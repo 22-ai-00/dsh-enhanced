@@ -6,12 +6,13 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { pluginCreationVerificationSigningPayload, sourceGrowthRunDigest, SourceGrowthRunUnavailableError,
+import { isSourceOwnerContinuation, pluginCreationVerificationSigningPayload, sourceGrowthRunDigest, SourceGrowthRunUnavailableError,
   type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import type { OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -81,7 +82,7 @@ async function fixture(withVerification = false, withAdoption = false) {
   vi.spyOn(Date, 'now').mockImplementation(() => now)
   const owner = { receiptVersion: 2 as const, authorityId: 'route', authorityHash: 'a'.repeat(64), principalId: 'owner',
     principalRecordId: 'record', principalVersion: 1, workspace: root, agentPreset: 'primary', bindingVersion: 1, generation: 1 }
-  const source: OwnerForegroundLearningTask = { protocol: 'assistant-delivery/owner-foreground-learning/v1', owner,
+  const source: OwnerForegroundLearningTask = { protocol: 'assistant-delivery/owner-foreground-learning/v1', owner: { ...owner },
     canonical: { scope: { workspace: root, preset: 'primary' }, scopeKey: 'scope', scopeWatermark: 1,
       triggerOutcomeId: 'feedback', situation: 'foreground:task',
       objective: { outcomeId: 'feedback', status: 'not-achieved', source: { kind: 'evaluator', id: 'assistant-verifier' },
@@ -93,7 +94,8 @@ async function fixture(withVerification = false, withAdoption = false) {
   const taskChangeListeners = new Set<() => void>()
   ctx.provide('assistantDelivery' as never, { validateOwnerRoute: () => structuredClone(owner),
     validateOwnerAgentForRoute: (agent: { owner?: typeof owner }) => agent.owner ? structuredClone(agent.owner) : undefined,
-    inspectOwnerForegroundLearningTask: () => structuredClone(activeSource) })
+    inspectOwnerForegroundLearningTask: () =>
+      isSourceOwnerContinuation(owner, activeSource.owner) ? structuredClone(activeSource) : undefined })
   ctx.provide('assistantEvaluation' as never, { canonicalHostScope: (input: unknown) => input,
     withTrustedCanonicalTaskWriterFence: (_input: unknown, callback: () => unknown) => ({ matched: true, value: callback() }),
     onTrustedTaskChange: (listener: () => void) => { taskChangeListeners.add(listener); return () => { taskChangeListeners.delete(listener) } } })
@@ -209,10 +211,10 @@ it('automatically verifies a pinned task creation after prepare and retains exac
   f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
   expect(f.verification).toHaveBeenCalledOnce()
   expect(f.service.inspectVerifiedCreation(planId)).toEqual(certificate)
-  f.owner.generation += 1
+  f.owner.principalVersion += 1
   expect(() => f.service.inspectVerifiedCreation(planId)).toThrow(/task repair source or owner changed/)
   expect(() => f.service.inspectCreationVerification(planId)).toThrow(/task repair source or owner changed/)
-  f.owner.generation -= 1
+  f.owner.principalVersion -= 1
   f.setSource({ ...f.source, source: { ...f.source.source, objective: 'owner corrected the original task' } })
   expect(() => f.service.inspectVerifiedCreation(planId)).toThrow(/task repair source or owner changed/)
   f.setSource(f.source)
@@ -243,6 +245,19 @@ it.each(['correction', 'withdrawal'] as const)(
     expect(f.taskChangeListenerCount()).toBeGreaterThan(0)
     const adopted = f.service.inspectCreatedCapability(planId)
     expect(adopted).toMatchObject({ status: 'active', aliases: [expect.stringMatching(/^evolved_rsi_service_helper_[a-f0-9]{8}_0$/u)] })
+    const adoption = () => {
+      const db = new DatabaseSync(join(f.config.statePath, 'creation-adoptions.sqlite'))
+      try {
+        const row = db.prepare('SELECT status, receipt_json FROM adoptions WHERE plan_id = ?').get(planId) as
+          { status: string; receipt_json: string }
+        const receipt = JSON.parse(row.receipt_json) as { expiresAt: number; adoptedAt: number }
+        const calls = (db.prepare('SELECT count(*) AS count FROM calls WHERE plan_id = ?').get(planId) as { count: number }).count
+        return { status: row.status, expiresAt: receipt.expiresAt, adoptedAt: receipt.adoptedAt, calls }
+      } finally { db.close() }
+    }
+    const adoptedBefore = adoption()
+    const certificate = structuredClone(f.service.inspectVerifiedCreation(planId))
+    const frozenJob = structuredClone(f.store.getSourceJob(job.id)!)
     const alias = adopted!.aliases[0]!
     expect(f.ctx.tools.get(alias)).toBeDefined()
     expect(f.ctx.tools.get('existing_probe')).toBeDefined()
@@ -258,9 +273,19 @@ it.each(['correction', 'withdrawal'] as const)(
     expect(runnerRun).toHaveBeenCalledTimes(1)
     await expect(tool.execute({ query: 'hello' }, valid)).resolves.toEqual({ value: { answer: 'ok' }, content: [{ type: 'text', text: 'ok' }] })
     expect(runnerRun).toHaveBeenCalledTimes(2)
+    f.owner.generation += 1; f.owner.bindingVersion += 1
+    expect(f.service.inspectVerifiedCreation(planId)).toEqual(certificate)
+    expect(f.store.getSourceJob(job.id)?.intent).toEqual(frozenJob.intent)
+    expect(f.store.getSourceJob(job.id)?.expiresAt).toBe(frozenJob.expiresAt)
+    expect(adoption()).toEqual({ ...adoptedBefore, calls: 1 })
+    expect(f.service.inspectCreatedCapability(planId)).toEqual(adopted)
+    const nextSession = { ...valid, callId: 'second-call', agent: { session: { id: 'session-2' }, owner: { ...f.owner } } } as unknown as ToolRunContext
+    await expect(tool.execute({ query: 'hello-again' }, nextSession)).resolves.toEqual({ value: { answer: 'ok' }, content: [{ type: 'text', text: 'ok' }] })
+    expect(adoption()).toEqual({ ...adoptedBefore, calls: 2 })
+    expect(runnerRun).toHaveBeenCalledTimes(3)
     f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
     expect(f.verification).toHaveBeenCalledOnce()
-    expect(runnerRun).toHaveBeenCalledTimes(2)
+    expect(runnerRun).toHaveBeenCalledTimes(3)
     expect(reserve).toHaveBeenCalledOnce()
     expect(f.service.inspectCreatedCapability(planId)?.status).toBe('active')
     f.setSource(change === 'correction'
@@ -276,7 +301,7 @@ it.each(['correction', 'withdrawal'] as const)(
     await vi.waitFor(() => expect(reconcile).toHaveBeenCalledTimes(2))
     expect(f.ctx.tools.get(alias)).toBeUndefined()
     expect(f.ctx.tools.get('existing_probe')).toBeDefined()
-    expect(runnerRun).toHaveBeenCalledTimes(2)
+    expect(runnerRun).toHaveBeenCalledTimes(3)
     await f.ctx.fiber.dispose()
     expect(reconcile).toHaveBeenCalledTimes(2)
     expect(f.taskChangeListenerCount()).toBe(0)
@@ -468,8 +493,26 @@ it('runs an ordinary owner failure through native scheduling into a checked new-
   expect(() => f.service.inspectPreparedCreation(plan.id)).toThrow('producer unavailable')
   await f.automations.tick(); await f.automations.whenIdle()
   expect(build.runDockerPreparedChecks).toHaveBeenCalledOnce()
-  f.owner.generation += 1
+  f.owner.principalVersion += 1
   expect(() => f.service.inspectPreparedCreation(plan.id)).toThrow('task repair source or owner changed')
+}, 30_000)
+
+it('continues a task creation from a new session with the original owner, run and deadlines', async () => {
+  const f = await fixture()
+  const original = f.store.getOwnerTaskFailureReference(f.request.gapId)!.owner
+  f.owner.generation += 1; f.owner.bindingVersion += 1
+  const queued = await f.service.enqueueSourceJob(f.request)
+  const intent = f.store.getSourceJob(queued.id)!.intent
+  expect(intent.owner).toEqual(original)
+  expect(intent.ownerDigest).toBe(controlPlaneDigest(original))
+  expect(intent.creation?.growthRun).toEqual(f.growthRun)
+  expect(intent.authority.expiresAt).toBe(f.config.sourceJobs!.expiresAt)
+  expect(intent.creation?.grant.expiresAt).toBe(f.config.sourceJobs!.creation!.expiresAt)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const prepared = f.store.getSourceJob(queued.id)!
+  expect(prepared.status).toBe('prepared')
+  expect(f.store.getSourcePlan(prepared.planId!).creation?.growthRun).toEqual(f.growthRun)
+  expect(f.service.inspectPreparedCreation(prepared.planId!).reference.owner).toEqual(original)
 }, 30_000)
 
 it('rejects an unbound or caller-spoofed task creation before durable enqueue', async () => {
@@ -646,7 +689,7 @@ it.each(['manifest', 'lock', 'owner', 'artifact', 'missing-pack', 'pack-bytes'] 
   vi.mocked(build.runDockerPreparedChecks).mockImplementationOnce(async input => {
     if (drift === 'manifest') await writeFile(join(input.worktree, 'plugins', input.name, 'package.json'), '{}\n')
     if (drift === 'lock') await writeFile(join(input.worktree, 'pnpm-lock.yaml'), 'tampered\n')
-    if (drift === 'owner') f.owner.generation += 1
+    if (drift === 'owner') f.owner.principalVersion += 1
     if (drift === 'artifact') f.checked.evidence.pack.version = '9.9.9'
     if (drift === 'missing-pack') delete f.checked.packArtifact
     if (drift === 'pack-bytes') f.checked.packArtifact = Buffer.from('different-package-bytes')

@@ -73,7 +73,7 @@ function buildReceipt(workspace: string, generation: number): Readonly<OwnerRout
   return Object.freeze({
     receiptVersion: 2,
     authorityId: OWNER_ROUTE,
-    authorityHash: `anchor-hash-${generation}`,
+    authorityHash: (generation === 1 ? 'a' : 'b').repeat(64),
     principalId: PRINCIPAL,
     principalRecordId: RECORD_ID,
     principalVersion: 1,

@@ -3281,6 +3281,64 @@ describe('real native Delivery Agent runtime', () => {
     } finally { await fixture.ctx.fiber.restart() }
   })
 
+  test('keeps an ordinary feedback source bound to its execution owner after a real /new Session turn', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-foreground-new-session-owner-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      ownerRoutes: [{ id: 'learning-owner', conversation, principal, workspace: root, agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }],
+    })
+    try {
+      const pairing = fixture.service.issuePairing('test', principal)
+      fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+      await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+      const route = { authorityId: 'learning-owner', principalId: 'lark/bot-1/tenant-a/ou_owner', workspace: root, agentPreset: 'primary' }
+      const first = await fixture.service.acceptInbound(message('evt-foreground-new-source', 'Complete the first ordinary task.'))
+      await drive(fixture.service)
+      expect(runtimeStore(fixture.service).getInbox(first.inboxId)?.status).toBe('processed')
+      expect(fixture.llm.requests).toHaveLength(1) // deterministic model fixture; native Delivery Agent ran
+      const executionRoute = fixture.service.validateOwnerRoute(route)
+      const executionBinding = runtimeStore(fixture.service).getActiveBinding(conversation)!
+      expect(executionRoute).toMatchObject({ bindingVersion: executionBinding.version, generation: executionBinding.generation })
+      expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })).toEqual([])
+
+      await fixture.service.acceptInbound({
+        ...message('evt-foreground-new-feedback', '/feedback not-achieved', 'command'),
+        metadata: { replyToProviderMessageId: replyProviderMessageId(fixture.service, 'evt-foreground-new-source') },
+      })
+      await drive(fixture.service)
+      const scope = fixture.ctx.assistantEvaluation.canonicalHostScope({ workspace: root, preset: 'primary' })
+      const page = fixture.ctx.assistantEvaluation.listTrustedTaskLearningProjections({ scope, limit: 1 })
+      expect(page.items).toHaveLength(1)
+      const outcomeId = page.items[0]!.receipt.triggerOutcomeId
+      const source = () => fixture.service.inspectOwnerForegroundLearningTask({ ...route, outcomeId })
+      const original = source()
+      expect(original).toMatchObject({ judgement: 'owner-feedback', owner: executionRoute,
+        ownerRevision: { version: 1, action: 'initial' },
+        canonical: { objective: { status: 'not-achieved' }, projection: { subjectRef: first.inboxId } },
+        source: { sessionId: executionBinding.sessionId, inboxId: first.inboxId, quiescent: true } })
+
+      await fixture.service.acceptInbound(message('evt-foreground-new-command', '/new', 'command'))
+      await drive(fixture.service)
+      const second = await fixture.service.acceptInbound(message('evt-foreground-new-second', 'Complete a task in the new Session.'))
+      await drive(fixture.service)
+      expect(runtimeStore(fixture.service).getInbox(second.inboxId)?.status).toBe('processed')
+      expect(fixture.llm.requests).toHaveLength(2)
+      const currentBinding = runtimeStore(fixture.service).getActiveBinding(conversation)!
+      const currentRoute = fixture.service.validateOwnerRoute(route)
+      const store = runtimeStore(fixture.service) as unknown as DeliveryStore
+      expect(store.getBinding(executionBinding.id)).toMatchObject({
+        status: 'revoked', version: executionBinding.version + 1, generation: executionBinding.generation,
+      })
+      expect(store.getInbox(second.inboxId)?.bindingId).toBe(currentBinding.id)
+      expect(currentBinding.sessionId).not.toBe(executionBinding.sessionId)
+      expect(currentBinding.generation).toBeGreaterThan(executionBinding.generation)
+      expect(currentRoute).toMatchObject({ bindingVersion: currentBinding.version, generation: currentBinding.generation })
+      expect(source()).toMatchObject({ owner: { ...executionRoute,
+        bindingVersion: executionBinding.version, generation: executionBinding.generation }, source: original!.source,
+        canonical: original!.canonical, ownerRevision: original!.ownerRevision })
+    } finally { await fixture.ctx.fiber.restart() }
+  })
+
   test('marks an ordinary foreground task model snapshot inconsistent across a rerouted continuation', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-ordinary-foreground-model-'))
     roots.push(root)

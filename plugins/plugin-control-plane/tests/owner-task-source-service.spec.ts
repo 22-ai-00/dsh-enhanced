@@ -11,6 +11,7 @@ import * as releaseClient from '../src/source-release-client.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import type { OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
+import { isSourceOwnerContinuation } from '@dsh-enhanced/assistant-growth-contract'
 import { afterEach, expect, test, vi } from 'vitest'
 import { PluginControlPlaneService } from '../src/service.ts'
 import * as workspace from '../src/source-workspace.ts'
@@ -39,7 +40,7 @@ async function fixture(approvals = false, managedVersion = false, releases = fal
   cleanup.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
   const owner = { receiptVersion: 2 as const, authorityId: 'route', authorityHash: 'a'.repeat(64), principalId: 'owner',
     principalRecordId: 'record', principalVersion: 1, workspace: root, agentPreset: 'primary', bindingVersion: 1, generation: 1 }
-  const source: OwnerForegroundLearningTask = { protocol: 'assistant-delivery/owner-foreground-learning/v1', owner,
+  const source: OwnerForegroundLearningTask = { protocol: 'assistant-delivery/owner-foreground-learning/v1', owner: { ...owner },
     canonical: { scope: { workspace: root, preset: 'primary' }, scopeKey: 'scope', scopeWatermark: 1,
       triggerOutcomeId: 'outcome', situation: 'foreground:task',
       objective: { outcomeId: 'outcome', status: 'not-achieved', source: { kind: 'evaluator', id: 'assistant-verifier' },
@@ -49,7 +50,8 @@ async function fixture(approvals = false, managedVersion = false, releases = fal
       quiescent: true, truncated: false, modelSelectionState: review ? 'frozen' : 'missing',
       ...(review ? { modelSelection: { provider: 'supplier', model: 'task-model', reasoningEffort: 'high' } } : {}) } }
   const fence = vi.fn((_input: unknown, callback: () => unknown) => ({ matched: true, value: callback() }))
-  ctx.provide('assistantDelivery' as never, { inspectOwnerForegroundLearningTask: () => structuredClone(source) })
+  ctx.provide('assistantDelivery' as never, { inspectOwnerForegroundLearningTask: () =>
+    isSourceOwnerContinuation(owner, source.owner) ? structuredClone(source) : undefined })
   ctx.provide('assistantEvaluation' as never, { canonicalHostScope: (input: unknown) => input, withTrustedCanonicalTaskWriterFence: fence })
   const statePath = join(root, 'state'), catalogPath = join(root, 'catalog.json'), trustPath = join(root, 'trust.json')
   vi.mocked(trust.loadTrustConfig).mockResolvedValue({ ledger: { path: join(statePath, 'control.sqlite') }, catalog: { path: catalogPath } } as Awaited<ReturnType<typeof trust.loadTrustConfig>>)
@@ -92,6 +94,18 @@ test('commits a checked task-bound proposal through the Host fence', async () =>
   expect(f.remove).not.toHaveBeenCalled()
 })
 
+test('keeps the original task owner and source after a same-owner session change during preparation', async () => {
+  const f = await fixture(), original = { ...f.source.owner }
+  vi.mocked(build.runDockerPreparedChecks).mockImplementationOnce(async () => {
+    f.owner.generation += 1; f.owner.bindingVersion += 1
+    return f.checked
+  })
+  const plan = await f.service.prepareModifySourcePlan(f.request)
+  expect(plan.status).toBe('pending-approval')
+  expect(f.source.owner).toEqual(original)
+  expect(f.count()).toBe(1)
+})
+
 test('prepares the Host version before isolated checks and retains it in the owner-bound plan', async () => {
   const f = await fixture(false, true), written = new Map<string, string>()
   vi.mocked(workspace.writeScopedPluginFiles).mockImplementation(async input => { for (const file of input.files) written.set(file.path, file.content) })
@@ -132,7 +146,7 @@ test('rejects a guessed task gap without caller ownership before acquiring a wor
 
 test('a source owner change during build removes the worktree without a plan', async () => {
   const f = await fixture()
-  vi.mocked(build.runDockerPreparedChecks).mockImplementationOnce(async () => { f.owner.generation += 1; return f.checked })
+  vi.mocked(build.runDockerPreparedChecks).mockImplementationOnce(async () => { f.owner.principalVersion += 1; return f.checked })
   await expect(f.service.prepareModifySourcePlan(f.request)).rejects.toThrow('changed')
   expect(f.count()).toBe(0)
   expect(f.remove).toHaveBeenCalledOnce()
@@ -171,14 +185,14 @@ test('Host uses the finite authority receipt and current source fence, with idem
   expect(approved).toMatchObject({ status: 'approved', revision: 2 })
   expect(await f.service.requestOwnerSourceApproval({ planId: f.plan.id })).toEqual(approved)
   expect(approvalClient.requestSourceApproval).toHaveBeenCalledTimes(1)
-  f.owner.generation += 1
+  f.owner.principalVersion += 1
   await expect(f.service.requestOwnerSourceApproval({ planId: f.plan.id })).rejects.toThrow('changed')
 })
 
 test.each(['source', 'cancel', 'trust'] as const)('rejects %s changes while authority is signing', async changed => {
   const f = await signedApprovalFixture(), abort = new AbortController()
   vi.mocked(approvalClient.requestSourceApproval).mockImplementationOnce(async () => {
-    if (changed === 'source') f.owner.generation += 1
+    if (changed === 'source') f.owner.principalVersion += 1
     if (changed === 'cancel') abort.abort()
     if (changed === 'trust') vi.mocked(trust.loadTrustConfig).mockResolvedValue({ ...await trust.loadTrustConfig('ignored'), installationId: 'changed' })
     return f.receipt
@@ -246,14 +260,14 @@ test('automatically rechecks approved owner source and starts the existing relea
   try { await expect(store.startSourceRelease({ planId: f.plan.id, expectedRevision: 3, authorization: f.authorization,
     resolveAuthority: () => { throw new Error('replay must not verify again') },
     idempotencyKey: 'source-release-authorization:finite-release' })).rejects.toThrow('Host admission') } finally { store.close() }
-  f.owner.generation += 1
+  f.owner.principalVersion += 1
   await expect(f.service.requestOwnerSourceRelease({ planId: f.plan.id })).rejects.toThrow('changed')
 })
 
 test.each(['source', 'cancel', 'trust', 'policy'] as const)('does not start release when %s changes while the authority signs', async changed => {
   const f = await signedReleaseFixture(), abort = new AbortController()
   vi.mocked(releaseClient.requestSourceReleaseAuthorization).mockImplementationOnce(async () => {
-    if (changed === 'source') f.owner.generation += 1
+    if (changed === 'source') f.owner.principalVersion += 1
     if (changed === 'cancel') abort.abort()
     if (changed === 'trust') vi.mocked(trust.loadTrustConfig).mockResolvedValue({ ...await trust.loadTrustConfig('ignored'), installationId: 'changed' })
     return changed === 'policy' ? { ...f.authorization, releasePolicy: { ...f.authorization.releasePolicy, catalogId: 'different' } } : f.authorization
@@ -267,7 +281,7 @@ test('late source changes after signature verification still prevent the release
   const verify = Ed25519SourceReleaseAuthorizationAuthority.prototype.verify
   const spy = vi.spyOn(Ed25519SourceReleaseAuthorizationAuthority.prototype, 'verify').mockImplementationOnce(async function (this: Ed25519SourceReleaseAuthorizationAuthority, ...args) {
     const result = await verify.apply(this, args)
-    f.owner.generation += 1
+    f.owner.principalVersion += 1
     return result
   })
   try { await expect(f.service.requestOwnerSourceRelease({ planId: f.plan.id })).rejects.toThrow('changed') }
@@ -312,7 +326,7 @@ test('Host release execution stops on frozen trust or owner changes, including a
   expect(releaseRunner.advanceSourceRelease).not.toHaveBeenCalled()
   expect(await f.service.advanceOwnerSourceRelease({ planId: f.plan.id })).toEqual(started)
   vi.mocked(releaseRunner.advanceSourceRelease).mockImplementationOnce(async options => {
-    f.owner.generation += 1; await options.assertCurrent(); return started
+    f.owner.principalVersion += 1; await options.assertCurrent(); return started
   })
   await expect(f.service.advanceOwnerSourceRelease({ planId: f.plan.id })).rejects.toThrow('changed')
 })
@@ -386,7 +400,7 @@ test.each(['source', 'unload'] as const)('adoption owns and drains its dedicated
   await ready
   await expect(f.service.adoptOwnerSourceRelease({ sourcePlanId: f.plan.id })).rejects.toThrow('already running')
   let disposed: Promise<void> | undefined
-  if (boundary === 'source') f.owner.generation += 1
+  if (boundary === 'source') f.owner.principalVersion += 1
   else disposed = Promise.resolve(f.ctx.fiber.dispose())
   finish(); await rejected; await disposed
   expect(() => dedicated!.getSourcePlan(f.plan.id)).toThrow()

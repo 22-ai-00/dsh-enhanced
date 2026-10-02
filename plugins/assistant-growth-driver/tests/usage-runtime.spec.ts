@@ -23,6 +23,7 @@ async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missi
   const owner = { receiptVersion: 2 as const, authorityId: scope.ownerRouteId, authorityHash: 'a'.repeat(64),
     principalId: scope.principalId, principalRecordId: 'record', principalVersion: 1,
     workspace: root, agentPreset: 'primary', bindingVersion: 1, generation: 1 }
+  const sourceOwner = structuredClone(owner)
   const policy = new AssistantPolicyService(ctx, { databasePath: join(root, 'policy.sqlite'), budgets: [
     { id: 'growth-scan-budget', metric: 'automation-runs', limit: options.scanBudgetLimit ?? 10, periodMs: 86_400_000, scope: 'subject' },
     ...(options.budget === false ? [] : [{ id: 'growth-budget', metric: 'automation-runs', limit: 10, periodMs: 86_400_000, scope: 'global' as const }])], rules: [
@@ -41,7 +42,7 @@ async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missi
     inspectOwnerForegroundLearningTask: ({ outcomeId }: { outcomeId: string }): OwnerForegroundLearningTask | undefined => {
       const canonical = evaluation.getTrustedTaskLearningProjection({ scope: evaluation.canonicalHostScope({ workspace: root, preset: 'primary' }), outcomeId })
       if (!canonical || canonical.projection.subjectKind !== 'foreground-turn') return undefined
-      return { protocol: 'assistant-delivery/owner-foreground-learning/v1', owner: { ...owner }, canonical,
+      return { protocol: 'assistant-delivery/owner-foreground-learning/v1', owner: { ...sourceOwner }, canonical,
         judgement: 'independent-verifier', source: { sessionId: 'original-session', inboxId: canonical.projection.subjectRef,
           objective: 'Fix the real task failure', truncated: false, quiescent: true,
           modelSelectionState: options.missing ? 'missing' : 'frozen', ...(options.missing ? {} : { modelSelection: { ...sourceModel } }) } }
@@ -185,7 +186,7 @@ test('recovers only the exact policy bound before generation and never retrofits
   expect(legacy.inspectSourceGrowthRun({ runId: oldId, intentDigest: oldDigest })).not.toHaveProperty('creationAcceptance')
 })
 
-test('fixed override records its origin even if the owner task selected the same model and invalidates on owner rotation', async () => {
+test('fixed override keeps its original source through a new Session but invalidates on owner rotation', async () => {
   const f = await fixture({ fixed: true, sameOverride: true }); f.append(); const runtime = f.create()
   let runId = ''; let intentDigest = ''
   f.review.mockImplementationOnce(async input => {
@@ -197,7 +198,10 @@ test('fixed override records its origin even if the owner task selected the same
   expect(runtime.inspectSourceGrowthRun({ runId, intentDigest })).toMatchObject({
     model: f.sourceModel, modelOrigin: 'explicit-growth-override',
   })
+  const original = runtime.inspectSourceGrowthRun({ runId, intentDigest })
   f.owner.generation += 1
+  expect(runtime.inspectSourceGrowthRun({ runId, intentDigest })).toEqual(original)
+  f.owner.principalVersion += 1
   expect(runtime.inspectSourceGrowthRun({ runId, intentDigest })).toBeUndefined()
 })
 

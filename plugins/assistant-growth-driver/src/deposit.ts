@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { isSourceOwnerContinuation } from '@dsh-enhanced/assistant-growth-contract'
 import type { GoalScope, OwnerGoalExecutionSnapshotInput } from '@dsh-enhanced/assistant-goals'
 import type { CommitOwnerAnchoredWorkflowTraceServiceResult } from '@dsh-enhanced/assistant-delivery'
 import type { GrowthOwnerScopeConfig } from './config.js'
@@ -55,7 +56,8 @@ export interface GrowthDeliveryPort {
  * owner from model-controlled values: the route id, principal, workspace and
  * preset all come from frozen plugin configuration.
  */
-export function mintGrowthAuthority(delivery: GrowthDeliveryPort, config: GrowthOwnerScopeConfig, expiresAt: number): GrowthAuthority {
+export function mintGrowthAuthority(delivery: GrowthDeliveryPort, config: GrowthOwnerScopeConfig, expiresAt: number,
+  allowNewSession = false): GrowthAuthority {
   const anchor = delivery.validateOwnerRoute({
     authorityId: config.ownerRouteId,
     principalId: config.principalId,
@@ -87,15 +89,15 @@ export function mintGrowthAuthority(delivery: GrowthDeliveryPort, config: Growth
       if (!Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) {
         throw new Error('assistant-growth-driver: growth authority expired')
       }
-      // Re-read the owner route on every use: a revoked/rebound delivery route
-      // or a principal generation change invalidates the whole wake.
+      // Task-backed usage may continue across /new. Other wake protocols keep
+      // their exact binding fence. Neither path renews the original id or TTL.
       const current = delivery.validateOwnerRoute({
         authorityId: config.ownerRouteId,
         principalId: config.principalId,
         workspace: config.workspace,
         agentPreset: config.preset,
       })
-      if (acceptanceDigest(current) !== anchorDigest) {
+      if (allowNewSession ? !isSourceOwnerContinuation(current, anchor) : acceptanceDigest(current) !== anchorDigest) {
         throw new Error('assistant-growth-driver: owner route changed during growth wake')
       }
     },

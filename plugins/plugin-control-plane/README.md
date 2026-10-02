@@ -367,6 +367,8 @@ Host 用真实 Cordis Fiber 动态注册受控 `evolved_<插件名>_<plan hash>_
 
 调用经过原生 ToolRuntime/Policy，须由 Delivery 证明当前注册的真实 Agent、Session 和 owner lineage；Policy 还须允许该 owner scope 下的准确工具别名或有限别名模式。输入、结果和累计调用均有界；同一 Agent Session/call id/参数的已完成调用回读缓存，unknown 不再派发。候选注释不进入 Host 描述，输出作为不可信数据。每次异步检查后、派发前和落账前重验真实调用者与 canonical 来源，撤权或纠正期间的迟到结果不能变成成功。
 
+同一主人 `/new` 后的新任务可在原授权窗口内调用已有入口。任务来源保留原执行绑定，源码作业、Growth run、验收与采用凭证的完整摘要不改写；当前 route 必须仍属于同一主人记录、版本和授权，且会话代次不能倒退。切换 Session 不续期、不补充额度、不重新派发 unknown，也不建立跨窗口或版本替换权限。
+
 Evaluation 纠正/撤回通知自动重验并卸载对应入口；到期、来源漂移也关闭该版本，其他 Host 插件保留。源码 producer 暂缺时只暂停入口，恢复原来源后可重新挂同一凭证。采用有效期还受原验收、任务/SourceJobs 和源码计划窗口约束，不授予跨窗口永久使用。源计划仍为 `pending-approval`，旧修改审批、PR、npm 发布和整 profile 采用门不变；Host-only `inspectCreatedCapability(planId)` 返回采用状态和别名。动态卸载是本能力的撤销路径，真实后续收益、版本替换回退和普通使用部署仍属完整目标的下一次验收。
 
 ### 普通任务修复的有限审批
@@ -573,7 +575,7 @@ adapter 的 stdout 只有一个签名 JSON receipt，stderr 不打印 request �
 
 Host-only `recordOwnerTaskFailureGap(source)` 将经 Delivery 再验证的 foreground `not-achieved` 结果，在 Evaluation canonical writer fence 中原子写入 gap 和私有来源引用。schema 16 从 v15 保留原有计划并增加 sidecar；引用只保存完整 owner receipt、outcome/canonical 修订和 source digest，gap 使用固定说明且 ROI 为未知占位 0。模型自报、调用方文案、未结束或截断来源均不能登记，接口不注册为 CLI/模型工具。
 
-这些 gap 不出现在全局 `gaps()` 中。Growth 自动复盘仅看本次来源的 exact gap；同步准备必须提供当前 owner，durable source job 绑定相同 owner。每个检查边界与最终计划提交重新验证来源，最终写入同时持有 Evaluation writer fence 和同步 Store admission；普通 CLI 不能凭 gap id 绕过来源检查。`/new` 的 binding/generation 改变、纠正、撤回或依赖服务不可用会拒绝旧任务，已派发而中断的 job 保留 unknown。历史引用保留以供审计，不自动重放。
+这些 gap 不出现在全局 `gaps()` 中。Growth 自动复盘仅看本次来源的 exact gap；同步准备必须提供当前 owner，durable source job 冻结原任务 owner。每个检查边界与最终计划提交重新验证来源，最终写入同时持有 Evaluation writer fence 和同步 Store admission；普通 CLI 不能凭 gap id 绕过来源检查。同主人 `/new` 保留原任务证据和授权窗口；身份或授权变化、纠正、撤回或依赖服务不可用会拒绝旧任务，已派发而中断的 job 保留 unknown。历史引用保留以供审计，不自动重放。
 
 该 Host API 使用同批 `assistant-delivery` 与可选 `assistant-evaluation >=0.1.33` 的精确接口；不要求手工 gap 部署安装 Evaluation。它只授权来源绑定的候选准备，pending plan 的后续授权采用、发布与观测仍走独立控制链。
 

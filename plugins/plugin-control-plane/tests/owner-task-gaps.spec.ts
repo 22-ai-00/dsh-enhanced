@@ -34,7 +34,8 @@ async function fixture() {
   const task = append('first')
   const owner = { receiptVersion: 2 as const, authorityId: 'route', authorityHash: 'a'.repeat(64), principalId: 'owner',
     principalRecordId: 'record', principalVersion: 1, workspace: root, agentPreset: 'primary', bindingVersion: 1, generation: 1 }
-  const source = (): OwnerForegroundLearningTask => ({ protocol: 'assistant-delivery/owner-foreground-learning/v1', owner: { ...owner },
+  const originalOwner = { ...owner }
+  const source = (): OwnerForegroundLearningTask => ({ protocol: 'assistant-delivery/owner-foreground-learning/v1', owner: { ...originalOwner },
     canonical: evaluation.getTrustedTaskLearningProjection({ scope, outcomeId: task.id })!, judgement: 'independent-verifier',
     source: { sessionId: 'session', inboxId: 'inbox-1', objective: 'private original task', truncated: false, quiescent: true,
       modelSelectionState: 'frozen', modelSelection: { provider: 'supplier', model: 'task-model' } } })
@@ -79,15 +80,36 @@ test.each(['achieved', 'unknown', 'retract', 'unresolved', 'truncated', 'running
   expect(() => f.gateway.record(invalid)).toThrow('trusted foreground failure')
 })
 
-test('blocks wrong callers and owner generation changes, including a new session', async () => {
+test('admits the same owner in a later session while keeping the original reference', async () => {
   const f = await fixture(), gap = f.gateway.record(f.source())
   expect(() => f.gateway.withCurrent(gap.id, undefined, () => {})).toThrow('caller')
   expect(() => f.gateway.withCurrent(gap.id, { ...f.owner, principalId: 'other-owner' }, () => {})).toThrow('caller')
-  f.owner.generation += 1
-  expect(() => f.gateway.withCurrent(gap.id, f.owner, () => {})).toThrow('caller')
+  const original = f.store.getOwnerTaskFailureReference(gap.id)!
+  f.owner.generation += 1; f.owner.bindingVersion += 1
+  expect(f.gateway.withCurrent(gap.id, f.owner, () => 'continued')).toBe('continued')
+  expect(f.store.getOwnerTaskFailureReference(gap.id)).toEqual(original)
   const caller = { ownerRouteId: f.owner.authorityId, principalId: f.owner.principalId, principalRecordId: f.owner.principalRecordId,
     principalVersion: f.owner.principalVersion, workspace: f.owner.workspace, preset: f.owner.agentPreset }
-  expect(() => f.gateway.withCurrent(gap.id, caller, () => {})).toThrow('changed')
+  expect(f.gateway.withCurrent(gap.id, caller, () => 'continued')).toBe('continued')
+})
+
+test.each(['authorityHash', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset', 'generation'] as const)(
+  'rejects a %s drift from the original task owner', async field => {
+    const f = await fixture(), gap = f.gateway.record(f.source())
+    f.owner.generation += 1; f.owner.bindingVersion += 1
+    if (field === 'authorityHash') f.owner.authorityHash = 'b'.repeat(64)
+    if (field === 'principalRecordId') f.owner.principalRecordId = 'different-record'
+    if (field === 'principalVersion') f.owner.principalVersion += 1
+    if (field === 'workspace') f.owner.workspace = '/different-workspace'
+    if (field === 'agentPreset') f.owner.agentPreset = 'different-preset'
+    if (field === 'generation') f.owner.generation = 0
+    expect(() => f.gateway.withCurrent(gap.id, f.owner, () => {})).toThrow('caller')
+  })
+
+test('rejects a binding change without a new generation', async () => {
+  const f = await fixture(), gap = f.gateway.record(f.source())
+  f.owner.bindingVersion += 1
+  expect(() => f.gateway.withCurrent(gap.id, f.owner, () => {})).toThrow('caller')
 })
 
 test('Host snapshot inherits the verified task model and rejects later owner feedback changes', async () => {
