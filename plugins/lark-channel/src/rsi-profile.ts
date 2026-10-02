@@ -106,6 +106,32 @@ function removePrefixed(values: YAMLSeq): void {
 function absolute(value: string, label: string): string { if (!isAbsolute(value) || resolve(value) !== value) fail(`${label} must be canonical absolute`); return value }
 function same(value: unknown, expected: unknown, label: string): void { if (!isDeepStrictEqual(value, expected)) fail(`${label} does not match owner scope`) }
 
+function validatedCreation(manifest: RsiSetupManifest, expectedOwner: RsiSetupManifest['sourceReviews']['owner']): RsiPluginCreationSetup | undefined {
+  const jobs = manifest.controlPlane.sourceJobs
+  const creation = manifest.pluginCreation === undefined ? undefined
+    : validateRsiPluginCreationSetup(manifest.pluginCreation, expectedOwner)
+  if (creation) {
+    same(jobs?.creation, creation.creation, 'source creation grant')
+    same(manifest.controlPlane.creationVerifications, creation.verifications, 'creation verification authority')
+    same(manifest.controlPlane.creationCapabilities, creation.capabilities, 'creation adoption grant')
+    const growth = normalizeConfig(manifest.growthDriver)
+    if (!jobs || jobs.ownerRouteId !== expectedOwner.authorityId || jobs.principalId !== expectedOwner.principalId
+      || jobs.workspace !== expectedOwner.workspace || jobs.preset !== expectedOwner.agentPreset
+      || !growth.enabled || growth.intervalMs !== 0 || !growth.pluginSourceProposals.enabled
+      || growth.pluginSourceProposals.preparationMode !== 'durable'
+      || growth.pluginSourceProposals.repository !== jobs.repository || !growth.pluginSourceProposals.allowCreation
+      || !isDeepStrictEqual(growth.scope, { workspace: expectedOwner.workspace,
+        preset: expectedOwner.agentPreset, principalId: expectedOwner.principalId, ownerRouteId: expectedOwner.authorityId })
+      || jobs.expiresAt <= Date.now() || creation.creation.expiresAt > jobs.expiresAt) {
+      fail('creation requires enabled Growth and a covering source job grant')
+    }
+  } else if (jobs?.creation || manifest.controlPlane.creationVerifications
+    || manifest.controlPlane.creationCapabilities || normalizeConfig(manifest.growthDriver).pluginSourceProposals.allowCreation) {
+    fail('creation requires a complete independently verified adoption setup')
+  }
+  return creation
+}
+
 
 function assertManifest(input: RsiSetupManifest): void {
   if (!input || input.schemaVersion !== 1) fail('unsupported manifest schema')
@@ -136,7 +162,7 @@ function assertNewMemoryBudget(policy: YAMLMap, id: string, limit: number, perio
   }
 }
 
-function targetPolicy(document: Document, personal: YAMLMap, manifest: RsiSetupManifest, scope: { workspace: string; preset: string; principal: string }, budgetIds: { reviews: string; discovery: string; source: string; observations: string }, memory?: RsiMemoryLearningSetup): void {
+function targetPolicy(document: Document, personal: YAMLMap, manifest: RsiSetupManifest, scope: { workspace: string; preset: string; principal: string }, budgetIds: { reviews: string; discovery: string; source: string; observations: string }, memory?: RsiMemoryLearningSetup, creation?: RsiPluginCreationSetup): void {
   const policy = map(personal.get('assistantPolicy', true) as Node | undefined, 'assistantPolicy config')
   const automation = map(personal.get('assistantAutomations', true) as Node | undefined, 'assistantAutomations config')
   if (automation.get('allowUnbudgetedExecution') === true) fail('assistantAutomations.allowUnbudgetedExecution must be false')
@@ -177,18 +203,21 @@ function targetPolicy(document: Document, personal: YAMLMap, manifest: RsiSetupM
   }
   const agent = { kind: 'agent', id: scope.preset, workspace: scope.workspace, principal: scope.principal }
   for (const tool of ['growth_*', 'plugin_source_*'] as const) upsertById(document, rules, { id: `${rsiPrefix}${tool}`, effect: 'allow', subject: agent, actions: ['execute'], resource: { kind: 'tool', id: tool }, context: { initiators: ['background'] } })
+  if (creation) upsertById(document, rules, { id: `${rsiPrefix}created-tools`, effect: 'allow', subject: agent,
+    actions: ['execute'], resource: { kind: 'tool', id: `evolved_${creation.creation.namePrefix.replaceAll('-', '_')}*` },
+    context: { initiators: ['external'] } })
   upsertById(document, rules, { id: `${rsiPrefix}verified-workflows`, effect: 'allow', subject: agent, actions: ['draft'], resource: { kind: 'evolution', id: 'verified-workflows' }, context: { initiators: ['background'] } })
 }
 
 function configurePersonal(document: Document, personal: YAMLMap, manifest: RsiSetupManifest,
   scope: { workspace: string; preset: string; principal: string },
   budgetIds: { reviews: string; discovery: string; source: string; observations: string },
-  memory?: RsiMemoryLearningSetup): void {
+  memory?: RsiMemoryLearningSetup, creation?: RsiPluginCreationSetup): void {
   if (memory) {
     const personalMemory = map(personal.get('personalMemory', true) as Node | undefined, 'personalMemory config')
     replaceNode(document, personalMemory, 'automaticLearning', memory.adoption)
   }
-  targetPolicy(document, personal, manifest, scope, budgetIds, memory)
+  targetPolicy(document, personal, manifest, scope, budgetIds, memory, creation)
 }
 
 /** Match the target compiler's exact embedded Personal Assistant options for Host attestation. */
@@ -202,7 +231,10 @@ export function compileRsiPersonalAssistantOptions(input: {
   const personal = map(document.contents ?? undefined, 'personal assistant options')
   const memory = input.manifest.memoryLearning === undefined ? undefined
     : validateRsiMemoryLearningSetup(input.manifest.memoryLearning, input.manifest.sourceReviews.owner)
-  configurePersonal(document, personal, input.manifest, input.scope, input.budgetIds, memory)
+  const creation = validatedCreation(input.manifest, input.manifest.sourceReviews.owner)
+  if (creation) same(input.scope, { workspace: creation.capabilities.owner.workspace,
+    preset: creation.capabilities.owner.agentPreset, principal: creation.capabilities.owner.principalId }, 'creation Policy scope')
+  configurePersonal(document, personal, input.manifest, input.scope, input.budgetIds, memory, creation)
   return json(personal, 'personal assistant options')
 }
 
@@ -231,17 +263,7 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   validateSourceReviewConfig(input.manifest.sourceReviews)
   const memory = input.manifest.memoryLearning === undefined ? undefined
     : validateRsiMemoryLearningSetup(input.manifest.memoryLearning, expectedOwner)
-  const creation = input.manifest.pluginCreation === undefined ? undefined
-    : validateRsiPluginCreationSetup(input.manifest.pluginCreation, expectedOwner)
-  if (creation) {
-    same(jobs.creation, creation.creation, 'source creation grant')
-    same(input.manifest.controlPlane.creationVerifications, creation.verifications, 'creation verification authority')
-    same(input.manifest.controlPlane.creationCapabilities, creation.capabilities, 'creation adoption grant')
-    if (!growth.pluginSourceProposals.allowCreation || creation.creation.expiresAt > jobs.expiresAt) fail('creation requires enabled Growth and a covering source job grant')
-  } else if (jobs.creation || input.manifest.controlPlane.creationVerifications
-    || input.manifest.controlPlane.creationCapabilities || growth.pluginSourceProposals.allowCreation) {
-    fail('creation requires a complete independently verified adoption setup')
-  }
+  const creation = validatedCreation(input.manifest, expectedOwner)
 
   const cp = structuredClone(input.manifest.controlPlane)
   if (!cp.sourceBuild || !cp.sourceApprovals || !cp.sourceReleases || !cp.sourceReleaseExecution || !cp.sourceAdoptions || !cp.runtimeObserver || !cp.foregroundDeployments || !cp.taskObservations) fail('target controlPlane lacks a complete source adoption chain')
@@ -284,7 +306,7 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   }
   const personal = cloneEffectiveConfig(target, effective, 'dsh-enhanced-personal-assistant')
   configurePersonal(target.document, personal, input.manifest, owner,
-    budgetIds as { reviews: string; discovery: string; source: string; observations: string }, memory)
+    budgetIds as { reviews: string; discovery: string; source: string; observations: string }, memory, creation)
   const verifier = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-verifier')
   // Keep all existing verifier settings, replacing only the finite review grant.
   replaceNode(target.document, verifier, 'sourceReviews', input.manifest.sourceReviews)

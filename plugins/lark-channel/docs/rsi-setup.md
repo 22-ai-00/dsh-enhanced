@@ -31,6 +31,8 @@ Linux 上的新安装还会自动准备授权工具与本地发布资源，无�
 
 新 owner 安装同时配置普通失败任务驱动的有界新工具创建：Growth 可创建 owner 命名空间内插件，Verifier 从真实任务/反馈独立产生验收用例，Control Plane 消费签名凭证并动态注册隔离工具。`pluginCreation` manifest 绑定同一 owner、命名空间、期限及有限额度，并镜像到 `sourceJobs.creation`、`creationVerifications`、`creationCapabilities` 和 Verifier `creationReviews`；字段不完整或不一致时拒绝部署。验收和采用分别使用现有 `review`、`adoption` 身份，沿独立协议签名，不新增或重建既有身份。复跑旧 manifest 保持原授权范围，不自动打开创建通道或更新期限。
 
+完整 `pluginCreation` 通过校验后，配置器同时为当前 owner 的 preset、工作区和 principal 添加前台外部任务的工具执行 Policy 规则，仅匹配本安装 `evolved_owner_<安装ID前8位>_*` 别名。缺少创建配置时不生成该规则；显式 deny 仍优先。Policy 只允许该命名空间的调用路径，不能证明工具已通过独立验收或仍可使用；动态采用器在每次调用时继续核对当前 owner、来源、期限及剩余额度，原有授权期限和计数不会因配置重跑而延长或重置。
+
 安装器从已批准的源码构建镜像准备独立行为镜像，资源保存在 `$DSH_HOME/rsi-creation-builds/<profile>`。临时上下文只含固定受信任 worker/launcher、Dockerfile、清单和锁文件，不复制候选、owner 凭据或期望行为。首次镜像准备可能访问 Debian 包源；运行候选时禁用网络。重复安装核验原始回执、输入摘要、Docker 可执行文件和实际不可变镜像 ID；镜像缺失或输入漂移不会触发重建。验收与调用使用独立私有 runner 账本，额度和 unknown 不因重启重置。该安装配置本身不证明普通任务收益或完整自迭代闭环。
 
 新安装还会尝试准备离线构建镜像。当前完整仓库检查沿用已验证的 Linux x64、Docker Server `29.4.1/linux/amd64` 与嵌套 sandbox 配置；不满足这些前置条件时，安装器保留源码并报告 `buildUnavailable`，普通 Agent 安装继续，但不声称源码修复构建已经可用。实际镜像构建失败或已有资源不一致会停止安装。

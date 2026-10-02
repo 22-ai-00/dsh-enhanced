@@ -9,6 +9,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parse } from 'yaml'
 import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
+import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.js'
+import { createRsiPluginCreationSetup } from '../src/rsi-plugin-creation.js'
 import { compileRsiPersonalAssistantOptions, compileRsiProfiles, type RsiSetupManifest } from '../src/rsi-profile.ts'
 
 const rows = (extra: string) => `
@@ -143,6 +145,89 @@ describe('RSI profile compiler', () => {
       const policyConfig = { ...target.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config.assistantPolicy, databasePath: join(root, 'policy.sqlite') }
       const policy = new AssistantPolicyService(new Context(), policyConfig)
       expect(policy.evaluate({ subject: { kind: 'background', id: 'source-job-123', workspace: adjustedOwner.workspace, principal: 'lark/account/tenant/owner' }, action: 'execute', resource: { kind: 'automation', id: 'source-job-123' }, context: { initiator: 'background' } }).effect).toBe('allow')
+
+      const createdSubject = { kind: 'agent' as const, id: 'primary', workspace: adjustedOwner.workspace, principal: 'lark/account/tenant/owner' }
+      await mkdir(adjustedOwner.workspace)
+      const createdRequest = (alias: string) => ({ subject: createdSubject, action: 'execute',
+        resource: { kind: 'tool' as const, id: alias }, context: { initiator: 'external' as const } })
+      const resources = await prepareRsiAuthorityResources({ dshHome: home, profile: 'target' })
+      await mkdir(join(resources.stateRoot, 'creation-review-runner'), { mode: 0o700 })
+      await mkdir(join(resources.stateRoot, 'creation-adoption-runner'), { mode: 0o700 })
+      const creation = createRsiPluginCreationSetup({ resources, owner: value.sourceReviews.owner,
+        expiresAt: value.controlPlane.sourceJobs!.expiresAt, now: Date.now(),
+        build: { schemaVersion: 1, sourceCommit: 'a'.repeat(40), sourceImage: `sha256:${'b'.repeat(64)}`,
+          image: `sha256:${'c'.repeat(64)}`, dockerPath: await realpath(process.execPath) } })
+      const alias = `evolved_${creation.creation.namePrefix.replaceAll('-', '_')}calculator_${'a'.repeat(8)}_0`
+      expect(policy.evaluate(createdRequest(alias))).toMatchObject({ effect: 'deny', reasonCode: 'default-deny' })
+      expect(policyConfig.rules.some((rule: { id: string }) => rule.id === 'rsi-setup-created-tools')).toBe(false)
+      const noCreationPersonal = compileRsiPersonalAssistantOptions({ effectiveConfig: {
+        assistantPolicy: { budgets: [], rules: [] }, assistantAutomations: { schedulerEnabled: false, allowUnbudgetedExecution: false },
+      }, manifest: value, scope: { workspace: adjustedOwner.workspace, preset: 'primary', principal: createdSubject.principal },
+      budgetIds: { reviews: 'review', discovery: 'discovery', source: 'source', observations: 'observations' } })
+      expect((noCreationPersonal.assistantPolicy as { rules: Array<{ id: string }> }).rules.some(rule => rule.id === 'rsi-setup-created-tools')).toBe(false)
+      const creationManifest = structuredClone(value)
+      creationManifest.pluginCreation = creation
+      creationManifest.controlPlane.sourceJobs!.creation = creation.creation
+      creationManifest.controlPlane.creationVerifications = creation.verifications
+      creationManifest.controlPlane.creationCapabilities = creation.capabilities
+      creationManifest.growthDriver.pluginSourceProposals!.allowCreation = true
+      const creationInput = { ...input, manifest: creationManifest }
+      const creationOutput = await compileRsiProfiles(creationInput)
+      expect(await compileRsiProfiles({ ...creationInput, targetPatch: creationOutput.targetPatch,
+        coordinatorPatch: creationOutput.coordinatorPatch })).toEqual(creationOutput)
+      const creationRows = parse(creationOutput.targetPatch) as Array<{ id: string; config: any }>
+      const creationPolicyConfig = creationRows.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config.assistantPolicy
+      expect(() => PolicyConfig(creationPolicyConfig)).not.toThrow()
+      expect(creationPolicyConfig.toolDefaultEffect).toBeUndefined()
+      expect(creationPolicyConfig.rules).toContainEqual({ id: 'rsi-setup-created-tools', effect: 'allow',
+        subject: createdSubject, actions: ['execute'], resource: { kind: 'tool', id: `evolved_${creation.creation.namePrefix.replaceAll('-', '_')}*` },
+        context: { initiators: ['external'] } })
+      const creationPolicy = new AssistantPolicyService(new Context(), { ...creationPolicyConfig,
+        databasePath: join(root, 'creation-policy.sqlite') })
+      expect(creationPolicy.evaluate(createdRequest(alias))).toMatchObject({ effect: 'allow', ruleId: 'rsi-setup-created-tools' })
+      const longName = `${creation.creation.namePrefix}${'calculator-'.repeat(5)}`
+      expect(creationPolicy.evaluate(createdRequest(`evolved_${longName.replaceAll('-', '_').slice(0, 32)}_aaaaaaaa_0`)))
+        .toMatchObject({ effect: 'allow', ruleId: 'rsi-setup-created-tools' })
+      for (const denied of [
+        { ...createdRequest(alias), subject: { ...createdSubject, id: 'other' } },
+        { ...createdRequest(alias), subject: { ...createdSubject, workspace: join(root, 'other') } },
+        { ...createdRequest(alias), subject: { ...createdSubject, principal: 'lark/account/tenant/other' } },
+        { ...createdRequest(alias), context: { initiator: 'background' as const } },
+        createdRequest('evolved_owner_deadbeef_calculator_aaaaaaaa_0'),
+        createdRequest('evolved_unrelated_aaaaaaaa_0'),
+      ]) expect(creationPolicy.evaluate(denied)).toMatchObject({ effect: 'deny', reasonCode: 'default-deny' })
+      const explicitDeny = new AssistantPolicyService(new Context(), { ...creationPolicyConfig,
+        databasePath: join(root, 'creation-deny-policy.sqlite'), rules: [...creationPolicyConfig.rules,
+          { id: 'owner-deny-created', effect: 'deny', subject: createdSubject, actions: ['execute'],
+            resource: { kind: 'tool', id: alias }, context: { initiators: ['external'] } }] })
+      expect(explicitDeny.evaluate(createdRequest(alias))).toMatchObject({ effect: 'deny', ruleId: 'owner-deny-created' })
+      const expectedCreationPersonal = compileRsiPersonalAssistantOptions({ effectiveConfig: {
+        assistantPolicy: { databasePath: { __jsExpr: "dshHomePath('policy.sqlite')" }, budgets: [], rules: [] },
+        assistantAutomations: { schedulerEnabled: false, allowUnbudgetedExecution: false },
+      }, manifest: creationManifest, scope: { workspace: adjustedOwner.workspace, preset: 'primary', principal: createdSubject.principal },
+      budgetIds: { reviews: 'review', discovery: 'discovery', source: 'source', observations: 'observations' } })
+      expect((expectedCreationPersonal.assistantPolicy as { budgets: unknown[]; rules: unknown[] }).budgets).toEqual(creationPolicyConfig.budgets)
+      expect((expectedCreationPersonal.assistantPolicy as { budgets: unknown[]; rules: unknown[] }).rules).toEqual(creationPolicyConfig.rules)
+      const badCreation = structuredClone(creationManifest)
+      badCreation.pluginCreation!.creation.namePrefix = 'owner-deadbeef-'
+      await expect(compileRsiProfiles({ ...creationInput, manifest: badCreation })).rejects.toThrow('namespace')
+      expect(() => compileRsiPersonalAssistantOptions({ effectiveConfig: {
+        assistantPolicy: { budgets: [], rules: [] }, assistantAutomations: { schedulerEnabled: false, allowUnbudgetedExecution: false },
+      }, manifest: badCreation, scope: { workspace: adjustedOwner.workspace, preset: 'primary', principal: createdSubject.principal },
+      budgetIds: { reviews: 'review', discovery: 'discovery', source: 'source', observations: 'observations' } })).toThrow('namespace')
+      const unmatchedCreation = structuredClone(creationManifest)
+      unmatchedCreation.controlPlane.sourceJobs!.creation = { ...creation.creation, namePrefix: 'owner-deadbeef-' }
+      await expect(compileRsiProfiles({ ...creationInput, manifest: unmatchedCreation })).rejects.toThrow('source creation grant')
+      expect(() => compileRsiPersonalAssistantOptions({ effectiveConfig: {
+        assistantPolicy: { budgets: [], rules: [] }, assistantAutomations: { schedulerEnabled: false, allowUnbudgetedExecution: false },
+      }, manifest: unmatchedCreation, scope: { workspace: adjustedOwner.workspace, preset: 'primary', principal: createdSubject.principal },
+      budgetIds: { reviews: 'review', discovery: 'discovery', source: 'source', observations: 'observations' } })).toThrow('source creation grant')
+      const wrongCreationOwner = structuredClone(creationManifest)
+      wrongCreationOwner.controlPlane.sourceJobs!.principalId = 'another-owner'
+      expect(() => compileRsiPersonalAssistantOptions({ effectiveConfig: {
+        assistantPolicy: { budgets: [], rules: [] }, assistantAutomations: { schedulerEnabled: false, allowUnbudgetedExecution: false },
+      }, manifest: wrongCreationOwner, scope: { workspace: adjustedOwner.workspace, preset: 'primary', principal: createdSubject.principal },
+      budgetIds: { reviews: 'review', discovery: 'discovery', source: 'source', observations: 'observations' } })).toThrow('creation requires enabled Growth')
 
       const memoryOwner = structuredClone(value.sourceReviews.owner)
       const memoryReviews = { authorityId: 'memory-review', owner: memoryOwner, expiresAt: Date.now() + 60_000,
