@@ -15,7 +15,7 @@
 | 能力 | 已有实现与剩余边界 | 按需入口 |
 | --- | --- | --- |
 | 任务与记忆 | 任务反馈、原生调度和记忆学习已有实现；同主人新会话保留原执行来源，记忆采用的双 producer 写锁保持原子。记忆对后续真实决策的收益待验收。 | [Delivery](../plugins/assistant-delivery/README.md)、[Memory](../plugins/assistant-memory-learning/README.md) |
-| 工程进化 | 新工具独立验收、有限签名采用与 Cordis 动态入口已有实现；新安装一次配置创建/验收/采用授权及行为镜像。同主人 `/new` 延续原窗口、额度和版本，不重置凭证；主人轮换、纠正/撤回仍拒绝旧来源。当前限有界纯工具和原来源窗口，真实使用收益、跨窗口延续及版本替换回退待验收。旧修改采用仍重启整 Host。 | [Growth](../plugins/assistant-growth-driver/README.md)、[Control Plane](../plugins/plugin-control-plane/README.md)、[Verifier](../plugins/assistant-verifier/README.md) |
+| 工程进化 | 新工具独立验收、有限签名采用与 Cordis 动态入口已有实现；新安装一次配置创建/验收/采用授权及行为镜像。完整创建配置经校验后，仅为当前 owner 的普通外部会话开放本安装工具命名空间；执行器仍逐次检查采用状态、来源、期限和额度。同主人 `/new` 延续原窗口、额度和版本，主人轮换、纠正/撤回拒绝旧来源。当前限有界纯工具和原来源窗口，真实使用收益、跨窗口延续及版本替换回退待验收。旧修改采用仍重启整 Host。 | [Growth](../plugins/assistant-growth-driver/README.md)、[Control Plane](../plugins/plugin-control-plane/README.md)、[Verifier](../plugins/assistant-verifier/README.md) |
 | 部署 | 安装、双 Host 交接与回退已有组件；普通使用闭环待部署验收。Super Relay 原生 system 投影已修复，真实模型来源与新会话延续探针通过；本地捕获通道和合成配对身份仍不代表真实用户部署验收。 | [安装](../plugins/lark-channel/docs/rsi-setup.md)、[试用](bounded-live-adoption.md) |
 
 ## 下一次验收
@@ -26,6 +26,6 @@
 
 ## 最新验证
 
-10 月 2 日 Super Relay 原生 system 投影及同/跨分钟学习预算回归独立复核 PASS。冻结 5 个文件的 `VITEST_MAX_WORKERS=1 pnpm check` 退出 0：manifest、零 lint 警告、类型检查、8086 项测试通过/61 项跳过、构建及 37 个包 dry-run pack；相关包入口与 adapter 文件已确认。
+10 月 2 日 owner 创建工具前台 Policy 修复独立复核 PASS。冻结 3 个实现、测试及安装说明文件的 `VITEST_MAX_WORKERS=1 pnpm check` 退出 0：manifest、零 lint 警告、类型检查、8086 项测试通过/61 项跳过、干净构建及 37 个包 dry-run pack。检查后仅更新本状态页；构建摘要与原生探针一致，相关包入口已确认。
 
-真实原生 Agent/Delivery/Evaluation 探针完成 3 次 Super Relay 调用：任务结果准确、认证反馈进入 canonical 学习，`/new` 后原执行来源一致。该探针使用本地捕获通道和合成配对身份，没有候选创建、采用或后续收益证明；跳过的外部测试不建立现场验收。证据及原失败记录保留于忽略目录 `docs/evidence/rsi-native-super-relay/`，历史验证查 Git。
+真实原生 AgentLoop/Tools/Policy 探针确认：已有 Agent 可发现并调用随后挂载的工具，新 Session 可复用，错误 principal 拒绝执行，卸载后别名消失。该探针使用脚本模型、合成 owner 和 fixture 工具，不证明真实候选、Docker 行为验收、Delivery `/new` 或模型收益。证据及原失败记录保留于忽略目录 `docs/evidence/rsi-created-tool-policy/`；跳过的外部测试不建立现场验收，历史验证查 Git。
