@@ -55,7 +55,7 @@ import {
   type CommitOwnerAnchoredWorkflowTraceResult,
   type OwnerRouteDispatchGuard,
 } from './store.js'
-import { DshDeliveryRuntime } from './agent-runtime.js'
+import { DshDeliveryRuntime, redactOwnerLearningReply } from './agent-runtime.js'
 import { DeliverySessionLeases } from './session-lease-runtime.js'
 import { NativeWebOwner, type NativeWebOwnerConfig, type NativeWebOwnerAccess } from './native-web-owner.js'
 import {
@@ -429,7 +429,7 @@ export interface OwnerForegroundLearningTask {
   readonly judgement: 'independent-verifier' | 'owner-feedback' | 'unresolved'
   readonly ownerRevision?: Readonly<{ version: number; action: 'initial' | 'correct' | 'withdraw' }>
   readonly feedback?: Readonly<{ inboxId: string; text: string; truncated: boolean }>
-  readonly source: Readonly<{ sessionId: string; inboxId: string; objective: string; truncated: boolean; quiescent: boolean; modelSelectionState: 'missing' | 'frozen' | 'inconsistent'; modelSelection?: Readonly<{ provider: string; model: string; reasoningEffort?: string }> }>
+  readonly source: Readonly<{ sessionId: string; inboxId: string; objective: string; truncated: boolean; quiescent: boolean; modelSelectionState: 'missing' | 'frozen' | 'inconsistent'; modelSelection?: Readonly<{ provider: string; model: string; reasoningEffort?: string }>; reply?: Readonly<Pick<OwnerForegroundTaskSourceContent['reply'], 'outboxId' | 'intentDigest' | 'fullTextDigest'> & { text: string; truncated: boolean; redacted: boolean }> }>
 }
 
 export interface Config {
@@ -4855,6 +4855,7 @@ export class AssistantDeliveryService extends Service {
     let judgement: OwnerForegroundLearningTask['judgement'] = 'unresolved'
     let ownerRevision: OwnerForegroundLearningTask['ownerRevision']
     let feedback: OwnerForegroundLearningTask['feedback']
+    let feedbackOutboxId: string | undefined
     const objective = canonical.objective
     if (objective?.source.kind === 'user-feedback') {
       if (objective.source.id !== 'assistant-delivery/typed-owner-feedback') return undefined
@@ -4871,6 +4872,7 @@ export class AssistantDeliveryService extends Service {
         || JSON.stringify(outbox.intent.target.conversation) !== JSON.stringify(binding.conversation)
         || !['accepted', 'delivered', 'read'].includes(outbox.status)) return undefined
       judgement = 'owner-feedback'
+      feedbackOutboxId = outbox.id
       ownerRevision = Object.freeze({ version: revision.version, action: revision.action })
       if (revision.operationId !== undefined) feedback = this.deliveryStore.findNaturalObjectiveFeedbackByOperation(
         outbox.id, revision.operationId,
@@ -4883,6 +4885,23 @@ export class AssistantDeliveryService extends Service {
     // Without an acceptance contract, only authenticated typed owner feedback
     // may turn a completed ordinary conversation into a learning source.
     if (accepted === null && judgement !== 'owner-feedback') return undefined
+    const content = feedbackOutboxId === undefined ? undefined : this.readOwnerForegroundTaskSource({
+      ...routeInput, inboxId: inbox.id, expectedSourceDigest: original.sourceDigest,
+      expectedOwner: { authorityHash: owner.authorityHash,
+        principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion },
+      maxReplyBytes: 16_384,
+    })
+    if (content !== undefined && content.reply.outboxId !== feedbackOutboxId) return undefined
+    const reply = content?.reply === undefined ? undefined : (() => {
+      // A partial prefix could cut a credential below the filter's minimum
+      // token length. Publish no raw prefix when the reader hit its hard cap.
+      const visible = content.reply.truncated
+        ? { text: '[TRUNCATED REPLY]', truncated: true, redacted: true }
+        : redactOwnerLearningReply(content.reply.text, 4096)
+      return Object.freeze({ text: visible.text, truncated: content.reply.truncated || visible.truncated,
+        redacted: visible.redacted, outboxId: content.reply.outboxId,
+        intentDigest: content.reply.intentDigest, fullTextDigest: content.reply.fullTextDigest })
+    })()
     // Fence cross-ledger reads before handing any task text to the consumer.
     if (!evaluation.isTrustedTaskLearningProjectionReceipt(canonical)
       || acceptanceCanonicalJson(owner) !== acceptanceCanonicalJson(this.validateOwnerRoute(routeInput))) return undefined
@@ -4892,7 +4911,8 @@ export class AssistantDeliveryService extends Service {
       ...(feedback === undefined ? {} : { feedback }),
       source: Object.freeze({ sessionId: binding.sessionId, inboxId: inbox.id,
         objective: objectiveText.slice(0, 4096), truncated: objectiveText.length > 4096, quiescent: execution.quiescent,
-        modelSelectionState: execution.modelSelectionState, ...(execution.modelSelection === undefined ? {} : { modelSelection: execution.modelSelection }) }) })
+        modelSelectionState: execution.modelSelectionState, ...(execution.modelSelection === undefined ? {} : { modelSelection: execution.modelSelection }),
+        ...(reply === undefined ? {} : { reply }) }) })
   }
 
   /**

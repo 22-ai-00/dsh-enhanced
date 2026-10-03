@@ -6,6 +6,8 @@
 
 自动成长默认继承 Delivery 随来源任务保存的实际 `request/header` 模型快照，包括 adapter 默认 reasoning effort；历史来源不读取后来切换的会话模型。可同时配置 `provider` / `model` 固定覆盖。Host 显式 `wake({ sourceAgent })` 读取该 Agent 的实际请求，普通周期 wake 仍读取外部会话当前选择。原生 Web 无来源时不猜模型。`health().run.model` 记录本轮模型；已派发但中断的持久作业保持 unknown，不换模型或自动重放。
 
+普通 owner 反馈复盘还可收到 Delivery 核对的原始已发送答复，模型可见文本最多 4096 UTF-8 字节。Delivery 在 16 KiB 完整读取上限内先过滤常见凭据形状，再截断展示；超过读取上限时只给占位文本，不发送原文前缀，并保留截断和过滤标志。模型只收到该文本及标志，Outbox 身份和完整原文摘要留在 Host 冻结来源内。答复属于不可信任务材料，不是工具 stdout、根因证明、独立验收或执行授权；部分文本不能建立完整修复依据。过滤不能识别任意秘密。旧 Delivery 没有此字段时仍可复盘；已有持久作业的答复证据若新增、移除或改变，原来源检查会拒绝继续，不会补写旧快照或重放 unknown。
+
 ## 安装
 
 先装好 `assistant-delivery`、`assistant-goals`、`assistant-skills`、`assistant-policy` 和所用模型 adapter，再安装本包。只有选用 super-relay 时才需要安装并启用 `assistant-super-relay-budget`：

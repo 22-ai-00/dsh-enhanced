@@ -558,6 +558,16 @@ function redactProgressResultText(value: string): string {
   return redactProgressText(value)
 }
 
+/** Bounded, common-credential-shape filtering for an owner learning reply. */
+export function redactOwnerLearningReply(value: string, maxBytes: number): Readonly<{ text: string; truncated: boolean; redacted: boolean }> {
+  const filtered = redactProgressResultText(value)
+  const bytes = Buffer.from(filtered, 'utf8')
+  let end = Math.min(bytes.length, maxBytes)
+  while (end > 0 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--
+  return Object.freeze({ text: bytes.subarray(0, end).toString('utf8'), truncated: end < bytes.length,
+    redacted: filtered !== value })
+}
+
 function progressResultPreview(content: readonly ContentBlock[], depth = 0): string {
   if (depth > 4) return TRUNCATED_PROGRESS_VALUE
   const parts: string[] = []

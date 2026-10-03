@@ -342,17 +342,28 @@ describe('durable owner foreground completion feed', () => {
       const before = f.store.getInbox(inbox.record.id)!.status
       const result = f.store.withOwnerForegroundTaskSourceFence(input, authority, content => {
         expect(content.source.inboxId).toBe(inbox.record.id)
+        expect(f.store.readOwnerForegroundTaskSource(input, authority)).toEqual(content)
+        expect(f.store.readOwnerForegroundTaskSource({ ...input, expectedSourceDigest: 'f'.repeat(64) }, authority)).toBeUndefined()
+        expect(() => f.store.readOwnerForegroundTaskSource({ ...input, expectedOwner: {
+          ...input.expectedOwner, principalVersion: input.expectedOwner.principalVersion + 1,
+        } }, authority)).toThrow(/owner authority changed/u)
         expect(() => other.revokePrincipal(f.owner.id, f.owner.version)).toThrow(/locked/u)
         return 'committed'
       })
       expect(result).toBe('committed')
+      expect(f.store.readOwnerForegroundTaskSource(input, authority)?.reply.text).toBe('ordinary answer')
       const finish = () => f.store.finishInbox({ inboxId: inbox.record.id, ownerId: 'native-worker', fencingToken: inbox.fencingToken!, outcome: 'processed' })
       // Use the existing connection's native statement to demonstrate rollback;
       // calling a public transaction inside this transaction would nest BEGIN.
       const writer = (f.store as unknown as { database: DatabaseSync }).database
       const change = () => writer.prepare("UPDATE inbox_messages SET status = 'processed' WHERE id = ?").run(inbox.record.id)
-      expect(() => f.store.withOwnerForegroundTaskSourceFence(input, authority, () => { change(); throw new Error('consumer failed') })).toThrow('consumer failed')
+      expect(() => f.store.withOwnerForegroundTaskSourceFence(input, authority, () => {
+        expect(f.store.readOwnerForegroundTaskSource(input, authority)?.reply.text).toBe('ordinary answer')
+        change()
+        throw new Error('consumer failed')
+      })).toThrow('consumer failed')
       expect(inspector.prepare('SELECT status FROM inbox_messages WHERE id = ?').get(inbox.record.id)).toEqual({ status: before })
+      expect(f.store.readOwnerForegroundTaskSource(input, authority)?.reply.text).toBe('ordinary answer')
       expect(() => f.store.withOwnerForegroundTaskSourceFence(input, authority, () => { change(); return Promise.resolve('late') })).toThrow(/synchronous/u)
       // eslint-disable-next-line unicorn/no-thenable -- This test verifies that untrusted thenables are rejected without invocation.
       expect(() => f.store.withOwnerForegroundTaskSourceFence(input, authority, () => ({ then() { throw new Error('must not run') } }))).toThrow(/synchronous/u)
@@ -424,6 +435,12 @@ describe('durable owner foreground completion feed', () => {
       expect(Object.isFrozen(current)).toBe(true)
       expect(current.map(item => item?.source.inboxId)).toEqual([b.inboxId, a.inboxId, undefined, undefined, undefined])
       expect(current[0]!.reply.text).toBe('ordinary answer')
+      expect(f.store.readOwnerForegroundTaskSource(b, authority)).toEqual(current[0])
+      expect(f.store.readOwnerForegroundTaskSource(a, authority)).toEqual(current[1])
+      expect(f.store.readOwnerForegroundTaskSource({ ...b, expectedSourceDigest: 'f'.repeat(64) }, authority)).toBeUndefined()
+      expect(() => f.store.readOwnerForegroundTaskSource({ ...a, expectedOwner: {
+        ...a.expectedOwner, principalVersion: a.expectedOwner.principalVersion + 1,
+      } }, authority)).toThrow(/owner authority changed/u)
       expect(() => other.revokePrincipal(f.owner.id, f.owner.version)).toThrow(/locked/u)
       return current
     })

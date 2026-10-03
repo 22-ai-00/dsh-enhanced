@@ -122,6 +122,26 @@ test('Host snapshot inherits the verified task model and rejects later owner fee
   expect(() => f.gateway.snapshot(gap.id, f.owner)).toThrow('trusted foreground failure')
 })
 
+test.each(['added', 'removed', 'changed'] as const)('fences a task repair when delivered reply evidence is %s', async change => {
+  const f = await fixture(), source = f.source()
+  const reply = { text: 'Filtered original answer', truncated: false, redacted: true,
+    outboxId: 'original-outbox', intentDigest: 'c'.repeat(64), fullTextDigest: 'd'.repeat(64) }
+  const original = { ...source, source: { ...source.source, ...(change === 'added' ? {} : { reply }) } }
+  f.inspect.mockReturnValue(original)
+  const gap = f.gateway.record(original)
+  const reference = f.store.getOwnerTaskFailureReference(gap.id)
+  expect(f.gateway.snapshot(gap.id, f.owner).source.reply).toEqual(original.source.reply)
+  expect(JSON.stringify(reference)).not.toContain(reply.text)
+  // Full original bytes remain bound even when the filtered visible text is unchanged.
+  f.inspect.mockReturnValue({ ...source, source: { ...source.source,
+    ...(change === 'removed' ? {} : { reply: change === 'changed'
+      ? { ...reply, fullTextDigest: 'e'.repeat(64) } : reply }) } })
+  const commit = vi.fn()
+  expect(() => f.gateway.withCurrent(gap.id, f.owner, commit)).toThrow('task repair source or owner changed')
+  expect(commit).not.toHaveBeenCalled()
+  expect(f.store.getOwnerTaskFailureReference(gap.id)).toEqual(reference)
+})
+
 test('refuses stale evidence inside the canonical writer fence without writing a gap', async () => {
   const f = await fixture(), expected = f.source()
   const original = f.evaluation.withTrustedCanonicalTaskWriterFence.bind(f.evaluation)
