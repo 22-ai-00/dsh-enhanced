@@ -3245,6 +3245,12 @@ describe('real native Delivery Agent runtime', () => {
         source: { inboxId: accepted.inboxId, truncated: false, quiescent: true,
           modelSelectionState: 'frozen', modelSelection: { provider: fixture.llm.requests[0]!.provider,
             model: fixture.llm.requests[0]!.model, reasoningEffort: fixture.llm.requests[0]!.reasoningEffort } } })
+      const originalOutbox = (runtimeStore(fixture.service) as unknown as DeliveryStore)
+        .getOutboxByIdempotencyKey(`inbound:${accepted.inboxId}:reply`)!
+      const originalReply = { text: 'reply-1', truncated: false, redacted: false,
+        fullTextDigest: createHash('sha256').update('reply-1').digest('hex'),
+        outboxId: originalOutbox.id, intentDigest: originalOutbox.intentHash }
+      expect(ownerFeedback?.source.reply).toEqual(originalReply)
       initial ??= ownerFeedback
       expect(() => fixture.service.inspectOwnerForegroundLearningTask({ ...route, principalId: 'someone-else',
         outcomeId: ownerFeedback!.canonical.triggerOutcomeId })).toThrow()
@@ -3253,11 +3259,13 @@ describe('real native Delivery Agent runtime', () => {
         .toMatchObject({ objectiveStatus: 'achieved' })
       expect(source()).toMatchObject({ judgement: 'owner-feedback', ownerRevision: { version: 2, action: 'correct' },
         canonical: { objective: { status: 'achieved' } } })
+      expect(source()?.source.reply).toEqual(originalReply)
       await feedback('evt-foreground-owner-withdraw', 'withdraw 2 achieved')
       expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
         .toMatchObject({ objectiveStatus: 'unknown', projection: { learningDisposition: 'retract' } })
       expect(source()).toMatchObject({ judgement: 'owner-feedback', ownerRevision: { version: 3, action: 'withdraw' },
         canonical: { objective: { status: 'unknown' }, projection: { disposition: 'retract' } } })
+      expect(source()?.source.reply).toEqual(originalReply)
       await expect(fixture.service.acceptInbound(correction)).resolves.toMatchObject({ duplicate: true })
       await drive(fixture.service)
       expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
@@ -3316,6 +3324,7 @@ describe('real native Delivery Agent runtime', () => {
         ownerRevision: { version: 1, action: 'initial' },
         canonical: { objective: { status: 'not-achieved' }, projection: { subjectRef: first.inboxId } },
         source: { sessionId: executionBinding.sessionId, inboxId: first.inboxId, quiescent: true } })
+      expect(original?.source.reply).toMatchObject({ text: 'reply-1', truncated: false, redacted: false })
 
       await fixture.service.acceptInbound(message('evt-foreground-new-command', '/new', 'command'))
       await drive(fixture.service)
@@ -3336,6 +3345,76 @@ describe('real native Delivery Agent runtime', () => {
       expect(source()).toMatchObject({ owner: { ...executionRoute,
         bindingVersion: executionBinding.version, generation: executionBinding.generation }, source: original!.source,
         canonical: original!.canonical, ownerRevision: original!.ownerRevision })
+      expect(source()?.source.reply).toEqual(original?.source.reply)
+    } finally { await fixture.ctx.fiber.restart() }
+  })
+
+  test.each([
+    { kind: 'common credential echoes', reply: [
+      '原文🧪 é ä unchanged', 'api_key=private-api-key', 'token=private-token',
+      'eyJabcdefgh.eyJijklmnop.eyJqrstuvwx',
+      '-----BEGIN PRIVATE KEY-----', 'private-key-material', '-----END PRIVATE KEY-----', '尾声🙂',
+    ].join('\n'), truncated: false, redacted: true },
+    { kind: 'long multibyte text', reply: '数'.repeat(1366) + '🙂', truncated: true, redacted: false },
+    { kind: 'credential crossing the 4096-byte boundary', reply: 'x'.repeat(4072) + ' ghp_' + 'A'.repeat(40),
+      truncated: false, redacted: true },
+    { kind: 'JWT crossing the 4096-byte boundary',
+      reply: 'x'.repeat(4060) + ' eyJ' + 'A'.repeat(32) + '.eyJ' + 'B'.repeat(32) + '.eyJ' + 'C'.repeat(32),
+      truncated: false, redacted: true },
+    { kind: 'reply beyond the 16KiB inspection limit', reply: 'x'.repeat(16_365) + ' ghp_' + 'A'.repeat(40),
+      truncated: true, redacted: true },
+  ])('bounds an ordinary owner feedback reply with $kind while retaining its full digest', async ({ kind, reply, truncated, redacted }) => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-learning-reply-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      ownerRoutes: [{ id: 'learning-owner', conversation, principal, workspace: root, agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }],
+    })
+    try {
+      const pairing = fixture.service.issuePairing('test', principal)
+      fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+      await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+      vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+        fixture.llm.requests.push(options)
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: reply }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: reply } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })
+      const task = await fixture.service.acceptInbound(message('evt-learning-reply-source', 'Review this ordinary request.'))
+      await drive(fixture.service)
+      await fixture.service.acceptInbound({ ...message('evt-learning-reply-feedback', '/feedback not-achieved', 'command'),
+        metadata: { replyToProviderMessageId: replyProviderMessageId(fixture.service, 'evt-learning-reply-source') } })
+      await drive(fixture.service)
+      const scope = fixture.ctx.assistantEvaluation.canonicalHostScope({ workspace: root, preset: 'primary' })
+      const [projection] = fixture.ctx.assistantEvaluation.listTrustedTaskLearningProjections({ scope, limit: 1 }).items
+      expect(projection).toBeDefined()
+      const learned = fixture.service.inspectOwnerForegroundLearningTask({
+        authorityId: 'learning-owner', principalId: 'lark/bot-1/tenant-a/ou_owner', workspace: root,
+        agentPreset: 'primary', outcomeId: projection!.receipt.triggerOutcomeId,
+      })
+      const originalOutbox = (runtimeStore(fixture.service) as unknown as DeliveryStore)
+        .getOutboxByIdempotencyKey(`inbound:${task.inboxId}:reply`)!
+      expect(learned?.source.reply).toMatchObject({ outboxId: originalOutbox.id,
+        intentDigest: originalOutbox.intentHash,
+        fullTextDigest: createHash('sha256').update(reply).digest('hex'), truncated, redacted })
+      const visible = learned?.source.reply?.text ?? ''
+      expect(Buffer.byteLength(visible, 'utf8')).toBeLessThanOrEqual(4096)
+      if (kind === 'common credential echoes') {
+        expect(visible).toContain('原文🧪 é ä unchanged')
+        for (const secret of ['private-api-key', 'private-token', 'eyJabcdefgh', 'private-key-material']) {
+          expect(visible).not.toContain(secret)
+        }
+      } else if (kind === 'long multibyte text') {
+        expect(visible).toBe('数'.repeat(1365))
+      } else if (kind === 'credential crossing the 4096-byte boundary') {
+        expect(visible).not.toContain('ghp_')
+        expect(visible).toContain('x'.repeat(4072))
+      } else if (kind === 'JWT crossing the 4096-byte boundary') {
+        expect(visible).not.toContain('eyJ' + 'A'.repeat(32))
+        expect(visible).toContain('x'.repeat(4060))
+      } else {
+        expect(visible).toBe('[TRUNCATED REPLY]')
+      }
     } finally { await fixture.ctx.fiber.restart() }
   })
 

@@ -37,6 +37,7 @@ async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missi
   let time = Date.now() - 1000
   const producer = new EvaluationStore({ path: join(root, 'evaluation.sqlite'), now: () => ++time })
   const sourceModel = { provider: 'conversation', model: 'original', reasoningEffort: 'medium' }
+  let reply: OwnerForegroundLearningTask['source']['reply']
   const delivery = {
     validateOwnerRoute: () => ({ ...owner }),
     inspectOwnerForegroundLearningTask: ({ outcomeId }: { outcomeId: string }): OwnerForegroundLearningTask | undefined => {
@@ -45,7 +46,8 @@ async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missi
       return { protocol: 'assistant-delivery/owner-foreground-learning/v1', owner: { ...sourceOwner }, canonical,
         judgement: 'independent-verifier', source: { sessionId: 'original-session', inboxId: canonical.projection.subjectRef,
           objective: 'Fix the real task failure', truncated: false, quiescent: true,
-          modelSelectionState: options.missing ? 'missing' : 'frozen', ...(options.missing ? {} : { modelSelection: { ...sourceModel } }) } }
+          modelSelectionState: options.missing ? 'missing' : 'frozen', ...(options.missing ? {} : { modelSelection: { ...sourceModel } }),
+          ...(reply === undefined ? {} : { reply: { ...reply } }) } }
     },
   }
   const config = normalizeConfig({ enabled: true, scope, budgetId: 'growth-budget', budgetAmount: 1,
@@ -76,6 +78,7 @@ async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missi
   }
   cleanup.push(async () => { for (const runtime of runtimes) await runtime.close(); producer.close(); await ctx.fiber.restart(); await rm(root, { recursive: true, force: true }) })
   return { ctx, root, config, owner, policy, evaluation, automations, sourceModel, review, create, append, tick,
+    setReply: (value: OwnerForegroundLearningTask['source']['reply']) => { reply = value },
     setCreationAuthority: (value: CreationAcceptanceAuthorityRef | undefined) => { currentCreationAuthority = value } }
 }
 
@@ -108,6 +111,43 @@ test('recovers queued work and freezes its original model across a restart', asy
   expect(f.review).toHaveBeenCalledTimes(1)
   expect(f.review.mock.calls[0]![0].model).toEqual({ provider: 'conversation', model: 'original', reasoningEffort: 'medium' })
   expect(second.health().counts).toEqual({ reviewed: 1 })
+})
+
+const originalReply = { text: 'Original delivered answer', truncated: false, redacted: false,
+  outboxId: 'original-outbox', intentDigest: 'a'.repeat(64), fullTextDigest: 'b'.repeat(64) }
+
+test.each(['added', 'removed', 'changed'] as const)('rejects a frozen queued source when reply evidence is %s across restart', async change => {
+  const f = await fixture()
+  if (change !== 'added') f.setReply(originalReply)
+  f.append(); const first = f.create(); await first.close()
+  const db = new DatabaseSync(join(f.root, 'usage.sqlite'))
+  const before = db.prepare('SELECT intent_json,digest FROM usage_jobs').get()
+  db.close()
+  f.setReply(change === 'removed' ? undefined : change === 'added' ? originalReply
+    : { ...originalReply, text: 'Changed delivered answer', fullTextDigest: 'c'.repeat(64) })
+  const restarted = f.create()
+  expect(restarted.health().counts).toEqual({ failed: 1 })
+  await f.tick()
+  expect(f.review).not.toHaveBeenCalled()
+  const afterDb = new DatabaseSync(join(f.root, 'usage.sqlite'))
+  expect(afterDb.prepare('SELECT intent_json,digest FROM usage_jobs').get()).toEqual(before)
+  afterDb.close()
+})
+
+test('invalidates a running reply snapshot without replaying or rebinding it', async () => {
+  const f = await fixture(); f.setReply(originalReply); f.append(); const runtime = f.create()
+  f.review.mockImplementationOnce(async input => {
+    expect(input.source.source.reply).toEqual(originalReply)
+    input.bindSourceRun(actualSourceRun(input))
+    f.setReply({ ...originalReply, text: 'Another task answer', outboxId: 'wrong-outbox' })
+    input.assertCurrent()
+    return 'reviewed'
+  })
+  await f.tick()
+  expect(runtime.health().counts).toEqual({ unknown: 1 })
+  await runtime.close(); const restarted = f.create(); await f.tick()
+  expect(f.review).toHaveBeenCalledTimes(1)
+  expect(restarted.health().counts).toEqual({ unknown: 1 })
 })
 
 test('binds only the claimed native occurrence, permits exact replay, rejects conflicting setup, and inspects reviewed work after restart', async () => {

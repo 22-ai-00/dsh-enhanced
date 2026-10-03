@@ -425,6 +425,8 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
       judgement: ownerProse ? 'owner-feedback' : 'independent-verifier',
       ...(ownerProse ? { feedback: { inboxId: 'private-feedback-inbox', text: '还是不行，保存时报错。', truncated: false } } : {}),
       source: { sessionId: 'real-session', inboxId: 'real-task', objective: 'The actual user report has a missing total.',
+        ...(ownerProse ? { reply: { text: 'The delivered result omitted the total.', truncated: false, redacted: true,
+          outboxId: 'private-source-outbox', intentDigest: 'private-intent-digest', fullTextDigest: 'private-reply-digest' } } : {}),
         truncated: false, quiescent: true, modelSelectionState: 'frozen', modelSelection: { provider: 'conversation-provider', model: 'original-task-model' } } }))
     const prompts: string[] = []
     h.ctx.on('llm/stream', async function* (options, next) { prompts.push(JSON.stringify(options.messages)); yield* next() })
@@ -438,8 +440,15 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
     expect(h.modelSelection).not.toHaveBeenCalled()
     expect(prompts.join('\n')).toContain('The actual user report has a missing total.')
     expect(prompts.join('\n')).toContain('untrusted task data')
-    if (ownerProse) expect(prompts.join('\n')).toContain('还是不行，保存时报错。')
+    if (ownerProse) {
+      expect(prompts.join('\n')).toContain('还是不行，保存时报错。')
+      expect(prompts.join('\n')).toContain('The delivered result omitted the total.')
+      expect(prompts.join('\n')).toContain('observedReply')
+    } else expect(prompts.join('\n')).not.toContain('observedReply')
     expect(prompts.join('\n')).not.toContain('private-feedback-inbox')
+    expect(prompts.join('\n')).not.toContain('private-source-outbox')
+    expect(prompts.join('\n')).not.toContain('private-intent-digest')
+    expect(prompts.join('\n')).not.toContain('private-reply-digest')
     expect(prompts.join('\n')).not.toContain(RECORD_ID)
   })
   it('inherits the owner conversation model, freezes it for the wake, and rereads it next wake', async () => {

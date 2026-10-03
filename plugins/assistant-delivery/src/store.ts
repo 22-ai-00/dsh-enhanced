@@ -4441,7 +4441,16 @@ export class DeliveryStore {
   readOwnerForegroundTaskSource(input: OwnerForegroundTaskSourceScope & {
     inboxId: string; expectedSourceDigest: string; maxInputBytes?: number; maxReplyBytes?: number
   }, authority: OwnerRouteAuthority): Readonly<OwnerForegroundTaskSourceContent> | undefined {
-    return this.withForegroundSourceRead(input, authority, content => content)
+    this.assertOpen()
+    const inputLimit = foregroundSourceByteLimit(input.maxInputBytes)
+    const replyLimit = foregroundSourceByteLimit(input.maxReplyBytes)
+    const read = () => {
+      const fence = this.foregroundSourceFence(input, authority)
+      return this.foregroundSourceContent(input, fence, inputLimit, replyLimit)
+    }
+    // A source fence already holds this connection's writer transaction. Reuse
+    // its owner check and snapshot without starting a nested BEGIN.
+    return this.writerTransactionActive ? read() : this.transaction(read)
   }
 
   /** Lock order: Delivery, then downstream Evaluation/Memory writer fences. */
