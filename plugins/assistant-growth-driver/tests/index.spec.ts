@@ -924,9 +924,9 @@ describe('opt-in plugin source proposals', () => {
   function creationService() {
     const base = sourceService()
     let producer: SourceGrowthRunProducer | undefined
-    base.gaps.mockReturnValue([{ id: creationGap, capability: 'new capability', context: 'owner failure',
+    base.gaps.mockReturnValue([{ id: creationGap, capability: 'task-failure', context: 'owner failure',
       status: 'open', createdAt: 1 }])
-    base.recordOwnerTaskFailureGap.mockReturnValue({ id: creationGap, capability: 'new capability',
+    base.recordOwnerTaskFailureGap.mockReturnValue({ id: creationGap, capability: 'task-failure',
       context: 'owner failure', status: 'open', createdAt: 1 })
     return {
       ...base,
@@ -1115,7 +1115,7 @@ describe('opt-in plugin source proposals', () => {
 
   it('queues new-plugin creation from ordinary failed owner usage with a frozen Growth override and exact task gap', async () => {
     const adapter = new ScriptedAdapter([
-      { name: 'plugin_source_gaps', args: {} }, creationRead([]), creationRead(['src/index.ts', 'README.md', 'tests/index.spec.ts']), creationCall(),
+      { name: 'plugin_source_gaps', args: {} }, creationRead(['src/index.ts', 'README.md', 'tests/index.spec.ts']), creationCall(),
     ])
     const h = await mount({ adapter, provider: 'conversation-provider' })
     h.modelSelection.mockImplementation(() => { throw new Error('current session supplier changed') })
@@ -1148,6 +1148,8 @@ describe('opt-in plugin source proposals', () => {
     expect(service.usageHealth()).toMatchObject({ counts: { reviewed: 1 } })
     expect(service.health().run?.sourceProposals).toEqual({ queued: 1, prepared: 0, rejected: 0 })
     expect(source.gaps).not.toHaveBeenCalled()
+    expect(source.inspectCreateSource).toHaveBeenCalledTimes(1)
+    expect(source.inspectSource).not.toHaveBeenCalled()
     expect(source.enqueueSourceJob).toHaveBeenCalledWith(expect.objectContaining({
       mode: 'create', gapId: creationGap, name: creationName, files: creationFiles,
       owner: expect.objectContaining({ principalId: PRINCIPAL, workspace: h.root }),
@@ -1311,10 +1313,11 @@ describe('opt-in plugin source proposals', () => {
     expect(result.service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 2 })
   })
 
-  it.each(['no-read', 'manifest-only', 'modify-snapshot'])('rejects creation without its own template content: %s', async kind => {
+  it.each(['no-read', 'manifest-only', 'partial-read', 'modify-snapshot'])('rejects creation without reading every replaced template: %s', async kind => {
     const turns = [
       { name: 'plugin_source_gaps', args: {} },
-      ...(kind === 'no-read' ? [] : kind === 'manifest-only' ? [creationRead([])] : [
+      ...(kind === 'no-read' ? [] : kind === 'manifest-only' ? [creationRead([])]
+        : kind === 'partial-read' ? [creationRead(['src/index.ts'])] : [
         { name: 'plugin_source_read', args: { gap_id: creationGap, plugin_name: creationName, paths: ['src/index.ts'] } },
       ]),
       creationCall(),
@@ -1336,17 +1339,20 @@ describe('opt-in plugin source proposals', () => {
     expect(result.service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 1 })
   })
 
-  it('queues a new name from a read template with only source, README and tests, and keeps the reply content-free', async () => {
+  it('queues a new name after one first batch read of all replaced template files', async () => {
     const source = creationService()
     const result = await creationWake({ source, turns: [
-      { name: 'plugin_source_gaps', args: {} }, creationRead([]), creationRead(['src/index.ts', 'README.md', 'tests/index.spec.ts']),
+      { name: 'plugin_source_gaps', args: {} }, creationRead(['src/index.ts', 'README.md', 'tests/index.spec.ts']),
       creationCall(), { name: 'plugin_source_job_status', args: { id: 'source-create-job' } },
     ] })
     expect(result.adapter.surfaces[0]).toContain('plugin_source_create')
-    expect(source.inspectCreateSource).toHaveBeenCalledTimes(2)
-    expect(source.inspectCreateSource.mock.calls[1]?.[0]).toMatchObject({
-      name: creationName, paths: ['src/index.ts', 'README.md', 'tests/index.spec.ts'], baseCommit: 'c'.repeat(40),
+    expect(source.inspectCreateSource).toHaveBeenCalledTimes(1)
+    expect(source.inspectCreateSource.mock.calls[0]?.[0]).toMatchObject({
+      name: creationName, paths: ['src/index.ts', 'README.md', 'tests/index.spec.ts'],
     })
+    expect(source.inspectCreateSource.mock.calls[0]?.[0]).not.toHaveProperty('baseCommit')
+    expect(result.adapter.messageTranscripts.some(text => text.includes('package.json')
+      && text.includes('template content') && text.includes('namePrefix'))).toBe(true)
     expect(source.enqueueSourceJob).toHaveBeenCalledTimes(1)
     expect(source.enqueueSourceJob.mock.calls[0]?.[0]).toMatchObject({
       mode: 'create', gapId: creationGap, name: creationName, files: creationFiles,
