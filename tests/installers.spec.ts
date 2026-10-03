@@ -1162,6 +1162,10 @@ exit 91
 set -euo pipefail
 if [[ " \${1:-} " == ' --version ' ]]; then printf '10.0.0\n'; exit 0; fi
 if [[ " \${1:-} \${2:-} " == ' store path ' ]]; then
+  if [[ "\${HOME:-}" == *'/verified-cache/home' && -n "\${pnpm_config_store_dir:-}" ]]; then
+    mkdir -p "\${pnpm_config_store_dir}/v11"
+    printf '%s\\n' "\${pnpm_config_store_dir}/v11"; exit 0
+  fi
   if [[ "${'$'}{LIFECYCLE_REQUIRE_PNPM_PROFILE_CWD:-0}" == '1' && "$PWD" != "${'$'}{LIFECYCLE_PROFILE_DIRECTORY:-}" ]]; then printf 'pnpm profile cwd mismatch\n' >&2; exit 97; fi
   if [[ "${'$'}{LIFECYCLE_PNPMFILE_MUST_NOT_RUN:-0}" == '1' && "${'$'}{pnpm_config_ignore_pnpmfile:-}" != 'true' ]]; then printf 'pnpmfile execution was not disabled\n' >&2; exit 98; fi
   if [[ -n "\${LIFECYCLE_PNPM_STORE_MARKER:-}" ]]; then : > "$LIFECYCLE_PNPM_STORE_MARKER"; fi
@@ -1230,12 +1234,13 @@ if [[ "\${arguments[0]:-}" == 'install' && " \${arguments[*]} " == *' --lockfile
   if [[ "\${LIFECYCLE_NPM_VERIFY_FAIL:-0}" == '1' ]]; then printf 'metadata verification failed\n' >&2; exit 94; fi
   node - "$directory/pnpm-lock.yaml" <<'NODE' > "\${pnpm_config_cache_dir:?}/lockfile-verified.jsonl"
 const { createHash } = require('node:crypto')
-const { readFileSync } = require('node:fs')
+const { readFileSync, statSync } = require('node:fs')
 const { resolve } = require('node:path')
 const path = resolve(process.argv[2])
+const lockStat = statSync(path, { bigint: true })
 const policy = { tarballUrlBinding: true, resolutionShapeCheck: true, dependencyAliasCheck: true }
 if (process.env.LIFECYCLE_NPM_RECEIPT_MISSING_POLICY) delete policy[process.env.LIFECYCLE_NPM_RECEIPT_MISSING_POLICY]
-process.stdout.write(JSON.stringify({ lockfile: { path, hash: createHash('sha256').update(readFileSync(path)).digest('hex') }, policy }) + '\\n')
+process.stdout.write(JSON.stringify({ lockfile: { path, size: Number(lockStat.size), inode: String(lockStat.ino), mtimeNs: String(lockStat.mtimeNs), hash: createHash('sha256').update(readFileSync(path)).digest('base64') }, policy }) + '\\n')
 NODE
   exit 0
 fi
@@ -1782,8 +1787,11 @@ async function preOwnerLifecycleFixture({ baseServices = false, memoryExtension 
   await mkdir(join(f.profileDirectory, 'node_modules'), { recursive: true })
   await writeFile(join(f.profileDirectory, 'node_modules', '.modules.yaml'), stringify({ storeDir: storeAlias }), { mode: 0o600 })
   const pnpmPath = join(f.fakeBin, 'pnpm')
-  await writeFile(pnpmPath, (await readFile(pnpmPath, 'utf8')).replaceAll('"@jsr:registry":"https://npm.jsr.io/"',
-    `"@jsr:registry":"https://npm.jsr.io/","cacheDir":${JSON.stringify(cachePath)}`))
+  await writeFile(pnpmPath, (await readFile(pnpmPath, 'utf8'))
+    .replace('#!/bin/bash\n', `#!/bin/bash\nsource '${join(f.root, 'pnpm-fixture-env.sh')}'\n`)
+    .replaceAll('"@jsr:registry":"https://npm.jsr.io/"',
+      `"@jsr:registry":"https://npm.jsr.io/","cacheDir":${JSON.stringify(cachePath)},"ignoreScripts":true,"ignorePnpmfile":true,"trustLockfile":false`))
+  writePreOwnerPnpmFixtureEnvironment(f)
   await chmod(f.dshHome, 0o755)
   await mkdir(join(f.dshHome, 'profiles', 'node_modules'))
   const moduleRoot = join(f.root, 'reviewed-installer')
@@ -1928,8 +1936,18 @@ fi
   await writeFile(join(controlPackage, 'lib/entry.js'), 'approved-package-bytes')
   return { ...f, moduleRoot, preparationRoot, cachePath, storeAlias }
 }
+// Production preparation deliberately excludes arbitrary inherited variables.
+// The deterministic pnpm fixture reads its synthetic controls from its own
+// fixture file, independently of that restricted production environment.
+function writePreOwnerPnpmFixtureEnvironment(f: { root: string; dshHome: string; fakeBin: string }, options: LifecycleRunOptions = {}) {
+  const environment = lifecycleEnvironment(f.dshHome, f.fakeBin, options)
+  const controls = Object.entries(environment).filter(([key]) => /^LIFECYCLE_[A-Z0-9_]+$/u.test(key))
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+  writeFileSync(join(f.root, 'pnpm-fixture-env.sh'), controls.map(([key, value]) => `export ${key}=${quote(String(value))}`).join('\n') + '\n', { mode: 0o600 })
+}
 function runPreOwnerLifecycle(f: Awaited<ReturnType<typeof preOwnerLifecycleFixture>>, operation: 'local-service-upgrade' | 'local-service-recover', options: LifecycleRunOptions = {}) {
   setLifecycleSystemdControls(join(f.root, 'systemd-state.json'), options)
+  writePreOwnerPnpmFixtureEnvironment(f, options)
   return spawnSync(process.execPath, [join(f.fixtureInstallDirectory,'lifecycle-profile.mjs'), operation, 'web', f.dshHome,
     join(f.fakeBin,'dsh'), join(f.fakeBin,'bwrap'), join(f.fakeBin,'systemctl'), join(f.fakeBin,'journalctl'),
     ...(operation === 'local-service-upgrade' ? [join(f.fakeBin,'pnpm'),f.preparationRoot] : []), f.moduleRoot], {
@@ -9986,28 +10004,47 @@ exit 7
 
 
 describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source transaction', () => {
+  test.each([
+    ['verification', { npmVerifyFails: true }],
+    ['prefetch', { storeFails: true }],
+    ['verification policy', { npmReceiptMissingPolicy: 'dependencyAliasCheck' as const }],
+  ])('rejects failed %s before stopping the original service', async (_name, options) => {
+    const f = await preOwnerLifecycleFixture()
+    const before = await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')
+    const result = runPreOwnerLifecycle(f, 'local-service-upgrade', options)
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('before service stop')
+    expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command.includes('stop'))).toBe(false)
+    expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
+    expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toBe(before)
+    expect(existsSync(join(f.cachePath, 'lockfile-verified.jsonl'))).toBe(false)
+  })
   test('takes a SQLite store snapshot including committed WAL and isolates writable cache copies', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'local-source-package-cache-')))
-    temporaryRoots.push(root)
-    const storePath = join(root, 'store'), cachePath = join(root, 'cache'), transaction = join(root, 'transaction'), alias = join(root, 'store-alias')
-    for (const path of [storePath, cachePath, transaction]) await mkdir(path, { mode: 0o700 })
-    await symlink(storePath, alias)
+    const f = await preOwnerLifecycleFixture()
+    const transaction = join(f.root, 'cache-transaction')
+    await mkdir(transaction, { mode: 0o700 })
+    const directoryIdentity = async (path: string) => { const entry = await lstat(path); return { dev: String(entry.dev), ino: String(entry.ino), uid: entry.uid, mode: entry.mode } }
+    const pnpmStore = { storePath: join(f.root, 'pnpm-store'), identity: await directoryIdentity(join(f.root, 'pnpm-store')),
+      localSource: { alias: { path: f.storeAlias }, cachePath: f.cachePath, cacheIdentity: await directoryIdentity(f.cachePath) } }
+    const preparation = await lifecycleProfileTest.prepareLocalSourceOfflineCache({
+      current: { profilesPath: join(f.dshHome, 'profiles'), profilesStat: await lstat(join(f.dshHome, 'profiles')),
+        profilePath: f.profileDirectory, profileStat: await lstat(f.profileDirectory) },
+      homePath: f.dshHome, profile: 'web', pnpmPath: join(f.fakeBin, 'pnpm'),
+    })
+    const storePath = preparation.storePath, cachePath = preparation.cachePath
     await writeFile(join(storePath, 'content'), 'original', { mode: 0o600 })
     await link(join(storePath, 'content'), join(storePath, 'content-alias'))
     await writeFile(join(cachePath, 'cache-content'), 'cached', { mode: 0o600 })
     await symlink('cache-content', join(cachePath, 'contained-link'))
     await mkdir(join(storePath, 'projects'))
-    await symlink(root, join(storePath, 'projects', 'registered-project'))
+    await symlink(f.root, join(storePath, 'projects', 'registered-project'))
     await mkdir(join(cachePath, 'dlx'))
-    await symlink(root, join(cachePath, 'dlx', 'unrelated-executable'))
+    await symlink(f.root, join(cachePath, 'dlx', 'unrelated-executable'))
     const db = new DatabaseSync(join(storePath, 'index.db'))
     db.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE package_index(key TEXT); INSERT INTO package_index VALUES (\'committed in WAL\')')
     expect((await stat(join(storePath, 'index.db-wal'))).size).toBeGreaterThan(0)
-    const directoryIdentity = async (path: string) => { const entry = await lstat(path); return { dev: String(entry.dev), ino: String(entry.ino), uid: entry.uid, mode: entry.mode } }
     try {
-      const copy = await lifecycleProfileTest.prepareLocalSourcePackageCaches(transaction, {
-        storePath, identity: await directoryIdentity(storePath), localSource: { alias: { path: alias }, cachePath, cacheIdentity: await directoryIdentity(cachePath) },
-      })
+      const copy = await lifecycleProfileTest.prepareLocalSourcePackageCaches(transaction, pnpmStore, preparation, f.profileDirectory)
       try {
         const clone = new DatabaseSync(join(copy.roots[0].sourcePath, 'index.db'))
         try { expect(clone.prepare('SELECT key FROM package_index').all()).toEqual([{ key: 'committed in WAL' }]) } finally { clone.close() }
@@ -10016,22 +10053,23 @@ describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source t
         expect(existsSync(join(copy.roots[0]!.sourcePath, 'projects'))).toBe(false)
         expect(existsSync(join(copy.roots.at(-1)!.sourcePath, 'dlx'))).toBe(false)
         expect(await realpath(join(copy.roots.at(-1)!.sourcePath, 'contained-link'))).toBe(join(copy.roots.at(-1)!.sourcePath, 'cache-content'))
-        expect(await readlink(join(storePath, 'projects', 'registered-project'))).toBe(root)
-        expect(await readlink(join(cachePath, 'dlx', 'unrelated-executable'))).toBe(root)
+        expect(await readlink(join(storePath, 'projects', 'registered-project'))).toBe(f.root)
+        expect(await readlink(join(cachePath, 'dlx', 'unrelated-executable'))).toBe(f.root)
         await writeFile(join(copy.roots.at(-1)!.sourcePath, 'cache-content'), 'new')
         expect(await readFile(join(storePath, 'content'), 'utf8')).toBe('original')
         expect(await readFile(join(cachePath, 'cache-content'), 'utf8')).toBe('cached')
       } finally { await copy.dispose() }
       expect(await readdir(transaction)).toEqual([])
-      const binding = { storePath, identity: await directoryIdentity(storePath), localSource: { alias: { path: alias }, cachePath, cacheIdentity: await directoryIdentity(cachePath) } }
       await writeFile(join(cachePath, 'other.db-wal'), 'unsupported WAL', { mode: 0o600 })
-      await expect(lifecycleProfileTest.prepareLocalSourcePackageCaches(transaction, binding)).rejects.toThrow('unsupported active SQLite WAL')
+      await expect(lifecycleProfileTest.prepareLocalSourcePackageCaches(transaction, pnpmStore, preparation, f.profileDirectory)).rejects.toThrow('unsupported active SQLite WAL')
       expect(await readdir(transaction)).toEqual([])
       await rm(join(cachePath, 'other.db-wal'))
       await symlink(join(storePath, 'content'), join(cachePath, 'escape'))
-      await expect(lifecycleProfileTest.prepareLocalSourcePackageCaches(transaction, binding)).rejects.toThrow('link escapes its private copy')
+      await expect(lifecycleProfileTest.prepareLocalSourcePackageCaches(transaction, pnpmStore, preparation, f.profileDirectory)).rejects.toThrow('link escapes its private copy')
       expect(await readdir(transaction)).toEqual([])
-    } finally { db.close() }
+      expect(await readFile(join(pnpmStore.storePath, 'original-store'), 'utf8')).toBe('original store')
+      expect(await readFile(join(f.cachePath, 'original-cache'), 'utf8')).toBe('original cache')
+    } finally { db.close(); await preparation.dispose() }
   })
   test('rejects a different installed store before stopping the service', async () => {
     const f = await preOwnerLifecycleFixture()

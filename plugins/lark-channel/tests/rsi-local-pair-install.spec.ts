@@ -1,11 +1,13 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { cp, lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { cp, lstat, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { join, relative } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { parseDocument } from 'yaml'
 import { rsiCoordinatorProfile } from '../src/rsi-install.js'
 import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages, rsiLocalPeerOverrides, type RsiLocalCohort } from '../src/rsi-local-cohort.js'
+import { verifyRsiLocalInstalledPackagesFresh } from '../lib/rsi-local-cohort.js'
 import { installRsiLocalProfile, mergeRsiLocalOverrides, rsiLocalDependencyOverrides, type RsiLocalProfilePorts } from '../src/rsi-local-install.js'
 import { stageRsiLocalPairPackages, stageRsiLocalSinglePackages } from '../src/rsi-local-pair-install.js'
 import { prepareRsiSourceWorkspace } from '../src/rsi-source.js'
@@ -158,6 +160,25 @@ async function fixture(sameVersion = false, peerGraph = false, memoryExtension =
 }
 
 describe('disposable Home paired package installation', () => {
+  test('fresh verifier follows a replaced pnpm package link and rejects changed candidate bytes', async () => {
+    const f = await fixture()
+    const profilePath = join(f.home, 'profiles', f.profile)
+    const targetLink = join(profilePath, 'node_modules', '@dsh-enhanced', 'target')
+    const oldPhysical = join(profilePath, 'old-target'), newPhysical = join(profilePath, 'new-target')
+    await rename(targetLink, oldPhysical)
+    await symlink(oldPhysical, targetLink)
+    const requireProfile = createRequire(join(profilePath, 'package.json'))
+    expect(requireProfile.resolve('@dsh-enhanced/target/package.json')).toBe(join(oldPhysical, 'package.json'))
+    await unpack(f.candidate, profilePath, f.candidate.bundles)
+    await rename(targetLink, newPhysical)
+    await symlink(newPhysical, targetLink)
+    const input = { cohort: f.candidate, profilePath, bundles: [...f.candidate.bundles] }
+    await expect(verifyRsiLocalInstalledPackages(input)).rejects.toThrow('installed package identity differs')
+    await expect(verifyRsiLocalInstalledPackagesFresh(input)).resolves.toBeUndefined()
+    await writeFile(join(newPhysical, 'lib', 'index.js'), 'changed candidate bytes\n')
+    await expect(verifyRsiLocalInstalledPackagesFresh(input)).rejects.toThrow('installed package file differs')
+  }, 30_000)
+
   test.each([false, true])('updates a pre-owner single profile without inventing coordinator state (same version: %s)', async sameVersion => {
     const f = await fixture(sameVersion, true)
     await rm(f.receiptPath)

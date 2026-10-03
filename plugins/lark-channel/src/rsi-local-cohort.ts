@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
+import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, open, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { gunzipSync } from 'node:zlib'
 import { isMap, isScalar, parseDocument } from 'yaml'
 import { rsiBuildResources as io } from './rsi-build.js'
@@ -539,4 +540,78 @@ export async function verifyRsiLocalInstalledPackages(input: { cohort: RsiLocalC
       pending.push({ name: dependency, from: manifestPath })
     }
   }
+}
+
+/** A native package add replaces pnpm links while the caller is running.
+ * Node caches their old physical targets in that process. Resolve the final
+ * installed closure in a new process using this pinned verifier's same checks. */
+export async function verifyRsiLocalInstalledPackagesFresh(
+  input: Parameters<typeof verifyRsiLocalInstalledPackages>[0], signal?: AbortSignal,
+): Promise<void> {
+  const modulePath = fileURLToPath(import.meta.url)
+  const source = await io.readStable(modulePath, 2_097_152)
+  const payload = JSON.stringify({ input, modulePath, moduleUrl: pathToFileURL(modulePath).href, sourceHash: digest(source) })
+  if (Buffer.byteLength(payload) > 20_971_520) fail('fresh installed verification input exceeds bound')
+  const script = `
+import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+let size = 0
+const chunks = []
+try {
+  for await (const chunk of process.stdin) {
+    size += chunk.length
+    if (size > 20_971_520) throw new Error('verification input exceeds bound')
+    chunks.push(chunk)
+  }
+  const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  const source = await readFile(payload.modulePath)
+  if (createHash('sha256').update(source).digest('hex') !== payload.sourceHash) throw new Error('pinned verifier source changed')
+  const { verifyRsiLocalInstalledPackages } = await import(payload.moduleUrl)
+  await verifyRsiLocalInstalledPackages(payload.input)
+  process.stdout.write(JSON.stringify({ ok: true }))
+} catch (error) {
+  process.stdout.write(JSON.stringify({ ok: false, message: String(error?.message ?? error).slice(0, 4096) }))
+}
+`
+  const environment = { ...process.env, NODE_OPTIONS: undefined, NODE_PATH: undefined }
+  const deadline = AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(120_000)])
+  deadline.throwIfAborted()
+  const result = await new Promise<string>((resolvePromise, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '--eval', script], {
+      env: environment, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32', windowsHide: true,
+    })
+    const output: Buffer[] = []
+    let outputBytes = 0, stderrBytes = 0, exceeded = false, spawnError = false
+    const group = () => {
+      if (!child.pid) return
+      try { if (process.platform === 'win32') child.kill('SIGKILL'); else process.kill(-child.pid, 'SIGKILL') }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') child.kill('SIGKILL') }
+    }
+    const abort = () => group()
+    deadline.addEventListener('abort', abort, { once: true })
+    if (deadline.aborted) group()
+    child.stdout.on('data', (chunk: Buffer) => {
+      outputBytes += chunk.length
+      if (outputBytes > 8_192) { exceeded = true; group() }
+      else output.push(chunk)
+    })
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrBytes += chunk.length
+      if (stderrBytes > 8_192) { exceeded = true; group() }
+    })
+    child.stdin.on('error', () => { spawnError = true; group() })
+    child.once('error', () => { spawnError = true; group() })
+    child.once('close', (code, killed) => {
+      deadline.removeEventListener('abort', abort)
+      if (spawnError || exceeded || deadline.aborted || code !== 0 || killed !== null) {
+        reject(new Error('rsi local cohort: fresh installed verification process failed or exceeded its bound'))
+      } else resolvePromise(Buffer.concat(output).toString('utf8'))
+    })
+    child.stdin.end(payload)
+  })
+  let parsed: { ok?: unknown; message?: unknown }
+  try { parsed = JSON.parse(result) as typeof parsed } catch { fail('fresh installed verification returned invalid result') }
+  if (parsed.ok === true && Object.keys(parsed).length === 1) return
+  if (parsed.ok === false && typeof parsed.message === 'string' && Object.keys(parsed).length === 2) throw new Error(parsed.message)
+  fail('fresh installed verification returned invalid result')
 }
