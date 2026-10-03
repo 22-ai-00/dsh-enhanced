@@ -43,7 +43,7 @@ import { adoptSourceRelease, validateSourceAdoptionConfig, type SourceAdoptionCo
 import { Ed25519ApprovalAuthority } from './approval.js'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from './store.js'
 import { runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
-import { awaitSourceSignal, inspectSourceContext, type SourceInspection } from './source-context.js'
+import { awaitSourceSignal, inspectSourceContext, inspectSourceTargetsContext, type SourceInspection, type SourceTargetsInspection } from './source-context.js'
 import { inspectSourceCreationContext, prepareCreatedPluginWorkspace, validateSourceCreationFiles, verifyCreatedPluginWorkspace } from './source-creation.js'
 import { resolveSourceBaseline } from './source-baseline.js'
 import { inheritedEnvironment, loadTrustConfig, resolveTrustKey } from './trust.js'
@@ -1129,6 +1129,32 @@ export class PluginControlPlaneService extends Service {
     this.sourceInspections.add(operation)
     void operation.then(() => this.sourceInspections.delete(operation), () => this.sourceInspections.delete(operation))
     return operation
+  }
+
+  async inspectSourceTargets(input: { repository: string; baseCommit?: string; signal?: AbortSignal; assertCurrent?: () => void | Promise<void> }): Promise<SourceTargetsInspection> {
+    this.abort.signal.throwIfAborted()
+    if (this.sourceBuilds.size !== 0 || this.sourceInspections.size !== 0) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'another source operation is still draining')
+    const signal = AbortSignal.any([this.abort.signal, ...(input.signal === undefined ? [] : [input.signal]), AbortSignal.timeout(15_000)])
+    const operation = this.inspectSourceTargetsOwned({ ...input, signal })
+    this.sourceInspections.add(operation)
+    void operation.then(() => this.sourceInspections.delete(operation), () => this.sourceInspections.delete(operation))
+    return operation
+  }
+
+  private async inspectSourceTargetsOwned(input: Parameters<PluginControlPlaneService['inspectSourceTargets']>[0]): Promise<SourceTargetsInspection> {
+    const signal = input.signal === undefined ? this.abort.signal : AbortSignal.any([this.abort.signal, input.signal])
+    const assertCurrent = async (): Promise<void> => { signal.throwIfAborted(); await awaitSourceSignal(signal, () => input.assertCurrent?.()); signal.throwIfAborted() }
+    await assertCurrent()
+    const trust = await awaitSourceSignal(signal, () => this.boundTrust())
+    const environment = inheritedEnvironment(trust)
+    const baseline = this.config.sourceJobs?.repository === input.repository ? this.config.sourceJobs.baseline : undefined
+    const baselineCommit = baseline === undefined ? undefined : await resolveSourceBaseline({ repository: input.repository,
+      config: baseline, environment, signal, assertCurrent, trust,
+      readHistory: () => this.store.getSourceBaselineHistory(input.repository),
+      readMaintenance: () => this.store.getSourceMaintenanceRecords(input.repository) })
+    return inspectSourceTargetsContext({ repository: input.repository,
+      ...(input.baseCommit === undefined ? {} : { baseCommit: input.baseCommit }),
+      ...(baselineCommit === undefined ? {} : { baselineCommit }), environment, signal, assertCurrent })
   }
 
   private async inspectSourceOwned(input: Parameters<PluginControlPlaneService['inspectSource']>[0]): Promise<SourceInspection> {

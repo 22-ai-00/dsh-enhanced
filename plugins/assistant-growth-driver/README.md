@@ -24,7 +24,7 @@ dsh --profile web --dump-config
 每次唤醒（`intervalMs > 0` 的 unref timer，或显式调用 `wake()`）：
 
 1. **Preflight（不触网、不起 Agent）**：用配置中冻结的 owner scope 经 `assistantDelivery.validateOwnerRoute` 重新锚定真实 owner route 并铸造一枚短-lived authority（寿命 `≤ maxDurationMs`，硬顶 300000ms，每次使用都重新校验 route，route 漂移即整轮作废）；读取并冻结所选模型；仅使用 super-relay 时检查其契约和默认凭据引用，其他供应由对应 DSH adapter 管理凭据；确认 policy 服务在线；可选地预留 owner 配置的后台预算。
-2. **有界后台 Agent**：照 `assistant-skills` repair-agent 的冻结范式运行——`llm/stream` 逐请求钉 provider/model/maxTokens/tools digest，`tools.guard` 白名单 + 双预算计数，system-prompt 按身份过滤，`deadline = min(expiresAt, now + maxDurationMs)` 到点 abort。刻意**不挂载任何 preset**：默认工具面恰好是下面四个 `growth_*` realm 工具；显式开启源码提案且 control-plane 服务在线且配置了构建器时增加三个 `plugin_source_*` 工具。任何其它可见工具都会在发请求前被拒绝。
+2. **有界后台 Agent**：照 `assistant-skills` repair-agent 的冻结范式运行——`llm/stream` 逐请求钉 provider/model/maxTokens/tools digest，`tools.guard` 白名单 + 双预算计数，system-prompt 按身份过滤，`deadline = min(expiresAt, now + maxDurationMs)` 到点 abort。刻意**不挂载任何 preset**：默认工具面恰好是下面四个 `growth_*` realm 工具；显式开启源码提案且 control-plane 服务在线且配置了构建器时增加三个基础 `plugin_source_*` 工具；可选 provider 另有目标发现、durable 状态或创建接口时按配置追加相应工具。任何其它可见工具都会在发请求前被拒绝。
    - `growth_list_owner_goals`：列最近的 owner-root goal（只读投影）。
    - `growth_read_verified_workflow`：读一条已完成 goal 的**脱敏**摘要；Host 独立复核 owner-root（非 subagent、无 parent session、delegationDepth=0）、whole-goal succeeded 且 quiescent，cwd/preset 精确匹配；不返回步骤参数与验收回执。
    - `growth_list_skills`：列该 owner 的 active skill 与 pending candidate，避免重名。
@@ -147,6 +147,10 @@ pluginSourceProposals:
 Agent 先通过 `plugin_source_gaps` 发现 owner 配置的控制面账本中已有的开放 gap，通过 `plugin_source_read` 列出并读取目标插件在 Git 提交中的文本源码，最后通过 `plugin_source_prepare` 提交 `gap_id`、`plugin_name` 与两种互补的修改输入：新增短文件或完整替换用 `files: [{path, content}]`；已读的长既有文件用 `edits: [{path, before, after}]`。每个 `before` 必须在本轮缓存的原始文本中精确且唯一地出现，编辑按原始偏移处理，且不能重叠；`files` 与 `edits` 可以一起使用，但路径必须互不相同。Host 先展开为完整文件再交给 Control Plane，模型不会从确认结果取回缓存源码。普通手动 wake 读取既有手工 gap，这类记录没有逐条 owner 来源证明，多 owner 部署仍须隔离手工账本。启用下述 `usageLearning` 时只读取本次可信失败的专属 gap，绝不退回全局列表。至少提供一种非空输入；两种输入合计最多 64 项，单个完整内容、`before`、`after` 与最终每个文件最多 64 KiB，最终完整文件最多 64 个、合计 256 KiB。模型不能给仓库路径、命令、镜像、环境、TTL、审批或发布参数。安全根插件由 driver 和控制面同时拒绝。
 
 `plugin_source_read` 接收 `gap_id`、`plugin_name`、`paths`；`paths: []` 返回文件清单，再按需读取源码、测试、README、package.json 和 patch。只读取已提交的文本，不读取工作区改动、未跟踪文件、符号链接、隐藏文件或生成目录。单文件最多 64 KiB，每轮内容累计最多 256 KiB，并受现有工具调用次数与运行时限控制。读取的内容属于不可信数据，不能改变工具权限。
+
+当可选 Control Plane 提供目标发现接口时，本轮另有 `plugin_source_targets({gap_id})`：先发现当前开放 gap，再读取可信 Git 基线中至多 128 个非保护插件的名称和可选简介。清单来自已提交的正规 manifest，不含工作区脏文件、未跟踪目录、链接、仓库路径或授权字段；简介最多 512 UTF-8 字节，并作为不可信选择线索。清单不证明某插件就是根因，不授权修改，也不能替代读取待替换文件。模型仍须结合原任务证据与源码决定是否修改已有插件，或在独立创建授权下新增能力。
+
+目标清单的首次基线绑定后续修改源码和创建模板读取；若此前已经读取源码，目标发现必须使用同一基线。重复清单、源码或服务提供者发生漂移时拒绝旧上下文；模型不能自行指定基线、仓库或刷新基线继续提交。旧 provider 没有此可选接口时维持原工具面。
 
 Host 在本轮内按 gap 与插件保存首次读取的 commit，后续读取和准备均绑定该 commit；HEAD 变化即拒绝旧上下文。同一文件在同一 commit 的再次读取若内容漂移也会拒绝。完整替换既有文件前必须读取原内容；精确编辑只能作用于已读的既有文件，可在已有目录中增加源码或测试文件。模型不能指定 commit，也不能只凭文件清单覆盖未读文件。服务提供者更换后读上下文与待执行动作一并失效；未提供源码读取接口的旧版 control-plane 保持四工具基础模式。
 

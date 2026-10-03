@@ -97,7 +97,20 @@ export interface GrowthSourceSnapshot {
   readonly contents: readonly GrowthSourcePreparedFile[]
 }
 
+/** Committed target hints, never modification authorization or candidate evidence. */
+export interface GrowthSourceTargets {
+  readonly baseCommit: string
+  readonly plugins: readonly { readonly name: string; readonly description?: string }[]
+}
+
 export interface GrowthSourcePlanePort {
+  /** Optional read-only repository inventory; the Host owns the repository and baseline. */
+  inspectSourceTargets?(input: {
+    repository: string
+    baseCommit?: string
+    signal: AbortSignal
+    assertCurrent: () => void
+  }): Promise<GrowthSourceTargets>
   /** Read committed text only; paths=[] discovers the bounded plugin manifest. */
   inspectSource(input: {
     repository: string

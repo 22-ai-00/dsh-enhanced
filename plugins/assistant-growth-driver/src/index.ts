@@ -129,7 +129,7 @@ export class AssistantGrowthDriverService extends Service {
       // when the control plane is absent or is being replaced.
       ctx.inject(['pluginControlPlane' as never], sourceCtx => {
         const abort = new AbortController()
-        type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan' | 'inspectSource' | 'inspectCreateSource' | 'getSourceCreationNamespace' | 'inspectSourceCreationAcceptanceAuthority' | 'enqueueSourceJob' | 'inspectSourceJob'> & {
+        type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan' | 'inspectSourceTargets' | 'inspectSource' | 'inspectCreateSource' | 'getSourceCreationNamespace' | 'inspectSourceCreationAcceptanceAuthority' | 'enqueueSourceJob' | 'inspectSourceJob'> & {
           gaps(limit: number): readonly GrowthSourceGap[]
           recordOwnerTaskFailureGap?: (source: OwnerForegroundLearningTask) => GrowthSourceGap
           canPrepareSource?: () => boolean
@@ -176,6 +176,16 @@ export class AssistantGrowthDriverService extends Service {
           nudge: () => { if (producerAvailable) current().reconcileSourceGrowthRuns?.() },
           port: {
             listOpenGaps: () => current().gaps(50),
+            ...(typeof provider.inspectSourceTargets === 'function'
+              ? { inspectSourceTargets: async (input: Parameters<NonNullable<GrowthSourcePlanePort['inspectSourceTargets']>>[0]) => {
+                  const signal = AbortSignal.any([input.signal, abort.signal, this.#abort.signal])
+                  const live = current()
+                  if (typeof live.inspectSourceTargets !== 'function') throw new Error('control plane source targets API unavailable')
+                  return live.inspectSourceTargets({ ...input, signal,
+                    assertCurrent: () => { signal.throwIfAborted(); current(); input.assertCurrent() },
+                  })
+                } }
+              : {}),
             inspectSource: async (input: Parameters<GrowthSourcePlanePort['inspectSource']>[0]) => {
               const signal = AbortSignal.any([input.signal, abort.signal, this.#abort.signal])
               return current().inspectSource({ ...input, signal,

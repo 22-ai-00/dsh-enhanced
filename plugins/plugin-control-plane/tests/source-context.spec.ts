@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { runLocalCommand } from '../src/source-workspace.ts'
-import { awaitSourceSignal, inspectSourceContext } from '../src/source-context.ts'
+import { awaitSourceSignal, inspectSourceContext, inspectSourceTargetsContext } from '../src/source-context.ts'
 
 vi.mock('node:child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('node:child_process')>()
@@ -33,6 +33,27 @@ function inspect(repository: string, paths: readonly string[] = [], baseCommit?:
   const signal = new AbortController()
   return inspectSourceContext({ repository, name: 'health-helper', paths, ...(baseCommit === undefined ? {} : { baseCommit }), environment: process.env, signal: signal.signal,
     assertCurrent: async () => { signal.signal.throwIfAborted() } })
+}
+
+async function targetFixture() {
+  const value = await fixture()
+  await writeFile(join(value.root, 'plugins/health-helper/package.json'), JSON.stringify({ name: '@dsh-enhanced/health-helper', description: 'Committed helper' }))
+  execFileSync('/usr/bin/git', ['-C', value.root, 'add', '.'])
+  execFileSync('/usr/bin/git', ['-C', value.root, 'commit', '-m', 'plugin manifest'])
+  return { root: value.root, head: execFileSync('/usr/bin/git', ['-C', value.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() }
+}
+
+function targets(repository: string, options: { baseCommit?: string; baselineCommit?: string; signal?: AbortSignal; assertCurrent?: () => Promise<void> } = {}) {
+  return inspectSourceTargetsContext({ repository, environment: process.env, signal: options.signal ?? new AbortController().signal,
+    assertCurrent: options.assertCurrent ?? (async () => undefined),
+    ...(options.baseCommit === undefined ? {} : { baseCommit: options.baseCommit }),
+    ...(options.baselineCommit === undefined ? {} : { baselineCommit: options.baselineCommit }) })
+}
+
+function commit(root: string, message: string): string {
+  execFileSync('/usr/bin/git', ['-C', root, 'add', '.'])
+  execFileSync('/usr/bin/git', ['-C', root, 'commit', '-m', message])
+  return execFileSync('/usr/bin/git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
 }
 
 describe('source context', () => {
@@ -145,5 +166,96 @@ describe('source context', () => {
     expect((await settled).message).toBe('inspection cancelled')
     expect(closed).toBe(true)
     expect(() => process.kill(pid!, 0)).toThrow()
+  })
+})
+
+describe('committed source targets', () => {
+  it('lists only eligible committed plugin identities and ignores dirty, untracked, protected, and linked manifests', async () => {
+    const { root, head } = await targetFixture()
+    await mkdir(join(root, 'plugins/assistant-policy'))
+    await writeFile(join(root, 'plugins/assistant-policy/package.json'), '{"name":"@dsh-enhanced/assistant-policy"}')
+    await mkdir(join(root, 'plugins/Bad_Name'))
+    await writeFile(join(root, 'plugins/Bad_Name/package.json'), '{"name":"@dsh-enhanced/Bad_Name"}')
+    await mkdir(join(root, 'plugins/linked-helper'))
+    await symlink('../health-helper/package.json', join(root, 'plugins/linked-helper/package.json'))
+    await mkdir(join(root, 'plugins/new-helper'))
+    await writeFile(join(root, 'plugins/new-helper/package.json'), '{"name":"@dsh-enhanced/new-helper"}')
+    execFileSync('/usr/bin/git', ['-C', root, 'add', 'plugins/assistant-policy', 'plugins/Bad_Name', 'plugins/linked-helper'])
+    execFileSync('/usr/bin/git', ['-C', root, 'update-index', '--add', '--cacheinfo', `160000,${head},plugins/gitlink-helper`])
+    execFileSync('/usr/bin/git', ['-C', root, 'commit', '-m', 'ineligible plugin roots'])
+    await writeFile(join(root, 'plugins/health-helper/package.json'), '{"name":"@dsh-enhanced/health-helper","description":"dirty"}')
+    const result = await targets(root)
+    expect(result.plugins).toEqual([{ name: 'health-helper', description: 'Committed helper' }])
+    expect(result.baseCommit).toBe(execFileSync('/usr/bin/git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim())
+    expect(Object.isFrozen(result.plugins)).toBe(true)
+  })
+
+  it('uses the resolved managed commit without changing checkout and rejects stale bases or noncanonical roots', async () => {
+    const { root, head } = await targetFixture()
+    await writeFile(join(root, 'plugins/health-helper/package.json'), '{"name":"@dsh-enhanced/health-helper","description":"released"}')
+    const released = commit(root, 'released plugin')
+    execFileSync('/usr/bin/git', ['-C', root, 'checkout', '--detach', head])
+    await writeFile(join(root, 'plugins/health-helper/package.json'), '{"name":"@dsh-enhanced/health-helper","description":"dirty"}')
+    expect(await targets(root, { baselineCommit: released, baseCommit: released })).toEqual({
+      baseCommit: released, plugins: [{ name: 'health-helper', description: 'released' }],
+    })
+    expect(await readFile(join(root, 'plugins/health-helper/package.json'), 'utf8')).toContain('dirty')
+    await expect(targets(root, { baselineCommit: released, baseCommit: head })).rejects.toThrow('stale')
+    await expect(targets(root, { baseCommit: released })).rejects.toThrow('stale')
+    await expect(targets(join(root, 'plugins/health-helper'))).rejects.toThrow('top-level')
+  })
+
+  it('rejects malformed, mismatched, binary and invalid description manifests', async () => {
+    const { root } = await targetFixture()
+    const path = join(root, 'plugins/health-helper/package.json')
+    for (const content of [
+      '{',
+      JSON.stringify({ name: '@dsh-enhanced/other-helper' }),
+      JSON.stringify({ name: '@dsh-enhanced/health-helper', description: 'a\nb' }),
+      JSON.stringify({ name: '@dsh-enhanced/health-helper', description: '界'.repeat(171) }),
+      Buffer.from([0x7b, 0x80, 0x7d]),
+    ]) {
+      await writeFile(path, content)
+      commit(root, 'invalid plugin manifest')
+      await expect(targets(root)).rejects.toThrow(/manifest|description/u)
+    }
+  })
+
+  it('rejects per-manifest, aggregate and eligible count bounds rather than returning a partial directory', async () => {
+    const { root } = await targetFixture()
+    const path = join(root, 'plugins/health-helper/package.json')
+    await writeFile(path, JSON.stringify({ name: '@dsh-enhanced/health-helper', padding: 'x'.repeat(16_384) }))
+    commit(root, 'oversized manifest')
+    await expect(targets(root)).rejects.toThrow('bound')
+    await writeFile(path, JSON.stringify({ name: '@dsh-enhanced/health-helper' }))
+    for (let i = 0; i < 129; i++) {
+      const name = `helper-${i}`
+      await mkdir(join(root, 'plugins', name))
+      await writeFile(join(root, 'plugins', name, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/${name}` }))
+    }
+    commit(root, 'too many plugins')
+    await expect(targets(root)).rejects.toThrow('count')
+    for (let i = 0; i < 129; i++) await rm(join(root, 'plugins', `helper-${i}`), { recursive: true })
+    for (let i = 0; i < 33; i++) {
+      const name = `aggregate-${i}`
+      await mkdir(join(root, 'plugins', name))
+      await writeFile(join(root, 'plugins', name, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/${name}`, padding: 'x'.repeat(16_000) }))
+    }
+    commit(root, 'too many manifest bytes')
+    await expect(targets(root)).rejects.toThrow('aggregate')
+  })
+
+  it('cancels a stalled currentness check and never publishes its late result', async () => {
+    const { root } = await targetFixture()
+    const controller = new AbortController()
+    let release!: () => void
+    const blocked = new Promise<void>(resolve => { release = resolve })
+    const running = targets(root, { signal: controller.signal, assertCurrent: () => blocked }).catch(error => error)
+    await new Promise(resolve => setImmediate(resolve))
+    controller.abort(new Error('target inspection cancelled'))
+    expect((await running).message).toBe('target inspection cancelled')
+    release()
+    await new Promise(resolve => setImmediate(resolve))
+    expect((await running).message).toBe('target inspection cancelled')
   })
 })
