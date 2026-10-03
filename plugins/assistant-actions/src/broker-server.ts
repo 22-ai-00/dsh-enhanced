@@ -359,7 +359,9 @@ export class GitHubBrokerServer {
     if (deadlineTimer) clearTimeout(deadlineTimer)
     for (const listener of listeners) for (const state of listener.connections) destroy(state, 'server shutdown')
     try { await beforeDeadline(Promise.resolve().then(() => this.#options.core.drain(deadlineAt)), deadlineAt, this.#options.now, 'core drain deadline exceeded') } catch (error) { cause ??= error }
-    try { await beforeDeadline(closing, deadlineAt, this.#options.now, 'listener close deadline exceeded') } catch (error) { cause ??= error }
+    // closeOwned bounds the listener callback itself. Its remaining filesystem
+    // work must settle before stop returns, even when the drain deadline passed.
+    await closing
     try { await beforeDeadline(Promise.resolve().then(() => this.#options.core.close()), deadlineAt, this.#options.now, 'core close deadline exceeded') } catch (error) { cause ??= error }
     finally { await Promise.allSettled(listeners.map(unlinkOwned)) }
     if (cause !== undefined) throw failure('shutdown-failed', 'one or more shutdown barriers failed', cause)
