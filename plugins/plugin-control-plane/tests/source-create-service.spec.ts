@@ -361,17 +361,29 @@ it('retains unknown verification without another native model dispatch and leave
 
 it('keeps a dispatched claim visible and excludes it from continuation while the verifier is in flight', async () => {
   const f = await fixture(true)
-  let finish!: (value: unknown) => void
-  f.verification.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+  let entered!: () => void
+  const verifierEntered = new Promise<void>(resolve => { entered = resolve })
+  let finish: ((value: unknown) => void) | undefined
+  f.verification.mockImplementation(() => new Promise(resolve => { finish = resolve; entered() }))
   const job = await f.service.enqueueSourceJob(f.request)
   f.advance()
   const tick = f.automations.tick()
-  await vi.waitFor(() => expect(f.verification).toHaveBeenCalledOnce())
+  try {
+    await tick
+    await Promise.race([verifierEntered, f.automations.whenIdle().then(() => {
+      throw new Error('native source job settled before independent verifier dispatch')
+    })])
+    expect(f.verification).toHaveBeenCalledOnce()
+    const planId = f.store.getSourceJob(job.id)!.planId!
+    expect(f.service.inspectCreationVerification(planId)).toMatchObject({ status: 'claimed', updatedAt: expect.any(Number) })
+    expect(f.store.listPreparedSourceApprovalJobs(false, false, false, true)).toHaveLength(0)
+  } finally {
+    if (finish !== undefined) {
+      finish({ status: 'unknown', reason: 'schema-observation-unknown' })
+      await f.automations.whenIdle()
+    }
+  }
   const planId = f.store.getSourceJob(job.id)!.planId!
-  expect(f.service.inspectCreationVerification(planId)).toMatchObject({ status: 'claimed', updatedAt: expect.any(Number) })
-  expect(f.store.listPreparedSourceApprovalJobs(false, false, false, true)).toHaveLength(0)
-  finish({ status: 'unknown', reason: 'schema-observation-unknown' })
-  await tick; await f.automations.whenIdle()
   expect(f.service.inspectCreationVerification(planId)).toMatchObject({ status: 'unknown', reason: 'schema-observation-unknown' })
   f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
   expect(f.verification).toHaveBeenCalledOnce()
