@@ -21,6 +21,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
+import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assistant-evaluation'
 import { SourceGrowthRunUnavailableError, sourceGrowthRunDigest, validateSourceGrowthRunBinding, type SourceGrowthRunProducer,
   type SourceGrowthRunRequest } from '@dsh-enhanced/assistant-growth-contract'
@@ -179,6 +180,7 @@ class ScriptedAdapter extends LlmAdapter {
   schemas: Array<Array<{ name: string; parameters: unknown }>> = []
   toolDescriptions: Array<Record<string, string>> = []
   messageTranscripts: string[] = []
+  requestTools: GenerateOptions['tools'][] = []
   constructor(private readonly turns: readonly ScriptedTurn[]) { super() }
   reset(): void { this.calls = 0 }
   override async resolveModel(provider: string, model: string) {
@@ -193,6 +195,7 @@ class ScriptedAdapter extends LlmAdapter {
     this.schemas.push((options.tools ?? []).map(tool => ({ name: tool.name, parameters: tool.parameters })))
     this.toolDescriptions.push(Object.fromEntries((options.tools ?? []).map(tool => [tool.name, tool.description ?? ''])))
     this.messageTranscripts.push(JSON.stringify(options.messages))
+    this.requestTools.push(options.tools)
     const index = this.calls++
     if (index < this.turns.length) {
       const turn = this.turns[index]!
@@ -224,6 +227,15 @@ function successTurns(): ScriptedTurn[] {
       },
     },
   ]
+}
+
+function firstGrowthPrompt(adapter: ScriptedAdapter): string {
+  const messages = JSON.parse(adapter.messageTranscripts[0]!) as Array<{
+    role: string; content: Array<{ type: string; text?: string }>
+  }>
+  const prompt = messages.find(message => message.role === 'user')?.content.find(block => block.type === 'text')?.text
+  if (prompt === undefined) throw new Error('native request omitted the Growth user prompt')
+  return prompt
 }
 
 interface MountOptions {
@@ -437,6 +449,7 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
     for (let i = 0; i < 3; i += 1) { await h.ctx.assistantAutomations.tick(); await h.ctx.assistantAutomations.whenIdle() }
     expect(service.usageHealth()).toMatchObject({ counts: { reviewed: 1 } })
     expect(adapter.requests).toEqual([{ provider: 'conversation-provider', model: 'original-task-model' }])
+    expect(firstGrowthPrompt(adapter)).toContain('Skill-review workflow, in order:')
     expect(h.modelSelection).not.toHaveBeenCalled()
     expect(prompts.join('\n')).toContain('The actual user report has a missing total.')
     expect(prompts.join('\n')).toContain('untrusted task data')
@@ -951,6 +964,7 @@ describe('opt-in plugin source proposals', () => {
     expect(adapter.messageTranscripts.join('')).toContain('Health diagnostics')
     expect(adapter.messageTranscripts.join('')).not.toContain('PRIVATE HOST')
     expect(adapter.schemas[0]?.find(tool => tool.name === 'plugin_source_targets')?.parameters).not.toHaveProperty('repository')
+    expect(firstGrowthPrompt(adapter)).toContain('Skill-review workflow, in order:')
   })
 
   it('refuses discovery before its gap or for a foreign gap', async () => {
@@ -1117,7 +1131,7 @@ describe('opt-in plugin source proposals', () => {
 
   async function startUsageReview(input: {
     h: Harness
-    source: ReturnType<typeof sourceService> | Record<string, unknown>
+    source?: ReturnType<typeof sourceService> | Record<string, unknown>
     objectiveStatus: 'achieved' | 'not-achieved'
     sourceConfig?: Record<string, unknown>
     growthConfig?: Record<string, unknown>
@@ -1152,14 +1166,14 @@ describe('opt-in plugin source proposals', () => {
       },
     }
     h.learningSource.mockReturnValue(learning)
-    if (!input.mountSourceAfterDriver) h.ctx.provide('pluginControlPlane' as never, source as never)
+    if (!input.mountSourceAfterDriver && source !== undefined) h.ctx.provide('pluginControlPlane' as never, source as never)
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
       budgetId: 'growth-budget', budgetAmount: 1,
       ...input.growthConfig,
       pluginSourceProposals: { ...options(h.root), ...input.sourceConfig },
       usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, databasePath: join(h.root, 'usage.sqlite') },
     }))
-    if (input.mountSourceAfterDriver) {
+    if (input.mountSourceAfterDriver && source !== undefined) {
       h.ctx.provide('pluginControlPlane' as never, source as never)
       await new Promise(resolve => setImmediate(resolve))
     }
@@ -1183,6 +1197,33 @@ describe('opt-in plugin source proposals', () => {
     expect(source.inspectSourceTargets).toHaveBeenCalledOnce()
     expect(source.prepareModifySourcePlan).toHaveBeenCalledOnce()
     expect(source.prepareModifySourcePlan).toHaveBeenCalledWith(expect.objectContaining({ gapId: 'gap-1' }))
+    const prompt = firstGrowthPrompt(adapter)
+    expect(prompt).toContain('Start with the task objective, observed reply and owner feedback')
+    expect(prompt).toContain('A paths: [] source read discovers file names only')
+    expect(prompt).not.toContain('Skill-review workflow, in order:')
+    expect(adapter.surfaces[0]).toContain('plugin_source_targets')
+    expect(source.inspectSource.mock.calls[0]?.[0].paths).toEqual(['README.md'])
+  })
+
+  it('keeps a successful owner task on the general growth review with a source peer', async () => {
+    const adapter = new ScriptedAdapter([])
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    const source = inventoryService()
+    const service = await startUsageReview({ h, source, objectiveStatus: 'achieved' })
+    expect(service.usageHealth()).toMatchObject({ counts: { reviewed: 1 } })
+    expect(firstGrowthPrompt(adapter)).toContain('Skill-review workflow, in order:')
+    expect(firstGrowthPrompt(adapter)).not.toContain('Start with the task objective, observed reply and owner feedback')
+    expect(adapter.surfaces[0]).toContain('plugin_source_targets')
+    expect(source.recordOwnerTaskFailureGap).not.toHaveBeenCalled()
+  })
+
+  it('keeps failed feedback on the general review when the source peer is absent', async () => {
+    const adapter = new ScriptedAdapter([])
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    const service = await startUsageReview({ h, objectiveStatus: 'not-achieved' })
+    expect(service.usageHealth()).toMatchObject({ counts: { reviewed: 1 } })
+    expect(firstGrowthPrompt(adapter)).toContain('Skill-review workflow, in order:')
+    expect(adapter.surfaces[0]).not.toContain('plugin_source_gaps')
   })
 
   it('keeps authorized new-plugin creation available when the existing target inventory is empty', async () => {
@@ -1271,6 +1312,15 @@ describe('opt-in plugin source proposals', () => {
     expect(source.prepareModifySourcePlan).toHaveBeenCalledWith(expect.objectContaining({
       gapId: 'owner-failure-gap', owner: expect.objectContaining({ workspace: h.root, principalId: PRINCIPAL }),
     }))
+    const prompt = firstGrowthPrompt(adapter)
+    expect(prompt).toContain('Start with the task objective, observed reply and owner feedback')
+    expect(prompt).not.toContain('Skill-review workflow, in order:')
+    expect(prompt).not.toContain('plugin_source_targets')
+    expect(adapter.surfaces[0]).toContain('plugin_source_gaps')
+    expect(adapter.surfaces[0]).toContain('plugin_source_read')
+    expect(adapter.surfaces[0]).toContain('plugin_source_prepare')
+    expect(adapter.surfaces[0]).not.toContain('plugin_source_targets')
+    expect(source.inspectSource.mock.calls.map(([input]) => input.paths)).toEqual([[], ['README.md']])
     expect(service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 1, rejected: 0 })
     expect(prompts.join('\n')).toContain('only this owner task may repair the total')
     expect(prompts.join('\n')).not.toContain('OTHER OWNER GLOBAL CONTEXT')
@@ -1346,6 +1396,16 @@ describe('opt-in plugin source proposals', () => {
     expect(growthRun.intentDigest).toBe(persisted.digest)
     expect(growthRun.native).toMatchObject({ definitionHash: persisted.definition_hash, occurrenceId: persisted.occurrence_id })
     expect(JSON.parse(persisted.source_run_json)).toEqual(growthRun)
+    const prompt = firstGrowthPrompt(adapter)
+    expect(prompt).toContain('Start with the task objective, observed reply and owner feedback')
+    expect(prompt).not.toContain('Skill-review workflow, in order:')
+    expect(growthRun.executionContractDigest).toBe(acceptanceDigest({
+      protocol: 'assistant-growth/execution-contract/v1', prompt,
+      guardVersion: 1, toolContractDigest: acceptanceDigest(adapter.requestTools[0] ?? []),
+      model: growthRun.model,
+      bounds: { maxModelCalls: 8, maxToolCalls: 24, maxOutputTokens: 8192,
+        maxDurationMs: 120000, maxPlansPerWake: 1 },
+    }))
     expect(adapter.requests.every(request => request.provider === 'conversation-provider'
       && request.model === 'growth-review-model' && request.reasoningEffort === 'medium')).toBe(true)
     const createSchema = adapter.schemas.flat().find(tool => tool.name === 'plugin_source_create')
