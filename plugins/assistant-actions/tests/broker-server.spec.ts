@@ -8,6 +8,18 @@ import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+
+const restoreGate = vi.hoisted(() => ({ wait: undefined as undefined | ((from: string, to: string) => Promise<void>) }))
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    rename: async (from: string, to: string): Promise<void> => {
+      await restoreGate.wait?.(from, to)
+      await actual.rename(from, to)
+    },
+  }
+})
 import { requestGitHubBroker, requestGitHubBrokerAdmin } from '../src/broker-client.js'
 import {
   BrokerFrameDecoder, GITHUB_BROKER_RESPONSE_MAX_BYTES, createBrokerClientRequest, encodeBrokerFrame, verifyBrokerServerHello,
@@ -27,6 +39,7 @@ const roots: string[] = [], servers: GitHubBrokerServer[] = [], replacements: Se
 const children: ChildProcess[] = []
 
 afterEach(async () => {
+  restoreGate.wait = undefined
   for (const child of children.splice(0)) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
   for (const server of servers.splice(0)) await server.stop().catch(() => undefined)
   for (const server of replacements.splice(0)) await new Promise<void>(resolve => server.close(() => resolve()))
@@ -358,6 +371,38 @@ describe('GitHubBrokerServer', () => {
     expect([after.dev, after.ino, after.mode]).toEqual([replacementIdentity.dev, replacementIdentity.ino, replacementIdentity.mode])
     if (expectedContent !== undefined) expect(await import('node:fs/promises').then(module => module.readFile(path, 'utf8'))).toBe(expectedContent)
     await expect(connect(server.adminSocketPath)).rejects.toBeDefined()
+  })
+
+  it.each(['regular', 'symlink'] as const)('waits for a parked %s replacement to be restored before stop settles', async kind => {
+    const path = await privateSocketPath(), server = await start({ path })
+    await unlink(path)
+    const content = 'foreign-data', target = join(dirname(path), 'foreign-target')
+    if (kind === 'symlink') {
+      await writeFile(target, content, { mode: 0o600 })
+      await symlink(target, path)
+    } else await writeFile(path, content, { mode: 0o600 })
+    const before = await lstat(path)
+    let entered!: () => void, release!: () => void
+    const restoring = new Promise<void>(resolve => { entered = resolve })
+    const held = new Promise<void>(resolve => { release = resolve })
+    restoreGate.wait = async (from, to) => {
+      if (from.startsWith(`${path}.replacement-`) && to === path) { entered(); await held }
+    }
+    const result = server.stop('lifecycle', 60).then(() => ({ status: 'resolved' as const }), error => ({ status: 'rejected' as const, error }))
+    try {
+      await restoring
+      await expect(lstat(path)).rejects.toMatchObject({ code: 'ENOENT' })
+      const early = await Promise.race([result, new Promise<'pending'>(resolve => setTimeout(() => resolve('pending'), 100))])
+      expect(early).toBe('pending')
+    } finally { release(); restoreGate.wait = undefined }
+    expect(await result).toMatchObject({ status: 'rejected', error: { code: 'shutdown-failed' } })
+    const after = await lstat(path)
+    expect([after.dev, after.ino, after.mode]).toEqual([before.dev, before.ino, before.mode])
+    expect(await import('node:fs/promises').then(module => module.readFile(path, 'utf8'))).toBe(content)
+    await expect(connect(server.adminSocketPath)).rejects.toBeDefined()
+    await new Promise<void>(resolve => setTimeout(resolve, 20))
+    const stable = await lstat(path)
+    expect([stable.dev, stable.ino, stable.mode]).toEqual([before.dev, before.ino, before.mode])
   })
 
   it('rejects active and unauthenticated occupied sockets without unlinking them', async () => {
