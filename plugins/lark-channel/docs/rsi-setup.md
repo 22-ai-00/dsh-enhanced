@@ -136,6 +136,8 @@ dsh-rsi-setup --prepare-local-update --profile web --dsh-home "$HOME/.dsh"
 
 尚未配置 owner 自动迭代的冻结安装另有显式内部 `maintenanceMode: 'pre-owner'`，不会因账本缺失自动启用。只读 `assertRsiPreOwnerInstallation` 核对原 Home/副本的初始授权资源、全部身份、bootstrap 与签名源码链，拒绝协调器、安装 journal、已配置 owner 或不明配置层；读取 Git 时禁用可选写锁。该模式保留初始身份与历史，以 `host:null` 签署连续维护记录，不创建控制账本。对应的 `stageRsiLocalSinglePackages` 只迁移单 profile，拒绝任何协调器残留，仍核验同版本的实际包字节。外层必须另外检查所有 profile 的有效插件图与真实启动参数，并负责停服、副本、切换和恢复；这些内部组件本身不负责服务切换。开发 checkout 已提供显式 `local-service-upgrade` / `local-service-recover`，复用 Home 锁、systemd 收容、完整 Home 副本及切换/恢复；预检的原生配置导出仅在私有副本运行，恢复前重验源码、安装模块和全部配置。激活预览使用额外可丢弃 Home 副本，其队列、数据库及会话写入不会进入正式安装。用法和未发布边界见[安装器指南](../../../scripts/install/README.md#checkout-内的-pre-owner-冻结源码维护)。
 
+该 checkout 维护入口在停服前，以私有 profile 和全新缓存按原有效 pnpm 策略验证原锁文件并预取依赖，随后把本次已核对缓存的副本交给无网络的原生 DSH 包安装。锁文件、配置、程序或验证标记发生漂移时拒绝继续；不会以关闭供应链检查解决离线安装超时。准备缓存不是部署完成或候选行为验收。
+
 自动入口只收集已启用且可修复的 `@dsh-enhanced/*` 条目，核对同批包名、版本、patch、入口及声明的 Host 文件；最终 Delivery、Growth Driver、Verifier、Personal Assistant（含 Memory/Policy/调度）、Memory Learning 配置及原始 Lark Loader 配置都进入目标 observer。停机后临时加载最终计划的 systemd unit，以真实 `systemctl show` 捕获授权所需属性，再恢复原 unit；捕获期间不启动服务。随后成对应用 patch、环境绑定和 unit，先启动协调器再启动目标。就绪判断要求两个 PID、InvocationID 与重启计数连续 12 秒稳定，目标 observer 与实际进程和配置摘要一致，并读到本次启动后持久登记的、绑定当前 owner scope 的协调器原生 Automation。它证明这次部署的有限启动状态，不证明普通任务已产生候选、通过独立验收或完成采用/回滚。
 
 崩溃留下的 `prepared` journal 会先在两个 Host 停机后回滚；若回滚确认成功，先恢复原来运行的服务，再继续新预检。应用前失败仅在原 patch、journal、unit 均可核对时恢复原服务；未知状态保持停机供对账。已应用后的启动或就绪失败保留 applied journal 和配置，供停止服务、排查后重试或显式回滚。自动重试沿用原有限授权起点、期限和额度。

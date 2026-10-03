@@ -5,7 +5,7 @@ import { isMap, isScalar, parseDocument } from 'yaml'
 import { rsiBuildResources as io } from './rsi-build.js'
 import { resolveInstalledRsiDsh, type InstalledRsiDsh } from './rsi-install-inputs.js'
 import { prepareRsiSourceWorkspace } from './rsi-source.js'
-import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages, rsiLocalPeerOverrides, rsiLocalRuntimeClosure, type RsiLocalCohort } from './rsi-local-cohort.js'
+import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages, verifyRsiLocalInstalledPackagesFresh, rsiLocalPeerOverrides, rsiLocalRuntimeClosure, type RsiLocalCohort } from './rsi-local-cohort.js'
 import { withDshHomeLifecycleLock } from './setup.js'
 import { version } from './version.js'
 
@@ -88,9 +88,9 @@ export interface RsiLocalProfileInput {
 }
 export interface RsiLocalProfilePorts {
   command: typeof io.command
-  verify: typeof verifyRsiLocalInstalledPackages
+  verify: (input: Parameters<typeof verifyRsiLocalInstalledPackages>[0], signal?: AbortSignal) => Promise<void>
 }
-const localProfilePorts: RsiLocalProfilePorts = { command: io.command, verify: verifyRsiLocalInstalledPackages }
+const localProfilePorts: RsiLocalProfilePorts = { command: io.command, verify: verifyRsiLocalInstalledPackagesFresh }
 
 /** Reject an existing owner's configuration conflict before stopping its Host.
  * Installation re-reads these bytes after stopping, before any package mutation. */
@@ -154,7 +154,7 @@ export async function installRsiLocalProfile(input: RsiLocalProfileInput, ports 
   // package tree. A retry reconciles that same cohort rather than guessing rollback.
   await run(['add',...tarballs])
   if ((await io.readStable(workspace,1_048_576)).toString('utf8') !== after) fail('package installation changed the frozen overrides')
-  const verify = () => ports.verify({cohort,profilePath,bundles:[...input.bundles]})
+  const verify = () => ports.verify({cohort,profilePath,bundles:[...input.bundles]},input.signal)
   try { await verify() }
   catch (error) {
     if (!isRsiLocalPackageRepairable(error)) throw error

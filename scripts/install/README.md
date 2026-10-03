@@ -59,6 +59,12 @@ Linux `supervised` 的已登记 RSI 双 Host 可以在同一个 Home 事务中�
 
 已安装冻结源码/cohort、尚无 RSI owner、coordinator 或 control ledger 的 Linux systemd Home，可显式调用已经审核并构建的本地 checkout。此入口尚未接入普通 `dsh-rsi update`、远程 helper 下载或发布版本 pins；不要复制单个新版 `lib` 文件到正式 profile。先以 `dsh-rsi-setup --prepare-local-update` 在 Home 外制作候选；候选与执行维护的 reviewed checkout 是两份独立绑定的输入。
 
+维护事务在停服前另用 Home 外的私有 profile 和全新缓存，按原有效 pnpm 配置验证原锁文件并预取依赖。原 manifest、workspace、lock 文件必须保持不变；校验缓存绑定本次执行、pnpm 程序、配置及文件身份，不能直接复用全局缓存里的验证标记。准备失败时原服务继续运行。停服后的原生 DSH 安装使用已核对缓存的独立副本，仍无网络、禁用安装脚本和 pnpmfile，并保留供应链策略检查；缺失或漂移的证明不能靠放宽策略继续安装。
+
+私有准备不复制全局 registry 认证字段；registry 与供应链策略等非认证配置仍须精确一致，依赖以匿名方式读取，需要凭据而无法预取时在停服前拒绝。传入的 pnpm 程序按文件身份和字节摘要绑定，包安装的 PATH 优先使用其目录；若使用 wrapper，其后续加载文件仍属于外部受信运行环境。本机部署验证使用 pnpm 的独立原生程序。
+
+包树更新后的完整文件、依赖闭包和身份检查在新的 Node 进程内执行，避免预检缓存的模块解析路径继续指向旧包目录；检查条件保持一致。新进程沿用当前安装隔离边界，校验失败仍拒绝切换。
+
 旧冻结安装缺少 `assistant-memory-learning` 时，可用同一 reviewed checkout 的 CLI 显式准备唯一受支持的根包扩展。目标必须已提供 Personal Assistant、Delivery、Evaluation 和 Verifier，且通过实际 pre-owner 权限与签名历史检查；这不是任意增删插件的入口：
 
 ```sh

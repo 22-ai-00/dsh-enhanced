@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { rsiBuildResources as io } from './rsi-build.js'
 import { rsiCoordinatorProfile } from './rsi-install.js'
 import type { InstalledRsiDsh } from './rsi-install-inputs.js'
-import { readRsiLocalCohort, verifyRsiLocalInstalledPackages, rsiLocalPeerOverrides, type RsiLocalCohort } from './rsi-local-cohort.js'
+import { readRsiLocalCohort, verifyRsiLocalInstalledPackages, verifyRsiLocalInstalledPackagesFresh, rsiLocalPeerOverrides, type RsiLocalCohort } from './rsi-local-cohort.js'
 import { installRsiLocalProfile } from './rsi-local-install.js'
 import { assertRsiLocalProfileRoots, rebaseRsiLocalProfileWorkspace } from './rsi-local-profile-update.js'
 import { rsiLocalUpdateBundles, rsiMemoryLearningInitialRow, type RsiLocalRootExtension } from './rsi-local-roots-extension.js'
@@ -25,9 +25,9 @@ export interface RsiLocalPairPackageProof extends RsiLocalSinglePackageProof {
 }
 export interface RsiLocalPairPackagePorts {
   install: typeof installRsiLocalProfile
-  verify: typeof verifyRsiLocalInstalledPackages
+  verify: (input: Parameters<typeof verifyRsiLocalInstalledPackages>[0], signal?: AbortSignal) => Promise<void>
 }
-const ports: RsiLocalPairPackagePorts = { install: installRsiLocalProfile, verify: verifyRsiLocalInstalledPackages }
+const ports: RsiLocalPairPackagePorts = { install: installRsiLocalProfile, verify: verifyRsiLocalInstalledPackagesFresh }
 
 async function replace(path: string, before: Buffer, after: string): Promise<void> {
   const temporary = `${path}.rsi-update-${randomUUID()}`
@@ -152,7 +152,7 @@ async function stageRsiLocalPackages(input: RsiLocalPackageInput,
       ...(input.rootExtension ? { rootExtension: input.rootExtension } : {}),
       originalPeers: await rsiLocalPeerOverrides({ cohort: originalCohort, bundles, profilePath: root }),
       candidatePeers: await rsiLocalPeerOverrides({ cohort: candidate, bundles: nextBundles }) })
-    await dependencies.verify({ cohort: originalCohort, profilePath: root, bundles: [...bundles] })
+    await dependencies.verify({ cohort: originalCohort, profilePath: root, bundles: [...bundles] }, signal)
     snapshots.push({ name, root, bundles: nextBundles, manifest, patch, workspace, nextWorkspace })
   }
   // All old package inventories and both configurations must pass before the
@@ -172,7 +172,7 @@ async function stageRsiLocalPackages(input: RsiLocalPackageInput,
   const files: Record<string, string> = {}
   for (const snapshot of snapshots) {
     signal.throwIfAborted()
-    await dependencies.verify({ cohort: candidate, profilePath: snapshot.root, bundles: [...snapshot.bundles] })
+    await dependencies.verify({ cohort: candidate, profilePath: snapshot.root, bundles: [...snapshot.bundles] }, signal)
     const manifest = await io.readStable(join(snapshot.root, 'package.json'), 2_097_152)
     // Native plugin add may introduce only the one explicit pre-owner root.
     if (input.rootExtension) assertExpectedLearnerManifest(snapshot.manifest, manifest, candidate)
