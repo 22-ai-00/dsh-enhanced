@@ -2,6 +2,8 @@
 
 默认关闭的有界后台成长驱动。可通过 `usageLearning` 让真实前台任务结果自动触发持久成长作业，或由 Host 显式唤醒。Agent 回顾 owner 的已验收成功、沉淀 pending 技能候选；启用源码轨后可准备已有 gap 对应的插件修改提案。当前自动入口已接通，修复后的有限采用与持续观察需另配 Control Plane；可安装部署与独立行为验收仍未贯通，`reviewed` 仅表示本次成长复盘结束。
 
+有源码接口且普通认证反馈的 objective 为 `not-achieved` 时，本轮先查看当前 owner 的任务缺口与任务证据，再按相关性读取目标清单、源码或已授权的创建模板。文件清单只供发现路径，替换前仍须读取正文；证据不足时可以不提案。成功、周期唤醒和缺少源码接口的反馈仍用通用成功工作流；技能候选始终经过独立验证与重复成功门。新运行将实际发送的完整提示（含脱敏反馈数据）绑定到执行摘要；旧来源绑定不补写，也不自动重放 unknown。
+
 同一插件内还有**第二条、独立开关**的学习轨 `workflowOwnerAnchored`（默认关闭）：它不起模型、不触网，只在本地枚举最近完成的 owner-root goal，把 locator（不含任何 prompt/步骤/验收结论）交给 `assistant-delivery`；由 Delivery 自己再调 goals 的 `inspectOwnerVerifiedWorkflowSource` 独立复核（owner-root、whole-goal succeeded 且 quiescent、cwd/preset 精确匹配），只接受可诚实归约为**单步零工具 agent-turn** 的 goal，通过后经 content-free trace v2 沉淀为 workflow growth candidate，并由 Growth 以 **paused** automation 落库待 owner 批准。自由 objective 无法跨任务聚齐重复门，故该轨**单条即沉淀**：每个独立复核通过的成功 goal 产一条独立 paused 候选。候选带冻结的**占位 cron**（`0 0 29 2 *` UTC，由 store 的激活门阻断执行）；automations 在 store 层 fail-closed——Growth 所属且仍带占位 schedule 的 workflow 无法经 owner 批准 `resume` 或系统 reconcile 转 active，必须先由 owner 显式做一次 schedule mutation（换真 cron）。该轨同样零 approve/activate/install。
 
 自动成长默认继承 Delivery 随来源任务保存的实际 `request/header` 模型快照，包括 adapter 默认 reasoning effort；历史来源不读取后来切换的会话模型。可同时配置 `provider` / `model` 固定覆盖。Host 显式 `wake({ sourceAgent })` 读取该 Agent 的实际请求，普通周期 wake 仍读取外部会话当前选择。原生 Web 无来源时不猜模型。`health().run.model` 记录本轮模型；已派发但中断的持久作业保持 unknown，不换模型或自动重放。
