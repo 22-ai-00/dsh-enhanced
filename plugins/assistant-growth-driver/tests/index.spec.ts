@@ -919,6 +919,127 @@ describe('opt-in plugin source proposals', () => {
     }
   }
 
+  const targetsTurn = { name: 'plugin_source_targets', args: { gap_id: 'gap-1' } }
+  function inventoryService() {
+    return { ...sourceService(), inspectSourceTargets: vi.fn(async (input: Parameters<NonNullable<GrowthSourcePlanePort['inspectSourceTargets']>>[0]) => {
+      input.signal.throwIfAborted(); input.assertCurrent()
+      return { baseCommit: 'c'.repeat(40), plugins: [{ name: 'assistant-health', description: 'Health diagnostics' }] }
+    }) }
+  }
+  async function inventoryWake(source: ReturnType<typeof inventoryService>, turns: ScriptedTurn[]) {
+    const adapter = new ScriptedAdapter(turns)
+    const h = await mount({ adapter })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    h.ctx.provide('pluginControlPlane' as never, source as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
+    await new Promise(resolve => setImmediate(resolve))
+    await runWake(service)
+    return { h, adapter, service }
+  }
+
+  it('discovers source targets through the optional peer and pins subsequent reads and preparation', async () => {
+    const source = inventoryService()
+    // Extra host fields must never enter the model projection.
+    source.inspectSourceTargets.mockResolvedValue({ baseCommit: 'c'.repeat(40), plugins: [{ name: 'assistant-health', description: 'Health diagnostics', repository: 'PRIVATE HOST PATH' }], grant: 'PRIVATE HOST GRANT' } as never)
+    const { h, adapter } = await inventoryWake(source, [sourceTurns[0]!, targetsTurn, ...sourceTurns.slice(1)])
+    expect(adapter.surfaces[0]).toContain('plugin_source_targets')
+    expect(adapter.surfaces[0]).toHaveLength(8)
+    expect(source.inspectSourceTargets).toHaveBeenCalledWith(expect.objectContaining({ repository: h.root }))
+    expect(source.inspectSourceTargets.mock.calls[0]?.[0].baseCommit).toBeUndefined()
+    expect(source.inspectSource.mock.calls.every(([input]) => input.baseCommit === 'c'.repeat(40))).toBe(true)
+    expect(source.prepareModifySourcePlan).toHaveBeenCalledWith(expect.objectContaining({ expectedBaseCommit: 'c'.repeat(40) }))
+    expect(adapter.messageTranscripts.join('')).toContain('Health diagnostics')
+    expect(adapter.messageTranscripts.join('')).not.toContain('PRIVATE HOST')
+    expect(adapter.schemas[0]?.find(tool => tool.name === 'plugin_source_targets')?.parameters).not.toHaveProperty('repository')
+  })
+
+  it('refuses discovery before its gap or for a foreign gap', async () => {
+    const source = inventoryService()
+    await inventoryWake(source, [targetsTurn, sourceTurns[0]!, { name: targetsTurn.name, args: { gap_id: 'foreign-gap' } }])
+    expect(source.inspectSourceTargets).not.toHaveBeenCalled()
+  })
+
+  it('does not treat a target list as read-before-replacement evidence', async () => {
+    const source = inventoryService()
+    await inventoryWake(source, [sourceTurns[0]!, targetsTurn, sourceTurns[3]!])
+    expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
+    expect(source.inspectSource).not.toHaveBeenCalled()
+  })
+
+  it('binds an inventory read after source inspection to the already observed commit', async () => {
+    const source = inventoryService()
+    await inventoryWake(source, [...sourceTurns.slice(0, 3), targetsTurn, sourceTurns[3]!])
+    expect(source.inspectSourceTargets).toHaveBeenCalledWith(expect.objectContaining({ baseCommit: 'c'.repeat(40) }))
+    expect(source.prepareModifySourcePlan).toHaveBeenCalledOnce()
+  })
+
+  it.each(['base', 'names', 'protected', 'description', 'control', 'duplicates', 'count'] as const)('invalidates an invalid %s inventory before further source operations', async defect => {
+    const source = inventoryService()
+    const plugins = defect === 'names' ? [{ name: '../escape' }]
+      : defect === 'protected' ? [{ name: 'assistant-policy' }]
+      : defect === 'description' ? [{ name: 'assistant-health', description: '水'.repeat(171) }]
+      : defect === 'control' ? [{ name: 'assistant-health', description: 'bad\ntext' }]
+      : defect === 'duplicates' ? [{ name: 'assistant-health' }, { name: 'assistant-health' }]
+      : defect === 'count' ? Array.from({ length: 129 }, (_, index) => ({ name: `helper-${index}` }))
+      : [{ name: 'assistant-health' }]
+    source.inspectSourceTargets.mockResolvedValue({ baseCommit: defect === 'base' ? 'bad' : 'c'.repeat(40), plugins } as never)
+    await inventoryWake(source, [sourceTurns[0]!, targetsTurn, ...sourceTurns.slice(1)])
+    expect(source.inspectSource).not.toHaveBeenCalled()
+    expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
+  })
+
+  it('rejects changed inventory at the same commit without allowing stale snapshots to prepare', async () => {
+    const source = inventoryService()
+    source.inspectSourceTargets.mockResolvedValueOnce({ baseCommit: 'c'.repeat(40), plugins: [{ name: 'assistant-health', description: 'Health diagnostics' }] })
+      .mockResolvedValueOnce({ baseCommit: 'c'.repeat(40), plugins: [] })
+    await inventoryWake(source, [sourceTurns[0]!, targetsTurn, sourceTurns[2]!, targetsTurn, sourceTurns[3]!])
+    expect(source.inspectSourceTargets.mock.calls[1]?.[0].baseCommit).toBe('c'.repeat(40))
+    expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
+  })
+
+  it('checks target membership at preparation even when source was read before the first inventory', async () => {
+    const source = inventoryService()
+    source.inspectSourceTargets.mockResolvedValue({ baseCommit: 'c'.repeat(40), plugins: [] })
+    await inventoryWake(source, [...sourceTurns.slice(0, 3), targetsTurn, sourceTurns[3]!])
+    expect(source.inspectSource).toHaveBeenCalledTimes(2)
+    expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
+  })
+
+  it('rejects source replies from a different baseline and names absent from the inventory', async () => {
+    const source = inventoryService()
+    source.inspectSource.mockImplementation(async input => ({ name: input.name, baseCommit: 'd'.repeat(40), files: [{ path: 'README.md', bytes: 8 }], contents: input.paths.map(path => ({ path, content: 'original' })) }))
+    await inventoryWake(source, [sourceTurns[0]!, targetsTurn,
+      { name: 'plugin_source_read', args: { gap_id: 'gap-1', plugin_name: 'unknown-helper', paths: [] } }, sourceTurns[2]!, sourceTurns[3]!])
+    expect(source.inspectSource).toHaveBeenCalledOnce()
+    expect(source.inspectSource.mock.calls[0]?.[0].baseCommit).toBe('c'.repeat(40))
+    expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
+  })
+
+  it('suppresses late inventory results when its provider is removed', async () => {
+    const source = inventoryService()
+    let observedSignal: AbortSignal | undefined
+    let release!: () => void
+    source.inspectSourceTargets.mockImplementation(input => new Promise(resolve => {
+      observedSignal = input.signal
+      release = () => resolve({ baseCommit: 'c'.repeat(40), plugins: [{ name: 'assistant-health', description: 'LATE INVENTORY' }] })
+    }))
+    const adapter = new ScriptedAdapter([sourceTurns[0]!, targetsTurn, ...sourceTurns.slice(1)])
+    const h = await mount({ adapter })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const provider = h.ctx.plugin({ name: 'inventory-provider', apply: ctx => { ctx.provide('pluginControlPlane' as never, source as never) } })
+    await provider
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
+    await new Promise(resolve => setImmediate(resolve))
+    const wake = runWake(service)
+    await vi.waitFor(() => expect(observedSignal).toBeDefined())
+    await provider.dispose()
+    release()
+    await wake
+    expect(observedSignal?.aborted).toBe(true)
+    expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
+    expect(adapter.messageTranscripts.join('')).not.toContain('LATE INVENTORY')
+  })
+
   const creationName = 'assistant-new-capability'
   const creationGap = 'owner-failure-gap'
   const creationFiles = [{ path: 'src/index.ts', content: 'export const name = "assistant-new-capability"\n' },
@@ -1050,6 +1171,39 @@ describe('opt-in plugin source proposals', () => {
     }
     return service
   }
+
+  it('discovers targets for only the current authenticated task gap without reading global gaps', async () => {
+    const source = inventoryService()
+    const turns = [sourceTurns[0]!, { name: targetsTurn.name, args: { gap_id: 'foreign-gap' } }, targetsTurn, sourceTurns[2]!, sourceTurns[3]!]
+    const adapter = new ScriptedAdapter(turns)
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    const service = await startUsageReview({ h, source, objectiveStatus: 'not-achieved' })
+    expect(service.usageHealth()).toMatchObject({ counts: { reviewed: 1 } })
+    expect(source.gaps).not.toHaveBeenCalled()
+    expect(source.inspectSourceTargets).toHaveBeenCalledOnce()
+    expect(source.prepareModifySourcePlan).toHaveBeenCalledOnce()
+    expect(source.prepareModifySourcePlan).toHaveBeenCalledWith(expect.objectContaining({ gapId: 'gap-1' }))
+  })
+
+  it('keeps authorized new-plugin creation available when the existing target inventory is empty', async () => {
+    const source = { ...creationService(), inspectSourceTargets: inventoryService().inspectSourceTargets }
+    source.inspectSourceTargets.mockResolvedValue({ baseCommit: 'c'.repeat(40), plugins: [] })
+    const result = await creationWake({ source, turns: [
+      { name: 'plugin_source_gaps', args: {} }, { name: targetsTurn.name, args: { gap_id: creationGap } },
+      creationRead(['src/index.ts', 'README.md', 'tests/index.spec.ts']), creationCall(),
+    ] })
+    expect(result.adapter.surfaces[0]).toHaveLength(10)
+    expect(source.inspectCreateSource).toHaveBeenCalledWith(expect.objectContaining({ baseCommit: 'c'.repeat(40) }))
+    expect(source.enqueueSourceJob).toHaveBeenCalledWith(expect.objectContaining({ mode: 'create', expectedBaseCommit: 'c'.repeat(40) }))
+  })
+
+  it('rejects inventory when the discovered gap closes before discovery', async () => {
+    const source = inventoryService()
+    source.gaps.mockReturnValueOnce([{ id: 'gap-1', capability: 'health', context: 'owner gap', status: 'open', createdAt: 1 }])
+      .mockReturnValue([])
+    await inventoryWake(source, [sourceTurns[0]!, targetsTurn])
+    expect(source.inspectSourceTargets).not.toHaveBeenCalled()
+  })
 
   it('keeps the producer temporarily unavailable until Usage mounts, then nudges existing source runs', async () => {
     const h = await mount({ adapter: new ScriptedAdapter([]), provider: 'conversation-provider' })

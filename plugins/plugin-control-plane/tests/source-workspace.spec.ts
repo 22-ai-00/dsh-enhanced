@@ -844,6 +844,28 @@ exit 0
     expect(execFileSync('/usr/bin/git', ['-C', plan.worktree, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()).toBe(fresh.baseCommit)
   })
 
+  it('owns target inspection through cancellation and Fiber teardown', async () => {
+    const value = await trustFixture()
+    const service = makeService(value)
+    const source = await modifyRepositoryFixture(value.root)
+    expect(await service.inspectSourceTargets({ repository: source.repository })).toEqual({
+      baseCommit: source.head, plugins: [{ name: 'health-helper' }],
+    })
+    const ctx = contexts.pop()!
+    let release!: () => void
+    const paused = new Promise<void>(resolve => { release = resolve })
+    const input = { repository: source.repository, assertCurrent: () => paused }
+    const inspecting = service.inspectSourceTargets(input).catch(error => error)
+    await expect(service.inspectSourceTargets(input)).rejects.toThrow('still draining')
+    let disposed = false
+    const disposing = ctx.fiber.dispose().then(() => { disposed = true })
+    await disposing
+    expect(disposed).toBe(true)
+    release()
+    expect(await inspecting).toBeInstanceOf(Error)
+    await expect(service.inspectSourceTargets(input)).rejects.toThrow()
+  })
+
   it('inspects and prepares the managed baseline while preserving a dirty older checkout', async () => {
     const value = await trustFixture()
     await installFakePnpm(value.root)

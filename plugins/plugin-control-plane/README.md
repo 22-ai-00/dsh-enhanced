@@ -232,6 +232,8 @@ sourceBuild:
 
 完整仓库镜像的 owner 构建脚本见 [source builder](../../scripts/isolation/README.md)。它只传入依赖清单和 lockfile，在联网构建阶段预取依赖；候选源码进入容器时仍禁网、无 Host 挂载。`repository` profile 仅扩大 owner 配置的检查预算，不延长 Growth Driver 的 5 分钟授权。长检查可通过下述持久 Host 任务提交；入队不代表检查通过或源码已改进。
 
+Host-only `inspectSourceTargets({ repository, baseCommit? })` 返回当前受信源码基线与最多 128 个已提交、可修改插件的名称及可选简短描述，供当前来源的 Growth 选择读取目标。目录仅从 canonical Git 仓库的正规 `plugins/<name>/package.json` blob 形成；保护根、符号链接、submodule、脏工作树和未跟踪目录不进入结果，manifest 非法或超过限制会拒绝整次查询。每个 manifest 最多 16 KiB，合计最多 512 KiB，描述最多 512 UTF-8 字节；`baseCommit` 不匹配当前受信基线时拒绝。目录不授予源码修改、创建、审批或采用权限，后续源码读取与准备仍核对原有来源及基线。
+
 源码检查在离线安装前核对归档输入，并仅按归档内根目录及直接插件/库包的 `bin` 声明，将已在 Git 中标为可执行的现有 bin 文件预设为 `0755`，以匹配固定 pnpm 的链接行为；声明的非可执行文件会被拒绝，尚未生成的 `lib/` bin 文件由构建产生。其余原始输入的内容和权限继续逐次精确核验。
 
 检查实际 tgz 的 manifest 时，控制面从不可变归档推导 pnpm 11.7.0 的出版形式：`packageManager` 和 `pnpm` 字段不入包，`scripts` 仅剔除六个发布生命周期钩子并移到顶层末尾，catalog/workspace 依赖按冻结清单解析；其余字段及对象键顺序须与预期精确一致。
