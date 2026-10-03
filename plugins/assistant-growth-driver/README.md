@@ -154,7 +154,7 @@ Control Plane 拥有 worktree、源码快照、容器构建和 SQLite 写入。`
 
 在上述 `durable` 配置中增加 `allowCreation: true`，并在 Control Plane 配置[有限创建授权](../plugin-control-plane/README.md#自动创建新插件候选)。正常使用的可信失败复盘可选择创建新能力，沿用同一原生 AgentLoop、冻结来源模型（或显式 Growth 固定覆盖）、owner、gap 与预算。
 
-创建工具仅公开 Host 允许的 `namePrefix` 命名规则。模型先选择此前缀下尚不存在的插件名，通过 `plugin_source_read({gap_id, plugin_name, mode: "create", paths: []})` 查看冻结基线公共模板的文件清单，再实际读取 `README.md`、`src/` 或 `tests/` 的模板内容；最后以 `plugin_source_create({gap_id, plugin_name, files: [{path, content}]})` 排队。创建与修改快照分别绑定；命名规则变化、过期或来源纠正使旧创建快照失效。
+gap 的 `capability` 是问题分类，不是现有 `plugin_name`。任务证据没有指向可修复的现有插件时，不猜修改目标；确需新增能力且已有创建授权时才选择创建，并非每个失败任务都要产出插件。创建工具公开 Host 允许的 `namePrefix` 命名规则。模型选择此前缀下尚不存在的插件名后，可首次调用 `plugin_source_read({gap_id, plugin_name, mode: "create", paths: ["README.md", "src/index.ts", "tests/index.spec.ts"]})`，一次取得完整文件清单、冻结 Git base 和这些模板内容；未知路径仍可用 `paths: []` 探索。替换任何模板文件前必须读过其内容，再以 `plugin_source_create({gap_id, plugin_name, files: [{path, content}]})` 排队。创建与修改快照分别绑定；命名规则变化、过期或来源纠正使旧创建快照失效。单轮 `maxDurationMs` 限定本地唤醒时间，不保证模型供应商在默认 120 秒内完成；排队后的 Host 作业另行推进。
 
 可信任务复盘的创建排队另附 Host 私有 source-run 绑定：原生 Automations claim 与真实 Growth Agent setup 后，driver 持久记录任务修订、owner、模型来源、预算、实际 session、工具面摘要和生成截止时间。模型的创建参数没有这些字段；Control Plane 通过可选 provider 重新读取当前绑定，不能从模型输出推断。旧 Usage 记录没有该绑定，不能取得任务绑定创建资格；运行变为 unknown、来源纠正/撤回、配置或 owner 变化及来源过期时读取失败。可用的 reviewed 绑定可跨重启只读恢复，不重放模型工作。修改提案仍沿用原有来源和权限检查。
 
