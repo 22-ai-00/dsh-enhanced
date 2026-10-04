@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, open, readdir, realpath, rename, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { rsiBuildResources as io } from './rsi-build.js'
@@ -69,17 +69,28 @@ async function sourceAssets(packageRoot: string, nodePath: string, signal: Abort
   await io.directory(join(packageRoot, 'bin'), false)
   await io.directory(join(packageRoot, 'lib'), false)
   const packageBytes = await asset(join(packageRoot, 'package.json'), 65_536, signal)
-  const manifest = JSON.parse(packageBytes.toString('utf8')) as { name?: string; version?: string; type?: string }
+  const manifest = JSON.parse(packageBytes.toString('utf8')) as {
+    name?: string; version?: string; type?: string; dependencies?: Record<string, unknown>
+  }
   if (manifest.name !== '@dsh-enhanced/plugin-control-plane' || manifest.version !== version || manifest.type !== 'module') fail('installed package identity differs')
+  if (typeof manifest.dependencies?.[CONTRACT_PACKAGE] !== 'string') fail('installed shared contract is not declared')
   const libraries = (await readdir(join(packageRoot, 'lib'))).filter(name => name.endsWith('.js')).sort()
   if (!libraries.length || libraries.length + 19 > MAX_ENTRIES) fail('library entry bound exceeded')
   const names = new Map<string, string>([['package.json', join(packageRoot, 'package.json')], ['node', nodePath]])
   for (const name of libraries) names.set(`lib/${name}`, join(packageRoot, 'lib', name))
   for (const name of Object.values(EXECUTABLES)) names.set(`bin/${name}`, join(packageRoot, 'bin', name))
   for (const phase of PHASES) names.set(`bin/dsh-local-release-${phase}.js`, join(packageRoot, 'bin', 'dsh-local-release-adapter.js'))
-  // Resolve only the Control Plane's installed dependency, never a workspace
-  // ancestor or a network install. The private runtime must survive profile replacement.
-  const contractRoot = await realpath(join(packageRoot, 'node_modules', CONTRACT_PACKAGE))
+  // Resolve through this package's manifest, but accept only its own dependency
+  // edge or the adjacent edge in the same pnpm virtual-store node_modules.
+  const resolvedContract = createRequire(join(packageRoot, 'package.json')).resolve(`${CONTRACT_PACKAGE}/package.json`)
+  const contractRoot = dirname(await realpath(resolvedContract))
+  const edges = [join(packageRoot, 'node_modules', CONTRACT_PACKAGE)]
+  if (basename(dirname(packageRoot)) === '@dsh-enhanced' && basename(dirname(dirname(packageRoot))) === 'node_modules'
+    && basename(dirname(dirname(dirname(dirname(packageRoot))))) === '.pnpm') {
+    edges.push(join(dirname(packageRoot), 'assistant-growth-contract'))
+  }
+  const edgeRoots = await Promise.all(edges.map(async edge => realpath(edge).catch(() => undefined)))
+  if (!edgeRoots.includes(contractRoot)) fail('installed shared contract resolved outside its dependency edge')
   await io.directory(contractRoot, false)
   await io.directory(join(contractRoot, 'lib'), false)
   const contractPackageBytes = await asset(join(contractRoot, 'package.json'), 65_536, signal)
