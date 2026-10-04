@@ -633,26 +633,45 @@ async function assertLifecycleLocksHeld(homePath) {
   }
 }
 
-async function resolveSymlinkTarget(path, logicalPath, linkText, physicalRoot, logicalRoot) {
-  let candidate
+function lexicalSymlinkTarget(path, logicalPath, linkText, physicalRoot, logicalRoot) {
   if (isAbsolute(linkText)) {
     const absoluteTarget = resolve(linkText)
-    candidate = inside(logicalRoot, absoluteTarget)
+    return inside(logicalRoot, absoluteTarget)
       ? resolve(physicalRoot, absoluteTarget.slice(logicalRoot.length + 1))
       : absoluteTarget
-  } else {
-    const physicalTarget = resolve(dirname(path), linkText)
-    // A relative pnpm link can lexically leave staged-home only because the
-    // snapshot lives below the transaction directory. Resolve those links as
-    // they will behave after the staged tree is renamed back to logicalHome.
-    // Links whose lexical target remains in staged-home must resolve there: a
-    // fallback to the original tree would hide a target deleted by a package
-    // script and incorrectly commit a newly dangling link.
-    candidate = inside(physicalRoot, physicalTarget)
-      ? physicalTarget
-      : resolve(dirname(logicalPath), linkText)
   }
+  const physicalTarget = resolve(dirname(path), linkText)
+  // A relative pnpm link can leave staged-home only because the snapshot
+  // lives below the transaction directory. Use its post-rename location only
+  // for that hop; an internal target must exist in the staged tree.
+  return inside(physicalRoot, physicalTarget)
+    ? physicalTarget
+    : resolve(dirname(logicalPath), linkText)
+}
+
+async function resolveSymlinkTarget(path, logicalPath, linkText, physicalRoot, logicalRoot) {
+  let candidate = lexicalSymlinkTarget(path, logicalPath, linkText, physicalRoot, logicalRoot)
+  let hops = 1
   try {
+    // realpath on an FD-anchored stage cannot interpret a nested relative
+    // package link as it will behave after rename. Follow each staged hop
+    // lexically, leaving all external resolution to realpath below.
+    while (inside(physicalRoot, candidate)) {
+      const suffix = candidate.slice(physicalRoot.length).split(sep).filter(Boolean)
+      let prefix = physicalRoot
+      let followed = false
+      for (const [index, component] of suffix.entries()) {
+        prefix = join(prefix, component)
+        if (!(await lstat(prefix)).isSymbolicLink()) continue
+        if (++hops > 40) throw new Error('snapshot symlink chain exceeded 40 hops')
+        const logicalPrefix = join(logicalRoot, prefix.slice(physicalRoot.length + 1))
+        const destination = lexicalSymlinkTarget(prefix, logicalPrefix, await readlink(prefix), physicalRoot, logicalRoot)
+        candidate = resolve(destination, ...suffix.slice(index + 1))
+        followed = true
+        break
+      }
+      if (!followed) break
+    }
     const target = await realpath(candidate)
     return { target, targetIdentity: identity(await lstat(target)) }
   } catch (error) {
@@ -675,7 +694,8 @@ async function assertSnapshotTreeSafe(homePath, logicalHome = homePath, allowPac
         const linkText = await readlink(path)
         let resolvedTarget
         try {
-          resolvedTarget = await resolveSymlinkTarget(path, join(logicalHome, relative), linkText, canonicalHome, logicalHome)
+          // Keep lexical resolution on the FD-anchored path; canonicalHome checks the final realpath below.
+          resolvedTarget = await resolveSymlinkTarget(path, join(logicalHome, relative), linkText, homePath, logicalHome)
         }
         catch { fail(`DSH_HOME 包含不可安全解析的符号链接，拒绝快照：${relative}`) }
         const packageLink = relative.split(sep).includes('node_modules')
@@ -7201,6 +7221,7 @@ async function main() {
 }
 
 export const lifecycleProfileTest = Object.freeze({
+  assertSnapshotTreeSafe,
   compactSupervisedSnapshot, validSupervisedLifecycle, validSupervisedManifestPhase, sameHomeOwnershipEvidence,
   validManifestTopLevel, validV3OperationShape, validV3ServiceAcceptance, writeManifest,
   validSupervisedCapabilityProof, assertHostRsiRuntimeSuccessor, hostSandboxRun, MANIFEST_MAX_BYTES,
