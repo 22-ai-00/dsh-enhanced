@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
 import { loadTrustConfig } from '@dsh-enhanced/plugin-control-plane'
@@ -128,6 +128,13 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
 
   test('pins shared contract bytes and refuses dependency substitution, tampering or extra directories', async () => {
     const f = await fixture()
+    const controlManifestPath = join(f.packageRoot, 'package.json')
+    const originalControlManifest = await readFile(controlManifestPath)
+    const controlManifest = JSON.parse(originalControlManifest.toString('utf8')) as { dependencies: Record<string, string> }
+    delete controlManifest.dependencies['@dsh-enhanced/assistant-growth-contract']
+    await writeFile(controlManifestPath, JSON.stringify(controlManifest))
+    await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot })).rejects.toThrow('not declared')
+    await writeFile(controlManifestPath, originalControlManifest)
     const contract = join('node_modules', '@dsh-enhanced', 'assistant-growth-contract')
     const sourceManifest = join(f.packageRoot, contract, 'package.json')
     const originalManifest = await readFile(sourceManifest)
@@ -168,6 +175,66 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
     await rename(stageHome, f.home)
     expect(await prepareRsiAuthorityRuntime(f.input, { packageRoot: join(f.home, 'profiles', 'owner',
       'node_modules', '@dsh-enhanced', 'plugin-control-plane') })).toHaveProperty('root', f.final)
+  }, 120_000)
+
+  test('stage replacement resolves a pnpm adjacent contract edge and replays after Home swap', async () => {
+    const f = await fixture()
+    await prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot })
+    const stageHome = join(f.root, 'pnpm-stage-home'), previousHome = join(f.root, 'pnpm-previous-home')
+    await cp(f.home, stageHome, { recursive: true })
+    const packageVersion = (JSON.parse(await readFile(join(f.packageRoot, 'package.json'), 'utf8')) as { version: string }).version
+    const virtualRoot = join(stageHome, 'profiles', 'owner', 'node_modules', '.pnpm')
+    const namespace = join(virtualRoot, `@dsh-enhanced+plugin-control-plane@${packageVersion}`, 'node_modules', '@dsh-enhanced')
+    const installed = join(namespace, 'plugin-control-plane')
+    const contractEdge = join(namespace, 'assistant-growth-contract')
+    const contractTarget = join(virtualRoot, `@dsh-enhanced+assistant-growth-contract@${packageVersion}`, 'node_modules',
+      '@dsh-enhanced', 'assistant-growth-contract')
+    await mkdir(namespace, { recursive: true, mode: 0o700 })
+    await cp(f.packageRoot, installed, { recursive: true })
+    await mkdir(dirname(contractTarget), { recursive: true, mode: 0o700 })
+    await cp(join(f.packageRoot, 'node_modules', '@dsh-enhanced', 'assistant-growth-contract'),
+      contractTarget, { recursive: true })
+    await rm(join(installed, 'node_modules'), { recursive: true })
+    await symlink(relative(dirname(contractEdge), contractTarget), contractEdge, 'dir')
+    await replaceRsiAuthorityRuntimeInStage({ logicalHome: f.home, physicalHome: stageHome, profile: 'owner' },
+      { packageRoot: installed })
+    const receipt = JSON.parse(await readFile(join(stageHome, 'rsi-authority-runtimes', 'owner', 'receipt.json'), 'utf8')) as {
+      entries: Array<{ path: string; sourcePath: string }>
+    }
+    const contractSource = receipt.entries.find(entry => entry.path === 'node_modules/@dsh-enhanced/assistant-growth-contract/package.json')
+    expect(contractSource?.sourcePath).toBe(join(f.home, relative(stageHome, contractTarget), 'package.json'))
+    expect(receipt.entries.some(entry => entry.sourcePath.startsWith(stageHome))).toBe(false)
+    await rename(f.home, previousHome)
+    await rename(stageHome, f.home)
+    expect(await prepareRsiAuthorityRuntime(f.input, { packageRoot: join(f.home, relative(stageHome, installed)) }))
+      .toHaveProperty('root', f.final)
+  }, 120_000)
+
+  test('rejects contract resolution inherited from an ancestor node_modules', async () => {
+    const f = await fixture()
+    const ancestorContract = join(f.root, 'node_modules', '@dsh-enhanced', 'assistant-growth-contract')
+    await mkdir(dirname(ancestorContract), { recursive: true, mode: 0o700 })
+    await cp(join(f.packageRoot, 'node_modules', '@dsh-enhanced', 'assistant-growth-contract'),
+      ancestorContract, { recursive: true })
+    await rm(join(f.packageRoot, 'node_modules'), { recursive: true })
+    await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot }))
+      .rejects.toThrow('outside its dependency edge')
+  }, 120_000)
+
+  test('rejects a declared contract supplied only by a flat project peer', async () => {
+    const f = await fixture()
+    const namespace = join(f.root, 'profile', 'node_modules', '@dsh-enhanced')
+    const installed = join(namespace, 'plugin-control-plane')
+    const contract = join(namespace, 'assistant-growth-contract')
+    await mkdir(namespace, { recursive: true, mode: 0o700 })
+    await cp(f.packageRoot, installed, { recursive: true })
+    await cp(join(f.packageRoot, 'node_modules', '@dsh-enhanced', 'assistant-growth-contract'),
+      contract, { recursive: true })
+    await rm(join(installed, 'node_modules'), { recursive: true })
+    const manifest = JSON.parse(await readFile(join(installed, 'package.json'), 'utf8')) as { dependencies: Record<string, string> }
+    expect(manifest.dependencies['@dsh-enhanced/assistant-growth-contract']).toBeDefined()
+    await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: installed }))
+      .rejects.toThrow('outside its dependency edge')
   }, 120_000)
 
   test('cancellation leaves no runtime; failed copied CLI removes only its claimed runtime', async () => {
