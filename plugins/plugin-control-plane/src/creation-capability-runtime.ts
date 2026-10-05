@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { JsonSchemaNode, ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { canonicalGrowthJson, SourceGrowthRunUnavailableError } from '@dsh-enhanced/assistant-growth-contract'
-import type { CreationCapabilityConfig, CreationCapabilityJournalPort, CreationCapabilityObservation,
+import type { CreationCapabilityCallEvidence, CreationCapabilityConfig, CreationCapabilityJournalPort, CreationCapabilityObservation,
   CreationCapabilityPorts, CreationCapabilityRecord, CreationCapabilityRunner, CreationCapabilityTool } from './creation-capability-types.js'
 
 const sha = (value: Buffer | string) => createHash('sha256').update(value).digest('hex')
@@ -330,7 +330,11 @@ export class CreationCapabilityRuntime {
       const call = this.ports.withCurrent(record, () => {
         this.ports.assertCaller(record, exec)
         controller.signal.throwIfAborted()
-        return this.journal.claimCall({ planId, key, argumentsDigest })
+        const foreground = this.ports.inspectCall?.(record, exec, tool.name, encoded)
+        if (foreground !== undefined && (foreground.task.sessionId !== String(exec.agent!.session.id)
+          || foreground.call.id !== String(exec.callId))) fail('foreground call differs from current execution')
+        return this.journal.claimCall({ planId, key, argumentsDigest, toolAlias: tool.name,
+          ...(foreground === undefined ? {} : { foreground }) })
       })
       if (!call.created) {
         if (call.call.status === 'completed') return call.call.result
@@ -405,6 +409,11 @@ export class CreationCapabilityRuntime {
   inspectStatus(planId: string): { status: CreationCapabilityRecord['status']; aliases: readonly string[] } | undefined {
     const record = this.journal.inspect(planId)
     return record && { status: record.status, aliases: record.tools?.map(tool => tool.name) ?? [] }
+  }
+
+  /** Host-only evidence lookup remains available for terminal adoptions. */
+  inspectCallEvidence(planId: string): readonly CreationCapabilityCallEvidence[] {
+    return this.journal.listCallEvidence?.(planId) ?? []
   }
 
   close(): Promise<void> {

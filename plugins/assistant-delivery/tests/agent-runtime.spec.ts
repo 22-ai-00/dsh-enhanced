@@ -63,6 +63,7 @@ import { AssistantDeliveryService } from '../src/service.ts'
 import type { DeliveryGoalWakeInput, OwnerGoalOutcomeFeedbackLocator, OwnerGoalOutcomeFeedbackProof } from '../src/goal-wake-types.ts'
 import { DeliveryStore } from '../src/store.ts'
 import { DELIVERY_PREFERENCE_PROJECTION_PROTOCOL } from '../src/types.ts'
+import type { ForegroundToolCallAttestation } from '../src/foreground-observation.ts'
 import type {
   ConversationBinding, ConversationModelSelection, ConversationRef, DeliveryAdapter, DeliveryProgressIntent,
   DeliveryPreferenceEvent, DeliveryPreferenceFeedback, InboundEnvelope, ModelRouteRef, OutboundFormat,
@@ -11719,3 +11720,63 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 })
+
+
+test('attests ordinary tool calls through real AgentLoop and ToolRuntime in two distinct Inbox tasks', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'delivery-native-call-proof-'))
+  roots.push(root)
+  const toolName = 'ordinary_call_evidence_probe'
+  const routeId = 'ordinary-call-owner'
+  const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+    presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
+    ownerRoutes: [{ id: routeId, conversation, principal, workspace: root,
+      agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }],
+    policyRules: [{ id: 'ordinary-call-execute', effect: 'allow', subject: {
+      kind: 'agent', id: 'primary', workspace: root, principal: 'lark/bot-1/tenant-a/ou_owner',
+    }, actions: ['execute'], resource: { kind: 'tool', id: toolName }, context: { initiators: ['external'] } }],
+  })
+  const proofs: ForegroundToolCallAttestation[] = []
+  const liveCalls: Array<{ agent: Agent; callId: string }> = []
+  fixture.ctx.tools.register(defineTool({ name: toolName, description: 'Native call provenance fixture', parameters: {},
+    output: { schema: { type: 'object', properties: { attested: { type: 'boolean', required: true } },
+      additionalProperties: false }, render: (_args, result) => [{ type: 'text', text: JSON.stringify(result) }] },
+    async execute(_args, execution) {
+      if (!execution.agent) throw new Error('native tool has no Agent')
+      const proof = fixture.service.inspectOwnerForegroundToolCall({ agent: execution.agent, authorityId: routeId,
+        callId: String(execution.callId), toolName, argumentsJson: '{}' })
+      if (!proof) throw new Error('native dispatch was not attested')
+      proofs.push(proof)
+      liveCalls.push({ agent: execution.agent, callId: String(execution.callId) })
+      return { attested: true }
+    },
+  }))
+  let requests = 0
+  vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* () {
+    requests += 1
+    if (requests % 2 === 0) { yield* textStopChunks('ordinary reply'); return }
+    const id = ToolCallId(`actual-native-${requests}`)
+    yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+    yield { type: 'tool-call-delta', index: 0, id, name: toolName, argumentsDelta: '{}' }
+    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: toolName, arguments: '{}' } }
+    yield { type: 'finish', reason: { kind: 'tool-calls' } }
+  })
+  try {
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const inboxIds: string[] = []
+    for (const eventId of ['ordinary-call-1', 'ordinary-call-2']) {
+      const accepted = await fixture.service.acceptInbound(message(eventId, 'Use the native probe for this ordinary task'))
+      inboxIds.push(accepted.inboxId)
+      await drive(fixture.service)
+    }
+    expect(proofs).toHaveLength(2)
+    expect(proofs.map(proof => proof.task.inboxId)).toEqual(inboxIds)
+    expect(proofs[0]!.task.sessionId).toBe(proofs[1]!.task.sessionId)
+    expect(proofs[0]!.turn).not.toBe(proofs[1]!.turn)
+    for (const call of liveCalls) {
+      expect(fixture.service.inspectOwnerForegroundToolCall({ ...call, authorityId: routeId,
+        toolName, argumentsJson: '{}' })).toBeUndefined()
+    }
+    expect(fixture.sends.filter(intent => intent.idempotencyKey.startsWith('inbound:'))).toHaveLength(2)
+  } finally { await fixture.ctx.fiber.restart() }
+}, 20_000)

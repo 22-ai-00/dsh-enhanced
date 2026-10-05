@@ -14,7 +14,7 @@ import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { isSourceOwnerContinuation, pluginCreationVerificationSigningPayload, sourceGrowthRunDigest, SourceGrowthRunUnavailableError,
   type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
-import type { OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
+import type { ForegroundToolCallAttestation, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import { afterEach, expect, it, vi } from 'vitest'
 import { PluginControlPlaneService, normalizeControlPlaneConfig, type Config } from '../src/service.ts'
 import { ControlPlaneStore, controlPlaneDigest } from '../src/store.ts'
@@ -97,8 +97,10 @@ async function fixture(withVerification = false, withAdoption = false, withReten
       quiescent: true, truncated: false, modelSelectionState: 'frozen', modelSelection: { provider: 'supplier', model: 'task-model', reasoningEffort: 'high' } } }
   let activeSource: OwnerForegroundLearningTask = source
   const taskChangeListeners = new Set<() => void>()
+  const foregroundCall = vi.fn<() => ForegroundToolCallAttestation | undefined>(() => undefined)
   const deliveryPorts = { validateOwnerRoute: () => structuredClone(owner),
     validateOwnerAgentForRoute: (agent: { owner?: typeof owner }) => agent.owner ? structuredClone(agent.owner) : undefined,
+    inspectOwnerForegroundToolCall: foregroundCall,
     inspectOwnerForegroundLearningTask: () =>
       isSourceOwnerContinuation(owner, activeSource.owner) ? structuredClone(activeSource) : undefined }
   const evaluationPorts = { canonicalHostScope: (input: unknown) => input,
@@ -164,7 +166,7 @@ async function fixture(withVerification = false, withAdoption = false, withReten
   })
   else vi.mocked(build.runDockerPreparedChecks).mockResolvedValue(checked)
   return { root, repository, git, ctx, config, capability, service, automations, policy, store, source, owner,
-    deliveryPorts, evaluationPorts, publicKey, verification, request, checked, growthRun, inspectGrowthRun,
+    deliveryPorts, evaluationPorts, foregroundCall, publicKey, verification, request, checked, growthRun, inspectGrowthRun,
     unregisterGrowthRun, authority, signing, setSource: (next: OwnerForegroundLearningTask) => { activeSource = next },
     notifyTaskChange: () => { for (const listener of taskChangeListeners) listener() },
     taskChangeListenerCount: () => taskChangeListeners.size,
@@ -280,6 +282,9 @@ it.each(['correction', 'withdrawal'] as const)(
       owner: { ...f.owner, principalId: 'other' } } } as unknown as ToolRunContext)).rejects.toThrow(/current authorized owner/)
     expect(runnerRun).toHaveBeenCalledTimes(1)
     await expect(tool.execute({ query: 'hello' }, valid)).resolves.toEqual({ value: { answer: 'ok' }, content: [{ type: 'text', text: 'ok' }] })
+    expect(f.service.inspectCreatedCapabilityCalls(planId)).toMatchObject([{ attribution: 'unattributed' }])
+    expect(f.foregroundCall).toHaveBeenLastCalledWith({ agent: valid.agent, authorityId: 'route',
+      callId: 'first-call', toolName: alias, argumentsJson: JSON.stringify({ query: 'hello' }) })
     expect(runnerRun).toHaveBeenCalledTimes(2)
     f.owner.generation += 1; f.owner.bindingVersion += 1
     expect(f.service.inspectVerifiedCreation(planId)).toEqual(certificate)
@@ -288,7 +293,21 @@ it.each(['correction', 'withdrawal'] as const)(
     expect(adoption()).toEqual({ ...adoptedBefore, calls: 1 })
     expect(f.service.inspectCreatedCapability(planId)).toEqual(adopted)
     const nextSession = { ...valid, callId: 'second-call', agent: { session: { id: 'session-2' }, owner: { ...f.owner } } } as unknown as ToolRunContext
+    // Contract wiring only: Delivery's real Agent/event proof is tested in its own suite.
+    f.foregroundCall.mockReturnValue({ protocol: 'assistant-delivery/foreground-tool-call/v1',
+      task: { protocol: 'assistant-delivery/foreground-task/v1', inboxId: 'subsequent-inbox', sessionId: 'session-2',
+        scope: { workspace: f.root, preset: 'primary' }, owner: { principalRecordId: 'record', principalVersion: 1 },
+        binding: { id: 'next-binding', version: f.owner.bindingVersion, generation: f.owner.generation }, dispatchedAt: Date.now() },
+      turn: 2, call: { id: 'second-call', toolName: alias, eventSeq: 20, eventDigest: '8'.repeat(64),
+        argumentsDigest: createHash('sha256').update(JSON.stringify({ query: 'hello-again' })).digest('hex') } })
     await expect(tool.execute({ query: 'hello-again' }, nextSession)).resolves.toEqual({ value: { answer: 'ok' }, content: [{ type: 'text', text: 'ok' }] })
+    const callEvidence = f.service.inspectCreatedCapabilityCalls(planId)
+    expect(callEvidence).toHaveLength(2)
+    expect(callEvidence).toContainEqual(expect.objectContaining({ attribution: 'foreground',
+      artifactSha256: f.checked.evidence.pack.sha256, schemaDigest: candidateSchemaDigest,
+      foreground: expect.objectContaining({ task: expect.objectContaining({ inboxId: 'subsequent-inbox' }) }) }))
+    expect(JSON.stringify(callEvidence)).not.toContain('hello-again')
+    expect(JSON.stringify(callEvidence)).not.toContain('answer')
     expect(adoption()).toEqual({ ...adoptedBefore, calls: 2 })
     expect(runnerRun).toHaveBeenCalledTimes(3)
     f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()

@@ -11,7 +11,7 @@ import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from 
 import { CreationCapabilityJournal, creationCapabilityPublicKey, validateCreationCapabilityConfig,
   verifyCreationCapabilityReceipt } from '../src/creation-capability-journal.js'
 import { CreationCapabilityRuntime } from '../src/creation-capability-runtime.js'
-import type { CreationCapabilityConfig, CreationCapabilityPorts, CreationCapabilityRunner,
+import type { CreationCapabilityConfig, CreationCapabilityForegroundCallWitness, CreationCapabilityPorts, CreationCapabilityRunner,
   CreationCapabilityTool } from '../src/creation-capability-types.js'
 
 const roots: string[] = []
@@ -56,6 +56,16 @@ function fixture(maxAdoptions = 2, maxCalls = 3) {
   return { root, config, path, artifact, certificate, signing }
 }
 const tools: CreationCapabilityTool[] = [{ originalName: 'echo', name: 'generated_echo', description: 'Echo', parameters: { type: 'object' } }]
+const callKey = (planId: string, sessionId: string, callId: string, toolName: string) =>
+  createHash('sha256').update(JSON.stringify({ planId, sessionId, callId, toolName })).digest('hex')
+function witness(config: CreationCapabilityConfig, argumentsDigest: string, callId = 'call-1'): CreationCapabilityForegroundCallWitness {
+  return { protocol: 'assistant-delivery/foreground-tool-call/v1',
+    task: { protocol: 'assistant-delivery/foreground-task/v1', inboxId: 'inbox-1', sessionId: 'session-1',
+      scope: { workspace: config.owner.workspace, preset: config.owner.agentPreset },
+      owner: { principalRecordId: config.owner.principalRecordId, principalVersion: config.owner.principalVersion },
+      binding: { id: 'binding-1', version: 1, generation: 1 }, dispatchedAt: Date.now() },
+    turn: 1, call: { id: callId, toolName: 'generated_echo', eventSeq: 1, eventDigest: d('f'), argumentsDigest } }
+}
 
 test('owner key and config preflight are read-only and reject unsafe fields', () => {
   const f = fixture()
@@ -146,7 +156,8 @@ test('real journal and Cordis tool retain one signed adoption across certificate
   const certificate = f.certificate('one', 2_000, schemaDigest)
   const ctx = new Context()
   let journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
-  let discover = 0, invoke = 0, sourceCurrent = true
+  let discover = 0, invoke = 0, sourceCurrent = true, proofAvailable = true
+  let pinnedProof: CreationCapabilityForegroundCallWitness | undefined
   const ports: CreationCapabilityPorts = {
     inspect: () => {
       if (Date.now() >= certificate.expiresAt) throw new Error('fresh certificate expired')
@@ -160,6 +171,15 @@ test('real journal and Cordis tool retain one signed adoption across certificate
       return callback()
     },
     assertCaller: () => { if (!sourceCurrent) throw new Error('owner withdrawn') },
+    inspectCall: (_record, _execution, alias, argumentsJson) => {
+      if (!proofAvailable) return undefined
+      if (!pinnedProof) {
+        const base = witness(f.config, createHash('sha256').update(argumentsJson).digest('hex'), 'first')
+        pinnedProof = { ...base, task: { ...base.task, sessionId: 'session-one' },
+          call: { ...base.call, toolName: alias } }
+      }
+      return pinnedProof
+    },
   }
   const runner: CreationCapabilityRunner = {
     run: async input => {
@@ -192,14 +212,22 @@ test('real journal and Cordis tool retain one signed adoption across certificate
     expect(verifyCreationCapabilityReceipt({ ...receipt, expiresAt: receipt.expiresAt + 1 },
       journal.authorityDigest, journal.publicKey)).toBe(false)
     expect(await execute(name, 'first')).toMatchObject({ value: { answer: 'ok' } })
+    proofAvailable = false
+    await expect(execute(name, 'first')).rejects.toThrow()
+    expect(invoke).toBe(1)
     await first.close()
     vi.spyOn(Date, 'now').mockReturnValue(baseTime + 3_000)
     journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
     expect(() => journal.claim({ certificate, artifact: f.artifact })).toThrow()
     const restarted = runtime(); await restarted.start()
     expect(ctx.tools.get(name)).toBeDefined()
+    await expect(execute(name, 'first')).rejects.toThrow()
+    expect(invoke).toBe(1)
+    proofAvailable = true
     expect(await execute(name, 'first')).toMatchObject({ value: { answer: 'ok' } })
+    proofAvailable = false
     expect(await execute(name, 'second')).toMatchObject({ value: { answer: 'ok' } })
+    expect(journal.listCallEvidence('one').find(item => item.foreground)?.attribution).toBe('foreground')
     expect(discover).toBe(1)
     expect(invoke).toBe(2)
     await expect(execute(name, 'third')).rejects.toThrow()
@@ -286,4 +314,115 @@ test('completed calls retain bounded result and expired receipts cannot dispatch
     expect(verifyCreationCapabilityReceipt(receipt, journal.authorityDigest, journal.publicKey)).toBe(false)
     expect(() => journal.claimCall({ planId: 'one', key: 'call-2', argumentsDigest: d('a') })).toThrow()
   } finally { journal.close() }
+})
+
+test('v1 calls migrate without backfilling evidence, quota or unknown state', () => {
+  const f = fixture(1, 2)
+  const first = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  first.claim({ certificate: f.certificate('one'), artifact: f.artifact })
+  first.authorize('one', tools); first.activate('one')
+  const authorityDigest = first.authorityDigest, receipt = first.inspect('one')!.receipt!
+  first.claimCall({ planId: 'one', key: 'legacy-completed', argumentsDigest: d('a') })
+  first.settleCall({ planId: 'one', key: 'legacy-completed', status: 'completed', result: { secret: 'private result' } })
+  first.claimCall({ planId: 'one', key: 'legacy-claimed', argumentsDigest: d('b') })
+  first.close()
+  const raw = new DatabaseSync(f.path)
+  try {
+    raw.exec(`BEGIN IMMEDIATE;
+      CREATE TABLE calls_v1 (plan_id TEXT NOT NULL REFERENCES adoptions(plan_id), call_key TEXT NOT NULL,
+        arguments_digest TEXT NOT NULL CHECK(length(arguments_digest)=64),
+        status TEXT NOT NULL CHECK(status IN ('claimed','completed','unknown')),
+        result_json TEXT CHECK(result_json IS NULL OR (json_valid(result_json) AND length(result_json)<=65536)),
+        job_id TEXT, PRIMARY KEY(plan_id,call_key),
+        CHECK((status='claimed' AND result_json IS NULL AND job_id IS NULL) OR status IN ('completed','unknown'))) STRICT, WITHOUT ROWID;
+      INSERT INTO calls_v1 SELECT plan_id,call_key,arguments_digest,status,result_json,job_id FROM calls;
+      DROP TABLE calls;
+      ALTER TABLE calls_v1 RENAME TO calls;
+      PRAGMA user_version=1;
+      COMMIT;`)
+  } finally { raw.close() }
+  const reopened = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  try {
+    expect(reopened.authorityDigest).toBe(authorityDigest)
+    expect(reopened.inspect('one')?.receipt).toEqual(receipt)
+    reopened.recoverClaims()
+    expect(reopened.claimCall({ planId: 'one', key: 'legacy-completed', argumentsDigest: d('a') }).call.result)
+      .toEqual({ secret: 'private result' })
+    expect(reopened.claimCall({ planId: 'one', key: 'legacy-claimed', argumentsDigest: d('b') }).call.status).toBe('unknown')
+    expect(() => reopened.claimCall({ planId: 'one', key: 'third', argumentsDigest: d('c') })).toThrow()
+    const evidence = reopened.listCallEvidence('one')
+    expect(evidence).toHaveLength(2)
+    expect(evidence.every(item => item.attribution === 'legacy-unattributed' && item.claimedAt === undefined
+      && item.settledAt === undefined && item.foreground === undefined)).toBe(true)
+    expect(JSON.stringify(evidence)).not.toContain('private result')
+  } finally { reopened.close() }
+  const check = new DatabaseSync(f.path)
+  try {
+    expect((check.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(2)
+    const rows = check.prepare('SELECT tool_alias,foreground_json,claimed_at,settled_at FROM calls').all() as
+      Array<{ tool_alias: null; foreground_json: null; claimed_at: null; settled_at: null }>
+    expect(rows).toEqual([{ tool_alias: null, foreground_json: null, claimed_at: null, settled_at: null },
+      { tool_alias: null, foreground_json: null, claimed_at: null, settled_at: null }])
+  } finally { check.close() }
+})
+
+test('new call evidence binds the signed adoption and rejects a different foreground event or alias', () => {
+  const f = fixture()
+  const journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  try {
+    journal.claim({ certificate: f.certificate('one'), artifact: f.artifact })
+    journal.authorize('one', [...tools, { ...tools[0]!, originalName: 'other', name: 'generated_other' }])
+    journal.activate('one')
+    const argumentsDigest = d('a'), key = callKey('one', 'session-1', 'call-1', 'generated_echo')
+    const foreground = witness(f.config, argumentsDigest)
+    expect(journal.claimCall({ planId: 'one', key, argumentsDigest, toolAlias: 'generated_echo', foreground }).created).toBe(true)
+    journal.settleCall({ planId: 'one', key, status: 'completed', result: { secret: 'private result' } })
+    expect(journal.claimCall({ planId: 'one', key, argumentsDigest, toolAlias: 'generated_echo', foreground }).created).toBe(false)
+    expect(() => journal.claimCall({ planId: 'one', key, argumentsDigest, toolAlias: 'generated_echo',
+      foreground: { ...foreground, task: { ...foreground.task, inboxId: 'another-inbox' } } })).toThrow()
+    expect(() => journal.claimCall({ planId: 'one', key, argumentsDigest, toolAlias: 'generated_other' })).toThrow()
+    expect(() => journal.claimCall({ planId: 'one', key, argumentsDigest, toolAlias: 'generated_echo',
+      foreground: { ...foreground, call: { ...foreground.call, eventDigest: d('0') } } })).toThrow()
+    expect(() => journal.claimCall({ planId: 'one', key, argumentsDigest, toolAlias: 'generated_echo' })).toThrow()
+    const evidence = journal.listCallEvidence('one')[0]!
+    expect(evidence).toMatchObject({ planId: 'one', key, status: 'completed', attribution: 'foreground',
+      toolAlias: 'generated_echo', originalName: 'echo', foreground })
+    expect(evidence.receiptDigest).toMatch(/^[a-f0-9]{64}$/u)
+    expect(evidence.artifactSha256).toBe(journal.inspect('one')!.receipt!.artifactSha256)
+    expect(evidence.schemaDigest).toBe(journal.inspect('one')!.receipt!.schemaDigest)
+    expect(evidence.claimedAt).toBeGreaterThan(0)
+    expect(evidence.settledAt).toBeGreaterThanOrEqual(evidence.claimedAt!)
+    expect(JSON.stringify(evidence)).not.toContain('private result')
+  } finally { journal.close() }
+})
+
+test('unattributed calls stay unattributed and a crashed foreground claim remains unknown after restart', () => {
+  const f = fixture(1, 2)
+  const first = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  first.claim({ certificate: f.certificate('one'), artifact: f.artifact })
+  first.authorize('one', tools); first.activate('one')
+  const argumentsDigest = d('a'), key = callKey('one', 'session-1', 'call-1', 'generated_echo')
+  first.claimCall({ planId: 'one', key, argumentsDigest, toolAlias: 'generated_echo' })
+  expect(first.listCallEvidence('one')[0]).toMatchObject({ attribution: 'unattributed', toolAlias: 'generated_echo' })
+  expect(() => first.claimCall({ planId: 'one', key, argumentsDigest, toolAlias: 'generated_echo',
+    foreground: witness(f.config, argumentsDigest) })).toThrow()
+  const unknownKey = callKey('one', 'session-1', 'call-2', 'generated_echo')
+  const unknownProof = witness(f.config, argumentsDigest, 'call-2')
+  first.claimCall({ planId: 'one', key: unknownKey, argumentsDigest, toolAlias: 'generated_echo',
+    foreground: unknownProof })
+  first.close()
+  const reopened = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  try {
+    reopened.recoverClaims()
+    expect(() => reopened.claimCall({ planId: 'one', key: unknownKey, argumentsDigest,
+      toolAlias: 'generated_echo' })).toThrow()
+    expect(reopened.claimCall({ planId: 'one', key: unknownKey, argumentsDigest,
+      toolAlias: 'generated_echo', foreground: unknownProof }).call.status).toBe('unknown')
+    expect(() => reopened.claimCall({ planId: 'one', key: 'third', argumentsDigest: d('b') })).toThrow()
+    reopened.settle('one', 'closed', 'owner-withdrawn')
+    const evidence = reopened.listCallEvidence('one')
+    expect(evidence.map(item => item.attribution).sort()).toEqual(['foreground', 'unattributed'])
+    expect(evidence.every(item => item.status === 'unknown' && item.settledAt !== undefined)).toBe(true)
+    expect(reopened.inspect('one')?.status).toBe('closed')
+  } finally { reopened.close() }
 })

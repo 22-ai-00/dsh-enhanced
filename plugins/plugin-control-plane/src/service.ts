@@ -524,6 +524,14 @@ export class PluginControlPlaneService extends Service {
                 signal.throwIfAborted()
               },
               withCurrent: (record, callback) => this.withCreatedCapabilityCurrent(record, callback),
+              inspectCall: (_record, execution, toolAlias, argumentsJson) => {
+                if (!execution.agent) return undefined
+                const delivery = current('delivery') as AssistantDeliveryService
+                if (typeof delivery.inspectOwnerForegroundToolCall !== 'function') return undefined
+                return delivery.inspectOwnerForegroundToolCall({ agent: execution.agent,
+                  authorityId: config.owner.authorityId, callId: String(execution.callId),
+                  toolName: toolAlias, argumentsJson })
+              },
               assertCaller: (_record, execution) => {
                 if (!execution.agent) throw new Error('created capability requires an authenticated owner Agent')
                 const delivery = current('delivery') as AssistantDeliveryService
@@ -880,6 +888,12 @@ export class PluginControlPlaneService extends Service {
   inspectCreatedCapability = (planId: string) => {
     this.abort.signal.throwIfAborted()
     return this.creationCapabilityRuntime?.inspectStatus(planId)
+  }
+
+  /** Exact immutable adoption and actual call evidence; no arguments, results or quality rating. */
+  inspectCreatedCapabilityCalls = (planId: string) => {
+    this.abort.signal.throwIfAborted()
+    return this.creationCapabilityRuntime?.inspectCallEvidence(planId) ?? []
   }
 
   private withCreatedCapabilityCurrent<T>(record: CreationCapabilityRecord, callback: () => T): T {

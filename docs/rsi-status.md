@@ -13,19 +13,19 @@
 | 能力 | 当前边界 | 入口 |
 | --- | --- | --- |
 | 任务与记忆 | 已有认证反馈、原生调度与持久记忆学习；真实后续决策收益待验收。 | [Delivery](../plugins/assistant-delivery/README.md)、[Memory](../plugins/assistant-memory-learning/README.md) |
-| 工程进化 | 已有源码目标发现、失败任务优先复盘、新工具独立验收、有限签名采用与动态加载。明确配置保留期后，已采用工具可跨单次任务、plan 和证书窗口，冷启动延续原额度；仍受原使用授权截止时间约束。实际调用归因、版本替换回退与真实收益待验收。 | [Growth](../plugins/assistant-growth-driver/README.md)、[Control Plane](../plugins/plugin-control-plane/README.md) |
+| 工程进化 | 已有源码目标发现、失败任务优先复盘、新工具独立验收、有限签名采用与动态加载。明确配置保留期后，已采用工具可跨单次任务、plan 和证书窗口，冷启动延续原额度；仍受原使用授权截止时间约束。新调用可绑定真实前台 Inbox/turn/事件及精确采用版本，旧调用不回填。后续认证反馈关联、版本替换回退与真实收益待验收。 | [Growth](../plugins/assistant-growth-driver/README.md)、[Control Plane](../plugins/plugin-control-plane/README.md) |
 | 部署 | 本机冻结更新已成功，绑定 `c79d30e`，25 个包/18 个根 bundle，包含默认禁用的 Memory Learning；原身份与配置保留。尚未安装 owner/coordinator 或启用学习调度。 | [安装](../plugins/lark-channel/docs/rsi-setup.md)、[维护](../scripts/install/README.md#checkout-内的-pre-owner-冻结源码维护) |
 
 ## 当前阻塞与下一验收
 
 下一步完成一次 owner/coordinator 配置。开启 scheduler 涉及现有三个 paused Automation，已请求确认但尚无答复，不能自动添加 `--ack-existing-automations`；重复任务提示不等于该确认。部署准备已完成，学习仍禁用。
 
-当前工程交付先补齐可信的实际工具调用与具体普通任务、能力版本的关联，再推进版本替换与回退；同一 Session 的多个 Inbox 不能互相借用归因。
+当前工程交付先将采用版本的前台调用关联后续认证 canonical 反馈，按具体任务修订去重、更正和撤回，再推进版本替换与精确回退。现有配置没有父版本/slot 替换授权；不能扩大旧创建或采用额度的语义。当前任务身份按 Inbox 建立，不能推断跨 Inbox 的语义同一性。
 
 启用后由新的真实普通任务验收创建 → 独立验证 → 动态采用 → 后续会话原生发现与复用；记录版本、实际调用、质量、成本、延迟和回归，检查纠正/撤回、重启及 unknown 不重放。之前组件诊断停在 unknown，无候选、采用或复用，不能作为闭环完成证据。两条普通使用通道通过可安装部署与[发布门](releasing.md)后再发布 npm。
 
 ## 最新验证
 
-本阶段 `VITEST_MAX_WORKERS=4 pnpm check` 退出 0：8163 项通过、61 项跳过，零 lint 警告、类型检查、干净构建及 37 个包 dry-run pack 通过，独立审查 PASS。有限保留测试覆盖过期 plan、原产物清理、完整 Context 冷启动、原调用额度和纠正/撤回；采用真实 Cordis/SQLite，Delivery/Evaluation 与容器执行器为测试替身，不能作为真实部署复用收益证据。
+本阶段 `VITEST_MAX_WORKERS=4 pnpm check` 退出 0：8172 项通过、61 项跳过，零 lint 警告、类型检查、干净构建及 37 个包 dry-run pack 通过，独立审查 PASS。真实 AgentLoop/ToolRuntime → Delivery 的两个 Inbox 测试通过（LLM/发送适配器为替身）；Control Plane 创建/采用/调用接线覆盖精确版本、无证明及旧记录未归因，容器执行器与 Delivery/Evaluation 为测试替身。保留阶段还覆盖过期 plan、产物清理、完整 Context 冷启动及原额度；这些证据不能替代 live 闭环。
 
-本机已部署版本仍为 `c79d30e`；其正式升级及独立部署复核曾通过，身份与配置摘要未变，Host 与真实 Lark 连接正常。本阶段尚未部署。原始记录分别保存在忽略目录 `docs/evidence/rsi-retained-capabilities/` 和 `docs/evidence/rsi-next-deployment/`；外部跳过测试不证明 live 行为。
+有限保留阶段 `f602a59` 已提交并推送 `dev`，独立审查 PASS。本机已部署版本仍为 `c79d30e`；其正式升级及独立部署复核曾通过，身份与配置摘要未变，Host 与真实 Lark 连接正常。本阶段尚未部署。原始记录保存在忽略目录 `docs/evidence/rsi-call-attribution/`、`docs/evidence/rsi-retained-capabilities/` 和 `docs/evidence/rsi-next-deployment/`；外部跳过测试不证明 live 行为。

@@ -3,7 +3,8 @@ import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFi
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { canonicalGrowthJson, validatePluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
-import type { CreationCapabilityCall, CreationCapabilityConfig, CreationCapabilityJournalPort,
+import type { CreationCapabilityCall, CreationCapabilityCallEvidence, CreationCapabilityConfig,
+  CreationCapabilityForegroundCallWitness, CreationCapabilityJournalPort,
   CreationCapabilityReceipt, CreationCapabilityRecord, CreationCapabilityTool } from './creation-capability-types.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u
@@ -78,6 +79,30 @@ function json(value: unknown, max = 65536): string {
 }
 const sha = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex')
 function digest(value: unknown): string { return sha(json(value)) }
+function witnessJson(value: unknown, config: CreationCapabilityConfig, planId: string, alias: string,
+  argumentsDigest: string, key: string): string {
+  const root = obj(value, ['protocol','task','turn','call'])
+  if (root.protocol !== 'assistant-delivery/foreground-tool-call/v1') fail()
+  const task = obj(root.task, ['protocol','inboxId','sessionId','scope','owner','binding','dispatchedAt'])
+  if (task.protocol !== 'assistant-delivery/foreground-task/v1') fail()
+  str(task.inboxId); str(task.sessionId)
+  const scope = obj(task.scope, ['workspace','preset'])
+  if (path(scope.workspace) !== config.owner.workspace || str(scope.preset) !== config.owner.agentPreset) fail()
+  const owner = obj(task.owner, ['principalRecordId','principalVersion'])
+  if (str(owner.principalRecordId, /^[\s\S]+$/u, 512) !== config.owner.principalRecordId
+    || int(owner.principalVersion, 1, Number.MAX_SAFE_INTEGER) !== config.owner.principalVersion) fail()
+  const binding = obj(task.binding, ['id','version','generation'])
+  str(binding.id, /^[\s\S]+$/u, 512)
+  int(binding.version, 1, Number.MAX_SAFE_INTEGER); int(binding.generation, 1, Number.MAX_SAFE_INTEGER)
+  int(task.dispatchedAt, 1, 8_640_000_000_000_000)
+  int(root.turn, 0, Number.MAX_SAFE_INTEGER)
+  const call = obj(root.call, ['id','toolName','eventSeq','eventDigest','argumentsDigest'])
+  str(call.id); str(call.toolName); int(call.eventSeq, 0, Number.MAX_SAFE_INTEGER)
+  str(call.eventDigest, SHA, 64); str(call.argumentsDigest, SHA, 64)
+  if (call.toolName !== alias || call.argumentsDigest !== argumentsDigest
+    || sha(JSON.stringify({ planId, sessionId: task.sessionId, callId: call.id, toolName: alias })) !== key) fail()
+  return json(value, 4096)
+}
 function receiptBody(receipt: CreationCapabilityReceipt): Omit<CreationCapabilityReceipt, 'signature'> {
   const { signature: _signature, ...body } = receipt
   return body
@@ -145,7 +170,9 @@ export function creationCapabilityPublicKey(config: CreationCapabilityConfig): s
 
 interface AdoptionRow { plan_id: string; status: CreationCapabilityRecord['status']; certificate_json: string; certificate_digest: string;
   artifact: Uint8Array; artifact_sha: string; tools_json: string | null; tools_digest: string | null; receipt_json: string | null; reason: string | null }
-interface CallRow { plan_id: string; call_key: string; arguments_digest: string; status: CreationCapabilityCall['status']; result_json: string | null; job_id: string | null }
+interface CallRow { plan_id: string; call_key: string; arguments_digest: string; status: CreationCapabilityCall['status'];
+  result_json: string | null; job_id: string | null; tool_alias: string | null; foreground_json: string | null;
+  claimed_at: number | null; settled_at: number | null }
 
 /** Reservations consume quota before any external invocation; recovery only marks uncertainty. */
 export class CreationCapabilityJournal implements CreationCapabilityJournalPort {
@@ -191,9 +218,17 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
               OR (status IN ('closed','unknown','rejected') AND reason IS NOT NULL))) STRICT, WITHOUT ROWID;
           CREATE TABLE calls (plan_id TEXT NOT NULL REFERENCES adoptions(plan_id), call_key TEXT NOT NULL, arguments_digest TEXT NOT NULL CHECK(length(arguments_digest)=64),
             status TEXT NOT NULL CHECK(status IN ('claimed','completed','unknown')), result_json TEXT CHECK(result_json IS NULL OR (json_valid(result_json) AND length(result_json)<=65536)),
-            job_id TEXT, PRIMARY KEY(plan_id,call_key), CHECK((status='claimed' AND result_json IS NULL AND job_id IS NULL) OR status IN ('completed','unknown'))) STRICT, WITHOUT ROWID;
-          PRAGMA application_id=${APP_ID}; PRAGMA user_version=1;`)
-        } else if (app !== APP_ID || version !== 1) fail()
+            job_id TEXT, tool_alias TEXT, foreground_json TEXT CHECK(foreground_json IS NULL OR (json_valid(foreground_json) AND length(foreground_json)<=4096)),
+            claimed_at INTEGER, settled_at INTEGER, PRIMARY KEY(plan_id,call_key),
+            CHECK((status='claimed' AND result_json IS NULL AND job_id IS NULL) OR status IN ('completed','unknown'))) STRICT, WITHOUT ROWID;
+          PRAGMA application_id=${APP_ID}; PRAGMA user_version=2;`)
+        } else if (app === APP_ID && version === 1) {
+          this.db.exec(`ALTER TABLE calls ADD COLUMN tool_alias TEXT;
+            ALTER TABLE calls ADD COLUMN foreground_json TEXT CHECK(foreground_json IS NULL OR (json_valid(foreground_json) AND length(foreground_json)<=4096));
+            ALTER TABLE calls ADD COLUMN claimed_at INTEGER;
+            ALTER TABLE calls ADD COLUMN settled_at INTEGER;
+            PRAGMA user_version=2;`)
+        } else if (app !== APP_ID || version !== 2) fail()
         const row = this.db.prepare('SELECT * FROM authority WHERE authority_id=?').get(this.config.authorityId) as
           { authority_digest: string; key_id: string; public_key: string; config_json: string } | undefined
         const count = (this.db.prepare('SELECT COUNT(*) AS n FROM authority').get() as { n: number }).n
@@ -290,11 +325,31 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
   private checkCalls(planId: string): void {
     const rows = this.db.prepare('SELECT * FROM calls WHERE plan_id=?').all(planId) as unknown as CallRow[]
     if (rows.length > this.config.maxCallsPerAdoption) fail()
-    for (const row of rows) this.decodeCall(row)
+    const adoption = this.row(planId)
+    if (!adoption) fail()
+    const record = this.decode(adoption)
+    for (const row of rows) this.decodeCall(row, record)
   }
-  private decodeCall(row: CallRow): CreationCapabilityCall {
+  private decodeCall(row: CallRow, record?: CreationCapabilityRecord): CreationCapabilityCall {
     str(row.plan_id); str(row.call_key); str(row.arguments_digest, SHA, 64)
     if (!['claimed','completed','unknown'].includes(row.status) || (row.status === 'claimed' && (row.result_json !== null || row.job_id !== null))) fail()
+    const adoption = record ?? this.decode(this.row(row.plan_id)!)
+    if (row.tool_alias !== null) {
+      str(row.tool_alias)
+      if (!adoption.receipt || !adoption.tools?.some(tool => tool.name === row.tool_alias)) fail()
+    }
+    if (row.claimed_at === null) {
+      if (row.tool_alias !== null || row.foreground_json !== null || row.settled_at !== null) fail()
+    } else {
+      int(row.claimed_at, 1, 8_640_000_000_000_000)
+      if (row.settled_at !== null) int(row.settled_at, row.claimed_at, 8_640_000_000_000_000)
+    }
+    if (row.status === 'claimed' && row.settled_at !== null) fail()
+    if (row.foreground_json !== null) {
+      if (row.tool_alias === null || row.claimed_at === null || Buffer.byteLength(row.foreground_json) > 4096
+        || witnessJson(JSON.parse(row.foreground_json), this.config, row.plan_id, row.tool_alias,
+          row.arguments_digest, row.call_key) !== row.foreground_json) fail()
+    }
     const call: CreationCapabilityCall = { key: row.call_key, status: row.status }
     if (row.result_json !== null) {
       if (Buffer.byteLength(row.result_json) > 65536) fail()
@@ -389,22 +444,33 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
       this.db.prepare('UPDATE adoptions SET status=?,reason=? WHERE plan_id=?').run(status, reason, planId)
     })
   }
-  claimCall(input: { planId: string; key: string; argumentsDigest: string }): { created: boolean; call: CreationCapabilityCall } {
+  claimCall(input: { planId: string; key: string; argumentsDigest: string; toolAlias?: string;
+    foreground?: CreationCapabilityForegroundCallWitness }): { created: boolean; call: CreationCapabilityCall } {
     str(input.planId); str(input.key); str(input.argumentsDigest, SHA, 64)
     return this.transaction(() => {
       const row = this.row(input.planId); if (!row) fail()
       const record = this.decode(row)
+      if (input.toolAlias !== undefined && (!record.tools?.some(tool => tool.name === input.toolAlias)
+        || str(input.toolAlias) !== input.toolAlias)) fail()
+      if (input.foreground !== undefined && input.toolAlias === undefined) fail()
+      const foreground = input.foreground === undefined ? null : witnessJson(input.foreground, this.config,
+        input.planId, input.toolAlias!, input.argumentsDigest, input.key)
       const prior = this.db.prepare('SELECT * FROM calls WHERE plan_id=? AND call_key=?').get(input.planId,input.key) as CallRow | undefined
       if (prior) {
-        if (prior.arguments_digest !== input.argumentsDigest) fail()
-        return { created: false, call: this.decodeCall(prior) }
+        if (prior.arguments_digest !== input.argumentsDigest
+          || (input.toolAlias !== undefined && prior.tool_alias !== null && prior.tool_alias !== input.toolAlias)
+          || (prior.foreground_json !== null && foreground === null)
+          || (foreground !== null && prior.foreground_json !== null && prior.foreground_json !== foreground)
+          || (foreground !== null && prior.foreground_json === null && prior.claimed_at !== null)) fail()
+        return { created: false, call: this.decodeCall(prior, record) }
       }
-      if (record.status !== 'active' || !record.receipt || Date.now() >= record.receipt.expiresAt) fail()
+      const now = Date.now()
+      if (record.status !== 'active' || !record.receipt || now >= record.receipt.expiresAt) fail()
       const global = (this.db.prepare('SELECT COUNT(*) AS n FROM calls').get() as { n: number }).n
       const local = (this.db.prepare('SELECT COUNT(*) AS n FROM calls WHERE plan_id=?').get(input.planId) as { n: number }).n
       if (global >= this.config.maxCallRecords || local >= this.config.maxCallsPerAdoption) fail()
-      this.db.prepare("INSERT INTO calls(plan_id,call_key,arguments_digest,status) VALUES (?,?,?,'claimed')")
-        .run(input.planId,input.key,input.argumentsDigest)
+      this.db.prepare("INSERT INTO calls(plan_id,call_key,arguments_digest,status,tool_alias,foreground_json,claimed_at) VALUES (?,?,?,'claimed',?,?,?)")
+        .run(input.planId,input.key,input.argumentsDigest,input.toolAlias ?? null,foreground,now)
       return { created: true, call: { key: input.key, status: 'claimed' } }
     })
   }
@@ -417,14 +483,41 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
       const row = this.db.prepare('SELECT * FROM calls WHERE plan_id=? AND call_key=?').get(input.planId,input.key) as CallRow | undefined
       if (!row || row.status !== 'claimed') fail()
       this.decodeCall(row)
-      this.db.prepare('UPDATE calls SET status=?,result_json=?,job_id=? WHERE plan_id=? AND call_key=? AND status=\'claimed\'')
-        .run(input.status,resultJson,jobId,input.planId,input.key)
+      this.db.prepare('UPDATE calls SET status=?,result_json=?,job_id=?,settled_at=? WHERE plan_id=? AND call_key=? AND status=\'claimed\'')
+        .run(input.status,resultJson,jobId,row.claimed_at === null ? null : Math.max(Date.now(), row.claimed_at),input.planId,input.key)
+    })
+  }
+  /** Host-only bounded metadata; never expose candidate arguments, results or private artifact bytes. */
+  listCallEvidence(planId: string): readonly CreationCapabilityCallEvidence[] {
+    this.checkFiles()
+    const adoption = this.row(planId)
+    if (!adoption) return []
+    const record = this.decode(adoption)
+    const rows = this.db.prepare('SELECT * FROM calls WHERE plan_id=? ORDER BY call_key').all(planId) as unknown as CallRow[]
+    if (rows.length > this.config.maxCallsPerAdoption || (rows.length > 0 && !record.receipt)) fail()
+    if (!record.receipt) return []
+    const receiptDigest = digest(record.receipt)
+    return rows.map(row => {
+      this.decodeCall(row, record)
+      const tool = record.tools?.find(item => item.name === row.tool_alias)
+      return { protocol: 'dsh-created-capability-call-evidence/v1' as const,
+        planId, key: row.call_key, status: row.status,
+        attribution: row.claimed_at === null ? 'legacy-unattributed' as const
+          : row.foreground_json === null ? 'unattributed' as const : 'foreground' as const,
+        ...(row.tool_alias === null ? {} : { toolAlias: row.tool_alias }),
+        ...(tool === undefined ? {} : { originalName: tool.originalName }),
+        receiptDigest, artifactSha256: record.receipt!.artifactSha256, schemaDigest: record.receipt!.schemaDigest,
+        ...(row.claimed_at === null ? {} : { claimedAt: row.claimed_at }),
+        ...(row.settled_at === null ? {} : { settledAt: row.settled_at }),
+        ...(row.foreground_json === null ? {} : { foreground: JSON.parse(row.foreground_json) as CreationCapabilityForegroundCallWitness }),
+      }
     })
   }
   recoverClaims(): void {
     this.transaction(() => {
       this.db.prepare("UPDATE adoptions SET status='unknown',reason='recovered-claim' WHERE status='claimed'").run()
-      this.db.prepare("UPDATE calls SET status='unknown' WHERE status='claimed'").run()
+      this.db.prepare("UPDATE calls SET status='unknown',settled_at=CASE WHEN claimed_at IS NULL THEN NULL ELSE max(claimed_at,?) END WHERE status='claimed'")
+        .run(Date.now())
     })
   }
   close(): void { this.db.close() }
