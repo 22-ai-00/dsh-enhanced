@@ -2,6 +2,7 @@ import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type Ado
 import { CreationCapabilityJournal, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
 import { CreationCapabilityRuntime } from './creation-capability-runtime.js'
 import { inspectCreationCapabilityTaskAssociations } from './creation-capability-feedback.js'
+import { captureCreationCapabilitySource } from './creation-capability-source.js'
 import type { CreationCapabilityConfig, CreationCapabilityRecord } from './creation-capability-types.js'
 import { lstat, readFile, realpath } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
@@ -10,7 +11,7 @@ import { createHash, createPublicKey, randomBytes } from 'node:crypto'
 import type { AssistantDeliveryService, ForegroundTaskObservationRegistration, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { sourceGrowthRunDigest, validateCreationAcceptanceAuthorityRef, verifyPluginCreationVerificationCertificate,
+import { isSourceOwnerContinuation, sourceGrowthRunDigest, validateCreationAcceptanceAuthorityRef, verifyPluginCreationVerificationCertificate,
   validateSourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate,
   type PluginCreationVerificationRequest, type PluginCreationVerificationResult,
   type SourceGrowthRunBinding, type SourceGrowthRunProducer } from '@dsh-enhanced/assistant-growth-contract'
@@ -517,6 +518,23 @@ export class PluginControlPlaneService extends Service {
                 await this.inspectPreparedCreationReviewContext(planId, signal)
                 if (!this.inspectVerifiedCreation(planId)) throw new Error('created capability independent certificate changed')
               },
+              captureSource: async (planId, signal) => {
+                const combined = AbortSignal.any([this.abort.signal, signal, AbortSignal.timeout(120_000)])
+                const prepared = this.inspectPreparedCreation(planId)
+                const certificate = this.inspectVerifiedCreation(planId)
+                if (!certificate) throw new Error('created capability source lacks a fresh certificate')
+                const trust = await this.boundTrust()
+                combined.throwIfAborted()
+                const source = await captureCreationCapabilitySource({ worktree: prepared.plan.worktree,
+                  baseCommit: prepared.plan.baseCommit, scope: [...prepared.plan.scope].sort(), certificate,
+                  environment: inheritedEnvironment(trust), signal: combined })
+                combined.throwIfAborted()
+                const latest = this.inspectVerifiedCreation(planId)
+                if (!latest || controlPlaneDigest(latest) !== controlPlaneDigest(certificate)) {
+                  throw new Error('created capability source changed during capture')
+                }
+                return source
+              },
               inspectRetained: record => this.withRetainedCreatedCapabilityCurrent(record, () => ({
                 certificate: record.certificate, artifact: record.artifact, owner: config.owner })),
               recheckRetained: async (record, signal) => {
@@ -895,6 +913,30 @@ export class PluginControlPlaneService extends Service {
   inspectCreatedCapabilityCalls = (planId: string) => {
     this.abort.signal.throwIfAborted()
     return this.creationCapabilityRuntime?.inspectCallEvidence(planId) ?? []
+  }
+
+  /** Host-only historical source data. It grants no continuation, activation or replacement. */
+  inspectCreatedCapabilitySource = (planId: string) => {
+    this.abort.signal.throwIfAborted()
+    const owner = this.config.creationCapabilities?.owner
+    const delivery = this.ctx.get('assistantDelivery' as never, false) as AssistantDeliveryService | undefined
+    if (!owner || !delivery || typeof delivery.validateOwnerRoute !== 'function') return undefined
+    try {
+      const before = delivery.validateOwnerRoute(owner)
+      const snapshot = this.creationCapabilityRuntime?.inspectSourceEvidence(planId)
+      if (!snapshot) return undefined
+      this.assertCreatedCapabilityAssociationSource(snapshot.record)
+      const { plan, reference } = this.store.getRetainedPreparedCreation(planId)
+      if (!isSourceOwnerContinuation(before, reference.owner)
+        || snapshot.archive.source.baseCommit !== plan.baseCommit
+        || controlPlaneDigest(snapshot.archive.source.scope) !== controlPlaneDigest([...plan.scope].sort())
+        || controlPlaneDigest(before) !== controlPlaneDigest(delivery.validateOwnerRoute(owner))) return undefined
+      const source = snapshot.archive.source
+      return Object.freeze({ ...snapshot.archive, source: Object.freeze({ ...source,
+        scope: Object.freeze([...source.scope]), entries: Object.freeze(source.entries.map(entry => Object.freeze({ ...entry }))),
+        files: Object.freeze(source.files.map(file => Object.freeze({ ...file }))),
+      }) })
+    } catch { return undefined }
   }
 
   /** Host-only current association of exact adopted call versions with authenticated task heads. */

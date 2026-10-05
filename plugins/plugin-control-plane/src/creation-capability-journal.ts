@@ -3,14 +3,17 @@ import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFi
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { canonicalGrowthJson, validatePluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { validateCreationCapabilitySource, type CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import type { CreationCapabilityCall, CreationCapabilityCallEvidence, CreationCapabilityConfig,
   CreationCapabilityForegroundCallWitness, CreationCapabilityJournalPort,
-  CreationCapabilityReceipt, CreationCapabilityRecord, CreationCapabilityTool } from './creation-capability-types.js'
+  CreationCapabilityReceipt, CreationCapabilityRecord, CreationCapabilitySourceArchive, CreationCapabilityTool } from './creation-capability-types.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u
 const SHA = /^[a-f0-9]{64}$/u
 const APP_ID = 0x44534341
 const SEMANTICS = 'dsh-created-capability-journal/v1:reserve-before-dispatch:unknown-no-retry:finite-owner-grant'
+const SOURCE_ARCHIVE_LIMIT = 2 * 1024 * 1024
+const SOURCE_ARCHIVE_DOMAIN = 'dsh-created-capability-source-archive-v1\0'
 function fail(): never { throw new Error('creation capability journal rejected input or state') }
 function obj(value: unknown, expected: readonly string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype
@@ -228,7 +231,13 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
             ALTER TABLE calls ADD COLUMN claimed_at INTEGER;
             ALTER TABLE calls ADD COLUMN settled_at INTEGER;
             PRAGMA user_version=2;`)
-        } else if (app !== APP_ID || version !== 2) fail()
+        } else if (app !== APP_ID || ![2, 3].includes(version)) fail()
+        if (version !== 3) {
+          this.db.exec(`CREATE TABLE source_archives (
+            plan_id TEXT PRIMARY KEY REFERENCES adoptions(plan_id),
+            archive_json TEXT NOT NULL CHECK(json_valid(archive_json) AND length(archive_json)<=${SOURCE_ARCHIVE_LIMIT})
+          ) STRICT, WITHOUT ROWID; PRAGMA user_version=3;`)
+        }
         const row = this.db.prepare('SELECT * FROM authority WHERE authority_id=?').get(this.config.authorityId) as
           { authority_digest: string; key_id: string; public_key: string; config_json: string } | undefined
         const count = (this.db.prepare('SELECT COUNT(*) AS n FROM authority').get() as { n: number }).n
@@ -359,7 +368,8 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
     if (row.job_id !== null) call.jobId = str(row.job_id)
     return call
   }
-  claim(input: { certificate: CreationCapabilityRecord['certificate']; artifact: Buffer }): { created: boolean; record: CreationCapabilityRecord } {
+  claim(input: { certificate: CreationCapabilityRecord['certificate']; artifact: Buffer;
+    source?: CreationCapabilitySourceSnapshot }): { created: boolean; record: CreationCapabilityRecord } {
     validatePluginCreationVerificationCertificate(input.certificate)
     if (!Buffer.isBuffer(input.artifact) || input.artifact.length < 1 || input.artifact.length > 524288) fail()
     const certificate = input.certificate, now = Date.now(), bytes = Buffer.from(input.artifact)
@@ -368,19 +378,61 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
       || certificate.authority.authorityId === this.config.authorityId
       || now >= this.config.expiresAt || now >= this.config.runner.expiresAt || now >= certificate.expiresAt) fail()
     const certificateJson = json(certificate)
+    let archiveJson: string | undefined
+    if (input.source !== undefined) {
+      validateCreationCapabilitySource(input.source, certificate)
+      const body: Omit<CreationCapabilitySourceArchive, 'signature'> = {
+        protocol: 'dsh-created-capability-source-archive/v1', authorityId: this.config.authorityId,
+        authorityDigest: this.authorityDigest, keyId: this.config.keyId, planId: certificate.plan.id,
+        certificateDigest: sha(certificateJson), artifactSha256: sha(bytes), source: input.source,
+      }
+      archiveJson = json({ ...body, signature: sign(null,
+        Buffer.from(SOURCE_ARCHIVE_DOMAIN + json(body, SOURCE_ARCHIVE_LIMIT)), this.key).toString('base64url') }, SOURCE_ARCHIVE_LIMIT)
+    }
     return this.transaction(() => {
       const prior = this.row(certificate.plan.id)
       if (prior) {
         const record = this.decode(prior)
         if (prior.certificate_digest !== sha(certificateJson) || prior.artifact_sha !== sha(bytes)
           || !record.artifact.equals(bytes)) fail()
+        if (archiveJson !== undefined) {
+          const existing = this.db.prepare('SELECT archive_json FROM source_archives WHERE plan_id=?')
+            .get(certificate.plan.id) as { archive_json: string } | undefined
+          if (existing?.archive_json !== archiveJson) fail()
+        }
         return { created: false, record }
       }
       if ((this.db.prepare('SELECT COUNT(*) AS n FROM adoptions').get() as { n: number }).n >= this.config.maxAdoptions) fail()
       this.db.prepare("INSERT INTO adoptions(plan_id,status,certificate_json,certificate_digest,artifact,artifact_sha) VALUES (?,'claimed',?,?,?,?)")
         .run(certificate.plan.id, certificateJson, sha(certificateJson), bytes, sha(bytes))
+      if (archiveJson !== undefined) this.db.prepare('INSERT INTO source_archives VALUES (?,?)').run(certificate.plan.id, archiveJson)
       return { created: true, record: this.decode(this.row(certificate.plan.id)!) }
     })
+  }
+
+  /** Archive validation is lazy; adoption reconciliation never loads source text. */
+  inspectSourceArchive(planId: string): CreationCapabilitySourceArchive | undefined {
+    const record = this.inspect(planId)
+    if (!record?.receipt) return undefined
+    const row = this.db.prepare('SELECT archive_json FROM source_archives WHERE plan_id=?')
+      .get(planId) as { archive_json: string } | undefined
+    if (!row) return undefined
+    if (Buffer.byteLength(row.archive_json) > SOURCE_ARCHIVE_LIMIT) fail()
+    const value = JSON.parse(row.archive_json) as unknown
+    const item = obj(value, ['protocol','authorityId','authorityDigest','keyId','planId','certificateDigest','artifactSha256','source','signature'])
+    if (item.protocol !== 'dsh-created-capability-source-archive/v1'
+      || item.authorityId !== this.config.authorityId || item.authorityDigest !== this.authorityDigest
+      || item.keyId !== this.config.keyId || item.planId !== record.planId
+      || item.certificateDigest !== digest(record.certificate)
+      || item.artifactSha256 !== record.certificate.plan.artifactSha256) fail()
+    validateCreationCapabilitySource(item.source, record.certificate)
+    const signature = str(item.signature, /^[A-Za-z0-9_-]{86}$/u, 86)
+    const { signature: _signature, ...body } = item
+    if (json(value, SOURCE_ARCHIVE_LIMIT) !== row.archive_json
+      || Buffer.from(signature, 'base64url').toString('base64url') !== signature
+      || !verify(null, Buffer.from(SOURCE_ARCHIVE_DOMAIN + json(body, SOURCE_ARCHIVE_LIMIT)),
+        createPublicKey(this.key), Buffer.from(signature, 'base64url'))) fail()
+    return value as CreationCapabilitySourceArchive
   }
   private validateTools(value: unknown): asserts value is CreationCapabilityTool[] {
     if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length < 1
