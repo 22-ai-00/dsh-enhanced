@@ -2528,6 +2528,19 @@ export class ControlPlaneStore {
     const owner = this.getOwnerTaskFailureReference(plan.gapId)
     if (owner === undefined) throw new ControlPlaneStoreError('invalid-state', 'prepared creation requires an owner task failure gap')
     this.#assertOwnerTaskFailureGapAdmission(plan.gapId)
+    return this.getRetainedPreparedCreation(planId).job
+  }
+
+  /** Read-only exact historical binding for an already signed adoption. Caller must hold the current owner fence. */
+  getRetainedPreparedCreation(planId: string): { plan: PluginSourcePlan; job: SourceJobRecord;
+    reference: OwnerTaskFailureReference } {
+    const plan = this.getSourcePlan(planId)
+    if (plan.mode !== 'prepared-create' || !['pending-approval', 'expired'].includes(plan.status)
+      || plan.creation === undefined || plan.preparedEvidence === undefined || plan.sourceCheck === undefined) {
+      throw new ControlPlaneStoreError('invalid-state', 'retained creation requires exact prepared evidence')
+    }
+    const owner = this.getOwnerTaskFailureReference(plan.gapId)
+    if (owner === undefined) throw new ControlPlaneStoreError('invalid-state', 'retained creation requires an owner task failure gap')
     const row = this.#database.prepare('SELECT * FROM source_jobs WHERE plan_id = ?')
       .get(plan.id) as unknown as SourceJobRow | undefined
     if (row === undefined) throw new ControlPlaneStoreError('invalid-state', 'prepared creation has no source job')
@@ -2546,7 +2559,7 @@ export class ControlPlaneStore {
       || plan.expiresAt !== plan.createdAt + job.intent.ttlMs) {
       throw new ControlPlaneStoreError('invalid-state', 'prepared creation source job binding is corrupt')
     }
-    return job
+    return { plan, job, reference: owner }
   }
 
   /** Host-only package bytes for an owner-admitted, still-pending created plugin. */

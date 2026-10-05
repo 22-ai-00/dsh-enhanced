@@ -215,7 +215,7 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
     try { key = createPublicKey(policy.publicKey) } catch { throw new Error('plugin-control-plane: creation verification public key is invalid') }
     if (!policy.publicKey.startsWith('-----BEGIN PUBLIC KEY-----\n') || key.asymmetricKeyType !== 'ed25519' || key.type !== 'public'
       || key.export({ format: 'pem', type: 'spki' }).toString() !== policy.publicKey
-      || policy.authority.expiresAt <= Date.now()
+      || (policy.authority.expiresAt <= Date.now() && config.creationCapabilities?.retention === undefined)
       || !config.sourceJobs?.creation || policy.authority.namePrefix !== config.sourceJobs.creation.namePrefix
       || policy.authority.expiresAt > Math.min(config.sourceJobs.creation.expiresAt, config.sourceJobs.expiresAt)) {
       throw new Error('plugin-control-plane: creation verification authority does not match finite source creation grant')
@@ -515,6 +515,13 @@ export class PluginControlPlaneService extends Service {
               recheck: async (planId, signal) => {
                 await this.inspectPreparedCreationReviewContext(planId, signal)
                 if (!this.inspectVerifiedCreation(planId)) throw new Error('created capability independent certificate changed')
+              },
+              inspectRetained: record => this.withRetainedCreatedCapabilityCurrent(record, () => ({
+                certificate: record.certificate, artifact: record.artifact, owner: config.owner })),
+              recheckRetained: async (record, signal) => {
+                signal.throwIfAborted()
+                this.withRetainedCreatedCapabilityCurrent(record, () => undefined)
+                signal.throwIfAborted()
               },
               withCurrent: (record, callback) => this.withCreatedCapabilityCurrent(record, callback),
               assertCaller: (_record, execution) => {
@@ -877,6 +884,9 @@ export class PluginControlPlaneService extends Service {
 
   private withCreatedCapabilityCurrent<T>(record: CreationCapabilityRecord, callback: () => T): T {
     this.abort.signal.throwIfAborted()
+    if (record.status === 'active' && record.receipt?.protocol === 'dsh-created-capability-adoption/v2') {
+      return this.withRetainedCreatedCapabilityCurrent(record, callback)
+    }
     const certificate = this.inspectVerifiedCreation(record.planId)
     if (!certificate || controlPlaneDigest(certificate) !== controlPlaneDigest(record.certificate)) {
       throw new Error('created capability certificate or current source changed')
@@ -884,6 +894,52 @@ export class PluginControlPlaneService extends Service {
     return this.withPreparedCreationFence({ planId: record.planId, planDigest: certificate.plan.digest,
       artifactSha256: certificate.plan.artifactSha256, growthRunDigest: certificate.source.growthRunDigest,
       referenceDigest: certificate.source.referenceDigest }, callback)
+  }
+
+  /** Historical signed evidence and immutable job are checked under the current canonical owner writer fence. */
+  private withRetainedCreatedCapabilityCurrent<T>(record: CreationCapabilityRecord, callback: () => T): T {
+    this.abort.signal.throwIfAborted()
+    const receipt = record.receipt
+    const config = this.config.creationVerifications
+    if (!receipt || receipt.protocol !== 'dsh-created-capability-adoption/v2' || !config
+      || !verifyPluginCreationVerificationCertificate(record.certificate, config.authority,
+        config.publicKey, receipt.adoptedAt)) {
+      throw new Error('created capability retained certificate is invalid')
+    }
+    const historical = this.store.getRetainedPreparedCreation(record.planId)
+    return this.taskGaps.withCurrent(historical.plan.gapId, historical.reference.owner, () => {
+      this.abort.signal.throwIfAborted()
+      const { plan, job, reference } = this.store.getRetainedPreparedCreation(record.planId)
+      const certificate = this.store.getCreationVerification(record.planId)
+      const growth = plan.creation?.growthRun
+      const creation = plan.creation
+      const ownerGrant = this.config.creationCapabilities?.owner
+      const artifactSha256 = createHash('sha256').update(record.artifact).digest('hex')
+      if (!certificate || controlPlaneDigest(certificate) !== controlPlaneDigest(record.certificate)
+        || !growth || !creation || !ownerGrant || !job.intent.creation?.growthRun
+        || !plan.sourceCheck || !plan.preparedEvidence
+        || plan.id !== receipt.planId || plan.digest !== receipt.planDigest
+        || plan.name !== record.certificate.plan.name || plan.generatorDigest !== record.certificate.plan.generatorDigest
+        || plan.sourceCheck.treeDigest !== record.certificate.plan.sourceTreeDigest
+        || plan.sourceCheck.patchDigest !== record.certificate.plan.sourcePatchDigest
+        || plan.preparedEvidence.pack.sha256 !== record.certificate.plan.artifactSha256
+        || plan.preparedEvidence.pack.sizeBytes !== record.certificate.plan.artifactBytes
+        || artifactSha256 !== record.certificate.plan.artifactSha256
+        || record.artifact.length !== record.certificate.plan.artifactBytes
+        || controlPlaneDigest(reference) !== record.certificate.source.referenceDigest
+        || controlPlaneDigest(reference.owner) !== record.certificate.source.ownerDigest
+        || sourceGrowthRunDigest(growth) !== record.certificate.source.growthRunDigest
+        || sourceGrowthRunDigest(job.intent.creation.growthRun) !== record.certificate.source.growthRunDigest
+        || controlPlaneDigest(growth.model) !== controlPlaneDigest(record.certificate.model)
+        || controlPlaneDigest(growth.creationAcceptance) !== controlPlaneDigest(config.authority)
+        || controlPlaneDigest(creation.grant) !== controlPlaneDigest(this.config.sourceJobs?.creation)
+        || Object.keys(ownerGrant).some(key =>
+          reference.owner[key as keyof typeof reference.owner]
+            !== ownerGrant[key as keyof typeof ownerGrant])) {
+        throw new Error('created capability retained source binding changed')
+      }
+      return callback()
+    })
   }
 
   private assertSourceGrowthRun(expected: SourceGrowthRunBinding, gapId: string, owner: SourceJobOwnerReceipt, generation: boolean): void {

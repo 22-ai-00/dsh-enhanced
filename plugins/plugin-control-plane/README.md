@@ -352,6 +352,8 @@ creationCapabilities:
   maxCallsPerAdoption: 20
   maxCallRecords: 60
   maxInputBytes: 4096
+  retention:
+    maximumLifetimeMs: 2592000000 # optional: 30 days after adoption
   runner:
     stateRoot: /private/owner/capability-runner
     image: sha256:<64-hex-plugin-verifier-image-id>
@@ -363,15 +365,15 @@ creationCapabilities:
     maxOutputBytes: 65536
 ```
 
-原生 SourceJobs 续跑自动消费精确验收凭证、复验工作树和当前 canonical 来源，先持久 claim，再独立发现工具 schema，签发绑定制品、来源、schema、别名、授权和期限的采用回执。`statePath/creation-adoptions.sqlite` 保存不可变授权、512 KiB 内精确包及累计额度；更换 runner 状态目录不能重置采用额度，修改同一 ledger 的授权定义会拒绝。失败或 unknown 消费额度，不自动重放；重启只恢复已授权的同一凭证和制品，不重新发现或签发。模型没有采用、签名或账本工具。
+原生 SourceJobs 续跑自动消费精确验收凭证、复验工作树和当前 canonical 来源，先持久 claim，再独立发现工具 schema，签发绑定制品、来源、schema、别名、授权和期限的采用回执。`retention` 是显式可选授权，取值为 1 ms 至 30 天；仅对已完成首次采用的版本生效。首次采用仍须新鲜验收凭证、创建授权和完整源码复验。配置 retention 时采用回执使用 v2，使用截止时间固定为采用时刻加 `maximumLifetimeMs`、`creationCapabilities.expiresAt`、`runner.expiresAt` 三者最早者；重启不重新计时。没有 retention 的旧配置和 v1 回执继续在原验收窗口结束时失效。`statePath/creation-adoptions.sqlite` 保存不可变授权、512 KiB 内精确包及累计额度；更换 runner 状态目录不能重置采用额度，修改同一 ledger 的授权定义会拒绝。失败或 unknown 消费额度，不自动重放；重启只恢复已授权的同一凭证和制品，不重新发现或签发。模型没有采用、签名或账本工具。
 
 Host 用真实 Cordis Fiber 动态注册受控 `evolved_<插件名>_<plan hash>_<序号>` 原生工具入口。候选代码在每次 discovery/invoke 的独立离线 Docker 子进程中创建自己的 Cordis Context 并挂载；Host 不导入候选代码。当前只支持原生 Tools/SystemPrompt 服务的有界纯工具插件；每次调用新建 candidate Context，不支持跨调用候选内存状态或任意 Host 服务桥接。包读取、临时制品、容器、Docker 子进程、私有 ledger 和密钥读取属于本授权；容器无 Host 挂载、网络或凭据，不执行包安装脚本。限制详见 [行为执行器](../../scripts/isolation/README.md#plugin-behavior-verifier-image)。
 
 调用经过原生 ToolRuntime/Policy，须由 Delivery 证明当前注册的真实 Agent、Session 和 owner lineage；Policy 还须允许该 owner scope 下的准确工具别名或有限别名模式。输入、结果和累计调用均有界；同一 Agent Session/call id/参数的已完成调用回读缓存，unknown 不再派发。候选注释不进入 Host 描述，输出作为不可信数据。每次异步检查后、派发前和落账前重验真实调用者与 canonical 来源，撤权或纠正期间的迟到结果不能变成成功。
 
-同一主人 `/new` 后的新任务可在原授权窗口内调用已有入口。任务来源保留原执行绑定，源码作业、Growth run、验收与采用凭证的完整摘要不改写；当前 route 必须仍属于同一主人记录、版本和授权，且会话代次不能倒退。切换 Session 不续期、不补充额度、不重新派发 unknown，也不建立跨窗口或版本替换权限。
+同一主人 `/new` 后的新任务可在使用授权截止前调用已有入口。任务来源保留原执行绑定，源码作业、Growth run、验收与采用凭证的完整摘要不改写；当前 route 必须仍属于同一主人记录、版本和授权，且会话代次不能倒退。已采用 v2 版本在单个创建作业、计划 TTL、Growth run 和证书到期后，仍可在原使用授权期限内，从冻结的签名 journal 和 Store 计划/作业/来源核对历史证据，并继续检查当前主人和 canonical 纠正/撤回；即使原准备制品被 GC，也只执行 journal 中冻结的包。切换 Session 不续期、不补充额度、不重新派发 unknown，也不授予版本替换权限。
 
-Evaluation 纠正/撤回通知自动重验并卸载对应入口；到期、来源漂移也关闭该版本，其他 Host 插件保留。源码 producer 暂缺时只暂停入口，恢复原来源后可重新挂同一凭证。采用有效期还受原验收、任务/SourceJobs 和源码计划窗口约束，不授予跨窗口永久使用。源计划仍为 `pending-approval`，旧修改审批、PR、npm 发布和整 profile 采用门不变；Host-only `inspectCreatedCapability(planId)` 返回采用状态和别名。动态卸载是本能力的撤销路径，真实后续收益、版本替换回退和普通使用部署仍属完整目标的下一次验收。
+Evaluation 纠正/撤回通知自动重验并卸载对应入口；到期、来源漂移也关闭该版本，其他 Host 插件保留。旧 v1 模式的源码 producer 暂缺时只暂停入口，恢复原来源后可重新挂同一凭证。v2 已采用版本不依赖过期的原 Growth producer；其历史验签时间固定为采用时刻，不可用于首次采用或新签收据。源计划可以按原规则从 `pending-approval` 过期并清理原制品；旧修改审批、PR、npm 发布和整 profile 采用门不变。Host-only `inspectCreatedCapability(planId)` 返回采用状态和别名。动态卸载是本能力的撤销路径，真实后续收益、版本替换回退和普通使用部署仍属完整目标的下一次验收。
 
 ### 普通任务修复的有限审批
 
