@@ -11,6 +11,7 @@ import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from 
 import { CreationCapabilityJournal, creationCapabilityPublicKey, validateCreationCapabilityConfig,
   verifyCreationCapabilityReceipt } from '../src/creation-capability-journal.js'
 import { CreationCapabilityRuntime } from '../src/creation-capability-runtime.js'
+import { creationCapabilitySourceDigest, type CreationCapabilitySourceSnapshot } from '../src/creation-capability-source.js'
 import type { CreationCapabilityConfig, CreationCapabilityForegroundCallWitness, CreationCapabilityPorts, CreationCapabilityRunner,
   CreationCapabilityTool } from '../src/creation-capability-types.js'
 
@@ -53,7 +54,30 @@ function fixture(maxAdoptions = 2, maxCalls = 3) {
     }
     return { ...unsigned, signature: sign(null, Buffer.from(canonicalGrowthJson(unsigned)), verifier.privateKey).toString('base64url') }
   }
-  return { root, config, path, artifact, certificate, signing }
+  return { root, config, path, artifact, certificate, signing, verifier }
+}
+
+function archivedFixture(f: ReturnType<typeof fixture>, planId = 'one') {
+  const certificate = f.certificate(planId)
+  const baseCommit = '1'.repeat(40), content = 'export const answer = 42\n'
+  const path = `plugins/${certificate.plan.name}/src/index.ts`, bytes = Buffer.from(content)
+  const oid = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')
+  const scope = [`plugins/${certificate.plan.name}`, 'plugins/README.md', 'pnpm-lock.yaml'].sort()
+  const entries = [{ path: 'plugins/README.md', mode: '100644' as const, oid: '2'.repeat(40) },
+    { path, mode: '100644' as const, oid }, { path: 'pnpm-lock.yaml', mode: '100644' as const, oid: '3'.repeat(40) }]
+  const treeDigest = createHash('sha256').update(`dsh-source-tree-v2\0${baseCommit}\0${JSON.stringify(scope)}\0`)
+    .update(entries.map(entry => `${entry.mode} ${entry.oid} 0\t${entry.path}\0`).join('')).digest('hex')
+  const payload: Omit<CreationCapabilitySourceSnapshot, 'digest'> = {
+    protocol: 'dsh-created-capability-source/v1', baseCommit, scope, treeDigest,
+    patchDigest: certificate.plan.sourcePatchDigest, entries,
+    files: [{ path, mode: '100644', oid, bytes: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'), content }],
+  }
+  const source = { ...payload, digest: creationCapabilitySourceDigest(payload) }
+  const { signature: _signature, ...body } = certificate
+  body.plan = { ...body.plan, sourceTreeDigest: treeDigest }
+  return { source, certificate: { ...body, signature: sign(null,
+    Buffer.from(canonicalGrowthJson(body)), f.verifier.privateKey).toString('base64url') } }
 }
 const tools: CreationCapabilityTool[] = [{ originalName: 'echo', name: 'generated_echo', description: 'Echo', parameters: { type: 'object' } }]
 const callKey = (planId: string, sessionId: string, callId: string, toolName: string) =>
@@ -77,6 +101,92 @@ test('owner key and config preflight are read-only and reject unsafe fields', ()
   Object.defineProperty(bad, 'keyPath', { enumerable: true, get() { invoked = true; return f.config.keyPath } })
   expect(() => validateCreationCapabilityConfig(bad)).toThrow()
   expect(invoked).toBe(false)
+})
+
+test('historical signed source survives expiry, closure and restart without renewed quota', () => {
+  const f = fixture(1, 1), prepared = archivedFixture(f)
+  let journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  journal.claim({ ...prepared, artifact: f.artifact })
+  expect(journal.inspectSourceArchive('one')).toBeUndefined() // No adopted receipt yet.
+  journal.authorize('one', tools); journal.activate('one')
+  const receipt = journal.inspect('one')!.receipt!, authorityDigest = journal.authorityDigest
+  const original = journal.inspectSourceArchive('one')!
+  expect(original.source).toEqual(prepared.source)
+  journal.claimCall({ planId: 'one', key: 'uncertain', argumentsDigest: d('a') })
+  journal.settle('one', 'closed', 'owner-corrected')
+  journal.close()
+  vi.spyOn(Date, 'now').mockReturnValue(f.config.expiresAt + 1)
+  journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  try {
+    journal.recoverClaims()
+    expect(journal.authorityDigest).toBe(authorityDigest)
+    expect(journal.inspect('one')?.receipt).toEqual(receipt)
+    expect(journal.inspectSourceArchive('one')).toEqual(original)
+    expect(journal.listCallEvidence('one')).toMatchObject([{ status: 'unknown' }])
+    expect(() => journal.claimCall({ planId: 'one', key: 'new-call', argumentsDigest: d('a') })).toThrow()
+    expect(() => journal.claim({ certificate: f.certificate('two'), artifact: f.artifact })).toThrow()
+  } finally { journal.close() }
+})
+
+test('source insertion failure rolls back the adoption reservation and never backfills a legacy claim', () => {
+  const f = fixture(1), prepared = archivedFixture(f)
+  const journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  const db = new DatabaseSync(f.path)
+  try {
+    db.exec("CREATE TRIGGER reject_archive BEFORE INSERT ON source_archives BEGIN SELECT RAISE(ABORT,'fixture-storage-failure'); END")
+    expect(() => journal.claim({ ...prepared, artifact: f.artifact })).toThrow(/fixture-storage-failure/)
+    expect(journal.list()).toEqual([])
+    db.exec('DROP TRIGGER reject_archive')
+    journal.claim({ certificate: prepared.certificate, artifact: f.artifact })
+    const receipt = journal.authorize('one', tools).receipt
+    expect(journal.inspectSourceArchive('one')).toBeUndefined()
+    expect(() => journal.claim({ ...prepared, artifact: f.artifact })).toThrow()
+    expect(journal.inspect('one')?.receipt).toEqual(receipt)
+    expect(journal.inspectSourceArchive('one')).toBeUndefined()
+    expect(() => journal.claim({ certificate: f.certificate('two'), artifact: f.artifact })).toThrow()
+  } finally { db.close(); journal.close() }
+})
+
+test('lazy archive reads reject source and signature tampering without altering the signed adoption', () => {
+  const f = fixture(), prepared = archivedFixture(f)
+  const journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  journal.claim({ ...prepared, artifact: f.artifact }); journal.authorize('one', tools)
+  const original = journal.inspectSourceArchive('one')!, receipt = journal.inspect('one')!.receipt
+  const db = new DatabaseSync(f.path)
+  try {
+    const signature = Buffer.from(original.signature, 'base64url'); signature[0] = signature[0]! ^ 1
+    for (const tampered of [{ ...original, signature: signature.toString('base64url') },
+      { ...original, source: { ...original.source, files: original.source.files.map(file => ({ ...file, content: 'forged source' })) } },
+      { ...original, artifactSha256: d('a') }]) {
+      db.prepare('UPDATE source_archives SET archive_json=? WHERE plan_id=?').run(canonicalGrowthJson(tampered), 'one')
+      expect(() => journal.inspectSourceArchive('one')).toThrow()
+      expect(journal.inspect('one')?.receipt).toEqual(receipt)
+    }
+    db.prepare('UPDATE source_archives SET archive_json=? WHERE plan_id=?').run(canonicalGrowthJson(original), 'one')
+    expect(journal.inspectSourceArchive('one')).toEqual(original)
+  } finally { db.close(); journal.close() }
+})
+
+test('schema 2 migration preserves authority, receipts, calls and exhausted quota without invented source', () => {
+  const f = fixture(1, 1)
+  let journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  journal.claim({ certificate: f.certificate('one'), artifact: f.artifact }); journal.authorize('one', tools)
+  journal.activate('one')
+  const authorityDigest = journal.authorityDigest, receipt = journal.inspect('one')!.receipt
+  journal.claimCall({ planId: 'one', key: 'cached', argumentsDigest: d('a') })
+  journal.settleCall({ planId: 'one', key: 'cached', status: 'completed', result: { answer: 'original' } })
+  journal.close()
+  const db = new DatabaseSync(f.path)
+  try { db.exec('DROP TABLE source_archives; PRAGMA user_version=2') } finally { db.close() }
+  journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  try {
+    expect(journal.authorityDigest).toBe(authorityDigest)
+    expect(journal.inspect('one')?.receipt).toEqual(receipt)
+    expect(journal.inspectSourceArchive('one')).toBeUndefined()
+    expect(journal.claimCall({ planId: 'one', key: 'cached', argumentsDigest: d('a') }).call.result).toEqual({ answer: 'original' })
+    expect(() => journal.claimCall({ planId: 'one', key: 'new-call', argumentsDigest: d('b') })).toThrow()
+    expect(() => journal.claim({ certificate: f.certificate('two'), artifact: f.artifact })).toThrow()
+  } finally { journal.close() }
 })
 
 test('accepts immutable Docker image ID or repository digest, rejecting mutable tags', () => {
@@ -338,6 +448,7 @@ test('v1 calls migrate without backfilling evidence, quota or unknown state', ()
       INSERT INTO calls_v1 SELECT plan_id,call_key,arguments_digest,status,result_json,job_id FROM calls;
       DROP TABLE calls;
       ALTER TABLE calls_v1 RENAME TO calls;
+      DROP TABLE source_archives;
       PRAGMA user_version=1;
       COMMIT;`)
   } finally { raw.close() }
@@ -358,7 +469,7 @@ test('v1 calls migrate without backfilling evidence, quota or unknown state', ()
   } finally { reopened.close() }
   const check = new DatabaseSync(f.path)
   try {
-    expect((check.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(2)
+    expect((check.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(3)
     const rows = check.prepare('SELECT tool_alias,foreground_json,claimed_at,settled_at FROM calls').all() as
       Array<{ tool_alias: null; foreground_json: null; claimed_at: null; settled_at: null }>
     expect(rows).toEqual([{ tool_alias: null, foreground_json: null, claimed_at: null, settled_at: null },

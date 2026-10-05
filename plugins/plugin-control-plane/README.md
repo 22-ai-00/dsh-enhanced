@@ -377,6 +377,10 @@ Host-only `inspectCreatedCapabilityTaskAssociations(planId)` 将精确采用版�
 
 关联是查询时刻的只读快照，后续采用或晋升决策仍须重新取得当前认证证据；它不能证明因果收益、成本或延迟改善。`adoptionStatus` 是账本状态，`withinSignedUseWindow` 只比较原签名期限，不能代替当前挂载、owner 和剩余额度校验。在运行时成功启动的前提下，终止或过期版本及重启后的历史调用仍可关联当前反馈，不重新激活入口或恢复额度；运行时不可用或来源无法复验时返回空；空结果不能解释为负面收益或撤权决定。
 
+新 controller 在首次采用 claim 前，从同一个私有 Git index 采集精确 staged 源码，核对独立证书的 tree/patch 摘要，并在采用事务内保存独立签名的源码快照。仅保存插件文本（至多 64 文件、单文件 64 KiB、总计 256 KiB），catalog/lock 只保留索引 OID，不能据此重建整个 workspace。读取 Git blobs 而非工作文件，保留 staged 字节及 BOM；不执行候选脚本。离线读取复验源码字节、Git blob OID、tree 摘要与采用密钥签名；patch 摘要与冻结证书相等，但不声称能在缺少原 base/patch 时重新计算。采用账本 schema v3 将源码独立存储，常规恢复不加载源码；v1/v2 迁移保留旧授权、凭证、调用缓存、unknown 和额度，旧行没有源码且不会推测或补写。旧 controller 不得写 v3，升级须停止旧 writer。
+
+Host-only `inspectCreatedCapabilitySource(planId)` 返回冻结的历史源码数据，要求同一配置/密钥和当前 Delivery 认证 owner continuation，并复验 Store 中原计划、作业、来源、Growth run、模型与历史证书。已采用版本在工作区/准备制品清理、执行期限结束、入口关闭或原反馈更正/撤回后仍可读；owner 换代、授权哈希漂移、代次倒退或证据篡改拒绝。运行时必须成功启动；旧行或不可复验状态返回缺失，不能解释为允许重建历史。读取不激活插件、不延续原任务、不恢复额度、不授予替换版本权限；后续修复必须使用当前触发任务和新的有限授权。
+
 同一主人 `/new` 后的新任务可在使用授权截止前调用已有入口。任务来源保留原执行绑定，源码作业、Growth run、验收与采用凭证的完整摘要不改写；当前 route 必须仍属于同一主人记录、版本和授权，且会话代次不能倒退。已采用 v2 版本在单个创建作业、计划 TTL、Growth run 和证书到期后，仍可在原使用授权期限内，从冻结的签名 journal 和 Store 计划/作业/来源核对历史证据，并继续检查当前主人和 canonical 纠正/撤回；即使原准备制品被 GC，也只执行 journal 中冻结的包。切换 Session 不续期、不补充额度、不重新派发 unknown，也不授予版本替换权限。
 
 Evaluation 纠正/撤回通知自动重验并卸载对应入口；到期、来源漂移也关闭该版本，其他 Host 插件保留。旧 v1 模式的源码 producer 暂缺时只暂停入口，恢复原来源后可重新挂同一凭证。v2 已采用版本不依赖过期的原 Growth producer；其历史验签时间固定为采用时刻，不可用于首次采用或新签收据。源计划可以按原规则从 `pending-approval` 过期并清理原制品；旧修改审批、PR、npm 发布和整 profile 采用门不变。Host-only `inspectCreatedCapability(planId)` 返回采用状态和别名。动态卸载是本能力的撤销路径，真实后续收益、版本替换回退和普通使用部署仍属完整目标的下一次验收。

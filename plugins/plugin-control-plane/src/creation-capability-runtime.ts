@@ -210,7 +210,15 @@ export class CreationCapabilityRuntime {
       const pinned = this.ports.inspect(planId)
       if (!sameCertificate(current.certificate, pinned.certificate)
         || sha(current.artifact) !== sha(pinned.artifact)) fail('source changed before claim')
-      const claimed = this.journal.claim({ certificate: current.certificate, artifact: current.artifact })
+      const source = await this.ports.captureSource?.(planId, activeSignal)
+      activeSignal.throwIfAborted()
+      const latestBeforeClaim = this.ports.inspect(planId)
+      if (!sameCertificate(current.certificate, latestBeforeClaim.certificate)
+        || sha(current.artifact) !== sha(latestBeforeClaim.artifact)) fail('source changed during source capture')
+      const claimRecord: CreationCapabilityRecord = { planId, status: 'claimed',
+        certificate: current.certificate, artifact: current.artifact }
+      const claimed = this.ports.withCurrent(claimRecord, () => this.journal.claim({
+        certificate: current.certificate, artifact: current.artifact, ...(source ? { source } : {}) }))
       if (!claimed.created) fail('plan already claimed')
       const record = claimed.record
       try {
@@ -421,6 +429,13 @@ export class CreationCapabilityRuntime {
     calls: readonly CreationCapabilityCallEvidence[] } | undefined {
     const record = this.journal.inspect(planId)
     return record?.receipt ? { record, calls: this.inspectCallEvidence(planId) } : undefined
+  }
+
+  /** Historical data only; callers must check the current authenticated owner. */
+  inspectSourceEvidence(planId: string) {
+    const record = this.journal.inspect(planId)
+    const archive = record?.receipt ? this.journal.inspectSourceArchive?.(planId) : undefined
+    return record && archive ? { record, archive } : undefined
   }
 
   close(): Promise<void> {

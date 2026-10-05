@@ -1,6 +1,7 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
+import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 
 export type CreationCapabilityOwner = Pick<SourceJobOwnerReceipt, 'authorityId' | 'authorityHash' | 'principalId'
   | 'principalRecordId' | 'principalVersion' | 'workspace' | 'agentPreset'>
@@ -90,6 +91,8 @@ export interface CreationCapabilityRunner {
 export interface CreationCapabilityPorts {
   inspect(planId: string): { certificate: PluginCreationVerificationCertificate; artifact: Buffer; owner: CreationCapabilityOwner }
   recheck(planId: string, signal: AbortSignal): Promise<void>
+  /** Capture checked staged source before first claim; legacy ports may have no archive. */
+  captureSource?(planId: string, signal: AbortSignal): Promise<CreationCapabilitySourceSnapshot>
   /** Historical evidence read for a v2 receipt; must recheck the current owner and frozen source. */
   inspectRetained?(record: CreationCapabilityRecord): { certificate: PluginCreationVerificationCertificate; artifact: Buffer; owner: CreationCapabilityOwner }
   recheckRetained?(record: CreationCapabilityRecord, signal: AbortSignal): Promise<void>
@@ -161,12 +164,28 @@ export interface CreationCapabilityCall {
   jobId?: string
 }
 
+/** Historical source data signed separately from the finite execution receipt. */
+export interface CreationCapabilitySourceArchive {
+  protocol: 'dsh-created-capability-source-archive/v1'
+  authorityId: string
+  authorityDigest: string
+  keyId: string
+  planId: string
+  certificateDigest: string
+  artifactSha256: string
+  source: CreationCapabilitySourceSnapshot
+  signature: string
+}
+
 export interface CreationCapabilityJournalPort {
   readonly authorityDigest: string
   readonly publicKey: string
   inspect(planId: string): CreationCapabilityRecord | undefined
   list(): readonly CreationCapabilityRecord[]
-  claim(input: { certificate: PluginCreationVerificationCertificate; artifact: Buffer }): { created: boolean; record: CreationCapabilityRecord }
+  claim(input: { certificate: PluginCreationVerificationCertificate; artifact: Buffer;
+    source?: CreationCapabilitySourceSnapshot }): { created: boolean; record: CreationCapabilityRecord }
+  /** Lazy historical read; legacy rows have no archive and are never inferred or backfilled. */
+  inspectSourceArchive?(planId: string): CreationCapabilitySourceArchive | undefined
   authorize(planId: string, tools: readonly CreationCapabilityTool[]): CreationCapabilityRecord
   activate(planId: string): CreationCapabilityRecord
   settle(planId: string, status: 'closed' | 'unknown' | 'rejected', reason: string): void

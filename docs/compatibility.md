@@ -26,7 +26,9 @@ Growth 的 `pluginSourceProposals.allowCreation` 默认关闭且只适用于 dur
 
 ## 新工具插件的有限动态采用
 
-Control Plane 可选 `creationCapabilities` 增加独立私有 `creation-adoptions.sqlite` v1，不改变主账本 schema 31。授权、密钥、ledger 路径和有限额度不可变；停下旧 controller 后保留该库与 runner ledger，unknown 不自动重派。需同批 Delivery `validateOwnerAgentForRoute`、Evaluation `onTrustedTaskChange`、Verifier 行为执行器及 native Tools/Policy peers；旧 peer 缺接口时仅此能力拒绝启动。Policy 新增可选 Host peer，不自动启用。DSH/Cordis/Loader/Include 基线与公共 npm 版本不变。
+Control Plane 可选 `creationCapabilities` 使用独立私有 `creation-adoptions.sqlite`，不改变主账本 schema 31。授权、密钥、ledger 路径和有限额度不可变；停下旧 controller 后保留该库与 runner ledger，unknown 不自动重派。需同批 Delivery `validateOwnerAgentForRoute`、Evaluation `onTrustedTaskChange`、Verifier 行为执行器及 native Tools/Policy peers；旧 peer 缺接口时仅此能力拒绝启动。Policy 新增可选 Host peer，不自动启用。DSH/Cordis/Loader/Include 基线与公共 npm 版本不变。
+
+采用账本当前为 schema v3：v2 在原 calls 行增加可空前台归因列，v3 新增独立懒读取的签名源码表；v1/v2 逐级迁移保持原 authorityDigest、配置、密钥、采用凭证、调用结果、unknown 和累计额度，旧行不补任务或源码。升级前停止旧 controller，旧版本不能打开新库。内建创建采用路径依赖同批精确源码采集模块，Host 历史读取还要求 Delivery `validateOwnerRoute`；源码数据不扩大创建/采用授权，不改变主 Control Plane schema 31 或 DSH/Cordis ABI。
 
 Host 动态挂载可信工具入口，精确候选每次在独立 Docker child 内挂载真实 Cordis Context，支持有界无跨调用状态的 Tools/SystemPrompt 插件。此路径不替代旧修改发布门；源计划保持 pending，采用状态保存于独立账本。调用、重启恢复与撤销边界见 [有限动态采用](../plugins/plugin-control-plane/README.md#新工具插件的有限动态采用)。
 

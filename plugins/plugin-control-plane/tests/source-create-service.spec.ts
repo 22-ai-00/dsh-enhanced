@@ -386,6 +386,12 @@ it.each(['correction', 'withdrawal'] as const)(
     const planId = f.store.getSourceJob(job.id)!.planId!
     const adopted = f.service.inspectCreatedCapability(planId)!
     expect(adopted.status).toBe('active')
+    const archive = f.service.inspectCreatedCapabilitySource(planId)!
+    expect(archive).toMatchObject({ protocol: 'dsh-created-capability-source-archive/v1', planId,
+      artifactSha256: f.checked.evidence.pack.sha256,
+      source: { treeDigest: f.checked.treeDigest, patchDigest: f.checked.patchDigest } })
+    expect(archive.source.files.find(file => file.path.endsWith('/README.md'))?.content).toBe('# Created plugin\n')
+    expect(Object.isFrozen(archive.source.files)).toBe(true)
     const alias = adopted.aliases[0]!
     let hostCtx = f.ctx
     const execute = (callId: string) => hostCtx.tools.get(alias)!.execute({ query: 'hello' }, {
@@ -402,25 +408,46 @@ it.each(['correction', 'withdrawal'] as const)(
     expect(f.store.deleteExpiredPreparedSourceArtifacts(Date.now())).toBe(1)
     expect(() => f.store.readPreparedSourceArtifact(planId)).toThrow()
     expect(f.store.getRetainedPreparedCreation(planId).job.id).toBe(job.id)
+    expect(plan.worktree.startsWith(`${f.config.statePath}/source-worktrees/`)).toBe(true)
+    f.git('worktree', 'remove', '--force', plan.worktree)
+    expect(f.service.inspectCreatedCapabilitySource(planId)).toEqual(archive)
     expect(() => normalizeControlPlaneConfig(f.config)).not.toThrow()
     await f.unregisterGrowthRun()
     await f.ctx.fiber.dispose()
-    hostCtx = new Context()
-    cleanup.push(async () => hostCtx.fiber.dispose())
-    await mountAgentLoopTestDependencies(hostCtx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
-    hostCtx.provide('assistantDelivery' as never, f.deliveryPorts)
-    hostCtx.provide('assistantEvaluation' as never, f.evaluationPorts)
-    hostCtx.provide('assistantVerifier' as never, { verifyPluginCreation: f.verification })
-    new AssistantPolicyService(hostCtx, { databasePath: join(f.root, 'policy.sqlite'),
-      budgets: [{ id: 'source-budget', metric: 'automation-runs', limit: 3, periodMs: 60_000, scope: 'global' }], rules: [
-        { id: 'reconcile', effect: 'allow', subject: { kind: 'background', id: 'plugin-control-plane-source', workspace: f.root, principal: 'owner' }, actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
-        { id: 'execute', effect: 'allow', subject: { kind: 'background', id: '*', workspace: f.root, principal: 'owner' }, actions: ['execute'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
-      ] })
-    new AssistantAutomationsService(hostCtx, { databasePath: join(f.root, 'automations.sqlite'),
-      runsPath: join(f.root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0 })
-    const restarted = new PluginControlPlaneService(hostCtx, f.config)
+    const startHost = async () => {
+      const context = new Context()
+      cleanup.push(async () => context.fiber.dispose())
+      await mountAgentLoopTestDependencies(context, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+      context.provide('assistantDelivery' as never, f.deliveryPorts)
+      context.provide('assistantEvaluation' as never, f.evaluationPorts)
+      context.provide('assistantVerifier' as never, { verifyPluginCreation: f.verification })
+      new AssistantPolicyService(context, { databasePath: join(f.root, 'policy.sqlite'),
+        budgets: [{ id: 'source-budget', metric: 'automation-runs', limit: 3, periodMs: 60_000, scope: 'global' }], rules: [
+          { id: 'reconcile', effect: 'allow', subject: { kind: 'background', id: 'plugin-control-plane-source', workspace: f.root, principal: 'owner' }, actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
+          { id: 'execute', effect: 'allow', subject: { kind: 'background', id: '*', workspace: f.root, principal: 'owner' }, actions: ['execute'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
+        ] })
+      new AssistantAutomationsService(context, { databasePath: join(f.root, 'automations.sqlite'),
+        runsPath: join(f.root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0 })
+      return { context, service: new PluginControlPlaneService(context, f.config) }
+    }
+    const restored = await startHost()
+    hostCtx = restored.context
+    const restarted = restored.service
     await vi.waitFor(() => expect(hostCtx.tools.get(alias)).toBeDefined())
     expect(restarted.inspectCreatedCapability(planId)?.status).toBe('active')
+    expect(restarted.inspectCreatedCapabilitySource(planId)).toEqual(archive)
+    const originalOwner = { ...f.owner }
+    f.owner.bindingVersion += 1 // Same generation must preserve the execution binding.
+    expect(restarted.inspectCreatedCapabilitySource(planId)).toBeUndefined()
+    Object.assign(f.owner, originalOwner)
+    f.owner.generation += 1; f.owner.bindingVersion += 1 // Same owner may start a new conversation.
+    expect(restarted.inspectCreatedCapabilitySource(planId)).toEqual(archive)
+    f.owner.authorityHash = 'f'.repeat(64)
+    expect(restarted.inspectCreatedCapabilitySource(planId)).toBeUndefined()
+    f.owner.authorityHash = originalOwner.authorityHash
+    f.owner.principalVersion += 2 // A → B → A still has a different authenticated owner version.
+    expect(restarted.inspectCreatedCapabilitySource(planId)).toBeUndefined()
+    Object.assign(f.owner, originalOwner)
     await expect(execute('after-expiry')).resolves.toMatchObject({ value: { answer: 'ok' } })
     await expect(execute('third-call')).rejects.toThrow()
     expect(f.inspectGrowthRun.mock.calls.length).toBe(producerCalls)
@@ -432,6 +459,16 @@ it.each(['correction', 'withdrawal'] as const)(
     await expect(execute('after-change')).rejects.toThrow()
     f.notifyTaskChange()
     await vi.waitFor(() => expect(restarted.inspectCreatedCapability(planId)?.status).toBe('closed'))
+    expect(hostCtx.tools.get(alias)).toBeUndefined()
+    expect(restarted.inspectCreatedCapabilitySource(planId)).toEqual(archive)
+    f.advance(2_000_000)
+    expect(restarted.inspectCreatedCapabilitySource(planId)).toEqual(archive)
+    expect(restarted.inspectCreatedCapability(planId)?.status).toBe('closed')
+    await hostCtx.fiber.dispose()
+    const expiredHost = await startHost()
+    hostCtx = expiredHost.context
+    await vi.waitFor(() => expect(expiredHost.service.inspectCreatedCapabilitySource(planId)).toEqual(archive))
+    expect(expiredHost.service.inspectCreatedCapability(planId)?.status).toBe('closed')
     expect(hostCtx.tools.get(alias)).toBeUndefined()
     expect(runnerRun).toHaveBeenCalledTimes(3)
   }, 60_000)
