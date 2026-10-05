@@ -9,7 +9,7 @@ type State = 'discover-claimed' | 'contract-claimed' | 'contract-ready' | 'case-
   | 'review-claimed' | 'certificate' | 'rejected' | 'unknown'
 interface Row { plan: string; binding: string; authority: string; state: State; data: string }
 interface Grant { authority: string; digest: string; maximum: number; used: number }
-interface Data { discovery?: unknown; contract?: unknown; cases?: Record<string, unknown>; certificate?: PluginCreationVerificationCertificate; reason?: string }
+interface Data<Certificate> { discovery?: unknown; contract?: unknown; cases?: Record<string, unknown>; certificate?: Certificate; reason?: string }
 function fail(message: string): never { throw new Error(`creation review store: ${message}`) }
 function check(idValue: string, digestValue: string): void {
   if (!ID.test(idValue) || !SHA.test(digestValue)) fail('invalid identity')
@@ -21,7 +21,7 @@ function privateFile(path: string): void {
 }
 
 /** Every dispatch is claimed durably first. A claimed or unknown stage is never replayed. */
-export class CreationReviewStore {
+export class CreationReviewStore<Certificate = PluginCreationVerificationCertificate> {
   readonly #db: DatabaseSync
   #closed = false
   constructor(path: string) {
@@ -62,7 +62,7 @@ export class CreationReviewStore {
     return maximum - row.used
   }
   claim(plan: string, binding: string, authority: string, digest: string, maximum: number):
-    { state: 'new' | 'unknown' | 'rejected' | 'certificate'; reason?: string; certificate?: PluginCreationVerificationCertificate } {
+    { state: 'new' | 'unknown' | 'rejected' | 'certificate'; reason?: string; certificate?: Certificate } {
     check(plan, binding); check(authority, digest)
     if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 1000) fail('invalid quota')
     return this.#transaction(() => {
@@ -71,7 +71,7 @@ export class CreationReviewStore {
       const old = this.#db.prepare('SELECT * FROM verifications WHERE plan=?').get(plan) as Row | undefined
       if (old) {
         if (old.binding !== binding || old.authority !== authority || !grant) fail('binding changed')
-        const data = JSON.parse(old.data) as Data
+        const data = JSON.parse(old.data) as Data<Certificate>
         if (old.state === 'certificate') {
           if (!data.certificate) fail('certificate missing')
           return { state: 'certificate', certificate: data.certificate }
@@ -89,11 +89,11 @@ export class CreationReviewStore {
       return { state: 'new' }
     })
   }
-  #advance(plan: string, binding: string, from: State, to: State, update: (data: Data) => Data): void {
+  #advance(plan: string, binding: string, from: State, to: State, update: (data: Data<Certificate>) => Data<Certificate>): void {
     this.#transaction(() => {
       const row = this.#db.prepare('SELECT * FROM verifications WHERE plan=?').get(plan) as Row | undefined
       if (!row || row.binding !== binding || row.state !== from) fail('stage changed')
-      const data = update(JSON.parse(row.data) as Data)
+      const data = update(JSON.parse(row.data) as Data<Certificate>)
       const serialized = canonicalGrowthJson(data)
       if (Buffer.byteLength(serialized) > 262_144) fail('record too large')
       this.#db.prepare('UPDATE verifications SET state=?,data=? WHERE plan=?').run(to, serialized, plan)
@@ -111,7 +111,7 @@ export class CreationReviewStore {
   }
   observation(plan: string, binding: string, caseId: string, observed: unknown): void {
     this.#advance(plan, binding, 'case-claimed', 'contract-ready', data => {
-      const active = data as Data & { activeCase?: { caseId: string; operationDigest: string } }
+      const active = data as Data<Certificate> & { activeCase?: { caseId: string; operationDigest: string } }
       if (active.activeCase?.caseId !== caseId || Object.hasOwn(data.cases ?? {}, caseId)) fail('case changed')
       const { activeCase: _, ...rest } = active
       return { ...rest, cases: { ...data.cases, [caseId]: observed } }
@@ -135,12 +135,12 @@ export class CreationReviewStore {
     this.#transaction(() => {
       const row = this.#db.prepare('SELECT * FROM verifications WHERE plan=?').get(plan) as Row | undefined
       if (!row || row.binding !== binding || row.state === 'certificate' || row.state === 'rejected' || row.state === 'unknown') fail('stage changed')
-      const data = JSON.parse(row.data) as Data
+      const data = JSON.parse(row.data) as Data<Certificate>
       this.#db.prepare('UPDATE verifications SET state=?,data=? WHERE plan=?')
         .run(state, canonicalGrowthJson({ ...data, reason }), plan)
     })
   }
-  certificate(plan: string, binding: string, certificate: PluginCreationVerificationCertificate): void {
+  certificate(plan: string, binding: string, certificate: Certificate): void {
     this.#advance(plan, binding, 'review-claimed', 'certificate', data => ({ ...data, certificate }))
   }
 }

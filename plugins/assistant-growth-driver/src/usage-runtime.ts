@@ -3,7 +3,8 @@ import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluat
 import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { SourceGrowthRunUnavailableError, isSourceOwnerContinuation, sourceGrowthEvidenceDigest, sourceGrowthRunDigest, validateSourceGrowthRunBinding,
-  type CreationAcceptanceAuthorityRef, type SourceGrowthRunBinding, type SourceGrowthRunRequest } from '@dsh-enhanced/assistant-growth-contract'
+  type CreationAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef,
+  type SourceGrowthRunBinding, type SourceGrowthRunRequest } from '@dsh-enhanced/assistant-growth-contract'
 import type { NormalizedGrowthDriverConfig } from './config.js'
 import { UsageStore, type UsageIntent, type UsageJob, type UsageModel } from './usage-store.js'
 
@@ -23,7 +24,7 @@ export interface UsageReviewInput {
   source: OwnerForegroundLearningTask
   signal: AbortSignal
   assertCurrent(): void
-  bindSourceRun(input: Pick<SourceGrowthRunBinding, 'model' | 'sessionId' | 'toolContractDigest' | 'executionContractDigest' | 'createdAt' | 'generationDeadlineAt' | 'creationAcceptance'>): SourceGrowthRunBinding
+  bindSourceRun(input: Pick<SourceGrowthRunBinding, 'model' | 'sessionId' | 'toolContractDigest' | 'executionContractDigest' | 'createdAt' | 'generationDeadlineAt' | 'creationAcceptance' | 'revisionAcceptance'>): SourceGrowthRunBinding
 }
 export type UsageReviewResult = 'reviewed' | 'failed' | 'unknown'
 const same = (a: unknown, b: unknown): boolean => acceptanceDigest(a) === acceptanceDigest(b)
@@ -47,6 +48,7 @@ export class UsageLearningRuntime {
     evaluation: Evaluation; delivery: Delivery; automations: Automations
     review(input: UsageReviewInput): Promise<UsageReviewResult>
     inspectCreationAcceptanceAuthority?(): CreationAcceptanceAuthorityRef | undefined
+    inspectRevisionAcceptanceAuthority?(): RevisionAcceptanceAuthorityRef | undefined
   }) {
     if (!config.usageLearning.enabled || !config.scope || !config.usageLearning.databasePath || !config.budgetId) throw new Error('usage learning configuration missing')
     if (typeof ports.evaluation.listTrustedTaskLearningProjections !== 'function'
@@ -59,7 +61,11 @@ export class UsageLearningRuntime {
     }
     this.store = new UsageStore(config.usageLearning.databasePath)
     this.lane = acceptanceDigest(config.scope)
-    this.configDigest = acceptanceDigest(config)
+    // The absent historical revision flag was effectively false. Preserve that
+    // config digest for old runs; opting in creates a new, distinct binding.
+    const { allowRevision, ...legacySourceConfig } = config.pluginSourceProposals
+    this.configDigest = acceptanceDigest(allowRevision ? config
+      : { ...config, pluginSourceProposals: legacySourceConfig })
     this.scanId = `usage-scan-${this.lane}`
   }
   health = () => ({ enabled: true, connected: this.active, lastScanAt: this.lastScanAt,
@@ -131,6 +137,10 @@ export class UsageLearningRuntime {
       if (binding.creationAcceptance !== undefined) {
         const current = this.ports.inspectCreationAcceptanceAuthority?.()
         if (current === undefined || current.expiresAt <= Date.now() || !same(binding.creationAcceptance, current)) return undefined
+      }
+      if (binding.revisionAcceptance !== undefined) {
+        const current = this.ports.inspectRevisionAcceptanceAuthority?.()
+        if (current === undefined || current.expiresAt <= Date.now() || !same(binding.revisionAcceptance, current)) return undefined
       }
       if (binding.runId !== job.id || binding.intentDigest !== job.digest || binding.configDigest !== this.configDigest
         || binding.native.definitionHash !== job.definitionHash || binding.native.occurrenceId !== job.occurrenceId
@@ -281,6 +291,12 @@ export class UsageLearningRuntime {
             throw new Error('usage creation acceptance authority changed during Agent setup')
           }
         }
+        if (actual.revisionAcceptance !== undefined) {
+          const current = this.ports.inspectRevisionAcceptanceAuthority?.()
+          if (current === undefined || current.expiresAt <= Date.now() || !same(actual.revisionAcceptance, current)) {
+            throw new Error('usage revision acceptance authority changed during Agent setup')
+          }
+        }
         if (!job.intent.modelOrigin || !job.intent.budget || !same(actual.model, job.intent.model)) {
           throw new Error('usage source run lacks a frozen model or budget')
         }
@@ -298,6 +314,7 @@ export class UsageLearningRuntime {
               judgement: source.judgement, ownerRevision: source.ownerRevision }) },
           model: actual.model, modelOrigin: job.intent.modelOrigin, budget: job.intent.budget,
           ...(actual.creationAcceptance === undefined ? {} : { creationAcceptance: structuredClone(actual.creationAcceptance) }),
+          ...(actual.revisionAcceptance === undefined ? {} : { revisionAcceptance: structuredClone(actual.revisionAcceptance) }),
           native: { owner: 'assistant-growth-usage', automationId: job.id,
             definitionHash: input.definitionHash, occurrenceId: input.occurrenceId },
           sessionId: actual.sessionId, toolContractDigest: actual.toolContractDigest,

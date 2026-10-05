@@ -2,6 +2,7 @@ import type { CatalogEntry, CatalogPackage } from './catalog.js'
 import type { LiveQualificationTerms } from './live-qualification.js'
 import type { AdoptionHandoffTerms } from './adoption-handoff.js'
 import type { SourceCreationBinding } from './source-creation.js'
+import type { SourceRevisionBinding } from './source-revision.js'
 
 export type PlanStatus =
   | 'pending-approval'
@@ -225,9 +226,11 @@ export interface PluginSourcePlan {
    * and evidence in the immutable plan digest. Legacy create digests keep their
    * original shape.
    */
-  mode: 'create' | 'modify' | 'prepared-create'
+  mode: 'create' | 'modify' | 'prepared-create' | 'prepared-revise'
   /** Frozen only for an owner-granted, prepared create candidate. */
   creation?: SourceCreationBinding
+  /** A new task's independent preparation grant and exact historical parent. */
+  sourceRevision?: SourceRevisionBinding
   scope: readonly string[]
   approval?: VerifiedApprovalReceipt
   sourceCheck?: SourceCheckEvidence

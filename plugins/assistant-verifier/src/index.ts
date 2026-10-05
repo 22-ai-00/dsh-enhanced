@@ -16,6 +16,8 @@ export type { MemoryReviewConfig, MemoryReviewReceipt, MemoryReviewAvailability 
 export type { PluginBehaviorOperation, PluginBehaviorObservation, PluginBehaviorRunnerInput } from './plugin-behavior-runner.js'
 export { compileCreationReviewConfig, validateCreationReviewConfig } from './creation-review.js'
 export type { CreationReviewConfig, CreationReviewAuthorityInspection } from './creation-review.js'
+export { compileRevisionReviewConfig, validateRevisionReviewConfig } from './revision-review.js'
+export type { RevisionReviewConfig, RevisionReviewAuthorityInspection } from './revision-review.js'
 
 export function apply(ctx: Context, config: Config): void {
   new AssistantVerifierService(ctx, config)

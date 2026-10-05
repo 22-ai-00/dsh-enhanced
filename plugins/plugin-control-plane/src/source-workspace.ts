@@ -172,10 +172,10 @@ export async function changedSourcePaths(worktree: string, baseCommit: string, e
   return [...new Set(`${tracked}${untracked}`.split('\0').filter(Boolean))].sort()
 }
 
-export function sourcePathAllowed(path: string, name: string, mode: 'create' | 'modify' | 'prepared-create' = 'modify'): boolean {
+export function sourcePathAllowed(path: string, name: string, mode: 'create' | 'modify' | 'prepared-create' | 'prepared-revise' = 'modify'): boolean {
   const pluginRoot = `plugins/${name}`
   const withinPluginTree = path === pluginRoot || path.startsWith(`${pluginRoot}/`)
-  if (mode === 'prepared-create') return withinPluginTree || path === pluginCatalogScope || path === 'pnpm-lock.yaml'
+  if (mode === 'prepared-create' || mode === 'prepared-revise') return withinPluginTree || path === pluginCatalogScope || path === 'pnpm-lock.yaml'
   return mode === 'create' ? (withinPluginTree || path === pluginCatalogScope) : withinPluginTree
 }
 
@@ -228,7 +228,7 @@ export async function verifyPreparedSourceWorktree(plan: PluginSourcePlan, envir
 export async function inspectPreparedCreationPatch(plan: PluginSourcePlan, environment: NodeJS.ProcessEnv,
   signal: AbortSignal): Promise<{ patch: string; changedPaths: string[] }> {
   signal.throwIfAborted()
-  if (plan.mode !== 'prepared-create' || !plan.sourceCheck || !plan.creation
+  if ((plan.mode !== 'prepared-create' && plan.mode !== 'prepared-revise') || !plan.sourceCheck || !(plan.creation ?? plan.sourceRevision)
     || await realpath(plan.repository) !== plan.repository || await realpath(plan.worktree) !== plan.worktree
     || plan.scope.join('\0') !== [`plugins/README.md`, `plugins/${plan.name}`, 'pnpm-lock.yaml'].join('\0')) {
     throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared creation paths or scope changed')
@@ -471,12 +471,12 @@ async function writeValidatedPluginFiles(worktree: string, name: string, files: 
 
 /** Owner-retired prepared source plans are collectible only with frozen mode evidence. */
 export function preparedWorktreeIsGarbage(plan: Pick<PluginSourcePlan,
-  'mode' | 'status' | 'expiresAt' | 'scope' | 'name' | 'generatorDigest' | 'creation' | 'sourceCheck' | 'preparedEvidence'>,
+  'mode' | 'status' | 'expiresAt' | 'scope' | 'name' | 'generatorDigest' | 'creation' | 'sourceRevision' | 'sourceCheck' | 'preparedEvidence'>,
 now: number): boolean {
   if (plan.expiresAt >= now) return false
   if (plan.mode === 'modify') return GC_ELIGIBLE_SOURCE_STATUSES.has(plan.status)
-  if (plan.mode !== 'prepared-create' || !['pending-approval', 'expired'].includes(plan.status)
-    || plan.creation?.generatorDigest !== plan.generatorDigest || !plan.sourceCheck || !plan.preparedEvidence) return false
+  if ((plan.mode !== 'prepared-create' && plan.mode !== 'prepared-revise') || !['pending-approval', 'expired'].includes(plan.status)
+    || (plan.creation ?? plan.sourceRevision)?.generatorDigest !== plan.generatorDigest || !plan.sourceCheck || !plan.preparedEvidence) return false
   return plan.scope.length === 3 && new Set(plan.scope).size === 3
     && [`plugins/${plan.name}`, pluginCatalogScope, 'pnpm-lock.yaml'].every(path => plan.scope.includes(path))
 }
@@ -528,10 +528,10 @@ export async function gcPreparedModifyWorktrees(input: {
     if (inside === '' || inside.startsWith('..') || isAbsolute(inside)) continue
     const linked = await linkedWorktrees(plan.repository, input.environment).catch((): readonly string[] => [])
     if (!linked.includes(worktree)) continue
-    if (plan.mode === 'prepared-create' && (dirname(worktree) !== stateRoot
+    if ((plan.mode === 'prepared-create' || plan.mode === 'prepared-revise') && (dirname(worktree) !== stateRoot
       || !/^worktree-job-[a-f0-9]{64}$/u.test(worktree.slice(stateRoot.length + 1)))) continue
     input.store.expirePreparedSourcePlan({ planId: plan.id, expectedRevision: plan.revision, now: input.now })
-    if (plan.mode === 'prepared-create') {
+    if (plan.mode === 'prepared-create' || plan.mode === 'prepared-revise') {
       await removeSourceJobWorktree({ stateRoot, repository: plan.repository,
         worktree, baseCommit: plan.baseCommit, environment: input.environment })
     } else await pruneRegisteredWorktree({ repository: plan.repository, worktree, environment: input.environment })

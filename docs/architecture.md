@@ -88,6 +88,8 @@ Control Plane 的 Host-only 任务关联查询从既有采用/调用账本读取
 
 已采用工具的历史源码与执行权分开：同一 Git index 的 staged 插件 blobs 经独立证书摘要核验后，与采用 claim 原子持久化并由采用密钥在独立域签名。源码账本迁移不修改原授权或补写旧历史；Host 只在当前 owner continuation 下懒读取冻结数据，反馈更正、入口关闭与期限结束不续权，也不妨碍同一主人检查旧源码。新修复和版本替换仍需当前认证触发与独立有限授权。
 
+有限修订沿用当前 Usage → 原生 Automation → Control Plane 构建 → Verifier 独立验收，无新增调度循环。Host 从已采用签名归档重建当前基线上的同名候选，冻结父证书/制品/归档/源码与新失败任务的模型、预算和修订授权；创建计数、修订计数、采用计数分别保存。独立修订证书与精确 staged 源码原子落账，历史只读入口不延续执行权限。本阶段不切换动态工具版本，父版本回归、稳定入口替换与回退仍是下一交付。
+
 `assistant-isolation` 作为独立 bundle 接入原生 ToolRuntime，Host 仍拥有 AgentLoop、Delivery owner、Policy、SQLite 授权/结果账本及 detached supervisor。模型的离线任意 shell 代码进入 Linux Docker 容器；每任务使用有字节/inode 硬限制的独立 tmpfs volume，Host 输入经受限复制进入卷，不向容器暴露 Host bind mount、真实项目、Host 状态、Docker socket 或凭据。独立 keeper 持续挂载工作卷，执行容器删除后才由固定 BusyBox 命令导出已验证类型/链接/字节限制的文本产物，最后删除 keeper 与卷。Host 工具路由在配置的 workspace/preset 内拒绝改走通用代码工具，容器内也没有动作或出网代理。
 
 Grant 绑定 owner lineage、范围、期限和次数/预留时长；请求摘要包含镜像与限制，Session 幂等键禁止未知结果重放。单 Controller 的持久 lease/fence 串行化预算与恢复，外部 CLI 先持久撤销再尝试终止容器。包同时发布 `lib/` 与 Node supervisor 的 `runtime/`，前者相对解析后者，不依赖源码目录。可回滚安装不等于回滚已发生的外部动作。

@@ -2,6 +2,7 @@ import type { SourceBuildConfig } from './source-build.js'
 import type { ScopedPluginFile } from './source-workspace.js'
 import type { SourceBaselineConfig } from './source-baseline.js'
 import type { SourceCreationBinding, SourceCreationGrant } from './source-creation.js'
+import type { SourceRevisionBinding, SourceRevisionGrant } from './source-revision.js'
 
 /** Owner-configured authority for background checks, separate from an Agent wake. */
 export interface SourceJobsConfig {
@@ -13,6 +14,8 @@ export interface SourceJobsConfig {
   baseline?: SourceBaselineConfig
   /** Explicit owner grant for creating new plugin roots. */
   creation?: SourceCreationGrant
+  /** Preparation only; does not grant adoption or execution of a revision. */
+  revision?: SourceRevisionGrant
   ownerRouteId: string
   principalId: string
   workspace: string
@@ -51,8 +54,9 @@ export interface SourceJobIntent {
   repository: string
   baseline?: SourceBaselineConfig
   /** Absent on historical and current modify jobs. */
-  mode?: 'create'
+  mode?: 'create' | 'revise-created'
   creation?: SourceCreationBinding
+  revision?: SourceRevisionBinding
   name: string
   gapId: string
   gapRevision: number
@@ -100,7 +104,7 @@ export interface SourceJobProjection {
   name: string
   gapId: string
   baseCommit: string
-  mode?: 'create'
+  mode?: 'create' | 'revise-created'
   status: SourceJobStatus
   createdAt: number
   expiresAt: number

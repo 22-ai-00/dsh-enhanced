@@ -88,7 +88,7 @@ export class AssistantGrowthDriverService extends Service {
   #active = true
   readonly #abort = new AbortController()
   #sourceBinding: { port: GrowthSourcePlanePort; signal: AbortSignal; available: () => boolean;
-    taskCreationReady: () => boolean; nudge: () => void;
+    taskCreationReady: () => boolean; taskRevisionReady: () => boolean; nudge: () => void;
     recordTaskFailure: (source: OwnerForegroundLearningTask) => GrowthSourceGap } | undefined
   #health: GrowthWakeHealth = { lastWakeAt: null, outcome: 'never-run', reason: null, run: null }
   #usage: UsageLearningRuntime | undefined
@@ -113,6 +113,7 @@ export class AssistantGrowthDriverService extends Service {
           evaluation: usageCtx.assistantEvaluation, automations: usageCtx.assistantAutomations,
           delivery: usageCtx.assistantDelivery, review: input => this.#reviewUsage(input),
           inspectCreationAcceptanceAuthority: () => this.#sourceBinding?.port.inspectSourceCreationAcceptanceAuthority?.(),
+          inspectRevisionAcceptanceAuthority: () => this.#sourceBinding?.port.inspectSourceRevisionAcceptanceAuthority?.(),
         })
         usageCtx.effect(() => async () => {
           if (this.#usage === usage) this.#usage = undefined
@@ -129,7 +130,7 @@ export class AssistantGrowthDriverService extends Service {
       // when the control plane is absent or is being replaced.
       ctx.inject(['pluginControlPlane' as never], sourceCtx => {
         const abort = new AbortController()
-        type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan' | 'inspectSourceTargets' | 'inspectSource' | 'inspectCreateSource' | 'getSourceCreationNamespace' | 'inspectSourceCreationAcceptanceAuthority' | 'enqueueSourceJob' | 'inspectSourceJob'> & {
+        type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan' | 'inspectSourceTargets' | 'inspectSource' | 'inspectCreateSource' | 'getSourceCreationNamespace' | 'inspectSourceCreationAcceptanceAuthority' | 'getSourceRevisionNamespace' | 'inspectSourceRevisionAcceptanceAuthority' | 'inspectCreatedCapabilityRevisionTargets' | 'inspectRevisionSource' | 'enqueueSourceJob' | 'inspectSourceJob'> & {
           gaps(limit: number): readonly GrowthSourceGap[]
           recordOwnerTaskFailureGap?: (source: OwnerForegroundLearningTask) => GrowthSourceGap
           canPrepareSource?: () => boolean
@@ -152,6 +153,11 @@ export class AssistantGrowthDriverService extends Service {
         if (!seamsPresent || typeof provider.inspectSource !== 'function') return
         const producerAvailable = this.#config.usageLearning.enabled
           && typeof provider.registerSourceGrowthRunProducer === 'function'
+        const revisionSeamsPresent = durable && this.#config.pluginSourceProposals.allowRevision && producerAvailable
+          && typeof provider.getSourceRevisionNamespace === 'function'
+          && typeof provider.inspectSourceRevisionAcceptanceAuthority === 'function'
+          && typeof provider.inspectCreatedCapabilityRevisionTargets === 'function'
+          && typeof provider.inspectRevisionSource === 'function'
         if (producerAvailable) sourceCtx.effect(() => provider.registerSourceGrowthRunProducer!({
           protocol: 'assistant-growth-source-run-producer/v1',
           inspect: request => {
@@ -173,6 +179,7 @@ export class AssistantGrowthDriverService extends Service {
             } catch { return false }
           },
           taskCreationReady: () => producerAvailable && this.#usage !== undefined,
+          taskRevisionReady: () => revisionSeamsPresent && this.#usage !== undefined,
           nudge: () => { if (producerAvailable) current().reconcileSourceGrowthRuns?.() },
           port: {
             listOpenGaps: () => current().gaps(50),
@@ -208,6 +215,26 @@ export class AssistantGrowthDriverService extends Service {
                 },
                 inspectSourceCreationAcceptanceAuthority: () => current().inspectSourceCreationAcceptanceAuthority?.() }
               : {}),
+            ...(revisionSeamsPresent ? {
+              getSourceRevisionNamespace: () => {
+                const namespace = current().getSourceRevisionNamespace?.()
+                return namespace === undefined ? undefined : { namePrefix: namespace.namePrefix }
+              },
+              inspectSourceRevisionAcceptanceAuthority: () => current().inspectSourceRevisionAcceptanceAuthority?.(),
+              inspectCreatedCapabilityRevisionTargets: () => {
+                const live = current()
+                if (typeof live.inspectCreatedCapabilityRevisionTargets !== 'function') throw new Error('control plane revision targets unavailable')
+                return live.inspectCreatedCapabilityRevisionTargets()
+              },
+              inspectRevisionSource: async (request: Parameters<NonNullable<GrowthSourcePlanePort['inspectRevisionSource']>>[0]) => {
+                const signal = AbortSignal.any([request.signal, abort.signal, this.#abort.signal])
+                const live = current()
+                if (typeof live.inspectRevisionSource !== 'function') throw new Error('control plane revision source unavailable')
+                return live.inspectRevisionSource({ ...request, signal,
+                  assertCurrent: () => { signal.throwIfAborted(); current(); request.assertCurrent() },
+                })
+              },
+            } : {}),
             prepareModifySourcePlan: async (input: Parameters<GrowthSourcePlanePort['prepareModifySourcePlan']>[0]) => {
               const signal = AbortSignal.any([input.signal, abort.signal, this.#abort.signal])
               return current().prepareModifySourcePlan({ ...input, signal,
@@ -401,13 +428,22 @@ export class AssistantGrowthDriverService extends Service {
             if (request.mode === 'create' && (!source.taskCreationReady() || growthRun === undefined)) {
               throw new Error('assistant-growth-driver: task-bound creation lacks a current native source run')
             }
-            return source.port.enqueueSourceJob(request.mode === 'create' && growthRun !== undefined
+            if (request.mode === 'revise-created' && (!source.taskRevisionReady() || growthRun?.revisionAcceptance === undefined)) {
+              throw new Error('assistant-growth-driver: task-bound revision lacks a current native source run')
+            }
+            return source.port.enqueueSourceJob((request.mode === 'create' || request.mode === 'revise-created') && growthRun !== undefined
               ? { ...request, growthRun } : request)
           },
         }
         if (!source.taskCreationReady()) {
           delete taskPort.inspectCreateSource
           delete taskPort.getSourceCreationNamespace
+        }
+        if (!source.taskRevisionReady()) {
+          delete taskPort.getSourceRevisionNamespace
+          delete taskPort.inspectSourceRevisionAcceptanceAuthority
+          delete taskPort.inspectCreatedCapabilityRevisionTargets
+          delete taskPort.inspectRevisionSource
         }
         sourcePort = taskPort
       }

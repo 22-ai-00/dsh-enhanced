@@ -14,7 +14,9 @@ v25 增加完成顺序与终态保护，原 owner 身份和只读 owner snapshot
 
 ## 自动创建插件候选（Control Plane schema 29）
 
-当前账本为 schema 31：在原 intent/creation JSON 中兼容读取可选 Growth run binding，新增仅供 queued one-shot 恢复的派发列。升级不重写旧 JSON、摘要、计划或制品；旧任务创建行缺绑定不能进入新派发/验收，且不会猜测旧模型或预算。停下旧 writer，并同步升级共享账本的 Host/CLI；旧二进制由版本门拒绝新账本。普通任务创建需要同批 Growth Host 的持久 Usage producer 与 Control Plane 的精确原生 Automation 重排接口。新生成模板将原生 `@deepseek-ai/dsh-tools` 声明为可选 Host peer（`>=0.1.5-rc.3 <0.1.6`）与固定 catalog 开发依赖，不新增 DSH/Cordis ABI 或创建 grant 权限。无工具入口不加载该 peer；候选实现工具时须声明实际必需注入。模板变更由冻结的 generatorDigest 与源码基准识别，已有 pending 计划继续沿原基准核验，不换用新模板。
+主账本当前为 schema 33。v32 → v33 扩展 `prepared-revise` 计划与可空修订绑定，并增加独立修订授权计数、验收 claim/结果及精确源码表；迁移保持旧行、摘要、制品、引用、外键、收据和累计额度，不补造旧任务权限。升级须停止旧 writer，同步更新 Host/CLI；旧二进制拒绝新账本。Growth 的 `allowRevision` 默认关闭，只有 durable Usage 与同批 Control Plane 的父归档/修订接口及 Verifier 独立修订配置完整时可用。Verifier 修订审查使用独立 `.revision-reviews` 账本与签名域；旧创建审查协议、配置默认摘要和共享 run v1 未配置新字段时保持不变。采用账本仍为 v3，DSH/Cordis ABI 不变。当前候选不执行或替换旧版本，owner 安装器不自动增加修订授权。
+
+schema 31 曾增加以下兼容能力：在原 intent/creation JSON 中兼容读取可选 Growth run binding，新增仅供 queued one-shot 恢复的派发列。升级不重写旧 JSON、摘要、计划或制品；旧任务创建行缺绑定不能进入新派发/验收，且不会猜测旧模型或预算。停下旧 writer，并同步升级共享账本的 Host/CLI；旧二进制由版本门拒绝新账本。普通任务创建需要同批 Growth Host 的持久 Usage producer 与 Control Plane 的精确原生 Automation 重排接口。新生成模板将原生 `@deepseek-ai/dsh-tools` 声明为可选 Host peer（`>=0.1.5-rc.3 <0.1.6`）与固定 catalog 开发依赖，不新增 DSH/Cordis ABI 或创建 grant 权限。无工具入口不加载该 peer；候选实现工具时须声明实际必需注入。模板变更由冻结的 generatorDigest 与源码基准识别，已有 pending 计划继续沿原基准核验，不换用新模板。
 
 Growth Usage schema 2 增加可空的 `source_run_json`；旧 intent 字节和摘要原样保留，不回填旧 run。旧 Growth writer 由版本门拒绝，须与 Control Plane 和原生 Automations 同批升级。
 
@@ -26,9 +28,9 @@ Growth 的 `pluginSourceProposals.allowCreation` 默认关闭且只适用于 dur
 
 ## 新工具插件的有限动态采用
 
-Control Plane 可选 `creationCapabilities` 使用独立私有 `creation-adoptions.sqlite`，不改变主账本 schema 31。授权、密钥、ledger 路径和有限额度不可变；停下旧 controller 后保留该库与 runner ledger，unknown 不自动重派。需同批 Delivery `validateOwnerAgentForRoute`、Evaluation `onTrustedTaskChange`、Verifier 行为执行器及 native Tools/Policy peers；旧 peer 缺接口时仅此能力拒绝启动。Policy 新增可选 Host peer，不自动启用。DSH/Cordis/Loader/Include 基线与公共 npm 版本不变。
+Control Plane 可选 `creationCapabilities` 使用独立私有 `creation-adoptions.sqlite`，不额外改变主账本（当前 schema 33）。授权、密钥、ledger 路径和有限额度不可变；停下旧 controller 后保留该库与 runner ledger，unknown 不自动重派。需同批 Delivery `validateOwnerAgentForRoute`、Evaluation `onTrustedTaskChange`、Verifier 行为执行器及 native Tools/Policy peers；旧 peer 缺接口时仅此能力拒绝启动。Policy 新增可选 Host peer，不自动启用。DSH/Cordis/Loader/Include 基线与公共 npm 版本不变。
 
-采用账本当前为 schema v3：v2 在原 calls 行增加可空前台归因列，v3 新增独立懒读取的签名源码表；v1/v2 逐级迁移保持原 authorityDigest、配置、密钥、采用凭证、调用结果、unknown 和累计额度，旧行不补任务或源码。升级前停止旧 controller，旧版本不能打开新库。内建创建采用路径依赖同批精确源码采集模块，Host 历史读取还要求 Delivery `validateOwnerRoute`；源码数据不扩大创建/采用授权，不改变主 Control Plane schema 31 或 DSH/Cordis ABI。
+采用账本当前为 schema v3：v2 在原 calls 行增加可空前台归因列，v3 新增独立懒读取的签名源码表；v1/v2 逐级迁移保持原 authorityDigest、配置、密钥、采用凭证、调用结果、unknown 和累计额度，旧行不补任务或源码。升级前停止旧 controller，旧版本不能打开新库。内建创建采用路径依赖同批精确源码采集模块，Host 历史读取还要求 Delivery `validateOwnerRoute`；源码数据不扩大创建/采用授权，不额外改变主 Control Plane 账本（当前 schema 33）或 DSH/Cordis ABI。
 
 Host 动态挂载可信工具入口，精确候选每次在独立 Docker child 内挂载真实 Cordis Context，支持有界无跨调用状态的 Tools/SystemPrompt 插件。此路径不替代旧修改发布门；源计划保持 pending，采用状态保存于独立账本。调用、重启恢复与撤销边界见 [有限动态采用](../plugins/plugin-control-plane/README.md#新工具插件的有限动态采用)。
 

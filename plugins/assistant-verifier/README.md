@@ -122,6 +122,14 @@ Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始
 
 新增数据与权限：读取当前 Host 认证任务和检查补丁，向该任务模型供应商发送这些材料；写私有合同、观察摘要、模型 Session、有限额度与签名账本；读取私有签名密钥，并通过固定 Docker executable 执行封存候选。没有浏览器或运行时联网容器权限，没有安装脚本或公开验收写工具。
 
+## 已采用插件的新任务修订验收
+
+`revisionReviews` 是可选、独立的 Host 配置，字段及限制与上表 `creationReviews` 相同；须单独配置修订 authority、Ed25519 密钥引用、政策和有限额度，密钥文件可与创建验收共用，但两种用途不能互相代用。用 `compileRevisionReviewConfig(config)` 取得 `{ authority, publicKey }`，仅将这两个公开字段交给 Control Plane 的 `revisionVerifications`；还须配置其独立的 `sourceJobs.revision` 授权和保留的已采用父版本源码。`revisionReviews` 缺省时不启用本轨，不借用创建验收引用或额度。修订 authority 使用 `assistant-growth/revision-acceptance-authority/v1` 和独立政策摘要，私有账本位于 `databasePath + '.revision-reviews'`；失败与 unknown 派发也占用修订额度，未知结果不自动重放。
+
+新的普通认证失败任务经 Growth 冻结 `revisionAcceptance`、原任务模型及预算，并选择同 owner 已采用父版本后，Control Plane 原生 SourceJobs 才能调用 Host-only `verifyPluginRevision({ protocol: 'assistant-growth/revision-verification-request/v1', planId })`。它不注册为模型工具。Host 重新核对当前 owner/任务、父版本签名归档、精确源码基线、父绑定及封存制品；任务纠正、撤回、授权或 provider 变化会使旧验收失效。父绑定含 `planId`、`certificateDigest`、`artifactSha256`、`sourceArchiveDigest`、`sourceDigest`，并同时进入持久 claim、最终 fence 和凭证。
+
+验收沿用两个全新的无工具原生模型回合与有界 Docker 行为观察：先依据这次任务和工具结构生成私有用例，不看候选源码；再对实际补丁、已观察用例及父绑定作源码审查。两轮使用这次新任务冻结的 supplier，另受 `revisionReviews` 的独立模型调用、输出和时限预算约束。通过后签发独立 `assistant-growth/revision-verification/v1` Ed25519 凭证，绑定父版本、当前任务、Growth run、精确制品/源码、观察环境与结果；修订签名域与旧创建凭证不互通。验收仅覆盖本次新任务及这些检查，不能推断父版本全部行为已回归通过。结果保留为 `prepared-revise` / `pending-approval` 候选；本阶段不授权执行、替换当前版本、扩大旧创建采用额度或声称版本回滚与后续收益已验证。
+
 ## 独立源码审查
 
 `sourceReviews` 是可选 Host 能力，供 Control Plane 的 `sourceReleaseExecution.independentReview` 调用。复用当前 DSH `agents`、`sessions`、`tools`、`llm`、`systemPrompt` 与 `assistantPolicy`，不新增调度器。缺少这些服务时保持未就绪，依赖替换或卸载会取消并等待当前审查。Host 在 PR 前检查精确 owner、插件、模型、目录与剩余额度；已存在的 operation 可进入终态恢复核验。

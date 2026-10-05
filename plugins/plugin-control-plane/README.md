@@ -328,6 +328,37 @@ Host 在私有 worktree 使用该基线的 `scripts/create-plugin.mjs`，生成 
 
 成功准备返回 `pending-approval`，不会自动发布。普通 gap 可用已有签名审批流程；owner 任务来源必须通过 Host 当前来源 fence 审批，离线 CLI 签名本身不能代替该校验。审批后，普通 gap 用 `dsh-plugin-control source verify-prepared --plan-id <id> --expected-revision <revision>` 重读同一 worktree 并核对 digest；owner 来源由下述 Host 发布接续入口完成复核，才能进入 review/release。修改 worktree 会使复核失败；旧 `create` 计划仍走 `scaffold`。`dsh-plugin-control source gc` 将已过 TTL、仍 pending/approved 的计划以版本 CAS 转为 `expired`，释放该计划的 gap 占用，再清理控制面登记的 modify worktree；已经 `expired` 的计划可重试物理清理，已经进入 review/release 的 worktree 保留。
 
+### 已采用工具的有限源码修订
+
+新的认证失败任务可引用同一当前 owner 已采用的精确源码，生成独立修订候选。旧创建来源可以已更正、撤回或到期；它只证明历史父版本，不授予新任务权限。修订默认关闭，Growth 须显式设置 `pluginSourceProposals.allowRevision: true`、`preparationMode: durable` 并启用 `usageLearning`；Control Plane 还须配置独立授权：
+
+```yaml
+sourceJobs:
+  # 保留完整 sourceJobs 配置；沿用其提交上限、原生 Policy 预算与 owner
+  revision:
+    id: owner-plugin-revision-1
+    expiresAt: 1800000000000 # 替换为 owner 批准的有限绝对期限
+    maxRevisions: 3
+    namePrefix: owner-tool-
+revisionVerifications:
+  authority: # 来自同批 Verifier compileRevisionReviewConfig 的公开引用
+    protocol: assistant-growth/revision-acceptance-authority/v1
+    authorityId: owner-revision-review
+    keyId: revision-review-key
+    authorityDigest: <实际编译摘要>
+    namePrefix: owner-tool-
+    expiresAt: 1800000000000
+  publicKey: <Verifier 的 Ed25519 公钥 PEM>
+```
+
+此路径要求既有 `creationCapabilities` 的 owner 和已签名源码归档、独立 Verifier 修订配置及当前 Growth Usage producer；验收密钥须与采用密钥不同。模型从 Host-only 清单投影选父计划和名称，不能传入归档、授权或验收用例；三个模型工具是 `plugin_source_revision_targets`、`plugin_source_revision_inspect`、`plugin_source_revise`，失败 gap 由 Host 从本轮当前任务推导。新任务的实际 supplier、预算、原生身份、修订验收引用在首个作者模型请求前冻结，每个派发与检查点重验新任务和父版本绑定。
+
+Host 从当前受信任基线生成同名 scaffold，将父归档的候选文件叠加后应用新文件；manifest、patch、版本、许可证及构建配置须与当前生成器精确一致。README、非保留 `src/`、`tests/` 的边界与创建相同，至少一个真实变化，不支持删除或可执行文件。生成器或保留文件不兼容、当前基线已有同名包时拒绝，不把旧 Git OID 写入新基线。受管基线只允许精确证书和制品绑定的已采用父 `prepared-create` 计划让位于自己的修订；其他未结束或 unknown 作业仍阻止推进。
+
+同一 `revision.id` 的累计额度独立保存，失败/unknown 不返还，幂等请求不重复扣取；同时消费既有 `maxSubmissions` 和 Policy 预算。成功构建产生 `prepared-revise`。原生续跑仅调用独立修订验收；新证书以专用签名域绑定父证书、制品、签名归档与源码摘要及新任务/model/run。claimed unknown 不自动重验；验证结果与精确 staged 源码在同一事务落账。
+
+Host-only `inspectCreatedCapabilityRevisionCandidate(planId)` 验签并核对当前 owner，可在来源更正/撤回、授权和证书到期、制品/worktree 回收及 Host 冷启动后读取历史候选。该候选没有执行回执，不注册工具、不替换父版本、不扩大或续期旧创建/采用额度；后续版本切换须另有有限授权和父版本回归验证。旧配置不会自动获得修订能力，owner 安装器目前不生成这一授权。
+
 ### 新工具插件的有限动态采用
 
 可选 `creationCapabilities` 是一次配置的独立 owner 采用授权，必须与 `sourceJobs.creation`、`creationVerifications` 一起启用。其 owner 的七个稳定字段须匹配实际 Delivery owner 来源，命名空间须一致；采用 Ed25519 私钥与验收器私钥的实际 material 和 key id 均须不同。旧 peer 缺少 live Agent 校验或 Evaluation 变化订阅时拒绝启动此能力。示例中的路径、身份、摘要、期限和镜像须替换为实际授权：

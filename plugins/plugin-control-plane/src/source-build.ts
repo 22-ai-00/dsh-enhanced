@@ -4,6 +4,9 @@ import { chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from 'node:f
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { ControlPlaneCliError } from './errors.js'
+import { verifyRevisedPluginWorkspace, type SourceRevisionBinding } from './source-revision.js'
+import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
+import type { PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { verifyCreatedPluginWorkspace, type SourceCreationBinding } from './source-creation.js'
 import { checkedSourceSnapshot, runLocalBuffer, runLocalCommand } from './source-workspace.js'
 import type { SourcePreparedEvidence } from './types.js'
@@ -576,6 +579,7 @@ export async function runDockerPreparedChecks(input: {
   sourceJob?: { id: string; containerName: string }
   /** Frozen owner grant and generator proof for Host-scaffolded creation only. */
   creation?: SourceCreationBinding
+  revision?: { binding: SourceRevisionBinding; parentSource: CreationCapabilitySourceSnapshot; parentCertificate: PluginCreationVerificationCertificate; files: readonly import('./source-workspace.js').ScopedPluginFile[] }
   /** Host-only request to return the exact already-verified pack bytes for independent verification. */
   capturePack?: true
 }): Promise<SourceBuildResult> {
@@ -591,20 +595,23 @@ export async function runDockerPreparedChecks(input: {
   let creationSnapshot: Awaited<ReturnType<typeof checkedSourceSnapshot>> | undefined
   let baseLockDigest: string | undefined
   const verifyCreation = async (): Promise<void> => {
-    if (input.creation === undefined) return
-    if (input.creation.grant.expiresAt <= Date.now()) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation grant expired before build')
-    const verified = await verifyCreatedPluginWorkspace({ worktree: input.worktree, baseCommit: input.baseCommit,
+    if (input.creation === undefined && input.revision === undefined) return
+    if (input.creation !== undefined && input.revision !== undefined) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source build has conflicting preparation authorities')
+    if ((input.creation?.grant ?? input.revision!.binding.grant).expiresAt <= Date.now()) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation grant expired before build')
+    const verified = input.revision === undefined ? await verifyCreatedPluginWorkspace({ worktree: input.worktree, baseCommit: input.baseCommit,
       name: input.name, environment: input.environment, signal: input.signal, assertCurrent: input.assertCurrent,
-      creation: input.creation })
+      creation: input.creation! }) : await verifyRevisedPluginWorkspace({ worktree: input.worktree, baseCommit: input.baseCommit,
+        name: input.name, environment: input.environment, signal: input.signal, assertCurrent: input.assertCurrent,
+        revision: input.revision.binding, parentSource: input.revision.parentSource, parentCertificate: input.revision.parentCertificate, files: input.revision.files })
     const expected = [...input.scope].sort()
     const actual = [...verified.scope].sort()
     if (expected.length !== actual.length || expected.some((path, index) => path !== actual[index])) {
       throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation build scope differs from verified scope')
     }
     await input.assertCurrent()
-    if (input.creation.grant.expiresAt <= Date.now()) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation grant expired before build')
+    if ((input.creation?.grant ?? input.revision!.binding.grant).expiresAt <= Date.now()) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation grant expired before build')
   }
-  if (input.creation !== undefined) {
+  if (input.creation !== undefined || input.revision !== undefined) {
     await verifyCreation()
     creationSnapshot = await checkedSourceSnapshot(input.worktree, input.baseCommit, input.scope, input.environment, undefined, input.signal)
     const baseLock = await runLocalBuffer('git', ['show', `${input.baseCommit}:pnpm-lock.yaml`], input.worktree,
@@ -645,7 +652,7 @@ export async function runDockerPreparedChecks(input: {
       if (existing.code !== 0 || existing.stdout.trim() !== '') throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable source container already exists or cannot be inspected')
     } catch (error) { await snapshot.cleanup(); throw error }
   }
-  if (input.creation !== undefined && input.creation.grant.expiresAt <= Date.now()) {
+  if ((input.creation !== undefined || input.revision !== undefined) && (input.creation?.grant ?? input.revision!.binding.grant).expiresAt <= Date.now()) {
     await snapshot.cleanup()
     throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation grant expired before build')
   }

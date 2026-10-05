@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
-import { SourceGrowthRunUnavailableError, type CreationAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
+import { SourceGrowthRunUnavailableError, type CreationAcceptanceAuthorityRef,
+  type RevisionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assistant-evaluation'
@@ -57,10 +58,12 @@ async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missi
     usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, databasePath: join(root, 'usage.sqlite'), maxPending: options.maxPending ?? 16 } })
   const review = vi.fn<(input: UsageReviewInput) => Promise<UsageReviewResult>>(async input => { input.assertCurrent(); return 'reviewed' })
   let currentCreationAuthority: CreationAcceptanceAuthorityRef | undefined
+  let currentRevisionAuthority: RevisionAcceptanceAuthorityRef | undefined
   const runtimes: UsageLearningRuntime[] = []
   const create = (selectedConfig = config) => {
     const runtime = new UsageLearningRuntime(selectedConfig, { evaluation, automations, delivery, review,
-      inspectCreationAcceptanceAuthority: () => currentCreationAuthority })
+      inspectCreationAcceptanceAuthority: () => currentCreationAuthority,
+      inspectRevisionAcceptanceAuthority: () => currentRevisionAuthority })
     runtimes.push(runtime); runtime.start(); return runtime
   }
   const append = (task = 'task', status: 'achieved' | 'not-achieved' | 'unknown' = 'not-achieved') => producer.append({
@@ -79,7 +82,8 @@ async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missi
   cleanup.push(async () => { for (const runtime of runtimes) await runtime.close(); producer.close(); await ctx.fiber.restart(); await rm(root, { recursive: true, force: true }) })
   return { ctx, root, config, owner, policy, evaluation, automations, sourceModel, review, create, append, tick,
     setReply: (value: OwnerForegroundLearningTask['source']['reply']) => { reply = value },
-    setCreationAuthority: (value: CreationAcceptanceAuthorityRef | undefined) => { currentCreationAuthority = value } }
+    setCreationAuthority: (value: CreationAcceptanceAuthorityRef | undefined) => { currentCreationAuthority = value },
+    setRevisionAuthority: (value: RevisionAcceptanceAuthorityRef | undefined) => { currentRevisionAuthority = value } }
 }
 
 function actualSourceRun(input: UsageReviewInput) {
@@ -224,6 +228,53 @@ test('recovers only the exact policy bound before generation and never retrofits
   await old.tick()
   old.setCreationAuthority(authority)
   expect(legacy.inspectSourceGrowthRun({ runId: oldId, intentDigest: oldDigest })).not.toHaveProperty('creationAcceptance')
+})
+
+test('freezes an independent revision policy before generation and rejects a changed ref after restart', async () => {
+  const f = await fixture()
+  const revision: RevisionAcceptanceAuthorityRef = { protocol: 'assistant-growth/revision-acceptance-authority/v1',
+    authorityId: 'revision-policy', keyId: 'revision-key', authorityDigest: '8'.repeat(64),
+    namePrefix: 'assistant-', expiresAt: Date.now() + 60_000 }
+  const creation: CreationAcceptanceAuthorityRef = { protocol: 'assistant-growth/creation-acceptance-authority/v1',
+    authorityId: 'creation-policy', keyId: 'creation-key', authorityDigest: '9'.repeat(64),
+    namePrefix: 'assistant-', expiresAt: revision.expiresAt }
+  f.setCreationAuthority(creation); f.setRevisionAuthority(revision)
+  f.append('new-failed-task'); const first = f.create()
+  let runId = ''; let intentDigest = ''
+  f.review.mockImplementationOnce(async input => {
+    runId = input.id; intentDigest = input.intentDigest
+    f.setRevisionAuthority({ ...revision, authorityDigest: '0'.repeat(64) })
+    expect(() => input.bindSourceRun({ ...actualSourceRun(input), revisionAcceptance: revision })).toThrow(/authority changed/)
+    f.setRevisionAuthority(revision)
+    const bound = input.bindSourceRun({ ...actualSourceRun(input), revisionAcceptance: revision, creationAcceptance: creation })
+    expect(bound).toMatchObject({ revisionAcceptance: revision, creationAcceptance: creation,
+      model: f.sourceModel, intentDigest, source: { projection: { subjectRef: 'new-failed-task' } } })
+    expect(first.inspectSourceGrowthRun({ runId, intentDigest })).toEqual(bound)
+    return 'reviewed'
+  })
+  await f.tick(); await first.close()
+  const recovered = f.create()
+  expect(recovered.inspectSourceGrowthRun({ runId, intentDigest })?.revisionAcceptance).toEqual(revision)
+  expect(recovered.inspectSourceGrowthRun({ runId, intentDigest: '0'.repeat(64) })).toBeUndefined()
+  f.setRevisionAuthority({ ...revision, authorityDigest: '0'.repeat(64) })
+  expect(recovered.inspectSourceGrowthRun({ runId, intentDigest })).toBeUndefined()
+  f.setRevisionAuthority(undefined)
+  expect(recovered.inspectSourceGrowthRun({ runId, intentDigest })).toBeUndefined()
+  f.setRevisionAuthority(revision)
+  expect(recovered.inspectSourceGrowthRun({ runId, intentDigest })).toBeDefined()
+  await recovered.close()
+})
+
+test('the default-disabled revision flag preserves the historical usage config digest', async () => {
+  const f = await fixture(); f.append('legacy-compatible-task'); f.create()
+  const { allowRevision: _absentHistorically, ...legacySourceConfig } = f.config.pluginSourceProposals
+  const expected = acceptanceDigest({ ...f.config, pluginSourceProposals: legacySourceConfig })
+  const db = new DatabaseSync(join(f.root, 'usage.sqlite'))
+  try {
+    const row = db.prepare('SELECT intent_json FROM usage_jobs LIMIT 1').get() as { intent_json: string }
+    expect((JSON.parse(row.intent_json) as { configDigest: string }).configDigest).toBe(expected)
+    expect(expected).not.toBe(acceptanceDigest(f.config))
+  } finally { db.close() }
 })
 
 test('fixed override keeps its original source through a new Session but invalidates on owner rotation', async () => {
