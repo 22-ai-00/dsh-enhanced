@@ -82,10 +82,15 @@ const check = String.raw`
 try {
   const before = containerIds()
   await mkdir(plugin, { recursive: true })
+  await writeFile(join(repository, 'pnpm-workspace.yaml'), "packages:\n  - 'plugins/*'\n")
   await writeFile(join(repository, 'package.json'), JSON.stringify({ name: 'sandbox-source-smoke', version: '1.0.0', private: true, scripts: { check: 'node check.cjs' } }))
   await writeFile(join(repository, 'check.cjs'), check)
-  await writeFile(join(plugin, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/sandbox-probe', version: '1.0.0', files: ['index.js'] }))
+  await writeFile(join(plugin, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/sandbox-probe', version: '1.0.0',
+    files: ['index.js', 'README.md', 'LICENSE', 'cordis.patch.yml'], dsh: { bundle: { patch: './cordis.patch.yml' } } }))
   await writeFile(join(plugin, 'index.js'), 'export const sandboxProbe = true\n')
+  await writeFile(join(plugin, 'README.md'), '# Synthetic sandbox probe\n')
+  await writeFile(join(plugin, 'LICENSE'), 'MIT License\nSynthetic test fixture only.\n')
+  await writeFile(join(plugin, 'cordis.patch.yml'), "- insert:\n    - id: dsh-enhanced-sandbox-probe\n      name: '@dsh-enhanced/sandbox-probe'\n")
   execFileSync('pnpm', ['install', '--lockfile-only', '--offline', '--ignore-scripts'], { cwd: repository, env, stdio: 'pipe' })
   git('init', '-q'); git('config', 'user.name', 'Sandbox source smoke'); git('config', 'user.email', 'sandbox@example.invalid')
   git('add', '--all'); git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'fixture')

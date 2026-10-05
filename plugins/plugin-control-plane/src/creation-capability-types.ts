@@ -131,6 +131,29 @@ export interface CreationCapabilityCallEvidence {
   foreground?: CreationCapabilityForegroundCallWitness
 }
 
+/** A current, content-free task association; not a causal improvement claim. */
+export interface CreationCapabilityTaskAssociation {
+  protocol: 'dsh-created-capability-task-association/v1'
+  planId: string
+  inboxId: string
+  sessionId: string
+  callKeys: readonly string[]
+  receiptDigest: string
+  artifactSha256: string
+  schemaDigest: string
+  adoptionStatus: CreationCapabilityRecord['status']
+  /** Signed deadline only; current execution still requires runtime owner, mount and quota checks. */
+  withinSignedUseWindow: boolean
+  task: {
+    projection: { subjectKind: 'foreground-turn'; subjectRef: string; version: number; digest: string; disposition: 'upsert' }
+    scopeWatermark: number
+    outcomeId: string
+    judgement: 'owner-feedback' | 'independent-verifier'
+    status: 'achieved' | 'not-achieved'
+    sourceDigest: string
+  }
+}
+
 export interface CreationCapabilityCall {
   key: string
   status: 'claimed' | 'completed' | 'unknown'

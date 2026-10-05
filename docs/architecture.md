@@ -84,6 +84,8 @@ Growth 的可选 `usageLearning` 使用 Evaluation canonical feed 与 Delivery o
 
 动态工具的实际使用与其触发来源分别记录：Delivery 只读证明当前真实前台 Agent 的具体 Inbox、开放 turn 和唯一未结算的原生调用事件，Control Plane 在调用 claim 事务中绑定该证明与冻结采用回执、工具及制品版本。旧调用不回填任务，无证明或 PTC 调用不计前台归因；unknown 继续消费额度且不重放。内容无关的 Host 查询只证明使用，任务收益仍由认证 canonical 修订或独立验收给出，不能从 Session、部署关联或工具成功推导。
 
+Control Plane 的 Host-only 任务关联查询从既有采用/调用账本读取精确版本，在 Evaluation canonical writer fence 内重验原创建来源和后续 Inbox 的当前认证判断，并由 Delivery 核对 owner lineage、执行绑定和真实任务证据。同一 plan/Inbox 的完成调用去重，更正切换到当前修订，撤回或 owner 漂移使关联失效；原创建任务和 unknown 不进入后续结果。该查询不增加结果账本或调度循环，不重新授权历史版本；签名使用期限只描述时间窗口。关联快照是观察证据，后续晋升或回退仍须独立验证并取得新鲜授权，不能将关联解释为因果收益。
+
 `assistant-isolation` 作为独立 bundle 接入原生 ToolRuntime，Host 仍拥有 AgentLoop、Delivery owner、Policy、SQLite 授权/结果账本及 detached supervisor。模型的离线任意 shell 代码进入 Linux Docker 容器；每任务使用有字节/inode 硬限制的独立 tmpfs volume，Host 输入经受限复制进入卷，不向容器暴露 Host bind mount、真实项目、Host 状态、Docker socket 或凭据。独立 keeper 持续挂载工作卷，执行容器删除后才由固定 BusyBox 命令导出已验证类型/链接/字节限制的文本产物，最后删除 keeper 与卷。Host 工具路由在配置的 workspace/preset 内拒绝改走通用代码工具，容器内也没有动作或出网代理。
 
 Grant 绑定 owner lineage、范围、期限和次数/预留时长；请求摘要包含镜像与限制，Session 幂等键禁止未知结果重放。单 Controller 的持久 lease/fence 串行化预算与恢复，外部 CLI 先持久撤销再尝试终止容器。包同时发布 `lib/` 与 Node supervisor 的 `runtime/`，前者相对解析后者，不依赖源码目录。可回滚安装不等于回滚已发生的外部动作。

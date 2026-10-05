@@ -1,6 +1,7 @@
 import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type AdoptionCoordinatorConfig } from './adoption-coordinator.js'
 import { CreationCapabilityJournal, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
 import { CreationCapabilityRuntime } from './creation-capability-runtime.js'
+import { inspectCreationCapabilityTaskAssociations } from './creation-capability-feedback.js'
 import type { CreationCapabilityConfig, CreationCapabilityRecord } from './creation-capability-types.js'
 import { lstat, readFile, realpath } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
@@ -894,6 +895,61 @@ export class PluginControlPlaneService extends Service {
   inspectCreatedCapabilityCalls = (planId: string) => {
     this.abort.signal.throwIfAborted()
     return this.creationCapabilityRuntime?.inspectCallEvidence(planId) ?? []
+  }
+
+  /** Host-only current association of exact adopted call versions with authenticated task heads. */
+  inspectCreatedCapabilityTaskAssociations = (planId: string) => {
+    this.abort.signal.throwIfAborted()
+    const snapshot = this.creationCapabilityRuntime?.inspectAssociationEvidence(planId)
+    if (!snapshot || !this.config.creationCapabilities) return []
+    const owner = this.config.creationCapabilities.owner
+    const evaluation = this.ctx.get('assistantEvaluation' as never, false) as AssistantEvaluationService | undefined
+    const delivery = this.ctx.get('assistantDelivery' as never, false) as AssistantDeliveryService | undefined
+    if (!evaluation || !delivery) return []
+    try {
+      const historical = this.store.getRetainedPreparedCreation(planId)
+      return inspectCreationCapabilityTaskAssociations({ ...snapshot, owner, evaluation, delivery,
+        triggerInboxId: historical.reference.projection.subjectRef,
+        readSourceCurrent: () => {
+          this.assertCreatedCapabilityAssociationSource(snapshot.record)
+          const current = this.taskGaps.inspectCurrent(historical.plan.gapId, historical.reference.owner)
+          return { projection: current.canonical.projection, scopeWatermark: current.canonical.scopeWatermark }
+        } })
+    } catch { return [] }
+  }
+
+  /** Exact historical certificate and source check without nesting an Evaluation writer fence. */
+  private assertCreatedCapabilityAssociationSource(record: CreationCapabilityRecord): void {
+    this.abort.signal.throwIfAborted()
+    const receipt = record.receipt
+    const config = this.config.creationVerifications
+    const ownerGrant = this.config.creationCapabilities?.owner
+    if (!receipt || !config || !ownerGrant
+      || !verifyPluginCreationVerificationCertificate(record.certificate, config.authority,
+        config.publicKey, receipt.adoptedAt)) throw new Error('created capability association certificate invalid')
+    const { plan, job, reference } = this.store.getRetainedPreparedCreation(record.planId)
+    const certificate = this.store.getCreationVerification(record.planId)
+    const growth = plan.creation?.growthRun
+    const artifactSha256 = createHash('sha256').update(record.artifact).digest('hex')
+    if (!certificate || controlPlaneDigest(certificate) !== controlPlaneDigest(record.certificate)
+      || !growth || !plan.creation || !job.intent.creation?.growthRun || !plan.sourceCheck || !plan.preparedEvidence
+      || plan.id !== receipt.planId || plan.digest !== receipt.planDigest
+      || plan.name !== record.certificate.plan.name || plan.generatorDigest !== record.certificate.plan.generatorDigest
+      || plan.sourceCheck.treeDigest !== record.certificate.plan.sourceTreeDigest
+      || plan.sourceCheck.patchDigest !== record.certificate.plan.sourcePatchDigest
+      || plan.preparedEvidence.pack.sha256 !== record.certificate.plan.artifactSha256
+      || plan.preparedEvidence.pack.sizeBytes !== record.certificate.plan.artifactBytes
+      || artifactSha256 !== record.certificate.plan.artifactSha256
+      || record.artifact.length !== record.certificate.plan.artifactBytes
+      || controlPlaneDigest(reference) !== record.certificate.source.referenceDigest
+      || controlPlaneDigest(reference.owner) !== record.certificate.source.ownerDigest
+      || sourceGrowthRunDigest(growth) !== record.certificate.source.growthRunDigest
+      || sourceGrowthRunDigest(job.intent.creation.growthRun) !== record.certificate.source.growthRunDigest
+      || controlPlaneDigest(growth.model) !== controlPlaneDigest(record.certificate.model)
+      || controlPlaneDigest(growth.creationAcceptance) !== controlPlaneDigest(config.authority)
+      || controlPlaneDigest(plan.creation.grant) !== controlPlaneDigest(this.config.sourceJobs?.creation)
+      || Object.keys(ownerGrant).some(key => reference.owner[key as keyof typeof reference.owner]
+        !== ownerGrant[key as keyof typeof ownerGrant])) throw new Error('created capability association source changed')
   }
 
   private withCreatedCapabilityCurrent<T>(record: CreationCapabilityRecord, callback: () => T): T {

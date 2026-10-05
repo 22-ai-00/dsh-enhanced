@@ -16,10 +16,21 @@ async function active(pid: number): Promise<boolean> {
     return !['Z', 'X'].includes(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0]!)
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error }
 }
+async function ownedFixtureProcess(root: string, file: string, pid: number): Promise<boolean> {
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, 'utf8')
+    const start = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/u)[19]
+    const recorded = await readFile(join(root, `${file}.start`), 'utf8')
+    const command = await readFile(`/proc/${pid}/cmdline`)
+    // PID reuse must not let fixture cleanup signal another process.
+    return start === recorded && command.includes(Buffer.from(root)) && await active(pid)
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error }
+}
 afterEach(async () => {
   for (const root of roots.splice(0)) {
     for (const file of ['child.pid', 'parent.pid']) {
-      try { const pid = Number(await readFile(join(root, file), 'utf8')); if (await active(pid)) process.kill(pid, 'SIGKILL') }
+      try { const pid = Number(await readFile(join(root, file), 'utf8'))
+        if (await ownedFixtureProcess(root, file, pid)) process.kill(pid, 'SIGKILL') }
       catch (error) { if (!['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error }
     }
     await rm(root, { recursive: true, force: true })
@@ -29,13 +40,28 @@ afterEach(async () => {
 async function fixture(mode: string) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-adapter-process-'))); roots.push(root)
   const path = join(root, 'adapter.mjs')
-  const childCode = `import {writeFileSync} from 'node:fs';
+  const childCode = `import {readFileSync,writeFileSync,writeSync} from 'node:fs';
+    const start=readFileSync('/proc/self/stat','utf8').split(') ').at(-1).trim().split(/\\s+/)[19];
+    writeFileSync(${JSON.stringify(join(root, 'child.pid.start'))}, start);
     writeFileSync(${JSON.stringify(join(root, 'child.pid'))}, String(process.pid));
-    ${mode === 'escaped-output' ? "setTimeout(()=>process.stdout.write('x'.repeat(1024*1024),()=>process.exit(0)),35);" : 'setInterval(()=>{}, 20);'} process.send('ready');`
+    ${mode === 'escaped-output' ? `const parent=process.ppid, deadline=Date.now()+900;
+      const writeAfterParentExit=()=>{
+        if(process.ppid!==parent){
+          writeFileSync(${JSON.stringify(join(root, 'after-parent-exit'))}, String(parent));
+          const bytes=Buffer.alloc(8192,120);let offset=0;
+          while(offset<bytes.length){const count=writeSync(1,bytes,offset,bytes.length-offset);if(count<=0)process.exit(24);offset+=count;}
+          process.exit(0);
+        }
+        if(Date.now()>=deadline)process.exit(23);
+        setTimeout(writeAfterParentExit,1);
+      };
+      process.send('ready');setTimeout(writeAfterParentExit,1);` : "setInterval(()=>{},20);process.send('ready');"}`
   await writeFile(path, `import {spawn} from 'node:child_process';
     import {readFileSync,writeFileSync} from 'node:fs';
     if (process.argv[2] === '--version') { process.stdout.write('tree-adapter-1\\n'); }
     else {
+      const start=readFileSync('/proc/self/stat','utf8').split(') ').at(-1).trim().split(/\\s+/)[19];
+      writeFileSync(${JSON.stringify(join(root, 'parent.pid.start'))}, start);
       writeFileSync(${JSON.stringify(join(root, 'parent.pid'))}, String(process.pid));
       const mode = ${JSON.stringify(mode)};
       if (mode === 'descriptor') {
@@ -103,11 +129,20 @@ describe.skipIf(process.platform !== 'linux')('adapter process ownership', () =>
     await expect(f.execute()).rejects.toMatchObject({ code: 'CLEANUP' })
     expect(performance.now() - start).toBeLessThan(4_000)
     // A process group is not a cgroup boundary. Fixture cleanup owns this escaped process.
-    expect(await active(Number(await readFile(join(f.root, 'child.pid'), 'utf8')))).toBe(true)
+    const pid = Number(await readFile(join(f.root, 'child.pid'), 'utf8'))
+    const recordedStart = await readFile(join(f.root, 'child.pid.start'), 'utf8')
+    const stat = await readFile(`/proc/${pid}/stat`, 'utf8')
+    expect(recordedStart).toMatch(/^\d+$/u)
+    expect(recordedStart).toBe(stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/u)[19])
+    expect(await ownedFixtureProcess(f.root, 'child.pid', pid)).toBe(true)
   })
   test('rejects an output overflow delivered after the leader exited during pipe drain', async () => {
     const f = await fixture('escaped-output')
     await expect(f.execute()).rejects.toMatchObject({ code: 'OUTPUT_LIMIT' })
+    expect(await readFile(join(f.root, 'after-parent-exit'), 'utf8'))
+      .toBe((await readFile(join(f.root, 'parent.pid'), 'utf8')).trim())
+    await expect.poll(async () => { try { await f.stopped(); return true } catch { return false } },
+      { timeout: 1_000, interval: 10 }).toBe(true)
   })
   test('handles early stdin closure and failed spawn as bounded execution errors', async () => {
     const f = await fixture('closed-stdin')
