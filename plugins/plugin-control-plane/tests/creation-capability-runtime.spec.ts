@@ -194,6 +194,34 @@ test('native tool policy still guards proxy, while repeated and unknown direct c
   await runtime.close()
 })
 
+test('the current caller witness must match the execution before a durable call claim', async () => {
+  const f = fixture()
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  const runtime = f.runtime(); await runtime.start(); await runtime.adopt('plan-1', new AbortController().signal)
+  const name = f.journal.inspect('plan-1')!.tools![0]!.name
+  const argumentsDigest = digest(JSON.stringify({ query: 'hi' }))
+  const witness = { protocol: 'assistant-delivery/foreground-tool-call/v1' as const,
+    task: { protocol: 'assistant-delivery/foreground-task/v1' as const, inboxId: 'inbox-1', sessionId: 'other-session',
+      scope: { workspace: f.config.owner.workspace, preset: f.config.owner.agentPreset },
+      owner: { principalRecordId: f.config.owner.principalRecordId, principalVersion: f.config.owner.principalVersion },
+      binding: { id: 'binding-1', version: 1, generation: 1 }, dispatchedAt: Date.now() },
+    turn: 1, call: { id: 'call-1', toolName: name, eventSeq: 1, eventDigest: 'f'.repeat(64), argumentsDigest } }
+  f.ports.inspectCall = () => witness
+  const exec = { callId: 'call-1', agent: { session: { id: 'session-1' } },
+    signal: new AbortController().signal } as unknown as ToolRunContext
+  await expect(f.ctx.tools.get(name)!.execute({ query: 'hi' }, exec)).rejects.toThrow('foreground call differs')
+  expect(f.calls.size).toBe(0)
+  expect(f.counts().invokes).toBe(0)
+  witness.task.sessionId = 'session-1'
+  let claimed: Parameters<CreationCapabilityJournalPort['claimCall']>[0] | undefined
+  const original = f.journal.claimCall
+  f.journal.claimCall = input => { claimed = input; return original(input) }
+  await expect(f.ctx.tools.get(name)!.execute({ query: 'hi' }, exec)).resolves.toMatchObject({ value: { answer: 'ok' } })
+  expect(claimed).toMatchObject({ toolAlias: name, foreground: witness })
+  expect(f.counts().invokes).toBe(1)
+  await runtime.close()
+})
+
 test('missing tools injection leaves wrapper pending and adoption becomes durable unknown', async () => {
   const f = fixture()
   const runtime = f.runtime(); await runtime.start()

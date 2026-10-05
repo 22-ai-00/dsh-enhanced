@@ -82,6 +82,8 @@ Growth 的可选 `usageLearning` 使用 Evaluation canonical feed 与 Delivery o
 
 独立验证后创建的工具由 Control Plane 的私有采用账本保存证书、不可变制品和签名使用回执，再以 Cordis 子 Fiber 注册 Host 别名，实际候选代码仍在离线 runner 中执行。显式 `creationCapabilities.retention` 将首次采用的新鲜证书门与采用后的有限使用期分开：v2 回执冻结采用时间和截止，后续调用及重启依靠原账本证据、精确计划/作业摘要和当前 owner/canonical 来源复核；单个创建作业、计划和证书到期或工作树回收不续期，也不重置额度或重放 unknown；原使用授权截止仍是硬门。无此配置的 v1 回执保持原证书到期语义。细节见 [Control Plane](../plugins/plugin-control-plane/README.md)。
 
+动态工具的实际使用与其触发来源分别记录：Delivery 只读证明当前真实前台 Agent 的具体 Inbox、开放 turn 和唯一未结算的原生调用事件，Control Plane 在调用 claim 事务中绑定该证明与冻结采用回执、工具及制品版本。旧调用不回填任务，无证明或 PTC 调用不计前台归因；unknown 继续消费额度且不重放。内容无关的 Host 查询只证明使用，任务收益仍由认证 canonical 修订或独立验收给出，不能从 Session、部署关联或工具成功推导。
+
 `assistant-isolation` 作为独立 bundle 接入原生 ToolRuntime，Host 仍拥有 AgentLoop、Delivery owner、Policy、SQLite 授权/结果账本及 detached supervisor。模型的离线任意 shell 代码进入 Linux Docker 容器；每任务使用有字节/inode 硬限制的独立 tmpfs volume，Host 输入经受限复制进入卷，不向容器暴露 Host bind mount、真实项目、Host 状态、Docker socket 或凭据。独立 keeper 持续挂载工作卷，执行容器删除后才由固定 BusyBox 命令导出已验证类型/链接/字节限制的文本产物，最后删除 keeper 与卷。Host 工具路由在配置的 workspace/preset 内拒绝改走通用代码工具，容器内也没有动作或出网代理。
 
 Grant 绑定 owner lineage、范围、期限和次数/预留时长；请求摘要包含镜像与限制，Session 幂等键禁止未知结果重放。单 Controller 的持久 lease/fence 串行化预算与恢复，外部 CLI 先持久撤销再尝试终止容器。包同时发布 `lib/` 与 Node supervisor 的 `runtime/`，前者相对解析后者，不依赖源码目录。可回滚安装不等于回滚已发生的外部动作。

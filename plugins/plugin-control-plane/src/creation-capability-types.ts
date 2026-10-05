@@ -95,6 +95,40 @@ export interface CreationCapabilityPorts {
   recheckRetained?(record: CreationCapabilityRecord, signal: AbortSignal): Promise<void>
   withCurrent<T>(record: CreationCapabilityRecord, callback: () => T): T
   assertCaller(record: CreationCapabilityRecord, execution: ToolRunContext): void
+  /** Optional authenticated Host attribution; absence never implies a foreground task. */
+  inspectCall?(record: CreationCapabilityRecord, execution: ToolRunContext, toolAlias: string,
+    argumentsJson: string): CreationCapabilityForegroundCallWitness | undefined
+}
+
+export interface CreationCapabilityForegroundCallWitness {
+  protocol: 'assistant-delivery/foreground-tool-call/v1'
+  task: {
+    protocol: 'assistant-delivery/foreground-task/v1'
+    inboxId: string
+    sessionId: string
+    scope: { workspace: string; preset: string }
+    owner: { principalRecordId: string; principalVersion: number }
+    binding: { id: string; version: number; generation: number }
+    dispatchedAt: number
+  }
+  turn: number
+  call: { id: string; toolName: string; eventSeq: number; eventDigest: string; argumentsDigest: string }
+}
+
+export interface CreationCapabilityCallEvidence {
+  protocol: 'dsh-created-capability-call-evidence/v1'
+  planId: string
+  key: string
+  status: CreationCapabilityCall['status']
+  attribution: 'foreground' | 'unattributed' | 'legacy-unattributed'
+  toolAlias?: string
+  originalName?: string
+  receiptDigest: string
+  artifactSha256: string
+  schemaDigest: string
+  claimedAt?: number
+  settledAt?: number
+  foreground?: CreationCapabilityForegroundCallWitness
 }
 
 export interface CreationCapabilityCall {
@@ -113,7 +147,9 @@ export interface CreationCapabilityJournalPort {
   authorize(planId: string, tools: readonly CreationCapabilityTool[]): CreationCapabilityRecord
   activate(planId: string): CreationCapabilityRecord
   settle(planId: string, status: 'closed' | 'unknown' | 'rejected', reason: string): void
-  claimCall(input: { planId: string; key: string; argumentsDigest: string }): { created: boolean; call: CreationCapabilityCall }
+  claimCall(input: { planId: string; key: string; argumentsDigest: string; toolAlias?: string;
+    foreground?: CreationCapabilityForegroundCallWitness }): { created: boolean; call: CreationCapabilityCall }
+  listCallEvidence?(planId: string): readonly CreationCapabilityCallEvidence[]
   settleCall(input: { planId: string; key: string; status: 'completed' | 'unknown'; result?: unknown; jobId?: string }): void
   recoverClaims(): void
   close(): void

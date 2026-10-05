@@ -10,6 +10,20 @@ export interface ForegroundTaskIdentity {
   dispatchedAt: number
 }
 
+/** Content-free proof of one native call in the currently claimed owner task. */
+export interface ForegroundToolCallAttestation {
+  protocol: 'assistant-delivery/foreground-tool-call/v1'
+  task: ForegroundTaskIdentity
+  turn: number
+  call: {
+    id: string
+    toolName: string
+    eventSeq: number
+    eventDigest: string
+    argumentsDigest: string
+  }
+}
+
 export interface ForegroundTaskObservationRegistration {
   protocol: 'plugin-control-plane/foreground-observer/v1'
   generation: string

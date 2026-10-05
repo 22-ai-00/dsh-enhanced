@@ -68,7 +68,8 @@ import {
 } from './goal-wake-types.js'
 import type { AcceptanceContract, AcceptanceHandle, ForegroundExecution, TaskAcceptanceRegistration } from './acceptance.js'
 import { isSynchronousForegroundObservationHandle, validForegroundObservationRegistration,
-  type ForegroundTaskIdentity, type ForegroundTaskObservationRegistration } from './foreground-observation.js'
+  type ForegroundTaskIdentity, type ForegroundTaskObservationRegistration,
+  type ForegroundToolCallAttestation } from './foreground-observation.js'
 import { InboundImageMaterializer } from './inbound-images.js'
 import { registerDeliveryTools } from './tools.js'
 import {
@@ -2330,6 +2331,73 @@ export class AssistantDeliveryService extends Service {
     }, 'assistant-delivery.native-web-notices')
     runtime.ctx.effect(() => () => access.dispose(), 'assistant-delivery.native-web-runtime')
     return access
+  }
+
+  /** Host-only proof of a single live native tool call in the exact claimed owner Inbox. */
+  inspectOwnerForegroundToolCall(input: Readonly<{
+    agent: Agent; authorityId: string; callId: string; toolName: string; argumentsJson: string
+  }>): Readonly<ForegroundToolCallAttestation> | undefined {
+    if (!input || typeof input !== 'object'
+      || typeof input.authorityId !== 'string' || input.authorityId.length === 0
+      || typeof input.callId !== 'string' || input.callId.length === 0
+      || typeof input.toolName !== 'string' || input.toolName.length === 0
+      || typeof input.argumentsJson !== 'string'
+      || Buffer.byteLength(input.authorityId) > toolApprovalIdentityBytes
+      || Buffer.byteLength(input.callId) > toolApprovalIdentityBytes
+      || Buffer.byteLength(input.toolName) > toolApprovalIdentityBytes
+      || Buffer.byteLength(input.argumentsJson) > toolApprovalArgumentBytes) return undefined
+    const route = this.validateOwnerAgentForRoute(input.agent, input.authorityId)
+    if (route === undefined) return undefined
+    const turn = this.currentPreferenceTurn(input.agent)
+    if (turn === undefined || turn.principalId !== route.principalId
+      || turn.principalLineage.principalRecordId !== route.principalRecordId
+      || turn.principalLineage.principalVersion !== route.principalVersion
+      || turn.scope.workspace !== route.workspace || turn.scope.preset !== route.agentPreset
+      || turn.bindingVersion !== route.bindingVersion
+      || turn.sessionId !== String(input.agent.session.id)) return undefined
+    const task = this.deliveryStore.inspectPendingForegroundToolTask({
+      inboxId: turn.sourceInboxId, sessionId: turn.sessionId, scope: turn.scope,
+      owner: turn.principalLineage,
+      binding: { id: turn.bindingId, version: turn.bindingVersion, generation: route.generation },
+    })
+    if (task === undefined) return undefined
+    const events = input.agent.session.snapshotEvents()
+    const openTurn = events.findLast(event => event.type === 'turn/start' || event.type === 'turn/end')
+    if (openTurn?.type !== 'turn/start' || openTurn.data.turn !== turn.turn) return undefined
+    const nativeCalls = events.filter((event): event is SessionEvent<'tool/call'> => event.type === 'tool/call' && event.seq > openTurn.seq
+      && event.data.turn === turn.turn && String(event.data.callId) === input.callId)
+    const unresolved = nativeCalls.filter(call => !events.some(event => event.type === 'tool/result'
+      && event.seq > call.seq && String(event.data.message.source.callId) === String(call.data.callId)))
+    if (unresolved.length !== 1) return undefined
+    const call = unresolved[0]!
+    const currentStep = events.findLast(event => (event.type === 'step/start' || event.type === 'step/end')
+      && event.data.turn === turn.turn)
+    if (String(call.data.callId) !== input.callId || call.data.name !== input.toolName
+      || !Number.isSafeInteger(call.seq) || !Number.isSafeInteger(call.data.step)
+      || typeof call.data.arguments !== 'string'
+      || Buffer.byteLength(call.data.arguments) > toolApprovalArgumentBytes
+      || events.some(event => event !== call && ((event.type === 'tool/call'
+        && String(event.data.callId) === input.callId)
+        || (event.type === 'tool/ptc-dispatch-start' && String(event.data.subCallId) === input.callId)))
+      || currentStep?.type !== 'step/start' || currentStep.seq <= openTurn.seq
+      || currentStep.seq >= call.seq || currentStep.data.step !== call.data.step
+      || events.filter(event => event.type === 'step/start' && event.data.turn === turn.turn
+        && event.data.step === call.data.step).length !== 1) return undefined
+    let normalizedArguments: string
+    try {
+      const parsed: unknown = JSON.parse(call.data.arguments)
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+      normalizedArguments = JSON.stringify(parsed)
+    } catch { return undefined }
+    const argumentsDigest = createHash('sha256').update(normalizedArguments).digest('hex')
+    if (argumentsDigest !== createHash('sha256').update(input.argumentsJson).digest('hex')) return undefined
+    const eventDigest = createHash('sha256').update(JSON.stringify(['tool/call', call.seq,
+      call.data.turn, call.data.step, input.callId, input.toolName, call.data.arguments])).digest('hex')
+    if (this.deliveryStore.inspectPendingForegroundToolTask({ inboxId: task.inboxId,
+      sessionId: task.sessionId, scope: task.scope, owner: task.owner, binding: task.binding }) === undefined) return undefined
+    return Object.freeze({ protocol: 'assistant-delivery/foreground-tool-call/v1' as const, task,
+      turn: turn.turn, call: Object.freeze({ id: input.callId, toolName: input.toolName,
+        eventSeq: call.seq, eventDigest, argumentsDigest }) })
   }
 
   currentPreferenceTurn(agent: Agent): Readonly<DeliveryPreferenceTurnAttestation> | undefined {

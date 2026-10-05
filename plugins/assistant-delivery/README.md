@@ -33,6 +33,8 @@ Patch 通过 `inject: [assistantPolicy]` 固定加载策略依赖；入站 Agent
 
 Host-only `validateOwnerAgentForRoute(agent, authorityId)` 为有限动态工具提供当前调用者证明：核对原生 Agent/Session 注册对象、当前 owner route、principal record/version、workspace 和 preset；伪造对象、旧 Session 或撤权身份拒绝。它只证明当前调用身份，不授予动作权限，也不替代最终提交时的来源与 canonical writer fence。此 API 无数据库迁移，消费者须检测同批实现。
 
+Host-only `inspectOwnerForegroundToolCall({ agent, authorityId, callId, toolName, argumentsJson })` 另核对当前认领的具体 Inbox、尚未结束的原生 turn、pending 前台执行记录及唯一未结算的 `tool/call` 事件。工具名和实际参数须与事件一致；返回内容无关的 task/owner/binding、turn、调用事件与参数摘要，不返回任务正文或参数。同 Session、开放 turn 或 owner 身份本身不足以产生证明；Host 直接调用、PTC 子调用、旧或重复事件保持未归因。此只读接口不迁移数据库，不授予执行权限，也不证明任务成功；消费者须保留后续 canonical 反馈与独立验收边界。
+
 ## 配置
 
 | 字段 | 默认值 | 含义 |

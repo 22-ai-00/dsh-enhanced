@@ -61,6 +61,7 @@ import {
   type OwnerGoalOutcomeFeedbackProof,
 } from './goal-wake-types.js'
 import type { AcceptanceContract, AcceptedExecution, ForegroundExecution } from './acceptance.js'
+import type { ForegroundTaskIdentity } from './foreground-observation.js'
 import { openDeliveryDatabase } from './sqlite.js'
 import type { SessionLease, SessionLeaseClaim, SessionLeaseTarget } from './session-lease-types.js'
 import {
@@ -4213,6 +4214,40 @@ export class DeliveryStore {
       dispatchedAt: row.dispatched_at, status: row.status, quiescent: row.quiescent === 1,
       completedAt: row.completed_at, executionRef: row.execution_ref, modelSelectionState: row.model_selection_state,
       ...(row.model_selection_state === 'frozen' && row.model_provider && row.model_id ? { modelSelection: Object.freeze({ provider: row.model_provider, model: row.model_id, ...(row.model_reasoning_effort === null ? {} : { reasoningEffort: row.model_reasoning_effort }) }) } : {}) })
+  }
+
+  /** One SQL snapshot binds a pending execution to its still claimed Inbox and current owner. */
+  inspectPendingForegroundToolTask(input: Readonly<{
+    inboxId: string
+    sessionId: string
+    scope: { workspace: string; preset: string }
+    owner: { principalRecordId: string; principalVersion: number }
+    binding: { id: string; version: number; generation: number }
+  }>): Readonly<ForegroundTaskIdentity> | undefined {
+    this.assertOpen()
+    const row = this.database.prepare(`SELECT execution.dispatched_at AS dispatched_at
+      FROM delivery_foreground_executions AS execution
+      JOIN inbox_messages AS inbox ON inbox.id = execution.inbox_id
+      JOIN conversation_bindings AS binding ON binding.id = execution.binding_id
+      JOIN delivery_principals AS principal ON principal.id = binding.principal_id
+      WHERE execution.inbox_id = ? AND execution.status = 'pending' AND execution.completed_at IS NULL
+        AND inbox.status = 'claimed' AND inbox.binding_id = execution.binding_id
+        AND binding.status = 'active' AND binding.session_id = ?
+        AND binding.id = ? AND binding.version = ? AND binding.generation = ?
+        AND binding.workspace = ? AND binding.agent_preset = ?
+        AND principal.status = 'active' AND principal.role = 'owner'
+        AND principal.id = ? AND principal.version = ?
+        AND execution.workspace = binding.workspace AND execution.preset = binding.agent_preset
+        AND execution.principal_record_id = principal.id AND execution.principal_version = principal.version
+        AND execution.binding_version = binding.version AND execution.binding_generation = binding.generation
+      LIMIT 1`).get(input.inboxId, input.sessionId, input.binding.id, input.binding.version,
+      input.binding.generation, input.scope.workspace, input.scope.preset,
+      input.owner.principalRecordId, input.owner.principalVersion) as { dispatched_at: number } | undefined
+    if (row === undefined) return undefined
+    return Object.freeze({ protocol: 'assistant-delivery/foreground-task/v1' as const,
+      inboxId: input.inboxId, sessionId: input.sessionId,
+      scope: Object.freeze({ ...input.scope }), owner: Object.freeze({ ...input.owner }),
+      binding: Object.freeze({ ...input.binding }), dispatchedAt: row.dispatched_at })
   }
 
   /** Immutable pre-prompt receipt for an authenticated owner foreground turn. */
