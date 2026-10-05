@@ -36,12 +36,24 @@ describe('finite owner-bound plugin creation setup', () => {
     expect(setup.reviews.maxVerifications).toBe(32)
     expect(setup.capabilities.maxAdoptions).toBe(32)
     expect(setup.capabilities.maxCallRecords).toBe(960)
+    expect(setup.capabilities.retention).toEqual({ maximumLifetimeMs: 30 * 86_400_000 })
     expect(setup.capabilities.runner.maxRuns).toBe(1_024)
     expect(setup.reviews.keyPath).toBe(f.resources.identities.review.keyPath)
     expect(setup.capabilities.keyPath).toBe(f.resources.identities.adoption.keyPath)
     expect(setup.verifications.publicKey).toBe(f.resources.identities.review.publicKeyPem)
     expect(setup.reviews.policy).toMatch(/current authenticated task and feedback/)
     expect(JSON.stringify(setup)).not.toContain('PRIVATE KEY')
+  })
+
+  test('preserves legacy manifests without granting retention and rejects changed installation lifetime', async () => {
+    const f = await fixture(), setup = createRsiPluginCreationSetup(f)
+    delete setup.capabilities.retention
+    const checked = validateRsiPluginCreationSetup(setup, f.owner, f.now)
+    expect(checked.capabilities.retention).toBeUndefined()
+    expect(checked).toEqual(setup)
+    const changed = createRsiPluginCreationSetup(f)
+    changed.capabilities.retention = { maximumLifetimeMs: 86_400_000 }
+    expect(() => validateRsiPluginCreationSetup(changed, f.owner, f.now)).toThrow('retention lifetime')
   })
 
   test('rejects changed owner, namespace, expiry, and independent authority IDs', async () => {

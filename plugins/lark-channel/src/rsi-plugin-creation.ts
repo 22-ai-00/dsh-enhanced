@@ -24,6 +24,7 @@ const limits = {
   reviewInputBytes: 262_144, reviewOutputTokens: 8_192, reviewDurationMs: 300_000,
   receiptTtlMs: 86_400_000, runnerDurationMs: 30_000,
   reviewRuns: 160, adoptionRuns: 1_024,
+  retentionLifetimeMs: 30 * 86_400_000,
 } as const
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u
 
@@ -120,6 +121,12 @@ export function validateRsiPluginCreationSetup(input: unknown, expectedOwner: Cr
     || capabilities.maxCallRecords !== limits.callRecords || capabilities.maxInputBytes !== limits.inputBytes) {
     fail('creation finite limits differ')
   }
+  // Old manifests retain their original certificate-bound lifetime. A new
+  // installation explicitly grants bounded use after the authoring window.
+  if (capabilities.retention !== undefined
+    && capabilities.retention.maximumLifetimeMs !== limits.retentionLifetimeMs) {
+    fail('creation retention lifetime differs')
+  }
   if (reviews.runner.maxRuns !== limits.reviewRuns || reviews.runner.maxDurationMs !== limits.runnerDurationMs
     || reviews.runner.maxTotalDurationMs !== limits.reviewRuns * limits.runnerDurationMs
     || reviews.runner.maxOutputBytes !== 262_144
@@ -169,6 +176,7 @@ export function createRsiPluginCreationSetup(input: {
     owner, namePrefix: prefix, expiresAt, maxAdoptions: limits.adoptions,
     maxTools: limits.tools, maxCallsPerAdoption: limits.callsPerAdoption,
     maxCallRecords: limits.callRecords, maxInputBytes: limits.inputBytes,
+    retention: { maximumLifetimeMs: limits.retentionLifetimeMs },
     runner: { stateRoot: join(resources.stateRoot, 'creation-adoption-runner'), image: build.image,
       dockerPath: build.dockerPath, expiresAt, maxRuns: limits.adoptionRuns,
       maxTotalDurationMs: 86_400_000, maxDurationMs: limits.runnerDurationMs, maxOutputBytes: 65_536 },

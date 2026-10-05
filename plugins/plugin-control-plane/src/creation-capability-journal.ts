@@ -85,7 +85,7 @@ function receiptBody(receipt: CreationCapabilityReceipt): Omit<CreationCapabilit
 function receiptShape(value: unknown): CreationCapabilityReceipt {
   const v = obj(value, ['protocol','authorityId','authorityDigest','keyId','planId','planDigest','verificationDigest',
     'artifactSha256','artifactBytes','source','schemaDigest','toolsDigest','expiresAt','adoptedAt','signature'])
-  if (v.protocol !== 'dsh-created-capability-adoption/v1') fail()
+  if (v.protocol !== 'dsh-created-capability-adoption/v1' && v.protocol !== 'dsh-created-capability-adoption/v2') fail()
   for (const name of ['authorityId','keyId','planId']) str(v[name])
   for (const name of ['authorityDigest','planDigest','verificationDigest','artifactSha256','schemaDigest','toolsDigest']) str(v[name], SHA, 64)
   int(v.artifactBytes, 1, 512 * 1024); int(v.expiresAt, 1, 8_640_000_000_000_000); int(v.adoptedAt, 1, 8_640_000_000_000_000)
@@ -109,7 +109,7 @@ export function verifyCreationCapabilityReceipt(value: unknown, authorityDigest:
 /** Read-only preflight; it never creates a signing key or ledger. */
 export function validateCreationCapabilityConfig(value: unknown): asserts value is CreationCapabilityConfig {
   const v = obj(value, ['authorityId','keyId','keyPath','owner','namePrefix','expiresAt','maxAdoptions','maxTools',
-    'maxCallsPerAdoption','maxCallRecords','maxInputBytes','runner'])
+    'maxCallsPerAdoption','maxCallRecords','maxInputBytes','runner', ...(Object.hasOwn(value as object, 'retention') ? ['retention'] : [])])
   str(v.authorityId); str(v.keyId); const keyPath = path(v.keyPath)
   const owner = obj(v.owner, ['authorityId','authorityHash','principalId','principalRecordId','principalVersion','workspace','agentPreset'])
   str(owner.authorityId); str(owner.authorityHash, SHA, 64)
@@ -118,6 +118,10 @@ export function validateCreationCapabilityConfig(value: unknown): asserts value 
   str(v.namePrefix, /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-$/u, 48)
   int(v.expiresAt, 1, 8_640_000_000_000_000); int(v.maxAdoptions, 1, 32); int(v.maxTools, 1, 16)
   int(v.maxCallsPerAdoption, 1, 1024); int(v.maxCallRecords, 1, 1024); int(v.maxInputBytes, 1, 65536)
+  if (Object.hasOwn(v, 'retention')) {
+    const retention = obj(v.retention, ['maximumLifetimeMs'])
+    int(retention.maximumLifetimeMs, 1, 30 * 86_400_000)
+  }
   const runner = obj(v.runner, ['stateRoot','image','dockerPath','expiresAt','maxRuns','maxTotalDurationMs','maxDurationMs','maxOutputBytes'])
   const root = path(runner.stateRoot)
   privateStat(root, 'directory')
@@ -252,6 +256,15 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
         || receipt.artifactBytes !== row.artifact.length || receipt.source.referenceDigest !== certificate.source.referenceDigest
         || receipt.source.ownerDigest !== certificate.source.ownerDigest || receipt.source.growthRunDigest !== certificate.source.growthRunDigest
         || receipt.toolsDigest !== row.tools_digest || receipt.schemaDigest !== certificate.schemaDigest) fail()
+      const expectedExpiry = this.config.retention === undefined
+        ? Math.min(this.config.expiresAt, this.config.runner.expiresAt, certificate.expiresAt)
+        : Math.min(this.config.expiresAt, this.config.runner.expiresAt,
+          receipt.adoptedAt + this.config.retention.maximumLifetimeMs)
+      if (receipt.protocol !== (this.config.retention === undefined
+        ? 'dsh-created-capability-adoption/v1' : 'dsh-created-capability-adoption/v2')
+        || receipt.expiresAt !== expectedExpiry || receipt.adoptedAt < certificate.verifiedAt
+        || receipt.adoptedAt >= certificate.expiresAt || receipt.adoptedAt >= this.config.expiresAt
+        || receipt.adoptedAt >= this.config.runner.expiresAt) fail()
       record.receipt = receipt
     }
     if (row.reason !== null) record.reason = row.reason
@@ -339,9 +352,12 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
         return record
       }
       if (record.status !== 'claimed') fail()
-      const now = Date.now(), expiresAt = Math.min(this.config.expiresAt, this.config.runner.expiresAt, record.certificate.expiresAt)
-      if (now >= expiresAt || record.certificate.verifiedAt > now) fail()
-      const unsigned: Omit<CreationCapabilityReceipt, 'signature'> = { protocol: 'dsh-created-capability-adoption/v1',
+      const now = Date.now(), freshExpiry = Math.min(this.config.expiresAt, this.config.runner.expiresAt, record.certificate.expiresAt)
+      if (now >= freshExpiry || record.certificate.verifiedAt > now) fail()
+      const expiresAt = this.config.retention === undefined ? freshExpiry
+        : Math.min(this.config.expiresAt, this.config.runner.expiresAt, now + this.config.retention.maximumLifetimeMs)
+      const unsigned: Omit<CreationCapabilityReceipt, 'signature'> = { protocol: this.config.retention === undefined
+        ? 'dsh-created-capability-adoption/v1' : 'dsh-created-capability-adoption/v2',
         authorityId: this.config.authorityId, authorityDigest: this.authorityDigest, keyId: this.config.keyId,
         planId, planDigest: record.certificate.plan.digest, verificationDigest: digest(record.certificate),
         artifactSha256: prior.artifact_sha, artifactBytes: prior.artifact.length, source: record.certificate.source,

@@ -18,6 +18,8 @@ export interface CreationCapabilityConfig {
   maxCallsPerAdoption: number
   maxCallRecords: number
   maxInputBytes: number
+  /** Opt-in lifetime for an already adopted capability; never extends either use grant. */
+  retention?: { maximumLifetimeMs: number }
   runner: {
     stateRoot: string
     image: string
@@ -38,7 +40,7 @@ export interface CreationCapabilityTool {
 }
 
 export interface CreationCapabilityReceipt {
-  protocol: 'dsh-created-capability-adoption/v1'
+  protocol: 'dsh-created-capability-adoption/v1' | 'dsh-created-capability-adoption/v2'
   authorityId: string
   authorityDigest: string
   keyId: string
@@ -88,6 +90,9 @@ export interface CreationCapabilityRunner {
 export interface CreationCapabilityPorts {
   inspect(planId: string): { certificate: PluginCreationVerificationCertificate; artifact: Buffer; owner: CreationCapabilityOwner }
   recheck(planId: string, signal: AbortSignal): Promise<void>
+  /** Historical evidence read for a v2 receipt; must recheck the current owner and frozen source. */
+  inspectRetained?(record: CreationCapabilityRecord): { certificate: PluginCreationVerificationCertificate; artifact: Buffer; owner: CreationCapabilityOwner }
+  recheckRetained?(record: CreationCapabilityRecord, signal: AbortSignal): Promise<void>
   withCurrent<T>(record: CreationCapabilityRecord, callback: () => T): T
   assertCaller(record: CreationCapabilityRecord, execution: ToolRunContext): void
 }

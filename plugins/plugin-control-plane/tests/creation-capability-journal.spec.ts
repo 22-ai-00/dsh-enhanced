@@ -3,11 +3,16 @@ import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { Context } from '@deepseek-ai/cordis'
+import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { afterEach, expect, test, vi } from 'vitest'
 import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { CreationCapabilityJournal, creationCapabilityPublicKey, validateCreationCapabilityConfig,
   verifyCreationCapabilityReceipt } from '../src/creation-capability-journal.js'
-import type { CreationCapabilityConfig, CreationCapabilityTool } from '../src/creation-capability-types.js'
+import { CreationCapabilityRuntime } from '../src/creation-capability-runtime.js'
+import type { CreationCapabilityConfig, CreationCapabilityPorts, CreationCapabilityRunner,
+  CreationCapabilityTool } from '../src/creation-capability-types.js'
 
 const roots: string[] = []
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -29,7 +34,7 @@ function fixture(maxAdoptions = 2, maxCalls = 3) {
   }
   const path = join(root, 'creation-adoptions.sqlite')
   const artifact = Buffer.from('exact candidate tarball')
-  function certificate(planId: string): PluginCreationVerificationCertificate {
+  function certificate(planId: string, lifetimeMs = 90_000, schemaDigest = d('5')): PluginCreationVerificationCertificate {
     const now = Date.now()
     const unsigned: Omit<PluginCreationVerificationCertificate, 'signature'> = {
       protocol: 'assistant-growth/creation-verification/v1', verificationId: `verification-${planId}`,
@@ -39,12 +44,12 @@ function fixture(maxAdoptions = 2, maxCalls = 3) {
         sourcePatchDigest: d('e'), artifactSha256: createHash('sha256').update(artifact).digest('hex'),
         artifactBytes: artifact.length, generatorDigest: d('f') },
       source: { referenceDigest: d('1'), ownerDigest: d('2'), growthRunDigest: d('3') },
-      contractDigest: d('4'), schemaDigest: d('5'), environment: { node: 'node22', cordis: 'cordis4', tools: 'tools1', systemPrompt: 'prompt1' },
+      contractDigest: d('4'), schemaDigest, environment: { node: 'node22', cordis: 'cordis4', tools: 'tools1', systemPrompt: 'prompt1' },
       model: { provider: 'fixture', model: 'test' }, budget: { modelCalls: 2, maxOutputTokens: 1024, maxDurationMs: 60_000, maxCases: 2 },
       sessions: { contract: 'contract-session', sourceReview: 'review-session' },
       observations: [{ caseId: 'first', jobId: 'job-first', operationDigest: d('6'), observationDigest: d('7') },
         { caseId: 'second', jobId: 'job-second', operationDigest: d('8'), observationDigest: d('9') }],
-      reviewDigest: d('0'), verifiedAt: now - 1000, expiresAt: now + 90_000,
+      reviewDigest: d('0'), verifiedAt: now - 1000, expiresAt: now + lifetimeMs,
     }
     return { ...unsigned, signature: sign(null, Buffer.from(canonicalGrowthJson(unsigned)), verifier.privateKey).toString('base64url') }
   }
@@ -82,6 +87,129 @@ test('preflight rejects budgets the actual process runner cannot start', () => {
   }
   expect(() => validateCreationCapabilityConfig({ ...f.config,
     runner: { ...f.config.runner, maxDurationMs: 300000, maxTotalDurationMs: 300000 } })).not.toThrow()
+})
+
+test('retention is explicit, bounded and part of the immutable authority digest', () => {
+  const f = fixture()
+  for (const maximumLifetimeMs of [0, 30 * 86_400_000 + 1, 1.5]) {
+    expect(() => validateCreationCapabilityConfig({ ...f.config, retention: { maximumLifetimeMs } })).toThrow()
+  }
+  const retained = { ...f.config, retention: { maximumLifetimeMs: 15_000 } }
+  const journal = new CreationCapabilityJournal({ path: f.path, config: retained })
+  journal.close()
+  expect(() => new CreationCapabilityJournal({ path: f.path, config: f.config })).toThrow()
+  expect(() => new CreationCapabilityJournal({ path: f.path,
+    config: { ...retained, retention: { maximumLifetimeMs: 15_001 } } })).toThrow()
+})
+
+test('retention never admits a first adoption with an expired certificate or use grant', () => {
+  const f = fixture()
+  f.config.retention = { maximumLifetimeMs: 20_000 }
+  const now = Date.now()
+  f.config.runner.expiresAt = now + 1_000
+  const expired = f.certificate('expired', 1), fresh = f.certificate('runner-expired')
+  const journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  try {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 3)
+    expect(() => journal.claim({ certificate: expired, artifact: f.artifact })).toThrow()
+    clock.mockReturnValue(now + 1_001)
+    expect(() => journal.claim({ certificate: fresh, artifact: f.artifact })).toThrow()
+  } finally { journal.close() }
+})
+
+test('the signed retained deadline cannot be extended or used for another call', () => {
+  const f = fixture()
+  f.config.retention = { maximumLifetimeMs: 5_000 }
+  const journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  try {
+    journal.claim({ certificate: f.certificate('one', 2_000), artifact: f.artifact })
+    const receipt = journal.authorize('one', tools).receipt!
+    journal.activate('one')
+    expect(receipt.expiresAt).toBe(receipt.adoptedAt + 5_000)
+    expect(journal.inspect('one')?.receipt).toEqual(receipt)
+    vi.spyOn(Date, 'now').mockReturnValue(receipt.expiresAt)
+    expect(verifyCreationCapabilityReceipt(receipt, journal.authorityDigest, journal.publicKey)).toBe(false)
+    expect(() => journal.claimCall({ planId: 'one', key: 'late', argumentsDigest: d('a') })).toThrow()
+    expect(journal.inspect('one')?.receipt).toEqual(receipt)
+  } finally { journal.close() }
+})
+
+test('real journal and Cordis tool retain one signed adoption across certificate expiry and Host restart', async () => {
+  const f = fixture(1, 2)
+  const baseTime = Date.now()
+  f.config.retention = { maximumLifetimeMs: 15_000 }
+  f.config.expiresAt = baseTime + 12_000
+  f.config.runner.expiresAt = baseTime + 10_000
+  const schemas = [{ name: 'echo', parameters: { type: 'object', additionalProperties: false,
+    properties: { query: { type: 'string' } }, required: ['query'] } }]
+  const schemaDigest = createHash('sha256').update(JSON.stringify(schemas)).digest('hex')
+  const certificate = f.certificate('one', 2_000, schemaDigest)
+  const ctx = new Context()
+  let journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  let discover = 0, invoke = 0, sourceCurrent = true
+  const ports: CreationCapabilityPorts = {
+    inspect: () => {
+      if (Date.now() >= certificate.expiresAt) throw new Error('fresh certificate expired')
+      return { certificate, artifact: f.artifact, owner: f.config.owner }
+    },
+    recheck: async () => { if (Date.now() >= certificate.expiresAt) throw new Error('fresh certificate expired') },
+    inspectRetained: () => ({ certificate, artifact: f.artifact, owner: f.config.owner }),
+    recheckRetained: async () => { if (!sourceCurrent) throw new Error('canonical source withdrawn') },
+    withCurrent: (_record, callback) => {
+      if (!sourceCurrent) throw new Error('canonical source withdrawn')
+      return callback()
+    },
+    assertCaller: () => { if (!sourceCurrent) throw new Error('owner withdrawn') },
+  }
+  const runner: CreationCapabilityRunner = {
+    run: async input => {
+      if (input.operation.kind === 'discover') {
+        discover++
+        return { status: 'observed', quiescent: true, artifactSha256: certificate.plan.artifactSha256,
+          schemaDigest, environment: certificate.environment, schemas }
+      }
+      invoke++
+      return { status: 'observed', quiescent: true, artifactSha256: certificate.plan.artifactSha256,
+        schemaDigest, environment: certificate.environment,
+        calls: input.operation.calls.map(call => ({ id: call.id, toolName: call.toolName,
+          result: { isError: false, value: { answer: 'ok' }, content: [{ type: 'text', text: 'ok' }] } })) }
+    },
+    close: async () => {},
+  }
+  const runtime = () => new CreationCapabilityRuntime({ ctx, config: f.config, journal, ports,
+    createRunner: async () => runner })
+  const execute = async (name: string, callId: string) => ctx.tools.get(name)!.execute({ query: 'hi' }, {
+    callId, agent: { session: { id: 'session-one' } }, signal: new AbortController().signal,
+  } as unknown as ToolRunContext)
+  try {
+    await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+    const first = runtime(); await first.start(); await first.adopt('one', new AbortController().signal)
+    const receipt = journal.inspect('one')!.receipt!
+    const name = journal.inspect('one')!.tools![0]!.name
+    expect(receipt.protocol).toBe('dsh-created-capability-adoption/v2')
+    expect(receipt.expiresAt).toBe(f.config.runner.expiresAt)
+    expect(verifyCreationCapabilityReceipt(receipt, journal.authorityDigest, journal.publicKey)).toBe(true)
+    expect(verifyCreationCapabilityReceipt({ ...receipt, expiresAt: receipt.expiresAt + 1 },
+      journal.authorityDigest, journal.publicKey)).toBe(false)
+    expect(await execute(name, 'first')).toMatchObject({ value: { answer: 'ok' } })
+    await first.close()
+    vi.spyOn(Date, 'now').mockReturnValue(baseTime + 3_000)
+    journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+    expect(() => journal.claim({ certificate, artifact: f.artifact })).toThrow()
+    const restarted = runtime(); await restarted.start()
+    expect(ctx.tools.get(name)).toBeDefined()
+    expect(await execute(name, 'first')).toMatchObject({ value: { answer: 'ok' } })
+    expect(await execute(name, 'second')).toMatchObject({ value: { answer: 'ok' } })
+    expect(discover).toBe(1)
+    expect(invoke).toBe(2)
+    await expect(execute(name, 'third')).rejects.toThrow()
+    expect(invoke).toBe(2)
+    sourceCurrent = false
+    await restarted.reconcile()
+    expect(ctx.tools.get(name)).toBeUndefined()
+    expect(journal.inspect('one')?.status).toBe('closed')
+    await restarted.close()
+  } finally { await ctx.fiber.dispose() }
 })
 
 test('claim and signed adoption survive restart without restoring quota', () => {

@@ -45,7 +45,7 @@ const baselineRepository = fileURLToPath(new URL('../../..', import.meta.url)).r
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); vi.resetAllMocks() })
 
-async function fixture(withVerification = false, withAdoption = false) {
+async function fixture(withVerification = false, withAdoption = false, withRetention = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-created-service-')))
   const { repository } = await createSourceCreationFixture(baselineRepository, join(root, 'source'))
   const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: repository, encoding: 'utf8' }).trim()
@@ -68,6 +68,11 @@ async function fixture(withVerification = false, withAdoption = false) {
       runner: { stateRoot, image: `sha256:${'a'.repeat(64)}`, dockerPath: '/usr/bin/docker',
         expiresAt: Date.now() + 600_000, maxRuns: 3, maxTotalDurationMs: 60_000,
         maxDurationMs: 10_000, maxOutputBytes: 65_536 } }
+    if (withRetention) {
+      capability.retention = { maximumLifetimeMs: 1_800_000 }
+      capability.expiresAt = Date.now() + 2_000_000
+      capability.runner.expiresAt = Date.now() + 2_000_000
+    }
   }
   cleanup.push(async () => {
     await ctx.fiber.dispose()
@@ -92,13 +97,15 @@ async function fixture(withVerification = false, withAdoption = false) {
       quiescent: true, truncated: false, modelSelectionState: 'frozen', modelSelection: { provider: 'supplier', model: 'task-model', reasoningEffort: 'high' } } }
   let activeSource: OwnerForegroundLearningTask = source
   const taskChangeListeners = new Set<() => void>()
-  ctx.provide('assistantDelivery' as never, { validateOwnerRoute: () => structuredClone(owner),
+  const deliveryPorts = { validateOwnerRoute: () => structuredClone(owner),
     validateOwnerAgentForRoute: (agent: { owner?: typeof owner }) => agent.owner ? structuredClone(agent.owner) : undefined,
     inspectOwnerForegroundLearningTask: () =>
-      isSourceOwnerContinuation(owner, activeSource.owner) ? structuredClone(activeSource) : undefined })
-  ctx.provide('assistantEvaluation' as never, { canonicalHostScope: (input: unknown) => input,
+      isSourceOwnerContinuation(owner, activeSource.owner) ? structuredClone(activeSource) : undefined }
+  const evaluationPorts = { canonicalHostScope: (input: unknown) => input,
     withTrustedCanonicalTaskWriterFence: (_input: unknown, callback: () => unknown) => ({ matched: true, value: callback() }),
-    onTrustedTaskChange: (listener: () => void) => { taskChangeListeners.add(listener); return () => { taskChangeListeners.delete(listener) } } })
+    onTrustedTaskChange: (listener: () => void) => { taskChangeListeners.add(listener); return () => { taskChangeListeners.delete(listener) } } }
+  ctx.provide('assistantDelivery' as never, deliveryPorts)
+  ctx.provide('assistantEvaluation' as never, evaluationPorts)
   const signing = generateKeyPairSync('ed25519')
   const authority: CreationAcceptanceAuthorityRef = { protocol: 'assistant-growth/creation-acceptance-authority/v1',
     authorityId: 'fixture-creation-review', keyId: 'fixture-key', authorityDigest: '9'.repeat(64),
@@ -156,8 +163,9 @@ async function fixture(withVerification = false, withAdoption = false) {
     return checked
   })
   else vi.mocked(build.runDockerPreparedChecks).mockResolvedValue(checked)
-  return { root, repository, git, ctx, config, capability, service, automations, policy, store, source, owner, request, checked, growthRun, inspectGrowthRun,
-    unregisterGrowthRun, authority, signing, verification, setSource: (next: OwnerForegroundLearningTask) => { activeSource = next },
+  return { root, repository, git, ctx, config, capability, service, automations, policy, store, source, owner,
+    deliveryPorts, evaluationPorts, publicKey, verification, request, checked, growthRun, inspectGrowthRun,
+    unregisterGrowthRun, authority, signing, setSource: (next: OwnerForegroundLearningTask) => { activeSource = next },
     notifyTaskChange: () => { for (const listener of taskChangeListeners) listener() },
     taskChangeListenerCount: () => taskChangeListeners.size,
     advance: (milliseconds = 1_100) => { now += milliseconds } }
@@ -306,6 +314,75 @@ it.each(['correction', 'withdrawal'] as const)(
     expect(reconcile).toHaveBeenCalledTimes(2)
     expect(f.taskChangeListenerCount()).toBe(0)
     f.notifyTaskChange()
+  }, 60_000)
+
+it.each(['correction', 'withdrawal'] as const)(
+  'retained adoption uses the frozen artifact after plan GC, then closes on current %s', async change => {
+    const f = await fixture(true, true, true)
+    f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedCertificate(f, request.planId,
+      f.signing.privateKey, body => { body.schemaDigest = candidateSchemaDigest; body.environment = candidateEnvironment }) }))
+    runnerRun.mockImplementation(async (input: { artifact: Buffer; operation: { kind: string;
+      calls?: readonly { id: string; toolName: string }[] } }): Promise<CreationCapabilityObservation> => {
+      const common = { status: 'observed' as const, quiescent: true,
+        artifactSha256: createHash('sha256').update(input.artifact).digest('hex'),
+        schemaDigest: candidateSchemaDigest, environment: candidateEnvironment }
+      return input.operation.kind === 'discover' ? { ...common, schemas: candidateSchemas }
+        : { ...common, calls: input.operation.calls!.map(call => ({ id: call.id, toolName: call.toolName,
+          result: { isError: false, value: { answer: 'ok' }, content: [{ type: 'text', text: 'ok' }] } })) }
+    })
+    const job = await f.service.enqueueSourceJob(f.request)
+    f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+    const planId = f.store.getSourceJob(job.id)!.planId!
+    const adopted = f.service.inspectCreatedCapability(planId)!
+    expect(adopted.status).toBe('active')
+    const alias = adopted.aliases[0]!
+    let hostCtx = f.ctx
+    const execute = (callId: string) => hostCtx.tools.get(alias)!.execute({ query: 'hello' }, {
+      callId, agent: { session: { id: 'session-1' }, owner: f.owner },
+      signal: new AbortController().signal,
+    } as unknown as ToolRunContext)
+    await expect(execute('before-expiry')).resolves.toMatchObject({ value: { answer: 'ok' } })
+    const producerCalls = f.inspectGrowthRun.mock.calls.length
+    f.advance(901_000)
+    expect(f.service.inspectVerifiedCreation(planId)).toBeUndefined()
+    expect(() => f.service.inspectPreparedCreation(planId)).toThrow()
+    const plan = f.store.getSourcePlan(planId)
+    expect(f.store.expirePreparedSourcePlan({ planId, expectedRevision: plan.revision, now: Date.now() }).status).toBe('expired')
+    expect(f.store.deleteExpiredPreparedSourceArtifacts(Date.now())).toBe(1)
+    expect(() => f.store.readPreparedSourceArtifact(planId)).toThrow()
+    expect(f.store.getRetainedPreparedCreation(planId).job.id).toBe(job.id)
+    expect(() => normalizeControlPlaneConfig(f.config)).not.toThrow()
+    await f.unregisterGrowthRun()
+    await f.ctx.fiber.dispose()
+    hostCtx = new Context()
+    cleanup.push(async () => hostCtx.fiber.dispose())
+    await mountAgentLoopTestDependencies(hostCtx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+    hostCtx.provide('assistantDelivery' as never, f.deliveryPorts)
+    hostCtx.provide('assistantEvaluation' as never, f.evaluationPorts)
+    hostCtx.provide('assistantVerifier' as never, { verifyPluginCreation: f.verification })
+    new AssistantPolicyService(hostCtx, { databasePath: join(f.root, 'policy.sqlite'),
+      budgets: [{ id: 'source-budget', metric: 'automation-runs', limit: 3, periodMs: 60_000, scope: 'global' }], rules: [
+        { id: 'reconcile', effect: 'allow', subject: { kind: 'background', id: 'plugin-control-plane-source', workspace: f.root, principal: 'owner' }, actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
+        { id: 'execute', effect: 'allow', subject: { kind: 'background', id: '*', workspace: f.root, principal: 'owner' }, actions: ['execute'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
+      ] })
+    new AssistantAutomationsService(hostCtx, { databasePath: join(f.root, 'automations.sqlite'),
+      runsPath: join(f.root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0 })
+    const restarted = new PluginControlPlaneService(hostCtx, f.config)
+    await vi.waitFor(() => expect(hostCtx.tools.get(alias)).toBeDefined())
+    expect(restarted.inspectCreatedCapability(planId)?.status).toBe('active')
+    await expect(execute('after-expiry')).resolves.toMatchObject({ value: { answer: 'ok' } })
+    await expect(execute('third-call')).rejects.toThrow()
+    expect(f.inspectGrowthRun.mock.calls.length).toBe(producerCalls)
+    expect(runnerRun).toHaveBeenCalledTimes(3)
+    f.setSource(change === 'correction'
+      ? { ...f.source, source: { ...f.source.source, objective: 'owner corrected the original task' } }
+      : { ...f.source, canonical: { ...f.source.canonical,
+        projection: { ...f.source.canonical.projection, disposition: 'retract' } } })
+    await expect(execute('after-change')).rejects.toThrow()
+    f.notifyTaskChange()
+    await vi.waitFor(() => expect(restarted.inspectCreatedCapability(planId)?.status).toBe('closed'))
+    expect(hostCtx.tools.get(alias)).toBeUndefined()
+    expect(runnerRun).toHaveBeenCalledTimes(3)
   }, 60_000)
 
 it('preflights independent adoption key, owner and namespace before constructing a Host service', async () => {

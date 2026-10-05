@@ -124,16 +124,23 @@ export class CreationCapabilityRuntime {
   }
 
   private live(record: CreationCapabilityRecord): void {
-    if (this.closed || Date.now() >= this.config.expiresAt || Date.now() >= record.certificate.expiresAt
+    if (this.closed || Date.now() >= this.config.expiresAt || Date.now() >= this.config.runner.expiresAt
+      || ((record.status !== 'active' || record.receipt?.protocol !== 'dsh-created-capability-adoption/v2')
+        && Date.now() >= record.certificate.expiresAt)
       || Date.now() >= (record.receipt?.expiresAt ?? 0)) fail('authority or receipt expired')
     if (!['authorized', 'active'].includes(record.status)) fail('adoption is not authorized')
   }
 
-  private async checked(record: CreationCapabilityRecord, signal: AbortSignal): Promise<void> {
+  private async checked(record: CreationCapabilityRecord, signal: AbortSignal, firstAdoption = false): Promise<void> {
     this.live(record)
-    await this.ports.recheck(record.planId, signal)
+    const retained = !firstAdoption && record.status === 'active'
+      && record.receipt?.protocol === 'dsh-created-capability-adoption/v2'
+    if (retained) {
+      if (!this.ports.inspectRetained || !this.ports.recheckRetained) fail('retained source authority unavailable')
+      await this.ports.recheckRetained(record, signal)
+    } else await this.ports.recheck(record.planId, signal)
     signal.throwIfAborted()
-    const current = this.ports.inspect(record.planId)
+    const current = retained ? this.ports.inspectRetained!(record) : this.ports.inspect(record.planId)
     this.ports.withCurrent(record, () => {
       if (!sameCertificate(current.certificate, record.certificate)
         || sha(current.artifact) !== record.certificate.plan.artifactSha256
@@ -222,9 +229,9 @@ export class CreationCapabilityRuntime {
           this.journal.authorize(planId, tools)
         })
         const authorized = this.journal.inspect(planId)!
-        await this.checked(authorized, activeSignal)
+        await this.checked(authorized, activeSignal, true)
         await this.mount(authorized, activeSignal)
-        await this.checked(authorized, activeSignal)
+        await this.checked(authorized, activeSignal, true)
         this.ports.withCurrent(authorized, () => this.journal.activate(planId))
       } catch (error) {
         try { await this.unmount(planId) }
@@ -276,7 +283,9 @@ export class CreationCapabilityRuntime {
   }
 
   private armExpiry(record: CreationCapabilityRecord): void {
-    const deadline = Math.min(this.config.expiresAt, record.certificate.expiresAt, record.receipt!.expiresAt)
+    const deadline = record.receipt!.protocol === 'dsh-created-capability-adoption/v2'
+      ? Math.min(this.config.expiresAt, this.config.runner.expiresAt, record.receipt!.expiresAt)
+      : Math.min(this.config.expiresAt, record.certificate.expiresAt, record.receipt!.expiresAt)
     const remaining = deadline - Date.now()
     const timer = setTimeout(() => {
       this.timers.delete(record.planId)

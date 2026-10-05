@@ -128,8 +128,16 @@ describe('ordinary-use RSI manifest factory', () => {
         target.entryId === 'dsh-enhanced-assistant-verifier')!.configDigest).toBe(runtimeConfigDigest(verifier))
       const cp = rows.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config
       expect(cp.creationCapabilities).toEqual(creation.capabilities)
+      expect(cp.creationCapabilities.retention).toEqual({ maximumLifetimeMs: 30 * 86_400_000 })
       expect(cp.creationVerifications).toEqual(creation.verifications)
       expect(cp.sourceJobs.creation).toEqual(creation.creation)
+      const legacy = structuredClone(manifest)
+      delete legacy.pluginCreation!.capabilities.retention
+      delete legacy.controlPlane.creationCapabilities!.retention
+      const legacyCompiled = await compile(legacy)
+      const legacyRows = parse(legacyCompiled.targetPatch) as Array<{ id: string; config: Record<string, any> }>
+      expect(legacyRows.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config
+        .creationCapabilities.retention).toBeUndefined()
       const partial = structuredClone(manifest)
       delete partial.pluginCreation
       await expect(compile(partial)).rejects.toThrow('complete independently verified adoption setup')
