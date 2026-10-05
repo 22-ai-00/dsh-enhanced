@@ -57,6 +57,7 @@ dsh --profile web --dump-config
 | `pluginSourceProposals.repository` | 无 | 开启时必填的绝对规范仓库路径；由 owner 配置，模型不可传入。 |
 | `pluginSourceProposals.preparationMode` | `inline` | `inline` 保持本轮隔离构建；`durable` 只把已读、冻结 base 的内容排入 Control Plane 自己的持久队列。队列 authority、构建超时和执行生命周期都由 Control Plane 配置，独立于模型 wake。 |
 | `pluginSourceProposals.allowCreation` | `false` | 仅 `durable` 可开启新插件候选。还须配置 Control Plane 的独立 `sourceJobs.creation` 授权；缺少创建读取接口或有效命名规则时保持既有修改工具。 |
+| `pluginSourceProposals.allowRevision` | `false` | 仅在 `pluginSourceProposals.enabled: true`、`preparationMode: durable` 且 `usageLearning.enabled: true` 时可显式开启已采用插件的修订候选；另需 Control Plane 的独立有限修订授权和验收引用。`allowCreation` 不会开启此轨。 |
 | `pluginSourceProposals.maxPlansPerWake` | `1` | 每轮源码提案尝试上限（1–5）；inline 的 prepared 与 durable 的 queued 都占用此预算，失败也占一次。 |
 | `pluginSourceProposals.isolatedBuildTimeoutMs` | `180000` | 仅 `inline` 使用的构建时间上限（60000–240000ms）；控制面可进一步收窄，单轮 authority 到期仍会取消。`durable` 使用控制面 `sourceBuild.timeoutMs`。 |
 | `pluginSourceProposals.offline` | `true` | 源码提案必须离线构建；`false` 配置会拒绝。镜像须预先准备依赖。 |
@@ -168,7 +169,15 @@ gap 的 `capability` 是问题分类，不是现有 `plugin_name`。任务证据
 
 配置 Control Plane `creationVerifications` 与 Verifier `creationReviews` 后，Agent setup 在首次作者模型请求前将当前验收政策引用持久写入 `creationAcceptance`。恢复继续要求同一未过期政策；历史无引用记录不会补写，也不能由新政策取得签名资格。模型没有选择或更改验收政策的参数；独立行为检查由 Host 原生 SourceJobs 续跑推进，见 [Verifier](../assistant-verifier/README.md#普通任务产生的新插件验收)。
 
-候选只能写 README、源码与测试；manifest、patch、版本、许可证、构建配置、目录行和锁文件由 Host 生成且不能覆盖，不允许新增依赖。创建与修改共享每轮提案预算；Host 另持久计量创建额度，失败和 unknown 也消耗额度。检查通过仅产生 `prepared-create` / `pending-approval`，现有修改审批器不会批准这种计划。新插件签名采用、动态加载及真实任务收益仍待接通，不代表已形成生产自迭代闭环。
+候选只能写 README、源码与测试；manifest、patch、版本、许可证、构建配置、目录行和锁文件由 Host 生成且不能覆盖，不允许新增依赖。创建与修改共享每轮提案预算；Host 另持久计量创建额度，失败和 unknown 也消耗额度。检查通过仅产生 `prepared-create` / `pending-approval`，现有修改审批器不会批准这种计划。候选本身不授予采用权限；显式签名采用与动态加载见 Control Plane，真实任务收益仍待验收。
+
+### 已采用插件的新任务修订候选
+
+本轨默认关闭。在上述 `durable` 源码配置中显式增加 `allowRevision: true`，同时启用下述 `usageLearning`，并为 Control Plane 配置独立的 `sourceJobs.revision` 有限授权、`revisionVerifications` 公开验收引用和已采用插件源码归档；Verifier 对应配置 `revisionReviews`。缺少当前授权、归档读取接口、原生 Usage 来源或验收引用时，不向模型提供修订工具。历史配置省略 `allowRevision` 仍按 `false` 处理，既有运行不会补写新验收引用。
+
+只有**新的、当前仍有效的普通认证失败任务**可进入此轨。Agent 先读取该任务专属的当前 gap，再用 `plugin_source_revision_targets({})` 查看 Host 提供的至多 64 个同 owner 已采用父版本线索 `{parentPlanId, name, parentSourceDigest}`。线索不证明根因。模型只能从该清单选父计划和插件名，再调用 `plugin_source_revision_inspect({parent_plan_id, plugin_name, paths})` 读取父版本冻结的 staged 归档源码；`paths: []` 返回完整清单。路径仅限 `README.md` 与直接位于 `src/`、`tests/` 的代码文件。替换既有文件前必须先读正文，随后以 `plugin_source_revise({parent_plan_id, plugin_name, files: [{path, content}]})` 排队；该工具不接收 `gap_id`、仓库、基线、授权、模型、预算、期限或验收政策。Host 重新核对父归档、当前任务、owner、源码基线和权限。任务纠正、撤回或来源漂移会阻止旧上下文继续提交。
+
+修订与创建、修改共用本轮 `maxPlansPerWake`、模型/工具调用和字节上限，不增加 Agent 循环。首次作者模型请求前，Growth 把**这次新任务**的实际 supplier、预算、任务修订、工具/执行摘要与 `revisionAcceptance` 固定到 source-run；恢复时引用必须仍相同且有效。它可以与独立的 `creationAcceptance` 同时存在，但创建授权、旧任务和旧创建额度都不能替代修订授权。排队仅返回 `revise-created` 作业的无内容状态；后续独立验收最多形成 `prepared-revise` / `pending-approval` 候选及修订凭证，见 [Verifier](../assistant-verifier/README.md#已采用插件的新任务修订验收)。本阶段不授予候选执行、替换当前版本或扩大旧创建采用额度；旧行为回归覆盖、版本切换/回滚和后续真实任务收益尚需分别验证。
 
 ## 真实使用自动触发
 

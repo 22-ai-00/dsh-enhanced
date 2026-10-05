@@ -9,7 +9,8 @@
  * @dsh-enhanced/plugin-control-plane (an optional peer): every field here is a
  * structural subset, so the driver still builds and loads without that package.
  */
-import type { CreationAcceptanceAuthorityRef, SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import type { CreationAcceptanceAuthorityRef, RevisionAcceptanceAuthorityRef,
+  SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 
 /**
  * Local mirror of the control-plane protected-plugin denylist
@@ -70,7 +71,7 @@ export interface SourceJobProjection {
   readonly gapId: string
   readonly baseCommit: string
   readonly status: 'queued' | 'running' | 'prepared' | 'failed' | 'unknown'
-  readonly mode?: 'create'
+  readonly mode?: 'create' | 'revise-created'
   readonly createdAt: number
   readonly expiresAt: number
   readonly planId?: string
@@ -103,6 +104,13 @@ export interface GrowthSourceTargets {
   readonly plugins: readonly { readonly name: string; readonly description?: string }[]
 }
 
+/** Same-owner adopted archives are selection hints, never causal proof or execution authority. */
+export interface GrowthSourceRevisionTarget {
+  readonly parentPlanId: string
+  readonly name: string
+  readonly parentSourceDigest: string
+}
+
 export interface GrowthSourcePlanePort {
   /** Optional read-only repository inventory; the Host owns the repository and baseline. */
   inspectSourceTargets?(input: {
@@ -133,6 +141,19 @@ export interface GrowthSourcePlanePort {
   getSourceCreationNamespace?(): Readonly<{ namePrefix: string }> | undefined
   /** Host-only current owner policy; never exposed as an Agent tool result. */
   inspectSourceCreationAcceptanceAuthority?(): CreationAcceptanceAuthorityRef | undefined
+  /** Only a new authenticated failed Usage task may use this independent revision lane. */
+  getSourceRevisionNamespace?(): Readonly<{ namePrefix: string }> | undefined
+  inspectSourceRevisionAcceptanceAuthority?(): RevisionAcceptanceAuthorityRef | undefined
+  inspectCreatedCapabilityRevisionTargets?(): readonly GrowthSourceRevisionTarget[]
+  inspectRevisionSource?(input: {
+    repository: string
+    parentPlanId: string
+    name: string
+    paths: readonly string[]
+    baseCommit?: string
+    signal: AbortSignal
+    assertCurrent: () => void
+  }): Promise<GrowthSourceSnapshot>
   /** Enumerate recently recorded gaps; the caller filters to still-open ones. */
   listOpenGaps(): readonly GrowthSourceGap[]
   /**
@@ -158,7 +179,8 @@ export interface GrowthSourcePlanePort {
   /** Queue Host-owned source preparation that outlives the model wake. */
   enqueueSourceJob(input: {
     /** Absent means the legacy modify lane. Creation needs a separate owner grant. */
-    mode?: 'create'
+    mode?: 'create' | 'revise-created'
+    parentPlanId?: string
     gapId: string
     name: string
     repository: string

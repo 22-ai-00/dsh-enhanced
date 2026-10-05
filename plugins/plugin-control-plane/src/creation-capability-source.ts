@@ -72,7 +72,7 @@ function exactArray(value: unknown, max: number, label: string): readonly unknow
   return value
 }
 
-function certificatePlan(certificate: PluginCreationVerificationCertificate): PluginCreationVerificationCertificate['plan'] {
+function certificatePlan(certificate: Pick<PluginCreationVerificationCertificate, 'plan'>): PluginCreationVerificationCertificate['plan'] {
   if (certificate === null || typeof certificate !== 'object' || Object.getPrototypeOf(certificate) !== Object.prototype) invalid('certificate')
   const descriptor = Object.getOwnPropertyDescriptor(certificate, 'plan')
   if (!descriptor || !('value' in descriptor) || !descriptor.enumerable) invalid('certificate plan')
@@ -167,7 +167,7 @@ function inspectEntry(value: unknown, root: string, plugin: boolean): CreationCa
 
 /** Offline structural and byte verification; signature, owner and current authority belong to the journal. */
 export function validateCreationCapabilitySource(snapshot: unknown,
-  certificate: PluginCreationVerificationCertificate): asserts snapshot is CreationCapabilitySourceSnapshot {
+  certificate: Pick<PluginCreationVerificationCertificate, 'plan'>): asserts snapshot is CreationCapabilitySourceSnapshot {
   const plan = certificatePlan(certificate)
   const value = exactRecord(snapshot, ['protocol', 'baseCommit', 'scope', 'treeDigest', 'patchDigest', 'entries', 'files', 'digest'], 'snapshot')
   if (value.protocol !== PROTOCOL || typeof value.baseCommit !== 'string' || !COMMIT.test(value.baseCommit)
@@ -250,7 +250,7 @@ async function listedPluginPaths(worktree: string, root: string, signal?: AbortS
 /** Capture exactly the same temporary-index digest domain as checkedSourceSnapshot. */
 export async function captureCreationCapabilitySource(input: {
   worktree: string; baseCommit: string; scope: readonly string[]
-  certificate: PluginCreationVerificationCertificate; environment: NodeJS.ProcessEnv; signal?: AbortSignal
+  certificate: Pick<PluginCreationVerificationCertificate, 'plan'>; environment: NodeJS.ProcessEnv; signal?: AbortSignal
 }): Promise<CreationCapabilitySourceSnapshot> {
   const plan = certificatePlan(input.certificate)
   const scope = checkedScope(plan.name, input.scope)

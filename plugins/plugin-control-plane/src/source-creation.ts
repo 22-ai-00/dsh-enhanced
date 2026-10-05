@@ -249,10 +249,15 @@ async function generatedFiles(worktree: string, name: string,
   const rootStat = await lstat(root)
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || await realpath(root) !== root) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'generated plugin root is unsafe')
   const output: { path: string; bytes: number; content: string }[] = []
-  const visit = async (directory: string, prefix: string): Promise<void> => {
+  let nodes = 0
+  const visit = async (directory: string, prefix: string, depth: number): Promise<void> => {
+    if (depth > 32) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'generated plugin directory depth exceeds bound')
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const path = prefix === '' ? entry.name : `${prefix}/${entry.name}`
-      if (entry.isDirectory()) await visit(join(directory, entry.name), path)
+      if (++nodes > 256 || Buffer.byteLength(path, 'utf8') > 1_024) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'generated plugin path or entry count exceeds bound')
+      }
+      if (entry.isDirectory()) await visit(join(directory, entry.name), path, depth + 1)
       else if (entry.isFile()) {
         const bytes = await safeBytes(join(directory, entry.name), MAX_FILE_BYTES)
         if (bytes.includes(0)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'generated plugin contains binary data')
@@ -261,7 +266,7 @@ async function generatedFiles(worktree: string, name: string,
       if (output.length > bounds.files) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'generated plugin exceeds file bound')
     }
   }
-  await visit(root, '')
+  await visit(root, '', 0)
   if (RESERVED_OUTPUTS.some(path => !output.some(file => file.path === path))
     || !output.some(file => file.path === 'README.md') || !output.some(file => file.path === 'tests/index.spec.ts')
     || output.reduce((total, file) => total + file.bytes, 0) > bounds.bytes) {
@@ -532,6 +537,113 @@ export async function verifyCreatedPluginWorkspace(input: {
 
 function creationCandidatePath(path: string): boolean {
   try { validateSourceCreationFiles([{ path, content: '' }]); return true } catch { return false }
+}
+
+/** Grant-free Host scaffold data for a new root. Revision callers supply their
+ * own independent owner authority and must verify the archived parent. */
+export interface SourceCreationHostScaffold {
+  baseCommit: string
+  generatorDigest: string
+  files: readonly { path: string; bytes: number; content: string }[]
+  catalog: Buffer
+  lock: string
+}
+
+type SourceCreationHostInput = {
+  repository: string; name: string; baseCommit?: string; baselineCommit?: string
+  environment: NodeJS.ProcessEnv; signal: AbortSignal; assertCurrent: () => void | Promise<void>
+}
+
+async function hostScaffold(assets: BaseAssets, name: string, environment: NodeJS.ProcessEnv,
+  signal: AbortSignal): Promise<SourceCreationHostScaffold> {
+  return isolatedGenerator(assets, name, environment, signal, async (capsule, files) => {
+    const manifest = JSON.parse(files.find(file => file.path === 'package.json')!.content) as Record<string, unknown>
+    if (manifest.name !== `@dsh-enhanced/${name}` || typeof manifest.version !== 'string'
+      || !record(manifest.dsh) || !record(manifest.dsh.bundle) || manifest.dsh.bundle.patch !== './cordis.patch.yml') {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'public generator emitted invalid plugin identity')
+    }
+    const baseLock = (await gitBlob(assets.repository, assets.blobs.get('pnpm-lock.yaml')!, environment, signal)).toString('utf8')
+    return Object.freeze({ baseCommit: assets.baseCommit, generatorDigest: assets.generatorDigest, files,
+      catalog: await safeBytes(join(capsule, 'plugins', 'README.md'), MAX_FILE_BYTES),
+      lock: lockImporter(baseLock, manifest, name) })
+  })
+}
+
+/** Reconstruct expected Host bytes without touching the repository. */
+export async function inspectCreationHostScaffold(input: SourceCreationHostInput): Promise<SourceCreationHostScaffold> {
+  if (!NAME.test(input.name) || input.name.normalize('NFC') !== input.name) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation Host plugin name is invalid')
+  }
+  const assets = await baseAssets(input)
+  await checked(input.signal, input.assertCurrent,
+    () => assertFreshName(assets, input.name, input.environment, input.signal))
+  return checked(input.signal, input.assertCurrent,
+    () => hostScaffold(assets, input.name, input.environment, input.signal))
+}
+
+/** Build only the fixed Host scaffold in a clean private linked worktree. */
+export async function prepareCreationHostScaffold(input: Omit<SourceCreationHostInput, 'repository'> & {
+  worktree: string; expectedGeneratorDigest: string
+}): Promise<SourceCreationHostScaffold> {
+  if (!NAME.test(input.name) || input.name.normalize('NFC') !== input.name || !DIGEST.test(input.expectedGeneratorDigest)) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation Host name or generator digest is invalid')
+  }
+  const assets = await baseAssets({ ...input, repository: input.worktree })
+  if (assets.generatorDigest !== input.expectedGeneratorDigest) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation generator inputs changed')
+  const linked = await linkedWorktrees(assets.repository, input.environment)
+  const privateParent = await lstat(dirname(assets.repository))
+  if (linked.length < 2 || linked[0] === assets.repository || !linked.includes(assets.repository)
+    || !privateParent.isDirectory() || privateParent.isSymbolicLink() || (privateParent.mode & 0o022) !== 0) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation requires a private linked non-primary worktree')
+  }
+  await checked(input.signal, input.assertCurrent, () => assertFreshName(assets, input.name, input.environment, input.signal))
+  const expected = await checked(input.signal, input.assertCurrent,
+    () => hostScaffold(assets, input.name, input.environment, input.signal))
+  await checked(input.signal, input.assertCurrent,
+    () => generateChecked(assets.repository, input.name, assets, input.environment, input.signal))
+  await checked(input.signal, input.assertCurrent,
+    () => writeFile(join(assets.repository, 'pnpm-lock.yaml'), expected.lock, { flag: 'w' }))
+  return expected
+}
+
+/** Recheck generated metadata, catalog and lock while exposing the complete
+ * actual plugin file set, including ignored extras, to the revision verifier. */
+export async function verifyCreationHostScaffold(input: Omit<SourceCreationHostInput, 'repository'> & {
+  worktree: string; expectedGeneratorDigest: string
+}): Promise<{ expected: SourceCreationHostScaffold; actual: readonly { path: string; bytes: number; content: string }[] }> {
+  if (!NAME.test(input.name) || input.name.normalize('NFC') !== input.name || !DIGEST.test(input.expectedGeneratorDigest)) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation Host name or generator digest is invalid')
+  }
+  const assets = await baseAssets({ ...input, repository: input.worktree })
+  if (assets.generatorDigest !== input.expectedGeneratorDigest) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation generator inputs changed')
+  await checked(input.signal, input.assertCurrent,
+    () => assertFreshName(assets, input.name, input.environment, input.signal))
+  await checked(input.signal, input.assertCurrent,
+    () => assertBaseFiles(assets.repository, assets, input.environment, input.signal, true))
+  await assertOnlyCreationChanges(assets.repository, assets.baseCommit, input.name, input.environment, input.signal)
+  const expected = await checked(input.signal, input.assertCurrent,
+    () => hostScaffold(assets, input.name, input.environment, input.signal))
+  const listed = await generatedFiles(assets.repository, input.name)
+  const actual = await Promise.all(listed.map(async file => {
+    const bytes = await safeBytes(join(assets.repository, 'plugins', input.name, file.path), MAX_FILE_BYTES)
+    if (bytes.includes(0)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation plugin contains binary data')
+    return Object.freeze({ path: file.path, bytes: bytes.length,
+      content: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) })
+  }))
+  const existing = new Map(actual.map(file => [file.path, file]))
+  for (const file of expected.files.filter(file => RESERVED_OUTPUTS.includes(file.path as typeof RESERVED_OUTPUTS[number]))) {
+    if (existing.get(file.path)?.content !== file.content) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', `Host-owned generated file changed: ${file.path}`)
+    }
+  }
+  if (!(await safeBytes(join(assets.repository, 'plugins', 'README.md'), MAX_FILE_BYTES)).equals(expected.catalog)) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'generated catalog changed')
+  }
+  if (!(await safeBytes(join(assets.repository, 'pnpm-lock.yaml'), 8_388_608)).equals(Buffer.from(expected.lock))) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'Host-owned new lock importer changed')
+  }
+  await checked(input.signal, input.assertCurrent, () => Promise.resolve())
+  return Object.freeze({ expected, actual: Object.freeze(actual) })
 }
 
 export async function prepareCreatedPluginWorkspace(input: {

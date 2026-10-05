@@ -1065,6 +1065,16 @@ describe('opt-in plugin source proposals', () => {
   const creationCall = (files = creationFiles, name = creationName) => ({ name: 'plugin_source_create', args: {
     gap_id: creationGap, plugin_name: name, files,
   } })
+  const revisionParent = 'adopted-parent-1'
+  const revisionName = 'assistant-adopted-sum'
+  const revisionFiles = [{ path: 'src/index.ts', content: 'export function sum(a: number, b: number) { return a + b }\n' }]
+  const revisionTarget = { parentPlanId: revisionParent, name: revisionName, parentSourceDigest: '7'.repeat(64) }
+  const revisionRead = (paths: string[]) => ({ name: 'plugin_source_revision_inspect', args: {
+    parent_plan_id: revisionParent, plugin_name: revisionName, paths,
+  } })
+  const revisionCall = (files = revisionFiles) => ({ name: 'plugin_source_revise', args: {
+    parent_plan_id: revisionParent, plugin_name: revisionName, files,
+  } })
   function creationService() {
     const base = sourceService()
     let producer: SourceGrowthRunProducer | undefined
@@ -1104,6 +1114,31 @@ describe('opt-in plugin source proposals', () => {
         id: input.id, mode: 'create' as const, name: creationName, gapId: creationGap,
         baseCommit: 'c'.repeat(40), status: 'queued' as const, createdAt: 1, expiresAt: 2,
       })),
+    }
+  }
+
+  function revisionService() {
+    const base = creationService()
+    const revisionAcceptance = { protocol: 'assistant-growth/revision-acceptance-authority/v1' as const,
+      authorityId: 'revision-policy', keyId: 'revision-key', authorityDigest: '8'.repeat(64),
+      namePrefix: 'assistant-', expiresAt: Date.now() + 60_000 }
+    return { ...base, revisionAcceptance,
+      getSourceRevisionNamespace: vi.fn((): { namePrefix: string } | undefined => ({ namePrefix: 'assistant-' })),
+      inspectSourceRevisionAcceptanceAuthority: vi.fn(() => revisionAcceptance),
+      inspectCreatedCapabilityRevisionTargets: vi.fn(() => [revisionTarget]),
+      inspectRevisionSource: vi.fn(async (input: Parameters<NonNullable<GrowthSourcePlanePort['inspectRevisionSource']>>[0]) => {
+        input.signal.throwIfAborted(); input.assertCurrent()
+        return { name: input.name, baseCommit: 'c'.repeat(40), files: [
+          { path: 'src/index.ts', bytes: 8 }, { path: 'README.md', bytes: 8 },
+          { path: 'tests/index.spec.ts', bytes: 8 }, { path: 'package.json', bytes: 8 },
+        ], contents: input.paths.map(path => ({ path, content: 'previous source content' })) }
+      }),
+      enqueueSourceJob: vi.fn(async (input: Parameters<GrowthSourcePlanePort['enqueueSourceJob']>[0]) => {
+        input.signal.throwIfAborted(); input.assertCurrent()
+        return { id: 'source-revision-job', mode: 'revise-created' as const, name: input.name,
+          gapId: input.gapId, baseCommit: input.expectedBaseCommit,
+          status: 'queued' as const, createdAt: 1, expiresAt: 2 }
+      }),
     }
   }
 
@@ -1435,6 +1470,111 @@ describe('opt-in plugin source proposals', () => {
     expect(service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 1 })
   })
 
+  it('queues a selected adopted parent from a new failed Inbox task with its own frozen model and revision authority', async () => {
+    const adapter = new ScriptedAdapter([
+      { name: 'plugin_source_gaps', args: {} },
+      { name: 'plugin_source_revision_targets', args: {} },
+      revisionRead(['src/index.ts']), revisionCall(),
+    ])
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    h.modelSelection.mockImplementation(() => { throw new Error('current session supplier changed') })
+    const source = revisionService()
+    adapter.onRequest = () => {
+      const db = new DatabaseSync(join(h.root, 'usage.sqlite'))
+      try {
+        const row = db.prepare("SELECT source_run_json FROM usage_jobs WHERE state='running'").get() as { source_run_json: string } | undefined
+        expect(JSON.parse(row?.source_run_json ?? 'null')).toMatchObject({ revisionAcceptance: source.revisionAcceptance,
+          model: { provider: 'conversation-provider', model: 'original-task-model' } })
+      } finally { db.close() }
+    }
+    const service = await startUsageReview({ h, source, objectiveStatus: 'not-achieved',
+      sourceConfig: { preparationMode: 'durable', allowRevision: true } })
+    expect(service.health().run?.sourceProposals).toEqual({ queued: 1, prepared: 0, rejected: 0 })
+    expect(source.gaps).not.toHaveBeenCalled()
+    expect(source.inspectCreatedCapabilityRevisionTargets).toHaveBeenCalled()
+    expect(source.inspectRevisionSource).toHaveBeenCalledWith(expect.objectContaining({
+      parentPlanId: revisionParent, name: revisionName, paths: ['src/index.ts'], repository: h.root,
+    }))
+    expect(source.enqueueSourceJob).toHaveBeenCalledWith(expect.objectContaining({
+      mode: 'revise-created', parentPlanId: revisionParent, gapId: creationGap, name: revisionName,
+      files: revisionFiles, expectedBaseCommit: 'c'.repeat(40),
+    }))
+    const queued = source.enqueueSourceJob.mock.calls[0]![0]
+    validateSourceGrowthRunBinding(queued.growthRun)
+    expect(queued.growthRun).toMatchObject({ revisionAcceptance: source.revisionAcceptance,
+      model: { provider: 'conversation-provider', model: 'original-task-model' },
+      source: { projection: { subjectRef: 'real-task' } },
+      budget: { maxPlansPerWake: 1 },
+    })
+    expect(queued.growthRun!.creationAcceptance).toBeUndefined()
+    expect(source.inspectRegisteredSourceRun({ runId: queued.growthRun!.runId, intentDigest: queued.growthRun!.intentDigest }))
+      .toEqual(queued.growthRun)
+    expect(adapter.requests.every(request => request.provider === 'conversation-provider'
+      && request.model === 'original-task-model')).toBe(true)
+    expect(adapter.surfaces[0]).toContain('plugin_source_revise')
+    expect(adapter.surfaces[0]).not.toContain('plugin_source_create')
+    expect(adapter.schemas.flat().find(tool => tool.name === 'plugin_source_revise')?.parameters).toMatchObject({
+      properties: { parent_plan_id: {}, plugin_name: {}, files: {} },
+    })
+  })
+
+  it('keeps revision disabled without every new port and rejects a non-current adopted target', async () => {
+    const old = creationService()
+    const olderAdapter = new ScriptedAdapter([])
+    const olderHarness = await mount({ adapter: olderAdapter, provider: 'conversation-provider' })
+    await startUsageReview({ h: olderHarness, source: old, objectiveStatus: 'not-achieved',
+      sourceConfig: { preparationMode: 'durable', allowRevision: true } })
+    expect(olderAdapter.surfaces[0]).not.toContain('plugin_source_revise')
+    expect(old.enqueueSourceJob).not.toHaveBeenCalled()
+
+    const adapter = new ScriptedAdapter([{ name: 'plugin_source_gaps', args: {} },
+      { name: 'plugin_source_revision_targets', args: {} },
+      { name: 'plugin_source_revision_inspect', args: { parent_plan_id: 'foreign-parent',
+        plugin_name: revisionName, paths: ['src/index.ts'] } }, revisionCall()])
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    const source = revisionService()
+    await startUsageReview({ h, source, objectiveStatus: 'not-achieved',
+      sourceConfig: { preparationMode: 'durable', allowRevision: true } })
+    expect(source.inspectRevisionSource).not.toHaveBeenCalled()
+    expect(source.enqueueSourceJob).not.toHaveBeenCalled()
+  })
+
+  it('keeps the revision lane off without explicit opt-in and rejects reserved candidate files', async () => {
+    const unoptedAdapter = new ScriptedAdapter([])
+    const unoptedHarness = await mount({ adapter: unoptedAdapter, provider: 'conversation-provider' })
+    const unoptedSource = revisionService()
+    await startUsageReview({ h: unoptedHarness, source: unoptedSource, objectiveStatus: 'not-achieved',
+      sourceConfig: { preparationMode: 'durable', allowCreation: true } })
+    expect(unoptedAdapter.surfaces[0]).not.toContain('plugin_source_revise')
+
+    const adapter = new ScriptedAdapter([{ name: 'plugin_source_gaps', args: {} },
+      { name: 'plugin_source_revision_targets', args: {} }, revisionRead(['src/index.ts']),
+      revisionCall([{ path: 'package.json', content: '{"scripts":{"install":"unsafe"}}' }])])
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    const source = revisionService()
+    await startUsageReview({ h, source, objectiveStatus: 'not-achieved',
+      sourceConfig: { preparationMode: 'durable', allowRevision: true } })
+    expect(source.enqueueSourceJob).not.toHaveBeenCalled()
+  })
+
+  it.each(['corrected', 'withdrawn'])('fences revision when the new owner task is %s after source inspection', async disposition => {
+    const adapter = new ScriptedAdapter([{ name: 'plugin_source_gaps', args: {} },
+      { name: 'plugin_source_revision_targets', args: {} },
+      revisionRead(['src/index.ts']), revisionCall()])
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    const source = revisionService()
+    const inspect = source.inspectRevisionSource.getMockImplementation()!
+    source.inspectRevisionSource.mockImplementation(async input => {
+      const result = await inspect(input)
+      source.recordOwnerTaskFailureGap.mockReturnValue({ id: creationGap, capability: 'task-failure',
+        context: `owner ${disposition} this new task`, status: 'closed', createdAt: 1 })
+      return result
+    })
+    await startUsageReview({ h, source, objectiveStatus: 'not-achieved',
+      sourceConfig: { preparationMode: 'durable', allowRevision: true } })
+    expect(source.enqueueSourceJob).not.toHaveBeenCalled()
+  })
+
   it('does not record or expose global gaps for an achieved trusted foreground task', async () => {
     const adapter = new ScriptedAdapter([{ name: 'plugin_source_gaps', args: {} }])
     const h = await mount({ adapter, provider: 'conversation-provider' })
@@ -1481,6 +1621,8 @@ describe('opt-in plugin source proposals', () => {
     expect(() => normalizeConfig(driverConfig('/tmp', { pluginSourceProposals: { ...options('/tmp'), preparationMode: 'later' } }))).toThrow()
     expect(() => normalizeConfig(driverConfig('/tmp', { pluginSourceProposals: { ...options('/tmp'), allowCreation: true } })))
       .toThrow(/requires enabled durable source proposals/)
+    expect(() => normalizeConfig(driverConfig('/tmp', { pluginSourceProposals: { ...options('/tmp'), allowRevision: true } })))
+      .toThrow(/requires enabled durable source proposals and usage learning/)
   })
 
   it('exposes creation only with explicit owner opt-in and the optional creation reader', async () => {

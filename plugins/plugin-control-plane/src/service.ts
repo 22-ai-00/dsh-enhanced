@@ -12,6 +12,8 @@ import type { AssistantDeliveryService, ForegroundTaskObservationRegistration, O
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { isSourceOwnerContinuation, sourceGrowthRunDigest, validateCreationAcceptanceAuthorityRef, verifyPluginCreationVerificationCertificate,
+  validateRevisionAcceptanceAuthorityRef, verifyPluginRevisionVerificationCertificate, type RevisionAcceptanceAuthorityRef,
+  type PluginRevisionVerificationCertificate, type PluginRevisionVerificationRequest, type PluginRevisionVerificationResult,
   validateSourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate,
   type PluginCreationVerificationRequest, type PluginCreationVerificationResult,
   type SourceGrowthRunBinding, type SourceGrowthRunProducer } from '@dsh-enhanced/assistant-growth-contract'
@@ -46,6 +48,7 @@ import { Ed25519ApprovalAuthority } from './approval.js'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from './store.js'
 import { runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
 import { awaitSourceSignal, inspectSourceContext, inspectSourceTargetsContext, type SourceInspection, type SourceTargetsInspection } from './source-context.js'
+import { inspectSourceRevisionContext, prepareRevisedPluginWorkspace, verifyRevisedPluginWorkspace } from './source-revision.js'
 import { inspectSourceCreationContext, prepareCreatedPluginWorkspace, validateSourceCreationFiles, verifyCreatedPluginWorkspace } from './source-creation.js'
 import { resolveSourceBaseline } from './source-baseline.js'
 import { inheritedEnvironment, loadTrustConfig, resolveTrustKey } from './trust.js'
@@ -74,6 +77,8 @@ export interface Config {
   creationVerifications?: { authority: CreationAcceptanceAuthorityRef; publicKey: string }
   /** Separate finite owner grant for dynamically adopted isolated tools. */
   creationCapabilities?: CreationCapabilityConfig
+  /** A new finite preparation/verification lane, with no execution authority. */
+  revisionVerifications?: { authority: RevisionAcceptanceAuthorityRef; publicKey: string }
   /** Optional finite owner authority; only approves prepared task-bound source, never deploys it. */
   sourceApprovals?: SourceApprovalClientConfig
   /** Optional separate finite authority for entering the local release state machine. */
@@ -95,20 +100,22 @@ export interface Config {
   /** Owner-pinned finite native replay; separate from the read-only observer. */
   replayEndpoint?: ReplayEndpointConfig
 }
+type RevisionVerifierPort = { verifyPluginRevision(request: PluginRevisionVerificationRequest, signal?: AbortSignal): Promise<PluginRevisionVerificationResult> }
 type CreationVerifierPort = {
   verifyPluginCreation(request: PluginCreationVerificationRequest, signal?: AbortSignal): Promise<PluginCreationVerificationResult>
 }
 const CREATION_UNKNOWN_CODES = new Set(['schema-observation-unknown', 'case-observation-unknown', 'contract-insufficient',
   'interrupted', 'stale-source', 'verification-unknown', 'previous-unknown'])
 const CREATION_REJECTED_CODES = new Set(['case-mismatch', 'source-review-rejected', 'request-invalid'])
-export type NormalizedControlPlaneConfig = Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'creationCapabilities' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>>
-  & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'creationCapabilities' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>
+export type NormalizedControlPlaneConfig = Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'revisionVerifications' | 'creationCapabilities' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>>
+  & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'revisionVerifications' | 'creationCapabilities' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>
 const schema = Schema.object({
   catalogPath: Schema.string().required(), statePath: Schema.string().required(), trustPath: Schema.string().required(),
   proposalTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   sourceBuild: Schema.any(),
   sourceJobs: Schema.any(),
   creationVerifications: Schema.any(),
+  revisionVerifications: Schema.any(),
   creationCapabilities: Schema.any(),
   sourceApprovals: Schema.any(),
   sourceReleases: Schema.any(),
@@ -221,6 +228,21 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
       || !config.sourceJobs?.creation || policy.authority.namePrefix !== config.sourceJobs.creation.namePrefix
       || policy.authority.expiresAt > Math.min(config.sourceJobs.creation.expiresAt, config.sourceJobs.expiresAt)) {
       throw new Error('plugin-control-plane: creation verification authority does not match finite source creation grant')
+    }
+  }
+  if (config.revisionVerifications !== undefined || config.sourceJobs?.revision !== undefined) {
+    const policy = config.revisionVerifications, grant = config.sourceJobs?.revision
+    if (!policy || !grant || !config.creationCapabilities || !config.sourceJobs
+      || Object.keys(policy).sort().join(',') !== 'authority,publicKey' || typeof policy.publicKey !== 'string') {
+      throw new Error('plugin-control-plane: revision verification requires its separate finite grant and retained adopted source')
+    }
+    validateRevisionAcceptanceAuthorityRef(policy.authority)
+    const key = createPublicKey(policy.publicKey)
+    if (key.asymmetricKeyType !== 'ed25519' || policy.authority.namePrefix !== grant.namePrefix
+      || policy.authority.expiresAt > Math.min(grant.expiresAt, config.sourceJobs.expiresAt)
+      || createPublicKey(creationCapabilityPublicKey(config.creationCapabilities)).export({ format: 'der', type: 'spki' })
+        .equals(key.export({ format: 'der', type: 'spki' }))) {
+      throw new Error('plugin-control-plane: invalid independent revision verification authority')
     }
   }
   if (config.creationCapabilities !== undefined) {
@@ -480,7 +502,7 @@ export class PluginControlPlaneService extends Service {
     if (this.config.sourceJobs !== undefined) ctx.inject(['assistantAutomations' as never, 'assistantDelivery' as never,
       ...(this.config.sourceApprovals ? ['assistantEvaluation' as never] : []),
       ...(this.config.sourceReleaseExecution?.independentReview ? ['assistantVerifier', 'agents', 'sessions', 'tools', 'llm', 'systemPrompt', 'assistantPolicy'] as never[] : []),
-      ...(this.config.creationVerifications ? ['assistantVerifier' as never] : []),
+      ...(this.config.creationVerifications || this.config.revisionVerifications ? ['assistantVerifier' as never] : []),
       ...(this.config.creationCapabilities ? ['tools', 'assistantEvaluation', 'assistantPolicy'] as never[] : [])], jobsCtx => {
       jobsCtx.effect(async () => {
         this.abort.signal.throwIfAborted()
@@ -585,6 +607,9 @@ export class PluginControlPlaneService extends Service {
             delivery: { validateOwnerRoute: request => current('delivery').validateOwnerRoute(request) },
           }, withGapSourceFence: (gapId, owner, callback) => this.taskGaps.withCurrent(gapId, owner, callback),
           assertGrowthRun: (run, gapId, owner, generation) => this.assertSourceGrowthRun(run, gapId, owner, generation),
+          ...(this.config.revisionVerifications ? { inspectRevisionParent: this.inspectRevisionParent,
+            verifyPreparedRevision: (job: SourceJobRecord, signal: AbortSignal) => this.verifyPreparedRevision(job, signal,
+              () => jobsCtx.get('assistantVerifier' as never) as unknown as RevisionVerifierPort) } : {}),
           ...(this.config.creationVerifications ? { verifyPreparedCreation: (job: SourceJobRecord, signal: AbortSignal) =>
             this.verifyPreparedCreation(job, signal, () => jobsCtx.get('assistantVerifier' as never) as unknown as CreationVerifierPort) } : {}),
           ...(capabilities ? { creationAdoptionEligible: (planId: string) => capabilities!.eligible(planId),
@@ -939,6 +964,37 @@ export class PluginControlPlaneService extends Service {
     } catch { return undefined }
   }
 
+  private inspectRevisionParent = (planId: string) => {
+    const archive = this.inspectCreatedCapabilitySource(planId)
+    const certificate = this.store.getCreationVerification(planId)
+    const grant = this.config.sourceJobs?.revision
+    if (!archive || !certificate || !grant || !certificate.plan.name.startsWith(grant.namePrefix)
+      || archive.certificateDigest !== controlPlaneDigest(certificate) || archive.artifactSha256 !== certificate.plan.artifactSha256) {
+      throw new Error('adopted revision parent source unavailable or changed')
+    }
+    return { name: certificate.plan.name, certificate, source: archive.source,
+      parent: { planId, certificateDigest: archive.certificateDigest, artifactSha256: archive.artifactSha256,
+        sourceArchiveDigest: controlPlaneDigest(archive), sourceDigest: archive.source.digest } }
+  }
+
+  /** Bounded current-owner inventory. These identities are hints, never causal evidence or use grants. */
+  inspectCreatedCapabilityRevisionTargets = () => {
+    if (!this.inspectSourceRevisionAcceptanceAuthority()) return []
+    const targets: { parentPlanId: string; name: string; parentSourceDigest: string }[] = []
+    for (const plan of this.store.listPreparedSourcePlans().filter(plan => plan.mode === 'prepared-create').slice(-64)) {
+      try {
+        const parent = this.inspectRevisionParent(plan.id)
+        targets.push({ parentPlanId: plan.id, name: parent.name, parentSourceDigest: parent.source.digest })
+      } catch { /* an unavailable archive is not a revision target */ }
+    }
+    return Object.freeze(targets.map(target => Object.freeze(target)))
+  }
+
+  getSourceRevisionNamespace = (): { namePrefix: string } | undefined => {
+    const policy = this.inspectSourceRevisionAcceptanceAuthority()
+    return policy ? { namePrefix: policy.namePrefix } : undefined
+  }
+
   /** Host-only current association of exact adopted call versions with authenticated task heads. */
   inspectCreatedCapabilityTaskAssociations = (planId: string) => {
     this.abort.signal.throwIfAborted()
@@ -1064,6 +1120,10 @@ export class PluginControlPlaneService extends Service {
     if (sourceGrowthRunDigest(actual) !== sourceGrowthRunDigest(expected)
       || expected.ownerDigest !== controlPlaneDigest(owner)) throw new Error('source growth run immutable binding changed')
     const policy = this.config.creationVerifications?.authority
+    if (expected.revisionAcceptance !== undefined && (this.config.revisionVerifications === undefined
+      || controlPlaneDigest(expected.revisionAcceptance) !== controlPlaneDigest(this.config.revisionVerifications.authority))) {
+      throw new Error('source growth run revision acceptance policy changed or was not pinned before authoring')
+    }
     if (expected.creationAcceptance !== undefined
       && (policy === undefined || controlPlaneDigest(policy) !== controlPlaneDigest(expected.creationAcceptance))) {
       throw new Error('source growth run creation acceptance policy changed or was not pinned before authoring')
@@ -1207,12 +1267,168 @@ export class PluginControlPlaneService extends Service {
     })
   }
 
+  /** Private Host handoff. Never register this package reader as a model tool. */
+  inspectPreparedRevision = (planId: string) => {
+    this.abort.signal.throwIfAborted()
+    const plan = this.store.getSourcePlan(planId)
+    const reference = this.store.getOwnerTaskFailureReference(plan.gapId)
+    if (!reference || plan.mode !== 'prepared-revise' || plan.status !== 'pending-approval'
+      || Date.now() >= plan.expiresAt || !plan.sourceRevision || Date.now() >= plan.sourceRevision.grant.expiresAt) {
+      throw new Error('prepared revision package is unavailable for independent verification')
+    }
+    return this.taskGaps.withCurrent(plan.gapId, reference.owner, () => {
+      this.abort.signal.throwIfAborted()
+      const job = this.store.getPreparedRevisionJob(plan.id)
+      if (!plan.sourceRevision?.growthRun || !job.intent.revision?.growthRun) throw new Error('prepared revision lacks a frozen source growth run')
+      this.assertSourceGrowthRun(plan.sourceRevision.growthRun, plan.gapId, reference.owner, false)
+      this.inspectRevisionParent(plan.sourceRevision.parent.planId)
+      return {
+        protocol: 'dsh-prepared-revision/v1' as const,
+        plan: structuredClone(plan), job: structuredClone(job), reference: structuredClone(reference),
+        source: this.taskGaps.inspectCurrent(plan.gapId, reference.owner),
+        artifact: this.store.readPreparedSourceArtifact(plan.id),
+      }
+    })
+  }
+
+  /** Host-only pre-author policy reference; never grants candidate or model authority. */
+  inspectSourceRevisionAcceptanceAuthority = (): RevisionAcceptanceAuthorityRef | undefined => {
+    const policy = this.config.revisionVerifications?.authority
+    if (this.abort.signal.aborted || !policy || Date.now() >= policy.expiresAt
+      || Date.now() >= (this.config.sourceJobs?.revision?.expiresAt ?? 0)
+      || Date.now() >= (this.config.sourceJobs?.expiresAt ?? 0)) return undefined
+    return structuredClone(policy)
+  }
+
+  /** Synchronous Evaluation writer fence for an exact independently reviewed creation. */
+  withPreparedRevisionFence = <T>(input: { planId: string; planDigest: string; artifactSha256: string;
+    growthRunDigest: string; referenceDigest: string; parentDigest: string }, callback: () => T): T => {
+    this.abort.signal.throwIfAborted()
+    const policy = this.inspectSourceRevisionAcceptanceAuthority()
+    if (!policy) throw new Error('revision verification authority unavailable')
+    const plan = this.store.getSourcePlan(input.planId)
+    const reference = this.store.getOwnerTaskFailureReference(plan.gapId)
+    if (!reference) throw new Error('revision verification source unavailable')
+    return this.taskGaps.withCurrent(plan.gapId, reference.owner, () => {
+      this.abort.signal.throwIfAborted()
+      const current = this.store.getSourcePlan(input.planId)
+      const job = this.store.getPreparedRevisionJob(input.planId)
+      if (current.digest !== input.planDigest || current.mode !== 'prepared-revise' || !current.sourceRevision?.growthRun
+        || !job.intent.revision?.growthRun || !current.sourceCheck || !current.preparedEvidence
+        || current.preparedEvidence.pack.sha256 !== input.artifactSha256
+        || controlPlaneDigest(reference) !== input.referenceDigest
+        || sourceGrowthRunDigest(current.sourceRevision.growthRun) !== input.growthRunDigest
+        || sourceGrowthRunDigest(job.intent.revision.growthRun) !== input.growthRunDigest
+        || !current.sourceRevision.growthRun.revisionAcceptance
+        || controlPlaneDigest(current.sourceRevision.growthRun.revisionAcceptance) !== controlPlaneDigest(policy)
+        || controlPlaneDigest(current.sourceRevision.grant) !== controlPlaneDigest(this.config.sourceJobs?.revision)
+        || controlPlaneDigest(current.sourceRevision.parent) !== input.parentDigest
+        || controlPlaneDigest(this.inspectRevisionParent(current.sourceRevision.parent.planId).parent) !== input.parentDigest) {
+        throw new Error('revision verification exact source binding changed')
+      }
+      this.assertSourceGrowthRun(current.sourceRevision.growthRun, current.gapId, reference.owner, false)
+      const artifact = this.store.readPreparedSourceArtifact(input.planId)
+      if (createHash('sha256').update(artifact).digest('hex') !== input.artifactSha256) {
+        throw new Error('revision verification artifact changed')
+      }
+      return callback()
+    })
+  }
+
+  /** Independent reviewer reads the actual checked tree through a disposable Git index. */
+  inspectPreparedRevisionReviewContext = async (planId: string, signal: AbortSignal): Promise<{ patch: string; changedPaths: string[] }> => {
+    const combined = AbortSignal.any([this.abort.signal, signal, AbortSignal.timeout(120_000)])
+    combined.throwIfAborted()
+    const prepared = this.inspectPreparedRevision(planId)
+    const current = () => this.withPreparedRevisionFence({ planId, planDigest: prepared.plan.digest,
+      artifactSha256: prepared.plan.preparedEvidence!.pack.sha256,
+      growthRunDigest: sourceGrowthRunDigest(prepared.plan.sourceRevision!.growthRun!),
+      referenceDigest: controlPlaneDigest(prepared.reference), parentDigest: controlPlaneDigest(prepared.plan.sourceRevision!.parent) }, () => undefined)
+    current()
+    const trust = await this.boundTrust()
+    const environment = inheritedEnvironment(trust)
+    const job = prepared.job
+    const parent = this.inspectRevisionParent(prepared.plan.sourceRevision!.parent.planId)
+    await verifyRevisedPluginWorkspace({ worktree: prepared.plan.worktree, baseCommit: prepared.plan.baseCommit,
+      name: prepared.plan.name, environment, signal: combined, assertCurrent: current,
+      revision: prepared.plan.sourceRevision!, parentSource: parent.source, parentCertificate: parent.certificate, files: job.intent.files })
+    const review = await inspectPreparedCreationPatch(prepared.plan, environment, combined)
+    current()
+    return review
+  }
+
+  /** Signed behavior evidence over stored pack/checks. Adoption must await async review-context recheck. */
+  inspectVerifiedRevision = (planId: string): PluginRevisionVerificationCertificate | undefined => {
+    const certificate = this.store.getRevisionVerification(planId)
+    if (!certificate) return undefined
+    const config = this.config.revisionVerifications
+    if (!config || !verifyPluginRevisionVerificationCertificate(certificate, config.authority, config.publicKey)) return undefined
+    this.withPreparedRevisionFence({ planId, planDigest: certificate.plan.digest,
+      artifactSha256: certificate.plan.artifactSha256, growthRunDigest: certificate.source.growthRunDigest,
+      referenceDigest: certificate.source.referenceDigest, parentDigest: controlPlaneDigest(certificate.parent) }, () => {
+      const plan = this.store.getSourcePlan(planId)
+      if (!plan.sourceCheck || !plan.preparedEvidence || certificate.plan.name !== plan.name
+        || certificate.plan.generatorDigest !== plan.generatorDigest
+        || certificate.plan.sourceTreeDigest !== plan.sourceCheck.treeDigest
+        || certificate.plan.sourcePatchDigest !== plan.sourceCheck.patchDigest
+        || certificate.plan.artifactBytes !== plan.preparedEvidence.pack.sizeBytes) {
+        throw new Error('revision verification exact plan evidence changed')
+      }
+    })
+    return structuredClone(certificate)
+  }
+
+  /** Private Host diagnostic; no cases, prompts, source bytes or verifier output. */
+  inspectRevisionVerification = (planId: string): { status: 'claimed' | 'verified' | 'unknown' | 'rejected';
+    reason?: string; updatedAt: number } | undefined => {
+    this.abort.signal.throwIfAborted()
+    const plan = this.store.getSourcePlan(planId)
+    const reference = this.store.getOwnerTaskFailureReference(plan.gapId)
+    if (!reference || plan.mode !== 'prepared-revise') throw new Error('revision verification owner source unavailable')
+    return this.taskGaps.withCurrent(plan.gapId, reference.owner, () => {
+      const current = this.store.getSourcePlan(planId)
+      if (current.mode !== 'prepared-revise' || current.digest !== plan.digest) {
+        throw new Error('revision verification diagnostic plan changed')
+      }
+      return this.store.inspectRevisionVerificationRecord(planId)
+    })
+  }
+
   /** Public naming rule only; never disclose grant identity or mutation authority. */
   getSourceCreationNamespace(): { namePrefix: string } | undefined {
     const config = this.config.sourceJobs
     if (this.abort.signal.aborted || config?.creation === undefined
       || Date.now() >= Math.min(config.expiresAt, config.creation.expiresAt)) return undefined
     return { namePrefix: config.creation.namePrefix }
+  }
+
+  inspectCreatedCapabilityRevisionCandidate = (planId: string) => {
+    this.abort.signal.throwIfAborted()
+    const policy = this.config.revisionVerifications
+    const owner = this.config.creationCapabilities?.owner
+    const delivery = this.ctx.get('assistantDelivery' as never, false) as AssistantDeliveryService | undefined
+    if (!policy || !owner || !delivery) return undefined
+    try {
+      const before = delivery.validateOwnerRoute(owner)
+      const { plan, reference, job } = this.store.getRetainedPreparedRevision(planId)
+      const certificate = this.store.getRevisionVerification(planId)
+      if (!certificate || !plan.sourceRevision || !isSourceOwnerContinuation(before, reference.owner)
+        || !verifyPluginRevisionVerificationCertificate(certificate, policy.authority, policy.publicKey, certificate.verifiedAt)
+        || certificate.plan.digest !== plan.digest || certificate.source.referenceDigest !== controlPlaneDigest(reference)
+        || certificate.source.ownerDigest !== job.intent.ownerDigest
+        || certificate.source.growthRunDigest !== sourceGrowthRunDigest(plan.sourceRevision.growthRun)
+        || controlPlaneDigest(certificate.parent) !== controlPlaneDigest(plan.sourceRevision.parent)
+        || controlPlaneDigest(certificate.model) !== controlPlaneDigest(plan.sourceRevision.growthRun.model)
+        || controlPlaneDigest(certificate.authority) !== controlPlaneDigest(plan.sourceRevision.growthRun.revisionAcceptance)) return undefined
+      const parent = this.inspectRevisionParent(certificate.parent.planId)
+      if (controlPlaneDigest(parent.parent) !== controlPlaneDigest(certificate.parent)) return undefined
+      const source = this.store.readRevisionSource(planId)
+      if (!source || controlPlaneDigest(before) !== controlPlaneDigest(delivery.validateOwnerRoute(owner))) return undefined
+      return Object.freeze({ protocol: 'dsh-created-capability-revision-candidate/v1' as const,
+        certificate: Object.freeze(structuredClone(certificate)), source: Object.freeze({ ...source,
+          scope: Object.freeze([...source.scope]), entries: Object.freeze(source.entries.map(entry => Object.freeze({ ...entry }))),
+          files: Object.freeze(source.files.map(file => Object.freeze({ ...file }))) }) })
+    } catch { return undefined }
   }
 
   // Bind Host entry points: Cordis service proxies must not become resource owners.
@@ -1287,6 +1503,79 @@ export class PluginControlPlaneService extends Service {
       }) } catch { /* stale owner/source remains permanently claimed */ }
       throw error
     }
+  }
+
+  private async verifyPreparedRevision(job: SourceJobRecord, signal: AbortSignal,
+    verifier: () => RevisionVerifierPort): Promise<void> {
+    signal.throwIfAborted()
+    if (!job.planId || !this.config.revisionVerifications || this.store.getRevisionVerificationStatus(job.planId) !== undefined) return
+    const prepared = this.inspectPreparedRevision(job.planId)
+    if (prepared.job.id !== job.id || !prepared.plan.sourceRevision?.growthRun || !prepared.plan.preparedEvidence) {
+      throw new Error('revision verification job is not the exact prepared source')
+    }
+    const binding = { planId: prepared.plan.id, planDigest: prepared.plan.digest,
+      artifactSha256: prepared.plan.preparedEvidence.pack.sha256,
+      growthRunDigest: sourceGrowthRunDigest(prepared.plan.sourceRevision.growthRun),
+      referenceDigest: controlPlaneDigest(prepared.reference), parentDigest: controlPlaneDigest(prepared.plan.sourceRevision.parent) }
+    this.withPreparedRevisionFence(binding, () => this.store.claimRevisionVerification(job.planId!))
+    try {
+      const current = verifier()
+      if (typeof current?.verifyPluginRevision !== 'function') throw new Error('independent revision verifier unavailable')
+      const result = await current.verifyPluginRevision({ protocol: 'assistant-growth/revision-verification-request/v1', planId: job.planId }, signal)
+      signal.throwIfAborted()
+      if (result.status === 'verified' && !verifyPluginRevisionVerificationCertificate(result.certificate,
+        this.config.revisionVerifications.authority, this.config.revisionVerifications.publicKey)) {
+        throw new Error('revision verification certificate signature or policy invalid')
+      }
+      if (controlPlaneDigest(await this.boundTrust()) !== job.intent.trustDigest) throw new Error('revision verification trust changed')
+      await this.inspectPreparedRevisionReviewContext(job.planId, signal)
+      const source = result.status === 'verified' ? await captureCreationCapabilitySource({ worktree: prepared.plan.worktree,
+        baseCommit: prepared.plan.baseCommit, scope: [...prepared.plan.scope].sort(), certificate: result.certificate,
+        environment: inheritedEnvironment(await this.boundTrust()), signal }) : undefined
+      this.withPreparedRevisionFence(binding, () => {
+        if (result.status === 'verified') {
+          if (!source) throw new Error('verified revision source archive unavailable')
+          this.store.recordRevisionVerification(result.certificate, source)
+        } else this.store.settleRevisionVerification(job.planId!, result.status,
+          typeof result.reason === 'string' && (result.status === 'unknown' ? CREATION_UNKNOWN_CODES : CREATION_REJECTED_CODES).has(result.reason)
+            ? result.reason : `independent-verifier-${result.status}`)
+      })
+    } catch (error) {
+      // The claimed row is a durable no-replay fence even if the process dies
+      // before settlement. A later native tick cannot dispatch another review.
+      try { this.withPreparedRevisionFence(binding, () => {
+        if (this.store.getRevisionVerificationStatus(job.planId!) === 'claimed') {
+          this.store.settleRevisionVerification(job.planId!, 'unknown', 'independent-verification-unsettled')
+        }
+      }) } catch { /* stale owner/source remains permanently claimed */ }
+      throw error
+    }
+  }
+
+  async inspectRevisionSource(input: { repository: string; parentPlanId: string; name: string; paths: readonly string[];
+    baseCommit?: string; signal?: AbortSignal; assertCurrent?: () => void | Promise<void> }): Promise<SourceInspection> {
+    this.abort.signal.throwIfAborted()
+    const config = this.config.sourceJobs
+    if (!config?.revision || !this.inspectSourceRevisionAcceptanceAuthority() || input.repository !== config.repository
+      || this.sourceBuilds.size !== 0 || this.sourceInspections.size !== 0) throw new Error('revision source inspection unavailable')
+    const signal = AbortSignal.any([this.abort.signal, ...(input.signal ? [input.signal] : []), AbortSignal.timeout(15_000)])
+    const parent = this.inspectRevisionParent(input.parentPlanId)
+    if (parent.name !== input.name) throw new Error('revision source name differs from adopted parent')
+    const assertCurrent = async () => {
+      signal.throwIfAborted(); await input.assertCurrent?.(); signal.throwIfAborted()
+      if (!this.inspectSourceRevisionAcceptanceAuthority() || controlPlaneDigest(this.inspectRevisionParent(input.parentPlanId).parent) !== controlPlaneDigest(parent.parent)) throw new Error('revision source authority or parent changed')
+    }
+    const operation = (async () => {
+      const trust = await this.boundTrust(), environment = inheritedEnvironment(trust)
+      const baselineCommit = config.baseline === undefined ? undefined : await resolveSourceBaseline({ repository: config.repository,
+        config: config.baseline, environment, signal, assertCurrent, trust,
+        readHistory: () => this.store.getSourceBaselineHistory(config.repository), readMaintenance: () => this.store.getSourceMaintenanceRecords(config.repository) })
+      return inspectSourceRevisionContext({ repository: config.repository, name: input.name, paths: input.paths,
+        ...(input.baseCommit === undefined ? {} : { baseCommit: input.baseCommit }), ...(baselineCommit === undefined ? {} : { baselineCommit }),
+        environment, signal, assertCurrent, grant: config.revision!, parent: parent.parent, parentSource: parent.source, parentCertificate: parent.certificate })
+    })()
+    this.sourceInspections.add(operation)
+    try { return await operation } finally { this.sourceInspections.delete(operation) }
   }
 
   async inspectSource(input: { repository: string; name: string; paths: readonly string[]; baseCommit?: string; signal?: AbortSignal; assertCurrent?: () => void | Promise<void> }): Promise<SourceInspection> {
@@ -1426,9 +1715,15 @@ export class PluginControlPlaneService extends Service {
     const gapOwner = sourceJob?.intent.owner ?? input.owner
     const creating = sourceJob?.intent.mode === 'create'
     const creation = creating ? sourceJob!.intent.creation : undefined
+    const revising = sourceJob?.intent.mode === 'revise-created'
+    const revision = revising ? sourceJob!.intent.revision : undefined
+    const parent = revision === undefined ? undefined : this.inspectRevisionParent(revision.parent.planId)
     const assertCurrent = async (): Promise<void> => {
       signal.throwIfAborted(); await input.assertCurrent?.(); signal.throwIfAborted()
       this.taskGaps.withCurrent(input.gapId, gapOwner, () => {})
+      if (revising && (!revision || !this.config.sourceJobs?.revision || Date.now() >= revision.grant.expiresAt
+        || controlPlaneDigest(revision.grant) !== controlPlaneDigest(this.config.sourceJobs.revision)
+        || controlPlaneDigest(this.inspectRevisionParent(revision.parent.planId).parent) !== controlPlaneDigest(revision.parent))) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'plugin revision authority or parent changed')
       if (creating && (!creation || !this.config.sourceJobs?.creation || Date.now() >= creation.grant.expiresAt
         || controlPlaneDigest(creation.grant) !== controlPlaneDigest(this.config.sourceJobs.creation))) {
         throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'plugin creation authority changed or expired')
@@ -1439,7 +1734,7 @@ export class PluginControlPlaneService extends Service {
     const name = input.name.normalize('NFC').trim()
     if (!/^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(name)) throw new ControlPlaneCliError('INVALID_ARGUMENT', 'plugin name is invalid')
     assertPluginModificationAllowed(name)
-    if (creating) validateSourceCreationFiles(input.files)
+    if (creating || revising) validateSourceCreationFiles(input.files)
     else {
       validateScopedPluginFiles(input.files)
       if (this.config.sourceBuild?.versioning === 'patch') assertManagedVersionPaths(input.files)
@@ -1478,7 +1773,9 @@ export class PluginControlPlaneService extends Service {
     const isolated = await createIsolatedWorktree({ stateRoot, repository, baseCommit, environment,
       ...(sourceJob === undefined ? {} : { worktreeName: basename(sourceJob.intent.worktree) }) })
     try {
-      const generated = creation === undefined ? undefined : await prepareCreatedPluginWorkspace({ worktree: isolated.worktree,
+      const generated = revision !== undefined ? await prepareRevisedPluginWorkspace({ worktree: isolated.worktree,
+        baseCommit, name, files: input.files, environment, signal, assertCurrent, revision, parentSource: parent!.source, parentCertificate: parent!.certificate })
+        : creation === undefined ? undefined : await prepareCreatedPluginWorkspace({ worktree: isolated.worktree,
         baseCommit, name, files: input.files, environment, signal, assertCurrent, creation })
       if (generated === undefined) await writeScopedPluginFiles({ worktree: isolated.worktree, name, files: input.files })
       await assertCurrent()
@@ -1486,7 +1783,7 @@ export class PluginControlPlaneService extends Service {
       if (!offline) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'isolated source builds must remain offline')
       const configured = this.config.sourceBuild
       const versionInput = { worktree: isolated.worktree, baseCommit, name, environment, signal, assertCurrent }
-      const managed = !creating && configured.versioning === 'patch' ? await managedPatchVersionFiles(versionInput) : undefined
+      const managed = !creating && !revising && configured.versioning === 'patch' ? await managedPatchVersionFiles(versionInput) : undefined
       if (managed !== undefined) {
         await assertCurrent()
         await writeScopedPluginFiles({ worktree: isolated.worktree, name, files: managed.files })
@@ -1494,14 +1791,18 @@ export class PluginControlPlaneService extends Service {
       }
       // Only owner-bound creation jobs retain the exact package for the
       // independent verifier. Ordinary source tools never receive these bytes.
-      const capturePack = creating && this.store.getOwnerTaskFailureReference(input.gapId) !== undefined
+      const capturePack = (creating || revising) && this.store.getOwnerTaskFailureReference(input.gapId) !== undefined
       const checked = await runDockerPreparedChecks({ config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
         worktree: isolated.worktree, baseCommit, name, scope: generated?.scope ?? [`plugins/${name}`], environment, signal,
         assertCurrent, preparedAt: Date.now(), ...(creation === undefined ? {} : { creation }),
+        ...(revision === undefined ? {} : { revision: { binding: revision, parentSource: parent!.source, parentCertificate: parent!.certificate, files: input.files } }),
         ...(capturePack ? { capturePack: true } : {}),
         ...(sourceJob === undefined ? {} : { sourceJob: { id: sourceJob.id, containerName: sourceJob.intent.containerName } }) })
       await assertCurrent()
       if (capturePack && checked.packArtifact === undefined) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared creation artifact was not captured')
+      if (revision !== undefined) {
+        await verifyRevisedPluginWorkspace({ worktree: isolated.worktree, baseCommit, name, files: input.files, environment, signal, assertCurrent, revision, parentSource: parent!.source, parentCertificate: parent!.certificate })
+      }
       if (creation !== undefined) {
         await verifyCreatedPluginWorkspace({ worktree: isolated.worktree, baseCommit, name,
           files: input.files, environment, signal, assertCurrent, creation })
@@ -1516,8 +1817,8 @@ export class PluginControlPlaneService extends Service {
       // exact directory during `source verify-prepared`.
       return this.taskGaps.withCurrent(input.gapId, gapOwner, () => this.store.createSourcePlan({ gapId: input.gapId, repository, worktree: isolated.worktree, baseCommit,
         name, generatorDigest: generated?.generatorDigest ?? MODIFY_GENERATOR_DIGEST,
-        scope: generated?.scope ?? [`plugins/${name}`], mode: creating ? 'prepared-create' : 'modify', ttlMs,
-        ...(creation === undefined ? {} : { creation }),
+        scope: generated?.scope ?? [`plugins/${name}`], mode: creating ? 'prepared-create' : revising ? 'prepared-revise' : 'modify', ttlMs,
+        ...(creation === undefined ? {} : { creation }), ...(revision === undefined ? {} : { revision }),
         ...(capturePack && checked.packArtifact !== undefined ? { preparedArtifact: checked.packArtifact } : {}),
         idempotencyKey: input.idempotencyKey,
         ...(sourceJob === undefined ? {} : { sourceJob: { jobId: sourceJob.id, jobRevision: sourceJob.revision, occurrenceId: sourceJob.occurrenceId! } }),

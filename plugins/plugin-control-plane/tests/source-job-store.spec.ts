@@ -60,18 +60,23 @@ function downgradeSourcePlansToV28(path: string, invalidMode = false): void {
     const current = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'source_plans'").get() as { sql: string }
     const indexes = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'source_plans' AND sql IS NOT NULL").all() as Array<{ sql: string }>
     const columns = (database.prepare('PRAGMA table_info(source_plans)').all() as Array<{ name: string }>).map(row => row.name)
-      .filter(name => name !== 'creation_json').map(name => `"${name}"`).join(',')
-    const old = current.sql.replace(/^CREATE TABLE\s+"?source_plans"?/u, 'CREATE TABLE source_plans_v28')
+      .filter(name => name !== 'creation_json' && name !== 'revision_json').map(name => `"${name}"`).join(',')
+    const old = current.sql
+      .replace(/\s*revision_json TEXT CHECK\(revision_json IS NULL OR \(json_valid\(revision_json\) AND json_type\(revision_json\)='object'\)\),/u, '')
+      .replace(/\s*CHECK\(\(mode = 'prepared-revise' AND revision_json IS NOT NULL\) OR \(mode IN \('create', 'modify', 'prepared-create'\) AND revision_json IS NULL\)\),/u, '')
+      .replaceAll(", 'prepared-revise'", '')
+      .replace(/^CREATE TABLE\s+"?source_plans"?/u, 'CREATE TABLE source_plans_v28')
       .replace("mode IN ('create', 'modify', 'prepared-create')", invalidMode
         ? "mode IN ('create', 'modify', 'unexpected')" : "mode IN ('create', 'modify')")
       .replace(/\s*creation_json TEXT CHECK\(creation_json IS NULL OR \(json_valid\(creation_json\) AND json_type\(creation_json\) = 'object'\)\),/u, '')
       .replace("mode IN ('modify', 'prepared-create') AND prepared_evidence_json IS NOT NULL", "mode = 'modify' AND prepared_evidence_json IS NOT NULL")
       .replace(/\s*CHECK\(\(mode = 'prepared-create' AND creation_json IS NOT NULL\) OR \(mode IN \('create', 'modify'\) AND creation_json IS NULL\)\),/u, '')
-    if (old.includes('creation_json') || !old.includes('CREATE TABLE source_plans_v28')) throw new Error('v28 fixture schema was not reconstructed')
+    if (old.includes('creation_json') || old.includes('revision_json') || !old.includes('CREATE TABLE source_plans_v28')) throw new Error('v28 fixture schema was not reconstructed')
     database.exec('PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE')
     try {
       database.exec(`${old}; INSERT INTO source_plans_v28 (${columns}) SELECT ${columns} FROM source_plans;
         DROP TABLE source_plans; ALTER TABLE source_plans_v28 RENAME TO source_plans;
+        DROP TABLE source_revision_sources; DROP TABLE source_revision_verifications; DROP TABLE source_revision_grants;
         DROP TABLE source_prepared_artifact_refs; DROP TABLE source_prepared_artifacts; DROP TABLE source_creation_grants;`)
       for (const index of indexes) database.exec(index.sql)
       if (database.prepare('PRAGMA foreign_key_check').all().length) throw new Error('v28 fixture has invalid foreign keys')

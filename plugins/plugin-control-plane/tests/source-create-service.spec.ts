@@ -13,7 +13,8 @@ import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { isSourceOwnerContinuation, pluginCreationVerificationSigningPayload, sourceGrowthRunDigest, SourceGrowthRunUnavailableError,
-  type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+  pluginRevisionVerificationSigningPayload, type RevisionAcceptanceAuthorityRef, type PluginRevisionVerificationCertificate,
+  type SourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import type { ForegroundToolCallAttestation, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import { afterEach, expect, it, vi } from 'vitest'
 import { PluginControlPlaneService, normalizeControlPlaneConfig, type Config } from '../src/service.ts'
@@ -45,7 +46,7 @@ const baselineRepository = fileURLToPath(new URL('../../..', import.meta.url)).r
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); vi.resetAllMocks() })
 
-async function fixture(withVerification = false, withAdoption = false, withRetention = false) {
+async function fixture(withVerification = false, withAdoption = false, withRetention = false, withRevision = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-created-service-')))
   const { repository } = await createSourceCreationFixture(baselineRepository, join(root, 'source'))
   const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: repository, encoding: 'utf8' }).trim()
@@ -126,7 +127,11 @@ async function fixture(withVerification = false, withAdoption = false, withReten
   const publicKey = signing.publicKey.export({ format: 'pem', type: 'spki' }).toString()
   const verification = vi.fn<(_request: { planId: string }, _signal?: AbortSignal) => Promise<unknown>>()
     .mockResolvedValue({ status: 'unknown', reason: 'fixture-verifier-unavailable' })
-  if (withVerification) ctx.provide('assistantVerifier' as never, { verifyPluginCreation: verification })
+  const revisionAuthority: RevisionAcceptanceAuthorityRef = { ...authority, protocol: 'assistant-growth/revision-acceptance-authority/v1',
+    authorityId: 'fixture-revision-review', authorityDigest: '8'.repeat(64) }
+  const revisionVerification = vi.fn<(_request: { planId: string }, _signal?: AbortSignal) => Promise<unknown>>()
+    .mockResolvedValue({ status: 'unknown', reason: 'fixture-verifier-unavailable' })
+  if (withVerification) ctx.provide('assistantVerifier' as never, { verifyPluginCreation: verification, verifyPluginRevision: revisionVerification })
   const policy = new AssistantPolicyService(ctx, { databasePath: join(root, 'policy.sqlite'),
     budgets: [{ id: 'source-budget', metric: 'automation-runs', limit: 3, periodMs: 60_000, scope: 'global' }], rules: [
       { id: 'reconcile', effect: 'allow', subject: { kind: 'background', id: 'plugin-control-plane-source', workspace: root, principal: 'owner' }, actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
@@ -141,11 +146,20 @@ async function fixture(withVerification = false, withAdoption = false, withReten
   const config: Config = { statePath, catalogPath, trustPath: join(root, 'trust.json'),
     ...(withVerification ? { creationVerifications: { authority, publicKey } } : {}),
     ...(capability ? { creationCapabilities: capability } : {}),
+    ...(withRevision ? { revisionVerifications: { authority: revisionAuthority, publicKey } } : {}),
     sourceBuild: { dockerPath: '/usr/bin/docker', image: `fixture@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000, versioning: 'patch',
       memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 },
     sourceJobs: { authorityId: 'source-grant', expiresAt: now + 600_000, maxSubmissions: 3, repository,
       ownerRouteId: 'route', principalId: 'owner', workspace: root, preset: 'primary', budgetId: 'source-budget', budgetAmount: 1,
+      ...(withRevision ? { revision: { id: 'owner-revise', expiresAt: now + 600_000, maxRevisions: 1, namePrefix: 'rsi-service-' } } : {}),
       creation: { id: 'owner-create', expiresAt: now + 600_000, maxCreates: 2, namePrefix: 'rsi-service-' } } }
+  if (withRevision) {
+    git('branch', '-M', 'dev')
+    const remote = join(root, 'managed-source.git')
+    execFileSync('/usr/bin/git', ['clone', '--bare', repository, remote], { stdio: 'pipe' })
+    await chmod(remote, 0o700)
+    config.sourceJobs!.baseline = { ref: 'refs/dsh-source/fixture', remote, targetBranch: 'dev', initialCommit: git('rev-parse', 'HEAD') }
+  }
   const service = new PluginControlPlaneService(ctx, config)
   await vi.waitFor(() => expect(service.canEnqueueSource()).toBe(true))
   const store = new ControlPlaneStore({ path: join(statePath, 'control.sqlite') })
@@ -153,7 +167,7 @@ async function fixture(withVerification = false, withAdoption = false, withReten
   const gap = service.recordOwnerTaskFailureGap(structuredClone(source))
   const growthRun = sourceGrowthRunFixture(store.getOwnerTaskFailureReference(gap.id)!, now)
   if (withVerification) growthRun.creationAcceptance = authority
-  const inspectGrowthRun = vi.fn(() => structuredClone(growthRun))
+  const inspectGrowthRun = vi.fn<(_request: { runId: string; intentDigest: string }) => SourceGrowthRunBinding | undefined>(() => structuredClone(growthRun))
   const unregisterGrowthRun = service.registerSourceGrowthRunProducer({ protocol: 'assistant-growth-source-run-producer/v1', inspect: inspectGrowthRun })
   cleanup.push(async () => unregisterGrowthRun())
   const caller = { ownerRouteId: 'route', principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: root, preset: 'primary' }
@@ -178,7 +192,7 @@ async function fixture(withVerification = false, withAdoption = false, withReten
   else vi.mocked(build.runDockerPreparedChecks).mockResolvedValue(checked)
   return { root, repository, git, ctx, config, capability, service, automations, policy, store, source, owner,
     deliveryPorts, evaluationPorts, foregroundCall, publicKey, verification, request, checked, growthRun, inspectGrowthRun,
-    unregisterGrowthRun, authority, signing, setSource: (next: OwnerForegroundLearningTask) => { activeSource = next },
+    unregisterGrowthRun, authority, signing, revisionAuthority, revisionVerification, setSource: (next: OwnerForegroundLearningTask) => { activeSource = next },
     setLaterSource: (next: OwnerForegroundLearningTask) => { laterSource = next },
     notifyTaskChange: () => { for (const listener of taskChangeListeners) listener() },
     taskChangeListenerCount: () => taskChangeListeners.size,
@@ -882,3 +896,195 @@ it.each(['manifest', 'lock', 'owner', 'artifact', 'missing-pack', 'pack-bytes'] 
   expect(f.git('worktree', 'list', '--porcelain')).not.toContain(`worktree ${worktree}\n`)
   expect(f.store.getGap(f.request.gapId).status).toBe('open')
 }, 30_000)
+
+function signedRevisionCertificate(f: Awaited<ReturnType<typeof fixture>>, planId: string,
+  alter?: (body: Omit<PluginRevisionVerificationCertificate, 'signature'>) => void): PluginRevisionVerificationCertificate {
+  const { plan, reference } = f.service.inspectPreparedRevision(planId)
+  const body: Omit<PluginRevisionVerificationCertificate, 'signature'> = {
+    protocol: 'assistant-growth/revision-verification/v1', verificationId: 'fixture-revision', authority: f.revisionAuthority,
+    parent: plan.sourceRevision!.parent,
+    plan: { id: plan.id, digest: plan.digest, name: plan.name, sourceTreeDigest: plan.sourceCheck!.treeDigest,
+      sourcePatchDigest: plan.sourceCheck!.patchDigest, artifactSha256: plan.preparedEvidence!.pack.sha256,
+      artifactBytes: plan.preparedEvidence!.pack.sizeBytes, generatorDigest: plan.generatorDigest },
+    source: { referenceDigest: controlPlaneDigest(reference), ownerDigest: controlPlaneDigest(reference.owner),
+      growthRunDigest: sourceGrowthRunDigest(plan.sourceRevision!.growthRun) },
+    contractDigest: 'a'.repeat(64), schemaDigest: candidateSchemaDigest, environment: candidateEnvironment,
+    model: plan.sourceRevision!.growthRun.model,
+    budget: { modelCalls: 2, maxOutputTokens: 1024, maxDurationMs: 60_000, maxCases: 2 },
+    sessions: { contract: 'revision-contract', sourceReview: 'revision-source' },
+    observations: [{ caseId: 'case-one', jobId: 'revision-job-one', operationDigest: 'c'.repeat(64), observationDigest: 'd'.repeat(64) },
+      { caseId: 'case-two', jobId: 'revision-job-two', operationDigest: 'e'.repeat(64), observationDigest: 'f'.repeat(64) }],
+    reviewDigest: '1'.repeat(64), verifiedAt: Date.now(), expiresAt: Date.now() + 300_000,
+  }
+  alter?.(body)
+  return { ...body, signature: sign(null, Buffer.from(pluginRevisionVerificationSigningPayload(body)), f.signing.privateKey).toString('base64url') }
+}
+
+async function revisionFixture() {
+  const f = await fixture(true, true, true, true)
+  f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedCertificate(f, request.planId,
+    f.signing.privateKey, body => { body.schemaDigest = candidateSchemaDigest; body.environment = candidateEnvironment }) }))
+  runnerRun.mockImplementation(async (input: { artifact: Buffer; operation: { kind: string } }) => ({ status: 'observed', quiescent: true,
+    artifactSha256: createHash('sha256').update(input.artifact).digest('hex'), schemaDigest: candidateSchemaDigest,
+    schemas: candidateSchemas, environment: candidateEnvironment }))
+  const initial = await f.service.enqueueSourceJob(f.request)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const parentPlanId = f.store.getSourceJob(initial.id)!.planId!
+  expect(f.service.inspectCreatedCapability(parentPlanId)?.status).toBe('active')
+  const archive = f.service.inspectCreatedCapabilitySource(parentPlanId)!
+  const next: OwnerForegroundLearningTask = { ...structuredClone(f.source),
+    canonical: { ...structuredClone(f.source.canonical), triggerOutcomeId: 'revision-feedback', situation: 'foreground:revision-task',
+      objective: { ...f.source.canonical.objective!, outcomeId: 'revision-feedback' },
+      projection: { ...f.source.canonical.projection, subjectRef: 'revision-inbox', digest: '7'.repeat(64) } },
+    source: { ...structuredClone(f.source.source), inboxId: 'revision-inbox', sessionId: 'revision-session',
+      objective: 'new ordinary task fails while using the created helper',
+      modelSelection: { provider: 'new-task-supplier', model: 'new-task-model', reasoningEffort: 'medium' } } }
+  f.setLaterSource(next)
+  const gap = f.service.recordOwnerTaskFailureGap(next)
+  const growthRun = sourceGrowthRunFixture(f.store.getOwnerTaskFailureReference(gap.id)!, Date.now(), next.source.modelSelection!, 'inherited-owner-task')
+  growthRun.runId = 'usage-source-revise'; growthRun.native.automationId = growthRun.runId
+  growthRun.intentDigest = '6'.repeat(64); growthRun.revisionAcceptance = f.revisionAuthority
+  f.inspectGrowthRun.mockImplementation(request => request.runId === growthRun.runId ? structuredClone(growthRun) : structuredClone(f.growthRun))
+  const request = { ...f.request, mode: 'revise-created' as const, parentPlanId, gapId: gap.id, growthRun,
+    idempotencyKey: 'revise-from-new-task', files: [{ path: 'README.md', content: '# Revised helper\n' }] }
+  return { ...f, parentPlanId, archive, next, revisionRun: growthRun, revisionRequest: request }
+}
+
+it('new ordinary task independently verifies a durable parent-bound revision without renewing creation or execution grants', async () => {
+  const f = await revisionFixture()
+  const alias = f.service.inspectCreatedCapability(f.parentPlanId)!.aliases[0]!
+  const readParentReceipt = () => {
+    const db = new DatabaseSync(join(f.config.statePath, 'creation-adoptions.sqlite'))
+    try { return db.prepare('SELECT receipt_json FROM adoptions WHERE plan_id=?').get(f.parentPlanId)?.receipt_json }
+    finally { db.close() }
+  }
+  const parentReceipt = readParentReceipt()
+  // Historical source survives an owner correction that shuts down the old execution grant.
+  f.setSource({ ...f.source, source: { ...f.source.source, objective: 'owner corrected old trigger' } })
+  f.notifyTaskChange()
+  await vi.waitFor(() => expect(f.ctx.tools.get(alias)).toBeUndefined())
+  expect(f.service.inspectCreatedCapabilityRevisionTargets()).toEqual([{ parentPlanId: f.parentPlanId,
+    name: f.request.name, parentSourceDigest: f.archive.source.digest }])
+  const context = await f.service.inspectRevisionSource({ repository: f.repository, name: f.request.name, parentPlanId: f.parentPlanId,
+    paths: ['README.md'], baseCommit: f.request.expectedBaseCommit, signal: new AbortController().signal })
+  expect(context.contents).toEqual(f.request.files)
+  f.revisionVerification.mockImplementation(async request => ({ status: 'verified', certificate: signedRevisionCertificate(f, request.planId) }))
+  const queued = await f.service.enqueueSourceJob(f.revisionRequest)
+  expect(await f.service.enqueueSourceJob(f.revisionRequest)).toEqual(queued)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const job = f.store.getSourceJob(queued.id)!
+  expect(job.status).toBe('prepared')
+  const planId = job.planId!
+  expect(f.store.getSourcePlan(planId)).toMatchObject({ mode: 'prepared-revise', revision: 1,
+    sourceRevision: { parent: { planId: f.parentPlanId }, growthRun: { model: f.next.source.modelSelection } } })
+  const certificate = f.service.inspectVerifiedRevision(planId)!
+  expect(certificate).toMatchObject({ protocol: 'assistant-growth/revision-verification/v1',
+    parent: { planId: f.parentPlanId, sourceArchiveDigest: controlPlaneDigest(f.archive) }, model: f.next.source.modelSelection })
+  expect(f.revisionVerification).toHaveBeenCalledOnce()
+  const candidate = f.service.inspectCreatedCapabilityRevisionCandidate(planId)!
+  expect(candidate.source.files.find(file => file.path.endsWith('/README.md'))?.content).toBe('# Revised helper\n')
+  expect(f.service.inspectCreatedCapability(planId)).toBeUndefined()
+  expect(f.ctx.tools.get(alias)).toBeUndefined()
+  expect(readParentReceipt()).toBe(parentReceipt)
+  const db = new DatabaseSync(join(f.config.statePath, 'control.sqlite'))
+  try {
+    expect(db.prepare('SELECT creates FROM source_creation_grants').get()?.creates).toBe(1)
+    expect(db.prepare('SELECT revisions FROM source_revision_grants').get()?.revisions).toBe(1)
+    expect(db.prepare('SELECT submissions FROM source_job_authorities').get()?.submissions).toBe(2)
+  } finally { db.close() }
+  f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
+  expect(f.revisionVerification).toHaveBeenCalledOnce()
+  const reopened = new ControlPlaneStore({ path: join(f.config.statePath, 'control.sqlite') })
+  try { expect(reopened.getRevisionVerification(planId)).toEqual(certificate); expect(reopened.readRevisionSource(planId)).toEqual(candidate.source) }
+  finally { reopened.close() }
+  // Historical data survives expiry, removal of prepared artifacts/worktrees,
+  // withdrawal of the new trigger and a complete Host/Cordis cold restart.
+  f.advance(901_000)
+  const removed = await f.service.gcPreparedSourceWorktrees()
+  expect(removed.removed).toContain(f.store.getSourcePlan(planId).worktree)
+  expect(() => f.store.readPreparedSourceArtifact(planId)).toThrow()
+  expect(f.service.inspectCreatedCapabilityRevisionCandidate(planId)).toEqual(candidate)
+  f.setLaterSource({ ...f.next, canonical: { ...f.next.canonical,
+    projection: { ...f.next.canonical.projection, disposition: 'retract' } } })
+  f.notifyTaskChange()
+  expect(f.service.inspectCreatedCapabilityRevisionCandidate(planId)).toEqual(candidate)
+  await f.unregisterGrowthRun()
+  await f.ctx.fiber.dispose()
+  const restored = new Context()
+  cleanup.push(async () => restored.fiber.dispose())
+  await mountAgentLoopTestDependencies(restored, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  restored.provide('assistantDelivery' as never, f.deliveryPorts)
+  restored.provide('assistantEvaluation' as never, f.evaluationPorts)
+  restored.provide('assistantVerifier' as never, { verifyPluginCreation: f.verification, verifyPluginRevision: f.revisionVerification })
+  new AssistantPolicyService(restored, { databasePath: join(f.root, 'policy.sqlite'),
+    budgets: [{ id: 'source-budget', metric: 'automation-runs', limit: 3, periodMs: 60_000, scope: 'global' }], rules: [
+      { id: 'reconcile', effect: 'allow', subject: { kind: 'background', id: 'plugin-control-plane-source', workspace: f.root, principal: 'owner' }, actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
+      { id: 'execute', effect: 'allow', subject: { kind: 'background', id: '*', workspace: f.root, principal: 'owner' }, actions: ['execute'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
+    ] })
+  const restoredAutomations = new AssistantAutomationsService(restored, { databasePath: join(f.root, 'automations.sqlite'),
+    runsPath: join(f.root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0 })
+  const restarted = new PluginControlPlaneService(restored, f.config)
+  await vi.waitFor(() => expect(restarted.inspectCreatedCapabilityRevisionCandidate(planId)).toEqual(candidate))
+  expect(restarted.inspectCreatedCapabilitySource(f.parentPlanId)).toEqual(f.archive)
+  expect(restarted.inspectCreatedCapability(planId)).toBeUndefined()
+  expect(restored.tools.get(alias)).toBeUndefined()
+  await restoredAutomations.tick(); await restoredAutomations.whenIdle()
+  expect(f.revisionVerification).toHaveBeenCalledOnce()
+  expect(readParentReceipt()).toBe(parentReceipt)
+  f.owner.generation += 1; f.owner.bindingVersion += 1
+  expect(restarted.inspectCreatedCapabilityRevisionCandidate(planId)).toEqual(candidate)
+  f.owner.principalVersion += 1
+  expect(restarted.inspectCreatedCapabilityRevisionCandidate(planId)).toBeUndefined()
+}, 60_000)
+
+it.each(['expired', 'parent', 'model', 'authority', 'new-task', 'quota'] as const)('revision %s fails before native dispatch without spending old creation or adoption grants', async fault => {
+  const f = await revisionFixture()
+  const parentReceipt = f.service.inspectCreatedCapability(f.parentPlanId)
+  const beforeBuilds = vi.mocked(build.runDockerPreparedChecks).mock.calls.length
+  let request = f.revisionRequest
+  if (fault === 'expired') f.advance(601_000)
+  if (fault === 'parent') request = { ...request, parentPlanId: 'missing-parent' }
+  if (fault === 'model') request = { ...request, growthRun: { ...request.growthRun, model: { provider: 'other', model: 'other' } } }
+  if (fault === 'authority') request = { ...request, growthRun: { ...request.growthRun,
+    revisionAcceptance: { ...f.revisionAuthority, authorityDigest: '0'.repeat(64) } } }
+  if (fault === 'new-task') f.setLaterSource({ ...f.next, source: { ...f.next.source, objective: 'corrected task' } })
+  if (fault === 'quota') {
+    await f.service.enqueueSourceJob(request)
+    request = { ...request, idempotencyKey: 'second-revision' }
+  }
+  await expect(f.service.enqueueSourceJob(request)).rejects.toThrow()
+  expect(vi.mocked(build.runDockerPreparedChecks).mock.calls.length).toBe(beforeBuilds)
+  expect(f.revisionVerification).not.toHaveBeenCalled()
+  expect(f.service.inspectCreatedCapability(f.parentPlanId)).toEqual(parentReceipt)
+  const db = new DatabaseSync(join(f.config.statePath, 'control.sqlite'))
+  try {
+    expect(db.prepare('SELECT creates FROM source_creation_grants').get()?.creates).toBe(1)
+    expect(db.prepare('SELECT COUNT(*) AS n FROM source_jobs WHERE json_extract(intent_json,\'$.mode\')=\'revise-created\'').get()?.n).toBe(fault === 'quota' ? 1 : 0)
+    expect(db.prepare('SELECT SUM(revisions) AS n FROM source_revision_grants').get()?.n ?? 0).toBe(fault === 'quota' ? 1 : 0)
+  } finally { db.close() }
+}, 60_000)
+
+it.each(['parent', 'new-task', 'unknown', 'source-insert'] as const)('revision %s rejection retains its no-replay claim and never creates an execution receipt', async fault => {
+  const f = await revisionFixture()
+  f.revisionVerification.mockImplementation(async request => {
+    if (fault === 'unknown') return { status: 'unknown', reason: 'case-observation-unknown' }
+    const certificate = signedRevisionCertificate(f, request.planId, fault === 'parent'
+      ? body => { body.parent = { ...body.parent, sourceDigest: '0'.repeat(64) } } : undefined)
+    if (fault === 'new-task') f.setLaterSource({ ...f.next, source: { ...f.next.source, objective: 'new task corrected during verification' } })
+    if (fault === 'source-insert') {
+      const db = new DatabaseSync(join(f.config.statePath, 'control.sqlite'))
+      try { db.exec("CREATE TRIGGER reject_revision_source BEFORE INSERT ON source_revision_sources BEGIN SELECT RAISE(ABORT,'injected source failure'); END") }
+      finally { db.close() }
+    }
+    return { status: 'verified', certificate }
+  })
+  const queued = await f.service.enqueueSourceJob(f.revisionRequest)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const planId = f.store.getSourceJob(queued.id)!.planId!
+  expect(f.store.getRevisionVerificationStatus(planId)).toBe(fault === 'new-task' ? 'claimed' : 'unknown')
+  expect(f.store.getRevisionVerification(planId)).toBeUndefined()
+  expect(f.service.inspectCreatedCapabilityRevisionCandidate(planId)).toBeUndefined()
+  expect(f.service.inspectCreatedCapability(planId)).toBeUndefined()
+  f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
+  expect(f.revisionVerification).toHaveBeenCalledOnce()
+}, 60_000)
