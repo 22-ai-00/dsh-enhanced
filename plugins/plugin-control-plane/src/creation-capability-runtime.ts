@@ -416,6 +416,13 @@ export class CreationCapabilityRuntime {
     return this.journal.listCallEvidence?.(planId) ?? []
   }
 
+  /** A bounded read snapshot; callers must subsequently fence current source and task heads. */
+  inspectAssociationEvidence(planId: string): { record: CreationCapabilityRecord;
+    calls: readonly CreationCapabilityCallEvidence[] } | undefined {
+    const record = this.journal.inspect(planId)
+    return record?.receipt ? { record, calls: this.inspectCallEvidence(planId) } : undefined
+  }
+
   close(): Promise<void> {
     if (this.closeTask) return this.closeTask
     this.admission = false; this.closed = true

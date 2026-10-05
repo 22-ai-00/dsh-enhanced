@@ -96,14 +96,25 @@ async function fixture(withVerification = false, withAdoption = false, withReten
     judgement: 'independent-verifier', source: { sessionId: 'session', inboxId: 'inbox', objective: 'ordinary failed task',
       quiescent: true, truncated: false, modelSelectionState: 'frozen', modelSelection: { provider: 'supplier', model: 'task-model', reasoningEffort: 'high' } } }
   let activeSource: OwnerForegroundLearningTask = source
+  let laterSource: OwnerForegroundLearningTask | undefined
   const taskChangeListeners = new Set<() => void>()
   const foregroundCall = vi.fn<() => ForegroundToolCallAttestation | undefined>(() => undefined)
   const deliveryPorts = { validateOwnerRoute: () => structuredClone(owner),
     validateOwnerAgentForRoute: (agent: { owner?: typeof owner }) => agent.owner ? structuredClone(agent.owner) : undefined,
     inspectOwnerForegroundToolCall: foregroundCall,
-    inspectOwnerForegroundLearningTask: () =>
-      isSourceOwnerContinuation(owner, activeSource.owner) ? structuredClone(activeSource) : undefined }
+    inspectOwnerForegroundLearningTask: (input: { outcomeId: string }) => {
+      const selected = input.outcomeId === laterSource?.canonical.triggerOutcomeId ? laterSource : activeSource
+      return isSourceOwnerContinuation(owner, selected.owner) ? structuredClone(selected) : undefined
+    },
+    inspectOwnerForegroundTaskSource: (input: { inboxId: string }) => input.inboxId === laterSource?.source.inboxId
+      ? { authorityId: owner.authorityId, authorityHash: owner.authorityHash, principalId: owner.principalId,
+        owner: { principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion },
+        binding: { id: 'next-binding', version: laterSource.owner.bindingVersion,
+          generation: laterSource.owner.generation, sessionId: laterSource.source.sessionId } } : undefined }
   const evaluationPorts = { canonicalHostScope: (input: unknown) => input,
+    getTrustedForegroundLearningProjection: (input: { inboxId: string }) =>
+      input.inboxId === laterSource?.source.inboxId ? structuredClone(laterSource.canonical)
+        : input.inboxId === activeSource.source.inboxId ? structuredClone(activeSource.canonical) : undefined,
     withTrustedCanonicalTaskWriterFence: (_input: unknown, callback: () => unknown) => ({ matched: true, value: callback() }),
     onTrustedTaskChange: (listener: () => void) => { taskChangeListeners.add(listener); return () => { taskChangeListeners.delete(listener) } } }
   ctx.provide('assistantDelivery' as never, deliveryPorts)
@@ -168,6 +179,7 @@ async function fixture(withVerification = false, withAdoption = false, withReten
   return { root, repository, git, ctx, config, capability, service, automations, policy, store, source, owner,
     deliveryPorts, evaluationPorts, foregroundCall, publicKey, verification, request, checked, growthRun, inspectGrowthRun,
     unregisterGrowthRun, authority, signing, setSource: (next: OwnerForegroundLearningTask) => { activeSource = next },
+    setLaterSource: (next: OwnerForegroundLearningTask) => { laterSource = next },
     notifyTaskChange: () => { for (const listener of taskChangeListeners) listener() },
     taskChangeListenerCount: () => taskChangeListeners.size,
     advance: (milliseconds = 1_100) => { now += milliseconds } }
@@ -293,6 +305,16 @@ it.each(['correction', 'withdrawal'] as const)(
     expect(adoption()).toEqual({ ...adoptedBefore, calls: 1 })
     expect(f.service.inspectCreatedCapability(planId)).toEqual(adopted)
     const nextSession = { ...valid, callId: 'second-call', agent: { session: { id: 'session-2' }, owner: { ...f.owner } } } as unknown as ToolRunContext
+    f.advance(1)
+    // Delivery/Evaluation are fixture peers here; the Control Plane, Git source,
+    // signed certificate and adoption/call journals are real in this test.
+    f.setLaterSource({ ...f.source, owner: { ...f.owner },
+      canonical: { ...f.source.canonical, scopeWatermark: 2, triggerOutcomeId: 'later-feedback',
+        objective: { ...f.source.canonical.objective!, outcomeId: 'later-feedback', status: 'achieved' },
+        projection: { ...f.source.canonical.projection, subjectRef: 'subsequent-inbox',
+          digest: '7'.repeat(64) } },
+      source: { ...f.source.source, inboxId: 'subsequent-inbox', sessionId: 'session-2',
+        objective: 'later ordinary task succeeded' } })
     // Contract wiring only: Delivery's real Agent/event proof is tested in its own suite.
     f.foregroundCall.mockReturnValue({ protocol: 'assistant-delivery/foreground-tool-call/v1',
       task: { protocol: 'assistant-delivery/foreground-task/v1', inboxId: 'subsequent-inbox', sessionId: 'session-2',
@@ -308,6 +330,15 @@ it.each(['correction', 'withdrawal'] as const)(
       foreground: expect.objectContaining({ task: expect.objectContaining({ inboxId: 'subsequent-inbox' }) }) }))
     expect(JSON.stringify(callEvidence)).not.toContain('hello-again')
     expect(JSON.stringify(callEvidence)).not.toContain('answer')
+    const association = f.service.inspectCreatedCapabilityTaskAssociations(planId)
+    expect(association).toMatchObject([{ planId, inboxId: 'subsequent-inbox', sessionId: 'session-2',
+      callKeys: [callEvidence.find(item => item.attribution === 'foreground')!.key],
+      adoptionStatus: 'active', withinSignedUseWindow: true,
+      artifactSha256: f.checked.evidence.pack.sha256, schemaDigest: candidateSchemaDigest,
+      task: { projection: { subjectRef: 'subsequent-inbox', disposition: 'upsert' },
+        judgement: 'independent-verifier', status: 'achieved' } }])
+    expect(association).toHaveLength(1)
+    expect(JSON.stringify(association)).not.toMatch(/later ordinary task succeeded|hello-again|answer/)
     expect(adoption()).toEqual({ ...adoptedBefore, calls: 2 })
     expect(runnerRun).toHaveBeenCalledTimes(3)
     f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
@@ -319,6 +350,7 @@ it.each(['correction', 'withdrawal'] as const)(
       ? { ...f.source, source: { ...f.source.source, objective: 'owner corrected the original task' } }
       : { ...f.source, canonical: { ...f.source.canonical,
         projection: { ...f.source.canonical.projection, disposition: 'retract' } } })
+    expect(f.service.inspectCreatedCapabilityTaskAssociations(planId)).toEqual([])
     await expect(tool.execute({ query: 'after-change' }, { ...valid, callId: 'changed-call' } as ToolRunContext)).rejects.toThrow()
     const reconcile = vi.spyOn(CreationCapabilityRuntime.prototype, 'reconcile')
     f.notifyTaskChange()

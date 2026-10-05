@@ -373,6 +373,10 @@ Host 用真实 Cordis Fiber 动态注册受控 `evolved_<插件名>_<plan hash>_
 
 新调用在 claim 事务中保存冻结工具别名与可选的 Delivery 原生前台调用证明。Host-only `inspectCreatedCapabilityCalls(planId)` 返回有界的采用回执、制品和 schema 摘要、原始工具名、调用状态及具体 Inbox/turn/事件证明，不返回参数或结果。只有准确 owner/Session/工具/参数匹配的证明才标记 `foreground`；无证明的新调用为 `unattributed`。调用账本 schema v2 为旧行保留空证据列，标记 `legacy-unattributed`，不按不可逆 call key 猜测任务或补写历史；额度、缓存与 unknown 状态保留。旧 controller 不支持 schema v2 时会拒绝打开；不能靠删除或回退账本重置额度或重放 unknown。已有前台证明的同 key 重试须提供完全相同的证明，缺失证明或指向不同 Inbox/事件均拒绝，不能回读另一任务的结果；旧行仍保留原缓存语义且不获归因。`foreground` 证明调用尝试所属的真实任务；仍须区分 `completed` 和 `unknown`，后者不能证明候选代码已执行或完成。尚未据此自动判断质量、因果收益、成本或晋升；后续收益须联接认证 canonical 任务修订并按任务去重。
 
+Host-only `inspectCreatedCapabilityTaskAssociations(planId)` 将精确采用版本的 `completed` 前台调用关联到后续 Inbox 的当前认证 canonical 结果。它排除原创建任务、unknown、旧记录和无前台证明的调用；同一 plan/Inbox 合并调用 key，不推断不同 Inbox 是同一语义任务。关联同时复验历史证书、冻结来源、当前 owner/会话绑定及 Delivery 的真实任务证据，并在 Evaluation writer fence 内重读原任务和后续任务；更正更新结果版本，撤回、来源漂移或 owner 换代使关联失效。查询返回摘要和认证 `achieved`/`not-achieved` 判断，不返回任务文本、参数或结果，不创建第二份结果账本。
+
+关联是查询时刻的只读快照，后续采用或晋升决策仍须重新取得当前认证证据；它不能证明因果收益、成本或延迟改善。`adoptionStatus` 是账本状态，`withinSignedUseWindow` 只比较原签名期限，不能代替当前挂载、owner 和剩余额度校验。在运行时成功启动的前提下，终止或过期版本及重启后的历史调用仍可关联当前反馈，不重新激活入口或恢复额度；运行时不可用或来源无法复验时返回空；空结果不能解释为负面收益或撤权决定。
+
 同一主人 `/new` 后的新任务可在使用授权截止前调用已有入口。任务来源保留原执行绑定，源码作业、Growth run、验收与采用凭证的完整摘要不改写；当前 route 必须仍属于同一主人记录、版本和授权，且会话代次不能倒退。已采用 v2 版本在单个创建作业、计划 TTL、Growth run 和证书到期后，仍可在原使用授权期限内，从冻结的签名 journal 和 Store 计划/作业/来源核对历史证据，并继续检查当前主人和 canonical 纠正/撤回；即使原准备制品被 GC，也只执行 journal 中冻结的包。切换 Session 不续期、不补充额度、不重新派发 unknown，也不授予版本替换权限。
 
 Evaluation 纠正/撤回通知自动重验并卸载对应入口；到期、来源漂移也关闭该版本，其他 Host 插件保留。旧 v1 模式的源码 producer 暂缺时只暂停入口，恢复原来源后可重新挂同一凭证。v2 已采用版本不依赖过期的原 Growth producer；其历史验签时间固定为采用时刻，不可用于首次采用或新签收据。源计划可以按原规则从 `pending-approval` 过期并清理原制品；旧修改审批、PR、npm 发布和整 profile 采用门不变。Host-only `inspectCreatedCapability(planId)` 返回采用状态和别名。动态卸载是本能力的撤销路径，真实后续收益、版本替换回退和普通使用部署仍属完整目标的下一次验收。
