@@ -177,7 +177,9 @@ gap 的 `capability` 是问题分类，不是现有 `plugin_name`。任务证据
 
 只有**新的、当前仍有效的普通认证失败任务**可进入此轨。Agent 先读取该任务专属的当前 gap，再用 `plugin_source_revision_targets({})` 查看 Host 提供的至多 64 个同 owner 已采用父版本线索 `{parentPlanId, name, parentSourceDigest}`。线索不证明根因。模型只能从该清单选父计划和插件名，再调用 `plugin_source_revision_inspect({parent_plan_id, plugin_name, paths})` 读取父版本冻结的 staged 归档源码；`paths: []` 返回完整清单。路径仅限 `README.md` 与直接位于 `src/`、`tests/` 的代码文件。替换既有文件前必须先读正文，随后以 `plugin_source_revise({parent_plan_id, plugin_name, files: [{path, content}]})` 排队；该工具不接收 `gap_id`、仓库、基线、授权、模型、预算、期限或验收政策。Host 重新核对父归档、当前任务、owner、源码基线和权限。任务纠正、撤回或来源漂移会阻止旧上下文继续提交。
 
-修订与创建、修改共用本轮 `maxPlansPerWake`、模型/工具调用和字节上限，不增加 Agent 循环。首次作者模型请求前，Growth 把**这次新任务**的实际 supplier、预算、任务修订、工具/执行摘要与 `revisionAcceptance` 固定到 source-run；恢复时引用必须仍相同且有效。它可以与独立的 `creationAcceptance` 同时存在，但创建授权、旧任务和旧创建额度都不能替代修订授权。排队仅返回 `revise-created` 作业的无内容状态；后续独立验收最多形成 `prepared-revise` / `pending-approval` 候选及修订凭证，见 [Verifier](../assistant-verifier/README.md#已采用插件的新任务修订验收)。本阶段不授予候选执行、替换当前版本或扩大旧创建采用额度；旧行为回归覆盖、版本切换/回滚和后续真实任务收益尚需分别验证。
+修订与创建、修改共用本轮 `maxPlansPerWake`、模型/工具调用和字节上限，不增加 Agent 循环。首次作者模型请求前，Growth 把**这次新任务**的实际 supplier、预算、任务修订、工具/执行摘要与 `revisionAcceptance` 固定到 source-run；可选回归授权已配置且 provider 提供当前引用时，同步冻结独立的 `revisionRegressionAcceptance`。恢复和后续 Host 读取要求已冻结引用仍与当前政策的规范摘要一致且未过期；政策变化会拒绝旧 run，不会补写新引用。它可以与独立的 `creationAcceptance` 同时存在，但创建授权、旧任务和旧创建额度都不能替代修订或回归授权。旧 provider 未提供回归引用、或历史 run 没有冻结该字段时，原有 `prepared-revise` / `pending-approval` 候选仍只是原候选，不能追认回归证书或因新增配置取得回归资格。
+
+排队仅返回 `revise-created` 作业的无内容状态；后续独立验收最多形成 `prepared-revise` / `pending-approval` 候选及修订凭证。已冻结回归引用的候选可由 Host 调用独立的父保留用例比较并取得回归凭证，见 [Verifier](../assistant-verifier/README.md#已采用插件的新任务修订验收)。这些凭证都不授予候选执行、替换当前版本或扩大旧创建采用额度；版本切换/回滚和后续真实任务收益尚需分别验证。
 
 ## 真实使用自动触发
 

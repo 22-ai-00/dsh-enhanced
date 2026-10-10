@@ -94,6 +94,7 @@ export class SourceJobRuntime {
     approvePrepared?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     inspectRevisionParent?: (planId: string) => { name: string; parent: PluginRevisionParentBinding; source: CreationCapabilitySourceSnapshot; certificate: PluginCreationVerificationCertificate }
     verifyPreparedRevision?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
+    verifyPreparedRevisionRegression?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     verifyPreparedCreation?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     creationAdoptionEligible?: (planId: string) => boolean
     adoptVerifiedCreation?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
@@ -117,7 +118,7 @@ export class SourceJobRuntime {
       execute: input => {
         const job = this.options.store.getSourceJobByAutomation(input.automationId)
         const flight = this.track(this.execute(input))
-        if (job?.intent.creation?.growthRun !== undefined) {
+        if ((job?.intent.creation?.growthRun ?? job?.intent.revision?.growthRun) !== undefined) {
           this.growthFlights.add(flight)
           void flight.then(() => this.growthFlights.delete(flight), () => this.growthFlights.delete(flight))
         }
@@ -211,11 +212,17 @@ export class SourceJobRuntime {
       if (job.intent.mode !== 'revise-created' || !job.intent.revision?.growthRun.revisionAcceptance || !initial.sourceRevision?.growthRun.revisionAcceptance) return
       await assertCurrent()
       if (this.options.store.getRevisionVerificationStatus(planId) === undefined && this.options.verifyPreparedRevision) await this.options.verifyPreparedRevision(job, signal)
+      if (this.options.store.getRevisionVerificationStatus(planId) === 'verified'
+        && this.options.store.getRevisionRegressionStatus(planId) === undefined
+        && job.intent.revision.growthRun.revisionRegressionAcceptance && this.options.verifyPreparedRevisionRegression) {
+        await assertCurrent()
+        await this.options.verifyPreparedRevisionRegression(job, signal)
+      }
       return
     }
     if (initial.mode === 'prepared-create') {
       if (job.intent.mode !== 'create'
-        || !(job.intent.creation?.growthRun ?? job.intent.revision?.growthRun)?.creationAcceptance || !initial.creation?.growthRun?.creationAcceptance) return
+        || !job.intent.creation?.growthRun?.creationAcceptance || !initial.creation?.growthRun?.creationAcceptance) return
       await assertCurrent()
       if (this.options.store.getCreationVerificationStatus(planId) === undefined && this.options.verifyPreparedCreation) {
         await this.options.verifyPreparedCreation(job, signal)
@@ -486,7 +493,7 @@ export class SourceJobRuntime {
         || (terminal !== undefined && terminal.immutableContext.state === 'verified'
           && terminal.immutableContext.definitionHash === job.definitionHash && terminal.createdAt >= job.createdAt)) {
         job = this.withGapSource(job.intent.gapId, job.intent.owner, () => {
-          this.assertGrowthRun(job.intent.creation!.growthRun, job.intent.mode, job.intent.gapId, job.intent.owner, false)
+          this.assertGrowthRun(job.intent.creation?.growthRun ?? job.intent.revision?.growthRun, job.intent.mode, job.intent.gapId, job.intent.owner, false)
           return this.options.store.rearmQueuedGrowthSourceJob({ id: job.id, revision: job.revision,
             priorDefinitionHash: job.definitionHash!, priorDefinitionVersion: health.definitionVersion, dispatchAt: Date.now() + 1000 })
         })
@@ -541,13 +548,13 @@ export class SourceJobRuntime {
   }
 
   private hasContinuations(): boolean {
-    return !!(this.options.approvePrepared || this.options.verifyPreparedRevision || this.options.verifyPreparedCreation || this.options.adoptVerifiedCreation || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased)
+    return !!(this.options.approvePrepared || this.options.verifyPreparedRevisionRegression || this.options.verifyPreparedRevision || this.options.verifyPreparedCreation || this.options.adoptVerifiedCreation || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased)
   }
 
   private continuationJobs(): readonly SourceJobRecord[] {
     if (!this.hasContinuations()) return []
     return this.options.store.listPreparedSourceApprovalJobs(this.options.releasePrepared !== undefined, this.options.advanceReleased !== undefined,
-      this.options.adoptReleased !== undefined, this.options.verifyPreparedCreation !== undefined, this.options.adoptVerifiedCreation !== undefined, this.options.verifyPreparedRevision !== undefined)
+      this.options.adoptReleased !== undefined, this.options.verifyPreparedCreation !== undefined, this.options.adoptVerifiedCreation !== undefined, this.options.verifyPreparedRevision !== undefined, this.options.verifyPreparedRevisionRegression !== undefined)
       .filter(job => this.eligibleContinuation(job))
   }
 
@@ -557,8 +564,12 @@ export class SourceJobRuntime {
     let plan: PluginSourcePlan
     try { plan = this.options.store.getSourcePlan(job.planId) } catch { return false }
     if (plan.mode === 'prepared-revise') {
-      if (job.intent.mode !== 'revise-created' || plan.status !== 'pending-approval' || !plan.sourceRevision?.growthRun.revisionAcceptance
-        || this.options.store.getRevisionVerificationStatus(plan.id) !== undefined || !this.options.verifyPreparedRevision) return false
+      if (job.intent.mode !== 'revise-created' || plan.status !== 'pending-approval' || !plan.sourceRevision?.growthRun.revisionAcceptance) return false
+      const status = this.options.store.getRevisionVerificationStatus(plan.id)
+      const verify = status === undefined && this.options.verifyPreparedRevision !== undefined
+      const regression = status === 'verified' && plan.sourceRevision.growthRun.revisionRegressionAcceptance !== undefined
+        && this.options.store.getRevisionRegressionStatus(plan.id) === undefined && this.options.verifyPreparedRevisionRegression !== undefined
+      if (!verify && !regression) return false
       try { this.assertOwner(job) } catch { return false }
       return plan.expiresAt > Date.now()
     }
@@ -684,7 +695,7 @@ export class SourceJobRuntime {
             const health = this.options.ports.automations.inspectSystemOwned({ owner: SOURCE_JOB_OWNER, automationId: job.automationId })
             if (health.definitionHash !== rebound.definitionHash) throw new Error('source job premature occurrence native binding changed')
             const pending = this.withGapSource(rebound.intent.gapId, rebound.intent.owner, () => {
-              this.assertGrowthRun(rebound.intent.creation?.growthRun, rebound.intent.mode, rebound.intent.gapId, rebound.intent.owner, false)
+              this.assertGrowthRun(rebound.intent.creation?.growthRun ?? rebound.intent.revision?.growthRun, rebound.intent.mode, rebound.intent.gapId, rebound.intent.owner, false)
               return this.options.store.rearmQueuedGrowthSourceJob({ id: rebound.id, revision: rebound.revision,
                 priorDefinitionHash: rebound.definitionHash!, priorDefinitionVersion: health.definitionVersion, dispatchAt: Date.now() + 1000 })
             })

@@ -206,7 +206,7 @@ test('populated v32 ledger upgrades without rewriting old plans, quota, jobs, ar
   } finally { migrated.close() }
   const reopened = openControlPlaneDatabase(path)
   try {
-    expect(version(reopened)).toBe(33)
+    expect(version(reopened)).toBe(controlPlaneSchemaVersion)
     expect(reopened.prepare('SELECT source_json FROM source_revision_sources WHERE plan_id=?').get(planId))
       .toEqual({ source_json: '{"archive":"exact"}' })
     expect(reopened.prepare('SELECT creates FROM source_creation_grants').get()).toEqual({ creates: 1 })
@@ -217,7 +217,7 @@ test('fresh database starts at v33 and v32 unknown table shape fails before a pa
   const freshPath = temporaryPath()
   const fresh = openControlPlaneDatabase(freshPath)
   try {
-    expect(version(fresh)).toBe(33)
+    expect(version(fresh)).toBe(controlPlaneSchemaVersion)
     expect(schema(fresh, 'source_revision_grants')).toContain('max_revisions')
     expect(schema(fresh, 'source_revision_verifications')).toContain('certificate_json')
     expect(schema(fresh, 'source_revision_sources')).toContain('source_json')
@@ -267,7 +267,7 @@ test.each([28, 31, 32])('synthetic v33 version rollback to v%i keeps populated r
   db.close()
   const reopened = openControlPlaneDatabase(path)
   try {
-    expect(version(reopened)).toBe(33)
+    expect(version(reopened)).toBe(controlPlaneSchemaVersion)
     expect(rows(reopened, 'source_jobs')).toEqual(oldJob)
     expect(rows(reopened, 'source_plans')).toEqual(oldPlan)
     expect(reopened.prepare('PRAGMA foreign_key_check').all()).toEqual([])

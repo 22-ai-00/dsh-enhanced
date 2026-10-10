@@ -9,7 +9,7 @@
  * @dsh-enhanced/plugin-control-plane (an optional peer): every field here is a
  * structural subset, so the driver still builds and loads without that package.
  */
-import type { CreationAcceptanceAuthorityRef, RevisionAcceptanceAuthorityRef,
+import type { CreationAcceptanceAuthorityRef, RevisionAcceptanceAuthorityRef, RevisionRegressionAcceptanceAuthorityRef,
   SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 
 /**
@@ -144,6 +144,8 @@ export interface GrowthSourcePlanePort {
   /** Only a new authenticated failed Usage task may use this independent revision lane. */
   getSourceRevisionNamespace?(): Readonly<{ namePrefix: string }> | undefined
   inspectSourceRevisionAcceptanceAuthority?(): RevisionAcceptanceAuthorityRef | undefined
+  /** Host-only optional parent-behavior policy; never exposed as a source tool result. */
+  inspectSourceRevisionRegressionAcceptanceAuthority?(): RevisionRegressionAcceptanceAuthorityRef | undefined
   inspectCreatedCapabilityRevisionTargets?(): readonly GrowthSourceRevisionTarget[]
   inspectRevisionSource?(input: {
     repository: string

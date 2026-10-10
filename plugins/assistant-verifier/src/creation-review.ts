@@ -4,8 +4,9 @@ import { isAbsolute, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { IsolatedVerifierRunnerConfig } from '@dsh-enhanced/assistant-isolation'
 import { canonicalGrowthJson, growthObjectDigest, sourceGrowthEvidenceDigest, sourceGrowthRunDigest, validateCreationAcceptanceAuthorityRef,
+  verifyPluginCreationVerificationCertificate,
   validateSourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationRequest,
-  type PluginCreationVerificationResult } from '@dsh-enhanced/assistant-growth-contract'
+  type PluginCreationVerificationResult, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { CreationReviewStore } from './creation-review-store.js'
 import { runNativeCreationTurn, type CreationModel } from './creation-review-native.js'
 
@@ -192,6 +193,14 @@ export class CreationReviewRuntime {
       || canonicalGrowthJson(input.owner) !== canonicalGrowthJson(config.owner)) return undefined
     const remainingVerifications = this.#store.remaining(config.authorityId, authority.authorityDigest, config.maxVerifications)
     return Object.freeze({ authority, publicKey, remainingVerifications, available: remainingVerifications > 0 })
+  }
+  /** Private runtime handoff of original held-out evidence, never a service or model tool. */
+  readRetainedCases(parent: PluginCreationVerificationCertificate): ReturnType<CreationReviewStore['readRetained']> | undefined {
+    const { authority, publicKey } = this.#compiled
+    if (this.#abort.signal.aborted
+      || !verifyPluginCreationVerificationCertificate(parent, authority, publicKey, parent.verifiedAt)) return undefined
+    const retained = this.#store.readRetained(parent.plan.id)
+    return retained && canonicalGrowthJson(retained.certificate) === canonicalGrowthJson(parent) ? retained : undefined
   }
   run(request: PluginCreationVerificationRequest, external?: AbortSignal): Promise<PluginCreationVerificationResult> {
     if (!request || typeof request !== 'object' || Array.isArray(request)

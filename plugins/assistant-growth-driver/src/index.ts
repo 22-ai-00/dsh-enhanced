@@ -114,6 +114,7 @@ export class AssistantGrowthDriverService extends Service {
           delivery: usageCtx.assistantDelivery, review: input => this.#reviewUsage(input),
           inspectCreationAcceptanceAuthority: () => this.#sourceBinding?.port.inspectSourceCreationAcceptanceAuthority?.(),
           inspectRevisionAcceptanceAuthority: () => this.#sourceBinding?.port.inspectSourceRevisionAcceptanceAuthority?.(),
+          inspectRevisionRegressionAcceptanceAuthority: () => this.#sourceBinding?.port.inspectSourceRevisionRegressionAcceptanceAuthority?.(),
         })
         usageCtx.effect(() => async () => {
           if (this.#usage === usage) this.#usage = undefined
@@ -130,7 +131,7 @@ export class AssistantGrowthDriverService extends Service {
       // when the control plane is absent or is being replaced.
       ctx.inject(['pluginControlPlane' as never], sourceCtx => {
         const abort = new AbortController()
-        type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan' | 'inspectSourceTargets' | 'inspectSource' | 'inspectCreateSource' | 'getSourceCreationNamespace' | 'inspectSourceCreationAcceptanceAuthority' | 'getSourceRevisionNamespace' | 'inspectSourceRevisionAcceptanceAuthority' | 'inspectCreatedCapabilityRevisionTargets' | 'inspectRevisionSource' | 'enqueueSourceJob' | 'inspectSourceJob'> & {
+        type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan' | 'inspectSourceTargets' | 'inspectSource' | 'inspectCreateSource' | 'getSourceCreationNamespace' | 'inspectSourceCreationAcceptanceAuthority' | 'getSourceRevisionNamespace' | 'inspectSourceRevisionAcceptanceAuthority' | 'inspectSourceRevisionRegressionAcceptanceAuthority' | 'inspectCreatedCapabilityRevisionTargets' | 'inspectRevisionSource' | 'enqueueSourceJob' | 'inspectSourceJob'> & {
           gaps(limit: number): readonly GrowthSourceGap[]
           recordOwnerTaskFailureGap?: (source: OwnerForegroundLearningTask) => GrowthSourceGap
           canPrepareSource?: () => boolean
@@ -221,6 +222,7 @@ export class AssistantGrowthDriverService extends Service {
                 return namespace === undefined ? undefined : { namePrefix: namespace.namePrefix }
               },
               inspectSourceRevisionAcceptanceAuthority: () => current().inspectSourceRevisionAcceptanceAuthority?.(),
+              inspectSourceRevisionRegressionAcceptanceAuthority: () => current().inspectSourceRevisionRegressionAcceptanceAuthority?.(),
               inspectCreatedCapabilityRevisionTargets: () => {
                 const live = current()
                 if (typeof live.inspectCreatedCapabilityRevisionTargets !== 'function') throw new Error('control plane revision targets unavailable')
@@ -442,6 +444,7 @@ export class AssistantGrowthDriverService extends Service {
         if (!source.taskRevisionReady()) {
           delete taskPort.getSourceRevisionNamespace
           delete taskPort.inspectSourceRevisionAcceptanceAuthority
+          delete taskPort.inspectSourceRevisionRegressionAcceptanceAuthority
           delete taskPort.inspectCreatedCapabilityRevisionTargets
           delete taskPort.inspectRevisionSource
         }

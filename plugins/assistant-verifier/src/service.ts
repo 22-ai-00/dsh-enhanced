@@ -17,11 +17,14 @@ import { MemoryReviewRuntime, validateMemoryReviewConfig } from './memory-review
 import type { MemoryReviewConfig, MemoryReviewAvailability } from './memory-review.js'
 import type { MemoryLearningOwner, MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
 import type { PluginCreationVerificationRequest, PluginCreationVerificationResult,
-  PluginRevisionVerificationRequest, PluginRevisionVerificationResult } from '@dsh-enhanced/assistant-growth-contract'
+  PluginRevisionVerificationRequest, PluginRevisionVerificationResult,
+  PluginRevisionRegressionRequest, PluginRevisionRegressionResult } from '@dsh-enhanced/assistant-growth-contract'
 import { CreationReviewRuntime, validateCreationReviewConfig } from './creation-review.js'
 import type { CreationReviewConfig, CreationReviewAuthorityInspection } from './creation-review.js'
 import { RevisionReviewRuntime, validateRevisionReviewConfig } from './revision-review.js'
 import type { RevisionReviewConfig, RevisionReviewAuthorityInspection } from './revision-review.js'
+import { RevisionRegressionReviewRuntime, validateRevisionRegressionReviewConfig } from './revision-regression-review.js'
+import type { RevisionRegressionReviewConfig, RevisionRegressionReviewAuthorityInspection } from './revision-regression-review.js'
 
 export { Config } from './config.js'
 
@@ -150,6 +153,8 @@ export class AssistantVerifierService extends Service<Config> {
   readonly #creationReviewers = new Set<CreationReviewRuntime>()
   #revisionReviewer: RevisionReviewRuntime | undefined
   readonly #revisionReviewers = new Set<RevisionReviewRuntime>()
+  #revisionRegressionReviewer: RevisionRegressionReviewRuntime | undefined
+  readonly #revisionRegressionReviewers = new Set<RevisionRegressionReviewRuntime>()
 
   constructor(ctx: Context, config: Config, options: { now?: () => number } = {}) {
     super(ctx, 'assistantVerifier')
@@ -158,6 +163,8 @@ export class AssistantVerifierService extends Service<Config> {
     const memoryReviews = normalized.memoryReviews === undefined ? undefined : validateMemoryReviewConfig(normalized.memoryReviews)
     const creationReviews = normalized.creationReviews === undefined ? undefined : validateCreationReviewConfig(normalized.creationReviews)
     const revisionReviews = normalized.revisionReviews === undefined ? undefined : validateRevisionReviewConfig(normalized.revisionReviews)
+    const revisionRegressions = normalized.revisionRegressions === undefined ? undefined
+      : validateRevisionRegressionReviewConfig(normalized.revisionRegressions)
     this.#memoryReviewConfig = memoryReviews
     this.#compiled = compileAcceptanceProfiles(normalized)
     this.#now = options.now ?? Date.now
@@ -184,7 +191,7 @@ export class AssistantVerifierService extends Service<Config> {
       this.#evaluation = undefined
       // Abort both review lanes before awaiting unrelated acceptance teardown.
       const reviews = [...this.#sourceReviewers, ...this.#memoryReviewers, ...this.#creationReviewers,
-        ...this.#revisionReviewers].map(reviewer => reviewer.close())
+        ...this.#revisionReviewers, ...this.#revisionRegressionReviewers].map(reviewer => reviewer.close())
       await this.#running?.catch(() => {})
       await Promise.allSettled([...this.#isolatedRunners.values()].map(async runner => (await runner).close()))
       await Promise.allSettled(reviews)
@@ -234,6 +241,18 @@ export class AssistantVerifierService extends Service<Config> {
         }
       }, 'assistant-verifier.revision-review')
     })
+    if (revisionRegressions) ctx.inject(['pluginControlPlane' as never], injected => {
+      injected.effect(() => {
+        if (!this.#active) return () => {}
+        const reviewer = new RevisionRegressionReviewRuntime(injected, revisionRegressions, normalized.databasePath,
+          parent => this.#creationReviewer?.readRetainedCases(parent))
+        this.#revisionRegressionReviewer = reviewer; this.#revisionRegressionReviewers.add(reviewer)
+        return async () => {
+          if (this.#revisionRegressionReviewer === reviewer) this.#revisionRegressionReviewer = undefined
+          await reviewer.close(); this.#revisionRegressionReviewers.delete(reviewer)
+        }
+      }, 'assistant-verifier.revision-regression-review')
+    })
   }
 
   /** Frozen public acceptance authority; unavailable until the private Host peers are active. */
@@ -259,6 +278,18 @@ export class AssistantVerifierService extends Service<Config> {
   verifyPluginRevision = (request: PluginRevisionVerificationRequest, signal?: AbortSignal): Promise<PluginRevisionVerificationResult> => {
     this.#assertActive()
     return this.#revisionReviewer?.run(request, signal)
+      ?? Promise.resolve({ status: 'unknown', reason: 'verification-unavailable' })
+  }
+
+  /** Host-only parent behavior regression; no candidate execution or version switch authority. */
+  inspectRevisionRegressionAcceptanceAuthority = (input: { owner: RevisionRegressionReviewConfig['owner'] }): RevisionRegressionReviewAuthorityInspection | undefined => {
+    this.#assertActive()
+    return this.#revisionRegressionReviewer?.inspect(input)
+  }
+
+  verifyPluginRevisionRegression = (request: PluginRevisionRegressionRequest, signal?: AbortSignal): Promise<PluginRevisionRegressionResult> => {
+    this.#assertActive()
+    return this.#revisionRegressionReviewer?.run(request, signal)
       ?? Promise.resolve({ status: 'unknown', reason: 'verification-unavailable' })
   }
 

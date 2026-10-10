@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { assertExactGrowthKeys, isGrowthRecord } from './canonical.js'
 import { validateCreationAcceptanceAuthorityRef, type CreationAcceptanceAuthorityRef } from './creation-verification.js'
 import { validateRevisionAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef } from './revision-verification.js'
+import { validateRevisionRegressionAcceptanceAuthorityRef, type RevisionRegressionAcceptanceAuthorityRef } from './revision-regression.js'
 
 /** Private Host provenance, never candidate input or a semantic acceptance oracle. */
 export interface SourceGrowthRunBinding {
@@ -28,6 +29,8 @@ export interface SourceGrowthRunBinding {
   creationAcceptance?: CreationAcceptanceAuthorityRef
   /** Independent owner policy for revising an adopted version; absent on historical runs. */
   revisionAcceptance?: RevisionAcceptanceAuthorityRef
+  /** Independent parent-behavior policy; absent on historical runs and never inferred from revisionAcceptance. */
+  revisionRegressionAcceptance?: RevisionRegressionAcceptanceAuthorityRef
   budget: {
     budgetId: string
     amount: number
@@ -88,7 +91,8 @@ export function validateSourceGrowthRunBinding(value: unknown): asserts value is
     'model', 'modelOrigin', 'budget', 'native', 'sessionId', 'toolContractDigest', 'executionContractDigest',
     'createdAt', 'generationDeadlineAt', 'expiresAt',
     ...(isGrowthRecord(value) && Object.hasOwn(value, 'creationAcceptance') ? ['creationAcceptance'] : []),
-    ...(isGrowthRecord(value) && Object.hasOwn(value, 'revisionAcceptance') ? ['revisionAcceptance'] : [])], 'binding')
+    ...(isGrowthRecord(value) && Object.hasOwn(value, 'revisionAcceptance') ? ['revisionAcceptance'] : []),
+    ...(isGrowthRecord(value) && Object.hasOwn(value, 'revisionRegressionAcceptance') ? ['revisionRegressionAcceptance'] : [])], 'binding')
   if (binding['protocol'] !== 'assistant-growth/source-run/v1') invalid('protocol')
   for (const key of ['runId', 'sessionId']) text(binding[key], key)
   for (const key of ['intentDigest', 'configDigest', 'ownerDigest', 'toolContractDigest', 'executionContractDigest']) hash(binding[key], key)
@@ -132,6 +136,10 @@ export function validateSourceGrowthRunBinding(value: unknown): asserts value is
   if (Object.hasOwn(binding, 'revisionAcceptance')) {
     validateRevisionAcceptanceAuthorityRef(binding['revisionAcceptance'])
     if ((binding['revisionAcceptance'] as RevisionAcceptanceAuthorityRef).expiresAt < Number(binding['createdAt'])) invalid('revision acceptance expiry')
+  }
+  if (Object.hasOwn(binding, 'revisionRegressionAcceptance')) {
+    validateRevisionRegressionAcceptanceAuthorityRef(binding['revisionRegressionAcceptance'])
+    if ((binding['revisionRegressionAcceptance'] as RevisionRegressionAcceptanceAuthorityRef).expiresAt < Number(binding['createdAt'])) invalid('revision regression acceptance expiry')
   }
 }
 

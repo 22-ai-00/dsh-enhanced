@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { validateCreationAcceptanceAuthorityRef, validateRevisionAcceptanceAuthorityRef,
-  type RevisionAcceptanceAuthorityRef, type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+  validateRevisionRegressionAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef,
+  type RevisionRegressionAcceptanceAuthorityRef, type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -177,7 +178,7 @@ export interface GrowthAgentInput {
   /** Actual task context is data, never authority or independent success proof. */
   feedback?: import('@dsh-enhanced/assistant-delivery').OwnerForegroundLearningTask
   /** Host-only callback after the real Agent realm, model, tools and guards are pinned. */
-  onSourceExecution?: (input: Pick<SourceGrowthRunBinding, 'model' | 'sessionId' | 'toolContractDigest' | 'executionContractDigest' | 'createdAt' | 'generationDeadlineAt' | 'creationAcceptance' | 'revisionAcceptance'>) => void | Promise<void>
+  onSourceExecution?: (input: Pick<SourceGrowthRunBinding, 'model' | 'sessionId' | 'toolContractDigest' | 'executionContractDigest' | 'createdAt' | 'generationDeadlineAt' | 'creationAcceptance' | 'revisionAcceptance' | 'revisionRegressionAcceptance'>) => void | Promise<void>
   /** Durable source expiry can shorten, but never extend, the Agent deadline. */
   generationDeadlineAt?: number
 }
@@ -232,6 +233,7 @@ function registerGrowthTools(
   creationNamespace: string | undefined,
   revisionNamespace: string | undefined,
   revisionAuthority: RevisionAcceptanceAuthorityRef | undefined,
+  revisionRegressionAuthority: RevisionRegressionAcceptanceAuthorityRef | undefined,
   sourceCounters: { queued: number; prepared: number; rejected: number },
   signal: AbortSignal,
 ): void {
@@ -363,6 +365,14 @@ function registerGrowthTools(
       validateRevisionAcceptanceAuthorityRef(liveRef)
       if (liveRef.expiresAt <= Date.now() || acceptanceDigest(liveRef) !== acceptanceDigest(revisionAuthority)) {
         throw new Error('source revision authority changed or expired')
+      }
+      if (revisionRegressionAuthority !== undefined) {
+        const regression = sourcePlane.inspectSourceRevisionRegressionAcceptanceAuthority?.()
+        validateRevisionRegressionAcceptanceAuthorityRef(regression)
+        if (regression.namePrefix !== revisionNamespace || regression.expiresAt <= Date.now()
+          || acceptanceDigest(regression) !== acceptanceDigest(revisionRegressionAuthority)) {
+          throw new Error('source revision regression authority changed or expired')
+        }
       }
     }
     const assertRevisionTarget = (parentPlanId: string, name: string): string => {
@@ -858,6 +868,7 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
   const failedSourceReview = sourcePlane !== undefined && input.feedback?.canonical.objective?.status === 'not-achieved'
   let revisionNamespace: string | undefined
   let revisionAuthority: RevisionAcceptanceAuthorityRef | undefined
+  let revisionRegressionAuthority: RevisionRegressionAcceptanceAuthorityRef | undefined
   if (failedSourceReview && input.onSourceExecution !== undefined && sourcePlane !== undefined
     && config.pluginSourceProposals.allowRevision && config.pluginSourceProposals.preparationMode === 'durable'
     && typeof sourcePlane.inspectRevisionSource === 'function'
@@ -868,6 +879,14 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
       if (validCreationPrefix(prefix) && ref !== undefined) {
         validateRevisionAcceptanceAuthorityRef(ref)
         if (ref.namePrefix === prefix && ref.expiresAt > Date.now()) {
+          const regression = sourcePlane.inspectSourceRevisionRegressionAcceptanceAuthority?.()
+          if (regression !== undefined) {
+            validateRevisionRegressionAcceptanceAuthorityRef(regression)
+            if (regression.namePrefix !== prefix || regression.expiresAt <= Date.now()) {
+              throw new Error('source revision regression authority invalid')
+            }
+            revisionRegressionAuthority = structuredClone(regression)
+          }
           revisionNamespace = prefix
           revisionAuthority = structuredClone(ref)
         }
@@ -945,6 +964,7 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
         agentCtx.effect(() => installModelSelection(agentCtx, { current: model, assembled: undefined }), 'assistant-growth-driver.model-selection')
 
         registerGrowthTools(agent, input, sourcePlane, creationNamespace, revisionNamespace, revisionAuthority,
+          revisionRegressionAuthority,
           sourceCounters, combined)
 
         // Deliberately NO preset mount: a preset would bring its own tool realm
@@ -1014,10 +1034,19 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
               throw new Error('assistant-growth-driver: revision acceptance authority changed during Agent setup')
             }
           }
+          if (revisionRegressionAuthority !== undefined) {
+            const regression = sourcePlane?.inspectSourceRevisionRegressionAcceptanceAuthority?.()
+            validateRevisionRegressionAcceptanceAuthorityRef(regression)
+            if (regression.namePrefix !== revisionNamespace || regression.expiresAt <= createdAt
+              || acceptanceDigest(regression) !== acceptanceDigest(revisionRegressionAuthority)) {
+              throw new Error('assistant-growth-driver: revision regression acceptance authority changed during Agent setup')
+            }
+          }
           await input.onSourceExecution({
             model, sessionId: String(agent.session.id), toolContractDigest: pinnedDigest,
             ...(creationAcceptance === undefined ? {} : { creationAcceptance: structuredClone(creationAcceptance) }),
             ...(revisionAcceptance === undefined ? {} : { revisionAcceptance: structuredClone(revisionAcceptance) }),
+            ...(revisionRegressionAuthority === undefined ? {} : { revisionRegressionAcceptance: structuredClone(revisionRegressionAuthority) }),
             executionContractDigest: acceptanceDigest({
               protocol: 'assistant-growth/execution-contract/v1',
               prompt: executionPrompt,

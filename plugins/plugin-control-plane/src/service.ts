@@ -13,6 +13,8 @@ import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluat
 import type { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { isSourceOwnerContinuation, sourceGrowthRunDigest, validateCreationAcceptanceAuthorityRef, verifyPluginCreationVerificationCertificate,
   validateRevisionAcceptanceAuthorityRef, verifyPluginRevisionVerificationCertificate, type RevisionAcceptanceAuthorityRef,
+  validateRevisionRegressionAcceptanceAuthorityRef, verifyPluginRevisionRegressionCertificate,
+  type RevisionRegressionAcceptanceAuthorityRef, type PluginRevisionRegressionCertificate, type PluginRevisionRegressionRequest, type PluginRevisionRegressionResult,
   type PluginRevisionVerificationCertificate, type PluginRevisionVerificationRequest, type PluginRevisionVerificationResult,
   validateSourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate,
   type PluginCreationVerificationRequest, type PluginCreationVerificationResult,
@@ -79,6 +81,7 @@ export interface Config {
   creationCapabilities?: CreationCapabilityConfig
   /** A new finite preparation/verification lane, with no execution authority. */
   revisionVerifications?: { authority: RevisionAcceptanceAuthorityRef; publicKey: string }
+  revisionRegressions?: { authority: RevisionRegressionAcceptanceAuthorityRef; publicKey: string }
   /** Optional finite owner authority; only approves prepared task-bound source, never deploys it. */
   sourceApprovals?: SourceApprovalClientConfig
   /** Optional separate finite authority for entering the local release state machine. */
@@ -101,14 +104,17 @@ export interface Config {
   replayEndpoint?: ReplayEndpointConfig
 }
 type RevisionVerifierPort = { verifyPluginRevision(request: PluginRevisionVerificationRequest, signal?: AbortSignal): Promise<PluginRevisionVerificationResult> }
+type RevisionRegressionVerifierPort = {
+  verifyPluginRevisionRegression(request: PluginRevisionRegressionRequest, signal?: AbortSignal): Promise<PluginRevisionRegressionResult>
+}
 type CreationVerifierPort = {
   verifyPluginCreation(request: PluginCreationVerificationRequest, signal?: AbortSignal): Promise<PluginCreationVerificationResult>
 }
 const CREATION_UNKNOWN_CODES = new Set(['schema-observation-unknown', 'case-observation-unknown', 'contract-insufficient',
   'interrupted', 'stale-source', 'verification-unknown', 'previous-unknown'])
 const CREATION_REJECTED_CODES = new Set(['case-mismatch', 'source-review-rejected', 'request-invalid'])
-export type NormalizedControlPlaneConfig = Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'revisionVerifications' | 'creationCapabilities' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>>
-  & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'revisionVerifications' | 'creationCapabilities' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>
+export type NormalizedControlPlaneConfig = Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'revisionVerifications' | 'revisionRegressions' | 'creationCapabilities' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>>
+  & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'revisionVerifications' | 'revisionRegressions' | 'creationCapabilities' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>
 const schema = Schema.object({
   catalogPath: Schema.string().required(), statePath: Schema.string().required(), trustPath: Schema.string().required(),
   proposalTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
@@ -116,6 +122,7 @@ const schema = Schema.object({
   sourceJobs: Schema.any(),
   creationVerifications: Schema.any(),
   revisionVerifications: Schema.any(),
+  revisionRegressions: Schema.any(),
   creationCapabilities: Schema.any(),
   sourceApprovals: Schema.any(),
   sourceReleases: Schema.any(),
@@ -243,6 +250,21 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
       || createPublicKey(creationCapabilityPublicKey(config.creationCapabilities)).export({ format: 'der', type: 'spki' })
         .equals(key.export({ format: 'der', type: 'spki' }))) {
       throw new Error('plugin-control-plane: invalid independent revision verification authority')
+    }
+  }
+  if (config.revisionRegressions !== undefined) {
+    const policy = config.revisionRegressions, jobs = config.sourceJobs, adoption = config.creationCapabilities
+    if (!jobs?.revision || !config.revisionVerifications || !adoption
+      || Object.keys(policy).sort().join(',') !== 'authority,publicKey' || typeof policy.publicKey !== 'string') {
+      throw new Error('plugin-control-plane: regression requires independently configured review and retained parent source')
+    }
+    validateRevisionRegressionAcceptanceAuthorityRef(policy.authority)
+    const key = createPublicKey(policy.publicKey)
+    if (key.asymmetricKeyType !== 'ed25519' || policy.authority.namePrefix !== jobs.revision.namePrefix
+      || policy.authority.expiresAt > Math.min(jobs.expiresAt, jobs.revision.expiresAt, config.revisionVerifications.authority.expiresAt)
+      || createPublicKey(creationCapabilityPublicKey(adoption)).export({ format: 'der', type: 'spki' })
+        .equals(key.export({ format: 'der', type: 'spki' }))) {
+      throw new Error('plugin-control-plane: invalid independent revision regression authority')
     }
   }
   if (config.creationCapabilities !== undefined) {
@@ -502,7 +524,7 @@ export class PluginControlPlaneService extends Service {
     if (this.config.sourceJobs !== undefined) ctx.inject(['assistantAutomations' as never, 'assistantDelivery' as never,
       ...(this.config.sourceApprovals ? ['assistantEvaluation' as never] : []),
       ...(this.config.sourceReleaseExecution?.independentReview ? ['assistantVerifier', 'agents', 'sessions', 'tools', 'llm', 'systemPrompt', 'assistantPolicy'] as never[] : []),
-      ...(this.config.creationVerifications || this.config.revisionVerifications ? ['assistantVerifier' as never] : []),
+      ...(this.config.creationVerifications || this.config.revisionVerifications || this.config.revisionRegressions ? ['assistantVerifier' as never] : []),
       ...(this.config.creationCapabilities ? ['tools', 'assistantEvaluation', 'assistantPolicy'] as never[] : [])], jobsCtx => {
       jobsCtx.effect(async () => {
         this.abort.signal.throwIfAborted()
@@ -610,6 +632,9 @@ export class PluginControlPlaneService extends Service {
           ...(this.config.revisionVerifications ? { inspectRevisionParent: this.inspectRevisionParent,
             verifyPreparedRevision: (job: SourceJobRecord, signal: AbortSignal) => this.verifyPreparedRevision(job, signal,
               () => jobsCtx.get('assistantVerifier' as never) as unknown as RevisionVerifierPort) } : {}),
+          ...(this.config.revisionRegressions ? { verifyPreparedRevisionRegression: (job: SourceJobRecord, signal: AbortSignal) =>
+            this.verifyPreparedRevisionRegression(job, signal,
+              () => jobsCtx.get('assistantVerifier' as never) as unknown as RevisionRegressionVerifierPort) } : {}),
           ...(this.config.creationVerifications ? { verifyPreparedCreation: (job: SourceJobRecord, signal: AbortSignal) =>
             this.verifyPreparedCreation(job, signal, () => jobsCtx.get('assistantVerifier' as never) as unknown as CreationVerifierPort) } : {}),
           ...(capabilities ? { creationAdoptionEligible: (planId: string) => capabilities!.eligible(planId),
@@ -1124,6 +1149,11 @@ export class PluginControlPlaneService extends Service {
       || controlPlaneDigest(expected.revisionAcceptance) !== controlPlaneDigest(this.config.revisionVerifications.authority))) {
       throw new Error('source growth run revision acceptance policy changed or was not pinned before authoring')
     }
+    if ((expected.revisionRegressionAcceptance !== undefined || (this.config.revisionRegressions && expected.revisionAcceptance))
+      && (this.config.revisionRegressions === undefined || expected.revisionRegressionAcceptance === undefined
+        || controlPlaneDigest(expected.revisionRegressionAcceptance) !== controlPlaneDigest(this.config.revisionRegressions.authority))) {
+      throw new Error('source growth run regression policy changed or was not pinned before authoring')
+    }
     if (expected.creationAcceptance !== undefined
       && (policy === undefined || controlPlaneDigest(policy) !== controlPlaneDigest(expected.creationAcceptance))) {
       throw new Error('source growth run creation acceptance policy changed or was not pinned before authoring')
@@ -1298,6 +1328,86 @@ export class PluginControlPlaneService extends Service {
       || Date.now() >= (this.config.sourceJobs?.revision?.expiresAt ?? 0)
       || Date.now() >= (this.config.sourceJobs?.expiresAt ?? 0)) return undefined
     return structuredClone(policy)
+  }
+
+  /** Host-only pre-author reference, separate from candidate verification and execution grants. */
+  inspectSourceRevisionRegressionAcceptanceAuthority = (): RevisionRegressionAcceptanceAuthorityRef | undefined => {
+    const policy = this.config.revisionRegressions?.authority
+    if (!policy) return undefined
+    if (this.abort.signal.aborted || Date.now() >= policy.expiresAt
+      || !this.inspectSourceRevisionAcceptanceAuthority()) {
+      throw new Error('configured revision regression authority unavailable')
+    }
+    return structuredClone(policy)
+  }
+
+  /** Immutable artifacts only. Historical parent permission never grants a new invocation. */
+  inspectPreparedRevisionRegression = (planId: string) => {
+    const prepared = this.inspectPreparedRevision(planId)
+    const certificate = this.inspectVerifiedRevision(planId)
+    const policy = this.inspectSourceRevisionRegressionAcceptanceAuthority()
+    const run = prepared.plan.sourceRevision!.growthRun
+    const source = this.store.readRevisionSource(planId)
+    if (!certificate || !source || !policy || !run.revisionRegressionAcceptance
+      || controlPlaneDigest(run.revisionRegressionAcceptance) !== controlPlaneDigest(policy)) {
+      throw new Error('regression requires fresh independently verified candidate and pre-author policy')
+    }
+    const parent = this.inspectRevisionParent(certificate.parent.planId)
+    const evidence = this.creationCapabilityRuntime?.inspectSourceEvidence(parent.parent.planId)
+    if (!evidence || !evidence.record.receipt
+      || controlPlaneDigest(evidence.archive) !== parent.parent.sourceArchiveDigest
+      || controlPlaneDigest(evidence.record.certificate) !== parent.parent.certificateDigest
+      || createHash('sha256').update(evidence.record.artifact).digest('hex') !== parent.parent.artifactSha256
+      || evidence.record.artifact.length !== parent.certificate.plan.artifactBytes) {
+      throw new Error('regression parent immutable artifact unavailable or changed')
+    }
+    this.inspectRevisionParent(parent.parent.planId)
+    return { protocol: 'dsh-prepared-revision-regression/v1' as const,
+      plan: prepared.plan, job: prepared.job, reference: prepared.reference,
+      candidate: { certificate, artifact: Buffer.from(prepared.artifact), sourceDigest: source.digest },
+      parent: { binding: parent.parent, certificate: parent.certificate, artifact: Buffer.from(evidence.record.artifact) } }
+  }
+
+  withPreparedRevisionRegressionFence = <T>(input: { planId: string; planDigest: string; artifactSha256: string;
+    growthRunDigest: string; referenceDigest: string; parentDigest: string; candidateVerificationDigest: string;
+    sourceDigest: string; regressionAuthorityDigest: string }, callback: () => T): T => {
+    // Resolve read-only snapshots before acquiring Evaluation's non-reentrant
+    // writer transaction; inside it, compare durable data without another fence.
+    const snapshot = this.inspectPreparedRevisionRegression(input.planId)
+    return this.withPreparedRevisionFence(input, () => {
+      const certificate = this.store.getRevisionVerification(input.planId)
+      const source = this.store.readRevisionSource(input.planId)
+      const policy = this.inspectSourceRevisionRegressionAcceptanceAuthority()
+      const candidatePolicy = this.config.revisionVerifications
+      if (!certificate || !source || !policy || !candidatePolicy
+        || !verifyPluginRevisionVerificationCertificate(certificate, candidatePolicy.authority, candidatePolicy.publicKey)
+        || controlPlaneDigest(certificate) !== input.candidateVerificationDigest
+        || controlPlaneDigest(snapshot.candidate.certificate) !== input.candidateVerificationDigest
+        || source.digest !== input.sourceDigest || snapshot.candidate.sourceDigest !== input.sourceDigest
+        || controlPlaneDigest(policy) !== input.regressionAuthorityDigest
+        || controlPlaneDigest(snapshot.plan.sourceRevision!.growthRun.revisionRegressionAcceptance) !== input.regressionAuthorityDigest
+        || controlPlaneDigest(snapshot.parent.binding) !== input.parentDigest) {
+        throw new Error('regression parent, candidate or policy changed')
+      }
+      return callback()
+    })
+  }
+
+  inspectVerifiedRevisionRegression = (planId: string): PluginRevisionRegressionCertificate | undefined => {
+    const certificate = this.store.getRevisionRegression(planId), policy = this.config.revisionRegressions
+    if (!certificate || !policy || !verifyPluginRevisionRegressionCertificate(certificate, policy.authority, policy.publicKey)) return undefined
+    const prepared = this.inspectPreparedRevisionRegression(planId)
+    this.withPreparedRevisionRegressionFence({ planId, planDigest: certificate.plan.digest, artifactSha256: certificate.plan.artifactSha256,
+      growthRunDigest: certificate.source.growthRunDigest, referenceDigest: certificate.source.referenceDigest,
+      parentDigest: controlPlaneDigest(certificate.parent), candidateVerificationDigest: certificate.candidateVerificationDigest,
+      sourceDigest: certificate.sourceDigest, regressionAuthorityDigest: controlPlaneDigest(certificate.authority) }, () => {
+      if (certificate.contractDigest !== prepared.parent.certificate.contractDigest
+        || controlPlaneDigest(certificate.plan) !== controlPlaneDigest(prepared.candidate.certificate.plan)
+        || controlPlaneDigest(certificate.model) !== controlPlaneDigest(prepared.candidate.certificate.model)) {
+        throw new Error('regression result does not match original held-out and exact candidate')
+      }
+    })
+    return structuredClone(certificate)
   }
 
   /** Synchronous Evaluation writer fence for an exact independently reviewed creation. */
@@ -1548,6 +1658,50 @@ export class PluginControlPlaneService extends Service {
           this.store.settleRevisionVerification(job.planId!, 'unknown', 'independent-verification-unsettled')
         }
       }) } catch { /* stale owner/source remains permanently claimed */ }
+      throw error
+    }
+  }
+
+  private async verifyPreparedRevisionRegression(job: SourceJobRecord, signal: AbortSignal,
+    verifier: () => RevisionRegressionVerifierPort): Promise<void> {
+    signal.throwIfAborted()
+    if (!job.planId || !this.config.revisionRegressions || this.store.getRevisionRegressionStatus(job.planId) !== undefined) return
+    const prepared = this.inspectPreparedRevisionRegression(job.planId)
+    if (prepared.job.id !== job.id) throw new Error('regression job is not exact prepared revision')
+    const certificate = prepared.candidate.certificate
+    const binding = { planId: prepared.plan.id, planDigest: prepared.plan.digest, artifactSha256: certificate.plan.artifactSha256,
+      growthRunDigest: certificate.source.growthRunDigest, referenceDigest: certificate.source.referenceDigest,
+      parentDigest: controlPlaneDigest(certificate.parent), candidateVerificationDigest: controlPlaneDigest(certificate),
+      sourceDigest: prepared.candidate.sourceDigest,
+      regressionAuthorityDigest: controlPlaneDigest(prepared.plan.sourceRevision!.growthRun.revisionRegressionAcceptance) }
+    this.withPreparedRevisionRegressionFence(binding, () => this.store.claimRevisionRegression(job.planId!))
+    try {
+      const current = verifier()
+      if (typeof current?.verifyPluginRevisionRegression !== 'function') throw new Error('independent regression verifier unavailable')
+      const result = await current.verifyPluginRevisionRegression({ protocol: 'assistant-growth/revision-regression-request/v1', planId: job.planId }, signal)
+      signal.throwIfAborted()
+      if (result.status === 'verified' && !verifyPluginRevisionRegressionCertificate(result.certificate,
+        this.config.revisionRegressions.authority, this.config.revisionRegressions.publicKey)) {
+        throw new Error('regression signature or independent policy invalid')
+      }
+      if (controlPlaneDigest(await this.boundTrust()) !== job.intent.trustDigest) throw new Error('regression trust changed')
+      await this.inspectPreparedRevisionReviewContext(job.planId, signal)
+      this.withPreparedRevisionRegressionFence(binding, () => {
+        if (result.status === 'verified') {
+          if (!verifyPluginRevisionRegressionCertificate(result.certificate, this.config.revisionRegressions!.authority,
+            this.config.revisionRegressions!.publicKey)) throw new Error('regression certificate expired before settlement')
+          this.store.recordRevisionRegression(result.certificate)
+        }
+        else this.store.settleRevisionRegression(job.planId!, result.status,
+          typeof result.reason === 'string' && /^[a-z][a-z0-9-]{0,79}$/u.test(result.reason)
+            ? result.reason : `independent-regression-${result.status}`)
+      })
+    } catch (error) {
+      try { this.withPreparedRevisionRegressionFence(binding, () => {
+        if (this.store.getRevisionRegressionStatus(job.planId!) === 'claimed') {
+          this.store.settleRevisionRegression(job.planId!, 'unknown', 'independent-regression-unsettled')
+        }
+      }) } catch { /* changed source retains its durable no-replay claim */ }
       throw error
     }
   }

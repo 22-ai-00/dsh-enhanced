@@ -359,6 +359,14 @@ Host 从当前受信任基线生成同名 scaffold，将父归档的候选文件
 
 Host-only `inspectCreatedCapabilityRevisionCandidate(planId)` 验签并核对当前 owner，可在来源更正/撤回、授权和证书到期、制品/worktree 回收及 Host 冷启动后读取历史候选。该候选没有执行回执，不注册工具、不替换父版本、不扩大或续期旧创建/采用额度；后续版本切换须另有有限授权和父版本回归验证。旧配置不会自动获得修订能力，owner 安装器目前不生成这一授权。
 
+### 修订候选的独立父行为回归门
+
+可选 `revisionRegressions: { authority, publicKey }` 使用 Verifier `revisionRegressions` 编译出的专用 `assistant-growth/revision-regression-acceptance-authority/v1` 引用。它要求既有有限修订与独立修订验收配置，命名空间相同、期限不超过这些新授权，验收公钥与采用密钥分离；Growth 在首次作者模型请求前把引用冻结进新任务 run，缺失或改变时不能恢复派发。未配置的新旧 provider 保留仅生成 pending 修订候选的行为，不回填授权。
+
+候选先通过新任务独立验收，再由原生 SourceJobs 接续私有 `verifyPluginRevisionRegression`：Verifier 从旧创建审查账本读取精确签名父证书对应的 held-out cases，不能从候选源码或新模型重新生成。两侧分别在新的有限隔离授权下 discover/invoke，工具名和参数 schema 投影、SDK 环境必须兼容，每个父用例分别比较独立 expected；结果原始摘要无需相同。历史父数据可以过期，但不能把旧创建/采用授权当作执行许可。缺失或篡改私有用例、未知观察、来源更正或写入失败保留独立 claim，不重放。
+
+Host-only `inspectPreparedRevisionRegression` 提供精确父/候选不可变制品；`withPreparedRevisionRegressionFence` 核对当前新任务、model/run、父归档、候选验收、源码与回归引用后同步落账。主账本 schema 34 的 `source_revision_regressions` 独立保存结果，冷启动不重派 settled/claimed 操作；旧计划和额度不改写。`inspectVerifiedRevisionRegression` 只在新窗口与当前来源有效时返回签名证书。成功仍为 `pending-approval`，没有工具、采用收据或版本切换；稳定入口切换与回退必须另外获得有限授权。配置和私有用例读取细节见 [Verifier](../assistant-verifier/README.md)。
+
 ### 新工具插件的有限动态采用
 
 可选 `creationCapabilities` 是一次配置的独立 owner 采用授权，必须与 `sourceJobs.creation`、`creationVerifications` 一起启用。其 owner 的七个稳定字段须匹配实际 Delivery owner 来源，命名空间须一致；采用 Ed25519 私钥与验收器私钥的实际 material 和 key id 均须不同。旧 peer 缺少 live Agent 校验或 Evaluation 变化订阅时拒绝启动此能力。示例中的路径、身份、摘要、期限和镜像须替换为实际授权：
