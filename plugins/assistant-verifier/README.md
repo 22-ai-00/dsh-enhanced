@@ -130,6 +130,14 @@ Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始
 
 验收沿用两个全新的无工具原生模型回合与有界 Docker 行为观察：先依据这次任务和工具结构生成私有用例，不看候选源码；再对实际补丁、已观察用例及父绑定作源码审查。两轮使用这次新任务冻结的 supplier，另受 `revisionReviews` 的独立模型调用、输出和时限预算约束。通过后签发独立 `assistant-growth/revision-verification/v1` Ed25519 凭证，绑定父版本、当前任务、Growth run、精确制品/源码、观察环境与结果；修订签名域与旧创建凭证不互通。验收仅覆盖本次新任务及这些检查，不能推断父版本全部行为已回归通过。结果保留为 `prepared-revise` / `pending-approval` 候选；本阶段不授权执行、替换当前版本、扩大旧创建采用额度或声称版本回滚与后续收益已验证。
 
+`revisionRegressions` 是另一个可选 Host 配置，用于对上述候选做父版本保留用例回归。它需要独立的 `authorityId`、有限额度及 runner 配置，不能由 `revisionReviews` 或 `creationReviews` 自动启用。配置字段为 `authorityId`、`owner`、`namePrefix`、`keyId`、`keyPath`、`expiresAt`、`maxVerifications`、`runner`、`maxDurationMs`、`maxCases`、`receiptTtlMs`；类型是创建验收配置去掉 `policy`、`maxInputBytes`、`maxOutputTokens`，其余字段沿用上表校验。`maxCases` 为 2–8，`runner.maxRuns` 至少为 `maxVerifications * (2 + 2 * maxCases)`，覆盖每次两侧发现及每条用例两侧调用。`compileRevisionRegressionReviewConfig(config)` 返回独立的 `{ authority, publicKey }`，公开引用使用 `assistant-growth/revision-regression-acceptance-authority/v1`；部署时将其配置到 Control Plane 的独立回归授权。旧配置缺少此字段时本轨保持关闭。
+
+Host-only `verifyPluginRevisionRegression({ protocol: 'assistant-growth/revision-regression-request/v1', planId })` 从已签发的新任务修订候选出发。Verifier 只从自身创建验收私有 SQLite 读取父版本当时保存的用例，核对历史创建凭证签名、合同摘要、观察操作及原记录；过期的父凭证可作历史证据，缺失或被改写的记录不能推测恢复。它不读取或扣减旧创建额度，也不向模型或服务调用者暴露私有用例。运行时不用额外模型回合，而是对父制品和候选制品分别做全新的隔离发现与调用，要求完整工具结构和 SDK 环境一致，并将两侧结果各自与原用例期望比较。两侧完整原始结果可不同；任一侧未达到期望即拒绝。`databasePath + '.revision-regressions'` 存储独立 claim、额度及结果；调用不明、取消或私有证据缺失返回 `unknown`，未完成的 claim 在重启后也不自动重放 Docker 调用。
+
+通过后独立签发 `assistant-growth/revision-regression/v1` Ed25519 凭证，绑定父凭证合同摘要、两侧观察、候选验收凭证、精确源码摘要、冻结的新任务 Growth run 与回归 authority。它只证明这些父保留用例在本次两个制品的隔离观察中达到原期望，不授予候选执行、工具版本切换、旧创建额度扩张或回滚权限。
+
+父私有用例必须在首次签发时完整可用；已完成的同一 plan/binding 重试在当前来源围栏与授权窗口内返回原签名凭证，不重新读取用例、派发观察或恢复额度。签发后的私有记录丢失不撤销当时的历史证明，但不能据此为新候选恢复或重建用例。Control Plane 消费签名凭证时核对父凭证及合同摘要，不获得私有用例读取权限。
+
 ## 独立源码审查
 
 `sourceReviews` 是可选 Host 能力，供 Control Plane 的 `sourceReleaseExecution.independentReview` 调用。复用当前 DSH `agents`、`sessions`、`tools`、`llm`、`systemPrompt` 与 `assistantPolicy`，不新增调度器。缺少这些服务时保持未就绪，依赖替换或卸载会取消并等待当前审查。Host 在 PR 前检查精确 owner、插件、模型、目录与剩余额度；已存在的 operation 可进入终态恢复核验。

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import { SourceGrowthRunUnavailableError, type CreationAcceptanceAuthorityRef,
-  type RevisionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
+  type RevisionAcceptanceAuthorityRef, type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assistant-evaluation'
@@ -59,11 +59,13 @@ async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missi
   const review = vi.fn<(input: UsageReviewInput) => Promise<UsageReviewResult>>(async input => { input.assertCurrent(); return 'reviewed' })
   let currentCreationAuthority: CreationAcceptanceAuthorityRef | undefined
   let currentRevisionAuthority: RevisionAcceptanceAuthorityRef | undefined
+  let currentRevisionRegressionAuthority: RevisionRegressionAcceptanceAuthorityRef | undefined
   const runtimes: UsageLearningRuntime[] = []
   const create = (selectedConfig = config) => {
     const runtime = new UsageLearningRuntime(selectedConfig, { evaluation, automations, delivery, review,
       inspectCreationAcceptanceAuthority: () => currentCreationAuthority,
-      inspectRevisionAcceptanceAuthority: () => currentRevisionAuthority })
+      inspectRevisionAcceptanceAuthority: () => currentRevisionAuthority,
+      inspectRevisionRegressionAcceptanceAuthority: () => currentRevisionRegressionAuthority })
     runtimes.push(runtime); runtime.start(); return runtime
   }
   const append = (task = 'task', status: 'achieved' | 'not-achieved' | 'unknown' = 'not-achieved') => producer.append({
@@ -83,7 +85,8 @@ async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missi
   return { ctx, root, config, owner, policy, evaluation, automations, sourceModel, review, create, append, tick,
     setReply: (value: OwnerForegroundLearningTask['source']['reply']) => { reply = value },
     setCreationAuthority: (value: CreationAcceptanceAuthorityRef | undefined) => { currentCreationAuthority = value },
-    setRevisionAuthority: (value: RevisionAcceptanceAuthorityRef | undefined) => { currentRevisionAuthority = value } }
+    setRevisionAuthority: (value: RevisionAcceptanceAuthorityRef | undefined) => { currentRevisionAuthority = value },
+    setRevisionRegressionAuthority: (value: RevisionRegressionAcceptanceAuthorityRef | undefined) => { currentRevisionRegressionAuthority = value } }
 }
 
 function actualSourceRun(input: UsageReviewInput) {
@@ -263,6 +266,54 @@ test('freezes an independent revision policy before generation and rejects a cha
   f.setRevisionAuthority(revision)
   expect(recovered.inspectSourceGrowthRun({ runId, intentDigest })).toBeDefined()
   await recovered.close()
+})
+
+test('freezes the optional parent regression policy before dispatch and rechecks it after cold restart', async () => {
+  const f = await fixture()
+  const revision: RevisionAcceptanceAuthorityRef = { protocol: 'assistant-growth/revision-acceptance-authority/v1',
+    authorityId: 'revision-policy', keyId: 'revision-key', authorityDigest: '8'.repeat(64),
+    namePrefix: 'assistant-', expiresAt: Date.now() + 60_000 }
+  const regression: RevisionRegressionAcceptanceAuthorityRef = {
+    protocol: 'assistant-growth/revision-regression-acceptance-authority/v1', authorityId: 'regression-policy',
+    keyId: 'regression-key', authorityDigest: '7'.repeat(64), namePrefix: 'assistant-', expiresAt: revision.expiresAt }
+  f.setRevisionAuthority(revision); f.setRevisionRegressionAuthority(regression)
+  f.append('regression-task'); const first = f.create()
+  let runId = ''; let intentDigest = ''
+  f.review.mockImplementationOnce(async input => {
+    runId = input.id; intentDigest = input.intentDigest
+    const actual = { ...actualSourceRun(input), revisionAcceptance: revision, revisionRegressionAcceptance: regression }
+    f.setRevisionRegressionAuthority({ ...regression, authorityDigest: '0'.repeat(64) })
+    expect(() => input.bindSourceRun(actual)).toThrow(/revision regression acceptance authority changed/)
+    f.setRevisionRegressionAuthority(undefined)
+    expect(() => input.bindSourceRun(actual)).toThrow(/revision regression acceptance authority changed/)
+    f.setRevisionRegressionAuthority(regression)
+    const bound = input.bindSourceRun(actual)
+    expect(bound.revisionRegressionAcceptance).toEqual(regression)
+    expect(first.inspectSourceGrowthRun({ runId, intentDigest })).toEqual(bound)
+    return 'reviewed'
+  })
+  await f.tick(); await first.close()
+  const recovered = f.create()
+  expect(recovered.inspectSourceGrowthRun({ runId, intentDigest })?.revisionRegressionAcceptance).toEqual(regression)
+  f.setRevisionRegressionAuthority({ ...regression, authorityDigest: '0'.repeat(64) })
+  expect(recovered.inspectSourceGrowthRun({ runId, intentDigest })).toBeUndefined()
+  f.setRevisionRegressionAuthority(undefined)
+  expect(recovered.inspectSourceGrowthRun({ runId, intentDigest })).toBeUndefined()
+  f.setRevisionRegressionAuthority(regression)
+  expect(recovered.inspectSourceGrowthRun({ runId, intentDigest })).toBeDefined()
+  await recovered.close()
+
+  const old = await fixture(); old.append('pre-policy-task'); const legacy = old.create()
+  let oldId = ''; let oldDigest = ''
+  old.review.mockImplementationOnce(async input => {
+    oldId = input.id; oldDigest = input.intentDigest
+    input.bindSourceRun(actualSourceRun(input))
+    return 'reviewed'
+  })
+  await old.tick()
+  old.setRevisionRegressionAuthority(regression)
+  expect(legacy.inspectSourceGrowthRun({ runId: oldId, intentDigest: oldDigest }))
+    .not.toHaveProperty('revisionRegressionAcceptance')
 })
 
 test('the default-disabled revision flag preserves the historical usage config digest', async () => {

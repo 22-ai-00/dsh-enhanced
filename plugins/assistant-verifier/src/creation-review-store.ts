@@ -61,6 +61,23 @@ export class CreationReviewStore<Certificate = PluginCreationVerificationCertifi
       || row.used < 0 || row.used > maximum) fail('grant changed or corrupt')
     return maximum - row.used
   }
+  /** Historical private evidence only; no grant read, claim, or quota mutation. */
+  readRetained(plan: string): Readonly<{ certificate: Certificate; discovery: unknown; contract: unknown;
+    cases: Record<string, unknown> }> | undefined {
+    if (this.#closed || !ID.test(plan)) fail('invalid retained identity')
+    const row = this.#db.prepare('SELECT state,data FROM verifications WHERE plan=?').get(plan) as
+      { state: State; data: string } | undefined
+    if (!row || row.state !== 'certificate') return undefined
+    if (Buffer.byteLength(row.data) > 262_144) fail('retained record too large')
+    const data: unknown = JSON.parse(row.data)
+    if (!data || typeof data !== 'object' || Array.isArray(data)
+      || Object.keys(data).sort().join(',') !== 'cases,certificate,contract,discovery'
+      || canonicalGrowthJson(data) !== row.data) fail('retained record changed')
+    const evidence = data as Data<Certificate>
+    if (evidence.certificate === undefined || evidence.discovery === undefined || evidence.contract === undefined
+      || !evidence.cases || typeof evidence.cases !== 'object' || Array.isArray(evidence.cases)) fail('retained evidence incomplete')
+    return { certificate: evidence.certificate, discovery: evidence.discovery, contract: evidence.contract, cases: evidence.cases }
+  }
   claim(plan: string, binding: string, authority: string, digest: string, maximum: number):
     { state: 'new' | 'unknown' | 'rejected' | 'certificate'; reason?: string; certificate?: Certificate } {
     check(plan, binding); check(authority, digest)

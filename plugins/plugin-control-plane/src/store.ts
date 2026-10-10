@@ -17,8 +17,8 @@ import { validateScopedPluginFiles } from './source-workspace.js'
 import { validateCreationCapabilitySource, type CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import { validateSourceRevisionBinding, type SourceRevisionBinding } from './source-revision.js'
 import { validateSourceCreationFiles, validateSourceCreationGrant, type SourceCreationBinding } from './source-creation.js'
-import { sourceGrowthRunDigest, validatePluginRevisionVerificationCertificate, validatePluginCreationVerificationCertificate, validateSourceGrowthRunBinding,
-  type PluginCreationVerificationCertificate, type PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { sourceGrowthRunDigest, validatePluginRevisionRegressionCertificate, validatePluginRevisionVerificationCertificate, validatePluginCreationVerificationCertificate, validateSourceGrowthRunBinding,
+  type PluginCreationVerificationCertificate, type PluginRevisionRegressionCertificate, type PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { validateAdoptionHandoffTerms, type AdoptionHandoffRecord, type AdoptionHandoffTerms } from './adoption-handoff.js'
 import type { SourceJobCompletion, SourceJobIntent, SourceJobRecord, SourceJobStatus } from './source-job-types.js'
 import type { OwnerTaskFailureReference } from './owner-task-gap-types.js'
@@ -2309,7 +2309,7 @@ export class ControlPlaneStore {
   }
 
   /** Prepared owner continuations have a bounded recovery query, independent of job history. */
-  listPreparedSourceApprovalJobs(includeRelease = false, includeExecution = false, includeAdoption = false, includeCreation = false, includeCreationAdoption = false, includeRevision = false): readonly SourceJobRecord[] {
+  listPreparedSourceApprovalJobs(includeRelease = false, includeExecution = false, includeAdoption = false, includeCreation = false, includeCreationAdoption = false, includeRevision = false, includeRegression = false): readonly SourceJobRecord[] {
     return (this.#database.prepare(`SELECT j.* FROM source_jobs j JOIN source_plans p ON p.id = j.plan_id
       JOIN owner_task_failure_gaps g ON g.gap_id = p.gap_id
       LEFT JOIN source_adoptions a ON a.source_plan_id = p.id
@@ -2325,10 +2325,14 @@ export class ControlPlaneStore {
           AND EXISTS (SELECT 1 FROM source_creation_verifications v WHERE v.plan_id = p.id AND v.status = 'verified'))
         OR (? = 1 AND p.mode = 'prepared-revise' AND p.status = 'pending-approval'
           AND json_type(j.intent_json, '$.revision.growthRun.revisionAcceptance') IS NOT NULL
-          AND NOT EXISTS (SELECT 1 FROM source_revision_verifications v WHERE v.plan_id=p.id)))
+          AND NOT EXISTS (SELECT 1 FROM source_revision_verifications v WHERE v.plan_id=p.id))
+        OR (? = 1 AND p.mode = 'prepared-revise' AND p.status = 'pending-approval'
+          AND json_type(j.intent_json, '$.revision.growthRun.revisionRegressionAcceptance') IS NOT NULL
+          AND EXISTS (SELECT 1 FROM source_revision_verifications v WHERE v.plan_id=p.id AND v.status='verified')
+          AND NOT EXISTS (SELECT 1 FROM source_revision_regressions v WHERE v.plan_id=p.id)))
         AND (p.expires_at > ? OR ap.status IN ('staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks', 'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending'))
       ORDER BY j.created_at, j.id LIMIT 1000`).all(includeRelease ? 1 : 0, includeExecution ? 1 : 0, includeAdoption ? 1 : 0,
-      includeCreation ? 1 : 0, includeCreationAdoption ? 1 : 0, includeRevision ? 1 : 0, this.#now()) as unknown as SourceJobRow[]).map(sourceJobFromRow)
+      includeCreation ? 1 : 0, includeCreationAdoption ? 1 : 0, includeRevision ? 1 : 0, includeRegression ? 1 : 0, this.#now()) as unknown as SourceJobRow[]).map(sourceJobFromRow)
   }
 
   bindSourceJobDefinition(input: { id: string; revision: number; definitionHash: string }): SourceJobRecord {
@@ -2881,6 +2885,120 @@ export class ControlPlaneStore {
     const result = this.#database.prepare(`UPDATE source_revision_verifications SET status=?,reason=?,updated_at=?
       WHERE plan_id=? AND status='claimed'`).run(status, reason, this.#now(), planId)
     if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'revision verification claim is not current')
+  }
+
+  /** Purpose-separated paired held-out proof; never changes plan or adoption state. */
+  recordRevisionRegression(certificate: PluginRevisionRegressionCertificate): void {
+    validatePluginRevisionRegressionCertificate(certificate)
+    const plan = this.getSourcePlan(certificate.plan.id)
+    const job = this.getPreparedRevisionJob(plan.id)
+    const candidate = this.getRevisionVerification(plan.id)
+    const parent = this.getCreationVerification(certificate.parent.planId)
+    const source = this.readRevisionSource(plan.id)
+    const reference = this.getOwnerTaskFailureReference(plan.gapId)
+    const run = plan.sourceRevision?.growthRun
+    const previousJobs = new Set([...(parent?.observations ?? []), ...(candidate?.observations ?? [])].map(item => item.jobId))
+    if (certificate.verifiedAt > this.#now() || certificate.expiresAt <= this.#now()
+      || !candidate || !parent || !source || !reference || !run?.revisionRegressionAcceptance
+      || !job.intent.revision?.growthRun.revisionRegressionAcceptance
+      || controlPlaneDigest(certificate.plan) !== controlPlaneDigest(candidate.plan)
+      || controlPlaneDigest(certificate.source) !== controlPlaneDigest(candidate.source)
+      || controlPlaneDigest(certificate.parent) !== controlPlaneDigest(candidate.parent)
+      || certificate.candidateVerificationDigest !== controlPlaneDigest(candidate)
+      || certificate.sourceDigest !== source.digest
+      || certificate.contractDigest !== parent.contractDigest
+      || certificate.schemaDigest !== candidate.schemaDigest
+      || controlPlaneDigest(certificate.environment) !== controlPlaneDigest(candidate.environment)
+      || controlPlaneDigest(certificate.environment) !== controlPlaneDigest(parent.environment)
+      || controlPlaneDigest(certificate.model) !== controlPlaneDigest(run.model)
+      || controlPlaneDigest(certificate.authority) !== controlPlaneDigest(run.revisionRegressionAcceptance)
+      || controlPlaneDigest(certificate.authority) !== controlPlaneDigest(job.intent.revision.growthRun.revisionRegressionAcceptance)
+      || certificate.source.referenceDigest !== controlPlaneDigest(reference)
+      || certificate.source.ownerDigest !== controlPlaneDigest(reference.owner)
+      || certificate.source.growthRunDigest !== sourceGrowthRunDigest(run)
+      || sourceGrowthRunDigest(run) !== sourceGrowthRunDigest(job.intent.revision.growthRun)
+      || certificate.observations.length !== parent.observations.length
+      || certificate.observations.some((item, index) => item.caseId !== parent.observations[index]?.caseId
+        || previousJobs.has(item.parent.jobId) || previousJobs.has(item.candidate.jobId))
+      || certificate.expiresAt > Math.min(candidate.expiresAt, plan.expiresAt, run.expiresAt,
+        plan.sourceRevision!.grant.expiresAt, certificate.authority.expiresAt)) {
+      throw new ControlPlaneStoreError('invalid-input', 'regression certificate does not match exact parent and candidate')
+    }
+    this.readPreparedSourceArtifact(plan.id)
+    const serialized = JSON.stringify(certificate), digest = controlPlaneDigest(certificate)
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const old = this.#database.prepare('SELECT status,certificate_digest FROM source_revision_regressions WHERE plan_id=?')
+        .get(plan.id) as { status: string; certificate_digest: string | null } | undefined
+      if (old?.status === 'verified' && old.certificate_digest === digest) { /* immutable idempotent result */ }
+      else if (old?.status !== 'claimed') throw new ControlPlaneStoreError('conflict', 'regression was not claimed or is settled')
+      else this.#database.prepare(`UPDATE source_revision_regressions SET status='verified',certificate_json=?,certificate_digest=?,updated_at=?
+        WHERE plan_id=? AND status='claimed'`).run(serialized, digest, this.#now(), plan.id)
+      this.#database.exec('COMMIT')
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  getRevisionRegression(planId: string): PluginRevisionRegressionCertificate | undefined {
+    const row = this.#database.prepare('SELECT status,certificate_json,certificate_digest FROM source_revision_regressions WHERE plan_id=?')
+      .get(planId) as { status: string; certificate_json: string | null; certificate_digest: string | null } | undefined
+    if (!row || row.status !== 'verified') return undefined
+    let certificate: PluginRevisionRegressionCertificate
+    try {
+      const parsed: unknown = JSON.parse(row.certificate_json!)
+      validatePluginRevisionRegressionCertificate(parsed)
+      certificate = parsed
+    } catch { throw new ControlPlaneStoreError('invalid-state', 'stored revision regression certificate is corrupt') }
+    if (certificate.plan.id !== planId || controlPlaneDigest(certificate) !== row.certificate_digest) {
+      throw new ControlPlaneStoreError('invalid-state', 'stored revision regression certificate digest changed')
+    }
+    return certificate
+  }
+
+  getRevisionRegressionStatus(planId: string): 'claimed' | 'verified' | 'unknown' | 'rejected' | undefined {
+    const row = this.#database.prepare('SELECT status FROM source_revision_regressions WHERE plan_id=?')
+      .get(planId) as { status: 'claimed' | 'verified' | 'unknown' | 'rejected' } | undefined
+    return row?.status
+  }
+
+  /** Content-free diagnostic projection; caller must hold current owner/source fence. */
+  inspectRevisionRegressionRecord(planId: string): { status: 'claimed' | 'verified' | 'unknown' | 'rejected'; reason?: string;
+    updatedAt: number } | undefined {
+    const row = this.#database.prepare('SELECT status,reason,updated_at FROM source_revision_regressions WHERE plan_id=?')
+      .get(planId) as { status: 'claimed' | 'verified' | 'unknown' | 'rejected'; reason: string | null; updated_at: number } | undefined
+    if (!row) return undefined
+    if (!['claimed', 'verified', 'unknown', 'rejected'].includes(row.status)
+      || !Number.isSafeInteger(row.updated_at) || row.updated_at < 1
+      || (row.reason !== null && !/^[a-z][a-z0-9-]{0,79}$/u.test(row.reason))) {
+      throw new ControlPlaneStoreError('invalid-state', 'revision regression diagnostic record is corrupt')
+    }
+    return { status: row.status, ...(row.reason === null ? {} : { reason: row.reason }), updatedAt: row.updated_at }
+  }
+
+  claimRevisionRegression(planId: string): void {
+    const job = this.getPreparedRevisionJob(planId)
+    const pinned = job.intent.revision?.growthRun?.revisionRegressionAcceptance
+    if (!pinned || this.#now() >= pinned.expiresAt) {
+      throw new ControlPlaneStoreError('invalid-state', 'revision regression requires a current pre-author policy binding')
+    }
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const count = this.#database.prepare('SELECT count(*) AS n FROM source_revision_regressions').get() as { n: number }
+      if (count.n >= 256) throw new ControlPlaneStoreError('conflict', 'revision regression record limit reached')
+      const now = this.#now()
+      this.#database.prepare(`INSERT INTO source_revision_regressions
+        (plan_id,status,certificate_json,certificate_digest,reason,created_at,updated_at) VALUES (?,'claimed',NULL,NULL,NULL,?,?)`)
+        .run(planId, now, now)
+      this.#database.exec('COMMIT')
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  settleRevisionRegression(planId: string, status: 'unknown' | 'rejected', reason: string): void {
+    if (typeof reason !== 'string' || !/^[a-z][a-z0-9-]{0,79}$/u.test(reason)) {
+      throw new ControlPlaneStoreError('invalid-input', 'revision regression reason is invalid')
+    }
+    const result = this.#database.prepare(`UPDATE source_revision_regressions SET status=?,reason=?,updated_at=?
+      WHERE plan_id=? AND status='claimed'`).run(status, reason, this.#now(), planId)
+    if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'revision regression claim is not current')
   }
 
   readRevisionSource(planId: string): CreationCapabilitySourceSnapshot | undefined {

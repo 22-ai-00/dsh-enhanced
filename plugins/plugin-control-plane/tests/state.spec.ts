@@ -1312,9 +1312,9 @@ catch { process.stdout.write('busy') } finally { db.close() }`
     const target = await fixture(); const before = target.store.recordGap({ idempotencyKey: 'gap:migrate-v6', capability: 'health',
       context: 'migration evidence', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 }); target.store.close()
     const legacy = new DatabaseSync(target.path)
-    // A genuine v6 ledger has no future artifact references for ALTER TABLE
+    // A genuine v6 ledger has no future revision/verification/artifact references for ALTER TABLE
     // to retarget while rebuilding source_plans during the v7 migration.
-    legacy.exec('DROP TABLE source_creation_verifications; DROP TABLE source_prepared_artifact_refs; DROP TABLE source_prepared_artifacts; DROP TABLE host_attestation_operations; DROP TABLE source_release_operations; PRAGMA user_version = 6;'); legacy.close(); await chmod(target.path, 0o600)
+    legacy.exec('DROP TABLE source_revision_regressions; DROP TABLE source_revision_sources; DROP TABLE source_revision_verifications; DROP TABLE source_creation_verifications; DROP TABLE source_prepared_artifact_refs; DROP TABLE source_prepared_artifacts; DROP TABLE host_attestation_operations; DROP TABLE source_release_operations; PRAGMA user_version = 6;'); legacy.close(); await chmod(target.path, 0o600)
     const migrated = openControlPlaneDatabase(target.path)
     expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(controlPlaneSchemaVersion)
     expect((migrated.prepare('SELECT capability FROM capability_gaps WHERE id = ?').get(before.id) as { capability: string }).capability).toBe('health')

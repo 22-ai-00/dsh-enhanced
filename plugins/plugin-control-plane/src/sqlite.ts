@@ -4,7 +4,7 @@ import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 
-export const controlPlaneSchemaVersion = 33
+export const controlPlaneSchemaVersion = 34
 
 const sourceRevisionGrantSchema = `CREATE TABLE IF NOT EXISTS source_revision_grants (
   grant_id TEXT PRIMARY KEY,
@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS source_revision_sources (
  plan_id TEXT PRIMARY KEY REFERENCES source_revision_verifications(plan_id) ON DELETE RESTRICT,
  source_json TEXT NOT NULL CHECK(json_valid(source_json) AND json_type(source_json)='object' AND length(source_json)<=2097152)
 ) STRICT, WITHOUT ROWID;`
+
+const sourceRevisionRegressionSchema = sourceCreationVerificationSchema.replace('source_creation_verifications', 'source_revision_regressions')
 
 const sourcePreparedArtifactTableSchema = `CREATE TABLE IF NOT EXISTS source_prepared_artifacts (
   pack_sha256 TEXT PRIMARY KEY CHECK(length(pack_sha256) = 64 AND pack_sha256 NOT GLOB '*[^a-f0-9]*'),
@@ -1439,6 +1441,21 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
     } else database.exec(sourceCreationVerificationSchema)
     if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 33) migrateV32ToV33(database)
     else database.exec(`${sourceRevisionGrantSchema} ${sourceRevisionVerificationSchema}`)
+    const regressionSchema = database.prepare("SELECT type,sql FROM sqlite_schema WHERE name='source_revision_regressions'")
+      .get() as { type: string; sql: string | null } | undefined
+    if (regressionSchema === undefined && Number(database.prepare('PRAGMA user_version').get()?.user_version) >= 34) {
+      throw new Error('missing revision regression schema')
+    }
+    if (regressionSchema !== undefined && (regressionSchema.type !== 'table'
+      || regressionSchema.sql !== storedTableSchema(sourceRevisionRegressionSchema))) {
+      throw new Error('unknown revision regression schema')
+    }
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 34) {
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        database.exec(`${sourceRevisionRegressionSchema} PRAGMA user_version = 34; COMMIT;`)
+      } catch (error) { database.exec('ROLLBACK'); throw error }
+    } else database.exec(sourceRevisionRegressionSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {

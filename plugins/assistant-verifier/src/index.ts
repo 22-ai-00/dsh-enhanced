@@ -18,6 +18,8 @@ export { compileCreationReviewConfig, validateCreationReviewConfig } from './cre
 export type { CreationReviewConfig, CreationReviewAuthorityInspection } from './creation-review.js'
 export { compileRevisionReviewConfig, validateRevisionReviewConfig } from './revision-review.js'
 export type { RevisionReviewConfig, RevisionReviewAuthorityInspection } from './revision-review.js'
+export { compileRevisionRegressionReviewConfig, validateRevisionRegressionReviewConfig } from './revision-regression-review.js'
+export type { RevisionRegressionReviewConfig, RevisionRegressionReviewAuthorityInspection } from './revision-regression-review.js'
 
 export function apply(ctx: Context, config: Config): void {
   new AssistantVerifierService(ctx, config)

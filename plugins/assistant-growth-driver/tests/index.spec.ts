@@ -1117,14 +1117,18 @@ describe('opt-in plugin source proposals', () => {
     }
   }
 
-  function revisionService() {
+  function revisionService(withRegression = false) {
     const base = creationService()
     const revisionAcceptance = { protocol: 'assistant-growth/revision-acceptance-authority/v1' as const,
       authorityId: 'revision-policy', keyId: 'revision-key', authorityDigest: '8'.repeat(64),
       namePrefix: 'assistant-', expiresAt: Date.now() + 60_000 }
-    return { ...base, revisionAcceptance,
+    const revisionRegressionAcceptance = { protocol: 'assistant-growth/revision-regression-acceptance-authority/v1' as const,
+      authorityId: 'regression-policy', keyId: 'regression-key', authorityDigest: '6'.repeat(64),
+      namePrefix: 'assistant-', expiresAt: revisionAcceptance.expiresAt }
+    return { ...base, revisionAcceptance, revisionRegressionAcceptance,
       getSourceRevisionNamespace: vi.fn((): { namePrefix: string } | undefined => ({ namePrefix: 'assistant-' })),
       inspectSourceRevisionAcceptanceAuthority: vi.fn(() => revisionAcceptance),
+      ...(withRegression ? { inspectSourceRevisionRegressionAcceptanceAuthority: vi.fn(() => revisionRegressionAcceptance) } : {}),
       inspectCreatedCapabilityRevisionTargets: vi.fn(() => [revisionTarget]),
       inspectRevisionSource: vi.fn(async (input: Parameters<NonNullable<GrowthSourcePlanePort['inspectRevisionSource']>>[0]) => {
         input.signal.throwIfAborted(); input.assertCurrent()
@@ -1478,12 +1482,13 @@ describe('opt-in plugin source proposals', () => {
     ])
     const h = await mount({ adapter, provider: 'conversation-provider' })
     h.modelSelection.mockImplementation(() => { throw new Error('current session supplier changed') })
-    const source = revisionService()
+    const source = revisionService(true)
     adapter.onRequest = () => {
       const db = new DatabaseSync(join(h.root, 'usage.sqlite'))
       try {
         const row = db.prepare("SELECT source_run_json FROM usage_jobs WHERE state='running'").get() as { source_run_json: string } | undefined
         expect(JSON.parse(row?.source_run_json ?? 'null')).toMatchObject({ revisionAcceptance: source.revisionAcceptance,
+          revisionRegressionAcceptance: source.revisionRegressionAcceptance,
           model: { provider: 'conversation-provider', model: 'original-task-model' } })
       } finally { db.close() }
     }
@@ -1502,6 +1507,7 @@ describe('opt-in plugin source proposals', () => {
     const queued = source.enqueueSourceJob.mock.calls[0]![0]
     validateSourceGrowthRunBinding(queued.growthRun)
     expect(queued.growthRun).toMatchObject({ revisionAcceptance: source.revisionAcceptance,
+      revisionRegressionAcceptance: source.revisionRegressionAcceptance,
       model: { provider: 'conversation-provider', model: 'original-task-model' },
       source: { projection: { subjectRef: 'real-task' } },
       budget: { maxPlansPerWake: 1 },
@@ -1516,6 +1522,54 @@ describe('opt-in plugin source proposals', () => {
     expect(adapter.schemas.flat().find(tool => tool.name === 'plugin_source_revise')?.parameters).toMatchObject({
       properties: { parent_plan_id: {}, plugin_name: {}, files: {} },
     })
+    expect(JSON.stringify(adapter.requests)).not.toContain(source.revisionRegressionAcceptance.authorityId)
+    expect(JSON.stringify(adapter.schemas)).not.toContain(source.revisionRegressionAcceptance.authorityId)
+  })
+
+  it('stops a revision proposal when the frozen regression policy is withdrawn after Agent setup', async () => {
+    const adapter = new ScriptedAdapter([{ name: 'plugin_source_gaps', args: {} },
+      { name: 'plugin_source_revision_targets', args: {} }, revisionRead(['src/index.ts']), revisionCall()])
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    const source = revisionService(true)
+    adapter.onRequest = () => {
+      source.inspectSourceRevisionRegressionAcceptanceAuthority?.mockImplementation(() => {
+        throw new Error('regression policy withdrawn')
+      })
+    }
+    await startUsageReview({ h, source, objectiveStatus: 'not-achieved',
+      sourceConfig: { preparationMode: 'durable', allowRevision: true } })
+    expect(source.enqueueSourceJob).not.toHaveBeenCalled()
+    expect(adapter.surfaces[0]).toContain('plugin_source_revise')
+  })
+
+  it('omits revision authoring and its SourceRun authority when the configured regression inspector fails before setup', async () => {
+    const adapter = new ScriptedAdapter([])
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    const source = revisionService(true)
+    source.inspectSourceRevisionRegressionAcceptanceAuthority?.mockImplementation(() => {
+      throw new Error('configured regression policy expired')
+    })
+    adapter.onRequest = () => {
+      const db = new DatabaseSync(join(h.root, 'usage.sqlite'))
+      try {
+        const row = db.prepare("SELECT source_run_json FROM usage_jobs WHERE state='running'")
+          .get() as { source_run_json: string } | undefined
+        const binding = JSON.parse(row?.source_run_json ?? 'null') as Record<string, unknown> | null
+        expect(binding).not.toBeNull()
+        expect(binding).not.toHaveProperty('revisionAcceptance')
+        expect(binding).not.toHaveProperty('revisionRegressionAcceptance')
+      } finally { db.close() }
+    }
+    await startUsageReview({ h, source, objectiveStatus: 'not-achieved',
+      sourceConfig: { preparationMode: 'durable', allowRevision: true } })
+    expect(source.inspectSourceRevisionAcceptanceAuthority).toHaveBeenCalled()
+    expect(source.inspectSourceRevisionRegressionAcceptanceAuthority).toHaveBeenCalledTimes(1)
+    expect(source.inspectCreatedCapabilityRevisionTargets).not.toHaveBeenCalled()
+    expect(source.inspectRevisionSource).not.toHaveBeenCalled()
+    expect(source.enqueueSourceJob).not.toHaveBeenCalled()
+    expect(adapter.surfaces[0]).not.toContain('plugin_source_revise')
+    expect(adapter.surfaces[0]).not.toContain('plugin_source_revision_targets')
+    expect(adapter.surfaces[0]).not.toContain('plugin_source_revision_inspect')
   })
 
   it('keeps revision disabled without every new port and rejects a non-current adopted target', async () => {
