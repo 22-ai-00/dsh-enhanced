@@ -2,9 +2,10 @@ import { mkdtemp, readFile, realpath, rm, mkdir, writeFile, chmod } from 'node:f
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT } from '@dsh-enhanced/assistant-deepseek-budget'
 import { parseDocument, isSeq, isMap, isScalar, type YAMLMap, type YAMLSeq } from 'yaml'
 import * as eventSupport from '@dsh-enhanced/event-triggers'
 import { DeliveryStore } from '../../assistant-delivery/lib/store.js'
@@ -142,6 +143,13 @@ function externalRepositoryEffective(source: string, input: WebOwnerSetupInput, 
 }
 
 describe('goal admission planning', () => {
+  beforeEach(() => {
+    const wallClockNow = Date.now
+    const startedAt = wallClockNow()
+    vi.spyOn(Date, 'now').mockImplementation(() => Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.checkedAt) + 1000 + wallClockNow() - startedAt)
+  })
+  afterEach(() => { vi.restoreAllMocks() })
+
   test('v2 uses the DSH settings overlay during formal setup and rejects malformed public routes', async () => {
     const f = await fixture(); const taskPath = join(f.input.dshHome, 'v2-task.json')
     const route = { provider: 'super-relay', model: 'auto_model' }
@@ -443,14 +451,15 @@ llm-pi-ai:
   })
 
   test('v2 is not bound to the expired DeepSeek contract while v1 remains protected', async () => {
-    const contractExpiry = Date.parse('2026-10-08T00:00:00.000Z')
+    const contractExpiry = Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.expiresAt)
     const f = await fixture(contractExpiry)
     const effective = parseDocument(f.effective); effective.add({ id: 'agent-default-model', config: { provider: 'super-relay', model: 'auto_model' } })
     const route = { provider: 'super-relay', model: 'auto_model' }
     const v2Task = task({ version: 2, route, model: undefined,
       executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [route] } })
     expect(() => prepareGoalAdmission(f.input, f.prepared.patch, effective.toString(), v2Task, f.snapshot, contractExpiry)).not.toThrow()
-    expect(() => prepareGoalAdmission(f.input, f.prepared.patch, effective.toString(), task(), f.snapshot, contractExpiry)).toThrow(/model contract expired/)
+    expect(() => prepareGoalAdmission(f.input, f.prepared.patch, f.effective, task(), f.snapshot, contractExpiry - 1)).not.toThrow()
+    expect(() => prepareGoalAdmission(f.input, f.prepared.patch, f.effective, task(), f.snapshot, contractExpiry)).toThrow(/model contract expired/)
   })
 
   test('compiles two exact acceptance profiles and the fixed wake route while preserving custom denies', async () => {

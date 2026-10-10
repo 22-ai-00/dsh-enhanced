@@ -1,8 +1,11 @@
 import { Context } from '@deepseek-ai/cordis'
 import { LlmRuntime, createUserMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { AssistantGoalsService } from '../plugins/assistant-goals/lib/index.js'
-import DeepSeekBudget, { Config, DEEPSEEK_PROVIDER, DeepSeekGoalMeteredAdapter } from '../plugins/assistant-deepseek-budget/lib/index.js'
+import DeepSeekBudget, { Config, DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_PROVIDER, DeepSeekGoalMeteredAdapter } from '../plugins/assistant-deepseek-budget/lib/index.js'
+
+beforeEach(() => { vi.spyOn(Date, 'now').mockReturnValue(Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.checkedAt) + 1000) })
+afterEach(() => { vi.restoreAllMocks() })
 
 async function harness() {
   const ctx = new Context()
@@ -41,8 +44,22 @@ test.each(['second-meter', 'provider'] as const)('failed %s registration rolls b
     if (conflict === 'provider') ctx.llm.registerAdapter([DEEPSEEK_PROVIDER], existing)
     else ctx.assistantGoals.registerBudgetMeter({ id: 'previous-pro-meter', provider: DEEPSEEK_PROVIDER, model: 'deepseek-v4-pro',
       inputTokenUpperBound: () => 2097152, inputUsdMicrosPerMillionTokens: null, outputUsdMicrosPerMillionTokens: null })
-    await expect(ctx.plugin(DeepSeekBudget, { enabled: true })).rejects.toThrow()
+    await expect(ctx.plugin(DeepSeekBudget, { enabled: true })).rejects.toThrow(conflict === 'provider' ? 'already registered' : 'execution budget unavailable or exhausted')
     expect(ctx.assistantGoals.health().registeredBudgetMeters).toBe(conflict === 'provider' ? 0 : 1)
     expect(ctx.llm.listProviders()).toHaveLength(conflict === 'provider' ? 1 : 0)
   } finally { existing.shutdown(); await ctx.fiber.dispose() }
+})
+
+test('expired contract rejects enabled registration without installing routes or meters', async () => {
+  const ctx = await harness()
+  const transport = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network must not be reached'))
+  vi.spyOn(Date, 'now').mockReturnValue(Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.expiresAt))
+  try {
+    const disabled = await ctx.plugin(DeepSeekBudget, {})
+    await disabled.dispose()
+    await expect(ctx.plugin(DeepSeekBudget, { enabled: true })).rejects.toThrow('contract has expired')
+    expect(ctx.assistantGoals.health().registeredBudgetMeters).toBe(0)
+    expect(ctx.llm.listProviders()).toHaveLength(0)
+    expect(transport).not.toHaveBeenCalled()
+  } finally { await ctx.fiber.dispose() }
 })

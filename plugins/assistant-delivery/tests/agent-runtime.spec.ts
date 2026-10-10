@@ -12,7 +12,7 @@ import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import * as ApiRemotes from '@deepseek-ai/dsh-api-remotes'
 import SessionController from '@deepseek-ai/dsh-api-session-controller'
 import * as NativeWebOwnerPlugin from '../../assistant-web-owner/lib/index.js'
-import DeepSeekBudgetPlugin from '../../assistant-deepseek-budget/lib/index.js'
+import DeepSeekBudgetPlugin, { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT } from '../../assistant-deepseek-budget/lib/index.js'
 import type {} from '@deepseek-ai/dsh-goal'
 import { AttachmentId, type AttachmentStore, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { PresetSpec } from '@deepseek-ai/dsh-permission-presets'
@@ -57,7 +57,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest'
 import { deliveryProgressFromSessionEvent, modelPickerOperationId } from '../src/agent-runtime.ts'
 import { AssistantDeliveryService } from '../src/service.ts'
 import type { DeliveryGoalWakeInput, OwnerGoalOutcomeFeedbackLocator, OwnerGoalOutcomeFeedbackProof } from '../src/goal-wake-types.ts'
@@ -11056,6 +11056,10 @@ describe('real native Delivery Agent runtime', () => {
   })
 
   test.each(['settled', 'insufficient-input', 'missing-usage', 'monetary'] as const)('uses the production DeepSeek route in native goal budgets: %s', async mode => {
+    const wallClockNow = Date.now
+    const startedAt = wallClockNow()
+    const contractClock = vi.spyOn(Date, 'now').mockImplementation(() => Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.checkedAt) + 1000 + wallClockNow() - startedAt)
+    onTestFinished(() => contractClock.mockRestore())
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-deepseek-budget-'))
     roots.push(root)
     const objective = 'Verify a bounded production route without treating mock transport as cloud evidence'
@@ -11136,9 +11140,10 @@ describe('real native Delivery Agent runtime', () => {
           : { state: 'held', input_tokens_reserved: 2_097_152, output_tokens_reserved: 7, input_tokens_actual: null, output_tokens_actual: null })])
       } finally { ledger.close() }
     } finally {
-      await fixture.ctx.fiber.restart()
-      fetchMock.mockRestore()
-      if (previousKey === undefined) delete process.env[envKey]; else process.env[envKey] = previousKey
+      try { await fixture.ctx.fiber.restart() } finally {
+        fetchMock.mockRestore()
+        if (previousKey === undefined) delete process.env[envKey]; else process.env[envKey] = previousKey
+      }
     }
   })
 

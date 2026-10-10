@@ -2,7 +2,7 @@ import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } f
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
-import { DEEPSEEK_INPUT_TOKEN_UPPER_BOUND, DEEPSEEK_PROVIDER } from '@dsh-enhanced/assistant-deepseek-budget'
+import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_INPUT_TOKEN_UPPER_BOUND, DEEPSEEK_PROVIDER } from '@dsh-enhanced/assistant-deepseek-budget'
 import { createNativeAdapter } from '../../src/benchmark/deepseek.js'
 import { createStrategyBenchmarkExecutor, createStrategyBenchmarkPlan, verifyStrategyBenchmarkResults } from '../../src/benchmark/strategy-executor.js'
 import { strategyBenchmarkJournalPlan } from '../../src/benchmark/strategy-plan.js'
@@ -39,6 +39,9 @@ type WireObservation = { endpoint: string; redirect: RequestInit['redirect']; mo
 const task = strategyDevelopmentTask('integer-sum')
 
 test.skipIf(!process.env.DSH_ISOLATION_TEST_IMAGE)('runs the real DeepSeek Goal route through paired cells without leaking verifier inputs', async () => {
+  const wallClockNow = Date.now
+  const startedAt = wallClockNow()
+  vi.spyOn(Date, 'now').mockImplementation(() => Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.checkedAt) + 1000 + wallClockNow() - startedAt)
   const input = config()
   const plan = createStrategyBenchmarkPlan(input)
   const journal = strategyBenchmarkJournalPlan(plan)
