@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { createMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_INPUT_TOKEN_UPPER_BOUND, DEEPSEEK_PROVIDER } from '@dsh-enhanced/assistant-deepseek-budget'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createNativeAdapter } from '../../src/benchmark/deepseek.js'
 import type { NativeModelConfig } from '../../src/benchmark/native.js'
 
@@ -31,6 +31,8 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
   for await (const chunk of stream) chunks.push(chunk)
   return chunks
 }
+
+beforeEach(() => { vi.spyOn(Date, 'now').mockReturnValue(Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.checkedAt) + 1000) })
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -118,7 +120,7 @@ describe('DeepSeek native benchmark adapter', () => {
   it('rejects an expired contract and refuses requests after idempotent disposal', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.expiresAt))
     await expect(createNativeAdapter(model(), { ctx: new Context(), workspace: '/unused' })).rejects.toThrow('contract has expired')
-    vi.restoreAllMocks()
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.checkedAt) + 1000)
     const binding = await createNativeAdapter(model(), { ctx: new Context(), workspace: '/unused' })
     binding.dispose(); binding.dispose()
     await expect(collect(binding.adapter.stream(request()))).rejects.toThrow('disposed')
