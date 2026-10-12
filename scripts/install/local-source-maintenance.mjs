@@ -487,6 +487,41 @@ export async function assertLocalSourcePreview(input) {
   return { persistedConfigDigest: hash(configs[input.profile]), previewConfigDigest: hash(dumped.stdout) }
 }
 
+export async function healLocalSourceProfileModuleFallback({ homePath, profile, dsh }) {
+  if (!exactPath(homePath) || !PROFILE.test(profile) || !exactPath(dsh?.path)
+    || dsh.pin?.path !== dsh.path || dsh.pin?.sha256 !== hash(await bytes(dsh.path))) {
+    fail('pinned DSH executable changed before module fallback healing')
+  }
+  if (await realpath(homePath) !== homePath || await realpath(dsh.path) !== dsh.path
+    || inside(homePath, dsh.path)) fail('pinned DSH executable is inside the stopped Home')
+  const hostRequire = createRequire(dsh.path)
+  const dshManifestPath = await realpath(hostRequire.resolve('@deepseek-ai/dsh/package.json'))
+  const dshManifest = JSON.parse((await bytes(dshManifestPath, 1_048_576)).toString('utf8'))
+  const dshRoot = dirname(dshManifestPath)
+  if (inside(homePath, dshRoot)) fail('pinned DSH package is inside the stopped Home')
+  const bin = dshManifest.bin?.dsh
+  if (dshManifest.name !== '@deepseek-ai/dsh' || typeof dshManifest.version !== 'string'
+    || typeof bin !== 'string' || !/^(?:\.\/)?[A-Za-z0-9._/-]+$/u.test(bin)
+    || bin.replace(/^\.\//u, '').split('/').some(part => !part || part === '.' || part === '..')
+    || !inside(dshRoot, resolve(dshRoot, bin))
+    || (await realpath(join(dshRoot, bin))) !== dsh.path) fail('pinned DSH package does not own its executable')
+  const packageRequire = createRequire(dshManifestPath)
+  const bootManifestPath = await realpath(packageRequire.resolve('@deepseek-ai/dsh-app-boot/package.json'))
+  const bootManifest = JSON.parse((await bytes(bootManifestPath, 1_048_576)).toString('utf8'))
+  const bootPath = await realpath(packageRequire.resolve('@deepseek-ai/dsh-app-boot'))
+  if (inside(homePath, dirname(bootManifestPath)) || inside(homePath, bootPath)) {
+    fail('pinned DSH boot module is inside the stopped Home')
+  }
+  if (bootManifest.name !== '@deepseek-ai/dsh-app-boot' || bootManifest.version !== dshManifest.version
+    || !inside(dirname(bootManifestPath), bootPath)) fail('pinned DSH boot module identity differs')
+  const { loadProfileDirectory, healProfilesModuleFallback } = await import(pathToFileURL(bootPath).href)
+  if (typeof loadProfileDirectory !== 'function' || typeof healProfilesModuleFallback !== 'function') {
+    fail('pinned DSH boot module lacks native fallback healing APIs')
+  }
+  const loaded = loadProfileDirectory('dsh', join(homePath, 'profiles', profile), dshManifestPath)
+  await healProfilesModuleFallback({ installAnchor: dshManifestPath, profile: loaded, home: homePath })
+}
+
 async function main() {
   const [action, inputPath] = process.argv.slice(2)
   const input = JSON.parse((await bytes(inputPath, 20_971_520)).toString('utf8'))
@@ -496,6 +531,7 @@ async function main() {
     result = await api.stageRsiLocalSinglePackages({ dshHome: input.homePath, profile: input.profile,
       originalCohort: input.originalCohort, dsh: input.dsh, rootExtension: input.proof.extension,
       signal: AbortSignal.timeout(600_000) })
+    await healLocalSourceProfileModuleFallback(input)
   } else if (action === 'configs') result = await composeLocalSourceConfigs(input)
   else if (action === 'verify') result = await verifyLocalSourceSelection(input)
   else if (action === 'preview-overlay') result = await localSourcePreviewOverlay(input)
