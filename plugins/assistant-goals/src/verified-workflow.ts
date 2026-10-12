@@ -94,7 +94,8 @@ export function ownerGoalRunProof(scope: GoalScope, record: Pick<GoalRecord, 'id
     if (event.type === 'tool/result' && event.surfaceOp === 'append' && Array.isArray(event.sourceEventSeqs)
       && event.sourceEventSeqs.length === 1 && typeof event.data?.message?.source?.callId === 'string') {
       const id = event.data.message.source.callId, content = event.data.message.content
-      const result = Array.isArray(content) && content.length === 1 && content[0]?.type === 'tool-result' ? content[0] : undefined
+      const result = event.data.message.role === 'tool' ? event.data.message
+        : event.data.message.role === 'user' && Array.isArray(content) && content.length === 1 && content[0]?.type === 'tool-result' ? content[0] : undefined
       const call = calls.get(id)
       if (call === undefined || event.sourceEventSeqs[0] !== call.seq) continue
       if (results.has(id) || result?.toolCallId !== id || event.seq <= call.seq) throw new Error('assistant-goals: run trace contains a missing, duplicate or mismatched result')
@@ -143,9 +144,9 @@ function verifiedToolTraceInternal(events: readonly any[], turn: number, window?
       && typeof event.data?.message?.source?.callId === 'string') {
       const id = event.data.message.source.callId
       const content = event.data.message.content
-      const result = Array.isArray(content) && content.length === 1 && content[0]?.type === 'tool-result' ? content[0] : undefined
+      const result = event.data.message.role === 'tool' ? event.data.message
+        : event.data.message.role === 'user' && Array.isArray(content) && content.length === 1 && content[0]?.type === 'tool-result' ? content[0] : undefined
       const call = calls.get(id)
-      // Native errors live in the matching tool-result block, not on Message.
       if (call === undefined || window !== undefined && (event.surfaceOp !== 'append' || !Array.isArray(event.sourceEventSeqs)
         || event.sourceEventSeqs.length !== 1 || event.sourceEventSeqs[0] !== call.seq)) continue
       if (results.has(id) || !result || result.toolCallId !== id || window !== undefined && event.seq <= call.seq!) {

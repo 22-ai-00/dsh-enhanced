@@ -1,6 +1,8 @@
 import type { AgentRegistry } from '@deepseek-ai/dsh-agent'
 import {
+  fileHandleText,
   projectImagesForTextModel,
+  projectToolUpdates,
   type GenerateOptions,
   type LlmRuntime,
 } from '@deepseek-ai/dsh-llm'
@@ -61,6 +63,7 @@ const compactionRequestKeys = new Set([
   'model',
   'messages',
   'tools',
+  'toolHistory',
   'maxTokens',
   'sessionId',
   'purpose',
@@ -70,16 +73,17 @@ const requiredCompactionRequestKeys = [
   'provider',
   'model',
   'messages',
+  'toolHistory',
   'maxTokens',
   'sessionId',
   'purpose',
   'signal',
 ] as const
-const instructionMessageKeys = new Set(['id', 'role', 'content', 'source'])
+const instructionMessageKeys = new Set(['role', 'content'])
 const compactionStartKeys = new Set(['compactionId', 'sourceCommandId', 'turn'])
 const automaticCompactionStartKeys = new Set(['compactionId', 'turn'])
 
-/** Exact final user instruction emitted by @deepseek-ai/dsh-compaction-basic 0.1.5-rc.3. */
+/** Exact final user instruction emitted by @deepseek-ai/dsh-compaction-basic 0.2.0-rc.2. */
 const COMPACTION_INSTRUCTION = [
   'You are now acting as a compaction engine for this AI coding assistant. Condense the conversation ABOVE into a structured checkpoint that lets another model resume the work with no loss of essential context.',
   '',
@@ -351,12 +355,9 @@ function exactCompactionInstruction(message: GenerateOptions['messages'][number]
   const keys = plainDataKeys(message)
   return keys !== undefined
     && exactKeys(keys, instructionMessageKeys)
-    && typeof message.id === 'string'
-    && uuidV4Pattern.test(message.id)
-    && sameData({ role: message.role, content: message.content, source: message.source }, {
+    && sameData({ role: message.role, content: message.content }, {
       role: 'user',
       content: [{ type: 'text', text: COMPACTION_INSTRUCTION }],
-      source: { kind: 'plugin', plugin: 'dsh-compaction-basic' },
     })
 }
 
@@ -431,7 +432,7 @@ function sameLoopMessage(
 ): boolean {
   if (actual === expected || (allowDetachedEqual && sameData(actual, expected))) return true
   const source = expected.source
-  if (expected.role !== 'assistant' || source.kind !== 'model' || source.replayState === undefined
+  if (expected.role !== 'assistant' || source?.kind !== 'model' || source.replayState === undefined
     || ownedRoutes.has(source.provider)) return false
 
   // DSH forAdapter() makes exactly this detached snapshot when the
@@ -453,41 +454,47 @@ function sameLoopMessage(
  * data-equal. This rejects partial projection and arbitrary equal-value clones.
  */
 function sameLoopMessages(
-  actual: GenerateOptions['messages'],
-  expected: GenerateOptions['messages'],
+  actual: Readonly<GenerateOptions['messages']>,
+  expected: Readonly<GenerateOptions['messages']>,
   ownedRoutes: ReadonlySet<string>,
+  fileText: LlmRuntime['fileRequestText'],
 ): boolean {
   if (actual.length !== expected.length) return false
   if (actual.every((message, index) => sameLoopMessage(message, expected[index]!, ownedRoutes))) return true
 
-  const projected = projectImagesForTextModel(expected)
-  if (projected === expected) return false
-  return actual.every((message, index) => {
-    const durable = expected[index]!
-    const candidate = projected[index]!
-    return candidate === durable
-      ? sameLoopMessage(message, durable, ownedRoutes)
-      : sameLoopMessage(message, candidate, ownedRoutes, true)
-  })
+  const filesProjected = expected.map(message => message.content.some(block => block.type === 'file')
+    ? { ...message, content: message.content.map(block => block.type === 'file'
+      ? { type: 'text' as const, text: fileText(block.attachment) } : block) } : message)
+  return [filesProjected, projectImagesForTextModel(filesProjected)].some(projected =>
+    actual.every((message, index) => {
+      const durable = expected[index]!
+      const candidate = projected[index]!
+      return candidate === durable
+        ? sameLoopMessage(message, durable, ownedRoutes)
+        : sameLoopMessage(message, candidate, ownedRoutes, true)
+    }))
 }
 
 function exactLoopEnvelope(
   request: GenerateOptions,
   session: LiveAgentSession,
   ownedRoutes: ReadonlySet<string>,
+  fileText: LlmRuntime['fileRequestText'],
 ): boolean {
   if (own(request, 'purpose') || !own(request, 'signal')
     || !(request.signal instanceof AbortSignal) || request.signal.aborted
     || !deeplyFrozen(request)) return false
   const header = session.requestHeader()
   if (header === undefined) return false
-  const expectedMessages = session.deriveMessages()
-  if (!sameLoopMessages(request.messages, expectedMessages, ownedRoutes)) return false
+  const toolHistory = session.toolHistory()
+  const projected = projectToolUpdates(session.deriveMessages(), header.tools, undefined, toolHistory)
+  if (!sameLoopMessages(request.messages, projected.messages, ownedRoutes, fileText)) return false
 
   const expected: Record<string, unknown> = {
     ...header.config,
     messages: request.messages,
-    ...(header.tools === undefined ? {} : { tools: header.tools }),
+    ...(projected.tools === undefined ? {} : { tools: projected.tools }),
+    toolHistory,
     sessionId: session.id,
     signal: request.signal,
   }
@@ -498,6 +505,7 @@ function exactCompactionEnvelope(
   request: GenerateOptions,
   session: LiveAgentSession,
   ownedRoutes: ReadonlySet<string>,
+  fileText: LlmRuntime['fileRequestText'],
 ): boolean {
   const keys = plainDataKeys(request)
   if (keys === undefined || keys.some(key => !compactionRequestKeys.has(key))
@@ -512,15 +520,18 @@ function exactCompactionEnvelope(
 
   const header = session.requestHeader()
   if (header === undefined || request.provider !== header.config.provider || request.model !== header.config.model
-    || own(request, 'tools') !== own(header, 'tools') || !sameData(request.tools, header.tools)) return false
+    || !sameData(request.toolHistory, session.toolHistory())) return false
 
-  const expectedMessages = session.deriveMessages()
+  const projected = projectToolUpdates(session.deriveMessages(), header.tools, undefined, session.toolHistory())
+  if (own(request, 'tools') !== (projected.tools !== undefined) || !sameData(request.tools, projected.tools)) return false
+  const expectedMessages = projected.messages
   const prefixLength = request.messages.length - 1
   if (prefixLength <= 0 || prefixLength >= expectedMessages.length
     || !sameLoopMessages(
       request.messages.slice(0, prefixLength),
       expectedMessages.slice(0, prefixLength),
       ownedRoutes,
+      fileText,
     )) return false
 
   const instruction = request.messages.at(-1)
@@ -547,6 +558,7 @@ function exactCompactionEnvelope(
 export function createAgentLoopRequestAttestor(
   agents: Pick<AgentRegistry, 'currentInitiator' | 'get'>,
   ownedRoutes: readonly string[],
+  fileText: LlmRuntime['fileRequestText'] = reference => fileHandleText(reference, undefined),
 ): AgentLoopRequestAttestor {
   const routes = new Set(ownedRoutes)
   if (routes.size === 0 || routes.size !== ownedRoutes.length || ownedRoutes.some(route => !providerPattern.test(route))) {
@@ -563,7 +575,7 @@ export function createAgentLoopRequestAttestor(
           && agents.get(initiator.id) === initiator
           && initiator.session === session
           && initiator.session.id === request.sessionId
-          && exactLoopEnvelope(request, initiator.session, routes)
+          && exactLoopEnvelope(request, initiator.session, routes, fileText)
       } catch {
         // Service teardown or a malformed host facade fails closed at the
         // provider boundary and is reported as an unattested local request.
@@ -591,7 +603,7 @@ export function createAgentLoopRequestAttestor(
 
         if (!plainCompactionRequestGraph(request, request.signal)) return false
         freezePlainGraph(request, request.signal)
-        return exactCompactionEnvelope(request, initiator.session, routes)
+        return exactCompactionEnvelope(request, initiator.session, routes, fileText)
       } catch {
         // Never freeze or authorize a malformed/stale ambient auxiliary call.
         return false

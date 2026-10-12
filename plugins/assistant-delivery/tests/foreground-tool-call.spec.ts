@@ -53,7 +53,7 @@ async function fixture() {
   const agent: Agent = { id, options: {}, session, inbox: createInboxStub(), ctx: new Context(),
     status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal),
     send() {}, followup() {}, steer() {}, inject() {} }
-  ctx.agents.register(agent)
+  await ctx.agents.register(agent)
   return { ctx, service, store, binding, agent }
 }
 

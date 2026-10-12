@@ -914,6 +914,7 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
       })
       await ctx.plugin(BasicCompactionEngine, {
         thresholdRatio: 0.5,
+        headroomTokens: 256,
         retainTokens: 0,
         maxTokens: 256,
         compactionRetries: 0,

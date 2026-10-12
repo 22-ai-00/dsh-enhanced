@@ -1,3 +1,9 @@
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'personal-memory': { kind: 'personal-memory'; form?: 'notice'; summary?: string }
+  }
+}
+
 import { isAbsolute } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -263,7 +269,7 @@ export class PersonalMemoryService extends Service {
         return () => clearInterval(timer)
       }, 'personal-memory.reconcile')
     }
-    ctx.on('agent/session-start', ({ agent }) => {
+    ctx.on('agent/created', ({ agent }) => {
       if (ctx.get('systemPrompt') !== undefined) return
       this.injectSessionSnapshot(agent)
     })
@@ -701,7 +707,7 @@ export class PersonalMemoryService extends Service {
     if (snapshot.text === '') return
     agent.inject(createUserMessage({
       content: [{ type: 'text', text: snapshot.text }],
-      source: { kind: 'plugin', plugin: 'personal-memory' },
+      source: { kind: 'personal-memory' },
     }))
   }
 
@@ -719,8 +725,7 @@ export class PersonalMemoryService extends Service {
         if (message.role !== 'user' || !message.content.some(block => block.type === 'text')) return false
         const kind: string | undefined = message.source?.kind
         return kind === 'user' || kind === 'delivery'
-          || (message.source?.kind === 'plugin'
-            && message.source.plugin === '@dsh-enhanced/assistant-automations')
+          || kind === 'assistant-automations' || kind === 'plugin:@dsh-enhanced/assistant-automations'
       })
       let query = ''
       for (const block of humanTask?.content ?? []) {

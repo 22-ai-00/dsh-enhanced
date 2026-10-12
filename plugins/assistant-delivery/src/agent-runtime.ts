@@ -1,3 +1,9 @@
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'assistant-delivery': { kind: 'assistant-delivery'; form?: 'notice'; summary?: string }
+  }
+}
+
 import { createHash } from 'node:crypto'
 import { mkdir, stat } from 'node:fs/promises'
 import { isDeepStrictEqual } from 'node:util'
@@ -9,7 +15,7 @@ import {
   type AgentHandle,
   type ModelSelection,
 } from '@deepseek-ai/dsh-agent'
-import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets'
+import type { AgentPresetRegistry as AgentPresets } from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-goal'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import {
@@ -590,8 +596,6 @@ function progressResultPreview(content: readonly ContentBlock[], depth = 0): str
     else if (block.type === 'image') append('[图片]')
     else if (block.type === 'tool-call') {
       append(`${block.name}\n${progressArgumentsPreview(block.arguments)}`)
-    } else if (block.type === 'tool-result') {
-      append(progressResultPreview(block.content, depth + 1))
     }
   }
   return boundedProgressToolPreview(redactProgressText(parts.join('\n')))
@@ -650,19 +654,15 @@ export function deliveryProgressFromSessionEvent(event: SessionEvent): DeliveryP
     // Human progress is an append-origin transcript, so projecting a replacement would make an
     // old tool result look like a tool invocation from the active turn.
     if (!isAppendSurfaceEvent(event)) return undefined
-    const block = event.data.message.content.find(value => value.type === 'tool-result')
-    const callId = block?.type === 'tool-result'
-      ? block.toolCallId
-      : event.data.message.source?.callId
+    const result = event.data.message
+    const callId = result.toolCallId
     if (callId === undefined) return undefined
-    const resultPreview = block?.type === 'tool-result'
-      ? progressResultPreview(block.content)
-      : ''
+    const resultPreview = progressResultPreview(result.content)
     const code = event.data.error?.code
     return {
       kind: 'tool-finished',
       callId: String(callId),
-      failed: event.data.error !== undefined || (block?.type === 'tool-result' && block.isError === true),
+      failed: event.data.error !== undefined || result.isError === true,
       ...(resultPreview === '' ? {} : { resultPreview }),
       ...(code === undefined ? {} : { code: boundedProgressText(code) }),
     }
@@ -751,18 +751,20 @@ interface PermissionPresetTargets {
 function permissionPresetTargets(service: PermissionPresets): Partial<PermissionPresetTargets> {
   const workspace: string[] = []
   const full: string[] = []
+  const nativeAuto: string[] = []
   const table: Array<readonly [string, string, string]> = []
   for (const name of service.names) {
     const spec = service.resolve(name)
     table.push([name, spec.sandbox, spec.approval])
     if (spec.sandbox === 'workspace-write' && spec.approval === 'ask') workspace.push(name)
     if (spec.sandbox === 'danger-full-access' && spec.approval === 'never') full.push(name)
+    if (name === 'auto' && spec.sandbox === 'danger-full-access' && spec.approval === 'ask') nativeAuto.push(name)
   }
-  if (workspace.length > 2 || full.length > 1) {
+  if (workspace.length > 2 || full.length > 1 || nativeAuto.length > 1) {
     throw new Error('ambiguous permission preset table')
   }
   const ask = workspace[0]
-  const auto = workspace[1] ?? ask
+  const auto = nativeAuto[0] ?? workspace[1] ?? ask
   return {
     ...(ask === undefined ? {} : { ask, auto: auto! }),
     ...(full[0] === undefined ? {} : { full: full[0] }),
@@ -806,18 +808,22 @@ function currentPermissionLevel(
 ): 'ask' | 'auto' | 'full' | 'custom' {
   const events = session.snapshotEvents()
   const current = service.current(session)
+  const reviewer = approvalReviewerOf(events, session.header.version)
   if (current === targets.full) {
     return explicitSandboxMode(events) === 'danger-full-access'
       && explicitApprovalPolicy(events) === 'never'
-      && approvalReviewerOf(events) === 'none'
+      && reviewer === 'none'
       ? 'full'
       : 'custom'
   }
-  if (explicitSandboxMode(events) !== 'workspace-write' || explicitApprovalPolicy(events) !== 'ask') return 'custom'
-  const reviewer = approvalReviewerOf(events)
+  if (explicitApprovalPolicy(events) !== 'ask') return 'custom'
+  if (current === targets.auto && targets.auto !== targets.ask) {
+    return explicitSandboxMode(events) === service.resolve(targets.auto).sandbox
+      && reviewer === 'auto-review' ? 'auto' : 'custom'
+  }
+  if (explicitSandboxMode(events) !== service.resolve(targets.ask).sandbox) return 'custom'
   if (targets.ask === targets.auto && current === targets.ask) return reviewer === 'auto-review' ? 'auto' : 'ask'
   if (current === targets.ask) return reviewer === 'user' ? 'ask' : 'custom'
-  if (current === targets.auto) return reviewer === 'auto-review' ? 'auto' : 'custom'
   return 'custom'
 }
 
@@ -833,7 +839,7 @@ async function ensurePermissionReviewer(
   preset: string,
   reviewer: ApprovalReviewer,
 ): Promise<void> {
-  if (approvalReviewerOf(session.snapshotEvents()) === reviewer) return
+  if (approvalReviewerOf(session.snapshotEvents(), session.header.version) === reviewer) return
   if (canonicalPresetReviewer(preset) === reviewer) {
     // PermissionPresetService deliberately makes a net-zero selection a no-op.
     // Re-append its official event when an older legacy reviewer event would
@@ -1377,10 +1383,7 @@ function finalAssistant(
       }
     }
     if (event.type === 'tool/result' && event.data.turn === expectedTurn) {
-      const block = event.data.message.content.find(value => value.type === 'tool-result')
-      const callId = block?.type === 'tool-result'
-        ? block.toolCallId
-        : event.data.message.source?.callId
+      const callId = event.data.message.toolCallId
       if (callId !== undefined) unpairedToolCalls.delete(String(callId))
     }
     if (event.type === 'turn/end' && event.data.turn === expectedTurn) {
@@ -1411,8 +1414,8 @@ function finalAssistant(
   }
 }
 
-function isScheduledGoalRuntimeContext(source: { kind?: unknown; plugin?: unknown; form?: unknown }): boolean {
-  return (source.kind === 'plugin' && source.plugin === '@deepseek-ai/dsh-system-prompt' && source.form === 'snapshot')
+function isScheduledGoalRuntimeContext(source: { kind?: unknown; form?: unknown }): boolean {
+  return source.kind === 'runtime-context'
     || (source.kind === 'skill-catalog' && source.form === 'catalog')
 }
 
@@ -2523,9 +2526,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         permissionPresets.set(session, target)
         // Legacy/seeded sessions may have no explicit knob events even when
         // their effective defaults match this preset. Materialize both facts
-        // before enabling either reviewer so auto is a coherent, replayable
-        // ask + workspace-write state rather than an inference from defaults.
-        ensureSandboxMode(session, 'workspace-write')
+        // before enabling either reviewer so Auto uses the Host's fixed bundle.
+        ensureSandboxMode(session, permissionPresets.resolve(target).sandbox)
         ensureApprovalPolicy(session, 'ask')
         const reviewer: ApprovalReviewer = action.level === 'auto' ? 'auto-review' : 'user'
         await ensurePermissionReviewer(session, target, reviewer)
@@ -4067,8 +4069,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
               ),
             }],
             source: {
-              kind: 'plugin',
-              plugin: '@dsh-enhanced/assistant-delivery',
+              kind: 'assistant-delivery',
               form: 'notice',
               summary: `Automatic answer completion attempt ${automaticTurns}`,
             },

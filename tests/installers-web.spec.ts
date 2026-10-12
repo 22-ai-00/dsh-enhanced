@@ -1,10 +1,11 @@
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { afterEach, describe, expect, test } from 'vitest'
+import { nativeInstallerHost, nativeWebSetupPackage } from './native-installer-host-fixture.ts'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const installer = join(repoRoot, 'scripts', 'install', 'install-local.sh')
@@ -37,38 +38,29 @@ async function actualFixture(setupExit: number | 'missing') {
   const fakeBin = join(root, 'bin')
   const log = join(root, 'order.log')
   const profileBin = join(dshHome, 'profiles', 'web', 'node_modules', '.bin')
-  const hostModules = join(fakeBin, 'node_modules', '@deepseek-ai')
   await mkdir(fakeBin, { recursive: true })
   await mkdir(profileBin, { recursive: true })
-  await writeFile(join(dshHome, 'profiles', 'web', 'package.json'), JSON.stringify({ dependencies: {} }))
-  await mkdir(join(hostModules, 'dsh'), { recursive: true })
-  await mkdir(join(hostModules, 'dsh-app-boot'), { recursive: true })
-  await writeFile(join(hostModules, 'dsh', 'package.json'), JSON.stringify({
-    name: '@deepseek-ai/dsh', version: '0.1.5-rc.3',
+  const profile = join(dshHome, 'profiles', 'web')
+  await writeFile(join(profile, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web', type: 'module',
+    dependencies: { '@dsh-enhanced/assistant-web-owner': '0.0.0' },
+    dsh: { profile: { bundles: [] } },
   }))
-  await writeFile(join(hostModules, 'dsh-app-boot', 'package.json'), JSON.stringify({
-    name: '@deepseek-ai/dsh-app-boot', type: 'module', exports: './index.js',
-  }))
-  await writeFile(join(hostModules, 'dsh-app-boot', 'index.js'), [
-    "import { mkdir, writeFile } from 'node:fs/promises'",
-    "import { join } from 'node:path'",
-    'export async function healProfilesModuleFallback({ installAnchor, home }) {',
-    "  if (!installAnchor.endsWith('/@deepseek-ai/dsh/package.json')) throw new Error('wrong Host anchor')",
-    "  await mkdir(join(home, 'profiles', 'node_modules'), { recursive: true })",
-    "  await writeFile(join(home, 'profiles', 'node_modules', '.host-fallback-healed'), 'exact-host')",
-    "  await writeFile(process.env.INSTALL_LOG, 'host-fallback\\n', { flag: 'a' })",
-    '}',
-    '',
-  ].join('\n'))
+  await nativeWebSetupPackage(profile, `import { writeFile } from 'node:fs/promises'
+export async function runWebOwnerSetup() {
+  await writeFile(process.env.INSTALL_LOG, 'setup\\n', { flag: 'a' })
+  ${setupExit === 23 ? "throw new Error('setup exit 23')" : ''}
+}
+`)
   await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf '11.7.0\\n'; fi
 exit 0
 `)
   await writeExecutable(join(fakeBin, 'npm'), '#!/bin/bash\nexit 0\n')
   await writeExecutable(join(fakeBin, 'dsh-rsi'), '#!/bin/bash\nif [[ "${1:-}" == version ]]; then printf "0.1.48\\n"; fi\n')
-  await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
+  const hostExecutable = await nativeInstallerHost(root, `#!/bin/bash
 set -euo pipefail
-if [[ "\${1:-}" == '--version' ]]; then printf '0.1.5-rc.3\\n'; exit 0; fi
+if [[ "\${1:-}" == '--version' ]]; then printf '0.2.0-rc.2\\n'; exit 0; fi
 if [[ " $* " == *' plugin '* ]]; then
   mkdir -p "$DSH_HOME/profiles/web/node_modules/.bin"
   printf 'plugin-add\\n' >> "$INSTALL_LOG"
@@ -85,14 +77,13 @@ if [[ " $* " == *' --no-open --port 0 '* ]]; then
 fi
 exit 0
 `)
+  await symlink(hostExecutable, join(fakeBin, 'dsh'))
   if (setupExit !== 'missing') {
-    await writeExecutable(join(profileBin, 'dsh-web-owner-setup'), `#!/bin/bash
-printf 'setup\\n' >> "$INSTALL_LOG"
-exit ${setupExit}
-`)
+    await symlink(join(profile, 'node_modules', '@dsh-enhanced', 'assistant-web-owner', 'bin', 'dsh-web-owner-setup.js'),
+      join(profileBin, 'dsh-web-owner-setup'))
   }
   const result = spawnSync('/bin/bash', [installer,
-    '--scenario', 'web', '--workspace', join(root, 'workspace'), '--dsh-version', '0.1.5-rc.3',
+    '--scenario', 'web', '--workspace', join(root, 'workspace'), '--dsh-version', '0.2.0-rc.2',
     '--no-service', '--model', 'skip', '--model-route', 'skip',
   ], {
     cwd: repoRoot,
@@ -174,8 +165,7 @@ describe('experimental Web owner installer scenario', () => {
     expect(result.status, result.stderr).toBe(0)
     const order = await readFile(log, 'utf8')
     const installed = order.slice(order.indexOf('plugin-add'))
-    expect(installed).toMatch(/^plugin-add\nhost-fallback\nsetup\n/u)
-    expect(installed.indexOf('host-fallback')).toBeLessThan(installed.indexOf('setup'))
+    expect(installed).toMatch(/^plugin-add\nsetup\n/u)
     expect(installed.indexOf('setup')).toBeLessThan(installed.indexOf('dump'))
     expect(installed.indexOf('dump')).toBeLessThan(installed.indexOf('probe'))
   }, 30_000)

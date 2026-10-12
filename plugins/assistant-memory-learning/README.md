@@ -2,7 +2,7 @@
 
 普通任务驱动的持久事实与经验学习。一次 owner 配置与有限授权后，原生 Automations 发现已完成的普通对话，原生 Agent 提取候选，独立 Verifier 重读来源审查，Personal Memory 在授权范围内采用。后续任务沿 Memory 的动态检索与 System Prompt seam 使用已采用记录。无需逐条调用捕获或批准工具。
 
-兼容当前 DSH `>=0.1.5-rc.3 <0.1.6`、Cordis `^4.0.1` 和本仓库 `0.1.48` 同批 Delivery、Evaluation、Automations、Policy、Verifier、Memory。安装本包不会启用其他 bundle。发布 patch 默认禁用，必须先配置下述 owner/grants 和预算，再启用该稳定行。
+兼容当前 DSH `0.2.0-rc.2`、Cordis `4.0.4` 和本仓库 `0.1.48` 同批 Delivery、Evaluation、Automations、Policy、Verifier、Memory。安装本包不会启用其他 bundle。发布 patch 默认禁用，必须先配置下述 owner/grants 和预算，再启用该稳定行。
 
 ```sh
 dsh plugin --profile assistant add @dsh-enhanced/assistant-memory-learning

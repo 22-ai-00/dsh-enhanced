@@ -8,6 +8,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  VITEST_MAX_WORKERS: '2'
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -172,7 +179,7 @@ jobs:
       - name: Install DSH and packed plugin in a clean profile
         shell: pwsh
         run: |
-          npm install --global --no-audit --no-fund @deepseek-ai/dsh@0.1.2-rc.1
+          npm install --global --no-audit --no-fund @deepseek-ai/dsh@0.2.0-rc.2
           if ($LASTEXITCODE -ne 0) { throw "failed to install DSH" }
 
           $env:DSH_HOME = Join-Path $env:RUNNER_TEMP "dsh-home"

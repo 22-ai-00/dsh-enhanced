@@ -1,4 +1,4 @@
-import type { ContentBlock, GenerateOptions, Message, ToolSchema } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, GenerateOptions, RequestMessage, ToolSchema } from '@deepseek-ai/dsh-llm'
 
 export const DSH_TOOL_CALL_PROTOCOL = 'dsh-tool-calls/v1'
 export const CLI_PROMPT_LIMIT_CAUSE = 'cli-prompt-limit'
@@ -28,7 +28,7 @@ interface TranscriptBlock {
 }
 
 interface TranscriptMessage {
-  role: Message['role']
+  role: RequestMessage['role']
   content: TranscriptBlock[]
 }
 
@@ -91,13 +91,6 @@ function serializeBlock(block: ContentBlock): TranscriptBlock {
       return { type: 'reasoning-omitted' }
     case 'tool-call':
       return { type: 'tool-call', id: block.id, name: block.name, arguments: block.arguments }
-    case 'tool-result':
-      return {
-        type: 'tool-result',
-        toolCallId: block.toolCallId,
-        ...(block.isError === undefined ? {} : { isError: block.isError }),
-        content: block.content.map(serializeToolResultContent),
-      }
     case 'image':
       throw new Error('coding subscription providers currently accept text-only DSH requests')
     default:
@@ -105,11 +98,18 @@ function serializeBlock(block: ContentBlock): TranscriptBlock {
   }
 }
 
-function serializeMessage(message: Message): TranscriptMessage {
+function serializeMessage(message: RequestMessage): TranscriptMessage {
+  if (message.role === 'tool') return { role: 'tool', content: [{
+    type: 'tool-result', toolCallId: message.toolCallId,
+    ...(message.isError === undefined ? {} : { isError: message.isError }),
+    content: message.content.map(serializeToolResultContent),
+  }] }
+  if (message.role === 'user' && message.source?.kind === 'tool') throw new Error('coding subscription provider received a tool result in a user message')
   return { role: message.role, content: message.content.map(serializeBlock) }
 }
 
-function skillCatalogSource(message: Message): { update?: unknown } | undefined {
+function skillCatalogSource(message: RequestMessage): { update?: unknown } | undefined {
+  if (message.role !== 'user' || message.source === undefined) return undefined
   const source = message.source as { kind?: unknown; form?: unknown; update?: unknown; entries?: unknown }
   if (source.kind !== 'skill-catalog' || source.form !== 'catalog' || !Array.isArray(source.entries)) return undefined
   for (const entry of source.entries) {
@@ -125,7 +125,7 @@ function skillCatalogSource(message: Message): { update?: unknown } | undefined 
  * supersedes. Compatibility providers do not serialize message sources, so remove only the older
  * catalogs when the newest catalog explicitly carries the replacement marker.
  */
-function effectiveMessages(messages: readonly Message[]): readonly Message[] {
+function effectiveMessages(messages: readonly RequestMessage[]): readonly RequestMessage[] {
   let newestCatalog = -1
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (skillCatalogSource(messages[index]!) !== undefined) {

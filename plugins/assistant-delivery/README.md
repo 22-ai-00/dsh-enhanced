@@ -8,14 +8,14 @@
 
 ## 兼容性与安装顺序
 
-- DSH / Agent / Agent Presets / LLM / Session：`>=0.1.5-rc.3 <0.1.6`
-- `@deepseek-ai/dsh-attachment`：`>=0.1.5-rc.3 <0.1.6`，仅图片入站路径需要的可选 Host service
-- `@deepseek-ai/dsh-user-questions`：`>=0.1.5-rc.3 <0.1.6`。它定义 `ctx.userQuestions.ask()` 和 Agent-scoped `user-questions/request` answerer waterfall；Web Host 通过 Remote Events 在 live root Agent scope 提供 answerer。该 seam 没有可供 Delivery 消费的独立 question request/answer 事件流。
-- `@deepseek-ai/dsh-commands`：`>=0.1.5-rc.3 <0.1.6`，可选 Host command service；按 `0.1.5-rc.3` 命令语法/执行契约只委托安全的原生 `/compact`。`/help`、`/status`、`/session`、`/new`、`/clear`、`/stop`、`/feedback`、`/learning` 及模型/权限控制命令都由 Delivery 自有；其他原生命令即使被宿主发布也不委托、不进入 LLM
-- `@deepseek-ai/dsh-goal`：`>=0.1.5-rc.3 <0.1.6`，可选原生目标服务；启用 `agentGoalContinuationTimeoutMs` 时还须由 Host 挂载同版本 `dsh-goal-round-driver`，仅安装服务不产生自动续跑
-- `@deepseek-ai/dsh-permission-presets` / `@deepseek-ai/dsh-sandbox-policy` / `@deepseek-ai/dsh-user-approval`：`>=0.1.5-rc.3 <0.1.6`，权限档位命令使用 preset service，并通过 sandbox/approval 包的 canonical setter 固化执行事实；所需 Host service 缺失时命令 fail closed
+- DSH / Agent / Agent Presets / LLM / Session：`0.2.0-rc.2`
+- `@deepseek-ai/dsh-attachment`：`0.2.0-rc.2`，仅图片入站路径需要的可选 Host service
+- `@deepseek-ai/dsh-user-questions`：`0.2.0-rc.2`。它定义 `ctx.userQuestions.ask()` 和 Agent-scoped `user-questions/request` answerer waterfall；Web Host 通过 Remote Events 在 live root Agent scope 提供 answerer。该 seam 没有可供 Delivery 消费的独立 question request/answer 事件流。
+- `@deepseek-ai/dsh-commands`：`0.2.0-rc.2`，可选 Host command service；按当前命令语法/执行契约只委托安全的原生 `/compact`。`/help`、`/status`、`/session`、`/new`、`/clear`、`/stop`、`/feedback`、`/learning` 及模型/权限控制命令都由 Delivery 自有；其他原生命令即使被宿主发布也不委托、不进入 LLM
+- `@deepseek-ai/dsh-goal`：`0.2.0-rc.2`，可选原生目标服务；启用 `agentGoalContinuationTimeoutMs` 时还须由 Host 挂载同版本 `dsh-goal-round-driver`，仅安装服务不产生自动续跑
+- `@deepseek-ai/dsh-permission-presets` / `@deepseek-ai/dsh-sandbox-policy` / `@deepseek-ai/dsh-user-approval`：`0.2.0-rc.2`，权限档位命令使用 preset service，并通过 sandbox/approval 包的 canonical setter 固化执行事实；所需 Host service 缺失时命令 fail closed
 - Cordis：`^4.0.1`
-- `@dsh-enhanced/assistant-policy`：`>=0.1.0 <0.2.0`，硬依赖
+- `@dsh-enhanced/assistant-policy`：`>=0.1.43 <0.2.0`，硬依赖
 - Preference Learning 是反向订阅 `subscribePreferenceFeedback()` 的可选下游；Delivery 不声明对它的 peer/runtime 依赖，避免消息核心与学习插件形成双向包依赖
 - 真实多轮恢复还要求 profile 已配置官方 `ctx.sessionPersistence` provider；缺失时新建空 session 可以成功，但冷 resume 会进入有界失败/死信路径。
 
@@ -178,7 +178,7 @@ cursor 的 protocol、数据库 epoch、稳定 owner scopeKey 和 sequence 必�
 
 ### 跨渠道 `ask_user_question`
 
-DSH `0.1.5-rc.3` 的 `ctx.userQuestions.ask()` 会把带 `agent` 的请求派发到该 exact live runtime root 的 Agent-scoped `user-questions/request` waterfall；随产品交付的 Web Host 通过 Remote Events 在同一 scope 注册 answerer。`dsh-user-questions` 不发布独立 request/answer 审计流，因此渠道集成必须直接注册 scoped answerer，并在其中完成 owner binding、adapter 能力、取消和回答校验。Delivery answerer 以前置顺序尝试有能力的渠道，避免先注册的远端 answerer 长时间等待而阻塞渠道；无 Delivery 路由、渠道不可用或回答畸形时继续 waterfall，已存在但失效的 owner binding 则以 `ASK_ABORTED` 失败关闭。没有 answerer 接受请求时 Host 以 `NO_PROVIDER` 失败，不会无限等待；多个 answerer 按 waterfall 组合顺序串联，当前 API 不承诺跨 UI 的竞速认领语义。
+DSH `0.2.0-rc.2` 的 `ctx.userQuestions.ask()` 会把带 `agent` 的请求派发到该 exact live runtime root 的 Agent-scoped `user-questions/request` waterfall；随产品交付的 Web Host 通过 Remote Events 在同一 scope 注册 answerer。`dsh-user-questions` 不发布独立 request/answer 审计流，因此渠道集成必须直接注册 scoped answerer，并在其中完成 owner binding、adapter 能力、取消和回答校验。Delivery answerer 以前置顺序尝试有能力的渠道，避免先注册的远端 answerer 长时间等待而阻塞渠道；无 Delivery 路由、渠道不可用或回答畸形时继续 waterfall，已存在但失效的 owner binding 则以 `ASK_ABORTED` 失败关闭。没有 answerer 接受请求时 Host 以 `NO_PROVIDER` 失败，不会无限等待；多个 answerer 按 waterfall 组合顺序串联，当前 API 不承诺跨 UI 的竞速认领语义。
 
 渠道自由文本只有在明确回复对应问题消息时才会结算，并要求 account、tenant、conversation、principal、binding version/generation 与当前 owner fence 全部匹配；同一路由恰好只有一个 pending question 也不会吞掉未引用的新消息。匹配回答直接恢复原来的工具调用，不写 Inbox、不作为普通新消息排队；`/stop`、`/new`、`/clear` 仍按渠道正常命令接入规则取消旧 wait（例如群聊可能仍要求 @ 机器人），问题卡的取消按钮则不依赖文字命令。问题发往原 binding 会话，不保证是私聊：若原会话是群聊，问题正文和选项对该群可见，敏感问题应在私聊中发起或改用其他交互方式。
 
@@ -226,7 +226,7 @@ Session 续约间隔取有效 lease 的约三分之一，有效期限使用 `min
 
 渠道 command envelope 只接受从正文第一字节开始的小写 ASCII slash 语法。未知命令、当前 preset 未发布的命令，以及大写、空命令等非法 slash 形态都只返回确定性帮助/错误，绝不作为自然语言进入 LLM。普通 Agent turn 只有在 session persistence `flush()` 明确返回 `true` 后才入队最终回复；返回 `false` 或抛错时不宣称任务成功。
 
-Agent Loop 以 `max-tokens` 结束、正常结束却没有正文，或完整正文超过 `maxTextBytes` 时，Delivery 默认在同一 session 中发起最多两轮后台恢复：先续写缺失部分；若仍未结束，最后一次机会优先根据当前请求和其后全部已有回答片段压缩为预算内的完整答案，不会把同一长会话中更早已完成的任务混入结论。空回答会重新生成，首轮即超长的回答会直接压缩。每个片段先持久化，再开始下一轮；恢复轮沿用已经选定的 provider、model 和 effort，但 source 明确标记为 Delivery 的内部 notice。恢复轮禁止工具执行：DSH `0.1.5-rc.3` 仍可能把 scoped tool schema 序列化给 provider，但任何调用都会在审批和执行前被拒绝，并立即结束该恢复轮；工具状态也不会展示给用户，后续恢复仍受同一总轮数限制。最终只投递一次合并后的完整回复并标记完成，不需要用户发送”继续”。
+Agent Loop 以 `max-tokens` 结束、正常结束却没有正文，或完整正文超过 `maxTextBytes` 时，Delivery 默认在同一 session 中发起最多两轮后台恢复：先续写缺失部分；若仍未结束，最后一次机会优先根据当前请求和其后全部已有回答片段压缩为预算内的完整答案，不会把同一长会话中更早已完成的任务混入结论。空回答会重新生成，首轮即超长的回答会直接压缩。每个片段先持久化，再开始下一轮；恢复轮沿用已经选定的 provider、model 和 effort，但 source 明确标记为 Delivery 的内部 notice。恢复轮禁止工具执行：DSH `0.2.0-rc.2` 仍可能把 scoped tool schema 序列化给 provider，但任何调用都会在审批和执行前被拒绝，并立即结束该恢复轮；工具状态也不会展示给用户，后续恢复仍受同一总轮数限制。最终只投递一次合并后的完整回复并标记完成，不需要用户发送”继续”。
 后台恢复是新的、有界模型 turn，可能产生额外模型用量，不是对同一个已提交请求的透明重试。若恢复轮失败或次数耗尽、没有新增正文，或已经持久化但无法建立安全调度边界，Delivery 才保留当前最佳正文、附加明确的未完成提示并标记失败；完全没有可用正文时发送重试提示。失败提示不再要求用户发送“继续”这类协议词。若任何片段无法确认持久化，则不投递该结果，也不宣称完成。这些失败回复不会进入 completed-turn preference projection。`agentMaxAutoContinuationTurns` 设为 `0` 时保留直接失败提示行为。
 
 `agentGoalContinuationTimeoutMs` 默认是 `0`，保持既有的前台回复后立即释放 Agent 行为。设为正值时，Delivery 先完成并入队原始前台回复，再保留同一 Session、Agent 与已固定的 GoalId，让 Host 的原生 `goal-round-driver` 在其自己的调度边界续跑；Delivery 不创建目标轮、不接管轮次，累计上限仍由 DSH 的 `maxGoalRounds` 限制。原回复只是该入站任务的结果，绝不表示业务目标已经达成。
@@ -309,15 +309,15 @@ Profile 还必须为当前 owner principal 添加精确授权，例如：`subjec
 
 卡片提交后，Delivery 会再次核对 active binding、精确 principal/chat、原始 provider message id 和 Policy，并用实时 `resolveModelInfo()` 验证 provider/model 及该模型支持的 effort；通过后把三项选择按 canonical conversation 持久化到 Delivery SQLite。渠道可以等待该 durable settlement：同实例由完成通知即时唤醒，共享数据库的另一实例完成时由有界轮询感知，从而把原卡更新成不可交互的最终结果。选择从下一条普通消息生效，保留当前 session 上下文，跨 `/new` 和 Host 重启仍有效。卡片可选择“默认（由模型决定）”；`/model use` 保留为无卡片渠道和排错时的文字后备，`/model reset` 删除会话覆盖并恢复 `agentProvider` / `agentModel`。模型目录按宿主约定是建议性的，最终调用是否成功仍由对应 adapter 和账号认证决定。若某个已持久化的显式 effort 在下一条普通消息前被 DSH 核心判为不支持，Delivery 会在任何 prompt 或 durable dispatch 标记之前，以 version CAS 仅清除该 effort、重新预检同一 provider/model 的默认档位；CAS 冲突会重试而不会覆盖更晚的 `/model` 选择。模型不会被静默替换，也不会重放或重复计费。
 
-`/permissions`（别名 `/permission`）只允许当前 active binding 的精确 owner 使用，命令本身不会进入 Agent 或触发 LLM。支持 typed `permission-picker` 的私聊渠道会显示“请求批准（ask）/帮我批准（auto）/完全访问权限（full）”三档卡片并标出当前档位；不支持卡片或渲染失败时自动退回含同等信息的文字命令。前两档都使用 `workspace-write + ask`，区别是持久 reviewer 为 `user` 或 `auto-review`。`full` 使用 `danger-full-access + never + none`，可访问网络及任意文件；卡片按钮带原生风险确认，文字入口则由 `/permission full` 显示橙色警告，必须再次发送 `/permission full confirm` 才切换。
+`/permissions`（别名 `/permission`）只允许当前 active binding 的精确 owner 使用，命令本身不会进入 Agent 或触发 LLM。支持 typed `permission-picker` 的私聊渠道会显示“请求批准（ask）/帮我批准（auto）/完全访问权限（full）”三档卡片并标出当前档位；不支持卡片或渲染失败时自动退回含同等信息的文字命令。`ask` 使用 `workspace-write + ask + user`；当前 Host 的固定 `auto` 使用 `danger-full-access + ask + auto-review`，不会被强制折叠为 `workspace-write`。Session 格式 4 的旧动态 `workspace-write + ask` Auto 组合不满足 Policy 的 Auto 一致性检查，切换失败时持久回退 ask。`full` 使用 `danger-full-access + never + none`，可访问网络及任意文件；卡片按钮带原生风险确认，文字入口则由 `/permission full` 显示橙色警告，必须再次发送 `/permission full confirm` 才切换。
 
 权限卡片作为受限 Outbox intent 持久化，并用独立 HMAC 域绑定原始 route、精确 owner、binding version、session、权限状态指纹、Policy 紧急停止版本、目标档位和有效期。点击时还必须匹配原卡的 provider message id，并重新核对 active owner/binding、DM、Policy 与 session；转发、错人、跨 chat、篡改、过期、`/new` 后的旧卡，以及权限状态或紧急停止版本变化后的旧卡都会明确提示失效。最终提交在权限 mutation 前、reviewer 等待后和 session flush 后重复核对紧急停止版本，因此紧急停止开→关的 ABA 也只会触发 ask 补偿，不会完成旧卡提权。同一张卡的第一次选择进入原 binding 的 durable Inbox 串行队列；点击 Toast 只表示“已受理”，真正切换成功会另发持久回复。平台重投同一选择幂等，相反选择冲突而不会晚到覆盖；需要再次切档时应重新发送 `/permissions`。
 
-原生 DSH 设置与 Web 权限面板会写 preset、sandbox 和 approval。生产表的 `workspace-write` / `auto` / `danger-full-access` 已由 AssistantPolicy 直接解释为 `user` / `auto-review` / `none`，所以 Web 与 Delivery 可互相切档且后写者获胜，不再为 canonical 三档补 custom reviewer。只有单 workspace preset、动态 id 和旧 session 继续使用兼容 reviewer event；非 canonical legacy full 仍经过严格迁移与 flush barrier。
+原生 DSH 设置与 Web 权限面板会写 preset、sandbox 和 approval。生产表的 `workspace-write` / `auto` / `danger-full-access` 已由 AssistantPolicy 直接解释为 `user` / `auto-review` / `none`，所以 Web 与 Delivery 可互相切档且后写者获胜，不再为 canonical 三档补 custom reviewer。旧 session 的兼容 reviewer event 仍可读，但不会把 Session 格式 4 的动态 workspace Auto 当作有效授权；非 canonical legacy full 仍经过严格迁移与 flush barrier。
 
 旧版本中，这个缺口会产生一个很迷惑的症状：session 看似已经是 native full，但 reviewer 缺失会保守折叠成 `user`，AssistantPolicy 因而把未知/敏感工具送去 `ask-review`；同一 session 的 `approval=never` 又会在渠道审批展示前直接拒绝，上游最终误写成 `"the user rejected tool"`，所以用户既没看到弹窗也没有机会批准。迁移后精确 full 会持久补齐 `reviewer=none`；同时进度适配器会把嵌套 `tool-result.isError=true` 显示为工具失败，而不是继续显示“已完成”。
 
-档位从 `ctx.permissionPresets.resolve()` 动态匹配：一个 `workspace-write + ask` 候选兼容旧版共享 ask/auto，两个候选按声明顺序映射 ask/auto，更多候选或多个 full 候选会失败关闭；full 候选必须唯一。目标表指纹也进入权限卡状态哈希，防止卡片发出后配置漂移。命令会显式固化 sandbox/approval；canonical 三档写官方 preset，动态/共享目标只在必要时写兼容 reviewer。mutation、flush、controller 或回复失败后会收敛并持久化到 ask；只有确认 ask 已 durable 且终态回复已经进入同一 Outbox，Inbox 才能结束，不会用“持久化结果不确定”冒充终态。
+档位从 `ctx.permissionPresets.resolve()` 动态匹配：一个或两个 `workspace-write + ask` 候选仍可识别旧版共享或分离的目标，但在 Session 格式 4 上，旧动态 Auto 不会通过 Policy 一致性检查；当前 Host 的固定 `auto` 则以 `danger-full-access + ask` 独立识别。更多同类候选或多个 full 候选会失败关闭；full 候选必须唯一。目标表指纹也进入权限卡状态哈希，防止卡片发出后配置漂移。命令会显式固化 sandbox/approval；canonical 三档写官方 preset，动态/共享目标只在必要时写兼容 reviewer。mutation、flush、controller 或回复失败后会收敛并持久化到 ask；只有确认 ask 已 durable 且终态回复已经进入同一 Outbox，Inbox 才能结束，不会用“持久化结果不确定”冒充终态。
 
 权限命令在第一次 reviewer/policy/sandbox mutation 前还必须先取得 Inbox 的 durable dispatch/recovery marker；每个异步边界后都复核 abort 与租约。若进程退出、续租失败、flush 未确认、依赖尚未就绪或回复入队失败，该 marker 会绕过普通 `maxAttempts`，在原 binding 串行 lane 中继续恢复，直到确认已持久化目标并补发成功终态，或安全收敛到 ask 后补发失败/取消终态。`/stop` 和 `/new` 会在 abort 前把正在执行的权限命令原子改标为 cancelled recovery；旧命令不会以 `processor-ambiguous` 终止，也不会从原始文本重新制造一次可能已取消的 full 提权。
 
@@ -374,7 +374,7 @@ Automation incident 使用 `automation-incident:<incidentId>:g<generation>` 同�
 - `unknown_after_send` cancel 后仍保留为独立的 ambiguous 状态和原始 resolution receipt，不伪装成确定未发送；该 exact attempt 不会再被自动 reconcile/send，并视为 lane terminal，cancel receipt 也不能改写成 retry。若平台随后给出匹配 provider message id 的 delivered/read receipt，外部事实可单调提升当前状态并清除当前失败标记，原 cancel/attempt ledger 仍保留。普通尚未结算的 unknown 只能由显式、Policy-gated operator `retry` 重新入队；稳定 owner route 禁止 retry，只能原 lineage reconcile/cancel/park。系统从不自动重发 unknown send。
 - Agent dispatch 前写 `dispatch-started` marker。此后进程崩溃会进入 `dispatch-ambiguous` dead letter，避免自动产生第二个 turn；这会牺牲一次自动重放，需要 owner 审阅后显式 retry。
 - `/permission` 是受限例外：它使用专用 commit/cancel/failure recovery marker，并以精确 Inbox id（兼容旧 event id）与 `replyToEventId` 共同证明终态 Outbox；崩溃恢复不会把普通 background Outbox 或同名伪造 key 当成完成见证。
-- 当前 DSH `0.1.5-rc.3` 的 `followup()` 没有跨进程 `sourceEventId` 唯一接纳/完成 handle，因此本包诚实承诺“持久 event 去重 + at-most-once 自动 Agent dispatch”，不声称端到端 exactly-once。若宿主未来提供该 seam，可升级为安全的 at-least-once wake。
+- 当前 DSH `0.2.0-rc.2` 的 `followup()` 没有跨进程 `sourceEventId` 唯一接纳/完成 handle，因此本包诚实承诺“持久 event 去重 + at-most-once 自动 Agent dispatch”，不声称端到端 exactly-once。若宿主未来提供该 seam，可升级为安全的 at-least-once wake。
 - Outbox adapter 抛异常一律视为可能已发送；不会按照普通 5xx 重试。
 
 ## Goals 单次唤醒边界

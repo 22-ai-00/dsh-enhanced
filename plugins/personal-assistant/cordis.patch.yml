@@ -6,10 +6,6 @@
         sandbox: workspace-write
         approval: ask
         name: 请求批准
-      auto:
-        sandbox: workspace-write
-        approval: ask
-        name: 帮我批准
       danger-full-access:
         sandbox: danger-full-access
         approval: never

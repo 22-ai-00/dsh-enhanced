@@ -654,7 +654,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     })
     const owner = agent({ cwd: '/work/alpha', preset: 'primary' })
     owner.session.append('permission/preset', { preset: 'auto' })
-    appendSandboxMode(owner, 'workspace-write')
+    appendSandboxMode(owner, 'danger-full-access')
     owner.session.append('approval/policy', { policy: 'ask' })
     setApprovalReviewer(owner.session, 'auto-review')
     owner.session.append('turn/start', { turn: 1 })

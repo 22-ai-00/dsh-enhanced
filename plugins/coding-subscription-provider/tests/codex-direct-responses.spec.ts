@@ -787,6 +787,22 @@ describe('Codex private Responses transport', () => {
     expect(dependencies.request).not.toHaveBeenCalled()
   })
 
+  it('requests durable image offloading before reading images when the route budget is exceeded', async () => {
+    const imageRef = { attachmentId: 'sha256:budget-image', mediaType: 'image/png', bytes: 1200, width: 1, height: 1 } as never
+    const dependencies = directDependencies(sse([]), { maxRequestImageBytes: 1024 })
+    await expect(collect(runCodexDirectResponses(request([{ role: 'user', content: [{ type: 'image', attachment: imageRef }] }]), dependencies)))
+      .rejects.toMatchObject({ code: 'IMAGE_OFFLOAD_REQUIRED', failure: { offloadImages: 1 } })
+    expect(dependencies.request).not.toHaveBeenCalled()
+  })
+
+  it('projects a surface-offloaded image to text without reading its bytes', async () => {
+    const imageRef = { attachmentId: 'sha256:offloaded-image', mediaType: 'image/png', bytes: 1200, width: 1, height: 1 } as never
+    const dependencies = directDependencies(sse([{ type: 'response.completed', response: completedResponse() }, '[DONE]']), { maxRequestImageBytes: 1024 })
+    await collect(runCodexDirectResponses(request([{ role: 'user', content: [{ type: 'image', attachment: imageRef, offloaded: true }] }]), dependencies))
+    const input = JSON.parse(dependencies.request.mock.calls[0]![0] as string).input
+    expect(input).toEqual([{ role: 'user', content: [{ type: 'input_text', text: expect.stringContaining('[image omitted') }] }])
+  })
+
   it('serializes multimodal history, native tools, raw call ids, and supported generation controls', async () => {
     const imageRef = {
       attachmentId: 'sha256:image-1',
@@ -812,14 +828,11 @@ describe('Codex private Responses transport', () => {
         ],
       }),
       createMessage({
-        role: 'user',
+        role: 'tool',
         source: { kind: 'tool', callId },
-        content: [{
-          type: 'tool-result',
-          toolCallId: callId,
-          content: [{ type: 'text', text: 'contents' }],
-          isError: false,
-        }],
+        toolCallId: callId,
+        content: [{ type: 'text', text: 'contents' }],
+        isError: false,
       }),
     ]
     const response = sse([
@@ -908,12 +921,10 @@ describe('Codex private Responses transport', () => {
       }],
     })
     const toolResult = createMessage({
-      role: 'user',
+      role: 'tool',
       source: { kind: 'tool', callId: hostCallId },
-      content: [{
-        type: 'tool-result', toolCallId: hostCallId, isError: false,
-        content: [{ type: 'text', text: 'contents' }],
-      }],
+      toolCallId: hostCallId, isError: false,
+      content: [{ type: 'text', text: 'contents' }],
     })
     const dependencies = directDependencies(sse([{
       type: 'response.completed', response: completedResponse(),
@@ -941,10 +952,8 @@ describe('Codex private Responses transport', () => {
     expect(assistant.content).toEqual([{
       type: 'tool-call', id: hostCallId, name: 'read_file', arguments: '{"path":"README.md"}',
     }])
-    expect(toolResult.content).toEqual([{
-      type: 'tool-result', toolCallId: hostCallId, isError: false,
-      content: [{ type: 'text', text: 'contents' }],
-    }])
+    expect(toolResult).toMatchObject({ role: 'tool', toolCallId: hostCallId, isError: false,
+      content: [{ type: 'text', text: 'contents' }] })
   })
 
   it('neutralizes literal and Unicode-Cf-obfuscated Harmony tokens in every outbound text surface', async () => {
@@ -963,12 +972,10 @@ describe('Codex private Responses transport', () => {
         ],
       }),
       createMessage({
-        role: 'user',
+        role: 'tool',
         source: { kind: 'tool', callId },
-        content: [{
-          type: 'tool-result', toolCallId: callId, isError: false,
-          content: [{ type: 'text', text: tainted }],
-        }],
+        toolCallId: callId, isError: false,
+        content: [{ type: 'text', text: tainted }],
       }),
     ]
     const dependencies = directDependencies(sse([{
@@ -1051,27 +1058,21 @@ describe('Codex private Responses transport', () => {
     })
     const messages: GenerateOptions['messages'] = [
       createMessage({
-        role: 'user',
+        role: 'tool',
         source: { kind: 'tool', callId: errorCallId },
-        content: [{
-          type: 'tool-result',
-          toolCallId: errorCallId,
-          isError: true,
-          content: [
-            { type: 'text', text: 'failed' },
-            { type: 'image', attachment: imageRef },
-          ],
-        }],
+        toolCallId: errorCallId,
+        isError: true,
+        content: [
+          { type: 'text', text: 'failed' },
+          { type: 'image', attachment: imageRef },
+        ],
       }),
       createMessage({
-        role: 'user',
+        role: 'tool',
         source: { kind: 'tool', callId: emptyCallId },
-        content: [{
-          type: 'tool-result',
-          toolCallId: emptyCallId,
-          isError: false,
-          content: [],
-        }],
+        toolCallId: emptyCallId,
+        isError: false,
+        content: [],
       }),
     ]
 
@@ -2347,14 +2348,11 @@ describe('Codex private Responses transport', () => {
       content: assembler.blocks(),
     })
     const firstToolResult = createMessage({
-      role: 'user',
+      role: 'tool',
       source: { kind: 'tool', callId: ToolCallId('call-first') },
-      content: [{
-        type: 'tool-result',
-        toolCallId: ToolCallId('call-first'),
-        isError: false,
-        content: [{ type: 'text', text: 'first contents' }],
-      }],
+      toolCallId: ToolCallId('call-first'),
+      isError: false,
+      content: [{ type: 'text', text: 'first contents' }],
     })
     await collect(runCodexDirectResponses(request([replayAssistant, firstToolResult], {
       sessionId,

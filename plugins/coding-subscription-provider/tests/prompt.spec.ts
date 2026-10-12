@@ -69,18 +69,23 @@ describe('DSH request serialization', () => {
     expect(prompt).not.toContain('private')
   })
 
-  it('projects nested tool-result images to bounded metadata text without reading image bytes', () => {
+  it('serializes request-only user input without inventing a durable source', () => {
+    const options = request()
+    options.messages = [{ role: 'user', content: [{ type: 'text', text: 'one-shot input' }] }]
+    const payload = JSON.parse(buildPrompt(options, 100_000).split('\n').slice(1).join('\n')) as { conversation: unknown[] }
+    expect(payload.conversation).toEqual([{ role: 'user', content: [{ type: 'text', text: 'one-shot input' }] }])
+  })
+
+  it('projects tool-result images to bounded metadata text without reading image bytes', () => {
     const options = request()
     const callId = 'call-image-result' as never
     const longId = `opaque:${'i'.repeat(10_000)}`
     const longName = `${'n'.repeat(10_000)}.png`
     options.messages = [...options.messages, createMessage({
-      role: 'user',
+      role: 'tool',
       source: { kind: 'tool', callId },
-      content: [{
-        type: 'tool-result',
-        toolCallId: callId,
-        content: [
+      toolCallId: callId,
+      content: [
           {
             type: 'image',
             attachment: {
@@ -105,7 +110,6 @@ describe('DSH request serialization', () => {
             },
           } as never,
         ],
-      }],
     })]
 
     const prompt = buildPrompt(options, 100_000)

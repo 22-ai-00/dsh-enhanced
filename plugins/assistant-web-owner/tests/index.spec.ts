@@ -130,9 +130,9 @@ describe('dsh-enhanced-assistant-web-owner', () => {
     expect(descriptor?.method).toBe('list')
     expect(descriptor?.parameters[0]?.codec.mode).toBe('strict')
     expect(descriptor?.result.mode).toBe('strict')
-    expect(() => descriptor?.parameters[0]?.codec.schema.parse('')).toThrow()
-    expect(descriptor?.result.schema.parse([{ id: 'n1', text: '提醒', createdAt: 1 }])).toEqual([{ id: 'n1', text: '提醒', createdAt: 1 }])
-    expect(() => descriptor?.result.schema.parse([{ id: 'n1', text: 1, createdAt: 1 }])).toThrow()
+    expect(() => descriptor?.parameters[0]?.codec.create().parse('')).toThrow()
+    expect(descriptor?.result.create().parse([{ id: 'n1', text: '提醒', createdAt: 1 }])).toEqual([{ id: 'n1', text: '提醒', createdAt: 1 }])
+    expect(() => descriptor?.result.create().parse([{ id: 'n1', text: 1, createdAt: 1 }])).toThrow()
   })
 
   it('serves notices through a real strict Gateway binding', async () => {

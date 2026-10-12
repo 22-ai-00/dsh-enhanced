@@ -1,3 +1,9 @@
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'assistant-verifier': { kind: 'assistant-verifier'; form?: 'notice'; summary?: string }
+  }
+}
+
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, ReasoningEffortId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -96,7 +102,7 @@ export async function runNativeSourceReview(ctx: Context, input: {
     try {
       signal.throwIfAborted()
       agent.followup(createUserMessage({ content: [{ type: 'text', text: data }],
-        source: { kind: 'plugin', plugin: '@dsh-enhanced/assistant-verifier', form: 'notice', summary: 'Independent source review' } }))
+        source: { kind: 'assistant-verifier', form: 'notice', summary: 'Independent source review' } }))
       await agent.whenIdle()
       signal.throwIfAborted(); assertCurrent()
       const events = agent.session.snapshotEvents() as readonly { type: string; data: Record<string, unknown> }[]

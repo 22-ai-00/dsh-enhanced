@@ -1,7 +1,7 @@
 import { Service } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ReasoningEffortId, ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, Message, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, RequestMessage, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { normalizeConfig, type DeepSeekGoalMeteredConfig } from './config.js'
 import { assertCurrentContract, DEEPSEEK_MODELS, DEEPSEEK_PROVIDER, isDeepSeekModel } from './contract.js'
 
@@ -44,7 +44,7 @@ function bounded<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   })
 }
 
-function content(blocks: readonly ContentBlock[], role: Message['role']): string {
+function content(blocks: readonly ContentBlock[], role: RequestMessage['role']): string {
   let value = ''
   for (const block of blocks) {
     if (block.type !== 'text') throw new Error(`assistant-deepseek-budget: ${role} content must be text-only`)
@@ -53,17 +53,17 @@ function content(blocks: readonly ContentBlock[], role: Message['role']): string
   return value
 }
 
-function projectMessage(message: Message): Record<string, unknown> {
+function projectMessage(message: RequestMessage): Record<string, unknown> {
   if (message.role === 'system') return { role: 'system', content: content(message.content, 'system') }
+  if (message.role === 'tool') {
+    if (message.toolCallId !== message.source.callId) throw new Error('assistant-deepseek-budget: invalid tool result message')
+    return { role: 'tool', tool_call_id: message.toolCallId, content: content(message.content, 'tool') }
+  }
   if (message.role === 'user') {
-    if (message.source.kind === 'tool') {
-      if (message.content.length !== 1 || message.content[0]?.type !== 'tool-result' || message.content[0].toolCallId !== message.source.callId) {
-        throw new Error('assistant-deepseek-budget: invalid tool result message')
-      }
-      return { role: 'tool', tool_call_id: message.source.callId, content: content(message.content[0].content, 'user') }
-    }
+    if (message.source?.kind === 'tool') throw new Error('assistant-deepseek-budget: invalid tool result message')
     return { role: 'user', content: content(message.content, 'user') }
   }
+  if (message.role === 'developer') throw new Error('assistant-deepseek-budget: developer messages are unsupported')
   let visible = ''
   let reasoning: string | undefined
   const calls: unknown[] = []

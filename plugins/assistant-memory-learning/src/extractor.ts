@@ -1,3 +1,9 @@
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'assistant-memory-learning': { kind: 'assistant-memory-learning'; form?: 'notice'; summary?: string }
+  }
+}
+
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, ReasoningEffortId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -154,7 +160,7 @@ export async function runNativeMemoryExtraction(ctx: Context, input: {
     try {
       deadline.throwIfAborted()
       agent.followup(createUserMessage({ content: [{ type: 'text', text: data }],
-        source: { kind: 'plugin', plugin: '@dsh-enhanced/assistant-memory-learning', form: 'notice', summary: 'Owner memory extraction' } }))
+        source: { kind: 'assistant-memory-learning', form: 'notice', summary: 'Owner memory extraction' } }))
       await awaitWithSignal(agent.whenIdle(), deadline)
       deadline.throwIfAborted(); assertCurrent()
       const events = agent.session.snapshotEvents() as readonly { type: string; data: Record<string, unknown> }[]

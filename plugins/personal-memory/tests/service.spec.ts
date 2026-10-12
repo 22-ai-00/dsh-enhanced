@@ -11,6 +11,12 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { PersonalMemoryError, PersonalMemoryService } from '../src/service.ts'
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'plugin:@dsh-enhanced/assistant-automations': { kind: 'plugin:@dsh-enhanced/assistant-automations' }
+  }
+}
+
 const temporaryRoots: string[] = []
 
 async function paths() {
@@ -177,15 +183,15 @@ describe('personal memory Cordis service', () => {
     const redis = approve(addInput('Redis retry needs idempotency'))
     approve(addInput('Garden watering schedule'))
     agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Redis retry' }] }), { surfaceOp: 'append' })
-    agentEvents(ctx, agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(ctx, agent).serial('agent/created', { source: 'startup' })
     const render = async () => renderContextSnapshot(await ctx.systemPrompt.assemble({ agent }))
     expect(await render()).toContain('Redis retry needs idempotency')
     expect(await render()).not.toContain('Garden watering schedule')
     expect(injections).toEqual([])
     // Runtime snapshots and generated answer-completion prompts are not new
     // owner tasks, even when their text happens to match another memory.
-    for (const plugin of ['@deepseek-ai/dsh-system-prompt', '@dsh-enhanced/assistant-delivery']) {
-      agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin', plugin },
+    for (const kind of ['system-prompt', 'personal-memory'] as const) {
+      agent.session.append('user/message', createUserMessage({ source: { kind },
         content: [{ type: 'text', text: 'Garden' }] }), { surfaceOp: 'append' })
     }
     expect(await render()).toContain('Redis retry needs idempotency')
@@ -193,6 +199,10 @@ describe('personal memory Cordis service', () => {
     agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Garden' }] }), { surfaceOp: 'append' })
     expect(await render()).toContain('Garden watering schedule')
     expect(await render()).not.toContain('Redis retry needs idempotency')
+    agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin:@dsh-enhanced/assistant-automations' },
+      content: [{ type: 'text', text: 'Redis retry' }] }), { surfaceOp: 'append' })
+    expect(await render()).toContain('Redis retry needs idempotency')
+    expect(await render()).not.toContain('Garden watering schedule')
     agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Redis' }] }), { surfaceOp: 'append' })
     const proposal = service.propose(agent, {
       idempotencyKey: 'remove:redis', principal: 'owner:lark:123',
@@ -479,7 +489,7 @@ describe('personal memory Cordis service', () => {
       reason: 'confirmed',
     })
 
-    agentEvents(ctx, fixture.agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(ctx, fixture.agent).serial('agent/created', { source: 'startup' })
     const late = service.propose(fixture.agent, addInput('Late memory', 'add:late'))
     service.decideProposal({
       proposalId: late.proposalId,
@@ -488,10 +498,10 @@ describe('personal memory Cordis service', () => {
       decision: 'approved',
       reason: 'confirmed',
     })
-    agentEvents(ctx, fixture.agent).emit('agent/session-start', { source: 'resume' })
+    await agentEvents(ctx, fixture.agent).serial('agent/created', { source: 'resume' })
 
     expect(fixture.injections).toHaveLength(1)
-    expect(fixture.injections[0]).toMatchObject({ source: { kind: 'plugin', plugin: 'personal-memory' } })
+    expect(fixture.injections[0]).toMatchObject({ source: { kind: 'personal-memory' } })
     const text = fixture.injections[0]!.content[0]
     expect(text).toMatchObject({ type: 'text', text: expect.stringContaining('Frozen startup memory') })
     expect(JSON.stringify(text)).not.toContain('Late memory')
@@ -505,9 +515,9 @@ describe('personal memory Cordis service', () => {
     const noWorkspace = stubAgent({ preset: 'primary' })
     const noPreset = stubAgent({ cwd: '/work/alpha' })
 
-    agentEvents(ctx, empty.agent).emit('agent/session-start', { source: 'startup' })
-    agentEvents(ctx, noWorkspace.agent).emit('agent/session-start', { source: 'startup' })
-    agentEvents(ctx, noPreset.agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(ctx, empty.agent).serial('agent/created', { source: 'startup' })
+    await agentEvents(ctx, noWorkspace.agent).serial('agent/created', { source: 'startup' })
+    await agentEvents(ctx, noPreset.agent).serial('agent/created', { source: 'startup' })
 
     expect(empty.injections).toEqual([])
     expect(noWorkspace.injections).toEqual([])

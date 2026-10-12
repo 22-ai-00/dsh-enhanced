@@ -6,7 +6,6 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 
-const repositoryRequire = createRequire(import.meta.url)
 const storageFields = new Set(['databasePath', 'statePath', 'stateRoot', 'vaultRoot', 'spoolPath', 'runsPath', 'catalogPath', 'trustPath', 'scratchPath'])
 const trustedBundleName = /^@(?:deepseek-ai|dsh-enhanced)\/[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)*$/u
 const lifecycleMarkers = new Map([
@@ -52,6 +51,7 @@ const comparePrerelease = (left, right) => {
 
 const compatibleHostVersion = value => {
   if (typeof value !== 'string') return false
+  if (value === '0.2.0-rc.2') return true
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.exec(value)
   if (match === null) return false
   const [, major, minor, patch, prerelease] = match
@@ -77,12 +77,14 @@ async function hostRequire(dshExecutable) {
     const entry = resolve(packageRoot, bin)
     if (!inside(packageRoot, entry)) return undefined
     const canonicalEntry = await realpath(entry)
-    return inside(packageRoot, canonicalEntry) ? canonicalEntry : undefined
+    return inside(packageRoot, canonicalEntry)
+      ? { entry: canonicalEntry, version: manifest.version, dependencies: manifest.dependencies }
+      : undefined
   }
   const acceptCanonicalEntry = async candidate => {
     try {
-      const manifestPath = await realpath(candidate), entry = await entryFor(manifestPath)
-      return entry === executable ? createRequire(manifestPath) : undefined
+      const manifestPath = await realpath(candidate), host = await entryFor(manifestPath)
+      return host?.entry === executable ? { ...host, manifestPath, require: createRequire(manifestPath) } : undefined
     } catch { return undefined }
   }
   try {
@@ -103,18 +105,100 @@ async function hostRequire(dshExecutable) {
       const source = await readFile(executable, 'utf8')
       const targets = [...source.matchAll(/exec\s+(?:node|"\$basedir\/node")\s+"\$basedir\/([^"\r\n]+)"\s+"\$@"/gu)]
         .map(match => resolve(dirname(executable), match[1]))
-      if (entry !== undefined && targets.length === 2 && (await Promise.all(targets.map(target => realpath(target).catch(() => '')))).every(target => target === entry)) return createRequire(manifestPath)
+      if (entry !== undefined && targets.length === 2 && (await Promise.all(targets.map(target => realpath(target).catch(() => '')))).every(target => target === entry.entry)) {
+        return { ...entry, manifestPath, require: createRequire(manifestPath) }
+      }
     } catch {}
   }
   throw new Error('lifecycle configuration validation requires the yaml parser from this repository or the canonical DSH executable')
 }
 
+function dependencyClosureRoot(manifestPath) {
+  const pnpmMarker = `${sep}node_modules${sep}.pnpm${sep}`
+  const pnpmIndex = manifestPath.indexOf(pnpmMarker)
+  if (pnpmIndex >= 0) return manifestPath.slice(0, pnpmIndex) + `${sep}node_modules`
+  const marker = `${sep}node_modules${sep}`
+  const index = manifestPath.lastIndexOf(marker)
+  if (index < 0) throw new Error('Host manifest is outside an installation node_modules')
+  return manifestPath.slice(0, index) + `${sep}node_modules`
+}
+
+function compatibleLegacySkillVersion(hostVersion, skillVersion) {
+  if (!compatibleHostVersion(skillVersion)) return false
+  const pattern = /^0\.1\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u
+  const host = pattern.exec(hostVersion), skill = pattern.exec(skillVersion)
+  if (host === null || skill === null) return false
+  if (Number(skill[1]) < Number(host[1])) return false
+  if (Number(skill[1]) > Number(host[1])) return skill[2] === undefined
+  return comparePrerelease(prereleaseIdentifiers(skill[2]), prereleaseIdentifiers(host[2])) >= 0
+}
+
+async function declaredParser(manifestPath, closureRoot, declaration, legacy = false) {
+  if (legacy ? declaration !== '^2.4.2' : declaration !== '^2.9.0' && declaration !== '2.9.0') {
+    throw new Error('unverified structural YAML parser declaration')
+  }
+  const requireFrom = createRequire(manifestPath)
+  const parserPath = await realpath(requireFrom.resolve('yaml/package.json'))
+  const parser = JSON.parse(await readFile(parserPath, 'utf8'))
+  const version = /^2\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.exec(parser.version ?? '')
+  if (parser.name !== 'yaml' || version === null || Number(version[1]) < (legacy ? 4 : 9)
+    || legacy && Number(version[1]) === 4 && Number(version[2]) < 2
+    || !inside(await realpath(closureRoot), parserPath)) throw new Error('unverified structural YAML parser')
+  let cursor = dirname(manifestPath), declaredLookup = false
+  for (;;) {
+    if (await realpath(join(cursor, 'node_modules', 'yaml', 'package.json')).catch(() => '') === parserPath) {
+      declaredLookup = true
+      break
+    }
+    const parent = dirname(cursor)
+    if (parent === cursor) break
+    cursor = parent
+  }
+  if (!declaredLookup) throw new Error('structural YAML parser was not resolved from a package dependency')
+  const resolved = await realpath(requireFrom.resolve('yaml'))
+  if (!inside(dirname(parserPath), resolved)) throw new Error('structural YAML parser module escapes its package')
+  return resolved
+}
+
+async function repositoryParser() {
+  const helper = await realpath(fileURLToPath(import.meta.url))
+  const root = dirname(dirname(dirname(helper)))
+  if (helper !== join(root, 'scripts', 'install', 'lifecycle-config.mjs')) throw new Error('helper is not in its repository')
+  const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
+  if (manifest.name !== 'dsh-enhanced') throw new Error('helper repository identity differs')
+  return declaredParser(join(root, 'package.json'), join(root, 'node_modules'), manifest.devDependencies?.yaml ?? manifest.dependencies?.yaml)
+}
+
+async function hostParser(dshExecutable) {
+  const host = await hostRequire(dshExecutable)
+  const closureRoot = dependencyClosureRoot(host.manifestPath)
+  if (host.version === '0.2.0-rc.2') {
+    if (host.dependencies?.['@deepseek-ai/dsh-plugin-manager'] !== host.version) throw new Error('unverified Host parser dependency')
+    const managerPath = await realpath(host.require.resolve('@deepseek-ai/dsh-plugin-manager/package.json'))
+    if (!inside(await realpath(closureRoot), managerPath)) throw new Error('Host parser dependency escapes its installation')
+    const manager = JSON.parse(await readFile(managerPath, 'utf8'))
+    if (manager.name !== '@deepseek-ai/dsh-plugin-manager' || manager.version !== host.version) {
+      throw new Error('unverified Host parser dependency')
+    }
+    return declaredParser(managerPath, closureRoot, manager.dependencies?.yaml)
+  }
+  if (host.dependencies?.yaml !== undefined) return declaredParser(host.manifestPath, closureRoot, host.dependencies.yaml)
+  if (host.dependencies?.['@deepseek-ai/dsh-skill-filesystem'] !== `^${host.version}`) throw new Error('unverified legacy Host parser dependency')
+  const skillPath = await realpath(host.require.resolve('@deepseek-ai/dsh-skill-filesystem/package.json'))
+  if (!inside(await realpath(closureRoot), skillPath)) throw new Error('legacy Host parser dependency escapes its installation')
+  const skill = JSON.parse(await readFile(skillPath, 'utf8'))
+  if (skill.name !== '@deepseek-ai/dsh-skill-filesystem' || !compatibleLegacySkillVersion(host.version, skill.version)) {
+    throw new Error('unverified legacy Host parser dependency')
+  }
+  return declaredParser(skillPath, closureRoot, skill.dependencies?.yaml, true)
+}
+
 async function yamlModule(dshExecutable) {
   let resolved
-  try {
-    resolved = repositoryRequire.resolve('yaml')
-  } catch {
-    try { resolved = (await hostRequire(dshExecutable)).resolve('yaml') } catch {
+  try { resolved = await repositoryParser() }
+  catch {
+    try { resolved = await hostParser(dshExecutable) }
+    catch {
       throw new Error('lifecycle configuration validation requires the yaml parser from this repository or the canonical DSH executable')
     }
   }

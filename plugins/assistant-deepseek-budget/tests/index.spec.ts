@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { createMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createAssistantMessage, createMessage, createToolResultMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it } from 'vitest'
 import { DeepSeekGoalMeteredAdapter } from '../src/adapter.ts'
 import { Config } from '../src/config.ts'
@@ -36,6 +36,27 @@ describe('dsh-enhanced-assistant-deepseek-budget', () => {
     const adapter = new DeepSeekGoalMeteredAdapter(Config(), { now, environment: { DEEPSEEK_API_KEY: 'test-key' }, fetch: async () => new Response(JSON.stringify({ model: 'deepseek-v4-pro', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }], usage: { prompt_tokens: 3, prompt_cache_hit_tokens: 2, completion_tokens: 1, total_tokens: 4 } })) })
     const iterator = adapter.stream({ provider: DEEPSEEK_PROVIDER, model: 'deepseek-v4-pro', maxTokens: 3, messages: [] })[Symbol.asyncIterator]()
     await expect(iterator.next()).rejects.toMatchObject({ code: 'DEEPSEEK_PROTOCOL' })
+  })
+
+  it('projects request-only input and first-class tool results without turning tool output into a user turn', async () => {
+    const callId = ToolCallId('call_1')
+    const fetch = async (_url: string, init: RequestInit) => {
+      expect(JSON.parse(String(init.body)).messages).toEqual([
+        { role: 'user', content: 'prompt' },
+        { role: 'assistant', content: null, tool_calls: [{ id: callId, type: 'function', function: { name: 'inspect', arguments: '{}' } }] },
+        { role: 'tool', tool_call_id: callId, content: 'observed' },
+      ])
+      return new Response(JSON.stringify({ model: 'deepseek-v4-pro', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'done' } }], usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 } }))
+    }
+    const adapter = new DeepSeekGoalMeteredAdapter(Config(), { fetch, now, environment: { DEEPSEEK_API_KEY: 'test-key' } })
+    const messages = [
+      { role: 'user' as const, content: [{ type: 'text' as const, text: 'prompt' }] },
+      createAssistantMessage({ source: { provider: DEEPSEEK_PROVIDER, model: 'deepseek-v4-pro' }, content: [{ type: 'tool-call', id: callId, name: 'inspect', arguments: '{}' }] }),
+      createToolResultMessage({ callId, content: [{ type: 'text', text: 'observed' }], isError: false }),
+    ]
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter.stream({ provider: DEEPSEEK_PROVIDER, model: 'deepseek-v4-pro', messages })) chunks.push(chunk)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
   })
 
   it('keeps the documented conservative input bound', () => {

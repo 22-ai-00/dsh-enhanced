@@ -24,7 +24,7 @@ export function apply(ctx: Context, input?: CodingSubscriptionProviderConfig): v
     return
   }
 
-  const requestAttestor = createAgentLoopRequestAttestor(ctx.agents, routes)
+  const requestAttestor = createAgentLoopRequestAttestor(ctx.agents, routes, reference => ctx.llm.fileRequestText(reference))
   const adapter = new CodingSubscriptionAdapter(config, {
     // A local CLI must only run for a live, loop-owned session.  Do not derive
     // this from model-visible request data or the configured provider cwd.

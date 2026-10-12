@@ -56,6 +56,14 @@ async function host(root: string, adapter: ScriptAdapter, options: { ownerVersio
   await ctx.loader.await()
   await ctx.plugin(TokenMeter)
   await ctx.plugin(ToolResultPruner, { thresholdChars: options.pruneThresholdChars ?? 8_192, headChars: options.pruneHeadChars ?? 4_096, tailChars: options.pruneTailChars ?? 1_024 })
+  ctx.on('agent/pre-step', ({ agent }, next) => {
+    const events = agent.session.snapshotEvents()
+    if (events.some(event => event.type === 'tool/result')
+      && !events.some(event => event.type === 'compaction/prune')) {
+      ctx.toolResultPruner.pruneSession(agent.session)
+    }
+    return next()
+  })
   ctx.provide('assistantDelivery', {
     preferencePrincipalForAgent: (agent: Agent) => options.revoked ? undefined : ({
       scope: { workspace: root, preset: 'primary' }, principalId: 'owner:public-fixture',
@@ -89,7 +97,7 @@ async function host(root: string, adapter: ScriptAdapter, options: { ownerVersio
   ctx.on('tools/execute', async (exec, next) => { if (exec.name === trackedTool) executions++; return next() })
   if (options.denyPipeline) ctx.on('tools/pre-execute', async (exec, next) =>
     exec.name === trackedTool ? { kind: 'deny', reason: 'resource provider revoked' } : next())
-  ctx.on('agent/session-start', ({ agent }) => {
+  ctx.on('agent/created', ({ agent }) => {
     agent.session.append('sandbox/mode', { mode: 'danger-full-access' })
     agent.session.append('approval/policy', { policy: 'never' })
     agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
@@ -123,7 +131,7 @@ test.each(['current-owner', 'changed-owner', 'revoked-owner', 'denied-tool', 'ch
     try {
       handle = await first.ctx.agents.create({ sessionId: id, meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'evidence-fixture', model: 'fixture' } })
       await prompt(handle, 'Capture the journal report.')
-      expect(first.executions(), JSON.stringify(handle.agent.session.snapshotEvents().filter(event => event.type === 'tool/result').map(event => ({ seq: event.seq, failed: event.data.message.content[0].isError })))).toBe(1)
+      expect(first.executions(), JSON.stringify(handle.agent.session.snapshotEvents().filter(event => event.type === 'tool/result').map(event => ({ seq: event.seq, failed: event.data.message.isError })))).toBe(1)
       const db = new DatabaseSync(join(root, 'memory.sqlite'), { readOnly: true })
       try {
         const anchors = db.prepare('SELECT reference, content_digest FROM memory_evidence_anchors').all()
@@ -132,10 +140,10 @@ test.each(['current-owner', 'changed-owner', 'revoked-owner', 'denied-tool', 'ch
         expect(db.prepare('SELECT count(*) AS n FROM memory_records').get()).toMatchObject({ n: 0 })
       } finally { db.close() }
       expect(reference).toMatch(/^dsh-evidence:v1:[0-9a-f]{64}$/u)
-      const pruned = first.ctx.toolResultPruner.pruneSession(handle.agent.session)
-      expect(pruned.pruned).toHaveLength(1)
+      const pruned = handle.agent.session.snapshotEvents().filter(event => event.type === 'compaction/prune')
+      expect(pruned).toHaveLength(1)
       expect(JSON.stringify(handle.agent.session.deriveMessages())).not.toContain('NEEDLE=journal-v2')
-      expect(handle.agent.session.eventAt(pruned.pruned[0]!.originalSeq)?.type).toBe('tool/result')
+      expect(handle.agent.session.eventAt(pruned[0]!.data.shadowedSeqs[0])?.type).toBe('tool/result')
       expect(await first.ctx.sessions.flush(handle.agent.session)).toBe(true)
       sourcePath = first.ctx.sessionPersistence.locate(handle.agent.session.header)!.path
       expect(await readFile(sourcePath, 'utf8')).toContain('NEEDLE=journal-v2')
@@ -148,9 +156,9 @@ test.each(['current-owner', 'changed-owner', 'revoked-owner', 'denied-tool', 'ch
         if (line === '') return line
         const value = JSON.parse(line)
         if (value.type !== 'tool/result' || value.surfaceOp !== 'append') return line
-        const text = value.data.message.content[0].content[0].text
+        const text = value.data.message.content[0].text
         if (!text.includes('NEEDLE=journal-v2')) return line
-        value.data.message.content[0].content[0].text = text.replace('NEEDLE=journal-v2', 'BROKEN=journal-v2')
+        value.data.message.content[0].text = text.replace('NEEDLE=journal-v2', 'BROKEN=journal-v2')
         changed++
         return JSON.stringify(value)
       }).join('\n')
@@ -251,9 +259,9 @@ test('read_image evidence survives prune, reopen, and replays through the vision
     await prompt(handle, 'Capture the diagram.')
     expect(first.executions()).toBe(1)
     // The real pipeline emitted a text envelope beside an image attachment block.
-    const serialized = JSON.stringify(handle.agent.session.deriveMessages())
-    expect(serialized).toContain(IMAGE_ENVELOPE_NEEDLE)
-    expect(serialized).toContain('"type":"image"')
+    const original = handle.agent.session.snapshotEvents().find(event => event.type === 'tool/result')
+    expect(JSON.stringify(original)).toContain(IMAGE_ENVELOPE_NEEDLE)
+    expect(JSON.stringify(original)).toContain('"type":"image"')
     const db = new DatabaseSync(join(root, 'memory.sqlite'), { readOnly: true })
     try {
       const anchors = db.prepare('SELECT reference, tool_name FROM memory_evidence_anchors').all()
@@ -262,8 +270,8 @@ test('read_image evidence survives prune, reopen, and replays through the vision
       reference = String(anchors[0]!.reference)
     } finally { db.close() }
 
-    const pruned = first.ctx.toolResultPruner.pruneSession(handle.agent.session)
-    expect(pruned.pruned).toHaveLength(1)
+    const pruned = handle.agent.session.snapshotEvents().filter(event => event.type === 'compaction/prune')
+    expect(pruned).toHaveLength(1)
     expect(JSON.stringify(handle.agent.session.deriveMessages())).not.toContain(IMAGE_ENVELOPE_NEEDLE)
     expect(await first.ctx.sessions.flush(handle.agent.session)).toBe(true)
     const sourcePath = first.ctx.sessionPersistence.locate(handle.agent.session.header)!.path
@@ -322,7 +330,7 @@ test('read_image evidence stays unavailable when the recovery route is not image
       expect(anchors).toHaveLength(1)
       reference = String(anchors[0]!.reference)
     } finally { db.close() }
-    first.ctx.toolResultPruner.pruneSession(handle.agent.session)
+    expect(handle.agent.session.snapshotEvents().filter(event => event.type === 'compaction/prune')).toHaveLength(1)
     await first.ctx.sessions.flush(handle.agent.session)
   } finally { await handle?.dispose(); await first.ctx.fiber.dispose() }
 

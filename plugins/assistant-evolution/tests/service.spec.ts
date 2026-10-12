@@ -436,7 +436,7 @@ async function recordAttributedOutcomes(
   for (const [offset, outcome] of outcomes.entries()) {
     const index = offset + 1
     const session = stubAgent({ id: `${keyPrefix}-session-${index}` })
-    agentEvents(fixture.ctx, session.agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(fixture.ctx, session.agent).serial('agent/created', { source: 'startup' })
     const automationId = fixture.rule.situation.replace(/^automation:/u, '')
     const exposure = await fixture.service.captureAutomationExposure({
       workspace: '/work/alpha',
@@ -1018,7 +1018,7 @@ describe('assistant evolution service', () => {
   test('injects approved guidance into a new session, and nothing before approval', async () => {
     const fixture = await adoptRule()
     const before = stubAgent()
-    agentEvents(fixture.ctx, before.agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(fixture.ctx, before.agent).serial('agent/created', { source: 'startup' })
     expect(before.injections).toEqual([])
 
     fixture.policy.decideProposal({
@@ -1031,7 +1031,7 @@ describe('assistant evolution service', () => {
     fixture.service.reconcileProposals()
 
     const after = stubAgent()
-    agentEvents(fixture.ctx, after.agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(fixture.ctx, after.agent).serial('agent/created', { source: 'startup' })
 
     expect(after.injections).toHaveLength(1)
     const text = after.injections[0]!.content.map(block => block.type === 'text' ? block.text : '').join('')
@@ -1045,7 +1045,7 @@ describe('assistant evolution service', () => {
     const fixture = await harness({ allow: false })
     const { agent, injections } = stubAgent()
 
-    agentEvents(fixture.ctx, agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(fixture.ctx, agent).serial('agent/created', { source: 'startup' })
 
     expect(injections).toEqual([])
     await fixture.ctx.fiber.restart()
@@ -1063,8 +1063,8 @@ describe('assistant evolution service', () => {
     fixture.service.reconcileProposals()
     const { agent, injections } = stubAgent()
 
-    agentEvents(fixture.ctx, agent).emit('agent/session-start', { source: 'startup' })
-    agentEvents(fixture.ctx, agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(fixture.ctx, agent).serial('agent/created', { source: 'startup' })
+    await agentEvents(fixture.ctx, agent).serial('agent/created', { source: 'startup' })
 
     expect(injections).toHaveLength(1)
     await fixture.ctx.fiber.restart()
@@ -1081,7 +1081,7 @@ describe('assistant evolution service', () => {
       sessionId: String(session.agent.session.id),
     })).toBeUndefined()
 
-    agentEvents(fixture.ctx, session.agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(fixture.ctx, session.agent).serial('agent/created', { source: 'startup' })
 
     expect(session.injections).toHaveLength(1)
     const captured = await fixture.service.captureAutomationExposure({
@@ -1140,7 +1140,7 @@ describe('assistant evolution service', () => {
       occurrenceId: 'occurrence-preview',
     }) as never)
 
-    agentEvents(fixture.ctx, preview.agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(fixture.ctx, preview.agent).serial('agent/created', { source: 'startup' })
 
     expect(preview.injections).toEqual([])
     expect(await fixture.service.captureAutomationExposure({
@@ -1156,7 +1156,7 @@ describe('assistant evolution service', () => {
       automationId: 'preview-safe',
       occurrenceId: 'occurrence-production',
     }) as never)
-    agentEvents(fixture.ctx, production.agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(fixture.ctx, production.agent).serial('agent/created', { source: 'startup' })
     expect(production.injections).toHaveLength(1)
     expect(await fixture.service.captureAutomationExposure({
       workspace: '/work/alpha',
@@ -1174,7 +1174,7 @@ describe('assistant evolution service', () => {
       inject: () => { throw new Error('inject failed') },
     })
 
-    agentEvents(fixture.ctx, session.agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(fixture.ctx, session.agent).serial('agent/created', { source: 'startup' })
     expect(await fixture.service.captureAutomationExposure({
       workspace: '/work/alpha',
       agentPreset: 'primary',
@@ -1188,7 +1188,7 @@ describe('assistant evolution service', () => {
     const first = await approvedRule('automation:weekly-report')
     const sessionId = 'resumed-automation-session'
     const initial = stubAgent({ id: sessionId })
-    agentEvents(first.ctx, initial.agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(first.ctx, initial.agent).serial('agent/created', { source: 'startup' })
     expect(initial.injections).toHaveLength(1)
     const expected = {
       ruleId: first.rule.id,
@@ -1199,7 +1199,7 @@ describe('assistant evolution service', () => {
 
     const restarted = await harness({ root })
     const resumed = stubAgent({ id: sessionId })
-    agentEvents(restarted.ctx, resumed.agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(restarted.ctx, resumed.agent).serial('agent/created', { source: 'startup' })
 
     expect(resumed.injections).toEqual([])
     expect(await restarted.service.captureAutomationExposure({
@@ -1228,7 +1228,7 @@ describe('assistant evolution service', () => {
     }
     const session = stubAgent({ id: 'bounded-guidance-session' })
 
-    agentEvents(fixture.ctx, session.agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(fixture.ctx, session.agent).serial('agent/created', { source: 'startup' })
 
     expect(session.injections).toHaveLength(1)
     const capturedA = await fixture.service.captureAutomationExposure({
@@ -1293,7 +1293,7 @@ describe('assistant evolution service', () => {
     `).get(String(session.agent.session.id))).toEqual({ count: 12 })
 
     const lateContext = stubAgent({ id: 'thirteenth-late-context-session' })
-    agentEvents(fixture.ctx, lateContext.agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(fixture.ctx, lateContext.agent).serial('agent/created', { source: 'startup' })
     expect(await fixture.service.captureAutomationExposure({
       workspace: '/work/alpha',
       agentPreset: 'primary',
@@ -1322,7 +1322,7 @@ describe('assistant evolution service', () => {
     const fixture = await approvedRule('automation:weekly-report')
     const sessionId = 'multi-generation-session'
     const firstSession = stubAgent({ id: sessionId })
-    agentEvents(fixture.ctx, firstSession.agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(fixture.ctx, firstSession.agent).serial('agent/created', { source: 'startup' })
 
     await recordAttributedOutcomes(
       fixture,
@@ -1356,7 +1356,7 @@ describe('assistant evolution service', () => {
     approve(fixture, readopt)
 
     const resumed = stubAgent({ id: sessionId })
-    agentEvents(fixture.ctx, resumed.agent).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(fixture.ctx, resumed.agent).serial('agent/created', { source: 'startup' })
 
     expect(resumed.injections).toHaveLength(1)
     const replacementText = resumed.injections[0]!.content
@@ -1373,7 +1373,7 @@ describe('assistant evolution service', () => {
     const fixture = await approvedRule('automation:nightly')
     for (let index = 1; index <= 4; index += 1) {
       const session = stubAgent({ id: `nightly-session-${index}` })
-      agentEvents(fixture.ctx, session.agent).emit('agent/session-start', { source: 'startup' })
+      await agentEvents(fixture.ctx, session.agent).serial('agent/created', { source: 'startup' })
       const exposure = (await fixture.service.captureAutomationExposure({
         workspace: '/work/alpha',
         agentPreset: 'primary',
@@ -1407,7 +1407,7 @@ describe('assistant evolution service', () => {
     })
     for (let index = 1; index <= 5; index += 1) {
       const session = stubAgent({ id: `operational-retire-session-${index}` })
-      agentEvents(fixture.ctx, session.agent).emit('agent/session-start', { source: 'startup' })
+      await agentEvents(fixture.ctx, session.agent).serial('agent/created', { source: 'startup' })
       const exposure = (await fixture.service.captureAutomationExposure({
         workspace: '/work/alpha',
         agentPreset: 'primary',

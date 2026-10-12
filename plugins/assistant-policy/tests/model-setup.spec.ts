@@ -2,16 +2,44 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { parse } from 'yaml'
+import { isMap, isSeq, parse, parseDocument, YAMLMap, YAMLSeq } from 'yaml'
 import {
-  applyModelSetup,
+  applyModelSetup as applyModelSetupWithReader,
   deriveApiKeyEnv,
   parseModelSetupArgs,
   resolveModelSetup,
   runModelSetup,
 } from '../src/model-setup.ts'
+import type { ResolvedModelSetup } from '../src/model-setup.ts'
 
 const temporaryRoots: string[] = []
+
+async function fixtureEffectiveConfig(home: string, profile: string, rowId: string): Promise<YAMLMap> {
+  let config = rowId === 'llm-pi-ai'
+    ? parseDocument('providers:\n  bundled:\n    baseURL: https://bundled.example/v1\n').contents as YAMLMap
+    : new YAMLMap()
+  for (const path of [join(home, 'cordis.patch.yml'), join(home, 'profiles', profile, 'cordis.patch.yml')]) {
+    let source: string
+    try { source = await readFile(path, 'utf8') } catch { continue }
+    const sequence = parseDocument(source).contents
+    if (!isSeq(sequence)) continue
+    const rows = (entries: YAMLSeq): YAMLMap[] => entries.items.flatMap(item => {
+      if (!isMap(item)) return []
+      const inserted = item.get('insert', true)
+      return [item, ...(isSeq(inserted) ? rows(inserted) : [])]
+    })
+    for (const row of rows(sequence)) {
+      if (row.get('id') !== rowId) continue
+      const candidate = row.get('config', true)
+      if (isMap(candidate)) config = candidate.clone() as YAMLMap
+    }
+  }
+  return config
+}
+
+function applyModelSetup(resolved: ResolvedModelSetup) {
+  return applyModelSetupWithReader(resolved, fixtureEffectiveConfig)
+}
 
 async function temporaryHome(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-model-setup-'))
@@ -83,6 +111,111 @@ describe('model setup', () => {
     expect(credentials.SUPER_RELAY_API_KEY).toBe('plat-secret-value')
   })
 
+  test('writes native defaults to separate profiles and preserves whole gateway config', async () => {
+    const home = await temporaryHome()
+    const webPath = join(home, 'profiles', 'web', 'cordis.patch.yml')
+    const assistantPath = join(home, 'profiles', 'assistant', 'cordis.patch.yml')
+    await mkdir(join(home, 'profiles', 'web'), { recursive: true })
+    await mkdir(join(home, 'profiles', 'assistant'), { recursive: true })
+    await writeFile(webPath, '# web owner\n- id: unrelated\n  config:\n    path: !!js dshHomePath("web")\n', 'utf8')
+    await writeFile(assistantPath, '# assistant owner\n- id: agent-default-model\n  config:\n    reasoningEffort: high\n- id: llm-pi-ai\n  config:\n    providers:\n      retained:\n        baseURL: https://retained.example/v1\n', 'utf8')
+
+    await applyModelSetup(resolveModelSetup(parseModelSetupArgs([
+      '--dsh-home', home, '--profile', 'web', '--provider', 'deepseek-official',
+    ])))
+    const configured = resolveModelSetup(parseModelSetupArgs([
+      '--dsh-home', home, '--profile', 'assistant', '--provider', 'super-relay', '--model', 'glm5.2',
+      '--base-url', 'https://super-relay.example/v1',
+    ]))
+    await applyModelSetup(configured)
+
+    const web = await readFile(webPath, 'utf8')
+    const assistant = await readFile(assistantPath, 'utf8')
+    expect(web).toContain('# web owner')
+    expect(web).toContain('path: !!js dshHomePath("web")')
+    expect(web).toContain('provider: deepseek-official')
+    expect(web).not.toContain('super-relay')
+    expect(assistant).toContain('# assistant owner')
+    expect(assistant).toContain('reasoningEffort: high')
+    expect(assistant).toContain('retained:')
+    expect(assistant).toContain('provider: super-relay')
+    expect(assistant).toContain('baseURL: https://super-relay.example/v1')
+    await applyModelSetup(configured)
+    expect(await readFile(assistantPath, 'utf8')).toBe(assistant)
+    await expect(readFile(join(home, 'settings.yaml'), 'utf8')).rejects.toThrow()
+  })
+
+  test('copies an existing native gateway provider when creating the profile override', async () => {
+    const home = await temporaryHome()
+    const resolved = resolveModelSetup(parseModelSetupArgs([
+      '--dsh-home', home, '--profile', 'web', '--provider', 'super-relay', '--model', 'glm5.2',
+      '--base-url', 'https://super-relay.example/v1',
+    ]))
+    const result = await applyModelSetup(resolved)
+    const patch = await readFile(result.profilePatchPath!, 'utf8')
+    expect(patch).toContain('bundled:')
+    expect(patch).toContain('https://bundled.example/v1')
+    expect(patch).toContain('super-relay:')
+  })
+
+  test('creates a provider map when the native gateway row has no config', async () => {
+    const home = await temporaryHome()
+    const resolved = resolveModelSetup(parseModelSetupArgs([
+      '--dsh-home', home, '--profile', 'web', '--provider', 'super-relay', '--model', 'glm5.2',
+      '--base-url', 'https://super-relay.example/v1',
+    ]))
+    const result = await applyModelSetupWithReader(resolved, async (_home, _profile, rowId) => {
+      return rowId === 'llm-pi-ai' ? new YAMLMap() : fixtureEffectiveConfig(_home, _profile, rowId)
+    })
+    const patch = await readFile(result.profilePatchPath!, 'utf8')
+    expect(patch).toContain('providers:')
+    expect(patch).toContain('super-relay:')
+  })
+
+  test('refuses a failed native config read before writing credentials or profile patch', async () => {
+    const home = await temporaryHome()
+    const resolved = resolveModelSetup(parseModelSetupArgs([
+      '--dsh-home', home, '--profile', 'web', '--provider', 'super-relay', '--model', 'glm5.2',
+      '--base-url', 'https://super-relay.example/v1', '--store-key',
+    ]))
+    await expect(applyModelSetupWithReader(resolved, async () => {
+      throw new Error('native dump failed')
+    })).rejects.toThrow('native dump failed')
+    await expect(readFile(join(home, '.credentials.yaml'), 'utf8')).rejects.toThrow()
+    await expect(readFile(join(home, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')).rejects.toThrow()
+  })
+
+  test('rejects malformed native profile patch without replacing it', async () => {
+    const home = await temporaryHome()
+    const profileDir = join(home, 'profiles', 'web')
+    await mkdir(profileDir, { recursive: true })
+    const path = join(profileDir, 'cordis.patch.yml')
+    await writeFile(path, 'notASequence: true\n', 'utf8')
+    const configured = resolveModelSetup(parseModelSetupArgs(['--dsh-home', home, '--profile', 'web']))
+    await expect(applyModelSetup(configured)).rejects.toThrow('top-level YAML sequence')
+    expect(await readFile(path, 'utf8')).toBe('notASequence: true\n')
+    await expect(readFile(join(home, 'settings.yaml'), 'utf8')).rejects.toThrow()
+  })
+
+  test('rejects pending legacy model import before writing a profile or credential', async () => {
+    const home = await temporaryHome()
+    const settingsPath = join(home, 'settings.yaml')
+    const source = 'agent-default-model: { provider: deepseek-official, model: previous }\n'
+    await writeFile(settingsPath, source, 'utf8')
+    const configured = resolveModelSetup(parseModelSetupArgs(['--dsh-home', home, '--profile', 'web']))
+    await expect(applyModelSetup(configured)).rejects.toThrow('pending legacy settings.yaml model section')
+    expect(await readFile(settingsPath, 'utf8')).toBe(source)
+    await expect(readFile(join(home, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')).rejects.toThrow()
+
+    await writeFile(settingsPath, 'llm-pi-ai:\n  providers:\n    retained: {}\n', 'utf8')
+    const gateway = resolveModelSetup(parseModelSetupArgs([
+      '--dsh-home', home, '--profile', 'web', '--provider', 'super-relay', '--model', 'glm5.2',
+      '--base-url', 'https://super-relay.example/v1', '--store-key',
+    ]))
+    await expect(applyModelSetup(gateway)).rejects.toThrow('pending legacy settings.yaml model section')
+    await expect(readFile(join(home, '.credentials.yaml'), 'utf8')).rejects.toThrow()
+  })
+
   test('derives POSIX credential references and defaults deepseek to DEEPSEEK_API_KEY', () => {
     expect(deriveApiKeyEnv('deepseek-official')).toBe('DEEPSEEK_API_KEY')
     expect(deriveApiKeyEnv('super-relay')).toBe('SUPER_RELAY_API_KEY')
@@ -97,6 +230,12 @@ describe('model setup', () => {
     expect(() => resolveModelSetup(parseModelSetupArgs([
       '--dsh-home', '/tmp/dsh', '--base-url', 'https://x/v1',
     ]))).toThrow('only apply to a custom gateway route')
+    expect(() => resolveModelSetup(parseModelSetupArgs([
+      '--dsh-home', '/tmp/dsh', '--profile', '../other',
+    ]))).toThrow('--profile must be a valid profile name')
+    expect(() => resolveModelSetup(parseModelSetupArgs([
+      '--dsh-home', '/tmp/dsh', '--profile', 'web', '--provider', 'traex-agent', '--enable-in-profile', 'assistant',
+    ]))).toThrow('must name the same profile')
   })
 
   test('refuses to store a key when neither the key env var nor the credential reference is set', async () => {
@@ -129,6 +268,20 @@ describe('model setup', () => {
     expect(settings['llm-pi-ai']).toBeUndefined()
     expect(result.credentialsPath).toBeUndefined()
     expect(result.profilePatchPath).toBeUndefined()
+  })
+
+  test('selects and enables an explicit agent route in one native profile patch', async () => {
+    const home = await temporaryHome()
+    const resolved = resolveModelSetup(parseModelSetupArgs([
+      '--dsh-home', home, '--profile', 'web', '--provider', 'traex-agent', '--enable-in-profile', 'web',
+    ]))
+    const result = await applyModelSetup(resolved)
+    const patch = await readFile(result.profilePatchPath!, 'utf8')
+    expect(patch).toContain('id: agent-default-model')
+    expect(patch).toContain('provider: traex-agent')
+    expect(patch).toContain('id: dsh-enhanced-traex-acp-provider')
+    expect(patch).toContain('enabled: true')
+    await expect(readFile(join(home, 'settings.yaml'), 'utf8')).rejects.toThrow()
   })
 
   test('enabling an agent route flips its bundle row while preserving other rows and !!js config', async () => {
@@ -173,7 +326,7 @@ describe('model setup', () => {
 
   test('default-if-absent selects only a fresh target profile and repeats without changing its patch', async () => {
     const home = await temporaryHome()
-    const args = ['--dsh-home', home, '--provider', 'traex-agent', '--enable-in-profile', 'web',
+    const args = ['--dsh-home', home, '--profile', 'web', '--provider', 'traex-agent', '--enable-in-profile', 'web',
       '--default-if-absent', '--agent-command', '/opt/traex/bin/traex']
     const resolved = resolveModelSetup(parseModelSetupArgs(args))
     const first = await applyModelSetup(resolved)
@@ -256,7 +409,7 @@ describe('model setup', () => {
     const chunks: string[] = []
     const output = vi.spyOn(process.stdout, 'write').mockImplementation(chunk => { chunks.push(String(chunk)); return true })
     try {
-      await runModelSetup(['--dsh-home', home, '--provider', 'traex-agent', '--enable-in-profile', 'web', '--default-if-absent'])
+      await runModelSetup(['--dsh-home', home, '--provider', 'traex-agent', '--enable-in-profile', 'web', '--default-if-absent'], fixtureEffectiveConfig)
     } finally { output.mockRestore() }
     const printed = chunks.join('')
     expect(printed).toContain('Preserved existing default model selection')
@@ -271,7 +424,7 @@ describe('model setup', () => {
     const args = ['--dsh-home', home, '--provider', 'traex-agent', '--enable-in-profile', 'web', '--enable-only']
     const chunks: string[] = []
     const output = vi.spyOn(process.stdout, 'write').mockImplementation(chunk => { chunks.push(String(chunk)); return true })
-    try { await runModelSetup(args) } finally { output.mockRestore() }
+    try { await runModelSetup(args, fixtureEffectiveConfig) } finally { output.mockRestore() }
     const printed = chunks.join('')
     expect(printed).toContain('Left')
     expect(printed).not.toContain('Updated settings')

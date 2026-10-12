@@ -420,7 +420,7 @@ export class AssistantSkillsService extends Service {
           } }
         }), 'assistant-skills.provider')
       }
-      runtime.on('agent/created', ({ agent }) => install(agent))
+      runtime.on('agent/created', ({ agent }) => { install(agent) })
       for (const agent of runtime.agents.list()) install(agent)
     })
   }

@@ -57,7 +57,7 @@ async function fixture() {
     output: { schema: { type: 'object', additionalProperties: false, properties: {} }, render: () => [] },
     execute: async () => { bodies += 1; return {} },
   }))
-  ctx.on('agent/session-start', ({ agent }) => {
+  ctx.on('agent/created', ({ agent }) => {
     registerProbe(agent.ctx)
     creates += 1
     agent.session.append('approval/policy', { policy: 'never' })

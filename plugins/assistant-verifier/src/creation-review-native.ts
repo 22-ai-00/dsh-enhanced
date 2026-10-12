@@ -93,7 +93,7 @@ export async function runNativeCreationTurn(ctx: Context, input: NativeInput): P
     try {
       signal.throwIfAborted()
       agent.followup(createUserMessage({ content: [{ type: 'text', text: data }],
-        source: { kind: 'plugin', plugin: '@dsh-enhanced/assistant-verifier', form: 'notice', summary: 'Independent creation verification' } }))
+        source: { kind: 'assistant-verifier', form: 'notice', summary: 'Independent creation verification' } }))
       await agent.whenIdle()
       signal.throwIfAborted(); input.assertCurrent()
       const events = agent.session.snapshotEvents() as readonly { type: string; data: Record<string, unknown> }[]

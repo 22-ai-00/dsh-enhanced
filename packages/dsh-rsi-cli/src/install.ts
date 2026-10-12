@@ -206,6 +206,9 @@ export async function runInstall(options: RunInstallOptions): Promise<number> {
         process.stdout.write('现有 Home 未绑定私有 Host；保留当前 Host，仅升级插件集合。\n')
       } else {
         const plan = await executor.prepareHostUpdate({ dshHome: home, selector })
+        if (plan.originalRuntime.version.startsWith('0.1.') && plan.candidateRuntime.version.startsWith('0.2.')) {
+          throw new PurgeError('DSH 0.1 → 0.2 跨 ABI 自动升级尚未支持；未修改原 Home 或插件。请保留原安装，在新的 DSH_HOME 中安装并验证新版，勿先替换旧 profile 的插件。')
+        }
         env = { ...env, DSH_ENHANCED_HOST_SELECTOR_VALIDATED: '1' }
         if (plan.status === 'update') {
           planStaging = await mkdtemp(join(tmpdir(), 'dsh-rsi-host-plan-'))

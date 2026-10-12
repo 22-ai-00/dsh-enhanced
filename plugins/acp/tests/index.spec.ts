@@ -16,7 +16,7 @@ const DSH_HOST_PACKAGES = [
   '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-agent',
   '@deepseek-ai/dsh-agent-default-model',
-  '@deepseek-ai/dsh-agent-presets',
+  '@deepseek-ai/dsh-agent-preset-registry',
   '@deepseek-ai/dsh-cordis-host-runner',
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-session',
@@ -37,7 +37,7 @@ describe('@dsh-enhanced/acp package contract', () => {
 
   it('composes the DSH agent preset roster required by ACP modes', () => {
     expect(bundle).toContain("id: agent-presets")
-    expect(bundle).toContain("name: '@deepseek-ai/dsh-agent-presets'")
+    expect(bundle).toContain("name: '@deepseek-ai/dsh-agent-preset-registry'")
     expect(bundle).toContain('default: standard')
     expect(bundle).toContain("name: '@deepseek-ai/dsh-cordis-host-runner'")
   })
@@ -59,7 +59,7 @@ describe('@dsh-enhanced/acp package contract', () => {
   it('targets the verified DSH release and carries ACP runtime libraries', () => {
     expect(manifest.dependencies.zod).toBe('catalog:')
     expect(Object.values(manifest.peerDependencies)).not.toContain('>=0.1.0-rc.5 <0.2.0')
-    expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.1.5-rc.3 <0.1.6')
+    expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('0.2.0-rc.2')
   })
 
   it('retains the upstream DeepSeek MIT attribution', () => {

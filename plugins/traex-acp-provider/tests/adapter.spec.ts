@@ -323,7 +323,7 @@ describe('TraeX ACP LLM adapter', () => {
         },
         content: [{ type: 'text', text: 'old answer' }],
       })
-      const system = createSystemMessage('Be concise.', 'agent-loop')
+      const system = createSystemMessage('Be concise.')
       const user = createMessage({
         role: 'user',
         source: { kind: 'user' },
@@ -334,7 +334,9 @@ describe('TraeX ACP LLM adapter', () => {
         header: { cwd: workspace },
         requestHeader: () => ({
           config: { provider: 'traex-agent', model: 'default' },
+          tools: [],
         }),
+        toolHistory: () => ({ tools: [], updates: [] }),
         deriveMessages: () => [system, historical, user],
       } as unknown as Agent['session']
       const agent = {
@@ -374,6 +376,8 @@ describe('TraeX ACP LLM adapter', () => {
         provider: 'traex-agent',
         model: 'default',
         messages: [system, historical, user],
+        tools: [],
+        toolHistory: session.toolHistory(),
         sessionId: TEST_SESSION_ID,
         signal: new AbortController().signal,
       }))

@@ -514,11 +514,23 @@ export async function healLocalSourceProfileModuleFallback({ homePath, profile, 
   }
   if (bootManifest.name !== '@deepseek-ai/dsh-app-boot' || bootManifest.version !== dshManifest.version
     || !inside(dirname(bootManifestPath), bootPath)) fail('pinned DSH boot module identity differs')
-  const { loadProfileDirectory, healProfilesModuleFallback } = await import(pathToFileURL(bootPath).href)
-  if (typeof loadProfileDirectory !== 'function' || typeof healProfilesModuleFallback !== 'function') {
-    fail('pinned DSH boot module lacks native fallback healing APIs')
+  const { loadProfileDirectory, healProfilesModuleFallback, createRuntimeResolution } = await import(pathToFileURL(bootPath).href)
+  if (typeof loadProfileDirectory !== 'function') {
+    fail(dshManifest.version === '0.2.0-rc.2' ? 'pinned DSH boot module lacks native profile loading API'
+      : 'pinned DSH boot module lacks native fallback healing APIs')
   }
   const loaded = loadProfileDirectory('dsh', join(homePath, 'profiles', profile), dshManifestPath)
+  if (dshManifest.version === '0.2.0-rc.2') {
+    if (typeof createRuntimeResolution !== 'function' || loaded.skippedBundles?.length) {
+      fail('pinned DSH boot module cannot resolve the complete profile')
+    }
+    const resolution = await createRuntimeResolution({ installAnchor: dshManifestPath, profile: loaded, home: homePath })
+    if (!resolution.entries?.some(entry => entry.name === '@deepseek-ai/cordis' && entry.scope === 'installation')) {
+      fail('pinned DSH boot module did not resolve Host Cordis')
+    }
+    return
+  }
+  if (typeof healProfilesModuleFallback !== 'function') fail('pinned DSH boot module lacks native fallback healing APIs')
   await healProfilesModuleFallback({ installAnchor: dshManifestPath, profile: loaded, home: homePath })
 }
 

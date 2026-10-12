@@ -242,7 +242,7 @@ describe('runInstall（薄委托）', () => {
     expect(code).toBe(3)
   })
 
-  test('upgrade prepares a private Host plan, delegates cohort first, and removes the plan afterward', async () => {
+  test.each([false, true])('upgrade fences cross-ABI changes before delegating the cohort (legacy=%s)', async legacy => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-host-plan-test-'))
     try {
       const home = join(root, 'home')
@@ -250,9 +250,9 @@ describe('runInstall（薄委托）', () => {
       await writeFile(join(home, '.dsh-rsi-host.json'), '{}', { mode: 0o600 })
       const plan = { schemaVersion: 1 as const, status: 'update' as const, canonicalHome: home,
         bindingPath: join(home, '.dsh-rsi-host.json'), originalBindingSource: '{}', originalBindingDigest: 'a'.repeat(64),
-        originalRuntime: { version: '0.1.5-rc.3', root: '/hosts/old', dshPath: '/hosts/old/dsh',
+        originalRuntime: { version: legacy ? '0.1.5-rc.3' : '0.2.0-rc.2', root: '/hosts/old', dshPath: '/hosts/old/dsh',
           binDirectory: '/hosts/old', integrity: 'sha512-old', receiptDigest: 'a'.repeat(64) },
-        candidateRuntime: { version: '0.1.5-rc.4', root: '/hosts/new', dshPath: '/hosts/new/dsh',
+        candidateRuntime: { version: '0.2.0-rc.2', root: '/hosts/new', dshPath: '/hosts/new/dsh',
           binDirectory: '/hosts/new', integrity: 'sha512-new', receiptDigest: 'b'.repeat(64) },
         candidateBindingSource: '{}',
       }
@@ -265,12 +265,19 @@ describe('runInstall（薄委托）', () => {
         return 0
       })
       const prepareHostUpdate = vi.fn(async () => plan)
-      expect(await runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+      const install = runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
         passthrough: ['--operation', 'upgrade'], dshHome: home,
         executor: { download: vi.fn(), runInherited, prepareHost: async ({ environment }) =>
           ({ ...environment, DSH_HOME: home, DSH_ENHANCED_HOST_BIN: '/hosts/old' }),
         prepareHostUpdate },
-      })).toBe(0)
+      })
+      if (legacy) {
+        await expect(install).rejects.toThrow('跨 ABI 自动升级尚未支持')
+        expect(runInherited).not.toHaveBeenCalled()
+        expect(await readFile(join(home, '.dsh-rsi-host.json'), 'utf8')).toBe('{}')
+        return
+      }
+      expect(await install).toBe(0)
       expect(prepareHostUpdate).toHaveBeenCalledWith({ dshHome: home, selector: 'latest' })
       await expect(readFile(planPath)).rejects.toMatchObject({ code: 'ENOENT' })
       expect(runInherited).toHaveBeenCalledTimes(1)

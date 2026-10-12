@@ -50,7 +50,6 @@
     "@deepseek-ai/dsh-attachment": "catalog:",
     "@deepseek-ai/dsh-attachment-local": "catalog:",
     "@deepseek-ai/dsh-atomic-write": "catalog:",
-    "@deepseek-ai/dsh-code-runtime": "catalog:",
     "@deepseek-ai/dsh-compaction": "catalog:",
     "@deepseek-ai/dsh-compaction-basic": "catalog:",
     "@deepseek-ai/dsh-compaction-tool-result-pruner": "catalog:",

@@ -1,7 +1,7 @@
 import { Service } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, Message, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, RequestMessage, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { normalizeConfig, type SuperRelayGoalMeteredConfig } from './config.js'
 import { assertCurrentContract, isSuperRelayModel, SUPER_RELAY_MODELS, SUPER_RELAY_PROVIDER } from './contract.js'
 
@@ -54,17 +54,17 @@ function textOnly(blocks: readonly ContentBlock[], role: string): string {
 }
 
 /** Project one non-system DSH Message to OpenAI Responses `input` items. */
-function projectMessage(message: Message): unknown[] {
+function projectMessage(message: RequestMessage): unknown[] {
   if (message.role === 'system') throw new Error('assistant-super-relay-budget: non-leading system message')
+  if (message.role === 'tool') {
+    if (message.toolCallId !== message.source.callId) throw new Error('assistant-super-relay-budget: invalid tool result message')
+    return [{ type: 'function_call_output', call_id: message.toolCallId, output: textOnly(message.content, 'tool result') }]
+  }
   if (message.role === 'user') {
-    if (message.source.kind === 'tool') {
-      if (message.content.length !== 1 || message.content[0]?.type !== 'tool-result' || message.content[0].toolCallId !== message.source.callId) {
-        throw new Error('assistant-super-relay-budget: invalid tool result message')
-      }
-      return [{ type: 'function_call_output', call_id: message.source.callId, output: textOnly(message.content[0].content, 'tool result') }]
-    }
+    if (message.source?.kind === 'tool') throw new Error('assistant-super-relay-budget: invalid tool result message')
     return [{ role: 'user', content: [{ type: 'input_text', text: textOnly(message.content, 'user') }] }]
   }
+  if (message.role === 'developer') throw new Error('assistant-super-relay-budget: developer messages are unsupported')
   // Assistant turn: visible text becomes one message item; each replayed tool
   // call becomes its own function_call item. Reasoning blocks are not replayed:
   // the gateway owns reasoning and the input contract was verified without it.

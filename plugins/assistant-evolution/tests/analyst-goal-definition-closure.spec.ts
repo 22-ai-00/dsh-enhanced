@@ -601,7 +601,7 @@ describe('supervised growth analyst goal-definition owner-gated adoption closure
 
       // Before the owner decides, a foreground goal session receives nothing.
       const before = foregroundSession(target.workspace, 'before')
-      agentEvents(target.ctx, before.agent).emit('agent/session-start', { source: 'startup' })
+      await agentEvents(target.ctx, before.agent).serial('agent/created', { source: 'startup' })
       expect(before.injections).toEqual([])
       expect(tableCount(target.evolutionPath, 'evolution_guidance_exposures')).toBe(0)
 
@@ -633,7 +633,7 @@ describe('supervised growth analyst goal-definition owner-gated adoption closure
       // A later ordinary foreground goal session in the same scope is injected
       // with the learned guidance through the generic unseen-rule path.
       const after = foregroundSession(target.workspace, 'after')
-      agentEvents(target.ctx, after.agent).emit('agent/session-start', { source: 'startup' })
+      await agentEvents(target.ctx, after.agent).serial('agent/created', { source: 'startup' })
       expect(after.injections).toHaveLength(1)
       const text = injectedText(after.injections[0]!)
       expect(text).toContain('<learned_guidance>')
@@ -653,13 +653,13 @@ describe('supervised growth analyst goal-definition owner-gated adoption closure
 
       // Repeated session-start in the SAME session never injects twice: the
       // durable exposure dedupes it and no second receipt is written.
-      agentEvents(target.ctx, after.agent).emit('agent/session-start', { source: 'startup' })
+      await agentEvents(target.ctx, after.agent).serial('agent/created', { source: 'startup' })
       expect(after.injections).toHaveLength(1)
       expect(tableCount(target.evolutionPath, 'evolution_guidance_exposures')).toBe(1)
 
       // A fresh foreground session still receives the guidance once.
       const later = foregroundSession(target.workspace, 'later')
-      agentEvents(target.ctx, later.agent).emit('agent/session-start', { source: 'startup' })
+      await agentEvents(target.ctx, later.agent).serial('agent/created', { source: 'startup' })
       expect(later.injections).toHaveLength(1)
       expect(tableCount(target.evolutionPath, 'evolution_guidance_exposures')).toBe(2)
     } finally {
@@ -708,7 +708,7 @@ describe('supervised growth analyst goal-definition owner-gated adoption closure
       expect(tableCount(target.evolutionPath, 'evolution_rules')).toBe(0)
 
       const foreground = foregroundSession(target.workspace, 'rejected')
-      agentEvents(target.ctx, foreground.agent).emit('agent/session-start', { source: 'startup' })
+      await agentEvents(target.ctx, foreground.agent).serial('agent/created', { source: 'startup' })
       expect(foreground.injections).toEqual([])
       expect(tableCount(target.evolutionPath, 'evolution_guidance_exposures')).toBe(0)
     } finally {

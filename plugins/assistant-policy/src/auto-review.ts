@@ -16,6 +16,12 @@ import {
 import { AUTO_REVIEW_APPROVAL_REASON, HUMAN_APPROVAL_REASON } from './tool-risk.js'
 import type { HumanApprovalAnswerer } from './approval-routing.js'
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'assistant-policy': { kind: 'assistant-policy' }
+  }
+}
+
 export interface AutoReviewConfig {
   enabled?: boolean
   provider?: string
@@ -454,7 +460,7 @@ async function reviewOnce(
       model,
       messages: [createUserMessage({
         content: [{ type: 'text', text: snapshot.payload }],
-        source: { kind: 'plugin', plugin: 'assistant-policy' },
+        source: { kind: 'assistant-policy' },
       })],
       system: AUTO_REVIEW_SYSTEM_PROMPT,
       tools: [],
@@ -517,7 +523,7 @@ export function registerAutoReviewAnswerer(
     })
     runtimeCtx.on('approval/request', async (request, next): Promise<ApprovalOutcome> => {
       const human = () => answerHuman(request, next)
-      if (approvalReviewerOf(request.agent.session.snapshotEvents()) !== 'auto-review') return human()
+      if (approvalReviewerOf(request.agent.session.snapshotEvents(), request.agent.session.header.version) !== 'auto-review') return human()
       if (request.reason === HUMAN_APPROVAL_REASON) return escalateToHuman(request, human)
       if (isExactNativeSandboxApproval(request)) return escalateToHuman(request, human)
       if (request.reason !== AUTO_REVIEW_APPROVAL_REASON) return next()

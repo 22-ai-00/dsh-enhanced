@@ -1,3 +1,9 @@
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'assistant-growth-driver': { kind: 'assistant-growth-driver'; form?: 'notice'; summary?: string }
+  }
+}
+
 import { createHash } from 'node:crypto'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { validateCreationAcceptanceAuthorityRef, validateRevisionAcceptanceAuthorityRef,
@@ -1069,7 +1075,7 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
     try {
       agent.followup(createUserMessage({
         content: [{ type: 'text', text: executionPrompt }],
-        source: { kind: 'plugin', plugin: '@dsh-enhanced/assistant-growth-driver', form: 'notice', summary: 'Growth review wake' },
+        source: { kind: 'assistant-growth-driver', form: 'notice', summary: 'Growth review wake' },
       }))
       await agent.whenIdle()
       const summary = summarize(agent.session.snapshotEvents(), combined, modelCalls, totalToolCalls)

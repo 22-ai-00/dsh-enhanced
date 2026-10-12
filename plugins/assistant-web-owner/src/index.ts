@@ -11,7 +11,7 @@ import { pathToFileURL } from 'node:url'
 import { version } from './version.js'
 import { TYPERT } from './typert.js'
 import { DeliveryNoticesService } from './notices.js'
-import { createOwnerSessionTree, resolveHostWebModules } from './native-client.js'
+import { createOwnerSessionTree, resolveHostWebModules, startOwnerSessionTree } from './native-client.js'
 
 export const name = 'dsh-enhanced-assistant-web-owner'
 export { version }
@@ -63,7 +63,7 @@ function textContent(content: readonly unknown[]): string {
 function ownedControl(frame: SessionControlFrame, access: NativeWebOwnerAccess): SessionControlFrame | undefined {
   if (frame.type === 'baseline') {
     const filter = <T>(rows: Readonly<Record<SessionId, T>>): Record<SessionId, T> => Object.fromEntries(Object.entries(rows).filter(([id]) => access.ownsSession(id as SessionId))) as Record<SessionId, T>
-    return { type: 'baseline', value: { queues: filter(frame.value.queues), jobs: filter(frame.value.jobs), projections: filter(frame.value.projections) } }
+    return { type: 'baseline', value: { projections: filter(frame.value.projections) } }
   }
   return access.ownsSession(frame.sessionId) ? frame : undefined
 }
@@ -129,8 +129,11 @@ async function wrapController(ctx: Context, config: Config, access: NativeWebOwn
   }) as Context['plugin'], emit: ((event: string, ...args: unknown[]) => {
     if (event.startsWith('api-session/')) {
       const id = (event === 'api-session/added' ? (args[0] as { sessionId?: SessionId })?.sessionId : args[0]) as SessionId
+      if (event === 'api-session/added' && creating > 0) {
+        if (pendingAdded.has(id) || pendingAdded.size < 100) pendingAdded.set(id, args[0])
+        return
+      }
       if (!access.ownsSession(id)) {
-        if (event === 'api-session/added' && creating > 0 && pendingAdded.size < 100) pendingAdded.set(id, args[0])
         return
       }
       // Native session/disposed means the in-memory handle detached. This
@@ -186,6 +189,7 @@ async function wrapController(ctx: Context, config: Config, access: NativeWebOwn
       const value = await call('create', [{ sessionId: request.sessionId, workspaceId: workspace.id, agentPreset: config.preset }]) as { sessionId: SessionId }
       assertOwned(access, value.sessionId)
       const added = pendingAdded.get(value.sessionId)
+      pendingAdded.delete(value.sessionId)
       if (added !== undefined) emit('api-session/added', added)
       return value
     } finally { creating -= 1; if (creating === 0) pendingAdded.clear() }
@@ -223,7 +227,7 @@ async function wrapController(ctx: Context, config: Config, access: NativeWebOwn
     })
     // Register cleanup before starting any child, including a partial failure.
     active.effect(() => () => tree.root.stop(), 'assistant-web-owner.native-client-entry')
-    await tree.root.update([{ id: 'native-session-controller', name: controllerPath }])
+    await startOwnerSessionTree(tree, controllerPath)
   })
 }
 

@@ -49,20 +49,20 @@ async function fixture() {
   return { ctx, service, store, binding }
 }
 
-function register(ctx: Context, sessionId: string): Agent {
+async function register(ctx: Context, sessionId: string): Promise<Agent> {
   const id = SessionId(sessionId)
   const session = ctx.sessions.create(id, { meta: { cwd: authority.workspace, agentPreset: authority.agentPreset } })
   const agent: Agent = { id, options: {}, session, inbox: createInboxStub(), ctx: new Context(),
     status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal),
     send() {}, followup() {}, steer() {}, inject() {} }
-  ctx.agents.register(agent)
+  await ctx.agents.register(agent)
   return agent
 }
 
 test('attests only the registered live Agent and Session on the exact owner route', async () => {
   const f = await fixture()
-  const agent = register(f.ctx, f.binding.sessionId)
+  const agent = await register(f.ctx, f.binding.sessionId)
   const receipt = f.service.validateOwnerAgentForRoute(agent, authority.id)
   expect(receipt).toEqual(f.service.validateOwnerRoute({ authorityId: authority.id,
     principalId: 'lark/bot/tenant/owner', workspace: authority.workspace, agentPreset: authority.agentPreset }))
@@ -79,11 +79,11 @@ test('attests only the registered live Agent and Session on the exact owner rout
 
 test('rejects stale, revoked, and principal-mismatched owners, then accepts the new live session', async () => {
   const f = await fixture()
-  const oldAgent = register(f.ctx, f.binding.sessionId)
+  const oldAgent = await register(f.ctx, f.binding.sessionId)
   const second = f.store.rotateBinding({ bindingId: f.binding.id, expectedVersion: f.binding.version,
     sessionId: 'owner-session-2' })
   expect(f.service.validateOwnerAgentForRoute(oldAgent, authority.id)).toBeUndefined()
-  const nextAgent = register(f.ctx, second.sessionId)
+  const nextAgent = await register(f.ctx, second.sessionId)
   expect(f.service.validateOwnerAgentForRoute(nextAgent, authority.id)?.generation).toBe(2)
   const principalRow = f.store.getPrincipal(principal)!
   f.store.revokePrincipal(principalRow.id, principalRow.version)
@@ -92,7 +92,7 @@ test('rejects stale, revoked, and principal-mismatched owners, then accepts the 
 
 test('fails closed without core Host services and on a changed principal lineage during validation', async () => {
   const f = await fixture()
-  const agent = register(f.ctx, f.binding.sessionId)
+  const agent = await register(f.ctx, f.binding.sessionId)
   const original = f.service.preferencePrincipalForAgent.bind(f.service)
   vi.spyOn(f.service, 'preferencePrincipalForAgent').mockImplementation(caller => {
     const value = original(caller)
@@ -108,7 +108,7 @@ test('fails closed without core Host services and on a changed principal lineage
 
 test('read fence rejects rotation after receipt creation and propagates unexpected store errors', async () => {
   const f = await fixture()
-  const agent = register(f.ctx, f.binding.sessionId)
+  const agent = await register(f.ctx, f.binding.sessionId)
   const original = f.service.validateOwnerRoute.bind(f.service)
   vi.spyOn(f.service, 'validateOwnerRoute').mockImplementation(input => {
     const receipt = original(input)

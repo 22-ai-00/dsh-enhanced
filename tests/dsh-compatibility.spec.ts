@@ -5,7 +5,7 @@ import { describe, expect, test } from 'vitest'
 import { parse } from 'yaml'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const baseline = '0.1.5-rc.3'
+const baseline = '0.2.0-rc.2'
 
 interface WorkspaceManifest {
   name: string
@@ -102,7 +102,7 @@ describe('DSH compatibility baseline', () => {
 
     expect(peers.length).toBeGreaterThan(0)
     for (const peer of peers) {
-      expect(peer, peer.path).toMatchObject({ range: `>=${baseline} <0.1.6` })
+      expect(peer, peer.path).toMatchObject({ range: baseline })
     }
   })
 

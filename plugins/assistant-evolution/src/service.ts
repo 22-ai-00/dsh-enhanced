@@ -1,3 +1,9 @@
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'assistant-evolution': { kind: 'assistant-evolution'; form?: 'notice'; summary?: string }
+  }
+}
+
 import { createHash, randomUUID } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -32,7 +38,6 @@ import { buildGuidance, buildGuidanceSnapshot } from './guidance.js'
 import { evolutionMutationReview } from './review.js'
 import {
   EvolutionStore,
-  EvolutionStoreError,
   evolutionDigest,
   supervisedGrowthAnalystProposalIdempotencyKey,
 } from './store.js'
@@ -476,14 +481,12 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
     })
 
     ctx.inject(['tools'], toolsCtx => registerEvolutionTools(toolsCtx, this))
-    ctx.on('agent/session-start', ({ agent }) => {
+    ctx.on('agent/created', ({ agent }) => {
       // Injection must never break session startup; a missing guidance block is
       // strictly better than an unstartable assistant.
       try {
         this.injectGuidance(agent)
-      } catch (error) {
-        if (!(error instanceof AssistantEvolutionError || error instanceof EvolutionStoreError)) throw error
-      }
+      } catch { return }
     })
     ctx.effect(() => () => {
       this.active = false
@@ -2063,7 +2066,7 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
     if (snapshot.text === '') return
     agent.inject(createUserMessage({
       content: [{ type: 'text', text: snapshot.text }],
-      source: { kind: 'plugin', plugin: 'assistant-evolution' },
+      source: { kind: 'assistant-evolution' },
     }))
     for (const rule of snapshot.rules) {
       this.store.recordGuidanceExposure({

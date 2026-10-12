@@ -1,3 +1,9 @@
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'assistant-automations': { kind: 'assistant-automations'; form?: 'notice'; summary?: string }
+  }
+}
+
 import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import {
@@ -5,7 +11,7 @@ import {
   type Agent,
   type AgentHandle,
 } from '@deepseek-ai/dsh-agent'
-import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets'
+import type { AgentPresetRegistry as AgentPresets } from '@deepseek-ai/dsh-agent-preset-registry'
 import { createUserMessage, type GenerateOptions, type LlmRuntime, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
@@ -511,8 +517,7 @@ export class DshAutomationRunner implements AutomationRunner {
       agent.followup(createUserMessage({
         content: [{ type: 'text', text: definition.prompt }],
         source: {
-          kind: 'plugin',
-          plugin: '@dsh-enhanced/assistant-automations',
+          kind: 'assistant-automations',
           form: 'notice',
           summary: `Automation: ${definition.name}`,
         },

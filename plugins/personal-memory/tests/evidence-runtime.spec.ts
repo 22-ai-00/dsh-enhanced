@@ -40,7 +40,7 @@ describe('tool evidence runtime', () => {
     const target = session()
     const result = appendCallAndResult(target)
     const replacement = target.append('tool/result', { ...result.data,
-      message: { ...result.data.message, content: [{ ...result.data.message.content[0], content: [{ type: 'text', text: 'summary only' }] }] },
+      message: { ...result.data.message, content: [{ type: 'text', text: 'summary only' }] },
     }, { surfaceOp: { op: 'replace', startSeq: result.seq, endSeq: result.seq }, sourceEventSeqs: [result.seq] })
     expect(originalToolEvidence(target, result.seq)?.text).toContain('result')
     expect(originalToolEvidence(target, replacement.seq)).toBeUndefined()
@@ -54,7 +54,7 @@ describe('tool evidence runtime', () => {
     const cold = Session.create(target.id, snapshot, target.header)
     expect(originalToolEvidence(cold, result.seq)?.contentDigest).toBe(first.contentDigest)
     const changed = JSON.parse(JSON.stringify(target.snapshotEvents()))
-    changed.find((event: { seq: number }) => event.seq === result.seq).data.message.content[0].content[0].text = 'tampered'
+    changed.find((event: { seq: number }) => event.seq === result.seq).data.message.content[0].text = 'tampered'
     const tampered = Session.create(target.id, changed, target.header)
     expect(originalToolEvidence(tampered, result.seq)?.contentDigest).not.toBe(first.contentDigest)
   })

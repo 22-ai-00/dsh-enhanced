@@ -59,7 +59,7 @@ function adapter(
   }
 }
 
-function liveAgent(ctx: Context, sessionId: string): Agent {
+async function liveAgent(ctx: Context, sessionId: string): Promise<Agent> {
   const id = SessionId(sessionId)
   const session = ctx.sessions.create(id, { meta: { cwd: '/work/alpha', agentPreset: 'primary' } })
   const agent: Agent = {
@@ -77,7 +77,7 @@ function liveAgent(ctx: Context, sessionId: string): Agent {
     steer() {},
     inject() {},
   }
-  ctx.agents.register(agent)
+  await ctx.agents.register(agent)
   return agent
 }
 
@@ -126,7 +126,7 @@ async function fixture(options: { blockingAnswererBeforeDelivery?: boolean } = {
     sessionId: 'user-question-session',
     policyRef: 'owner-dm',
   })
-  return { ctx, service, store, binding, agent: liveAgent(ctx, binding.sessionId), earlierAnswerer }
+  return { ctx, service, store, binding, agent: await liveAgent(ctx, binding.sessionId), earlierAnswerer }
 }
 
 describe('assistant delivery user-question waterfall answerer', () => {
@@ -172,7 +172,7 @@ describe('assistant delivery user-question waterfall answerer', () => {
     await f.service.registerAdapter(adapter(requestUserQuestion))
 
     await expect(f.ctx.userQuestions.ask({ questions })).resolves.toEqual(exactAnswer)
-    const unrelated = liveAgent(f.ctx, 'unrelated-session')
+    const unrelated = await liveAgent(f.ctx, 'unrelated-session')
     await expect(f.ctx.userQuestions.ask({ agent: unrelated, questions })).resolves.toEqual(exactAnswer)
     expect(fallback).toHaveBeenCalledTimes(2)
     expect(requestUserQuestion).not.toHaveBeenCalled()
