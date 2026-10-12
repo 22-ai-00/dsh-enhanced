@@ -1208,10 +1208,12 @@ if [[ " \${arguments[0]:-} \${arguments[1]:-} \${arguments[2]:-} " == ' config l
   printf '{"registry":"%s","@jsr:registry":"https://npm.jsr.io/"}\n' "$registry"
   exit 0
 fi
-if [[ "\${arguments[0]:-}" == 'add' && " \${arguments[*]} " == *' --lockfile-only '* && "$directory" == *'-metadata' || "\${arguments[0]:-}" == 'add' && " \${arguments[*]} " == *' --lockfile-only '* && "$directory" == *'-replay' ]]; then
+if [[ "\${arguments[0]:-}" == 'add' && " \${arguments[*]} " == *' --force --ignore-scripts --reporter=ndjson '* && " \${arguments[*]} " != *' --lockfile-only '* && ( "$directory" == *'-metadata' || "$directory" == *'-replay' ) ]]; then
   if [[ " \${arguments[*]} " == *' --no-frozen-lockfile '* ]]; then printf 'Unknown option frozen-lockfile\n' >&2; exit 93; fi
+  if [[ "$directory" == *'-replay' && -e "$directory/node_modules" ]]; then printf 'metadata replay reused warm node_modules\n' >&2; exit 91; fi
   printf 'pnpm-metadata-warmup\t%s\tcwd=%s\toffline=%s\t%s\n' "$transaction_state" "$directory" "\${pnpm_config_offline:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
   if [[ "$directory" == *'-metadata' ]]; then
+    mkdir -p "$directory/node_modules"
     if [[ "\${LIFECYCLE_METADATA_WARMUP_FAIL:-0}" == '1' ]]; then printf 'metadata warmup failed\n' >&2; exit 93; fi
     if [[ "\${LIFECYCLE_METADATA_WARMUP_MISSING_MIRROR:-0}" != '1' ]]; then
       mkdir -p "\${pnpm_config_cache_dir:?}/v11/metadata-full/registry.npmjs.org/@koromix"
@@ -10202,8 +10204,11 @@ snapshots:
       expect(await readFile(metadataPath, 'utf8')).toBe('full metadata\n')
       const operations = await readFile(join(fixture.root, 'lifecycle-operations.log'), 'utf8')
       expect(operations.match(/^pnpm-metadata-warmup/gmu)).toHaveLength(2)
+      expect(operations).toMatch(/pnpm-metadata-warmup\tabsent\t.*add --force --ignore-scripts --reporter=ndjson /u)
+      expect(operations).toMatch(/pnpm-metadata-warmup\tabsent\t.*add --force --ignore-scripts --reporter=ndjson --offline /u)
+      expect(operations.match(/^pnpm-metadata-warmup.*$/gmu)?.every(line => !line.includes('--lockfile-only'))).toBe(true)
       expect(operations.match(/^pnpm-verify/gmu)).toHaveLength(2)
-      expect(operations.match(/^pnpm-fetch/gmu)).toHaveLength(2)
+      expect(operations.match(/^pnpm-fetch/gmu)).toHaveLength(1)
       expect(operations).not.toContain('--no-frozen-lockfile')
       const transaction = join(fixture.root, 'cache-transaction')
       await mkdir(transaction, { mode: 0o700 })
