@@ -1823,6 +1823,20 @@ process.exit(result.status ?? 99)
 // are covered by lark-channel's source-maintenance and local-package suites.
 async function preOwnerLifecycleFixture({ baseServices = false, memoryExtension = false }: { baseServices?: boolean; memoryExtension?: boolean } = {}) {
   const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] }, ...(baseServices ? { readiness: 'host' as const } : {}) })
+  const bootRoot = join(f.fakeBin, 'node_modules', '@deepseek-ai', 'dsh-app-boot')
+  await mkdir(join(bootRoot, 'lib'), { recursive: true })
+  await writeFile(join(f.fakeBin, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.5-rc.3',
+    bin: { dsh: 'dsh' }, exports: { './package.json': './package.json' } }))
+  await writeFile(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version: '0.1.5-rc.3',
+    type: 'module', exports: { '.': './lib/index.js', './package.json': './package.json' } }))
+  await writeFile(join(bootRoot, 'lib/index.js'), `export function loadProfileDirectory(name, dir, installAnchor) {
+  if (name !== 'dsh' || !dir.endsWith('/profiles/web') || !installAnchor.endsWith('/bin/package.json')) throw new Error('wrong Host profile')
+  return { dir }
+}
+export async function healProfilesModuleFallback({ installAnchor, profile, home }) {
+  if (!installAnchor.endsWith('/bin/package.json') || profile.dir !== home + '/profiles/web') throw new Error('wrong Host fallback')
+}
+`)
   if (baseServices || memoryExtension) await writeFile(join(f.dshHome, '.lifecycle-dump-config'), stringify([
     { id: 'dsh-enhanced-lark-channel', name: '@dsh-enhanced/lark-channel', config: { enabled: true } },
     { id: 'dsh-enhanced-assistant-recovery', name: '@dsh-enhanced/assistant-recovery', config: { jobs: [] } },
@@ -7774,7 +7788,7 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     expect(result.stdout).not.toContain('dsh-lark-setup')
   })
 
-  test.each([localInstaller, npmInstaller])('Linux auto selects bounded ordinary-use learning for %s', async installer => {
+  test.skipIf(process.platform !== 'linux').each([localInstaller, npmInstaller])('Linux auto selects bounded ordinary-use learning for %s', async installer => {
     const dshHome = await temporaryDshHome()
     const result = runInstaller(installer, ['--dry-run', '--yes'], dshHome, 'Linux')
 
@@ -7814,7 +7828,7 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     expect(result.stdout).not.toContain('dsh-rsi-setup --install-owner')
   })
 
-  test('Linux fresh noninteractive install fails before mutation when owner pairing is unavailable', async () => {
+  test.skipIf(process.platform !== 'linux')('Linux fresh noninteractive install fails before mutation when owner pairing is unavailable', async () => {
     const dshHome = await temporaryDshHome()
     const fakeBin = join(dshHome, 'bin')
     await mkdir(fakeBin)

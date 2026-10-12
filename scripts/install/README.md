@@ -94,6 +94,8 @@ node /reviewed/checkout/scripts/install/lifecycle-profile.mjs \
 
 调用前停止其它外部或手工 Home writers；受管 systemd units 由既有 Home 锁、mask、guardian 和原子 Home 切换事务接管。预检先检查 Home 及所有 profile 的持久 YAML，随后只在私有 Home 副本的 bwrap 逻辑路径内执行原生配置导出，逐字节核对配置未被导出改写。正常 `!!js` 路径/脚本文本只惰性解析，动态 owner 配置、额外配置格式、隐藏授权、非空 Recovery jobs 和启用的 Automations scheduler 均拒绝。`profiles/node_modules` 是原生共享依赖目录，不作为 profile。
 
+离线包安装完成后，在同一隔离副本内调用已固定 Host 的原生 `loadProfileDirectory` / `healProfilesModuleFallback`，重新生成依赖解析的 `.dsh-module-fallback` 链接；不启动 Host 或插件，不修改持久配置。缺失原生 API 或 Host 身份不符时拒绝继续。仅导出配置不会修复这些链接。
+
 副本链接检查沿已打开的目录 FD 逐级读取内部链接，再以真实路径核对最终目标的副本边界；FD 路径别名不会把内部 pnpm 链接当作外链。某一相对链接离开副本时，按切换后的逻辑 Home 位置解析该跳，因此原样的 `.bin` → 包目录 → 仓库链接仍可核对原目标身份。副本内目标缺失时不回读原 Home；内部链最多 40 跳，循环仍被拒绝。最终目标在副本外或不存在的包链接，仅允许原文本与原目标身份均不变的白名单条目。这保留既有最终目标校验合同，未增加外部中间链接的逐跳隔离。
 
 事务记录真实 composed scenario 和独立 pre-owner 证明，绑定 reviewed installer 的完整已安装模块树、候选收据、六类源码/制品/授权资源和所有持久/有效配置摘要；即使版本号相同也验证安装闭包的实际字节。停服后复核，将 stage 根目录收窄为 0700，再于无网络副本离线物化既有 bundle，并以原 Host 身份签署 pre-owner 源码维护链。包安装保留已验证的 pnpm store 路径别名，只写事务内的独立 store/cache 副本；SQLite 索引用在线备份，原缓存不作为可写挂载，副本不继承项目登记和 dlx 执行缓存。复制并非全树原子快照，仍以离线完整性检查和最终安装字节核验拒绝缺失或变化内容。不会创建 owner ledger、改动用户授权、开启 scheduler 或清除历史工作。预览在额外的完整可丢弃 Home 副本中运行，丢弃其队列、数据库和会话写入，最终待切换副本不会被预览启动。预览使用仅限 pre-owner 的配置派生检查：只禁用 Lark 连接，并在 Health 原本要求 larkChannel 时删除该项；缺失的检查不凭空创建，其他 provider、配置和动态标签保持一致；正式接受仍要求 fresh InvocationID、Host ready、真实飞书连接与稳定窗口，接受记录持久化后才清理事务。包含 Recovery/Control Plane 的 pre-owner profile 即使被组合分类为 supervised，仍使用 pre-owner 接受记录；owner 证明决定专用验收分支。切换前失败恢复原活动服务；切换后失败保留新旧 Home 和事务，重试必须重新验证模块、资源、配置及安装包字节。已有 owner/coordinator 的 supervised 升级继续使用原有 attestation/Health 门。

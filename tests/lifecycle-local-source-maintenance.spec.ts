@@ -1,12 +1,13 @@
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import * as yaml from 'yaml'
 import { assertLocalSourceInstaller, assertLocalSourceRawPreflight, assertMemoryLearningCandidateConfigs, assertPreOwnerAuthorityState, assertPreOwnerEffectiveConfigs,
-  bindLocalSourceInstaller, expectedMemoryLearningSemanticDigest } from '../scripts/install/local-source-maintenance.mjs'
+  bindLocalSourceInstaller, expectedMemoryLearningSemanticDigest, healLocalSourceProfileModuleFallback } from '../scripts/install/local-source-maintenance.mjs'
 import { lifecycleProfileTest } from '../scripts/install/lifecycle-profile.mjs'
 import { rsiMemoryLearningInitialRow } from '../plugins/lark-channel/src/rsi-local-roots-extension.js'
 
@@ -23,7 +24,7 @@ function check(rows = base, extra: Record<string, string> = {}) {
   return assertPreOwnerEffectiveConfigs({ assistant: yaml.stringify(rows), ...extra }, home, 'assistant', yaml)
 }
 async function installerFixture() {
-  const root = await mkdtemp(join(tmpdir(), 'local-source-installer-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'local-source-installer-')))
   roots.push(root)
   for (const directory of ['plugins/lark-channel/lib', 'packages/shared/lib', 'scripts/install', 'node_modules']) await mkdir(join(root, directory), { recursive: true })
   for (const path of ['package.json', 'pnpm-lock.yaml', 'plugins/lark-channel/package.json', 'packages/shared/package.json']) await writeFile(join(root, path), '{}', { mode: 0o600 })
@@ -32,6 +33,34 @@ async function installerFixture() {
   const require = createRequire(import.meta.url)
   await cp(dirname(require.resolve('yaml/package.json')), join(root, 'node_modules/yaml'), { recursive: true })
   return root
+}
+async function hostFixture(root: string, missingApi = false) {
+  const host = join(root, 'host')
+  const dshRoot = join(host, 'node_modules', '@deepseek-ai', 'dsh')
+  const bootRoot = join(host, 'node_modules', '@deepseek-ai', 'dsh-app-boot')
+  await mkdir(join(dshRoot, 'lib'), { recursive: true })
+  await mkdir(join(bootRoot, 'lib'), { recursive: true })
+  const path = join(dshRoot, 'lib', 'bin.js')
+  await writeFile(path, 'export const cli = true\n', { mode: 0o700 })
+  await writeFile(join(dshRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.5-rc.3',
+    type: 'module', bin: { dsh: 'lib/bin.js' }, exports: { './package.json': './package.json' } }), { mode: 0o600 })
+  await writeFile(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version: '0.1.5-rc.3',
+    type: 'module', exports: { '.': './lib/index.js', './package.json': './package.json' } }), { mode: 0o600 })
+  await writeFile(join(bootRoot, 'lib/index.js'), missingApi ? 'export const boot = () => { throw new Error("plugin effects ran") }\n'
+    : `import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+export const boot = () => { throw new Error('plugin effects ran') }
+export function loadProfileDirectory(name, dir, installAnchor) {
+  if (name !== 'dsh' || !installAnchor.endsWith('/@deepseek-ai/dsh/package.json')) throw new Error('wrong Host')
+  return { dir, manifest: JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) }
+}
+export async function healProfilesModuleFallback({ installAnchor, profile, home }) {
+  if (!installAnchor.endsWith('/@deepseek-ai/dsh/package.json') || !profile.manifest.dsh) throw new Error('wrong Host profile')
+  appendFileSync(join(home, 'heal.log'), profile.dir + '\\n')
+  writeFileSync(join(home, 'fallback-healed'), 'native')
+}
+`, { mode: 0o600 })
+  return { path, pin: { path, sha256: createHash('sha256').update(await readFile(path)).digest('hex') } }
 }
 
 describe('pre-owner local source maintenance admission', () => {
@@ -101,9 +130,15 @@ describe('pre-owner local source maintenance admission', () => {
         : 'export {}\n', { mode: 0o600 })
     }
     const installer = await bindLocalSourceInstaller(root)
+    const homePath = join(await realpath(await mkdtemp(join(tmpdir(), 'local-source-stage-'))), 'home')
+    roots.push(dirname(homePath))
+    await mkdir(join(homePath, 'profiles', 'assistant'), { recursive: true })
+    const manifest = '{"name":"dsh-profile-assistant","dsh":{"profile":{"bundles":[]}}}\n'
+    await writeFile(join(homePath, 'profiles', 'assistant', 'package.json'), manifest)
+    const dsh = await hostFixture(dirname(homePath))
     const inputPath = join(root, 'package-input.json')
     const run = async (extension?: string) => {
-      await writeFile(inputPath, JSON.stringify({ homePath: '/staged', profile: 'assistant', originalCohort: {}, dsh: {},
+      await writeFile(inputPath, JSON.stringify({ homePath, profile: 'assistant', originalCohort: {}, dsh,
         proof: { installer, ...(extension ? { extension } : {}) } }), { mode: 0o600 })
       return spawnSync(process.execPath, [join(process.cwd(), 'scripts/install/local-source-maintenance.mjs'), 'packages', inputPath],
         { encoding: 'utf8' })
@@ -114,9 +149,47 @@ describe('pre-owner local source maintenance admission', () => {
     const legacy = await run()
     expect(legacy.status).toBe(0)
     expect(JSON.parse(legacy.stdout)).toEqual({ extension: null })
+    expect(await readFile(join(homePath, 'fallback-healed'), 'utf8')).toBe('native')
+    expect((await readFile(join(homePath, 'heal.log'), 'utf8')).trim().split('\n')).toHaveLength(2)
+    expect(await readFile(join(homePath, 'profiles', 'assistant', 'package.json'), 'utf8')).toBe(manifest)
+  })
+  test('package healing fails closed for a missing native API or a changed pinned Host CLI', async () => {
+    const root = await installerFixture()
+    await writeFile(join(root, 'package.json'), '{"type":"module"}', { mode: 0o600 })
+    await writeFile(join(root, 'plugins/lark-channel/package.json'), '{"type":"module"}', { mode: 0o600 })
+    for (const name of ['rsi-local-update', 'rsi-local-resources', 'rsi-source-maintenance', 'rsi-local-activation',
+      'rsi-local-pair-install', 'rsi-local-roots-extension', 'rsi-local-cohort', 'rsi-authority-runtime', 'supervised-growth-profile']) {
+      await writeFile(join(root, 'plugins/lark-channel/lib', `${name}.js`), name === 'rsi-local-pair-install'
+        ? 'export async function stageRsiLocalSinglePackages() { return { staged: true } }\n' : 'export {}\n', { mode: 0o600 })
+    }
+    const installer = await bindLocalSourceInstaller(root)
+    const stageRoot = await realpath(await mkdtemp(join(tmpdir(), 'local-source-heal-')))
+    roots.push(stageRoot)
+    const homePath = join(stageRoot, 'home')
+    await mkdir(join(homePath, 'profiles', 'assistant'), { recursive: true })
+    await writeFile(join(homePath, 'profiles', 'assistant', 'package.json'), '{"dsh":{"profile":{"bundles":[]}}}\n')
+    const dsh = await hostFixture(stageRoot, true)
+    const inputPath = join(root, 'package-input.json')
+    const run = () => spawnSync(process.execPath, [join(process.cwd(), 'scripts/install/local-source-maintenance.mjs'), 'packages', inputPath], { encoding: 'utf8' })
+    await writeFile(inputPath, JSON.stringify({ homePath, profile: 'assistant', originalCohort: {}, dsh, proof: { installer } }), { mode: 0o600 })
+    const missing = run()
+    expect(missing.status).not.toBe(0)
+    expect(missing.stderr).toContain('lacks native fallback healing APIs')
+    expect(await readFile(join(homePath, 'profiles', 'assistant', 'package.json'), 'utf8')).toBe('{"dsh":{"profile":{"bundles":[]}}}\n')
+    await writeFile(dsh.path, 'changed Host executable\n')
+    const changed = run()
+    expect(changed.status).not.toBe(0)
+    expect(changed.stderr).toContain('pinned DSH executable changed')
+  })
+  test('rejects an executable Host from the writable stopped Home before loading its boot module', async () => {
+    const homePath = await realpath(await mkdtemp(join(tmpdir(), 'local-source-home-host-')))
+    roots.push(homePath)
+    const dsh = await hostFixture(homePath)
+    await expect(healLocalSourceProfileModuleFallback({ homePath, profile: 'assistant', dsh }))
+      .rejects.toThrow('executable is inside the stopped Home')
   })
   test('rechecks authority emptiness and signed sidecar host absence on stopped copies', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'local-source-authority-'))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'local-source-authority-')))
     roots.push(root)
     const authority = join(root, 'rsi-authorities', 'assistant')
     for (const name of ['config', 'identities', 'registry', 'state']) await mkdir(join(authority, name), { recursive: true, mode: 0o700 })
