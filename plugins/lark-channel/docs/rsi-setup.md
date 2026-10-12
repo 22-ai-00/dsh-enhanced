@@ -69,7 +69,7 @@ dsh plugin --profile rsi-coordinator add \
   @dsh-enhanced/plugin-control-plane
 ```
 
-自动安装从 DSH base 创建确定性命名的独立协调器 profile，并安装同版本 Policy、Automations、Control Plane；中断后的部分安装仅凭本次私有登记及停机状态修复。手动配置也须使用新的自定义 profile，勿从 `web` 模板复制：协调器不需要 Web 服务或第二个 Lark 入口。目标和协调器的 Policy/Automations 状态分开；协调器 Control Plane 的主库独立，专用采用连接按目标 trust 中的精确路径读取共享交接账本。
+自动安装从 DSH base 创建确定性命名的独立协调器 profile，并安装同版本 Policy、Automations、Control Plane；base 由当前受信任 DSH Host 的安装目录提供，不要求协调器 profile 自行安装。中断后的部分安装仅凭本次私有登记及停机状态修复。手动配置也须使用新的自定义 profile，勿从 `web` 模板复制：协调器不需要 Web 服务或第二个 Lark 入口。目标和协调器的 Policy/Automations 状态分开；协调器 Control Plane 的主库独立，专用采用连接按目标 trust 中的精确路径读取共享交接账本。
 
 ## 2. 准备一次性有限授权 manifest
 

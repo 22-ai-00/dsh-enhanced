@@ -366,6 +366,35 @@ describe('owner-scoped native goal context', () => {
     } finally { clock.mockRestore() }
   })
 
+  it('shows bounded escaped opportunity profiles only beside owner-authorized event sources', async () => {
+    const f = await harness(undefined, 4_000, undefined, true, true, 2_000, {
+      preauthorizedCreateMaxRounds: 2, eventWaits: true, executionBudget: scheduleBudget, backgroundWake: scheduleWake,
+    })
+    const agent = await f.create('opportunity-context', 'owner'); f.human.add(agent)
+    const objective = 'Track a repository result'; await installGoalVerifier(f, goalProfiles(f.root, objective))
+    const availableProfiles = vi.fn(() => [{ id: '<report>&{result}', mode: 'remind', maxDecisionsPerGoal: 3, maxExecutionsPerGoal: 0, maxRemindersPerGoal: 1 }])
+    f.ctx.provide('assistantProactive' as never, { availableProfiles } as never)
+    const record = f.service.create(agent, objective, 2)
+    const context = f.service.snapshot(agent)
+    expect(availableProfiles).toHaveBeenCalledWith(agent)
+    expect(context).toContain('opportunity_profile')
+    expect(context).toContain('&lt;report&gt;&amp;&#123;result&#125;')
+    expect(context).not.toContain('<report>')
+    expect(context).toContain('"waitExpiresAt"')
+    expect(context.length).toBeLessThanOrEqual(4_000)
+    expect(f.service.eventWaitsForGoal(agent, record.id)).toEqual([])
+    availableProfiles.mockImplementation(() => Array.from({ length: 16 }, (_, index) => ({ id: `${index}${'x'.repeat(200)}`, mode: 'execute', maxDecisionsPerGoal: 2, maxExecutionsPerGoal: 1, maxRemindersPerGoal: 0 })))
+    const oversized = f.service.snapshot(agent)
+    expect(oversized).toContain('opportunity_profile')
+    expect(oversized).toContain(`0${'x'.repeat(200)}`)
+    expect(oversized).not.toContain(`15${'x'.repeat(200)}`)
+    expect(oversized).toContain('"triggerId":"file"')
+    availableProfiles.mockImplementation(() => [])
+    expect(f.service.snapshot(agent)).not.toContain('opportunity_profile')
+    f.denyAction('wait-for-event')
+    expect(f.service.snapshot(agent)).not.toContain('Configured event sources')
+  })
+
   it.each(['success', 'storage-failure', 'trailing-tool', 'multiple-steps', 'compressed-persistence'] as const)('drives an admitted native event wait without an owner turn: %s', async scenario => {
     const nativeBudget = { mode: 'calls' as const, modelCalls: 4, toolCalls: 4, durationMs: 60_000, maxOutputTokensPerCall: 500, routes: [{ provider: 'fixture', model: 'fixture' }] }
     const f = await harness(undefined, undefined, undefined, true, true, 2_000, { eventWaits: true, executionBudget: nativeBudget, backgroundWake: scheduleWake }, scenario === 'compressed-persistence')

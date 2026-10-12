@@ -1,5 +1,11 @@
 # 安装、诊断与重启
 
+## 事件与主动跟进
+
+`supervised` 安装包含 `event-triggers` 和 `assistant-proactive`，复用原生 Goals/Automations 做持久等待和主动提醒。支持的来源包含 GitHub 仓库/CI/评审、精确飞书日历、文件、HTTPS JSON 和签名 webhook；安装两个 bundle 不等于授权读取账户。空配置不轮询、不创建目标、不发送提醒，也不恢复既有暂停任务。
+
+首次接线须配置主人范围内的事件来源、有限观测预算和 Goals 等待/执行权限；GitHub 可使用 Web Owner 的 `repositoryDelivery.events` 配置，飞书日历还需要应用只读 scope 与精确日历 ID。主人可在对话中让现有目标等待已授权来源，Goals 上下文显示可用来源和机会策略，使用 `goal_wait_event` 持久登记，而不是让模型反复查询。`remind`、`prepare`、`execute` 分别对应提醒、准备和继续目标，配置与限制见 [事件来源](../../plugins/event-triggers/README.md) 和 [主动跟进](../../plugins/assistant-proactive/README.md)。目前不提供聊天创建任意账户监控或任务之外无授权的自主发现。
+
 ## 首次安装依赖审批
 
 Linux `autonomy` 场景需要原生依赖 `koffi`。pnpm 11.7.0 首次安装可能以 `ERR_PNPM_IGNORED_BUILDS` 停止，并列出 `koffi` 和实际 profile 目录。进入该报错中的目录，使用同一个 pnpm 11.7.0 执行：

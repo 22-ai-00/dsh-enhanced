@@ -19,6 +19,10 @@
 
 ## 当前阻塞与下一验收
 
+当前交付：授权内减少重复审批、GitHub/飞书日历事件主动跟进，以及可直接安装的 npm 新版本。已补齐 supervised 的事件/主动性 bundle 安装、主人可用机会策略发现及 `proactive_status` 只读预授权；仍须显式配置来源、预算和等待权限，未提供聊天创建任意监控或任务之外自主发现。owner 配置器的基础包读取已改用经验证的 Host 安装目录，源码定向验证通过，尚未重新部署。
+
+用户要求默认最新 DSH。npm 尚无无预发布后缀的正式版，官方 `latest` 为 `0.2.0-rc.2`；当前锁与 peer 仍是 `0.1.5-rc.3` 基线，不能只放宽范围就发布。下一步成套迁移 Session/动态 Auto、preset registry、Cordis/Loader 和已移除的 fallback API，再运行完整检查、真实事件/安装验收及发布流程。未通过前不标记新 npm 版本已发布。
+
 本机目标为 `assistant`，原 Agent 与用量监控服务运行，学习仍禁用。用户已确认修复离线升级并开启学习 scheduler；升级后只读数据库核查三个旧 Heartbeat/Recovery 任务均为 paused、下一运行时间为空，满足本次 `--ack-existing-automations` 前提。
 
 离线完整元数据、临时 peer 包预热及原生 fallback 修复已通过正式维护，事务退出 0、完成服务验收并清理事务目录；未放宽生产链接守卫。随后 owner 安装退出 1：新协调器 profile 缺少 `@deepseek-ai/dsh-base/cordis.patch.yml`，尚未返回 ready；保留现场排查，不以包安装成功代替调度就绪。启用后该冻结安装的本地更新路径仍受限。

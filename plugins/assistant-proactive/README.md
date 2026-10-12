@@ -62,6 +62,8 @@ profiles:
 
 对话示例：`为当前目标等待 report-file 触发器，使用 useful-report 机会策略，截止时间为一小时后。` 模型在当前主人请求中调用 `goal_wait_event`，显式提供 `opportunity_profile: useful-report`，以及实际目标 ID、native revision、触发器 ID 和毫秒时间戳。未知策略在暂停前被拒绝；省略策略保留 Goals 原有行为。
 
+启用 Goals 事件等待后，主人目标上下文会列出当前可用策略的 ID、模式和每目标上限，供选择 `opportunity_profile`；不展示准备模型、供应商或预算标识。空策略配置不提供主动动作。列表只读且不授予等待、提醒、模型或执行权限；目标首次使用策略时仍按原逻辑冻结，执行时再次核验主人及权限。已认证主人可用 `proactive_status` 只读查看决定，无需对每次合法查询重复工具审批；`proactive_feedback` 仍需当前主人回合及原有审批。
+
 - `execute`：达到条件后返回执行候选；Goals 再次核验当前目标和授权，才能恢复。
 - `remind`：向冻结的主人会话投递一条持久提醒，包含目标、事件标识与配置估值；不调用模型，不执行目标。要求 Delivery 支持 `enqueueOwnerNotification`、已配置主人路由，并为背景主体 `assistant-proactive/v1` 授予该会话消息的 `send` 权限。设置 `maxRemindersPerGoal` 为正数；重复处理同一决定复用相同投递键。Web 在原会话输入区显示“主动提醒”，重启后可继续读取；其他渠道通过已有适配器发送。
 - `prepare`：默认只保存目标、事件标识与判断理由，供 `proactive_status` 查询；省略 `preparation` 时不生成模型草稿、不修改业务文件。显式配置 `preparation { provider, model, budgetId, maxOutputTokens, timeoutMs }` 后，才会排入持久准备队列并请求一次真实模型草稿。该草稿使用独立 Session、最多一次模型请求、`tools: []`、`maxToolCalls: 0`；准备运行只解析预设身份，不装载预设工具和 persona，原目标保持 `paused`；运行器禁止工具执行；提示要求只提供草稿、不声称完成或验收。模型文本本身不构成执行或验收证据。`proactive_status` 返回的草稿始终是 `verified: false` / `unverified-draft`，不是验收结果。目标继续等待后续事件，直到截止或主人控制。
@@ -75,7 +77,7 @@ profiles:
 
 - 文件系统：保存配置数据库及 SQLite WAL/SHM；其中含主人身份范围、目标文本、事件标识、判断和反馈。另保存 `databasePath + '.preparations'` 及 WAL/SHM，其中含准备请求、模型草稿、有限 usage、独立 Session ID、状态和原因。数据库要求私有普通文件及不可由组/其他用户写入的父目录；不读取事件正文或业务文件。
 - 网络：本插件本身不直接联网；显式开启准备后，`assistant-automations` 通过宿主已配置的模型 provider 发送草稿请求，目标文本和草稿会进入该请求和本地准备账本。子进程、凭据、浏览器、安装脚本：本插件均不直接使用。
-- 工具：注册 `proactive_status` 和 `proactive_feedback`，均要求真实 Agent、Delivery 主人身份及 Policy；反馈还要求当前主人请求。Policy 资源为 `goal:proactive-opportunities`，动作分别为 `inspect`、`feedback`；通用工具审批仍由宿主处理。
+- 工具：注册 `proactive_status` 和 `proactive_feedback`，均要求真实 Agent、Delivery 主人身份及 Policy；反馈还要求当前主人请求。Policy 资源为 `goal:proactive-opportunities`，动作分别为 `inspect`、`feedback`；安装配套 Policy 后，仅严格匹配的只读 `proactive_status` 可按当前 owner 和 Policy 预授权，其他调用仍由宿主审批。
 - 执行：未配置 `preparation` 时本插件不执行模型调用、不恢复目标；提醒通过 Delivery 的有类型接口持久入队。配置准备后还要求 Automations、Goals、Delivery 和 Policy 都可用，且 `background:assistant-proactive/v1` 对该 goal 的 `prepare` 被允许。真正业务操作及消息发送的权限由 Goals、Delivery 与具体工具负责。
 - 卸载释放数据库和工具；保留历史数据库，重新安装可继续读取。删除历史数据库会丢失本插件计数和反馈，不应在活跃目标期间清空。
 

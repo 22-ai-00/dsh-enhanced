@@ -467,9 +467,10 @@ export class AssistantPolicyService extends Service {
     const expectedCaller = ['action_github_grants', 'action_github_deliver', 'action_github_delivery_status', 'action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect', 'action_github_compensate', 'action_github_compensation_status'].includes(definition.name) ? 'dsh-enhanced-assistant-actions'
       : ['isolation_run', 'isolation_grants'].includes(definition.name) ? 'dsh-enhanced-assistant-isolation'
       : ['goal_create', 'goal_context', 'goal_schedule', 'goal_strategy', 'goal_wait_event', 'goal_checkpoint'].includes(definition.name) ? 'dsh-enhanced-assistant-goals'
+      : definition.name === 'proactive_status' ? 'dsh-enhanced-assistant-proactive'
       : ['skill_run', 'skill_status'].includes(definition.name) ? 'dsh-enhanced-assistant-skills' : undefined
     if (expectedCaller === undefined || caller.fiber.name !== expectedCaller) {
-      throw new Error('assistant-policy: preauthorization is reserved for approved assistant-actions GitHub tools, assistant-isolation tools, assistant-goals tools, or assistant-skills skill_run/skill_status')
+      throw new Error('assistant-policy: preauthorization is reserved for approved assistant-actions GitHub tools, assistant-isolation tools, assistant-goals tools, assistant-proactive proactive_status, or assistant-skills skill_run/skill_status')
     }
     if (options !== undefined && (typeof options.denialReason !== 'string' || options.denialReason.trim().length === 0 || options.denialReason.length > 512)) {
       throw new Error('assistant-policy: invalid preauthorization denial reason')

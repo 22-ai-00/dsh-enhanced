@@ -4,9 +4,6 @@
 # This file is sourced by the two public entrypoints; do not execute it directly.
 
 DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.1.5-rc.1'
-# The bootstrap pin identifies the pinned installer cohort. Runtime Hosts use
-# the verified compatibility range below. Fresh installs resolve the registry's
-# latest tag to an exact, compatible Host before mutating the global toolchain.
 DSH_ENHANCED_DEFAULT_DSH_VERSION='latest'
 DSH_ENHANCED_DEFAULT_PNPM_VERSION='11.7.0'
 if [[ -z "${DSH_ENHANCED_VERIFIED_HOST_RANGE:-}" ]]; then
@@ -51,6 +48,8 @@ DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS=(
   # the supervised top-level cohort so fresh profiles activate completely.
   'assistant-goals'
   'assistant-recovery'
+  'event-triggers'
+  'assistant-proactive'
 )
 
 # This is retained only for users deliberately migrating an old all-in-one

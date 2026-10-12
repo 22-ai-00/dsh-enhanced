@@ -173,6 +173,8 @@ executionBudget:
 
 这是 `goal_wait_event` 的参数。`expires_at` 是 UTC epoch 毫秒。已创建目标的上下文会为事件源提供 `waitExpiresAt`，取来源期限、目标预算、最大等待时长和独立验收有效期内的可用上限；调用时使用该值或更早的有效期限，不要直接复制来源的 `expiresAt`。上下文不授予权限，实际调用仍重查所有边界。省略 `expires_at` 时只查看当前目标的等待记录。创建等待还需 goal 的 `wait`、`pause`、`observe`、`inspect` 权限和该工具的执行权限；当前 agent 以及 `background:assistant-goals-wake/v1` 都必须对来源目标 automation 获得 `wait-for-event` 权限。后台恢复仍需原有 owner route、`wake`、执行与预算规则；结果投递另需 `background:assistant-goals-wake/v1` 对原 binding 的 message `send` 权限。启用 `preauthorizedSchedule` 时，精确的四参数调用还须通过已有隔离验收和有限预算预检。
 
+若安装 `assistant-proactive` 并配置策略，事件源上下文还会列出当前主人可见的策略 ID、`prepare`/`remind`/`execute` 模式和每目标有限上限。选择后将 ID 作为可选 `opportunity_profile` 传给 `goal_wait_event`；空配置不列出策略。列表是只读提示，不包含模型凭据、不新建等待或授权；注册等待和后续事件处理仍走原目标、来源、Policy、预算与独立验收。上下文长度不足时省略策略提示。
+
 授权时冻结来源配置与持久序号，暂停原目标并 flush 原 Session；只匹配快照之后的首个有效事件。私有 `databasePath + '.event-waits'` 日志先保存匹配与固定 wake 身份，再交给已有调度器恢复原 Session/Goal。消费者重开会扫描持久事件；来源通知只是扫描提示。目标版本、owner、来源配置、Policy 或期限不再有效时拒绝恢复。派发后的未知执行不自动重放。
 
 完成本次原生执行与独立验收等待、释放 Agent 后，事件 wake 将本次目标回合的完整最终文本放入原 owner binding 的持久消息队列。入队前重查来源、目标和精确 owner/binding generation/Session；稳定 key 防止重复结果入队。缺少结果能力、空白/截断/超限文本、撤权或入队失败不会伪报交付成功，也不重跑已派发目标。队列实际送达仍按 Delivery 的渠道确认和 unknown 规则处理；wake 成功仅证明结果已入队。仅配置旧的单次计划 wake 不自动增加消息投递。
