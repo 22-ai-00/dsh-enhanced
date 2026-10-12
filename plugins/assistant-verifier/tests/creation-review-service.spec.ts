@@ -33,7 +33,7 @@ test('late binds the private Control Plane and native peers, then drains each ve
   const expiresAt = Date.now() + 60_000
   const creationReviews: CreationReviewConfig = { authorityId: 'grant', owner, namePrefix: 'owner-', keyId: 'key-1', keyPath,
     expiresAt, maxVerifications: 1,
-    runner: { stateRoot, image: 'sha256:' + 'b'.repeat(64), dockerPath: '/usr/bin/docker', expiresAt,
+    runner: { stateRoot, image: 'sha256:' + 'b'.repeat(64), dockerPath: await realpath(process.execPath), expiresAt,
       maxRuns: 3, maxTotalDurationMs: 30_000, maxDurationMs: 10_000, maxOutputBytes: 65_536 },
     policy: 'Review the owner task.', maxInputBytes: 8192, maxOutputTokens: 512, maxDurationMs: 20_000,
     maxCases: 2, receiptTtlMs: 10_000 }

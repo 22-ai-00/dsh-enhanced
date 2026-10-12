@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'vitest'
-import { cp, lstat, mkdir, mkdtemp, readFile, readlink, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { cp, lstat, mkdir, mkdtemp, readFile, readlink, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
@@ -71,7 +71,7 @@ async function profile(home: string, name: string, oldHost: string) {
 }
 
 async function fixture(names = ['alpha', 'beta']) {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-host-profile-update-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-host-profile-update-')))
   roots.push(root)
   const originalHome = join(root, 'home'), stagedHome = join(root, 'stage'), preparationRoot = join(root, 'preparation')
   const oldHost = join(root, 'old-host'), candidateHost = join(root, 'candidate-host')

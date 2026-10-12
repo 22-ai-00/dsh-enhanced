@@ -97,10 +97,6 @@ jobs:
         id: repository
         run: pnpm check
 
-      - name: Collect remaining package test failures
-        if: failure() && steps.repository.outcome == 'failure'
-        run: pnpm --recursive --no-bail --if-present run test --testTimeout=15000
-
   macos-verify:
     # The installers document macOS LaunchAgent support and the Control Plane
     # loaders compare `realpath` against `resolve`, which behaves differently on
@@ -127,13 +123,14 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - name: Record the system Bash version
+      - name: Configure macOS test environment
         shell: bash
         run: |
           set -euo pipefail
           # The installer must stay compatible with the bundled Bash 3.2, which
           # has no `BASHPID` and differs on empty-array expansion under nounset.
           /bin/bash --version | head -1
+          printf 'TMPDIR=%s\n' "$(cd /tmp && pwd -P)" >> "${GITHUB_ENV}"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -141,10 +138,6 @@ jobs:
       - name: Verify repository
         id: repository
         run: pnpm check
-
-      - name: Collect remaining package test failures
-        if: failure() && steps.repository.outcome == 'failure'
-        run: pnpm --recursive --no-bail --if-present run test --testTimeout=15000
 
   windows-acp-smoke:
     runs-on: windows-2025

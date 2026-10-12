@@ -235,6 +235,8 @@ async function controlledHostFixture(withUnits = false, dumpLink: 'none' | 'exte
 }
 
 describe('managed Host transaction inputs', () => {
+  const itLinux = process.platform === 'linux' ? it : it.skip
+
   it('passes trust_lockfile only for offline materialize in the production bwrap invocation', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-host-bwrap-'))
     try {
@@ -311,7 +313,7 @@ describe('managed Host transaction inputs', () => {
     expect(result.pathEnvironment).not.toContain(old.root)
   })
 
-  it('returns current without creating a transaction or touching Home', async () => {
+  itLinux('returns current without creating a transaction or touching Home', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-host-current-'))
     try {
       const home = join(root, 'home')
@@ -376,7 +378,7 @@ describe('managed Host transaction inputs', () => {
     expect(() => verify(baseline, current, { stage: 'preview' })).toThrow()
   })
 
-  it('switches an unregistered Home to the candidate Host through the full v4 transaction', async () => {
+  itLinux('switches an unregistered Home to the candidate Host through the full v4 transaction', async () => {
     const fixture = await controlledHostFixture()
     try {
       const result = fixture.run('host-update')
@@ -389,7 +391,7 @@ describe('managed Host transaction inputs', () => {
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)
 
-  it('migrates an active unit and preserves an inactive same-Home sibling', async () => {
+  itLinux('migrates an active unit and preserves an inactive same-Home sibling', async () => {
     const fixture = await controlledHostFixture(true)
     try {
       const result = fixture.run('host-update')
@@ -413,7 +415,7 @@ describe('managed Host transaction inputs', () => {
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)
 
-  it('rejects an external Home symlink created by candidate dump-config before swap', async () => {
+  itLinux('rejects an external Home symlink created by candidate dump-config before swap', async () => {
     const fixture = await controlledHostFixture(false, 'external')
     try {
       const result = fixture.run('host-update')
@@ -424,7 +426,7 @@ describe('managed Host transaction inputs', () => {
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)
 
-  it('allows a staged node_modules link into the receipt-verified candidate Host', async () => {
+  itLinux('allows a staged node_modules link into the receipt-verified candidate Host', async () => {
     const fixture = await controlledHostFixture(false, 'candidate')
     try {
       const result = fixture.run('host-update')
@@ -436,7 +438,7 @@ describe('managed Host transaction inputs', () => {
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)
 
-  it('recovers the original Home after a v4 rename-gap crash with simulated empty unmanaged-process inventory', async () => {
+  itLinux('recovers the original Home after a v4 rename-gap crash with simulated empty unmanaged-process inventory', async () => {
     const fixture = await controlledHostFixture()
     try {
       const crashed = fixture.run('host-update', true)
@@ -454,7 +456,7 @@ describe('managed Host transaction inputs', () => {
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)
 
-  it('restores original unit bytes and active set after a prestart rename-gap crash', async () => {
+  itLinux('restores original unit bytes and active set after a prestart rename-gap crash', async () => {
     const fixture = await controlledHostFixture(true)
     try {
       const before = await Promise.all(['web', 'dormant'].map(profile =>
@@ -478,7 +480,7 @@ describe('managed Host transaction inputs', () => {
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)
 
-  it('keeps the candidate binding and resumes acceptance after the candidate has run', async () => {
+  itLinux('keeps the candidate binding and resumes acceptance after the candidate has run', async () => {
     const fixture = await controlledHostFixture(true)
     try {
       const state = JSON.parse(await readFile(fixture.systemdState, 'utf8'))

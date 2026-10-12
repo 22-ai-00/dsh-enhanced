@@ -1168,6 +1168,9 @@ describe('release version workflow', () => {
     expect(ciWorkflow).toContain('kernel.apparmor_restrict_unprivileged_userns=0')
     expect(ciWorkflow).toContain('/usr/bin/bwrap')
     expect(ciWorkflow).toContain('--unshare-all')
+    expect(ciWorkflow.match(/run: pnpm check\n/gu)).toHaveLength(2)
+    expect(ciWorkflow).not.toContain('Collect remaining package test failures')
+    expect(ciWorkflow).toContain('$(cd /tmp && pwd -P)')
     expect(releaseWorkflow).toContain("printf 'DSH_TEST_PNPM_ROOT=%s\\n'")
   })
 

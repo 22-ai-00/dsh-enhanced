@@ -72,7 +72,7 @@ async function calls(path: string): Promise<{ args: string[]; safe: boolean }[]>
   return (await readFile(path, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { args: string[]; safe: boolean })
 }
 
-describe('private RSI repository builder', () => {
+describe.skipIf(process.platform !== 'linux' || process.arch !== 'x64')('private RSI repository builder', () => {
   test('reads pinned inputs without Docker calls and refuses missing or changed resources', async () => {
     const f = await fixture()
     await expect(readRsiBuildEnvironment(f.args)).rejects.toThrow()

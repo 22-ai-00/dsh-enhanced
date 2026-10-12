@@ -6,10 +6,14 @@ import { Context } from '@deepseek-ai/cordis'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { afterEach, expect, test } from 'vitest'
 import { AssistantAutomationsService } from '../src/service.ts'
-import { listAutomationsLocally } from '../src/operator.ts'
 import type { HostAutomationDefinition } from '../src/types.ts'
 
 const fixtures: Array<{ ctx: Context; root: string }> = []
+function readStoredDefinitions(databasePath: string) {
+  const database = new DatabaseSync(databasePath, { readOnly: true })
+  try { return database.prepare('SELECT id, status FROM automation_definitions ORDER BY id').all() }
+  finally { database.close() }
+}
 afterEach(async () => {
   for (const { ctx, root } of fixtures.splice(0)) {
     await ctx.fiber.dispose()
@@ -69,9 +73,9 @@ test('pinned Cordis root disposal pauses the owner registration before provider 
   const service = ctx.get('assistantAutomations') as AssistantAutomationsService
   service.reconcileSystem({ owner: 'other', automationId: 'other', idempotencyKey: 'other:active',
     desiredStatus: 'active', definition: definition('other-generation') })
-  expect(listAutomationsLocally(databasePath).map(item => [item.id, item.status])).toEqual([['other', 'active'], ['owned', 'active']])
+  expect(readStoredDefinitions(databasePath).map(item => [item.id, item.status])).toEqual([['other', 'active'], ['owned', 'active']])
   await ctx.fiber.dispose()
-  expect(listAutomationsLocally(databasePath).map(item => [item.id, item.status])).toEqual([['other', 'active'], ['owned', 'paused']])
+  expect(readStoredDefinitions(databasePath).map(item => [item.id, item.status])).toEqual([['other', 'active'], ['owned', 'paused']])
 })
 
 test('consumer-only unload and provider replacement pause once without leaking old callback', async () => {
@@ -79,17 +83,17 @@ test('consumer-only unload and provider replacement pause once without leaking o
   const first = consumer(ctx, 'owned')
   await first
   await first.dispose()
-  expect(listAutomationsLocally(databasePath).find(item => item.id === 'owned')?.status).toBe('paused')
+  expect(readStoredDefinitions(databasePath).find(item => item.id === 'owned')?.status).toBe('paused')
   const second = consumer(ctx, 'replacement')
   await second
   await provider.dispose()
-  expect(listAutomationsLocally(databasePath).find(item => item.id === 'replacement')?.status).toBe('paused')
+  expect(readStoredDefinitions(databasePath).find(item => item.id === 'replacement')?.status).toBe('paused')
   const nextProvider = ctx.plugin(AssistantAutomationsService, config)
   await nextProvider
   await second
-  expect(listAutomationsLocally(databasePath).find(item => item.id === 'replacement')?.status).toBe('active')
+  expect(readStoredDefinitions(databasePath).find(item => item.id === 'replacement')?.status).toBe('active')
   await second.dispose()
-  expect(listAutomationsLocally(databasePath).find(item => item.id === 'replacement')?.status).toBe('paused')
+  expect(readStoredDefinitions(databasePath).find(item => item.id === 'replacement')?.status).toBe('paused')
 })
 
 test('rejected Host shutdown callback cannot skip provider resource closure', async () => {
@@ -103,7 +107,7 @@ test('rejected Host shutdown callback cannot skip provider resource closure', as
   } })
   await owner
   await ctx.fiber.dispose()
-  expect(listAutomationsLocally(databasePath).find(item => item.id === 'broken')?.status).toBe('paused')
+  expect(readStoredDefinitions(databasePath).find(item => item.id === 'broken')?.status).toBe('paused')
 })
 
 test('provider rejects new registrations as soon as shutdown begins', async () => {
@@ -157,9 +161,9 @@ test('an old consumer shutdown cannot pause a newer nonce for the same owner and
   await newer
   await older.dispose()
   expect(oldClosed).toBe(1)
-  expect(listAutomationsLocally(databasePath).find(item => item.id === 'same')?.status).toBe('active')
+  expect(readStoredDefinitions(databasePath).find(item => item.id === 'same')?.status).toBe('active')
   await newStop()
-  expect(listAutomationsLocally(databasePath).find(item => item.id === 'same')?.status).toBe('paused')
+  expect(readStoredDefinitions(databasePath).find(item => item.id === 'same')?.status).toBe('paused')
 })
 
 test('a never-settling Host callback reaches its deadline and closes the provider store', async () => {
@@ -177,7 +181,7 @@ test('a never-settling Host callback reaches its deadline and closes the provide
   await provider.dispose()
   expect(Date.now() - started).toBeGreaterThanOrEqual(2_800)
   expect(() => service.health()).toThrow(/disposed/)
-  expect(listAutomationsLocally(databasePath).find(item => item.id === 'stuck')?.status).toBe('paused')
+  expect(readStoredDefinitions(databasePath).find(item => item.id === 'stuck')?.status).toBe('paused')
   const reopened = new DatabaseSync(databasePath)
   try {
     reopened.exec('BEGIN EXCLUSIVE')

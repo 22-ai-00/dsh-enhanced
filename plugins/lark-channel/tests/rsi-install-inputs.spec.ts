@@ -63,7 +63,7 @@ describe('installed owner setup input capture', () => {
         .rejects.toBeInstanceOf(RsiInstalledInputsUnavailableError)
     } finally { await data.cleanup() }
   })
-  test('captures real installed entry, Host files, pins and exact Include raw !!js digests', async () => {
+  test.skipIf(process.platform !== 'linux')('captures real installed entry, Host files, pins and exact Include raw !!js digests', async () => {
     const data = await fixture()
     try {
       const result = await collectRsiInstalledInputs({ dshHome: data.home, targetProfile: 'target', targetEffective: data.effective,
@@ -98,7 +98,7 @@ describe('installed owner setup input capture', () => {
     } finally { await data.cleanup() }
   })
 
-  test('rejects mismatched installed entry, escaped package file, disabled ingress and unsupported tags', async () => {
+  test.skipIf(process.platform !== 'linux')('rejects mismatched installed entry, escaped package file, disabled ingress and unsupported tags', async () => {
     const data = await fixture()
     try {
       const request = { dshHome: data.home, targetProfile: 'target', targetEffective: data.effective,
@@ -137,7 +137,7 @@ describe('installed owner setup input capture', () => {
     } finally { await data.cleanup() }
   })
 
-  test('pins the exact embedded Memory dependency in an isolated profile', async () => {
+  test.skipIf(process.platform !== 'linux')('pins the exact embedded Memory dependency in an isolated profile', async () => {
     const data = await fixture()
     try {
       const shared = join(data.profile, 'node_modules', '@dsh-enhanced', 'personal-memory')

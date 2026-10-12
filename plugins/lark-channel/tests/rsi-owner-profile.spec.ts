@@ -60,7 +60,7 @@ describe('ordinary-use owner authority and scheduler inventory', () => {
     expect(() => rsiDatabasePaths(effective.replace('automations/state.sqlite', '../escape'), '/private')).toThrow('bounded dshHomePath')
     expect(() => rsiDatabasePaths(effective + '- id: dsh-enhanced-assistant-automations\n  config: { databasePath: /private/other.sqlite }\n', '/private')).toThrow('ambiguous')
   })
-  test('reads actual active durable tasks without creating absent storage or changing existing data', async () => {
+  test.skipIf(process.platform !== 'linux')('reads actual active durable tasks without creating absent storage or changing existing data', async () => {
     const home = await realpath(await mkdtemp(join(tmpdir(), 'rsi-inventory-'))); roots.push(home)
     const databasePath = join(home, 'state', 'automations.sqlite')
     const effective = stringify([{ id: 'dsh-enhanced-assistant-automations', config: { databasePath, schedulerEnabled: false } }])

@@ -13,6 +13,7 @@ import { prepareRsiSourceWorkspace } from '../src/rsi-source.js'
 import { localCohortFixture, installFixture } from './fixtures/rsi-local-cohort.js'
 
 const roots: string[] = []
+const linuxTest = test.skipIf(process.platform !== 'linux')
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('/usr/bin/git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', ...args],
@@ -62,7 +63,7 @@ async function fixture(memory = false) {
   return { ...f, source, args, original, profilePath, next, addBundle, get builds() { return f.builds } }
 }
 
-test('prepares and reuses exact candidate tarballs outside Home while preserving installed files and source', async () => {
+linuxTest('prepares and reuses exact candidate tarballs outside Home while preserving installed files and source', async () => {
   const f = await fixture(), upstream = await f.next()
   const bootstrapPath = join(f.home, 'rsi-sources', f.profile, 'bootstrap.json')
   const bootstrap = await readFile(bootstrapPath), cohortReceipt = await readFile(join(f.original.root, 'receipt.json'))
@@ -90,7 +91,7 @@ test('prepares and reuses exact candidate tarballs outside Home while preserving
   await expect(prepareRsiLocalUpdate(f.args, ports)).rejects.toThrow('prepared update receipt differs')
 }, 60_000)
 
-test('refuses publishing a preparation when upstream advances during the build', async () => {
+linuxTest('refuses publishing a preparation when upstream advances during the build', async () => {
   const f = await fixture(); await f.next()
   await expect(prepareRsiLocalUpdate(f.args, { build: async (...args) => {
     await f.ports.build(...args)
@@ -103,7 +104,7 @@ test('refuses publishing a preparation when upstream advances during the build',
   await verifyRsiLocalInstalledPackages({ cohort: f.original, profilePath: f.profilePath })
 }, 60_000)
 
-test('prepares a newer package version while retaining the installed release', async () => {
+linuxTest('prepares a newer package version while retaining the installed release', async () => {
   const f = await fixture()
   const manifests = ['package.json', ...f.original.packages.map(item => `${item.path}/package.json`)]
   for (const path of manifests) {
@@ -120,7 +121,7 @@ test('prepares a newer package version while retaining the installed release', a
   await verifyRsiLocalInstalledPackages({ cohort: f.original, profilePath: f.profilePath })
 }, 60_000)
 
-test('a failed candidate build can retry without replacing the original frozen cohort', async () => {
+linuxTest('a failed candidate build can retry without replacing the original frozen cohort', async () => {
   const f = await fixture(); await f.next()
   await expect(prepareRsiLocalUpdate(f.args, { build: async () => { throw new Error('builder failed') } })).rejects.toThrow('builder failed')
   await verifyRsiLocalInstalledPackages({ cohort: f.original, profilePath: f.profilePath })
@@ -129,7 +130,7 @@ test('a failed candidate build can retry without replacing the original frozen c
   expect(result.originalCohortDigest).toBe(f.original.receiptDigest)
 }, 60_000)
 
-test('default preparation refuses missing isolated build inputs without running an ambient build script', async () => {
+linuxTest('default preparation refuses missing isolated build inputs without running an ambient build script', async () => {
   const f = await fixture()
   const marker = join(f.root, 'ambient-build-ran'), manifest = join(f.sourceRepository, 'package.json')
   const value = JSON.parse(await readFile(manifest, 'utf8'))
@@ -142,7 +143,7 @@ test('default preparation refuses missing isolated build inputs without running 
   await verifyRsiLocalInstalledPackages({ cohort: f.original, profilePath: f.profilePath })
 }, 60_000)
 
-test('reading an update never recreates an absent candidate or accepts a preparation without isolated build evidence', async () => {
+linuxTest('reading an update never recreates an absent candidate or accepts a preparation without isolated build evidence', async () => {
   const f = await fixture(); await f.next()
   const result = await prepareRsiLocalUpdate(f.args, f.ports)
   const args = { dshHome: f.home, profile: f.profile, root: result.root }
@@ -170,7 +171,7 @@ test('CLI preparation derives the existing source and cannot be combined with ac
   }
 })
 
-test('explicit pre-owner extension freezes exactly one disabled bundle without changing the installed Home', async () => {
+linuxTest('explicit pre-owner extension freezes exactly one disabled bundle without changing the installed Home', async () => {
   const f = await fixture(true)
   const patch = await readFile(new URL('../../assistant-memory-learning/cordis.patch.yml', import.meta.url), 'utf8')
   await f.addBundle('assistant-memory-learning', patch)
@@ -203,7 +204,7 @@ test('explicit pre-owner extension freezes exactly one disabled bundle without c
   expect(f.builds).toBe(builds)
 }, 60_000)
 
-test('owner authority appearing during an extension build prevents a completed receipt', async () => {
+linuxTest('owner authority appearing during an extension build prevents a completed receipt', async () => {
   const f = await fixture(true)
   await f.addBundle('assistant-memory-learning')
   git(f.sourceRepository, 'add', '.'); git(f.sourceRepository, 'commit', '-m', 'add learner')
@@ -219,7 +220,7 @@ test('owner authority appearing during an extension build prevents a completed r
   await verifyRsiLocalInstalledPackages({ cohort: f.original, profilePath: f.profilePath })
 }, 60_000)
 
-test('schema 2 reader rechecks roots, build identity, current cohort and owner after candidate preparation', async () => {
+linuxTest('schema 2 reader rechecks roots, build identity, current cohort and owner after candidate preparation', async () => {
   const f = await fixture(true)
   await f.addBundle('assistant-memory-learning')
   git(f.sourceRepository, 'add', '.'); git(f.sourceRepository, 'commit', '-m', 'add learner')

@@ -55,7 +55,7 @@ async function fixture() {
   const owner = { authorityId: 'route', authorityHash: h('a'), principalId: 'owner', principalRecordId: 'record',
     principalVersion: 1, workspace: root, agentPreset: 'main' }
   const base = { owner, namePrefix: 'owner-', keyId: 'owner-key', keyPath, expiresAt: now + 120_000,
-    maxVerifications: 2, runner: { stateRoot, image: 'sha256:' + h('a'), dockerPath: '/usr/bin/docker',
+    maxVerifications: 2, runner: { stateRoot, image: 'sha256:' + h('a'), dockerPath: await realpath(process.execPath),
       expiresAt: now + 120_000, maxRuns: 20, maxTotalDurationMs: 80_000,
       maxDurationMs: 10_000, maxOutputBytes: 65_536 }, maxDurationMs: 60_000, maxCases: 3, receiptTtlMs: 30_000 }
   const creationConfig: CreationReviewConfig = { ...base, authorityId: 'creation-review',
