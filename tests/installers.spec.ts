@@ -9230,7 +9230,7 @@ fi
     const dshHome = await temporaryDshHome()
     await configureExistingLark(dshHome)
 
-    const result = runInstaller(localInstaller, ['--dry-run', '--yes'], dshHome)
+    const result = runInstaller(localInstaller, ['--dry-run', '--yes'], dshHome, 'Linux')
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('部署场景：supervised')
@@ -9349,7 +9349,10 @@ if [[ "$REGISTER_MODE" != 'invisible' ]]; then touch "$REGISTERED"; fi
     }
   })
 
-  test('recognizes a home-layer Lark binding as the effective profile binding', async () => {
+  test.each([
+    ['Linux', 'supervised'],
+    ['Darwin', 'lark'],
+  ])('recognizes a home-layer Lark binding as the effective profile binding on %s', async (platform, scenario) => {
     const dshHome = await temporaryDshHome()
     await writeFile(join(dshHome, 'cordis.patch.yml'), `- id: dsh-enhanced-lark-channel
   config:
@@ -9357,10 +9360,10 @@ if [[ "$REGISTER_MODE" != 'invisible' ]]; then touch "$REGISTERED"; fi
     appId: cli_0123456789abcdef
 `, 'utf8')
 
-    const result = runInstaller(localInstaller, ['--dry-run', '--yes'], dshHome)
+    const result = runInstaller(localInstaller, ['--dry-run', '--yes'], dshHome, platform)
 
     expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toContain('部署场景：supervised')
+    expect(result.stdout).toContain(`部署场景：${scenario}`)
     expect(result.stdout).toContain('飞书处理：保留当前应用配置')
     expect(result.stdout).toContain('检测到已有启用的 Lark channel；跳过临时 Host')
   })
