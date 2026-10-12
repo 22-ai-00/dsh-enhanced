@@ -7,7 +7,7 @@ import { chmod, lstat, mkdir, mkdtemp, open, opendir, readFile, readdir, readlin
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
-import { assertLifecycleNpmMetadataSafe, classifyLifecycleScenario, lifecycleWorkspacePaths, prepareLifecycleNpmMetadata, readRsiCoordinatorReceipt, validateRsiCoordinatorPair } from './lifecycle-config.mjs'
+import { assertLifecycleLocalSourceReplayMetadata, assertLifecycleNpmMetadataSafe, classifyLifecycleScenario, lifecycleWorkspacePaths, prepareLifecycleNpmMetadata, readRsiCoordinatorReceipt, validateRsiCoordinatorPair } from './lifecycle-config.mjs'
 import { candidateHostUnitSource, classifyHostUnitBytes, parseHostUpdatePlan } from './host-lifecycle.mjs'
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
@@ -1476,7 +1476,7 @@ async function assertProfileDigest(home, profile, expected) {
   } finally { closeSync(descriptor) }
 }
 
-async function profileTreeDigest(profilePath, initialPrefix = '', maxFileBytes = PROFILE_TREE_MAX_FILE_BYTES) {
+async function profileTreeDigest(profilePath, initialPrefix = '', maxFileBytes = PROFILE_TREE_MAX_FILE_BYTES, rejectSymlinks = false) {
   const records = []
   let count = 0
   const visit = async (directory, prefix = '') => {
@@ -1511,6 +1511,7 @@ async function profileTreeDigest(profilePath, initialPrefix = '', maxFileBytes =
           records.push(['file', relative, opened.mode, opened.size, sha256(contents)])
         } finally { closeSync(descriptor) }
       } else if (entry.isSymbolicLink()) {
+        if (rejectSymlinks) fail(`registry metadata mirror contains a symlink: ${relative}`)
         if (linked.uid !== currentUid() || linked.nlink !== 1) fail(`profile tree symlink 身份不安全：${relative}`)
         records.push(['symlink', relative, linked.mode, await readlink(path)])
       } else fail(`profile tree 含不支持的特殊文件：${relative}`)
@@ -1726,7 +1727,7 @@ async function recoverBoundTransaction({
   fail(`生命周期事务 home/backup 身份未知；拒绝重命名或删除任何目录：${transactionRoot}`)
 }
 
-function run(executable, args, { cwd, env = process.env, capture = false, passFds = [], timeoutMs } = {}) {
+function run(executable, args, { cwd, env = process.env, capture = false, rejectTruncated = false, passFds = [], timeoutMs } = {}) {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(executable, args, {
       cwd,
@@ -1737,6 +1738,7 @@ function run(executable, args, { cwd, env = process.env, capture = false, passFd
     })
     let stdout = ''
     let stderr = ''
+    let truncated = false
     let timedOut = false
     const timeout = timeoutMs === undefined ? undefined : setTimeout(() => {
       timedOut = true
@@ -1745,16 +1747,19 @@ function run(executable, args, { cwd, env = process.env, capture = false, passFd
     timeout?.unref()
     if (capture) {
       child.stdout.on('data', chunk => {
+        if (stdout.length + chunk.length > 16 * 1024 * 1024) truncated = true
         if (stdout.length < 16 * 1024 * 1024) stdout += String(chunk)
       })
       child.stderr.on('data', chunk => {
+        if (stderr.length + chunk.length > 4 * 1024 * 1024) truncated = true
         if (stderr.length < 4 * 1024 * 1024) stderr += String(chunk)
       })
     }
     child.once('error', rejectRun)
     child.once('close', (code, signal) => {
       if (timeout !== undefined) clearTimeout(timeout)
-      if (code === 0) resolveRun({ stdout, stderr })
+      if (code === 0 && rejectTruncated && truncated) rejectRun(new LifecycleError(`${basename(executable)} output exceeds verification limit`, 1))
+      else if (code === 0) resolveRun({ stdout, stderr })
       else rejectRun(new LifecycleError(
         timedOut
           ? `${basename(executable)} timed out after ${timeoutMs}ms`
@@ -5411,11 +5416,66 @@ async function assertLocalSourceCacheTree(root, boundary = root) {
   }
 }
 
+async function localSourceRegistryMetadataDigest(cachePath, storePath) {
+  const records = []
+  for (const [kind, root] of [['cache', cachePath], ['store', storePath]]) {
+    const directories = ['', ...(await readdir(root)).filter(name => /^v[0-9]+$/u.test(name)).sort()]
+    for (const directory of directories) {
+      const parent = join(root, directory)
+      await assertOwnedPrivateDirectory(parent)
+      for (const name of (await readdir(parent)).filter(value => /^metadata(?:-[a-z0-9-]+)?$/u.test(value)).sort()) {
+        const path = join(parent, name)
+        await assertOwnedPrivateDirectory(path)
+        records.push([kind, directory, name, await profileTreeDigest(path, '', PROFILE_TREE_MAX_FILE_BYTES, true)])
+      }
+    }
+  }
+  return sha256(canonicalJson(records))
+}
+
+function localSourceWarmupTargets(packageSource) {
+  let manifest
+  try { manifest = JSON.parse(packageSource) } catch { fail('local source original package manifest is invalid') }
+  const dependencies = manifest?.dependencies
+  if (dependencies === null || typeof dependencies !== 'object' || Array.isArray(dependencies)) {
+    fail('local source original dependencies are invalid')
+  }
+  return Object.entries(dependencies).map(([name, specifier]) => {
+    if (!/^(?:@[a-z0-9._-]+\/)?[a-z0-9][a-z0-9._-]*$/u.test(name)
+      || typeof specifier !== 'string' || specifier.length === 0 || specifier.length > 4096
+      || /\p{Cc}/u.test(specifier)) fail('local source original dependency specifier is unsafe')
+    return `${name}@${specifier}`
+  })
+}
+
+function assertLocalSourceWarmupOutput(result) {
+  for (const [channel, source] of [['stdout', result.stdout], ['stderr', result.stderr]]) {
+    for (const line of source.split('\n')) {
+      if (line.trim() === '') continue
+      if (channel === 'stderr' && !line.trimStart().startsWith('{')) {
+        if (/\b(?:optional|resolution.failure|error|fail(?:ed|ure)?)\b/iu.test(line)) {
+          fail('local source pnpm metadata warmup emitted an unverified failure on stderr')
+        }
+        continue
+      }
+      let event
+      try { event = JSON.parse(line) } catch { fail('local source pnpm metadata warmup emitted invalid NDJSON') }
+      if (event?.name === 'pnpm:skipped-optional-dependency' && event.reason !== 'unsupported_platform') {
+        fail('local source pnpm metadata warmup skipped an optional dependency without a verified platform reason')
+      }
+      if (event?.level === 'error') fail('local source pnpm metadata warmup emitted an error event')
+    }
+  }
+}
+
 async function assertLocalSourcePreparation(preparation, currentProfilePath, checkIdentity = true) {
   await assertLocalPnpmExecutable(preparation.pnpmExecutable)
   await assertCriticalDirectory(preparation.rootPath, preparation.rootIdentity)
   await assertCriticalDirectory(preparation.cachePath, preparation.cacheIdentity)
   await assertCriticalDirectory(preparation.storePath, preparation.storeIdentity)
+  if (await localSourceRegistryMetadataDigest(preparation.cachePath, preparation.storePath) !== preparation.registryMetadataDigest) {
+    fail('local source registry metadata mirror changed after preparation')
+  }
   await assertNpmMetadata(currentProfilePath, preparation.original, checkIdentity)
   await assertNpmMetadata(preparation.profilePath, preparation.privateMetadata, true)
   for (const [name, expected] of Object.entries(preparation.configFiles)) {
@@ -5478,7 +5538,7 @@ async function assertLocalSourceLockMarker(marker, profilePath, lockfile, allowe
   return matched
 }
 
-async function prepareLocalSourceOfflineCache({ current, homePath, profile, pnpmPath }) {
+async function prepareLocalSourceOfflineCache({ current, homePath, profile, pnpmPath, dshExecutable }) {
   await assertProfileTreeIdentity(current)
   const pnpmExecutable = await pinLocalPnpmExecutable(pnpmPath)
   pnpmPath = pnpmExecutable.path
@@ -5539,6 +5599,54 @@ async function prepareLocalSourceOfflineCache({ current, homePath, profile, pnpm
       || !isDeepStrictEqual(finalReceipt.policy, initialReceipt.policy)) {
       fail('local source original verification record changed during prefetch')
     }
+    const targets = localSourceWarmupTargets(original.packageJson.source)
+    if (targets.length > 0) {
+      let onlineLockfile
+      let offlineLockfile
+      for (const [suffix, offline] of [['metadata', false], ['replay', true]]) {
+        const disposableProfile = join(rootPath, 'profiles', `${profile}-${suffix}`)
+        await mkdir(disposableProfile, { mode: 0o700 })
+        try {
+          await writeNpmMetadata(disposableProfile, npmMetadataSources(original))
+          await assertLocalPnpmExecutable(pnpmExecutable)
+          const result = await run(pnpmPath, ['add', '--lockfile-only', '--ignore-scripts',
+            '--reporter=ndjson', ...(offline ? ['--offline'] : []), ...targets], {
+            cwd: disposableProfile, env: environment, capture: true, rejectTruncated: true, timeoutMs: 300_000,
+          })
+          await assertLocalPnpmExecutable(pnpmExecutable)
+          assertLocalSourceWarmupOutput(result)
+          const resolvedLockfile = await readNpmMetadataFile(join(disposableProfile, 'pnpm-lock.yaml'))
+          if (offline) offlineLockfile = resolvedLockfile.source
+          else {
+            onlineLockfile = resolvedLockfile.source
+            await assertLocalPnpmExecutable(pnpmExecutable)
+            const fetched = await run(pnpmPath, ['fetch', '--frozen-lockfile', '--reporter=ndjson'], {
+              cwd: disposableProfile, env: environment, capture: true, rejectTruncated: true, timeoutMs: 300_000,
+            })
+            await assertLocalPnpmExecutable(pnpmExecutable)
+            assertLocalSourceWarmupOutput(fetched)
+            if ((await readNpmMetadataFile(join(disposableProfile, 'pnpm-lock.yaml'))).digest !== resolvedLockfile.digest) {
+              fail('local source online metadata lockfile changed during warm fetch')
+            }
+          }
+          await assertNpmMetadata(current.profilePath, original, true)
+        } finally { await rm(disposableProfile, { recursive: true }) }
+      }
+      await assertLifecycleLocalSourceReplayMetadata({ original: original.lockfile.source,
+        online: onlineLockfile, offline: offlineLockfile, dshExecutable })
+    }
+    await assertLocalPnpmExecutable(pnpmExecutable)
+    await run(pnpmPath, ['install', '--lockfile-only', '--frozen-lockfile'], { cwd: profilePath, env: environment, timeoutMs: 300_000 })
+    await assertLocalPnpmExecutable(pnpmExecutable)
+    await assertNpmMetadata(profilePath, copiedMetadata)
+    const verifiedLockStat = await localSourceLockStat(profilePath)
+    lockStats.push(verifiedLockStat)
+    const verifiedMarker = await readNpmMetadataFile(join(cachePath, 'lockfile-verified.jsonl'))
+    const verifiedReceipt = await assertLocalSourceLockMarker(verifiedMarker, profilePath, original.lockfile, lockStats)
+    if (verifiedReceipt.lockfile.hash !== initialReceipt.lockfile.hash
+      || !isDeepStrictEqual(verifiedReceipt.policy, initialReceipt.policy)) {
+      fail('local source original verification record changed during metadata warmup')
+    }
     const privateMetadata = await readNpmMetadata(profilePath)
     const storeOutput = await run(pnpmPath, ['store', 'path'], { cwd: profilePath, env: environment, capture: true, timeoutMs: 30_000 })
     const selectedStorePath = storeOutput.stdout.trim()
@@ -5550,7 +5658,8 @@ async function prepareLocalSourceOfflineCache({ current, homePath, profile, pnpm
     if (await profileTreeDigest(cohortSource, '', 256 * 1024 * 1024) !== cohortDigest
       || await profileTreeDigest(cohortCopy, '', 256 * 1024 * 1024) !== cohortDigest) fail('local source original cohort changed during prefetch')
     const preparation = { rootPath, rootIdentity, profilePath, cachePath, cacheIdentity: identity(await lstat(cachePath)),
-      storePath, storeIdentity: identity(await lstat(storePath)), original, privateMetadata, marker, configFiles,
+      storePath, storeIdentity: identity(await lstat(storePath)), original, privateMetadata, marker: verifiedMarker, configFiles,
+      registryMetadataDigest: await localSourceRegistryMetadataDigest(cachePath, storePath),
       sourceConfig, environment, pnpmPath, pnpmExecutable, lockStats, dispose }
     await assertLocalSourcePreparation(preparation, current.profilePath)
     return preparation
@@ -5614,6 +5723,10 @@ async function prepareLocalSourcePackageCaches(transactionRoot, pnpmStore, prepa
     const copiedMarker = await readNpmMetadataFile(join(cache, 'lockfile-verified.jsonl'))
     if (copiedMarker.digest !== preparation.marker.digest) fail('local source copied verification marker changed')
     await assertLocalSourceLockMarker(copiedMarker, preparation.profilePath, preparation.original.lockfile, preparation.lockStats)
+    if (await localSourceRegistryMetadataDigest(cache, store) !== preparation.registryMetadataDigest
+      || await localSourceRegistryMetadataDigest(preparation.cachePath, preparation.storePath) !== preparation.registryMetadataDigest) {
+      fail('local source copied registry metadata mirror changed')
+    }
     if (!sameIdentity(await lstat(pnpmStore.storePath), pnpmStore.identity)
       || await realpath(pnpmStore.localSource.alias.path) !== pnpmStore.storePath) fail('local package store changed while copying')
     await assertLocalSourcePreparation(preparation, stagedProfilePath, false)
@@ -7118,7 +7231,7 @@ async function main() {
     const cacheEntry = await lstat(cachePath)
     assertExpectedDirectoryMetadata(cacheEntry, identity(cacheEntry), cachePath)
     pnpmStore.localSource = { alias, cachePath, cacheIdentity: identity(cacheEntry) }
-    const localSourcePreparation = await prepareLocalSourceOfflineCache({ current, homePath, profile,
+    const localSourcePreparation = await prepareLocalSourceOfflineCache({ current, homePath, profile, dshExecutable,
       pnpmPath: await realpath(pnpmPath) })
     try {
       await performLifecycle({ operation: 'upgrade', homePath, profile, dshExecutable, bwrapExecutable,

@@ -719,6 +719,13 @@ interface LifecycleRunOptions {
   npmBlock?: boolean
   npmPeerExternalBin?: string
   npmPrepareFails?: boolean
+  metadataWarmupFails?: boolean
+  metadataWarmupSkipReason?: 'resolution_failure' | 'unsupported_platform' | 'missing'
+  metadataWarmupMissingMirror?: boolean
+  metadataMirrorMutationPath?: string
+  metadataGraphShrink?: 'replay' | 'both'
+  metadataWarmupStderrSkip?: boolean
+  metadataWarmupLargeStderr?: boolean
   npmReceiptMissingPolicy?: 'dependencyAliasCheck' | 'resolutionShapeCheck' | 'tarballUrlBinding'
   npmSandboxRegistryDrift?: boolean
   npmSourceMetadataMutation?: boolean
@@ -1173,6 +1180,7 @@ if [[ " \${1:-} \${2:-} " == ' store path ' ]]; then
 fi
 if [[ " \${1:-} \${2:-} \${3:-} " == ' config list --json ' ]]; then
   if [[ ! -f "$PWD/pnpm-workspace.yaml" ]]; then printf 'pnpm config workspace missing\n' >&2; exit 96; fi
+  if [[ -n "\${LIFECYCLE_METADATA_MIRROR_MUTATION_PATH:-}" ]]; then printf 'changed metadata\n' > "$LIFECYCLE_METADATA_MIRROR_MUTATION_PATH"; fi
   registry='https://registry.npmjs.org/'
   if [[ "\${LIFECYCLE_NPM_SANDBOX_REGISTRY_DRIFT:-0}" == '1' && "\${pnpm_config_offline:-}" == 'true' ]]; then registry='https://registry.invalid/'; fi
   printf '{"registry":"%s","@jsr:registry":"https://npm.jsr.io/"}\n' "$registry"
@@ -1198,6 +1206,47 @@ if [[ " \${arguments[0]:-} \${arguments[1]:-} \${arguments[2]:-} " == ' config l
   registry='https://registry.npmjs.org/'
   if [[ "\${LIFECYCLE_NPM_SANDBOX_REGISTRY_DRIFT:-0}" == '1' && "\${pnpm_config_offline:-}" == 'true' ]]; then registry='https://registry.invalid/'; fi
   printf '{"registry":"%s","@jsr:registry":"https://npm.jsr.io/"}\n' "$registry"
+  exit 0
+fi
+if [[ "\${arguments[0]:-}" == 'add' && " \${arguments[*]} " == *' --lockfile-only '* && "$directory" == *'-metadata' || "\${arguments[0]:-}" == 'add' && " \${arguments[*]} " == *' --lockfile-only '* && "$directory" == *'-replay' ]]; then
+  if [[ " \${arguments[*]} " == *' --no-frozen-lockfile '* ]]; then printf 'Unknown option frozen-lockfile\n' >&2; exit 93; fi
+  printf 'pnpm-metadata-warmup\t%s\tcwd=%s\toffline=%s\t%s\n' "$transaction_state" "$directory" "\${pnpm_config_offline:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
+  if [[ "$directory" == *'-metadata' ]]; then
+    if [[ "\${LIFECYCLE_METADATA_WARMUP_FAIL:-0}" == '1' ]]; then printf 'metadata warmup failed\n' >&2; exit 93; fi
+    if [[ "\${LIFECYCLE_METADATA_WARMUP_MISSING_MIRROR:-0}" != '1' ]]; then
+      mkdir -p "\${pnpm_config_cache_dir:?}/v11/metadata-full/registry.npmjs.org/@koromix"
+      printf 'full metadata\n' > "\${pnpm_config_cache_dir}/v11/metadata-full/registry.npmjs.org/@koromix/koffi-linux-x64.jsonl"
+      mkdir -p "\${pnpm_config_cache_dir}/v12/metadata-full" "\${pnpm_config_cache_dir}/v9/metadata"
+      printf 'new version\n' > "\${pnpm_config_cache_dir}/v12/metadata-full/entry.jsonl"
+      printf 'old version\n' > "\${pnpm_config_cache_dir}/v9/metadata/entry.jsonl"
+    fi
+  elif [[ ! -f "\${pnpm_config_cache_dir:?}/v11/metadata-full/registry.npmjs.org/@koromix/koffi-linux-x64.jsonl" ]]; then
+    printf '{"name":"pnpm:skipped-optional-dependency","reason":"resolution_failure"}\n'
+  fi
+  if [[ -n "\${LIFECYCLE_METADATA_WARMUP_SKIP_REASON:-}" ]]; then
+    if [[ "$LIFECYCLE_METADATA_WARMUP_SKIP_REASON" == 'missing' ]]; then
+      printf '{"name":"pnpm:skipped-optional-dependency"}\n'
+    else
+      printf '{"name":"pnpm:skipped-optional-dependency","reason":"%s"}\n' "$LIFECYCLE_METADATA_WARMUP_SKIP_REASON"
+    fi
+  fi
+  if [[ "\${LIFECYCLE_METADATA_WARMUP_STDERR_SKIP:-0}" == '1' ]]; then
+    printf '{"name":"pnpm:skipped-optional-dependency","reason":"resolution_failure"}\n' >&2
+  fi
+  if [[ "\${LIFECYCLE_METADATA_WARMUP_LARGE_STDERR:-0}" == '1' ]]; then
+    node -e "process.stderr.write('x'.repeat(4 * 1024 * 1024 + 1024))"
+    printf '{"name":"pnpm:skipped-optional-dependency","reason":"resolution_failure"}\n' >&2
+  fi
+  if [[ "\${LIFECYCLE_METADATA_GRAPH_SHRINK:-}" == 'both' || "\${LIFECYCLE_METADATA_GRAPH_SHRINK:-}" == 'replay' && "$directory" == *'-replay' ]]; then
+    node - "$directory/pnpm-lock.yaml" <<'NODE'
+const { readFileSync, writeFileSync } = require('node:fs')
+const path = process.argv[2]
+const source = readFileSync(path, 'utf8')
+const shortened = source.replace("      '@koromix/koffi-linux-x64': 3.3.2\\n", '')
+if (source === shortened) process.exit(92)
+writeFileSync(path, shortened)
+NODE
+  fi
   exit 0
 fi
 if [[ "\${arguments[0]:-}" == 'add' && " \${arguments[*]} " == *' --lockfile-only '* && " \${arguments[*]} " == *' --save-exact '* ]]; then
@@ -2081,6 +2130,13 @@ function lifecycleEnvironment(dshHome: string, fakeBin: string, options: Lifecyc
     LIFECYCLE_NPM_BLOCK_STARTED: join(dirname(dshHome), 'npm-block-started'),
     LIFECYCLE_NPM_PEER_EXTERNAL_BIN: options.npmPeerExternalBin ?? '',
     LIFECYCLE_NPM_PREPARE_FAIL: options.npmPrepareFails ? '1' : '0',
+    LIFECYCLE_METADATA_WARMUP_FAIL: options.metadataWarmupFails ? '1' : '0',
+    LIFECYCLE_METADATA_WARMUP_SKIP_REASON: options.metadataWarmupSkipReason ?? '',
+    LIFECYCLE_METADATA_WARMUP_MISSING_MIRROR: options.metadataWarmupMissingMirror ? '1' : '0',
+    LIFECYCLE_METADATA_MIRROR_MUTATION_PATH: options.metadataMirrorMutationPath ?? '',
+    LIFECYCLE_METADATA_GRAPH_SHRINK: options.metadataGraphShrink ?? '',
+    LIFECYCLE_METADATA_WARMUP_STDERR_SKIP: options.metadataWarmupStderrSkip ? '1' : '0',
+    LIFECYCLE_METADATA_WARMUP_LARGE_STDERR: options.metadataWarmupLargeStderr ? '1' : '0',
     LIFECYCLE_NPM_RECEIPT_MISSING_POLICY: options.npmReceiptMissingPolicy ?? '',
     LIFECYCLE_NPM_SANDBOX_REGISTRY_DRIFT: options.npmSandboxRegistryDrift ? '1' : '0',
     LIFECYCLE_NPM_SOURCE_METADATA_MUTATION: options.npmSourceMetadataMutation ? '1' : '0',
@@ -10081,6 +10137,108 @@ exit 7
 
 
 describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source transaction', () => {
+  test.each([
+    ['warmup command', { metadataWarmupFails: true }],
+    ['missing full metadata', { metadataWarmupMissingMirror: true }],
+    ['optional resolution failure', { metadataWarmupSkipReason: 'resolution_failure' as const }],
+    ['optional skip without reason', { metadataWarmupSkipReason: 'missing' as const }],
+    ['optional resolution failure on stderr', { metadataWarmupStderrSkip: true }],
+    ['truncated stderr before optional resolution failure', { metadataWarmupLargeStderr: true }],
+  ])('rejects %s before stopping the original service', async (_name, options) => {
+    const fixture = await preOwnerLifecycleFixture()
+    const metadataNames = ['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml']
+    const original = await Promise.all(metadataNames.map(name => readFile(join(fixture.profileDirectory, name), 'utf8')))
+    const result = runPreOwnerLifecycle(fixture, 'local-service-upgrade', options)
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('before service stop')
+    if ('metadataWarmupLargeStderr' in options) expect(result.stderr).toContain('output exceeds verification limit')
+    expect((await readLifecycleSystemdLog(fixture.systemdLog)).some(command => command.includes('stop'))).toBe(false)
+    expect(await Promise.all(metadataNames.map(name => readFile(join(fixture.profileDirectory, name), 'utf8')))).toEqual(original)
+    expect(existsSync(fixture.dshHome + '.dsh-enhanced-transaction')).toBe(false)
+  })
+  test.each(['replay', 'both'] as const)('rejects a silent %s optional graph shrink before service stop', async mode => {
+    const fixture = await preOwnerLifecycleFixture()
+    const lockfile = `lockfileVersion: '9.0'
+packages:
+  'koffi@3.3.2':
+    resolution: {integrity: sha512-fixture}
+  '@koromix/koffi-linux-x64@3.3.2':
+    resolution: {integrity: sha512-fixture}
+  '@koromix/koffi-linux-arm@3.3.2':
+    resolution: {integrity: sha512-fixture}
+snapshots:
+  'koffi@3.3.2':
+    optionalDependencies:
+      '@koromix/koffi-linux-x64': 3.3.2
+      '@koromix/koffi-linux-arm': 3.3.2
+  '@koromix/koffi-linux-x64@3.3.2': {}
+  '@koromix/koffi-linux-arm@3.3.2': {}
+`
+    await writeFile(join(fixture.profileDirectory, 'pnpm-lock.yaml'), lockfile)
+    const result = runPreOwnerLifecycle(fixture, 'local-service-upgrade', { metadataGraphShrink: mode })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('before service stop')
+    expect(result.stderr).toContain(mode === 'replay' ? 'graphs differ' : 'original registry optional dependency')
+    expect((await readLifecycleSystemdLog(fixture.systemdLog)).some(command => command.includes('stop'))).toBe(false)
+    expect(await readFile(join(fixture.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toBe(lockfile)
+  })
+  test('warms complete metadata in disposable profiles and binds an isolated cache copy', async () => {
+    const fixture = await preOwnerLifecycleFixture()
+    const metadataNames = ['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml']
+    const original = await Promise.all(metadataNames.map(name => readFile(join(fixture.profileDirectory, name), 'utf8')))
+    const directoryIdentity = async (path: string) => { const entry = await lstat(path); return { dev: String(entry.dev), ino: String(entry.ino), uid: entry.uid, mode: entry.mode } }
+    const pnpmStore = { storePath: join(fixture.root, 'pnpm-store'), identity: await directoryIdentity(join(fixture.root, 'pnpm-store')),
+      localSource: { alias: { path: fixture.storeAlias }, cachePath: fixture.cachePath, cacheIdentity: await directoryIdentity(fixture.cachePath) } }
+    const preparation = await lifecycleProfileTest.prepareLocalSourceOfflineCache({
+      current: { profilesPath: join(fixture.dshHome, 'profiles'), profilesStat: await lstat(join(fixture.dshHome, 'profiles')),
+        profilePath: fixture.profileDirectory, profileStat: await lstat(fixture.profileDirectory) },
+      homePath: fixture.dshHome, profile: 'web', pnpmPath: join(fixture.fakeBin, 'pnpm'),
+    })
+    try {
+      expect(await Promise.all(metadataNames.map(name => readFile(join(fixture.profileDirectory, name), 'utf8')))).toEqual(original)
+      expect(existsSync(join(preparation.rootPath, 'profiles', 'web-metadata'))).toBe(false)
+      expect(existsSync(join(preparation.rootPath, 'profiles', 'web-replay'))).toBe(false)
+      const metadataPath = join(preparation.cachePath, 'v11/metadata-full/registry.npmjs.org/@koromix/koffi-linux-x64.jsonl')
+      expect(await readFile(metadataPath, 'utf8')).toBe('full metadata\n')
+      const operations = await readFile(join(fixture.root, 'lifecycle-operations.log'), 'utf8')
+      expect(operations.match(/^pnpm-metadata-warmup/gmu)).toHaveLength(2)
+      expect(operations.match(/^pnpm-verify/gmu)).toHaveLength(2)
+      expect(operations.match(/^pnpm-fetch/gmu)).toHaveLength(2)
+      expect(operations).not.toContain('--no-frozen-lockfile')
+      const transaction = join(fixture.root, 'cache-transaction')
+      await mkdir(transaction, { mode: 0o700 })
+      const copy = await lifecycleProfileTest.prepareLocalSourcePackageCaches(transaction, pnpmStore, preparation, fixture.profileDirectory)
+      try {
+        expect(await readFile(join(copy.roots.at(-1)!.sourcePath, 'v11/metadata-full/registry.npmjs.org/@koromix/koffi-linux-x64.jsonl'), 'utf8')).toBe('full metadata\n')
+        expect(await readFile(join(copy.roots.at(-1)!.sourcePath, 'v12/metadata-full/entry.jsonl'), 'utf8')).toBe('new version\n')
+        expect(await readFile(join(copy.roots.at(-1)!.sourcePath, 'v9/metadata/entry.jsonl'), 'utf8')).toBe('old version\n')
+      } finally { await copy.dispose() }
+      await writeFile(metadataPath, 'changed metadata\n')
+      await expect(lifecycleProfileTest.assertLocalSourcePreparation(preparation, fixture.profileDirectory)).rejects.toThrow('registry metadata mirror changed')
+      await expect(lifecycleProfileTest.prepareLocalSourcePackageCaches(transaction, pnpmStore, preparation, fixture.profileDirectory)).rejects.toThrow('registry metadata mirror changed')
+      expect(await readdir(transaction)).toEqual([])
+      await writeFile(metadataPath, 'full metadata\n')
+      await rm(metadataPath)
+      await expect(lifecycleProfileTest.assertLocalSourcePreparation(preparation, fixture.profileDirectory)).rejects.toThrow('registry metadata mirror changed')
+      await writeFile(metadataPath, 'full metadata\n')
+      const addedMetadata = join(dirname(metadataPath), 'unexpected.jsonl')
+      await writeFile(addedMetadata, 'added metadata\n')
+      await expect(lifecycleProfileTest.assertLocalSourcePreparation(preparation, fixture.profileDirectory)).rejects.toThrow('registry metadata mirror changed')
+      await rm(addedMetadata)
+      const metadataLink = join(dirname(metadataPath), 'indirection.jsonl')
+      await symlink('koffi-linux-x64.jsonl', metadataLink)
+      await expect(lifecycleProfileTest.assertLocalSourcePreparation(preparation, fixture.profileDirectory)).rejects.toThrow('registry metadata mirror contains a symlink')
+      await rm(metadataLink)
+      writePreOwnerPnpmFixtureEnvironment(fixture, { metadataMirrorMutationPath: metadataPath })
+      await expect(lifecycleProfileTest.prepareLocalSourcePackageCaches(transaction, pnpmStore, preparation, fixture.profileDirectory)).rejects.toThrow('copied registry metadata mirror changed')
+      expect(await readdir(transaction)).toEqual([])
+    } finally { await preparation.dispose() }
+  })
+  test('allows unsupported platform optional skips during metadata warmup', async () => {
+    const fixture = await preOwnerLifecycleFixture()
+    const result = runPreOwnerLifecycle(fixture, 'local-service-upgrade', { metadataWarmupSkipReason: 'unsupported_platform' })
+    expect(result.status, result.stderr).toBe(0)
+  }, 15000)
   test.each([
     ['verification', { npmVerifyFails: true }],
     ['prefetch', { storeFails: true }],
