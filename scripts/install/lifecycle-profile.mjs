@@ -5609,7 +5609,7 @@ async function prepareLocalSourceOfflineCache({ current, homePath, profile, pnpm
         try {
           await writeNpmMetadata(disposableProfile, npmMetadataSources(original))
           await assertLocalPnpmExecutable(pnpmExecutable)
-          const result = await run(pnpmPath, ['add', '--lockfile-only', '--ignore-scripts',
+          const result = await run(pnpmPath, ['add', '--force', '--ignore-scripts',
             '--reporter=ndjson', ...(offline ? ['--offline'] : []), ...targets], {
             cwd: disposableProfile, env: environment, capture: true, rejectTruncated: true, timeoutMs: 300_000,
           })
@@ -5617,18 +5617,7 @@ async function prepareLocalSourceOfflineCache({ current, homePath, profile, pnpm
           assertLocalSourceWarmupOutput(result)
           const resolvedLockfile = await readNpmMetadataFile(join(disposableProfile, 'pnpm-lock.yaml'))
           if (offline) offlineLockfile = resolvedLockfile.source
-          else {
-            onlineLockfile = resolvedLockfile.source
-            await assertLocalPnpmExecutable(pnpmExecutable)
-            const fetched = await run(pnpmPath, ['fetch', '--frozen-lockfile', '--reporter=ndjson'], {
-              cwd: disposableProfile, env: environment, capture: true, rejectTruncated: true, timeoutMs: 300_000,
-            })
-            await assertLocalPnpmExecutable(pnpmExecutable)
-            assertLocalSourceWarmupOutput(fetched)
-            if ((await readNpmMetadataFile(join(disposableProfile, 'pnpm-lock.yaml'))).digest !== resolvedLockfile.digest) {
-              fail('local source online metadata lockfile changed during warm fetch')
-            }
-          }
+          else onlineLockfile = resolvedLockfile.source
           await assertNpmMetadata(current.profilePath, original, true)
         } finally { await rm(disposableProfile, { recursive: true }) }
       }

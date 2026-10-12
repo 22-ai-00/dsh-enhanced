@@ -65,20 +65,21 @@ if (args.join(' ') === 'install --lockfile-only --frozen-lockfile') {
   }
   process.exit(0)
 }
-if (args.join(' ') === 'add --lockfile-only --ignore-scripts --reporter=ndjson old@1.0.0'
+if (args.join(' ') === 'add --force --ignore-scripts --reporter=ndjson old@1.0.0'
   && process.cwd().endsWith('web-metadata')) {
+  fs.mkdirSync(path.join(process.cwd(), 'node_modules'), { mode: 0o700 })
   const mirror = path.join(process.env.pnpm_config_cache_dir, 'v11/metadata-full/registry.npmjs.org')
   fs.mkdirSync(mirror, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(mirror, 'old.jsonl'), 'full metadata\\n', { mode: 0o600 })
   process.exit(0)
 }
-if (args.join(' ') === 'add --lockfile-only --ignore-scripts --reporter=ndjson --offline old@1.0.0'
+if (args.join(' ') === 'add --force --ignore-scripts --reporter=ndjson --offline old@1.0.0'
   && process.cwd().endsWith('web-replay')) {
+  if (fs.existsSync(path.join(process.cwd(), 'node_modules'))) process.exit(91)
   if (!fs.existsSync(path.join(process.env.pnpm_config_cache_dir, 'v11/metadata-full/registry.npmjs.org/old.jsonl'))) process.exit(92)
   process.exit(0)
 }
-if (args.join(' ') === 'fetch --frozen-lockfile'
-  || args.join(' ') === 'fetch --frozen-lockfile --reporter=ndjson' && process.cwd().endsWith('web-metadata')) {
+if (args.join(' ') === 'fetch --frozen-lockfile') {
   if (mode === 'mutate-lockfile') fs.appendFileSync(lock, 'changed\\n')
   if (mode === 'same-size-lock-mutate') {
     const old = fs.readFileSync(lock, 'utf8')
@@ -205,7 +206,7 @@ describe('pre-stop local source offline policy cache', () => {
     const preparation = await lifecycleProfileTest.prepareLocalSourceOfflineCache({ ...f, profile: 'web' })
     try {
       const receipts = preparation.marker.source.trim().split('\n').map(line => JSON.parse(line))
-      expect(receipts).toHaveLength(4)
+      expect(receipts).toHaveLength(3)
       expect(receipts.at(-1).lockfile.path).toBe(join(preparation.profilePath, 'pnpm-lock.yaml'))
       await expect(lifecycleProfileTest.assertLocalSourcePreparation(preparation, f.profilePath)).resolves.toBeUndefined()
     } finally { await preparation.dispose() }
