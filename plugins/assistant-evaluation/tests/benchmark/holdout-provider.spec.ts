@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { access, chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import ts from 'typescript'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -39,14 +40,15 @@ async function killOwnedFixtureProcess(pid: number): Promise<void> {
     await new Promise<void>(resolveWait => setTimeout(resolveWait, 10))
   }
 }
-async function runStandalone(script: string): Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }> {
+async function runStandalone(script: string): Promise<{ readonly code: number | null; readonly signal: NodeJS.Signals | null; readonly timedOut: boolean; readonly stdout: string; readonly stderr: string }> {
   return await new Promise(resolveRun => {
     const child = spawn(process.execPath, ['--input-type=module', '--eval', script], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = '', stderr = ''
+    let timedOut = false
     child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { stdout += chunk })
     child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderr += chunk })
-    const timeout = setTimeout(() => child.kill('SIGKILL'), 5_000)
-    child.once('close', code => { clearTimeout(timeout); resolveRun({ code, stdout, stderr }) })
+    const timeout = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, 5_000)
+    child.once('close', (code, signal) => { clearTimeout(timeout); resolveRun({ code, signal, timedOut, stdout, stderr }) })
   })
 }
 async function waitForFixtureFile(path: string): Promise<void> {
@@ -273,17 +275,17 @@ describe('holdout child provider transport', () => {
   })
 
   it.skipIf(process.platform === 'win32')('keeps standalone top-level await alive until group cleanup settles', async () => {
-    const script = `import ts from 'typescript'; import { readFileSync } from 'node:fs';
-const source = readFileSync(${JSON.stringify(providerSource)}, 'utf8');
-const transformed = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
-const { openHoldoutProvider } = await import('data:text/javascript;base64,' + Buffer.from(transformed).toString('base64'));
+    const source = await readFile(providerSource, 'utf8')
+    const transformed = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText
+    const moduleUrl = `data:text/javascript;base64,${Buffer.from(transformed).toString('base64')}`
+    const script = `const { openHoldoutProvider } = await import(${JSON.stringify(moduleUrl)});
 const provider = await openHoldoutProvider({ executable: process.execPath, args: [${JSON.stringify(fixture)}], environment: { HOLDOUT_FIXTURE_MODE: 'orphan-descendant', LANG: 'C', LC_ALL: 'C' }, maxLineBytes: 1024, maxStderrBytes: 1024, readyTimeoutMs: 2_000, requestTimeoutMs: 200, closeTimeoutMs: 20, killTimeoutMs: 100 });
 console.log('PROVIDER_PID=' + provider.pid); const value = await provider.request('manifest', {}); console.log('DESCENDANT_PID=' + value.descendantPid); await provider.close(); console.log('CLOSE_SETTLED');`
     let output = ''
     try {
       const result = await runStandalone(script)
       output = result.stdout
-      expect(result.code, result.stderr).toBe(0)
+      expect(result, result.stderr).toMatchObject({ code: 0, signal: null, timedOut: false })
       expect(result.stdout).toContain('CLOSE_SETTLED')
     } finally {
       const providerPid = Number(/^PROVIDER_PID=(\d+)$/mu.exec(output)?.[1])

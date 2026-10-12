@@ -113,6 +113,8 @@ jobs:
     # (bubblewrap sandbox, root-owned system dirs) skip themselves by platform.
     runs-on: macos-latest
     timeout-minutes: 35
+    env:
+      PNPM_CONFIG_WORKSPACE_CONCURRENCY: '2'
 
     steps:
       - name: Check out repository
