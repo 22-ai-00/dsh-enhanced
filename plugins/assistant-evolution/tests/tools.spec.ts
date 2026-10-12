@@ -186,7 +186,7 @@ async function recordAttributedFailures(ctx: Context, rule: Awaited<ReturnType<t
   const automationId = rule.situation.replace(/^automation:/u, '')
   for (let index = 1; index <= 4; index += 1) {
     const session = agent()
-    agentEvents(ctx, session).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(ctx, session).serial('agent/created', { source: 'startup' })
     const exposure = await ctx.assistantEvolution.captureAutomationExposure({
       workspace: '/work/alpha',
       agentPreset: 'primary',

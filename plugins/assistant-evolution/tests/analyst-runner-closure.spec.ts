@@ -148,25 +148,21 @@ class AnalystAdapter extends LlmAdapter {
       content: LooseBlock[]
     }[]
     for (const message of messages) {
-      if (message.role !== 'user' || message.source?.kind !== 'tool') continue
-      for (const result of message.content) {
-        if (result.type !== 'tool-result') continue
-        for (const block of result.content ?? []) {
-          if (block.type !== 'text' || typeof block.text !== 'string') continue
-          const text = block.text
-          const start = text.indexOf('{')
-          const end = text.lastIndexOf('}')
-          if (start === -1 || end <= start) continue
-          try {
-            const parsed = JSON.parse(text.slice(start, end + 1)) as {
-              candidate?: { reviewToken?: unknown }
-            }
-            if (typeof parsed.candidate?.reviewToken === 'string') {
-              return parsed.candidate.reviewToken
-            }
-          } catch {
-            // Not the review result (or a wrapped error shape); keep scanning.
+      if (message.role !== 'tool' || message.source?.kind !== 'tool') continue
+      for (const block of message.content) {
+        if (block.type !== 'text' || typeof block.text !== 'string') continue
+        const text = block.text
+        const start = text.indexOf('{')
+        const end = text.lastIndexOf('}')
+        if (start === -1 || end <= start) continue
+        try {
+          const parsed = JSON.parse(text.slice(start, end + 1)) as {
+            candidate?: { reviewToken?: unknown }
           }
+          if (typeof parsed.candidate?.reviewToken === 'string') {
+            return parsed.candidate.reviewToken
+          }
+        } catch {
         }
       }
     }
@@ -481,7 +477,7 @@ async function fixture(dryRunAdapter = false): Promise<Target & {
   // The real background Agent's coherent full-access bundle, written by the
   // session-start observer exactly the production runtime relies on.
   const executionContexts: unknown[] = []
-  ctx.on('agent/session-start', ({ agent: started }) => {
+  ctx.on('agent/created', ({ agent: started }) => {
     executionContexts.push(started.ctx.get('assistantAutomationExecution'))
     started.session.append('approval/policy', { policy: 'never' })
     started.session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
@@ -695,7 +691,7 @@ describe('supervised growth analyst real automation-runner vertical slice', () =
       // Before the owner decides, an ordinary foreground goal session in the
       // same scope receives nothing.
       const before = foregroundSession(target.workspace, 'before')
-      agentEvents(target.ctx, before.agent).emit('agent/session-start', { source: 'startup' })
+      await agentEvents(target.ctx, before.agent).serial('agent/created', { source: 'startup' })
       expect(before.injections).toEqual([])
       expect(tableCount(target.evolutionPath, 'evolution_guidance_exposures')).toBe(0)
 
@@ -728,7 +724,7 @@ describe('supervised growth analyst real automation-runner vertical slice', () =
       // A later ordinary foreground goal session is injected with the learned
       // guidance through the generic unseen-rule path, once per session.
       const after = foregroundSession(target.workspace, 'after')
-      agentEvents(target.ctx, after.agent).emit('agent/session-start', { source: 'startup' })
+      await agentEvents(target.ctx, after.agent).serial('agent/created', { source: 'startup' })
       expect(after.injections).toHaveLength(1)
       const text = injectedText(after.injections[0]!)
       expect(text).toContain('<learned_guidance>')
@@ -746,13 +742,13 @@ describe('supervised growth analyst real automation-runner vertical slice', () =
       expect(exposures[0]!.scope_key).toBe(canonicalEvolutionScope(target.workspace, PRESET))
 
       // A repeated session-start in the SAME session never injects twice.
-      agentEvents(target.ctx, after.agent).emit('agent/session-start', { source: 'startup' })
+      await agentEvents(target.ctx, after.agent).serial('agent/created', { source: 'startup' })
       expect(after.injections).toHaveLength(1)
       expect(tableCount(target.evolutionPath, 'evolution_guidance_exposures')).toBe(1)
 
       // A fresh foreground session still receives the guidance once.
       const later = foregroundSession(target.workspace, 'later')
-      agentEvents(target.ctx, later.agent).emit('agent/session-start', { source: 'startup' })
+      await agentEvents(target.ctx, later.agent).serial('agent/created', { source: 'startup' })
       expect(later.injections).toHaveLength(1)
       expect(tableCount(target.evolutionPath, 'evolution_guidance_exposures')).toBe(2)
     } finally {

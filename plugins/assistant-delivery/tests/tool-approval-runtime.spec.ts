@@ -46,11 +46,11 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-function registerAgent(ctx: Context, sessionId: string, input: {
+async function registerAgent(ctx: Context, sessionId: string, input: {
   callId: ReturnType<typeof ToolCallId>
   toolName: string
   argumentsJson: string
-}): Agent {
+}): Promise<Agent> {
   const id = SessionId(sessionId)
   const session = ctx.sessions.create(id, { meta: { cwd: '/work/alpha', agentPreset: 'primary' } })
   const agent: Agent = {
@@ -68,7 +68,7 @@ function registerAgent(ctx: Context, sessionId: string, input: {
     steer() {},
     inject() {},
   }
-  ctx.agents.register(agent)
+  await ctx.agents.register(agent)
   session.append('turn/start', { turn: 1 })
   session.append('step/start', { turn: 1, step: 1 })
   session.append('approval/policy', { policy: 'ask' })
@@ -168,15 +168,16 @@ async function fixture(adapterOutcome: DeliveryToolApprovalOutcome, options: {
   const callId = ToolCallId('runtime-approval-call')
   const arguments_ = { operation: 'exact-request', value: 7 }
   const argumentsJson = JSON.stringify(arguments_)
-  const agent = registerAgent(ctx, 'runtime-approval-session', {
+  const agent = await registerAgent(ctx, 'runtime-approval-session', {
     callId,
     toolName: 'delivery_mutation_probe',
     argumentsJson,
   })
   if (options.auto) {
-    agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'auto-review' })
     const append = agent.session.append as unknown as (type: string, data: unknown) => unknown
-    append.call(agent.session, 'sandbox/mode', { mode: 'workspace-write' })
+    append.call(agent.session, 'permission/preset', { preset: 'auto' })
+    append.call(agent.session, 'sandbox/mode', { mode: 'danger-full-access' })
+    agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'auto-review' })
   }
   let executions = 0
   const receivedArguments: unknown[] = []

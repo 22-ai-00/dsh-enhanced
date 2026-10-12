@@ -67,7 +67,7 @@ describe('four-core personal assistant composition', () => {
     roots.push(root)
     const ctx = new Context()
     await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' } })
-    ctx.on('agent/session-start', ({ agent }) => {
+    ctx.on('agent/created', ({ agent }) => {
       agent.session.append('approval/policy', { policy: 'never' })
       agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
       const append = agent.session.append as unknown as (type: string, data: unknown) => unknown
@@ -210,7 +210,7 @@ describe('four-core personal assistant composition', () => {
     expect(JSON.stringify(adapter.requests[0]!.messages)).toContain('Transient deployment note: use the staging endpoint.')
     expect(JSON.stringify(adapter.requests[0]!.messages)).toContain('provenance:')
     const currentContext = adapter.requests[1]!.messages.findLast(message =>
-      message.source.kind === 'plugin' && message.source.plugin === '@deepseek-ai/dsh-system-prompt')
+      message.source?.kind === 'runtime-context')
     expect(JSON.stringify(currentContext)).toContain('Preferred editor is Helix')
     expect(JSON.stringify(currentContext)).not.toContain('Transient deployment note: use the staging endpoint.')
     expect(JSON.stringify(adapter.requests[1]!.messages)).toContain('Preferred editor is Helix')

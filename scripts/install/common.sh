@@ -7,7 +7,7 @@ DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.1.5-rc.1'
 DSH_ENHANCED_DEFAULT_DSH_VERSION='latest'
 DSH_ENHANCED_DEFAULT_PNPM_VERSION='11.7.0'
 if [[ -z "${DSH_ENHANCED_VERIFIED_HOST_RANGE:-}" ]]; then
-  DSH_ENHANCED_VERIFIED_HOST_RANGE='>=0.1.5-rc.3 <0.1.6'
+  DSH_ENHANCED_VERIFIED_HOST_RANGE='0.2.0-rc.2'
 fi
 DSH_ENHANCED_CORE_PLUGIN_SLUGS=(
   'personal-assistant'
@@ -829,7 +829,7 @@ dsh_enhanced_choose_model_mode() {
   else
     printf '\n当前 profile 尚未配置可用的默认模型：\n' >&2
     printf '  1) 现在配置默认模型（推荐）\n' >&2
-    printf '  2) 稍后手动配置（编辑 settings.yaml 或运行 dsh-model-setup）\n' >&2
+    printf '  2) 稍后手动配置（运行 dsh-model-setup --profile <目标 profile>）\n' >&2
     printf '请选择 [1]：' >&2
     local choice
     IFS= read -r choice
@@ -1280,7 +1280,7 @@ dsh_enhanced_apply_model() {
     setup_display="${setup_launcher[*]}"
   fi
 
-  local args=(--dsh-home "$dsh_home" --provider "$provider")
+  local args=(--dsh-home "$dsh_home" --profile "$profile" --provider "$provider")
   [[ -n "$model" ]] && args+=(--model "$model")
   [[ -n "$base_url" ]] && args+=(--base-url "$base_url")
   [[ -n "$api" ]] && args+=(--api "$api")
@@ -1295,11 +1295,11 @@ dsh_enhanced_apply_model() {
   if dsh_enhanced_is_agent_route "$provider"; then
     args+=(--enable-in-profile "$profile")
     if [[ "$dry_run" == '1' ]]; then
-      printf '模型配置：将写入 settings.yaml 并在 profile %s 的 patch 层启用 traex-acp-provider（无需 API Key）。\n' "$profile"
+      printf '模型配置：将在 profile %s 的 patch 层写入默认模型并启用 traex-acp-provider（无需 API Key）。\n' "$profile"
       dsh_enhanced_print_command "$setup_display" "${args[@]}"
       return 0
     fi
-    "${setup_launcher[@]}" "${args[@]}" || return $?
+    dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup "${args[@]}" || return $?
     return 0
   fi
 
@@ -1314,10 +1314,10 @@ dsh_enhanced_apply_model() {
 
   if [[ "$dry_run" == '1' ]]; then
     if [[ "$have_key" == '1' ]]; then
-      printf '模型配置：将写入 settings.yaml 并把环境中的 API Key 存入 .credentials.yaml。\n'
+      printf '模型配置：将写入 profile %s 的 patch 层，并把环境中的 API Key 存入 .credentials.yaml。\n' "$profile"
       dsh_enhanced_print_command "$setup_display" "${args[@]}" --store-key
     else
-      printf '模型配置：将写入 settings.yaml；未检测到 API Key，稍后请设置 %s 或编辑 .credentials.yaml。\n' "$derived_ref"
+      printf '模型配置：将写入 profile %s 的 patch 层；未检测到 API Key，稍后请设置 %s 或编辑 .credentials.yaml。\n' "$profile" "$derived_ref"
       dsh_enhanced_print_command "$setup_display" "${args[@]}"
     fi
     return 0
@@ -1332,7 +1332,7 @@ dsh_enhanced_apply_model() {
     IFS= read -rs secret || secret=''
     printf '\n' >&2
     if [[ -n "$secret" ]]; then
-      DSH_ENHANCED_MODEL_API_KEY="$secret" "${setup_launcher[@]}" "${args[@]}" --store-key
+      DSH_ENHANCED_MODEL_API_KEY="$secret" dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup "${args[@]}" --store-key
       local status=$?
       unset secret
       return $status
@@ -1340,9 +1340,9 @@ dsh_enhanced_apply_model() {
   fi
 
   if [[ "$have_key" == '1' ]]; then
-    "${setup_launcher[@]}" "${args[@]}" --store-key
+    dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup "${args[@]}" --store-key
   else
-    "${setup_launcher[@]}" "${args[@]}"
+    dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup "${args[@]}"
     printf '模型配置：未存储 API Key；请设置环境变量 %s 或编辑 %s/.credentials.yaml 后再验证。\n' \
       "$derived_ref" "$dsh_home"
   fi
@@ -1377,12 +1377,6 @@ dsh_enhanced_verify_model_route() {
     return 0
   fi
 
-  # The effective default provider is the settings.yaml user-layer selection,
-  # which wins over any composed value at runtime.  An agent route (TraeX) only
-  # has its adapter in the profile that enabled its bundle, and it never accepts
-  # a headless one-shot prompt, so verify it structurally instead of calling a
-  # model: confirm the adapter is registered in the target profile and that the
-  # local agent reports a login.  This also avoids spending any model quota.
   local effective_provider="$configured_provider"
   if [[ -z "$effective_provider" ]]; then
     if ! effective_provider="$(dsh_enhanced_effective_default_provider "$dsh_home" "$profile")"; then
@@ -1396,14 +1390,30 @@ dsh_enhanced_verify_model_route() {
   fi
 
   if [[ "$dry_run" == '1' ]]; then
-    printf '模型 route：将通过 DSH headless profile 发送一次固定的最小验证请求。\n'
+    printf '模型 route：将使用目标 profile 的模型配置，通过 DSH headless profile 发送一次固定的最小验证请求。\n'
     dsh_enhanced_print_command dsh --profile headless 'Reply with exactly DSH_ROUTE_READY and nothing else.'
     return 0
   fi
 
   printf '模型 route：正在发送最小验证请求。\n'
-  local response
-  if ! response="$(dsh --profile headless 'Reply with exactly DSH_ROUTE_READY and nothing else.' 2>&1)"; then
+  local response verification_directory='' status=0
+  local route_args=(--profile headless)
+  if [[ "$(dsh --version 2>/dev/null || true)" == '0.2.0-rc.2' ]]; then
+    if [[ -e "$dsh_home/settings.yaml" ]]; then
+      dsh_enhanced_fail 1 '仍有待迁移的 settings.yaml；请先在目标 profile 完成原生导入，再验证模型，避免 headless 消费其他 profile 的配置。'
+      return $?
+    fi
+    verification_directory="$(mktemp -d)" || return 1
+    if ! dsh_enhanced_prepare_model_verification "$profile" "$verification_directory"; then
+      rm -rf -- "$verification_directory"
+      dsh_enhanced_fail 1 '无法读取目标 profile 的模型配置；未向其他 profile 的默认模型发送请求。'
+      return $?
+    fi
+    route_args+=(--patch "$verification_directory/route.yml")
+  fi
+  response="$(dsh "${route_args[@]}" 'Reply with exactly DSH_ROUTE_READY and nothing else.' 2>&1)" || status=$?
+  [[ -z "$verification_directory" ]] || rm -rf -- "$verification_directory"
+  if [[ "$status" != 0 ]]; then
     printf '%s\n' "$response" >&2
     dsh_enhanced_fail 1 '模型 route 验证失败。请先在 DSH 中配置并登录可用模型，然后重新运行 --model-route verify。'
     return $?
@@ -1416,16 +1426,61 @@ dsh_enhanced_verify_model_route() {
   printf '模型 route 验证通过。\n'
 }
 
-# Read the settings.yaml user-layer agent-default-model.provider, which is the
-# selection the runtime actually resolves (it wins over the composed value).
-# dsh-model-setup writes block-style YAML, but a hand-edited or older file may
-# be flow-style (`{ agent-default-model: { provider: X, ... } }`); handle both
-# so the verifier never misreads the default and picks the wrong route.
+dsh_enhanced_prepare_model_verification() {
+  local profile="$1" directory="$2"
+  dsh --profile "$profile" --dump-config > "$directory/composed.yml" || return 1
+  NODE_PATH='' NODE_OPTIONS='' node --input-type=module - "$(command -v dsh)" "$directory" <<'NODE'
+import { createRequire } from 'node:module'
+import { readFile, realpath, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { execFileSync } from 'node:child_process'
+import { isDeepStrictEqual } from 'node:util'
+const [executable, directory] = process.argv.slice(2)
+const hostRequire = createRequire(await realpath(executable))
+const bootRequire = createRequire(hostRequire.resolve('@deepseek-ai/dsh-app-boot'))
+const { default: yaml } = await import(pathToFileURL(bootRequire.resolve('js-yaml')).href)
+class Expression { constructor(value) { this.value = value } }
+const schema = yaml.DEFAULT_SCHEMA.extend([new yaml.Type('tag:yaml.org,2002:js', {
+  kind: 'scalar', instanceOf: Expression, construct: value => new Expression(value), represent: value => value.value,
+})])
+const rows = yaml.load(await readFile(join(directory, 'composed.yml'), 'utf8'), { schema })
+function selectEntries(rows) {
+  if (!Array.isArray(rows)) throw new Error('invalid composed model configuration')
+  const entries = new Map()
+  for (const entry of rows) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('invalid composed entry')
+    const id = entry.id
+    if (id !== 'agent-default-model' && id !== 'llm-pi-ai') continue
+    if (entries.has(id) || entry.disabled !== undefined && entry.disabled !== false) throw new Error('ambiguous or disabled model configuration')
+    entries.set(id, entry)
+  }
+  if (!entries.has('agent-default-model')) throw new Error('target profile has no default model')
+  return entries
+}
+const entries = selectEntries(rows)
+const patch = join(directory, 'route.yml')
+await writeFile(patch, yaml.dump([...entries.values()], { schema }), { mode: 0o600, flag: 'wx' })
+const effective = selectEntries(yaml.load(execFileSync(await realpath(executable),
+  ['--profile', 'headless', '--patch', patch, '--dump-config'],
+  { encoding: 'utf8', timeout: 30_000, maxBuffer: 2_097_152, stdio: ['ignore', 'pipe', 'pipe'] }), { schema }))
+for (const [id, entry] of entries) {
+  const actual = effective.get(id)
+  if (!actual || actual.name !== entry.name || !isDeepStrictEqual(actual.config, entry.config)) {
+    throw new Error('headless verification route differs from target profile')
+  }
+}
+NODE
+}
+
 dsh_enhanced_effective_default_provider() {
   local dsh_home="$1"
   local profile="${2:-}"
   local settings_path="$dsh_home/settings.yaml"
   local provider=''
+  if [[ -n "$profile" && "$(dsh --version 2>/dev/null || true)" == '0.2.0-rc.2' ]]; then
+    settings_path=''
+  fi
   if [[ -f "$settings_path" ]]; then
     provider="$(awk '
     BEGIN { in_s = 0 }
@@ -1675,11 +1730,11 @@ dsh_enhanced_apply_auto_traex() (
   if [[ "$dry_run" == '1' ]]; then
     printf 'TraeX：dry-run 不检查最终命令或登录；执行时仅在最终命令已登录且无显式默认模型时设置此 profile 的默认模型。\n'
     printf 'TraeX：未登录或显式 --model skip 时仅启用 route：\n'
-    dsh_enhanced_print_command "$setup_display" --dsh-home "$dsh_home" --provider traex-agent \
+    dsh_enhanced_print_command "$setup_display" --dsh-home "$dsh_home" --profile "$profile" --provider traex-agent \
       --enable-in-profile "$profile" --agent-command "$traex_command" --enable-only
     if [[ "$default_candidate" == '1' ]]; then
       printf 'TraeX：已登录时由 model-setup 原子确认无显式默认模型：\n'
-      dsh_enhanced_print_command "$setup_display" --dsh-home "$dsh_home" --provider traex-agent \
+      dsh_enhanced_print_command "$setup_display" --dsh-home "$dsh_home" --profile "$profile" --provider traex-agent \
         --enable-in-profile "$profile" --agent-command "$traex_command" --default-if-absent
     fi
     return 0
@@ -1702,7 +1757,7 @@ dsh_enhanced_apply_auto_traex() (
   trap 'exit 130' INT
   trap 'exit 143' TERM
 
-  "${setup_launcher[@]}" --dsh-home "$dsh_home" --provider traex-agent \
+  dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup --dsh-home "$dsh_home" --profile "$profile" --provider traex-agent \
     --enable-in-profile "$profile" --agent-command "$traex_command" --enable-only || return $?
   local composed_path="$snapshot/composed.yml"
   if ! dsh --profile "$profile" --dump-config > "$composed_path"; then
@@ -1720,7 +1775,7 @@ dsh_enhanced_apply_auto_traex() (
     logged_in='1'
   fi
   if [[ "$default_candidate" == '1' && "$logged_in" == '1' ]]; then
-    "${setup_launcher[@]}" --dsh-home "$dsh_home" --provider traex-agent \
+    dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup --dsh-home "$dsh_home" --profile "$profile" --provider traex-agent \
       --enable-in-profile "$profile" --agent-command "$traex_command" --default-if-absent || return $?
     dsh --profile "$profile" --dump-config > "$composed_path" || return $?
     effective_command="$(dsh_enhanced_probe_auto_traex_route "$profile" "$dsh_home" "$composed_path")" || return $?
@@ -2187,7 +2242,7 @@ dsh_enhanced_doctor_isolation() {
     dsh_enhanced_fail 1 'doctor：未安装自治诊断入口，请安装匹配版本的 assistant-web-owner；不会重建或续期授权。'
     return $?
   fi
-  "$executable" --dsh-home "$dsh_home" --profile "$profile"
+  dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-autonomy-doctor --dsh-home "$dsh_home" --profile "$profile"
 }
 
 # The installer calls this before creating a brand-new profile and after it has
@@ -2296,7 +2351,7 @@ dsh_enhanced_ensure_resident_service() {
     return $?
   fi
   printf '常驻服务：检测到 launchd 服务未注册，正在自动注册 %s。\n' "$target"
-  if ! "$setup_bin" --profile "$profile" --install-service; then
+  if ! dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" --install-service; then
     dsh_enhanced_fail 1 "常驻服务：自动注册 $target 失败；请检查上方 launchd 错误后重试安装。"
     return $?
   fi
@@ -2328,7 +2383,7 @@ dsh_enhanced_apply_permission_choice() {
     return $?
   fi
   printf '权限默认值：显式设置为 %s。\n' "$preset"
-  dsh_enhanced_run "$dry_run" "$setup_bin" --dsh-home "$dsh_home" --preset "$preset"
+  dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-permission-setup --dsh-home "$dsh_home" --profile "$profile" --preset "$preset"
 }
 
 dsh_enhanced_apply_lark() {
@@ -2361,11 +2416,11 @@ dsh_enhanced_apply_lark() {
       # Refresh only the policy layer from the existing channel binding before
       # any restart; this path never reopens app/credential/owner onboarding.
       if [[ "$agent_tools" == 'allow' || "$agent_tools" == 'disable' ]]; then
-        dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile" --refresh-agent-policy \
+        dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" --refresh-agent-policy \
           "${agent_tools_flag[@]}" || return $?
       fi
       if [[ "$manage_service" == '1' ]]; then
-        dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile" --install-service
+        dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" --install-service
       else
         printf '已按 --no-service 跳过常驻服务重启。\n'
       fi
@@ -2383,9 +2438,9 @@ dsh_enhanced_apply_lark() {
         fi
       fi
       if [[ "$manage_service" == '1' ]]; then
-        dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile" "${agent_tools_flag[@]+"${agent_tools_flag[@]}"}"
+        dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" "${agent_tools_flag[@]+"${agent_tools_flag[@]}"}"
       else
-        dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile" --no-service "${agent_tools_flag[@]+"${agent_tools_flag[@]}"}"
+        dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" --no-service "${agent_tools_flag[@]+"${agent_tools_flag[@]}"}"
       fi
       ;;
     skip)
@@ -2398,7 +2453,7 @@ dsh_enhanced_apply_lark() {
         # Agent reachability is independent of channel onboarding. In skip
         # mode this only edits installer-managed Policy rules; it does not
         # enable or alter the Lark row and never installs/restarts a service.
-        dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile" --refresh-agent-policy \
+        dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-lark-setup --profile "$profile" --refresh-agent-policy \
           "${agent_tools_flag[@]}" || return $?
       fi
       ;;
@@ -2426,7 +2481,7 @@ dsh_enhanced_prepare_rsi_source() {
     dsh_enhanced_fail 1 "找不到安装后的 dsh-rsi-setup：$setup_bin"
     return $?
   fi
-  dsh_enhanced_run "$dry_run" "$setup_bin" "${args[@]}" || {
+  dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-rsi-setup "${args[@]}" || {
     local status=$?
     dsh_enhanced_fail "$status" '自迭代源码和构建环境准备失败，安装已停止。'
     return $?
@@ -2444,23 +2499,166 @@ dsh_enhanced_install_rsi_owner() {
     dsh_enhanced_fail 1 "找不到安装后的 dsh-rsi-setup：$setup_bin"
     return $?
   fi
-  dsh_enhanced_run "$dry_run" "$setup_bin" "${args[@]}"
+  dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-rsi-setup "${args[@]}"
 }
 
 dsh_enhanced_install_local_cohort() {
   local profile="$1" dsh_home="$2" repo_root="$3" dry_run="$4"
   shift 4
-  local setup_bin="$repo_root/plugins/lark-channel/bin/dsh-rsi-setup.js"
   local args=(--install-local-cohort --profile "$profile" --dsh-home "$dsh_home" --source-repository "$repo_root")
   local slug
   for slug in "$@"; do args+=(--bundle "$slug"); done
   printf '\n本地 supervised：从冻结提交构建独立包，并安装到 profile 内。\n'
-  dsh_enhanced_run "$dry_run" node "$setup_bin" "${args[@]}"
+  dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" source-rsi "$repo_root" "${args[@]}"
 }
 
-# Setup CLIs run as ordinary Node processes before a profile is mounted.  Ask
-# the verified Host's public boot API to materialize its shared peer closure
-# under this DSH_HOME, without composing or activating a profile.
+dsh_enhanced_run_profile_setup() {
+  local dry_run="$1" dsh_home="$2" profile="$3" setup="$4"
+  shift 4
+  local executable="$dsh_home/profiles/$profile/node_modules/.bin/$setup"
+  if [[ "$setup" == 'source-rsi' ]]; then
+    executable="$1/plugins/lark-channel/bin/dsh-rsi-setup.js"
+  fi
+  if [[ "$dry_run" == '1' ]]; then
+    if [[ "$setup" == 'source-rsi' ]]; then
+      dsh_enhanced_print_command node "$executable" "${@:2}"
+    else
+      dsh_enhanced_print_command "$executable" "$@"
+    fi
+    return 0
+  fi
+  if [[ "$(NODE_PATH='' NODE_OPTIONS='' dsh --version 2>/dev/null || true)" != '0.2.0-rc.2' ]]; then
+    if [[ "$setup" == 'source-rsi' ]]; then
+      node "$executable" "${@:2}"
+    elif [[ "$setup" == 'dsh-model-setup' && ! -x "$executable" ]]; then
+      local launcher=() launcher_token=''
+      while IFS= read -r launcher_token; do launcher+=("$launcher_token"); done \
+        < <(dsh_enhanced_resolve_model_setup "$profile" "$dsh_home")
+      [[ -n "${launcher[0]+set}" ]] || return 1
+      "${launcher[@]}" "$@"
+    else
+      "$executable" "$@"
+    fi
+    return $?
+  fi
+  local source_root=''
+  if [[ "$setup" == 'source-rsi' ]]; then source_root="$1"; shift; fi
+  local runtime_script=''
+  runtime_script="$(cat <<'NODE'
+import { readFile, realpath } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { dirname, isAbsolute, join, relative } from 'node:path'
+import { pathToFileURL } from 'node:url'
+
+const [home, profileName, setup, sourceRoot, suppliedExecutable, ...args] = process.argv.slice(1)
+const modules = {
+  'dsh-model-setup': ['assistant-policy', 'model-setup', 'runModelSetup'],
+  'dsh-permission-setup': ['assistant-policy', 'permission-setup', 'runPermissionSetup'],
+  'dsh-lark-setup': ['lark-channel', 'setup', 'runLarkSetup'],
+  'dsh-rsi-setup': ['lark-channel', 'rsi-setup', 'runRsiSetup'],
+  'dsh-web-owner-setup': ['assistant-web-owner', 'setup', 'runWebOwnerSetup'],
+  'dsh-autonomy-doctor': ['assistant-web-owner', 'doctor', 'runAutonomyDoctor'],
+  'source-rsi': ['lark-channel', 'rsi-setup', 'runRsiSetup'],
+}
+if (!Object.hasOwn(modules, setup) || !/^[a-z][a-z0-9-]*$/u.test(profileName)) throw new Error('unsupported profile setup')
+const inside = (parent, child) => { const suffix = relative(parent, child); return suffix === '' || (!suffix.startsWith('..') && !isAbsolute(suffix)) }
+const executable = await realpath(suppliedExecutable)
+const cliRequire = createRequire(executable)
+let installAnchor
+try { installAnchor = cliRequire.resolve('@deepseek-ai/dsh/package.json') } catch {}
+if (installAnchor === undefined) {
+  for (let directory = dirname(executable);;) {
+    const candidate = join(directory, 'package.json')
+    try {
+      const manifest = JSON.parse(await readFile(candidate, 'utf8'))
+      if (manifest.name === '@deepseek-ai/dsh') { installAnchor = candidate; break }
+    } catch {}
+    const parent = dirname(directory)
+    if (parent === directory) break
+    directory = parent
+  }
+}
+if (installAnchor === undefined) throw new Error('selected dsh executable has no Host manifest')
+installAnchor = await realpath(installAnchor)
+const hostManifest = JSON.parse(await readFile(installAnchor, 'utf8'))
+const hostRoot = dirname(installAnchor)
+if (hostManifest.name !== '@deepseek-ai/dsh' || hostManifest.version !== '0.2.0-rc.2'
+  || typeof hostManifest.bin?.dsh !== 'string' || await realpath(join(hostRoot, hostManifest.bin.dsh)) !== executable
+  || !inside(hostRoot, executable) || inside(home, hostRoot)) throw new Error('selected dsh executable is not owned by verified Host')
+const hostRequire = createRequire(installAnchor)
+const bootManifestPath = await realpath(hostRequire.resolve('@deepseek-ai/dsh-app-boot/package.json'))
+const bootManifest = JSON.parse(await readFile(bootManifestPath, 'utf8'))
+const bootPath = await realpath(hostRequire.resolve('@deepseek-ai/dsh-app-boot'))
+const cordisPath = await realpath(hostRequire.resolve('@deepseek-ai/cordis'))
+const cordisManifestPath = await realpath(hostRequire.resolve('@deepseek-ai/cordis/package.json'))
+const cordisManifest = JSON.parse(await readFile(cordisManifestPath, 'utf8'))
+if (bootManifest.name !== '@deepseek-ai/dsh-app-boot' || bootManifest.version !== hostManifest.version
+  || !inside(dirname(bootManifestPath), bootPath) || cordisManifest.name !== '@deepseek-ai/cordis'
+  || !inside(dirname(cordisManifestPath), cordisPath) || inside(home, bootPath) || inside(home, cordisPath)) {
+  throw new Error('selected Host boot or Cordis identity differs')
+}
+const boot = await import(pathToFileURL(bootPath).href)
+const { Context } = await import(pathToFileURL(cordisPath).href)
+if (typeof boot.loadProfileDirectory !== 'function' || typeof boot.createRuntimeResolution !== 'function'
+  || typeof boot.PluginPackages !== 'function' || typeof Context !== 'function') throw new Error('selected Host lacks native runtime resolution')
+const profileDir = join(home, 'profiles', profileName)
+let profile
+let profileExists = true
+try {
+  await readFile(join(profileDir, 'package.json'), 'utf8')
+} catch (error) {
+  if (setup !== 'source-rsi' || error.code !== 'ENOENT') throw error
+  profileExists = false
+}
+if (profileExists) profile = boot.loadProfileDirectory('dsh', profileDir, installAnchor)
+if (profile?.skippedBundles.length) throw new Error('selected profile has unresolved bundles')
+const resolution = await boot.createRuntimeResolution({ installAnchor, profile, home })
+const installationCordis = resolution.entries.find(entry => entry.name === '@deepseek-ai/cordis' && entry.scope === 'installation')
+if (!installationCordis || await realpath(installationCordis.packageDir) !== dirname(cordisManifestPath)) {
+  throw new Error('selected Host Cordis was not resolved from installation')
+}
+const [packageName, moduleName, exportName] = modules[setup]
+const expectedName = `@dsh-enhanced/${packageName}`
+const direct = resolution.localPackageNames.includes(expectedName)
+const layer = profile?.layers.find(entry => entry.packageName === expectedName)
+const selected = resolution.entries.find(entry => entry.name === expectedName && entry.scope === 'profile')
+let selectedPackageDir
+if (setup === 'source-rsi') selectedPackageDir = join(sourceRoot, 'plugins', packageName)
+else if (direct) selectedPackageDir = join(profileDir, 'node_modules', expectedName)
+else if (selected) selectedPackageDir = selected.packageDir
+else throw new Error('setup package differs from native profile resolution')
+const packageRoot = await realpath(selectedPackageDir)
+if (setup === 'source-rsi' && !inside(await realpath(sourceRoot), packageRoot)) {
+  throw new Error('setup package escapes its selected installation')
+}
+if (setup !== 'source-rsi' && layer && (!direct || await realpath(layer.packageDir) !== packageRoot)) {
+  throw new Error('setup package differs from native profile resolution')
+}
+const packageManifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'))
+const binName = setup === 'source-rsi' ? 'dsh-rsi-setup' : setup
+const binRelative = packageManifest.bin?.[binName]
+if (packageManifest.name !== expectedName || typeof binRelative !== 'string'
+  || isAbsolute(binRelative) || binRelative.split('/').some(part => part === '..')
+  || !inside(packageRoot, await realpath(join(packageRoot, binRelative)))) {
+  throw new Error('setup package identity or bin ownership differs')
+}
+const modulePath = await realpath(join(packageRoot, 'lib', `${moduleName}.js`))
+if (!inside(packageRoot, modulePath)) throw new Error('setup module escapes its package')
+const context = new Context()
+const fiber = context.plugin(boot.PluginPackages, { resolution })
+try {
+  await fiber.await()
+  const setupModule = await import(pathToFileURL(modulePath).href)
+  if (typeof setupModule[exportName] !== 'function') throw new Error('installed setup module lacks its expected entrypoint')
+  await setupModule[exportName](args)
+} finally {
+  await fiber.dispose()
+}
+NODE
+)"
+  NODE_PATH='' NODE_OPTIONS='' node --input-type=module -e "$runtime_script" "$dsh_home" "$profile" "$setup" "$source_root" "$(command -v dsh)" "$@"
+}
+
 dsh_enhanced_heal_host_module_fallback() {
   local dsh_home="$1"
   local expected_version="$2"
@@ -2509,16 +2707,20 @@ if (installAnchor === undefined) {
 }
 const hostRequire = createRequire(installAnchor)
 const appBoot = await import(pathToFileURL(hostRequire.resolve('@deepseek-ai/dsh-app-boot')).href)
-if (typeof appBoot.healProfilesModuleFallback !== 'function') {
+if (expectedVersion === '0.2.0-rc.2') {
+  if (typeof appBoot.loadProfileDirectory !== 'function' || typeof appBoot.createRuntimeResolution !== 'function'
+    || typeof appBoot.PluginPackages !== 'function') throw new Error('verified DSH lacks process-local resolution APIs')
+} else if (typeof appBoot.healProfilesModuleFallback !== 'function') {
   throw new Error('verified DSH does not expose the required module fallback API')
+} else {
+  await appBoot.healProfilesModuleFallback({ installAnchor, home })
 }
-await appBoot.healProfilesModuleFallback({ installAnchor, home })
 NODE
   then
     dsh_enhanced_fail 1 '无法准备已验证 DSH 的 setup peer 闭包；尚未运行 setup 或启动 profile。'
     return $?
   fi
-  printf '已准备已验证 DSH 的 setup peer 闭包；未挂载或启动 profile。\n'
+  printf '已验证 DSH 的 setup peer 解析；未挂载或启动 profile。\n'
 }
 
 dsh_enhanced_apply_web_owner() {
@@ -2538,7 +2740,7 @@ dsh_enhanced_apply_web_owner() {
   fi
   local args=(--dsh-home "$dsh_home" --profile "$profile" --workspace "$workspace" --preset "$preset")
   if [[ -n "$isolation_image" ]]; then args+=(--isolation-image "$isolation_image" --isolation-max-runs "$isolation_max_runs" --isolation-lease-ms "$isolation_lease_ms" --isolation-runtime-ms "$isolation_runtime_ms"); fi
-  dsh_enhanced_run "$dry_run" "$setup_bin" "${args[@]}"
+  dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-web-owner-setup "${args[@]}"
 }
 
 dsh_enhanced_validate_lifecycle_state_paths() {

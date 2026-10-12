@@ -1,4 +1,5 @@
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { cp, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -14,7 +15,7 @@ async function fixture() {
   created.push(parent)
   const root = join(parent, 'private cache')
   await mkdir(root, { mode: 0o700 })
-  let latest = '0.1.5-rc.3'
+  let latest = '0.2.0-rc.2'
   let integrity = SHA_A
   let installCount = 0
   let viewCount = 0
@@ -85,7 +86,7 @@ describe('private managed DSH runtime', () => {
   test('installs exact latest once, verifies executable and reuses the local receipt', async () => {
     const f = await fixture()
     const first = await prepareManagedHostRuntime({ root: f.root }, f.ports)
-    expect(first.version).toBe('0.1.5-rc.3')
+    expect(first.version).toBe('0.2.0-rc.2')
     expect(first.integrity).toBe(SHA_A)
     expect(first.dshPath).toBe(join(first.binDirectory, 'dsh'))
     expect(first.root).toBe(join(f.root, first.version))
@@ -98,29 +99,53 @@ describe('private managed DSH runtime', () => {
     expect(f.counts()).toEqual({ viewCount: 2, installCount: 1 })
   })
 
-  test('a moving latest tag creates a separate immutable exact version', async () => {
+  test('a moving latest tag cannot replace a cached validated runtime with an old version', async () => {
     const f = await fixture()
     const first = await prepareManagedHostRuntime({ root: f.root }, f.ports)
     f.setLatest('0.1.5-rc.4')
-    f.setIntegrity(SHA_B)
-    const second = await prepareManagedHostRuntime({ root: f.root }, f.ports)
-    expect(second.root).not.toBe(first.root)
-    expect(second.version).toBe('0.1.5-rc.4')
-    expect((await readManagedHostRuntime({ root: f.root, version: first.version })).integrity).toBe(SHA_A)
-    expect(f.counts().installCount).toBe(2)
+    await expect(prepareManagedHostRuntime({ root: f.root }, f.ports)).rejects.toThrow(/unsupported DSH version/u)
+    expect(await readManagedHostRuntime({ root: f.root, version: first.version })).toEqual(first)
+    expect(f.counts()).toEqual({ viewCount: 2, installCount: 1 })
   })
 
   test('an explicit supported version is resolved and installed without following latest', async () => {
     const f = await fixture()
     f.setLatest('0.1.5-rc.4')
-    const exact = await prepareManagedHostRuntime({ root: f.root, selector: '0.1.5-rc.3' }, f.ports)
-    expect(exact.version).toBe('0.1.5-rc.3')
+    const exact = await prepareManagedHostRuntime({ root: f.root, selector: '0.2.0-rc.2' }, f.ports)
+    expect(exact.version).toBe('0.2.0-rc.2')
     expect(f.counts()).toEqual({ viewCount: 1, installCount: 1 })
+  })
+
+  test.each(['0.1.5-rc.3', '0.1.5'])('reads a verified legacy %s receipt without selecting it for a new install', async legacyVersion => {
+    const f = await fixture()
+    const current = await prepareManagedHostRuntime({ root: f.root }, f.ports)
+    const legacyRoot = join(f.root, legacyVersion)
+    await cp(current.root, legacyRoot, { recursive: true, verbatimSymlinks: true })
+    const changedPaths = ['package.json', 'package-lock.json', 'node_modules/@deepseek-ai/dsh/package.json', 'node_modules/@deepseek-ai/dsh/lib/bin.js']
+    for (const path of changedPaths) {
+      const target = join(legacyRoot, path)
+      await writeFile(target, (await readFile(target, 'utf8')).replaceAll(current.version, legacyVersion))
+    }
+    const receiptPath = join(legacyRoot, 'receipt.json')
+    const receipt = JSON.parse(await readFile(receiptPath, 'utf8')) as {
+      version: string; tarball: string; entries: Array<{ path: string; sha256?: string }>
+    }
+    receipt.version = legacyVersion
+    receipt.tarball = receipt.tarball.replace(current.version, legacyVersion)
+    for (const entry of receipt.entries) {
+      if (changedPaths.includes(entry.path)) entry.sha256 = createHash('sha256').update(await readFile(join(legacyRoot, entry.path))).digest('hex')
+    }
+    await writeFile(receiptPath, JSON.stringify(receipt) + '\n')
+    const legacy = await readManagedHostRuntime({ root: f.root, version: legacyVersion })
+    expect(legacy.version).toBe(legacyVersion)
+    expect(legacy.integrity).toBe(SHA_A)
+    await expect(prepareManagedHostRuntime({ root: f.root, selector: legacyVersion }, f.ports)).rejects.toThrow(/unsupported DSH version/u)
+    expect(f.counts().installCount).toBe(1)
   })
 
   test('rejects beta, next and unvalidated versions before installing', async () => {
     const f = await fixture()
-    for (const selector of ['next', '0.1.7-rc.2', '0.1.5-beta.1', '0.1.5-rc.2', '0.1.6']) {
+    for (const selector of ['next', '0.1.5-rc.3', '0.1.5', '0.1.7-rc.2', '0.2.0-alpha.1', '0.2.0-rc.1', '0.2.0-rc.3', '0.2.0', '0.3.0-rc.1']) {
       await expect(prepareManagedHostRuntime({ root: f.root, selector }, f.ports)).rejects.toThrow(/unsupported DSH version/u)
     }
     f.setLatest('0.1.7-rc.2')
@@ -155,7 +180,7 @@ describe('private managed DSH runtime', () => {
     const f = await fixture()
     f.failInstall()
     await expect(prepareManagedHostRuntime({ root: f.root }, f.ports)).rejects.toThrow(/npm install failed \(exit 42, EAUTH\)/u)
-    expect((await readdir(f.root)).filter(name => name.startsWith('.stage-') || name === '0.1.5-rc.3')).toEqual([])
+    expect((await readdir(f.root)).filter(name => name.startsWith('.stage-') || name === '0.2.0-rc.2')).toEqual([])
   })
 
   test('an already cancelled request never contacts npm or publishes a runtime', async () => {

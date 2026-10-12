@@ -17,12 +17,22 @@ async function fixture() {
   roots.push(root)
   const dshHome = join(root,'home with spaces')
   const cacheRoot = join(root,'cache')
-  const runtime = runtimeAt(cacheRoot, '0.1.5-rc.3')
+  const runtime = runtimeAt(cacheRoot, '0.2.0-rc.2')
   const prepare = vi.fn(async () => runtime)
   const read = vi.fn(async (_input: Parameters<InstallHostPorts['read']>[0]) => runtime)
   const ports: InstallHostPorts = {prepare,read}
   const input = {dshHome,cacheRoot,environment:{PATH:'/original/bin',TOKEN:'preserved'}}
   return {root,input,runtime,prepare,read,ports}
+}
+
+async function bindLegacyHome(fixtureValue: Awaited<ReturnType<typeof fixture>>, version: string) {
+  const runtime = runtimeAt(fixtureValue.input.cacheRoot, version)
+  await mkdir(fixtureValue.input.dshHome, { mode: 0o700 })
+  await writeFile(join(fixtureValue.input.dshHome, '.dsh-rsi-host.json'), JSON.stringify({
+    schemaVersion: 1, cacheRoot: fixtureValue.input.cacheRoot, version, receiptDigest: runtime.receiptDigest,
+  }) + '\n', { mode: 0o600 })
+  fixtureValue.read.mockImplementation(async ({ version: selected }) => selected === version ? runtime : fixtureValue.runtime)
+  return runtime
 }
 
 describe('Home-bound private Host selection', () => {
@@ -69,6 +79,20 @@ describe('Home-bound private Host selection', () => {
     f.read.mockResolvedValue({...f.runtime,receiptDigest:'b'.repeat(64)})
     await expect(prepareInstallHostEnvironment(f.input,f.ports)).rejects.toThrow('制品发生变化')
     expect(f.prepare).toHaveBeenCalledTimes(1)
+  })
+  test('a verified legacy binding remains usable, while a fresh Home rejects its runtime as a new candidate', async () => {
+    const bound = await fixture()
+    const legacy = await bindLegacyHome(bound, '0.1.5-rc.3')
+    const environment = await prepareInstallHostEnvironment(bound.input, bound.ports)
+    expect(environment.DSH_ENHANCED_HOST_BIN).toBe(legacy.binDirectory)
+    expect(bound.read).toHaveBeenCalledWith({ root: bound.input.cacheRoot, version: legacy.version })
+    expect(bound.prepare).not.toHaveBeenCalled()
+
+    const fresh = await fixture()
+    fresh.prepare.mockResolvedValue(legacy)
+    await expect(prepareInstallHostEnvironment(fresh.input, fresh.ports)).rejects.toThrow('候选 Host 版本')
+    expect(await readdir(fresh.input.dshHome)).toEqual([])
+    await expect(prepareInstallHostEnvironment({ ...fresh.input, selector: legacy.version }, fresh.ports)).rejects.toThrow('请求的 Host 版本')
   })
   test('a linked binding is never followed', async () => {
     const f = await fixture()
@@ -126,19 +150,22 @@ describe('read-only Home Host update planning', () => {
   })
   test('a different compatible exact version only prepares candidate binding bytes', async () => {
     const f = await fixture()
-    await prepareInstallHostEnvironment(f.input, f.ports)
+    const original = await bindLegacyHome(f, '0.1.5-rc.3')
     const path = join(f.input.dshHome, '.dsh-rsi-host.json')
     const before = await readFile(path, 'utf8')
-    const candidate = runtimeAt(f.input.cacheRoot, '0.1.5-rc.4', 'b'.repeat(64))
+    const candidate = runtimeAt(f.input.cacheRoot, '0.2.0-rc.2', 'b'.repeat(64))
     f.prepare.mockResolvedValue(candidate)
-    f.read.mockImplementation(async ({ version }) => version === candidate.version ? candidate : f.runtime)
-    const plan = await prepareHostUpdatePlan({ dshHome: f.input.dshHome, selector: '0.1.5-rc.4' }, f.ports)
+    f.read.mockImplementation(async ({ version }) => version === candidate.version ? candidate : original)
+    const plan = await prepareHostUpdatePlan({ dshHome: f.input.dshHome, selector: '0.2.0-rc.2' }, f.ports)
     expect(plan.status).toBe('update')
     expect(plan.candidateRuntime).toEqual(candidate)
     expect(JSON.parse(plan.candidateBindingSource)).toEqual({ schemaVersion: 1, cacheRoot: f.input.cacheRoot,
       version: candidate.version, receiptDigest: candidate.receiptDigest })
     expect(await readFile(path, 'utf8')).toBe(before)
-    expect(f.prepare).toHaveBeenLastCalledWith({ root: f.input.cacheRoot, selector: '0.1.5-rc.4' })
+    expect(f.prepare).toHaveBeenLastCalledWith({ root: f.input.cacheRoot, selector: '0.2.0-rc.2' })
+    f.prepare.mockClear()
+    expect((await prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).candidateRuntime).toEqual(candidate)
+    expect(f.prepare).toHaveBeenLastCalledWith({ root: f.input.cacheRoot, selector: 'latest' })
   })
   test('same-version receipt or runtime path mismatch cannot be treated as current', async () => {
     const f = await fixture()
@@ -151,12 +178,10 @@ describe('read-only Home Host update planning', () => {
     await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).rejects.toThrow('独立收据验证')
     expect(await readFile(path, 'utf8')).toBe(before)
   })
-  test.each([['0.1.5-rc.4', '0.1.5-rc.3'], ['0.1.5', '0.1.5-rc.4']])(
+  test.each([['0.2.0-rc.2', '0.1.5-rc.3'], ['0.2.0-rc.2', '0.1.5']])(
     'latest and exact selectors cannot downgrade %s to %s', async (originalVersion, olderVersion) => {
       const f = await fixture()
-      const originalRuntime = runtimeAt(f.input.cacheRoot, originalVersion)
-      f.prepare.mockResolvedValueOnce(originalRuntime)
-      f.read.mockResolvedValue(originalRuntime)
+      expect(f.runtime.version).toBe(originalVersion)
       await prepareInstallHostEnvironment(f.input, f.ports)
       const path = join(f.input.dshHome, '.dsh-rsi-host.json')
       const before = await readFile(path, 'utf8')
@@ -170,17 +195,17 @@ describe('read-only Home Host update planning', () => {
     })
   test('a different-version candidate must independently match the exact cached runtime', async () => {
     const f = await fixture()
-    await prepareInstallHostEnvironment(f.input, f.ports)
+    const original = await bindLegacyHome(f, '0.1.5')
     const path = join(f.input.dshHome, '.dsh-rsi-host.json')
     const before = await readFile(path, 'utf8')
-    const candidate = runtimeAt(f.input.cacheRoot, '0.1.5-rc.4', 'b'.repeat(64))
+    const candidate = runtimeAt(f.input.cacheRoot, '0.2.0-rc.2', 'b'.repeat(64))
     f.prepare.mockResolvedValue(candidate)
     f.read.mockImplementation(async ({ version }) => version === candidate.version
-      ? { ...candidate, root: join(f.root, 'foreign-cache') } : f.runtime)
+      ? { ...candidate, root: join(f.root, 'foreign-cache') } : original)
     await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).rejects.toThrow('独立收据验证')
     expect(f.read).toHaveBeenLastCalledWith({ root: f.input.cacheRoot, version: candidate.version })
     f.read.mockImplementation(async ({ version }) => version === candidate.version
-      ? { ...candidate, receiptDigest: 'c'.repeat(64) } : f.runtime)
+      ? { ...candidate, receiptDigest: 'c'.repeat(64) } : original)
     await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).rejects.toThrow('独立收据验证')
     expect(await readFile(path, 'utf8')).toBe(before)
   })
@@ -209,12 +234,12 @@ describe('read-only Home Host update planning', () => {
   })
   test('binding drift during preparation is rejected without publishing the candidate', async () => {
     const f = await fixture()
-    await prepareInstallHostEnvironment(f.input, f.ports)
+    const original = await bindLegacyHome(f, '0.1.5-rc.3')
     const path = join(f.input.dshHome, '.dsh-rsi-host.json')
     const drifted = JSON.stringify({ schemaVersion: 1, cacheRoot: f.input.cacheRoot, version: f.runtime.version,
       receiptDigest: 'c'.repeat(64) }) + '\n'
-    const candidate = runtimeAt(f.input.cacheRoot, '0.1.5-rc.4', 'b'.repeat(64))
-    f.read.mockImplementation(async ({ version }) => version === candidate.version ? candidate : f.runtime)
+    const candidate = runtimeAt(f.input.cacheRoot, '0.2.0-rc.2', 'b'.repeat(64))
+    f.read.mockImplementation(async ({ version }) => version === candidate.version ? candidate : original)
     f.prepare.mockImplementation(async () => {
       await writeFile(path, drifted, { mode: 0o600 })
       return candidate

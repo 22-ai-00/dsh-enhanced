@@ -21,24 +21,24 @@
 
 当前交付：授权内减少重复审批、GitHub/飞书日历事件主动跟进，以及可直接安装的 npm 新版本。已补齐 supervised 的事件/主动性 bundle 安装、主人可用机会策略发现及 `proactive_status` 只读预授权；仍须显式配置来源、预算和等待权限，未提供聊天创建任意监控或任务之外自主发现。owner 配置器的基础包读取已改用经验证的 Host 安装目录，源码定向验证通过，尚未重新部署。
 
-用户要求默认最新 DSH。npm 尚无无预发布后缀的正式版，官方 `latest` 为 `0.2.0-rc.2`；当前锁与 peer 仍是 `0.1.5-rc.3` 基线，不能只放宽范围就发布。下一步成套迁移 Session/动态 Auto、preset registry、Cordis/Loader 和已移除的 fallback API，再运行完整检查、真实事件/安装验收及发布流程。未通过前不标记新 npm 版本已发布。
+当前交付先完成官方 npm `latest` 的 **DSH `0.2.0-rc.2`** 适配；上游尚无无预发布后缀的正式稳定版。开发锁与 peers 成套迁移，包含 Session 4、动态 Auto、preset registry、原生 setup 解析和 profile 独立模型/权限设置；安装默认解析 latest 后冻结已验证精确版本。远程发布引导器仍固定旧制品，不能视为已更新。`0.1 → 0.2` 自动联合升级尚不支持，CLI 在替换旧插件前拒绝；新版本只在独立 Home 验证，不改变正在运行的旧安装。
 
 本机目标为 `assistant`，原 Agent 与用量监控服务运行，学习仍禁用。用户已确认修复离线升级并开启学习 scheduler；升级后只读数据库核查三个旧 Heartbeat/Recovery 任务均为 paused、下一运行时间为空，满足本次 `--ack-existing-automations` 前提。
 
-离线完整元数据、临时 peer 包预热及原生 fallback 修复已通过正式维护，事务退出 0、完成服务验收并清理事务目录；未放宽生产链接守卫。随后 owner 安装退出 1：新协调器 profile 缺少 `@deepseek-ai/dsh-base/cordis.patch.yml`，尚未返回 ready；保留现场排查，不以包安装成功代替调度就绪。启用后该冻结安装的本地更新路径仍受限。
+旧安装的离线维护已成功、身份未变；随后 owner 安装因协调器缺少 Host base 退出 1。读取 Host base 的修复已提交，尚未部署；新版本跨 ABI 迁移也必须先解决，不能以包安装成功代替调度就绪。
 
-CI 保留 Linux/macOS 完整检查，修正真实 Linux/bwrap/ELF 测试的平台边界、macOS 临时目录的 canonical 短路径、模拟 Docker 和发行包夹具、GNU stat/tar 假设及 Linux 子进程启动等待窗口；删除首次失败后的重复全包测试。`6a8dce4` 的 macOS 根测试还剩 4 项夹具假设失败；补丁显式恢复夹具 PATH、固定 Linux auto 场景并补充 Linux/macOS Home 绑定覆盖，定向 7 项通过，待下一次远端验证。
+CI 保留 Linux/macOS 完整检查，平台夹具修复已提交；删除失败后重复全包测试，本次限制测试 worker 并取消同分支过时运行，降低争用与浪费。远端 macOS 结果仍待验证，不能以本地 Linux 通过替代。
 
-独立父行为回归门已完成集成与完整根检查；下一交付是独立替换授权、稳定入口切换与回退。现有配置没有父版本/slot 替换授权，不能扩大旧创建或采用额度的语义。当前任务身份按 Inbox 建立，不能推断跨 Inbox 的语义同一性。
+下一验收先解决旧 Home 的联合 Host/插件迁移与回滚，再完成 owner 就绪与学习调度。独立父行为回归门是既有能力边界；现有配置没有父版本/slot 替换授权，不能扩大旧创建或采用额度的语义。当前任务身份按 Inbox 建立，不能推断跨 Inbox 的语义同一性。
 
 启用后由新的真实普通任务验收创建 → 独立验证 → 动态采用 → 后续会话原生发现与复用；记录版本、实际调用、质量、成本、延迟和回归，检查纠正/撤回、重启及 unknown 不重放。之前组件诊断停在 unknown，无候选、采用或复用，不能作为闭环完成证据。两条普通使用通道通过可安装部署与[发布门](releasing.md)后再发布 npm。
 
 ## 最新验证
 
-本轮 `pnpm check` 首轮退出 1：validate、零警告 lint、typecheck 和根测试 879 项通过；既有 Automations WAL 写锁测试一次未拒绝活跃 writer。原样单项及整个包复跑分别 1/276 项通过，首次漏检原因尚未确认，未修改生产锁检查。为避免重复根检查，仅续跑失败包和未完成包，再执行 build 与 pack；续跑退出 0，去重合计 8318 项通过、61 项跳过、37 个包 dry-run pack。不能称单次完整命令通过，WAL 安全测试波动仍须跟踪。
+本轮最终 `VITEST_MAX_WORKERS=2 pnpm check` 退出 **0**：清单、零警告 lint、类型检查、**8376 项通过 / 61 项跳过**、构建与 **37 个包 dry-run pack** 全部完成；已核对新 profile 配置 helper 包含在 Policy 产物中。此前失败来自新版协议断言及 Host/YAML 依赖夹具，已修复并由本次完整检查覆盖；未降低生产安全断言。
 
-原生 fallback 修复在真实失败 stage 的隔离副本调用生产 helper 通过：3 个悬空链接清零，1197 条链接通过原守卫，四份 profile 元数据不变；随后正式升级退出 0。完整检查、续跑、定向输出及升级/owner 安装结果保留在忽略的证据目录。
+真实 npm `0.2.0-rc.2` Host 的隔离 core 安装、ACP 初始化和双 profile 设置烟测通过：保留只读预设、其他 provider 与兄弟 profile，重复设置字节稳定。模型 route 的真实 headless 配置投影校验通过，未发真实模型请求。独立临时目录的 lifecycle helper 从 Host 声明依赖链加载结构化 YAML，真实 Host 正例及不执行危险表达式的负例通过；旧 Host 与环境污染拒绝由定向测试覆盖。
 
-Cordis、SQLite、Git 使用真实实现；模型及 Docker 行为观察使用夹具，61 项跳过不证明外部/live 行为。本轮升级已部署，但学习尚未就绪、未发布 npm，也不证明普通任务收益。完整检查、定向输出及本机维护/恢复证据保留在忽略目录 `docs/evidence/rsi-default-learning/` 与 `docs/evidence/rsi-offline-learning/`。
+本轮证据在忽略目录 `docs/evidence/dsh-latest/`，完整命令为 `check-verified.log` / `.exit`。真实 Host/SQLite/Cordis 验证不等于真实普通任务闭环；尚未发布 npm、未启用生产学习，远端 CI 仍待验证。此前 WAL 活跃 writer 拒绝测试曾单次波动，本次 Automations 276 项全部通过；继续跟踪，不修改生产锁断言或把跳过的测试计作通过。
 
 生产 DeepSeek 固定合同仍于 2026-10-08 过期；Super Relay 预算插件的固定合同于 2026-10-14 到期，但本机未安装该预算插件，不能据此判断当前会话路由是否可用。保留 owner 会话的 `super-relay/ark/seed-evolving` 选择，不把静态选择当作 live 调用证明；本轮不延长供应合同、不替换用户模型、不续期旧授权。

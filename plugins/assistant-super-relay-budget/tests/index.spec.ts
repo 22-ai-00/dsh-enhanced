@@ -207,8 +207,8 @@ describe('dsh-enhanced-assistant-super-relay-budget', () => {
     it('projects native leading system messages after one-shot system text, preserving text and history order', async () => {
       const callId = ToolCallId('call_1')
       const messages = [
-        createSystemMessage(' first\n', 'dsh-agent-loop'),
-        createSystemMessage('second ', 'dsh-agent-loop'),
+        createSystemMessage(' first\n'),
+        createSystemMessage('second '),
         ...userMessage('hello'),
         createAssistantMessage({ source: { provider: SUPER_RELAY_PROVIDER, model: MODEL }, content: [
           { type: 'text', text: 'checking' }, { type: 'tool-call', id: callId, name: 'inspect', arguments: '{"x":1}' },
@@ -232,6 +232,15 @@ describe('dsh-enhanced-assistant-super-relay-budget', () => {
       expect(fetch).toHaveBeenCalledOnce()
     })
 
+    it('projects source-free request-only input as a user turn', async () => {
+      const fetch = vi.fn(jsonFetch(completedResponse(), init => {
+        expect(JSON.parse(String(init.body)).input).toEqual([{ role: 'user', content: [{ type: 'input_text', text: 'one-shot input' }] }])
+      }))
+      const adapter = new SuperRelayGoalMeteredAdapter(Config({ enabled: true }), { environment: { SUPER_RELAY_API_KEY: 'test-key' }, fetch })
+      await collect(adapter, streamOptions({ messages: [{ role: 'user', content: [{ type: 'text', text: 'one-shot input' }] }] }))
+      expect(fetch).toHaveBeenCalledOnce()
+    })
+
     it('projects an AgentLoop-shaped request with only a leading native system message', async () => {
       const adapter = new SuperRelayGoalMeteredAdapter(Config({ enabled: true }), {
         environment: { SUPER_RELAY_API_KEY: 'test-key' },
@@ -243,7 +252,7 @@ describe('dsh-enhanced-assistant-super-relay-budget', () => {
           })
         }),
       })
-      await collect(adapter, streamOptions({ messages: [createSystemMessage('native prompt', 'dsh-agent-loop'), ...userMessage('hello')] }))
+      await collect(adapter, streamOptions({ messages: [createSystemMessage('native prompt'), ...userMessage('hello')] }))
     })
 
     it('omits instructions for an empty native system message and preserves one-shot system alone', async () => {
@@ -252,7 +261,7 @@ describe('dsh-enhanced-assistant-super-relay-budget', () => {
         environment: { SUPER_RELAY_API_KEY: 'test-key' },
         fetch: jsonFetch(completedResponse(), init => { bodies.push(JSON.parse(String(init.body))) }),
       })
-      const messages = [createSystemMessage('', 'dsh-agent-loop'), ...userMessage('hello')]
+      const messages = [createSystemMessage(''), ...userMessage('hello')]
       await collect(adapter, streamOptions({ messages }))
       await collect(adapter, streamOptions({ system: 'one-shot', messages }))
       expect(bodies).toEqual([
@@ -262,8 +271,8 @@ describe('dsh-enhanced-assistant-super-relay-budget', () => {
     })
 
     it.each([
-      ['a non-leading system message', [...userMessage('hello'), createSystemMessage('late', 'dsh-agent-loop')], /non-leading system/],
-      ['a non-text leading system message', [{ ...createSystemMessage('hello', 'dsh-agent-loop'), content: [{ type: 'reasoning', text: 'hidden' }] }, ...userMessage('hello')], /system content must be text-only/],
+      ['a non-leading system message', [...userMessage('hello'), createSystemMessage('late')], /non-leading system/],
+      ['a non-text leading system message', [{ ...createSystemMessage('hello'), content: [{ type: 'reasoning', text: 'hidden' }] }, ...userMessage('hello')], /system content must be text-only/],
     ])('rejects %s before fetch', async (_label, messages, error) => {
       const fetch = vi.fn(jsonFetch(completedResponse()))
       const adapter = new SuperRelayGoalMeteredAdapter(Config({ enabled: true }), { environment: { SUPER_RELAY_API_KEY: 'test-key' }, fetch })

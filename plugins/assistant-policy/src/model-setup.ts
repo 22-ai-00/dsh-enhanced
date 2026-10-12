@@ -2,11 +2,13 @@ import { randomUUID } from 'node:crypto'
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import { type Document, isMap, isSeq, type Node, parseDocument, Scalar, YAMLMap, YAMLSeq } from 'yaml'
+import { type EffectiveProfileConfigReader, readEffectiveProfileConfig } from './profile-setup.js'
 
 export type ModelApiProtocol = 'openai-completions' | 'openai-responses' | 'anthropic-messages'
 
 export interface ModelSetupArgs {
   dshHome: string
+  profile?: string
   provider: string
   model: string
   apiKeyEnv: string
@@ -24,6 +26,7 @@ export interface ModelSetupArgs {
 
 export interface ResolvedModelSetup {
   dshHome: string
+  profile?: string
   provider: string
   model: string
   apiKeyEnv: string
@@ -132,6 +135,7 @@ export function parseModelSetupArgs(argv: readonly string[]): ModelSetupArgs {
       continue
     }
     if (option === '--dsh-home') result.dshHome = argumentValue(argv, index++, option)
+    else if (option === '--profile') result.profile = argumentValue(argv, index++, option)
     else if (option === '--provider') result.provider = argumentValue(argv, index++, option)
     else if (option === '--model') result.model = argumentValue(argv, index++, option)
     else if (option === '--api-key-env') result.apiKeyEnv = argumentValue(argv, index++, option)
@@ -156,6 +160,12 @@ export function resolveModelSetup(args: ModelSetupArgs): ResolvedModelSetup {
   }
   if (args.enableInProfile !== undefined && !profileNamePattern.test(args.enableInProfile)) {
     throw new Error('assistant-policy model setup: --enable-in-profile must be a valid profile name')
+  }
+  if (args.profile !== undefined && !profileNamePattern.test(args.profile)) {
+    throw new Error('assistant-policy model setup: --profile must be a valid profile name')
+  }
+  if (args.profile !== undefined && args.enableInProfile !== undefined && args.profile !== args.enableInProfile) {
+    throw new Error('assistant-policy model setup: --profile and --enable-in-profile must name the same profile')
   }
   if (args.enableOnly && args.defaultIfAbsent) {
     throw new Error('assistant-policy model setup: --enable-only and --default-if-absent are mutually exclusive')
@@ -186,6 +196,7 @@ export function resolveModelSetup(args: ModelSetupArgs): ResolvedModelSetup {
     }
     return {
       dshHome: args.dshHome,
+      ...(args.profile !== undefined ? { profile: args.profile } : {}),
       provider: args.provider,
       model: args.model.length > 0 ? args.model : agentRoute.model,
       apiKeyEnv,
@@ -206,6 +217,7 @@ export function resolveModelSetup(args: ModelSetupArgs): ResolvedModelSetup {
 
   const base: Omit<ResolvedModelSetup, 'kind' | 'model' | 'custom'> = {
     dshHome: args.dshHome,
+    ...(args.profile !== undefined ? { profile: args.profile } : {}),
     provider: args.provider,
     apiKeyEnv,
     storeKey: args.storeKey,
@@ -362,16 +374,25 @@ function containsDefaultModelRow(sequence: YAMLSeq): boolean {
   return patchRows(sequence).some(row => row.get('id') === 'agent-default-model')
 }
 
-function homeRouteConfig(sequence: YAMLSeq, rowId: string): YAMLMap {
-  let lastConfig: YAMLMap | undefined
-  for (const row of patchRows(sequence)) {
-    if (row.get('id') !== rowId) continue
+function profileRowConfig(document: Document, sequence: YAMLSeq, nativeConfig: YAMLMap, rowId: string): YAMLMap {
+  const rows = patchRows(sequence).filter(row => row.get('id') === rowId)
+  for (const row of rows) {
     const config = row.get('config', true)
     if (config === undefined) continue
-    if (!isMap(config)) throw new Error('assistant-policy model setup: home agent route config must be a YAML mapping')
-    lastConfig = config
+    if (!isMap(config)) throw new Error(`assistant-policy model setup: ${rowId} config must be a YAML mapping`)
   }
-  return lastConfig === undefined ? new YAMLMap() : lastConfig.clone() as YAMLMap
+  let row = rows.at(-1)
+  if (row === undefined) {
+    row = document.createNode({ id: rowId, disabled: false }) as YAMLMap
+    row.set('config', nativeConfig.clone())
+    sequence.add(row)
+  } else {
+    row.set('disabled', false)
+    if (row.get('config', true) === undefined) row.set('config', nativeConfig.clone())
+  }
+  const config = row.get('config', true)
+  if (!isMap(config)) throw new Error(`assistant-policy model setup: ${rowId} config must be a YAML mapping`)
+  return config
 }
 
 async function existingDefaultSource(resolved: ResolvedModelSetup, homePatch: YAMLSeq, profilePatch: YAMLSeq): Promise<ModelSetupResult['profileDefaultAction'] | undefined> {
@@ -386,22 +407,58 @@ async function existingDefaultSource(resolved: ResolvedModelSetup, homePatch: YA
 // layer, preserving other rows, comments, !!js expressions and existing config.
 // Conditional default selection is added to this profile only when no explicit
 // user selection exists in settings or the home/profile patch layers.
-async function enableAgentRouteInProfile(resolved: ResolvedModelSetup): Promise<{
+async function writeProfilePatch(resolved: ResolvedModelSetup, nativeConfigs: ReadonlyMap<string, YAMLMap>): Promise<{
   path: string
-  routeAction: 'enabled' | 'already-enabled'
+  routeAction?: 'enabled' | 'already-enabled'
   commandAction?: 'set' | 'preserved'
   defaultAction?: ModelSetupResult['profileDefaultAction']
 }> {
-  const agent = resolved.agent!
-  const patchPath = join(resolved.dshHome, 'profiles', resolved.enableInProfile!, 'cordis.patch.yml')
+  const profile = resolved.profile ?? resolved.enableInProfile!
+  const patchPath = join(resolved.dshHome, 'profiles', profile, 'cordis.patch.yml')
   const { document, source, sequence } = await loadPatchDocument(patchPath, 'profile patch')
   const home = await loadPatchDocument(join(resolved.dshHome, 'cordis.patch.yml'), 'home patch')
-  const inheritedConfig = homeRouteConfig(home.sequence, agent.rowId)
+  if (resolved.profile !== undefined && !resolved.enableOnly && !resolved.defaultIfAbsent) {
+    const modelConfig = profileRowConfig(document, sequence, nativeConfigs.get('agent-default-model')!, 'agent-default-model')
+    modelConfig.set('provider', resolved.provider)
+    modelConfig.set('model', resolved.model)
+    if (resolved.custom !== undefined) {
+      const gatewayConfig = profileRowConfig(document, sequence, nativeConfigs.get('llm-pi-ai')!, 'llm-pi-ai')
+      const providers = gatewayConfig.get('providers', true)
+      if (providers !== undefined && !isMap(providers)) {
+        throw new Error('assistant-policy model setup: llm-pi-ai.providers must be a YAML mapping')
+      }
+      const providerMap = providers ?? new YAMLMap()
+      if (providers === undefined) gatewayConfig.set('providers', providerMap)
+      const route = providerMap.get(resolved.provider, true)
+      if (route !== undefined && !isMap(route)) {
+        throw new Error('assistant-policy model setup: llm-pi-ai provider must be a YAML mapping')
+      }
+      const routeMap = route ?? new YAMLMap()
+      if (route === undefined) providerMap.set(resolved.provider, routeMap)
+      if (resolved.custom.displayName !== undefined) routeMap.set('displayName', resolved.custom.displayName)
+      routeMap.set('apiKeyEnv', resolved.apiKeyEnv)
+      routeMap.set('api', resolved.custom.api)
+      routeMap.set('baseURL', resolved.custom.baseURL)
+      routeMap.set('models', [{ id: resolved.model, name: resolved.model }])
+    }
+  }
+  if (resolved.agent === undefined) {
+    const serialized = document.toString({ lineWidth: 0 })
+    if (serialized !== source) {
+      await mkdir(join(resolved.dshHome, 'profiles', profile), { recursive: true })
+      await atomicWriteYaml(patchPath, serialized)
+    }
+    return { path: patchPath }
+  }
+  const agent = resolved.agent
+  const inheritedConfig = nativeConfigs.get(agent.rowId)!.clone() as YAMLMap
   let defaultAction: ModelSetupResult['profileDefaultAction'] | undefined
   if (resolved.defaultIfAbsent) {
     defaultAction = await existingDefaultSource(resolved, home.sequence, sequence)
     if (defaultAction === undefined) {
-      sequence.add(document.createNode({ id: 'agent-default-model', config: { provider: resolved.provider, model: resolved.model } }))
+      const modelConfig = profileRowConfig(document, sequence, nativeConfigs.get('agent-default-model')!, 'agent-default-model')
+      modelConfig.set('provider', resolved.provider)
+      modelConfig.set('model', resolved.model)
       defaultAction = 'set'
     }
   }
@@ -456,7 +513,7 @@ async function enableAgentRouteInProfile(resolved: ResolvedModelSetup): Promise<
     } else commandAction = 'preserved'
   }
 
-  await mkdir(join(resolved.dshHome, 'profiles', resolved.enableInProfile!), { recursive: true })
+  await mkdir(join(resolved.dshHome, 'profiles', profile), { recursive: true })
   const serialized = document.toString({ lineWidth: 0 })
   if (serialized !== source) await atomicWriteYaml(patchPath, serialized)
   return { path: patchPath, routeAction,
@@ -464,7 +521,28 @@ async function enableAgentRouteInProfile(resolved: ResolvedModelSetup): Promise<
     ...(defaultAction !== undefined ? { defaultAction } : {}) }
 }
 
-export async function applyModelSetup(resolved: ResolvedModelSetup): Promise<ModelSetupResult> {
+export async function applyModelSetup(
+  resolved: ResolvedModelSetup,
+  readConfig: EffectiveProfileConfigReader = readEffectiveProfileConfig,
+): Promise<ModelSetupResult> {
+  const conditional = resolved.kind === 'agent' && (resolved.enableOnly || resolved.defaultIfAbsent)
+  if (resolved.profile !== undefined && !conditional) {
+    const legacy = await loadMappingDocument(join(resolved.dshHome, 'settings.yaml'), 'settings.yaml')
+    const settings = legacy.contents as YAMLMap
+    if (settings.has('agent-default-model') || (resolved.custom !== undefined && settings.has('llm-pi-ai'))) {
+      throw new Error('assistant-policy model setup: pending legacy settings.yaml model section may override this profile; migrate it into the target profile before --profile setup')
+    }
+  }
+  const profileTarget = resolved.profile !== undefined || resolved.enableInProfile !== undefined
+  const nativeConfigs = new Map<string, YAMLMap>()
+  if (profileTarget) {
+    const profile = resolved.profile ?? resolved.enableInProfile!
+    const rowIds = new Set<string>()
+    if (resolved.profile !== undefined && !conditional || resolved.defaultIfAbsent) rowIds.add('agent-default-model')
+    if (resolved.custom !== undefined) rowIds.add('llm-pi-ai')
+    if (resolved.agent !== undefined) rowIds.add(resolved.agent.rowId)
+    for (const rowId of rowIds) nativeConfigs.set(rowId, await readConfig(resolved.dshHome, profile, rowId))
+  }
   // Resolve (and fail on) a missing secret before touching any file, so a
   // stored-key request never leaves settings pointing at an unconfigured route.
   let credentialsPath: string | undefined
@@ -472,14 +550,15 @@ export async function applyModelSetup(resolved: ResolvedModelSetup): Promise<Mod
     const secret = resolveSecret(resolved)
     credentialsPath = await writeCredential(resolved.dshHome, resolved.apiKeyEnv, secret)
   }
-  const conditional = resolved.kind === 'agent' && (resolved.enableOnly || resolved.defaultIfAbsent)
-  const settingsPath = conditional ? join(resolved.dshHome, 'settings.yaml') : await writeSettings(resolved)
+  const settingsPath = conditional ? join(resolved.dshHome, 'settings.yaml')
+    : resolved.profile !== undefined ? join(resolved.dshHome, 'profiles', resolved.profile, 'cordis.patch.yml')
+      : await writeSettings(resolved)
   let profilePatchPath: string | undefined
   let routeAction: ModelSetupResult['routeAction'] | undefined
   let agentCommandAction: ModelSetupResult['agentCommandAction'] | undefined
   let profileDefaultAction: ModelSetupResult['profileDefaultAction'] | undefined
-  if (resolved.kind === 'agent' && resolved.enableInProfile !== undefined) {
-    const profile = await enableAgentRouteInProfile(resolved)
+  if (profileTarget) {
+    const profile = await writeProfilePatch(resolved, nativeConfigs)
     profilePatchPath = profile.path
     routeAction = profile.routeAction
     agentCommandAction = profile.commandAction
@@ -498,18 +577,20 @@ export async function applyModelSetup(resolved: ResolvedModelSetup): Promise<Mod
 
 export function modelSetupUsage(): string {
   return [
-    'Usage: dsh-model-setup [--dsh-home <absolute-path>] [--provider <route>] [--model <id>]',
+    'Usage: dsh-model-setup [--dsh-home <absolute-path>] [--profile <name>] [--provider <route>] [--model <id>]',
     '                       [--api-key-env <VAR>] [--store-key] [--key-env-var <VAR>]',
     '                       [--base-url <url>] [--api <openai-completions|openai-responses|anthropic-messages>]',
     '                       [--display-name <name>] [--enable-in-profile <profile>]',
     '                       [--enable-only | --default-if-absent] [--agent-command <absolute-path>]',
     '',
-    'Writes the deployment default model into DSH settings.yaml (section agent-default-model),',
-    'and, for a custom gateway route, its provider profile under section llm-pi-ai.',
+    'With --profile, writes the model selection and custom gateway route into that profile\'s',
+    'cordis.patch.yml. Without --profile, writes legacy settings.yaml for one-time import',
+    'into the first started profile. A pending corresponding legacy section blocks --profile setup.',
     'With --store-key it also persists the API key into $DSH_HOME/.credentials.yaml (0600).',
     '',
     `Agent routes (${Object.keys(AGENT_ROUTES).join(', ')}) carry no API key; they are backed by a local coding`,
-    'agent. Pass --enable-in-profile <profile> to enable its bundle row in that profile.',
+    'agent. Pass --enable-in-profile <profile> to enable its bundle row in that profile;',
+    'when combined with --profile, both names must match.',
     '--enable-only leaves settings.yaml untouched and does not select a default.',
     '--default-if-absent selects the route only for the target profile when settings.yaml,',
     'the home patch, and the profile patch contain no explicit default-model selection.',
@@ -522,14 +603,17 @@ export function modelSetupUsage(): string {
   ].join('\n')
 }
 
-export async function runModelSetup(argv = process.argv.slice(2)): Promise<void> {
+export async function runModelSetup(
+  argv = process.argv.slice(2),
+  readConfig: EffectiveProfileConfigReader = readEffectiveProfileConfig,
+): Promise<void> {
   const args = parseModelSetupArgs(argv)
   if (args.help) {
     process.stdout.write(`${modelSetupUsage()}\n`)
     return
   }
   const resolved = resolveModelSetup(args)
-  const result = await applyModelSetup(resolved)
+  const result = await applyModelSetup(resolved, readConfig)
   if (result.settingsUpdated) {
     process.stdout.write(
       `Updated ${result.settingsPath}: agent-default-model provider=${resolved.provider} model=${resolved.model}\n`,

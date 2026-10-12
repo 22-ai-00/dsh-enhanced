@@ -3,7 +3,7 @@ import { constants } from 'node:fs'
 import { link, lstat, mkdir, open, readdir, realpath, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join, resolve } from 'node:path'
-import { prepareManagedHostRuntime, readManagedHostRuntime, type ManagedHostRuntime } from './host-runtime.ts'
+import { isSupportedCandidateVersion, isSupportedReceiptVersion, prepareManagedHostRuntime, readManagedHostRuntime, type ManagedHostRuntime } from './host-runtime.ts'
 import { PurgeError } from './purge.ts'
 
 const BINDING = '.dsh-rsi-host.json'
@@ -27,13 +27,17 @@ export interface HostUpdatePlan {
   candidateBindingSource: string
 }
 
-function supportedVersion(version: string): boolean {
-  const match = /^0\.1\.5(?:-rc\.([0-9]{1,6}))?$/u.exec(version)
-  return match !== null && (match[1] === undefined || Number(match[1]) >= 3)
+function versionOrder(version: string): readonly number[] {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$/u.exec(version)!
+  return [Number(match[1]), Number(match[2]), Number(match[3]), match[4] === undefined ? Number.MAX_SAFE_INTEGER : Number(match[4])]
 }
 
-function versionRank(version: string): number {
-  return version === '0.1.5' ? Number.MAX_SAFE_INTEGER : Number(/^0\.1\.5-rc\.([0-9]{1,6})$/u.exec(version)![1])
+function earlierVersion(left: string, right: string): boolean {
+  const leftOrder = versionOrder(left), rightOrder = versionOrder(right)
+  for (let index = 0; index < leftOrder.length; index++) {
+    if (leftOrder[index] !== rightOrder[index]) return leftOrder[index]! < rightOrder[index]!
+  }
+  return false
 }
 
 function sameRuntime(left: ManagedHostRuntime, right: ManagedHostRuntime): boolean {
@@ -71,7 +75,7 @@ async function readUpdateBinding(home: string): Promise<{ binding: HostBinding; 
     const binding = value as HostBinding
     if (binding.schemaVersion !== 1 || typeof binding.cacheRoot !== 'string' || !isAbsolute(binding.cacheRoot)
       || resolve(binding.cacheRoot) !== binding.cacheRoot || typeof binding.version !== 'string'
-      || !supportedVersion(binding.version) || typeof binding.receiptDigest !== 'string'
+      || !isSupportedReceiptVersion(binding.version) || typeof binding.receiptDigest !== 'string'
       || !/^[a-f0-9]{64}$/u.test(binding.receiptDigest)) throw new PurgeError('私有 Host 绑定文件无效。')
     return { binding, bytes, source, dev: metadata.dev, ino: metadata.ino }
   } finally { await file.close() }
@@ -98,13 +102,15 @@ export async function prepareHostUpdatePlan(input: { dshHome: string; selector?:
   }
   input.signal?.throwIfAborted()
   const selector = input.selector ?? 'latest'
-  if (selector !== 'latest' && !supportedVersion(selector)) throw new PurgeError('请求的 Host 版本不兼容。')
-  if (selector !== 'latest' && versionRank(selector) < versionRank(original.binding.version)) throw new PurgeError('受管 Host 更新不能降级。')
+  if (selector !== 'latest' && !isSupportedReceiptVersion(selector)) throw new PurgeError('请求的 Host 版本不兼容。')
+  if (selector !== 'latest' && earlierVersion(selector, original.binding.version)) throw new PurgeError('受管 Host 更新不能降级。')
+  if (selector !== 'latest' && !isSupportedCandidateVersion(selector)) throw new PurgeError('请求的 Host 版本不兼容。')
   const preparedRuntime = await dependencies.prepare({ root: original.binding.cacheRoot, selector,
     ...(input.signal === undefined ? {} : { signal: input.signal }) })
-  if (!supportedVersion(preparedRuntime.version) || selector !== 'latest' && preparedRuntime.version !== selector
+  if (!isSupportedReceiptVersion(preparedRuntime.version) || selector !== 'latest' && preparedRuntime.version !== selector
     || !/^[a-f0-9]{64}$/u.test(preparedRuntime.receiptDigest)) throw new PurgeError('候选 Host 版本或收据无效。')
-  if (versionRank(preparedRuntime.version) < versionRank(original.binding.version)) throw new PurgeError('受管 Host 更新不能降级。')
+  if (earlierVersion(preparedRuntime.version, original.binding.version)) throw new PurgeError('受管 Host 更新不能降级。')
+  if (!isSupportedCandidateVersion(preparedRuntime.version)) throw new PurgeError('候选 Host 版本或收据无效。')
   const candidateRuntime = await dependencies.read({ root: original.binding.cacheRoot, version: preparedRuntime.version,
     ...(input.signal === undefined ? {} : { signal: input.signal }) })
   if (!sameRuntime(candidateRuntime, preparedRuntime)
@@ -148,7 +154,8 @@ async function readBinding(home: string): Promise<HostBinding | undefined> {
       || process.getuid && metadata.uid !== process.getuid()) throw new PurgeError('私有 Host 绑定文件不安全。')
     const value = JSON.parse(await file.readFile('utf8')) as HostBinding
     if (value.schemaVersion !== 1 || typeof value.cacheRoot !== 'string' || !isAbsolute(value.cacheRoot)
-      || typeof value.version !== 'string' || !/^[a-f0-9]{64}$/u.test(value.receiptDigest)) throw new PurgeError('私有 Host 绑定文件无效。')
+      || typeof value.version !== 'string' || !isSupportedReceiptVersion(value.version)
+      || !/^[a-f0-9]{64}$/u.test(value.receiptDigest)) throw new PurgeError('私有 Host 绑定文件无效。')
     return value
   } finally { await file.close() }
 }
@@ -183,11 +190,14 @@ export async function prepareInstallHostEnvironment(input: {
   if (input.prepareFresh === false) return environment
   if ((await readdir(home)).length) return environment
   await assertOwnedHome(home)
+  if (selector !== 'latest' && !isSupportedCandidateVersion(selector)) throw new PurgeError('请求的 Host 版本不兼容。')
 
   const cache = resolve(input.cacheRoot ?? join(homedir(),'.local','share','dsh-enhanced','hosts'))
   await mkdir(cache,{recursive:true,mode:0o700})
   const cacheRoot = await realpath(cache)
   const runtime: Runtime = await dependencies.prepare({root:cacheRoot,selector})
+  if (!isSupportedCandidateVersion(runtime.version) || selector !== 'latest' && runtime.version !== selector
+    || !/^[a-f0-9]{64}$/u.test(runtime.receiptDigest)) throw new PurgeError('候选 Host 版本或收据无效。')
   const raced = await readBinding(home)
   if (raced) return use(raced)
   if ((await readdir(home)).length) throw new PurgeError('准备 Host 期间 DSH_HOME 已被其它安装修改；未切换 Host。')

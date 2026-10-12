@@ -1,4 +1,4 @@
-import type { ContentBlock, GenerateOptions, Message, ToolSchema } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, GenerateOptions, RequestMessage, ToolSchema } from '@deepseek-ai/dsh-llm'
 
 export const DSH_TOOL_CALL_PROTOCOL = 'dsh-tool-calls/v1'
 
@@ -24,7 +24,7 @@ interface TranscriptBlock {
 }
 
 interface TranscriptMessage {
-  role: Message['role']
+  role: RequestMessage['role']
   content: TranscriptBlock[]
 }
 
@@ -86,13 +86,6 @@ function serializeBlock(block: ContentBlock): TranscriptBlock {
       return { type: 'reasoning-omitted' }
     case 'tool-call':
       return { type: 'tool-call', id: block.id, name: block.name, arguments: block.arguments }
-    case 'tool-result':
-      return {
-        type: 'tool-result',
-        toolCallId: block.toolCallId,
-        ...(block.isError === undefined ? {} : { isError: block.isError }),
-        content: block.content.map(serializeToolResultContent),
-      }
     case 'image':
       throw new Error('TraeX ACP provider currently accepts text-only DSH requests')
     default:
@@ -100,7 +93,13 @@ function serializeBlock(block: ContentBlock): TranscriptBlock {
   }
 }
 
-function serializeMessage(message: Message): TranscriptMessage {
+function serializeMessage(message: RequestMessage): TranscriptMessage {
+  if (message.role === 'tool') return { role: 'tool', content: [{
+    type: 'tool-result', toolCallId: message.toolCallId,
+    ...(message.isError === undefined ? {} : { isError: message.isError }),
+    content: message.content.map(serializeToolResultContent),
+  }] }
+  if (message.role === 'user' && message.source?.kind === 'tool') throw new Error('TraeX ACP provider received a tool result in a user message')
   return { role: message.role, content: message.content.map(serializeBlock) }
 }
 

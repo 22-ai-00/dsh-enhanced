@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { existsSync } from 'node:fs'
@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
+import { nativeInstallerHost, nativeWebSetupPackage } from './native-installer-host-fixture.ts'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const localInstaller = join(repoRoot, 'scripts', 'install', 'install-local.sh')
@@ -40,7 +41,7 @@ exec env PATH="$REAL_PATH" pnpm "$@"
     await writeExecutable(join(fakeBin, 'dsh-rsi'), '#!/bin/bash\nif [[ "${1:-}" == version ]]; then printf "0.1.48\\n"; fi\n')
     await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
 set -euo pipefail
-if [[ "\${1:-}" == '--version' ]]; then printf '0.1.5-rc.3\\n'; exit 0; fi
+if [[ "\${1:-}" == '--version' ]]; then printf '0.2.0-rc.2\\n'; exit 0; fi
 if [[ "$*" == *'--no-open --port 0'* ]]; then
   printf 'dsh web: http://127.0.0.1:43210\\n'
   exit 0
@@ -89,7 +90,7 @@ PROFILE
 
     const installerArguments = [
       localInstaller,
-      '--dsh-version', '0.1.5-rc.3',
+      '--dsh-version', '0.2.0-rc.2',
       '--scenario', 'core',
       '--lark', 'skip',
       '--no-service',
@@ -128,20 +129,13 @@ PROFILE
     const root = await mkdtemp(join(tmpdir(), 'dsh-enhanced-repeat-installer-'))
     temporaryRoots.push(root)
     const dshHome = join(root, 'dsh-home')
-    const fakeHost = join(root, 'fake-host')
     const fakeBin = join(root, 'bin')
-    const dshPath = join(fakeHost, 'bin', 'dsh')
-    await mkdir(join(fakeHost, 'node_modules', '@deepseek-ai', 'dsh-app-boot'), { recursive: true })
-    await mkdir(dirname(dshPath), { recursive: true })
+    const profileDirectory = join(dshHome, 'profiles', 'web')
     await mkdir(fakeBin, { recursive: true })
-    await writeFile(join(fakeHost, 'package.json'), JSON.stringify({
-      name: '@deepseek-ai/dsh', version: '0.1.5-rc.3', type: 'module',
-    }), 'utf8')
-    await writeFile(join(fakeHost, 'node_modules', '@deepseek-ai', 'dsh-app-boot', 'package.json'), JSON.stringify({
-      name: '@deepseek-ai/dsh-app-boot', type: 'module', exports: './index.js',
-    }), 'utf8')
-    await writeFile(join(fakeHost, 'node_modules', '@deepseek-ai', 'dsh-app-boot', 'index.js'),
-      'export async function healProfilesModuleFallback() {}\n', 'utf8')
+    await nativeWebSetupPackage(profileDirectory, 'export async function runWebOwnerSetup() {}\n')
+    await mkdir(join(profileDirectory, 'node_modules', '.bin'), { recursive: true })
+    await symlink(join(profileDirectory, 'node_modules', '@dsh-enhanced', 'assistant-web-owner', 'bin', 'dsh-web-owner-setup.js'),
+      join(profileDirectory, 'node_modules', '.bin', 'dsh-web-owner-setup'))
     await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
 set -euo pipefail
 if [[ "\${1:-}" == '--version' ]]; then printf '11.7.0\\n'; exit 0; fi
@@ -150,9 +144,9 @@ exec env PATH="$REAL_PATH" pnpm "$@"
 `)
     await writeExecutable(join(fakeBin, 'npm'), '#!/bin/bash\nexit 0\n')
     await writeExecutable(join(fakeBin, 'dsh-rsi'), '#!/bin/bash\nif [[ "${1:-}" == version ]]; then printf "0.1.48\\n"; fi\n')
-    await writeExecutable(dshPath, `#!/bin/bash
+    const dshPath = await nativeInstallerHost(root, `#!/bin/bash
 set -euo pipefail
-if [[ "\${1:-}" == '--version' ]]; then printf '0.1.5-rc.3\\n'; exit 0; fi
+if [[ "\${1:-}" == '--version' ]]; then printf '0.2.0-rc.2\\n'; exit 0; fi
 profile='web'
 for ((index = 1; index <= $#; index += 1)); do
   if [[ "\${!index}" == '--profile' ]]; then next=$((index + 1)); profile="\${!next}"; fi
@@ -161,8 +155,8 @@ profile_dir="$DSH_HOME/profiles/$profile"
 if [[ " $* " == *' plugin '* && " $* " == *' add '* ]]; then
   mkdir -p "$profile_dir/node_modules/.bin"
   node - "$profile_dir/package.json" "$@" <<'NODE'
-const { readFileSync, writeFileSync } = require('node:fs')
-const { basename } = require('node:path')
+const { existsSync, mkdirSync, readFileSync, writeFileSync } = require('node:fs')
+const { basename, dirname, join } = require('node:path')
 const path = process.argv[2]
 const args = process.argv.slice(3)
 const add = args.indexOf('add')
@@ -175,12 +169,18 @@ for (const target of targets) {
   const name = '@dsh-enhanced/' + basename(target)
   manifest.dependencies[name] = 'file:' + target
   if (!manifest.dsh.profile.bundles.includes(name)) manifest.dsh.profile.bundles.push(name)
+  const packageRoot = join(dirname(path), 'node_modules', name)
+  mkdirSync(packageRoot, { recursive: true })
+  if (!existsSync(join(packageRoot, 'package.json'))) {
+    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
+      name, version: '0.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } },
+    }))
+  }
+  if (!existsSync(join(packageRoot, 'cordis.patch.yml'))) writeFileSync(join(packageRoot, 'cordis.patch.yml'), '[]\\n')
 }
 writeFileSync(path, JSON.stringify(manifest, null, 2) + '\\n')
 NODE
   if [[ ! -f "$profile_dir/cordis.patch.yml" ]]; then printf '[]\\n' > "$profile_dir/cordis.patch.yml"; fi
-  printf '#!/bin/bash\\nexit 0\\n' > "$profile_dir/node_modules/.bin/dsh-web-owner-setup"
-  chmod 755 "$profile_dir/node_modules/.bin/dsh-web-owner-setup"
   exit 0
 fi
 if [[ " $* " == *' --dump-config '* ]]; then cat "$profile_dir/cordis.patch.yml"; exit 0; fi
@@ -189,18 +189,18 @@ if [[ " $* " == *' --host 127.0.0.1 --no-open --port 0 '* ]]; then
 fi
 exit 2
 `)
+    await symlink(dshPath, join(fakeBin, 'dsh'))
 
     const environment = {
-      PATH: `${join(fakeHost, 'bin')}:${fakeBin}:${pathWithoutTraex}`,
+      PATH: `${fakeBin}:${pathWithoutTraex}`,
       DSH_HOME: dshHome,
       DSH_ENHANCED_WEB_PORT: '43192',
       REAL_PATH: pathWithoutTraex,
     }
-    const arguments_ = [localInstaller, '--dsh-version', '0.1.5-rc.3', '--scenario', 'web', '--lark', 'skip', '--no-service']
+    const arguments_ = [localInstaller, '--dsh-version', '0.2.0-rc.2', '--scenario', 'web', '--lark', 'skip', '--no-service']
     const first = spawnSync('/bin/bash', arguments_, { cwd: repoRoot, encoding: 'utf8', env: environment })
     expect(first.status, first.stderr).toBe(0)
 
-    const profileDirectory = join(dshHome, 'profiles', 'web')
     const patchPath = join(profileDirectory, 'cordis.patch.yml')
     const settingsPath = join(dshHome, 'settings.yaml')
     const goalPath = join(dshHome, 'assistant-goals', 'web.sqlite')

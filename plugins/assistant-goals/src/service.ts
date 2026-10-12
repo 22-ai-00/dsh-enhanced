@@ -404,7 +404,7 @@ export class AssistantGoalsService extends Service {
           this.#eventWait?.reconcile()
         } catch { this.#observationFailures++ }
       })
-      runtime.on('agent/session-start', ({ agent }) => {
+      runtime.on('agent/created', ({ agent }) => {
         try { this.#observe(agent, false) } catch { this.#observationFailures++ }
       })
       runtime.inject(['systemPrompt'], prompt => {

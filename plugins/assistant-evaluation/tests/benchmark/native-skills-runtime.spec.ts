@@ -1,11 +1,17 @@
 import { Context } from '@deepseek-ai/cordis'
-import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, ToolCallId, type ContextFormed, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, expect, test } from 'vitest'
 import { createNativeSkillGoalRuntime, type NativeSkillGoalOptions } from '../../src/benchmark/native-skills-runtime.js'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'runtime-context': { kind: 'runtime-context' } & ContextFormed
+  }
+}
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
@@ -44,9 +50,9 @@ class Adapter extends LlmAdapter {
     const agent = this.ctx.agents.currentInitiator()!
     const native = (this.ctx.get('goals' as never) as unknown as { get(agent: unknown): { roundsStarted: number; phase: string } | undefined }).get(agent)
     if (this.sourcePlanning && native && native.roundsStarted > 0) {
-      const source = options.messages.findLast(message => message.source.kind === 'plugin'
-        && message.source.plugin === '@deepseek-ai/dsh-system-prompt' && message.source.form === 'snapshot')?.source
-      const context = source?.kind === 'plugin' && source.form === 'snapshot'
+      const source = options.messages.findLast(message => message.source?.kind === 'runtime-context'
+        && message.source.form === 'snapshot')?.source
+      const context = source?.kind === 'runtime-context' && source.form === 'snapshot'
         ? source.sections.find(section => section.name === 'assistant-goals:current-context')?.text : undefined
       expect(context).toBeDefined()
       const json = context!.split('<business-goal-data>\n')[1]!.split('\n</business-goal-data>')[0]!

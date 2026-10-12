@@ -6,7 +6,7 @@ type Handler = (payload: any, next: () => Promise<any>) => Promise<any>
 const goalSource = (overrides: Record<string, unknown> = {}) => ({
   kind: 'goal', goalId: 'native-goal', revision: 2, round: 1, ...overrides,
 })
-const runtimeSource = { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot' }
+const runtimeSource = { kind: 'runtime-context', form: 'snapshot', sections: [] }
 
 function fixture() {
   const handlers = new Map<string, Handler>()

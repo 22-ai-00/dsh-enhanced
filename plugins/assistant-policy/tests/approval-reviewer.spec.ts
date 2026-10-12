@@ -40,12 +40,13 @@ describe('durable approval reviewer', () => {
     original.append('approval/policy', { policy: 'ask' })
     expect(getApprovalReviewer(original)).toBe('user')
     appendSandboxMode(original, 'workspace-write')
-    expect(getApprovalReviewer(original)).toBe('auto-review')
+    expect(getApprovalReviewer(original)).toBe('user')
+    expect(approvalReviewerOf(original.snapshotEvents(), 3)).toBe('auto-review')
 
     const replayed = session(structuredClone(original.snapshotEvents()))
     expect(foldApprovalReviewer(replayed.snapshotEvents())).toBe('auto-review')
-    expect(approvalReviewerOf(replayed.snapshotEvents())).toBe('auto-review')
-    expect(getApprovalReviewer(replayed)).toBe('auto-review')
+    expect(approvalReviewerOf(replayed.snapshotEvents(), 4)).toBe('user')
+    expect(getApprovalReviewer(replayed)).toBe('user')
   })
 
   test('validates values and does not append the current effective value', () => {
@@ -108,7 +109,7 @@ describe('durable approval reviewer', () => {
 
   test('uses the latest official three-level preset as reviewer intent without a custom event', () => {
     const current = session()
-    appendSandboxMode(current, 'workspace-write')
+    appendSandboxMode(current, 'danger-full-access')
     current.append('approval/policy', { policy: 'ask' })
 
     appendPermissionPreset(current, 'auto')
@@ -127,7 +128,7 @@ describe('durable approval reviewer', () => {
 
   test('folds official preset and legacy reviewer events in durable log order', () => {
     const current = session()
-    appendSandboxMode(current, 'workspace-write')
+    appendSandboxMode(current, 'danger-full-access')
     current.append('approval/policy', { policy: 'ask' })
 
     setApprovalReviewer(current, 'auto-review')
@@ -135,7 +136,7 @@ describe('durable approval reviewer', () => {
     expect(getApprovalReviewer(current)).toBe('user')
 
     setApprovalReviewer(current, 'auto-review')
-    expect(getApprovalReviewer(current)).toBe('auto-review')
+    expect(getApprovalReviewer(current)).toBe('user')
 
     appendPermissionPreset(current, 'auto')
     setApprovalReviewer(current, 'user')
@@ -149,10 +150,8 @@ describe('durable approval reviewer', () => {
     expect(getApprovalReviewer(auto)).toBe('user')
     auto.append('approval/policy', { policy: 'ask' })
     appendSandboxMode(auto, 'danger-full-access')
-    // Current format 3 defines Auto as workspace-write + ask. Changing only
-    // sandbox mode invalidates a stale selector and must require human review.
-    expect(getApprovalReviewer(auto)).toBe('user')
-    // The fixed full-access Auto bundle belongs only to the verified v4 ABI.
+    expect(getApprovalReviewer(auto)).toBe('auto-review')
+    expect(approvalReviewerOf(auto.snapshotEvents(), 3)).toBe('user')
     expect(approvalReviewerOf(auto.snapshotEvents(), 4)).toBe('auto-review')
     expect(approvalReviewerOf(auto.snapshotEvents(), 5)).toBe('user')
     // approval "never" with only an Auto intent is the host's delegated-child
@@ -164,7 +163,8 @@ describe('durable approval reviewer', () => {
     appendPermissionPreset(legacyAuto, 'auto')
     legacyAuto.append('approval/policy', { policy: 'ask' })
     appendSandboxMode(legacyAuto, 'workspace-write')
-    expect(getApprovalReviewer(legacyAuto)).toBe('auto-review')
+    expect(getApprovalReviewer(legacyAuto)).toBe('user')
+    expect(approvalReviewerOf(legacyAuto.snapshotEvents(), 3)).toBe('auto-review')
     expect(approvalReviewerOf(legacyAuto.snapshotEvents(), 4)).toBe('user')
 
     const full = session()

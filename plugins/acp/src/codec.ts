@@ -39,7 +39,6 @@ function toolContent(block: DshContentBlock): ToolCallContent | undefined {
     case 'image':
       return { type: 'content', content: imageFallback(block) }
     case 'tool-call':
-    case 'tool-result':
       return undefined
     default:
       return undefined
@@ -140,7 +139,7 @@ export function createSessionEventMapper(
           }]
 
         case 'tool/result': {
-          const result = event.data.message.content[0]
+          const result = event.data.message
           const content = result.content.flatMap((block) => {
             const mapped = toolContent(block)
             return mapped === undefined ? [] : [mapped]

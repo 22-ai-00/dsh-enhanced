@@ -48,19 +48,19 @@ dsh --profile web --dump-config
 
 ## 三档即时审批
 
-当前交付基线是官方 `latest` 的 DSH `0.1.5-rc.3`。Policy 已验证 `0.1.7-rc.2` 的动态 Auto 注册与 format v4 冷读适配，但 meta-bundle 的静态 Auto 配置不能用于该版本；整套插件尚未宣称支持 `0.1.7-rc.2`。
+当前适配 DSH `0.2.0-rc.2`：`auto` 是上游保留档位，由 Policy 在权限服务就绪期间通过 `permissionPresets.registerAuto()` 动态注册；meta-bundle 不配置同名静态项。定向测试覆盖注册、服务换代、撤销及 Session format v4；完整部署仍需独立验收。
 
 生产三档由标准 `permission/preset`、`sandbox/mode` 与 `approval/policy` 共同决定：官方 id `workspace-write` / `auto` / `danger-full-access` 分别映射 reviewer `user` / `auto-review` / `none`，而且日志中更晚的官方选择会覆盖更早的旧 reviewer 事件。`assistant-policy/approval-reviewer` 仍保留为旧 session、单 workspace preset 或第三方动态 id 的兼容事实；无论意图来自哪一种事件，执行状态仍逐项核验：
 
 - **请求批准**：`sandbox/mode: workspace-write` + `approval/policy: ask` + reviewer `user`。低风险精确 allowlist 直接继续，其余动作交给人工。
-- **帮我批准**：当前 `0.1.5-rc.3` profile 使用 `sandbox/mode: workspace-write` + `approval/policy: ask` + reviewer `auto-review`；`0.1.7-rc.2` 的保留 Auto bundle 则使用 `danger-full-access + ask`，由 Policy 的实时注册控制；只有 format v4 且有效 preset 为 `auto` 才识别该组合。format v3 中残留的 `auto` 选择不能授权 full-access 自动审核，未知会话格式也不会启用自动审核。内置只读网络工具、workspace 内文件读写、非凭据本地文件只读、单个命名 Skill 的加载、普通前台 Bash（含测试、构建、非敏感管道/重定向和依赖安装）以及专用 `ask_user_question` 直接继续，不再消耗 reviewer 或打断用户；未知插件工具仍进入隔离 reviewer。凭据、后台进程、破坏性命令、提权、workspace 外写入、任意 `run_code` / PowerShell，以及显式原生 sandbox escalation 仍交人工。
+- **帮我批准**：DSH `0.2.0-rc.2` 的保留 Auto bundle 使用 `danger-full-access + ask`，由 Policy 的实时注册控制；只有 format v4 且有效 preset 为 `auto` 才识别该组合。format v3 中残留的 `auto` 选择不能授权 full-access 自动审核，未知会话格式也不会启用自动审核。内置只读网络工具、workspace 内文件读写、非凭据本地文件只读、单个命名 Skill 的加载、普通前台 Bash（含测试、构建、非敏感管道/重定向和依赖安装）以及专用 `ask_user_question` 直接继续，不再消耗 reviewer 或打断用户；未知插件工具仍进入隔离 reviewer。凭据、后台进程、破坏性命令、提权、workspace 外写入、任意 `run_code` / PowerShell，以及显式原生 sandbox escalation 仍交人工。
 - **完全访问权限**：只有显式且同时生效的 `sandbox/mode: danger-full-access` + `approval/policy: never` + reviewer `none` 才会绕过参数级即时风险门。单独的 `never`、缺少 sandbox 事件、事件畸形或三者暂时不一致都会失败关闭，绝不会把 headless 的“不询问”误解成 full；此时敏感工具直接返回稳定的 `[approval-disabled]` 诊断，并明确说明没有向用户展示审批，不再制造 `the user rejected tool` 的错误归因。`tools.guard()` 的显式 deny、紧急停止、身份和预算检查仍然单调生效；若希望未匹配工具也可执行，需要显式配置 `toolDefaultEffect: allow`。
 
 包根导出 `approvalReviewerOf(events)`、`getApprovalReviewer(session)` 和兼容 setter `setApprovalReviewer(session, reviewer)`；setter 只接受 `user | auto-review | none`。auto 与 full 都要求 preset 意图、显式 approval 和显式 sandbox 完整一致；缺项、畸形事件或切换中的中间状态只会折回 `user`。因此 Web 的 full→auto、ask→auto，以及 Delivery auto→Web ask 都由最新官方 preset 直接串行折叠，不再依赖另写 custom reviewer。
 
 canonical `danger-full-access` 现在直接折叠为 reviewer `none`，不需要迁移写入。仅对旧版/第三方的非 canonical full preset，插件仍在 live session 扫描、`session/created` 和工具执行屏障做严格兼容迁移；它要求显式 full bundle、sandbox 与 approval 完全一致且没有 reviewer，失败则收窄并拒绝本次工具。
 
-`assistant-policy/approval-reviewer` 是 required session event。当前 DSH 尚无公开事件注册 API，而且独立安装/软链接插件时，插件和 DSH Host 可能各自加载一份 `@deepseek-ai/dsh-session`。本包会同步校验当前 `0.1.5-rc.3` 的 format v3（也识别 `0.1.7-rc.2` 的 v4），并在插件本地目录与真实 Host reader 使用的目录不同时做精确、进程生命周期内单调注册；npm/pnpm bin 会先解析软链接，不依赖固定安装路径。注册不能在插件卸载或 HMR 时删除，否则 persistence 的关机 drain 和已有 session 冷恢复可能再次把事件判为 unknown。若无法从真实入口解析 Host copy，或已解析到的 copy 在格式、导出形态、同步加载能力上不兼容，插件都会 fail fast，拒绝仅修改本地目录并要求同步更新兼容层。
+`assistant-policy/approval-reviewer` 是 required session event。当前 DSH 尚无公开事件注册 API，而且独立安装/软链接插件时，插件和 DSH Host 可能各自加载一份 `@deepseek-ai/dsh-session`。本包会同步校验当前 `0.2.0-rc.2` 的 format v4（仍识别旧 v3），并在插件本地目录与真实 Host reader 使用的目录不同时做精确、进程生命周期内单调注册；npm/pnpm bin 会先解析软链接，不依赖固定安装路径。注册不能在插件卸载或 HMR 时删除，否则 persistence 的关机 drain 和已有 session 冷恢复可能再次把事件判为 unknown。若无法从真实入口解析 Host copy，或已解析到的 copy 在格式、导出形态、同步加载能力上不兼容，插件都会 fail fast，拒绝仅修改本地目录并要求同步更新兼容层。
 
 参数级风险门不是宽泛的字符串前缀判断，也不声称实现了完整 shell parser：
 
@@ -140,9 +140,9 @@ DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件
 - 文件系统：创建一个 SQLite 数据库及 WAL/SHM 辅助文件；新目录权限 `0700`，主数据库 `0600`。数据库使用 WAL、`busy_timeout`、外键、FULL synchronous 和前向 schema 版本。
 - 网络：插件不直接打开 socket；启用隔离自动 reviewer 时会调用宿主 `dsh-llm`，所选 provider route 可能使用网络。provider 的认证与传输仍由宿主拥有，本插件不直接读取其凭据。
 - 子进程：无。
-- 凭据：运行时的 Policy service 不读取或保存凭据值。审计按敏感 key/value、shell `command`、授权头、token、password、path/cwd 做脱敏，资源 id 仅保存 SHA-256。自动 reviewer 输入只要需要任何 secret 脱敏就失去自动放行资格并转人工。包另附带两个安装期 CLI（`dsh-permission-setup`、`dsh-model-setup`），仅供安装器/部署者手动调用，不在 Cordis 运行时加载：`dsh-permission-setup` 只原子改写 `settings.yaml` 的 `permission.defaultPreset`；`dsh-model-setup` 原子写入 `agent-default-model`（自定义网关另写 `llm-pi-ai.providers.<route>`），并在显式 `--store-key` 时把仅从环境变量读取的 API Key 原子写入 `$DSH_HOME/.credentials.yaml`（`0600`，目录 `0700`），密钥绝不作为命令行参数、缺失时 fail-closed。`dsh-model-setup` 还支持 agent route（如 `traex-agent`）：这类 route 不涉及 API Key，`--enable-in-profile <profile>` 只在该 profile 的 `cordis.patch.yml` 原子改写对应 provider 行的 `enabled`（保留其它行/注释/`!!js`），非 YAML 序列的 patch 会 fail-closed 而非被覆盖。
+- 凭据：运行时的 Policy service 不读取或保存凭据值。审计按敏感 key/value、shell `command`、授权头、token、password、path/cwd 做脱敏，资源 id 仅保存 SHA-256。自动 reviewer 输入只要需要任何 secret 脱敏就失去自动放行资格并转人工。包另附带两个安装期 CLI（`dsh-permission-setup`、`dsh-model-setup`），仅供安装器/部署者手动调用，不在 Cordis 运行时加载。安装器始终传 `--profile <name>`：两个 CLI 先校验所选 DSH Host 并读取目标 profile 的原生 `--dump-config`，再原子改写其 `cordis.patch.yml`，分别写入 `permission.defaultPreset` 与 `agent-default-model`（自定义网关还写入 `llm-pi-ai.providers.<route>`），保留原生有效整段配置中的其它预设、网关、注释和 `!!js`。读取或组合失败时拒绝写入。若省略 `--profile`，CLI 仍写旧版全局 `settings.yaml`；DSH 0.2 在下次启动时把它一次性导入第一个启动的 profile，不适合多 profile 设置。目标配置对应区段尚留在 `settings.yaml` 时，显式 `--profile` 拒绝写入，须先把旧设置迁移至目标 profile，避免首启覆盖。显式 `--store-key` 时 API Key 仅从环境变量读取，原子写入 `$DSH_HOME/.credentials.yaml`（`0600`，目录 `0700`），密钥绝不作为命令行参数、缺失时 fail-closed。agent route（如 `traex-agent`）不涉及 API Key；`--enable-in-profile` 与 `--profile` 同时使用时必须同名。
 
-自动发现本机 agent 时可调用 `dsh-model-setup --provider traex-agent --enable-in-profile web --enable-only [--agent-command /absolute/path/to/traex]`：仅启用目标 profile 的 route，完全不读取或写入 `settings.yaml`。若希望在没有显式选择时把它设为该 profile 的默认模型，改用 `--default-if-absent`；CLI 用 YAML AST 检查 `settings.yaml`、home patch 和目标 profile patch，已有 `agent-default-model` 就保留，三处都没有才在目标 profile patch 添加默认模型行。DSH 的 settings 用户层优先于插件配置，因此已有全局 settings 默认值不会被 profile 行覆盖。两个模式互斥且仅适用于带 `--enable-in-profile` 的 agent route；启用 route 时在目标行同时写 `disabled: false` 和 `config.enabled: true`，保留 profile 的已有配置；没有 profile 配置时继承 home patch 最后生效的整段配置，并保留 `!!js` 表达式。`--agent-command` 必须是绝对路径，只填缺失的 `config.command`，保留已有 `command` 和 `cwd`。不带新模式的显式 model setup 保持原有全局默认模型写入行为。
+自动发现本机 agent 时可调用 `dsh-model-setup --profile web --provider traex-agent --enable-in-profile web --enable-only [--agent-command /absolute/path/to/traex]`：仅启用目标 profile 的 route，不改模型选择。若希望在没有显式选择时把它设为该 profile 的默认模型，改用 `--default-if-absent`；CLI 用 YAML AST 检查待导入的 `settings.yaml`、home patch 和目标 profile patch，已有 `agent-default-model` 就保留，三处都没有才在目标 profile patch 添加默认模型行。两个模式互斥且仅适用于带 `--enable-in-profile` 的 agent route；启用 route 时在目标行同时写 `disabled: false` 和 `config.enabled: true`，保留 profile 的已有配置；没有 profile 配置时继承 home patch 最后生效的整段配置，并保留 `!!js` 表达式。`--agent-command` 必须是绝对路径，只填缺失的 `config.command`，保留已有 `command` 和 `cwd`。显式 model setup 传 `--profile` 时只设置目标 profile；不传时保留旧版 `settings.yaml` 行为。
 - 浏览器：无。
 - 安装脚本：无 npm 生命周期脚本；上述 CLI 仅在被显式调用时运行。
 
@@ -150,7 +150,7 @@ DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件
 
 ## 兼容性
 
-已针对 DeepSeek Harness `0.1.5-rc.3` 验证。详见仓库[兼容性基线](../../docs/compatibility.md)。
+本包已在安装的 DeepSeek Harness `0.2.0-rc.2` 上通过类型检查及包测试；完整宿主安装和外部模型/渠道仍按仓库[兼容性基线](../../docs/compatibility.md)验收。
 
 ### Finite action broker preauthorization
 

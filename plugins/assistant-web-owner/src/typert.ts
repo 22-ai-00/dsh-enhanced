@@ -21,12 +21,12 @@ export const TYPERT = {
     invocation: { kind: 'direct' },
     parameters: [{
       name: 'sessionId', wire: 'sessionId', source: 'json',
-      codec: { mode: 'strict', typeSymbol: '@deepseek-ai/dsh-session/types#SessionId', schema: sessionId },
+      codec: { mode: 'strict', typeSymbol: '@deepseek-ai/dsh-session/types#SessionId', create: () => sessionId },
     }],
     result: {
       mode: 'strict',
       typeSymbol: '@dsh-enhanced/assistant-web-owner#DeliveryNotice[]',
-      schema: z.array(notice).readonly(),
+      create: () => z.array(notice).readonly(),
     },
     sourceLocation: { file: 'plugins/assistant-web-owner/src/typert.ts', line: 15, column: 3 },
   }],

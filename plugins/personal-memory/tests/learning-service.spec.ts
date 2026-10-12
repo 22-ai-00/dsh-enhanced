@@ -156,7 +156,7 @@ test('automatic memory never enters the permanent session-start fallback', async
   const f = await fixture({ prompt: false })
   f.service.adoptReviewedLearning({ request: f.request })
   expect(f.service.search(f.agent, { query: 'Atlas' })).toHaveLength(1)
-  agentEvents(f.ctx, f.agent).emit('agent/session-start', { source: 'startup' })
+  await agentEvents(f.ctx, f.agent).serial('agent/created', { source: 'startup' })
   expect(f.injections).toEqual([])
 })
 

@@ -3,8 +3,9 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import AgentPresets, { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
+import AgentPresets, { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import * as ToolSkill from '@deepseek-ai/dsh-tool-skill'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
@@ -22,6 +23,7 @@ import {
   LlmAdapter,
   ReasoningEffortId,
   type GenerateOptions,
+  type ContextFormed,
   type LlmModelInfo,
   type LlmProviderInfo,
   type LlmResolvedModelInfo,
@@ -29,6 +31,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import {
   KNOWN_SESSION_EVENT_TYPES,
+  SESSION_FORMAT_VERSION,
   SessionLogOffset,
   SessionSeq,
   type Session,
@@ -51,13 +54,20 @@ import AssistantGoalsPlugin, { AssistantGoalsService } from '../../assistant-goa
 import { PersonalMemoryService } from '../../personal-memory/lib/index.js'
 import { MemoryStore } from '../../personal-memory/lib/store.js'
 import { createHash } from 'node:crypto'
-import { access, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, onTestFinished, test, vi } from 'vitest'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'assistant-delivery-test': { kind: 'assistant-delivery-test'; form: 'notice'; summary: string }
+    'runtime-context': { kind: 'runtime-context' } & ContextFormed
+  }
+}
 import { deliveryProgressFromSessionEvent, modelPickerOperationId } from '../src/agent-runtime.ts'
 import { AssistantDeliveryService } from '../src/service.ts'
 import type { DeliveryGoalWakeInput, OwnerGoalOutcomeFeedbackLocator, OwnerGoalOutcomeFeedbackProof } from '../src/goal-wake-types.ts'
@@ -313,6 +323,12 @@ const canonicalPermissionPresets = {
   },
 } as const satisfies Record<string, PresetSpec>
 
+const nativeAutoPermissionPresets = {
+  'workspace-write': { sandbox: 'workspace-write', approval: 'ask', name: 'Ask' },
+  'danger-full-access': { sandbox: 'danger-full-access', approval: 'never', name: 'Full' },
+  auto: { sandbox: 'danger-full-access', approval: 'ask', name: 'Auto' },
+} as const satisfies Record<string, PresetSpec>
+
 function lastPermissionPreset(events: readonly SessionEvent[]): string | undefined {
   return events.findLast(event => event.type === 'permission/preset')?.data.preset
 }
@@ -468,7 +484,7 @@ async function runtimeHarness(
   defaultRoute = { provider: 'mock', model: 'delivery-model' },
   channelFormats: readonly OutboundFormat[] = ['plain', 'model-picker', 'permission-picker'],
   workspace = root,
-  presetRoot?: string,
+  useNativePresetRegistry = false,
   agentPreset = 'primary',
   provideAgentPresets = true,
   presetToolMode: 'probe' | 'empty' = 'probe',
@@ -491,7 +507,7 @@ async function runtimeHarness(
     resolve: () => { throw new Error('unexpected file receipt in text-only delivery fixture') },
     bindPrompt: () => ({ commit() {}, [Symbol.dispose]() {} }),
   } as never)
-  if (presetRoot === undefined && provideAgentPresets) {
+  if (!useNativePresetRegistry && provideAgentPresets) {
     const presetResolve = vi.fn(async (id?: string) => ({ id: id ?? agentPreset }))
     const presetMount = vi.fn(async (agentCtx: Agent['ctx'], id?: string) => {
       if (presetToolMode === 'empty') {
@@ -512,14 +528,12 @@ async function runtimeHarness(
       return { id: id ?? agentPreset }
     })
     ctx.provide('agentPresets' as never, { resolve: presetResolve, mount: presetMount } as never)
-  } else if (presetRoot !== undefined) {
+  } else if (useNativePresetRegistry) {
     ctx.loader.builtins['assistant-delivery-test-tools'] = presetToolsPlugin
-    await ctx.plugin(AgentPresets, {
-      default: agentPreset,
-      roots: [{ path: presetRoot, trust: 'system' }],
-      includeUserRoot: false,
-      includeShippedRoot: false,
-    })
+    await ctx.plugin(AgentPresets, { default: agentPreset })
+    await ctx.agentPresets.register({ id: agentPreset, plugins: [
+      { name: 'cordis:assistant-delivery-test-tools' },
+    ] })
   }
   ctx.on('session/flush', session => {
     if (sessionPersistence === undefined && fallbackWriters.has(String(session.id))) return
@@ -742,11 +756,10 @@ async function drive(service: AssistantDeliveryService): Promise<void> {
 // deliberate in both places.
 const USER_CANCELLED_NOTICE_MARKER = 'stopped deliberately by the human'
 
-/** Join every dsh-system-prompt snapshot user message visible in one request. */
+/** Join every native runtime-context snapshot user message visible in one request. */
 function systemPromptSnapshotTexts(request: GenerateOptions): string[] {
   return request.messages
-    .filter(message => message.source?.kind === 'plugin'
-      && message.source.plugin === '@deepseek-ai/dsh-system-prompt')
+    .filter(message => message.role === 'user' && message.source?.kind === 'runtime-context')
     .map(message => message.content.flatMap(block => (block.type === 'text' ? [block.text] : [])).join('\n'))
 }
 
@@ -764,7 +777,7 @@ function messageText(message: GenerateOptions['messages'][number]): string {
 function lastHumanTextIndex(request: GenerateOptions, text: string): number {
   for (let index = request.messages.length - 1; index >= 0; index -= 1) {
     const message = request.messages[index]!
-    if (message.role === 'user' && message.source.kind === 'delivery' && messageText(message).includes(text)) return index
+    if (message.role === 'user' && message.source?.kind === 'delivery' && messageText(message).includes(text)) return index
   }
   return -1
 }
@@ -773,8 +786,7 @@ function lastHumanTextIndex(request: GenerateOptions, text: string): number {
 function userCancelNoticeIndices(request: GenerateOptions): number[] {
   const indices: number[] = []
   request.messages.forEach((message, index) => {
-    if (message.source?.kind === 'plugin'
-      && message.source.plugin === '@deepseek-ai/dsh-system-prompt'
+    if (message.role === 'user' && message.source?.kind === 'runtime-context'
       && messageText(message).includes(USER_CANCELLED_NOTICE_MARKER)) indices.push(index)
   })
   return indices
@@ -1162,7 +1174,7 @@ function expectSafeAskPermission(
   expect(permissionPresets.currentEvents(events)).toBe('guarded-dynamic-id')
   expect(lastSandboxMode(events)).toBe('workspace-write')
   expect(lastApprovalPolicy(events) ?? 'ask').toBe('ask')
-  expect(approvalReviewerOf(events)).toBe('user')
+  expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('user')
 }
 
 function expectSafeFullPermission(
@@ -1714,7 +1726,7 @@ describe('real native Delivery Agent runtime', () => {
     await first.ctx.fiber.restart()
     const persisted = saved.get(sessionId)!
     const source = kind === 'non-goal'
-      ? { kind: 'plugin' as const, plugin: '@dsh-enhanced/test', form: 'notice' as const, summary: 'retained stale inbox item' }
+      ? { kind: 'assistant-delivery-test' as const, form: 'notice' as const, summary: 'retained stale inbox item' }
       : kind === 'user'
         ? { kind: 'user' as const }
         : { kind: 'goal' as const, goalId: JSON.parse(first.readWake(wake.id).intent_json).native.goalId, revision: 999, round: 999 }
@@ -1784,8 +1796,7 @@ describe('real native Delivery Agent runtime', () => {
 
     expect(f.llm.requests).toHaveLength(2)
     expect(f.llm.requests[1]?.messages.at(-1)?.source).toEqual({
-      kind: 'plugin',
-      plugin: '@dsh-enhanced/assistant-delivery',
+      kind: 'assistant-delivery',
       form: 'notice',
       summary: 'Automatic answer completion attempt 1',
     })
@@ -1829,8 +1840,7 @@ describe('real native Delivery Agent runtime', () => {
 
     f.ctx.on('agent/inbox/inserted', event => {
       const source = event.message.source
-      if (maintenanceActive && source.kind === 'plugin'
-        && source.plugin === '@dsh-enhanced/assistant-delivery') {
+      if (maintenanceActive && source.kind === 'assistant-delivery') {
         automaticInsertedDuringMaintenance = true
       }
     })
@@ -1843,8 +1853,7 @@ describe('real native Delivery Agent runtime', () => {
         guard = vi.spyOn(event.agent.ctx.tools, 'guard')
         return
       }
-      if (maintenanceActive && source.kind === 'plugin'
-        && source.plugin === '@dsh-enhanced/assistant-delivery') {
+      if (maintenanceActive && source.kind === 'assistant-delivery') {
         automaticClaimedDuringMaintenance = true
       }
     })
@@ -2192,7 +2201,7 @@ describe('real native Delivery Agent runtime', () => {
       content: [{ type: 'text', text: '下一条 Host 测试消息需要调用 preset_probe。' }],
       // Exercise synchronous barrier cleanup for trusted Host work. Native Web user
       // input must now cancel the lease; the actual Controller regressions cover it.
-      source: { kind: 'plugin', plugin: 'assistant-delivery-test', form: 'notice', summary: 'Verify automatic barrier cleanup' },
+      source: { kind: 'assistant-delivery-test', form: 'notice', summary: 'Verify automatic barrier cleanup' },
     })
     let normalQueued = false
     let normalTurn: number | undefined
@@ -2206,8 +2215,7 @@ describe('real native Delivery Agent runtime', () => {
         return
       }
       const source = event.message.source
-      if (normalQueued || source.kind !== 'plugin'
-        || source.plugin !== '@dsh-enhanced/assistant-delivery') return
+      if (normalQueued || source.kind !== 'assistant-delivery') return
       normalQueued = true
       event.agent.followup(normalMessage)
     })
@@ -2272,8 +2280,7 @@ describe('real native Delivery Agent runtime', () => {
     const normalCall = normalTurnEvents.find(event => event.type === 'tool/call'
       && String(event.data.callId) === 'call-normal-preset-probe')
     const normalResult = normalTurnEvents.find(event => event.type === 'tool/result'
-      && event.data.message.content.some(block => block.type === 'tool-result'
-        && String(block.toolCallId) === 'call-normal-preset-probe'))
+      && String(event.data.message.toolCallId) === 'call-normal-preset-probe')
     const normalText = normalTurnEvents.find(event => event.type === 'assistant/message'
       && event.data.message.content.some(block => block.type === 'text' && block.text === normalAnswer))
     if (normalCall?.type !== 'tool/call' || normalResult?.type !== 'tool/result'
@@ -3733,6 +3740,20 @@ describe('real native Delivery Agent runtime', () => {
     let ownerHistory: AsyncIterator<unknown> | undefined
     try {
       fixture.ctx.provide('attachments', textPromptAttachments())
+      class WorkspaceFileSystem extends LocalFileSystem {
+        override async resolve(path: string, options?: Parameters<LocalFileSystem['resolve']>[1]) {
+          const target = await super.resolve(path, options)
+          const workspace = await super.resolve(root)
+          if (!this.contains(workspace, target)) throw new Error('outside owner workspace')
+          return target
+        }
+
+        override processPathFromHostPath(path: string) {
+          const mapped = super.processPathFromHostPath(path)
+          return mapped === root || mapped?.startsWith(`${root}${sep}`) ? mapped : undefined
+        }
+      }
+      await fixture.ctx.plugin(WorkspaceFileSystem, { cwd: root })
       const ownedWorkspace = {
         id: 'web-owner-workspace', path: root, attachSession: vi.fn(async () => {}),
       }
@@ -3745,6 +3766,7 @@ describe('real native Delivery Agent runtime', () => {
         return ownedWorkspace
       })
       fixture.ctx.provide('workspaceRegistry' as never, {
+        archivedSessionIds: [],
         get: (id: string) => id === ownedWorkspace.id ? ownedWorkspace : id === foreignWorkspace.id ? foreignWorkspace : undefined,
         resolveByPath,
         create: createWorkspace,
@@ -3758,7 +3780,7 @@ describe('real native Delivery Agent runtime', () => {
       await fixture.ctx.plugin(ApiRemotes)
       const gateway = fixture.ctx.typertGateway
       for (const frames of forwarded) {
-        const stream = await gateway.wireStream.open('$events', { args: {} }, eventAbort.signal)
+        const stream = await gateway.wireStream.open('$events', { args: {} }, (async function* () {})(), undefined, eventAbort.signal)
         eventStreams.push((async () => {
           try { for await (const frame of stream) frames.push(frame as { event?: string; args?: unknown[] }) }
           catch (error) { if (!eventAbort.signal.aborted) throw error }
@@ -3783,12 +3805,21 @@ describe('real native Delivery Agent runtime', () => {
       await expect(gateway.invoke({ namespace: 'session', method: 'create', args: { request: { workspaceId: ownedWorkspace.id, agentPreset: 'foreign' } } })).rejects.toThrow('configured preset')
       const created = await gateway.invoke({ namespace: 'session', method: 'create', args: { request: { workspaceId: ownedWorkspace.id } } }) as { sessionId: SessionId }
       expect(ownedWorkspace.attachSession).toHaveBeenCalledWith(created.sessionId)
+      const ownerAddedCount = (frames: Array<{ event?: string; args?: unknown[] }>): number => frames.filter(frame =>
+        frame.event === 'api-session/added' && (frame.args?.[0] as { sessionId?: string } | undefined)?.sessionId === created.sessionId).length
+      await vi.waitFor(() => expect(forwarded.every(frames => ownerAddedCount(frames) === 1)).toBe(true))
+      await vi.waitFor(() => expect(fixture.ctx.sessions.get(created.sessionId)).toBeUndefined())
       await expect(gateway.invoke({ namespace: 'session', method: 'create', args: { request: { sessionId: created.sessionId, cwd: root, agentPreset: 'primary' } } })).resolves.toMatchObject({ sessionId: created.sessionId })
+      await vi.waitFor(() => expect(forwarded.map(ownerAddedCount)).toEqual([2, 2]))
       const binding = operator.getBindingBySession(String(created.sessionId))!
       expect(binding.principal).toEqual(webPrincipal)
       ownerHistory = controller.follow({ address: { kind: 'session', sessionId: created.sessionId } }, eventAbort.signal)[Symbol.asyncIterator]()
       expect((await ownerHistory.next()).value).toMatchObject({ type: 'snapshot', header: { id: created.sessionId } })
       await vi.waitFor(() => expect(fixture.ctx.agents.get(created.sessionId)).toBeUndefined())
+      let createdAgentEvents = 0
+      let disposedAgentEvents = 0
+      fixture.ctx.on('agent/created', ({ agent }) => { if (agent.id === created.sessionId) createdAgentEvents += 1 })
+      fixture.ctx.on('agent/disposed', ({ agent }) => { if (agent.id === created.sessionId) disposedAgentEvents += 1 })
       let humanTurn = false
       let goalCreated = false
       fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
@@ -3814,8 +3845,14 @@ describe('real native Delivery Agent runtime', () => {
       expect(humanTurn).toBe(true)
       expect(fixture.llm.requests).toHaveLength(1)
       expect(fixture.ctx.agents.get(created.sessionId)).toBeUndefined()
-      await vi.waitFor(() => expect(forwarded.every(frames => frames.some(frame => frame.event === 'api-session/added'
-        && (frame.args?.[0] as { sessionId?: string } | undefined)?.sessionId === created.sessionId))).toBe(true))
+      await vi.waitFor(() => expect(forwarded.map(ownerAddedCount)).toEqual([4, 4]))
+      expect([createdAgentEvents, disposedAgentEvents]).toEqual([1, 1])
+      for (const frames of forwarded) {
+        const summaries = frames.filter(frame => frame.event === 'api-session/added'
+          && (frame.args?.[0] as { sessionId?: string } | undefined)?.sessionId === created.sessionId)
+          .map(frame => frame.args?.[0] as { agentAvailable?: boolean })
+        expect(summaries.slice(-2).map(summary => summary.agentAvailable)).toEqual([false, false])
+      }
       expect(forwarded.every(frames => !frames.some(frame => frame.event === 'api-session/removed' && frame.args?.[0] === created.sessionId))).toBe(true)
       const db = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
       try { expect(db.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get(created.sessionId)).toMatchObject({ state: 'released' }) }
@@ -3834,8 +3871,9 @@ describe('real native Delivery Agent runtime', () => {
       await vi.waitFor(() => expect(forwarded.every(frames => frames.some(frame => frame.event === 'api-session/activity' && frame.args?.[1] === 123456))).toBe(true))
       for (const frames of forwarded) {
         expect(JSON.stringify(frames)).not.toContain('foreign-')
-        // Initial creation and deliberate cold resume refresh the same summary.
-        expect(frames.filter(frame => frame.event === 'api-session/added' && (frame.args?.[0] as { sessionId?: string })?.sessionId === created.sessionId)).toHaveLength(2)
+        // Create and explicit reopen each forward one owner-bound summary;
+        // cold prompt Agent creation/disposal publish availability transitions.
+        expect(ownerAddedCount(frames)).toBe(4)
       }
       const owner = operator.getPrincipal(webPrincipal)!
       operator.revokePrincipal(owner.id, owner.version)
@@ -4018,7 +4056,7 @@ describe('real native Delivery Agent runtime', () => {
       }, new AbortController().signal)
       await vi.waitFor(() => expect(fixture.llm.requests).toHaveLength(3), { timeout: 5_000 })
       const memoryIn = (request: GenerateOptions) => {
-        const snapshot = request.messages.findLast(message => message.source?.kind === 'plugin' && message.source.plugin === '@deepseek-ai/dsh-system-prompt')
+        const snapshot = request.messages.findLast(message => message.role === 'user' && message.source?.kind === 'runtime-context')
         const text = snapshot?.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n') ?? ''
         return text.match(/<memory_source>[\s\S]*?<\/memory_source>/)?.[0] ?? ''
       }
@@ -4142,7 +4180,7 @@ describe('real native Delivery Agent runtime', () => {
       const completedBefore = agent.session.snapshotEvents().filter(event => event.type === 'turn/end').length
       agent.followup(createUserMessage({
         content: [{ type: 'text', text: 'Run this one Host plugin notice.' }],
-        source: { kind: 'plugin', plugin: 'assistant-delivery-test', form: 'notice', summary: 'Web owner scope regression' },
+        source: { kind: 'assistant-delivery-test', form: 'notice', summary: 'Web owner scope regression' },
       }))
       await vi.waitFor(() => expect(reopened.llm.requests).toHaveLength(1))
       await vi.waitFor(() => expect(agent.session.snapshotEvents().filter(event => event.type === 'turn/end'))
@@ -5146,15 +5184,8 @@ describe('real native Delivery Agent runtime', () => {
   test('mounts the durable preset before fresh and restarted Agent requests', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-preset-'))
     roots.push(root)
-    const presetRoot = join(root, 'presets')
-    await mkdir(join(presetRoot, 'standard'), { recursive: true })
-    await writeFile(join(presetRoot, 'standard', 'agent.cordis.yml'), [
-      '- id: tools',
-      '  name: cordis:assistant-delivery-test-tools',
-      '',
-    ].join('\n'))
     const saved = new Map<string, SavedSession>()
-    const first = await runtimeHarness(root, saved, undefined, undefined, root, presetRoot, 'standard')
+    const first = await runtimeHarness(root, saved, undefined, undefined, root, true, 'standard')
     const firstPublished: Array<string | undefined> = []
     first.ctx.on('agent/created', ({ agent }) => {
       firstPublished.push(first.ctx.agentPresets.composedPreset(agent.ctx))
@@ -5170,7 +5201,7 @@ describe('real native Delivery Agent runtime', () => {
       .toEqual(expect.arrayContaining([...PRESET_TOOLS]))
     await first.ctx.fiber.restart()
 
-    const restarted = await runtimeHarness(root, saved, undefined, undefined, root, presetRoot, 'standard')
+    const restarted = await runtimeHarness(root, saved, undefined, undefined, root, true, 'standard')
     const restartedPublished: Array<string | undefined> = []
     restarted.ctx.on('agent/created', ({ agent }) => {
       restartedPublished.push(restarted.ctx.agentPresets.composedPreset(agent.ctx))
@@ -5398,8 +5429,7 @@ describe('real native Delivery Agent runtime', () => {
     }))).toEqual({ kind: 'step', text: '正在确认工具「firecrawl-scrape」的调用权限…' })
     const finished = deliveryProgressFromSessionEvent(event({
       type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1,
-        message: { source: { callId: 'call-1' }, content: [{ type: 'tool-result', toolCallId: 'call-1',
-          content: [
+        message: { toolCallId: 'call-1', content: [
             { type: 'reasoning', text: 'hidden tool thought' },
             { type: 'text', text: [
               'Found 2 matching release notes',
@@ -5414,7 +5444,7 @@ describe('real native Delivery Agent runtime', () => {
               '{"message":"password=\\"inner-password-private\\""}',
               '{"message":"OPENAI_API_KEY=\\"inner-key-private\\""}',
             ].join('\n') },
-          ] }] } },
+          ] } },
     }))
     expect(finished).toMatchObject({ kind: 'tool-finished', callId: 'call-1', failed: false })
     expect(finished?.kind === 'tool-finished' ? finished.resultPreview : '').toContain('Found 2 matching release notes')
@@ -5432,9 +5462,8 @@ describe('real native Delivery Agent runtime', () => {
     expect(finished?.kind === 'tool-finished' ? finished.resultPreview : '').not.toContain('hidden tool thought')
     expect(deliveryProgressFromSessionEvent(event({
       type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1,
-        message: { source: { callId: 'call-rejected' }, content: [{ type: 'tool-result',
-          toolCallId: 'call-rejected', content: [{ type: 'text', text: 'the user rejected tool' }],
-          isError: true }] }, error: { name: 'ToolError', code: 'USER_REJECTED' } },
+        message: { toolCallId: 'call-rejected', content: [{ type: 'text', text: 'the user rejected tool' }],
+          isError: true }, error: { name: 'ToolError', code: 'USER_REJECTED' } },
     }))).toEqual({ kind: 'tool-finished', callId: 'call-rejected', failed: true,
       resultPreview: 'the user rejected tool', code: 'USER_REJECTED' })
     expect(deliveryProgressFromSessionEvent(event({
@@ -5452,8 +5481,7 @@ describe('real native Delivery Agent runtime', () => {
       deliveryProgressFromSessionEvent(event({ type: 'tool/call', data: { turn: 1, step: 1,
         callId: 'call-1', name: 'web.search', arguments: '{"query":"release notes","api_key":"must-not-leak"}' } })),
       deliveryProgressFromSessionEvent(event({ type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1,
-        message: { source: { callId: 'call-1' }, content: [{ type: 'tool-result', toolCallId: 'call-1',
-          content: [{ type: 'text', text: 'Found release note; token=must-not-leak-too' }] }] } } })),
+        message: { toolCallId: 'call-1', content: [{ type: 'text', text: 'Found release note; token=must-not-leak-too' }] } } })),
     ])
     expect(serialized).not.toContain('private chain of thought')
     expect(serialized).not.toContain('must-not-leak')
@@ -5464,9 +5492,8 @@ describe('real native Delivery Agent runtime', () => {
   test('projects only append-origin tool results into human progress', () => {
     const event = (value: object) => value as SessionEvent
     const data = { turn: 2, step: 1,
-      message: { source: { callId: 'call-before-compaction' }, content: [{ type: 'tool-result',
-        toolCallId: 'call-before-compaction', content: [{ type: 'text', text: 'durable result' }],
-        isError: false }] } }
+      message: { toolCallId: 'call-before-compaction', content: [{ type: 'text', text: 'durable result' }],
+        isError: false } }
 
     expect(deliveryProgressFromSessionEvent(event({
       type: 'tool/result', surfaceOp: { op: 'replace', start: 8, end: 8 },
@@ -5528,8 +5555,7 @@ describe('real native Delivery Agent runtime', () => {
 
     const finished = deliveryProgressFromSessionEvent(event({
       type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1,
-        message: { source: { callId: 'call-large' }, content: [{ type: 'tool-result', toolCallId: 'call-large',
-          content: [{ type: 'text', text: `result\n"token":"${'must-not-leak-'.repeat(300)}` }] }] } },
+        message: { toolCallId: 'call-large', content: [{ type: 'text', text: `result\n"token":"${'must-not-leak-'.repeat(300)}` }] } },
     }))
     expect(finished?.kind).toBe('tool-finished')
     if (finished?.kind !== 'tool-finished' || finished.resultPreview === undefined) {
@@ -5545,8 +5571,7 @@ describe('real native Delivery Agent runtime', () => {
     const event = (value: object) => value as SessionEvent
     const finished = deliveryProgressFromSessionEvent(event({
       type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1,
-        message: { source: { callId: 'call-result-secrets' }, content: [{ type: 'tool-result',
-          toolCallId: 'call-result-secrets', content: [
+        message: { toolCallId: 'call-result-secrets', content: [
             { type: 'text', text: '{"token":{"value":"nested-secret"},"summary":"kept"}' },
             { type: 'text', text: 'Cookie: sid=first-secret; csrf=second-secret' },
             { type: 'text', text: 'password: correct horse battery staple' },
@@ -5564,7 +5589,7 @@ describe('real native Delivery Agent runtime', () => {
                 text: `message: "{${slashes}"token${slashes}":${slashes}"escaped-key-${count}-secret${slashes}"}"` }
             }),
             { type: 'text', text: String.raw`message: "{\'password\':\'single-key-secret\'}"` },
-          ] }] } },
+          ] } },
     }))
     if (finished?.kind !== 'tool-finished' || finished.resultPreview === undefined) {
       throw new Error('missing tool result preview')
@@ -5586,10 +5611,9 @@ describe('real native Delivery Agent runtime', () => {
     const event = (value: object) => value as SessionEvent
     const finished = deliveryProgressFromSessionEvent(event({
       type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1,
-        message: { source: { callId: 'call-oversized-result' }, content: [{ type: 'tool-result',
-          toolCallId: 'call-oversized-result', content: [{ type: 'text', text: JSON.stringify({
+        message: { toolCallId: 'call-oversized-result', content: [{ type: 'text', text: JSON.stringify({
             summary: 'oversized-private', padding: 'x'.repeat(40_000),
-          }) }] }] } },
+          }) }] } },
     }))
     expect(finished).toEqual({ kind: 'tool-finished', callId: 'call-oversized-result', failed: false,
       resultPreview: '{"truncated":true}' })
@@ -7286,7 +7310,7 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 
-  test('/permissions reports all three levels and folds an auto reviewer after restart without an Agent turn', async () => {
+  test('/permissions reports all three levels and rejects legacy dynamic Auto in a format-4 session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-fold-'))
     roots.push(root)
     const saved = new Map<string, SavedSession>()
@@ -7316,22 +7340,22 @@ describe('real native Delivery Agent runtime', () => {
     await first.service.acceptInbound(message('evt-permission-auto', '/permission auto', 'command'))
     await drive(first.service)
     const events = activeSessionEvents(first.service, saved)
-    expect(approvalReviewerOf(events)).toBe('auto-review')
+    expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('user')
     expect(runtimeStore(first.service).getActiveBinding(conversation)?.sessionId).toBe(bindingBefore.sessionId)
     expect([...saved.keys()]).toEqual([bindingBefore.sessionId])
-    expect(first.sends.at(-1)?.text).toContain('已切换到 帮我批准（auto）')
+    expect(first.sends.at(-1)?.text).toContain('已安全恢复并持久化为请求批准（ask）')
     expect(first.llm.requests).toHaveLength(0)
     await first.ctx.fiber.restart()
 
     const restarted = await permissionRuntimeHarness(root, saved, {})
     await restarted.service.acceptInbound(message('evt-permissions-restart', '/permission', 'command'))
     await drive(restarted.service)
-    expect(restarted.sends.at(-1)?.text).toContain('当前权限：帮我批准（auto）')
+    expect(restarted.sends.at(-1)?.text).toContain('当前权限：请求批准（ask）')
     expect(restarted.llm.requests).toHaveLength(0)
     await restarted.ctx.fiber.restart()
   })
 
-  test('/permission maps two declared workspace bundles to distinct dynamic ask and auto targets', async () => {
+  test('/permission refuses a dynamic workspace Auto bundle in format 4 and retains ask', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-distinct-dynamic-'))
     roots.push(root)
     const saved = new Map<string, SavedSession>()
@@ -7342,18 +7366,51 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.service.acceptInbound(message('evt-dynamic-auto', '/permission auto', 'command'))
     await drive(fixture.service)
     let events = activeSessionEvents(fixture.service, saved)
-    expect(lastPermissionPreset(events)).toBe('auto-dynamic-id')
-    expect(approvalReviewerOf(events)).toBe('auto-review')
+    expect(lastPermissionPreset(events)).toBe('ask-dynamic-id')
+    expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('user')
+    expect(fixture.sends.at(-1)?.text).toContain('已安全恢复并持久化为请求批准（ask）')
 
     await fixture.service.acceptInbound(message('evt-dynamic-ask', '/permission ask', 'command'))
     await drive(fixture.service)
     events = activeSessionEvents(fixture.service, saved)
     expect(lastPermissionPreset(events)).toBe('ask-dynamic-id')
-    expect(approvalReviewerOf(events)).toBe('user')
+    expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('user')
     expect(fixture.permissionPresets?.set.mock.calls.map(([, name]) => name)).toEqual([
       'auto-dynamic-id',
       'ask-dynamic-id',
+      'ask-dynamic-id',
     ])
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/permission selects the Host fixed Auto bundle and restores ask without retaining full sandbox access', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-native-auto-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const fixture = await permissionRuntimeHarness(root, saved, { presets: nativeAutoPermissionPresets })
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound(message('evt-native-auto', '/permission auto', 'command'))
+    await drive(fixture.service)
+    let events = activeSessionEvents(fixture.service, saved)
+    expect(lastPermissionPreset(events)).toBe('auto')
+    expect(lastSandboxMode(events)).toBe('danger-full-access')
+    expect(lastApprovalPolicy(events)).toBe('ask')
+    expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('auto-review')
+    expect(fixture.sends.at(-1)?.text).toContain('帮我批准（auto）')
+
+    await fixture.service.acceptInbound(message('evt-native-auto-status', '/permission', 'command'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('当前权限：帮我批准（auto）')
+
+    await fixture.service.acceptInbound(message('evt-native-auto-ask', '/permission ask', 'command'))
+    await drive(fixture.service)
+    events = activeSessionEvents(fixture.service, saved)
+    expect(lastPermissionPreset(events)).toBe('workspace-write')
+    expect(lastSandboxMode(events)).toBe('workspace-write')
+    expect(lastApprovalPolicy(events)).toBe('ask')
+    expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('user')
     await fixture.ctx.fiber.restart()
   })
 
@@ -7361,7 +7418,7 @@ describe('real native Delivery Agent runtime', () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-canonical-'))
     roots.push(root)
     const saved = new Map<string, SavedSession>()
-    const fixture = await permissionRuntimeHarness(root, saved, { presets: canonicalPermissionPresets })
+    const fixture = await permissionRuntimeHarness(root, saved, { presets: nativeAutoPermissionPresets })
     const pairing = fixture.service.issuePairing('test', principal)
     fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
 
@@ -7369,7 +7426,7 @@ describe('real native Delivery Agent runtime', () => {
     await drive(fixture.service)
     let events = activeSessionEvents(fixture.service, saved)
     expect(lastPermissionPreset(events)).toBe('auto')
-    expect(approvalReviewerOf(events)).toBe('auto-review')
+    expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('auto-review')
     expect(events.some(event => event.type === 'assistant-policy/approval-reviewer')).toBe(false)
 
     await fixture.service.acceptInbound(message('evt-canonical-full', '/permission full confirm', 'command'))
@@ -7382,7 +7439,7 @@ describe('real native Delivery Agent runtime', () => {
     await drive(fixture.service)
     events = activeSessionEvents(fixture.service, saved)
     expect(lastPermissionPreset(events)).toBe('auto')
-    expect(approvalReviewerOf(events)).toBe('auto-review')
+    expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('auto-review')
 
     await fixture.service.acceptInbound(message('evt-canonical-web-ask', '/permission ask', 'command'))
     await drive(fixture.service)
@@ -8263,7 +8320,7 @@ describe('real native Delivery Agent runtime', () => {
   })
 
   test('waits for the shared Policy native-full migration and honors its conservative compensation', async () => {
-    let clock = 17_000
+    const clock = 17_000
     const now = vi.spyOn(Date, 'now').mockImplementation(() => clock)
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-native-full-barrier-'))
     roots.push(root)
@@ -8308,25 +8365,18 @@ describe('real native Delivery Agent runtime', () => {
     expect(markDispatching).not.toHaveBeenCalled()
     releaseFlush()
     await restarted.service.whenIdle()
-    await restarted.service.tick()
-    await restarted.service.whenIdle()
 
     expect(logsAtFlush).toHaveLength(1)
     expect(approvalReviewerOf(logsAtFlush[0]!)).toBe('none')
     expect(lastSandboxMode(logsAtFlush[0]!)).toBe('danger-full-access')
     expect(lastApprovalPolicy(logsAtFlush[0]!)).toBe('never')
     const waiting = store.getInbox(accepted.inboxId)
-    expect(waiting).toMatchObject({ status: 'retry_wait', failureCode: 'agent-resume-failed' })
-    expect(restarted.llm.requests).toHaveLength(0)
+    expect(waiting).toMatchObject({ status: 'processed' })
+    expect(restarted.llm.requests).toHaveLength(1)
     const compensated = activeSessionEvents(restarted.service, saved)
     expect(approvalReviewerOf(compensated)).toBe('user')
     expect(compensated.filter(event => event.type === 'assistant-policy/approval-reviewer').map(event => event.data))
       .toEqual([{ reviewer: 'none' }, { reviewer: 'user' }])
-    if (waiting?.nextAttemptAt === undefined) throw new Error('native full reconciliation retry is missing')
-    clock = waiting.nextAttemptAt
-    await drive(restarted.service)
-    expect(store.getInbox(accepted.inboxId)).toMatchObject({ status: 'processed' })
-    expect(restarted.llm.requests).toHaveLength(1)
     flush.mockRestore()
     now.mockRestore()
     await restarted.ctx.fiber.restart()
@@ -8680,9 +8730,7 @@ describe('real native Delivery Agent runtime', () => {
     },
   )
 
-  test('permission compensation waits for reader proof before appending a dynamic ask reviewer', async () => {
-    let clock = 19_000
-    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock)
+  test('format-4 dynamic Auto stays ask even when the legacy reviewer reader is unavailable', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permission-reader-compensation-'))
     roots.push(root)
     const saved = new Map<string, SavedSession>()
@@ -8692,39 +8740,25 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.service.acceptInbound(message('evt-permission-reader-compensation-seed', '/permission auto', 'command'))
     await drive(fixture.service)
     const before = activeSessionEvents(fixture.service, saved)
-    expect(approvalReviewerOf(before)).toBe('auto-review')
+    expectSafeAskPermission(fixture.permissionPresets!, before)
+    expect(fixture.sends.at(-1)?.text).toContain('已安全恢复并持久化为请求批准（ask）')
     const sendsBefore = fixture.sends.length
     const restoreReader = suspendApprovalReviewerReader(fixture.ctx)
     const accepted = await fixture.service.acceptInbound(
       message('evt-permission-reader-compensation', '/permission ask', 'command'),
     )
     try {
-      await fixture.service.tick()
-      await fixture.service.whenIdle()
-      const waiting = runtimeStore(fixture.service).getInbox(accepted.inboxId)
-      expect(waiting).toMatchObject({
-        status: 'retry_wait',
-        failureCode: 'permission-failure-notice-recovery',
-      })
-      const held = activeSessionEvents(fixture.service, saved)
-      expect(approvalReviewerOf(held)).toBe('auto-review')
-      expect(held.filter(event => event.type === 'assistant-policy/approval-reviewer').map(event => event.data))
-        .toEqual([{ reviewer: 'auto-review' }])
-      expect(fixture.sends).toHaveLength(sendsBefore)
-      if (waiting?.nextAttemptAt === undefined) throw new Error('reviewer compensation retry is missing')
-
-      restoreReader()
-      clock = waiting.nextAttemptAt
       await drive(fixture.service)
       expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({ status: 'processed' })
-      const compensated = activeSessionEvents(fixture.service, saved)
-      expectSafeAskPermission(fixture.permissionPresets!, compensated)
-      expect(compensated.filter(event => event.type === 'assistant-policy/approval-reviewer').map(event => event.data))
-        .toEqual([{ reviewer: 'auto-review' }, { reviewer: 'user' }])
-      expect(fixture.sends.at(-1)?.text).toContain('权限切换未完成')
+      const held = activeSessionEvents(fixture.service, saved)
+      expectSafeAskPermission(fixture.permissionPresets!, held)
+      expect(held.filter(event => event.type === 'assistant-policy/approval-reviewer')).toEqual(
+        before.filter(event => event.type === 'assistant-policy/approval-reviewer'),
+      )
+      expect(fixture.sends).toHaveLength(sendsBefore + 1)
+      expect(fixture.sends.at(-1)?.text).toContain('当前已是 请求批准（ask）')
     } finally {
       restoreReader()
-      now.mockRestore()
       await fixture.ctx.fiber.restart()
     }
   })
@@ -11432,7 +11466,7 @@ describe('real native Delivery Agent runtime', () => {
   test.each([
     { name: 'runs two real native children under one parent budget', mode: 'normal', modelCalls: 4, adapterCalls: 4, boundChildren: 2, childCalls: 2 },
     { name: 'rejects the second child before its adapter request when the aggregate budget is exhausted', mode: 'quota', modelCalls: 2, adapterCalls: 2, boundChildren: 2, childCalls: 1 },
-    { name: 'rejects a real child scoped tool call', mode: 'scoped-tool', modelCalls: 5, adapterCalls: 5, boundChildren: 2, childCalls: 2 },
+    { name: 'Policy rejects a real child scoped tool before Goals sees it', mode: 'scoped-tool', modelCalls: 5, adapterCalls: 5, boundChildren: 2, childCalls: 2 },
     { name: 'cancels an owner-revoked child waiting for its first chunk', mode: 'revoke', modelCalls: 4, adapterCalls: 2, boundChildren: 2, childCalls: 1 },
     { name: 'disposes a real native run returned after its strategy deadline', mode: 'late-start', modelCalls: 4, adapterCalls: 4, boundChildren: 2, childCalls: 2 },
     { name: 'records an actual adapter stream failure without calling it a budget limit', mode: 'stream-error', modelCalls: 4, adapterCalls: 4, boundChildren: 2, childCalls: 2 },
@@ -11442,14 +11476,11 @@ describe('real native Delivery Agent runtime', () => {
   ] as const)('goal_strategy compare $name', async ({ mode, modelCalls, adapterCalls, boundChildren, childCalls }) => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-strategy-'))
     roots.push(root)
-    const presetRoot = join(root, 'presets')
-    await mkdir(join(presetRoot, 'primary'), { recursive: true })
-    await writeFile(join(presetRoot, 'primary', 'agent.cordis.yml'), '- id: tools\n  name: cordis:assistant-delivery-test-tools\n')
     const ownerId = 'lark/bot-1/tenant-a/ou_owner'
     const subject = { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId }
     const JsonlPersistence = await jsonlPersistenceConstructor()
     const stored = new Map<string, DurableStoredSession>()
-    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, presetRoot, 'primary', true, 'probe', undefined, {
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, true, 'primary', true, 'probe', undefined, {
       policyRules: [
         { id: 'native-strategy-probe-fixture', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root }, actions: ['execute'], resource: { kind: 'tool', id: 'strategy_scoped_probe' } },
         { id: 'native-strategy-goal', effect: 'allow' as const, subject,
@@ -11628,7 +11659,7 @@ describe('real native Delivery Agent runtime', () => {
       expect(scopedResults).toHaveLength(1)
       expect(scopedResults[0]?.sessionId).toBe(attackSessionId)
       expect(scopedResults[0]?.result).toMatchObject({ isError: true })
-      expect(JSON.stringify(scopedResults[0]?.result)).toContain('strategy children cannot use tools')
+      expect(JSON.stringify(scopedResults[0]?.result)).toContain('assistant-policy: ask-review')
     }
     if (mode === 'revoke') {
       expect(adapterAborted).toBe(true)
@@ -11683,7 +11714,7 @@ describe('real native Delivery Agent runtime', () => {
       if (mode === 'scoped-tool') {
         expect(attackSessionId).toBeDefined()
         expect(new Set(bound.map(child => child.sessionId))).toEqual(new Set(childAgents.map(agent => String(agent.session.id))))
-        expect(bound.find(child => child.sessionId === attackSessionId)?.diagnostics).toMatchObject({ toolRejections: 1, output: 'accepted' })
+        expect(bound.find(child => child.sessionId === attackSessionId)?.diagnostics).toMatchObject({ toolRejections: 0, output: 'accepted' })
         expect(bound.filter(child => child.sessionId !== attackSessionId).map(child => child.diagnostics))
           .toEqual([{ toolRejections: 0, output: 'accepted' }])
       }

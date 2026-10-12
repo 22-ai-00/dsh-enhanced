@@ -45,7 +45,7 @@ dsh-rsi [全局选项] <命令>
 
 - **npm 形态（默认）**：下载 `https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/v<本包版本>/scripts/install/install-npm.sh` 到临时目录执行。引导脚本内部会按内嵌 SHA-256 自校验 `common.sh` 等资产，dsh-rsi 不重复 hash 逻辑。**锁定的只是引导脚本与同 tag 的安装器资产，不是插件 cohort 版本**：安装器默认把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套 `@dsh-enhanced/*` bundle；要锁定插件版本需透传 `--plugin-version <x.y.z|dist-tag>` 或预设 `DSH_ENHANCED_VERSION`。安装器尾部还会执行 `npm install --global @dsh-enhanced/dsh-rsi-cli@<cohort 版本>`，可能因此把全局 dsh-rsi 升降级到该 cohort 版本。
 - **local 形态**：`--local <checkout 目录>`，直接执行该目录下 `scripts/install/install-local.sh`，并从该 checkout 的 packages/dsh-rsi-cli 全局安装（本地开发 / 无网救机）。
-- 全新、空的 `DSH_HOME` 默认从官方 npm 解析一次 DSH `latest`，私有准备器目前接受 `0.1.5` 或 `0.1.5-rc.N`（N≥3），在当前兼容范围 `>=0.1.5-rc.3 <0.1.6` 内安装到 `~/.local/share/dsh-enhanced/hosts/<精确版本>`。安装不执行依赖安装脚本；校验 registry integrity、lockfile、实际入口及全部安装文件后，写入 Home 内的私有 `.dsh-rsi-host.json`。不替换全局 DSH。安装器及其生成的常驻服务使用该私有入口，补装 pnpm 后仍保留这个入口的优先级。
+- 全新、空的 `DSH_HOME` 默认从官方 npm 解析一次 DSH `latest`，当前新安装接受已适配的 `0.2.0-rc.2`（官方 latest，尚非正式稳定版），安装到 `~/.local/share/dsh-enhanced/hosts/<精确版本>`。安装不执行依赖安装脚本；校验 registry integrity、lockfile、实际入口及全部安装文件后，写入 Home 内的私有 `.dsh-rsi-host.json`。不替换全局 DSH。安装器及其生成的常驻服务使用该私有入口，补装 pnpm 后仍保留这个入口的优先级。
 - 重试安装按 Home 绑定读取原精确版本，并核对文件与收据；重试不重新解析 `latest`。受管 Home 的升级入口默认解析官方 `latest`，先核对兼容范围，再通过独立事务迁移 Host；同版本不创建 Host 事务。已有未绑定 Home 保留原 Host。`--dsh-version` 可在首次安装或受管 Home 升级时选择范围内精确版本，不能直接覆盖已有绑定。此路径已在 Linux 验证；macOS/Windows 私有 Host 安装尚未实机验证。直接运行 shell 安装脚本仍使用原有 Host 选择方式。
 - 同一 Home 不支持与旧版或外部安装器并发安装；绑定文件原子发布不等于整个安装流程具有跨程序排他锁。
 - 私有缓存是多个 Home 可共享的安装资源；全量 purge/reinstall 删除 Home 绑定但保留缓存，`--remove-host` 仍只操作全局 npm Host。缓存只含运行程序及收据，不含飞书凭据。

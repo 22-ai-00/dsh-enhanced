@@ -170,8 +170,9 @@ async function fixture(
     agent.session.append('approval/policy', { policy: options.approvalPolicy ?? 'ask' })
   }
   if (options.sandboxMode !== 'missing') {
-    appendSandboxMode(agent, options.sandboxMode ?? 'workspace-write')
+    appendSandboxMode(agent, options.sandboxMode ?? 'danger-full-access')
   }
+  if ((options.reviewer ?? 'auto-review') === 'auto-review') appendPermissionPreset(agent, 'auto')
   const callId = ToolCallId('exact-review-call')
   const exactToolName = options.exactToolName ?? 'bash'
   if (options.historicalExactCall === true) {
@@ -356,6 +357,7 @@ describe('isolated automatic approval reviewer', () => {
     })
     expect(current.adapter.requests[0]).not.toHaveProperty('sessionId')
     expect(current.adapter.requests[0]?.system).toContain('JSON')
+    expect(current.adapter.requests[0]?.messages[0]?.source).toEqual({ kind: 'assistant-policy' })
     const wire = JSON.stringify(current.adapter.requests[0])
     expect(wire).toContain('git status --short')
     expect(wire).toContain('Inspect the repository status')
@@ -368,7 +370,7 @@ describe('isolated automatic approval reviewer', () => {
       { approvalPolicy: 'missing' as const },
       { sandboxMode: 'missing' as const },
       { approvalPolicy: 'missing' as const, sandboxMode: 'missing' as const },
-      { sandboxMode: 'danger-full-access' as const },
+      { sandboxMode: 'workspace-write' as const },
     ]) {
       const current = await fixture([assessment()], options)
       await expect(current.request()).resolves.toBe('rejected')
@@ -377,9 +379,8 @@ describe('isolated automatic approval reviewer', () => {
     }
   })
 
-  test('does not review a stale Auto selector after rc.3 sandbox knobs change', async () => {
-    const current = await fixture([assessment()], { sandboxMode: 'danger-full-access' })
-    appendPermissionPreset(current.agent, 'auto')
+  test('does not review a stale Auto selector after sandbox knobs change', async () => {
+    const current = await fixture([assessment()], { sandboxMode: 'workspace-write' })
     await expect(current.request()).resolves.toBe('rejected')
     expect(current.adapter.requests).toHaveLength(0)
   })
@@ -921,8 +922,8 @@ describe('isolated automatic approval reviewer', () => {
     while (sandboxDrift.adapter.requests.length === 0) await new Promise(resolve => setTimeout(resolve, 0))
     appendSandboxMode(sandboxDrift.agent, 'workspace-write')
     releaseSandbox()
-    await expect(sandboxPending).resolves.toBe('rejected')
-    expect(sandboxDrift.fallbackEscalations).toEqual([true])
+    await expect(sandboxPending).resolves.toBe('unavailable')
+    expect(sandboxDrift.fallbackEscalations).toEqual([])
 
     let releaseFull!: () => void
     const fullGate = new Promise<void>(resolve => { releaseFull = resolve })

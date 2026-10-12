@@ -117,7 +117,7 @@ export async function runNativeMemoryReview(ctx: Context, input: {
     try {
       signal.throwIfAborted()
       agent.followup(createUserMessage({ content: [{ type: 'text', text: data }],
-        source: { kind: 'plugin', plugin: '@dsh-enhanced/assistant-verifier', form: 'notice', summary: 'Independent memory review' } }))
+        source: { kind: 'assistant-verifier', form: 'notice', summary: 'Independent memory review' } }))
       await agent.whenIdle()
       signal.throwIfAborted(); assertCurrent()
       const events = agent.session.snapshotEvents() as readonly { type: string; data: Record<string, unknown> }[]

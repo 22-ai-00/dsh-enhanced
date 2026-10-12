@@ -256,7 +256,7 @@ async function seedAttributedRetirementEvidence(
   for (const [offset, outcome] of outcomes.entries()) {
     const index = offset + 1
     const session = agent({ id: `${keyPrefix}-session-${index}` })
-    agentEvents(fixture.ctx, session).emit('agent/session-start', { source: 'startup' })
+    await agentEvents(fixture.ctx, session).serial('agent/created', { source: 'startup' })
     const exposure = await fixture.service.captureAutomationExposure({
       workspace: WORKSPACE,
       agentPreset: PRESET,

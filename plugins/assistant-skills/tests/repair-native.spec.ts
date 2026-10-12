@@ -154,7 +154,7 @@ test('rejects and cancels an unadvertised preset-local tool call before its exec
   await agent.whenIdle(); await ctx.assistantGoals.whenIdle()
   const toolResults = (agent.session.snapshotEvents() as any[]).filter(event => event.type === 'tool/result')
   expect(toolResults).toHaveLength(1)
-  expect(toolResults[0]).toMatchObject({ data: { message: { source: { kind: 'tool', callId: 'unadvertised' }, content: [{ isError: true }] } } })
+  expect(toolResults[0]).toMatchObject({ data: { message: { role: 'tool', toolCallId: 'unadvertised', isError: true, source: { kind: 'tool', callId: 'unadvertised' } } } })
   expect(JSON.stringify(toolResults[0])).toContain('assistant-skills: owner repair tool request rejected')
   expect(forbiddenCalls).toBe(0)
   expect(cancel).toHaveBeenCalledWith({ kind: 'hook', reason: 'assistant-skills-owner-repair-tool-limit' })

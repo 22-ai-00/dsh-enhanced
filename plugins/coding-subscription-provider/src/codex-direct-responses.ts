@@ -1,9 +1,12 @@
 import {
   ToolCallId,
-  offloadRequestImagesWithPolicy,
+  IMAGE_OFFLOAD_REQUIRED_CODE,
+  LlmError,
+  projectOffloadedImages,
+  requiredImageOffload,
   type ContentBlock,
   type GenerateOptions,
-  type Message,
+  type RequestMessage,
   type StreamChunk,
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
@@ -357,11 +360,10 @@ async function buildInput(
   maxRequestImageBytes: number,
   signal: AbortSignal,
 ): Promise<unknown[]> {
-  const messages = offloadRequestImagesWithPolicy(options.messages, {
-    maxBytes: maxRequestImageBytes,
-    representation: 'raw',
-    placeholder: () => '[image omitted to keep the request within its image limit; older images are omitted first. If this image is still needed, read its file again when a path is available; otherwise ask the user to attach it again.]',
-  })
+  const offloadImages = requiredImageOffload(options.messages, { maxBytes: maxRequestImageBytes, representation: 'raw' }, block => block.attachment.bytes)
+  if (offloadImages > 0) throw new LlmError('Codex private Responses requires older images to be offloaded', IMAGE_OFFLOAD_REQUIRED_CODE, { offloadImages })
+  const messages = projectOffloadedImages(options.messages,
+    () => '[image omitted to keep the request within its image limit; older images are omitted first. If this image is still needed, read its file again when a path is available; otherwise ask the user to attach it again.]')
   const input: unknown[] = []
   for (const message of messages) {
     const replay = matchingReplay(message, options.provider, options.model)
@@ -374,7 +376,7 @@ async function buildInput(
   return input
 }
 
-function matchingReplay(message: Message, provider: string, model: string): ReplayResponse | undefined {
+function matchingReplay(message: RequestMessage, provider: string, model: string): ReplayResponse | undefined {
   if (message.role !== 'assistant' || message.source.kind !== 'model') return undefined
   // The durable source retains the user-facing model alias (`default`) while
   // replay records the concrete model sent on the wire. The replay's own model
@@ -516,7 +518,7 @@ function neutralizeHarmonyStructure(value: unknown, depth = 0): unknown {
 
 async function appendGenericMessage(
   input: unknown[],
-  message: Message,
+  message: RequestMessage,
   attachments: CodexDirectImageReader | undefined,
   signal: AbortSignal | undefined,
 ): Promise<void> {
@@ -543,7 +545,6 @@ async function appendGenericMessage(
           })
           break
         case 'image':
-        case 'tool-result':
           throw protocolError(`Codex private Responses cannot serialize ${block.type} in an assistant message`)
         default:
           throw protocolError('Codex private Responses encountered an unknown assistant content block')
@@ -553,7 +554,14 @@ async function appendGenericMessage(
     return
   }
 
-  const role = message.role === 'system' ? 'system' : 'user'
+  if (message.role === 'tool') {
+    if (message.toolCallId !== message.source.callId) throw protocolError('Codex private Responses received a mismatched tool result')
+    input.push({ type: 'function_call_output', call_id: wireCallId(String(message.toolCallId)),
+      output: await functionOutput(message.content, message.isError === true, attachments, signal) })
+    return
+  }
+  if (message.role === 'user' && message.source?.kind === 'tool') throw protocolError('Codex private Responses received a tool result in a user message')
+  const role = message.role
   let content: unknown[] = []
   const flush = () => {
     if (content.length === 0) return
@@ -567,18 +575,10 @@ async function appendGenericMessage(
         content.push({ type: 'input_text', text: neutralizeHarmonyText(block.text) })
         break
       case 'image':
-        if (message.role === 'system') {
-          throw protocolError('Codex private Responses cannot serialize an image in a system message')
+        if (message.role !== 'user') {
+          throw protocolError(`Codex private Responses cannot serialize an image in a ${message.role} message`)
         }
         content.push(await inputImage(block.attachment, attachments, signal))
-        break
-      case 'tool-result':
-        flush()
-        input.push({
-          type: 'function_call_output',
-          call_id: wireCallId(String(block.toolCallId)),
-          output: await functionOutput(block.content, block.isError === true, attachments, signal),
-        })
         break
       case 'tool-call':
         throw protocolError(`Codex private Responses cannot serialize ${block.type} in a ${message.role} message`)
@@ -606,7 +606,6 @@ async function functionOutput(
         parts.push(await inputImage(block.attachment, attachments, signal))
         break
       case 'tool-call':
-      case 'tool-result':
         throw protocolError('Codex private Responses cannot nest a tool block inside a tool result')
       default:
         throw protocolError('Codex private Responses encountered an unknown tool-result content block')
@@ -1612,11 +1611,6 @@ function contentEquals(left: readonly ContentBlock[], right: readonly ContentBlo
           && candidate.arguments === block.arguments
       case 'image':
         return candidate.type === 'image' && sameImageRef(candidate.attachment, block.attachment)
-      case 'tool-result':
-        return candidate.type === 'tool-result'
-          && candidate.toolCallId === block.toolCallId
-          && candidate.isError === block.isError
-          && contentEquals(candidate.content, block.content)
       default:
         return false
     }

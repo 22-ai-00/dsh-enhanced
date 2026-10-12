@@ -18,11 +18,13 @@ pnpm approve-builds koffi
 
 ## 安装入口
 
+开发版默认推荐官方 `latest`（当前 `0.2.0-rc.2`，上游尚无正式稳定版），并校验精确兼容基线。未知新版不会未经验证直接装入现有环境。旧 `0.1` Home 到 `0.2` 的联合迁移尚未支持；不要先替换旧 profile 的插件，现阶段在独立新 Home 中验证新版。远端 npm 引导器须等新版本通过发布验证后更新。
+
 macOS 的本地和 npm 安装入口会在安装末尾检查受管 LaunchAgent；若 `ai.deepseek.dsh.profile.<profile>` 未注册，会自动调用当前 profile 的服务注册入口并再次确认，再执行健康检查，无需手动运行 `launchctl bootstrap`。修复复用服务注册入口，不启动新的飞书 onboarding；已有中断的 setup 事务仍由原入口恢复。`--no-service`、`--lark skip` 以及不管理常驻服务的场景保持跳过；独立 `doctor.sh` 仍只检查。注册失败会保留具体错误并停止安装。
 
 历史验收记录（截至 2026-09-12）：`v0.1.31` 完成过 Linux `autonomy` 的远程全新安装，以及真实 `.30 → .31` 升级、隔离 Host 启动与事务提交；最终冻结候选完成 `.31 → .31` 重复升级，两次均确认 14 个受管包同版本，选定配置、状态文件、暂停目标及其检查点保持不变。该批升级修复随 `0.1.32` 发布；旧 `v0.1.31` 远程 helper 不具备同样能力。当前验收范围与剩余缺口见 [RSI 当前状态](../../docs/rsi-status.md)。
 
-安装器先确保 Node.js、pnpm 和兼容的 DSH。当前 checkout 的兼容范围为 `>=0.1.5-rc.3 <0.1.6`；新安装先解析官方 `@deepseek-ai/dsh` 的 `latest`，确认属于该范围后安装解析出的精确版本，不追踪 `next` 或 beta。已有兼容 CLI 直接复用，不做全局升级或降级。越界、无法识别或解析失败会在安装 Host 前拒绝；新维护线需先完成适配。`--dry-run` 离线展示解析计划，显式 `--dsh-version` 可指定范围内精确版本。已发布的远程引导器仍加载其发布标签中的 helper；本 checkout 的改动须发布后才进入远程安装。当前开发版的 `dsh-rsi update --all` 会为已有私有绑定的 Linux Home 规划 Host 更新；版本相同跳过，未绑定 Home 沿用原 Host。此能力尚未发布，验证进度见 [RSI 状态](../../docs/rsi-status.md)。 `dsh-rsi install` 对全新空 Home 已加入私有 Host 选择：解析并安装官方 latest 到独立目录，Home 内持久绑定精确版本；重试、插件升级及生成的服务复用该入口，补装 pnpm 不会改变它的优先级。此行为不修改全局 DSH；直接执行本节 shell 脚本仍沿用上述选择方式。缓存与重装说明见 [CLI 指南](../../packages/dsh-rsi-cli/README.md#install--reinstall薄委托)。之后，再按场景安装最小 bundle 集合。三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 包含全部 `core` 能力，`supervised` 又在 `lark` 之上追加评测、演化与恢复。`dsh-rsi install/reinstall` 未指定 `--scenario` 或 `--mode` 时默认进入 `supervised`，不再要求用户先选择成长场景。直接调用 shell 安装脚本的 Linux 默认安装同样进入 `supervised`：自动准备持久记忆学习、普通任务成长、新工具独立验收与有限采用及协调器；不再因 `--yes` 或非交互而静默降为 `core`。显式 `--scenario core` 保留无渠道、无 daemon、无后台学习的轻量安装；`--lark skip` 或 `--no-service` 保留不启用完整 RSI 的有限场景。非 Linux 的 shell 自动选择仍使用原有限场景，并明确说明完整 RSI 未开启。
+安装器先确保 Node.js、pnpm 和兼容的 DSH。当前 checkout 正在适配官方 `latest` 的 `0.2.0-rc.2`（上游目前尚无正式稳定版）；新安装先解析官方 `@deepseek-ai/dsh` 的 `latest`，确认属于该范围后安装解析出的精确版本，不追踪 `next` 或 beta。已有兼容 CLI 直接复用，不做全局升级或降级。越界、无法识别或解析失败会在安装 Host 前拒绝；新维护线需先完成适配。`--dry-run` 离线展示解析计划，显式 `--dsh-version` 可指定范围内精确版本。已发布的远程引导器仍加载其发布标签中的 helper；本 checkout 的改动须发布后才进入远程安装。当前开发版的 `dsh-rsi update --all` 会为已有私有绑定的 Linux Home 规划 Host 更新；版本相同跳过，未绑定 Home 沿用原 Host。此能力尚未发布，验证进度见 [RSI 状态](../../docs/rsi-status.md)。 `dsh-rsi install` 对全新空 Home 已加入私有 Host 选择：解析并安装官方 latest 到独立目录，Home 内持久绑定精确版本；重试、插件升级及生成的服务复用该入口，补装 pnpm 不会改变它的优先级。此行为不修改全局 DSH；直接执行本节 shell 脚本仍沿用上述选择方式。缓存与重装说明见 [CLI 指南](../../packages/dsh-rsi-cli/README.md#install--reinstall薄委托)。之后，再按场景安装最小 bundle 集合。三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 包含全部 `core` 能力，`supervised` 又在 `lark` 之上追加评测、演化与恢复。`dsh-rsi install/reinstall` 未指定 `--scenario` 或 `--mode` 时默认进入 `supervised`，不再要求用户先选择成长场景。直接调用 shell 安装脚本的 Linux 默认安装同样进入 `supervised`：自动准备持久记忆学习、普通任务成长、新工具独立验收与有限采用及协调器；不再因 `--yes` 或非交互而静默降为 `core`。显式 `--scenario core` 保留无渠道、无 daemon、无后台学习的轻量安装；`--lark skip` 或 `--no-service` 保留不启用完整 RSI 的有限场景。非 Linux 的 shell 自动选择仍使用原有限场景，并明确说明完整 RSI 未开启。
 
 开发版默认启用流程不是给缺配置的 bundle 强行打开开关。安装器复用可信飞书私聊配对确定 owner，保留已有模型选择；数据库路径、独立身份、构建资源、有限授权与预算由现有 RSI 安装器生成。新授权默认记忆提取每日最多 7 次、成长复盘每日最多 7 次（既有合法聚合预算优先），独立审查另有有限额度并可能增加模型调用；授权有固定期限，重试不续期、不返还消耗、不重放 unknown。缺少模型、owner、Linux systemd 或隔离构建前提时应按具体提示完成配置，不能把未启用的学习报告成安装成功。已有 active/paused Automation 仍须显式确认 `--ack-existing-automations`；`--yes` 不代替该确认。
 
@@ -246,7 +248,7 @@ v1 任务只能选 `deepseek-v4-flash` 或 `deepseek-v4-pro`，并需为每次�
 
 DSH 需要一个能解析的默认模型才能真正对话。新安装时若 PATH 上有真正可执行的 `traex` 或 `trae-cli`，安装器会在写入前把 TraeX provider 加入同一 cohort 预检、安装并启用当前 profile 的 route，不弹模型菜单。它只在最终有效命令已登录、且 settings/home/profile 都没有显式默认模型时，为当前 profile 选择 `traex-agent` 默认模型；已有命令、工作目录与明确默认模型均保留。未登录时 route 仍启用，但不声称可对话，只提示运行最终命令的 `login`；`--model skip` 仍安装并启用 route，但不选择默认模型。未发现 TraeX 时沿用模型配置引导；仅在未检测到 TraeX 且未显式指定 provider 时，`--yes` 和非交互运行不主动写入新 route。升级不自动追加 TraeX 或改模型 route。
 
-引导支持三种目标，都由 `dsh-model-setup` 写入 `settings.yaml` 的 `agent-default-model`（自定义网关另写 `llm-pi-ai.providers.<route>`）：
+引导支持三种目标，都由 `dsh-model-setup --profile <目标 profile>` 写入目标 profile 的 `cordis.patch.yml`：`agent-default-model` 选择模型，自定义网关另写 `llm-pi-ai.providers.<route>`。各 profile 的选择彼此隔离：
 
 ```sh
 # DeepSeek 官方：只需模型名（缺省 deepseek-v4-flash）与 API Key
@@ -268,13 +270,13 @@ DSH 需要一个能解析的默认模型才能真正对话。新安装时若 PAT
 
 若显式选择 `--model configure`，且本机 PATH 上存在 `traex` 或 `trae-cli`，交互向导会多出一个「本机 TraeX」选项；也可用 `--model-provider traex-agent` 直接指定。这是一个 **agent route**（由本机已登录的 TraeX 通过 ACP 提供），因此：
 
-以下显式 `--model-provider traex-agent` 路径仍写入全局默认；上面的自动发现路径只可能写当前 profile 的默认行，不改全局 settings。
+显式 `--model-provider traex-agent` 和上面的自动发现路径都只写当前 profile 的默认行，不改全局 settings。
 
 - 不需要 API Key，也不接受 `--model-base-url/--model-api/--model-display-name`。
-- 安装器会自动把 `@dsh-enhanced/traex-acp-provider` 加入安装集，把全局 `settings.yaml` 的 `agent-default-model` 指向 `traex-agent`，并在**该 profile 的 patch 层**把 provider 行置为 `enabled: true`（保留其它行、注释与 `!!js` 表达式；已有 `cwd` 覆盖不被改写）。
-- 当本轮将默认模型设为 TraeX 且 `--model-route` 保持 `auto` 时，安装器会先做不消耗额度的 `traex login status` 校验，再写入全局默认模型并检查 profile 适配器；未安装、未登录或 profile 未注册适配器都会失败，不会把部署宣称为可用。后两步失败或在此窗口被中断时，会恢复本次前的 `settings.yaml` 和该 profile patch，因此不会把其它 profile 留在未经验证的 `traex-agent` 默认上。显式 `--model-route skip` 仍可跳过该检查。
+- 安装器会自动把 `@dsh-enhanced/traex-acp-provider` 加入安装集，把目标 profile 的 `agent-default-model` 指向 `traex-agent`，并在同一 patch 层把 provider 行置为 `enabled: true`（保留其它行、注释与 `!!js` 表达式；已有 `cwd` 覆盖不被改写）。
+- 当本轮将默认模型设为 TraeX 且 `--model-route` 保持 `auto` 时，安装器会先做不消耗额度的 `traex login status` 校验，再写入目标 profile 默认模型并检查适配器；未安装、未登录或 profile 未注册适配器都会失败。后两步失败或在此窗口被中断时，会恢复本次前的配置快照。显式 `--model-route skip` 仍可跳过该检查。
 
-注意 `traex-agent` 的**适配器是按 profile 注册的**（只在启用了 `traex-acp-provider` bundle 的 profile 里存在），而 `agent-default-model` 是**全局唯一**的 settings 段、被所有 profile 共享。因此把默认设为 `traex-agent` 后，只有已启用该 route 的 profile（默认 `web`）能真正解析它；`headless` 等未安装该 bundle 的 profile 若用这个默认会报 `NO_ADAPTER`。安装器为此对 agent route 采用**结构化验证**：不发模型请求，而是确认目标 profile 的 `--dump-config` 已注册 `traex-acp-provider` 并检查 `traex login status`，避免误用 `headless` 触发 `NO_ADAPTER`，也不消耗任何额度。每次真实调用会新起一个 `traex acp serve` 子进程并消耗 TraeX 侧额度；具体边界见 [`traex-acp-provider` 文档](../../plugins/traex-acp-provider/README.md)。
+`traex-agent` 的适配器按 profile 注册（只在启用了 `traex-acp-provider` bundle 的 profile 里存在）。安装器只把它设为目标 profile 的默认值，并通过该 profile 的 `--dump-config` 与 `traex login status` 做结构化验证，不消耗模型额度。每次真实调用会新起一个 `traex acp serve` 子进程并消耗 TraeX 侧额度；具体边界见 [`traex-acp-provider` 文档](../../plugins/traex-acp-provider/README.md)。
 
 API Key 只从环境读取，绝不作为命令行参数（避免进入进程列表、日志与历史）。安装器优先读取 `DSH_ENHANCED_MODEL_API_KEY`，其次是按 provider 派生的凭据引用（`deepseek-official` 用 `DEEPSEEK_API_KEY`，其余形如 `SUPER_RELAY_API_KEY`）；命中任一即在写入 route 后把密钥存入 `$DSH_HOME/.credentials.yaml`（`0600`，目录 `0700`）。交互终端未命中环境变量时会用隐藏输入（`read -s`）询问一次，仅为该子进程导出、结束即清除。都没有时仍写入 route 选择，并提示稍后设置对应环境变量或编辑 `.credentials.yaml`，不会中断安装。agent route（TraeX）不涉及 API Key。
 
@@ -282,11 +284,13 @@ API Key 只从环境读取，绝不作为命令行参数（避免进入进程列
 
 ```sh
 DSH_ENHANCED_MODEL_API_KEY=… "$DSH_HOME"/profiles/web/node_modules/.bin/dsh-model-setup \
-  --provider deepseek-official --model deepseek-v4-flash
+  --profile web --provider deepseek-official --model deepseek-v4-flash
 
 # TraeX：写默认选择并在 web profile 启用 route（需先 --with traex 或已安装该 bundle）
-"$DSH_HOME"/profiles/web/node_modules/.bin/dsh-model-setup --provider traex-agent --enable-in-profile web
+"$DSH_HOME"/profiles/web/node_modules/.bin/dsh-model-setup --profile web --provider traex-agent --enable-in-profile web
 ```
+
+手动调用 `dsh-model-setup` 或 `dsh-permission-setup` 时请传 `--profile`。省略时仍写旧版全局 `settings.yaml`；DSH 0.2 会在首个启动的 profile 上执行一次性导入，不能用于多个 profile 的定向设置。对应旧区段尚待导入时，`--profile` 会拒绝写入；先将旧值迁移到目标 profile 的原生 patch，确认后再运行配置器，安装器不会擅自删除或分配旧设置。
 
 模型 route 不会被安装器静默调用；配置模型后可请求一次最小验证：
 
@@ -294,7 +298,7 @@ DSH_ENHANCED_MODEL_API_KEY=… "$DSH_HOME"/profiles/web/node_modules/.bin/dsh-mo
 ./scripts/install/install-local.sh --scenario lark --lark keep --model-route verify
 ```
 
-验证方式取决于当前全局默认的 provider 类型：普通 API-key/网关 route 通过 `headless` profile 发送一次固定的最小请求；agent route（`traex-agent`）不发模型请求，改为校验目标 profile 已注册 `traex-acp-provider` 适配器并检查 `traex login status`。
+验证方式取决于目标 profile 的有效默认 provider：普通 API-key/网关 route 先从目标 profile 的 `--dump-config` 读取 provider/model，再用临时只含该选择的 headless overlay 发送一次固定最小请求；待导入的全局 `settings.yaml` 存在时拒绝真实验证，以免消费其它 profile 的遗留配置。agent route（`traex-agent`）不发模型请求，改为校验目标 profile 已注册 `traex-acp-provider` 适配器并检查 `traex login status`。
 
 新建原生 `web` 模板时会预检 Web 端口（默认 `127.0.0.1:3080`，可用 `DSH_ENHANCED_WEB_PORT` 覆盖）。自定义 profile 不要求 Web 端口；安装器在飞书配置前通过原生 Host 就绪信号验证插件真实激活，而非只验证 YAML 可组合；已管理的 Lark profile 则以实际常驻服务验收。独立诊断：
 

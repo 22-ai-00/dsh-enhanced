@@ -47,9 +47,9 @@ async function fixture() {
     { contractId: 'outcome-contract', state: 'done', attempts: 1, reason: null, contract: outcomeContract, receipt: { objectiveStatus: 'not-achieved', digest: 'd'.repeat(64), validUntil: now + 60_000, completedAt: now }, verifierExecutionObservation: { status: 'succeeded', quiescent: true, completedAt: 4, executionRef: 'assessment-a' } }] })
   const events = () => [{ seq: 0, type: 'turn/start', data: { turn } }, { seq: 1, type: 'user/message', data: { turn, source: { kind: 'goal', goalId: 'native-a', revision: nativeRevision, round: 1 } } },
     { seq: 2, type: 'tool/call', data: { turn, callId: 'failed-write', name: 'write', arguments: '{"path":"a"}' } },
-    { seq: 3, type: 'tool/result', surfaceOp: 'append', sourceEventSeqs: [2], data: { turn, message: { isError: true, source: { callId: 'failed-write' }, content: [{ type: 'tool-result', toolCallId: 'failed-write', isError: true }] } } },
+    { seq: 3, type: 'tool/result', surfaceOp: 'append', sourceEventSeqs: [2], data: { turn, message: { role: 'user', isError: true, source: { callId: 'failed-write' }, content: [{ type: 'tool-result', toolCallId: 'failed-write', isError: true }] } } },
     { seq: 4, type: 'tool/call', data: { turn, callId: 'read-after', name: 'read', arguments: '{"path":"a"}' } },
-    { seq: 5, type: 'tool/result', surfaceOp: 'append', sourceEventSeqs: [4], data: { turn, message: { source: { callId: 'read-after' }, content: [{ type: 'tool-result', toolCallId: 'read-after' }] } } },
+    { seq: 5, type: 'tool/result', surfaceOp: 'append', sourceEventSeqs: [4], data: { turn, message: { role: 'user', source: { callId: 'read-after' }, content: [{ type: 'tool-result', toolCallId: 'read-after' }] } } },
     { seq: 6, type: 'turn/end', data: { turn, reason: { kind: 'completed' } } }]
   const observation = (raw = events()) => ({ source: 'live', header: { id: 'session-a', cwd: root, agentPreset: 'primary', origin: 'user', delegationDepth: 0 },
     events: raw, inheritedEventCount: 0, cursor: raw.at(-1)!.seq, retain() { return this }, [Symbol.dispose]() {} })
@@ -130,7 +130,7 @@ test('rejects a result without the exact causal call source', async () => {
 test.each(['before-source', 'after-end'] as const)('excludes a settled call %s from the exact owner run proof', async position => {
   const f = await fixture(), raw = f.events() as any[]
   const call = { type: 'tool/call', data: { turn: 4, callId: `outside-${position}`, name: 'write', arguments: '{}' } }
-  const result = { type: 'tool/result', surfaceOp: 'append', data: { turn: 4, message: { source: { callId: `outside-${position}` },
+  const result = { type: 'tool/result', surfaceOp: 'append', data: { turn: 4, message: { role: 'user', source: { callId: `outside-${position}` },
     content: [{ type: 'tool-result', toolCallId: `outside-${position}` }] } } }
   if (position === 'before-source') {
     for (const event of raw.slice(1)) {

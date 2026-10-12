@@ -320,7 +320,7 @@ export class GoalExecutionRuntime {
   }
 
   #isRuntimeContext(source: { kind?: unknown; plugin?: unknown; form?: unknown }): boolean {
-    return (source.kind === 'plugin' && source.plugin === '@deepseek-ai/dsh-system-prompt' && source.form === 'snapshot')
+    return (source.kind === 'runtime-context' && (source.form === undefined || source.form === 'snapshot'))
       || (source.kind === 'skill-catalog' && source.form === 'catalog')
   }
 

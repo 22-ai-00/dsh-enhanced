@@ -59,7 +59,7 @@ export function originalToolEvidence(
   const event = session.eventAt(eventSeq as never)
   if (event?.type !== 'tool/result' || !isAppendSurfaceEvent(event)) return undefined
 
-  const result = event.data.message.content[0]
+  const result = event.data.message
   const callId = result.toolCallId
   if (event.data.message.source.callId !== callId) return undefined
 

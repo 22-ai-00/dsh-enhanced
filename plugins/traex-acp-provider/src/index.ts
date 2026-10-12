@@ -21,7 +21,7 @@ export function apply(ctx: Context, input?: TraexAcpProviderConfig): void {
     ctx.logger.warn('dsh-enhanced-traex-acp-provider: disabled until config.enabled is true')
     return
   }
-  const requestAttestor = createAgentLoopRequestAttestor(ctx.agents, [TRAEX_PROVIDER_ROUTE])
+  const requestAttestor = createAgentLoopRequestAttestor(ctx.agents, [TRAEX_PROVIDER_ROUTE], reference => ctx.llm.fileRequestText(reference))
   const adapter = new TraexAcpAdapter(config, {
     // A local ACP subprocess must be bound to a live loop session, never a
     // prompt-selected or static workspace path.

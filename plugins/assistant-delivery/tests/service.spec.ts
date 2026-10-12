@@ -217,18 +217,18 @@ async function harness(allow = true, options: MountHarnessOptions = {}) {
   return mountHarness(root, allow, options)
 }
 
-function registerApprovalAgent(ctx: Context, sessionId: string, input: {
+async function registerApprovalAgent(ctx: Context, sessionId: string, input: {
   callId: string
   toolName: string
   arguments: string
-}): Agent {
+}): Promise<Agent> {
   const id = SessionId(sessionId)
   const session = ctx.sessions.create(id, { meta: { cwd: '/work/alpha', agentPreset: 'primary' } })
   const agent: Agent = { id, options: {}, session,
     inbox: createInboxStub(),
     ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
-  ctx.agents.register(agent)
+  await ctx.agents.register(agent)
   session.append('turn/start', { turn: 1 })
   session.append('step/start', { turn: 1, step: 1 })
   session.append('approval/policy', { policy: 'ask' })
@@ -245,6 +245,13 @@ function registerApprovalAgent(ctx: Context, sessionId: string, input: {
 function appendSandboxMode(session: Session, mode: 'workspace-write' | 'danger-full-access'): void {
   const append = session.append as unknown as (type: string, data: unknown) => unknown
   append.call(session, 'sandbox/mode', { mode })
+}
+
+function selectNativeAutoReview(session: Session): void {
+  const append = session.append as unknown as (type: string, data: unknown) => unknown
+  append.call(session, 'permission/preset', { preset: 'auto' })
+  appendSandboxMode(session, 'danger-full-access')
+  session.append('assistant-policy/approval-reviewer', { reviewer: 'auto-review' })
 }
 
 const principal = { channel: 'lark', account: 'bot-1', tenant: 'tenant-a', user: 'ou_owner' }
@@ -294,7 +301,7 @@ async function boundApprovalHarness(options: MountHarnessOptions & {
       sessionId, policyRef: 'owner-dm' })
   }
   const binding = fixture.service.history(foreground(sessionId), {}).binding
-  const agent = registerApprovalAgent(fixture.ctx, binding.sessionId, {
+  const agent = await registerApprovalAgent(fixture.ctx, binding.sessionId, {
     callId: 'call-delivery-1', toolName: 'write_file', arguments: rawArguments,
   })
   return { ...fixture, agent, binding, rawArguments }
@@ -1713,7 +1720,7 @@ describe('assistant delivery Cordis service', () => {
     await service.acceptInbound({ ...envelope, eventId: 'evt-tool-approval' })
     const binding = service.history(foreground('delivery-session-approval'), {}).binding
     const rawArguments = '{ "path": "/work/alpha/a.txt", "mode": "write" }'
-    const agent = registerApprovalAgent(ctx, binding.sessionId, {
+    const agent = await registerApprovalAgent(ctx, binding.sessionId, {
       callId: 'call-delivery-1', toolName: 'write_file', arguments: rawArguments,
     })
     const requestToolApproval = vi.fn(async () => 'allowed-once' as const)
@@ -1987,7 +1994,7 @@ describe('assistant delivery Cordis service', () => {
   test('falls through once only for unbound or auto-reviewed asks and claims bound user asks', async () => {
     const unboundFlush = vi.fn()
     const unbound = await harness(true, { approval: true, flush: unboundFlush })
-    const unboundAgent = registerApprovalAgent(unbound.ctx, 'unbound-session', {
+    const unboundAgent = await registerApprovalAgent(unbound.ctx, 'unbound-session', {
       callId: 'call-delivery-1', toolName: 'write_file', arguments: '{}',
     })
     const unboundNext = vi.fn(async () => 'rejected' as const)
@@ -2000,7 +2007,7 @@ describe('assistant delivery Cordis service', () => {
 
     const flush = vi.fn()
     const bound = await boundApprovalHarness({ flush, sessionId: 'approval-waterfall' })
-    bound.agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'auto-review' })
+    selectNativeAutoReview(bound.agent.session)
     const next = vi.fn(async () => 'rejected' as const)
     bound.ctx.on('approval/request', next)
     await expect(bound.ctx.approval.request({ agent: bound.agent, toolName: 'write_file',
@@ -2121,7 +2128,8 @@ describe('assistant delivery Cordis service', () => {
       const fixture = await boundApprovalHarness({ sessionId, reviewer: modelReviewer,
         ...(reviewerMountOrder === undefined ? {} : { reviewerMountOrder }) })
       contexts.push(fixture.ctx)
-      fixture.agent.session.append('assistant-policy/approval-reviewer', { reviewer })
+      if (reviewer === 'auto-review') selectNativeAutoReview(fixture.agent.session)
+      else fixture.agent.session.append('assistant-policy/approval-reviewer', { reviewer })
       const requestToolApproval = vi.fn(async () => 'allowed-once' as const)
       await fixture.service.registerAdapter({
         channel: 'lark', account: 'bot-1',
@@ -2205,7 +2213,7 @@ describe('assistant delivery Cordis service', () => {
       reviewerAssessment('escalate'), reviewerAssessment('escalate'),
     ])
     const fixture = await boundApprovalHarness({ sessionId: 'approval-auto-concurrent', reviewer: modelReviewer })
-    fixture.agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'auto-review' })
+    selectNativeAutoReview(fixture.agent.session)
     fixture.agent.session.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('call-delivery-2'),
       name: 'write_file', arguments: '{"path":"/work/alpha/b.txt"}' })
     const answers = new Map<string, (outcome: 'allowed-once') => void>()
@@ -2237,7 +2245,7 @@ describe('assistant delivery Cordis service', () => {
   test('does not leak one live auto-review escalation marker into a concurrent request', async () => {
     const modelReviewer = new DeliveryReviewerAdapter([reviewerAssessment('escalate')])
     const fixture = await boundApprovalHarness({ sessionId: 'approval-auto-isolation', reviewer: modelReviewer })
-    fixture.agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'auto-review' })
+    selectNativeAutoReview(fixture.agent.session)
     fixture.agent.session.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('call-delivery-2'),
       name: 'write_file', arguments: '{"path":"/work/alpha/b.txt"}' })
     let answer!: (outcome: 'allowed-once') => void
@@ -2335,7 +2343,7 @@ describe('assistant delivery Cordis service', () => {
 
   test('supports an explicit delegated owner route and invalidates it when unbound', async () => {
     const fixture = await boundApprovalHarness({ sessionId: 'approval-delegated-owner' })
-    const delegated = registerApprovalAgent(fixture.ctx, 'approval-background-agent', {
+    const delegated = await registerApprovalAgent(fixture.ctx, 'approval-background-agent', {
       callId: 'call-delegated-1', toolName: 'write_file', arguments: '{"path":"/work/alpha/delegated.txt"}',
     })
     const unbind = fixture.service.bindAgentApprovalRoute(delegated, { bindingId: fixture.binding.id })

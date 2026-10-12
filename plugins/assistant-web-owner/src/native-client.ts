@@ -36,3 +36,16 @@ export function createOwnerSessionTree(ctx: Context, Tree: typeof EntryTree, con
   }
   return new OwnerSessionTree(ctx)
 }
+
+export async function startOwnerSessionTree(tree: EntryTree, controllerPath: string): Promise<void> {
+  try {
+    await tree.root.update([{ id: 'native-session-controller', name: controllerPath }])
+    await tree.await()
+    const entry = tree.resolve('native-session-controller')
+    if (!entry.fiber) throw new Error('assistant-web-owner: native controller did not start')
+    await entry.fiber.await()
+  } catch (error) {
+    await tree.root.stop()
+    throw error
+  }
+}

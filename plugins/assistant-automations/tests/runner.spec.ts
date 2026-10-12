@@ -157,7 +157,7 @@ async function harness(options: {
   })
   let startupDecision: string | undefined
   const executionContexts: unknown[] = []
-  ctx.on('agent/session-start', ({ agent: started }) => {
+  ctx.on('agent/created', ({ agent: started }) => {
     executionContexts.push(started.ctx.get('assistantAutomationExecution'))
     started.session.append('approval/policy', { policy: 'never' })
     started.session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })

@@ -446,7 +446,7 @@ describe('owner-scoped native goal context', () => {
     await agent.whenIdle(); await f.service.whenIdle()
     expect(f.service.inspect(agent, record.id).native).toMatchObject({ phase: 'paused', revision: record.native.revision + 1 })
     const results = agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
-    const waitResults = results.flatMap(event => event.data.message.content).filter(block => block.type === 'tool-result' && block.toolCallId === 'wait-event')
+    const waitResults = results.map(event => event.data.message).filter(block => block.toolCallId === 'wait-event')
     expect(waitResults).toHaveLength(1)
     expect(waitResults[0], JSON.stringify(results)).toMatchObject({ isError: scenario === 'storage-failure' })
     expect(f.human.has(agent)).toBe(false); expect(calls).toBe(expectedCalls); expect(lateTool).not.toHaveBeenCalled()
@@ -1069,7 +1069,7 @@ describe('owner-scoped native goal context', () => {
     await drifting.agent.whenIdle(); await f.service.whenIdle()
     expect(phaseRequests).toBe(1)
     const toolResults = drifting.agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
-      .flatMap(event => event.data.message.content).filter(block => block.type === 'tool-result' && block.toolCallId === 'drift-dependency-tool')
+      .map(event => event.data.message).filter(block => block.toolCallId === 'drift-dependency-tool')
     expect(toolResults).toMatchObject([{ isError: false }])
     expect(f.service.executionRuns(drifting.agent, drifting.saved.id)).toMatchObject([{
       intent: { dependencies: [{ goalId: dependency.id, definitionVersion: achieved.definition.version, definitionDigest: achieved.definition.digest }] },
@@ -1188,7 +1188,7 @@ describe('owner-scoped native goal context', () => {
     // The harness keeps its owner-turn seam asserted; capture happens only after
     // the autonomous source turn has completed and been independently accepted.
     const sourceResults = agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
-    expect(sourceResults.some(event => event.data.message.content.some(block => block.type === 'tool-result' && block.isError === true)), JSON.stringify(sourceResults)).toBe(false)
+    expect(sourceResults.some(event => event.data.message.isError === true), JSON.stringify(sourceResults)).toBe(false)
     expect(f.service.inspectVerifiedWorkflowRun(agent, record.id, exported.runId)).toEqual(exported)
     await f.ctx.plugin(SessionQueryEngine, [])
     const ownerInput = { ownerRouteId: 'owner-route', principalId: 'owner', workspace: f.root,
@@ -1282,7 +1282,7 @@ describe('owner-scoped native goal context', () => {
     await vi.waitFor(() => expect(calls).toBe(3), { timeout: 2_000 })
     await agent.whenIdle(); await f.service.whenIdle()
     const sourceResults = agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
-    expect(sourceResults.some(event => event.data.message.content.some(block => block.type === 'tool-result' && block.isError === true)), JSON.stringify(sourceResults)).toBe(false)
+    expect(sourceResults.some(event => event.data.message.isError === true), JSON.stringify(sourceResults)).toBe(false)
     const historical = f.service.inspectVerifiedWorkflowSource(agent, record.id)
     expect(historical.steps).toHaveLength(1)
     f.owners.set(agent, 'other')
@@ -1430,8 +1430,8 @@ describe('goal strategy compare concurrency', () => {
   const compareResult = (agent: Agent) => {
     const blocks = agent.session.snapshotEvents()
       .filter(event => event.type === 'tool/result')
-      .flatMap(event => event.data.message.content)
-      .filter(block => block.type === 'tool-result' && block.toolCallId === 'compare-call')
+      .map(event => event.data.message)
+      .filter(block => block.toolCallId === 'compare-call')
     if (blocks.length !== 1) return undefined
     const content = blocks[0]!.content
     const text = typeof content === 'string' ? content

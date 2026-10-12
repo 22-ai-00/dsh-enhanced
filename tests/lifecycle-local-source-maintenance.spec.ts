@@ -34,7 +34,7 @@ async function installerFixture() {
   await cp(dirname(require.resolve('yaml/package.json')), join(root, 'node_modules/yaml'), { recursive: true })
   return root
 }
-async function hostFixture(root: string, missingApi = false) {
+async function hostFixture(root: string, missingApi = false, version = '0.1.5-rc.3') {
   const host = join(root, 'host')
   const dshRoot = join(host, 'node_modules', '@deepseek-ai', 'dsh')
   const bootRoot = join(host, 'node_modules', '@deepseek-ai', 'dsh-app-boot')
@@ -42,12 +42,23 @@ async function hostFixture(root: string, missingApi = false) {
   await mkdir(join(bootRoot, 'lib'), { recursive: true })
   const path = join(dshRoot, 'lib', 'bin.js')
   await writeFile(path, 'export const cli = true\n', { mode: 0o700 })
-  await writeFile(join(dshRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.5-rc.3',
+  await writeFile(join(dshRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version,
     type: 'module', bin: { dsh: 'lib/bin.js' }, exports: { './package.json': './package.json' } }), { mode: 0o600 })
-  await writeFile(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version: '0.1.5-rc.3',
+  await writeFile(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version,
     type: 'module', exports: { '.': './lib/index.js', './package.json': './package.json' } }), { mode: 0o600 })
   await writeFile(join(bootRoot, 'lib/index.js'), missingApi ? 'export const boot = () => { throw new Error("plugin effects ran") }\n'
-    : `import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+    : version === '0.2.0-rc.2' ? `import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+export function loadProfileDirectory(name, dir, installAnchor) {
+  if (name !== 'dsh' || !installAnchor.endsWith('/@deepseek-ai/dsh/package.json')) throw new Error('wrong Host')
+  const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+  return { dir, skippedBundles: manifest.skip ? [{ packageName: 'missing' }] : [] }
+}
+export async function createRuntimeResolution({ installAnchor, profile }) {
+  if (!installAnchor.endsWith('/@deepseek-ai/dsh/package.json') || !profile.dir) throw new Error('wrong Host profile')
+  return { entries: [{ name: '@deepseek-ai/cordis', scope: 'installation' }] }
+}
+` : `import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 export const boot = () => { throw new Error('plugin effects ran') }
 export function loadProfileDirectory(name, dir, installAnchor) {
@@ -180,6 +191,24 @@ describe('pre-owner local source maintenance admission', () => {
     const changed = run()
     expect(changed.status).not.toBe(0)
     expect(changed.stderr).toContain('pinned DSH executable changed')
+  })
+  test('DSH 0.2 resolves a pinned Host profile without legacy fallback writes', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'local-source-resolution-')))
+    roots.push(root)
+    const homePath = join(root, 'home')
+    const manifestPath = join(homePath, 'profiles', 'assistant', 'package.json')
+    await mkdir(dirname(manifestPath), { recursive: true })
+    await writeFile(manifestPath, '{"dsh":{"profile":{"bundles":[]}}}\n')
+    const dsh = await hostFixture(root, false, '0.2.0-rc.2')
+    await expect(healLocalSourceProfileModuleFallback({ homePath, profile: 'assistant', dsh })).resolves.toBeUndefined()
+    await expect(readFile(join(homePath, 'fallback-healed'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(manifestPath, 'utf8')).toBe('{"dsh":{"profile":{"bundles":[]}}}\n')
+    await writeFile(manifestPath, '{"skip":true,"dsh":{"profile":{"bundles":[]}}}\n')
+    await expect(healLocalSourceProfileModuleFallback({ homePath, profile: 'assistant', dsh }))
+      .rejects.toThrow('cannot resolve the complete profile')
+    await writeFile(dsh.path, 'changed Host executable\n')
+    await expect(healLocalSourceProfileModuleFallback({ homePath, profile: 'assistant', dsh }))
+      .rejects.toThrow('pinned DSH executable changed')
   })
   test('rejects an executable Host from the writable stopped Home before loading its boot module', async () => {
     const homePath = await realpath(await mkdtemp(join(tmpdir(), 'local-source-home-host-')))

@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { Loader, EntryTree } from '@deepseek-ai/cordis-plugin-loader'
 import { describe, expect, it } from 'vitest'
-import { createOwnerSessionTree } from '../src/native-client.js'
+import { createOwnerSessionTree, startOwnerSessionTree } from '../src/native-client.js'
 
 // Exercise actual Cordis/Loader lifecycle, not just serialized metadata. The
 // real installed-package graph is additionally covered by the browser test.
@@ -20,7 +20,7 @@ describe('owner native Session client entry', () => {
           inner.effect(() => () => { stops++ })
         } })
         active.effect(() => () => tree!.root.stop())
-        await tree.root.update([{ id: 'native-session-controller', name: path }])
+        await startOwnerSessionTree(tree, path)
       } })
       await owner
       expect(starts).toBe(1)
@@ -41,7 +41,7 @@ describe('owner native Session client entry', () => {
         active.effect(() => () => { cleanups++ })
         throw new Error('owner adapter unavailable')
       } })
-      await expect(tree.root.update([{ id: 'native-session-controller', name: '/native/controller.js' }])).rejects.toThrow('owner adapter unavailable')
+      await expect(startOwnerSessionTree(tree, '/native/controller.js')).rejects.toThrow('owner adapter unavailable')
       await tree.root.stop()
       expect([...tree.entries()]).toEqual([])
       expect(cleanups).toBe(1)

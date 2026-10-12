@@ -133,15 +133,22 @@ async function controlledHostFixture(withUnits = false, dumpLink: 'none' | 'exte
     const executable = join(binDirectory, 'dsh')
     await mkdir(join(native, 'dsh', 'lib'), { recursive: true, mode: 0o700 })
     await mkdir(join(native, 'dsh-base'), { recursive: true, mode: 0o700 })
+    await mkdir(join(native, 'dsh-skill-filesystem'), { recursive: true, mode: 0o700 })
     await mkdir(binDirectory, { recursive: true, mode: 0o700 })
     await chmod(runtimeRoot, 0o700)
     await cp(yamlRoot, join(runtimeRoot, 'node_modules', 'yaml'), { recursive: true, dereference: true })
     await writeFile(join(native, 'dsh', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version,
-      bin: { dsh: 'lib/bin.js' } }) + '\n')
+      bin: { dsh: 'lib/bin.js' }, dependencies: { '@deepseek-ai/dsh-skill-filesystem': `^${version}` } }) + '\n')
     await writeFile(join(native, 'dsh-base', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-base', version }) + '\n')
+    await writeFile(join(native, 'dsh-skill-filesystem', 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh-skill-filesystem', version, dependencies: { yaml: '^2.4.2' },
+    }) + '\n')
     await writeFile(join(runtimeRoot, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: {
-      'node_modules/@deepseek-ai/dsh': { version, integrity: old.integrity },
+      'node_modules/@deepseek-ai/dsh': { version, integrity: old.integrity,
+        dependencies: { '@deepseek-ai/dsh-skill-filesystem': `^${version}` } },
       'node_modules/@deepseek-ai/dsh-base': { version, integrity: old.integrity },
+      'node_modules/@deepseek-ai/dsh-skill-filesystem': { version, integrity: old.integrity,
+        dependencies: { yaml: '^2.4.2' } },
     } }) + '\n')
     const dumpMutation = version !== '0.1.5-rc.4' ? '' : dumpLink === 'external'
       ? `require('node:fs').symlinkSync('/etc/hosts', process.env.DSH_HOME + '/unexpected-link'); `

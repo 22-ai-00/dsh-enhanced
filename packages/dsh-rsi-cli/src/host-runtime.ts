@@ -56,12 +56,19 @@ function inside(base: string, path: string): boolean {
   const part = relative(base, path)
   return part === '' || (part !== '..' && !part.startsWith(`..${sep}`) && !isAbsolute(part))
 }
-function isVersion(version: string): boolean {
+export function isSupportedReceiptVersion(version: string): boolean {
   const match = /^0\.1\.5(?:-rc\.([0-9]{1,6}))?$/u.exec(version)
-  return match !== null && (match[1] === undefined || Number(match[1]) >= 3)
+  return version === '0.2.0-rc.2' || match !== null && (match[1] === undefined || Number(match[1]) >= 3)
 }
-function validVersion(version: string): string {
-  if (!isVersion(version)) fail(`unsupported DSH version ${JSON.stringify(version)}; validated range is 0.1.5-rc.3 through 0.1.5`)
+export function isSupportedCandidateVersion(version: string): boolean {
+  return version === '0.2.0-rc.2'
+}
+function validReceiptVersion(version: string): string {
+  if (!isSupportedReceiptVersion(version)) fail(`unsupported DSH receipt version ${JSON.stringify(version)}`)
+  return version
+}
+function validCandidateVersion(version: string): string {
+  if (!isSupportedCandidateVersion(version)) fail(`unsupported DSH version ${JSON.stringify(version)}; validated candidate is 0.2.0-rc.2`)
   return version
 }
 function validIntegrity(integrity: string): boolean {
@@ -138,7 +145,7 @@ async function npmCommand(args: readonly string[], cwd: string, signal: AbortSig
 }
 
 async function resolveMetadata(selector: string, root: string, signal: AbortSignal, ports: ManagedHostRuntimePorts): Promise<Metadata> {
-  if (selector !== 'latest') validVersion(selector)
+  if (selector !== 'latest') validCandidateVersion(selector)
   const response = await npmCommand(['view', `${PACKAGE}@${selector}`, 'version', 'dist.integrity', 'dist.tarball', '--json', '--prefer-online', `--registry=${REGISTRY}`], root, signal, ports)
   let object: unknown
   try { object = JSON.parse(response.stdout) } catch { fail('npm view did not return valid JSON') }
@@ -148,7 +155,7 @@ async function resolveMetadata(selector: string, root: string, signal: AbortSign
   const integrity = data['dist.integrity']
   const tarball = data['dist.tarball']
   if (typeof version !== 'string' || typeof integrity !== 'string' || typeof tarball !== 'string') fail('npm metadata is incomplete')
-  validVersion(version)
+  validCandidateVersion(version)
   if (selector !== 'latest' && version !== selector) fail('npm resolved a different exact version')
   if (!validIntegrity(integrity)) fail('npm metadata lacks a valid SHA-512 integrity value')
   const expectedTarball = `${REGISTRY}@deepseek-ai/dsh/-/dsh-${version}.tgz`
@@ -314,7 +321,7 @@ async function acquireLock(root: string, signal: AbortSignal): Promise<() => Pro
 /** Read and independently verify a previously prepared exact version without contacting npm. */
 export async function readManagedHostRuntime(input: { root: string; version: string; signal?: AbortSignal }): Promise<ManagedHostRuntime> {
   const root = await canonicalRoot(input.root, false)
-  const version = validVersion(input.version)
+  const version = validReceiptVersion(input.version)
   return await checkReceipt(root, version, input.signal ?? new AbortController().signal)
 }
 

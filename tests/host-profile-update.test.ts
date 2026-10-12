@@ -14,10 +14,14 @@ const integrity = 'sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 const native = (name: string, version: string, dependencies = {}) => ({ name, version, dependencies })
 
 async function host(root: string, version: string, dropped: boolean, cordisVersion = dropped ? '4.0.1' : '4.0.2') {
-  const yamlEntry = createRequire(import.meta.url).resolve('yaml')
+  const yamlPackage = dirname(createRequire(import.meta.url).resolve('yaml/package.json'))
   await mkdir(join(root, 'node_modules'), { recursive: true })
-  await symlink(dirname(dirname(yamlEntry)), join(root, 'node_modules', 'yaml'))
-  const packages = [{ ...native('@deepseek-ai/dsh', version), bin: { dsh: 'lib/bin.js' } }, native('@deepseek-ai/dsh-base', version, { '@deepseek-ai/cordis': cordisVersion }), native('@deepseek-ai/cordis', cordisVersion)]
+  await cp(yamlPackage, join(root, 'node_modules', 'yaml'), { recursive: true })
+  const packages = [{ ...native('@deepseek-ai/dsh', version, { '@deepseek-ai/dsh-skill-filesystem': `^${version}` }),
+    bin: { dsh: 'lib/bin.js' } },
+  native('@deepseek-ai/dsh-base', version, { '@deepseek-ai/cordis': cordisVersion }),
+  native('@deepseek-ai/dsh-skill-filesystem', version, { yaml: '^2.4.2' }),
+  native('@deepseek-ai/cordis', cordisVersion)]
   if (dropped) packages.push(native('@deepseek-ai/old-only', version))
   const lock: Record<string, unknown> = { '': { name: 'test-host', version: '0.0.0' } }
   for (const pkg of packages) {

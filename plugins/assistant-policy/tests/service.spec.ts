@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
+import PermissionPresetService from '@deepseek-ai/dsh-permission-presets'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { AssistantPolicyService } from '../src/service.ts'
 import type { PolicyRequest } from '../src/types.ts'
@@ -29,6 +30,35 @@ const request: PolicyRequest = {
 }
 
 describe('assistant policy Cordis service', () => {
+  test('publishes fixed Auto through the installed DSH permission service and withdraws it on replacement', async () => {
+    const ctx = new Context()
+    new SessionStore(ctx)
+    ctx.provide('shell' as never, { sandboxMode: 'workspace-write' } as never)
+    ctx.provide('approval' as never, { config: { policy: 'ask' } } as never)
+    ctx.provide('sessionProjections' as never, { register() {}, stateOf() { return { preset: null, sandbox: null, approval: null, seeded: false } } } as never)
+    const policy = ctx.plugin(AssistantPolicyService, { databasePath: await databasePath(), rules: [] })
+    await policy
+    const mount = () => ctx.plugin(PermissionPresetService, { presets: {
+      'workspace-write': { sandbox: 'workspace-write', approval: 'ask', name: 'Ask' },
+      'danger-full-access': { sandbox: 'danger-full-access', approval: 'never', name: 'Full' },
+    } })
+    const first = mount(); await first
+    expect(ctx.permissionPresets.names).toContain('auto')
+    expect(ctx.permissionPresets.resolve('auto')).toEqual({ sandbox: 'danger-full-access', approval: 'ask' })
+    const firstAdmit = (ctx.permissionPresets as unknown as { autoAdmit: () => void }).autoAdmit
+    expect(firstAdmit).not.toThrow()
+    await first.dispose()
+    expect(firstAdmit).toThrow(/integration is inactive/u)
+    const second = mount(); await second
+    expect(ctx.permissionPresets.names).toContain('auto')
+    const secondAdmit = (ctx.permissionPresets as unknown as { autoAdmit: () => void }).autoAdmit
+    await policy.dispose()
+    expect(ctx.permissionPresets.names).not.toContain('auto')
+    expect(secondAdmit).toThrow(/integration is inactive/u)
+    await second.dispose()
+    await ctx.fiber.restart()
+  })
+
   test('registers Auto for an injected permission generation and revokes its admission on replacement', async () => {
     const ctx = new Context()
     new SessionStore(ctx)

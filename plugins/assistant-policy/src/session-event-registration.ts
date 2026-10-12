@@ -14,7 +14,7 @@ import { createRequire } from 'node:module'
 const APPROVAL_REVIEWER_EVENT_TYPE = 'assistant-policy/approval-reviewer'
 const READER_PROBE_EVENT_PREFIX = 'assistant-policy/__reader-probe/'
 const LEGACY_SESSION_FORMAT_VERSION = 0
-// v3 is the 0.1.5-rc.3 format; v4 is the 0.1.7-rc.2 format. Every one of
+// v3 is the 0.1.5-rc.3 format; v4 is the 0.2.0-rc.2 format. Every one of
 // these builds exposes the same mutable KNOWN_SESSION_EVENT_TYPES Set that
 // persistence consults on both append and cold read (with the unknown-type
 // refusal running before per-type structural adoption), so the reader-identity
