@@ -88,14 +88,14 @@ describe('RSI finite authority deployment binding', () => {
     await expect(validateRsiAuthorities(value.manifest, value.binding as any)).rejects.toThrow(message)
   })
 
-  test('accepts a pinned schema-4 Host wrapper and matching finite resolver grant', async () => {
+  test.skipIf(process.platform !== 'linux')('accepts a pinned schema-4 Host wrapper and matching finite resolver grant', async () => {
     const value = await fixture(true)
     const host = await value.standingHost()
     process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG = host.wrapperPath
     await expect(validateRsiAuthorities(value.manifest, value.binding as any)).resolves.toBeUndefined()
   })
 
-  test('accepts two Host grant packages in reverse adoption policy order', async () => {
+  test.skipIf(process.platform !== 'linux')('accepts two Host grant packages in reverse adoption policy order', async () => {
     const value = await fixture(true)
     const host = await value.standingHost()
     for (const name of ['approvals', 'releases', 'adoptions', 'observations', 'qualifications'] as const) {
@@ -122,7 +122,7 @@ describe('RSI finite authority deployment binding', () => {
     await expect(validateRsiAuthorities(value.manifest, value.binding as any)).resolves.toBeUndefined()
   })
 
-  test.each([
+  test.skipIf(process.platform !== 'linux').each([
     ['unknown wrapper schema', async (host: Awaited<ReturnType<RsiAuthorityFixture['standingHost']>>) => {
       const wrapper = await host.readWrapper(); wrapper.schemaVersion = 5; await host.writeWrapper(wrapper)
     }, 'unknown wrapper schema'],

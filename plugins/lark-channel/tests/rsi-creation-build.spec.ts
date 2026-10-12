@@ -81,7 +81,7 @@ function behaviorBuilds(items: { args: string[] }[]): number {
     && item.args.some(arg => arg.endsWith('plugin-verifier.Dockerfile'))).length
 }
 
-describe('private RSI plugin behavior image preparation', () => {
+describe.skipIf(process.platform !== 'linux' || process.arch !== 'x64')('private RSI plugin behavior image preparation', () => {
   test('builds once from pinned fixed assets, replays the immutable image, and reads without Docker', async () => {
     const f = await fixture()
     const first = await prepareRsiCreationBuildEnvironment(f.args)

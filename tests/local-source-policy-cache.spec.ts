@@ -108,7 +108,7 @@ process.exit(2)
   return { homePath, profilePath, pnpmPath, current, originalResources }
 }
 
-describe('pre-stop local source offline policy cache', () => {
+describe.skipIf(process.platform !== 'linux')('pre-stop local source offline policy cache', () => {
   test('binds old metadata and a fresh verified marker, then rejects marker or pnpm replacement', async () => {
     const f = await fixture()
     const preparation = await lifecycleProfileTest.prepareLocalSourceOfflineCache({ ...f, profile: 'web' })

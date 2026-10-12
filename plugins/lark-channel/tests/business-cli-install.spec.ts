@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -10,7 +10,7 @@ import { ensureLarkBusinessCli } from '../src/business-cli-install.ts'
 const originalPath = process.env.PATH
 const roots: string[] = []
 const version = '1.0.96'
-const archiveName = `lark-cli-${version}-linux-amd64.tar.gz`
+const archiveName = `lark-cli-${version}-${process.platform}-${process.arch === 'x64' ? 'amd64' : process.arch}.tar.gz`
 const registryUrl = 'https://registry.npmjs.org/@larksuite%2fcli/latest'
 const tarballUrl = `https://registry.npmjs.org/@larksuite/cli/-/cli-${version}.tgz`
 const releaseUrl = `https://github.com/larksuite/cli/releases/download/v${version}/${archiveName}`
@@ -23,7 +23,7 @@ afterEach(async () => {
 })
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-lark-business-cli-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-lark-business-cli-')))
   roots.push(root)
   const home = join(root, 'dsh-home')
   const bin = join(root, 'fake-bin')

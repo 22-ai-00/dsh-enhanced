@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,7 +15,7 @@ async function executable(path: string, content: string): Promise<void> {
 }
 
 async function fixture(initialPnpm: 'missing' | 'wrong') {
-  const root = await mkdtemp(join(tmpdir(), 'dsh private host path '))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh private host path ')))
   roots.push(root)
   const fakeBin = join(root, 'fake bin')
   const globalPrefix = join(root, 'fake npm global')

@@ -83,7 +83,7 @@ async function fixture() {
     source: { schemaVersion: 1, version: '0.1.48', origin: { kind: 'local-head', locator: root, ref: 'HEAD' },
       sourceCommit: 'a'.repeat(40), repository: join(root, 'source'),
       baseline: { ref: 'refs/dsh-source/repairs', remote: join(root, 'release.git'), targetBranch: 'repairs', initialCommit: 'a'.repeat(40) } },
-    sourceBuild: { dockerPath: '/usr/bin/docker', image: `fixture@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
+    sourceBuild: { dockerPath: await realpath(process.execPath), image: `fixture@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
       memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096, versioning: 'patch' },
     git: { path: '/usr/bin/git', sha256: 'a'.repeat(64) }, now, expiresAt: now + 30 * 86_400_000,
     plugins: ['personal-assistant', 'assistant-goals', 'assistant-health', 'assistant-growth-driver', 'assistant-memory-learning'],

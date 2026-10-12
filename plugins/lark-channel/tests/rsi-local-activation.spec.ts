@@ -32,6 +32,7 @@ const runtimeHelpers = await import(new URL('../../plugin-control-plane/tests/he
   cleanupRuntimeEpochFixtures(): Promise<void>
 }
 const roots: string[] = []
+const linuxTest = test.skipIf(process.platform !== 'linux')
 afterEach(async () => {
   await runtimeHelpers.cleanupRuntimeEpochFixtures()
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
@@ -112,7 +113,7 @@ async function fixture(watched = false, preOwner = false) {
   return { ...f, resources, original, preparation, live, stage, ledger, stageLedger, watchedPlan, readiness, input }
 }
 
-test('produces a verifiable unanchored Host signature without writing either Home or ledger', async () => {
+linuxTest('produces a verifiable unanchored Host signature without writing either Home or ledger', async () => {
   const f = await fixture(), originalHome = await snapshot(f.home), originalStage = await snapshot(f.stage)
   const record = await produceRsiLocalSourceMaintenance(f.input)
   expect(parseSourceMaintenanceRecord(record)).toEqual(record)
@@ -128,7 +129,7 @@ test('produces a verifiable unanchored Host signature without writing either Hom
   expect(await snapshot(f.stage)).toEqual(originalStage)
 }, 60_000)
 
-test.each(['owner-ledger', 'pre-owner'] as const)('extends a previously applied signed Git chain in %s mode with the exact prior digest', async mode => {
+linuxTest.each(['owner-ledger', 'pre-owner'] as const)('extends a previously applied signed Git chain in %s mode with the exact prior digest', async mode => {
   const f = await fixture(false, mode === 'pre-owner'), originalHome = await snapshot(f.home)
   const first = await produceRsiLocalSourceMaintenance(f.input)
   await applyRsiSourceMaintenanceInStage({ logicalHome: f.home, physicalHome: f.stage, profile: f.profile,
@@ -157,7 +158,7 @@ test.each(['owner-ledger', 'pre-owner'] as const)('extends a previously applied 
   expect(await snapshot(archive)).toEqual(originalHome)
 }, 60_000)
 
-test.each(['missing', 'old-schema', 'corrupt', 'missing-table'] as const)('rejects a %s stage ledger without creating or migrating it', async kind => {
+linuxTest.each(['missing', 'old-schema', 'corrupt', 'missing-table'] as const)('rejects a %s stage ledger without creating or migrating it', async kind => {
   const f = await fixture(), originalHome = await snapshot(f.home)
   if (kind === 'missing') await rm(f.stageLedger)
   else if (kind === 'old-schema') sql(f.stageLedger, database => database.exec('PRAGMA user_version=27'))
@@ -169,7 +170,7 @@ test.each(['missing', 'old-schema', 'corrupt', 'missing-table'] as const)('rejec
   expect(await snapshot(f.stage)).toEqual(originalStage)
 }, 60_000)
 
-test('rejects live/stage source history drift and a live ledger that diverges from its signed sidecar', async () => {
+linuxTest('rejects live/stage source history drift and a live ledger that diverges from its signed sidecar', async () => {
   const f = await fixture(), record = await produceRsiLocalSourceMaintenance(f.input)
   const originalHome = await snapshot(f.home)
   const insert = (path: string) => sql(path, database => database.prepare('INSERT INTO source_maintenance VALUES (?,?,?,?,?,?)')
@@ -183,7 +184,7 @@ test('rejects live/stage source history drift and a live ledger that diverges fr
   expect(await snapshot(f.home)).toEqual(driftedHome)
 }, 60_000)
 
-test('rejects foreign and unsafe staged signing keys and stale preparation bindings', async () => {
+linuxTest('rejects foreign and unsafe staged signing keys and stale preparation bindings', async () => {
   const f = await fixture(), originalHome = await snapshot(f.home)
   const path = join(f.stage, 'rsi-authorities', f.profile, 'identities', 'host.pem'), originalKey = await readFile(path)
   const foreignKey = generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
@@ -201,7 +202,7 @@ test('rejects foreign and unsafe staged signing keys and stale preparation bindi
   expect(await snapshot(f.home)).toEqual(originalHome)
 }, 60_000)
 
-test('rejects unfinished source work in the stopped stage ledger', async () => {
+linuxTest('rejects unfinished source work in the stopped stage ledger', async () => {
   const f = await fixture(), originalHome = await snapshot(f.home)
   const store = new ControlPlaneStore({ path: f.stageLedger })
   try {
@@ -216,7 +217,7 @@ test('rejects unfinished source work in the stopped stage ledger', async () => {
   expect(await snapshot(f.home)).toEqual(originalHome)
 }, 60_000)
 
-test('binds a watched deployment to the original applied readiness signed by the installed Host', async () => {
+linuxTest('binds a watched deployment to the original applied readiness signed by the installed Host', async () => {
   const f = await fixture(true), originalHome = await snapshot(f.home), originalStage = await snapshot(f.stage)
   const record = await produceRsiLocalSourceMaintenance(f.input)
   expect(record.host).toEqual({ planId: f.watchedPlan!.id, planDigest: f.watchedPlan!.digest,
@@ -226,14 +227,14 @@ test('binds a watched deployment to the original applied readiness signed by the
   expect(await snapshot(f.stage)).toEqual(originalStage)
 }, 60_000)
 
-test('rejects watched deployment drift even when live and stage classify the same plan', async () => {
+linuxTest('rejects watched deployment drift even when live and stage classify the same plan', async () => {
   const f = await fixture(true), originalHome = await snapshot(f.home)
   sql(f.stageLedger, database => database.prepare('UPDATE adoption_handoffs SET created_at=created_at+1 WHERE plan_id=?').run(f.watchedPlan!.id))
   await expect(produceRsiLocalSourceMaintenance(f.input)).rejects.toThrow('watched Host deployments differ')
   expect(await snapshot(f.home)).toEqual(originalHome)
 }, 60_000)
 
-test.each(['missing-readiness', 'forged-signature', 'foreign-issuer', 'unwatched', 'pending'] as const)(
+linuxTest.each(['missing-readiness', 'forged-signature', 'foreign-issuer', 'unwatched', 'pending'] as const)(
   'rejects %s watched state instead of signing host:null', async kind => {
     const f = await fixture(true), originalHome = await snapshot(f.home)
     sql(f.stageLedger, database => {
@@ -253,7 +254,7 @@ test.each(['missing-readiness', 'forged-signature', 'foreign-issuer', 'unwatched
   }, 60_000)
 
 
-test('explicit pre-owner maintenance signs real Host evidence without creating a ledger and imports through first-owner contract', async () => {
+linuxTest('explicit pre-owner maintenance signs real Host evidence without creating a ledger and imports through first-owner contract', async () => {
   const f = await fixture(false, true)
   for (const home of [f.home, f.stage]) await writeFile(join(home, 'profiles', f.profile, 'cordis.patch.yml'),
     '- id: dsh-enhanced-plugin-control-plane\n  name: "@dsh-enhanced/plugin-control-plane"\n  config:\n    sourceAdoptions: null\n- id: unrelated-default\n  name: !!js import("unrelated")\n', { mode: 0o600 })
@@ -290,7 +291,7 @@ test('explicit pre-owner maintenance signs real Host evidence without creating a
 
 const residues = ['config', 'ledger', 'state', 'registry', 'catalog', 'coordinator-profile', 'coordinator-state',
   'coordinator-receipt', 'setup-journal', 'target-control-plane', 'target-authority-reference'] as const
-for (const side of ['live', 'stage'] as const) test.each(residues)('rejects pre-owner %s residue in ' + side, async kind => {
+for (const side of ['live', 'stage'] as const) linuxTest.each(residues)('rejects pre-owner %s residue in ' + side, async kind => {
   const f = await fixture(false, true), home = side === 'live' ? f.home : f.stage
   const digest = hash(f.profile), coordinator = `rsi-${f.profile.slice(0, 43)}-${digest.slice(0, 12)}`
   const authority = join(home, 'rsi-authorities', f.profile)
@@ -315,7 +316,7 @@ for (const side of ['live', 'stage'] as const) test.each(residues)('rejects pre-
   expect(await snapshot(f.stage)).toEqual(beforeStage)
 }, 60_000)
 
-test.each(['authority-bootstrap', 'source-bootstrap', 'identity', 'sidecar', 'anchor'] as const)(
+linuxTest.each(['authority-bootstrap', 'source-bootstrap', 'identity', 'sidecar', 'anchor'] as const)(
   'rejects pre-owner %s mismatch with read-only evidence', async kind => {
     const f = await fixture(false, true)
     if (kind === 'authority-bootstrap' || kind === 'source-bootstrap') {
@@ -335,7 +336,7 @@ test.each(['authority-bootstrap', 'source-bootstrap', 'identity', 'sidecar', 'an
     expect(await snapshot(f.home)).toEqual(beforeLive); expect(await snapshot(f.stage)).toEqual(beforeStage)
   }, 60_000)
 
-test('rejects even validly signed pre-owner sidecar records carrying an owner deployment anchor', async () => {
+linuxTest('rejects even validly signed pre-owner sidecar records carrying an owner deployment anchor', async () => {
   const f = await fixture(false, true), record = await produceRsiLocalSourceMaintenance(f.input)
   const { signature: _signature, publicKeyPem: _publicKey, ...unsigned } = record
   const anchored = signSourceMaintenanceRecord({ ...unsigned, host: { planId: 'owner-plan', planDigest: 'a'.repeat(64),
@@ -347,7 +348,7 @@ test('rejects even validly signed pre-owner sidecar records carrying an owner de
 }, 60_000)
 
 
-test('pre-owner inspection does not refresh the live Git index when tracked stat metadata changes', async () => {
+linuxTest('pre-owner inspection does not refresh the live Git index when tracked stat metadata changes', async () => {
   const f = await fixture(false, true), tracked = join(f.source.repository, 'package.json')
   const changedTime = new Date(Date.now() + 10_000)
   await utimes(tracked, changedTime, changedTime)
@@ -360,7 +361,7 @@ test('pre-owner inspection does not refresh the live Git index when tracked stat
 }, 60_000)
 
 
-test.each(['home-patch', 'home-root', 'profile-root', 'dynamic-row', 'dynamic-config', 'include', 'alternate-format', 'external-overlay',
+linuxTest.each(['home-patch', 'home-root', 'profile-root', 'dynamic-row', 'dynamic-config', 'include', 'alternate-format', 'external-overlay',
   'memory-review', 'automatic-memory', 'active-learner', 'configured-learner'] as const)(
   'rejects pre-owner %s configuration outside the target patch', async kind => {
     const f = await fixture(false, true)
@@ -384,7 +385,7 @@ test.each(['home-patch', 'home-root', 'profile-root', 'dynamic-row', 'dynamic-co
     expect(await snapshot(f.home)).toEqual(beforeLive); expect(await snapshot(f.stage)).toEqual(beforeStage)
   }, 60_000)
 
-test('supports empty native root layers and ordinary defaults while never evaluating unrelated !!js module references', async () => {
+linuxTest('supports empty native root layers and ordinary defaults while never evaluating unrelated !!js module references', async () => {
   const f = await fixture(false, true)
   for (const home of [f.home, f.stage]) {
     await writeFile(join(home, 'cordis.patch.yml'), '[]\n', { mode: 0o644 })

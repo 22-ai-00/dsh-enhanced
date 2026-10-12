@@ -10,6 +10,8 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { PREPARED_SOURCE_BUILD_SCRIPT } from '../src/source-build.ts'
 
 const roots: string[] = []
+const archivePrefix = (prefix: string) => process.platform === 'darwin'
+  ? `-s ',^,${prefix},'` : `--transform='s,^,${prefix},'`
 afterEach(async () => { vi.unstubAllEnvs(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 
 it('keeps the fixed container command within the durable evidence argument bound', () => {
@@ -106,7 +108,7 @@ exec '${process.execPath}' "$@"
 set -eu
 case "$1" in
   --version) if [ "$TEST_MUTATION" = pnpm-other-version ]; then printf '11.7.1\\n'; else printf '11.7.0\\n'; fi;;
-  install) umask > "$TEST_SCRATCH/install-umask"; stat -c %a "$TEST_WORKSPACE/plugins/helper/run.sh" > "$TEST_SCRATCH/bin-mode-at-install"; printf '%s\\n' "$@" > "$TEST_SCRATCH/install-args"; mkdir -p "$TEST_WORKSPACE/node_modules"; printf generated > "$TEST_WORKSPACE/node_modules/dependency";;
+  install) umask > "$TEST_SCRATCH/install-umask"; node -p "(require('node:fs').statSync(process.argv[1]).mode & 0o777).toString(8)" "$TEST_WORKSPACE/plugins/helper/run.sh" > "$TEST_SCRATCH/bin-mode-at-install"; printf '%s\\n' "$@" > "$TEST_SCRATCH/install-args"; mkdir -p "$TEST_WORKSPACE/node_modules"; printf generated > "$TEST_WORKSPACE/node_modules/dependency";;
   check)
     umask > "$TEST_SCRATCH/check-umask"
     mkdir -p "$TEST_WORKSPACE/plugins/helper/generated-check-umask-dir"
@@ -184,11 +186,11 @@ case "$1" in
     fi
     cd "$TEST_WORKSPACE/plugins/helper"
     case "$TEST_MUTATION" in
-      pack-missing) tar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" --transform='s,^,package/,' package.json README.md LICENSE bin run.sh lib;;
-      pack-missing-entry) tar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" --transform='s,^,package/,' package.json cordis.patch.yml README.md LICENSE bin run.sh;;
-      pack-duplicate) tar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" --transform='s,^,package/,' package.json package.json cordis.patch.yml README.md LICENSE bin run.sh lib;;
-      pack-unsafe) tar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" --transform='s,^,../package/,' package.json cordis.patch.yml README.md LICENSE bin run.sh lib;;
-      *) tar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" --transform='s,^,package/,' package.json cordis.patch.yml README.md LICENSE bin run.sh lib;;
+      pack-missing) tar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" ${archivePrefix('package/')} package.json README.md LICENSE bin run.sh lib;;
+      pack-missing-entry) tar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" ${archivePrefix('package/')} package.json cordis.patch.yml README.md LICENSE bin run.sh;;
+      pack-duplicate) tar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" ${archivePrefix('package/')} package.json package.json cordis.patch.yml README.md LICENSE bin run.sh lib;;
+      pack-unsafe) tar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" ${archivePrefix('../package/')} package.json cordis.patch.yml README.md LICENSE bin run.sh lib;;
+      *) tar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" ${archivePrefix('package/')} package.json cordis.patch.yml README.md LICENSE bin run.sh lib;;
     esac
     if [ "$TEST_MUTATION" = pack-symlink ]; then
       mv "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" "$TEST_SCRATCH/original-pack.tgz"

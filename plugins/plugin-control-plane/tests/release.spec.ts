@@ -704,7 +704,7 @@ describe('descriptor-pinned release adapter invocation', () => {
     const flight = invokeSourceReleaseAdapter(trust, fixture.request, abort.signal)
     const rejected = expect(flight).rejects.toMatchObject({ name: 'ReleaseAdapterError', code: 'ABORTED' })
     try {
-      await expect.poll(async () => { try { return Number(await readFile(fixture.descendantPidPath, 'utf8')) > 0 } catch { return false } }).toBe(true)
+      await expect.poll(async () => { try { return Number(await readFile(fixture.descendantPidPath, 'utf8')) > 0 } catch { return false } }, { timeout: 5_000 }).toBe(true)
       abort.abort(); await rejected
       const pid = Number(await readFile(fixture.descendantPidPath, 'utf8'))
       let active = false

@@ -42,7 +42,7 @@ test('rejects files writable by other users and multi-link inodes', async () => 
   await expect(captureHostInputFiles(f.stage, f.target, ['node_modules/pkg/index.js'])).rejects.toThrow('trusted regular')
 })
 
-test('materializes only a declared pnpm-style hardlink with identical bytes and mode', async () => {
+test.skipIf(process.platform !== 'linux')('materializes only a declared pnpm-style hardlink with identical bytes and mode', async () => {
   const f = await fixture(), input = 'node_modules/pkg/index.js'
   const entry = join(f.stage, 'node_modules/.store/pkg/index.js'), original = join(f.root, 'pnpm-store-index.js')
   await chmod(entry, 0o755)

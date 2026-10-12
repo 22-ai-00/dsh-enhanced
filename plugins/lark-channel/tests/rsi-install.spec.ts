@@ -73,7 +73,7 @@ async function fixture() {
   return {f,home,profile,coordinator,ports,starts,stops,originals,input:{dshHome:home,profile}}
 }
 
-describe('automatic owner deployment', () => {
+describe.skipIf(process.platform !== 'linux')('automatic owner deployment', () => {
   test('rejects persisted creation, receipt and grant file drift before either Host is stopped', async () => {
     const f = await fixture()
     for (const name of ['creation-review-runner', 'creation-adoption-runner']) {
