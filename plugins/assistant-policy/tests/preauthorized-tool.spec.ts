@@ -155,6 +155,32 @@ describe('trusted Host tool preauthorization', () => {
     await current.ctx.fiber.restart()
   })
 
+  test('reserves proactive_status to its exact mounted tool and revokes read-only admission with the caller', async () => {
+    const current = await fixture()
+    const caller = trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-proactive')
+    let active = true; let executions = 0
+    const status = definition('proactive_status', () => { executions += 1 })
+    const forged = definition('proactive_status', () => { executions += 100 })
+    const feedback = definition('proactive_feedback', () => {})
+    current.ctx.tools.register(status)
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(current.ctx, status, () => true)).toThrow(/reserved/)
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-goals'), status, () => true)).toThrow(/reserved/)
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(caller, feedback, () => true)).toThrow(/reserved/)
+    current.ctx.assistantPolicy.registerPreauthorizedTool(caller, forged, () => true)
+    expect((await execute(current.ctx, current.owner, 'proactive_status')).isError).toBe(true)
+    expect(current.asks()).toBe(1)
+    current.ctx.assistantPolicy.registerPreauthorizedTool(caller, status, () => active)
+    expect((await execute(current.ctx, current.owner, 'proactive_status')).isError).toBe(false)
+    expect(current.asks()).toBe(1)
+    active = false
+    expect((await execute(current.ctx, current.owner, 'proactive_status')).isError).toBe(true)
+    expect(current.asks()).toBe(2)
+    expect(executions).toBe(1)
+    await caller.fiber.dispose()
+    expect(current.ctx.assistantPolicy.isPreauthorizedTool({ name: 'proactive_status', agent: current.owner, arguments: { command: 'status' }, signal: new AbortController().signal } as never)).toBe(false)
+    await current.ctx.fiber.restart()
+  })
+
   test.each([
     'action_github_commit',
     'action_github_branch',

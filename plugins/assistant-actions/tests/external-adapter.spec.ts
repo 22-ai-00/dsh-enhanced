@@ -8,7 +8,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { createHash, generateKeyPairSync } from 'node:crypto'
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
-import { access, chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { access, chmod, chown, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -24,6 +24,13 @@ type MockExternalDispatch = ReturnType<typeof vi.fn<ExternalDispatch>>
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
+
+async function privateFixtureRoot(prefix: string): Promise<string> {
+  const root = await realpath(await mkdtemp(join(tmpdir(), prefix)))
+  await chown(root, process.getuid!(), process.getgid!())
+  expect((await lstat(root)).gid).toBe(process.getgid!())
+  return root
+}
 
 function ownerAgent(ctx: Context, workspace: string): Agent {
   const id = SessionId('external-owner-session')
@@ -70,7 +77,7 @@ function response(actionId: string, status: 'succeeded' | 'failed' | 'unknown', 
 }
 
 async function externalFixture(dispatch: MockExternalDispatch = vi.fn<ExternalDispatch>(async (_options, intent, _signal) => response(intent.actionId, 'succeeded')), grantOverrides?: (root: string) => Partial<BrokerGrantProjection>) {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'actions-external-'))), ctx = new Context(), agent = ownerAgent(ctx, root)
+  const root = await privateFixtureRoot('actions-external-'), ctx = new Context(), agent = ownerAgent(ctx, root)
   const localCommit = vi.fn(), localWorkflow = { branch: vi.fn(), pullRequest: vi.fn(), inspect: vi.fn() }, localCompensation = { capture: vi.fn(), commit: vi.fn() }
   let policyAllowed = true, actionBudget = Number.POSITIVE_INFINITY
   const authorize = vi.fn(() => ({ effect: policyAllowed && actionBudget-- > 0 ? 'allow' : 'deny' }))
@@ -92,7 +99,7 @@ async function externalFixture(dispatch: MockExternalDispatch = vi.fn<ExternalDi
 
 describe('external broker configuration', () => {
   it('defaults to embedded compatibility and rejects mixed or malformed external authority', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'actions-config-'))); cleanups.push(async () => rm(root, { recursive: true, force: true }))
+    const root = await privateFixtureRoot('actions-config-'); cleanups.push(async () => rm(root, { recursive: true, force: true }))
     expect(validateConfig({ stateRoot: join(root, 'state') }).broker.mode).toBe('embedded-compat')
     const external = await externalConfig(root)
     expect(validateConfig(external)).toMatchObject({ broker: { mode: 'external-unix-v1', requestTimeoutMs: 30_000, helloTtlMs: 30_000 }, grants: [] })
@@ -104,7 +111,7 @@ describe('external broker configuration', () => {
   })
 
   it('rejects a key beneath an unsafe writable ancestor', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'actions-key-ancestor-'))); cleanups.push(async () => rm(root, { recursive: true, force: true }))
+    const root = await privateFixtureRoot('actions-key-ancestor-'); cleanups.push(async () => rm(root, { recursive: true, force: true }))
     const unsafe = join(root, 'unsafe'), keyRoot = join(unsafe, 'keys'), keyPath = join(keyRoot, 'client.pem')
     await mkdir(keyRoot, { recursive: true, mode: 0o700 }); await chmod(unsafe, 0o770); await chmod(keyRoot, 0o700)
     const key = generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }); await writeFile(keyPath, key, { mode: 0o600 })
@@ -112,7 +119,7 @@ describe('external broker configuration', () => {
   })
 
   it('rejects replacement of the direct key parent after opening the key', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'actions-key-parent-race-'))); cleanups.push(async () => rm(root, { recursive: true, force: true }))
+    const root = await privateFixtureRoot('actions-key-parent-race-'); cleanups.push(async () => rm(root, { recursive: true, force: true }))
     const keyRoot = join(root, 'keys'), moved = join(root, 'keys-old'), keyPath = join(keyRoot, 'client.pem')
     mkdirSync(keyRoot, { mode: 0o700 }); const key = generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }); writeFileSync(keyPath, key, { mode: 0o600 })
     expect(() => readPinnedKeyFile(keyPath, 'private', { afterAncestorSnapshot() { renameSync(keyRoot, moved); mkdirSync(keyRoot, { mode: 0o700 }); writeFileSync(keyPath, key, { mode: 0o600 }) } })).toThrow(/key ancestor changed/)
@@ -267,7 +274,7 @@ describe('external broker Host facade', () => {
 
 describe('Cordis mode lifecycle', () => {
   it('owns embedded service under Keychain availability and reloads it on provider replacement', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'actions-lifecycle-'))), ctx = new Context(); cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
+    const root = await privateFixtureRoot('actions-lifecycle-'), ctx = new Context(); cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
     ctx.provide('assistantPolicy' as never, {} as never); ctx.provide('assistantDelivery' as never, {} as never)
     await ctx.plugin(plugin, { stateRoot: join(root, 'state') })
     expect(ctx.get('assistantActions', false)).toBeUndefined()
@@ -282,8 +289,9 @@ describe('Cordis mode lifecycle', () => {
     // This mode validates the configured UDS pathname even though no broker is
     // connected. Keep only the socket under the production 100-byte pathname
     // cap; keys retain their private temporary-root ancestry.
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'actions-external-lifecycle-')))
-    const socketRoot = await realpath(await mkdtemp('/tmp/aea-')), ctx = new Context(); cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }); await rm(socketRoot, { recursive: true, force: true }) })
+    const root = await privateFixtureRoot('actions-external-lifecycle-')
+    const socketRoot = await realpath(await mkdtemp('/tmp/aea-')); await chown(socketRoot, process.getuid!(), process.getgid!()); expect((await lstat(socketRoot)).gid).toBe(process.getgid!())
+    const ctx = new Context(); cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }); await rm(socketRoot, { recursive: true, force: true }) })
     ctx.provide('assistantPolicy' as never, {} as never); ctx.provide('assistantDelivery' as never, {} as never)
     const config = await externalConfig(root, [], socketRoot)
     const mounted = await ctx.plugin(plugin, config); const service = ctx.assistantActions

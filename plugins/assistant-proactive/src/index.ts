@@ -1,6 +1,6 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import Schema from '@deepseek-ai/schemastery'
@@ -57,12 +57,16 @@ export class AssistantProactiveService extends Service {
         schema: { type: 'object' as const, additionalProperties: false, properties: { context: { type: 'string' as const, required: true } } },
         render: (_args: unknown, value: { context: string }) => [{ type: 'text' as const, text: value.context }],
       } as const
-      runtime.tools.register(defineTool({
+      const statusTool = defineTool({
         name: 'proactive_status',
         description: 'Inspect owner-scoped event opportunity decisions and operator utility estimates. Preparation may include a persisted model draft when explicitly configured. Drafts are unverified and do not mean the original goal was executed.',
         parameters: { goal_id: { type: 'string' } }, output,
         execute: async (args, execution) => { return { context: JSON.stringify(this.inspect(execution.agent, args.goal_id)) } },
-      }))
+      })
+      runtime.tools.register(statusTool)
+      if (runtime.assistantPolicy.contextToolPreauthorizationVersion?.() === 1) {
+        runtime.assistantPolicy.registerPreauthorizedTool?.(runtime, statusTool, execution => this.preauthorizeStatus(execution))
+      }
       runtime.tools.register(defineTool({
         name: 'proactive_feedback',
         description: 'Record current authenticated owner feedback on an opportunity. Rejection starts a durable cooldown for subsequent decisions. Feedback grants no execution permission and does not undo an already dispatched goal.',
@@ -75,6 +79,27 @@ export class AssistantProactiveService extends Service {
     if (!this.#active || !this.#profiles.has(profileId)) throw new Error('assistant-proactive: configured active opportunity profile required')
     if (this.#profiles.get(profileId)!.preparation && !this.#preparations.available()) throw new Error('assistant-proactive: preparation services unavailable')
     if (this.#profiles.get(profileId)!.mode === 'remind' && !this.#notificationPort()) throw new Error('assistant-proactive: reminder delivery service unavailable')
+  }
+  availableProfiles = (agent: Agent | undefined) => {
+    this.#scope(agent, false, false)
+    return Object.freeze([...this.#profiles.values()].filter(profile => {
+      try { this.assertProfile(profile.id); return true } catch { return false }
+    }).slice(0, 16).map(profile => Object.freeze({ id: profile.id, mode: profile.mode,
+      maxDecisionsPerGoal: profile.maxDecisionsPerGoal, maxExecutionsPerGoal: profile.maxExecutionsPerGoal,
+      maxRemindersPerGoal: profile.maxRemindersPerGoal })))
+  }
+  preauthorizeStatus = (execution: ToolExecution): boolean => {
+    try {
+      if (execution.signal.aborted || !execution.arguments || typeof execution.arguments !== 'object'
+        || Array.isArray(execution.arguments) || Object.getPrototypeOf(execution.arguments) !== Object.prototype
+        || Object.getOwnPropertySymbols(execution.arguments).length !== 0) return false
+      const args = execution.arguments as Record<string, unknown>
+      if (Object.getOwnPropertyNames(args).some(key => key !== 'goal_id')
+        || Object.values(Object.getOwnPropertyDescriptors(args)).some(value => !value.enumerable || !('value' in value))
+        || args.goal_id !== undefined && (typeof args.goal_id !== 'string' || args.goal_id.length === 0 || args.goal_id.length > 4096)) return false
+      this.#scope(execution.agent, false, false)
+      return true
+    } catch { return false }
   }
   evaluate = (input: OpportunityInput) => {
     this.assertProfile(input.profileId)
@@ -105,7 +130,7 @@ export class AssistantProactiveService extends Service {
     this.#engine.closeWait(waitId, scope, reason)
     this.#preparations.store.cancelWait(waitId, scope)
   }
-  #scope(agent: Agent | undefined, feedback: boolean): OpportunityScope {
+  #scope(agent: Agent | undefined, feedback: boolean, consume = true): OpportunityScope {
     if (!this.#active) throw new Error('assistant-proactive: disposed')
     if (!agent || this.ctx.get('agents')?.get(agent.id) !== agent) throw new Error('assistant-proactive: exact live agent required')
     const delivery = this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
@@ -117,7 +142,9 @@ export class AssistantProactiveService extends Service {
       if (!turn || acceptanceDigest({ principalId: turn.principalId, ...turn.principalLineage, workspace: turn.scope.workspace, preset: turn.scope.preset }) !== acceptanceDigest(scope)) throw new Error('assistant-proactive: current authenticated owner turn required')
     }
     const policy = this.ctx.get('assistantPolicy') as AssistantPolicyService | undefined
-    if (policy?.authorizeAgent(agent, feedback ? 'feedback' : 'inspect', { kind: 'goal', id: 'proactive-opportunities' }).effect !== 'allow') throw new Error('assistant-proactive: policy denied')
+    const decision = consume ? policy?.authorizeAgent(agent, feedback ? 'feedback' : 'inspect', { kind: 'goal', id: 'proactive-opportunities' })
+      : policy?.evaluateAgent(agent, feedback ? 'feedback' : 'inspect', { kind: 'goal', id: 'proactive-opportunities' })
+    if (decision?.effect !== 'allow') throw new Error('assistant-proactive: policy denied')
     return scope
   }
   inspect = (agent: Agent | undefined, goalId?: string) => {

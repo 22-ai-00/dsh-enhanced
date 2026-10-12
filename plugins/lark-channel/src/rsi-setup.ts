@@ -3,7 +3,8 @@ import { chmod, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/pro
 import { spawnSync } from 'node:child_process'
 import { createHash, createPublicKey, randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { createRequire } from 'node:module'
 import { isDeepStrictEqual } from 'node:util'
 import { isMap, isScalar, isSeq, parseDocument } from 'yaml'
 import type { ActiveLarkOwnerBindingsSnapshot } from '@dsh-enhanced/assistant-delivery'
@@ -23,6 +24,7 @@ import { rsiServiceEnvironmentPath, type RsiServiceEnvironment } from './rsi-ser
 import { resolveRsiServiceEnvironments } from './rsi-service-setup.js'
 import { validateRsiHostAuthorities } from './rsi-host-authorities.js'
 import { validateRsiMemoryLearningSetup } from './rsi-memory-learning.js'
+import { resolveInstalledRsiDsh } from './rsi-install-inputs.js'
 
 const MAX_BYTES = 2_097_152
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
@@ -252,11 +254,47 @@ export interface RsiSetupPorts {
   start(profile: string, home: string): Promise<void>
 }
 
+export async function readRsiInstalledBase(profile: string, home: string, environment: NodeJS.ProcessEnv = process.env): Promise<string> {
+  if (!profilePattern.test(profile)) fail('invalid profile for installed base')
+  await safeDirectory(join(home, 'profiles', profile))
+  const dsh = await resolveInstalledRsiDsh(environment)
+  const packageName = '@deepseek-ai/dsh-base'
+  const installAnchor = join(dsh.root, 'package.json')
+  let installRoot = dsh.root
+  for (let directory = dirname(dsh.root); directory !== dirname(directory); directory = dirname(directory)) {
+    if (basename(directory) === 'node_modules') installRoot = directory
+  }
+  for (const searchPath of createRequire(installAnchor).resolve.paths(packageName) ?? []) {
+    const packageRoot = join(searchPath, packageName)
+    const manifestPath = join(packageRoot, 'package.json')
+    let manifestBytes: string
+    try {
+      const physical = await realpath(manifestPath)
+      const child = relative(installRoot, physical)
+      if (!child || child === '..' || child.startsWith(`..${sep}`) || isAbsolute(child)) fail('installed DSH base escapes Host installation')
+      manifestBytes = await readOwnedFile(physical, false, true)
+    }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw error
+    }
+    let manifest: unknown
+    try { manifest = JSON.parse(manifestBytes) } catch { fail('installed DSH base manifest is invalid') }
+    const entry = manifest as { name?: unknown; version?: unknown; dsh?: { bundle?: { patch?: unknown } } }
+    if (entry?.name !== packageName || entry.version !== dsh.version || entry.dsh?.bundle?.patch !== './cordis.patch.yml') {
+      fail('installed DSH base identity or patch declaration differs from Host')
+    }
+    const patchPath = await realpath(join(packageRoot, 'cordis.patch.yml'))
+    const child = relative(installRoot, patchPath)
+    if (!child || child === '..' || child.startsWith(`..${sep}`) || isAbsolute(child)) fail('installed DSH base patch escapes Host installation')
+    return readOwnedFile(patchPath, false, true)
+  }
+  fail('installed DSH base is absent from Host installation')
+}
+
 export const rsiSetupPorts: RsiSetupPorts = {
   async base(profile, home) {
-    // Resolve the installed package symlink, then pin a bounded non-writable file.
-    const path = await realpath(join(home, 'profiles', profile, 'node_modules', '@deepseek-ai', 'dsh-base', 'cordis.patch.yml'))
-    return readOwnedFile(path, false, true)
+    return readRsiInstalledBase(profile, home)
   },
   dump(profile, home) {
     const result = spawnSync('dsh', ['--profile', profile, '--dump-config'], { encoding: 'utf8', timeout: 60_000,

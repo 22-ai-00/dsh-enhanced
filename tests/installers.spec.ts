@@ -8153,7 +8153,7 @@ printf '%s\\n' '{not-json'
     for (const required of [
       'personal-assistant', 'assistant-delivery', 'assistant-evaluation',
       'assistant-evolution', 'assistant-growth-experiments', 'preference-learning', 'assistant-heartbeat',
-      'assistant-health', 'assistant-goals', 'assistant-recovery', 'lark-channel',
+      'assistant-health', 'assistant-goals', 'assistant-recovery', 'lark-channel', 'event-triggers', 'assistant-proactive',
     ]) expect(slugs.has(required), `missing ${required}`).toBe(true)
     expect(result.stdout).toContain('env npm_config_loglevel=error dsh plugin --profile web add')
     expect(result.stdout).toContain('dsh-rsi-setup --install-owner --profile web')

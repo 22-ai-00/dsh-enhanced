@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { ActiveLarkOwnerBindingsSnapshot } from '@dsh-enhanced/assistant-delivery'
-import { assertRsiEffectivePatch, configureRsiSetup, parseRsiSetupArgs, runRsiSetup, type RsiSetupPorts } from '../src/rsi-setup.js'
+import { assertRsiEffectivePatch, configureRsiSetup, parseRsiSetupArgs, readRsiInstalledBase, runRsiSetup, type RsiSetupPorts } from '../src/rsi-setup.js'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -40,7 +40,75 @@ async function fixture() {
   return { home, pair, manifestPath, ports, args, apply, rollback, patch, journal }
 }
 
+async function installedBaseFixture() {
+  const setup = await fixture()
+  const host = await mkdtemp(join(await realpath(tmpdir()), 'dsh-rsi-host-')); roots.push(host)
+  const bin = join(host, 'bin'), dsh = join(host, 'node_modules', '@deepseek-ai', 'dsh')
+  const base = join(host, 'node_modules', '@deepseek-ai', 'dsh-base')
+  await mkdir(bin, { recursive: true })
+  await mkdir(join(dsh, 'lib'), { recursive: true })
+  await mkdir(base, { recursive: true })
+  await writeFile(join(dsh, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.5-rc.3', bin: { dsh: 'lib/bin.js' } }))
+  await writeFile(join(dsh, 'lib', 'bin.js'), '#!/usr/bin/env node\n', { mode: 0o700 })
+  await symlink(join(dsh, 'lib', 'bin.js'), join(bin, 'dsh'))
+  const baseManifest = { name: '@deepseek-ai/dsh-base', version: '0.1.5-rc.3', dsh: { bundle: { patch: './cordis.patch.yml' } } }
+  await writeFile(join(base, 'package.json'), JSON.stringify(baseManifest))
+  const basePatch = '- id: installed-base\n  config: {}\n'
+  await writeFile(join(base, 'cordis.patch.yml'), basePatch)
+  const environment = { PATH: bin }
+  return { ...setup, host, bin, dsh, base, baseManifest, basePatch, environment }
+}
+
 describe('RSI dual profile setup transaction', () => {
+  test('reads the selected DSH Host base when the coordinator has no local base dependency', async () => {
+    const f = await installedBaseFixture()
+    await expect(stat(join(f.home, 'profiles', 'coordinator', 'node_modules', '@deepseek-ai', 'dsh-base')))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readRsiInstalledBase('coordinator', f.home, f.environment)).toBe(f.basePatch)
+    const local = join(f.home, 'profiles', 'coordinator', 'node_modules', '@deepseek-ai', 'dsh-base')
+    await mkdir(local, { recursive: true })
+    await writeFile(join(local, 'cordis.patch.yml'), '- id: untrusted-local\n')
+    expect(await readRsiInstalledBase('coordinator', f.home, f.environment)).toBe(f.basePatch)
+  })
+  test.each([
+    ['name', { name: '@deepseek-ai/other' }],
+    ['version', { version: '0.1.7' }],
+    ['patch declaration', { dsh: { bundle: { patch: './other.yml' } } }],
+  ])('rejects installed base %s drift', async (_label, change) => {
+    const f = await installedBaseFixture()
+    await writeFile(join(f.base, 'package.json'), JSON.stringify({ ...f.baseManifest, ...change }))
+    await expect(readRsiInstalledBase('coordinator', f.home, f.environment)).rejects.toThrow('base identity or patch declaration')
+  })
+  test('rejects an untrusted DSH executable and absent Host base', async () => {
+    const f = await installedBaseFixture()
+    await writeFile(join(f.dsh, 'package.json'), JSON.stringify({ name: '@deepseek-ai/other', version: '0.1.5-rc.3', bin: { dsh: 'lib/bin.js' } }))
+    await expect(readRsiInstalledBase('coordinator', f.home, f.environment)).rejects.toThrow('no installed @deepseek-ai/dsh package')
+    await writeFile(join(f.dsh, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.5-rc.3', bin: { dsh: 'lib/bin.js' } }))
+    await rm(f.base, { recursive: true })
+    await expect(readRsiInstalledBase('coordinator', f.home, f.environment)).rejects.toThrow('base is absent from Host installation')
+  })
+  test('rejects a Host base link outside the selected installation', async () => {
+    const f = await installedBaseFixture()
+    const external = join(f.home, 'external-base')
+    await rm(f.base, { recursive: true })
+    await mkdir(external)
+    await writeFile(join(external, 'package.json'), JSON.stringify(f.baseManifest))
+    await writeFile(join(external, 'cordis.patch.yml'), f.basePatch)
+    await symlink(external, f.base)
+    await expect(readRsiInstalledBase('coordinator', f.home, f.environment)).rejects.toThrow('base escapes Host installation')
+  })
+  test('rejects installed base byte drift before writing either profile', async () => {
+    const f = await installedBaseFixture()
+    f.ports.base = () => readRsiInstalledBase('coordinator', f.home, f.environment)
+    const compile = f.ports.compile
+    f.ports.compile = vi.fn(async input => {
+      await writeFile(join(f.base, 'cordis.patch.yml'), '- id: drifted-base\n  config: {}\n')
+      return compile(input)
+    })
+    await expect(configureRsiSetup(f.args(f.apply), f.ports)).rejects.toThrow('manifest or owner snapshot changed before write')
+    await expect(stat(f.journal)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(f.patch(), 'utf8')).toContain('original')
+  })
   test('final composition compares values and executable YAML tags, ignoring formatting', () => {
     const patch = '- id: managed\n  config: { count: 1, path: !!js dshHomePath("state") }\n'
     expect(() => assertRsiEffectivePatch(patch, '- id: managed\n  config:\n    path: !!js dshHomePath("state")\n    count: 1\n')).not.toThrow()

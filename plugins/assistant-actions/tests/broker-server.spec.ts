@@ -1,7 +1,7 @@
 import { generateKeyPairSync, type KeyObject } from 'node:crypto'
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { chmod, lstat, mkdir, mkdtemp, realpath, rm, symlink, unlink } from 'node:fs/promises'
+import { chmod, chown, lstat, mkdir, mkdtemp, realpath, rm, symlink, unlink } from 'node:fs/promises'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -49,6 +49,8 @@ afterEach(async () => {
 
 async function privateSocketPath(mode = 0o700): Promise<string> {
   const outer = await realpath(await mkdtemp(join(tmpdir(), 'abs-')))
+  await chown(outer, uid, gid)
+  expect((await lstat(outer)).gid).toBe(gid)
   const root = join(outer, 'runtime')
   await mkdir(root, { mode }); await chmod(root, mode)
   roots.push(outer)
