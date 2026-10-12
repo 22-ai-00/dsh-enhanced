@@ -4,6 +4,8 @@
 
 Linux `supervised` 新安装在最终模型、TraeX、Lark 配置和 doctor 完成后自动运行 `dsh-rsi-setup --install-owner`。它使用当前 active owner，准备独立协调器、有限授权与发布/Host 配置，成对应用并启动两个 systemd user Host。需要可用的 systemd user session、完整离线构建资源和同批已安装插件；缺少构建前置条件会返回 `not-ready` 和退出码 3，安装流程不打印完成。完整生产部署仍需实际使用验收。源码发布轨使用授权的本地 registry，仓库公共 npm 发版仍走仓库发布流程。
 
+开发版 Linux 默认安装（包括 checkout 内 shell 的 auto/`--yes`）选择此完整场景；显式轻量场景、shell 的 `--mode standard`、`--lark skip` 或 `--no-service` 不隐式开启后台学习。必要配置优先从当前可信 owner 和已配置模型自动取得，缺少身份时使用安装向导的首次私聊配对，不把任意首条消息当主人。路径、独立授权身份及有限预算自动生成；没有全部前提仍报告未就绪。裸插件安装保持 fail-closed，旧安装不自动续期、补签或修改 paused 任务。
+
 ## 1. 准备源码、构建环境与两个 profile
 
 新安装的 `supervised` 场景会自动准备私有源码仓库，并安装下述目标依赖。源码放在 `$DSH_HOME/rsi-sources/<profile>/`：`checkout` 为独立工作树，`release.git` 为本地 bare 发布仓库，`bootstrap.json` 保存来源与初始提交。npm 安装读取本工具版本对应的官方 `v<version>` tag；本地安装只复制 checkout 已提交的 HEAD，保留原工作区的未提交修改。

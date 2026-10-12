@@ -17,6 +17,7 @@ describe('installer port preflight diagnostics', () => {
       const result = spawnSync('/bin/bash', [
         '-c', `source "$1"
 dsh_enhanced_reject_incompatible_existing_dsh() { :; }
+dsh_enhanced_effective_lark_is_configured() { return 0; }
 dsh_enhanced_ensure_dsh() { printf 'REACHED_HOST_PREPARATION\\n'; return 77; }
 dsh_enhanced_install local "$2" --profile "$3" --scenario supervised --yes`,
         'profile-port-test', resolve('scripts/install/common.sh'), resolve('.'), profile,

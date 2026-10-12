@@ -7693,10 +7693,10 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     expect(cohortPreflight).toBeGreaterThan(routeSelection)
   })
 
-  test('local installer defaults to the safe core scenario with capability discovery and excludes optional bundles', async () => {
+  test('explicit core installs capability discovery without optional bundles', async () => {
     const dshHome = await temporaryDshHome()
 
-    const result = runInstaller(localInstaller, ['--dry-run', '--lark', 'skip'], dshHome)
+    const result = runInstaller(localInstaller, ['--dry-run', '--scenario', 'core', '--lark', 'skip'], dshHome)
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('目标 profile：web')
@@ -7714,6 +7714,82 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     expect(result.stdout).toContain('权限默认值：保留现有 Settings')
     expect(result.stdout).toContain('立即使用：dsh --profile web')
     expect(result.stdout).not.toContain('dsh-lark-setup')
+  })
+
+  test.each([localInstaller, npmInstaller])('Linux auto selects bounded ordinary-use learning for %s', async installer => {
+    const dshHome = await temporaryDshHome()
+    const result = runInstaller(installer, ['--dry-run', '--yes'], dshHome, 'Linux')
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('部署场景：supervised')
+    expect(result.stdout).toContain('部署模式：supervised-growth')
+    expect(result.stdout).toContain('安装成功后，后续任务会产生有限额外模型消耗')
+    expect(result.stdout).toContain('dsh-lark-setup --profile web')
+    expect(result.stdout).toContain('dsh-rsi-setup --install-owner --profile web')
+    expect(result.stdout).not.toContain('--ack-existing-automations')
+  })
+
+  test.each([
+    { args: ['--lark', 'skip'], scenario: 'core' },
+    { args: ['--no-service'], scenario: 'core' },
+    { args: ['--mode', 'standard'], scenario: 'core' },
+    { args: ['--scenario', 'lark'], scenario: 'lark' },
+    { args: ['--scenario', 'full'], scenario: 'full' },
+  ])('Linux auto retains explicit limited choice $args', async ({ args, scenario }) => {
+    const dshHome = await temporaryDshHome()
+    const result = runInstaller(localInstaller, ['--dry-run', '--yes', ...args], dshHome, 'Linux')
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain(`部署场景：${scenario}`)
+    expect(result.stdout).toContain('普通使用自迭代：本次不启用完整 RSI')
+    expect(result.stdout).not.toContain('dsh-rsi-setup --install-owner')
+  })
+
+  test.each([['--lark', 'skip'], ['--no-service']])('Linux existing Lark respects limited opt-out %s', async (...args) => {
+    const dshHome = await temporaryDshHome()
+    await configureExistingLark(dshHome)
+    const result = runInstaller(localInstaller, ['--dry-run', '--yes', ...args], dshHome, 'Linux')
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('部署场景：lark')
+    expect(result.stdout).toContain('普通使用自迭代：本次不启用完整 RSI')
+    expect(result.stdout).not.toContain('dsh-rsi-setup --install-owner')
+  })
+
+  test('Linux fresh noninteractive install fails before mutation when owner pairing is unavailable', async () => {
+    const dshHome = await temporaryDshHome()
+    const fakeBin = join(dshHome, 'bin')
+    await mkdir(fakeBin)
+    await writeExecutable(join(fakeBin, 'dsh'), '#!/bin/bash\nprintf "0.1.5-rc.3\\n"\n')
+    const result = runInstaller(localInstaller, ['--yes'], dshHome, 'Linux', {
+      PATH: `${fakeBin}:${pathWithoutTraex}`,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('需要交互式飞书 onboarding')
+    expect(result.stdout).not.toContain('准备并构建当前仓库')
+    expect(result.stdout).not.toContain('安装流程完成')
+  })
+
+  test('other platforms retain a limited auto scenario and report the RSI boundary', async () => {
+    const dshHome = await temporaryDshHome()
+    const result = runInstaller(localInstaller, ['--dry-run', '--yes'], dshHome, 'Darwin')
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('部署场景：core')
+    expect(result.stdout).toContain('普通使用自迭代：本次不启用完整 RSI')
+    expect(result.stdout).not.toContain('dsh-rsi-setup --install-owner')
+  })
+
+  test('Linux interactive scenario menu defaults to supervised and offers limited opt-outs', () => {
+    const result = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_choose_scenario 0 Linux', 'installer-test', installerLibrary,
+    ], { encoding: 'utf8', input: '\n' })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toBe('supervised')
+    expect(result.stderr).toContain('额外消耗有限模型额度')
+    expect(result.stderr).toContain('3) 仅本机核心')
   })
 
   test('standard Lark installs automatic preference learning without the supervised operations stack', async () => {
@@ -9078,13 +9154,14 @@ fi
     expect(await readFile(profilePatch, 'utf8')).toBe(originalPatch)
   })
 
-  test('auto mode keeps an existing enabled Feishu bot and only restarts its service', async () => {
+  test('Linux auto supervision preserves the existing Feishu binding and Agent policy', async () => {
     const dshHome = await temporaryDshHome()
     await configureExistingLark(dshHome)
 
     const result = runInstaller(localInstaller, ['--dry-run', '--yes'], dshHome)
 
     expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('部署场景：supervised')
     expect(result.stdout).toContain('飞书处理：保留当前应用配置')
     expect(result.stdout).toContain('检测到已有启用的 Lark channel；跳过临时 Host')
     const larkSetup = join(dshHome, 'profiles', 'web', 'node_modules', '.bin', 'dsh-lark-setup')
@@ -9211,7 +9288,7 @@ if [[ "$REGISTER_MODE" != 'invisible' ]]; then touch "$REGISTERED"; fi
     const result = runInstaller(localInstaller, ['--dry-run', '--yes'], dshHome)
 
     expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toContain('部署场景：lark')
+    expect(result.stdout).toContain('部署场景：supervised')
     expect(result.stdout).toContain('飞书处理：保留当前应用配置')
     expect(result.stdout).toContain('检测到已有启用的 Lark channel；跳过临时 Host')
   })

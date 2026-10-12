@@ -77,6 +77,8 @@ describe('runInstall（薄委托）', () => {
 
   test.each([
     { label: 'explicit scenario', args: ['--scenario', 'core', '--yes'] },
+    { label: 'explicit supervised with Lark skip', args: ['--scenario', 'supervised', '--lark', 'skip'] },
+    { label: 'explicit supervised with no service', args: ['--scenario', 'supervised', '--no-service'] },
     { label: 'explicit legacy standard mode', args: ['--mode', 'standard', '--yes'] },
     { label: 'explicit supervised mode', args: ['--mode', 'supervised-growth', '--yes'] },
     { label: 'explicit auto scenario', args: ['--scenario', 'auto', '--dry-run'] },
@@ -93,6 +95,34 @@ describe('runInstall（薄委托）', () => {
       executor: { download: vi.fn(), runInherited },
     })
     expect(runInherited.mock.calls[0]![1].slice(1)).toEqual(args)
+  })
+
+  test.each(['npm', 'local'] as const)('%s limited opt-outs preserve shell auto selection', async mode => {
+    for (const args of [['--lark', 'skip'], ['--no-service']]) {
+      const passthrough = Object.freeze(['--yes', '--dry-run', ...args])
+      const runInherited = vi.fn(async (_command: string, _args: readonly string[]) => 0)
+      await runInstall({
+        mode,
+        ...(mode === 'local' ? { localRepositoryRoot: '/repo' } : {}),
+        releaseRef: 'v0.1.48', passthrough,
+        executor: { download: vi.fn(async () => '#!/usr/bin/env bash\n'), runInherited },
+      })
+      expect(runInherited.mock.calls[0]![1].slice(1)).toEqual(passthrough)
+    }
+  })
+
+  test.each([
+    { args: ['--lark', 'skip', '--lark', 'configure'], expectedSuffix: ['--scenario', 'supervised'] },
+    { args: ['--lark', 'configure', '--lark', 'skip'], expectedSuffix: [] },
+    { args: ['--no-service', '--lark', 'skip', '--lark', 'configure'], expectedSuffix: [] },
+  ])('repeated Lark choice delegates the final value and service opt-out: $args', async ({ args, expectedSuffix }) => {
+    const runInherited = vi.fn(async (_command: string, _args: readonly string[]) => 0)
+    await runInstall({
+      mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+      passthrough: ['--dry-run', ...args],
+      executor: { download: vi.fn(), runInherited },
+    })
+    expect(runInherited.mock.calls[0]![1].slice(1)).toEqual(['--dry-run', ...args, ...expectedSuffix])
   })
 
   test.each([['--scenario'], ['--mode'], ['--scenario', '--yes'], ['--mode', '--yes']])
@@ -382,6 +412,23 @@ describe('main：install / reinstall 分发', () => {
     const code = await main(command, { HOME: '/h' }, { ...makeDeps([]), install })
     expect(code).toBe(0)
     expect(delegated).toEqual([expected])
+  })
+
+  test.each([
+    ['--lark', 'skip'],
+    ['--no-service'],
+  ])('public install passes limited opt-out %j to shell auto selection', async (...args) => {
+    const delegated: string[][] = []
+    const install: InstallFn = async options => runInstall({
+      ...options,
+      executor: {
+        download: async () => '#!/usr/bin/env bash\n',
+        runInherited: async (_command, invocation) => { delegated.push(invocation.slice(1)); return 0 },
+      },
+    })
+    const code = await main(['install', ...args, '--dry-run'], { HOME: '/h' }, { ...makeDeps([]), install })
+    expect(code).toBe(0)
+    expect(delegated).toEqual([[...args, '--dry-run']])
   })
 
   test('install：npm 形态，releaseRef 锁自身版本，参数完整透传', async () => {

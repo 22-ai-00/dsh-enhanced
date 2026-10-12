@@ -74,20 +74,20 @@ dsh_enhanced_usage() {
   cat <<EOF
 Usage: $(basename "$0") [options]
 
-Install a minimal, runnable dsh-enhanced personal-assistant scenario.
+Install a runnable dsh-enhanced personal-assistant scenario.
 
 Options:
   --profile <name>          DSH profile (default: web)
   --operation <name>        install, upgrade, or uninstall (default: install)
   --confirm-dsh-home-stopped Required for lifecycle; Lark/supervised service operations stop managed units, you stop other DSH_HOME users
-  --scenario <name>         auto, core, web, autonomy, lark, supervised, or full (default: auto)
+  --scenario <name>         auto, core, web, autonomy, lark, supervised, or full (default: auto; Linux auto enables supervised learning)
   --workspace <absolute>    Web owner workspace (web/autonomy; default: current directory)
   --agent-preset <id>       Web owner Agent preset (web/autonomy; default: standard)
   --isolation-image <id>    Immutable sha256 image for autonomy
   --isolation-max-runs <n>  Autonomy grant run limit (default: 20)
   --isolation-lease-minutes <n> Autonomy grant lease (default: 60)
   --isolation-runtime-minutes <n> Cumulative reserved runtime budget (default: 10)
-  --mode <mode>             standard or supervised-growth (default: standard)
+  --mode <mode>             standard or supervised-growth (auto resolves by platform; explicit standard opts out)
   --with <add-on>           Add coding, traex, health, heartbeat, events, or bridge (repeatable)
   --ack-existing-automations
                             Acknowledge existing active/paused jobs when enabling the RSI scheduler
@@ -105,7 +105,7 @@ Options:
   --model-display-name <s>  Optional human label for a custom provider route
   --dsh-version <version>   Compatible DSH version (default: ${DSH_ENHANCED_DEFAULT_DSH_VERSION})
   --no-service              Do not install or restart the platform resident service
-  --yes                     Choose the safe default without the installer menu
+  --yes                     Choose the platform default without the installer menu
   --dry-run                 Print the complete plan without changing the machine
   -h, --help                Show this help
 EOF
@@ -131,6 +131,10 @@ Agent tool modes:
 
 Scenarios:
   Capabilities are additive: core ⊂ lark ⊂ supervised.
+  auto       On Linux, install supervised ordinary-use learning by default; this
+             uses bounded additional model calls and requires paired Lark owner
+             onboarding and a resident service. Other platforms keep a limited
+             core/Lark default without ordinary-use RSI.
   core       Local Web/direct core plus read-only plugin discovery.  No channel, daemon, or scheduler.
   web        Experimental local Web owner: core plus Delivery, Goals, and Web owner setup.
              It does not configure Lark or a resident service.
@@ -728,7 +732,29 @@ dsh_enhanced_choose_lark_mode() {
 
 dsh_enhanced_choose_scenario() {
   local configured="$1"
+  local platform="$2"
   printf '\n选择部署场景（能力逐档叠加：core ⊂ lark ⊂ supervised）：\n' >&2
+  if [[ "$platform" == 'Linux' ]]; then
+    printf '  1) 分级自治成长（推荐：普通使用中有限自迭代，额外消耗有限模型额度）\n' >&2
+    if [[ "$configured" == '1' ]]; then
+      printf '  2) 仅保留已配置的飞书常驻助理（不启用完整自迭代）\n' >&2
+    else
+      printf '  2) 飞书/Lark 常驻助理（不启用完整自迭代）\n' >&2
+    fi
+    printf '  3) 仅本机核心（不启用完整自迭代）\n' >&2
+    printf '  4) 实验性本机 Web owner（不配置飞书或常驻服务）\n' >&2
+    printf '请选择 [1]：' >&2
+    local choice
+    IFS= read -r choice
+    case "$choice" in
+      ''|'1') printf 'supervised' ;;
+      '2') printf 'lark' ;;
+      '3') printf 'core' ;;
+      '4') printf 'web' ;;
+      *) return 2 ;;
+    esac
+    return 0
+  fi
   printf '  1) 仅本机核心（推荐：安全、可立即通过 Web/direct 使用）\n' >&2
   if [[ "$configured" == '1' ]]; then
     printf '  2) 保留已配置的飞书常驻助理\n' >&2
@@ -3237,10 +3263,7 @@ dsh_enhanced_install() {
     existing_lark_configured='1'
   fi
 
-  # Keep the legacy --mode surface working, but make it an alias for the
-  # explicit supervised scenario.  A scenario is selected before any package
-  # is installed, so a fresh non-interactive machine never falls into an app
-  # creation prompt or gains optional services by accident.
+  local install_platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}"
   if [[ "$deployment_mode" == 'supervised-growth' ]]; then
     if [[ "$scenario_explicit" == '1' && "$scenario" != 'supervised' ]]; then
       dsh_enhanced_fail 2 '--mode supervised-growth 只能与 --scenario supervised 一起使用。'
@@ -3249,12 +3272,22 @@ dsh_enhanced_install() {
     scenario='supervised'
   fi
   if [[ "$scenario" == 'auto' ]]; then
-    if [[ "$lark_mode" == 'configure' || "$lark_mode" == 'keep' || "$existing_lark_configured" == '1' ]]; then
+    if [[ "$install_platform" == 'Linux' && "$lark_mode" != 'skip' && "$manage_service" == '1'
+      && !( "$deployment_mode_explicit" == '1' && "$deployment_mode" == 'standard' ) ]]; then
+      if [[ "$assume_yes" == '1' || ! -t 0 || ! -t 1 ]]; then
+        scenario='supervised'
+      else
+        scenario="$(dsh_enhanced_choose_scenario "$existing_lark_configured" "$install_platform")" || {
+          dsh_enhanced_fail 2 '部署场景选项无效。'
+          return $?
+        }
+      fi
+    elif [[ "$lark_mode" == 'configure' || "$lark_mode" == 'keep' || "$existing_lark_configured" == '1' ]]; then
       scenario='lark'
     elif [[ "$assume_yes" == '1' || ! -t 0 || ! -t 1 ]]; then
       scenario='core'
     else
-      scenario="$(dsh_enhanced_choose_scenario "$existing_lark_configured")" || {
+      scenario="$(dsh_enhanced_choose_scenario "$existing_lark_configured" 'limited')" || {
         dsh_enhanced_fail 2 '部署场景选项无效。'
         return $?
       }
@@ -3266,6 +3299,11 @@ dsh_enhanced_install() {
       return $?
     fi
     deployment_mode='supervised-growth'
+  fi
+  if [[ "$operation" == 'install' && "$scenario" == 'supervised' && "$existing_lark_configured" != '1'
+    && "$dry_run" != '1' && ( ! -t 0 || ! -t 1 ) ]]; then
+    dsh_enhanced_fail 1 'supervised 安装需要交互式飞书 onboarding；当前没有已配置的飞书 Bot。请在终端运行安装器完成 onboarding，或显式选择有限场景；本次未开始安装。'
+    return $?
   fi
   if [[ "$agent_tools_mode" == 'auto' && "$scenario" != 'lark' && "$scenario" != 'supervised' && "$scenario" != 'full' ]]; then
     agent_tools_mode='preserve'
@@ -3333,6 +3371,11 @@ dsh_enhanced_install() {
   printf '生命周期操作：%s\n' "$operation"
   printf '目标 profile：%s\n' "$profile"
   printf '部署场景：%s\n' "$scenario"
+  if [[ "$scenario" == 'supervised' ]]; then
+    printf '普通使用自迭代：计划配置 owner 与有限自动学习；安装成功后，后续任务会产生有限额外模型消耗。\n'
+  else
+    printf '普通使用自迭代：本次不启用完整 RSI；当前仅安装 %s 场景。\n' "$scenario"
+  fi
   if [[ "$deployment_mode" != 'standard' ]]; then
     printf '部署模式：%s\n' "$deployment_mode"
   fi

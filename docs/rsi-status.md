@@ -1,6 +1,6 @@
 # RSI 当前状态
 
-更新：2026-10-10。本页是唯一进展入口；只加载本页及当前任务相关 README。验收条件见[合同](rsi-acceptance.md)，历史细节查 Git。
+更新：2026-10-12。本页是唯一进展入口；只加载本页及当前任务相关 README。验收条件见[合同](rsi-acceptance.md)，历史细节查 Git。
 
 ## 目标
 
@@ -14,11 +14,12 @@
 | --- | --- | --- |
 | 任务与记忆 | 已有认证反馈、原生调度与持久记忆学习；真实后续决策收益待验收。 | [Delivery](../plugins/assistant-delivery/README.md)、[Memory](../plugins/assistant-memory-learning/README.md) |
 | 工程进化 | 已有源码发现、失败任务复盘、新工具独立验收、有限签名采用与动态加载，精确版本调用/反馈关联及独立签名源码保留。默认关闭的有限修订候选已具备独立父行为回归门：首作者请求前冻结专用授权，Verifier 私有父用例与候选写权限分离，父/候选新隔离观察，独立额度与签名结果，unknown 不重放。候选仍不执行或替换父版本，历史证据不延续执行权；稳定入口切换、回退与真实收益待验收。 | [Growth](../plugins/assistant-growth-driver/README.md)、[Control Plane](../plugins/plugin-control-plane/README.md) |
+| 默认安装 | 开发版 Linux shell 与 CLI 默认进入完整学习配置；可信配对、模型与构建前提仍必需，路径和有限预算自动生成。保留显式轻量场景和不启用服务/渠道的退出选项；裸 bundle 不绕过配置验证，远程发布 tag 尚未更新。 | [安装器](../scripts/install/README.md) |
 | 部署 | 本机 pre-owner 冻结维护已部署 `962911e`，25 个包/18 个根 bundle，包含默认禁用的 Memory Learning；14 个身份及持久配置保留，目标安装锁随新制品物化。尚未安装 owner/coordinator 或启用学习调度。 | [安装](../plugins/lark-channel/docs/rsi-setup.md)、[维护](../scripts/install/README.md#checkout-内的-pre-owner-冻结源码维护) |
 
 ## 当前阻塞与下一验收
 
-下一步完成一次 owner/coordinator 配置。开启 scheduler 涉及现有三个 paused Automation，已请求确认但尚无答复，不能自动添加 `--ack-existing-automations`；重复任务提示不等于该确认。部署仍为上述 `962911e`，学习禁用；后续开发增量尚未部署。
+本机开启已完成只读预检：目标为 `assistant`，服务仍运行；三个旧 paused Automation 为两个 Heartbeat 与一个 Recovery，当前配置没有启用它们。已请求确认保持旧任务暂停并开启学习 scheduler，尚无答复，不能自动添加 `--ack-existing-automations`。先通过 pre-owner 维护部署当前开发增量，再配置 owner/coordinator；启用后该冻结安装的本地更新路径仍受限。部署仍为上述 `962911e`，学习禁用，尚无本轮启用或真实学习证据。
 
 独立父行为回归门已完成集成与完整根检查；下一交付是独立替换授权、稳定入口切换与回退。现有配置没有父版本/slot 替换授权，不能扩大旧创建或采用额度的语义。当前任务身份按 Inbox 建立，不能推断跨 Inbox 的语义同一性。
 
@@ -26,8 +27,8 @@
 
 ## 最新验证
 
-`VITEST_MAX_WORKERS=4 pnpm check` 退出 0：8285 项通过、61 项跳过；manifest 校验、零 lint 警告、类型检查、构建及 37 个包 dry-run pack 通过，新回归合同与验收模块进入包。31 个实现/测试文件冻结摘要一致。Control Plane 1138 项、Growth Driver 156 项、Verifier 180 项通过；独立控制面定向 144 项通过。
+`VITEST_MAX_WORKERS=4 pnpm check` 最终退出 0：8306 项通过、61 项跳过；manifest 校验、零 lint 警告、类型检查、构建及 37 个包 dry-run pack 通过。安装器定向 16 项、CLI 156 项、端口预检 7 项通过；含本页的 11 个改动文件最终摘要一致。新默认覆盖 Linux auto/非交互/菜单、显式退出、非支持平台、缺 Bot 前置拒绝、CLI 重复参数及原端口安全门。
 
-覆盖私有父用例、双方新观察、专用授权与额度、签名和原子落账失败、来源纠正/撤回、owner 换代、冷启动与 unknown 不重放，以及 schema 33 → 34 保留旧证据/累计额度和拒绝未知结构。Cordis、SQLite、Git 使用真实实现；模型及 Docker 行为观察使用夹具，61 项跳过不证明外部/live 行为。本轮未部署或发布 npm，也不证明普通任务收益。
+Cordis、SQLite、Git 使用真实实现；模型及 Docker 行为观察使用夹具，61 项跳过不证明外部/live 行为。本轮尚未部署或发布 npm，也不证明普通任务收益。初跑端口测试缺少新安装前提，补齐已配置 Bot 的夹具后完整重验；原始检查和定向输出保留在忽略目录 `docs/evidence/rsi-default-learning/`。
 
-全检发现既有 DeepSeek 测试依赖真实日期；经确认仅修正测试时钟并验证到期拒绝，生产合同仍于 2026-10-08 过期，未延长供给或授权。初跑失败、全包审计和最终重验记录保留在忽略目录 `docs/evidence/rsi-revision-regression/`；部署历史查 Git。
+生产 DeepSeek 固定合同仍于 2026-10-08 过期；当前 owner 会话的 Super Relay 选择需在启用时重验，其合同于 2026-10-14 到期。本轮不延长供应合同、不替换用户模型、不续期旧授权。

@@ -90,6 +90,7 @@ PROFILE
     const installerArguments = [
       localInstaller,
       '--dsh-version', '0.1.5-rc.3',
+      '--scenario', 'core',
       '--lark', 'skip',
       '--no-service',
     ]
