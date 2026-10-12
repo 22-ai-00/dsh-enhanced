@@ -50,7 +50,7 @@ dsh-rsi restart --profile web          # 改配置后重启（只动运行状态
 
 升级（`update` / `update --all`）、干净重装（`reinstall`）、彻底卸载（`purge`）、崩溃救机脚本与全部安装器参数分别见 [`packages/dsh-rsi-cli/README.md`](packages/dsh-rsi-cli/README.md) 和[安装脚本文档](scripts/install/README.md)。
 
-开发版 `dsh-rsi install/reinstall` 未显式选择场景时默认安装 `supervised`；首次飞书身份授权仍由平台完成，构建资源或 owner 未就绪时不会报告安装成功。显式 `--scenario core` 可选择本机核心。
+开发版 `dsh-rsi install/reinstall` 和 Linux checkout 内 shell 默认安装 `supervised`，自动组合持久记忆学习、普通任务成长、独立验收与有限采用。首次飞书身份授权仍由平台完成，已有模型选择保留，必要路径和有限预算由安装器生成；构建资源或 owner 未就绪时不会报告安装成功。显式 `--scenario core` 可选择本机核心；shell 的 `--mode standard`、`--lark skip` 或 `--no-service` 保留有限场景。非 Linux 完整 RSI 尚不受支持。已发布的远程安装器仍使用固定 tag，默认行为须随下一发布更新。
 
 三档部署场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 含全部 `core` 能力并加飞书常驻与偏好学习，`supervised` 再追加评测、演化与恢复。安装时检测到本机 `traex` 或 `trae-cli` 会自动安装并启用 TraeX 插件，复用本机登录；已登录且没有显式默认模型时，为当前 profile 配置 TraeX 默认模型。已有模型选择保持不变。其它模型可在安装引导中配置，API Key 只从环境读取。实验性离线执行入口 `autonomy` 需显式指定本机固定隔离镜像，详见[安装文档](scripts/install/README.md)。
 

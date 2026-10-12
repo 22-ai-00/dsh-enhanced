@@ -49,7 +49,7 @@ export interface RunInstallOptions {
   localRepositoryRoot?: string
   /** npm 形态拉取引导脚本的 release ref；rsi-cli 默认传与自身版本一致的 vX.Y.Z。 */
   releaseRef: string
-  /** 用户传入的安装器参数；默认 install 在委派副本末尾补 supervised 场景。 */
+  /** 用户传入的安装器参数；默认 install 在未选择有限安装时补 supervised 场景。 */
   passthrough: readonly string[]
   /** 安装器不识别 --dsh-home，统一经 DSH_HOME 环境变量传入。 */
   dshHome?: string
@@ -152,7 +152,10 @@ export async function runInstall(options: RunInstallOptions): Promise<number> {
   }
   const scenarioExplicit = !help && explicitlySet('--scenario')
   const modeExplicit = !help && explicitlySet('--mode')
-  const passthrough = operation === 'install' && !help && !scenarioExplicit && !modeExplicit
+  const larkOptionIndex = options.passthrough.lastIndexOf('--lark')
+  const limitedOptOut = options.passthrough.includes('--no-service')
+    || (larkOptionIndex >= 0 && options.passthrough[larkOptionIndex + 1] === 'skip')
+  const passthrough = operation === 'install' && !help && !scenarioExplicit && !modeExplicit && !limitedOptOut
     ? [...options.passthrough, '--scenario', 'supervised']
     : options.passthrough
   const inactive = options.passthrough.some(arg => ['--help', '-h', '--dry-run'].includes(arg))

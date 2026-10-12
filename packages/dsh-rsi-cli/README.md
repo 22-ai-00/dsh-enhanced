@@ -39,7 +39,7 @@ dsh-rsi [全局选项] <命令>
 
 `dsh-rsi install` 为全新 Home 选择 Host，再调用统一安装器：
 
-`install` 和 `reinstall` 在未指定 `--scenario`、也未指定 `--mode` 时，向安装器显式传入 `--scenario supervised`；`--dry-run` 会展示这一默认场景。显式 `--scenario` 或旧式 `--mode` 保持安装器原有语义，例如 `--scenario core` 选择 core，`--mode standard` 保留安装器的自动选择。`update --all` 等升级、卸载、恢复及 `install --help` 不采用此默认值。其余参数仍按原顺序透传。
+`install` 和 `reinstall` 在未指定 `--scenario`、也未指定 `--mode` 时，向安装器显式传入 `--scenario supervised`；`--dry-run` 会展示这一默认场景。显式 `--lark skip` 或 `--no-service` 不追加完整场景，交由统一安装器保留有限场景；它们不能覆盖用户显式选择的 `supervised`。显式 `--scenario` 或旧式 `--mode` 保持安装器原有语义，例如 `--scenario core` 选择 core，`--mode standard` 保留安装器的自动选择。`update --all` 等升级、卸载、恢复及 `install --help` 不采用此默认值。其余参数仍按原顺序透传。
 
 首次飞书身份授权须由平台的授权流程完成。授权尚未就绪时，不能把 supervised 安装称为成功；应完成平台授权后按安装器提示继续或重试。
 
