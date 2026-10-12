@@ -19,9 +19,9 @@
 
 ## 当前阻塞与下一验收
 
-本机目标为 `assistant`，原 Agent 与用量监控服务已恢复运行；部署仍为上述 `962911e`，学习禁用。三个旧 paused Automation 为两个 Heartbeat 与一个 Recovery，当前配置没有启用它们。已请求确认保持旧任务暂停并开启学习 scheduler，尚无答复，不能自动添加 `--ack-existing-automations`。
+本机目标为 `assistant`，原 Agent 与用量监控服务运行；部署仍为上述 `962911e`，学习禁用。用户已确认修复离线升级并开启学习 scheduler，三个旧 Heartbeat/Recovery 任务继续暂停；只读数据库核查均为 paused、下一运行时间为空，满足本次 `--ack-existing-automations` 前提。
 
-当前开发增量的 pre-owner 更新被暂存链接安全门拒绝，未切换 Home。pnpm 11.7.0 的隔离离线 `add` 结果锁缺失 Koffi 的 20 个可选平台条目，相同依赖的在线 `add` 对照保留；内部机制尚未证实。原锁仅补齐已安装 Koffi 3.3.2 的 20 个平台条目并规范排序，持锁、备份与 CAS 操作通过独立审查；未在原 Home 安装新包或修改授权、模型，25 个已安装 cohort 包复验通过。尚无保持离线边界的已验证修复。原生 `local-service-recover` 退出 0、通过原服务就绪验收，用量监控也已恢复。下一步先修复并验证实际离线维护路径，再配置 owner/coordinator；启用后该冻结安装的本地更新路径仍受限。
+离线升级根因已由固定 pnpm 源码及隔离 NDJSON 复现确认：可选依赖读取 `metadata-full` 镜像，原 frozen fetch 只准备 abbreviated 镜像；缺失时被记录为 `resolution_failure` 并跳过，退出 0 仍会丢失 Koffi 子图。停服前在线预热、独立离线重放、图保留检查及镜像摘要已集成，预热锁不进入部署，停服后的安装仍完全离线。根检查已通过；独立审查完成后提交并升级本机，再开启有限学习。实际完整维护与 owner 安装待验收；启用后该冻结安装的本地更新路径仍受限。
 
 独立父行为回归门已完成集成与完整根检查；下一交付是独立替换授权、稳定入口切换与回退。现有配置没有父版本/slot 替换授权，不能扩大旧创建或采用额度的语义。当前任务身份按 Inbox 建立，不能推断跨 Inbox 的语义同一性。
 
@@ -29,8 +29,8 @@
 
 ## 最新验证
 
-默认安装实现 `b1a17f0` 已提交并推送 `dev`，独立审查通过。`VITEST_MAX_WORKERS=4 pnpm check` 最终退出 0：8306 项通过、61 项跳过；manifest 校验、零 lint 警告、类型检查、构建及 37 个包 dry-run pack 通过。安装器定向 16 项、CLI 156 项、端口预检 7 项通过；新默认覆盖 Linux auto/非交互/菜单、显式退出、非支持平台、缺 Bot 前置拒绝、CLI 重复参数及原端口安全门。后续仓库修改仅为本页状态更新。
+默认安装实现 `b1a17f0` 已提交并推送 `dev`。当前离线修复完整 `pnpm check` 退出 0：8316 项通过、61 项跳过、37 个包 dry-run pack；使用正常 umask 022，先前私有日志掩码导致的两个既有权限夹具失败未复现。真实私有缓存准备退出 0，原三份元数据不变、完整平台镜像 20 项，在线/离线图与原 registry 可选边通过，末端重核本次执行的原锁收据。定向测试覆盖解析软失败、静默图缩水、镜像漂移/软链及输出上限；正式独立审查 PASS，本机部署尚未执行。
 
-Cordis、SQLite、Git 使用真实实现；模型及 Docker 行为观察使用夹具，61 项跳过不证明外部/live 行为。本轮尚未成功部署或发布 npm，也不证明普通任务收益。完整检查、定向输出及本机维护/恢复证据保留在忽略目录 `docs/evidence/rsi-default-learning/`。
+Cordis、SQLite、Git 使用真实实现；模型及 Docker 行为观察使用夹具，61 项跳过不证明外部/live 行为。本轮尚未成功部署或发布 npm，也不证明普通任务收益。完整检查、定向输出及本机维护/恢复证据保留在忽略目录 `docs/evidence/rsi-default-learning/` 与 `docs/evidence/rsi-offline-learning/`。
 
-生产 DeepSeek 固定合同仍于 2026-10-08 过期；当前 owner 会话的 Super Relay 选择需在启用时重验，其合同于 2026-10-14 到期。本轮不延长供应合同、不替换用户模型、不续期旧授权。
+生产 DeepSeek 固定合同仍于 2026-10-08 过期；Super Relay 预算插件的固定合同于 2026-10-14 到期，但本机未安装该预算插件，不能据此判断当前会话路由是否可用。保留 owner 会话的 `super-relay/ark/seed-evolving` 选择，不把静态选择当作 live 调用证明；本轮不延长供应合同、不替换用户模型、不续期旧授权。

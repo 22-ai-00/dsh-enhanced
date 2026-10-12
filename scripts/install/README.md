@@ -61,7 +61,9 @@ Linux `supervised` 的已登记 RSI 双 Host 可以在同一个 Home 事务中�
 
 已安装冻结源码/cohort、尚无 RSI owner、coordinator 或 control ledger 的 Linux systemd Home，可显式调用已经审核并构建的本地 checkout。此入口尚未接入普通 `dsh-rsi update`、远程 helper 下载或发布版本 pins；不要复制单个新版 `lib` 文件到正式 profile。先以 `dsh-rsi-setup --prepare-local-update` 在 Home 外制作候选；候选与执行维护的 reviewed checkout 是两份独立绑定的输入。
 
-维护事务在停服前另用 Home 外的私有 profile 和全新缓存，按原有效 pnpm 配置验证原锁文件并预取依赖。原 manifest、workspace、lock 文件必须保持不变；校验缓存绑定本次执行、pnpm 程序、配置及文件身份，不能直接复用全局缓存里的验证标记。准备失败时原服务继续运行。停服后的原生 DSH 安装使用已核对缓存的独立副本，仍无网络、禁用安装脚本和 pnpmfile，并保留供应链策略检查；缺失或漂移的证明不能靠放宽策略继续安装。
+维护事务在停服前另用 Home 外的私有 profile 和全新缓存，按原有效 pnpm 配置验证原锁文件并预取依赖。随后在一次性同级 profile 中，以原直接依赖执行原生 `add --lockfile-only` 在线解析及 frozen fetch，补齐完整 registry 元数据和依赖包，再以另一份原元数据做离线锁解析复演。在线与离线结果图必须一致，并保留原 registry 包和可选依赖；原生 `file:` peer 上下文可以重算。预热与复演的 manifest 和锁均丢弃，不复制到 Home 或正式副本。可选依赖解析失败、未知跳过原因、损坏或截断的验证输出，即使 pnpm 退出 0 也会拒绝准备，不把不支持其他平台误作失败。
+
+预热后重新核对原锁的原始字节及本次供应链收据，原 manifest、workspace、lock 文件必须保持不变；无软链的 registry 镜像摘要、pnpm 程序、配置及文件身份随准备绑定，并在缓存复制后复核，不能直接复用全局验证标记。准备失败时原服务继续运行。停服后的原生 DSH 安装使用已核对缓存的独立副本，仍无网络、禁用安装脚本和 pnpmfile，并保留供应链策略检查；缺失或漂移的证明不能靠放宽策略继续安装。此准备覆盖原依赖图，不表示新增候选 registry 依赖已经可离线安装。
 
 私有准备不复制全局 registry 认证字段；registry 与供应链策略等非认证配置仍须精确一致，依赖以匿名方式读取，需要凭据而无法预取时在停服前拒绝。传入的 pnpm 程序按文件身份和字节摘要绑定，包安装的 PATH 优先使用其目录；若使用 wrapper，其后续加载文件仍属于外部受信运行环境。本机部署验证使用 pnpm 的独立原生程序。
 

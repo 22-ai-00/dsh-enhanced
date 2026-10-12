@@ -611,6 +611,35 @@ function yamlObject(document, field) {
   try { return plainRecord(document.toJS({ maxAliasCount: 0 }), field) } catch { metadataError(`${field} is not structurally valid YAML`) }
 }
 
+export async function assertLifecycleLocalSourceReplayMetadata({ original, online, offline, dshExecutable }) {
+  const yaml = await yamlModule(dshExecutable)
+  const originalGraph = yamlObject(parseYamlDocument(yaml, original, 'original lockfile'), 'original lockfile')
+  const onlineGraph = yamlObject(parseYamlDocument(yaml, online, 'online metadata lockfile'), 'online metadata lockfile')
+  const offlineGraph = yamlObject(parseYamlDocument(yaml, offline, 'offline replay lockfile'), 'offline replay lockfile')
+  if (!isDeepStrictEqual(onlineGraph, offlineGraph)) metadataError('online metadata and offline replay lockfile graphs differ')
+  const originalPackages = plainRecord(originalGraph.packages ?? {}, 'original registry packages')
+  const originalSnapshots = plainRecord(originalGraph.snapshots ?? {}, 'original registry snapshots')
+  for (const [label, graph] of [['online', onlineGraph], ['offline', offlineGraph]]) {
+    const packages = plainRecord(graph.packages ?? {}, `${label} registry packages`)
+    const snapshots = plainRecord(graph.snapshots ?? {}, `${label} registry snapshots`)
+    for (const [name, record] of Object.entries(originalPackages)) {
+      if (!name.includes('file:') && !isDeepStrictEqual(packages[name], record)) {
+        metadataError(`${label} metadata lockfile changed original registry package ${name}`)
+      }
+    }
+    for (const [name, snapshot] of Object.entries(originalSnapshots)) {
+      if (name.includes('file:') || snapshot?.optionalDependencies === undefined) continue
+      const optional = plainRecord(snapshot.optionalDependencies, `original registry snapshot ${name} optionalDependencies`)
+      const candidate = plainRecord(snapshots[name]?.optionalDependencies, `${label} registry snapshot ${name} optionalDependencies`)
+      for (const [dependency, resolution] of Object.entries(optional)) {
+        if (!isDeepStrictEqual(candidate[dependency], resolution)) {
+          metadataError(`${label} metadata lockfile changed original registry optional dependency ${name}/${dependency}`)
+        }
+      }
+    }
+  }
+}
+
 function dependencyReference(value) {
   if (typeof value === 'string') return value
   if (value !== null && typeof value === 'object' && typeof value.version === 'string') return value.version
