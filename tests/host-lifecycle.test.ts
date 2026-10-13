@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { chmod, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -259,6 +260,71 @@ async function treeSnapshot(root: string): Promise<string> {
 
 describe('managed Host transaction inputs', () => {
   const itLinux = process.platform === 'linux' ? it : it.skip
+
+  itLinux('admits only the captured owner observer socket before stop and discards only its disposable copy', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-owner-observer-copy-')))
+    const home = join(root, 'home'), profile = 'assistant'
+    const stateRoot = join(home, 'rsi-authorities', profile, 'state')
+    const socketPath = join(stateRoot, 'observer.sock')
+    const stageHome = join(root, 'candidate')
+    const server = createServer()
+    let replacement: ReturnType<typeof createServer> | undefined
+    let other: ReturnType<typeof createServer> | undefined
+    try {
+      await mkdir(stateRoot, { recursive: true, mode: 0o700 })
+      await new Promise<void>((resolveListen, reject) => server.listen(socketPath, resolveListen).once('error', reject))
+      await chmod(socketPath, 0o600)
+      const sourceProof = { protocol: 'dsh-enhanced/host-owner-source-repair/v1', ownerRepair: {
+        homePath: home, profile, original: { resources: { stateRoot }, manifest: { controlPlane: {
+          runtimeObserver: { socketPath } } } } } }
+      const capture = lifecycleProfileTest.captureOwnerRepairObserverSocket
+      await expect(capture({ ...sourceProof, protocol: 'forged' }, home, profile)).rejects.toThrow('not bound')
+      await expect(capture({ ...sourceProof, ownerRepair: { ...sourceProof.ownerRepair,
+        original: { ...sourceProof.ownerRepair.original, manifest: { controlPlane: {
+          runtimeObserver: { socketPath: join(home, 'unapproved.sock') } } } } } }, home, profile))
+        .rejects.toThrow('not bound')
+      const bound = await capture(sourceProof, home, profile)
+      expect(bound).toBeDefined()
+      await expect(lifecycleProfileTest.assertSnapshotTreeSafe(home, home, true, undefined, bound)).resolves.toBeDefined()
+      await expect(lifecycleProfileTest.assertSnapshotTreeSafe(home)).rejects.toThrow('特殊文件')
+      await mkdir(stageHome, { mode: 0o700 })
+      const copied = spawnSync('/bin/cp', ['-a', '--no-preserve=links', '--reflink=auto', '--', `${home}/.`, stageHome], { encoding: 'utf8' })
+      expect(copied.status, copied.stderr).toBe(0)
+      expect((await lstat(join(stageHome, 'rsi-authorities', profile, 'state', 'observer.sock'))).isSocket()).toBe(true)
+      await lifecycleProfileTest.discardCopiedOwnerObserverSocket(home, stageHome, bound)
+      await expect(lifecycleProfileTest.assertSnapshotTreeSafe(stageHome, home)).resolves.toBeDefined()
+      expect((await lstat(socketPath)).isSocket()).toBe(true)
+      const rogue = join(stateRoot, 'rogue.sock')
+      other = createServer()
+      await new Promise<void>((resolveListen, reject) => other!.listen(rogue, resolveListen).once('error', reject))
+      await chmod(rogue, 0o600)
+      await expect(lifecycleProfileTest.assertSnapshotTreeSafe(home, home, true, undefined, bound)).rejects.toThrow('特殊文件')
+      await new Promise<void>(resolveClose => other!.close(resolveClose))
+      other = undefined
+      const fifo = join(stateRoot, 'rogue.fifo')
+      const mkfifo = spawnSync('/usr/bin/mkfifo', [fifo], { encoding: 'utf8' })
+      expect(mkfifo.status, mkfifo.stderr).toBe(0)
+      await expect(lifecycleProfileTest.assertSnapshotTreeSafe(home, home, true, undefined, bound)).rejects.toThrow('特殊文件')
+      await rm(fifo)
+      await rename(socketPath, join(root, 'held-observer.sock'))
+      await symlink(join(home, 'rsi-authorities'), socketPath)
+      await expect(lifecycleProfileTest.assertSnapshotTreeSafe(home, home, true, undefined, bound)).rejects.toThrow('changed type')
+      await rm(socketPath)
+      const replacedByFifo = spawnSync('/usr/bin/mkfifo', [socketPath], { encoding: 'utf8' })
+      expect(replacedByFifo.status, replacedByFifo.stderr).toBe(0)
+      await expect(lifecycleProfileTest.assertSnapshotTreeSafe(home, home, true, undefined, bound)).rejects.toThrow('changed type')
+      await rm(socketPath)
+      replacement = createServer()
+      await new Promise<void>((resolveListen, reject) => replacement!.listen(socketPath, resolveListen).once('error', reject))
+      await chmod(socketPath, 0o600)
+      await expect(lifecycleProfileTest.assertSnapshotTreeSafe(home, home, true, undefined, bound)).rejects.toThrow('changed before snapshot')
+    } finally {
+      if (other) await new Promise<void>(resolveClose => other!.close(resolveClose))
+      if (replacement) await new Promise<void>(resolveClose => replacement!.close(resolveClose))
+      await new Promise<void>(resolveClose => server.close(resolveClose))
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 
   it('admits settings recovery only for its accepted started joint transaction and exact permit', () => {
     const envelope = { permit: { transactionId: 'transaction-a', homePath: '/private/home', profile: 'assistant',

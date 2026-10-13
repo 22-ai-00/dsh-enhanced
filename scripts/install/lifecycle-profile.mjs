@@ -686,16 +686,46 @@ async function resolveSymlinkTarget(path, logicalPath, linkText, physicalRoot, l
   return { target: undefined, targetIdentity: undefined }
 }
 
-async function assertSnapshotTreeSafe(homePath, logicalHome = homePath, allowPackageHardlinks = false, packageSymlinkWhitelist) {
+function sameOwnerObserverSocket(entry, bound) {
+  return entry.isSocket() && entry.uid === currentUid() && entry.nlink === 1
+    && (entry.mode & 0o777) === 0o600
+    && String(entry.dev) === bound.dev && String(entry.ino) === bound.ino
+    && entry.mode === bound.mode && entry.uid === bound.uid
+}
+
+async function captureOwnerRepairObserverSocket(sourceProof, homePath, profile) {
+  const ownerRepair = sourceProof?.ownerRepair
+  const stateRoot = join(homePath, 'rsi-authorities', profile, 'state')
+  const socketPath = join(stateRoot, 'observer.sock')
+  if (sourceProof?.protocol !== 'dsh-enhanced/host-owner-source-repair/v1'
+    || ownerRepair?.homePath !== homePath || ownerRepair.profile !== profile
+    || ownerRepair.original?.resources?.stateRoot !== stateRoot
+    || ownerRepair.original?.manifest?.controlPlane?.runtimeObserver?.socketPath !== socketPath) {
+    fail('owner repair observer socket is not bound to the signed installation')
+  }
+  const entry = await lstat(socketPath).catch(error => error?.code === 'ENOENT' ? undefined : Promise.reject(error))
+  if (entry === undefined) return undefined
+  const bound = { relative: `rsi-authorities/${profile}/state/observer.sock`,
+    dev: String(entry.dev), ino: String(entry.ino), uid: entry.uid, mode: entry.mode }
+  if (!sameOwnerObserverSocket(entry, bound)) fail('owner repair observer socket is not private and canonical')
+  return bound
+}
+
+async function assertSnapshotTreeSafe(homePath, logicalHome = homePath, allowPackageHardlinks = false,
+  packageSymlinkWhitelist, ownerObserverSocket) {
   const canonicalHome = await realpath(homePath)
   const homeStat = await assertOwnedPrivateDirectory(homePath)
   const hardlinks = new Map()
   const observedPackageSymlinks = new Map()
+  let sawOwnerObserverSocket = false
   const visit = async directory => {
     const entries = await opendir(directory)
     for await (const entry of entries) {
       const path = join(directory, entry.name)
       const relative = path.slice(homePath.length + 1)
+      if (relative === ownerObserverSocket?.relative && !entry.isSocket()) {
+        fail(`owner repair observer socket changed type before snapshot: ${relative}`)
+      }
       if (entry.isSymbolicLink()) {
         const linkText = await readlink(path)
         let resolvedTarget
@@ -738,10 +768,15 @@ async function assertSnapshotTreeSafe(homePath, logicalHome = homePath, allowPac
           observed.count += 1
           hardlinks.set(key, observed)
         }
+      } else if (entry.isSocket() && relative === ownerObserverSocket?.relative) {
+        const socket = await lstat(path)
+        if (!sameOwnerObserverSocket(socket, ownerObserverSocket)) fail('owner repair observer socket changed before snapshot')
+        sawOwnerObserverSocket = true
       } else fail(`DSH_HOME 包含无法安全快照的特殊文件：${relative}`)
     }
   }
   await visit(homePath)
+  if (ownerObserverSocket && !sawOwnerObserverSocket) fail('owner repair observer socket disappeared before snapshot')
   for (const value of hardlinks.values()) {
     if (value.count !== value.expected) fail(`DSH_HOME 包含可能连接到快照外部的硬链接，拒绝快照：${value.first}`)
   }
@@ -5370,9 +5405,29 @@ async function performNpmServiceUpgrade({
   }
 }
 
-async function copyHome(homePath, stageHome) {
+async function discardCopiedOwnerObserverSocket(homePath, stageHome, bound) {
+  const original = join(homePath, bound.relative)
+  const copied = join(stageHome, bound.relative)
+  if (!sameOwnerObserverSocket(await lstat(original), bound)) fail('owner repair observer socket changed during copy')
+  const cloned = await lstat(copied)
+  const clonedIdentity = { dev: String(cloned.dev), ino: String(cloned.ino), uid: cloned.uid, mode: cloned.mode }
+  if (!sameOwnerObserverSocket(cloned, clonedIdentity)
+    || String(cloned.dev) !== bound.dev || String(cloned.ino) === bound.ino) {
+    fail('candidate Home observer socket copy is not a distinct private socket')
+  }
+  if (!sameOwnerObserverSocket(await lstat(copied), clonedIdentity)) fail('candidate observer socket changed before discard')
+  await rm(copied)
+  if (!sameOwnerObserverSocket(await lstat(original), bound)) fail('owner repair observer socket changed during copy')
+  await assertSnapshotTreeSafe(stageHome, homePath, false)
+}
+
+async function copyHome(homePath, stageHome, ownerObserverSocket) {
+  if (ownerObserverSocket && !sameOwnerObserverSocket(await lstat(join(homePath, ownerObserverSocket.relative)), ownerObserverSocket)) {
+    fail('owner repair observer socket changed before copy')
+  }
   await mkdir(stageHome, { mode: 0o700 })
   await run('/bin/cp', ['-a', '--no-preserve=links', '--reflink=auto', '--', `${homePath}${sep}.`, stageHome], { passFds: [3, 4, 5] })
+  if (ownerObserverSocket) await discardCopiedOwnerObserverSocket(homePath, stageHome, ownerObserverSocket)
 }
 
 function cleanWebProfileSources(profile) {
@@ -7006,8 +7061,12 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
     return
   }
   await assertNoMounts(physicalHomePath)
-  const originalPackageLinks = await assertSnapshotTreeSafe(physicalHomePath, homePath, true)
-  const originalExternalLinksDigest = await originalExternalPackageLinkDigest(physicalHomePath, originalPackageLinks)
+  const ownerRepairRequested = localSourceInput?.ownerRepairPreset !== undefined
+  let originalPackageLinks, originalExternalLinksDigest
+  if (!ownerRepairRequested) {
+    originalPackageLinks = await assertSnapshotTreeSafe(physicalHomePath, homePath, true)
+    originalExternalLinksDigest = await originalExternalPackageLinkDigest(physicalHomePath, originalPackageLinks)
+  }
   const originalProfile = await readProfile(physicalHomePath, profile)
   const originalDshExecutable = await realpath(plan.originalRuntime.dshPath)
   const inventory = await captureServiceInventory(serviceContext.systemctlExecutable, homePath, profile,
@@ -7032,6 +7091,13 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
     if (!ownerRepair && (state.LoadState !== 'not-found' || state.ActiveState !== 'inactive' || state.MainPID !== '0')) {
       fail('prepared coordinator already has a service; joint pre-owner migration is not applicable')
     }
+  }
+  const ownerObserverSocket = localSource?.protocol === 'dsh-enhanced/host-owner-source-repair/v1'
+    ? await captureOwnerRepairObserverSocket(localSource, homePath, profile) : undefined
+  if (ownerRepairRequested) {
+    originalPackageLinks = await assertSnapshotTreeSafe(physicalHomePath, homePath, true,
+      undefined, ownerObserverSocket)
+    originalExternalLinksDigest = await originalExternalPackageLinkDigest(physicalHomePath, originalPackageLinks)
   }
   const units = []
   for (const service of services) {
@@ -7090,7 +7156,8 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
     let jointArtifacts
     if (localSource) {
       candidateHome = join(preparationRoot, 'candidate-home')
-      await copyHome(homePath, candidateHome)
+      await copyHome(homePath, candidateHome, ownerObserverSocket)
+      if (!ownerObserverSocket) await assertSnapshotTreeSafe(candidateHome, homePath, false)
       const { stageResourcesForPreparation } = await import('./host-local-source-update.mjs')
       jointArtifacts = await stageResourcesForPreparation({ proof: localSource, homePath, disposableHome: candidateHome })
     }
@@ -7126,6 +7193,7 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
     await assertNoUnmanagedHomeProcesses(homePath)
     manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
       hostMigration: { ...manifest.hostMigration, phase: 'stopped' } }, 'preparing')
+    await assertSnapshotTreeSafe(physicalHomePath, homePath, true)
     await copyHome(physicalHomePath, stageHome)
     const stagedIdentity = identity(await lstat(stageHome))
     manifest = await writeManifest(physicalTransactionRoot, { ...manifest, stagedIdentity,
@@ -7750,7 +7818,7 @@ export const lifecycleProfileTest = Object.freeze({
   ownerRepairRestorationPolicy, serviceReadySignal, serviceRuntimeReady, readRawServiceState,
   assertHostSettingsRecoveryAdmission, assertHostSettingsRecoveryServiceState, readHostSettingsRecoveryFile,
   canonicalJointCandidateHome,
-  assertSnapshotTreeSafe,
+  assertSnapshotTreeSafe, captureOwnerRepairObserverSocket, discardCopiedOwnerObserverSocket,
   compactSupervisedSnapshot, validSupervisedLifecycle, validSupervisedManifestPhase, sameHomeOwnershipEvidence,
   validManifestTopLevel, validV3OperationShape, validV3ServiceAcceptance, writeManifest,
   validSupervisedCapabilityProof, assertHostRsiRuntimeSuccessor, hostSandboxRun, MANIFEST_MAX_BYTES,
