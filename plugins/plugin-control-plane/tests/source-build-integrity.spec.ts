@@ -133,7 +133,7 @@ case "$1" in
       check-bin-mode-777) chmod 777 "$TEST_WORKSPACE/plugins/helper/run.sh";;
       check-bin-setuid) chmod 4755 "$TEST_WORKSPACE/plugins/helper/run.sh";;
       check-nonbin-exec) chmod 755 "$TEST_WORKSPACE/plugins/helper/src/index.ts";;
-      check-dir-special) chmod 2700 "$TEST_WORKSPACE/plugins/helper/tests";;
+      check-dir-special) chmod ${process.platform === 'darwin' ? '1700' : '2700'} "$TEST_WORKSPACE/plugins/helper/tests";;
       check-bin-manifest-expand)
         node -e 'const fs=require("node:fs"); const p=process.argv[1]; const target=process.argv[2]; const original=fs.readFileSync(p); const m=JSON.parse(original.toString("utf8")); m.bin.extra="src/index.ts"; fs.writeFileSync(p,JSON.stringify(m)); fs.chmodSync(target,0o755); fs.writeFileSync(p,original)' "$TEST_WORKSPACE/plugins/helper/package.json" "$TEST_WORKSPACE/plugins/helper/src/index.ts";;
     esac;;

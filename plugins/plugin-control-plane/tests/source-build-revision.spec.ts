@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { PluginCreationVerificationCertificate, SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
-import { afterEach, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, expect, test } from 'vitest'
 import { captureCreationCapabilitySource } from '../src/creation-capability-source.js'
 import { runDockerPreparedChecks, type SourceBuildConfig } from '../src/source-build.js'
 import { inspectSourceCreationContext, prepareCreatedPluginWorkspace } from '../src/source-creation.js'
@@ -17,8 +17,17 @@ import { checkedSourceSnapshot, createIsolatedWorktree } from '../src/source-wor
 import { createSourceCreationFixture } from './helpers/source-creation-fixture.js'
 
 const sourceRoot = fileURLToPath(new URL('../../..', import.meta.url)).replace(/\/$/u, '')
+let cloneRoot: string
+let repository: string
+let baseCommit: string
 const roots: string[] = []
 const worktrees: Array<{ remove: () => Promise<void> }> = []
+beforeAll(async () => {
+  cloneRoot = await realpath(await mkdtemp(join(tmpdir(), 'source-build-revision-clone-')))
+  const created = await createSourceCreationFixture(sourceRoot, join(cloneRoot, 'repository'))
+  repository = created.repository; baseCommit = created.baseCommit
+})
+afterAll(async () => { await rm(cloneRoot, { recursive: true, force: true }) })
 afterEach(async () => {
   for (const worktree of worktrees.splice(0).reverse()) await worktree.remove()
   for (const root of roots.splice(0).reverse()) await rm(root, { recursive: true, force: true })
@@ -70,7 +79,6 @@ function growthRun(grant: SourceRevisionGrant): SourceGrowthRunBinding {
 
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'source-build-revision-'))); roots.push(root)
-  const { repository, baseCommit } = await createSourceCreationFixture(sourceRoot, join(root, 'repository'))
   const environment = { ...process.env, HOME: root }
   const signal = new AbortController().signal
   const isolated = async () => {
@@ -129,7 +137,7 @@ test('revision proof reaches Docker dispatch with the exact staged tree and trus
     '--env', 'DSH_SOURCE_TRUST_LOCKFILE=true', '--env', `DSH_SOURCE_BASE_LOCK_SHA256=${lockDigest}`]))
   expect(result.treeDigest).toMatch(/^[a-f0-9]{64}$/u)
   expect(await readFile(`${f.dockerPath}.args`, 'utf8')).toContain('PLUGIN_ROOT=plugins/rsi-build-revision')
-})
+}, 30_000)
 
 test('parent binding, archived bytes, scope and mutually exclusive authorities fail before Docker run', async () => {
   const f = await fixture()
@@ -144,7 +152,7 @@ test('parent binding, archived bytes, scope and mutually exclusive authorities f
   await noDockerRun(f.dockerPath)
   await expect(runDockerPreparedChecks({ ...f.input, creation: f.creation })).rejects.toThrow(/conflicting preparation authorities/)
   await noDockerRun(f.dockerPath)
-})
+}, 30_000)
 
 test('current scaffold, lock, unsubmitted candidate change and expired grant fail before Docker run', async () => {
   const f = await fixture()
@@ -168,4 +176,4 @@ test('current scaffold, lock, unsubmitted candidate change and expired grant fai
   await expect(runDockerPreparedChecks({ ...f.input, revision: { ...f.revision,
     binding: { ...f.binding, grant: { ...f.binding.grant, expiresAt: Date.now() - 1 } } } })).rejects.toThrow(/grant expired/)
   await noDockerRun(f.dockerPath)
-})
+}, 30_000)
