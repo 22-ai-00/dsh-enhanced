@@ -710,7 +710,9 @@ export class PluginControlPlaneService extends Service {
 
   private async boundTrust(): Promise<Awaited<ReturnType<typeof loadTrustConfig>>> {
     const trust = await loadTrustConfig(this.config.trustPath)
-    if (resolve(join(this.config.statePath, 'control.sqlite')) !== trust.ledger.path
+    const localLedgerPath = resolve(join(this.config.statePath, 'control.sqlite'))
+    if ((this.config.adoptionCoordinator === undefined
+      ? localLedgerPath !== trust.ledger.path : localLedgerPath === trust.ledger.path)
       || resolve(this.config.catalogPath) !== trust.catalog.path) {
       throw new Error('plugin-control-plane: configured ledger/catalog do not match the owner trust binding')
     }
