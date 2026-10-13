@@ -574,7 +574,7 @@ handoff:
   commit: target-host
 ```
 
-这些条款进入不可变计划摘要，由现有采用审批签名覆盖。目标在当前 owner 反馈写入屏障内创建持久交接；期限取计划、审批回执和窗口上限的最小值，恢复或重复调用不会续期。外部 Host 共享精确 ledger/trust，单独配置：
+这些条款进入不可变计划摘要，由现有采用审批签名覆盖。目标在当前 owner 反馈写入屏障内创建持久交接；期限取计划、审批回执和窗口上限的最小值，恢复或重复调用不会续期。外部 Host 由 owner-private trust 指定目标 ledger，单独配置；交接仍受签名 handoff、owner 审批和操作 fence 约束：
 
 ```yaml
 adoptionCoordinator:
@@ -589,7 +589,7 @@ adoptionCoordinator:
   timeoutMs: 300000
 ```
 
-协调器必须运行在另一进程和独立 systemd unit；它不能同时配置目标的 `sourceJobs`、`sourceAdoptions`、`runtimeObserver` 或 `replayEndpoint`。只需连接所在 Host 的 Automations，复用原生每分钟调度、owner/Policy 和预算，每轮至多推进一个交接；空队列仍消耗一次配置的调度预算。`budgetId/budgetAmount` 必填，对应 Policy budget 使用 `automation-runs` metric 与有限周期额度，建议 `subject` scope，以稳定的协调器 automation id 聚合。Policy 账本按 scope、metric 和周期计量，仅换 budget id 不会分池；同一 Host 的其他任务应明确选择共用或分开额度。旧配置升级时须补齐，不能打开 `allowUnbudgetedExecution` 代替。`coordinatorId` 是绑定标识，不提供 OS 隔离或替代 ledger 文件权限。停用调度或耗尽原生预算也会暂停自动恢复，恢复前需先核对未知外部操作。
+协调器必须运行在另一进程和独立 systemd unit；它不能同时配置目标的 `sourceJobs`、`sourceAdoptions`、`runtimeObserver` 或 `replayEndpoint`。协调器的 `statePath/control.sqlite` 必须独立于 owner-private trust 指定的目标 ledger；普通控制面的本地账本仍须与 trust ledger 相同。只需连接所在 Host 的 Automations，复用原生每分钟调度、owner/Policy 和预算，每轮至多推进一个交接；空队列仍消耗一次配置的调度预算。`budgetId/budgetAmount` 必填，对应 Policy budget 使用 `automation-runs` metric 与有限周期额度，建议 `subject` scope，以稳定的协调器 automation id 聚合。Policy 账本按 scope、metric 和周期计量，仅换 budget id 不会分池；同一 Host 的其他任务应明确选择共用或分开额度。旧配置升级时须补齐，不能打开 `allowUnbudgetedExecution` 代替。`coordinatorId` 是绑定标识，不提供 OS 隔离或替代 ledger 文件权限。停用调度或耗尽原生预算也会暂停自动恢复，恢复前需先核对未知外部操作。
 
 协调器把关闭动作登记到同批 Automations 的 Host 停用屏障：正常卸载、provider 替换及 Host 退出时，在 Automations 存储关闭前暂停本代原生登记，再释放执行器与控制面连接。该屏障要求成套更新 Automations 与 Control Plane；不改变强制终止后的 unknown 执行对账语义。
 
