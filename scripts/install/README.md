@@ -122,6 +122,10 @@ node /reviewed/checkout/scripts/install/lifecycle-profile.mjs \
 
 停服前绑定原双服务的 InvocationID、PID、Host 就绪及原生登记状态。仅在候选从未启动、原证明仍完整时，恢复才允许保留原先缺失的就绪信号，恢复原 active / enablement 并明确报告 `degraded-original-restored`；原先已有的就绪信号仍须重新产生。这不降低候选验收门，也不把原来未就绪的学习服务宣称为成功。
 
+owner 身份复核使用新鲜、原子读取的完整绑定、查询范围、数据库版本及主数据库设备号 / inode；正常停服 checkpoint 导致的 WAL / SHM 清理不视为身份变化。候选未启动的 owner 修复回滚验证原 Home、已安装包和签名资源，不要求废弃候选或外部开发分支 HEAD 仍然可用；候选准备、切换和接受的完整来源校验不变。
+
+正式事务应使用独立冻结的已构建安装器目录；不要在同一目录并行构建或运行会重建 `lib/` 的测试。准备候选后，保持其外部源码 HEAD 不变直至事务结束，避免前向来源校验拒绝漂移。
+
 ### Checkout 内的 pre-owner 冻结源码维护
 
 已安装冻结源码/cohort、尚无 RSI owner、coordinator 或 control ledger 的 Linux systemd Home，可显式调用已经审核并构建的本地 checkout。此入口尚未接入普通 `dsh-rsi update`、远程 helper 下载或发布版本 pins；不要复制单个新版 `lib` 文件到正式 profile。先以 `dsh-rsi-setup --prepare-local-update` 在 Home 外制作候选；候选与执行维护的 reviewed checkout 是两份独立绑定的输入。

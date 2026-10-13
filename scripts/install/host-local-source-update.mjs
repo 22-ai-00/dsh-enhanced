@@ -197,6 +197,34 @@ async function readOriginal(proof, homePath, api) {
   return { preparation, source, cohort }
 }
 
+export async function verifyHostLocalSourceOriginalForPrestartRecovery({ proof, homePath, physicalHome }) {
+  assertProtocol(proof)
+  if (!repairMode(proof) || !profileName.test(proof.profile) || proof.homePath !== homePath
+    || proof.ownerRepair?.homePath !== homePath || proof.ownerRepair.profile !== proof.profile
+    || !exact(physicalHome)
+    || await realpath(physicalHome) !== homePath) fail('owner prestart recovery Home differs')
+  await privateHome(homePath)
+  await assertLocalSourceInstaller(proof.installer)
+  const api = await loadLocalSourceInstaller(proof.installer, { ownerRepair: true })
+  if (!proof.candidateArtifacts || !same(await allProfileRoots(homePath, {
+    packages: Object.keys(proof.candidateArtifacts).map(name => ({ name })),
+  }), proof.profileRoots)) fail('original Home profile roots changed')
+  const { verifyOwnerSourceRepair } = await import('./owner-source-repair.mjs')
+  await verifyOwnerSourceRepair({ ownerRepair: proof.ownerRepair, homePath,
+    physicalHome: homePath, installer: proof.installer, phase: 'original' })
+  const source = await api.readRsiSourceMaintenance({ logicalHome: homePath, physicalHome: homePath,
+    profile: proof.profile })
+  const cohort = await api.readRsiLocalCohort({ dshHome: homePath, profile: proof.profile })
+  await api.verifyRsiLocalInstalledPackages({ cohort, profilePath: join(homePath, 'profiles', proof.profile) })
+  const runtime = await api.readRsiAuthorityRuntimeReceipt({ logicalHome: homePath,
+    physicalHome: homePath, profile: proof.profile })
+  if (!same(source, proof.original.source) || cohort.receiptDigest !== proof.original.cohortDigest
+    || cohort.version !== proof.original.version || !same(runtime, proof.original.authorityRuntime)
+    || !same(await profileInventory(homePath, proof.profile), proof.original.profileInventory)) {
+    fail('original owner recovery identity changed')
+  }
+}
+
 export async function prepareHostLocalSourceUpdate({ homePath, profile, preparationRoot, installerRoot, auxiliaryRoot,
   ownerRepairPreset, dshPath, dshEnvironment }) {
   await privateHome(homePath)
