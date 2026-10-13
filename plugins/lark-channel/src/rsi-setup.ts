@@ -1,4 +1,4 @@
-import { constants } from 'node:fs'
+import { constants, realpathSync } from 'node:fs'
 import { chmod, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { createHash, createPublicKey, randomUUID } from 'node:crypto'
@@ -311,7 +311,7 @@ export const rsiSetupPorts: RsiSetupPorts = {
   compile: compileRsiProfiles,
   validateAuthorities: validateRsiAuthorities,
   resolveEnvironments: resolveRsiServiceEnvironments,
-  serviceUnitPath: (profile, home) => systemdServicePaths({ dshHome: home, profile }).unitPath,
+  serviceUnitPath: (profile, home) => systemdServicePaths({ dshHome: home, profile, home: realpathSync(homedir()) }).unitPath,
   async renderServiceUnit(profile, home, environment) { return (await renderDshSystemdService({ dshHome: home, profile }, { environment })).source },
   reloadServices() {
     const result = spawnSync('systemctl', ['--user', 'daemon-reload'], { encoding: 'utf8', timeout: 10_000, maxBuffer: 65_536 })
