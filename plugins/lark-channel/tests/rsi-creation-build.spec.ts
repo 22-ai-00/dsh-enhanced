@@ -1,13 +1,14 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
 import { parse } from 'yaml'
 import { prepareRsiBuildEnvironment } from '../src/rsi-build.js'
-import { prepareRsiCreationBuildEnvironment, readRsiCreationBuildEnvironment } from '../src/rsi-creation-build.js'
+import { materializeRsiCreationBuildInStage, prepareRsiCreationBuildEnvironment, readRsiCreationBuildInStage,
+  readRsiCreationBuildEnvironment } from '../src/rsi-creation-build.js'
 import type { RsiSourceWorkspace } from '../src/rsi-source.js'
 
 const roots: string[] = []
@@ -102,6 +103,59 @@ function behaviorBuilds(items: { args: string[] }[]): number {
 }
 
 describe.skipIf(process.platform !== 'linux' || process.arch !== 'x64')('private RSI plugin behavior image preparation', () => {
+  test('materializes only a newly verified candidate image into a stopped logical Home receipt', async () => {
+    const f = await fixture()
+    await prepareRsiCreationBuildEnvironment(f.args)
+    const stagePhysicalHome = join(f.root, 'stage'), logicalHome = join(f.root, 'logical')
+    await cp(f.home, stagePhysicalHome, { recursive: true })
+    const candidatePath = join(f.home, 'rsi-creation-builds', 'owner', 'bootstrap.json')
+    const stagePath = join(stagePhysicalHome, 'rsi-creation-builds', 'owner', 'bootstrap.json')
+    const candidateBefore = await readFile(candidatePath)
+    const stageInput = { logicalHome, stagePhysicalHome, profile: 'owner',
+      stagedSource: { ...f.source, repository: join(logicalHome, 'rsi-sources', 'owner', 'checkout') },
+      stagedBuild: f.args.build }
+    const result = await materializeRsiCreationBuildInStage({ ...stageInput,
+      candidateHome: f.home, candidateSource: f.source, candidateBuild: f.args.build })
+    const stage = JSON.parse(await readFile(stagePath, 'utf8')) as Record<string, unknown>
+    expect(stage.dshHome).toBe(logicalHome)
+    expect(stage.sourceCommit).toBe(f.source.sourceCommit)
+    expect(stage.image).toBe(behaviorImage)
+    expect(stage.receiptDigest).toBe(createHash('sha256').update(JSON.stringify(Object.fromEntries(
+      Object.entries(stage).filter(([key]) => key !== 'receiptDigest')))).digest('hex'))
+    expect(result.candidateReceiptSha256).toBe(createHash('sha256').update(candidateBefore).digest('hex'))
+    expect(result.receiptSha256).toBe(createHash('sha256').update(await readFile(stagePath)).digest('hex'))
+    expect(await readFile(candidatePath)).toEqual(candidateBefore)
+    expect(await readRsiCreationBuildInStage(stageInput)).toEqual(result.creationBuild)
+    await writeFile(stagePath, JSON.stringify({ ...stage, image: sourceImage }))
+    await expect(readRsiCreationBuildInStage(stageInput)).rejects.toThrow('receipt differs')
+  })
+
+  test('creation stage rejects source, image, and receipt drift without changing either Home', async () => {
+    const f = await fixture()
+    await prepareRsiCreationBuildEnvironment(f.args)
+    const stagePhysicalHome = join(f.root, 'stage'), logicalHome = join(f.root, 'logical')
+    await cp(f.home, stagePhysicalHome, { recursive: true })
+    const candidatePath = join(f.home, 'rsi-creation-builds', 'owner', 'bootstrap.json')
+    const stagePath = join(stagePhysicalHome, 'rsi-creation-builds', 'owner', 'bootstrap.json')
+    const before = await readFile(stagePath)
+    const input = { candidateHome: f.home, stagePhysicalHome, logicalHome, profile: 'owner',
+      candidateSource: f.source, candidateBuild: f.args.build,
+      stagedSource: { ...f.source, repository: join(logicalHome, 'rsi-sources', 'owner', 'checkout') },
+      stagedBuild: f.args.build }
+    await expect(materializeRsiCreationBuildInStage({ ...input,
+      stagedSource: { ...input.stagedSource, sourceCommit: '0'.repeat(40) } })).rejects.toThrow('binding differs')
+    await writeFile(join(stagePhysicalHome, 'rsi-sources', 'owner', 'checkout', 'pnpm-lock.yaml'), 'changed')
+    await expect(materializeRsiCreationBuildInStage(input)).rejects.toThrow('staged source inputs differ')
+    expect(await readFile(stagePath)).toEqual(before)
+    await writeFile(f.state, 'missing-behavior')
+    await cp(f.home, stagePhysicalHome, { recursive: true, force: true })
+    await expect(materializeRsiCreationBuildInStage(input)).rejects.toThrow('subprocess failed')
+    expect(await readFile(stagePath)).toEqual(before)
+    await writeFile(f.state, 'ready')
+    await writeFile(candidatePath, before.toString('utf8').replace(behaviorImage, sourceImage))
+    await expect(materializeRsiCreationBuildInStage(input)).rejects.toThrow('receipt differs')
+    expect(await readFile(stagePath)).toEqual(before)
+  })
   test('builds once from pinned fixed assets, replays the immutable image, and reads without Docker', async () => {
     const f = await fixture()
     const first = await prepareRsiCreationBuildEnvironment(f.args)

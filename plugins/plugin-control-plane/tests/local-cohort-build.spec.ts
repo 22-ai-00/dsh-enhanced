@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, readlink, rm, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, readlink, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
@@ -16,7 +16,7 @@ const bwrap = spawnSync('/usr/bin/bwrap', ['--unshare-all', '--ro-bind', '/', '/
 const roots: string[] = []
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 
-async function fixture(options: { failSlug?: string; mutateSource?: boolean } = {}) {
+async function fixture(options: { failSlug?: string; mutateSource?: boolean; binPath?: string; createBin?: boolean; mutateBin?: 'bytes' | 'mode' } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-local-cohort-build-'))
   roots.push(root)
   const toolchain = join(root, 'toolchain'), store = join(root, 'store')
@@ -42,9 +42,15 @@ printf 'sandbox-only write\\n' > ${JSON.stringify(secret)}
 [ "$(cat ${JSON.stringify(secret)})" = 'sandbox-only write' ] || exit 51
 [ ! -e /workspace/.git ] || exit 44
 [ ! -e /workspace/node_modules ] || exit 45
-if [ "\${1-}" = install ]; then : > /workspace/installed; exit 0; fi
+if [ "\${1-}" = install ]; then
+  ${options.binPath === undefined || options.createBin === false ? ':' : 'chmod 755 /workspace/plugins/alpha/bin/alpha.js'}
+  : > /workspace/installed; exit 0
+fi
 if [ "\${1-}" = --workspace-root ]; then
   ${options.mutateSource ? "printf 'changed source\\n' > /workspace/plugins/alpha/package.json" : ':'}
+  ${options.mutateBin === 'bytes' ? "printf 'changed bin\\n' > /workspace/plugins/alpha/bin/alpha.js" : ':'}
+  ${options.mutateBin === 'mode' ? 'chmod 700 /workspace/plugins/alpha/bin/alpha.js' : ':'}
+  ${options.binPath !== undefined && options.createBin === false ? "mkdir -p /workspace/plugins/alpha/lib; printf 'generated bin\\n' > /workspace/plugins/alpha/lib/cli.js" : ':'}
   exit 0
 fi
 if [ "\${1-}" = --dir ]; then
@@ -65,6 +71,14 @@ exit 49
   for (const path of ['plugins/alpha', 'packages/helper']) {
     await mkdir(join(workspace, path), { recursive: true, mode: 0o700 })
     await writeFile(join(workspace, path, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/${path.split('/')[1]}`, version: '1.0.0' }))
+  }
+  if (options.binPath !== undefined) {
+    await writeFile(join(workspace, 'plugins/alpha/package.json'), JSON.stringify({ name: '@dsh-enhanced/alpha', version: '1.0.0', bin: { alpha: options.binPath } }))
+    if (options.createBin !== false) {
+      await mkdir(join(workspace, 'plugins/alpha/bin'), { mode: 0o700 })
+      await writeFile(join(workspace, 'plugins/alpha/bin/alpha.js'), '#!/usr/bin/env node\n', { mode: 0o700 })
+      await chmod(join(workspace, 'plugins/alpha/bin/alpha.js'), 0o700)
+    }
   }
   const build = inspectLocalReleaseBuildEnvironment({ pnpmRoot: toolchain, storeRoot: store })
   return { root, workspace, output, secret, build, packagePaths: ['plugins/alpha', 'packages/helper'] }
@@ -105,4 +119,35 @@ test.skipIf(!bwrap)('rejects ambiguous package paths before running candidate co
   expect(() => buildLocalUpdateCohort({ ...request(f), packagePaths: ['plugins/alpha', 'packages/alpha'] })).toThrow(/ambiguous/u)
   expect(await readdir(f.output)).toEqual([])
   expect(createHash('sha256').update(await readFile(join(f.workspace, 'plugins', 'alpha', 'package.json'))).digest('hex')).toBe(before)
+})
+
+test.skipIf(!bwrap)('normalizes a declared private bin before inventory without changing the source', async () => {
+  const f = await fixture({ binPath: './bin/alpha.js' })
+  const original = await readFile(join(f.workspace, 'plugins/alpha/bin/alpha.js'))
+  buildLocalUpdateCohort(request(f))
+  expect((await stat(join(f.workspace, 'plugins/alpha/bin/alpha.js'))).mode & 0o777).toBe(0o700)
+  expect(await readFile(join(f.workspace, 'plugins/alpha/bin/alpha.js'))).toEqual(original)
+  expect((await readdir(f.output)).sort()).toEqual(['alpha', 'helper'])
+})
+
+test.skipIf(!bwrap)('still rejects byte and mode changes to normalized bins during build', async () => {
+  for (const mutateBin of ['bytes', 'mode'] as const) {
+    const f = await fixture({ binPath: './bin/alpha.js', mutateBin })
+    expect(() => buildLocalUpdateCohort(request(f))).toThrow(/source file changed during build: plugins\/alpha\/bin\/alpha.js/u)
+    expect(await readdir(f.output)).toEqual([])
+  }
+})
+
+test.skipIf(!bwrap)('allows a declared bin generated only after the source snapshot', async () => {
+  const f = await fixture({ binPath: './lib/cli.js', createBin: false })
+  buildLocalUpdateCohort(request(f))
+  expect((await readdir(f.output)).sort()).toEqual(['alpha', 'helper'])
+})
+
+test.skipIf(!bwrap)('rejects an escaping or non-file declared bin before candidate execution', async () => {
+  for (const binPath of ['../../outside.js', './bin']) {
+    const f = await fixture({ binPath })
+    expect(() => buildLocalUpdateCohort(request(f))).toThrow(/local update bin path/u)
+    expect(await readdir(f.output)).toEqual([])
+  }
 })

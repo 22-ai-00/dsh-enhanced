@@ -8,7 +8,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { assertLifecycleLocalSourceReplayMetadata, assertLifecycleNpmMetadataSafe, classifyLifecycleScenario, lifecycleWorkspacePaths, prepareLifecycleNpmMetadata, readRsiCoordinatorReceipt, validateRsiCoordinatorPair } from './lifecycle-config.mjs'
-import { candidateHostUnitSource, classifyHostUnitBytes, hostLocalSourcePlanMode, parseHostUpdatePlan } from './host-lifecycle.mjs'
+import { candidateHostUnitSource, classifyHostUnitBytes, hostLocalSourcePlanMode, hostOwnerSourceRepairSelection, parseHostUpdatePlan } from './host-lifecycle.mjs'
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const VALIDATOR_PATH = join(dirname(SCRIPT_PATH), 'lifecycle-config.mjs')
@@ -1022,13 +1022,25 @@ const HOST_UPDATE_PHASES = new Set([
 
 function validateHostUpdateManifest(manifest, expected, transactionRoot) {
   const migration = manifest.hostMigration
+  const ownerRepair = migration?.localSource?.protocol === 'dsh-enhanced/host-owner-source-repair/v1'
   if (migration?.localSource !== undefined && (migration.localSource === null
     || typeof migration.localSource !== 'object' || Array.isArray(migration.localSource)
-    || migration.localSource.protocol !== 'dsh-enhanced/host-local-source-update/v1'
+    || !ownerRepair && migration.localSource.protocol !== 'dsh-enhanced/host-local-source-update/v1'
     || migration.localSource.homePath !== expected.homePath || migration.localSource.profile !== expected.profile)) {
     fail('joint source migration proof is invalid')
   }
-  if (migration?.localSource !== undefined && (!Array.isArray(manifest.services)
+  if (ownerRepair) {
+    const selection = hostOwnerSourceRepairSelection(migration.plan, manifest.services, manifest.profile,
+      migration.localSource.ownerRepair?.permissionPreset)
+    if (selection.coordinatorProfile !== migration.localSource.ownerRepair.coordinatorProfile) fail('owner repair pair differs')
+    if (typeof migration.bwrapExecutable !== 'string' || !isAbsolute(migration.bwrapExecutable)
+      || resolve(migration.bwrapExecutable) !== migration.bwrapExecutable) fail('owner repair sandbox binding differs')
+    if (!validOwnerRepairOriginalReadiness(migration.originalReadiness, manifest.services,
+      expected.profile, selection.coordinatorProfile)) fail('owner repair original readiness baseline differs')
+  } else if (migration?.originalReadiness !== undefined) {
+    fail('original readiness baseline is only valid for owner repair')
+  }
+  if (migration?.localSource !== undefined && !ownerRepair && (!Array.isArray(manifest.services)
     || manifest.services.length !== 1 || manifest.services[0]?.profile !== manifest.profile
     || manifest.services[0]?.wasActive !== true)) {
     fail('joint source migration requires exactly the active target service')
@@ -1089,6 +1101,24 @@ function validateHostUpdateManifest(manifest, expected, transactionRoot) {
   if (manifest.serviceStartBarriers.length !== 0 && manifest.serviceStartBarriers.length !== manifest.services.length) {
     fail('Host 更新事务 start barrier inventory 无效。')
   }
+}
+
+function validOwnerRepairOriginalReadiness(readiness, services, targetProfile, coordinatorProfile) {
+  if (!exactKeys(readiness, ['schemaVersion', 'services']) || readiness.schemaVersion !== 1
+    || !Array.isArray(readiness.services) || readiness.services.length !== 2
+    || !Array.isArray(services) || services.length !== 2) return false
+  return readiness.services.every((entry, index) => {
+    const service = services[index]
+    return exactKeys(entry, ['unit', 'profile', 'invocationId', 'mainPid', 'hostReady', 'coordinatorActivated'])
+      && entry.unit === service?.unit && entry.profile === service?.profile
+      && [targetProfile, coordinatorProfile].includes(entry.profile)
+      && service?.wasActive === true && entry.invocationId === service.invocationId
+      && typeof entry.invocationId === 'string' && entry.invocationId.length > 0
+      && entry.mainPid === service.mainPid && Number.isSafeInteger(entry.mainPid) && entry.mainPid > 0
+      && typeof entry.hostReady === 'boolean'
+      && (entry.profile === targetProfile ? entry.coordinatorActivated === null
+        : typeof entry.coordinatorActivated === 'boolean')
+  })
 }
 
 function validForeignOwnershipEvidence(evidence) {
@@ -3067,6 +3097,85 @@ async function journalHasReadyMarker(journalctlExecutable, service) {
   return hasHostReadyMarker(result.stdout)
 }
 
+async function captureOwnerRepairOriginalReadiness({ systemctlExecutable, journalctlExecutable,
+  services, homePath, profile, sourceProof, activationInspector }) {
+  const coordinatorProfile = sourceProof.ownerRepair.coordinatorProfile
+  const activation = activationInspector ?? await (async () => {
+    const { ownerRepairActivationInspector } = await import('./owner-repair-readiness.mjs')
+    return ownerRepairActivationInspector({ ownerRepair: sourceProof.ownerRepair,
+      installer: sourceProof.installer, homePath, targetProfile: profile, coordinatorProfile })
+  })()
+  const captured = []
+  for (const service of services) {
+    const before = await readRawServiceState(systemctlExecutable, service.unit)
+    assertExpectedServiceEnvironment(before, service)
+    if (before.activeState !== 'active' || before.subState !== 'running' || before.controlPid !== 0
+      || before.mainPid !== service.mainPid || before.invocationId !== service.invocationId
+      || before.nRestarts !== service.nRestarts || before.mainPid <= 0 || before.invocationId === '') {
+      fail(`owner repair original service changed before stop: ${service.unit}`)
+    }
+    const hostReady = await journalHasReadyMarker(journalctlExecutable, before)
+    const coordinatorActivated = service.profile === coordinatorProfile ? activation(0) : null
+    const after = await readRawServiceState(systemctlExecutable, service.unit)
+    assertExpectedServiceEnvironment(after, service)
+    if (after.activeState !== before.activeState || after.subState !== before.subState
+      || after.mainPid !== before.mainPid || after.controlPid !== before.controlPid
+      || after.invocationId !== before.invocationId || after.nRestarts !== before.nRestarts) {
+      fail(`owner repair original service changed during readiness capture: ${service.unit}`)
+    }
+    captured.push({ unit: service.unit, profile: service.profile, invocationId: service.invocationId,
+      mainPid: service.mainPid, hostReady, coordinatorActivated })
+  }
+  for (const service of services) {
+    const current = await readRawServiceState(systemctlExecutable, service.unit)
+    assertExpectedServiceEnvironment(current, service)
+    if (current.activeState !== 'active' || current.subState !== 'running' || current.controlPid !== 0
+      || current.mainPid !== service.mainPid || current.invocationId !== service.invocationId
+      || current.nRestarts !== service.nRestarts) {
+      fail(`owner repair original service changed before pair capture completed: ${service.unit}`)
+    }
+  }
+  const readiness = { schemaVersion: 1, services: captured }
+  if (!validOwnerRepairOriginalReadiness(readiness, services, profile, coordinatorProfile)) {
+    fail('owner repair original readiness cannot be bound to both services')
+  }
+  return readiness
+}
+
+function ownerRepairRestorationPolicy(readiness, services, targetProfile, coordinatorProfile, activation) {
+  if (!validOwnerRepairOriginalReadiness(readiness, services, targetProfile, coordinatorProfile)
+    || typeof activation !== 'function') fail('owner repair restoration readiness evidence differs')
+  return { records: new Map(readiness.services.map(entry => [entry.unit, entry])), activation,
+    coordinatorProfile, startedAt: Date.now() }
+}
+
+function restorationRequiresHostReady(policy, unit) {
+  return policy?.records.get(unit)?.hostReady !== false
+}
+
+async function assertRestorationActivation(policy, homePath, service, since) {
+  if (policy?.coordinatorProfile === service.profile) {
+    if (policy.records.get(service.unit)?.coordinatorActivated !== false && !policy.activation(since)) {
+      fail('owner repair original coordinator has no fresh native activation')
+    }
+  } else await assertRsiCoordinatorActivation(homePath, service, since)
+}
+
+async function serviceReadySignal(journalctlExecutable, homePath, service, startedAt, originalRestoration) {
+  if (restorationRequiresHostReady(originalRestoration, service.unit)
+    && !await journalHasReadyMarker(journalctlExecutable, service)) return false
+  try { await assertRestorationActivation(originalRestoration, homePath, service, startedAt) }
+  catch { return false }
+  return true
+}
+
+function serviceRuntimeReady(previous, service, originalRestoration) {
+  return service !== undefined && service.activeState === 'active' && service.subState === 'running'
+    && service.mainPid > 0 && service.controlPid === 0 && service.invocationId !== ''
+    && service.invocationId !== previous.invocationId
+    && (originalRestoration === undefined || service.mainPid !== previous.mainPid)
+}
+
 async function larkJournalStates(journalctlExecutable, service) {
   const result = await runServiceCommand(journalctlExecutable, [
     '--user', '--unit', service.unit, `_SYSTEMD_INVOCATION_ID=${service.invocationId}`, '--output=cat', '--no-pager',
@@ -3091,9 +3200,9 @@ async function latestLarkJournalState(journalctlExecutable, service) {
 async function startAndAcceptServices({
   systemctlExecutable, journalctlExecutable, services, serviceMasks,
   homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], timeouts,
-  acceptAfterReady, durableAccept, requireLarkReady = false, larkReadyProfiles = [],
+  acceptAfterReady, durableAccept, requireLarkReady = false, larkReadyProfiles = [], originalRestoration,
 }) {
-  const startedAt = Date.now()
+  const startedAt = originalRestoration?.startedAt ?? Date.now()
   const activeBefore = services.filter(service => service.wasActive)
   const activeMasks = activeBefore.map(service => {
     const mask = serviceMasks.find(candidate => candidate.unit === service.unit)
@@ -3124,16 +3233,14 @@ async function startAndAcceptServices({
           && service.mainPid === 0 && service.controlPid === 0
           && service.loadState === 'masked'
       }
-      const systemdReady = candidates.every(({ previous, current: service }) => service !== undefined
-        && service.activeState === 'active' && service.subState === 'running' && service.mainPid > 0
-        && service.controlPid === 0 && service.invocationId !== '' && service.invocationId !== previous.invocationId) && inactiveReady
+      const systemdReady = candidates.every(({ previous, current: service }) =>
+        serviceRuntimeReady(previous, service, originalRestoration)) && inactiveReady
       if (systemdReady) {
         let logsReady = true
         const readinessLarkCounts = new Map()
         for (const candidate of candidates) {
-          if (!await journalHasReadyMarker(journalctlExecutable, candidate.current)) { logsReady = false; break }
-          try { await assertRsiCoordinatorActivation(homePath, candidate.current, startedAt) }
-          catch { logsReady = false; break }
+          if (!await serviceReadySignal(journalctlExecutable, homePath, candidate.current,
+            startedAt, originalRestoration)) { logsReady = false; break }
           if (requireLarkReady && candidate.current.profile === targetProfile
             || larkReadyProfiles.includes(candidate.current.profile)) {
             const states = await larkJournalStates(journalctlExecutable, candidate.current)
@@ -3171,10 +3278,10 @@ async function startAndAcceptServices({
       for (const service of stable) assertExpectedServiceEnvironment(service, service)
       const stableByUnit = new Map(stable.map(service => [service.unit, service]))
       for (const acceptedService of accepted) {
-        await assertRsiCoordinatorActivation(homePath, acceptedService, startedAt)
+        await assertRestorationActivation(originalRestoration, homePath, acceptedService, startedAt)
         const service = stableByUnit.get(acceptedService.unit)
         if (service === undefined || service.activeState !== 'active' || service.subState !== 'running' || service.mainPid <= 0
-          || service.controlPid !== 0
+          || service.mainPid !== acceptedService.mainPid || service.controlPid !== 0
           || service.invocationId !== acceptedService.invocationId || service.nRestarts !== acceptedService.nRestarts) {
           fail(`systemd service 未通过稳定性验证：${acceptedService.unit}`)
         }
@@ -3212,6 +3319,7 @@ async function finalizeAcceptedServices({
   homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], acceptance, requireLarkReady = false,
   larkReadyProfiles = [],
   restoreContainedEnablement = true,
+  originalRestoration,
 }) {
   await stageBoundMasks(systemctlExecutable, serviceMasks)
   if (restoreContainedEnablement) await stageBoundMasks(systemctlExecutable, containmentMasks)
@@ -3233,26 +3341,26 @@ async function finalizeAcceptedServices({
   await assertAcceptedServicesStillBound({
     systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
     homePath, targetProfile, unitUniverse, foreignOwnership, cleanProfiles, acceptance, requireLarkReady,
-    larkReadyProfiles,
+    larkReadyProfiles, originalRestoration,
   })
 }
 
 async function assertAcceptedServicesStillBound({
   systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
   homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], acceptance, requireLarkReady = false,
-  larkReadyProfiles = [],
+  larkReadyProfiles = [], originalRestoration,
 }) {
   if (!await acceptedServicesStillBound({
     systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
     homePath, targetProfile, unitUniverse, foreignOwnership, cleanProfiles, acceptance, requireLarkReady,
-    larkReadyProfiles,
+    larkReadyProfiles, originalRestoration,
   })) fail('systemd service acceptance 在 cleanup 前失效。')
 }
 
 async function acceptedServicesStillBound({
   systemctlExecutable, journalctlExecutable, services, serviceMasks, serviceStartBarriers, homePath, targetProfile,
   unitUniverse, foreignOwnership = [], cleanProfiles = [], acceptance, requireLarkReady = false,
-  larkReadyProfiles = [],
+  larkReadyProfiles = [], originalRestoration,
 }) {
   await assertUnitUniverseStable(systemctlExecutable, unitUniverse, homePath, foreignOwnership)
   await assertCleanProfileInventory(homePath, cleanProfiles)
@@ -3313,7 +3421,8 @@ async function acceptedServicesStillBound({
     if (proof === undefined || service.activeState !== 'active' || service.subState !== 'running'
       || service.mainPid !== proof.mainPid || service.invocationId !== proof.invocationId
       || service.nRestarts !== proof.nRestarts) readyForCleanup = false
-    await assertRsiCoordinatorActivation(homePath, original, 0)
+    await assertRestorationActivation(originalRestoration, homePath, original,
+      originalRestoration?.startedAt ?? 0)
     if ((requireLarkReady && original.profile === targetProfile
       || larkReadyProfiles.includes(original.profile))
       && !LARK_ACCEPTED_STATES.has(await latestLarkJournalState(journalctlExecutable, service))) {
@@ -4165,17 +4274,18 @@ async function restoreOriginalActiveSet({
   systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
   containmentMasks = [], containmentStartBarriers = [],
   homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], timeouts, acceptAfterReady,
-  requireLarkReady = false,
+  requireLarkReady = false, originalRestoration,
 }) {
   await assertServiceFilesUnchanged(services)
   const accepted = await startAndAcceptServices({
     systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks,
     homePath, targetProfile, unitUniverse, foreignOwnership, cleanProfiles, timeouts, acceptAfterReady, requireLarkReady,
+    originalRestoration,
   })
   await finalizeAcceptedServices({
     systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
     containmentMasks, containmentStartBarriers, homePath, targetProfile, unitUniverse, foreignOwnership, cleanProfiles, acceptance: accepted,
-    requireLarkReady,
+    requireLarkReady, originalRestoration,
   })
   return accepted
 }
@@ -6905,17 +7015,21 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
   const { services, unitUniverse, foreignOwnership } = inventory
   let localSource
   if (localSourceInput) {
-    if (services.length !== 1 || services[0].profile !== profile || !services[0].wasActive) {
+    const ownerRepair = localSourceInput.ownerRepairPreset !== undefined
+    if (ownerRepair) hostOwnerSourceRepairSelection(plan, services, profile, localSourceInput.ownerRepairPreset)
+    else if (services.length !== 1 || services[0].profile !== profile || !services[0].wasActive) {
       fail('joint pre-owner migration requires exactly the active target service')
     }
     const { prepareHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
-    localSource = await prepareHostLocalSourceUpdate({ homePath, profile, ...localSourceInput })
+    localSource = await prepareHostLocalSourceUpdate({ homePath, profile, dshPath: originalDshExecutable,
+      dshEnvironment: { PATH: [plan.originalRuntime.binDirectory, dirname(process.execPath), '/usr/bin', '/bin'].join(':') },
+      ...localSourceInput })
     const coordinator = `rsi-${profile.slice(0, 43)}-${sha256(profile).slice(0, 12)}`
     const fields = ['LoadState', 'ActiveState', 'MainPID']
     const state = parseSystemdShowProperties((await runServiceCommand(serviceContext.systemctlExecutable,
       ['--user', 'show', `dsh-profile-${coordinator}.service`, '--no-pager', ...fields.map(name => `--property=${name}`)])).stdout,
     `dsh-profile-${coordinator}.service`, fields)
-    if (state.LoadState !== 'not-found' || state.ActiveState !== 'inactive' || state.MainPID !== '0') {
+    if (!ownerRepair && (state.LoadState !== 'not-found' || state.ActiveState !== 'inactive' || state.MainPID !== '0')) {
       fail('prepared coordinator already has a service; joint pre-owner migration is not applicable')
     }
   }
@@ -6938,6 +7052,10 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
       afterDigest: sha256(candidate.source), pathEnvironment: candidate.pathEnvironment })
   }
   const originalStat = await assertOwnedPrivateDirectory(physicalHomePath)
+  const originalReadiness = localSource?.protocol === 'dsh-enhanced/host-owner-source-repair/v1'
+    ? await captureOwnerRepairOriginalReadiness({ systemctlExecutable: serviceContext.systemctlExecutable,
+      journalctlExecutable: serviceContext.journalctlExecutable, services, homePath, profile, sourceProof: localSource })
+    : undefined
   const homeParent = fstatSync(3)
   if (String(homeParent.dev) !== String(originalStat.dev)) fail('Host Home and transaction must share filesystem')
   if (services.length > 0) {
@@ -6958,7 +7076,8 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
     services, unitUniverse, foreignOwnership, serviceMasks: [], serviceStartBarriers: [],
     containmentMasks: [], containmentMaskIntents: [], containmentStartBarriers: [],
     hostMigration: { plan, units, phase: 'initializing', candidateEverStarted: false,
-      originalExternalLinksDigest, ...(localSource ? { localSource } : {}) },
+      originalExternalLinksDigest, ...(localSource ? { localSource } : {}),
+      ...(originalReadiness ? { bwrapExecutable, originalReadiness } : {}) },
   }
   let manifest = await writeManifest(physicalTransactionRoot, initial, 'preparing')
   try {
@@ -6991,9 +7110,14 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
       hostMigration: { ...manifest.hostMigration, preparation } }, 'preparing')
     const masks = await prepareBoundMasks(physicalTransactionRoot, services.map(service => service.unit), 'managed')
     const barriers = await prepareServiceStartBarriers(physicalTransactionRoot, services)
+    const preStopReadiness = originalReadiness
+      ? await captureOwnerRepairOriginalReadiness({ systemctlExecutable: serviceContext.systemctlExecutable,
+        journalctlExecutable: serviceContext.journalctlExecutable, services, homePath, profile, sourceProof: localSource })
+      : undefined
     manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
       serviceMasks: masks, serviceStartBarriers: barriers,
-      hostMigration: { ...manifest.hostMigration, phase: 'stopping' } }, 'preparing')
+      hostMigration: { ...manifest.hostMigration, phase: 'stopping',
+        ...(preStopReadiness ? { originalReadiness: preStopReadiness } : {}) } }, 'preparing')
     await assertUnitUniverseStable(serviceContext.systemctlExecutable, unitUniverse, homePath, foreignOwnership)
     await installBoundMasks(serviceContext.systemctlExecutable, masks)
     await establishServiceStartBarriers(serviceContext.systemctlExecutable, barriers)
@@ -7022,7 +7146,7 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
       ? (await import('./host-local-profile-update.mjs')).materializeHostLocalProfileUpdate : materializeHostProfileUpdate
     const profileProof = await materializeProfiles({ preparation, stagedHome: stageHome,
       logicalHome: homePath, runPnpm, runCandidateDsh })
-    if (localSource) {
+    if (localSource && localSource.protocol !== 'dsh-enhanced/host-owner-source-repair/v1') {
       const { finalizeHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
       localSource = await finalizeHostLocalSourceUpdate({ proof: localSource, homePath, stageHome })
       manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
@@ -7049,6 +7173,7 @@ async function continueHostUpdate({ manifest: initial, homePath, physicalHomePat
   let manifest = initial
   const migration = manifest.hostMigration
   const plan = migration.plan
+  const ownerRepair = migration.localSource?.protocol === 'dsh-enhanced/host-owner-source-repair/v1'
   const services = manifest.services
   const masks = manifest.serviceMasks
   const systemctlExecutable = serviceContext.systemctlExecutable
@@ -7086,18 +7211,47 @@ async function continueHostUpdate({ manifest: initial, homePath, physicalHomePat
     } finally { await installBoundMasks(systemctlExecutable, masks) }
   }, false, homePath, services.map(service => service.unit))
   await assertNoUnmanagedHomeProcesses(homePath)
-  const rsiProof = migration.localSource
+  if (ownerRepair) {
+    const helper = await import('./host-local-source-update.mjs')
+    const { loadLocalSourceInstaller } = await import('./local-source-maintenance.mjs')
+    const api = await loadLocalSourceInstaller(migration.localSource.installer, { ownerRepair: true })
+    const pair = [manifest.profile, migration.localSource.ownerRepair.coordinatorProfile]
+    const bwrapExecutable = await trustedSystemExecutable(migration.bwrapExecutable, 'bwrap')
+    const dump = async profile => (await hostSandboxRun({ bwrapExecutable,
+      preparationRoot: migration.preparation.preparationRoot, stageHome, logicalHome: homePath,
+      command: plan.candidateRuntime.dshPath, args: ['--profile', profile, '--dump-config'],
+      cwd: homePath, phase: 'fallback' })).stdout
+    const effective = await Promise.all(pair.map(dump))
+    const coordinatorBase = await api.readRsiInstalledBase(pair[1], homePath, { ...process.env,
+      PATH: [dirname(plan.candidateRuntime.dshPath), dirname(process.execPath), '/usr/bin', '/bin'].join(':') })
+    const localSource = await helper.finalizeHostLocalSourceUpdate({ proof: migration.localSource, homePath, stageHome,
+      stageNativeEffective: { targetEffective: effective[0], coordinatorEffective: effective[1] }, coordinatorBase,
+      unitProperties: unitTransitions.find(item => item.profile === manifest.profile)?.unitProperties,
+      transactionId: manifest.id })
+    for (const selected of pair) api.assertRsiEffectivePatch(
+      await readFile(join(stageHome, 'profiles', selected, 'cordis.patch.yml'), 'utf8'), await dump(selected))
+    manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+      stagedProfileDigest: sha256((await readProfile(stageHome, manifest.profile)).source),
+      hostMigration: { ...manifest.hostMigration, localSource } }, 'preparing')
+  }
+  const sourceProof = manifest.hostMigration.localSource
+  const rsiProof = ownerRepair
+    ? { schemaVersion: 1, mode: 'owner-repair', hostPlanDigest: sha256(JSON.stringify(plan)),
+      authorizedPatchDigests: sourceProof.ownerRepairNext.patches,
+      installations: [{ targetProfile: manifest.profile, coordinatorProfile: sourceProof.ownerRepair.coordinatorProfile }] }
+    : migration.localSource
     ? { schemaVersion: 1, mode: 'pre-owner-local', hostPlanDigest: sha256(JSON.stringify(plan)),
       authorizedPatchDigests: {}, installations: [] }
     : await prepareRsiHostUpdate({ homePath, stageHome, hostPlan: plan, unitTransitions,
       transactionId: manifest.id, systemctlExecutable })
   if (migration.localSource) {
     const { verifyHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
-    await verifyHostLocalSourceUpdate({ proof: migration.localSource, homePath, physicalHome: homePath, selection: 'original' })
-    await verifyHostLocalSourceUpdate({ proof: migration.localSource, homePath, physicalHome: stageHome, selection: 'candidate' })
+    await verifyHostLocalSourceUpdate({ proof: sourceProof, homePath, physicalHome: homePath, selection: 'original' })
+    await verifyHostLocalSourceUpdate({ proof: sourceProof, homePath, physicalHome: stageHome, selection: 'candidate', checkLedger: ownerRepair })
   } else await verifyRsiHostUpdate({ homePath, physicalHome: stageHome, hostPlan: plan, proof: rsiProof })
   if (JSON.stringify(await validateHostProfileUpdate({ preparation: migration.preparation,
-    stagedHome: stageHome, authorizedPatchDigests: rsiProof.authorizedPatchDigests })) !== JSON.stringify(migration.profileProof)) {
+    stagedHome: stageHome, authorizedPatchDigests: rsiProof.authorizedPatchDigests,
+    ...(ownerRepair ? { ownerSourceRepair: { homePath, sourceProof } } : {}) })) !== JSON.stringify(migration.profileProof)) {
     fail('RSI authority preparation changed staged profile materialization')
   }
   await verifyHostPlanBinding(plan, homePath)
@@ -7126,7 +7280,7 @@ async function continueHostUpdate({ manifest: initial, homePath, physicalHomePat
   if (migration.localSource) {
     const { verifyHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
     const candidateHome = await canonicalJointCandidateHome(physicalHomePath, homePath)
-    await verifyHostLocalSourceUpdate({ proof: migration.localSource, homePath, physicalHome: candidateHome, selection: 'candidate' })
+    await verifyHostLocalSourceUpdate({ proof: sourceProof, homePath, physicalHome: candidateHome, selection: 'candidate', checkLedger: ownerRepair })
   } else await verifyRsiHostUpdate({ homePath, physicalHome: physicalHomePath, hostPlan: plan, proof: rsiProof })
   await assertUnitUniverseStable(systemctlExecutable, manifest.unitUniverse, homePath, manifest.foreignOwnership)
   await acceptHostCandidate({ manifest, homePath, physicalHomePath, transactionRoot,
@@ -7172,23 +7326,49 @@ async function awaitHostRsiRuntimeSuccessor({ homePath, dshExecutable, target, t
   }
 }
 
+async function awaitHostOwnerRepairReadiness({ manifestPath, homePath, dshExecutable, sourceProof, startedAt }) {
+  const { assertLocalSourceInstaller } = await import('./local-source-maintenance.mjs')
+  await assertLocalSourceInstaller(sourceProof.installer)
+  const helperPath = join(sourceProof.installer.root, 'scripts', 'install', 'owner-source-repair.mjs')
+  const script = [
+    "import { readFile } from 'node:fs/promises'",
+    "import { pathToFileURL } from 'node:url'",
+    'const [manifestPath, homePath, helperPath, startedAt] = process.argv.slice(1)',
+    "const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))",
+    'const proof = manifest.hostMigration.localSource',
+    "if (manifest.homePath !== homePath || proof.protocol !== 'dsh-enhanced/host-owner-source-repair/v1') throw new Error('owner readiness transaction differs')",
+    'const { awaitOwnerSourceRepairReady } = await import(pathToFileURL(helperPath).href)',
+    'await awaitOwnerSourceRepairReady({ ownerRepair: proof.ownerRepair, ownerRepairNext: proof.ownerRepairNext, homePath, installer: proof.installer, startedAt: Number(startedAt) })',
+    "process.stdout.write(JSON.stringify({ mode: 'ready' }))",
+  ].join('\n')
+  const result = await run(process.execPath, ['--input-type=module', '-e', script,
+    manifestPath, homePath, helperPath, String(startedAt)], { capture: true, timeoutMs: 120_000, passFds: [3],
+    env: { ...process.env, DSH_HOME: homePath, NODE_OPTIONS: '', NODE_PATH: '',
+      PATH: [dirname(dshExecutable), dirname(process.execPath), '/usr/bin', '/bin'].join(':') } })
+  if (JSON.parse(result.stdout).mode !== 'ready') fail('owner repair native readiness did not pass')
+  await assertLocalSourceInstaller(sourceProof.installer)
+}
+
 async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePath, transactionRoot,
   physicalTransactionRoot, backupHome, serviceContext }) {
   let manifest = initial
   const migration = manifest.hostMigration
   const plan = migration.plan
+  const ownerRepair = migration.localSource?.protocol === 'dsh-enhanced/host-owner-source-repair/v1'
   const systemctlExecutable = serviceContext.systemctlExecutable
   const masks = manifest.serviceMasks
   const services = await hostCandidateServices(manifest.services, migration.units, plan.candidateRuntime.dshPath)
   const { verifyRsiHostUpdate } = await import('./host-rsi-update.mjs')
-  const verifyAuthority = async () => {
+  const verifyAuthority = async (checkLedger = false) => {
     if (migration.localSource) {
       const { verifyHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
       const candidateHome = await canonicalJointCandidateHome(physicalHomePath, homePath)
-      await verifyHostLocalSourceUpdate({ proof: migration.localSource, homePath, physicalHome: candidateHome, selection: 'candidate' })
+      await verifyHostLocalSourceUpdate({ proof: migration.localSource, homePath, physicalHome: candidateHome,
+        selection: 'candidate', checkLedger })
       const { validateHostLocalProfileUpdate } = await import('./host-local-profile-update.mjs')
       const profiles = await validateHostLocalProfileUpdate({ preparation: migration.preparation,
         stagedHome: candidateHome, originalPhysicalHome: backupHome,
+        ...(ownerRepair ? { ownerSourceRepair: { homePath, sourceProof: migration.localSource } } : {}),
         ...(migration.nativeSettingsImport === undefined ? {} : {
           legacySettingsImport: { ...migration.nativeSettingsImport, manifest, sourceProof: migration.localSource,
             homePath, baseManifestDigest: migration.nativeSettingsImport.permit.baseManifestDigest },
@@ -7196,11 +7376,12 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
       if (JSON.stringify(profiles) !== JSON.stringify(migration.profileProof)) fail('candidate Host profile proof changed')
     } else await verifyRsiHostUpdate({ homePath, physicalHome: physicalHomePath, hostPlan: plan, proof: migration.rsiProof })
   }
-  await verifyAuthority()
+  await verifyAuthority(ownerRepair && !migration.candidateEverStarted)
   await verifyHostPlanBinding(plan, homePath, 'candidate')
   const candidateDshExecutable = await realpath(plan.candidateRuntime.dshPath)
-  const rsiTargets = await hostRsiRuntimeAcceptance({ proof: migration.rsiProof, homePath,
+  const rsiTargets = ownerRepair ? [] : await hostRsiRuntimeAcceptance({ proof: migration.rsiProof, homePath,
     dshExecutable: candidateDshExecutable, services })
+  const larkReadyProfiles = ownerRepair ? [manifest.profile] : rsiTargets.map(target => target.profile)
   if (!migration.candidateEverStarted) await assertHostCandidateTreeSafe(backupHome, physicalHomePath,
     homePath, plan, migration.originalExternalLinksDigest)
   await assertUnitUniverseStable(systemctlExecutable, manifest.unitUniverse, homePath, manifest.foreignOwnership)
@@ -7223,16 +7404,20 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
       }
     } finally { await installBoundMasks(systemctlExecutable, masks) }
   }, false, homePath, services.map(service => service.unit))
+  const ownerRepairStartedAt = ownerRepair ? Date.now() : undefined
   manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
-    hostMigration: { ...migration, phase: 'starting', candidateEverStarted: true } }, 'swapped')
+    hostMigration: { ...migration, phase: 'starting', candidateEverStarted: true,
+      ...(ownerRepair ? { ownerRepairStartedAt } : {}) } }, 'swapped')
   const targetProfile = services.find(service => service.profile === manifest.profile)?.profile
     ?? services[0]?.profile ?? manifest.profile
   const accepted = services.length === 0 ? [] : await startAndAcceptServices({
     ...serviceContext, services, serviceMasks: masks, homePath, targetProfile,
     unitUniverse: manifest.unitUniverse, foreignOwnership: manifest.foreignOwnership,
     cleanProfiles: [], timeouts: serviceTimeouts(), requireLarkReady: migration.localSource !== undefined,
-    larkReadyProfiles: rsiTargets.map(target => target.profile),
+    larkReadyProfiles,
     acceptAfterReady: async () => {
+      if (ownerRepair) await awaitHostOwnerRepairReadiness({ manifestPath: join(physicalTransactionRoot, 'manifest.json'),
+        homePath, dshExecutable: plan.candidateRuntime.dshPath, sourceProof: migration.localSource, startedAt: ownerRepairStartedAt })
       for (const target of rsiTargets) target.accepted = await awaitHostRsiRuntimeSuccessor({
         homePath, dshExecutable: candidateDshExecutable, target, timeoutMs: serviceTimeouts().ready,
       })
@@ -7248,7 +7433,7 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
     containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
     homePath, targetProfile, unitUniverse: manifest.unitUniverse,
     foreignOwnership: manifest.foreignOwnership, cleanProfiles: [], acceptance: manifest.serviceAcceptance,
-    requireLarkReady: migration.localSource !== undefined, larkReadyProfiles: rsiTargets.map(target => target.profile),
+    requireLarkReady: migration.localSource !== undefined, larkReadyProfiles,
   })
   for (const target of rsiTargets) {
     const current = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
@@ -7268,6 +7453,8 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
       fail(`candidate systemd unit properties changed after acceptance: ${expected.unit}`)
     }
   }
+  if (ownerRepair) await awaitHostOwnerRepairReadiness({ manifestPath: join(physicalTransactionRoot, 'manifest.json'),
+    homePath, dshExecutable: plan.candidateRuntime.dshPath, sourceProof: migration.localSource, startedAt: ownerRepairStartedAt })
   await verifyAuthority()
   manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
     hostMigration: { ...manifest.hostMigration, phase: 'committed' } }, 'committed')
@@ -7342,6 +7529,15 @@ async function recoverHostUpdate({ manifest: initial, homePath, physicalHomePath
       await verifyHostLocalSourceUpdate({ proof: migration.localSource, homePath,
         physicalHome: physicalHomePath, selection: 'original' })
     }
+    let originalRestoration
+    if (migration.localSource?.protocol === 'dsh-enhanced/host-owner-source-repair/v1') {
+      const { ownerRepairActivationInspector } = await import('./owner-repair-readiness.mjs')
+      const activation = await ownerRepairActivationInspector({ ownerRepair: migration.localSource.ownerRepair,
+        installer: migration.localSource.installer, homePath, targetProfile: profile,
+        coordinatorProfile: migration.localSource.ownerRepair.coordinatorProfile })
+      originalRestoration = ownerRepairRestorationPolicy(migration.originalReadiness, manifest.services,
+        profile, migration.localSource.ownerRepair.coordinatorProfile, activation)
+    }
     const restored = await Promise.all(manifest.services.map(async service => {
       const fragment = await snapshotServiceFile(service.fragment.path,
         migration.units.find(unit => unit.unit === service.unit).before)
@@ -7356,11 +7552,13 @@ async function recoverHostUpdate({ manifest: initial, homePath, physicalHomePath
       containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
       homePath, targetProfile: restored.find(service => service.profile === profile)?.profile ?? restored[0].profile,
       unitUniverse: manifest.unitUniverse, foreignOwnership: manifest.foreignOwnership,
-      cleanProfiles: [], timeouts: serviceTimeouts() })
+      cleanProfiles: [], timeouts: serviceTimeouts(), originalRestoration })
     const evidence = await moveTransactionAside(physicalTransactionRoot, transactionRoot, profile)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
-    process.stderr.write(`Host update rolled back before candidate start; evidence: ${evidence}\n`)
-    return 'host-original-restored'
+    const degraded = originalRestoration !== undefined
+      && migration.originalReadiness.services.some(entry => !entry.hostReady || entry.coordinatorActivated === false)
+    process.stderr.write(`Host update ${degraded ? 'degraded-original-restored' : 'rolled back before candidate start'}; evidence: ${evidence}\n`)
+    return degraded ? 'degraded-original-restored' : 'host-original-restored'
   }
   if (!candidateLive) fail('candidate Host has potentially run but candidate Home is unavailable; retain containment')
   await reconcileHostUnitSources(migration.units, 'after')
@@ -7443,11 +7641,12 @@ async function main() {
     } finally { await localSourcePreparation.dispose() }
     return
   }
-  if (operation === 'host-update' || operation === 'host-recover' || operation === 'host-local-update'
+  if (operation === 'host-update' || operation === 'host-recover' || operation === 'host-local-update' || operation === 'host-owner-repair'
     || operation === 'host-recover-settings') {
-    const joint = operation === 'host-local-update'
-    if (!PROFILE_NAME.test(profile) || (joint ? targets.length < 5 || targets.length > 7 : targets.length < 2 || targets.length > 3)) {
-      fail('Host update requires systemctl, journalctl and plan.json; local migration additionally requires source preparation and reviewed installer roots, with optional auxiliary artifact and legacy global DSH roots', 2)
+    const ownerRepair = operation === 'host-owner-repair'
+    const joint = operation === 'host-local-update' || ownerRepair
+    if (!PROFILE_NAME.test(profile) || (joint ? targets.length < (ownerRepair ? 6 : 5) || targets.length > 7 : targets.length < 2 || targets.length > 3)) {
+      fail('Host update requires systemctl, journalctl and plan.json; local migration also requires source preparation and reviewed installer roots; owner repair requires an explicit permission preset and accepts an optional auxiliary artifact root', 2)
     }
     const [suppliedSystemctl, suppliedJournalctl, planPath] = targets
     const serviceContext = {
@@ -7469,8 +7668,8 @@ async function main() {
     await performHostUpdate({ ...hostPaths, profile, planPath, bwrapExecutable,
       dshExecutable, serviceContext, ...(joint ? { localSourceInput: {
         preparationRoot: targets[3], installerRoot: targets[4],
-        ...(targets[5] ? { auxiliaryRoot: targets[5] } : {}),
-        ...(targets[6] ? { globalDshRoot: targets[6] } : {}),
+        ...(ownerRepair ? { ownerRepairPreset: targets[5], ...(targets[6] ? { auxiliaryRoot: targets[6] } : {}) }
+          : { ...(targets[5] ? { auxiliaryRoot: targets[5] } : {}), ...(targets[6] ? { globalDshRoot: targets[6] } : {}) }),
       } } : {}) })
     return
   }
@@ -7547,6 +7746,8 @@ async function main() {
 
 export const lifecycleProfileTest = Object.freeze({
   reconcileHostUnitSources, validateHostUpdateManifest,
+  validOwnerRepairOriginalReadiness, captureOwnerRepairOriginalReadiness,
+  ownerRepairRestorationPolicy, serviceReadySignal, serviceRuntimeReady, readRawServiceState,
   assertHostSettingsRecoveryAdmission, assertHostSettingsRecoveryServiceState, readHostSettingsRecoveryFile,
   canonicalJointCandidateHome,
   assertSnapshotTreeSafe,

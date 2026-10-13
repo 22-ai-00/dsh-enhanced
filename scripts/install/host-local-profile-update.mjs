@@ -585,7 +585,7 @@ export async function prepareHostLocalProfileUpdate({ originalHome, originalDshP
 }
 
 export async function validateHostLocalProfileUpdate({ preparation, stagedHome,
-  originalPhysicalHome = preparation.originalHome, legacySettingsImport }) {
+  originalPhysicalHome = preparation.originalHome, legacySettingsImport, ownerSourceRepair }) {
   const stage = await directory(stagedHome)
   const original = await directory(originalPhysicalHome)
   if (stage === original || inside(original, stage) || inside(stage, original)
@@ -601,11 +601,29 @@ export async function validateHostLocalProfileUpdate({ preparation, stagedHome,
   const normalizedPatch = legacySettingsImport === undefined ? undefined : await verifyHostLegacySettingsImport({
     ...legacySettingsImport, preparation, stagedHome: stage, originalPhysicalHome: original,
   })
+  let repairPatches
+  if (ownerSourceRepair !== undefined) {
+    const proof = ownerSourceRepair.sourceProof
+    if (legacySettingsImport !== undefined || ownerSourceRepair.homePath !== preparation.originalHome
+      || proof?.protocol !== 'dsh-enhanced/host-owner-source-repair/v1'
+      || proof.homePath !== preparation.originalHome || !proof.ownerRepairNext) fail('owner profile repair binding differs')
+    const { verifyOwnerSourceRepair } = await import('./owner-source-repair.mjs')
+    await verifyOwnerSourceRepair({ ownerRepair: proof.ownerRepair, ownerRepairNext: proof.ownerRepairNext,
+      record: proof.record, homePath: preparation.originalHome, physicalHome: stage,
+      installer: proof.installer, phase: 'after-finalize' })
+    repairPatches = proof.ownerRepairNext.patches
+    if (!plain(repairPatches) || !same(Object.keys(repairPatches).sort(),
+      [proof.profile, proof.ownerRepair.coordinatorProfile].sort())) fail('owner repair patch scope differs')
+  }
   for (const profile of actual) {
     const expected = preparation.profiles.find(item => item.name === profile.name)
-    const metadata = normalizedPatch !== undefined && profile.name === legacySettingsImport.permit.profile
+    let metadata = normalizedPatch !== undefined && profile.name === legacySettingsImport.permit.profile
       ? { ...profile.metadata, 'cordis.patch.yml': normalizedPatch } : profile.metadata
     const originalMetadata = await readMetadata(join(original, 'profiles', profile.name))
+    if (repairPatches && Object.hasOwn(repairPatches, profile.name)) {
+      if (sourceDigest(profile.metadata['cordis.patch.yml']) !== repairPatches[profile.name]) fail('signed repaired patch changed')
+      metadata = { ...metadata, 'cordis.patch.yml': originalMetadata['cordis.patch.yml'] }
+    }
     const peerScope = await selectedPeers(originalMetadata, preparation.candidateArtifacts, readRsiLocalArtifactManifest)
     if (!same(peerScope, expected.peerScope)) fail(`verified peer scope changed: ${profile.name}`)
     for (const name of metadataNames) {

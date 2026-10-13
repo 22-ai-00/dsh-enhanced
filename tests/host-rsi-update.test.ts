@@ -12,6 +12,7 @@ import { createRuntimeEpochFixture, cleanupRuntimeEpochFixtures } from '../plugi
 import { rsiBootstrapFixture } from '../plugins/lark-channel/tests/fixtures/rsi-bootstrap.js'
 import { prepareRsiOwnerConfiguration } from '../plugins/lark-channel/src/rsi-bootstrap.js'
 import { compileRsiProfiles } from '../plugins/lark-channel/src/rsi-profile.js'
+import { signRsiOwnerRepairOverlay } from '../plugins/lark-channel/src/rsi-host-update.js'
 import { controlPlaneDigest, readHostMaintenanceContext } from '../plugins/plugin-control-plane/src/store.js'
 import { loadTrustConfig } from '../plugins/plugin-control-plane/src/trust.js'
 import { discoverRsiHostUpdateBackups, prepareRsiHostUpdate, verifyRsiHostUpdate } from '../scripts/install/host-rsi-update.mjs'
@@ -241,4 +242,114 @@ test.skipIf(process.platform !== 'linux')('staged RSI Host maintenance preserves
       currentPlanId = successor.plan.id; originalHistory = history(f.home)
     }
   }
+}, 120_000)
+
+test.skipIf(process.platform !== 'linux')('signed owner repair permits a later watched target adoption but not coordinator patch drift', async () => {
+  const fixture = await installedFixture()
+  const configRoot = fixture.f.input.resources.configRoot
+  const bootstrapSource = await readFile(join(configRoot, 'bootstrap.json'), 'utf8')
+  const receipt = JSON.parse(bootstrapSource) as { files: Record<string, string>; result: {
+    schemaVersion: 1; manifestPath: string; manifestDigest: string; targetProfile: string; coordinatorProfile: string
+  } }
+  const targetProfile = join(fixture.home, 'profiles', 'target')
+  const targetPatchPath = join(targetProfile, 'cordis.patch.yml')
+  const coordinatorPatchPath = join(fixture.home, 'profiles', 'coordinator', 'cordis.patch.yml')
+  const patches = { target: hash(await readFile(targetPatchPath)), coordinator: hash(await readFile(coordinatorPatchPath)) }
+  const runtimeReceiptDigest = hash(await readFile(join(fixture.home, 'rsi-authority-runtimes', 'target', 'receipt.json')))
+  const journalPath = join(fixture.home, '.rsi-setup-journal.json')
+  const creationPath = join(fixture.home, 'rsi-creation-builds', 'target', 'bootstrap.json')
+  const beforeJournalSource = json({ stage: 'before-repair' }), beforeCreationSource = json({ stage: 'before-repair' })
+  const journalSource = json({ stage: 'after-repair' }), creationSource = json({ stage: 'after-repair' })
+  await file(journalPath, beforeJournalSource)
+  await file(creationPath, beforeCreationSource)
+  const beforeJournalDigest = hash(await readFile(journalPath)), beforeCreationDigest = hash(await readFile(creationPath))
+  await writeFile(journalPath, journalSource)
+  await writeFile(creationPath, creationSource)
+  const host = fixture.f.input.resources.identities.host
+  const repair = signRsiOwnerRepairOverlay({ schemaVersion: 1, kind: 'rsi-owner-repair-overlay',
+    transactionId: 'prior-owner-repair', dshHome: fixture.home, targetProfile: 'target',
+    installationId: fixture.f.input.resources.installationId, sequence: 1, previousDigest: null,
+    bootstrapDigest: hash(bootstrapSource), files: receipt.files, patches, runtimeReceiptDigest,
+    planDigest: hash(json({ files: receipt.files, patches })), result: receipt.result,
+    repair: { sourceMaintenanceDigest: hash('source-maintenance'),
+      before: { files: receipt.files, patches, runtimeReceiptDigest,
+        creationReceiptDigest: beforeCreationDigest, journalDigest: beforeJournalDigest },
+      after: { creationReceiptDigest: hash(creationSource), journalDigest: hash(journalSource) },
+      permissionPreset: 'workspace-write' },
+    issuedAt: fixture.f.input.now, authority: host.authority, keyId: host.keyId },
+  await readFile(host.keyPath, 'utf8'), fixture.f.input.resources, bootstrapSource, [])
+  await file(join(configRoot, 'host-update-overlays.json'),
+    json({ schemaVersion: 1, kind: 'rsi-host-update-overlays', records: [repair] }))
+
+  const saved = join(fixture.f.root, 'repair-adoption-baseline')
+  await cp(targetProfile, saved, { recursive: true, verbatimSymlinks: true })
+  const pins = async () => Promise.all(['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'].map(async name => {
+    const path = join(targetProfile, name)
+    return { path, sha256: hash(await readFile(path)) }
+  }))
+  const baselineFiles = await pins(), input = 'node_modules/.pnpm/host-entry/index.js'
+  const deploymentPath = join(targetProfile, input)
+  const baselineDeploymentFiles = [{ input, path: deploymentPath, sha256: hash(await readFile(deploymentPath)) }]
+  await writeFile(targetPatchPath, `${await readFile(targetPatchPath, 'utf8')}# adopted after owner repair\n`)
+  await writeFile(deploymentPath, 'export const deployed = 2\n')
+  fixture.released.reopen()
+  const next = await fixture.released.next({ baseCommit: '7'.repeat(40), mergeCommit: '8'.repeat(40) })
+  const successor = await createRuntimeEpochFixture({ releaseFixture: next, profile: 'target', originallyExisted: true,
+    executor: { id: fixture.f.input.executor.id, version: fixture.hostPlan.originalRuntime.version,
+      path: fixture.hostPlan.originalRuntime.dshPath, sha256: hash(await readFile(fixture.hostPlan.originalRuntime.dshPath)) },
+    profileFiles: await pins(), baselineFiles,
+    deploymentFiles: [{ input, path: deploymentPath, sha256: hash(await readFile(deploymentPath)) }],
+    baselineDeploymentFiles, readinessKey: { ...host, privateKeyPem: await readFile(host.keyPath, 'utf8') } })
+  successor.coordinator.close(); fixture.released.close()
+  const backup = `.target.plugin-backup-${successor.plan.activation!.id.replace(/[^A-Za-z0-9-]/gu, '').slice(-36)}`
+  await rename(saved, join(fixture.home, 'profiles', backup))
+  await rm(join(fixture.home, 'profiles', fixture.backup), { recursive: true })
+
+  const stageHome = join(fixture.f.root, 'repair-adoption-stage')
+  await cp(fixture.home, stageHome, { recursive: true, verbatimSymlinks: true })
+  const proof = await prepareRsiHostUpdate({ homePath: fixture.home, stageHome, hostPlan: fixture.hostPlan,
+    unitTransitions: fixture.unitTransitions, transactionId: 'after-repair-adoption', systemctlExecutable: '/usr/bin/true' })
+  expect(proof.installations).toHaveLength(1)
+  await verifyRsiHostUpdate({ homePath: fixture.home, physicalHome: stageHome, hostPlan: fixture.hostPlan, proof })
+  const stagedJournalPath = join(stageHome, '.rsi-setup-journal.json')
+  const stagedCreationPath = join(stageHome, 'rsi-creation-builds', 'target', 'bootstrap.json')
+  await writeFile(stagedJournalPath, json({ stage: 'journal-drift-after-host' }))
+  await expect(verifyRsiHostUpdate({ homePath: fixture.home, physicalHome: stageHome,
+    hostPlan: fixture.hostPlan, proof })).rejects.toThrow('owner repair journal or creation receipt changed')
+  await writeFile(stagedJournalPath, journalSource)
+  await writeFile(stagedCreationPath, json({ stage: 'creation-drift-after-host' }))
+  await expect(verifyRsiHostUpdate({ homePath: fixture.home, physicalHome: stageHome,
+    hostPlan: fixture.hostPlan, proof })).rejects.toThrow('owner repair journal or creation receipt changed')
+  await writeFile(stagedCreationPath, creationSource)
+
+  await writeFile(journalPath, json({ stage: 'journal-drift' }))
+  const journalDriftStage = join(fixture.f.root, 'repair-journal-drift-stage')
+  await cp(fixture.home, journalDriftStage, { recursive: true, verbatimSymlinks: true })
+  await expect(prepareRsiHostUpdate({ homePath: fixture.home, stageHome: journalDriftStage, hostPlan: fixture.hostPlan,
+    unitTransitions: fixture.unitTransitions, transactionId: 'after-repair-journal-drift', systemctlExecutable: '/usr/bin/true' }))
+    .rejects.toThrow('owner repair journal or creation receipt changed')
+  await writeFile(journalPath, journalSource)
+  await writeFile(creationPath, json({ stage: 'creation-drift' }))
+  const creationDriftStage = join(fixture.f.root, 'repair-creation-drift-stage')
+  await cp(fixture.home, creationDriftStage, { recursive: true, verbatimSymlinks: true })
+  await expect(prepareRsiHostUpdate({ homePath: fixture.home, stageHome: creationDriftStage, hostPlan: fixture.hostPlan,
+    unitTransitions: fixture.unitTransitions, transactionId: 'after-repair-creation-drift', systemctlExecutable: '/usr/bin/true' }))
+    .rejects.toThrow('owner repair journal or creation receipt changed')
+  await writeFile(creationPath, creationSource)
+
+  const adoptedPatch = await readFile(targetPatchPath, 'utf8')
+  await writeFile(targetPatchPath, `${adoptedPatch}# unwatched target drift\n`)
+  const targetDriftStage = join(fixture.f.root, 'repair-target-drift-stage')
+  await cp(fixture.home, targetDriftStage, { recursive: true, verbatimSymlinks: true })
+  await expect(prepareRsiHostUpdate({ homePath: fixture.home, stageHome: targetDriftStage, hostPlan: fixture.hostPlan,
+    unitTransitions: fixture.unitTransitions, transactionId: 'after-repair-target-drift', systemctlExecutable: '/usr/bin/true' }))
+    .rejects.toThrow('original deployment pin changed')
+  await writeFile(targetPatchPath, adoptedPatch)
+
+  await writeFile(coordinatorPatchPath, `${await readFile(coordinatorPatchPath, 'utf8')}# unrelated coordinator drift\n`)
+  const driftStage = join(fixture.f.root, 'repair-coordinator-drift-stage')
+  await cp(fixture.home, driftStage, { recursive: true, verbatimSymlinks: true })
+  await expect(prepareRsiHostUpdate({ homePath: fixture.home, stageHome: driftStage, hostPlan: fixture.hostPlan,
+    unitTransitions: fixture.unitTransitions, transactionId: 'after-repair-coordinator-drift', systemctlExecutable: '/usr/bin/true' }))
+    .rejects.toThrow('owner repair coordinator patch changed')
 }, 120_000)

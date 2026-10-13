@@ -22,6 +22,7 @@ const fail = message => { throw new Error(`Local source maintenance: ${message}`
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const modules = ['rsi-local-update', 'rsi-local-resources', 'rsi-source-maintenance',
   'rsi-local-activation', 'rsi-local-pair-install', 'rsi-local-cohort', 'rsi-authority-runtime', 'supervised-growth-profile']
+const ownerModules = ['rsi-source', 'rsi-build', 'rsi-authority-resources', 'rsi-setup', 'rsi-profile']
 const resourceKinds = ['rsi-sources', 'rsi-local-cohorts', 'rsi-builds', 'rsi-release-builds', 'rsi-authorities', 'rsi-authority-runtimes']
 const ownerFields = new Set(['sourceJobs', 'sourceApprovals', 'sourceReleases', 'sourceReleaseExecution',
   'sourceAdoptions', 'sourceBuild', 'runtimeObserver', 'foregroundDeployments', 'taskObservations', 'adoptionCoordinator',
@@ -114,7 +115,7 @@ export async function bindLocalSourceInstaller(root) {
 export async function assertLocalSourceInstaller(binding) {
   if (!isDeepStrictEqual(await bindLocalSourceInstaller(binding.root), binding)) fail('reviewed installer module bytes or ownership changed')
 }
-async function load(binding) {
+async function load(binding, { ownerRepair = false } = {}) {
   await assertLocalSourceInstaller(binding)
   const root = join(binding.root, 'plugins', 'lark-channel', 'lib')
   const require = createRequire(join(binding.root, 'package.json'))
@@ -122,7 +123,8 @@ async function load(binding) {
   if (!inside(binding.root, yamlPath)) fail('YAML parser is outside the reviewed installer root')
   const moduleRequire = createRequire(join(root, 'supervised-growth-profile.js'))
   if (!inside(binding.root, await realpath(moduleRequire.resolve('yaml/package.json')))) fail('YAML parser is outside the reviewed installer root')
-  const result = Object.assign({}, ...await Promise.all(modules.map(name => import(pathToFileURL(join(root, `${name}.js`)).href))))
+  const selectedModules = ownerRepair ? [...modules, ...ownerModules] : modules
+  const result = Object.assign({}, ...await Promise.all(selectedModules.map(name => import(pathToFileURL(join(root, `${name}.js`)).href))))
   result.yaml = require('yaml')
   return result
 }
