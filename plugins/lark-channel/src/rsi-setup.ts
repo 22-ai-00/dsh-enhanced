@@ -40,6 +40,11 @@ function yamlValue(node: unknown): unknown {
     .sort((left, right) => JSON.stringify(left[0]).localeCompare(JSON.stringify(right[0]))) }
   return node
 }
+function patchValue(source: string, label: string): unknown {
+  const document = parseDocument(source, { uniqueKeys: true })
+  if (document.errors.length || !isSeq(document.contents)) fail(`invalid ${label} patch`)
+  return yamlValue(document.contents)
+}
 export function assertRsiEffectivePatch(patch: string, effective: string): void {
   const expected = parseDocument(patch), actual = parseDocument(effective)
   if (expected.errors.length || actual.errors.length || !isSeq(expected.contents) || !isSeq(actual.contents)) fail('invalid final profile composition')
@@ -499,7 +504,9 @@ export async function configureRsiSetupLocked(args: RsiSetupArgs, ports: RsiSetu
         for (let i = 0; i < pair.length; i++) assertRsiEffectivePatch(next[i]!, final[i]!)
         const recompiled = await ports.compile({ ...input, targetPatch: next[0]!, coordinatorPatch: next[1]!,
           targetEffective: final[0]!, coordinatorEffective: final[1]! })
-        if (!isDeepStrictEqual(recompiled, compiled)) fail('effective profile differs from the compiled deployment')
+        if (!isDeepStrictEqual(patchValue(recompiled.targetPatch, 'recompiled target'), patchValue(compiled.targetPatch, 'compiled target'))
+          || !isDeepStrictEqual(patchValue(recompiled.coordinatorPatch, 'recompiled coordinator'), patchValue(compiled.coordinatorPatch, 'compiled coordinator')))
+          fail('effective profile differs from the compiled deployment')
         if (environments) { ports.reloadServices(); await ports.validateServiceUnits(manifest, environments.target) }
         journal.stage = 'applied'; await atomicWrite(journalPath, JSON.stringify(journal))
       } catch (error) {

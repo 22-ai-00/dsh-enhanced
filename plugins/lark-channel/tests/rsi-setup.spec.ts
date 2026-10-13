@@ -1,9 +1,11 @@
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { rsiServiceEnvironmentPath } from '../src/rsi-service-environment.js'
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
+import { applyEntryPatches, entryListSchema } from '@deepseek-ai/cordis-plugin-include'
 import type { ActiveLarkOwnerBindingsSnapshot } from '@dsh-enhanced/assistant-delivery'
 import { assertRsiEffectivePatch, configureRsiSetup, parseRsiSetupArgs, readRsiInstalledBase, rsiSetupPorts, runRsiSetup, type RsiSetupPorts } from '../src/rsi-setup.js'
 
@@ -311,6 +313,69 @@ describe('RSI dual profile setup transaction', () => {
     expect(await readFile(join(outside, ...remaining, 'dsh-profile-target.service'), 'utf8')).toBe('external unit')
     expect((await lstat(linked)).isSymbolicLink()).toBe(true)
     expect(await readFile(setup.patch(), 'utf8')).toContain('original')
+    await expect(lstat(setup.journal)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+  test('accepts a native Include YAML roundtrip with reordered maps, quotes and comments', async () => {
+    const setup = await fixture()
+    const require = createRequire(import.meta.url)
+    const includeRequire = createRequire(require.resolve('@deepseek-ai/cordis-plugin-include/package.json'))
+    const nativeYaml = includeRequire('js-yaml') as { load(source: string, options: { schema: unknown }): unknown;
+      dump(value: unknown, options: { schema: unknown; noRefs: boolean }): string }
+    const targetPatch = '- id: target\n  name: "@owner/target"\n  config:\n    status: configured\n    expression: !!js dshHomePath("state")\n    steps: [first, second]\n'
+    const coordinatorPatch = '- id: coordinator\n  config: { status: configured, count: 2 }\n'
+    const roundtrip = (source: string): string => {
+      const rows = nativeYaml.load(source, { schema: entryListSchema }) as Array<{ config: Record<string, unknown> }>
+      rows[0]!.config = Object.fromEntries(Object.entries(rows[0]!.config).reverse())
+      return `# native Include dump\n${nativeYaml.dump(applyEntryPatches([], [{ insert: rows as unknown as Parameters<typeof applyEntryPatches>[0] }], () => {}),
+        { schema: entryListSchema, noRefs: true })}`
+    }
+    const recompiled = { targetPatch: roundtrip(targetPatch), coordinatorPatch: roundtrip(coordinatorPatch) }
+    expect(recompiled.targetPatch).not.toBe(targetPatch)
+    setup.ports.compile = vi.fn().mockResolvedValueOnce({ targetPatch, coordinatorPatch }).mockResolvedValueOnce(recompiled)
+    await expect(configureRsiSetup(setup.args(setup.apply), setup.ports)).resolves.toMatchObject({ mode: 'configured' })
+    expect(await readFile(setup.patch(), 'utf8')).toBe(targetPatch)
+    expect(await readFile(setup.patch('coordinator'), 'utf8')).toBe(coordinatorPatch)
+  })
+  test.each([
+    ['expression tag', '- id: target\n  name: "@owner/target"\n  config: { status: configured, expression: dshHomePath("state"), steps: [first, second] }\n'],
+    ['config value', '- id: target\n  name: "@owner/target"\n  config: { status: changed, expression: !!js dshHomePath("state"), steps: [first, second] }\n'],
+    ['disabled flag', '- id: target\n  name: "@owner/target"\n  disabled: true\n  config: { status: configured, expression: !!js dshHomePath("state"), steps: [first, second] }\n'],
+    ['plugin name', '- id: target\n  name: "@owner/other"\n  config: { status: configured, expression: !!js dshHomePath("state"), steps: [first, second] }\n'],
+    ['extra row', '- id: target\n  name: "@owner/target"\n  config: { status: configured, expression: !!js dshHomePath("state"), steps: [first, second] }\n- id: extra\n  name: "@owner/extra"\n'],
+    ['sequence order', '- id: target\n  name: "@owner/target"\n  config: { status: configured, expression: !!js dshHomePath("state"), steps: [second, first] }\n'],
+  ])('rejects recompiled patch %s drift and restores the original profile', async (_case, changedTarget) => {
+    const setup = await fixture()
+    const targetPatch = '- id: target\n  name: "@owner/target"\n  config: { status: configured, expression: !!js dshHomePath("state"), steps: [first, second] }\n'
+    const coordinatorPatch = '- id: coordinator\n  config: { status: configured }\n'
+    setup.ports.compile = vi.fn().mockResolvedValueOnce({ targetPatch, coordinatorPatch })
+      .mockResolvedValueOnce({ targetPatch: changedTarget, coordinatorPatch })
+    await expect(configureRsiSetup(setup.args(setup.apply), setup.ports))
+      .rejects.toThrow('effective profile differs from the compiled deployment')
+    expect(await readFile(setup.patch(), 'utf8')).toContain('status: original')
+    expect(await readFile(setup.patch('coordinator'), 'utf8')).toContain('status: original')
+    await expect(lstat(setup.journal)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+  test('rejects recompiled coordinator row order drift', async () => {
+    const setup = await fixture()
+    const targetPatch = '- id: target\n  config: { status: configured }\n'
+    const coordinatorPatch = '- id: coordinator\n  config: { status: configured }\n- id: extra\n  name: "@owner/extra"\n'
+    const changedCoordinator = '- id: extra\n  name: "@owner/extra"\n- id: coordinator\n  config: { status: configured }\n'
+    setup.ports.compile = vi.fn().mockResolvedValueOnce({ targetPatch, coordinatorPatch })
+      .mockResolvedValueOnce({ targetPatch, coordinatorPatch: changedCoordinator })
+    await expect(configureRsiSetup(setup.args(setup.apply), setup.ports))
+      .rejects.toThrow('effective profile differs from the compiled deployment')
+    expect(await readFile(setup.patch('coordinator'), 'utf8')).toContain('status: original')
+    await expect(lstat(setup.journal)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+  test('rejects invalid recompiled YAML and restores both profiles', async () => {
+    const setup = await fixture()
+    const targetPatch = '- id: target\n  config: { status: configured }\n'
+    const coordinatorPatch = '- id: coordinator\n  config: { status: configured }\n'
+    setup.ports.compile = vi.fn().mockResolvedValueOnce({ targetPatch, coordinatorPatch })
+      .mockResolvedValueOnce({ targetPatch: '- id: [\n', coordinatorPatch })
+    await expect(configureRsiSetup(setup.args(setup.apply), setup.ports)).rejects.toThrow('invalid recompiled target patch')
+    expect(await readFile(setup.patch(), 'utf8')).toContain('status: original')
+    expect(await readFile(setup.patch('coordinator'), 'utf8')).toContain('status: original')
     await expect(lstat(setup.journal)).rejects.toMatchObject({ code: 'ENOENT' })
   })
   test('journals both service bindings and units, preserves replay, and restores absent originals', async () => {
