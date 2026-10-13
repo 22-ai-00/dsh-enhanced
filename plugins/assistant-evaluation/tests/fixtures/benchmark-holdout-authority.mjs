@@ -60,7 +60,13 @@ if (mode === 'oversize-stderr') process.stderr.write('x'.repeat(4096))
 if (mode === 'oversize-line') process.stdout.write('x'.repeat(4096))
 else if (mode === 'ready-partial') process.stdout.write(JSON.stringify({ protocol, type: 'ready' }) + '\n{"partial":')
 else if (mode !== 'no-ready') split(JSON.stringify({ protocol, type: 'ready' }) + '\n')
-if (mode === 'ready-unsolicited-partial') setTimeout(() => process.stdout.write('{"preloaded":'), 10)
+if (mode === 'ready-unsolicited-partial') {
+  if (!acknowledgedPath) throw new Error('unsolicited injection trigger is required')
+  void (async () => {
+    while (!existsSync(acknowledgedPath)) await new Promise(resolve => setTimeout(resolve, 5))
+    process.stdout.write('{"preloaded":')
+  })()
+}
 
 let pending = '', requestCount = 0
 let manifestSent = false, frozenPlan, planDigest, cells = [], nextCell = 0, activeInput, verdictDigests = [], finished = false

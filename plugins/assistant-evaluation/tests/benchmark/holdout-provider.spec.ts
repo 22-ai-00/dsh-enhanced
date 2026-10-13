@@ -58,6 +58,17 @@ async function waitForFixtureFile(path: string): Promise<void> {
   }
   throw new Error('fixture control handshake timed out')
 }
+async function waitForFixtureExit(pid: number): Promise<void> {
+  const deadline = Date.now() + 5_000
+  while (Date.now() < deadline) {
+    try { process.kill(pid, 0) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return
+      throw error
+    }
+    await new Promise<void>(resolveWait => setTimeout(resolveWait, 5))
+  }
+  throw new Error('unsolicited fixture output did not close the provider')
+}
 
 describe('holdout child provider transport', () => {
   it('does not spawn at import time and requires explicit open', async () => {
@@ -116,9 +127,18 @@ describe('holdout child provider transport', () => {
   })
 
   it('poisons on unsolicited partial bytes after ready and before a request', async () => {
-    const provider = await open('ready-unsolicited-partial')
-    await new Promise(resolve => setTimeout(resolve, 30))
-    await expect(provider.request('manifest', {})).rejects.toSatisfy((error: unknown) => code(error, 'closed'))
+    const root = await mkdtemp(join(tmpdir(), 'holdout-unsolicited-'))
+    await chmod(root, 0o700)
+    const acknowledged = join(root, 'acknowledged')
+    try {
+      const provider = await open('ready-unsolicited-partial', { environment: {
+        HOLDOUT_FIXTURE_MODE: 'ready-unsolicited-partial', HOLDOUT_FIXTURE_ACKNOWLEDGED_PATH: acknowledged,
+        LANG: 'C', LC_ALL: 'C',
+      } })
+      await writeFile(acknowledged, 'inject\n', { mode: 0o600 })
+      await waitForFixtureExit(provider.pid)
+      await expect(provider.request('manifest', {})).rejects.toSatisfy((error: unknown) => code(error, 'closed'))
+    } finally { await rm(root, { recursive: true, force: true }) }
   })
 
   it('carries signed ordered evidence without transporting oracle material', async () => {
