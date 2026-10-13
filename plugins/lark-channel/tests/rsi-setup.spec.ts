@@ -1,14 +1,17 @@
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { rsiServiceEnvironmentPath } from '../src/rsi-service-environment.js'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { ActiveLarkOwnerBindingsSnapshot } from '@dsh-enhanced/assistant-delivery'
-import { assertRsiEffectivePatch, configureRsiSetup, parseRsiSetupArgs, readRsiInstalledBase, runRsiSetup, type RsiSetupPorts } from '../src/rsi-setup.js'
+import { assertRsiEffectivePatch, configureRsiSetup, parseRsiSetupArgs, readRsiInstalledBase, rsiSetupPorts, runRsiSetup, type RsiSetupPorts } from '../src/rsi-setup.js'
 
 const roots: string[] = []
-afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
+afterEach(async () => {
+  vi.unstubAllEnvs()
+  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+})
 async function fixture() {
   // macOS 上 os.tmpdir() 经 /var → /private/var 符号链接，须先规范化到 canonical 路径，
   // 否则 safeDirectory 的 realpath 检查会拒绝测试夹具本身（生产 DSH home 无此问题）。
@@ -251,6 +254,65 @@ describe('RSI dual profile setup transaction', () => {
     return { ...f, environments, binding: (profile = 'target') => rsiServiceEnvironmentPath(f.home, profile),
       unit: (profile = 'target') => f.ports.serviceUnitPath(profile, f.home) }
   }
+  async function withAliasedServiceHome(createUnitParent = true) {
+    const setup = await withServiceEnvironment()
+    const unitParent = join(setup.home, '.config', 'systemd', 'user')
+    if (createUnitParent) await mkdir(unitParent, { recursive: true, mode: 0o700 })
+    const alias = join(setup.home, 'alias-home')
+    await symlink(setup.home, alias)
+    vi.stubEnv('HOME', alias)
+    setup.ports.serviceUnitPath = rsiSetupPorts.serviceUnitPath
+    return { ...setup, unitParent }
+  }
+  test('creates a missing unit parent through a HOME alias', async () => {
+    const setup = await withAliasedServiceHome(false)
+    const unitPath = join(setup.unitParent, 'dsh-profile-target.service')
+    expect(setup.unit()).toBe(unitPath)
+    await expect(lstat(setup.unitParent)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(lstat(unitPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    await configureRsiSetup(setup.args(setup.apply), setup.ports)
+    expect((await lstat(setup.unitParent)).isDirectory()).toBe(true)
+    expect(JSON.parse(await readFile(unitPath, 'utf8')).environment).toEqual(setup.environments.target)
+    await configureRsiSetup(setup.args(setup.rollback), setup.ports)
+    await expect(lstat(unitPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+  test('restores original unit bytes through a HOME alias after failed service validation', async () => {
+    const setup = await withAliasedServiceHome()
+    for (const profile of setup.pair) await writeFile(setup.unit(profile), `original ${profile} unit`, { mode: 0o600 })
+    setup.ports.validateServiceUnits = vi.fn(async () => { throw new Error('grant environment mismatch') })
+    await expect(configureRsiSetup(setup.args(setup.apply), setup.ports)).rejects.toThrow('grant environment mismatch')
+    for (const profile of setup.pair) expect(await readFile(setup.unit(profile), 'utf8')).toBe(`original ${profile} unit`)
+    expect(await readFile(setup.patch(), 'utf8')).toContain('original')
+    await expect(lstat(setup.journal)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+  test('rejects a final unit symlink through a HOME alias before changing profiles', async () => {
+    const setup = await withAliasedServiceHome()
+    const outside = join(setup.home, 'outside-unit')
+    await writeFile(outside, 'external unit', { mode: 0o600 })
+    await symlink(outside, setup.unit())
+    await expect(configureRsiSetup(setup.args(setup.apply), setup.ports)).rejects.toThrow('noncanonical file')
+    expect(await readFile(outside, 'utf8')).toBe('external unit')
+    expect((await lstat(setup.unit())).isSymbolicLink()).toBe(true)
+    expect(await readFile(setup.patch(), 'utf8')).toContain('original')
+    await expect(lstat(setup.journal)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+  test.each(['.config', 'systemd', 'user'])('rejects a %s service directory symlink through a HOME alias', async segment => {
+    const setup = await withAliasedServiceHome(false)
+    const directories = ['.config', 'systemd', 'user']
+    const index = directories.indexOf(segment)
+    const linked = join(setup.home, ...directories.slice(0, index + 1))
+    const outside = join(setup.home, 'outside-service-tree')
+    const remaining = directories.slice(index + 1)
+    await mkdir(join(outside, ...remaining), { recursive: true, mode: 0o700 })
+    await writeFile(join(outside, ...remaining, 'dsh-profile-target.service'), 'external unit', { mode: 0o600 })
+    await mkdir(join(setup.home, ...directories.slice(0, index)), { recursive: true, mode: 0o700 })
+    await symlink(outside, linked)
+    await expect(configureRsiSetup(setup.args(setup.apply), setup.ports)).rejects.toThrow('noncanonical file')
+    expect(await readFile(join(outside, ...remaining, 'dsh-profile-target.service'), 'utf8')).toBe('external unit')
+    expect((await lstat(linked)).isSymbolicLink()).toBe(true)
+    expect(await readFile(setup.patch(), 'utf8')).toContain('original')
+    await expect(lstat(setup.journal)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
   test('journals both service bindings and units, preserves replay, and restores absent originals', async () => {
     const f = await withServiceEnvironment()
     await configureRsiSetup(f.args(), f.ports)
