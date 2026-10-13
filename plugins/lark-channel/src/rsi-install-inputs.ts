@@ -188,6 +188,21 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
     activeBundles.push(plugin)
     if (!PROTECTED_PLUGIN_DENYLIST.has(plugin)) plugins.push(plugin)
   }
+  const permission = rows.get('permission')
+  if (permission?.get('name') === '@deepseek-ai/dsh-permission-presets' && permission.get('disabled') !== true) {
+    const config = permission.get('config', true)
+    if (isMap(config)) {
+      const defaultPreset = config.get('defaultPreset')
+      const presets = config.get('presets', true)
+      if (typeof defaultPreset === 'string') {
+        const configured = isMap(presets) ? presets.has(defaultPreset)
+          : ['workspace-write', 'danger-full-access'].includes(defaultPreset)
+        if (defaultPreset === 'auto' || !configured) {
+          throw new RsiInstalledInputsUnavailableError(`permission.defaultPreset=${defaultPreset} is not a persistent configured preset`)
+        }
+      }
+    }
+  }
   const learner = rows.get(learnerId)
   if (!learner || learner.get('name') !== '@dsh-enhanced/assistant-memory-learning'
     || learner.get('disabled') === true && learner.has('config')) fail('installed memory learning row must be the unconfigured bundle entry')

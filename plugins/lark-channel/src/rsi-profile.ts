@@ -357,7 +357,7 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
     adoptionCoordinator: { coordinatorId: targetAdoptions.handoff?.coordinatorId ?? fail('sourceAdoptions.handoff coordinatorId is required'), scope: { workspace: owner.workspace, preset: owner.preset, principalId: owner.principal, ownerRouteId: owner.route.id }, timeoutMs: input.manifest.coordinator.timeoutMs, budgetId: input.manifest.coordinator.budgetId, budgetAmount: input.manifest.coordinator.budgetAmount } }
   normalizeControlPlaneConfig(coordinatorCp)
   const policy = cloneEffectiveConfig(coordinator, coordinatorEffective, 'dsh-enhanced-assistant-policy')
-  policy.set('databasePath', join(root, 'policy.sqlite'))
+  replaceNode(coordinator.document, policy, 'databasePath', join(root, 'policy.sqlite'))
   const budgets = seq(policy.get('budgets', true) as Node | undefined, 'coordinator policy budgets')
   upsertById(coordinator.document, budgets, { id: input.manifest.coordinator.budgetId, metric: 'automation-runs', limit: input.manifest.limits.coordinator, periodMs: input.manifest.limits.periodMs, scope: 'subject' })
   const rules = seq(policy.get('rules', true) as Node | undefined, 'coordinator policy rules'); removePrefixed(rules)
@@ -367,7 +367,9 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   upsertById(coordinator.document, rules, { id: `${rsiPrefix}coordinator-execute`, effect: 'allow', subject: coordinatorAutomationSubject, actions: ['execute'], resource: { kind: 'automation', id: 'adoption-coordinator-*' }, context: { initiators: ['background'] } })
   const automationConfig = cloneEffectiveConfig(coordinator, coordinatorEffective, 'dsh-enhanced-assistant-automations')
   if (automationConfig.get('allowUnbudgetedExecution') === true) fail('coordinator allowUnbudgetedExecution must be false')
-  automationConfig.set('schedulerEnabled', true); automationConfig.set('databasePath', rsiCoordinatorAutomationDatabasePath(input.dshHome, input.manifest.coordinatorProfile)); automationConfig.set('runsPath', join(root, 'runs'))
+  automationConfig.set('schedulerEnabled', true)
+  replaceNode(coordinator.document, automationConfig, 'databasePath', rsiCoordinatorAutomationDatabasePath(input.dshHome, input.manifest.coordinatorProfile))
+  replaceNode(coordinator.document, automationConfig, 'runsPath', join(root, 'runs'))
   cloneEffectiveConfig(coordinator, coordinatorEffective, 'dsh-enhanced-plugin-control-plane')
   replaceNode(coordinator.document, required(coordinator.rows, 'dsh-enhanced-plugin-control-plane'), 'config', coordinatorCp)
   return { targetPatch: target.document.toString({ lineWidth: 0 }), coordinatorPatch: coordinator.document.toString({ lineWidth: 0 }) }

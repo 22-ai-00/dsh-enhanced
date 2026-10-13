@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -46,13 +46,35 @@ async function fixture() {
   }
   const resources = await prepareRsiAuthorityResources({ dshHome: home, profile: 'target' })
   const source = { schemaVersion: 1, version: '0.1.48', baseline: { targetBranch: 'repairs' } } as RsiSourceWorkspace
-  const effective = `- id: dsh-enhanced-personal-assistant\n  name: '@dsh-enhanced/personal-assistant'\n  config:\n    personalMemory:\n      databasePath: !!js dshHomePath('memory.sqlite')\n- id: dsh-enhanced-assistant-delivery\n  name: '@dsh-enhanced/assistant-delivery'\n  config:\n    defaultWorkspace: !!js dshHomePath('assistant-workspace')\n    enabled: true\n- id: dsh-enhanced-lark-channel\n  name: '@dsh-enhanced/lark-channel'\n  config:\n    credentialHandle: !!js dshHomePath('lark/credential')\n    enabled: true\n- id: dsh-enhanced-assistant-health\n  name: '@dsh-enhanced/assistant-health'\n  config: {}\n- id: dsh-enhanced-assistant-memory-learning\n  name: '@dsh-enhanced/assistant-memory-learning'\n  disabled: true\n`
+  const effective = `- id: permission\n  name: '@deepseek-ai/dsh-permission-presets'\n  config:\n    presets:\n      workspace-write:\n        sandbox: workspace-write\n        approval: ask\n      danger-full-access:\n        sandbox: danger-full-access\n        approval: never\n    defaultPreset: danger-full-access\n- id: dsh-enhanced-personal-assistant\n  name: '@dsh-enhanced/personal-assistant'\n  config:\n    personalMemory:\n      databasePath: !!js dshHomePath('memory.sqlite')\n- id: dsh-enhanced-assistant-delivery\n  name: '@dsh-enhanced/assistant-delivery'\n  config:\n    defaultWorkspace: !!js dshHomePath('assistant-workspace')\n    enabled: true\n- id: dsh-enhanced-lark-channel\n  name: '@dsh-enhanced/lark-channel'\n  config:\n    credentialHandle: !!js dshHomePath('lark/credential')\n    enabled: true\n- id: dsh-enhanced-assistant-health\n  name: '@dsh-enhanced/assistant-health'\n  config: {}\n- id: dsh-enhanced-assistant-memory-learning\n  name: '@dsh-enhanced/assistant-memory-learning'\n  disabled: true\n`
   const environment = { PATH: `${bin}:/usr/bin:/bin` }
   return { root, home, profile, dsh, bin, plugin, resources, source, effective, environment,
     cleanup: () => rm(root, { recursive: true, force: true }) }
 }
 
 describe('installed owner setup input capture', () => {
+  test('reports unsupported persistent permission defaults before owner files exist without changing source', async () => {
+    const data = await fixture()
+    try {
+      const originalPatch = await readFile(join(data.profile, 'cordis.patch.yml'))
+      const originalConfig = await readdir(data.resources.configRoot)
+      const request = { dshHome: data.home, targetProfile: 'target', targetEffective: data.effective,
+        resources: data.resources, source: data.source, environment: data.environment }
+      for (const value of ['auto', 'missing-preset']) {
+        const targetEffective = data.effective.replace('defaultPreset: danger-full-access', `defaultPreset: ${value}`)
+        await expect(collectRsiInstalledInputs({ ...request, targetEffective }))
+          .rejects.toThrow(`permission.defaultPreset=${value} is not a persistent configured preset`)
+        expect(await readFile(join(data.profile, 'cordis.patch.yml'))).toEqual(originalPatch)
+        expect(await readdir(data.resources.configRoot)).toEqual(originalConfig)
+      }
+      for (const targetEffective of [data.effective.replace('defaultPreset: danger-full-access', 'defaultPreset: workspace-write'),
+        data.effective.replace('    defaultPreset: danger-full-access\n', ''),
+        data.effective.replace('defaultPreset: danger-full-access', 'defaultPreset: null')]) {
+        await expect(collectRsiInstalledInputs({ ...request, targetEffective })).resolves.toMatchObject({ plugins: expect.any(Array) })
+      }
+    } finally { await data.cleanup() }
+  })
+
   test('reports local development links as unavailable before deployment authority is prepared', async () => {
     const data = await fixture()
     try {

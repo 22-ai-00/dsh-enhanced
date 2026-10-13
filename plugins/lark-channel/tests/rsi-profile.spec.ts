@@ -4,7 +4,11 @@ import { Config as PolicyConfig } from '@dsh-enhanced/assistant-policy'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { AssistantVerifierService } from '@dsh-enhanced/assistant-verifier'
 import { Context } from '@deepseek-ai/cordis'
+import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
+import { interpolate, isJsExpr } from '@deepseek-ai/cordis-plugin-loader'
+import { Config as AutomationConfig } from '@dsh-enhanced/assistant-automations'
 import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parse } from 'yaml'
@@ -115,6 +119,27 @@ describe('RSI profile compiler', () => {
       const second = await compileRsiProfiles({ ...input, targetPatch: first.targetPatch, coordinatorPatch: first.coordinatorPatch })
       expect(second).toEqual(first)
       expect(first.targetPatch).toContain('!!js dshHomePath')
+      const require = createRequire(import.meta.url)
+      const includeRequire = createRequire(require.resolve('@deepseek-ai/cordis-plugin-include/package.json'))
+      const nativeYaml = includeRequire('js-yaml') as { load(source: string, options: { schema: unknown }): unknown }
+      const nativeRows = (source: string) => nativeYaml.load(source, { schema: entryListSchema }) as Array<{ id: string; config: Record<string, unknown> }>
+      const coordinatorRows = nativeRows(first.coordinatorPatch)
+      const coordinatorRoot = join(home, 'rsi-coordinators', 'coordinator')
+      const coordinatorPolicy = coordinatorRows.find(row => row.id === 'dsh-enhanced-assistant-policy')!.config
+      const coordinatorAutomations = coordinatorRows.find(row => row.id === 'dsh-enhanced-assistant-automations')!.config
+      expect(coordinatorPolicy.databasePath).toBe(join(coordinatorRoot, 'policy.sqlite'))
+      expect(coordinatorAutomations.databasePath).toBe(join(coordinatorRoot, 'automations.sqlite'))
+      expect(coordinatorAutomations.runsPath).toBe(join(coordinatorRoot, 'runs'))
+      for (const path of [coordinatorPolicy.databasePath, coordinatorAutomations.databasePath, coordinatorAutomations.runsPath]) {
+        expect(typeof path).toBe('string')
+        expect(isJsExpr(path)).toBe(false)
+        expect(interpolate(new Proxy({}, { has: () => true, get: () => { throw new Error('unexpected expression evaluation') } }), path)).toBe(path)
+      }
+      expect(() => PolicyConfig(coordinatorPolicy as unknown as Parameters<typeof PolicyConfig>[0])).not.toThrow()
+      expect(() => AutomationConfig(coordinatorAutomations as unknown as Parameters<typeof AutomationConfig>[0])).not.toThrow()
+      const targetRows = nativeRows(first.targetPatch)
+      const personal = targetRows.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config
+      expect(isJsExpr((personal.assistantPolicy as Record<string, unknown>).databasePath)).toBe(true)
       const target = parse(first.targetPatch) as Array<{ id: string; config: any }>
       expect(target.some(row => row.id === 'dsh-enhanced-assistant-memory-learning')).toBe(false)
       expect(target.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config.personalMemory).toBeUndefined()
