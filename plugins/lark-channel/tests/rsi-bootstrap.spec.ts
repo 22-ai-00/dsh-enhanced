@@ -1,4 +1,5 @@
 import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
@@ -144,13 +145,76 @@ describe.skipIf(process.platform !== 'linux')('owner configuration preparation',
     const f = await rsiBootstrapFixture()
     try {
       const keyPath = f.input.resources.identities.approval.keyPath, key = await readFile(keyPath)
+      const stateBefore = await readdir(f.input.resources.stateRoot)
       const binding = { ...f.binding, owner: { ...f.binding.owner, version: f.binding.owner.version + 1 } }
       await expect(prepareRsiOwnerConfiguration(f.input, { ...f, binding })).rejects.toThrow(/owner/u)
       expect(await readdir(f.input.resources.configRoot)).toEqual([])
+      expect(await readdir(f.input.resources.stateRoot)).toEqual(stateBefore)
       await expect(lstat(join(f.input.manifest.controlPlane.statePath, 'control.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' })
       expect(await readFile(keyPath)).toEqual(key)
       expect(await prepareRsiOwnerConfiguration(f.input, f)).toHaveProperty('manifestPath')
     } finally { await f.cleanup() }
+  }, 120_000)
+
+  test('SQLite validation failure removes its own WAL sidecars and restores the pre-owner state layout', async () => {
+    const f = await rsiBootstrapFixture()
+    try {
+      const stateBefore = await readdir(f.input.resources.stateRoot)
+      f.input.executor.id = 'invalid/executor'
+      await expect(prepareRsiOwnerConfiguration(f.input, f)).rejects.toThrow('source adoption authority refused the request')
+      expect(await readdir(f.input.resources.configRoot)).toEqual([])
+      expect(await readdir(f.input.resources.stateRoot)).toEqual(stateBefore)
+      await expect(lstat(join(f.input.manifest.controlPlane.statePath, 'control.sqlite-shm')))
+        .rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(lstat(join(f.input.manifest.controlPlane.statePath, 'control.sqlite-wal')))
+        .rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { await f.cleanup() }
+  }, 120_000)
+
+  test('refuses an unregistered SQLite sidecar without changing it', async () => {
+    const f = await rsiBootstrapFixture()
+    try {
+      const sidecar = join(f.input.manifest.controlPlane.statePath, 'control.sqlite-shm')
+      await mkdir(dirname(sidecar), { recursive: true, mode: 0o700 })
+      await writeFile(sidecar, 'unknown database state', { mode: 0o600 })
+      await expect(prepareRsiOwnerConfiguration(f.input, f)).rejects.toThrow('unregistered configuration or ledger')
+      expect(await readFile(sidecar, 'utf8')).toBe('unknown database state')
+      expect(await readdir(f.input.resources.configRoot)).toEqual([])
+    } finally { await f.cleanup() }
+  }, 120_000)
+
+  test('retains a sidecar changed after SQLite verification for reconciliation', async () => {
+    const fixture = await rsiBootstrapFixture()
+    try {
+      const sidecar = join(fixture.input.manifest.controlPlane.statePath, 'control.sqlite-shm')
+      const targetPatch = fixture.profiles.targetPatch
+      Object.defineProperty(fixture.profiles, 'targetPatch', { enumerable: true, get() {
+        expect(existsSync(sidecar)).toBe(true)
+        writeFileSync(sidecar, 'foreign state')
+        return targetPatch
+      } })
+      const binding = { ...fixture.binding, owner: { ...fixture.binding.owner, version: fixture.binding.owner.version + 1 } }
+      await expect(prepareRsiOwnerConfiguration(fixture.input, { ...fixture, binding })).rejects.toThrow(/owner/u)
+      expect(await readFile(sidecar, 'utf8')).toBe('foreign state')
+      expect(await readdir(fixture.input.resources.configRoot)).toEqual([])
+    } finally { await fixture.cleanup() }
+  }, 120_000)
+
+  test('retains a sidecar rewritten with identical bytes after cleanup ownership was recorded', async () => {
+    const fixture = await rsiBootstrapFixture()
+    try {
+      const sidecar = join(fixture.input.manifest.controlPlane.statePath, 'control.sqlite-shm')
+      const targetPatch = fixture.profiles.targetPatch
+      Object.defineProperty(fixture.profiles, 'targetPatch', { enumerable: true, get() {
+        expect(existsSync(sidecar)).toBe(true)
+        writeFileSync(sidecar, readFileSync(sidecar))
+        return targetPatch
+      } })
+      const binding = { ...fixture.binding, owner: { ...fixture.binding.owner, version: fixture.binding.owner.version + 1 } }
+      await expect(prepareRsiOwnerConfiguration(fixture.input, { ...fixture, binding })).rejects.toThrow(/owner/u)
+      expect((await lstat(sidecar)).isFile()).toBe(true)
+      expect(await readdir(fixture.input.resources.configRoot)).toEqual([])
+    } finally { await fixture.cleanup() }
   }, 120_000)
 
   test('does not overwrite unregistered owner configuration or create a ledger on cancellation', async () => {

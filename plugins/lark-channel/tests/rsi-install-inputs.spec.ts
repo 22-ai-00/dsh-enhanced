@@ -5,11 +5,13 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
-import { runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
+import { ControlPlaneStore, loadTrustConfig, runtimeConfigDigest, validateSourceAdoptionAuthorityConfig } from '@dsh-enhanced/plugin-control-plane'
 
 import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.ts'
+import { compileRsiAuthorityConfigs } from '../src/rsi-authority-config.ts'
 import { collectRsiInstalledInputs, resolveInstalledRsiDsh, RsiInstalledInputsUnavailableError } from '../src/rsi-install-inputs.ts'
 import type { RsiSourceWorkspace } from '../src/rsi-source.ts'
+import { rsiBootstrapFixture } from './fixtures/rsi-bootstrap.ts'
 
 const require = createRequire(import.meta.url)
 const loaderRequire = createRequire(require.resolve('@deepseek-ai/cordis-plugin-include/package.json'))
@@ -30,7 +32,7 @@ async function fixture() {
   // The installed-input collector pins a native systemctl binary but never invokes it here.
   // An owned PATH entry backed by `false` fails closed if another test starts invoking it.
   await symlink('/usr/bin/false', join(bin, 'systemctl'))
-  await file(join(dsh, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.5-rc.3', bin: { dsh: 'lib/bin.js' } }))
+  await file(join(dsh, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.0-rc.2', bin: { dsh: 'lib/bin.js' } }))
   await file(join(dsh, 'lib', 'bin.js'), '#!/usr/bin/env node\n', 0o700)
   await symlink(join(dsh, 'lib', 'bin.js'), join(bin, 'dsh'))
   for (const entry of ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml']) await file(join(profile, entry), `fixture ${entry}\n`)
@@ -87,16 +89,45 @@ describe('installed owner setup input capture', () => {
         expect(target.configDigest).toBe(runtimeConfigDigest(raw))
       }
       expect(result.observerTargets.map(target => target.services)).toEqual([['assistantDelivery'], ['larkChannel']])
-      expect(result.executor).toMatchObject({ id: '@deepseek-ai/dsh', version: '0.1.5-rc.3', path: join(data.dsh, 'lib', 'bin.js') })
+      expect(result.executor).toMatchObject({ id: 'dsh', version: '0.2.0-rc.2', path: join(data.dsh, 'lib', 'bin.js') })
       expect(result.systemctl.path).toBe(await realpath(join(data.bin, 'systemctl')))
       expect(result.systemctl.sha256).toBe(createHash('sha256').update(await readFile(result.systemctl.path)).digest('hex'))
       expect(result.systemctl.interpreter).toBeNull()
-      expect(result.policies).toMatchObject([{ candidateId: 'personal-assistant' }, { candidateId: 'assistant-health', dshBaseline: '0.1.5-rc.3',
-        capabilities: ['owner-installed'], authorities: ['owner-installed'], requires: [] }, { candidateId: 'assistant-memory-learning', dshBaseline: '0.1.5-rc.3',
+      expect(result.policies).toMatchObject([{ candidateId: 'personal-assistant' }, { candidateId: 'assistant-health', dshBaseline: '0.2.0-rc.2',
+        capabilities: ['owner-installed'], authorities: ['owner-installed'], requires: [] }, { candidateId: 'assistant-memory-learning', dshBaseline: '0.2.0-rc.2',
         capabilities: ['owner-installed'], authorities: ['owner-installed'], requires: [] }])
       expect(await readFile(result.dsh.path, 'utf8')).toContain('node')
     } finally { await data.cleanup() }
   })
+
+  test.skipIf(process.platform !== 'linux')('feeds the installed DSH 0.2 executor into real adoption and trust validators', async () => {
+    const installed = await fixture()
+    try {
+      const captured = await collectRsiInstalledInputs({ dshHome: installed.home, targetProfile: 'target',
+        targetEffective: installed.effective, resources: installed.resources, source: installed.source,
+        environment: installed.environment })
+      const owner = await rsiBootstrapFixture()
+      try {
+        const input = { ...owner.input, executor: captured.executor,
+          policies: owner.input.policies.map(policy => ({ ...policy, dshBaseline: captured.dsh.version })) }
+        const compiled = compileRsiAuthorityConfigs(input)
+        const adoptionPath = input.manifest.controlPlane.sourceAdoptions!.authority.configPath
+        const adoption = JSON.parse(compiled.files[adoptionPath]!) as { grant: { executor: unknown } }
+        expect(adoption.grant.executor).toEqual({ id: 'dsh', version: '0.2.0-rc.2',
+          path: captured.dsh.path, sha256: captured.dsh.pin.sha256 })
+        for (const path of compiled.directories) await mkdir(path, { recursive: true, mode: 0o700 })
+        const store = new ControlPlaneStore({ path: join(input.manifest.controlPlane.statePath, 'control.sqlite') })
+        store.close()
+        for (const [path, bytes] of Object.entries(compiled.files)) await file(path, bytes)
+        validateSourceAdoptionAuthorityConfig(adoption)
+        expect(() => validateSourceAdoptionAuthorityConfig({ ...adoption, grant: { ...adoption.grant,
+          executor: { ...captured.executor, id: '@deepseek-ai/dsh' } } })).toThrow()
+        const trustPath = input.manifest.controlPlane.trustPath
+        const trust = await loadTrustConfig(trustPath)
+        expect(trust.executor).toEqual(captured.executor)
+      } finally { await owner.cleanup() }
+    } finally { await installed.cleanup() }
+  }, 120_000)
 
   test.skipIf(process.platform !== 'linux')('rejects mismatched installed entry, escaped package file, disabled ingress and unsupported tags', async () => {
     const data = await fixture()
