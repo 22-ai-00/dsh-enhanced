@@ -448,6 +448,12 @@ function lifecyclePaths(homePath) {
   }
 }
 
+async function canonicalJointCandidateHome(physicalHomePath, homePath) {
+  const candidateHome = await realpath(physicalHomePath)
+  if (candidateHome !== homePath) fail('joint candidate Home does not resolve to the canonical Home')
+  return candidateHome
+}
+
 function rendezvousLockPath(homePath) {
   return `/tmp/.dsh-enhanced-lifecycle-${currentUid()}-${sha256(homePath)}.lock`
 }
@@ -1054,6 +1060,10 @@ function validateHostUpdateManifest(manifest, expected, transactionRoot) {
     fail(`拒绝未绑定或无效的 Host 更新事务 manifest：${expected.transactionPath}`)
   }
   parseHostUpdatePlan(migration.plan, expected.homePath)
+  if (migration.plan.schemaVersion === 2 && migration.localSource === undefined
+    || migration.localSource !== undefined && migration.plan.schemaVersion !== 2) {
+    fail('joint source migration proof and unbound Host plan must be recorded together')
+  }
   if (migration.plan.status !== 'update') fail('Host 更新事务不能记录 current 计划。')
   if (manifest.serviceMasks.length !== 0 && manifest.serviceMasks.length !== manifest.services.length) {
     fail('Host 更新事务 service mask inventory 无效。')
@@ -6622,16 +6632,20 @@ async function readHostPlanFile(path, homePath) {
 
 async function verifyHostPlanBinding(plan, homePath, selection = 'original') {
   const path = join(homePath, '.dsh-rsi-host.json')
-  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
-  try {
-    const entry = fstatSync(descriptor)
-    if (!entry.isFile() || entry.uid !== currentUid() || entry.nlink !== 1
-      || (entry.mode & 0o077) !== 0 || entry.size > 16 * 1024
-      || await readFile(`/proc/self/fd/${descriptor}`, 'utf8') !== (selection === 'original'
-        ? plan.originalBindingSource : plan.candidateBindingSource)) {
-      fail('Home-bound Host changed after update planning')
-    }
-  } finally { closeSync(descriptor) }
+  if (plan.schemaVersion === 2 && selection === 'original') {
+    if (await existingIdentity(path) !== undefined) fail('unbound original Home acquired a Host binding after planning')
+  } else {
+    const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    try {
+      const entry = fstatSync(descriptor)
+      if (!entry.isFile() || entry.uid !== currentUid() || entry.nlink !== 1
+        || (entry.mode & 0o077) !== 0 || entry.size > 16 * 1024
+        || await readFile(`/proc/self/fd/${descriptor}`, 'utf8') !== (selection === 'original'
+          ? plan.originalBindingSource : plan.candidateBindingSource)) {
+        fail('Home-bound Host changed after update planning')
+      }
+    } finally { closeSync(descriptor) }
+  }
   for (const runtime of [plan.originalRuntime, plan.candidateRuntime]) {
     const root = await lstat(runtime.root)
     if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== currentUid() || (root.mode & 0o077) !== 0
@@ -6701,7 +6715,7 @@ async function hostUnitProperties(systemctlExecutable, unit) {
 }
 
 async function hostSandboxRun({ bwrapExecutable, preparationRoot, stageHome, logicalHome, command, args, cwd,
-  phase, environment = {} }) {
+  phase, environment = {}, candidateHome }) {
   const isPreparation = phase === 'resolve' || phase === 'fetch'
   const logical = isPreparation ? preparationRoot : logicalHome
   const physical = isPreparation ? preparationRoot : stageHome
@@ -6717,9 +6731,13 @@ async function hostSandboxRun({ bwrapExecutable, preparationRoot, stageHome, log
   for (const name of ['pnpm_config_offline', 'pnpm_config_frozen_lockfile', 'pnpm_config_package_import_method']) {
     if (environment[name] !== undefined) env[name] = environment[name]
   }
+  for (const [name, value] of Object.entries(env)) {
+    if (name.startsWith('pnpm_config_')) env[name.toUpperCase()] = value
+  }
   const invocation = [
     '--die-with-parent', '--new-session', '--ro-bind', '/', '/', '--proc', '/proc', '--dev', '/dev',
     '--tmpfs', '/tmp', '--bind', preparationRoot, preparationRoot,
+    ...(isPreparation && candidateHome ? ['--bind', candidateHome, logicalHome] : []),
     ...(isPreparation ? [] : ['--bind', physical, logical, '--unshare-net']),
     '--chdir', cwd, '--clearenv',
     ...Object.entries(env).flatMap(([name, value]) => ['--setenv', name, value]),
@@ -6751,11 +6769,18 @@ async function reconcileHostUnitSources(units, selected) {
 }
 
 async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, physicalTransactionRoot,
-  profile, planPath, bwrapExecutable, dshExecutable, serviceContext }) {
+  profile, planPath, bwrapExecutable, dshExecutable, serviceContext, localSourceInput }) {
   const previous = await recoverBoundTransaction({ homePath, physicalHomePath, profile,
     transactionRoot, physicalTransactionRoot, serviceContext })
   if (previous !== undefined) return
   const plan = await readHostPlanFile(planPath, homePath)
+  if (plan.originalRuntime.version.startsWith('0.1.') && plan.candidateRuntime.version.startsWith('0.2.') && !localSourceInput) {
+    fail('cross-ABI Host migration requires a verified joint local source transaction')
+  }
+  if (plan.schemaVersion === 2 && !localSourceInput) fail('unbound Host migration requires a verified joint local source transaction')
+  if (localSourceInput && (plan.schemaVersion !== 2 || plan.candidateRuntime.version !== '0.2.0-rc.2')) {
+    fail('joint local source migration requires the explicit legacy unbound Host plan')
+  }
   await verifyHostPlanBinding(plan, homePath)
   if (await realpath(plan.originalRuntime.dshPath) !== dshExecutable) {
     fail('caller DSH executable does not match Home-bound Host')
@@ -6772,6 +6797,22 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
   const inventory = await captureServiceInventory(serviceContext.systemctlExecutable, homePath, profile,
     originalDshExecutable, true)
   const { services, unitUniverse, foreignOwnership } = inventory
+  let localSource
+  if (localSourceInput) {
+    if (services.length !== 1 || services[0].profile !== profile || !services[0].wasActive) {
+      fail('joint pre-owner migration requires exactly the active target service')
+    }
+    const { prepareHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
+    localSource = await prepareHostLocalSourceUpdate({ homePath, profile, ...localSourceInput })
+    const coordinator = `rsi-${profile.slice(0, 43)}-${sha256(profile).slice(0, 12)}`
+    const fields = ['LoadState', 'ActiveState', 'MainPID']
+    const state = parseSystemdShowProperties((await runServiceCommand(serviceContext.systemctlExecutable,
+      ['--user', 'show', `dsh-profile-${coordinator}.service`, '--no-pager', ...fields.map(name => `--property=${name}`)])).stdout,
+    `dsh-profile-${coordinator}.service`, fields)
+    if (state.LoadState !== 'not-found' || state.ActiveState !== 'inactive' || state.MainPID !== '0') {
+      fail('prepared coordinator already has a service; joint pre-owner migration is not applicable')
+    }
+  }
   const units = []
   for (const service of services) {
     if (!service.dshPath.startsWith(`${plan.originalRuntime.root}/`)) {
@@ -6809,22 +6850,35 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
     services, unitUniverse, foreignOwnership, serviceMasks: [], serviceStartBarriers: [],
     containmentMasks: [], containmentMaskIntents: [], containmentStartBarriers: [],
     hostMigration: { plan, units, phase: 'initializing', candidateEverStarted: false,
-      originalExternalLinksDigest },
+      originalExternalLinksDigest, ...(localSource ? { localSource } : {}) },
   }
   let manifest = await writeManifest(physicalTransactionRoot, initial, 'preparing')
   try {
     await mkdir(preparationRoot, { mode: 0o700 })
     const { prepareHostProfileUpdate, materializeHostProfileUpdate } = await import('./host-profile-update.mjs')
     const { discoverRsiHostUpdateBackups } = await import('./host-rsi-update.mjs')
-    const { approvedBackupNames } = await discoverRsiHostUpdateBackups({ homePath })
+    const { approvedBackupNames } = localSource ? { approvedBackupNames: [] }
+      : await discoverRsiHostUpdateBackups({ homePath })
+    let candidateHome
+    let jointArtifacts
+    if (localSource) {
+      candidateHome = join(preparationRoot, 'candidate-home')
+      await copyHome(homePath, candidateHome)
+      const { stageResourcesForPreparation } = await import('./host-local-source-update.mjs')
+      jointArtifacts = await stageResourcesForPreparation({ proof: localSource, homePath, disposableHome: candidateHome })
+    }
     const runPnpm = async (args, options) => {
       await hostSandboxRun({ bwrapExecutable, preparationRoot, stageHome, logicalHome: homePath,
         command: options.pnpmPath, args, cwd: options.cwd, phase: options.phase,
-        environment: options.env })
+        environment: options.env, candidateHome })
     }
-    const preparation = await prepareHostProfileUpdate({ originalHome: homePath,
+    const prepareProfiles = localSource
+      ? (await import('./host-local-profile-update.mjs')).prepareHostLocalProfileUpdate : prepareHostProfileUpdate
+    const preparation = await prepareProfiles({ originalHome: homePath,
       originalDshPath: plan.originalRuntime.dshPath, candidateDshPath: plan.candidateRuntime.dshPath,
-      preparationRoot, approvedBackupNames, runPnpm })
+      preparationRoot, approvedBackupNames, runPnpm,
+      ...(localSource ? { candidateHome, candidateArtifacts: jointArtifacts.candidateArtifacts,
+        installer: localSource.installer, globalDshRoot: localSourceInput.globalDshRoot } : {}) })
     manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
       hostMigration: { ...manifest.hostMigration, preparation } }, 'preparing')
     const masks = await prepareBoundMasks(physicalTransactionRoot, services.map(service => service.unit), 'managed')
@@ -6845,13 +6899,27 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
     manifest = await writeManifest(physicalTransactionRoot, { ...manifest, stagedIdentity,
       hostMigration: { ...manifest.hostMigration, phase: 'prepared' } }, 'preparing')
     await writeFileAtomic(join(stageHome, '.dsh-rsi-host.json'), plan.candidateBindingSource)
+    if (localSource) {
+      const { stageHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
+      localSource = await stageHostLocalSourceUpdate({ proof: localSource, homePath, stageHome })
+      manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+        hostMigration: { ...manifest.hostMigration, localSource } }, 'preparing')
+    }
     const runCandidateDsh = async (args, options) => {
       await hostSandboxRun({ bwrapExecutable, preparationRoot, stageHome, logicalHome: homePath,
         command: plan.candidateRuntime.dshPath, args, cwd: homePath, phase: options.phase,
         environment: options.env })
     }
-    const profileProof = await materializeHostProfileUpdate({ preparation, stagedHome: stageHome,
+    const materializeProfiles = localSource
+      ? (await import('./host-local-profile-update.mjs')).materializeHostLocalProfileUpdate : materializeHostProfileUpdate
+    const profileProof = await materializeProfiles({ preparation, stagedHome: stageHome,
       logicalHome: homePath, runPnpm, runCandidateDsh })
+    if (localSource) {
+      const { finalizeHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
+      localSource = await finalizeHostLocalSourceUpdate({ proof: localSource, homePath, stageHome })
+      manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+        hostMigration: { ...manifest.hostMigration, localSource } }, 'preparing')
+    }
     await assertHostCandidateTreeSafe(physicalHomePath, stageHome, homePath, plan,
       manifest.hostMigration.originalExternalLinksDigest)
     manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
@@ -6877,7 +6945,9 @@ async function continueHostUpdate({ manifest: initial, homePath, physicalHomePat
   const masks = manifest.serviceMasks
   const systemctlExecutable = serviceContext.systemctlExecutable
   const candidateDshExecutable = await realpath(plan.candidateRuntime.dshPath)
-  const { validateHostProfileUpdate } = await import('./host-profile-update.mjs')
+  const validateHostProfileUpdate = migration.localSource
+    ? (await import('./host-local-profile-update.mjs')).validateHostLocalProfileUpdate
+    : (await import('./host-profile-update.mjs')).validateHostProfileUpdate
   const { prepareRsiHostUpdate, verifyRsiHostUpdate } = await import('./host-rsi-update.mjs')
   if (migration.profileProof === undefined || JSON.stringify(await validateHostProfileUpdate({
     preparation: migration.preparation, stagedHome: stageHome,
@@ -6908,9 +6978,16 @@ async function continueHostUpdate({ manifest: initial, homePath, physicalHomePat
     } finally { await installBoundMasks(systemctlExecutable, masks) }
   }, false, homePath, services.map(service => service.unit))
   await assertNoUnmanagedHomeProcesses(homePath)
-  const rsiProof = await prepareRsiHostUpdate({ homePath, stageHome, hostPlan: plan, unitTransitions,
-    transactionId: manifest.id, systemctlExecutable })
-  await verifyRsiHostUpdate({ homePath, physicalHome: stageHome, hostPlan: plan, proof: rsiProof })
+  const rsiProof = migration.localSource
+    ? { schemaVersion: 1, mode: 'pre-owner-local', hostPlanDigest: sha256(JSON.stringify(plan)),
+      authorizedPatchDigests: {}, installations: [] }
+    : await prepareRsiHostUpdate({ homePath, stageHome, hostPlan: plan, unitTransitions,
+      transactionId: manifest.id, systemctlExecutable })
+  if (migration.localSource) {
+    const { verifyHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
+    await verifyHostLocalSourceUpdate({ proof: migration.localSource, homePath, physicalHome: homePath, selection: 'original' })
+    await verifyHostLocalSourceUpdate({ proof: migration.localSource, homePath, physicalHome: stageHome, selection: 'candidate' })
+  } else await verifyRsiHostUpdate({ homePath, physicalHome: stageHome, hostPlan: plan, proof: rsiProof })
   if (JSON.stringify(await validateHostProfileUpdate({ preparation: migration.preparation,
     stagedHome: stageHome, authorizedPatchDigests: rsiProof.authorizedPatchDigests })) !== JSON.stringify(migration.profileProof)) {
     fail('RSI authority preparation changed staged profile materialization')
@@ -6938,7 +7015,11 @@ async function continueHostUpdate({ manifest: initial, homePath, physicalHomePat
   await fsyncPath(LOCK_PARENT_FD_PATH, true)
   manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
     hostMigration: { ...manifest.hostMigration, phase: 'swapped' } }, 'swapped')
-  await verifyRsiHostUpdate({ homePath, physicalHome: physicalHomePath, hostPlan: plan, proof: rsiProof })
+  if (migration.localSource) {
+    const { verifyHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
+    const candidateHome = await canonicalJointCandidateHome(physicalHomePath, homePath)
+    await verifyHostLocalSourceUpdate({ proof: migration.localSource, homePath, physicalHome: candidateHome, selection: 'candidate' })
+  } else await verifyRsiHostUpdate({ homePath, physicalHome: physicalHomePath, hostPlan: plan, proof: rsiProof })
   await assertUnitUniverseStable(systemctlExecutable, manifest.unitUniverse, homePath, manifest.foreignOwnership)
   await acceptHostCandidate({ manifest, homePath, physicalHomePath, transactionRoot,
     physicalTransactionRoot, backupHome, serviceContext })
@@ -6992,8 +7073,18 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
   const masks = manifest.serviceMasks
   const services = await hostCandidateServices(manifest.services, migration.units, plan.candidateRuntime.dshPath)
   const { verifyRsiHostUpdate } = await import('./host-rsi-update.mjs')
-  await verifyRsiHostUpdate({ homePath, physicalHome: physicalHomePath, hostPlan: plan,
-    proof: migration.rsiProof })
+  const verifyAuthority = async () => {
+    if (migration.localSource) {
+      const { verifyHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
+      const candidateHome = await canonicalJointCandidateHome(physicalHomePath, homePath)
+      await verifyHostLocalSourceUpdate({ proof: migration.localSource, homePath, physicalHome: candidateHome, selection: 'candidate' })
+      const { validateHostLocalProfileUpdate } = await import('./host-local-profile-update.mjs')
+      const profiles = await validateHostLocalProfileUpdate({ preparation: migration.preparation,
+        stagedHome: candidateHome, originalPhysicalHome: backupHome })
+      if (JSON.stringify(profiles) !== JSON.stringify(migration.profileProof)) fail('candidate Host profile proof changed')
+    } else await verifyRsiHostUpdate({ homePath, physicalHome: physicalHomePath, hostPlan: plan, proof: migration.rsiProof })
+  }
+  await verifyAuthority()
   await verifyHostPlanBinding(plan, homePath, 'candidate')
   const candidateDshExecutable = await realpath(plan.candidateRuntime.dshPath)
   const rsiTargets = await hostRsiRuntimeAcceptance({ proof: migration.rsiProof, homePath,
@@ -7027,7 +7118,7 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
   const accepted = services.length === 0 ? [] : await startAndAcceptServices({
     ...serviceContext, services, serviceMasks: masks, homePath, targetProfile,
     unitUniverse: manifest.unitUniverse, foreignOwnership: manifest.foreignOwnership,
-    cleanProfiles: [], timeouts: serviceTimeouts(), requireLarkReady: false,
+    cleanProfiles: [], timeouts: serviceTimeouts(), requireLarkReady: migration.localSource !== undefined,
     larkReadyProfiles: rsiTargets.map(target => target.profile),
     acceptAfterReady: async () => {
       for (const target of rsiTargets) target.accepted = await awaitHostRsiRuntimeSuccessor({
@@ -7045,7 +7136,7 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
     containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
     homePath, targetProfile, unitUniverse: manifest.unitUniverse,
     foreignOwnership: manifest.foreignOwnership, cleanProfiles: [], acceptance: manifest.serviceAcceptance,
-    requireLarkReady: false, larkReadyProfiles: rsiTargets.map(target => target.profile),
+    requireLarkReady: migration.localSource !== undefined, larkReadyProfiles: rsiTargets.map(target => target.profile),
   })
   for (const target of rsiTargets) {
     const current = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
@@ -7065,8 +7156,7 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
       fail(`candidate systemd unit properties changed after acceptance: ${expected.unit}`)
     }
   }
-  await verifyRsiHostUpdate({ homePath, physicalHome: physicalHomePath, hostPlan: plan,
-    proof: migration.rsiProof })
+  await verifyAuthority()
   manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
     hostMigration: { ...manifest.hostMigration, phase: 'committed' } }, 'committed')
   manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
@@ -7129,6 +7219,15 @@ async function recoverHostUpdate({ manifest: initial, homePath, physicalHomePath
       await fsyncPath(LOCK_PARENT_FD_PATH, true)
     }
     await verifyHostPlanBinding(migration.plan, homePath)
+    const originalProfile = await readProfile(physicalHomePath, profile)
+    if (sha256(originalProfile.source) !== manifest.originalProfileDigest) {
+      fail('Host recovery original profile changed; retain containment')
+    }
+    if (migration.localSource) {
+      const { verifyHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
+      await verifyHostLocalSourceUpdate({ proof: migration.localSource, homePath,
+        physicalHome: physicalHomePath, selection: 'original' })
+    }
     const restored = await Promise.all(manifest.services.map(async service => {
       const fragment = await snapshotServiceFile(service.fragment.path,
         migration.units.find(unit => unit.unit === service.unit).before)
@@ -7229,9 +7328,10 @@ async function main() {
     } finally { await localSourcePreparation.dispose() }
     return
   }
-  if (operation === 'host-update' || operation === 'host-recover') {
-    if (!PROFILE_NAME.test(profile) || targets.length < 2 || targets.length > 3) {
-      fail('host-update/recover requires systemctl, journalctl and optional plan.json', 2)
+  if (operation === 'host-update' || operation === 'host-recover' || operation === 'host-local-update') {
+    const joint = operation === 'host-local-update'
+    if (!PROFILE_NAME.test(profile) || (joint ? targets.length < 5 || targets.length > 7 : targets.length < 2 || targets.length > 3)) {
+      fail('Host update requires systemctl, journalctl and plan.json; local migration additionally requires source preparation and reviewed installer roots, with optional auxiliary artifact and legacy global DSH roots', 2)
     }
     const [suppliedSystemctl, suppliedJournalctl, planPath] = targets
     const serviceContext = {
@@ -7248,7 +7348,11 @@ async function main() {
     }
     if (planPath === undefined) fail('host-update requires plan.json', 2)
     await performHostUpdate({ ...hostPaths, profile, planPath, bwrapExecutable,
-      dshExecutable, serviceContext })
+      dshExecutable, serviceContext, ...(joint ? { localSourceInput: {
+        preparationRoot: targets[3], installerRoot: targets[4],
+        ...(targets[5] ? { auxiliaryRoot: targets[5] } : {}),
+        ...(targets[6] ? { globalDshRoot: targets[6] } : {}),
+      } } : {}) })
     return
   }
   if (operation === 'recover') {
@@ -7323,6 +7427,7 @@ async function main() {
 }
 
 export const lifecycleProfileTest = Object.freeze({
+  canonicalJointCandidateHome,
   assertSnapshotTreeSafe,
   compactSupervisedSnapshot, validSupervisedLifecycle, validSupervisedManifestPhase, sameHomeOwnershipEvidence,
   validManifestTopLevel, validV3OperationShape, validV3ServiceAcceptance, writeManifest,

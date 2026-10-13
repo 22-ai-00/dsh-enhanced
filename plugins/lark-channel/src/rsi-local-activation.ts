@@ -1,12 +1,15 @@
 import { createHash, createPublicKey, verify } from 'node:crypto'
 import { lstat, readdir, realpath } from 'node:fs/promises'
 import { isAbsolute, join, resolve, sep } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { ControlPlaneDatabaseError, ControlPlaneStore, controlPlaneDigest, hostMaintenanceCanonical, hostMaintenanceDigest,
   signSourceMaintenanceRecord, sourceBaselineChain, sourceMaintenanceDigest, verifySourceMaintenanceRecords,
   type SourceMaintenanceAnchor, type SourceMaintenanceRecord } from '@dsh-enhanced/plugin-control-plane'
 import { rsiBuildResources as io } from './rsi-build.js'
 import { isMap, isScalar, isSeq, parseDocument } from 'yaml'
 import { prepareRsiAuthorityResources } from './rsi-authority-resources.js'
+import { readRsiLocalCohort, verifyRsiLocalInstalledPackages } from './rsi-local-cohort.js'
+import { assertRsiLocalProfileRoots } from './rsi-local-profile-update.js'
 import type { RsiLocalCohort } from './rsi-local-cohort.js'
 import type { RsiLocalUpdatePreparation } from './rsi-local-update.js'
 import { readRsiSourceMaintenance } from './rsi-source-maintenance.js'
@@ -39,6 +42,7 @@ export interface ProduceRsiLocalMaintenanceInput {
   nextCohort: Pick<RsiLocalCohort, 'sourceCommit' | 'version' | 'receiptDigest'>
   /** An absent ledger never selects pre-owner implicitly. */
   maintenanceMode?: 'owner-ledger' | 'pre-owner'
+  preparedCoordinator?: true
   now?: () => number
   signal?: AbortSignal
 }
@@ -54,6 +58,7 @@ export interface AssertRsiPreOwnerInstallationInput {
   records?: readonly SourceMaintenanceRecord[]
   /** CLI --patch overlays are outside this copied Home proof and unsupported. */
   extraPatchFiles?: readonly string[]
+  preparedCoordinator?: true
   signal?: AbortSignal
 }
 export interface RsiPreOwnerInstallationProof {
@@ -64,6 +69,42 @@ export interface RsiPreOwnerInstallationProof {
   sourceChainTip: string
   originalBootstrapDigest: string
   authorityBootstrapDigest: string
+  preparedCoordinator?: { profile: string; receiptDigest: string; cohortDigest: string }
+}
+
+const COORDINATOR_BUNDLES = ['assistant-policy', 'assistant-automations', 'plugin-control-plane']
+function emptyConfiguration(source: string, path: string): void {
+  const document = parseDocument(source, { uniqueKeys: true,
+    customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
+  if (document.errors.length || document.warnings.length || !isSeq(document.contents) || document.contents.items.length) {
+    fail(`prepared coordinator configuration is not inert: ${path}`)
+  }
+}
+async function assertPreparedCoordinator(input: AssertRsiPreOwnerInstallationInput, home: string,
+  coordinator: string, receiptPath: string, receipt: Buffer, cohort: Awaited<ReturnType<typeof readRsiLocalCohort>>): Promise<void> {
+  const profileRoot = join(home, 'profiles', coordinator)
+  await io.directory(profileRoot, false)
+  if (!isDeepStrictEqual((await readdir(profileRoot)).sort(),
+    ['cordis.patch.yml', 'cordis.yml', 'node_modules', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml'].sort())) {
+    fail(`prepared coordinator profile layout differs: ${profileRoot}`)
+  }
+  if (!(await io.readStable(receiptPath, 65_536, true)).equals(receipt)) fail('prepared coordinator receipt changed')
+  for (const name of ['cordis.yml', 'cordis.patch.yml']) {
+    const path = join(profileRoot, name)
+    const bytes = await io.readStable(path, 2_097_152)
+    emptyConfiguration(bytes.toString('utf8'), path)
+    if (home !== input.logicalHome && !(await io.readStable(join(input.logicalHome, 'profiles', coordinator, name), 2_097_152)).equals(bytes)) {
+      fail(`prepared coordinator configuration changed in stage: ${path}`)
+    }
+  }
+  for (const name of ['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml']) {
+    const path = join(profileRoot, name), bytes = await io.readStable(path, 16_777_216)
+    if (home !== input.logicalHome && !(await io.readStable(join(input.logicalHome, 'profiles', coordinator, name), 16_777_216)).equals(bytes)) {
+      fail(`prepared coordinator installation changed in stage: ${path}`)
+    }
+    if (name === 'package.json') assertRsiLocalProfileRoots({ source: bytes.toString('utf8'), cohort, bundles: COORDINATOR_BUNDLES })
+  }
+  await verifyRsiLocalInstalledPackages({ cohort, profilePath: profileRoot, bundles: COORDINATOR_BUNDLES })
 }
 
 async function assertAbsent(path: string): Promise<void> {
@@ -116,8 +157,9 @@ function assertPreOwnerConfiguration(source: string, path: string, authorityConf
 }
 
 /** Read-only absence proof for an installation whose authority bootstrap exists
- * but owner grants, coordinator and control ledger have never been installed.
- * It neither creates a ledger nor interprets a partial owner setup as fresh.
+ * but owner grants and control ledger have never been installed. The explicit
+ * preparedCoordinator path accepts only the inert, receipt-bound original pair.
+ * It neither creates a ledger nor interprets arbitrary partial setup as fresh.
  * Only Home/profile cordis.yml and cordis.patch.yml layers are supported.
  * Alternate formats, dynamic owner rows/config, includes and explicit CLI
  * overlays are rejected. The outer transaction must verify the effective
@@ -140,6 +182,19 @@ export async function assertRsiPreOwnerInstallation(input: AssertRsiPreOwnerInst
   const sourceBootstrap = await io.readStable(join(input.logicalHome, sourceRelative, 'bootstrap.json'), 65_536, true)
   const profileDigest = createHash('sha256').update(input.profile).digest('hex')
   const coordinator = `rsi-${input.profile.slice(0, 43)}-${profileDigest.slice(0, 12)}`
+  const markerName = `.rsi-coordinator-${profileDigest.slice(0, 16)}.json`
+  const originalCohort = input.preparedCoordinator === true
+    ? await readRsiLocalCohort({ dshHome: input.logicalHome, profile: input.profile }) : undefined
+  const marker = input.preparedCoordinator === true
+    ? await io.readStable(join(input.logicalHome, markerName), 65_536, true) : undefined
+  if (originalCohort && marker) {
+    let parsed: unknown
+    try { parsed = JSON.parse(marker.toString('utf8')) } catch { fail('prepared coordinator receipt is invalid') }
+    if (!isDeepStrictEqual(parsed, { schemaVersion: 1, targetProfile: input.profile, coordinatorProfile: coordinator,
+      version: originalCohort.version, sourceRepository: originalCohort.sourceRepository })) {
+      fail('prepared coordinator receipt differs from the frozen cohort')
+    }
+  }
   for (const home of new Set([input.logicalHome, input.physicalHome])) {
     signal.throwIfAborted()
     const authority = join(home, authorityRelative)
@@ -148,7 +203,15 @@ export async function assertRsiPreOwnerInstallation(input: AssertRsiPreOwnerInst
     if ((await readdir(authority)).sort().join(',') !== 'bootstrap.json,catalog.json,config,identities,registry,state') fail(`pre-owner authority layout differs: ${authority}`)
     for (const name of ['config', 'state', 'registry']) {
       const directory = join(authority, name); await io.directory(directory)
-      if ((await readdir(directory)).length) fail(`pre-owner ${name} is not empty: ${directory}`)
+      const entries = (await readdir(directory)).sort()
+      if (name === 'state' && marker && isDeepStrictEqual(entries,
+        ['creation-adoption-runner', 'creation-review-runner'])) {
+        for (const entry of entries) {
+          const child = join(directory, entry)
+          await io.directory(child)
+          if ((await readdir(child)).length) fail(`pre-owner state is not empty: ${child}`)
+        }
+      } else if (entries.length) fail(`pre-owner ${name} is not empty: ${directory}`)
     }
     const catalog = JSON.parse((await io.readStable(join(authority, 'catalog.json'), 2_097_152, true)).toString('utf8')) as unknown
     if (controlPlaneDigest(catalog) !== controlPlaneDigest({ schemaVersion: 1, entries: [] })) fail(`pre-owner catalog is not empty: ${authority}`)
@@ -161,8 +224,30 @@ export async function assertRsiPreOwnerInstallation(input: AssertRsiPreOwnerInst
       const expected = await privateHostKey(identity.keyPath)
       if (actual !== expected) fail(`pre-owner signing identity differs: ${role}`)
     }
-    for (const path of [join(home, 'profiles', coordinator), join(home, 'rsi-coordinators', coordinator),
-      join(home, `.rsi-coordinator-${profileDigest.slice(0, 16)}.json`), join(home, '.rsi-setup-journal.json')]) await assertAbsent(path)
+    for (const path of [join(home, 'rsi-coordinators', coordinator), join(home, 'rsi-authorities', coordinator),
+      join(home, '.rsi-setup-journal.json')]) await assertAbsent(path)
+    try {
+      const coordinators = join(home, 'rsi-coordinators')
+      await io.directory(coordinators)
+      if ((await readdir(coordinators)).length) fail(`unknown coordinator state: ${coordinators}`)
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    for (const name of await readdir(home)) {
+      if (name.startsWith('.rsi-coordinator-') && (!marker || name !== markerName)) fail(`unknown coordinator marker: ${name}`)
+    }
+    if (marker && originalCohort) {
+      await assertPreparedCoordinator(input, home, coordinator, join(home, markerName), marker, originalCohort)
+      const targetRoot = join(home, 'profiles', input.profile)
+      const targetManifest = await io.readStable(join(targetRoot, 'package.json'), 2_097_152)
+      assertRsiLocalProfileRoots({ source: targetManifest.toString('utf8'), cohort: originalCohort,
+        bundles: originalCohort.bundles })
+      if (home !== input.logicalHome && !(await io.readStable(join(input.logicalHome, 'profiles', input.profile,
+        'package.json'), 2_097_152)).equals(targetManifest)) fail('prepared target profile manifest changed in stage')
+      await verifyRsiLocalInstalledPackages({ cohort: originalCohort, profilePath: targetRoot,
+        bundles: originalCohort.bundles })
+    } else {
+      await assertAbsent(join(home, 'profiles', coordinator))
+      await assertAbsent(join(home, markerName))
+    }
     const profileRoot = join(home, 'profiles', input.profile)
     for (const root of [home, profileRoot]) {
       for (const name of ['cordis.yaml', 'cordis.patch.yaml', 'cordis.json', 'cordis.patch.json']) {
@@ -191,7 +276,9 @@ export async function assertRsiPreOwnerInstallation(input: AssertRsiPreOwnerInst
   sourceBaselineChain(live.anchor.baseline, [], live.records)
   signal.throwIfAborted()
   return { mode: 'pre-owner', anchor: live.anchor, records, workspace: live.workspace, sourceChainTip,
-    originalBootstrapDigest: live.originalBootstrapDigest, authorityBootstrapDigest: digest(authorityBootstrap) }
+    originalBootstrapDigest: live.originalBootstrapDigest, authorityBootstrapDigest: digest(authorityBootstrap),
+    ...(marker && originalCohort ? { preparedCoordinator: { profile: coordinator, receiptDigest: digest(marker),
+      cohortDigest: originalCohort.receiptDigest } } : {}) }
 }
 
 type ActivationState = { kind: 'watched'; planId: string } | { kind: 'unsettled' } | { kind: 'none' }
@@ -269,6 +356,7 @@ export async function produceRsiLocalSourceMaintenance(input: ProduceRsiLocalMai
   // the sidecar before the chain is extended.
   const mode = input.maintenanceMode ?? 'owner-ledger'
   if (mode !== 'owner-ledger' && mode !== 'pre-owner') fail('invalid maintenance mode')
+  if (input.preparedCoordinator && mode !== 'pre-owner') fail('prepared coordinator requires pre-owner maintenance mode')
   let currentTip: string
   let liveState: ActivationState = { kind: 'none' }
   let liveSnapshotDigest = ''
@@ -276,7 +364,8 @@ export async function produceRsiLocalSourceMaintenance(input: ProduceRsiLocalMai
   let liveHistory: ReturnType<ControlPlaneStore['readSourceMaintenanceState']>['history']
   if (mode === 'pre-owner') {
     const proof = await assertRsiPreOwnerInstallation({ logicalHome: input.logicalHome, physicalHome: stagePhysicalHome,
-      profile: input.profile, anchor, records: input.live.records, signal })
+      profile: input.profile, anchor, records: input.live.records,
+      ...(input.preparedCoordinator ? { preparedCoordinator: true as const } : {}), signal })
     if (proof.originalBootstrapDigest !== input.live.originalBootstrapDigest
       || controlPlaneDigest(proof.workspace) !== controlPlaneDigest(input.live.workspace)) fail('pre-owner source bootstrap or workspace snapshot changed')
     currentTip = proof.sourceChainTip; liveHistory = []

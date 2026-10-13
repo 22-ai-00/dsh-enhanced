@@ -580,3 +580,8 @@ export async function materializeHostProfileUpdate({ preparation, stagedHome, lo
   }
   return validateHostProfileUpdate({ preparation, stagedHome: stage })
 }
+
+export { nativeAuthority, inventory, readMetadata, writeMetadata, pnpmEnvironment,
+  nonNativePackages, oldHostLinks, localCohortPins, sourceDigest, metadataNames,
+  nativeName, packageName, snapshotName, snapshotSelector, referenceBase,
+  assertPeerBindings, normalizePreparedCohortLock, defaultRunPnpm }

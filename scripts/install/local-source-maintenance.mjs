@@ -126,6 +126,8 @@ async function load(binding) {
   result.yaml = require('yaml')
   return result
 }
+
+export { load as loadLocalSourceInstaller }
 async function memoryLearnerInitialRow(binding) {
   await assertLocalSourceInstaller(binding)
   const source = join(binding.root, 'plugins', 'lark-channel', 'lib', 'rsi-local-roots-extension.js')

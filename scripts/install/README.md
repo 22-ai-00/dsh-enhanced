@@ -18,7 +18,7 @@ pnpm approve-builds koffi
 
 ## 安装入口
 
-开发版默认推荐官方 `latest`（当前 `0.2.0-rc.2`，上游尚无正式稳定版），并校验精确兼容基线。未知新版不会未经验证直接装入现有环境。旧 `0.1` Home 到 `0.2` 的联合迁移尚未支持；不要先替换旧 profile 的插件，现阶段在独立新 Home 中验证新版。远端 npm 引导器须等新版本通过发布验证后更新。
+开发版默认推荐官方 `latest`（当前 `0.2.0-rc.2`，上游尚无正式稳定版），并校验精确兼容基线。未知新版不会未经验证直接装入现有环境。旧 `0.1` Home 到 `0.2` 不走普通自动升级；满足下述严格前提时使用显式联合迁移，否则在独立新 Home 中验证新版，不要先替换旧 profile 的插件。远端 npm 引导器须等新版本通过发布验证后更新。
 
 macOS 的本地和 npm 安装入口会在安装末尾检查受管 LaunchAgent；若 `ai.deepseek.dsh.profile.<profile>` 未注册，会自动调用当前 profile 的服务注册入口并再次确认，再执行健康检查，无需手动运行 `launchctl bootstrap`。修复复用服务注册入口，不启动新的飞书 onboarding；已有中断的 setup 事务仍由原入口恢复。`--no-service`、`--lark skip` 以及不管理常驻服务的场景保持跳过；独立 `doctor.sh` 仍只检查。注册失败会保留具体错误并停止安装。
 
@@ -64,6 +64,26 @@ uninstall 不访问 npm registry 或 pnpm store。`web` / `autonomy` 仍使用�
 
 Linux `supervised` 的已登记 RSI 双 Host 可以在同一个 Home 事务中成对升级插件：目标及协调器必须处于活动状态，安装收据和现有版本一致，共享 catalog/trust、owner 与 handoff 通过核对。协调器只包含原生基础配置及 Policy、Automations、Control Plane 三个增强包，三包随目标同批更新。npm 路径先分别准备并完整预取两个 profile 的锁文件；切换前更新副本收据并实际激活两个 profile。协调器预览只在进程 overlay 中关闭 scheduler，真实启动须生成本次启动后的 owner-bound Automation 登记。原始/候选的有效配置、收据和包版本在恢复、接受及清理前重新核对。停服前还要求旧协调器本次 InvocationID 已有就绪信号；缺少信号时原服务继续运行。切换前失败可恢复原活动服务；切换后失败保持双服务停止、保留新旧 Home 与事务供对账，不自动覆盖可能已迁移的状态。固定本地源码或存在 `rsi-local-cohorts` 的安装目前在 registry 查询、停服和包修改前拒绝升级，包括尚未生成协调器收据的冻结安装。开发版 `dsh-rsi-setup --prepare-local-update` 可在 Home 外准备保留既有修复的合并源码与隔离构建制品；尚无 RSI owner/coordinator 的安装可使用下述 checkout 内显式维护入口，已授权的双 Host 冻结安装仍未开放，详见 [RSI 配置](../../plugins/lark-channel/docs/rsi-setup.md)；成对卸载仍未支持。跨版本 Host 更新作为插件升级之后的独立阶段，见下文。
 
+
+### 旧 Home 的联合 Host / 源码迁移
+
+开发 checkout 提供显式 `host-local-update`，仅适用于未绑定私有 Host、尚无 owner 授权、具有精确匹配的惰性预备协调器及单个活动目标服务的 Linux Home。原 Host 必须有可验证的私有缓存收据；当前只接受 `0.1.x → 0.2.0-rc.2`。它不是普通 `dsh-rsi update` 的自动路径，也不自动开启学习。其他状态仍拒绝，不能删除协调器标记或伪造 Host 绑定来满足前提。
+
+先准备 schema 1 冻结源码候选，再用 CLI 包的 `prepareUnboundHostUpdatePlan` 显式提供旧 Host 的 `cacheRoot`、`version`、`dshPath`，将返回计划保存为 Home 外当前用户独占的 `0600` 文件。准备过程核对完整旧 / 新 Host 收据，不修改 Home。使用已经审核、构建且在事务期间保持不变的 checkout 执行：
+
+```sh
+node /reviewed/checkout/scripts/install/lifecycle-profile.mjs \
+  host-local-update assistant /absolute/dsh-home \
+  /absolute/original-private-dsh /usr/bin/bwrap /usr/bin/systemctl /usr/bin/journalctl \
+  /absolute/private-plan.json /absolute/prepared-local-update /reviewed/checkout \
+  /absolute/private-auxiliary-root
+```
+
+事务检查整个 Home 的所有 profile，包括未运行的 ACP、Web 和预备协调器。缺少的增强包从同一冻结候选提交隔离构建；辅助目录在恢复结束前必须保留。同一收据只在全部输入和字节仍一致时复用。停服前的副本仅供依赖解析和预取，绝不作为运行状态切换；屏蔽、停止并核对整个 Home 静止后重新复制，在无网络隔离中物化所有锁定依赖。原 patch、身份、密钥和授权树保持不变，源码维护记录仍为 pre-owner，不授予 owner 权限。候选 authority runtime、包文件、锁图及空 profile 残留在切换前、恢复启动前和验收后核对。
+
+沿用 v4 Host 事务的崩溃收容与 `host-recover`：候选尚未运行时可恢复原 Home 和 unit；候选已运行后保留候选绑定并继续验收，不自动覆盖可能已变更的业务状态。真实目标服务还必须通过新 InvocationID、飞书就绪和稳定窗口。迁移成功后才单独执行 `dsh-rsi-setup --install-owner --ack-existing-automations`，使用既有配对和模型生成有限学习配置；迁移通过不代表学习就绪或普通任务闭环通过。
+
+DSH `0.2` 使用原生 runtime resolution，不再依赖旧的共享 `profiles/node_modules` 或 profile 内 `.dsh-module-fallback`。联合迁移只在暂存副本退役经过库存核对的纯链接缓存；真实文件、自定义包目录、未知链接来源或准备后的漂移都会拒绝。如果缓存还引用旧全局安装，须在上述命令的辅助制品目录后追加原全局 `@deepseek-ai/dsh` 包的 canonical 目录，供显式核验。原 Home 和回滚副本保留原缓存；不会跟随悬空链接删除目标，也不把旧全局 DSH 路径当作候选代码授权。
 
 ### Checkout 内的 pre-owner 冻结源码维护
 
