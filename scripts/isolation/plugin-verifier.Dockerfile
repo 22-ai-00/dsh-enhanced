@@ -31,9 +31,9 @@ RUN test "$(node -p 'require("./package.json").packageManager')" = pnpm@11.7.0 \
  && rm -rf /workspace/.pnpm-store /workspace/.pnpm-cache \
  && ln -s ../../plugins/assistant-verifier/node_modules/@deepseek-ai/dsh-tools node_modules/@deepseek-ai/dsh-tools \
  && ln -s ../../plugins/assistant-verifier/node_modules/@deepseek-ai/dsh-system-prompt node_modules/@deepseek-ai/dsh-system-prompt \
- && test "$(node -p 'require("./node_modules/@deepseek-ai/cordis/package.json").version')" = 4.0.2 \
- && test "$(node -p 'require("./node_modules/@deepseek-ai/dsh-tools/package.json").version')" = 0.1.5-rc.3 \
- && test "$(node -p 'require("./node_modules/@deepseek-ai/dsh-system-prompt/package.json").version')" = 0.1.5-rc.3 \
+ && test "$(node -p 'require("./node_modules/@deepseek-ai/cordis/package.json").version')" = 4.0.4 \
+ && test "$(node -p 'require("./node_modules/@deepseek-ai/dsh-tools/package.json").version')" = 0.2.0-rc.2 \
+ && test "$(node -p 'require("./node_modules/@deepseek-ai/dsh-system-prompt/package.json").version')" = 0.2.0-rc.2 \
  && test "$(node --version)" = v22.23.2 \
  && chmod -R a+rX /opt/dsh-plugin-verifier \
  && chmod 0755 /opt/dsh-plugin-verifier/worker.mjs /opt/dsh-plugin-verifier/candidate.mjs /opt/dsh-plugin-verifier/candidate-launcher

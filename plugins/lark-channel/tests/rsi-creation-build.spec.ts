@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
+import { parse } from 'yaml'
 import { prepareRsiBuildEnvironment } from '../src/rsi-build.js'
 import { prepareRsiCreationBuildEnvironment, readRsiCreationBuildEnvironment } from '../src/rsi-creation-build.js'
 import type { RsiSourceWorkspace } from '../src/rsi-source.js'
@@ -14,6 +15,25 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 const repositoryRoot = fileURLToPath(new URL('../../../', import.meta.url))
 const sourceImage = `sha256:${'a'.repeat(64)}`
 const behaviorImage = `sha256:${'b'.repeat(64)}`
+
+test('behavior verifier recipe pins the exact workspace and lockfile native versions', async () => {
+  const workspace = parse(await readFile(join(repositoryRoot, 'pnpm-workspace.yaml'), 'utf8')) as {
+    catalog: Record<string, string>
+  }
+  const lock = parse(await readFile(join(repositoryRoot, 'pnpm-lock.yaml'), 'utf8')) as {
+    catalogs: { default: Record<string, { specifier: string; version: string }> }
+  }
+  const recipe = await readFile(join(repositoryRoot, 'scripts/isolation/plugin-verifier.Dockerfile'), 'utf8')
+  for (const [name, version] of [
+    ['@deepseek-ai/cordis', '4.0.4'],
+    ['@deepseek-ai/dsh-tools', '0.2.0-rc.2'],
+    ['@deepseek-ai/dsh-system-prompt', '0.2.0-rc.2'],
+  ] as const) {
+    expect(workspace.catalog[name]).toBe(version)
+    expect(lock.catalogs.default[name]).toEqual({ specifier: version, version })
+    expect(recipe).toContain(`test "$(node -p 'require("./node_modules/${name}/package.json").version')" = ${version}`)
+  }
+})
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', ...args],
@@ -112,6 +132,14 @@ describe.skipIf(process.platform !== 'linux' || process.arch !== 'x64')('private
     const { receiptDigest: _ignored, ...content } = parsed
     content.sourceImage = behaviorImage
     await writeFile(receipt, JSON.stringify({ ...content, receiptDigest: createHash('sha256').update(JSON.stringify(content)).digest('hex') }))
+    await expect(readRsiCreationBuildEnvironment(f.args)).rejects.toThrow('receipt differs')
+    await writeFile(receipt, bytes)
+    const old = JSON.parse(bytes) as Record<string, unknown>
+    const oldHashes = old.inputHashes as Record<string, string>
+    oldHashes['scripts/isolation/plugin-verifier.Dockerfile'] = '4a73ede3ae1ca943a5e661e72f0f8b80ef2876b4ec530023e4b61f3d17ea121b'
+    const { receiptDigest: _oldDigest, ...oldContent } = old
+    await writeFile(receipt, JSON.stringify({ ...oldContent,
+      receiptDigest: createHash('sha256').update(JSON.stringify(oldContent)).digest('hex') }))
     await expect(readRsiCreationBuildEnvironment(f.args)).rejects.toThrow('receipt differs')
     await writeFile(receipt, bytes)
     await chmod(receipt, 0o644)
