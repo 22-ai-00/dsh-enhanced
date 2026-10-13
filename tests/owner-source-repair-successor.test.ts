@@ -1,11 +1,13 @@
+import { createHash, generateKeyPairSync } from 'node:crypto'
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
 import { isMap, isSeq, parseDocument } from 'yaml'
-import { appendOwnerSourceRepairMaintenance, captureOwnerSourceRepairSuccessor, ownerRepairSnapshotEquivalent,
+import { appendOwnerSourceRepairMaintenance, boundOwnerRepairCandidateRuntimeReceipt,
+  captureOwnerSourceRepairSuccessor, ownerRepairSnapshotEquivalent,
   ownerRepairSuccessorSnapshotEquivalent, readOwnerRepairPredecessorChain,
-  selectOwnerRepairPermission } from '../scripts/install/owner-source-repair.mjs'
+  selectOwnerRepairPermission, verifyOwnerSourceRepair } from '../scripts/install/owner-source-repair.mjs'
 import { readRsiHostUpdateOverlayChain, rsiHostUpdateOverlayDigest,
   signRsiOwnerRepairOverlay } from '../plugins/lark-channel/src/rsi-host-update.js'
 
@@ -13,10 +15,13 @@ const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 const stageState = vi.hoisted(() => ({ source: null as unknown, ledger: null as unknown,
-  trust: null as unknown, appendCount: 0 }))
+  trust: null as unknown, runtimeReceipt: null as unknown, appendCount: 0 }))
 vi.mock('../scripts/install/local-source-maintenance.mjs', () => ({ assertLocalSourceInstaller: vi.fn() }))
 vi.mock('../plugins/lark-channel/lib/rsi-source-maintenance.js', async importOriginal => ({
   ...await importOriginal<Record<string, unknown>>(), readRsiSourceMaintenance: async () => stageState.source,
+}))
+vi.mock('../plugins/lark-channel/lib/rsi-authority-runtime.js', async importOriginal => ({
+  ...await importOriginal<Record<string, unknown>>(), readRsiAuthorityRuntimeReceipt: async () => stageState.runtimeReceipt,
 }))
 vi.mock('../plugins/plugin-control-plane/lib/index.js', async importOriginal => ({
   ...await importOriginal<Record<string, unknown>>(),
@@ -76,6 +81,106 @@ test('successor append accepts signed seq1 trust bytes, but rejects staged trust
   expect(stageState.appendCount).toBe(1)
 })
 
+test('successor pre-finalize accepts only an explicitly bound candidate runtime receipt', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-owner-successor-phases-')))
+  roots.push(root)
+  const homePath = join(root, 'home'), stageHome = join(root, 'stage')
+  const profile = 'target', coordinatorProfile = 'coordinator'
+  const configRoot = join(homePath, 'rsi-authorities', profile, 'config')
+  const stateRoot = join(homePath, 'rsi-authorities', profile, 'state')
+  const physicalConfig = join(stageHome, 'rsi-authorities', profile, 'config')
+  const sha = (source: string) => createHash('sha256').update(source).digest('hex')
+  const createFile = async (path: string, source: string) => {
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+    await writeFile(path, source, { mode: 0o600 })
+  }
+  await mkdir(homePath, { mode: 0o700 })
+  await mkdir(stageHome, { mode: 0o700 })
+  await mkdir(join(stageHome, 'rsi-authorities', profile, 'state'), { recursive: true, mode: 0o700 })
+  const bootstrapSource = '{"bootstrap":true}\n'
+  const journalSource = '{"stage":"applied"}\n'
+  const creationSource = '{"creation":true}\n'
+  const manifestSource = '{"version":"first-repair"}\n'
+  const oldRuntimeSource = '{"runtime":"old"}\n'
+  const candidateRuntimeSource = '{"runtime":"candidate"}\n'
+  const runtimePath = join(stageHome, 'rsi-authority-runtimes', profile, 'receipt.json')
+  const manifestPath = join(configRoot, 'manifest.json')
+  const files: Record<string, string> = { [manifestPath]: manifestSource,
+    [join(configRoot, 'trust.json')]: '{"version":"first-repair"}\n' }
+  for (const name of ['approval', 'release', 'adoption', 'observation', 'qualification', 'host-authority']) {
+    files[join(configRoot, `${name}.json`)] = JSON.stringify({ statePath: join(stateRoot, `${name}.sqlite`) })
+  }
+  for (const [path, source] of Object.entries(files)) {
+    await createFile(join(physicalConfig, path.slice(configRoot.length + 1)), source)
+  }
+  await createFile(join(physicalConfig, 'bootstrap.json'), bootstrapSource)
+  await createFile(join(stageHome, '.rsi-setup-journal.json'), journalSource)
+  await createFile(join(stageHome, 'rsi-creation-builds', profile, 'bootstrap.json'), creationSource)
+  await createFile(runtimePath, candidateRuntimeSource)
+  const patches = { [profile]: '[]\n', [coordinatorProfile]: '[]\n' }
+  for (const [name, source] of Object.entries(patches)) {
+    await createFile(join(stageHome, 'profiles', name, 'cordis.patch.yml'), source)
+  }
+  const keys = generateKeyPairSync('ed25519')
+  const privateKey = keys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString()
+  const resources = { installationId: 'installation', configRoot, stateRoot,
+    identities: { host: { authority: 'host-installation', keyId: 'host-installation-key',
+      publicKeyPem: keys.publicKey.export({ format: 'pem', type: 'spki' }).toString() } } }
+  const baselineFiles = Object.fromEntries(Object.entries(files).map(([path, source]) => [path, sha(source)]))
+  const baselinePatches = Object.fromEntries(Object.entries(patches).map(([name, source]) => [name, sha(source)]))
+  const oldRuntimeDigest = sha(oldRuntimeSource)
+  const overlay = signRsiOwnerRepairOverlay({ schemaVersion: 1, kind: 'rsi-owner-repair-overlay',
+    transactionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', dshHome: homePath,
+    targetProfile: profile, installationId: resources.installationId, sequence: 1,
+    previousDigest: null, bootstrapDigest: sha(bootstrapSource), files: baselineFiles,
+    patches: baselinePatches, runtimeReceiptDigest: oldRuntimeDigest,
+    planDigest: sha('first-plan'), result: { schemaVersion: 1, manifestPath,
+      manifestDigest: baselineFiles[manifestPath], targetProfile: profile, coordinatorProfile },
+    repair: { sourceMaintenanceDigest: sha('first-source'),
+      before: { files: baselineFiles, patches: baselinePatches, runtimeReceiptDigest: oldRuntimeDigest,
+        creationReceiptDigest: sha('old-creation'), journalDigest: sha('old-journal') },
+      after: { creationReceiptDigest: sha(creationSource), journalDigest: sha(journalSource) },
+      permissionPreset: 'workspace-write' }, issuedAt: 1, authority: resources.identities.host.authority,
+    keyId: resources.identities.host.keyId }, privateKey, resources as any, bootstrapSource, [])
+  await createFile(join(physicalConfig, 'host-update-overlays.json'),
+    JSON.stringify({ schemaVersion: 1, kind: 'rsi-host-update-overlays', records: [overlay] }))
+  const prior = { sequence: 1 }, record = { host: null, after: { sourceCommit: 'candidate' } }
+  stageState.ledger = { history: [], records: [prior, record] }
+  const original = { resources, files, baselineFiles, baselinePatches, patches,
+    receipt: { files: { ...baselineFiles, [join(configRoot, 'trust.json')]: sha('bootstrap trust') } },
+    receiptSource: bootstrapSource, journalSource, creationDigest: sha(creationSource), manifestSource,
+    runtimeReceiptDigest: oldRuntimeDigest, environments: {}, units: {},
+    source: { records: [prior], workspace: { repository: '/source' } }, sourceState: { history: [], records: [prior] } }
+  const ownerRepair = { protocol: 'dsh-enhanced/host-owner-source-repair/v1', homePath, profile,
+    installer: { root: process.cwd() }, original, predecessor: { sourceProofDigest: sha('predecessor'),
+      overlayDigest: rsiHostUpdateOverlayDigest(overlay), records: [overlay] } }
+  const input = { ownerRepair, homePath, physicalHome: stageHome, phase: 'before-finalize', record }
+  await expect(verifyOwnerSourceRepair(input)).rejects.toThrow('owner runtime receipt differs from the selected stage')
+  await writeFile(runtimePath, oldRuntimeSource)
+  await expect(verifyOwnerSourceRepair(input)).resolves.toMatchObject({ phase: 'before-finalize' })
+  await writeFile(runtimePath, candidateRuntimeSource)
+  await expect(verifyOwnerSourceRepair({ ...input, candidateRuntimeReceiptDigest: sha(candidateRuntimeSource) }))
+    .resolves.toMatchObject({ phase: 'before-finalize' })
+  await expect(verifyOwnerSourceRepair({ ...input, candidateRuntimeReceiptDigest: sha('wrong candidate') }))
+    .rejects.toThrow('owner runtime receipt differs from the selected stage')
+  await expect(verifyOwnerSourceRepair({ ...input, phase: 'original' }))
+    .rejects.toThrow('owner runtime receipt differs from the selected stage')
+  await expect(verifyOwnerSourceRepair({ ...input, ownerRepair: { ...ownerRepair,
+    original: { ...original, manifestSource: '{"version":"forged"}\n' } },
+  candidateRuntimeReceiptDigest: sha(candidateRuntimeSource) }))
+    .rejects.toThrow('successor original receipt binding differs')
+  stageState.runtimeReceipt = { runtime: { name: 'candidate' }, receiptDigest: sha(candidateRuntimeSource) }
+  const runtimeInput = { api: { readRsiAuthorityRuntimeReceipt: async () => stageState.runtimeReceipt },
+    homePath, stageHome, profile }
+  await expect(boundOwnerRepairCandidateRuntimeReceipt({ ...runtimeInput, runtime: { name: 'candidate' } }))
+    .resolves.toBe(sha(candidateRuntimeSource))
+  await expect(boundOwnerRepairCandidateRuntimeReceipt({ ...runtimeInput, runtime: { name: 'forged' } }))
+    .rejects.toThrow('new staged authority runtime differs')
+  await writeFile(join(physicalConfig, 'bootstrap.json'), '{"bootstrap":false}\n')
+  await expect(verifyOwnerSourceRepair({ ...input, candidateRuntimeReceiptDigest: sha(candidateRuntimeSource) }))
+    .rejects.toThrow('original owner bootstrap or journal changed')
+})
+
 test('successor keeps the already selected permission preset instead of resetting authority', () => {
   const effective = `- id: permission
   name: '@deepseek-ai/dsh-permission-presets'
@@ -130,8 +235,6 @@ test('successor accepts only a byte-identical copied owner database with the sam
   expect(ownerRepairSuccessorSnapshotEquivalent({ ...copied, sidecars: {} }, original)).toBe(false)
   expect(ownerRepairSuccessorSnapshotEquivalent({ ...copied, storageDigest: 'malformed' }, original)).toBe(false)
 })
-import { createHash, generateKeyPairSync } from 'node:crypto'
-
 test('successor predecessor requires exact signed two-repair chain and current baseline', () => {
   const sha = (source: string) => createHash('sha256').update(source).digest('hex')
   const key = generateKeyPairSync('ed25519')
