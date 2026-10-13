@@ -103,7 +103,7 @@ Agent setup 的第二参数是尚未发布的确切 Agent；不再读取 `ctx.ag
 
 `0.2.0-rc.2` 使用 Session format 4、生产者专属 MessageSource、顶层工具结果消息、动态 Auto 与 agent-preset-registry。新版 composition 移除静态 Auto，由 Policy 在审批器就绪时登记并随生命周期注销。Cordis/Loader/Include 同步为 `4.0.4` / `1.0.5` / `1.0.9`。旧 fallback API 已移除，独立 setup CLI 必须通过所选 Host 的原生进程内解析启动，不能复用残留旧 Host peers。
 
-`0.1 → 0.2` 的既有 Home 自动升级尚不支持：旧流程先升级插件再切 Host，不能用于本次 ABI 变化。CLI 在插件事务前明确拒绝，不修改旧绑定或插件；独立新 Home 的安装不受此限制。后续须验证联合迁移与回滚，不能通过放宽旧 Host 版本门绕过。
+`0.1 → 0.2` 的既有 Home 普通自动升级仍拒绝先升级插件再切 Host。开发 checkout 提供显式 pre-owner 联合迁移：可验证的私有旧 Host、空 owner 权限、收据绑定的惰性协调器及单个活动目标服务，才可在同一 Home 事务中物化全部 profile 并切换 Host / 源码。已绑定 `0.2.0-rc.2` 的同类 Home 也可保持 Host 与 unit 原字节，只更新认证源码及配套包；不得冒充 Host 版本升级。候选运行后的恢复继续核验候选，不覆盖可能已变更的业务状态。操作与限制见[安装说明](../scripts/install/README.md#旧-home-的联合-host--源码迁移)，真实验收状态见 [RSI 状态](rsi-status.md)。
 
 原生 ToolResultPruner 应沿 BasicCompactionEngine 的 open-turn `agent/pre-step` 路径运行。该版本在 turn 外直接调用 `pruneSession()` 后的替换事件不能被同版 SessionPersistence 冷重开；本项目不走该手动路径，回归测试覆盖原生路径及持久证据恢复。
 

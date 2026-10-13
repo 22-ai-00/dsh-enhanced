@@ -72,6 +72,14 @@ export function parseHostUpdatePlan(value, homePath) {
   return value
 }
 
+export function hostLocalSourcePlanMode(plan) {
+  parseHostUpdatePlan(plan, plan?.canonicalHome)
+  if (plan.schemaVersion === 2) return 'legacy'
+  if (plan.schemaVersion === 1 && plan.status === 'current'
+    && plan.originalRuntime.version === '0.2.0-rc.2') return 'same-host'
+  throw new Error('joint local source migration requires a legacy plan or an unchanged supported Host')
+}
+
 function quote(value) {
   if (value.includes('\0') || /[\r\n]/u.test(value)) throw new Error('invalid systemd value')
   return `"${value.replaceAll('%', '%%').replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`

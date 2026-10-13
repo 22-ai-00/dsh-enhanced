@@ -67,9 +67,11 @@ Linux `supervised` 的已登记 RSI 双 Host 可以在同一个 Home 事务中�
 
 ### 旧 Home 的联合 Host / 源码迁移
 
-开发 checkout 提供显式 `host-local-update`，仅适用于未绑定私有 Host、尚无 owner 授权、具有精确匹配的惰性预备协调器及单个活动目标服务的 Linux Home。原 Host 必须有可验证的私有缓存收据；当前只接受 `0.1.x → 0.2.0-rc.2`。它不是普通 `dsh-rsi update` 的自动路径，也不自动开启学习。其他状态仍拒绝，不能删除协调器标记或伪造 Host 绑定来满足前提。
+开发 checkout 提供显式 `host-local-update`，适用于尚无 owner 授权、具有精确匹配的惰性预备协调器及单个活动目标服务的 Linux Home。原 Host 必须有可验证的私有缓存收据；支持未绑定 Home 的 `0.1.x → 0.2.0-rc.2`，以及已绑定 `0.2.0-rc.2` 的同 Host 源码更新。它不是普通 `dsh-rsi update` 的自动路径，也不自动开启学习。其他状态仍拒绝，不能删除协调器标记或伪造 Host 绑定来满足前提。
 
 先准备 schema 1 冻结源码候选，再用 CLI 包的 `prepareUnboundHostUpdatePlan` 显式提供旧 Host 的 `cacheRoot`、`version`、`dshPath`，将返回计划保存为 Home 外当前用户独占的 `0600` 文件。准备过程核对完整旧 / 新 Host 收据，不修改 Home。使用已经审核、构建且在事务期间保持不变的 checkout 执行：
+
+已经完成 Host 迁移、但尚未启用 owner 的 Home，改用 `prepareHostUpdatePlan` 生成 schema 1 `current` 计划；原 / 候选 Host、收据和绑定必须完全相同。相同命令仍原子更新整个 Home 的配套源码和全部 profile，复用隔离预取与离线物化，不依赖上次事务已清理的 pnpm store。systemd unit 和 PATH 只校验、不重写，普通 `host-update current` 仍不做任何更新；已授权 owner 不适用。
 
 ```sh
 node /reviewed/checkout/scripts/install/lifecycle-profile.mjs \
