@@ -86,8 +86,18 @@ if (args[1] === 'show') {
 }
 if (args[1] === 'mask' && args[2] === '--runtime') { for (const name of args.slice(3)) state.units[name].runtimeMasked = true; save(); process.exit(0) }
 if (args[1] === 'unmask' && args[2] === '--runtime') { for (const name of args.slice(3)) state.units[name].runtimeMasked = false; save(); process.exit(0) }
-if (args[1] === 'stop' || args[1] === 'reset-failed') {
-  for (const name of args.slice(2)) { const unit = state.units[name]; unit.activeState='inactive'; unit.subState='dead'; unit.mainPid=0 }
+if (args[1] === 'stop') {
+  for (const name of args.slice(2)) { const unit = state.units[name];
+    const failed = unit.profile === state.failedOnStopProfile;
+    unit.activeState=failed?'failed':'inactive'; unit.subState=failed?'failed':'dead';
+    unit.mainPid=unit.profile===state.failedStopPidProfile?42:0 }
+  save(); process.exit(0)
+}
+if (args[1] === 'reset-failed') {
+  for (const name of args.slice(2)) { const unit = state.units[name];
+    if (state.rejectIdleReset && unit.activeState === 'inactive') process.exit(6)
+    if (state.rejectFailedReset && unit.activeState === 'failed') process.exit(7)
+    unit.activeState='inactive'; unit.subState='dead'; unit.mainPid=0 }
   save(); process.exit(0)
 }
 if (args[1] === 'start' || args[1] === 'restart') {
@@ -324,6 +334,33 @@ describe('managed Host transaction inputs', () => {
       await new Promise<void>(resolveClose => server.close(resolveClose))
       await rm(root, { recursive: true, force: true })
     }
+  })
+
+  itLinux('resets only proven failed and PID-zero units after stop, leaving GC-idle units alone', async () => {
+    const fixture = await controlledHostFixture(true)
+    const web = 'dsh-profile-web.service', dormant = 'dsh-profile-dormant.service'
+    try {
+      const state = JSON.parse(await readFile(fixture.systemdState, 'utf8'))
+      state.failedOnStopProfile = 'web'
+      state.rejectIdleReset = true
+      await writeFile(fixture.systemdState, JSON.stringify(state))
+      await expect(lifecycleProfileTest.stopAndResetServiceUnits(join(fixture.root, 'systemctl'), [web, dormant]))
+        .resolves.toBeUndefined()
+      const commands = (await readFile(fixture.systemdLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[])
+      expect(commands.filter(command => command[1] === 'reset-failed')).toEqual([['--user', 'reset-failed', web]])
+      const stopped = JSON.parse(await readFile(fixture.systemdState, 'utf8'))
+      expect(stopped.units[web]).toMatchObject({ activeState: 'inactive', subState: 'dead', mainPid: 0 })
+      expect(stopped.units[dormant]).toMatchObject({ activeState: 'inactive', subState: 'dead', mainPid: 0 })
+      stopped.failedStopPidProfile = 'web'
+      await writeFile(fixture.systemdState, JSON.stringify(stopped))
+      await expect(lifecycleProfileTest.stopAndResetServiceUnits(join(fixture.root, 'systemctl'), [web]))
+        .rejects.toThrow('尚未静止')
+      stopped.failedStopPidProfile = undefined
+      stopped.rejectFailedReset = true
+      await writeFile(fixture.systemdState, JSON.stringify(stopped))
+      await expect(lifecycleProfileTest.stopAndResetServiceUnits(join(fixture.root, 'systemctl'), [web]))
+        .rejects.toThrow('systemctl failed with exit 7')
+    } finally { await rm(fixture.root, { recursive: true, force: true }) }
   })
 
   it('admits settings recovery only for its accepted started joint transaction and exact permit', () => {
