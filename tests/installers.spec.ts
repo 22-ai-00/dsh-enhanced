@@ -1541,7 +1541,6 @@ if (args[1] === 'show') {
       && Object.values(state.units).some(candidate => candidate.starts > 0))
     && unit.reportedDshHome !== originalHome) {
     unit.reportedDshHome = originalHome
-    unit.workingDirectory = originalHome + '/profiles/' + unit.profile
     persist()
   }
   if (state.controls.guardianOwnershipShowFailsProfile === unit.profile && unit.starts > 0
@@ -5532,7 +5531,8 @@ describe('one-click installers', () => {
       expect(commands.some(command => ['stop', 'disable', 'mask'].includes(command[1])
         && command.includes('dsh-profile-foreign.service'))).toBe(false)
       expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-foreign.service'])
-        .toMatchObject({ activeState: 'active', starts: 0, reportedDshHome: f.dshHome })
+        .toMatchObject({ activeState: 'active', starts: 0, reportedDshHome: f.dshHome,
+          workingDirectory: join(f.root, 'other-home', 'profiles', 'foreign') })
       const contender = runServiceLifecycle(
         ['web', f.dshHome, '0'], f.dshHome, f.fakeBin, {}, 'service-uninstall',
       )
@@ -5586,7 +5586,8 @@ describe('one-click installers', () => {
       const state = await readLifecycleSystemdState(f.systemdState)
       expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'inactive' })
       expect(state.units['dsh-profile-foreign.service'])
-        .toMatchObject({ activeState: 'active', starts: 0, reportedDshHome: f.dshHome })
+        .toMatchObject({ activeState: 'active', starts: 0, reportedDshHome: f.dshHome,
+          workingDirectory: join(f.root, 'other-home', 'profiles', 'foreign') })
       const commands = await readLifecycleSystemdLog(f.systemdLog)
       expect(commands.some(command => ['stop', 'disable', 'mask'].includes(command[1])
         && command.includes('dsh-profile-foreign.service'))).toBe(false)
