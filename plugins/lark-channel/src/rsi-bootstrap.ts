@@ -1,4 +1,4 @@
-import { constants } from 'node:fs'
+import { constants, type BigIntStats } from 'node:fs'
 import { lstat, mkdir, open, readdir, realpath, rmdir, unlink } from 'node:fs/promises'
 import { createHash, randomBytes } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
@@ -37,7 +37,13 @@ interface Receipt {
   observerKeyDigest: string
   result: RsiOwnerConfiguration
 }
-interface OwnedFile { path: string; dev: number; ino: number; digest: string }
+interface OwnedFile {
+  path: string; dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint; digest: string
+}
+function sameOwnedFile(stat: BigIntStats, file: OwnedFile): boolean {
+  return stat.dev === file.dev && stat.ino === file.ino && stat.size === file.size
+    && stat.mtimeNs === file.mtimeNs && stat.ctimeNs === file.ctimeNs
+}
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`
 function fail(message: string): never { throw new Error(`rsi bootstrap: ${message}`) }
@@ -160,7 +166,7 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
   const expectedFiles = Object.fromEntries(Object.entries(files).sort(([left], [right]) => left.localeCompare(right)).map(([path, value]) => [path, hash(value)]))
   const result: RsiOwnerConfiguration = { schemaVersion: 1, manifestPath, manifestDigest: hash(files[manifestPath]!),
     targetProfile: manifest.targetProfile, coordinatorProfile: manifest.coordinatorProfile }
-  const verify = async () => {
+  const verify = async (rememberSqliteSidecars?: () => Promise<void>) => {
     signal.throwIfAborted()
     for (const directory of directories) await io.directory(directory)
     await privateFile(ledgerPath, 268_435_456)
@@ -172,7 +178,10 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
         .all(manifest.controlPlane.sourceJobs!.repository).map(row => JSON.parse(String(row.record_json)) as unknown)
       if (!isDeepStrictEqual(stored, sourceMaintenance)
         || !isDeepStrictEqual(await readSourceMaintenance(), sourceMaintenance)) fail('source maintenance ledger differs from retained history')
-    } finally { database.close() }
+    } finally {
+      database.close()
+      await rememberSqliteSidecars?.()
+    }
     const patches = await compileRsiProfiles({ manifest, dshHome: home, ...context.profiles, owner: context.binding })
     await validateRsiAuthorities(manifest, context.binding, manifest.serviceEnvironment?.target)
     for (const phase of Object.keys(runtime.releaseAdapters) as Array<keyof typeof runtime.releaseAdapters>) {
@@ -219,12 +228,27 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
   // First preparation must not overwrite an operator's configuration or attach
   // new installation IDs to an existing ledger. A crash leaves inspectable
   // partial resources; it is never interpreted as a fresh installation.
-  if ((await readdir(resources.configRoot)).length || await exists(ledgerPath)) fail('unregistered configuration or ledger already exists')
+  const sqliteSidecars = [`${ledgerPath}-wal`, `${ledgerPath}-shm`]
+  if ((await readdir(resources.configRoot)).length || await exists(ledgerPath)
+    || (await Promise.all(sqliteSidecars.map(exists))).some(Boolean)) fail('unregistered configuration or ledger already exists')
   const ownedFiles: OwnedFile[] = []
   const ownedDirectories: Array<{ path: string; dev: number; ino: number }> = []
   const remember = async (path: string) => {
-    const stat = await lstat(path)
-    ownedFiles.push({ path, dev: stat.dev, ino: stat.ino, digest: hash(await privateFile(path, 268_435_456)) })
+    const stat = await lstat(path, { bigint: true })
+    const digest = hash(await privateFile(path, 268_435_456))
+    const after = await lstat(path, { bigint: true })
+    if (stat.dev !== after.dev || stat.ino !== after.ino || stat.size !== after.size
+      || stat.mtimeNs !== after.mtimeNs || stat.ctimeNs !== after.ctimeNs) fail('created file changed while recording cleanup ownership')
+    const previous = ownedFiles.find(file => file.path === path)
+    if (previous) {
+      if (!sameOwnedFile(stat, previous) || digest !== previous.digest) fail('created file changed after cleanup ownership was recorded')
+      return
+    }
+    ownedFiles.push({ path, dev: stat.dev, ino: stat.ino, size: stat.size,
+      mtimeNs: stat.mtimeNs, ctimeNs: stat.ctimeNs, digest })
+  }
+  const rememberSqliteSidecars = async () => {
+    for (const path of sqliteSidecars) if (await exists(path)) await remember(path)
   }
   const directory = async (path: string): Promise<void> => {
     if (roots.includes(path)) { await io.directory(path); return }
@@ -252,9 +276,13 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
         if (!baseline) fail('retained source maintenance requires the original baseline')
         await store.importSourceMaintenanceRecords(sourceMaintenance, { trust: compiled.trust, baseline })
       }
-    } finally { store.close(); await remember(ledgerPath) }
+    } finally {
+      store.close()
+      await remember(ledgerPath)
+      await rememberSqliteSidecars()
+    }
     for (const [path, bytes] of Object.entries(files)) await write(path, bytes)
-    const planDigest = hash(json({ files: expectedFiles, patches: await verify() }))
+    const planDigest = hash(json({ files: expectedFiles, patches: await verify(rememberSqliteSidecars) }))
     const receipt: Receipt = { schemaVersion: 1, planDigest, files: expectedFiles,
       observerKeyDigest: hash(await privateFile(observer.keyPath, 32)), result }
     await write(receiptPath, json(receipt))
@@ -265,8 +293,9 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
     // nonempty directory survives for reconciliation instead of being erased.
     for (const file of ownedFiles.reverse()) {
       try {
-        const stat = await lstat(file.path)
-        if (stat.dev === file.dev && stat.ino === file.ino && hash(await privateFile(file.path, 268_435_456)) === file.digest) await unlink(file.path)
+        const stat = await lstat(file.path, { bigint: true })
+        if (sameOwnedFile(stat, file) && hash(await privateFile(file.path, 268_435_456)) === file.digest
+          && sameOwnedFile(await lstat(file.path, { bigint: true }), file)) await unlink(file.path)
       } catch {}
     }
     for (const entry of ownedDirectories.reverse()) {

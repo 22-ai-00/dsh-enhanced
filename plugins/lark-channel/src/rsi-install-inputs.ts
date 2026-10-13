@@ -301,6 +301,6 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
     minimumReproducibleBuilds: 2,
   }))
   return { dsh, plugins, hostDeploymentInputs, observerTargets,
-    executor: { id: '@deepseek-ai/dsh', version: dsh.version, path: dsh.path,
+    executor: { id: 'dsh', version: dsh.version, path: dsh.path,
       sha256: dsh.pin.sha256, environmentAllowlist: [] }, git, systemctl, policies }
 }
