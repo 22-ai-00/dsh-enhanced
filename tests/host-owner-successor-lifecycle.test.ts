@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, open, readFile, readlink, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, test } from 'vitest'
@@ -105,6 +105,34 @@ test('archive rebase rejects a foreign or root-level staging location', () => {
 })
 
 const testLinux = process.platform === 'linux' ? test : test.skip
+
+testLinux('canonicalizes only the inode-bound predecessor backup before profile validation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-owner-successor-backup-'))
+  const archiveRoot = join(root, 'archived-transaction')
+  const backup = join(archiveRoot, 'original-home')
+  await mkdir(backup, { recursive: true, mode: 0o700 })
+  const original = await lstat(backup)
+  const expected = { dev: String(original.dev), ino: String(original.ino), uid: original.uid, mode: original.mode }
+  const descriptor = await open(root, 'r')
+  try {
+    const anchoredArchive = `/proc/self/fd/${descriptor.fd}/archived-transaction`
+    expect(anchoredArchive).not.toBe(await realpath(anchoredArchive))
+    expect(await lifecycleProfileTest.canonicalOwnerSuccessorBackup(anchoredArchive, expected))
+      .toBe(await realpath(backup))
+    const heldOriginalHome = join(root, 'held-original-home')
+    await rename(backup, heldOriginalHome)
+    await mkdir(backup, { mode: 0o700 })
+    await expect(lifecycleProfileTest.canonicalOwnerSuccessorBackup(anchoredArchive, expected))
+      .rejects.toThrow('Home identities changed')
+    await rm(backup, { recursive: true })
+    await symlink(heldOriginalHome, backup)
+    await expect(lifecycleProfileTest.canonicalOwnerSuccessorBackup(anchoredArchive, expected))
+      .rejects.toThrow('Home identities changed')
+  } finally {
+    await descriptor.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 async function maskedInspectionFixture() {
   const root = await mkdtemp(join(tmpdir(), 'dsh-owner-successor-mask-'))

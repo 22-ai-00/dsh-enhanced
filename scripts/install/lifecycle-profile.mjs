@@ -7365,11 +7365,23 @@ async function readOwnerSuccessorManifestSource(path) {
   } finally { await file.close() }
 }
 
-async function verifyOwnerSuccessorBaseline({ manifest, homePath, physicalHomePath, archiveRoot, serviceContext }) {
-  if (!sameIdentity(await lstat(physicalHomePath), manifest.stagedIdentity)
-    || !sameIdentity(await lstat(join(archiveRoot, 'original-home')), manifest.originalIdentity)) {
+async function canonicalOwnerSuccessorBackup(archiveRoot, expectedIdentity) {
+  const anchoredBackup = join(archiveRoot, 'original-home')
+  if (!sameIdentity(await lstat(anchoredBackup), expectedIdentity)) {
     fail('owner successor predecessor Home identities changed')
   }
+  const canonicalBackup = await realpath(anchoredBackup)
+  if (!sameIdentity(await lstat(canonicalBackup), expectedIdentity)) {
+    fail('owner successor predecessor Home identities changed')
+  }
+  return canonicalBackup
+}
+
+async function verifyOwnerSuccessorBaseline({ manifest, homePath, physicalHomePath, archiveRoot, serviceContext }) {
+  if (!sameIdentity(await lstat(physicalHomePath), manifest.stagedIdentity)) {
+    fail('owner successor predecessor Home identities changed')
+  }
+  const originalPhysicalHome = await canonicalOwnerSuccessorBackup(archiveRoot, manifest.originalIdentity)
   await verifyHostPlanBinding(manifest.hostMigration.plan, homePath, 'candidate')
   await assertUnitUniverseStable(serviceContext.systemctlExecutable, manifest.unitUniverse, homePath, manifest.foreignOwnership)
   for (const expected of manifest.hostMigration.unitProperties) {
@@ -7382,7 +7394,7 @@ async function verifyOwnerSuccessorBaseline({ manifest, homePath, physicalHomePa
   await verifyHostLocalSourceUpdate({ proof, homePath, physicalHome: homePath, selection: 'candidate', checkLedger: true })
   const { validateHostLocalProfileUpdate } = await import('./host-local-profile-update.mjs')
   const profiles = await validateHostLocalProfileUpdate({ preparation: manifest.hostMigration.preparation,
-    stagedHome: homePath, originalPhysicalHome: join(archiveRoot, 'original-home'),
+    stagedHome: homePath, originalPhysicalHome,
     ownerSourceRepair: { homePath, sourceProof: proof } })
   if (!isDeepStrictEqual(profiles, manifest.hostMigration.profileProof)) fail('owner successor predecessor package graph changed')
 }
@@ -8123,7 +8135,7 @@ async function main() {
 export const lifecycleProfileTest = Object.freeze({
   reconcileHostUnitSources, validateHostUpdateManifest,
   assertHostOwnerSuccessorAdmission, ownerSuccessorServiceBarriers, ownerSuccessorRecoveryDecision,
-  inspectStoppedOwnerSuccessor, hostUnitProperties,
+  inspectStoppedOwnerSuccessor, hostUnitProperties, canonicalOwnerSuccessorBackup,
   validOwnerRepairOriginalReadiness, captureOwnerRepairOriginalReadiness,
   ownerRepairRestorationPolicy, serviceReadySignal, serviceRuntimeReady, readRawServiceState,
   stopAndResetServiceUnits,
