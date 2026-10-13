@@ -4,6 +4,8 @@
 
 开发 checkout 的 `host-owner-repair` 只修复同一 DSH `0.2.0-rc.2` 上已 applied、尚未首次采用且签发器未使用的冻结双 Host。旧 bootstrap、身份、授权期限和累计预算不重置；追加真实源码维护记录及独立签名 `rsi-owner-repair-overlay`，绑定新配置、creation receipt 和 setup journal，并保留原件审计。目标、协调器与授权程序必须成套更新；旧 overlay reader 不支持此修复收据，后续 Host overlay 仍须验证最近 repair 的收据。此能力不修改数据库 schema 或 DSH/Cordis ABI，不等于通用 owner 升级。入口、有限恢复与实际验收边界见[安装指南](../scripts/install/README.md#已-applied未首次采用的-owner-修复)和[当前状态](rsi-status.md)。
 
+开发 checkout 的显式 `host-owner-repair-successor` 处理上述首修候选已运行、仍未就绪且未采用 / 使用签发器的情形。原 Host 签名意图绑定新源码、安装器、同档预设和旧失败事务，旧事务及最老 Home 永久保留在独立私有归档；新事务以当前已运行 Home 为基线，追加已有 overlay 协议的下一条记录，不改 bootstrap、不倒退业务数据库。普通命令遇到未完成意图拒绝操作，只允许同一受审后继入口继续；它不扩展 DSH/Cordis ABI，不修改新鲜学习验收条件，也不是通用已采用安装的修复协议。
+
 ## 普通任务自动记忆学习
 
 `assistant-memory-learning` 新 bundle 使用独立私有 schema 1 意图/游标/提取额度库，依赖同批 Delivery 精确来源元数据查询、Verifier 审查额度探针和 Memory 当前受管目标/采用额度探针。Delivery schema 25、Memory schema 7、Verifier 的既有审查库结构不变；旧 peers 缺少能力时拒绝激活。初始 owner/grants/有限预算配置完成后复用原生 Automations 和 Agent；DSH/Cordis ABI 未升级。真实 owner 部署与后续收益仍待完整闭环验收。

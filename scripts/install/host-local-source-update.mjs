@@ -226,9 +226,10 @@ export async function verifyHostLocalSourceOriginalForPrestartRecovery({ proof, 
 }
 
 export async function prepareHostLocalSourceUpdate({ homePath, profile, preparationRoot, installerRoot, auxiliaryRoot,
-  ownerRepairPreset, dshPath, dshEnvironment }) {
+  ownerRepairPreset, ownerRepairPredecessor, dshPath, dshEnvironment }) {
   await privateHome(homePath)
   if (!profileName.test(profile) || !exact(preparationRoot) || !exact(installerRoot)) fail('invalid source preparation input')
+  if (ownerRepairPredecessor !== undefined && ownerRepairPreset === undefined) fail('owner successor requires an explicit repair preset')
   const installer = await bindLocalSourceInstaller(installerRoot)
   const api = await loadLocalSourceInstaller(installer, { ownerRepair: ownerRepairPreset !== undefined })
   const preparation = await api.readRsiLocalUpdateLocked({ dshHome: homePath, profile, root: preparationRoot })
@@ -236,8 +237,10 @@ export async function prepareHostLocalSourceUpdate({ homePath, profile, preparat
   let preOwner, ownerRepair, candidateCreation
   if (ownerRepairPreset !== undefined) {
     const helper = await import('./owner-source-repair.mjs')
-    ownerRepair = await helper.captureOwnerSourceRepair({ homePath, profile, installer,
-      permissionPreset: ownerRepairPreset, dshPath, dshEnvironment })
+    ownerRepair = await (ownerRepairPredecessor === undefined
+      ? helper.captureOwnerSourceRepair : helper.captureOwnerSourceRepairSuccessor)({ homePath, profile, installer,
+      permissionPreset: ownerRepairPreset, dshPath, dshEnvironment,
+      ...(ownerRepairPredecessor === undefined ? {} : { predecessorProof: ownerRepairPredecessor }) })
     const source = await api.readRsiSourceWorkspace({ dshHome: preparation.candidateHome, profile,
       sourceRepository: preparation.source.repository })
     const sourceBuild = await api.readRsiBuildEnvironment({ dshHome: preparation.candidateHome, profile, source })

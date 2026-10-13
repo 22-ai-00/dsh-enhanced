@@ -124,7 +124,23 @@ node /reviewed/checkout/scripts/install/lifecycle-profile.mjs \
 
 owner 身份复核使用新鲜、原子读取的完整绑定、查询范围、数据库版本及主数据库设备号 / inode；正常停服 checkpoint 导致的 WAL / SHM 清理不视为身份变化。候选未启动的 owner 修复回滚验证原 Home、已安装包和签名资源，不要求废弃候选或外部开发分支 HEAD 仍然可用；候选准备、切换和接受的完整来源校验不变。
 
-正式事务应使用独立冻结的已构建安装器目录；不要在同一目录并行构建或运行会重建 `lib/` 的测试。准备候选后，保持其外部源码 HEAD 不变直至事务结束，避免前向来源校验拒绝漂移。
+正式事务应使用独立冻结的已构建安装器目录；不要在同一目录并行构建或运行会重建 `lib/` 的测试，也不要与会创建同用户隔离进程的测试并行迁移。用量监控等外部 Home 读取进程同样可能阻止静止证明，应在明确授权后临时暂停、结束后恢复，而不是放宽进程检查。准备候选后，保持其外部源码 HEAD 不变直至事务结束，避免前向来源校验拒绝漂移。
+
+#### 已运行但未就绪的修复后继
+
+首修候选已实际运行，而冻结代码缺陷使 `host-recover` 反复未通过 readiness 时，不能替换其包文件、修改冻结 installer、删除事务或回退最老 Home。开发入口 `host-owner-repair-successor` 仅接受同 Host、已运行但尚未接受、无采用和签发器用量的 owner 修复事务；预设必须与前次显式授权相同。它不是一般升级、放宽验收或已有业务采用的恢复协议。
+
+```sh
+node /reviewed/new-checkout/scripts/install/lifecycle-profile.mjs \
+  host-owner-repair-successor assistant /absolute/dsh-home \
+  /absolute/current-private-dsh /usr/bin/bwrap /usr/bin/systemctl /usr/bin/journalctl \
+  /absolute/private-current-plan.json /absolute/new-prepared-local-update /reviewed/new-checkout \
+  danger-full-access /absolute/private-new-auxiliary-root
+```
+
+新源码及安装器必须独立准备。停服后重新校验当前候选、原备份、完整包图、原签名链、owner 绑定、全部授权和未使用状态；复制 Home 导致的身份库 inode 变化仅在设备、完整绑定及存储摘要均相同时接纳，同一 Home 的通常恢复仍要求 inode 不变。先持锁写入并同步原 Host 签署的 Home 外后继意图，再将当前候选作为明确未就绪的降级基线恢复服务、完整归档旧事务，随后从当前 Home 制作新的事务副本。新事务保留业务数据库、原 bootstrap、所有历史签名、期限和累计预算，追加源码维护记录及下一条 repair overlay；不会把旧失败事务记为成功。
+
+后继意图未完成时，其余生命周期命令拒绝操作；中断后使用完全相同的后继命令继续。新候选运行前只允许恢复当前降级基线，不能恢复最老 Home；新候选运行后只前滚并重新接受。只有完整新鲜双 Host、飞书、HMAC observer、记忆学习及协调器原生登记通过后，才归档接受证据并清除后继意图。原失败事务与最老 Home 保留为私有审计，不随新事务清理删除。此入口的实际生产状态以[当前状态](../../docs/rsi-status.md)为准。
 
 ### Checkout 内的 pre-owner 冻结源码维护
 

@@ -6,7 +6,7 @@ import { join } from 'node:path'
 const mocks = vi.hoisted(() => ({
   bind: vi.fn(), assert: vi.fn(), load: vi.fn(),
   auxVerify: vi.fn(), auxMaterialize: vi.fn(), auxVerifyHome: vi.fn(),
-  captureOwner: vi.fn(), prepareCreation: vi.fn(), appendOwner: vi.fn(), stageOwner: vi.fn(), verifyOwner: vi.fn(),
+  captureOwner: vi.fn(), captureSuccessor: vi.fn(), prepareCreation: vi.fn(), appendOwner: vi.fn(), stageOwner: vi.fn(), verifyOwner: vi.fn(),
 }))
 vi.mock('../scripts/install/local-source-maintenance.mjs', () => ({
   bindLocalSourceInstaller: mocks.bind,
@@ -21,6 +21,7 @@ vi.mock('../scripts/install/host-local-artifacts.mjs', () => ({
 }))
 vi.mock('../scripts/install/owner-source-repair.mjs', () => ({
   captureOwnerSourceRepair: mocks.captureOwner,
+  captureOwnerSourceRepairSuccessor: mocks.captureSuccessor,
   prepareOwnerRepairCreation: mocks.prepareCreation,
   appendOwnerSourceRepairMaintenance: mocks.appendOwner,
   stageOwnerSourceRepair: mocks.stageOwner,
@@ -182,6 +183,26 @@ test('owner repair appends the real owner-ledger record and binds finalization t
   mocks.verifyOwner.mockRejectedValueOnce(new Error('owner ledger drift'))
   await expect(verifyHostLocalSourceUpdate({ proof: finalized, homePath: setup.homePath,
     physicalHome: setup.stageHome, selection: 'candidate', checkLedger: true })).rejects.toThrow('owner ledger drift')
+})
+
+test('owner successor uses the dedicated predecessor capture without enabling ordinary repair', async () => {
+  const setup = await fixture()
+  const predecessorProof = { protocol: 'dsh-enhanced/host-owner-source-repair/v1', record: 'previous' }
+  const ownerRepair = { homePath: setup.homePath, profile: setup.profile, permissionPreset: 'danger-full-access' }
+  mocks.captureSuccessor.mockResolvedValue(ownerRepair)
+  mocks.prepareCreation.mockResolvedValue({ receiptSha256: 'a'.repeat(64) })
+  const proof = await prepareHostLocalSourceUpdate({ ...setup, ownerRepairPreset: 'danger-full-access',
+    ownerRepairPredecessor: predecessorProof })
+  expect(proof.ownerRepair).toEqual(ownerRepair)
+  expect(mocks.captureOwner).not.toHaveBeenCalled()
+  expect(mocks.captureSuccessor).toHaveBeenCalledWith(expect.objectContaining({
+    predecessorProof, permissionPreset: 'danger-full-access',
+  }))
+  await expect(prepareHostLocalSourceUpdate({ ...setup, ownerRepairPredecessor: predecessorProof }))
+    .rejects.toThrow('owner successor requires an explicit repair preset')
+  mocks.captureSuccessor.mockRejectedValueOnce(new Error('predecessor drift'))
+  await expect(prepareHostLocalSourceUpdate({ ...setup, ownerRepairPreset: 'danger-full-access',
+    ownerRepairPredecessor: predecessorProof })).rejects.toThrow('predecessor drift')
 })
 
 test('owner prestart recovery verifies only exact original Home despite changed upstream HEAD or missing candidate', async () => {

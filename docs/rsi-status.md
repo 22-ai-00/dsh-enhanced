@@ -16,20 +16,21 @@
 
 修复 CI、迁移旧 Home、启用生产学习并验证远端 CI。事件主动跟进和 npm 新版本等待这一部署及普通使用验收，不并列展开新主任务。
 
-生产 Home 已完成 DSH `0.1.5-rc.3` → `0.2.0-rc.2` 联合迁移，五个 profile 的依赖图已离线物化，签名源码维护链指向 `35360f69`。14 个签名身份、三个暂停且无下次运行时间的旧任务、会话模型与 fallback 保留。旧 settings 异步导入已用精确签名恢复许可完成对账；三节被上游拒绝的 UI / 旧 preset 设置只归档，不宣称生效。
+生产 Home 已完成 DSH `0.1.5-rc.3` → `0.2.0-rc.2` 联合迁移，五个 profile 的依赖图已离线物化。14 个签名身份、三个暂停且无下次运行时间的旧任务、会话模型与 fallback 保留。旧 settings 异步导入已用精确签名恢复许可完成对账；三节被上游拒绝的 UI / 旧 preset 设置只归档，不宣称生效。
 
-**生产学习仍未通过就绪验收。** owner 首次配置已经 applied；原生安装器在双 Host readiness 失败后按合同保留配置和 journal，不能把两个 active 进程当成学习成功。33 份 owner 配置及五份冻结资源收据未被救援重试改写，原授权期限和预算不续期。
+**生产学习仍未通过就绪验收。** 正式修复候选 `6763feda` 已实际运行，追加第八条签名源码维护记录及第一条 repair overlay，原 bootstrap 与 33 份 owner 原件归档保留。用户明确选择 `danger-full-access`、不逐次审批；六项原授权、期限和预算不重置。记忆注册检查通过，但协调器登记为零；双服务当前按失败事务收容停止，不能回退已运行 Home，也不能以 active 进程代替学习就绪。
 
-已修复并独立审查的启动问题包括：合法 executor 标识、失败 SQLite sidecar 的精确身份清理、OS Home 别名、原生 YAML 序列化固定点误判、协调器路径继承 `!!js` 标签、运行时观察器对 native Include 子项的错误解析。新预检在停服及 owner 配置前拒绝已不受支持的持久 `permission.defaultPreset: auto`，不自动放宽用户权限。开发源码修复不等于已经部署到冻结生产 cohort。
+当前根因是协调器使用独立本地账本，却被普通控制面的同账本断言拒绝。开发源码已修复专用协调模式，普通模式与签名 handoff 的操作约束不放宽；真实 Cordis 注册测试通过，但尚未部署到冻结生产候选。
 
-当前生产安装属于“owner 已 applied、尚未 ready”的冻结双 Host。开发版新增显式 `host-owner-repair` 入口：仅修复同 Host、applied journal、尚无采用或签发状态的失败首启，保留原 bootstrap 和审计归档，追加真实签名源码维护记录及修复 overlay，不续期、不虚构 activation。权限预设必须显式指定，候选运行前允许恢复原先已降级的双服务，候选运行后未知结果保持隔离对账。
+当前开发交付为有签名意图及完整旧事务归档的 owner 修复后继。它保留当前业务状态，追加签名链，不改旧安装器、不伪造旧事务成功；完整 Home 外演练、独立审查及新鲜生产验收仍待完成。[入口与恢复边界](../scripts/install/README.md#已运行但未就绪的修复后继)。
 
-真实 Home 的只读冻结预检和 Home 外完整迁移演练已通过：五个 profile 离线物化、真实签名源码后继记录及 owner 修复 overlay 均通过校验，六项原授权及其预算、期限原样保留。演练发现并修复了源码 origin 与受管 checkout 混淆、同一 Ed25519 公钥 PEM 换行差异、creation seccomp 路径迁移三处问题；验签及原字节防篡改边界保留。演练未启动候选或修改生产 Home，不是生产就绪证明。下一验收是最终提交的精确候选、完整检查、正式双 Host 事务及新鲜注册，随后验证全部远端 CI 作业。
+Kaboo 用量监控持有 Home 句柄。用户已授权迁移期间临时暂停并自动恢复；上次尝试结束后已恢复，配置未改。正式迁移与本地隔离测试须串行，进程检查不设豁免。下一验收是精确后继候选的完整离线演练、生产新鲜注册与保全核对，再运行根检查并验证全部远端 CI 作业。
 
 ## 最新验证
 
 - 临时真实 DSH `0.2.0-rc.2` / systemd fixture 退出 0：裸 entry ID 的认证观察、活跃与禁用状态、PID / InvocationID、socket 与临时环境清理均通过；不涉及生产或模型调用。observer 24 项、编译器 3 项、采集器 7 项、setup / installer 58 项定向检查以及相关类型检查、lint 和独立审查通过。
-- `umask 022; VITEST_MAX_WORKERS=2 pnpm check` 退出 0：8549 项通过、61 项跳过、37 包 dry-run pack，清单无依赖目录或私有证据。检查期间补入的 YAML 别名修复另经重新构建、类型检查、49 项 setup 测试及 24 项相关根测试通过；完整包测试也使用新构建。真实 Home 只读冻结预检、14 个身份、三个暂停任务和原 33 份 owner 配置保全通过；这些检查不代替学习就绪或外部场景验收。
+- `3ce14ce2` 的根 `pnpm check` 退出 0：8552 项通过、61 项跳过、37 包 dry-run pack，无依赖目录或私有证据。后续 `6763feda` 根测试 1016 项通过、3 项跳过；完整流水线为避免与生产迁移冲突主动取消，退出 143，**不是完整检查通过**。
+- 协调器真实 Cordis 注册回归 3/3、相关四文件 17/17，类型检查与 lint 通过。后继 owner 的真实 Home 只读 capture 通过，原授权、预设、unit、环境、bootstrap 及签名链保持一致；这些检查不代替实际部署。
 - CI 已移除根检查重复构建，并将 Linux 根测试与包测试 / 打包分为独立作业。`ee38f7f7` 的远端 Linux / Windows 成功，macOS 仅剩原生 ELF systemctl 测试的平台假设失败；正向原生采集测试现限定 Linux，跨平台拒绝测试保留。最终远端验收以推送的精确 dev HEAD 的[全部 CI 作业](https://github.com/22-ai-00/dsh-enhanced/actions/workflows/ci.yml?query=branch%3Adev)为准，不把仅汇总 Linux 的 verify 通过称为全绿。
 - 原 DeepSeek 固定合同于 2026-10-08 过期，未续期；保留 `super-relay/ark/seed-evolving` 会话模型及既有 fallback，静态配置不代表 live 模型调用通过。
 

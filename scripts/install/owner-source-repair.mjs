@@ -225,6 +225,34 @@ function compiledFiles(api, original) {
   return compiled
 }
 
+function repairBaselineFiles(ownerRepair) {
+  return ownerRepair.original.baselineFiles ?? ownerRepair.original.receipt.files
+}
+
+function repairBaselinePatches(ownerRepair) {
+  return ownerRepair.original.baselinePatches ?? Object.fromEntries(
+    Object.entries(ownerRepair.original.patches).map(([name, value]) => [name, hash(value)]))
+}
+
+export function readOwnerRepairPredecessorChain(api, ownerRepair, source) {
+  if (!ownerRepair.predecessor) return []
+  const original = ownerRepair.original
+  if (!hex.test(ownerRepair.predecessor.sourceProofDigest)
+    || !hex.test(ownerRepair.predecessor.overlayDigest)
+    || !Array.isArray(ownerRepair.predecessor.records)
+    || ownerRepair.predecessor.records.length < 1) fail('invalid successor predecessor reference')
+  const records = api.readRsiHostUpdateOverlayChain({ source, resources: original.resources,
+    dshHome: ownerRepair.homePath, profile: ownerRepair.profile,
+    bootstrapSource: original.receiptSource }).records
+  if (!same(records, ownerRepair.predecessor.records)
+    || api.rsiHostUpdateOverlayDigest(records.at(-1)) !== ownerRepair.predecessor.overlayDigest
+    || !same(records.at(-1)?.files, repairBaselineFiles(ownerRepair))
+    || !same(records.at(-1)?.patches, repairBaselinePatches(ownerRepair))) {
+    fail('signed predecessor overlay chain differs')
+  }
+  return records
+}
+
 async function originalCompiledPlan(api, { homePath, profile, coordinatorProfile, source,
   resources, runtime, files, dshPath, dshEnvironment, manifest, journal, receipt, owner }) {
   const cohort = await api.readRsiLocalCohort({ dshHome: homePath, profile, source: source.workspace })
@@ -417,6 +445,16 @@ export function ownerRepairSnapshotEquivalent(current, original) {
   return currentIdentity !== null && originalIdentity !== null && same(currentIdentity, originalIdentity)
 }
 
+/** The lifecycle must separately bind current Home to the predecessor's stagedIdentity. */
+export function ownerRepairSuccessorSnapshotEquivalent(current, original) {
+  const currentIdentity = ownerSnapshotIdentity(current)
+  const originalIdentity = ownerSnapshotIdentity(original)
+  return currentIdentity !== null && originalIdentity !== null
+    && same({ ...currentIdentity, database: { device: currentIdentity.database.device } },
+      { ...originalIdentity, database: { device: originalIdentity.database.device } })
+    && current.storageDigest === original.storageDigest
+}
+
 function assertNonOwnerRows(api, originalEffective, stagedEffective) {
   const original = yamlRows(api, originalEffective, 'original target effective')
   const staged = yamlRows(api, stagedEffective, 'staged target effective')
@@ -440,13 +478,16 @@ function assertNonOwnerRows(api, originalEffective, stagedEffective) {
   }
 }
 
-function permissionSelection(api, source, preset, label) {
+function permissionSelection(api, source, preset, label, expectedDefault = 'auto') {
   const document = yamlRows(api, source, label)
   const rows = document.contents.items.filter(item => api.yaml.isMap(item) && item.get('id') === 'permission')
   if (rows.length !== 1 || rows[0].get('name') !== '@deepseek-ai/dsh-permission-presets'
     || !api.yaml.isMap(rows[0].get('config', true))) fail('installed permission row differs')
   const config = rows[0].get('config', true)
-  if (config.get('defaultPreset') !== 'auto') fail('permission default is not the original unsupported auto preset')
+  if (config.get('defaultPreset') !== expectedDefault) {
+    fail(expectedDefault === 'auto' ? 'permission default is not the original unsupported auto preset'
+      : 'permission default differs from repair baseline')
+  }
   const presets = config.get('presets', true)
   if (api.yaml.isMap(presets) && !presets.has(preset)) fail('selected permission preset is not configured')
   config.set('defaultPreset', document.createNode(preset))
@@ -463,11 +504,13 @@ function patchPermission(api, patch, selected) {
   return String(document)
 }
 
-export function selectOwnerRepairPermission({ targetEffective, targetPatch, permissionPreset, yaml }) {
+export function selectOwnerRepairPermission({ targetEffective, targetPatch, permissionPreset, yaml,
+  currentPreset = 'auto' }) {
   if (!['workspace-write', 'danger-full-access'].includes(permissionPreset)
+    || currentPreset !== 'auto' && currentPreset !== permissionPreset
     || typeof targetEffective !== 'string' || typeof targetPatch !== 'string'
     || !yaml?.parseDocument) fail('invalid explicit permission selection')
-  const selected = permissionSelection({ yaml }, targetEffective, permissionPreset, 'target effective')
+  const selected = permissionSelection({ yaml }, targetEffective, permissionPreset, 'target effective', currentPreset)
   return { targetEffective: selected.source, targetPatch: patchPermission({ yaml }, targetPatch, selected) }
 }
 
@@ -523,13 +566,13 @@ export async function stageOwnerSourceRepair({ ownerRepair, homePath, stageHome,
   }
   await verifyOwnerSourceRepair({ ownerRepair, homePath, physicalHome: stageHome,
     installer, phase: 'before-finalize', record })
-  compiledFiles(api, original)
+  if (!ownerRepair.predecessor) compiledFiles(api, original)
   assertNonOwnerRows(api, original.effective.targetEffective, stageNativeEffective.targetEffective)
   const ownerSnapshot = await api.rsiSetupPorts.snapshot(stageNativeEffective.targetEffective, homePath)
   if (!ownerRepairSnapshotEquivalent(ownerSnapshot, original.ownerSnapshot)) fail('owner binding changed before repair')
   const selected = selectOwnerRepairPermission({ targetEffective: stageNativeEffective.targetEffective,
     targetPatch: original.patches[ownerRepair.profile], permissionPreset: ownerRepair.permissionPreset,
-    yaml: api.yaml })
+    yaml: api.yaml, currentPreset: ownerRepair.predecessor ? ownerRepair.permissionPreset : 'auto' })
   const stageRuntime = await api.readRsiAuthorityRuntimeReceipt({ logicalHome: homePath,
     physicalHome: stageHome, profile: ownerRepair.profile })
   if (!same(stageRuntime.runtime, runtime)) fail('new staged authority runtime differs')
@@ -561,7 +604,16 @@ export async function stageOwnerSourceRepair({ ownerRepair, homePath, stageHome,
     unitProperties, policies: original.policies, now: original.now })
   const manifestPath = join(resources.configRoot, 'manifest.json')
   const files = { ...compiled.files, [manifestPath]: json(manifest) }
-  if (!same(Object.keys(files).sort(), Object.keys(original.receipt.files).sort())) fail('new grant file inventory changed')
+  if (!same(Object.keys(files).sort(), Object.keys(repairBaselineFiles(ownerRepair)).sort())) {
+    fail('new grant file inventory changed')
+  }
+  if (ownerRepair.predecessor) {
+    for (const name of ['approval', 'release', 'adoption', 'observation', 'qualification', 'host-authority']) {
+      const path = join(resources.configRoot, `${name}.json`)
+      if (!same(parsed(files[path], `new ${name} grant`).grant,
+        parsed(original.files[path], `baseline ${name} grant`).grant)) fail(`new ${name} grant changed`)
+    }
+  }
   const patches = await api.compileRsiProfiles({ manifest, dshHome: homePath,
     targetPatch: selected.targetPatch, targetEffective: selected.targetEffective,
     coordinatorPatch: original.patches[ownerRepair.coordinatorProfile],
@@ -587,17 +639,20 @@ export async function stageOwnerSourceRepair({ ownerRepair, homePath, stageHome,
   const fileDigests = Object.fromEntries(Object.entries(files)
     .sort(([left], [right]) => left.localeCompare(right)).map(([path, value]) => [path, hash(value)]))
   const patchDigests = Object.fromEntries(Object.entries(patchMap).map(([profile, value]) => [profile, hash(value)]))
+  const overlayPath = join(stageHome, relative(homePath, resources.configRoot), 'host-update-overlays.json')
+  const previous = ownerRepair.predecessor
+    ? readOwnerRepairPredecessorChain(api, ownerRepair, (await stable(overlayPath)).toString('utf8')) : []
   const overlay = api.signRsiOwnerRepairOverlay({ schemaVersion: 1, kind: 'rsi-owner-repair-overlay',
     transactionId, dshHome: homePath, targetProfile: ownerRepair.profile,
-    installationId: resources.installationId, sequence: 1, previousDigest: null,
+    installationId: resources.installationId, sequence: previous.length + 1,
+    previousDigest: previous.length ? api.rsiHostUpdateOverlayDigest(previous.at(-1)) : null,
     bootstrapDigest: hash(original.receiptSource), files: fileDigests, patches: patchDigests,
     runtimeReceiptDigest: stageRuntime.receiptDigest,
     planDigest: hash(json({ files: fileDigests, patches: patchDigests })),
     result: { schemaVersion: 1, manifestPath, manifestDigest: fileDigests[manifestPath],
       targetProfile: ownerRepair.profile, coordinatorProfile: ownerRepair.coordinatorProfile },
     repair: { sourceMaintenanceDigest: api.control.sourceMaintenanceDigest(record),
-      before: { files: original.receipt.files,
-        patches: Object.fromEntries(Object.entries(original.patches).map(([name, value]) => [name, hash(value)])),
+      before: { files: repairBaselineFiles(ownerRepair), patches: repairBaselinePatches(ownerRepair),
         runtimeReceiptDigest: original.runtimeReceiptDigest,
         creationReceiptDigest: original.creationDigest, journalDigest: hash(original.journalSource) },
       after: { creationReceiptDigest: creation.receiptSha256, journalDigest: hash(journalSource) },
@@ -605,9 +660,10 @@ export async function stageOwnerSourceRepair({ ownerRepair, homePath, stageHome,
     issuedAt: Date.now(), authority: resources.identities.host.authority,
     keyId: resources.identities.host.keyId },
   (await stable(join(stageHome, relative(homePath, resources.identities.host.keyPath)), 16_384)).toString('utf8'),
-  resources, original.receiptSource, [])
-  const overlayPath = join(stageHome, relative(homePath, resources.configRoot), 'host-update-overlays.json')
-  await exclusive(overlayPath, json({ schemaVersion: 1, kind: 'rsi-host-update-overlays', records: [overlay] }))
+  resources, original.receiptSource, previous)
+  const chainSource = json({ schemaVersion: 1, kind: 'rsi-host-update-overlays', records: [...previous, overlay] })
+  if (ownerRepair.predecessor) await atomicReplace(overlayPath, chainSource)
+  else await exclusive(overlayPath, chainSource)
   const next = { schemaVersion: 1, transactionId, manifestPath, manifestDigest: fileDigests[manifestPath],
     files: fileDigests, patches: patchDigests, overlay, overlayDigest: api.rsiHostUpdateOverlayDigest(overlay),
     audit, creationReceiptSha256: creation.receiptSha256, candidateReceiptSha256: creation.candidateReceiptSha256,
@@ -717,6 +773,112 @@ export async function captureOwnerSourceRepair({ homePath, profile, installer, p
   return result
 }
 
+export async function captureOwnerSourceRepairSuccessor({ predecessorProof, homePath, profile, installer,
+  permissionPreset, dshPath }) {
+  await privateDirectory(homePath)
+  if (predecessorProof?.protocol !== protocol || predecessorProof.homePath !== homePath
+    || predecessorProof.profile !== profile || !predecessorProof.ownerRepairNext
+    || predecessorProof.ownerRepair?.permissionPreset !== permissionPreset
+    || !['workspace-write', 'danger-full-access'].includes(permissionPreset)
+    || predecessorProof.ownerRepair.dshPath !== dshPath) fail('successor predecessor scope differs')
+  const { verifyHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
+  await verifyHostLocalSourceUpdate({ proof: predecessorProof, homePath, physicalHome: homePath,
+    selection: 'candidate', checkLedger: true })
+  const api = await load(installer)
+  const previous = predecessorProof.ownerRepair
+  const resources = await api.prepareRsiAuthorityResources({ dshHome: homePath, profile, existingOnly: true })
+  if (!same(resources, previous.original.resources)) fail('successor owner resources differ')
+  const config = resources.configRoot
+  const receiptSource = (await stable(join(config, 'bootstrap.json'))).toString('utf8')
+  if (receiptSource !== previous.original.receiptSource) fail('successor bootstrap changed')
+  const chainSource = (await stable(join(config, 'host-update-overlays.json'))).toString('utf8')
+  const chain = api.readRsiHostUpdateOverlayChain({ source: chainSource, resources,
+    dshHome: homePath, profile, bootstrapSource: receiptSource })
+  const latest = chain.latest
+  if (!latest || !same(latest, predecessorProof.ownerRepairNext.overlay)
+    || api.rsiHostUpdateOverlayDigest(latest) !== predecessorProof.ownerRepairNext.overlayDigest
+    || latest.kind !== 'rsi-owner-repair-overlay' || latest.repair.permissionPreset !== permissionPreset) {
+    fail('successor signed predecessor differs')
+  }
+  const files = {}
+  for (const [path, digest] of Object.entries(latest.files)) {
+    if (!inside(config, path) || path === config || !hex.test(digest)) fail('successor config scope differs')
+    const value = (await stable(path)).toString('utf8')
+    if (hash(value) !== digest) fail('successor config changed')
+    files[path] = value
+  }
+  const manifestSource = files[join(config, 'manifest.json')]
+  const manifest = parsed(manifestSource, 'successor owner manifest')
+  if (hash(manifestSource) !== latest.result.manifestDigest
+    || manifest.targetProfile !== profile || manifest.coordinatorProfile !== previous.coordinatorProfile
+    || !same(manifest.sourceReviews.owner, previous.original.manifest.sourceReviews.owner)
+    || manifest.sourceReviews.expiresAt !== previous.original.manifest.sourceReviews.expiresAt) {
+    fail('successor owner manifest differs')
+  }
+  for (const name of ['approval', 'release', 'adoption', 'observation', 'qualification', 'host-authority']) {
+    const path = join(config, `${name}.json`)
+    if (!same(parsed(files[path], `${name} grant`).grant,
+      parsed(previous.original.files[path], `predecessor ${name} grant`).grant)) {
+      fail(`successor ${name} grant changed`)
+    }
+  }
+  const journalSource = (await stable(join(homePath, '.rsi-setup-journal.json'))).toString('utf8')
+  if (hash(journalSource) !== latest.repair.after.journalDigest) fail('successor journal changed')
+  const journal = parsed(journalSource, 'successor owner journal')
+  assertJournal(journal, manifest, hash(manifestSource))
+  const creationPath = join(homePath, 'rsi-creation-builds', profile, 'bootstrap.json')
+  const creationSource = (await stable(creationPath, 65_536)).toString('utf8')
+  if (hash(creationSource) !== latest.repair.after.creationReceiptDigest) fail('successor creation receipt changed')
+  const runtimeReceiptPath = join(homePath, 'rsi-authority-runtimes', profile, 'receipt.json')
+  const runtimeReceiptDigest = hash(await stable(runtimeReceiptPath, 65_536))
+  if (runtimeReceiptDigest !== latest.runtimeReceiptDigest) fail('successor runtime receipt changed')
+  const patches = {}, environments = {}, units = {}
+  for (const [index, name] of [profile, previous.coordinatorProfile].entries()) {
+    const patch = (await stable(join(homePath, 'profiles', name, 'cordis.patch.yml'), 2_097_152, false)).toString('utf8')
+    const environment = await optional(api.rsiServiceEnvironmentPath(homePath, name), 2_097_152)
+    const unit = await optional(api.systemdServicePaths({ dshHome: homePath, profile: name,
+      home: realpathSync(homedir()) }).unitPath, 2_097_152, false)
+    if (hash(patch) !== latest.patches[name] || patch !== journal.entries[index].after
+      || environment !== previous.original.environments[name]
+      || unit !== previous.original.units[name]) fail('successor profile or service binding changed')
+    patches[name] = patch; environments[name] = environment; units[name] = unit
+  }
+  await assertIssuerStateAbsent({ resources, files, homePath, physicalHome: homePath })
+  const source = await api.readRsiSourceMaintenance({ logicalHome: homePath, physicalHome: homePath, profile })
+  if (!same(source, predecessorProof.candidateSource)) fail('successor source history differs')
+  const sourceState = await ownerLedger(api, join(manifest.controlPlane.statePath, 'control.sqlite'),
+    source.workspace.repository, homePath, source.records)
+  const runtime = await api.readRsiAuthorityRuntimeReceipt({ logicalHome: homePath, physicalHome: homePath, profile })
+  if (!same(runtime, predecessorProof.candidateRuntime)) fail('successor authority runtime differs')
+  const composed = await composeOwnerRepairProfiles({ homePath, profile,
+    coordinatorProfile: previous.coordinatorProfile, dshPath })
+  if (composed.dshDigest !== previous.host.dshDigest || composed.dshVersion !== previous.host.version) {
+    fail('successor Host changed')
+  }
+  const ownerSnapshot = await api.rsiSetupPorts.snapshot(composed.targetEffective, homePath)
+  if (!ownerRepairSuccessorSnapshotEquivalent(ownerSnapshot, previous.original.ownerSnapshot)) {
+    fail('successor owner binding changed')
+  }
+  permissionSelection(api, composed.targetEffective, permissionPreset, 'successor effective', permissionPreset)
+  const build = await api.readRsiBuildEnvironment({ dshHome: homePath, profile, source: source.workspace })
+  const releaseBuild = await api.readRsiReleaseBuildEnvironment({ dshHome: homePath, profile, build })
+  const creationBuild = await api.readRsiCreationBuildEnvironment({ dshHome: homePath, profile,
+    source: source.workspace, build })
+  const original = { ...previous.original, resources, runtime, source, sourceDigest: hash(json(sourceState)),
+    sourceState, ownerSnapshot, manifest, manifestSource, journal, journalSource, files, patches,
+    environments, units, creationSource, creationDigest: hash(creationSource), creationBuild,
+    runtimeReceiptDigest, build, releaseBuild,
+    effective: { targetEffective: composed.targetEffective, coordinatorEffective: composed.coordinatorEffective },
+    baselineFiles: latest.files, baselinePatches: latest.patches }
+  originalInputs(original)
+  const result = { protocol, homePath, profile, coordinatorProfile: previous.coordinatorProfile,
+    permissionPreset, installer, dshPath, host: previous.host, original,
+    predecessor: { sourceProofDigest: hash(JSON.stringify(predecessorProof)),
+      overlayDigest: api.rsiHostUpdateOverlayDigest(latest), records: chain.records } }
+  await verifyOwnerSourceRepair({ ownerRepair: result, homePath, installer, phase: 'original' })
+  return result
+}
+
 export async function readOwnerRepairCandidateSource({ api, candidateHome, profile, source, signal }) {
   if (!['local-head', 'official-tag'].includes(source?.origin?.kind)) fail('candidate source provenance is invalid')
   const actualSource = await api.readRsiSourceWorkspace({ dshHome: candidateHome, profile,
@@ -801,8 +963,12 @@ export async function verifyOwnerSourceRepair({ ownerRepair, ownerRepairNext, ho
   await privateDirectory(physicalHome)
   const original = ownerRepair.original
   const config = join(physicalHome, 'rsi-authorities', ownerRepair.profile, 'config')
-  const paths = phase === 'after-finalize' ? ownerRepairNext?.files : original.receipt.files
-  if (!paths || Object.keys(paths).length !== Object.keys(original.receipt.files).length) fail('owner repair file inventory is incomplete')
+  const baselineFiles = repairBaselineFiles(ownerRepair)
+  const baselinePatches = repairBaselinePatches(ownerRepair)
+  const paths = phase === 'after-finalize' ? ownerRepairNext?.files : baselineFiles
+  if (!paths || !same(Object.keys(paths).sort(), Object.keys(baselineFiles).sort())) {
+    fail('owner repair file inventory is incomplete')
+  }
   for (const [logicalPath, digest] of Object.entries(paths)) {
     if (!inside(original.resources.configRoot, logicalPath) || !hex.test(digest)) fail('owner repair config scope differs')
     const path = join(config, relative(original.resources.configRoot, logicalPath))
@@ -815,6 +981,15 @@ export async function verifyOwnerSourceRepair({ ownerRepair, ownerRepairNext, ho
       || (await stable(join(physicalHome, '.rsi-setup-journal.json'))).toString('utf8') !== original.journalSource
       || hash(await stable(join(physicalHome, 'rsi-creation-builds', ownerRepair.profile, 'bootstrap.json'), 65_536)) !== original.creationDigest) {
       fail('original owner bootstrap or journal changed')
+    }
+    if (ownerRepair.predecessor) {
+      const source = (await stable(join(config, 'host-update-overlays.json'))).toString('utf8')
+      readOwnerRepairPredecessorChain(api, ownerRepair, source)
+      if (hash(await stable(join(physicalHome, 'rsi-authority-runtimes', ownerRepair.profile,
+        'receipt.json'), 65_536)) !== original.runtimeReceiptDigest
+        || hash(original.manifestSource) !== ownerRepair.predecessor.records.at(-1)?.result.manifestDigest) {
+        fail('successor original receipt binding differs')
+      }
     }
     for (const [name, source] of Object.entries(original.patches)) {
       if ((await stable(join(physicalHome, 'profiles', name, 'cordis.patch.yml'), 2_097_152, false)).toString('utf8') !== source) fail('original owner profile changed')
@@ -850,7 +1025,9 @@ export async function verifyOwnerSourceRepair({ ownerRepair, ownerRepairNext, ho
     const chain = api.readRsiHostUpdateOverlayChain({ source: overlaySource, resources: original.resources,
       dshHome: homePath, profile: ownerRepair.profile, bootstrapSource: original.receiptSource })
     const overlay = chain.latest
-    if (chain.records.length !== 1 || overlay?.kind !== 'rsi-owner-repair-overlay'
+    const previous = ownerRepair.predecessor?.records ?? []
+    if (chain.records.length !== previous.length + 1
+      || !same(chain.records.slice(0, -1), previous) || overlay?.kind !== 'rsi-owner-repair-overlay'
       || !same(overlay, ownerRepairNext?.overlay)
       || api.rsiHostUpdateOverlayDigest(overlay) !== ownerRepairNext.overlayDigest
       || !same(overlay.files, paths) || !same(overlay.patches, ownerRepairNext.patches)
@@ -864,6 +1041,16 @@ export async function verifyOwnerSourceRepair({ ownerRepair, ownerRepairNext, ho
     for (const [name, digest] of Object.entries(overlay.patches)) {
       if (hash(await stable(join(physicalHome, 'profiles', name, 'cordis.patch.yml'),
         2_097_152, false)) !== digest) fail('signed repaired patch changed')
+    }
+    if (ownerRepair.predecessor) {
+      for (const name of ['approval', 'release', 'adoption', 'observation', 'qualification', 'host-authority']) {
+        const path = join(config, `${name}.json`)
+        const originalPath = join(original.resources.configRoot, `${name}.json`)
+        if (!same(parsed((await stable(path)).toString('utf8'), `repaired ${name} grant`).grant,
+          parsed(original.files[originalPath], `baseline ${name} grant`).grant)) {
+          fail(`repaired ${name} grant changed`)
+        }
+      }
     }
     for (const [name, source] of Object.entries(original.environments)) {
       if (await optional(join(physicalHome, relative(homePath, api.rsiServiceEnvironmentPath(homePath, name))),
@@ -883,8 +1070,7 @@ export async function verifyOwnerSourceRepair({ ownerRepair, ownerRepairNext, ho
       || audit.journal !== original.journalSource || audit.creationReceipt !== original.creationSource
       || !same(audit.patches, original.patches)
       || overlay.repair.sourceMaintenanceDigest !== ownerRepairNext.recordDigest
-      || !same(overlay.repair.before, { files: original.receipt.files,
-        patches: Object.fromEntries(Object.entries(original.patches).map(([name, value]) => [name, hash(value)])),
+      || !same(overlay.repair.before, { files: baselineFiles, patches: baselinePatches,
         runtimeReceiptDigest: original.runtimeReceiptDigest,
         creationReceiptDigest: original.creationDigest, journalDigest: hash(original.journalSource) })) {
       fail('signed repair predecessor or audit differs')
