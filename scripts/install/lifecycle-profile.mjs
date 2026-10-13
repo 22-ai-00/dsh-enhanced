@@ -2963,10 +2963,15 @@ async function assertMaskedAndQuiescent({
 async function stopAndResetServiceUnits(systemctlExecutable, units) {
   if (units.length === 0) return
   await runServiceCommand(systemctlExecutable, ['--user', 'stop', ...units])
-  // DSH exits with 130 after its intentional SIGINT shutdown. systemd may
-  // retain failed/failed even after every PID is gone; clear only that manager
-  // bookkeeping before requiring the stable inactive/dead state.
-  await runServiceCommand(systemctlExecutable, ['--user', 'reset-failed', ...units])
+  for (const unit of units) {
+    const state = await readRawServiceState(systemctlExecutable, unit)
+    if (state.activeState !== 'failed' && state.subState !== 'failed') continue
+    if (state.activeState !== 'failed' || state.subState !== 'failed'
+      || state.mainPid !== 0 || state.controlPid !== 0) {
+      fail(`systemd failed unit 尚未静止，不得 reset-failed：${unit}`)
+    }
+    await runServiceCommand(systemctlExecutable, ['--user', 'reset-failed', unit])
+  }
 }
 
 async function stopServicesAndWait(
@@ -7816,6 +7821,7 @@ export const lifecycleProfileTest = Object.freeze({
   reconcileHostUnitSources, validateHostUpdateManifest,
   validOwnerRepairOriginalReadiness, captureOwnerRepairOriginalReadiness,
   ownerRepairRestorationPolicy, serviceReadySignal, serviceRuntimeReady, readRawServiceState,
+  stopAndResetServiceUnits,
   assertHostSettingsRecoveryAdmission, assertHostSettingsRecoveryServiceState, readHostSettingsRecoveryFile,
   canonicalJointCandidateHome,
   assertSnapshotTreeSafe, captureOwnerRepairObserverSocket, discardCopiedOwnerObserverSocket,
