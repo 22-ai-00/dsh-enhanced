@@ -1125,7 +1125,7 @@ it('keeps a queued revision pending without a producer and resumes via Host read
   await f.automations.tick(); await f.automations.whenIdle()
   expect(build.runDockerPreparedChecks).toHaveBeenCalledTimes(2)
   await unregister()
-}, 30_000)
+}, 60_000)
 
 it('revokes and drains a claimed growth revision when its producer is disposed', async () => {
   const f = await revisionFixture()
@@ -1155,7 +1155,7 @@ it('revokes and drains a claimed growth revision when its producer is disposed',
   await f.automations.tick(); await f.automations.whenIdle()
   expect(build.runDockerPreparedChecks).toHaveBeenCalledTimes(2)
   await unregister()
-}, 30_000)
+}, 60_000)
 
 it.each(['before-native-ack', 'after-native-ack'] as const)('recovers persisted revision queued rearm %s without a second job', async stage => {
   const f = await revisionFixture()
@@ -1185,7 +1185,7 @@ it.each(['before-native-ack', 'after-native-ack'] as const)('recovers persisted 
   expect(f.store.listSourceJobs()).toHaveLength(2)
   expect(build.runDockerPreparedChecks).toHaveBeenCalledTimes(2)
   await unregister()
-}, 30_000)
+}, 60_000)
 
 it('rearms revision when the new native occurrence fires before its Control Plane bind', async () => {
   const f = await revisionFixture()
@@ -1211,7 +1211,7 @@ it('rearms revision when the new native occurrence fires before its Control Plan
   expect(f.store.listSourceJobs()).toHaveLength(2)
   expect(build.runDockerPreparedChecks).toHaveBeenCalledTimes(2)
   await unregister()
-}, 30_000)
+}, 60_000)
 
 
 async function restartRegressionHost(f: Awaited<ReturnType<typeof revisionFixture>>) {

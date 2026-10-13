@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { AssistantAutomationsService, listActiveAutomationsLocally } from '@dsh-enhanced/assistant-automations'
+import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { afterEach, expect, test, vi } from 'vitest'
 import * as trustModule from '../src/trust.ts'
 
@@ -53,12 +53,21 @@ test('separate coordinator state uses signed target ledger and registers a fresh
     allowUnbudgetedExecution: false, proposalDefaults: { provider: 'test', model: 'test', allowedTools: [],
       timeoutMs: 30_000, maxOutputTokens: 32, maxToolCalls: 0, misfireKind: 'latest', misfireLimit: 1,
       overlap: 'skip', retrySafety: 'never', maxRetries: 0, budgetId: 'coordinator-budget', budgetAmount: 1 } })
-  const startedAt = Date.now()
+  const owner = 'plugin-control-plane-adoption-coordinator'
+  expect(value.ctx.assistantAutomations.listSystemOwned({ owner })).toEqual([])
   await value.ctx.plugin(PluginControlPlaneService, value.config)
-  await vi.waitFor(() => expect(listActiveAutomationsLocally(value.automationPath).filter(record =>
-    record.owner === 'plugin-control-plane-adoption-coordinator' && record.updatedAt >= startedAt
-      && record.definition.execution?.kind === 'host'
-      && record.definition.execution.ownerRouteId === value.config.adoptionCoordinator.scope.ownerRouteId)).toHaveLength(1))
+  await vi.waitFor(() => {
+    const records = value.ctx.assistantAutomations.listSystemOwned({ owner })
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({ owner, automationStatus: 'active',
+      definitionHash: expect.stringMatching(/^[a-f0-9]{64}$/u) })
+    expect(value.ctx.assistantAutomations.inspectSystemOwnedActivation({ owner,
+      automationId: records[0]!.automationId })).toMatchObject({
+      definitionHash: records[0]!.definitionHash,
+      activationNonce: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      ownerRouteId: value.config.adoptionCoordinator.scope.ownerRouteId,
+    })
+  })
 })
 
 test('ordinary Control Plane keeps same-ledger trust binding and rejects mismatched catalog', async () => {
