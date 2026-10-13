@@ -7,7 +7,10 @@ import { afterEach, expect, test } from 'vitest'
 import { Document, isAlias, isMap, isScalar, isSeq, parseDocument } from 'yaml'
 import { appendOwnerSourceRepairMaintenance, assertIssuerStateAbsent, awaitOwnerSourceRepairReady,
   captureOwnerSourceRepair, composeOwnerRepairProfiles, prepareOwnerRepairCreation, selectOwnerRepairPermission,
-  ownerLedger, ownerRepairPatchEquivalent, stageOwnerSourceRepair, verifyOwnerSourceRepair } from '../scripts/install/owner-source-repair.mjs'
+  ownerLedger, ownerRepairPatchEquivalent, readOwnerRepairCandidateSource, stageOwnerSourceRepair,
+  verifyOwnerSourceRepair } from '../scripts/install/owner-source-repair.mjs'
+import { rsiBootstrapFixture } from '../plugins/lark-channel/tests/fixtures/rsi-bootstrap.js'
+import { readRsiSourceWorkspace } from '../plugins/lark-channel/src/rsi-source.js'
 
 const roots: string[] = []
 const dshExecutable = spawnSync('which', ['dsh'], { encoding: 'utf8' }).stdout.trim()
@@ -30,6 +33,24 @@ const patch = `- id: unrelated
   config:
     path: !!js dshHomePath('existing')
 `
+
+test('candidate creation rereads the receipt-bound source origin, not its managed checkout', async () => {
+  const fixture = await rsiBootstrapFixture()
+  try {
+    const source = fixture.input.source
+    const candidateHome = join(fixture.root, 'home')
+    expect(source.origin.kind).toBe('local-head')
+    expect(source.origin.locator).not.toBe(source.repository)
+    const input = { api: { readRsiSourceWorkspace }, candidateHome, profile: 'target', source }
+    await expect(readOwnerRepairCandidateSource(input)).resolves.toEqual(source)
+    await expect(readOwnerRepairCandidateSource({ ...input,
+      source: { ...source, origin: { kind: 'local-head', locator: source.repository, ref: 'HEAD' } } }))
+      .rejects.toThrow(/workspace receipt provenance differs/u)
+    await expect(readOwnerRepairCandidateSource({ ...input,
+      source: { ...source, sourceCommit: '0'.repeat(40) } }))
+      .rejects.toThrow('candidate source or build differs')
+  } finally { await fixture.cleanup() }
+})
 
 function rows(source: string) {
   const document = parseDocument(source, { uniqueKeys: true })

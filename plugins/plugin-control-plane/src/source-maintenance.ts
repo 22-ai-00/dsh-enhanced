@@ -14,6 +14,13 @@ function canonical(value: unknown): string {
   return JSON.stringify(value)
 }
 export function sourceMaintenanceDigest(value: unknown): string { return createHash('sha256').update(canonical(value)).digest('hex') }
+export function sameSourceMaintenancePublicKey(left: string, right: string): boolean {
+  try {
+    const first = createPublicKey(left), second = createPublicKey(right)
+    return first.asymmetricKeyType === 'ed25519' && second.asymmetricKeyType === 'ed25519'
+      && first.export({ format: 'der', type: 'spki' }).equals(second.export({ format: 'der', type: 'spki' }))
+  } catch { return false }
+}
 function object(value: unknown, keys: readonly string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.keys(value).sort().join('\0') !== [...keys].sort().join('\0')) invalid()
@@ -116,7 +123,8 @@ export function verifySourceMaintenanceRecords(records: readonly SourceMaintenan
     if (record.installationId !== anchor.installationId || sourceMaintenanceDigest(record.ledger) !== sourceMaintenanceDigest(anchor.ledger)
       || record.repository !== anchor.repository || sourceMaintenanceDigest(record.baseline) !== sourceMaintenanceDigest(anchor.baseline)
       || record.authority !== anchor.hostIdentity.authority || record.keyId !== anchor.hostIdentity.keyId
-      || record.publicKeyPem !== anchor.hostIdentity.publicKeyPem || record.sequence !== (prior?.sequence ?? 0) + 1
+      || !sameSourceMaintenancePublicKey(record.publicKeyPem, anchor.hostIdentity.publicKeyPem)
+      || record.sequence !== (prior?.sequence ?? 0) + 1
       || record.previousDigest !== (prior ? sourceMaintenanceDigest(prior) : null)
       || prior && (record.issuedAt < prior.issuedAt || record.originalBootstrapDigest !== prior.originalBootstrapDigest
         || sourceMaintenanceDigest(record.before) !== sourceMaintenanceDigest(prior.after))

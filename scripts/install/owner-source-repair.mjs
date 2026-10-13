@@ -692,6 +692,15 @@ export async function captureOwnerSourceRepair({ homePath, profile, installer, p
   return result
 }
 
+export async function readOwnerRepairCandidateSource({ api, candidateHome, profile, source, signal }) {
+  if (!['local-head', 'official-tag'].includes(source?.origin?.kind)) fail('candidate source provenance is invalid')
+  const actualSource = await api.readRsiSourceWorkspace({ dshHome: candidateHome, profile,
+    ...(source.origin.kind === 'local-head' ? { sourceRepository: source.origin.locator } : {}),
+    ...(signal ? { signal } : {}) })
+  if (!same(actualSource, source)) fail('candidate source or build differs from the prepared maintenance')
+  return actualSource
+}
+
 export async function prepareOwnerRepairCreation({ ownerRepair, candidateHome, source, sourceBuild,
   installer = ownerRepair?.installer, signal }) {
   if (ownerRepair?.protocol !== protocol || !exact(candidateHome) || candidateHome === ownerRepair.homePath
@@ -702,12 +711,11 @@ export async function prepareOwnerRepairCreation({ ownerRepair, candidateHome, s
   const api = await load(installer)
   await privateDirectory(candidateHome)
   const profile = ownerRepair.profile
-  const actualSource = await api.readRsiSourceWorkspace({ dshHome: candidateHome, profile,
-    sourceRepository: source?.repository, ...(signal ? { signal } : {}) })
+  const actualSource = await readOwnerRepairCandidateSource({ api, candidateHome, profile, source, signal })
   const actualBuild = await api.readRsiBuildEnvironment({ dshHome: candidateHome, profile,
     source: actualSource, ...(signal ? { signal } : {}) })
-  if (!same(actualSource, source) || !same(actualBuild, sourceBuild)
-    || source.sourceCommit === ownerRepair.original.source.workspace.sourceCommit) {
+  if (!same(actualBuild, sourceBuild)
+    || actualSource.sourceCommit === ownerRepair.original.source.workspace.sourceCommit) {
     fail('candidate source or build differs from the prepared maintenance')
   }
   const creationBuild = await api.prepareRsiCreationBuildEnvironment({ dshHome: candidateHome,
