@@ -135,6 +135,32 @@ node /reviewed/checkout/scripts/install/lifecycle-profile.mjs \
 
 调用前停止其它外部或手工 Home writers；受管 systemd units 由既有 Home 锁、mask、guardian 和原子 Home 切换事务接管。预检先检查 Home 及所有 profile 的持久 YAML，随后只在私有 Home 副本的 bwrap 逻辑路径内执行原生配置导出，逐字节核对配置未被导出改写。正常 `!!js` 路径/脚本文本只惰性解析，动态 owner 配置、额外配置格式、隐藏授权、非空 Recovery jobs 和启用的 Automations scheduler 均拒绝。`profiles/node_modules` 是原生共享依赖目录，不作为 profile。
 
+#### 未启用 owner 的旧行为镜像
+
+源码维护不会静默改写既有 `rsi-creation-builds` 收据。若首次 owner 安装发现行为镜像仍绑定旧源码，先完成经过认证的源码及构建资源更新，确认当前行为镜像配方与依赖锁一致。再显式迁移这个尚未被 owner 使用的辅助资源：
+
+```sh
+node /reviewed/checkout/scripts/install/creation-build-migration.mjs \
+  assistant /absolute/dsh-home \
+  /absolute/.dsh-rsi-creation-build-migration-reviewed-20261013 /reviewed/checkout
+```
+
+归档须是 Home 同级、同文件系统下尚不存在的 `.dsh-rsi-creation-build-migration-` 前缀目录。入口持有 Home 生命周期锁，核对签名源码历史、未初始化的 owner / registry / 账本及旧收据，只把严格识别的旧资源原样归档到 Home 外；新收据必须由当前源码和构建环境的原生镜像准备器生成。日志和旧收据保留，重复调用沿同一日志恢复，不覆盖未知目录或用旧镜像冒充新环境。已有 owner、未知资源、漂移或不完整归档均拒绝；不能用删除旧目录替代迁移。镜像准备可能访问 Debian 包源，但候选行为验收仍禁网运行。这个操作不启用 scheduler，也不代表普通使用学习已验收。
+
+若在首次日志落盘前崩溃，空归档不会被自动认领；原资源尚未移动，经人工核对后可另指定新归档重试。日志原子替换前崩溃留下的临时文件也会被拒绝，需检查原日志、临时内容和两侧资源后处理；不要直接删除归档重跑。已完成迁移的新资源丢失时同样拒绝重建，不把未知丢失当成首次安装。
+
+DSH `0.2` 的 standalone setup 需要 Host 原生模块解析器；不要用旧 PATH 中的 DSH 或手工补 `NODE_PATH`。在已审核 checkout 中，指定 Home 绑定的私有 Host 后调用安装器入口：
+
+```sh
+export PATH=/absolute/verified-host/node_modules/.bin:$PATH
+source /reviewed/checkout/scripts/install/common.sh
+dsh_enhanced_run_profile_setup 0 /absolute/dsh-home assistant dsh-rsi-setup \
+  --install-owner --profile assistant --dsh-home /absolute/dsh-home \
+  --source-repository /absolute/source-repository --ack-existing-automations
+```
+
+只有返回 `mode: "ready"` 才证明本次双 Host 就绪、owner-bound 协调器及记忆扫描登记完成。确认旧 Automation 仅允许打开调度，不恢复 paused 定义，也不续期旧授权。
+
 离线包安装完成后，在同一隔离副本内调用已固定 Host 的原生 `loadProfileDirectory` / `healProfilesModuleFallback`，重新生成依赖解析的 `.dsh-module-fallback` 链接；不启动 Host 或插件，不修改持久配置。缺失原生 API 或 Host 身份不符时拒绝继续。仅导出配置不会修复这些链接。
 
 副本链接检查沿已打开的目录 FD 逐级读取内部链接，再以真实路径核对最终目标的副本边界；FD 路径别名不会把内部 pnpm 链接当作外链。某一相对链接离开副本时，按切换后的逻辑 Home 位置解析该跳，因此原样的 `.bin` → 包目录 → 仓库链接仍可核对原目标身份。副本内目标缺失时不回读原 Home；内部链最多 40 跳，循环仍被拒绝。最终目标在副本外或不存在的包链接，仅允许原文本与原目标身份均不变的白名单条目。这保留既有最终目标校验合同，未增加外部中间链接的逐跳隔离。

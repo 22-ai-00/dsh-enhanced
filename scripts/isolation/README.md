@@ -69,8 +69,8 @@ The builder checks that ID, creates and removes a temporary local tag for
 Docker BuildKit, and returns the verifier image's content ID. Its temporary
 context contains only the root/workspace manifests, lock, Dockerfile, fixed
 parent/candidate workers and native observer launcher; it excludes other product source, Host mounts, `.npmrc`, credentials and
-expected behavior. It installs the exact locked Cordis 4.0.2, native tools and
-system prompt 0.1.5-rc.3 packages offline with scripts disabled, and adds
+expected behavior. It installs the exact locked Cordis 4.0.4, native tools and
+system prompt 0.2.0-rc.2 packages offline with scripts disabled, and adds
 BusyBox for the isolation supervisor. The build compiles the fixed launcher and
 parent protection library for Linux x64. Debian package installation is a build
 step; the returned image ID pins the completed image. No worker installation or

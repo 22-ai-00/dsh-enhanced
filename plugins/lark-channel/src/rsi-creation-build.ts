@@ -11,7 +11,7 @@ const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const PACKAGE_MANAGER = 'pnpm@11.7.0'
 const FIXED = {
   'scripts/isolation/build-plugin-verifier-image.mjs': 'ae615696e51f88be9ad1e5f1b2a8769b951d8f0632b13547fcfa8f23ab837802',
-  'scripts/isolation/plugin-verifier.Dockerfile': '4a73ede3ae1ca943a5e661e72f0f8b80ef2876b4ec530023e4b61f3d17ea121b',
+  'scripts/isolation/plugin-verifier.Dockerfile': 'e3d4aad5d1a1fda8c1a01d080f32aceb9d6438954169b412ed96e8dde2fd22b2',
   'scripts/isolation/plugin-observer-launcher.c': '90bb335432a74778d442e2fcab50a19fc4441191343eaa76beed09287515b0ce',
   'plugins/assistant-verifier/src/plugin-behavior-runner.ts': '1a7f5d9a686cc8615e403a9f5536701d759fc40ef9fa5fe7c29cbddb2891c187',
 } as const
