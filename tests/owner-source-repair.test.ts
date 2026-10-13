@@ -34,7 +34,7 @@ const patch = `- id: unrelated
     path: !!js dshHomePath('existing')
 `
 
-test('candidate creation rereads the receipt-bound source origin, not its managed checkout', async () => {
+test.skipIf(process.platform !== 'linux')('candidate creation rereads the receipt-bound source origin, not its managed checkout', async () => {
   const fixture = await rsiBootstrapFixture()
   try {
     const source = fixture.input.source

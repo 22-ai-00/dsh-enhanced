@@ -27,7 +27,7 @@
 - 正式后继 CLI 退出 0；独立验后检查退出 0，核对双服务 fresh readiness、seq2 签名链、14 个密钥摘要、六项授权、三个暂停任务及模型 / fallback。最大观察到的事务 manifest 为 2,039,610 字节，低于 2 MiB 限额。
 - 后继路径与生命周期定向测试 36/36，语法、lint 及独立审查通过；真实 systemd 临时探针验证全 / 半暂存遮罩按原 inode 复装且无服务启动，临时 unit 已清理。协调器真实 Cordis 登记回归通过。
 - Home 外完整演练通过；最终候选的 25 个包与演练版逐包字节、锁图及依赖一致。源码和安装器各自重新绑定，正式事务重新执行完整 pre-swap 校验，不以旧演练冒充新源码验收。
-- 全检命令为 `VITEST_MAX_WORKERS=2 pnpm check`，包括根测试、全部包测试、构建、类型检查及 37 包 dry-run pack。远端以精确 dev HEAD 的[全部 CI 作业](https://github.com/22-ai-00/dsh-enhanced/actions/workflows/ci.yml?query=branch%3Adev)为准，不把仅汇总 Linux 的 verify 通过称为全绿。CI 拆分 Linux 根测试与包测试、移除重复构建；macOS 的 native ELF 正向测试限定 Linux，跨平台拒绝测试保留。
+- 全检命令为 `VITEST_MAX_WORKERS=2 pnpm check`，包括根测试、全部包测试、构建、类型检查及 37 包 dry-run pack。远端以精确 dev HEAD 的[全部 CI 作业](https://github.com/22-ai-00/dsh-enhanced/actions/workflows/ci.yml?query=branch%3Adev)为准，不把仅汇总 Linux 的 verify 通过称为全绿。CI 拆分 Linux 根测试与包测试、移除重复构建；native ELF 与 authority runtime 正向测试限定 Linux，跨平台拒绝测试保留。
 - 原 DeepSeek 固定合同于 2026-10-08 过期，未续期；保留 `super-relay/ark/seed-evolving` 模型及既有 fallback，未将配置或就绪检查当作 live 模型调用证明。
 
 原始日志和私有证据位于忽略目录 `docs/evidence/ci-migration/`、`docs/evidence/runtime-observer-fix/` 与 `docs/evidence/owner-repair/`。满足普通使用闭环及[发布门](releasing.md)后才发布 npm。
