@@ -14,6 +14,9 @@ vi.mock('../scripts/install/local-source-maintenance.mjs', () => ({
     readRsiLocalArtifactManifest: async ({ name }: { name: string }) => ({ peerDependencies: reviewed.peers[name] || {} }),
   }),
 }))
+vi.mock('../scripts/install/host-legacy-settings.mjs', () => ({
+  verifyHostLegacySettingsImport: async () => '[]\n',
+}))
 
 const roots: string[] = []
 afterEach(async () => {
@@ -296,6 +299,27 @@ test('prepares all profiles and materializes a copied Home using pinned candidat
     logicalHome: input.originalHome, runPnpm: input.runPnpm, runCandidateDsh: async () => {} })
   expect(proof.profileNames).toEqual(['acp', 'assistant'])
   expect(await validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome })).toEqual(proof)
+})
+
+test('rejects pending native legacy settings before Host profile preparation', async () => {
+  const input = await fixture(['assistant'])
+  await writeFile(join(input.originalHome, 'settings.yaml'), 'permission:\n  defaultPreset: auto\n')
+  await expect(prepareHostLocalProfileUpdate(input)).rejects.toThrow('pending native legacy settings import')
+})
+
+test('normalizes only the permitted profile patch while retaining other profile drift checks', async () => {
+  const input = await fixture()
+  const preparation = await prepareHostLocalProfileUpdate(input)
+  await materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
+    logicalHome: input.originalHome, runPnpm: input.runPnpm, runCandidateDsh: async () => {} })
+  const assistantPatch = join(input.stagedHome, 'profiles', 'assistant', 'cordis.patch.yml')
+  await writeFile(assistantPatch, '[]\n- id: imported\n')
+  const legacySettingsImport = { permit: { profile: 'assistant' } }
+  await expect(validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
+    legacySettingsImport })).resolves.toBeDefined()
+  await writeFile(join(input.stagedHome, 'profiles', 'acp', 'cordis.patch.yml'), '- id: drift\n')
+  await expect(validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
+    legacySettingsImport })).rejects.toThrow('staged metadata drift: acp/cordis.patch.yml')
 })
 
 test('retires authenticated old shared fallback only in stage and checks its backup after swap', async () => {

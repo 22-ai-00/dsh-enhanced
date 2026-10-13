@@ -260,6 +260,68 @@ async function treeSnapshot(root: string): Promise<string> {
 describe('managed Host transaction inputs', () => {
   const itLinux = process.platform === 'linux' ? it : it.skip
 
+  it('admits settings recovery only for its accepted started joint transaction and exact permit', () => {
+    const envelope = { permit: { transactionId: 'transaction-a', homePath: '/private/home', profile: 'assistant',
+      baseManifestDigest: 'a'.repeat(64) }, replayReceipt: {} }
+    const manifest = { version: 4, operation: 'host-update', state: 'swapped', id: 'transaction-a',
+      homePath: '/private/home', profile: 'assistant', bindingDigest: 'a'.repeat(64),
+      services: [{ profile: 'assistant', wasActive: true }], hostMigration: { phase: 'accepted',
+        candidateEverStarted: true, localSource: {}, plan: { schemaVersion: 2, candidateRuntime: { version: '0.2.0-rc.2' } } } }
+    const admit = lifecycleProfileTest.assertHostSettingsRecoveryAdmission
+    expect(() => admit(manifest, envelope)).not.toThrow()
+    for (const changed of [
+      { ...manifest, state: 'preparing' },
+      { ...manifest, id: 'other-transaction' },
+      { ...manifest, bindingDigest: 'b'.repeat(64) },
+      { ...manifest, services: [] },
+      { ...manifest, hostMigration: { ...manifest.hostMigration, phase: 'starting' } },
+      { ...manifest, hostMigration: { ...manifest.hostMigration, candidateEverStarted: false } },
+      { ...manifest, hostMigration: { ...manifest.hostMigration, localSource: undefined } },
+    ]) expect(() => admit(changed, envelope)).toThrow(/native settings recovery/u)
+    const persisted = { ...manifest, bindingDigest: 'b'.repeat(64),
+      hostMigration: { ...manifest.hostMigration, nativeSettingsImport: envelope } }
+    expect(() => admit(persisted, structuredClone(envelope))).not.toThrow()
+    expect(() => admit({ ...persisted, hostMigration: { ...persisted.hostMigration, phase: 'starting' } }, envelope))
+      .not.toThrow()
+    expect(() => admit(persisted, { ...envelope, replayReceipt: { different: true } }))
+      .toThrow('permit already differs')
+  })
+
+  it('requires a bound installed mask and a masked quiescent unit before admitting settings recovery', () => {
+    const state = { loadState: 'masked', activeState: 'inactive', subState: 'dead', mainPid: 0, controlPid: 0 }
+    const assertState = lifecycleProfileTest.assertHostSettingsRecoveryServiceState
+    expect(() => assertState('installed', state)).not.toThrow()
+    for (const location of ['staged', 'missing']) {
+      expect(() => assertState(location, state)).toThrow('bound masked inactive services')
+    }
+    for (const changed of [
+      { ...state, loadState: 'loaded' }, { ...state, activeState: 'activating' },
+      { ...state, subState: 'running' }, { ...state, mainPid: 42 }, { ...state, controlPid: 42 },
+    ]) expect(() => assertState('installed', changed)).toThrow('bound masked inactive services')
+  })
+
+  itLinux('reads settings recovery permits only from private canonical external files', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-host-settings-permit-')))
+    const home = join(root, 'home'), permitPath = join(root, 'permit.json')
+    const envelope = { permit: {}, replayReceipt: {} }
+    try {
+      await mkdir(home)
+      await writeFile(permitPath, JSON.stringify(envelope), { mode: 0o600 })
+      await expect(lifecycleProfileTest.readHostSettingsRecoveryFile(permitPath, home)).resolves.toEqual(envelope)
+      await symlink(permitPath, join(root, 'alias.json'))
+      await expect(lifecycleProfileTest.readHostSettingsRecoveryFile(join(root, 'alias.json'), home))
+        .rejects.toThrow('canonical')
+      await writeFile(join(home, 'permit.json'), JSON.stringify(envelope), { mode: 0o600 })
+      await expect(lifecycleProfileTest.readHostSettingsRecoveryFile(join(home, 'permit.json'), home))
+        .rejects.toThrow('outside Home')
+      await chmod(permitPath, 0o644)
+      await expect(lifecycleProfileTest.readHostSettingsRecoveryFile(permitPath, home)).rejects.toThrow('owner-private')
+      await chmod(permitPath, 0o600)
+      await writeFile(permitPath, JSON.stringify({ ...envelope, extra: true }))
+      await expect(lifecycleProfileTest.readHostSettingsRecoveryFile(permitPath, home)).rejects.toThrow('invalid native')
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   itLinux('canonicalizes the locked candidate Home for joint post-swap verification only', async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-host-canonical-')))
     const parent = await open(root, 'r')

@@ -85,6 +85,19 @@ node /reviewed/checkout/scripts/install/lifecycle-profile.mjs \
 
 DSH `0.2` 使用原生 runtime resolution，不再依赖旧的共享 `profiles/node_modules` 或 profile 内 `.dsh-module-fallback`。联合迁移只在暂存副本退役经过库存核对的纯链接缓存；真实文件、自定义包目录、未知链接来源或准备后的漂移都会拒绝。如果缓存还引用旧全局安装，须在上述命令的辅助制品目录后追加原全局 `@deepseek-ai/dsh` 包的 canonical 目录，供显式核验。原 Home 和回滚副本保留原缓存；不会跟随悬空链接删除目标，也不把旧全局 DSH 路径当作候选代码授权。
 
+旧 `settings.yaml` 必须在迁移前单独核对：DSH `0.2` 的原生导入器会在启动后异步将其改名为 `settings.yaml.imported`，逐节写入当前 profile；被拒绝的节仅保留在改名文件中，不会重试。联合迁移现在在停服前拒绝尚待导入的文件，避免运行中改写已冻结配置。不能把目标 profile 的设置移动到 Home 级 patch：后者会覆盖其他 profile 的独立模型、路由和权限。
+
+针对旧版联合事务已启动候选、通过就绪验收后才遇到这种已知原生导入的现场，提供显式 `host-recover-settings`，不是普通摘要漂移的宽松恢复。它要求原事务已接受、服务已收容停用；独立禁网副本重放原生导入并逐节审计，证明原补丁字节前缀及完整导入后字节都精确匹配，再由既有 Host 身份签署绑定事务、原 manifest、Host 收据、设置、补丁和回放证据的许可。原设置、旧导入标记、前后补丁、回放方法和收据须保存在事务外的私有归档，不能随清理丢弃。当前协议只支持明确审核的六节 / 三行导入形状；未知节、额外变更、错误签名或归档漂移均拒绝。
+
+```sh
+node /reviewed/recovery-checkout/scripts/install/lifecycle-profile.mjs \
+  host-recover-settings assistant /absolute/dsh-home \
+  /absolute/candidate-private-dsh /usr/bin/bwrap /usr/bin/systemctl /usr/bin/journalctl \
+  /absolute/private-settings-archive/permit.json
+```
+
+恢复许可只接纳已经发生且独立复现的单 profile 配置后继，不重播导入、不改写配置、不重签源码链、不更换旧 installer 绑定，也不回退已运行的 Home。恢复 checkout 可以独立审核，但原收据引用的 installer 必须保持原字节。许可持久化后中断可用同一 recovery checkout 的普通 `host-recover` 继续；其余 profile、制品、原身份、系统服务和 fresh InvocationID 验收仍照常执行。被原生拒绝的 UI / 旧 preset 节应明确记录并保留原件，不得宣称它们已生效。
+
 ### Checkout 内的 pre-owner 冻结源码维护
 
 已安装冻结源码/cohort、尚无 RSI owner、coordinator 或 control ledger 的 Linux systemd Home，可显式调用已经审核并构建的本地 checkout。此入口尚未接入普通 `dsh-rsi update`、远程 helper 下载或发布版本 pins；不要复制单个新版 `lib` 文件到正式 profile。先以 `dsh-rsi-setup --prepare-local-update` 在 Home 外制作候选；候选与执行维护的 reviewed checkout 是两份独立绑定的输入。
