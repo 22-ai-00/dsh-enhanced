@@ -8,7 +8,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { assertLifecycleLocalSourceReplayMetadata, assertLifecycleNpmMetadataSafe, classifyLifecycleScenario, lifecycleWorkspacePaths, prepareLifecycleNpmMetadata, readRsiCoordinatorReceipt, validateRsiCoordinatorPair } from './lifecycle-config.mjs'
-import { candidateHostUnitSource, classifyHostUnitBytes, parseHostUpdatePlan } from './host-lifecycle.mjs'
+import { candidateHostUnitSource, classifyHostUnitBytes, hostLocalSourcePlanMode, parseHostUpdatePlan } from './host-lifecycle.mjs'
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const VALIDATOR_PATH = join(dirname(SCRIPT_PATH), 'lifecycle-config.mjs')
@@ -1022,6 +1022,18 @@ const HOST_UPDATE_PHASES = new Set([
 
 function validateHostUpdateManifest(manifest, expected, transactionRoot) {
   const migration = manifest.hostMigration
+  if (migration?.localSource !== undefined && (migration.localSource === null
+    || typeof migration.localSource !== 'object' || Array.isArray(migration.localSource)
+    || migration.localSource.protocol !== 'dsh-enhanced/host-local-source-update/v1'
+    || migration.localSource.homePath !== expected.homePath || migration.localSource.profile !== expected.profile)) {
+    fail('joint source migration proof is invalid')
+  }
+  if (migration?.localSource !== undefined && (!Array.isArray(manifest.services)
+    || manifest.services.length !== 1 || manifest.services[0]?.profile !== manifest.profile
+    || manifest.services[0]?.wasActive !== true)) {
+    fail('joint source migration requires exactly the active target service')
+  }
+  const sameHostSource = migration?.localSource !== undefined && migration.plan?.status === 'current'
   if (!validManifestTopLevel(manifest) || manifest.version !== HOST_UPDATE_MANIFEST_VERSION
     || manifest.operation !== 'host-update' || manifest.homePath !== expected.homePath
     || manifest.canonicalHome !== expected.homePath || manifest.transactionPath !== expected.transactionPath
@@ -1043,7 +1055,8 @@ function validateHostUpdateManifest(manifest, expected, transactionRoot) {
     || migration.units.some(unit => !SYSTEMD_UNIT.test(unit.unit)
       || unit.profile !== SYSTEMD_UNIT.exec(unit.unit)?.[1]
       || typeof unit.before !== 'string' || typeof unit.after !== 'string'
-      || unit.before === unit.after || !validDigest(unit.beforeDigest) || !validDigest(unit.afterDigest)
+      || (sameHostSource ? unit.before !== unit.after : unit.before === unit.after)
+      || !validDigest(unit.beforeDigest) || !validDigest(unit.afterDigest)
       || sha256(unit.before) !== unit.beforeDigest || sha256(unit.after) !== unit.afterDigest)
     || migration.unitProperties !== undefined && (!Array.isArray(migration.unitProperties)
       || migration.unitProperties.length !== migration.units.length
@@ -1060,16 +1073,16 @@ function validateHostUpdateManifest(manifest, expected, transactionRoot) {
     fail(`拒绝未绑定或无效的 Host 更新事务 manifest：${expected.transactionPath}`)
   }
   parseHostUpdatePlan(migration.plan, expected.homePath)
-  if (migration.plan.schemaVersion === 2 && migration.localSource === undefined
-    || migration.localSource !== undefined && migration.plan.schemaVersion !== 2) {
+  if (migration.plan.schemaVersion === 2 && migration.localSource === undefined) {
     fail('joint source migration proof and unbound Host plan must be recorded together')
   }
+  if (migration.localSource !== undefined) hostLocalSourcePlanMode(migration.plan)
   if (migration.nativeSettingsImport !== undefined
     && (migration.localSource === undefined || !migration.candidateEverStarted
       || manifest.state !== 'swapped' && manifest.state !== 'committed' && manifest.state !== 'cleanup-started')) {
     fail('native settings recovery requires a started joint candidate')
   }
-  if (migration.plan.status !== 'update') fail('Host 更新事务不能记录 current 计划。')
+  if (migration.plan.status !== 'update' && !sameHostSource) fail('Host 更新事务不能记录 current 计划。')
   if (manifest.serviceMasks.length !== 0 && manifest.serviceMasks.length !== manifest.services.length) {
     fail('Host 更新事务 service mask inventory 无效。')
   }
@@ -6857,7 +6870,7 @@ async function reconcileHostUnitSources(units, selected) {
   for (const unit of units) {
     const snapshot = await snapshotServiceFile(unit.path)
     const state = classifyHostUnitBytes(snapshot.source, unit.before, unit.after)
-    if (state !== selected) await writeFileAtomic(unit.path, selected === 'before' ? unit.before : unit.after)
+    if (unit.before !== unit.after && state !== selected) await writeFileAtomic(unit.path, selected === 'before' ? unit.before : unit.after)
     const after = await snapshotServiceFile(unit.path, selected === 'before' ? unit.before : unit.after)
     if (after.path !== unit.path) fail(`Host unit path changed: ${unit.unit}`)
   }
@@ -6873,14 +6886,12 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
     fail('cross-ABI Host migration requires a verified joint local source transaction')
   }
   if (plan.schemaVersion === 2 && !localSourceInput) fail('unbound Host migration requires a verified joint local source transaction')
-  if (localSourceInput && (plan.schemaVersion !== 2 || plan.candidateRuntime.version !== '0.2.0-rc.2')) {
-    fail('joint local source migration requires the explicit legacy unbound Host plan')
-  }
+  const localSourceMode = localSourceInput ? hostLocalSourcePlanMode(plan) : undefined
   await verifyHostPlanBinding(plan, homePath)
   if (await realpath(plan.originalRuntime.dshPath) !== dshExecutable) {
     fail('caller DSH executable does not match Home-bound Host')
   }
-  if (plan.status === 'current') {
+  if (plan.status === 'current' && !localSourceInput) {
     process.stdout.write(`managed Host already current: ${plan.originalRuntime.version}\n`)
     return
   }
@@ -6914,8 +6925,10 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
       fail(`unit does not use the bound Host root: ${service.unit}`)
     }
     const before = await snapshotServiceFile(service.fragment.path)
-    const candidate = candidateHostUnitSource(service, before.source,
-      service.dshPath, plan.candidateRuntime.dshPath, plan.originalRuntime.root)
+    const candidate = localSourceMode === 'same-host'
+      ? { source: before.source, pathEnvironment: service.pathEnvironment }
+      : candidateHostUnitSource(service, before.source,
+        service.dshPath, plan.candidateRuntime.dshPath, plan.originalRuntime.root)
     if (await existingIdentity(serviceMaskPath(service.unit)) !== undefined
       || await existingIdentity(`${serviceMaskPath(service.unit)}.d`) !== undefined) {
       fail(`existing systemd mask conflicts with Host transaction: ${service.unit}`)
@@ -7261,7 +7274,9 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
   manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
     hostMigration: { ...manifest.hostMigration, phase: 'cleanup-started' } }, 'cleanup-started')
   await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome })
-  process.stdout.write(`managed Host updated: ${plan.originalRuntime.version} -> ${plan.candidateRuntime.version}\n`)
+  process.stdout.write(manifest.hostMigration.localSource && plan.status === 'current'
+    ? `managed Home source updated; Host unchanged: ${plan.candidateRuntime.version}\n`
+    : `managed Host updated: ${plan.originalRuntime.version} -> ${plan.candidateRuntime.version}\n`)
 }
 
 async function recoverHostUpdate({ manifest: initial, homePath, physicalHomePath, profile,
@@ -7531,6 +7546,7 @@ async function main() {
 }
 
 export const lifecycleProfileTest = Object.freeze({
+  reconcileHostUnitSources, validateHostUpdateManifest,
   assertHostSettingsRecoveryAdmission, assertHostSettingsRecoveryServiceState, readHostSettingsRecoveryFile,
   canonicalJointCandidateHome,
   assertSnapshotTreeSafe,
