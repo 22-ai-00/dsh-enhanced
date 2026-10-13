@@ -16,7 +16,7 @@ env:
   VITEST_MAX_WORKERS: '2'
 
 jobs:
-  verify:
+  linux-packages:
     runs-on: ubuntu-latest
     timeout-minutes: 35
 
@@ -100,9 +100,121 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify repository
-        id: repository
-        run: pnpm check
+      - name: Validate and lint repository
+        run: pnpm run validate && pnpm run lint
+
+      - name: Build and typecheck packages
+        run: pnpm run build && pnpm run typecheck:built
+
+      - name: Verify package tests
+        run: pnpm --recursive --if-present run test --testTimeout=15000
+
+      - name: Verify package packs
+        run: pnpm run pack:check
+
+  linux-root-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 11.7.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Verify Linux E2E prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            bubblewrap \
+            file \
+            git \
+            python3 \
+            tar
+
+          command -v bwrap >/dev/null
+          command -v git >/dev/null
+          command -v tar >/dev/null
+          command -v python3 >/dev/null
+          test -d /proc/self/fd
+
+          # The hosted runner needs loopback setup for the real --unshare-net
+          # bubblewrap tests, just like the package lane.
+          if [[ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] \
+            && [[ "$(</proc/sys/kernel/apparmor_restrict_unprivileged_userns)" == '1' ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          /usr/bin/bwrap \
+            --unshare-all \
+            --die-with-parent \
+            --new-session \
+            --ro-bind /usr /usr \
+            --ro-bind /lib /lib \
+            --ro-bind /lib64 /lib64 \
+            --proc /proc \
+            --dev /dev \
+            /usr/bin/true
+
+      - name: Install native pnpm test runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime_prefix="${RUNNER_TEMP}/dsh-test-pnpm"
+          npm install \
+            --prefix "${runtime_prefix}" \
+            --no-audit \
+            --no-fund \
+            --no-save \
+            --package-lock=false \
+            @pnpm/exe@11.7.0
+
+          pnpm_root="${runtime_prefix}/node_modules/@pnpm/exe"
+          node -e '
+            const manifest = require(process.argv[1]);
+            if (manifest.name !== "@pnpm/exe" || manifest.version !== "11.7.0") {
+              throw new Error(`unexpected pnpm runtime: ${manifest.name}@${manifest.version}`);
+            }
+          ' "${pnpm_root}/package.json"
+          test -x "${pnpm_root}/pnpm"
+          file "${pnpm_root}/pnpm" | grep -Eq 'ELF .* executable'
+          printf 'DSH_TEST_PNPM_ROOT=%s\n' "${pnpm_root}" >> "${GITHUB_ENV}"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build root test dependencies
+        run: pnpm run build
+
+      - name: Verify root tests
+        run: pnpm run test:root
+
+  verify:
+    needs: [linux-packages, linux-root-tests]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Verify both Linux lanes
+        shell: bash
+        run: |
+          packages='${{ needs.linux-packages.result }}'
+          root='${{ needs.linux-root-tests.result }}'
+          printf 'linux-packages=%s linux-root-tests=%s\n' "$packages" "$root"
+          test "$packages" = success
+          test "$root" = success
 
   macos-verify:
     # The installers document macOS LaunchAgent support and the Control Plane
