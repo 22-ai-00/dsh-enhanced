@@ -3,7 +3,7 @@ import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
-import { hostLocalSourcePlanMode } from '../scripts/install/host-lifecycle.mjs'
+import { hostLocalSourcePlanMode, hostOwnerSourceRepairSelection } from '../scripts/install/host-lifecycle.mjs'
 import { lifecycleProfileTest } from '../scripts/install/lifecycle-profile.mjs'
 
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -28,6 +28,28 @@ const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 describe('same-runtime joint source admission', () => {
+  test('admits owner repair only for an exact active pair, same Host, and explicit permission preset', () => {
+    const profile = 'assistant'
+    const coordinatorProfile = `rsi-${profile}-${sha256(profile).slice(0, 12)}`
+    const services = [profile, coordinatorProfile].map(name => ({
+      unit: `dsh-profile-${name}.service`, profile: name, wasActive: true,
+    }))
+    expect(hostOwnerSourceRepairSelection(sameHostPlan, services, profile, 'workspace-write'))
+      .toEqual({ coordinatorProfile, permissionPreset: 'workspace-write' })
+    expect(hostOwnerSourceRepairSelection(sameHostPlan, [...services].reverse(), profile, 'danger-full-access'))
+      .toEqual({ coordinatorProfile, permissionPreset: 'danger-full-access' })
+    for (const changed of [services.slice(0, 1), [...services, services[0]],
+      [{ ...services[0], wasActive: false }, services[1]],
+      [services[0], { ...services[1], wasActive: false }],
+      [services[0], { ...services[1], profile: 'other' }],
+      [services[0], { ...services[1], unit: 'dsh-profile-other.service' }]]) {
+      expect(() => hostOwnerSourceRepairSelection(sameHostPlan, changed, profile, 'workspace-write')).toThrow()
+    }
+    expect(() => hostOwnerSourceRepairSelection(legacyPlan, services, profile, 'workspace-write')).toThrow()
+    expect(() => hostOwnerSourceRepairSelection(sameHostPlan, services, profile, 'read-only')).toThrow()
+    expect(() => hostOwnerSourceRepairSelection(sameHostPlan, services, profile, undefined)).toThrow()
+  })
+
   test('accepts only a current schema 1 DSH 0.2 runtime or a legacy schema 2 update', () => {
     expect(hostLocalSourcePlanMode(sameHostPlan)).toBe('same-host')
     expect(hostLocalSourcePlanMode(legacyPlan)).toBe('legacy')
@@ -96,6 +118,62 @@ describe('same-runtime joint source admission', () => {
     const fakeUpdate = await write({ hostMigration: { ...base.hostMigration,
       plan: { ...currentPlan, status: 'update' } } })
     expect(() => lifecycleProfileTest.validateHostUpdateManifest(fakeUpdate, expected, transactionRoot)).toThrow()
+  })
+
+  test('binds an owner repair transaction manifest to both active services and the explicit preset', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-owner-repair-manifest-')))
+    roots.push(root)
+    const homePath = join(root, 'home'), transactionRoot = join(root, 'transaction')
+    await mkdir(homePath, { mode: 0o700 })
+    await mkdir(transactionRoot, { mode: 0o700 })
+    const transaction = await lstat(transactionRoot)
+    const profile = 'assistant', coordinatorProfile = `rsi-${profile}-${sha256(profile).slice(0, 12)}`
+    const services = [profile, coordinatorProfile].map(name => ({
+      unit: `dsh-profile-${name}.service`, profile: name, wasActive: true,
+      mainPid: name === profile ? 101 : 102, invocationId: name === profile ? 'target-old' : 'coordinator-old',
+    }))
+    const source = '[Service]\nExecStart=current-host\n'
+    const units = services.map(service => ({ unit: service.unit, profile: service.profile,
+      path: join(root, service.unit), before: source, after: source,
+      beforeDigest: sha256(source), afterDigest: sha256(source), pathEnvironment: 'PATH=/usr/bin' }))
+    const plan = { ...sameHostPlan, canonicalHome: homePath,
+      bindingPath: join(homePath, '.dsh-rsi-host.json') }
+    const localSource = { protocol: 'dsh-enhanced/host-owner-source-repair/v1', homePath, profile,
+      ownerRepair: { coordinatorProfile, permissionPreset: 'workspace-write' } }
+    const originalReadiness = { schemaVersion: 1, services: services.map(service => ({
+      unit: service.unit, profile: service.profile, invocationId: service.invocationId, mainPid: service.mainPid,
+      hostReady: false, coordinatorActivated: service.profile === coordinatorProfile ? false : null,
+    })) }
+    const base = { version: 4, id: 'owner-repair-test', homePath, canonicalHome: homePath,
+      transactionPath: transactionRoot, transactionIdentity: { dev: String(transaction.dev),
+        ino: String(transaction.ino), uid: transaction.uid, mode: transaction.mode },
+      profile, operation: 'host-update', services,
+      unitUniverse: services.map(service => service.unit), foreignOwnership: [], serviceMasks: [], serviceStartBarriers: [],
+      containmentMasks: [], containmentMaskIntents: [], containmentStartBarriers: [],
+      hostMigration: { plan, units, bwrapExecutable: '/usr/bin/true', phase: 'initializing', candidateEverStarted: false,
+        originalExternalLinksDigest: 'a'.repeat(64), localSource, originalReadiness } }
+    const expected = { homePath, transactionPath: transactionRoot, profile }
+    const write = (changed: object) => lifecycleProfileTest.writeManifest(transactionRoot, { ...base, ...changed }, 'preparing')
+    const valid = await write({})
+    expect(() => lifecycleProfileTest.validateHostUpdateManifest(valid, expected, transactionRoot)).not.toThrow()
+    for (const changed of [
+      { services: [services[0]], unitUniverse: [services[0].unit],
+        hostMigration: { ...base.hostMigration, units: [units[0]] } },
+      { services: [services[0], { ...services[1], wasActive: false }] },
+      { hostMigration: { ...base.hostMigration,
+        localSource: { ...localSource, ownerRepair: { ...localSource.ownerRepair, permissionPreset: 'read-only' } } } },
+      { hostMigration: { ...base.hostMigration,
+        localSource: { ...localSource, ownerRepair: { ...localSource.ownerRepair, coordinatorProfile: 'other' } } } },
+      { hostMigration: { ...base.hostMigration, bwrapExecutable: 'relative/bwrap' } },
+      { hostMigration: { ...base.hostMigration, originalReadiness: undefined } },
+      { hostMigration: { ...base.hostMigration, originalReadiness: { ...originalReadiness,
+        services: [{ ...originalReadiness.services[0], invocationId: 'other' }, originalReadiness.services[1]] } } },
+      { hostMigration: { ...base.hostMigration, originalReadiness: { ...originalReadiness,
+        services: [originalReadiness.services[0], { ...originalReadiness.services[1], coordinatorActivated: null }] } } },
+    ]) {
+      const invalid = await write(changed)
+      expect(() => lifecycleProfileTest.validateHostUpdateManifest(invalid, expected, transactionRoot)).toThrow()
+    }
   })
 })
 

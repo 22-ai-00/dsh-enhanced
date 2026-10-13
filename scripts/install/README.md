@@ -62,7 +62,7 @@ npm upgrade 则在同一生命周期锁内把发布 selector 解析为精确 coh
 
 uninstall 不访问 npm registry 或 pnpm store。`web` / `autonomy` 仍使用操作者预先停止整个 home 的离线事务；Linux `lark` 和 `supervised` upgrade/uninstall 会在锁内枚举同一 canonical `DSH_HOME` 的 installer-managed systemd user units，以绑定 inode 的高优先级 `user.control` mask 屏蔽后全部停止，在每次 rename 前后复核进程静止，并只恢复原 active units；启动由独立 crash guardian 执行，fresh InvocationID 的 journal ready marker 与稳定窗口通过后才删除旧备份。明确属于其它绝对 HOME 的 custom/legacy unit 不会被修改，但它的 ownership 摘要会写入事务并持续复核；归属缺失、相对、冲突、漂移为当前 HOME 或嵌套于当前 HOME 都会 fail closed。此前卸载留下的同 HOME clean profile 只有在四文件和目录闭集精确匹配 installer baseline 时才允许共存，其摘要同样绑定到事务并在恢复、启动、验收与清理前复核。此能力要求 `DSH_HOME` 与用户 systemd 配置位于同一文件系统，以便用 Linux `renameat2(RENAME_NOREPLACE)` 原子移动受管 mask 和 enablement link。此 Linux service-aware 能力不适用于外部 supervisor 或 Windows；macOS 仅支持调用方已停止整个 Home 的 upgrade，不支持 service-aware uninstall。`supervised` upgrade/uninstall 还要求 source 已安装支持只读 operator/attestation seam 的 cohort；安装器绝不回退到会迁移数据库的 Store 读取。停服后会绑定 Recovery、Automations 与 Delivery owner 快照；copied state 只按内容和语义摘要比较，允许 inode 改变。升级后的私有副本用 fresh UUID 和新包 catalog 生成 preview；preview Host 在无网络 bwrap 中运行，并只在该进程的临时 overlay 里禁用 Lark、从 Health required providers 移除 `larkChannel`。这个唯一 external-provider exemption 会绑定进事务且不会进入 active 配置。swap 后真实 upgraded service 必须同时通过 fresh InvocationID/journal、真实 Lark required-health、generation 严格前进的 exact active attestation 与稳定窗口。`supervised` uninstall 则在停服后绑定只读 source proof，将旧 profile 归档并换成 installer-clean Web profile；clean target 只按通用 fresh InvocationID/journal readiness 与稳定窗口验收，不要求已被停用的 Lark/Health/supervised active attestation。失败会保持服务收容并保留 current/original homes 和 manifest，不自动回滚。
 
-Linux `supervised` 的已登记 RSI 双 Host 可以在同一个 Home 事务中成对升级插件：目标及协调器必须处于活动状态，安装收据和现有版本一致，共享 catalog/trust、owner 与 handoff 通过核对。协调器只包含原生基础配置及 Policy、Automations、Control Plane 三个增强包，三包随目标同批更新。npm 路径先分别准备并完整预取两个 profile 的锁文件；切换前更新副本收据并实际激活两个 profile。协调器预览只在进程 overlay 中关闭 scheduler，真实启动须生成本次启动后的 owner-bound Automation 登记。原始/候选的有效配置、收据和包版本在恢复、接受及清理前重新核对。停服前还要求旧协调器本次 InvocationID 已有就绪信号；缺少信号时原服务继续运行。切换前失败可恢复原活动服务；切换后失败保持双服务停止、保留新旧 Home 与事务供对账，不自动覆盖可能已迁移的状态。固定本地源码或存在 `rsi-local-cohorts` 的安装目前在 registry 查询、停服和包修改前拒绝升级，包括尚未生成协调器收据的冻结安装。开发版 `dsh-rsi-setup --prepare-local-update` 可在 Home 外准备保留既有修复的合并源码与隔离构建制品；尚无 RSI owner/coordinator 的安装可使用下述 checkout 内显式维护入口，已授权的双 Host 冻结安装仍未开放，详见 [RSI 配置](../../plugins/lark-channel/docs/rsi-setup.md)；成对卸载仍未支持。跨版本 Host 更新作为插件升级之后的独立阶段，见下文。
+Linux `supervised` 的已登记 RSI 双 Host 可以在同一个 Home 事务中成对升级插件：目标及协调器必须处于活动状态，安装收据和现有版本一致，共享 catalog/trust、owner 与 handoff 通过核对。协调器只包含原生基础配置及 Policy、Automations、Control Plane 三个增强包，三包随目标同批更新。npm 路径先分别准备并完整预取两个 profile 的锁文件；切换前更新副本收据并实际激活两个 profile。协调器预览只在进程 overlay 中关闭 scheduler，真实启动须生成本次启动后的 owner-bound Automation 登记。原始/候选的有效配置、收据和包版本在恢复、接受及清理前重新核对。停服前还要求旧协调器本次 InvocationID 已有就绪信号；缺少信号时原服务继续运行。切换前失败可恢复原活动服务；切换后失败保持双服务停止、保留新旧 Home 与事务供对账，不自动覆盖可能已迁移的状态。固定本地源码或存在 `rsi-local-cohorts` 的安装目前在 registry 查询、停服和包修改前拒绝普通升级，包括尚未生成协调器收据的冻结安装。开发版 `dsh-rsi-setup --prepare-local-update` 可在 Home 外准备保留既有修复的合并源码与隔离构建制品；尚无 RSI owner/coordinator 的安装可使用下述 checkout 内显式维护入口。已授权双 Host 的通用源码升级仍未开放；已 applied、未首次采用的失败首启另有下述有界 `host-owner-repair` 入口。详见 [RSI 配置](../../plugins/lark-channel/docs/rsi-setup.md)；成对卸载仍未支持。跨版本 Host 更新作为插件升级之后的独立阶段，见下文。
 
 
 ### 旧 Home 的联合 Host / 源码迁移
@@ -99,6 +99,26 @@ node /reviewed/recovery-checkout/scripts/install/lifecycle-profile.mjs \
 ```
 
 恢复许可只接纳已经发生且独立复现的单 profile 配置后继，不重播导入、不改写配置、不重签源码链、不更换旧 installer 绑定，也不回退已运行的 Home。恢复 checkout 可以独立审核，但原收据引用的 installer 必须保持原字节。许可持久化后中断可用同一 recovery checkout 的普通 `host-recover` 继续；其余 profile、制品、原身份、系统服务和 fresh InvocationID 验收仍照常执行。被原生拒绝的 UI / 旧 preset 节应明确记录并保留原件，不得宣称它们已生效。
+
+### 已 applied、未首次采用的 owner 修复
+
+`host-owner-repair` 是独立的失败首启修复入口，不是通用的 owner 升级或权限重置。它只接受同一受支持 Host 的 `current` 计划、原本活动的精确目标 / 协调器双服务、完整 applied journal、尚无 activation 的原控制账本，以及尚未使用的签发器状态。已有 Host overlay、未知变更或在途工作会拒绝；不得删除状态以满足这些条件。
+
+先在 Home 外准备真实冻结源码候选，再显式选择已授权的持久权限预设：`workspace-write` 或 `danger-full-access`。后者允许任意文件和网络访问、不逐次审批；命令不会把旧 `auto` 静默放宽。以下示例采用较严格的一档：
+
+```sh
+node /reviewed/checkout/scripts/install/lifecycle-profile.mjs \
+  host-owner-repair assistant /absolute/dsh-home \
+  /absolute/current-private-dsh /usr/bin/bwrap /usr/bin/systemctl /usr/bin/journalctl \
+  /absolute/private-current-plan.json /absolute/prepared-local-update /reviewed/checkout \
+  workspace-write /absolute/private-auxiliary-root
+```
+
+事务在屏蔽并停止双服务后重新复制 Home，追加真实 owner-ledger 源码维护记录，物化候选包和独立构建的 creation image，并用原身份、原始期限与预算重新编译配置。原 bootstrap 不覆盖；旧配置、journal、creation receipt 保留在私有审计中，新配置由单独的 Host 签名 repair overlay 绑定，不虚构 activation。unit 与 service environment 保持不变，其他 profile 不得改变行为。
+
+候选启动前复核原账本历史和追加记录。切换后必须通过新鲜 systemd InvocationID、飞书就绪、真实 HMAC observer 与原生协调器登记，不能以进程 active 代替验收。恢复沿用 `host-recover`：候选未运行可恢复原 Home；已经运行则保留候选和事务继续对账，不覆盖业务状态。该命令的实现、生产验收和普通使用闭环是不同门，当前验证边界见 [RSI 状态](../../docs/rsi-status.md)。
+
+停服前绑定原双服务的 InvocationID、PID、Host 就绪及原生登记状态。仅在候选从未启动、原证明仍完整时，恢复才允许保留原先缺失的就绪信号，恢复原 active / enablement 并明确报告 `degraded-original-restored`；原先已有的就绪信号仍须重新产生。这不降低候选验收门，也不把原来未就绪的学习服务宣称为成功。
 
 ### Checkout 内的 pre-owner 冻结源码维护
 

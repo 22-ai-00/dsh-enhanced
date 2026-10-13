@@ -334,7 +334,8 @@ describe('managed Host transaction inputs', () => {
       await expect(lifecycleProfileTest.canonicalJointCandidateHome(anchoredHome, otherHome))
         .rejects.toThrow('does not resolve to the canonical Home')
       const source = await readFile(new URL('../scripts/install/lifecycle-profile.mjs', import.meta.url), 'utf8')
-      expect(source.match(/physicalHome: candidateHome, selection: 'candidate'/gu)).toHaveLength(2)
+      expect(source.match(/physicalHome: candidateHome,\s+selection: 'candidate'/gu)).toHaveLength(2)
+      expect(source).toContain("selection: 'candidate', checkLedger: ownerRepair")
       expect(source).toContain('stagedHome: candidateHome, originalPhysicalHome: backupHome')
     } finally {
       await parent.close()

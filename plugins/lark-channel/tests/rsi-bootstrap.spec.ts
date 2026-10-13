@@ -8,10 +8,81 @@ import { describe, expect, test } from 'vitest'
 import { ControlPlaneStore, signSourceMaintenanceRecord } from '@dsh-enhanced/plugin-control-plane'
 import { inspectRsiOwnerConfiguration, prepareRsiOwnerConfiguration } from '../src/rsi-bootstrap.js'
 import { compileRsiProfiles } from '../src/rsi-profile.js'
-import { signRsiHostUpdateOverlay } from '../src/rsi-host-update.js'
+import { rsiHostUpdateOverlayDigest, signRsiHostUpdateOverlay, signRsiOwnerRepairOverlay } from '../src/rsi-host-update.js'
 import { rsiBootstrapFixture } from './fixtures/rsi-bootstrap.js'
 
 describe.skipIf(process.platform !== 'linux')('owner configuration preparation', () => {
+  test('accepts a signed no-activation repair without recreating owner authority and rejects receipt drift', async () => {
+    const fixture = await rsiBootstrapFixture()
+    try {
+      const { manifest, resources } = fixture.input
+      const home = dirname(dirname(resources.root))
+      const result = await prepareRsiOwnerConfiguration(fixture.input, fixture)
+      const patches = await compileRsiProfiles({ manifest, dshHome: home, ...fixture.profiles, owner: fixture.binding })
+      const sha = (bytes: Buffer | string) => createHash('sha256').update(bytes).digest('hex')
+      const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`
+      const bootstrapSource = await readFile(join(resources.configRoot, 'bootstrap.json'), 'utf8')
+      const receipt = JSON.parse(bootstrapSource) as { files: Record<string, string> }
+      const patchDigests = { [manifest.targetProfile]: sha(patches.targetPatch),
+        [manifest.coordinatorProfile]: sha(patches.coordinatorPatch) }
+      await writeFile(join(home, 'profiles', manifest.targetProfile, 'cordis.patch.yml'), patches.targetPatch, { mode: 0o600 })
+      await writeFile(join(home, 'profiles', manifest.coordinatorProfile, 'cordis.patch.yml'), patches.coordinatorPatch, { mode: 0o600 })
+      const journalPath = join(home, '.rsi-setup-journal.json')
+      const creationPath = join(home, 'rsi-creation-builds', manifest.targetProfile, 'bootstrap.json')
+      await mkdir(dirname(creationPath), { recursive: true, mode: 0o700 })
+      const beforeJournal = '{"state":"before"}\n', beforeCreation = '{"state":"before"}\n'
+      const afterJournal = '{"state":"after"}\n', afterCreation = '{"state":"after"}\n'
+      await writeFile(journalPath, afterJournal, { mode: 0o600 })
+      await writeFile(creationPath, afterCreation, { mode: 0o600 })
+      const runtimePath = join(home, 'rsi-authority-runtimes', manifest.targetProfile, 'receipt.json')
+      const runtimeReceiptDigest = sha(await readFile(runtimePath))
+      const host = resources.identities.host
+      const observerKeyPath = manifest.controlPlane.runtimeObserver!.keyPath
+      const observerKey = await readFile(observerKeyPath), observerKeyStat = await lstat(observerKeyPath)
+      const repair = signRsiOwnerRepairOverlay({ schemaVersion: 1, kind: 'rsi-owner-repair-overlay',
+        transactionId: 'owner-repair', dshHome: home, targetProfile: manifest.targetProfile,
+        installationId: resources.installationId, sequence: 1, previousDigest: null,
+        bootstrapDigest: sha(bootstrapSource), files: receipt.files, patches: patchDigests,
+        runtimeReceiptDigest, planDigest: sha(json({ files: receipt.files, patches: patchDigests })), result,
+        repair: { sourceMaintenanceDigest: 'a'.repeat(64),
+          before: { files: receipt.files, patches: patchDigests, runtimeReceiptDigest,
+            creationReceiptDigest: sha(beforeCreation), journalDigest: sha(beforeJournal) },
+          after: { creationReceiptDigest: sha(afterCreation), journalDigest: sha(afterJournal) },
+          permissionPreset: 'workspace-write' },
+        issuedAt: fixture.input.now, authority: host.authority, keyId: host.keyId },
+      await readFile(host.keyPath, 'utf8'), resources, bootstrapSource, [])
+      await writeFile(join(resources.configRoot, 'host-update-overlays.json'),
+        json({ schemaVersion: 1, kind: 'rsi-host-update-overlays', records: [repair] }), { mode: 0o600 })
+      const inspect = () => inspectRsiOwnerConfiguration({ manifest, resources, patches,
+        signal: new AbortController().signal })
+      await expect(inspect()).resolves.toBeUndefined()
+      await expect(prepareRsiOwnerConfiguration(fixture.input, fixture)).resolves.toEqual(result)
+      expect(await readFile(observerKeyPath)).toEqual(observerKey)
+      expect((await lstat(observerKeyPath)).ino).toBe(observerKeyStat.ino)
+      const successor = signRsiHostUpdateOverlay({ schemaVersion: 1, kind: 'rsi-host-update-overlay',
+        transactionId: 'host-successor', dshHome: home, targetProfile: manifest.targetProfile,
+        installationId: resources.installationId, currentPlanId: 'watched-plan', activationId: 'watched-activation',
+        sequence: 2, previousDigest: rsiHostUpdateOverlayDigest(repair), bootstrapDigest: sha(bootstrapSource),
+        files: receipt.files, patches: patchDigests, runtimeReceiptDigest,
+        planDigest: sha(json({ files: receipt.files, patches: patchDigests })), result,
+        issuedAt: fixture.input.now + 1, authority: host.authority, keyId: host.keyId },
+      await readFile(host.keyPath, 'utf8'), resources, bootstrapSource, [repair])
+      await writeFile(join(resources.configRoot, 'host-update-overlays.json'),
+        json({ schemaVersion: 1, kind: 'rsi-host-update-overlays', records: [repair, successor] }))
+      await expect(inspect()).resolves.toBeUndefined()
+      await expect(prepareRsiOwnerConfiguration(fixture.input, fixture)).resolves.toEqual(result)
+      await writeFile(journalPath, beforeJournal)
+      await expect(inspect()).rejects.toThrow('signed owner repair receipts changed')
+      await expect(prepareRsiOwnerConfiguration(fixture.input, fixture)).rejects.toThrow('signed owner repair receipts changed')
+      await writeFile(journalPath, afterJournal)
+      await writeFile(creationPath, beforeCreation)
+      await expect(inspect()).rejects.toThrow('signed owner repair receipts changed')
+      await expect(prepareRsiOwnerConfiguration(fixture.input, fixture)).rejects.toThrow('signed owner repair receipts changed')
+      expect(await readFile(observerKeyPath)).toEqual(observerKey)
+      expect((await lstat(observerKeyPath)).ino).toBe(observerKeyStat.ino)
+    } finally { await fixture.cleanup() }
+  }, 120_000)
+
   test('pre-stop inspection accepts signed backup profiles and rejects backup or runtime receipt drift', async () => {
     const f = await rsiBootstrapFixture()
     try {

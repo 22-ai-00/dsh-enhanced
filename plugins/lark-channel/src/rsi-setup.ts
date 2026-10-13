@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { createRequire } from 'node:module'
 import { isDeepStrictEqual } from 'node:util'
-import { isMap, isScalar, isSeq, parseDocument } from 'yaml'
+import { isAlias, isMap, isScalar, isSeq, parseDocument } from 'yaml'
 import type { ActiveLarkOwnerBindingsSnapshot } from '@dsh-enhanced/assistant-delivery'
 import { compileRsiProfiles, type RsiSetupManifest } from './rsi-profile.js'
 import { withDshHomeLifecycleLock } from './setup.js'
@@ -33,17 +33,22 @@ function fail(message: string): never { throw new Error(`rsi setup: ${message}`)
 
 // Compare semantic YAML nodes, including executable !!js tags, without depending
 // on comments or formatting retained by the profile patch serializer.
-function yamlValue(node: unknown): unknown {
+function yamlValue(node: unknown, document: ReturnType<typeof parseDocument>, ancestors = new Set<unknown>()): unknown {
+  if (isAlias(node)) {
+    const resolved = node.resolve(document)
+    if (!resolved || ancestors.has(resolved)) fail('cyclic or unresolved YAML alias')
+    return yamlValue(resolved, document, new Set(ancestors).add(resolved))
+  }
   if (isScalar(node)) return { tag: node.tag, value: node.value }
-  if (isSeq(node)) return { tag: node.tag, items: node.items.map(yamlValue) }
-  if (isMap(node)) return { tag: node.tag, entries: node.items.map(item => [yamlValue(item.key), yamlValue(item.value)])
+  if (isSeq(node)) return { tag: node.tag, items: node.items.map(item => yamlValue(item, document, ancestors)) }
+  if (isMap(node)) return { tag: node.tag, entries: node.items.map(item => [yamlValue(item.key, document, ancestors), yamlValue(item.value, document, ancestors)])
     .sort((left, right) => JSON.stringify(left[0]).localeCompare(JSON.stringify(right[0]))) }
   return node
 }
 function patchValue(source: string, label: string): unknown {
   const document = parseDocument(source, { uniqueKeys: true })
   if (document.errors.length || !isSeq(document.contents)) fail(`invalid ${label} patch`)
-  return yamlValue(document.contents)
+  return yamlValue(document.contents, document)
 }
 export function assertRsiEffectivePatch(patch: string, effective: string): void {
   const expected = parseDocument(patch), actual = parseDocument(effective)
@@ -53,7 +58,7 @@ export function assertRsiEffectivePatch(patch: string, effective: string): void 
     const matches = actual.contents.items.filter(item => isMap(item) && item.get('id') === row.get('id'))
     const resolved = matches[0]
     if (matches.length !== 1 || !isMap(resolved) || (resolved.get('disabled') as unknown) === true && (row.get('disabled') as unknown) !== true
-      || !isDeepStrictEqual(yamlValue(row.get('config', true)), yamlValue(resolved.get('config', true)))) fail(`effective profile overrides compiled config for ${String(row.get('id'))}`)
+      || !isDeepStrictEqual(yamlValue(row.get('config', true), expected), yamlValue(resolved.get('config', true), actual))) fail(`effective profile overrides compiled config for ${String(row.get('id'))}`)
   }
 }
 

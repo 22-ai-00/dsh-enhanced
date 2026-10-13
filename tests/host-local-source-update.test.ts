@@ -6,6 +6,7 @@ import { join } from 'node:path'
 const mocks = vi.hoisted(() => ({
   bind: vi.fn(), assert: vi.fn(), load: vi.fn(),
   auxVerify: vi.fn(), auxMaterialize: vi.fn(), auxVerifyHome: vi.fn(),
+  captureOwner: vi.fn(), prepareCreation: vi.fn(), appendOwner: vi.fn(), stageOwner: vi.fn(), verifyOwner: vi.fn(),
 }))
 vi.mock('../scripts/install/local-source-maintenance.mjs', () => ({
   bindLocalSourceInstaller: mocks.bind,
@@ -17,6 +18,13 @@ vi.mock('../scripts/install/host-local-artifacts.mjs', () => ({
   verifyHostLocalArtifacts: mocks.auxVerify,
   materializeHostLocalArtifacts: mocks.auxMaterialize,
   verifyHostLocalArtifactsInHome: mocks.auxVerifyHome,
+}))
+vi.mock('../scripts/install/owner-source-repair.mjs', () => ({
+  captureOwnerSourceRepair: mocks.captureOwner,
+  prepareOwnerRepairCreation: mocks.prepareCreation,
+  appendOwnerSourceRepairMaintenance: mocks.appendOwner,
+  stageOwnerSourceRepair: mocks.stageOwner,
+  verifyOwnerSourceRepair: mocks.verifyOwner,
 }))
 
 import { prepareHostLocalSourceUpdate, stageHostLocalSourceUpdate,
@@ -76,6 +84,9 @@ async function fixture() {
   const runtime = { packageVersion: '0.1.48', root: join(homePath, 'rsi-authority-runtimes', profile) }
   const runtimeReceipts = new Map<string, unknown>()
   const api = {
+    readRsiSourceWorkspace: vi.fn(async () => preparation.source),
+    readRsiBuildEnvironment: vi.fn(async () => ({ sourceBuild: 'candidate-build' })),
+    prepareRsiAuthorityResources: vi.fn(async () => ({ installationId: 'installation' })),
     readRsiLocalUpdateLocked: vi.fn(async () => preparation),
     assertRsiPreOwnerInstallation: vi.fn(async () => preOwner),
     readRsiSourceMaintenance: vi.fn(async ({ physicalHome }: { physicalHome: string }) => stagedSources.get(physicalHome) ?? originalSource),
@@ -83,7 +94,7 @@ async function fixture() {
     stageRsiLocalUpdateResources: vi.fn(async ({ stagePhysicalHome }: { stagePhysicalHome: string }) => {
       await writeFile(join(stagePhysicalHome, 'rsi-local-cohorts', profile, 'receipt.json'),
         JSON.stringify(stagedCohort), { mode: 0o600 })
-      return { cohort: stagedCohort,
+      return { cohort: stagedCohort, sourceBuild: 'candidate-build', releaseBuild: 'candidate-release',
         proof: { schemaVersion: 1, preparationDigest: preparation.receiptDigest } }
     }),
     produceRsiLocalSourceMaintenance: vi.fn(async () => record),
@@ -123,6 +134,62 @@ test('binds reviewed pre-owner source and rebases authenticated artifacts for di
     tarball: join(setup.homePath, 'rsi-local-cohorts', setup.profile, 'artifacts', 'assistant-policy.tgz'),
     sourcePath: join(setup.disposableHome, 'rsi-local-cohorts', setup.profile, 'artifacts', 'assistant-policy.tgz'),
   })
+  expect(setup.api.produceRsiLocalSourceMaintenance).not.toHaveBeenCalled()
+})
+
+test('owner repair appends the real owner-ledger record and binds finalization to native inputs', async () => {
+  const setup = await fixture()
+  const ownerRepair = { homePath: setup.homePath, profile: setup.profile, permissionPreset: 'workspace-write' }
+  const candidateCreation = { receiptSha256: 'a'.repeat(64) }
+  const ownerRepairNext = { overlayDigest: 'b'.repeat(64) }
+  mocks.captureOwner.mockResolvedValue(ownerRepair)
+  mocks.prepareCreation.mockResolvedValue(candidateCreation)
+  mocks.stageOwner.mockResolvedValue(ownerRepairNext)
+  const proof = await prepareHostLocalSourceUpdate({ ...setup, ownerRepairPreset: 'workspace-write',
+    dshPath: '/private/host/dsh', dshEnvironment: { PATH: '/private/host/bin' } })
+  expect(proof.protocol).toBe('dsh-enhanced/host-owner-source-repair/v1')
+  expect(setup.api.assertRsiPreOwnerInstallation).not.toHaveBeenCalled()
+  expect(mocks.captureOwner).toHaveBeenCalledWith(expect.objectContaining({
+    permissionPreset: 'workspace-write', dshPath: '/private/host/dsh',
+    dshEnvironment: { PATH: '/private/host/bin' },
+  }))
+  await stageResourcesForPreparation({ proof, homePath: setup.homePath, disposableHome: setup.disposableHome })
+  expect(mocks.appendOwner).not.toHaveBeenCalled()
+  const staged = await stageHostLocalSourceUpdate({ proof, homePath: setup.homePath, stageHome: setup.stageHome })
+  expect(setup.api.produceRsiLocalSourceMaintenance).toHaveBeenCalledWith(expect.objectContaining({
+    maintenanceMode: 'owner-ledger',
+  }))
+  expect(setup.api.produceRsiLocalSourceMaintenance.mock.calls[0][0]).not.toHaveProperty('preparedCoordinator')
+  expect(mocks.appendOwner).toHaveBeenCalledWith(expect.objectContaining({
+    ownerRepair, record: setup.record, homePath: setup.homePath, stageHome: setup.stageHome,
+  }))
+  const native = { targetEffective: 'target-native', coordinatorEffective: 'coordinator-native' }
+  const finalized = await finalizeHostLocalSourceUpdate({ proof: staged, homePath: setup.homePath,
+    stageHome: setup.stageHome, stageNativeEffective: native, coordinatorBase: 'native-base',
+    unitProperties: { ExecStart: 'exact-host' }, transactionId: 'repair-transaction' })
+  expect(finalized.ownerRepairNext).toEqual(ownerRepairNext)
+  expect(mocks.stageOwner).toHaveBeenCalledWith(expect.objectContaining({
+    ownerRepair, candidateCreation, stageNativeEffective: native, coordinatorBase: 'native-base',
+    unitProperties: { ExecStart: 'exact-host' }, transactionId: 'repair-transaction',
+    sourceBuild: 'candidate-build', releaseBuild: 'candidate-release', record: setup.record,
+  }))
+  await verifyHostLocalSourceUpdate({ proof: finalized, homePath: setup.homePath,
+    physicalHome: setup.stageHome, selection: 'candidate', checkLedger: true })
+  expect(mocks.verifyOwner).toHaveBeenLastCalledWith(expect.objectContaining({
+    ownerRepairNext, phase: 'after-finalize', checkLedger: true,
+  }))
+  mocks.verifyOwner.mockRejectedValueOnce(new Error('owner ledger drift'))
+  await expect(verifyHostLocalSourceUpdate({ proof: finalized, homePath: setup.homePath,
+    physicalHome: setup.stageHome, selection: 'candidate', checkLedger: true })).rejects.toThrow('owner ledger drift')
+})
+
+test('failed owner eligibility never falls back to pre-owner or creates candidate grants', async () => {
+  const setup = await fixture()
+  mocks.captureOwner.mockRejectedValue(new Error('owner activation already exists'))
+  await expect(prepareHostLocalSourceUpdate({ ...setup, ownerRepairPreset: 'workspace-write' }))
+    .rejects.toThrow('owner activation already exists')
+  expect(setup.api.assertRsiPreOwnerInstallation).not.toHaveBeenCalled()
+  expect(mocks.prepareCreation).not.toHaveBeenCalled()
   expect(setup.api.produceRsiLocalSourceMaintenance).not.toHaveBeenCalled()
 })
 

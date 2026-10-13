@@ -80,6 +80,23 @@ export function hostLocalSourcePlanMode(plan) {
   throw new Error('joint local source migration requires a legacy plan or an unchanged supported Host')
 }
 
+export function hostOwnerSourceRepairSelection(plan, services, profile, permissionPreset) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(profile)
+    || !['workspace-write', 'danger-full-access'].includes(permissionPreset)
+    || hostLocalSourcePlanMode(plan) !== 'same-host') {
+    throw new Error('owner repair requires an unchanged supported Host and an explicit permission preset')
+  }
+  const coordinatorProfile = `rsi-${profile.slice(0, 43)}-${digest(profile).slice(0, 12)}`
+  const pair = [profile, coordinatorProfile].sort()
+  if (!Array.isArray(services) || services.length !== 2
+    || JSON.stringify(services.map(service => service.profile).sort()) !== JSON.stringify(pair)
+    || services.some(service => service.wasActive !== true
+      || service.unit !== `dsh-profile-${service.profile}.service`)) {
+    throw new Error('owner repair requires exactly the active target and coordinator services')
+  }
+  return { coordinatorProfile, permissionPreset }
+}
+
 function quote(value) {
   if (value.includes('\0') || /[\r\n]/u.test(value)) throw new Error('invalid systemd value')
   return `"${value.replaceAll('%', '%%').replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`

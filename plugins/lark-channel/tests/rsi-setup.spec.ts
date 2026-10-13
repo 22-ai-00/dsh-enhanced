@@ -121,6 +121,27 @@ describe('RSI dual profile setup transaction', () => {
     expect(() => assertRsiEffectivePatch(patch, patch.replace('!!js ', ''))).toThrow('overrides compiled config')
     expect(() => assertRsiEffectivePatch(patch, '[]')).toThrow('overrides compiled config')
   })
+  test('final composition resolves aliases without trusting anchor names', () => {
+    const aliased = '- id: managed\n  config:\n    scope: &scope { principalId: owner, path: !!js dshHomePath("state") }\n    reused: *scope\n'
+    const expanded = '- id: managed\n  config:\n    scope: { principalId: owner, path: !!js dshHomePath("state") }\n    reused: { principalId: owner, path: !!js dshHomePath("state") }\n'
+    const renamed = aliased.replace('&scope', '&other').replace('*scope', '*other')
+    expect(() => assertRsiEffectivePatch(aliased, expanded)).not.toThrow()
+    expect(() => assertRsiEffectivePatch(expanded, aliased)).not.toThrow()
+    expect(() => assertRsiEffectivePatch(aliased, renamed)).not.toThrow()
+    expect(() => assertRsiEffectivePatch(aliased, expanded.replace('principalId: owner', 'principalId: other'))).toThrow('overrides compiled config')
+    expect(() => assertRsiEffectivePatch(aliased, expanded.replace('!!js ', ''))).toThrow('overrides compiled config')
+    expect(() => assertRsiEffectivePatch(aliased, '- id: managed\n  config: &loop { self: *loop }\n')).toThrow('cyclic or unresolved YAML alias')
+    expect(() => assertRsiEffectivePatch(aliased, '- id: managed\n  config: *missing\n')).toThrow('cyclic or unresolved YAML alias')
+  })
+  test('recompiled profile patches compare aliases with expanded values', async () => {
+    const f = await fixture()
+    const aliased = (profile: string) => `- id: ${profile}\n  config:\n    scope: &scope { principalId: owner }\n    reused: *scope\n`
+    const expanded = (profile: string) => `- id: ${profile}\n  config:\n    scope: { principalId: owner }\n    reused: { principalId: owner }\n`
+    f.ports.compile = vi.fn(async input => input.targetPatch.includes('reused:')
+      ? { targetPatch: expanded('target'), coordinatorPatch: expanded('coordinator') }
+      : { targetPatch: aliased('target'), coordinatorPatch: aliased('coordinator') })
+    expect((await configureRsiSetup(f.args(f.apply), f.ports)).mode).toBe('configured')
+  })
   test('default validates without writing or starting services', async () => {
     const f = await fixture()
     expect(await configureRsiSetup(f.args(), f.ports)).toEqual({ mode: 'checked', profiles: f.pair })

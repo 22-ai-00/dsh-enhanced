@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readdir, rename, rm, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { rsiBuildResources as io, readRsiBuildEnvironment, type RsiBuildEnvironment } from './rsi-build.js'
@@ -177,6 +177,86 @@ export async function readRsiCreationBuildEnvironment(input: Input): Promise<Rsi
   const parent = join(input.dshHome, 'rsi-creation-builds'), final = join(parent, input.profile)
   await io.directory(parent)
   return replay(final, input, expected, dockerSha256, undefined, input.signal)
+}
+
+export async function readRsiCreationBuildInStage(input: {
+  logicalHome: string; stagePhysicalHome: string; profile: string
+  stagedSource: RsiSourceWorkspace; stagedBuild: RsiBuildEnvironment; signal?: AbortSignal
+}): Promise<RsiCreationBuildEnvironment> {
+  if (!validPath(input.logicalHome) || !validPath(input.stagePhysicalHome)
+    || input.logicalHome === input.stagePhysicalHome || !PROFILE.test(input.profile)
+    || input.stagedSource.repository !== join(input.logicalHome, 'rsi-sources', input.profile, 'checkout')
+    || input.stagedSource.sourceCommit !== input.stagedBuild.sourceCommit) {
+    fail('staged creation binding differs')
+  }
+  const expected = await inputs({ ...input.stagedSource,
+    repository: join(input.stagePhysicalHome, 'rsi-sources', input.profile, 'checkout') })
+  const dockerSha256 = digest(await io.readStable(input.stagedBuild.sourceBuild.dockerPath, 100_000_000, false, true))
+  return replay(join(input.stagePhysicalHome, 'rsi-creation-builds', input.profile),
+    { dshHome: input.logicalHome, profile: input.profile, source: input.stagedSource,
+      build: input.stagedBuild, ...(input.signal ? { signal: input.signal } : {}) },
+    expected, dockerSha256, undefined, input.signal)
+}
+
+/** Bind a freshly built candidate image to a stopped, copied Home. The old
+ * logical Home and the candidate receipt are never written by this operation. */
+export async function materializeRsiCreationBuildInStage(input: {
+  candidateHome: string; stagePhysicalHome: string; logicalHome: string; profile: string
+  candidateSource: RsiSourceWorkspace; candidateBuild: RsiBuildEnvironment
+  stagedSource: RsiSourceWorkspace; stagedBuild: RsiBuildEnvironment; signal?: AbortSignal
+}): Promise<{ creationBuild: RsiCreationBuildEnvironment; candidateReceiptSha256: string; receiptSha256: string }> {
+  const { candidateHome, stagePhysicalHome, logicalHome, profile, signal } = input
+  if (!validPath(candidateHome) || !validPath(stagePhysicalHome) || !validPath(logicalHome)
+    || !PROFILE.test(profile) || candidateHome === stagePhysicalHome || candidateHome === logicalHome
+    || stagePhysicalHome === logicalHome || input.candidateSource.sourceCommit !== input.stagedSource.sourceCommit
+    || !isDeepStrictEqual(input.candidateBuild.sourceBuild, input.stagedBuild.sourceBuild)
+    || input.candidateBuild.sourceCommit !== input.stagedBuild.sourceCommit
+    || input.stagedSource.repository !== join(logicalHome, 'rsi-sources', profile, 'checkout')) {
+    fail('staged creation binding differs from new candidate')
+  }
+  const candidateInput = { dshHome: candidateHome, profile, source: input.candidateSource,
+    build: input.candidateBuild, ...(signal ? { signal } : {}) }
+  const creationBuild = await readRsiCreationBuildEnvironment(candidateInput)
+  const candidatePath = join(candidateHome, 'rsi-creation-builds', profile, 'bootstrap.json')
+  const candidateBytes = await io.readStable(candidatePath, 65_536, true)
+  const candidateReceipt = JSON.parse(candidateBytes.toString('utf8')) as Receipt
+  const expected = await inputs({ ...input.stagedSource,
+    repository: join(stagePhysicalHome, 'rsi-sources', profile, 'checkout') })
+  if (!isDeepStrictEqual(expected.hashes, candidateReceipt.inputHashes)
+    || expected.contextDigest !== candidateReceipt.contextDigest
+    || expected.lockSha256 !== candidateReceipt.lockSha256
+    || !isDeepStrictEqual(expected.contextFiles, candidateReceipt.contextFiles)) {
+    fail('staged source inputs differ from freshly built behavior image')
+  }
+  const dockerSha256 = digest(await io.readStable(creationBuild.dockerPath, 100_000_000, false, true))
+  if (dockerSha256 !== candidateReceipt.dockerSha256) fail('candidate Docker client changed')
+  const scratch = await mkdtemp(join(stagePhysicalHome, '.rsi-creation-verify-'))
+  try {
+    await chmod(scratch, 0o700)
+    await mkdir(join(scratch, 'docker-config'), { mode: 0o700 })
+    const deadline = AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(120_000)])
+    await imageExists(creationBuild.dockerPath, creationBuild.sourceImage, scratch, deadline)
+    await imageExists(creationBuild.dockerPath, creationBuild.image, scratch, deadline)
+  } finally { await rm(scratch, { recursive: true, force: true }) }
+  const content = { ...creationBuild, dshHome: logicalHome, profile, dockerSha256,
+    inputHashes: expected.hashes, contextFiles: expected.contextFiles,
+    contextDigest: expected.contextDigest, lockSha256: expected.lockSha256 }
+  const bytes = JSON.stringify({ ...content, receiptDigest: digest(JSON.stringify(content)) })
+  const directory = join(stagePhysicalHome, 'rsi-creation-builds', profile)
+  await io.directory(directory)
+  const oldPath = join(directory, 'bootstrap.json')
+  await io.readStable(oldPath, 65_536, true)
+  const temporary = join(directory, `.bootstrap-${process.pid}-${Date.now()}.json`)
+  try {
+    await io.writeExclusive(temporary, bytes)
+    await rename(temporary, oldPath)
+    await io.syncDirectory(directory)
+  } finally { await rm(temporary, { force: true }) }
+  if (!isDeepStrictEqual(await readRsiCreationBuildInStage({ logicalHome, stagePhysicalHome, profile,
+    stagedSource: input.stagedSource, stagedBuild: input.stagedBuild, ...(signal ? { signal } : {}) }), creationBuild)) {
+    fail('materialized behavior image did not replay in the stopped stage')
+  }
+  return { creationBuild, candidateReceiptSha256: digest(candidateBytes), receiptSha256: digest(bytes) }
 }
 
 /** Caller holds the DSH_HOME lifecycle lock. Build or replay an immutable image. */

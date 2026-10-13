@@ -580,6 +580,7 @@ export function buildLocalUpdateCohort(value) {
     chmodSync(runRoot, 0o700)
     const isolatedWorkspace = join(runRoot, 'workspace')
     copyBuildWorkspace(workspace, isolatedWorkspace)
+    normalizeBuildBinModes(isolatedWorkspace)
     const sourceInputs = snapshotBuildInputs(isolatedWorkspace)
     for (const path of paths) {
       const packageRoot = join(isolatedWorkspace, path)
@@ -1073,6 +1074,56 @@ function copyBuildWorkspace(source, destination) {
     if (metadata.isDirectory()) for (const name of readdirSync(path)) inspect(join(path, name))
   }
   inspect(destination)
+}
+function normalizeBuildBinModes(root) {
+  for (const collection of ['plugins', 'packages']) {
+    const collectionRoot = join(root, collection)
+    if (!existsSync(collectionRoot)) continue
+    for (const name of readdirSync(collectionRoot)) {
+      const packageRoot = join(collectionRoot, name)
+      if (!lstatSync(packageRoot).isDirectory()) continue
+      const manifestPath = join(packageRoot, 'package.json')
+      if (!existsSync(manifestPath)) continue
+      const manifestFile = lstatSync(manifestPath)
+      if (!manifestFile.isFile() || manifestFile.size > MAX_INPUT_BYTES) fail('local update package manifest is unsafe')
+      let manifest
+      try { manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) }
+      catch { fail('local update package manifest is invalid') }
+      if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) fail('local update package manifest is invalid')
+      const bin = manifest.bin
+      if (bin === undefined) continue
+      const binPaths = typeof bin === 'string' ? [bin]
+        : bin !== null && typeof bin === 'object' && !Array.isArray(bin) ? Object.values(bin) : null
+      if (binPaths === null) fail('local update package bin is invalid')
+      for (const binPath of binPaths) {
+        if (typeof binPath !== 'string' || binPath.length === 0 || binPath.length > 2_000
+          || binPath.includes('\0') || binPath.includes('\\') || isAbsolute(binPath)
+          || binPath.split('/').includes('..')) fail('local update bin path is invalid')
+        const path = resolve(packageRoot, binPath)
+        const inside = relative(packageRoot, path)
+        if (!inside || inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside)) fail('local update bin path escapes its package')
+        const parts = inside.split(sep)
+        let current = packageRoot
+        let missing = false
+        for (const [index, part] of parts.entries()) {
+          current = join(current, part)
+          let metadata
+          try { metadata = lstatSync(current) }
+          catch (error) {
+            if (error.code !== 'ENOENT') throw error
+            missing = true
+            break
+          }
+          if (metadata.isSymbolicLink() || (index === parts.length - 1 ? !metadata.isFile() : !metadata.isDirectory())) {
+            fail('local update bin path is unsafe')
+          }
+        }
+        if (missing) continue
+        if (realpathSync(path) !== path) fail('local update bin path is unsafe')
+        chmodSync(path, 0o755)
+      }
+    }
+  }
 }
 function snapshotBuildInputs(root) {
   const directories = [], files = []

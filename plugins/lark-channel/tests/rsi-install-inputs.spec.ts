@@ -67,6 +67,14 @@ describe('installed owner setup input capture', () => {
         expect(await readFile(join(data.profile, 'cordis.patch.yml'))).toEqual(originalPatch)
         expect(await readdir(data.resources.configRoot)).toEqual(originalConfig)
       }
+    } finally { await data.cleanup() }
+  })
+
+  test.skipIf(process.platform !== 'linux')('accepts configured and absent persistent permission defaults with a native systemctl', async () => {
+    const data = await fixture()
+    try {
+      const request = { dshHome: data.home, targetProfile: 'target', targetEffective: data.effective,
+        resources: data.resources, source: data.source, environment: data.environment }
       for (const targetEffective of [data.effective.replace('defaultPreset: danger-full-access', 'defaultPreset: workspace-write'),
         data.effective.replace('    defaultPreset: danger-full-access\n', ''),
         data.effective.replace('defaultPreset: danger-full-access', 'defaultPreset: null')]) {

@@ -12,7 +12,7 @@ import { compileRsiProfiles } from './rsi-profile.js'
 import { validateRsiAuthorities } from './rsi-setup.js'
 import { prepareRsiAuthorityResources } from './rsi-authority-resources.js'
 import { prepareRsiAuthorityRuntime } from './rsi-authority-runtime.js'
-import { readRsiHostUpdateOverlayChain } from './rsi-host-update.js'
+import { readRsiHostUpdateOverlayChain, type RsiOwnerRepairOverlay } from './rsi-host-update.js'
 import { readRsiSourceMaintenance } from './rsi-source-maintenance.js'
 import { rsiBuildResources as io } from './rsi-build.js'
 
@@ -60,6 +60,11 @@ async function privateFile(path: string, maximum = 2_097_152): Promise<Buffer> {
   await io.directory(dirname(path))
   return io.readStable(path, maximum, true)
 }
+async function verifyRepairReceipts(overlay: RsiOwnerRepairOverlay, home: string, profile: string): Promise<void> {
+  if (hash(await privateFile(join(home, '.rsi-setup-journal.json'))) !== overlay.repair.after.journalDigest
+    || hash(await privateFile(join(home, 'rsi-creation-builds', profile, 'bootstrap.json'), 65_536))
+      !== overlay.repair.after.creationReceiptDigest) fail('signed owner repair receipts changed')
+}
 
 /** Read-only retry admission before either Host is stopped. */
 export async function inspectRsiOwnerConfiguration(input: {
@@ -92,6 +97,8 @@ export async function inspectRsiOwnerConfiguration(input: {
   }
   const key = await privateFile(manifest.controlPlane.runtimeObserver!.keyPath, 32)
   if (key.length !== 32 || hash(key) !== receipt.observerKeyDigest) fail('observer identity changed before stopping Hosts')
+  const repair = overlay.records.findLast(record => record.kind === 'rsi-owner-repair-overlay')
+  if (repair?.kind === 'rsi-owner-repair-overlay') await verifyRepairReceipts(repair, home, manifest.targetProfile)
   if (overlay.latest) {
     const patchDigests = { [manifest.targetProfile]: hash(patches.targetPatch),
       [manifest.coordinatorProfile]: hash(patches.coordinatorPatch) }
@@ -211,6 +218,8 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
     const key = await privateFile(observer.keyPath, 32)
     if (key.length !== 32 || hash(key) !== receipt.observerKeyDigest) fail('observer identity changed')
     const patches = await verify()
+    const repair = overlay.records.findLast(record => record.kind === 'rsi-owner-repair-overlay')
+    if (repair?.kind === 'rsi-owner-repair-overlay') await verifyRepairReceipts(repair, home, manifest.targetProfile)
     if (overlay.latest) {
       const patchDigests = { [manifest.targetProfile]: hash(patches.targetPatch),
         [manifest.coordinatorProfile]: hash(patches.coordinatorPatch) }
