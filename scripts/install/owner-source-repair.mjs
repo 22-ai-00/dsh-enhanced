@@ -544,6 +544,15 @@ async function auditOriginal(stageHome, ownerRepair, transactionId) {
   return { path: join(ownerRepair.homePath, relative(stageHome, path)), digest: hash(content) }
 }
 
+export async function boundOwnerRepairCandidateRuntimeReceipt({ api, homePath, stageHome, profile, runtime }) {
+  const receipt = await api.readRsiAuthorityRuntimeReceipt({ logicalHome: homePath,
+    physicalHome: stageHome, profile })
+  if (!same(receipt.runtime, runtime) || !hex.test(receipt.receiptDigest)) {
+    fail('new staged authority runtime differs')
+  }
+  return receipt.receiptDigest
+}
+
 export async function stageOwnerSourceRepair({ ownerRepair, homePath, stageHome, record, resources, runtime,
   source, sourceBuild, releaseBuild, candidateCreation, stageNativeEffective, coordinatorBase,
   unitProperties, installer = ownerRepair?.installer, transactionId }) {
@@ -564,8 +573,10 @@ export async function stageOwnerSourceRepair({ ownerRepair, homePath, stageHome,
   if (host.dshDigest !== ownerRepair.host.dshDigest || host.version !== ownerRepair.host.version) {
     fail('selected DSH Host changed since repair capture')
   }
+  const candidateRuntimeReceiptDigest = await boundOwnerRepairCandidateRuntimeReceipt({
+    api, homePath, stageHome, profile: ownerRepair.profile, runtime })
   await verifyOwnerSourceRepair({ ownerRepair, homePath, physicalHome: stageHome,
-    installer, phase: 'before-finalize', record })
+    installer, phase: 'before-finalize', record, candidateRuntimeReceiptDigest })
   if (!ownerRepair.predecessor) compiledFiles(api, original)
   assertNonOwnerRows(api, original.effective.targetEffective, stageNativeEffective.targetEffective)
   const ownerSnapshot = await api.rsiSetupPorts.snapshot(stageNativeEffective.targetEffective, homePath)
@@ -953,12 +964,15 @@ export async function appendOwnerSourceRepairMaintenance({ ownerRepair, homePath
 }
 
 export async function verifyOwnerSourceRepair({ ownerRepair, ownerRepairNext, homePath,
-  physicalHome = homePath, installer = ownerRepair?.installer, phase = 'original', record, checkLedger = false }) {
+  physicalHome = homePath, installer = ownerRepair?.installer, phase = 'original', record, checkLedger = false,
+  candidateRuntimeReceiptDigest }) {
   if (ownerRepair?.protocol !== protocol || ownerRepair.homePath !== homePath
     || !same(installer, ownerRepair.installer)
     || !['original', 'before-finalize', 'after-finalize'].includes(phase)
     || phase === 'before-finalize' && !record
-    || phase === 'after-finalize' && !ownerRepairNext) fail('invalid owner repair proof')
+    || phase === 'after-finalize' && !ownerRepairNext
+    || candidateRuntimeReceiptDigest !== undefined
+      && (phase !== 'before-finalize' || !hex.test(candidateRuntimeReceiptDigest))) fail('invalid owner repair proof')
   const api = await load(installer)
   await privateDirectory(physicalHome)
   const original = ownerRepair.original
@@ -977,6 +991,11 @@ export async function verifyOwnerSourceRepair({ ownerRepair, ownerRepairNext, ho
   if (phase === 'original' || phase === 'before-finalize') {
     await assertIssuerStateAbsent({ resources: original.resources, files: original.files,
       homePath, physicalHome })
+    const runtimeReceiptPath = join(physicalHome, 'rsi-authority-runtimes', ownerRepair.profile, 'receipt.json')
+    if (hash(await stable(runtimeReceiptPath, 65_536))
+      !== (candidateRuntimeReceiptDigest ?? original.runtimeReceiptDigest)) {
+      fail('owner runtime receipt differs from the selected stage')
+    }
     if ((await stable(join(config, 'bootstrap.json'))).toString('utf8') !== original.receiptSource
       || (await stable(join(physicalHome, '.rsi-setup-journal.json'))).toString('utf8') !== original.journalSource
       || hash(await stable(join(physicalHome, 'rsi-creation-builds', ownerRepair.profile, 'bootstrap.json'), 65_536)) !== original.creationDigest) {
@@ -985,9 +1004,7 @@ export async function verifyOwnerSourceRepair({ ownerRepair, ownerRepairNext, ho
     if (ownerRepair.predecessor) {
       const source = (await stable(join(config, 'host-update-overlays.json'))).toString('utf8')
       readOwnerRepairPredecessorChain(api, ownerRepair, source)
-      if (hash(await stable(join(physicalHome, 'rsi-authority-runtimes', ownerRepair.profile,
-        'receipt.json'), 65_536)) !== original.runtimeReceiptDigest
-        || hash(original.manifestSource) !== ownerRepair.predecessor.records.at(-1)?.result.manifestDigest) {
+      if (hash(original.manifestSource) !== ownerRepair.predecessor.records.at(-1)?.result.manifestDigest) {
         fail('successor original receipt binding differs')
       }
     }
