@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
 import { parse } from 'yaml'
-import { prepareRsiBuildEnvironment } from '../src/rsi-build.js'
+import { prepareRsiBuildEnvironment, type RsiBuildEnvironment } from '../src/rsi-build.js'
 import { materializeRsiCreationBuildInStage, prepareRsiCreationBuildEnvironment, readRsiCreationBuildInStage,
   readRsiCreationBuildEnvironment } from '../src/rsi-creation-build.js'
 import type { RsiSourceWorkspace } from '../src/rsi-source.js'
@@ -102,18 +102,34 @@ function behaviorBuilds(items: { args: string[] }[]): number {
     && item.args.some(arg => arg.endsWith('plugin-verifier.Dockerfile'))).length
 }
 
+async function rebaseStageBuild(f: Awaited<ReturnType<typeof fixture>>, stagePhysicalHome: string,
+  logicalHome: string): Promise<RsiBuildEnvironment> {
+  const buildPath = join(stagePhysicalHome, 'rsi-builds', 'owner', 'bootstrap.json')
+  const receipt = JSON.parse(await readFile(buildPath, 'utf8')) as Record<string, unknown>
+  const sourceBuild = { ...f.args.build.sourceBuild, repositorySandbox: {
+    ...f.args.build.sourceBuild.repositorySandbox,
+    seccompPath: join(logicalHome, 'rsi-builds', 'owner', 'seccomp.json') } }
+  const { receiptDigest: _previousDigest, ...body } = receipt
+  const relocated = { ...body, dshHome: logicalHome,
+    repository: join(logicalHome, 'rsi-sources', 'owner', 'checkout'), sourceBuild }
+  await writeFile(buildPath, JSON.stringify({ ...relocated,
+    receiptDigest: createHash('sha256').update(JSON.stringify(relocated)).digest('hex') }))
+  return { ...f.args.build, sourceBuild }
+}
+
 describe.skipIf(process.platform !== 'linux' || process.arch !== 'x64')('private RSI plugin behavior image preparation', () => {
   test('materializes only a newly verified candidate image into a stopped logical Home receipt', async () => {
     const f = await fixture()
     await prepareRsiCreationBuildEnvironment(f.args)
     const stagePhysicalHome = join(f.root, 'stage'), logicalHome = join(f.root, 'logical')
     await cp(f.home, stagePhysicalHome, { recursive: true })
+    const stagedBuild = await rebaseStageBuild(f, stagePhysicalHome, logicalHome)
     const candidatePath = join(f.home, 'rsi-creation-builds', 'owner', 'bootstrap.json')
     const stagePath = join(stagePhysicalHome, 'rsi-creation-builds', 'owner', 'bootstrap.json')
     const candidateBefore = await readFile(candidatePath)
     const stageInput = { logicalHome, stagePhysicalHome, profile: 'owner',
       stagedSource: { ...f.source, repository: join(logicalHome, 'rsi-sources', 'owner', 'checkout') },
-      stagedBuild: f.args.build }
+      stagedBuild }
     const result = await materializeRsiCreationBuildInStage({ ...stageInput,
       candidateHome: f.home, candidateSource: f.source, candidateBuild: f.args.build })
     const stage = JSON.parse(await readFile(stagePath, 'utf8')) as Record<string, unknown>
@@ -135,20 +151,44 @@ describe.skipIf(process.platform !== 'linux' || process.arch !== 'x64')('private
     await prepareRsiCreationBuildEnvironment(f.args)
     const stagePhysicalHome = join(f.root, 'stage'), logicalHome = join(f.root, 'logical')
     await cp(f.home, stagePhysicalHome, { recursive: true })
+    const stagedBuild = await rebaseStageBuild(f, stagePhysicalHome, logicalHome)
     const candidatePath = join(f.home, 'rsi-creation-builds', 'owner', 'bootstrap.json')
     const stagePath = join(stagePhysicalHome, 'rsi-creation-builds', 'owner', 'bootstrap.json')
     const before = await readFile(stagePath)
     const input = { candidateHome: f.home, stagePhysicalHome, logicalHome, profile: 'owner',
       candidateSource: f.source, candidateBuild: f.args.build,
       stagedSource: { ...f.source, repository: join(logicalHome, 'rsi-sources', 'owner', 'checkout') },
-      stagedBuild: f.args.build }
+      stagedBuild }
     await expect(materializeRsiCreationBuildInStage({ ...input,
       stagedSource: { ...input.stagedSource, sourceCommit: '0'.repeat(40) } })).rejects.toThrow('binding differs')
+    await expect(materializeRsiCreationBuildInStage({ ...input,
+      stagedBuild: { ...stagedBuild, sourceBuild: { ...stagedBuild.sourceBuild,
+        repositorySandbox: { seccompPath: join(f.root, 'unexpected.json') } } } }))
+      .rejects.toThrow('outside the approved seccomp relocation')
+    await expect(materializeRsiCreationBuildInStage({ ...input,
+      stagedBuild: { ...stagedBuild, sourceBuild: { ...stagedBuild.sourceBuild, image: behaviorImage } } }))
+      .rejects.toThrow('outside the approved seccomp relocation')
+    const stageSeccompPath = join(stagePhysicalHome, 'rsi-builds', 'owner', 'seccomp.json')
+    const seccompBefore = await readFile(stageSeccompPath)
+    await writeFile(stageSeccompPath, '{}')
+    await expect(materializeRsiCreationBuildInStage(input)).rejects.toThrow('staged build receipt or seccomp differs')
+    await writeFile(stageSeccompPath, seccompBefore)
+    const buildPath = join(stagePhysicalHome, 'rsi-builds', 'owner', 'bootstrap.json')
+    const buildBefore = await readFile(buildPath)
+    await writeFile(buildPath, buildBefore.toString('utf8').replace('"profile":"owner"', '"profile":"wrong"'))
+    await expect(materializeRsiCreationBuildInStage(input)).rejects.toThrow('staged build receipt or seccomp differs')
+    await writeFile(buildPath, buildBefore)
+    const candidateBuildPath = join(f.home, 'rsi-builds', 'owner', 'bootstrap.json')
+    const candidateBuildBefore = await readFile(candidateBuildPath)
+    await writeFile(candidateBuildPath, candidateBuildBefore.toString('utf8').replace('"profile":"owner"', '"profile":"wrong"'))
+    await expect(materializeRsiCreationBuildInStage(input)).rejects.toThrow('build receipt differs')
+    await writeFile(candidateBuildPath, candidateBuildBefore)
     await writeFile(join(stagePhysicalHome, 'rsi-sources', 'owner', 'checkout', 'pnpm-lock.yaml'), 'changed')
     await expect(materializeRsiCreationBuildInStage(input)).rejects.toThrow('staged source inputs differ')
     expect(await readFile(stagePath)).toEqual(before)
     await writeFile(f.state, 'missing-behavior')
     await cp(f.home, stagePhysicalHome, { recursive: true, force: true })
+    await rebaseStageBuild(f, stagePhysicalHome, logicalHome)
     await expect(materializeRsiCreationBuildInStage(input)).rejects.toThrow('subprocess failed')
     expect(await readFile(stagePath)).toEqual(before)
     await writeFile(f.state, 'ready')

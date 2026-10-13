@@ -28,7 +28,7 @@ import type { TaskObservationBatch, TaskObservationRecord } from './task-observa
 import { parseRuntimeEpochRequest, parseRuntimeEpochReceipt, verifyRuntimeEpochReceipt, type RuntimeEpochRequest, type RuntimeEpochReceipt } from './runtime-epoch.js'
 import { runtimeIdentityDigest } from './foreground-deployment.js'
 import { readHostMaintenanceRecords, verifyHostMaintenanceChain, hostMaintenanceCanonical, hostMaintenanceDigest, type HostMaintenanceRecord } from './host-maintenance.js'
-import { parseSourceMaintenanceRecord, sourceMaintenanceDigest, sourceBaselineChain,
+import { parseSourceMaintenanceRecord, sameSourceMaintenancePublicKey, sourceMaintenanceDigest, sourceBaselineChain,
   verifySourceMaintenanceRecords, type SourceMaintenanceRecord } from './source-maintenance.js'
 import { resolveTrustKey } from './trust.js'
 import type { SourceBaselineConfig } from './source-baseline.js'
@@ -3146,7 +3146,7 @@ export class ControlPlaneStore {
     const key = resolveTrustKey(trust, 'host-attestation', record.authority, record.keyId)
     if (record.installationId !== trust.installationId || controlPlaneDigest(record.ledger) !== controlPlaneDigest(trust.ledger)
       || record.repository !== recordInput.repository || controlPlaneDigest(record.baseline) !== controlPlaneDigest(baseline)
-      || record.publicKeyPem !== key.publicKeyPem || record.issuedAt > this.#now()) {
+      || !sameSourceMaintenancePublicKey(record.publicKeyPem, key.publicKeyPem) || record.issuedAt > this.#now()) {
       throw new ControlPlaneStoreError('invalid-input', 'source maintenance owner binding changed')
     }
     const verifiedHistory = this.getSourceBaselineHistory(record.repository)

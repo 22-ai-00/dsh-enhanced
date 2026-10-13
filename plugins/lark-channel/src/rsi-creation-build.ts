@@ -209,14 +209,39 @@ export async function materializeRsiCreationBuildInStage(input: {
   if (!validPath(candidateHome) || !validPath(stagePhysicalHome) || !validPath(logicalHome)
     || !PROFILE.test(profile) || candidateHome === stagePhysicalHome || candidateHome === logicalHome
     || stagePhysicalHome === logicalHome || input.candidateSource.sourceCommit !== input.stagedSource.sourceCommit
-    || !isDeepStrictEqual(input.candidateBuild.sourceBuild, input.stagedBuild.sourceBuild)
     || input.candidateBuild.sourceCommit !== input.stagedBuild.sourceCommit
     || input.stagedSource.repository !== join(logicalHome, 'rsi-sources', profile, 'checkout')) {
     fail('staged creation binding differs from new candidate')
   }
+  const candidateSeccompPath = join(candidateHome, 'rsi-builds', profile, 'seccomp.json')
+  const stagedSeccompPath = join(logicalHome, 'rsi-builds', profile, 'seccomp.json')
+  if (input.candidateBuild.sourceBuild.repositorySandbox?.seccompPath !== candidateSeccompPath
+    || input.stagedBuild.sourceBuild.repositorySandbox?.seccompPath !== stagedSeccompPath
+    || !isDeepStrictEqual(input.stagedBuild.sourceBuild, { ...input.candidateBuild.sourceBuild,
+      repositorySandbox: { ...input.candidateBuild.sourceBuild.repositorySandbox, seccompPath: stagedSeccompPath } })) {
+    fail('staged creation build differs outside the approved seccomp relocation')
+  }
+  const candidateBuildPath = join(candidateHome, 'rsi-builds', profile, 'bootstrap.json')
+  const candidateBuildBytes = await io.readStable(candidateBuildPath, 65_536, true)
+  const candidateSeccompBytes = await io.readStable(candidateSeccompPath, 65_536, true)
   const candidateInput = { dshHome: candidateHome, profile, source: input.candidateSource,
     build: input.candidateBuild, ...(signal ? { signal } : {}) }
   const creationBuild = await readRsiCreationBuildEnvironment(candidateInput)
+  const stageBuildPath = join(stagePhysicalHome, 'rsi-builds', profile, 'bootstrap.json')
+  if (!candidateBuildBytes.equals(await io.readStable(candidateBuildPath, 65_536, true))
+    || !candidateSeccompBytes.equals(await io.readStable(candidateSeccompPath, 65_536, true))) {
+    fail('verified candidate build changed during relocation')
+  }
+  const candidateBuildReceipt = JSON.parse(candidateBuildBytes.toString('utf8')) as Record<string, unknown>
+  const stagedBuildReceipt = JSON.parse((await io.readStable(stageBuildPath, 65_536, true)).toString('utf8')) as Record<string, unknown>
+  const { receiptDigest: _candidateDigest, ...candidateBuildBody } = candidateBuildReceipt
+  const expectedBuildBody = { ...candidateBuildBody, dshHome: logicalHome,
+    repository: input.stagedSource.repository, sourceBuild: input.stagedBuild.sourceBuild }
+  if (!isDeepStrictEqual(stagedBuildReceipt, { ...expectedBuildBody,
+    receiptDigest: digest(JSON.stringify(expectedBuildBody)) })
+    || !candidateSeccompBytes.equals(await io.readStable(join(stagePhysicalHome, 'rsi-builds', profile, 'seccomp.json'), 65_536, true))) {
+    fail('staged build receipt or seccomp differs from verified candidate')
+  }
   const candidatePath = join(candidateHome, 'rsi-creation-builds', profile, 'bootstrap.json')
   const candidateBytes = await io.readStable(candidatePath, 65_536, true)
   const candidateReceipt = JSON.parse(candidateBytes.toString('utf8')) as Receipt

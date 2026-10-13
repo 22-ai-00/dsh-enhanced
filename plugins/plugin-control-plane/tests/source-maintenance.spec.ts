@@ -1,13 +1,14 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { chmod, mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, test, vi } from 'vitest'
 import * as release from '../src/release.ts'
 import { resolveSourceBaseline } from '../src/source-baseline.ts'
-import { signSourceMaintenanceRecord, sourceMaintenanceDigest, sourceBaselineChain,
+import { parseSourceMaintenanceRecord, sameSourceMaintenancePublicKey, signSourceMaintenanceRecord,
+  sourceMaintenanceDigest, sourceBaselineChain, verifySourceMaintenanceRecords,
   type SourceMaintenanceRecord } from '../src/source-maintenance.ts'
 import { ControlPlaneStore, controlPlaneDigest } from '../src/store.ts'
 import { controlPlaneSchemaVersion } from '../src/sqlite.ts'
@@ -15,7 +16,7 @@ import { hostMaintenanceDigest } from '../src/host-maintenance.ts'
 import { Ed25519PostActivationObservationAuthority, postActivationEvidenceDigest,
   postActivationObservationSigningPayload } from '../src/post-activation.ts'
 import type { PostActivationObservationReceipt } from '../src/types.ts'
-import type { PluginControlTrustConfig } from '../src/trust.ts'
+import { loadTrustConfig, type PluginControlTrustConfig } from '../src/trust.ts'
 import { sourceBaselineRelease } from './helpers/source-baseline.ts'
 import { cleanupRuntimeEpochFixtures, createRuntimeEpochFixture } from './helpers/runtime-epoch.ts'
 import { fixture as releaseFixture } from './helpers/source-release-runner.ts'
@@ -26,6 +27,16 @@ afterEach(async () => { await cleanupRuntimeEpochFixtures(); for (const root of 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex')
 const git = (cwd: string, ...args: string[]) => execFileSync('/usr/bin/git', args, { cwd, encoding: 'utf8',
   env: { LANG: 'C', LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } }).trim()
+
+test('compares only canonical Ed25519 public-key identity', () => {
+  const key = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  const other = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 }).publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  expect(sameSourceMaintenancePublicKey(key, key.trimEnd())).toBe(true)
+  expect(sameSourceMaintenancePublicKey(key, other)).toBe(false)
+  expect(sameSourceMaintenancePublicKey(key, rsa)).toBe(false)
+  expect(sameSourceMaintenancePublicKey(key, 'not a PEM')).toBe(false)
+})
 
 test('preserves signed releases across two Host-signed maintenance edges, restart, CAS and rejected writes', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-source-maintenance-'))); roots.push(root)
@@ -47,7 +58,12 @@ test('preserves signed releases across two Host-signed maintenance edges, restar
   const keys = generateKeyPairSync('ed25519')
   const hostIdentity = { authority: 'source-maintenance-host', keyId: 'host-1',
     publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }
-  const trust = { ...fixture.trust, dshHome: root, hostAttestationKeys: [hostIdentity] } as PluginControlTrustConfig
+  const trustPath = join(fixture.root, 'maintenance-trust.json')
+  const rawTrust = JSON.parse(await readFile(join(fixture.root, 'trust.json'), 'utf8')) as PluginControlTrustConfig
+  await writeFile(trustPath, JSON.stringify({ ...rawTrust, dshHome: root, hostAttestationKeys: [hostIdentity] }), { mode: 0o600 })
+  const trust = await loadTrustConfig(trustPath)
+  expect(hostIdentity.publicKeyPem.endsWith('\n')).toBe(true)
+  expect(trust.hostAttestationKeys[0]!.publicKeyPem.endsWith('\n')).toBe(false)
   const baseline = { ref: 'refs/dsh-source/repairs', remote, targetBranch: 'repairs', initialCommit: initial }
   const options = { trust, baseline }
   const make = (sequence: number, beforeTip: string, afterTip: string,
@@ -66,9 +82,15 @@ test('preserves signed releases across two Host-signed maintenance edges, restar
   git(repository, 'update-ref', baseline.ref, maintenanceOne)
   await expect(fixture.store.appendSourceMaintenance(first, { trust: { ...trust, hostAttestationKeys: [] }, baseline }))
     .rejects.toThrow()
+  const otherHost = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  await expect(fixture.store.appendSourceMaintenance(first, { trust: { ...trust, hostAttestationKeys: [
+    { ...trust.hostAttestationKeys[0]!, publicKeyPem: otherHost }] }, baseline })).rejects.toThrow('source maintenance owner binding changed')
+  expect(() => parseSourceMaintenanceRecord({ ...first, publicKeyPem: first.publicKeyPem.trimEnd() })).toThrow('source maintenance record is invalid')
   expect(fixture.store.getSourceMaintenanceRecords(repository)).toEqual([])
   await fixture.store.appendSourceMaintenance(first, options)
   expect(fixture.store.getSourceMaintenanceRecords(repository)).toEqual([first])
+  expect(verifySourceMaintenanceRecords([first], { installationId: trust.installationId,
+    ledger: trust.ledger, repository, baseline, hostIdentity: trust.hostAttestationKeys[0]! })).toEqual([first])
   await fixture.store.appendSourceMaintenance(first, options)
   expect(fixture.store.getSourceMaintenanceRecords(repository)).toHaveLength(1)
   await fixture.completeNext({ baseCommit: maintenanceOne, mergeCommit: releaseTwo,
