@@ -1,4 +1,4 @@
-import { chmod, cp, link, lstat, mkdtemp, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { appendFile, chmod, cp, link, lstat, mkdtemp, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -2458,10 +2458,54 @@ async function preservedLifecycleTransactions(dshHome: string): Promise<string[]
     .sort()
 }
 
-async function readJsonLines(path: string): Promise<unknown[][]> {
-  const source = await readFile(path, 'utf8')
-  return source.trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as unknown[])
+async function readJsonLines(path: string, onIncomplete?: () => void): Promise<unknown[][]> {
+  const deadline = Date.now() + 2_000
+  let observedIncomplete = false
+  for (;;) {
+    const source = await readFile(path, 'utf8')
+    const lines = source.split('\n')
+    const tail = lines.pop()
+    const complete = lines.filter(Boolean).map(line => JSON.parse(line) as unknown[])
+    if (tail === '') return complete
+    if (!observedIncomplete) {
+      observedIncomplete = true
+      onIncomplete?.()
+    }
+    if (Date.now() >= deadline) throw new Error(`Incomplete JSON line in ${path}`)
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 10))
+  }
 }
+
+test('reads a systemd log entry only after its second append commits the newline', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-systemd-json-lines-'))
+  const path = join(root, 'systemd.log')
+  try {
+    await writeFile(path, '["first"]\n["second"')
+    const observedIncomplete = Promise.withResolvers<void>()
+    const reading = readJsonLines(path, observedIncomplete.resolve)
+    await observedIncomplete.promise
+    await appendFile(path, ']\n')
+    expect(await reading).toEqual([['first'], ['second']])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('rejects a malformed newline-committed systemd log entry', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-systemd-json-lines-'))
+  const path = join(root, 'systemd.log')
+  try {
+    await writeFile(path, '["first"]\n["bad"\n["pending"')
+    await expect(readJsonLines(path)).rejects.toThrow(SyntaxError)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('rejects a permanently unterminated systemd log entry', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-systemd-json-lines-'))
+  const path = join(root, 'systemd.log')
+  try {
+    await writeFile(path, '["first"]\n["pending"')
+    await expect(readJsonLines(path)).rejects.toThrow(`Incomplete JSON line in ${path}`)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 
 interface LifecycleSystemdState {
   controls: {
