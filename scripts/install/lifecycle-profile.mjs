@@ -1064,6 +1064,11 @@ function validateHostUpdateManifest(manifest, expected, transactionRoot) {
     || migration.localSource !== undefined && migration.plan.schemaVersion !== 2) {
     fail('joint source migration proof and unbound Host plan must be recorded together')
   }
+  if (migration.nativeSettingsImport !== undefined
+    && (migration.localSource === undefined || !migration.candidateEverStarted
+      || manifest.state !== 'swapped' && manifest.state !== 'committed' && manifest.state !== 'cleanup-started')) {
+    fail('native settings recovery requires a started joint candidate')
+  }
   if (migration.plan.status !== 'update') fail('Host 更新事务不能记录 current 计划。')
   if (manifest.serviceMasks.length !== 0 && manifest.serviceMasks.length !== manifest.services.length) {
     fail('Host 更新事务 service mask inventory 无效。')
@@ -6630,6 +6635,96 @@ async function readHostPlanFile(path, homePath) {
   } finally { closeSync(descriptor) }
 }
 
+async function readHostSettingsRecoveryFile(path, homePath) {
+  if (!isAbsolute(path) || resolve(path) !== path || await realpath(path) !== path
+    || inside(homePath, path) || inside(`${homePath}${TRANSACTION_SUFFIX}`, path)) {
+    fail('native settings recovery permit must be canonical and outside Home and transaction')
+  }
+  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const before = fstatSync(descriptor)
+    if (!before.isFile() || before.uid !== currentUid() || before.nlink !== 1
+      || (before.mode & 0o077) !== 0 || before.size < 1 || before.size > 131_072) {
+      fail('native settings recovery permit must be an owner-private bounded file')
+    }
+    const source = await readFile(`/proc/self/fd/${descriptor}`, 'utf8')
+    const after = fstatSync(descriptor)
+    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+      fail('native settings recovery permit changed during read')
+    }
+    const envelope = JSON.parse(source)
+    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)
+      || !isDeepStrictEqual(Object.keys(envelope).sort(), ['permit', 'replayReceipt'])) {
+      fail('invalid native settings recovery envelope')
+    }
+    return envelope
+  } finally { closeSync(descriptor) }
+}
+
+function assertHostSettingsRecoveryAdmission(manifest, envelope) {
+  const migration = manifest.hostMigration
+  if (manifest.version !== HOST_UPDATE_MANIFEST_VERSION || manifest.operation !== 'host-update'
+    || manifest.state !== 'swapped'
+    || migration?.phase !== 'accepted' && !(migration?.phase === 'starting' && migration.nativeSettingsImport !== undefined)
+    || migration.candidateEverStarted !== true || !migration.localSource
+    || migration.plan?.schemaVersion !== 2 || migration.plan.candidateRuntime?.version !== '0.2.0-rc.2'
+    || manifest.services?.length !== 1 || manifest.services[0].profile !== manifest.profile
+    || manifest.services[0].wasActive !== true
+    || envelope?.permit?.transactionId !== manifest.id
+    || envelope.permit.homePath !== manifest.homePath || envelope.permit.profile !== manifest.profile) {
+    fail('native settings recovery requires the exact accepted joint target transaction')
+  }
+  if (migration.nativeSettingsImport !== undefined) {
+    if (!isDeepStrictEqual(migration.nativeSettingsImport, envelope)) fail('native settings recovery permit already differs')
+  } else if (envelope.permit.baseManifestDigest !== manifest.bindingDigest) {
+    fail('native settings recovery permit is not bound to the current manifest')
+  }
+}
+
+function assertHostSettingsRecoveryServiceState(maskLocation, state) {
+  if (maskLocation !== 'installed' || state.loadState !== 'masked'
+    || state.activeState !== 'inactive' || state.subState !== 'dead' || state.mainPid !== 0 || state.controlPid !== 0) {
+    fail('native settings recovery admission requires bound masked inactive services')
+  }
+}
+
+async function assertHostSettingsRecoveryContained(manifest, serviceContext, homePath, backupHome) {
+  for (const service of manifest.services) {
+    const mask = manifest.serviceMasks.find(candidate => candidate.unit === service.unit)
+    const state = await readRawServiceState(serviceContext.systemctlExecutable, service.unit)
+    assertHostSettingsRecoveryServiceState(mask === undefined ? 'missing' : await boundMaskLocation(mask), state)
+  }
+  await assertNoUnmanagedHomeProcesses(homePath, [backupHome])
+  await assertUnitUniverseStable(serviceContext.systemctlExecutable, manifest.unitUniverse, homePath, manifest.foreignOwnership)
+}
+
+async function admitHostSettingsRecovery({ homePath, physicalHomePath, profile, transactionRoot,
+  physicalTransactionRoot, serviceContext, permitPath }) {
+  let manifest = await loadManifest(physicalTransactionRoot, { homePath, profile, transactionPath: transactionRoot })
+  const envelope = await readHostSettingsRecoveryFile(permitPath, homePath)
+  assertHostSettingsRecoveryAdmission(manifest, envelope)
+  const backupHome = join(transactionRoot, 'original-home')
+  await assertCriticalDirectory(physicalHomePath, manifest.stagedIdentity)
+  await assertCriticalDirectory(backupHome, manifest.originalIdentity)
+  await assertHostSettingsRecoveryContained(manifest, serviceContext, homePath, backupHome)
+  await verifyHostPlanBinding(manifest.hostMigration.plan, homePath, 'candidate')
+  const { verifyHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
+  await verifyHostLocalSourceUpdate({ proof: manifest.hostMigration.localSource, homePath,
+    physicalHome: await canonicalJointCandidateHome(physicalHomePath, homePath), selection: 'candidate' })
+  const { validateHostLocalProfileUpdate } = await import('./host-local-profile-update.mjs')
+  const observed = await validateHostLocalProfileUpdate({ preparation: manifest.hostMigration.preparation,
+    stagedHome: homePath, originalPhysicalHome: backupHome,
+    legacySettingsImport: { ...envelope, manifest, sourceProof: manifest.hostMigration.localSource,
+      homePath, baseManifestDigest: envelope.permit.baseManifestDigest } })
+  if (!isDeepStrictEqual(observed, manifest.hostMigration.profileProof)) fail('native settings recovery profile proof differs')
+  await assertHostSettingsRecoveryContained(manifest, serviceContext, homePath, backupHome)
+  if (manifest.hostMigration.nativeSettingsImport === undefined) {
+    manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+      hostMigration: { ...manifest.hostMigration, nativeSettingsImport: envelope } }, manifest.state)
+  }
+  return manifest
+}
+
 async function verifyHostPlanBinding(plan, homePath, selection = 'original') {
   const path = join(homePath, '.dsh-rsi-host.json')
   if (plan.schemaVersion === 2 && selection === 'original') {
@@ -7080,7 +7175,11 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
       await verifyHostLocalSourceUpdate({ proof: migration.localSource, homePath, physicalHome: candidateHome, selection: 'candidate' })
       const { validateHostLocalProfileUpdate } = await import('./host-local-profile-update.mjs')
       const profiles = await validateHostLocalProfileUpdate({ preparation: migration.preparation,
-        stagedHome: candidateHome, originalPhysicalHome: backupHome })
+        stagedHome: candidateHome, originalPhysicalHome: backupHome,
+        ...(migration.nativeSettingsImport === undefined ? {} : {
+          legacySettingsImport: { ...migration.nativeSettingsImport, manifest, sourceProof: migration.localSource,
+            homePath, baseManifestDigest: migration.nativeSettingsImport.permit.baseManifestDigest },
+        }) })
       if (JSON.stringify(profiles) !== JSON.stringify(migration.profileProof)) fail('candidate Host profile proof changed')
     } else await verifyRsiHostUpdate({ homePath, physicalHome: physicalHomePath, hostPlan: plan, proof: migration.rsiProof })
   }
@@ -7266,7 +7365,8 @@ async function main() {
   }
   if (!isAbsolute(suppliedHomePath) || resolve(suppliedHomePath) !== suppliedHomePath) fail('invalid lifecycle DSH_HOME', 2)
   const homePath = await canonicalMissingAllowed(suppliedHomePath)
-  const recoveryOperation = operation === 'recover' || operation === 'service-recover' || operation === 'host-recover'
+  const recoveryOperation = operation === 'recover' || operation === 'service-recover'
+    || operation === 'host-recover' || operation === 'host-recover-settings'
   const dshExecutable = await realpath(suppliedDshExecutable).catch(() => fail('DSH executable must exist'))
   const bwrapExecutable = recoveryOperation ? suppliedBwrapExecutable
     : await trustedSystemExecutable(suppliedBwrapExecutable, 'bwrap')
@@ -7328,7 +7428,8 @@ async function main() {
     } finally { await localSourcePreparation.dispose() }
     return
   }
-  if (operation === 'host-update' || operation === 'host-recover' || operation === 'host-local-update') {
+  if (operation === 'host-update' || operation === 'host-recover' || operation === 'host-local-update'
+    || operation === 'host-recover-settings') {
     const joint = operation === 'host-local-update'
     if (!PROFILE_NAME.test(profile) || (joint ? targets.length < 5 || targets.length > 7 : targets.length < 2 || targets.length > 3)) {
       fail('Host update requires systemctl, journalctl and plan.json; local migration additionally requires source preparation and reviewed installer roots, with optional auxiliary artifact and legacy global DSH roots', 2)
@@ -7341,8 +7442,11 @@ async function main() {
     const paths = lifecyclePaths(homePath)
     const hostPaths = { homePath, physicalHomePath: paths.physicalHomePath,
       transactionRoot: paths.transactionPath, physicalTransactionRoot: paths.physicalTransactionRoot }
-    if (operation === 'host-recover') {
-      if (planPath !== undefined) fail('host-recover does not accept plan.json', 2)
+    if (operation === 'host-recover' || operation === 'host-recover-settings') {
+      if (operation === 'host-recover-settings') {
+        if (planPath === undefined) fail('host-recover-settings requires an independently verified signed permit', 2)
+        await admitHostSettingsRecovery({ ...hostPaths, profile, serviceContext, permitPath: planPath })
+      } else if (planPath !== undefined) fail('host-recover does not accept plan.json', 2)
       await recoverBoundTransaction({ ...hostPaths, profile, serviceContext })
       return
     }
@@ -7427,6 +7531,7 @@ async function main() {
 }
 
 export const lifecycleProfileTest = Object.freeze({
+  assertHostSettingsRecoveryAdmission, assertHostSettingsRecoveryServiceState, readHostSettingsRecoveryFile,
   canonicalJointCandidateHome,
   assertSnapshotTreeSafe,
   compactSupervisedSnapshot, validSupervisedLifecycle, validSupervisedManifestPhase, sameHomeOwnershipEvidence,

@@ -9,6 +9,7 @@ import { assertLifecycleNpmMetadataSafe } from './lifecycle-config.mjs'
 import { loadLocalSourceInstaller } from './local-source-maintenance.mjs'
 import { prepareHostLocalSharedFallback, retireHostLocalSharedFallback,
   verifyRetiredHostLocalSharedFallback } from './host-local-fallback.mjs'
+import { verifyHostLegacySettingsImport } from './host-legacy-settings.mjs'
 import { nativeAuthority, inventory, readMetadata, writeMetadata, pnpmEnvironment, oldHostLinks,
   localCohortPins, sourceDigest, metadataNames, nativeName, snapshotName, assertPeerBindings } from './host-profile-update.mjs'
 
@@ -499,6 +500,10 @@ export async function prepareHostLocalProfileUpdate({ originalHome, originalDshP
   runPnpm }) {
   if (typeof runPnpm !== 'function') fail('sandboxed pnpm runner is required')
   await directory(originalHome)
+  if (await lstat(join(originalHome, 'settings.yaml')).then(() => true, error => {
+    if (error?.code === 'ENOENT') return false
+    throw error
+  })) fail('pending native legacy settings import requires a separate migration')
   await directory(preparationRoot, true)
   await directory(candidateHome, true)
   if (inside(originalHome, preparationRoot) || inside(preparationRoot, originalHome)
@@ -580,7 +585,7 @@ export async function prepareHostLocalProfileUpdate({ originalHome, originalDshP
 }
 
 export async function validateHostLocalProfileUpdate({ preparation, stagedHome,
-  originalPhysicalHome = preparation.originalHome }) {
+  originalPhysicalHome = preparation.originalHome, legacySettingsImport }) {
   const stage = await directory(stagedHome)
   const original = await directory(originalPhysicalHome)
   if (stage === original || inside(original, stage) || inside(stage, original)
@@ -593,18 +598,23 @@ export async function validateHostLocalProfileUpdate({ preparation, stagedHome,
   await verifyArtifacts(preparation, stage, original)
   const actual = await inventory(stage, preparation.approvedBackupNames)
   if (!same(actual.map(item => item.name), preparation.profiles.map(item => item.name))) fail('profile inventory changed')
+  const normalizedPatch = legacySettingsImport === undefined ? undefined : await verifyHostLegacySettingsImport({
+    ...legacySettingsImport, preparation, stagedHome: stage, originalPhysicalHome: original,
+  })
   for (const profile of actual) {
     const expected = preparation.profiles.find(item => item.name === profile.name)
+    const metadata = normalizedPatch !== undefined && profile.name === legacySettingsImport.permit.profile
+      ? { ...profile.metadata, 'cordis.patch.yml': normalizedPatch } : profile.metadata
     const originalMetadata = await readMetadata(join(original, 'profiles', profile.name))
     const peerScope = await selectedPeers(originalMetadata, preparation.candidateArtifacts, readRsiLocalArtifactManifest)
     if (!same(peerScope, expected.peerScope)) fail(`verified peer scope changed: ${profile.name}`)
     for (const name of metadataNames) {
       if (sourceDigest(originalMetadata[name]) !== expected.originalDigests[name]) fail(`original metadata drift: ${profile.name}/${name}`)
-      if (sourceDigest(profile.metadata[name]) !== expected.preparedDigests[name]) fail(`staged metadata drift: ${profile.name}/${name}`)
+      if (sourceDigest(metadata[name]) !== expected.preparedDigests[name]) fail(`staged metadata drift: ${profile.name}/${name}`)
     }
-    if (!expected.fallbackOnly) assertDelta(originalMetadata, profile.metadata, preparation.candidateNative,
+    if (!expected.fallbackOnly) assertDelta(originalMetadata, metadata, preparation.candidateNative,
       preparation.candidateArtifacts, preparation.originalHome, yaml, peerScope)
-    else assertFallbackDelta(originalMetadata, profile.metadata)
+    else assertFallbackDelta(originalMetadata, metadata)
     await oldHostLinks(join(profile.path, 'node_modules'), preparation.oldHostRoot, preparation.candidateHostRoot, false)
     await oldHostLinks(join(profile.path, '.dsh-module-fallback', 'node_modules'), preparation.oldHostRoot, preparation.candidateHostRoot, false)
     if (expected.fallbackOnly) {

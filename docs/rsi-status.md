@@ -19,15 +19,17 @@
 
 修复 CI，完成旧 Home 的联合 Host / 源码迁移，再启用生产学习并验证远端 CI。事件主动跟进和 npm 新版本等待这一部署及普通使用验收，不并列展开新主任务。
 
-生产 canonical Home 为 `/data00/home/jiataorui/.dsh`，活动目标为 `assistant`，仍运行 DSH `0.1.5-rc.3` 与冻结源码 `6a8dce4`。14 个签名身份保持不变；预备协调器没有 service，owner 配置 / registry 尚为空，学习 scheduler 仍关闭。三个旧 Heartbeat / Recovery 定义均暂停、下一运行时间为空；用户已同意现有自动化确认。未确认有独立运行的用量监控服务。
+生产 canonical Home `/data00/home/jiataorui/.dsh` 已完成 DSH `0.1.5-rc.3` → `0.2.0-rc.2` 联合迁移；assistant、预备协调器、ACP、Web、headless 的依赖图完成离线物化，目标冻结源码为 `9b4646db`。assistant 与原用量监控服务已恢复 active/running、重启计数为零；14 个签名身份、三个暂停且无下一运行时间的旧任务以及会话模型保持不变。owner 配置 / registry 尚为空，学习 scheduler 仍关闭。
 
-联合迁移实现尚未交付：显式认证未绑定 Home 的旧私有 Host，整个 Home 的 assistant、预备协调器、ACP、Web、headless 一起迁移；候选在 Home 外准备，停服后重新复制并离线物化，沿用 v4 收容 / 恢复。保留生产 fail-closed 断言、原身份和授权，不通过删除部分安装或伪造绑定绕过预检。真实隔离副本及只读 mount namespace 换位校验均通过；尚未停服、切换生产或启用学习。
+原生 DSH 异步导入旧 `settings.yaml` 导致接受后的 profile 摘要改变，迁移按设计收容停服。现已用禁网副本精确复现，签署仅绑定该事务和已发生单 profile 后继的恢复许可；原设置、旧标记、前后补丁、回放方法 / 原始观察和许可保存在事务外私有归档。重新启动通过 fresh readiness 后完成清理；没有放松普通漂移检查或回退已运行 Home。三节 UI / 旧 preset 设置被上游拒绝，仅保留原件，不宣称已生效。后续迁移在停服前拒绝尚待导入的旧设置。
+
+下一阻塞是 pre-owner 的旧 `rsi-creation-builds` 尚绑定 `6a8dce4`，而 source/build 已迁移；新 owner 安装正确拒绝不一致。独立行为镜像的旧版本断言也需与当前锁一致。必须通过新认证源码 / 构建链迁移这个未使用辅助资源，保留旧收据并验证新镜像，之后才启用双 Host 学习；不能删除旧绑定或伪造新收据绕过。
 
 ## 最新验证与阻塞
 
 - CI 修复 `db54e533` 已推送 dev：原 macOS evaluation 失败已消失，但远端运行 [38323695472](https://github.com/22-ai-00/dsh-enhanced/actions/runs/38323695472) 又暴露目录 setgid 夹具及三个 Git 修订测试超时；修复提交 `2d20a4d1` 尚未推送。Windows 已通过；Linux 全部测试通过后触及 35 分钟上限。新配置移除根检查的重复构建，将 Linux 根测试与包测试 / 37 包 prepack / dry-run pack 分为两个独立作业，原 `verify` 必须等两者成功；未减少验收门，新配置尚待最终完整检查及远端验证。
-- 最终集成代码 `VITEST_MAX_WORKERS=2 pnpm check` 退出 0：8461 项通过、61 项跳过、37 包 dry-run pack；独立只读审查通过。跳过的外部场景不代表 live 行为已验证。
-- 联合迁移定向测试与独立静态审查覆盖预备协调器、认证制品 / peer 闭包、hoisted → isolated、旧 fallback cache 退役及改名后恢复拒绝篡改。真实五 profile 副本完成锁解析、预取、离线物化、dump-config、源码签名和运行时复核；只读 namespace 模拟换位后的源码 / profile 校验通过。修正 Node 解析缓存及 FD 锚定路径的 canonical 适配，保留底层锁 / inode 防护。生产迁移及远端 CI 尚待执行。
+- 联合迁移基线 `VITEST_MAX_WORKERS=2 pnpm check` 退出 0：8461 项通过、61 项跳过、37 包 dry-run pack。恢复补丁的冻结定向检查 66/66、全仓 lint / typecheck 通过；末端收容复核追加 23/23 与 lint 通过。新的根检查正在运行，尚无最终结果；跳过外部场景不代表 live 行为已验证。
+- 独立只读审查通过签名许可和恢复边界；生产恢复退出 0，Host binding / receipt、服务实际 executable 与稳定 InvocationID、事务清理、私有归档及原身份 / 暂停任务 / 会话模型保留均已独立核验。学习启用及远端 CI 尚待完成。
 - 原 DeepSeek 固定合同已于 2026-10-08 过期；不延长合同或旧授权。保留 `super-relay/ark/seed-evolving` 会话模型及既有 fallback，静态配置不代表 live 模型调用通过。
 
 证据存放于忽略目录 `docs/evidence/ci-migration/`。生产启用后，仍需新的真实普通任务证明创建 → 独立验证 → 动态采用 → 后续复用及纠正 / 撤回 / 重启边界，满足[发布门](releasing.md)后才发布 npm。
