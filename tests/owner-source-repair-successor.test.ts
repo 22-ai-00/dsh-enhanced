@@ -1,9 +1,9 @@
-import { mkdtemp, realpath, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { isMap, isSeq, parseDocument } from 'yaml'
-import { captureOwnerSourceRepairSuccessor, ownerRepairSnapshotEquivalent,
+import { appendOwnerSourceRepairMaintenance, captureOwnerSourceRepairSuccessor, ownerRepairSnapshotEquivalent,
   ownerRepairSuccessorSnapshotEquivalent, readOwnerRepairPredecessorChain,
   selectOwnerRepairPermission } from '../scripts/install/owner-source-repair.mjs'
 import { readRsiHostUpdateOverlayChain, rsiHostUpdateOverlayDigest,
@@ -11,6 +11,70 @@ import { readRsiHostUpdateOverlayChain, rsiHostUpdateOverlayDigest,
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
+
+const stageState = vi.hoisted(() => ({ source: null as unknown, ledger: null as unknown,
+  trust: null as unknown, appendCount: 0 }))
+vi.mock('../scripts/install/local-source-maintenance.mjs', () => ({ assertLocalSourceInstaller: vi.fn() }))
+vi.mock('../plugins/lark-channel/lib/rsi-source-maintenance.js', async importOriginal => ({
+  ...await importOriginal<Record<string, unknown>>(), readRsiSourceMaintenance: async () => stageState.source,
+}))
+vi.mock('../plugins/plugin-control-plane/lib/index.js', async importOriginal => ({
+  ...await importOriginal<Record<string, unknown>>(),
+  parseSourceMaintenanceRecord: (record: unknown) => record,
+  sourceMaintenanceDigest: () => 'd'.repeat(64),
+  loadTrustConfig: async () => stageState.trust,
+  ControlPlaneStore: class {
+    readSourceMaintenanceState() { return stageState.ledger }
+    readSourceMaintenanceActivationState() { return { kind: 'none' } }
+    async appendSourceMaintenance(record: unknown) {
+      stageState.appendCount += 1
+      const before = stageState.ledger as { history: unknown[]; records: unknown[] }
+      stageState.ledger = { ...before, records: [...before.records, record] }
+    }
+    close() {}
+  },
+}))
+
+test('successor append accepts signed seq1 trust bytes, but rejects staged trust drift', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-owner-successor-trust-')))
+  roots.push(root)
+  const homePath = join(root, 'home'), stageHome = join(root, 'stage'), profile = 'target'
+  const configRoot = join(homePath, 'rsi-authorities', profile, 'config')
+  const trustPath = join(stageHome, 'rsi-authorities', profile, 'config', 'trust.json')
+  await mkdir(homePath, { mode: 0o700 })
+  await mkdir(join(stageHome, 'rsi-authorities', profile, 'config'), { recursive: true, mode: 0o700 })
+  const bootstrapTrust = '{"version":"bootstrap"}\n'
+  const signedTrust = '{"version":"first-repair"}\n'
+  await writeFile(trustPath, signedTrust, { mode: 0o600 })
+  const sha = (source: string) => createHash('sha256').update(source).digest('hex')
+  const prior = { sequence: 1 }, record = { host: null, after: { sourceCommit: 'candidate' } }
+  const sourceState = { history: [], records: [prior] }
+  stageState.source = { records: [prior, record], anchor: { kind: 'owner' },
+    workspace: { sourceCommit: 'candidate' } }
+  stageState.ledger = sourceState
+  stageState.trust = { installationId: 'installation', ledger: { id: 'ledger' }, dshHome: homePath }
+  stageState.appendCount = 0
+  const ownerRepair = { protocol: 'dsh-enhanced/host-owner-source-repair/v1', homePath, profile,
+    installer: { root: process.cwd() }, original: {
+      resources: { installationId: 'installation', ledgerId: 'ledger', configRoot },
+      source: { records: [prior], anchor: { kind: 'owner' }, workspace: { repository: '/source', baseline: {} } },
+      sourceState, receipt: { files: { [join(configRoot, 'trust.json')]: sha(bootstrapTrust) } },
+      baselineFiles: { [join(configRoot, 'trust.json')]: sha(signedTrust) },
+    } }
+  await expect(appendOwnerSourceRepairMaintenance({ ownerRepair, homePath, stageHome, record }))
+    .resolves.toMatchObject({ recordDigest: 'd'.repeat(64) })
+  expect(stageState.appendCount).toBe(1)
+  stageState.ledger = sourceState
+  await writeFile(trustPath, '{"version":"tampered"}\n')
+  await expect(appendOwnerSourceRepairMaintenance({ ownerRepair, homePath, stageHome, record }))
+    .rejects.toThrow('staged old owner trust differs')
+  expect(stageState.appendCount).toBe(1)
+  await writeFile(trustPath, signedTrust)
+  stageState.trust = { installationId: 'different', ledger: { id: 'ledger' }, dshHome: homePath }
+  await expect(appendOwnerSourceRepairMaintenance({ ownerRepair, homePath, stageHome, record }))
+    .rejects.toThrow('staged old owner trust differs')
+  expect(stageState.appendCount).toBe(1)
+})
 
 test('successor keeps the already selected permission preset instead of resetting authority', () => {
   const effective = `- id: permission

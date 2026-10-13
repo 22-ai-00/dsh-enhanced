@@ -940,7 +940,7 @@ export async function appendOwnerSourceRepairMaintenance({ ownerRepair, homePath
   const trust = await api.control.loadTrustConfig(trustPath)
   if (trust.installationId !== original.resources.installationId
     || trust.ledger.id !== original.resources.ledgerId || trust.dshHome !== homePath
-    || hash(await stable(trustPath)) !== original.receipt.files[join(original.resources.configRoot, 'trust.json')]) {
+    || hash(await stable(trustPath)) !== repairBaselineFiles(ownerRepair)[join(original.resources.configRoot, 'trust.json')]) {
     fail('staged old owner trust differs')
   }
   const ledger = new api.control.ControlPlaneStore({ path: stageLedgerPath })
