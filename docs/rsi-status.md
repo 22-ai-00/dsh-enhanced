@@ -12,26 +12,22 @@
 - 开发安装默认进入 supervised 学习配置，仍需可信配对、模型、有限预算、Linux systemd 和隔离构建。显式轻量安装与不启动选项保留；远程 npm 发布制品尚未更新。
 - 当前锁及 peers 支持官方 npm latest **DSH `0.2.0-rc.2`**，该版本仍是预发布版，不称其为正式稳定版；安装先解析 latest，再固定受支持精确版本，不追踪 next。
 
-## 当前交付与阻塞
+## 当前交付与边界
 
-修复 CI、迁移旧 Home、启用生产学习并验证远端 CI。事件主动跟进和 npm 新版本等待这一部署及普通使用验收，不并列展开新主任务。
+生产 Home 已完成 DSH `0.1.5-rc.3` → `0.2.0-rc.2` 联合迁移，五个 profile 的依赖图已离线物化。受审源码 `c429e903` 的签名后继事务已提交，追加第二条 repair overlay；原失败事务、最老 Home 和 bootstrap 保留审计，未回退已运行 Home，待恢复意图已清除。[入口与恢复边界](../scripts/install/README.md#已运行但未就绪的修复后继)。
 
-生产 Home 已完成 DSH `0.1.5-rc.3` → `0.2.0-rc.2` 联合迁移，五个 profile 的依赖图已离线物化。14 个签名身份、三个暂停且无下次运行时间的旧任务、会话模型与 fallback 保留。旧 settings 异步导入已用精确签名恢复许可完成对账；三节被上游拒绝的 UI / 旧 preset 设置只归档，不宣称生效。
+**生产学习已通过新鲜就绪验收，不等于完整自迭代收益已验收。** 双 Host、飞书、HMAC observer、记忆学习和独立账本协调器原生登记均通过；双服务正常运行，无重启。用户选择的 `danger-full-access` 不逐次审批；14 个签名身份、六项原授权及其期限与预算、三个暂停旧任务、会话模型与 fallback 均保留。未因本次修复清理旧聊天。
 
-**生产学习仍未通过就绪验收。** 正式修复候选 `6763feda` 已实际运行，追加第八条签名源码维护记录及第一条 repair overlay，原 bootstrap 与 33 份 owner 原件归档保留。用户明确选择 `danger-full-access`、不逐次审批；六项原授权、期限和预算不重置。记忆注册检查通过，但协调器登记为零；双服务当前按失败事务收容停止，不能回退已运行 Home，也不能以 active 进程代替学习就绪。
+旧 settings 已按签名恢复许可完成导入对账；上游拒绝的三节 UI / 旧 preset 设置只归档，不宣称生效。Kaboo 按用户授权在迁移期间暂停，成功后已恢复，配置和开机启用状态未改。
 
-当前根因是协调器使用独立本地账本，却被普通控制面的同账本断言拒绝。开发源码已修复专用协调模式，普通模式与签名 handoff 的操作约束不放宽；真实 Cordis 注册测试通过，但尚未部署到冻结生产候选。
-
-当前开发交付为有签名意图及完整旧事务归档的 owner 修复后继。它保留当前业务状态，追加签名链，不改旧安装器、不伪造旧事务成功；完整 Home 外演练、独立审查及新鲜生产验收仍待完成。[入口与恢复边界](../scripts/install/README.md#已运行但未就绪的修复后继)。
-
-Kaboo 用量监控持有 Home 句柄。用户已授权迁移期间临时暂停并自动恢复；上次尝试结束后已恢复，配置未改。正式迁移与本地隔离测试须串行，进程检查不设豁免。下一验收是精确后继候选的完整离线演练、生产新鲜注册与保全核对，再运行根检查并验证全部远端 CI 作业。
+本轮收尾为完整仓库检查及精确 dev HEAD 的远端 CI 验证。下一能力验收是普通任务驱动的记忆与工程进化：创建 → 独立验证 → 动态采用 → 后续真实任务复用，覆盖纠正、撤回和重启；事件主动跟进与 npm 发布不并列展开。
 
 ## 最新验证
 
-- 临时真实 DSH `0.2.0-rc.2` / systemd fixture 退出 0：裸 entry ID 的认证观察、活跃与禁用状态、PID / InvocationID、socket 与临时环境清理均通过；不涉及生产或模型调用。observer 24 项、编译器 3 项、采集器 7 项、setup / installer 58 项定向检查以及相关类型检查、lint 和独立审查通过。
-- `3ce14ce2` 的根 `pnpm check` 退出 0：8552 项通过、61 项跳过、37 包 dry-run pack，无依赖目录或私有证据。后续 `6763feda` 根测试 1016 项通过、3 项跳过；完整流水线为避免与生产迁移冲突主动取消，退出 143，**不是完整检查通过**。
-- 协调器真实 Cordis 注册回归 3/3、相关四文件 17/17，类型检查与 lint 通过。后继 owner 的真实 Home 只读 capture 通过，原授权、预设、unit、环境、bootstrap 及签名链保持一致；这些检查不代替实际部署。
-- CI 已移除根检查重复构建，并将 Linux 根测试与包测试 / 打包分为独立作业。`ee38f7f7` 的远端 Linux / Windows 成功，macOS 仅剩原生 ELF systemctl 测试的平台假设失败；正向原生采集测试现限定 Linux，跨平台拒绝测试保留。最终远端验收以推送的精确 dev HEAD 的[全部 CI 作业](https://github.com/22-ai-00/dsh-enhanced/actions/workflows/ci.yml?query=branch%3Adev)为准，不把仅汇总 Linux 的 verify 通过称为全绿。
-- 原 DeepSeek 固定合同于 2026-10-08 过期，未续期；保留 `super-relay/ark/seed-evolving` 会话模型及既有 fallback，静态配置不代表 live 模型调用通过。
+- 正式后继 CLI 退出 0；独立验后检查退出 0，核对双服务 fresh readiness、seq2 签名链、14 个密钥摘要、六项授权、三个暂停任务及模型 / fallback。最大观察到的事务 manifest 为 2,039,610 字节，低于 2 MiB 限额。
+- 后继路径与生命周期定向测试 36/36，语法、lint 及独立审查通过；真实 systemd 临时探针验证全 / 半暂存遮罩按原 inode 复装且无服务启动，临时 unit 已清理。协调器真实 Cordis 登记回归通过。
+- Home 外完整演练通过；最终候选的 25 个包与演练版逐包字节、锁图及依赖一致。源码和安装器各自重新绑定，正式事务重新执行完整 pre-swap 校验，不以旧演练冒充新源码验收。
+- 全检命令为 `VITEST_MAX_WORKERS=2 pnpm check`，包括根测试、全部包测试、构建、类型检查及 37 包 dry-run pack。远端以精确 dev HEAD 的[全部 CI 作业](https://github.com/22-ai-00/dsh-enhanced/actions/workflows/ci.yml?query=branch%3Adev)为准，不把仅汇总 Linux 的 verify 通过称为全绿。CI 拆分 Linux 根测试与包测试、移除重复构建；macOS 的 native ELF 正向测试限定 Linux，跨平台拒绝测试保留。
+- 原 DeepSeek 固定合同于 2026-10-08 过期，未续期；保留 `super-relay/ark/seed-evolving` 模型及既有 fallback，未将配置或就绪检查当作 live 模型调用证明。
 
-原始日志和私有证据位于忽略目录 `docs/evidence/ci-migration/`、`docs/evidence/runtime-observer-fix/` 与 `docs/evidence/owner-repair/`。生产启用之后，仍须通过真实普通任务的创建 → 独立验证 → 动态采用 → 后续复用与纠正 / 撤回 / 重启边界，满足[发布门](releasing.md)后才发布 npm。
+原始日志和私有证据位于忽略目录 `docs/evidence/ci-migration/`、`docs/evidence/runtime-observer-fix/` 与 `docs/evidence/owner-repair/`。满足普通使用闭环及[发布门](releasing.md)后才发布 npm。
