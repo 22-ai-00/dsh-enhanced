@@ -1055,7 +1055,7 @@ const HOST_UPDATE_PHASES = new Set([
   'committed', 'cleanup-started', 'failed',
 ])
 
-function validateHostUpdateManifest(manifest, expected, transactionRoot) {
+function validateHostUpdateManifest(manifest, expected, transactionRoot, identityRoot = transactionRoot) {
   const migration = manifest.hostMigration
   const ownerRepair = migration?.localSource?.protocol === 'dsh-enhanced/host-owner-source-repair/v1'
   if (migration?.localSource !== undefined && (migration.localSource === null
@@ -1072,6 +1072,14 @@ function validateHostUpdateManifest(manifest, expected, transactionRoot) {
       || resolve(migration.bwrapExecutable) !== migration.bwrapExecutable) fail('owner repair sandbox binding differs')
     if (!validOwnerRepairOriginalReadiness(migration.originalReadiness, manifest.services,
       expected.profile, selection.coordinatorProfile)) fail('owner repair original readiness baseline differs')
+    const successor = migration.localSource.successorIntent
+    if (successor !== undefined && (!exactKeys(successor, ['digest', 'archivePath', 'transactionId'])
+      || !validDigest(successor.digest) || successor.transactionId !== manifest.id
+      || successor.archivePath !== `${expected.transactionPath}.owner-predecessor-${manifest.id}`
+      || !validDigest(migration.localSource.ownerRepair.predecessor?.sourceProofDigest))
+      || migration.localSource.ownerRepair.predecessor !== undefined && successor === undefined) {
+      fail('owner successor transaction binding differs')
+    }
   } else if (migration?.originalReadiness !== undefined) {
     fail('original readiness baseline is only valid for owner repair')
   }
@@ -1085,7 +1093,7 @@ function validateHostUpdateManifest(manifest, expected, transactionRoot) {
     || manifest.operation !== 'host-update' || manifest.homePath !== expected.homePath
     || manifest.canonicalHome !== expected.homePath || manifest.transactionPath !== expected.transactionPath
     || manifest.profile !== expected.profile || typeof manifest.id !== 'string'
-    || !sameIdentity(lstatSync(transactionRoot), manifest.transactionIdentity)
+    || !sameIdentity(lstatSync(identityRoot), manifest.transactionIdentity)
     || !HOST_UPDATE_PHASES.has(migration?.phase) || !Array.isArray(migration.units)
     || !validDigest(migration.originalExternalLinksDigest)
     || !Array.isArray(manifest.services) || !Array.isArray(manifest.unitUniverse)
@@ -7047,8 +7055,8 @@ async function reconcileHostUnitSources(units, selected) {
 }
 
 async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, physicalTransactionRoot,
-  profile, planPath, bwrapExecutable, dshExecutable, serviceContext, localSourceInput }) {
-  const previous = await recoverBoundTransaction({ homePath, physicalHomePath, profile,
+  profile, planPath, bwrapExecutable, dshExecutable, serviceContext, localSourceInput, ownerSuccessor }) {
+  const previous = ownerSuccessor ? undefined : await recoverBoundTransaction({ homePath, physicalHomePath, profile,
     transactionRoot, physicalTransactionRoot, serviceContext })
   if (previous !== undefined) return
   const plan = await readHostPlanFile(planPath, homePath)
@@ -7088,6 +7096,8 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
     localSource = await prepareHostLocalSourceUpdate({ homePath, profile, dshPath: originalDshExecutable,
       dshEnvironment: { PATH: [plan.originalRuntime.binDirectory, dirname(process.execPath), '/usr/bin', '/bin'].join(':') },
       ...localSourceInput })
+    if (ownerSuccessor) localSource.successorIntent = { digest: ownerSuccessor.digest,
+      archivePath: ownerSuccessor.intent.archivePath, transactionId: ownerSuccessor.intent.successorTransactionId }
     const coordinator = `rsi-${profile.slice(0, 43)}-${sha256(profile).slice(0, 12)}`
     const fields = ['LoadState', 'ActiveState', 'MainPID']
     const state = parseSystemdShowProperties((await runServiceCommand(serviceContext.systemctlExecutable,
@@ -7140,7 +7150,7 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
   const preparationRoot = join(transactionRoot, 'host-preparation')
   const transactionIdentity = identity(await lstat(physicalTransactionRoot))
   const initial = {
-    version: HOST_UPDATE_MANIFEST_VERSION, id: randomUUID(), homePath, canonicalHome: homePath,
+    version: HOST_UPDATE_MANIFEST_VERSION, id: ownerSuccessor?.intent.successorTransactionId ?? randomUUID(), homePath, canonicalHome: homePath,
     transactionPath: transactionRoot, transactionIdentity, profile, operation: 'host-update',
     originalIdentity: identity(originalStat), originalProfileDigest: sha256(originalProfile.source),
     stagedIdentity: undefined, stagedProfileDigest: undefined, createdAt: new Date().toISOString(),
@@ -7239,6 +7249,193 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
     })
     throw error
   }
+}
+
+function assertHostOwnerSuccessorAdmission(manifest, permissionPreset) {
+  const migration = manifest?.hostMigration
+  if (manifest?.version !== HOST_UPDATE_MANIFEST_VERSION || manifest.operation !== 'host-update'
+    || manifest.state !== 'swapped' || migration?.phase !== 'starting'
+    || migration.candidateEverStarted !== true || manifest.serviceAcceptance !== undefined
+    || migration.nativeSettingsImport !== undefined || migration.plan?.status !== 'current'
+    || migration.localSource?.protocol !== 'dsh-enhanced/host-owner-source-repair/v1'
+    || !migration.localSource.ownerRepairNext
+    || manifest.serviceMasks?.length !== 2 || manifest.serviceStartBarriers?.length !== 2
+    || manifest.containmentMasks?.length !== 0 || manifest.containmentMaskIntents?.length !== 0
+    || manifest.containmentStartBarriers?.length !== 0
+    || migration.localSource.ownerRepair?.permissionPreset !== permissionPreset) {
+    fail('owner successor requires the exact stopped, started-but-unaccepted owner repair candidate')
+  }
+  hostOwnerSourceRepairSelection(migration.plan, manifest.services, manifest.profile, permissionPreset)
+}
+
+function ownerSuccessorServiceBarriers(manifest, originalRoot, archiveRoot) {
+  const relocate = record => {
+    if (record.transactionRoot !== originalRoot || !inside(originalRoot, record.stagingPath)
+      || record.stagingPath === originalRoot) fail('owner successor containment path changed')
+    return { ...record, transactionRoot: archiveRoot,
+      stagingPath: `${archiveRoot}${record.stagingPath.slice(originalRoot.length)}` }
+  }
+  return { masks: manifest.serviceMasks.map(relocate), barriers: manifest.serviceStartBarriers.map(record => ({ ...record,
+    ...(record.enablement ? { enablement: relocate(record.enablement) } : {}) })) }
+}
+
+function ownerSuccessorRecoveryDecision({ intent, activeManifest, emptyActiveDirectory, homeIdentity, backupIdentity }) {
+  if (!activeManifest) {
+    if (!homeIdentity || !sameIdentity(homeIdentity, intent.currentCandidateIdentity)) {
+      fail('owner successor has no bound transaction for the current Home')
+    }
+    return emptyActiveDirectory ? 'clean-empty-child' : 'prepare-child'
+  }
+  if (emptyActiveDirectory || activeManifest.id !== intent.successorTransactionId
+    || !isDeepStrictEqual(activeManifest.originalIdentity, intent.currentCandidateIdentity)) {
+    fail('owner successor child baseline differs from its signed predecessor')
+  }
+  const candidateLive = homeIdentity && activeManifest.stagedIdentity
+    && sameIdentity(homeIdentity, activeManifest.stagedIdentity)
+  const originalLive = homeIdentity && sameIdentity(homeIdentity, activeManifest.originalIdentity)
+  const originalBackup = backupIdentity && sameIdentity(backupIdentity, activeManifest.originalIdentity)
+  if (activeManifest.hostMigration.candidateEverStarted) {
+    if (!candidateLive) fail('started owner successor candidate is unavailable; retain containment')
+  } else if (!originalLive && !(candidateLive && originalBackup) && !(homeIdentity === undefined && originalBackup)) {
+    fail('owner successor prestart Home identities are unknown; retain containment')
+  }
+  return 'recover-child'
+}
+
+async function readOwnerSuccessorManifestSource(path) {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const before = await file.stat({ bigint: true })
+    const named = await lstat(path, { bigint: true })
+    if (!before.isFile() || before.uid !== BigInt(currentUid()) || before.nlink !== 1n
+      || (before.mode & 0o077n) !== 0n || before.size < 1n || before.size > BigInt(HOST_MANIFEST_MAX_BYTES)
+      || before.dev !== named.dev || before.ino !== named.ino) fail('owner successor manifest is not owner-private')
+    const source = await file.readFile('utf8')
+    const after = await file.stat({ bigint: true })
+    if (before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs
+      || BigInt(Buffer.byteLength(source)) !== before.size) fail('owner successor manifest changed during read')
+    return source
+  } finally { await file.close() }
+}
+
+async function verifyOwnerSuccessorBaseline({ manifest, homePath, physicalHomePath, archiveRoot, serviceContext }) {
+  if (!sameIdentity(await lstat(physicalHomePath), manifest.stagedIdentity)
+    || !sameIdentity(await lstat(join(archiveRoot, 'original-home')), manifest.originalIdentity)) {
+    fail('owner successor predecessor Home identities changed')
+  }
+  await verifyHostPlanBinding(manifest.hostMigration.plan, homePath, 'candidate')
+  await assertUnitUniverseStable(serviceContext.systemctlExecutable, manifest.unitUniverse, homePath, manifest.foreignOwnership)
+  for (const expected of manifest.hostMigration.unitProperties) {
+    if (!isDeepStrictEqual(await hostUnitProperties(serviceContext.systemctlExecutable, expected.unit), expected.properties)) {
+      fail('owner successor predecessor unit properties changed')
+    }
+  }
+  const { verifyHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
+  const proof = manifest.hostMigration.localSource
+  await verifyHostLocalSourceUpdate({ proof, homePath, physicalHome: homePath, selection: 'candidate', checkLedger: true })
+  const { validateHostLocalProfileUpdate } = await import('./host-local-profile-update.mjs')
+  const profiles = await validateHostLocalProfileUpdate({ preparation: manifest.hostMigration.preparation,
+    stagedHome: homePath, originalPhysicalHome: join(archiveRoot, 'original-home'),
+    ownerSourceRepair: { homePath, sourceProof: proof } })
+  if (!isDeepStrictEqual(profiles, manifest.hostMigration.profileProof)) fail('owner successor predecessor package graph changed')
+}
+
+async function performHostOwnerSuccessor(input) {
+  const { homePath, physicalHomePath, transactionRoot, physicalTransactionRoot,
+    profile, planPath, dshExecutable, serviceContext, localSourceInput } = input
+  const helper = await import('./owner-repair-successor.mjs')
+  const peek = await helper.peekOwnerRepairSuccessorIntent({ homePath })
+  const archived = peek && await existingIdentity(anchoredSibling(peek.archivePath)) !== undefined
+  const oldRoot = archived ? anchoredSibling(peek.archivePath) : physicalTransactionRoot
+  const oldManifestSource = await readOwnerSuccessorManifestSource(join(oldRoot, 'manifest.json'))
+  const oldManifest = JSON.parse(oldManifestSource)
+  validateHostUpdateManifest(oldManifest, { homePath, profile, transactionPath: transactionRoot }, physicalTransactionRoot, oldRoot)
+  assertHostOwnerSuccessorAdmission(oldManifest, localSourceInput.ownerRepairPreset)
+  const { bindLocalSourceInstaller, loadLocalSourceInstaller } = await import('./local-source-maintenance.mjs')
+  const installer = await bindLocalSourceInstaller(localSourceInput.installerRoot)
+  const plan = await readHostPlanFile(planPath, homePath)
+  if (!isDeepStrictEqual(plan, oldManifest.hostMigration.plan)
+    || await realpath(plan.candidateRuntime.dshPath) !== dshExecutable) fail('owner successor must preserve the same Host plan')
+  let envelope = peek ? await helper.readOwnerRepairSuccessorIntent({ homePath, profile, oldManifestSource }) : undefined
+  if (envelope) {
+    const intent = envelope.intent
+    if (!isDeepStrictEqual(intent.installer, installer) || intent.planPath !== planPath
+      || intent.planDigest !== sha256(await readFile(planPath))
+      || intent.preparationRoot !== localSourceInput.preparationRoot
+      || intent.permissionPreset !== localSourceInput.ownerRepairPreset
+      || intent.auxiliaryRoot !== (localSourceInput.auxiliaryRoot ?? null)) fail('owner successor retry inputs changed')
+    if (archived && await existingIdentity(physicalTransactionRoot) !== undefined) {
+      if ((await readdir(physicalTransactionRoot)).length === 0) {
+        ownerSuccessorRecoveryDecision({ intent, emptyActiveDirectory: true,
+          homeIdentity: await existingIdentity(physicalHomePath) })
+        await recoverBoundTransaction({ homePath, physicalHomePath, profile, transactionRoot, physicalTransactionRoot, serviceContext })
+      } else {
+        const active = await loadManifest(physicalTransactionRoot, { homePath, profile, transactionPath: transactionRoot })
+        if (active.id !== intent.successorTransactionId
+          || active.hostMigration?.localSource?.successorIntent?.digest !== envelope.digest
+          || active.hostMigration.localSource.ownerRepair.predecessor?.sourceProofDigest
+            !== sha256(JSON.stringify(oldManifest.hostMigration.localSource))) fail('owner successor active transaction differs')
+        ownerSuccessorRecoveryDecision({ intent, activeManifest: active,
+          homeIdentity: await existingIdentity(physicalHomePath),
+          backupIdentity: await existingIdentity(join(physicalTransactionRoot, 'original-home')) })
+        const recovered = await recoverBoundTransaction({ homePath, physicalHomePath, profile, transactionRoot, physicalTransactionRoot, serviceContext })
+        if (recovered !== 'host-candidate-committed') fail('owner successor remains pending after restoring its degraded baseline; retry the same successor command')
+        return
+      }
+    }
+  }
+  const api = await loadLocalSourceInstaller(installer, { ownerRepair: true })
+  if (envelope) ownerSuccessorRecoveryDecision({ intent: envelope.intent,
+    homeIdentity: await existingIdentity(physicalHomePath) })
+  const preparation = await api.readRsiLocalUpdateLocked({ dshHome: homePath, profile, root: localSourceInput.preparationRoot })
+  if (envelope && (envelope.intent.preparationDigest !== preparation.receiptDigest
+    || envelope.intent.candidateSourceCommit !== preparation.source.sourceCommit)) fail('owner successor candidate preparation changed')
+  const containment = ownerSuccessorServiceBarriers(oldManifest, physicalTransactionRoot, oldRoot)
+  await installBoundMasks(serviceContext.systemctlExecutable, containment.masks)
+  await ensureServiceStartBarriers(serviceContext.systemctlExecutable, containment.barriers)
+  await stopAndResetServiceUnits(serviceContext.systemctlExecutable, oldManifest.services.map(service => service.unit))
+  for (const service of oldManifest.services) {
+    const state = await readRawServiceState(serviceContext.systemctlExecutable, service.unit)
+    if (state.activeState !== 'inactive' || state.subState !== 'dead' || state.mainPid !== 0 || state.controlPid !== 0) {
+      fail('owner successor predecessor service is not stopped')
+    }
+  }
+  await assertNoUnmanagedHomeProcesses(homePath, [await realpath(join(oldRoot, 'original-home'))])
+  await verifyOwnerSuccessorBaseline({ manifest: oldManifest, homePath, physicalHomePath, archiveRoot: oldRoot, serviceContext })
+  const { captureOwnerSourceRepairSuccessor } = await import('./owner-source-repair.mjs')
+  await captureOwnerSourceRepairSuccessor({ predecessorProof: oldManifest.hostMigration.localSource,
+    homePath, profile, installer, permissionPreset: localSourceInput.ownerRepairPreset, dshPath: dshExecutable })
+  if (!envelope) {
+    const successorTransactionId = randomUUID()
+    envelope = await helper.createOwnerRepairSuccessorIntent({ homePath, profile, oldManifestSource,
+      currentCandidateIdentity: oldManifest.stagedIdentity, installer,
+      preparationRoot: localSourceInput.preparationRoot, preparationDigest: preparation.receiptDigest,
+      candidateSourceCommit: preparation.source.sourceCommit, permissionPreset: localSourceInput.ownerRepairPreset,
+      auxiliaryRoot: localSourceInput.auxiliaryRoot ?? null, planPath, planDigest: sha256(await readFile(planPath)),
+      archivePath: `${transactionRoot}.owner-predecessor-${successorTransactionId}`, successorTransactionId })
+  }
+  {
+    const proof = oldManifest.hostMigration.localSource
+    const { ownerRepairActivationInspector } = await import('./owner-repair-readiness.mjs')
+    const activation = await ownerRepairActivationInspector({ ownerRepair: proof.ownerRepair, installer: proof.installer,
+      homePath, targetProfile: profile, coordinatorProfile: proof.ownerRepair.coordinatorProfile })
+    const originalRestoration = ownerRepairRestorationPolicy(oldManifest.hostMigration.originalReadiness,
+      oldManifest.services, profile, proof.ownerRepair.coordinatorProfile, activation)
+    const services = await hostCandidateServices(oldManifest.services, oldManifest.hostMigration.units, dshExecutable)
+    await restoreOriginalActiveSet({ ...serviceContext, dshExecutable, services,
+      serviceMasks: containment.masks, serviceStartBarriers: containment.barriers,
+      containmentMasks: oldManifest.containmentMasks, containmentStartBarriers: oldManifest.containmentStartBarriers,
+      homePath, targetProfile: profile, unitUniverse: oldManifest.unitUniverse,
+      foreignOwnership: oldManifest.foreignOwnership, timeouts: serviceTimeouts(), originalRestoration })
+    if (await readOwnerSuccessorManifestSource(join(oldRoot, 'manifest.json')) !== oldManifestSource) fail('owner successor predecessor manifest changed')
+    if (!archived) {
+      await moveBoundDirectoryNoReplace(physicalTransactionRoot, anchoredSibling(envelope.intent.archivePath), oldManifest.transactionIdentity)
+      await fsyncPath(LOCK_PARENT_FD_PATH, true)
+      process.stderr.write(`owner successor retains the running degraded candidate and archives its unaccepted transaction: ${envelope.intent.archivePath}\n`)
+    }
+  }
+  await performHostUpdate({ ...input, ownerSuccessor: envelope,
+    localSourceInput: { ...localSourceInput, ownerRepairPredecessor: oldManifest.hostMigration.localSource } })
 }
 
 async function continueHostUpdate({ manifest: initial, homePath, physicalHomePath, transactionRoot,
@@ -7531,6 +7728,20 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
   await verifyAuthority()
   manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
     hostMigration: { ...manifest.hostMigration, phase: 'committed' } }, 'committed')
+  if (manifest.hostMigration.localSource?.successorIntent) {
+    const helper = await import('./owner-repair-successor.mjs')
+    const expected = manifest.hostMigration.localSource.successorIntent
+    const oldManifestSource = await readOwnerSuccessorManifestSource(join(expected.archivePath, 'manifest.json'))
+    const envelope = await helper.readOwnerRepairSuccessorIntent({ homePath, profile: manifest.profile,
+      oldManifestSource, archivePath: expected.archivePath })
+    if (envelope.digest !== expected.digest || envelope.intent.successorTransactionId !== manifest.id) {
+      fail('owner successor acceptance intent changed')
+    }
+    await helper.finalizeOwnerRepairSuccessorIntent({ homePath, profile: manifest.profile,
+      oldManifestSource, intentSource: envelope.source, archivePath: expected.archivePath,
+      acceptedManifestSource: await readOwnerSuccessorManifestSource(join(physicalTransactionRoot, 'manifest.json')),
+      readinessVerified: true })
+  }
   manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
     hostMigration: { ...manifest.hostMigration, phase: 'cleanup-started' } }, 'cleanup-started')
   await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome })
@@ -7664,6 +7875,10 @@ async function main() {
     return
   }
   await assertLifecycleLocksHeld(homePath)
+  if (operation !== 'host-owner-repair-successor'
+    && await existingIdentity(anchoredSibling(`${homePath}.dsh-enhanced-owner-successor.json`)) !== undefined) {
+    fail('pending owner successor requires the same reviewed checkout and explicit successor command')
+  }
   if (operation === 'local-service-upgrade' || operation === 'local-service-recover') {
     if (!PROFILE_NAME.test(profile) || targets.length !== (operation === 'local-service-upgrade' ? 5 : 3)) {
       fail('local-service-upgrade requires systemctl, journalctl, pnpm, preparation-root and reviewed-installer-root; local-service-recover requires systemctl, journalctl and reviewed-installer-root', 2)
@@ -7718,8 +7933,10 @@ async function main() {
     return
   }
   if (operation === 'host-update' || operation === 'host-recover' || operation === 'host-local-update' || operation === 'host-owner-repair'
+    || operation === 'host-owner-repair-successor'
     || operation === 'host-recover-settings') {
-    const ownerRepair = operation === 'host-owner-repair'
+    const ownerSuccessor = operation === 'host-owner-repair-successor'
+    const ownerRepair = operation === 'host-owner-repair' || ownerSuccessor
     const joint = operation === 'host-local-update' || ownerRepair
     if (!PROFILE_NAME.test(profile) || (joint ? targets.length < (ownerRepair ? 6 : 5) || targets.length > 7 : targets.length < 2 || targets.length > 3)) {
       fail('Host update requires systemctl, journalctl and plan.json; local migration also requires source preparation and reviewed installer roots; owner repair requires an explicit permission preset and accepts an optional auxiliary artifact root', 2)
@@ -7741,7 +7958,7 @@ async function main() {
       return
     }
     if (planPath === undefined) fail('host-update requires plan.json', 2)
-    await performHostUpdate({ ...hostPaths, profile, planPath, bwrapExecutable,
+    await (ownerSuccessor ? performHostOwnerSuccessor : performHostUpdate)({ ...hostPaths, profile, planPath, bwrapExecutable,
       dshExecutable, serviceContext, ...(joint ? { localSourceInput: {
         preparationRoot: targets[3], installerRoot: targets[4],
         ...(ownerRepair ? { ownerRepairPreset: targets[5], ...(targets[6] ? { auxiliaryRoot: targets[6] } : {}) }
@@ -7822,6 +8039,7 @@ async function main() {
 
 export const lifecycleProfileTest = Object.freeze({
   reconcileHostUnitSources, validateHostUpdateManifest,
+  assertHostOwnerSuccessorAdmission, ownerSuccessorServiceBarriers, ownerSuccessorRecoveryDecision,
   validOwnerRepairOriginalReadiness, captureOwnerRepairOriginalReadiness,
   ownerRepairRestorationPolicy, serviceReadySignal, serviceRuntimeReady, readRawServiceState,
   stopAndResetServiceUnits,
