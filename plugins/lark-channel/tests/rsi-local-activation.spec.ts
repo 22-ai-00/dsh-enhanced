@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { createHash, generateKeyPairSync } from 'node:crypto'
-import { chmod, cp, mkdir, readFile, readdir, rename, rm, utimes, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, readFile, readdir, rename, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -288,6 +288,91 @@ linuxTest('explicit pre-owner maintenance signs real Host evidence without creat
     records: [first] })).rejects.toThrow('pre-owner state is not empty')
   expect(await snapshot(f.home)).toEqual(originalLive)
 }, 60_000)
+
+async function preparedCoordinatorFixture() {
+  const f = await fixture(false, true)
+  const digest = hash(f.profile), coordinator = `rsi-${f.profile.slice(0, 43)}-${digest.slice(0, 12)}`
+  const markerName = `.rsi-coordinator-${digest.slice(0, 16)}.json`
+  const marker = { schemaVersion: 1, targetProfile: f.profile, coordinatorProfile: coordinator,
+    version: f.original.version, sourceRepository: f.sourceRepository }
+  for (const [home, relative] of [[f.home, 'home'], [f.stage, 'stage']] as const) {
+    const coordinatorRoot = await installFixture(f, f.original,
+      ['assistant-policy', 'assistant-automations', 'plugin-control-plane'], `${relative}/profiles/${coordinator}`)
+    const targetRoot = join(home, 'profiles', f.profile)
+    const manifest = (bundles: string[]) => ({ name: 'prepared-profile', private: true,
+      dependencies: Object.fromEntries(bundles.map(slug => [`@dsh-enhanced/${slug}`,
+        `file:${join(f.original.root, 'artifacts', `${slug}.tgz`)}`])),
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', ...bundles.map(slug => `@dsh-enhanced/${slug}`)] } } })
+    await writeFile(join(targetRoot, 'package.json'), JSON.stringify(manifest(['target'])))
+    await writeFile(join(coordinatorRoot, 'package.json'), JSON.stringify(manifest(['assistant-automations', 'assistant-policy', 'plugin-control-plane'])))
+    for (const name of ['cordis.yml', 'cordis.patch.yml']) await writeFile(join(coordinatorRoot, name), '[]\n')
+    await writeFile(join(coordinatorRoot, 'pnpm-workspace.yaml'), 'nodeLinker: isolated\n')
+    await writeFile(join(coordinatorRoot, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
+    await writeFile(join(home, markerName), JSON.stringify(marker), { mode: 0o600 })
+    for (const name of ['creation-review-runner', 'creation-adoption-runner']) {
+      await mkdir(join(home, 'rsi-authorities', f.profile, 'state', name), { mode: 0o700 })
+    }
+  }
+  return { ...f, coordinator, markerName, marker,
+    input: { ...f.input, preparedCoordinator: true as const } }
+}
+
+linuxTest('explicit prepared coordinator proof preserves a frozen inert pair and signed pre-owner history', async () => {
+  const f = await preparedCoordinatorFixture(), beforeLive = await snapshot(f.home), beforeStage = await snapshot(f.stage)
+  await expect(assertRsiPreOwnerInstallation({ logicalHome: f.home, physicalHome: f.stage,
+    profile: f.profile })).rejects.toThrow('pre-owner state is not empty')
+  const proof = await assertRsiPreOwnerInstallation({ logicalHome: f.home, physicalHome: f.stage,
+    profile: f.profile, preparedCoordinator: true })
+  expect(proof.preparedCoordinator).toMatchObject({ profile: f.coordinator, cohortDigest: f.original.receiptDigest,
+    receiptDigest: hash(JSON.stringify(f.marker)) })
+  const record = await produceRsiLocalSourceMaintenance(f.input)
+  expect(record.host).toBeNull()
+  expect(verifySourceMaintenanceRecords([record], f.live.anchor)).toEqual([record])
+  await expect(produceRsiLocalSourceMaintenance({ ...f.input, maintenanceMode: 'owner-ledger' }))
+    .rejects.toThrow('prepared coordinator requires pre-owner')
+  expect(await snapshot(f.home)).toEqual(beforeLive)
+  expect(await snapshot(f.stage)).toEqual(beforeStage)
+}, 60_000)
+
+linuxTest.each(['marker-version', 'marker-extra', 'stage-marker', 'marker-symlink', 'unknown-marker', 'unknown-state',
+  'coordinator-config', 'coordinator-root', 'coordinator-file', 'coordinator-package', 'target-package',
+  'target-manifest', 'state-file', 'state-symlink', 'coordinator-authority', 'setup-journal'] as const)(
+  'prepared coordinator proof rejects %s residue or drift', async kind => {
+    const f = await preparedCoordinatorFixture()
+    const markerPath = join(f.stage, f.markerName)
+    if (kind === 'marker-version') await writeFile(markerPath, JSON.stringify({ ...f.marker, version: '0.1.49' }))
+    else if (kind === 'marker-extra') await writeFile(markerPath, JSON.stringify({ ...f.marker, extra: true }))
+    else if (kind === 'stage-marker') await rm(markerPath)
+    else if (kind === 'marker-symlink') {
+      await rm(markerPath)
+      await symlink(join(f.home, f.markerName), markerPath)
+    }
+    else if (kind === 'unknown-marker') await writeFile(join(f.stage, '.rsi-coordinator-foreign.json'), '{}')
+    else if (kind === 'unknown-state') {
+      await mkdir(join(f.stage, 'rsi-coordinators'), { mode: 0o700 })
+      await writeFile(join(f.stage, 'rsi-coordinators', 'foreign.json'), '{}')
+    }
+    else if (kind === 'coordinator-config') await writeFile(join(f.stage, 'profiles', f.coordinator, 'cordis.patch.yml'),
+      '- id: owner\n  config:\n    schedulerEnabled: true\n')
+    else if (kind === 'coordinator-root') await writeFile(join(f.stage, 'profiles', f.coordinator, 'cordis.yml'),
+      '- id: owner\n  name: "@dsh-enhanced/plugin-control-plane"\n')
+    else if (kind === 'coordinator-file') await writeFile(join(f.stage, 'profiles', f.coordinator, 'unexpected.json'), '{}')
+    else if (kind === 'coordinator-package') await writeFile(join(f.stage, 'profiles', f.coordinator,
+      'node_modules', '@dsh-enhanced', 'assistant-policy', 'lib', 'index.js'), 'tampered')
+    else if (kind === 'target-package') await writeFile(join(f.stage, 'profiles', f.profile,
+      'node_modules', '@dsh-enhanced', 'target', 'lib', 'index.js'), 'tampered')
+    else if (kind === 'target-manifest') await writeFile(join(f.stage, 'profiles', f.profile, 'package.json'),
+      JSON.stringify({ name: 'owner', dependencies: {}, dsh: { profile: { bundles: [] } } }))
+    else if (kind === 'state-file') await writeFile(join(f.stage, 'rsi-authorities', f.profile, 'state', 'creation-review-runner', 'run.json'), '{}')
+    else if (kind === 'state-symlink') {
+      await rm(join(f.stage, 'rsi-authorities', f.profile, 'state', 'creation-review-runner'), { recursive: true })
+      await symlink(join(f.home, 'rsi-authorities', f.profile, 'state', 'creation-review-runner'),
+        join(f.stage, 'rsi-authorities', f.profile, 'state', 'creation-review-runner'))
+    } else if (kind === 'coordinator-authority') await mkdir(join(f.stage, 'rsi-authorities', f.coordinator), { mode: 0o700 })
+    else await writeFile(join(f.stage, '.rsi-setup-journal.json'), '{}')
+    await expect(assertRsiPreOwnerInstallation({ logicalHome: f.home, physicalHome: f.stage,
+      profile: f.profile, preparedCoordinator: true })).rejects.toThrow()
+  }, 60_000)
 
 const residues = ['config', 'ledger', 'state', 'registry', 'catalog', 'coordinator-profile', 'coordinator-state',
   'coordinator-receipt', 'setup-journal', 'target-control-plane', 'target-authority-reference'] as const

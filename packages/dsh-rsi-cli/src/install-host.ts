@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import { link, lstat, mkdir, open, readdir, realpath, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { delimiter, isAbsolute, join, resolve } from 'node:path'
+import { delimiter, isAbsolute, join, resolve, sep } from 'node:path'
 import { isSupportedCandidateVersion, isSupportedReceiptVersion, prepareManagedHostRuntime, readManagedHostRuntime, type ManagedHostRuntime } from './host-runtime.ts'
 import { PurgeError } from './purge.ts'
 
@@ -25,6 +25,13 @@ export interface HostUpdatePlan {
   originalRuntime: ManagedHostRuntime
   candidateRuntime: ManagedHostRuntime
   candidateBindingSource: string
+}
+
+export interface UnboundHostUpdatePlan extends Omit<HostUpdatePlan, 'schemaVersion' | 'status' | 'originalBindingSource' | 'originalBindingDigest'> {
+  schemaVersion: 2
+  status: 'update'
+  originalBindingSource: null
+  originalBindingDigest: null
 }
 
 function versionOrder(version: string): readonly number[] {
@@ -134,6 +141,74 @@ export async function prepareHostUpdatePlan(input: { dshHome: string; selector?:
   return { schemaVersion: 1, status, canonicalHome, bindingPath: join(canonicalHome, BINDING),
     originalBindingSource: original.source, originalBindingDigest: createHash('sha256').update(original.bytes).digest('hex'),
     originalRuntime, candidateRuntime, candidateBindingSource }
+}
+
+/** Plan an explicit legacy private Host migration without creating a Home binding. */
+export async function prepareUnboundHostUpdatePlan(input: {
+  dshHome: string
+  unboundOriginal: { cacheRoot: string; version: string; dshPath: string }
+  selector?: string
+  signal?: AbortSignal
+}, dependencies: InstallHostPorts = ports): Promise<UnboundHostUpdatePlan> {
+  input.signal?.throwIfAborted()
+  const requested = resolve(input.dshHome)
+  const entry = await lstat(requested).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new PurgeError('DSH_HOME 不存在，不能准备受管 Host 更新。')
+    throw error
+  })
+  if (!entry.isDirectory() && !entry.isSymbolicLink()) throw new PurgeError('DSH_HOME 必须是目录。')
+  const canonicalHome = await realpath(requested)
+  await assertOwnedHome(canonicalHome)
+  const initialHome = await lstat(canonicalHome)
+  const bindingPath = join(canonicalHome, BINDING)
+  const assertUnbound = async (): Promise<void> => {
+    try { await lstat(bindingPath) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    throw new PurgeError('DSH_HOME 已有私有 Host 绑定，不能准备无绑定迁移。')
+  }
+  await assertUnbound()
+  const { cacheRoot, version, dshPath } = input.unboundOriginal
+  if (!isAbsolute(cacheRoot) || resolve(cacheRoot) !== cacheRoot || !isAbsolute(dshPath)
+    || resolve(dshPath) !== dshPath || !isSupportedReceiptVersion(version) || version === '0.2.0-rc.2') {
+    throw new PurgeError('原 Host 必须是显式指定的受支持旧版私有制品。')
+  }
+  const originalRuntime = await dependencies.read({ root: cacheRoot, version,
+    ...(input.signal === undefined ? {} : { signal: input.signal }) })
+  if (originalRuntime.version !== version || originalRuntime.root !== join(cacheRoot, version)
+    || originalRuntime.dshPath !== dshPath || !/^[a-f0-9]{64}$/u.test(originalRuntime.receiptDigest)) {
+    throw new PurgeError('原 Host 可执行文件与私有收据不一致。')
+  }
+  const originalExecutable = await realpath(dshPath).catch(() => { throw new PurgeError('原 Host 可执行文件与私有收据不一致。') })
+  if (!originalExecutable.startsWith(`${originalRuntime.root}${sep}`)) {
+    throw new PurgeError('原 Host 可执行文件与私有收据不一致。')
+  }
+  input.signal?.throwIfAborted()
+  const selector = input.selector ?? 'latest'
+  if (selector !== 'latest' && selector !== '0.2.0-rc.2') throw new PurgeError('请求的 Host 版本不兼容。')
+  const preparedRuntime = await dependencies.prepare({ root: cacheRoot, selector,
+    ...(input.signal === undefined ? {} : { signal: input.signal }) })
+  if (!isSupportedCandidateVersion(preparedRuntime.version) || selector !== 'latest' && preparedRuntime.version !== selector
+    || !/^[a-f0-9]{64}$/u.test(preparedRuntime.receiptDigest)) throw new PurgeError('候选 Host 版本或收据无效。')
+  const candidateRuntime = await dependencies.read({ root: cacheRoot, version: preparedRuntime.version,
+    ...(input.signal === undefined ? {} : { signal: input.signal }) })
+  if (!sameRuntime(candidateRuntime, preparedRuntime)
+    || candidateRuntime.root !== join(cacheRoot, candidateRuntime.version)) {
+    throw new PurgeError('候选 Host 制品未通过原缓存根的独立收据验证。')
+  }
+  input.signal?.throwIfAborted()
+  await assertOwnedHome(canonicalHome)
+  const currentHome = await lstat(canonicalHome)
+  if (currentHome.dev !== initialHome.dev || currentHome.ino !== initialHome.ino) {
+    throw new PurgeError('准备 Host 期间 DSH_HOME 身份发生变化；未切换 Host。')
+  }
+  await assertUnbound()
+  const candidateBindingSource = JSON.stringify({ schemaVersion: 1, cacheRoot, version: candidateRuntime.version,
+    receiptDigest: candidateRuntime.receiptDigest }) + '\n'
+  return { schemaVersion: 2, status: 'update', canonicalHome, bindingPath,
+    originalBindingSource: null, originalBindingDigest: null, originalRuntime, candidateRuntime, candidateBindingSource }
 }
 
 async function assertOwnedHome(home: string): Promise<void> {

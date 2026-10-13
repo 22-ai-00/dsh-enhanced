@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -241,8 +241,44 @@ async function controlledHostFixture(withUnits = false, dumpLink: 'none' | 'exte
     unitDirectory: join(systemdHome, '.config', 'systemd', 'user'), originalRuntime, candidateRuntime }
 }
 
+async function treeSnapshot(root: string): Promise<string> {
+  const entries: unknown[] = []
+  const visit = async (path: string): Promise<void> => {
+    const item = await lstat(path), name = relative(root, path)
+    if (item.isDirectory()) {
+      entries.push([name, 'directory', item.mode & 0o777])
+      for (const child of (await readdir(path)).sort()) await visit(join(path, child))
+    } else if (item.isFile()) entries.push([name, 'file', item.mode & 0o777,
+      createHash('sha256').update(await readFile(path)).digest('hex')])
+    else if (item.isSymbolicLink()) entries.push([name, 'link', await readlink(path)])
+    else throw new Error(`unexpected snapshot entry: ${path}`)
+  }
+  await visit(root)
+  return digest(JSON.stringify(entries))
+}
+
 describe('managed Host transaction inputs', () => {
   const itLinux = process.platform === 'linux' ? it : it.skip
+
+  itLinux('canonicalizes the locked candidate Home for joint post-swap verification only', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-host-canonical-')))
+    const parent = await open(root, 'r')
+    try {
+      const home = join(root, 'home'), otherHome = join(root, 'other')
+      await mkdir(home)
+      await mkdir(otherHome)
+      const anchoredHome = `/proc/self/fd/${parent.fd}/home`
+      await expect(lifecycleProfileTest.canonicalJointCandidateHome(anchoredHome, home)).resolves.toBe(home)
+      await expect(lifecycleProfileTest.canonicalJointCandidateHome(anchoredHome, otherHome))
+        .rejects.toThrow('does not resolve to the canonical Home')
+      const source = await readFile(new URL('../scripts/install/lifecycle-profile.mjs', import.meta.url), 'utf8')
+      expect(source.match(/physicalHome: candidateHome, selection: 'candidate'/gu)).toHaveLength(2)
+      expect(source).toContain('stagedHome: candidateHome, originalPhysicalHome: backupHome')
+    } finally {
+      await parent.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 
   it('passes trust_lockfile only for offline materialize in the production bwrap invocation', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-host-bwrap-'))
@@ -289,6 +325,66 @@ describe('managed Host transaction inputs', () => {
     expect(parseHostUpdatePlan({ ...plan, status: 'current', candidateRuntime: old,
       candidateBindingSource: binding(old) }, '/private/home').status).toBe('current')
   })
+
+  it('accepts an exact 0.2 candidate for an existing schema 1 binding', () => {
+    const next = { ...candidate, version: '0.2.0-rc.2', root: '/private/hosts/0.2.0-rc.2',
+      dshPath: '/private/hosts/0.2.0-rc.2/node_modules/.bin/dsh',
+      binDirectory: '/private/hosts/0.2.0-rc.2/node_modules/.bin' }
+    expect(parseHostUpdatePlan({ ...plan, candidateRuntime: next,
+      candidateBindingSource: binding(next) }, '/private/home').candidateRuntime).toEqual(next)
+  })
+
+  it('accepts only a null-bound schema 2 legacy-to-0.2 plan in the same cache', () => {
+    const next = { ...candidate, version: '0.2.0-rc.2', root: '/private/hosts/0.2.0-rc.2',
+      dshPath: '/private/hosts/0.2.0-rc.2/node_modules/.bin/dsh',
+      binDirectory: '/private/hosts/0.2.0-rc.2/node_modules/.bin' }
+    const unbound = { ...plan, schemaVersion: 2, originalBindingSource: null,
+      originalBindingDigest: null, candidateRuntime: next, candidateBindingSource: binding(next) }
+    expect(parseHostUpdatePlan(unbound, '/private/home')).toEqual(unbound)
+    expect(() => parseHostUpdatePlan({ ...unbound, originalBindingSource: binding(old) }, '/private/home')).toThrow()
+    expect(() => parseHostUpdatePlan({ ...unbound, originalBindingDigest: digest(binding(old)) }, '/private/home')).toThrow()
+    expect(() => parseHostUpdatePlan({ ...unbound, status: 'current' }, '/private/home')).toThrow()
+    expect(() => parseHostUpdatePlan({ ...unbound, candidateRuntime: candidate,
+      candidateBindingSource: binding(candidate) }, '/private/home')).toThrow()
+    expect(() => parseHostUpdatePlan({ ...unbound, candidateBindingSource: JSON.stringify({
+      schemaVersion: 1, cacheRoot: '/foreign', version: next.version,
+      receiptDigest: next.receiptDigest,
+    }) + '\n' }, '/private/home')).toThrow()
+    expect(() => parseHostUpdatePlan({ ...unbound, originalRuntime: { ...old, version: '0.1.5-rc.2' } }, '/private/home')).toThrow()
+    expect(() => parseHostUpdatePlan({ ...unbound, candidateRuntime: { ...next, version: '0.2.1-alpha.2' } }, '/private/home')).toThrow()
+  })
+
+  itLinux.each([1, 2] as const)('rejects a schema %s direct cross-ABI Host update before changing Home', async schemaVersion => {
+    const fixture = await controlledHostFixture()
+    try {
+      const planPath = join(fixture.root, 'plan.json')
+      const original = JSON.parse(await readFile(planPath, 'utf8')) as {
+        schemaVersion: number; originalBindingSource: string | null; originalBindingDigest: string | null;
+        candidateRuntime: typeof old; candidateBindingSource: string
+      }
+      const nextRoot = join(dirname(fixture.originalRuntime.root), '0.2.0-rc.2')
+      const nextRuntime = { ...original.candidateRuntime, version: '0.2.0-rc.2', root: nextRoot,
+        dshPath: join(nextRoot, 'node_modules', '.bin', 'dsh'),
+        binDirectory: join(nextRoot, 'node_modules', '.bin') }
+      const nextBinding = `${JSON.stringify({ schemaVersion: 1, cacheRoot: dirname(nextRoot),
+        version: nextRuntime.version, receiptDigest: nextRuntime.receiptDigest })}\n`
+      await writeFile(planPath, JSON.stringify({ ...original, schemaVersion, candidateRuntime: nextRuntime,
+        candidateBindingSource: nextBinding,
+        ...(schemaVersion === 2 ? { originalBindingSource: null, originalBindingDigest: null } : {}) }), { mode: 0o600 })
+      if (schemaVersion === 2) await rm(join(fixture.home, '.dsh-rsi-host.json'))
+      const beforeHome = await treeSnapshot(fixture.home)
+      const beforeCache = await treeSnapshot(dirname(fixture.originalRuntime.root))
+      const result = fixture.run('host-update')
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toMatch(schemaVersion === 1
+        ? /cross-ABI Host migration requires a verified joint local source transaction/u
+        : /cross-ABI Host migration requires a verified joint local source transaction|unbound Host migration requires a verified joint local source transaction/u)
+      expect(await treeSnapshot(fixture.home)).toBe(beforeHome)
+      expect(await treeSnapshot(dirname(fixture.originalRuntime.root))).toBe(beforeCache)
+      await expect(lstat(`${fixture.home}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(lstat(nextRoot)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { await rm(fixture.root, { recursive: true, force: true }) }
+  }, 90_000)
 
   it('changes only the Host executable and PATH of an exact unit', () => {
     const service = { profile: 'owner', nodePath: '/usr/bin/node', dshPath: old.dshPath,
@@ -484,6 +580,25 @@ describe('managed Host transaction inputs', () => {
       }
       expect(await readFile(join(fixture.home, '.dsh-rsi-host.json'), 'utf8'))
         .toBe(fixture.originalBindingSource)
+    } finally { await rm(fixture.root, { recursive: true, force: true }) }
+  }, 90_000)
+
+  itLinux('retains containment when the original profile changes after a prestart rename-gap crash', async () => {
+    const fixture = await controlledHostFixture(true)
+    try {
+      expect(fixture.run('host-update', true).status).not.toBe(0)
+      const backupManifest = join(`${fixture.home}.dsh-enhanced-transaction`, 'original-home',
+        'profiles', 'web', 'package.json')
+      await writeFile(backupManifest, `${await readFile(backupManifest, 'utf8')}\n`)
+      const recovered = fixture.run('host-recover')
+      expect(recovered.status).not.toBe(0)
+      expect(recovered.stderr).toContain('Host recovery original profile changed')
+      const state = JSON.parse(await readFile(fixture.systemdState, 'utf8'))
+      expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'inactive',
+        starts: 0 })
+      expect(await readlink(join(dirname(fixture.unitDirectory), 'user.control', 'dsh-profile-web.service')))
+        .toBe('/dev/null')
+      expect((await lstat(`${fixture.home}.dsh-enhanced-transaction`)).isDirectory()).toBe(true)
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)
 

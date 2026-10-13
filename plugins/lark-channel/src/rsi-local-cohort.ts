@@ -421,6 +421,33 @@ export function rsiLocalRuntimeClosure(cohort: RsiLocalCohort, bundles: readonly
   return [...result.values()]
 }
 
+export async function readRsiLocalArtifactManifest(item: Pick<RsiLocalCohortPackage,
+  'name' | 'tarball' | 'sha256' | 'files' | 'runtimeDependencies'> & { version: string }): Promise<{
+    peerDependencies: Record<string, string>
+  }> {
+  slugOf(item.name)
+  let bytes: Buffer | undefined
+  const packed = await stableFile(item.tarball, MAX_ARCHIVE)
+  const files = archiveEntries(packed, manifest => { bytes = manifest })
+  if (digest(packed) !== item.sha256 || !same(files, item.files)) fail(`cohort tarball differs: ${item.name}`)
+  if (!bytes || bytes.length > 1_048_576 || digest(bytes) !== item.files.find(file => file.path === 'package.json')?.sha256) {
+    fail(`installed package file differs: ${item.name}/package.json`)
+  }
+  const manifest = JSON.parse(bytes.toString('utf8')) as Record<string, unknown>
+  if (manifest.name !== item.name || manifest.version !== item.version
+    || !same(runtimeDependencies(manifest), item.runtimeDependencies)) fail(`installed package identity differs: ${item.name}`)
+  const peers = manifest.peerDependencies
+  if (peers === undefined) return { peerDependencies: {} }
+  if (!peers || typeof peers !== 'object' || Array.isArray(peers)) fail(`invalid peerDependencies: ${item.name}`)
+  const result: Record<string, string> = {}
+  for (const [name, range] of Object.entries(peers)) {
+    if (typeof range !== 'string' || !range) fail(`invalid peerDependencies entry: ${item.name}`)
+    if (name.startsWith(INTERNAL)) slugOf(name)
+    result[name] = range
+  }
+  return { peerDependencies: result }
+}
+
 export async function rsiLocalPeerOverrides(input: { cohort: RsiLocalCohort; bundles: readonly string[];
   /** During a pair upgrade the original archives have already been replaced.
    * Its installed manifests must still match the original receipt's digest. */
@@ -450,9 +477,12 @@ export async function rsiLocalPeerOverrides(input: { cohort: RsiLocalCohort; bun
     if (input.profilePath) {
       bytes = await stableFile(manifestPaths.get(parent.name)!, 1_048_576)
     } else {
-      const packed = await stableFile(parent.tarball, MAX_ARCHIVE)
-      const files = archiveEntries(packed, manifest => { bytes = manifest })
-      if (digest(packed) !== parent.sha256 || !same(files, parent.files)) fail(`cohort tarball differs: ${parent.name}`)
+      const manifest = await readRsiLocalArtifactManifest({ ...parent, version: cohort.version })
+      for (const name of Object.keys(manifest.peerDependencies)) {
+        const provider = providers.get(name)
+        if (provider) result[`${parent.name}@${cohort.version}>${name}`] = `file:${provider.tarball}`
+      }
+      continue
     }
     if (!bytes || bytes.length > 1_048_576 || digest(bytes) !== parent.files.find(file => file.path === 'package.json')?.sha256) fail(`installed package file differs: ${parent.name}/package.json`)
     const manifest = JSON.parse(bytes.toString('utf8')) as Record<string, unknown>

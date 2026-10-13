@@ -4,12 +4,23 @@ import { dirname, isAbsolute, resolve } from 'node:path'
 const digest = value => createHash('sha256').update(value).digest('hex')
 const hex = value => typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value)
 const absolute = value => typeof value === 'string' && isAbsolute(value) && resolve(value) === value
-const versionRank = value => value === '0.1.5' ? Number.MAX_SAFE_INTEGER
-  : Number(/^0\.1\.5-rc\.([0-9]{1,6})$/u.exec(value)?.[1])
+const supportedLegacy = value => value === '0.1.5' || /^0\.1\.5-rc\.([0-9]{1,6})$/u.test(value)
+  && Number(/^0\.1\.5-rc\.([0-9]{1,6})$/u.exec(value)[1]) >= 3
+const versionOrder = value => {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$/u.exec(value)
+  return [Number(match[1]), Number(match[2]), Number(match[3]), match[4] === undefined ? Number.MAX_SAFE_INTEGER : Number(match[4])]
+}
+const earlierVersion = (left, right) => {
+  const before = versionOrder(left), after = versionOrder(right)
+  for (let index = 0; index < before.length; index++) {
+    if (before[index] !== after[index]) return before[index] < after[index]
+  }
+  return false
+}
 const keys = (value, expected) => value !== null && typeof value === 'object' && !Array.isArray(value)
   && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort())
 const validRuntime = value => keys(value, ['version', 'root', 'dshPath', 'binDirectory', 'integrity', 'receiptDigest'])
-  && /^0\.1\.5(?:-rc\.[0-9]{1,6})?$/u.test(value.version) && versionRank(value.version) >= 3
+  && (supportedLegacy(value.version) || value.version === '0.2.0-rc.2')
   && absolute(value.root) && absolute(value.dshPath) && absolute(value.binDirectory)
   && typeof value.integrity === 'string' && value.integrity.startsWith('sha512-')
   && hex(value.receiptDigest) && value.dshPath.startsWith(`${value.root}/`)
@@ -18,11 +29,15 @@ const validRuntime = value => keys(value, ['version', 'root', 'dshPath', 'binDir
 export function parseHostUpdatePlan(value, homePath) {
   if (!keys(value, ['schemaVersion', 'status', 'canonicalHome', 'bindingPath', 'originalBindingSource',
     'originalBindingDigest', 'originalRuntime', 'candidateRuntime', 'candidateBindingSource'])
-    || value.schemaVersion !== 1 || !['current', 'update'].includes(value.status)
+    || ![1, 2].includes(value.schemaVersion) || !['current', 'update'].includes(value.status)
     || !absolute(value.canonicalHome) || value.canonicalHome !== homePath
     || value.bindingPath !== `${homePath}/.dsh-rsi-host.json`
-    || typeof value.originalBindingSource !== 'string' || typeof value.candidateBindingSource !== 'string'
-    || !hex(value.originalBindingDigest) || digest(value.originalBindingSource) !== value.originalBindingDigest
+    || typeof value.candidateBindingSource !== 'string'
+    || value.schemaVersion === 1 && (typeof value.originalBindingSource !== 'string'
+      || !hex(value.originalBindingDigest) || digest(value.originalBindingSource) !== value.originalBindingDigest)
+    || value.schemaVersion === 2 && (value.status !== 'update' || value.originalBindingSource !== null
+      || value.originalBindingDigest !== null || !supportedLegacy(value.originalRuntime?.version)
+      || value.candidateRuntime?.version !== '0.2.0-rc.2')
     || !validRuntime(value.originalRuntime) || !validRuntime(value.candidateRuntime)
     || value.originalRuntime.root === value.candidateRuntime.root && value.status === 'update'
       && value.originalRuntime.version === value.candidateRuntime.version) {
@@ -37,18 +52,21 @@ export function parseHostUpdatePlan(value, homePath) {
     }
     return parsed
   }
-  const before = parseBinding(value.originalBindingSource)
+  const before = value.schemaVersion === 1 ? parseBinding(value.originalBindingSource) : null
   const after = parseBinding(value.candidateBindingSource)
-  for (const [binding, runtime] of [[before, value.originalRuntime], [after, value.candidateRuntime]]) {
+  for (const [binding, runtime] of [[after, value.candidateRuntime], ...(before === null ? [] : [[before, value.originalRuntime]])]) {
     if (binding.version !== runtime.version || binding.receiptDigest !== runtime.receiptDigest
       || runtime.root !== `${binding.cacheRoot}/${binding.version}`) {
       throw new Error('managed Host binding does not match runtime receipt')
     }
   }
-  if (before.cacheRoot !== after.cacheRoot || value.status === 'current'
+  const originalCacheRoot = before?.cacheRoot ?? dirname(value.originalRuntime.root)
+  if (originalCacheRoot !== after.cacheRoot
+    || value.originalRuntime.root !== `${originalCacheRoot}/${value.originalRuntime.version}`
+    || value.status === 'current'
     && (value.originalBindingSource !== value.candidateBindingSource
       || JSON.stringify(value.originalRuntime) !== JSON.stringify(value.candidateRuntime))
-    || value.status === 'update' && versionRank(before.version) >= versionRank(after.version)) {
+    || value.status === 'update' && !earlierVersion(value.originalRuntime.version, value.candidateRuntime.version)) {
     throw new Error('managed Host update plan has inconsistent versions')
   }
   return value

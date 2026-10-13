@@ -1,7 +1,8 @@
 import { chmod, cp, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
-import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages, rsiLocalPeerOverrides, type RsiLocalCohortPorts } from '../src/rsi-local-cohort.js'
+import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages, rsiLocalPeerOverrides,
+  readRsiLocalArtifactManifest, type RsiLocalCohortPorts } from '../src/rsi-local-cohort.js'
 import { localCohortFixture, installFixture } from './fixtures/rsi-local-cohort.js'
 
 const roots: string[] = []
@@ -85,6 +86,21 @@ describe('frozen local tarball cohort', () => {
 
 
 describe('frozen internal peers', () => {
+  test('reads peer edges only after checking the exact archive, inventory and runtime manifest', async () => {
+    const f = await localCohortFixture(true); roots.push(f.root)
+    const cohort = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile,
+      source: f.source, bundles: ['target'] }, f.ports)
+    const artifact = cohort.packages.find(item => item.name === '@dsh-enhanced/target')!
+    const item = { ...artifact, version: cohort.version }
+    expect((await readRsiLocalArtifactManifest(item)).peerDependencies['@dsh-enhanced/shared-lib']).toBeDefined()
+    await expect(readRsiLocalArtifactManifest({ ...item, runtimeDependencies: [] }))
+      .rejects.toThrow('installed package identity differs')
+    await expect(readRsiLocalArtifactManifest({ ...item, files: item.files.slice(1) }))
+      .rejects.toThrow('cohort tarball differs')
+    const original = await readFile(item.tarball)
+    await writeFile(item.tarball, Buffer.concat([original, Buffer.from('x')]))
+    await expect(readRsiLocalArtifactManifest(item)).rejects.toThrow(/cohort tarball differs|invalid or oversized gzip tarball/u)
+  })
   test('derives peers from schema 1 tarballs within the selected runtime closure only', async () => {
     const f = await localCohortFixture(true); roots.push(f.root)
     const cohort = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source, bundles: ['target'] }, f.ports)
