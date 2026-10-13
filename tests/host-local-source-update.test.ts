@@ -29,7 +29,7 @@ vi.mock('../scripts/install/owner-source-repair.mjs', () => ({
 
 import { prepareHostLocalSourceUpdate, stageHostLocalSourceUpdate,
   stageResourcesForPreparation, verifyHostLocalSourceUpdate,
-  finalizeHostLocalSourceUpdate } from '../scripts/install/host-local-source-update.mjs'
+  finalizeHostLocalSourceUpdate, verifyHostLocalSourceOriginalForPrestartRecovery } from '../scripts/install/host-local-source-update.mjs'
 
 const roots: string[] = []
 afterEach(async () => {
@@ -91,6 +91,7 @@ async function fixture() {
     assertRsiPreOwnerInstallation: vi.fn(async () => preOwner),
     readRsiSourceMaintenance: vi.fn(async ({ physicalHome }: { physicalHome: string }) => stagedSources.get(physicalHome) ?? originalSource),
     readRsiLocalCohort: vi.fn(async () => originalCohort),
+    verifyRsiLocalInstalledPackages: vi.fn(async () => undefined),
     stageRsiLocalUpdateResources: vi.fn(async ({ stagePhysicalHome }: { stagePhysicalHome: string }) => {
       await writeFile(join(stagePhysicalHome, 'rsi-local-cohorts', profile, 'receipt.json'),
         JSON.stringify(stagedCohort), { mode: 0o600 })
@@ -181,6 +182,59 @@ test('owner repair appends the real owner-ledger record and binds finalization t
   mocks.verifyOwner.mockRejectedValueOnce(new Error('owner ledger drift'))
   await expect(verifyHostLocalSourceUpdate({ proof: finalized, homePath: setup.homePath,
     physicalHome: setup.stageHome, selection: 'candidate', checkLedger: true })).rejects.toThrow('owner ledger drift')
+})
+
+test('owner prestart recovery verifies only exact original Home despite changed upstream HEAD or missing candidate', async () => {
+  const setup = await fixture()
+  const ownerRepair = { homePath: setup.homePath, profile: setup.profile }
+  mocks.captureOwner.mockResolvedValue(ownerRepair)
+  mocks.prepareCreation.mockResolvedValue({ receiptSha256: 'a'.repeat(64) })
+  const proof = await prepareHostLocalSourceUpdate({ ...setup, ownerRepairPreset: 'workspace-write' })
+  setup.api.readRsiLocalUpdateLocked.mockRejectedValue(new Error('candidate original source changed'))
+  await rm(setup.preparationRoot, { recursive: true })
+  const input = { proof, homePath: setup.homePath, physicalHome: setup.homePath }
+  await expect(verifyHostLocalSourceOriginalForPrestartRecovery(input)).resolves.toBeUndefined()
+  expect(setup.api.readRsiLocalUpdateLocked).toHaveBeenCalledTimes(2)
+  expect(setup.api.verifyRsiLocalInstalledPackages).toHaveBeenCalledWith(expect.objectContaining({
+    profilePath: join(setup.homePath, 'profiles', setup.profile),
+  }))
+  expect(mocks.verifyOwner).toHaveBeenLastCalledWith(expect.objectContaining({
+    ownerRepair, phase: 'original', homePath: setup.homePath,
+  }))
+  await expect(verifyHostLocalSourceUpdate({ ...input, selection: 'original' }))
+    .rejects.toThrow('candidate original source changed')
+})
+
+test('owner prestart recovery rejects changed Home, owner, profile roots and source identity', async () => {
+  const setup = await fixture()
+  const ownerRepair = { homePath: setup.homePath, profile: setup.profile }
+  mocks.captureOwner.mockResolvedValue(ownerRepair)
+  mocks.prepareCreation.mockResolvedValue({ receiptSha256: 'a'.repeat(64) })
+  const proof = await prepareHostLocalSourceUpdate({ ...setup, ownerRepairPreset: 'workspace-write' })
+  const input = { proof, homePath: setup.homePath, physicalHome: setup.homePath }
+  await expect(verifyHostLocalSourceOriginalForPrestartRecovery({ ...input, homePath: setup.root }))
+    .rejects.toThrow('owner prestart recovery Home differs')
+  await expect(verifyHostLocalSourceOriginalForPrestartRecovery({ ...input,
+    proof: { ...proof, protocol: 'dsh-enhanced/host-local-source-update/v1', ownerRepair: undefined } }))
+    .rejects.toThrow('owner prestart recovery Home differs')
+  for (const changedOwner of [{ ...ownerRepair, homePath: setup.root },
+    { ...ownerRepair, profile: 'other' }]) {
+    await expect(verifyHostLocalSourceOriginalForPrestartRecovery({ ...input,
+      proof: { ...proof, ownerRepair: changedOwner } })).rejects.toThrow('owner prestart recovery Home differs')
+  }
+  await expect(verifyHostLocalSourceOriginalForPrestartRecovery({ ...input,
+    proof: { ...proof, profile: '../other' } })).rejects.toThrow('owner prestart recovery Home differs')
+  mocks.verifyOwner.mockRejectedValueOnce(new Error('owner binding changed'))
+  await expect(verifyHostLocalSourceOriginalForPrestartRecovery(input)).rejects.toThrow('owner binding changed')
+  await writeFile(join(setup.homePath, 'profiles', setup.profile, 'package.json'),
+    JSON.stringify({ dependencies: { '@dsh-enhanced/other': '0.1.48' } }), { mode: 0o644 })
+  await expect(verifyHostLocalSourceOriginalForPrestartRecovery(input))
+    .rejects.toThrow('original Home profile roots changed')
+  await writeFile(join(setup.homePath, 'profiles', setup.profile, 'package.json'),
+    JSON.stringify({ dependencies: { '@dsh-enhanced/assistant-policy': '0.1.48' } }), { mode: 0o644 })
+  setup.stagedSources.set(setup.homePath, { workspace: { version: '0.1.48', sourceCommit: '0'.repeat(40) } })
+  await expect(verifyHostLocalSourceOriginalForPrestartRecovery(input))
+    .rejects.toThrow('original owner recovery identity changed')
 })
 
 test('failed owner eligibility never falls back to pre-owner or creates candidate grants', async () => {

@@ -7598,8 +7598,11 @@ async function recoverHostUpdate({ manifest: initial, homePath, physicalHomePath
       fail('Host recovery original profile changed; retain containment')
     }
     if (migration.localSource) {
-      const { verifyHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
-      await verifyHostLocalSourceUpdate({ proof: migration.localSource, homePath,
+      const { verifyHostLocalSourceUpdate, verifyHostLocalSourceOriginalForPrestartRecovery } = await import('./host-local-source-update.mjs')
+      if (migration.localSource.protocol === 'dsh-enhanced/host-owner-source-repair/v1') {
+        await verifyHostLocalSourceOriginalForPrestartRecovery({ proof: migration.localSource,
+          homePath, physicalHome: physicalHomePath })
+      } else await verifyHostLocalSourceUpdate({ proof: migration.localSource, homePath,
         physicalHome: physicalHomePath, selection: 'original' })
     }
     let originalRestoration
