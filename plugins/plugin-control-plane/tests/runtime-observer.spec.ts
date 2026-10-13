@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
+import { Include } from '@deepseek-ai/cordis-plugin-include'
 import { Loader } from '@deepseek-ai/cordis-plugin-loader'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { PluginControlPlaneService } from '../src/service.js'
@@ -32,11 +33,12 @@ async function eventually(assertion: () => Promise<void>): Promise<void> {
   for (let count = 0; count < 200; count++) { try { await assertion(); return } catch (error) { last = error; await pause() } }
   throw last
 }
-async function fixture(load = true, services = ['candidateService']) {
+async function fixture(load = true, services = ['candidateService'], nativeInclude = false, targetId = 'candidate') {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'dsh-ro-'))
   const ctx = new Context(); fixtures.push({ ctx, root })
   const profile = join(root, 'profiles', 'fixture'); const owner = join(root, 'owner')
   await mkdir(profile, { recursive: true }); await mkdir(owner, { mode: 0o700 })
+  if (nativeInclude) await writeFile(join(profile, 'cordis.yml'), '[]\n')
   const keyPath = join(owner, 'key'); await writeFile(keyPath, randomBytes(32), { mode: 0o600 })
   const pkg = join(profile, 'node_modules', 'observer-fixture')
   await mkdir(pkg, { recursive: true })
@@ -44,20 +46,113 @@ async function fixture(load = true, services = ['candidateService']) {
   await writeFile(join(pkg, 'package.json'), JSON.stringify({ name: 'observer-fixture', type: 'module', exports: './index.js' }))
   await writeFile(join(pkg, 'index.js'), `export default { name: 'observer-fixture', inject: ['fixtureDependency'], apply(ctx) { ctx.provide('candidateService', { ready: true }); } }\n`)
   const config: RuntimeObserverConfig = { socketPath: join(owner, 'observe.sock'), keyPath, profilePath: profile,
-    targets: [{ entryId: 'candidate', module: './node_modules/observer-fixture/index.js', configDigest: runtimeConfigDigest({ option: 1 }), services }] }
+    targets: [{ entryId: targetId, module: './node_modules/observer-fixture/index.js', configDigest: runtimeConfigDigest({ option: 1 }), services }] }
   const controlConfig = { catalogPath: join(owner, 'catalog.json'), trustPath: join(owner, 'trust.json'), statePath: join(owner, 'state'), runtimeObserver: config }
   const control = ctx.plugin(PluginControlPlaneService, controlConfig); await control
   ctx.baseUrl = pathToFileURL(join(profile, 'cordis.yml')).href
-  const addLoader = async () => { const fiber = ctx.plugin(Loader); await fiber; return fiber }
+  const addLoader = async () => {
+    const fiber = ctx.plugin(Loader); await fiber
+    if (nativeInclude) {
+      ctx.loader.builtins.include = Include
+      const includeOptions = { id: 'include', name: 'cordis:include', config: { path: pathToFileURL(join(profile, 'cordis.yml')).href } }
+      await ctx.loader.create(includeOptions)
+    }
+    return fiber
+  }
   const loader = load ? await addLoader() : undefined
-  const addCandidate = () => { const options = { id: 'candidate', name: config.targets[0]!.module, config: { option: 1 } }; return ctx.loader.create(options) }
+  const addCandidate = () => {
+    const options = { id: 'candidate', name: config.targets[0]!.module, config: { option: 1 } }
+    return nativeInclude ? ctx.loader.resolve('include').subtree!.create(options) : ctx.loader.create(options)
+  }
   const dependency = () => ctx.plugin({ name: 'fixture-dependency', apply(c: Context) { c.provide('fixtureDependency', {}) } })
   const query = () => queryRuntimeObserver(config)
   if (load) await eventually(async () => { expect((await lstat(config.socketPath)).mode & 0o777).toBe(0o600) })
-  return { ctx, root, owner, config, controlConfig, control, loader, addLoader, addCandidate, dependency, query }
+  return { ctx, root, owner, profile, config, controlConfig, control, loader, addLoader, addCandidate, dependency, query }
 }
 
 describe.skipIf(process.platform !== 'linux')('owner runtime observer on the pinned Loader', () => {
+  test.each(['candidate', 'include:candidate'])('binds %s to the native Include profile and direct child', async targetId => {
+    const f = await fixture(true, ['candidateService'], true, targetId)
+    await f.dependency()
+    await f.addCandidate()
+    const observed = (await f.query()).entries[0]!
+    expect(observed).toMatchObject({ entryId: targetId, active: true, module: f.config.targets[0]!.module,
+      instance: { uid: expect.any(Number), epoch: expect.any(Number) },
+      services: [{ name: 'candidateService', instance: { uid: expect.any(Number) } }] })
+    expect(f.ctx.loader.resolve('include:candidate').parent).toBe(f.ctx.loader.resolve('include').subtree!.root)
+  })
+
+  test('rejects a wrong Include path and never substitutes an active same-id root entry', async () => {
+    const f = await fixture(true, ['candidateService'], true)
+    await f.dependency()
+    const rootOptions = { id: 'candidate', name: f.config.targets[0]!.module, config: { option: 1 } }
+    await f.ctx.loader.create(rootOptions)
+    expect((await f.query()).entries[0]).toMatchObject({ entryId: 'candidate', active: false, module: null, instance: null })
+    f.ctx.loader.remove('candidate')
+    await f.ctx.loader.await()
+    await f.addCandidate()
+    expect((await f.query()).entries[0]?.active).toBe(true)
+    const include = f.ctx.loader.resolve('include')
+    include.options.config = { path: pathToFileURL(join(f.profile, 'other.yml')).href }
+    expect((await f.query()).entries[0]).toMatchObject({ entryId: 'candidate', active: false, module: null, instance: null })
+  })
+
+  test('requires the configured profile and direct Include child even when another subtree has the same id', async () => {
+    const f = await fixture(true, ['candidateService'], true)
+    await f.dependency()
+    const otherProfile = join(f.root, 'profiles', 'other')
+    await mkdir(otherProfile)
+    await writeFile(join(otherProfile, 'cordis.yml'), '[]\n')
+    const otherOptions = { id: 'other', name: 'cordis:include', config: { path: pathToFileURL(join(otherProfile, 'cordis.yml')).href } }
+    await f.ctx.loader.create(otherOptions)
+    const candidateOptions = { id: 'candidate', name: f.config.targets[0]!.module, config: { option: 1 } }
+    await f.ctx.loader.resolve('other').subtree!.create(candidateOptions)
+    expect((await f.query()).entries[0]).toMatchObject({ active: false, module: null, instance: null })
+    const wrongProfileConfig = { ...f.config, socketPath: join(f.owner, 'wrong-profile.sock'), profilePath: otherProfile }
+    const observer = f.ctx.plugin({ apply(ctx: Context) { installRuntimeObserver(ctx, wrongProfileConfig) } })
+    await observer
+    await eventually(async () => { expect((await lstat(wrongProfileConfig.socketPath)).mode & 0o777).toBe(0o600) })
+    expect((await queryRuntimeObserver(wrongProfileConfig)).entries[0]).toMatchObject({ active: false, module: null, instance: null })
+  })
+
+  test('retains dependency, disabled and Fiber generation checks under the native Include', async () => {
+    const f = await fixture(true, ['candidateService'], true)
+    await f.addCandidate()
+    expect((await f.query()).entries[0]).toMatchObject({ active: false, instance: null })
+    await f.dependency()
+    const first = (await f.query()).entries[0]!
+    expect(first.active).toBe(true)
+    await f.ctx.loader.update('include:candidate', { config: { option: 2 } })
+    const changed = (await f.query()).entries[0]!
+    expect(changed.active).toBe(false)
+    expect(changed.instance?.uid).toBe(first.instance?.uid)
+    expect(changed.instance?.epoch).not.toBe(first.instance?.epoch)
+    await f.ctx.loader.update('include:candidate', { config: { option: 1 }, disabled: true })
+    expect((await f.query()).entries[0]).toMatchObject({ active: false, instance: null })
+    await f.ctx.loader.update('include:candidate', { config: { option: 1 }, disabled: false })
+    expect((await f.query()).entries[0]?.active).toBe(true)
+  })
+
+  test('rejects accessor IDs without calling user-defined getters', async () => {
+    const f = await fixture(true, ['candidateService'], true)
+    await f.dependency()
+    await f.addCandidate()
+    const include = f.ctx.loader.resolve('include')
+    const candidate = f.ctx.loader.resolve('include:candidate')
+    let getterCalls = 0
+    Object.defineProperty(include.options, 'id', { configurable: true, enumerable: true,
+      get() { getterCalls++; return 'include' } })
+    expect((await f.query()).entries[0]).toMatchObject({ active: false, module: null, instance: null })
+    expect(getterCalls).toBe(0)
+    Object.defineProperty(include.options, 'id', { configurable: true, enumerable: true, writable: true, value: 'include' })
+    Object.defineProperty(candidate.options, 'id', { configurable: true, enumerable: true,
+      get() { getterCalls++; return 'candidate' } })
+    expect((await f.query()).entries[0]).toMatchObject({ active: false, module: null, instance: null })
+    expect(getterCalls).toBe(0)
+    Object.defineProperty(candidate.options, 'id', { configurable: true, enumerable: true, writable: true, value: 'candidate' })
+    expect((await f.query()).entries[0]?.active).toBe(true)
+  })
+
   test('foreground consumers share socket identity and epochs, and lose sampling on teardown', async () => {
     const f = await fixture(); await f.dependency(); await f.addCandidate()
     const config = { ...f.config, socketPath: join(f.owner, 'foreground.sock') }
