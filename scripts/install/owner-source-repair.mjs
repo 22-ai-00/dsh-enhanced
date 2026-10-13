@@ -392,6 +392,31 @@ export function ownerRepairPatchEquivalent({ yaml, planned, applied }) {
     yamlDocumentValue(api, applied, 'applied patch'))
 }
 
+function ownerSnapshotIdentity(snapshot) {
+  if (snapshot?.protocol !== 'assistant-delivery/active-lark-owner-bindings-snapshot/v1'
+    || ![23, 24, 25].includes(snapshot.schemaVersion)
+    || !snapshot.scope || typeof snapshot.scope !== 'object' || Array.isArray(snapshot.scope)
+    || !['account', 'tenant', 'workspace', 'agentPreset'].every(key => typeof snapshot.scope[key] === 'string')
+    || !Array.isArray(snapshot.bindings) || snapshot.bindings.length !== 1
+    || !snapshot.bindings[0] || typeof snapshot.bindings[0] !== 'object'
+    || !snapshot.database || typeof snapshot.database !== 'object'
+    || typeof snapshot.database.device !== 'string' || !/^[0-9]+$/u.test(snapshot.database.device)
+    || typeof snapshot.database.inode !== 'string' || !/^[0-9]+$/u.test(snapshot.database.inode)
+    || !snapshot.sidecars || typeof snapshot.sidecars !== 'object' || Array.isArray(snapshot.sidecars)
+    || !Object.hasOwn(snapshot.sidecars, 'wal')
+    || !Object.hasOwn(snapshot.sidecars, 'shm')
+    || !hex.test(snapshot.storageDigest) || !hex.test(snapshot.snapshotDigest)) return null
+  return { protocol: snapshot.protocol, schemaVersion: snapshot.schemaVersion,
+    scope: snapshot.scope, bindings: snapshot.bindings,
+    database: { device: snapshot.database.device, inode: snapshot.database.inode } }
+}
+
+export function ownerRepairSnapshotEquivalent(current, original) {
+  const currentIdentity = ownerSnapshotIdentity(current)
+  const originalIdentity = ownerSnapshotIdentity(original)
+  return currentIdentity !== null && originalIdentity !== null && same(currentIdentity, originalIdentity)
+}
+
 function assertNonOwnerRows(api, originalEffective, stagedEffective) {
   const original = yamlRows(api, originalEffective, 'original target effective')
   const staged = yamlRows(api, stagedEffective, 'staged target effective')
@@ -501,7 +526,7 @@ export async function stageOwnerSourceRepair({ ownerRepair, homePath, stageHome,
   compiledFiles(api, original)
   assertNonOwnerRows(api, original.effective.targetEffective, stageNativeEffective.targetEffective)
   const ownerSnapshot = await api.rsiSetupPorts.snapshot(stageNativeEffective.targetEffective, homePath)
-  if (!same(ownerSnapshot, original.ownerSnapshot)) fail('owner binding changed before repair')
+  if (!ownerRepairSnapshotEquivalent(ownerSnapshot, original.ownerSnapshot)) fail('owner binding changed before repair')
   const selected = selectOwnerRepairPermission({ targetEffective: stageNativeEffective.targetEffective,
     targetPatch: original.patches[ownerRepair.profile], permissionPreset: ownerRepair.permissionPreset,
     yaml: api.yaml })
@@ -813,7 +838,7 @@ export async function verifyOwnerSourceRepair({ ownerRepair, ownerRepairNext, ho
       if (!same({ dshDigest: composed.dshDigest, version: composed.dshVersion }, ownerRepair.host)
         || !same({ targetEffective: composed.targetEffective,
           coordinatorEffective: composed.coordinatorEffective }, original.effective)
-        || !same(await api.rsiSetupPorts.snapshot(composed.targetEffective, homePath),
+        || !ownerRepairSnapshotEquivalent(await api.rsiSetupPorts.snapshot(composed.targetEffective, homePath),
           original.ownerSnapshot)) fail('original native composition or owner binding changed')
     }
   }

@@ -7,7 +7,7 @@ import { afterEach, expect, test } from 'vitest'
 import { Document, isAlias, isMap, isScalar, isSeq, parseDocument } from 'yaml'
 import { appendOwnerSourceRepairMaintenance, assertIssuerStateAbsent, awaitOwnerSourceRepairReady,
   captureOwnerSourceRepair, composeOwnerRepairProfiles, prepareOwnerRepairCreation, selectOwnerRepairPermission,
-  ownerLedger, ownerRepairPatchEquivalent, readOwnerRepairCandidateSource, stageOwnerSourceRepair,
+  ownerLedger, ownerRepairPatchEquivalent, ownerRepairSnapshotEquivalent, readOwnerRepairCandidateSource, stageOwnerSourceRepair,
   verifyOwnerSourceRepair } from '../scripts/install/owner-source-repair.mjs'
 import { rsiBootstrapFixture } from '../plugins/lark-channel/tests/fixtures/rsi-bootstrap.js'
 import { readRsiSourceWorkspace } from '../plugins/lark-channel/src/rsi-source.js'
@@ -88,6 +88,44 @@ test('original in-memory YAML aliases equal persisted expanded maps without eras
   expect(ownerRepairPatchEquivalent({ ...input, applied: applied.replace('- id: first', '- id: changed') })).toBe(false)
   expect(ownerRepairPatchEquivalent({ ...input, applied: applied.replace('- id: first', '- id: temporary')
     .replace('- id: second', '- id: first').replace('- id: temporary', '- id: second') })).toBe(false)
+})
+
+test('owner repair retains exact binding and main database identity across SQLite checkpoints', () => {
+  const original = {
+    protocol: 'assistant-delivery/active-lark-owner-bindings-snapshot/v1', schemaVersion: 25,
+    scope: { account: 'account', tenant: 'tenant', workspace: 'workspace', agentPreset: 'assistant' },
+    database: { device: '1', inode: '42', size: '100', mtimeNs: '1000', digest: 'a'.repeat(64) },
+    sidecars: { wal: { device: '1', inode: '43', size: '20', mtimeNs: '1000', digest: 'b'.repeat(64) },
+      shm: { device: '1', inode: '44', size: '30', mtimeNs: '1000', digest: 'c'.repeat(64) } },
+    storageDigest: 'd'.repeat(64), snapshotDigest: 'e'.repeat(64),
+    bindings: [{ id: 'binding', version: 1, principal: { id: 'principal' },
+      owner: { id: 'owner', version: 1 } }],
+  }
+  const afterCheckpoint = { ...original,
+    database: { ...original.database, size: '120', mtimeNs: '2000', digest: 'f'.repeat(64) },
+    sidecars: { wal: null, shm: null }, storageDigest: '1'.repeat(64), snapshotDigest: '2'.repeat(64) }
+  expect(ownerRepairSnapshotEquivalent(afterCheckpoint, original)).toBe(true)
+  const differences = [
+    { ...afterCheckpoint, protocol: 'forged' },
+    { ...afterCheckpoint, schemaVersion: 26 },
+    { ...afterCheckpoint, scope: { ...original.scope, workspace: 'elsewhere' } },
+    { ...afterCheckpoint, bindings: [{ ...original.bindings[0], version: 2 }] },
+    { ...afterCheckpoint, bindings: [{ ...original.bindings[0], principal: { id: 'elsewhere' } }] },
+    { ...afterCheckpoint, bindings: [{ ...original.bindings[0], owner: { id: 'owner', version: 2 } }] },
+    { ...afterCheckpoint, database: { ...afterCheckpoint.database, device: '2' } },
+    { ...afterCheckpoint, database: { ...afterCheckpoint.database, inode: '45' } },
+  ]
+  for (const current of differences) expect(ownerRepairSnapshotEquivalent(current, original)).toBe(false)
+  const malformed = [
+    { ...original, bindings: [] },
+    { ...original, database: { ...original.database, inode: undefined } },
+    { ...original, sidecars: {} },
+    { ...original, snapshotDigest: 'bad' },
+  ]
+  for (const current of malformed) {
+    expect(ownerRepairSnapshotEquivalent(current, original)).toBe(false)
+    expect(ownerRepairSnapshotEquivalent(original, current)).toBe(false)
+  }
 })
 
 test('receipt plans replay shared in-memory manifest references while persisted JSON expands them', () => {
