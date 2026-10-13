@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { chmod, lstat, unlink } from 'node:fs/promises'
 import { createServer, type Socket } from 'node:net'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
-import type { Loader } from '@deepseek-ai/cordis-plugin-loader'
+import type { Entry, Loader } from '@deepseek-ai/cordis-plugin-loader'
 import {
   RUNTIME_OBSERVER_MAX_BYTES,
   RUNTIME_OBSERVER_TIMEOUT,
@@ -53,14 +55,37 @@ export function createRuntimeSampler(ctx: Context, config: RuntimeObserverConfig
     }
     return false
   }
+  const resolveTarget = (loader: Loader, entryId: string): Entry | undefined => {
+    let root: Entry | undefined
+    try { root = loader.resolve('include') } catch { root = undefined }
+    if (root || loader.builtins.include !== undefined) {
+      const rootOptions = root && Object.getOwnPropertyDescriptors(root.options)
+      const includeConfig = rootOptions?.config && 'value' in rootOptions.config ? rootOptions.config.value : undefined
+      const path = includeConfig && typeof includeConfig === 'object' && !Array.isArray(includeConfig)
+        ? Object.getOwnPropertyDescriptors(includeConfig).path : undefined
+      const localId = entryId.startsWith('include:') ? entryId.slice('include:'.length) : entryId
+      if (!root || !rootOptions?.id || !('value' in rootOptions.id) || rootOptions.id.value !== 'include'
+        || root.parent !== loader.root || rootOptions.name?.value !== 'cordis:include'
+        || !path || !('value' in path) || path.value !== pathToFileURL(join(config.profilePath, 'cordis.yml')).href
+        || !root.subtree || root.subtree.ctx.fiber.entry !== root || !instance(root.fiber)
+        || !localId || localId.includes(':')) return undefined
+      try {
+        const entry = loader.resolve(`include:${localId}`)
+        const childId = Object.getOwnPropertyDescriptor(entry.options, 'id')
+        return childId && 'value' in childId && childId.value === localId
+          && entry.parent === root.subtree.root ? entry : undefined
+      } catch { return undefined }
+    }
+    try { return loader.resolve(entryId) } catch { return undefined }
+  }
   return challenge => {
     assertRuntimeObserverText(challenge, /^[a-f0-9]{64}$/u)
     if (ctx.fiber.uid === null || ctx.fiber.state !== ACTIVE) runtimeObserverFail()
     // Resolve the current injected provider on every sample, never cache a proxy.
     const loader: Loader = ctx.loader
     const entries = config.targets.map(target => {
-      let entry: ReturnType<Loader['resolve']>
-      try { entry = loader.resolve(target.entryId) } catch {
+      const entry = resolveTarget(loader, target.entryId)
+      if (!entry) {
         return { entryId: target.entryId, module: null, configDigest: null, active: false, instance: null, dependencies: [], services: [] }
       }
       const fiber = entry.fiber
@@ -76,7 +101,7 @@ export function createRuntimeSampler(ctx: Context, config: RuntimeObserverConfig
         const impl = realm ? fiber?.ctx.reflect.store[realm] : undefined
         return { name, instance: impl && fiber && ownedBy(impl.fiber, fiber) && fiber.ctx.get(name) !== undefined ? instance(impl.fiber) : null }
       })
-      return { entryId: entry.id, module, configDigest,
+      return { entryId: target.entryId, module, configDigest,
         active: !entry.disabled && module === target.module && configDigest === target.configDigest
           && current !== null && current.uid > 0 && dependencies.every(item => item.instance !== null) && services.every(item => item.instance !== null),
         instance: current, dependencies, services }

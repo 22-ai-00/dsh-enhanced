@@ -22,16 +22,21 @@ runtimeObserver:
   keyPath: /absolute/owner-private/observer.key
   profilePath: /absolute/dsh-home/profiles/web
   targets:
-    - entryId: include:dsh-enhanced-personal-memory
+    - entryId: dsh-enhanced-personal-memory
       module: '@dsh-enhanced/personal-memory'
       configDigest: <runtimeConfigDigest of the exact raw row config>
       services: [personalMemory]
 ```
 
 All fields are required. Allow 1–32 distinct entries and up to 16 required
-services per entry. The full Loader entry ID includes its Include ancestry;
-the tested DSH launcher uses `include:<patch-row-id>`. Match the effective
-composition's exact `name` and raw row config. The digest is bounded canonical
+services per entry. The DSH launcher mounts `cordis.yml` under the root
+`cordis:include` entry, so a bare patch-row ID and its full `include:<patch-row-id>`
+form both select that Include's direct child. The observation returns the
+configured ID form. The observer requires the root Include's config path to
+match `profilePath/cordis.yml` and never substitutes an entry from another
+profile, nested subtree or same-ID root row. A flat Loader without a root
+Include retains direct ID resolution. Match the effective composition's exact
+`name` and raw row config. The digest is bounded canonical
 JSON; omitted/null config uses `runtimeConfigDigest(null)`. Non-JSON config,
 accessors and cycles are rejected. Config content is not returned.
 
@@ -94,16 +99,17 @@ not infer this from a pathname or timeout.
 
 ## Evidence and limits
 
-The implementation consumes pinned Cordis 4.0.2 / Loader 1.0.3 public
+The implementation consumes pinned Cordis 4.0.4 / Loader 1.0.5 / Include 1.0.9 public
 `resolve`, `Entry.fiber`, `Fiber.state/uid/store/inertia` and reflection realm
-and store surfaces. It does not rely on the newer sibling Loader resolver
-or HMR behavior. Tests cover pending dependencies, provider replacement,
+and store surfaces. Tests cover the native Include root and direct-child
+binding, profile/path drift, same-ID entries outside the root, pending
+dependencies, provider replacement,
 same-UID Fiber restart, disabled entries, foreign service ownership, late
 Loader binding, authentication, cancellation, endpoint collision, server
 error and async teardown against the installed runtime.
 
-The real DSH fixture
-uses DSH 0.1.5-rc.2, local built Control Plane and Policy package entries,
+The real DSH fixture, last run with DSH 0.2.0-rc.2, uses local built Control Plane
+and Policy package entries with a bare observed target ID,
 a temporary Web profile and transient systemd user service. It checks an
 active Policy Fiber/service, stable fresh-challenge samples, actual PID and
 InvocationID, socket removal on Host stop, and inactive state after disabling

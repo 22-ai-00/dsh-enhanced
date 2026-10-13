@@ -35,7 +35,7 @@ try {
   const keyPath = join(owner, 'observer.key'); await writeFile(keyPath, randomBytes(32), { mode: 0o600 })
   const candidateConfig = { databasePath: join(owner, 'policy.sqlite'), autoReview: { enabled: false }, rules: [], budgets: [] }
   const config = { socketPath: join(owner, 'observer.sock'), keyPath, profilePath: profile,
-    targets: [{ entryId: 'include:observed-candidate', module: candidateUrl.href,
+    targets: [{ entryId: 'observed-candidate', module: candidateUrl.href,
       configDigest: runtimeConfigDigest(candidateConfig), services: ['assistantPolicy'] }] }
   const patch = disabled => [{ insert: [
     { id: 'observer-control', name: controlUrl.href, config: { catalogPath: join(owner, 'catalog.json'), trustPath: join(owner, 'trust.json'),
