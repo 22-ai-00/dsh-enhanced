@@ -1888,12 +1888,13 @@ async function runServiceCommand(executable, args) {
 
 async function withCrashStopGuardian(
   systemctlExecutable, units, completionToken, operation, startUnits = true, containmentHome, knownUniverse = units,
+  ownerSuccessorMasks,
 ) {
   const source = String.raw`
 const { spawnSync } = require('node:child_process')
 const { realpathSync } = require('node:fs')
 const { isAbsolute, sep } = require('node:path')
-const [systemctl, completionToken, startFlag, containmentHome, startCountSource, ...allUnits] = process.argv.slice(1)
+const [systemctl, completionToken, startFlag, containmentHome, startCountSource, boundMasksSource, moduleSource, ...allUnits] = process.argv.slice(1)
 const startCount = Number(startCountSource)
 const units = allUnits.slice(0, startCount)
 const knownUniverse = allUnits.slice(startCount)
@@ -2015,6 +2016,15 @@ const blockStarts = targets => targets.length === 0 || (
   && successful(command(['--user', 'mask', '--runtime', ...targets]))
 )
 const verify = targets => targets.every(unit => inactive(unit, state(unit)))
+const restoreBoundMasks = async () => {
+  if (boundMasksSource === '-') return true
+  try {
+    const masks = JSON.parse(Buffer.from(boundMasksSource, 'base64url').toString('utf8'))
+    const module = await import(moduleSource)
+    await module.restoreBoundOwnerSuccessorMasks(systemctl, masks, knownUnits)
+    return true
+  } catch { return false }
+}
 const stopKnownUntilVerified = async () => {
   for (;;) {
     stop(knownUnits)
@@ -2028,6 +2038,14 @@ const stopAndVerify = async () => {
   let previousCensus
   let stableCensuses = 0
   for (;;) {
+    if (!await restoreBoundMasks()) {
+      stableCensuses = 0
+      previousCensus = undefined
+      stop(knownUnits)
+      verify(knownUnits)
+      await sleep(1000)
+      continue
+    }
     const unitFiles = parseUnitList(command([
       '--user', 'list-unit-files', '--type=service', '--no-legend', '--no-pager', 'dsh-profile-*.service',
     ]), 2)
@@ -2127,7 +2145,8 @@ process.stdout.on('error', beginContainment)
 `
   const guardian = spawn(process.execPath, [
     '-e', source, systemctlExecutable, completionToken, startUnits ? '1' : '0', containmentHome ?? '-',
-    String(units.length), ...units, ...knownUniverse,
+    String(units.length), ownerSuccessorMasks === undefined ? '-' : Buffer.from(JSON.stringify(ownerSuccessorMasks)).toString('base64url'),
+    ownerSuccessorMasks === undefined ? '-' : import.meta.url, ...units, ...knownUniverse,
   ], {
     // Keep the parent directory plus both kernel lock descriptions alive if
     // the lifecycle process dies. The detached guardian must continue to
@@ -2796,6 +2815,34 @@ async function installBoundMasks(systemctlExecutable, masks) {
   }
   await fsyncPath(controlRoot, true)
   await runServiceCommand(systemctlExecutable, ['--user', 'daemon-reload'])
+}
+
+export async function restoreBoundOwnerSuccessorMasks(systemctlExecutable, masks, units) {
+  if (!Array.isArray(masks) || !Array.isArray(units) || masks.length === 0 || masks.length !== units.length
+    || new Set(units).size !== units.length) fail('owner successor guardian bound mask set is invalid')
+  const controlRoot = dirname(masks[0].path)
+  const transactionRoot = masks[0].transactionRoot
+  if (!isAbsolute(controlRoot) || basename(controlRoot) !== 'user.control'
+    || !isAbsolute(transactionRoot) || resolve(transactionRoot) !== transactionRoot) {
+    fail('owner successor guardian bound mask roots are invalid')
+  }
+  for (const [index, mask] of masks.entries()) {
+    if (!SYSTEMD_UNIT.test(units[index]) || mask?.unit !== units[index]
+      || mask.path !== join(controlRoot, mask.unit) || mask.target !== '/dev/null'
+      || mask.transactionRoot !== transactionRoot || !isAbsolute(mask.stagingPath)
+      || !inside(transactionRoot, mask.stagingPath) || basename(mask.stagingPath) !== mask.unit
+      || mask.identity === null || typeof mask.identity !== 'object'
+      || typeof mask.identity.dev !== 'string' || typeof mask.identity.ino !== 'string'
+      || mask.identity.uid !== currentUid() || typeof mask.identity.mode !== 'number') {
+      fail('owner successor guardian bound mask identity is invalid')
+    }
+  }
+  await installBoundMasks(systemctlExecutable, masks)
+  for (const unit of units) {
+    if ((await readRawServiceState(systemctlExecutable, unit)).loadState !== 'masked') {
+      fail(`owner successor guardian did not restore bound mask: ${unit}`)
+    }
+  }
 }
 
 async function stageBoundMasks(systemctlExecutable, masks) {
@@ -7340,6 +7387,37 @@ async function verifyOwnerSuccessorBaseline({ manifest, homePath, physicalHomePa
   if (!isDeepStrictEqual(profiles, manifest.hostMigration.profileProof)) fail('owner successor predecessor package graph changed')
 }
 
+async function inspectStoppedOwnerSuccessor({ systemctlExecutable, masks, units, homePath, inspect }) {
+  const assertStopped = async () => {
+    for (const unit of units) {
+      const state = await readRawServiceState(systemctlExecutable, unit)
+      if (state.activeState !== 'inactive' || state.subState !== 'dead'
+        || state.mainPid !== 0 || state.controlPid !== 0) fail('owner successor predecessor service is not stopped')
+    }
+  }
+  await assertStopped()
+  let inspectionFailure
+  let inspectionFailed = false
+  const result = await withCrashStopGuardian(systemctlExecutable, [], randomUUID(), async () => {
+    let inspected
+    try {
+      await stageBoundMasks(systemctlExecutable, masks)
+      await assertStopped()
+      inspected = await inspect()
+      await assertStopped()
+    } catch (error) {
+      inspectionFailure = error
+      inspectionFailed = true
+    } finally {
+      await restoreBoundOwnerSuccessorMasks(systemctlExecutable, masks, units)
+      await assertStopped()
+    }
+    return inspected
+  }, false, homePath, units, masks)
+  if (inspectionFailed) throw inspectionFailure
+  return result
+}
+
 async function performHostOwnerSuccessor(input) {
   const { homePath, physicalHomePath, transactionRoot, physicalTransactionRoot,
     profile, planPath, dshExecutable, serviceContext, localSourceInput } = input
@@ -7401,10 +7479,15 @@ async function performHostOwnerSuccessor(input) {
     }
   }
   await assertNoUnmanagedHomeProcesses(homePath, [await realpath(join(oldRoot, 'original-home'))])
-  await verifyOwnerSuccessorBaseline({ manifest: oldManifest, homePath, physicalHomePath, archiveRoot: oldRoot, serviceContext })
   const { captureOwnerSourceRepairSuccessor } = await import('./owner-source-repair.mjs')
-  await captureOwnerSourceRepairSuccessor({ predecessorProof: oldManifest.hostMigration.localSource,
-    homePath, profile, installer, permissionPreset: localSourceInput.ownerRepairPreset, dshPath: dshExecutable })
+  await inspectStoppedOwnerSuccessor({ systemctlExecutable: serviceContext.systemctlExecutable,
+    masks: containment.masks, units: oldManifest.services.map(service => service.unit), homePath,
+    inspect: async () => {
+      await verifyOwnerSuccessorBaseline({ manifest: oldManifest, homePath, physicalHomePath,
+        archiveRoot: oldRoot, serviceContext })
+      await captureOwnerSourceRepairSuccessor({ predecessorProof: oldManifest.hostMigration.localSource,
+        homePath, profile, installer, permissionPreset: localSourceInput.ownerRepairPreset, dshPath: dshExecutable })
+    } })
   if (!envelope) {
     const successorTransactionId = randomUUID()
     envelope = await helper.createOwnerRepairSuccessorIntent({ homePath, profile, oldManifestSource,
@@ -8040,6 +8123,7 @@ async function main() {
 export const lifecycleProfileTest = Object.freeze({
   reconcileHostUnitSources, validateHostUpdateManifest,
   assertHostOwnerSuccessorAdmission, ownerSuccessorServiceBarriers, ownerSuccessorRecoveryDecision,
+  inspectStoppedOwnerSuccessor, hostUnitProperties,
   validOwnerRepairOriginalReadiness, captureOwnerRepairOriginalReadiness,
   ownerRepairRestorationPolicy, serviceReadySignal, serviceRuntimeReady, readRawServiceState,
   stopAndResetServiceUnits,
