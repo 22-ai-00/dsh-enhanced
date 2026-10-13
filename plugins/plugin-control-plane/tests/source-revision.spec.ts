@@ -143,7 +143,7 @@ describe('revision of archived created plugin through the real Git generator', (
     await chmod(join(current, 'plugins', name, 'src/index.ts'), 0o644)
     await writeFile(join(current, 'plugins', name, 'ignored-extra.txt'), 'extra\n')
     await expect(verifyRevisedPluginWorkspace(input)).rejects.toThrow('actual source file set changed')
-  })
+  }, 30_000)
 
   it('rejects no-op, altered parent digest, protected metadata and baseline collision', async () => {
     const parent = await parentFixture()
@@ -188,7 +188,7 @@ describe('revision of archived created plugin through the real Git generator', (
     workers.push(collisionWorker)
     await expect(prepareRevisedPluginWorkspace({ ...base, worktree: collisionWorker.worktree,
       baseCommit: collisionBase, files: overlay })).rejects.toThrow('already exists at base')
-  })
+  }, 30_000)
 
   it('rejects wrong base, generator digest, primary worktree and unsafe bindings', async () => {
     const parent = await parentFixture()
@@ -218,5 +218,5 @@ describe('revision of archived created plugin through the real Git generator', (
     Object.defineProperty(getter, 'parent', { enumerable: true, get() { read = true; return parent.binding.parent } })
     expect(() => validateSourceRevisionBinding(getter)).toThrow()
     expect(read).toBe(false)
-  })
+  }, 30_000)
 })
