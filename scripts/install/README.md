@@ -116,6 +116,8 @@ node /reviewed/checkout/scripts/install/lifecycle-profile.mjs \
 
 事务在屏蔽并停止双服务后重新复制 Home，追加真实 owner-ledger 源码维护记录，物化候选包和独立构建的 creation image，并用原身份、原始期限与预算重新编译配置。原 bootstrap 不覆盖；旧配置、journal、creation receipt 保留在私有审计中，新配置由单独的 Host 签名 repair overlay 绑定，不虚构 activation。unit 与 service environment 保持不变，其他 profile 不得改变行为。
 
+停服前仅允许原签名配置绑定的 observer socket，按精确路径、所有者及文件身份核验；准备副本不保留该运行时端点。原 Home 的 socket 不由安装器删除，必须由服务正常关闭清理，停服后再执行不允许特殊文件的严格快照检查。未知 socket、FIFO、符号链接替换或身份漂移继续拒绝。
+
 候选启动前复核原账本历史和追加记录。切换后必须通过新鲜 systemd InvocationID、飞书就绪、真实 HMAC observer 与原生协调器登记，不能以进程 active 代替验收。恢复沿用 `host-recover`：候选未运行可恢复原 Home；已经运行则保留候选和事务继续对账，不覆盖业务状态。该命令的实现、生产验收和普通使用闭环是不同门，当前验证边界见 [RSI 状态](../../docs/rsi-status.md)。
 
 停服前绑定原双服务的 InvocationID、PID、Host 就绪及原生登记状态。仅在候选从未启动、原证明仍完整时，恢复才允许保留原先缺失的就绪信号，恢复原 active / enablement 并明确报告 `degraded-original-restored`；原先已有的就绪信号仍须重新产生。这不降低候选验收门，也不把原来未就绪的学习服务宣称为成功。
