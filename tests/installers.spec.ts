@@ -8256,6 +8256,7 @@ printf '%s\\n' '{not-json'
     const npm = runInstaller(npmInstaller, ['--dry-run', '--lark', 'skip'], dshHome)
     const manifest = JSON.parse(await readFile(join(repoRoot, 'release-manifest.json'), 'utf8'))
     const released = readFileSync(npmInstaller, 'utf8')
+    const pinnedRelease = manifest.pending ?? manifest.current
 
     expect(local.status, local.stderr).toBe(0)
     expect(npm.status, npm.stderr).toBe(0)
@@ -8265,8 +8266,8 @@ printf '%s\\n' '{not-json'
     expect(npm.stdout).not.toContain('npm install --global @deepseek-ai/dsh@latest')
     expect(manifest.nextPinnedHostVersion).toBe('0.2.0-rc.2')
     expect(manifest.nextVerifiedHostRange).toBe('0.2.0-rc.2')
-    expect(manifest.current.pinnedHostVersion).toBe('0.1.5-rc.1')
-    expect(released).toContain("DSH_ENHANCED_PINNED_HOST_VERSION='0.1.5-rc.1'")
+    expect(released).toContain(`DSH_ENHANCED_PINNED_HOST_VERSION='${pinnedRelease.pinnedHostVersion}'`)
+    expect(released).toContain(`DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='${pinnedRelease.verifiedHostRange}'`)
   })
 
   test('remote npm installer exports the verified range paired with its pinned common', async () => {

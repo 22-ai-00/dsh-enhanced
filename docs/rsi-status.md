@@ -28,6 +28,6 @@
 - 后继路径与生命周期定向测试 36/36，语法、lint 及独立审查通过；真实 systemd 临时探针验证全 / 半暂存遮罩按原 inode 复装且无服务启动，临时 unit 已清理。协调器真实 Cordis 登记回归通过。
 - Home 外完整演练通过；最终候选的 25 个包与演练版逐包字节、锁图及依赖一致。源码和安装器各自重新绑定，正式事务重新执行完整 pre-swap 校验，不以旧演练冒充新源码验收。
 - 发布准备前的精确提交 `54dfc299` [五项 CI 全部通过](https://github.com/22-ai-00/dsh-enhanced/actions/runs/38428350406)，macOS 完整 `pnpm check` 含 37 包 dry-run pack；本地基线全检为 8589 通过、61 条件跳过，后续测试修复均经定向回归和独立审查。版本变更后的发布源码仍须重新验证，不复用旧 SHA 作为新版本通过证明。
-- 原 DeepSeek 固定合同于 2026-10-08 过期，未续期；保留 `super-relay/ark/seed-evolving` 模型及既有 fallback，未将配置或就绪检查当作 live 模型调用证明。
+- DeepSeek 固定合同于 2026-10-08、Super Relay Responses 固定合同于 2026-10-14 过期，均未续期；相关受限适配器与增长派发仍拒绝过期合同。修正历史协议测试的时钟不恢复真实路由。保留 `super-relay/ark/seed-evolving` 模型及既有 fallback，未将配置或就绪检查当作 live 模型调用证明。
 
 原始日志和私有证据位于忽略目录 `docs/evidence/ci-migration/`、`docs/evidence/runtime-observer-fix/` 与 `docs/evidence/owner-repair/`。npm 发布遵循[发布协议](releasing.md)，普通使用效果继续按验收合同积累证据。

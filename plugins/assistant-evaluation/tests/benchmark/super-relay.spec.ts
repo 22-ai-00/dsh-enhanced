@@ -8,7 +8,7 @@
  */
 import { Context } from '@deepseek-ai/cordis'
 import { createMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // mock factory 被提升到 import 之前，凡其引用的外部绑定都必须放进 vi.hoisted，
 // 否则在提升期触发 TDZ。这里同时承载跨作用域的凭证 resolver 观察点。
@@ -23,6 +23,7 @@ const hoisted = vi.hoisted(() => ({
 const PROVIDER = hoisted.provider
 const MODEL = hoisted.model
 const EXPIRES = hoisted.expires
+const VALID_NOW = Date.parse(EXPIRES) - 1
 const digest = 'a'.repeat(64)
 
 vi.mock('@dsh-enhanced/assistant-super-relay-budget', async () => {
@@ -91,6 +92,7 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
   return chunks
 }
 
+beforeEach(() => { vi.spyOn(Date, 'now').mockReturnValue(VALID_NOW) })
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('Super Relay native benchmark adapter（工程层替身，非真实供应商证据）', () => {
@@ -179,10 +181,12 @@ describe('Super Relay native benchmark adapter（工程层替身，非真实供�
   })
 
   it('契约过期拒绝创建；dispose 幂等且拒绝后续请求', async () => {
+    const binding = await createNativeAdapter(model(), { ctx: new Context(), workspace: '/unused' })
     vi.spyOn(Date, 'now').mockReturnValue(Date.parse(EXPIRES))
     await expect(createNativeAdapter(model(), { ctx: new Context(), workspace: '/unused' })).rejects.toThrow('contract has expired')
-    vi.restoreAllMocks()
-    const binding = await createNativeAdapter(model(), { ctx: new Context(), workspace: '/unused' })
+    await expect(collect(binding.adapter.stream(request()))).rejects.toThrow('contract has expired')
+    expect(() => binding.inputTokenUpperBound?.(request())).toThrow('contract has expired')
+    vi.spyOn(Date, 'now').mockReturnValue(VALID_NOW)
     binding.dispose(); binding.dispose()
     await expect(collect(binding.adapter.stream(request()))).rejects.toThrow('disposed')
     expect(() => binding.inputTokenUpperBound?.(request())).toThrow('disposed')

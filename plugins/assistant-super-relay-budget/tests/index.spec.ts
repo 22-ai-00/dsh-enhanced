@@ -4,15 +4,17 @@
  * 外部系统证据；真实协议以 src/contract.ts 的短期 primary-source contract 为准。
  */
 import { readFileSync } from 'node:fs'
+import { performance } from 'node:perf_hooks'
 import { EMPTY_RESPONSE_CODE, ToolCallId, createAssistantMessage, createMessage, createSystemMessage, createToolResultMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SuperRelayGoalMeteredAdapter } from '../src/adapter.ts'
 import { Config, normalizeConfig } from '../src/config.ts'
-import { assertCurrentContract, SUPER_RELAY_INPUT_TOKEN_UPPER_BOUND, SUPER_RELAY_MODELS, SUPER_RELAY_PROVIDER, apply, name, version } from '../src/index.ts'
+import { assertCurrentContract, SUPER_RELAY_INPUT_TOKEN_UPPER_BOUND, SUPER_RELAY_MODELS, SUPER_RELAY_PROVIDER, SUPER_RELAY_RESPONSES_CONTRACT, apply, name, version } from '../src/index.ts'
 import type { GoalBudgetMeter } from '@dsh-enhanced/assistant-goals'
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
 const MODEL = 'auto_model/alwaysday1'
+const VALID_NOW = Date.parse(SUPER_RELAY_RESPONSES_CONTRACT.checkedAt) + 1_000
 
 function userMessage(text: string) {
   return [createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] })]
@@ -74,7 +76,8 @@ function fakeCtx() {
   return { ctx: ctx as any, meters, releaseOrder, credentials, adapter: () => capturedAdapter!, routes: () => capturedRoutes!, unload: () => disposer?.() }
 }
 
-afterEach(() => { vi.useRealTimers() })
+beforeEach(() => { vi.spyOn(Date, 'now').mockReturnValue(VALID_NOW) })
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('dsh-enhanced-assistant-super-relay-budget', () => {
   it('exposes stable plugin identity', () => {
@@ -153,10 +156,9 @@ describe('dsh-enhanced-assistant-super-relay-budget', () => {
     })
 
     it('fails closed once the protocol contract expires', () => {
-      // Right now the contract is current, so the meter's bound does not throw.
       expect(() => meters()[0]!.inputTokenUpperBound(streamOptions())).not.toThrow()
       // The meter's bound calls this same shared contract gate internally.
-      expect(() => assertCurrentContract(Date.parse('2026-11-01T00:00:00.000Z'))).toThrow(/contract has expired/)
+      expect(() => assertCurrentContract(Date.parse(SUPER_RELAY_RESPONSES_CONTRACT.expiresAt))).toThrow(/contract has expired/)
     })
   })
 
@@ -282,7 +284,7 @@ describe('dsh-enhanced-assistant-super-relay-budget', () => {
 
     it('fails closed after contract expiry even with a healthy fetch', async () => {
       const adapter = new SuperRelayGoalMeteredAdapter(Config({ enabled: true }), {
-        now: () => Date.parse('2026-11-01T00:00:00.000Z'),
+        now: () => Date.parse(SUPER_RELAY_RESPONSES_CONTRACT.expiresAt),
         environment: { SUPER_RELAY_API_KEY: 'test-key' },
         fetch: jsonFetch(completedResponse()),
       })
@@ -312,9 +314,9 @@ describe('dsh-enhanced-assistant-super-relay-budget', () => {
     it('rejects a hanging upstream within its timeout instead of awaiting forever', async () => {
       const hanging = () => new Promise<Response>(() => {})
       const adapter = new SuperRelayGoalMeteredAdapter(Config({ enabled: true, timeoutMs: 1_000 }), { environment: { SUPER_RELAY_API_KEY: 'test-key' }, fetch: hanging })
-      const started = Date.now()
+      const started = performance.now()
       await expect(collect(adapter, streamOptions())).rejects.toThrow()
-      expect(Date.now() - started).toBeLessThan(3_000)
+      expect(performance.now() - started).toBeLessThan(3_000)
     }, 8_000)
   })
 })
