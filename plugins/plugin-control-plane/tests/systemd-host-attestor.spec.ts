@@ -229,6 +229,10 @@ async function readinessFixture(f: Awaited<ReturnType<typeof fixture>>, mode: 's
 
 async function epochFixture() {
   const f = await fixture()
+  // Epoch fixtures compose reload and readiness with repeated hashing of the
+  // pinned interpreter. Allow that I/O under the repository build's CPU limit.
+  f.config.timeoutMs = 10_000
+  await f.save()
   const ready = await readinessFixture(f)
   const readiness = await ready.start().result
   expect(readiness.code, readiness.stderr).toBe(0)
@@ -327,7 +331,7 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
   // prove that evidence; the rejection tests below still run there.
   const recoveryTest = test.skipIf(!hasVisibleRecoveryCgroup())
   // Reload, readiness, initial epoch and replay each launch the pinned attestor;
-  // each has its own 5-second command deadline, plus resolver and test setup.
+  // each has its own 10-second command deadline, plus resolver and test setup.
   test('attests a stable runtime epoch through schema 5 without another restart or changing reload history', async () => {
     const { f, request, start } = await epochFixture()
     const historical = new DatabaseSync(join(f.config.stateRoot, 'reload.sqlite'), { readOnly: true })
