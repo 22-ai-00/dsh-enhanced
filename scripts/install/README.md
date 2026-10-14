@@ -18,18 +18,20 @@ pnpm approve-builds koffi
 
 ## 安装入口
 
-开发版默认推荐官方 `latest`（当前 `0.2.0-rc.2`，上游尚无正式稳定版），并校验精确兼容基线。未知新版不会未经验证直接装入现有环境。旧 `0.1` Home 到 `0.2` 不走普通自动升级；满足下述严格前提时使用显式联合迁移，否则在独立新 Home 中验证新版，不要先替换旧 profile 的插件。远端 npm 引导器须等新版本通过发布验证后更新。
+`0.1.49` 起默认解析官方 npm `latest`（当前验证为 `0.2.0-rc.2`，上游尚无正式稳定版），并校验精确兼容基线。未知新版不会未经验证直接装入现有环境。旧 `0.1` Home 到 `0.2` 不走普通自动升级；满足下述严格前提时使用显式联合迁移，否则在独立新 Home 中验证新版，不要先替换旧 profile 的插件。远端引导器的固定 tag 和资产摘要由本次 release prepare 更新。
 
 macOS 的本地和 npm 安装入口会在安装末尾检查受管 LaunchAgent；若 `ai.deepseek.dsh.profile.<profile>` 未注册，会自动调用当前 profile 的服务注册入口并再次确认，再执行健康检查，无需手动运行 `launchctl bootstrap`。修复复用服务注册入口，不启动新的飞书 onboarding；已有中断的 setup 事务仍由原入口恢复。`--no-service`、`--lark skip` 以及不管理常驻服务的场景保持跳过；独立 `doctor.sh` 仍只检查。注册失败会保留具体错误并停止安装。
 
 历史验收记录（截至 2026-09-12）：`v0.1.31` 完成过 Linux `autonomy` 的远程全新安装，以及真实 `.30 → .31` 升级、隔离 Host 启动与事务提交；最终冻结候选完成 `.31 → .31` 重复升级，两次均确认 14 个受管包同版本，选定配置、状态文件、暂停目标及其检查点保持不变。该批升级修复随 `0.1.32` 发布；旧 `v0.1.31` 远程 helper 不具备同样能力。当前验收范围与剩余缺口见 [RSI 当前状态](../../docs/rsi-status.md)。
 
-安装器先确保 Node.js、pnpm 和兼容的 DSH。当前 checkout 正在适配官方 `latest` 的 `0.2.0-rc.2`（上游目前尚无正式稳定版）；新安装先解析官方 `@deepseek-ai/dsh` 的 `latest`，确认属于该范围后安装解析出的精确版本，不追踪 `next` 或 beta。已有兼容 CLI 直接复用，不做全局升级或降级。越界、无法识别或解析失败会在安装 Host 前拒绝；新维护线需先完成适配。`--dry-run` 离线展示解析计划，显式 `--dsh-version` 可指定范围内精确版本。已发布的远程引导器仍加载其发布标签中的 helper；本 checkout 的改动须发布后才进入远程安装。当前开发版的 `dsh-rsi update --all` 会为已有私有绑定的 Linux Home 规划 Host 更新；版本相同跳过，未绑定 Home 沿用原 Host。此能力尚未发布，验证进度见 [RSI 状态](../../docs/rsi-status.md)。 `dsh-rsi install` 对全新空 Home 已加入私有 Host 选择：解析并安装官方 latest 到独立目录，Home 内持久绑定精确版本；重试、插件升级及生成的服务复用该入口，补装 pnpm 不会改变它的优先级。此行为不修改全局 DSH；直接执行本节 shell 脚本仍沿用上述选择方式。缓存与重装说明见 [CLI 指南](../../packages/dsh-rsi-cli/README.md#install--reinstall薄委托)。之后，再按场景安装最小 bundle 集合。三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 包含全部 `core` 能力，`supervised` 又在 `lark` 之上追加评测、演化与恢复。`dsh-rsi install/reinstall` 未指定 `--scenario` 或 `--mode` 时默认进入 `supervised`，不再要求用户先选择成长场景。直接调用 shell 安装脚本的 Linux 默认安装同样进入 `supervised`：自动准备持久记忆学习、普通任务成长、新工具独立验收与有限采用及协调器；不再因 `--yes` 或非交互而静默降为 `core`。显式 `--scenario core` 保留无渠道、无 daemon、无后台学习的轻量安装；`--lark skip` 或 `--no-service` 保留不启用完整 RSI 的有限场景。非 Linux 的 shell 自动选择仍使用原有限场景，并明确说明完整 RSI 未开启。
+安装器先确保 Node.js、pnpm 和兼容的 DSH。新安装先解析官方 `@deepseek-ai/dsh` 的 `latest`，确认是已验证的 `0.2.0-rc.2` 后安装精确版本，不追踪 `next` 或 beta；未知版本或解析失败会在安装 Host 前拒绝。`--dry-run` 离线展示计划，显式 `--dsh-version` 可指定范围内精确版本。`dsh-rsi install` 对全新空 Home 将 Host 安装到独立目录，并在 Home 内持久绑定精确版本；重试、插件升级及生成的服务复用该入口，不修改全局 DSH。已有未绑定 Home 保留原 Host。`0.1.49` 起，`dsh-rsi update --all` 可为已有私有绑定的 Linux Home 规划受管 Host 更新；版本相同跳过，旧 `0.1 → 0.2` 仍拒绝普通自动更新。真实跨版本验收状态见 [RSI 状态](../../docs/rsi-status.md)，缓存与重装说明见 [CLI 指南](../../packages/dsh-rsi-cli/README.md#install--reinstall薄委托)。
 
-开发版默认启用流程不是给缺配置的 bundle 强行打开开关。安装器复用可信飞书私聊配对确定 owner，保留已有模型选择；数据库路径、独立身份、构建资源、有限授权与预算由现有 RSI 安装器生成。新授权默认记忆提取每日最多 7 次、成长复盘每日最多 7 次（既有合法聚合预算优先），独立审查另有有限额度并可能增加模型调用；授权有固定期限，重试不续期、不返还消耗、不重放 unknown。缺少模型、owner、Linux systemd 或隔离构建前提时应按具体提示完成配置，不能把未启用的学习报告成安装成功。已有 active/paused Automation 仍须显式确认 `--ack-existing-automations`；`--yes` 不代替该确认。
+三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`。`0.1.49` 起，`dsh-rsi install/reinstall` 未指定 `--scenario` 或 `--mode` 时默认进入 `supervised`；直接调用 shell 安装脚本的 Linux 默认安装也会准备持久记忆学习、普通任务成长、新工具独立验收、有限采用及协调器，不因 `--yes` 或非交互而降为 `core`。全新 Home 的 supervised 安装需要交互式飞书 onboarding；尚未配对时，`--yes` 或管道执行会在安装前停止。显式 `--scenario core` 保留无渠道、无后台学习的轻量安装；`--lark skip` 或 `--no-service` 保留有限场景。非 Linux 不支持完整 supervised；可显式选择 `core` 等轻量场景。
+
+默认启用流程不会给缺配置的 bundle 强行打开开关。安装器复用可信飞书私聊配对确定 owner，保留已有模型选择；首次没有可用模型时须在安装引导中配置，数据库路径、独立身份、构建资源、有限授权与预算由现有 RSI 安装器生成。新授权默认记忆提取每日最多 7 次、成长复盘每日最多 7 次（既有合法聚合预算优先），独立审查另有有限额度并可能增加模型调用；授权有固定期限，重试不续期、不返还消耗、不重放 unknown。缺少模型、owner、Linux systemd 或隔离构建前提时应按具体提示完成配置，不能把未启用的学习报告成安装成功。已有 active/paused Automation 仍须显式确认 `--ack-existing-automations`；`--yes` 不代替该确认。新会话默认 Full access，可访问任意文件及网络、不逐次审批；显式收紧权限见下文。
 
 ```sh
-./scripts/install/install-local.sh --yes
+./scripts/install/install-local.sh
 ```
 
 现有无常驻服务的 `web` / `autonomy` profile 可显式执行离线升级或卸载：
@@ -242,7 +244,7 @@ curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/
 ./scripts/install/purge.sh --dry-run
 ```
 
-`purge.sh` 是 **mutable-main 运维脚本**：始终取 main 分支最新版本，不做 release pin / SHA-256 校验，也不纳入 `install-npm.sh` 的引导资产清单（引导器不会下载执行它）。它与固定 tag、三资产摘要校验的供应链引导路径刻意分离；需要可复现引导校验时仍应使用 `install-npm.sh`。
+`purge.sh` 是 **mutable-main 运维脚本**：始终取 main 分支最新版本，不做 release pin / SHA-256 校验，也不纳入 `install-npm.sh` 的引导资产清单（引导器不会下载执行它）。它与固定 tag、最多六项按需资产摘要校验的供应链引导路径刻意分离；需要可复现引导校验时仍应使用 `install-npm.sh`。
 
 ## 通过 `dsh-rsi` 安装与重装
 
@@ -251,6 +253,9 @@ curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/
 ```sh
 # npm 形态（默认）：下载与本 dsh-rsi 同版本（vX.Y.Z）的 install-npm.sh 到临时目录执行；
 # 引导脚本内部仍按内嵌 SHA-256 自校验 common.sh 等资产
+dsh-rsi install
+
+# 只需轻量 core 时可跳过飞书 onboarding
 dsh-rsi install --scenario core --yes
 
 # local 形态：执行 checkout 内 install-local.sh
@@ -259,10 +264,11 @@ dsh-rsi install --local ~/work/github/dsh-enhanced --scenario web
 # 安装器支持的全部参数（--scenario/--workspace/--model-route/--lark …）原样透传
 dsh-rsi install --help
 
-# 干净重装：先按 purge 安全门控备份+彻底删除，再立即重新安装
-dsh-rsi reinstall --yes
-dsh-rsi reinstall --profile web --yes
-dsh-rsi reinstall --local ~/work/github/dsh-enhanced --yes
+# 干净重装：先按 purge 安全门控备份+彻底删除，再交互式完成 onboarding
+dsh-rsi reinstall
+dsh-rsi reinstall --local ~/work/github/dsh-enhanced
+# 非交互重装可显式选择轻量 core
+dsh-rsi reinstall --profile web --scenario core --yes
 ```
 
 `--dsh-home` 由 dsh-rsi 经 `DSH_HOME` 环境变量传给安装器（安装器不识别该 flag）；`reinstall` 的 purge 阶段支持 `--no-backup` / `--keep-keychain` / `--remove-host` / `--profile`，未加 `--yes` 仍需输入 `purge` 确认。安装器退出码原样透传。
@@ -418,11 +424,15 @@ DSH_ENHANCED_MODEL_API_KEY=… "$DSH_HOME"/profiles/web/node_modules/.bin/dsh-mo
 
 `--require-service` 在 Linux 同时验证 systemd user unit、稳定性窗口和 lingering；若检测到循环崩溃会停止该 unit 并输出 journal，若未启用 lingering，注销会停止 user service，按 doctor 提示运行 `sudo loginctl enable-linger "$(id -u)"`。未带 `--require-service` 的 doctor 会避免对已启用 Lark 的 profile 启动第二个 Host；macOS LaunchAgent 与 Windows 当前用户计划任务只能在用户登录会话中运行；Windows 的任务会在失败后重启，但不宣称注销后继续运行。
 
-远程 npm 安装器（`install-npm.sh`）可从 `main` 直接拉取执行，但它只是薄引导器；当脚本不在 `common.sh` 旁边运行时，它从固定 `vX.Y.Z` 发布标签拉取并校验 `common.sh`。仅当参数中的最终 `--operation` 为 `upgrade` 或 `uninstall` 时，它才从同一个 tag 拉取 `lifecycle-config.mjs` 和 `lifecycle-profile.mjs`；所需资产先写入私有临时目录中的 `.download` 文件，全部通过各自内嵌的 lowercase SHA-256 校验后才原子改名并设为只读，随后才 source `common.sh`。远程 bootstrap 要求 `TMPDIR` 是绝对路径；逻辑路径上的每个符号链接组件都必须由 root 拥有并解析到目录，因此接受 macOS `/var` → `/private/var`（每用户 `TMPDIR` 所在）与 `/tmp` → `/private/tmp` 这类操作系统别名，任何非 root 拥有的符号链接组件都会在下载前被拒绝。完全解析到 canonical 路径后，最终目录必须由当前用户拥有，其非系统临时目录祖先不能由非 root/当前用户拥有或向 group/other 开放写权限；系统 `/tmp` 必须解析到 root-owned `01777` 目录。实际安装逻辑和生命周期执行器都不从 mutable `main` 执行。可分别用 `DSH_ENHANCED_INSTALL_COMMON_SHA256`、`DSH_ENHANCED_INSTALL_LIFECYCLE_CONFIG_SHA256`、`DSH_ENHANCED_INSTALL_LIFECYCLE_PROFILE_SHA256` 覆盖 digest，并用 `DSH_ENHANCED_INSTALL_REF` 覆盖固定发布 tag；所有 digest 必须是精确的 64 位小写十六进制值。`v0.1.30` 的发布准备为三个实际资产写入独立摘要，支持上述远程生命周期入口。旧 `v0.1.24` 不含两个 lifecycle helper，其全零 sentinel 会使远程 upgrade/uninstall 在下载或 source 前拒绝。本地 sibling 模式直接使用 checkout helper；checkout 中尚未发布的安装逻辑不会被远程引导器加载。
+远程 npm 安装器（`install-npm.sh`）是薄引导器。将它下载到新建的私有目录再执行：若同目录存在可读的 `common.sh`，脚本会直接 source sibling，仅可信 checkout 适合该模式。没有 sibling 时，引导器从固定 `vX.Y.Z` 发布标签下载并校验 `common.sh`；最终 `--operation` 为 `upgrade` 或 `uninstall` 时，再下载 `lifecycle-config.mjs` 和 `lifecycle-profile.mjs`；存在 `DSH_ENHANCED_HOST_UPDATE_PLAN` 或 `DSH_ENHANCED_HOST_RECOVERY_ONLY=1` 时，再下载 `host-lifecycle.mjs`、`host-profile-update.mjs` 和 `host-rsi-update.mjs`。所需资产先写入私有临时目录的 `.download` 文件，逐项通过内嵌 SHA-256 校验后才封存，并在 source `common.sh` 前核验文件身份。缺失、无效或占位的必需摘要会拒绝对应操作。
+
+远程 bootstrap 要求 `TMPDIR` 是绝对路径；逻辑路径上的每个符号链接组件都必须由 root 拥有并解析到目录，因此接受 macOS `/var` → `/private/var`（每用户 `TMPDIR` 所在）与 `/tmp` → `/private/tmp` 这类操作系统别名，任何非 root 拥有的符号链接组件都会在下载前被拒绝。完全解析到 canonical 路径后，最终目录必须由当前用户拥有，其非系统临时目录祖先不能由非 root/当前用户拥有或向 group/other 开放写权限；系统 `/tmp` 必须解析到 root-owned `01777` 目录。六项资产摘要可分别由 `DSH_ENHANCED_INSTALL_COMMON_SHA256`、`DSH_ENHANCED_INSTALL_LIFECYCLE_CONFIG_SHA256`、`DSH_ENHANCED_INSTALL_LIFECYCLE_PROFILE_SHA256`、`DSH_ENHANCED_INSTALL_HOST_LIFECYCLE_SHA256`、`DSH_ENHANCED_INSTALL_HOST_PROFILE_UPDATE_SHA256` 和 `DSH_ENHANCED_INSTALL_HOST_RSI_UPDATE_SHA256` 覆盖；`DSH_ENHANCED_INSTALL_REF` 可覆盖固定发布 tag。已请求资产的摘要必须是精确的 64 位小写十六进制值。远程模式的安装逻辑和生命周期执行器不从 mutable `main` 执行；可信 checkout 的 sibling 模式直接使用本地 helper。
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash
+curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash -s -- --scenario core
 ```
+
+管道示例只安装轻量 `core`；首次完整 `supervised` 需要终端交互，参见[首页的 curl 安装命令](../../README.md#安装)。
 
 安装器默认先把 `@dsh-enhanced/personal-assistant@latest` 解析为一次安装的精确版本，再用该精确版本预检并安装每个选中的 `@dsh-enhanced/*` bundle；registry 查询固定使用 npm 的 global location，避免当前 checkout 中 pnpm 专用 `.npmrc` 键被 npm 误报为 unknown project config。profile add 仅把 pnpm 日志级别降到 error：安装器自己的 cohort/阶段输出保留，Host 已提供的 optional peer 与已明确忽略的 build-script 重复提示不再刷屏，真实 package-manager 错误仍原样显示并以非零退出。因此仍会获得最新的完整发布，不会因各包独立解析 `latest` 而混装。预检发现任一 bundle 尚未发布该版本时，会在修改 profile 前失败。显式传入 `--plugin-version` 或 `DSH_ENHANCED_VERSION` 可使用精确 SemVer 或 npm dist-tag；tag 同样先由 anchor 解析为精确版本。版本 range 会被拒绝，因为它不能表达一个可验证的单一 cohort。`--dry-run` 不访问 npm registry，会显示待执行的 anchor 解析与预检；要确认实际发布状态请去掉 `--dry-run`。`supervised` 场景要求完整的 bundle 集合，安装后由 owner RSI 入口成对配置目标与协调器。
 

@@ -2,6 +2,12 @@
 
 本文是 `dsh-enhanced` 的完整发布协议。仓库中的插件和共享包采用统一版本；发布安全依赖版本账本、稳定标签、fail-closed workflow 和受保护的 npm 凭据共同成立。
 
+## 发布与效果验收
+
+实验性版本可以先发布供用户安装，再通过真实普通任务持续验证学习、后续复用、质量、成本与回归收益。完整普通使用闭环尚未验收，不再单独阻止实验性 npm 发布；发行说明必须保留这一边界，不能把工程测试或服务就绪说成自迭代收益证明。
+
+发布前仍须通过仓库完整检查、精确发布源码的跨平台 CI、安装器版本与摘要一致性检查，以及已实现能力的安装和运行就绪验证。身份校验、有限预算、独立验收与回滚保护不因实验性发布而放宽；已知的安装失败或安全问题不能留给用户探索。
+
 ## 版本账本
 
 仓库级版本记录在 [`release-manifest.json`](../release-manifest.json)。查看当前版本、待发布版本和下一个默认版本：
@@ -22,11 +28,11 @@ pnpm release:prepare
 pnpm release:prepare 0.2.0
 ```
 
-`release:prepare` 会统一修改根包、所有 `plugins/*` / `packages/*` 的 `package.json` 和运行时 `src/version.ts`，并写入 `pending`，但不会把尚未发布的版本标记为成功。它还会把同一发布标签、精确 Host 版本及已验证范围，以及 `common.sh`、`lifecycle-config.mjs`、`lifecycle-profile.mjs` 三个远端安装资产的独立 SHA-256 同步写入 `install-npm.sh`；`release:verify-tag` 和 `release:record` 会重新计算并逐项核验这些值。
+`release:prepare` 会统一修改根包、所有 `plugins/*` / `packages/*` 的 `package.json` 和运行时 `src/version.ts`，并写入 `pending`，但不会把尚未发布的版本标记为成功。它还会把同一发布标签、精确 Host 版本及已验证范围，以及六个远端安装资产（`common.sh`、`lifecycle-config.mjs`、`lifecycle-profile.mjs`、`host-lifecycle.mjs`、`host-profile-update.mjs`、`host-rsi-update.mjs`）的独立 SHA-256 同步写入 `install-npm.sh`；`node scripts/release-version.mjs verify-tag vX.Y.Z` 和 `release:record` 会重新计算并逐项核验这些值。
 
 ## 校验、合入与创建标签
 
-运行 `pnpm check` 并把版本变更提交、合入 `main` 后，先同步并确认本地 `main` 就是当前 `origin/main`，再在这个提交上创建与 `pending` 完全一致的稳定版本标签：
+运行 `pnpm check` 并把版本变更提交、合入 `main` 后，确认精确发布提交的 Linux、macOS 和 Windows CI 已全部通过，再同步并确认本地 `main` 就是当前 `origin/main`，在这个提交上创建与 `pending` 完全一致的稳定版本标签：
 
 ```sh
 git fetch origin +refs/heads/main:refs/remotes/origin/main
@@ -60,6 +66,8 @@ pnpm release:record
 
 按下述 immutable tag ruleset 部署后，release tag 会稳定指向实际发布的源码提交；workflow 自身不会创建或移动 tag，账本记录位于其后的独立提交。
 
+发布后逐包核对 npm 上的精确版本、dist-tag 与包集合，再从公开 tag 下载安装资产并核对摘要。在隔离的临时 Home 验证公开包安装与配置加载，不修改现有生产 Home；完整 supervised 安装仍须完成真实身份配对及必要的模型、预算和构建环境设置，轻量安装测试不替代该授权流程。最后将 `main` 的发布账本记录同步回 `dev`。
+
 ## 失败重试与不可变标签
 
 若发版中途出现暂时性失败，`pending` 会保留。请在 GitHub Actions 中 rerun 原 run，或手动运行 Release workflow 并输入同一个现有 tag；不要为重试创建或移动标签。
@@ -80,7 +88,7 @@ workflow 的多次远端检查会缩小竞态窗口，但不能从技术上完�
 
 protected environment 的审批只控制发布 job 和 secret 的使用，不能单独锁定 `main`。若 `origin/main` 已前进或版本一致性校验失败，workflow 会拒绝继续；不得移动原 tag 来绕过。
 
-远端 `install-npm.sh` 本身仍从 mutable `main` 获取；其内嵌摘要把随后执行的三个资产绑定到不可变发布 tag，但不能认证最外层引导器本身。仓库管理员权限和 immutable tag ruleset 因此仍属于发布信任根。
+远端 `install-npm.sh` 本身仍从 mutable `main` 获取；其内嵌摘要把随后执行的六个资产绑定到不可变发布 tag，但不能认证最外层引导器本身。仓库管理员权限和 immutable tag ruleset 因此仍属于发布信任根。
 
 ## npm 凭据
 

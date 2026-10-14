@@ -8,7 +8,7 @@
 
 ## 普通任务自动记忆学习
 
-`assistant-memory-learning` 新 bundle 使用独立私有 schema 1 意图/游标/提取额度库，依赖同批 Delivery 精确来源元数据查询、Verifier 审查额度探针和 Memory 当前受管目标/采用额度探针。Delivery schema 25、Memory schema 7、Verifier 的既有审查库结构不变；旧 peers 缺少能力时拒绝激活。初始 owner/grants/有限预算配置完成后复用原生 Automations 和 Agent；DSH/Cordis ABI 未升级。真实 owner 部署与后续收益仍待完整闭环验收。
+`assistant-memory-learning` 新 bundle 使用独立私有 schema 1 意图/游标/提取额度库，依赖同批 Delivery 精确来源元数据查询、Verifier 审查额度探针和 Memory 当前受管目标/采用额度探针。Delivery schema 25、Memory schema 7、Verifier 的既有审查库结构不变；旧 peers 缺少能力时拒绝激活。初始 owner/grants/有限预算配置完成后复用原生 Automations 和 Agent；DSH/Cordis ABI 未升级。生产 owner 部署和新鲜就绪已验收，后续真实任务收益及完整普通使用闭环仍待验收。
 
 ## 有限事实与经验采用（Memory schema 7）
 
@@ -80,7 +80,7 @@ Control Plane v24 增加 `awaiting-live-tasks`、不可续期窗口、专用资�
 
 ## 飞书业务 CLI 安装
 
-Lark setup 的业务接入使用官方 `lark-cli` 1.x、最低已核实版本 `1.0.85`；同时检查所需 CLI 子命令，实际启用前校验认证 JSON 与服务端 owner 身份。`1.0.85` 和 `1.0.96` 的认证/技能协议已对照官方源码，`1.0.96` 的全域 scope 集合还会读取官方远端目录。缺失时解析 npm latest 并下载精确稳定版本，复用兼容的本地或受管 CLI。生成的入口使用 DSH `0.1.5-rc.3` 原生 `skill-filesystem` 的 `$DSH_HOME/skills` 与原生 shell/skill 工具，不新增 Cordis 服务或修改 Host ABI；参见[安装指南](../plugins/lark-channel/docs/setup.md#自动业务工具接入)。
+Lark setup 的业务接入使用官方 `lark-cli` 1.x、最低已核实版本 `1.0.85`；同时检查所需 CLI 子命令，实际启用前校验认证 JSON 与服务端 owner 身份。`1.0.85` 和 `1.0.96` 的认证/技能协议已对照官方源码，`1.0.96` 的全域 scope 集合还会读取官方远端目录。缺失时解析 npm latest 并下载精确稳定版本，复用兼容的本地或受管 CLI。生成的入口使用当前受支持 DSH 的原生 `skill-filesystem` 的 `$DSH_HOME/skills` 与原生 shell/skill 工具，不新增 Cordis 服务或修改 Host ABI；参见[安装指南](../plugins/lark-channel/docs/setup.md#自动业务工具接入)。
 
 ## 日常使用双 Host 配置入口
 
@@ -101,9 +101,9 @@ Delivery 的新审批桥要求提供 `registerHumanApprovalAnswerer` 的同批 P
 
 新 Control Plane 在原生 `appReady` 提交后向 stderr 输出版本化的 `dsh-enhanced host ready: v1`，不污染 headless/ACP 的 stdout。安装器与 service lifecycle 的隔离激活、预览和 systemd 验收均识别此信号，保留旧 Web URL 信号；systemd 仍要求新 InvocationID，generic 信号必须是完整、精确的协议行。仅含旧 cohort 的无 Web Host 可能没有该通知；成对升级会在停服前检查旧协调器当前 InvocationID 的就绪记录，无法证明时保留运行状态并拒绝升级。该启动证据不替代独立任务验证或持久采用证明。
 
-Linux service-aware upgrade 已接入登记过的 RSI 目标与协调器：核对私有安装收据、同批已安装版本、共享 catalog/trust、owner scope、handoff 与专用状态路径，再把目标包和协调器的 Policy、Automations、Control Plane 三包更新到同一精确版本。协调器仅在隔离预览进程关闭 scheduler；持久配置仍启用调度。真实服务接受还要求本次启动后登记的、匹配 owner 与 executor 的原生 Automation。事务绑定原始/候选收据、配置及包摘要，恢复与清理前重新核对。固定本地源码或 `rsi-local-cohorts` 制品的迁移尚未实现，会在 registry 查询和停服前拒绝；不能将此能力外推为所有本地安装可更新。跨版本 DSH Host 更新的独立迁移事务已通过工程验收，真实跨版本升级尚未验证；与插件升级是先后两个阶段，Host 失败不会撤销已提交的插件升级。
+Linux service-aware upgrade 已接入登记过的 RSI 目标与协调器：核对私有安装收据、同批已安装版本、共享 catalog/trust、owner scope、handoff 与专用状态路径，再把目标包和协调器的 Policy、Automations、Control Plane 三包更新到同一精确版本。协调器仅在隔离预览进程关闭 scheduler；持久配置仍启用调度。真实服务接受还要求本次启动后登记的、匹配 owner 与 executor 的原生 Automation。事务绑定原始/候选收据、配置及包摘要，恢复与清理前重新核对。普通 registry 更新仍不支持固定本地源码或 `rsi-local-cohorts` 制品，会在 registry 查询和停服前拒绝；不能将显式维护入口外推为所有本地安装可自动更新。跨版本 DSH Host 的独立迁移事务已通过工程验收；本机受审生产 Home 通过显式联合 Host / 源码迁移及签名后继修复，完成 `0.1.5-rc.3 → 0.2.0-rc.2` 的双 Host 新鲜就绪验收。这仅证明该特定 Home 与输入，其他部署组合仍待验证。普通插件升级与 Host 更新仍是先后两个阶段，Host 失败不会撤销已提交的插件升级。
 
-当前开发基线迁移至官方 npm `latest` 的 **DSH `0.2.0-rc.2`**（2026-10-12 核对 registry），上游尚未发布无预发布后缀的稳定版。安装默认解析 `latest` 并冻结精确版本，只接受已验证的版本；未知新版本拒绝安装，不静默退回旧版或选择 Alpha/Beta。现有私有 Host 收据仍保留读取和回滚能力；新版插件不得装入旧 Host。发布历史和远端引导器的固定制品由 release prepare 单独更新，迁移验收状态见 [RSI 状态](rsi-status.md)。
+`0.1.49` 起兼容基线为官方 npm `latest` 的 **DSH `0.2.0-rc.2`**（2026-10-14 核对 registry），上游尚未发布无预发布后缀的稳定版。安装默认解析 `latest` 并冻结精确版本，只接受已验证的版本；未知新版本拒绝安装，不静默退回旧版或选择 Alpha/Beta。现有私有 Host 收据仍保留读取和回滚能力；新版插件不得装入旧 Host。发布历史和远端引导器的固定制品由 release prepare 单独更新，迁移验收状态见 [RSI 状态](rsi-status.md)。
 
 Agent setup 的第二参数是尚未发布的确切 Agent；不再读取 `ctx.agent`。Inbox 使用公开 `nextTurn` / `nextStep`，程序内嵌套工具事件为 `tool/ptc-dispatch-start` / `tool/ptc-dispatch`。此前 `0.1` 的 Session format 为 3，当前 `0.2` 为 4；持久化使用 `create/open` 返回的会话句柄，恢复和清理须保持独占写入及未知结果不重派。系统提示进入原生消息历史，`EpochHeader` 不再携带 `system`；请求来源验证按新原生结构精确比较。
 

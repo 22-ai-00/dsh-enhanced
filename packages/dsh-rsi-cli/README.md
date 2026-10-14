@@ -39,9 +39,9 @@ dsh-rsi [全局选项] <命令>
 
 `dsh-rsi install` 为全新 Home 选择 Host，再调用统一安装器：
 
-`install` 和 `reinstall` 在未指定 `--scenario`、也未指定 `--mode` 时，向安装器显式传入 `--scenario supervised`；`--dry-run` 会展示这一默认场景。显式 `--lark skip` 或 `--no-service` 不追加完整场景，交由统一安装器保留有限场景；它们不能覆盖用户显式选择的 `supervised`。显式 `--scenario` 或旧式 `--mode` 保持安装器原有语义，例如 `--scenario core` 选择 core，`--mode standard` 保留安装器的自动选择。`update --all` 等升级、卸载、恢复及 `install --help` 不采用此默认值。其余参数仍按原顺序透传。
+`install` 和 `reinstall` 在未指定 `--scenario`、也未指定 `--mode` 时，向安装器显式传入 `--scenario supervised`；`--dry-run` 会展示这一默认场景。完整 supervised 需要 Linux/systemd user services；macOS 可显式选择 `--scenario core` 等轻量场景。显式 `--lark skip` 或 `--no-service` 不追加完整场景，交由统一安装器保留有限场景；它们不能覆盖用户显式选择的 `supervised`。显式 `--scenario` 或旧式 `--mode` 保持安装器原有语义，例如 `--scenario core` 选择 core，`--mode standard` 保留安装器的自动选择。`update --all` 等升级、卸载、恢复及 `install --help` 不采用此默认值。其余参数仍按原顺序透传。
 
-首次飞书身份授权须由平台的授权流程完成。授权尚未就绪时，不能把 supervised 安装称为成功；应完成平台授权后按安装器提示继续或重试。
+首次飞书身份授权须由平台的授权流程完成。全新 Home 尚无飞书 Bot 时，`supervised --yes` 或管道等非交互执行会在安装前停止；先在交互式终端运行 `dsh-rsi install` 完成 onboarding。安装器保留已有模型选择，并生成路径、签名身份及有期限的授权与有限预算；仍须有可用模型及隔离构建环境。已有 active/paused Automation 需要另行确认 `--ack-existing-automations`，`--yes` 不代替它。授权尚未就绪时，不能把 supervised 安装称为成功。
 
 - **npm 形态（默认）**：下载 `https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/v<本包版本>/scripts/install/install-npm.sh` 到临时目录执行。引导脚本内部会按内嵌 SHA-256 自校验 `common.sh` 等资产，dsh-rsi 不重复 hash 逻辑。**锁定的只是引导脚本与同 tag 的安装器资产，不是插件 cohort 版本**：安装器默认把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套 `@dsh-enhanced/*` bundle；要锁定插件版本需透传 `--plugin-version <x.y.z|dist-tag>` 或预设 `DSH_ENHANCED_VERSION`。安装器尾部还会执行 `npm install --global @dsh-enhanced/dsh-rsi-cli@<cohort 版本>`，可能因此把全局 dsh-rsi 升降级到该 cohort 版本。
 - **local 形态**：`--local <checkout 目录>`，直接执行该目录下 `scripts/install/install-local.sh`，并从该 checkout 的 packages/dsh-rsi-cli 全局安装（本地开发 / 无网救机）。
@@ -52,10 +52,11 @@ dsh-rsi [全局选项] <命令>
 - 安装器 stdio 与终端直连，退出码原样透传。`--help` / `--dry-run` 不准备私有 Host。
 
 ```bash
-# npm 形态默认安装 supervised 场景
-dsh-rsi install --yes
+# npm 形态在交互式终端安装 supervised 场景
+dsh-rsi install
 
-# 显式选择 core 场景
+# 已完成飞书 onboarding 后可非交互重试；显式选择 core 也无需飞书
+dsh-rsi install --yes
 dsh-rsi install --scenario core --yes
 
 # local checkout 形态
@@ -64,9 +65,10 @@ dsh-rsi install --local ~/work/github/dsh-enhanced --scenario web
 # 查看安装器支持的全部参数
 dsh-rsi install --help
 
-# 干净重装：先备份+purge，再按相同形态重新安装
-dsh-rsi reinstall --yes
-dsh-rsi reinstall --profile web --yes
+# 干净重装：先备份+purge，再交互式完成新的 supervised onboarding
+dsh-rsi reinstall
+# 若只需轻量场景，可非交互地重装 core
+dsh-rsi reinstall --profile web --scenario core --yes
 ```
 
 `reinstall` 支持的 rsi 侧选项与 `purge` 一致（`--no-backup` / `--keep-keychain` / `--remove-host` / `--profile`）；只有既未加 `--yes` 也未加 `--dry-run` 时才需输入 `purge` 确认——`reinstall --dry-run` 全程无交互、无修改：先打印 purge 计划，再以 `--dry-run` 透传演练安装器（`--dry-run` 同时作用于 purge 与安装两个阶段）。重装阶段默认走 npm 形态；local 重装加 `--local <dir>`。
@@ -90,14 +92,14 @@ dsh-rsi update --all --yes
 
 `update` 选项：
 
-- `--all`：自身升级成功后，把插件集合交给同一目标版本的安装器原地升级；Linux 受管服务由事务停服并恢复，额外或手工启动的 Host 必须先停止。当前开发版在已绑定的 Linux Home 继续执行受管 Host 更新；版本相同则跳过。用户无需传 `--confirm-dsh-home-stopped` 或重复声明 `--scenario`；安装器从 effective/composed profile 自动识别场景。
+- `--all`：自身升级成功后，把插件集合交给同一目标版本的安装器原地升级；Linux 受管服务由事务停服并恢复，额外或手工启动的 Host 必须先停止。`0.1.49` 起，在已绑定的 Linux Home 继续执行受管 Host 更新；版本相同则跳过。用户无需传 `--confirm-dsh-home-stopped` 或重复声明 `--scenario`；安装器从 effective/composed profile 自动识别场景。
 - `--version <v|tag>`：dsh-rsi 自身的目标版本或 dist-tag（默认 `latest`）。只接受精确版本 `x.y.z`（可带预发布后缀）或纯字母 dist-tag；范围表达式如 `>=0.1.0` 会被拒绝。
 - `--dry-run`：解析出目标版本并打印将执行的命令，不做任何安装。
 - 其余参数在 `--all` 下原样透传给安装器；`--local <dir>` 走 local 形态。显式 `--scenario` 仍可作为一致性断言，但不再是必填项。
 
 ### 受管 Host 更新
 
-此能力尚未发布，验证进度见 [RSI 状态](../../docs/rsi-status.md)。更新分两步：先完成目标与协调器的同批插件升级，使其具备新版状态读取能力；再在 Home 外准备精确 Host 与原生依赖，停止同一 Home 的受管服务，对完整副本迁移、验证并切换。Host 阶段失败可能保留已成功更新的插件和旧 Host；整个命令不提供跨两个阶段的原子回退。
+`0.1.49` 起，已绑定 Linux Home 的受管更新分两步：先完成目标与协调器的同批插件升级，使其具备新版状态读取能力；再在 Home 外准备精确 Host 与原生依赖，停止同一 Home 的受管服务，对完整副本迁移、验证并切换。旧 `0.1` Home 到 `0.2` 不支持普通自动升级，须使用安装指南中的显式联合迁移。Host 阶段失败可能保留已成功更新的插件和旧 Host；整个命令不提供跨两个阶段的原子回退。真实跨版本 Host 更新的验收状态见 [RSI 状态](../../docs/rsi-status.md)。
 
 Host 事务覆盖同一 Home 的其它 profile，保留原配置、owner、历史记录、密钥、授权期限和已用额度。候选服务须重新通过启动与运行验收；中断重试先恢复已有事务，再规划更新。冻结本地源码/cohort 的升级仍不支持。兼容范围外的新 `latest` 会明确报错，须完成适配后才能更新；不会改用 `next` 或替换全局 Host。
 

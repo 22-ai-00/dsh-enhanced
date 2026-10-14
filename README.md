@@ -4,29 +4,34 @@
 
 **当前仍为实验性实现：基础组件和局部链路已有验证，普通使用驱动的完整自迭代闭环尚未验收。** 当前阻塞与下一步只维护在 [RSI 当前状态](docs/rsi-status.md)。
 
-`plugins/*` 是可独立安装、测试和发布的 DSH bundle，`packages/*` 是不会自动启用的共享库。仓库新安装默认跟随 DSH 官方 `latest`；当前验证基线为 `0.1.5-rc.3`，下一版计划支持 `>=0.1.5-rc.3 <0.1.6`。已发布 `v0.1.48` 安装器仍使用其发布时的 Host 版本与兼容范围。
+`plugins/*` 是可独立安装、测试和发布的 DSH bundle，`packages/*` 是不会自动启用的共享库。`0.1.49` 起，新安装解析 DSH 官方 npm `latest` 并固定已验证的精确 Host 版本；当前兼容版本为 `0.2.0-rc.2`，仍是预发布版。后续 `latest` 超出已验证范围时安装器会拒绝安装，等待适配。
 
 ## 安装
 
 支持 macOS / Linux，需要 Node.js `^22.19 || >=24`。
 
-**方式一：npm 全局安装 `dsh-rsi`（零运行时依赖，仅用 Node 内置模块），再安装自迭代助理**
+**方式一：Linux 上全局安装 `dsh-rsi`（零运行时依赖，仅用 Node 内置模块），在交互式终端完成飞书引导并安装自迭代助理**
 
 ```sh
 npm install --global @dsh-enhanced/dsh-rsi-cli
-dsh-rsi install --scenario supervised --yes
+dsh-rsi install
 ```
 
-**方式二：curl 一键安装（默认 `core` 场景，无需先 clone 仓库）**
+**方式二：curl 引导安装（Linux，默认开启学习；无需先 clone 仓库）**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash
+installer_directory="$(mktemp -d)"
+curl -fsSLo "$installer_directory/install-npm.sh" https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh &&
+  bash "$installer_directory/install-npm.sh" --scenario supervised
+install_status=$?
+rm -rf -- "$installer_directory"
+test "$install_status" -eq 0
 ```
 
-指定场景或其它选项时，参数跟在 `--` 之后：
+首次启用 `supervised` 须在终端完成飞书 onboarding。只需无后台学习的轻量 `core` 时可以使用管道执行：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash -s -- --scenario lark --lark configure
+curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash -s -- --scenario core
 ```
 
 引导器虽从 `main` 拉取，但实际安装逻辑与生命周期 helper 全部从**固定发布 tag** 下载、通过内嵌 SHA-256 自校验后才执行，不从 mutable `main` 运行任何安装代码。完整场景选项、凭据存储与平台差异见[安装脚本文档](scripts/install/README.md)。
@@ -50,7 +55,7 @@ dsh-rsi restart --profile web          # 改配置后重启（只动运行状态
 
 升级（`update` / `update --all`）、干净重装（`reinstall`）、彻底卸载（`purge`）、崩溃救机脚本与全部安装器参数分别见 [`packages/dsh-rsi-cli/README.md`](packages/dsh-rsi-cli/README.md) 和[安装脚本文档](scripts/install/README.md)。
 
-开发版 `dsh-rsi install/reinstall` 和 Linux checkout 内 shell 默认安装 `supervised`，自动组合持久记忆学习、普通任务成长、独立验收与有限采用。首次飞书身份授权仍由平台完成，已有模型选择保留，必要路径和有限预算由安装器生成；构建资源或 owner 未就绪时不会报告安装成功。显式 `--scenario core` 可选择本机核心；shell 的 `--mode standard`、`--lark skip` 或 `--no-service` 保留有限场景。非 Linux 完整 RSI 尚不受支持。已发布的远程安装器仍使用固定 tag，默认行为须随下一发布更新。
+`0.1.49` 起，Linux 的 `dsh-rsi install/reinstall` 和 shell 默认安装 `supervised`，组合持久记忆学习、普通任务成长、独立验收与有限采用。首次安装须在终端完成飞书身份授权并配置可用模型；已有模型选择保留，必要路径和有限预算由安装器生成。未配对的全新 Home 使用 `--yes` 或管道运行时会停止并提示完成 onboarding。显式 `--scenario core` 可安装无渠道、无后台学习的本机核心；`--mode standard`、`--lark skip` 或 `--no-service` 保留有限场景。非 Linux 不支持完整 RSI，可显式选用 `core` 等轻量场景。
 
 三档部署场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 含全部 `core` 能力并加飞书常驻与偏好学习，`supervised` 再追加评测、演化与恢复。安装时检测到本机 `traex` 或 `trae-cli` 会自动安装并启用 TraeX 插件，复用本机登录；已登录且没有显式默认模型时，为当前 profile 配置 TraeX 默认模型。已有模型选择保持不变。其它模型可在安装引导中配置，API Key 只从环境读取。实验性离线执行入口 `autonomy` 需显式指定本机固定隔离镜像，详见[安装文档](scripts/install/README.md)。
 
