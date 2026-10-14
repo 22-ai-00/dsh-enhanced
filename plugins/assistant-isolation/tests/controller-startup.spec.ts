@@ -8,6 +8,8 @@ import type {} from '@deepseek-ai/dsh-tools'
 import IsolationPlugin from '../src/index.ts'
 import { IsolationLedger } from '../src/ledger.ts'
 import { AssistantIsolationService } from '../src/service.ts'
+import { configuredDockerSocketPath } from '../src/docker-socket.ts'
+import { bindIsolationStateSocket } from '../src/state-socket-binding.ts'
 
 const roots: string[] = []
 const sleep = async (milliseconds: number): Promise<void> => await new Promise(resolve => setTimeout(resolve, milliseconds))
@@ -20,6 +22,7 @@ async function fixture(leaseMs: number) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'assistant-isolation-controller-startup-')))
   roots.push(root)
   await chmod(root, 0o700)
+  bindIsolationStateSocket(root, configuredDockerSocketPath(undefined))
   const ledger = new IsolationLedger(join(root, 'ledger.sqlite'))
   const authority = ledger.claimController('previous-host', leaseMs)
   return { root, ledger, authority }
