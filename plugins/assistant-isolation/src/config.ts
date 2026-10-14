@@ -2,12 +2,14 @@ import Schema from '@deepseek-ai/schemastery'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { defaultStoragePolicy, plannedStorageBytes, validateStoragePolicy } from './storage-policy.js'
+import { configuredDockerSocketPath } from './docker-socket.js'
 import type { IsolationGrant, IsolationLimits, IsolationStoragePolicy } from './types.js'
 
 export interface Config {
   stateRoot?: string
   image?: string
   dockerPath?: string
+  socketPath?: string
   grants?: IsolationGrant[]
   limits?: Partial<IsolationLimits>
   storage?: Partial<IsolationStoragePolicy>
@@ -20,7 +22,8 @@ export const defaultLimits: IsolationLimits = { maxDurationMs: 60_000, maxInputB
 const integer = (max: number) => Schema.number().step(1).min(1).max(max)
 export const Config: Schema<Config> = Schema.object({
   stateRoot: Schema.string().default(join(homedir(), '.dsh', 'assistant-isolation')),
-  image: Schema.string(), dockerPath: Schema.string().default('/usr/bin/docker'),
+  image: Schema.string(), dockerPath: Schema.string().default(process.platform === 'darwin' ? '/usr/local/bin/docker' : '/usr/bin/docker'),
+  socketPath: Schema.string(),
   grants: Schema.array(Schema.object({
     id: Schema.string().required(), revision: integer(Number.MAX_SAFE_INTEGER).required(),
     principalDigest: Schema.string().required(), principalRecordId: Schema.string().required(),
@@ -38,7 +41,8 @@ export const Config: Schema<Config> = Schema.object({
 })
 export function validateConfig(input: Config): Required<Config> & { limits: IsolationLimits, storage: IsolationStoragePolicy } {
   const stateRoot = input.stateRoot ?? join(homedir(), '.dsh', 'assistant-isolation')
-  const dockerPath = input.dockerPath ?? '/usr/bin/docker'
+  const dockerPath = input.dockerPath ?? (process.platform === 'darwin' ? '/usr/local/bin/docker' : '/usr/bin/docker')
+  const socketPath = configuredDockerSocketPath(input.socketPath)
   const grants = structuredClone(input.grants ?? [])
   const image = input.image ?? ''
   if (!isAbsolute(stateRoot) || resolve(stateRoot) !== stateRoot || stateRoot === '/' || /[\p{Cc},]/u.test(stateRoot)
@@ -61,5 +65,5 @@ export function validateConfig(input: Config): Required<Config> & { limits: Isol
   for (const grant of grants) if (!isAbsolute(grant.workspace) || resolve(grant.workspace) !== grant.workspace
     || !/^[0-9a-f]{64}$/.test(grant.principalDigest)) throw new Error('assistant-isolation: invalid grant scope')
   if (storage.maxStateBytes < plannedStorageBytes(limits)) throw new Error('assistant-isolation: storage budget below planned job allocation')
-  return { stateRoot, dockerPath, image, grants, limits, storage, maxConcurrentJobs, maxReservedMemoryMiB, maxReservedWorkspaceInodes }
+  return { stateRoot, dockerPath, socketPath, image, grants, limits, storage, maxConcurrentJobs, maxReservedMemoryMiB, maxReservedWorkspaceInodes }
 }

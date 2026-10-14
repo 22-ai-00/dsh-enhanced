@@ -1403,7 +1403,7 @@ export interface ProfileSetupLockOptions {
 export function dshHomeLifecycleRendezvousPath(dshHome: string, uid = process.getuid?.()): string {
   if (!isAbsolute(dshHome)) throw new Error('lark-channel setup: DSH_HOME must be absolute')
   if (!Number.isSafeInteger(uid) || uid === undefined || uid < 0) {
-    throw new Error('lark-channel setup: cannot determine the Linux user id for lifecycle locking')
+    throw new Error('lark-channel setup: cannot determine the user id for lifecycle locking')
   }
   const canonicalHome = normalizeSetupResourcePath(dshHome)
   return `/tmp/.dsh-enhanced-lifecycle-${uid}-${textSha256(canonicalHome)}.lock`
@@ -1428,12 +1428,14 @@ export async function withDshHomeLifecycleLock<T>(
   dshHome: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  if (process.platform !== 'linux') return operation()
+  if (process.platform !== 'linux' && process.platform !== 'darwin') return operation()
   const uid = process.getuid?.()
   if (!Number.isSafeInteger(uid) || uid === undefined || uid < 0) {
-    throw new Error('lark-channel setup: cannot determine the Linux user id for lifecycle locking')
+    throw new Error('lark-channel setup: cannot determine the user id for lifecycle locking')
   }
-  const temporaryDirectory = await lstat('/tmp')
+  // macOS /tmp is a system symlink to /private/tmp. Validate the physical
+  // sticky directory while retaining the shared rendezvous pathname.
+  const temporaryDirectory = await lstat(process.platform === 'darwin' ? realpathSync('/tmp') : '/tmp')
   if (!temporaryDirectory.isDirectory() || temporaryDirectory.isSymbolicLink()
     || temporaryDirectory.uid !== 0 || (temporaryDirectory.mode & 0o7777) !== 0o1777) {
     throw new Error('lark-channel setup: lifecycle rendezvous lock requires a safe root-owned sticky /tmp')
@@ -1443,9 +1445,16 @@ export async function withDshHomeLifecycleLock<T>(
   try {
     descriptor = await open(lockPath, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600)
     await assertDshHomeLifecycleLockIdentity(descriptor, lockPath, uid)
-    const acquired = spawnSync('/usr/bin/flock', ['-n', '-E', '75', '3'], {
+    // Both helpers lock the inherited open file description. The kernel keeps
+    // it locked until this process closes the descriptor, including on crash.
+    const mac = process.platform === 'darwin'
+    const acquired = spawnSync(mac ? '/usr/bin/perl' : '/usr/bin/flock', mac
+      ? ['-MFcntl=:flock', '-MErrno=EAGAIN,EWOULDBLOCK', '-e',
+        'open(F, "<&", 3) or exit 74; flock(F, LOCK_EX|LOCK_NB) or exit(($! == EAGAIN || $! == EWOULDBLOCK) ? 75 : 74);']
+      : ['-n', '-E', '75', '3'], {
       encoding: 'utf8',
       stdio: ['ignore', 'ignore', 'pipe', descriptor.fd],
+      env: { PATH: '/usr/bin:/bin', LANG: 'C' }, timeout: 10_000,
     })
     if (acquired.status === 75) throw new Error(`lark-channel setup: DSH_HOME lifecycle is busy: ${lockPath}`)
     if (acquired.status !== 0) {

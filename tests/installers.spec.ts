@@ -3962,6 +3962,7 @@ describe('one-click installers', () => {
     },
   )
 
+
   test('macOS local supervised upgrade activates successfully and removes its temporary backup', async () => {
     const f = await lifecycleFixture({
       effectiveScenario: 'supervised',
@@ -7922,19 +7923,19 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     expect(result.stdout).not.toContain('安装流程完成')
   })
 
-  test('other platforms retain a limited auto scenario and report the RSI boundary', async () => {
+  test('macOS auto selects native ordinary-use learning', async () => {
     const dshHome = await temporaryDshHome()
     const result = runInstaller(localInstaller, ['--dry-run', '--yes'], dshHome, 'Darwin')
 
     expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toContain('部署场景：core')
-    expect(result.stdout).toContain('普通使用自迭代：本次不启用完整 RSI')
-    expect(result.stdout).not.toContain('dsh-rsi-setup --install-owner')
+    expect(result.stdout).toContain('部署场景：supervised')
+    expect(result.stdout).toContain('部署模式：supervised-growth')
+    expect(result.stdout).toContain('dsh-rsi-setup --install-owner')
   })
 
-  test('Linux interactive scenario menu defaults to supervised and offers limited opt-outs', () => {
+  test.each(['Linux', 'Darwin'])('%s interactive scenario menu defaults to supervised and offers limited opt-outs', platform => {
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_choose_scenario 0 Linux', 'installer-test', installerLibrary,
+      '-c', 'source "$1"; dsh_enhanced_choose_scenario 0 "$2"', 'installer-test', installerLibrary, platform,
     ], { encoding: 'utf8', input: '\n' })
 
     expect(result.status, result.stderr).toBe(0)
@@ -8238,6 +8239,7 @@ printf '%s\\n' '{not-json'
     expect(result.stdout).toContain('dsh-rsi-setup --install-owner --profile web')
     expect(result.stdout).not.toContain('dsh-supervised-growth-setup')
   })
+
 
   test('npm installer with its sibling common rejects an unsupported exact host version', async () => {
     const dshHome = await temporaryDshHome()
@@ -9435,7 +9437,7 @@ export async function runLarkSetup(args) {
 
   test.each([
     ['Linux', 'supervised'],
-    ['Darwin', 'lark'],
+    ['Darwin', 'supervised'],
   ])('recognizes a home-layer Lark binding as the effective profile binding on %s', async (platform, scenario) => {
     const dshHome = await temporaryDshHome()
     await writeFile(join(dshHome, 'cordis.patch.yml'), `- id: dsh-enhanced-lark-channel

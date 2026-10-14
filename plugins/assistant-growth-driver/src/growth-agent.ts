@@ -474,13 +474,13 @@ function registerGrowthTools(
     })), agentCtx.tools.register(defineTool({
       name: 'plugin_source_read',
       description: creationAvailable
-        ? `Inspect committed existing source (default mode modify) or the fixed Host new-plugin template (mode create) for a listed gap. New plugin names must begin with ${creationNamespace}. In create mode the first read can request README.md, src/index.ts and tests/index.spec.ts together; it also returns the complete manifest and fixed base. Use paths=[] to explore unknown paths. Read every file before replacing it. Each mode has a separate pinned snapshot.`
+        ? `${sourceCfg.allowModification ? 'Inspect committed existing source (mode modify) or ' : 'Inspect only '}the fixed Host new-plugin template (mode create) for a listed gap. New plugin names must begin with ${creationNamespace}. In create mode the first read can request README.md, src/index.ts and tests/index.spec.ts together; it also returns the complete manifest and fixed base. Use paths=[] to explore unknown paths. Read every file before replacing it. Each mode has a separate pinned snapshot.`
         : 'Inspect committed source for a listed gap. Use paths=[] for a file manifest, then read selected text files. The Host pins this wake to one commit; existing files must be read before replacement.',
       parameters: {
         gap_id: { type: 'string', required: true },
         plugin_name: { type: 'string', required: true },
         paths: { type: 'array', required: true, items: { type: 'string' } },
-        ...(creationAvailable ? { mode: { type: 'string' as const, enum: ['modify', 'create'] as const } } : {}),
+        ...(creationAvailable ? { mode: { type: 'string' as const, enum: sourceCfg.allowModification ? ['modify', 'create'] as const : ['create'] as const } } : {}),
       },
       output: toolOutput,
       execute: async (args, exec: ToolRunContext) => {
@@ -490,6 +490,7 @@ function registerGrowthTools(
         assertTarget(args.gap_id, args.plugin_name)
         if (args.paths.length > 64 || args.paths.some(path => !validPath(path))) throw new Error('source read paths exceed bounds')
         const mode = creationAvailable && args.mode === 'create' ? 'create' : 'modify'
+        if (mode === 'modify' && !sourceCfg.allowModification) throw new Error('source modification is not authorized')
         if (mode === 'modify') assertModifyTarget(args.gap_id, args.plugin_name)
         const key = snapshotKey(mode, args.gap_id, args.plugin_name)
         if (invalidSnapshots.has(key)) throw new Error('source snapshot was invalidated; wait for a later wake')
@@ -541,7 +542,8 @@ function registerGrowthTools(
         snapshots.set(key, snapshot)
         return { context: JSON.stringify(mode === 'create' ? { ...result, namePrefix: creationNamespace } : result) }
       },
-    })), agentCtx.tools.register(defineTool({
+    })))
+    if (sourceCfg.allowModification) disposers.push(agentCtx.tools.register(defineTool({
       name: 'plugin_source_prepare',
       description: sourceCfg.preparationMode === 'durable'
         ? 'Queue a Host-owned pending modification for a listed open gap. Supply nonempty files and/or edits (at most 64 combined): use exact edits for long already-read existing files, and full files for added short files or replacements. Files and edits must use disjoint paths. The Host controls repository, build environment, queue authority and limits; approval and release are separate owner actions.'
@@ -912,14 +914,16 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
       objectiveStatus: input.feedback.canonical.objective?.status,
       executionStatus: input.feedback.canonical.execution?.status, revision: input.feedback.canonical.projection.version })
   const executionPrompt = (failedSourceReview ? FAILED_TASK_PROMPT : GROWTH_PROMPT)
-    + (sourcePlane === undefined ? '' : SOURCE_PROPOSALS_PROMPT)
-    + (targetsAvailable ? SOURCE_TARGETS_PROMPT : '')
+    + (sourcePlane === undefined || !config.pluginSourceProposals.allowModification ? '' : SOURCE_PROPOSALS_PROMPT)
+    + (targetsAvailable && config.pluginSourceProposals.allowModification ? SOURCE_TARGETS_PROMPT : '')
     + (creationAvailable ? SOURCE_CREATION_PROMPT : '')
     + (revisionAvailable ? SOURCE_REVISION_PROMPT : '') + feedbackText
   const allowedTools: ReadonlySet<string> = new Set([...GROWTH_TOOL_NAMES,
-    ...(sourcePlane === undefined ? [] : config.pluginSourceProposals.preparationMode === 'durable' ? DURABLE_SOURCE_TOOL_NAMES : SOURCE_TOOL_NAMES),
+    ...(sourcePlane === undefined ? [] : config.pluginSourceProposals.allowModification
+      ? config.pluginSourceProposals.preparationMode === 'durable' ? DURABLE_SOURCE_TOOL_NAMES : SOURCE_TOOL_NAMES
+      : ['plugin_source_gaps', 'plugin_source_read', ...(config.pluginSourceProposals.preparationMode === 'durable' ? ['plugin_source_job_status'] : [])]),
     ...(creationAvailable ? [CREATE_SOURCE_TOOL_NAME] : []),
-    ...(targetsAvailable ? [SOURCE_TARGETS_TOOL_NAME] : []),
+    ...(targetsAvailable && config.pluginSourceProposals.allowModification ? [SOURCE_TARGETS_TOOL_NAME] : []),
     ...(revisionAvailable ? REVISION_SOURCE_TOOL_NAMES : [])])
   const sourceCounters = { queued: 0, prepared: 0, rejected: 0 }
   const agents = ctx.get('agents')

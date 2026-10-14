@@ -1,4 +1,4 @@
-/* Fixed Linux x86-64 observer boundary. Built into the verifier image only. */
+/* Fixed Linux x86-64/aarch64 observer boundary. Built into the verifier image only. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -11,9 +11,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+
+#if defined(__x86_64__)
+#define DSH_AUDIT_ARCH AUDIT_ARCH_X86_64
+#elif defined(__aarch64__)
+#define DSH_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#else
+#error "unsupported verifier architecture"
+#endif
+#ifndef DSH_NODE_PATH
+#define DSH_NODE_PATH "/usr/local/bin/node"
+#endif
 
 #ifdef DSH_PARENT_PRELOAD
 __attribute__((constructor)) static void protect_observer(void) {
@@ -26,7 +38,7 @@ __attribute__((constructor)) static void protect_observer(void) {
 __attribute__((constructor)) static void close_exec_window(void) {
   struct sock_filter filter[] = {
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
-    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, DSH_AUDIT_ARCH, 1, 0),
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execve, 0, 1),
@@ -62,7 +74,7 @@ static int restrict_syscalls(int node_fd) {
   const uint32_t writing = O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND | (O_TMPFILE & ~O_DIRECTORY);
   struct sock_filter filter[] = {
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
-    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, DSH_AUDIT_ARCH, 1, 0),
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
     BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0x40000000U),
@@ -87,17 +99,62 @@ static int restrict_syscalls(int node_fd) {
     BLOCK(__NR_sched_setaffinity), BLOCK(__NR_sched_setscheduler),
     BLOCK(__NR_sched_setparam), BLOCK(__NR_sched_setattr), BLOCK(__NR_setpriority),
     BLOCK(__NR_ioprio_set), BLOCK(__NR_process_madvise),
-    BLOCK(__NR_fork), BLOCK(__NR_vfork), BLOCK_ENOSYS(__NR_clone3),
+    BLOCK_ENOSYS(__NR_clone3),
+#ifdef __NR_fork
+    BLOCK(__NR_fork),
+#endif
+#ifdef __NR_vfork
+    BLOCK(__NR_vfork),
+#endif
     BLOCK(__NR_execve),
-    BLOCK(__NR_openat2), BLOCK(__NR_creat),
+    BLOCK(__NR_openat2),
+#ifdef __NR_creat
+    BLOCK(__NR_creat),
+#endif
     BLOCK(__NR_truncate), BLOCK(__NR_ftruncate), BLOCK(__NR_fallocate),
-    BLOCK(__NR_chmod), BLOCK(__NR_fchmod), BLOCK(__NR_fchmodat),
-    BLOCK(__NR_chown), BLOCK(__NR_fchown), BLOCK(__NR_lchown), BLOCK(__NR_fchownat),
-    BLOCK(__NR_link), BLOCK(__NR_linkat), BLOCK(__NR_symlink), BLOCK(__NR_symlinkat),
-    BLOCK(__NR_unlink), BLOCK(__NR_unlinkat), BLOCK(__NR_rename), BLOCK(__NR_renameat),
-    BLOCK(__NR_renameat2), BLOCK(__NR_mkdir), BLOCK(__NR_mkdirat), BLOCK(__NR_rmdir),
-    BLOCK(__NR_mknod), BLOCK(__NR_mknodat), BLOCK(__NR_utime), BLOCK(__NR_utimes),
-    BLOCK(__NR_futimesat), BLOCK(__NR_utimensat), BLOCK(__NR_mount), BLOCK(__NR_umount2),
+    BLOCK(__NR_fchmod), BLOCK(__NR_fchmodat), BLOCK(__NR_fchown), BLOCK(__NR_fchownat),
+#ifdef __NR_chmod
+    BLOCK(__NR_chmod),
+#endif
+#ifdef __NR_chown
+    BLOCK(__NR_chown),
+#endif
+#ifdef __NR_lchown
+    BLOCK(__NR_lchown),
+#endif
+    BLOCK(__NR_linkat), BLOCK(__NR_symlinkat), BLOCK(__NR_unlinkat), BLOCK(__NR_renameat),
+#ifdef __NR_link
+    BLOCK(__NR_link),
+#endif
+#ifdef __NR_symlink
+    BLOCK(__NR_symlink),
+#endif
+#ifdef __NR_unlink
+    BLOCK(__NR_unlink),
+#endif
+#ifdef __NR_rename
+    BLOCK(__NR_rename),
+#endif
+    BLOCK(__NR_renameat2), BLOCK(__NR_mkdirat), BLOCK(__NR_mknodat), BLOCK(__NR_utimensat),
+#ifdef __NR_mkdir
+    BLOCK(__NR_mkdir),
+#endif
+#ifdef __NR_rmdir
+    BLOCK(__NR_rmdir),
+#endif
+#ifdef __NR_mknod
+    BLOCK(__NR_mknod),
+#endif
+#ifdef __NR_utime
+    BLOCK(__NR_utime),
+#endif
+#ifdef __NR_utimes
+    BLOCK(__NR_utimes),
+#endif
+#ifdef __NR_futimesat
+    BLOCK(__NR_futimesat),
+#endif
+    BLOCK(__NR_mount), BLOCK(__NR_umount2),
     BLOCK(__NR_pivot_root), BLOCK(__NR_setns), BLOCK(__NR_unshare),
     BLOCK(__NR_open_tree), BLOCK(__NR_move_mount), BLOCK(__NR_fsopen),
     BLOCK(__NR_fsconfig), BLOCK(__NR_fsmount), BLOCK(__NR_fspick),
@@ -121,12 +178,14 @@ static int restrict_syscalls(int node_fd) {
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, CLONE_THREAD, 1, 0),
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+#ifdef __NR_open
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_open, 0, 4),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[1])),
     BPF_STMT(BPF_ALU | BPF_AND | BPF_K, writing),
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0),
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+#endif
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_openat, 0, 4),
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[2])),
     BPF_STMT(BPF_ALU | BPF_AND | BPF_K, writing),
@@ -148,10 +207,26 @@ static int restrict_syscalls(int node_fd) {
   return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program);
 }
 
+#ifdef DSH_LAUNCHER_TEST
+int main(void) {
+  int node_fd = open(DSH_NODE_PATH, O_PATH | O_CLOEXEC);
+  if (node_fd < 0 || restrict_syscalls(node_fd) != 0) return 2;
+  errno = 0;
+  if (syscall(SYS_socket, AF_INET, SOCK_STREAM, 0) != -1 || errno != EPERM) return 3;
+  errno = 0;
+  if (openat(AT_FDCWD, "/tmp/dsh-verifier-probe", O_CREAT | O_WRONLY, 0600) != -1 || errno != EPERM) return 4;
+  errno = 0;
+  if (syscall(SYS_execve, "/bin/false", NULL, NULL) != -1 || errno != EPERM) return 5;
+  int fd = open("/etc/passwd", O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return 6;
+  close(fd);
+  return 0;
+}
+#else
 int main(int argc, char **argv) {
   (void)argv;
   if (argc != 1) return 125;
-  int node_fd = open("/usr/local/bin/node", O_PATH | O_CLOEXEC);
+  int node_fd = open(DSH_NODE_PATH, O_PATH | O_CLOEXEC);
   if (node_fd < 0) return 125;
   char *args[] = { "node", "--permission", "--disable-sigusr1",
     "--allow-fs-read=/opt/dsh-plugin-verifier/candidate.mjs",
@@ -167,4 +242,5 @@ int main(int argc, char **argv) {
   syscall(SYS_execveat, node_fd, "", args, env, AT_EMPTY_PATH);
   return 125;
 }
+#endif
 #endif

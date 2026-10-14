@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, open, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { homedir } from 'node:os'
 import { isDeepStrictEqual } from 'node:util'
 import type { Config as ControlPlaneConfig } from '@dsh-enhanced/plugin-control-plane'
 import { readRsiSourceWorkspace, type RsiSourceWorkspace } from './rsi-source.js'
@@ -12,8 +13,10 @@ const COMMIT = /^[a-f0-9]{40}$/u
 const IMAGE = /^sha256:[a-f0-9]{64}$/u
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const SECCOMP_SHA = 'b1e4b5b709578785bd2aff4a3a344301997571ad0e8ae5747aec176571ddc342'
-const BUILDER_SHA = '7b7eb0797e1ca543fb1ffa0463eb78b3ecad14f28fe4bfca25651640aac4669b'
-const DOCKERFILE_SHA = 'c936e136517c5bc85603e7187fe74691e32f954f57b5076946dc42fed33c65f5'
+const LEGACY_BUILDER_SHA = '7b7eb0797e1ca543fb1ffa0463eb78b3ecad14f28fe4bfca25651640aac4669b'
+const LEGACY_DOCKERFILE_SHA = 'c936e136517c5bc85603e7187fe74691e32f954f57b5076946dc42fed33c65f5'
+const BUILDER_SHA = '0f17e5976f7c7e689ca1cd965d7b24a8e2032c216a12c321af90c172e0e8b51b'
+const DOCKERFILE_SHA = 'b3b7d88cf3cf648db2082c49189ec0480bf6969be911448293cf202216be6906'
 const BASE_IMAGE = 'node:22.23.2-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9'
 const PACKAGE_MANAGER = 'pnpm@11.7.0'
 const MAX_OUTPUT = 65_536
@@ -38,6 +41,9 @@ interface Receipt extends RsiBuildEnvironment {
   contextFiles: string[]
   lockSha256: string
   receiptDigest: string
+  hostPlatform?: string
+  imagePlatform?: string
+  daemonId?: string
 }
 
 function fail(message: string): never { throw new Error(`rsi build: ${message}`) }
@@ -140,8 +146,42 @@ function isolatedEnvironment(home: string): NodeJS.ProcessEnv {
     DOCKER_BUILDKIT: '1' }
 }
 
+function hostPlatform(): 'linux/amd64' | 'darwin/amd64' | 'darwin/arm64' {
+  if (process.platform === 'linux' && process.arch === 'x64') return 'linux/amd64'
+  if (process.platform === 'darwin' && process.arch === 'x64') return 'darwin/amd64'
+  if (process.platform === 'darwin' && process.arch === 'arm64') return 'darwin/arm64'
+  throw new RsiBuildUnavailableError('Linux x64 or native macOS x64/arm64 is required')
+}
+
+async function localSocket(path?: string): Promise<string> {
+  const expected = join(homedir(), '.docker', 'run', 'docker.sock')
+  const socket = path ?? expected
+  if (!exactPath(socket) || socket !== expected) fail('Docker socket must be the owner local socket')
+  let canonical: string
+  try { canonical = await realpath(socket) }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new RsiBuildUnavailableError('local Docker socket is unavailable')
+    throw error
+  }
+  if (canonical !== socket) fail('Docker socket must be the owner local socket')
+  let info: Awaited<ReturnType<typeof lstat>>, parent: Awaited<ReturnType<typeof lstat>>
+  try { [info, parent] = await Promise.all([lstat(socket), lstat(dirname(socket))]) }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new RsiBuildUnavailableError('local Docker socket is unavailable')
+    throw error
+  }
+  if (!info.isSocket() || info.uid !== process.getuid?.() || !parent.isDirectory()
+    || parent.uid !== process.getuid?.() || parent.mode & 0o022) fail('Docker socket is not owner-safe')
+  return socket
+}
+
+function dockerArgs(args: string[], scratch: string, socket?: string): string[] {
+  return socket === undefined ? args : ['--config', join(scratch, 'docker-config'), '-H', `unix://${socket}`, ...args]
+}
+
 // Shared by the release-toolchain preparer; these helpers never change a profile.
-export const rsiBuildResources = { directory, readStable, writeExclusive, syncDirectory, command, isolatedEnvironment }
+export const rsiBuildResources = { directory, readStable, writeExclusive, syncDirectory, command, isolatedEnvironment,
+  hostPlatform, localSocket, dockerArgs }
 
 async function dockerExecutable(requested?: string): Promise<{ path: string; sha256: string }> {
   let path = requested
@@ -167,15 +207,21 @@ async function dockerExecutable(requested?: string): Promise<{ path: string; sha
   return { path: canonical, sha256: digest(await readStable(canonical, 100_000_000, false, true)) }
 }
 
-async function runtime(dockerPath: string, scratch: string, signal: AbortSignal): Promise<void> {
+async function runtime(dockerPath: string, scratch: string, signal: AbortSignal, platform: string, socket?: string): Promise<string | undefined> {
   let output: string
-  try { output = await command(dockerPath, ['version', '--format', '{{.Server.Version}}/{{.Server.Os}}/{{.Server.Arch}}'],
+  try { output = await command(dockerPath, dockerArgs(['version', '--format', '{{.Server.Version}}/{{.Server.Os}}/{{.Server.Arch}}'], scratch, socket),
     isolatedEnvironment(scratch), signal, 10_000, 4096) }
   catch {
     if (signal.aborted) signal.throwIfAborted()
     throw new RsiBuildUnavailableError('local Docker daemon is unavailable')
   }
-  if (output !== '29.4.1/linux/amd64') throw new RsiBuildUnavailableError('Docker Server 29.4.1/linux/amd64 is required')
+  const arch = platform.endsWith('/arm64') ? 'arm64' : 'amd64'
+  if (output !== `29.4.1/linux/${arch}`) throw new RsiBuildUnavailableError(`Docker Server 29.4.1/linux/${arch} is required`)
+  if (socket === undefined) return undefined
+  const daemonId = await command(dockerPath, dockerArgs(['info', '--format', '{{.ID}}'], scratch, socket),
+    isolatedEnvironment(scratch), signal, 10_000, 4096)
+  if (!/^[A-Za-z0-9][A-Za-z0-9:._-]{7,127}$/u.test(daemonId)) fail('Docker daemon identity is invalid')
+  return daemonId
 }
 
 async function sourceInputs(source: RsiSourceWorkspace, expectedRepository: string): Promise<{
@@ -210,8 +256,11 @@ async function sourceInputs(source: RsiSourceWorkspace, expectedRepository: stri
   for (const name of inputs) files.set(name, await readStable(join(source.repository, name), 4_194_304))
   const manifest = JSON.parse(files.get('package.json')!.toString('utf8')) as Record<string, unknown>
   if (manifest.name !== 'dsh-enhanced' || manifest.version !== source.version || manifest.packageManager !== PACKAGE_MANAGER) fail('source manifest differs from installed cohort')
-  if (digest(files.get('scripts/isolation/build-source-image.mjs')!) !== BUILDER_SHA
-    || digest(files.get('scripts/isolation/source-builder.Dockerfile')!) !== DOCKERFILE_SHA) fail('source builder differs from installed trusted builder')
+  const builderHash = digest(files.get('scripts/isolation/build-source-image.mjs')!)
+  const dockerfileHash = digest(files.get('scripts/isolation/source-builder.Dockerfile')!)
+  const current = builderHash === BUILDER_SHA && dockerfileHash === DOCKERFILE_SHA
+  const legacy = builderHash === LEGACY_BUILDER_SHA && dockerfileHash === LEGACY_DOCKERFILE_SHA
+  if (!current && !(hostPlatform() === 'linux/amd64' && legacy)) fail('source builder differs from installed trusted builder')
   if (digest(files.get('scripts/isolation/source-builder-seccomp.json')!) !== SECCOMP_SHA) fail('repository seccomp differs from approved runtime profile')
   const hashes = Object.fromEntries([...files].map(([name, bytes]) => [name, digest(bytes)]))
   return { files, hashes, contextFiles, lockSha256: digest(files.get('pnpm-lock.yaml')!) }
@@ -237,21 +286,26 @@ function parseBuildOutput(raw: string, expected: { contextFiles: string[]; lockS
   return value.image
 }
 
-function buildConfig(dockerPath: string, image: string, seccompPath: string): SourceBuild {
-  return { dockerPath, image, timeoutMs: 1_800_000, memoryMiB: 16_384, cpus: 8, pidsLimit: 1_024,
+function buildConfig(dockerPath: string, image: string, seccompPath: string, socket?: string, daemonId?: string): SourceBuild {
+  if (socket !== undefined && daemonId === undefined) fail('portable Docker daemon identity is absent')
+  const common = { dockerPath, image, timeoutMs: 1_800_000, memoryMiB: 16_384, cpus: 8, pidsLimit: 1_024,
     workspaceMiB: 4_096, temporaryMiB: 2_048, outputBytes: 65_536,
-    versioning: 'patch', profile: 'repository', repositorySandbox: { seccompPath } }
+    versioning: 'patch' as const }
+  return socket === undefined
+    ? { ...common, profile: 'repository', repositorySandbox: { seccompPath } }
+    : { ...common, temporaryMiB: 4_096, profile: 'portable-repository', repositorySandbox: { seccompPath }, socketPath: socket, daemonId: daemonId! }
 }
 
-async function imageExists(dockerPath: string, image: string, scratch: string, signal: AbortSignal): Promise<void> {
-  const actual = await command(dockerPath, ['image', 'inspect', '--format', '{{.Id}}', image],
+async function imageExists(dockerPath: string, image: string, scratch: string, signal: AbortSignal, platform: string, socket?: string): Promise<void> {
+  const arch = platform.endsWith('/arm64') ? 'arm64' : 'amd64'
+  const actual = await command(dockerPath, dockerArgs(['image', 'inspect', '--format', '{{.Id}}/{{.Os}}/{{.Architecture}}', image], scratch, socket),
     isolatedEnvironment(scratch), signal, 30_000, 4096)
-  if (actual !== image) fail('Docker image content ID differs from builder receipt')
+  if (actual !== `${image}/linux/${arch}`) fail('Docker image ID or platform differs from builder receipt')
 }
 
 async function replay(final: string, expected: { dshHome: string; profile: string; repository: string;
   sourceCommit: string; dockerPath: string; dockerSha256: string; inputHashes: Record<string, string>;
-  contextFiles: string[]; lockSha256: string }, scratch: string | undefined, signal: AbortSignal): Promise<RsiBuildEnvironment> {
+  contextFiles: string[]; lockSha256: string; hostPlatform: string; socket: string | undefined; daemonId: string | undefined }, scratch: string | undefined, signal: AbortSignal): Promise<RsiBuildEnvironment> {
   await directory(final)
   if (JSON.stringify((await readdir(final)).sort()) !== JSON.stringify(['bootstrap.json', 'seccomp.json'])) fail('build workspace incomplete or unexpected')
   const value = JSON.parse((await readStable(join(final, 'bootstrap.json'), 65_536, true)).toString('utf8')) as Receipt
@@ -260,13 +314,16 @@ async function replay(final: string, expected: { dshHome: string; profile: strin
     || value.dshHome !== expected.dshHome || value.profile !== expected.profile
     || value.repository !== expected.repository || value.sourceCommit !== expected.sourceCommit
     || value.dockerSha256 !== expected.dockerSha256 || value.sourceBuild?.dockerPath !== expected.dockerPath
+    || value.hostPlatform !== (expected.socket === undefined ? undefined : expected.hostPlatform)
+    || value.imagePlatform !== (expected.socket === undefined ? undefined : `linux/${expected.hostPlatform.endsWith('/arm64') ? 'arm64' : 'amd64'}`)
+    || value.daemonId !== expected.daemonId
     || !IMAGE.test(value.sourceBuild?.image ?? '')
     || JSON.stringify(value.inputHashes) !== JSON.stringify(expected.inputHashes)
     || JSON.stringify(value.contextFiles) !== JSON.stringify(expected.contextFiles)
     || value.lockSha256 !== expected.lockSha256
-    || JSON.stringify(value.sourceBuild) !== JSON.stringify(buildConfig(expected.dockerPath, value.sourceBuild.image, join(final, 'seccomp.json')))) fail('build receipt differs from frozen source or Docker client')
+    || JSON.stringify(value.sourceBuild) !== JSON.stringify(buildConfig(expected.dockerPath, value.sourceBuild.image, join(final, 'seccomp.json'), expected.socket, expected.daemonId))) fail('build receipt differs from frozen source or Docker client')
   if (digest(await readStable(join(final, 'seccomp.json'), 65_536, true)) !== SECCOMP_SHA) fail('private repository seccomp changed')
-  if (scratch !== undefined) await imageExists(expected.dockerPath, value.sourceBuild.image, scratch, signal)
+  if (scratch !== undefined) await imageExists(expected.dockerPath, value.sourceBuild.image, scratch, signal, expected.hostPlatform, expected.socket)
   signal.throwIfAborted()
   return { schemaVersion: 1, sourceCommit: value.sourceCommit, sourceBuild: value.sourceBuild }
 }
@@ -284,21 +341,26 @@ export async function readRsiBuildEnvironment(input: { dshHome: string; profile:
   const saved = JSON.parse((await readStable(join(final, 'bootstrap.json'), 65_536, true)).toString('utf8')) as Receipt
   if (typeof saved.sourceBuild?.dockerPath !== 'string') fail('recorded Docker path is absent')
   const docker = await dockerExecutable(saved.sourceBuild.dockerPath)
+  const platform = hostPlatform()
+  const socket = platform.startsWith('darwin/') ? await localSocket(saved.sourceBuild.socketPath) : undefined
   const signal = input.signal ?? new AbortController().signal
   return replay(final, { dshHome: input.dshHome, profile: input.profile, repository,
     sourceCommit: input.source.sourceCommit, dockerPath: docker.path, dockerSha256: docker.sha256,
-    inputHashes: source.hashes, contextFiles: source.contextFiles, lockSha256: source.lockSha256 }, undefined, signal)
+    inputHashes: source.hashes, contextFiles: source.contextFiles, lockSha256: source.lockSha256,
+    hostPlatform: platform, socket, daemonId: saved.daemonId }, undefined, signal)
 }
 
 /** Caller holds the DSH_HOME lifecycle lock; no profile or service is changed here. */
 export async function prepareRsiBuildEnvironment(input: { dshHome: string; profile: string; source: RsiSourceWorkspace;
-  dockerPath?: string | undefined; signal?: AbortSignal }): Promise<RsiBuildEnvironment> {
+  dockerPath?: string | undefined; socketPath?: string | undefined; signal?: AbortSignal }): Promise<RsiBuildEnvironment> {
   if (!exactPath(input.dshHome) || !PROFILE.test(input.profile)) fail('invalid DSH_HOME or profile')
-  if (process.platform !== 'linux' || process.arch !== 'x64') throw new RsiBuildUnavailableError('Linux x64 is required')
+  const platform = hostPlatform()
+  if (platform === 'linux/amd64' && input.socketPath !== undefined) fail('Linux source build does not accept a portable socket')
   await directory(input.dshHome, false)
   const repository = join(input.dshHome, 'rsi-sources', input.profile, 'checkout')
   const source = await sourceInputs(input.source, repository)
   const docker = await dockerExecutable(input.dockerPath)
+  const socket = platform.startsWith('darwin/') ? await localSocket(input.socketPath) : undefined
   const parent = join(input.dshHome, 'rsi-builds')
   try { await mkdir(parent, { mode: 0o700 }) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
   await directory(parent)
@@ -308,10 +370,10 @@ export async function prepareRsiBuildEnvironment(input: { dshHome: string; profi
   let claimed: { dev: number; ino: number } | undefined
   try {
     await mkdir(join(stage, 'docker-config'), { mode: 0o700 })
-    await runtime(docker.path, stage, signal)
+    const daemonId = await runtime(docker.path, stage, signal, platform, socket)
     const expected = { dshHome: input.dshHome, profile: input.profile, repository, sourceCommit: input.source.sourceCommit,
       dockerPath: docker.path, dockerSha256: docker.sha256, inputHashes: source.hashes,
-      contextFiles: source.contextFiles, lockSha256: source.lockSha256 }
+      contextFiles: source.contextFiles, lockSha256: source.lockSha256, hostPlatform: platform, socket, daemonId }
     const present = await lstat(final).then(() => true, error => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
       throw error
@@ -321,10 +383,12 @@ export async function prepareRsiBuildEnvironment(input: { dshHome: string; profi
     await mkdir(sourceSnapshot, { mode: 0o700 })
     await snapshot(sourceSnapshot, source.files)
     const builder = join(sourceSnapshot, 'scripts', 'isolation', 'build-source-image.mjs')
-    const raw = await command(process.execPath, [builder, '--docker-path', docker.path, '--timeout-ms', '1800000'],
+    const raw = await command(process.execPath, [builder, '--docker-path', docker.path, '--timeout-ms', '1800000',
+      ...(socket === undefined ? [] : ['--socket-path', socket, '--platform', platform.slice('darwin/'.length)])],
       isolatedEnvironment(stage), signal, 1_810_000)
     const image = parseBuildOutput(raw, source)
-    await imageExists(docker.path, image, stage, signal)
+    await imageExists(docker.path, image, stage, signal, platform, socket)
+    if (await runtime(docker.path, stage, signal, platform, socket) !== daemonId) fail('Docker daemon changed during source image build')
     const fresh = await sourceInputs(input.source, repository)
     if (JSON.stringify(fresh.hashes) !== JSON.stringify(source.hashes)) fail('source inputs changed during Docker build')
     await mkdir(final, { mode: 0o700 })
@@ -332,9 +396,10 @@ export async function prepareRsiBuildEnvironment(input: { dshHome: string; profi
     await writeExclusive(join(stage, 'seccomp.json'), source.files.get('scripts/isolation/source-builder-seccomp.json')!)
     await rename(join(stage, 'seccomp.json'), join(final, 'seccomp.json'))
     const result: RsiBuildEnvironment = { schemaVersion: 1, sourceCommit: input.source.sourceCommit,
-      sourceBuild: buildConfig(docker.path, image, join(final, 'seccomp.json')) }
+      sourceBuild: buildConfig(docker.path, image, join(final, 'seccomp.json'), socket, daemonId) }
     const content = { ...result, dshHome: input.dshHome, profile: input.profile, repository,
-      dockerSha256: docker.sha256, inputHashes: source.hashes, contextFiles: source.contextFiles, lockSha256: source.lockSha256 }
+      dockerSha256: docker.sha256, inputHashes: source.hashes, contextFiles: source.contextFiles, lockSha256: source.lockSha256,
+      ...(socket === undefined ? {} : { hostPlatform: platform, imagePlatform: `linux/${platform.endsWith('/arm64') ? 'arm64' : 'amd64'}`, daemonId }) }
     await writeExclusive(join(final, 'bootstrap.json'), JSON.stringify({ ...content, receiptDigest: digest(JSON.stringify(content)) }))
     await syncDirectory(final); await syncDirectory(parent)
     return result

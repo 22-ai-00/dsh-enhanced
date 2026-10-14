@@ -3,6 +3,9 @@
 # store to that context.
 ARG BASE_IMAGE=node:22.23.2-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9
 FROM ${BASE_IMAGE}
+ARG TARGETARCH
+RUN test "$TARGETARCH" = "$(node -p "process.arch === 'x64' ? 'amd64' : process.arch")" \
+ && test "$(uname -m)" = "$(node -p "process.arch === 'x64' ? 'x86_64' : 'aarch64'")"
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends bash bubblewrap ca-certificates coreutils curl git libatomic1 openssl perl python3 strace util-linux \

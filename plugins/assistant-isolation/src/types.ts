@@ -114,6 +114,7 @@ export interface IsolationRunInput {
   containerName: string
   image: string
   dockerPath: string
+  socketPath?: string
   workspacePath: string
   artifacts?: string[]
   command: string

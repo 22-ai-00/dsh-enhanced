@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -34,7 +35,148 @@ async function fixture(version = '0.1.48') {
   return { root, home, source, head, args: { dshHome: home, profile: 'owner', version, sourceRepository: source } }
 }
 
+async function legacyMacFixture() {
+  const f = await fixture('0.1.49')
+  const old = await prepareRsiSourceWorkspace(f.args)
+  const receiptPath = join(f.home, 'rsi-sources', 'owner', 'bootstrap.json')
+  const receipt = JSON.parse(await readFile(receiptPath, 'utf8')) as Record<string, any>
+  // The known official commit is part of the admission contract. A local
+  // fixture cannot reproduce that object, so model it using the receipt's
+  // digest envelope and a Git output adapter scoped to this test.
+  const knownCommit = '172bc31ddf0c00a6f0b3252354f2170a14dd7fc2'
+  const { receiptDigest: _digest, ...body } = receipt
+  body.origin = { kind: 'official-tag', locator: 'https://github.com/22-ai-00/dsh-enhanced.git', ref: 'refs/tags/v0.1.49' }
+  body.sourceCommit = knownCommit
+  body.baseline.initialCommit = knownCommit
+  await writeFile(receiptPath, JSON.stringify({ ...body, receiptDigest: createHash('sha256').update(JSON.stringify(body)).digest('hex') }))
+  return { ...f, old, receiptPath, knownCommit }
+}
+
+async function withLegacyMacGit<T>(f: Awaited<ReturnType<typeof legacyMacFixture>>, run: () => Promise<T>): Promise<T> {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+  const nativeSpawn = (await vi.importActual<typeof import('node:child_process')>('node:child_process')).spawn
+  const script = `
+    const {spawnSync}=require('node:child_process');
+    const [actual,known,command,...args]=process.argv.slice(1);
+    const mapped=args.map(value=>value.replaceAll(known,actual));
+    const result=spawnSync(command,mapped,{cwd:process.cwd(),env:process.env,encoding:'utf8',maxBuffer:1048576});
+    process.stdout.write((result.stdout||'').replaceAll(actual,known));
+    process.stderr.write(result.stderr||'');
+    process.exit(result.status===null?1:result.status);
+  `
+  Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' })
+  vi.mocked(spawn).mockImplementation((command, args, options) => nativeSpawn(process.execPath,
+    ['-e', script, f.head, f.knownCommit, String(command), ...(args as string[])], options))
+  try { return await run() }
+  finally {
+    vi.mocked(spawn).mockImplementation(nativeSpawn)
+    Object.defineProperty(process, 'platform', platform)
+  }
+}
+
+async function withPlatform<T>(value: NodeJS.Platform, run: () => Promise<T>): Promise<T> {
+  const previous = Object.getOwnPropertyDescriptor(process, 'platform')!
+  Object.defineProperty(process, 'platform', { ...previous, value })
+  try { return await run() }
+  finally { Object.defineProperty(process, 'platform', previous) }
+}
+
 describe('private RSI source workspace', () => {
+  test('archives only the verified unused official 0.1.49 Mac source before preparing a new local identity', async () => {
+    const f = await legacyMacFixture()
+    const oldReceipt = await readFile(f.receiptPath)
+    await mkdir(join(f.home, 'rsi-source-archives', 'owner'), { recursive: true, mode: 0o700 })
+    await writeFile(join(f.source, 'package.json'), JSON.stringify({ name: 'dsh-enhanced', version: '0.1.50' }))
+    git(f.source, 'add', 'package.json'); git(f.source, 'commit', '-m', 'next version')
+    const next = git(f.source, 'rev-parse', 'HEAD')
+    await withLegacyMacGit(f, async () => {
+      const request = { ...f.args, version: '0.1.50' }
+      const prepared = await prepareRsiSourceWorkspace(request)
+      expect(prepared.sourceCommit).toBe(next)
+      expect(prepared.origin).toEqual({ kind: 'local-head', locator: f.source, ref: 'HEAD' })
+      const archiveRoot = join(f.home, 'rsi-source-archives', 'owner')
+      const archives = await readdir(archiveRoot)
+      expect(archives).toHaveLength(1)
+      const archived = join(archiveRoot, archives[0]!)
+      expect(await readFile(join(archived, 'bootstrap.json'))).toEqual(oldReceipt)
+      expect(await readFile(join(archived, 'checkout', 'README.md'), 'utf8')).toBe('initial\n')
+      expect(git(join(archived, 'release.git'), 'rev-parse', 'refs/heads/repairs')).toBe(f.head)
+      expect(await prepareRsiSourceWorkspace(request)).toEqual(prepared)
+      expect(await readdir(archiveRoot)).toEqual(archives)
+    })
+  })
+
+  test.each(['advanced', 'unknown-ref', 'unknown-file', 'dirty', 'authority', 'build-stage',
+    'source-stage', 'observer'] as const)('%s blocks legacy Mac archiving', async obstruction => {
+      const f = await legacyMacFixture()
+      await withLegacyMacGit(f, async () => {
+        if (obstruction === 'advanced') {
+          await writeFile(join(f.old.repository, 'README.md'), 'changed\n')
+          git(f.old.repository, 'add', 'README.md'); git(f.old.repository, 'commit', '-m', 'repair')
+          git(f.old.repository, 'update-ref', 'refs/dsh-source/repairs', git(f.old.repository, 'rev-parse', 'HEAD'))
+        } else if (obstruction === 'unknown-ref') {
+          git(f.old.repository, 'update-ref', 'refs/dsh-source/candidate', f.head)
+        } else if (obstruction === 'unknown-file') {
+          await writeFile(join(f.home, 'rsi-sources', 'owner', 'candidate.json'), '{}')
+        } else if (obstruction === 'dirty') {
+          await writeFile(join(f.old.repository, 'README.md'), 'dirty\n')
+        } else if (obstruction === 'authority') {
+          await mkdir(join(f.home, 'rsi-authorities', 'owner'), { recursive: true })
+        } else if (obstruction === 'build-stage') {
+          await mkdir(join(f.home, 'rsi-builds', '.owner-stage-abandoned'), { recursive: true })
+        } else if (obstruction === 'source-stage') {
+          await mkdir(join(f.home, 'rsi-sources', '.owner-stage-abandoned'), { mode: 0o700 })
+        } else {
+          await mkdir(join(f.home, `.rsi-${createHash('sha256').update('owner').digest('hex').slice(0, 12)}`), { mode: 0o700 })
+        }
+        const original = await readFile(f.receiptPath)
+        await expect(prepareRsiSourceWorkspace({ ...f.args, version: '0.1.50' })).rejects.toThrow()
+        expect(await readFile(f.receiptPath)).toEqual(original)
+        await expect(lstat(join(f.home, 'rsi-source-archives'))).rejects.toMatchObject({ code: 'ENOENT' })
+      })
+  })
+
+  test('Linux does not archive, and a failed Mac replacement retains one archive for retry', async () => {
+    const f = await legacyMacFixture()
+    await withPlatform('linux', async () => {
+      await expect(prepareRsiSourceWorkspace({ ...f.args, version: '0.1.50' })).rejects.toThrow()
+    })
+    await expect(lstat(join(f.home, 'rsi-source-archives'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await withLegacyMacGit(f, async () => {
+      const request = { ...f.args, version: '0.1.50' }
+      await expect(prepareRsiSourceWorkspace(request)).rejects.toThrow('untouched legacy source is retained at')
+      const archiveRoot = join(f.home, 'rsi-source-archives', 'owner')
+      const archives = await readdir(archiveRoot)
+      expect(archives).toHaveLength(1)
+      expect(await readFile(join(archiveRoot, archives[0]!, 'bootstrap.json'))).toBeTruthy()
+      await expect(lstat(join(f.home, 'rsi-sources', 'owner'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await writeFile(join(f.source, 'package.json'), JSON.stringify({ name: 'dsh-enhanced', version: '0.1.50' }))
+      git(f.source, 'add', 'package.json'); git(f.source, 'commit', '-m', 'next version')
+      const prepared = await prepareRsiSourceWorkspace(request)
+      expect(prepared.version).toBe('0.1.50')
+      expect(await readdir(archiveRoot)).toEqual(archives)
+    })
+  })
+
+  test('Mac replay with an omitted repository preserves an existing local-head source', async () => {
+    const f = await fixture()
+    const prepared = await prepareRsiSourceWorkspace(f.args)
+    await withPlatform('darwin', async () => {
+      expect(await prepareRsiSourceWorkspace({ dshHome: f.home, profile: 'owner', version: f.args.version })).toEqual(prepared)
+    })
+    await expect(lstat(join(f.home, 'rsi-source-archives'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('an existing archive blocks another legacy migration without moving the source', async () => {
+    const f = await legacyMacFixture()
+    const archive = join(f.home, 'rsi-source-archives', 'owner', 'prior')
+    await mkdir(archive, { recursive: true, mode: 0o700 })
+    await withLegacyMacGit(f, async () => {
+      await expect(prepareRsiSourceWorkspace({ ...f.args, version: '0.1.50' })).rejects.toThrow('existing archive')
+      expect(await readFile(f.receiptPath)).toBeTruthy()
+      expect(await readdir(join(f.home, 'rsi-source-archives', 'owner'))).toEqual(['prior'])
+    })
+  })
   test('imports only committed HEAD and publishes a private checkout, bare branch and managed ref', async () => {
     const f = await fixture()
     await writeFile(join(f.source, 'README.md'), 'dirty source retained\n')

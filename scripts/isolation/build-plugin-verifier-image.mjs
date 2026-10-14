@@ -11,18 +11,24 @@ const root = resolve(fileURLToPath(new URL('../..', import.meta.url)))
 const dockerfile = join(root, 'scripts/isolation/plugin-verifier.Dockerfile')
 const source = join(root, 'plugins/assistant-verifier/src/plugin-behavior-runner.ts')
 const imagePattern = /^sha256:[a-f0-9]{64}$/u
-const options = { dockerPath: '/usr/bin/docker', sourceImage: '', tag: '', timeoutMs: 1_800_000 }
+const options = { dockerPath: '/usr/bin/docker', socketPath: undefined, platform: process.arch === 'arm64' ? 'arm64' : 'amd64', sourceImage: '', tag: '', timeoutMs: 1_800_000 }
 for (let index = 2; index < process.argv.length; index += 2) {
   const flag = process.argv[index], value = process.argv[index + 1]
   if (value === undefined) throw new Error('missing argument value')
   if (flag === '--source-image') options.sourceImage = value
   else if (flag === '--docker-path') options.dockerPath = value
+  else if (flag === '--socket-path') options.socketPath = value
+  else if (flag === '--platform') options.platform = value
   else if (flag === '--tag') options.tag = value
   else if (flag === '--timeout-ms') options.timeoutMs = Number(value)
   else throw new Error('unknown argument: ' + flag)
 }
 if (!imagePattern.test(options.sourceImage) || !Number.isSafeInteger(options.timeoutMs)
   || options.timeoutMs < 60_000 || options.timeoutMs > 1_800_000
+  || !['amd64', 'arm64'].includes(options.platform) || options.platform !== (process.arch === 'arm64' ? 'arm64' : 'amd64')
+  || (process.platform === 'darwin' && options.socketPath === undefined)
+  || (options.socketPath !== undefined && (typeof options.socketPath !== 'string' || !options.socketPath.startsWith('/')
+    || resolve(options.socketPath) !== options.socketPath || !options.socketPath.endsWith('/.docker/run/docker.sock')))
   || options.tag && !/^[a-z0-9][a-z0-9._/-]{0,127}(?::[A-Za-z0-9][A-Za-z0-9._-]{0,127})?$/u.test(options.tag)) {
   throw new Error('source image ID, tag or build timeout invalid')
 }
@@ -31,10 +37,18 @@ const metadata = await lstat(dockerPath)
 if (dockerPath !== resolve(options.dockerPath) || !metadata.isFile() || metadata.isSymbolicLink()
   || (metadata.mode & 0o111) === 0 || (metadata.mode & 0o022) !== 0
   || metadata.uid !== 0 && metadata.uid !== process.getuid?.()) throw new Error('unsafe Docker executable')
+if (options.socketPath !== undefined) {
+  if (await realpath(options.socketPath) !== options.socketPath) throw new Error('Docker socket is not canonical')
+  const socket = await lstat(options.socketPath), parent = await lstat(dirname(options.socketPath))
+  if (!socket.isSocket() || socket.uid !== process.getuid?.() || !parent.isDirectory()
+    || parent.uid !== process.getuid?.() || parent.mode & 0o022) throw new Error('Docker socket is not owner-safe')
+}
 const temporary = await mkdtemp(join(tmpdir(), 'dsh-plugin-verifier-image-'))
 const context = join(temporary, 'context')
 const dockerConfig = join(temporary, 'docker-config')
-const environment = { PATH: '/usr/bin:/bin', HOME: temporary, DOCKER_CONFIG: dockerConfig }
+const environment = { PATH: '/usr/bin:/bin', HOME: temporary, DOCKER_CONFIG: dockerConfig, DOCKER_BUILDKIT: '1' }
+const dockerArgs = args => options.socketPath === undefined ? args
+  : ['--config', dockerConfig, '-H', `unix://${options.socketPath}`, ...args]
 const inventory = []
 const temporarySourceTag = 'dsh-plugin-verifier-source:' + randomUUID().replaceAll('-', '')
 let taggedSource = false
@@ -48,7 +62,7 @@ async function copy(path) {
   inventory.push(name)
 }
 async function command(args, collect = false) {
-  const child = spawn(dockerPath, args, { shell: false, env: environment, stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(dockerPath, dockerArgs(args), { shell: false, env: environment, stdio: ['ignore', 'pipe', 'pipe'] })
   let output = '', error = '', bytes = 0, timedOut = false
   const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, options.timeoutMs)
   child.stdout.on('data', chunk => {
@@ -104,16 +118,18 @@ try {
   inventory.push('candidate.mjs')
   const lockSha256 = createHash('sha256').update(await readFile(join(root, 'pnpm-lock.yaml'))).digest('hex')
   const tag = options.tag || 'dsh-plugin-verifier:' + lockSha256.slice(0, 16) + '-' + randomUUID().slice(0, 8)
-  if (await command(['image', 'inspect', '--format', '{{.Id}}', options.sourceImage], true) !== options.sourceImage)
-    throw new Error('local source image content ID differs')
+  const platformSuffix = `/linux/${options.platform}`
+  if (await command(['image', 'inspect', '--format', '{{.Id}}/{{.Os}}/{{.Architecture}}', options.sourceImage], true) !== options.sourceImage + platformSuffix)
+    throw new Error('local source image content ID or platform differs')
   await command(['image', 'tag', options.sourceImage, temporarySourceTag])
   taggedSource = true
-  if (await command(['image', 'inspect', '--format', '{{.Id}}', temporarySourceTag], true) !== options.sourceImage)
+  if (await command(['image', 'inspect', '--format', '{{.Id}}/{{.Os}}/{{.Architecture}}', temporarySourceTag], true) !== options.sourceImage + platformSuffix)
     throw new Error('temporary source tag differs from approved ID')
-  await command(['build', '--pull=false', '--file', join(context, 'scripts/isolation/plugin-verifier.Dockerfile'),
+  await command(['build', '--pull=false', '--platform', `linux/${options.platform}`, '--file', join(context, 'scripts/isolation/plugin-verifier.Dockerfile'),
     '--build-arg', 'SOURCE_IMAGE=' + temporarySourceTag, '--tag', tag, context])
-  const id = await command(['image', 'inspect', '--format', '{{.Id}}', tag], true)
-  if (!imagePattern.test(id)) throw new Error('Docker did not return an immutable image ID')
+  const inspected = await command(['image', 'inspect', '--format', '{{.Id}}/{{.Os}}/{{.Architecture}}', tag], true)
+  const id = inspected.slice(0, -platformSuffix.length)
+  if (inspected !== id + platformSuffix || !imagePattern.test(id)) throw new Error('Docker did not return an immutable image on the required Linux platform')
   process.stdout.write(JSON.stringify({ image: id, tag, sourceImage: options.sourceImage, lockSha256,
     workerSha256: createHash('sha256').update(worker).digest('hex'),
     candidateSha256: createHash('sha256').update(candidate).digest('hex'),

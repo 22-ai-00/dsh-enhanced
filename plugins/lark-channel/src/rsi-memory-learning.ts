@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { isDeepStrictEqual } from 'node:util'
 import { growthObjectDigest, validateMemoryLearningOwner, type MemoryLearningOwner } from '@dsh-enhanced/assistant-growth-contract'
@@ -80,4 +81,34 @@ export function validateRsiMemoryLearningSetup(input: unknown, expectedOwner: Me
     || !Number.isSafeInteger(limits.scans) || limits.scans < 1 || limits.scans > 10_000
     || learning.budgetAmount > limits.extractions || learning.scanBudgetAmount > limits.scans) fail('invalid finite automation limits')
   return { learning, reviews, adoption, limits: { extractions: limits.extractions, scans: limits.scans } }
+}
+
+/** Compile the same finite memory terms for native and dual-Host deployments. */
+export function createRsiMemoryLearningSetup(input: {
+  installationId: string; stateRoot: string; owner: MemoryLearningOwner; now: number; expiresAt: number
+}): RsiMemoryLearningSetup {
+  const { installationId: installation, stateRoot: state, owner, now, expiresAt } = input
+  const day = 86_400_000
+  const { validateLearningConfig, validateMemoryReviewConfig, validateMemoryLearningAdoptionGrant } = getRsiMemoryLearningValidators()
+  const memoryReview = validateMemoryReviewConfig({ authorityId: `memory-review-${installation}`,
+    owner: owner, expiresAt: expiresAt, maxReviews: 1000,
+    policy: 'Independently verify exact owner statements for facts and trusted owner objectives with canonical outcomes for experiences. Reject unsupported claims, withdrawn sources, and ambiguous mutations.',
+    maxInputBytes: 65_536, maxOutputTokens: 2048, timeoutMs: 120_000 })
+  const memoryAdoption = validateMemoryLearningAdoptionGrant({ authorityId: `memory-adopt-${installation}`,
+    owner: owner, reviewAuthorityId: memoryReview.authorityId,
+    reviewAuthorityDigest: growthObjectDigest(memoryReview), expiresAt: expiresAt,
+    maxMutations: 1000, maxTotalContentBytes: 4_096_000, maxRecordTtlMs: 30 * day,
+    kinds: ['fact', 'experience'], operations: ['add', 'replace', 'remove'] })
+  return validateRsiMemoryLearningSetup({
+    learning: validateLearningConfig({ databasePath: join(state, 'memory-learning.sqlite'),
+      authorityId: `memory-extract-${installation}`, owner: owner, expiresAt: expiresAt,
+      maxExtractions: 1000, maxPending: 100, lookbackMs: 30 * day,
+      policy: 'Extract only explicit owner facts or experience grounded in a trusted owner objective and canonical outcome. Do not infer success from a reply. Prefer noop when evidence is insufficient.',
+      maxInputBytes: 65_536, maxOutputTokens: 2048, timeoutMs: 120_000,
+      budgetId: `rsi-memory-learning-${installation}`, budgetAmount: 1,
+      scanBudgetId: `rsi-memory-scan-${installation}`, scanBudgetAmount: 1,
+      reviewAuthorityId: memoryReview.authorityId, reviewAuthorityDigest: growthObjectDigest(memoryReview),
+      adoptionAuthorityId: memoryAdoption.authorityId, adoptionGrantDigest: growthObjectDigest(memoryAdoption) }),
+    reviews: memoryReview, adoption: memoryAdoption, limits: { extractions: 7, scans: 1440 },
+  }, owner, now)
 }

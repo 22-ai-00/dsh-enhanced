@@ -62,11 +62,12 @@ export class UsageLearningRuntime {
     }
     this.store = new UsageStore(config.usageLearning.databasePath)
     this.lane = acceptanceDigest(config.scope)
-    // The absent historical revision flag was effectively false. Preserve that
-    // config digest for old runs; opting in creates a new, distinct binding.
-    const { allowRevision, ...legacySourceConfig } = config.pluginSourceProposals
-    this.configDigest = acceptanceDigest(allowRevision ? config
-      : { ...config, pluginSourceProposals: legacySourceConfig })
+    // Historical defaults were revision=false and modification=true. Preserve
+    // both omissions for old runs; an explicitly restricted lane stays distinct.
+    const { allowRevision, allowModification, ...legacySourceConfig } = config.pluginSourceProposals
+    this.configDigest = acceptanceDigest({ ...config, pluginSourceProposals: { ...legacySourceConfig,
+      ...(allowRevision ? { allowRevision: true } : {}),
+      ...(allowModification === false ? { allowModification: false } : {}) } })
     this.scanId = `usage-scan-${this.lane}`
   }
   health = () => ({ enabled: true, connected: this.active, lastScanAt: this.lastScanAt,

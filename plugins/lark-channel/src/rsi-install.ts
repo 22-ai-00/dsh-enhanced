@@ -139,7 +139,7 @@ async function observerReady(observer: RuntimeObserverConfig, state: Record<stri
       || target.services.some(name => !entry.services.some(service => service.name === name && service.instance !== null))) fail('installed Loader entries are not ready')
   }
 }
-export function assertRsiMemoryScanActivation(manifest: RsiSetupManifest,
+export function assertRsiMemoryScanActivation(manifest: Pick<RsiSetupManifest, 'memoryLearning'>,
   records: ReturnType<typeof listActiveAutomationsLocally>): void {
   const learning = manifest.memoryLearning?.learning
   if (!learning) return

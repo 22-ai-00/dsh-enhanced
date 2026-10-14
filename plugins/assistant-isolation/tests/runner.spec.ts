@@ -8,7 +8,8 @@ import { runIsolatedProcess } from '../src/runner.ts'
 // These tests intentionally require an already-present immutable image. They
 // never pull an image and are skipped in ordinary unit-test and CI runs.
 const image = process.env.DSH_ISOLATION_TEST_IMAGE ?? ''
-const dockerPath = process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker'
+const dockerPath = process.env.DSH_ISOLATION_TEST_DOCKER ?? (process.platform === 'darwin' ? '/usr/local/bin/docker' : '/usr/bin/docker')
+const socketPath = process.env.DSH_ISOLATION_TEST_SOCKET
 const dockerTests = /^sha256:[0-9a-f]{64}$/.test(image) ? describe.sequential : describe.skip
 const workspaces: string[] = []
 
@@ -43,6 +44,7 @@ async function run(command: string, options: { deadlineMs?: number, signal?: Abo
     containerName: `dsh-isolation-${randomUUID()}`,
     image,
     dockerPath,
+    ...(socketPath === undefined ? {} : { socketPath }),
     workspacePath: path,
     artifacts: options.artifacts ?? [],
     command,
@@ -53,7 +55,7 @@ async function run(command: string, options: { deadlineMs?: number, signal?: Abo
   })
 }
 
-dockerTests('Linux Docker isolation runner (opt in)', () => {
+dockerTests('local Docker isolation runner (opt in)', () => {
   test('runs only in the workspace with no Docker socket or external network', async () => {
     const result = await run('set -e; test -f /workspace/input && test ! -S /var/run/docker.sock && test ! -e /sys/class/net/eth0; printf ok; printf err >&2')
     expect(result).toMatchObject({ status: 'succeeded', quiescent: true, exitCode: 0 })
@@ -66,7 +68,11 @@ dockerTests('Linux Docker isolation runner (opt in)', () => {
     // Cleanup and the attached CLI deadline race. Normal close permits a stopped
     // result; an interrupted mutation must preserve uncertainty and occupancy.
     if (result.quiescent) expect(result).toMatchObject({ status: 'timed-out', quiescent: true })
-    else expect(result).toMatchObject({ status: 'unknown', quiescent: false, reason: 'docker-mutation-unconfirmed', creationWitness: { requestsSettled: false } })
+    else {
+      expect(result).toMatchObject({ status: 'unknown', quiescent: false, reason: 'docker-mutation-unconfirmed' })
+      if (process.platform === 'linux') expect(result.creationWitness).toMatchObject({ requestsSettled: false })
+      else expect(result.creationWitness).toBeUndefined()
+    }
   }, 30_000)
 
   test('cancels a setsid descendant with its container', async () => {
@@ -79,7 +85,9 @@ dockerTests('Linux Docker isolation runner (opt in)', () => {
 
   test('stops and fails when combined attached output reaches its bound', async () => {
     const result = await run('i=0; while [ "$i" -lt 200 ]; do printf 0123456789; i=$((i + 1)); done', { outputBytes: 128 })
-    expect(result).toMatchObject({ status: 'unknown', quiescent: false, reason: 'docker-mutation-unconfirmed', creationWitness: { requestsSettled: false } })
+    expect(result).toMatchObject({ status: 'unknown', quiescent: false, reason: 'docker-mutation-unconfirmed' })
+    if (process.platform === 'linux') expect(result.creationWitness).toMatchObject({ requestsSettled: false })
+    else expect(result.creationWitness).toBeUndefined()
     expect(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(128)
   }, 30_000)
   test('does not expand malformed UTF-8 beyond the output byte limit', async () => {

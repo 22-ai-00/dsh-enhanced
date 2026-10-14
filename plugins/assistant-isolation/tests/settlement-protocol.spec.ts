@@ -1,6 +1,7 @@
 import { fork } from 'node:child_process'
 import { once } from 'node:events'
-import { chmod, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -54,6 +55,10 @@ async function run(mode: string): Promise<Settlement> {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'settlement-protocol-'))); roots.push(root)
   const executable = join(root, 'docker'); const workspace = join(root, 'workspace')
   await writeFile(executable, fakeDocker(mode), { mode: 0o700 }); await chmod(executable, 0o700); await writeFile(workspace, '')
+  const socketPath = join(root, 'docker.sock')
+  const socketServer = createServer()
+  await new Promise<void>((resolve, reject) => { socketServer.once('error', reject); socketServer.listen(socketPath, resolve) })
+  const socketStat = await stat(socketPath)
   const supervisor = fork(new URL('../runtime/supervisor.mjs', import.meta.url), [], { serialization: 'json', stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
   const exited = once(supervisor, 'exit')
   return await new Promise<Settlement>((resolve, reject) => {
@@ -68,14 +73,18 @@ async function run(mode: string): Promise<Settlement> {
     })
     supervisor.send({ type: 'configure', config: {
       dockerPath: executable, containerName: 'dsh-isolation-00000000-0000-0000-0000-000000000001', image: `sha256:${'a'.repeat(64)}`,
+      socket: { path: socketPath, dev: socketStat.dev, ino: socketStat.ino },
       workspacePath: workspace, artifacts: mode.startsWith('exec-') ? ['out'] : [], command: 'true', deadline: Date.now() + 15_000,
       limits: { maxDurationMs: 300_000, maxInputBytes: 1024, maxOutputBytes: 1024, maxArtifactBytes: 1024, maxFiles: 1, memoryMiB: 64, workspaceMiB: 4, workspaceInodes: 64, pidsLimit: 16, cpus: 1 },
     } })
-  }).finally(async () => { if (supervisor.connected) supervisor.disconnect(); if (!supervisor.killed) supervisor.kill('SIGKILL'); await exited })
+  }).finally(async () => {
+    if (supervisor.connected) supervisor.disconnect(); if (!supervisor.killed) supervisor.kill('SIGKILL'); await exited
+    await new Promise<void>(resolve => socketServer.close(() => resolve()))
+  })
 }
 
-// The real supervisor accepts configuration only on a non-root Linux host.
-const supportedHost = process.platform === 'linux' && typeof process.getuid === 'function' && typeof process.getgid === 'function' && process.getuid() !== 0
+// The real supervisor accepts configuration only on a non-root Unix host.
+const supportedHost = ['linux', 'darwin'].includes(process.platform) && typeof process.getuid === 'function' && typeof process.getgid === 'function' && process.getuid() !== 0
 describe.runIf(supportedHost)('supervisor settlement protocol', () => {
   it.each(['nonzero-volume', 'nonzero-create', 'nonzero-start', 'nonzero-cp', 'signal', 'spawnerror', 'overflow', 'exec-signal', 'exec-overflow'])(
     'marks mutation %s as not settled after every CLI closes', async (mode) => {

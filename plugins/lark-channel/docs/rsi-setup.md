@@ -1,10 +1,29 @@
-# 日常使用自迭代的双 Host 配置
+# 日常使用自迭代配置
 
 `dsh-rsi-setup` 将已配置的 Lark owner 目标 profile 和独立采用协调器接入原生 Automations。目标 Host 从普通任务学习持久事实与经验，并从真实任务反馈形成源码修复，协调器在目标重启期间继续有限交接；目标恢复后重验当前 owner 和反馈，再完成采用。后续任务进入观察与回滚流程。
 
 Linux `supervised` 新安装在最终模型、TraeX、Lark 配置和 doctor 完成后自动运行 `dsh-rsi-setup --install-owner`。它使用当前 active owner，准备独立协调器、有限授权与发布/Host 配置，成对应用并启动两个 systemd user Host。需要可用的 systemd user session、完整离线构建资源和同批已安装插件；缺少构建前置条件会返回 `not-ready` 和退出码 3，安装流程不打印完成。完整生产部署仍需实际使用验收。源码发布轨使用授权的本地 registry，仓库公共 npm 发版仍走仓库发布流程。
 
 开发版 Linux 默认安装（包括 checkout 内 shell 的 auto/`--yes`）选择此完整场景；显式轻量场景、shell 的 `--mode standard`、`--lark skip` 或 `--no-service` 不隐式开启后台学习。必要配置优先从当前可信 owner 和已配置模型自动取得，缺少身份时使用安装向导的首次私聊配对，不把任意首条消息当主人。路径、独立授权身份及有限预算自动生成；没有全部前提仍报告未就绪。裸插件安装保持 fail-closed，旧安装不自动续期、补签或修改 paused 任务。
+
+## 原生 macOS 学习
+
+macOS x64 / Apple Silicon 的 `supervised` 使用一个原生 Node Host，由当前登录用户的 launchd 管理。普通任务与认证反馈驱动持久记忆学习，以及 owner 命名空间内的新工具创建、独立行为验证和 Cordis 动态采用。候选构建和执行使用本机 Docker Desktop 的 Linux 容器；Host、聊天、模型与学习调度仍运行在 macOS。此路径没有既有插件源码替换、发布和双 Host 交接授权；已有 Linux 源码修复轨保持原合同。
+
+使用已安装的独立 npm DSH CLI，并确保它是 `PATH` 中选中的 `dsh`。先确认 `/usr/bin/git --version` 可运行（Apple Command Line Tools），再启动 Docker Desktop；当前构建合同要求 Docker Server `29.4.1` 和与本机匹配的 Linux amd64/arm64 daemon。使用当前用户的 [`~/.docker/run/docker.sock`](https://docs.docker.com/desktop/setup/install/mac-permission-requirements/)，不使用系统级 socket 软链接。安装器解析本机 Docker 客户端，准备与本机架构匹配的不可变构建/验证镜像；不连接远端 `DOCKER_HOST`，不读取 Docker 登录凭据。构建与执行绑定本地 socket，资源消耗、隔离参数、unknown 不重放与独立验证边界仍有效。Docker 镜像首次准备需要网络和足够磁盘，之后候选检查离线运行。
+
+本地安装器的默认 `auto` 场景也会选择 supervised；已安装相同源码版本及所需包后，可重试：
+
+```sh
+"$DSH_HOME/profiles/web/node_modules/.bin/dsh-rsi-setup" \
+  --install-owner --profile web --dsh-home "$DSH_HOME"
+```
+
+安装计划、有限授权、信任配置与恢复日志保存在 `rsi-authorities/<profile>/config/native-*.json`，重复执行复用原期限、密钥与额度。配置当前用户服务前先核对 Home/owner/Automation 库存；已存在 active 或 paused 任务且需要启用调度时，仍要求 `--ack-existing-automations`。安装后用 HMAC Unix socket 核对 launchd PID、真实 Loader 配置、学习服务及原生 memory-scan 登记，稳定观察通过才报告 ready。失败恢复本次尝试前的配置和服务；冲突时保留日志供核对，不清理聊天、学习历史或候选记录。
+
+从此前报出 `Linux x64 is required` 的官方 `0.1.49` 安装升级时，macOS 会识别其未使用的源码准备：仅当旧 receipt、干净工作树、初始提交与全部 Git 引用均匹配，且没有授权、构建或运行资源时，才把整个旧目录移入 `rsi-source-archives/<profile>/<UUID>`，再准备请求的新版本或本地来源。已有修改、维护提交或使用迹象会停止迁移，保留原目录；归档后的准备失败会报告归档路径，不删除旧历史。新目录建立后若进程崩溃，仍须人工核对不完整目录与归档，不会自动覆盖。
+
+`ready` 证明部署就绪，长期普通任务收益仍按 [RSI 验收合同](../../../docs/rsi-acceptance.md) 验证。Linux 上的模拟平台测试不能替代真实 Mac/Docker Desktop 验收。
 
 ## 1. 准备源码、构建环境与两个 profile
 
@@ -50,7 +69,7 @@ Linux 上的新安装还会自动准备授权工具与本地发布资源，无�
 
 输出中的 `sourceBuild` 可用于 Control Plane manifest。安装器还自动从同一不可变镜像导出原生 Node、pnpm、离线 store 和供应链策略缓存，输出 `releaseBuild` 可直接用于本地发布 adapter 的 `build` 配置；无需手填工具链路径和摘要。资源保存在 `$DSH_HOME/rsi-release-builds/<profile>`，回执固定所有文件内容与模式。导出只创建未启动的容器，复制固定路径后删除容器，不执行其中的源码。发布仍使用本机 `/usr/bin/bwrap` 和 `/usr/bin/tar`；`--optional-build` 在缺少这些前置条件时报告 `releaseBuildUnavailable`，保留已准备的源码验证镜像。实际复制、工具链版本校验或已有回执漂移失败仍会停止安装。配置使用不可变镜像 ID，并将私有回执与 seccomp 保存到 `$DSH_HOME/rsi-builds/<profile>`。重新执行会核对来源、构建输入与本地镜像；不会静默换镜像或重新构建丢失的已登记镜像。Docker 构建脚本、Dockerfile 与 seccomp 必须匹配安装包内登记的摘要，只把 lock、workspace 配置及包清单放入构建上下文；不复制源码、主机包缓存或凭据。首次镜像准备需要网络，随后候选构建离线运行。
 
-自动配置沿用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID、4 GiB 工作区和 2 GiB 临时目录上限；宿主需提供相应资源。嵌套 sandbox 的系统路径与 seccomp 边界见[构建镜像指南](../../../scripts/isolation/README.md#nested-sandbox-profile)。准备资源只完成安装前置步骤；`--install-owner` 会核对已安装 Host、owner 和最终配置后再应用。
+自动配置使用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID 和 4 GiB 工作区上限；macOS 原生 portable 构建使用 4 GiB 临时目录，既有 Linux repository 构建保持 2 GiB。宿主需提供相应资源。嵌套 sandbox 的系统路径与 seccomp 边界见[构建镜像指南](../../../scripts/isolation/README.md#nested-sandbox-profile)。准备资源只完成安装前置步骤；`--install-owner` 会核对已安装 Host、owner 和最终配置后再应用。
 
 目标先完成 [Lark 配对](setup.md)与 [supervised 安装](../../../scripts/install/README.md)，已有唯一 active owner DM。无需先激活固定 Recovery runbook；缺失的 owner route 在成对配置事务内生成，既有唯一精确路由（包括 `supervised-growth-owner`）沿用原 ID 和 minimum generation。路由冲突或重复会拒绝，不覆盖其他授权。新安装自动补齐目标依赖；旧安装若缺依赖，为目标补装同一构建的 Growth Driver、Goals、Skills、Verifier、Memory Learning 与 Control Plane。Memory 由 Personal Assistant 内嵌提供，不再添加独立 Memory bundle。开发版应使用本地构建的包；仅有相同版本号不能证明含有这些新增 API。
 
@@ -116,11 +135,13 @@ manifest 是 owner 私有的 JSON（`chmod 600`），路径须 canonical，不�
 
 ## 自动安装与就绪判断
 
-正常新装无需手填 manifest。`supervised` 安装完成模型、TraeX、Lark 与 doctor 后，调用当前 profile 内的 `dsh-rsi-setup --install-owner --profile <name> --dsh-home <absolute>`；本地源码安装再传 `--source-repository`。仅 Linux systemd user services 支持此入口。构建前置条件缺失，或旧的本地目录链接使必需包实体位于 profile 外时，返回 `{"mode":"not-ready",...}` 和退出码 3；旧链接在停服、创建协调器和签发授权前被拒绝。其他预检或部署失败也使安装命令非零退出，不显示“安装流程完成”。前序已安装的普通 Agent 与资源保留供修复后重试。
+正常新装无需手填 manifest。`supervised` 安装完成模型、TraeX、Lark 与 doctor 后，调用当前 profile 内的 `dsh-rsi-setup --install-owner --profile <name> --dsh-home <absolute>`；本地源码安装再传 `--source-repository`。此入口支持 Linux systemd user service 和 macOS 原生 launchd Host。构建前置条件缺失，或旧的本地目录链接使必需包实体位于 profile 外时，返回 `{"mode":"not-ready",...}` 和退出码 3；旧链接在停服、创建协调器和签发授权前被拒绝。其他预检或部署失败也使安装命令非零退出，不显示“安装流程完成”。前序已安装的普通 Agent 与资源保留供修复后重试。
 
 本地 supervised 新安装先运行 `--install-local-cohort`：在私有临时 checkout 中按冻结 lockfile 构建，将选定插件、协调器及其内部运行依赖打包到 `$DSH_HOME/rsi-local-cohorts/<profile>/`。bootstrap 构建复用本机 pnpm 缓存；这不是候选代码的隔离构建。冻结源码的 `allowBuilds` 布尔清单随 receipt 保存并在安装前合并，保留已有配置；同一依赖存在相反决定时停止，不自动扩大安装脚本权限。安装通过原生 DSH `plugin list/add` 完成，本地 supervised profile 使用 pnpm `nodeLinker: isolated`，防止 hoisted 布局把同版本 registry peer 混入本地运行依赖。依赖覆盖限定精确父包：运行依赖固定到本批制品；内部 peer 仅在其 provider 已属于当前 profile 的运行依赖闭包时固定到同一制品，不通过 peer 扩大安装集合。目标和协调器分别计算闭包，缺席的可选 peer 不自动安装。仅选定根包成为直接 bundle；每条内部运行依赖、已提供的 peer 和实际安装文件均须匹配制品，同名内部包必须解析到同一真实目录，防止同版本 npm/file 副本产生不同模块状态。重试复用 receipt 并核对原始提交、包选择与摘要，不自动改为新的 HEAD。构建发生在停服前；若后续包安装或文件核验失败，保留固定制品与覆盖配置，Host 保持停机，修复后以相同输入重试。若 pnpm 普通安装保留了缺失、已知文件内容不符或模块目录分裂的包，安装器会重验冻结制品和配置，再强制重装一次并核验结果。协调器的完整包名/版本不会掩盖文件缺失。额外文件、配置冲突及未知状态不会触发此自动修复；重验仍失败时保持停机，不自动删除用户的 profile。
 
 既有冻结安装可重跑原 `--install-local-cohort` 命令修复同批 peer 解析；必须保持原 profile、源码路径和 bundle 选择。预检拒绝未知内部 override、改变的固定路径或制品；随后持生命周期锁停服，重新安装原 tarball 并核验，成功后恢复原服务。此修复不更新源码提交、冻结收据或业务状态；不是升级到当前开发 HEAD。
+
+macOS 本地 cohort 安装沿用冻结制品与安装文件校验，持同一个 Home 生命周期锁，核对当前 LaunchAgent 的加载身份与 plist 后再停服；仅恢复安装前已注册的同一服务。安装或校验失败且尚未重启时保持停服；若启动可能已提交而补偿无法证明停机，明确报告 unknown，须核对实际服务后重试。本入口只替换所选 profile 的插件包，不授予源码替换或发布能力。
 
 开发版提供本地更新候选的准备入口：
 

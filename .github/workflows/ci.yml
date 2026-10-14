@@ -227,6 +227,7 @@ jobs:
     timeout-minutes: 35
     env:
       PNPM_CONFIG_WORKSPACE_CONCURRENCY: '2'
+      DSH_NATIVE_LAUNCHD_TEST: '1'
 
     steps:
       - name: Check out repository

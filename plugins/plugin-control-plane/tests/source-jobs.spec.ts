@@ -28,7 +28,7 @@ const evidence = () => ({ schemaVersion: 1 as const, kind: 'dsh-source-prepared-
 
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean; releases?: boolean; execution?: boolean; adoption?: boolean; creation?: boolean } = {}) {
+async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean; releases?: boolean; execution?: boolean; adoption?: boolean; creation?: boolean; allowedModes?: readonly ('create' | 'modify' | 'revise-created')[] } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-source-jobs-runtime-'))); roots.push(root)
   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true })
   await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export const committed = true\n')
@@ -92,6 +92,7 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
     return options.typed === true ? withGapSourceFence!(job.intent.gapId, job.intent.owner, create) : create()
   })
   const config = { authorityId: 'source-authority', expiresAt: Date.now() + 60_000, maxSubmissions: 2, repository: sourceRepository,
+    ...(options.allowedModes ? { allowedModes: options.allowedModes } : {}),
     ...(options.creation ? { creation: { id: 'source-runtime-create', expiresAt: Date.now() + 30_000, maxCreates: 1, namePrefix: 'agent-' } } : {}),
     ownerRouteId: OWNER.ownerRouteId, principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId: 'source-runs', budgetAmount: 1 }
   const delivery = { validateOwnerRoute: vi.fn(receipt) }
@@ -129,6 +130,26 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
 }
 
 describe('durable source-job runtime', () => {
+  it('rejects modification at the Host enqueue boundary when only creation is granted', async () => {
+    const f = await fixture({ creation: true, allowedModes: ['create'] })
+    try {
+      expect(() => f.enqueue()).toThrow('mode is not authorized')
+      expect(f.store.listSourceJobs(100)).toEqual([])
+    } finally { await f.runtime.close(); f.store.close() }
+  })
+
+  it('settles a queued modification before recovery when the new Host grant is create-only', async () => {
+    const f = await fixture()
+    const queued = await f.enqueue()
+    await f.runtime.close()
+    Object.assign(f.config, { allowedModes: ['create'] })
+    const restarted = f.createRuntime()
+    try {
+      restarted.start()
+      expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'failed', failureCode: 'source-job-mode-revoked' })
+      expect(f.prepare).not.toHaveBeenCalled()
+    } finally { await restarted.close(); f.store.close() }
+  })
   it('freezes the original task owner for a creation enqueued and dispatched in a later session', async () => {
     const f = await fixture({ typed: true, creation: true })
     try {

@@ -2,11 +2,15 @@
 # fixed worker. The local source image ID is an explicit immutable build arg.
 ARG SOURCE_IMAGE=scratch
 FROM ${SOURCE_IMAGE} AS launcher-build
+ARG TARGETARCH
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends gcc libc6-dev
 COPY scripts/isolation/plugin-observer-launcher.c /tmp/plugin-observer-launcher.c
-RUN cc -std=c11 -O2 -Wall -Wextra -Werror /tmp/plugin-observer-launcher.c -o /tmp/candidate-launcher \
+RUN test "$TARGETARCH" = "$(node -p "process.arch === 'x64' ? 'amd64' : process.arch")" \
+ && test "$(uname -m)" = "$(node -p "process.arch === 'x64' ? 'x86_64' : 'aarch64'")" \
+ && cc -std=c11 -O2 -Wall -Wextra -Werror /tmp/plugin-observer-launcher.c -o /tmp/candidate-launcher \
+ && cc -std=c11 -O2 -Wall -Wextra -Werror -DDSH_LAUNCHER_TEST /tmp/plugin-observer-launcher.c -o /tmp/launcher-test \
  && cc -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared -DDSH_PARENT_PRELOAD /tmp/plugin-observer-launcher.c -o /tmp/parent-protect.so \
  && cc -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared -DDSH_CHILD_PRELOAD /tmp/plugin-observer-launcher.c -o /tmp/child-protect.so \
  && readelf -d /tmp/parent-protect.so | grep -q '(INIT_ARRAY)' \
@@ -14,7 +18,8 @@ RUN cc -std=c11 -O2 -Wall -Wextra -Werror /tmp/plugin-observer-launcher.c -o /tm
  && cc -std=c11 -O2 -Wall -Wextra -Werror -DDSH_PARENT_PRELOAD_TEST /tmp/plugin-observer-launcher.c -o /tmp/parent-preload-test \
  && cc -std=c11 -O2 -Wall -Wextra -Werror -DDSH_CHILD_PRELOAD_TEST /tmp/plugin-observer-launcher.c -o /tmp/child-preload-test \
  && LD_PRELOAD=/tmp/parent-protect.so /tmp/parent-preload-test \
- && LD_PRELOAD=/tmp/child-protect.so /tmp/child-preload-test
+ && LD_PRELOAD=/tmp/child-protect.so /tmp/child-preload-test \
+ && /tmp/launcher-test
 FROM ${SOURCE_IMAGE}
 USER root
 WORKDIR /opt/dsh-plugin-verifier

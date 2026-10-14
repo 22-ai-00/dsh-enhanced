@@ -69,7 +69,7 @@ Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始
 
 预期结果只保存在 Host authority 中。容器每次只收到 `artifact` 和当前 `input`；模型反馈、契约、回执不包含测试输入或预期输出。反馈会披露有限的通过/失败信息，这不是密码学意义的测试集保密。
 
-此能力需要同一 Host 中已启用的 `assistant-isolation`，它是可选 peer；普通验收不自动安装或激活 Isolation。Verifier 通过当前 Goals producer 找回真实 step acceptance，再核对 owner、workspace、preset、Session、原生目标、定义与 run。产物只能来自该次 admitted native round 派发前绑定的 Isolation job；新的失败/unknown 产物尝试会遮蔽旧成功，已清理正文或缺少 provenance 时返回 unknown。whole-goal 使用其持久 `triggerRunId`，不能换成上下文 focus 的目标。
+此能力需要同一 Host 中已启用的 `assistant-isolation` 服务；Verifier 的正式包依赖仅安装其 runner 代码，普通验收不会自动激活 Isolation 服务。Verifier 通过当前 Goals producer 找回真实 step acceptance，再核对 owner、workspace、preset、Session、原生目标、定义与 run。产物只能来自该次 admitted native round 派发前绑定的 Isolation job；新的失败/unknown 产物尝试会遮蔽旧成功，已清理正文或缺少 provenance 时返回 unknown。whole-goal 使用其持久 `triggerRunId`，不能换成上下文 focus 的目标。
 
 独立验收使用另一私有 stateRoot 和 Isolation 持久控制器、资源池与预算，不使用模型 Agent 身份，也不在 Host 上执行产物。每测试用例的幂等键绑定契约、criterion、源 job、内容摘要、authority、testSet 和序号。相同 key 重读已知结果；派发不明的任务保留 unknown 和占用，重启不重放。更改配置不会自动扩额或续期；需要 operator 明确处置私有账本和未确认的运行资源。Docker 文件系统、网络、子进程和凭据边界与 Isolation 一致；Host 插件和同 UID 管理者仍属于可信控制面。
 
@@ -83,7 +83,7 @@ Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始
 
 ## 新插件包的隔离行为观察
 
-从 `@dsh-enhanced/assistant-verifier/plugin-behavior-runner` 显式导入 `PluginBehaviorRunner`，它是供可信 Host 构造的观察器，未自动激活，也不注册模型工具。主 bundle 不加载可选 Isolation peer；仅使用这个子入口时才需要它。构造参数复用 `IsolatedVerifierRunnerConfig`，省略 `command`；命令由实现固定。必须使用[专用镜像](../../scripts/isolation/README.md)、私有 `stateRoot`、不可变镜像 ID、有限次数与累计时间，`maxOutputBytes` 至少 65536。Host 持有实例并在所属 Cordis effect 的 disposer 中等待 `close()`。
+从 `@dsh-enhanced/assistant-verifier/plugin-behavior-runner` 显式导入 `PluginBehaviorRunner`，它是供可信 Host 构造的观察器，未自动激活，也不注册模型工具。Verifier 将 Isolation 代码作为正式运行依赖打包安装，但只在使用这个子入口时构造 runner；包依赖不会挂载 Isolation 的 Cordis 服务。构造参数复用 `IsolatedVerifierRunnerConfig`，省略 `command`；命令由实现固定。必须使用[专用镜像](../../scripts/isolation/README.md)、私有 `stateRoot`、不可变镜像 ID、有限次数与累计时间，`maxOutputBytes` 至少 65536。Host 持有实例并在所属 Cordis effect 的 disposer 中等待 `close()`。
 
 `run({ key, artifact, operation, signal })` 接受真实 tgz 的 `Buffer`：`operation: { kind: 'discover' }` 返回工具 schema 与摘要；`{ kind: 'invoke', schemaDigest, calls: [{ id, toolName, arguments }] }` 仅在 schema 摘要匹配时执行调用。每包最多 512 KiB，每轮最多 8 次调用。两轮分别消耗持久预算，key 须绑定候选、操作与调用输入；派发不明的 key 不重放。
 

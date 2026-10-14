@@ -538,7 +538,9 @@ function sandboxCommand(build, args, context, hooks = {}) {
   for (const item of mounts) verifyPinnedDirectory(item)
   const mountFd = index => String(3 + index)
   const sandboxArgs = ['--unshare-all', '--die-with-parent', '--new-session', '--clearenv',
-    '--ro-bind', '/usr', '/usr', '--ro-bind', '/lib', '/lib', '--ro-bind', '/lib64', '/lib64',
+    '--ro-bind', '/usr', '/usr', '--ro-bind', '/lib', '/lib',
+    // Debian arm64 keeps its loader under /lib; /lib64 is an x86_64 path.
+    ...(process.arch === 'arm64' ? [] : ['--ro-bind', '/lib64', '/lib64']),
     '--symlink', 'usr/bin', '/bin',
     '--ro-bind-fd', mountFd(0), '/toolchain', '--ro-bind-fd', mountFd(1), '/store',
     ...(build.cacheRoot === undefined ? [] : ['--ro-bind-fd', mountFd(5), '/cache']),

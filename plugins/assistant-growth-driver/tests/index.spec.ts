@@ -1149,6 +1149,7 @@ describe('opt-in plugin source proposals', () => {
     turns: ScriptedTurn[]
     source?: ReturnType<typeof creationService> | Record<string, unknown>
     allowCreation?: boolean
+    allowModification?: boolean
     maxPlansPerWake?: number
     onRequest?: (adapter: ScriptedAdapter) => void
   }) {
@@ -1160,6 +1161,7 @@ describe('opt-in plugin source proposals', () => {
     h.ctx.provide('pluginControlPlane' as never, source as never)
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
       pluginSourceProposals: { ...options(h.root), preparationMode: 'durable', allowCreation: input.allowCreation ?? true,
+        allowModification: input.allowModification ?? true,
         maxPlansPerWake: input.maxPlansPerWake ?? 1 },
     }))
     await new Promise(resolve => setImmediate(resolve))
@@ -1699,6 +1701,19 @@ describe('opt-in plugin source proposals', () => {
     const noGrant = await creationWake({ turns: [], source: noGrantPort })
     expect(noGrant.adapter.surfaces[0]).toHaveLength(8)
     expect(noGrant.adapter.surfaces[0]).not.toContain('plugin_source_create')
+  })
+
+  it('offers a create-only source surface when modification is disabled', async () => {
+    const source = creationService()
+    const result = await creationWake({ source, allowModification: false, turns: [
+      { name: 'plugin_source_gaps', args: {} }, creationRead(['src/index.ts']),
+      creationCall([{ path: 'src/index.ts', content: 'export const created = true\n' }]),
+    ] })
+    expect(result.adapter.surfaces[0]).toContain('plugin_source_create')
+    expect(result.adapter.surfaces[0]).not.toContain('plugin_source_prepare')
+    expect(result.adapter.toolDescriptions[0]?.plugin_source_read).toContain('only')
+    expect(source.enqueueSourceJob).toHaveBeenCalledWith(expect.objectContaining({ mode: 'create' }))
+    expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
   })
 
   it('publishes a nonstandard public name prefix, then queues only a matching new plugin', async () => {

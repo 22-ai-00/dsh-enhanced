@@ -1689,6 +1689,9 @@ importers:
       '@dsh-enhanced/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
+      '@dsh-enhanced/assistant-isolation':
+        specifier: workspace:*
+        version: link:../assistant-isolation
       '@dsh-enhanced/plugin-control-plane':
         specifier: '>=0.1.0 <0.2.0'
         version: link:../plugin-control-plane
@@ -1735,9 +1738,6 @@ importers:
       '@dsh-enhanced/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
-      '@dsh-enhanced/assistant-isolation':
-        specifier: workspace:*
-        version: link:../assistant-isolation
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy

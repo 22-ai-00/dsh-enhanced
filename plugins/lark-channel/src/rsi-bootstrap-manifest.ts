@@ -1,7 +1,6 @@
 import { isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { type ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
-import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
 import { PROTECTED_PLUGIN_DENYLIST, runtimeConfigDigest, validateHostDeploymentInputs, type RuntimeObserverTarget } from '@dsh-enhanced/plugin-control-plane'
 import { isAlias, isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
 
@@ -11,7 +10,7 @@ import type { RsiBuildEnvironment } from './rsi-build.js'
 import type { RsiSetupManifest } from './rsi-profile.js'
 import type { RsiSourceWorkspace } from './rsi-source.js'
 import { resolveRsiOwnerRoute } from './rsi-owner-profile.js'
-import { getRsiMemoryLearningValidators, validateRsiMemoryLearningSetup } from './rsi-memory-learning.js'
+import { createRsiMemoryLearningSetup } from './rsi-memory-learning.js'
 import { compileRsiPersonalAssistantOptions } from './rsi-profile.js'
 import type { RsiCreationBuildEnvironment } from './rsi-creation-build.js'
 import { createRsiPluginCreationSetup } from './rsi-plugin-creation.js'
@@ -241,28 +240,8 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
   for (const phase of phases) targetEnvironment[`DSH_RELEASE_${phase.toUpperCase().replaceAll('-', '_')}_CONFIG`] = join(config, `release-${phase}.json`)
   const profilePath = join(input.dshHome, 'profiles', input.targetProfile)
   const installation = input.resources.installationId
-  const { validateLearningConfig, validateMemoryReviewConfig, validateMemoryLearningAdoptionGrant } = getRsiMemoryLearningValidators()
-  const memoryReview = validateMemoryReviewConfig({ authorityId: `memory-review-${installation}`,
-    owner: reviewOwner, expiresAt: input.expiresAt, maxReviews: 1000,
-    policy: 'Independently verify exact owner statements for facts and trusted owner objectives with canonical outcomes for experiences. Reject unsupported claims, withdrawn sources, and ambiguous mutations.',
-    maxInputBytes: 65_536, maxOutputTokens: 2048, timeoutMs: 120_000 })
-  const memoryAdoption = validateMemoryLearningAdoptionGrant({ authorityId: `memory-adopt-${installation}`,
-    owner: reviewOwner, reviewAuthorityId: memoryReview.authorityId,
-    reviewAuthorityDigest: growthObjectDigest(memoryReview), expiresAt: input.expiresAt,
-    maxMutations: 1000, maxTotalContentBytes: 4_096_000, maxRecordTtlMs: 30 * day,
-    kinds: ['fact', 'experience'], operations: ['add', 'replace', 'remove'] })
-  const memoryLearning = validateRsiMemoryLearningSetup({
-    learning: validateLearningConfig({ databasePath: join(state, 'memory-learning.sqlite'),
-      authorityId: `memory-extract-${installation}`, owner: reviewOwner, expiresAt: input.expiresAt,
-      maxExtractions: 1000, maxPending: 100, lookbackMs: 30 * day,
-      policy: 'Extract only explicit owner facts or experience grounded in a trusted owner objective and canonical outcome. Do not infer success from a reply. Prefer noop when evidence is insufficient.',
-      maxInputBytes: 65_536, maxOutputTokens: 2048, timeoutMs: 120_000,
-      budgetId: `rsi-memory-learning-${installation}`, budgetAmount: 1,
-      scanBudgetId: `rsi-memory-scan-${installation}`, scanBudgetAmount: 1,
-      reviewAuthorityId: memoryReview.authorityId, reviewAuthorityDigest: growthObjectDigest(memoryReview),
-      adoptionAuthorityId: memoryAdoption.authorityId, adoptionGrantDigest: growthObjectDigest(memoryAdoption) }),
-    reviews: memoryReview, adoption: memoryAdoption, limits: { extractions: 7, scans: 1440 },
-  }, reviewOwner, input.now)
+  const memoryLearning = createRsiMemoryLearningSetup({ installationId: installation,
+    stateRoot: state, owner: reviewOwner, now: input.now, expiresAt: input.expiresAt })
   if (learner.get('disabled') !== true) {
     if (!learner.has('config') || !isDeepStrictEqual(plain(rowConfig(learner, 'memory learner'), 'memory learner'), memoryLearning.learning)) {
       fail('existing memory learner config differs from frozen owner grant')

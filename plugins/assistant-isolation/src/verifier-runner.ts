@@ -10,11 +10,13 @@ import { observeStorage } from './storage.js'
 import { plannedStorageBytes } from './storage-policy.js'
 import type { IsolationJob, IsolationRequest, IsolationResult } from './types.js'
 import type { CreationWitness } from './runtime-witness.js'
+import { bindIsolationStateSocket } from './state-socket-binding.js'
 
 export interface IsolatedVerifierRunnerConfig {
   stateRoot: string
   image: string
   dockerPath: string
+  socketPath?: string
   authorityDigest: string
   command: string
   expiresAt: number
@@ -46,6 +48,7 @@ export class IsolatedVerifierRunner {
       || !Number.isSafeInteger(input.expiresAt) || input.expiresAt < 1) throw new Error('invalid isolated verifier authority')
     this.#input = Object.freeze({ ...input })
     this.#config = validateConfig({ stateRoot: this.#input.stateRoot, image: this.#input.image, dockerPath: this.#input.dockerPath,
+      ...(this.#input.socketPath === undefined ? {} : { socketPath: this.#input.socketPath }),
       limits: { ...defaultLimits, maxDurationMs: this.#input.maxDurationMs, maxOutputBytes: this.#input.maxOutputBytes },
       grants: [{ id: 'verification', revision: 1, principalDigest: this.#input.authorityDigest,
         principalRecordId: `verification:${this.#input.authorityDigest}`, principalVersion: 1,
@@ -55,6 +58,7 @@ export class IsolatedVerifierRunner {
     mkdirSync(root, { recursive: true, mode: 0o700 })
     if (realpathSync(root) !== root || !lstatSync(root).isDirectory() || lstatSync(root).uid !== process.getuid?.()) throw new Error('isolated verifier requires a private owned state root')
     chmodSync(root, 0o700)
+    bindIsolationStateSocket(root, this.#config.socketPath)
     this.#ledger = new IsolationLedger(join(root, 'ledger.sqlite'))
     try { this.#controller = this.#ledger.claimController(randomUUID(), 30_000); this.#ledger.syncGrants(this.#config.grants, this.#controller) }
     catch (error) { this.#ledger.close(); throw error }
@@ -74,7 +78,7 @@ export class IsolatedVerifierRunner {
       cursor = jobs.at(-1)!.id
       for (const job of jobs) {
         if (!this.#active) return
-        const removed = await removeIsolatedContainer(this.#config.dockerPath, job.containerName, { signal: this.#abort.signal })
+        const removed = await removeIsolatedContainer(this.#config.dockerPath, job.containerName, { socketPath: this.#config.socketPath, signal: this.#abort.signal })
         const quiescent = removed && !job.dispatchAttempted
         // Preserve any durable process evidence. Recovery only changes the
         // lifecycle conclusion; it must never erase a previous receipt body.
@@ -125,13 +129,13 @@ export class IsolatedVerifierRunner {
       if (!current()) throw new Error('verification authorization changed')
       job = this.#ledger.markDispatched(job.id, job.version, this.#controller); dispatched = true
       const observed = await runIsolatedProcess({ jobId: job.id, containerName: job.containerName, image: this.#config.image,
-        dockerPath: this.#config.dockerPath, workspacePath, command: request.command, artifacts: [], deadline: job.deadline,
+        dockerPath: this.#config.dockerPath, socketPath: this.#config.socketPath, workspacePath, command: request.command, artifacts: [], deadline: job.deadline,
         limits: this.#config.limits, signal: AbortSignal.any([signal, abort.signal]),
         authorizeStart: () => { if (!current()) return false; job = this.#ledger.start(job.id, job.version, this.#controller); return true } })
       const { creationWitness, ...value } = observed; witness = creationWitness
       result = { ...value, jobId: job.id, artifacts: [], quiescent: value.status === 'unknown' ? false : value.quiescent }
     } catch {
-      if (dispatched) { await removeIsolatedContainer(this.#config.dockerPath, job.containerName); result = { ...result, status: 'unknown', quiescent: false, reason: 'verification-dispatch-unconfirmed' } }
+      if (dispatched) { await removeIsolatedContainer(this.#config.dockerPath, job.containerName, { socketPath: this.#config.socketPath }); result = { ...result, status: 'unknown', quiescent: false, reason: 'verification-dispatch-unconfirmed' } }
     } finally { clearInterval(timer) }
     try { this.#ledger.settle(job.id, job.version, result, this.#controller, witness) }
     finally { if (result.quiescent) await rm(join(this.#config.stateRoot, 'workspaces', job.id), { recursive: true, force: true }) }

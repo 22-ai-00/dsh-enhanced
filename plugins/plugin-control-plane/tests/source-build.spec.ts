@@ -4,7 +4,8 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { afterEach, expect, it, vi } from 'vitest'
 import { removeSourceJobContainer, runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from '../src/source-build.ts'
@@ -212,6 +213,66 @@ it('rejects repository seccomp escalation unless the exact repository configurat
   expect(() => validateSourceBuildConfig({ ...base, repositorySandbox: { seccompPath: '/tmp/profile.json' } })).toThrow(/configuration is invalid/)
   expect(() => validateSourceBuildConfig({ ...base, profile: 'repository', repositorySandbox: { seccompPath: '/tmp/profile.json', extra: true } as never })).toThrow(/configuration is invalid/)
   expect(() => validateSourceBuildConfig({ ...base, profile: 'repository', repositorySandbox: { seccompPath: 'relative.json' } })).toThrow(/configuration is invalid/)
+})
+
+it('requires an explicit portable repository profile, immutable image, local socket and daemon binding', () => {
+  const base: SourceBuildConfig = { dockerPath: '/usr/bin/docker', image: `sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
+    memoryMiB: 128, cpus: 0.25, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4_096 }
+  const portable = { ...base, profile: 'portable-repository' as const, socketPath: '/tmp/.docker/run/docker.sock',
+    daemonId: 'TEST-DAEMON-0000', repositorySandbox: { seccompPath: '/tmp/profile.json' } }
+  expect(() => validateSourceBuildConfig(portable)).not.toThrow()
+  expect(() => validateSourceBuildConfig({ ...portable, repositorySandbox: undefined } as unknown as SourceBuildConfig)).toThrow(/invalid/)
+  expect(() => validateSourceBuildConfig({ ...portable, repositorySandbox: { seccompPath: '/tmp/profile.json', extra: true } as never })).toThrow(/invalid/)
+  expect(() => validateSourceBuildConfig({ ...portable, daemonId: undefined } as unknown as SourceBuildConfig)).toThrow(/invalid/)
+  expect(() => validateSourceBuildConfig({ ...portable, image: 'example.com/image@sha256:' + 'a'.repeat(64) })).toThrow(/invalid/)
+  expect(() => validateSourceBuildConfig({ ...portable, socketPath: 'tcp://remote' })).toThrow(/invalid/)
+  expect(() => validateSourceBuildConfig({ ...base, socketPath: portable.socketPath })).toThrow(/invalid/)
+})
+
+it('portable prepared checks reject daemon and image drift and keep the Docker endpoint local', async () => {
+  const f = await fixture()
+  const previousHome = process.env.HOME
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+  const socket = join(f.root, '.docker', 'run', 'docker.sock')
+  const state = join(f.root, 'state')
+  await mkdir(dirname(socket), { recursive: true, mode: 0o700 })
+  await writeFile(state, 'ready')
+  const server = createServer()
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socket, resolve) })
+  await writeFile(f.dockerPath, `#!/bin/sh
+if [ "$1" = --config ]; then shift 4; fi
+state="$(cat ${state})"
+case "$1" in
+  version) printf '%s\\n' '29.4.1/linux/amd64' ;;
+  info) if [ "$state" = daemon-drift ]; then printf '%s\\n' 'BAD-DAEMON-0000'; else printf '%s\\n' 'TEST-DAEMON-0000'; fi ;;
+  image) if [ "$state" = image-drift ]; then printf '%s\\n' 'sha256:${'a'.repeat(64)}/linux/arm64'; else printf '%s\\n' 'sha256:${'a'.repeat(64)}/linux/amd64'; fi ;;
+  run) printf '%s\\n' "$@" > "$0.args"; cat >/dev/null; ${marker} ;;
+  *) exit 0 ;;
+esac
+`)
+  try {
+    process.env.HOME = f.root
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true })
+    f.config.profile = 'portable-repository'
+    f.config.socketPath = socket
+    f.config.daemonId = 'TEST-DAEMON-0000'
+    const seccompPath = join(f.root, 'seccomp.json')
+    await writeFile(seccompPath, await readFile(new URL('../../../scripts/isolation/source-builder-seccomp.json', import.meta.url)))
+    f.config.repositorySandbox = { seccompPath }
+    const result = await runDockerPreparedChecks(f.input)
+    const args = result.evidence.commands[0]!.args
+    expect(args).toEqual(expect.arrayContaining(['-H', `unix://${socket}`, '--network', 'none', '--read-only', '--cap-drop', 'ALL']))
+    expect(args).toEqual(expect.arrayContaining(['systempaths=unconfined', '/sys:ro,nosuid,nodev,noexec,size=1m']))
+    await writeFile(state, 'daemon-drift')
+    await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/daemon identity differs/)
+    await writeFile(state, 'image-drift')
+    await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/image ID or platform differs/)
+  } finally {
+    Object.defineProperty(process, 'platform', platform)
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
 })
 
 it('admits an approved copied seccomp profile only on a supported Host after Docker runtime gating', async () => {
