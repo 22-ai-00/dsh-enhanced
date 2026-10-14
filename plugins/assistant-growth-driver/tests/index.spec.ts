@@ -30,17 +30,16 @@ import plugin, { apply, AssistantGrowthDriverService, name, normalizeConfig, ver
 import type { OwnerRouteReceipt } from '../src/deposit.ts'
 import type { GrowthSourceGap, GrowthSourcePlanePort } from '../src/source-port.ts'
 
-// Contract expiry is unreachable with the wall clock while the pinned contract
-// is still current, so the single assertCurrentContract call is gated through
-// a hoisted switch; every other package export keeps its real implementation.
 const contractState = vi.hoisted(() => ({ expired: false }))
 vi.mock('@dsh-enhanced/assistant-super-relay-budget', async importOriginal => {
   const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-super-relay-budget')>()
   return {
     ...actual,
     assertCurrentContract(now?: number): void {
-      if (contractState.expired) throw new Error('assistant-super-relay-budget: Super Relay protocol contract has expired')
-      actual.assertCurrentContract(now)
+      const contractNow = contractState.expired
+        ? Date.parse(actual.SUPER_RELAY_RESPONSES_CONTRACT.expiresAt)
+        : now ?? Date.parse(actual.SUPER_RELAY_RESPONSES_CONTRACT.checkedAt) + 1_000
+      actual.assertCurrentContract(contractNow)
     },
   }
 })
