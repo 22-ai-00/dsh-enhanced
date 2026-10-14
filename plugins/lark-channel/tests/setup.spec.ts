@@ -2483,6 +2483,113 @@ setInterval(() => {}, 1000)`,
     expect(await readFile(fooPatchPath, 'utf8')).toBe(base)
   })
 
+  test.each([
+    { mode: 'isolated', conflicting: false },
+    { mode: 'lark-owner', conflicting: true },
+    { mode: 'delivery-scheduler', conflicting: true },
+    { mode: 'missing-user-patch', conflicting: true },
+    { mode: 'unreadable-bundle', conflicting: true },
+    { mode: 'unexpected-rejection', conflicting: true },
+    { mode: 'desktop-launcher-only', conflicting: true },
+  ] as const)('composes an Electron-owned desktop profile after its CLI rejects a dump (%s)', async ({ mode, conflicting }) => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-electron-profile-'))
+    const dshHome = join(root, 'dsh-home')
+    const sharedDatabasePath = join(dshHome, 'assistant-delivery/shared.sqlite')
+    const desktopDatabasePath = mode === 'isolated' ? join(dshHome, 'desktop/isolated.sqlite') : sharedDatabasePath
+    const fooDirectory = join(dshHome, 'profiles', 'foo')
+    const desktopDirectory = join(dshHome, 'profiles', 'desktop')
+    const cliDirectory = join(root, 'cli-install', 'node_modules', '@deepseek-ai', 'dsh')
+    const cliBinDirectory = join(root, 'bin')
+    const desktopLauncherDirectory = join(root, 'DeepSeek Harness.app', 'Contents', 'Resources', 'runtime', 'cli', 'bin')
+    const publicCommandDirectory = join(root, 'usr-local-bin')
+    await mkdir(fooDirectory, { recursive: true })
+    await mkdir(join(cliDirectory, 'node_modules', '@deepseek-ai'), { recursive: true })
+    await mkdir(join(cliDirectory, 'lib'), { recursive: true })
+    await mkdir(cliBinDirectory, { recursive: true })
+    await mkdir(desktopLauncherDirectory, { recursive: true })
+    await mkdir(publicCommandDirectory, { recursive: true })
+    await mkdir(join(desktopDirectory, 'node_modules', '@fixture', 'desktop-bundle'), { recursive: true })
+    const fooPatchPath = join(fooDirectory, 'cordis.patch.yml')
+    const base = baseAssistantProfile(dshHome, sharedDatabasePath)
+    await writeFile(fooPatchPath, base, 'utf8')
+    await writeFile(join(desktopDirectory, 'package.json'), JSON.stringify({
+      name: 'desktop-profile',
+      dsh: { profile: { bundles: ['@fixture/desktop-bundle'] } },
+    }), 'utf8')
+    await writeFile(join(desktopDirectory, 'cordis.yml'), '[]\n', 'utf8')
+    if (mode !== 'missing-user-patch') await writeFile(join(desktopDirectory, 'cordis.patch.yml'), '[]\n', 'utf8')
+    await writeFile(join(cliDirectory, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh', version: '0.2.0-rc.2', exports: { './package.json': './package.json' },
+    }), 'utf8')
+    await writeFile(join(cliDirectory, 'lib', 'bin.js'), '#!/usr/bin/env node\nconsole.log("0.2.0-rc.2")\n', { mode: 0o700 })
+    await symlink(join(cliDirectory, 'lib', 'bin.js'), join(cliBinDirectory, 'dsh'))
+    await writeFile(join(desktopLauncherDirectory, 'dsh'), '#!/bin/sh\nprintf "0.2.0-rc.2\\n"\n', { mode: 0o700 })
+    await symlink(join(desktopLauncherDirectory, 'dsh'), join(publicCommandDirectory, 'dsh'))
+    const pnpmPackages = await readdir(fileURLToPath(new URL('../../../node_modules/.pnpm/', import.meta.url)))
+    const bootStore = pnpmPackages.find(name => name.startsWith('@deepseek-ai+dsh-app-boot@'))
+    expect(bootStore).toBeDefined()
+    await symlink(
+      fileURLToPath(new URL(`../../../node_modules/.pnpm/${bootStore}/node_modules/@deepseek-ai/dsh-app-boot/`, import.meta.url)),
+      join(cliDirectory, 'node_modules', '@deepseek-ai', 'dsh-app-boot'),
+    )
+    const bundleDirectory = join(desktopDirectory, 'node_modules', '@fixture', 'desktop-bundle')
+    await writeFile(join(bundleDirectory, 'package.json'), JSON.stringify({
+      name: '@fixture/desktop-bundle',
+      dsh: { bundle: { patch: './cordis.patch.yml' } },
+    }), 'utf8')
+    const bundleRows = mode === 'lark-owner'
+      ? effectiveLarkDeliveryProfile(desktopDatabasePath)
+      : effectiveDeliveryProfile(desktopDatabasePath).replace('    databasePath:', '    schedulerEnabled: true\n    databasePath:')
+    await writeFile(join(bundleDirectory, 'cordis.patch.yml'), mode === 'unreadable-bundle'
+      ? 'not-a-patch-list\n'
+      : `- insert:\n${bundleRows.trim().split('\n').map(line => `  ${line}`).join('\n')}\n`, 'utf8')
+    const { executeLarkSetupProfileTransaction } = await import('../src/setup.ts')
+    const args = lark.parseLarkSetupArgs([
+      '--profile', 'foo', '--account', 'primary', '--tenant', 'personal',
+      '--app-id', 'cli_0123456789abcdef', '--no-service', '--disable-agent-tools',
+    ])
+    let staged = 0
+    const execute = () => executeLarkSetupProfileTransaction({
+      args, dshHome, patchPath: fooPatchPath,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+      credentialProvider: 'macos-keychain',
+      operations: {
+        readEffectiveProfile(profile: string) {
+          if (profile === 'desktop') {
+            if (mode === 'unexpected-rejection') throw new Error('DSH failed to compose desktop for an unknown reason')
+            throw new Error('lark-channel setup: DSH rejected the updated profile: error: profile "desktop" is managed exclusively by the Electron application')
+          }
+          return asEffectiveProfile(readFileSync(fooPatchPath, 'utf8'))
+        },
+        storeCredential() { staged += 1 },
+        readCredential() { return 'secret' },
+        discoverOwner() { return { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_foo' } },
+        validateProfile() {},
+        pairPrincipal() {},
+        removeCredential() {},
+      },
+    })
+    const previousPath = process.env.PATH
+    process.env.PATH = [publicCommandDirectory, ...(mode === 'desktop-launcher-only' ? [] : [cliBinDirectory]), previousPath ?? ''].join(':')
+    try {
+      if (conflicting) {
+        await expect(execute()).rejects.toThrow(mode === 'lark-owner'
+          ? /profile desktop already owns Lark.*same assistant-delivery database/iu
+          : mode === 'unreadable-bundle' || mode === 'unexpected-rejection' || mode === 'desktop-launcher-only'
+            ? /cannot verify effective Lark ownership in profile desktop/iu
+            : /profile desktop has an enabled assistant-delivery scheduler.*same database/iu)
+        expect(staged).toBe(0)
+        expect(await readFile(fooPatchPath, 'utf8')).toBe(base)
+      } else {
+        await execute()
+        expect(staged).toBe(1)
+        expect(await readFile(fooPatchPath, 'utf8')).toContain('lark/primary/personal/ou_foo')
+      }
+    } finally {
+      process.env.PATH = previousPath
+    }
+  })
+
   test.each(['enabled', 'default', 'alias', 'custom-row', 'invalid-scheduler'] as const)(
     'refuses a disabled Lark adapter with an unsafe Delivery consumer (%s) before staging credentials',
     async mode => {
