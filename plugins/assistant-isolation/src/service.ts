@@ -20,6 +20,7 @@ import { plannedStorageBytes } from './storage-policy.js'
 import { maintainIsolationStorage, observeStorage } from './storage.js'
 import type { IsolationIdentity, IsolationJob, IsolationRequest, IsolationResult } from './types.js'
 import { inspectIsolationGrant } from './diagnostics.js'
+import { bindIsolationStateSocket } from './state-socket-binding.js'
 
 export { Config }
 export const isolationPrincipalDigest = (principal: string): string => createHash('sha256').update(principal).digest('hex')
@@ -71,6 +72,7 @@ export class AssistantIsolationService extends Service {
     mkdirSync(root, { recursive: true, mode: 0o700 })
     if (realpathSync(root) !== root || !lstatSync(root).isDirectory() || lstatSync(root).uid !== process.getuid?.()) throw new Error('assistant-isolation: private owned state root required')
     chmodSync(root, 0o700)
+    bindIsolationStateSocket(root, this.#config.socketPath)
     this.#ledger = new IsolationLedger(join(root, 'ledger.sqlite'))
     ctx.on('internal/plugin', fiber => { if (fiber === ctx.fiber && fiber.uid === null) this.#abortStartup() })
     ctx.on('tools/execute', async (execution, next) => {
@@ -149,7 +151,7 @@ export class AssistantIsolationService extends Service {
         if (!this.#active) break
         if (this.#jobs.has(job.id)) continue
         const signal = AbortSignal.any([this.#recoveryAbort.signal, AbortSignal.timeout(30_000)])
-        if (await reconcileUnknownJob(this.#ledger, this.#controller(), job, this.#config.dockerPath, signal)) {
+        if (await reconcileUnknownJob(this.#ledger, this.#controller(), job, this.#config.dockerPath, signal, this.#config.socketPath)) {
           await rm(join(this.#config.stateRoot, 'workspaces', job.id), { recursive: true, force: true })
         }
       }
@@ -216,7 +218,7 @@ export class AssistantIsolationService extends Service {
       cursor = page.at(-1)!.id
       for (const job of page) {
         if (!this.#active) return
-        const removed = await removeIsolatedContainer(this.#config.dockerPath, job.containerName, { signal: this.#recoveryAbort.signal })
+        const removed = await removeIsolatedContainer(this.#config.dockerPath, job.containerName, { socketPath: this.#config.socketPath, signal: this.#recoveryAbort.signal })
         if (!this.#active) return
         // An absent object does not prove a timed-out daemon create request
         // completed. Restart must not erase that uncertainty or free its pool.
@@ -347,7 +349,7 @@ export class AssistantIsolationService extends Service {
       job = this.#ledger.markDispatched(job.id, job.version, this.#controller())
       mayHaveCreated = true
       const processResult = await runIsolatedProcess({ jobId: job.id, containerName: job.containerName, image: this.#config.image,
-        dockerPath: this.#config.dockerPath, workspacePath, artifacts: request.artifacts ?? [], command: request.command, deadline: job.deadline,
+        dockerPath: this.#config.dockerPath, socketPath: this.#config.socketPath, workspacePath, artifacts: request.artifacts ?? [], command: request.command, deadline: job.deadline,
         limits: this.#config.limits, signal: AbortSignal.any([signal, abort.signal]),
         authorizeStart: () => {
           if (!authorized()) return false
@@ -361,7 +363,7 @@ export class AssistantIsolationService extends Service {
         quiescent: publicResult.status === 'unknown' ? false : publicResult.quiescent }
     } catch {
       if (mayHaveCreated) {
-        await removeIsolatedContainer(this.#config.dockerPath, job.containerName)
+        await removeIsolatedContainer(this.#config.dockerPath, job.containerName, { socketPath: this.#config.socketPath })
         result = { ...result, status: 'unknown', quiescent: false, reason: 'runner-exception-no-replay' }
       }
     }

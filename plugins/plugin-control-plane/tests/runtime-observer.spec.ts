@@ -70,7 +70,7 @@ async function fixture(load = true, services = ['candidateService'], nativeInclu
   return { ctx, root, owner, profile, config, controlConfig, control, loader, addLoader, addCandidate, dependency, query }
 }
 
-describe.skipIf(process.platform !== 'linux')('owner runtime observer on the pinned Loader', () => {
+describe.skipIf(!['linux', 'darwin'].includes(process.platform))('owner runtime observer on the pinned Loader', () => {
   test.each(['candidate', 'include:candidate'])('binds %s to the native Include profile and direct child', async targetId => {
     const f = await fixture(true, ['candidateService'], true, targetId)
     await f.dependency()
@@ -357,8 +357,8 @@ test('the platform gate lives in the runtime shell, not in configuration validat
       platform.mockReturnValue('darwin')
       expect(() => validateRuntimeObserverConfig(config)).not.toThrow()
       await expect(lstat(config.socketPath)).rejects.toMatchObject({ code: 'ENOENT' })
-      // 运行时门控：非 Linux 仍被拒绝，真实行为不变。
-      expect(() => assertRuntimeObserverPlatform()).toThrow('runtime observer')
+      // 两个平台都支持私有 Unix socket；Windows 仍被拒绝。
+      expect(() => assertRuntimeObserverPlatform()).not.toThrow()
       platform.mockReturnValue('win32')
       expect(() => assertRuntimeObserverPlatform()).toThrow('runtime observer')
       platform.mockReturnValue('linux')

@@ -45,7 +45,7 @@ export { SourceGrowthRunUnavailableError } from '@dsh-enhanced/assistant-growth-
 class SourceGrowthNativeMismatchError extends Error {}
 
 export function validateSourceJobsConfig(value: SourceJobsConfig, build?: SourceBuildConfig): void {
-  const allowed = new Set(['authorityId', 'expiresAt', 'maxSubmissions', 'repository', 'baseline', 'creation', 'revision', 'ownerRouteId', 'principalId', 'workspace', 'preset', 'budgetId', 'budgetAmount'])
+  const allowed = new Set(['authorityId', 'expiresAt', 'maxSubmissions', 'allowedModes', 'repository', 'baseline', 'creation', 'revision', 'ownerRouteId', 'principalId', 'workspace', 'preset', 'budgetId', 'budgetAmount'])
   if (value === null || typeof value !== 'object' || Array.isArray(value) || build === undefined
     || Object.keys(value).some(key => !allowed.has(key))
     || ![value.authorityId, value.ownerRouteId, value.principalId, value.repository, value.workspace, value.preset].every(text => typeof text === 'string' && text !== '' && text.normalize('NFC').trim() === text && text.length <= 4096 && !/[\p{Cc}]/u.test(text))
@@ -58,6 +58,11 @@ export function validateSourceJobsConfig(value: SourceJobsConfig, build?: Source
     throw new Error('plugin-control-plane: invalid sourceJobs authority configuration')
   }
   if (value.baseline !== undefined) validateSourceBaselineConfig(value.baseline)
+  if (value.allowedModes !== undefined && (!Array.isArray(value.allowedModes) || value.allowedModes.length < 1
+    || value.allowedModes.length > 3 || new Set(value.allowedModes).size !== value.allowedModes.length
+    || value.allowedModes.some(mode => !['create', 'modify', 'revise-created'].includes(mode)))) {
+    throw new Error('plugin-control-plane: invalid sourceJobs allowedModes')
+  }
   if (value.creation !== undefined) validateSourceCreationGrant(value.creation)
   if (value.revision !== undefined) validateSourceRevisionGrant(value.revision)
 }
@@ -193,6 +198,7 @@ export class SourceJobRuntime {
   }
 
   private async continuePreparedLocked(job: SourceJobRecord, signal: AbortSignal): Promise<void> {
+    this.assertMode(job.intent.mode)
     if (!job.planId || !this.options.store.getOwnerTaskFailureReference(job.intent.gapId)) return
     const planId = job.planId
     const current = this.options.store.getSourceJob(job.id)
@@ -304,7 +310,16 @@ export class SourceJobRuntime {
     return this.options.withGapSourceFence(gapId, owner, callback)
   }
 
+  private modeAllowed(mode: SourceJobIntent['mode']): boolean {
+    return this.options.config.allowedModes?.includes(mode ?? 'modify') ?? true
+  }
+
+  private assertMode(mode: SourceJobIntent['mode']): void {
+    if (!this.modeAllowed(mode)) throw new Error('source job mode is not authorized')
+  }
+
   private assertOwner(job: SourceJobRecord): void {
+    this.assertMode(job.intent.mode)
     const current = this.receipt()
     const taskBacked = this.options.store.getOwnerTaskFailureReference(job.intent.gapId) !== undefined
     if (!this.available() || job.expiresAt <= Date.now() || (job.intent.mode === 'create' && (!this.options.config.creation || !job.intent.creation
@@ -338,6 +353,7 @@ export class SourceJobRuntime {
   }
 
   enqueue(input: EnqueueSourceJobInput): Promise<SourceJobProjection> {
+    this.assertMode(input.mode)
     if (input.mode !== 'create' && input.mode !== 'revise-created' && input.growthRun !== undefined) throw new Error('modify source job cannot carry a growth run')
     if (input.mode === 'create' || input.mode === 'revise-created') validateSourceCreationFiles(input.files)
     else {
@@ -350,6 +366,7 @@ export class SourceJobRuntime {
   }
 
   private async enqueueOwned(input: EnqueueSourceJobInput): Promise<SourceJobProjection> {
+    this.assertMode(input.mode)
     const signal = AbortSignal.any([input.signal, this.abort.signal, AbortSignal.timeout(15_000)])
     const assertCurrent = async (): Promise<void> => { signal.throwIfAborted(); await awaitSourceSignal(signal, input.assertCurrent); this.withGapSource(input.gapId, this.assertCaller(input.owner), () => {}); if (!this.available()) throw new Error('source job authority unavailable'); signal.throwIfAborted() }
     await assertCurrent()
@@ -444,6 +461,8 @@ export class SourceJobRuntime {
   /** Native runner admission can fail before our executor is invoked. */
   private refreshQueued(job: SourceJobRecord): SourceJobRecord {
     if (job.status !== 'queued') return job
+    if (!this.modeAllowed(job.intent.mode)) return this.options.store.settleSourceJob({ id: job.id, revision: job.revision,
+      status: 'failed', failureCode: 'source-job-mode-revoked' })
     let code: string | undefined
     let providerUnavailable = false
     if (job.intent.mode === 'create' && this.options.store.getOwnerTaskFailureReference(job.intent.gapId) !== undefined
@@ -555,7 +574,7 @@ export class SourceJobRuntime {
     if (!this.hasContinuations()) return []
     return this.options.store.listPreparedSourceApprovalJobs(this.options.releasePrepared !== undefined, this.options.advanceReleased !== undefined,
       this.options.adoptReleased !== undefined, this.options.verifyPreparedCreation !== undefined, this.options.adoptVerifiedCreation !== undefined, this.options.verifyPreparedRevision !== undefined, this.options.verifyPreparedRevisionRegression !== undefined)
-      .filter(job => this.eligibleContinuation(job))
+      .filter(job => this.modeAllowed(job.intent.mode) && this.eligibleContinuation(job))
   }
 
   /** Admission reads durable state and validates the current owner; it never invokes continuation approval or release hooks. */

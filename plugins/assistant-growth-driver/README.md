@@ -57,6 +57,7 @@ dsh --profile web --dump-config
 | `pluginSourceProposals.repository` | 无 | 开启时必填的绝对规范仓库路径；由 owner 配置，模型不可传入。 |
 | `pluginSourceProposals.preparationMode` | `inline` | `inline` 保持本轮隔离构建；`durable` 只把已读、冻结 base 的内容排入 Control Plane 自己的持久队列。队列 authority、构建超时和执行生命周期都由 Control Plane 配置，独立于模型 wake。 |
 | `pluginSourceProposals.allowCreation` | `false` | 仅 `durable` 可开启新插件候选。还须配置 Control Plane 的独立 `sourceJobs.creation` 授权；缺少创建读取接口或有效命名规则时保持既有修改工具。 |
+| `pluginSourceProposals.allowModification` | `true` | 设为 `false` 时不提供既有插件修改工具；创建读取必须显式使用 `mode: create`。原生创建路径应同时配置 Control Plane 的 `sourceJobs.allowedModes: [create]`。 |
 | `pluginSourceProposals.allowRevision` | `false` | 仅在 `pluginSourceProposals.enabled: true`、`preparationMode: durable` 且 `usageLearning.enabled: true` 时可显式开启已采用插件的修订候选；另需 Control Plane 的独立有限修订授权和验收引用。`allowCreation` 不会开启此轨。 |
 | `pluginSourceProposals.maxPlansPerWake` | `1` | 每轮源码提案尝试上限（1–5）；inline 的 prepared 与 durable 的 queued 都占用此预算，失败也占一次。 |
 | `pluginSourceProposals.isolatedBuildTimeoutMs` | `180000` | 仅 `inline` 使用的构建时间上限（60000–240000ms）；控制面可进一步收窄，单轮 authority 到期仍会取消。`durable` 使用控制面 `sourceBuild.timeoutMs`。 |

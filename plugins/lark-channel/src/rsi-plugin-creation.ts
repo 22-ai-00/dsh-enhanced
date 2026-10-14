@@ -135,7 +135,8 @@ export function validateRsiPluginCreationSetup(input: unknown, expectedOwner: Cr
     || reviews.runner.maxRuns < reviews.maxVerifications * (reviews.maxCases + 1)
     || capabilities.runner.maxRuns < capabilities.maxAdoptions + capabilities.maxCallRecords
     || capabilities.maxCallRecords < capabilities.maxAdoptions * capabilities.maxCallsPerAdoption
-    || reviews.runner.image !== capabilities.runner.image || reviews.runner.dockerPath !== capabilities.runner.dockerPath) {
+    || reviews.runner.image !== capabilities.runner.image || reviews.runner.dockerPath !== capabilities.runner.dockerPath
+    || reviews.runner.socketPath !== capabilities.runner.socketPath) {
     fail('creation runner limits cannot cover finite grants')
   }
   if (!exact(setup.verifications, ['authority', 'publicKey'])) fail('invalid creation verification fields')
@@ -163,7 +164,7 @@ export function createRsiPluginCreationSetup(input: {
     keyId: `creation-review-${resources.installationId}-key`, keyPath: resources.identities.review.keyPath,
     expiresAt, maxVerifications: limits.verifications,
     runner: { stateRoot: join(resources.stateRoot, 'creation-review-runner'), image: build.image,
-      dockerPath: build.dockerPath, expiresAt, maxRuns: limits.reviewRuns,
+      dockerPath: build.dockerPath, ...(build.socketPath ? { socketPath: build.socketPath } : {}), expiresAt, maxRuns: limits.reviewRuns,
       maxTotalDurationMs: limits.reviewRuns * limits.runnerDurationMs, maxDurationMs: limits.runnerDurationMs,
       maxOutputBytes: 262_144 },
     policy: 'Derive concrete held-out behavior cases from the current authenticated task and feedback. Independently check exact outputs and the checked source patch. Reject ambiguous behavior, unsafe scope, and missing evidence.',
@@ -178,7 +179,7 @@ export function createRsiPluginCreationSetup(input: {
     maxCallRecords: limits.callRecords, maxInputBytes: limits.inputBytes,
     retention: { maximumLifetimeMs: limits.retentionLifetimeMs },
     runner: { stateRoot: join(resources.stateRoot, 'creation-adoption-runner'), image: build.image,
-      dockerPath: build.dockerPath, expiresAt, maxRuns: limits.adoptionRuns,
+      dockerPath: build.dockerPath, ...(build.socketPath ? { socketPath: build.socketPath } : {}), expiresAt, maxRuns: limits.adoptionRuns,
       maxTotalDurationMs: 86_400_000, maxDurationMs: limits.runnerDurationMs, maxOutputBytes: 65_536 },
   }
   const { compileCreationReviewConfig } = getRsiPluginCreationValidators()

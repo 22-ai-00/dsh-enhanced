@@ -55,7 +55,7 @@ dsh-rsi restart --profile web          # 改配置后重启（只动运行状态
 
 升级（`update` / `update --all`）、干净重装（`reinstall`）、彻底卸载（`purge`）、崩溃救机脚本与全部安装器参数分别见 [`packages/dsh-rsi-cli/README.md`](packages/dsh-rsi-cli/README.md) 和[安装脚本文档](scripts/install/README.md)。
 
-`0.1.49` 起，Linux 的 `dsh-rsi install/reinstall` 和 shell 默认安装 `supervised`，组合持久记忆学习、普通任务成长、独立验收与有限采用。首次安装须在终端完成飞书身份授权并配置可用模型；已有模型选择保留，必要路径和有限预算由安装器生成。未配对的全新 Home 使用 `--yes` 或管道运行时会停止并提示完成 onboarding。显式 `--scenario core` 可安装无渠道、无后台学习的本机核心；`--mode standard`、`--lark skip` 或 `--no-service` 保留有限场景。非 Linux 不支持完整 RSI，可显式选用 `core` 等轻量场景。
+`0.1.49` 起，Linux 的 `dsh-rsi install/reinstall` 和 shell 默认安装 `supervised`，组合持久记忆学习、普通任务成长、独立验收与有限采用。首次安装须在终端完成飞书身份授权并配置可用模型；已有模型选择保留，必要路径和有限预算由安装器生成。未配对的全新 Home 使用 `--yes` 或管道运行时会停止并提示完成 onboarding。显式 `--scenario core` 可安装无渠道、无后台学习的本机核心；`--mode standard`、`--lark skip` 或 `--no-service` 保留有限场景。当前开发源码也为 macOS 默认接入 supervised：Host 原生运行于 launchd，本机 Docker Desktop 隔离候选构建与验证，支持持久记忆、新工具独立验证和动态采用；既有插件源码替换与发布仍限 Linux。这项移植尚未包含在 npm `0.1.49` 中，实机验收边界见[当前状态](docs/rsi-status.md)。
 
 三档部署场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 含全部 `core` 能力并加飞书常驻与偏好学习，`supervised` 再追加评测、演化与恢复。安装时检测到本机 `traex` 或 `trae-cli` 会自动安装并启用 TraeX 插件，复用本机登录；已登录且没有显式默认模型时，为当前 profile 配置 TraeX 默认模型。已有模型选择保持不变。其它模型可在安装引导中配置，API Key 只从环境读取。实验性离线执行入口 `autonomy` 需显式指定本机固定隔离镜像，详见[安装文档](scripts/install/README.md)。
 

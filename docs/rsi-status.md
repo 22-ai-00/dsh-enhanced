@@ -14,14 +14,14 @@
 
 ## 当前交付
 
-修复飞书安装时读取 Electron 专管 `desktop` profile 的错误：仅在 CLI 明确拒绝 Desktop 导出时，使用同版本 DSH 的只读配置组合接口，合并 bundle、profile 和 Home patch。继续检查 Delivery/owner/调度冲突；不能完整读取时仍拒绝接管，不忽略 Desktop。
+原生 macOS 学习的代码已集成，尚未发布到 npm。Node Host 由当前用户 launchd 管理，Docker Desktop 的 Linux 容器承担候选构建与隔离验证；支持 x64/arm64、持久记忆、新工具独立验证与动态采用。有限授权、原模型合同、安装恢复、运行时就绪与 unknown 不重放保持有效。既有插件源码替换、发布与双 Host 交接仍限 Linux；不声称与 Linux 完整源码修复轨等价。
 
-下一交付是原生 macOS 学习：Node Host 由 launchd 管理，本机 Docker 容器承担候选隔离。目标覆盖持久记忆、新工具独立验证与动态采用，保留有限授权、安装恢复及运行时就绪检查；既有插件源码替换与发布仍沿 Linux 合同。当前 npm `0.1.49` 尚不包含这项移植。
+飞书安装现可只读组合 Electron 专管的 `desktop` profile，继续核对 Delivery/owner 冲突。macOS 升级可将确认未使用的官方 `0.1.49` 源码准备完整归档，再准备新来源；已有修改、维护提交或运行资源会阻止自动迁移。使用方式与前置条件见[原生 macOS 学习](../plugins/lark-channel/docs/rsi-setup.md#原生-macos-学习)。
 
 ## 最新验证与下一验收
 
-- Desktop 修复已在独立 checkout 核对精确补丁，并通过定向测试与独立只读审查。`VITEST_MAX_WORKERS=2 PNPM_CONFIG_WORKSPACE_CONCURRENCY=2 pnpm check` 退出 0：8,599 项测试通过、61 项跳过，包含构建、类型检查、lint 与全部包 dry-run pack。跳过项不构成外部服务或跨平台运行证据。
-- macOS 移植仍在集成；Linux 模拟测试、x64 Docker 镜像构建和 AArch64 交叉编译均不能替代真实 macOS launchd、Docker Desktop 与安装验收。
-- 下一验收：完成工程全检与独立复核，再验证真实 Mac 安装及普通任务驱动的新工具创建 → 独立验证 → 动态采用 → 后续任务复用，覆盖纠正、撤回与重启。
+- Linux 本机 `VITEST_MAX_WORKERS=2 PNPM_CONFIG_WORKSPACE_CONCURRENCY=2 pnpm check` 退出 0：8,654 项通过、62 项跳过，包含构建、类型检查、lint 与所有包 dry-run pack。新增原生模块已进入打包清单；生产依赖冷打包导入和旧源码迁移定向检查通过。代码集成与本机工程检查通过独立只读审查。
+- Linux x64 构建/验证镜像构建和 AArch64 launcher 交叉编译通过；交叉编译不构成 arm64 执行证据。跨平台工程结果以对应提交的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/workflows/ci.yml) 为准；macOS job 已接入可用 GUI session 下的 launchd smoke，显式跳过不构成运行证据。
+- 本次按用户选择交付代码与 CI，真实 Mac 的完整安装、Docker Desktop 和普通使用验收暂缓。后续仍需验证普通任务驱动的新工具创建 → 独立验证 → 动态采用 → 后续任务复用，覆盖纠正、撤回与重启；工程检查不能证明长期质量、成本、延迟或回归收益。
 
 本次原始日志位于忽略目录 `docs/evidence/macos-native/`。发布遵循[发布协议](releasing.md)。

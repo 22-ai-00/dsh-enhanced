@@ -9,6 +9,8 @@ export interface SourceJobsConfig {
   authorityId: string
   expiresAt: number
   maxSubmissions: number
+  /** Restrict both new work and recovery; omitted retains all legacy modes. */
+  allowedModes?: readonly ('create' | 'modify' | 'revise-created')[]
   repository: string
   /** Owner-managed source history; the working checkout remains untouched. */
   baseline?: SourceBaselineConfig

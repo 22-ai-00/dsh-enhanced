@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
+import { createServer } from 'node:net'
 import { parse } from 'yaml'
 import { prepareRsiBuildEnvironment, type RsiBuildEnvironment } from '../src/rsi-build.js'
 import { materializeRsiCreationBuildInStage, prepareRsiCreationBuildEnvironment, readRsiCreationBuildInStage,
@@ -41,7 +42,19 @@ function git(cwd: string, ...args: string[]): string {
     { cwd, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } }).trim()
 }
 
-async function fixture() {
+async function architectureNode(root: string, architecture: 'x64' | 'arm64', platform: 'darwin' | 'linux'): Promise<string> {
+  const nativeNode = process.execPath
+  const preload = join(root, `${platform}-${architecture}.cjs`), launcher = join(root, `node-${platform}-${architecture}.cjs`)
+  await writeFile(preload, `Object.defineProperty(process, 'arch', { value: ${JSON.stringify(architecture)}, configurable: true })\n` +
+    `Object.defineProperty(process, 'platform', { value: ${JSON.stringify(platform)}, configurable: true })\n`)
+  await writeFile(launcher, `#!${nativeNode}\nconst { spawnSync } = require('node:child_process')\n` +
+    `const result = spawnSync(process.execPath, ['--require', ${JSON.stringify(preload)}, ...process.argv.slice(2)], { stdio: 'inherit' })\n` +
+    `process.exit(result.status ?? 1)\n`, { mode: 0o700 })
+  await chmod(launcher, 0o700)
+  return launcher
+}
+
+async function fixture(architecture: 'x64' | 'arm64' = 'x64') {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rsi-creation-build-'))); roots.push(root)
   const home = join(root, 'home'), repository = join(home, 'rsi-sources', 'owner', 'checkout')
   const bare = join(home, 'rsi-sources', 'owner', 'release.git')
@@ -72,12 +85,17 @@ async function fixture() {
     origin: { kind: 'local-head', locator: repository, ref: 'HEAD' }, repository,
     baseline: { ref: 'refs/dsh-source/repairs', remote: bare, targetBranch: 'repairs', initialCommit: sourceCommit } }
   const docker = join(root, 'docker'), calls = join(root, 'docker-calls'), state = join(root, 'docker-state')
+  const dockerArch = join(root, 'docker-arch')
   await writeFile(state, 'ready')
-  const executable = `#!${process.execPath}\nconst fs=require('node:fs')\nconst path=require('node:path')\nconst args=process.argv.slice(2)\n` +
+  await writeFile(dockerArch, 'amd64')
+  const executable = `#!${process.execPath}\nconst fs=require('node:fs')\nconst path=require('node:path')\nconst raw=process.argv.slice(2)\nconst args=raw[0]==='--config'?raw.slice(4):raw\n` +
     `const state=fs.readFileSync(${JSON.stringify(state)},'utf8').trim()\n` +
+    `const arch=fs.readFileSync(${JSON.stringify(dockerArch)},'utf8').trim()\n` +
+    `const otherArch=arch==='arm64'?'amd64':'arm64'\n` +
     `const safe=process.env.DOCKER_CONFIG&&fs.statSync(process.env.DOCKER_CONFIG).isDirectory()&&!process.env.DOCKER_HOST&&!process.env.DOCKER_CONTEXT\n` +
-    `fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify({args,safe})+'\\n')\nif(!safe)process.exit(91)\n` +
-    `if(args[0]==='version'){console.log('29.4.1/linux/amd64');process.exit(0)}\n` +
+    `fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify({args,raw,safe})+'\\n')\nif(!safe)process.exit(91)\n` +
+    `if(args[0]==='version'){console.log('29.4.1/linux/'+arch);process.exit(0)}\n` +
+    `if(args[0]==='info'){console.log(state==='wrong-daemon'?'BAD-DAEMON-0000':'TEST-DAEMON-0000');process.exit(0)}\n` +
     `if(args[0]==='build'){const behavior=args.some(a=>a.endsWith('/plugin-verifier.Dockerfile'));` +
     `if(behavior){const context=args.at(-1);if(fs.existsSync(path.join(context,'plugins/assistant-verifier/src'))` +
     `||!fs.existsSync(path.join(context,'worker.mjs'))||!fs.existsSync(path.join(context,'candidate.mjs')))process.exit(77)}` +
@@ -87,9 +105,26 @@ async function fixture() {
     `if(args[0]==='image'&&args[1]==='rm')process.exit(0)\n` +
     `if(args[0]==='image'&&args[1]==='inspect'){const target=args.at(-1);` +
     `if(state==='missing-behavior'&&target===${JSON.stringify(behaviorImage)})process.exit(5);` +
-    `console.log(target===${JSON.stringify(behaviorImage)}||target.startsWith('dsh-plugin-verifier:')?${JSON.stringify(behaviorImage)}:${JSON.stringify(sourceImage)});process.exit(0)}\nprocess.exit(90)\n`
+    `console.log((target===${JSON.stringify(behaviorImage)}||target.startsWith('dsh-plugin-verifier:')?${JSON.stringify(behaviorImage)}:${JSON.stringify(sourceImage)})+'/linux/'+(state==='bad-platform'?otherArch:arch));process.exit(0)}\nprocess.exit(90)\n`
   await writeFile(docker, executable, { mode: 0o700 }); await chmod(docker, 0o700)
-  const build = await prepareRsiBuildEnvironment({ dshHome: home, profile: 'owner', source, dockerPath: docker })
+  // Seed the trusted Linux source image before the portable Mac test switches
+  // to its native architecture. Linux-only tests continue to use this path.
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
+  const originalArch = Object.getOwnPropertyDescriptor(process, 'arch')!
+  const originalExecPath = Object.getOwnPropertyDescriptor(process, 'execPath')!
+  const node = await architectureNode(root, 'x64', 'linux')
+  let build: RsiBuildEnvironment
+  try {
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
+    Object.defineProperty(process, 'arch', { value: 'x64', configurable: true })
+    Object.defineProperty(process, 'execPath', { value: node, configurable: true })
+    build = await prepareRsiBuildEnvironment({ dshHome: home, profile: 'owner', source, dockerPath: docker })
+  } finally {
+    Object.defineProperty(process, 'platform', originalPlatform)
+    Object.defineProperty(process, 'arch', originalArch)
+    Object.defineProperty(process, 'execPath', originalExecPath)
+  }
+  await writeFile(dockerArch, architecture === 'arm64' ? 'arm64' : 'amd64')
   const args = { dshHome: home, profile: 'owner', source, build }
   return { root, home, repository, source, docker, calls, state, args }
 }
@@ -101,6 +136,60 @@ function behaviorBuilds(items: { args: string[] }[]): number {
   return items.filter(item => item.args[0] === 'build' && item.args.includes('--file')
     && item.args.some(arg => arg.endsWith('plugin-verifier.Dockerfile'))).length
 }
+
+test.each(['x64', 'arm64'] as const)('portable behavior image binds the same macOS %s socket, daemon and Linux image platform', async architecture => {
+  const f = await fixture(architecture)
+  await rm(join(f.home, 'rsi-builds'), { recursive: true, force: true })
+  const previousHome = process.env.HOME
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+  const arch = Object.getOwnPropertyDescriptor(process, 'arch')!
+  const execPath = Object.getOwnPropertyDescriptor(process, 'execPath')!
+  const node = await architectureNode(f.root, architecture, 'darwin')
+  const imageArch = architecture === 'arm64' ? 'arm64' : 'amd64'
+  const socket = join(f.root, '.docker', 'run', 'docker.sock')
+  await mkdir(dirname(socket), { recursive: true, mode: 0o700 })
+  const server = createServer()
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socket, resolve) })
+  try {
+    process.env.HOME = f.root
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true })
+    Object.defineProperty(process, 'arch', { value: architecture, configurable: true })
+    Object.defineProperty(process, 'execPath', { value: node, configurable: true })
+    const build = await prepareRsiBuildEnvironment({ dshHome: f.home, profile: 'owner', source: f.source,
+      dockerPath: f.docker, socketPath: socket })
+    const input = { ...f.args, build }
+    const prepared = await prepareRsiCreationBuildEnvironment(input)
+    expect(prepared).toEqual({ schemaVersion: 1, sourceCommit: f.source.sourceCommit,
+      sourceImage, image: behaviorImage, dockerPath: f.docker, socketPath: socket })
+    expect(await readRsiCreationBuildEnvironment(input)).toEqual(prepared)
+    const observed = await calls(f.calls) as { args: string[]; raw: string[]; safe: boolean }[]
+    expect(observed.filter(item => item.raw[0] === '--config').every(item => item.raw[2] === '-H'
+      && item.raw[3] === `unix://${socket}` && item.safe)).toBe(true)
+    expect(observed.some(item => item.args[0] === 'build' && item.args.includes(`linux/${imageArch}`))).toBe(true)
+    expect(await prepareRsiCreationBuildEnvironment(input)).toEqual(prepared)
+    const stagePhysicalHome = join(f.root, 'portable-stage'), logicalHome = join(f.root, 'portable-logical')
+    await cp(f.home, stagePhysicalHome, { recursive: true })
+    const stagedBuild = await rebaseStageBuild({ ...f, args: input }, stagePhysicalHome, logicalHome)
+    const stagedSource = { ...f.source, repository: join(logicalHome, 'rsi-sources', 'owner', 'checkout') }
+    const relocated = await materializeRsiCreationBuildInStage({ candidateHome: f.home, stagePhysicalHome,
+      logicalHome, profile: 'owner', candidateSource: f.source, candidateBuild: build,
+      stagedSource, stagedBuild })
+    expect(relocated.creationBuild.socketPath).toBe(socket)
+    expect(await readRsiCreationBuildInStage({ logicalHome, stagePhysicalHome, profile: 'owner',
+      stagedSource, stagedBuild })).toEqual(prepared)
+    await writeFile(f.state, 'wrong-daemon')
+    await expect(prepareRsiCreationBuildEnvironment(input)).rejects.toThrow('receipt differs')
+    await writeFile(f.state, 'bad-platform')
+    await expect(prepareRsiCreationBuildEnvironment(input)).rejects.toThrow('platform differs')
+  } finally {
+    Object.defineProperty(process, 'platform', platform)
+    Object.defineProperty(process, 'arch', arch)
+    Object.defineProperty(process, 'execPath', execPath)
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+})
 
 async function rebaseStageBuild(f: Awaited<ReturnType<typeof fixture>>, stagePhysicalHome: string,
   logicalHome: string): Promise<RsiBuildEnvironment> {

@@ -25,6 +25,7 @@ export interface CreationCapabilityConfig {
     stateRoot: string
     image: string
     dockerPath: string
+    socketPath?: string
     expiresAt: number
     maxRuns: number
     maxTotalDurationMs: number

@@ -79,7 +79,7 @@ Options:
   --profile <name>          DSH profile (default: web)
   --operation <name>        install, upgrade, or uninstall (default: install)
   --confirm-dsh-home-stopped Required for lifecycle; Lark/supervised service operations stop managed units, you stop other DSH_HOME users
-  --scenario <name>         auto, core, web, autonomy, lark, supervised, or full (default: auto; Linux auto enables supervised learning)
+  --scenario <name>         auto, core, web, autonomy, lark, supervised, or full (default: auto; Linux/macOS auto enables supervised learning)
   --workspace <absolute>    Web owner workspace (web/autonomy; default: current directory)
   --agent-preset <id>       Web owner Agent preset (web/autonomy; default: standard)
   --isolation-image <id>    Immutable sha256 image for autonomy
@@ -130,7 +130,7 @@ Agent tool modes:
 
 Scenarios:
   Capabilities are additive: core ⊂ lark ⊂ supervised.
-  auto       On Linux, install supervised ordinary-use learning by default; this
+  auto       On Linux/macOS, install supervised ordinary-use learning by default; this
              uses bounded additional model calls and requires paired Lark owner
              onboarding and a resident service. Other platforms keep a limited
              core/Lark default without ordinary-use RSI.
@@ -733,7 +733,7 @@ dsh_enhanced_choose_scenario() {
   local configured="$1"
   local platform="$2"
   printf '\n选择部署场景（能力逐档叠加：core ⊂ lark ⊂ supervised）：\n' >&2
-  if [[ "$platform" == 'Linux' ]]; then
+  if [[ "$platform" == 'Linux' || "$platform" == 'Darwin' ]]; then
     printf '  1) 分级自治成长（推荐：普通使用中有限自迭代，额外消耗有限模型额度）\n' >&2
     if [[ "$configured" == '1' ]]; then
       printf '  2) 仅保留已配置的飞书常驻助理（不启用完整自迭代）\n' >&2
@@ -2494,7 +2494,7 @@ dsh_enhanced_install_rsi_owner() {
   local args=(--install-owner --profile "$profile" --dsh-home "$dsh_home")
   if [[ "$source_mode" == 'local' ]]; then args+=(--source-repository "$repo_root"); fi
   if [[ "$acknowledge" == '1' ]]; then args+=(--ack-existing-automations); fi
-  printf '\nsupervised-growth：自动配置当前 owner 的自迭代双 Host。\n'
+  printf '\nsupervised-growth：自动配置当前 owner 的学习与能力进化。\n'
   if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
     dsh_enhanced_fail 1 "找不到安装后的 dsh-rsi-setup：$setup_bin"
     return $?
@@ -3473,7 +3473,7 @@ dsh_enhanced_install() {
     scenario='supervised'
   fi
   if [[ "$scenario" == 'auto' ]]; then
-    if [[ "$install_platform" == 'Linux' && "$lark_mode" != 'skip' && "$manage_service" == '1'
+    if [[ ( "$install_platform" == 'Linux' || "$install_platform" == 'Darwin' ) && "$lark_mode" != 'skip' && "$manage_service" == '1'
       && !( "$deployment_mode_explicit" == '1' && "$deployment_mode" == 'standard' ) ]]; then
       if [[ "$assume_yes" == '1' || ! -t 0 || ! -t 1 ]]; then
         scenario='supervised'

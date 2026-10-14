@@ -106,8 +106,14 @@ export function validateCreationReviewConfig(input: CreationReviewConfig): Creat
   if (typeof item.policy !== 'string' || !item.policy.trim() || item.policy.includes('\0')
     || !item.policy.isWellFormed() || Buffer.byteLength(item.policy) > 8192) throw new Error('creation review invalid policy')
   const runner = exact(item.runner, ['stateRoot', 'image', 'dockerPath', 'expiresAt', 'maxRuns', 'maxTotalDurationMs',
-    'maxDurationMs', 'maxOutputBytes'], 'runner')
+    'maxDurationMs', 'maxOutputBytes',
+    ...(item.runner && typeof item.runner === 'object' && Object.hasOwn(item.runner, 'socketPath') ? ['socketPath'] : [])], 'runner')
   privatePath(runner.stateRoot, 'runner root'); privatePath(runner.dockerPath, 'docker path')
+  if (Object.hasOwn(runner, 'socketPath')) {
+    const socketPath = runner.socketPath
+    if (typeof socketPath !== 'string' || !isAbsolute(socketPath) || resolve(socketPath) !== socketPath
+      || /[\p{Cc},]/u.test(socketPath) || socketPath.includes('://')) throw new Error('creation review invalid Docker socket path')
+  }
   if (typeof runner.image !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(runner.image)) throw new Error('creation review invalid image')
   integer(runner.expiresAt, 1, 8_640_000_000_000_000, 'runner expiry')
   integer(runner.maxRuns, 1, 10_000, 'runner quota')

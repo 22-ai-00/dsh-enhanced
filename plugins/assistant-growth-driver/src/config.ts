@@ -43,6 +43,8 @@ export interface PluginSourceProposalsConfig {
   enabled?: boolean
   /** Separately opt into new-plugin creation; only Host-owned durable jobs may use it. */
   allowCreation?: boolean
+  /** Existing-plugin modification is enabled by default for older profiles. */
+  allowModification?: boolean
   /** Separately opt into revising an adopted plugin from a new failed owner task. */
   allowRevision?: boolean
   /** Inline builds during the model wake; durable queues Host-owned work. */
@@ -101,6 +103,7 @@ export interface NormalizedWorkflowOwnerAnchoredConfig {
 export interface NormalizedPluginSourceProposalsConfig {
   readonly enabled: boolean
   readonly allowCreation: boolean
+  readonly allowModification: boolean
   readonly allowRevision: boolean
   readonly preparationMode: 'inline' | 'durable'
   readonly repository: string | null
@@ -178,6 +181,7 @@ const workflowOwnerAnchoredSchema = workflowOwnerAnchoredObjectSchema
 const pluginSourceProposalsObjectSchema = Schema.object({
   enabled: Schema.boolean().default(false),
   allowCreation: Schema.boolean().default(false),
+  allowModification: Schema.boolean().default(true),
   allowRevision: Schema.boolean().default(false),
   preparationMode: Schema.union(['inline', 'durable']).default('inline'),
   repository: boundedText(4_096),
@@ -257,6 +261,7 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
     pluginSourceProposals: Object.freeze({
       enabled: config.pluginSourceProposals?.enabled ?? false,
       allowCreation: config.pluginSourceProposals?.allowCreation ?? false,
+      allowModification: config.pluginSourceProposals?.allowModification ?? true,
       allowRevision: config.pluginSourceProposals?.allowRevision ?? false,
       preparationMode: config.pluginSourceProposals?.preparationMode ?? 'inline',
       repository: config.pluginSourceProposals?.repository?.normalize('NFC').trim() ?? null,
@@ -311,6 +316,10 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
   if (normalized.pluginSourceProposals.allowCreation
     && (!normalized.pluginSourceProposals.enabled || normalized.pluginSourceProposals.preparationMode !== 'durable')) {
     throw new Error('assistant-growth-driver: source creation requires enabled durable source proposals')
+  }
+  if (normalized.pluginSourceProposals.enabled && !normalized.pluginSourceProposals.allowModification
+    && !normalized.pluginSourceProposals.allowCreation && !normalized.pluginSourceProposals.allowRevision) {
+    throw new Error('assistant-growth-driver: source proposals require at least one allowed mode')
   }
   if (normalized.pluginSourceProposals.allowRevision
     && (!normalized.pluginSourceProposals.enabled || normalized.pluginSourceProposals.preparationMode !== 'durable'

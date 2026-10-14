@@ -3,13 +3,15 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { defaultLimits } from './config.js'
+import { configuredDockerSocketPath } from './docker-socket.js'
 import { runIsolatedProcess } from './runner.js'
 import { stageWorkspace } from './workspace.js'
 
 /** Operator-only readiness probe using the same supervisor and work-volume path as jobs. */
-export async function probeIsolationRuntime(image: string, dockerPath = '/usr/bin/docker'): Promise<{ ready: true }> {
+export async function probeIsolationRuntime(image: string, dockerPath = process.platform === 'darwin' ? '/usr/local/bin/docker' : '/usr/bin/docker', socketPath?: string): Promise<{ ready: true }> {
   if (!/^sha256:[0-9a-f]{64}$/.test(image) || !dockerPath.startsWith('/')) throw new Error('isolation readiness requires an immutable local image and absolute Docker path')
-  if (process.platform !== 'linux' || process.getuid?.() === undefined || process.getuid() === 0) throw new Error('isolation readiness requires a non-root Linux Host and Docker access')
+  if (!['linux', 'darwin'].includes(process.platform) || process.getuid?.() === undefined || process.getuid() === 0) throw new Error('isolation readiness requires a non-root Unix Host and Docker access')
+  socketPath = configuredDockerSocketPath(socketPath)
   const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-isolation-probe-'))
   const jobId = randomUUID(); const containerName = `dsh-isolation-${jobId}`
   let safeToRemove = true
@@ -17,9 +19,9 @@ export async function probeIsolationRuntime(image: string, dockerPath = '/usr/bi
     const marker = randomUUID()
     const command = `test "$(id -u)" != 0 && test ! -w /etc && printf '%s' '${marker}' > readiness.txt && printf '%s' '${marker}'`
     const workspacePath = await stageWorkspace(stateRoot, jobId, { grantId: 'readiness', idempotencyKey: jobId, command })
-    await writeFile(join(stateRoot, 'probe.json'), JSON.stringify({ jobId, containerName, image, dockerPath }), { mode: 0o600, flag: 'wx' })
+    await writeFile(join(stateRoot, 'probe.json'), JSON.stringify({ jobId, containerName, image, dockerPath, socketPath }), { mode: 0o600, flag: 'wx' })
     safeToRemove = false
-    const result = await runIsolatedProcess({ jobId, containerName, image, dockerPath, workspacePath,
+    const result = await runIsolatedProcess({ jobId, containerName, image, dockerPath, socketPath, workspacePath,
       command, artifacts: ['readiness.txt'], deadline: Date.now() + 20_000,
       limits: { ...defaultLimits, maxDurationMs: 20_000, memoryMiB: 64, workspaceMiB: 4, workspaceInodes: 64 },
       signal: AbortSignal.timeout(20_000), authorizeStart: () => true })

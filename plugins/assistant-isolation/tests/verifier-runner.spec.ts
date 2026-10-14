@@ -12,15 +12,16 @@ import { normalizeRequest } from '../src/workspace.ts'
 // Real Docker only: the runner never pulls. CI and local unit runs skip this
 // suite unless the operator supplies an already-present immutable image.
 const image = process.env.DSH_ISOLATION_TEST_IMAGE ?? ''
-const dockerPath = process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker'
-const dockerTests = process.platform === 'linux' && process.getuid?.() !== 0 && /^sha256:[0-9a-f]{64}$/.test(image) ? describe.sequential : describe.skip
+const dockerPath = process.env.DSH_ISOLATION_TEST_DOCKER ?? (process.platform === 'darwin' ? '/usr/local/bin/docker' : '/usr/bin/docker')
+const socketPath = process.env.DSH_ISOLATION_TEST_SOCKET
+const dockerTests = ['linux', 'darwin'].includes(process.platform) && process.getuid?.() !== 0 && /^sha256:[0-9a-f]{64}$/.test(image) ? describe.sequential : describe.skip
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 async function root(): Promise<string> { const value = await mkdtemp(join(tmpdir(), 'dsh-verifier-runner-')); await chmod(value, 0o700); roots.push(value); return value }
 function config(stateRoot: string, changes: Partial<IsolatedVerifierRunnerConfig> = {}): IsolatedVerifierRunnerConfig {
   return {
-    stateRoot, image, dockerPath, authorityDigest: 'a'.repeat(64), command: '/bin/sh /workspace/artifact < /workspace/input',
+    stateRoot, image, dockerPath, ...(socketPath === undefined ? {} : { socketPath }), authorityDigest: 'a'.repeat(64), command: '/bin/sh /workspace/artifact < /workspace/input',
     expiresAt: Date.now() + 60_000, maxRuns: 2, maxTotalDurationMs: 60_000, maxDurationMs: 10_000, maxOutputBytes: 4_096,
     ...changes,
   }

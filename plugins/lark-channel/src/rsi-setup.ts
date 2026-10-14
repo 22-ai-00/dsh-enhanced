@@ -532,6 +532,7 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
   const args = parseRsiSetupArgs(argv)
   if (args.help) {
     process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--ack-existing-automations] [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--ack-existing-automations]\n       dsh-rsi-setup --install-local-cohort --profile <name> --source-repository <local-absolute> --bundle <slug> [--bundle <slug> ...] [--dsh-home <absolute>]\n--ack-existing-automations acknowledges active or paused durable rows when enabling or switching an Automation scheduler; accepted only with --install-owner or --apply, and does not bypass inventory drift checks.\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, creates an offline image and exports a pinned native release toolchain/store/cache; --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
+    process.stdout.write('macOS: --prepare-build prepares native-architecture Docker images; --install-owner configures a native launchd Host with finite memory learning and verified plugin creation. Source replacement/release remains Linux-only.\n')
     process.stdout.write('       dsh-rsi-setup --prepare-local-update --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--add-memory-learning]\nPrepare local update source and tarballs outside the active Home; does not install or activate them. --add-memory-learning explicitly prepares the disabled learner bundle for a verified pre-owner installation.\n')
     return
   }
@@ -564,8 +565,8 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
     return
   }
   if (args.installOwner) {
-    if (process.platform !== 'linux') {
-      process.stdout.write(`${JSON.stringify({ mode: 'not-ready', reason: 'automatic dual Host installation requires Linux systemd user services' })}\n`)
+    if (process.platform !== 'linux' && process.platform !== 'darwin') {
+      process.stdout.write(`${JSON.stringify({ mode: 'not-ready', reason: 'automatic learning requires Linux systemd or macOS launchd' })}\n`)
       process.exitCode = 3
       return
     }
@@ -573,12 +574,16 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
     const cancel = () => controller.abort(new Error('owner installation interrupted'))
     process.once('SIGINT', cancel); process.once('SIGTERM', cancel)
     try {
-      const { installRsiOwnerDeployment } = await import('./rsi-install.js')
-      const result = await installRsiOwnerDeployment({ dshHome: args.dshHome, profile: args.profile!,
+      const install = process.platform === 'darwin'
+        ? (await import('./rsi-native-install.js')).installNativeRsiOwnerDeployment
+        : (await import('./rsi-install.js')).installRsiOwnerDeployment
+      const result = await install({ dshHome: args.dshHome, profile: args.profile!,
         sourceRepository: args.sourceRepository, ackExistingAutomations: args.ackExistingAutomations, signal: controller.signal })
       process.stdout.write(`${JSON.stringify(result)}\n`)
-      process.stderr.write(result.mode === 'ready' ? '自迭代双 Host 已启动并通过就绪检查。\n'
-        : `普通 supervised 安装已保留；自迭代双 Host 未就绪：${result.reason}。\n`)
+      process.stderr.write(result.mode === 'ready' ? (process.platform === 'darwin'
+        ? '原生 macOS 学习已启动并通过就绪检查：持久记忆、新工具独立验证与动态采用。\n'
+        : '自迭代双 Host 已启动并通过就绪检查。\n')
+        : `普通 supervised 安装已保留；自迭代未就绪：${result.reason}。\n`)
       if (result.mode === 'not-ready') process.exitCode = 3
     } finally { process.off('SIGINT', cancel); process.off('SIGTERM', cancel) }
     return
@@ -591,7 +596,7 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
     try {
       const prepared = await withDshHomeLifecycleLock(args.dshHome, async () => {
         const authorities = async () => ({
-          authorityRuntime: await prepareRsiAuthorityRuntime({ dshHome: args.dshHome, profile: args.profile!, signal: controller.signal }),
+          ...(process.platform === 'linux' ? { authorityRuntime: await prepareRsiAuthorityRuntime({ dshHome: args.dshHome, profile: args.profile!, signal: controller.signal }) } : {}),
           authorityResources: await prepareRsiAuthorityResources({ dshHome: args.dshHome, profile: args.profile!, signal: controller.signal }),
         })
         if (args.prepareAuthorities) return authorities()
@@ -599,11 +604,18 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
           dshHome: args.dshHome, profile: args.profile!, version, sourceRepository: args.sourceRepository, signal: controller.signal,
         })
         if (!args.prepareBuild) return source
-        const provisioned = { ...source, ...(process.platform === 'linux' ? await authorities()
+        const provisioned = { ...source, ...(['linux', 'darwin'].includes(process.platform) ? await authorities()
           : { authorityResourcesUnavailable: 'private authority runtime currently requires Linux' }) }
         try {
           const build = await prepareRsiBuildEnvironment({ dshHome: args.dshHome, profile: args.profile!, source,
             dockerPath: args.dockerPath, signal: controller.signal })
+          if (process.platform === 'darwin') {
+            const { prepareRsiCreationBuildEnvironment } = await import('./rsi-creation-build.js')
+            const creation = await prepareRsiCreationBuildEnvironment({ dshHome: args.dshHome, profile: args.profile!, source,
+              build, signal: controller.signal })
+            return { ...provisioned, sourceBuild: build.sourceBuild, creationBuild: creation,
+              capabilities: ['native-memory-learning', 'verified-plugin-creation', 'dynamic-tool-adoption'] }
+          }
           try {
             const release = await prepareRsiReleaseBuildEnvironment({ dshHome: args.dshHome, profile: args.profile!,
               build, signal: controller.signal })

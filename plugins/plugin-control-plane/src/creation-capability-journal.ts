@@ -150,12 +150,17 @@ export function validateCreationCapabilityConfig(value: unknown): asserts value 
     const retention = obj(v.retention, ['maximumLifetimeMs'])
     int(retention.maximumLifetimeMs, 1, 30 * 86_400_000)
   }
-  const runner = obj(v.runner, ['stateRoot','image','dockerPath','expiresAt','maxRuns','maxTotalDurationMs','maxDurationMs','maxOutputBytes'])
+  const runner = obj(v.runner, ['stateRoot','image','dockerPath','expiresAt','maxRuns','maxTotalDurationMs','maxDurationMs','maxOutputBytes',
+    ...(v.runner && typeof v.runner === 'object' && Object.hasOwn(v.runner, 'socketPath') ? ['socketPath'] : [])])
   const root = path(runner.stateRoot)
   privateStat(root, 'directory')
   str(runner.image, /^(?:[a-z0-9][a-z0-9._:/-]*@)?sha256:[a-f0-9]{64}$/u, 512)
   const dockerPath = path(runner.dockerPath)
   if (dockerPath === keyPath) fail()
+  if (Object.hasOwn(runner, 'socketPath')) {
+    const socketPath = path(runner.socketPath)
+    if (/[\p{Cc},]/u.test(socketPath) || socketPath.includes('://')) fail()
+  }
   int(runner.expiresAt, 1, 8_640_000_000_000_000); int(runner.maxRuns, 1, 1024)
   int(runner.maxTotalDurationMs, 1, 86_400_000); int(runner.maxDurationMs, 1, 300_000)
   if ((runner.maxDurationMs as number) > (runner.maxTotalDurationMs as number)) fail()

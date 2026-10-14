@@ -10,10 +10,16 @@ const IMAGE = /^sha256:[a-f0-9]{64}$/u
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const PACKAGE_MANAGER = 'pnpm@11.7.0'
 const FIXED = {
+  'scripts/isolation/build-plugin-verifier-image.mjs': 'abfa721cc51e29672f5f1b139c63d282ffeebdc4c4b96d4496c7c089d711891a',
+  'scripts/isolation/plugin-verifier.Dockerfile': '9301bf426688c46f3d4fd8bcae7acde5da283ed6730f87be1f225d93fca95823',
+  'scripts/isolation/plugin-observer-launcher.c': '75ba31c8a2a0eb09820066fc7c73efb087095cf5229e460c965daa8659af1d0e',
+  'plugins/assistant-verifier/src/plugin-behavior-runner.ts': '1a7f5d9a686cc8615e403a9f5536701d759fc40ef9fa5fe7c29cbddb2891c187',
+} as const
+const LEGACY_FIXED = {
+  ...FIXED,
   'scripts/isolation/build-plugin-verifier-image.mjs': 'ae615696e51f88be9ad1e5f1b2a8769b951d8f0632b13547fcfa8f23ab837802',
   'scripts/isolation/plugin-verifier.Dockerfile': 'e3d4aad5d1a1fda8c1a01d080f32aceb9d6438954169b412ed96e8dde2fd22b2',
   'scripts/isolation/plugin-observer-launcher.c': '90bb335432a74778d442e2fcab50a19fc4441191343eaa76beed09287515b0ce',
-  'plugins/assistant-verifier/src/plugin-behavior-runner.ts': '1a7f5d9a686cc8615e403a9f5536701d759fc40ef9fa5fe7c29cbddb2891c187',
 } as const
 const WORKER_SHA = '0394f3974410fe00538fbd99e643a86672a7dfad7a1471af7280dce36668eef4'
 const CANDIDATE_SHA = '051e76a0e45c50e434be757913f89a2be0ee5cac6941797924fb13b316695109'
@@ -24,6 +30,7 @@ export interface RsiCreationBuildEnvironment {
   sourceImage: string
   image: string
   dockerPath: string
+  socketPath?: string
 }
 
 interface Receipt extends RsiCreationBuildEnvironment {
@@ -35,6 +42,9 @@ interface Receipt extends RsiCreationBuildEnvironment {
   contextDigest: string
   lockSha256: string
   receiptDigest: string
+  hostPlatform?: string
+  imagePlatform?: string
+  daemonId?: string
 }
 
 interface Input { dshHome: string; profile: string; source: RsiSourceWorkspace; build: RsiBuildEnvironment; signal?: AbortSignal }
@@ -84,9 +94,8 @@ async function inputs(source: RsiSourceWorkspace): Promise<Inputs> {
     await io.directory(dirname(join(source.repository, name)), false)
     files.set(name, await io.readStable(join(source.repository, name), 4_194_304))
   }
-  for (const [name, expected] of Object.entries(FIXED)) {
-    if (digest(files.get(name)!) !== expected) fail(`trusted asset changed: ${name}`)
-  }
+  const matches = (pins: Record<string, string>) => Object.entries(pins).every(([name, expected]) => digest(files.get(name)!) === expected)
+  if (!matches(FIXED) && !(io.hostPlatform() === 'linux/amd64' && matches(LEGACY_FIXED))) fail('trusted asset changed')
   const manifest = JSON.parse(files.get('package.json')!.toString('utf8')) as Record<string, unknown>
   if (manifest.name !== 'dsh-enhanced' || manifest.version !== source.version
     || manifest.packageManager !== PACKAGE_MANAGER) fail('root manifest differs from source cohort')
@@ -131,42 +140,51 @@ function parseOutput(raw: string, expected: Inputs, sourceImage: string): string
     || typeof value.image !== 'string' || !IMAGE.test(value.image)
     || value.sourceImage !== sourceImage || value.lockSha256 !== expected.lockSha256
     || value.workerSha256 !== WORKER_SHA || value.candidateSha256 !== CANDIDATE_SHA
-    || value.launcherSourceSha256 !== FIXED['scripts/isolation/plugin-observer-launcher.c']
-    || value.dockerfileSha256 !== FIXED['scripts/isolation/plugin-verifier.Dockerfile']
+    || value.launcherSourceSha256 !== expected.hashes['scripts/isolation/plugin-observer-launcher.c']
+    || value.dockerfileSha256 !== expected.hashes['scripts/isolation/plugin-verifier.Dockerfile']
     || !isDeepStrictEqual(value.contextFiles, [...expected.contextFiles, 'worker.mjs', 'candidate.mjs'].sort()))
     fail('builder output differs from frozen source inputs')
   return value.image
 }
 
-async function imageExists(dockerPath: string, image: string, scratch: string, signal: AbortSignal): Promise<void> {
-  const actual = await io.command(dockerPath, ['image', 'inspect', '--format', '{{.Id}}', image],
+async function imageExists(dockerPath: string, image: string, scratch: string, signal: AbortSignal, socket?: string): Promise<void> {
+  const arch = io.hostPlatform().endsWith('/arm64') ? 'arm64' : 'amd64'
+  const actual = await io.command(dockerPath, io.dockerArgs(['image', 'inspect', '--format', '{{.Id}}/{{.Os}}/{{.Architecture}}', image], scratch, socket),
     io.isolatedEnvironment(scratch), signal, 30_000, 4096)
-  if (actual !== image) fail('Docker image content ID differs from receipt')
+  if (actual !== `${image}/linux/${arch}`) fail('Docker image ID or platform differs from receipt')
 }
 
 async function replay(final: string, input: Input, expected: Inputs, dockerSha256: string,
-  scratch?: string, signal?: AbortSignal): Promise<RsiCreationBuildEnvironment> {
+  scratch?: string, signal?: AbortSignal, daemonId?: string): Promise<RsiCreationBuildEnvironment> {
   await io.directory(final)
   if (!isDeepStrictEqual(await readdir(final), ['bootstrap.json'])) fail('behavior workspace incomplete or unexpected')
   const value = JSON.parse((await io.readStable(join(final, 'bootstrap.json'), 65_536, true)).toString('utf8')) as Receipt
   const { receiptDigest, ...content } = value
+  const socket = input.build.sourceBuild.socketPath
   if (!isDeepStrictEqual(Object.keys(content).sort(), ['schemaVersion', 'sourceCommit', 'sourceImage', 'image',
-    'dockerPath', 'dshHome', 'profile', 'dockerSha256', 'inputHashes', 'contextFiles', 'contextDigest', 'lockSha256'].sort())
+    'dockerPath', 'dshHome', 'profile', 'dockerSha256', 'inputHashes', 'contextFiles', 'contextDigest', 'lockSha256',
+    ...(socket === undefined ? [] : ['socketPath', 'hostPlatform', 'imagePlatform', 'daemonId'])].sort())
     || value.schemaVersion !== 1 || digest(JSON.stringify(content)) !== receiptDigest
     || value.dshHome !== input.dshHome || value.profile !== input.profile
     || value.sourceCommit !== input.source.sourceCommit || value.sourceImage !== input.build.sourceBuild.image
     || !IMAGE.test(value.image) || value.dockerPath !== input.build.sourceBuild.dockerPath
-    || value.dockerSha256 !== dockerSha256 || !isDeepStrictEqual(value.inputHashes, expected.hashes)
+    || value.dockerSha256 !== dockerSha256 || value.socketPath !== socket
+    || value.hostPlatform !== (socket === undefined ? undefined : io.hostPlatform())
+    || value.imagePlatform !== (socket === undefined ? undefined : `linux/${io.hostPlatform().endsWith('/arm64') ? 'arm64' : 'amd64'}`)
+    || (socket !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9:._-]{7,127}$/u.test(value.daemonId ?? '')
+      || value.daemonId !== input.build.sourceBuild.daemonId
+      || daemonId !== undefined && value.daemonId !== daemonId))
+    || !isDeepStrictEqual(value.inputHashes, expected.hashes)
     || !isDeepStrictEqual(value.contextFiles, expected.contextFiles)
     || value.contextDigest !== expected.contextDigest || value.lockSha256 !== expected.lockSha256)
     fail('behavior receipt differs from approved source, assets, or Docker client')
   if (scratch && signal) {
-    await imageExists(value.dockerPath, value.sourceImage, scratch, signal)
-    await imageExists(value.dockerPath, value.image, scratch, signal)
+    await imageExists(value.dockerPath, value.sourceImage, scratch, signal, socket)
+    await imageExists(value.dockerPath, value.image, scratch, signal, socket)
   }
   signal?.throwIfAborted()
   return { schemaVersion: 1, sourceCommit: value.sourceCommit, sourceImage: value.sourceImage,
-    image: value.image, dockerPath: value.dockerPath }
+    image: value.image, dockerPath: value.dockerPath, ...(socket === undefined ? {} : { socketPath: socket }) }
 }
 
 /** Verify frozen local inputs only. This reader never invokes Docker. */
@@ -260,12 +278,14 @@ export async function materializeRsiCreationBuildInStage(input: {
     await chmod(scratch, 0o700)
     await mkdir(join(scratch, 'docker-config'), { mode: 0o700 })
     const deadline = AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(120_000)])
-    await imageExists(creationBuild.dockerPath, creationBuild.sourceImage, scratch, deadline)
-    await imageExists(creationBuild.dockerPath, creationBuild.image, scratch, deadline)
+    await imageExists(creationBuild.dockerPath, creationBuild.sourceImage, scratch, deadline, creationBuild.socketPath)
+    await imageExists(creationBuild.dockerPath, creationBuild.image, scratch, deadline, creationBuild.socketPath)
   } finally { await rm(scratch, { recursive: true, force: true }) }
   const content = { ...creationBuild, dshHome: logicalHome, profile, dockerSha256,
     inputHashes: expected.hashes, contextFiles: expected.contextFiles,
-    contextDigest: expected.contextDigest, lockSha256: expected.lockSha256 }
+    contextDigest: expected.contextDigest, lockSha256: expected.lockSha256,
+    ...(creationBuild.socketPath === undefined ? {} : { hostPlatform: io.hostPlatform(),
+      imagePlatform: `linux/${io.hostPlatform().endsWith('/arm64') ? 'arm64' : 'amd64'}`, daemonId: candidateReceipt.daemonId }) }
   const bytes = JSON.stringify({ ...content, receiptDigest: digest(JSON.stringify(content)) })
   const directory = join(stagePhysicalHome, 'rsi-creation-builds', profile)
   await io.directory(directory)
@@ -286,10 +306,12 @@ export async function materializeRsiCreationBuildInStage(input: {
 
 /** Caller holds the DSH_HOME lifecycle lock. Build or replay an immutable image. */
 export async function prepareRsiCreationBuildEnvironment(input: Input): Promise<RsiCreationBuildEnvironment> {
-  if (process.platform !== 'linux' || process.arch !== 'x64') fail('Linux x64 is required')
+  const platform = io.hostPlatform()
   await base(input)
   const expected = await inputs(input.source)
   const dockerPath = input.build.sourceBuild.dockerPath
+  const socket = input.build.sourceBuild.socketPath
+  if (platform.startsWith('darwin/') ? socket !== await io.localSocket(socket) : socket !== undefined) fail('invalid portable Docker socket')
   const dockerSha256 = digest(await io.readStable(dockerPath, 100_000_000, false, true))
   const parent = join(input.dshHome, 'rsi-creation-builds')
   try { await mkdir(parent, { mode: 0o700 }) }
@@ -302,24 +324,34 @@ export async function prepareRsiCreationBuildEnvironment(input: Input): Promise<
   let claimed: { dev: number; ino: number } | undefined
   try {
     await mkdir(join(stage, 'docker-config'), { mode: 0o700 })
-    const version = await io.command(dockerPath, ['version', '--format', '{{.Server.Version}}/{{.Server.Os}}/{{.Server.Arch}}'],
+    const version = await io.command(dockerPath, io.dockerArgs(['version', '--format', '{{.Server.Version}}/{{.Server.Os}}/{{.Server.Arch}}'], stage, socket),
       io.isolatedEnvironment(stage), signal, 10_000, 4096)
-    if (version !== '29.4.1/linux/amd64') fail('Docker runtime version differs from approved runtime')
+    const arch = platform.endsWith('/arm64') ? 'arm64' : 'amd64'
+    if (version !== `29.4.1/linux/${arch}`) fail('Docker runtime version differs from approved runtime')
+    const daemonId = socket === undefined ? undefined : await io.command(dockerPath,
+      io.dockerArgs(['info', '--format', '{{.ID}}'], stage, socket), io.isolatedEnvironment(stage), signal, 10_000, 4096)
+    if (socket !== undefined && !/^[A-Za-z0-9][A-Za-z0-9:._-]{7,127}$/u.test(daemonId ?? '')) fail('Docker daemon identity is invalid')
     const present = await lstat(final).then(() => true, error => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
       throw error
     })
-    if (present) return await replay(final, input, expected, dockerSha256, stage, signal)
-    await imageExists(dockerPath, input.build.sourceBuild.image, stage, signal)
+    if (present) return await replay(final, input, expected, dockerSha256, stage, signal, daemonId)
+    await imageExists(dockerPath, input.build.sourceBuild.image, stage, signal, socket)
     const context = join(stage, 'source')
     await mkdir(context, { mode: 0o700 })
     await snapshot(context, expected.files)
     const builder = join(context, 'scripts/isolation/build-plugin-verifier-image.mjs')
     const raw = await io.command(process.execPath, [builder, '--docker-path', dockerPath,
-      '--source-image', input.build.sourceBuild.image, '--timeout-ms', '1800000'],
+      '--source-image', input.build.sourceBuild.image, '--timeout-ms', '1800000',
+      ...(socket === undefined ? [] : ['--socket-path', socket, '--platform', arch])],
     { ...io.isolatedEnvironment(stage), TMPDIR: stage }, signal, 1_810_000)
     const image = parseOutput(raw, expected, input.build.sourceBuild.image)
-    await imageExists(dockerPath, image, stage, signal)
+    await imageExists(dockerPath, image, stage, signal, socket)
+    if (socket !== undefined) {
+      const after = await io.command(dockerPath, io.dockerArgs(['info', '--format', '{{.ID}}'], stage, socket),
+        io.isolatedEnvironment(stage), signal, 10_000, 4096)
+      if (after !== daemonId) fail('Docker daemon changed during behavior image build')
+    }
     await base(input)
     const fresh = await inputs(input.source)
     if (!isDeepStrictEqual(fresh.hashes, expected.hashes) || fresh.contextDigest !== expected.contextDigest)
@@ -328,10 +360,11 @@ export async function prepareRsiCreationBuildEnvironment(input: Input): Promise<
     await mkdir(final, { mode: 0o700 })
     const identity = await stat(final); claimed = { dev: identity.dev, ino: identity.ino }
     const result: RsiCreationBuildEnvironment = { schemaVersion: 1, sourceCommit: input.source.sourceCommit,
-      sourceImage: input.build.sourceBuild.image, image, dockerPath }
+      sourceImage: input.build.sourceBuild.image, image, dockerPath, ...(socket === undefined ? {} : { socketPath: socket }) }
     const content = { ...result, dshHome: input.dshHome, profile: input.profile, dockerSha256,
       inputHashes: expected.hashes, contextFiles: expected.contextFiles,
-      contextDigest: expected.contextDigest, lockSha256: expected.lockSha256 }
+      contextDigest: expected.contextDigest, lockSha256: expected.lockSha256,
+      ...(socket === undefined ? {} : { hostPlatform: platform, imagePlatform: `linux/${arch}`, daemonId }) }
     await io.writeExclusive(join(final, 'bootstrap.json'), JSON.stringify({ ...content, receiptDigest: digest(JSON.stringify(content)) }))
     await io.syncDirectory(final); await io.syncDirectory(parent)
     return result

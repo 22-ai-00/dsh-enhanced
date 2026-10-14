@@ -316,10 +316,13 @@ test('freezes the optional parent regression policy before dispatch and rechecks
     .not.toHaveProperty('revisionRegressionAcceptance')
 })
 
-test('the default-disabled revision flag preserves the historical usage config digest', async () => {
-  const f = await fixture(); f.append('legacy-compatible-task'); f.create()
-  const { allowRevision: _absentHistorically, ...legacySourceConfig } = f.config.pluginSourceProposals
-  const expected = acceptanceDigest({ ...f.config, pluginSourceProposals: legacySourceConfig })
+test.each([true, false])('preserves historical usage digest unless modification is restricted: %s', async allowModification => {
+  const f = await fixture(); f.append('legacy-compatible-task')
+  f.create({ ...f.config, pluginSourceProposals: { ...f.config.pluginSourceProposals, allowModification } })
+  const { allowRevision: _absentRevision, allowModification: _absentModification, ...legacySourceConfig } = f.config.pluginSourceProposals
+  const historical = acceptanceDigest({ ...f.config, pluginSourceProposals: legacySourceConfig })
+  const expected = allowModification ? historical : acceptanceDigest({ ...f.config, pluginSourceProposals: { ...legacySourceConfig, allowModification: false } })
+  expect(expected === historical).toBe(allowModification)
   const db = new DatabaseSync(join(f.root, 'usage.sqlite'))
   try {
     const row = db.prepare('SELECT intent_json FROM usage_jobs LIMIT 1').get() as { intent_json: string }

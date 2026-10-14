@@ -1,7 +1,7 @@
 # Source builder image
 
 New supervised installations prepare this image automatically when the supported
-Linux x64 Docker runtime is available. The installer pins the builder inputs,
+Linux x64 or native macOS x64/arm64 Docker runtime is available. The installer pins the builder inputs,
 records the immutable image ID in a private receipt, and verifies that receipt
 before reusing the image. See the [RSI setup guide](../../plugins/lark-channel/docs/rsi-setup.md)
 for the installed command, runtime requirements, and generated `sourceBuild` configuration.
@@ -12,6 +12,11 @@ Build the owner-controlled, manifest-only source-check image with:
 node scripts/isolation/build-source-image.mjs
 ```
 
+For a manual macOS build, also pass the canonical Docker client path,
+`--socket-path "$HOME/.docker/run/docker.sock"`, and the native `--platform`
+(`amd64` on Intel or `arm64` on Apple Silicon). The supervised installer supplies
+these arguments automatically.
+
 The script creates a temporary context containing only the Dockerfile, root
 `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, and direct workspace
 `package.json` files. It does not copy repository source, `.npmrc`, credentials,
@@ -19,6 +24,16 @@ or a host package store. Docker uses a temporary empty configuration directory
 and HOME so public dependency preparation does not read Host registry credentials. Docker progress is written to stderr; stdout is one
 JSON record with the immutable image content ID, local tag, lock hash, and the
 complete context-file inventory.
+
+On macOS, the owner preparation resolves the Docker client from `PATH` to its
+canonical executable and uses the current user's `~/.docker/run/docker.sock`
+through explicit Docker `-H unix://` arguments without inheriting a remote
+Docker context. It rejects a changed local daemon identity and a source image whose Linux
+architecture differs from the native Mac. Intel Macs build `linux/amd64`;
+Apple Silicon Macs build `linux/arm64`. The fixed Node base digest is a
+multiarch OCI index containing both platforms. The private receipt freezes
+the client digest, socket, daemon identity, host and image platforms, asset
+hashes, and immutable image ID for replay.
 
 The base image and pnpm version are fixed in the script and Dockerfile. An
 owner can set a bounded Docker-client path, timeout, or local tag:
@@ -72,7 +87,9 @@ parent/candidate workers and native observer launcher; it excludes other product
 expected behavior. It installs the exact locked Cordis 4.0.4, native tools and
 system prompt 0.2.0-rc.2 packages offline with scripts disabled, and adds
 BusyBox for the isolation supervisor. The build compiles the fixed launcher and
-parent protection library for Linux x64. Debian package installation is a build
+parent protection library for Linux x64 or arm64. The Dockerfile compiles and
+runs the native seccomp launcher and preload probes for the selected image
+architecture. Debian package installation is a build
 step; the returned image ID pins the completed image. No worker installation or
 package download occurs during verification.
 
@@ -115,19 +132,23 @@ tests are explicit opt-in and their skipped status is not live verification.
 ## Nested sandbox profile
 
 Full repository tests invoke the existing release adapter's Bubblewrap sandbox.
-This needs an explicit owner `repositorySandbox.seccompPath` in addition to
-`profile: repository`. The smoke below selects the vendored
+This needs an explicit owner `repositorySandbox.seccompPath` with either
+`profile: repository` on Linux x64 or `profile: portable-repository` on native
+macOS x64/arm64. The portable profile also requires the frozen local Docker
+socket and daemon identity. The smoke below selects the vendored
 `source-builder-seccomp.json`. The runner accepts only its fixed SHA-256
 (`b1e4b5b709578785bd2aff4a3a344301997571ad0e8ae5747aec176571ddc342`),
-a canonical non-writable-by-others file, Linux x64, and Docker Server
-`29.4.1/linux/amd64`. It copies the verified bytes into a private temporary file
+a canonical non-writable-by-others file, and Docker Server 29.4.1 on Linux
+with the matching `amd64` or `arm64` architecture. The Linux repository profile
+continues to require a Linux x64 Host and `29.4.1/linux/amd64` exactly. It copies
+the verified bytes into a private temporary file
 before invoking Docker and records the profile digest with the source tree.
 
 The profile is derived from [Moby profiles/seccomp v0.1.0](https://github.com/moby/profiles/tree/c936cc7b4074219137bc0bee45670f5e4618d462/seccomp),
 the module used by the tested Docker daemon. Original `default.json` SHA-256:
 `01536f1d1df938ae611eba20d6349e0de7a99b6ecdee1549427a0b01b8301e28`.
 Its Apache-2.0 license is retained in `source-builder-seccomp.LICENSE`.
-The additional rules permit namespace-only `unshare`, amd64 `clone` with
+The additional rules permit namespace-only `unshare`, native `clone` with
 `CLONE_NEWUSER`, and `mount`, `umount2`, and `pivot_root`. The clone rule does
 not restrict all other clone flags. Kernel capability checks still apply;
 this expands the available kernel surface compared with Docker's default.
@@ -173,7 +194,7 @@ node scripts/e2e/source-repository-smoke.mjs
 This owner-invoked engineering check snapshots the entire current workspace,
 including uncommitted, non-ignored files. It runs the unchanged root
 `pnpm check` and packs plugin-control-plane. Its repository profile allows
-30 minutes, 16 GiB memory, 8 CPUs, 1024 PIDs, 4 GiB workspace, and 2 GiB `/tmp`.
+30 minutes, 16 GiB memory, 8 CPUs, 1024 PIDs, and 4 GiB workspace. Native macOS portable builds allow 4 GiB `/tmp`; existing Linux repository builds retain 2 GiB `/tmp`.
 Both tmpfs mounts permit execution of build tools and test fixtures; the root
 remains read-only, with no capabilities or network. The evidence records actual Docker arguments and the immutable archived Git
 tree label. Normal conditional integration skips remain in force (for example,

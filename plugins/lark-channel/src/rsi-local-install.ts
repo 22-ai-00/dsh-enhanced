@@ -1,13 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, realpath, rename, unlink } from 'node:fs/promises'
-import { delimiter, isAbsolute, join } from 'node:path'
+import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { isMap, isScalar, parseDocument } from 'yaml'
 import { rsiBuildResources as io } from './rsi-build.js'
 import { resolveInstalledRsiDsh, type InstalledRsiDsh } from './rsi-install-inputs.js'
 import { prepareRsiSourceWorkspace } from './rsi-source.js'
 import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages, verifyRsiLocalInstalledPackagesFresh, rsiLocalPeerOverrides, rsiLocalRuntimeClosure, type RsiLocalCohort } from './rsi-local-cohort.js'
+import { launchAgentPaths } from './launchd.js'
+import { assertNativeLaunchdPlist, inspectNativeLaunchd, startNativeLaunchd, stopNativeLaunchd } from './rsi-native-launchd.js'
 import { withDshHomeLifecycleLock } from './setup.js'
 import { version } from './version.js'
+import type { RsiInstallPorts } from './rsi-install.js'
 
 function fail(message: string): never { throw new Error(`rsi local install: ${message}`) }
 const hash = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex')
@@ -170,22 +173,116 @@ export async function installRsiLocalProfile(input: RsiLocalProfileInput, ports 
   }
 }
 
-export async function installRsiLocalTarget(input: {dshHome:string;profile:string;sourceRepository:string;bundles:string[];signal?:AbortSignal}) {
-  if (process.platform !== 'linux') fail('automatic local RSI installation currently requires Linux')
+interface RsiLocalTargetPorts {
+  platform: NodeJS.Platform
+  prepareSource: typeof prepareRsiSourceWorkspace
+  prepareCohort: typeof prepareRsiLocalCohort
+  preflight: typeof preflightRsiLocalProfile
+  resolveDsh: typeof resolveInstalledRsiDsh
+  installProfile: typeof installRsiLocalProfile
+  pinSystemctl: typeof systemctlPin
+  stopLinux: RsiInstallPorts['stop']
+  startLinux: (profile: string, home: string) => Promise<void>
+  inspectNative: typeof inspectNativeLaunchd
+  validatePlist: typeof assertNativeLaunchdPlist
+  stopNative: typeof stopNativeLaunchd
+  startNative: typeof startNativeLaunchd
+  readPlist: (path: string) => Promise<Buffer | null>
+}
+
+/** A missing LaunchAgent is legitimate before the owner profile is installed.
+ * An existing one must be a single, owner-controlled physical file. */
+export async function readRsiLocalLaunchAgentPlist(path: string): Promise<Buffer | null> {
+  const uid = process.getuid?.()
+  if (!isAbsolute(path) || resolve(path) !== path || !Number.isSafeInteger(uid) || uid === undefined || uid < 1) {
+    fail('invalid LaunchAgent plist identity')
+  }
+  const directory = dirname(path)
+  let parent: Awaited<ReturnType<typeof lstat>>
+  try { parent = await lstat(directory) }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
+  if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid || parent.mode & 0o022
+    || await realpath(directory) !== directory) fail('LaunchAgents directory is not owner-safe and physical')
+  let before: Awaited<ReturnType<typeof lstat>>
+  try { before = await lstat(path) }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.uid !== uid
+    || before.mode & 0o022 || await realpath(path) !== path) fail('LaunchAgent plist is not owner-safe and physical')
+  const bytes = await io.readStable(path, 262_144)
+  const [after, parentAfter] = await Promise.all([lstat(path), lstat(directory)])
+  if (!after.isFile() || after.isSymbolicLink() || after.nlink !== 1 || after.uid !== uid
+    || after.mode !== before.mode || after.dev !== before.dev || after.ino !== before.ino
+    || !parentAfter.isDirectory() || parentAfter.isSymbolicLink() || parentAfter.uid !== uid
+    || parentAfter.mode !== parent.mode || parentAfter.dev !== parent.dev || parentAfter.ino !== parent.ino
+    || await realpath(directory) !== directory || await realpath(path) !== path) {
+    fail('LaunchAgent plist or directory changed while being read')
+  }
+  return bytes
+}
+
+const localTargetPorts: RsiLocalTargetPorts = {
+  platform: process.platform,
+  prepareSource: prepareRsiSourceWorkspace,
+  prepareCohort: prepareRsiLocalCohort,
+  preflight: preflightRsiLocalProfile,
+  resolveDsh: resolveInstalledRsiDsh,
+  installProfile: installRsiLocalProfile,
+  pinSystemctl: systemctlPin,
+  stopLinux: async (...args) => (await import('./rsi-install.js')).rsiInstallPorts.stop(...args),
+  startLinux: async (profile, home) => (await import('./rsi-install.js')).rsiInstallPorts.setup.start(profile, home),
+  inspectNative: inspectNativeLaunchd,
+  validatePlist: assertNativeLaunchdPlist,
+  stopNative: stopNativeLaunchd,
+  startNative: startNativeLaunchd,
+  readPlist: readRsiLocalLaunchAgentPlist,
+}
+
+export async function installRsiLocalTarget(input: {dshHome:string;profile:string;sourceRepository:string;bundles:string[];signal?:AbortSignal},
+  ports: RsiLocalTargetPorts = localTargetPorts) {
+  if (ports.platform !== 'linux' && ports.platform !== 'darwin') fail('automatic local RSI installation requires Linux or macOS')
   if (!profilePattern.test(input.profile)) fail('invalid target profile')
   await mkdir(input.dshHome,{recursive:true,mode:0o700})
   if (await realpath(input.dshHome) !== input.dshHome) fail('DSH_HOME must be canonical')
   const signal = AbortSignal.any([input.signal ?? new AbortController().signal,AbortSignal.timeout(2_400_000)])
   return withDshHomeLifecycleLock(input.dshHome,async () => {
-    const source = await prepareRsiSourceWorkspace({...input,version,signal})
-    const cohort = await prepareRsiLocalCohort({...input,source,signal})
-    await preflightRsiLocalProfile({...input,cohort})
-    const dsh = await resolveInstalledRsiDsh()
-    const systemctl = await systemctlPin()
-    const {rsiInstallPorts} = await import('./rsi-install.js')
-    const running = await rsiInstallPorts.stop(input,input.profile,systemctl,signal)
-    await installRsiLocalProfile({...input,cohort,dsh,signal})
-    if (running) await rsiInstallPorts.setup.start(input.profile,input.dshHome)
+    const source = await ports.prepareSource({...input,version,signal})
+    const cohort = await ports.prepareCohort({...input,source,signal})
+    await ports.preflight({...input,cohort})
+    const dsh = await ports.resolveDsh()
+    if (ports.platform === 'darwin') {
+      const identity = { dshHome: input.dshHome, profile: input.profile,
+        nodePath: await realpath(process.execPath), dshPath: dsh.path, dshSha256: dsh.pin.sha256 }
+      const state = ports.inspectNative(identity)
+      const plist = await ports.readPlist(launchAgentPaths(identity).plistPath)
+      if (state.registered && plist === null) fail('registered LaunchAgent has no trusted plist')
+      if (plist !== null) ports.validatePlist(plist.toString('utf8'), identity)
+      if (state.registered) await ports.stopNative(identity, signal)
+      await ports.installProfile({...input,cohort,dsh,signal})
+      if (state.registered) {
+        const current = await ports.readPlist(launchAgentPaths(identity).plistPath)
+        if (current === null || !current.equals(plist!)
+          || hash(await io.readStable(dsh.path,67_108_864,false,true)) !== dsh.pin.sha256) {
+          fail('native service identity changed during local installation')
+        }
+        ports.validatePlist(current.toString('utf8'), identity)
+        try { await ports.startNative(identity, signal) }
+        catch (startError) {
+          // Bootstrap may have committed before a later inspection failed.
+          // stopNative checks the loaded job's identity before bootout.
+          try { await ports.stopNative(identity, AbortSignal.timeout(45_000)) }
+          catch (stopError) {
+            throw new AggregateError([startError, stopError],
+              'rsi local install: native service startup failed and stop outcome is unknown')
+          }
+          throw startError
+        }
+      }
+    } else {
+      const systemctl = await ports.pinSystemctl()
+      const running = await ports.stopLinux(input,input.profile,systemctl,signal)
+      await ports.installProfile({...input,cohort,dsh,signal})
+      if (running) await ports.startLinux(input.profile,input.dshHome)
+    }
     return {mode:'local-cohort-installed',profile:input.profile,sourceCommit:cohort.sourceCommit,packages:cohort.packages.length}
   })
 }

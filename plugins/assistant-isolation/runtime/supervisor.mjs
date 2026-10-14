@@ -1,9 +1,9 @@
 import { spawn } from 'node:child_process'
 import { chmod, mkdtemp, rm } from 'node:fs/promises'
+import { lstatSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const SOCKET = 'unix:///var/run/docker.sock'
 const OPERATION_TIMEOUT_MS = 10_000
 const NAME = /^dsh-isolation-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/
 const IMAGE = /^sha256:[0-9a-f]{64}$/
@@ -41,6 +41,12 @@ function decode(buffer) {
 function succeeded(result) {
   return result.code === 0 && !result.timeout && !result.overflow
 }
+function socketUnchanged() {
+  try {
+    const info = lstatSync(config.socket.path)
+    return info.isSocket() && info.dev === config.socket.dev && info.ino === config.socket.ino
+  } catch { return false }
+}
 function docker(args, { outputLimit = 65_536, timeoutMs = OPERATION_TIMEOUT_MS } = {}) {
   return new Promise(resolve => {
     let child
@@ -61,8 +67,9 @@ function docker(args, { outputLimit = 65_536, timeoutMs = OPERATION_TIMEOUT_MS }
       resolve({ ...result, stdout: decoded ?? '', stderr: decode(err) ?? '', stdoutBytes: out.length,
         stdoutUtf8: decoded !== undefined, overflow, timeout })
     }
+    if (!socketUnchanged()) { mutationAmbiguous = true; finish({ code: null, error: 'docker-socket-changed' }); return }
     try {
-      child = spawn(config.dockerPath, ['--config', dockerDirectory, '-H', SOCKET, ...args], {
+      child = spawn(config.dockerPath, ['--config', dockerDirectory, '-H', `unix://${config.socket.path}`, ...args], {
         shell: false, env: environment(), stdio: ['ignore', 'pipe', 'pipe'],
       })
     } catch (error) { finish({ code: null, error: String(error) }); return }
@@ -213,6 +220,8 @@ async function begin() {
 function valid(input) {
   return input && NAME.test(input.containerName) && IMAGE.test(input.image)
     && typeof input.dockerPath === 'string' && input.dockerPath.startsWith('/')
+    && input.socket && typeof input.socket.path === 'string' && input.socket.path.startsWith('/')
+    && Number.isSafeInteger(input.socket.dev) && Number.isSafeInteger(input.socket.ino)
     && typeof input.workspacePath === 'string' && input.workspacePath.startsWith('/') && !/[\p{Cc},]/u.test(input.workspacePath)
     && typeof input.command === 'string' && Number.isSafeInteger(input.deadline)
     && input.limits && Object.values(input.limits).every(value => typeof value === 'number' && Number.isFinite(value) && value > 0)
@@ -254,11 +263,12 @@ async function provision() {
 }
 async function configure(input) {
   if (config !== undefined || !valid(input)) { send({ type: 'error', reason: 'invalid-supervisor-config' }); return }
-  if (process.platform !== 'linux' || typeof process.getuid !== 'function' || typeof process.getgid !== 'function' || process.getuid() === 0) {
-    send({ type: 'error', reason: 'non-root-linux-host-required' })
+  if (!['linux', 'darwin'].includes(process.platform) || typeof process.getuid !== 'function' || typeof process.getgid !== 'function' || process.getuid() === 0) {
+    send({ type: 'error', reason: 'non-root-unix-host-required' })
     return
   }
   config = input
+  if (!socketUnchanged()) { send({ type: 'error', reason: 'docker-socket-changed' }); return }
   try {
     dockerDirectory = await mkdtemp(join(tmpdir(), 'dsh-isolation-docker-'))
     await chmod(dockerDirectory, 0o700)

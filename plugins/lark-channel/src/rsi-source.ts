@@ -1,8 +1,8 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, open, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
-import { isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 const OFFICIAL = 'https://github.com/22-ai-00/dsh-enhanced.git'
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
@@ -10,6 +10,8 @@ const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$
 const COMMIT = /^[a-f0-9]{40}$/u
 const ZERO = '0'.repeat(40)
 const MAX_OUTPUT = 65_536
+const LEGACY_MAC_VERSION = '0.1.49'
+const LEGACY_MAC_COMMIT = '172bc31ddf0c00a6f0b3252354f2170a14dd7fc2'
 const GIT_FLAGS = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'protocol.allow=never',
   '-c', 'protocol.https.allow=always', '-c', 'protocol.file.allow=always',
   '-c', 'credential.helper=', '-c', 'gc.auto=0'] as const
@@ -192,6 +194,85 @@ async function existing(path: string, expected: Omit<Receipt, 'sourceCommit' | '
   return result
 }
 
+async function absent(path: string): Promise<boolean> {
+  try { await lstat(path); return false }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true; throw error }
+}
+
+async function initialRefs(repository: string, expected: readonly string[], signal: AbortSignal): Promise<boolean> {
+  const rows = (await git(repository, ['for-each-ref', '--format=%(refname)%00%(objectname)%00%(symref)'], signal))
+    .split('\n').filter(Boolean).sort()
+  return JSON.stringify(rows) === JSON.stringify(expected.map(name => `${name}\0${LEGACY_MAC_COMMIT}\0`).sort())
+}
+
+/** Retire only the verified official 0.1.49 Mac source preparation.
+ * No prepared grant, build or coordinator resource or noninitial ref may exist.
+ * The old tree is retained byte-for-byte with its original receipt paths. */
+async function archiveUnusedLegacyMacWorkspace(home: string, profile: string,
+  old: RsiSourceWorkspace, signal: AbortSignal): Promise<string> {
+  if (old.version !== LEGACY_MAC_VERSION || old.origin.kind !== 'official-tag'
+    || old.origin.locator !== OFFICIAL || old.origin.ref !== 'refs/tags/v0.1.49'
+    || old.sourceCommit !== LEGACY_MAC_COMMIT || old.baseline.initialCommit !== LEGACY_MAC_COMMIT
+    || !await initialRefs(old.repository, ['refs/dsh-source/repairs', 'refs/heads/repairs'], signal)
+    || !await initialRefs(old.baseline.remote, ['refs/heads/repairs'], signal)) {
+    fail('legacy Mac source has maintenance or unknown Git refs; preserve it and resolve the existing source authority manually')
+  }
+  const resourcePaths = [
+    ...['rsi-authorities', 'rsi-authority-runtimes', 'rsi-builds', 'rsi-creation-builds',
+      'rsi-release-builds', 'rsi-local-cohorts'].map(kind => join(home, kind, profile)),
+    join(home, 'rsi-service-environments', `${profile}.json`),
+    join(home, 'rsi-coordinators'), join(home, '.rsi-setup-journal.json'),
+    join(home, '.rsi-systemd-capture-journal.json'),
+    join(home, `.rsi-coordinator-${createHash('sha256').update(profile).digest('hex').slice(0, 16)}.json`),
+    join(home, `.rsi-${createHash('sha256').update(profile).digest('hex').slice(0, 12)}`),
+    join(dirname(home), `.dsh-rsi-local-updates-${createHash('sha256').update(home).digest('hex').slice(0, 16)}`),
+  ]
+  for (const path of resourcePaths) if (!await absent(path)) {
+    fail(`legacy Mac source may already have prepared or active RSI resources at ${path}; preserve its authority and resolve manually`)
+  }
+  for (const kind of ['rsi-sources', 'rsi-authority-runtimes', 'rsi-builds', 'rsi-creation-builds',
+    'rsi-release-builds', 'rsi-local-cohorts']) {
+    const parent = join(home, kind)
+    if (await absent(parent)) continue
+    const names = await readdir(parent)
+    if (names.some(name => name.startsWith(`.${profile}-stage-`)
+      || name.startsWith(`.${profile}-update-`) || name.startsWith(`.${profile}-previous-`))) {
+      fail(`legacy Mac source has unfinished RSI preparation in ${parent}; preserve it and resolve manually`)
+    }
+  }
+  if ((await readdir(home)).some(name => name.startsWith('.rsi-coordinator-'))) {
+    fail('legacy Mac source has a coordinator marker; preserve its authority and resolve manually')
+  }
+  // A previous successful migration is not a license to rebase again. An
+  // interrupted attempt may have created only the empty private archive slot.
+  const archiveParent = join(home, 'rsi-source-archives')
+  try { await mkdir(archiveParent, { mode: 0o700 }) }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
+  await privateDirectory(archiveParent)
+  if ((await lstat(archiveParent)).uid !== process.getuid?.()) fail('legacy archive parent is not owned by the current user')
+  const profileArchive = join(archiveParent, profile)
+  try { await mkdir(profileArchive, { mode: 0o700 }) }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
+  await privateDirectory(profileArchive)
+  if ((await lstat(profileArchive)).uid !== process.getuid?.()) fail('legacy archive slot is not owned by the current user')
+  if ((await readdir(profileArchive)).length !== 0) {
+    fail('legacy Mac source has an existing archive; preserve both histories and resolve manually')
+  }
+  const destination = join(profileArchive, randomUUID())
+  signal.throwIfAborted()
+  let archived = false
+  try {
+    await rename(join(home, 'rsi-sources', profile), destination)
+    archived = true
+    await syncDirectory(profileArchive)
+    await syncDirectory(join(home, 'rsi-sources'))
+  } catch (error) {
+    if (archived) throw new Error(`rsi source: legacy archive was moved to ${destination}; verify it before retrying`, { cause: error })
+    throw error
+  }
+  return destination
+}
+
 /** Read the registered source without creating or repairing any workspace. */
 export async function readRsiSourceWorkspace(input: { dshHome: string; profile: string; version?: string;
   sourceRepository?: string | undefined; signal?: AbortSignal }): Promise<RsiSourceWorkspace> {
@@ -249,8 +330,21 @@ export async function prepareRsiSourceWorkspace(input: { dshHome: string; profil
   const expected = { schemaVersion: 1 as const, version: input.version, origin, repository,
     dshHome: input.dshHome, profile: input.profile,
     baseline: { ref: 'refs/dsh-source/repairs' as const, remote, targetBranch: 'repairs' as const } }
-  try { await lstat(final); return readRsiSourceWorkspace({ ...input, signal }) }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+  const present = await lstat(final).then(() => true, error => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  })
+  if (present) {
+    if (process.platform !== 'darwin') return readRsiSourceWorkspace({ ...input, signal })
+    const old = await readRsiSourceWorkspace({ dshHome: input.dshHome, profile: input.profile, signal })
+    if (old.version === input.version && (input.sourceRepository === undefined
+      || JSON.stringify(old.origin) === JSON.stringify(origin))) return old
+    const archive = await archiveUnusedLegacyMacWorkspace(input.dshHome, input.profile, old, signal)
+    try { return await prepareRsiSourceWorkspace(input) }
+    catch (error) {
+      throw new Error(`rsi source: replacement preparation failed; untouched legacy source is retained at ${archive}`, { cause: error })
+    }
+  }
   const stage = await mkdtemp(join(parent, `.${input.profile}-stage-`))
   await chmod(stage, 0o700)
   let claimed = false, claimIdentity: { dev: number; ino: number } | undefined

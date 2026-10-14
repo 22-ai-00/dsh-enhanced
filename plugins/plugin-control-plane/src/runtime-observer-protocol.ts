@@ -26,12 +26,12 @@ export function runtimeObserverFail(): never { throw new Error('runtime observer
 
 /**
  * Runtime-only platform gate. The observer binds an owner-private AF_UNIX socket
- * and reads Loader/Fiber state through /proc-backed ownership checks, which are
- * only available on Linux. Callers that merely validate or clone configuration
- * must not use this.
+ * and reads Loader/Fiber state in-process. Linux and macOS both provide the
+ * private socket, inode and HMAC primitives used here. Service identity is
+ * checked separately by the platform installer. Pure validators do not use this.
  */
 export function assertRuntimeObserverPlatform(): void {
-  if (process.platform !== 'linux') runtimeObserverFail()
+  if (process.platform !== 'linux' && process.platform !== 'darwin') runtimeObserverFail()
 }
 export function assertRuntimeObserverExact(value: unknown, fields: string[]): asserts value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)
@@ -204,7 +204,7 @@ export function assertRuntimeObservation(value: unknown): asserts value is Runti
 
 /** Owner caller supplies no claimed state; fresh challenge authenticates the observed response. */
 export async function queryRuntimeObserver(input: { socketPath: string; keyPath: string; signal?: AbortSignal }): Promise<RuntimeObservation> {
-  if (process.platform !== 'linux') runtimeObserverFail()
+  if (process.platform !== 'linux' && process.platform !== 'darwin') runtimeObserverFail()
   privateRuntimeObserverDirectory(dirname(input.socketPath))
   const before = lstatSync(input.socketPath)
   if (!before.isSocket() || before.uid !== process.getuid!() || (before.mode & 0o077) !== 0 || realpathSync(input.socketPath) !== input.socketPath) runtimeObserverFail()

@@ -10,6 +10,8 @@ import { removeIsolatedContainer } from './runner.js'
 import { defaultStoragePolicy, validateStoragePolicy } from './storage-policy.js'
 import { maintainIsolationStorage, type IsolationStorageMaintenance } from './storage.js'
 import { archiveIsolationAudit, verifyIsolationAuditArchive } from './audit-archive.js'
+import { configuredDockerSocketPath } from './docker-socket.js'
+import { stateSocketBindingMatches } from './state-socket-binding.js'
 
 function privateLedger(stateRoot: string, dockerPath: string): string {
   if (!isAbsolute(stateRoot) || realpathSync(stateRoot) !== stateRoot) throw new Error('canonical state root required')
@@ -23,18 +25,22 @@ function privateLedger(stateRoot: string, dockerPath: string): string {
 }
 
 /** Operator entry point, separate from the model's tool registry. */
-export async function revokeIsolationGrant(stateRoot: string, grantId: string, revision: number, dockerPath = '/usr/bin/docker'): Promise<{ revoked: true; containersRemoved: boolean }> {
+export async function revokeIsolationGrant(stateRoot: string, grantId: string, revision: number,
+  dockerPath = process.platform === 'darwin' ? '/usr/local/bin/docker' : '/usr/bin/docker', socketPath?: string): Promise<{ revoked: true; containersRemoved: boolean }> {
   const file = privateLedger(stateRoot, dockerPath)
+  const boundSocket = configuredDockerSocketPath(socketPath)
   const ledger = new IsolationLedger(file)
   try {
     ledger.revoke(grantId, revision, 'external-operator-revoke')
-    let containersRemoved = true
+    const bindingMatches = stateSocketBindingMatches(stateRoot, boundSocket)
+    let containersRemoved = bindingMatches
     let cursor = ''
     for (;;) {
       const page = ledger.recoverable(cursor)
       if (page.length === 0) break
       cursor = page.at(-1)!.id
-      for (const job of page) if (job.grantId === grantId && !await removeIsolatedContainer(dockerPath, job.containerName)) containersRemoved = false
+      for (const job of page) if (job.grantId === grantId && bindingMatches
+        && !await removeIsolatedContainer(dockerPath, job.containerName, { socketPath: boundSocket })) containersRemoved = false
     }
     // Revocation is durable. A running controller also polls it and prevents any
     // pending create from starting; late daemon responses may remain unknown.
@@ -43,7 +49,9 @@ export async function revokeIsolationGrant(stateRoot: string, grantId: string, r
 }
 
 /** Reconcile only settled requests; a live Host owns its own background sweep. */
-export async function reconcileIsolation(stateRoot: string, dockerPath = '/usr/bin/docker', signal: AbortSignal = new AbortController().signal): Promise<{ checked: number; released: number; retained: number }> {
+export async function reconcileIsolation(stateRoot: string, dockerPath = process.platform === 'darwin' ? '/usr/local/bin/docker' : '/usr/bin/docker',
+  signal: AbortSignal = new AbortController().signal, socketPath?: string): Promise<{ checked: number; released: number; retained: number }> {
+  const boundSocket = configuredDockerSocketPath(socketPath)
   const ledger = new IsolationLedger(privateLedger(stateRoot, dockerPath))
   const abort = new AbortController()
   let timer: NodeJS.Timeout | undefined
@@ -63,7 +71,8 @@ export async function reconcileIsolation(stateRoot: string, dockerPath = '/usr/b
         signal.throwIfAborted(); abort.signal.throwIfAborted()
         counts.checked++
         const combined = AbortSignal.any([signal, abort.signal, AbortSignal.timeout(30_000)])
-        if (await reconcileUnknownJob(ledger, controller, job, dockerPath, combined)) counts.released++
+        if (stateSocketBindingMatches(stateRoot, boundSocket)
+          && await reconcileUnknownJob(ledger, controller, job, dockerPath, combined, boundSocket)) counts.released++
         else counts.retained++
       }
     }
@@ -96,17 +105,17 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   const [command, stateRoot, grantId, revision, dockerPath, ...extra] = process.argv.slice(2)
   try {
     if (command === 'probe') {
-      if (!stateRoot || revision !== undefined) throw new Error('usage: dsh-isolation probe sha256:image-id [/absolute/docker]')
-      process.stdout.write(`${JSON.stringify(await probeIsolationRuntime(stateRoot, grantId))}\n`)
+      if (!stateRoot || dockerPath !== undefined || extra.length > 0) throw new Error('usage: dsh-isolation probe sha256:image-id [/absolute/docker [/absolute/docker.sock]]')
+      process.stdout.write(`${JSON.stringify(await probeIsolationRuntime(stateRoot, grantId, revision))}\n`)
     } else if (command === 'maintain') {
       if (stateRoot === undefined || dockerPath !== undefined || (grantId !== undefined && !/^(0|[1-9][0-9]*)$/.test(grantId))) throw new Error('usage: dsh-isolation maintain /absolute/private/state-root [result-retention-ms [after-job-id]]')
       process.stdout.write(`${JSON.stringify(await maintainIsolation(stateRoot, grantId === undefined ? 0 : Number(grantId), revision))}\n`)
     } else if (command === 'reconcile') {
-      if (stateRoot === undefined || revision !== undefined) throw new Error('usage: dsh-isolation reconcile /absolute/private/state-root [/absolute/docker]')
+      if (stateRoot === undefined || dockerPath !== undefined || extra.length > 0) throw new Error('usage: dsh-isolation reconcile /absolute/private/state-root [/absolute/docker [/absolute/docker.sock]]')
       const abort = new AbortController()
       const cancel = (): void => abort.abort()
       process.once('SIGINT', cancel); process.once('SIGTERM', cancel)
-      try { process.stdout.write(`${JSON.stringify(await reconcileIsolation(stateRoot, grantId, abort.signal))}\n`) }
+      try { process.stdout.write(`${JSON.stringify(await reconcileIsolation(stateRoot, grantId, abort.signal, revision))}\n`) }
       finally { process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel) }
     } else if (command === 'archive-audit') {
       if (stateRoot === undefined || grantId === undefined || dockerPath !== undefined || extra.length > 0
@@ -120,8 +129,8 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
       }
       process.stdout.write(`${JSON.stringify(verifyIsolationAuditArchive(stateRoot))}\n`)
     } else {
-    if (command !== 'revoke' || stateRoot === undefined || grantId === undefined || revision === undefined || extra.length > 0 || !/^[1-9][0-9]*$/.test(revision)) throw new Error('usage: dsh-isolation revoke /absolute/private/state-root grant-id revision [/absolute/docker]')
-    const result = await revokeIsolationGrant(stateRoot, grantId, Number(revision), dockerPath)
+    if (command !== 'revoke' || stateRoot === undefined || grantId === undefined || revision === undefined || extra.length > 1 || !/^[1-9][0-9]*$/.test(revision)) throw new Error('usage: dsh-isolation revoke /absolute/private/state-root grant-id revision [/absolute/docker [/absolute/docker.sock]]')
+    const result = await revokeIsolationGrant(stateRoot, grantId, Number(revision), dockerPath, extra[0])
     process.stdout.write(`${JSON.stringify(result)}\n`)
     if (!result.containersRemoved) process.exitCode = 2
     }

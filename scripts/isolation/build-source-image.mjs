@@ -15,16 +15,22 @@ const packageManager = 'pnpm@11.7.0'
 const maximumTimeoutMs = 1_800_000
 
 function parseArguments(argv) {
-  const value = { dockerPath: '/usr/bin/docker', timeoutMs: 1_800_000, tag: undefined }
+  const value = { dockerPath: '/usr/bin/docker', socketPath: undefined, platform: process.arch === 'arm64' ? 'arm64' : 'amd64', timeoutMs: 1_800_000, tag: undefined }
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index]
     const next = argv[index + 1]
     if (flag === '--docker-path') { value.dockerPath = next; index += 1 }
+    else if (flag === '--socket-path') { value.socketPath = next; index += 1 }
+    else if (flag === '--platform') { value.platform = next; index += 1 }
     else if (flag === '--timeout-ms') { value.timeoutMs = Number(next); index += 1 }
     else if (flag === '--tag') { value.tag = next; index += 1 }
     else throw new Error(`unknown argument: ${flag}`)
   }
   if (typeof value.dockerPath !== 'string' || !value.dockerPath.startsWith('/') || value.dockerPath.includes('\0')
+    || (value.socketPath !== undefined && (typeof value.socketPath !== 'string' || !value.socketPath.startsWith('/')
+      || resolve(value.socketPath) !== value.socketPath || !value.socketPath.endsWith('/.docker/run/docker.sock')))
+    || !['amd64', 'arm64'].includes(value.platform) || (process.arch === 'arm64' ? 'arm64' : 'amd64') !== value.platform
+    || (process.platform === 'darwin' && value.socketPath === undefined)
     || !Number.isSafeInteger(value.timeoutMs) || value.timeoutMs < 60_000 || value.timeoutMs > maximumTimeoutMs
     || (value.tag !== undefined && (typeof value.tag !== 'string' || !/^[a-z0-9][a-z0-9._/-]{0,127}(?::[A-Za-z0-9][A-Za-z0-9._-]{0,127})?$/u.test(value.tag)))) {
     throw new Error('invalid docker path, timeout, or local image tag')
@@ -49,6 +55,18 @@ async function trustedDockerPath(path) {
   }
   return canonical
 }
+
+async function trustedSocket(path) {
+  if (path === undefined) return undefined
+  if (await realpath(path) !== path) throw new Error('Docker socket must be canonical')
+  const info = await lstat(path), parent = await lstat(dirname(path))
+  if (!info.isSocket() || info.uid !== process.getuid?.() || !parent.isDirectory()
+    || parent.uid !== process.getuid?.() || parent.mode & 0o022) throw new Error('Docker socket is not owner-safe')
+  return path
+}
+
+const dockerArgs = args => options.socketPath === undefined ? args
+  : ['--config', dockerConfig, '-H', `unix://${options.socketPath}`, ...args]
 
 async function copyContextFile(context, source, inventory) {
   await regularFile(source, relative(root, source))
@@ -76,7 +94,7 @@ async function workspaceManifests() {
 
 async function run(command, args, timeoutMs, signal) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'], shell: false, env: { PATH: '/usr/bin:/bin', HOME: temporaryRoot, DOCKER_CONFIG: dockerConfig } })
+    const child = spawn(command, dockerArgs(args), { stdio: ['ignore', 'ignore', 'pipe'], shell: false, env: { PATH: '/usr/bin:/bin', HOME: temporaryRoot, DOCKER_CONFIG: dockerConfig, DOCKER_BUILDKIT: '1' } })
     let stderr = ''; let settled = false; let timedOut = false
     const abort = () => { child.kill('SIGKILL') }
     const finish = (callback) => value => {
@@ -100,7 +118,7 @@ async function run(command, args, timeoutMs, signal) {
 async function imageId(dockerPath, tag, timeoutMs, signal) {
   let output = ''
   await new Promise((resolvePromise, reject) => {
-    const child = spawn(dockerPath, ['image', 'inspect', '--format', '{{.Id}}', tag], { stdio: ['ignore', 'pipe', 'pipe'], shell: false, env: { PATH: '/usr/bin:/bin', HOME: temporaryRoot, DOCKER_CONFIG: dockerConfig } })
+    const child = spawn(dockerPath, dockerArgs(['image', 'inspect', '--format', '{{.Id}}/{{.Os}}/{{.Architecture}}', tag]), { stdio: ['ignore', 'pipe', 'pipe'], shell: false, env: { PATH: '/usr/bin:/bin', HOME: temporaryRoot, DOCKER_CONFIG: dockerConfig, DOCKER_BUILDKIT: '1' } })
     let stderr = ''; let settled = false; let timedOut = false; let outputBytes = 0
     const abort = () => { child.kill('SIGKILL') }
     const finish = callback => value => {
@@ -120,8 +138,9 @@ async function imageId(dockerPath, tag, timeoutMs, signal) {
       : signal.aborted ? reject(signal.reason ?? new Error('docker image inspect aborted'))
         : code === 0 ? resolvePromise() : reject(new Error(`docker image inspect exited ${code}: ${stderr.trimEnd()}`))))
   })
-  if (!/^sha256:[a-f0-9]{64}$/u.test(output.trim())) throw new Error('docker did not return an immutable image content ID')
-  return output.trim()
+  const suffix = `/linux/${options.platform}`
+  if (!new RegExp(`^sha256:[a-f0-9]{64}${suffix}$`, 'u').test(output.trim())) throw new Error('docker did not return an immutable image with the required Linux platform')
+  return output.trim().slice(0, -suffix.length)
 }
 
 const options = parseArguments(process.argv.slice(2))
@@ -145,7 +164,8 @@ try {
   const lockSha256 = createHash('sha256').update(lock).digest('hex')
   const tag = options.tag ?? `dsh-source-builder:${lockSha256.slice(0, 16)}-${randomUUID().slice(0, 8)}`
   const dockerPath = await trustedDockerPath(options.dockerPath)
-  await run(dockerPath, ['build', '--pull=false', '--file', join(context, 'scripts', 'isolation', 'source-builder.Dockerfile'),
+  await trustedSocket(options.socketPath)
+  await run(dockerPath, ['build', '--pull=false', '--platform', `linux/${options.platform}`, '--file', join(context, 'scripts', 'isolation', 'source-builder.Dockerfile'),
     '--build-arg', `BASE_IMAGE=${baseImage}`, '--tag', tag, context], options.timeoutMs, abort.signal)
   const id = await imageId(dockerPath, tag, options.timeoutMs, abort.signal)
   process.stdout.write(JSON.stringify({ image: id, tag, baseImage, packageManager, lockSha256, contextFiles: inventory.sort() }) + '\n')

@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { chmod, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { sameLocalDockerSocket, type DockerSocket } from './docker-socket.js'
 
 const NAME = /^dsh-isolation-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/
 const OUTPUT_LIMIT = 4096
@@ -36,7 +37,7 @@ function environment(): NodeJS.ProcessEnv {
 
 interface CommandResult { code: number | null; stderr: string; timedOut: boolean; aborted: boolean }
 
-async function command(dockerPath: string, configDirectory: string, socketPath: string, args: readonly string[], signal?: AbortSignal): Promise<CommandResult> {
+async function command(dockerPath: string, configDirectory: string, socketPath: string, args: readonly string[], signal?: AbortSignal, socket?: DockerSocket): Promise<CommandResult> {
   return await new Promise(resolve => {
     let child: ReturnType<typeof spawn> | undefined
     let stderr = ''
@@ -51,6 +52,7 @@ async function command(dockerPath: string, configDirectory: string, socketPath: 
     }
     const abort = (): void => { child?.kill('SIGKILL'); finish(null, false, true) }
     if (signal?.aborted) { finish(null, false, true); return }
+    if (socket && !sameLocalDockerSocket(socket)) { finish(null, false, false); return }
     signal?.addEventListener('abort', abort, { once: true })
     try {
       child = spawn(dockerPath, ['--config', configDirectory, '-H', `unix://${socketPath}`, ...args], {
@@ -76,13 +78,13 @@ function absent(result: CommandResult): boolean {
     && result.code !== 0 && /no such (object|container|volume)/i.test(result.stderr)
 }
 
-async function removeOne(dockerPath: string, configDirectory: string, socketPath: string, kind: 'container' | 'volume', name: string, signal?: AbortSignal): Promise<CleanupResourceReceipt | undefined> {
+async function removeOne(dockerPath: string, configDirectory: string, socketPath: string, kind: 'container' | 'volume', name: string, signal?: AbortSignal, socket?: DockerSocket): Promise<CleanupResourceReceipt | undefined> {
   for (let attempt = 0; attempt < 3; attempt++) {
-    const removal = await command(dockerPath, configDirectory, socketPath, kind === 'volume' ? ['volume', 'rm', name] : ['rm', '-f', name], signal)
+    const removal = await command(dockerPath, configDirectory, socketPath, kind === 'volume' ? ['volume', 'rm', name] : ['rm', '-f', name], signal, socket)
     // A failed or ambiguous remove invalidates this cleanup pass even if a later
     // inspect happens to find the resource absent.
     if (removal.timedOut || removal.aborted || removal.code === null) return undefined
-    const inspection = await command(dockerPath, configDirectory, socketPath, ['inspect', '--type', kind, name], signal)
+    const inspection = await command(dockerPath, configDirectory, socketPath, ['inspect', '--type', kind, name], signal, socket)
     if (absent(inspection)) return Object.freeze({ kind, name, removalExitCode: removal.code, inspectionConfirmedAbsent: true })
     if (inspection.timedOut || inspection.aborted || inspection.code === null) return undefined
     if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 100))
@@ -94,9 +96,10 @@ async function removeOne(dockerPath: string, configDirectory: string, socketPath
  * Deletes and then independently inspects all three deterministic resources.
  * The returned opaque receipt is evidence of this exact cleanup pass only.
  */
-export async function cleanupIsolationResources(dockerPath: string, name: string, options: { socketPath?: string; signal?: AbortSignal } = {}): Promise<IsolationCleanupReceipt | undefined> {
+export async function cleanupIsolationResources(dockerPath: string, name: string, options: { socketPath?: string; socket?: DockerSocket; signal?: AbortSignal } = {}): Promise<IsolationCleanupReceipt | undefined> {
   const socketPath = options.socketPath ?? '/var/run/docker.sock'
-  if (!NAME.test(name) || !dockerPath.startsWith('/') || !validSocket(socketPath) || options.signal?.aborted) return undefined
+  if (!NAME.test(name) || !dockerPath.startsWith('/') || !validSocket(socketPath) || options.signal?.aborted
+    || (options.socket && (options.socket.path !== socketPath || !sameLocalDockerSocket(options.socket)))) return undefined
   let configDirectory: string | undefined
   try {
     configDirectory = await mkdtemp(join(tmpdir(), 'dsh-isolation-docker-'))
@@ -109,11 +112,11 @@ export async function cleanupIsolationResources(dockerPath: string, name: string
     const resources: CleanupResourceReceipt[] = []
     let complete = true
     for (const [kind, target] of targets) {
-      const receipt = await removeOne(dockerPath, configDirectory, socketPath, kind, target, options.signal)
+      const receipt = await removeOne(dockerPath, configDirectory, socketPath, kind, target, options.signal, options.socket)
       if (receipt === undefined) complete = false
       else resources.push(receipt)
     }
-    if (!complete || options.signal?.aborted) return undefined
+    if (!complete || options.signal?.aborted || (options.socket && !sameLocalDockerSocket(options.socket))) return undefined
     const receipt = Object.freeze({})
     receipts.set(receipt, Object.freeze({ dockerPath, socketPath, containerName: name, checkedAt: Date.now(), resources: Object.freeze(resources) }))
     return receipt
