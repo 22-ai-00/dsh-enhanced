@@ -56,13 +56,17 @@ async function fixture(load = true, services = ['candidateService'], nativeInclu
       ctx.loader.builtins.include = Include
       const includeOptions = { id: 'include', name: 'cordis:include', config: { path: pathToFileURL(join(profile, 'cordis.yml')).href } }
       await ctx.loader.create(includeOptions)
+      // create() returns before Include finishes reading and mounting its tree.
+      await ctx.loader.await()
     }
     return fiber
   }
   const loader = load ? await addLoader() : undefined
-  const addCandidate = () => {
+  const addCandidate = async () => {
     const options = { id: 'candidate', name: config.targets[0]!.module, config: { option: 1 } }
-    return nativeInclude ? ctx.loader.resolve('include').subtree!.create(options) : ctx.loader.create(options)
+    const id = await (nativeInclude ? ctx.loader.resolve('include').subtree!.create(options) : ctx.loader.create(options))
+    await ctx.loader.await()
+    return id
   }
   const dependency = () => ctx.plugin({ name: 'fixture-dependency', apply(c: Context) { c.provide('fixtureDependency', {}) } })
   const query = () => queryRuntimeObserver(config)
@@ -120,6 +124,7 @@ describe.skipIf(!['linux', 'darwin'].includes(process.platform))('owner runtime 
     await f.addCandidate()
     expect((await f.query()).entries[0]).toMatchObject({ active: false, instance: null })
     await f.dependency()
+    await f.ctx.loader.await()
     const first = (await f.query()).entries[0]!
     expect(first.active).toBe(true)
     await f.ctx.loader.update('include:candidate', { config: { option: 2 } })
