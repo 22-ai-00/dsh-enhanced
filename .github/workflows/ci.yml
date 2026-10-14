@@ -224,7 +224,7 @@ jobs:
     # verified instead of trusting the Linux job for it. Linux-only suites
     # (bubblewrap sandbox, root-owned system dirs) skip themselves by platform.
     runs-on: macos-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     env:
       PNPM_CONFIG_WORKSPACE_CONCURRENCY: '2'
       DSH_NATIVE_LAUNCHD_TEST: '1'
@@ -256,6 +256,17 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Verify native macOS paths early
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Report platform fixture and launchd failures before the long
+          # Control Plane integration suite; the full check still follows.
+          pnpm run build
+          pnpm --filter @dsh-enhanced/plugin-control-plane exec vitest run --testTimeout=15000 tests/source-build.spec.ts
+          pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run --testTimeout=15000 tests/controller-startup.spec.ts tests/state-socket-binding.spec.ts tests/storage.spec.ts tests/mac-socket.spec.ts
+          pnpm --filter @dsh-enhanced/lark-channel exec vitest run --testTimeout=15000 tests/rsi-native-profile.spec.ts tests/rsi-native-install.spec.ts tests/rsi-native-launchd.spec.ts tests/native-lifecycle-lock.spec.ts tests/rsi-local-install.spec.ts tests/rsi-build.spec.ts tests/rsi-creation-build.spec.ts tests/rsi-source.spec.ts tests/setup.spec.ts
 
       - name: Verify repository
         id: repository

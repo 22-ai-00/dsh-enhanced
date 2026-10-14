@@ -11,6 +11,8 @@ import { AssistantIsolationService } from '../src/service.ts'
 import { IsolationLedger } from '../src/ledger.ts'
 import { defaultStoragePolicy } from '../src/storage-policy.ts'
 import { maintainIsolationStorage, observeStorage } from '../src/storage.ts'
+import { configuredDockerSocketPath } from '../src/docker-socket.ts'
+import { bindIsolationStateSocket } from '../src/state-socket-binding.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -18,6 +20,7 @@ const identity = { principalDigest: 'owner', principalRecordId: 'record', princi
 const request = (key: string) => ({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: key, requestDigest: key, durationMs: 1000 })
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'isolation-storage-'))); roots.push(root)
+  bindIsolationStateSocket(root, configuredDockerSocketPath(undefined))
   const ledger = new IsolationLedger(join(root, 'ledger.sqlite'))
   const authority = ledger.claimController('host', 30_000)
   ledger.syncGrants([{ ...identity, id: 'grant', revision: 1, expiresAt: Date.now() + 60_000, maxRuns: 10, maxTotalDurationMs: 10_000 }], authority)

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -25,7 +25,7 @@ afterEach(async () => {
 const nativePlatform = process.platform
 
 async function socket(): Promise<{ home: string; path: string; server: Server }> {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-mac-socket-')); roots.push(home)
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'dsh-mac-socket-'))); roots.push(home)
   const directory = join(home, '.docker', 'run'); await mkdir(directory, { recursive: true, mode: 0o700 })
   await chmod(directory, 0o700)
   const path = join(directory, 'docker.sock')
