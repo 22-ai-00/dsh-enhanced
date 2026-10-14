@@ -3,7 +3,7 @@
 # Shared implementation for install-local.sh and install-npm.sh.
 # This file is sourced by the two public entrypoints; do not execute it directly.
 
-DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.1.5-rc.1'
+DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.2.0-rc.2'
 DSH_ENHANCED_DEFAULT_DSH_VERSION='latest'
 DSH_ENHANCED_DEFAULT_PNPM_VERSION='11.7.0'
 if [[ -z "${DSH_ENHANCED_VERIFIED_HOST_RANGE:-}" ]]; then
