@@ -94,7 +94,7 @@ describe('frozen local profile dependency installation', () => {
 
 describe('native local cohort target lifecycle', () => {
   test('reads only a physical owner plist in a physical owner LaunchAgents directory', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-local-plist-'))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-local-plist-')))
     const directory = join(root, 'LaunchAgents'), path = join(directory, 'owner.plist')
     try {
       expect(await readRsiLocalLaunchAgentPlist(path)).toBeNull()
@@ -125,7 +125,7 @@ describe('native local cohort target lifecycle', () => {
   })
 
   async function fixture() {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-local-target-'))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-local-target-')))
     const dshHome = join(root, 'home'), dshPath = join(root, 'dsh')
     await mkdir(dshHome, { mode: 0o700 })
     const executable = Buffer.from('#!/bin/sh\n')

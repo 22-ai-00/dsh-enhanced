@@ -171,7 +171,7 @@ test.skipIf(process.platform !== 'darwin' || process.env.DSH_NATIVE_LAUNCHD_TEST
     const domain = `gui/${uid}`
     const gui = spawnSync('/bin/launchctl', ['print', domain], { encoding: 'utf8', timeout: 10_000 })
     if (gui.status !== 0) { console.warn(`native launchd smoke skipped: GUI domain ${domain} unavailable: ${gui.stderr?.trim() ?? ''}`); context.skip(); return }
-    const smokeHome = await mkdtemp(join(tmpdir(), 'dsh-native-launchd-smoke-'))
+    const smokeHome = realpathSync(await mkdtemp(join(tmpdir(), 'dsh-native-launchd-smoke-')))
     const profile = `rsi-smoke-${randomUUID().slice(0, 8)}`, dshHome = join(smokeHome, '.dsh')
     const smokeInput: NativeLaunchdIdentity = { dshHome, profile, home: smokeHome, uid,
       nodePath: realpathSync(process.execPath), dshPath: join(smokeHome, 'resident.mjs'), dshSha256: '' }
