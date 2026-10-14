@@ -2,7 +2,7 @@
 
 普通任务驱动的持久事实与经验学习。一次 owner 配置与有限授权后，原生 Automations 发现已完成的普通对话，原生 Agent 提取候选，独立 Verifier 重读来源审查，Personal Memory 在授权范围内采用。后续任务沿 Memory 的动态检索与 System Prompt seam 使用已采用记录。无需逐条调用捕获或批准工具。
 
-兼容当前 DSH `0.2.0-rc.2`、Cordis `4.0.4` 和本仓库 `0.1.48` 同批 Delivery、Evaluation、Automations、Policy、Verifier、Memory。安装本包不会启用其他 bundle。发布 patch 默认禁用，必须先配置下述 owner/grants 和预算，再启用该稳定行。
+兼容当前 DSH `0.2.0-rc.2`、Cordis `4.0.4` 和本仓库 `0.1.49` 同批 Delivery、Evaluation、Automations、Policy、Verifier、Memory。安装本包不会启用其他 bundle。发布 patch 默认禁用，必须先配置下述 owner/grants 和预算，再启用该稳定行。
 
 ```sh
 dsh plugin --profile assistant add @dsh-enhanced/assistant-memory-learning
@@ -34,7 +34,7 @@ Policy 最少需要这些准确 owner/workspace、`initiators: ['background']` �
 - 同 subject 对本插件受管 automation IDs 允许 `reconcile`；原生 Automation occurrence subject 对这些 IDs 允许 `execute`。完整 Automation subject 和预算配置见 [Automations](../assistant-automations/README.md)。
 - 前台 Memory 的 read/search/snapshot 权限继续按 [Memory](../personal-memory/README.md) 配置。
 
-本包不伪造 owner、不签发 grant、不修改 Policy。新 supervised owner 安装会自动组合这三份 grant 与有限预算，再启用默认禁用行，见 [双 Host 配置](../lark-channel/docs/rsi-setup.md#普通任务的自动记忆学习)。Memory 沿用 Personal Assistant 内嵌 provider。已有 owner manifest 不会被重跑安装静默补签，实际 production 启用与收益仍需验收。
+本包不伪造 owner、不签发 grant、不修改 Policy。新 supervised owner 安装会自动组合这三份 grant 与有限预算，再启用默认禁用行，见 [双 Host 配置](../lark-channel/docs/rsi-setup.md#普通任务的自动记忆学习)。Memory 沿用 Personal Assistant 内嵌 provider。已有 owner manifest 不会被重跑安装静默补签。本机生产启用与新鲜就绪已验收，后续真实任务收益仍需持续验证。
 
 ## 来源、独立审查与恢复
 
@@ -55,4 +55,4 @@ Policy 最少需要这些准确 owner/workspace、`initiators: ['background']` �
 
 ## 证据边界
 
-包内测试覆盖真实原生 Agent 提取守卫、真实 Automations 调度与预算、真实 Delivery/Evaluation/Memory 的普通来源→采用→后续 System Prompt/检索、纠正/撤回、重启、背压和 lost ACK。模型输出与独立审查语义仍用测试 fixture；这不是线上供应商效果或后续任务质量/成本/延迟收益证明。初始 owner 安装组合已有工程接线；新插件自动创建与 Cordis 动态工程采用、实际 owner 部署和普通任务收益仍按 [当前状态](../../docs/rsi-status.md) 继续验收。
+包内测试覆盖真实原生 Agent 提取守卫、真实 Automations 调度与预算、真实 Delivery/Evaluation/Memory 的普通来源→采用→后续 System Prompt/检索、纠正/撤回、重启、背压和 lost ACK。模型输出与独立审查语义仍用测试 fixture；这不是线上供应商效果或后续任务质量/成本/延迟收益证明。本机 owner 部署与新鲜就绪已验收；普通任务驱动的新插件创建、Cordis 动态工程采用及后续真实任务收益仍按 [当前状态](../../docs/rsi-status.md) 继续验收。

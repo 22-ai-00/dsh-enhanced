@@ -28,7 +28,7 @@ Keep one active delivery in context. Completed work is a capability boundary, no
 - Keep acceptance rules and held-out tasks outside candidate write authority. Promote only from fresh independently checked outcomes, never model self-ratings or successful tool exits alone.
 - Judge improvement on subsequent real tasks: quality, cost, latency and regressions. Deduplicate canonical task revisions, fence decisions against corrections/withdrawals, and do not treat deployment association as causal evidence. Use bounded versioned comparisons with the same supplier/budget where needed; retain failed attempts.
 - Link actions and peer claims to agent/run identity, capability versions and original evidence. Derive repair triggers from current owner-bound feedback, not global gap records. Enforce existing owner authorization before action; observe afterward, bound changes, retain rollback and reconcile unknown outcomes before retrying.
-- Publish the next npm release once an installable deployment supports the ordinary-use loop and passes release verification. Intermediate APIs, pending proposals and repeated hand-run probes do not meet this gate.
+- Publish installable experimental npm releases after installation, runtime readiness and release verification pass. Validate long-term ordinary-use learning and improvement after installation; do not block experimental distribution on that longitudinal evidence or claim the complete loop is accepted before it exists. Preserve independent verification, owner authorization, finite budgets and rollback in every release.
 
 ## Repository contracts
 
