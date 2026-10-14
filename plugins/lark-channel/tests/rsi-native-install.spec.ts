@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,7 +10,7 @@ const homes: string[] = []
 afterEach(async () => { await Promise.all(homes.splice(0).map(home => rm(home, { recursive: true, force: true }))) })
 
 async function fixture() {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-native-install-')); homes.push(home)
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'dsh-native-install-'))); homes.push(home)
   const dshHome = join(home, '.dsh'), profile = 'web', profileRoot = join(dshHome, 'profiles', profile)
   const configRoot = join(dshHome, 'rsi-authorities', 'web', 'config')
   const stateRoot = join(dshHome, 'rsi-authorities', 'web', 'state')

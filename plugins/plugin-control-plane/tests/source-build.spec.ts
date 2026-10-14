@@ -229,10 +229,13 @@ it('requires an explicit portable repository profile, immutable image, local soc
   expect(() => validateSourceBuildConfig({ ...base, socketPath: portable.socketPath })).toThrow(/invalid/)
 })
 
-it('portable prepared checks reject daemon and image drift and keep the Docker endpoint local', async () => {
+it.each(['x64', 'arm64'] as const)('portable prepared checks on macOS %s reject runtime, daemon and image drift and keep the Docker endpoint local', async arch => {
   const f = await fixture()
   const previousHome = process.env.HOME
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+  const architecture = Object.getOwnPropertyDescriptor(process, 'arch')!
+  const dockerArchitecture = arch === 'arm64' ? 'arm64' : 'amd64'
+  const driftArchitecture = arch === 'arm64' ? 'amd64' : 'arm64'
   const socket = join(f.root, '.docker', 'run', 'docker.sock')
   const state = join(f.root, 'state')
   await mkdir(dirname(socket), { recursive: true, mode: 0o700 })
@@ -243,9 +246,9 @@ it('portable prepared checks reject daemon and image drift and keep the Docker e
 if [ "$1" = --config ]; then shift 4; fi
 state="$(cat ${state})"
 case "$1" in
-  version) printf '%s\\n' '29.4.1/linux/amd64' ;;
+  version) if [ "$state" = runtime-drift ]; then printf '%s\\n' '29.4.1/linux/${driftArchitecture}'; else printf '%s\\n' '29.4.1/linux/${dockerArchitecture}'; fi ;;
   info) if [ "$state" = daemon-drift ]; then printf '%s\\n' 'BAD-DAEMON-0000'; else printf '%s\\n' 'TEST-DAEMON-0000'; fi ;;
-  image) if [ "$state" = image-drift ]; then printf '%s\\n' 'sha256:${'a'.repeat(64)}/linux/arm64'; else printf '%s\\n' 'sha256:${'a'.repeat(64)}/linux/amd64'; fi ;;
+  image) if [ "$state" = image-drift ]; then printf '%s\\n' 'sha256:${'a'.repeat(64)}/linux/${driftArchitecture}'; else printf '%s\\n' 'sha256:${'a'.repeat(64)}/linux/${dockerArchitecture}'; fi ;;
   run) printf '%s\\n' "$@" > "$0.args"; cat >/dev/null; ${marker} ;;
   *) exit 0 ;;
 esac
@@ -253,6 +256,7 @@ esac
   try {
     process.env.HOME = f.root
     Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true })
+    Object.defineProperty(process, 'arch', { value: arch, configurable: true })
     f.config.profile = 'portable-repository'
     f.config.socketPath = socket
     f.config.daemonId = 'TEST-DAEMON-0000'
@@ -263,12 +267,15 @@ esac
     const args = result.evidence.commands[0]!.args
     expect(args).toEqual(expect.arrayContaining(['-H', `unix://${socket}`, '--network', 'none', '--read-only', '--cap-drop', 'ALL']))
     expect(args).toEqual(expect.arrayContaining(['systempaths=unconfined', '/sys:ro,nosuid,nodev,noexec,size=1m']))
+    await writeFile(state, 'runtime-drift')
+    await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/approved matching Linux Docker runtime/)
     await writeFile(state, 'daemon-drift')
     await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/daemon identity differs/)
     await writeFile(state, 'image-drift')
     await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/image ID or platform differs/)
   } finally {
     Object.defineProperty(process, 'platform', platform)
+    Object.defineProperty(process, 'arch', architecture)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await new Promise<void>(resolve => server.close(() => resolve()))
@@ -281,7 +288,7 @@ it('admits an approved copied seccomp profile only on a supported Host after Doc
   await writeFile(profile, await readFile(new URL('../../../scripts/isolation/source-builder-seccomp.json', import.meta.url)))
   f.config.repositorySandbox = { seccompPath: profile }
   if (process.platform !== 'linux' || process.arch !== 'x64') {
-    await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/repository seccomp requires linux x64/)
+    await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/repository seccomp requires an approved native Host/)
     await expect(lstat(`${f.dockerPath}.args`)).rejects.toMatchObject({ code: 'ENOENT' })
     return
   }
@@ -314,7 +321,7 @@ it('rejects repository seccomp at the Host gate or the approved digest gate befo
   await writeFile(profile, '{"defaultAction":"SCMP_ACT_ALLOW"}\n')
   f.config.repositorySandbox = { seccompPath: profile }
   await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(process.platform === 'linux' && process.arch === 'x64'
-    ? /digest is not approved/ : /repository seccomp requires linux x64/)
+    ? /digest is not approved/ : /repository seccomp requires an approved native Host/)
   await expect(lstat(`${f.dockerPath}.args`)).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
