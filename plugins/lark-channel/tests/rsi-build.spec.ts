@@ -179,11 +179,16 @@ describe.skipIf(process.platform !== 'linux' || process.arch !== 'x64')('private
     const receiptPath = join(f.home, 'rsi-builds', 'owner', 'bootstrap.json')
     const receipt = JSON.parse(await readFile(receiptPath, 'utf8')) as Record<string, unknown>
     const hashes = receipt.inputHashes as Record<string, string>
-    for (const name of ['build-source-image.mjs', 'source-builder.Dockerfile']) {
+    const legacyPins = {
+      'build-source-image.mjs': '7b7eb0797e1ca543fb1ffa0463eb78b3ecad14f28fe4bfca25651640aac4669b',
+      'source-builder.Dockerfile': 'c936e136517c5bc85603e7187fe74691e32f954f57b5076946dc42fed33c65f5',
+    }
+    for (const [name, expected] of Object.entries(legacyPins)) {
       const relative = `scripts/isolation/${name}`
-      const bytes = execFileSync('git', ['show', `HEAD:${relative}`], { cwd: repositoryRoot })
+      const bytes = await readFile(new URL(`./fixtures/legacy-linux-source-build/${name}`, import.meta.url))
+      expect(createHash('sha256').update(bytes).digest('hex')).toBe(expected)
       await writeFile(join(f.repository, relative), bytes)
-      hashes[relative] = createHash('sha256').update(bytes).digest('hex')
+      hashes[relative] = expected
     }
     const { receiptDigest: _ignored, ...body } = receipt
     await writeFile(receiptPath, JSON.stringify({ ...body,
