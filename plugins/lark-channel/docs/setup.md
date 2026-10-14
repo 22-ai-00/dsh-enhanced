@@ -92,6 +92,8 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 
 重复执行会更新同一 account 的受管配置，不会重复添加规则或 handle。首次绑定 owner 默认开放已安装的 Agent 工具能力；已有应用或 owner 配置保留现状，不会因重装重新开启已关闭的工具：
 
+向导在交接 Lark owner 前检查同一 DSH Home 的其他 profile 是否使用相同 Delivery 数据库。Electron 管理的 `desktop` profile 不允许通过 `dsh --profile desktop --dump-config` 读取；向导遇到这条明确的 CLI 拒绝时，使用当前 `dsh` CLI 安装的配置组合器只读检查 Desktop 的 bundle、profile 和 Home 覆盖层。发现共享 Lark owner 或启用的 Delivery scheduler，以及 Desktop 配置无法完整读取时，都会停止交接并保留原 profile。
+
 - 不传参数：首次配置默认开放，已有配置保留现状；
 - `--preserve-agent-tools`：始终保留现有规则，首次配置也不新增通用工具授权；
 - `--allow-agent-tools`：写入本地 foreground 与精确 Delivery 主体的通用 capability 可达性规则，并保留外部主体工具级 allow/deny；

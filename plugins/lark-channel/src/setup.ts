@@ -4,9 +4,10 @@ import { createHash, randomBytes } from 'node:crypto'
 import { accessSync, constants, realpathSync } from 'node:fs'
 import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, dirname, isAbsolute, join, normalize, win32 } from 'node:path'
+import { createRequire } from 'node:module'
+import { basename, delimiter, dirname, isAbsolute, join, normalize, win32 } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createInterface } from 'node:readline/promises'
 import { spawnSync } from 'node:child_process'
 import type { ExternalPrincipalKey } from '@dsh-enhanced/assistant-delivery'
@@ -2586,20 +2587,38 @@ async function assertNoOtherProfileSharesDelivery(input: {
     try {
       await readFile(patchPath, 'utf8')
     } catch (error) {
-      if (fileSystemErrorCode(error) === 'ENOENT') continue
-      throw error
+      // Electron can have a bundle-backed desktop profile before its optional
+      // user patch exists. Its bundles may still own Lark or consume Delivery.
+      if (fileSystemErrorCode(error) === 'ENOENT' && entry.name !== 'desktop') continue
+      if (fileSystemErrorCode(error) === 'ENOENT') {
+        // Continue into the read-only Desktop composition below.
+      } else {
+        throw error
+      }
     }
     let effective
     try {
       effective = await input.readEffectiveProfile(entry.name)
     } catch (error) {
-      // Raw absence cannot prove absence: consumers may be inherited from a lower
-      // bundle and a resident using the last valid composition may still run.
-      // Without a durable ownership registry, an unverifiable real profile is
-      // therefore a fail-closed handoff boundary.
-      throw new Error(`lark-channel setup: cannot verify effective Lark ownership in profile ${entry.name} or its Delivery consumers`, {
-        cause: error,
-      })
+      if (entry.name === 'desktop'
+        && error instanceof Error
+        && error.message.includes('profile "desktop" is managed exclusively by the Electron application')) {
+        try {
+          effective = await readElectronDesktopEffectiveProfile(input.dshHome)
+        } catch (compositionError) {
+          throw new Error(`lark-channel setup: cannot verify effective Lark ownership in profile desktop or its Delivery consumers`, {
+            cause: compositionError,
+          })
+        }
+      } else {
+        // Raw absence cannot prove absence: consumers may be inherited from a lower
+        // bundle and a resident using the last valid composition may still run.
+        // Without a durable ownership registry, an unverifiable real profile is
+        // therefore a fail-closed handoff boundary.
+        throw new Error(`lark-channel setup: cannot verify effective Lark ownership in profile ${entry.name} or its Delivery consumers`, {
+          cause: error,
+        })
+      }
     }
     if (effectiveProfileHasEnabledLarkChannel(effective, entry.name)
       && normalizeSetupResourcePath(deliveryDatabasePathFromEffectiveProfile(effective, input.dshHome)) === databasePath) {
@@ -2616,6 +2635,84 @@ async function assertNoOtherProfileSharesDelivery(input: {
       )
     }
   }
+}
+
+/** Electron owns `desktop`, so the DSH CLI refuses even a config dump. Compose
+ * its existing project with the same app-boot reader as Electron, without
+ * running the CLI or preparing (and writing to) that profile. */
+async function readElectronDesktopEffectiveProfile(dshHome: string): Promise<string> {
+  const profileDir = platformJoin(dshHome, 'profiles', 'desktop')
+  // The Electron Host resolves core bundles from its private runtime, not the
+  // plugin project. The setup process already uses `dsh` on PATH for ordinary
+  // config dumps, so anchor this exceptional read to that same installation.
+  const dshManifest = await resolveSetupDshManifest()
+  const bootEntry = createRequire(dshManifest).resolve('@deepseek-ai/dsh-app-boot')
+  const boot = await import(pathToFileURL(bootEntry).href) as {
+    loadProfileDirectory: (binName: string, dir: string, anchor: string) => {
+      layers: Array<{ packageName: string; patches: unknown[] }>
+      patches: unknown[]
+      patchPath: string
+      skippedBundles: Array<{ packageName: string; reason: string }>
+    }
+    loadOptionalPatches: (binName: string, file: string) => unknown[] | undefined
+    renderConfigDump: (binName: string, root: string, layers: Array<{ label: string; patches: unknown[] }>) => string
+  }
+  const loaded = boot.loadProfileDirectory('dsh desktop', profileDir, dshManifest)
+  if (loaded.skippedBundles.length > 0) {
+    throw new Error(`desktop profile has unreadable bundles: ${loaded.skippedBundles.map(item => item.packageName).join(', ')}`)
+  }
+  const layers = loaded.layers.map(layer => ({ label: layer.packageName, patches: layer.patches }))
+  layers.push({ label: loaded.patchPath, patches: loaded.patches })
+  const homePatchPath = platformJoin(dshHome, 'cordis.patch.yml')
+  const homePatches = boot.loadOptionalPatches('dsh desktop', homePatchPath)
+  if (homePatches !== undefined) layers.push({ label: homePatchPath, patches: homePatches })
+  return boot.renderConfigDump('dsh desktop', platformJoin(profileDir, 'cordis.yml'), layers)
+}
+
+async function resolveSetupDshManifest(): Promise<string> {
+  const selectedVersion = spawnSync('dsh', ['--version'], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000,
+  })
+  if (selectedVersion.status !== 0 || typeof selectedVersion.stdout !== 'string') {
+    throw new Error('cannot verify the selected dsh CLI version')
+  }
+  const version = selectedVersion.stdout.trim()
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(version)) {
+    throw new Error('selected dsh CLI returned an invalid version')
+  }
+  for (const directory of (process.env.PATH ?? '').split(delimiter)) {
+    if (directory === '') continue
+    const executable = platformJoin(directory, 'dsh')
+    try {
+      accessSync(executable, constants.X_OK)
+    } catch {
+      continue
+    }
+    const canonical = realpathSync(executable)
+    const candidates: string[] = []
+    try {
+      candidates.push(createRequire(canonical).resolve('@deepseek-ai/dsh/package.json'))
+    } catch {
+      // Electron's public `dsh` command is a shell launcher; it has no Node
+      // package at this path. Search later PATH entries for a matching npm CLI.
+    }
+    for (let ancestor = dirname(canonical);;) {
+      candidates.push(platformJoin(ancestor, 'package.json'))
+      const parent = dirname(ancestor)
+      if (parent === ancestor) break
+      ancestor = parent
+    }
+    for (const manifest of candidates) {
+      let packageJson: { name?: unknown; version?: unknown }
+      try {
+        packageJson = JSON.parse(await readFile(manifest, 'utf8')) as { name?: unknown; version?: unknown }
+      } catch {
+        continue
+      }
+      if (packageJson.name === '@deepseek-ai/dsh' && packageJson.version === version) return manifest
+    }
+  }
+  throw new Error('no npm dsh installation on PATH matches the selected CLI version')
 }
 
 async function withDeliveryOwnerSetupLock<T>(
