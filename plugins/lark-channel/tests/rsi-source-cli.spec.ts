@@ -86,10 +86,16 @@ describe('RSI source preparation CLI', () => {
     const result = JSON.parse(String(output.mock.calls.at(-1)![0]))
     expect(result).toMatchObject({ version, buildUnavailable: expect.stringContaining('daemon unavailable'), repository: join(home, 'rsi-sources', 'web', 'checkout') })
     expect(result.sourceBuild).toBeUndefined()
-    if (process.platform === 'linux') {
+    if (process.platform === 'linux' || process.platform === 'darwin') {
       expect(result.authorityResources.identities.host.publicKeyPem).toContain('PUBLIC KEY')
-      expect(result.authorityRuntime.executables.hostAttestor.path).toContain('rsi-authority-runtimes')
-    } else expect(result.authorityResourcesUnavailable).toContain('requires Linux')
+      expect(result.authorityResourcesUnavailable).toBeUndefined()
+      if (process.platform === 'linux') expect(result.authorityRuntime.executables.hostAttestor.path).toContain('rsi-authority-runtimes')
+      else expect(result.authorityRuntime).toBeUndefined()
+    } else {
+      expect(result.authorityResources).toBeUndefined()
+      expect(result.authorityRuntime).toBeUndefined()
+      expect(result.authorityResourcesUnavailable).toContain('requires Linux')
+    }
     expect(build.mock.calls.at(-1)![0]).toMatchObject({ profile: 'web', dshHome: home, source: { version } })
     build.mockRejectedValue(new Error('image build failed'))
     await expect(runRsiSetup([...args, '--optional-build'])).rejects.toThrow('image build failed')
