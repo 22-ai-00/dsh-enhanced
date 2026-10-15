@@ -7856,6 +7856,41 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     expect(result.stdout).not.toContain('安装流程完成')
   })
 
+  async function macUpgradeProcessView(fixtureHome: string, fixtureRoot: string, visiblePid?: number) {
+    const canonicalHome = await realpath(fixtureHome)
+    const preload = join(fixtureRoot, 'mac-upgrade-process-view.cjs')
+    const marker = join(fixtureRoot, 'mac-upgrade-ps-observed')
+    await writeFile(preload, String.raw`const child = require('node:child_process')
+const fs = require('node:fs')
+const original = child.spawnSync
+child.spawnSync = (command, args, options) => {
+  const result = original(command, args, options)
+  if (process.argv[1] !== '-' || process.argv[2] !== ${JSON.stringify(canonicalHome)}
+    || command !== '/bin/ps' || args?.length !== 2 || args[0] !== '-axo'
+    || args[1] !== 'pid=,command=') return result
+  fs.appendFileSync(${JSON.stringify(marker)}, 'ps\n')
+  if (result.status !== 0 || result.error || result.signal || typeof result.stdout !== 'string') return result
+  const visiblePid = ${JSON.stringify(visiblePid ?? null)}
+  const lines = result.stdout.match(/[^\n]*\n|[^\n]+$/gu) ?? []
+  let parsed = 0
+  let removed = 0
+  const stdout = lines.filter(line => {
+    if (line.trim() === '') return true
+    const match = /^\s*(\d+)\s+.+$/u.exec(line.endsWith('\n') ? line.slice(0, -1) : line)
+    if (!match) return true
+    parsed += 1
+    if (visiblePid !== null && Number(match[1]) === visiblePid) return true
+    removed += 1
+    return false
+  }).join('')
+  fs.appendFileSync(${JSON.stringify(marker)}, 'parsed=' + parsed + ' removed=' + removed + '\n')
+  return { ...result, stdout }
+}
+require('node:module').syncBuiltinESMExports()
+`)
+    return { environment: { NODE_OPTIONS: `--require=${preload}` }, marker }
+  }
+
   test.each(['local', 'npm'] as const)(
     'macOS %s supervised upgrade auto-detects the scenario and repairs a legacy Recovery closure',
     async source => {
@@ -7869,10 +7904,14 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
         : join(f.fixtureInstallDirectory, 'install-npm.sh')
       const args = ['--operation', 'upgrade', '--confirm-dsh-home-stopped', '--dry-run']
       if (source === 'npm') args.push('--plugin-version', '1.4.0')
+      const processView = await macUpgradeProcessView(f.dshHome, f.root)
       const result = runInstaller(
-        script, args, f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin),
+        script, args, f.dshHome, 'Darwin', {
+          ...lifecycleEnvironment(f.dshHome, f.fakeBin), ...processView.environment,
+        },
       )
 
+      expect(await readFile(processView.marker, 'utf8')).toMatch(/parsed=[1-9]\d* removed=[1-9]\d*/u)
       expect(result.status, result.stderr).toBe(0)
       expect(result.stdout).toContain('自动识别为 supervised')
       expect(result.stdout).toContain('assistant-recovery 但缺少 assistant-goals')
@@ -7893,12 +7932,15 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
       systemd: {},
     })
     const before = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+    const processView = await macUpgradeProcessView(f.dshHome, f.root)
     const result = runInstaller(join(f.fixtureInstallDirectory, `install-${source}.sh`), [
       '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes',
     ], f.dshHome, 'Darwin', {
       ...lifecycleEnvironment(f.dshHome, f.fakeBin),
+      ...processView.environment,
       DSH_ENHANCED_HOST_UPDATE_PLAN: join(f.dshHome, 'host-plan.json'),
     })
+    expect(await readFile(processView.marker, 'utf8')).toMatch(/parsed=[1-9]\d* removed=[1-9]\d*/u)
     expect(result.status, result.stderr).toBe(2)
     expect(result.stderr).toContain('macOS 尚不支持受管 Host 跨版本更新')
     expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(before)
@@ -7998,11 +8040,22 @@ require('node:module').syncBuiltinESMExports()
         host.once('error', error => { clearTimeout(timer); rejectReady(error) })
         host.once('close', () => { clearTimeout(timer); rejectReady(new Error('host exited before ready')) })
       })
+      const hostPid = host.pid
+      expect(hostPid).toBeDefined()
+      const running = spawnSync('/bin/ps', ['-axo', 'pid=,command='], { encoding: 'utf8' })
+      expect(running.status, running.stderr).toBe(0)
+      const hostLine = running.stdout.split('\n').find(line => new RegExp(`^\\s*${hostPid}\\s+`, 'u').test(line))
+      expect(hostLine).toContain(hostScript)
+      expect(hostLine).toContain(`--profile=${profile}`)
+      const processView = await macUpgradeProcessView(f.dshHome, f.root, hostPid)
       const result = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), [
         '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes',
-      ], f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin))
+      ], f.dshHome, 'Darwin', {
+        ...lifecycleEnvironment(f.dshHome, f.fakeBin), ...processView.environment,
+      })
+      expect(await readFile(processView.marker, 'utf8')).toMatch(/parsed=[1-9]\d* removed=[1-9]\d*/u)
       expect(result.status).not.toBe(0)
-      expect(result.stderr).toMatch(/Host PID .* still running/u)
+      expect(result.stderr).toContain(`Host PID ${hostPid} for profile ${profile} is still running`)
       expect(await readFile(f.operationLog, 'utf8')).toBe('')
       await expect(stat(join(f.dshHome, 'assistant-workspace'))).rejects.toMatchObject({ code: 'ENOENT' })
     } finally {
@@ -8023,10 +8076,14 @@ require('node:module').syncBuiltinESMExports()
       managedDependencies: ['personal-assistant', 'assistant-recovery'],
       systemd: {},
     })
+    const processView = await macUpgradeProcessView(f.dshHome, f.root)
     const result = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), [
       '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes',
-    ], f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin))
+    ], f.dshHome, 'Darwin', {
+      ...lifecycleEnvironment(f.dshHome, f.fakeBin), ...processView.environment,
+    })
 
+    expect(await readFile(processView.marker, 'utf8')).toMatch(/parsed=[1-9]\d* removed=[1-9]\d*/u)
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('macOS profile 原地升级通过')
     expect(result.stdout).toContain('assistant-recovery 但缺少 assistant-goals')
@@ -8042,10 +8099,14 @@ require('node:module').syncBuiltinESMExports()
       systemd: {},
     })
     const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+    const processView = await macUpgradeProcessView(f.dshHome, f.root)
     const result = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), [
       '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes',
-    ], f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin))
+    ], f.dshHome, 'Darwin', {
+      ...lifecycleEnvironment(f.dshHome, f.fakeBin), ...processView.environment,
+    })
 
+    expect(await readFile(processView.marker, 'utf8')).toMatch(/parsed=[1-9]\d* removed=[1-9]\d*/u)
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('原 profile 已恢复')
     expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
