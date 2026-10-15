@@ -11489,15 +11489,18 @@ describe('real native Delivery Agent runtime', () => {
           actions: ['execute'], resource: { kind: 'tool' as const, id: 'goal_create' }, context: { initiators: ['external' as const] } },
         { id: 'native-strategy-tool', effect: 'allow' as const, subject,
           actions: ['execute'], resource: { kind: 'tool' as const, id: 'goal_strategy' }, context: { initiators: ['external' as const] } },
-      ], presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false, goalContinuationTimeoutMs: 5_000,
+      ], presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
+      goalContinuationTimeoutMs: mode === 'late-start' ? 15_000 : 5_000,
     }, realPersistence(JsonlPersistence, root, stored))
     const native = await nativeGoalPlugins()
     await fixture.ctx.plugin(native.GoalService as never, {} as never)
     await fixture.ctx.plugin(native.goalTools as never, {} as never)
     await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
     await fixture.ctx.plugin(SubagentRuntime as never, {} as never)
-    await fixture.ctx.plugin(AssistantGoalsPlugin, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, strategy: { maxDurationMs: mode === 'late-start' ? 1000 : 30000 }, stepMaxDurationMs: 5_000,
-      executionBudget: { modelCalls, toolCalls: 1, inputTokens: 50, outputTokens: 35, durationMs: 5_000, maxOutputTokensPerCall: 7 } } as never)
+    await fixture.ctx.plugin(AssistantGoalsPlugin, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, strategy: { maxDurationMs: mode === 'late-start' ? 5_000 : 30_000 },
+      stepMaxDurationMs: mode === 'late-start' ? 15_000 : 5_000,
+      executionBudget: { modelCalls, toolCalls: 1, inputTokens: 50, outputTokens: 35,
+        durationMs: mode === 'late-start' ? 15_000 : 5_000, maxOutputTokensPerCall: 7 } } as never)
     const pairing = fixture.service.issuePairing('test', principal)
     fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
     const owner = runtimeStore(fixture.service).getPrincipal(principal)!
@@ -11568,11 +11571,16 @@ describe('real native Delivery Agent runtime', () => {
       return next()
     })
     let releaseLate: (() => void) | undefined
+    const lateStopReasons: string[] = []
     if (mode === 'late-start') {
       const gate = new Promise<void>(resolve => { releaseLate = resolve })
       const start = fixture.ctx.subagents.start.bind(fixture.ctx.subagents)
       vi.spyOn(fixture.ctx.subagents, 'start').mockImplementation(async (...args) => {
         const run = await start(...args)
+        // The returned run is late, while both genuine model streams and their
+        // budget settlement complete before the strategy deadline is observed.
+        try { lateStopReasons.push((await run.result).stopReason) }
+        catch { lateStopReasons.push('result-rejected') }
         await gate
         return run
       })
@@ -11641,120 +11649,125 @@ describe('real native Delivery Agent runtime', () => {
       binding: { adapter: fixture.llm, inputTokenUpperBound: () => 10, dispose() {} },
     }) : undefined
     if (outerMeter) fixture.ctx.on('agent/request', async (_payload, next) => ({ ...await next(), maxTokens: 7 }))
-    await fixture.service.acceptInbound(message(`evt-native-strategy-${mode}`, 'Run the native strategy comparison'))
-    await drive(fixture.service)
-    await (fixture.ctx.assistantGoals as unknown as { whenIdle(): Promise<void> }).whenIdle()
-    expect(goalId).not.toBe('')
-    expect(fixture.llm.requests).toHaveLength(adapterCalls + 1)
-    if (outerMeter) {
-      outerMeter.assertComplete()
-      const measured = outerMeter.snapshot()
-      expect(measured).toMatchObject({ modelCalls: 5, toolCalls: 2, inputTokens: 50, outputTokens: 10, heldModelCalls: 0 })
-      const childIds = new Set(childAgents.map(agent => String(agent.session.id)))
-      expect(measured.traces.filter(trace => childIds.has(trace.sessionId ?? ''))).toHaveLength(2)
-      expect(measured.traces.every(trace => trace.phase === 'settled' && trace.sessionId !== null)).toBe(true)
-    }
-    expect(scopedEffect).not.toHaveBeenCalled()
-    if (mode === 'scoped-tool') {
-      expect(scopedResults).toHaveLength(1)
-      expect(scopedResults[0]?.sessionId).toBe(attackSessionId)
-      expect(scopedResults[0]?.result).toMatchObject({ isError: true })
-      expect(JSON.stringify(scopedResults[0]?.result)).toContain('assistant-policy: ask-review')
-    }
-    if (mode === 'revoke') {
-      expect(adapterAborted).toBe(true)
-      expect(Date.now() - revokedAt).toBeLessThan(2000)
-    }
-    const strategy = new DatabaseSync(join(root, 'goals.sqlite.strategies'), { readOnly: true })
     try {
-      const row = strategy.prepare('SELECT state, outcome, children_json FROM goal_strategy_records').get() as { state: string, outcome: string, children_json: string }
-      const bound = JSON.parse(row.children_json) as Array<{ sessionId: string; diagnostics?: { toolRejections: number; output: string; failure?: { stage: string; dispatched: boolean } } }>
-      expect(row.state).toBe(['revoke', 'late-start'].includes(mode) ? 'unknown' : 'settled')
-      expect(row.outcome, JSON.stringify([...stored.values()].map(s => ({ header: s.meta, events: s.events.filter(e => /error|end/.test(e.type)).slice(-4) })))).toBe(['revoke', 'late-start'].includes(mode) ? 'unknown' : ['quota', 'stream-error', 'usage-invalid', 'request-hook-error', 'stream-setup-error'].includes(mode) ? 'execution-failed' : 'advice')
-      expect(bound).toHaveLength(boundChildren)
-      expect(new Set(bound.map(child => child.sessionId)).size).toBe(boundChildren)
-      if (mode === 'quota') {
-        // 两个 persona child 并发启动且共享同一预算：它们可能在任一方预留之前
-        // 都通过流式前的 modelCalls 快照预检。串行实现时负者在该快照处被拒
-        // （'request-limit'）；并发下该快照存在竞态，真正权威的拒绝点是预算
-        // 存储的原子预留事务（'reserve'）。这两道闸都严格发生在 adapter 派发
-        // 之前，因此安全契约不变：恰好一个 child 被拒且从未发出请求
-        // （dispatched:false，且没有多出任何 adapter 调用）。这里钉死具体的
-        // 原子阶段，而不是放宽为“派发前任一阶段”，并强制保留 dispatched:false。
-        expect(new Set(bound.map(child => child.sessionId))).toEqual(new Set(childAgents.map(agent => String(agent.session.id))))
-        expect(bound.map(child => child.diagnostics?.failure).filter(failure => failure !== undefined))
-          .toEqual([{ stage: 'reserve', dispatched: false }])
+      await fixture.service.acceptInbound(message(`evt-native-strategy-${mode}`, 'Run the native strategy comparison'))
+      await drive(fixture.service)
+      await (fixture.ctx.assistantGoals as unknown as { whenIdle(): Promise<void> }).whenIdle()
+      expect(goalId).not.toBe('')
+      if (mode === 'late-start') expect(lateStopReasons).toEqual(['completed', 'completed'])
+      expect(fixture.llm.requests).toHaveLength(adapterCalls + 1)
+      if (outerMeter) {
+        outerMeter.assertComplete()
+        const measured = outerMeter.snapshot()
+        expect(measured).toMatchObject({ modelCalls: 5, toolCalls: 2, inputTokens: 50, outputTokens: 10, heldModelCalls: 0 })
+        const childIds = new Set(childAgents.map(agent => String(agent.session.id)))
+        expect(measured.traces.filter(trace => childIds.has(trace.sessionId ?? ''))).toHaveLength(2)
+        expect(measured.traces.every(trace => trace.phase === 'settled' && trace.sessionId !== null)).toBe(true)
       }
-      if (mode === 'stream-error' || mode === 'usage-invalid' || mode === 'stream-setup-error') {
-        expect(faultSessionId).toBeDefined()
-        expect(bound.find(child => child.sessionId === faultSessionId)?.diagnostics?.failure).toEqual({
-          stage: mode === 'usage-invalid' ? 'usage' : 'stream', dispatched: mode !== 'stream-setup-error',
-        })
-        expect(bound.filter(child => child.sessionId !== faultSessionId).every(child => child.diagnostics?.failure === undefined)).toBe(true)
-      }
-      if (mode === 'request-hook-error') {
-        expect(bound.find(child => child.sessionId === String(childAgents[0]?.session.id))?.diagnostics).not.toHaveProperty('failure')
+      expect(scopedEffect).not.toHaveBeenCalled()
+      if (mode === 'scoped-tool') {
+        expect(scopedResults).toHaveLength(1)
+        expect(scopedResults[0]?.sessionId).toBe(attackSessionId)
+        expect(scopedResults[0]?.result).toMatchObject({ isError: true })
+        expect(JSON.stringify(scopedResults[0]?.result)).toContain('assistant-policy: ask-review')
       }
       if (mode === 'revoke') {
-        // 并发下两个 persona 都已绑定。owner 吊销必须同时冻结两者：恰好一个在
-        // 等待首个 chunk 的流中被中止（dispatched:true，对应 adapterAborted 与
-        // 唯一一条 held 预留），另一个在派发前即被拒（dispatched:false），绝不
-        // 允许第二个 child 借吊销间隙补发请求（adapterCalls 与 held=1 已共同锁死）。
-        const failures = bound.map(child => child.diagnostics?.failure)
-        expect(failures.every(failure => failure !== undefined)).toBe(true)
-        expect(failures.filter(failure => failure?.dispatched === true)).toHaveLength(1)
-        expect(failures.filter(failure => failure?.dispatched === false)).toHaveLength(1)
+        expect(adapterAborted).toBe(true)
+        expect(Date.now() - revokedAt).toBeLessThan(2000)
       }
+      const strategy = new DatabaseSync(join(root, 'goals.sqlite.strategies'), { readOnly: true })
+      try {
+        const row = strategy.prepare('SELECT state, outcome, children_json FROM goal_strategy_records').get() as { state: string, outcome: string, children_json: string }
+        const bound = JSON.parse(row.children_json) as Array<{ sessionId: string; diagnostics?: { toolRejections: number; output: string; failure?: { stage: string; dispatched: boolean } } }>
+        expect(row.state).toBe(['revoke', 'late-start'].includes(mode) ? 'unknown' : 'settled')
+        expect(row.outcome, JSON.stringify([...stored.values()].map(s => ({ header: s.meta, events: s.events.filter(e => /error|end/.test(e.type)).slice(-4) })))).toBe(['revoke', 'late-start'].includes(mode) ? 'unknown' : ['quota', 'stream-error', 'usage-invalid', 'request-hook-error', 'stream-setup-error'].includes(mode) ? 'execution-failed' : 'advice')
+        expect(bound).toHaveLength(boundChildren)
+        expect(new Set(bound.map(child => child.sessionId)).size).toBe(boundChildren)
+        if (mode === 'quota') {
+          // 两个 persona child 并发启动且共享同一预算：它们可能在任一方预留之前
+          // 都通过流式前的 modelCalls 快照预检。串行实现时负者在该快照处被拒
+          // （'request-limit'）；并发下该快照存在竞态，真正权威的拒绝点是预算
+          // 存储的原子预留事务（'reserve'）。这两道闸都严格发生在 adapter 派发
+          // 之前，因此安全契约不变：恰好一个 child 被拒且从未发出请求
+          // （dispatched:false，且没有多出任何 adapter 调用）。这里钉死具体的
+          // 原子阶段，而不是放宽为“派发前任一阶段”，并强制保留 dispatched:false。
+          expect(new Set(bound.map(child => child.sessionId))).toEqual(new Set(childAgents.map(agent => String(agent.session.id))))
+          expect(bound.map(child => child.diagnostics?.failure).filter(failure => failure !== undefined))
+            .toEqual([{ stage: 'reserve', dispatched: false }])
+        }
+        if (mode === 'stream-error' || mode === 'usage-invalid' || mode === 'stream-setup-error') {
+          expect(faultSessionId).toBeDefined()
+          expect(bound.find(child => child.sessionId === faultSessionId)?.diagnostics?.failure).toEqual({
+            stage: mode === 'usage-invalid' ? 'usage' : 'stream', dispatched: mode !== 'stream-setup-error',
+          })
+          expect(bound.filter(child => child.sessionId !== faultSessionId).every(child => child.diagnostics?.failure === undefined)).toBe(true)
+        }
+        if (mode === 'request-hook-error') {
+          expect(bound.find(child => child.sessionId === String(childAgents[0]?.session.id))?.diagnostics).not.toHaveProperty('failure')
+        }
+        if (mode === 'revoke') {
+          // 并发下两个 persona 都已绑定。owner 吊销必须同时冻结两者：恰好一个在
+          // 等待首个 chunk 的流中被中止（dispatched:true，对应 adapterAborted 与
+          // 唯一一条 held 预留），另一个在派发前即被拒（dispatched:false），绝不
+          // 允许第二个 child 借吊销间隙补发请求（adapterCalls 与 held=1 已共同锁死）。
+          const failures = bound.map(child => child.diagnostics?.failure)
+          expect(failures.every(failure => failure !== undefined)).toBe(true)
+          expect(failures.filter(failure => failure?.dispatched === true)).toHaveLength(1)
+          expect(failures.filter(failure => failure?.dispatched === false)).toHaveLength(1)
+        }
+        if (mode === 'late-start') {
+          // 两个 run 引用都迟到 deadline，但它们各自唯一的请求都在 deadline 窗口内
+          // 合法发出（见 adapterCalls）；deadline 处置是正常超时回收而非预算失败，
+          // 因此两个 child 都不得被记成预算 failure。
+          expect(bound.every(child => child.diagnostics?.failure === undefined)).toBe(true)
+        }
+        if (mode === 'scoped-tool') {
+          expect(attackSessionId).toBeDefined()
+          expect(new Set(bound.map(child => child.sessionId))).toEqual(new Set(childAgents.map(agent => String(agent.session.id))))
+          expect(bound.find(child => child.sessionId === attackSessionId)?.diagnostics).toMatchObject({ toolRejections: 0, output: 'accepted' })
+          expect(bound.filter(child => child.sessionId !== attackSessionId).map(child => child.diagnostics))
+            .toEqual([{ toolRejections: 0, output: 'accepted' }])
+        }
+        if (mode === 'normal') expect(bound.map(child => child.diagnostics)).toEqual([
+          { toolRejections: 0, output: 'accepted' }, { toolRejections: 0, output: 'accepted' },
+        ])
+      } finally { strategy.close() }
+      const ledger = new DatabaseSync(join(root, 'goals.sqlite.budgets'), { readOnly: true })
+      try {
+        expect(ledger.prepare('SELECT COUNT(*) AS count FROM goal_budget_tools WHERE goal_id = ?').get(goalId)).toMatchObject({ count: 1 })
+        const childRows = ledger.prepare("SELECT DISTINCT run_id FROM goal_budget_reservations WHERE goal_id = ? AND run_id LIKE 'strategy-%'").all(goalId) as Array<{ run_id: string }>
+        expect(childRows).toHaveLength(childCalls)
+        expect(new Set(childRows.map(row => row.run_id)).size).toBe(childCalls)
+        expect(ledger.prepare("SELECT COUNT(*) AS count FROM goal_budget_reservations WHERE state = 'held'").get()).toMatchObject({ count: ['revoke', 'stream-error', 'usage-invalid', 'stream-setup-error'].includes(mode) ? 1 : 0 })
+      } finally { ledger.close() }
       if (mode === 'late-start') {
-        // 两个 run 引用都迟到 deadline，但它们各自唯一的请求都在 deadline 窗口内
-        // 合法发出（见 adapterCalls）；deadline 处置是正常超时回收而非预算失败，
-        // 因此两个 child 都不得被记成预算 failure。
-        expect(bound.every(child => child.diagnostics?.failure === undefined)).toBe(true)
+        const before = fixture.llm.requests.length
+        releaseLate!()
+        // 两个迟到的 run 引用释放后，其 child agent 都必须被回收，且释放动作本身
+        // 不得再触发任何 adapter 请求（窗口内已发出的请求此前已计入 adapterCalls）。
+        for (const child of childAgents) {
+          await vi.waitFor(() => expect(fixture.ctx.agents.get(child.id)).toBeUndefined(), { timeout: 2000 })
+        }
+        expect(fixture.llm.requests).toHaveLength(before)
+        const check = new DatabaseSync(join(root, 'goals.sqlite.strategies'), { readOnly: true })
+        try { expect(check.prepare('SELECT state, outcome FROM goal_strategy_records').get()).toMatchObject({ state: 'unknown', outcome: 'unknown' }) } finally { check.close() }
       }
-      if (mode === 'scoped-tool') {
-        expect(attackSessionId).toBeDefined()
-        expect(new Set(bound.map(child => child.sessionId))).toEqual(new Set(childAgents.map(agent => String(agent.session.id))))
-        expect(bound.find(child => child.sessionId === attackSessionId)?.diagnostics).toMatchObject({ toolRejections: 0, output: 'accepted' })
-        expect(bound.filter(child => child.sessionId !== attackSessionId).map(child => child.diagnostics))
-          .toEqual([{ toolRejections: 0, output: 'accepted' }])
+      if (mode === 'normal') {
+        const child = childAgents[0]!
+        const before = fixture.llm.requests.length
+        expect(stored.get(String(child.id))?.events.some(event => String(event.type) === 'subagent/descriptor')).toBe(true)
+        const resumed = await fixture.ctx.agents.resume({ resumeSessionId: child.id, agentOptions: { provider: 'mock', model: 'delivery-model' } })
+        resumed.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Resume without the old private permit' }], source: { kind: 'user' } }))
+        await resumed.agent.whenIdle()
+        expect(fixture.llm.requests).toHaveLength(before)
+        expect(resumed.agent.session.snapshotEvents().some(event => event.type === 'turn/end' && event.data.reason.kind === 'error')).toBe(true)
+        await resumed.dispose()
       }
-      if (mode === 'normal') expect(bound.map(child => child.diagnostics)).toEqual([
-        { toolRejections: 0, output: 'accepted' }, { toolRejections: 0, output: 'accepted' },
-      ])
-    } finally { strategy.close() }
-    const ledger = new DatabaseSync(join(root, 'goals.sqlite.budgets'), { readOnly: true })
-    try {
-      expect(ledger.prepare('SELECT COUNT(*) AS count FROM goal_budget_tools WHERE goal_id = ?').get(goalId)).toMatchObject({ count: 1 })
-      const childRows = ledger.prepare("SELECT DISTINCT run_id FROM goal_budget_reservations WHERE goal_id = ? AND run_id LIKE 'strategy-%'").all(goalId) as Array<{ run_id: string }>
-      expect(childRows).toHaveLength(childCalls)
-      expect(new Set(childRows.map(row => row.run_id)).size).toBe(childCalls)
-      expect(ledger.prepare("SELECT COUNT(*) AS count FROM goal_budget_reservations WHERE state = 'held'").get()).toMatchObject({ count: ['revoke', 'stream-error', 'usage-invalid', 'stream-setup-error'].includes(mode) ? 1 : 0 })
-    } finally { ledger.close() }
-    if (mode === 'late-start') {
-      const before = fixture.llm.requests.length
-      releaseLate!()
-      // 两个迟到的 run 引用释放后，其 child agent 都必须被回收，且释放动作本身
-      // 不得再触发任何 adapter 请求（窗口内已发出的请求此前已计入 adapterCalls）。
-      for (const child of childAgents) {
-        await vi.waitFor(() => expect(fixture.ctx.agents.get(child.id)).toBeUndefined(), { timeout: 2000 })
-      }
-      expect(fixture.llm.requests).toHaveLength(before)
-      const check = new DatabaseSync(join(root, 'goals.sqlite.strategies'), { readOnly: true })
-      try { expect(check.prepare('SELECT state, outcome FROM goal_strategy_records').get()).toMatchObject({ state: 'unknown', outcome: 'unknown' }) } finally { check.close() }
+    } finally {
+      releaseLate?.()
+      await fixture.ctx.fiber.restart()
     }
-    if (mode === 'normal') {
-      const child = childAgents[0]!
-      const before = fixture.llm.requests.length
-      expect(stored.get(String(child.id))?.events.some(event => String(event.type) === 'subagent/descriptor')).toBe(true)
-      const resumed = await fixture.ctx.agents.resume({ resumeSessionId: child.id, agentOptions: { provider: 'mock', model: 'delivery-model' } })
-      resumed.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Resume without the old private permit' }], source: { kind: 'user' } }))
-      await resumed.agent.whenIdle()
-      expect(fixture.llm.requests).toHaveLength(before)
-      expect(resumed.agent.session.snapshotEvents().some(event => event.type === 'turn/end' && event.data.reason.kind === 'error')).toBe(true)
-      await resumed.dispose()
-    }
-    await fixture.ctx.fiber.restart()
-  })
+  }, 20_000)
 })
 
 
