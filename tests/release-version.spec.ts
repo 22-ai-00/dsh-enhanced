@@ -1202,7 +1202,8 @@ describe('release version workflow', () => {
     expect(ciWorkflow).toContain("VITEST_MAX_WORKERS: '2'")
     expect(ciWorkflow).toContain('cancel-in-progress: true')
     expect(ciWorkflow).toContain('@deepseek-ai/dsh@0.2.0-rc.2')
-    expect(ciWorkflow).toContain('$(cd /tmp && pwd -P)')
+    expect(ciWorkflow).not.toContain("printf 'TMPDIR=")
+    expect(ciWorkflow).toContain('tests/native-macos.spec.ts')
     expect(releaseWorkflow).toContain("printf 'DSH_TEST_PNPM_ROOT=%s\\n'")
   })
 
