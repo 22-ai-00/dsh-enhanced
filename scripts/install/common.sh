@@ -1200,6 +1200,7 @@ dsh_enhanced_resolve_model_setup() {
 dsh_enhanced_restart_resident_service() {
   local profile="$1"
   local dry_run="$2"
+  local dsh_home="${3:-${DSH_HOME:-$HOME/.dsh}}"
   local platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}"
   case "$platform" in
     Darwin|darwin)
@@ -1209,10 +1210,7 @@ dsh_enhanced_restart_resident_service() {
         dsh_enhanced_print_command launchctl kickstart -k "$target"
         return 0
       fi
-      if launchctl print "$target" >/dev/null 2>&1; then
-        printf '常驻服务：重启以加载新模型配置。\n'
-        launchctl kickstart -k "$target" || printf '常驻服务：重启失败；请手动重启后再验证。\n'
-      fi
+      dsh_enhanced_macos_service_action "$profile" "$dsh_home" restart-if-loaded || return $?
       ;;
     Linux|linux)
       local target="dsh-profile-$profile.service"
@@ -2307,9 +2305,9 @@ dsh_enhanced_doctor() {
         return $?
       fi
       ;;
-    Darwin)
-      if ! launchctl print "gui/$(id -u)/ai.deepseek.dsh.profile.$profile" >/dev/null 2>&1; then
-        dsh_enhanced_fail 1 "doctor：launchd 服务 ai.deepseek.dsh.profile.$profile 未注册。"
+    Darwin|darwin)
+      if ! dsh_enhanced_macos_service_action "$profile" "$dsh_home" running; then
+        dsh_enhanced_fail 1 "doctor：当前 Home 的 launchd 服务 ai.deepseek.dsh.profile.$profile 未运行或归属无法确认。"
         return $?
       fi
       ;;
@@ -2343,9 +2341,15 @@ dsh_enhanced_ensure_resident_service() {
     dsh_enhanced_print_command "$setup_bin" --profile "$profile" --install-service
     return 0
   fi
-  if launchctl print "$target" >/dev/null 2>&1; then
+  local inspection_status=0
+  if dsh_enhanced_macos_service_action "$profile" "$dsh_home" registered; then
     return 0
+  else
+    inspection_status=$?
   fi
+  # Only an explicitly absent job permits registration. Query/identity errors
+  # must not overwrite a service belonging to another Home.
+  if [[ "$inspection_status" != '3' ]]; then return "$inspection_status"; fi
   if [[ ! -x "$setup_bin" ]]; then
     dsh_enhanced_fail 1 "常驻服务：launchd 服务未注册，且找不到注册入口：$setup_bin"
     return $?
@@ -2355,11 +2359,17 @@ dsh_enhanced_ensure_resident_service() {
     dsh_enhanced_fail 1 "常驻服务：自动注册 $target 失败；请检查上方 launchd 错误后重试安装。"
     return $?
   fi
-  if ! launchctl print "$target" >/dev/null 2>&1; then
+  if ! dsh_enhanced_macos_service_action "$profile" "$dsh_home" registered; then
     dsh_enhanced_fail 1 "常驻服务：自动注册后 $target 仍不可见；请在当前 macOS 用户的图形登录会话中重试安装。"
     return $?
   fi
   printf '常驻服务：launchd 注册已完成。\n'
+}
+
+dsh_enhanced_macos_service_action() {
+  local profile="$1" dsh_home="$2" action="$3"
+  dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" internal-lark-service \
+    --profile "$profile" --dsh-home "$dsh_home" --action "$action"
 }
 
 dsh_enhanced_apply_permission_choice() {
@@ -2528,6 +2538,10 @@ dsh_enhanced_run_profile_setup() {
     return 0
   fi
   if [[ "$(NODE_PATH='' NODE_OPTIONS='' dsh --version 2>/dev/null || true)" != '0.2.0-rc.2' ]]; then
+    if [[ "$setup" == 'internal-lark-service' ]]; then
+      dsh_enhanced_fail 1 'macOS 服务归属检查需要已验证的 DSH Host；尚未操作服务。'
+      return $?
+    fi
     if [[ "$setup" == 'source-rsi' ]]; then
       node "$executable" "${@:2}"
     elif [[ "$setup" == 'dsh-model-setup' && ! -x "$executable" ]]; then
@@ -2555,6 +2569,7 @@ const modules = {
   'dsh-model-setup': ['assistant-policy', 'model-setup', 'runModelSetup'],
   'dsh-permission-setup': ['assistant-policy', 'permission-setup', 'runPermissionSetup'],
   'dsh-lark-setup': ['lark-channel', 'setup', 'runLarkSetup'],
+  'internal-lark-service': ['lark-channel', 'launchd-control', 'runLaunchdControl'],
   'dsh-rsi-setup': ['lark-channel', 'rsi-setup', 'runRsiSetup'],
   'dsh-web-owner-setup': ['assistant-web-owner', 'setup', 'runWebOwnerSetup'],
   'dsh-autonomy-doctor': ['assistant-web-owner', 'doctor', 'runAutonomyDoctor'],
@@ -2635,7 +2650,7 @@ if (setup !== 'source-rsi' && layer && (!direct || await realpath(layer.packageD
   throw new Error('setup package differs from native profile resolution')
 }
 const packageManifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'))
-const binName = setup === 'source-rsi' ? 'dsh-rsi-setup' : setup
+const binName = setup === 'source-rsi' ? 'dsh-rsi-setup' : setup === 'internal-lark-service' ? 'dsh-lark-setup' : setup
 const binRelative = packageManifest.bin?.[binName]
 if (packageManifest.name !== expectedName || typeof binRelative !== 'string'
   || isAbsolute(binRelative) || binRelative.split('/').some(part => part === '..')
@@ -3963,7 +3978,7 @@ NODE
     dsh_enhanced_apply_auto_traex "$profile" "$dsh_home" "$auto_traex_command" \
       "$auto_traex_default_candidate" "$dry_run" || return $?
     if [[ "$model_mode" != 'configure' && "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
-      dsh_enhanced_restart_resident_service "$profile" "$dry_run" || return $?
+      dsh_enhanced_restart_resident_service "$profile" "$dry_run" "$dsh_home" || return $?
     fi
   fi
 
@@ -4004,7 +4019,7 @@ NODE
     # after it reloads. An agent route has already passed its zero-cost local
     # prerequisite check above; now reload the resident process for postflight.
     if [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
-      dsh_enhanced_restart_resident_service "$profile" "$dry_run" || return $?
+      dsh_enhanced_restart_resident_service "$profile" "$dry_run" "$dsh_home" || return $?
     fi
   else
     printf '\n模型配置：本次跳过；使用 profile 已组合的默认模型。\n'

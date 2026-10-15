@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -151,7 +151,8 @@ describe('native local cohort target lifecycle', () => {
       startNative: vi.fn(async () => { events.push('start') }),
       readPlist: vi.fn(async () => plist),
     } satisfies NonNullable<Parameters<typeof installRsiLocalTarget>[1]>
-    const input = { dshHome, profile: 'web', sourceRepository: join(root, 'source'), bundles: ['target'] }
+    const input = { dshHome, profile: `local-${process.pid}-${randomUUID().slice(0, 8)}`,
+      sourceRepository: join(root, 'source'), bundles: ['target'] }
     return { root, input, ports, events, setPlist: (value: Buffer | null) => { plist = value },
       setRegistered: (value: boolean) => { registered = value } }
   }
@@ -159,7 +160,7 @@ describe('native local cohort target lifecycle', () => {
   test('validates its loaded LaunchAgent, stops it and restores it only after frozen installation', async () => {
     const f = await fixture()
     try {
-      await expect(installRsiLocalTarget(f.input, f.ports)).resolves.toMatchObject({ mode: 'local-cohort-installed', profile: 'web' })
+      await expect(installRsiLocalTarget(f.input, f.ports)).resolves.toMatchObject({ mode: 'local-cohort-installed', profile: f.input.profile })
       expect(f.events).toEqual(['source', 'cohort', 'preflight', 'validate', 'stop', 'install', 'validate', 'start'])
       expect(f.ports.readPlist).toHaveBeenCalledTimes(2)
       expect(f.ports.pinSystemctl).not.toHaveBeenCalled()
@@ -221,7 +222,7 @@ describe('native local cohort target lifecycle', () => {
       await installRsiLocalTarget(f.input, linux)
       expect(linux.pinSystemctl).toHaveBeenCalledTimes(1)
       expect(linux.stopLinux).toHaveBeenCalledTimes(1)
-      expect(linux.startLinux).toHaveBeenCalledWith('web', f.input.dshHome)
+      expect(linux.startLinux).toHaveBeenCalledWith(f.input.profile, f.input.dshHome)
       expect(linux.inspectNative).not.toHaveBeenCalled()
       await expect(installRsiLocalTarget(f.input, { ...f.ports, platform: 'win32' })).rejects.toThrow('requires Linux or macOS')
       expect(f.ports.prepareSource).toHaveBeenCalledTimes(1)

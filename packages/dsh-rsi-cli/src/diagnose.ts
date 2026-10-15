@@ -1,8 +1,8 @@
 import { existsSync } from 'node:fs'
 import { open, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
+import { inspectLaunchdDefinition, inspectLoadedLaunchd } from './launchd-service.ts'
 import {
-  launchAgentTargets,
   listLifecycleResiduals,
   listProfiles,
   listProfilePlugins,
@@ -34,14 +34,14 @@ export interface StatusSnapshot {
 async function serviceState(
   platform: NodeJS.Platform,
   home: string,
+  dshHome: string,
   profile: string,
   runner: CommandRunner,
 ): Promise<{ installed: boolean; active: boolean }> {
   if (platform === 'darwin') {
-    const { label, plistPath } = launchAgentTargets(home, profile)
-    const installed = existsSync(plistPath)
-    const shown = runner('launchctl', ['print', `gui/${process.getuid?.() ?? process.env.UID}/${label}`])
-    return { installed, active: installed && shown.status === 0 }
+    const checked = await inspectLaunchdDefinition(home, dshHome, profile, runner)
+    const loaded = checked.definition ? inspectLoadedLaunchd(checked.definition, dshHome, runner) : undefined
+    return { installed: !!checked.definition, active: !!loaded && !loaded.error && loaded.registered && loaded.running }
   }
   const unit = systemdUnitName(profile)
   const installed = existsSync(join(systemdUserDirectory(home), unit))
@@ -62,7 +62,7 @@ export async function collectStatus(
   const profileStatus: ProfileStatus[] = []
   for (const name of profiles) {
     const plugins = await listProfilePlugins(dshHome, name)
-    const service = await serviceState(platform, home, name, runner)
+    const service = await serviceState(platform, home, dshHome, name, runner)
     profileStatus.push({
       name,
       npmPlugins: plugins.filter(plugin => plugin.kind === 'npm').map(plugin => plugin.name),

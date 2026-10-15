@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 import { runtimeConfigDigest, type RuntimeObservation, type RuntimeObserverConfig } from '@dsh-enhanced/plugin-control-plane'
-import { createLaunchAgent, launchAgentPaths } from '../src/launchd.ts'
+import { createLaunchAgent, inspectDshLaunchAgent, installDshLaunchAgent, launchAgentPaths } from '../src/launchd.ts'
 import { assertNativeLaunchdPlist, assertNativeRuntimeObservation, inspectNativeLaunchd, startNativeLaunchd, stopNativeLaunchd,
   type NativeLaunchdCommand, type NativeLaunchdIdentity } from '../src/rsi-native-launchd.ts'
 
@@ -197,10 +197,20 @@ test.skipIf(process.platform !== 'darwin' || process.env.DSH_NATIVE_LAUNCHD_TEST
       attempted = true
       await startNativeLaunchd(smokeInput, AbortSignal.timeout(30_000))
       await expect.poll(() => inspectNativeLaunchd(smokeInput).pid, { timeout: 10_000 }).toBeGreaterThan(1)
+      const beforePid = inspectNativeLaunchd(smokeInput).pid
+      const installed = await installDshLaunchAgent({ dshHome, profile }, {
+        home: smokeHome, uid, nodePath: smokeInput.nodePath!, dshPath: smokeInput.dshPath!,
+        path: `${join(smokeHome, 'bin')}:/usr/bin:/bin`,
+      })
+      expect(installed.target).toBe(`${domain}/${smokePaths.label}`)
+      const replacement = await inspectDshLaunchAgent({ dshHome, profile }, { home: smokeHome, uid })
+      expect(replacement).toMatchObject({ registered: true, running: true })
+      expect(replacement.pid).toBeGreaterThan(1)
+      expect(replacement.pid).not.toBe(beforePid)
       await stopNativeLaunchd(smokeInput, AbortSignal.timeout(45_000))
       expect(inspectNativeLaunchd(smokeInput)).toEqual({ registered: false, pid: 0 })
     } finally {
       if (attempted) spawnSync('/bin/launchctl', ['bootout', domain, smokePaths.plistPath], { encoding: 'utf8', timeout: 10_000 })
       await rm(smokeHome, { recursive: true, force: true })
     }
-  }, 90_000)
+  }, 150_000)

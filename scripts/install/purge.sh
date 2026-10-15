@@ -7,7 +7,8 @@ set -euo pipefail
 # 那样的供应链引导路径，因此不做 release pin/sha256 校验。
 #
 # 优先委托全局 dsh-rsi（随插件集合一起安装，实现完整、带单测）；
-# 机器上没有 dsh-rsi 时（崩溃后/手动删过），使用本文件内联的精简实现：
+# macOS 必须使用具有服务归属校验能力的 dsh-rsi；缺失或旧版 CLI 会停止清理。
+# Linux 机器上没有 dsh-rsi 时（崩溃后/手动删过），使用本文件内联的精简实现：
 # 先自动停用受管常驻服务 → 停服后复检残留进程（可证明归属本 home 的 dsh 进程交互/--yes
 # 终止，无法证明归属的 fail-closed）→ tar.gz 备份 → 删除 profile/DSH home/生命周期残留
 # → 清理外部凭据 → 可选卸载全局 host。local checkout 源码绝不删除。
@@ -63,6 +64,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "$(uname -s)" in
+  Darwin) PURGE_PLATFORM='darwin' ;;
+  Linux) PURGE_PLATFORM='linux' ;;
+  *) printf 'purge.sh: 仅支持 macOS 与 Linux，当前平台：%s\n' "$(uname -s)" >&2; exit 1 ;;
+esac
+
 # 完整实现始终以 dsh-rsi 为准。全局 bin 可能不在 PATH（手动删过 PATH / 用别的 node prefix），
 # 因此按多路径定位，兼容新旧包名（@dsh-enhanced/dsh-rsi-cli 与 @dsh-enhanced/rsi-cli）；
 # 只有所有路径都找不到时才降级到内联实现。
@@ -84,25 +91,30 @@ purge_locate_rsi() {
 }
 
 if purge_rsi_found="$(purge_locate_rsi)"; then
+  # Keep paths with spaces intact, including the fallback JavaScript entry.
+  if [[ "$purge_rsi_found" == 'node '* ]]; then
+    set -- node "${purge_rsi_found#node }"
+  else
+    set -- "$purge_rsi_found"
+  fi
+  if [[ "$PURGE_PLATFORM" == 'darwin' ]]; then
+    if ! purge_capabilities="$("$@" --capabilities 2>/dev/null)" \
+      || ! node -e 'try { const value = JSON.parse(process.argv[1]); process.exit(Array.isArray(value.capabilities) && value.capabilities.includes("macos-launchd-ownership-v1") ? 0 : 1) } catch { process.exit(1) }' "$purge_capabilities"; then
+      printf 'purge.sh: 已找到的 dsh-rsi 缺少 macOS 服务归属校验能力，已停止，未操作服务或删除数据。请升级到包含该能力的 @dsh-enhanced/dsh-rsi-cli 后重试。\n' >&2
+      exit 1
+    fi
+  fi
   purge_rsi_args=(--dsh-home "$PURGE_DSH_HOME")
   [[ -n "$PURGE_PROFILE" ]] && purge_rsi_args+=(--profile "$PURGE_PROFILE")
   [[ "$PURGE_BACKUP" == '0' ]] && purge_rsi_args+=(--no-backup)
   [[ "$PURGE_KEEP_KEYCHAIN" == '1' ]] && purge_rsi_args+=(--keep-keychain)
   [[ "$PURGE_REMOVE_HOST" == '1' ]] && purge_rsi_args+=(--remove-host)
   [[ "$PURGE_DRY_RUN" == '1' ]] && purge_rsi_args+=(--dry-run)
-  purge_rsi_args+=(--yes)
-  # shellcheck disable=SC2086
-  set -- $purge_rsi_found
+  [[ "$PURGE_ASSUME_YES" == '1' ]] && purge_rsi_args+=(--yes)
   exec "$@" purge "${purge_rsi_args[@]+"${purge_rsi_args[@]}"}"
 fi
 
 printf 'purge.sh: 未找到全局 dsh-rsi（已查 PATH、npm prefix bin 与新旧包名路径），使用内联精简实现（建议日后安装插件集合获得完整 dsh-rsi）。\n' >&2
-
-case "$(uname -s)" in
-  Darwin) PURGE_PLATFORM='darwin' ;;
-  Linux) PURGE_PLATFORM='linux' ;;
-  *) printf 'purge.sh: 仅支持 macOS 与 Linux，当前平台：%s\n' "$(uname -s)" >&2; exit 1 ;;
-esac
 
 if [[ -n "$PURGE_PROFILE" && "$PURGE_REMOVE_HOST" == '1' ]]; then
   printf 'purge.sh: --remove-host 只能在全量 purge（不指定 --profile）时使用。\n' >&2
@@ -111,6 +123,10 @@ fi
 if [[ ! -d "$PURGE_DSH_HOME" ]]; then
   printf 'purge.sh: DSH home 不存在：%s（没有可清除的内容）。\n' "$PURGE_DSH_HOME"
   exit 0
+fi
+if [[ "$PURGE_PLATFORM" == 'darwin' ]]; then
+  printf 'purge.sh: macOS 清理需要 dsh-rsi 的服务归属与停服校验；当前未找到完整 CLI，已停止，未操作服务或删除数据。请安装 @dsh-enhanced/dsh-rsi-cli 后重试。\n' >&2
+  exit 1
 fi
 if [[ -n "$PURGE_PROFILE" && ! -d "$PURGE_DSH_HOME/profiles/$PURGE_PROFILE" ]]; then
   printf 'purge.sh: profile 不存在：%s（DSH home：%s）\n' "$PURGE_PROFILE" "$PURGE_DSH_HOME" >&2
@@ -155,12 +171,6 @@ fi
 
 # --- 2. 先停用并注销受管常驻服务（受管 host 自动停，不再阻塞用户） ---
 for purge_p in "${PURGE_PROFILES[@]+"${PURGE_PROFILES[@]}"}"; do
-  if [[ "$PURGE_PLATFORM" == 'darwin' ]]; then
-    purge_label="ai.deepseek.dsh.profile.$purge_p"
-    purge_plist="$HOME/Library/LaunchAgents/$purge_label.plist"
-    purge_run launchctl bootout "gui/$(id -u)/$purge_label" || true
-    [[ -e "$purge_plist" ]] && purge_run rm -f "$purge_plist"
-  else
     purge_unit="dsh-profile-$purge_p.service"
     purge_unit_path="$HOME/.config/systemd/user/$purge_unit"
     purge_run systemctl --user disable --now "$purge_unit" 2>/dev/null || true
@@ -176,7 +186,6 @@ for purge_p in "${PURGE_PROFILES[@]+"${PURGE_PROFILES[@]}"}"; do
       printf 'purge.sh: 服务文件内容非受管 unit，保留：%s\n' "$purge_unit_path" >&2
     fi
     if [[ "$PURGE_DRY_RUN" != '1' ]]; then systemctl --user daemon-reload 2>/dev/null || true; fi
-  fi
 done
 
 # --- 3. 停服后复检残留进程，分类终止 ---

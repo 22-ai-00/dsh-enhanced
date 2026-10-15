@@ -9345,6 +9345,8 @@ fi
     { installer, profile: 'web', mode: 'registered', extra: [] },
     { installer, profile: 'web', mode: 'failed', extra: [] },
     { installer, profile: 'web', mode: 'invisible', extra: [] },
+    { installer, profile: 'web', mode: 'foreign', extra: [] },
+    { installer, profile: 'web', mode: 'inactive', extra: [] },
     { installer, profile: 'web', mode: 'missing', extra: ['--no-service'] },
     { installer, profile: 'web', mode: 'missing', extra: ['--lark', 'skip'] },
   ]))('reconciles launchd registration in $installer ($profile, $mode, $extra)', async ({ installer, profile, mode, extra }) => {
@@ -9360,7 +9362,7 @@ fi
     const patchPath = join(dshHome, 'profiles', profile, 'cordis.patch.yml')
     const originalPatch = await readFile(patchPath, 'utf8')
     await writeFile(logPath, '')
-    if (mode === 'registered') await writeFile(registered, '')
+    if (mode === 'registered' || mode === 'inactive') await writeFile(registered, '')
     await writeExecutable(join(fakeBin, 'node'), `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; exit 0; fi
 exec "$FIXTURE_REAL_NODE" "$@"
@@ -9397,6 +9399,18 @@ export async function runLarkSetup(args) {
   if (process.env.REGISTER_MODE !== 'invisible') await writeFile(process.env.REGISTERED, '')
 }
 `)
+    await writeFile(join(dirname(dirname(packageExecutable)), 'lib', 'launchd-control.js'), `import { appendFile, access } from 'node:fs/promises'
+export async function runLaunchdControl(args) {
+  const profile = args[args.indexOf('--profile') + 1]
+  const home = args[args.indexOf('--dsh-home') + 1]
+  const action = args[args.indexOf('--action') + 1]
+  if (profile !== process.env.FIXTURE_PROFILE || home !== process.env.DSH_HOME) throw new Error('wrong service identity')
+  await appendFile(process.env.INSTALL_LOG, 'lark-service ' + action + ' ' + profile + '\\n')
+  if (process.env.REGISTER_MODE === 'foreign') throw new Error('loaded service belongs to another installation')
+  if (process.env.REGISTER_MODE === 'inactive' && action === 'running') { process.exitCode = 3; return }
+  try { await access(process.env.REGISTERED) } catch { process.exitCode = 3 }
+}
+`)
     await symlink(packageExecutable, join(setupDirectory, 'dsh-lark-setup'))
     await writeFile(join(dshHome, 'profiles', profile, 'package.json'), JSON.stringify({
       name: `dsh-profile-${profile}`, type: 'module',
@@ -9416,20 +9430,22 @@ export async function runLarkSetup(args) {
     })
     const log = await readFile(logPath, 'utf8')
     const optedOut = extra.length > 0
-    const failed = mode === 'failed' || mode === 'invisible'
+    const failed = ['failed', 'invisible', 'foreign', 'inactive'].includes(mode)
     expect(result.status, result.stderr).toBe(failed ? 1 : 0)
     expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
     const calls = log.split('\n').filter(line => line.startsWith('lark-setup '))
-    expect(calls).toHaveLength(optedOut ? 0 : mode === 'registered' ? 1 : 2)
+    expect(calls).toHaveLength(optedOut ? 0 : ['registered', 'foreign', 'inactive'].includes(mode) ? 1 : 2)
     expect(calls.every(line => line === `lark-setup --profile ${profile} --install-service`)).toBe(true)
     if (optedOut) {
       expect(log).not.toContain('launchctl')
+      expect(log).not.toContain('lark-service')
     } else if (failed) {
       expect(result.stdout).not.toContain('安装流程完成')
-      expect(result.stderr).toContain(mode === 'failed' ? 'bootstrap denied' : '仍不可见')
+      expect(result.stderr).toContain(mode === 'failed' ? 'bootstrap denied' : mode === 'foreign'
+        ? 'another installation' : mode === 'inactive' ? '未运行或归属无法确认' : '仍不可见')
     } else {
       expect(result.stdout).toContain('doctor：profile、channel 与常驻服务均已通过检查')
-      expect(log.trim().split('\n').at(-1)).toBe(`launchctl print gui/${process.getuid!()}/ai.deepseek.dsh.profile.${profile}`)
+      expect(log.trim().split('\n').at(-1)).toBe(`lark-service running ${profile}`)
       if (mode === 'missing') expect(result.stdout).toContain('launchd 注册已完成')
       else expect(result.stdout).not.toContain('正在自动注册')
     }
