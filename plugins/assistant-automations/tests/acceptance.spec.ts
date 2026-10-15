@@ -157,14 +157,15 @@ test('store-terminal Automations, Verifier, and Evaluation integration persists 
   const authority = {
     kind: 'runner' as const, id: 'read-result', executable: process.execPath,
     fixedArgs: ['-e', "process.stdout.write(require('node:fs').readFileSync(process.argv[1], 'utf8'))"],
-    timeoutMs: 1_000, maxOutputBytes: 1_024,
+    timeoutMs: 5_000, maxOutputBytes: 1_024,
   }
   const authorities = createVerifierAuthorities({ authorities: [authority] })
   const profile = {
     id: 'automation-result', version: 1,
     scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: 'principal-owner', principalVersion: 4 },
     taskKind: 'automation-run' as const, objective: 'Write the accepted result.', validityMs: 60_000,
-    bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 },
+    // This integration starts a real child while other packages run concurrently in CI.
+    bounds: { maxDurationMs: 5_000, maxEvidenceBytes: 4_096 },
     criteria: [{ id: 'result', kind: 'process-behavior' as const, authority: { id: authority.id, digest: authorities[0]!.digest },
       artifactPath: 'result.txt', stdin: '', expectedStdout: 'verified', expectedExitCode: 0 }],
   }
@@ -199,7 +200,13 @@ test('store-terminal Automations, Verifier, and Evaluation integration persists 
   await verifier.tick()
   expect(verifier.health()).toMatchObject({ hostProducers: expect.arrayContaining(['assistantAutomations']), evaluationConnected: true })
   expect(verifier.continuations()).toEqual([])
-  expect(evaluation.query({ scope: { workspace: root, preset: 'primary' }, situation: 'automation:acceptance-service', limit: 10 }))
+  const outcomes = evaluation.query({ scope: { workspace: root, preset: 'primary' }, situation: 'automation:acceptance-service', limit: 10 })
+  const contractId = outcomes.find(outcome => outcome.source.kind === 'evaluator' && outcome.source.id === 'assistant-verifier')
+    ?.evidence.find(item => item.kind === 'acceptance-contract')?.ref
+  const verificationState = contractId === undefined ? null : verifier.inspect(contractId)
+  expect(verificationState?.receipt?.results, `verifier acceptance state: ${JSON.stringify(verificationState)}`)
+    .toEqual([expect.objectContaining({ criterionId: 'result', status: 'passed' })])
+  expect(outcomes, `verifier acceptance state: ${JSON.stringify(verificationState)}`)
     .toEqual(expect.arrayContaining([expect.objectContaining({
       trust: 'trusted', objectiveStatus: 'achieved', source: { kind: 'evaluator', id: 'assistant-verifier' },
     })]))

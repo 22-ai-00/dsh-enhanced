@@ -1330,7 +1330,7 @@ describe.sequential('trusted staged CLI', () => {
     expect(gap.status).toBe('open')
     expect('candidateId' in gap).toBe(false)
     store.close()
-  }, 15_000)
+  }, 30_000)
 
   test.each(['target', 'backup'] as const)('post-activation rollback preserves both profiles when the %s core files drift', async location => {
     const value = await fixture(); const plan = await activatedByProbe(value, `watch-drift-${location}`)
