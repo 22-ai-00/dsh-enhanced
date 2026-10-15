@@ -9,6 +9,7 @@ import { runtimeConfigDigest, type RuntimeObservation, type RuntimeObserverConfi
 import { createLaunchAgent, inspectDshLaunchAgent, installDshLaunchAgent, launchAgentPaths } from '../src/launchd.ts'
 import { assertNativeLaunchdPlist, assertNativeRuntimeObservation, inspectNativeLaunchd, startNativeLaunchd, stopNativeLaunchd,
   type NativeLaunchdCommand, type NativeLaunchdIdentity } from '../src/rsi-native-launchd.ts'
+import { inspectNativeLaunchdDetail } from '../src/launchd-identity.ts'
 
 let root: string, input: NativeLaunchdIdentity, paths: ReturnType<typeof launchAgentPaths>, target: string, foreignPath: string
 beforeAll(async () => {
@@ -29,8 +30,8 @@ function argumentsForLoaded(): string[] {
 }
 function loaded(overrides: Record<string, string> = {}, args = argumentsForLoaded()): string {
   const fields = { path: paths.plistPath, 'working directory': join(input.dshHome, 'profiles', input.profile),
-    DSH_HOME: input.dshHome, program: input.nodePath!, pid: '1234', ...overrides }
-  return `path = ${fields.path}\nworking directory = ${fields['working directory']}\nDSH_HOME => ${fields.DSH_HOME}\nprogram = ${fields.program}\narguments = {\n${args.map(arg => `  ${arg}`).join('\n')}\n}\npid = ${fields.pid}\n`
+    DSH_HOME: input.dshHome, program: input.nodePath!, pid: '1234', state: 'running', ...overrides }
+  return `${target} = {\n  path = ${fields.path}\n  working directory = ${fields['working directory']}\n  environment = {\n    DSH_HOME => ${fields.DSH_HOME}\n  }\n  program = ${fields.program}\n  arguments = {\n${args.map(arg => `    ${arg}`).join('\n')}\n  }\n  state = ${fields.state}\n  pid = ${fields.pid}\n  resource coalition = {\n    state = active\n  }\n}\n`
 }
 function validPlist() {
   return { Label: paths.label, WorkingDirectory: join(input.dshHome, 'profiles', input.profile),
@@ -48,6 +49,18 @@ function command(stdout: string, status = 0, stderr = ''): NativeLaunchdCommand 
 describe('native launchd service identity', () => {
   test('accepts only the loaded job owned by this Home and profile', () => {
     expect(inspectNativeLaunchd(input, command(loaded()))).toEqual({ registered: true, pid: 1234 })
+    expect(inspectNativeLaunchdDetail(input, command(loaded())))
+      .toMatchObject({ registered: true, pid: 1234, running: true, state: 'running' })
+    expect(inspectNativeLaunchdDetail(input, command(loaded({ state: 'waiting' }))).running).toBe(false)
+    for (const printed of [
+      loaded().replace('  state = running\n', ''),
+      loaded().replace('  state = running\n', '  state = running\n  state = waiting\n'),
+      loaded().slice(0, -2),
+    ]) {
+      expect(inspectNativeLaunchdDetail(input, command(printed)).running).toBe(false)
+    }
+    expect(() => inspectNativeLaunchd(input, command(loaded().replace('  environment = {',
+      `  DSH_HOME => ${input.dshHome}\n  environment = {`)))).toThrow('another installation')
     expect(inspectNativeLaunchd(input, command('', 113, 'Could not find service'))).toEqual({ registered: false, pid: 0 })
     expect(() => inspectNativeLaunchd(input, command('', 5, 'I/O error'))).toThrow('cannot inspect')
     for (const fields of [{ path: '/Users/other/Library/LaunchAgents/foreign.plist' },
@@ -207,6 +220,7 @@ test.skipIf(process.platform !== 'darwin' || process.env.DSH_NATIVE_LAUNCHD_TEST
       expect(replacement).toMatchObject({ registered: true, running: true })
       expect(replacement.pid).toBeGreaterThan(1)
       expect(replacement.pid).not.toBe(beforePid)
+      console.info(`native launchd smoke: state=${inspectNativeLaunchdDetail(smokeInput).state}, previousPid=${beforePid}, replacementPid=${replacement.pid}`)
       await stopNativeLaunchd(smokeInput, AbortSignal.timeout(45_000))
       expect(inspectNativeLaunchd(smokeInput)).toEqual({ registered: false, pid: 0 })
     } finally {

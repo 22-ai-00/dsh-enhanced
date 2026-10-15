@@ -10,7 +10,9 @@ export interface NativeLaunchdIdentity {
   nodePath?: string; dshPath?: string; dshSha256?: string
 }
 export interface NativeLaunchdState { registered: boolean; pid: number }
-export interface NativeLaunchdDetail extends NativeLaunchdState { running: boolean }
+export interface NativeLaunchdDetail extends NativeLaunchdState {
+  running: boolean; state: string | null; lastExitCode: string | null
+}
 export interface NativeLaunchdCommandResult { status: number | null; stdout: string; stderr: string }
 export type NativeLaunchdCommand = (command: string, args: string[]) => NativeLaunchdCommandResult
 const run: NativeLaunchdCommand = (command, args) => {
@@ -31,6 +33,32 @@ function scalar(text: string, key: string, separator = ' = '): string | undefine
   if (matches.length !== 1) return undefined
   return matches[0]!.slice(prefix.length)
 }
+function rootScalar(text: string, target: string, key: string): string | undefined {
+  const lines = text.split('\n'), values: string[] = []
+  let depth = 0, rootDepth = 0, first = true, wrapped = false
+  for (const line of lines) {
+    const value = line.trim()
+    if (value === '') continue
+    if (first) {
+      first = false
+      if (value.endsWith(' = {')) {
+        if (value !== `${target} = {`) return undefined
+        depth = 1; rootDepth = 1; wrapped = true
+        continue
+      }
+    }
+    if (wrapped && depth === 0) return undefined
+    if (value === '}') {
+      if (depth === 0) return undefined
+      depth -= 1
+      continue
+    }
+    const prefix = `${key} = `
+    if (depth === rootDepth && value.startsWith(prefix)) values.push(value.slice(prefix.length))
+    if (value.endsWith(' = {')) depth += 1
+  }
+  return depth === 0 && values.length === 1 ? values[0] : undefined
+}
 function assertArguments(args: unknown, input: NativeLaunchdIdentity): void {
   if (!input.nodePath || !input.dshPath || !input.dshSha256 || !Array.isArray(args)
     || !args.every(arg => typeof arg === 'string')) fail('service executable identity is missing')
@@ -49,7 +77,9 @@ function assertArguments(args: unknown, input: NativeLaunchdIdentity): void {
 export function inspectNativeLaunchdDetail(input: NativeLaunchdIdentity, command: NativeLaunchdCommand = run): NativeLaunchdDetail {
   const expected = identity(input), result = command('/bin/launchctl', ['print', expected.target])
   if (result.status !== 0) {
-    if (result.status === 113 && /Could not find service/iu.test(result.stderr)) return { registered: false, pid: 0, running: false }
+    if (result.status === 113 && /Could not find service/iu.test(result.stderr)) {
+      return { registered: false, pid: 0, running: false, state: null, lastExitCode: null }
+    }
     fail('cannot inspect the user service')
   }
   if (scalar(result.stdout, 'path') !== expected.plistPath || scalar(result.stdout, 'working directory') !== expected.cwd
@@ -62,7 +92,9 @@ export function inspectNativeLaunchdDetail(input: NativeLaunchdIdentity, command
   if (realpathSync(scalar(result.stdout, 'program') ?? '') !== input.nodePath) fail('loaded service program differs')
   const raw = scalar(result.stdout, 'pid'), pid = raw === undefined ? 0 : Number(raw)
   if (!Number.isSafeInteger(pid) || pid < 0 || pid === 1) fail('invalid service process identity')
-  return { registered: true, pid, running: scalar(result.stdout, 'state') === 'running' && pid > 1 }
+  const state = rootScalar(result.stdout, expected.target, 'state') ?? null
+  return { registered: true, pid, running: state === 'running' && pid > 1, state,
+    lastExitCode: rootScalar(result.stdout, expected.target, 'last exit code') ?? null }
 }
 
 export function inspectNativeLaunchd(input: NativeLaunchdIdentity, command: NativeLaunchdCommand = run): NativeLaunchdState {
