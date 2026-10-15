@@ -1,5 +1,5 @@
 import { generateKeyPairSync, sign } from 'node:crypto'
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -108,7 +108,7 @@ describe('bounded live qualification contract', () => {
 
 test.each(['achieved', 'not-achieved'] as const)('independent signer freezes a finite grant and %s receipt across replay', async status => {
   const { batch, keys } = fixture(status)
-  const root = await mkdtemp(join(tmpdir(), 'dsh-live-authority-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-live-authority-')))
   roots.push(root)
   const keyPath = join(root, 'key.pem'), controlDatabasePath = join(root, 'control.sqlite'), statePath = join(root, 'state.sqlite')
   await writeFile(keyPath, keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })

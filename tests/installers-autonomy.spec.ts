@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -9,7 +9,14 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const installer = join(root, 'scripts', 'install', 'install-local.sh')
 const homes: string[] = []
 afterEach(async () => { await Promise.all(homes.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
-async function home(): Promise<string> { const value = await mkdtemp(join(tmpdir(), 'dsh-autonomy-')); homes.push(value); return value }
+async function home(): Promise<string> {
+  const value = await realpath(await mkdtemp(join(tmpdir(), 'dsh-autonomy-')))
+  homes.push(value)
+  const fakeBin = join(value, 'fake-bin')
+  await mkdir(fakeBin)
+  await writeFile(join(fakeBin, 'dsh'), '#!/bin/bash\nexit 1\n', { mode: 0o755 })
+  return value
+}
 function run(args: string[], dshHome: string) { return spawnSync('/bin/bash', [installer, ...args], { cwd: root, encoding: 'utf8', env: { ...process.env, DSH_HOME: dshHome } }) }
 const image = `sha256:${'a'.repeat(64)}`
 
@@ -45,14 +52,16 @@ describe('autonomy installer scenario', () => {
     const executable = join(bin, 'dsh-autonomy-doctor'); const log = join(dshHome, 'calls')
     await writeFile(executable, '#!/bin/bash\nprintf "%s\\n" "$*" > "$DSH_HOME/calls"\nexit 7\n'); await chmod(executable, 0o755)
     const doctor = join(root, 'scripts/install/doctor.sh')
-    const result = spawnSync('/bin/bash', [doctor, '--profile', 'web', '--require-isolation'], { encoding: 'utf8', env: { ...process.env, DSH_HOME: dshHome } })
+    const environment = { ...process.env, DSH_HOME: dshHome,
+      PATH: `${join(dshHome, 'fake-bin')}:${process.env.PATH ?? ''}` }
+    const result = spawnSync('/bin/bash', [doctor, '--profile', 'web', '--require-isolation'], { encoding: 'utf8', env: environment })
     expect(result.status).toBe(7)
     expect(await readFile(log, 'utf8')).toBe(`--dsh-home ${dshHome} --profile web\n`)
     for (const option of ['--preflight', '--require-service']) {
-      expect(spawnSync('/bin/bash', [doctor, '--require-isolation', option], { env: { ...process.env, DSH_HOME: dshHome } }).status).toBe(2)
+      expect(spawnSync('/bin/bash', [doctor, '--require-isolation', option], { env: environment }).status).toBe(2)
     }
     await rm(executable)
-    const missing = spawnSync('/bin/bash', [doctor, '--require-isolation'], { encoding: 'utf8', env: { ...process.env, DSH_HOME: dshHome } })
+    const missing = spawnSync('/bin/bash', [doctor, '--require-isolation'], { encoding: 'utf8', env: environment })
     expect(missing.status).toBe(1); expect(missing.stderr).toContain('不会重建或续期授权')
   })
 })

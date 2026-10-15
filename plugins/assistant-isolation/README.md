@@ -14,6 +14,36 @@ lease interval plus ordinary boot time before treating readiness as a failure.
 
 This is the first actual isolation component of autonomy work packages 08–10. External action/credential brokerage, rollback/compensation and installer bootstrap remain separate delivery requirements. It does not isolate arbitrary Host plugins or replace the native AgentLoop. The Host, Docker daemon, configured image and local operator remain trusted. Each workspace uses a private tmpfs volume with byte and inode hard limits. A persistent pool bounds admitted worker/workspace/keeper reservations across this ledger; it is not a machine-wide guarantee against Docker/kernel overhead or unrelated workloads. Do not treat this initial component as a complete hostile-code production platform.
 
+## Native macOS execution primitive
+
+The Host-only `runNativeMacProcess` export runs one digest-pinned Node process
+under `/usr/bin/sandbox-exec`, without Docker. Its deny-default policy permits
+only system runtime reads, explicitly approved canonical runtime roots and a
+private workspace. The workspace is read-only unless the trusted caller explicitly
+sets `workspaceWritable: true`. Network and child processes are denied; file
+access is limited to these approved paths. Strict ancestors receive exact
+metadata access for Node ESM path resolution. macOS Node startup additionally
+requires directory-data access to literal `/`, exposing only the root directory's
+top-level names; unapproved descendants and other ancestors remain unreadable.
+Runtime roots are bound to their device/inode; the executable is checked against
+its approved SHA-256 before dispatch. The child receives a clean environment,
+bounded input/output and a finite deadline. Cancellation and timeout kill the
+process; only a confirmed process close reports `quiescent: true`.
+
+This is a low-level building block, not an alternate backend for `isolation_run`
+or `IsolatedVerifierRunner`. The caller must own authorization, durable budget
+reservation, idempotency, crash recovery and safe staging. Keep runtime roots
+minimal and free of credentials. Approval covers every readable file under a
+runtime root, including existing hard-link aliases; directory device/inode checks
+do not authenticate its contents. The caller must provision trusted runtime
+contents and exclude aliases to unrelated Host files. Workspace staging rejects
+symbolic links, hard links and special files before dispatch.
+Writable workspaces have no hard disk quota; this primitive also has no hard
+memory or CPU quota. Do not infer Docker resource limits or a complete native
+RSI installation from a successful invocation. Native tests run on macOS and
+use only temporary canaries, an ephemeral loopback listener and disposable
+processes; they require no Docker installation.
+
 ## Installation
 
 ```sh

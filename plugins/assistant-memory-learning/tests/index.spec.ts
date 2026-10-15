@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -27,7 +27,7 @@ describe('dsh-enhanced-assistant-memory-learning', () => {
   })
 
   it('mounted default waits for peers and owns runtime disposal when a provider disappears', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'memory-learning-entry-')), ctx = new Context()
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'memory-learning-entry-'))), ctx = new Context()
     const config: LearningConfig = { databasePath: join(root, 'learning.sqlite'), authorityId: 'extraction-grant',
       owner: { authorityId: 'delivery-owner', authorityHash: 'a'.repeat(64), principalId: 'lark/bot/tenant/owner',
         principalRecordId: 'principal', principalVersion: 1, workspace: root, agentPreset: 'primary' },

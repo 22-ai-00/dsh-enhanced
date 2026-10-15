@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs'
+import { chmodSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -8,7 +8,7 @@ import type { LearningCursor, LearningIntent, LearningSnapshot } from '../src/ty
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
-function path(): string { const root = mkdtempSync(join(tmpdir(), 'memory-learning-store-')); roots.push(root); return join(root, 'learning.sqlite') }
+function path(): string { const root = realpathSync(mkdtempSync(join(tmpdir(), 'memory-learning-store-'))); roots.push(root); return join(root, 'learning.sqlite') }
 const grant = { authorityId: 'learning-one', configDigest: 'a'.repeat(64), maxExtractions: 2 }
 const owner = { authorityId: grant.authorityId, authorityHash: 'b'.repeat(64), principalId: 'lark/primary/personal/ou_owner',
   principalRecordId: 'principal-one', principalVersion: 1, workspace: '/work/owner', agentPreset: 'standard' }

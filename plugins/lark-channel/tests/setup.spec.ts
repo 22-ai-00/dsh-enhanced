@@ -2,7 +2,7 @@ import { describe, expect, test, vi } from 'vitest'
 import { spawn, spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { readFileSync, writeFileSync } from 'node:fs'
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -681,7 +681,7 @@ setInterval(() => {}, 1000)`,
 
   test.each(['default', 'channel-only', 'business-failure', 'account-rotation', 'profile-failure'] as const)(
     'full setup entry commits the owner before business tools: %s', async mode => {
-      const root = await mkdtemp(join(tmpdir(), 'lark-business-entry-'))
+      const root = await realpath(await mkdtemp(join(tmpdir(), 'lark-business-entry-')))
       const dshHome = join(root, 'dsh-home')
       const patchPath = join(dshHome, 'profiles/web/cordis.patch.yml')
       await mkdir(dirname(patchPath), { recursive: true })
@@ -2570,7 +2570,8 @@ setInterval(() => {}, 1000)`,
       },
     })
     const previousPath = process.env.PATH
-    process.env.PATH = [publicCommandDirectory, ...(mode === 'desktop-launcher-only' ? [] : [cliBinDirectory]), previousPath ?? ''].join(':')
+    process.env.PATH = [publicCommandDirectory, ...(mode === 'desktop-launcher-only' ? [] : [cliBinDirectory]),
+      dirname(process.execPath), '/usr/bin', '/bin'].join(':')
     try {
       if (conflicting) {
         await expect(execute()).rejects.toThrow(mode === 'lark-owner'

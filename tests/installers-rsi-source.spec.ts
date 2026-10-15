@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -16,12 +16,15 @@ const pathWithoutTraex = (process.env.PATH ?? '').split(':').filter(directory =>
 afterEach(async () => { await Promise.all(temporaryRoots.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-installer-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-rsi-installer-')))
   temporaryRoots.push(root)
   const home = join(root, 'dsh home')
   const bin = join(home, 'profiles', 'web', 'node_modules', '.bin')
   const log = join(root, 'args.log')
   await mkdir(bin, { recursive: true })
+  const fakeBin = join(root, 'fake-bin')
+  await mkdir(fakeBin)
+  await writeFile(join(fakeBin, 'dsh'), '#!/bin/bash\nexit 1\n', { mode: 0o755 })
   const setup = join(bin, 'dsh-rsi-setup')
   await writeFile(setup, '#!/bin/bash\nprintf "%s\\n" "$@" > "$RSI_ARGS_LOG"\nexit "${RSI_EXIT_CODE:-0}"\n')
   await chmod(setup, 0o755)
@@ -31,7 +34,8 @@ async function fixture() {
 function invokeHelper(home: string, mode: 'local' | 'npm', repository: string, dryRun: boolean, log: string, exitCode = 0) {
   return spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_enhanced_prepare_rsi_source "$@"', 'bash',
     common, 'web', home, mode, repository, dryRun ? '1' : '0'], {
-    cwd: repoRoot, encoding: 'utf8', env: { ...process.env, RSI_ARGS_LOG: log, RSI_EXIT_CODE: String(exitCode) },
+    cwd: repoRoot, encoding: 'utf8', env: { ...process.env, PATH: `${join(dirname(home), 'fake-bin')}:${process.env.PATH ?? ''}`,
+      RSI_ARGS_LOG: log, RSI_EXIT_CODE: String(exitCode) },
   })
 }
 
@@ -65,7 +69,8 @@ describe('supervised RSI source and build preparation', () => {
   it('propagates the owner installer not-ready status instead of reporting success', async () => {
     const {home,log} = await fixture()
     const result = spawnSync('/bin/bash',['-c','source "$1"; shift; dsh_enhanced_install_rsi_owner "$@"','bash',
-      common,'web',home,'local',repoRoot,'0'],{cwd:repoRoot,encoding:'utf8',env:{...process.env,RSI_ARGS_LOG:log,RSI_EXIT_CODE:'3'}})
+      common,'web',home,'local',repoRoot,'0'],{cwd:repoRoot,encoding:'utf8',env:{...process.env,
+        PATH:`${join(dirname(home), 'fake-bin')}:${process.env.PATH ?? ''}`,RSI_ARGS_LOG:log,RSI_EXIT_CODE:'3'}})
     expect(result.status).toBe(3)
     expect((await readFile(log,'utf8')).trimEnd().split('\n')).toEqual([
       '--install-owner','--profile','web','--dsh-home',home,'--source-repository',repoRoot,
@@ -77,7 +82,8 @@ describe('supervised RSI source and build preparation', () => {
     const { home, log } = await fixture()
     const result = spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_enhanced_install_rsi_owner "$@"', 'bash',
       common, 'web', home, 'npm', repoRoot, '0', '1'], {
-      cwd: repoRoot, encoding: 'utf8', env: { ...process.env, RSI_ARGS_LOG: log },
+      cwd: repoRoot, encoding: 'utf8', env: { ...process.env,
+        PATH: `${join(dirname(home), 'fake-bin')}:${process.env.PATH ?? ''}`, RSI_ARGS_LOG: log },
     })
     expect(result.status, result.stderr).toBe(0)
     expect((await readFile(log, 'utf8')).trimEnd().split('\n')).toEqual([

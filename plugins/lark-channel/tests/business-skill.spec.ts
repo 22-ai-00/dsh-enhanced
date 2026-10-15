@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { chmod, lstat, mkdtemp, mkdir, readFile, symlink, unlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdtemp, mkdir, readFile, realpath, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -12,7 +12,7 @@ import {
 const temporaryHomes: string[] = []
 
 async function input(): Promise<LarkBusinessSkillInput> {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-lark-business-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-lark-business-')))
   temporaryHomes.push(root)
   return {
     dshHome: join(root, 'dsh'),

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -54,7 +54,7 @@ function agentFor(sessionId: string, workspace: string, preset: string): Agent {
 }
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'personal-memory-learning-integration-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'personal-memory-learning-integration-')))
   roots.push(root)
   const deliveryPath = join(root, 'delivery.sqlite'), evaluationPath = join(root, 'evaluation.sqlite')
   const memoryPath = join(root, 'memory.sqlite')

@@ -25,7 +25,7 @@ function settlementWorker(input: {
   const loader = fileURLToPath(new URL('./fixtures/ts-source-loader.mjs', import.meta.url))
   const worker = new Worker(new URL('./fixtures/approval-settlement-worker.mjs', import.meta.url), {
     workerData: input,
-    execArgv: ['--no-warnings', '--experimental-transform-types', '--loader', loader],
+    execArgv: ['--no-warnings', '--loader', loader],
   })
   let readyResolve!: () => void
   let resultResolve!: (value: WorkerResult) => void

@@ -1,5 +1,4 @@
 import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 import { isMap, isSeq, parse, parseDocument, stringify, type Node } from 'yaml'
@@ -45,7 +44,7 @@ function runtime(home: string): RsiAuthorityRuntime {
 }
 
 async function fixture() {
-  const root = await mkdtemp(join(await realpath(tmpdir()), 'rsi-manifest-'))
+  const root = await mkdtemp(join(await realpath('/tmp'), 'rsi-manifest-'))
   const home = join(root, 'home'), workspace = join(home, 'assistant-workspace')
   await mkdir(home, { mode: 0o700 })
   await mkdir(join(home, 'profiles', 'target'), { recursive: true })

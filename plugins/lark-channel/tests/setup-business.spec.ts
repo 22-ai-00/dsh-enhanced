@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -15,7 +15,7 @@ const authorizationUrl = 'https://accounts.feishu.cn/device/authorize'
 const deviceCode = 'test-device-code'
 
 async function setupInput(): Promise<{ input: LarkBusinessSetupInput; callbacks: string[] }> {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-lark-business-setup-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-lark-business-setup-')))
   temporaryHomes.push(root)
   const callbacks: string[] = []
   return {

@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -57,6 +57,23 @@ describe('prepared source creation using the real public generator and base lock
     expect(view.contents[0]?.content).toContain("dsh-enhanced-rsi-created-example")
     expect(JSON.parse(view.contents[1]!.content)).toMatchObject({ name: '@dsh-enhanced/rsi-created-example', version: '0.1.0' })
     expect(execFileSync('/usr/bin/git', ['worktree', 'list', '--porcelain'], { cwd: repository, encoding: 'utf8' })).toBe(before)
+  })
+
+  it('inspects a generated plugin when TMPDIR is a symlink to its physical directory', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-create-tmp-alias-')))
+    roots.push(root)
+    const alias = join(root, 'alias')
+    await symlink(root, alias, 'dir')
+    const previous = process.env.TMPDIR
+    try {
+      process.env.TMPDIR = alias
+      expect(tmpdir()).toBe(alias)
+      const view = await inspected('rsi-created-symlink-tmp')
+      expect(view.files.some(file => file.path === 'package.json')).toBe(true)
+    } finally {
+      if (previous === undefined) delete process.env.TMPDIR
+      else process.env.TMPDIR = previous
+    }
   })
 
   it('writes candidate source and a single Host lock importer while preserving generated Host files', async () => {

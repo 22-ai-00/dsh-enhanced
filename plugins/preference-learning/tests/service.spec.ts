@@ -1079,9 +1079,10 @@ describe('preference learning service', () => {
   })
 
   test('binds the exact injected hypothesis version to a completed reply and corrects that exposure', async () => {
+    let eventTime = Date.now()
     const { ctx, agent: target, attestTurn, databasePath, feedback } =
-      await harness({ autonomousT1Enabled: true })
-    feedback(feedbackEvent('initial-explicit', { interpretationTrust: 'explicit-selection' }))
+      await harness({ autonomousT1Enabled: true, now: () => eventTime })
+    feedback(feedbackEvent('initial-explicit', { interpretationTrust: 'explicit-selection', occurredAt: eventTime }))
     target.session.append('turn/start', { turn: 1 })
     target.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'Please format this response.' }],
@@ -1096,13 +1097,16 @@ describe('preference learning service', () => {
     expect(renderContextSnapshot(await ctx.systemPrompt.assemble({ agent: target })))
       .toContain('bullet lists')
 
-    feedback(completionEvent(30, {
+    eventTime += 1
+    feedback({ ...completionEvent(30, {
       sessionId: String(target.session.id), sourceEventId: 'event-exposed',
       sourceInboxId: 'inbox-exposed', replyOutboxId: 'outbox-exposed',
-    }))
+    }), occurredAt: eventTime })
+    eventTime += 1
     feedback(feedbackEvent('exact-exposure-correction', {
       candidateValue: 'prose',
       interpretationTrust: 'explicit-selection',
+      occurredAt: eventTime,
       exposureTarget: { sourceInboxId: 'inbox-exposed', sourceOutboxId: 'outbox-exposed' },
     }))
     const review = ctx.assistantPreferenceLearning.review(target)

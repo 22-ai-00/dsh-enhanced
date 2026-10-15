@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -312,9 +312,7 @@ test('derives real claimed physical stop recovery after forward grant expiry and
 
 test('packaged CLI resolves the exact claimed Store request through its relative lib import', async () => {
   const base = await fixture()
-  const nodePath = join(dirname(base.config.trustPath), 'node')
-  await copyFile(await realpath(process.execPath), nodePath)
-  await chmod(nodePath, 0o700)
+  const nodePath = await realpath(process.execPath)
   const attestorPath = join(dirname(base.config.trustPath), 'attestor.js')
   const attestor = await readFile(resolve('bin/dsh-systemd-host-attestor.js'), 'utf8')
   if (!attestor.startsWith('#!/usr/bin/node\n')) throw new Error('packaged attestor shebang changed')

@@ -294,7 +294,7 @@ async function isolatedGenerator<T>(assets: BaseAssets, name: string, environmen
   signal: AbortSignal, action: (worktree: string, files: readonly { path: string; bytes: number; content: string }[]) => Promise<T>): Promise<T> {
   // The public generator runs against only approved Git blobs in a disposable
   // capsule. Inspect never changes the source repository or its worktree list.
-  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-create-inspect-'))
+  const stateRoot = await realpath(await mkdtemp(join(tmpdir(), 'dsh-create-inspect-')))
   try {
     for (const blob of assets.blobs.values()) {
       signal.throwIfAborted()

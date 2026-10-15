@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
@@ -13,7 +13,7 @@ function runtimeAt(cacheRoot: string, version: string, receiptDigest = 'a'.repea
   return { version, root, dshPath: join(root, 'dsh.js'), binDirectory: join(root, 'bin'), integrity: 'fixture', receiptDigest }
 }
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(),'dsh-install-host-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(),'dsh-install-host-')))
   roots.push(root)
   const dshHome = join(root,'home with spaces')
   const cacheRoot = join(root,'cache')
