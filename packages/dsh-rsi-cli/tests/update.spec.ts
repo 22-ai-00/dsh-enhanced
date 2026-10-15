@@ -1,4 +1,8 @@
 import { describe, expect, test, vi } from 'vitest'
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { spawn } from 'node:child_process'
 import { PurgeError } from '../src/purge.ts'
 import type { CommandResult, CommandRunner } from '../src/run.ts'
 import {
@@ -183,7 +187,7 @@ describe('main：update 命令派发', () => {
     const install = makeInstall()
     const selfUpdate = makeSelfUpdate()
     try {
-      const code = await main(['update', '--all'], { HOME: '/h' }, { install, selfUpdate, findRunning: noRunning })
+      const code = await main(['update', '--all'], { HOME: '/h' }, { platform: 'linux', install, selfUpdate, findRunning: noRunning })
       expect(code).toBe(0)
       expect(selfUpdate).toHaveBeenCalledTimes(1)
       expect(install).toHaveBeenCalledTimes(1)
@@ -191,6 +195,135 @@ describe('main：update 命令派发', () => {
       expect(passed.passthrough).toContain('--operation')
       expect(passed.passthrough).toContain('upgrade')
     } finally { write.mockRestore() }
+  })
+
+  test('Mac --all requires an explicit stopped Home confirmation before self-update', async () => {
+    const error = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const install = makeInstall(), selfUpdate = makeSelfUpdate()
+    try {
+      expect(await main(['update', '--all'], { HOME: '/h' }, {
+        platform: 'darwin', install, selfUpdate, findRunning: noRunning,
+      })).toBe(1)
+      expect(selfUpdate).not.toHaveBeenCalled()
+      expect(install).not.toHaveBeenCalled()
+    } finally { error.mockRestore() }
+  })
+
+  test('Mac --all refuses frozen owner resources and any running managed Host before self-update', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-mac-upgrade-'))
+    const dshHome = join(root, '.dsh')
+    const error = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const install = makeInstall(), selfUpdate = makeSelfUpdate()
+    try {
+      await mkdir(join(dshHome, 'profiles', 'web'), { recursive: true })
+      await mkdir(join(dshHome, 'rsi-authorities', 'web'), { recursive: true })
+      const argv = ['update', '--all', '--confirm-dsh-home-stopped']
+      const deps = { platform: 'darwin' as const, install, selfUpdate,
+        findRunning: () => ({ active: [{ pid: 4321, commandLine: 'dsh --profile web' }] }),
+        macHostProcessesStopped: async () => {} }
+      expect(await main(argv, { HOME: root, DSH_HOME: dshHome }, deps)).toBe(1)
+      await rm(join(dshHome, 'rsi-authorities'), { recursive: true })
+      expect(await main(argv, { HOME: root, DSH_HOME: dshHome }, deps)).toBe(1)
+      expect(selfUpdate).not.toHaveBeenCalled()
+      expect(install).not.toHaveBeenCalled()
+    } finally { error.mockRestore(); await rm(root, { recursive: true, force: true }) }
+  })
+
+  test('Mac --all rejects a partial native runtime marker and a symlink profile before self-update', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-mac-upgrade-'))
+    const dshHome = join(root, '.dsh')
+    const error = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const install = makeInstall(), selfUpdate = makeSelfUpdate()
+    const argv = ['update', '--all', '--confirm-dsh-home-stopped']
+    const deps = { platform: 'darwin' as const, install, selfUpdate, findRunning: noRunning,
+      macHostProcessesStopped: async () => {} }
+    try {
+      await mkdir(join(dshHome, 'profiles', 'web'), { recursive: true })
+      await mkdir(join(dshHome, 'rsi-native-runtimes'), { recursive: true })
+      expect(await main(argv, { HOME: root, DSH_HOME: dshHome }, deps)).toBe(1)
+      await rm(join(dshHome, 'rsi-native-runtimes'), { recursive: true })
+      await symlink(join(dshHome, 'profiles', 'web'), join(dshHome, 'profiles', 'other'))
+      expect(await main(argv, { HOME: root, DSH_HOME: dshHome }, deps)).toBe(1)
+      expect(selfUpdate).not.toHaveBeenCalled()
+      expect(install).not.toHaveBeenCalled()
+    } finally { error.mockRestore(); await rm(root, { recursive: true, force: true }) }
+  })
+
+  test('Mac --all rejects managed PID and unknown service state that pgrep missed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-mac-upgrade-'))
+    const dshHome = join(root, '.dsh')
+    const error = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const install = makeInstall(), selfUpdate = makeSelfUpdate()
+    try {
+      await mkdir(join(dshHome, 'profiles', 'web'), { recursive: true })
+      const common = { platform: 'darwin' as const, install, selfUpdate, findRunning: noRunning,
+        macHostProcessesStopped: async () => {} }
+      const argv = ['update', '--all', '--confirm-dsh-home-stopped']
+      expect(await main(argv, { HOME: root, DSH_HOME: dshHome }, {
+        ...common, managedServicePids: async () => ({ pids: [4321], errors: [] }),
+      })).toBe(1)
+      expect(await main(argv, { HOME: root, DSH_HOME: dshHome }, {
+        ...common, managedServicePids: async () => ({ pids: [], errors: ['launchd unknown'] }),
+      })).toBe(1)
+      expect(selfUpdate).not.toHaveBeenCalled()
+      expect(install).not.toHaveBeenCalled()
+    } finally { error.mockRestore(); await rm(root, { recursive: true, force: true }) }
+  })
+
+  test('Mac --all refuses an unlisted real DSH bin.js Host before self-update', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-mac-upgrade-'))
+    const dshHome = join(root, '.dsh')
+    const script = join(root, 'foreign', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+    const error = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const install = makeInstall(), selfUpdate = makeSelfUpdate()
+    await mkdir(join(dshHome, 'profiles', 'web'), { recursive: true })
+    await mkdir(dirname(script), { recursive: true })
+    await writeFile(script, "process.stdout.write('ready\\n'); setInterval(() => {}, 1000)\n")
+    const host = spawn(process.execPath, [script, '--profile=orphan', '--no-open'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    try {
+      await new Promise<void>((resolveReady, rejectReady) => {
+        const timer = setTimeout(() => rejectReady(new Error('host readiness timeout')), 3000)
+        host.stdout.once('data', () => { clearTimeout(timer); resolveReady() })
+        host.once('error', failure => { clearTimeout(timer); rejectReady(failure) })
+        host.once('close', () => { clearTimeout(timer); rejectReady(new Error('host exited before ready')) })
+      })
+      expect(await main(['update', '--all', '--confirm-dsh-home-stopped'], { HOME: root, DSH_HOME: dshHome }, {
+        platform: 'darwin', install, selfUpdate, findRunning: noRunning,
+        managedServicePids: async () => ({ pids: [], errors: [] }),
+      })).toBe(1)
+      expect(selfUpdate).not.toHaveBeenCalled()
+      expect(install).not.toHaveBeenCalled()
+    } finally {
+      if (host.exitCode === null && host.signalCode === null) {
+        await new Promise<void>((resolveClose, rejectClose) => {
+          const force = setTimeout(() => host.kill('SIGKILL'), 1000)
+          const timeout = setTimeout(() => rejectClose(new Error('host did not close after SIGKILL')), 3000)
+          host.once('close', () => { clearTimeout(force); clearTimeout(timeout); resolveClose() })
+          host.kill('SIGTERM')
+        })
+      }
+      error.mockRestore()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test('Mac --all forwards explicit stopped confirmation for an ordinary Home', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-mac-upgrade-'))
+    const dshHome = join(root, '.dsh')
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const install = makeInstall(), selfUpdate = makeSelfUpdate()
+    try {
+      await mkdir(join(dshHome, 'profiles', 'web'), { recursive: true })
+      expect(await main(['update', '--all', '--confirm-dsh-home-stopped'], { HOME: root, DSH_HOME: dshHome }, {
+        platform: 'darwin', install, selfUpdate, findRunning: noRunning,
+        macHostProcessesStopped: async () => {},
+      })).toBe(0)
+      expect(selfUpdate).toHaveBeenCalledTimes(1)
+      expect(install).toHaveBeenCalledTimes(1)
+      expect(install.mock.calls[0]![0].passthrough).toContain('--confirm-dsh-home-stopped')
+    } finally { write.mockRestore(); await rm(root, { recursive: true, force: true }) }
   })
 
   test('自身升级失败时不继续升级插件集合', async () => {
@@ -209,7 +342,7 @@ describe('main：update 命令派发', () => {
     const install = makeInstall(7)
     const selfUpdate = makeSelfUpdate()
     try {
-      expect(await main(['update', '--all'], { HOME: '/h' }, { install, selfUpdate, findRunning: noRunning })).toBe(7)
+      expect(await main(['update', '--all'], { HOME: '/h' }, { platform: 'linux', install, selfUpdate, findRunning: noRunning })).toBe(7)
     } finally { write.mockRestore() }
   })
 })

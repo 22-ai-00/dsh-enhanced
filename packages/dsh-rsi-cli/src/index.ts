@@ -1,4 +1,7 @@
 import { homedir } from 'node:os'
+import { lstat, readdir, realpath } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
+import { join } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { runPurge, PurgeError, type PurgeReport } from './purge.ts'
 import { collectStatus, formatStatus, formatFindings, runDoctor } from './diagnose.ts'
@@ -79,8 +82,9 @@ update：
                       Host 事务覆盖同一 DSH_HOME 下全部已登记受管 unit，即使 --profile 只升级一个 cohort
   --version <v|tag>   指定 dsh-rsi 目标版本或 dist-tag（默认 latest）
   --local <dir>       --all 时走 local 形态，用该 checkout 的安装器升级
-  其它参数            --all 时原样透传给安装器；通常无需再写 --scenario 或内部确认参数
+  其它参数            --all 时原样透传给安装器；Linux 通常无需再写 --scenario 或内部确认参数
   安全                已注册的 Linux 受管服务由升级事务自行停服/恢复；额外手工或测试 Host 会阻止升级。
+                      macOS 须先停止整个 Home 并显式传 --confirm-dsh-home-stopped；冻结的原生 owner/source Home 暂无迁移路径。
 
 start / stop / restart：
   不带 --profile 时作用于 DSH home 下的全部 profile；配合 --dry-run 可先看将执行的命令。
@@ -416,10 +420,105 @@ export interface MainDeps {
   managedServicePids?: typeof managedServiceProcessIds
 }
 
+async function assertMacUpgradeHome(dshHome: string): Promise<void> {
+  for (const kind of ['rsi-local-cohorts', 'rsi-native-runtimes', 'rsi-sources', 'rsi-authorities',
+    'rsi-authority-runtimes', 'rsi-builds', 'rsi-release-builds', 'rsi-coordinators']) {
+    try {
+      await lstat(join(dshHome, kind))
+      throw new PurgeError(`macOS Home 存在 ${kind} 冻结资源；需使用保留原数据的专用迁移，未升级 CLI 或插件。`)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+  }
+}
+
+async function macHomeProfiles(dshHome: string): Promise<string[]> {
+  let entries
+  try { entries = await readdir(join(dshHome, 'profiles'), { withFileTypes: true }) }
+  catch { throw new PurgeError('无法枚举 macOS Home 的全部 profile；未升级 CLI 或插件。') }
+  const profiles: string[] = []
+  for (const entry of entries) {
+    if (entry.name === 'node_modules') {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) {
+        throw new PurgeError('macOS Home 的 profiles/node_modules 归属不明；未升级 CLI 或插件。')
+      }
+      continue
+    }
+    if (entry.name === '.DS_Store') {
+      if (!entry.isFile() || entry.isSymbolicLink()) {
+        throw new PurgeError('macOS Home 的 profiles/.DS_Store 归属不明；未升级 CLI 或插件。')
+      }
+      continue
+    }
+    if (!entry.isDirectory() || entry.isSymbolicLink()
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(entry.name)) {
+      throw new PurgeError(`macOS Home 的 profile 条目 ${entry.name} 归属不明；未升级 CLI 或插件。`)
+    }
+    profiles.push(entry.name)
+  }
+  if (profiles.length === 0) throw new PurgeError('macOS Home 没有可升级的 profile。')
+  return profiles
+}
+
+async function assertMacHostProcessesStopped(dshHome: string, profiles: readonly string[]): Promise<void> {
+  const canonicalHome = await realpath(dshHome)
+  const foreignLaunchdPids = new Set<number>()
+  if (process.platform === 'darwin') {
+    for (const profile of profiles) {
+      const target = `gui/${process.getuid?.()}/ai.deepseek.dsh.profile.${profile}`
+      const result = spawnSync('/bin/launchctl', ['print', target], {
+        encoding: 'utf8', timeout: 10_000, maxBuffer: 262_144,
+        env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
+      })
+      if (result.error || result.signal) throw new PurgeError(`无法查询 macOS launchd ${profile}；未升级 CLI 或插件。`)
+      if (result.status === 113 && /Could not find service/iu.test(result.stderr ?? '')) continue
+      if (result.status !== 0) throw new PurgeError(`无法查询 macOS launchd ${profile}；未升级 CLI 或插件。`)
+      const loadedHome = /^\s*DSH_HOME => (.+)$/mu.exec(result.stdout ?? '')?.[1]
+      if (!loadedHome) throw new PurgeError(`macOS launchd ${profile} Home 归属未知；未升级 CLI 或插件。`)
+      let loadedCanonicalHome: string
+      try { loadedCanonicalHome = await realpath(loadedHome) }
+      catch { throw new PurgeError(`macOS launchd ${profile} Home 无法解析；未升级 CLI 或插件。`) }
+      const pid = /^\s*pid = (\d+)$/mu.exec(result.stdout ?? '')?.[1]
+      if (loadedCanonicalHome !== canonicalHome) {
+        if (pid !== undefined) foreignLaunchdPids.add(Number(pid))
+        continue
+      }
+      const state = /^\s*state = ([^\n]+)$/mu.exec(result.stdout ?? '')?.[1]
+      if (!state || pid !== undefined && (!Number.isSafeInteger(Number(pid)) || Number(pid) < 2)) {
+        throw new PurgeError(`macOS launchd ${profile} 状态未知；未升级 CLI 或插件。`)
+      }
+      if (state === 'running' || pid !== undefined) {
+        throw new PurgeError(`macOS launchd ${profile} 仍在运行；未升级 CLI 或插件。`)
+      }
+    }
+  }
+  const processList = spawnSync('/bin/ps', ['-axo', 'pid=,command='], {
+    encoding: 'utf8', timeout: 10_000, maxBuffer: 16_777_216,
+    env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
+  })
+  if (processList.status !== 0 || processList.error || processList.signal) {
+    throw new PurgeError('无法列出 macOS Host 进程；未升级 CLI 或插件。')
+  }
+  for (const line of (processList.stdout ?? '').split('\n')) {
+    if (line.trim() === '') continue
+    const match = /^\s*(\d+)\s+(.+)$/u.exec(line)
+    if (!match) throw new PurgeError('macOS Host 进程列表包含无法解析的行；未升级 CLI 或插件。')
+    if (Number(match[1]) === process.pid || foreignLaunchdPids.has(Number(match[1]))) continue
+    const command = match[2]!
+    const dshEntry = /(?:^|\s|\/)dsh(?:\.js)?\s/u.test(command)
+      || /(?:^|\s)\S*\/@deepseek-ai\/dsh\/(?:lib\/)?bin\.js\s/u.test(command)
+    if (!dshEntry) continue
+    const profile = /(?:^|\s)--profile(?:=|\s+)([^\s]+)/u.exec(command)?.[1]
+    // An unlisted profile (including a removed profile or node_modules) does
+    // not establish another Home. Only a launchd job with a different Home is exempt.
+    throw new PurgeError(`macOS Host PID ${match[1]} 仍在运行或 profile ${profile ?? '未知'} 的 Home 归属未知；未升级 CLI 或插件。`)
+  }
+}
+
 export async function main(
   argv: readonly string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
-  deps: MainDeps = {},
+  deps: MainDeps & { platform?: NodeJS.Platform; macHostProcessesStopped?: typeof assertMacHostProcessesStopped } = {},
 ): Promise<number> {
   // Rescue scripts probe this before delegating destructive work to an installed CLI.
   // Keep the response read-only and independent of Home, launchd and installed Host state.
@@ -507,6 +606,25 @@ export async function main(
         return entries.some(entry => entry.errors.length > 0) ? 1 : 0
       }
       case 'update': {
+        const platform = deps.platform ?? process.platform
+        if (args.all && platform === 'darwin') {
+          if (!args.passthrough.includes('--confirm-dsh-home-stopped')) {
+            throw new PurgeError('macOS update --all 需要操作者先停止整个 Home，再显式传入 --confirm-dsh-home-stopped；未升级 CLI 或插件。')
+          }
+          await assertMacUpgradeHome(args.dshHome)
+          // A Mac launchd Host is not quiesced by the Linux lifecycle executor.
+          // Check the entire Home before self-update, including other profiles.
+          const allProfiles = await macHomeProfiles(args.dshHome)
+          const active = findRunning(allProfiles)
+          if (active.error !== undefined || active.active.length > 0) {
+            throw new PurgeError(`macOS Home 尚未确认静止：${active.error ?? active.active.map(item => `PID ${item.pid}`).join('、')}；未升级 CLI 或插件。`)
+          }
+          const managed = await managedPids(platform, homedir(), allProfiles)
+          if (managed.errors.length > 0 || managed.pids.length > 0) {
+            throw new PurgeError(`macOS 受管 Host 状态未静止：${managed.errors.join('；') || managed.pids.map(pid => `PID ${pid}`).join('、')}；未升级 CLI 或插件。`)
+          }
+          await (deps.macHostProcessesStopped ?? assertMacHostProcessesStopped)(args.dshHome, allProfiles)
+        }
         // 先升级自身：--all 下若自身升级失败就不继续动插件集合，避免用旧版 rsi
         // 的判断去驱动新一轮 cohort 升级。
         const report = await selfUpdate({
@@ -517,7 +635,7 @@ export async function main(
         if (!args.all) return 0
         const passthrough = [...args.passthrough]
         if (!passthrough.includes('--operation')) passthrough.push('--operation', 'upgrade')
-        if (!passthrough.includes('--confirm-dsh-home-stopped')) {
+        if (platform !== 'darwin' && !passthrough.includes('--confirm-dsh-home-stopped')) {
           passthrough.push('--confirm-dsh-home-stopped')
         }
         const releaseVersion = report.installedVersion
@@ -542,20 +660,20 @@ export async function main(
         if (running.error !== undefined) {
           throw new PurgeError(`无法确认 DSH_HOME 已静止：${running.error}`)
         }
-        const managed = await managedPids(process.platform, homedir(), profiles)
+        const managed = await managedPids(platform, homedir(), profiles)
         if (managed.errors.length > 0) {
           throw new PurgeError(`无法确认受管服务进程：${managed.errors.join('；')}`)
         }
         const managedSet = new Set(managed.pids)
-        const external = running.active.filter(item => !managedSet.has(item.pid))
+        const external = platform === 'darwin' ? running.active : running.active.filter(item => !managedSet.has(item.pid))
         if (external.length > 0) {
           const details = external.map(item => `PID ${item.pid}`).join('、')
-          throw new PurgeError(
-            `检测到目标 profile 存在非受管 Host（${details}）。请停止对应手工/测试 dsh 进程后重试；`
-            + '已注册的受管服务无需手动停止，将由生命周期事务接管。',
-          )
+          throw new PurgeError(platform === 'darwin'
+            ? `检测到 macOS Host（${details}）；请停止整个 Home 的所有 Host 后重试。`
+            : `检测到目标 profile 存在非受管 Host（${details}）。请停止对应手工/测试 dsh 进程后重试；`
+              + '已注册的受管服务无需手动停止，将由生命周期事务接管。')
         }
-        process.stdout.write(managed.pids.length > 0
+        process.stdout.write(platform !== 'darwin' && managed.pids.length > 0
           ? '\n插件集合升级：已确认除受管服务外没有其它 Host；生命周期事务将安全停服、升级并恢复。\n'
           : '\n插件集合升级：已确认目标 profile 无运行中 Host，正在继承现有部署场景并原地升级。\n')
         return await install({
