@@ -45,14 +45,6 @@ async function openDeliveryConcurrently(path: string, start: string, count = 12)
   if (failure) throw failure.reason
 }
 
-async function waitForFile(path: string, timeoutMs = 1_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (!existsSync(path)) {
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`)
-    await new Promise(resolve => setTimeout(resolve, 5))
-  }
-}
-
 const deliveryAttachmentsV6Schema = `
   CREATE TABLE delivery_attachments (
     id TEXT PRIMARY KEY,
@@ -430,40 +422,81 @@ describe('delivery SQLite boundary', () => {
     const childSource = `
       import { writeFileSync } from 'node:fs';
       import { DatabaseSync } from 'node:sqlite';
+      await new Promise(resolve => setTimeout(resolve, 1_200));
       const database = new DatabaseSync(${JSON.stringify(path)});
       database.exec('PRAGMA journal_mode = DELETE');
       database.exec('BEGIN');
       database.prepare('SELECT count(*) FROM sqlite_master').get();
       writeFileSync(${JSON.stringify(ready)}, 'locked', { mode: 0o600 });
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 750);
       database.exec('ROLLBACK');
       database.close();
     `
     const child = spawn(process.execPath, [
-      '--no-warnings', '--loader', loader,
-      '--input-type=module', '--eval', childSource,
+      '--no-warnings', '--input-type=module', '--eval', childSource,
     ], { stdio: ['ignore', 'ignore', 'pipe'] })
     let stderr = ''
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', chunk => { stderr += String(chunk) })
-    const childClosed = new Promise<void>((resolve, reject) => {
-      child.once('error', reject)
-      child.once('close', code => {
-        if (code === 0) resolve()
-        else reject(new Error(`WAL read-lock holder exited ${code}: ${stderr}`))
-      })
+    let spawnError: Error | undefined
+    let exitCode: number | null | undefined
+    const childClosed = new Promise<void>(resolve => {
+      child.once('error', error => { spawnError = error })
+      child.once('close', code => { exitCode = code; resolve() })
     })
-    await waitForFile(ready)
-
+    const waitForClose = async (timeoutMs: number): Promise<boolean> => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        return await Promise.race([
+          childClosed.then(() => true),
+          new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs) }),
+        ])
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+    }
     let database: DatabaseSync | undefined
+    let failure: unknown
     try {
+      const deadline = Date.now() + 4_000
+      while (!existsSync(ready)) {
+        if (exitCode !== undefined || spawnError !== undefined) {
+          throw new Error(`WAL read-lock holder exited before readiness: ${spawnError?.message ?? exitCode}: ${stderr}`)
+        }
+        if (Date.now() >= deadline) throw new Error(`timed out waiting for ${ready}`)
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      expect(exitCode).toBeUndefined()
       database = openDeliveryDatabase(path)
       expect(database.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
+      if (!await waitForClose(2_000)) throw new Error('timed out waiting for WAL read-lock holder to exit')
+      if (spawnError !== undefined || exitCode !== 0) {
+        throw new Error(`WAL read-lock holder exited ${spawnError?.message ?? exitCode}: ${stderr}`)
+      }
+    } catch (error) {
+      failure = error
     } finally {
-      database?.close()
-      await childClosed
+      try {
+        database?.close()
+      } catch (error) {
+        failure ??= error
+      } finally {
+        if (exitCode === undefined) {
+          child.kill('SIGTERM')
+          if (!await waitForClose(1_000)) {
+            child.kill('SIGKILL')
+            if (!await waitForClose(1_000)) {
+              // afterEach must not remove a database still held by this reader.
+              const rootIndex = roots.indexOf(root)
+              if (rootIndex !== -1) roots.splice(rootIndex, 1)
+              failure = new Error(`WAL read-lock holder did not close after SIGKILL; preserved ${root}: ${stderr}`)
+            }
+          }
+        }
+      }
     }
-  })
+    if (failure !== undefined) throw failure
+  }, 15_000)
 
   test('takes the transient-lock WAL retry path', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-wal-retry-'))
