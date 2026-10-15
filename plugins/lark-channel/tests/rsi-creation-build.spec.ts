@@ -54,8 +54,8 @@ async function architectureNode(root: string, architecture: 'x64' | 'arm64', pla
   return launcher
 }
 
-async function fixture(architecture: 'x64' | 'arm64' = 'x64') {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'rsi-creation-build-'))); roots.push(root)
+async function fixture(architecture: 'x64' | 'arm64' = 'x64', rootParent = tmpdir()) {
+  const root = await realpath(await mkdtemp(join(rootParent, 'rsi-creation-build-'))); roots.push(root)
   const home = join(root, 'home'), repository = join(home, 'rsi-sources', 'owner', 'checkout')
   const bare = join(home, 'rsi-sources', 'owner', 'release.git')
   await mkdir(repository, { recursive: true, mode: 0o700 }); await mkdir(bare, { mode: 0o700 })
@@ -138,7 +138,8 @@ function behaviorBuilds(items: { args: string[] }[]): number {
 }
 
 test.each(['x64', 'arm64'] as const)('portable behavior image binds the same macOS %s socket, daemon and Linux image platform', async architecture => {
-  const f = await fixture(architecture)
+  // Keep the real Unix socket below macOS's path bound even with a long TMPDIR.
+  const f = await fixture(architecture, await realpath('/tmp'))
   await rm(join(f.home, 'rsi-builds'), { recursive: true, force: true })
   const previousHome = process.env.HOME
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
@@ -147,6 +148,7 @@ test.each(['x64', 'arm64'] as const)('portable behavior image binds the same mac
   const node = await architectureNode(f.root, architecture, 'darwin')
   const imageArch = architecture === 'arm64' ? 'arm64' : 'amd64'
   const socket = join(f.root, '.docker', 'run', 'docker.sock')
+  expect(Buffer.byteLength(socket)).toBeLessThan(104)
   await mkdir(dirname(socket), { recursive: true, mode: 0o700 })
   const server = createServer()
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socket, resolve) })
