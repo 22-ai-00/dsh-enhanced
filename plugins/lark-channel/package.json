@@ -62,7 +62,8 @@
     "markdown-it": "14.3.1",
     "qrcode": "1.5.4",
     "yaml": "2.9.0",
-    "@dsh-enhanced/assistant-growth-contract": "workspace:*"
+    "@dsh-enhanced/assistant-growth-contract": "workspace:*",
+    "@dsh-enhanced/assistant-isolation": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

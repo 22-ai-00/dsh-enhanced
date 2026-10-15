@@ -271,8 +271,8 @@ describe('runInstall（薄委托）', () => {
           ({ ...environment, DSH_HOME: home, DSH_ENHANCED_HOST_BIN: '/hosts/old' }),
         prepareHostUpdate },
       })
-      if (legacy) {
-        await expect(install).rejects.toThrow('跨 ABI 自动升级尚未支持')
+      if (legacy || process.platform === 'darwin') {
+        await expect(install).rejects.toThrow(legacy ? '跨 ABI 自动升级尚未支持' : 'macOS 尚不支持受管 Host 跨版本更新')
         expect(runInherited).not.toHaveBeenCalled()
         expect(await readFile(join(home, '.dsh-rsi-host.json'), 'utf8')).toBe('{}')
         return

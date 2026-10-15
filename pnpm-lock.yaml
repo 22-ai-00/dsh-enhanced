@@ -1958,6 +1958,9 @@ importers:
       '@dsh-enhanced/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
+      '@dsh-enhanced/assistant-isolation':
+        specifier: workspace:*
+        version: link:../assistant-isolation
       '@larksuiteoapi/node-sdk':
         specifier: 1.73.0
         version: 1.73.0
@@ -2218,6 +2221,9 @@ importers:
       '@dsh-enhanced/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
+      '@dsh-enhanced/assistant-isolation':
+        specifier: workspace:*
+        version: link:../assistant-isolation
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 'catalog:'

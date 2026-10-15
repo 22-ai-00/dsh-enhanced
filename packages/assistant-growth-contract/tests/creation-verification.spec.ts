@@ -27,6 +27,26 @@ function fixture(): PluginCreationVerificationCertificate {
 }
 
 describe('task-derived creation verification certificate', () => {
+  test('native v2 signs the actual boundary, runtime and build evidence while v1 stays byte compatible', () => {
+    const old = fixture()
+    expect(Object.hasOwn(old, 'execution')).toBe(false)
+    const { signature: _signature, ...legacyBody } = old
+    const body: Omit<PluginCreationVerificationCertificate, 'signature'> = {
+      ...legacyBody, protocol: 'assistant-growth/creation-verification/v2',
+      execution: { boundary: 'macos-seatbelt-single-process-v1', runtimeDigest: 'b'.repeat(64), buildEvidenceDigest: 'c'.repeat(64) },
+    }
+    const certificate: PluginCreationVerificationCertificate = { ...body,
+      signature: sign(null, Buffer.from(pluginCreationVerificationSigningPayload(body)), privateKey).toString('base64url') }
+    expect(verifyPluginCreationVerificationCertificate(certificate, certificate.authority, pem, 20_000)).toBe(true)
+    for (const execution of [{ ...body.execution, runtimeDigest: 'd'.repeat(64) },
+      { ...body.execution, buildEvidenceDigest: 'e'.repeat(64) },
+      { ...body.execution, boundary: 'process-seccomp-v1' }]) {
+      expect(verifyPluginCreationVerificationCertificate({ ...certificate, execution } as unknown,
+        certificate.authority, pem, 20_000)).toBe(false)
+    }
+    expect(() => validatePluginCreationVerificationCertificate({ ...old, execution: body.execution })).toThrow()
+    expect(() => validatePluginCreationVerificationCertificate({ ...certificate, execution: undefined })).toThrow()
+  })
   test('verifies a bounded certificate with a real Ed25519 signature and frozen authority', () => {
     const certificate = fixture()
     expect(() => validatePluginCreationVerificationCertificate(certificate)).not.toThrow()

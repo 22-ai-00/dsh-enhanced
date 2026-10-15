@@ -3934,73 +3934,6 @@ describe('one-click installers', () => {
   )
 
   test.each(['local', 'npm'] as const)(
-    'macOS %s supervised upgrade auto-detects the scenario and repairs a legacy Recovery closure',
-    async source => {
-      const f = await lifecycleFixture({
-        effectiveScenario: 'supervised',
-        managedDependencies: ['personal-assistant', 'assistant-recovery'],
-        systemd: {},
-      })
-      const script = source === 'local'
-        ? join(f.fixtureInstallDirectory, 'install-local.sh')
-        : join(f.fixtureInstallDirectory, 'install-npm.sh')
-      const args = ['--operation', 'upgrade', '--confirm-dsh-home-stopped', '--dry-run']
-      if (source === 'npm') args.push('--plugin-version', '1.4.0')
-      const result = runInstaller(
-        script, args, f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin),
-      )
-
-      expect(result.status, result.stderr).toBe(0)
-      expect(result.stdout).toContain('自动识别为 supervised')
-      expect(result.stdout).toContain('assistant-recovery 但缺少 assistant-goals')
-      expect(result.stdout).toContain(source === 'npm'
-        ? '@dsh-enhanced/assistant-goals@1.4.0'
-        : join(repoRoot, 'plugins', 'assistant-goals'))
-      expect(result.stdout).toContain('macOS 已停止 Home 升级')
-      expect(result.stdout).not.toMatch(/systemctl|journalctl/iu)
-      expect(await readFile(f.operationLog, 'utf8')).toBe('')
-    },
-  )
-
-
-  test('macOS local supervised upgrade activates successfully and removes its temporary backup', async () => {
-    const f = await lifecycleFixture({
-      effectiveScenario: 'supervised',
-      managedDependencies: ['personal-assistant', 'assistant-recovery'],
-      systemd: {},
-    })
-    const result = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), [
-      '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes',
-    ], f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin))
-
-    expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toContain('macOS profile 原地升级通过')
-    expect(result.stdout).toContain('assistant-recovery 但缺少 assistant-goals')
-    expect(await readFile(f.dshLog, 'utf8')).toContain(join(repoRoot, 'plugins', 'assistant-goals'))
-    expect((await readdir(join(f.dshHome, 'profiles'))).some(name => name.includes('upgrade-backup'))).toBe(false)
-  })
-
-  test('macOS local supervised upgrade restores the original profile after activation failure', async () => {
-    const f = await lifecycleFixture({
-      activationFails: true,
-      effectiveScenario: 'supervised',
-      managedDependencies: ['personal-assistant', 'assistant-recovery'],
-      systemd: {},
-    })
-    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
-    const result = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), [
-      '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes',
-    ], f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin))
-
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain('原 profile 已恢复')
-    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
-    const profileEntries = await readdir(join(f.dshHome, 'profiles'))
-    expect(profileEntries.some(name => name.startsWith('web.failed-upgrade.'))).toBe(true)
-    expect(profileEntries.some(name => name.includes('upgrade-backup'))).toBe(false)
-  })
-
-  test.each(['local', 'npm'] as const)(
     'public %s supervised uninstall dry-run is admitted without systemd, registry, or transaction mutation',
     async source => {
       const f = await lifecycleFixture({
@@ -7921,6 +7854,94 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     expect(result.stderr).toContain('需要交互式飞书 onboarding')
     expect(result.stdout).not.toContain('准备并构建当前仓库')
     expect(result.stdout).not.toContain('安装流程完成')
+  })
+
+  test.each(['local', 'npm'] as const)(
+    'macOS %s supervised upgrade auto-detects the scenario and repairs a legacy Recovery closure',
+    async source => {
+      const f = await lifecycleFixture({
+        effectiveScenario: 'supervised',
+        managedDependencies: ['personal-assistant', 'assistant-recovery'],
+        systemd: {},
+      })
+      const script = source === 'local'
+        ? join(f.fixtureInstallDirectory, 'install-local.sh')
+        : join(f.fixtureInstallDirectory, 'install-npm.sh')
+      const args = ['--operation', 'upgrade', '--confirm-dsh-home-stopped', '--dry-run']
+      if (source === 'npm') args.push('--plugin-version', '1.4.0')
+      const result = runInstaller(
+        script, args, f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin),
+      )
+
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout).toContain('自动识别为 supervised')
+      expect(result.stdout).toContain('assistant-recovery 但缺少 assistant-goals')
+      expect(result.stdout).toContain(source === 'npm'
+        ? '@dsh-enhanced/assistant-goals@1.4.0'
+        : join(repoRoot, 'plugins', 'assistant-goals'))
+      expect(result.stdout).toContain('macOS 已停止 Home 升级')
+      expect(result.stdout).not.toMatch(/systemctl|journalctl/iu)
+      expect(await readFile(f.operationLog, 'utf8')).toBe('')
+    },
+  )
+
+
+  test.each(['local', 'npm'] as const)('macOS %s rejects a Host update plan before changing the profile', async source => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised',
+      managedDependencies: ['personal-assistant', 'assistant-recovery'],
+      systemd: {},
+    })
+    const before = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+    const result = runInstaller(join(f.fixtureInstallDirectory, `install-${source}.sh`), [
+      '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes',
+    ], f.dshHome, 'Darwin', {
+      ...lifecycleEnvironment(f.dshHome, f.fakeBin),
+      DSH_ENHANCED_HOST_UPDATE_PLAN: join(f.dshHome, 'host-plan.json'),
+    })
+    expect(result.status, result.stderr).toBe(2)
+    expect(result.stderr).toContain('macOS 尚不支持受管 Host 跨版本更新')
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(before)
+    expect(await readFile(f.operationLog, 'utf8')).toBe('')
+    expect(await readFile(f.systemdLog, 'utf8')).toBe('')
+    expect((await readdir(join(f.dshHome, 'profiles'))).some(name => name.includes('upgrade-backup'))).toBe(false)
+  })
+
+  test('macOS local supervised upgrade activates successfully and removes its temporary backup', async () => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised',
+      managedDependencies: ['personal-assistant', 'assistant-recovery'],
+      systemd: {},
+    })
+    const result = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), [
+      '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes',
+    ], f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin))
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('macOS profile 原地升级通过')
+    expect(result.stdout).toContain('assistant-recovery 但缺少 assistant-goals')
+    expect(await readFile(f.dshLog, 'utf8')).toContain(join(repoRoot, 'plugins', 'assistant-goals'))
+    expect((await readdir(join(f.dshHome, 'profiles'))).some(name => name.includes('upgrade-backup'))).toBe(false)
+  })
+
+  test('macOS local supervised upgrade restores the original profile after activation failure', async () => {
+    const f = await lifecycleFixture({
+      activationFails: true,
+      effectiveScenario: 'supervised',
+      managedDependencies: ['personal-assistant', 'assistant-recovery'],
+      systemd: {},
+    })
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+    const result = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), [
+      '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes',
+    ], f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin))
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('原 profile 已恢复')
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    const profileEntries = await readdir(join(f.dshHome, 'profiles'))
+    expect(profileEntries.some(name => name.startsWith('web.failed-upgrade.'))).toBe(true)
+    expect(profileEntries.some(name => name.includes('upgrade-backup'))).toBe(false)
   })
 
   test('macOS auto selects native ordinary-use learning', async () => {

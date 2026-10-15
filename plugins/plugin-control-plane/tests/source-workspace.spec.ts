@@ -448,6 +448,7 @@ describe.sequential('prepared modify source workspaces (engineering-layer, not v
     expect(plan.releaseAuthorization).toBeUndefined()
     expect(plan.release).toBeUndefined()
     const evidence = plan.preparedEvidence!
+    if (evidence.schemaVersion !== 1) throw new Error('expected legacy build evidence')
     expect(evidence.commands.map(command => command.command)).toEqual(['docker'])
     expect(evidence.commands.every(command => command.exitCode === 0)).toBe(true)
     expect(evidence.environment).toMatchObject({ npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true })
@@ -580,7 +581,8 @@ exit 0
     const plan = await withEnvironment({ DSH_HOME: value.dshHome, PATH: `${shell.binDir}${delimiter}${process.env.PATH ?? ''}` },
       () => service.prepareModifySourcePlan({ ...input, timeoutMs: 1_800_000 }))
     expect(plan.status).toBe('pending-approval')
-    const args = plan.preparedEvidence!.commands[0]!.args
+    if (plan.preparedEvidence?.schemaVersion !== 1) throw new Error('expected legacy build evidence')
+    const args = plan.preparedEvidence.commands[0]!.args
     expect(args.length).toBeGreaterThan(32)
     expect(args).toContain('CI=true')
     expect(args.some(arg => arg.startsWith('dsh.source.tree='))).toBe(true)
@@ -590,7 +592,7 @@ exit 0
     const database = openDatabase(value.state)
     try {
       expect(store.getSourcePlan(plan.id).preparedEvidence).toEqual(plan.preparedEvidence)
-      const command = plan.preparedEvidence!.commands[0]!
+      const command = plan.preparedEvidence.commands[0]!
       const updateArgs = (changed: readonly string[]): void => {
         database.prepare('UPDATE source_plans SET prepared_evidence_json = ? WHERE id = ?').run(JSON.stringify({
           ...plan.preparedEvidence, commands: [{ ...command, args: changed }],

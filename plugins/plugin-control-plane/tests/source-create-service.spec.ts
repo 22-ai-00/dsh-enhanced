@@ -23,7 +23,7 @@ import { checkedSourceSnapshot } from '../src/source-workspace.ts'
 import * as build from '../src/source-build.ts'
 import * as trust from '../src/trust.ts'
 import { defaultHostAttestationPolicy } from '../src/trust.ts'
-import type { SourcePreparedEvidence } from '../src/types.ts'
+import type { DockerSourcePreparedEvidence } from '../src/types.ts'
 import type { CreationCapabilityConfig, CreationCapabilityObservation } from '../src/creation-capability-types.ts'
 import { CreationCapabilityRuntime } from '../src/creation-capability-runtime.ts'
 import { createSourceCreationFixture } from './helpers/source-creation-fixture.ts'
@@ -190,12 +190,12 @@ async function fixture(withVerification = false, withAdoption = false, withReten
   // Docker remains a fixture: these bytes exercise the Host handoff, not npm
   // publication or real package behavior.
   const packArtifact = Buffer.from('fixture-package-bytes')
-  const evidence: SourcePreparedEvidence = { schemaVersion: 1, kind: 'dsh-source-prepared-evidence',
+  const evidence: DockerSourcePreparedEvidence = { schemaVersion: 1, kind: 'dsh-source-prepared-evidence',
     environment: { npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true, nodeVersion: 'fixture', pnpmVersion: 'fixture' },
     commands: [{ command: 'pnpm', args: ['check'], exitCode: 0, durationMs: 1, logDigest: 'c'.repeat(64) }],
     pack: { name: 'dsh-enhanced-rsi-service-helper-0.1.0.tgz', version: '0.1.0', sizeBytes: packArtifact.length,
       sha256: createHash('sha256').update(packArtifact).digest('hex') }, preparedAt: now }
-  const checked: build.SourceBuildResult = { treeDigest: 'e'.repeat(64), patchDigest: 'f'.repeat(64), checkedAt: now, evidence, packArtifact }
+  const checked: build.SourceBuildResult<DockerSourcePreparedEvidence> = { treeDigest: 'e'.repeat(64), patchDigest: 'f'.repeat(64), checkedAt: now, evidence, packArtifact }
   if (withVerification) vi.mocked(build.runDockerPreparedChecks).mockImplementation(async input => {
     const snapshot = await checkedSourceSnapshot(input.worktree, input.baseCommit, input.scope, process.env)
     checked.treeDigest = snapshot.checkedTreeDigest

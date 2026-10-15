@@ -203,6 +203,39 @@ describe('durable source job ledger', () => {
     } finally { try { target.store.close() } catch {} }
   })
 
+  it('persists native resource identity separately from historical Docker rows and never replays unknown', async () => {
+    const target = await fixture()
+    try {
+      const grant = { id: 'owner-native-create', expiresAt: target.now() + 60_000, maxCreates: 1, namePrefix: 'new-' }
+      const historical = intent({ mode: 'create', creation: { grant, generatorDigest: hex('generator') }, name: 'new-helper' })
+      const { containerName: _containerName, ...withoutDockerIdentity } = historical
+      const native: SourceJobIntent = { ...withoutDockerIdentity,
+        build: { backend: 'macos-seatbelt', runtime: { schemaVersion: 1, platform: `darwin-${process.arch}` as 'darwin-arm64' | 'darwin-x64',
+          nodePath: '/private/node/bin/node', nodeSha256: hex('node'), modulesPath: '/private/modules',
+          roots: [{ path: '/private/node', dev: 1, ino: 2, sha256: hex('root') },
+            { path: '/private/modules', dev: 1, ino: 3, sha256: hex('modules') }],
+          versions: { node: 'v24.22.0', typescript: '6.0.3', cordis: '4.0.4', tools: '0.2.0-rc.2', systemPrompt: '0.2.0-rc.2' } },
+        stateRoot: '/private/native-source', authorityDigest: hex('authority'), expiresAt: grant.expiresAt,
+        maxRuns: 10, maxTotalDurationMs: 600_000, timeoutMs: 60_000, outputBytes: 1_048_576 },
+        nativeResource: { backend: 'macos-seatbelt', key: jobId() } }
+      const queued = target.store.enqueueSourceJob({ id: jobId(), automationId: jobId(), idempotencyKey: 'create:native-unknown', intent: native })
+      expect(queued.intent.nativeResource).toEqual({ backend: 'macos-seatbelt', key: jobId() })
+      expect(queued.intent.containerName).toBeUndefined()
+      const bound = target.store.bindSourceJobDefinition({ id: queued.id, revision: queued.revision, definitionHash: hex('definition') })
+      target.store.claimSourceJob({ id: queued.id, revision: bound.revision, definitionHash: hex('definition'), occurrenceId: 'native-occurrence' })
+      expect(target.store.interruptSourceJobs()).toBe(1)
+      target.store.close()
+      const reopened = new ControlPlaneStore({ path: target.path, now: target.now })
+      try {
+        expect(reopened.getSourceJob(queued.id)).toMatchObject({ status: 'unknown', intent: { nativeResource: { key: queued.id } } })
+        expect(reopened.interruptSourceJobs()).toBe(0)
+        expect(() => reopened.enqueueSourceJob({ id: jobId('e'), automationId: jobId('e'), idempotencyKey: 'create:native-second',
+          intent: { ...native, name: 'new-other', nativeResource: { backend: 'macos-seatbelt', key: jobId('e') },
+            worktree: `/worktree/worktree-job-${'e'.repeat(64)}` } })).toThrow(/creation grant quota/u)
+      } finally { reopened.close() }
+    } finally { try { target.store.close() } catch {} }
+  })
+
   it('refuses a queued create claim exactly at grant expiry and keeps its accepted charge', async () => {
     const target = await fixture()
     try {

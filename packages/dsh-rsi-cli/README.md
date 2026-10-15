@@ -19,7 +19,7 @@ dsh-rsi [全局选项] <命令>
 | 命令 | 说明 |
 | --- | --- |
 | `status`（默认） | 列出 DSH home、各 profile 与安装形态（npm 实体副本 / local 符号链接）、全局 host 版本、launchd / systemd 受管服务状态、外部凭据条目数、生命周期事务/锁残留。**只读**。 |
-| `doctor` | 在 `status` 基础上扫描各 profile 的 `*-host.error.log`，识别已知崩溃模式（如旧版 event-support oracle 拒绝注册）并给出升级/重建建议。**只读**。 |
+| `doctor` | 在 `status` 基础上扫描各 profile 的 `*-host.error.log`，识别已知崩溃模式（如旧版 event-support oracle 拒绝注册）并给出升级/重建建议。**只读**；退出码 0 不代表构建、行为验证或学习授权已就绪。 |
 | `start` / `stop` / `restart` | 切换已注册受管常驻服务的运行状态。**只改运行状态**，不新建/改写/删除 launchd plist 或 systemd unit；未注册时报错并给出注册指引。 |
 | `logs` | 查看各 profile 的受管 `*-host.log` / `*-host.error.log` 尾部（默认末 200 行）。**只读**。 |
 | `web-url` | 从运行中受管服务的 journal（Linux）或 `*-host.log`（macOS）解析最近一次 `dsh web:` 行，输出带 token 的完整 Web 授权 URL。**只读**，不关闭或绕过 Web 认证；服务未运行时提示先 `dsh-rsi start`。 |
@@ -42,14 +42,14 @@ dsh-rsi [全局选项] <命令>
 
 `dsh-rsi install` 为全新 Home 选择 Host，再调用统一安装器：
 
-`install` 和 `reinstall` 在未指定 `--scenario`、也未指定 `--mode` 时，向安装器显式传入 `--scenario supervised`；`--dry-run` 会展示这一默认场景。Linux 使用 systemd user services；原生 macOS 使用 launchd 管理 Node Host、Docker Desktop 容器承担候选构建与隔离验证，支持新工具学习。现有插件源码替换、发布与双 Host 交接仍限 Linux。显式 `--lark skip` 或 `--no-service` 不追加完整场景，交由统一安装器保留有限场景；它们不能覆盖用户显式选择的 `supervised`。显式 `--scenario` 或旧式 `--mode` 保持安装器原有语义，例如 `--scenario core` 选择 core，`--mode standard` 保留安装器的自动选择。`update --all` 等升级、卸载、恢复及 `install --help` 不采用此默认值。其余参数仍按原顺序透传。
+`install` 和 `reinstall` 在未指定 `--scenario`、也未指定 `--mode` 时，向安装器显式传入 `--scenario supervised`；`--dry-run` 会展示这一默认场景。Linux 使用 systemd user services；原生 macOS 使用 launchd 管理 Node Host，候选构建与验证使用系统沙箱和私有固定 Node，无需 Docker。现有插件源码替换、发布与双 Host 交接仍限 Linux。显式 `--lark skip` 或 `--no-service` 不追加完整场景，交由统一安装器保留有限场景；它们不能覆盖用户显式选择的 `supervised`。显式 `--scenario` 或旧式 `--mode` 保持安装器原有语义，例如 `--scenario core` 选择 core，`--mode standard` 保留安装器的自动选择。`update --all` 等升级、卸载、恢复及 `install --help` 不采用此默认值。其余参数仍按原顺序透传。
 
 首次飞书身份授权须由平台的授权流程完成。全新 Home 尚无飞书 Bot 时，`supervised --yes` 或管道等非交互执行会在安装前停止；先在交互式终端运行 `dsh-rsi install` 完成 onboarding。安装器保留已有模型选择，并生成路径、签名身份及有期限的授权与有限预算；仍须有可用模型及隔离构建环境。已有 active/paused Automation 需要另行确认 `--ack-existing-automations`，`--yes` 不代替它。授权尚未就绪时，不能把 supervised 安装称为成功。
 
 - **npm 形态（默认）**：下载 `https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/v<本包版本>/scripts/install/install-npm.sh` 到临时目录执行。引导脚本内部会按内嵌 SHA-256 自校验 `common.sh` 等资产，dsh-rsi 不重复 hash 逻辑。**锁定的只是引导脚本与同 tag 的安装器资产，不是插件 cohort 版本**：安装器默认把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套 `@dsh-enhanced/*` bundle；要锁定插件版本需透传 `--plugin-version <x.y.z|dist-tag>` 或预设 `DSH_ENHANCED_VERSION`。安装器尾部还会执行 `npm install --global @dsh-enhanced/dsh-rsi-cli@<cohort 版本>`，可能因此把全局 dsh-rsi 升降级到该 cohort 版本。
 - **local 形态**：`--local <checkout 目录>`，直接执行该目录下 `scripts/install/install-local.sh`，并从该 checkout 的 packages/dsh-rsi-cli 全局安装（本地开发 / 无网救机）。
 - 全新、空的 `DSH_HOME` 默认从官方 npm 解析一次 DSH `latest`，当前新安装接受已适配的 `0.2.0-rc.2`（官方 latest，尚非正式稳定版），安装到 `~/.local/share/dsh-enhanced/hosts/<精确版本>`。安装不执行依赖安装脚本；校验 registry integrity、lockfile、实际入口及全部安装文件后，写入 Home 内的私有 `.dsh-rsi-host.json`。不替换全局 DSH。安装器及其生成的常驻服务使用该私有入口，补装 pnpm 后仍保留这个入口的优先级。
-- 重试安装按 Home 绑定读取原精确版本，并核对文件与收据；重试不重新解析 `latest`。受管 Home 的升级入口默认解析官方 `latest`，先核对兼容范围，再通过独立事务迁移 Host；同版本不创建 Host 事务。已有未绑定 Home 保留原 Host。`--dsh-version` 可在首次安装或受管 Home 升级时选择范围内精确版本，不能直接覆盖已有绑定。此路径已在 Linux 验证；macOS/Windows 私有 Host 安装尚未实机验证。直接运行 shell 安装脚本仍使用原有 Host 选择方式。
+- 重试安装按 Home 绑定读取原精确版本，并核对文件与收据；重试不重新解析 `latest`。受管 Home 的升级入口默认解析官方 `latest`，先核对兼容范围，再通过独立事务迁移 Host；同版本不创建 Host 事务。已有未绑定 Home 保留原 Host。`--dsh-version` 可在首次安装或受管 Home 升级时选择范围内精确版本，不能直接覆盖已有绑定。Linux 支持受管 Host 更新；macOS 私有 Host 新安装已在临时 Home 验证，但跨版本 Host 更新会在插件变更前拒绝。Windows 私有 Host 安装尚未实机验证。直接运行 shell 安装脚本仍使用原有 Host 选择方式。
 - 同一 Home 不支持与旧版或外部安装器并发安装；绑定文件原子发布不等于整个安装流程具有跨程序排他锁。
 - 私有缓存是多个 Home 可共享的安装资源；全量 purge/reinstall 删除 Home 绑定但保留缓存，`--remove-host` 仍只操作全局 npm Host。缓存只含运行程序及收据，不含飞书凭据。
 - 安装器 stdio 与终端直连，退出码原样透传。`--help` / `--dry-run` 不准备私有 Host。
@@ -95,7 +95,7 @@ dsh-rsi update --all --yes
 
 `update` 选项：
 
-- `--all`：自身升级成功后，把插件集合交给同一目标版本的安装器原地升级；Linux 受管服务由事务停服并恢复，额外或手工启动的 Host 必须先停止。`0.1.49` 起，在已绑定的 Linux Home 继续执行受管 Host 更新；版本相同则跳过。用户无需传 `--confirm-dsh-home-stopped` 或重复声明 `--scenario`；安装器从 effective/composed profile 自动识别场景。
+- `--all`：自身升级成功后，把插件集合交给同一目标版本的安装器原地升级；Linux 受管服务由事务停服并恢复，额外或手工启动的 Host 必须先停止。macOS 当前须先停止整个 Home，仅升级插件集合，保留原 Host 与 LaunchAgent 定义；完成后用 `dsh-rsi start` 恢复运行。`0.1.49` 起，在已绑定的 Linux Home 继续执行受管 Host 更新；版本相同则跳过。用户无需传 `--confirm-dsh-home-stopped` 或重复声明 `--scenario`；安装器从 effective/composed profile 自动识别场景。
 - `--version <v|tag>`：dsh-rsi 自身的目标版本或 dist-tag（默认 `latest`）。只接受精确版本 `x.y.z`（可带预发布后缀）或纯字母 dist-tag；范围表达式如 `>=0.1.0` 会被拒绝。
 - `--dry-run`：解析出目标版本并打印将执行的命令，不做任何安装。
 - 其余参数在 `--all` 下原样透传给安装器；`--local <dir>` 走 local 形态。显式 `--scenario` 仍可作为一致性断言，但不再是必填项。

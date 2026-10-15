@@ -339,11 +339,15 @@ test('skill_failure_candidate consumes one atomically attested failure summary a
     const refreshed = { ...unsigned, attestedAt: unsigned.attestedAt + read.count }
     current.summary = { ...refreshed, evidence: { ...current.summary.evidence, digest: failureSummaryEvidenceDigest(refreshed, current.generation) } }
   })
+  const stageTime = state.summary.attestedAt + 2
+  vi.spyOn(Date, 'now').mockReturnValue(stageTime)
   const goals = f.ctx.get('assistantGoals')! as object
   Object.defineProperty(goals, Service.tracker, { configurable: true, value: { associate: 'assistantGoals', property: 'ctx' } })
   expect(f.ctx.get('assistantGoals')).not.toBe(f.ctx.get('assistantGoals'))
   const candidate = result(await f.execute('skill_failure_candidate', failureCandidateArgs()))
   expect(candidate).toMatchObject({ state: 'pending', failure: { category: 'objective-not-achieved', count: 1, digest: expect.stringMatching(/^[a-f0-9]{64}$/u) } })
+  expect(candidate.createdAt).toBe(stageTime)
+  expect(state.summary.attestedAt).toBe(stageTime - 1)
   expect(JSON.stringify(candidate)).not.toContain(String(state.summary.attestedAt))
   expect(state.failureReadCount()).toBe(1)
   expect(state.repairReadCount()).toBe(2)

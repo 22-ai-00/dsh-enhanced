@@ -1,5 +1,6 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import type { NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
 import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 
@@ -26,6 +27,15 @@ export interface CreationCapabilityConfig {
     image: string
     dockerPath: string
     socketPath?: string
+    expiresAt: number
+    maxRuns: number
+    maxTotalDurationMs: number
+    maxDurationMs: number
+    maxOutputBytes: number
+  } | {
+    backend: 'macos-seatbelt'
+    runtime: NativeMacRuntime
+    stateRoot: string
     expiresAt: number
     maxRuns: number
     maxTotalDurationMs: number
@@ -74,6 +84,8 @@ export interface CreationCapabilityObservation {
   quiescent: boolean
   jobId?: string
   artifactSha256: string
+  boundary?: 'process-seccomp-v1' | 'macos-seatbelt-single-process-v1'
+  runtimeDigest?: string
   reason?: string
   environment?: PluginCreationVerificationCertificate['environment']
   schemaDigest?: string

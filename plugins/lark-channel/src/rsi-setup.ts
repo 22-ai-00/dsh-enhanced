@@ -147,6 +147,7 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
     if (!isAbsolute(result.dshHome) || !result.profile || !profilePattern.test(result.profile)) fail('resource preparation requires --profile and absolute DSH_HOME')
     if (result.prepareAuthorities && result.sourceRepository) fail('--source-repository requires --prepare-source or --prepare-build')
     if (result.sourceRepository && !isAbsolute(result.sourceRepository)) fail('--source-repository must be absolute')
+    if (result.dockerPath && process.platform === 'darwin') fail('--docker-path is not supported by macOS native build preparation')
     if (result.dockerPath && !isAbsolute(result.dockerPath)) fail('--docker-path must be absolute')
     return result
   }
@@ -532,7 +533,7 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
   const args = parseRsiSetupArgs(argv)
   if (args.help) {
     process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--ack-existing-automations] [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--ack-existing-automations]\n       dsh-rsi-setup --install-local-cohort --profile <name> --source-repository <local-absolute> --bundle <slug> [--bundle <slug> ...] [--dsh-home <absolute>]\n--ack-existing-automations acknowledges active or paused durable rows when enabling or switching an Automation scheduler; accepted only with --install-owner or --apply, and does not bypass inventory drift checks.\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, creates an offline image and exports a pinned native release toolchain/store/cache; --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
-    process.stdout.write('macOS: --prepare-build prepares native-architecture Docker images; --install-owner configures a native launchd Host with finite memory learning and verified plugin creation. Source replacement/release remains Linux-only.\n')
+    process.stdout.write('macOS: --prepare-build installs a pinned private Node and frozen manifest-only dependencies for offline Seatbelt checks; --docker-path is rejected and --optional-build does not suppress native preparation failure. --install-owner configures a native launchd Host with finite memory learning and verified plugin creation. Source replacement/release remains Linux-only.\n')
     process.stdout.write('       dsh-rsi-setup --prepare-local-update --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--add-memory-learning]\nPrepare local update source and tarballs outside the active Home; does not install or activate them. --add-memory-learning explicitly prepares the disabled learner bundle for a verified pre-owner installation.\n')
     return
   }
@@ -607,15 +608,16 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
         const provisioned = { ...source, ...(['linux', 'darwin'].includes(process.platform) ? await authorities()
           : { authorityResourcesUnavailable: 'private authority runtime currently requires Linux' }) }
         try {
-          const build = await prepareRsiBuildEnvironment({ dshHome: args.dshHome, profile: args.profile!, source,
-            dockerPath: args.dockerPath, signal: controller.signal })
           if (process.platform === 'darwin') {
-            const { prepareRsiCreationBuildEnvironment } = await import('./rsi-creation-build.js')
-            const creation = await prepareRsiCreationBuildEnvironment({ dshHome: args.dshHome, profile: args.profile!, source,
-              build, signal: controller.signal })
-            return { ...provisioned, sourceBuild: build.sourceBuild, creationBuild: creation,
+            if (args.dockerPath) fail('--docker-path is not supported by macOS native build preparation')
+            const { nativeRsiCreationBuild, prepareNativeRsiRuntime } = await import('./rsi-native-runtime-bootstrap.js')
+            const build = await prepareNativeRsiRuntime({ dshHome: args.dshHome, profile: args.profile!, source,
+              signal: controller.signal })
+            return { ...provisioned, sourceBuild: build.sourceBuild, creationBuild: nativeRsiCreationBuild(build),
               capabilities: ['native-memory-learning', 'verified-plugin-creation', 'dynamic-tool-adoption'] }
           }
+          const build = await prepareRsiBuildEnvironment({ dshHome: args.dshHome, profile: args.profile!, source,
+            dockerPath: args.dockerPath, signal: controller.signal })
           try {
             const release = await prepareRsiReleaseBuildEnvironment({ dshHome: args.dshHome, profile: args.profile!,
               build, signal: controller.signal })

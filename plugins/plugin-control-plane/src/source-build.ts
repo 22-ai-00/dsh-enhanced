@@ -9,9 +9,10 @@ import type { CreationCapabilitySourceSnapshot } from './creation-capability-sou
 import type { PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { verifyCreatedPluginWorkspace, type SourceCreationBinding } from './source-creation.js'
 import { checkedSourceSnapshot, runLocalBuffer, runLocalCommand } from './source-workspace.js'
-import type { SourcePreparedEvidence } from './types.js'
+import type { DockerSourcePreparedEvidence, SourcePreparedEvidence } from './types.js'
+import { validateNativeMacRuntime, type NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 
-export interface SourceBuildConfig {
+export interface DockerSourceBuildConfig {
   /** Canonical owner-controlled docker client. */
   dockerPath: string
   /** Canonical, owner-held local Docker Desktop socket for portable repository builds. */
@@ -37,11 +38,26 @@ export interface SourceBuildConfig {
   repositorySandbox?: { seccompPath: string }
 }
 
-export interface SourceBuildResult {
+export interface NativeSourceBuildConfig {
+  backend: 'macos-seatbelt'
+  runtime: NativeMacRuntime
+  stateRoot: string
+  authorityDigest: string
+  expiresAt: number
+  maxRuns: number
+  maxTotalDurationMs: number
+  timeoutMs: number
+  outputBytes: number
+  versioning?: 'patch'
+}
+
+export type SourceBuildConfig = DockerSourceBuildConfig | NativeSourceBuildConfig
+
+export interface SourceBuildResult<E extends SourcePreparedEvidence = SourcePreparedEvidence> {
   treeDigest: string
   patchDigest: string
   checkedAt: number
-  evidence: SourcePreparedEvidence
+  evidence: E
   /** Host-only bytes from the same verified in-container pack read. Never persisted in source evidence. */
   packArtifact?: Buffer
 }
@@ -483,12 +499,33 @@ interface SourceBuildLimits {
   temporaryMiB: number
 }
 
-function sourceBuildLimits(config: SourceBuildConfig): SourceBuildLimits {
+function sourceBuildLimits(config: DockerSourceBuildConfig): SourceBuildLimits {
   const profile = config.profile ?? 'standard'
   return { profile, temporaryMiB: config.temporaryMiB ?? (profile === 'standard' ? 32 : 2_048) }
 }
 
 export function validateSourceBuildConfig(config: SourceBuildConfig): void {
+  if (config === null || typeof config !== 'object' || Array.isArray(config)) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source build configuration is invalid')
+  }
+  if ('backend' in config) {
+    const allowed = new Set(['backend', 'runtime', 'stateRoot', 'authorityDigest', 'expiresAt', 'maxRuns',
+      'maxTotalDurationMs', 'timeoutMs', 'outputBytes', 'versioning'])
+    if (config.backend !== 'macos-seatbelt' || Object.keys(config).some(key => !allowed.has(key))
+      || typeof config.stateRoot !== 'string' || !config.stateRoot.startsWith('/') || resolve(config.stateRoot) !== config.stateRoot
+      || !/^[a-f0-9]{64}$/u.test(config.authorityDigest)
+      || !Number.isSafeInteger(config.expiresAt) || config.expiresAt <= 0
+      || !Number.isSafeInteger(config.maxRuns) || config.maxRuns < 1 || config.maxRuns > 1000
+      || !Number.isSafeInteger(config.maxTotalDurationMs) || config.maxTotalDurationMs < 60_000 || config.maxTotalDurationMs > 86_400_000
+      || !Number.isSafeInteger(config.timeoutMs) || config.timeoutMs < 1_000 || config.timeoutMs > 300_000
+      || !Number.isSafeInteger(config.outputBytes) || config.outputBytes < 4096 || config.outputBytes > 1_048_576
+      || (config.versioning !== undefined && config.versioning !== 'patch')) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'native source build configuration is invalid')
+    }
+    try { validateNativeMacRuntime(config.runtime) }
+    catch { throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'native source runtime configuration is invalid') }
+    return
+  }
   if (config === null || typeof config !== 'object' || Array.isArray(config) || (config.profile !== undefined && config.profile !== 'standard' && config.profile !== 'repository' && config.profile !== 'portable-repository')
     || (config.versioning !== undefined && config.versioning !== 'patch')
     || (config.temporaryMiB !== undefined && !Number.isSafeInteger(config.temporaryMiB))
@@ -522,7 +559,7 @@ export function validateSourceBuildConfig(config: SourceBuildConfig): void {
   }
 }
 
-async function snapshotRepositorySeccomp(config: SourceBuildConfig, temporary: string): Promise<{ path: string; digest: string } | undefined> {
+async function snapshotRepositorySeccomp(config: DockerSourceBuildConfig, temporary: string): Promise<{ path: string; digest: string } | undefined> {
   const sandbox = config.repositorySandbox
   if (sandbox === undefined) return undefined
   if (!(process.platform === 'linux' && process.arch === 'x64')
@@ -560,7 +597,7 @@ async function verifiedDockerPath(path: string): Promise<string> {
   return canonical
 }
 
-async function verifiedPortableSocket(config: SourceBuildConfig): Promise<string | undefined> {
+async function verifiedPortableSocket(config: DockerSourceBuildConfig): Promise<string | undefined> {
   if (config.profile !== 'portable-repository') return undefined
   if (process.platform !== 'darwin' || !['x64', 'arm64'].includes(process.arch)) {
     throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'portable repository requires native macOS')
@@ -599,7 +636,7 @@ async function sourceTree(worktree: string, baseCommit: string, scope: readonly 
  * value, or Host path crosses the boundary: the sole input is tar on stdin.
  */
 export async function runDockerPreparedChecks(input: {
-  config: SourceBuildConfig
+  config: DockerSourceBuildConfig
   worktree: string
   baseCommit: string
   name: string
@@ -615,7 +652,7 @@ export async function runDockerPreparedChecks(input: {
   revision?: { binding: SourceRevisionBinding; parentSource: CreationCapabilitySourceSnapshot; parentCertificate: PluginCreationVerificationCertificate; files: readonly import('./source-workspace.js').ScopedPluginFile[] }
   /** Host-only request to return the exact already-verified pack bytes for independent verification. */
   capturePack?: true
-}): Promise<SourceBuildResult> {
+}): Promise<SourceBuildResult<DockerSourcePreparedEvidence>> {
   if (input.capturePack !== undefined && input.capturePack !== true) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source pack capture request is invalid')
   if (input.sourceJob !== undefined && (!/^source-job-[a-f0-9]{64}$/u.test(input.sourceJob.id)
     || input.sourceJob.containerName !== `dsh-${input.sourceJob.id}`)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'invalid durable container identity')
@@ -798,7 +835,7 @@ export async function runDockerPreparedChecks(input: {
 }
 
 /** Reconcile only a labeled, image-bound durable container, then prove absence. */
-export async function removeSourceJobContainer(config: SourceBuildConfig, job: { id: string; containerName: string }): Promise<void> {
+export async function removeSourceJobContainer(config: DockerSourceBuildConfig, job: { id: string; containerName: string }): Promise<void> {
   if (!/^source-job-[a-f0-9]{64}$/u.test(job.id) || job.containerName !== `dsh-${job.id}`) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'invalid durable container identity')
   validateSourceBuildConfig(config)
   const path = await verifiedDockerPath(config.dockerPath)

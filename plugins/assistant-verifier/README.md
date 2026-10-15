@@ -83,7 +83,9 @@ Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始
 
 ## 新插件包的隔离行为观察
 
-从 `@dsh-enhanced/assistant-verifier/plugin-behavior-runner` 显式导入 `PluginBehaviorRunner`，它是供可信 Host 构造的观察器，未自动激活，也不注册模型工具。Verifier 将 Isolation 代码作为正式运行依赖打包安装，但只在使用这个子入口时构造 runner；包依赖不会挂载 Isolation 的 Cordis 服务。构造参数复用 `IsolatedVerifierRunnerConfig`，省略 `command`；命令由实现固定。必须使用[专用镜像](../../scripts/isolation/README.md)、私有 `stateRoot`、不可变镜像 ID、有限次数与累计时间，`maxOutputBytes` 至少 65536。Host 持有实例并在所属 Cordis effect 的 disposer 中等待 `close()`。
+从 `@dsh-enhanced/assistant-verifier/plugin-behavior-runner` 显式导入 `PluginBehaviorRunner`，它是供可信 Host 构造的观察器，未自动激活，也不注册模型工具。Verifier 将 Isolation 代码作为正式运行依赖打包安装，但只在使用这个子入口时构造 runner；包依赖不会挂载 Isolation 的 Cordis 服务。旧 Docker 构造参数复用 `IsolatedVerifierRunnerConfig`，省略 `command`；命令由实现固定。Docker 路径必须使用[专用镜像](../../scripts/isolation/README.md)、私有 `stateRoot`、不可变镜像 ID、有限次数与累计时间，`maxOutputBytes` 至少 65536。Host 持有实例并在所属 Cordis effect 的 disposer 中等待 `close()`。
+
+macOS 使用显式 `backend: 'macos-seatbelt'`、私有固定 `runtime` 与相同的持久次数、时长和输出预算；部署配置省略 `authorityDigest`，认证 Host 在构造时注入。`validatePluginBehaviorDeploymentConfig` 与 `validatePluginBehaviorRunnerConfig` 是同步严格校验。固定源码在只读 Seatbelt 单进程中加载 Cordis、SystemPrompt、Tools 和候选，只将操作输入传入候选；预期答案、签名私钥和持久账本留在 Host。Host 安全解析 npm tarball 为普通文件，拒绝链接及越界路径；从已核验的 runtime 填入环境与 `macos-seatbelt-single-process-v1` 边界。候选仍与观察代码同进程，其输出和结果均视为不可信，必须由独立私有 held-out 答案裁决；该边界不声称具备 Linux 双进程隔离的等价防篡改性。v2 创建证书签名绑定运行时摘要和固定构建证据摘要，采用及后续调用再次比对运行时；旧 v1 凭证及 Docker 路径保留。
 
 `run({ key, artifact, operation, signal })` 接受真实 tgz 的 `Buffer`：`operation: { kind: 'discover' }` 返回工具 schema 与摘要；`{ kind: 'invoke', schemaDigest, calls: [{ id, toolName, arguments }] }` 仅在 schema 摘要匹配时执行调用。每包最多 512 KiB，每轮最多 8 次调用。两轮分别消耗持久预算，key 须绑定候选、操作与调用输入；派发不明的 key 不重放。
 

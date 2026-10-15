@@ -65,6 +65,11 @@ export function validateSourceJobsConfig(value: SourceJobsConfig, build?: Source
   }
   if (value.creation !== undefined) validateSourceCreationGrant(value.creation)
   if (value.revision !== undefined) validateSourceRevisionGrant(value.revision)
+  if (build !== undefined && 'backend' in build
+    && (!value.allowedModes || value.allowedModes.some(mode => mode === 'modify')
+      || value.creation === undefined && value.revision === undefined)) {
+    throw new Error('plugin-control-plane: native source jobs require finite create/revise-created grants')
+  }
 }
 
 function projection(job: SourceJobRecord): SourceJobProjection {
@@ -109,6 +114,7 @@ export class SourceJobRuntime {
     adoptReleased?: (job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>) => Promise<void>
     adoptionTimeoutMs?: number
     prepare: (job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>) => Promise<PluginSourcePlan>
+    inspectNativeQuiescence?: (key: string) => Promise<'quiescent' | 'unknown'>
   }) {
     validateSourceJobsConfig(options.config, options.build)
     this.authorityDigest = controlPlaneDigest({ config: options.config, build: options.build })
@@ -434,7 +440,10 @@ export class SourceJobRuntime {
         generatorDigest: (source as Awaited<ReturnType<typeof inspectSourceRevisionContext>>).generatorDigest, parent: structuredClone(parent!.parent), growthRun: structuredClone(input.growthRun!) } } : {}),
       gapId: gap.id, gapRevision: gap.revision, gapDigest: controlPlaneDigest(gap), baseCommit: source.baseCommit,
       files: structuredClone(input.files), ttlMs: input.ttlMs, build: structuredClone(this.options.build),
-      worktree: join(this.options.statePath, 'source-worktrees', `worktree-job-${token}`), containerName: `dsh-source-job-${token}`,
+      worktree: join(this.options.statePath, 'source-worktrees', `worktree-job-${token}`),
+      ...('backend' in this.options.build
+        ? { nativeResource: { backend: 'macos-seatbelt' as const, key: id } }
+        : { containerName: `dsh-source-job-${token}` }),
     }
     await assertCurrent()
     // Synchronous acceptance and registration: no Agent signal is persisted.
@@ -783,7 +792,14 @@ export class SourceJobRuntime {
       if (job.status !== 'unknown') throw new Error('only unknown source jobs need resource reconciliation')
       const trust = await this.options.trust()
       if (controlPlaneDigest(trust) !== job.intent.trustDigest) throw new Error('source job trust changed')
-      await removeSourceJobContainer(job.intent.build, { id: job.id, containerName: job.intent.containerName })
+      if ('backend' in job.intent.build) {
+        if (job.intent.nativeResource?.backend !== 'macos-seatbelt' || job.intent.nativeResource.key !== job.id
+          || await this.options.inspectNativeQuiescence?.(job.id) !== 'quiescent') {
+          throw new Error('native source job has no valid durable quiescence receipt')
+        }
+      } else {
+        await removeSourceJobContainer(job.intent.build, { id: job.id, containerName: job.intent.containerName! })
+      }
       await removeSourceJobWorktree({ stateRoot: join(this.options.statePath, 'source-worktrees'), repository: job.intent.repository, worktree: job.intent.worktree, baseCommit: job.intent.baseCommit, environment: inheritedEnvironment(trust) })
       this.inspect(input)
       return projection(this.options.store.settleSourceJob({ id: job.id, revision: job.revision, status: 'failed', failureCode: 'source-job-resources-reconciled' }))

@@ -9,6 +9,7 @@ import { createLaunchAgent, launchAgentPaths } from './launchd.js'
 import { prepareRsiSourceWorkspace } from './rsi-source.js'
 import { prepareRsiBuildEnvironment, RsiBuildUnavailableError, rsiBuildResources as io } from './rsi-build.js'
 import { prepareRsiCreationBuildEnvironment } from './rsi-creation-build.js'
+import { nativeRsiCreationBuild, prepareNativeRsiRuntime } from './rsi-native-runtime-bootstrap.js'
 import { prepareRsiAuthorityResources } from './rsi-authority-resources.js'
 import { compileNativeRsiProfile, type NativeRsiCompiledProfile, type NativeRsiSetupManifest } from './rsi-native-profile.js'
 import { assertRsiEffectivePatch, rsiSetupPorts } from './rsi-setup.js'
@@ -48,8 +49,11 @@ async function privateDirectory(path: string): Promise<void> {
 async function prepare(input: RsiInstallInput, signal: AbortSignal) {
   const source = await prepareRsiSourceWorkspace({ ...input, version, signal })
   const resources = await prepareRsiAuthorityResources({ ...input, signal })
-  const build = await prepareRsiBuildEnvironment({ ...input, source, signal })
-  const creationBuild = await prepareRsiCreationBuildEnvironment({ ...input, source, build, signal })
+  const build = process.platform === 'darwin'
+    ? await prepareNativeRsiRuntime({ dshHome: input.dshHome, profile: input.profile, source, signal })
+    : await prepareRsiBuildEnvironment({ ...input, source, signal })
+  const creationBuild = build.schemaVersion === 2 ? nativeRsiCreationBuild(build)
+    : await prepareRsiCreationBuildEnvironment({ ...input, source, build, signal })
   for (const name of ['creation-review-runner', 'creation-adoption-runner']) await privateDirectory(join(resources.stateRoot, name))
   const dsh = await resolveInstalledRsiDsh()
   return { source, resources, build, creationBuild,
@@ -120,6 +124,11 @@ export async function installNativeRsiOwnerDeployment(input: RsiInstallInput,
     const manifestPath = join(resources.configRoot, 'native-manifest.json')
     const saved = await optional(planPath)
     const old = saved === null ? undefined : JSON.parse(saved) as Plan
+    const oldBuild = old?.compiled?.manifest?.controlPlane?.sourceBuild
+    if (old && build.schemaVersion === 2 && (!oldBuild || !('backend' in oldBuild)
+      || oldBuild.backend !== 'macos-seatbelt')) {
+      fail('frozen Docker installation plan cannot be resumed with native backend')
+    }
     if (old && (old.schemaVersion !== 1 || old.dshHome !== input.dshHome || old.profile !== input.profile
       || typeof old.beforePatch !== 'string' || typeof old.beforeEffective !== 'string' || typeof old.afterPlist !== 'string'
       || old.sourceCommit !== source.sourceCommit || !isDeepStrictEqual(old.executor, executor)

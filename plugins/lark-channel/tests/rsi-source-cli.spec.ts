@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { configureRsiSetup, parseRsiSetupArgs, runRsiSetup } from '../src/rsi-setup.js'
+import * as setup from '../src/setup.js'
+import * as authorityRuntime from '../src/rsi-authority-runtime.js'
 import { version } from '../src/version.js'
 import * as buildSetup from '../src/rsi-build.js'
 
@@ -27,10 +29,17 @@ describe('RSI source preparation CLI', () => {
     expect(() => parseRsiSetupArgs(['--manifest', '/tmp/m.json', '--profile', 'web'])).toThrow('require --prepare-source')
     await expect(configureRsiSetup(parseRsiSetupArgs(base))).rejects.toThrow('separate setup operation')
     const build = ['--prepare-build', '--profile', 'web', '--dsh-home', '/tmp/home']
-    expect(parseRsiSetupArgs([...build, '--optional-build', '--docker-path', '/usr/bin/docker'])).toMatchObject({ prepareBuild: true, optionalBuild: true, dockerPath: '/usr/bin/docker' })
+    if (process.platform === 'darwin') {
+      expect(() => parseRsiSetupArgs([...build, '--optional-build', '--docker-path', '/usr/bin/docker']))
+        .toThrow('--docker-path is not supported by macOS')
+    } else {
+      expect(parseRsiSetupArgs([...build, '--optional-build', '--docker-path', '/usr/bin/docker']))
+        .toMatchObject({ prepareBuild: true, optionalBuild: true, dockerPath: '/usr/bin/docker' })
+    }
     expect(() => parseRsiSetupArgs([...base, '--prepare-build'])).toThrow('cannot be combined')
     expect(() => parseRsiSetupArgs([...base, '--optional-build'])).toThrow('require --prepare-build')
-    expect(() => parseRsiSetupArgs([...build, '--docker-path', 'relative'])).toThrow('must be absolute')
+    expect(() => parseRsiSetupArgs([...build, '--docker-path', 'relative']))
+      .toThrow(process.platform === 'darwin' ? '--docker-path is not supported by macOS' : 'must be absolute')
     expect(() => parseRsiSetupArgs([...build, '--apply'])).toThrow('cannot be combined')
     const authorities = ['--prepare-authorities', '--profile', 'web', '--dsh-home', '/tmp/home']
     expect(parseRsiSetupArgs(authorities)).toMatchObject({ prepareAuthorities: true, profile: 'web', manifestPath: '' })
@@ -80,25 +89,48 @@ describe('RSI source preparation CLI', () => {
     const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     const build = vi.spyOn(buildSetup, 'prepareRsiBuildEnvironment').mockRejectedValue(new buildSetup.RsiBuildUnavailableError('daemon unavailable'))
+    // This case exercises the Linux Docker branch; macOS has no physical
+    // root-owned /tmp and therefore cannot run Linux's rendezvous lock.
+    vi.spyOn(setup, 'withDshHomeLifecycleLock').mockImplementation(async (_home, action) => action())
+    vi.spyOn(authorityRuntime, 'prepareRsiAuthorityRuntime').mockResolvedValue({
+      executables: { hostAttestor: { path: join(home, 'rsi-authority-runtimes', 'web', 'host-attestor') } },
+    } as Awaited<ReturnType<typeof authorityRuntime.prepareRsiAuthorityRuntime>>)
     const args = ['--prepare-build', '--profile', 'web', '--dsh-home', home, '--source-repository', source]
-    await expect(runRsiSetup(args)).rejects.toThrow('daemon unavailable')
-    await runRsiSetup([...args, '--optional-build'])
-    const result = JSON.parse(String(output.mock.calls.at(-1)![0]))
-    expect(result).toMatchObject({ version, buildUnavailable: expect.stringContaining('daemon unavailable'), repository: join(home, 'rsi-sources', 'web', 'checkout') })
-    expect(result.sourceBuild).toBeUndefined()
-    if (process.platform === 'linux' || process.platform === 'darwin') {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { ...platform, value: 'linux' })
+    try {
+      await expect(runRsiSetup(args)).rejects.toThrow('daemon unavailable')
+      await runRsiSetup([...args, '--optional-build'])
+      const result = JSON.parse(String(output.mock.calls.at(-1)![0]))
+      expect(result).toMatchObject({ version, buildUnavailable: expect.stringContaining('daemon unavailable'), repository: join(home, 'rsi-sources', 'web', 'checkout') })
+      expect(result.sourceBuild).toBeUndefined()
       expect(result.authorityResources.identities.host.publicKeyPem).toContain('PUBLIC KEY')
       expect(result.authorityResourcesUnavailable).toBeUndefined()
-      if (process.platform === 'linux') expect(result.authorityRuntime.executables.hostAttestor.path).toContain('rsi-authority-runtimes')
-      else expect(result.authorityRuntime).toBeUndefined()
-    } else {
-      expect(result.authorityResources).toBeUndefined()
-      expect(result.authorityRuntime).toBeUndefined()
-      expect(result.authorityResourcesUnavailable).toContain('requires Linux')
+      expect(result.authorityRuntime.executables.hostAttestor.path).toContain('rsi-authority-runtimes')
+      expect(build.mock.calls.at(-1)![0]).toMatchObject({ profile: 'web', dshHome: home, source: { version } })
+      build.mockRejectedValue(new Error('image build failed'))
+      await expect(runRsiSetup([...args, '--optional-build'])).rejects.toThrow('image build failed')
+      await expect(readFile(join(home, 'profiles', 'web', 'cordis.patch.yml'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      Object.defineProperty(process, 'platform', platform)
     }
-    expect(build.mock.calls.at(-1)![0]).toMatchObject({ profile: 'web', dshHome: home, source: { version } })
-    build.mockRejectedValue(new Error('image build failed'))
-    await expect(runRsiSetup([...args, '--optional-build'])).rejects.toThrow('image build failed')
+  })
+
+  test.runIf(process.platform === 'darwin')('routes optional Mac preparation through native bootstrap and keeps its failure fatal', async () => {
+    const home = await mkdtemp(join(await realpath(tmpdir()), 'rsi-native-build-cli-')); roots.push(home)
+    const source = join(home, 'original'); await mkdir(source, { mode: 0o700 })
+    const git = (...args: string[]) => execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', ...args], {
+      cwd: source, encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: home, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
+    })
+    git('init', '--quiet')
+    await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'dsh-enhanced', version }))
+    git('add', 'package.json')
+    git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'initial')
+    const docker = vi.spyOn(buildSetup, 'prepareRsiBuildEnvironment')
+    const args = ['--prepare-build', '--optional-build', '--profile', 'web', '--dsh-home', home,
+      '--source-repository', source]
+    await expect(runRsiSetup(args)).rejects.toThrow('rsi native bootstrap: frozen manifest inventory is incomplete')
+    expect(docker).not.toHaveBeenCalled()
     await expect(readFile(join(home, 'profiles', 'web', 'cordis.patch.yml'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 

@@ -13,10 +13,11 @@ const FIXED = {
   'scripts/isolation/build-plugin-verifier-image.mjs': 'abfa721cc51e29672f5f1b139c63d282ffeebdc4c4b96d4496c7c089d711891a',
   'scripts/isolation/plugin-verifier.Dockerfile': '9301bf426688c46f3d4fd8bcae7acde5da283ed6730f87be1f225d93fca95823',
   'scripts/isolation/plugin-observer-launcher.c': '75ba31c8a2a0eb09820066fc7c73efb087095cf5229e460c965daa8659af1d0e',
-  'plugins/assistant-verifier/src/plugin-behavior-runner.ts': '1a7f5d9a686cc8615e403a9f5536701d759fc40ef9fa5fe7c29cbddb2891c187',
+  'plugins/assistant-verifier/src/plugin-behavior-runner.ts': 'b291cda21f24c5f03c295b816d68e6e50a6d507f837a3b7446986158f513dd18',
 } as const
 const LEGACY_FIXED = {
   ...FIXED,
+  'plugins/assistant-verifier/src/plugin-behavior-runner.ts': '1a7f5d9a686cc8615e403a9f5536701d759fc40ef9fa5fe7c29cbddb2891c187',
   'scripts/isolation/build-plugin-verifier-image.mjs': 'ae615696e51f88be9ad1e5f1b2a8769b951d8f0632b13547fcfa8f23ab837802',
   'scripts/isolation/plugin-verifier.Dockerfile': 'e3d4aad5d1a1fda8c1a01d080f32aceb9d6438954169b412ed96e8dde2fd22b2',
   'scripts/isolation/plugin-observer-launcher.c': '90bb335432a74778d442e2fcab50a19fc4441191343eaa76beed09287515b0ce',

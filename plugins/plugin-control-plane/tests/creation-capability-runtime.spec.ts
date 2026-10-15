@@ -1,10 +1,11 @@
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { SourceGrowthRunUnavailableError } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson, SourceGrowthRunUnavailableError,
+  verifyPluginCreationVerificationCertificate, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { afterEach, expect, test } from 'vitest'
 import { CreationCapabilityRuntime } from '../src/creation-capability-runtime.js'
 import type { CreationCapabilityConfig, CreationCapabilityJournalPort, CreationCapabilityObservation,
@@ -12,8 +13,34 @@ import type { CreationCapabilityConfig, CreationCapabilityJournalPort, CreationC
 
 const digest = (value: Buffer | string) => createHash('sha256').update(value).digest('hex')
 const expiry = () => Date.now() + 60_000
+const verifier = generateKeyPairSync('ed25519')
+const verifierPublicKey = verifier.publicKey.export({ format: 'pem', type: 'spki' }).toString()
 const fixtures: Context[] = []
 afterEach(async () => { for (const ctx of fixtures.splice(0)) await ctx.fiber.dispose() })
+
+function legacyCertificate(planId: string, name: string, artifact: Buffer, schemaDigest: string,
+  environment: PluginCreationVerificationCertificate['environment']): PluginCreationVerificationCertificate {
+  const verifiedAt = Date.now()
+  const expiresAt = verifiedAt + 60_000
+  const unsigned: Omit<PluginCreationVerificationCertificate, 'signature'> = {
+    protocol: 'assistant-growth/creation-verification/v1', verificationId: `verification-${planId}`,
+    authority: { protocol: 'assistant-growth/creation-acceptance-authority/v1', authorityId: 'verifier',
+      keyId: 'fixture-key', authorityDigest: 'b'.repeat(64), namePrefix: 'tool-', expiresAt: expiresAt + 1_000 },
+    plan: { id: planId, digest: 'a'.repeat(64), name, sourceTreeDigest: '1'.repeat(64),
+      sourcePatchDigest: '2'.repeat(64), artifactSha256: digest(artifact), artifactBytes: artifact.length,
+      generatorDigest: '3'.repeat(64) },
+    source: { referenceDigest: '4'.repeat(64), ownerDigest: '5'.repeat(64), growthRunDigest: '6'.repeat(64) },
+    contractDigest: '7'.repeat(64), schemaDigest, environment,
+    model: { provider: 'fixture', model: 'fixture' },
+    budget: { modelCalls: 2, maxOutputTokens: 1_024, maxDurationMs: 10_000, maxCases: 2 },
+    sessions: { contract: `contract-${planId}`, sourceReview: `source-review-${planId}` },
+    observations: [
+      { caseId: 'case-one', jobId: `job-one-${planId}`, operationDigest: '8'.repeat(64), observationDigest: '9'.repeat(64) },
+      { caseId: 'case-two', jobId: `job-two-${planId}`, operationDigest: 'a'.repeat(64), observationDigest: 'b'.repeat(64) },
+    ], reviewDigest: 'c'.repeat(64), verifiedAt, expiresAt,
+  }
+  return { ...unsigned, signature: sign(null, Buffer.from(canonicalGrowthJson(unsigned)), verifier.privateKey).toString('base64url') }
+}
 
 function fixture() {
   const ctx = new Context(); fixtures.push(ctx)
@@ -24,9 +51,7 @@ function fixture() {
     }, required: ['query'] } }]
   const schemaDigest = digest(JSON.stringify(schemas))
   const environment = { node: 'v22.19.0', cordis: '4.0.2', tools: '0.1.5-rc.3', systemPrompt: '0.1.5-rc.3' }
-  const certificate = { plan: { id: 'plan-1', digest: 'a'.repeat(64), name: 'tool-example',
-    artifactSha256: digest(artifact), artifactBytes: artifact.length }, schemaDigest, environment,
-    expiresAt: expiry() } as CreationCapabilityRecord['certificate']
+  const certificate = legacyCertificate('plan-1', 'tool-example', artifact, schemaDigest, environment)
   const owner = { authorityId: 'owner', authorityHash: 'c'.repeat(64), principalId: 'principal',
     principalRecordId: 'record', principalVersion: 1, workspace: '/fixture', agentPreset: 'primary' }
   const config = { authorityId: 'owner', namePrefix: 'tool-', owner, expiresAt: expiry(),
@@ -36,7 +61,7 @@ function fixture() {
   let journalCloseCount = 0
   const calls = new Map<string, { status: 'claimed' | 'completed' | 'unknown'; result?: unknown }>()
   const journal: CreationCapabilityJournalPort = {
-    authorityDigest: 'b'.repeat(64), publicKey: 'fixture', inspect: () => record, list: () => record ? [record] : [],
+    authorityDigest: 'b'.repeat(64), publicKey: verifierPublicKey, inspect: () => record, list: () => record ? [record] : [],
     claim: ({ certificate: cert, artifact: bytes }) => {
       if (record) return { created: false, record }
       record = { planId: 'plan-1', status: 'claimed', certificate: cert, artifact: bytes }
@@ -100,6 +125,15 @@ function fixture() {
     setCallerValid: (value: boolean) => { callerValid = value },
     counts: () => ({ discoveries, invokes, closeCount, journalCloseCount }) }
 }
+
+test('signed legacy v1 certificate remains eligible for the Docker runner', async () => {
+  const f = fixture()
+  expect(verifyPluginCreationVerificationCertificate(f.certificate, f.certificate.authority, verifierPublicKey)).toBe(true)
+  const runtime = f.runtime()
+  await runtime.start()
+  expect(runtime.eligible('plan-1')).toBe(true)
+  await runtime.close()
+})
 
 test('a real Cordis Fiber mounts sanitized Host tool and disposes it without affecting native tools', async () => {
   const f = fixture()
@@ -372,15 +406,14 @@ test('revoking plan A does not abort a pending native call on plan B; global clo
   const environment = { node: 'v22.19.0', cordis: '4.0.2', tools: '0.1.5-rc.3', systemPrompt: '0.1.5-rc.3' }
   const plans = ['plan-a', 'plan-b'] as const
   const artifacts = Object.fromEntries(plans.map(planId => [planId, Buffer.from(`exact-tgz-${planId}`)])) as Record<string, Buffer>
-  const certificates = Object.fromEntries(plans.map(planId => [planId, {
-    plan: { id: planId, digest: 'a'.repeat(64), name: `tool-${planId}`, artifactSha256: digest(artifacts[planId]!),
-      artifactBytes: artifacts[planId]!.length }, schemaDigest, environment, expiresAt: expiry(),
-  } as CreationCapabilityRecord['certificate']])) as Record<string, CreationCapabilityRecord['certificate']>
+  const certificates = Object.fromEntries(plans.map(planId => [planId,
+    legacyCertificate(planId, `tool-${planId}`, artifacts[planId]!, schemaDigest, environment),
+  ])) as Record<string, CreationCapabilityRecord['certificate']>
   const records = new Map<string, CreationCapabilityRecord>()
   const calls = new Map<string, Map<string, { status: 'claimed' | 'completed' | 'unknown'; result?: unknown }>>()
   let closeCount = 0
   const journal: CreationCapabilityJournalPort = {
-    authorityDigest: 'b'.repeat(64), publicKey: 'fixture',
+    authorityDigest: 'b'.repeat(64), publicKey: verifierPublicKey,
     inspect: planId => records.get(planId), list: () => [...records.values()],
     claim: ({ certificate, artifact }) => {
       const existing = records.get(certificate.plan.id)

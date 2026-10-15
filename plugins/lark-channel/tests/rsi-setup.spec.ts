@@ -494,6 +494,10 @@ describe('RSI dual profile setup transaction', () => {
     expect(() => parseRsiSetupArgs([...base,'--ack-existing-automations'])).toThrow('requires --install-owner or --apply')
     expect(() => parseRsiSetupArgs([...base,'--rollback','--confirm-hosts-stopped','--ack-existing-automations'])).toThrow('requires --install-owner or --apply')
     expect(() => parseRsiSetupArgs(['--prepare-build','--profile','web','--ack-existing-automations'])).toThrow('requires --install-owner or --apply')
+    if (process.platform === 'darwin') {
+      expect(() => parseRsiSetupArgs(['--prepare-build', '--profile', 'web', '--docker-path', '/usr/local/bin/docker']))
+        .toThrow('--docker-path is not supported by macOS')
+    }
   })
   test('platform gate lives only in the CLI shell, not in the injectable transaction', async () => {
     const f = await fixture()

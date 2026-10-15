@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { JsonSchemaNode, ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { canonicalGrowthJson, SourceGrowthRunUnavailableError } from '@dsh-enhanced/assistant-growth-contract'
+import { nativeMacRuntimeDigest } from '@dsh-enhanced/assistant-isolation'
 import type { CreationCapabilityCallEvidence, CreationCapabilityConfig, CreationCapabilityJournalPort, CreationCapabilityObservation,
   CreationCapabilityPorts, CreationCapabilityRecord, CreationCapabilityRunner, CreationCapabilityTool } from './creation-capability-types.js'
 
@@ -83,6 +84,17 @@ function observed(record: CreationCapabilityRecord, result: CreationCapabilityOb
     && result.artifactSha256 === record.certificate.plan.artifactSha256
     && result.schemaDigest === record.certificate.schemaDigest
     && sameEnvironment(result.environment, record.certificate.environment)
+    && (record.certificate.protocol === 'assistant-growth/creation-verification/v1'
+      ? result.boundary === undefined || result.boundary === 'process-seccomp-v1'
+      : result.boundary === record.certificate.execution?.boundary
+        && result.runtimeDigest === record.certificate.execution?.runtimeDigest)
+}
+
+function sameExecution(record: CreationCapabilityRecord, config: CreationCapabilityConfig): boolean {
+  return record.certificate.protocol === 'assistant-growth/creation-verification/v1'
+    ? !('backend' in config.runner)
+    : 'backend' in config.runner && config.runner.backend === 'macos-seatbelt'
+      && record.certificate.execution?.runtimeDigest === nativeMacRuntimeDigest(config.runner.runtime)
 }
 
 type Mounted = { fiber: { dispose(): Promise<void>; state: number }; aliases: readonly string[] }
@@ -124,6 +136,7 @@ export class CreationCapabilityRuntime {
   }
 
   private live(record: CreationCapabilityRecord): void {
+    if (!sameExecution(record, this.config)) fail('verification runtime changed')
     if (this.closed || Date.now() >= this.config.expiresAt || Date.now() >= this.config.runner.expiresAt
       || ((record.status !== 'active' || record.receipt?.protocol !== 'dsh-created-capability-adoption/v2')
         && Date.now() >= record.certificate.expiresAt)
@@ -186,6 +199,7 @@ export class CreationCapabilityRuntime {
         || Date.now() >= this.config.expiresAt || Date.now() >= this.config.runner.expiresAt) return false
       const current = this.ports.inspect(planId)
       return current.certificate.plan.id === planId && current.certificate.expiresAt > Date.now()
+        && sameExecution({ planId, status: 'claimed', certificate: current.certificate, artifact: current.artifact }, this.config)
         && current.certificate.plan.name.startsWith(this.config.namePrefix)
         && sameCertificate(current.owner, this.config.owner)
         && sha(current.artifact) === current.certificate.plan.artifactSha256
