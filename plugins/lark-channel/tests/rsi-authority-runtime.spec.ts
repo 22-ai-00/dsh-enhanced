@@ -51,12 +51,12 @@ test('copied Linux authority modules load and invoke without the Mac isolation p
     try { await authority.runSourceApprovalAuthority([]); throw new Error('invalid CLI invocation accepted') }
     catch (error) { if (error?.name !== 'SourceApprovalAuthorityError') throw error }
     process.stdout.write('isolated authority loaded and invoked\\n')`
-  const invoked = spawnSync(process.execPath, ['--input-type=module', '--eval', code],
+  const invoked = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', '--input-type=module', '--eval', code],
     { cwd: f.root, env: isolated, encoding: 'utf8', timeout: 10_000 })
   expect({ status: invoked.status, stderr: invoked.stderr, stdout: invoked.stdout }).toEqual({
     status: 0, stderr: '', stdout: 'isolated authority loaded and invoked\n',
   })
-  const cli = spawnSync(process.execPath, [join(f.packageRoot, 'bin', 'dsh-source-approval-authority.js'), '--bad'],
+  const cli = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', join(f.packageRoot, 'bin', 'dsh-source-approval-authority.js'), '--bad'],
     { cwd: f.root, env: isolated, encoding: 'utf8', timeout: 10_000 })
   expect({ status: cli.status, stderr: cli.stderr, stdout: cli.stdout }).toEqual({
     status: 1, stderr: 'source approval authority refused the request\n', stdout: '',
