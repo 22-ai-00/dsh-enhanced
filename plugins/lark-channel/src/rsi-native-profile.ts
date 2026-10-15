@@ -82,7 +82,9 @@ function upsert(document: Document, sequence: YAMLSeq, value: Record<string, unk
   if (!matches.length) sequence.add(document.createNode(value))
 }
 function copyConfig(out: ReturnType<typeof parseRows>, effective: ReturnType<typeof parseRows>, key: keyof typeof managed): YAMLMap {
-  const source = options(effectiveRow(effective.byId, key), key)
+  const effectiveConfig = effectiveRow(effective.byId, key)
+  const source = key === 'growth' && !effectiveConfig.has('config')
+    ? mapping(out.document.createNode({}), 'growth config') : options(effectiveConfig, key)
   let row = out.byId.get(ids[key])
   if (!row) { row = mapping(out.document.createNode({ id: ids[key] }), key); out.rows.add(row); out.byId.set(ids[key], row) }
   if (row.get('name') !== undefined && row.get('name') !== managed[key] || row.get('disabled') === true) fail(`${key} patch override differs`)

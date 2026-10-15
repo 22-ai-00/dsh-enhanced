@@ -9,7 +9,10 @@ import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-const restoreGate = vi.hoisted(() => ({ wait: undefined as undefined | ((from: string, to: string) => Promise<void>) }))
+const restoreGate = vi.hoisted(() => ({
+  wait: undefined as undefined | ((from: string, to: string) => Promise<void>),
+  chmodWait: undefined as undefined | ((path: string) => Promise<void>),
+}))
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   return {
@@ -17,6 +20,10 @@ vi.mock('node:fs/promises', async importOriginal => {
     rename: async (from: string, to: string): Promise<void> => {
       await restoreGate.wait?.(from, to)
       await actual.rename(from, to)
+    },
+    chmod: async (path: string, mode: number): Promise<void> => {
+      await restoreGate.chmodWait?.(path)
+      await actual.chmod(path, mode)
     },
   }
 })
@@ -40,6 +47,7 @@ const children: ChildProcess[] = []
 
 afterEach(async () => {
   restoreGate.wait = undefined
+  restoreGate.chmodWait = undefined
   for (const child of children.splice(0)) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
   for (const server of servers.splice(0)) await server.stop().catch(() => undefined)
   for (const server of replacements.splice(0)) await new Promise<void>(resolve => server.close(() => resolve()))
@@ -117,6 +125,70 @@ async function nextFrame(socket: Socket): Promise<unknown> {
     socket.on('data', chunk => { try { const values = decoder.push(chunk); if (values[0] !== undefined) resolve(values[0]) } catch (error) { reject(error) } })
     socket.once('error', reject); socket.once('end', () => reject(new Error('ended before frame')))
   })
+}
+
+function adminSocketPath(actionSocketPath: string): string {
+  return join(dirname(dirname(actionSocketPath)), 'admin-runtime', 'broker-admin.sock')
+}
+
+async function waitForSignedAdminHello(actionSocketPath: string, stopped: Promise<never>): Promise<void> {
+  const ready = vi.waitFor(async () => {
+    const socket = await connect(adminSocketPath(actionSocketPath))
+    try {
+      verifyBrokerServerHello(await within(nextFrame(socket), 1_200, 'signed admin hello'), serverKeys.publicKey, {
+        expectedInstanceId: 'broker-fixture', minimumGeneration: 1,
+      })
+    } finally {
+      socket.destroy()
+    }
+  }, { timeout: 5_000, interval: 20 })
+  await Promise.race([ready, stopped])
+}
+
+async function within<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), timeoutMs) }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+function preserveRoot(actionSocketPath: string): void {
+  const root = dirname(dirname(actionSocketPath)), index = roots.indexOf(root)
+  if (index !== -1) roots.splice(index, 1)
+}
+
+async function stopInProcessServe(running: Promise<number>, previousSignals: ReadonlySet<NodeJS.SignalsListener>, socketPath: string): Promise<void> {
+  let finished = false
+  void running.then(() => { finished = true })
+  try {
+    await within(Promise.race([
+      running,
+      vi.waitFor(() => expect(process.listeners('SIGTERM').some(listener => !previousSignals.has(listener))).toBe(true), { timeout: 5_000 }),
+    ]), 5_500, 'broker serve startup')
+    if (!finished) process.emit('SIGTERM', 'SIGTERM')
+    await expect(within(running, 5_000, 'broker serve shutdown')).resolves.toBe(0)
+  } catch (error) {
+    if (!finished) preserveRoot(socketPath)
+    throw error
+  }
+}
+
+async function closeBrokerChild(child: ChildProcess, childClosed: Promise<unknown>, socketPath: string): Promise<void> {
+  if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM')
+  try {
+    await within(childClosed, 2_000, 'broker child graceful shutdown')
+  } catch {
+    child.kill('SIGKILL')
+    try { await within(childClosed, 2_000, 'broker child forced shutdown') }
+    catch (error) { preserveRoot(socketPath); throw error }
+  }
+  const index = children.indexOf(child)
+  if (index !== -1) children.splice(index, 1)
 }
 
 describe('GitHubBrokerServer', () => {
@@ -540,16 +612,51 @@ describe('broker CLI safety boundary', () => {
     expect(writes).toEqual(['assistant-actions broker: command failed or invalid arguments\n'])
   })
 
+  it('waits for an authenticated admin hello after the action socket appears', async () => {
+    const socketPath = await privateSocketPath(), path = await configFile(socketPath, true, { minimumBrokerGeneration: 1 })
+    const adminPath = adminSocketPath(socketPath)
+    let entered!: () => void, release!: () => void
+    const adminChmodEntered = new Promise<void>(resolve => { entered = resolve })
+    const adminChmodReleased = new Promise<void>(resolve => { release = resolve })
+    restoreGate.chmodWait = async candidate => {
+      if (candidate === adminPath) { entered(); await adminChmodReleased }
+    }
+    const previousSignals = new Set(process.listeners('SIGTERM'))
+    const running = runBrokerCli(['serve', path], { createCore: () => core(), peerInspector: trustedPeer })
+    try {
+      await within(adminChmodEntered, 5_000, 'provisional admin socket bind')
+      expect((await lstat(socketPath)).isSocket()).toBe(true)
+      expect((await lstat(adminPath)).isSocket()).toBe(true)
+      let ready = false
+      const readiness = waitForSignedAdminHello(socketPath, running.then(code => { throw new Error(`broker serve exited before readiness: ${code}`) }))
+      void readiness.then(() => { ready = true }, () => undefined)
+      const provisional = await connect(adminPath)
+      try { await expect(within(nextFrame(provisional), 500, 'provisional admin rejection')).rejects.not.toThrow('timed out waiting for provisional admin rejection') }
+      finally { provisional.destroy() }
+      expect(ready).toBe(false)
+      release()
+      await readiness
+      const status = await requestGitHubBrokerAdmin(connectionOptions(adminPath), { operation: 'status', body: {}, deadline: Date.now() + 5_000 }, { kind: 'assistant-actions-admin', instanceId: 'operator-fixture', generation: 1 }, 'admin-fixture', adminKeys.privateKey)
+      expect(status).toMatchObject({ status: 'succeeded', state: { admission: 'accepting', generation: 7 } })
+    } finally {
+      release()
+      await stopInProcessServe(running, previousSignals, socketPath)
+    }
+  })
+
   it.runIf(linuxPeerCredentialsAvailable())('uses the production core, kernel peer credentials, and signed admin client without dependency injection', async () => {
     const socketPath = await privateSocketPath(), path = await configFile(socketPath, true, { minimumBrokerGeneration: 1 })
     const operatorPath = await configFile(socketPath, false, { minimumBrokerGeneration: 1 })
+    const previousSignals = new Set(process.listeners('SIGTERM'))
     const running = runBrokerCli(['serve', path], { stderr: { write() { return true } } })
-    await vi.waitFor(async () => expect((await lstat(socketPath)).isSocket()).toBe(true))
-    const output: string[] = []
-    await expect(runBrokerCli(['status', operatorPath], { stdout: { write(value) { output.push(String(value)); return true } } })).resolves.toBe(0)
-    expect(JSON.parse(output.join(''))).toMatchObject({ status: 'succeeded', state: { admission: 'accepting', generation: 1 } })
-    process.emit('SIGTERM', 'SIGTERM')
-    await expect(running).resolves.toBe(0)
+    try {
+      await waitForSignedAdminHello(socketPath, running.then(code => { throw new Error(`broker serve exited before readiness: ${code}`) }))
+      const output: string[] = []
+      await expect(runBrokerCli(['status', operatorPath], { stdout: { write(value) { output.push(String(value)); return true } } })).resolves.toBe(0)
+      expect(JSON.parse(output.join(''))).toMatchObject({ status: 'succeeded', state: { admission: 'accepting', generation: 1 } })
+    } finally {
+      await stopInProcessServe(running, previousSignals, socketPath)
+    }
     expect((await lstat(join(socketPath, '..', 'broker.sqlite'))).isFile()).toBe(true)
     await expect(lstat(socketPath)).rejects.toMatchObject({ code: 'ENOENT' })
   })
@@ -565,18 +672,26 @@ describe('broker CLI safety boundary', () => {
     child.stderr?.setEncoding('utf8')
     child.stderr?.on('data', (chunk: string) => { childStderr = (childStderr + chunk).slice(-16_384) })
     children.push(child)
-    await vi.waitFor(async () => expect((await lstat(actionSocketPath)).isSocket()).toBe(true), { timeout: 5_000 })
-    const run = promisify(execFile)
-    const status = await run(process.execPath, [brokerCliEntrypoint, 'status', operatorConfig], { timeout: 5_000, maxBuffer: 16_384, env: { PATH: process.env.PATH, LANG: 'C', LC_ALL: 'C' } })
-    expect(JSON.parse(status.stdout)).toMatchObject({ status: 'succeeded', state: { admission: 'accepting', generation: 1, controlVersion: 0 } })
-    const stop = await run(process.execPath, [brokerCliEntrypoint, 'stop', operatorConfig, '0', 'operator-request'], { timeout: 5_000, maxBuffer: 16_384, env: { PATH: process.env.PATH, LANG: 'C', LC_ALL: 'C' } })
-    expect(JSON.parse(stop.stdout)).toMatchObject({ status: 'succeeded', state: { admission: 'stopped', controlVersion: 1 } })
-    await new Promise<void>((resolve, reject) => {
-      child.once('close', (code, signal) => code === 0 ? resolve()
-        : reject(new Error(`broker child exited ${code} (signal ${signal ?? 'none'}); stderr: ${JSON.stringify(childStderr)}`)))
-      child.once('error', reject)
-      if (!child.kill('SIGTERM')) reject(new Error(`broker child had already exited ${child.exitCode}; stderr: ${JSON.stringify(childStderr)}`))
+    let childError: Error | undefined
+    const childClosed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
+      child.once('error', error => { childError = error })
+      child.once('close', (code, signal) => resolve({ code, signal }))
     })
+    try {
+      await waitForSignedAdminHello(actionSocketPath, childClosed.then(({ code, signal }) => {
+        throw new Error(`broker child exited before readiness ${code} (signal ${signal ?? 'none'}); stderr: ${JSON.stringify(childStderr)}; error: ${childError?.message ?? 'none'}`)
+      }))
+      const run = promisify(execFile)
+      const status = await run(process.execPath, [brokerCliEntrypoint, 'status', operatorConfig], { timeout: 5_000, maxBuffer: 16_384, env: { PATH: process.env.PATH, LANG: 'C', LC_ALL: 'C' } })
+      expect(JSON.parse(status.stdout)).toMatchObject({ status: 'succeeded', state: { admission: 'accepting', generation: 1, controlVersion: 0 } })
+      const stop = await run(process.execPath, [brokerCliEntrypoint, 'stop', operatorConfig, '0', 'operator-request'], { timeout: 5_000, maxBuffer: 16_384, env: { PATH: process.env.PATH, LANG: 'C', LC_ALL: 'C' } })
+      expect(JSON.parse(stop.stdout)).toMatchObject({ status: 'succeeded', state: { admission: 'stopped', controlVersion: 1 } })
+      if (!child.kill('SIGTERM')) throw new Error(`broker child had already exited ${child.exitCode}; stderr: ${JSON.stringify(childStderr)}`)
+      const { code, signal } = await within(childClosed, 5_000, 'broker child shutdown')
+      expect(code, `broker child exited ${code} (signal ${signal ?? 'none'}); stderr: ${JSON.stringify(childStderr)}`).toBe(0)
+    } finally {
+      await closeBrokerChild(child, childClosed, actionSocketPath)
+    }
     await expect(lstat(actionSocketPath)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })

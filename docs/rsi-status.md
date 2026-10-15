@@ -18,12 +18,12 @@
 
 - 正式 `dsh-rsi-setup --prepare-build` 在私有临时 Home 使用在线官方归档、冻结 Git 清单和依赖安装，退出 0；未传预下载文件，也未使用 Docker。重复读取、坏归档、Git replace ref、回执权限和运行时篡改/缺失拒绝均有定向证据。
 - 真实 Mac 原生执行包 136 项通过、38 项明确跳过；行为探针 4 项通过。固定源码生成/编译/打包、两例私有留出、v2 签名、动态采用和重复 callId 复用串联退出 0。串联中的模型、owner 和部分上层当前性接口为测试替身，只证明工程机制贯通，不证明真实认证用户的普通任务闭环。
-- 临时 core Home 已验证实际 DSH 插件激活；临时 launchd 用例验证服务生命周期。它们尚不能替代真实 owner、模型和 Lark 连接的完整 supervised 安装验收。用户现有 web profile 尚未替换。
-- 最终 `pnpm check` 退出 0，源码前后指纹一致，37 个包 dry-run pack 完成；包含真实 Mac runtime/bootstrap/behavior/launchd 用例。Delivery 的 WAL reader 测试已修复 1 秒握手超时后的清理竞态，保留真实锁竞争断言；本机整包 842 通过、2 跳过，修后 Linux CI 待新提交验证。
+- 临时 core Home 已验证实际 DSH 插件激活；临时 launchd 用例验证服务生命周期。真实 `web` 已完整备份并安装 `55090bb7` 的 22 个 bundle、30 个包，服务正在运行，配置和历史保留。旧 growth 行省略 `config` 的兼容修复已通过真实配置的只读编译预检；进一步预检发现 Automations 库存读取仍依赖 `/proc/locks`，因此尚未落盘 owner 授权。Mac 原生写锁探针已在临时数据库验证，产品接线与就绪验收仍待完成。
+- 最新 CI 修复的 `pnpm check` 退出 0，源码前后指纹一致，37 个包 dry-run pack 完成；无 `lib`/`node_modules` 的源码副本也通过冻结依赖安装和完整构建。修复移除 Linux 私有 authority runtime 对 Mac 执行包的运行时值导入，补充仅复制约定依赖的真实子进程回归，修正 broker 就绪握手与签名变异，并为真实源码生成用例设置局部有限超时。Delivery 的 WAL reader 清理竞态修复保留真实锁竞争断言。循环开发依赖的递归 emit 改为串行，避免声明读写重叠。定向检查及独立审查已通过，新提交的跨平台 CI 待核验。
 - CI 增强已单独保留为本地提交，推送受 GitHub OAuth `workflow` 权限限制。Linux/Docker/真实模型的条件跳过项不构成 live 运行证据。
 
 ## 下一验收
 
-提交并推送本次能力、核对 Linux CI；随后沿用用户选定的 `web` profile，备份并完成真实 owner 的原生安装及运行就绪。继续以普通任务验证新工具复用、纠正、撤回、重启与后续收益，保留现有模型合同和有限授权，不自动续期或重放 unknown。
+推送 CI 修复并核对跨平台结果；补齐 Automations 的 Mac 只读锁检查与 inode 校验后，继续现有 `web` 的 owner 安装。保留 `55090bb7` 冻结源码、cohort 和签名身份，分别记录安装器与运行包的提交。继续以普通任务验证新工具复用、纠正、撤回、重启与后续收益，保留现有模型合同和有限授权，不自动续期或重放 unknown。
 
 原始命令、退出码与运行结果位于忽略目录 `docs/evidence/macos-native-20261015/`。发布遵循[发布协议](releasing.md)。

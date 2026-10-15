@@ -142,8 +142,12 @@ test('revalidates a journaled permit after a candidate start crash but never bef
 
 test('rejects wrong signatures, transactions, Host receipts, replay and appended rows', async () => {
   const item = await fixture()
+  const signatureBytes = Buffer.from(item.input.permit.signature, 'base64url')
+  signatureBytes[0] = signatureBytes[0]! ^ 1
+  const changedSignature = signatureBytes.toString('base64url')
+  expect(changedSignature).not.toBe(item.input.permit.signature)
   await expect(verifyHostLegacySettingsImport({ ...item.input,
-    permit: { ...item.input.permit, signature: item.input.permit.signature.replace(/^./u, 'A') } })).rejects.toThrow()
+    permit: { ...item.input.permit, signature: changedSignature } })).rejects.toThrow()
   await expect(verifyHostLegacySettingsImport({ ...item.input,
     manifest: { ...item.input.manifest, id: 'another-transaction' } })).rejects.toThrow(/binding/)
   await expect(verifyHostLegacySettingsImport({ ...item.input,
