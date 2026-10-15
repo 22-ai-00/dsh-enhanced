@@ -3967,27 +3967,44 @@ describe('real native Delivery Agent runtime', () => {
     })
     const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') }); operator.handoffOwner(webPrincipal)
     let held = true; let heldAgent: Agent | undefined
+    const pendingSettlement = vi.fn((agent: Agent) => held && agent === heldAgent)
     fixture.ctx.provide('goals' as never, {
       // Deliberately non-armed: only the narrow settlement read proves retention.
       get: () => ({ phase: 'paused', activation: 'disarmed' }),
     } as never)
     fixture.ctx.provide('assistantGoals' as never, {
-      hasPendingExecutionSettlement: (agent: Agent) => held && agent === heldAgent,
+      hasPendingExecutionSettlement: pendingSettlement,
     } as never)
+    const expiry = new AbortController()
+    const nativeTimeout = AbortSignal.timeout
     let access: ReturnType<AssistantDeliveryService['bindNativeWebOwner']> | undefined
     const fiber = fixture.ctx.plugin({ inject: ['assistantDelivery', 'agents', 'sessions'], apply(ctx: Context) {
-      access = ctx.assistantDelivery.bindNativeWebOwner(ctx, { principal: webPrincipal, workspace: root, preset: 'primary', maxExecutionMs: outcome === 'expiry' ? 500 : 10_000 })
+      access = ctx.assistantDelivery.bindNativeWebOwner(ctx, { principal: webPrincipal, workspace: root, preset: 'primary', maxExecutionMs: 10_000 })
     } })
+    const timeout = outcome === 'expiry' ? vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms =>
+      ms === 10_000 ? expiry.signal : nativeTimeout(ms)) : undefined
     try {
       await fiber
       const handle = await access!.create({ sessionId: `native-pending-${outcome}` as SessionId, meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'mock', model: 'delivery-model' } })
       heldAgent = handle.agent
-      await new Promise(resolve => setTimeout(resolve, 250))
-      expect(fixture.ctx.agents.get(handle.agent.id)).toBe(handle.agent)
+      await vi.waitFor(() => expect(pendingSettlement.mock.calls.filter(([agent]) => agent === handle.agent).length).toBeGreaterThanOrEqual(2), { timeout: 5_000 })
+      expect(fixture.ctx.agents.get(handle.agent.id) === handle.agent).toBe(true)
+      const leased = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      try { expect(leased.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get(handle.agent.id)).toMatchObject({ state: 'dispatched' }) }
+      finally { leased.close() }
       if (outcome === 'release') held = false
       if (outcome === 'revocation') { const owner = operator.getPrincipal(webPrincipal)!; operator.revokePrincipal(owner.id, owner.version) }
-      await vi.waitFor(() => expect(fixture.ctx.agents.get(handle.agent.id)).toBeUndefined(), { timeout: 2_000 })
-    } finally { await fiber.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
+      if (outcome === 'expiry') {
+        // Control the exact timeout signal used by this native execution lease.
+        // A real 500ms deadline could elapse before the retention assertion on a busy CI host.
+        expect(timeout).toHaveBeenCalledWith(10_000)
+        expiry.abort(new DOMException('The operation timed out', 'TimeoutError'))
+      }
+      await vi.waitFor(() => expect(fixture.ctx.agents.get(handle.agent.id)).toBeUndefined(), { timeout: 5_000 })
+      const released = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      try { expect(released.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get(handle.agent.id)).toMatchObject({ state: 'released' }) }
+      finally { released.close() }
+    } finally { timeout?.mockRestore(); await fiber.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
   })
 
   test.each([{ withdraw: false, conflict: false }, { withdraw: true, conflict: false }, { withdraw: false, conflict: true }])('native Goal rounds refresh task memory after a checkpoint change (%j)', async ({ withdraw, conflict }) => {
