@@ -8,9 +8,9 @@ Linux `supervised` 新安装在最终模型、TraeX、Lark 配置和 doctor 完�
 
 ## 原生 macOS 学习
 
-macOS x64 / Apple Silicon 的 `supervised` 使用一个原生 Node Host，由当前登录用户的 launchd 管理。普通任务与认证反馈驱动持久记忆学习，以及 owner 命名空间内的新工具创建、独立行为验证和 Cordis 动态采用。候选构建和执行使用本机 Docker Desktop 的 Linux 容器；Host、聊天、模型与学习调度仍运行在 macOS。此路径没有既有插件源码替换、发布和双 Host 交接授权；已有 Linux 源码修复轨保持原合同。
+macOS x64 / Apple Silicon 的 `supervised` 使用一个原生 Node Host，由当前登录用户的 launchd 管理。普通任务与认证反馈驱动持久记忆学习，以及 owner 命名空间内的新工具创建、独立行为验证和 Cordis 动态采用。候选构建和行为执行使用私有本机 Node 与 Seatbelt，独立 runner 保留有限额度及 unknown 结果；Host、聊天、模型与学习调度也运行在 macOS。此路径没有既有插件源码替换、发布和双 Host 交接授权；已有 Linux 源码修复轨保持原合同。
 
-使用已安装的独立 npm DSH CLI，并确保它是 `PATH` 中选中的 `dsh`。先确认 `/usr/bin/git --version` 可运行（Apple Command Line Tools），再启动 Docker Desktop；当前构建合同要求 Docker Server `29.4.1` 和与本机匹配的 Linux amd64/arm64 daemon。使用当前用户的 [`~/.docker/run/docker.sock`](https://docs.docker.com/desktop/setup/install/mac-permission-requirements/)，不使用系统级 socket 软链接。安装器解析本机 Docker 客户端，准备与本机架构匹配的不可变构建/验证镜像；不连接远端 `DOCKER_HOST`，不读取 Docker 登录凭据。构建与执行绑定本地 socket，资源消耗、隔离参数、unknown 不重放与独立验证边界仍有效。Docker 镜像首次准备需要网络和足够磁盘，之后候选检查离线运行。
+使用已安装的独立 npm DSH CLI，并确保它是 `PATH` 中选中的 `dsh`。先确认 `/usr/bin/git --version` 可运行（Apple Command Line Tools）。安装器只复制冻结来源提交中的根清单、工作区包清单与锁文件，以固定摘要验证官方 Node 24.22.0 和 pnpm 11.7.0，使用私有无凭据环境执行 `--frozen-lockfile --ignore-scripts` 安装。此准备阶段可联网下载锁定依赖；候选构建和行为执行离线运行。私有运行时的节点、依赖树、来源提交与锁文件由回执固定，复跑核对全部内容，缺失或漂移时停止而不重建已授权的资产。macOS `--docker-path` 明确拒绝；无需 Docker Desktop 或 Docker socket。
 
 本地安装器的默认 `auto` 场景也会选择 supervised；已安装相同源码版本及所需包后，可重试：
 
@@ -23,7 +23,7 @@ macOS x64 / Apple Silicon 的 `supervised` 使用一个原生 Node Host，由当
 
 从此前报出 `Linux x64 is required` 的官方 `0.1.49` 安装升级时，macOS 会识别其未使用的源码准备：仅当旧 receipt、干净工作树、初始提交与全部 Git 引用均匹配，且没有授权、构建或运行资源时，才把整个旧目录移入 `rsi-source-archives/<profile>/<UUID>`，再准备请求的新版本或本地来源。已有修改、维护提交或使用迹象会停止迁移，保留原目录；归档后的准备失败会报告归档路径，不删除旧历史。新目录建立后若进程崩溃，仍须人工核对不完整目录与归档，不会自动覆盖。
 
-`ready` 证明部署就绪，长期普通任务收益仍按 [RSI 验收合同](../../../docs/rsi-acceptance.md) 验证。Linux 上的模拟平台测试不能替代真实 Mac/Docker Desktop 验收。
+`ready` 证明部署就绪，长期普通任务收益仍按 [RSI 验收合同](../../../docs/rsi-acceptance.md) 验证。Linux 上的模拟平台测试不能替代真实 Mac 验收。
 
 ## 1. 准备源码、构建环境与两个 profile
 
@@ -56,9 +56,9 @@ Linux 上的新安装还会自动准备授权工具与本地发布资源，无�
 
 新生成的创建采用授权显式包含 `creationCapabilities.retention.maximumLifetimeMs: 2592000000`（最多 30 天）。首次采用仍要求原创建作业和计划有效期内的新鲜独立证书；采用后可以跨单个作业、计划及证书的截止，在原使用授权和 runner 截止前复用精确版本。默认安装的创建与使用授权仍共用原年度截止，此模式不跨该授权期限。重启保留原采用时间、截止和调用额度，反馈纠正、撤回或 owner 变化仍阻断使用。旧 manifest 缺少此字段时保持证书窗口内的原语义；重跑安装不补签，不向已有账本自动增加此授权。该期限不证明真实任务收益或版本替换回退已经验收。
 
-安装器从已批准的源码构建镜像准备独立行为镜像，资源保存在 `$DSH_HOME/rsi-creation-builds/<profile>`。临时上下文只含固定受信任 worker/launcher、Dockerfile、清单和锁文件，不复制候选、owner 凭据或期望行为。首次镜像准备可能访问 Debian 包源；运行候选时禁用网络。重复安装核验原始回执、输入摘要、Docker 可执行文件和实际不可变镜像 ID；镜像缺失或输入漂移不会触发重建。验收与调用使用独立私有 runner 账本，额度和 unknown 不因重启重置。该安装配置本身不证明普通任务收益或完整自迭代闭环。
+Linux 安装器从已批准的源码构建镜像准备独立行为镜像，资源保存在 `$DSH_HOME/rsi-creation-builds/<profile>`。临时上下文只含固定受信任 worker/launcher、Dockerfile、清单和锁文件，不复制候选、owner 凭据或期望行为。首次镜像准备可能访问 Debian 包源；运行候选时禁用网络。重复安装核验原始回执、输入摘要、Docker 可执行文件和实际不可变镜像 ID；镜像缺失或输入漂移不会触发重建。macOS 行为 runner 复用上文私有原生运行时。两种平台的验收与调用均使用独立私有 runner 账本，额度和 unknown 不因重启重置。该安装配置本身不证明普通任务收益或完整自迭代闭环。
 
-新安装还会尝试准备离线构建镜像。当前完整仓库检查沿用已验证的 Linux x64、Docker Server `29.4.1/linux/amd64` 与嵌套 sandbox 配置；不满足这些前置条件时，安装器保留源码并报告 `buildUnavailable`，普通 Agent 安装继续，但不声称源码修复构建已经可用。实际镜像构建失败或已有资源不一致会停止安装。
+Linux 新安装还会尝试准备离线构建镜像。当前完整仓库检查沿用已验证的 Linux x64、Docker Server `29.4.1/linux/amd64` 与嵌套 sandbox 配置；不满足这些前置条件时，安装器保留源码并报告 `buildUnavailable`，普通 Agent 安装继续，但不声称源码修复构建已经可用。macOS 原生准备失败会停止安装，不由 `--optional-build` 掩盖；已有资源不一致也会停止安装。
 
 支持的环境可单独运行严格构建准备：
 
@@ -67,9 +67,9 @@ Linux 上的新安装还会自动准备授权工具与本地发布资源，无�
   --prepare-build --profile web --dsh-home "$HOME/.dsh"
 ```
 
-输出中的 `sourceBuild` 可用于 Control Plane manifest。安装器还自动从同一不可变镜像导出原生 Node、pnpm、离线 store 和供应链策略缓存，输出 `releaseBuild` 可直接用于本地发布 adapter 的 `build` 配置；无需手填工具链路径和摘要。资源保存在 `$DSH_HOME/rsi-release-builds/<profile>`，回执固定所有文件内容与模式。导出只创建未启动的容器，复制固定路径后删除容器，不执行其中的源码。发布仍使用本机 `/usr/bin/bwrap` 和 `/usr/bin/tar`；`--optional-build` 在缺少这些前置条件时报告 `releaseBuildUnavailable`，保留已准备的源码验证镜像。实际复制、工具链版本校验或已有回执漂移失败仍会停止安装。配置使用不可变镜像 ID，并将私有回执与 seccomp 保存到 `$DSH_HOME/rsi-builds/<profile>`。重新执行会核对来源、构建输入与本地镜像；不会静默换镜像或重新构建丢失的已登记镜像。Docker 构建脚本、Dockerfile 与 seccomp 必须匹配安装包内登记的摘要，只把 lock、workspace 配置及包清单放入构建上下文；不复制源码、主机包缓存或凭据。首次镜像准备需要网络，随后候选构建离线运行。
+Linux 输出中的 `sourceBuild` 可用于 Control Plane manifest。Linux 安装器还自动从同一不可变镜像导出原生 Node、pnpm、离线 store 和供应链策略缓存，输出 `releaseBuild` 可直接用于本地发布 adapter 的 `build` 配置；无需手填工具链路径和摘要。资源保存在 `$DSH_HOME/rsi-release-builds/<profile>`，回执固定所有文件内容与模式。导出只创建未启动的容器，复制固定路径后删除容器，不执行其中的源码。发布仍使用本机 `/usr/bin/bwrap` 和 `/usr/bin/tar`；`--optional-build` 在缺少这些前置条件时报告 `releaseBuildUnavailable`，保留已准备的源码验证镜像。实际复制、工具链版本校验或已有回执漂移失败仍会停止安装。配置使用不可变镜像 ID，并将私有回执与 seccomp 保存到 `$DSH_HOME/rsi-builds/<profile>`。重新执行会核对来源、构建输入与本地镜像；不会静默换镜像或重新构建丢失的已登记镜像。Docker 构建脚本、Dockerfile 与 seccomp 必须匹配安装包内登记的摘要，只把 lock、workspace 配置及包清单放入构建上下文；不复制源码、主机包缓存或凭据。首次镜像准备需要网络，随后候选构建离线运行。macOS 的 `--prepare-build` 仅输出不含 owner 授权的 runtime/sourceBuild 基础回执；`--install-owner` 编译时才加入绑定安装、owner、期限与额度的 sourceBuild 配置。
 
-自动配置使用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID 和 4 GiB 工作区上限；macOS 原生 portable 构建使用 4 GiB 临时目录，既有 Linux repository 构建保持 2 GiB。宿主需提供相应资源。嵌套 sandbox 的系统路径与 seccomp 边界见[构建镜像指南](../../../scripts/isolation/README.md#nested-sandbox-profile)。准备资源只完成安装前置步骤；`--install-owner` 会核对已安装 Host、owner 和最终配置后再应用。
+Linux 自动配置使用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID 和 4 GiB 工作区上限；Linux repository 构建保持 2 GiB 临时目录。宿主需提供相应资源。嵌套 sandbox 的系统路径与 seccomp 边界见[构建镜像指南](../../../scripts/isolation/README.md#nested-sandbox-profile)。macOS 原生构建按固定 60 秒单次、1 MiB 输出、1000 次及 24 小时累计运行限额授予，独立行为 runner 保留各自原有额度。准备资源只完成安装前置步骤；`--install-owner` 会核对已安装 Host、owner 和最终配置后再应用。
 
 目标先完成 [Lark 配对](setup.md)与 [supervised 安装](../../../scripts/install/README.md)，已有唯一 active owner DM。无需先激活固定 Recovery runbook；缺失的 owner route 在成对配置事务内生成，既有唯一精确路由（包括 `supervised-growth-owner`）沿用原 ID 和 minimum generation。路由冲突或重复会拒绝，不覆盖其他授权。新安装自动补齐目标依赖；旧安装若缺依赖，为目标补装同一构建的 Growth Driver、Goals、Skills、Verifier、Memory Learning 与 Control Plane。Memory 由 Personal Assistant 内嵌提供，不再添加独立 Memory bundle。开发版应使用本地构建的包；仅有相同版本号不能证明含有这些新增 API。
 

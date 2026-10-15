@@ -14,6 +14,8 @@ export type { SourceReviewConfig, SourceReviewInput, SourceReviewRequest, Source
 export { validateMemoryReviewConfig } from './memory-review.js'
 export type { MemoryReviewConfig, MemoryReviewReceipt, MemoryReviewAvailability } from './memory-review.js'
 export type { PluginBehaviorOperation, PluginBehaviorObservation, PluginBehaviorRunnerInput } from './plugin-behavior-runner.js'
+export { validatePluginBehaviorRunnerConfig, validatePluginBehaviorDeploymentConfig, NATIVE_BEHAVIOR_BOUNDARY } from './plugin-behavior-config.js'
+export type { PluginBehaviorRunnerConfig, PluginBehaviorDeploymentConfig } from './plugin-behavior-config.js'
 export { compileCreationReviewConfig, validateCreationReviewConfig } from './creation-review.js'
 export type { CreationReviewConfig, CreationReviewAuthorityInspection } from './creation-review.js'
 export { compileRevisionReviewConfig, validateRevisionReviewConfig } from './revision-review.js'

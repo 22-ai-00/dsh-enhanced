@@ -3344,6 +3344,11 @@ dsh_enhanced_install() {
       return $?
     fi
     if [[ -n "${DSH_ENHANCED_HOST_UPDATE_PLAN:-}" ]]; then
+      local host_update_platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}"
+      if [[ "$host_update_platform" == 'Darwin' || "$host_update_platform" == 'darwin' ]]; then
+        dsh_enhanced_fail 2 'macOS 尚不支持受管 Host 跨版本更新；未修改原 Home 或插件。请保留当前 Host，或在新的 DSH_HOME 中安装并验证目标版本。'
+        return $?
+      fi
       for lifecycle_asset in host-lifecycle.mjs host-profile-update.mjs host-rsi-update.mjs; do
         if [[ ! -f "$lifecycle_directory/$lifecycle_asset" || -L "$lifecycle_directory/$lifecycle_asset" ]]; then
           dsh_enhanced_fail 1 "缺少可信的 Host 资产：$lifecycle_directory/$lifecycle_asset"
@@ -4058,7 +4063,11 @@ NODE
   fi
   if [[ "$dry_run" == '1' ]]; then
     if [[ "$require_service" == '1' ]]; then
-      printf 'doctor：将验证 profile、飞书 channel、常驻服务与 Linux logout persistence。\n'
+      if [[ "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" == 'Linux' ]]; then
+        printf 'doctor：将验证 profile、飞书 channel、常驻服务与 Linux logout persistence。\n'
+      else
+        printf 'doctor：将验证 profile、飞书 channel 与当前登录会话的常驻服务。\n'
+      fi
     else
       printf 'doctor：将验证 profile 能真实激活；飞书服务可用 doctor.sh --require-service 复查。\n'
     fi

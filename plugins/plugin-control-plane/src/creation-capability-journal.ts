@@ -2,7 +2,9 @@ import { createHash, createPrivateKey, createPublicKey, sign, verify, type KeyOb
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { canonicalGrowthJson, validatePluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson, validatePluginCreationVerificationCertificate,
+  type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { nativeMacRuntimeDigest, validateNativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 import { validateCreationCapabilitySource, type CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import type { CreationCapabilityCall, CreationCapabilityCallEvidence, CreationCapabilityConfig,
   CreationCapabilityForegroundCallWitness, CreationCapabilityJournalPort,
@@ -110,6 +112,12 @@ function receiptBody(receipt: CreationCapabilityReceipt): Omit<CreationCapabilit
   const { signature: _signature, ...body } = receipt
   return body
 }
+function compatibleExecution(certificate: PluginCreationVerificationCertificate, config: CreationCapabilityConfig): boolean {
+  if (certificate.protocol === 'assistant-growth/creation-verification/v1') return !('backend' in config.runner)
+  return 'backend' in config.runner && config.runner.backend === 'macos-seatbelt'
+    && certificate.execution?.boundary === 'macos-seatbelt-single-process-v1'
+    && certificate.execution.runtimeDigest === nativeMacRuntimeDigest(config.runner.runtime)
+}
 function receiptShape(value: unknown): CreationCapabilityReceipt {
   const v = obj(value, ['protocol','authorityId','authorityDigest','keyId','planId','planDigest','verificationDigest',
     'artifactSha256','artifactBytes','source','schemaDigest','toolsDigest','expiresAt','adoptedAt','signature'])
@@ -150,16 +158,21 @@ export function validateCreationCapabilityConfig(value: unknown): asserts value 
     const retention = obj(v.retention, ['maximumLifetimeMs'])
     int(retention.maximumLifetimeMs, 1, 30 * 86_400_000)
   }
-  const runner = obj(v.runner, ['stateRoot','image','dockerPath','expiresAt','maxRuns','maxTotalDurationMs','maxDurationMs','maxOutputBytes',
-    ...(v.runner && typeof v.runner === 'object' && Object.hasOwn(v.runner, 'socketPath') ? ['socketPath'] : [])])
+  const native = !!v.runner && typeof v.runner === 'object' && (v.runner as { backend?: unknown }).backend === 'macos-seatbelt'
+  const runner = obj(v.runner, ['stateRoot',...(native ? ['backend','runtime'] : ['image','dockerPath']),
+    'expiresAt','maxRuns','maxTotalDurationMs','maxDurationMs','maxOutputBytes',
+    ...(!native && v.runner && typeof v.runner === 'object' && Object.hasOwn(v.runner, 'socketPath') ? ['socketPath'] : [])])
   const root = path(runner.stateRoot)
   privateStat(root, 'directory')
-  str(runner.image, /^(?:[a-z0-9][a-z0-9._:/-]*@)?sha256:[a-f0-9]{64}$/u, 512)
-  const dockerPath = path(runner.dockerPath)
-  if (dockerPath === keyPath) fail()
-  if (Object.hasOwn(runner, 'socketPath')) {
-    const socketPath = path(runner.socketPath)
-    if (/[\p{Cc},]/u.test(socketPath) || socketPath.includes('://')) fail()
+  if (native) validateNativeMacRuntime(runner.runtime)
+  else {
+    str(runner.image, /^(?:[a-z0-9][a-z0-9._:/-]*@)?sha256:[a-f0-9]{64}$/u, 512)
+    const dockerPath = path(runner.dockerPath)
+    if (dockerPath === keyPath) fail()
+    if (Object.hasOwn(runner, 'socketPath')) {
+      const socketPath = path(runner.socketPath)
+      if (/[\p{Cc},]/u.test(socketPath) || socketPath.includes('://')) fail()
+    }
   }
   int(runner.expiresAt, 1, 8_640_000_000_000_000); int(runner.maxRuns, 1, 1024)
   int(runner.maxTotalDurationMs, 1, 86_400_000); int(runner.maxDurationMs, 1, 300_000)
@@ -285,6 +298,7 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
       || Buffer.byteLength(row.certificate_json) > 65536 || sha(row.certificate_json) !== row.certificate_digest) fail()
     const certificate = JSON.parse(row.certificate_json) as CreationCapabilityRecord['certificate']
     validatePluginCreationVerificationCertificate(certificate)
+    if (!compatibleExecution(certificate, this.config)) fail()
     if (json(certificate) !== row.certificate_json || certificate.plan.id !== row.plan_id
       || certificate.plan.artifactSha256 !== row.artifact_sha || certificate.plan.artifactBytes !== row.artifact.length) fail()
     const record: CreationCapabilityRecord = { planId: row.plan_id, status: row.status, certificate, artifact: Buffer.from(row.artifact) }
@@ -378,6 +392,7 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
     validatePluginCreationVerificationCertificate(input.certificate)
     if (!Buffer.isBuffer(input.artifact) || input.artifact.length < 1 || input.artifact.length > 524288) fail()
     const certificate = input.certificate, now = Date.now(), bytes = Buffer.from(input.artifact)
+    if (!compatibleExecution(certificate, this.config)) fail()
     if (certificate.plan.artifactSha256 !== sha(bytes) || certificate.plan.artifactBytes !== bytes.length
       || !certificate.plan.name.startsWith(this.config.namePrefix) || certificate.authority.keyId === this.config.keyId
       || certificate.authority.authorityId === this.config.authorityId

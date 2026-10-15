@@ -25,8 +25,8 @@ describe('IsolationLedger', () => {
     expect((database.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode).toBe('wal')
     expect((statSync(file).mode & 0o777)).toBe(0o600)
     expect((statSync(join(file, '..')).mode & 0o777)).toBe(0o700)
-    expect((database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('6')
-    expect((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(6)
+    expect((database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('7')
+    expect((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(7)
     expect((database.prepare('PRAGMA auto_vacuum').get() as { auto_vacuum: number }).auto_vacuum).toBe(2)
     database.close()
   })
@@ -144,8 +144,8 @@ describe('IsolationLedger', () => {
     expect(error(() => ledger.prepare({ ...input('new'), resourceReservation: reservation() })).code).toBe('unauthorized')
     ledger.close()
     const reopened = new DatabaseSync(file)
-    expect((reopened.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(6)
-    expect((reopened.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('6')
+    expect((reopened.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(7)
+    expect((reopened.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('7')
     expect((reopened.prepare("SELECT COUNT(*) AS count FROM isolation_jobs WHERE id='legacy'").get() as { count: number }).count).toBe(1)
     reopened.close()
   })
@@ -182,7 +182,9 @@ describe('IsolationLedger', () => {
     const legacy = ledger.prepare({ ...input('v2'), resourceReservation: reservation() }).job
     ledger.close()
     const db = new DatabaseSync(file)
-    db.exec("DROP INDEX isolation_artifact_contract; ALTER TABLE isolation_jobs DROP COLUMN artifact_binding_json; ALTER TABLE isolation_jobs DROP COLUMN creation_witness_json; ALTER TABLE isolation_jobs DROP COLUMN dispatch_attempted; ALTER TABLE isolation_jobs DROP COLUMN reserved_storage_bytes; PRAGMA user_version=2; UPDATE schema_meta SET value='2' WHERE key='schema-version';")
+    db.exec(`ALTER TABLE isolation_jobs RENAME TO isolation_jobs_v7;
+      CREATE TABLE isolation_jobs AS SELECT id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,status,version,created_at,updated_at,result_json FROM isolation_jobs_v7;
+      DROP TABLE isolation_jobs_v7; PRAGMA user_version=2; UPDATE schema_meta SET value='2' WHERE key='schema-version';`)
     db.close()
     ledger = new IsolationLedger(file, { now: clock })
     try {
@@ -199,11 +201,33 @@ describe('IsolationLedger', () => {
     } finally { ledger.close() }
   })
 
+  it('migrates a v6 Linux job without changing its Docker identity or budget', () => {
+    const file = path(); let ledger = new IsolationLedger(file, { now: clock }); ledger.syncGrants([grant()])
+    const original = ledger.prepare({ ...input('v6'), resourceReservation: reservation() }).job
+    ledger.close()
+    const database = new DatabaseSync(file)
+    database.exec(`ALTER TABLE isolation_jobs RENAME TO isolation_jobs_v7;
+      CREATE TABLE isolation_jobs AS SELECT id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,status,version,created_at,updated_at,result_json,dispatch_attempted,creation_witness_json,artifact_binding_json FROM isolation_jobs_v7;
+      DROP TABLE isolation_jobs_v7; PRAGMA user_version=6; UPDATE schema_meta SET value='6' WHERE key='schema-version';`)
+    database.close()
+    ledger = new IsolationLedger(file, { now: clock })
+    try {
+      expect(ledger.get(original.id)).toMatchObject({ backend: 'docker', containerName: original.containerName,
+        reservedMemoryMiB: original.reservedMemoryMiB, reservedWorkspaceInodes: original.reservedWorkspaceInodes,
+        requestDigest: original.requestDigest, status: 'prepared' })
+      const db = new DatabaseSync(file)
+      try { expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(7) }
+      finally { db.close() }
+    } finally { ledger.close() }
+  })
+
   it('migrates v5 binding storage as null and never lets a same-key replay attach a binding', () => {
     const file = path(); let ledger = new IsolationLedger(file, { now: clock }); ledger.syncGrants([grant()])
     const legacy = ledger.prepare(input('legacy-v5')).job; ledger.close()
     const database = new DatabaseSync(file)
-    database.exec("DROP INDEX isolation_artifact_contract; ALTER TABLE isolation_jobs DROP COLUMN artifact_binding_json; PRAGMA user_version=5; UPDATE schema_meta SET value='5' WHERE key='schema-version';")
+    database.exec(`ALTER TABLE isolation_jobs RENAME TO isolation_jobs_v7;
+      CREATE TABLE isolation_jobs AS SELECT id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,status,version,created_at,updated_at,result_json,dispatch_attempted,creation_witness_json FROM isolation_jobs_v7;
+      DROP TABLE isolation_jobs_v7; PRAGMA user_version=5; UPDATE schema_meta SET value='5' WHERE key='schema-version';`)
     database.close()
     ledger = new IsolationLedger(file, { now: clock })
     try {

@@ -90,7 +90,11 @@ export interface IsolationJob {
   sessionId: string
   idempotencyKey: string
   requestDigest: string
+  /** Explicit backend identity; legacy v6 rows migrate to docker. */
+  backend: 'docker' | 'macos-seatbelt'
   containerName: string
+  nativeResourceId?: string
+  nativeNonce?: string
   deadline: number
   reservedDurationMs: number
   /** Conservative worker + workspace + keeper reservation; zero denotes legacy work. */

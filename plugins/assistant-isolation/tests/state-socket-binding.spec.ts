@@ -31,6 +31,15 @@ test('legacy Linux state permits only its original default socket', async () => 
   bindIsolationStateSocket(root, '/var/run/docker.sock')
 })
 
+test('Linux Docker binding refuses a native-marked state root', async () => {
+  Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-native-binding-'))); roots.push(root)
+  await writeFile(join(root, 'native-backend'), 'macos-seatbelt-v1\n', { mode: 0o600 })
+  await writeFile(join(root, 'ledger.sqlite'), '')
+  expect(stateSocketBindingMatches(root, '/var/run/docker.sock')).toBe(false)
+  expect(() => bindIsolationStateSocket(root, '/var/run/docker.sock')).toThrow(/native-bound/)
+})
+
 test('new Mac state binds only the current user Docker socket', async () => {
   Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true })
   const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-mac-socket-binding-'))); roots.push(root)

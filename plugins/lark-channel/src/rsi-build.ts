@@ -8,7 +8,7 @@ import { isDeepStrictEqual } from 'node:util'
 import type { Config as ControlPlaneConfig } from '@dsh-enhanced/plugin-control-plane'
 import { readRsiSourceWorkspace, type RsiSourceWorkspace } from './rsi-source.js'
 
-type SourceBuild = NonNullable<ControlPlaneConfig['sourceBuild']>
+type SourceBuild = Extract<NonNullable<ControlPlaneConfig['sourceBuild']>, { image: string }>
 const COMMIT = /^[a-f0-9]{40}$/u
 const IMAGE = /^sha256:[a-f0-9]{64}$/u
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u

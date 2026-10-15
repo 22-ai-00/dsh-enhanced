@@ -170,6 +170,7 @@ export function validateSourceApprovalAuthorityConfig(value: unknown): asserts v
 
 export function sourceAuthorityValidatePrepared(plan: PluginSourcePlan, now: number, status: PluginSourcePlan['status'] = 'pending-approval'): void {
   if (plan.status !== status || plan.mode !== 'modify' || plan.sourceCheck === undefined || plan.preparedEvidence === undefined
+    || plan.preparedEvidence.schemaVersion !== 1
     || now > plan.expiresAt || plan.preparedEvidence.preparedAt > plan.sourceCheck.checkedAt || plan.sourceCheck.checkedAt > plan.createdAt
     || plan.preparedEvidence.preparedAt > now || plan.preparedEvidence.environment.npmConfigIgnoreScripts !== true
     || plan.preparedEvidence.environment.frozenLockfile !== true || plan.preparedEvidence.environment.offline !== true

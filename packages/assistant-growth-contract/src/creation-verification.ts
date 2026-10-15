@@ -13,7 +13,7 @@ export interface CreationAcceptanceAuthorityRef {
 
 /** Independent checks of a task-derived contract, never a task-success rating. */
 export interface PluginCreationVerificationCertificate {
-  protocol: 'assistant-growth/creation-verification/v1'
+  protocol: 'assistant-growth/creation-verification/v1' | 'assistant-growth/creation-verification/v2'
   verificationId: string
   authority: CreationAcceptanceAuthorityRef
   plan: {
@@ -38,7 +38,18 @@ export interface PluginCreationVerificationCertificate {
   verifiedAt: number
   expiresAt: number
   signature: string
+  /** Required exactly for v2; rejected for v1 by the strict validator. */
+  execution?: {
+    boundary: 'macos-seatbelt-single-process-v1'
+    runtimeDigest: string
+    buildEvidenceDigest: string
+  }
 }
+
+export type PluginCreationVerificationCertificateV1 = PluginCreationVerificationCertificate &
+  { protocol: 'assistant-growth/creation-verification/v1'; execution?: never }
+export type PluginCreationVerificationCertificateV2 = PluginCreationVerificationCertificate &
+  { protocol: 'assistant-growth/creation-verification/v2'; execution: NonNullable<PluginCreationVerificationCertificate['execution']> }
 
 /** Host-only request; the producer rereads every source and artifact binding. */
 export interface PluginCreationVerificationRequest {
@@ -82,9 +93,17 @@ export function validateCreationAcceptanceAuthorityRef(value: unknown): asserts 
 }
 
 export function validatePluginCreationVerificationCertificate(value: unknown): asserts value is PluginCreationVerificationCertificate {
+  const native = !!value && typeof value === 'object'
+    && (value as { protocol?: unknown }).protocol === 'assistant-growth/creation-verification/v2'
   const item = record(value, ['protocol', 'verificationId', 'authority', 'plan', 'source', 'contractDigest', 'schemaDigest',
-    'environment', 'model', 'budget', 'sessions', 'observations', 'reviewDigest', 'verifiedAt', 'expiresAt', 'signature'], 'certificate')
-  if (item.protocol !== 'assistant-growth/creation-verification/v1') fail('protocol')
+    'environment', 'model', 'budget', 'sessions', 'observations', 'reviewDigest', 'verifiedAt', 'expiresAt', 'signature',
+    ...(native ? ['execution'] : [])], 'certificate')
+  if (item.protocol !== (native ? 'assistant-growth/creation-verification/v2' : 'assistant-growth/creation-verification/v1')) fail('protocol')
+  if (native) {
+    const execution = record(item.execution, ['boundary', 'runtimeDigest', 'buildEvidenceDigest'], 'execution')
+    if (execution.boundary !== 'macos-seatbelt-single-process-v1') fail('execution boundary')
+    sha(execution.runtimeDigest, 'runtimeDigest'); sha(execution.buildEvidenceDigest, 'buildEvidenceDigest')
+  }
   id(item.verificationId, 'verificationId'); validateCreationAcceptanceAuthorityRef(item.authority)
   const plan = record(item.plan, ['id', 'digest', 'name', 'sourceTreeDigest', 'sourcePatchDigest', 'artifactSha256',
     'artifactBytes', 'generatorDigest'], 'plan')

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { approvalSigningPayload, Ed25519ApprovalAuthority } from '../src/approval.ts'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST } from '../src/store.ts'
-import type { ApprovalReceipt, PluginSourcePlan, SourcePreparedEvidence } from '../src/types.ts'
+import type { ApprovalReceipt, DockerSourcePreparedEvidence, PluginSourcePlan } from '../src/types.ts'
 
 // 工程层、非真实供应商证据：本文件的 prepared evidence 全是字面量 fixture，
 // 只验证 store 对 modify source plan 的状态机与校验，不代表任何真实构建。
@@ -16,7 +16,7 @@ afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { rec
 const hex = (character: string) => character.repeat(64)
 const TTL_MS = 60_000
 
-function validEvidence(overrides?: Partial<SourcePreparedEvidence>): SourcePreparedEvidence {
+function validEvidence(overrides?: Partial<DockerSourcePreparedEvidence>): DockerSourcePreparedEvidence {
   return {
     schemaVersion: 1, kind: 'dsh-source-prepared-evidence',
     environment: { npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true, nodeVersion: 'v22.0.0', pnpmVersion: '9.0.0' },
@@ -79,7 +79,8 @@ describe('modify source plans (engineering-layer fixtures, not vendor evidence)'
     expect(plan.scope).toEqual(['plugins/health-helper'])
     expect(plan.sourceCheck).toEqual({ treeDigest: hex('1'), patchDigest: hex('2'), checkedAt: 1_800_000_000_500 })
     expect(plan.preparedEvidence?.kind).toBe('dsh-source-prepared-evidence')
-    expect(plan.preparedEvidence?.environment.npmConfigIgnoreScripts).toBe(true)
+    if (plan.preparedEvidence?.schemaVersion !== 1) throw new Error('expected legacy build evidence')
+    expect(plan.preparedEvidence.environment.npmConfigIgnoreScripts).toBe(true)
     expect(plan.preparedEvidence?.pack.sha256).toBe(hex('d'))
     expect(target.store.getGap(gap.id).status).toBe('matched')
 
@@ -98,7 +99,7 @@ describe('modify source plans (engineering-layer fixtures, not vendor evidence)'
     ['a free-form generator digest instead of the modify constant', 2, (gapId, suffix) =>
       ({ ...modifyInput(gapId, suffix), generatorDigest: hex('9') })],
     ['prepared evidence with an unknown top-level key', 3, (gapId, suffix) =>
-      modifyInput(gapId, suffix, { ...validEvidence(), unexpected: true } as SourcePreparedEvidence)],
+      modifyInput(gapId, suffix, { ...validEvidence(), unexpected: true } as DockerSourcePreparedEvidence)],
     ['a non-hex pack sha256', 4, (gapId, suffix) =>
       modifyInput(gapId, suffix, validEvidence({ pack: { ...validEvidence().pack, sha256: 'z'.repeat(64) } }))],
     ['a command that exited non-zero', 5, (gapId, suffix) =>

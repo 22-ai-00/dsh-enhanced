@@ -26,7 +26,9 @@ metadata access for Node ESM path resolution. macOS Node startup additionally
 requires directory-data access to literal `/`, exposing only the root directory's
 top-level names; unapproved descendants and other ancestors remain unreadable.
 Runtime roots are bound to their device/inode; the executable is checked against
-its approved SHA-256 before dispatch. The child receives a clean environment,
+its approved SHA-256 before dispatch. A trusted caller can set
+`sourceType: 'module'` for fixed ESM source; the primitive's default remains
+CommonJS. The child receives a clean environment,
 bounded input/output and a finite deadline. Cancellation and timeout kill the
 process; only a confirmed process close reports `quiescent: true`.
 
@@ -43,6 +45,25 @@ memory or CPU quota. Do not infer Docker resource limits or a complete native
 RSI installation from a successful invocation. Native tests run on macOS and
 use only temporary canaries, an ephemeral loopback listener and disposable
 processes; they require no Docker installation.
+
+The Host-only `NativeMacVerifierRunner` adds a durable finite grant to this
+single-process primitive. Its `backend: 'macos-seatbelt'` configuration pins an
+approved `NativeMacRuntime` (Node SHA-256, root device/inode and deterministic
+tree hashes, module directory, package versions) and a fixed trusted Node
+source. `run(key, files, stdin, signal)` stages bounded text files in a fresh
+read-only worker workspace. `inspectQuiescence(key)` returns `quiescent` only
+when the private supervisor close receipt matches the ledger job, input digest
+and nonce. The detached supervisor kills its candidate when the Host IPC
+disconnects; an absent or invalid receipt leaves the job `unknown`, occupies
+active capacity and cannot be replayed. A new Host must wait for the old
+controller lease to expire before recovering it. The private native state
+root is bound separately from Docker state and is never a runtime read root.
+Runtime tree hashing rejects special files, hard links, external symbolic
+links and group/world-writable contents; internal pnpm links are allowed only
+when their resolved targets remain inside the same root. Admission bounds runs,
+cumulative duration, concurrent jobs and observed storage growth. Seatbelt
+does not provide hard memory, CPU or disk quotas for this runner. It is a
+trusted verifier API, not the public `isolation_run` tool.
 
 ## Installation
 

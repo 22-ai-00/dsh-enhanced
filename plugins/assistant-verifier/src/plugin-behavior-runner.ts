@@ -1,5 +1,12 @@
 import { createHash } from 'node:crypto'
-import { IsolatedVerifierRunner, type IsolatedVerifierRunnerConfig } from '@dsh-enhanced/assistant-isolation'
+import { IsolatedVerifierRunner, NativeMacVerifierRunner, type IsolatedVerifierRunnerConfig,
+  type NativeMacVerifierRunnerConfig } from '@dsh-enhanced/assistant-isolation'
+import { behaviorNativeRuntimeDigest, NATIVE_BEHAVIOR_BOUNDARY, validatePluginBehaviorRunnerConfig,
+  type PluginBehaviorRunnerConfig } from './plugin-behavior-config.js'
+export { NATIVE_BEHAVIOR_BOUNDARY, validatePluginBehaviorRunnerConfig, validatePluginBehaviorDeploymentConfig } from './plugin-behavior-config.js'
+export type { PluginBehaviorRunnerConfig, PluginBehaviorDeploymentConfig } from './plugin-behavior-config.js'
+import { nativeBehaviorFiles } from './native-behavior-artifact.js'
+import { NATIVE_BEHAVIOR_SOURCE } from './native-behavior-worker.js'
 
 const MAX_PACK_BYTES = 512 * 1024
 const MAX_OPERATION_BYTES = 64 * 1024
@@ -9,7 +16,6 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$/u
 const SAFE_TOOL = /^[a-z][a-z0-9_-]{0,95}$/u
 const COMMAND = 'exec /usr/bin/env LD_PRELOAD=/opt/dsh-plugin-verifier/parent-protect.so /usr/local/bin/node --disable-sigusr1 /opt/dsh-plugin-verifier/worker.mjs'
 const BOUNDARY = 'process-seccomp-v1'
-
 export type PluginBehaviorOperation =
   | { readonly kind: 'discover' }
   | { readonly kind: 'invoke'; readonly schemaDigest: string; readonly calls: readonly {
@@ -21,6 +27,8 @@ export interface PluginBehaviorObservation {
   readonly quiescent: boolean
   readonly jobId?: string
   readonly artifactSha256: string
+  readonly boundary?: typeof BOUNDARY | typeof NATIVE_BEHAVIOR_BOUNDARY
+  readonly runtimeDigest?: string
   readonly reason?: string
   readonly environment?: Readonly<{ node: string; cordis: string; tools: string; systemPrompt: string }>
   readonly schemaDigest?: string
@@ -107,10 +115,24 @@ function validObservation(value: unknown, operation: PluginBehaviorOperation, sh
 
 /** Host-only behavior observation. The candidate and worker receive no oracle or promotion authority. */
 export class PluginBehaviorRunner {
-  readonly #runner: IsolatedVerifierRunner
-  constructor(input: Omit<IsolatedVerifierRunnerConfig, 'command'>) {
-    if (input.maxOutputBytes < MAX_WORKER_OUTPUT_BYTES) throw new Error('plugin behavior output budget must be at least 64 KiB')
-    this.#runner = new IsolatedVerifierRunner({ ...input, command: COMMAND })
+  readonly #runner: IsolatedVerifierRunner | NativeMacVerifierRunner
+  readonly #native: boolean
+  readonly #runtimeDigest?: string
+  readonly #authorityDigest: string
+  readonly #environment?: NonNullable<PluginBehaviorObservation['environment']>
+  readonly #modulesPath?: string
+  constructor(input: PluginBehaviorRunnerConfig) {
+    const config = validatePluginBehaviorRunnerConfig(input)
+    this.#authorityDigest = config.authorityDigest
+    this.#native = 'backend' in config && config.backend === 'macos-seatbelt'
+    if (this.#native) {
+      const native = config as Omit<NativeMacVerifierRunnerConfig, 'source'>
+      this.#runtimeDigest = behaviorNativeRuntimeDigest(native.runtime)
+      this.#environment = { node: native.runtime.versions.node, cordis: native.runtime.versions.cordis,
+        tools: native.runtime.versions.tools, systemPrompt: native.runtime.versions.systemPrompt }
+      this.#modulesPath = native.runtime.modulesPath
+      this.#runner = new NativeMacVerifierRunner({ ...native, source: NATIVE_BEHAVIOR_SOURCE })
+    } else this.#runner = new IsolatedVerifierRunner({ ...config as Omit<IsolatedVerifierRunnerConfig, 'command'>, command: COMMAND })
   }
   async run(input: PluginBehaviorRunnerInput): Promise<PluginBehaviorObservation> {
     const artifactSha256 = Buffer.isBuffer(input.artifact)
@@ -121,11 +143,27 @@ export class PluginBehaviorRunner {
       return unknown('plugin-artifact-out-of-bound', true)
     try { if (!validOperation(input.operation)) return unknown('plugin-operation-invalid', true) }
     catch { return unknown('plugin-operation-invalid', true) }
-    const request = { schemaVersion: 1, sha256: artifactSha256, sizeBytes: input.artifact.length, operation: input.operation }
+    let staged: ReturnType<typeof nativeBehaviorFiles> | undefined
+    if (this.#native) {
+      try { staged = nativeBehaviorFiles(input.artifact) }
+      catch { return unknown('plugin-artifact-invalid', true) }
+    }
+    // Stable per frozen request: the durable runner must see identical bytes for a replay key.
+    // This is only frame correlation. Single-process candidate output is untrusted.
+    const nonce = this.#native ? createHash('sha256').update(JSON.stringify({ authorityDigest: this.#authorityDigest,
+      key: input.key, artifactSha256, operation: input.operation })).digest('hex') : undefined
+    const request = this.#native
+      ? { schemaVersion: 1, nonce, artifactSha256, entry: staged!.entry,
+        modulesPath: this.#modulesPath!, operation: input.operation }
+      : { schemaVersion: 1, sha256: artifactSha256, sizeBytes: input.artifact.length, operation: input.operation }
     const stdin = canonicalJson(request)
     if (stdin === undefined || Buffer.byteLength(stdin) > MAX_OPERATION_BYTES) return unknown('plugin-operation-out-of-bound', true)
     let isolated
-    try { isolated = await this.#runner.run(input.key, input.artifact.toString('base64'), stdin, input.signal) }
+    try {
+      isolated = this.#native
+        ? await (this.#runner as NativeMacVerifierRunner).run(input.key, staged!.files, stdin, input.signal)
+        : await (this.#runner as IsolatedVerifierRunner).run(input.key, input.artifact.toString('base64'), stdin, input.signal)
+    }
     catch { return unknown('plugin-runner-unavailable') }
     if (isolated.status !== 'succeeded' || isolated.quiescent !== true || isolated.exitCode !== 0)
       return unknown(isolated.reason ?? 'plugin-runner-unsettled', isolated.quiescent, isolated.jobId)
@@ -133,6 +171,42 @@ export class PluginBehaviorRunner {
       || isolated.stdout.indexOf('\n') !== isolated.stdout.length - 1) return unknown('plugin-worker-output-invalid', true, isolated.jobId)
     try {
       const value: unknown = JSON.parse(isolated.stdout.slice(0, -1))
+      if (this.#native) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return unknown('plugin-worker-output-invalid', true, isolated.jobId)
+        const frame = value as Record<string, unknown>
+        const header = frame.wireVersion === 1 && frame.nonce === nonce && frame.artifactSha256 === artifactSha256
+          && frame.operationDigest === createHash('sha256').update(JSON.stringify(input.operation)).digest('hex')
+        if (!header) return unknown('plugin-worker-output-invalid', true, isolated.jobId)
+        if (frame.status === 'unknown' && typeof frame.reason === 'string' && frame.reason.length > 0
+          && frame.reason.length <= 128 && Object.keys(frame).length === 6) return unknown(frame.reason, true, isolated.jobId)
+        if (frame.status !== 'result' || !SHA256.test(frame.schemaDigest as string)
+          || Object.keys(frame).length !== 7) return unknown('plugin-worker-observation-invalid', true, isolated.jobId)
+        if (input.operation.kind === 'discover') {
+          if (!Array.isArray(frame.schemas) || frame.schemas.length < 1 || frame.schemas.length > 64
+            || frame.calls !== undefined || createHash('sha256').update(JSON.stringify(frame.schemas)).digest('hex') !== frame.schemaDigest)
+            return unknown('plugin-worker-observation-invalid', true, isolated.jobId)
+          const names = new Set<string>()
+          for (const schema of frame.schemas) {
+            const name = (schema as { name?: unknown } | null)?.name
+            if (typeof name !== 'string' || !SAFE_TOOL.test(name) || names.has(name))
+              return unknown('plugin-worker-observation-invalid', true, isolated.jobId)
+            names.add(name)
+          }
+        } else {
+          const calls = input.operation.calls
+          if (frame.schemaDigest !== input.operation.schemaDigest || !Array.isArray(frame.calls)
+            || frame.calls.length !== calls.length || frame.schemas !== undefined
+            || frame.calls.some((call, index) => !call || typeof call !== 'object'
+              || (call as { id?: string }).id !== calls[index]!.id
+              || (call as { toolName?: string }).toolName !== calls[index]!.toolName
+              || !Object.hasOwn(call, 'result'))) return unknown('plugin-worker-observation-invalid', true, isolated.jobId)
+        }
+        return { status: 'observed', quiescent: true, artifactSha256, jobId: isolated.jobId,
+          boundary: NATIVE_BEHAVIOR_BOUNDARY, runtimeDigest: this.#runtimeDigest!, environment: this.#environment!,
+          schemaDigest: frame.schemaDigest as string,
+          ...(input.operation.kind === 'discover' ? { schemas: frame.schemas as unknown[] }
+            : { calls: frame.calls as { id: string; toolName: string; result: unknown }[] }) }
+      }
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
         const record = value as Record<string, unknown>
         if (record.schemaVersion === 2 && record.boundary === BOUNDARY && record.status === 'unknown'

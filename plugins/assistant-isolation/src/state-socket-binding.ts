@@ -21,6 +21,7 @@ function readBinding(stateRoot: string): string | undefined {
 /** Legacy state roots were Linux-only and always used the default socket. */
 export function stateSocketBindingMatches(stateRoot: string, socketPath: string): boolean {
   try {
+    if (existsSync(join(stateRoot, 'native-backend'))) return false
     const existing = readBinding(stateRoot)
     return existing === undefined ? process.platform === 'linux' && socketPath === '/var/run/docker.sock' : existing === socketPath
   } catch { return false }
@@ -28,6 +29,7 @@ export function stateSocketBindingMatches(stateRoot: string, socketPath: string)
 
 export function bindIsolationStateSocket(stateRoot: string, socketPath: string): void {
   configuredDockerSocketPath(socketPath)
+  if (existsSync(join(stateRoot, 'native-backend'))) throw new Error('assistant-isolation: state root is native-bound')
   const existing = readBinding(stateRoot)
   if (existing !== undefined) {
     if (existing !== socketPath) throw new Error('assistant-isolation: state root is bound to a different Docker socket')

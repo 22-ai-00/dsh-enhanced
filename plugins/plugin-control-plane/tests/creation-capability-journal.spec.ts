@@ -8,6 +8,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { afterEach, expect, test, vi } from 'vitest'
 import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { nativeMacRuntimeDigest, type NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 import { CreationCapabilityJournal, creationCapabilityPublicKey, validateCreationCapabilityConfig,
   verifyCreationCapabilityReceipt } from '../src/creation-capability-journal.js'
 import { CreationCapabilityRuntime } from '../src/creation-capability-runtime.js'
@@ -101,6 +102,34 @@ test('owner key and config preflight are read-only and reject unsafe fields', ()
   Object.defineProperty(bad, 'keyPath', { enumerable: true, get() { invoked = true; return f.config.keyPath } })
   expect(() => validateCreationCapabilityConfig(bad)).toThrow()
   expect(invoked).toBe(false)
+})
+
+test('native adoption requires a signed v2 certificate pinned to its exact runner runtime', () => {
+  const f = fixture()
+  const runtimeRoot = join(f.root, 'runtime')
+  const runtime: NativeMacRuntime = { schemaVersion: 1, platform: `darwin-${process.arch}` as NativeMacRuntime['platform'],
+    nodePath: join(runtimeRoot, 'node'), nodeSha256: d('a'),
+    modulesPath: join(runtimeRoot, 'node_modules'), roots: [{ path: runtimeRoot, dev: 1, ino: 2, sha256: d('b') }],
+    versions: { node: 'v24.22.0', typescript: '6.0.3', cordis: '4.0.4', tools: '0.2.0-rc.2', systemPrompt: '0.2.0-rc.2' } }
+  const config: CreationCapabilityConfig = { ...f.config, runner: { backend: 'macos-seatbelt', runtime,
+    stateRoot: f.root, expiresAt: Date.now() + 120_000, maxRuns: 5,
+    maxTotalDurationMs: 30_000, maxDurationMs: 10_000, maxOutputBytes: 65536 } }
+  validateCreationCapabilityConfig(config)
+  const nativeCertificate = (planId: string, runtimeDigest: string): PluginCreationVerificationCertificate => {
+    const { signature: _signature, ...legacy } = f.certificate(planId)
+    const body: Omit<PluginCreationVerificationCertificate, 'signature'> = { ...legacy,
+      protocol: 'assistant-growth/creation-verification/v2',
+      execution: { boundary: 'macos-seatbelt-single-process-v1', runtimeDigest, buildEvidenceDigest: d('c') } }
+    return { ...body, signature: sign(null, Buffer.from(canonicalGrowthJson(body)), f.verifier.privateKey).toString('base64url') }
+  }
+  const journal = new CreationCapabilityJournal({ path: f.path, config })
+  try {
+    expect(() => journal.claim({ certificate: f.certificate('legacy'), artifact: f.artifact })).toThrow()
+    expect(() => journal.claim({ certificate: nativeCertificate('mismatch', d('f')), artifact: f.artifact })).toThrow()
+    const record = journal.claim({ certificate: nativeCertificate('native', nativeMacRuntimeDigest(runtime)), artifact: f.artifact })
+    expect(record.created).toBe(true)
+    expect(record.record.certificate.protocol).toBe('assistant-growth/creation-verification/v2')
+  } finally { journal.close() }
 })
 
 test('historical signed source survives expiry, closure and restart without renewed quota', () => {

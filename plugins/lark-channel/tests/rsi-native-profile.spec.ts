@@ -16,6 +16,7 @@ import { Config as AutomationsConfig } from '@dsh-enhanced/assistant-automations
 import { MemoryLearningRuntime, type LearningPorts } from '../../assistant-memory-learning/lib/runtime.js'
 import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.ts'
 import { compileNativeRsiProfile, type NativeRsiProfileInput } from '../src/rsi-native-profile.ts'
+import type { RsiCreationBuildEnvironment } from '../src/rsi-creation-build.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -66,6 +67,28 @@ async function fixture(): Promise<NativeRsiProfileInput> {
 }
 
 describe('native owner learning profile', () => {
+  test('binds native compiler and behavior runners to one frozen runtime and finite owner grant', async () => {
+    const input = await fixture(), root = join(input.dshHome, 'rsi-native-runtimes', 'web', 'runtime')
+    const runtime = { schemaVersion: 1 as const, platform: `darwin-${process.arch}` as 'darwin-arm64' | 'darwin-x64',
+      nodePath: join(root, 'bin', 'node'), nodeSha256: 'a'.repeat(64),
+      roots: [{ path: root, dev: 1, ino: 2, sha256: 'b'.repeat(64) }], modulesPath: join(root, 'node_modules'),
+      versions: { node: 'v24.22.0', typescript: '5.9.3', cordis: '3.0.0', tools: '1.0.0', systemPrompt: '1.0.0' } }
+    const native = { ...input,
+      sourceBuild: { backend: 'macos-seatbelt' as const, runtime, timeoutMs: 60_000 as const,
+        outputBytes: 1_048_576 as const, versioning: 'patch' as const },
+      creationBuild: { schemaVersion: 2 as const, backend: 'macos-seatbelt' as const,
+        sourceCommit: input.source.sourceCommit, runtime } }
+    const compiled = compileNativeRsiProfile(native)
+    expect(compiled.manifest.controlPlane.sourceBuild).toMatchObject({ backend: 'macos-seatbelt', runtime,
+      stateRoot: join(input.resources.stateRoot, 'native-source-build'), expiresAt: input.expiresAt,
+      maxRuns: 1000, maxTotalDurationMs: 86_400_000, timeoutMs: 60_000, outputBytes: 1_048_576 })
+    expect(compiled.manifest.pluginCreation.reviews.runner).toMatchObject({ backend: 'macos-seatbelt', runtime })
+    expect(compiled.manifest.pluginCreation.capabilities.runner).toMatchObject({ backend: 'macos-seatbelt', runtime })
+    expect(compileNativeRsiProfile(native)).toEqual(compiled)
+    expect(() => compileNativeRsiProfile({ ...native, creationBuild: { ...native.creationBuild,
+      runtime: { ...runtime, nodeSha256: 'c'.repeat(64) } } })).toThrow('native creation runtime differs')
+  })
+
   test('compiles finite memory and creation grants, final observation digests, and create-only Host authority', async () => {
     const input = await fixture()
     const first = compileNativeRsiProfile(input)
@@ -110,8 +133,9 @@ describe('native owner learning profile', () => {
     rows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!.config = { authorityId: 'foreign' }
     rows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!.disabled = false
     expect(() => compileNativeRsiProfile({ ...input, targetEffective: stringify(rows) })).toThrow('existing memory learner grant differs')
-    expect(() => compileNativeRsiProfile({ ...input, creationBuild: { ...input.creationBuild, sourceImage: `sha256:${'0'.repeat(64)}` } })).toThrow('creation build differs')
-    expect(() => compileNativeRsiProfile({ ...input, creationBuild: { ...input.creationBuild, socketPath: '/tmp/other.sock' } })).toThrow('creation build differs')
+    const dockerBuild = input.creationBuild as RsiCreationBuildEnvironment
+    expect(() => compileNativeRsiProfile({ ...input, creationBuild: { ...dockerBuild, sourceImage: `sha256:${'0'.repeat(64)}` } })).toThrow('creation build differs')
+    expect(() => compileNativeRsiProfile({ ...input, creationBuild: { ...dockerBuild, socketPath: '/tmp/other.sock' } })).toThrow('creation build differs')
   })
 
   test('registers a native memory scan against the generated Policy and Automations config', async () => {

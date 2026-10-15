@@ -165,6 +165,29 @@ test('uses two fresh inherited-model Agent turns, private challenge cases, exact
   expect(f.adapter.requests).toHaveLength(2)
 })
 
+test('native build/runtime mismatch is rejected before durable claim or model and observer dispatch', async () => {
+  const f = await fixture()
+  const runtimeRoot = join(f.root, 'fixed-runtime')
+  const nativeConfig: CreationReviewConfig = { ...f.config, runner: { backend: 'macos-seatbelt',
+    stateRoot: f.config.runner.stateRoot, expiresAt: f.config.runner.expiresAt,
+    maxRuns: f.config.runner.maxRuns, maxTotalDurationMs: f.config.runner.maxTotalDurationMs,
+    maxDurationMs: f.config.runner.maxDurationMs, maxOutputBytes: f.config.runner.maxOutputBytes,
+    runtime: { schemaVersion: 1, platform: `darwin-${process.arch}` as 'darwin-arm64' | 'darwin-x64',
+      nodePath: join(runtimeRoot, 'node'), nodeSha256: 'a'.repeat(64), modulesPath: join(runtimeRoot, 'node_modules'),
+      roots: [{ path: runtimeRoot, dev: 1, ino: 1, sha256: 'b'.repeat(64) }],
+      versions: { node: 'v24.22.0', typescript: '6.0.3', cordis: '4.0.4', tools: '0.2.0-rc.2', systemPrompt: '0.2.0-rc.2' } } } }
+  const compiled = compileCreationReviewConfig(nativeConfig)
+  f.growthRun.creationAcceptance = compiled.authority
+  Object.assign(f.plan.preparedEvidence, { schemaVersion: 2, boundary: 'macos-seatbelt-single-process-v1',
+    runtimeDigest: 'f'.repeat(64) })
+  const nativeReview = new CreationReviewRuntime(f.ctx, nativeConfig, join(f.root, 'native-review.sqlite'))
+  runtimes.push(nativeReview)
+  expect((await nativeReview.run(f.request)).status).toBe('unknown')
+  expect(observer.run).not.toHaveBeenCalled()
+  expect(f.adapter.requests).toHaveLength(0)
+  expect(nativeReview.inspect({ owner: f.owner })?.remainingVerifications).toBe(2)
+})
+
 test('malformed or insufficient contract is durable unknown and consumes quota without observer replay', async () => {
   const f = await fixture(); f.adapter.mode = 'insufficient'
   expect((await f.runtime.run(f.request)).status).toBe('unknown')

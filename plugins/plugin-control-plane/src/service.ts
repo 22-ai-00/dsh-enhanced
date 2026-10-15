@@ -49,6 +49,9 @@ import { adoptSourceRelease, validateSourceAdoptionConfig, type SourceAdoptionCo
 import { Ed25519ApprovalAuthority } from './approval.js'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from './store.js'
 import { runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
+import { runNativePreparedChecks } from './native-source-build.js'
+import { NativeMacVerifierRunner } from '@dsh-enhanced/assistant-isolation'
+import { NATIVE_SOURCE_COMPILER } from './native-source-build-worker.js'
 import { awaitSourceSignal, inspectSourceContext, inspectSourceTargetsContext, type SourceInspection, type SourceTargetsInspection } from './source-context.js'
 import { inspectSourceRevisionContext, prepareRevisedPluginWorkspace, verifyRevisedPluginWorkspace } from './source-revision.js'
 import { inspectSourceCreationContext, prepareCreatedPluginWorkspace, validateSourceCreationFiles, verifyCreatedPluginWorkspace } from './source-creation.js'
@@ -194,6 +197,13 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
   }
   if (config.sourceApprovals !== undefined) validateSourceApprovalClientConfig(config.sourceApprovals)
   if (config.sourceBuild !== undefined) validateSourceBuildConfig(config.sourceBuild)
+  if (config.sourceBuild !== undefined && 'backend' in config.sourceBuild) {
+    if (!config.sourceJobs?.allowedModes || config.sourceJobs.allowedModes.some(mode => mode === 'modify')
+      || config.sourceReleases !== undefined || config.sourceReleaseExecution !== undefined
+      || config.sourceAdoptions !== undefined || config.sourceApprovals !== undefined) {
+      throw new Error('plugin-control-plane: native source build only supports Host-scaffolded create/revise-created')
+    }
+  }
   if (config.sourceReleases !== undefined) {
     validateSourceReleaseClientConfig(config.sourceReleases)
     if (!config.sourceApprovals || config.sourceBuild?.versioning !== 'patch') throw new Error('plugin-control-plane: sourceReleases requires sourceApprovals and Host patch versioning')
@@ -302,6 +312,7 @@ export class PluginControlPlaneService extends Service {
   private liveRuntime: LiveQualificationRuntime | undefined
   private assertLiveRuntime: ((planId: string) => void) | undefined
   private sourceRuntime: SourceJobRuntime | undefined
+  private nativeSourceRunner: NativeMacVerifierRunner | undefined
   private readonly sourceRuntimes = new Set<SourceJobRuntime>()
   private creationCapabilityRuntime: CreationCapabilityRuntime | undefined
   private readonly creationCapabilityRuntimes = new Set<CreationCapabilityRuntime>()
@@ -616,7 +627,22 @@ export class PluginControlPlaneService extends Service {
             throw error
           }
         }
-        const runtime = new SourceJobRuntime({ config: this.config.sourceJobs!, build: this.config.sourceBuild!, statePath: this.config.statePath, store: this.store,
+        const sourceBuild = this.config.sourceBuild!
+        let nativeRunner: NativeMacVerifierRunner | undefined
+        try {
+          nativeRunner = 'backend' in sourceBuild ? new NativeMacVerifierRunner({ backend: 'macos-seatbelt',
+            stateRoot: sourceBuild.stateRoot, authorityDigest: sourceBuild.authorityDigest,
+            runtime: sourceBuild.runtime, source: NATIVE_SOURCE_COMPILER, expiresAt: sourceBuild.expiresAt,
+            maxRuns: sourceBuild.maxRuns, maxTotalDurationMs: sourceBuild.maxTotalDurationMs,
+            maxDurationMs: sourceBuild.timeoutMs, maxOutputBytes: sourceBuild.outputBytes }) : undefined
+        } catch (error) {
+          unsubscribeTaskChanges?.()
+          if (capabilities) { await capabilities.close(); this.creationCapabilityRuntimes.delete(capabilities) }
+          throw error
+        }
+        this.nativeSourceRunner = nativeRunner
+        let runtime: SourceJobRuntime
+        try { runtime = new SourceJobRuntime({ config: this.config.sourceJobs!, build: sourceBuild, statePath: this.config.statePath, store: this.store,
           ports: {
             automations: {
               registerHostExecutor: executor => current('automations').registerHostExecutor(executor),
@@ -661,19 +687,29 @@ export class PluginControlPlaneService extends Service {
               await this.adoptOwnerSourceRelease({ sourcePlanId: job.planId, signal, expectedTrustDigest: job.intent.trustDigest, assertCurrent })
             } } : {}),
           trust: () => this.boundTrust(), prepare: (job, signal, assertCurrent) => this.prepareSourceJob(job, signal, assertCurrent),
-        })
+          ...(nativeRunner ? { inspectNativeQuiescence: (key: string) => nativeRunner.inspectQuiescence(key) } : {}),
+        }) } catch (error) {
+          if (this.nativeSourceRunner === nativeRunner) this.nativeSourceRunner = undefined
+          await nativeRunner?.close()
+          unsubscribeTaskChanges?.()
+          if (capabilities) { await capabilities.close(); this.creationCapabilityRuntimes.delete(capabilities) }
+          throw error
+        }
         this.sourceRuntimes.add(runtime)
         const close = async (): Promise<void> => {
           unsubscribeTaskChanges?.()
           if (this.sourceRuntime === runtime) this.sourceRuntime = undefined
-          try { await runtime.close() }
-          finally {
-            this.sourceRuntimes.delete(runtime)
-            if (capabilities) {
-              if (this.creationCapabilityRuntime === capabilities) this.creationCapabilityRuntime = undefined
-              await capabilities.close()
-              this.creationCapabilityRuntimes.delete(capabilities)
-            }
+          let closeError: unknown
+          try { await runtime.close() } catch (error) { closeError = error }
+          if (this.nativeSourceRunner === nativeRunner) this.nativeSourceRunner = undefined
+          this.sourceRuntimes.delete(runtime)
+          if (this.creationCapabilityRuntime === capabilities) this.creationCapabilityRuntime = undefined
+          const results = await Promise.allSettled([nativeRunner?.close(), capabilities?.close()])
+          if (capabilities) this.creationCapabilityRuntimes.delete(capabilities)
+          const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+          if (closeError !== undefined || failures.length) {
+            throw new AggregateError([...(closeError === undefined ? [] : [closeError]), ...failures.map(result => result.reason)],
+              'source runtime cleanup failed')
           }
         }
         try {
@@ -1908,7 +1944,8 @@ export class PluginControlPlaneService extends Service {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 900_000 || ttlMs > 86_400_000) {
       throw new ControlPlaneCliError('INVALID_ARGUMENT', 'ttlMs must be an integer within 900000..86400000')
     }
-    const maximumTimeoutMs = ['repository', 'portable-repository'].includes(this.config.sourceBuild?.profile ?? '') ? 1_800_000 : 240_000
+    const maximumTimeoutMs = this.config.sourceBuild !== undefined && !('backend' in this.config.sourceBuild)
+      && ['repository', 'portable-repository'].includes(this.config.sourceBuild.profile ?? '') ? 1_800_000 : 240_000
     const timeoutMs = input.timeoutMs ?? 180_000
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 60_000 || timeoutMs > maximumTimeoutMs) {
       throw new ControlPlaneCliError('INVALID_ARGUMENT', `timeoutMs must be an integer within 60000..${maximumTimeoutMs}`)
@@ -1948,12 +1985,21 @@ export class PluginControlPlaneService extends Service {
       // Only owner-bound creation jobs retain the exact package for the
       // independent verifier. Ordinary source tools never receive these bytes.
       const capturePack = (creating || revising) && this.store.getOwnerTaskFailureReference(input.gapId) !== undefined
-      const checked = await runDockerPreparedChecks({ config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
-        worktree: isolated.worktree, baseCommit, name, scope: generated?.scope ?? [`plugins/${name}`], environment, signal,
-        assertCurrent, preparedAt: Date.now(), ...(creation === undefined ? {} : { creation }),
-        ...(revision === undefined ? {} : { revision: { binding: revision, parentSource: parent!.source, parentCertificate: parent!.certificate, files: input.files } }),
-        ...(capturePack ? { capturePack: true } : {}),
-        ...(sourceJob === undefined ? {} : { sourceJob: { id: sourceJob.id, containerName: sourceJob.intent.containerName } }) })
+      const common = { worktree: isolated.worktree, baseCommit, name, scope: generated?.scope ?? [`plugins/${name}`],
+        environment, signal, assertCurrent, preparedAt: Date.now(), ...(creation === undefined ? {} : { creation }),
+        ...(revision === undefined ? {} : { revision: { binding: revision, parentSource: parent!.source,
+          parentCertificate: parent!.certificate, files: input.files } }), ...(capturePack ? { capturePack: true as const } : {}) }
+      const checked = 'backend' in configured
+        ? await (async () => {
+          if ((!creating && !revising) || sourceJob === undefined || this.nativeSourceRunner === undefined
+            || sourceJob.intent.nativeResource?.key !== sourceJob.id) {
+            throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'native source preparation requires a durable Host-scaffolded creation job')
+          }
+          return runNativePreparedChecks({ ...common, config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
+            runner: this.nativeSourceRunner, sourceJob: { id: sourceJob.id } })
+        })()
+        : await runDockerPreparedChecks({ ...common, config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
+          ...(sourceJob === undefined ? {} : { sourceJob: { id: sourceJob.id, containerName: sourceJob.intent.containerName! } }) })
       await assertCurrent()
       if (capturePack && checked.packArtifact === undefined) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared creation artifact was not captured')
       if (revision !== undefined) {

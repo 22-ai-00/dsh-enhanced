@@ -8,7 +8,7 @@ import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { assertRsiMemoryScanActivation, installRsiOwnerDeployment, rsiCoordinatorProfile, rsiInstallPorts, type RsiInstallPorts } from '../src/rsi-install.js'
 import { rsiSetupPorts } from '../src/rsi-setup.js'
-import { RsiBuildUnavailableError } from '../src/rsi-build.js'
+import { RsiBuildUnavailableError, type RsiBuildEnvironment } from '../src/rsi-build.js'
 import { RsiInstalledInputsUnavailableError } from '../src/rsi-install-inputs.js'
 import { rsiBootstrapFixture } from './fixtures/rsi-bootstrap.js'
 
@@ -50,7 +50,8 @@ async function fixture() {
   setup.compile = async value => { const result = await actualCompile(value); return result }
   const ports: RsiInstallPorts = { ...rsiInstallPorts, setup,
     prepare: vi.fn(async () => ({ source:f.input.source, runtime:f.input.runtime,resources:f.input.resources,
-      build:{schemaVersion:1 as const,sourceCommit:f.input.source.sourceCommit,sourceBuild:f.input.manifest.controlPlane.sourceBuild!},
+      build:{schemaVersion:1 as const,sourceCommit:f.input.source.sourceCommit,
+        sourceBuild:f.input.manifest.controlPlane.sourceBuild! as RsiBuildEnvironment['sourceBuild']},
       release:{schemaVersion:1 as const,sourceCommit:f.input.source.sourceCommit,image:'sha256:'+'a'.repeat(64),releaseBuild:f.input.releaseBuild} })),
     collect: vi.fn(async value => ({ dsh:{root:'/fixture/dsh',path:f.input.executor.path,version:f.input.executor.version,pin:f.input.executor},
       executor:f.input.executor,git:f.input.manifest.sourceReviews.git,systemctl:f.input.systemctl,

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { gzipSync } from 'node:zlib'
 import { beforeEach, expect, it, vi } from 'vitest'
 
 const seam = vi.hoisted(() => ({
@@ -12,9 +13,17 @@ vi.mock('@dsh-enhanced/assistant-isolation', () => ({
     run(...args: unknown[]) { return seam.run(...args) }
     close() { return seam.close() }
   },
+  NativeMacVerifierRunner: class {
+    constructor(config: unknown) { seam.configs.push(config) }
+    run(...args: unknown[]) { return seam.run(...args) }
+    close() { return seam.close() }
+  },
+  validateNativeMacRuntime: (value: unknown) => value,
+  nativeMacRuntimeDigest: () => 'c'.repeat(64),
 }))
 
-import { PluginBehaviorRunner } from '../src/plugin-behavior-runner.ts'
+import { PluginBehaviorRunner, NATIVE_BEHAVIOR_BOUNDARY } from '../src/plugin-behavior-runner.ts'
+import { behaviorNativeRuntimeDigest } from '../src/plugin-behavior-config.ts'
 
 const authority = {
   stateRoot: '/private/state', image: 'sha256:' + 'a'.repeat(64), dockerPath: '/usr/bin/docker',
@@ -36,6 +45,64 @@ const observed = (extra: Record<string, unknown> = {}) => ({
   schemas: [schema], ...extra,
 })
 beforeEach(() => { seam.run.mockReset(); seam.close.mockClear(); seam.configs.length = 0 })
+
+function nativePack(): Buffer {
+  const entries = { 'package/package.json': JSON.stringify({ name: 'native-probe', version: '1.0.0', type: 'module', main: './lib/index.js' }),
+    'package/lib/index.js': 'export default {}' }
+  const records: Buffer[] = []
+  for (const [name, content] of Object.entries(entries)) {
+    const bytes = Buffer.from(content), header = Buffer.alloc(512)
+    header.write(name); header.write('0000644\0', 100); header.write('0000000\0', 108); header.write('0000000\0', 116)
+    header.write(bytes.length.toString(8).padStart(11, '0') + '\0', 124); header.write('00000000000\0', 136)
+    header.fill(32, 148, 156); header.write('0', 156); header.write('ustar\0', 257); header.write('00', 263)
+    header.write(header.reduce((sum, byte) => sum + byte, 0).toString(8).padStart(6, '0') + '\0 ', 148)
+    records.push(header, bytes, Buffer.alloc((512 - bytes.length % 512) % 512))
+  }
+  return gzipSync(Buffer.concat([...records, Buffer.alloc(1024)]))
+}
+
+it('native mode stages regular files, binds a fixed worker frame, and derives environment from runtime authority', async () => {
+  const nativeArtifact = nativePack(), hash = createHash('sha256').update(nativeArtifact).digest('hex')
+  const config = { backend: 'macos-seatbelt' as const, stateRoot: '/private/native-state', authorityDigest: 'b'.repeat(64),
+    expiresAt: Date.now() + 60_000, maxRuns: 2, maxTotalDurationMs: 20_000, maxDurationMs: 10_000, maxOutputBytes: 65_536,
+    runtime: { schemaVersion: 1 as const, platform: 'darwin-arm64' as const, nodePath: '/private/runtime/node', nodeSha256: 'd'.repeat(64),
+      modulesPath: '/private/runtime/node_modules', roots: [{ path: '/private/runtime', dev: 1, ino: 1, sha256: 'e'.repeat(64) }], versions: {
+        node: 'v24.22.0', typescript: '5.9.3', cordis: '4.0.4', tools: '0.2.0-rc.2', systemPrompt: '0.2.0-rc.2' } } }
+  seam.run.mockImplementation((_key: string, files: unknown, stdin: string) => {
+    expect(files).toEqual([{ path: 'package/package.json', content: expect.any(String) },
+      { path: 'package/lib/index.js', content: 'export default {}' }])
+    const request = JSON.parse(stdin) as { nonce: string; artifactSha256: string; operation: unknown }
+    return result({ wireVersion: 1, nonce: request.nonce, artifactSha256: request.artifactSha256,
+      operationDigest: createHash('sha256').update(JSON.stringify(request.operation)).digest('hex'),
+      status: 'result', schemaDigest, schemas: [schema] })
+  })
+  const runner = new PluginBehaviorRunner(config)
+  const observation = await runner.run({ key: 'native-discover', artifact: nativeArtifact, operation: { kind: 'discover' }, signal })
+  expect(observation).toMatchObject({ status: 'observed', artifactSha256: hash,
+    boundary: NATIVE_BEHAVIOR_BOUNDARY, runtimeDigest: behaviorNativeRuntimeDigest(config.runtime),
+    environment: { node: 'v24.22.0', cordis: '4.0.4' } })
+  expect((seam.configs[0] as { source: string }).source).toContain('registerHooks')
+  await runner.close()
+})
+
+it('native mode rejects a forged or polluted frame without converting candidate stdout into Host authority', async () => {
+  const nativeArtifact = nativePack()
+  const config = { backend: 'macos-seatbelt' as const, stateRoot: '/private/native-state', authorityDigest: 'b'.repeat(64),
+    expiresAt: Date.now() + 60_000, maxRuns: 2, maxTotalDurationMs: 20_000, maxDurationMs: 10_000, maxOutputBytes: 65_536,
+    runtime: { schemaVersion: 1 as const, platform: 'darwin-arm64' as const, nodePath: '/private/runtime/node', nodeSha256: 'd'.repeat(64),
+      modulesPath: '/private/runtime/node_modules', roots: [{ path: '/private/runtime', dev: 1, ino: 1, sha256: 'e'.repeat(64) }], versions: {
+        node: 'v24.22.0', typescript: '5.9.3', cordis: '4.0.4', tools: '0.2.0-rc.2', systemPrompt: '0.2.0-rc.2' } } }
+  seam.run.mockImplementation((_key: string, _files: unknown, stdin: string) => {
+    const request = JSON.parse(stdin) as { artifactSha256: string; operation: unknown }
+    return { ...result({ wireVersion: 1, nonce: '0'.repeat(64), artifactSha256: request.artifactSha256,
+      operationDigest: createHash('sha256').update(JSON.stringify(request.operation)).digest('hex'),
+      status: 'result', schemaDigest, schemas: [schema] }), stderr: '' }
+  })
+  const runner = new PluginBehaviorRunner(config)
+  expect((await runner.run({ key: 'native-forged', artifact: nativeArtifact,
+    operation: { kind: 'discover' }, signal })).status).toBe('unknown')
+  await runner.close()
+})
 
 it('stages only canonical base64 artifact and bounded operation, with fixed command and frozen authority', async () => {
   seam.run.mockResolvedValue(result(observed()))

@@ -30,7 +30,7 @@ async function fixture() {
     inventory: { databasePath: join(dshHome, 'automations.sqlite'), schedulerEnabled: false, records: [] as object[] },
     failReady: false, driftOnStop: false, foreignService: false, starts: 0, stops: 0 }
   const prepared = { source: { sourceCommit: 'a'.repeat(40) }, resources: { configRoot, stateRoot },
-    build: { sourceBuild: {} }, creationBuild: {}, executor: {
+    build: { schemaVersion: 1, sourceBuild: { image: `sha256:${'a'.repeat(64)}`, dockerPath: process.execPath } }, creationBuild: {}, executor: {
       id: 'dsh', version: '1', path: process.execPath, sha256: 'b'.repeat(64), environmentAllowlist: [],
     } } as unknown as Awaited<ReturnType<NativeRsiInstallPorts['prepare']>>
   const ports: NativeRsiInstallPorts = {
@@ -39,7 +39,8 @@ async function fixture() {
     prepare: vi.fn(async () => prepared),
     compile: vi.fn(value => ({ targetPatch: installedPatch,
       manifest: { schemaVersion: 1, now: value.now, expiresAt: value.expiresAt, owner: value.owner,
-        controlPlane: { trustPath: join(configRoot, 'native-trust.json'), runtimeObserver: value.observer } },
+        controlPlane: { trustPath: join(configRoot, 'native-trust.json'), runtimeObserver: value.observer,
+          sourceBuild: value.sourceBuild } },
       trust: { schemaVersion: 1, owner: value.owner },
     }) as unknown as ReturnType<NativeRsiInstallPorts['compile']>),
     dump: vi.fn(() => readFileSync(patchPath, 'utf8')),
@@ -59,6 +60,20 @@ async function fixture() {
 }
 
 describe('native RSI installation transaction', () => {
+  test('does not reuse a frozen Docker plan after switching to the native backend', async () => {
+    const f = await fixture()
+    await installNativeRsiOwnerDeployment(f.input, f.ports)
+    const original = f.ports.prepare
+    f.ports.prepare = vi.fn(async (input, signal) => {
+      const prepared = await original(input, signal)
+      return { ...prepared, build: { ...prepared.build, schemaVersion: 2 as const } } as Awaited<ReturnType<NativeRsiInstallPorts['prepare']>>
+    })
+    const stops = f.state.stops
+    await expect(installNativeRsiOwnerDeployment(f.input, f.ports))
+      .rejects.toThrow('frozen Docker installation plan cannot be resumed')
+    expect(f.state.stops).toBe(stops)
+  })
+
   test('rejects a DSH_HOME whose native observer socket exceeds the path limit', async () => {
     const f = await fixture()
     const dshHome = join(f.home, 'x'.repeat(90))

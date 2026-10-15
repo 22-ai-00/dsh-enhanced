@@ -259,7 +259,7 @@ export interface SourceCheckEvidence {
  * while the plan is still pending owner approval. It never embeds source,
  * logs or secrets: command output is reduced to a bounded-tail sha256 digest.
  */
-export interface SourcePreparedEvidence {
+export interface DockerSourcePreparedEvidence {
   schemaVersion: 1
   kind: 'dsh-source-prepared-evidence'
   environment: {
@@ -285,6 +285,21 @@ export interface SourcePreparedEvidence {
   }
   preparedAt: number
 }
+
+/** Native preparation proves the checks named here only. A compiler result is
+ * never represented as a passing pnpm check or candidate test. */
+export interface NativeSourcePreparedEvidence {
+  schemaVersion: 2
+  kind: 'dsh-source-prepared-evidence'
+  boundary: 'macos-seatbelt-single-process-v1'
+  runtimeDigest: string
+  fixedCompilerSha256: string
+  checks: readonly ['semantic-typecheck', 'js-declaration-emit', 'host-safe-pack']
+  pack: DockerSourcePreparedEvidence['pack']
+  preparedAt: number
+}
+
+export type SourcePreparedEvidence = DockerSourcePreparedEvidence | NativeSourcePreparedEvidence
 
 export interface SourceReleasePolicy {
   targetBranch: string

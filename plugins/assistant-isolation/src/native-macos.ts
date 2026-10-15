@@ -16,6 +16,8 @@ export interface NativeMacProcessInput {
   runtimeReadRoots: NativeMacReadRoot[]
   /** Disabled by default; enable only for a candidate that must write scratch files. */
   workspaceWritable?: boolean
+  /** Trusted fixed source may use static ESM imports; default retains CommonJS evaluation. */
+  sourceType?: 'module' | 'commonjs'
   source: string
   stdin?: string
   deadline: number
@@ -111,6 +113,7 @@ export async function runNativeMacProcess(input: NativeMacProcessInput): Promise
   if (process.platform !== 'darwin' || typeof process.getuid !== 'function' || process.getuid() === 0) return failure('non-root-macos-required')
   if (!input || typeof input.signal?.aborted !== 'boolean' || typeof input.signal.addEventListener !== 'function') return failure('invalid-input-or-signal')
   if (input.workspaceWritable !== undefined && typeof input.workspaceWritable !== 'boolean') return failure('invalid-workspace-writable')
+  if (input.sourceType !== undefined && input.sourceType !== 'module' && input.sourceType !== 'commonjs') return failure('invalid-source-type')
   if (!await canonical(SANDBOX, false) || !await access(SANDBOX, constants.X_OK).then(() => true, () => false)) return failure('sandbox-exec-unavailable')
   if (!await privateWorkspace(input.workspacePath)) return failure('invalid-private-workspace')
   if (!await safeWorkspaceTree(input.workspacePath)) return failure('unsafe-workspace-tree')
@@ -156,7 +159,7 @@ export async function runNativeMacProcess(input: NativeMacProcessInput): Promise
     }
     let child
     try {
-      child = spawn(SANDBOX, ['-p', policy, input.nodePath, '--no-warnings', '-e', input.source], {
+      child = spawn(SANDBOX, ['-p', policy, input.nodePath, '--no-warnings', ...(input.sourceType === 'module' ? ['--input-type=module'] : []), '-e', input.source], {
         cwd: input.workspacePath,
         env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', HOME: input.workspacePath, TMPDIR: input.workspacePath },
         stdio: ['pipe', 'pipe', 'pipe'],

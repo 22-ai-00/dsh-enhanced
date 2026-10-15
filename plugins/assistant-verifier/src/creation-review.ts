@@ -2,13 +2,14 @@ import { createHash, createPrivateKey, createPublicKey, type KeyObject } from 'n
 import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import type { IsolatedVerifierRunnerConfig } from '@dsh-enhanced/assistant-isolation'
 import { canonicalGrowthJson, growthObjectDigest, sourceGrowthEvidenceDigest, sourceGrowthRunDigest, validateCreationAcceptanceAuthorityRef,
   verifyPluginCreationVerificationCertificate,
   validateSourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationRequest,
   type PluginCreationVerificationResult, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { CreationReviewStore } from './creation-review-store.js'
 import { runNativeCreationTurn, type CreationModel } from './creation-review-native.js'
+import { behaviorNativeRuntimeDigest, NATIVE_BEHAVIOR_BOUNDARY, validatePluginBehaviorDeploymentConfig,
+  type PluginBehaviorDeploymentConfig } from './plugin-behavior-config.js'
 
 type PluginBehaviorRunner = import('./plugin-behavior-runner.js').PluginBehaviorRunner
 
@@ -46,7 +47,7 @@ export interface CreationReviewConfig {
   keyPath: string
   expiresAt: number
   maxVerifications: number
-  runner: Omit<IsolatedVerifierRunnerConfig, 'authorityDigest' | 'command'>
+  runner: PluginBehaviorDeploymentConfig
   policy: string
   maxInputBytes: number
   maxOutputTokens: number
@@ -105,16 +106,9 @@ export function validateCreationReviewConfig(input: CreationReviewConfig): Creat
   integer(item.receiptTtlMs, 1000, 86_400_000, 'receipt ttl')
   if (typeof item.policy !== 'string' || !item.policy.trim() || item.policy.includes('\0')
     || !item.policy.isWellFormed() || Buffer.byteLength(item.policy) > 8192) throw new Error('creation review invalid policy')
-  const runner = exact(item.runner, ['stateRoot', 'image', 'dockerPath', 'expiresAt', 'maxRuns', 'maxTotalDurationMs',
-    'maxDurationMs', 'maxOutputBytes',
-    ...(item.runner && typeof item.runner === 'object' && Object.hasOwn(item.runner, 'socketPath') ? ['socketPath'] : [])], 'runner')
-  privatePath(runner.stateRoot, 'runner root'); privatePath(runner.dockerPath, 'docker path')
-  if (Object.hasOwn(runner, 'socketPath')) {
-    const socketPath = runner.socketPath
-    if (typeof socketPath !== 'string' || !isAbsolute(socketPath) || resolve(socketPath) !== socketPath
-      || /[\p{Cc},]/u.test(socketPath) || socketPath.includes('://')) throw new Error('creation review invalid Docker socket path')
-  }
-  if (typeof runner.image !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(runner.image)) throw new Error('creation review invalid image')
+  const runner = item.runner as PluginBehaviorDeploymentConfig
+  validatePluginBehaviorDeploymentConfig(runner)
+  privatePath(runner.stateRoot, 'runner root')
   integer(runner.expiresAt, 1, 8_640_000_000_000_000, 'runner expiry')
   integer(runner.maxRuns, 1, 10_000, 'runner quota')
   integer(runner.maxTotalDurationMs, 1, 86_400_000, 'runner total duration')
@@ -156,7 +150,8 @@ export interface PreparedCreationPort {
   inspectPreparedCreation(planId: string): {
     protocol: 'dsh-prepared-creation/v1'; plan: { id: string; digest: string; name: string; mode: string; status: string; expiresAt: number;
       generatorDigest: string; sourceCheck?: { treeDigest: string; patchDigest: string };
-      preparedEvidence?: { pack: { sha256: string; sizeBytes: number } };
+      preparedEvidence?: { schemaVersion?: number; boundary?: string; runtimeDigest?: string;
+        pack: { sha256: string; sizeBytes: number } };
       creation?: { grant: { namePrefix: string; expiresAt: number }; growthRun?: unknown } }
     job: { intent: { creation?: unknown } }
     reference: { owner: Record<string, unknown>; sourceDigest: string; outcomeId: string }
@@ -261,6 +256,15 @@ export class CreationReviewRuntime {
       }
       const sourceBinding = { referenceDigest: sourceGrowthEvidenceDigest(reference), ownerDigest: sourceGrowthEvidenceDigest(reference.owner),
         growthRunDigest: sourceGrowthRunDigest(frozen) }
+      const nativeExecution = 'backend' in config.runner && config.runner.backend === 'macos-seatbelt'
+        ? (() => {
+          const evidence = plan.preparedEvidence
+          const runtimeDigest = behaviorNativeRuntimeDigest(config.runner.runtime)
+          if (evidence?.schemaVersion !== 2 || evidence.boundary !== NATIVE_BEHAVIOR_BOUNDARY
+            || evidence.runtimeDigest !== runtimeDigest) throw new Error('native build and behavior runtime mismatch')
+          return { boundary: NATIVE_BEHAVIOR_BOUNDARY as typeof NATIVE_BEHAVIOR_BOUNDARY, runtimeDigest,
+            buildEvidenceDigest: createHash('sha256').update(canonicalGrowthJson(evidence)).digest('hex') }
+        })() : undefined
       const fenceInput = { planId: plan.id, planDigest: plan.digest, artifactSha256: plan.preparedEvidence.pack.sha256,
         growthRunDigest: sourceBinding.growthRunDigest, referenceDigest: sourceBinding.referenceDigest }
       const fence = <T>(callback: () => T): T => port.withPreparedCreationFence(fenceInput, callback)
@@ -268,7 +272,8 @@ export class CreationReviewRuntime {
       const model: CreationModel = frozen.model
       const binding = growthObjectDigest({ request, authority, plan: { id: plan.id, digest: plan.digest,
         tree: plan.sourceCheck.treeDigest, patch: plan.sourceCheck.patchDigest, artifact: plan.preparedEvidence.pack },
-      source: sourceBinding, model, budget: { maxOutputTokens: config.maxOutputTokens, maxDurationMs: config.maxDurationMs, maxCases: config.maxCases } })
+      source: sourceBinding, model, budget: { maxOutputTokens: config.maxOutputTokens, maxDurationMs: config.maxDurationMs, maxCases: config.maxCases },
+      ...(nativeExecution ? { execution: nativeExecution } : {}) })
       const claim = fence(() => this.#store.claim(plan.id, binding, config.authorityId, authority.authorityDigest, config.maxVerifications))
       if (claim.state === 'certificate') return claim.certificate!.expiresAt > Date.now()
         ? { status: 'verified', certificate: claim.certificate! }
@@ -281,7 +286,9 @@ export class CreationReviewRuntime {
       const discoverKey = growthObjectDigest([binding, 'discover'])
       const discovery = await observer.run({ key: discoverKey, artifact, operation: { kind: 'discover' }, signal })
       if (discovery.status !== 'observed' || !discovery.quiescent || !discovery.schemaDigest || !discovery.schemas
-        || !discovery.environment || !discovery.jobId || discovery.artifactSha256 !== plan.preparedEvidence.pack.sha256) {
+        || !discovery.environment || !discovery.jobId || discovery.artifactSha256 !== plan.preparedEvidence.pack.sha256
+        || nativeExecution && (discovery.boundary !== nativeExecution.boundary
+          || discovery.runtimeDigest !== nativeExecution.runtimeDigest)) {
         this.#store.unknown(plan.id, binding, 'schema-observation-unknown')
         return { status: 'unknown', reason: 'schema-observation-unknown' }
       }
@@ -314,6 +321,8 @@ export class CreationReviewRuntime {
         if (observed.status !== 'observed' || !observed.quiescent || !observed.jobId
           || observed.schemaDigest !== discovery.schemaDigest || observed.artifactSha256 !== plan.preparedEvidence.pack.sha256
           || canonicalGrowthJson(observed.environment) !== canonicalGrowthJson(discovery.environment)
+          || nativeExecution && (observed.boundary !== nativeExecution.boundary
+            || observed.runtimeDigest !== nativeExecution.runtimeDigest)
           || observed.calls?.length !== 1 || observed.calls[0]?.id !== item.id || jobs.has(observed.jobId)) {
           this.#store.unknown(plan.id, binding, 'case-observation-unknown')
           return { status: 'unknown', reason: 'case-observation-unknown' }
@@ -349,7 +358,8 @@ export class CreationReviewRuntime {
       const expiresAt = Math.min(verifiedAt + config.receiptTtlMs, config.expiresAt, config.runner.expiresAt,
         plan.expiresAt, plan.creation.grant.expiresAt, frozen.expiresAt)
       if (expiresAt <= verifiedAt) throw new Error('creation verification windows closed')
-      const body = { protocol: 'assistant-growth/creation-verification/v1' as const,
+      const body = { protocol: nativeExecution ? 'assistant-growth/creation-verification/v2' as const
+        : 'assistant-growth/creation-verification/v1' as const,
         verificationId: `creation-${binding.slice(0, 40)}`, authority,
         plan: { id: plan.id, digest: plan.digest, name: plan.name, sourceTreeDigest: plan.sourceCheck.treeDigest,
           sourcePatchDigest: plan.sourceCheck.patchDigest, artifactSha256: plan.preparedEvidence.pack.sha256,
@@ -358,7 +368,8 @@ export class CreationReviewRuntime {
         environment: discovery.environment, model,
         budget: { modelCalls: 2 as const, maxOutputTokens: config.maxOutputTokens, maxDurationMs: config.maxDurationMs,
           maxCases: config.maxCases }, sessions: { contract: contract.sessionId, sourceReview: review.sessionId },
-        observations, reviewDigest: review.outputDigest, verifiedAt, expiresAt }
+        observations, reviewDigest: review.outputDigest, verifiedAt, expiresAt,
+        ...(nativeExecution ? { execution: nativeExecution } : {}) }
       const { sign } = await import('node:crypto')
       const signature = sign(null, Buffer.from(canonicalGrowthJson(body)), privateKey).toString('base64url')
       const certificate = { ...body, signature }

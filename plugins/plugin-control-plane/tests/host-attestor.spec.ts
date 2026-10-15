@@ -11,7 +11,10 @@ import { invokeConfiguredHostAttestor } from '../src/host-attestor.ts'
 import type { PluginControlTrustConfig } from '../src/trust.ts'
 import type { HostAttestationRequest } from '../src/types.ts'
 
-vi.mock('node:child_process', () => ({ spawn: vi.fn() }))
+vi.mock('node:child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return { ...actual, spawn: vi.fn() }
+})
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   return { ...actual, realpath: vi.fn(actual.realpath) }

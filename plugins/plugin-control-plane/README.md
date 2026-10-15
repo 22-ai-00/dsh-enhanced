@@ -310,13 +310,15 @@ sourceJobs:
 
 Growth Driver 同时启用 `pluginSourceProposals.allowCreation: true` 与 `preparationMode: durable`。Host 公开有效 `namePrefix`，模型只能选择该命名空间内尚不存在的插件，不能更改授权。读取和入队冻结实际 base、公共生成器及模板摘要、来源 owner、反馈修订与构建配置。候选只提交 `README.md`、`src/`（不含 `src/version.ts`）和 `tests/`；单文件 64 KiB、合计 256 KiB、最多 64 个文件，最终插件也包含模板保留文件计算此上限，受原有来源及取消 fence 约束。
 
-`sourceJobs.allowedModes` 可把 Host 的入队与恢复同时限制为 `create`、`modify`、`revise-created` 的非空子集；省略时保持旧版本的全部模式。原生 macOS 创建路径使用 `[create]`，已有修改或修订作业不能越过新的 Host 配置继续执行。
+`sourceJobs.allowedModes` 可把 Host 的入队与恢复同时限制为 `create`、`modify`、`revise-created` 的非空子集；省略时保持旧版本的全部模式。原生 macOS 构建要求显式选择 `create` 和/或 `revise-created`，不接受已有插件的 `modify`；旧作业不能越过新的 Host 配置继续执行。
 
 普通 owner 任务驱动的创建还须由 Growth Host 注册私有 run producer，冻结其持久 Usage 中的实际模型、模型来源、预算、原生 Automation occurrence、Agent session、工具/执行合同和任务来源。入队、原生 claim、构建检查点及独立验收读取均重新查询 producer，并比对当前 owner 与 Evaluation 来源；模型工具传入的字段只作为预期值。生成截止仅限制模型提交与同步入队，后续隔离构建仍使用独立的 Control Plane Policy 预算，并须处在原 Usage 来源窗口和创建授权期限内。producer 暂未就绪时未 claim 的创建保持 queued，Host 就绪时唤醒既有原生调度；注销会中止并排空已 claim 的创建，状态转为 unknown，不自动重放。旧任务创建行缺少 run binding 时仍可读取原字节和摘要，但不能继续派发或作为新验收包；旧手动创建不需要该字段。
 
-Host 在私有 worktree 使用该基线的 `scripts/create-plugin.mjs`，生成 manifest、patch、许可证、版本和构建配置，登记目录行，并只为新包追加锁文件 importer。依赖只能复用基线 catalog 的唯一既有解析，不进行网络解析、不改变已有 importers/packages/snapshots。生成器以固定 Node 执行路径、清理后的环境及有限运行时限运行；这属于可信基线的 Host 子进程，临时目录本身不构成操作系统沙箱。候选源码在原离线 Docker 构建器中检查；Host 在检查后重建生成器输出，复验保留文件、catalog 和 lock 字节。
+Host 在私有 worktree 使用该基线的 `scripts/create-plugin.mjs`，生成 manifest、patch、许可证、版本和构建配置，登记目录行，并只为新包追加锁文件 importer。依赖只能复用基线 catalog 的唯一既有解析，不进行网络解析、不改变已有 importers/packages/snapshots。生成器以固定 Node 执行路径、清理后的环境及有限运行时限运行；这属于可信基线的 Host 子进程，临时目录本身不构成操作系统沙箱。Host 在构建前后重建生成器输出，复验保留文件、catalog、lock 与精确 Git 源码快照。
 
-创建检查需要包含已验证基线锁文件的新构建镜像（运行 `node scripts/isolation/build-source-image.mjs`）。Host 复核实际归档的创建范围，容器核对原 Git 基线锁摘要与只读镜像 `/opt/dsh-source-baseline/pnpm-lock.yaml` 一致，才在 pnpm 11.7.0 的首次离线 frozen install 使用 `--trust-lockfile`。该选项跳过锁文件解析与供应链策略复核；已有解析已在镜像构建时通过策略验证，新 importer 不引入新解析。普通修改不使用此选项，旧镜像或不同基线均拒绝此创建检查。构建证据保留实际 Docker 参数及基线锁摘要。
+`sourceBuild.backend: macos-seatbelt` 选择纯 macOS 创建构建：Host 校验冻结的 Node/TypeScript/Cordis 依赖树，按原创建或修订授权复核 worktree，把候选 TypeScript 当作数据交给固定编译器，在无网络、无子进程的系统沙箱内作语义类型检查并生成 JS/声明文件。编译器不执行候选脚本、测试、tsconfig 插件或已生成 JS。Host 将受限输出与固定 manifest、README、LICENSE、patch 打成确定性的不超过 512 KiB 的 tar.gz，留存 v2 证据中的运行时摘要、固定编译器摘要和实际三项检查。v2 不声明 `pnpm check` 或 CPU、内存、磁盘硬配额；v1 Docker 证据及 Linux 修改/发布路径保持原样。原生作业使用单独的持久资源身份；unknown 只有经原生执行器的精确关闭回执核对后才释放，不调用 Docker 清理，也不自动重派。
+
+Linux Docker 创建检查需要包含已验证基线锁文件的新构建镜像（运行 `node scripts/isolation/build-source-image.mjs`）。Host 复核实际归档的创建范围，容器核对原 Git 基线锁摘要与只读镜像 `/opt/dsh-source-baseline/pnpm-lock.yaml` 一致，才在 pnpm 11.7.0 的首次离线 frozen install 使用 `--trust-lockfile`。该选项跳过锁文件解析与供应链策略复核；已有解析已在镜像构建时通过策略验证，新 importer 不引入新解析。普通修改不使用此选项，旧镜像或不同基线均拒绝此创建检查。构建证据保留实际 Docker 参数及基线锁摘要。
 
 `creation.id` 对应的授权定义不可变，累计用量独立持久保存；更换 `sourceJobs.authorityId`、重启或修改构建配置不会重置同一创建授权。接受的失败/unknown 尝试仍消费创建额度，同一幂等请求不重复扣取。实际创建同时受 `maxSubmissions`、Policy 预算及全账本单 outstanding job 上限约束。
 
@@ -636,7 +638,7 @@ Host-only `recordOwnerTaskFailureGap(source)` 将经 Delivery 再验证的 foreg
 
 ## 权限
 
-- 插件 Host service：启用 `sourceApprovals` 时执行固定的 owner helper（可读其配置、私钥和私有审批账本），Host 只消费签名回执；读取 catalog/trust，写 owner-private SQLite/WAL；启用源码读取或准备时执行受限 Git，启用 `sourceJobs.baseline` 时还会从指定本地 bare 仓库导入对象并写入专用 `refs/dsh-source/` 引用；启用 `sourceJobs.creation` 时执行冻结基线的公共生成器并写临时模板目录、私有 worktree、目录行和新锁文件 importer；启用 `sourceBuild`/`sourceJobs` 时调用 owner 配置的离线容器构建。模型不能选择可执行文件、网络或凭据；Host 不使用浏览器。
+- 插件 Host service：启用 `sourceApprovals` 时执行固定的 owner helper（可读其配置、私钥和私有审批账本），Host 只消费签名回执；读取 catalog/trust，写 owner-private SQLite/WAL；启用源码读取或准备时执行受限 Git，启用 `sourceJobs.baseline` 时还会从指定本地 bare 仓库导入对象并写入专用 `refs/dsh-source/` 引用；启用 `sourceJobs.creation` 时执行冻结基线的公共生成器并写临时模板目录、私有 worktree、目录行和新锁文件 importer；启用 Docker `sourceBuild` 时调用 owner 配置的离线容器构建，启用原生 macOS `sourceBuild` 时执行固定编译器及 Host 打包，读取冻结依赖树并写 owner-private 持久账本、工作目录和回执。模型不能选择可执行文件、网络或凭据；Host 不使用浏览器。
 - owner CLI `activate`：读取/复制/rename/恢复 DSH profile，并执行固定 DSH executable。
 - owner CLI `probe`：执行固定 Host attestor，只有严格 allowlist 环境；不读取 attestation 私钥，不使用 shell或网络客户端。
 - owner CLI `scaffold`：仅在审批绑定的 linked worktree 中运行固定边界内的 `git` / `pnpm`。
