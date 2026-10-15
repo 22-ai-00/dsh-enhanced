@@ -171,7 +171,8 @@ Growth 的 owner-anchored workflow 证据桥（见 `assistant-growth-driver` 的
 - 网络：插件不直接发网络请求；Agent automation 会通过宿主 DSH LLM provider 调用已批准的模型，Host automation 则调用已注册插件执行器。执行器和白名单工具各自声明的网络权限仍独立生效。
 - Proactive 草稿：显式开启的准备会把目标文本发送给其配置的宿主模型 provider，并保存独立 Session ID、有限 usage 和未验收草稿；它不获取工具、文件、浏览器或消息发送权限。该模型网络依赖和上述持久数据仅在 `assistant-proactive` 显式开启 `preparation` 后存在。
 - 消息投递：`assistant-delivery` 是可选 peer；只有 automation 固定了 `deliveryBindingId` 且后台 send 策略允许时才会 enqueue。该服务不存在时，run 保持 `deliveryStatus: pending`，完整结果仍可从本地 artifact 获取。
-- 子进程、凭据、浏览器、安装脚本：本插件自身无。白名单工具的独立权限仍然生效，assistant-policy 只能进一步拒绝，不能替代 OS/container 隔离。
+- 子进程、凭据、浏览器、安装脚本：macOS 的只读 operator inventory 会用固定系统 `/usr/bin/perl` 子进程，对显式继承的数据库/WAL/SHM 文件描述符查询 POSIX 写锁，并通过固定的私有目录描述符清理快照副本；不向它传数据库路径或凭据，环境仅含固定的 PATH/locale 与描述符数量。其余插件运行不自行启动子进程。白名单工具的独立权限仍然生效，assistant-policy 只能进一步拒绝，不能替代 OS/container 隔离。
+- macOS operator inventory 拒绝读取本进程已经打开的同一数据库或 WAL/SHM inode，避免关闭临时描述符时释放该进程持有的 SQLite POSIX 锁；系统 Perl 辅助进程缺失或锁查询无法判定时按数据库忙碌拒绝。
 - 模型成本：每个 occurrence 可产生一个或多个 LLM step。默认要求 immutable `budgetId`/`budgetAmount`，并在 Agent 创建前预留 Policy budget；只有显式设置 `allowUnbudgetedExecution: true` 才能绕过。runner 会通过 Policy 的只读配置接口证明该 budget 的 metric 精确为 `automation-runs`，其他单位在 reserve 和 Agent 创建前 fail closed。reservation 幂等键同时绑定 automation、occurrence、definition hash、metric 和 budget；唯一允许读取 finalized receipt 的 Recovery 恢复路径不会再次结算预算，executor 自身以同一 operation key 返回已有 terminal result。
 - 每次执行使用可信配置的固定 per-run cost，并始终按完整 `budgetAmount` finalize（通常设为 `1`，budget limit 表示周期内允许的运行次数）；provider usage 只保留为执行证据/审计，不参与退款或换算。因此 input/cache/reasoning 的不可知上界和沉默 CLI/ACP route 都不会突破执行前已预留的硬上限。只有能确定 Agent 尚未提交时才 release。
 - 保留与备份：删除 run artifacts 不改变账本，但会失去完整输出；备份时一致性复制 SQLite（含 WAL）和 runs 目录。prompt、输出与 usage 可能含私人信息。

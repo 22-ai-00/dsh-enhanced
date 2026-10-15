@@ -531,7 +531,7 @@ describe('read-only Automations operator snapshot', () => {
     }
   })
 
-  test('fails closed (busy) when /proc/locks cannot be read', async () => {
+  test.runIf(process.platform === 'linux')('fails closed (busy) when /proc/locks cannot be read', async () => {
     const f = await fixture(); f.store.close()
     procLocksReadFailure = true
     expectCode(() => inspectAutomationsOperatorSnapshot(f.path), 'database-busy')
