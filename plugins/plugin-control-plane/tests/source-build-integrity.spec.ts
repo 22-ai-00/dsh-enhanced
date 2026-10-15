@@ -186,11 +186,11 @@ case "$1" in
     fi
     cd "$TEST_WORKSPACE/plugins/helper"
     case "$TEST_MUTATION" in
-      pack-missing) tar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" ${archivePrefix('package/')} package.json README.md LICENSE bin run.sh lib;;
-      pack-missing-entry) tar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" ${archivePrefix('package/')} package.json cordis.patch.yml README.md LICENSE bin run.sh;;
-      pack-duplicate) tar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" ${archivePrefix('package/')} package.json package.json cordis.patch.yml README.md LICENSE bin run.sh lib;;
-      pack-unsafe) tar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" ${archivePrefix('../package/')} package.json cordis.patch.yml README.md LICENSE bin run.sh lib;;
-      *) tar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" ${archivePrefix('package/')} package.json cordis.patch.yml README.md LICENSE bin run.sh lib;;
+      pack-missing) tar --format=ustar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" ${archivePrefix('package/')} package.json README.md LICENSE bin run.sh lib;;
+      pack-missing-entry) tar --format=ustar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" ${archivePrefix('package/')} package.json cordis.patch.yml README.md LICENSE bin run.sh;;
+      pack-duplicate) tar --format=ustar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" ${archivePrefix('package/')} package.json package.json cordis.patch.yml README.md LICENSE bin run.sh lib;;
+      pack-unsafe) tar --format=ustar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" ${archivePrefix('../package/')} package.json cordis.patch.yml README.md LICENSE bin run.sh lib;;
+      *) tar --format=ustar -czf "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" ${archivePrefix('package/')} package.json cordis.patch.yml README.md LICENSE bin run.sh lib;;
     esac
     if [ "$TEST_MUTATION" = pack-symlink ]; then
       mv "$TEST_WORKSPACE/.dsh-pack/helper-1.0.0.tgz" "$TEST_SCRATCH/original-pack.tgz"
@@ -221,7 +221,7 @@ esac
     delete childEnvironment.DSH_SOURCE_BASE_LOCK_SHA256
     delete childEnvironment.DSH_SOURCE_CAPTURE_PACK
     const child = spawn('/bin/sh', ['-ceu', script], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...childEnvironment, PATH: `${bin}:${process.env.PATH ?? ''}`, PLUGIN_ROOT: 'plugins/helper',
+      env: { ...childEnvironment, COPYFILE_DISABLE: '1', PATH: `${bin}:${process.env.PATH ?? ''}`, PLUGIN_ROOT: 'plugins/helper',
         TEST_WORKSPACE: workspace, TEST_SCRATCH: scratch, TEST_MUTATION: mutation,
         ...(capture ? { DSH_SOURCE_CAPTURE_PACK: 'true' } : {}),
         ...(trust === undefined ? {} : { DSH_SOURCE_TRUST_LOCKFILE: 'true',

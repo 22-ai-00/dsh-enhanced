@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
@@ -16,7 +16,7 @@ function git(root: string, ...args: string[]): string {
 }
 
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), 'created-source-'))
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'created-source-')))
   roots.push(root)
   git(root, 'init', '-q')
   git(root, 'config', 'user.name', 'Source Test')

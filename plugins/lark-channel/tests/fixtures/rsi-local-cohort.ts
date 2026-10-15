@@ -66,7 +66,9 @@ export async function localCohortFixture(peerGraph = false) {
       await copyFile(join(workspace, path, 'LICENSE'), join(packedRoot, 'LICENSE'))
       if (path.startsWith('plugins/')) await copyFile(join(workspace, path, 'cordis.patch.yml'), join(packedRoot, 'cordis.patch.yml'))
       await chmod(join(packedRoot, 'lib', 'index.js'), 0o644)
-      run('/usr/bin/tar', ['-czf', join(output, slug, `${slug}.tgz`), 'package'], join(output, '.packing', slug))
+      execFileSync('/usr/bin/tar', ['--format=ustar', '-czf', join(output, slug, `${slug}.tgz`), 'package'], {
+        cwd: join(output, '.packing', slug), env: { ...process.env, COPYFILE_DISABLE: '1' },
+      })
     }
   } }
   return { root, home, sourceRepository, profile, version, source, ports, get builds() { return builds } }

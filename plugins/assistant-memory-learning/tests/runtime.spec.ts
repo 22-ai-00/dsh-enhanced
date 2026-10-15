@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -17,7 +17,7 @@ type Source = { inboxId: string; sequence: number; digest: string; input: string
   model: { provider: string; model: string; reasoningEffort: string }; completedAt: number }
 
 async function fixture(options: { maxPending?: number; maxExtractions?: number; nativeBudget?: boolean; reviewAvailable?: boolean } = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'memory-learning-runtime-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'memory-learning-runtime-')))
   const ctx = new Context()
   const owner = { authorityId: 'owner-route', authorityHash: 'a'.repeat(64), principalId: 'lark/primary/personal/ou_owner',
     principalRecordId: 'principal-one', principalVersion: 1, workspace: root, agentPreset: 'primary' }

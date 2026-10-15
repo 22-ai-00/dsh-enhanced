@@ -14,16 +14,17 @@
 
 ## 当前交付
 
-原生 macOS 学习的代码已集成，尚未发布到 npm。Node Host 由当前用户 launchd 管理，Docker Desktop 的 Linux 容器承担候选构建与隔离验证；支持 x64/arm64、持久记忆、新工具独立验证与动态采用。有限授权、原模型合同、安装恢复、运行时就绪与 unknown 不重放保持有效。既有插件源码替换、发布与双 Host 交接仍限 Linux；不声称与 Linux 完整源码修复轨等价。
+当前目标已切换为**纯 macOS 原生运行，不依赖 Docker**。Host 使用当前用户 launchd；跨 Home 归属校验、生命周期锁、稳定 PID、失败恢复和运行就绪已有实现。现有完整候选构建/验证仍是容器合同，不能因原生执行 API 可用就宣称无 Docker 的完整 RSI 已接通。
 
-飞书安装现可只读组合 Electron 专管的 `desktop` profile，继续核对 Delivery/owner 冲突。macOS 升级可将确认未使用的官方 `0.1.49` 源码准备完整归档，再准备新来源；已有修改、维护提交或运行资源会阻止自动迁移。使用方式与前置条件见[原生 macOS 学习](../plugins/lark-channel/docs/rsi-setup.md#原生-macos-学习)。
+本轮交付原生单进程执行基础层：固定摘要 Node、deny-default 系统沙箱、只读运行依赖、默认只读工作目录、禁止联网与子进程、有限输入输出和超时/取消后的关闭证明。它尚未接入模型工具或候选流水线；持久授权、预算、重启恢复仍由上层负责，且不提供 Docker 的内存/CPU/磁盘硬配额。批准读取目录的内容必须由可信 Host 准备，目录身份回执不认证其全部内容。详见 [Assistant Isolation](../plugins/assistant-isolation/README.md#native-macos-execution-primitive)。
 
-macOS 服务复查修复同名 profile 跨 Home 覆盖、停止失败仍删定义、仅注册即报运行和清理时误杀未知进程的问题。安装与 CLI 共用 launchd 目标锁；purge 另持 Home 锁贯穿备份与删除，保留锁 inode。普通服务替换失败会尝试恢复旧定义及注册状态；启动核对稳定 PID，重启核对新 PID，运行状态只取服务顶层字段，避免混入资源组状态。救机脚本只委托具备新归属校验能力的 Mac CLI。
+同时修复 macOS 默认临时目录别名导致的真实新插件生成失败，并修正 Mac 路径、BSD tar、Homebrew Node 动态库和 Node 26 测试加载器兼容问题。本机验证保留系统默认 TMPDIR；对应 CI 增强已单独准备，推送仍受 GitHub OAuth `workflow` 权限限制。既有插件源码替换、发布与双 Host 交接仍限 Linux。
 
 ## 最新验证与下一验收
 
-- Linux 本机 `VITEST_MAX_WORKERS=2 PNPM_CONFIG_WORKSPACE_CONCURRENCY=2 pnpm check` 退出 0：8,705 项通过、62 项跳过，包含构建、类型检查、lint 与 37 个包 dry-run pack。清理脚本的晚改另有 5 项回归通过；新增服务归属、锁和控制模块均进入打包清单。跨包真实内核锁互斥及 Mac 安装/清理的模拟回归通过；真实 Mac 行为以 CI 和后续实机验收为准。
-- Linux x64 构建/验证镜像构建和 AArch64 launcher 交叉编译通过；交叉编译不构成 arm64 执行证据。跨平台工程结果以对应提交的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/workflows/ci.yml) 为准；macOS job 已接入可用 GUI session 下的服务替换及安装器 → CLI 检查/重启/停止 smoke，显式跳过不构成运行证据。
-- 本次按用户选择交付代码与 CI，真实 Mac 的完整安装、Docker Desktop 和普通使用验收暂缓。后续仍需验证普通任务驱动的新工具创建 → 独立验证 → 动态采用 → 后续任务复用，覆盖纠正、撤回与重启；工程检查不能证明长期质量、成本、延迟或回归收益。
+- Apple Silicon macOS 26.6.2 上，Node 26.11.1 与私有官方 Node 24.22.0 的原生执行测试分别 11 项通过；真实 Cordis 工具在沙箱中注册、发现、调用、卸载成功，探针均退出 0。原生边界独立审查 PASS。新临时 Home 已装入 `core` profile，`doctor.sh --profile mac-zhgkns` 退出 0，实际激活全部启用插件；该安装未配置完整 supervised 身份与模型，不替代完整安装验收。
+- 真实 launchd 安装器/CLI/锁回归 35 项通过。Mac `pnpm check` 本次退出 1：Control Plane 844 项、Isolation 124 项通过，随后偏好学习的一项事件时序断言失败。该夹具现已注入递增事件时间，修后偏好学习整包 91 项、类型检查和 lint 通过；没有将定向结果记为全仓通过。独立 `pnpm run pack:check` 退出 0，37 个包均列出，包含原生执行 API 的 JS/声明产物。最终集成仍须重新通过完整检查。
+- 被平台条件跳过的 Linux、Docker 和真实模型测试不构成运行证据。跨平台结果以精确提交的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/workflows/ci.yml) 为准。
+- 下一验收是把原生执行接入固定构建、独立行为验证、持久预算和 unknown 不重放，再通过无 Docker 的安装/运行就绪。随后验证普通任务驱动的新工具创建、动态采用、复用、纠正、撤回与重启；工程检查不能证明长期收益。
 
-本次复查日志位于忽略目录 `docs/evidence/macos-audit/`，原生学习移植证据在 `docs/evidence/macos-native/`。发布遵循[发布协议](releasing.md)。
+本轮实机原始日志位于忽略目录 `docs/evidence/macos-native-20261015/`。上述改动尚未发布到 npm，`0.1.49` 不含本轮修复。发布遵循[发布协议](releasing.md)。

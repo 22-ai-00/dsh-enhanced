@@ -1100,6 +1100,8 @@ describe('owner-scoped native goal context', () => {
     ])
     let record!: ReturnType<AssistantGoalsService['create']>
     let requests = 0
+    let releaseFirstRound!: () => void
+    const firstRoundGate = new Promise<void>(resolve => { releaseFirstRound = resolve })
     class Adapter extends LlmAdapter {
       async *stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
         requests++
@@ -1119,6 +1121,8 @@ describe('owner-scoped native goal context', () => {
           yield { type: 'finish', reason: { kind: 'tool-calls' } }
           return
         }
+        // Keep the first goal round in flight until its exact native state is observed.
+        if (requests === 3) await firstRoundGate
         yield { type: 'block-start', index: 0, blockType: 'text' }
         yield { type: 'text-delta', index: 0, text: 'The report is ready for independent verification.' }
         yield { type: 'block-end', index: 0, block: { type: 'text', text: 'The report is ready for independent verification.' } }
@@ -1131,7 +1135,12 @@ describe('owner-scoped native goal context', () => {
     await agent.whenIdle()
     expect(f.ctx.fiber.state).toBe(2)
     record = f.service.create(agent, objective, 2)
-    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
+    try {
+      await vi.waitFor(() => {
+        expect(requests).toBe(3)
+        expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1)
+      }, { timeout: 2_000 })
+    } finally { releaseFirstRound() }
     await vi.waitFor(() => expect(requests).toBe(5), { timeout: 2_000 })
     await agent.whenIdle(); await f.service.whenIdle()
     const complete = f.service.inspect(agent, record.id)

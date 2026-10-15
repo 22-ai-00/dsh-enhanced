@@ -4,10 +4,12 @@ import { chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { deliverySchemaVersion, DeliveryDatabaseError, openDeliveryDatabase } from '../src/sqlite.ts'
 
 const roots: string[] = []
+const loader = fileURLToPath(new URL('./fixtures/ts-source-loader.mjs', import.meta.url))
 
 async function openDeliveryConcurrently(path: string, start: string, count = 12): Promise<void> {
   const moduleUrl = new URL('../src/sqlite.ts', import.meta.url).href
@@ -22,7 +24,7 @@ async function openDeliveryConcurrently(path: string, start: string, count = 12)
   `
   const openChild = () => new Promise<void>((resolve, reject) => {
     const child = spawn(process.execPath, [
-      '--no-warnings', '--experimental-transform-types',
+      '--no-warnings', '--loader', loader,
       '--input-type=module', '--eval', childSource,
     ], { stdio: ['ignore', 'ignore', 'pipe'] })
     let stderr = ''
@@ -438,7 +440,7 @@ describe('delivery SQLite boundary', () => {
       database.close();
     `
     const child = spawn(process.execPath, [
-      '--no-warnings', '--experimental-transform-types',
+      '--no-warnings', '--loader', loader,
       '--input-type=module', '--eval', childSource,
     ], { stdio: ['ignore', 'ignore', 'pipe'] })
     let stderr = ''

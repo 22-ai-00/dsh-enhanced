@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { cp, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { cp, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -11,7 +11,7 @@ const created: string[] = []
 afterEach(async () => { await Promise.all(created.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
 
 async function fixture() {
-  const parent = await mkdtemp(join(tmpdir(), 'managed host runtime '))
+  const parent = await realpath(await mkdtemp(join(tmpdir(), 'managed host runtime ')))
   created.push(parent)
   const root = join(parent, 'private cache')
   await mkdir(root, { mode: 0o700 })

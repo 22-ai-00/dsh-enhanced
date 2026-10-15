@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -27,7 +27,7 @@ function reference(): OwnerTaskFailureReference {
 }
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'control-plane-source-artifact-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'control-plane-source-artifact-'))); roots.push(root)
   const path = join(root, 'state.sqlite')
   let clock = NOW
   const store = new ControlPlaneStore({ path, now: () => clock })

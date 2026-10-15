@@ -9676,6 +9676,9 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
 
   test('an agent-route default verifies structurally instead of a headless model call', async () => {
     const dshHome = await temporaryDshHome()
+    const fakeBin = join(dshHome, 'fake-bin')
+    await mkdir(fakeBin)
+    await writeExecutable(join(fakeBin, 'dsh'), '#!/bin/bash\nexit 1\n')
     // The runtime resolves the settings.yaml user-layer selection, which is what
     // the verifier reads; a real run would have just written it.
     await writeFile(join(dshHome, 'settings.yaml'),
@@ -9683,7 +9686,7 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
 
     const result = runInstaller(localInstaller, [
       '--dry-run', '--lark', 'skip', '--model-route', 'verify',
-    ], dshHome)
+    ], dshHome, undefined, { PATH: `${fakeBin}:${pathWithoutTraex}` })
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('agent route traex-agent 不发送模型请求')
@@ -10003,9 +10006,13 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
 
   test('auto-discovers trae-cli as an executable path and enables its profile route and default', async () => {
     const f = await autoTraexSetupFixture('trae-cli', true)
+    const detected = spawnSync('/bin/bash', ['-c', 'PATH="$2"; export PATH; source "$1"; dsh_enhanced_detect_traex_command',
+      'installer-test', installerLibrary, f.environment.PATH], { encoding: 'utf8', env: f.environment })
+    expect(detected.status, detected.stderr).toBe(0)
+    expect(detected.stdout).toBe(f.commandPath)
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; detected="$(dsh_enhanced_detect_traex_command)"; dsh_enhanced_apply_auto_traex web "$2" "$detected" 1 0',
-      'installer-test', installerLibrary, f.dshHome,
+      '-c', 'PATH="$3"; export PATH; source "$1"; detected="$(dsh_enhanced_detect_traex_command)"; dsh_enhanced_apply_auto_traex web "$2" "$detected" 1 0',
+      'installer-test', installerLibrary, f.dshHome, f.environment.PATH,
     ], { encoding: 'utf8', env: f.environment })
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain(`TraeX 自动接入：${f.commandPath}`)

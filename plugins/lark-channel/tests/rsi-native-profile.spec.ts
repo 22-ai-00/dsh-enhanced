@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { parse, stringify } from 'yaml'
@@ -21,7 +20,7 @@ import { compileNativeRsiProfile, type NativeRsiProfileInput } from '../src/rsi-
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 async function fixture(): Promise<NativeRsiProfileInput> {
-  const root = await mkdtemp(join(await realpath(tmpdir()), 'nr-')); roots.push(root)
+  const root = await mkdtemp(join(await realpath('/tmp'), 'nr-')); roots.push(root)
   const home = join(root, 'h'), workspace = join(root, 'w'), sourceRoot = join(root, 's'), release = join(root, 'r')
   for (const path of [home, workspace, sourceRoot, release, join(home, 'profiles', 'web')]) await mkdir(path, { recursive: true })
   const resources = await prepareRsiAuthorityResources({ dshHome: home, profile: 'web' })

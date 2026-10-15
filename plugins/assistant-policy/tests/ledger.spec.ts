@@ -28,7 +28,7 @@ function migrationWorker(path: string, phase: SharedArrayBuffer): {
   const loader = fileURLToPath(new URL('./fixtures/ts-source-loader.mjs', import.meta.url))
   const worker = new Worker(new URL('./fixtures/policy-migration-worker.mjs', import.meta.url), {
     workerData: { path, phase },
-    execArgv: ['--no-warnings', '--experimental-transform-types', '--loader', loader],
+    execArgv: ['--no-warnings', '--loader', loader],
   })
   const ready = new Promise<void>((resolve, reject) => {
     worker.once('error', reject)

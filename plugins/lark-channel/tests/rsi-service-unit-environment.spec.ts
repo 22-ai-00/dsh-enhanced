@@ -1,5 +1,5 @@
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -15,7 +15,7 @@ afterEach(async () => {
 })
 
 test('standing schema-4 checks the loaded unit environment before starting the Host', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'rsi-unit-environment-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'rsi-unit-environment-'))); roots.push(root)
   const path = join(root, 'wrapper.json'), expected = 'DSH_HOME=/private/home DSH_RELEASE_PR_CONFIG=/private/pr.json'
   await writeFile(path, JSON.stringify({ schemaVersion: 4, template: { unitProperties: { Environment: expected } } }), { mode: 0o600 })
   const readback = (stdout: string, status = 0) => vi.mocked(spawnSync).mockReturnValue({ stdout, status } as SpawnSyncReturns<string>)

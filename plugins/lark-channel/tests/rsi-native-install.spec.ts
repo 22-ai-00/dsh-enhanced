@@ -1,7 +1,6 @@
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { installNativeRsiOwnerDeployment, type NativeRsiInstallPorts } from '../src/rsi-native-install.ts'
@@ -11,7 +10,7 @@ const homes: string[] = []
 afterEach(async () => { await Promise.all(homes.splice(0).map(home => rm(home, { recursive: true, force: true }))) })
 
 async function fixture() {
-  const home = await realpath(await mkdtemp(join(tmpdir(), 'dsh-native-install-'))); homes.push(home)
+  const home = await mkdtemp(join(await realpath('/tmp'), 'dsh-native-install-')); homes.push(home)
   const dshHome = join(home, '.dsh'), profile = `native-${process.pid}-${randomUUID().slice(0, 8)}`
   const profileRoot = join(dshHome, 'profiles', profile)
   const configRoot = join(dshHome, 'rsi-authorities', profile, 'config')
@@ -60,6 +59,17 @@ async function fixture() {
 }
 
 describe('native RSI installation transaction', () => {
+  test('rejects a DSH_HOME whose native observer socket exceeds the path limit', async () => {
+    const f = await fixture()
+    const dshHome = join(f.home, 'x'.repeat(90))
+    await mkdir(join(dshHome, 'profiles', f.input.profile), { recursive: true, mode: 0o700 })
+    expect(Buffer.byteLength(join(dshHome, '.rsi-123456789012', 'observe.sock'))).toBeGreaterThan(100)
+    await expect(installNativeRsiOwnerDeployment({ ...f.input, dshHome }, f.ports))
+      .rejects.toThrow('DSH_HOME is too long for a native Unix socket')
+    expect(f.ports.stop).not.toHaveBeenCalled()
+    expect(f.ports.start).not.toHaveBeenCalled()
+  })
+
   test.each(['patch', 'plist'])('rejects a group-writable %s before stopping the Host', async kind => {
     const f = await fixture()
     const path = kind === 'patch' ? f.patchPath : f.paths.plistPath

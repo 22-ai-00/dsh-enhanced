@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { hasPendingHostRecovery, runInstall } from '../src/install.ts'
@@ -243,7 +243,7 @@ describe('runInstall（薄委托）', () => {
   })
 
   test.each([false, true])('upgrade fences cross-ABI changes before delegating the cohort (legacy=%s)', async legacy => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-host-plan-test-'))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-rsi-host-plan-test-')))
     try {
       const home = join(root, 'home')
       await mkdir(home)
@@ -285,7 +285,7 @@ describe('runInstall（薄委托）', () => {
   })
 
   test('upgrade preserves an unbound Home and dry-run never prepares a Host', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-unbound-test-'))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-rsi-unbound-test-')))
     try {
       const home = join(root, 'home')
       await mkdir(home)
@@ -306,7 +306,7 @@ describe('runInstall（薄委托）', () => {
   })
 
   test('v4 rename gap invokes recovery before Host preparation and returns for preflight', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-host-recovery-test-'))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-rsi-host-recovery-test-')))
     try {
       const home = join(root, 'home')
       const transaction = `${home}.dsh-enhanced-transaction`

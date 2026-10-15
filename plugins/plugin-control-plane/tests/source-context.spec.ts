@@ -205,20 +205,18 @@ describe('committed source targets', () => {
     await expect(targets(join(root, 'plugins/health-helper'))).rejects.toThrow('top-level')
   })
 
-  it('rejects malformed, mismatched, binary and invalid description manifests', async () => {
+  it.each([
+    ['malformed JSON', '{'],
+    ['mismatched identity', JSON.stringify({ name: '@dsh-enhanced/other-helper' })],
+    ['description control characters', JSON.stringify({ name: '@dsh-enhanced/health-helper', description: 'a\nb' })],
+    ['oversized description', JSON.stringify({ name: '@dsh-enhanced/health-helper', description: '界'.repeat(171) })],
+    ['binary bytes', Buffer.from([0x7b, 0x80, 0x7d])],
+  ] as const)('rejects %s plugin manifest', async (_case, content) => {
     const { root } = await targetFixture()
     const path = join(root, 'plugins/health-helper/package.json')
-    for (const content of [
-      '{',
-      JSON.stringify({ name: '@dsh-enhanced/other-helper' }),
-      JSON.stringify({ name: '@dsh-enhanced/health-helper', description: 'a\nb' }),
-      JSON.stringify({ name: '@dsh-enhanced/health-helper', description: '界'.repeat(171) }),
-      Buffer.from([0x7b, 0x80, 0x7d]),
-    ]) {
-      await writeFile(path, content)
-      commit(root, 'invalid plugin manifest')
-      await expect(targets(root)).rejects.toThrow(/manifest|description/u)
-    }
+    await writeFile(path, content)
+    commit(root, 'invalid plugin manifest')
+    await expect(targets(root)).rejects.toThrow(/manifest|description/u)
   })
 
   it('rejects per-manifest, aggregate and eligible count bounds rather than returning a partial directory', async () => {
