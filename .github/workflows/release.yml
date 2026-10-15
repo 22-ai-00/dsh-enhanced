@@ -15,6 +15,9 @@ concurrency:
   group: npm-release
   cancel-in-progress: false
 
+env:
+  VITEST_MAX_WORKERS: '2'
+
 jobs:
   publish:
     runs-on: ubuntu-latest
