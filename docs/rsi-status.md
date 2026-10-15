@@ -18,12 +18,12 @@
 
 飞书安装现可只读组合 Electron 专管的 `desktop` profile，继续核对 Delivery/owner 冲突。macOS 升级可将确认未使用的官方 `0.1.49` 源码准备完整归档，再准备新来源；已有修改、维护提交或运行资源会阻止自动迁移。使用方式与前置条件见[原生 macOS 学习](../plugins/lark-channel/docs/rsi-setup.md#原生-macos-学习)。
 
-macOS 服务复查修复同名 profile 跨 Home 覆盖、停止失败仍删定义、仅注册即报运行和清理时误杀未知进程的问题。安装与 CLI 共用 launchd 目标锁；purge 另持 Home 锁贯穿备份与删除，保留锁 inode。普通服务替换失败会尝试恢复旧定义及注册状态；启动核对稳定 PID，重启核对新 PID。救机脚本只委托具备新归属校验能力的 Mac CLI。
+macOS 服务复查修复同名 profile 跨 Home 覆盖、停止失败仍删定义、仅注册即报运行和清理时误杀未知进程的问题。安装与 CLI 共用 launchd 目标锁；purge 另持 Home 锁贯穿备份与删除，保留锁 inode。普通服务替换失败会尝试恢复旧定义及注册状态；启动核对稳定 PID，重启核对新 PID，运行状态只取服务顶层字段，避免混入资源组状态。救机脚本只委托具备新归属校验能力的 Mac CLI。
 
 ## 最新验证与下一验收
 
 - Linux 本机 `VITEST_MAX_WORKERS=2 PNPM_CONFIG_WORKSPACE_CONCURRENCY=2 pnpm check` 退出 0：8,705 项通过、62 项跳过，包含构建、类型检查、lint 与 37 个包 dry-run pack。清理脚本的晚改另有 5 项回归通过；新增服务归属、锁和控制模块均进入打包清单。跨包真实内核锁互斥及 Mac 安装/清理的模拟回归通过；真实 Mac 行为以 CI 和后续实机验收为准。
-- Linux x64 构建/验证镜像构建和 AArch64 launcher 交叉编译通过；交叉编译不构成 arm64 执行证据。跨平台工程结果以对应提交的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/workflows/ci.yml) 为准；macOS job 已接入可用 GUI session 下的 launchd smoke，显式跳过不构成运行证据。
+- Linux x64 构建/验证镜像构建和 AArch64 launcher 交叉编译通过；交叉编译不构成 arm64 执行证据。跨平台工程结果以对应提交的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/workflows/ci.yml) 为准；macOS job 已接入可用 GUI session 下的服务替换及安装器 → CLI 检查/重启/停止 smoke，显式跳过不构成运行证据。
 - 本次按用户选择交付代码与 CI，真实 Mac 的完整安装、Docker Desktop 和普通使用验收暂缓。后续仍需验证普通任务驱动的新工具创建 → 独立验证 → 动态采用 → 后续任务复用，覆盖纠正、撤回与重启；工程检查不能证明长期质量、成本、延迟或回归收益。
 
 本次复查日志位于忽略目录 `docs/evidence/macos-audit/`，原生学习移植证据在 `docs/evidence/macos-native/`。发布遵循[发布协议](releasing.md)。

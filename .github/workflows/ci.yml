@@ -269,7 +269,7 @@ jobs:
           pnpm --filter @dsh-enhanced/lark-channel exec vitest run --testTimeout=15000 tests/rsi-native-profile.spec.ts tests/rsi-native-install.spec.ts tests/rsi-native-launchd.spec.ts tests/native-lifecycle-lock.spec.ts tests/rsi-local-install.spec.ts tests/rsi-build.spec.ts tests/rsi-creation-build.spec.ts tests/rsi-source.spec.ts tests/rsi-source-cli.spec.ts tests/setup.spec.ts
           pnpm --filter @dsh-enhanced/lark-channel exec vitest run --testTimeout=15000 tests/launchd.spec.ts tests/launchd-control.spec.ts
           pnpm --filter @dsh-enhanced/dsh-rsi-cli exec vitest run --testTimeout=15000
-          pnpm exec vitest run --testTimeout=15000 --dir tests tests/macos-launchd-lock.spec.ts tests/macos-purge-fallback.spec.ts tests/install-setup-runtime.spec.ts
+          pnpm exec vitest run --testTimeout=15000 --dir tests tests/macos-launchd-lock.spec.ts tests/macos-launchd-service.spec.ts tests/macos-purge-fallback.spec.ts tests/install-setup-runtime.spec.ts
 
       - name: Verify repository
         id: repository

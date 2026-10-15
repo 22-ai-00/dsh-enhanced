@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { collectStatus } from '../src/diagnose.ts'
+import { inspectLoadedLaunchd } from '../src/launchd-service.ts'
 import { resolveManagedWebUrl } from '../src/weburl.ts'
 import type { CommandResult, CommandRunner } from '../src/run.ts'
 import {
@@ -55,7 +56,8 @@ function managedPlist(home: string, dshHome = join(home, '.dsh')): string {
 
 function loadedJob(home: string, dshHome = join(home, '.dsh'), pid = 0, state = pid > 1 ? 'running' : 'waiting'): string {
   return `path = ${join(home, 'Library', 'LaunchAgents', 'ai.deepseek.dsh.profile.web.plist')}\n`
-    + `state = ${state}\nworking directory = ${join(dshHome, 'profiles', 'web')}\nDSH_HOME => ${dshHome}\n`
+    + `state = ${state}\nworking directory = ${join(dshHome, 'profiles', 'web')}\n`
+    + `environment = {\n  DSH_HOME => ${dshHome}\n  PATH => /usr/bin\n}\n`
     + `program = /usr/bin/node\narguments = {\n  /usr/bin/node\n  /opt/dsh/bin/dsh.js\n  --profile\n  web\n  --no-open\n}\npid = ${pid}\n`
 }
 
@@ -386,6 +388,28 @@ describe('controlManagedService', () => {
     const url = await resolveManagedWebUrl('darwin', home, dshHome, 'web', runner)
     expect(url.url).toBeUndefined()
     expect(url.notice).toMatch(/未运行/)
+  })
+
+  test('macOS：只读取顶层 state；coalition 的同名字段不能覆盖或冒充', () => {
+    const label = 'ai.deepseek.dsh.profile.web'
+    const dshHome = join(home, '.dsh')
+    const definition = { label, path: join(home, 'Library', 'LaunchAgents', `${label}.plist`),
+      cwd: join(dshHome, 'profiles', 'web'), program: '/usr/bin/node',
+      args: ['/usr/bin/node', '/opt/dsh/bin/dsh.js', '--profile', 'web', '--no-open'] }
+    const target = `gui/${process.getuid?.() ?? process.env.UID}/${label}`
+    const nested = '\nresource coalition = {\n  state = active\n  pid = 999\n}\n'
+    const inspect = (stdout: string) => inspectLoadedLaunchd(definition, dshHome,
+      () => ({ status: 0, stdout, stderr: '' }))
+    const running = loadedJob(home, dshHome, 321)
+    expect(inspect(running + nested)).toMatchObject({ registered: true, pid: 321, running: true })
+    expect(inspect(`${target} = {\n${running}${nested}}\n`)).toMatchObject({ registered: true, pid: 321, running: true })
+    const waiting = loadedJob(home, dshHome, 321, 'waiting')
+    expect(inspect(waiting + '\nresource coalition = {\n  state = running\n}\n').running).toBe(false)
+    const missingTopState = waiting.replace('state = waiting\n', '')
+    expect(inspect(missingTopState + '\nresource coalition = {\n  state = running\n}\n').error).toMatch(/不一致/)
+    expect(inspect(running + 'state = waiting\n').error).toMatch(/不一致/)
+    expect(inspect(running + 'resource coalition = {\n state = active\n').error).toMatch(/不一致/)
+    expect(inspect(running.replace(/environment = \{\n[\s\S]*?\}\n/u, `DSH_HOME => ${dshHome}\n`)).error).toMatch(/不一致/)
   })
 
   test('不支持的平台明确报错而不是静默成功', async () => {

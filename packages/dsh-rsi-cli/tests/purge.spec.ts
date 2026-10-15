@@ -251,7 +251,8 @@ describe('runPurge', () => {
       LimitLoadToSessionType: 'Aqua', ProcessType: 'Background', RunAtLoad: true,
       KeepAlive: true, ThrottleInterval: 10, ExitTimeOut: 30, Umask: 63 }
     await writeFile(plistPath, JSON.stringify(plist))
-    const loaded = `path = ${plistPath}\nworking directory = ${plist.WorkingDirectory}\nDSH_HOME => ${fixture.dshHome}\n`
+    const loaded = `path = ${plistPath}\nstate = running\nworking directory = ${plist.WorkingDirectory}\n`
+      + `environment = {\n  DSH_HOME => ${fixture.dshHome}\n  PATH => /usr/bin\n}\n`
       + `program = /usr/bin/node\narguments = {\n${args.map(arg => `  ${arg}`).join('\n')}\n}\npid = 123\n`
     const runner: CommandRunner = (command, commandArgs) => {
       if (command === '/usr/bin/plutil') return { status: 0, stdout: readFileSync(plistPath, 'utf8'), stderr: '' }

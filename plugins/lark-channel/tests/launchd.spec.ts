@@ -32,7 +32,7 @@ async function fixture(existing = false, profile = `launchd-${process.pid}-${ran
     StandardErrorPath: paths.stderrPath, LimitLoadToSessionType: 'Aqua', ProcessType: 'Background',
     RunAtLoad: true, KeepAlive: true, ThrottleInterval: 10, ExitTimeOut: 30, Umask: 63 })
   const loaded = (dshPath: string, homeValue = dshHome, pid = 0, forceWaiting = false) =>
-    `path = ${paths.plistPath}\nworking directory = ${join(homeValue, 'profiles', profile)}\nDSH_HOME => ${homeValue}\nprogram = ${nodePath}\narguments = {\n  ${nodePath}\n  --disable-warning=ExperimentalWarning\n  ${dshPath}\n  --profile\n  ${profile}\n  --no-open\n}\nstate = ${pid > 1 && !forceWaiting ? 'running' : 'waiting'}\npid = ${pid}\n`
+    `gui/${uid}/${paths.label} = {\n  path = ${paths.plistPath}\n  working directory = ${join(homeValue, 'profiles', profile)}\n  environment = {\n    DSH_HOME => ${homeValue}\n  }\n  program = ${nodePath}\n  arguments = {\n    ${nodePath}\n    --disable-warning=ExperimentalWarning\n    ${dshPath}\n    --profile\n    ${profile}\n    --no-open\n  }\n  state = ${pid > 1 && !forceWaiting ? 'running' : 'waiting'}\n  pid = ${pid}\n  resource coalition = {\n    state = active\n  }\n}\n`
   const calls: string[] = []
   let registered = existing, currentDsh = oldDsh, currentHome = dshHome, parsedHome = dshHome, pid = 0
   let bootstrapPid = 90_000_000, forceWaiting = false

@@ -293,11 +293,15 @@ async function startVerified(input: NativeLaunchdIdentity, paths: LaunchAgentPat
     bootstrap = run('/bin/launchctl', ['bootstrap', domain, paths.plistPath])
     if (bootstrap.status !== 0 && !isBootstrapEio(bootstrap)) throw commandError('launchd bootstrap', bootstrap)
     let consecutiveRunning = 0, previousRunningPid = 0, registered = false
+    let lastState = 'absent', lastPid = 0, lastExitCode: string | null = null
     // launchd can register before the Host reaches running. Keep polling the
     // same job; a second bootstrap while it remains registered is not safe.
     for (let observation = 0; observation < 120; observation += 1) {
       const state = inspectNativeLaunchdDetail(input, command)
       registered = state.registered
+      lastState = state.state ?? 'unknown'
+      lastPid = state.pid
+      lastExitCode = state.lastExitCode
       if (registered && !requireRunning) return
       if (state.running) {
         consecutiveRunning = state.pid === previousRunningPid ? consecutiveRunning + 1 : 1
@@ -310,7 +314,9 @@ async function startVerified(input: NativeLaunchdIdentity, paths: LaunchAgentPat
       if (!registered && observation >= 2) break
       await wait(250)
     }
-    if (registered) throw new Error('lark-channel setup: LaunchAgent registered but the Host did not become running')
+    if (registered) {
+      throw new Error(`lark-channel setup: LaunchAgent registered but the Host did not become running (state=${lastState.slice(0, 40)}, pid=${lastPid}, lastExitCode=${lastExitCode?.slice(0, 40) ?? 'unknown'})`)
+    }
     const delayMs = delays[attempt]
     if (delayMs !== undefined) await wait(delayMs)
   }

@@ -6,14 +6,54 @@ import { launchAgentTargets } from './paths.ts'
 
 export interface LaunchdState { registered: boolean; pid: number; running: boolean; error?: string }
 
-function scalar(source: string, key: string, separator = ' = '): string | undefined {
-  const lines = source.split('\n').map(line => line.trim()).filter(line => line.startsWith(`${key}${separator}`))
-  return lines.length === 1 ? lines[0]!.slice(key.length + separator.length) : undefined
-}
+interface LoadedPrint { top: Map<string, string>; environment: Map<string, string>; args: string[] }
 
-function argumentsBlock(source: string): string[] | undefined {
-  const match = /^\s*arguments = \{\n([\s\S]*?)^\s*\}/mu.exec(source)
-  return match?.[1]?.split('\n').map(line => line.trim()).filter(Boolean)
+/** launchctl print contains nested coalitions with their own state/pid keys. */
+function parseLoadedPrint(source: string, target: string): LoadedPrint | undefined {
+  const lines = source.split('\n').map(line => line.trim()).filter(Boolean)
+  const wrapped = lines[0] === `${target} = {`
+  const stack = wrapped ? ['@root'] : [] as string[]
+  const rootOffset = wrapped ? 1 : 0
+  const top = new Map<string, string>()
+  const environment = new Map<string, string>()
+  const args: string[] = []
+  let argumentsBlocks = 0
+  let environmentBlocks = 0
+  for (const line of wrapped ? lines.slice(1) : lines) {
+    if (line === '}') {
+      if (stack.length === 0) return undefined
+      stack.pop()
+      continue
+    }
+    if (wrapped && stack.length === 0) return undefined
+    const scope = stack.slice(rootOffset)
+    const block = /^(.+?) (?:=|=>) \{$/u.exec(line)
+    if (block) {
+      if (scope.length === 0 && block[1] === 'arguments') argumentsBlocks++
+      if (scope.length === 0 && block[1] === 'environment') environmentBlocks++
+      stack.push(block[1]!)
+      continue
+    }
+    if (scope.length === 1 && scope[0] === 'arguments') {
+      args.push(line)
+      continue
+    }
+    // Coalition/resource blocks may contain lists and display-only values.
+    // Their fields cannot establish execution identity, so only balance their
+    // delimiters and ignore their contents.
+    if (scope.length > 0 && !(scope.length === 1 && scope[0] === 'environment')) continue
+    const field = /^(.+?) (?:=|=>) (.*)$/u.exec(line)
+    if (!field) return undefined
+    if (scope.length === 0) {
+      if (top.has(field[1]!)) return undefined
+      top.set(field[1]!, field[2]!)
+    } else if (scope.length === 1 && scope[0] === 'environment') {
+      if (environment.has(field[1]!)) return undefined
+      environment.set(field[1]!, field[2]!)
+    }
+  }
+  if (stack.length !== 0 || argumentsBlocks !== 1 || environmentBlocks !== 1) return undefined
+  return { top, environment, args }
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -77,18 +117,20 @@ export function inspectLoadedLaunchd(definition: LaunchdDefinition, dshHome: str
       : { registered: false, pid: 0, running: false,
         error: `无法查询已加载服务：${result.stderr.trim() || `launchctl 退出码 ${result.status}`}` }
   }
-  const rawPid = scalar(result.stdout, 'pid')
+  const parsed = parseLoadedPrint(result.stdout, target)
+  const rawPid = parsed?.top.get('pid')
   const pid = rawPid === undefined ? 0 : Number(rawPid)
-  if (scalar(result.stdout, 'path') !== definition.path
-    || scalar(result.stdout, 'working directory') !== definition.cwd
-    || scalar(result.stdout, 'DSH_HOME', ' => ') !== dshHome
-    || scalar(result.stdout, 'program') !== definition.program
-    || JSON.stringify(argumentsBlock(result.stdout)) !== JSON.stringify(definition.args)
+  if (!parsed || parsed.top.get('path') !== definition.path
+    || parsed.top.get('working directory') !== definition.cwd
+    || parsed.environment.get('DSH_HOME') !== dshHome
+    || parsed.top.get('program') !== definition.program
+    || JSON.stringify(parsed.args) !== JSON.stringify(definition.args)
+    || parsed.top.get('state') === undefined
     || !Number.isSafeInteger(pid) || pid < 0 || pid === 1
     || /^\s*(?:NODE_OPTIONS|NODE_PATH|DYLD_[A-Z_]+|LD_PRELOAD|LD_LIBRARY_PATH) =>/mu.test(result.stdout)) {
     return { registered: true, pid: 0, running: false, error: '已加载服务与指定 DSH home/profile 的 plist 不一致' }
   }
-  return { registered: true, pid, running: scalar(result.stdout, 'state') === 'running' && pid > 1 }
+  return { registered: true, pid, running: parsed.top.get('state') === 'running' && pid > 1 }
 }
 
 export function oldPidExited(pid: number, runner: CommandRunner): boolean {
