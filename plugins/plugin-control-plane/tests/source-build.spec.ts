@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path'
 import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { afterEach, expect, it, vi } from 'vitest'
+import { validateNativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 import { removeSourceJobContainer, runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from '../src/source-build.ts'
 import { inspectSourceCreationContext, prepareCreatedPluginWorkspace, type SourceCreationGrant } from '../src/source-creation.ts'
 import { createIsolatedWorktree } from '../src/source-workspace.ts'
@@ -27,6 +28,36 @@ vi.mock('node:fs/promises', async importOriginal => {
 const roots: string[] = []
 const worktrees: Array<{ remove: () => Promise<void> }> = []
 afterEach(async () => { indexHook.run = undefined; indices.length = 0; for (const worktree of worktrees.splice(0).reverse()) await worktree.remove(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
+
+it('keeps synchronous native Config validation strict and aligned with the executor shape check', () => {
+  const runtime = { schemaVersion: 1 as const, platform: `darwin-${process.arch}` as 'darwin-arm64' | 'darwin-x64',
+    nodePath: '/approved/node/bin/node', nodeSha256: 'a'.repeat(64), modulesPath: '/approved/modules',
+    roots: [{ path: '/approved/node', dev: 1, ino: 2, sha256: 'b'.repeat(64) },
+      { path: '/approved/modules', dev: 3, ino: 4, sha256: 'c'.repeat(64) }],
+    versions: { node: 'v24.22.0', typescript: '6.0.3', cordis: '1', tools: '1', systemPrompt: '1' } }
+  const config = { backend: 'macos-seatbelt' as const, runtime, stateRoot: '/approved/state',
+    authorityDigest: 'd'.repeat(64), expiresAt: Date.now() + 60_000, maxRuns: 2,
+    maxTotalDurationMs: 120_000, timeoutMs: 60_000, outputBytes: 1_048_576 }
+  expect(() => validateNativeMacRuntime(runtime)).not.toThrow()
+  expect(() => validateSourceBuildConfig(config)).not.toThrow()
+  const malformed: unknown[] = [
+    { ...runtime, unexpected: true },
+    { ...runtime, platform: 'linux-arm64' },
+    { ...runtime, nodePath: '/other/node' },
+    { ...runtime, modulesPath: '/other/modules' },
+    { ...runtime, nodeSha256: 'A'.repeat(64) },
+    { ...runtime, roots: [{ ...runtime.roots[0], dev: -1 }, runtime.roots[1]] },
+    { ...runtime, roots: [{ ...runtime.roots[0], ino: 1.5 }, runtime.roots[1]] },
+    { ...runtime, roots: [runtime.roots[0], runtime.roots[0]] },
+    { ...runtime, roots: [{ ...runtime.roots[0], path: '/approved/../node' }, runtime.roots[1]] },
+    { ...runtime, versions: { ...runtime.versions, unexpected: '1' } },
+  ]
+  for (const candidate of malformed) {
+    expect(() => validateNativeMacRuntime(candidate)).toThrow('invalid native runtime')
+    expect(() => validateSourceBuildConfig({ ...config, runtime: candidate } as SourceBuildConfig))
+      .toThrow('native source runtime configuration is invalid')
+  }
+})
 const marker = `printf 'DSH_PREPARED_PACK\\thelper-1.0.0-rc.1.tgz\\t13\\t${'d'.repeat(64)}\\tv24.0.0\\t11.7.0\\n'`
 const packFrame = 'DSH_PREPARED_PACK_BYTES_V1'
 function captureOutput(bytes: Buffer, options: { size?: number; sha?: string; encoded?: string; trailing?: string } = {}): string {
@@ -83,6 +114,10 @@ async function creationFixture() {
       environment, signal, assertCurrent: async () => {}, preparedAt: Date.now(), creation } }
 }
 
+// Each case copies the public generator inputs, commits a real Git baseline,
+// creates an isolated worktree and runs the frozen Node plugin generator.
+const creationProofTestTimeoutMs = 60_000
+
 it('enables trust-lockfile only after real generated creation proof and freezes the base lock digest', async () => {
   const f = await creationFixture()
   const result = await runDockerPreparedChecks(f.input)
@@ -92,7 +127,7 @@ it('enables trust-lockfile only after real generated creation proof and freezes 
     '--env', 'DSH_SOURCE_TRUST_LOCKFILE=true', '--env', `DSH_SOURCE_BASE_LOCK_SHA256=${expected}`]))
   expect(result.evidence.pack.version).toBe('0.1.0')
   expect(await readFile(`${f.dockerPath}.args`, 'utf8')).toContain('DSH_SOURCE_TRUST_LOCKFILE=true')
-})
+}, creationProofTestTimeoutMs)
 
 it('rejects altered creation scope, grant, lock and scaffold before launching Docker', async () => {
   const f = await creationFixture()
@@ -112,14 +147,14 @@ it('rejects altered creation scope, grant, lock and scaffold before launching Do
   await writeFile(join(f.worktree, 'plugins', f.name, 'cordis.patch.yml'), 'tampered\n')
   await expect(runDockerPreparedChecks(base)).rejects.toThrow(/Host-owned generated file changed/)
   await expect(lstat(argsPath)).rejects.toMatchObject({ code: 'ENOENT' })
-})
+}, creationProofTestTimeoutMs)
 
 it('rejects a staged tree changed after creation proof and before Git staging', async () => {
   const f = await creationFixture()
   indexHook.run = async () => { await writeFile(join(f.worktree, 'plugins', f.name, 'README.md'), '# raced source\n') }
   await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/staged tree differs from verified workspace/)
   await expect(lstat(`${f.dockerPath}.args`)).rejects.toMatchObject({ code: 'ENOENT' })
-})
+}, creationProofTestTimeoutMs)
 
 it('records the immutable prerelease package version and configured image', async () => {
   const f = await fixture()

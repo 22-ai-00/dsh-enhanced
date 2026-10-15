@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { ControlPlaneCliError } from './errors.js'
 import { verifyRevisedPluginWorkspace, type SourceRevisionBinding } from './source-revision.js'
 import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
@@ -10,7 +10,7 @@ import type { PluginCreationVerificationCertificate } from '@dsh-enhanced/assist
 import { verifyCreatedPluginWorkspace, type SourceCreationBinding } from './source-creation.js'
 import { checkedSourceSnapshot, runLocalBuffer, runLocalCommand } from './source-workspace.js'
 import type { DockerSourcePreparedEvidence, SourcePreparedEvidence } from './types.js'
-import { validateNativeMacRuntime, type NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 
 export interface DockerSourceBuildConfig {
   /** Canonical owner-controlled docker client. */
@@ -52,6 +52,30 @@ export interface NativeSourceBuildConfig {
 }
 
 export type SourceBuildConfig = DockerSourceBuildConfig | NativeSourceBuildConfig
+
+/** Keep Config synchronous and independent of the Mac executor package: Linux
+ * authority runtimes copy this module without assistant-isolation. The native
+ * executor repeats this shape check and verifies the approved bytes at dispatch. */
+function validNativeRuntimeShape(value: unknown): value is NativeMacRuntime {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const runtime = value as NativeMacRuntime
+  const hex = (part: unknown): part is string => typeof part === 'string' && /^[0-9a-f]{64}$/u.test(part)
+  const canonical = (part: unknown): part is string => typeof part === 'string' && isAbsolute(part)
+    && resolve(part) === part && !part.includes('\0') && !part.includes('\r') && !part.includes('\n')
+  const within = (path: string, root: string): boolean => path === root || path.startsWith(root + sep)
+  return Object.keys(runtime).sort().join() === 'modulesPath,nodePath,nodeSha256,platform,roots,schemaVersion,versions'
+    && runtime.schemaVersion === 1 && runtime.platform === `darwin-${process.arch}` && canonical(runtime.nodePath)
+    && hex(runtime.nodeSha256) && canonical(runtime.modulesPath) && Array.isArray(runtime.roots)
+    && runtime.roots.length >= 1 && runtime.roots.length <= 32 && !!runtime.versions && typeof runtime.versions === 'object'
+    && Object.keys(runtime.versions).sort().join() === 'cordis,node,systemPrompt,tools,typescript'
+    && Object.values(runtime.versions).every(version => typeof version === 'string' && version.length >= 1 && version.length <= 128)
+    && runtime.roots.every(root => !!root && Object.keys(root).sort().join() === 'dev,ino,path,sha256'
+      && canonical(root.path) && root.path !== '/' && Number.isSafeInteger(root.dev) && root.dev >= 0
+      && Number.isSafeInteger(root.ino) && root.ino >= 0 && hex(root.sha256))
+    && new Set(runtime.roots.map(root => root.path)).size === runtime.roots.length
+    && runtime.roots.some(root => within(runtime.nodePath, root.path) && runtime.nodePath !== root.path)
+    && runtime.roots.some(root => within(runtime.modulesPath, root.path))
+}
 
 export interface SourceBuildResult<E extends SourcePreparedEvidence = SourcePreparedEvidence> {
   treeDigest: string
@@ -522,7 +546,7 @@ export function validateSourceBuildConfig(config: SourceBuildConfig): void {
       || (config.versioning !== undefined && config.versioning !== 'patch')) {
       throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'native source build configuration is invalid')
     }
-    try { validateNativeMacRuntime(config.runtime) }
+    try { if (!validNativeRuntimeShape(config.runtime)) throw new Error('invalid native runtime') }
     catch { throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'native source runtime configuration is invalid') }
     return
   }

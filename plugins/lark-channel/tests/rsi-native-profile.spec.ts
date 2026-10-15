@@ -67,6 +67,36 @@ async function fixture(): Promise<NativeRsiProfileInput> {
 }
 
 describe('native owner learning profile', () => {
+  test('accepts the published growth default without config while retaining strict explicit config checks', async () => {
+    const input = await fixture()
+    const rows = parse(input.targetEffective) as Array<{ id: string; config?: any }>
+    const growth = rows.find(row => row.id === 'dsh-enhanced-assistant-growth-driver')!
+    const personal = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+    delete growth.config
+    personal.config.ownerUnknownOption = { retained: true }
+    const defaultInput = { ...input, targetEffective: stringify(rows) }
+    const compiled = compileNativeRsiProfile(defaultInput)
+    const patch = parse(compiled.targetPatch) as Array<{ id: string; config: any }>
+    const get = (name: string) => patch.find(row => row.id === `dsh-enhanced-${name}`)!.config
+    expect(compiled.manifest.growthDriver).not.toHaveProperty('provider')
+    expect(compiled.manifest.growthDriver).not.toHaveProperty('model')
+    expect(get('assistant-growth-driver').budgetId).toBe(compiled.manifest.growthDriver.budgetId)
+    expect(get('personal-assistant').ownerUnknownOption).toEqual({ retained: true })
+    expect(compiled.targetPatch).toContain("!!js dshHomePath('custom')")
+    growth.config = { provider: 'owner-provider', model: 'owner-model', reasoningEffort: 'high' }
+    expect(compileNativeRsiProfile({ ...input, targetEffective: stringify(rows) }).manifest.growthDriver)
+      .toMatchObject(growth.config)
+    for (const invalid of [null, 'scalar', 1, []]) {
+      growth.config = invalid
+      expect(() => compileNativeRsiProfile({ ...input, targetEffective: stringify(rows) })).toThrow('growth config must be a mapping')
+    }
+    growth.config = { pluginSourceProposals: { enabled: false } }
+    expect(() => compileNativeRsiProfile({ ...input, targetEffective: stringify(rows) })).toThrow('existing source proposal grant differs')
+    delete personal.config
+    growth.config = {}
+    expect(() => compileNativeRsiProfile({ ...input, targetEffective: stringify(rows) })).toThrow('personal config must be a mapping')
+  })
+
   test('binds native compiler and behavior runners to one frozen runtime and finite owner grant', async () => {
     const input = await fixture(), root = join(input.dshHome, 'rsi-native-runtimes', 'web', 'runtime')
     const runtime = { schemaVersion: 1 as const, platform: `darwin-${process.arch}` as 'darwin-arm64' | 'darwin-x64',
