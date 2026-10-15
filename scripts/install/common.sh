@@ -2968,8 +2968,101 @@ dsh_enhanced_profile_lifecycle() {
   dsh_enhanced_run_lifecycle_executor "$operation" "$profile" "$dsh_home" "$expected_scenario" "$@"
 }
 
-# macOS 没有 Linux bwrap/systemd 强事务。该分支只在调用方已确认整个
-# DSH_HOME 静止时运行；升级前完整备份 profile，失败时恢复原目录。
+# The confirmation flag cannot establish quiescence or authorize replacing a
+# frozen native owner/source cohort. Run this before registry, store, workspace
+# or profile work, for every profile in the canonical Home.
+dsh_enhanced_macos_upgrade_guard() {
+  node --input-type=module - "$1" <<'NODE'
+import { lstatSync, readdirSync, realpathSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { join } from 'node:path'
+
+const home = process.argv[2]
+const fail = message => { throw new Error(`macOS upgrade: ${message}`) }
+for (const kind of ['rsi-local-cohorts', 'rsi-native-runtimes', 'rsi-sources', 'rsi-authorities',
+  'rsi-authority-runtimes', 'rsi-builds', 'rsi-release-builds', 'rsi-coordinators']) {
+  try {
+    lstatSync(join(home, kind))
+    fail(`${kind} exists in this Home; frozen native owner/source resources require a dedicated migration that preserves existing data`)
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+}
+let entries
+try { entries = readdirSync(join(home, 'profiles'), { withFileTypes: true }) }
+catch { fail('cannot inventory every profile in the canonical Home') }
+const profiles = []
+for (const entry of entries) {
+  if (entry.name === 'node_modules') {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) fail('profiles/node_modules identity is unknown')
+    continue
+  }
+  if (entry.name === '.DS_Store') {
+    if (!entry.isFile() || entry.isSymbolicLink()) fail('profiles/.DS_Store identity is unknown')
+    continue
+  }
+  if (!entry.isDirectory() || entry.isSymbolicLink()
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(entry.name)) {
+    fail(`profile entry ${entry.name} has unknown identity`)
+  }
+  profiles.push(entry.name)
+}
+if (profiles.length === 0) fail('no profile to upgrade')
+const uid = process.getuid?.()
+if (!Number.isSafeInteger(uid) || uid < 1) fail('cannot identify the launchd user')
+const foreignLaunchdPids = new Set()
+if (process.platform === 'darwin') {
+  for (const profile of profiles) {
+    const target = `gui/${uid}/ai.deepseek.dsh.profile.${profile}`
+    const result = spawnSync('/bin/launchctl', ['print', target], {
+      encoding: 'utf8', timeout: 10_000, maxBuffer: 262_144,
+      env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
+    })
+    if (result.error || result.signal) fail(`cannot inspect launchd ${profile}`)
+    if (result.status === 113 && /Could not find service/iu.test(result.stderr ?? '')) continue
+    if (result.status !== 0) fail(`cannot inspect launchd ${profile}`)
+    const loadedHome = /^\s*DSH_HOME => (.+)$/mu.exec(result.stdout ?? '')?.[1]
+    if (!loadedHome) fail(`launchd ${profile} Home identity is unknown`)
+    let loadedCanonicalHome
+    try { loadedCanonicalHome = realpathSync(loadedHome) }
+    catch { fail(`launchd ${profile} Home cannot be resolved`) }
+    if (loadedCanonicalHome !== home) {
+      const foreignPid = /^\s*pid = (\d+)$/mu.exec(result.stdout ?? '')?.[1]
+      if (foreignPid !== undefined) foreignLaunchdPids.add(Number(foreignPid))
+      continue
+    }
+    const state = /^\s*state = ([^\n]+)$/mu.exec(result.stdout ?? '')?.[1]
+    const pid = /^\s*pid = (\d+)$/mu.exec(result.stdout ?? '')?.[1]
+    if (!state || (pid !== undefined && (!Number.isSafeInteger(Number(pid)) || Number(pid) < 2))) {
+      fail(`launchd ${profile} state is unknown`)
+    }
+    if (state === 'running' || pid !== undefined) fail(`launchd ${profile} is still running`)
+  }
+}
+const processes = spawnSync('/bin/ps', ['-axo', 'pid=,command='], {
+  encoding: 'utf8', timeout: 10_000, maxBuffer: 16_777_216,
+  env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
+})
+if (processes.status !== 0 || processes.error || processes.signal) fail('cannot inspect running Host processes')
+for (const line of (processes.stdout ?? '').split('\n')) {
+  if (line.trim() === '') continue
+  const match = /^\s*(\d+)\s+(.+)$/u.exec(line)
+  if (!match) fail('cannot parse a running process identity')
+  if (Number(match[1]) === process.pid || foreignLaunchdPids.has(Number(match[1]))) continue
+  const command = match[2]
+  const dshEntry = /(?:^|[\/\s])dsh(?:\.js)?\s/u.test(command)
+    || /(?:^|\s)\S*\/@deepseek-ai\/dsh\/(?:lib\/)?bin\.js\s/u.test(command)
+  if (!dshEntry) continue
+  const profile = /(?:^|\s)--profile(?:=|\s+)([^\s]+)/u.exec(command)?.[1]
+  if (!profile) fail(`Host PID ${match[1]} has no attributable profile`)
+  // A profile absent from this Home is not proof that the process belongs to
+  // another Home. Only a launchd job with a different explicit Home is exempt.
+  fail(`Host PID ${match[1]} for profile ${profile} is still running or has unknown Home`)
+}
+NODE
+}
+
+# macOS 没有 Linux bwrap/systemd 强事务。升级前完整备份 profile，失败时恢复原目录。
 dsh_enhanced_macos_stopped_upgrade() {
   local profile="$1"
   local dsh_home="$2"
@@ -2985,6 +3078,12 @@ dsh_enhanced_macos_stopped_upgrade() {
     dsh_enhanced_print_command dsh --profile "$profile" --host 127.0.0.1 --no-open --port 0
     return 0
   fi
+  # Registry resolution and source preparation can take time. Narrow the gap
+  # before the first profile mutation; this is still not a held Home lock.
+  dsh_enhanced_macos_upgrade_guard "$dsh_home" || {
+    dsh_enhanced_fail 1 'macOS Home 在升级前复检时不再静止或存在冻结资源；尚未修改 profile。'
+    return $?
+  }
   local backup_directory=''
   backup_directory="$(mktemp -d "$dsh_home/profiles/.${profile}.upgrade-backup.XXXXXX")" || {
     dsh_enhanced_fail 1 'macOS 升级无法创建 profile 备份目录。'
@@ -3329,6 +3428,13 @@ dsh_enhanced_install() {
       dsh_enhanced_fail 1 '无法解析 lifecycle DSH_HOME 的 canonical 路径。'
       return $?
     }
+    local lifecycle_platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}"
+    if [[ "$operation" == 'upgrade' && ( "$lifecycle_platform" == 'Darwin' || "$lifecycle_platform" == 'darwin' ) ]]; then
+      dsh_enhanced_macos_upgrade_guard "$dsh_home" || {
+        dsh_enhanced_fail 1 'macOS Home 升级拒绝继续；未修改 profile、registry 或 store。保留原数据，冻结的 owner/source 需要专用迁移。'
+        return $?
+      }
+    fi
     if [[ "${DSH_ENHANCED_HOST_RECOVERY_ONLY:-}" == '1' ]]; then
       if [[ "$operation" != 'upgrade' || "$dry_run" == '1' ]]; then
         dsh_enhanced_fail 2 'Host recovery 仅用于非 dry-run upgrade。'
@@ -3417,7 +3523,6 @@ dsh_enhanced_install() {
       dsh_enhanced_fail 2 'Lark/supervised upgrade/uninstall 必须管理受管常驻服务；不能使用 --no-service。'
       return $?
     fi
-    local lifecycle_platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}"
     if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' )
       && "$lifecycle_platform" != 'Linux'
       && !( "$operation" == 'upgrade' && ( "$lifecycle_platform" == 'Darwin' || "$lifecycle_platform" == 'darwin' ) ) ]]; then

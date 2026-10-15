@@ -7907,6 +7907,116 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     expect((await readdir(join(f.dshHome, 'profiles'))).some(name => name.includes('upgrade-backup'))).toBe(false)
   })
 
+  test.each(['local', 'npm'] as const)(
+    'macOS %s refuses a frozen native Home before workspace or package work', async source => {
+      const f = await lifecycleFixture({ effectiveScenario: 'supervised', systemd: {} })
+      const before = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+      await mkdir(join(f.dshHome, 'rsi-local-cohorts', 'web'), { recursive: true })
+      const result = runInstaller(join(f.fixtureInstallDirectory, `install-${source}.sh`), [
+        '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes',
+      ], f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin))
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toMatch(/rsi-local-cohorts|冻结的 owner\/source/iu)
+      expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(before)
+      expect(await readFile(f.operationLog, 'utf8')).toBe('')
+      await expect(stat(join(f.dshHome, 'assistant-workspace'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect((await readdir(join(f.dshHome, 'profiles'))).some(name => name.includes('upgrade-backup'))).toBe(false)
+    },
+  )
+
+  test('macOS refuses a native owner authority even without a cohort receipt', async () => {
+    const f = await lifecycleFixture({ effectiveScenario: 'supervised', systemd: {} })
+    await mkdir(join(f.dshHome, 'rsi-authorities', 'web'), { recursive: true })
+    const result = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), [
+      '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes',
+    ], f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin))
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('rsi-authorities')
+    expect(await readFile(f.operationLog, 'utf8')).toBe('')
+  })
+
+  test('macOS refuses a partial native runtime marker and a symlink profile', async () => {
+    const f = await lifecycleFixture({ effectiveScenario: 'supervised', systemd: {} })
+    const argv = ['--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes']
+    await mkdir(join(f.dshHome, 'rsi-native-runtimes'), { recursive: true })
+    const marker = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), argv,
+      f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin))
+    expect(marker.status).not.toBe(0)
+    expect(marker.stderr).toContain('rsi-native-runtimes')
+    await rm(join(f.dshHome, 'rsi-native-runtimes'), { recursive: true })
+    await symlink(f.profileDirectory, join(f.dshHome, 'profiles', 'other'))
+    const alias = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), argv,
+      f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin))
+    expect(alias.status).not.toBe(0)
+    expect(alias.stderr).toContain('profile entry other has unknown identity')
+    await rm(join(f.dshHome, 'profiles', 'other'))
+    await rm(join(f.dshHome, 'profiles', 'node_modules'), { recursive: true, force: true })
+    await symlink(f.profileDirectory, join(f.dshHome, 'profiles', 'node_modules'))
+    const fallbackAlias = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), argv,
+      f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin))
+    expect(fallbackAlias.status).not.toBe(0)
+    expect(fallbackAlias.stderr).toContain('profiles/node_modules identity is unknown')
+    expect(await readFile(f.operationLog, 'utf8')).toBe('')
+  })
+
+  test.skipIf(process.platform !== 'darwin')('macOS launchd Home alias resolves to the same running Home', async () => {
+    const f = await lifecycleFixture({ effectiveScenario: 'supervised', systemd: {} })
+    const alias = join(f.root, 'home-alias')
+    await symlink(f.dshHome, alias)
+    const preload = join(f.root, 'launchctl-alias-fixture.cjs')
+    await writeFile(preload, `const child = require('node:child_process')
+const original = child.spawnSync
+child.spawnSync = (command, args, options) => command === '/bin/launchctl'
+  ? args[1].endsWith('.web')
+    ? { status: 0, signal: null, error: undefined, stdout: 'gui/501/ai.deepseek.dsh.profile.web = {\\nDSH_HOME => ${alias}\\nstate = running\\npid = 4321\\n}', stderr: '' }
+    : { status: 113, signal: null, error: undefined, stdout: '', stderr: 'Could not find service' }
+  : original(command, args, options)
+require('node:module').syncBuiltinESMExports()
+`)
+    const result = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), [
+      '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes',
+    ], f.dshHome, 'Darwin', {
+      ...lifecycleEnvironment(f.dshHome, f.fakeBin), NODE_OPTIONS: `--require=${preload}`,
+    })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('launchd web is still running')
+    expect(await readFile(f.operationLog, 'utf8')).toBe('')
+  })
+
+  test.each(['web', 'orphan'])('macOS refuses a running Host for %s even when stopped-Home confirmation is supplied', async profile => {
+    const f = await lifecycleFixture({ effectiveScenario: 'supervised', systemd: {} })
+    const hostScript = join(f.root, 'other-home', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+    await mkdir(dirname(hostScript), { recursive: true })
+    await writeFile(hostScript, "process.stdout.write('ready\\n'); setInterval(() => {}, 1000)\n")
+    const host = spawn(process.execPath, [hostScript, `--profile=${profile}`, '--no-open'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    try {
+      await new Promise<void>((resolveReady, rejectReady) => {
+        const timer = setTimeout(() => rejectReady(new Error('host readiness timeout')), 3000)
+        host.stdout.once('data', () => { clearTimeout(timer); resolveReady() })
+        host.once('error', error => { clearTimeout(timer); rejectReady(error) })
+        host.once('close', () => { clearTimeout(timer); rejectReady(new Error('host exited before ready')) })
+      })
+      const result = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), [
+        '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes',
+      ], f.dshHome, 'Darwin', lifecycleEnvironment(f.dshHome, f.fakeBin))
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toMatch(/Host PID .* still running/u)
+      expect(await readFile(f.operationLog, 'utf8')).toBe('')
+      await expect(stat(join(f.dshHome, 'assistant-workspace'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      if (host.exitCode === null && host.signalCode === null) {
+        await new Promise<void>((resolveClose, rejectClose) => {
+          const force = setTimeout(() => host.kill('SIGKILL'), 1000)
+          const timeout = setTimeout(() => rejectClose(new Error('host did not close after SIGKILL')), 3000)
+          host.once('close', () => { clearTimeout(force); clearTimeout(timeout); resolveClose() })
+          host.kill('SIGTERM')
+        })
+      }
+    }
+  })
+
   test('macOS local supervised upgrade activates successfully and removes its temporary backup', async () => {
     const f = await lifecycleFixture({
       effectiveScenario: 'supervised',

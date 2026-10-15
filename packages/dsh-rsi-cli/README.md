@@ -91,11 +91,14 @@ dsh-rsi update --version next
 
 # 自身 + 整套插件集合原地升级；受管 Linux 服务由事务停服/恢复，额外 Host 会被拒绝
 dsh-rsi update --all --yes
+
+# macOS：先停止同一 DSH_HOME 的全部 Host，再显式确认；冻结的原生 owner/source Home 暂无普通升级路径
+dsh-rsi update --all --confirm-dsh-home-stopped
 ```
 
 `update` 选项：
 
-- `--all`：自身升级成功后，把插件集合交给同一目标版本的安装器原地升级；Linux 受管服务由事务停服并恢复，额外或手工启动的 Host 必须先停止。macOS 当前须先停止整个 Home，仅升级插件集合，保留原 Host 与 LaunchAgent 定义；完成后用 `dsh-rsi start` 恢复运行。`0.1.49` 起，在已绑定的 Linux Home 继续执行受管 Host 更新；版本相同则跳过。用户无需传 `--confirm-dsh-home-stopped` 或重复声明 `--scenario`；安装器从 effective/composed profile 自动识别场景。
+- `--all`：自身升级成功后，把插件集合交给同一目标版本的安装器原地升级；Linux 受管服务由事务停服并恢复，额外或手工启动的 Host 必须先停止。macOS 须先停止整个 Home 并显式传入 `--confirm-dsh-home-stopped`；CLI 在自更新前检查冻结资源与各 profile 的运行进程，安装器检查 launchd 和 Host，并在修改 profile 前复检，无法确认时拒绝插件变更。已有原生 owner/source/cohort 的冻结 Home 不能普通升级；保留数据的专用迁移目前尚未实现。未冻结且已停止的 Mac Home 仅升级插件集合，保留原 Host 与 LaunchAgent 定义；完成后用 `dsh-rsi start` 恢复运行。Mac 的检查没有覆盖整个升级过程的 Home 独占锁，操作者必须在升级全程保持 Host 停止。`0.1.49` 起，在已绑定的 Linux Home 继续执行受管 Host 更新；版本相同则跳过。Linux 用户无需传 `--confirm-dsh-home-stopped` 或重复声明 `--scenario`；安装器从 effective/composed profile 自动识别场景。
 - `--version <v|tag>`：dsh-rsi 自身的目标版本或 dist-tag（默认 `latest`）。只接受精确版本 `x.y.z`（可带预发布后缀）或纯字母 dist-tag；范围表达式如 `>=0.1.0` 会被拒绝。
 - `--dry-run`：解析出目标版本并打印将执行的命令，不做任何安装。
 - 其余参数在 `--all` 下原样透传给安装器；`--local <dir>` 走 local 形态。显式 `--scenario` 仍可作为一致性断言，但不再是必填项。
