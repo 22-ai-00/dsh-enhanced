@@ -20,7 +20,7 @@ traex login status
 
 一键安装器自动检测 `traex` / `trae-cli` 并补入实际可执行路径；手动安装时可在插件配置中覆盖 `command`。首次登录应在 DSH 外单独完成，例如本机版本提供的 `traex login --sso` 或 `traex login --sso-device`；插件不会启动交互式登录或打开浏览器。
 
-公开的 ByteDance `trae-agent` Python 项目与这里检测到的 TraeX / TRAE CLI 不是同一个运行时。只有 `acp serve` 可用且握手返回 `agentInfo.name = "traex-acp"` 的实现会被本插件接受。
+公开的 ByteDance `trae-agent` Python 项目与这里检测到的 TraeX / TRAE CLI 不是同一个运行时。只有 `acp serve` 可用且握手返回 `agentInfo.name = "traex-acp"` 或 `"traecli-acp"` 的实现会被本插件接受；仍要求 ACP protocol v1 与 Trae SSO 认证方法。
 
 ## 安装
 
@@ -122,7 +122,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 
 ## 协议与失败策略
 
-- 只接受 ACP protocol v1 和 `traex-acp` agent identity；版本或 identity 不符时 fail closed。
+- 只接受 ACP protocol v1 和精确的 `traex-acp` / `traecli-acp` agent identity；版本或 identity 不符时 fail closed。
 - SDK 前的 wire guard 会追踪 JSON-RPC request id；非法 envelope、未知/重复 response id、未声明的 filesystem/terminal request 和未知 notification 都会终止该轮，不交给 SDK 宽松处理。
 - 只消费当前 session 的文本 `agent_message_chunk`；普通文本直接成为最终回复，严格匹配 `dsh-tool-calls/v1` 的信封会转换为 DSH tool call。thought、plan 和 TraeX 自己的 tool update 不会伪装成 DSH 输出。
 - 工具信封只允许调用本次 `GenerateOptions.tools` 中存在的精确名称，参数必须是 JSON 对象。兼容模型把参数编码成 JSON 字符串的情况，但只解码一次，结果仍须是对象；数组、null、畸形文本和再次编码的字符串均拒绝。未知工具、空调用或畸形信封以 `ACP_PROTOCOL_ERROR` fail closed。参数继续交给原生工具校验和权限检查。截断终态不会执行工具信封。若模型误在合法信封前附加一小段进度说明，插件会只提取并隐藏该信封，避免原始 JSON 泄漏到对话界面；不含协议标记的普通 JSON 仍按文本处理。
@@ -142,7 +142,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 | `ACP_REFUSAL` | TraeX 明确拒绝了本次请求 | 属模型侧决定，调整 prompt 后重试。 |
 | `ACP_TIMEOUT` | 握手+建会话+整轮 prompt 超过 `timeoutMs` | 简化 prompt 或调大 `timeoutMs`。 |
 | `ACP_OUTPUT_LIMIT` | 助手文本超过 `maxOutputBytes` | 调大 `maxOutputBytes` 或缩小任务。 |
-| `ACP_PROTOCOL_ERROR` | protocol/identity 不符、非法 envelope、无文本或缺终态 | 确认 TraeX 版本仍提供 ACP v1 + `traex-acp` identity；升级后握手变化时插件会拒绝而非猜测。 |
+| `ACP_PROTOCOL_ERROR` | protocol/identity 不符、非法 envelope、无文本或缺终态 | 确认 TraeX 版本仍提供 ACP v1 + `traex-acp` 或 `traecli-acp` identity；升级后握手变化时插件会拒绝而非猜测。 |
 | `ACP_PROCESS_FAILED` | 子进程非零退出或其他未归类失败 | 开 `logDiagnostics` 看脱敏 stderr；单独 `traex acp serve` 复现。 |
 | `CONTEXT_WINDOW_EXCEEDED` | 序列化后的 DSH 请求超过 `maxPromptBytes`，在握手前失败 | 调大 `maxPromptBytes`，或压缩/清理对话历史；该上限只防本机内存膨胀，与 argv 长度无关。 |
 | `ACP_PROMPT_INVALID` | 请求中含无法序列化的内容（如图片或未知 content block） | 本 route 是 text-only 兼容层；改用纯文本，或换用支持该模态的 provider。 |
@@ -159,7 +159,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 - DSH `0.1.2-rc.1` 暴露的是 `LlmAdapter` seam，因此工具调用通过模型隐藏的严格 JSON 信封桥接，不是 TraeX 原生 tool update，也不是完整 ACP UI。TraeX 的 plan、diff、permission UI、会话列表和富内容不会进入 DSH。
 - 每次 DSH 请求使用一个新的 TraeX 进程和 ACP session，不恢复外部历史；完整 DSH 对话会被序列化进 prompt。
 - 暂不转发图片、音频或 TraeX token usage。DSH tool schema 会随每一步序列化，工具结果则通过下一步的完整 DSH 对话返回给模型；实验性的 ACP `PromptResponse.usage` 只保留显式数值字段用于内部诊断，不会映射或发送为 DSH usage chunk。
-- TraeX 是变化中的开发工具；本实现以本机 `traecli 0.201.1 (internal edition)` 的 ACP v1 握手、逐模型 reasoning selector 与官方 ACP SDK `0.25.1` 为验证基线。升级后若 identity、模型/effort selector 或终态变化，插件会拒绝而不是猜测兼容。
+- TraeX 是变化中的开发工具；本实现以 `traecli 0.201.1 (internal edition)` 的 ACP v1 握手和本机 `traecli 0.210.1 (internal edition)` 的 `traecli-acp` 身份、模型目录、逐模型 reasoning selector，以及官方 ACP SDK `0.25.1` 为验证基线。升级后若 identity、模型/effort selector 或终态变化，插件会拒绝而不是猜测兼容。
 
 ## 兼容性与调研
 

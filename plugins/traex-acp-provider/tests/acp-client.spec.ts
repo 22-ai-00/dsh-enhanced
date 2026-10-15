@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ACP_USAGE_DSH_MAPPING_GATE,
   buildTraexEnv,
+  discoverTraexAcpModels,
   runTraexAcpText,
   type CatalogObservation,
   type ProviderFailureContext,
@@ -76,6 +77,7 @@ interface Script {
   readonly closeOnSigkill?: boolean
   readonly initializeTitle?: string
   readonly malformedHandshake?: boolean
+  readonly observedCliResponseShape?: boolean
   readonly onPrompt?: (connection: AgentConnection, request: PromptRequest) => Promise<StopReason>
   readonly onCloseSession?: (sessionId: string) => Promise<Record<string, never>>
 }
@@ -158,9 +160,10 @@ function harness(script: Script = {}): { state: FakeState; spawn: SpawnProcess }
       const models = script.models ?? ['default', 'fast']
       let selectedModel = models[0] ?? ''
       const selectedReasoning = new Map<string, string>()
+      const modelConfigId = script.observedCliResponseShape ? 'model' : 'model-choice'
       const configOptions = (): SessionConfigOption[] => {
         const options: SessionConfigOption[] = [{
-          id: 'model-choice',
+          id: modelConfigId,
           name: 'Model',
           category: 'model',
           type: 'select',
@@ -207,14 +210,23 @@ function harness(script: Script = {}): { state: FakeState; spawn: SpawnProcess }
             agentInfo: {
               name: script.agentName ?? 'traex-acp',
               title: script.initializeTitle ?? 'TRAE CLI',
-              version: '0.201.1',
+              version: script.observedCliResponseShape ? '0.210.1' : '0.201.1',
             },
             agentCapabilities: script.advertiseClose === false
               ? {}
               : { sessionCapabilities: { close: {} } },
             authMethods: script.advertiseTraeSso === false
               ? [{ id: 'chatgpt', name: 'Login with ChatGPT' }]
-              : [{ id: 'trae-sso', name: 'Login with Trae' }],
+              : script.observedCliResponseShape
+                ? [
+                    { id: 'trae-sso', name: 'Login with Trae', description: 'Trae SSO' },
+                    { id: 'chatgpt', name: 'Login with ChatGPT', description: 'ChatGPT' },
+                    { id: 'codex-api-key', name: 'OpenAI API key', description: 'API key' },
+                    { id: 'openai-api-key', name: 'OpenAI API key', description: 'API key' },
+                    { id: 'trae-tob-browser', name: 'Trae enterprise browser', description: 'Browser' },
+                    { id: 'trae-tob-pat', name: 'Trae enterprise PAT', description: 'PAT' },
+                  ]
+                : [{ id: 'trae-sso', name: 'Login with Trae' }],
           })
         },
         authenticate() {
@@ -230,7 +242,7 @@ function harness(script: Script = {}): { state: FakeState; spawn: SpawnProcess }
         },
         setSessionConfigOption(request) {
           state.modelSelections.push(request)
-          if (request.configId === 'model-choice') selectedModel = request.value as string
+          if (request.configId === modelConfigId) selectedModel = request.value as string
           if (request.configId === 'reasoning_effort') {
             selectedReasoning.set(selectedModel, request.value as string)
           }
@@ -283,13 +295,14 @@ afterEach(() => {
 })
 
 describe('TraeX ACP subprocess transport', () => {
-  it('discovers every ACP model without submitting a prompt', async () => {
+  it.each(['traex-acp', 'traecli-acp'])('discovers every ACP model with %s without submitting a prompt', async agentName => {
     const discover = Reflect.get(acpClientModule, 'discoverTraexAcpModels') as (
       invocation: Omit<TraexAcpInvocation, 'prompt' | 'model'>,
       options: { spawn: SpawnProcess },
     ) => Promise<CatalogObservation>
     expect(discover).toBeTypeOf('function')
     const { state, spawn } = harness({
+      agentName,
       models: ['trae-fast', 'trae-pro'],
       reasoningByModel: {
         'trae-fast': ['low', 'high'],
@@ -329,6 +342,26 @@ describe('TraeX ACP subprocess transport', () => {
     expect(state.prompts).toHaveLength(0)
     expect(state.closedSessions).toEqual(['session-current'])
     expect(state.kills).toEqual(['SIGINT'])
+  })
+
+  it('accepts the observed Trae CLI 0.210.1 handshake and model selector shape', async () => {
+    const { state, spawn } = harness({
+      agentName: 'traecli-acp',
+      observedCliResponseShape: true,
+      models: ['first', 'second'],
+      reasoningByModel: { first: ['low'], second: ['high'] },
+    })
+    await expect(discoverTraexAcpModels({ command: 'traex', args: safeArgs, cwd: process.cwd() }, { spawn }))
+      .resolves.toMatchObject({ modelValues: ['first', 'second'], completeReasoning: true })
+    expect(state.modelSelections).toEqual([expect.objectContaining({ configId: 'model', value: 'second' })])
+    expect(state.prompts).toHaveLength(0)
+    expect(state.closedSessions).toEqual(['session-current'])
+  })
+
+  it.each(['traex-acp', 'traecli-acp'])('uses the same accepted %s identity for a real stream', async agentName => {
+    const { state, spawn } = harness({ agentName })
+    await expect(collect(invocation, { spawn })).resolves.toEqual(['answer'])
+    expect(state.prompts).toHaveLength(1)
   })
 
   it('performs the v1 handshake, creates one session, selects a model, and emits only current-session agent text', async () => {
@@ -528,11 +561,21 @@ describe('TraeX ACP subprocess transport', () => {
   })
 
   it.each([
-    { agentName: 'impostor', protocolVersion: PROTOCOL_VERSION },
-    { agentName: 'traex-acp', protocolVersion: PROTOCOL_VERSION + 1 },
-  ])('rejects an incompatible handshake %#', async identity => {
-    const { spawn } = harness(identity)
-    await expect(collect(invocation, { spawn })).rejects.toMatchObject({ cause: 'protocol' })
+    { name: 'unknown identity', script: { agentName: 'impostor' }, failure: 'protocol' },
+    { name: 'near identity', script: { agentName: 'traecli-acp-extra' }, failure: 'protocol' },
+    { name: 'wrong protocol', script: { agentName: 'traecli-acp', protocolVersion: PROTOCOL_VERSION + 1 }, failure: 'protocol' },
+    { name: 'missing Trae SSO', script: { agentName: 'traecli-acp', advertiseTraeSso: false }, failure: 'auth' },
+  ])('rejects $name before prompt for discovery and stream', async ({ script, failure }) => {
+    const catalog = harness(script)
+    await expect(discoverTraexAcpModels({ command: 'traex', args: safeArgs, cwd: process.cwd() }, { spawn: catalog.spawn }))
+      .rejects.toMatchObject({ cause: failure })
+    expect(catalog.state.sessions).toHaveLength(0)
+    expect(catalog.state.prompts).toHaveLength(0)
+
+    const stream = harness(script)
+    await expect(collect(invocation, { spawn: stream.spawn })).rejects.toMatchObject({ cause: failure })
+    expect(stream.state.sessions).toHaveLength(0)
+    expect(stream.state.prompts).toHaveLength(0)
   })
 
   it('rejects security-critical initialize fields that the SDK tolerant schema would skip', async () => {
