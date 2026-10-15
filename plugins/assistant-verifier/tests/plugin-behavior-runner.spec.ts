@@ -30,6 +30,7 @@ const authority = {
   authorityDigest: 'b'.repeat(64), expiresAt: Date.now() + 60_000, maxRuns: 2,
   maxTotalDurationMs: 20_000, maxDurationMs: 10_000, maxOutputBytes: 65_536,
 }
+const nativePlatform: 'darwin-arm64' | 'darwin-x64' = process.arch === 'arm64' ? 'darwin-arm64' : 'darwin-x64'
 const artifact = Buffer.from('fixture tgz bytes')
 const artifactSha256 = createHash('sha256').update(artifact).digest('hex')
 const schema = { name: 'probe_echo', description: 'Echo', parameters: { type: 'object', properties: {} } }
@@ -65,7 +66,7 @@ it('native mode stages regular files, binds a fixed worker frame, and derives en
   const nativeArtifact = nativePack(), hash = createHash('sha256').update(nativeArtifact).digest('hex')
   const config = { backend: 'macos-seatbelt' as const, stateRoot: '/private/native-state', authorityDigest: 'b'.repeat(64),
     expiresAt: Date.now() + 60_000, maxRuns: 2, maxTotalDurationMs: 20_000, maxDurationMs: 10_000, maxOutputBytes: 65_536,
-    runtime: { schemaVersion: 1 as const, platform: 'darwin-arm64' as const, nodePath: '/private/runtime/node', nodeSha256: 'd'.repeat(64),
+    runtime: { schemaVersion: 1 as const, platform: nativePlatform, nodePath: '/private/runtime/node', nodeSha256: 'd'.repeat(64),
       modulesPath: '/private/runtime/node_modules', roots: [{ path: '/private/runtime', dev: 1, ino: 1, sha256: 'e'.repeat(64) }], versions: {
         node: 'v24.22.0', typescript: '5.9.3', cordis: '4.0.4', tools: '0.2.0-rc.2', systemPrompt: '0.2.0-rc.2' } } }
   seam.run.mockImplementation((_key: string, files: unknown, stdin: string) => {
@@ -89,7 +90,7 @@ it('native mode rejects a forged or polluted frame without converting candidate 
   const nativeArtifact = nativePack()
   const config = { backend: 'macos-seatbelt' as const, stateRoot: '/private/native-state', authorityDigest: 'b'.repeat(64),
     expiresAt: Date.now() + 60_000, maxRuns: 2, maxTotalDurationMs: 20_000, maxDurationMs: 10_000, maxOutputBytes: 65_536,
-    runtime: { schemaVersion: 1 as const, platform: 'darwin-arm64' as const, nodePath: '/private/runtime/node', nodeSha256: 'd'.repeat(64),
+    runtime: { schemaVersion: 1 as const, platform: nativePlatform, nodePath: '/private/runtime/node', nodeSha256: 'd'.repeat(64),
       modulesPath: '/private/runtime/node_modules', roots: [{ path: '/private/runtime', dev: 1, ino: 1, sha256: 'e'.repeat(64) }], versions: {
         node: 'v24.22.0', typescript: '5.9.3', cordis: '4.0.4', tools: '0.2.0-rc.2', systemPrompt: '0.2.0-rc.2' } } }
   seam.run.mockImplementation((_key: string, _files: unknown, stdin: string) => {
