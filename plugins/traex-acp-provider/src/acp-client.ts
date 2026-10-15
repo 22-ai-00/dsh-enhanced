@@ -268,6 +268,10 @@ const SAFE_ARGS = [
   'serve',
 ] as const
 
+// Known Trae CLI ACP identities across verified versions. Keep this exact:
+// accepting an arbitrary ACP agent here would grant it the Trae account-backed route.
+const TRAE_ACP_AGENT_NAMES = new Set(['traex-acp', 'traecli-acp'])
+
 const defaults = {
   timeoutMs: 10 * 60_000,
   killGraceMs: 3_000,
@@ -620,7 +624,8 @@ export async function* runTraexAcpText(
         },
       }))
       throwIfFatal(fatal)
-      if (initialized.protocolVersion !== PROTOCOL_VERSION || initialized.agentInfo?.name !== 'traex-acp') {
+      if (initialized.protocolVersion !== PROTOCOL_VERSION
+        || !TRAE_ACP_AGENT_NAMES.has(initialized.agentInfo?.name ?? '')) {
         throw new TraexAcpError('protocol')
       }
       if (!initialized.authMethods?.some(isTraeSsoAuthMethod)) {
