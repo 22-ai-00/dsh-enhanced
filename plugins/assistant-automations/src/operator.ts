@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 import { automationSchemaVersion } from './sqlite.js'
+import { assertNoMacProcessConnection, macCleanupPinnedDirectory, macConnectionInodes, macExclusiveWriter } from './operator-macos.js'
 import { normalizeAutomationDefinition } from './store.js'
 import type { AutomationDefinition, AutomationRecord, AutomationStatus } from './types.js'
 
@@ -232,10 +233,10 @@ interface PinnedTemp {
   readonly inode: bigint
 }
 
-// Inode binding is enforced through Linux /proc/self/fd. On other platforms the
-// snapshot keeps its historical path-based pinning; CI still exercises that code.
-const inodeBindSupported = process.platform === 'linux'
-const procSelfFd = '/proc/self/fd'
+// Linux and macOS prove the SQLite connection's dev/inode through their own
+// process descriptor directories. Other platforms retain path-based pinning.
+const inodeBindSupported = process.platform === 'linux' || process.platform === 'darwin'
+const procSelfFd = process.platform === 'darwin' ? '/dev/fd' : '/proc/self/fd'
 
 /**
  * Enumerate the regular-file inodes held by THIS process, excluding the
@@ -243,9 +244,12 @@ const procSelfFd = '/proc/self/fd'
  * remaining database fds are SQLite's, so a (dev,ino) match proves the
  * connection genuinely opened the pinned inode rather than an attacker's
  * same-name replacement. An attacker in another process cannot plant an fd
- * here because /proc/self/fd never lists another process's descriptors.
+ * here because these directories never list another process's descriptors.
  */
 function connectionInodes(exclude: ReadonlySet<number>): Array<{ device: bigint; inode: bigint }> {
+  if (process.platform === 'darwin') {
+    try { return macConnectionInodes(exclude) } catch { fail('database-drift', 'cannot inspect the database connection file descriptors') }
+  }
   let entries: string[]
   try { entries = readdirSync(procSelfFd) } catch {
     fail('database-corrupt', 'cannot inspect the database connection file descriptors')
@@ -297,13 +301,23 @@ function pinTempDirectory(path: string): PinnedTemp {
   throw new Error('unreachable')
 }
 
+function pinnedTempMatches(pinned: PinnedTemp): boolean {
+  try {
+    const linked = lstatSync(pinned.path, { bigint: true })
+    const opened = fstatSync(pinned.descriptor, { bigint: true })
+    return linked.isDirectory() && !linked.isSymbolicLink() && opened.isDirectory()
+      && linked.dev === pinned.device && linked.ino === pinned.inode
+      && opened.dev === pinned.device && opened.ino === pinned.inode
+      && (opened.mode & 0o7777n) === 0o700n
+  } catch { return false }
+}
+
 /**
- * Materialise one private byte-for-byte copy THROUGH the pinned directory fd
- * (`/proc/self/fd/<dirfd>/<name>`), then reopen it O_NOFOLLOW through the same
- * anchor and keep that descriptor open. Neither the create, the verify, the
- * SQLite open, or the cleanup ever resolve a swappable path component, so a
- * same-name directory swap cannot retarget the replica. The returned file is
- * left open and must be closed by the caller.
+ * Materialise a private byte-for-byte copy and keep its verified descriptor.
+ * Linux passes a pinned /proc/self/fd directory reference. macOS checks the
+ * pinned parent before/after path creation and proves SQLite opened this copy
+ * by inode; an intervening replacement fails closed. The returned file must
+ * be closed by the caller.
  */
 function copyAndPin(source: OpenedFile, targetRef: string): OpenedFile {
   const buffer = Buffer.allocUnsafe(64 * 1024)
@@ -335,13 +349,26 @@ function copyAndPin(source: OpenedFile, targetRef: string): OpenedFile {
 }
 
 /**
- * Remove the replica THROUGH the pinned directory fd, unlinking only the fixed
- * names SQLite could create. The directory itself is rmdir'd by path only after
- * the pinned fd proves the path still names the same empty inode; a swapped or
- * non-empty directory is left untouched and the snapshot fails closed rather
- * than recursively deleting an attacker-controlled replacement.
+ * Remove only fixed replica names through the pinned directory (Linux /proc
+ * reference or macOS helper fchdir). The empty directory is rmdir'd by path
+ * only after an identity check; any detected swap retains the replacement.
+ * This final check/rmdir is not atomic against a same-owner instantaneous swap.
  */
 function removePinnedTemp(pinned: PinnedTemp, names: readonly string[]): void {
+  if (process.platform === 'darwin') {
+    try {
+      try { macCleanupPinnedDirectory({ dev: pinned.device, ino: pinned.inode, descriptor: pinned.descriptor }) }
+      catch { fail('database-drift', 'temporary snapshot copy cannot be removed through its pinned directory') }
+      if (!pinnedTempMatches(pinned) || readdirSync(pinned.path).length !== 0) {
+        fail('database-drift', 'temporary snapshot directory was retargeted before cleanup')
+      }
+    } finally {
+      // Failure keeps the private directory for reconciliation, without leaking its fd.
+      try { closeSync(pinned.descriptor) } catch {}
+    }
+    try { rmdirSync(pinned.path) } catch { fail('database-drift', 'temporary snapshot directory could not be removed') }
+    return
+  }
   const anchor = `${procSelfFd}/${pinned.descriptor}`
   for (const name of names) {
     try { unlinkSync(`${anchor}/${name}`) } catch (error) {
@@ -467,11 +494,12 @@ export function decodeDeviceId(dev: bigint): { major: bigint; minor: bigint } {
 interface LockProbeTarget {
   readonly dev: bigint
   readonly ino: bigint
+  readonly descriptor: number
 }
 
 function lockTargets(files: ReadonlyArray<OpenedFile | null>): LockProbeTarget[] {
   return files.filter((file): file is OpenedFile => file !== null)
-    .map(file => ({ dev: file.stat.dev, ino: file.stat.ino }))
+    .map(file => ({ dev: file.stat.dev, ino: file.stat.ino, descriptor: file.descriptor }))
 }
 
 /** Parse the MAJ:MIN:INO out of one /proc/locks row, including blocked-lock rows. */
@@ -496,6 +524,11 @@ export function parseWritableProcLock(line: string): { major: bigint; minor: big
 }
 
 function assertNoExclusiveWriter(targets: readonly LockProbeTarget[]): void {
+  if (process.platform === 'darwin') {
+    try { if (macExclusiveWriter(targets)) fail('database-busy', 'database has an exclusive writer lock') }
+    catch (error) { if (error instanceof AutomationOperatorSnapshotError) throw error; fail('database-busy', 'cannot inspect active database locks') }
+    return
+  }
   let locks: string
   try {
     locks = readFileSync('/proc/locks', 'utf8')
@@ -689,6 +722,12 @@ function readSnapshot(databasePath: string): {
     temporaryPinned?.descriptor, ...copyFiles.map(file => file.descriptor),
   ].filter((descriptor): descriptor is number => descriptor !== undefined))
   try {
+    if (process.platform === 'darwin') {
+      // Closing any descriptor of a SQLite inode can release this process's POSIX locks.
+      // Check without opening the source, including both WAL sidecars.
+      try { assertNoMacProcessConnection([path, walPath, shmPath]) }
+      catch { fail('database-busy', 'database is open in this process or descriptors cannot be inspected') }
+    }
     assertNoRollbackJournal(path)
     source = openPrivateFile(path, 'database-missing')
     assertJournalAbsent(path)
@@ -728,7 +767,7 @@ function readSnapshot(databasePath: string): {
         || (process.getuid?.() !== undefined && temporaryMetadata.uid !== BigInt(process.getuid!()))) {
         fail('unsafe-path', 'temporary snapshot directory is not private')
       }
-      if (inodeBindSupported) {
+      if (process.platform === 'linux') {
         temporaryPinned = pinTempDirectory(temporary)
         const anchor = `${procSelfFd}/${temporaryPinned.descriptor}`
         const mainRef = `${anchor}/automations.sqlite`
@@ -740,6 +779,20 @@ function readSnapshot(databasePath: string): {
         catch (error) { try { closeSync(copiedMain.descriptor) } catch {}; throw error }
         copyFiles = Object.freeze([copiedMain, copiedWal])
         target = mainRef
+        bound = copyFiles
+      } else if (process.platform === 'darwin') {
+        temporaryPinned = pinTempDirectory(temporary)
+        const copy = join(temporary, 'automations.sqlite')
+        if (!pinnedTempMatches(temporaryPinned)) fail('database-drift', 'temporary snapshot directory changed before copy')
+        const copiedMain = copyAndPin(source, copy)
+        let copiedWal: OpenedFile | undefined
+        try { copiedWal = copyAndPin(wal, `${copy}-wal`) }
+        catch (error) { try { closeSync(copiedMain.descriptor) } catch {}; throw error }
+        copyFiles = Object.freeze([copiedMain, copiedWal])
+        if (!pinnedTempMatches(temporaryPinned) || !copyFiles.every(pinnedFileIdentityMatches)) {
+          fail('database-drift', 'temporary snapshot copy changed before SQLite open')
+        }
+        target = copy
         bound = copyFiles
       } else {
         const copy = join(temporary, 'automations.sqlite')
@@ -845,7 +898,7 @@ function readSnapshot(databasePath: string): {
       try {
         removePinnedTemp(temporaryPinned, ['automations.sqlite', 'automations.sqlite-wal', 'automations.sqlite-shm'])
       } catch (error) { deferred ??= error }
-    } else if (temporary !== undefined) {
+    } else if (temporary !== undefined && process.platform !== 'darwin') {
       try { rmSync(temporary, { recursive: true, force: true }) } catch (error) { deferred ??= error }
     }
     try { closeSync(pinnedParent.descriptor) } catch (error) { deferred ??= error }

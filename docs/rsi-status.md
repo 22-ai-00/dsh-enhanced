@@ -1,6 +1,6 @@
 # RSI 当前状态
 
-更新：2026-10-15。本页是唯一进展入口；验收见[合同](rsi-acceptance.md)，历史实施与迁移证据查 Git。
+更新：2026-10-16。本页是唯一进展入口；验收见[合同](rsi-acceptance.md)，历史实施与迁移证据查 Git。
 
 ## 目标与能力边界
 
@@ -18,12 +18,13 @@
 
 - 正式 `dsh-rsi-setup --prepare-build` 在私有临时 Home 使用在线官方归档、冻结 Git 清单和依赖安装，退出 0；未传预下载文件，也未使用 Docker。重复读取、坏归档、Git replace ref、回执权限和运行时篡改/缺失拒绝均有定向证据。
 - 真实 Mac 原生执行包 136 项通过、38 项明确跳过；行为探针 4 项通过。固定源码生成/编译/打包、两例私有留出、v2 签名、动态采用和重复 callId 复用串联退出 0。串联中的模型、owner 和部分上层当前性接口为测试替身，只证明工程机制贯通，不证明真实认证用户的普通任务闭环。
-- 临时 core Home 已验证实际 DSH 插件激活；临时 launchd 用例验证服务生命周期。真实 `web` 已完整备份并安装 `55090bb7` 的 22 个 bundle、30 个包，服务正在运行，配置和历史保留。旧 growth 行省略 `config` 的兼容修复已通过真实配置的只读编译预检；进一步预检发现 Automations 库存读取仍依赖 `/proc/locks`，因此尚未落盘 owner 授权。Mac 原生写锁探针已在临时数据库验证，产品接线与就绪验收仍待完成。
-- 最新 CI 修复的 `pnpm check` 退出 0，源码前后指纹一致，37 个包 dry-run pack 完成；无 `lib`/`node_modules` 的源码副本也通过冻结依赖安装和完整构建。修复移除 Linux 私有 authority runtime 对 Mac 执行包的运行时值导入，补充仅复制约定依赖的真实子进程回归，修正 broker 就绪握手与签名变异，并为真实源码生成用例设置局部有限超时。Delivery 的 WAL reader 清理竞态修复保留真实锁竞争断言。循环开发依赖的递归 emit 改为串行，避免声明读写重叠。定向检查及独立审查已通过，新提交的跨平台 CI 待核验。
-- CI 增强已单独保留为本地提交，推送受 GitHub OAuth `workflow` 权限限制。Linux/Docker/真实模型的条件跳过项不构成 live 运行证据。
+- Automations 的 Mac 库存读取已接通原生写锁查询、WAL 快照及实际连接 inode 校验。固定 Perl helper 只检查继承的文件描述符；不能确认锁、同进程已有源库连接或路径漂移时拒绝。整包 260 项通过、23 项明确跳过，新增回归覆盖真实 WAL 业务行、写锁保留、路径替换及子进程清理；Linux 仍使用原 `/proc/locks` 分支。
+- 最新 Mac `pnpm check` 退出 0，源码前后指纹一致，37 个包 dry-run pack 完成。真实 `web` 已完整备份并安装 `55090bb7` 的 22 个 bundle、30 个包；205 行配置及 7 个历史/凭据文件的保留检查通过。修复后的真实配置编译与库存只读预检退出 0，owner 授权和最终就绪尚未验收。
+- Linux 实机已免密连接并拉取最新 `dev`，Node 24 与真实 bubblewrap 探针可用。`302732ba` CI 的 Linux root 和 Windows 已通过，Linux packages 在 packaged systemd authority CLI 用例仍失败，正在实机复现；最终修复提交的 Linux 全检和跨平台 CI 尚待完成。平台或外部依赖的条件跳过不构成 live 运行证据。
+- TraeX 本机 CLI `0.210.1` 的 ACP 身份改为 `traecli-acp`，现插件只接受 `traex-acp`，无 prompt 插件探针已复现初始化拒绝。直接协议探针成功返回 28 个模型；精确身份兼容修复及回归待完成。
 
 ## 下一验收
 
-推送 CI 修复并核对跨平台结果；补齐 Automations 的 Mac 只读锁检查与 inode 校验后，继续现有 `web` 的 owner 安装。保留 `55090bb7` 冻结源码、cohort 和签名身份，分别记录安装器与运行包的提交。继续以普通任务验证新工具复用、纠正、撤回、重启与后续收益，保留现有模型合同和有限授权，不自动续期或重放 unknown。
+完成现有 `web` 的 owner 安装，保留 `55090bb7` 冻结源码、cohort 和签名身份，分别记录安装器与运行包的提交。修复 Linux 剩余 CI 失败和 TraeX 模型目录，在 Mac、Linux 实机与精确发布提交的跨平台 CI 通过后准备 `0.1.50`。继续以普通任务验证新工具复用、纠正、撤回、重启与后续收益，保留现有模型合同和有限授权，不自动续期或重放 unknown。
 
 原始命令、退出码与运行结果位于忽略目录 `docs/evidence/macos-native-20261015/`。发布遵循[发布协议](releasing.md)。
