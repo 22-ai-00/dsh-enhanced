@@ -18,7 +18,7 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     environment: npm-release
     outputs:
       source_commit: ${{ steps.release_source.outputs.source_commit }}
