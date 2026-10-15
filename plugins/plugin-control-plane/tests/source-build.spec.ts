@@ -66,8 +66,9 @@ function captureOutput(bytes: Buffer, options: { size?: number; sha?: string; en
   const encoded = options.encoded ?? bytes.toString('base64')
   return `printf '%s\\n' 'DSH_PREPARED_PACK\thelper-1.0.0-rc.1.tgz\t${size}\t${sha}\tv24.0.0\t11.7.0' '${packFrame}\t${encoded}'${options.trailing ?? ''}`
 }
-async function fixture(run = marker, control = 'exit 0', override: Partial<SourceBuildConfig> = {}, version = "printf '%s\\n' '29.4.1/linux/amd64'") {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'source-builder-test-'))); roots.push(root)
+async function fixture(run = marker, control = 'exit 0', override: Partial<SourceBuildConfig> = {},
+  version = "printf '%s\\n' '29.4.1/linux/amd64'", rootParent = tmpdir()) {
+  const root = await realpath(await mkdtemp(join(rootParent, 'source-builder-test-'))); roots.push(root)
   const repository = join(root, 'repo'); const plugin = join(repository, 'plugins', 'helper')
   await mkdir(plugin, { recursive: true })
   await writeFile(join(plugin, 'package.json'), '{"name":"helper","version":"1.0.0-rc.1"}')
@@ -265,13 +266,15 @@ it('requires an explicit portable repository profile, immutable image, local soc
 })
 
 it.each(['x64', 'arm64'] as const)('portable prepared checks on macOS %s reject runtime, daemon and image drift and keep the Docker endpoint local', async arch => {
-  const f = await fixture()
+  // macOS Unix sockets have a short path bound; the default TMPDIR may exceed it.
+  const f = await fixture(marker, 'exit 0', {}, undefined, await realpath('/tmp'))
   const previousHome = process.env.HOME
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
   const architecture = Object.getOwnPropertyDescriptor(process, 'arch')!
   const dockerArchitecture = arch === 'arm64' ? 'arm64' : 'amd64'
   const driftArchitecture = arch === 'arm64' ? 'amd64' : 'arm64'
   const socket = join(f.root, '.docker', 'run', 'docker.sock')
+  expect(Buffer.byteLength(socket)).toBeLessThan(104)
   const state = join(f.root, 'state')
   await mkdir(dirname(socket), { recursive: true, mode: 0o700 })
   await writeFile(state, 'ready')
