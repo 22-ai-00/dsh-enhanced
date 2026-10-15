@@ -421,6 +421,16 @@ export async function main(
   env: NodeJS.ProcessEnv = process.env,
   deps: MainDeps = {},
 ): Promise<number> {
+  // Rescue scripts probe this before delegating destructive work to an installed CLI.
+  // Keep the response read-only and independent of Home, launchd and installed Host state.
+  if (argv[0] === '--capabilities') {
+    if (argv.length !== 1) {
+      process.stderr.write('--capabilities 不接受其他参数\n')
+      return 2
+    }
+    process.stdout.write(`${JSON.stringify({ capabilities: ['macos-launchd-ownership-v1'] })}\n`)
+    return 0
+  }
   const purge = deps.purge ?? runPurge
   const install = deps.install ?? runInstall
   const selfUpdate = deps.selfUpdate ?? runSelfUpdate
@@ -465,7 +475,7 @@ export async function main(
         const outcomes: ServiceActionOutcome[] = []
         for (const profile of profiles) {
           outcomes.push(await controlManagedService(
-            process.platform, homedir(), profile, action, undefined, args.dryRun,
+            process.platform, homedir(), profile, action, undefined, args.dryRun, args.dshHome,
           ))
         }
         process.stdout.write(`${formatServiceOutcomes(outcomes, action, args.dryRun)}\n`)

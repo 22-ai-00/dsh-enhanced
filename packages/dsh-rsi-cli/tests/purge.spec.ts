@@ -1,9 +1,10 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { createFakeBin, type FakeBin } from './fake-bin.ts'
 import {
   listLifecycleResiduals,
@@ -13,6 +14,22 @@ import {
 import { scanCredentialLocators } from '../src/secrets.ts'
 import { runPurge, PurgeError } from '../src/purge.ts'
 import type { CommandRunner } from '../src/run.ts'
+import { withLaunchdProfileLock } from '../src/launchd-lock.ts'
+
+const lockTrace = vi.hoisted(() => ({ home: false, profiles: new Set<string>(), order: [] as string[] }))
+vi.mock('../src/launchd-lock.ts', () => ({ withLaunchdProfileLock: (profile: string,
+  operation: () => Promise<unknown>) => {
+  if (lockTrace.profiles.has(profile)) throw new Error(`busy target ${profile}`)
+  lockTrace.profiles.add(profile)
+  lockTrace.order.push(profile)
+  return operation().finally(() => { lockTrace.profiles.delete(profile) })
+} }))
+vi.mock('../src/home-lifecycle-lock.ts', () => ({ withDshHomeLifecycleLock: (_home: string,
+  operation: () => Promise<unknown>) => {
+  if (lockTrace.home) throw new Error('busy home')
+  lockTrace.home = true
+  return operation().finally(() => { lockTrace.home = false })
+} }))
 
 interface Fixture {
   root: string
@@ -185,6 +202,7 @@ describe('runPurge', () => {
   afterEach(async () => {
     await rm(fixture.root, { recursive: true, force: true })
     await fakeBin.cleanup()
+    lockTrace.order.length = 0
   })
 
   const purge = (override: Partial<Parameters<typeof runPurge>[0]> = {}) => runPurge({
@@ -218,6 +236,102 @@ describe('runPurge', () => {
       expect(existsSync(join(fixture.dshHome, 'profiles', 'web'))).toBe(true)
     } finally {
       delete process.env.FAKE_PGREP_ACTIVE
+    }
+  })
+
+  test('macOS：bootout 失败时中止 purge，保留 plist、Home 与凭据记录', async () => {
+    const plistPath = join(fixture.home, 'Library', 'LaunchAgents', 'ai.deepseek.dsh.profile.web.plist')
+    await mkdir(join(fixture.home, 'Library', 'LaunchAgents'), { recursive: true })
+    const args = ['/usr/bin/node', '/opt/dsh/bin/dsh.js', '--profile', 'web', '--no-open']
+    const plist = { Label: 'ai.deepseek.dsh.profile.web', ProgramArguments: args,
+      WorkingDirectory: join(fixture.dshHome, 'profiles', 'web'),
+      EnvironmentVariables: { DSH_HOME: fixture.dshHome, PATH: '/usr/bin' },
+      StandardOutPath: join(fixture.dshHome, 'logs', 'web-host.log'),
+      StandardErrorPath: join(fixture.dshHome, 'logs', 'web-host.error.log'),
+      LimitLoadToSessionType: 'Aqua', ProcessType: 'Background', RunAtLoad: true,
+      KeepAlive: true, ThrottleInterval: 10, ExitTimeOut: 30, Umask: 63 }
+    await writeFile(plistPath, JSON.stringify(plist))
+    const loaded = `path = ${plistPath}\nworking directory = ${plist.WorkingDirectory}\nDSH_HOME => ${fixture.dshHome}\n`
+      + `program = /usr/bin/node\narguments = {\n${args.map(arg => `  ${arg}`).join('\n')}\n}\npid = 123\n`
+    const runner: CommandRunner = (command, commandArgs) => {
+      if (command === '/usr/bin/plutil') return { status: 0, stdout: readFileSync(plistPath, 'utf8'), stderr: '' }
+      if (command === 'launchctl' && commandArgs[0] === 'print') return { status: 0, stdout: loaded, stderr: '' }
+      if (command === 'launchctl' && commandArgs[0] === 'bootout') return { status: 5, stdout: '', stderr: 'failure' }
+      throw new Error(`unexpected command ${command}`)
+    }
+    await expect(purge({ platform: 'darwin', runner, backup: false })).rejects.toThrow(/bootout 失败/)
+    expect(existsSync(plistPath)).toBe(true)
+    expect(existsSync(fixture.dshHome)).toBe(true)
+    expect(existsSync(join(fixture.dshHome, 'profiles', 'web', 'cordis.patch.yml.lark-setup.journal.json'))).toBe(true)
+  })
+
+  test('macOS：本 Home 的未加载 plist 可正常注销并完成 purge', async () => {
+    const plistPath = join(fixture.home, 'Library', 'LaunchAgents', 'ai.deepseek.dsh.profile.web.plist')
+    await mkdir(join(fixture.home, 'Library', 'LaunchAgents'), { recursive: true })
+    await writeFile(plistPath, JSON.stringify({ Label: 'ai.deepseek.dsh.profile.web',
+      ProgramArguments: ['/usr/bin/node', '/opt/dsh/bin/dsh.js', '--profile', 'web', '--no-open'],
+      WorkingDirectory: join(fixture.dshHome, 'profiles', 'web'),
+      EnvironmentVariables: { DSH_HOME: fixture.dshHome, PATH: '/usr/bin' },
+      StandardOutPath: join(fixture.dshHome, 'logs', 'web-host.log'),
+      StandardErrorPath: join(fixture.dshHome, 'logs', 'web-host.error.log'),
+      LimitLoadToSessionType: 'Aqua', ProcessType: 'Background', RunAtLoad: true,
+      KeepAlive: true, ThrottleInterval: 10, ExitTimeOut: 30, Umask: 63 }))
+    const fallback = fakeRunner(fakeBin)
+    const runner: CommandRunner = (command, commandArgs) => {
+      if (command === '/usr/bin/plutil') return { status: 0, stdout: readFileSync(plistPath, 'utf8'), stderr: '' }
+      if (command === 'launchctl' && commandArgs[0] === 'print') {
+        return { status: 113, stdout: '', stderr: 'Could not find service' }
+      }
+      return fallback(command, commandArgs)
+    }
+    const report = await purge({ platform: 'darwin', runner, backup: false, keepKeychain: true })
+    expect(report.serviceErrors).toEqual([])
+    expect(existsSync(plistPath)).toBe(false)
+    expect(existsSync(fixture.dshHome)).toBe(false)
+  })
+
+  test('macOS：--yes 不根据同名 dsh 命令行杀其他 Home 进程或删除数据', async () => {
+    const calls: string[] = []
+    const runner: CommandRunner = (command, args) => {
+      calls.push([command, ...args].join(' '))
+      if (command === 'launchctl') return { status: 113, stdout: '', stderr: 'Could not find service' }
+      if (command === 'pgrep') return { status: 0, stdout: '12345\n', stderr: '' }
+      if (command === 'ps') return { status: 0, stdout: 'node /other/home/bin/dsh --profile web --no-open\n', stderr: '' }
+      throw new Error(`unexpected command ${command}`)
+    }
+    await expect(purge({ platform: 'darwin', runner, backup: false, assumeYes: true })).rejects.toThrow(/无法证明归属/)
+    expect(calls.some(call => call.startsWith('kill '))).toBe(false)
+    expect(existsSync(fixture.dshHome)).toBe(true)
+  })
+
+  test('macOS：Home→全部profile锁贯穿停服、备份、删除与凭据清理；不unlink共享锁inode', async () => {
+    await mkdir(join(fixture.dshHome, 'profiles', 'alpha'), { recursive: true })
+    await writeFile(join(fixture.dshHome, 'profiles', 'alpha', 'package.json'), '{}')
+    const rendezvous = `/tmp/.dsh-enhanced-lifecycle-${process.getuid?.()}-${createHash('sha256').update(fixture.dshHome).digest('hex')}.lock`
+    await writeFile(rendezvous, '')
+    const seen = new Set<string>()
+    const fallback = fakeRunner(fakeBin)
+    const runner: CommandRunner = (command, args) => {
+      if (command === 'launchctl') return { status: 113, stdout: '', stderr: 'Could not find service' }
+      if (['pgrep', 'tar', '/usr/bin/security', '/usr/bin/secret-tool'].includes(command)) {
+        expect(lockTrace.home).toBe(true)
+        expect([...lockTrace.profiles].sort()).toEqual(['alpha', 'web'])
+        expect(() => withLaunchdProfileLock('web', async () => {})).toThrow(/busy target web/)
+        seen.add(command)
+      }
+      if (command === '/usr/bin/security') expect(existsSync(fixture.dshHome)).toBe(false)
+      return fallback(command, args)
+    }
+    try {
+      const report = await purge({ platform: 'darwin', runner })
+      expect(report.removedPaths).not.toContain(rendezvous)
+      expect(existsSync(rendezvous)).toBe(true)
+      expect(seen).toEqual(new Set(['pgrep', 'tar', '/usr/bin/security', '/usr/bin/secret-tool']))
+      expect(lockTrace.order).toEqual(['alpha', 'web'])
+      expect(lockTrace.home).toBe(false)
+      expect(lockTrace.profiles.size).toBe(0)
+    } finally {
+      await rm(rendezvous, { force: true })
     }
   })
 

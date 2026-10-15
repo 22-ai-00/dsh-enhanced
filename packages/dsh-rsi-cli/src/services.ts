@@ -1,6 +1,9 @@
 import { readFile, rm, stat } from 'node:fs/promises'
 import { open } from 'node:fs/promises'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
+import { inspectLaunchdDefinition, inspectLoadedLaunchd, oldPidExited, type LaunchdDefinition } from './launchd-service.ts'
+import { withLaunchdProfileLock } from './launchd-lock.ts'
 import type { CommandRunner } from './run.ts'
 import { defaultRunner } from './run.ts'
 import {
@@ -28,28 +31,6 @@ async function isManagedUnitFile(path: string, profile: string): Promise<boolean
     && source.includes('--no-open')
 }
 
-/**
- * 判定 macOS plist 确为受管 LaunchAgent。
- *
- * launchd.ts 的 createLaunchAgent 不写入任何注释标记，所以判定依据是它实际渲染
- * 的结构：Label 必须是受管前缀加该 profile，且 ProgramArguments 含
- * `--profile <profile>` 与 `--no-open` 两项。这与 stopManagedService 对 systemd
- * unit 的判定同样严格，避免把同名的用户自建 LaunchAgent 当成受管服务操作。
- */
-async function isManagedPlistFile(path: string, profile: string): Promise<boolean> {
-  let source: string
-  try {
-    source = await readFile(path, 'utf8')
-  } catch {
-    return false
-  }
-  const { label } = launchAgentTargets('', profile)
-  return source.includes(`<string>${label}</string>`)
-    && source.includes('<string>--profile</string>')
-    && source.includes(`<string>${profile}</string>`)
-    && source.includes('<string>--no-open</string>')
-}
-
 export interface ServiceStopOutcome {
   profile: string
   /** 已执行/计划执行的动作（dry-run 下同样填充，供报告展示）。 */
@@ -57,6 +38,31 @@ export interface ServiceStopOutcome {
   /** 归属不明而跳过、需要人工确认的文件（fail-closed）。 */
   skipped: string[]
   errors: string[]
+}
+
+/** Optional bounded polling control for tests; production waits up to five seconds. */
+export interface ServiceWaitOptions { attempts?: number; intervalMs?: number }
+
+async function waitForLaunchdTransition(
+  definition: LaunchdDefinition, dshHome: string, previousPid: number, runner: CommandRunner,
+  target: 'stopped' | 'running' | 'restarted', options: ServiceWaitOptions = {},
+): Promise<{ ok: boolean; error?: string }> {
+  const attempts = options.attempts ?? 50
+  const intervalMs = options.intervalMs ?? 100
+  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 100
+    || !Number.isSafeInteger(intervalMs) || intervalMs < 0 || intervalMs > 1_000) {
+    return { ok: false, error: '无效的 launchd 状态检查参数' }
+  }
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const state = inspectLoadedLaunchd(definition, dshHome, runner)
+    if (state.error) return { ok: false, error: state.error }
+    const oldExited = previousPid < 2 || oldPidExited(previousPid, runner)
+    if (target === 'stopped' && !state.registered && oldExited) return { ok: true }
+    if (target === 'running' && state.running) return { ok: true }
+    if (target === 'restarted' && state.running && state.pid !== previousPid && oldExited) return { ok: true }
+    if (attempt + 1 < attempts) await delay(intervalMs)
+  }
+  return { ok: false }
 }
 
 /**
@@ -71,16 +77,57 @@ export async function stopManagedService(
   profile: string,
   runner: CommandRunner,
   dryRun: boolean,
+  dshHome = join(home, '.dsh'),
+  waitOptions: ServiceWaitOptions = {},
+): Promise<ServiceStopOutcome> {
+  if (platform === 'darwin' && process.platform === 'darwin' && !dryRun) {
+    return withLaunchdProfileLock(profile, () => stopManagedServiceUnlocked(platform, home, profile, runner, dryRun, dshHome, waitOptions))
+  }
+  return stopManagedServiceUnlocked(platform, home, profile, runner, dryRun, dshHome, waitOptions)
+}
+
+async function stopManagedServiceUnlocked(
+  platform: NodeJS.Platform, home: string, profile: string, runner: CommandRunner,
+  dryRun: boolean, dshHome: string, waitOptions: ServiceWaitOptions,
 ): Promise<ServiceStopOutcome> {
   const outcome: ServiceStopOutcome = { profile, actions: [], skipped: [], errors: [] }
   if (platform === 'darwin') {
     const { label, plistPath } = launchAgentTargets(home, profile)
     const target = `gui/${process.getuid?.() ?? process.env.UID}/${label}`
-    outcome.actions.push(`launchctl bootout ${target}（未注册时忽略错误）`)
-    outcome.actions.push(`删除 ${plistPath}`)
+    const checked = await inspectLaunchdDefinition(home, dshHome, profile, runner)
+    if (!checked.exists) {
+      const query = runner('launchctl', ['print', target])
+      if (query.status === 113 && /Could not find service/iu.test(query.stderr)) return outcome
+      outcome.errors.push(`${profile}：plist 不存在，但同名已加载服务存在或查询失败，拒绝删除数据`)
+      return outcome
+    }
+    if (!checked.definition) {
+      outcome.skipped.push(`${plistPath}（${checked.error ?? '归属不明'}，保留）`)
+      outcome.errors.push(`${profile}：${checked.error ?? 'plist 归属不明'}，拒绝注销`)
+      return outcome
+    }
+    const loaded = inspectLoadedLaunchd(checked.definition, dshHome, runner)
+    if (loaded.error) { outcome.errors.push(`${profile}：${loaded.error}`); return outcome }
+    if (loaded.registered) outcome.actions.push(`launchctl bootout ${target}`)
+    outcome.actions.push(`删除受管 plist ${plistPath}`)
     if (dryRun) return outcome
-    // bootout 对未加载 label 返回非零（No such process），属预期。
-    runner('launchctl', ['bootout', target])
+    if (loaded.registered) {
+      const bootout = runner('launchctl', ['bootout', target])
+      if (bootout.status !== 0) {
+        outcome.errors.push(`${profile}：bootout 失败：${bootout.stderr.trim() || bootout.status}`)
+        return outcome
+      }
+      const after = await waitForLaunchdTransition(checked.definition, dshHome, loaded.pid, runner, 'stopped', waitOptions)
+      if (!after.ok) {
+        outcome.errors.push(`${profile}：${after.error ?? '服务或旧 PID 仍在'}，保留 plist 并中止删除`)
+        return outcome
+      }
+    }
+    const latest = await inspectLaunchdDefinition(home, dshHome, profile, runner)
+    if (!latest.definition || JSON.stringify(latest.definition) !== JSON.stringify(checked.definition)) {
+      outcome.errors.push(`${profile}：plist 在停止期间改变，保留并中止删除`)
+      return outcome
+    }
     await rm(plistPath, { force: true })
     return outcome
   }
@@ -130,6 +177,23 @@ export async function stopManagedService(
   }
   outcome.actions.push('systemctl --user daemon-reload')
   return outcome
+}
+
+/** Hold every affected GUI label lock until the caller's purge transaction completes. */
+export async function withMacPurgeServiceLocks<T>(
+  home: string, dshHome: string, profiles: readonly string[], runner: CommandRunner,
+  operation: (stop: (profile: string) => Promise<ServiceStopOutcome>) => Promise<T>,
+): Promise<T> {
+  const ordered = [...new Set(profiles)].sort()
+  const allowed = new Set(ordered)
+  const stop = (profile: string): Promise<ServiceStopOutcome> => {
+    if (!allowed.has(profile)) throw new Error(`未锁定的 launchd profile：${profile}`)
+    return stopManagedServiceUnlocked('darwin', home, profile, runner, false, dshHome, {})
+  }
+  const acquire = (index: number): Promise<T> => index === ordered.length
+    ? operation(stop)
+    : withLaunchdProfileLock(ordered[index]!, () => acquire(index + 1))
+  return acquire(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -217,17 +281,13 @@ export async function inspectManagedService(
   platform: NodeJS.Platform,
   home: string,
   profile: string,
+  dshHome = join(home, '.dsh'),
+  runner: CommandRunner = defaultRunner,
 ): Promise<ManagedServicePresence> {
   if (platform === 'darwin') {
     const { plistPath } = launchAgentTargets(home, profile)
-    const managed = await isManagedPlistFile(plistPath, profile)
-    let exists = true
-    try {
-      await stat(plistPath)
-    } catch {
-      exists = false
-    }
-    return { managed, definitionPath: plistPath, foreign: exists && !managed }
+    const checked = await inspectLaunchdDefinition(home, dshHome, profile, runner)
+    return { managed: !!checked.definition, definitionPath: plistPath, foreign: checked.exists && !checked.definition }
   }
   const unit = systemdUnitName(profile)
   const definitionPath = join(systemdUserDirectory(home), unit)
@@ -259,6 +319,18 @@ export async function controlManagedService(
   action: ServiceAction,
   runner: CommandRunner = defaultRunner,
   dryRun = false,
+  dshHome = join(home, '.dsh'),
+  waitOptions: ServiceWaitOptions = {},
+): Promise<ServiceActionOutcome> {
+  if (platform === 'darwin' && process.platform === 'darwin' && !dryRun) {
+    return withLaunchdProfileLock(profile, () => controlManagedServiceUnlocked(platform, home, profile, action, runner, dryRun, dshHome, waitOptions))
+  }
+  return controlManagedServiceUnlocked(platform, home, profile, action, runner, dryRun, dshHome, waitOptions)
+}
+
+async function controlManagedServiceUnlocked(
+  platform: NodeJS.Platform, home: string, profile: string, action: ServiceAction,
+  runner: CommandRunner, dryRun: boolean, dshHome: string, waitOptions: ServiceWaitOptions,
 ): Promise<ServiceActionOutcome> {
   const outcome: ServiceActionOutcome = { profile, actions: [], messages: [], errors: [] }
   const label = ACTION_LABEL[action]
@@ -268,7 +340,7 @@ export async function controlManagedService(
     return outcome
   }
 
-  const presence = await inspectManagedService(platform, home, profile)
+  const presence = await inspectManagedService(platform, home, profile, dshHome, runner)
   if (!presence.managed) {
     outcome.errors.push(presence.foreign
       ? `${profile}：${presence.definitionPath} 存在但不是 dsh-enhanced 受管服务，已拒绝操作（请人工确认该文件归属）`
@@ -282,15 +354,23 @@ export async function controlManagedService(
 
   if (platform === 'darwin') {
     const { label: agentLabel, plistPath } = launchAgentTargets(home, profile)
+    const checked = await inspectLaunchdDefinition(home, dshHome, profile, runner)
+    if (!checked.definition) { outcome.errors.push(`${profile}：plist 归属无法确认`); return outcome }
+    const loaded = inspectLoadedLaunchd(checked.definition, dshHome, runner)
+    if (loaded.error) { outcome.errors.push(`${profile}：${loaded.error}`); return outcome }
     const domain = `gui/${process.getuid?.() ?? process.env.UID}`
     const target = `${domain}/${agentLabel}`
     if (action === 'stop') {
-      outcome.actions.push(`launchctl bootout ${target}`)
-      if (!dryRun) {
+      if (loaded.registered) outcome.actions.push(`launchctl bootout ${target}`)
+      if (!dryRun && loaded.registered) {
         const result = runner('launchctl', ['bootout', target])
-        // 未加载时 bootout 返回非零（No such process），对 stop 语义等价于已停止。
-        if (result.status !== 0 && !/No such process|not find/iu.test(`${result.stderr}${result.stdout}`)) {
+        if (result.status !== 0) {
           outcome.errors.push(`${profile}：${label}失败：${result.stderr.trim() || `launchctl 退出码 ${result.status}`}`)
+          return outcome
+        }
+        const after = await waitForLaunchdTransition(checked.definition, dshHome, loaded.pid, runner, 'stopped', waitOptions)
+        if (!after.ok) {
+          outcome.errors.push(`${profile}：${after.error ?? '服务或旧 PID 仍在'}，停止未确认`)
           return outcome
         }
       }
@@ -298,14 +378,26 @@ export async function controlManagedService(
       return outcome
     }
     // start / restart：plist 可能尚未 bootstrap（曾被 stop），先确保已载入再 kickstart。
-    outcome.actions.push(`launchctl bootstrap ${domain} ${plistPath}（已载入时忽略错误）`)
+    if (!loaded.registered) outcome.actions.push(`launchctl bootstrap ${domain} ${plistPath}`)
     outcome.actions.push(`launchctl kickstart ${action === 'restart' ? '-k ' : ''}${target}`)
     if (!dryRun) {
-      runner('launchctl', ['bootstrap', domain, plistPath])
+      if (!loaded.registered) {
+        const bootstrap = runner('launchctl', ['bootstrap', domain, plistPath])
+        if (bootstrap.status !== 0) {
+          outcome.errors.push(`${profile}：载入失败：${bootstrap.stderr.trim() || bootstrap.status}`)
+          return outcome
+        }
+      }
       const kickstartArgs = action === 'restart' ? ['kickstart', '-k', target] : ['kickstart', target]
       const result = runner('launchctl', kickstartArgs)
       if (result.status !== 0) {
         outcome.errors.push(`${profile}：${label}失败：${result.stderr.trim() || `launchctl 退出码 ${result.status}`}`)
+        return outcome
+      }
+      const after = await waitForLaunchdTransition(checked.definition, dshHome, loaded.pid, runner,
+        action === 'restart' && loaded.registered ? 'restarted' : 'running', waitOptions)
+      if (!after.ok) {
+        outcome.errors.push(`${profile}：${after.error ?? '运行状态或新 PID 未确认'}，${label}未确认`)
         return outcome
       }
     }

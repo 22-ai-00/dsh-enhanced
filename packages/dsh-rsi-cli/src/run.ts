@@ -31,7 +31,8 @@ function escapeRegex(value: string): string {
  * 进程静止检查：查找仍在运行的受管 profile host。
  *
  * 先用 `pgrep -f <pattern>`（只取 PID），pattern 为 `--profile <profile>`；
- * 命令行再用 `ps -p <pid> -o command=` 读取（procps/BSD 均支持），
+ * 命令行再用 `ps -p <pid> -o command=` 读取（procps/BSD 均支持）；
+ * ps 无法读取匹配 PID 时按探测失败处理，不将其当作静止。
  * 因为部分环境 pgrep -l 会打印线程 comm（如 MainThread）而非完整命令行。
  * dsh-rsi purge 自身命令行也可能带该参数，因此把命令行中含 dsh-rsi / dsh-rsi-cli
  * （旧包名 @dsh-enhanced/rsi-cli 的全局路径同样包含 rsi-cli）的匹配剔除。
@@ -47,23 +48,20 @@ export function findRunningProfiles(
     // Linux procps 与 macOS BSD pgrep 都不会把它当成选项（无需依赖 -- 分隔符）。
     const pattern = `[-]-profile ${escapeRegex(profile)}`
     const result = runner('pgrep', ['-f', pattern])
-    if (result.status !== 0 && result.status !== 1) {
+    if (result.status !== 0 && !(result.status === 1 && result.stdout.trim() === '' && result.stderr.trim() === '')) {
       return { active: [], error: result.stderr.trim() || `pgrep 退出码 ${result.status}` }
     }
     for (const line of result.stdout.split('\n')) {
       const pid = Number(line.trim())
       if (!Number.isInteger(pid) || pid <= 0) continue
-      const commandLine = readCommandLine(pid, runner)
+      const shown = runner('ps', ['-p', String(pid), '-o', 'command='])
+      if (shown.status !== 0 || shown.stdout.trim() === '') {
+        return { active: [], error: `无法读取 PID ${pid} 命令行：${shown.stderr.trim() || `ps 退出码 ${shown.status}`}` }
+      }
+      const commandLine = shown.stdout.trim()
       if (commandLine.includes('dsh-rsi') || commandLine.includes('rsi-cli') || commandLine.includes('purge.sh')) continue
       active.push({ pid, commandLine })
     }
   }
   return { active }
-}
-
-/** 跨平台读取单个 PID 的完整命令行；读取失败时回退占位文本。 */
-function readCommandLine(pid: number, runner: CommandRunner): string {
-  const shown = runner('ps', ['-p', String(pid), '-o', 'command='])
-  if (shown.status !== 0) return `PID ${pid}（命令行不可读）`
-  return shown.stdout.trim() || `PID ${pid}`
 }

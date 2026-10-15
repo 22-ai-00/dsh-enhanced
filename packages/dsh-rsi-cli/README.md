@@ -8,6 +8,8 @@ npm install --global @dsh-enhanced/dsh-rsi-cli
 
 零运行时依赖（仅用 Node.js 内置模块），要求 Node.js `^22.19.0 || >=24.0.0`，支持 macOS 与 Linux。
 
+macOS 服务管理使用系统的 `/usr/bin/perl`、`plutil` 和 `launchctl`。内核锁文件位于 `/tmp`，用于协调安装、服务操作和卸载；进程退出即释放锁。
+
 ## 命令
 
 ```
@@ -32,6 +34,7 @@ dsh-rsi [全局选项] <命令>
 - `--dsh-home <path>`：指定 DSH home（默认取 `$DSH_HOME`，否则 `~/.dsh`；install 经 `DSH_HOME` 环境变量传给安装器）
 - `--profile <name>`：仅操作单个 profile（`purge` 默认全量；install/reinstall 同时透传给安装器）
 - `--dry-run`：只打印将执行的动作，不做任何修改（install/reinstall 透传给安装器）
+- `--capabilities`：供救机脚本精确探测 CLI 安全能力；单独使用时只输出一行 JSON，不读取 Home 或操作服务。当前标记为 `macos-launchd-ownership-v1`，不供日常交互使用。
 - `--yes`：`purge` / `reinstall` 时跳过交互确认（install/reinstall 透传给安装器）
 - `-h, --help`：无命令位置时显示 dsh-rsi 帮助；`dsh-rsi install --help` 透传展示**安装器**完整参数清单
 
@@ -39,7 +42,7 @@ dsh-rsi [全局选项] <命令>
 
 `dsh-rsi install` 为全新 Home 选择 Host，再调用统一安装器：
 
-`install` 和 `reinstall` 在未指定 `--scenario`、也未指定 `--mode` 时，向安装器显式传入 `--scenario supervised`；`--dry-run` 会展示这一默认场景。完整 supervised 需要 Linux/systemd user services；macOS 可显式选择 `--scenario core` 等轻量场景。显式 `--lark skip` 或 `--no-service` 不追加完整场景，交由统一安装器保留有限场景；它们不能覆盖用户显式选择的 `supervised`。显式 `--scenario` 或旧式 `--mode` 保持安装器原有语义，例如 `--scenario core` 选择 core，`--mode standard` 保留安装器的自动选择。`update --all` 等升级、卸载、恢复及 `install --help` 不采用此默认值。其余参数仍按原顺序透传。
+`install` 和 `reinstall` 在未指定 `--scenario`、也未指定 `--mode` 时，向安装器显式传入 `--scenario supervised`；`--dry-run` 会展示这一默认场景。Linux 使用 systemd user services；原生 macOS 使用 launchd 管理 Node Host、Docker Desktop 容器承担候选构建与隔离验证，支持新工具学习。现有插件源码替换、发布与双 Host 交接仍限 Linux。显式 `--lark skip` 或 `--no-service` 不追加完整场景，交由统一安装器保留有限场景；它们不能覆盖用户显式选择的 `supervised`。显式 `--scenario` 或旧式 `--mode` 保持安装器原有语义，例如 `--scenario core` 选择 core，`--mode standard` 保留安装器的自动选择。`update --all` 等升级、卸载、恢复及 `install --help` 不采用此默认值。其余参数仍按原顺序透传。
 
 首次飞书身份授权须由平台的授权流程完成。全新 Home 尚无飞书 Bot 时，`supervised --yes` 或管道等非交互执行会在安装前停止；先在交互式终端运行 `dsh-rsi install` 完成 onboarding。安装器保留已有模型选择，并生成路径、签名身份及有期限的授权与有限预算；仍须有可用模型及隔离构建环境。已有 active/paused Automation 需要另行确认 `--ack-existing-automations`，`--yes` 不代替它。授权尚未就绪时，不能把 supervised 安装称为成功。
 
@@ -158,7 +161,7 @@ dsh-rsi logs --errors-only
 ### 安全门控
 
 - **不隐式注册服务**：服务定义文件不存在时**不会**顺手装一个（那会绕过安装器的归属、路径与凭据校验）。`core` / `web` 场景默认没有常驻服务，这是正常状态；命令会提供可直接复制的 `dsh-rsi install --profile <p> --scenario lark` / `--scenario supervised`，并以退出码 1 结束。`dsh-rsi-setup` 是插件包内的专用工具，不保证作为全局命令存在，因此不再把它作为用户修复入口。
-- **归属 fail-closed**：同名文件存在但内容不属受管（人工改写或被第三方占用）时拒绝操作、原样保留文件，并说明需人工确认归属。判定依据与 purge 一致 —— Linux 要求 unit 同时含 `DeepSeek Harness profile`、对应 `--profile <p>`、`--no-open`；macOS 要求 plist 的 `Label` 为 `ai.deepseek.dsh.profile.<p>` 且 `ProgramArguments` 含 `--profile <p>` 与 `--no-open`。
+- **归属 fail-closed**：同名文件存在但内容不属受管（人工改写或被第三方占用）时拒绝操作、原样保留文件，并说明需人工确认归属。判定依据与 purge 一致 —— Linux 要求 unit 同时含 `DeepSeek Harness profile`、对应 `--profile <p>`、`--no-open`；macOS 解析 plist 结构，核对 Label、完整启动参数、工作目录、`DSH_HOME`、日志路径和执行设置，还核对已加载 launchd job 的路径、参数与 Home。无法查询时拒绝变更。
 - **dry-run 措辞与实际执行严格区分**：`--dry-run` 下不执行任何命令，结论行为「将启动/将停止/将重启」；只有真正执行过才输出「已…」。
 - **多 profile 部分失败即非零**：任一 profile 出错，命令整体以退出码 1 结束，便于脚本判定；其余 profile 的处理结果照常打印。
 - 仅支持 macOS（launchd）与 Linux（systemd --user），其它平台明确报错而非静默成功。
@@ -203,7 +206,7 @@ purge 选项：
 
 **删除：**
 
-- 全量：整个 DSH home（profiles、logs、uninstalled-profiles、home 内锁文件），以及 home 外的生命周期事务目录、失败诊断目录、home 锁与 `/tmp` rendezvous 锁
+- 全量：整个 DSH home（profiles、logs、uninstalled-profiles、home 内锁文件），以及 home 外的生命周期事务目录、失败诊断目录和 home 锁。Linux 清理旧 `/tmp` rendezvous 锁；macOS 保留共享锁文件的稳定 inode，避免持锁期间被另一个进程重建同名锁文件。
 - 单 profile：`profiles/<name>`、对应的两份 host 日志、归属该 profile 的失败诊断目录
 - 受管常驻服务：macOS `launchctl bootout` + 删除 `~/Library/LaunchAgents/ai.deepseek.dsh.profile.<p>.plist`；Linux `systemctl --user disable --now` + `reset-failed` + 删除受管 unit 文件
 - 外部凭据：按各 profile 的 setup journal / cleanup 记录**权威反查** service 前缀为 `dsh/` 的条目，逐条从 Keychain（`security delete-generic-password`）或 Secret Service（`secret-tool clear`）删除；home 内的 protected-file 凭据随 home 一起删除
@@ -216,8 +219,8 @@ purge 选项：
 
 ### 安全门控
 
-- **进程静止检查**：Linux 已注册受管服务的精确 systemd MainPID 会交给 installer 的 service-aware 事务停服、屏蔽、升级和恢复；其它同 profile 的手工/测试 Host 仍会拒绝执行并列出 PID，不会被自动 kill。macOS 及无受管服务场景仍要求调用前保持整个目标 Home 静止。
-- **systemd unit 归属 fail-closed**：仅当 unit 文件内容同时包含受管标记（`DeepSeek Harness profile`、对应 `--profile <p>`、`--no-open`）才删除；归属不明的同名文件只报告、保留。
+- **进程静止检查**：Linux 已注册受管服务的精确 systemd MainPID 会交给 installer 的 service-aware 事务停服、屏蔽、升级和恢复；其它同 profile 的手工/测试 Host 仍会拒绝执行并列出 PID，不会被自动 kill。macOS 及无受管服务场景仍要求调用前保持整个目标 Home 静止；macOS 无法从命令行确认手动 Host 所属 Home，发现同 profile 进程时会阻止 purge，须人工确认并先行停止。
+- **服务归属 fail-closed**：Linux 仅当 unit 文件内容同时包含受管标记（`DeepSeek Harness profile`、对应 `--profile <p>`、`--no-open`）才删除。macOS 还要求本 Home 的 plist 与已加载 job 归属一致；`bootout` 失败、job 未注销或旧 PID 仍在时保留 plist 并中止数据删除。同一 GUI 用户下各 Home 共享 label；Mac purge 从枚举 profile 到停服、备份、删除和凭据清理始终按 Home 锁 → 所有目标 UID/profile 锁的顺序持有内核锁。
 - **locator 先扫描、文件先删除、凭据后清理**：删文件前先扫描各 profile 的 setup journal / cleanup 记录（journal 位于 DSH home 内，必须在删除前扫出凭据 locator）；随后**先删除文件**，再按预扫描的 locator 逐条删除外部凭据。单条凭据删除失败不会回滚已删文件，而是以「文件已删除，但以下凭据条目清理失败，请手工删除：…」报错并以退出码 1 结束。默认的 tar.gz 备份内含完整 journal，可解包后据此复查、手工补删；`--no-backup` 下文件与 journal 均不可恢复，只剩错误消息中列出的 service/account 可供定位。
 - 单 profile 与 `--remove-host` 互斥；仅支持 macOS / Linux。
 

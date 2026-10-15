@@ -9,6 +9,7 @@ import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPacka
 import { launchAgentPaths } from './launchd.js'
 import { assertNativeLaunchdPlist, inspectNativeLaunchd, startNativeLaunchd, stopNativeLaunchd } from './rsi-native-launchd.js'
 import { withDshHomeLifecycleLock } from './setup.js'
+import { withLaunchAgentTargetLock } from './launchd-target-lock.js'
 import { version } from './version.js'
 import type { RsiInstallPorts } from './rsi-install.js'
 
@@ -244,7 +245,8 @@ export async function installRsiLocalTarget(input: {dshHome:string;profile:strin
   await mkdir(input.dshHome,{recursive:true,mode:0o700})
   if (await realpath(input.dshHome) !== input.dshHome) fail('DSH_HOME must be canonical')
   const signal = AbortSignal.any([input.signal ?? new AbortController().signal,AbortSignal.timeout(2_400_000)])
-  return withDshHomeLifecycleLock(input.dshHome,async () => {
+  return withDshHomeLifecycleLock(input.dshHome,() => {
+    const operation = async () => {
     const source = await ports.prepareSource({...input,version,signal})
     const cohort = await ports.prepareCohort({...input,source,signal})
     await ports.preflight({...input,cohort})
@@ -284,5 +286,7 @@ export async function installRsiLocalTarget(input: {dshHome:string;profile:strin
       if (running) await ports.startLinux(input.profile,input.dshHome)
     }
     return {mode:'local-cohort-installed',profile:input.profile,sourceCommit:cohort.sourceCommit,packages:cohort.packages.length}
+    }
+    return ports.platform === 'darwin' ? withLaunchAgentTargetLock(input, operation) : operation()
   })
 }

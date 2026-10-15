@@ -13,7 +13,8 @@ import {
 } from './paths.ts'
 import { deleteCredentialLocator, scanCredentialLocators } from './secrets.ts'
 import { findRunningProfiles, defaultRunner, type CommandRunner } from './run.ts'
-import { stopManagedService } from './services.ts'
+import { stopManagedService, withMacPurgeServiceLocks, type ServiceStopOutcome } from './services.ts'
+import { withDshHomeLifecycleLock } from './home-lifecycle-lock.ts'
 import { scanRunningProfiles, terminatePids } from './process-guard.ts'
 
 export class PurgeError extends Error {}
@@ -82,6 +83,29 @@ async function listDirectoryOrEmpty(path: string): Promise<string[]> {
  */
 export async function runPurge(options: PurgeOptions): Promise<PurgeReport> {
   const platform = options.platform ?? process.platform
+  if (platform === 'darwin' && !options.dryRun) {
+    // Global order: Home rendezvous → stable ordered GUI labels → entire purge.
+    // Enumerating under the Home lock also fences a newly added profile.
+    return withDshHomeLifecycleLock(options.dshHome, async () => {
+      const allProfiles = await listProfiles(options.dshHome)
+      if (options.profile !== undefined && !allProfiles.includes(options.profile)) {
+        throw new PurgeError(`profile 不存在：${options.profile}（DSH home：${options.dshHome}）`)
+      }
+      const targets = options.profile === undefined ? allProfiles : [options.profile]
+      const runner = options.runner ?? defaultRunner
+      return withMacPurgeServiceLocks(options.home, options.dshHome, targets, runner,
+        stop => runPurgeCore(options, allProfiles, stop))
+    })
+  }
+  return runPurgeCore(options)
+}
+
+async function runPurgeCore(
+  options: PurgeOptions,
+  lockedProfiles?: string[],
+  stopUnderLock?: (profile: string) => Promise<ServiceStopOutcome>,
+): Promise<PurgeReport> {
+  const platform = options.platform ?? process.platform
   if (platform !== 'darwin' && platform !== 'linux') {
     throw new PurgeError(`dsh-rsi purge 仅支持 macOS 与 Linux，当前平台：${platform}`)
   }
@@ -90,7 +114,7 @@ export async function runPurge(options: PurgeOptions): Promise<PurgeReport> {
   }
   const runner = options.runner ?? defaultRunner
 
-  const allProfiles = await listProfiles(options.dshHome)
+  const allProfiles = lockedProfiles ?? await listProfiles(options.dshHome)
   const scope = options.profile === undefined ? 'full' : 'profile'
   if (scope === 'profile' && !allProfiles.includes(options.profile!)) {
     throw new PurgeError(`profile 不存在：${options.profile}（DSH home：${options.dshHome}）`)
@@ -103,7 +127,9 @@ export async function runPurge(options: PurgeOptions): Promise<PurgeReport> {
   const skippedServiceFiles: string[] = []
   const serviceErrors: string[] = []
   for (const profile of targetProfiles) {
-    const outcome = await stopManagedService(platform, options.home, profile, runner, options.dryRun)
+    const outcome = stopUnderLock === undefined
+      ? await stopManagedService(platform, options.home, profile, runner, options.dryRun, options.dshHome)
+      : await stopUnderLock(profile)
     skippedServiceFiles.push(...outcome.skipped)
     for (const message of outcome.errors) serviceErrors.push(`[${profile}] ${message}`)
   }
@@ -112,7 +138,7 @@ export async function runPurge(options: PurgeOptions): Promise<PurgeReport> {
   // 2. 停服后复检残留进程。受管 host 此时应已消失；剩下的要么是可证明归属本 home
   //    的临时 dsh/plugin 命令（proven，可终止），要么是无法证明归属的进程（foreign，
   //    fail-closed，绝不自动杀）。
-  const guard = await scanRunningProfiles(options.dshHome, targetProfiles, runner)
+  const guard = await scanRunningProfiles(options.dshHome, targetProfiles, runner, platform)
   if (guard.error !== undefined) {
     throw new PurgeError(`无法检查运行中的 profile 进程：${guard.error}`)
   }
@@ -198,7 +224,12 @@ export async function runPurge(options: PurgeOptions): Promise<PurgeReport> {
     const parentEntries = await listDirectoryOrEmpty(dirname(options.dshHome))
     const tmpEntries = await listDirectoryOrEmpty('/tmp').catch(() => [])
     const residuals = await listLifecycleResiduals(options.dshHome, parentEntries, tmpEntries)
-    const targets = [options.dshHome, ...residuals]
+    // A kernel lock must keep its rendezvous inode linked for the entire
+    // transaction. Unlinking it would let a second process lock a new inode.
+    const retained = platform === 'darwin'
+      ? residuals.filter(path => !path.startsWith('/tmp/.dsh-enhanced-lifecycle-'))
+      : residuals
+    const targets = [options.dshHome, ...retained]
     report.removedPaths.push(...targets)
     if (!options.dryRun) {
       for (const target of targets) await rm(target, { recursive: true, force: true })

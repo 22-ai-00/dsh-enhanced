@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import type { CommandResult, CommandRunner } from '../src/run.ts'
 import { scanRunningProfiles, terminatePids } from '../src/process-guard.ts'
+import { findRunningProfiles } from '../src/run.ts'
 
 /** 构造按 pid 返回命令行的假 runner。 */
 function psRunner(pidToCmd: Record<number, string>): { runner: CommandRunner; calls: string[] } {
@@ -29,7 +30,7 @@ describe('scanRunningProfiles：归属分类', () => {
       103: 'node /opt/dsh/bin/dsh plugin --profile web remove @deepseek-ai/dsh-sandbox-local',
       104: '/usr/sbin/anacron --profile web',
     })
-    const { processes } = await scanRunningProfiles('/home/u/.dsh', ['web'], runner)
+    const { processes } = await scanRunningProfiles('/home/u/.dsh', ['web'], runner, 'linux')
     const byPid = Object.fromEntries(processes.map(p => [p.pid, p]))
     // 101 self → 不出现
     expect(byPid[101]).toBeUndefined()
@@ -44,6 +45,27 @@ describe('scanRunningProfiles：归属分类', () => {
     const runner: CommandRunner = () => ({ status: 2, stdout: '', stderr: 'pgrep boom' })
     const { error } = await scanRunningProfiles('/h/.dsh', ['web'], runner)
     expect(error).toMatch(/pgrep boom/)
+  })
+
+  test('macOS：同名 dsh 命令行无法证明 Home，归为 foreign', async () => {
+    const { runner } = psRunner({ 12345: 'node /other/home/bin/dsh --profile web --no-open' })
+    const result = await scanRunningProfiles('/target/.dsh', ['web'], runner, 'darwin')
+    expect(result.error).toBeUndefined()
+    expect(result.processes).toMatchObject([{ pid: 12345, owner: 'foreign' }])
+    expect(result.processes[0]!.evidence.join(' ')).toMatch(/无可信 DSH_HOME/)
+  })
+
+  test('pgrep 无匹配须 stderr 为空；ps 失败不能当作进程退出', async () => {
+    const warning: CommandRunner = command => command === 'pgrep'
+      ? { status: 1, stdout: '', stderr: 'permission denied' }
+      : { status: 0, stdout: '', stderr: '' }
+    expect((await scanRunningProfiles('/target/.dsh', ['web'], warning, 'darwin')).error).toMatch(/permission denied/)
+    const psFailed: CommandRunner = command => command === 'pgrep'
+      ? { status: 0, stdout: '12345\n', stderr: '' }
+      : { status: 1, stdout: '', stderr: 'permission denied' }
+    expect((await scanRunningProfiles('/target/.dsh', ['web'], psFailed, 'darwin')).error).toMatch(/permission denied/)
+    expect(findRunningProfiles(['web'], warning).error).toMatch(/permission denied/)
+    expect(findRunningProfiles(['web'], psFailed).error).toMatch(/permission denied/)
   })
 })
 

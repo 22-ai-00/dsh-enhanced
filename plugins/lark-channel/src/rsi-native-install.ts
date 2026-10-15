@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { listActiveAutomationsLocally } from '@dsh-enhanced/assistant-automations'
 import { withDshHomeLifecycleLock } from './setup.js'
+import { withLaunchAgentTargetLock } from './launchd-target-lock.js'
 import { createLaunchAgent, launchAgentPaths } from './launchd.js'
 import { prepareRsiSourceWorkspace } from './rsi-source.js'
 import { prepareRsiBuildEnvironment, RsiBuildUnavailableError, rsiBuildResources as io } from './rsi-build.js'
@@ -96,7 +97,7 @@ export async function installNativeRsiOwnerDeployment(input: RsiInstallInput,
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(input.profile) || input.profile === 'desktop'
     || await realpath(input.dshHome) !== input.dshHome) fail('invalid native installation identity')
   const signal = AbortSignal.any([input.signal ?? new AbortController().signal, AbortSignal.timeout(2_400_000)])
-  return withDshHomeLifecycleLock(input.dshHome, async () => {
+  return withDshHomeLifecycleLock(input.dshHome, () => withLaunchAgentTargetLock(input, async () => {
     let prepared: Awaited<ReturnType<typeof prepare>>
     try { prepared = await ports.prepare(input, signal) }
     catch (error) { signal.throwIfAborted(); if (error instanceof RsiBuildUnavailableError) return { mode: 'not-ready', reason: error.message }; throw error }
@@ -208,5 +209,5 @@ export async function installNativeRsiOwnerDeployment(input: RsiInstallInput,
       catch (rollbackError) { throw new AggregateError([error, rollbackError], 'rsi native install failed and rollback requires reconciliation') }
       throw error
     }
-  })
+  }))
 }

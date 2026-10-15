@@ -10,13 +10,12 @@ import { defaultRunner } from './run.ts'
  * 连「本应受管、本可自动停掉」的 host 也不放过，导致用户卡在 purge 入口。
  * 这里把进程分成三类：
  *   - self    ：dsh-rsi / purge.sh 自身命令行，永远跳过。
- *   - proven  ：非 self，但命令行指向目标 profile，且归属证据（DSH_HOME 环境变量 /
- *               cwd / 命令行）能证明它属于本次要清除的 DSH home。可安全终止。
+ *   - proven  ：Linux 下非 self，且 /proc 环境变量或既有命令行规则认定归属目标 Home。
+ *               macOS 没有可信的 Home 进程身份读取，全部未知目标均归为 foreign。
  *   - foreign ：命令行带 `--profile <p>` 但证据指向别的 home / 无法证明归属；fail-closed，
  *               绝不自动杀。
  *
- * 终止顺序：先 SIGTERM，轮询最多 5 秒；仍在则 SIGKILL。每次复检都重新读取命令行，
- * 确认 PID 仍是目标进程（防 PID reuse）。
+ * Linux 的既有终止顺序：先 SIGTERM，轮询最多 5 秒；仍在则 SIGKILL。
  */
 
 export interface GuardedProcess {
@@ -45,7 +44,7 @@ function escapeRegex(value: string): string {
   return value.replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 }
 
-/** 读取 PID 的命令行（ps）；失败返回占位。 */
+/** Linux 既有终止路径读取 PID 的命令行；扫描路径另行检查 ps 退出状态。 */
 function readCommandLine(pid: number, runner: CommandRunner): string {
   const shown = runner('ps', ['-p', String(pid), '-o', 'command='])
   return shown.stdout.trim() || `PID ${pid}`
@@ -72,30 +71,39 @@ export async function scanRunningProfiles(
   dshHome: string,
   profiles: readonly string[],
   runner: CommandRunner = defaultRunner,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<ProcessScan> {
   const processes: GuardedProcess[] = []
   for (const profile of profiles) {
     const pattern = `[-]-profile ${escapeRegex(profile)}`
     const result = runner('pgrep', ['-f', pattern])
-    if (result.status !== 0 && result.status !== 1) {
+    if (result.status !== 0 && !(result.status === 1 && result.stdout.trim() === '' && result.stderr.trim() === '')) {
       return { processes, error: result.stderr.trim() || `pgrep 退出码 ${result.status}` }
     }
     for (const line of result.stdout.split('\n')) {
       const pid = Number(line.trim())
       if (!Number.isInteger(pid) || pid <= 0) continue
-      const commandLine = readCommandLine(pid, runner)
-      if (isSelfCommand(commandLine)) continue
+      const shown = runner('ps', ['-p', String(pid), '-o', 'command='])
+      if (shown.status !== 0 || shown.stdout.trim() === '') {
+        return { processes, error: `无法读取 PID ${pid} 命令行：${shown.stderr.trim() || `ps 退出码 ${shown.status}`}` }
+      }
+      const commandLine = shown.stdout.trim()
+      if (platform === 'darwin' ? pid === process.pid : isSelfCommand(commandLine)) continue
 
       const evidence: string[] = [`命令行：${commandLine}`]
-      const envHome = await procDshHome(pid)
+      const envHome = platform === 'darwin' ? undefined : await procDshHome(pid)
       let owner: 'proven' | 'foreign'
 
-      if (envHome !== undefined) {
+      if (platform === 'darwin') {
+        // ps 的命令行不含可信 Home 身份；同一 profile 可属于其他 DSH_HOME。
+        owner = 'foreign'
+        evidence.push('macOS 无可信 DSH_HOME 进程归属证据，拒绝自动终止')
+      } else if (envHome !== undefined) {
         // 有 DSH_HOME 环境变量：直接比较，最强证据。
         evidence.push(`DSH_HOME=${envHome}`)
         owner = envHome === dshHome ? 'proven' : 'foreign'
       } else {
-        // 无 /proc（macOS）或无 DSH_HOME 变量：命令行启发式。
+        // Linux 无 DSH_HOME 变量：保留既有命令行启发式。
         // 命令行带目标 --profile 且属于 dsh/dsh-rsi/dsh plugin 操作 → proven；
         // 否则无法证明归属 → foreign（fail-closed）。
         const looksLikeDsh = /(^|[\s/])(dsh|dsh-rsi)([\s.]|$)/u.test(commandLine)

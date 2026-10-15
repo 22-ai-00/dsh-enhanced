@@ -100,6 +100,26 @@ test('DSH 0.2 setup resolves Host peers in-process, awaits completion and retain
   expect(existsSync(join(home, 'profiles', 'node_modules'))).toBe(false)
 })
 
+test('internal Mac service dispatch uses the selected Lark package without onboarding', async () => {
+  const { home, bin, output, profile, packageRoot } = await fixture()
+  const larkRoot = join(dirname(packageRoot), 'lark-channel')
+  await rename(packageRoot, larkRoot)
+  await writeFile(join(profile, 'package.json'), JSON.stringify({ name: 'dsh-profile-assistant', type: 'module',
+    dependencies: { '@dsh-enhanced/lark-channel': '0.0.0' }, dsh: { profile: { bundles: [] } } }))
+  await writeFile(join(larkRoot, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/lark-channel',
+    version: '0.0.0', type: 'module', bin: { 'dsh-lark-setup': './bin/dsh-model-setup.js' } }))
+  await writeFile(join(larkRoot, 'lib', 'launchd-control.js'), `import { writeFile } from 'node:fs/promises'
+export async function runLaunchdControl(args) { await writeFile(process.env.SETUP_RESULT, JSON.stringify(args)); process.exitCode = 3 }
+`)
+  const result = spawnSync('/bin/bash', ['-c',
+    'source "$1"; dsh_enhanced_macos_service_action assistant "$2" registered',
+    'service-test', join(process.cwd(), 'scripts/install/common.sh'), home], {
+    encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '', PATH: `${bin}:${process.env.PATH ?? ''}`, SETUP_RESULT: output },
+  })
+  expect(result.status, result.stderr).toBe(3)
+  expect(JSON.parse(await readFile(output, 'utf8'))).toEqual(['--profile', 'assistant', '--dsh-home', home, '--action', 'registered'])
+})
+
 test('DSH 0.2 setup resolves a policy nested under a selected local bundle link', async () => {
   const { home, bin, output } = await nestedPolicyFixture()
   const result = run(home, bin, output, ['--smoke', 'nested'], 'owner input\n')

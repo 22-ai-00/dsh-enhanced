@@ -48,12 +48,8 @@ fi
 
 (cd "$REPOSITORY_ROOT" && pnpm build)
 if [[ "$SERVICE_KIND" == 'launchd' ]]; then
-  TARGET="gui/$(id -u)/ai.deepseek.dsh.profile.$PROFILE"
-  if ! launchctl print "$TARGET" >/dev/null 2>&1; then
-    printf 'dsh-enhanced restart: 常驻服务尚未安装：%s\n' "$TARGET" >&2
-    exit 1
-  fi
-  launchctl kickstart -k "$TARGET"
+  source "$SCRIPT_DIRECTORY/common.sh"
+  dsh_enhanced_macos_service_action "$PROFILE" "${DSH_HOME:-$HOME/.dsh}" restart
 elif [[ "$SERVICE_KIND" == 'systemd' ]]; then
   TARGET="dsh-profile-$PROFILE.service"
   # Probe unit-file existence, not run state: `systemctl status` exits non-zero

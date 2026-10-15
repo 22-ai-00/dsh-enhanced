@@ -2,6 +2,7 @@ import type { CommandRunner } from './run.ts'
 import { defaultRunner } from './run.ts'
 import { inspectManagedService, tailLogFile } from './services.ts'
 import { profileLogPaths, systemdUnitName, SYSTEMD_UNIT_PATTERN } from './paths.ts'
+import { inspectLaunchdDefinition, inspectLoadedLaunchd } from './launchd-service.ts'
 
 /**
  * Web URL：从运行中受管服务的 journal / host 日志中解析最新一次 `dsh web:` 行，
@@ -45,7 +46,7 @@ const WEB_URL_LOOKBACK_LINES = 400
  * - macOS launchd：读 `$DSH_HOME/logs/<profile>-host.log` 尾部
  *
  * 服务未注册时给出与 start/stop 一致的指引；服务未运行时明确提示先 start。
- * 即使服务当前未运行，只要日志里还有历史 URL，也会返回并标注其可能已随重启失效。
+ * Linux 保留展示 journal 历史 URL 的诊断行为；macOS 仅在已加载 job 有运行 PID 时读取日志。
  */
 export async function resolveManagedWebUrl(
   platform: NodeJS.Platform,
@@ -55,7 +56,7 @@ export async function resolveManagedWebUrl(
   runner: CommandRunner = defaultRunner,
 ): Promise<ProfileWebUrl> {
   const result: ProfileWebUrl = { profile, errors: [] }
-  const presence = await inspectManagedService(platform, home, profile)
+  const presence = await inspectManagedService(platform, home, profile, dshHome, runner)
   if (!presence.managed) {
     result.notice = presence.foreign
       ? `${profile}：${presence.definitionPath} 存在但不是 dsh-enhanced 受管服务，拒绝读取。`
@@ -83,6 +84,14 @@ export async function resolveManagedWebUrl(
       result.notice = `${profile}：受管服务当前状态为「${activeValue || 'unknown'}」，先运行 dsh-rsi start --profile ${profile}；下面是日志中最近一次的 URL，重启后会变化。`
     }
   } else if (platform === 'darwin') {
+    const checked = await inspectLaunchdDefinition(home, dshHome, profile, runner)
+    if (!checked.definition) { result.errors.push(`${profile}：plist 归属无法确认`); return result }
+    const loaded = inspectLoadedLaunchd(checked.definition, dshHome, runner)
+    if (loaded.error) { result.errors.push(`${profile}：${loaded.error}`); return result }
+    if (!loaded.registered || !loaded.running) {
+      result.notice = `${profile}：受管服务未运行；先运行 dsh-rsi start --profile ${profile}。`
+      return result
+    }
     const [stdoutLog] = profileLogPaths(dshHome, profile)
     if (stdoutLog === undefined) {
       result.errors.push(`${profile}：无法解析 host 日志路径。`)

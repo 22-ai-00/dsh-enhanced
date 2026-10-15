@@ -1,5 +1,25 @@
-import { describe, expect, test } from 'vitest'
-import { parseArgs, version } from '../src/index.ts'
+import { describe, expect, test, vi } from 'vitest'
+import { main, parseArgs, version } from '../src/index.ts'
+
+describe('capability probe', () => {
+  test('仅精确 --capabilities 返回只读 JSON，不调用服务依赖', async () => {
+    const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const error = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    try {
+      const forbidden = () => { throw new Error('must not be called') }
+      expect(await main(['--capabilities'], { DSH_HOME: '/does/not/exist' }, {
+        purge: forbidden as never, install: forbidden as never, selfUpdate: forbidden as never,
+      })).toBe(0)
+      expect(output).toHaveBeenCalledExactlyOnceWith('{"capabilities":["macos-launchd-ownership-v1"]}\n')
+      expect(error).not.toHaveBeenCalled()
+      expect(await main(['--capabilities', '--yes'], {})).toBe(2)
+      expect(output).toHaveBeenCalledTimes(1)
+    } finally {
+      output.mockRestore()
+      error.mockRestore()
+    }
+  })
+})
 
 describe('version', () => {
   test('导出稳定的三段式版本字面量', () => {

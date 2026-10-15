@@ -1,5 +1,6 @@
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
@@ -11,11 +12,12 @@ afterEach(async () => { await Promise.all(homes.splice(0).map(home => rm(home, {
 
 async function fixture() {
   const home = await realpath(await mkdtemp(join(tmpdir(), 'dsh-native-install-'))); homes.push(home)
-  const dshHome = join(home, '.dsh'), profile = 'web', profileRoot = join(dshHome, 'profiles', profile)
-  const configRoot = join(dshHome, 'rsi-authorities', 'web', 'config')
-  const stateRoot = join(dshHome, 'rsi-authorities', 'web', 'state')
+  const dshHome = join(home, '.dsh'), profile = `native-${process.pid}-${randomUUID().slice(0, 8)}`
+  const profileRoot = join(dshHome, 'profiles', profile)
+  const configRoot = join(dshHome, 'rsi-authorities', profile, 'config')
+  const stateRoot = join(dshHome, 'rsi-authorities', profile, 'state')
   for (const directory of [dshHome, join(dshHome, 'profiles'), profileRoot, join(dshHome, 'rsi-authorities'),
-    join(dshHome, 'rsi-authorities', 'web'), configRoot, stateRoot]) {
+    join(dshHome, 'rsi-authorities', profile), configRoot, stateRoot]) {
     await mkdir(directory, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error })
     await chmod(directory, 0o700)
   }
@@ -74,7 +76,7 @@ describe('native RSI installation transaction', () => {
   test('commits once and a retry preserves the original finite grant expiry', async () => {
     const f = await fixture()
     const first = await installNativeRsiOwnerDeployment(f.input, f.ports)
-    expect(first).toMatchObject({ mode: 'ready', profiles: ['web'] })
+    expect(first).toMatchObject({ mode: 'ready', profiles: [f.input.profile] })
     expect(await readFile(f.patchPath, 'utf8')).toBe(f.installedPatch)
     const planPath = join(f.configRoot, 'native-plan.json'), manifestPath = join(f.configRoot, 'native-manifest.json')
     const plan = await readFile(planPath, 'utf8'), manifest = await readFile(manifestPath, 'utf8')

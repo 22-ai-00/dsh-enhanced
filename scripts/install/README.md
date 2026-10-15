@@ -22,6 +22,10 @@ pnpm approve-builds koffi
 
 macOS 的本地和 npm 安装入口会在安装末尾检查受管 LaunchAgent；若 `ai.deepseek.dsh.profile.<profile>` 未注册，会自动调用当前 profile 的服务注册入口并再次确认，再执行健康检查，无需手动运行 `launchctl bootstrap`。修复复用服务注册入口，不启动新的飞书 onboarding；已有中断的 setup 事务仍由原入口恢复。`--no-service`、`--lark skip` 以及不管理常驻服务的场景保持跳过；独立 `doctor.sh` 仍只检查。注册失败会保留具体错误并停止安装。
 
+同一 macOS 用户的同名 profile 共用一个 launchd 目标。安装、重启与清理会核对 plist 和已加载服务的 DSH_HOME、profile 与执行参数，并按该目标互斥；另一 Home 已占用时停止操作。替换服务失败会尝试恢复原定义与注册状态，无法证明停服或恢复时保留现场并报错。运行检查要求 `state = running` 和有效 PID；重启还须确认新 PID，只有注册记录不算运行成功。
+
+macOS purge 从枚举 profile 到停服、备份和删除结束持续持有 Home 生命周期锁，并在停服前获取全部目标服务锁，阻止同 Home 的安装或同目标的启动与清理并发。`/tmp` 中的 Home 和服务锁文件保留稳定 inode；进程退出即释放内核锁，保留文件不表示仍被占用。同 profile 的手动 Host 若无法证明所属 Home，清理会中止，`--yes` 不会自动终止它。
+
 历史验收记录（截至 2026-09-12）：`v0.1.31` 完成过 Linux `autonomy` 的远程全新安装，以及真实 `.30 → .31` 升级、隔离 Host 启动与事务提交；最终冻结候选完成 `.31 → .31` 重复升级，两次均确认 14 个受管包同版本，选定配置、状态文件、暂停目标及其检查点保持不变。该批升级修复随 `0.1.32` 发布；旧 `v0.1.31` 远程 helper 不具备同样能力。当前验收范围与剩余缺口见 [RSI 当前状态](../../docs/rsi-status.md)。
 
 安装器先确保 Node.js、pnpm 和兼容的 DSH。新安装先解析官方 `@deepseek-ai/dsh` 的 `latest`，确认是已验证的 `0.2.0-rc.2` 后安装精确版本，不追踪 `next` 或 beta；未知版本或解析失败会在安装 Host 前拒绝。`--dry-run` 离线展示计划，显式 `--dsh-version` 可指定范围内精确版本。`dsh-rsi install` 对全新空 Home 将 Host 安装到独立目录，并在 Home 内持久绑定精确版本；重试、插件升级及生成的服务复用该入口，不修改全局 DSH。已有未绑定 Home 保留原 Host。`0.1.49` 起，`dsh-rsi update --all` 可为已有私有绑定的 Linux Home 规划受管 Host 更新；版本相同跳过，旧 `0.1 → 0.2` 仍拒绝普通自动更新。真实跨版本验收状态见 [RSI 状态](../../docs/rsi-status.md)，缓存与重装说明见 [CLI 指南](../../packages/dsh-rsi-cli/README.md#install--reinstall薄委托)。
@@ -233,9 +237,9 @@ dsh-rsi purge --dry-run # 查看完整删除计划
 dsh-rsi purge --yes     # 先在 ~ 生成 0600 的 tar.gz 备份，再删除 DSH home 与全部受管痕迹
 ```
 
-purge 覆盖 npm cohort 实体副本与本地 checkout 符号链接两种形态。**全量**（默认）删除整个 `$DSH_HOME`（profiles、logs、uninstalled-profiles、home 内锁文件）以及 home 外生命周期事务目录、失败诊断目录、home 锁与 `/tmp` rendezvous 锁；**单 profile**（`--profile <name>`）只删除 `profiles/<name>`、该 profile 的两份 host 日志与 `.failed-<name>-*` 失败诊断目录，共享的生命周期事务目录与两把锁因可能涉及其它 profile 而刻意保留——注意单 profile 的 tar.gz 备份仍覆盖**整个** `$DSH_HOME`。两种范围都会停用并注销 launchd / systemd --user 受管服务，并按各 profile 的 setup journal 权威反查清理 Keychain / Secret Service 中 service 前缀为 `dsh/` 的凭据。选项：`--no-backup`、`--keep-keychain`、`--remove-host`（同时卸载全局 `@deepseek-ai/dsh`，默认保留；仅限全量）。本地 checkout 源码只删符号链接、**绝不删除 checkout**，报告会列出 checkout 路径。发现仍在运行的 profile host 会拒绝执行（不代为 kill）；systemd unit 文件内容不匹配受管标记时 fail-closed 只报告保留。完整命令参考见 `packages/dsh-rsi-cli/README.md`。
+purge 覆盖 npm cohort 实体副本与本地 checkout 符号链接两种形态。**全量**（默认）删除整个 `$DSH_HOME`（profiles、logs、uninstalled-profiles、home 内锁文件）以及 home 外生命周期事务目录、失败诊断目录、home 锁；Linux 另清理 `/tmp` rendezvous 锁，macOS 保留共享内核锁文件以维持并发互斥。**单 profile**（`--profile <name>`）只删除 `profiles/<name>`、该 profile 的两份 host 日志与 `.failed-<name>-*` 失败诊断目录，共享的生命周期事务目录与两把锁因可能涉及其它 profile 而刻意保留——注意单 profile 的 tar.gz 备份仍覆盖**整个** `$DSH_HOME`。两种范围都会停用并注销 launchd / systemd --user 受管服务，并按各 profile 的 setup journal 权威反查清理 Keychain / Secret Service 中 service 前缀为 `dsh/` 的凭据。选项：`--no-backup`、`--keep-keychain`、`--remove-host`（同时卸载全局 `@deepseek-ai/dsh`，默认保留；仅限全量）。本地 checkout 源码只删符号链接、**绝不删除 checkout**，报告会列出 checkout 路径。发现仍在运行的 profile host 会拒绝执行（不代为 kill）；systemd unit 文件内容不匹配受管标记时 fail-closed 只报告保留。完整命令参考见 `packages/dsh-rsi-cli/README.md`。
 
-机器上没有 `dsh-rsi` 时（host 已损坏 / 全局命令被删），可直接执行单文件救机脚本；它优先委托 `dsh-rsi`，找不到时使用等价的内联精简实现，参数与 `dsh-rsi purge` 一致：
+机器上 host 已损坏或全局命令被删时，可执行单文件救机脚本，参数与 `dsh-rsi purge` 一致。Linux 优先委托 `dsh-rsi`，找不到时使用内联精简实现；macOS 必须找到具有 `macos-launchd-ownership-v1` 能力的完整 CLI，旧 CLI 或缺失 CLI 均停止清理并提示升级，不停止服务、不删除数据：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/purge.sh \
