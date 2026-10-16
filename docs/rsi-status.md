@@ -1,30 +1,29 @@
 # RSI 当前状态
 
-更新：2026-10-16。本页是唯一进展入口；验收见[合同](rsi-acceptance.md)，历史实施与迁移证据查 Git。
+更新：2026-10-16。本页是唯一进展入口；验收见[合同](rsi-acceptance.md)，发行见[发布协议](releasing.md)，历史实施与证据查 Git。
 
 ## 目标与能力边界
 
 普通使用驱动持续自迭代：认证任务与反馈 → 持久学习 → 能力候选 → 独立验证 → 有限采用 → 后续任务 → 观察与回滚。初始配置和授权后，主人不必逐次编排改进。
 
-**完整普通使用闭环尚未验收。** 实验性发布须先通过安装、运行就绪和工程检查；发布或服务启动成功不证明后续真实任务的质量、成本、延迟与回归收益。
+**完整普通使用闭环尚未验收。** 工程测试、安装与服务就绪不证明后续真实任务的质量、成本、延迟及回归收益。
 
-- 版本账本记录的已发布版本为 `0.1.49`，37 个包，精确 Host 基线为 `0.2.0-rc.2`（预发布）。本轮 Mac 修复尚未发布到 npm；公开安装包不含这些改动。
-- 本轮开发源码接通**纯 macOS 原生新工具创建与采用，无需 Docker**：私有固定 Node 与冻结依赖 → 固定 TypeScript 语义检查及 JS/声明生成 → Host 安全打包 → 独立留出行为核验 → v2 签名证书 → Cordis 动态采用及持久复用。
-- 原生执行使用系统沙箱，禁止联网和子进程，工作目录只读；持久账本约束次数与累计时长，可信 supervisor 在 Host 退出后清理候选并保存精确关闭回执。缺失或不符的回执保持 unknown，占用容量，不自动重放。runtime 树、授权、构建证据和签名采用均绑定摘要。
-- 候选与行为观察代码位于同一沙箱进程；输出不可信，预期答案及签名密钥留在 Host。该边界不等价于 Linux 双进程隔离，也不提供内存、CPU、磁盘硬配额。公开的任意 shell `isolation_run` 仍是单独的 Docker 能力，不是 Mac 新工具路径的依赖。
-- 既有插件源码替换、发布与双 Host 交接仍限 Linux。Mac 普通插件升级仅支持未冻结且全程已停止的 Home；入口与变更前检查拒绝运行中、身份未知或冻结资源。冻结 cohort 迁移和跨版本私有 Host 更新尚未支持。Apple Silicon 有实机证据，Intel Mac 仍待实机验证。
+- `0.1.53` 已发布到公开 npm，37 个包的精确版本和 `latest` 均已逐项核对。精确 Host 基线为 `0.2.0-rc.2`（预发布）。
+- macOS 原生新工具创建与采用无需 Docker：私有固定 Node 与冻结依赖 → TypeScript 语义检查及 JS/声明生成 → Host 打包 → 独立留出核验 → v2 签名 → Cordis 动态采用及持久复用。
+- 系统沙箱禁止联网和子进程，工作目录只读；持久账本限制次数和累计时长，Host 退出后由 supervisor 清理并保存关闭回执。缺失或不符的回执保持 unknown，占用容量，不自动重放。
+- 候选与行为观察代码共享沙箱进程，预期答案和签名密钥留在 Host；没有内存、CPU、磁盘硬配额，不等同于 Linux 双进程隔离。任意 shell 的 `isolation_run` 仍是单独的 Docker 能力。
+- 既有插件源码替换、发布与双 Host 交接仍限 Linux。Mac 普通插件升级只支持未冻结且全程停止的 Home；运行中、身份未知或冻结资源会被拒绝。冻结 cohort 迁移、跨版本私有 Host 更新和 Intel Mac 实机仍待支持或验收。
 
 ## 当前验证
 
-- 正式 `dsh-rsi-setup --prepare-build` 在私有临时 Home 使用在线官方归档、冻结 Git 清单和依赖安装，退出 0；未传预下载文件，也未使用 Docker。重复读取、坏归档、Git replace ref、回执权限和运行时篡改/缺失拒绝均有定向证据。
-- 真实 Mac 原生执行包 136 项通过、38 项明确跳过；行为探针 4 项通过。固定源码生成/编译/打包、两例私有留出、v2 签名、动态采用和重复 callId 复用串联退出 0。串联中的模型、owner 和部分上层当前性接口为测试替身，只证明工程机制贯通，不证明真实认证用户的普通任务闭环。
-- Automations 的 Mac 库存读取已接通原生写锁查询、WAL 快照及实际连接 inode 校验。固定 Perl helper 只检查继承的文件描述符；不能确认锁、同进程已有源库连接或路径漂移时拒绝。整包 260 项通过、23 项明确跳过，新增回归覆盖真实 WAL 业务行、写锁保留、路径替换及子进程清理；Linux 仍使用原 `/proc/locks` 分支。
-- Mac Automations 修复的 `pnpm check` 退出 0，源码前后指纹一致，37 个包 dry-run pack 完成。真实 `web` 的原生 owner 安装和认证就绪均退出 0，并经独立复核：launchd 运行、6 个目标组件 active、Lark connected；19 个身份/收据文件、199 行非受管配置及 7 个历史/凭据文件保留，模型覆盖未变。安装器为 `bd077551`，实际运行的 22 个 bundle、30 个包仍绑定 `55090bb7` 冻结 cohort。
-- Linux 实机已免密连接并拉取最新 `dev`，Node 24 与真实 bubblewrap 探针可用。packaged systemd authority CLI 用例在组可写 Node 安装目录下复现相同拒绝，测试现为 Linux 固定私有副本；组可写来源回归及 Mac 同文件均 9 项通过，独立审查通过。CI 原始 runner 的目录权限未直接留证，最终修复提交的 Linux 全检和跨平台 CI 尚待完成。平台或外部依赖的条件跳过不构成 live 运行证据。
-- TraeX CLI `0.210.1` 的 ACP 身份改为 `traecli-acp`，旧插件只接受 `traex-acp`，已实机复现初始化拒绝。修复精确兼容两种身份并保留 ACP v1、Trae SSO 及未知身份拒绝；包内 168 项通过，真实 `listModels` 返回 28 个具体模型和 `default`，与原生目录匹配，无 prompt、子进程已关闭，独立审查通过。最终发布全检、跨平台 CI 和新版安装待验；现有冻结 `web` 尚未替换为该修复。
+- 精确源码 `3801baebdce1251f0755152514585d7a5aa91f02`：Mac、Linux 实机根目录 `pnpm check` 均退出 0，各完成 37 个包的 dry-run pack；源码前后指纹及原始日志经独立复核通过。Node `24.7.0`、pnpm `11.7.0`；条件跳过不算实机通过。
+- 同一源码的 [dev CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/38819827778) 和 [main CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/38822617317) 均为 5/5 成功；[Release](https://github.com/22-ai-00/dsh-enhanced/actions/runs/38826666692) 再次全检、37 包发布及账本记录成功。不可变 `v0.1.53` 指向该源码，账本提交为 `0321c9f2`。
+- 公开标签的六项安装资产摘要匹配；Mac 与 Linux 的私有临时 Home 均从公开 npm 安装 Host `0.2.0-rc.2`、personal-assistant / plugin-control-plane / traex-acp-provider `0.1.53`，安装和组合配置命令全部退出 0，独立复核通过。临时 Home 的安装与配置检查不替代真实身份配对、模型配置、预算授权及 supervised 服务启动。
+- TraeX CLI `0.210.1` 的 ACP 身份为 `traecli-acp`，插件现精确接受它和旧 `traex-acp`，保留 ACP v1、Trae SSO 与未知身份拒绝。公开 npm 安装包经真实 Host 的依赖解析实测，`listModels` 返回 28 个具体模型及 1 个 `default`，与原生目录匹配；无 prompt，ACP 子进程及 Host 测试上下文均关闭，独立复核通过。
+- 真实 Mac `web` 本轮早先的原生 owner 安装及认证就绪检查退出 0，当时确认 launchd 运行、6 个组件 active、Lark connected。终检确认 19 个冻结身份/收据文件的摘要和权限未变，原 Host 进程保留，生产 Home 未出现测试 `smoke` profile。其 22 个 bundle、30 个包仍绑定 `55090bb7` 冻结 cohort，**未升级到 0.1.53，也未替换该 profile 的 TraeX 插件**。
 
 ## 下一验收
 
-Mac 升级保护的真实进程、未知 profile 与路径别名回归及独立审查已通过。准备 `0.1.50`，完成精确发布源码的 Mac、Linux 实机全检与跨平台 CI 后发布，再从公开包验收新 Home 安装。现有 `web` 保留 `55090bb7` 冻结源码、cohort 和签名身份；Mac 冻结 cohort 原地迁移尚未实现，不能用单包覆盖替代维护事务。继续以普通任务验证新工具复用、纠正、撤回、重启与后续收益，保留现有模型合同和有限授权，不自动续期或重放 unknown。
+实现受维护事务保护的 Mac 冻结 cohort 迁移后，才能原地升级现有 `web`；不能用单包覆盖绕过保护。继续通过普通任务验证新工具复用、纠正、撤回、重启和后续收益，保留现有模型合同与有限授权，不自动续期或重放 unknown。
 
-原始命令、退出码与运行结果位于忽略目录 `docs/evidence/macos-native-20261015/`。发布遵循[发布协议](releasing.md)。
+原始命令、退出码和日志位于忽略目录 `docs/evidence/macos-native-20261015/`；本次索引为 `release-v0153-acceptance.md`。
