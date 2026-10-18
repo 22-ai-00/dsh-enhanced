@@ -1637,9 +1637,11 @@ dsh_enhanced_probe_auto_traex_route() {
   node - "$dsh_home/profiles/$profile" "$composed_path" <<'NODE'
 const { existsSync, readFileSync, realpathSync } = require('node:fs')
 const { createRequire } = require('node:module')
-const { join } = require('node:path')
+const { dirname, join } = require('node:path')
+const { pathToFileURL } = require('node:url')
 const profileDir = process.argv[2]
 const composedPath = process.argv[3]
+async function main() {
 try {
   // pnpm may expose Policy only below personal-assistant. Resolve from the
   // installed parent package, then use Policy's own YAML dependency; never
@@ -1673,25 +1675,43 @@ try {
     if (!route) throw new Error(`TraeX route row missing: ${path}`)
     return route
   }
+  let defaultCommand
+  async function routeCommand(config) {
+    if (config.has('command')) return config.get('command')
+    if (defaultCommand === undefined) {
+      const fromProfile = createRequire(join(profileDir, 'package.json'))
+      const providerManifest = realpathSync(fromProfile.resolve('@dsh-enhanced/traex-acp-provider/package.json'))
+      // The public Config module has no Host peer imports. Importing the
+      // plugin entrypoint would activate unrelated Host ABI dependencies.
+      const { Config } = await import(pathToFileURL(join(dirname(providerManifest), 'lib', 'config.js')).href)
+      defaultCommand = Config().command
+      if (typeof defaultCommand !== 'string' || !defaultCommand.trim()) {
+        throw new Error('installed TraeX provider has no valid default command')
+      }
+    }
+    return defaultCommand
+  }
   const route = routeFrom(join(profileDir, 'cordis.patch.yml'))
   const config = route?.get('config', true)
-  const command = isMap(config) ? config.get('command') : undefined
+  const command = isMap(config) ? await routeCommand(config) : undefined
   if (route.get('disabled') !== undefined && route.get('disabled') !== false) {
     throw new Error('TraeX profile route row is disabled')
   }
-  if (!isMap(config) || config.get('enabled') !== true || typeof command !== 'string' || !command.trim()) {
+  if ((route.get('name') !== undefined && route.get('name') !== '@dsh-enhanced/traex-acp-provider')
+    || !isMap(config) || config.get('enabled') !== true || typeof command !== 'string' || !command.trim()) {
     throw new Error('TraeX route is not enabled with a nonempty command')
   }
   if (composedPath) {
     const effective = routeFrom(composedPath)
     const effectiveConfig = effective.get('config', true)
+    const effectiveCommand = isMap(effectiveConfig) ? await routeCommand(effectiveConfig) : undefined
     if (effective.get('name') !== '@dsh-enhanced/traex-acp-provider'
       || (effective.get('disabled') !== undefined && effective.get('disabled') !== false)
       || !isMap(effectiveConfig) || effectiveConfig.get('enabled') !== true
-      || typeof effectiveConfig.get('command') !== 'string' || !effectiveConfig.get('command').trim()) {
+      || typeof effectiveCommand !== 'string' || !effectiveCommand.trim()) {
       throw new Error('composed TraeX route is not active with a nonempty command')
     }
-    if (effectiveConfig.get('command') !== command) {
+    if (effectiveCommand !== command) {
       throw new Error('composed TraeX command differs from the target profile')
     }
   }
@@ -1700,6 +1720,8 @@ try {
   process.stderr.write(`dsh-enhanced installer: TraeX route postflight: ${error.message}\n`)
   process.exitCode = 1
 }
+}
+void main()
 NODE
 }
 
@@ -4195,6 +4217,14 @@ NODE
     dsh_enhanced_install_rsi_owner "$profile" "$dsh_home" "$source_mode" "$repo_root" "$dry_run" "$ack_existing_automations" || return $?
   fi
 
+  local slug effective_traex_command=''
+  for slug in "${selected_slugs[@]}"; do
+    if [[ "$slug" == 'traex-acp-provider' && -n "$auto_traex_command" && "$dry_run" != '1' ]]; then
+      effective_traex_command="$(dsh_enhanced_probe_auto_traex_route "$profile" "$dsh_home")" || return $?
+      break
+    fi
+  done
+
   printf '\n安装流程完成。\n'
   printf '检查配置：dsh --profile %s --dump-config\n' "$profile"
   if [[ "$scenario" == 'core' || "$scenario" == 'web' ]]; then
@@ -4207,15 +4237,13 @@ NODE
 
   # Automatic discovery already enabled this profile's route. A manually added
   # bundle without a local executable remains disabled until configured.
-  local slug
   for slug in "${selected_slugs[@]}"; do
     if [[ "$slug" == 'traex-acp-provider' ]]; then
       if [[ -n "$auto_traex_command" ]]; then
         if [[ "$dry_run" == '1' ]]; then
           printf '\nTraeX route 将自动接入 profile %s（命令：%s）。\n' "$profile" "$auto_traex_command"
         else
-          printf '\nTraeX route 已接入 profile %s（有效命令：%s）。\n' "$profile" \
-            "$(dsh_enhanced_probe_auto_traex_route "$profile" "$dsh_home")"
+          printf '\nTraeX route 已接入 profile %s（有效命令：%s）。\n' "$profile" "$effective_traex_command"
         fi
       else
         printf '\nTraeX bundle 已安装；未检测到本机可执行文件，route 尚未自动启用。\n'

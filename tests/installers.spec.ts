@@ -468,6 +468,8 @@ async function autoTraexSetupFixture(commandName: 'traex' | 'trae-cli', loggedIn
     dsh: { profile: { bundles: policyLayout === 'nested' ? ['@dsh-enhanced/personal-assistant'] : [] } },
   }))
   await mkdir(join(profileModules, '@dsh-enhanced'), { recursive: true })
+  await symlink(join(repoRoot, 'plugins', 'traex-acp-provider'),
+    join(profileModules, '@dsh-enhanced', 'traex-acp-provider'), 'dir')
   if (policyLayout === 'nested') {
     const personalDir = join(profileModules, '@dsh-enhanced', 'personal-assistant')
     await mkdir(join(personalDir, 'node_modules', '@dsh-enhanced'), { recursive: true })
@@ -10245,6 +10247,87 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
     ], { encoding: 'utf8', env: f.environment })
     expect(negative.status).not.toBe(0)
     expect(negative.stderr).toContain('composed TraeX route is not active')
+  })
+
+  test('TraeX postflight resolves only an omitted command from the installed provider schema', async () => {
+    const f = await autoTraexSetupFixture('traex', true)
+    const patchPath = join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml')
+    const composedPath = join(f.dshHome, 'composed-traex.yml')
+    const row = (command: string, options: { name?: string; disabled?: boolean } = {}) =>
+      `- id: dsh-enhanced-traex-acp-provider\n`
+      + (options.name === undefined ? '' : `  name: '${options.name}'\n`)
+      + (options.disabled ? '  disabled: true\n' : '')
+      + `  config:\n    enabled: true\n${command}`
+    const probe = (withComposed: boolean) => spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_probe_auto_traex_route web "$2" "$3"',
+      'installer-test', installerLibrary, f.dshHome, withComposed ? composedPath : '',
+    ], { encoding: 'utf8', env: f.environment })
+
+    await writeFile(patchPath, row(''))
+    await writeFile(composedPath, row('', { name: '@dsh-enhanced/traex-acp-provider' }))
+    const defaulted = probe(true)
+    expect(defaulted.status, defaulted.stderr).toBe(0)
+    expect(defaulted.stdout).toBe('traex')
+    const profileOnly = probe(false)
+    expect(profileOnly.status, profileOnly.stderr).toBe(0)
+    expect(profileOnly.stdout).toBe('traex')
+
+    await writeFile(patchPath, row('    command: /custom/traex\n'))
+    await writeFile(composedPath, row('    command: /custom/traex\n', { name: '@dsh-enhanced/traex-acp-provider' }))
+    const custom = probe(true)
+    expect(custom.status, custom.stderr).toBe(0)
+    expect(custom.stdout).toBe('/custom/traex')
+
+    for (const invalid of ["    command: ''\n", '    command: 42\n', '    command: null\n']) {
+      await writeFile(patchPath, row(invalid))
+      const rejected = probe(false)
+      expect(rejected.status, invalid).not.toBe(0)
+      expect(rejected.stderr).toContain('TraeX route is not enabled with a nonempty command')
+      expect(rejected.stdout).toBe('')
+    }
+    await writeFile(patchPath, row('', { disabled: true }))
+    expect(probe(false).status).not.toBe(0)
+    await writeFile(patchPath, row('', { name: '@example/not-traex' }))
+    expect(probe(false).status).not.toBe(0)
+
+    await writeFile(patchPath, row(''))
+    for (const overridden of [
+      row('', { name: '@example/not-traex' }),
+      row('', { name: '@dsh-enhanced/traex-acp-provider', disabled: true }),
+      row('    command: /other/traex\n', { name: '@dsh-enhanced/traex-acp-provider' }),
+    ]) {
+      await writeFile(composedPath, overridden)
+      const rejected = probe(true)
+      expect(rejected.status, rejected.stderr).not.toBe(0)
+      expect(rejected.stdout).toBe('')
+    }
+  })
+
+  test('TraeX postflight reads the installed schema when the plugin entrypoint fails', async () => {
+    const f = await autoTraexSetupFixture('traex', true)
+    const providerDir = join(f.dshHome, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'traex-acp-provider')
+    await rm(providerDir)
+    await mkdir(join(providerDir, 'lib'), { recursive: true })
+    await writeFile(join(providerDir, 'package.json'), JSON.stringify({
+      name: '@dsh-enhanced/traex-acp-provider', type: 'module',
+      exports: { '.': './lib/index.js', './package.json': './package.json' },
+    }))
+    await writeFile(join(providerDir, 'lib', 'index.js'), "throw new Error('fixture plugin entrypoint must not load')\n")
+    await symlink(join(repoRoot, 'plugins', 'traex-acp-provider', 'lib', 'config.js'),
+      join(providerDir, 'lib', 'config.js'), 'file')
+    const brokenEntry = spawnSync(process.execPath, [join(providerDir, 'lib', 'index.js')], { encoding: 'utf8' })
+    expect(brokenEntry.status).not.toBe(0)
+    expect(brokenEntry.stderr).toContain('fixture plugin entrypoint must not load')
+
+    await writeFile(join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml'),
+      '- id: dsh-enhanced-traex-acp-provider\n  config:\n    enabled: true\n')
+    const result = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_probe_auto_traex_route web "$2"',
+      'installer-test', installerLibrary, f.dshHome,
+    ], { encoding: 'utf8', env: f.environment })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toBe('traex')
+    expect(result.stderr).not.toContain('fixture plugin entrypoint must not load')
   })
 
   test('auto-enabling TraeX preserves an explicit default and operator command/cwd across repeat installs', async () => {
