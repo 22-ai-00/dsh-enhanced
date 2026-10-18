@@ -1096,7 +1096,76 @@ dsh_enhanced_ensure_agent_bundle() {
     target="@dsh-enhanced/$slug@$plugin_version"
   fi
   printf '\n为 traex-agent 安装 provider bundle：\n'
+  if [[ "$source_mode" == 'npm' ]]; then
+    dsh_enhanced_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || return $?
+  fi
   dsh_enhanced_run "$dry_run" dsh plugin --profile "$profile" add "$target"
+}
+
+# pnpm 11 requires an explicit decision even for protobufjs's advisory-only
+# postinstall. Keep this decision in the profile that DSH actually installs,
+# using DSH's own initializer for a fresh profile and its installed YAML parser.
+dsh_enhanced_prepare_profile_build_policy() {
+  local profile="$1" dsh_home="$2" dry_run="$3"
+  local profile_directory="$dsh_home/profiles/$profile"
+  local workspace="$profile_directory/pnpm-workspace.yaml"
+  if [[ "$dry_run" == '1' ]]; then
+    printf 'profile 依赖构建策略：将由 Host 初始化 profile，并仅将 protobufjs 的非必需脚本设为 false。\n'
+    dsh_enhanced_print_command dsh plugin --profile "$profile" version-exemptions
+    return 0
+  fi
+  if [[ ! -e "$workspace" ]]; then
+    if [[ -e "$profile_directory/package.json" ]]; then
+      dsh_enhanced_fail 1 "现有 profile 缺少 pnpm-workspace.yaml；不会创建不完整的 Host workspace：$profile_directory"
+      return $?
+    fi
+    dsh plugin --profile "$profile" version-exemptions >/dev/null || {
+      dsh_enhanced_fail 1 "Host 无法初始化 profile workspace：$profile_directory"
+      return $?
+    }
+  fi
+  local dsh_executable
+  dsh_executable="$(command -v dsh)" || return $?
+  node - "$workspace" "$dsh_executable" <<'NODE'
+const { createRequire } = require('node:module')
+const { randomBytes } = require('node:crypto')
+const { openSync, closeSync, readFileSync, renameSync, rmSync, realpathSync, lstatSync, chmodSync, writeSync } = require('node:fs')
+const { dirname, join } = require('node:path')
+const workspace = process.argv[2]
+const hostRequire = createRequire(realpathSync(process.argv[3]))
+const managerRequire = createRequire(hostRequire.resolve('@deepseek-ai/dsh-plugin-manager/package.json'))
+const { parseDocument, isMap, isScalar } = managerRequire('yaml')
+const fail = message => { throw new Error(`profile build policy: ${message}`) }
+const metadata = lstatSync(workspace)
+if (!metadata.isFile() || metadata.isSymbolicLink()) fail('workspace is not a regular profile file')
+const original = readFileSync(workspace, 'utf8')
+const document = parseDocument(original, { uniqueKeys: true, strict: true })
+if (document.errors.length > 0 || !isMap(document.contents)) fail('workspace is not an unambiguous YAML mapping')
+const builds = document.get('allowBuilds', true)
+if (builds !== undefined && !isMap(builds)) fail('allowBuilds is not a mapping')
+const decision = builds?.get('protobufjs', true)
+if (decision !== undefined) {
+  if (!isScalar(decision)) fail('protobufjs build decision is not a scalar')
+  if (decision.value === false) process.exit(0)
+  if (decision.value !== 'set this to true or false') fail('protobufjs build decision conflicts with false')
+}
+document.setIn(['allowBuilds', 'protobufjs'], false)
+const temporary = join(dirname(workspace), `.pnpm-workspace.yaml.dsh-enhanced-${randomBytes(12).toString('hex')}`)
+let descriptor
+try {
+  descriptor = openSync(temporary, 'wx', 0o600)
+  const output = Buffer.from(String(document))
+  let position = 0
+  while (position < output.length) position += writeSync(descriptor, output, position, output.length - position)
+  closeSync(descriptor)
+  descriptor = undefined
+  chmodSync(temporary, metadata.mode & 0o777)
+  renameSync(temporary, workspace)
+} finally {
+  if (descriptor !== undefined) closeSync(descriptor)
+  rmSync(temporary, { force: true })
+}
+NODE
 }
 
 # Model setup changes a global setting and a profile-local route row.  Keep a
@@ -4032,8 +4101,14 @@ NODE
   if [[ "$source_mode" == 'local' && "$deployment_mode" == 'supervised-growth' ]]; then
     dsh_enhanced_install_local_cohort "$profile" "$dsh_home" "$repo_root" "$dry_run" "${selected_slugs[@]}" || return $?
   elif [[ "$dry_run" == '1' ]]; then
+    if [[ "$source_mode" == 'npm' ]]; then
+      dsh_enhanced_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || return $?
+    fi
     dsh_enhanced_print_command env npm_config_loglevel=error dsh plugin --profile "$profile" add "${targets[@]}"
   else
+    if [[ "$source_mode" == 'npm' ]]; then
+      dsh_enhanced_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || return $?
+    fi
     npm_config_loglevel=error dsh plugin --profile "$profile" add "${targets[@]}" || return $?
   fi
   if [[ "$scenario" != 'core' ]]; then
