@@ -107,7 +107,7 @@ Linux service-aware upgrade 已接入登记过的 RSI 目标与协调器：核�
 
 Agent setup 的第二参数是尚未发布的确切 Agent；不再读取 `ctx.agent`。Inbox 使用公开 `nextTurn` / `nextStep`，程序内嵌套工具事件为 `tool/ptc-dispatch-start` / `tool/ptc-dispatch`。此前 `0.1` 的 Session format 为 3，当前 `0.2` 为 4；持久化使用 `create/open` 返回的会话句柄，恢复和清理须保持独占写入及未知结果不重派。系统提示进入原生消息历史，`EpochHeader` 不再携带 `system`；请求来源验证按新原生结构精确比较。
 
-`0.2.0-rc.2` 使用 Session format 4、生产者专属 MessageSource、顶层工具结果消息、动态 Auto 与 agent-preset-registry。新版 composition 移除静态 Auto，由 Policy 在审批器就绪时登记并随生命周期注销。Cordis/Loader/Include 同步为 `4.0.4` / `1.0.5` / `1.0.9`。旧 fallback API 已移除，独立 setup CLI 必须通过所选 Host 的原生进程内解析启动，不能复用残留旧 Host peers。
+`0.2.0-rc.2` 使用 Session format 4、生产者专属 MessageSource、顶层工具结果消息、动态 Auto 与 agent-preset-registry。新版 composition 移除静态 Auto，由 Policy 在审批器就绪时登记并随生命周期注销。仓库锁定的 Cordis/Loader/Include 基线为 `4.0.4` / `1.0.5` / `1.0.9`；公开 Host 的依赖范围允许补丁更新，2026-10-19 的 Mac `0.1.55` 全新安装实际解析为 `4.0.5` / `1.0.6` / `1.0.10`，配置激活和真实 TraeX 模型目录查询均通过。验收须核对安装树、Host 运行时解析和插件声明的 peer 范围，不能将仓库锁定版本冒充公开安装的唯一允许版本。旧 fallback API 已移除，独立 setup CLI 必须通过所选 Host 的原生进程内解析启动，不能复用残留旧 Host peers。
 
 `0.1 → 0.2` 的既有 Home 普通自动升级仍拒绝先升级插件再切 Host。开发 checkout 提供显式 pre-owner 联合迁移：可验证的私有旧 Host、空 owner 权限、收据绑定的惰性协调器及单个活动目标服务，才可在同一 Home 事务中物化全部 profile 并切换 Host / 源码。已绑定 `0.2.0-rc.2` 的同类 Home 也可保持 Host 与 unit 原字节，只更新认证源码及配套包；不得冒充 Host 版本升级。候选运行后的恢复继续核验候选，不覆盖可能已变更的业务状态。操作与限制见[安装说明](../scripts/install/README.md#旧-home-的联合-host--源码迁移)，真实验收状态见 [RSI 状态](rsi-status.md)。
 
