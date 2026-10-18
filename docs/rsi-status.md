@@ -8,28 +8,23 @@
 
 **完整普通使用闭环尚未验收。** 工程测试、安装与服务就绪不证明后续真实任务的质量、成本、延迟及回归收益。
 
-- `0.1.53` 已发布到公开 npm，37 个包的精确版本和 `latest` 均已逐项核对。精确 Host 基线为 `0.2.0-rc.2`（预发布）。
-- macOS 原生新工具创建与采用无需 Docker：私有固定 Node 与冻结依赖 → TypeScript 语义检查及 JS/声明生成 → Host 打包 → 独立留出核验 → v2 签名 → Cordis 动态采用及持久复用。
-- 系统沙箱禁止联网和子进程，工作目录只读；持久账本限制次数和累计时长，Host 退出后由 supervisor 清理并保存关闭回执。缺失或不符的回执保持 unknown，占用容量，不自动重放。
-- 候选与行为观察代码共享沙箱进程，预期答案和签名密钥留在 Host；没有内存、CPU、磁盘硬配额，不等同于 Linux 双进程隔离。任意 shell 的 `isolation_run` 仍是单独的 Docker 能力。
-- 既有插件源码替换、发布与双 Host 交接仍限 Linux。Mac 普通插件升级只支持未冻结且全程停止的 Home；运行中、身份未知或冻结资源会被拒绝。冻结 cohort 迁移、跨版本私有 Host 更新和 Intel Mac 实机仍待支持或验收。
+- macOS 原生新工具创建与采用无需 Docker：私有固定 Node 与冻结依赖 → 类型检查与构建 → 独立留出核验 → 签名 → Cordis 动态采用及持久复用。系统沙箱禁止联网和子进程，工作目录只读；次数和累计时长有上限，unknown 不自动重放。
+- 候选与行为观察代码共享沙箱进程，预期答案与签名密钥留在 Host；没有内存、CPU、磁盘硬配额，不等同于 Linux 双进程隔离。任意 shell 的 isolation_run 仍是单独的 Docker 能力。
+- 既有插件源码替换、发布与双 Host 交接仍限 Linux。Mac 普通升级仅支持未冻结且全程停止的 Home；冻结 cohort 原地迁移、跨版本私有 Host 更新和 Intel Mac 实机仍待支持或验收。备份后完整重装不等于原地迁移。
 
-## 当前验证
+## 当前发布与实机状态
 
-- 精确源码 `3801baebdce1251f0755152514585d7a5aa91f02`：Mac、Linux 实机根目录 `pnpm check` 均退出 0，各完成 37 个包的 dry-run pack；源码前后指纹及原始日志经独立复核通过。Node `24.7.0`、pnpm `11.7.0`；条件跳过不算实机通过。
-- 同一源码的 [dev CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/38819827778) 和 [main CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/38822617317) 均为 5/5 成功；[Release](https://github.com/22-ai-00/dsh-enhanced/actions/runs/38826666692) 再次全检、37 包发布及账本记录成功。不可变 `v0.1.53` 指向该源码，账本提交为 `0321c9f2`。
-- 公开标签的六项安装资产摘要匹配；Mac 与 Linux 的私有临时 Home 均从公开 npm 安装 Host `0.2.0-rc.2`、personal-assistant / plugin-control-plane / traex-acp-provider `0.1.53`，安装和组合配置命令全部退出 0，独立复核通过。临时 Home 的安装与配置检查不替代真实身份配对、模型配置、预算授权及 supervised 服务启动。
-- TraeX CLI `0.210.1` 的 ACP 身份为 `traecli-acp`，插件现精确接受它和旧 `traex-acp`，保留 ACP v1、Trae SSO 与未知身份拒绝。公开 npm 安装包经真实 Host 的依赖解析实测，`listModels` 返回 28 个具体模型及 1 个 `default`，与原生目录匹配；无 prompt，ACP 子进程及 Host 测试上下文均关闭，独立复核通过。
-- 真实 Mac `web` 已按用户授权完成旧数据备份和官方完整重装，安装器退出 0：20 个 bundle、28 个包均为公开 npm `0.1.53`，私有 Host `0.2.0-rc.2`，source/runtime/plan 均绑定 `3801baeb`。原生 journal 为 `ready`，launchd 与认证 observer 的同一进程六组件全部 active，有限授权为 365 天 / 1000 次源码执行；独立实测通过。原机器人“柳神”已通过真实私聊绑定主人并连接，额外 208 项飞书业务用户权限按用户选择暂缓。
-- 生产 Web 模型 API 返回 28 个具体 TraeX 模型及 default，零失败；真实页面 29 项名称与 API 一致，选择 GPT-6-Astra、刷新保留、恢复 default 再刷新均通过。已有助手工作区通过官方 `workspace/create` API 注册，未改冻结配置；本轮不提交模型 prompt。源码已修正安装结束摘要对省略 command 的误报：从已安装 provider 的独立 schema 模块读取默认值，避免加载 Host peers；实际 profile 探针、20 项回归与独立复核通过，尚待随新版本安装。
-- 10 月 19 日网络复测恢复，原命令、原 240 秒时限的冷缓存 bootstrap 重跑退出 0，耗时 74.5 秒。Mac 原版补充根目录全检退出 0，源码前后指纹相同、37 包 dry-run pack 经独立复核；10 月 16 日的两次超时失败保留。Linux 同一原版补充全检也退出 0，源码前后指纹相同、37 包 dry-run pack 经独立复核。两端原版全检各含根项目加包共 38 组测试摘要，新 SDK 和安装器修复尚未计入这轮结果。
-- 当前生产复测发现旧服务的飞书连接断开、TraeX 目录退回 default；官方受管重启退出 0 后，六组件 active、柳神连接及 29 项目录恢复，真实 Web 菜单再次核对。TraeX 登录有效；旧目录发现耗时约 10 秒，符合发现超时回退，但未捕获旧 ACP 错误，不能认定具体诱因。
-- 新发现的 Lark SDK `1.73.0` 握手超时会因丢弃 socket 错误监听而终止 Host，已在无凭据的本地回环子进程中复现（退出 1）。源码现将直接依赖精确更新为官方 `1.76.0`，打包清单保留该版本；实际回环超时、提前关闭与真实 SDK 卡片桥接回归通过，独立复核通过。生产仍为 `0.1.53` 的旧固定依赖，修复须完成最终版本双端全检、发布和受支持的重装后才算交付。
+- `0.1.54` 已公开发布，37 包精确版本与 latest、不可变 tag 和六项安装资产逐项核对通过；Host 基线为 `0.2.0-rc.2`。包含 Lark SDK `1.76.0` 的握手超时清理修复，以及安装器从已安装 TraeX 纯 schema 读取默认 command 的修复。
+- 精确源码 `46a3a23ca079125dbb34008dc428f76a64400546`：Mac 和 Linux 根目录 `pnpm check` 均退出 0；各有 38 组测试摘要和 37 包 dry-run pack，源码指纹和原始输出经独立复核。Mac 7792 通过 / 1064 跳过，Linux 8756 通过 / 100 跳过；跳过不算实机通过。Node `24.7.0`、pnpm `11.7.0`。
+- 同源码 [dev CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39152555875)、[main CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39155698217) 均 5/5 成功；[Release](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39155718356) 再次全检、37 包发布及账本回写成功。账本提交 `0b87bacf`。
+- **公开新装尚未通过**：Mac/Linux 临时 Home 安装 `0.1.54` 均因 pnpm 11.7 的 `ERR_PNPM_IGNORED_BUILDS: protobufjs@7.6.6` 退出 1。仓库已明确禁用此非必需脚本，但正式 npm 安装器未将该策略带入 profile。候选安装器现已在首次安装前明确拒绝此脚本，Mac/Linux 全新临时 Home 均通过正式入口安装公开 `0.1.54` 包，七个 bundle 实际启用、Host 自检与 SDK 导入均退出 0。安装器整组回归 185 通过 / 272 条件跳过；修复仍须随后续版本全检和发布，不修改既有标签。
+- 真实 Mac `web` 仍运行公开 `0.1.53`：20 个 bundle、28 个包，私有 Host `0.2.0-rc.2`，source/runtime/plan 为 `3801baeb`。原生 journal ready，同一 launchd/observer 进程的六组件 active；有限授权 365 天 / 1000 次源码执行。原机器人“柳神”已通过真实私聊绑定，额外 208 项业务用户权限按用户选择暂缓。
+- 原安装 TraeX CLI `0.210.1`、ACP `traecli-acp` 的真实目录为 28 个具体模型及 default。公开包 Host 加载、Web API、页面名称与选择 GPT-6-Astra 后刷新保留均已验收；旧服务目录曾退回 default，官方重启后恢复，未捕获旧 ACP 错误，具体诱因未确证。新版本仍须重新检查生产菜单与新飞书模型卡片。
 
-- `0.1.54` 首轮 Mac 精确候选全检退出 1：观察器 accessor-ID 用例与 Include 延迟写盘竞争。受控复现抓到断言前两次 getter 调用均来自 YAML 序列化；测试现先等待写盘并核对文件内容，再保留原零调用断言。该文件 24 项、类型检查及 lint 退出 0；最终修复提交仍须双端完整全检与 CI，失败证据不被单项复跑替代。
+## 当前交付与下一验收
 
-## 下一验收
+正式 npm 新装已补齐 profile 级 `allowBuilds.protobufjs: false`，保留其他依赖审批与已有明确决策；双端全新临时 Home 的真实安装入口已验证。下一步对最终候选进行双端全检、跨平台 CI、发布和公开制品核验。随后按已授权的完整 Home 备份重装本机，沿用 `web` 和“柳神”，重新完成真实主人配对；业务权限继续跳过。
 
-`0.1.54` 候选包含 SDK 握手清理修复和安装器默认命令检查修复；先完成精确候选的双端全检与 CI，再按发布协议完成安装、真实新卡片冒烟及公开制品核验。按用户已授权的备份后完整重装更新本机，保留原机器人并重新完成真实身份配对；业务权限继续跳过。之后通过普通任务验证新工具复用、纠正、撤回、重启和后续收益，保持模型合同与有限授权，不自动续期或重放 unknown。真实 Mac 安装与模型选择器验收不代替这些长期收益；放弃旧数据后的完整重装也不代表冻结 cohort 原地迁移已经支持，仍不能用单包覆盖绕过保护。
+完成安装和原生服务、模型目录及新卡片回调后，再通过普通任务验证新工具复用、纠正、撤回、重启和后续收益，保持模型合同与有限授权，不自动续期或重放 unknown。
 
-公开发行证据位于忽略目录 `docs/evidence/macos-native-20261015/release-v0153-acceptance.md`；真实 Mac 重装证据位于 `docs/evidence/macos-fresh-web-20261016/acceptance.md`，当前复测位于 `docs/evidence/macos-closeout-20261019/`。
+本轮原始记录：忽略目录 `docs/evidence/release-v0154-20261019/`；新装修复与复验：`docs/evidence/release-v0155-20261019/`。旧实机安装证据：`docs/evidence/macos-fresh-web-20261016/`。

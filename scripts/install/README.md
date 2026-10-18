@@ -8,6 +8,8 @@
 
 ## 首次安装依赖审批
 
+公开 npm 新装会在调用 `dsh plugin add` 前，由 DSH 初始化目标 profile 的 workspace，并在该 profile 的 `pnpm-workspace.yaml` 中明确设置 `allowBuilds.protobufjs: false`。`protobufjs` 的 postinstall 只输出依赖版本建议，已发布的 SDK 使用预构建文件，不需要执行该脚本。重试时，安装器只会将 pnpm 留下的 `set this to true or false` 未决占位改成 `false`；已有 `false` 保持原样，`true` 或其它值则拒绝覆盖。其它依赖的构建决策保持原样，不会自动批准。
+
 Linux `autonomy` 场景需要原生依赖 `koffi`。pnpm 11.7.0 首次安装可能以 `ERR_PNPM_IGNORED_BUILDS` 停止，并列出 `koffi` 和实际 profile 目录。进入该报错中的目录，使用同一个 pnpm 11.7.0 执行：
 
 ```sh

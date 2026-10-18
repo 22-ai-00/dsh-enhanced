@@ -8434,6 +8434,71 @@ printf '%s\\n' '{not-json'
     expect(result.stdout).not.toContain('dsh-supervised-growth-setup')
   })
 
+  test.each([
+    { name: 'fresh Host profile', workspace: undefined, expectedStatus: 71 },
+    { name: 'existing profile and pnpm placeholder', workspace: 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nsharedWorkspaceLockfile: false\nallowBuilds:\n  protobufjs: set this to true or false\n  koffi: set this to true or false\n', expectedStatus: 71 },
+    { name: 'existing explicit false', workspace: 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  protobufjs: false\n  other-native: true\n', expectedStatus: 71 },
+    { name: 'existing explicit true conflict', workspace: 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  protobufjs: true\n', expectedStatus: 1 },
+    { name: 'existing unknown decision conflict', workspace: 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  protobufjs: ask-owner\n', expectedStatus: 1 },
+  ])('npm install applies exact profile build policy before package add: $name', async ({ workspace, expectedStatus }) => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'home')
+    const profileDirectory = join(dshHome, 'profiles', 'probe')
+    const fakeBin = join(root, 'bin')
+    const logPath = join(root, 'operations.log')
+    await mkdir(fakeBin, { recursive: true })
+    await writeFile(logPath, '')
+    if (workspace !== undefined) {
+      await mkdir(profileDirectory, { recursive: true })
+      await writeFile(join(profileDirectory, 'package.json'), '{"name":"dsh-profile-probe","private":true,"dependencies":{},"dsh":{"profile":{"bundles":[]}}}\n')
+      await writeFile(join(profileDirectory, 'pnpm-workspace.yaml'), workspace)
+    }
+    const hostExecutable = await nativeInstallerHost(root, `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '0.2.0-rc.2\\n'; exit 0; fi
+if [[ "$*" == *'plugin --profile probe version-exemptions'* ]]; then
+  printf 'init\\n' >> "$INSTALL_LOG"
+  mkdir -p "$DSH_HOME/profiles/probe"
+  printf '%s\\n' '{"name":"dsh-profile-probe","private":true,"dependencies":{},"dsh":{"profile":{"bundles":[]}}}' > "$DSH_HOME/profiles/probe/package.json"
+  printf 'packages:\\n  - .\\n\\nnodeLinker: hoisted\\nautoInstallPeers: false\\n' > "$DSH_HOME/profiles/probe/pnpm-workspace.yaml"
+  exit 0
+fi
+if [[ "$*" == *'plugin --profile probe add '* ]]; then
+  printf 'add\\n' >> "$INSTALL_LOG"
+  exit 71
+fi
+exit 0
+`)
+    await symlink(hostExecutable, join(fakeBin, 'dsh'))
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+if [[ "\${1:-}" == 'view' ]]; then printf '"0.1.55"\\n'; exit 0; fi
+exit 0
+`)
+    const result = runInstaller(npmInstaller, [
+      '--profile', 'probe', '--scenario', 'core', '--lark', 'skip', '--model', 'skip', '--model-route', 'skip',
+      '--no-service', '--yes', '--plugin-version', '0.1.55',
+    ], dshHome, undefined, { PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`, INSTALL_LOG: logPath })
+    expect(result.status, result.stderr).toBe(expectedStatus)
+    const operations = await readFile(logPath, 'utf8')
+    const finalWorkspace = await readFile(join(profileDirectory, 'pnpm-workspace.yaml'), 'utf8')
+    if (expectedStatus === 71) {
+      expect(operations).toContain('add\n')
+      expect(parse(finalWorkspace)).toMatchObject({
+        packages: ['.'], nodeLinker: 'hoisted', autoInstallPeers: false,
+        allowBuilds: { protobufjs: false },
+      })
+      if (workspace?.includes('sharedWorkspaceLockfile')) {
+        expect(parse(finalWorkspace)).toMatchObject({ sharedWorkspaceLockfile: false,
+          allowBuilds: { koffi: 'set this to true or false' } })
+      }
+      if (workspace?.includes('other-native')) expect(parse(finalWorkspace)).toMatchObject({ allowBuilds: { 'other-native': true } })
+      if (workspace?.includes('protobufjs: false')) expect(finalWorkspace).toBe(workspace)
+    } else {
+      expect(operations).not.toContain('add\n')
+      expect(finalWorkspace).toBe(workspace)
+      expect(result.stderr).toContain('protobufjs build decision conflicts with false')
+    }
+  })
+
 
   test('npm installer with its sibling common rejects an unsupported exact host version', async () => {
     const dshHome = await temporaryDshHome()
@@ -9610,6 +9675,10 @@ export async function runLaunchdControl(args) {
       name: `dsh-profile-${profile}`, type: 'module',
       dependencies: { '@dsh-enhanced/lark-channel': '0.0.0' }, dsh: { profile: { bundles: [] } },
     }))
+    if (installer === npmInstaller) {
+      await writeFile(join(dshHome, 'profiles', profile, 'pnpm-workspace.yaml'),
+        'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\n')
+    }
     const result = runInstaller(installer, [
       '--scenario', 'lark', '--profile', profile, '--yes', '--model', 'skip', '--model-route', 'skip', ...extra,
     ], dshHome, 'Darwin', {
