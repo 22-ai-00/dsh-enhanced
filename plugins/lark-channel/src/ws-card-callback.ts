@@ -35,8 +35,8 @@ function headers(frame: LarkWsFrame): Record<string, string> {
 }
 
 /**
- * Bridge CardKit callback frames dropped by @larksuiteoapi/node-sdk 1.73.0.
- * The pinned SDK only dispatches `type=event`; Feishu may deliver
+ * Bridge CardKit callback frames dropped by @larksuiteoapi/node-sdk 1.76.0.
+ * The pinned SDK still only dispatches `type=event`; Feishu may deliver
  * `card.action.trigger` as `type=card`, which still requires the same ACK.
  */
 export function installLarkCardCallbackBridge(client: object): void {

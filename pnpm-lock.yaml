@@ -1962,8 +1962,8 @@ importers:
         specifier: workspace:*
         version: link:../assistant-isolation
       '@larksuiteoapi/node-sdk':
-        specifier: 1.73.0
-        version: 1.73.0
+        specifier: 1.76.0
+        version: 1.76.0
       markdown-it:
         specifier: 14.3.1
         version: 14.3.1
@@ -3692,8 +3692,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@larksuiteoapi/node-sdk@1.73.0':
-    resolution: {integrity: sha512-gs4EiupJ6RdYAEJGtuYrCVsB7wSMBwtUDK+ilpmOHD6RTvbtciW6AWciQO9coOQVuBZfh7hvAi25dPfCsny/nA==}
+  '@larksuiteoapi/node-sdk@1.76.0':
+    resolution: {integrity: sha512-v/bxQNCugwAmMPbZtBGJtSu8hdQLiB1/29Jr+GBIG18DyQ4LYyp7gxQ74pkhXVSuoUeH4v+/ZHAw/SW+KMrj2g==}
 
   '@oxc-project/types@0.151.0':
     resolution: {integrity: sha512-J1yXrIlNDZVzE3ada310xeAw7nH8yCAyLPuUIsjKatFPmfn5bS1oW+cM+QsGOtVWd5nhSpbwZWx/rue+r5Z+PA==}
@@ -5960,7 +5960,7 @@ snapshots:
   '@koromix/koffi-win32-x64@3.2.1':
     optional: true
 
-  '@larksuiteoapi/node-sdk@1.73.0':
+  '@larksuiteoapi/node-sdk@1.76.0':
     dependencies:
       axios: 1.19.0
       lodash.identity: 3.0.0
