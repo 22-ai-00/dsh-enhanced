@@ -14,17 +14,17 @@
 
 ## 当前发布与实机状态
 
-- `0.1.54` 已公开发布，37 包精确版本与 latest、不可变 tag 和六项安装资产逐项核对通过；Host 基线为 `0.2.0-rc.2`。包含 Lark SDK `1.76.0` 的握手超时清理修复，以及安装器从已安装 TraeX 纯 schema 读取默认 command 的修复。
-- 精确源码 `46a3a23ca079125dbb34008dc428f76a64400546`：Mac 和 Linux 根目录 `pnpm check` 均退出 0；各有 38 组测试摘要和 37 包 dry-run pack，源码指纹和原始输出经独立复核。Mac 7792 通过 / 1064 跳过，Linux 8756 通过 / 100 跳过；跳过不算实机通过。Node `24.7.0`、pnpm `11.7.0`。
-- 同源码 [dev CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39152555875)、[main CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39155698217) 均 5/5 成功；[Release](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39155718356) 再次全检、37 包发布及账本回写成功。账本提交 `0b87bacf`。
-- **公开新装尚未通过**：Mac/Linux 临时 Home 安装 `0.1.54` 均因 pnpm 11.7 的 `ERR_PNPM_IGNORED_BUILDS: protobufjs@7.6.6` 退出 1。仓库已明确禁用此非必需脚本，但正式 npm 安装器未将该策略带入 profile。候选安装器现已在首次安装前明确拒绝此脚本，Mac/Linux 全新临时 Home 均通过正式入口安装公开 `0.1.54` 包，七个 bundle 实际启用、Host 自检与 SDK 导入均退出 0。安装器整组回归 185 通过 / 272 条件跳过；修复仍须随后续版本全检和发布，不修改既有标签。
-- 真实 Mac `web` 仍运行公开 `0.1.53`：20 个 bundle、28 个包，私有 Host `0.2.0-rc.2`，source/runtime/plan 为 `3801baeb`。原生 journal ready，同一 launchd/observer 进程的六组件 active；有限授权 365 天 / 1000 次源码执行。原机器人“柳神”已通过真实私聊绑定，额外 208 项业务用户权限按用户选择暂缓。
-- 原安装 TraeX CLI `0.210.1`、ACP `traecli-acp` 的真实目录为 28 个具体模型及 default。公开包 Host 加载、Web API、页面名称与选择 GPT-6-Astra 后刷新保留均已验收；旧服务目录曾退回 default，官方重启后恢复，未捕获旧 ACP 错误，具体诱因未确证。新版本仍须重新检查生产菜单与新飞书模型卡片。
+- `0.1.55` 已公开发布，37 包精确版本与 latest、不可变 tag 和六项安装资产逐项核对通过；Host 基线为 `0.2.0-rc.2`。正式安装器在首次 npm 添加前将 `allowBuilds.protobufjs: false` 写入 profile，修复 pnpm 11.7 新装中断，保留其他构建审批与已有明确决策；包含 Lark SDK `1.76.0` 握手清理和 TraeX 默认 command 发现修复。
+- 精确源码 `3da0337f2cb337df244299cf64b06bcb85db477a`：Mac 和 Linux 根目录 `pnpm check` 均退出 0；各有 38 组测试摘要和 37 包 dry-run pack，源码指纹和原始输出经独立复核。Mac 7797 通过 / 1064 跳过，Linux 8761 通过 / 100 跳过；跳过不算实机通过。Node `24.7.0`、pnpm `11.7.0`。
+- 同源码 [dev CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39160382184)、[main CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39163045263) 均 5/5 成功；[Release](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39163079875) 再次全检、37 包发布及账本回写成功。账本提交 `4bbfad31` 已同步回 `dev`。
+- **公开新装通过**：Mac/Linux 的全新临时 Home 均使用公开 tag 安装器安装公开 `0.1.55`，各七条命令实际退出 0；七个增强 bundle 与 base 激活、Host 自检、配置加载和 SDK `1.76.0` 实际导入均通过。安装均使用 pnpm `11.7.0`，Mac 使用本机 Node `26.11.1`，Linux 使用 `24.7.0`。临时安装未进行主人配对或部署常驻服务。
+- Mac 公开包经真实 Host 加载，TraeX CLI `0.210.1` / ACP `traecli-acp` 返回 28 个具体模型及 default，与原生目录一致；只查询目录，无 prompt，ACP 子进程全部关闭。新装实际解析的 Cordis 补丁版本和插件 peer 范围已核对，见[兼容性基线](compatibility.md)。生产 Web 选择持久化及新飞书模型卡片仍待本轮复验。
+- 真实 Mac CLI 已更新为 `0.1.55`，`web` 已通过官方安装器重装同版 Lark 场景包，保留“柳神”的钥匙串凭据；安装及模型路由结构校验退出 0。旧 Home 的 0600 完整备份通过 gzip、tar 和版本内容校验。当前等待新 Home 的真实主人私聊配对，再启用原生 supervised 服务；旧 `0.1.53` 的绑定和服务验收不代替新安装验收。额外 208 项业务用户权限继续暂缓。
 
 ## 当前交付与下一验收
 
-正式 npm 新装已补齐 profile 级 `allowBuilds.protobufjs: false`，保留其他依赖审批与已有明确决策；双端全新临时 Home 的真实安装入口已验证。下一步对最终候选进行双端全检、跨平台 CI、发布和公开制品核验。随后按已授权的完整 Home 备份重装本机，沿用 `web` 和“柳神”，重新完成真实主人配对；业务权限继续跳过。
+双端全检、跨平台 CI、公开发布、双端真实新装和 Mac 公开包模型目录均已通过并独立复核。当前交付是本机完整 Home 备份重装：重新完成真实主人配对、原生 supervised 常驻服务与 Web 模型选择验收；业务权限继续跳过。
 
 完成安装和原生服务、模型目录及新卡片回调后，再通过普通任务验证新工具复用、纠正、撤回、重启和后续收益，保持模型合同与有限授权，不自动续期或重放 unknown。
 
-本轮原始记录：忽略目录 `docs/evidence/release-v0154-20261019/`；新装修复与复验：`docs/evidence/release-v0155-20261019/`。旧实机安装证据：`docs/evidence/macos-fresh-web-20261016/`。
+本轮原始记录：忽略目录 `docs/evidence/release-v0155-20261019/`；Mac 全量检查日志位于 `docs/evidence/macos-native-20261015/`。旧实机安装证据：`docs/evidence/macos-fresh-web-20261016/`。
