@@ -12,9 +12,9 @@ npm install --global @dsh-enhanced/dsh-rsi-cli
 dsh-rsi install                     # 交互式安装，默认 supervised 场景
 dsh-rsi status                      # 查看 Home、profile 和服务状态
 dsh-rsi doctor                      # 查看状态和已知错误日志线索
-dsh-rsi logs --profile web    # 查看日志尾部
-dsh-rsi web-url --profile web # 查看日志中最近的 Web 授权 URL
-dsh-rsi restart --profile web # 重启已注册的常驻服务
+dsh-rsi logs --profile web            # 查看日志尾部
+dsh-rsi web-url --profile web         # 查看日志中最近的 Web 授权 URL
+dsh-rsi restart --profile web         # 重启已注册的常驻服务
 ```
 
 首次 `supervised` 安装需要在交互式终端完成飞书 owner 配对和模型配置；未完成配对时，`--yes` 不会跳过 onboarding。新会话默认 Full access，可访问任意文件和网络，不逐次审批；按需收紧权限见[安装指南](../../scripts/install/README.md)。完整安装参数用 `dsh-rsi install --help` 查看。若只需轻量场景，可运行 `dsh-rsi install --scenario core --yes`；本地 checkout 用 `dsh-rsi install --local <checkout目录>`。
@@ -37,13 +37,15 @@ dsh-rsi restart --profile web # 重启已注册的常驻服务
 ```sh
 dsh-rsi update --dry-run                # 预览 CLI 自身升级
 dsh-rsi update                          # 只升级全局 dsh-rsi
-dsh-rsi update --all --yes              # Linux：CLI + 已安装插件集合原地升级
-dsh-rsi update --all --confirm-dsh-home-stopped # macOS：整个 Home 已停时
+dsh-rsi update --all --dry-run --yes    # Linux：先看整套升级计划
+dsh-rsi update --all --yes              # Linux：升级支持的现有 Home
 dsh-rsi reinstall --dry-run             # 预览清理与重新安装两阶段
 dsh-rsi reinstall                       # 备份、删除、重新安装并重做 onboarding
 ```
 
-`update --all` 先升级 CLI，再委托安装器升级已安装的插件集合，保留 patch、凭据、Session 和 Goal；它不是对所有 Home 通用的升级路径。Linux 已注册的受管服务由升级事务停服并恢复，额外的手工 Host 须先停止。macOS 须先停止**同一 DSH Home 的全部 Host**，在整个升级期间保持停止，并显式传 `--confirm-dsh-home-stopped`；冻结的原生 owner/source Home 不支持普通原地升级。未冻结的 Mac Home 更新完成后，使用 `dsh-rsi start` 恢复服务。受管 Host 的版本迁移还有独立边界，详见[安装维护说明](../../scripts/install/maintenance.md)。可用 `update --version <精确版本或dist-tag>` 选择 CLI 版本；`--all` 下其它安装器选项可继续透传。
+`update --all` 先升级 CLI，再更新已安装程序；它不是对所有 Home 通用的升级路径。包含新升级入口的 CLI 发布或从相应源码安装后，**支持的 Linux 现有冻结 owner/cohort Home** 可用上面的 `update --all --yes`：从 Home 原来绑定的官方源码仓库拉取干净的 `dev` 或 `main` 分支，更新冻结插件和私有 Host，并在事务中停启已注册服务。要求 owner 的 target/coordinator 双服务处于活动状态，且无已采用的源码 activation 或未结 activation；原 owner 绑定、授权期限和额度、凭据、Session、Goal 及历史保留，不重新配对或自动续期。已过期授权会在升级预检中被拒绝，需先按原授权流程处理。若有待恢复事务，先用原安装器恢复，本次不拉取源码。此路径只支持已核验的 Host 组合与参数，详见[安装维护说明](../../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)；不能据此推断当前公开版本已包含或实机验收了这条路径。
+
+普通 Linux npm cohort 升级由安装器事务停服并恢复已注册受管服务，额外的手工 Host 须先停止。macOS 须先停止**同一 DSH Home 的全部 Host**，在整个升级期间保持停止，并显式传 `--confirm-dsh-home-stopped`；冻结的原生 owner/source Home 不支持普通原地升级。未冻结的 Mac Home 更新完成后，使用 `dsh-rsi start` 恢复服务。可用 `update --version <精确版本或dist-tag>` 选择 CLI 版本；`--all` 下的其它安装器选项只适用于非冻结 Home。
 
 `install` 用于安装或修复；`reinstall` **先执行 purge，再执行 install**，默认在 `~` 生成备份，删除原数据后重新走安装和 owner onboarding。`reinstall --profile <name>` 只清理并重装该 profile。`--yes` 跳过清理确认并透传安装器，不能代替首次配对或已有 Automation 的单独确认；`--dry-run` 同时预览清理和安装。安装场景、模型及 Host 选择见[安装指南](../../scripts/install/README.md)。
 

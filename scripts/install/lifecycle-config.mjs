@@ -51,7 +51,7 @@ const comparePrerelease = (left, right) => {
 
 const compatibleHostVersion = value => {
   if (typeof value !== 'string') return false
-  if (value === '0.2.0-rc.2') return true
+  if (['0.2.0-rc.2', '0.2.1-rc.2'].includes(value)) return true
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.exec(value)
   if (match === null) return false
   const [, major, minor, patch, prerelease] = match
@@ -172,7 +172,7 @@ async function repositoryParser() {
 async function hostParser(dshExecutable) {
   const host = await hostRequire(dshExecutable)
   const closureRoot = dependencyClosureRoot(host.manifestPath)
-  if (host.version === '0.2.0-rc.2') {
+  if (['0.2.0-rc.2', '0.2.1-rc.2'].includes(host.version)) {
     if (host.dependencies?.['@deepseek-ai/dsh-plugin-manager'] !== host.version) throw new Error('unverified Host parser dependency')
     const managerPath = await realpath(host.require.resolve('@deepseek-ai/dsh-plugin-manager/package.json'))
     if (!inside(await realpath(closureRoot), managerPath)) throw new Error('Host parser dependency escapes its installation')

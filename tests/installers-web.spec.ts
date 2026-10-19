@@ -60,7 +60,7 @@ exit 0
   await writeExecutable(join(fakeBin, 'dsh-rsi'), '#!/bin/bash\nif [[ "${1:-}" == version ]]; then printf "0.1.48\\n"; fi\n')
   const hostExecutable = await nativeInstallerHost(root, `#!/bin/bash
 set -euo pipefail
-if [[ "\${1:-}" == '--version' ]]; then printf '0.2.0-rc.2\\n'; exit 0; fi
+if [[ "\${1:-}" == '--version' ]]; then printf '0.2.1-rc.2\\n'; exit 0; fi
 if [[ " $* " == *' plugin '* ]]; then
   mkdir -p "$DSH_HOME/profiles/web/node_modules/.bin"
   printf 'plugin-add\\n' >> "$INSTALL_LOG"
@@ -83,7 +83,7 @@ exit 0
       join(profileBin, 'dsh-web-owner-setup'))
   }
   const result = spawnSync('/bin/bash', [installer,
-    '--scenario', 'web', '--workspace', join(root, 'workspace'), '--dsh-version', '0.2.0-rc.2',
+    '--scenario', 'web', '--workspace', join(root, 'workspace'), '--dsh-version', '0.2.1-rc.2',
     '--no-service', '--model', 'skip', '--model-route', 'skip',
   ], {
     cwd: repoRoot,

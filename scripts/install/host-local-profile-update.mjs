@@ -604,16 +604,24 @@ export async function validateHostLocalProfileUpdate({ preparation, stagedHome,
   let repairPatches
   if (ownerSourceRepair !== undefined) {
     const proof = ownerSourceRepair.sourceProof
+    const programUpdate = proof?.protocol === 'dsh-enhanced/host-owner-program-update/v1'
+    const owner = programUpdate ? proof.ownerUpdate : proof?.ownerRepair
+    const next = programUpdate ? proof.ownerUpdateNext : proof?.ownerRepairNext
     if (legacySettingsImport !== undefined || ownerSourceRepair.homePath !== preparation.originalHome
-      || proof?.protocol !== 'dsh-enhanced/host-owner-source-repair/v1'
-      || proof.homePath !== preparation.originalHome || !proof.ownerRepairNext) fail('owner profile repair binding differs')
-    const { verifyOwnerSourceRepair } = await import('./owner-source-repair.mjs')
-    await verifyOwnerSourceRepair({ ownerRepair: proof.ownerRepair, ownerRepairNext: proof.ownerRepairNext,
-      record: proof.record, homePath: preparation.originalHome, physicalHome: stage,
-      installer: proof.installer, phase: 'after-finalize' })
-    repairPatches = proof.ownerRepairNext.patches
+      || !programUpdate && proof?.protocol !== 'dsh-enhanced/host-owner-source-repair/v1'
+      || proof.homePath !== preparation.originalHome || !next) fail('owner profile update binding differs')
+    const verification = { record: proof.record, homePath: preparation.originalHome, physicalHome: stage,
+      installer: proof.installer, phase: 'after-finalize' }
+    if (programUpdate) {
+      const { verifyOwnerProgramUpdate } = await import('./owner-program-update.mjs')
+      await verifyOwnerProgramUpdate({ ownerUpdate: owner, ownerUpdateNext: next, ...verification })
+    } else {
+      const { verifyOwnerSourceRepair } = await import('./owner-source-repair.mjs')
+      await verifyOwnerSourceRepair({ ownerRepair: owner, ownerRepairNext: next, ...verification })
+    }
+    repairPatches = next.patches
     if (!plain(repairPatches) || !same(Object.keys(repairPatches).sort(),
-      [proof.profile, proof.ownerRepair.coordinatorProfile].sort())) fail('owner repair patch scope differs')
+      [proof.profile, owner.coordinatorProfile].sort())) fail('owner update patch scope differs')
   }
   for (const profile of actual) {
     const expected = preparation.profiles.find(item => item.name === profile.name)

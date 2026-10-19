@@ -209,10 +209,11 @@ async function ownerConfiguration(installation, homePath, physicalHome, modules)
     ? await sourceAt(homePath, physicalHome, overlayPath, 2_097_152) : undefined
   const overlay = modules.hostUpdate.readRsiHostUpdateOverlayChain({ source: overlaySource,
     resources: installation.resources, dshHome: homePath, profile: installation.targetProfile, bootstrapSource })
-  const repair = overlay.records.findLast(record => record.kind === 'rsi-owner-repair-overlay')
-  if (repair && (hash(await sourceAt(homePath, physicalHome, join(homePath, '.rsi-setup-journal.json'), 2_097_152)) !== repair.repair.after.journalDigest
-    || hash(await sourceAt(homePath, physicalHome, join(homePath, 'rsi-creation-builds', installation.targetProfile, 'bootstrap.json'), 65_536)) !== repair.repair.after.creationReceiptDigest)) {
-    fail('owner repair journal or creation receipt changed')
+  const ownerUpdate = overlay.records.findLast(record => ['rsi-owner-repair-overlay', 'rsi-owner-program-update-overlay'].includes(record.kind))
+  const ownerAfter = ownerUpdate?.kind === 'rsi-owner-repair-overlay' ? ownerUpdate.repair.after : ownerUpdate?.update.after
+  if (ownerAfter && (hash(await sourceAt(homePath, physicalHome, join(homePath, '.rsi-setup-journal.json'), 2_097_152)) !== ownerAfter.journalDigest
+    || hash(await sourceAt(homePath, physicalHome, join(homePath, 'rsi-creation-builds', installation.targetProfile, 'bootstrap.json'), 65_536)) !== ownerAfter.creationReceiptDigest)) {
+    fail(`owner ${ownerUpdate.kind === 'rsi-owner-repair-overlay' ? 'repair' : 'program update'} journal or creation receipt changed`)
   }
   const effective = overlay.latest ?? receipt
   const sources = {}
@@ -228,8 +229,8 @@ async function ownerConfiguration(installation, homePath, physicalHome, modules)
   if (overlay.latest) {
     const current = await watchedPlans(installation, homePath, physicalHome, modules)
     if (hash(json({ files: effective.files, patches: overlay.latest.patches })) !== effective.planDigest) fail('owner overlay plan changed')
-    if (overlay.latest.kind === 'rsi-owner-repair-overlay') {
-      if (overlay.latest.patches[installation.coordinatorProfile] !== hash(patches.coordinatorPatch)) fail('owner repair coordinator patch changed')
+    if (['rsi-owner-repair-overlay', 'rsi-owner-program-update-overlay'].includes(overlay.latest.kind)) {
+      if (overlay.latest.patches[installation.coordinatorProfile] !== hash(patches.coordinatorPatch)) fail(`owner ${overlay.latest.kind === 'rsi-owner-repair-overlay' ? 'repair' : 'program update'} coordinator patch changed`)
     } else if (current[0]?.id === overlay.latest.currentPlanId) {
       for (const [profile, digest] of Object.entries(overlay.latest.patches)) {
         if (!profileName.test(profile) && !/^\.[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.plugin-backup-[A-Za-z0-9-]{1,36}$/u.test(profile)) fail('owner patch overlay profile differs')

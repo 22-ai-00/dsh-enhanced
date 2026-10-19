@@ -2,12 +2,12 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { startInProcessRun } from '@deepseek-ai/dsh-subagent-in-process-driver'
-import { delegationDepthOf, foldSubagentDescriptor, snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
-import type { ResolvedSubagentStartRequest, SubagentProvider, SubagentRun } from '@deepseek-ai/dsh-subagent'
+import { delegationDepthOf, foldSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
+import type { ResolvedSubagentStartRequest, SubagentActivation, SubagentProvider, SubagentRun } from '@deepseek-ai/dsh-subagent'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { GoalBudgetRuntime } from './budget.js'
 import { STRATEGY_PROVIDER } from './strategy-identity.js'
+import { startStrategyOneShot } from './strategy-one-shot.js'
 import { GoalStrategyStore } from './strategy-store.js'
 import type { StrategyAdviceDefinitionSummary, StrategyChildDiagnostics, StrategyKind, StrategyRecord, StrategyTerminationReason } from './strategy-store.js'
 import type { GoalExecutionRun, GoalRecord, GoalScope } from './types.js'
@@ -50,7 +50,7 @@ export function validateGoalStrategyInput(input: unknown): Readonly<GoalStrategy
 
 type Current = { record: GoalRecord; run: GoalExecutionRun; signal: AbortSignal }
 type Permit = { id: string; label: string; parent: Agent; parentRunId: string; record: GoalRecord; expiresAt: number; signal: AbortSignal; provider: string; model: string; maxTokens: number | undefined; prompt: readonly ContentBlock[]; maxDepth: number; rejected: boolean; starting: boolean; toolRejections: number; child?: Agent }
-type ChildState = { sessionId: string; stopReason: string; quiescent: boolean; output: 'not-observed' | 'accepted' | 'empty-or-oversized'; run?: SubagentRun; permit: Permit }
+type ChildState = { sessionId: string; stopReason: string; quiescent: boolean; output: 'not-observed' | 'accepted' | 'empty-or-oversized'; run?: SubagentActivation; permit: Permit }
 
 function bounded<T>(operation: Promise<T>, signal: AbortSignal, deadline: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -75,7 +75,8 @@ function outputText(output: readonly ContentBlock[], maximum: number): string | 
 function promptBlock(text: string): readonly ContentBlock[] { return Object.freeze([Object.freeze({ type: 'text' as const, text })]) }
 
 /**
- * Host-only one-shot strategy runner. Strategy output is deliberately advice
+ * Host-only strategy runner. Each native child gets one admitted activation.
+ * Strategy output is deliberately advice
  * only: it never feeds a verifier or changes a goal's native lifecycle.
  */
 export class GoalStrategyRuntime {
@@ -83,8 +84,8 @@ export class GoalStrategyRuntime {
   readonly #permits = new Map<string, Permit>()
   readonly #operations = new Set<Promise<void>>()
   readonly #controllers = new Set<AbortController>()
-  readonly #runs = new Set<SubagentRun>()
-  readonly #disposals = new WeakMap<SubagentRun, Promise<void>>()
+  readonly #runs = new Set<SubagentActivation>()
+  readonly #disposals = new WeakMap<SubagentActivation, Promise<void>>()
   readonly #guarded = new WeakSet<Agent>()
   readonly #observedToolGuards = new WeakSet<object>()
   #active = true
@@ -101,17 +102,15 @@ export class GoalStrategyRuntime {
     this.#store.recoverIncomplete(Date.now())
     const provider: SubagentProvider = {
       name: STRATEGY_PROVIDER,
-      capabilities: Object.freeze({ agentOptions: true, outputSchema: false, depthLimit: true, toolFilter: true, persona: true }),
+      capabilities: Object.freeze({ agentOptions: true, agentPreset: false, outputSchema: false, depthLimit: true }),
       inheritsParentContext: false,
       start: request => this.#start(request),
     }
     ctx.inject(['subagents', 'tools', 'systemPrompt'], runtime => {
       const removeProvider = runtime.subagents.registerProvider(provider)
       this.#removeResolver = this.callbacks.budget.registerDelegateResolver(agent => this.#delegate(agent))
-      // Agent/request changes route configuration only. The native driver
-      // installs this private persona during creation, before its first prompt
-      // assembly; the hidden descriptor arrives later at pre-step. This marker
-      // only removes presentation, never grants budget or owner authority.
+      // The native AgentLoop assembles the first prompt before pre-step appends
+      // the descriptor. The private persona marker only strips presentation.
       runtime.on('system-prompt/assemble', async (_assembly, { agent }, next) => {
         const assembly = await next()
         const marker = assembly.sections.find(section => section.name === 'deployment:persona-prefix')?.text
@@ -220,12 +219,13 @@ export class GoalStrategyRuntime {
           childSlots[index] = child
           let text: string | undefined
           try {
-            const started = this.ctx.subagents.start(STRATEGY_PROVIDER, {
-              label: permit.label, prompt: [...permit.prompt], parent, signal: combined,
-              agentOptions: { provider, model, ...(maxTokens === undefined ? {} : { maxTokens }) }, maxDepth: permit.maxDepth, toolFilter: { allow: [] },
+            const started = this.ctx.subagents.startActivation({
+              provider: STRATEGY_PROVIDER, label: permit.label, signal: combined, delivery: 'caller',
+              request: { prompt: [...permit.prompt], parent,
+                agentOptions: { provider, model, ...(maxTokens === undefined ? {} : { maxTokens }) }, maxDepth: permit.maxDepth },
             })
             const run = await this.#boundedStart(started, permit, combined, expiresAt)
-            child.run = run; child.sessionId = String(run.id)
+            child.run = run; child.sessionId = String(run.childId)
             const result = await bounded(run.result, combined, expiresAt)
             this.#assertPermit(permit)
             child.stopReason = result.stopReason
@@ -333,7 +333,7 @@ export class GoalStrategyRuntime {
 
   #open(): void { if (this.#closed) throw new Error('assistant-goals: strategy runtime is closed') }
 
-  async #dispose(run: SubagentRun): Promise<boolean> {
+  async #dispose(run: SubagentActivation): Promise<boolean> {
     let disposal = this.#disposals.get(run)
     if (disposal === undefined) {
       disposal = run.dispose()
@@ -343,7 +343,7 @@ export class GoalStrategyRuntime {
     try { await bounded(disposal, new AbortController().signal, Date.now() + 1_000); return true } catch { return false }
   }
 
-  async #boundedStart(started: Promise<SubagentRun>, permit: Permit, signal: AbortSignal, deadline: number): Promise<SubagentRun> {
+  async #boundedStart(started: Promise<SubagentActivation>, permit: Permit, signal: AbortSignal, deadline: number): Promise<SubagentActivation> {
     let timely = true
     started.then(run => {
       this.#runs.add(run)
@@ -378,20 +378,23 @@ export class GoalStrategyRuntime {
   }
 
   #start(request: ResolvedSubagentStartRequest): Promise<SubagentRun> {
-    const descriptor = request.descriptor
-    const label = descriptor.mode === 'one-shot' ? descriptor.label : undefined
-    const permit = label === undefined ? undefined : this.#permits.get(label)
-    const expected = label === undefined ? undefined : snapshotSubagentDescriptor({ mode: 'one-shot', provider: STRATEGY_PROVIDER, label })
-    if (!this.#active || this.#closed || permit === undefined || permit.rejected || permit.starting || request.parent !== permit.parent || expected === undefined || !same(descriptor, expected)) {
+    const permit = request.label === undefined ? undefined : this.#permits.get(request.label)
+    if (!this.#active || this.#closed || permit === undefined || permit.rejected || permit.starting || request.parent !== permit.parent
+      || request.signal.aborted || permit.signal.aborted || request.agentPreset !== undefined || request.outputSchema !== undefined
+      || request.maxDepth !== permit.maxDepth || !same(request.prompt, permit.prompt)
+      || !same(request.agentOptions, { provider: permit.provider, model: permit.model,
+        ...(permit.maxTokens === undefined ? {} : { maxTokens: permit.maxTokens }) })) {
       return Promise.reject(new Error('assistant-goals: strategy provider request is not admitted'))
     }
     try { this.#assertPermit(permit) } catch { return Promise.reject(new Error('assistant-goals: strategy provider authorization changed')) }
-    // Reconstruct every model-affecting field from the private permit. The
-    // registry request is only an admission carrier, never authority input.
     permit.starting = true
-    const started = startInProcessRun({ parent: permit.parent, signal: permit.signal, label: permit.label, prompt: [...permit.prompt],
-      agentOptions: { provider: permit.provider, model: permit.model, ...(permit.maxTokens === undefined ? {} : { maxTokens: permit.maxTokens }) }, maxDepth: permit.maxDepth,
-      toolFilter: { allow: [] }, persona: `${STRATEGY_PROVIDER}:${permit.label}`, descriptor: expected }, {})
+    // Rebuild model-affecting fields from the private permit, not caller input.
+    const started = startStrategyOneShot({ ...request, parent: permit.parent, signal: AbortSignal.any([request.signal, permit.signal]), label: permit.label,
+      prompt: [...permit.prompt], agentOptions: { provider: permit.provider, model: permit.model,
+        ...(permit.maxTokens === undefined ? {} : { maxTokens: permit.maxTokens }) }, maxDepth: permit.maxDepth }, child => {
+      if (permit.child !== undefined) throw new Error('assistant-goals: strategy child already created')
+      permit.child = child
+    })
     started.catch(() => { permit.rejected = true })
     return started
   }
@@ -410,7 +413,7 @@ export class GoalStrategyRuntime {
   #permitFor(agent: Agent): Permit {
     const descriptor = this.#strategyDescriptor(agent)
     const permit = descriptor?.label === undefined ? undefined : this.#permits.get(descriptor.label)
-    if (!permit || permit.child !== agent) throw new Error('assistant-goals: strategy child is not admitted')
+    if (!descriptor || !permit || permit.child !== agent) throw new Error('assistant-goals: strategy child is not admitted')
     return permit
   }
 
@@ -426,10 +429,11 @@ export class GoalStrategyRuntime {
       if (this.#recognized(agent)) throw new Error('assistant-goals: unsupported strategy descriptor')
       return undefined
     }
-    const label = descriptor.label
-    const permit = label === undefined ? undefined : this.#permits.get(label)
+    const permit = descriptor.label === undefined ? undefined : this.#permits.get(descriptor.label)
     if (!this.#active || this.#closed || permit === undefined || permit.rejected || (permit.child !== undefined && permit.child !== agent) || Date.now() >= permit.expiresAt
       || permit.signal.aborted || this.ctx.get('agents')?.get(agent.id) !== agent
+      || permit.child !== agent || descriptor.label !== permit.label || agent.options.provider !== permit.provider || agent.options.model !== permit.model
+      || agent.session.header.origin !== 'subagent'
       || String(agent.session.header.parentSession) !== String(permit.parent.session.id)
       || this.ctx.get('agents')?.get(permit.parent.id) !== permit.parent) throw new Error('assistant-goals: strategy child is not admitted')
     let current: Current
@@ -438,11 +442,10 @@ export class GoalStrategyRuntime {
     if (record === undefined || record.state !== 'starting' || record.intent.expiresAt !== permit.expiresAt || record.intent.parentRunId !== permit.parentRunId
       || record.intent.parentSessionId !== String(permit.parent.session.id) || record.intent.provider !== permit.provider || record.intent.model !== permit.model
       || record.intent.definitionVersion !== permit.record.definition.version || record.intent.definitionDigest !== permit.record.definition.digest) throw new Error('assistant-goals: strategy record is unavailable')
-    if (permit.child === undefined) {
+    if (!record.children.some(child => child.sessionId === String(agent.id))) {
       try { this.#store.bindChild(permit.id, record.version, String(agent.id), Date.now()) } catch { throw new Error('assistant-goals: strategy child binding failed') }
-      permit.child = agent
       this.#installChildGuards(agent)
-    } else if (!record.children.some(child => child.sessionId === String(agent.id))) throw new Error('assistant-goals: strategy child binding is unavailable')
+    }
     return { parent: permit.parent, runId: permit.parentRunId, signal: AbortSignal.any([permit.signal, current.signal]), provider: permit.provider, model: permit.model, accountingRunId: `strategy-${String(agent.id)}` }
   }
 }

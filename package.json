@@ -43,6 +43,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "catalog:",
+    "@deepseek-ai/cordis-plugin-group": "catalog:",
     "@deepseek-ai/cordis-plugin-include": "catalog:",
     "@deepseek-ai/dsh-agent": "catalog:",
     "@deepseek-ai/dsh-api-session-controller": "catalog:",
@@ -56,7 +57,6 @@
     "@deepseek-ai/dsh-compaction-tool-result-pruner": "catalog:",
     "@deepseek-ai/dsh-llm": "catalog:",
     "@deepseek-ai/dsh-home-paths": "catalog:",
-    "@deepseek-ai/dsh-invariants": "catalog:",
     "@deepseek-ai/dsh-permission-presets": "catalog:",
     "@deepseek-ai/dsh-sandbox": "catalog:",
     "@deepseek-ai/dsh-scope": "catalog:",

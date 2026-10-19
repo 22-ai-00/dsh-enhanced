@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { isAbsolute, resolve as normalizePath } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { ContextSnapshotSection } from '@deepseek-ai/dsh-llm'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { isAppendSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { FsTarget } from '@deepseek-ai/dsh-fs'
@@ -94,6 +95,35 @@ export class SessionEvidenceBridge {
         ledger.record(scope, { eventSeq, toolName, callId: source.callId, contentDigest, observedAt,
           sourcePath: observation.sourcePath, sourceTargetDigest: observation.sourceTargetDigest })
       } catch { /* Missing/revoked identity or unavailable evidence does not undo a committed tool result. */ }
+    })
+    ctx.on('agent/pre-step', ({ agent }, next) => {
+      // AgentLoop retains earlier runtime-context messages on the request
+      // surface. Their evidence manifests were authorized at an earlier step,
+      // so remove this provider's section before the next request. The new
+      // snapshot will be rendered against current owner and tool authority.
+      for (const seq of agent.session.surface.nodes) {
+        const event = agent.session.eventAt(seq)
+        // AgentLoop's runtime-context source is supplied by the Host, which
+        // this independently published plugin does not depend on directly.
+        if (event?.type !== 'user/message') continue
+        const source = event.data.source as { kind: string; form?: string; sections?: readonly ContextSnapshotSection[] }
+        if (source.kind !== 'runtime-context' || source.form !== 'snapshot' || !Array.isArray(source.sections)
+          || !source.sections.some(section => section.name === 'personal-memory:tool-evidence')) continue
+        const [block] = event.data.content
+        const sections = source.sections.filter(section => section.name !== 'personal-memory:tool-evidence')
+        const prefix = 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\n'
+        const original = prefix + source.sections.map(section => section.text).join('\n\n')
+        // If the Host's body and named sections disagree, discard the body;
+        // it cannot be safely attributed to individual providers.
+        const text = event.data.content.length === 1 && block?.type === 'text' && block.text === original
+          ? prefix + sections.map(section => section.text).join('\n\n') : ''
+        agent.session.append('user/message', {
+          ...event.data,
+          content: [{ type: 'text', text }],
+          source: { ...source, sections } as typeof event.data.source,
+        }, { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] })
+      }
+      return next()
     })
   }
 

@@ -140,7 +140,12 @@ describe('dsh-enhanced-assistant-web-owner', () => {
     try {
       await ctx.plugin(TypertRegistry)
       ctx.typert.register(TYPERT)
+      ctx.provide('remoteAccess' as never, { decide: () => ({ kind: 'deny', reason: 'test-owner-only' }) } as never)
       await ctx.plugin(TypertGatewayService, {})
+      const peer: Parameters<typeof ctx.typertGateway.invoke>[0]['peer'] = {
+        id: 'web-owner-notices-test' as never, ctx, principal: { kind: 'owner' },
+        signal: new AbortController().signal, interactions: 'none', dispose: async () => {},
+      }
       const access = { notifications: (sessionId: string) => {
         if (sessionId !== 'owned-session') throw new Error('owner session denied')
         return [{ id: 'notice-1', text: '已准备', createdAt: 1 }]
@@ -150,11 +155,11 @@ describe('dsh-enhanced-assistant-web-owner', () => {
       expect(service.typertRemote.serviceKey).toBe('deliveryNotices')
       expect(service.typertRemote.namespace).toBe('deliveryNotices')
       expect(ctx.get('deliveryNotices')).toBeDefined()
-      await expect(ctx.typertGateway.invoke({ namespace: 'deliveryNotices', method: 'list', args: { sessionId: 'owned-session' } })).resolves.toEqual([
+      await expect(ctx.typertGateway.invoke({ peer, namespace: 'deliveryNotices', method: 'list', args: { sessionId: 'owned-session' } })).resolves.toEqual([
         { id: 'notice-1', text: '已准备', createdAt: 1 },
       ])
-      await expect(ctx.typertGateway.invoke({ namespace: 'deliveryNotices', method: 'list', args: { sessionId: '' } })).rejects.toThrow()
-      await expect(ctx.typertGateway.invoke({ namespace: 'deliveryNotices', method: 'list', args: { sessionId: 'foreign-session' } })).rejects.toThrow('owner session denied')
+      await expect(ctx.typertGateway.invoke({ peer, namespace: 'deliveryNotices', method: 'list', args: { sessionId: '' } })).rejects.toThrow()
+      await expect(ctx.typertGateway.invoke({ peer, namespace: 'deliveryNotices', method: 'list', args: { sessionId: 'foreign-session' } })).rejects.toThrow('owner session denied')
     } finally {
       await ctx.fiber.dispose()
     }

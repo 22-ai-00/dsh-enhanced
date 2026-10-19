@@ -142,7 +142,7 @@ export function buildGoalFeedback(
     || considered[index]!.intent.task.goal.definitionDigest !== record.definition.digest)
   const nextAction = unreconciled !== null ? 'reconcile-execution'
     : latest?.status === 'unknown' ? 'gather-evidence'
-    : pending !== null ? 'await-verification'
+    : pending !== null && settled?.status !== 'not-achieved' ? 'await-verification'
       : hasOldDefinition && settled === null ? 'plan-current-definition'
         : settled?.status === 'not-achieved' ? 'revise-plan'
           : settled?.status === 'achieved' ? 'review-remaining-criteria'

@@ -47,7 +47,18 @@ export interface RsiOwnerRepairOverlay {
   }
   issuedAt: number; authority: string; keyId: string; signature: string
 }
-export type RsiOwnerOverlay = RsiHostUpdateOverlay | RsiOwnerRepairOverlay
+export interface RsiOwnerProgramUpdateOverlay extends Omit<RsiOwnerRepairOverlay, 'kind' | 'repair'> {
+  kind: 'rsi-owner-program-update-overlay'
+  update: {
+    sourceMaintenanceDigest: string
+    // Caller attests unchanged owner/grants/deadlines/budgets/config; this reader validates only digest shape.
+    authorityDigest: string
+    hostPlanDigest: string
+    before: RsiOwnerRepairOverlay['repair']['before']
+    after: RsiOwnerRepairOverlay['repair']['after']
+  }
+}
+export type RsiOwnerOverlay = RsiHostUpdateOverlay | RsiOwnerRepairOverlay | RsiOwnerProgramUpdateOverlay
 export function rsiHostUpdateOverlayDigest(value: RsiOwnerOverlay): string { return sha256(canonical(value)) }
 function overlayShape(value: unknown, resources: RsiAuthorityResources, home: string, profile: string,
   bootstrapDigest: string, sequence: number, previousDigest: string | null): asserts value is RsiHostUpdateOverlay {
@@ -124,6 +135,52 @@ function repairOverlayShape(value: unknown, resources: RsiAuthorityResources, ho
   if (key.asymmetricKeyType !== 'ed25519'
     || !verify(null, Buffer.from(canonical(unsigned)), key, Buffer.from(signature, 'base64'))) fail('repair overlay signature differs')
 }
+function programUpdateOverlayShape(value: unknown, resources: RsiAuthorityResources, home: string, profile: string,
+  bootstrapDigest: string, sequence: number, previousDigest: string | null): asserts value is RsiOwnerProgramUpdateOverlay {
+  if (!record(value) || !isDeepStrictEqual(Object.keys(value).sort(), ['schemaVersion', 'kind', 'transactionId', 'dshHome',
+    'targetProfile', 'installationId', 'sequence', 'previousDigest', 'bootstrapDigest', 'files', 'patches',
+    'runtimeReceiptDigest', 'planDigest', 'result', 'update', 'issuedAt', 'authority', 'keyId', 'signature'].sort())
+    || value.schemaVersion !== 1 || value.kind !== 'rsi-owner-program-update-overlay'
+    || value.dshHome !== home || value.targetProfile !== profile || value.installationId !== resources.installationId
+    || value.sequence !== sequence || value.previousDigest !== previousDigest || value.bootstrapDigest !== bootstrapDigest
+    || value.authority !== resources.identities.host.authority || value.keyId !== resources.identities.host.keyId
+    || typeof value.transactionId !== 'string' || !value.transactionId || !Number.isSafeInteger(value.issuedAt)
+    || !hex.test(String(value.runtimeReceiptDigest)) || !hex.test(String(value.planDigest))
+    || !record(value.files) || !record(value.patches) || Object.keys(value.files).length > 64
+    || Object.entries(value.files).some(([path, digest]) => !isAbsolute(path) || resolve(path) !== path
+      || !path.startsWith(`${resources.configRoot}/`) || !hex.test(String(digest)))
+    || !record(value.result) || !isDeepStrictEqual(Object.keys(value.result).sort(),
+      ['schemaVersion', 'manifestPath', 'manifestDigest', 'targetProfile', 'coordinatorProfile'].sort())
+    || value.result.schemaVersion !== 1 || value.result.targetProfile !== profile
+    || !profileName.test(String(value.result.coordinatorProfile)) || value.result.coordinatorProfile === profile
+    || value.result.manifestPath !== `${resources.configRoot}/manifest.json`
+    || value.result.manifestDigest !== value.files[value.result.manifestPath]
+    || !isDeepStrictEqual(Object.keys(value.patches).sort(), [profile, value.result.coordinatorProfile].sort())
+    || Object.values(value.patches).some(digest => !hex.test(String(digest)))
+    || !record(value.update) || !isDeepStrictEqual(Object.keys(value.update).sort(),
+      ['sourceMaintenanceDigest', 'authorityDigest', 'hostPlanDigest', 'before', 'after'].sort())
+    || !hex.test(String(value.update.sourceMaintenanceDigest))
+    || !hex.test(String(value.update.authorityDigest))
+    || !hex.test(String(value.update.hostPlanDigest))
+    || !record(value.update.before) || !isDeepStrictEqual(Object.keys(value.update.before).sort(),
+      ['files', 'patches', 'runtimeReceiptDigest', 'creationReceiptDigest', 'journalDigest'].sort())
+    || !record(value.update.before.files) || !record(value.update.before.patches)
+    || !isDeepStrictEqual(Object.keys(value.update.before.files).sort(), Object.keys(value.files).sort())
+    || !isDeepStrictEqual(Object.keys(value.update.before.patches).sort(), Object.keys(value.patches).sort())
+    || Object.values(value.update.before.files).some(digest => !hex.test(String(digest)))
+    || Object.values(value.update.before.patches).some(digest => !hex.test(String(digest)))
+    || !hex.test(String(value.update.before.runtimeReceiptDigest))
+    || !hex.test(String(value.update.before.creationReceiptDigest))
+    || !hex.test(String(value.update.before.journalDigest))
+    || !record(value.update.after) || !isDeepStrictEqual(Object.keys(value.update.after).sort(),
+      ['creationReceiptDigest', 'journalDigest'].sort())
+    || !hex.test(String(value.update.after.creationReceiptDigest)) || !hex.test(String(value.update.after.journalDigest))
+    || typeof value.signature !== 'string' || value.signature.length > 256) fail('program update overlay shape or scope differs')
+  const { signature, ...unsigned } = value
+  const key = createPublicKey(resources.identities.host.publicKeyPem)
+  if (key.asymmetricKeyType !== 'ed25519'
+    || !verify(null, Buffer.from(canonical(unsigned)), key, Buffer.from(signature, 'base64'))) fail('program update overlay signature differs')
+}
 export function readRsiHostUpdateOverlayChain(input: {
   source: string | undefined; resources: RsiAuthorityResources; dshHome: string; profile: string; bootstrapSource: string
 }): { records: RsiOwnerOverlay[]; latest?: RsiOwnerOverlay } {
@@ -139,6 +196,8 @@ export function readRsiHostUpdateOverlayChain(input: {
     const previousDigest = records.length ? rsiHostUpdateOverlayDigest(records.at(-1)!) : null
     if (record(value) && value.kind === 'rsi-owner-repair-overlay') {
       repairOverlayShape(value, input.resources, input.dshHome, input.profile, bootstrapDigest, sequence, previousDigest)
+    } else if (record(value) && value.kind === 'rsi-owner-program-update-overlay') {
+      programUpdateOverlayShape(value, input.resources, input.dshHome, input.profile, bootstrapDigest, sequence, previousDigest)
     } else {
       overlayShape(value, input.resources, input.dshHome, input.profile, bootstrapDigest, sequence, previousDigest)
     }
@@ -160,6 +219,14 @@ export function signRsiOwnerRepairOverlay(input: Omit<RsiOwnerRepairOverlay, 'si
   previous: readonly RsiOwnerOverlay[]): RsiOwnerRepairOverlay {
   const record = { ...input, signature: sign(null, Buffer.from(canonical(input)), privateKeyPem).toString('base64') }
   repairOverlayShape(record, resources, input.dshHome, input.targetProfile, sha256(bootstrapSource),
+    previous.length + 1, previous.length ? rsiHostUpdateOverlayDigest(previous.at(-1)!) : null)
+  return record
+}
+export function signRsiOwnerProgramUpdateOverlay(input: Omit<RsiOwnerProgramUpdateOverlay, 'signature'>,
+  privateKeyPem: string, resources: RsiAuthorityResources, bootstrapSource: string,
+  previous: readonly RsiOwnerOverlay[]): RsiOwnerProgramUpdateOverlay {
+  const record = { ...input, signature: sign(null, Buffer.from(canonical(input)), privateKeyPem).toString('base64') }
+  programUpdateOverlayShape(record, resources, input.dshHome, input.targetProfile, sha256(bootstrapSource),
     previous.length + 1, previous.length ? rsiHostUpdateOverlayDigest(previous.at(-1)!) : null)
   return record
 }

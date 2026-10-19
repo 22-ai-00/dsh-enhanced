@@ -10,17 +10,17 @@ export async function nativeInstallerHost(root: string, executableSource: string
   const cordis = dirname(require.resolve('@deepseek-ai/cordis/package.json'))
   const yaml = dirname(require.resolve('yaml/package.json'))
   const store = join(process.cwd(), 'node_modules', '.pnpm')
-  const bootStore = (await readdir(store)).find(name => name.startsWith('@deepseek-ai+dsh-app-boot@0.2.0-rc.2_'))
+  const bootStore = (await readdir(store)).find(name => name.startsWith('@deepseek-ai+dsh-app-boot@0.2.1-rc.2_'))
   if (bootStore === undefined) throw new Error('locked DSH 0.2 app-boot is not installed')
   const boot = join(store, bootStore, 'node_modules', '@deepseek-ai', 'dsh-app-boot')
   await mkdir(dirname(executable), { recursive: true })
   await writeFile(join(hostRoot, 'package.json'), JSON.stringify({
-    name: '@deepseek-ai/dsh', version: '0.2.0-rc.2', type: 'module',
+    name: '@deepseek-ai/dsh', version: '0.2.1-rc.2', type: 'module',
     bin: { dsh: 'lib/bin.sh' },
     dependencies: {
-      '@deepseek-ai/dsh-app-boot': '0.2.0-rc.2',
-      '@deepseek-ai/dsh-plugin-manager': '0.2.0-rc.2',
-      '@deepseek-ai/cordis': '4.0.4',
+      '@deepseek-ai/dsh-app-boot': '0.2.1-rc.2',
+      '@deepseek-ai/dsh-plugin-manager': '0.2.1-rc.2',
+      '@deepseek-ai/cordis': '4.0.5',
     },
     exports: { './package.json': './package.json' },
   }))
@@ -29,7 +29,7 @@ export async function nativeInstallerHost(root: string, executableSource: string
   const manager = join(hostModules, 'dsh-plugin-manager')
   await mkdir(manager)
   await writeFile(join(manager, 'package.json'), JSON.stringify({
-    name: '@deepseek-ai/dsh-plugin-manager', version: '0.2.0-rc.2', dependencies: { yaml: '^2.9.0' },
+    name: '@deepseek-ai/dsh-plugin-manager', version: '0.2.1-rc.2', dependencies: { yaml: '^2.9.0' },
   }))
   await cp(yaml, join(root, 'fake-host', 'node_modules', 'yaml'), { recursive: true })
   await symlink(await realpath(boot), join(hostModules, 'dsh-app-boot'))

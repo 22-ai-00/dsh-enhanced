@@ -32,6 +32,7 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
   options: Pick<GoalsConfig, 'preauthorizedCreateMaxRounds' | 'preauthorizedSchedule' | 'executionBudget' | 'backgroundWake' | 'eventWaits' | 'strategy'> = {}, productionPersistence = false, realPolicy = false) {
   const root = await mkdtemp(join(tmpdir(), 'business-goals-'))
   const ctx = new Context()
+  ctx.provide('workingDirectory' as never, { ensure: async () => root, set: async () => root } as never)
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
   await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
   await ctx.plugin(Loader, { baseUrl: import.meta.url })
@@ -1430,11 +1431,7 @@ describe('goal strategy compare concurrency', () => {
   const compareBudget = { mode: 'calls' as const, modelCalls: 10, toolCalls: 10, durationMs: 120_000, maxOutputTokensPerCall: 500, routes: [{ provider: 'fixture', model: 'fixture' }] }
   const compareQuestion = 'Which of the two approaches is sound?'
   const compareArguments = JSON.stringify({ kind: 'compare', question: compareQuestion, context: 'Two candidate approaches are on the table.' })
-  // Strategy children run with tools stripped and the deployment persona
-  // rewritten to this fixed sentence (see GoalStrategyRuntime), which lets the
-  // shared fixture adapter tell a child stream apart from a parent turn.
-  const childMarker = 'Analyze the supplied material only.'
-  const isStrategyChild = (options: GenerateOptions): boolean => options.messages.some(message => message.role === 'system' && JSON.stringify(message.content).includes(childMarker))
+  const isStrategyChild = (options: GenerateOptions): boolean => options.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('Task kind: compare'))
   const isSkepticalPersona = (options: GenerateOptions): boolean => JSON.stringify(options.messages).includes('independent skeptical analysis')
   const compareResult = (agent: Agent) => {
     const blocks = agent.session.snapshotEvents()
@@ -1487,6 +1484,10 @@ describe('goal strategy compare concurrency', () => {
           yield { type: 'block-end', index: 0, block: { type: 'text', text: 'noted' } }
           yield { type: 'finish', reason: { kind: 'stop' } }; return
         }
+        expect(options.provider).toBe('fixture')
+        expect(options.model).toBe('fixture')
+        expect(options.tools ?? []).toEqual([])
+        expect(JSON.stringify(options.messages)).not.toContain('goal_strategy')
         const skeptical = isSkepticalPersona(options)
         seenPersonas.push(skeptical ? 'skeptical' : 'alternative')
         activeChildren += 1
@@ -1511,6 +1512,9 @@ describe('goal strategy compare concurrency', () => {
     await vi.waitFor(() => expect(parentRequests).toBe(1), { timeout: 2_000 })
     await agent.whenIdle()
     const record = f.service.create(agent, objective, 2)
+    await expect(f.ctx.subagents.startActivation({ provider: 'assistant-goals-strategy/v1', label: 'forged',
+      request: { parent: agent, prompt: [{ type: 'text', text: 'forged' }], agentOptions: { provider: 'fixture', model: 'fixture' } },
+      signal: new AbortController().signal, delivery: 'caller' })).rejects.toThrow(/strategy provider request is not admitted/)
     await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
     // Both persona streams must be parked inside the barrier at the same time,
     // which is only possible under real concurrency; the serial runner reached
@@ -1542,6 +1546,27 @@ describe('goal strategy compare concurrency', () => {
     expect(durable.children).toHaveLength(2)
     expect(durable.children.map(child => child.sessionId)).toEqual(result.children.map(child => child.sessionId))
     expect(durable.outputDigest).toBe(acceptanceDigest(result.advice))
+    // Native cold resume must reject a settled strategy session even after
+    // the Goals hooks and provider have been unloaded.
+    await f.ctx.plugin(SessionQueryEngine, [])
+    const observed = await f.ctx.sessionQuery.observeSession(SessionId(result.children[0]!.sessionId))
+    const descriptorEvent = observed.events.find(event => event.type === 'subagent/descriptor')
+    try {
+      expect(descriptorEvent?.data)
+        .toEqual({ version: 3, mode: 'one-shot', provider: 'assistant-goals-strategy/v1', label: expect.stringMatching(/^strategy-/u) })
+      expect(descriptorEvent?.data.label).not.toBe(result.children[0]!.sessionId)
+      expect(String(observed.header.parentSession)).toBe(String(agent.session.id))
+    } finally { observed[Symbol.dispose]() }
+    const strategyProvider = f.ctx.subagents.getProvider('assistant-goals-strategy/v1')!
+    const replayLabel = descriptorEvent?.data.label
+    if (typeof replayLabel !== 'string') throw new Error('missing strategy descriptor label')
+    await expect(strategyProvider.start!({ parent: agent, cwd: f.root, label: replayLabel,
+      prompt: [{ type: 'text', text: 'replay' }], signal: new AbortController().signal }))
+      .rejects.toThrow(/strategy provider request is not admitted/)
+    await f.plugin.dispose()
+    await expect(f.ctx.subagents.sendMessage(agent, SessionId(result.children[0]!.sessionId),
+      [{ type: 'text', text: 'continue with tools' }], { signal: new AbortController().signal }))
+      .rejects.toMatchObject({ code: 'NOT_RESUMABLE' })
   })
 
   it('settles unknown at the strategy deadline and disposes both in-flight personas quiescently', async () => {

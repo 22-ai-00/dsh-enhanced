@@ -59,7 +59,7 @@ describe('@dsh-enhanced/acp package contract', () => {
   it('targets the verified DSH release and carries ACP runtime libraries', () => {
     expect(manifest.dependencies.zod).toBe('catalog:')
     expect(Object.values(manifest.peerDependencies)).not.toContain('>=0.1.0-rc.5 <0.2.0')
-    expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('0.2.0-rc.2')
+    expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('0.2.1-rc.2')
   })
 
   it('retains the upstream DeepSeek MIT attribution', () => {

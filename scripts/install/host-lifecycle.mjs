@@ -20,7 +20,7 @@ const earlierVersion = (left, right) => {
 const keys = (value, expected) => value !== null && typeof value === 'object' && !Array.isArray(value)
   && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort())
 const validRuntime = value => keys(value, ['version', 'root', 'dshPath', 'binDirectory', 'integrity', 'receiptDigest'])
-  && (supportedLegacy(value.version) || value.version === '0.2.0-rc.2')
+  && (supportedLegacy(value.version) || ['0.2.0-rc.2', '0.2.1-rc.2'].includes(value.version))
   && absolute(value.root) && absolute(value.dshPath) && absolute(value.binDirectory)
   && typeof value.integrity === 'string' && value.integrity.startsWith('sha512-')
   && hex(value.receiptDigest) && value.dshPath.startsWith(`${value.root}/`)
@@ -37,7 +37,7 @@ export function parseHostUpdatePlan(value, homePath) {
       || !hex(value.originalBindingDigest) || digest(value.originalBindingSource) !== value.originalBindingDigest)
     || value.schemaVersion === 2 && (value.status !== 'update' || value.originalBindingSource !== null
       || value.originalBindingDigest !== null || !supportedLegacy(value.originalRuntime?.version)
-      || value.candidateRuntime?.version !== '0.2.0-rc.2')
+      || !['0.2.0-rc.2', '0.2.1-rc.2'].includes(value.candidateRuntime?.version))
     || !validRuntime(value.originalRuntime) || !validRuntime(value.candidateRuntime)
     || value.originalRuntime.root === value.candidateRuntime.root && value.status === 'update'
       && value.originalRuntime.version === value.candidateRuntime.version) {
@@ -76,7 +76,7 @@ export function hostLocalSourcePlanMode(plan) {
   parseHostUpdatePlan(plan, plan?.canonicalHome)
   if (plan.schemaVersion === 2) return 'legacy'
   if (plan.schemaVersion === 1 && plan.status === 'current'
-    && plan.originalRuntime.version === '0.2.0-rc.2') return 'same-host'
+    && ['0.2.0-rc.2', '0.2.1-rc.2'].includes(plan.originalRuntime.version)) return 'same-host'
   throw new Error('joint local source migration requires a legacy plan or an unchanged supported Host')
 }
 

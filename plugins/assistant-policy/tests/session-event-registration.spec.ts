@@ -271,7 +271,7 @@ async function distinctLoaderBackedReader(): Promise<{
   }
 }
 
-async function modernLoaderBackedReader(): Promise<{
+async function modernLoaderBackedReader(exportShape: 'legacy' | 'plugin' = 'legacy'): Promise<{
   service: object
   module: SessionRegistryModule
   validate(meta: unknown, events: unknown[]): void
@@ -287,12 +287,18 @@ async function modernLoaderBackedReader(): Promise<{
     writeFile(join(backendRoot, 'package.json'), JSON.stringify({
       name: '@deepseek-ai/dsh-session-persistence-jsonl', type: 'module', exports: './lib/index.js',
     })),
-    writeFile(join(backendRoot, 'lib/index.js'), 'export default class JsonlSessionPersistence { constructor(ctx) { this.ctx = ctx } }\n'),
+    writeFile(join(backendRoot, 'lib/index.js'), exportShape === 'legacy'
+      ? 'export default class JsonlSessionPersistence { constructor(ctx) { this.ctx = ctx } }\n'
+      : `import { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'\n`
+        + `class JsonlSessionPersistence extends SessionPersistence { name = 'session-persistence-jsonl' }\n`
+        + `export const name = 'session-persistence-jsonl'\nexport function apply() {}\n`
+        + `export function create(ctx) { return new JsonlSessionPersistence(ctx) }\n`),
     writeFile(join(persistenceRoot, 'package.json'), JSON.stringify({
       name: '@deepseek-ai/dsh-session-persistence', type: 'module', exports: './index.js',
     })),
     writeFile(join(persistenceRoot, 'index.js'), `
       import { KNOWN_SESSION_EVENT_TYPES, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
+      export class SessionPersistence { constructor(ctx) { this.ctx = ctx } }
       export function assertVersion(meta) {
         if (meta.version !== SESSION_FORMAT_VERSION) throw new Error('wrong format')
       }
@@ -307,13 +313,16 @@ async function modernLoaderBackedReader(): Promise<{
     writeFile(join(sessionRoot, 'index.js'), 'export const SESSION_FORMAT_VERSION = 3\nexport const KNOWN_SESSION_EVENT_TYPES = new Set(["session/start"])\n'),
   ])
   const backendRequire = createRequire(join(backendRoot, 'lib/index.js'))
-  const Backend = backendRequire(join(backendRoot, 'lib/index.js')).default
+  const backendModule = backendRequire(join(backendRoot, 'lib/index.js'))
   const readerRequire = createRequire(join(persistenceRoot, 'index.js'))
   return {
-    service: new Backend({ fiber: { entry: {
+    service: (exportShape === 'legacy' ? new backendModule.default({ fiber: { entry: {
       options: { name: '@deepseek-ai/dsh-session-persistence-jsonl' },
       parent: { tree: { ctx: { baseUrl: `${pathToFileURL(root).href}/` } } },
-    } } }),
+    } } }) : backendModule.create({ fiber: { entry: {
+      options: { name: '@deepseek-ai/dsh-session-persistence-jsonl' },
+      parent: { tree: { ctx: { baseUrl: `${pathToFileURL(root).href}/` } } },
+    } } })),
     module: readerRequire('@deepseek-ai/dsh-session'),
     validate: backendRequire('@deepseek-ai/dsh-session-persistence').validateStoredEvents,
   }
@@ -344,6 +353,28 @@ describe('assistant-policy session event registration', () => {
     await ctx.fiber.restart()
     expect(registration.isReady()).toBe(false)
     expect(reader.module.KNOWN_SESSION_EVENT_TYPES.has(REVIEWER_EVENT_TYPE)).toBe(true)
+  })
+
+  test('proves the 0.2.1 plugin-shaped JSONL reader through its exact persistence base', async () => {
+    const reader = await modernLoaderBackedReader('plugin')
+    const ctx = new Context()
+    contexts.add(ctx)
+    ctx.provide('sessionPersistence' as never, reader.service as never)
+    const registration = registerApprovalReviewerSessionEvent(ctx)
+    await registration.assertReady()
+    expect(registration.isReady()).toBe(true)
+    expect(reader.module.KNOWN_SESSION_EVENT_TYPES.has(REVIEWER_EVENT_TYPE)).toBe(true)
+    expect(() => reader.validate({ version: 3 }, [{ type: REVIEWER_EVENT_TYPE }])).not.toThrow()
+    expect(() => reader.validate({ version: 3 }, [{ type: 'unknown/required' }])).toThrow('unknown/required')
+  })
+
+  test('rejects a lookalike 0.2.1 JSONL reader without the backend persistence base', async () => {
+    const reader = await modernLoaderBackedReader('plugin')
+    const ctx = new Context()
+    contexts.add(ctx)
+    ctx.provide('sessionPersistence' as never, { ...reader.service } as never)
+    expect(() => registerApprovalReviewerSessionEvent(ctx)).toThrow(/no supported reader oracle/)
+    expect(reader.module.KNOWN_SESSION_EVENT_TYPES.has(REVIEWER_EVENT_TYPE)).toBe(false)
   })
 
   test('re-proves a replacement modern provider from the same module', async () => {

@@ -491,6 +491,9 @@ fi
 if [[ -n "$SCRIPT_DIRECTORY" && -r "$SCRIPT_DIRECTORY/common.sh" ]]; then
   # shellcheck source=./common.sh
   source "$SCRIPT_DIRECTORY/common.sh"
+  # A development checkout uses its own reviewed Host contract. The immutable
+  # release constants above apply only to the downloaded release assets below.
+  DSH_ENHANCED_PINNED_HOST_VERSION="$DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION"
 else
   umask 077
   select_temporary_parent

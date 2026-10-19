@@ -12,7 +12,7 @@ import { createRuntimeEpochFixture, cleanupRuntimeEpochFixtures } from '../plugi
 import { rsiBootstrapFixture } from '../plugins/lark-channel/tests/fixtures/rsi-bootstrap.js'
 import { prepareRsiOwnerConfiguration } from '../plugins/lark-channel/src/rsi-bootstrap.js'
 import { compileRsiProfiles } from '../plugins/lark-channel/src/rsi-profile.js'
-import { signRsiOwnerRepairOverlay } from '../plugins/lark-channel/src/rsi-host-update.js'
+import { signRsiOwnerRepairOverlay, signRsiOwnerProgramUpdateOverlay } from '../plugins/lark-channel/src/rsi-host-update.js'
 import { controlPlaneDigest, readHostMaintenanceContext } from '../plugins/plugin-control-plane/src/store.js'
 import { loadTrustConfig } from '../plugins/plugin-control-plane/src/trust.js'
 import { discoverRsiHostUpdateBackups, prepareRsiHostUpdate, verifyRsiHostUpdate } from '../scripts/install/host-rsi-update.mjs'
@@ -244,7 +244,7 @@ test.skipIf(process.platform !== 'linux')('staged RSI Host maintenance preserves
   }
 }, 120_000)
 
-test.skipIf(process.platform !== 'linux')('signed owner repair permits a later watched target adoption but not coordinator patch drift', async () => {
+test.skipIf(process.platform !== 'linux').each(['repair', 'program update'] as const)('signed owner %s permits a later watched target adoption but not coordinator patch drift', async kind => {
   const fixture = await installedFixture()
   const configRoot = fixture.f.input.resources.configRoot
   const bootstrapSource = await readFile(join(configRoot, 'bootstrap.json'), 'utf8')
@@ -266,18 +266,23 @@ test.skipIf(process.platform !== 'linux')('signed owner repair permits a later w
   await writeFile(journalPath, journalSource)
   await writeFile(creationPath, creationSource)
   const host = fixture.f.input.resources.identities.host
-  const repair = signRsiOwnerRepairOverlay({ schemaVersion: 1, kind: 'rsi-owner-repair-overlay',
+  const common = { schemaVersion: 1 as const,
     transactionId: 'prior-owner-repair', dshHome: fixture.home, targetProfile: 'target',
     installationId: fixture.f.input.resources.installationId, sequence: 1, previousDigest: null,
     bootstrapDigest: hash(bootstrapSource), files: receipt.files, patches, runtimeReceiptDigest,
     planDigest: hash(json({ files: receipt.files, patches })), result: receipt.result,
-    repair: { sourceMaintenanceDigest: hash('source-maintenance'),
+    issuedAt: fixture.f.input.now, authority: host.authority, keyId: host.keyId }
+  const change = { sourceMaintenanceDigest: hash('source-maintenance'),
       before: { files: receipt.files, patches, runtimeReceiptDigest,
         creationReceiptDigest: beforeCreationDigest, journalDigest: beforeJournalDigest },
-      after: { creationReceiptDigest: hash(creationSource), journalDigest: hash(journalSource) },
-      permissionPreset: 'workspace-write' },
-    issuedAt: fixture.f.input.now, authority: host.authority, keyId: host.keyId },
-  await readFile(host.keyPath, 'utf8'), fixture.f.input.resources, bootstrapSource, [])
+      after: { creationReceiptDigest: hash(creationSource), journalDigest: hash(journalSource) } }
+  const key = await readFile(host.keyPath, 'utf8')
+  const repair = kind === 'repair'
+    ? signRsiOwnerRepairOverlay({ ...common, kind: 'rsi-owner-repair-overlay',
+      repair: { ...change, permissionPreset: 'workspace-write' } }, key, fixture.f.input.resources, bootstrapSource, [])
+    : signRsiOwnerProgramUpdateOverlay({ ...common, kind: 'rsi-owner-program-update-overlay',
+      update: { ...change, authorityDigest: hash('preserved-authority'), hostPlanDigest: hash('host-plan') } },
+    key, fixture.f.input.resources, bootstrapSource, [])
   await file(join(configRoot, 'host-update-overlays.json'),
     json({ schemaVersion: 1, kind: 'rsi-host-update-overlays', records: [repair] }))
 
@@ -315,11 +320,11 @@ test.skipIf(process.platform !== 'linux')('signed owner repair permits a later w
   const stagedCreationPath = join(stageHome, 'rsi-creation-builds', 'target', 'bootstrap.json')
   await writeFile(stagedJournalPath, json({ stage: 'journal-drift-after-host' }))
   await expect(verifyRsiHostUpdate({ homePath: fixture.home, physicalHome: stageHome,
-    hostPlan: fixture.hostPlan, proof })).rejects.toThrow('owner repair journal or creation receipt changed')
+    hostPlan: fixture.hostPlan, proof })).rejects.toThrow(`owner ${kind} journal or creation receipt changed`)
   await writeFile(stagedJournalPath, journalSource)
   await writeFile(stagedCreationPath, json({ stage: 'creation-drift-after-host' }))
   await expect(verifyRsiHostUpdate({ homePath: fixture.home, physicalHome: stageHome,
-    hostPlan: fixture.hostPlan, proof })).rejects.toThrow('owner repair journal or creation receipt changed')
+    hostPlan: fixture.hostPlan, proof })).rejects.toThrow(`owner ${kind} journal or creation receipt changed`)
   await writeFile(stagedCreationPath, creationSource)
 
   await writeFile(journalPath, json({ stage: 'journal-drift' }))
@@ -327,14 +332,14 @@ test.skipIf(process.platform !== 'linux')('signed owner repair permits a later w
   await cp(fixture.home, journalDriftStage, { recursive: true, verbatimSymlinks: true })
   await expect(prepareRsiHostUpdate({ homePath: fixture.home, stageHome: journalDriftStage, hostPlan: fixture.hostPlan,
     unitTransitions: fixture.unitTransitions, transactionId: 'after-repair-journal-drift', systemctlExecutable: '/usr/bin/true' }))
-    .rejects.toThrow('owner repair journal or creation receipt changed')
+    .rejects.toThrow(`owner ${kind} journal or creation receipt changed`)
   await writeFile(journalPath, journalSource)
   await writeFile(creationPath, json({ stage: 'creation-drift' }))
   const creationDriftStage = join(fixture.f.root, 'repair-creation-drift-stage')
   await cp(fixture.home, creationDriftStage, { recursive: true, verbatimSymlinks: true })
   await expect(prepareRsiHostUpdate({ homePath: fixture.home, stageHome: creationDriftStage, hostPlan: fixture.hostPlan,
     unitTransitions: fixture.unitTransitions, transactionId: 'after-repair-creation-drift', systemctlExecutable: '/usr/bin/true' }))
-    .rejects.toThrow('owner repair journal or creation receipt changed')
+    .rejects.toThrow(`owner ${kind} journal or creation receipt changed`)
   await writeFile(creationPath, creationSource)
 
   const adoptedPatch = await readFile(targetPatchPath, 'utf8')
@@ -351,5 +356,5 @@ test.skipIf(process.platform !== 'linux')('signed owner repair permits a later w
   await cp(fixture.home, driftStage, { recursive: true, verbatimSymlinks: true })
   await expect(prepareRsiHostUpdate({ homePath: fixture.home, stageHome: driftStage, hostPlan: fixture.hostPlan,
     unitTransitions: fixture.unitTransitions, transactionId: 'after-repair-coordinator-drift', systemctlExecutable: '/usr/bin/true' }))
-    .rejects.toThrow('owner repair coordinator patch changed')
+    .rejects.toThrow(`owner ${kind} coordinator patch changed`)
 }, 120_000)

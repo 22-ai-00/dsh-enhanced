@@ -8,7 +8,7 @@ import { describe, expect, test } from 'vitest'
 import { ControlPlaneStore, signSourceMaintenanceRecord } from '@dsh-enhanced/plugin-control-plane'
 import { inspectRsiOwnerConfiguration, prepareRsiOwnerConfiguration } from '../src/rsi-bootstrap.js'
 import { compileRsiProfiles } from '../src/rsi-profile.js'
-import { rsiHostUpdateOverlayDigest, signRsiHostUpdateOverlay, signRsiOwnerRepairOverlay } from '../src/rsi-host-update.js'
+import { rsiHostUpdateOverlayDigest, signRsiHostUpdateOverlay, signRsiOwnerRepairOverlay, signRsiOwnerProgramUpdateOverlay } from '../src/rsi-host-update.js'
 import { rsiBootstrapFixture } from './fixtures/rsi-bootstrap.js'
 
 describe.skipIf(process.platform !== 'linux')('owner configuration preparation', () => {
@@ -72,12 +72,38 @@ describe.skipIf(process.platform !== 'linux')('owner configuration preparation',
       await expect(inspect()).resolves.toBeUndefined()
       await expect(prepareRsiOwnerConfiguration(fixture.input, fixture)).resolves.toEqual(result)
       await writeFile(journalPath, beforeJournal)
-      await expect(inspect()).rejects.toThrow('signed owner repair receipts changed')
-      await expect(prepareRsiOwnerConfiguration(fixture.input, fixture)).rejects.toThrow('signed owner repair receipts changed')
+      await expect(inspect()).rejects.toThrow('signed owner change receipts changed')
+      await expect(prepareRsiOwnerConfiguration(fixture.input, fixture)).rejects.toThrow('signed owner change receipts changed')
       await writeFile(journalPath, afterJournal)
       await writeFile(creationPath, beforeCreation)
-      await expect(inspect()).rejects.toThrow('signed owner repair receipts changed')
-      await expect(prepareRsiOwnerConfiguration(fixture.input, fixture)).rejects.toThrow('signed owner repair receipts changed')
+      await expect(inspect()).rejects.toThrow('signed owner change receipts changed')
+      await expect(prepareRsiOwnerConfiguration(fixture.input, fixture)).rejects.toThrow('signed owner change receipts changed')
+      const update = signRsiOwnerProgramUpdateOverlay({ schemaVersion: 1,
+        kind: 'rsi-owner-program-update-overlay', transactionId: 'program-update', dshHome: home,
+        targetProfile: manifest.targetProfile, installationId: resources.installationId,
+        sequence: 3, previousDigest: rsiHostUpdateOverlayDigest(successor), bootstrapDigest: sha(bootstrapSource),
+        files: receipt.files, patches: patchDigests, runtimeReceiptDigest,
+        planDigest: sha(json({ files: receipt.files, patches: patchDigests })), result,
+        update: { sourceMaintenanceDigest: 'a'.repeat(64), authorityDigest: 'b'.repeat(64),
+          hostPlanDigest: 'c'.repeat(64),
+          before: { files: receipt.files, patches: patchDigests, runtimeReceiptDigest,
+            creationReceiptDigest: sha(afterCreation), journalDigest: sha(afterJournal) },
+          after: { creationReceiptDigest: sha(beforeCreation), journalDigest: sha(beforeJournal) } },
+        issuedAt: fixture.input.now + 2, authority: host.authority, keyId: host.keyId },
+      await readFile(host.keyPath, 'utf8'), resources, bootstrapSource, [repair, successor])
+      await writeFile(journalPath, beforeJournal)
+      await writeFile(creationPath, beforeCreation)
+      await writeFile(join(resources.configRoot, 'host-update-overlays.json'),
+        json({ schemaVersion: 1, kind: 'rsi-host-update-overlays', records: [repair, successor, update] }))
+      await expect(inspect()).resolves.toBeUndefined()
+      await expect(prepareRsiOwnerConfiguration(fixture.input, fixture)).resolves.toEqual(result)
+      await writeFile(journalPath, afterJournal)
+      await expect(inspect()).rejects.toThrow('signed owner change receipts changed')
+      await expect(prepareRsiOwnerConfiguration(fixture.input, fixture)).rejects.toThrow('signed owner change receipts changed')
+      await writeFile(journalPath, beforeJournal)
+      await writeFile(creationPath, afterCreation)
+      await expect(inspect()).rejects.toThrow('signed owner change receipts changed')
+      await expect(prepareRsiOwnerConfiguration(fixture.input, fixture)).rejects.toThrow('signed owner change receipts changed')
       expect(await readFile(observerKeyPath)).toEqual(observerKey)
       expect((await lstat(observerKeyPath)).ino).toBe(observerKeyStat.ino)
     } finally { await fixture.cleanup() }

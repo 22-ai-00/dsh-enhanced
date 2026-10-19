@@ -3,7 +3,7 @@ import { describe, expect, test } from 'vitest'
 import { parseDocument } from 'yaml'
 import type { RsiAuthorityResources } from '../src/rsi-authority-resources.js'
 import { readRsiHostUpdateOverlayChain, rebaseRsiHostActivePatch, rebaseRsiHostValue,
-  rsiHostUpdateOverlayDigest, signRsiHostUpdateOverlay, signRsiOwnerRepairOverlay } from '../src/rsi-host-update.js'
+  rsiHostUpdateOverlayDigest, signRsiHostUpdateOverlay, signRsiOwnerRepairOverlay, signRsiOwnerProgramUpdateOverlay } from '../src/rsi-host-update.js'
 
 const oldSha = 'a'.repeat(64), newSha = 'b'.repeat(64)
 const rebase = { oldHostRoot: '/old-host', oldHostVersion: '0.1.5-rc.3', candidateHostVersion: '0.1.5',
@@ -120,4 +120,70 @@ describe('bounded RSI Host update projections', () => {
       before: { ...repairInput.repair.before, runtimeReceiptDigest: 'invalid' } } },
     privateKey, resources, bootstrapSource, [host])).toThrow('repair overlay shape')
   })
+
+  test('program update is purpose-bound and composes with legacy repair and Host records', () => {
+    const keys = generateKeyPairSync('ed25519'), foreign = generateKeyPairSync('ed25519')
+    const privateKey = keys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+    const resources = { installationId: 'install-1', configRoot: '/home/rsi-authorities/target/config',
+      identities: { host: { authority: 'host-install-1', keyId: 'host-install-1-key',
+        publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() } } } as RsiAuthorityResources
+    const bootstrapSource = '{"schemaVersion":1}\n'
+    const manifestPath = `${resources.configRoot}/manifest.json`
+    const common = { schemaVersion: 1 as const, transactionId: 'txn', dshHome: '/home', targetProfile: 'target',
+      installationId: 'install-1', sequence: 1, previousDigest: null,
+      bootstrapDigest: createHash('sha256').update(bootstrapSource).digest('hex'),
+      files: { [manifestPath]: oldSha }, patches: { target: oldSha, coordinator: oldSha },
+      runtimeReceiptDigest: oldSha, planDigest: oldSha,
+      result: { schemaVersion: 1 as const, manifestPath, manifestDigest: oldSha,
+        targetProfile: 'target', coordinatorProfile: 'coordinator' }, issuedAt: 1,
+      authority: 'host-install-1', keyId: 'host-install-1-key' }
+    const repair = signRsiOwnerRepairOverlay({ ...common, kind: 'rsi-owner-repair-overlay',
+      repair: { sourceMaintenanceDigest: oldSha, permissionPreset: 'workspace-write',
+        before: { files: common.files, patches: common.patches, runtimeReceiptDigest: oldSha,
+          creationReceiptDigest: oldSha, journalDigest: oldSha },
+        after: { creationReceiptDigest: newSha, journalDigest: newSha } } },
+    privateKey, resources, bootstrapSource, [])
+    const input = { ...common, kind: 'rsi-owner-program-update-overlay' as const, transactionId: 'update',
+      sequence: 2, previousDigest: rsiHostUpdateOverlayDigest(repair), issuedAt: 2,
+      update: { sourceMaintenanceDigest: oldSha, authorityDigest: oldSha, hostPlanDigest: oldSha,
+        before: { files: common.files, patches: common.patches, runtimeReceiptDigest: oldSha,
+          creationReceiptDigest: newSha, journalDigest: newSha },
+        after: { creationReceiptDigest: oldSha, journalDigest: oldSha } } }
+    const update = signRsiOwnerProgramUpdateOverlay(input, privateKey, resources, bootstrapSource, [repair])
+    const host = signRsiHostUpdateOverlay({ ...common, kind: 'rsi-host-update-overlay', transactionId: 'host',
+      currentPlanId: 'plan', activationId: 'activation', sequence: 3,
+      previousDigest: rsiHostUpdateOverlayDigest(update), issuedAt: 3 },
+    privateKey, resources, bootstrapSource, [repair, update])
+    const read = (records: unknown[]) => readRsiHostUpdateOverlayChain({ source: JSON.stringify({ schemaVersion: 1,
+      kind: 'rsi-host-update-overlays', records }), resources, dshHome: '/home', profile: 'target', bootstrapSource })
+    expect(read([repair, update, host]).latest).toEqual(host)
+    expect(() => read([repair, { ...update, kind: 'rsi-owner-repair-overlay' }])).toThrow('repair overlay shape')
+    expect(() => read([repair, { ...update, kind: 'rsi-host-update-overlay' }])).toThrow('overlay shape')
+    expect(() => read([repair, { ...update, kind: 'unknown' }])).toThrow('overlay shape')
+    expect(() => read([update, repair])).toThrow('program update overlay shape')
+    expect(() => read([repair, { ...update, sequence: 4 }])).toThrow('program update overlay shape')
+    expect(() => read([repair, { ...update, update: { ...update.update, authorityDigest: newSha } }]))
+      .toThrow('program update overlay signature')
+    expect(() => signRsiOwnerProgramUpdateOverlay(input,
+      foreign.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), resources, bootstrapSource, [repair]))
+      .toThrow('program update overlay signature')
+    expect(() => signRsiOwnerProgramUpdateOverlay({ ...input,
+      update: { ...input.update, authorityDigest: 'bad' } }, privateKey, resources, bootstrapSource, [repair]))
+      .toThrow('program update overlay shape')
+    expect(() => signRsiOwnerProgramUpdateOverlay({ ...input,
+      files: { ...input.files, '/outside/file': oldSha } }, privateKey, resources, bootstrapSource, [repair]))
+      .toThrow('program update overlay shape')
+    expect(() => signRsiOwnerProgramUpdateOverlay({ ...input,
+      patches: { ...input.patches, extra: oldSha } }, privateKey, resources, bootstrapSource, [repair]))
+      .toThrow('program update overlay shape')
+    expect(() => signRsiOwnerProgramUpdateOverlay({ ...input,
+      result: { ...input.result, manifestDigest: newSha } }, privateKey, resources, bootstrapSource, [repair]))
+      .toThrow('program update overlay shape')
+    expect(() => signRsiOwnerProgramUpdateOverlay({ ...input,
+      update: { ...input.update, before: { ...input.update.before, files: {} } } },
+    privateKey, resources, bootstrapSource, [repair])).toThrow('program update overlay shape')
+    expect(() => signRsiOwnerProgramUpdateOverlay({ ...input, activationId: 'forged' } as typeof input,
+      privateKey, resources, bootstrapSource, [repair])).toThrow('program update overlay shape')
+  })
+
 })

@@ -17,7 +17,7 @@ async function fixture() {
   roots.push(root)
   const dshHome = join(root,'home with spaces')
   const cacheRoot = join(root,'cache')
-  const runtime = runtimeAt(cacheRoot, '0.2.0-rc.2')
+  const runtime = runtimeAt(cacheRoot, '0.2.1-rc.2')
   const prepare = vi.fn(async () => runtime)
   const read = vi.fn(async (_input: Parameters<InstallHostPorts['read']>[0]) => runtime)
   const ports: InstallHostPorts = {prepare,read}
@@ -148,21 +148,33 @@ describe('read-only Home Host update planning', () => {
     expect(await readFile(path, 'utf8')).toBe(before)
     expect(await readdir(f.input.dshHome)).toEqual(['.dsh-rsi-host.json'])
   })
+  test('plans a bound 0.2.0 receipt to the verified 0.2.1 Host without changing Home', async () => {
+    const f = await fixture()
+    const original = await bindLegacyHome(f, '0.2.0-rc.2')
+    const bindingPath = join(f.input.dshHome, '.dsh-rsi-host.json')
+    const before = await readFile(bindingPath, 'utf8')
+    const plan = await prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)
+    expect(plan).toMatchObject({ status: 'update', originalRuntime: original, candidateRuntime: f.runtime })
+    expect(JSON.parse(plan.candidateBindingSource).version).toBe('0.2.1-rc.2')
+    expect(await readFile(bindingPath, 'utf8')).toBe(before)
+    await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome, selector: '0.2.0-rc.2' }, f.ports))
+      .rejects.toThrow('版本不兼容')
+  })
   test('a different compatible exact version only prepares candidate binding bytes', async () => {
     const f = await fixture()
     const original = await bindLegacyHome(f, '0.1.5-rc.3')
     const path = join(f.input.dshHome, '.dsh-rsi-host.json')
     const before = await readFile(path, 'utf8')
-    const candidate = runtimeAt(f.input.cacheRoot, '0.2.0-rc.2', 'b'.repeat(64))
+    const candidate = runtimeAt(f.input.cacheRoot, '0.2.1-rc.2', 'b'.repeat(64))
     f.prepare.mockResolvedValue(candidate)
     f.read.mockImplementation(async ({ version }) => version === candidate.version ? candidate : original)
-    const plan = await prepareHostUpdatePlan({ dshHome: f.input.dshHome, selector: '0.2.0-rc.2' }, f.ports)
+    const plan = await prepareHostUpdatePlan({ dshHome: f.input.dshHome, selector: '0.2.1-rc.2' }, f.ports)
     expect(plan.status).toBe('update')
     expect(plan.candidateRuntime).toEqual(candidate)
     expect(JSON.parse(plan.candidateBindingSource)).toEqual({ schemaVersion: 1, cacheRoot: f.input.cacheRoot,
       version: candidate.version, receiptDigest: candidate.receiptDigest })
     expect(await readFile(path, 'utf8')).toBe(before)
-    expect(f.prepare).toHaveBeenLastCalledWith({ root: f.input.cacheRoot, selector: '0.2.0-rc.2' })
+    expect(f.prepare).toHaveBeenLastCalledWith({ root: f.input.cacheRoot, selector: '0.2.1-rc.2' })
     f.prepare.mockClear()
     expect((await prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).candidateRuntime).toEqual(candidate)
     expect(f.prepare).toHaveBeenLastCalledWith({ root: f.input.cacheRoot, selector: 'latest' })
@@ -178,7 +190,7 @@ describe('read-only Home Host update planning', () => {
     await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).rejects.toThrow('独立收据验证')
     expect(await readFile(path, 'utf8')).toBe(before)
   })
-  test.each([['0.2.0-rc.2', '0.1.5-rc.3'], ['0.2.0-rc.2', '0.1.5']])(
+  test.each([['0.2.1-rc.2', '0.1.5-rc.3'], ['0.2.1-rc.2', '0.1.5']])(
     'latest and exact selectors cannot downgrade %s to %s', async (originalVersion, olderVersion) => {
       const f = await fixture()
       expect(f.runtime.version).toBe(originalVersion)
@@ -198,7 +210,7 @@ describe('read-only Home Host update planning', () => {
     const original = await bindLegacyHome(f, '0.1.5')
     const path = join(f.input.dshHome, '.dsh-rsi-host.json')
     const before = await readFile(path, 'utf8')
-    const candidate = runtimeAt(f.input.cacheRoot, '0.2.0-rc.2', 'b'.repeat(64))
+    const candidate = runtimeAt(f.input.cacheRoot, '0.2.1-rc.2', 'b'.repeat(64))
     f.prepare.mockResolvedValue(candidate)
     f.read.mockImplementation(async ({ version }) => version === candidate.version
       ? { ...candidate, root: join(f.root, 'foreign-cache') } : original)
@@ -238,7 +250,7 @@ describe('read-only Home Host update planning', () => {
     const path = join(f.input.dshHome, '.dsh-rsi-host.json')
     const drifted = JSON.stringify({ schemaVersion: 1, cacheRoot: f.input.cacheRoot, version: f.runtime.version,
       receiptDigest: 'c'.repeat(64) }) + '\n'
-    const candidate = runtimeAt(f.input.cacheRoot, '0.2.0-rc.2', 'b'.repeat(64))
+    const candidate = runtimeAt(f.input.cacheRoot, '0.2.1-rc.2', 'b'.repeat(64))
     f.read.mockImplementation(async ({ version }) => version === candidate.version ? candidate : original)
     f.prepare.mockImplementation(async () => {
       await writeFile(path, drifted, { mode: 0o600 })
@@ -269,7 +281,7 @@ describe('explicit unbound private Host update planning', () => {
     await mkdir(f.input.dshHome, { mode: 0o700 })
     await mkdir(f.input.cacheRoot, { mode: 0o700 })
     const original = runtimeAt(f.input.cacheRoot, version)
-    const candidate = runtimeAt(f.input.cacheRoot, '0.2.0-rc.2', 'b'.repeat(64))
+    const candidate = runtimeAt(f.input.cacheRoot, '0.2.1-rc.2', 'b'.repeat(64))
     await mkdir(original.root, { mode: 0o700 })
     await writeFile(original.dshPath, 'old executable', { mode: 0o700 })
     f.prepare.mockResolvedValue(candidate)
@@ -290,7 +302,7 @@ describe('explicit unbound private Host update planning', () => {
     expect(JSON.parse(plan.candidateBindingSource)).toEqual({ schemaVersion: 1,
       cacheRoot: f.input.cacheRoot, version: f.candidate.version, receiptDigest: f.candidate.receiptDigest })
     expect(f.read.mock.calls).toEqual([[{ root: f.input.cacheRoot, version }],
-      [{ root: f.input.cacheRoot, version: '0.2.0-rc.2' }]])
+      [{ root: f.input.cacheRoot, version: '0.2.1-rc.2' }]])
     expect(await readdir(f.input.dshHome)).toEqual(before)
   })
 

@@ -2,7 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { mountAgentLoopTestDependencies, provideWorkingDirectoryFixture } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { createUserMessage, LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
@@ -47,10 +47,12 @@ class ScriptAdapter extends LlmAdapter {
   }
 }
 
-async function host(root: string, adapter: ScriptAdapter, options: { ownerVersion?: number; revoked?: boolean; denySource?: boolean; denyFile?: boolean; denyPipeline?: boolean; unregistered?: boolean; budgeted?: 'execute' | 'read'; pruneThresholdChars?: number; pruneHeadChars?: number; pruneTailChars?: number; imageStore?: boolean; imageTool?: boolean } = {}) {
+async function host(root: string, adapter: ScriptAdapter, options: { ownerVersion?: number; revoked?: boolean; denySource?: boolean; denyFile?: boolean; denyPipeline?: boolean; unregistered?: boolean; budgeted?: 'execute' | 'read'; pruneThresholdChars?: number; pruneHeadChars?: number; pruneTailChars?: number; imageStore?: boolean; imageTool?: boolean; unrelatedContext?: string } = {}) {
   const ctx = new Context()
   try {
   await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: 'Use current verified evidence.', includeRuntimeContext: true } })
+  provideWorkingDirectoryFixture(ctx, root)
+  if (options.unrelatedContext) ctx.systemPrompt.context({ name: 'fixture:unrelated-context', order: 239, text: () => options.unrelatedContext! })
   await ctx.plugin(Loader, { baseUrl: import.meta.url })
   await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'), compression: 'none', packChunks: false, writeBatchMaxDelayMs: 1 } })
   await ctx.loader.await()
@@ -107,6 +109,50 @@ async function host(root: string, adapter: ScriptAdapter, options: { ownerVersio
   return { ctx, executions: () => executions }
   } catch (error) { await ctx.fiber.dispose(); throw error }
 }
+
+test.each(['changed-owner', 'revoked-owner'] as const)(
+  'same live Session drops old evidence after %s while preserving other context', async mode => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-live-evidence-')))
+    roots.push(root)
+    await writeFile(join(root, 'journal.txt'), `report-start:${'a'.repeat(12_000)}NEEDLE=journal-v2${'b'.repeat(12_000)}:report-end`)
+    const unrelated = 'Other provider keeps <session_tool_evidence>its own literal</session_tool_evidence>.'
+    const authority = { ownerVersion: 1, revoked: false, unrelatedContext: unrelated }
+    const adapter = new ScriptAdapter((_request, index) => index === 0
+      ? { name: 'read', args: { file_path: 'journal.txt' } } : 'Finished this step.')
+    const fixture = await host(root, adapter, authority)
+    let handle: AgentHandle | undefined
+    try {
+      handle = await fixture.ctx.agents.create({ sessionId: SessionId(`live-evidence-${mode}`),
+        meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'evidence-fixture', model: 'fixture' } })
+      await prompt(handle, 'Capture the journal report.')
+      const db = new DatabaseSync(join(root, 'memory.sqlite'), { readOnly: true })
+      let reference: string
+      try { reference = String(db.prepare('SELECT reference FROM memory_evidence_anchors').get()!.reference) }
+      finally { db.close() }
+      expect(adapter.requests).toHaveLength(2)
+      expect(JSON.stringify(adapter.requests[1]!.messages)).toContain(reference)
+      const before = adapter.requests[1]!.messages.find(message => message.source.kind === 'runtime-context'
+        && JSON.stringify(message).includes(reference))!
+      expect(before.source).toMatchObject({ form: 'snapshot', sections: [
+        { name: 'fixture:unrelated-context', text: unrelated },
+        { name: 'personal-memory:tool-evidence' },
+      ] })
+
+      if (mode === 'changed-owner') authority.ownerVersion = 2
+      else authority.revoked = true
+      await prompt(handle, 'Continue with current authority.')
+      expect(adapter.requests).toHaveLength(3)
+      const messages = adapter.requests[2]!.messages
+      expect(JSON.stringify(messages)).not.toContain(reference)
+      const oldContext = messages[adapter.requests[1]!.messages.indexOf(before)]!
+      expect(oldContext.content).toEqual([{ type: 'text', text: expect.stringContaining(unrelated) }])
+      expect(oldContext.source).toMatchObject({ form: 'snapshot', sections: [
+        { name: 'fixture:unrelated-context', text: unrelated },
+      ] })
+      expect(JSON.stringify(oldContext)).toContain('<session_tool_evidence>its own literal</session_tool_evidence>')
+    } finally { await handle?.dispose(); await fixture.ctx.fiber.dispose() }
+  },
+)
 
 async function prompt(handle: AgentHandle, text: string) {
   handle.agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] }))
