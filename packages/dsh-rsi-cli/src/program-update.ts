@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { constants } from 'node:fs'
 import { lstat, open, readdir, realpath } from 'node:fs/promises'
-import { isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { PurgeError } from './purge.ts'
 
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
@@ -91,6 +91,18 @@ async function stableArtifactDigest(path: string, profile: string): Promise<stri
   } finally { await descriptor.close() }
 }
 
+function auxiliarySourceRepository(home: string, sourceRepository: unknown, repository: string): boolean {
+  if (sourceRepository === repository) return true
+  if (typeof sourceRepository !== 'string') return false
+  const parent = join(dirname(home), `.dsh-rsi-local-updates-${createHash('sha256').update(home).digest('hex').slice(0, 16)}`)
+  const prefix = `${parent}${sep}`
+  if (!sourceRepository.startsWith(prefix)) return false
+  const relative = sourceRepository.slice(prefix.length).split(sep)
+  return relative.length === 3 && digestPattern.test(relative[0]!)
+    && relative[1] === 'source' && relative[2] === 'repository'
+    && sourceRepository === join(parent, ...relative)
+}
+
 async function verifyAuxiliaryCohort(home: string, profile: string, repository: string): Promise<void> {
   if (!auxiliaryPattern.test(profile)) fail(`未知本地 cohort：${profile}`)
   const realProfile = await lstat(join(home, 'profiles', profile)).catch(error => {
@@ -111,7 +123,7 @@ async function verifyAuxiliaryCohort(home: string, profile: string, repository: 
   const keys = ['allowBuilds', 'bundles', 'packages', 'receiptDigest', 'root', 'schemaVersion', 'sourceCommit',
     'sourceRepository', 'version']
   if (!sameNames(Object.keys(receipt), keys) || receipt.schemaVersion !== 1 || receipt.root !== root
-    || receipt.sourceRepository !== repository || typeof receipt.sourceCommit !== 'string'
+    || !auxiliarySourceRepository(home, receipt.sourceRepository, repository) || typeof receipt.sourceCommit !== 'string'
     || !/^[a-f0-9]{40}$/u.test(receipt.sourceCommit) || typeof receipt.version !== 'string'
     || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(receipt.version)
     || !Array.isArray(receipt.bundles) || !Array.isArray(receipt.packages)

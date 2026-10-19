@@ -191,6 +191,7 @@ describe('main：update 命令派发', () => {
   }
 
   const noRunning = () => ({ active: [] })
+  const noFrozenOwner = async () => undefined
 
   test('不带 --all 时只升级自身，绝不调用安装器', async () => {
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
@@ -209,7 +210,9 @@ describe('main：update 命令派发', () => {
     const install = makeInstall()
     const selfUpdate = makeSelfUpdate()
     try {
-      const code = await main(['update', '--all'], { HOME: '/h' }, { platform: 'linux', install, selfUpdate, findRunning: noRunning })
+      const code = await main(['update', '--all'], { HOME: '/h' }, {
+        platform: 'linux', install, selfUpdate, findRunning: noRunning, detectFrozenOwner: noFrozenOwner,
+      })
       expect(code).toBe(0)
       expect(selfUpdate).toHaveBeenCalledTimes(1)
       expect(install).toHaveBeenCalledTimes(1)
@@ -354,7 +357,10 @@ describe('main：update 命令派发', () => {
     const install = makeInstall()
     const selfUpdate = vi.fn<SelfUpdateFn>(async () => { throw new PurgeError('npm 失败') })
     try {
-      expect(await main(['update', '--all'], { HOME: '/h' }, { install, selfUpdate, findRunning: noRunning })).toBe(1)
+      expect(await main(['update', '--all'], { HOME: '/h' }, {
+        platform: 'linux', install, selfUpdate, findRunning: noRunning, detectFrozenOwner: noFrozenOwner,
+      })).toBe(1)
+      expect(selfUpdate).toHaveBeenCalledTimes(1)
       expect(install).not.toHaveBeenCalled()
     } finally { write.mockRestore(); error.mockRestore() }
   })
@@ -364,7 +370,9 @@ describe('main：update 命令派发', () => {
     const install = makeInstall(7)
     const selfUpdate = makeSelfUpdate()
     try {
-      expect(await main(['update', '--all'], { HOME: '/h' }, { platform: 'linux', install, selfUpdate, findRunning: noRunning })).toBe(7)
+      expect(await main(['update', '--all'], { HOME: '/h' }, {
+        platform: 'linux', install, selfUpdate, findRunning: noRunning, detectFrozenOwner: noFrozenOwner,
+      })).toBe(7)
     } finally { write.mockRestore() }
   })
 })
