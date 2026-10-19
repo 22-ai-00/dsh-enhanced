@@ -54,6 +54,7 @@ catalog:
   '@deepseek-ai/dsh-fs-observation-policy': 0.2.1-rc.2
   '@deepseek-ai/dsh-tool-fs': 0.2.1-rc.2
   '@deepseek-ai/dsh-session-projection': 0.2.1-rc.2
+  '@deepseek-ai/dsh-working-directory': 0.2.1-rc.2
   '@deepseek-ai/dsh-session-title': 0.2.1-rc.2
   '@deepseek-ai/dsh-settings': 0.2.1-rc.2
   '@deepseek-ai/dsh-shell': 0.2.1-rc.2
@@ -137,6 +138,7 @@ minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-fs-observation-policy@0.2.1-rc.2'
   - '@deepseek-ai/dsh-tool-fs@0.2.1-rc.2'
   - '@deepseek-ai/dsh-session-projection@0.2.1-rc.2'
+  - '@deepseek-ai/dsh-working-directory@0.2.1-rc.2'
   - '@deepseek-ai/dsh-session-title@0.2.1-rc.2'
   - '@deepseek-ai/dsh-session@0.2.1-rc.2'
   - '@deepseek-ai/dsh-settings@0.2.1-rc.2'

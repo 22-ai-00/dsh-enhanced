@@ -1,6 +1,8 @@
 import { Context } from '@deepseek-ai/cordis'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
+import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import WorkingDirectoryService from '@deepseek-ai/dsh-working-directory'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as FileTools from '@deepseek-ai/dsh-tool-fs'
@@ -129,7 +131,13 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayResult> {
     if (parameterBytes + files.reduce((sum, file) => sum + bytes(file.content), 0) > input.maxBytes) fail('byte limit')
     for (const file of files) { input.signal.throwIfAborted(); input.authorize(); await mkdir(resolve(file.path, '..'), { recursive: true }); await writeFile(file.path, file.content, { flag: 'wx' }) }
     if (parameterBytes + await total(root) > input.maxBytes) fail('byte limit')
-    ctx = new Context(); await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(LocalFileSystem, { cwd: root }); await ctx.plugin(FileTools)
+    ctx = new Context()
+    new SessionProjectionRegistry(ctx)
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime, { mode: 'native' })
+    await ctx.plugin(LocalFileSystem, { cwd: root })
+    await ctx.plugin(WorkingDirectoryService, { defaultDirectory: root })
+    await ctx.plugin(FileTools)
     const done: ReplayStep[] = []
     // Dependency DAG gate: a step dispatches only after every declared
     // predecessor executed successfully. The v1 stop-and-report compensation is

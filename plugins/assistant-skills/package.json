@@ -117,7 +117,6 @@
     "@deepseek-ai/dsh-llm": "catalog:",
     "@deepseek-ai/dsh-scope": "catalog:",
     "@deepseek-ai/dsh-session": "catalog:",
-    "@deepseek-ai/dsh-session-projection": "catalog:",
     "@deepseek-ai/dsh-skill": "catalog:",
     "@deepseek-ai/dsh-system-prompt": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
@@ -135,7 +134,9 @@
   "dependencies": {
     "@deepseek-ai/dsh-fs": "catalog:",
     "@deepseek-ai/dsh-fs-local": "catalog:",
+    "@deepseek-ai/dsh-session-projection": "catalog:",
     "@deepseek-ai/dsh-tool-fs": "catalog:",
+    "@deepseek-ai/dsh-working-directory": "catalog:",
     "@deepseek-ai/schemastery": "catalog:",
     "@dsh-enhanced/task-acceptance-contract": "workspace:*"
   },

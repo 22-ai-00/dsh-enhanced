@@ -1,15 +1,23 @@
 import * as Cordis from '@deepseek-ai/cordis'
 import { Context } from '@deepseek-ai/cordis'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
+import type {} from '@deepseek-ai/dsh-api-gateway/client'
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
+import { runInNewContext } from 'node:vm'
 import { describe, expect, it, vi } from 'vitest'
 import { TYPERT_REMOTE } from '../src/typert.ts'
 
 describe('notice client Remote namespace lifecycle', () => {
   it('makes the mounted namespace available only to a dynamic Cordis injection', async () => {
     let registration: { factory(require: (id: string) => unknown): { apply(ctx: Context): void } } | undefined
-    const previousWindow = (globalThis as { window?: unknown }).window
-    ;(globalThis as { window?: unknown }).window = { __ModuleLoader__: { load: (value: typeof registration) => { registration = value } } }
-    await import('@deepseek-ai/dsh-api-gateway/client')
+    const require = createRequire(import.meta.url)
+    const gatewayRoot = dirname(require.resolve('@deepseek-ai/dsh-api-gateway/package.json'))
+    runInNewContext(readFileSync(join(gatewayRoot, 'lib', 'client.browser.js'), 'utf8'), {
+      window: { __ModuleLoader__: { load: (value: typeof registration) => { registration = value } } },
+      AbortController, AbortSignal, URL,
+    })
     if (registration === undefined) throw new Error('Gateway client did not register a ModuleLoader factory')
     const GatewayClient = registration.factory((id) => {
       if (id === '@deepseek-ai/cordis') return Cordis
@@ -43,7 +51,6 @@ describe('notice client Remote namespace lifecycle', () => {
       expect(ctx.get('remote.deliveryNotices' as never)).toBeUndefined()
     } finally {
       await ctx.fiber.dispose()
-      ;(globalThis as { window?: unknown }).window = previousWindow
     }
   })
 })

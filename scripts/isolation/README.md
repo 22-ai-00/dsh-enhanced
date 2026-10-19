@@ -84,8 +84,8 @@ The builder checks that ID, creates and removes a temporary local tag for
 Docker BuildKit, and returns the verifier image's content ID. Its temporary
 context contains only the root/workspace manifests, lock, Dockerfile, fixed
 parent/candidate workers and native observer launcher; it excludes other product source, Host mounts, `.npmrc`, credentials and
-expected behavior. It installs the exact locked Cordis 4.0.4, native tools and
-system prompt 0.2.0-rc.2 packages offline with scripts disabled, and adds
+expected behavior. It installs the exact locked Cordis 4.0.5, native tools and
+system prompt 0.2.1-rc.2 packages offline with scripts disabled, and adds
 BusyBox for the isolation supervisor. The build compiles the fixed launcher and
 parent protection library for Linux x64 or arm64. The Dockerfile compiles and
 runs the native seccomp launcher and preload probes for the selected image

@@ -11,9 +11,15 @@ const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const PACKAGE_MANAGER = 'pnpm@11.7.0'
 const FIXED = {
   'scripts/isolation/build-plugin-verifier-image.mjs': 'abfa721cc51e29672f5f1b139c63d282ffeebdc4c4b96d4496c7c089d711891a',
-  'scripts/isolation/plugin-verifier.Dockerfile': '9301bf426688c46f3d4fd8bcae7acde5da283ed6730f87be1f225d93fca95823',
+  'scripts/isolation/plugin-verifier.Dockerfile': '18bb3b1decd725875e42ad9cca36a42f3f8601488b541cda7e5858ff56c66902',
   'scripts/isolation/plugin-observer-launcher.c': '75ba31c8a2a0eb09820066fc7c73efb087095cf5229e460c965daa8659af1d0e',
   'plugins/assistant-verifier/src/plugin-behavior-runner.ts': 'b291cda21f24c5f03c295b816d68e6e50a6d507f837a3b7446986158f513dd18',
+} as const
+// Keep the exact previously reviewed asset set readable while upgrading an
+// existing 0.2.0 cohort. Do not accept arbitrary mixtures of trusted hashes.
+const HOST_020_FIXED = {
+  ...FIXED,
+  'scripts/isolation/plugin-verifier.Dockerfile': '9301bf426688c46f3d4fd8bcae7acde5da283ed6730f87be1f225d93fca95823',
 } as const
 const LEGACY_FIXED = {
   ...FIXED,
@@ -96,7 +102,8 @@ async function inputs(source: RsiSourceWorkspace): Promise<Inputs> {
     files.set(name, await io.readStable(join(source.repository, name), 4_194_304))
   }
   const matches = (pins: Record<string, string>) => Object.entries(pins).every(([name, expected]) => digest(files.get(name)!) === expected)
-  if (!matches(FIXED) && !(io.hostPlatform() === 'linux/amd64' && matches(LEGACY_FIXED))) fail('trusted asset changed')
+  if (!matches(FIXED) && !matches(HOST_020_FIXED)
+    && !(io.hostPlatform() === 'linux/amd64' && matches(LEGACY_FIXED))) fail('trusted asset changed')
   const manifest = JSON.parse(files.get('package.json')!.toString('utf8')) as Record<string, unknown>
   if (manifest.name !== 'dsh-enhanced' || manifest.version !== source.version
     || manifest.packageManager !== PACKAGE_MANAGER) fail('root manifest differs from source cohort')
