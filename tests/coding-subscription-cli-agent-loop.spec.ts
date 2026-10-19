@@ -177,6 +177,7 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
       await mountAgentLoopTestDependencies(ctx, {
         systemPrompt: { personaPrefix: '' },
         tools: { mode: 'native' },
+        workingDirectory: true,
       })
       await ctx.plugin(SkillRegistry)
       ctx.skills.register({
@@ -605,6 +606,7 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
       await mountAgentLoopTestDependencies(ctx, {
         systemPrompt: { personaPrefix: '' },
         tools: { mode: 'native' },
+        workingDirectory: true,
       })
       await ctx.plugin(SkillRegistry)
       ctx.skills.register({

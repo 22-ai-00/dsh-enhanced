@@ -74,7 +74,7 @@ describe('runSelfUpdate / 包改名迁移', () => {
     // packageRoot 是已知全局包路径 → 从路径反推 prefix，而非调用 npm prefix -g
     expect(report.globalPrefix).toBe('/Users/test/.npm-global')
     expect(report.migratedFrom).toBe(false)
-    expect(calls).toContain(`npm install --global --prefix /Users/test/.npm-global ${RSI_CLI_PACKAGE}@latest --location=global`)
+    expect(calls).toContain(`npm install --global --prefix /Users/test/.npm-global ${RSI_CLI_PACKAGE}@9.9.9 --location=global`)
     expect(calls.some(c => c.includes('uninstall'))).toBe(false)
   })
 
@@ -82,7 +82,7 @@ describe('runSelfUpdate / 包改名迁移', () => {
     const { runner, calls } = npmRunner({ prefix: '/opt/npm', viewVersion: '9.9.9' })
     const report = await runSelfUpdate({ runner, packageRoot: LEGACY_GLOBAL })
     expect(report.migratedFrom).toBe(true)
-    const installIdx = calls.findIndex(c => c.startsWith(`npm install --global --prefix /Users/test/.npm-global ${RSI_CLI_PACKAGE}@`))
+    const installIdx = calls.findIndex(c => c.startsWith(`npm install --global --prefix /Users/test/.npm-global ${RSI_CLI_PACKAGE}@9.9.9`))
     const uninstallIdx = calls.findIndex(c => c.startsWith(`npm uninstall --global --prefix /Users/test/.npm-global ${LEGACY_RSI_CLI_PACKAGE}`))
     expect(installIdx).toBeGreaterThanOrEqual(0)
     expect(uninstallIdx).toBeGreaterThan(installIdx)
@@ -97,6 +97,23 @@ describe('runSelfUpdate / 包改名迁移', () => {
     expect(report.migratedFrom).toBe(false)
     expect(calls.some(c => c.includes('install'))).toBe(false)
     expect(calls.some(c => c.includes('uninstall'))).toBe(false)
+  })
+
+  test('official global CLI newer than npm latest is retained without npm mutation', async () => {
+    const { runner, calls } = npmRunner({ viewVersion: '0.1.54' })
+    const report = await runSelfUpdate({ runner, packageRoot: NEW_GLOBAL })
+    expect(report).toMatchObject({ alreadyCurrent: true, retainedNewer: true,
+      resolvedVersion: '0.1.54', installedVersion: VERSION })
+    expect(calls.some(call => call.startsWith('npm install') || call.startsWith('npm uninstall'))).toBe(false)
+    expect(formatSelfUpdateReport(report, false)).toContain('保留本机版本，未安装旧版')
+  })
+
+  test('latest older than nonofficial runtime fails closed before install', async () => {
+    for (const packageRoot of [LEGACY_GLOBAL, '/checkout/packages/dsh-rsi-cli']) {
+      const { runner, calls } = npmRunner({ viewVersion: '0.1.54' })
+      await expect(runSelfUpdate({ runner, packageRoot })).rejects.toThrow(/早于当前 CLI/)
+      expect(calls.some(call => call.startsWith('npm install') || call.startsWith('npm uninstall'))).toBe(false)
+    }
   })
 
   test('旧包即使版本号相同也必须迁移一次（不视为 alreadyCurrent）', async () => {
@@ -124,12 +141,17 @@ describe('runSelfUpdate / 包改名迁移', () => {
     expect(report.actions).toContainEqual(expect.stringContaining(LEGACY_RSI_CLI_PACKAGE))
   })
 
-  test('registry 无法解析版本时仍按 selector 安装新包', async () => {
+  test('registry 无法解析 latest 时不安装未知版本', async () => {
     const { runner, calls } = npmRunner({ viewVersion: null })
-    const report = await runSelfUpdate({ runner, packageRoot: NEW_GLOBAL })
-    expect(report.resolvedVersion).toBeUndefined()
-    expect(report.alreadyCurrent).toBe(false)
-    expect(calls).toContain(`npm install --global --prefix /Users/test/.npm-global ${RSI_CLI_PACKAGE}@latest --location=global`)
+    await expect(runSelfUpdate({ runner, packageRoot: NEW_GLOBAL })).rejects.toThrow(/无法确认 npm latest/)
+    expect(calls.some(call => call.startsWith('npm install'))).toBe(false)
+  })
+
+  test('explicit older CLI version remains available outside frozen --all', async () => {
+    const { runner, calls } = npmRunner({ viewVersion: '0.1.54' })
+    const report = await runSelfUpdate({ runner, packageRoot: NEW_GLOBAL, selector: '0.1.54' })
+    expect(report.installedVersion).toBe('0.1.54')
+    expect(calls).toContain(`npm install --global --prefix /Users/test/.npm-global ${RSI_CLI_PACKAGE}@0.1.54 --location=global`)
   })
 
   test('接受精确版本与 dist-tag，拒绝非法 selector', async () => {

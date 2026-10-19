@@ -73,6 +73,20 @@ describe('detached lifecycle YAML parser', () => {
     expect(rejectedEscape.stderr).toContain('resolves outside canonical DSH_HOME')
   })
 
+  test('uses the 0.2.1 Host parser from its matching plugin manager', async () => {
+    const input = await fixture()
+    for (const file of [join(input.host, 'package.json'), join(input.manager, 'package.json')]) {
+      const manifest = JSON.parse(await readFile(file, 'utf8'))
+      manifest.version = '0.2.1-rc.2'
+      if (manifest.dependencies?.['@deepseek-ai/dsh-plugin-manager']) {
+        manifest.dependencies['@deepseek-ai/dsh-plugin-manager'] = '0.2.1-rc.2'
+      }
+      await writeFile(file, JSON.stringify(manifest))
+    }
+    const result = run(input, "- id: first-party\n  name: '@dsh-enhanced/assistant-web-owner'\n")
+    expect(result.status, result.stderr).toBe(0)
+  })
+
   test('rejects a mismatched Host or parser dependency rather than using ambient YAML', async () => {
     const input = await fixture()
     const source = "- id: first-party\n  name: '@dsh-enhanced/assistant-web-owner'\n"

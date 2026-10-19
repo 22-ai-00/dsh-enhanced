@@ -23,8 +23,8 @@ async function fixture() {
   const require = createRequire(import.meta.url)
   const cordis = dirname(require.resolve('@deepseek-ai/cordis/package.json'))
   const store = join(process.cwd(), 'node_modules', '.pnpm')
-  const bootStore = (await readdir(store)).find(name => name.startsWith('@deepseek-ai+dsh-app-boot@0.2.0-rc.2_'))
-  if (bootStore === undefined) throw new Error('locked DSH 0.2 app-boot is not installed')
+  const bootStore = (await readdir(store)).find(name => name.startsWith('@deepseek-ai+dsh-app-boot@0.2.1-rc.2_'))
+  if (bootStore === undefined) throw new Error('locked DSH 0.2.1 app-boot is not installed')
   const boot = join(store, bootStore, 'node_modules', '@deepseek-ai', 'dsh-app-boot')
   await Promise.all([
     mkdir(join(packageRoot, 'lib'), { recursive: true }),
@@ -49,10 +49,10 @@ export async function runModelSetup(args) {
   await writeFile(process.env.SETUP_RESULT, JSON.stringify({ args, input, tty: process.stdin.isTTY === true }))
 }
 `)
-  await writeFile(join(hostRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.0-rc.2',
-    type: 'module', bin: { dsh: 'lib/bin.js' }, dependencies: { '@deepseek-ai/dsh-app-boot': '0.2.0-rc.2',
-      '@deepseek-ai/cordis': '4.0.4' }, exports: { './package.json': './package.json' } }))
-  await writeFile(executable, '#!/usr/bin/env node\nif (process.argv[2] === "--version") process.stdout.write("0.2.0-rc.2\\n")\n')
+  await writeFile(join(hostRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.1-rc.2',
+    type: 'module', bin: { dsh: 'lib/bin.js' }, dependencies: { '@deepseek-ai/dsh-app-boot': '0.2.1-rc.2',
+      '@deepseek-ai/cordis': '4.0.5' }, exports: { './package.json': './package.json' } }))
+  await writeFile(executable, '#!/usr/bin/env node\nif (process.argv[2] === "--version") process.stdout.write("0.2.1-rc.2\\n")\n')
   await chmod(executable, 0o755)
   await symlink(await realpath(boot), join(hostModules, 'dsh-app-boot'))
   await symlink(await realpath(cordis), join(hostModules, 'cordis'))

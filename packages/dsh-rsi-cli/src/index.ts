@@ -1,5 +1,6 @@
 import { homedir } from 'node:os'
-import { lstat, readdir, realpath } from 'node:fs/promises'
+import { lstat, open, readdir, realpath } from 'node:fs/promises'
+import { constants } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline/promises'
@@ -9,6 +10,7 @@ import { resolveDshHome } from './paths.ts'
 import { hasPendingHostRecovery, runInstall } from './install.ts'
 import { findRunningProfiles } from './run.ts'
 import { formatSelfUpdateReport, runSelfUpdate } from './update.ts'
+import { assertFrozenCliUpdateVersion, assertFrozenUpdateArgs, detectFrozenOwner, runFrozenOwnerUpdate } from './program-update.ts'
 import { formatWebUrlResult, resolveManagedWebUrl } from './weburl.ts'
 import {
   collectLogs,
@@ -82,9 +84,11 @@ update：
                       Host 事务覆盖同一 DSH_HOME 下全部已登记受管 unit，即使 --profile 只升级一个 cohort
   --version <v|tag>   指定 dsh-rsi 目标版本或 dist-tag（默认 latest）
   --local <dir>       --all 时走 local 形态，用该 checkout 的安装器升级
-  其它参数            --all 时原样透传给安装器；Linux 通常无需再写 --scenario 或内部确认参数
+  其它参数            普通 npm Home 的 --all 透传给安装器；冻结本地 owner 只接受上述有限更新选项
   安全                已注册的 Linux 受管服务由升级事务自行停服/恢复；额外手工或测试 Host 会阻止升级。
-                      macOS 须先停止整个 Home 并显式传 --confirm-dsh-home-stopped；冻结的原生 owner/source Home 暂无迁移路径。
+                      Linux 冻结本地 owner 沿已绑定官方 GitHub 源码的 dev/main 分支快进，再执行专用原地升级；
+                      源码分支提交可能尚未发布到 npm。macOS 须先停止整个 Home 并显式传
+                      --confirm-dsh-home-stopped；冻结的原生 owner/source Home 暂无迁移路径。
 
 start / stop / restart：
   不带 --profile 时作用于 DSH home 下的全部 profile；配合 --dry-run 可先看将执行的命令。
@@ -140,6 +144,7 @@ interface ParsedArgs {
   all: boolean
   /** update：dsh-rsi 自身的目标版本或 dist-tag。 */
   targetVersion?: string
+  dshVersion?: string
   /** install/reinstall：原样透传给安装器的参数。 */
   passthrough: string[]
 }
@@ -149,7 +154,7 @@ const KNOWN_COMMANDS = new Set([
   'install', 'reinstall', 'purge', 'version',
 ])
 const GLOBAL_FLAGS = new Set(['--dry-run', '--yes', '--help', '-h'])
-const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--version'])
+const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--version', '--dsh-version'])
 const LOGS_FLAGS = new Set(['--errors-only'])
 const UPDATE_FLAGS = new Set(['--all'])
 /** logs --lines 上限，避免一次把超大日志全量打到终端。 */
@@ -164,6 +169,7 @@ function assignValueOption(result: ParsedArgs, token: string, value: string): vo
   if (token === '--dsh-home') { result.dshHome = value; return }
   if (token === '--profile') { result.profile = value; return }
   if (token === '--version') { result.targetVersion = value; return }
+  if (token === '--dsh-version') { result.dshVersion = value; return }
   // --lines
   if (!/^[0-9]+$/u.test(value)) throw new PurgeError(`--lines 需要一个正整数，收到：${value}`)
   const parsed = Number(value)
@@ -283,8 +289,22 @@ function consumeInstallToken(result: ParsedArgs, argv: readonly string[], index:
       result.targetVersion = value
       return index + 1
     }
+    if (token === '--dsh-version') {
+      const value = argv[index + 1]
+      if (value === undefined || value.startsWith('--')) throw new PurgeError(`${token} 需要一个值`)
+      result.dshVersion = value
+      result.passthrough.push(token, value)
+      return index + 1
+    }
     if (token === '--help' || token === '-h') { result.help = true; return index }
     if (token === '--dry-run') { result.dryRun = true; result.passthrough.push(token); return index }
+    if (token === '--yes') { result.yes = true; result.passthrough.push(token); return index }
+    if (token === '--profile') {
+      const value = argv[index + 1]
+      if (value === undefined || value.startsWith('--')) throw new PurgeError(`${token} 需要一个值`)
+      result.profile = value
+      return index + 1
+    }
   }
 
   if (INSTALL_VALUE_OPTIONS.has(token)) {
@@ -396,6 +416,9 @@ function formatPurgeReport(args: ParsedArgs, report: PurgeReport): string {
 /** 组装 install 参数；命令位置之前的全局 --yes/--dry-run/--profile 在 install 下也补透传给安装器。 */
 function buildInstallOptions(args: ParsedArgs): Parameters<typeof runInstall>[0] {
   const passthrough = [...args.passthrough]
+  if (args.command === 'update' && args.dshVersion !== undefined && !passthrough.includes('--dsh-version')) {
+    passthrough.push('--dsh-version', args.dshVersion)
+  }
   if (args.yes && !passthrough.includes('--yes')) passthrough.push('--yes')
   if (args.dryRun && !passthrough.includes('--dry-run')) passthrough.push('--dry-run')
   // --profile 既用于 reinstall 的 purge 范围，也原样透传给安装器（安装器本身接受 --profile）。
@@ -418,6 +441,46 @@ export interface MainDeps {
   selfUpdate?: typeof runSelfUpdate
   findRunning?: typeof findRunningProfiles
   managedServicePids?: typeof managedServiceProcessIds
+}
+
+async function assertFreshCliBin(prefix: string, version: string): Promise<string> {
+  const packageRoot = join(prefix, 'lib', 'node_modules', '@dsh-enhanced', 'dsh-rsi-cli')
+  const binDirectory = join(packageRoot, 'bin')
+  const bin = join(binDirectory, 'dsh-rsi.js')
+  for (const path of [packageRoot, binDirectory]) {
+    const entry = await lstat(path)
+    if (!entry.isDirectory() || entry.isSymbolicLink() || entry.uid !== process.getuid?.()
+      || (entry.mode & 0o022)) throw new PurgeError('新 CLI 包目录归属或权限不安全。')
+  }
+  const descriptor = await open(join(packageRoot, 'package.json'), constants.O_RDONLY | constants.O_NOFOLLOW)
+  let manifest: unknown
+  try {
+    const before = await descriptor.stat()
+    if (!before.isFile() || before.nlink !== 1 || before.uid !== process.getuid?.()
+      || (before.mode & 0o022) || before.size < 1 || before.size > 65_536) {
+      throw new PurgeError('新 CLI 包 manifest 不安全。')
+    }
+    const bytes = await descriptor.readFile()
+    const after = await descriptor.stat()
+    const named = await lstat(join(packageRoot, 'package.json'))
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+      || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
+      || named.dev !== before.dev || named.ino !== before.ino || named.isSymbolicLink()) {
+      throw new PurgeError('新 CLI 包 manifest 读取期间变化。')
+    }
+    manifest = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+  } finally { await descriptor.close() }
+  if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)
+    || (manifest as { name?: unknown }).name !== '@dsh-enhanced/dsh-rsi-cli'
+    || (manifest as { version?: unknown }).version !== version) {
+    throw new PurgeError('新 CLI 包 manifest 版本与 npm 安装结果不一致。')
+  }
+  const metadata = await lstat(bin)
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1
+    || metadata.uid !== process.getuid?.() || (metadata.mode & 0o022)) {
+    throw new PurgeError('新 CLI bin 归属或权限不安全。')
+  }
+  return bin
 }
 
 async function assertMacUpgradeHome(dshHome: string): Promise<void> {
@@ -518,7 +581,9 @@ async function assertMacHostProcessesStopped(dshHome: string, profiles: readonly
 export async function main(
   argv: readonly string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
-  deps: MainDeps & { platform?: NodeJS.Platform; macHostProcessesStopped?: typeof assertMacHostProcessesStopped } = {},
+  deps: MainDeps & { platform?: NodeJS.Platform; macHostProcessesStopped?: typeof assertMacHostProcessesStopped;
+    detectFrozenOwner?: typeof detectFrozenOwner; frozenUpdate?: typeof runFrozenOwnerUpdate;
+    freshExec?: (bin: string, argv: readonly string[], env: NodeJS.ProcessEnv) => number } = {},
 ): Promise<number> {
   // Rescue scripts probe this before delegating destructive work to an installed CLI.
   // Keep the response read-only and independent of Home, launchd and installed Host state.
@@ -607,6 +672,22 @@ export async function main(
       }
       case 'update': {
         const platform = deps.platform ?? process.platform
+        const frozen = args.all && platform === 'linux'
+          ? await (deps.detectFrozenOwner ?? detectFrozenOwner)(args.dshHome) : undefined
+        if (frozen !== undefined) {
+          const frozenExtra: string[] = []
+          for (let i = 0; i < args.passthrough.length; i++) {
+            const token = args.passthrough[i]!
+            if (token === '--yes' || token === '--dry-run') continue
+            if (token === '--dsh-version' && args.passthrough[i + 1] === args.dshVersion) { i++; continue }
+            frozenExtra.push(token)
+          }
+          assertFrozenUpdateArgs({ ...(args.profile === undefined ? {} : { profile: args.profile }),
+            ...(args.local === undefined ? {} : { local: args.local }),
+            passthrough: frozenExtra,
+            yes: args.yes, ...(args.dshVersion === undefined ? {} : { dshVersion: args.dshVersion }),
+            ...(args.targetVersion === undefined ? {} : { cliVersion: args.targetVersion }) }, frozen)
+        }
         if (args.all && platform === 'darwin') {
           if (!args.passthrough.includes('--confirm-dsh-home-stopped')) {
             throw new PurgeError('macOS update --all 需要操作者先停止整个 Home，再显式传入 --confirm-dsh-home-stopped；未升级 CLI 或插件。')
@@ -633,6 +714,28 @@ export async function main(
         })
         process.stdout.write(`${formatSelfUpdateReport(report, args.dryRun)}\n`)
         if (!args.all) return 0
+        if (frozen !== undefined && !args.dryRun) {
+          assertFrozenCliUpdateVersion(report.installedVersion, VERSION, report.alreadyCurrent)
+        }
+        if (env.DSH_RSI_UPDATE_FRESH_EXEC === '1' && report.installedVersion !== VERSION) {
+          throw new PurgeError('新 CLI 进程版本与自升级结果不一致；未继续升级 Home。')
+        }
+        if (!args.dryRun && env.DSH_RSI_UPDATE_FRESH_EXEC !== '1'
+          && !report.alreadyCurrent && (report.migratedFrom || report.installedVersion !== report.fromVersion)) {
+          if (report.globalPrefix === undefined || report.installedVersion === undefined) {
+            throw new PurgeError('CLI 已升级但无法定位精确新版本 bin；请从新 dsh-rsi 命令重试 update --all。')
+          }
+          const bin = await assertFreshCliBin(report.globalPrefix, report.installedVersion)
+          const execute = deps.freshExec ?? ((path: string, arguments_: readonly string[], environment: NodeJS.ProcessEnv) => {
+            const result = spawnSync(process.execPath, [path, ...arguments_], { stdio: 'inherit', env: environment })
+            return result.status ?? 1
+          })
+          return execute(bin, argv, { ...env, DSH_RSI_UPDATE_FRESH_EXEC: '1' })
+        }
+        if (frozen !== undefined) {
+          return (deps.frozenUpdate ?? runFrozenOwnerUpdate)(frozen,
+            { dryRun: args.dryRun, ...(args.dshVersion === undefined ? {} : { dshVersion: args.dshVersion }) })
+        }
         const passthrough = [...args.passthrough]
         if (!passthrough.includes('--operation')) passthrough.push('--operation', 'upgrade')
         if (platform !== 'darwin' && !passthrough.includes('--confirm-dsh-home-stopped')) {

@@ -34,7 +34,7 @@ pnpm approve-builds koffi
 
 ## 安装入口
 
-`0.1.49` 起默认解析官方 npm `latest`（当前验证为 `0.2.0-rc.2`，上游尚无正式稳定版），并校验精确兼容基线。未知新版不会未经验证直接装入现有环境。旧 `0.1` Home 到 `0.2` 不走普通自动升级；满足下述严格前提时使用显式联合迁移，否则在独立新 Home 中验证新版，不要先替换旧 profile 的插件。远端引导器的固定 tag 和资产摘要由本次 release prepare 更新。
+安装器默认解析官方 npm `latest`，并校验当前源码允许的精确兼容基线；未知新版不会未经验证直接装入现有环境。新源码的目标 Host 为 `0.2.1-rc.2`，此前公开 `0.1.55` 安装仍使用 `0.2.0-rc.2`，不要把源码支持误认为已公开发布或完成实机验收。旧 `0.1` Home 到 `0.2` 不走普通自动升级；满足下述严格前提时使用显式联合迁移，否则在独立新 Home 中验证新版。远端引导器的固定 tag 和资产摘要由 release prepare 更新。
 
 macOS 的本地和 npm 安装入口会在安装末尾检查受管 LaunchAgent；若 `ai.deepseek.dsh.profile.<profile>` 未注册，会自动调用当前 profile 的服务注册入口并再次确认，再执行健康检查，无需手动运行 `launchctl bootstrap`。修复复用服务注册入口，不启动新的飞书 onboarding；已有中断的 setup 事务仍由原入口恢复。`--no-service`、`--lark skip` 以及不管理常驻服务的场景保持跳过；独立 `doctor.sh` 仍只检查。注册失败会保留具体错误并停止安装。
 
@@ -43,7 +43,7 @@ macOS 的本地和 npm 安装入口会在安装末尾检查受管 LaunchAgent；
 macOS purge 从枚举 profile 到停服、备份和删除结束持续持有 Home 生命周期锁，并在停服前获取全部目标服务锁，阻止同 Home 的安装或同目标的启动与清理并发。`/tmp` 中的 Home 和服务锁文件保留稳定 inode；进程退出即释放内核锁，保留文件不表示仍被占用。同 profile 的手动 Host 若无法证明所属 Home，清理会中止，`--yes` 不会自动终止它。
 
 
-安装器先确保 Node.js、pnpm 和兼容的 DSH。新安装先解析官方 `@deepseek-ai/dsh` 的 `latest`，确认是已验证的 `0.2.0-rc.2` 后安装精确版本，不追踪 `next` 或 beta；未知版本或解析失败会在安装 Host 前拒绝。`--dry-run` 离线展示计划，显式 `--dsh-version` 可指定范围内精确版本。`dsh-rsi install` 对全新空 Home 将 Host 安装到独立目录，并在 Home 内持久绑定精确版本；重试、插件升级及生成的服务复用该入口，不修改全局 DSH。已有未绑定 Home 保留原 Host。`0.1.49` 起，`dsh-rsi update --all` 可为已有私有绑定的 Linux Home 规划受管 Host 更新；版本相同跳过，旧 `0.1 → 0.2` 仍拒绝普通自动更新。真实跨版本验收状态见 [RSI 状态](../../docs/rsi-status.md)，缓存与重装说明见 [CLI 指南](../../packages/dsh-rsi-cli/README.md#升级与重装)。
+安装器先确保 Node.js、pnpm 和兼容的 DSH。新安装解析官方 `@deepseek-ai/dsh` 的 `latest` 并固定精确版本；与当前源码基线不符或解析失败时会拒绝，不追踪 `next` 或 beta。`--dry-run` 离线展示计划，显式 `--dsh-version` 可指定允许的精确版本。`dsh-rsi install` 对全新空 Home 将 Host 安装到独立目录，并在 Home 内持久绑定精确版本；重试、插件升级及生成的服务复用该入口，不修改全局 DSH。已有未绑定 Home 保留原 Host。普通 Linux npm cohort 的受管 Host 更新与下述冻结 owner 程序升级有不同适用条件；真实跨版本验收状态见 [RSI 状态](../../docs/rsi-status.md)，缓存与重装说明见 [CLI 指南](../../packages/dsh-rsi-cli/README.md#升级与重装)。
 
 三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`。`0.1.49` 起，`dsh-rsi install/reinstall` 未指定 `--scenario` 或 `--mode` 时默认进入 `supervised`；当前 checkout 的 shell 安装脚本在 Linux/macOS 默认准备持久记忆学习、普通任务成长、新工具独立验收和有限采用，Linux 另配置独立采用协调器，不因 `--yes` 或非交互而降为 `core`。全新 Home 的 supervised 安装需要交互式飞书 onboarding；尚未配对时，`--yes` 或管道执行会在安装前停止。显式 `--scenario core` 保留无渠道、无后台学习的轻量安装；`--lark skip` 或 `--no-service` 保留有限场景。macOS 使用原生 launchd Host，支持记忆学习、新工具独立验证与动态采用；源码替换发布轨仍限 Linux。也可显式选择 `core` 等轻量场景。
 
@@ -83,8 +83,21 @@ npm upgrade 则在同一生命周期锁内把发布 selector 解析为精确 coh
 
 uninstall 不访问 npm registry 或 pnpm store。`web` / `autonomy` 仍使用操作者预先停止整个 home 的离线事务；Linux `lark` 和 `supervised` upgrade/uninstall 会在锁内枚举同一 canonical `DSH_HOME` 的 installer-managed systemd user units，以绑定 inode 的高优先级 `user.control` mask 屏蔽后全部停止，在每次 rename 前后复核进程静止，并只恢复原 active units；启动由独立 crash guardian 执行，fresh InvocationID 的 journal ready marker 与稳定窗口通过后才删除旧备份。明确属于其它绝对 HOME 的 custom/legacy unit 不会被修改，但它的 ownership 摘要会写入事务并持续复核；归属缺失、相对、冲突、漂移为当前 HOME 或嵌套于当前 HOME 都会 fail closed。此前卸载留下的同 HOME clean profile 只有在四文件和目录闭集精确匹配 installer baseline 时才允许共存，其摘要同样绑定到事务并在恢复、启动、验收与清理前复核。此能力要求 `DSH_HOME` 与用户 systemd 配置位于同一文件系统，以便用 Linux `renameat2(RENAME_NOREPLACE)` 原子移动受管 mask 和 enablement link。此 Linux service-aware 能力不适用于外部 supervisor 或 Windows；macOS 仅支持调用方已停止整个 Home 的 upgrade，不支持 service-aware uninstall。`supervised` upgrade/uninstall 还要求 source 已安装支持只读 operator/attestation seam 的 cohort；安装器绝不回退到会迁移数据库的 Store 读取。停服后会绑定 Recovery、Automations 与 Delivery owner 快照；copied state 只按内容和语义摘要比较，允许 inode 改变。升级后的私有副本用 fresh UUID 和新包 catalog 生成 preview；preview Host 在无网络 bwrap 中运行，并只在该进程的临时 overlay 里禁用 Lark、从 Health required providers 移除 `larkChannel`。这个唯一 external-provider exemption 会绑定进事务且不会进入 active 配置。swap 后真实 upgraded service 必须同时通过 fresh InvocationID/journal、真实 Lark required-health、generation 严格前进的 exact active attestation 与稳定窗口。`supervised` uninstall 则在停服后绑定只读 source proof，将旧 profile 归档并换成 installer-clean Web profile；clean target 只按通用 fresh InvocationID/journal readiness 与稳定窗口验收，不要求已被停用的 Lark/Health/supervised active attestation。失败会保持服务收容并保留 current/original homes 和 manifest，不自动回滚。
 
-Linux `supervised` 的已登记 RSI 双 Host 可以在同一个 Home 事务中成对升级插件：目标及协调器必须处于活动状态，安装收据和现有版本一致，共享 catalog/trust、owner 与 handoff 通过核对。协调器只包含原生基础配置及 Policy、Automations、Control Plane 三个增强包，三包随目标同批更新。npm 路径先分别准备并完整预取两个 profile 的锁文件；切换前更新副本收据并实际激活两个 profile。协调器预览只在进程 overlay 中关闭 scheduler，真实启动须生成本次启动后的 owner-bound Automation 登记。原始/候选的有效配置、收据和包版本在恢复、接受及清理前重新核对。停服前还要求旧协调器本次 InvocationID 已有就绪信号；缺少信号时原服务继续运行。切换前失败可恢复原活动服务；切换后失败保持双服务停止、保留新旧 Home 与事务供对账，不自动覆盖可能已迁移的状态。固定本地源码或存在 `rsi-local-cohorts` 的安装目前在 registry 查询、停服和包修改前拒绝普通升级，包括尚未生成协调器收据的冻结安装。开发版 `dsh-rsi-setup --prepare-local-update` 可在 Home 外准备保留既有修复的合并源码与隔离构建制品；尚无 RSI owner/coordinator 的安装可使用下述 checkout 内显式维护入口。已授权双 Host 的通用源码升级仍未开放；已 applied、未首次采用的失败首启另有下述有界 `host-owner-repair` 入口。详见 [RSI 配置](../../plugins/lark-channel/docs/rsi-setup.md)；成对卸载仍未支持。跨版本 Host 更新作为插件升级之后的独立阶段，见下文。
+Linux `supervised` 的已登记 RSI 双 Host 可以在同一个 Home 事务中成对升级插件：目标及协调器必须处于活动状态，安装收据和现有版本一致，共享 catalog/trust、owner 与 handoff 通过核对。协调器只包含原生基础配置及 Policy、Automations、Control Plane 三个增强包，三包随目标同批更新。npm 路径先分别准备并完整预取两个 profile 的锁文件；切换前更新副本收据并实际激活两个 profile。协调器预览只在进程 overlay 中关闭 scheduler，真实启动须生成本次启动后的 owner-bound Automation 登记。原始/候选的有效配置、收据和包版本在恢复、接受及清理前重新核对。停服前还要求旧协调器本次 InvocationID 已有就绪信号；缺少信号时原服务继续运行。切换前失败可恢复原活动服务；切换后失败保持双服务停止、保留新旧 Home 与事务供对账，不自动覆盖可能已迁移的状态。固定本地源码或存在 `rsi-local-cohorts` 的安装在 registry 查询、停服和包修改前拒绝普通 npm 升级，包括尚未生成协调器收据的冻结安装。开发版 `dsh-rsi-setup --prepare-local-update` 可在 Home 外准备保留既有修复的合并源码与隔离构建制品；尚无 RSI owner/coordinator 的安装可使用下述 checkout 内显式维护入口。已授权双 Host 的通用源码升级仍未开放；下文仅开放符合严格条件的程序升级，已 applied、未首次采用的失败首启另有有界 `host-owner-repair` 入口。详见 [RSI 配置](../../plugins/lark-channel/docs/rsi-setup.md)；成对卸载仍未支持。跨版本 Host 更新作为插件升级之后的独立阶段，见下文。
 
+
+## 现有 Linux 冻结 owner 程序升级
+
+包含此入口的新版 CLI **发布或从相应源码安装后**，对支持的现有 Linux owner/cohort Home，可运行：
+
+```sh
+dsh-rsi update --all --dry-run --yes
+dsh-rsi update --all --yes
+```
+
+CLI 先升级自身，再识别 Home 中唯一的冻结 target/coordinator 与原 `sourceRepository`；只接受绑定仓库的官方 GitHub origin、干净的 `dev` / `main` 分支，并执行 `git fetch`、仅快进合并、锁文件安装和构建。候选目前要求私有 Host 从受支持的 `0.2.0-rc.2` / `0.2.1-rc.2` 到已核验的 `0.2.1-rc.2`，同时更新冻结插件。要求原 target 与 coordinator 受管服务均活动、没有已采用的源码或未结 activation；额外参数会被拒绝。事务自动停启这对服务，保留原 owner 绑定、模型、权限、凭据、有限授权期限与已用额度、Session、Goal 和历史，不重做 onboarding，也不自动续期或扩权。已过期授权会在升级预检中被拒绝，需先按原授权流程处理。
+
+若有待恢复的程序升级事务，CLI 先用**原安装器**恢复，本次不拉取新源码；恢复后再次执行同一升级命令。`--dry-run` 仅显示计划。拒绝或失败时保留报错及事务现场；不要删除账本或改用 `reinstall` 冒充保留数据的升级。此处描述的是新源码路径，**不代表当前公开 CLI 已包含该能力，也不代表真实生产升级已验收**。macOS 冻结 owner/source Home 仍不支持普通原地升级。
 
 ### 旧 Home 的联合 Host / 源码迁移
 
@@ -236,7 +249,7 @@ dsh_enhanced_run_profile_setup 0 /absolute/dsh-home assistant dsh-rsi-setup \
 
 Host 依赖准备阶段联网验证 pnpm 供应链策略并完整预取；离线副本安装前重新核对准备元数据摘要，随后仅信任这份已验证锁文件，允许写入独立临时 store，仍禁止网络、安装脚本与 pnpmfile hooks。RSI 迁移在停服前及停服后的原账本和副本上检查未结任务、发布、激活与观察回执；这些工作须先在原 Host 完成对账，避免替换授权配置后无法继续处理原请求。
 
-CLI 重试先处理未完成的 Host 事务。现有未绑定 Home 不自动接管全局 Host；冻结本地源码/cohort 更新仍会拒绝。当前仅实现 Linux 受管事务，兼容窗口以 [兼容性说明](../../docs/compatibility.md) 为准；受控夹具中的合成版本不代表官方发布或真实跨版本验收。
+CLI 重试先处理未完成的 Host 事务。现有未绑定 Home 不自动接管全局 Host；普通 registry 更新仍拒绝冻结本地源码/cohort，支持的现有 Linux owner 改走上文的程序升级路径。当前仅实现 Linux 受管事务，兼容窗口以 [兼容性说明](../../docs/compatibility.md) 为准；受控夹具中的合成版本不代表官方发布或真实跨版本验收。
 
 事务也不会修改权限、模型或 Agent 工具配置，并会拒绝不安全 owner/权限、home 内的外部状态链接、外部硬链接、挂载点、特殊文件及无法证明归属的旧事务残留；失败证据保留在同级 transaction 目录供人工排查。`--confirm-dsh-home-stopped` 对 service-aware lifecycle 表示除安装器将自行停止的 systemd units 外，其它使用整个 `DSH_HOME` 的外部/手工进程均已停止；它不是允许安装器 kill 未知进程的授权。
 

@@ -1,5 +1,11 @@
 # 兼容性基线
 
+## Linux 既有 owner 的程序升级
+
+`dsh-rsi update --all --yes` 为冻结源码的 Linux 安装提供专用程序升级事务：沿安装收据绑定的官方 `dev` / `main` 分支快进源码，在 Home 外准备依赖，再成对停服、复制 Home、更新程序和私有 Host，最后检查本次启动的目标与协调器。它沿用原 owner、模型、凭据、授权期限、累计额度和业务历史；不重新 onboarding，不自动续期。当前入口仅接受未发生源码采用的安装及 `0.2.0-rc.2` / `0.2.1-rc.2` 原 Host，候选固定为 `0.2.1-rc.2`。它不扩展 Mac 冻结 Home 或 `0.1 → 0.2` 迁移范围。
+
+升级追加独立签名的 `rsi-owner-program-update-overlay` 和源码维护记录，保留原 bootstrap 与此前 repair 链。后续 reader 必须支持两种 owner overlay，并核对最近记录的 creation / journal 摘要。候选启动前失败可恢复原 Home；候选已启动后只继续核验当前 Home，不能用旧副本覆盖可能新增的业务记录。未完成事务优先恢复，不先拉取或重建其已固定的安装器。操作说明见 [CLI 指南](../packages/dsh-rsi-cli/README.md#升级与重装)，实际验收状态见 [当前状态](rsi-status.md)。
+
 ## 首次 owner 启动修复
 
 开发 checkout 的 `host-owner-repair` 只修复同一 DSH `0.2.0-rc.2` 上已 applied、尚未首次采用且签发器未使用的冻结双 Host。旧 bootstrap、身份、授权期限和累计预算不重置；追加真实源码维护记录及独立签名 `rsi-owner-repair-overlay`，绑定新配置、creation receipt 和 setup journal，并保留原件审计。目标、协调器与授权程序必须成套更新；旧 overlay reader 不支持此修复收据，后续 Host overlay 仍须验证最近 repair 的收据。此能力不修改数据库 schema 或 DSH/Cordis ABI，不等于通用 owner 升级。入口、有限恢复与实际验收边界见[安装指南](../scripts/install/README.md#已-applied未首次采用的-owner-修复)和[当前状态](rsi-status.md)。
@@ -103,11 +109,15 @@ Delivery 的新审批桥要求提供 `registerHumanApprovalAnswerer` 的同批 P
 
 Linux service-aware upgrade 已接入登记过的 RSI 目标与协调器：核对私有安装收据、同批已安装版本、共享 catalog/trust、owner scope、handoff 与专用状态路径，再把目标包和协调器的 Policy、Automations、Control Plane 三包更新到同一精确版本。协调器仅在隔离预览进程关闭 scheduler；持久配置仍启用调度。真实服务接受还要求本次启动后登记的、匹配 owner 与 executor 的原生 Automation。事务绑定原始/候选收据、配置及包摘要，恢复与清理前重新核对。普通 registry 更新仍不支持固定本地源码或 `rsi-local-cohorts` 制品，会在 registry 查询和停服前拒绝；不能将显式维护入口外推为所有本地安装可自动更新。跨版本 DSH Host 的独立迁移事务已通过工程验收；本机受审生产 Home 通过显式联合 Host / 源码迁移及签名后继修复，完成 `0.1.5-rc.3 → 0.2.0-rc.2` 的双 Host 新鲜就绪验收。这仅证明该特定 Home 与输入，其他部署组合仍待验证。普通插件升级与 Host 更新仍是先后两个阶段，Host 失败不会撤销已提交的插件升级。
 
-`0.1.49` 起兼容基线为官方 npm `latest` 的 **DSH `0.2.0-rc.2`**（2026-10-14 核对 registry），上游尚未发布无预发布后缀的稳定版。安装默认解析 `latest` 并冻结精确版本，只接受已验证的版本；未知新版本拒绝安装，不静默退回旧版或选择 Alpha/Beta。现有私有 Host 收据仍保留读取和回滚能力；新版插件不得装入旧 Host。发布历史和远端引导器的固定制品由 release prepare 单独更新，迁移验收状态见 [RSI 状态](rsi-status.md)。
+当前源码兼容基线为 **DSH `0.2.1-rc.2`**（2026-10-19 核对官方 registry），公开增强包 `0.1.55` 仍配套 `0.2.0-rc.2`。安装默认解析 `latest` 并冻结精确版本，只接受已适配的版本；未知新版本拒绝安装，不静默退回旧版或选择 Alpha/Beta。现有私有 Host 收据仍保留读取和回滚能力；新版插件不得装入旧 Host。发布历史和远端引导器的固定制品由 release prepare 单独更新，迁移验收状态见 [RSI 状态](rsi-status.md)。
 
 Agent setup 的第二参数是尚未发布的确切 Agent；不再读取 `ctx.agent`。Inbox 使用公开 `nextTurn` / `nextStep`，程序内嵌套工具事件为 `tool/ptc-dispatch-start` / `tool/ptc-dispatch`。此前 `0.1` 的 Session format 为 3，当前 `0.2` 为 4；持久化使用 `create/open` 返回的会话句柄，恢复和清理须保持独占写入及未知结果不重派。系统提示进入原生消息历史，`EpochHeader` 不再携带 `system`；请求来源验证按新原生结构精确比较。
 
-`0.2.0-rc.2` 使用 Session format 4、生产者专属 MessageSource、顶层工具结果消息、动态 Auto 与 agent-preset-registry。新版 composition 移除静态 Auto，由 Policy 在审批器就绪时登记并随生命周期注销。仓库锁定的 Cordis/Loader/Include 基线为 `4.0.4` / `1.0.5` / `1.0.9`；公开 Host 的依赖范围允许补丁更新，2026-10-19 的 Mac `0.1.55` 全新安装实际解析为 `4.0.5` / `1.0.6` / `1.0.10`，配置激活和真实 TraeX 模型目录查询均通过。验收须核对安装树、Host 运行时解析和插件声明的 peer 范围，不能将仓库锁定版本冒充公开安装的唯一允许版本。旧 fallback API 已移除，独立 setup CLI 必须通过所选 Host 的原生进程内解析启动，不能复用残留旧 Host peers。
+`0.2.1-rc.2` 继续使用 Session format 4、生产者专属 MessageSource、顶层工具结果消息、动态 Auto 与 agent-preset-registry。仓库锁定的 Cordis/Loader/Include 基线为 `4.0.5` / `1.0.6` / `1.0.10`。验收须核对安装树、Host 运行时解析和插件声明的 peer 范围；独立 setup CLI 通过所选 Host 的原生 `createRuntimeResolution` 启动，不调用已移除的 fallback API。
+
+新版子任务改用 `SubagentRuntime.startActivation()`。Goals 保持原生 external provider 的 one-shot 合同：兼容驱动复用原生 AgentRegistry / AgentLoop 执行单轮，持久化不可恢复的 descriptor，继续校验父会话、有限 permit、预算与工具限制；停用 Goals 后原生 `sendMessage` 仍拒绝冷恢复。外部 activation ID 与真实子会话 ID 由 descriptor label 关联。旧 `subagent-in-process-driver` 与未使用的 `dsh-invariants` 已移出依赖。JSONL persistence 改为命名插件导出；Policy 仍要求精确后端与实际持久化基类，使用原生 reader oracle 验证事件，不降低伪造后端检查。
+
+原生请求前刷新 runtime context 后，任务提示同时保留当前待验证状态和上一轮独立失败反馈，避免新回合遮住修订依据；历史反馈不改变当前评估或目标完成门槛。 Memory 在每次模型请求前从旧快照中移除自身的工具证据段，再按当前 owner 与工具权限生成新段；其他提供者的正文和来源元数据保留。原会话与磁盘恢复均须覆盖撤权、owner 变化及无关上下文保留。
 
 `0.1 → 0.2` 的既有 Home 普通自动升级仍拒绝先升级插件再切 Host。开发 checkout 提供显式 pre-owner 联合迁移：可验证的私有旧 Host、空 owner 权限、收据绑定的惰性协调器及单个活动目标服务，才可在同一 Home 事务中物化全部 profile 并切换 Host / 源码。已绑定 `0.2.0-rc.2` 的同类 Home 也可保持 Host 与 unit 原字节，只更新认证源码及配套包；不得冒充 Host 版本升级。候选运行后的恢复继续核验候选，不覆盖可能已变更的业务状态。操作与限制见[安装说明](../scripts/install/README.md#旧-home-的联合-host--源码迁移)，真实验收状态见 [RSI 状态](rsi-status.md)。
 
@@ -127,7 +137,7 @@ Goals 的自动技能提取桥使用可选 Host peer `dsh-session-query@0.1.2-rc
 
 仓库当前对齐以下上游发布状态：
 
-- DeepSeek Harness 运行时与 npm 测试依赖：`0.2.0-rc.2`。Session 保持通过公开 `snapshotEvents()` 读取；模型请求允许无持久身份的 RequestUserInput，不能把该输入伪装为认证用户事件。
+- DeepSeek Harness 运行时与 npm 测试依赖：`0.2.1-rc.2`。Session 保持通过公开 `snapshotEvents()` 读取；模型请求允许无持久身份的 RequestUserInput，不能把该输入伪装为认证用户事件。
 - `@deepseek-ai/dsh-user-questions@0.1.2-rc.1` 定义 `ctx.userQuestions.ask()` 与 `user-questions/request` answerer waterfall。带 `agent` 的请求只会派发到 exact live runtime root 的 Agent scope；随产品交付的 Web Host 通过 Remote Events 在该 scope 贡献 answerer。没有 answerer 接受请求时以 `NO_PROVIDER` 失败，不会无限等待。
 - `0.1.2-rc.1` 不再发布 `@deepseek-ai/dsh-host-apiproxy`，`dsh-user-questions` 也不发布独立的 question request/answer 审计流。渠道集成若要承接 `ask_user_question`，必须直接在同一 Agent scope 注册 `user-questions/request` answerer；旧版 Host question bridge 的并发结算语义不属于当前公开契约。
 - `@deepseek-ai/dsh-system-prompt@0.1.2-rc.1`：Personal Memory 使用可选 Host peer 的 `context()` 在每次模型步骤组装时贡献任务相关记忆；当前任务取自 `Session.deriveMessages()` 的有效 surface，忽略已被 compaction replacement 移除的消息。注册随 Cordis injection 释放。AgentLoop 将变化后的 context 追加为持久 user-role snapshot，并声明它覆盖旧快照的有效语义；该 API 不会从历史消息中擦除原始记忆。无该服务时仅保留启动快照兼容路径。升级时须重跑实际 AgentLoop 两步之间记忆撤回与 provenance 测试。

@@ -353,6 +353,22 @@ export class GoalOutcomeRuntime {
     return run?.acceptance ?? null
   }
   view(record: GoalRecord): GoalOutcomeView {
+    return this.#viewAssessment(record)
+  }
+  /** Prompt-only history while a newer assessment remains pending. It never replaces view(). */
+  viewLatestSettled(record: GoalRecord): GoalOutcomeView | undefined {
+    const current = this.view(record)
+    if (current.status !== 'pending' || current.assessmentId === undefined) return undefined
+    const history = this.inspectAssessments(record)
+    const currentIndex = history.findIndex(item => item.contract.task.ref === current.assessmentId)
+    if (currentIndex < 0) return undefined
+    for (const assessment of history.slice(currentIndex + 1)) {
+      const previous = this.#viewAssessment(record, assessment)
+      if (previous.status !== 'pending' && previous.status !== 'unverified') return previous
+    }
+    return undefined
+  }
+  #viewAssessment(record: GoalRecord, assessment?: GoalOutcomeAssessment): GoalOutcomeView {
     const base: GoalOutcomeView = { status: 'unverified', definitionVersion: record.definition.version }
     if (!this.#active) return { ...base, status: 'unavailable' }
     const definition = this.#store.getDefinition(record.scope, record.id, record.definition.version)
@@ -361,7 +377,7 @@ export class GoalOutcomeRuntime {
     base.conditions = { contractId: template.id, profileId: template.profile.id, profileVersion: template.profile.version,
       digest: acceptanceDigest(template.criteria), expiresAt: template.expiresAt, criteria: template.criteria }
     if (Date.now() >= template.expiresAt) return { ...base, status: 'expired' }
-    const latest = this.#store.list(record.scope, record.id, 100).find(item => item.definition.definition.version === record.definition.version)
+    const latest = assessment ?? this.#store.list(record.scope, record.id, 100).find(item => item.definition.definition.version === record.definition.version)
     if (latest === undefined) return base
     base.assessmentId = latest.contract.task.ref
     if (latest.execution === undefined) return { ...base, status: 'pending' }

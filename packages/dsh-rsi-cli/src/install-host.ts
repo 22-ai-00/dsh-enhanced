@@ -172,7 +172,7 @@ export async function prepareUnboundHostUpdatePlan(input: {
   await assertUnbound()
   const { cacheRoot, version, dshPath } = input.unboundOriginal
   if (!isAbsolute(cacheRoot) || resolve(cacheRoot) !== cacheRoot || !isAbsolute(dshPath)
-    || resolve(dshPath) !== dshPath || !isSupportedReceiptVersion(version) || version === '0.2.0-rc.2') {
+    || resolve(dshPath) !== dshPath || !isSupportedReceiptVersion(version) || version.startsWith('0.2.')) {
     throw new PurgeError('原 Host 必须是显式指定的受支持旧版私有制品。')
   }
   const originalRuntime = await dependencies.read({ root: cacheRoot, version,
@@ -187,7 +187,7 @@ export async function prepareUnboundHostUpdatePlan(input: {
   }
   input.signal?.throwIfAborted()
   const selector = input.selector ?? 'latest'
-  if (selector !== 'latest' && selector !== '0.2.0-rc.2') throw new PurgeError('请求的 Host 版本不兼容。')
+  if (selector !== 'latest' && selector !== '0.2.1-rc.2') throw new PurgeError('请求的 Host 版本不兼容。')
   const preparedRuntime = await dependencies.prepare({ root: cacheRoot, selector,
     ...(input.signal === undefined ? {} : { signal: input.signal }) })
   if (!isSupportedCandidateVersion(preparedRuntime.version) || selector !== 'latest' && preparedRuntime.version !== selector

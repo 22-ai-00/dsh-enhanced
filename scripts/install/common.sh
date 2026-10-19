@@ -3,11 +3,11 @@
 # Shared implementation for install-local.sh and install-npm.sh.
 # This file is sourced by the two public entrypoints; do not execute it directly.
 
-DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.2.0-rc.2'
+DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.2.1-rc.2'
 DSH_ENHANCED_DEFAULT_DSH_VERSION='latest'
 DSH_ENHANCED_DEFAULT_PNPM_VERSION='11.7.0'
 if [[ -z "${DSH_ENHANCED_VERIFIED_HOST_RANGE:-}" ]]; then
-  DSH_ENHANCED_VERIFIED_HOST_RANGE='0.2.0-rc.2'
+  DSH_ENHANCED_VERIFIED_HOST_RANGE='0.2.1-rc.2'
 fi
 DSH_ENHANCED_CORE_PLUGIN_SLUGS=(
   'personal-assistant'
@@ -1465,7 +1465,7 @@ dsh_enhanced_verify_model_route() {
   printf '模型 route：正在发送最小验证请求。\n'
   local response verification_directory='' status=0
   local route_args=(--profile headless)
-  if [[ "$(dsh --version 2>/dev/null || true)" == '0.2.0-rc.2' ]]; then
+  if [[ "$(dsh --version 2>/dev/null || true)" =~ ^0\.2\.(0|1)-rc\.2$ ]]; then
     if [[ -e "$dsh_home/settings.yaml" ]]; then
       dsh_enhanced_fail 1 '仍有待迁移的 settings.yaml；请先在目标 profile 完成原生导入，再验证模型，避免 headless 消费其他 profile 的配置。'
       return $?
@@ -1545,7 +1545,7 @@ dsh_enhanced_effective_default_provider() {
   local profile="${2:-}"
   local settings_path="$dsh_home/settings.yaml"
   local provider=''
-  if [[ -n "$profile" && "$(dsh --version 2>/dev/null || true)" == '0.2.0-rc.2' ]]; then
+  if [[ -n "$profile" && "$(dsh --version 2>/dev/null || true)" =~ ^0\.2\.(0|1)-rc\.2$ ]]; then
     settings_path=''
   fi
   if [[ -f "$settings_path" ]]; then
@@ -2628,7 +2628,7 @@ dsh_enhanced_run_profile_setup() {
     fi
     return 0
   fi
-  if [[ "$(NODE_PATH='' NODE_OPTIONS='' dsh --version 2>/dev/null || true)" != '0.2.0-rc.2' ]]; then
+  if [[ ! "$(NODE_PATH='' NODE_OPTIONS='' dsh --version 2>/dev/null || true)" =~ ^0\.2\.(0|1)-rc\.2$ ]]; then
     if [[ "$setup" == 'internal-lark-service' ]]; then
       dsh_enhanced_fail 1 'macOS 服务归属检查需要已验证的 DSH Host；尚未操作服务。'
       return $?
@@ -2688,7 +2688,7 @@ if (installAnchor === undefined) throw new Error('selected dsh executable has no
 installAnchor = await realpath(installAnchor)
 const hostManifest = JSON.parse(await readFile(installAnchor, 'utf8'))
 const hostRoot = dirname(installAnchor)
-if (hostManifest.name !== '@deepseek-ai/dsh' || hostManifest.version !== '0.2.0-rc.2'
+if (hostManifest.name !== '@deepseek-ai/dsh' || !['0.2.0-rc.2', '0.2.1-rc.2'].includes(hostManifest.version)
   || typeof hostManifest.bin?.dsh !== 'string' || await realpath(join(hostRoot, hostManifest.bin.dsh)) !== executable
   || !inside(hostRoot, executable) || inside(home, hostRoot)) throw new Error('selected dsh executable is not owned by verified Host')
 const hostRequire = createRequire(installAnchor)
@@ -2813,7 +2813,7 @@ if (installAnchor === undefined) {
 }
 const hostRequire = createRequire(installAnchor)
 const appBoot = await import(pathToFileURL(hostRequire.resolve('@deepseek-ai/dsh-app-boot')).href)
-if (expectedVersion === '0.2.0-rc.2') {
+if (['0.2.0-rc.2', '0.2.1-rc.2'].includes(expectedVersion)) {
   if (typeof appBoot.loadProfileDirectory !== 'function' || typeof appBoot.createRuntimeResolution !== 'function'
     || typeof appBoot.PluginPackages !== 'function') throw new Error('verified DSH lacks process-local resolution APIs')
 } else if (typeof appBoot.healProfilesModuleFallback !== 'function') {

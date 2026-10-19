@@ -888,6 +888,7 @@ async function scheduledGoalHarness(root: string, saved: Map<string, SavedSessio
   })
   const native = await nativeGoalPlugins()
   if (withSkills) {
+    fixture.ctx.provide('workingDirectory' as never, { get: () => root, ensure: async () => root, set: async (_agent: unknown, path: string) => path } as never)
     await fixture.ctx.plugin(SkillRegistry)
     fixture.ctx.skills.register({ name: 'repository-work', description: 'Inspect and repair a repository.', content: 'Use repository evidence.', source: 'runtime' })
     await fixture.ctx.plugin(ToolSkill, {})
@@ -3755,10 +3756,10 @@ describe('real native Delivery Agent runtime', () => {
       }
       await fixture.ctx.plugin(WorkspaceFileSystem, { cwd: root })
       const ownedWorkspace = {
-        id: 'web-owner-workspace', path: root, attachSession: vi.fn(async () => {}),
+        id: 'web-owner-workspace', path: root, sessionIds: [] as SessionId[], attachSession: vi.fn(async (sessionId: SessionId) => { ownedWorkspace.sessionIds.push(sessionId) }),
       }
       const foreignWorkspace = {
-        id: 'foreign-workspace', path: join(root, 'foreign'), attachSession: vi.fn(async () => {}),
+        id: 'foreign-workspace', path: join(root, 'foreign'), sessionIds: [] as SessionId[], attachSession: vi.fn(async () => {}),
       }
       const resolveByPath = vi.fn(async (_path: string) => undefined)
       const createWorkspace = vi.fn(async (path: string) => {
@@ -3776,11 +3777,17 @@ describe('real native Delivery Agent runtime', () => {
       await fixture.ctx.plugin(TypertRegistry)
       fixture.ctx.typert.register((await import('@deepseek-ai/dsh-api-session-controller/typert')).TYPERT as never)
       fixture.ctx.typert.register((await import('@deepseek-ai/dsh-goal/typert')).TYPERT as never)
+      fixture.ctx.provide('remoteAccess' as never, { decide: () => ({ kind: 'deny', reason: 'test-owner-only' }) } as never)
       await fixture.ctx.plugin(TypertGatewayService, {})
       await fixture.ctx.plugin(ApiRemotes)
       const gateway = fixture.ctx.typertGateway
+      const peer: Parameters<typeof gateway.invoke>[0]['peer'] = {
+        id: 'delivery-web-owner-test' as never, ctx: fixture.ctx, principal: { kind: 'owner' },
+        signal: eventAbort.signal, interactions: 'answer', dispose: async () => {},
+      }
+      const foreignPeer = { ...peer, id: 'delivery-foreign-test' as never, principal: { kind: 'test-foreign' } as never }
       for (const frames of forwarded) {
-        const stream = await gateway.wireStream.open('$events', { args: {} }, (async function* () {})(), undefined, eventAbort.signal)
+        const stream = await gateway.wireStream.open('$events', { args: {} }, (async function* () {})(), peer, eventAbort.signal)
         eventStreams.push((async () => {
           try { for await (const frame of stream) frames.push(frame as { event?: string; args?: unknown[] }) }
           catch (error) { if (!eventAbort.signal.aborted) throw error }
@@ -3798,18 +3805,18 @@ describe('real native Delivery Agent runtime', () => {
       const controller = fixture.ctx.get('sessionController')!
       expect(resolveByPath).toHaveBeenCalledWith(root)
       expect(createWorkspace).toHaveBeenCalledWith(root)
-      await expect(gateway.invoke({ namespace: 'session', method: 'create', args: { request: { workspaceId: 'unknown-workspace' } } })).rejects.toThrow('configured workspaceId')
-      await expect(gateway.invoke({ namespace: 'session', method: 'create', args: { request: { workspaceId: foreignWorkspace.id } } })).rejects.toThrow('configured workspaceId')
-      await expect(gateway.invoke({ namespace: 'session', method: 'create', args: { request: { workspaceId: ownedWorkspace.id, cwd: root } } })).rejects.toThrow('cannot be combined')
-      await expect(gateway.invoke({ namespace: 'session', method: 'create', args: { request: { cwd: foreignWorkspace.path } } })).rejects.toThrow('configured workspace')
-      await expect(gateway.invoke({ namespace: 'session', method: 'create', args: { request: { workspaceId: ownedWorkspace.id, agentPreset: 'foreign' } } })).rejects.toThrow('configured preset')
-      const created = await gateway.invoke({ namespace: 'session', method: 'create', args: { request: { workspaceId: ownedWorkspace.id } } }) as { sessionId: SessionId }
+      await expect(gateway.invoke({ peer, namespace: 'session', method: 'create', args: { request: { workspaceId: 'unknown-workspace' } } })).rejects.toThrow('configured workspaceId')
+      await expect(gateway.invoke({ peer, namespace: 'session', method: 'create', args: { request: { workspaceId: foreignWorkspace.id } } })).rejects.toThrow('configured workspaceId')
+      await expect(gateway.invoke({ peer, namespace: 'session', method: 'create', args: { request: { workspaceId: ownedWorkspace.id, cwd: root } } })).rejects.toThrow('cannot be combined')
+      await expect(gateway.invoke({ peer, namespace: 'session', method: 'create', args: { request: { cwd: foreignWorkspace.path } } })).rejects.toThrow('configured workspace')
+      await expect(gateway.invoke({ peer, namespace: 'session', method: 'create', args: { request: { workspaceId: ownedWorkspace.id, agentPreset: 'foreign' } } })).rejects.toThrow('configured preset')
+      const created = await gateway.invoke({ peer, namespace: 'session', method: 'create', args: { request: { workspaceId: ownedWorkspace.id } } }) as { sessionId: SessionId }
       expect(ownedWorkspace.attachSession).toHaveBeenCalledWith(created.sessionId)
       const ownerAddedCount = (frames: Array<{ event?: string; args?: unknown[] }>): number => frames.filter(frame =>
         frame.event === 'api-session/added' && (frame.args?.[0] as { sessionId?: string } | undefined)?.sessionId === created.sessionId).length
       await vi.waitFor(() => expect(forwarded.every(frames => ownerAddedCount(frames) === 1)).toBe(true))
       await vi.waitFor(() => expect(fixture.ctx.sessions.get(created.sessionId)).toBeUndefined())
-      await expect(gateway.invoke({ namespace: 'session', method: 'create', args: { request: { sessionId: created.sessionId, cwd: root, agentPreset: 'primary' } } })).resolves.toMatchObject({ sessionId: created.sessionId })
+      await expect(gateway.invoke({ peer, namespace: 'session', method: 'create', args: { request: { sessionId: created.sessionId, cwd: root, agentPreset: 'primary' } } })).resolves.toMatchObject({ sessionId: created.sessionId })
       await vi.waitFor(() => expect(forwarded.map(ownerAddedCount)).toEqual([2, 2]))
       const binding = operator.getBindingBySession(String(created.sessionId))!
       expect(binding.principal).toEqual(webPrincipal)
@@ -3838,7 +3845,7 @@ describe('real native Delivery Agent runtime', () => {
         nativeGoals(fixture.ctx).disarm(agent)
         return await next()
       })
-      await expect(gateway.invoke({ namespace: 'session', method: 'prompt', args: { request: { sessionId: created.sessionId, requestId: 'native-owner-message',
+      await expect(gateway.invoke({ peer, namespace: 'session', method: 'prompt', args: { request: { sessionId: created.sessionId, requestId: 'native-owner-message',
         mode: 'queue', content: [{ type: 'text', text: 'Finish the Web owner project' }] } }, signal: new AbortController().signal })).resolves.toEqual({ accepted: true })
       await vi.waitFor(() => expect(goalCreated).toBe(true), { timeout: 5_000 })
       await vi.waitFor(() => expect(operator.getInboxByProviderEvent('web', 'browser', 'native-owner-message')?.status).toBe('processed'), { timeout: 5_000 })
@@ -3863,9 +3870,9 @@ describe('real native Delivery Agent runtime', () => {
         fixture.ctx.emit('agent/error', { agent: foreign.agent, error: new Error('foreign-private-error') } as never)
         foreign.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'foreign-private-message' }], source: { kind: 'user' } }))
         await vi.waitFor(() => expect(foreign.agent.session.snapshotEvents().some(event => event.type === 'turn/end')).toBe(true))
-        await expect(gateway.invoke({ namespace: 'session', method: 'page', args: { request: { address: { kind: 'session', sessionId: foreign.agent.id }, throughSeq: 100 } } })).rejects.toThrow('denied')
-        await expect(gateway.invoke({ namespace: 'skills', method: 'list', args: { request: { sessionId: foreign.agent.id } }, signal: new AbortController().signal })).rejects.toThrow('denied')
-        await expect(gateway.invoke({ namespace: 'goals', method: 'create', args: { agentId: foreign.agent.id, request: { objective: 'foreign-goal' } } })).rejects.toThrow('denied')
+        await expect(gateway.invoke({ peer, namespace: 'session', method: 'page', args: { request: { address: { kind: 'session', sessionId: foreign.agent.id }, throughSeq: 100 } } })).rejects.toThrow('denied')
+        await expect(gateway.invoke({ peer: foreignPeer, namespace: 'skills', method: 'list', args: { request: { sessionId: foreign.agent.id } }, signal: new AbortController().signal })).rejects.toThrow('denied')
+        await expect(gateway.invoke({ peer: foreignPeer, namespace: 'goals', method: 'create', args: { agentId: foreign.agent.id, request: { objective: 'foreign-goal' } } })).rejects.toThrow('denied')
       } finally { await foreign.dispose() }
       fixture.ctx.emit('api-session/activity', created.sessionId, 123456)
       await vi.waitFor(() => expect(forwarded.every(frames => frames.some(frame => frame.event === 'api-session/activity' && frame.args?.[1] === 123456))).toBe(true))
@@ -4077,12 +4084,16 @@ describe('real native Delivery Agent runtime', () => {
         const text = snapshot?.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n') ?? ''
         return text.match(/<memory_source>[\s\S]*?<\/memory_source>/)?.[0] ?? ''
       }
-      expect(memoryIn(fixture.llm.requests[1]!)).toContain('Citrus recovery requires')
-      expect(memoryIn(fixture.llm.requests[1]!)).toContain('evidence://citrus')
-      expect(memoryIn(fixture.llm.requests[1]!)).toContain('Citrus schema v1 has no journal')
-      expect(memoryIn(fixture.llm.requests[1]!)).toContain('applicability unverified')
-      expect(memoryIn(fixture.llm.requests[1]!)).not.toContain('generic maintenance')
-      const afterChange = memoryIn(fixture.llm.requests[2]!)
+      const snapshots = fixture.llm.requests.map(memoryIn)
+      expect(snapshots).toHaveLength(3)
+      // The current Host refreshes runtime context before the first request,
+      // after pre-step has established the new checkpoint.
+      expect(snapshots[0]).toContain('Citrus recovery requires')
+      expect(snapshots[0]).toContain('evidence://citrus')
+      expect(snapshots[0]).toContain('Citrus schema v1 has no journal')
+      expect(snapshots[0]).toContain('applicability unverified')
+      expect(snapshots[0]).not.toContain('generic maintenance')
+      const afterChange = snapshots[1]!
       if (conflict) {
         expect(afterChange).toContain('claim disagreement: orchid.recovery.mode')
         expect(afterChange).toContain('no value selected')
@@ -4091,6 +4102,7 @@ describe('real native Delivery Agent runtime', () => {
       expect(afterChange).not.toContain('Citrus recovery requires')
       if (withdraw) expect(afterChange).not.toContain('Orchid recovery requires')
       expect(Buffer.byteLength(afterChange)).toBeLessThanOrEqual(2_048)
+      expect(snapshots[2]).toBe(afterChange)
       await vi.waitFor(() => expect(fixture.ctx.agents.get(handle.agent.id)).toBeUndefined(), { timeout: 5_000 })
     } finally { await fiber.dispose(); memories.close(); operator.close(); await fixture.ctx.fiber.restart() }
   })
@@ -11513,6 +11525,7 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.ctx.plugin(native.GoalService as never, {} as never)
     await fixture.ctx.plugin(native.goalTools as never, {} as never)
     await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
+    fixture.ctx.provide('workingDirectory' as never, { get: () => root, ensure: async () => root, set: async (_agent: unknown, path: string) => path } as never)
     await fixture.ctx.plugin(SubagentRuntime as never, {} as never)
     await fixture.ctx.plugin(AssistantGoalsPlugin, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, strategy: { maxDurationMs: mode === 'late-start' ? 5_000 : 30_000 },
       stepMaxDurationMs: mode === 'late-start' ? 15_000 : 5_000,
@@ -11591,8 +11604,8 @@ describe('real native Delivery Agent runtime', () => {
     const lateStopReasons: string[] = []
     if (mode === 'late-start') {
       const gate = new Promise<void>(resolve => { releaseLate = resolve })
-      const start = fixture.ctx.subagents.start.bind(fixture.ctx.subagents)
-      vi.spyOn(fixture.ctx.subagents, 'start').mockImplementation(async (...args) => {
+      const start = fixture.ctx.subagents.startActivation.bind(fixture.ctx.subagents)
+      vi.spyOn(fixture.ctx.subagents, 'startActivation').mockImplementation(async (...args) => {
         const run = await start(...args)
         // The returned run is late, while both genuine model streams and their
         // budget settlement complete before the strategy deadline is observed.

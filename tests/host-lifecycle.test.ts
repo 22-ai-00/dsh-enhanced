@@ -500,6 +500,21 @@ describe('managed Host transaction inputs', () => {
       candidateBindingSource: binding(next) }, '/private/home').candidateRuntime).toEqual(next)
   })
 
+  it('accepts an exact 0.2.0 to 0.2.1 update and rejects a downgrade', () => {
+    const original = { ...candidate, version: '0.2.0-rc.2', root: '/private/hosts/0.2.0-rc.2',
+      dshPath: '/private/hosts/0.2.0-rc.2/node_modules/.bin/dsh',
+      binDirectory: '/private/hosts/0.2.0-rc.2/node_modules/.bin' }
+    const next = { ...original, version: '0.2.1-rc.2', root: '/private/hosts/0.2.1-rc.2',
+      dshPath: '/private/hosts/0.2.1-rc.2/node_modules/.bin/dsh',
+      binDirectory: '/private/hosts/0.2.1-rc.2/node_modules/.bin' }
+    const update = { ...plan, originalRuntime: original, originalBindingSource: binding(original),
+      originalBindingDigest: digest(binding(original)), candidateRuntime: next, candidateBindingSource: binding(next) }
+    expect(parseHostUpdatePlan(update, '/private/home')).toEqual(update)
+    expect(() => parseHostUpdatePlan({ ...update, originalRuntime: next, originalBindingSource: binding(next),
+      originalBindingDigest: digest(binding(next)), candidateRuntime: original,
+      candidateBindingSource: binding(original) }, '/private/home')).toThrow()
+  })
+
   it('accepts only a null-bound schema 2 legacy-to-0.2 plan in the same cache', () => {
     const next = { ...candidate, version: '0.2.0-rc.2', root: '/private/hosts/0.2.0-rc.2',
       dshPath: '/private/hosts/0.2.0-rc.2/node_modules/.bin/dsh',
@@ -507,6 +522,11 @@ describe('managed Host transaction inputs', () => {
     const unbound = { ...plan, schemaVersion: 2, originalBindingSource: null,
       originalBindingDigest: null, candidateRuntime: next, candidateBindingSource: binding(next) }
     expect(parseHostUpdatePlan(unbound, '/private/home')).toEqual(unbound)
+    const currentCandidate = { ...next, version: '0.2.1-rc.2', root: '/private/hosts/0.2.1-rc.2',
+      dshPath: '/private/hosts/0.2.1-rc.2/node_modules/.bin/dsh',
+      binDirectory: '/private/hosts/0.2.1-rc.2/node_modules/.bin' }
+    expect(parseHostUpdatePlan({ ...unbound, candidateRuntime: currentCandidate,
+      candidateBindingSource: binding(currentCandidate) }, '/private/home').candidateRuntime).toEqual(currentCandidate)
     expect(() => parseHostUpdatePlan({ ...unbound, originalBindingSource: binding(old) }, '/private/home')).toThrow()
     expect(() => parseHostUpdatePlan({ ...unbound, originalBindingDigest: digest(binding(old)) }, '/private/home')).toThrow()
     expect(() => parseHostUpdatePlan({ ...unbound, status: 'current' }, '/private/home')).toThrow()

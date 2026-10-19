@@ -47,7 +47,7 @@ async function hostFixture(root: string, missingApi = false, version = '0.1.5-rc
   await writeFile(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version,
     type: 'module', exports: { '.': './lib/index.js', './package.json': './package.json' } }), { mode: 0o600 })
   await writeFile(join(bootRoot, 'lib/index.js'), missingApi ? 'export const boot = () => { throw new Error("plugin effects ran") }\n'
-    : version === '0.2.0-rc.2' ? `import { readFileSync } from 'node:fs'
+    : ['0.2.0-rc.2', '0.2.1-rc.2'].includes(version) ? `import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 export function loadProfileDirectory(name, dir, installAnchor) {
   if (name !== 'dsh' || !installAnchor.endsWith('/@deepseek-ai/dsh/package.json')) throw new Error('wrong Host')
@@ -192,14 +192,14 @@ describe('pre-owner local source maintenance admission', () => {
     expect(changed.status).not.toBe(0)
     expect(changed.stderr).toContain('pinned DSH executable changed')
   })
-  test('DSH 0.2 resolves a pinned Host profile without legacy fallback writes', async () => {
+  test.each(['0.2.0-rc.2', '0.2.1-rc.2'])('DSH %s resolves a pinned Host profile without legacy fallback writes', async version => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'local-source-resolution-')))
     roots.push(root)
     const homePath = join(root, 'home')
     const manifestPath = join(homePath, 'profiles', 'assistant', 'package.json')
     await mkdir(dirname(manifestPath), { recursive: true })
     await writeFile(manifestPath, '{"dsh":{"profile":{"bundles":[]}}}\n')
-    const dsh = await hostFixture(root, false, '0.2.0-rc.2')
+    const dsh = await hostFixture(root, false, version)
     await expect(healLocalSourceProfileModuleFallback({ homePath, profile: 'assistant', dsh })).resolves.toBeUndefined()
     await expect(readFile(join(homePath, 'fallback-healed'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await readFile(manifestPath, 'utf8')).toBe('{"dsh":{"profile":{"bundles":[]}}}\n')

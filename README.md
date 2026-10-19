@@ -51,7 +51,7 @@ dsh-rsi web-url --profile web
 | 查看最近日志 | `dsh-rsi logs --profile web --lines 100` |
 | 重启服务 | `dsh-rsi restart --profile web` |
 
-浏览器关闭后，默认安装的服务仍会在后台运行。升级、重装和卸载的区别见 [CLI 帮助](packages/dsh-rsi-cli/README.md)；`reinstall` 会删除旧配置和历史后重新安装，请勿当作普通升级使用。
+浏览器关闭后，默认安装的服务仍会在后台运行。只升级命令本身用 `dsh-rsi update`；包含新升级入口的 CLI 发布或从相应源码安装后，支持的现有 Linux 冻结 owner/cohort 可用 `dsh-rsi update --all --yes` 从原绑定官方源码升级程序，自动停启受管服务并保留原授权与历史。适用条件、macOS 限制及其它升级路径见 [CLI 帮助](packages/dsh-rsi-cli/README.md#升级与重装)。`reinstall` 会删除旧配置和历史后重新安装，请勿当作普通升级使用。
 
 ## 按需阅读
 

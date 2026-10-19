@@ -285,11 +285,18 @@ function supportOracle(persistence: PersistenceService): EventSupportOracle {
   const manifest = record(backendRequire('./../package.json'))
   const backendModule = record(backendRequire(backendEntrypoint))
   const Backend = backendModule?.default
-  if (manifest?.name !== '@deepseek-ai/dsh-session-persistence-jsonl'
-    || typeof Backend !== 'function' || !(persistence instanceof Backend)) {
+  const module = record(backendRequire('@deepseek-ai/dsh-session-persistence'))
+  const Base = module?.SessionPersistence
+  // Before 0.2.1 JSONL exported its service class as default. The 0.2.1
+  // plugin exports apply/name while keeping that class private; its mounted
+  // service still extends the exact persistence base resolved by this backend.
+  const oldBackend = typeof Backend === 'function' && persistence instanceof Backend
+  const pluginBackend = backendModule?.name === 'session-persistence-jsonl'
+    && typeof backendModule.apply === 'function' && typeof Base === 'function'
+    && persistence instanceof Base && (persistence as { name?: unknown }).name === 'session-persistence-jsonl'
+  if (manifest?.name !== '@deepseek-ai/dsh-session-persistence-jsonl' || (!oldBackend && !pluginBackend)) {
     throw new Error('assistant-policy: live persistence backend has no supported reader oracle')
   }
-  const module = record(backendRequire('@deepseek-ai/dsh-session-persistence'))
   const validate = module?.validateStoredEvents
   const assertVersion = module?.assertVersion
   const session = loadSessionCandidate('live storage validator', createRequire(

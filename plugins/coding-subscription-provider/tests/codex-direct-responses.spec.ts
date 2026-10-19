@@ -6,7 +6,6 @@ import {
   type GenerateOptions,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import { apply as applyLlmInvariant } from '@deepseek-ai/dsh-llm/invariant'
 import { describe, expect, it, vi, type Mock } from 'vitest'
 import {
   runCodexDirectResponses,
@@ -102,36 +101,6 @@ async function captureDirectRequest(options: GenerateOptions): Promise<{
   const call = dependencies.request.mock.calls[0]
   if (call === undefined) throw new Error('expected one direct request')
   return { body: JSON.parse(call[0]) as Record<string, unknown>, routing: call[2] }
-}
-
-async function installActualLlmInvariant(source: AsyncIterable<StreamChunk>): Promise<AsyncIterable<StreamChunk>> {
-  type StreamHook = (
-    options: GenerateOptions,
-    next: () => AsyncIterable<StreamChunk>,
-  ) => AsyncIterable<StreamChunk>
-  let streamHook: StreamHook | undefined
-  const runtimeContext = {
-    on(event: string, callback: unknown) {
-      if (event === 'llm/stream') streamHook = callback as StreamHook
-      return () => {}
-    },
-    get() {
-      return undefined
-    },
-  }
-  const invariantContext = {
-    invariants: {
-      register(_packageName: string, install: (context: unknown, fail: (message: string) => never) => void) {
-        install(runtimeContext, (message): never => {
-          throw new Error(message)
-        })
-        return () => {}
-      },
-    },
-  }
-  await applyLlmInvariant(invariantContext as never)
-  if (streamHook === undefined) throw new Error('current DSH LLM stream invariant was not installed')
-  return streamHook(request([]), () => source)
 }
 
 describe('Codex private Responses transport', () => {
@@ -1805,7 +1774,7 @@ describe('Codex private Responses transport', () => {
     },
   )
 
-  it('closes every partial max-token block before finish through the actual DSH LLM invariant', async () => {
+  it('closes every partial max-token block before finish and preserves native DSH assembly', async () => {
     const cases: Array<{
       readonly name: string
       readonly events: Array<Record<string, unknown> | '[DONE]'>
@@ -1856,14 +1825,32 @@ describe('Codex private Responses transport', () => {
         request([user(testCase.name)], testCase.overrides),
         dependencies,
       )
-      const chunks = await collect(await installActualLlmInvariant(source))
+      const chunks = await collect(source)
+      // DSH 0.2.1 removed the separately mounted invariant plugin. Keep the
+      // closed-block contract explicit and verify the current native assembler.
+      const openBlocks = new Map<number, string>()
+      const assembler = new BlockAssembler()
+      let startedBlocks = 0
+      for (const chunk of chunks) {
+        if (chunk.type === 'block-start') {
+          expect(openBlocks.has(chunk.index), testCase.name).toBe(false)
+          openBlocks.set(chunk.index, chunk.blockType)
+          startedBlocks += 1
+        } else if (chunk.type === 'block-end') {
+          expect(openBlocks.get(chunk.index), testCase.name).toBe(chunk.block.type)
+          openBlocks.delete(chunk.index)
+        } else if (chunk.type === 'finish') {
+          expect([...openBlocks], testCase.name).toEqual([])
+        }
+        assembler.push(chunk)
+      }
+      expect(startedBlocks, testCase.name).toBeGreaterThan(0)
+      expect([...openBlocks], testCase.name).toEqual([])
       expect(chunks.at(-1), testCase.name).toEqual({ type: 'finish', reason: { kind: 'max-tokens' } })
       expect(chunks.at(-1), testCase.name).not.toHaveProperty('replayState')
-      if (testCase.name === 'tool') {
-        const assembler = new BlockAssembler()
-        chunks.forEach(chunk => assembler.push(chunk))
-        expect(assembler.blocks()).toEqual([])
-      }
+      expect(assembler.blocks(), testCase.name).toEqual(testCase.name === 'tool'
+        ? []
+        : [{ type: testCase.name, text: `partial ${testCase.name}` }])
     }
   })
 
