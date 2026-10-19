@@ -6,6 +6,8 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { PurgeError } from './purge.ts'
 
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
+const auxiliaryPattern = /^host-migration-[a-f0-9]{20}$/u
+const digestPattern = /^[a-f0-9]{64}$/u
 
 export interface FrozenOwner { home: string; profile: string; repository: string }
 export interface ProgramUpdatePorts {
@@ -52,6 +54,148 @@ async function names(path: string): Promise<string[]> {
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error }
 }
 
+function sameNames(actual: readonly string[], expected: readonly string[]): boolean {
+  const sortedExpected = [...expected].sort()
+  return actual.length === expected.length && [...actual].sort().every((name, index) => name === sortedExpected[index])
+}
+
+function sortedUnique(values: readonly string[]): boolean {
+  const sorted = [...new Set(values)].sort()
+  return values.length === sorted.length && values.every((value, index) => value === sorted[index])
+}
+
+async function stableArtifactDigest(path: string, profile: string): Promise<string> {
+  const descriptor = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() =>
+    fail(`辅助 cohort 制品文件不安全：${profile}`))
+  try {
+    const before = await descriptor.stat()
+    if (!before.isFile() || before.nlink !== 1 || before.uid !== process.getuid?.()
+      || (before.mode & 0o022) || before.size < 1 || before.size > 268_435_456) {
+      fail(`辅助 cohort 制品文件不安全：${profile}`)
+    }
+    const hash = createHash('sha256')
+    let length = 0
+    for await (const chunk of descriptor.createReadStream({ autoClose: false })) {
+      length += chunk.length
+      if (length > 268_435_456) fail(`辅助 cohort 制品超过大小上限：${profile}`)
+      hash.update(chunk)
+    }
+    const after = await descriptor.stat()
+    const named = await lstat(path)
+    if (length !== before.size || before.dev !== after.dev || before.ino !== after.ino
+      || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
+      || named.dev !== before.dev || named.ino !== before.ino || named.isSymbolicLink()) {
+      fail(`辅助 cohort 制品读取期间变化：${profile}`)
+    }
+    return hash.digest('hex')
+  } finally { await descriptor.close() }
+}
+
+async function verifyAuxiliaryCohort(home: string, profile: string, repository: string): Promise<void> {
+  if (!auxiliaryPattern.test(profile)) fail(`未知本地 cohort：${profile}`)
+  const realProfile = await lstat(join(home, 'profiles', profile)).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  })
+  if (realProfile !== undefined) fail(`辅助 cohort 与真实 profile 同名：${profile}`)
+  const root = join(home, 'rsi-local-cohorts', profile)
+  const rootEntry = await lstat(root)
+  if (!rootEntry.isDirectory() || rootEntry.isSymbolicLink() || rootEntry.uid !== process.getuid?.()
+    || (rootEntry.mode & 0o077)) fail(`辅助 cohort 目录不安全：${profile}`)
+  if (!sameNames(await names(root), ['artifacts', 'receipt.json'])) fail(`辅助 cohort 包含未知文件：${profile}`)
+  const artifactRoot = join(root, 'artifacts')
+  const artifactEntry = await lstat(artifactRoot)
+  if (!artifactEntry.isDirectory() || artifactEntry.isSymbolicLink() || artifactEntry.uid !== process.getuid?.()
+    || (artifactEntry.mode & 0o077)) fail(`辅助制品目录不安全：${profile}`)
+  const receipt = await privateJson(join(root, 'receipt.json'), 16_777_216)
+  const keys = ['allowBuilds', 'bundles', 'packages', 'receiptDigest', 'root', 'schemaVersion', 'sourceCommit',
+    'sourceRepository', 'version']
+  if (!sameNames(Object.keys(receipt), keys) || receipt.schemaVersion !== 1 || receipt.root !== root
+    || receipt.sourceRepository !== repository || typeof receipt.sourceCommit !== 'string'
+    || !/^[a-f0-9]{40}$/u.test(receipt.sourceCommit) || typeof receipt.version !== 'string'
+    || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(receipt.version)
+    || !Array.isArray(receipt.bundles) || !Array.isArray(receipt.packages)
+    || receipt.packages.length < 1 || receipt.packages.length > 128
+    || receipt.allowBuilds === null || typeof receipt.allowBuilds !== 'object' || Array.isArray(receipt.allowBuilds)
+    || typeof receipt.receiptDigest !== 'string' || !digestPattern.test(receipt.receiptDigest)) {
+    fail(`辅助 cohort 收据格式或绑定无效：${profile}`)
+  }
+  const bundles = receipt.bundles as unknown[]
+  if (bundles.length < 1
+    || bundles.some(bundle => typeof bundle !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(bundle))
+    || !sortedUnique(bundles as string[])) {
+    fail(`辅助 cohort bundle 清单无效：${profile}`)
+  }
+  const allowedBuilds = Object.entries(receipt.allowBuilds)
+  if (allowedBuilds.length > 128 || !sortedUnique(allowedBuilds.map(([name]) => name))
+    || allowedBuilds.some(([name, enabled]) =>
+    !/^(@[a-z0-9._-]+\/)?[a-z0-9._-]+$/u.test(name) || typeof enabled !== 'boolean')) {
+    fail(`辅助 cohort allowBuilds 无效：${profile}`)
+  }
+  const { receiptDigest, ...body } = receipt
+  if (createHash('sha256').update(JSON.stringify(body)).digest('hex') !== receiptDigest) {
+    fail(`辅助 cohort 收据摘要不一致：${profile}`)
+  }
+  const expectedArtifacts: string[] = []
+  const packageNames: string[] = []
+  const records: Record<string, unknown>[] = []
+  for (const item of receipt.packages) {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) fail(`辅助 cohort 包记录无效：${profile}`)
+    const record = item as Record<string, unknown>
+    if (typeof record.name !== 'string' || !/^@dsh-enhanced\/[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(record.name)
+      || typeof record.sha256 !== 'string' || !digestPattern.test(record.sha256)) fail(`辅助 cohort 包记录无效：${profile}`)
+    const slug = record.name.slice('@dsh-enhanced/'.length)
+    const artifact = `${slug}.tgz`
+    if (!sameNames(Object.keys(record), ['bundle', 'files', 'name', 'path', 'runtimeDependencies', 'sha256', 'tarball'])
+      || record.path !== `plugins/${slug}` && record.path !== `packages/${slug}`
+      || record.bundle !== (record.path === `plugins/${slug}`)
+      || record.tarball !== join(artifactRoot, artifact)) fail(`辅助 cohort 包记录无效：${profile}`)
+    expectedArtifacts.push(artifact)
+    packageNames.push(record.name)
+    records.push(record)
+  }
+  if (!sortedUnique(packageNames) || !sameNames(await names(artifactRoot), expectedArtifacts)) {
+    fail(`辅助 cohort 制品清单不匹配：${profile}`)
+  }
+  for (const record of records) {
+    if (!Array.isArray(record.runtimeDependencies) || !Array.isArray(record.files)) {
+      fail(`辅助 cohort 包依赖或文件清单无效：${profile}`)
+    }
+    const dependencies = record.runtimeDependencies as unknown[]
+    if (dependencies.some(name => typeof name !== 'string' || !name.startsWith('@dsh-enhanced/'))
+      || !sortedUnique(dependencies as string[])
+      || dependencies.some(name => !packageNames.includes(name as string))) {
+      fail(`辅助 cohort 包依赖闭包无效：${profile}`)
+    }
+    const files = record.files as unknown[]
+    const filePaths: string[] = []
+    for (const file of files) {
+      if (file === null || typeof file !== 'object' || Array.isArray(file)) fail(`辅助 cohort 文件记录无效：${profile}`)
+      const value = file as Record<string, unknown>
+      if (!sameNames(Object.keys(value), ['mode', 'path', 'sha256'])
+        || typeof value.path !== 'string' || value.path.startsWith('/')
+        || value.path.split('/').some(part => !part || part === '.' || part === '..')
+        || typeof value.sha256 !== 'string' || !digestPattern.test(value.sha256)
+        || !Number.isInteger(value.mode) || (value.mode as number) < 0 || (value.mode as number) > 0o777) {
+        fail(`辅助 cohort 文件记录无效：${profile}`)
+      }
+      filePaths.push(value.path)
+    }
+    if (!sortedUnique(filePaths)) fail(`辅助 cohort 文件清单顺序无效：${profile}`)
+  }
+  for (const slug of [...(bundles as string[]), 'assistant-policy', 'assistant-automations', 'plugin-control-plane']) {
+    if (!records.some(record => record.name === `@dsh-enhanced/${slug}` && record.bundle === true)) {
+      fail(`辅助 cohort 缺少必要 bundle：${profile}`)
+    }
+  }
+  for (const record of records) {
+    const artifact = record.tarball as string
+    if (await stableArtifactDigest(artifact, profile) !== record.sha256) {
+      fail(`辅助 cohort 制品摘要不一致：${profile}`)
+    }
+  }
+}
+
 /** Read-only, fail-closed recognition. Partial frozen installations must not fall into the npm updater. */
 export async function detectFrozenOwner(dshHome: string): Promise<FrozenOwner | undefined> {
   if (!isAbsolute(dshHome) || resolve(dshHome) !== dshHome) {
@@ -70,16 +214,19 @@ export async function detectFrozenOwner(dshHome: string): Promise<FrozenOwner | 
   })
   const markers = (await names(canonical)).filter(name => name.startsWith('.rsi-coordinator-'))
   if (localRoot === undefined && markers.length === 0) return undefined
-  if (cohorts.length !== 1 || markers.length !== 1 || !profilePattern.test(cohorts[0]!)) {
+  if (markers.length !== 1 || !/^\.rsi-coordinator-[a-f0-9]{16}\.json$/u.test(markers[0]!)) {
     fail('只接受恰好一个冻结 target 与 coordinator marker')
   }
-  const profile = cohorts[0]!
+  const pair = await privateJson(join(canonical, markers[0]!), 65_536)
+  const profile = pair.targetProfile
+  if (typeof profile !== 'string' || !profilePattern.test(profile) || !cohorts.includes(profile)) {
+    fail('只接受恰好一个冻结 target 与 coordinator marker')
+  }
   const marker = `.rsi-coordinator-${createHash('sha256').update(profile).digest('hex').slice(0, 16)}.json`
   if (markers[0] !== marker) fail('coordinator marker 与 target 不一致')
   await ownedDirectory(join(canonical, 'rsi-local-cohorts'))
   await ownedDirectory(join(canonical, 'rsi-local-cohorts', profile))
   const cohort = await privateJson(join(canonical, 'rsi-local-cohorts', profile, 'receipt.json'), 16_777_216)
-  const pair = await privateJson(join(canonical, marker), 65_536)
   const repository = cohort.sourceRepository
   if (cohort.schemaVersion !== 1 || cohort.root !== join(canonical, 'rsi-local-cohorts', profile)
     || typeof repository !== 'string' || !isAbsolute(repository) || resolve(repository) !== repository
@@ -87,6 +234,7 @@ export async function detectFrozenOwner(dshHome: string): Promise<FrozenOwner | 
     || pair.sourceRepository !== repository || !profilePattern.test(String(pair.coordinatorProfile))
     || pair.coordinatorProfile === profile) fail('冻结收据的 target、source 或 coordinator 不一致')
   await ownedDirectory(repository)
+  for (const name of cohorts) if (name !== profile) await verifyAuxiliaryCohort(canonical, name, repository)
   return { home: canonical, profile, repository }
 }
 
