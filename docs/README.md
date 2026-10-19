@@ -1,8 +1,19 @@
 # 文档索引
 
-根 [`README`](../README.md) 提供安装与产品入口。默认只读 [RSI 当前状态](rsi-status.md)：目标、能力边界、当前阻塞和下一步。处理具体任务时再选择下列指南与对应插件 README；无需把整个索引加载到上下文。
+第一次使用从[首页的三步安装](../README.md#开始使用)开始。无需先了解插件结构或自迭代架构。
 
-本索引按需导航，不作为交接清单。已完成实现、测试和部署记录从 Git 查询；日常上下文只保留一个当前交付及其未解决问题。
+## 使用帮助
+
+| 想做什么 | 从这里开始 |
+| --- | --- |
+| 安装、选择场景、解决启动问题 | [安装指南](../scripts/install/README.md) |
+| 添加 API 模型、使用 TraeX、切换模型 | [模型配置](models.md) |
+| 连接飞书、绑定机器人、排查没有回复 | [飞书接入](../plugins/lark-channel/docs/setup.md) |
+| 查状态、看日志、升级、重装或卸载 | [dsh-rsi 命令参考](../packages/dsh-rsi-cli/README.md) |
+| 了解当前能力与平台限制 | [当前状态](rsi-status.md) |
+| 安装更多功能 | [插件目录](../plugins/README.md) |
+
+以下资料供开发、维护或专项验收时查阅。
 
 ## 自迭代主线
 
@@ -19,9 +30,9 @@
 - [兼容性基线](compatibility.md)：DSH、Cordis、Node.js 与 pnpm 的版本约束。
 - [发版指南](releasing.md)：统一版本、tag/workflow、失败重试、竞态和 npm 凭据协议。
 
-## 安装与平台兼容
+## 高级维护与平台兼容
 
-- [安装脚本](../scripts/install/README.md)：本地/远程安装、场景选择、升级、重启和凭据边界。
+- [高级维护](../scripts/install/maintenance.md)：旧 Home 迁移、冻结源码维护和中断恢复。
 - [ACP Windows 兼容性复查](acp-windows-compatibility.md)：原生 Windows 支持现状和限制。
 
 ## Provider 参考与历史研究

@@ -1,6 +1,58 @@
-# 安装、凭据与常驻服务
+# 连接飞书
 
-本页记录 `@dsh-enhanced/lark-channel` 的完整接入流程。首次部署推荐使用 setup wizard；只有已在飞书控制台完成应用配置时，才使用手工凭据路径。
+连接后，可以在飞书私聊机器人处理任务、用 `/model` 选择模型。机器人在本机后台运行，关闭 Web 页面不影响收发消息。
+
+## 首次连接
+
+还没安装时，在本机终端运行：
+
+```sh
+npm install --global @dsh-enhanced/dsh-rsi-cli
+dsh-rsi install
+```
+
+已经跟随[首页安装](../../../README.md#开始使用)的用户，继续当前向导即可。默认配置名为 `web`，无需手工安装每个飞书插件、填写 App Secret 或配置公网回调地址。
+
+1. **选择机器人**：打开终端显示的飞书链接，选择已有应用或创建新应用，确认应用权限。企业要求管理员审批时，先完成飞书侧审批。
+2. **绑定本人**：给机器人发送终端当前显示的完整 `DSH-CONNECT-…` 验证码。只用最新验证码，在向导等待期间发送；终端显示成功即完成绑定，这一步不会收到聊天回复。
+3. **选择模型**：常驻服务启动后，用同一个飞书账号私聊发送 `/model`，在卡片里选择模型并确认。这条消息也会建立首次聊天会话。
+4. **确认可用**：发一句普通消息，确认收到回复。如果安装器提示 `exactly one current owner DM is required`，完成第 3 步后用原安装命令继续，无需删除配置或重新配对。
+
+只需要飞书消息助理、不启用完整学习场景时，可在首次安装选择 `dsh-rsi install --scenario lark`。Mac 原生运行无需 Docker；平台准备见[安装指南](../../../scripts/install/README.md)。
+
+## 业务权限可以单独处理
+
+文档、日历、邮件、审批等业务工具需要额外的用户授权。默认向导会申请这些权限；消息绑定成功不表示它们已经获准。
+
+暂时不需要业务工具时，可以不批准这一步。若向导因此中断，先确认终端已经显示「消息通道已配置」，再用**原安装命令加 `--lark keep`** 继续，保留已绑定的应用和本人身份。例如默认安装：
+
+```sh
+dsh-rsi install --lark keep
+```
+
+这不会重新申请业务授权。若消息通道尚未配置完成，仍需先完成前面的绑定。独立插件向导的 `--no-business-tools` 只属于 `dsh-lark-setup`，不是 `dsh-rsi install` 的参数，详见下方高级参考。
+
+## 没有回复时
+
+```sh
+dsh-rsi status
+dsh-rsi logs --profile web --lines 100
+```
+
+| 现象 | 处理 |
+| --- | --- |
+| 发了验证码，没有回复 | 正常；看终端绑定结果。验证码只用于绑定，不是聊天。 |
+| 终端一直没收到验证码 | 确认发给当前应用、使用本人私聊和最新码；超时后重跑向导，旧码失效。 |
+| 绑定成功，但普通消息没反应 | 先确认常驻服务运行，再检查模型配置和日志；不要同时手动启动第二个相同 profile。 |
+| `/model` 没有卡片或点了没反应 | 核查应用的消息权限和 `card.action.trigger` 回调；旧应用补权限后还需发布或审批，见下方「手工配置飞书应用」。 |
+| 有模型卡片，但对话失败 | 检查[模型登录、API Key 与接口配置](../../../docs/models.md)。 |
+
+日常重启用 `dsh-rsi restart --profile web`；已注册服务停止后用 `dsh-rsi start --profile web`。重启不会重新授权飞书。
+
+<details>
+<summary>高级参考：独立插件、手工应用配置、凭据与系统服务</summary>
+
+以下保留独立部署和源码开发入口。`dsh-lark-setup` 的直接命令要求插件能解析对应 Host 的依赖，且 PATH 中的 `dsh` 就是目标 Host。通过 `dsh-rsi` 安装的私有 Host 会由安装器处理这些依赖；这类安装请优先沿用上面的安装器入口，裸运行 profile 下的 `.bin/dsh-lark-setup` 可能缺少依赖或选错 Host。
 
 ## 安装
 
@@ -301,3 +353,5 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 长连接至少需要消息事件、发送/回复消息权限和机器人身份读取。若群聊无需 `@机器人` 即触发，必须同时将 `requireMentionInGroups` 设为 `false` 并在飞书侧申请更宽的群消息权限。
 
 `account` 与 `tenant` 是 DSH 内部稳定路由名，不是 Secret。个人单应用通常保持 `account: primary`、`tenant: personal`；真实飞书身份由向导发现的应用作用域 `open_id` 决定。陌生外部身份仍由 `assistant-delivery` fail closed；不能把“飞书能收到事件”视为已经授权。
+
+</details>

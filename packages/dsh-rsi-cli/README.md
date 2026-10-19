@@ -1,256 +1,76 @@
-# @dsh-enhanced/dsh-rsi-cli — 全局 `dsh-rsi` 命令
+# `dsh-rsi`：安装和管理 DSH enhanced
 
-DSH enhanced 插件集合的安装 / 控制 / 诊断 / 彻底卸载工具。安装插件集合（npm cohort 或本地 checkout 形态）后，安装器会同时把本包装成全局 `dsh-rsi` 命令；也可单独安装：
+`dsh-rsi` 管理 macOS / Linux 上的 DSH enhanced 插件集合。安装器会安装这个全局命令；也可单独安装 CLI（Node.js `^22.19.0 || >=24.0.0`）：
 
-```bash
+```sh
 npm install --global @dsh-enhanced/dsh-rsi-cli
 ```
 
-零运行时依赖（仅用 Node.js 内置模块），要求 Node.js `^22.19.0 || >=24.0.0`，支持 macOS 与 Linux。
+常用操作从这里开始：
 
-macOS 服务管理使用系统的 `/usr/bin/perl`、`plutil` 和 `launchctl`。内核锁文件位于 `/tmp`，用于协调安装、服务操作和卸载；进程退出即释放锁。
-
-## 命令
-
+```sh
+dsh-rsi install                     # 交互式安装，默认 supervised 场景
+dsh-rsi status                      # 查看 Home、profile 和服务状态
+dsh-rsi doctor                      # 查看状态和已知错误日志线索
+dsh-rsi logs --profile web    # 查看日志尾部
+dsh-rsi web-url --profile web # 查看日志中最近的 Web 授权 URL
+dsh-rsi restart --profile web # 重启已注册的常驻服务
 ```
-dsh-rsi [全局选项] <命令>
-```
 
-| 命令 | 说明 |
+首次 `supervised` 安装需要在交互式终端完成飞书 owner 配对和模型配置；未完成配对时，`--yes` 不会跳过 onboarding。新会话默认 Full access，可访问任意文件和网络，不逐次审批；按需收紧权限见[安装指南](../../scripts/install/README.md)。完整安装参数用 `dsh-rsi install --help` 查看。若只需轻量场景，可运行 `dsh-rsi install --scenario core --yes`；本地 checkout 用 `dsh-rsi install --local <checkout目录>`。
+
+## 常用命令
+
+| 命令 | 用途 |
 | --- | --- |
-| `status`（默认） | 列出 DSH home、各 profile 与安装形态（npm 实体副本 / local 符号链接）、全局 host 版本、launchd / systemd 受管服务状态、外部凭据条目数、生命周期事务/锁残留。**只读**。 |
-| `doctor` | 在 `status` 基础上扫描各 profile 的 `*-host.error.log`，识别已知崩溃模式（如旧版 event-support oracle 拒绝注册）并给出升级/重建建议。**只读**；退出码 0 不代表构建、行为验证或学习授权已就绪。 |
-| `start` / `stop` / `restart` | 切换已注册受管常驻服务的运行状态。**只改运行状态**，不新建/改写/删除 launchd plist 或 systemd unit；未注册时报错并给出注册指引。 |
-| `logs` | 查看各 profile 的受管 `*-host.log` / `*-host.error.log` 尾部（默认末 200 行）。**只读**。 |
-| `web-url` | 从运行中受管服务的 journal（Linux）或 `*-host.log`（macOS）解析最近一次 `dsh web:` 行，输出带 token 的完整 Web 授权 URL。**只读**，不关闭或绕过 Web 认证；服务未运行时提示先 `dsh-rsi start`。 |
-| `update` | 升级全局 dsh-rsi 自身；加 `--all` 再把插件集合交给安装器 `--operation upgrade` **原地升级**（保留 patch、凭据、Session、Goal）。 |
-| `install` | 安装/修复插件集合：默认选择 supervised 自迭代场景；npm 形态下载与本 dsh-rsi 同版本的官方安装器执行，`--local <dir>` 执行 checkout 内安装器。 |
-| `reinstall` | 先 `purge`（默认先备份、同样的安全门控）再立即 `install`，用于干净重装。 |
-| `purge` | 彻底卸载：进程静止检查 → 停服注销 → tar.gz 备份 → 删除 profile / DSH home / 生命周期残留 → 清理外部凭据。 |
-| `version` | 打印版本。 |
+| `status`（省略命令时默认） | 只读查看 DSH Home、profile、安装形态、Host 和受管服务等状态。 |
+| `doctor` | 只读查看状态，并扫描 Host 错误日志中的已知问题。 |
+| `logs` | 查看各 profile 的 Host 日志尾部；`--lines <n>` 设置每份日志行数（1–10000，默认 200），`--errors-only` 只看错误日志。 |
+| `web-url` | 从受管服务日志取最近的、带 token 的 Web 授权 URL；请按凭据保护该 URL。服务未运行时先 `start`，旧 URL 重启后可能失效。 |
+| `start` / `stop` / `restart` | 只切换**已注册**常驻服务的运行状态，保留服务定义和数据；未注册时会报错，需通过 `install` 注册。 |
+| `version` | 打印 CLI 版本。 |
 
-全局选项：
+不带 `--profile` 时，服务、日志和 Web URL 命令面向当前 DSH Home 下的全部真实 profile。可用 `--profile <name>` 指定一个。`status` / `doctor` 返回 0 只说明诊断命令执行成功，不证明真实模型可用或普通使用学习闭环通过；当前能力边界见[RSI 状态](../../docs/rsi-status.md)。
 
-- `--dsh-home <path>`：指定 DSH home（默认取 `$DSH_HOME`，否则 `~/.dsh`；install 经 `DSH_HOME` 环境变量传给安装器）
-- `--profile <name>`：仅操作单个 profile（`purge` 默认全量；install/reinstall 同时透传给安装器）
-- `--dry-run`：只打印将执行的动作，不做任何修改（install/reinstall 透传给安装器）
-- `--capabilities`：供救机脚本精确探测 CLI 安全能力；单独使用时只输出一行 JSON，不读取 Home 或操作服务。当前标记为 `macos-launchd-ownership-v1`，不供日常交互使用。
-- `--yes`：`purge` / `reinstall` 时跳过交互确认（install/reinstall 透传给安装器）
-- `-h, --help`：无命令位置时显示 dsh-rsi 帮助；`dsh-rsi install --help` 透传展示**安装器**完整参数清单
+## 升级与重装
 
-## install / reinstall（薄委托）
-
-`dsh-rsi install` 为全新 Home 选择 Host，再调用统一安装器：
-
-`install` 和 `reinstall` 在未指定 `--scenario`、也未指定 `--mode` 时，向安装器显式传入 `--scenario supervised`；`--dry-run` 会展示这一默认场景。Linux 使用 systemd user services；原生 macOS 使用 launchd 管理 Node Host，候选构建与验证使用系统沙箱和私有固定 Node，无需 Docker。现有插件源码替换、发布与双 Host 交接仍限 Linux。显式 `--lark skip` 或 `--no-service` 不追加完整场景，交由统一安装器保留有限场景；它们不能覆盖用户显式选择的 `supervised`。显式 `--scenario` 或旧式 `--mode` 保持安装器原有语义，例如 `--scenario core` 选择 core，`--mode standard` 保留安装器的自动选择。`update --all` 等升级、卸载、恢复及 `install --help` 不采用此默认值。其余参数仍按原顺序透传。
-
-首次飞书身份授权须由平台的授权流程完成。全新 Home 尚无飞书 Bot 时，`supervised --yes` 或管道等非交互执行会在安装前停止；先在交互式终端运行 `dsh-rsi install` 完成 onboarding。安装器保留已有模型选择，并生成路径、签名身份及有期限的授权与有限预算；仍须有可用模型及隔离构建环境。已有 active/paused Automation 需要另行确认 `--ack-existing-automations`，`--yes` 不代替它。授权尚未就绪时，不能把 supervised 安装称为成功。
-
-- **npm 形态（默认）**：下载 `https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/v<本包版本>/scripts/install/install-npm.sh` 到临时目录执行。引导脚本内部会按内嵌 SHA-256 自校验 `common.sh` 等资产，dsh-rsi 不重复 hash 逻辑。**锁定的只是引导脚本与同 tag 的安装器资产，不是插件 cohort 版本**：安装器默认把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套 `@dsh-enhanced/*` bundle；要锁定插件版本需透传 `--plugin-version <x.y.z|dist-tag>` 或预设 `DSH_ENHANCED_VERSION`。安装器尾部还会执行 `npm install --global @dsh-enhanced/dsh-rsi-cli@<cohort 版本>`，可能因此把全局 dsh-rsi 升降级到该 cohort 版本。
-- **local 形态**：`--local <checkout 目录>`，直接执行该目录下 `scripts/install/install-local.sh`，并从该 checkout 的 packages/dsh-rsi-cli 全局安装（本地开发 / 无网救机）。
-- 全新、空的 `DSH_HOME` 默认从官方 npm 解析一次 DSH `latest`，当前新安装接受已适配的 `0.2.0-rc.2`（官方 latest，尚非正式稳定版），安装到 `~/.local/share/dsh-enhanced/hosts/<精确版本>`。安装不执行依赖安装脚本；校验 registry integrity、lockfile、实际入口及全部安装文件后，写入 Home 内的私有 `.dsh-rsi-host.json`。不替换全局 DSH。安装器及其生成的常驻服务使用该私有入口，补装 pnpm 后仍保留这个入口的优先级。
-- 重试安装按 Home 绑定读取原精确版本，并核对文件与收据；重试不重新解析 `latest`。受管 Home 的升级入口默认解析官方 `latest`，先核对兼容范围，再通过独立事务迁移 Host；同版本不创建 Host 事务。已有未绑定 Home 保留原 Host。`--dsh-version` 可在首次安装或受管 Home 升级时选择范围内精确版本，不能直接覆盖已有绑定。Linux 支持受管 Host 更新；macOS 私有 Host 新安装已在临时 Home 验证，但跨版本 Host 更新会在插件变更前拒绝。Windows 私有 Host 安装尚未实机验证。直接运行 shell 安装脚本仍使用原有 Host 选择方式。
-- 同一 Home 不支持与旧版或外部安装器并发安装；绑定文件原子发布不等于整个安装流程具有跨程序排他锁。
-- 私有缓存是多个 Home 可共享的安装资源；全量 purge/reinstall 删除 Home 绑定但保留缓存，`--remove-host` 仍只操作全局 npm Host。缓存只含运行程序及收据，不含飞书凭据。
-- 安装器 stdio 与终端直连，退出码原样透传。`--help` / `--dry-run` 不准备私有 Host。
-
-```bash
-# npm 形态在交互式终端安装 supervised 场景
-dsh-rsi install
-
-# 已完成飞书 onboarding 后可非交互重试；显式选择 core 也无需飞书
-dsh-rsi install --yes
-dsh-rsi install --scenario core --yes
-
-# local checkout 形态
-dsh-rsi install --local ~/work/github/dsh-enhanced --scenario web
-
-# 查看安装器支持的全部参数
-dsh-rsi install --help
-
-# 干净重装：先备份+purge，再交互式完成新的 supervised onboarding
-dsh-rsi reinstall
-# 若只需轻量场景，可非交互地重装 core
-dsh-rsi reinstall --profile web --scenario core --yes
+```sh
+dsh-rsi update --dry-run                # 预览 CLI 自身升级
+dsh-rsi update                          # 只升级全局 dsh-rsi
+dsh-rsi update --all --yes              # Linux：CLI + 已安装插件集合原地升级
+dsh-rsi update --all --confirm-dsh-home-stopped # macOS：整个 Home 已停时
+dsh-rsi reinstall --dry-run             # 预览清理与重新安装两阶段
+dsh-rsi reinstall                       # 备份、删除、重新安装并重做 onboarding
 ```
 
-`reinstall` 支持的 rsi 侧选项与 `purge` 一致（`--no-backup` / `--keep-keychain` / `--remove-host` / `--profile`）；只有既未加 `--yes` 也未加 `--dry-run` 时才需输入 `purge` 确认——`reinstall --dry-run` 全程无交互、无修改：先打印 purge 计划，再以 `--dry-run` 透传演练安装器（`--dry-run` 同时作用于 purge 与安装两个阶段）。重装阶段默认走 npm 形态；local 重装加 `--local <dir>`。
+`update --all` 先升级 CLI，再委托安装器升级已安装的插件集合，保留 patch、凭据、Session 和 Goal；它不是对所有 Home 通用的升级路径。Linux 已注册的受管服务由升级事务停服并恢复，额外的手工 Host 须先停止。macOS 须先停止**同一 DSH Home 的全部 Host**，在整个升级期间保持停止，并显式传 `--confirm-dsh-home-stopped`；冻结的原生 owner/source Home 不支持普通原地升级。未冻结的 Mac Home 更新完成后，使用 `dsh-rsi start` 恢复服务。受管 Host 的版本迁移还有独立边界，详见[安装维护说明](../../scripts/install/maintenance.md)。可用 `update --version <精确版本或dist-tag>` 选择 CLI 版本；`--all` 下其它安装器选项可继续透传。
 
-## update（升级自身 / 升级整套）
+`install` 用于安装或修复；`reinstall` **先执行 purge，再执行 install**，默认在 `~` 生成备份，删除原数据后重新走安装和 owner onboarding。`reinstall --profile <name>` 只清理并重装该 profile。`--yes` 跳过清理确认并透传安装器，不能代替首次配对或已有 Automation 的单独确认；`--dry-run` 同时预览清理和安装。安装场景、模型及 Host 选择见[安装指南](../../scripts/install/README.md)。
 
-```bash
-# 只升级全局 dsh-rsi 自身（默认 latest）
-dsh-rsi update
+## 故障与卸载
 
-# 先看会装哪个版本
-dsh-rsi update --dry-run
+先运行 `dsh-rsi doctor`，再用 `dsh-rsi logs --profile <name> --errors-only` 看日志。常驻服务未注册时，`start` / `stop` / `restart` 不会创建服务；按提示重新运行 `install` 并选择有常驻服务的场景。维护和迁移故障见[安装维护说明](../../scripts/install/maintenance.md)；全局 CLI 损坏时见[单文件救机入口](../../scripts/install/maintenance.md#彻底卸载purge)。
 
-# 指定精确版本或 dist-tag
-dsh-rsi update --version 0.1.38
-dsh-rsi update --version next
-
-# 自身 + 整套插件集合原地升级；受管 Linux 服务由事务停服/恢复，额外 Host 会被拒绝
-dsh-rsi update --all --yes
-
-# macOS：先停止同一 DSH_HOME 的全部 Host，再显式确认；冻结的原生 owner/source Home 暂无普通升级路径
-dsh-rsi update --all --confirm-dsh-home-stopped
+```sh
+dsh-rsi purge --dry-run                  # 预览删除范围
+dsh-rsi purge                            # 输入 purge 确认
+dsh-rsi purge --profile web --yes        # 只删除一个 profile
+dsh-rsi purge --yes --keep-keychain      # 保留外部凭据
 ```
 
-`update` 选项：
+`purge` 会停用并注销受管服务，默认先在 `~` 创建权限为 0600 的 `dsh-purge-backup-<UTC时间戳>.tar.gz`。全量清理会删除整个 DSH Home（含 profile、历史与 Home 内凭据）、相关生命周期残留，并清理可定位的 macOS Keychain / Linux Secret Service 凭据；单 profile 清理只删除该 profile、对应日志和诊断，保留其他 profile 与共享 Home。两者均不会删除 local checkout 源码；全局 `@deepseek-ai/dsh` Host 默认保留。删除文件后若外部凭据清理失败，命令会报错，已删文件不会回滚。
 
-- `--all`：自身升级成功后，把插件集合交给同一目标版本的安装器原地升级；Linux 受管服务由事务停服并恢复，额外或手工启动的 Host 必须先停止。macOS 须先停止整个 Home 并显式传入 `--confirm-dsh-home-stopped`；CLI 在自更新前检查冻结资源与各 profile 的运行进程，安装器检查 launchd 和 Host，并在修改 profile 前复检，无法确认时拒绝插件变更。已有原生 owner/source/cohort 的冻结 Home 不能普通升级；保留数据的专用迁移目前尚未实现。未冻结且已停止的 Mac Home 仅升级插件集合，保留原 Host 与 LaunchAgent 定义；完成后用 `dsh-rsi start` 恢复运行。Mac 的检查没有覆盖整个升级过程的 Home 独占锁，操作者必须在升级全程保持 Host 停止。`0.1.49` 起，在已绑定的 Linux Home 继续执行受管 Host 更新；版本相同则跳过。Linux 用户无需传 `--confirm-dsh-home-stopped` 或重复声明 `--scenario`；安装器从 effective/composed profile 自动识别场景。
-- `--version <v|tag>`：dsh-rsi 自身的目标版本或 dist-tag（默认 `latest`）。只接受精确版本 `x.y.z`（可带预发布后缀）或纯字母 dist-tag；范围表达式如 `>=0.1.0` 会被拒绝。
-- `--dry-run`：解析出目标版本并打印将执行的命令，不做任何安装。
-- 其余参数在 `--all` 下原样透传给安装器；`--local <dir>` 走 local 形态。显式 `--scenario` 仍可作为一致性断言，但不再是必填项。
+`--yes` 跳过输入 `purge` 的确认，也可能终止已确认属于目标 Home 的残留进程；无法确认归属的进程仍会阻止清理。`--no-backup` 使被删数据和 Home 内凭据记录无法从本次备份恢复。`--keep-keychain` 保留外部凭据；`--remove-host` 额外卸载全局 Host，仅可用于不指定 `--profile` 的全量清理。`reinstall` 也接受这些清理选项。安装器的 `--operation uninstall` 是保留数据的归档操作，语义不同于 `purge`。
 
-### 受管 Host 更新
+## 选项与退出码
 
-`0.1.49` 起，已绑定 Linux Home 的受管更新分两步：先完成目标与协调器的同批插件升级，使其具备新版状态读取能力；再在 Home 外准备精确 Host 与原生依赖，停止同一 Home 的受管服务，对完整副本迁移、验证并切换。旧 `0.1` Home 到 `0.2` 不支持普通自动升级，须使用安装指南中的显式联合迁移。Host 阶段失败可能保留已成功更新的插件和旧 Host；整个命令不提供跨两个阶段的原子回退。真实跨版本 Host 更新的验收状态见 [RSI 状态](../../docs/rsi-status.md)。
-
-Host 事务覆盖同一 Home 的其它 profile，保留原配置、owner、历史记录、密钥、授权期限和已用额度。候选服务须重新通过启动与运行验收；中断重试先恢复已有事务，再规划更新。冻结本地源码/cohort 的升级仍不支持。兼容范围外的新 `latest` 会明确报错，须完成适配后才能更新；不会改用 `next` 或替换全局 Host。
-
-### 三条语义边界
-
-- **自身先行，失败即止**。`--all` 下先升级 dsh-rsi 自身，失败就**不**继续升级 cohort —— 避免用旧版 rsi 的判断去驱动一轮新的 cohort 升级。
-- **同版本闭环**。自身升级固定写回当前 `dsh-rsi` 实际所属的 npm prefix，不受当前目录 `.npmrc` 或沙箱 prefix 影响；`--all` 使用 registry 解析出的精确版本 tag 下载安装器，无法确定精确版本时停止，绝不回退到旧进程版本。
-- **已是目标版本则跳过自身安装，但继续 `--all`**。先用 `npm view` 把 selector 解析为精确版本，与自身版本相同时不重复安装 CLI；`--all` 仍继续升级 profile。registry 无法解析 dist-tag 时可单独升级 CLI，但整体升级会 fail-closed，避免 CLI 与安装器 tag 错配。
-
-### 与 install / reinstall 的区别
-
-| | `update --all` | `install` | `reinstall` |
-| --- | --- | --- | --- |
-| 语义 | 原地升级已装的 cohort | 安装 / 修复 | **先 purge 再装** |
-| 保留 patch、凭据、Session、Goal | 是 | 是 | **否**（purge 阶段删除） |
-| 新增场景能力 | 否（只升当前已装的顶层依赖） | 是 | 是 |
-| 升级 dsh-rsi 自身 | 是（本命令的主职责） | 顺带（安装器尾部按 cohort 版本装） | 同 install |
-
-## 日常运维：start / stop / restart / logs
-
-```bash
-# 改完配置或升级插件后让 profile 生效
-dsh-rsi restart --profile web
-
-# 停掉全部 profile 的常驻服务（服务定义与数据都保留，可再 start）
-dsh-rsi stop
-
-# 先看会执行什么，再真正动手
-dsh-rsi restart --dry-run
-
-# 看日志尾部
-dsh-rsi logs --profile web --lines 100
-dsh-rsi logs --errors-only
-```
-
-不带 `--profile` 时作用于 DSH home 下的**全部真实 profile**。枚举以 `profiles/<name>/package.json` 为 profile 身份锚点；共享的 `profiles/node_modules`、缓存目录、无 manifest 的暂存目录和符号链接不会被当成 profile，也不会生成 `ai.deepseek.dsh.profile.node_modules` 之类的错误服务目标。
-
-`logs` 选项：
-
-- `--lines <n>`：每个日志文件显示的尾部行数（默认 200，范围 1..10000；非法值报错退出 2，不静默回落）
-- `--errors-only`：只显示 `*-host.error.log`
-
-### 与 purge 的职责分界
-
-这三个运维命令和 `purge` 的停服步骤刻意分开：
-
-| | start / stop / restart | purge |
-| --- | --- | --- |
-| 改变运行状态 | 是 | 是 |
-| 删除 plist / unit 定义 | **否** | 是 |
-| 删除 profile 数据 | **否** | 是 |
-| 服务未注册时 | 报错并给出注册指引 | 视作已停止，继续删数据 |
-
-`stop` 之后服务定义仍在，所以可以再 `start` 起来；`purge` 的停服会连定义一起注销。
-
-### 安全门控
-
-- **不隐式注册服务**：服务定义文件不存在时**不会**顺手装一个（那会绕过安装器的归属、路径与凭据校验）。`core` / `web` 场景默认没有常驻服务，这是正常状态；命令会提供可直接复制的 `dsh-rsi install --profile <p> --scenario lark` / `--scenario supervised`，并以退出码 1 结束。`dsh-rsi-setup` 是插件包内的专用工具，不保证作为全局命令存在，因此不再把它作为用户修复入口。
-- **归属 fail-closed**：同名文件存在但内容不属受管（人工改写或被第三方占用）时拒绝操作、原样保留文件，并说明需人工确认归属。判定依据与 purge 一致 —— Linux 要求 unit 同时含 `DeepSeek Harness profile`、对应 `--profile <p>`、`--no-open`；macOS 解析 plist 结构，核对 Label、完整启动参数、工作目录、`DSH_HOME`、日志路径和执行设置，还核对已加载 launchd job 的路径、参数与 Home。无法查询时拒绝变更。
-- **dry-run 措辞与实际执行严格区分**：`--dry-run` 下不执行任何命令，结论行为「将启动/将停止/将重启」；只有真正执行过才输出「已…」。
-- **多 profile 部分失败即非零**：任一 profile 出错，命令整体以退出码 1 结束，便于脚本判定；其余 profile 的处理结果照常打印。
-- 仅支持 macOS（launchd）与 Linux（systemd --user），其它平台明确报错而非静默成功。
-
-## status / doctor
-
-```bash
-dsh-rsi status
-dsh-rsi --profile web status
-dsh-rsi doctor
-DSH_HOME=/custom/.dsh dsh-rsi doctor
-```
-
-两个命令都不修改任何文件，适合在升级、报障或怀疑安装损坏时先跑一遍。
-
-## purge（彻底卸载）
-
-```bash
-# 先看计划（强烈建议）
-dsh-rsi purge --dry-run
-
-# 全量 purge（交互时需输入 purge 确认）
-dsh-rsi purge --yes
-
-# 只清单个 profile，保留兄弟 profile 与共享 DSH home
-dsh-rsi purge --profile web --yes
-
-# 连同全局 @deepseek-ai/dsh host 一起卸载（仅限全量）
-dsh-rsi purge --yes --remove-host
-
-# 不备份、保留外部凭据
-dsh-rsi purge --yes --no-backup --keep-keychain
-```
-
-purge 选项：
-
-- `--no-backup`：删除前不生成 `~/dsh-purge-backup-<UTC时间戳>.tar.gz`（默认备份，权限 0600）
-- `--keep-keychain`：保留 macOS Keychain / Linux Secret Service 中的受管凭据
-- `--remove-host`：同时 `npm uninstall -g @deepseek-ai/dsh`（仅限全量；默认保留 host）
-
-### purge 会删除 / 保留什么
-
-**删除：**
-
-- 全量：整个 DSH home（profiles、logs、uninstalled-profiles、home 内锁文件），以及 home 外的生命周期事务目录、失败诊断目录和 home 锁。Linux 清理旧 `/tmp` rendezvous 锁；macOS 保留共享锁文件的稳定 inode，避免持锁期间被另一个进程重建同名锁文件。
-- 单 profile：`profiles/<name>`、对应的两份 host 日志、归属该 profile 的失败诊断目录
-- 受管常驻服务：macOS `launchctl bootout` + 删除 `~/Library/LaunchAgents/ai.deepseek.dsh.profile.<p>.plist`；Linux `systemctl --user disable --now` + `reset-failed` + 删除受管 unit 文件
-- 外部凭据：按各 profile 的 setup journal / cleanup 记录**权威反查** service 前缀为 `dsh/` 的条目，逐条从 Keychain（`security delete-generic-password`）或 Secret Service（`secret-tool clear`）删除；home 内的 protected-file 凭据随 home 一起删除
-
-**保留：**
-
-- 本地 checkout 源码：local 形态在 `node_modules/@dsh-enhanced/` 下是指向 checkout 的符号链接，purge 只随 profile 目录删除链接本身，**绝不删除 checkout**；报告中会列出 checkout 路径，确认无用后可自行 `rm -rf`
-- 全局 `@deepseek-ai/dsh` host（除非加 `--remove-host`）
-- 外部凭据（加 `--keep-keychain` 时）
-
-### 安全门控
-
-- **进程静止检查**：Linux 已注册受管服务的精确 systemd MainPID 会交给 installer 的 service-aware 事务停服、屏蔽、升级和恢复；其它同 profile 的手工/测试 Host 仍会拒绝执行并列出 PID，不会被自动 kill。macOS 及无受管服务场景仍要求调用前保持整个目标 Home 静止；macOS 无法从命令行确认手动 Host 所属 Home，发现同 profile 进程时会阻止 purge，须人工确认并先行停止。
-- **服务归属 fail-closed**：Linux 仅当 unit 文件内容同时包含受管标记（`DeepSeek Harness profile`、对应 `--profile <p>`、`--no-open`）才删除。macOS 还要求本 Home 的 plist 与已加载 job 归属一致；`bootout` 失败、job 未注销或旧 PID 仍在时保留 plist 并中止数据删除。同一 GUI 用户下各 Home 共享 label；Mac purge 从枚举 profile 到停服、备份、删除和凭据清理始终按 Home 锁 → 所有目标 UID/profile 锁的顺序持有内核锁。
-- **locator 先扫描、文件先删除、凭据后清理**：删文件前先扫描各 profile 的 setup journal / cleanup 记录（journal 位于 DSH home 内，必须在删除前扫出凭据 locator）；随后**先删除文件**，再按预扫描的 locator 逐条删除外部凭据。单条凭据删除失败不会回滚已删文件，而是以「文件已删除，但以下凭据条目清理失败，请手工删除：…」报错并以退出码 1 结束。默认的 tar.gz 备份内含完整 journal，可解包后据此复查、手工补删；`--no-backup` 下文件与 journal 均不可恢复，只剩错误消息中列出的 service/account 可供定位。
-- 单 profile 与 `--remove-host` 互斥；仅支持 macOS / Linux。
-
-### 与安装器 `--operation uninstall` 的区别
-
-安装器的 `uninstall` 是**保留数据的归档**：把旧 profile 移到 `$DSH_HOME/uninstalled-profiles/` 并重建干净基础 profile，凭据 / Session / Goal 等状态保留。`dsh-rsi purge` 是**彻底删除**：删除 DSH home 与生命周期残留（默认先打 tar.gz 备份），用于崩溃救机、报废环境或干净重装。
-
-## 崩溃机器上的单文件救机脚本
-
-机器上没有 `dsh-rsi` 时（host 已损坏或全局命令被删），可直接运行仓库中的自包含脚本；它会优先委托 `dsh-rsi`，找不到时使用等价的内联精简实现：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/purge.sh \
-  | bash -s -- --yes
-```
-
-该脚本是 mutable-main 运维脚本（非供应链引导路径），参数与 `dsh-rsi purge` 一致。
-
-## 退出码
+用法：`dsh-rsi [全局选项] <命令> [命令参数]`。`--dsh-home <path>` 选择 Home（默认 `$DSH_HOME`，否则 `~/.dsh`）；`--profile <name>` 选择 profile；`--dry-run` 预览操作；`--yes` 适用于清理确认并在安装时透传。`-h` / `--help` 查看 CLI 帮助，`install --help` 查看安装器帮助。`--capabilities` 是供救机脚本使用的只读 JSON 探测接口。
 
 | 退出码 | 含义 |
 | --- | --- |
-| 0 | 成功。含 dry-run 与多数幂等场景：外部凭据条目本不存在、服务未注册、`rm --force` 删除已不存在的路径等 |
-| 1 | update：selector 非法、`npm install --global` 失败（`--all` 下自身升级失败则不再委托安装器）；start/stop/restart：服务未注册、归属不明被拒、或底层 `systemctl`/`launchctl` 失败（多 profile 下任一失败即 1）；logs：DSH home 下没有任何 profile；purge 执行失败（活动进程、服务/凭据错误、备份失败等）；install 下载/委托失败。两个非幂等边界：① 默认备份下全量 purge 不存在的 DSH home，`tar` 因源目录不存在以退出码 2 失败、rsi 退出 1（`--no-backup` 同场景为 0）；② `purge --profile <不存在的名字>`（含 dry-run）直接报「profile 不存在」退出 1。单文件 `purge.sh` 的内联实现对不存在的 home 统一退出 0，在此边界上与 dsh-rsi 不一致 |
-| 2 | 参数错误 |
-| 其它非 0 | `install` / `reinstall` 安装器的退出码原样透传 |
+| `0` | 命令成功执行，包含只读查看和 dry-run；不代表模型或学习能力已验证。 |
+| `1` | CLI 操作失败，例如服务未注册、Home/进程归属无法确认、备份或清理失败；不存在的 profile 也报错。 |
+| `2` | CLI 参数错误。 |
+| 其它非零 | `install` / `reinstall` 委托安装器后，透传其退出码。 |
 
-## License
-
-MIT
+许可证：MIT。

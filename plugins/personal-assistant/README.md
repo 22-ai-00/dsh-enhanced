@@ -32,25 +32,11 @@ patch 会完整覆盖上游 `permission` 行，并挂载唯一的 `dsh-enhanced-
 
 ## 配置默认模型
 
-meta-bundle 附带 `dsh-model-setup`（同时以 `@dsh-enhanced/assistant-policy/model-setup` 导出），把部署默认模型写入 DSH `settings.yaml` 的 `agent-default-model`；自定义 OpenAI 兼容网关另写 `llm-pi-ai.providers.<route>`。它只写模型选择与 provider profile，不改权限、不动 channel。
+日常添加 API 模型请使用 **Web → 设置 → 模型**；在 Web 聊天选择器或飞书 `/model` 中切换当前会话。完整步骤见[模型配置](../../docs/models.md)，无需改动插件代码或把 API Key 写入项目。
 
-```sh
-# DeepSeek 官方（缺省模型 deepseek-v4-flash）
-dsh-model-setup --provider deepseek-official --model deepseek-v4-flash
+安装器会保留已有默认选择；发现已登录的 TraeX 且没有明确默认值时，为当前 profile 选择 `traex-agent`。TraeX 只在已启用其插件的 profile 中可用，见[TraeX 帮助](../traex-acp-provider/README.md)。
 
-# 自定义网关（缺省协议 openai-completions）
-dsh-model-setup --provider super-relay --model glm5.2 \
-  --base-url https://super-relay.example/v1 --api openai-completions
-
-# 本机 TraeX（agent route，无 API Key）：写默认选择并在指定 profile 启用 route
-dsh-model-setup --provider traex-agent --enable-in-profile web
-```
-
-API Key 绝不作为参数传入：加 `--store-key` 时，值只从 `DSH_ENHANCED_MODEL_API_KEY` 或按 provider 派生的凭据引用（`deepseek-official` 为 `DEEPSEEK_API_KEY`，其余形如 `SUPER_RELAY_API_KEY`）读取，并原子写入 `$DSH_HOME/.credentials.yaml`（`0600`，目录 `0700`），密钥缺失时 fail-closed 且不改动 `settings.yaml`。不加 `--store-key` 则只写 route 选择，凭据仍按 DSH 运行时的环境/`.credentials.yaml` 解析。
-
-`traex-agent` 是 **agent route**：不需要 API Key（也拒绝 `--store-key` 与网关传输字段），由本机已登录的 TraeX 通过 [`@dsh-enhanced/traex-acp-provider`](../traex-acp-provider/README.md) 提供。它把全局 `agent-default-model` 指向 `traex-agent`，并用 `--enable-in-profile <profile>` 在该 profile 的 `cordis.patch.yml` 里把 provider 行置为 `enabled: true`（保留其它行/注释/`!!js`，仅在缺失时补默认 `cwd`）。注意 `agent-default-model` 是全局唯一段、被所有 profile 共享，而该 route 的适配器只在启用了本 bundle 的 profile 里注册；因此只有已启用的 profile（如 `web`）能解析 `traex-agent`，`headless` 等未装该 bundle 的 profile 会 `NO_ADAPTER`。安装器的模型配置引导即调用此工具，详见[安装脚本文档](../../scripts/install/README.md#配置默认模型)。
-
-自动安装使用 `--profile <profile> --default-if-absent --enable-in-profile <profile>`：保留 settings、home patch 和 profile patch 中已有的显式模型选择，只在没有选择时写入当前 profile 默认模型；`--enable-only` 只启用 route。检测到的命令通过 `--agent-command` 补入缺失字段，已有 command/cwd 保留。手动设置也应传 `--profile`；不带 profile 的旧写法产生待导入的 settings 文件，不再是跨 profile 的即时全局设置。
+部署脚本可通过本包附带的 `dsh-model-setup` 设置默认值，参数和作用范围见[高级模型配置](../../scripts/install/maintenance.md#配置默认模型)。这与“添加一个可选模型”不同；手动调用应显式指定 `--profile`，避免生成旧版全局待导入设置。
 
 ## 权限与数据
 
