@@ -45,6 +45,10 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 
 应用授权与用户业务授权在安装流程中完成。插件仍运行在 DSH Host 内；安装到 `web` profile 时，向导默认让该 profile 在后台常驻，不需要保持浏览器打开，也不需要另行运行 `dsh web`。
 
+`DSH-CONNECT-...` 仅用于临时长连接上的 owner 身份绑定，绑定阶段不会自动回复，也不会建立 Delivery 聊天会话。应在当前向导的等待窗口内发送最新短语；向导超时退出后，旧短语不再有效。以终端的绑定成功结果判断，不以聊天中是否回复判断。
+
+全新或完整重装的 Home 在常驻服务启动后，还需要 owner 私聊发送一条普通消息或 `/model`，以建立真实会话；`/model` 可同时验证模型卡片与选择回调。若后续原生学习配置报告 `exactly one current owner DM is required`，先完成这一步，再通过安装器的 Host-aware 入口续跑 owner 配置。此时已有身份绑定和普通服务会保留，无需重新配对或授予额外业务权限。
+
 ### 官方一键授权的范围
 
 一键模式使用 OAuth 2.0 Device Authorization Grant。只传 `--create-app` 时，确认页同时提供“选择已有应用”和“创建新应用”；同时传 `--app-id` 时，只更新该已有应用。两种方式都会先显示权限、事件与回调增量，确认后才生效。
