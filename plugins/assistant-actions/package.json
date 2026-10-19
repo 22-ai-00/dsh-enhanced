@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-actions",
-  "version": "0.1.55",
+  "version": "0.1.56",
   "description": "Owner-authorized GitHub action facade with embedded compatibility and an external Unix broker.",
   "license": "MIT",
   "type": "module",
