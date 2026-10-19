@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, mkdtemp, mkdir, realpath, rm, writeFile, symlink } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -24,15 +24,139 @@ async function fixture() {
   return { root, home, repository, profile, receipt, marker }
 }
 
+async function auxiliary(f: Awaited<ReturnType<typeof fixture>>, suffix = 'a'.repeat(20)) {
+  const name = `host-migration-${suffix}`
+  const root = join(f.home, 'rsi-local-cohorts', name)
+  const artifacts = join(root, 'artifacts')
+  await mkdir(artifacts, { recursive: true, mode: 0o700 })
+  const tarball = join(artifacts, 'assistant-actions.tgz')
+  const bundles = ['assistant-actions', 'assistant-automations', 'assistant-policy', 'plugin-control-plane']
+  const packages = []
+  for (const slug of bundles) {
+    const artifact = join(artifacts, `${slug}.tgz`)
+    const content = `archive:${slug}`
+    await writeFile(artifact, content, { mode: 0o600 })
+    packages.push({ name: `@dsh-enhanced/${slug}`, path: `plugins/${slug}`, bundle: true,
+      tarball: artifact, sha256: createHash('sha256').update(content).digest('hex'), runtimeDependencies: [], files: [] })
+  }
+  const body = { schemaVersion: 1, root, sourceCommit: 'a'.repeat(40), version: '0.1.56',
+    sourceRepository: f.repository, allowBuilds: {}, bundles, packages }
+  const receipt = join(root, 'receipt.json')
+  await writeFile(receipt, JSON.stringify({ ...body,
+    receiptDigest: createHash('sha256').update(JSON.stringify(body)).digest('hex') }), { mode: 0o600 })
+  return { name, root, artifacts, tarball, receipt }
+}
+
+async function rewriteAuxiliaryReceipt(path: string, change: (body: Record<string, unknown>) => void): Promise<void> {
+  const original = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
+  const { receiptDigest: _digest, ...body } = original
+  change(body)
+  await writeFile(path, JSON.stringify({ ...body,
+    receiptDigest: createHash('sha256').update(JSON.stringify(body)).digest('hex') }))
+}
+
 test('detects exactly the owner target and rejects unsafe or ambiguous files', async () => {
   const f = await fixture()
   expect(await detectFrozenOwner(f.home)).toEqual({ home: f.home, profile: f.profile, repository: f.repository })
   await writeFile(join(f.home, 'rsi-local-cohorts', 'other'), '')
-  await expect(detectFrozenOwner(f.home)).rejects.toThrow(/恰好一个/)
+  await expect(detectFrozenOwner(f.home)).rejects.toThrow(/未知本地 cohort/)
   await rm(join(f.home, 'rsi-local-cohorts', 'other'))
   await rm(f.receipt)
   await symlink(f.marker, f.receipt)
   await expect(detectFrozenOwner(f.home)).rejects.toThrow()
+})
+
+test('single owner marker selects target while retaining historical host-migration cohorts', async () => {
+  const f = await fixture()
+  for (const suffix of ['a'.repeat(20), 'b'.repeat(20), 'c'.repeat(20), 'd'.repeat(20), 'e'.repeat(20)]) {
+    await auxiliary(f, suffix)
+  }
+  expect(await detectFrozenOwner(f.home)).toEqual({ home: f.home, profile: f.profile, repository: f.repository })
+})
+
+test('rejects unknown, tampered, extra-owner and real-profile auxiliary cohorts', async () => {
+  {
+    const f = await fixture()
+    await mkdir(join(f.home, 'rsi-local-cohorts', 'unknown'), { mode: 0o700 })
+    await expect(detectFrozenOwner(f.home)).rejects.toThrow(/未知本地 cohort/)
+  }
+  {
+    const f = await fixture(), item = await auxiliary(f)
+    const original = JSON.parse(await readFile(item.receipt, 'utf8')) as Record<string, unknown>
+    await writeFile(item.receipt, JSON.stringify({ ...original, sourceCommit: 'b'.repeat(40) }))
+    await expect(detectFrozenOwner(f.home)).rejects.toThrow(/摘要不一致/)
+  }
+  {
+    const f = await fixture(), item = await auxiliary(f)
+    const original = JSON.parse(await readFile(item.receipt, 'utf8')) as Record<string, unknown>
+    const { receiptDigest: _digest, ...body } = original
+    const forged = { ...body, root: join(f.home, 'rsi-local-cohorts', 'other') }
+    await writeFile(item.receipt, JSON.stringify({ ...forged,
+      receiptDigest: createHash('sha256').update(JSON.stringify(forged)).digest('hex') }))
+    await expect(detectFrozenOwner(f.home)).rejects.toThrow(/收据格式或绑定无效/)
+  }
+  {
+    const f = await fixture()
+    await auxiliary(f)
+    const other = 'other'
+    await writeFile(join(f.home, `.rsi-coordinator-${createHash('sha256').update(other).digest('hex').slice(0, 16)}.json`),
+      '{}', { mode: 0o600 })
+    await expect(detectFrozenOwner(f.home)).rejects.toThrow(/恰好一个/)
+  }
+  {
+    const f = await fixture(), item = await auxiliary(f)
+    await mkdir(join(f.home, 'profiles', item.name), { recursive: true, mode: 0o700 })
+    await expect(detectFrozenOwner(f.home)).rejects.toThrow(/真实 profile/)
+  }
+})
+
+test('rejects auxiliary cohort unknown files, symlinks and unsafe permissions', async () => {
+  {
+    const f = await fixture(), item = await auxiliary(f)
+    await writeFile(join(item.root, 'extra'), 'x')
+    await expect(detectFrozenOwner(f.home)).rejects.toThrow(/未知文件/)
+  }
+  {
+    const f = await fixture(), item = await auxiliary(f)
+    await rm(item.tarball)
+    await symlink(f.receipt, item.tarball)
+    await expect(detectFrozenOwner(f.home)).rejects.toThrow(/制品文件不安全/)
+  }
+  {
+    const f = await fixture(), item = await auxiliary(f)
+    await chmod(item.root, 0o755)
+    await expect(detectFrozenOwner(f.home)).rejects.toThrow(/目录不安全/)
+  }
+})
+
+test('rejects same-length artifact tampering even when receipt and file metadata remain plausible', async () => {
+  const f = await fixture(), item = await auxiliary(f)
+  const content = await readFile(item.tarball)
+  content[0] = content[0] === 0x58 ? 0x59 : 0x58
+  await writeFile(item.tarball, content)
+  await expect(detectFrozenOwner(f.home)).rejects.toThrow(/制品摘要不一致/)
+})
+
+test('rejects rehashed auxiliary receipt with invalid package graph', async () => {
+  const cases: { change: (body: Record<string, unknown>) => void; message: RegExp }[] = [
+    { change: body => { ((body.packages as Record<string, unknown>[])[0]!).path = 'packages/assistant-actions' },
+      message: /包记录无效/ },
+    { change: body => { ((body.packages as Record<string, unknown>[])[0]!).bundle = false },
+      message: /包记录无效/ },
+    { change: body => { ((body.packages as Record<string, unknown>[])[0]!).runtimeDependencies = ['@dsh-enhanced/missing'] },
+      message: /依赖闭包无效/ },
+    { change: body => { ((body.packages as Record<string, unknown>[])[0]!).files = [
+      { path: '../escape', sha256: 'a'.repeat(64), mode: 0o600 },
+    ] }, message: /文件记录无效/ },
+    { change: body => { body.bundles = ['assistant-actions', 'assistant-automations', 'assistant-policy', 'plugin-control-plane', 'unknown'] },
+      message: /缺少必要 bundle/ },
+    { change: body => { body.bundles = [] }, message: /bundle 清单无效/ },
+  ]
+  for (const { change, message } of cases) {
+    const f = await fixture(), item = await auxiliary(f)
+    await rewriteAuxiliaryReceipt(item.receipt, change)
+    await expect(detectFrozenOwner(f.home)).rejects.toThrow(message)
+  }
 })
 
 test('default Home alias resolves to canonical owner Home and dispatches its original target', async () => {
