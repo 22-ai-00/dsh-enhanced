@@ -6,11 +6,13 @@ import * as FsPolicy from '@deepseek-ai/dsh-fs-observation-policy'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
+import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as FileTools from '@deepseek-ai/dsh-tool-fs'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import WorkingDirectoryService from '@deepseek-ai/dsh-working-directory'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -36,7 +38,7 @@ async function fixture(options: { existing?: string; denyRead?: boolean; changeA
   const root = await mkdtemp(join(tmpdir(), 'assistant-skills-file-observation-'))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   if (options.existing !== undefined) await writeFile(join(root, 'artifact.txt'), options.existing)
-  const ctx = new Context(); cleanups.push(() => ctx.fiber.restart())
+  const ctx = new Context(); new SessionProjectionRegistry(ctx); cleanups.push(() => ctx.fiber.restart())
   const owner = agent(ctx, root)
   const scope = { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: root, preset: 'primary' }
   const source = { protocol: 'assistant-goals/verified-workflow-source/v1' as const, scope,
@@ -50,7 +52,7 @@ async function fixture(options: { existing?: string; denyRead?: boolean; changeA
   ctx.provide('assistantVerifier' as never, {} as never)
   ctx.provide('assistantGoals' as never, { inspectVerifiedWorkflowSource: () => source,
     inspectWorkflowRunContext: (_agent: Agent, goalId: string) => ({ scope, goalId, sessionId: String(owner.session.id), goalExecutionRunId: `execution-${goalId}`, nativeGoalId: `native-${goalId}`, definition: { version: 1, digest: 'd'.repeat(64) } }) } as never)
-  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(LocalFileSystem, { cwd: root }); await ctx.plugin(FsPolicy); await ctx.plugin(FileTools); await ctx.plugin(SkillRegistry)
+  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(LocalFileSystem, { cwd: root }); await ctx.plugin(WorkingDirectoryService, { defaultDirectory: root }); await ctx.plugin(FsPolicy); await ctx.plugin(FileTools); await ctx.plugin(SkillRegistry)
   await ctx.plugin(AssistantSkillsService, { databasePath: join(root, 'skills.sqlite'), allowedTools: [...(options.allowedTools ?? ['read', 'write', 'edit'])] })
   const calls: { name: string; callId: string; rootCallId: string; arguments: unknown; token: unknown; parent: unknown }[] = []
   const prepared: string[] = []

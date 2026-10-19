@@ -27,9 +27,9 @@ test('behavior verifier recipe pins the exact workspace and lockfile native vers
   }
   const recipe = await readFile(join(repositoryRoot, 'scripts/isolation/plugin-verifier.Dockerfile'), 'utf8')
   for (const [name, version] of [
-    ['@deepseek-ai/cordis', '4.0.4'],
-    ['@deepseek-ai/dsh-tools', '0.2.0-rc.2'],
-    ['@deepseek-ai/dsh-system-prompt', '0.2.0-rc.2'],
+    ['@deepseek-ai/cordis', '4.0.5'],
+    ['@deepseek-ai/dsh-tools', '0.2.1-rc.2'],
+    ['@deepseek-ai/dsh-system-prompt', '0.2.1-rc.2'],
   ] as const) {
     expect(workspace.catalog[name]).toBe(version)
     expect(lock.catalogs.default[name]).toEqual({ specifier: version, version })
@@ -54,7 +54,7 @@ async function architectureNode(root: string, architecture: 'x64' | 'arm64', pla
   return launcher
 }
 
-async function fixture(architecture: 'x64' | 'arm64' = 'x64', rootParent = tmpdir()) {
+async function fixture(architecture: 'x64' | 'arm64' = 'x64', rootParent = tmpdir(), previousHost = false) {
   const root = await realpath(await mkdtemp(join(rootParent, 'rsi-creation-build-'))); roots.push(root)
   const home = join(root, 'home'), repository = join(home, 'rsi-sources', 'owner', 'checkout')
   const bare = join(home, 'rsi-sources', 'owner', 'release.git')
@@ -78,6 +78,12 @@ async function fixture(architecture: 'x64' | 'arm64' = 'x64', rootParent = tmpdi
   ]
   for (const name of pinned) {
     const path = join(repository, name); await mkdir(dirname(path), { recursive: true }); await copyFile(join(repositoryRoot, name), path)
+  }
+  if (previousHost) {
+    const recipe = join(repository, 'scripts/isolation/plugin-verifier.Dockerfile')
+    const prior = (await readFile(recipe, 'utf8')).replace('= 4.0.5', '= 4.0.4').replaceAll('= 0.2.1-rc.2', '= 0.2.0-rc.2')
+    expect(createHash('sha256').update(prior).digest('hex')).toBe('9301bf426688c46f3d4fd8bcae7acde5da283ed6730f87be1f225d93fca95823')
+    await writeFile(recipe, prior)
   }
   git(repository, 'add', '.'); git(repository, 'commit', '-m', 'pinned source')
   const sourceCommit = git(repository, 'rev-parse', 'HEAD')
@@ -209,6 +215,14 @@ async function rebaseStageBuild(f: Awaited<ReturnType<typeof fixture>>, stagePhy
 }
 
 describe.skipIf(process.platform !== 'linux' || process.arch !== 'x64')('private RSI plugin behavior image preparation', () => {
+  test('retains the exact prior Host asset receipt without allowing subsequent asset changes', async () => {
+    const f = await fixture('x64', tmpdir(), true)
+    const prepared = await prepareRsiCreationBuildEnvironment(f.args)
+    expect(await readRsiCreationBuildEnvironment(f.args)).toEqual(prepared)
+    const recipe = join(f.repository, 'scripts/isolation/plugin-verifier.Dockerfile')
+    await writeFile(recipe, `${await readFile(recipe, 'utf8')}\n# unreviewed change\n`)
+    await expect(readRsiCreationBuildEnvironment(f.args)).rejects.toThrow('trusted asset changed')
+  })
   test('materializes only a newly verified candidate image into a stopped logical Home receipt', async () => {
     const f = await fixture()
     await prepareRsiCreationBuildEnvironment(f.args)

@@ -5,9 +5,11 @@ import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
+import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as FileTools from '@deepseek-ai/dsh-tool-fs'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import WorkingDirectoryService from '@deepseek-ai/dsh-working-directory'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -36,6 +38,7 @@ test('native filesystem tools run through the production repair wrapper and reje
   await symlink(privateRoot, join(workspace, 'private-link'))
 
   const ctx = new Context()
+  new SessionProjectionRegistry(ctx)
   cleanups.push(async () => { await ctx.fiber.dispose() })
   let agent!: Agent
   let repairContext: Context | undefined
@@ -55,6 +58,7 @@ test('native filesystem tools run through the production repair wrapper and reje
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime, { mode: 'native' })
   await ctx.plugin(LocalFileSystem, { cwd: workspace })
+  await ctx.plugin(WorkingDirectoryService, { defaultDirectory: workspace })
   await ctx.plugin(FileTools)
   await ctx.inject(['tools'], consumer => { repairContext = consumer })
   if (repairContext === undefined) throw new Error('repair tools consumer did not activate')

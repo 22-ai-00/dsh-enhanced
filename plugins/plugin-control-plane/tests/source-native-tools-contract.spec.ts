@@ -61,7 +61,7 @@ it('provides the native Tools SDK through the real generator and a single frozen
     devDependencies: Record<string, string>
   }
   expect(manifest.name).toBe(packageName)
-  expect(manifest.peerDependencies[sdk]).toBe('0.2.0-rc.2')
+  expect(manifest.peerDependencies[sdk]).toBe('0.2.1-rc.2')
   expect(manifest.peerDependenciesMeta[sdk]).toEqual({ optional: true })
   expect(manifest.devDependencies[sdk]).toBe('catalog:')
   expect(manifest.devDependencies[systemPrompt]).toBe('catalog:')
@@ -82,9 +82,9 @@ it('provides the native Tools SDK through the real generator and a single frozen
   expect(generatedLock.split(`\n  plugins/${name}:\n`)).toHaveLength(2)
   expect(generatedLock.replace(importer!, '')).toBe(originalLock)
   expect(importer).toContain(`'${sdk}':\n        specifier: 'catalog:'`)
-  expect(importer).toMatch(/'@deepseek-ai\/dsh-tools':\n        specifier: 'catalog:'\n        version: "0\.2\.0-rc\.2[^"\n]*"/u)
+  expect(importer).toMatch(/'@deepseek-ai\/dsh-tools':\n        specifier: 'catalog:'\n        version: "0\.2\.1-rc\.2[^"\n]*"/u)
   expect(importer!.match(/'@deepseek-ai\/dsh-system-prompt':/gu)).toHaveLength(1)
-  expect(importer).toMatch(/'@deepseek-ai\/dsh-system-prompt':\n        specifier: 'catalog:'\n        version: "0\.2\.0-rc\.2[^"\n]*"/u)
+  expect(importer).toMatch(/'@deepseek-ai\/dsh-system-prompt':\n        specifier: 'catalog:'\n        version: "0\.2\.1-rc\.2[^"\n]*"/u)
   await expect(verifyCreatedPluginWorkspace({ worktree: isolated.worktree, baseCommit, name,
     environment, signal, assertCurrent: () => undefined, creation, files: candidate })).resolves.toEqual(prepared)
 
