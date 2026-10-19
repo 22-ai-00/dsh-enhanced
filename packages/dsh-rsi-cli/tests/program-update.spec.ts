@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
 import { assertFrozenCliUpdateVersion, detectFrozenOwner, runFrozenOwnerUpdate, type ProgramUpdatePorts } from '../src/program-update.ts'
 import { main } from '../src/index.ts'
@@ -55,6 +55,11 @@ async function rewriteAuxiliaryReceipt(path: string, change: (body: Record<strin
     receiptDigest: createHash('sha256').update(JSON.stringify(body)).digest('hex') }))
 }
 
+function historicalCandidate(home: string): string {
+  return join(dirname(home), `.dsh-rsi-local-updates-${createHash('sha256').update(home).digest('hex').slice(0, 16)}`,
+    'b'.repeat(64), 'source', 'repository')
+}
+
 test('detects exactly the owner target and rejects unsafe or ambiguous files', async () => {
   const f = await fixture()
   expect(await detectFrozenOwner(f.home)).toEqual({ home: f.home, profile: f.profile, repository: f.repository })
@@ -72,6 +77,23 @@ test('single owner marker selects target while retaining historical host-migrati
     await auxiliary(f, suffix)
   }
   expect(await detectFrozenOwner(f.home)).toEqual({ home: f.home, profile: f.profile, repository: f.repository })
+})
+
+test('accepts a historical candidate source bound to this Home without requiring that source to exist', async () => {
+  const f = await fixture(), item = await auxiliary(f)
+  await rewriteAuxiliaryReceipt(item.receipt, body => { body.sourceRepository = historicalCandidate(f.home) })
+  expect(await detectFrozenOwner(f.home)).toEqual({ home: f.home, profile: f.profile, repository: f.repository })
+})
+
+test('rejects auxiliary candidate source from another Home or outside its exact namespace', async () => {
+  for (const sourceRepository of [
+    (home: string) => historicalCandidate(join(dirname(home), 'other-home')),
+    (home: string) => `${historicalCandidate(home)}/../repository`,
+  ]) {
+    const f = await fixture(), item = await auxiliary(f)
+    await rewriteAuxiliaryReceipt(item.receipt, body => { body.sourceRepository = sourceRepository(f.home) })
+    await expect(detectFrozenOwner(f.home)).rejects.toThrow(/收据格式或绑定无效/)
+  }
 })
 
 test('rejects unknown, tampered, extra-owner and real-profile auxiliary cohorts', async () => {
