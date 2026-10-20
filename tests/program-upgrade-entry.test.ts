@@ -52,9 +52,11 @@ describe('program-only upgrade entry', () => {
     expect(parseProgramUpgradeArgs([...base, '--dry-run'])).toMatchObject({ home: '/private/home',
       profile: 'assistant', selector: 'latest', dryRun: true, recover: false })
     expect(parseProgramUpgradeArgs([...base, '--recover'])).toMatchObject({ recover: true })
+    expect(parseProgramUpgradeArgs([...base, '--recover-readiness'])).toMatchObject({ recoverReadiness: true, recover: false })
     for (const args of [[], ['--dsh-home', 'relative', '--profile', 'assistant'],
       [...base, '--install-owner'], [...base, '--permission-preset', 'danger-full-access'],
-      [...base, '--dsh-version', 'next'], [...base, '--profile', 'web']]) {
+      [...base, '--dsh-version', 'next'], [...base, '--profile', 'web'],
+      [...base, '--recover-readiness', '--recover'], [...base, '--recover-readiness', '--dsh-version', 'latest']]) {
       expect(() => parseProgramUpgradeArgs(args)).toThrow()
     }
   })

@@ -274,6 +274,28 @@ function assertConnectionBound(files: readonly OpenedFile[], exclude: ReadonlySe
   }
 }
 
+/** Require SQLite's own newly opened descriptors, not another connection in this process. */
+function assertFreshConnectionBound(files: readonly OpenedFile[], prior: ReadonlySet<number>): void {
+  if (process.platform !== 'linux') return
+  let entries: string[]
+  try { entries = readdirSync(procSelfFd) } catch {
+    fail('database-drift', 'cannot inspect the database connection file descriptors')
+  }
+  const fresh = entries.flatMap(entry => {
+    const descriptor = Number(entry)
+    if (!Number.isInteger(descriptor) || descriptor <= 2 || prior.has(descriptor)) return []
+    try {
+      const stat = fstatSync(descriptor, { bigint: true })
+      return stat.isFile() ? [{ device: stat.dev, inode: stat.ino }] : []
+    } catch { return [] }
+  })
+  for (const file of files) {
+    if (!fresh.some(inode => inode.device === file.stat.dev && inode.inode === file.stat.ino)) {
+      fail('database-drift', 'database connection is not bound to a newly opened pinned inode')
+    }
+  }
+}
+
 /** Pin the private mkdtemp copy directory itself so a same-name swap cannot retarget the copies. */
 function pinTempDirectory(path: string): PinnedTemp {
   let descriptor: number | undefined
@@ -445,6 +467,64 @@ function openOptionalSidecar(path: string): OpenedFile | null {
     fail('unsafe-path', `${basename(path)} cannot be inspected`)
   }
   return openPrivateFile(path, 'database-drift')
+}
+
+/** Pin a live SQLite file without reading its bytes: WAL content can advance during a read transaction. */
+function openLiveFile(path: string, missing: AutomationOperatorSnapshotErrorCode): OpenedFile {
+  let linked: BigIntStats
+  try { linked = lstatSync(path, { bigint: true }) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') fail(missing, `${basename(path)} does not exist`)
+    fail('unsafe-path', `${basename(path)} cannot be inspected`)
+  }
+  const uid = process.getuid?.()
+  if (!linked.isFile() || linked.isSymbolicLink() || linked.nlink !== 1n
+    || (linked.mode & 0o7777n) !== 0o600n || uid === undefined || linked.uid !== BigInt(uid)) {
+    fail('unsafe-path', `${basename(path)} must be one private owned regular file`)
+  }
+  let descriptor: number
+  try { descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW) } catch {
+    fail('unsafe-path', `${basename(path)} cannot be opened safely`)
+  }
+  try {
+    const opened = fstatSync(descriptor, { bigint: true })
+    if (!sameLiveIdentity(linked, opened) || !sameLiveIdentity(opened, lstatSync(path, { bigint: true }))) {
+      fail('database-drift', `${basename(path)} changed while being opened`)
+    }
+    return { path, descriptor, stat: opened, digest: '' }
+  } catch (error) { closeSync(descriptor); throw error }
+}
+
+function sameLiveIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return right.isFile() && !right.isSymbolicLink() && left.dev === right.dev && left.ino === right.ino
+    && left.uid === right.uid && left.mode === right.mode && left.nlink === right.nlink
+}
+
+function assertLiveIdentity(file: OpenedFile): void {
+  try {
+    if (!sameLiveIdentity(file.stat, fstatSync(file.descriptor, { bigint: true }))
+      || !sameLiveIdentity(file.stat, lstatSync(file.path, { bigint: true }))) {
+      fail('database-drift', `${basename(file.path)} changed during the read`)
+    }
+  } catch (error) {
+    if (error instanceof AutomationOperatorSnapshotError) throw error
+    fail('database-drift', `${basename(file.path)} disappeared during the read`)
+  }
+}
+
+function openOptionalLiveSidecar(path: string): OpenedFile | null {
+  try { lstatSync(path) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    fail('unsafe-path', `${basename(path)} cannot be inspected`)
+  }
+  return openLiveFile(path, 'database-drift')
+}
+
+function assertLiveSidecar(path: string, file: OpenedFile | null): void {
+  if (file !== null) return assertLiveIdentity(file)
+  try { lstatSync(path); fail('database-drift', `${basename(path)} appeared during the read`) } catch (error) {
+    if (error instanceof AutomationOperatorSnapshotError) throw error
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') fail('database-drift', `${basename(path)} cannot be inspected`)
+  }
 }
 
 function assertStillIdentical(file: OpenedFile): void {
@@ -959,4 +1039,114 @@ export function listAutomationsLocally(databasePath: string): AutomationRecord[]
 /** Compatibility projection retained for callers that only gate active work. */
 export function listActiveAutomationsLocally(databasePath: string): AutomationRecord[] {
   return listAutomationsLocally(databasePath).filter(record => record.status === 'active')
+}
+
+/**
+ * Read current active registrations through SQLite's own consistent read transaction.
+ * The source WAL/SHM must already exist as a safe pair. SQLite may coordinate
+ * readers through the existing SHM file; this is not a byte-for-byte backup.
+ */
+export function listActiveAutomationsForReadiness(databasePath: string): AutomationRecord[] {
+  const path = privateDatabasePath(databasePath)
+  const parent = pinPrivateParent(dirname(path))
+  const walPath = `${path}-wal`; const shmPath = `${path}-shm`
+  let source: OpenedFile | undefined
+  let wal: OpenedFile | null = null; let shm: OpenedFile | null = null
+  let database: DatabaseSync | undefined
+  let transaction = false
+  let records: AutomationRecord[] | undefined
+  let deferred: unknown
+  let priorDescriptors: ReadonlySet<number> = new Set()
+  const selfDescriptors = (): ReadonlySet<number> => new Set([
+    parent.descriptor, source?.descriptor, wal?.descriptor, shm?.descriptor,
+  ].filter((fd): fd is number => fd !== undefined))
+  try {
+    if (process.platform === 'darwin') {
+      try { assertNoMacProcessConnection([path, walPath, shmPath]) } catch {
+        fail('database-busy', 'database is open in this process or descriptors cannot be inspected')
+      }
+    }
+    assertNoRollbackJournal(path)
+    source = openLiveFile(path, 'database-missing')
+    wal = openOptionalLiveSidecar(walPath); shm = openOptionalLiveSidecar(shmPath)
+    if ((wal === null) !== (shm === null)) fail('database-drift', 'WAL sidecar set is incomplete')
+    if (wal === null) {
+      // SQLite's read-only WAL open can create a new SHM. Refuse that state
+      // before opening, while still supporting a quiescent rollback database.
+      const header = Buffer.alloc(2)
+      if (readSync(source.descriptor, header, 0, 2, 18) !== 2 || header[0] === 2 || header[1] === 2) {
+        fail('database-busy', 'WAL database has no existing coordination sidecars')
+      }
+    }
+    assertJournalAbsent(path)
+    assertLiveIdentity(source); assertLiveSidecar(walPath, wal); assertLiveSidecar(shmPath, shm)
+    if (process.platform === 'linux') {
+      priorDescriptors = new Set(readdirSync(procSelfFd).map(Number).filter(descriptor => {
+        if (!Number.isInteger(descriptor) || descriptor <= 2) return false
+        try { return fstatSync(descriptor, { bigint: true }).isFile() } catch { return false }
+      }))
+      const held = connectionInodes(selfDescriptors())
+      if ([source, wal, shm].filter((file): file is OpenedFile => file !== null && file !== undefined)
+        .some(file => held.some(inode => inode.device === file.stat.dev && inode.inode === file.stat.ino))) {
+        fail('database-busy', 'database is already open in this process')
+      }
+    }
+    const location = pathToFileURL(path)
+    location.searchParams.set('mode', 'ro')
+    database = new DatabaseSync(location, { readOnly: true })
+    if (inodeBindSupported) assertConnectionBound([source], selfDescriptors())
+    assertFreshConnectionBound([source], priorDescriptors)
+    database.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 0; BEGIN'); transaction = true
+    const queryOnly = (database.prepare('PRAGMA query_only').get() as { query_only?: unknown }).query_only
+    if (queryOnly !== 1) fail('database-unavailable', 'read-only guard was not enabled')
+    const version = (database.prepare('PRAGMA user_version').get() as { user_version?: unknown }).user_version
+    if (version !== automationSchemaVersion) fail('schema-unsupported', `expected schema ${automationSchemaVersion}`)
+    const rows = database.prepare(`
+      SELECT id, system_owner, definition_hash, definition_json, status, next_run_at,
+        created_at, updated_at, version, 0 AS running_task_count
+      FROM automation_definitions WHERE status = 'active' ORDER BY id COLLATE BINARY
+    `).all() as unknown as DefinitionRow[]
+    records = rows.map(row => {
+      const record = parseRecord(row)
+      return freeze({
+        id: record.id,
+        ...(record.owner === undefined ? {} : { owner: record.owner }),
+        definition: record.definition,
+        status: record.status,
+        nextRunAt: record.nextRunAt,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+        version: record.version,
+      })
+    })
+    const bound = [source, ...(wal === null ? [] : [wal, shm!])]
+    if (inodeBindSupported) assertConnectionBound(bound, selfDescriptors())
+    assertFreshConnectionBound(bound, priorDescriptors)
+    assertJournalAbsent(path)
+    assertLiveIdentity(source); assertLiveSidecar(walPath, wal); assertLiveSidecar(shmPath, shm)
+    database.exec('ROLLBACK'); transaction = false
+    database.close(); database = undefined
+  } catch (error) { deferred = error } finally {
+    if (transaction) try { database?.exec('ROLLBACK') } catch (error) { deferred ??= error }
+    try { database?.close() } catch (error) { deferred ??= error }
+    if (source !== undefined) {
+      try {
+        assertJournalAbsent(path)
+        assertLiveIdentity(source); assertLiveSidecar(walPath, wal); assertLiveSidecar(shmPath, shm)
+      } catch (error) { deferred ??= error }
+    }
+    if (!pinnedParentMatches(parent)) {
+      deferred = new AutomationOperatorSnapshotError('unsafe-parent',
+        'automation operator snapshot: database parent changed while it was inspected')
+    }
+    for (const file of [shm, wal, source]) if (file != null) try { closeSync(file.descriptor) } catch {}
+    try { closeSync(parent.descriptor) } catch (error) { deferred ??= error }
+  }
+  if (deferred !== undefined) {
+    if (deferred instanceof AutomationOperatorSnapshotError) throw deferred
+    const message = deferred instanceof Error ? deferred.message.toLowerCase() : ''
+    if (/(?:busy|locked)/u.test(message)) fail('database-busy', 'database is busy')
+    fail('database-corrupt', 'database cannot produce valid active registrations')
+  }
+  return records!
 }
