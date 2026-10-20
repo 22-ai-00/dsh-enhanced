@@ -192,7 +192,7 @@ async function selectedPeers(metadata, candidateArtifacts, readArtifactManifest)
   }
   return { names: [...closure.keys()].sort(), overrides, peerProviders }
 }
-function derive(metadata, home, native, candidateArtifacts, yaml, peerOverrides = {}) {
+function derive(metadata, home, originalNative, native, candidateArtifacts, yaml, peerOverrides = {}) {
   const normalized = projectPnpmPackageManager(metadata)
   const original = roots(normalized), manifest = structuredClone(original.manifest)
   if (Object.keys(original.dependencies).length === 0) return { ...normalized }
@@ -207,10 +207,19 @@ function derive(metadata, home, native, candidateArtifacts, yaml, peerOverrides 
     || ![undefined, 'hoisted', 'isolated'].includes(workspace.nodeLinker)) fail('unsupported workspace layout')
   const overrides = {}
   for (const [key, value] of Object.entries(workspace.overrides || {})) {
-    const match = /^(@[^/]+\/[^@]+|[^@]+)@[^>]+>(@[^/]+\/[a-z0-9._-]+)$/.exec(key)
+    const match = /^(@[^/]+\/[^@]+|[^@]+)@([^>]+)>(@[^/]+\/[a-z0-9._-]+)$/.exec(key)
     if (!match || typeof value !== 'string') fail(`unsupported override: ${key}`)
-    const parent = match[1], dependency = match[2]
+    const parent = match[1], parentSelector = match[2], dependency = match[3]
     if (!enhancedName.test(parent) && !nativeName.test(parent)) fail(`unapproved override parent: ${key}`)
+    if (nativeName.test(parent)) {
+      const originalParent = originalNative[parent]
+      if (!nativeName.test(dependency) || originalParent?.version !== parentSelector
+        || !Object.hasOwn(originalParent.dependencies, dependency)
+        || originalNative[dependency]?.version !== value) fail(`override is outside original Host: ${key}`)
+      // The complete candidate Host graph below recreates its surviving edges.
+      // An original native parent or dependency absent there has retired.
+      continue
+    }
     const target = enhancedName.test(dependency)
       ? artifactLocator(home, dependency, candidateArtifacts[dependency] ?? fail(`candidate artifact missing for override: ${dependency}`))
       : native[dependency]?.version ?? fail(`candidate Host lacks override: ${dependency}`)
@@ -231,7 +240,14 @@ function derive(metadata, home, native, candidateArtifacts, yaml, peerOverrides 
   workspace.nodeLinker = 'isolated'
   return { ...normalized, 'package.json': `${JSON.stringify(manifest, null, 2)}\n`, 'pnpm-workspace.yaml': yaml.stringify(workspace) }
 }
-function assertDelta(original, prepared, native, candidateArtifacts, home, yaml, peerScope) {
+export { derive as deriveHostLocalProfileMetadata }
+async function verifyOriginalNative(preparation) {
+  if (typeof preparation.originalDshPath !== 'string' || !plain(preparation.originalNative)) fail('original Host authority is absent')
+  const current = await nativeAuthority(preparation.originalDshPath)
+  if (current.root !== preparation.oldHostRoot || !same(current.packages, preparation.originalNative)) fail('original Host authority drift')
+  return current.packages
+}
+function assertDelta(original, prepared, originalNative, native, candidateArtifacts, home, yaml, peerScope) {
   const eligible = new Set(peerScope.names)
   const assertArtifactReference = (name, reference, label) => {
     if (!eligible.has(name)) fail(`enhanced package outside selected closure: ${label}`)
@@ -246,7 +262,7 @@ function assertDelta(original, prepared, native, candidateArtifacts, home, yaml,
     }
   }
   if (original['cordis.patch.yml'] !== prepared['cordis.patch.yml']) fail('raw Cordis patch changed')
-  const expected = derive(original, home, native, candidateArtifacts, yaml, peerScope.overrides)
+  const expected = derive(original, home, originalNative, native, candidateArtifacts, yaml, peerScope.overrides)
   for (const name of ['package.json', 'pnpm-workspace.yaml']) {
     const before = name === 'package.json' ? JSON.parse(expected[name]) : parse(yaml, expected[name], name)
     const after = name === 'package.json' ? JSON.parse(prepared[name]) : parse(yaml, prepared[name], name)
@@ -546,7 +562,7 @@ export async function prepareHostLocalProfileUpdate({ originalHome, originalDshP
     const path = join(preparationRoot, profile.name)
     await mkdir(path, { mode: 0o700 })
     const peerScope = await selectedPeers(profile.metadata, verifiedArtifacts, readRsiLocalArtifactManifest)
-    const initial = derive(profile.metadata, originalHome, candidate.packages, verifiedArtifacts, yaml, peerScope.overrides)
+    const initial = derive(profile.metadata, originalHome, oldHost.packages, candidate.packages, verifiedArtifacts, yaml, peerScope.overrides)
     await writeMetadata(path, initial)
     const env = { ...pnpmEnvironment(preparationRoot), PNPM_CONFIG_USERCONFIG: join(preparationRoot, 'home', '.npmrc'),
       PNPM_CONFIG_STORE_DIR: join(preparationRoot, 'store'), PNPM_CONFIG_CACHE_DIR: join(preparationRoot, 'cache'),
@@ -558,14 +574,14 @@ export async function prepareHostLocalProfileUpdate({ originalHome, originalDshP
       const resolved = await readMetadata(path)
       const prepared = { ...resolved, 'pnpm-lock.yaml': normalizeLock(yaml,
         resolved['pnpm-lock.yaml'], path, profile.path, originalHome) }
-      assertDelta(profile.metadata, prepared, candidate.packages, verifiedArtifacts, originalHome, yaml, peerScope)
+      assertDelta(profile.metadata, prepared, oldHost.packages, candidate.packages, verifiedArtifacts, originalHome, yaml, peerScope)
       await runPnpm(['fetch', '--frozen-lockfile', '--ignore-scripts'], { cwd: path, env, signal, phase: 'fetch', pnpmPath,
         logicalHome: originalHome, candidateHome })
       if (!same(await readMetadata(path), resolved)) fail(`fetch changed metadata: ${profile.name}`)
       await writeFile(join(path, 'pnpm-lock.yaml'), prepared['pnpm-lock.yaml'], { mode: 0o600 })
     }
     const prepared = await readMetadata(path)
-    if (needsInstall) assertDelta(profile.metadata, prepared, candidate.packages, verifiedArtifacts, originalHome, yaml, peerScope)
+    if (needsInstall) assertDelta(profile.metadata, prepared, oldHost.packages, candidate.packages, verifiedArtifacts, originalHome, yaml, peerScope)
     else assertFallbackDelta(profile.metadata, prepared)
     output.push({ name: profile.name, backupOf: profile.backupOf, fallbackOnly: !needsInstall,
       peerScope,
@@ -577,9 +593,11 @@ export async function prepareHostLocalProfileUpdate({ originalHome, originalDshP
     profiles.map(item => [item.name, ...metadataNames.map(name => sourceDigest(item.metadata[name]))]))) fail('original Home changed during preparation')
   await verifyArtifacts({ originalHome, candidateHome, candidateArtifacts: verifiedArtifacts,
     candidateCohorts, originalCohorts }, candidateHome)
+  await verifyOriginalNative({ originalDshPath, oldHostRoot: oldHost.root, originalNative: oldHost.packages })
   return { schemaVersion: 1, originalHome, preparationRoot, candidateHome, candidateDshPath, installer,
     sharedFallback,
-    oldHostRoot: oldHost.root, candidateHostRoot: candidate.root, candidateNative: candidate.packages,
+    originalDshPath, oldHostRoot: oldHost.root, originalNative: oldHost.packages,
+    candidateHostRoot: candidate.root, candidateNative: candidate.packages,
     candidateArtifacts: verifiedArtifacts, candidateCohorts, originalCohorts,
     approvedBackupNames, profiles: output }
 }
@@ -591,6 +609,7 @@ export async function validateHostLocalProfileUpdate({ preparation, stagedHome,
   if (stage === original || inside(original, stage) || inside(stage, original)
     || stage !== preparation.originalHome && inside(preparation.originalHome, stage)) fail('stage overlaps original Home')
   const yaml = parser(preparation.candidateDshPath)
+  const originalNative = await verifyOriginalNative(preparation)
   await verifyRetiredHostLocalSharedFallback({ proof: preparation.sharedFallback, stagedHome: stage,
     originalPhysicalHome: original })
   const { readRsiLocalArtifactManifest } = await loadLocalSourceInstaller(preparation.installer)
@@ -638,7 +657,7 @@ export async function validateHostLocalProfileUpdate({ preparation, stagedHome,
       if (sourceDigest(originalMetadata[name]) !== expected.originalDigests[name]) fail(`original metadata drift: ${profile.name}/${name}`)
       if (sourceDigest(metadata[name]) !== expected.preparedDigests[name]) fail(`staged metadata drift: ${profile.name}/${name}`)
     }
-    if (!expected.fallbackOnly) assertDelta(originalMetadata, metadata, preparation.candidateNative,
+    if (!expected.fallbackOnly) assertDelta(originalMetadata, metadata, originalNative, preparation.candidateNative,
       preparation.candidateArtifacts, preparation.originalHome, yaml, peerScope)
     else assertFallbackDelta(originalMetadata, metadata)
     await oldHostLinks(join(profile.path, 'node_modules'), preparation.oldHostRoot, preparation.candidateHostRoot, false)
@@ -675,6 +694,7 @@ export async function materializeHostLocalProfileUpdate({ preparation, stagedHom
   const stage = await directory(stagedHome)
   if (stage === logicalHome || inside(logicalHome, stage)) fail('stage overlaps original Home')
   const yaml = parser(preparation.candidateDshPath)
+  await verifyOriginalNative(preparation)
   const originals = await inventory(logicalHome, preparation.approvedBackupNames)
   const staged = await inventory(stage, preparation.approvedBackupNames)
   if (!same(originals.map(item => item.name), preparation.profiles.map(item => item.name))
