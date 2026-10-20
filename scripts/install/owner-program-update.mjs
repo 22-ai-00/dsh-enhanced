@@ -12,7 +12,7 @@ import { isDeepStrictEqual as same } from 'node:util'
 import { DatabaseSync } from 'node:sqlite'
 import { assertLocalSourceInstaller } from './local-source-maintenance.mjs'
 import { composeOwnerRepairProfiles, ownerRepairPatchEquivalent,
-  ownerRepairSuccessorSnapshotEquivalent } from './owner-source-repair.mjs'
+  ownerRepairSnapshotEquivalent } from './owner-source-repair.mjs'
 
 const protocol = 'dsh-enhanced/host-owner-program-update/v1'
 const hash = value => createHash('sha256').update(value).digest('hex')
@@ -849,6 +849,15 @@ function parseMaybe(source) {
   return parse(source, 'authority configuration')
 }
 
+export function assertOwnerProgramOriginalComposition(composed, ownerUpdate, currentOwnerSnapshot) {
+  if (composed.dshDigest !== ownerUpdate.host.dshDigest
+    || !same({ targetEffective: composed.targetEffective,
+      coordinatorEffective: composed.coordinatorEffective }, ownerUpdate.original.effective)
+    || !ownerRepairSnapshotEquivalent(currentOwnerSnapshot, ownerUpdate.original.ownerSnapshot)) {
+    fail('original Host composition or owner binding changed')
+  }
+}
+
 export async function verifyOwnerProgramUpdate({ ownerUpdate, ownerUpdateNext, homePath,
   physicalHome = homePath, installer = ownerUpdate?.installer, phase = 'original',
   record, checkLedger = false }) {
@@ -960,13 +969,8 @@ export async function verifyOwnerProgramUpdate({ ownerUpdate, ownerUpdateNext, h
   if (phase === 'original') {
     const composed = await composeOwnerRepairProfiles({ homePath, profile: ownerUpdate.profile,
       coordinatorProfile: ownerUpdate.coordinatorProfile, dshPath: ownerUpdate.dshPath })
-    if (composed.dshDigest !== ownerUpdate.host.dshDigest
-      || !same({ targetEffective: composed.targetEffective,
-        coordinatorEffective: composed.coordinatorEffective }, original.effective)
-      || !ownerRepairSuccessorSnapshotEquivalent(await api.rsiSetupPorts.snapshot(
-        composed.targetEffective, homePath), original.ownerSnapshot)) {
-      fail('original Host composition or owner binding changed')
-    }
+    assertOwnerProgramOriginalComposition(composed, ownerUpdate,
+      await api.rsiSetupPorts.snapshot(composed.targetEffective, homePath))
   }
   return { phase, manifestDigest: hash(files[manifestPath]),
     ...(sourceHistoryDigest ? { sourceHistoryDigest } : {}),

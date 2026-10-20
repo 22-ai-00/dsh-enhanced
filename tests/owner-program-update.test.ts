@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest'
 import { createHash, generateKeyPairSync } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -8,7 +8,7 @@ import { parseDocument } from 'yaml'
 import { controlPlaneDigest } from '../plugins/plugin-control-plane/src/store.js'
 import { readRsiHostUpdateOverlayChain, rebaseRsiHostValue, rsiHostUpdateOverlayDigest,
   signRsiOwnerProgramUpdateOverlay, signRsiOwnerRepairOverlay } from '../plugins/lark-channel/src/rsi-host-update.js'
-import { applyOwnerProgramAuthorityCas, assertOwnerProgramAuthorityPreserved, assertOwnerProgramWindow,
+import { applyOwnerProgramAuthorityCas, assertOwnerProgramAuthorityPreserved, assertOwnerProgramOriginalComposition, assertOwnerProgramWindow,
   assertOwnerProgramBusinessDataCopied, assertOwnerProgramManifestPreserved, stageOwnerProgramUpdate,
   verifyOwnerProgramUpdate, updateOwnerProgramJournal } from '../scripts/install/owner-program-update.mjs'
 
@@ -77,6 +77,74 @@ test('stage and verify reject an unbound owner transaction before touching files
     .rejects.toThrow(/proof binding differs/u)
   await expect(verifyOwnerProgramUpdate({ ownerUpdate: {}, homePath: '/tmp/owner' }))
     .rejects.toThrow(/proof binding differs/u)
+})
+
+test('original program verification accepts a SQLite checkpoint only while the DB and owner identity stay exact', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-checkpoint-')))
+  const databasePath = join(root, 'delivery.sqlite')
+  const digest = (value: Buffer | string) => createHash('sha256').update(value).digest('hex')
+  const snapshot = async () => {
+    const database = await stat(databasePath)
+    const sidecar = async (suffix: string) => {
+      try {
+        const file = await stat(`${databasePath}${suffix}`)
+        return { device: String(file.dev), inode: String(file.ino), size: String(file.size),
+          digest: digest(await readFile(`${databasePath}${suffix}`)) }
+      } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
+    }
+    const wal = await sidecar('-wal'), shm = await sidecar('-shm')
+    const storageDigest = digest(JSON.stringify({ main: digest(await readFile(databasePath)), wal, shm }))
+    return { protocol: 'assistant-delivery/active-lark-owner-bindings-snapshot/v1', schemaVersion: 25,
+      scope: { account: 'account', tenant: 'tenant', workspace: 'workspace', agentPreset: 'assistant' },
+      database: { device: String(database.dev), inode: String(database.ino), size: String(database.size) },
+      sidecars: { wal, shm }, storageDigest, snapshotDigest: digest(storageDigest),
+      bindings: [{ id: 'binding', version: 1, owner: { id: 'owner', version: 1 } }] }
+  }
+  try {
+    const db = new DatabaseSync(databasePath)
+    try {
+      db.exec('PRAGMA journal_mode=WAL; CREATE TABLE history (id INTEGER PRIMARY KEY, content TEXT); INSERT INTO history(content) VALUES (\'retained\')')
+      const before = await snapshot()
+      const composed = { dshDigest: digest('host'), targetEffective: 'target', coordinatorEffective: 'coordinator' }
+      const ownerUpdate = { host: { dshDigest: composed.dshDigest }, original: {
+        effective: { targetEffective: composed.targetEffective, coordinatorEffective: composed.coordinatorEffective },
+        ownerSnapshot: before } }
+      db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+      const after = await snapshot()
+      expect(after.storageDigest).not.toBe(before.storageDigest)
+      expect(after.database.inode).toBe(before.database.inode)
+      expect(() => assertOwnerProgramOriginalComposition(composed, ownerUpdate, after)).not.toThrow()
+      const rejected = [
+        { ...after, database: { ...after.database, inode: String(Number(after.database.inode) + 1) } },
+        { ...after, bindings: [{ ...after.bindings[0], owner: { id: 'other', version: 1 } }] },
+        { ...after, bindings: [{ ...after.bindings[0], owner: { id: 'owner', version: 2 } }] },
+        { ...after, bindings: [{ ...after.bindings[0], version: 2 }] },
+        { ...after, scope: { ...after.scope, workspace: 'other' } },
+      ]
+      for (const changed of rejected) {
+        expect(() => assertOwnerProgramOriginalComposition(composed, ownerUpdate, changed))
+          .toThrow(/original Host composition or owner binding changed/u)
+      }
+      expect(() => assertOwnerProgramOriginalComposition({ ...composed, dshDigest: digest('changed') },
+        ownerUpdate, after)).toThrow(/original Host composition or owner binding changed/u)
+      expect(() => assertOwnerProgramOriginalComposition({ ...composed, targetEffective: 'changed' },
+        ownerUpdate, after)).toThrow(/original Host composition or owner binding changed/u)
+      expect(db.prepare('SELECT content FROM history').get()).toMatchObject({ content: 'retained' })
+    } finally { db.close() }
+    const priorIdentity = await snapshot()
+    await rename(databasePath, `${databasePath}.original`)
+    const replacement = new DatabaseSync(databasePath)
+    replacement.exec('CREATE TABLE replacement (id INTEGER)')
+    replacement.close()
+    const replaced = await snapshot()
+    expect(replaced.database.inode).not.toBe(priorIdentity.database.inode)
+    expect(() => assertOwnerProgramOriginalComposition(
+      { dshDigest: digest('host'), targetEffective: 'target', coordinatorEffective: 'coordinator' },
+      { host: { dshDigest: digest('host') }, original: {
+        effective: { targetEffective: 'target', coordinatorEffective: 'coordinator' },
+        ownerSnapshot: priorIdentity } }, replaced))
+      .toThrow(/original Host composition or owner binding changed/u)
+  } finally { await rm(root, { recursive: true, force: true }) }
 })
 
 test('a signed repair predecessor and program update form one mixed immutable chain', () => {
