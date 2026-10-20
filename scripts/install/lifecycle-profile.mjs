@@ -3235,41 +3235,56 @@ async function captureOwnerRepairOriginalReadiness({ systemctlExecutable, journa
     return ownerRepairActivationInspector({ ownerRepair: sourceOwner(sourceProof),
       installer: sourceProof.installer, homePath, targetProfile: profile, coordinatorProfile })
   })()
-  const captured = []
-  for (const service of services) {
-    const before = await readRawServiceState(systemctlExecutable, service.unit)
-    assertExpectedServiceEnvironment(before, service)
-    if (before.activeState !== 'active' || before.subState !== 'running' || before.controlPid !== 0
-      || before.mainPid !== service.mainPid || before.invocationId !== service.invocationId
-      || before.nRestarts !== service.nRestarts || before.mainPid <= 0 || before.invocationId === '') {
-      fail(`owner repair original service changed before stop: ${service.unit}`)
-    }
-    const hostReady = await journalHasReadyMarker(journalctlExecutable, before)
-    const coordinatorActivated = service.profile === coordinatorProfile ? activation(0) : null
-    const after = await readRawServiceState(systemctlExecutable, service.unit)
-    assertExpectedServiceEnvironment(after, service)
-    if (after.activeState !== before.activeState || after.subState !== before.subState
-      || after.mainPid !== before.mainPid || after.controlPid !== before.controlPid
-      || after.invocationId !== before.invocationId || after.nRestarts !== before.nRestarts) {
-      fail(`owner repair original service changed during readiness capture: ${service.unit}`)
-    }
-    captured.push({ unit: service.unit, profile: service.profile, invocationId: service.invocationId,
-      mainPid: service.mainPid, hostReady, coordinatorActivated })
-  }
-  for (const service of services) {
-    const current = await readRawServiceState(systemctlExecutable, service.unit)
-    assertExpectedServiceEnvironment(current, service)
-    if (current.activeState !== 'active' || current.subState !== 'running' || current.controlPid !== 0
-      || current.mainPid !== service.mainPid || current.invocationId !== service.invocationId
-      || current.nRestarts !== service.nRestarts) {
-      fail(`owner repair original service changed before pair capture completed: ${service.unit}`)
+  const assertOriginalPair = async () => {
+    for (const service of services) {
+      const current = await readRawServiceState(systemctlExecutable, service.unit)
+      assertExpectedServiceEnvironment(current, service)
+      if (current.activeState !== 'active' || current.subState !== 'running' || current.controlPid !== 0
+        || current.mainPid !== service.mainPid || current.invocationId !== service.invocationId
+        || current.nRestarts !== service.nRestarts) {
+        fail(`owner repair original service changed before pair capture completed: ${service.unit}`)
+      }
     }
   }
-  const readiness = { schemaVersion: 1, services: captured }
-  if (!validOwnerRepairOriginalReadiness(readiness, services, profile, coordinatorProfile)) {
-    fail('owner repair original readiness cannot be bound to both services')
+  const captureOnce = async () => {
+    const captured = []
+    for (const service of services) {
+      const before = await readRawServiceState(systemctlExecutable, service.unit)
+      assertExpectedServiceEnvironment(before, service)
+      if (before.activeState !== 'active' || before.subState !== 'running' || before.controlPid !== 0
+        || before.mainPid !== service.mainPid || before.invocationId !== service.invocationId
+        || before.nRestarts !== service.nRestarts || before.mainPid <= 0 || before.invocationId === '') {
+        fail(`owner repair original service changed before stop: ${service.unit}`)
+      }
+      const hostReady = await journalHasReadyMarker(journalctlExecutable, before)
+      const coordinatorActivated = service.profile === coordinatorProfile ? activation(0) : null
+      const after = await readRawServiceState(systemctlExecutable, service.unit)
+      assertExpectedServiceEnvironment(after, service)
+      if (after.activeState !== before.activeState || after.subState !== before.subState
+        || after.mainPid !== before.mainPid || after.controlPid !== before.controlPid
+        || after.invocationId !== before.invocationId || after.nRestarts !== before.nRestarts) {
+        fail(`owner repair original service changed during readiness capture: ${service.unit}`)
+      }
+      captured.push({ unit: service.unit, profile: service.profile, invocationId: service.invocationId,
+        mainPid: service.mainPid, hostReady, coordinatorActivated })
+    }
+    await assertOriginalPair()
+    const readiness = { schemaVersion: 1, services: captured }
+    if (!validOwnerRepairOriginalReadiness(readiness, services, profile, coordinatorProfile)) {
+      fail('owner repair original readiness cannot be bound to both services')
+    }
+    return readiness
   }
-  return readiness
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try { return await captureOnce() }
+    catch (error) {
+      if (attempt === 3 || typeof activation.isTransientSnapshotError !== 'function'
+        || !activation.isTransientSnapshotError(error)) throw error
+      await assertOriginalPair()
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 250))
+      await assertOriginalPair()
+    }
+  }
 }
 
 function ownerRepairRestorationPolicy(readiness, services, targetProfile, coordinatorProfile, activation) {

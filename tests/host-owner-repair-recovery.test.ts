@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { lifecycleProfileTest } from '../scripts/install/lifecycle-profile.mjs'
-import { matchesOwnerRepairActivation } from '../scripts/install/owner-repair-readiness.mjs'
+import { matchesOwnerRepairActivation, transientAutomationOperatorSnapshot } from '../scripts/install/owner-repair-readiness.mjs'
+import { AutomationOperatorSnapshotError } from '../plugins/assistant-automations/src/operator.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -46,6 +47,98 @@ async function fixture() {
 }
 
 describe('owner repair original readiness', () => {
+  const operatorError = (code: AutomationOperatorSnapshotError['code']) =>
+    new AutomationOperatorSnapshotError(code, 'operator snapshot failed')
+  const retryable = (inspect: () => boolean) => Object.assign(inspect, {
+    isTransientSnapshotError: (error: unknown) =>
+      transientAutomationOperatorSnapshot(error, AutomationOperatorSnapshotError),
+  })
+
+  test('retries the complete original pair after a reviewed transient operator snapshot and then succeeds', async () => {
+    const setup = await fixture()
+    const journalCount = join(setup.root, 'journal-count'), countedJournal = join(setup.root, 'counted-journal')
+    await writeFile(journalCount, '0')
+    await writeFile(countedJournal, `#!${process.execPath}\n`
+      + `const fs = require('node:fs'); const path = ${JSON.stringify(journalCount)};\n`
+      + `fs.writeFileSync(path, String(Number(fs.readFileSync(path, 'utf8')) + 1));\n`
+      + `process.stdout.write('dsh-enhanced host ready: v1\\n');\n`, { mode: 0o700 })
+    let inspections = 0
+    const activation = retryable(() => {
+      inspections++
+      if (inspections === 1) throw operatorError('database-drift')
+      return true
+    })
+    const readiness = await lifecycleProfileTest.captureOwnerRepairOriginalReadiness({
+      systemctlExecutable: setup.systemctl, journalctlExecutable: countedJournal,
+      services: setup.services, homePath: setup.homePath, profile: setup.profile,
+      sourceProof: setup.sourceProof, activationInspector: activation,
+    })
+    expect(inspections).toBe(2)
+    expect(Number(readFileSync(journalCount, 'utf8'))).toBe(4)
+    expect(readiness.services).toEqual(setup.services.map(service => ({
+      unit: service.unit, profile: service.profile, invocationId: service.invocationId,
+      mainPid: service.mainPid, hostReady: true,
+      coordinatorActivated: service.profile === setup.coordinatorProfile ? true : null,
+    })))
+  })
+
+  test.each(['database-busy', 'database-drift'] as const)(
+    'stops after exactly three reviewed %s snapshots', async code => {
+    const setup = await fixture()
+    let inspections = 0
+    await expect(lifecycleProfileTest.captureOwnerRepairOriginalReadiness({
+      systemctlExecutable: setup.systemctl, journalctlExecutable: setup.quietJournal,
+      services: setup.services, homePath: setup.homePath, profile: setup.profile,
+      sourceProof: setup.sourceProof, activationInspector: retryable(() => {
+        inspections++
+        throw operatorError(code)
+      }),
+    })).rejects.toMatchObject({ code })
+    expect(inspections).toBe(3)
+    })
+
+  test('unsafe, missing, corrupt, untyped and lookalike errors do not retry', async () => {
+    const setup = await fixture()
+    for (const error of [operatorError('unsafe-path'), operatorError('unsafe-parent'), operatorError('database-missing'),
+      operatorError('database-corrupt'), new Error('database-drift'),
+      { name: 'AutomationOperatorSnapshotError', code: 'database-drift' }]) {
+      let inspections = 0
+      await expect(lifecycleProfileTest.captureOwnerRepairOriginalReadiness({
+        systemctlExecutable: setup.systemctl, journalctlExecutable: setup.quietJournal,
+        services: setup.services, homePath: setup.homePath, profile: setup.profile,
+        sourceProof: setup.sourceProof, activationInspector: retryable(() => { inspections++; throw error }),
+      })).rejects.toBe(error)
+      expect(inspections).toBe(1)
+    }
+    let unreviewedInspections = 0
+    await expect(lifecycleProfileTest.captureOwnerRepairOriginalReadiness({
+      systemctlExecutable: setup.systemctl, journalctlExecutable: setup.quietJournal,
+      services: setup.services, homePath: setup.homePath, profile: setup.profile,
+      sourceProof: setup.sourceProof, activationInspector: () => {
+        unreviewedInspections++
+        throw operatorError('database-drift')
+      },
+    })).rejects.toMatchObject({ code: 'database-drift' })
+    expect(unreviewedInspections).toBe(1)
+  })
+
+  test('rejects an original service identity drift before another snapshot attempt', async () => {
+    const setup = await fixture()
+    let inspections = 0
+    await expect(lifecycleProfileTest.captureOwnerRepairOriginalReadiness({
+      systemctlExecutable: setup.systemctl, journalctlExecutable: setup.quietJournal,
+      services: setup.services, homePath: setup.homePath, profile: setup.profile,
+      sourceProof: setup.sourceProof, activationInspector: retryable(() => {
+        inspections++
+        const states = JSON.parse(readFileSync(setup.statePath, 'utf8'))
+        states[setup.services[0].unit].invocationId = 'restarted-before-retry'
+        writeFileSync(setup.statePath, JSON.stringify(states))
+        throw operatorError('database-drift')
+      }),
+    })).rejects.toThrow('changed before pair capture completed')
+    expect(inspections).toBe(1)
+  })
+
   test('captures both running systemd identities without inventing absent markers or activation', async () => {
     const setup = await fixture()
     const readiness = await lifecycleProfileTest.captureOwnerRepairOriginalReadiness({
