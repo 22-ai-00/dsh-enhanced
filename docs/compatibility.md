@@ -2,7 +2,7 @@
 
 ## Linux 既有 owner 的程序升级
 
-`dsh-rsi update --all --yes` 为冻结源码的 Linux 安装提供专用程序升级事务：沿安装收据绑定的官方 `dev` / `main` 分支快进源码，在 Home 外准备依赖，再成对停服、复制 Home、更新程序和私有 Host，最后检查本次启动的目标与协调器。它沿用原 owner、模型、凭据、授权期限、累计额度和业务历史；不重新 onboarding，不自动续期。当前入口仅接受未发生源码采用的安装及 `0.2.0-rc.2` / `0.2.1-rc.2` 原 Host，候选固定为 `0.2.1-rc.2`。它不扩展 Mac 冻结 Home 或 `0.1 → 0.2` 迁移范围。
+`dsh-rsi update --all --yes` 为冻结源码的 Linux 安装提供专用程序升级事务：沿安装收据绑定的官方 `dev` / `main` 分支快进源码，在 Home 外准备依赖，再成对停服、复制 Home、更新程序和私有 Host，最后检查本次启动的目标与协调器。它保留原 owner 绑定、模型配置、凭据引用、授权原期限、累计已用额度和业务历史；不重新 onboarding，不重置额度或自动续期。当前入口仅接受未发生源码采用的安装及 `0.2.0-rc.2` / `0.2.1-rc.2` 原 Host，候选固定为 `0.2.1-rc.2`。它不扩展 Mac 冻结 Home 或 `0.1 → 0.2` 迁移范围。
 
 升级追加独立签名的 `rsi-owner-program-update-overlay` 和源码维护记录，保留原 bootstrap 与此前 repair 链。后续 reader 必须支持两种 owner overlay，并核对最近记录的 creation / journal 摘要。候选启动前失败可恢复原 Home；候选已启动后只继续核验当前 Home，不能用旧副本覆盖可能新增的业务记录。未完成事务优先恢复，不先拉取或重建其已固定的安装器。操作说明见 [CLI 指南](../packages/dsh-rsi-cli/README.md#升级与重装)，实际验收状态见 [当前状态](rsi-status.md)。
 
@@ -109,7 +109,7 @@ Delivery 的新审批桥要求提供 `registerHumanApprovalAnswerer` 的同批 P
 
 Linux service-aware upgrade 已接入登记过的 RSI 目标与协调器：核对私有安装收据、同批已安装版本、共享 catalog/trust、owner scope、handoff 与专用状态路径，再把目标包和协调器的 Policy、Automations、Control Plane 三包更新到同一精确版本。协调器仅在隔离预览进程关闭 scheduler；持久配置仍启用调度。真实服务接受还要求本次启动后登记的、匹配 owner 与 executor 的原生 Automation。事务绑定原始/候选收据、配置及包摘要，恢复与清理前重新核对。普通 registry 更新仍不支持固定本地源码或 `rsi-local-cohorts` 制品，会在 registry 查询和停服前拒绝；不能将显式维护入口外推为所有本地安装可自动更新。跨版本 DSH Host 的独立迁移事务已通过工程验收；本机受审生产 Home 通过显式联合 Host / 源码迁移及签名后继修复，完成 `0.1.5-rc.3 → 0.2.0-rc.2` 的双 Host 新鲜就绪验收。这仅证明该特定 Home 与输入，其他部署组合仍待验证。普通插件升级与 Host 更新仍是先后两个阶段，Host 失败不会撤销已提交的插件升级。
 
-当前源码兼容基线为 **DSH `0.2.1-rc.2`**（2026-10-19 核对官方 registry），公开增强包 `0.1.55` 仍配套 `0.2.0-rc.2`。安装默认解析 `latest` 并冻结精确版本，只接受已适配的版本；未知新版本拒绝安装，不静默退回旧版或选择 Alpha/Beta。现有私有 Host 收据仍保留读取和回滚能力；新版插件不得装入旧 Host。发布历史和远端引导器的固定制品由 release prepare 单独更新，迁移验收状态见 [RSI 状态](rsi-status.md)。
+当前源码兼容基线为 **DSH `0.2.1-rc.2`**（2026-10-20 核对官方 registry），公开增强包 `0.1.57` 配套该私有 Host 版本。安装默认解析 `latest` 并冻结精确版本，只接受已适配的版本；未知新版本拒绝安装，不静默退回旧版或选择 Alpha/Beta。现有私有 Host 收据仍保留读取和回滚能力；新版插件不得装入旧 Host。发布历史和远端引导器的固定制品由 release prepare 单独更新，迁移验收状态见 [RSI 状态](rsi-status.md)。
 
 Agent setup 的第二参数是尚未发布的确切 Agent；不再读取 `ctx.agent`。Inbox 使用公开 `nextTurn` / `nextStep`，程序内嵌套工具事件为 `tool/ptc-dispatch-start` / `tool/ptc-dispatch`。此前 `0.1` 的 Session format 为 3，当前 `0.2` 为 4；持久化使用 `create/open` 返回的会话句柄，恢复和清理须保持独占写入及未知结果不重派。系统提示进入原生消息历史，`EpochHeader` 不再携带 `system`；请求来源验证按新原生结构精确比较。
 
