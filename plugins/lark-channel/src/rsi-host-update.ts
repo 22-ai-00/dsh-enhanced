@@ -1,10 +1,11 @@
 import { isDeepStrictEqual } from 'node:util'
 import { createHash, createPublicKey, sign, verify } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
-import { isMap, isSeq, parseDocument, type YAMLMap } from 'yaml'
+import { isAlias, isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
 import { runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
 import type { RsiSetupManifest } from './rsi-profile.js'
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
+import { rawLoaderConfig } from './rsi-bootstrap-manifest.js'
 
 export interface RsiHostPinReplacement { path: string; sha256: string }
 export interface RsiHostRebase {
@@ -260,8 +261,48 @@ export function rebaseRsiHostValue<T>(value: T, rebase: RsiHostRebase): T {
 }
 
 function document(source: string, label: string) {
-  const value = parseDocument(source, { uniqueKeys: true, strict: true })
+  // Include's !!js is an inert Loader expression at this stage. Resolve only
+  // that scalar tag; rawLoaderConfig below rejects every other tagged node.
+  const value = parseDocument(source, { uniqueKeys: true, strict: true,
+    customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (source: string) => source }] })
   if (value.errors.length || value.warnings.length || !isSeq(value.contents)) fail(`${label} is not a bounded patch`)
+  // Existing Loader patches may share an object using YAML anchors. Expand
+  // those references as YAML nodes, before applying the strict raw projection;
+  // this never evaluates a !!js expression or turns it into a plain map.
+  let nodes = 0
+  let aliases = 0
+  const expand = (node: Node, ancestors: ReadonlySet<Node>, depth: number): Node => {
+    if (++nodes > 100_000 || depth > 128) fail(`${label} exceeds YAML expansion bounds`)
+    if (isAlias(node)) {
+      if (++aliases > 256) fail(`${label} exceeds YAML alias bounds`)
+      const resolved = node.resolve(value)
+      if (!resolved || ancestors.has(resolved)) fail(`${label} has an unresolved or cyclic YAML alias`)
+      return expand(resolved.clone() as Node, new Set([...ancestors, resolved]), depth + 1)
+    }
+    if (isMap(node)) {
+      if (node.items.some(pair => (isScalar(pair.key) ? pair.key.value : pair.key) === '__jsExpr')) {
+        fail(`${label} contains an untagged Loader expression marker`)
+      }
+      for (const pair of node.items) {
+        if (pair.value) pair.value = expand(pair.value as Node, new Set([...ancestors, node]), depth + 1)
+      }
+    } else if (isSeq(node)) {
+      for (let index = 0; index < node.items.length; index++) {
+        const child = node.items[index]
+        if (child) node.items[index] = expand(child as Node, new Set([...ancestors, node]), depth + 1)
+      }
+    }
+    return node
+  }
+  value.contents = expand(value.contents, new Set(), 0) as typeof value.contents
+  const clearAnchors = (node: Node): void => {
+    if (isAlias(node)) fail(`${label} has an unexpanded YAML alias`)
+    delete node.anchor
+    if (isMap(node)) for (const pair of node.items) if (pair.value) clearAnchors(pair.value as Node)
+    if (isSeq(node)) for (const item of node.items) if (item) clearAnchors(item as Node)
+  }
+  clearAnchors(value.contents)
+  rawLoaderConfig(value.contents, label)
   return value
 }
 function row(document: ReturnType<typeof parseDocument>, id: string): YAMLMap {
@@ -293,9 +334,77 @@ function row(document: ReturnType<typeof parseDocument>, id: string): YAMLMap {
 function config(value: YAMLMap): Record<string, unknown> {
   const node = value.get('config', true)
   if (!isMap(node)) fail('patch row config is not a map')
-  const result = node.toJSON()
+  const result = JSON.parse(JSON.stringify(rawLoaderConfig(node, 'patch row config'))) as unknown
   if (!record(result)) fail('patch row config is invalid')
   return result
+}
+function hasJsTag(node: Node | null | undefined): boolean {
+  if (!node) return false
+  if (isScalar(node)) return node.tag === 'tag:yaml.org,2002:js'
+  if (isSeq(node)) return node.items.some(item => hasJsTag(item as Node | null))
+  if (isMap(node)) return node.items.some(pair => hasJsTag(pair.value as Node | null))
+  return false
+}
+function hasRawExpression(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasRawExpression)
+  return record(value) && (Object.hasOwn(value, '__jsExpr') || Object.values(value).some(hasRawExpression))
+}
+function updateConfigNode(patch: ReturnType<typeof parseDocument>, node: Node, replacement: unknown): Node {
+  const before = JSON.parse(JSON.stringify(rawLoaderConfig(node, 'patch config'))) as unknown
+  if (isDeepStrictEqual(before, replacement)) return node
+  if (isScalar(node) && node.tag === 'tag:yaml.org,2002:js') fail('tagged Loader expression changed')
+  if (isMap(node) && record(replacement) && hasJsTag(node)) {
+    const remove: string[] = []
+    for (const pair of node.items) {
+      const key = isScalar(pair.key) ? pair.key.value : pair.key
+      if (typeof key !== 'string') fail('patch config key is invalid')
+      if (!Object.hasOwn(replacement, key)) {
+        if (hasJsTag(pair.value as Node | null)) fail('tagged Loader expression removed')
+        remove.push(key)
+      } else {
+        const child = pair.value as Node | null
+        if (!child) fail('patch config value is invalid')
+        pair.value = updateConfigNode(patch, child, replacement[key])
+      }
+    }
+    for (const key of remove) node.delete(key)
+    for (const [key, value] of Object.entries(replacement)) {
+      if (!node.has(key)) {
+        if (hasRawExpression(value)) fail('tagged Loader expression inserted')
+        node.set(key, patch.createNode(value))
+      }
+    }
+    return node
+  }
+  if (isSeq(node) && Array.isArray(replacement) && hasJsTag(node)) {
+    if (node.items.length !== replacement.length) fail('tagged Loader expression sequence changed')
+    for (let index = 0; index < replacement.length; index++) {
+      const child = node.items[index] as Node | null
+      if (!child) fail('patch config value is invalid')
+      node.items[index] = updateConfigNode(patch, child, replacement[index])
+    }
+    return node
+  }
+  if (hasJsTag(node) || hasRawExpression(replacement)) fail('tagged Loader expression changed')
+  return patch.createNode(replacement)
+}
+function setConfig(patch: ReturnType<typeof parseDocument>, id: string, replacement: unknown): void {
+  const target = row(patch, id)
+  const node = target.get('config', true)
+  if (!isMap(node)) fail('patch row config is not a map')
+  target.set('config', updateConfigNode(patch, node, replacement))
+}
+/** Read the same inert Loader values used by the runtime observer. */
+export function readRsiHostPatchConfig(source: string, id: string): Record<string, unknown> {
+  return config(row(document(source, 'owner patch'), id))
+}
+/** Change a bounded row without rebuilding unrelated !!js expression nodes. */
+export function replaceRsiHostPatchConfig(source: string, id: string, expected: Record<string, unknown>,
+  replacement: Record<string, unknown>): string {
+  const patch = document(source, 'owner patch')
+  if (!isDeepStrictEqual(config(row(patch, id)), expected)) fail(`owner patch row changed: ${id}`)
+  setConfig(patch, id, replacement)
+  return patch.toString({ lineWidth: 0 })
 }
 function targetDigest(manifest: RsiSetupManifest, id: string, patch: ReturnType<typeof parseDocument>): string {
   const source = config(row(patch, id))
@@ -322,12 +431,12 @@ export function rebaseRsiHostProfiles(input: {
     const current = config(row(oldTarget, id))
     const original = id === 'dsh-enhanced-plugin-control-plane' ? input.manifest.controlPlane : input.manifest.growthDriver
     if (!isDeepStrictEqual(current, original)) fail(`${id} patch differs from the owner manifest`)
-    row(target, id).set('config', target.createNode(value))
+    setConfig(target, id, value)
   }
   const verifier = row(target, 'dsh-enhanced-assistant-verifier')
   const verifierConfig = config(verifier)
   if (!isDeepStrictEqual(verifierConfig.sourceReviews, input.manifest.sourceReviews)) fail('verifier patch differs from the owner manifest')
-  verifier.set('config', target.createNode({ ...verifierConfig, sourceReviews: changed.sourceReviews }))
+  setConfig(target, 'dsh-enhanced-assistant-verifier', { ...verifierConfig, sourceReviews: changed.sourceReviews })
   const targets = changed.controlPlane.runtimeObserver?.targets
   if (!targets) fail('runtime observer targets are missing')
   for (const targetEntry of targets) {
@@ -336,6 +445,7 @@ export function rebaseRsiHostProfiles(input: {
     if (targetEntry.configDigest !== oldDigest) fail(`observer digest differs: ${targetEntry.entryId}`)
     targetEntry.configDigest = targetDigest(changed, targetEntry.entryId, target)
   }
+  setConfig(target, 'dsh-enhanced-plugin-control-plane', changed.controlPlane)
   // A coordinator patch may contain only its declared standalone scope. It
   // must not carry any old Host path that this rebase cannot account for.
   if (input.coordinatorPatch.includes(input.rebase.oldHostRoot)) fail('coordinator patch has an unmapped Host path')
@@ -351,7 +461,7 @@ export function rebaseRsiHostActivePatch(input: { patch: string; rebase: RsiHost
     'dsh-enhanced-assistant-verifier']
   for (const id of ids) {
     const current = config(row(documentBefore, id))
-    row(documentAfter, id).set('config', documentAfter.createNode(rebaseRsiHostValue(current, input.rebase)))
+    setConfig(documentAfter, id, rebaseRsiHostValue(current, input.rebase))
   }
   const cp = config(row(documentAfter, ids[0]!))
   const observer = cp.runtimeObserver
@@ -365,8 +475,10 @@ export function rebaseRsiHostActivePatch(input: { patch: string; rebase: RsiHost
     if (entry.configDigest !== oldDigest) fail(`active observer digest differs: ${entry.entryId}`)
     entry.configDigest = runtimeConfigDigest(newConfig)
   }
-  row(documentAfter, ids[0]!).set('config', documentAfter.createNode(cp))
-  if (JSON.stringify(documentAfter.toJSON()).includes(input.rebase.oldHostRoot)) fail('active patch retains an unmapped Host path')
+  setConfig(documentAfter, ids[0]!, cp)
+  if (JSON.stringify(rawLoaderConfig(documentAfter.contents, 'active patch')).includes(input.rebase.oldHostRoot)) {
+    fail('active patch retains an unmapped Host path')
+  }
   return documentAfter.toString({ lineWidth: 0 })
 }
 
