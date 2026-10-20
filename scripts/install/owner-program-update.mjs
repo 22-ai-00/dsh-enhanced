@@ -635,47 +635,12 @@ function programCreation(before, candidate) {
   return result
 }
 
-function patchConfig(api, source, id) {
-  const document = api.yaml.parseDocument(source, { uniqueKeys: true, strict: true })
-  if (document.errors.length || document.warnings.length || !api.yaml.isSeq(document.contents)) fail('invalid owner patch')
-  const matches = []
-  for (const op of document.contents.items) {
-    if (!api.yaml.isMap(op)) fail('invalid owner patch operation')
-    if (op.get('id') === id) matches.push(op)
-    for (const kind of ['insert', 'update']) {
-      const rows = op.get(kind, true)
-      if (!rows) continue
-      if (!api.yaml.isSeq(rows)) fail('invalid owner patch rows')
-      for (const row of rows.items) if (api.yaml.isMap(row) && row.get('id') === id) matches.push(row)
-    }
-  }
-  if (matches.length !== 1 || !api.yaml.isMap(matches[0].get('config', true))) {
-    fail(`owner patch row differs: ${id}`)
-  }
-  return api.rawLoaderConfig(matches[0].get('config', true), id)
+export function patchConfig(api, source, id) {
+  return api.readRsiHostPatchConfig(source, id)
 }
 
-function replacePatchConfig(api, source, id, expected, replacement) {
-  const document = api.yaml.parseDocument(source, { uniqueKeys: true, strict: true })
-  if (document.errors.length || document.warnings.length || !api.yaml.isSeq(document.contents)) {
-    fail('invalid owner patch')
-  }
-  const matches = []
-  for (const operation of document.contents.items) {
-    if (!api.yaml.isMap(operation)) fail('invalid owner patch operation')
-    if (operation.get('id') === id) matches.push(operation)
-    for (const kind of ['insert', 'update']) {
-      const rows = operation.get(kind, true)
-      if (!rows) continue
-      if (!api.yaml.isSeq(rows)) fail('invalid owner patch rows')
-      for (const row of rows.items) if (api.yaml.isMap(row) && row.get('id') === id) matches.push(row)
-    }
-  }
-  if (matches.length !== 1 || !same(matches[0].get('config', true)?.toJSON(), expected)) {
-    fail(`owner patch program row changed: ${id}`)
-  }
-  matches[0].set('config', document.createNode(replacement))
-  return document.toString({ lineWidth: 0 })
+export function replacePatchConfig(api, source, id, expected, replacement) {
+  return api.replaceRsiHostPatchConfig(source, id, expected, replacement)
 }
 
 export async function applyOwnerProgramAuthorityCas(api, home, stage, before, after, oldTrustDigest, newTrustDigest) {

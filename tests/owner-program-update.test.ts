@@ -6,11 +6,12 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { isAlias, isMap, isScalar, isSeq, parseDocument } from 'yaml'
 import { controlPlaneDigest } from '../plugins/plugin-control-plane/src/store.js'
-import { readRsiHostUpdateOverlayChain, rebaseRsiHostValue, rsiHostUpdateOverlayDigest,
+import { readRsiHostPatchConfig, readRsiHostUpdateOverlayChain, rebaseRsiHostValue, replaceRsiHostPatchConfig,
+  rsiHostUpdateOverlayDigest,
   signRsiOwnerProgramUpdateOverlay, signRsiOwnerRepairOverlay } from '../plugins/lark-channel/src/rsi-host-update.js'
 import { applyOwnerProgramAuthorityCas, assertOwnerProgramAuthorityPreserved, assertOwnerProgramOriginalComposition, assertOwnerProgramWindow,
   assertOwnerProgramBusinessDataCopied, assertOwnerProgramManifestPreserved, stageOwnerProgramUpdate,
-  verifyOwnerProgramUpdate, updateOwnerProgramJournal } from '../scripts/install/owner-program-update.mjs'
+  verifyOwnerProgramUpdate, updateOwnerProgramJournal, patchConfig, replacePatchConfig } from '../scripts/install/owner-program-update.mjs'
 
 const old = {
   '/private/owner/config/release.json': JSON.stringify({ grant: { id: 'release-1', expiresAt: 456,
@@ -24,6 +25,29 @@ const old = {
 }
 type FileMap = Record<string, string>
 const yamlApi = { isAlias, isMap, isScalar, isSeq, parseDocument }
+
+test('owner program patch updates preserve inert Loader tags through repeated verifier and control-plane writes', () => {
+  const api = { readRsiHostPatchConfig, replaceRsiHostPatchConfig }
+  const patch = `[
+    { id: dsh-enhanced-assistant-verifier, config: { databasePath: !!js "dshHomePath('verifier/state.sqlite')", creationReviews: [], sourceReviews: [] } },
+    { id: dsh-enhanced-plugin-control-plane, config: { runtimeObserver: { targets: [] } } },
+    { id: personal-assistant, config: { paths: [!!js 'dshHomePath("personal/state.sqlite")'] } }
+  ]`
+  const verifier = patchConfig(api, patch, 'dsh-enhanced-assistant-verifier')
+  expect(verifier.databasePath).toEqual({ __jsExpr: "dshHomePath('verifier/state.sqlite')" })
+  const changed = replacePatchConfig(api, patch, 'dsh-enhanced-assistant-verifier', verifier,
+    { ...verifier, creationReviews: [{ id: 'review-1' }] })
+  const control = patchConfig(api, changed, 'dsh-enhanced-plugin-control-plane')
+  const twice = replacePatchConfig(api, changed, 'dsh-enhanced-plugin-control-plane', control,
+    { ...control, runtimeObserver: { targets: [{ entryId: 'dsh-enhanced-assistant-verifier' }] } })
+  expect(twice.match(/!!js/g)).toHaveLength(2)
+  expect(patchConfig(api, twice, 'dsh-enhanced-assistant-verifier')).toEqual({
+    ...verifier, creationReviews: [{ id: 'review-1' }],
+  })
+  expect(() => replacePatchConfig(api, twice, 'dsh-enhanced-assistant-verifier',
+    patchConfig(api, twice, 'dsh-enhanced-assistant-verifier'), { ...verifier, databasePath: '/tmp/escape.sqlite' }))
+    .toThrow('tagged Loader expression')
+})
 
 test('updates both applied service receipts for the next upgrade and preserves original journal history', () => {
   const journal = { schemaVersion: 2, stage: 'applied', manifestDigest: 'old',

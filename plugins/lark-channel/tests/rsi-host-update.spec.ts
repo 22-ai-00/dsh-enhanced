@@ -1,8 +1,12 @@
 import { createHash, generateKeyPairSync } from 'node:crypto'
 import { describe, expect, test } from 'vitest'
-import { parseDocument } from 'yaml'
+import { isMap, isScalar, isSeq, parseDocument } from 'yaml'
 import type { RsiAuthorityResources } from '../src/rsi-authority-resources.js'
-import { readRsiHostUpdateOverlayChain, rebaseRsiHostActivePatch, rebaseRsiHostValue,
+import type { RsiSetupManifest } from '../src/rsi-profile.js'
+import { rawLoaderConfig } from '../src/rsi-bootstrap-manifest.js'
+import { runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
+import { readRsiHostPatchConfig, readRsiHostUpdateOverlayChain, rebaseRsiHostActivePatch, rebaseRsiHostProfiles,
+  rebaseRsiHostValue, replaceRsiHostPatchConfig,
   rsiHostUpdateOverlayDigest, signRsiHostUpdateOverlay, signRsiOwnerRepairOverlay, signRsiOwnerProgramUpdateOverlay } from '../src/rsi-host-update.js'
 
 const oldSha = 'a'.repeat(64), newSha = 'b'.repeat(64)
@@ -37,6 +41,119 @@ describe('bounded RSI Host update projections', () => {
     expect(() => rebaseRsiHostActivePatch({ patch: patch.replace('version: 0.1.5-rc.3 } }\n    ]',
       'version: 0.1.5-rc.3, unbound: /old-host/other } }\n    ]'), rebase }))
       .toThrow('unmapped Host path')
+  })
+
+  test('rebases a tagged owner patch while preserving Loader expressions and observer digest', () => {
+    const verifier = { databasePath: { __jsExpr: "dshHomePath('verifier/state.sqlite')" }, sourceReviews: [] }
+    const digest = runtimeConfigDigest(verifier)
+    const patch = `[
+      { id: dsh-enhanced-plugin-control-plane, config: { runtimeObserver: { targets: [{ entryId: dsh-enhanced-assistant-verifier, configDigest: ${digest} }] }, executor: { path: /old-host/bin/dsh, sha256: '${oldSha}', version: 0.1.5-rc.3 } } },
+      { id: dsh-enhanced-assistant-growth-driver, config: { dshBaseline: 0.1.5-rc.3 } },
+      { id: dsh-enhanced-assistant-verifier, config: { databasePath: !!js "dshHomePath('verifier/state.sqlite')", sourceReviews: [] } },
+      { id: personal-assistant, config: { nested: [{ databasePath: !!js 'dshHomePath("personal/state.sqlite")' }] } }
+    ]`
+    const coordinator = `[{ id: coordinator, config: { path: !!js "dshHomePath('coordinator/state.sqlite')" } }]`
+    const manifest = { controlPlane: readRsiHostPatchConfig(patch, 'dsh-enhanced-plugin-control-plane'),
+      growthDriver: readRsiHostPatchConfig(patch, 'dsh-enhanced-assistant-growth-driver'), sourceReviews: [] } as unknown as RsiSetupManifest
+    const changed = rebaseRsiHostProfiles({ manifest, targetPatch: patch, coordinatorPatch: coordinator, rebase })
+    expect(changed.manifest.controlPlane.runtimeObserver!.targets[0]!.configDigest).toBe(digest)
+    expect(readRsiHostPatchConfig(changed.targetPatch, 'dsh-enhanced-assistant-verifier')).toEqual(verifier)
+    expect(changed.targetPatch).toContain('!!js')
+    expect(changed.coordinatorPatch).toContain('!!js')
+    const adopted = rebaseRsiHostActivePatch({ patch, rebase })
+    expect(readRsiHostPatchConfig(adopted, 'dsh-enhanced-assistant-verifier')).toEqual(verifier)
+    const document = parseDocument(adopted, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (s: string) => s }] })
+    const verifierRow = document.contents
+    expect(rawLoaderConfig(verifierRow, 'patch')).toMatchObject(expect.arrayContaining([
+      { id: 'dsh-enhanced-assistant-verifier', config: verifier },
+    ]))
+    const rows = document.contents
+    if (!isSeq(rows)) throw new Error('invalid test patch')
+    const verifierNode = rows.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-enhanced-assistant-verifier')
+    if (!isMap(verifierNode)) throw new Error('missing verifier')
+    const configNode = verifierNode.get('config', true)
+    if (!isMap(configNode)) throw new Error('missing config')
+    const databaseNode = configNode.get('databasePath', true)
+    expect(isScalar(databaseNode) && databaseNode.tag).toBe('tag:yaml.org,2002:js')
+  })
+
+  test('rejects unknown tags, duplicates, string impersonation and tagged expression changes', () => {
+    const patch = `[{ id: dsh-enhanced-assistant-verifier, config: { databasePath: !!js "dshHomePath('verifier/state.sqlite')", sourceReviews: [] } }]`
+    const old = readRsiHostPatchConfig(patch, 'dsh-enhanced-assistant-verifier')
+    expect(old.databasePath).toEqual({ __jsExpr: "dshHomePath('verifier/state.sqlite')" })
+    expect(() => replaceRsiHostPatchConfig(patch, 'dsh-enhanced-assistant-verifier',
+      { ...old, databasePath: "dshHomePath('verifier/state.sqlite')" }, old)).toThrow('row changed')
+    expect(() => replaceRsiHostPatchConfig(patch, 'dsh-enhanced-assistant-verifier', old,
+      { ...old, databasePath: { __jsExpr: "dshHomePath('other.sqlite')" } })).toThrow('tagged Loader expression')
+    expect(() => replaceRsiHostPatchConfig(patch, 'dsh-enhanced-assistant-verifier', old,
+      { ...old, databasePath: '/tmp/plain.sqlite' })).toThrow('tagged Loader expression')
+    const once = replaceRsiHostPatchConfig(patch, 'dsh-enhanced-assistant-verifier', old,
+      { ...old, sourceReviews: [{ id: 'one' }] })
+    const twice = replaceRsiHostPatchConfig(once, 'dsh-enhanced-assistant-verifier',
+      { ...old, sourceReviews: [{ id: 'one' }] }, { ...old, sourceReviews: [{ id: 'two' }] })
+    expect(twice).toContain('!!js')
+    expect(readRsiHostPatchConfig(twice, 'dsh-enhanced-assistant-verifier').sourceReviews).toEqual([{ id: 'two' }])
+    expect(() => readRsiHostPatchConfig(patch.replace('!!js', '!!python'), 'dsh-enhanced-assistant-verifier'))
+      .toThrow('bounded patch')
+    expect(() => readRsiHostPatchConfig(patch.replace('sourceReviews: []', 'sourceReviews: [], sourceReviews: []'),
+      'dsh-enhanced-assistant-verifier')).toThrow('bounded patch')
+    expect(() => readRsiHostPatchConfig(patch.replace('!!js "dshHomePath(\'verifier/state.sqlite\')"',
+      "{ __jsExpr: \"dshHomePath('verifier/state.sqlite')\" }"), 'dsh-enhanced-assistant-verifier'))
+      .toThrow('untagged Loader expression marker')
+  })
+
+  test('expands a bounded native YAML alias without losing tagged expressions', () => {
+    const patch = `[
+      { id: dsh-enhanced-plugin-control-plane, config: {
+        runtimeObserver: { targets: [] },
+        taskObservations: { scope: &a1 { account: owner, tenant: stable } },
+        liveQualification: { scope: *a1 },
+        executor: { path: /old-host/bin/dsh, sha256: '${oldSha}', version: 0.1.5-rc.3 }
+      } },
+      { id: dsh-enhanced-assistant-growth-driver, config: { dshBaseline: 0.1.5-rc.3 } },
+      { id: dsh-enhanced-assistant-verifier, config: { databasePath: !!js "dshHomePath('verifier/state.sqlite')", sourceReviews: [] } }
+    ]`
+    const cp = readRsiHostPatchConfig(patch, 'dsh-enhanced-plugin-control-plane')
+    expect(cp.liveQualification).toEqual({ scope: { account: 'owner', tenant: 'stable' } })
+    const changed = rebaseRsiHostActivePatch({ patch, rebase })
+    expect(changed).toContain('!!js')
+    expect(changed).not.toContain('*a1')
+    expect(changed).not.toContain('&a1')
+    expect(readRsiHostPatchConfig(changed, 'dsh-enhanced-plugin-control-plane')).toMatchObject({
+      taskObservations: { scope: { account: 'owner', tenant: 'stable' } },
+      liveQualification: { scope: { account: 'owner', tenant: 'stable' } },
+      executor: { path: '/new-host/bin/dsh' },
+    })
+    expect(() => readRsiHostPatchConfig('[{ id: x, config: { cycle: &a1 [*a1] } }]', 'x'))
+      .toThrow('cyclic YAML alias')
+    expect(() => readRsiHostPatchConfig('[{ id: x, config: { missing: *notThere } }]', 'x'))
+      .toThrow()
+  })
+
+  test('writes changed verifier observer digests back to the control-plane patch', () => {
+    const reviews = { runner: { path: '/old-host/bin/dsh', sha256: oldSha } }
+    const verifier = { databasePath: { __jsExpr: "dshHomePath('verifier/state.sqlite')" }, sourceReviews: reviews }
+    const digest = runtimeConfigDigest(verifier)
+    const patch = `[
+      { id: dsh-enhanced-plugin-control-plane, config: { runtimeObserver: { targets: [{ entryId: dsh-enhanced-assistant-verifier, configDigest: ${digest} }] } } },
+      { id: dsh-enhanced-assistant-growth-driver, config: { dshBaseline: 0.1.5-rc.3 } },
+      { id: dsh-enhanced-assistant-verifier, config: {
+        databasePath: !!js "dshHomePath('verifier/state.sqlite')",
+        sourceReviews: { runner: { path: /old-host/bin/dsh, sha256: '${oldSha}' } }
+      } }
+    ]`
+    const manifest = { controlPlane: readRsiHostPatchConfig(patch, 'dsh-enhanced-plugin-control-plane'),
+      growthDriver: readRsiHostPatchConfig(patch, 'dsh-enhanced-assistant-growth-driver'),
+      sourceReviews: reviews } as unknown as RsiSetupManifest
+    const changed = rebaseRsiHostProfiles({ manifest, targetPatch: patch, coordinatorPatch: '[]', rebase })
+    const newControl = readRsiHostPatchConfig(changed.targetPatch, 'dsh-enhanced-plugin-control-plane')
+    expect(newControl).toEqual(changed.manifest.controlPlane)
+    expect(newControl.runtimeObserver).toEqual({ targets: [{ entryId: 'dsh-enhanced-assistant-verifier',
+      configDigest: runtimeConfigDigest(readRsiHostPatchConfig(changed.targetPatch, 'dsh-enhanced-assistant-verifier')) }] })
+    expect(newControl.runtimeObserver).not.toEqual(manifest.controlPlane.runtimeObserver)
+    expect(changed.targetPatch).toContain('!!js')
+    expect(() => replaceRsiHostPatchConfig(changed.targetPatch, 'dsh-enhanced-plugin-control-plane',
+      newControl, { ...newControl })).not.toThrow()
   })
 
   test('binds a multi-step overlay chain to original bootstrap bytes and the installed Host identity', () => {
