@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import { chmod, lstat, mkdtemp, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { chmod, lstat, mkdtemp, open, readlink, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { PurgeError } from './purge.ts'
@@ -7,6 +8,8 @@ import { prepareHostUpdatePlan, prepareInstallHostEnvironment } from './install-
 import { resolveDshHome, TRANSACTION_SUFFIX } from './paths.ts'
 
 const INSTALL_BASE_URL = 'https://raw.githubusercontent.com/22-ai-00/dsh-enhanced'
+const DEFAULT_PENDING_MANIFEST_BYTES = 2 * 1024 * 1024
+const PROGRAM_PENDING_MANIFEST_BYTES = 8 * 1024 * 1024
 
 /**
  * install 委托的外部副作用面：下载引导脚本与 stdio inherit 执行。
@@ -92,12 +95,43 @@ async function pendingHostRecovery(homePath: string): Promise<string | undefined
   })
   if (info === undefined) return undefined
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== process.getuid?.()
-    || (info.mode & 0o077) !== 0 || info.size > 2 * 1024 * 1024) {
+    || (info.mode & 0o077) !== 0 || info.size < 1 || info.size > PROGRAM_PENDING_MANIFEST_BYTES) {
     throw new PurgeError('已有 Host 事务 manifest 文件不安全，拒绝继续升级。')
   }
+  let source: string
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const opened = await handle.stat()
+    if (opened.dev !== info.dev || opened.ino !== info.ino || opened.size !== info.size) {
+      throw new PurgeError('已有 Host 事务 manifest 文件读取时变化，拒绝继续升级。')
+    }
+    const buffer = Buffer.allocUnsafe(info.size + 1)
+    let size = 0
+    while (size < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, size, buffer.length - size, size)
+      if (bytesRead === 0) break
+      size += bytesRead
+    }
+    const after = await handle.stat()
+    const named = await lstat(path)
+    if (size !== info.size || after.size !== info.size || after.mtimeMs !== info.mtimeMs
+      || after.ctimeMs !== info.ctimeMs || named.dev !== info.dev || named.ino !== info.ino) {
+      throw new PurgeError('已有 Host 事务 manifest 文件读取时变化，拒绝继续升级。')
+    }
+    source = buffer.toString('utf8', 0, size)
+  } finally { await handle.close() }
   let manifest: unknown
-  try { manifest = JSON.parse(await readFile(path, 'utf8')) }
+  try { manifest = JSON.parse(source) }
   catch { throw new PurgeError('已有 Host 事务 manifest 无法解析，拒绝继续升级。') }
+  const program = typeof manifest === 'object' && manifest !== null && 'version' in manifest && manifest.version === 4
+    && 'operation' in manifest && manifest.operation === 'host-update'
+    && 'hostMigration' in manifest && typeof manifest.hostMigration === 'object' && manifest.hostMigration !== null
+    && 'localSource' in manifest.hostMigration && typeof manifest.hostMigration.localSource === 'object'
+    && manifest.hostMigration.localSource !== null && 'protocol' in manifest.hostMigration.localSource
+    && manifest.hostMigration.localSource.protocol === 'dsh-enhanced/host-owner-program-update/v1'
+  if (info.size > DEFAULT_PENDING_MANIFEST_BYTES && !program) {
+    throw new PurgeError('已有 Host 事务 manifest 超过其允许大小，拒绝继续升级。')
+  }
   if (typeof manifest !== 'object' || manifest === null || !('version' in manifest) || manifest.version !== 4) return undefined
   if (!('profile' in manifest) || typeof manifest.profile !== 'string'
     || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(manifest.profile)) {

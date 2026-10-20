@@ -75,11 +75,12 @@ export async function runProgramUpgrade(options) {
   const binding = await privateJson(join(home, '.dsh-rsi-host.json'), 16_384)
   const transactionPath = `${home}.dsh-enhanced-transaction`
   let pending
-  try { pending = await privateJson(join(transactionPath, 'manifest.json')) }
+  try { pending = await privateJson(join(transactionPath, 'manifest.json'), 8_388_608) }
   catch (error) { if (error.code !== 'ENOENT') throw error }
   if (pending) {
     const proof = pending.hostMigration?.localSource
-    if (pending.version !== 4 || pending.homePath !== home || pending.profile !== profile
+    if (pending.version !== 4 || pending.operation !== 'host-update'
+      || pending.homePath !== home || pending.profile !== profile
       || pending.transactionPath !== transactionPath || proof?.installer?.root !== root
       || proof.protocol !== 'dsh-enhanced/host-owner-program-update/v1') fail('pending transaction belongs to another reviewed installer or operation')
     if (options.dryRun) { process.stdout.write('将先恢复现有程序升级事务；不拉取或重建安装器。\n'); return 0 }

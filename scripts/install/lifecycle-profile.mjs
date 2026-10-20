@@ -858,6 +858,7 @@ async function writeFileAtomic(path, contents) {
 
 const MANIFEST_MAX_BYTES = 64 * 1024
 const HOST_MANIFEST_MAX_BYTES = 2 * 1024 * 1024
+const OWNER_PROGRAM_MANIFEST_MAX_BYTES = 8 * 1024 * 1024
 const PROFILE_TREE_MAX_ENTRIES = 200_000
 const PROFILE_TREE_MAX_FILE_BYTES = 64 * 1024 * 1024
 const MANIFEST_TOP_LEVEL_KEYS = [
@@ -880,13 +881,23 @@ function validManifestTopLevel(manifest) {
     && (manifest.failure === undefined || typeof manifest.failure === 'string')
 }
 
+function ownerProgramManifest(manifest) {
+  return manifest?.version === HOST_UPDATE_MANIFEST_VERSION && manifest.operation === 'host-update'
+    && manifest.hostMigration?.localSource?.protocol === OWNER_PROGRAM_PROTOCOL
+}
+
+function manifestMaximumBytes(manifest) {
+  return ownerProgramManifest(manifest) ? OWNER_PROGRAM_MANIFEST_MAX_BYTES
+    : manifest?.version === HOST_UPDATE_MANIFEST_VERSION ? HOST_MANIFEST_MAX_BYTES : MANIFEST_MAX_BYTES
+}
+
 async function writeManifest(transactionRoot, manifest, state, details = {}) {
   const next = withBindingDigest({ ...manifest, ...details, state, updatedAt: new Date().toISOString() })
   if (!validManifestTopLevel(next)) {
     fail('生命周期事务 manifest 包含未知顶层字段，拒绝持久化（可能绕过 bindingDigest 信封）。')
   }
-  const serialized = `${JSON.stringify(next, null, 2)}\n`
-  const maximum = next.version === HOST_UPDATE_MANIFEST_VERSION ? HOST_MANIFEST_MAX_BYTES : MANIFEST_MAX_BYTES
+  const serialized = `${JSON.stringify(next, null, ownerProgramManifest(next) ? undefined : 2)}\n`
+  const maximum = manifestMaximumBytes(next)
   if (Buffer.byteLength(serialized, 'utf8') > maximum) {
     fail(`生命周期事务 manifest 超过 ${maximum} 字节安全上限，拒绝持久化：${transactionRoot}`)
   }
@@ -906,11 +917,9 @@ async function loadManifest(physicalTransactionRoot, expected) {
     const manifestStat = fstatSync(manifestDescriptor)
     if (!manifestStat.isFile() || manifestStat.uid !== currentUid()
       || manifestStat.nlink !== 1 || (manifestStat.mode & 0o077) !== 0
-      || manifestStat.size > HOST_MANIFEST_MAX_BYTES) throw new Error('unsafe manifest')
+      || manifestStat.size > OWNER_PROGRAM_MANIFEST_MAX_BYTES) throw new Error('unsafe manifest')
     manifest = JSON.parse(await readFile(`/proc/self/fd/${manifestDescriptor}`, 'utf8'))
-    if (manifest?.version !== HOST_UPDATE_MANIFEST_VERSION && manifestStat.size > MANIFEST_MAX_BYTES) {
-      throw new Error('legacy manifest size exceeded')
-    }
+    if (manifestStat.size > manifestMaximumBytes(manifest)) throw new Error('manifest size exceeded')
     if ((isServiceManifestVersion(manifest?.version) || manifest?.version === HOST_UPDATE_MANIFEST_VERSION)
       && !sameIdentity(rootStat, manifest.transactionIdentity)) {
       throw new Error('transaction root identity mismatch')
@@ -8180,7 +8189,7 @@ export const lifecycleProfileTest = Object.freeze({
   canonicalJointCandidateHome,
   assertSnapshotTreeSafe, captureOwnerRepairObserverSocket, discardCopiedOwnerObserverSocket,
   compactSupervisedSnapshot, validSupervisedLifecycle, validSupervisedManifestPhase, sameHomeOwnershipEvidence,
-  validManifestTopLevel, validV3OperationShape, validV3ServiceAcceptance, writeManifest,
+  validManifestTopLevel, validV3OperationShape, validV3ServiceAcceptance, writeManifest, loadManifest,
   validSupervisedCapabilityProof, assertHostRsiRuntimeSuccessor, hostSandboxRun, MANIFEST_MAX_BYTES,
   validLocalSourceManifest, validLocalSourceSelection, localSourcePhysicalProof, profileTreeDigest,
   prepareLocalSourceOfflineCache, assertLocalSourcePreparation, prepareLocalSourcePackageCaches, sandboxArgs,
