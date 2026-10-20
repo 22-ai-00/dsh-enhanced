@@ -425,7 +425,7 @@ describe('managed Host transaction inputs', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
-  itLinux('canonicalizes the locked candidate Home for joint post-swap verification only', async () => {
+  itLinux('resolves the locked candidate Home and rejects a redirected directory', async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-host-canonical-')))
     const parent = await open(root, 'r')
     try {
@@ -436,10 +436,10 @@ describe('managed Host transaction inputs', () => {
       await expect(lifecycleProfileTest.canonicalJointCandidateHome(anchoredHome, home)).resolves.toBe(home)
       await expect(lifecycleProfileTest.canonicalJointCandidateHome(anchoredHome, otherHome))
         .rejects.toThrow('does not resolve to the canonical Home')
-      const source = await readFile(new URL('../scripts/install/lifecycle-profile.mjs', import.meta.url), 'utf8')
-      expect(source.match(/physicalHome: candidateHome,\s+selection: 'candidate'/gu)).toHaveLength(2)
-      expect(source).toContain("selection: 'candidate', checkLedger: ownerRepair")
-      expect(source).toContain('stagedHome: candidateHome, originalPhysicalHome: backupHome')
+      await rm(home, { recursive: true })
+      await symlink(otherHome, home)
+      await expect(lifecycleProfileTest.canonicalJointCandidateHome(anchoredHome, home))
+        .rejects.toThrow('does not resolve to the canonical Home')
     } finally {
       await parent.close()
       await rm(root, { recursive: true, force: true })
