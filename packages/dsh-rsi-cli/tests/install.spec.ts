@@ -332,6 +332,41 @@ describe('runInstall（薄委托）', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  test('large pending manifests admit only the exact v4 program Host recovery', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-rsi-large-recovery-test-')))
+    try {
+      const home = join(root, 'home')
+      const transaction = `${home}.dsh-enhanced-transaction`
+      await mkdir(transaction, { mode: 0o700 })
+      const path = join(transaction, 'manifest.json')
+      const base = { version: 4, operation: 'host-update', profile: 'owner', hostMigration: {
+        localSource: { protocol: 'dsh-enhanced/host-owner-program-update/v1' },
+      } }
+      const large = { ...base, padding: 'x'.repeat(2 * 1024 * 1024) }
+      await writeFile(path, JSON.stringify(large), { mode: 0o600 })
+      expect(await hasPendingHostRecovery(home)).toBe(true)
+      const prepareHost = vi.fn(), runInherited = vi.fn(async () => 0)
+      expect(await runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.56',
+        passthrough: ['--operation', 'upgrade'], dshHome: home, recoveryOnly: true,
+        executor: { download: vi.fn(), runInherited, prepareHost },
+      })).toBe(0)
+      expect(runInherited).toHaveBeenCalledTimes(1)
+      expect(prepareHost).not.toHaveBeenCalled()
+      const exactLimit = 8 * 1024 * 1024 - Buffer.byteLength(JSON.stringify({ ...base, padding: '' }))
+      await writeFile(path, JSON.stringify({ ...base, padding: 'x'.repeat(exactLimit) }))
+      expect(await hasPendingHostRecovery(home)).toBe(true)
+      for (const change of [
+        { ...large, operation: 'upgrade' },
+        { ...large, hostMigration: { localSource: { protocol: 'unknown' } } },
+      ]) {
+        await writeFile(path, JSON.stringify(change))
+        await expect(hasPendingHostRecovery(home)).rejects.toThrow('超过其允许大小')
+      }
+      await writeFile(path, JSON.stringify({ ...base, padding: 'x'.repeat(8 * 1024 * 1024) }))
+      await expect(hasPendingHostRecovery(home)).rejects.toThrow('文件不安全')
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   test('normal install and dry-run ignore ambient Host transaction markers', async () => {
     const markers = ['DSH_ENHANCED_HOST_UPDATE_PLAN', 'DSH_ENHANCED_HOST_UPDATE_BIN',
       'DSH_ENHANCED_HOST_SELECTOR_VALIDATED', 'DSH_ENHANCED_HOST_RECOVERY_ONLY',
