@@ -281,24 +281,58 @@ async function standingData(home, physicalHome, profile, { ledgerChanged = false
 
 export async function assertOwnerProgramBusinessDataCopied(api, owner, stage) {
   const paths = new Set()
-  const scan = value => {
-    if (Array.isArray(value)) { value.forEach(scan); return }
-    if (!value || typeof value !== 'object') return
-    for (const [key, child] of Object.entries(value)) {
-      if (key === 'databasePath' && typeof child === 'string') {
-        if (!exact(child) || !inside(owner.homePath, child)) fail('owner database escaped Home')
-        paths.add(child)
-      } else scan(child)
+  const databasePath = node => {
+    if (!api.yaml.isScalar(node) || typeof node.value !== 'string') fail('owner database escaped Home')
+    let path = node.value
+    if (node.tag === 'tag:yaml.org,2002:js') {
+      const match = /^dshHomePath\((['"])([A-Za-z0-9._/-]+)\1\)$/u.exec(path)
+      const relativePath = match?.[2]
+      if (!relativePath || relativePath.split('/').some(part => !part || part === '.' || part === '..')) {
+        fail('owner database escaped Home')
+      }
+      path = join(owner.homePath, relativePath)
+    } else if (node.tag && node.tag !== 'tag:yaml.org,2002:str') {
+      fail('owner database escaped Home')
+    }
+    if (!exact(path) || !inside(owner.homePath, path)) fail('owner database escaped Home')
+    return path
+  }
+  const scan = (node, document, ancestors = new Set()) => {
+    if (api.yaml.isAlias(node)) {
+      const resolved = node.resolve(document)
+      if (!resolved || ancestors.has(resolved)) fail('original effective profile has a cyclic database alias')
+      scan(resolved, document, new Set(ancestors).add(resolved))
+      return
+    }
+    if (api.yaml.isSeq(node)) { node.items.forEach(child => scan(child, document, ancestors)); return }
+    if (!api.yaml.isMap(node)) return
+    for (const pair of node.items) {
+      if (api.yaml.isScalar(pair.key) && pair.key.value === 'databasePath') {
+        paths.add(databasePath(pair.value))
+      } else scan(pair.value, document, ancestors)
     }
   }
+  const ownerRows = new Set(['dsh-enhanced-assistant-delivery', 'dsh-enhanced-personal-assistant',
+    'dsh-enhanced-assistant-verifier', 'dsh-enhanced-assistant-growth-driver',
+    'dsh-enhanced-assistant-memory-learning', 'dsh-enhanced-assistant-policy',
+    'dsh-enhanced-assistant-automations', 'dsh-enhanced-plugin-control-plane'])
   for (const source of Object.values(owner.original.effective)) {
     const document = api.yaml.parseDocument(source, { uniqueKeys: true })
-    if (document.errors.length) fail('original effective profile is invalid')
-    const ownerRows = new Set(['dsh-enhanced-assistant-delivery', 'dsh-enhanced-personal-assistant',
-      'dsh-enhanced-assistant-verifier', 'dsh-enhanced-assistant-growth-driver',
-      'dsh-enhanced-assistant-memory-learning', 'dsh-enhanced-assistant-policy',
-      'dsh-enhanced-assistant-automations', 'dsh-enhanced-plugin-control-plane'])
-    for (const row of document.toJSON()) if (ownerRows.has(row?.id)) scan(row.config)
+    if (document.errors.length || !api.yaml.isSeq(document.contents)) fail('original effective profile is invalid')
+    for (const row of document.contents.items) {
+      if (api.yaml.isMap(row) && ownerRows.has(row.get('id'))) scan(row.get('config', true), document)
+    }
+  }
+  const assertParentInside = async (root, path) => {
+    if (await realpath(root) !== root) fail('owner database escaped Home')
+    let cursor = root
+    for (const part of relative(root, dirname(path)).split(sep).filter(Boolean)) {
+      cursor = join(cursor, part)
+      let entry
+      try { entry = await lstat(cursor) }
+      catch (error) { if (error?.code === 'ENOENT') break; throw error }
+      if (entry.isSymbolicLink() || !entry.isDirectory()) fail('owner database escaped Home')
+    }
   }
   const digest = async path => {
     try {
@@ -308,10 +342,15 @@ export async function assertOwnerProgramBusinessDataCopied(api, owner, stage) {
       return hash(await readFile(path))
     } catch (error) { if (error?.code === 'ENOENT') return null; throw error }
   }
-  for (const path of paths) for (const suffix of ['', '-wal', '-shm', '-journal']) {
-    const original = await digest(path + suffix)
-    if (original !== await digest(physical(owner.homePath, stage, path) + suffix)) {
-      fail(`staged owner/automation/budget database differs: ${path}${suffix}`)
+  for (const path of paths) {
+    const stagedPath = physical(owner.homePath, stage, path)
+    await assertParentInside(owner.homePath, path)
+    await assertParentInside(stage, stagedPath)
+    for (const suffix of ['', '-wal', '-shm', '-journal']) {
+      const original = await digest(path + suffix)
+      if (original !== await digest(stagedPath + suffix)) {
+        fail(`staged owner/automation/budget database differs: ${path}${suffix}`)
+      }
     }
   }
 }
