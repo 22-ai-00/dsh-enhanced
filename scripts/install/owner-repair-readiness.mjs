@@ -6,6 +6,11 @@ import { assertLocalSourceInstaller } from './local-source-maintenance.mjs'
 
 const fail = message => { throw new Error(`Owner repair readiness: ${message}`) }
 
+export function transientAutomationOperatorSnapshot(error, SnapshotError) {
+  return typeof SnapshotError === 'function' && error instanceof SnapshotError
+    && ['database-drift', 'database-busy'].includes(error.code)
+}
+
 export function matchesOwnerRepairActivation(record, id, scope, since) {
   return record?.id === id && record.owner === 'plugin-control-plane-adoption-coordinator'
     && record.status === 'active' && Number.isSafeInteger(record.updatedAt) && record.updatedAt >= since
@@ -34,17 +39,20 @@ export async function ownerRepairActivationInspector({ ownerRepair, installer, h
     join(installer.root, 'plugins', 'plugin-control-plane', 'lib', 'store.js')]
   const paths = await Promise.all(modules.map(path => realpath(path)))
   if (paths.some(path => !path.startsWith(`${installer.root}${sep}`))) fail('reviewed activation API escapes installer')
-  const [{ listActiveAutomationsLocally }, { controlPlaneDigest }] = await Promise.all(
+  const [{ listActiveAutomationsLocally, AutomationOperatorSnapshotError }, { controlPlaneDigest }] = await Promise.all(
     paths.map(path => import(pathToFileURL(path).href)))
-  if (typeof listActiveAutomationsLocally !== 'function' || typeof controlPlaneDigest !== 'function') {
+  if (typeof listActiveAutomationsLocally !== 'function'
+    || typeof AutomationOperatorSnapshotError !== 'function' || typeof controlPlaneDigest !== 'function') {
     fail('reviewed activation API is unavailable')
   }
   const id = `adoption-coordinator-${controlPlaneDigest({ coordinatorId, scope }).slice(0, 40)}`
   const database = join(homePath, 'rsi-coordinators', coordinatorProfile, 'automations.sqlite')
-  return since => {
+  const inspect = since => {
     if (!Number.isSafeInteger(since) || since < 0) fail('invalid activation timestamp')
     const records = listActiveAutomationsLocally(database)
     if (!Array.isArray(records)) fail('reviewed activation inventory is invalid')
     return records.some(record => matchesOwnerRepairActivation(record, id, scope, since))
   }
+  inspect.isTransientSnapshotError = error => transientAutomationOperatorSnapshot(error, AutomationOperatorSnapshotError)
+  return inspect
 }
