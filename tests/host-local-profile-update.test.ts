@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { basename, dirname, join, relative } from 'node:path'
 import { parse, stringify } from 'yaml'
-import { materializeHostLocalProfileUpdate, prepareHostLocalProfileUpdate,
+import { deriveHostLocalProfileMetadata, materializeHostLocalProfileUpdate, prepareHostLocalProfileUpdate,
   validateHostLocalProfileUpdate } from '../scripts/install/host-local-profile-update.mjs'
+import { nativeAuthority, readMetadata } from '../scripts/install/host-profile-update.mjs'
 import { createHash } from 'node:crypto'
 
 const reviewed = vi.hoisted(() => ({ peers: {} as Record<string, Record<string, string>> }))
@@ -129,6 +130,139 @@ async function fixture(names = ['assistant', 'acp']) {
   return { root, originalHome, preparationRoot, candidateHome, stagedHome, originalDshPath, candidateDshPath,
     candidateArtifacts, installer: { root: 'reviewed-test-installer' }, runPnpm }
 }
+
+async function nativePackage(hostRoot: string, name: string, version: string, dependencies: Record<string, string>) {
+  const path = join(hostRoot, 'node_modules', name)
+  await mkdir(path, { recursive: true })
+  await writeFile(join(path, 'package.json'), JSON.stringify({ name, version, dependencies }))
+  const lockPath = join(hostRoot, 'package-lock.json')
+  const lock = JSON.parse(await readFile(lockPath, 'utf8'))
+  lock.packages[`node_modules/${name}`] = { version, integrity, dependencies }
+  await writeFile(lockPath, JSON.stringify(lock))
+}
+
+async function nativeOverrides(input: Awaited<ReturnType<typeof fixture>>, overrides: Record<string, string>) {
+  const profile = join(input.originalHome, 'profiles', 'assistant')
+  await writeFile(join(profile, 'pnpm-workspace.yaml'), stringify({ packages: ['.'], overrides }))
+  const lockPath = join(profile, 'pnpm-lock.yaml'), lock = parse(await readFile(lockPath, 'utf8'))
+  lock.overrides = overrides
+  await writeFile(lockPath, stringify(lock))
+  const staged = join(input.stagedHome, 'profiles', 'assistant')
+  await writeFile(join(staged, 'pnpm-workspace.yaml'), stringify({ packages: ['.'], overrides }))
+  await writeFile(join(staged, 'pnpm-lock.yaml'), stringify(lock))
+}
+
+test('retires only authenticated original native override edges and regenerates the complete candidate graph', async () => {
+  const input = await fixture(['assistant'])
+  const oldRoot = join(input.root, 'old-host'), candidateRoot = join(input.root, 'candidate-host')
+  await nativePackage(oldRoot, '@deepseek-ai/dsh-retired-tool', '0.1.5-rc.3', {})
+  await nativePackage(oldRoot, '@deepseek-ai/dsh-retired-parent', '0.1.5-rc.3', {
+    '@deepseek-ai/dsh-retired-tool': '0.1.5-rc.3',
+  })
+  await nativePackage(oldRoot, '@deepseek-ai/dsh-base', '0.1.5-rc.3', {
+    '@deepseek-ai/cordis': '4.0.2', '@deepseek-ai/dsh-retired-tool': '0.1.5-rc.3',
+  })
+  await nativePackage(candidateRoot, '@deepseek-ai/dsh-new-tool', '0.2.0-rc.2', {})
+  await nativePackage(candidateRoot, '@deepseek-ai/dsh-base', '0.2.0-rc.2', {
+    '@deepseek-ai/cordis': '4.0.4', '@deepseek-ai/dsh-new-tool': '0.2.0-rc.2',
+  })
+  await nativeOverrides(input, {
+    '@deepseek-ai/dsh-base@0.1.5-rc.3>@deepseek-ai/cordis': '4.0.2',
+    '@deepseek-ai/dsh-base@0.1.5-rc.3>@deepseek-ai/dsh-retired-tool': '0.1.5-rc.3',
+    '@deepseek-ai/dsh-retired-parent@0.1.5-rc.3>@deepseek-ai/dsh-retired-tool': '0.1.5-rc.3',
+  })
+  const original = await readMetadata(join(input.originalHome, 'profiles', 'assistant'))
+  const originalBytes = structuredClone(original)
+  const originalHost = await nativeAuthority(input.originalDshPath)
+  const candidateHost = await nativeAuthority(input.candidateDshPath)
+  const projected = deriveHostLocalProfileMetadata(original, input.originalHome, originalHost.packages,
+    candidateHost.packages, input.candidateArtifacts, createRequire(input.candidateDshPath)('yaml'))
+  expect(original).toEqual(originalBytes)
+  expect(projected['cordis.patch.yml']).toBe(original['cordis.patch.yml'])
+  const preparation = await prepareHostLocalProfileUpdate(input)
+  const workspace = parse(await readFile(join(input.preparationRoot, 'assistant', 'pnpm-workspace.yaml'), 'utf8'))
+  expect(parse(projected['pnpm-workspace.yaml']).overrides).toEqual(workspace.overrides)
+  expect(workspace.overrides).toEqual({
+    '@deepseek-ai/dsh-base@0.2.0-rc.2>@deepseek-ai/cordis': '4.0.4',
+    '@deepseek-ai/dsh-base@0.2.0-rc.2>@deepseek-ai/dsh-new-tool': '0.2.0-rc.2',
+  })
+  expect(Object.keys(workspace.overrides).some((key: string) => key.includes('retired'))).toBe(false)
+  expect(preparation.originalNative['@deepseek-ai/dsh-retired-parent']).toMatchObject({ version: '0.1.5-rc.3' })
+})
+
+test.each([
+  ['unknown parent', '@deepseek-ai/dsh-unknown@0.1.5-rc.3>@deepseek-ai/cordis', '4.0.2'],
+  ['wrong parent version', '@deepseek-ai/dsh-base@0.1.5-rc.2>@deepseek-ai/cordis', '4.0.2'],
+  ['wrong child version', '@deepseek-ai/dsh-base@0.1.5-rc.3>@deepseek-ai/cordis', '4.0.1'],
+  ['undeclared edge', '@deepseek-ai/dsh@0.1.5-rc.3>@deepseek-ai/cordis', '4.0.2'],
+  ['unknown child', '@deepseek-ai/dsh-base@0.1.5-rc.3>@deepseek-ai/dsh-unknown', '0.1.5-rc.3'],
+] as const)('rejects %s native override outside original Host authority', async (_label, key, value) => {
+  const input = await fixture(['assistant'])
+  await nativeOverrides(input, { [key]: value })
+  await expect(prepareHostLocalProfileUpdate(input)).rejects.toThrow('override is outside original Host')
+})
+
+test('keeps custom and enhanced-parent overrides fail closed', async () => {
+  const custom = await fixture(['assistant'])
+  await nativeOverrides(custom, { '@custom/driver@1.0.0>@deepseek-ai/cordis': '4.0.2' })
+  await expect(prepareHostLocalProfileUpdate(custom)).rejects.toThrow('unapproved override parent')
+  const enhanced = await fixture(['assistant'])
+  await nativeOverrides(enhanced, { '@dsh-enhanced/demo@0.1.1>@deepseek-ai/dsh-retired-tool': '0.1.5-rc.3' })
+  await expect(prepareHostLocalProfileUpdate(enhanced)).rejects.toThrow('candidate Host lacks override')
+})
+
+test('does not retire an explicit native root missing from the candidate Host', async () => {
+  const input = await fixture(['assistant'])
+  await nativePackage(join(input.root, 'old-host'), '@deepseek-ai/dsh-retired-tool', '0.1.5-rc.3', {})
+  const profile = join(input.originalHome, 'profiles', 'assistant', 'package.json')
+  const manifest = JSON.parse(await readFile(profile, 'utf8'))
+  manifest.dependencies['@deepseek-ai/dsh-retired-tool'] = '0.1.5-rc.3'
+  await writeFile(profile, JSON.stringify(manifest))
+  await expect(prepareHostLocalProfileUpdate(input)).rejects.toThrow('candidate Host lacks root')
+})
+
+test('rechecks original Host authority before staged validation', async () => {
+  const input = await fixture(['assistant'])
+  await nativeOverrides(input, { '@deepseek-ai/dsh-base@0.1.5-rc.3>@deepseek-ai/cordis': '4.0.2' })
+  const preparation = await prepareHostLocalProfileUpdate(input)
+  preparation.originalNative['@deepseek-ai/cordis'].version = '4.0.1'
+  await expect(validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome }))
+    .rejects.toThrow('original Host authority drift')
+})
+
+test('rejects original Host authority changed during preparation', async () => {
+  const input = await fixture(['assistant'])
+  await nativeOverrides(input, { '@deepseek-ai/dsh-base@0.1.5-rc.3>@deepseek-ai/cordis': '4.0.2' })
+  const runPnpm: typeof input.runPnpm = async (...args) => {
+    await input.runPnpm(...args)
+    if (args[1].phase !== 'resolve') return
+    const manifestPath = join(input.root, 'old-host', 'node_modules', '@deepseek-ai', 'dsh-base', 'package.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    await writeFile(manifestPath, JSON.stringify({ ...manifest, dependencies: {} }))
+  }
+  await expect(prepareHostLocalProfileUpdate({ ...input, runPnpm }))
+    .rejects.toThrow('original Host authority drift')
+})
+
+test('rejects changed original Host dependency authority and staged override tampering', async () => {
+  const input = await fixture(['assistant'])
+  await nativeOverrides(input, { '@deepseek-ai/dsh-base@0.1.5-rc.3>@deepseek-ai/cordis': '4.0.2' })
+  const preparation = await prepareHostLocalProfileUpdate(input)
+  const oldBase = join(input.root, 'old-host', 'node_modules', '@deepseek-ai', 'dsh-base', 'package.json')
+  const original = await readFile(oldBase, 'utf8')
+  await writeFile(oldBase, JSON.stringify({ ...JSON.parse(original), dependencies: {} }))
+  await expect(validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome }))
+    .rejects.toThrow('original Host authority drift')
+  await writeFile(oldBase, original)
+  await materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
+    logicalHome: input.originalHome, runPnpm: input.runPnpm, runCandidateDsh: async () => {} })
+  const workspacePath = join(input.stagedHome, 'profiles', 'assistant', 'pnpm-workspace.yaml')
+  const workspace = parse(await readFile(workspacePath, 'utf8'))
+  workspace.overrides['@deepseek-ai/dsh-base@0.2.0-rc.2>@deepseek-ai/cordis'] = '4.0.1'
+  await writeFile(workspacePath, stringify(workspace))
+  await expect(validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome }))
+    .rejects.toThrow('staged metadata drift: assistant/pnpm-workspace.yaml')
+})
 
 test('derives internal peer overrides only inside the selected runtime closure', async () => {
   const input = await fixture(['assistant'])

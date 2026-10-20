@@ -1203,7 +1203,8 @@ describe('release version workflow', () => {
     const workerLimit = /^ {2}VITEST_MAX_WORKERS: '([1-9]\d*)'$/mu
     expect(releaseWorkflow.match(workerLimit)?.[1]).toBe(ciWorkflow.match(workerLimit)?.[1])
     expect(ciWorkflow).toContain('cancel-in-progress: true')
-    expect(ciWorkflow).toContain('@deepseek-ai/dsh@0.2.0-rc.2')
+    const releaseManifest = await readJson(join(repoRoot, 'release-manifest.json'))
+    expect(ciWorkflow).toContain(`@deepseek-ai/dsh@${releaseManifest.nextPinnedHostVersion}`)
     expect(ciWorkflow).toContain('$(cd /tmp && pwd -P)')
     expect(releaseWorkflow).toContain("printf 'DSH_TEST_PNPM_ROOT=%s\\n'")
   })
