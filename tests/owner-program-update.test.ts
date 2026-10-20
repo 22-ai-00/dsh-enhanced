@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest'
 import { createHash, generateKeyPairSync } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, link, mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -306,12 +306,18 @@ test('owner database paths reject untagged expressions, unsafe JS, traversal and
       `!!js dshHomePath('/tmp/outside')`,
       `!!js dshHomePath('state\\outside')`,
       `!!js "dshHomePath('state\\n.sqlite')"`,
+      `!!js "dshHomePath('state\\0.sqlite')"`,
       join(outside, 'state.sqlite'),
     ]
     for (const value of unsafe) {
       await expect(assertOwnerProgramBusinessDataCopied({ yaml: yamlApi }, owner(value), stageHome))
         .rejects.toThrow(/owner database escaped Home/u)
     }
+    await expect(assertOwnerProgramBusinessDataCopied({ yaml: yamlApi }, {
+      homePath, original: { effective: {
+        targetEffective: '- id: dsh-enhanced-assistant-delivery\n  config: &loop\n    nested: *loop\n',
+        coordinatorEffective: '[]\n' } } }, stageHome))
+      .rejects.toThrow(/cyclic database alias/u)
     await mkdir(join(homePath, 'state'), { mode: 0o700 })
     await symlink(outside, join(stageHome, 'state'))
     await expect(assertOwnerProgramBusinessDataCopied({ yaml: yamlApi },
@@ -322,6 +328,66 @@ test('owner database paths reject untagged expressions, unsafe JS, traversal and
     await expect(assertOwnerProgramBusinessDataCopied({ yaml: yamlApi },
       owner(`!!js dshHomePath('escape/delivery.sqlite')`), stageHome))
       .rejects.toThrow(/owner database escaped Home/u)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('large owner databases preserve every byte and reject replacement, hard links and loose modes', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-large-')))
+  try {
+    const homePath = join(root, 'home'), stageHome = join(root, 'stage')
+    await mkdir(homePath, { mode: 0o700 }); await mkdir(stageHome, { mode: 0o700 })
+    const name = 'policy.sqlite', size = 268_435_457
+    const original = join(homePath, name), staged = join(stageHome, name)
+    for (const path of [original, staged]) {
+      const file = await open(path, 'w', 0o600)
+      try { await file.truncate(size) } finally { await file.close() }
+    }
+    const owner = { homePath, original: { effective: {
+      targetEffective: `- id: dsh-enhanced-assistant-policy\n  config:\n    databasePath: ${original}\n`,
+      coordinatorEffective: '[]\n' } } }
+    const verify = () => assertOwnerProgramBusinessDataCopied({ yaml: yamlApi }, owner, stageHome)
+    await expect(verify()).resolves.toBeUndefined()
+    const changed = await open(staged, 'r+')
+    try { await changed.write(Buffer.from([1]), 0, 1, size - 1) } finally { await changed.close() }
+    await expect(verify()).rejects.toThrow(/staged owner\/automation\/budget database differs/u)
+    await rm(staged)
+    await symlink(original, staged)
+    await expect(verify()).rejects.toThrow(/unsafe owner database/u)
+    await rm(staged)
+    await link(original, staged)
+    await expect(verify()).rejects.toThrow(/unsafe owner database/u)
+    await rm(staged)
+    await writeFile(staged, 'retained', { mode: 0o644 })
+    await chmod(staged, 0o644)
+    await expect(verify()).rejects.toThrow(/unsafe owner database/u)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('owner database digest rejects a file that changes while it is being read', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-changing-')))
+  try {
+    const homePath = join(root, 'home'), stageHome = join(root, 'stage')
+    await mkdir(homePath, { mode: 0o700 }); await mkdir(stageHome, { mode: 0o700 })
+    const path = join(homePath, 'policy.sqlite'), staged = join(stageHome, 'policy.sqlite')
+    for (const name of [path, staged]) {
+      const file = await open(name, 'w', 0o600)
+      try { await file.truncate(268_435_457) } finally { await file.close() }
+    }
+    const owner = { homePath, original: { effective: {
+      targetEffective: `- id: dsh-enhanced-assistant-policy\n  config:\n    databasePath: ${path}\n`,
+      coordinatorEffective: '[]\n' } } }
+    const writer = await open(path, 'r+')
+    let writing = true, next = 0
+    const pending = (async () => {
+      while (writing) {
+        await writer.write(Buffer.from([next ^= 1]), 0, 1, 268_435_456)
+        await new Promise(resolve => setTimeout(resolve, 1))
+      }
+    })()
+    try {
+      await expect(assertOwnerProgramBusinessDataCopied({ yaml: yamlApi }, owner, stageHome))
+        .rejects.toThrow(/unsafe owner database/u)
+    } finally { writing = false; await pending; await writer.close() }
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
