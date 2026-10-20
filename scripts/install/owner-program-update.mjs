@@ -335,12 +335,33 @@ export async function assertOwnerProgramBusinessDataCopied(api, owner, stage) {
     }
   }
   const digest = async path => {
+    let named
+    try { named = await lstat(path, { bigint: true }) }
+    catch (error) { if (error?.code === 'ENOENT') return null; throw error }
+    const unsafe = () => fail(`unsafe owner database: ${path}`)
+    if (!named.isFile() || named.isSymbolicLink() || named.uid !== BigInt(process.getuid())
+      || named.mode & 0o077n || named.nlink !== 1n || named.size < 0n
+      || named.size > BigInt(Number.MAX_SAFE_INTEGER) || await realpath(path) !== path) unsafe()
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
     try {
-      const entry = await lstat(path)
-      if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== process.getuid()
-        || entry.mode & 0o077 || entry.size > 268_435_456) fail(`unsafe owner database: ${path}`)
-      return hash(await readFile(path))
-    } catch (error) { if (error?.code === 'ENOENT') return null; throw error }
+      const before = await file.stat({ bigint: true })
+      const identity = entry => [entry.dev, entry.ino, entry.size, entry.mtimeNs,
+        entry.ctimeNs, entry.uid, entry.mode, entry.nlink]
+      if (!before.isFile() || !same(identity(named), identity(before))) unsafe()
+      const size = Number(before.size), buffer = Buffer.allocUnsafe(1_048_576), stream = createHash('sha256')
+      let offset = 0
+      while (offset < size) {
+        const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, size - offset), offset)
+        if (bytesRead <= 0) unsafe()
+        stream.update(buffer.subarray(0, bytesRead))
+        offset += bytesRead
+      }
+      const after = await file.stat({ bigint: true })
+      const namedAfter = await lstat(path, { bigint: true })
+      if (!same(identity(before), identity(after)) || !same(identity(before), identity(namedAfter))
+        || !namedAfter.isFile() || namedAfter.isSymbolicLink()) unsafe()
+      return stream.digest('hex')
+    } finally { await file.close() }
   }
   for (const path of paths) {
     const stagedPath = physical(owner.homePath, stage, path)
