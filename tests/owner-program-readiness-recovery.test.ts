@@ -128,6 +128,24 @@ test('prestart, another owner pair, accepted initial transaction and altered gra
   expect(() => assertRecoveryEnvelope(manifest, { permit, receipt: {} }, homePath, profile, root)).toThrow()
 })
 
+test('first admission accepts only bound stopped installed or staged mask states', () => {
+  const assertStopped = lifecycleProfileTest.assertHostReadinessRecoveryStoppedServiceState
+  const inactive = { loadState: 'loaded', unitFileState: 'disabled', activeState: 'inactive',
+    subState: 'dead', mainPid: 0, controlPid: 0 }
+  expect(() => assertStopped('staged', inactive)).not.toThrow()
+  expect(() => assertStopped('installed', { ...inactive, loadState: 'masked',
+    unitFileState: 'masked' })).not.toThrow()
+  for (const [location, state] of [
+    ['missing', inactive],
+    ['staged', { ...inactive, activeState: 'active', subState: 'running', mainPid: 42 }],
+    ['staged', { ...inactive, controlPid: 42 }],
+    ['staged', { ...inactive, unitFileState: 'enabled' }],
+    ['staged', { ...inactive, loadState: 'not-found' }],
+    ['installed', inactive],
+    ['installed', { ...inactive, loadState: 'masked', subState: 'failed' }],
+  ] as const) expect(() => assertStopped(location, state)).toThrow('bound stopped services')
+})
+
 test('a persisted permit remains the same signed envelope through accepted and committed cleanup phases', () => {
   const { manifest, permit, host } = fixture()
   for (const phase of ['accepted', 'committed', 'cleanup-started']) {

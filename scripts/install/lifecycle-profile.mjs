@@ -6994,6 +6994,27 @@ function assertHostSettingsRecoveryServiceState(maskLocation, state) {
   }
 }
 
+function assertHostReadinessRecoveryStoppedServiceState(maskLocation, state) {
+  if (!['installed', 'staged'].includes(maskLocation)
+    || state.activeState !== 'inactive' || state.subState !== 'dead'
+    || state.mainPid !== 0 || state.controlPid !== 0
+    || maskLocation === 'installed' && state.loadState !== 'masked'
+    || maskLocation === 'staged' && (state.loadState !== 'loaded' || state.unitFileState !== 'disabled')) {
+    fail('program readiness recovery admission requires bound stopped services')
+  }
+}
+
+async function assertHostReadinessRecoveryStopped(manifest, serviceContext, homePath, backupHome) {
+  for (const service of manifest.services) {
+    const mask = manifest.serviceMasks.find(candidate => candidate.unit === service.unit)
+    const state = await readRawServiceState(serviceContext.systemctlExecutable, service.unit)
+    assertHostReadinessRecoveryStoppedServiceState(mask === undefined ? 'missing' : await boundMaskLocation(mask), state)
+  }
+  await assertNoUnmanagedHomeProcesses(homePath, [backupHome])
+  await assertUnitUniverseStable(serviceContext.systemctlExecutable, manifest.unitUniverse, homePath,
+    manifest.foreignOwnership)
+}
+
 async function assertHostSettingsRecoveryContained(manifest, serviceContext, homePath, backupHome) {
   for (const service of manifest.services) {
     const mask = manifest.serviceMasks.find(candidate => candidate.unit === service.unit)
@@ -7047,7 +7068,7 @@ async function admitHostProgramReadinessRecovery({ homePath, physicalHomePath, p
   await assertCriticalDirectory(physicalHomePath, manifest.stagedIdentity)
   if (!cleanupOnly) {
     await assertCriticalDirectory(backupHome, manifest.originalIdentity)
-    if (firstAdmission) await assertHostSettingsRecoveryContained(manifest, serviceContext, homePath, backupHome)
+    if (firstAdmission) await assertHostReadinessRecoveryStopped(manifest, serviceContext, homePath, backupHome)
   }
   await verifyHostPlanBinding(manifest.hostMigration.plan, homePath, 'candidate')
   const { verifyHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
@@ -7062,6 +7083,12 @@ async function admitHostProgramReadinessRecovery({ homePath, physicalHomePath, p
     if (!isDeepStrictEqual(profiles, manifest.hostMigration.profileProof)) {
       fail('program readiness recovery candidate profile proof differs')
     }
+  }
+  if (firstAdmission) {
+    await assertHostReadinessRecoveryStopped(manifest, serviceContext, homePath, backupHome)
+    await installBoundMasks(serviceContext.systemctlExecutable, manifest.serviceMasks)
+    await ensureServiceStartBarriers(serviceContext.systemctlExecutable, manifest.serviceStartBarriers)
+    await assertHostSettingsRecoveryContained(manifest, serviceContext, homePath, backupHome)
   }
   const { envelope, created } = await admitOwnerProgramReadinessRecovery({ manifest, homePath, profile, installerRoot })
   if (cleanupOnly) {
@@ -8375,6 +8402,7 @@ export const lifecycleProfileTest = Object.freeze({
   ownerRepairRestorationPolicy, serviceReadySignal, serviceRuntimeReady, readRawServiceState,
   stopAndResetServiceUnits,
   assertHostSettingsRecoveryAdmission, assertHostSettingsRecoveryServiceState, readHostSettingsRecoveryFile,
+  assertHostReadinessRecoveryStoppedServiceState,
   publishReadinessRecoveryReceipt, assertReadinessRecoveryAdmissionGate,
   canonicalJointCandidateHome,
   assertSnapshotTreeSafe, captureOwnerRepairObserverSocket, discardCopiedOwnerObserverSocket,
