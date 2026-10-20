@@ -119,7 +119,7 @@ describe('active Automations readiness read', () => {
     const marker = join(f.root, 'writer-count')
     const writer = spawn(process.execPath, ['--input-type=module', '-e', `
       import { DatabaseSync } from 'node:sqlite'
-      import { writeFileSync } from 'node:fs'
+      import { renameSync, writeFileSync } from 'node:fs'
       const db = new DatabaseSync(process.argv[1])
       db.exec('PRAGMA wal_autocheckpoint=0')
       let count = 0
@@ -128,7 +128,8 @@ describe('active Automations readiness read', () => {
         db.prepare("UPDATE automation_definitions SET updated_at = updated_at + 1 WHERE id IN ('live', 'live-pair')").run()
         db.exec('COMMIT')
         count++
-        writeFileSync(process.argv[2], String(count))
+        writeFileSync(process.argv[2] + '.next', String(count))
+        renameSync(process.argv[2] + '.next', process.argv[2])
         if (count === 1) process.stdout.write('ready\\n')
       }, 1)
       process.stdin.on('data', () => { clearInterval(timer); db.close(); process.exit(0) })
@@ -143,7 +144,15 @@ describe('active Automations readiness read', () => {
       const before = await Promise.all([f.path, `${f.path}-wal`, `${f.path}-shm`].map(path => stat(path, { bigint: true })))
       const countBefore = Number(readFileSync(marker, 'utf8'))
       sqliteControls.afterOpen = () => {
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40)
+        const deadline = Date.now() + 2_000
+        const pause = new Int32Array(new SharedArrayBuffer(4))
+        while (Date.now() < deadline) {
+          const published = readFileSync(marker, 'utf8')
+          if (/^[1-9][0-9]*$/u.test(published) && Number.isSafeInteger(Number(published))
+            && Number(published) > countBefore) return
+          Atomics.wait(pause, 0, 0, 5)
+        }
+        throw new Error('WAL writer did not publish another committed update within 2 seconds')
       }
       const records = listActiveAutomationsForReadiness(f.path)
       sqliteControls.afterOpen = null
@@ -160,8 +169,8 @@ describe('active Automations readiness read', () => {
       expect(after.map(value => [value.dev, value.ino])).toEqual(before.map(value => [value.dev, value.ino]))
     } finally {
       sqliteControls.afterOpen = null
-      if (writer.exitCode === null) {
-        writer.stdin.write('stop\n')
+      if (writer.exitCode === null && writer.signalCode === null) {
+        writer.kill('SIGTERM')
         await new Promise<void>(resolve => writer.once('exit', () => resolve()))
       }
     }
