@@ -86,18 +86,28 @@ uninstall 不访问 npm registry 或 pnpm store。`web` / `autonomy` 仍使用�
 Linux `supervised` 的已登记 RSI 双 Host 可以在同一个 Home 事务中成对升级插件：目标及协调器必须处于活动状态，安装收据和现有版本一致，共享 catalog/trust、owner 与 handoff 通过核对。协调器只包含原生基础配置及 Policy、Automations、Control Plane 三个增强包，三包随目标同批更新。npm 路径先分别准备并完整预取两个 profile 的锁文件；切换前更新副本收据并实际激活两个 profile。协调器预览只在进程 overlay 中关闭 scheduler，真实启动须生成本次启动后的 owner-bound Automation 登记。原始/候选的有效配置、收据和包版本在恢复、接受及清理前重新核对。停服前还要求旧协调器本次 InvocationID 已有就绪信号；缺少信号时原服务继续运行。切换前失败可恢复原活动服务；切换后失败保持双服务停止、保留新旧 Home 与事务供对账，不自动覆盖可能已迁移的状态。固定本地源码或存在 `rsi-local-cohorts` 的安装在 registry 查询、停服和包修改前拒绝普通 npm 升级，包括尚未生成协调器收据的冻结安装。开发版 `dsh-rsi-setup --prepare-local-update` 可在 Home 外准备保留既有修复的合并源码与隔离构建制品；尚无 RSI owner/coordinator 的安装可使用下述 checkout 内显式维护入口。已授权双 Host 的通用源码升级仍未开放；下文仅开放符合严格条件的程序升级，已 applied、未首次采用的失败首启另有有界 `host-owner-repair` 入口。详见 [RSI 配置](../../plugins/lark-channel/docs/rsi-setup.md)；成对卸载仍未支持。跨版本 Host 更新作为插件升级之后的独立阶段，见下文。
 
 
+## 查找私有 Host 入口
+
+`dsh-rsi status` 中的 Host 版本来自全局 PATH。旧 Home 或自定义缓存应读取 Home 自身的绑定；下面只输出入口路径，不输出凭据：
+
+```sh
+node -e 'const fs=require("node:fs"),p=require("node:path"),os=require("node:os");const h=process.env.DSH_HOME||p.join(os.homedir(),".dsh");const {cacheRoot,version}=JSON.parse(fs.readFileSync(p.join(h,".dsh-rsi-host.json"),"utf8"));console.log(p.join(cacheRoot,version,"node_modules",".bin","dsh"))'
+```
+
+用输出的完整路径代替 `dsh`，再加 `--profile web` 启动。若使用自定义 `DSH_HOME`，两次命令应保留相同设置。没有绑定文件的旧 Home 不适用此方法，先按原安装方式核对 Host。
+
 ## 现有 Linux 冻结 owner 程序升级
 
-包含此入口的新版 CLI **发布或从相应源码安装后**，对支持的现有 Linux owner/cohort Home，可运行：
+从 CLI `0.1.56` 起，对支持的现有 Linux owner/cohort Home，可运行：
 
 ```sh
 dsh-rsi update --all --dry-run --yes
 dsh-rsi update --all --yes
 ```
 
-CLI 先升级自身，再识别 Home 中唯一的冻结 target/coordinator 与原 `sourceRepository`；只接受绑定仓库的官方 GitHub origin、干净的 `dev` / `main` 分支，并执行 `git fetch`、仅快进合并、锁文件安装和构建。候选目前要求私有 Host 从受支持的 `0.2.0-rc.2` / `0.2.1-rc.2` 到已核验的 `0.2.1-rc.2`，同时更新冻结插件。要求原 target 与 coordinator 受管服务均活动、没有已采用的源码或未结 activation；额外参数会被拒绝。事务自动停启这对服务，保留原 owner 绑定、模型、权限、凭据、有限授权期限与已用额度、Session、Goal 和历史，不重做 onboarding，也不自动续期或扩权。已过期授权会在升级预检中被拒绝，需先按原授权流程处理。
+若当前 CLI 是 `0.1.55` 等旧版，先单独运行 `dsh-rsi update`，确认新进程为 `0.1.56` 或更新版本；旧版 `--all` 不会自动以新 CLI 进程识别冻结 owner。此后 CLI 先升级自身，再识别 Home 中唯一的冻结 target/coordinator 与原 `sourceRepository`；只接受绑定仓库的官方 GitHub origin、干净的 `dev` / `main` 分支，并执行 `git fetch`、仅快进合并、锁文件安装和构建。候选目前要求私有 Host 从受支持的 `0.2.0-rc.2` / `0.2.1-rc.2` 到 `0.2.1-rc.2`，同时更新冻结插件。要求原 owner 授权有效、target 与 coordinator 受管服务均活动、没有已采用的源码或未结 activation；额外参数会被拒绝。事务自动停启这对服务，保留原 owner 绑定、模型、权限、凭据、有限授权期限与已用额度、Session、Goal 和历史，不重做 onboarding，也不自动续期或扩权。已过期授权会在升级预检中被拒绝，需先按原授权流程处理。
 
-若有待恢复的程序升级事务，CLI 先用**原安装器**恢复，本次不拉取新源码；恢复后再次执行同一升级命令。`--dry-run` 仅显示计划。拒绝或失败时保留报错及事务现场；不要删除账本或改用 `reinstall` 冒充保留数据的升级。此处描述的是新源码路径，**不代表当前公开 CLI 已包含该能力，也不代表真实生产升级已验收**。macOS 冻结 owner/source Home 仍不支持普通原地升级。
+若有普通待恢复的程序升级事务，CLI 先用**原安装器**恢复，本次不拉取新源码；恢复后再次执行同一升级命令。若报错指出事务已绑定独立审核的签名 readiness 修复安装器，须从**该许可绑定的独立审核 checkout** 显式运行 `node scripts/install/upgrade-program.mjs --dsh-home <绝对Home路径> --profile <原target> --recover-readiness`；不要修改原安装器或删除事务。`--dry-run` 仅显示计划。拒绝或失败时保留报错及事务现场；不要删除账本或改用 `reinstall` 冒充保留数据的升级。当前发布与实机验收状态见 [RSI 状态](../../docs/rsi-status.md)。macOS 冻结 owner/source Home 仍不支持普通原地升级。
 
 ### 旧 Home 的联合 Host / 源码迁移
 

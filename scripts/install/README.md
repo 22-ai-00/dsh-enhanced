@@ -36,17 +36,16 @@ dsh-rsi doctor
 
 ## 只用本机 Web
 
-适合先体验聊天，暂不连接飞书、不启用后台学习；这一场景无需 Docker。下面的 `0.2.1-rc.2` 私有 Host 路径仅适用于包含该支持的新源码或相应版本**发布后**。此前公开 `0.1.55` 安装仍绑定 `0.2.0-rc.2`；请先用 `dsh-rsi status` 核对实际版本，改用对应目录的 `dsh`：
+适合先体验聊天，暂不连接飞书、不启用后台学习；这一场景无需 Docker。以下路径适用于 CLI `0.1.56` 起新安装的 `0.2.1-rc.2` 私有 Host。旧 Home 或自定义缓存目录请先[查找绑定的 Host 入口](maintenance.md#查找私有-host-入口)：
 
 ```sh
-npm install --global @dsh-enhanced/dsh-rsi-cli
 dsh-rsi install --scenario core --model skip --yes
 ~/.local/share/dsh-enhanced/hosts/0.2.1-rc.2/node_modules/.bin/dsh --profile web
 ```
 
 在浏览器打开前台命令打印的完整授权地址，按[模型指南](../../docs/models.md)配置并开始聊天。这个进程需要保持终端运行；按 Ctrl-C 停止。它没有注册常驻服务，因此不用 `dsh-rsi web-url` 或 `start`。
 
-旧 Home、其他 Host 版本或自定义安装位置，请先用 `dsh-rsi status` 核对实际 Host 路径；不要用另一个全局 `dsh` 代替当前绑定。
+旧 Home、其他 Host 版本或自定义安装位置，按[查找私有 Host 入口](maintenance.md#查找私有-host-入口)读取 Home 绑定；不要用另一个全局 `dsh` 代替当前绑定。
 
 ## 常用命令
 
@@ -57,7 +56,7 @@ dsh-rsi restart --profile web
 dsh-rsi install --help
 ```
 
-只需升级全局 CLI：`dsh-rsi update`。要升级已安装程序，先读 [CLI 升级说明](../../packages/dsh-rsi-cli/README.md#升级与重装)；Linux 可运行 `dsh-rsi update --all --dry-run --yes` 查看计划。包含新入口的 CLI 发布或从相应源码安装后，支持的**现有 Linux 冻结 owner/cohort** 可用 `dsh-rsi update --all --yes` 从原绑定官方源码干净分支更新冻结插件与私有 Host；受管服务由事务停启，owner 绑定、授权期限和历史保留，待恢复事务先恢复。要求无已采用或未结的源码 activation，完整条件见[冻结 owner 升级](maintenance.md#现有-linux-冻结-owner-程序升级)。macOS 必须先停止整个 Home 并显式确认；**冻结了原生 owner/source/cohort 资源的 Mac Home 暂不支持普通原地升级。** `dsh-rsi reinstall` 会先备份、彻底清理再安装，属于破坏性重装，不是升级；先核对 [CLI 重装与 purge 说明](../../packages/dsh-rsi-cli/README.md#升级与重装) 和[维护说明](maintenance.md#彻底卸载purge)。
+只需升级全局 CLI：`dsh-rsi update`。从 CLI `0.1.56` 起，受支持的**现有 Linux 冻结 owner/cohort** 可先用 `dsh-rsi update --all --dry-run --yes` 看计划，再运行 `dsh-rsi update --all --yes`，从原绑定官方源码升级冻结插件与私有 Host，保留 owner、授权和历史；旧 CLI 须先单独自升级一次。完整条件与恢复步骤见[冻结 owner 升级](maintenance.md#现有-linux-冻结-owner-程序升级)及 [CLI 升级说明](../../packages/dsh-rsi-cli/README.md#升级与重装)。macOS 必须先停止整个 Home 并显式确认；**冻结了原生 owner/source/cohort 资源的 Mac Home 暂不支持普通原地升级。** `dsh-rsi reinstall` 会先备份、彻底清理再安装，属于破坏性重装，不是升级；先核对 [CLI 重装与 purge 说明](../../packages/dsh-rsi-cli/README.md#升级与重装) 和[维护说明](maintenance.md#彻底卸载purge)。
 
 ## 场景与参数入口
 
