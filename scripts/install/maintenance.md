@@ -98,14 +98,14 @@ node -e 'const fs=require("node:fs"),p=require("node:path"),os=require("node:os"
 
 ## 现有 Linux 冻结 owner 程序升级
 
-从 CLI `0.1.56` 起，对支持的现有 Linux owner/cohort Home，可运行：
+从 CLI `0.1.57` 起，对支持的现有 Linux owner/cohort Home，可运行：
 
 ```sh
 dsh-rsi update --all --dry-run --yes
 dsh-rsi update --all --yes
 ```
 
-若当前 CLI 是 `0.1.55` 等旧版，先单独运行 `dsh-rsi update`，确认新进程为 `0.1.56` 或更新版本；旧版 `--all` 不会自动以新 CLI 进程识别冻结 owner。此后 CLI 先升级自身，再识别 Home 中唯一的冻结 target/coordinator 与原 `sourceRepository`；只接受绑定仓库的官方 GitHub origin、干净的 `dev` / `main` 分支，并执行 `git fetch`、仅快进合并、锁文件安装和构建。候选目前要求私有 Host 从受支持的 `0.2.0-rc.2` / `0.2.1-rc.2` 到 `0.2.1-rc.2`，同时更新冻结插件。要求原 owner 授权有效、target 与 coordinator 受管服务均活动、没有已采用的源码或未结 activation；额外参数会被拒绝。事务自动停启这对服务，保留原 owner 绑定、模型、权限、凭据、有限授权期限与已用额度、Session、Goal 和历史，不重做 onboarding，也不自动续期或扩权。已过期授权会在升级预检中被拒绝，需先按原授权流程处理。
+若当前 CLI 是 `0.1.55` 等旧版，先单独运行 `dsh-rsi update`，确认新进程为 `0.1.57` 或更新版本；旧版 `--all` 不会自动以新 CLI 进程识别冻结 owner。此后 CLI 先升级自身，再识别 Home 中唯一的冻结 target/coordinator 与原 `sourceRepository`；只接受绑定仓库的官方 GitHub origin、干净的 `dev` / `main` 分支，并执行 `git fetch`、仅快进合并、锁文件安装和构建。候选目前要求私有 Host 从受支持的 `0.2.0-rc.2` / `0.2.1-rc.2` 到 `0.2.1-rc.2`，同时更新冻结插件。要求原 owner 授权有效、target 与 coordinator 受管服务均活动、没有已采用的源码或未结 activation；额外参数会被拒绝。事务自动停启这对服务，保留原 owner 绑定、模型、权限、凭据、有限授权期限与已用额度、Session、Goal 和历史，不重做 onboarding，也不自动续期或扩权。已过期授权会在升级预检中被拒绝，需先按原授权流程处理。
 
 若有普通待恢复的程序升级事务，CLI 先用**原安装器**恢复，本次不拉取新源码；恢复后再次执行同一升级命令。若报错指出事务已绑定独立审核的签名 readiness 修复安装器，须从**该许可绑定的独立审核 checkout** 显式运行 `node scripts/install/upgrade-program.mjs --dsh-home <绝对Home路径> --profile <原target> --recover-readiness`；不要修改原安装器或删除事务。`--dry-run` 仅显示计划。拒绝或失败时保留报错及事务现场；不要删除账本或改用 `reinstall` 冒充保留数据的升级。当前发布与实机验收状态见 [RSI 状态](../../docs/rsi-status.md)。macOS 冻结 owner/source Home 仍不支持普通原地升级。
 

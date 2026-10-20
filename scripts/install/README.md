@@ -36,7 +36,7 @@ dsh-rsi doctor
 
 ## 只用本机 Web
 
-适合先体验聊天，暂不连接飞书、不启用后台学习；这一场景无需 Docker。以下路径适用于 CLI `0.1.56` 起新安装的 `0.2.1-rc.2` 私有 Host。旧 Home 或自定义缓存目录请先[查找绑定的 Host 入口](maintenance.md#查找私有-host-入口)：
+适合先体验聊天，暂不连接飞书、不启用后台学习；这一场景无需 Docker。以下路径适用于 CLI `0.1.57` 起新安装的 `0.2.1-rc.2` 私有 Host。旧 Home 或自定义缓存目录请先[查找绑定的 Host 入口](maintenance.md#查找私有-host-入口)：
 
 ```sh
 dsh-rsi install --scenario core --model skip --yes
@@ -56,7 +56,7 @@ dsh-rsi restart --profile web
 dsh-rsi install --help
 ```
 
-只需升级全局 CLI：`dsh-rsi update`。从 CLI `0.1.56` 起，受支持的**现有 Linux 冻结 owner/cohort** 可先用 `dsh-rsi update --all --dry-run --yes` 看计划，再运行 `dsh-rsi update --all --yes`，从原绑定官方源码升级冻结插件与私有 Host，保留 owner、授权和历史；旧 CLI 须先单独自升级一次。完整条件与恢复步骤见[冻结 owner 升级](maintenance.md#现有-linux-冻结-owner-程序升级)及 [CLI 升级说明](../../packages/dsh-rsi-cli/README.md#升级与重装)。macOS 必须先停止整个 Home 并显式确认；**冻结了原生 owner/source/cohort 资源的 Mac Home 暂不支持普通原地升级。** `dsh-rsi reinstall` 会先备份、彻底清理再安装，属于破坏性重装，不是升级；先核对 [CLI 重装与 purge 说明](../../packages/dsh-rsi-cli/README.md#升级与重装) 和[维护说明](maintenance.md#彻底卸载purge)。
+只需升级全局 CLI：`dsh-rsi update`。从 CLI `0.1.57` 起，受支持的**现有 Linux 冻结 owner/cohort** 可先用 `dsh-rsi update --all --dry-run --yes` 看计划，再运行 `dsh-rsi update --all --yes`，从原绑定官方源码升级冻结插件与私有 Host，保留 owner、授权和历史；旧 CLI 须先单独自升级一次。完整条件与恢复步骤见[冻结 owner 升级](maintenance.md#现有-linux-冻结-owner-程序升级)及 [CLI 升级说明](../../packages/dsh-rsi-cli/README.md#升级与重装)。macOS 必须先停止整个 Home 并显式确认；**冻结了原生 owner/source/cohort 资源的 Mac Home 暂不支持普通原地升级。** `dsh-rsi reinstall` 会先备份、彻底清理再安装，属于破坏性重装，不是升级；先核对 [CLI 重装与 purge 说明](../../packages/dsh-rsi-cli/README.md#升级与重装) 和[维护说明](maintenance.md#彻底卸载purge)。
 
 ## 场景与参数入口
 
