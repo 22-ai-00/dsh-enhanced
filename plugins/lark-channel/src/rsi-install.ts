@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { lstat, mkdir, readFile, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { listActiveAutomationsLocally } from '@dsh-enhanced/assistant-automations'
+import { listActiveAutomationsForReadiness } from '@dsh-enhanced/assistant-automations'
 import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
 import { isDeepStrictEqual } from 'node:util'
 import { controlPlaneDigest, queryRuntimeObserver, runtimeConfigDigest, type RuntimeObserverConfig } from '@dsh-enhanced/plugin-control-plane'
@@ -140,7 +140,7 @@ async function observerReady(observer: RuntimeObserverConfig, state: Record<stri
   }
 }
 export function assertRsiMemoryScanActivation(manifest: Pick<RsiSetupManifest, 'memoryLearning'>,
-  records: ReturnType<typeof listActiveAutomationsLocally>): void {
+  records: ReturnType<typeof listActiveAutomationsForReadiness>): void {
   const learning = manifest.memoryLearning?.learning
   if (!learning) return
   const owner = learning.owner, digest = growthObjectDigest(learning)
@@ -182,11 +182,11 @@ async function ready(manifest: RsiSetupManifest, pin: RsiAuthorityConfigInput['s
       if (states.some(state => state.ActiveState !== 'active' || !/^\d+$/u.test(state.MainPID ?? '') || Number(state.MainPID) < 1
         || !/^[a-f0-9]{32}$/u.test(state.InvocationID ?? ''))) fail('Host services are not running')
       await observerReady(manifest.controlPlane.runtimeObserver!, states[0]!, signal)
-      if (memoryDatabasePath) assertRsiMemoryScanActivation(manifest, listActiveAutomationsLocally(memoryDatabasePath))
+      if (memoryDatabasePath) assertRsiMemoryScanActivation(manifest, listActiveAutomationsForReadiness(memoryDatabasePath))
       const scope = manifest.controlPlane.taskObservations!.scope
       const coordinatorId = manifest.controlPlane.sourceAdoptions!.handoff!.coordinatorId
       const id = `adoption-coordinator-${controlPlaneDigest({coordinatorId,scope}).slice(0,40)}`
-      const registration = listActiveAutomationsLocally(join(home,'rsi-coordinators',manifest.coordinatorProfile,'automations.sqlite')).find(item => item.id === id)
+      const registration = listActiveAutomationsForReadiness(join(home,'rsi-coordinators',manifest.coordinatorProfile,'automations.sqlite')).find(item => item.id === id)
       if (!registration || registration.owner !== 'plugin-control-plane-adoption-coordinator'
         || registration.updatedAt < startedAt || registration.definition.execution?.kind !== 'host'
         || registration.definition.execution.executorId !== 'plugin-control-plane-adoption-coordinator-v1'

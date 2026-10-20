@@ -23,6 +23,7 @@ export {
   automationDefinitionDigest,
   inspectAutomationInventoryLocally,
   inspectAutomationsOperatorSnapshot,
+  listActiveAutomationsForReadiness,
   listActiveAutomationsLocally,
   listAutomationsLocally,
 } from './operator.js'

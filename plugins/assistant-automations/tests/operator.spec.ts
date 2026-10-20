@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
-import { chmodSync, renameSync } from 'node:fs'
+import { chmodSync, readFileSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -71,6 +71,7 @@ import {
   automationDefinitionDigest,
   decodeDeviceId,
   inspectAutomationsOperatorSnapshot,
+  listActiveAutomationsForReadiness,
   listActiveAutomationsLocally,
   listAutomationsLocally,
   parseWritableProcLock,
@@ -88,6 +89,178 @@ afterEach(async () => {
   tempControls.widenAfterOpen = false
   tempControls.lastPath = null
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+})
+
+describe('active Automations readiness read', () => {
+  test('reads active registrations from a private rollback database without changing its bytes', async () => {
+    const f = await fixture()
+    f.store.reconcileSystemOwned({ owner: 'owner-readiness', automationId: 'active-readiness',
+      idempotencyKey: 'create-active-readiness', definition: definition('active-readiness') })
+    f.store.reconcileSystemOwned({ owner: 'owner-readiness', automationId: 'paused-readiness',
+      idempotencyKey: 'create-paused-readiness', desiredStatus: 'paused', definition: definition('paused-readiness') })
+    f.store.close()
+    const setup = new DatabaseSync(f.path)
+    setup.exec('PRAGMA journal_mode=DELETE')
+    setup.close()
+    const before = await fingerprint(f.path)
+    const records = listActiveAutomationsForReadiness(f.path)
+    expect(records).toMatchObject([{ id: 'active-readiness', owner: 'owner-readiness', status: 'active' }])
+    expect(records[0]?.definition).toEqual(definition('active-readiness'))
+    expect(await fingerprint(f.path)).toEqual(before)
+  })
+
+  test.runIf(process.platform === 'linux')('reads registered owner through a live WAL writer and leaves source files in place', async () => {
+    const f = await fixture()
+    f.store.reconcileSystemOwned({ owner: 'owner-live', automationId: 'live',
+      idempotencyKey: 'create-live', definition: definition('live') })
+    f.store.reconcileSystemOwned({ owner: 'owner-live', automationId: 'live-pair',
+      idempotencyKey: 'create-live-pair', definition: definition('live-pair') })
+    f.store.close()
+    const marker = join(f.root, 'writer-count')
+    const writer = spawn(process.execPath, ['--input-type=module', '-e', `
+      import { DatabaseSync } from 'node:sqlite'
+      import { writeFileSync } from 'node:fs'
+      const db = new DatabaseSync(process.argv[1])
+      db.exec('PRAGMA wal_autocheckpoint=0')
+      let count = 0
+      const timer = setInterval(() => {
+        db.exec('BEGIN IMMEDIATE')
+        db.prepare("UPDATE automation_definitions SET updated_at = updated_at + 1 WHERE id IN ('live', 'live-pair')").run()
+        db.exec('COMMIT')
+        count++
+        writeFileSync(process.argv[2], String(count))
+        if (count === 1) process.stdout.write('ready\\n')
+      }, 1)
+      process.stdin.on('data', () => { clearInterval(timer); db.close(); process.exit(0) })
+    `, f.path, marker], { stdio: ['pipe', 'pipe', 'pipe'] })
+    try {
+      await new Promise<void>((resolve, reject) => {
+        writer.once('error', reject)
+        writer.stdout.once('data', () => resolve())
+        writer.once('exit', code => reject(new Error(`writer exited ${code} before ready`)))
+      })
+      await chmod(`${f.path}-wal`, 0o600); await chmod(`${f.path}-shm`, 0o600)
+      const before = await Promise.all([f.path, `${f.path}-wal`, `${f.path}-shm`].map(path => stat(path, { bigint: true })))
+      const countBefore = Number(readFileSync(marker, 'utf8'))
+      sqliteControls.afterOpen = () => {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40)
+      }
+      const records = listActiveAutomationsForReadiness(f.path)
+      sqliteControls.afterOpen = null
+      const countAfter = Number(readFileSync(marker, 'utf8'))
+      expect(countAfter).toBeGreaterThan(countBefore)
+      expect(records).toMatchObject([
+        { id: 'live', owner: 'owner-live', status: 'active' },
+        { id: 'live-pair', owner: 'owner-live', status: 'active' },
+      ])
+      expect(records[0]?.updatedAt).toBe(records[1]?.updatedAt)
+      expect(records[0]?.definition).toEqual(definition('live'))
+      expect(Object.isFrozen(records[0])).toBe(true)
+      const after = await Promise.all([f.path, `${f.path}-wal`, `${f.path}-shm`].map(path => stat(path, { bigint: true })))
+      expect(after.map(value => [value.dev, value.ino])).toEqual(before.map(value => [value.dev, value.ino]))
+    } finally {
+      sqliteControls.afterOpen = null
+      if (writer.exitCode === null) {
+        writer.stdin.write('stop\n')
+        await new Promise<void>(resolve => writer.once('exit', () => resolve()))
+      }
+    }
+  })
+
+  test.runIf(process.platform === 'linux')('rejects missing, unsafe and incomplete sidecars', async () => {
+    const f = await fixture()
+    f.store.createApproved({ automationId: 'safe', idempotencyKey: 'create-safe', definition: definition('safe') })
+    f.store.close()
+    const keeper = spawn(process.execPath, ['--input-type=module', '-e', `
+      import { DatabaseSync } from 'node:sqlite'
+      const db = new DatabaseSync(process.argv[1])
+      db.exec('PRAGMA wal_autocheckpoint=0')
+      db.prepare('SELECT count(*) FROM automation_definitions').get()
+      process.stdout.write('ready\\n')
+      process.stdin.on('data', () => { db.close(); process.exit(0) })
+    `, f.path], { stdio: ['pipe', 'pipe', 'pipe'] })
+    await new Promise<void>((resolve, reject) => {
+      keeper.once('error', reject)
+      keeper.stdout.once('data', () => resolve())
+    })
+    try {
+      await chmod(`${f.path}-wal`, 0o600); await chmod(`${f.path}-shm`, 0o600)
+      expect(listActiveAutomationsForReadiness(f.path)).toHaveLength(1)
+      await chmod(`${f.path}-wal`, 0o644)
+      expectCode(() => listActiveAutomationsForReadiness(f.path), 'unsafe-path')
+      await chmod(`${f.path}-wal`, 0o600)
+      await rm(`${f.path}-shm`)
+      expectCode(() => listActiveAutomationsForReadiness(f.path), 'database-drift')
+    } finally { keeper.kill('SIGTERM') }
+  })
+
+  test.runIf(process.platform === 'linux')('does not mistake an existing same-process SQLite fd for the readiness connection', async () => {
+    const f = await fixture()
+    f.store.createApproved({ automationId: 'prior-fd', idempotencyKey: 'create-prior-fd', definition: definition('prior-fd') })
+    f.store.close()
+    const keeper = new DatabaseSync(f.path)
+    keeper.prepare('SELECT count(*) FROM automation_definitions').get()
+    try {
+      await chmod(`${f.path}-wal`, 0o600); await chmod(`${f.path}-shm`, 0o600)
+      expectCode(() => listActiveAutomationsForReadiness(f.path), 'database-busy')
+    } finally { keeper.close() }
+  })
+
+  test('rejects unsupported schema and invalid active definition', async () => {
+    const f = await fixture()
+    f.store.createApproved({ automationId: 'bad', idempotencyKey: 'create-bad', definition: definition('bad') })
+    f.store.close()
+    const database = new DatabaseSync(f.path)
+    database.exec('PRAGMA journal_mode=DELETE')
+    database.exec('PRAGMA user_version = 14')
+    database.close()
+    expectCode(() => listActiveAutomationsForReadiness(f.path), 'schema-unsupported')
+    const repair = new DatabaseSync(f.path)
+    repair.exec('PRAGMA user_version = 15')
+    repair.prepare("UPDATE automation_definitions SET definition_json = '{}' WHERE id = 'bad'").run()
+    repair.close()
+    expectCode(() => listActiveAutomationsForReadiness(f.path), 'database-corrupt')
+  })
+
+  test('rejects a symbolic-link database path', async () => {
+    const f = await fixture(); f.store.close()
+    const alias = join(f.state, 'alias.sqlite')
+    await symlink(f.path, alias)
+    expectCode(() => listActiveAutomationsForReadiness(alias), 'unsafe-path')
+  })
+
+  test('rejects hardlinked database and widened parent', async () => {
+    const f = await fixture(); f.store.close()
+    const alias = join(f.state, 'hardlink.sqlite')
+    await link(f.path, alias)
+    expectCode(() => listActiveAutomationsForReadiness(f.path), 'unsafe-path')
+    await rm(alias)
+    await chmod(f.state, 0o755)
+    try { expectCode(() => listActiveAutomationsForReadiness(f.path), 'unsafe-parent') }
+    finally { await chmod(f.state, 0o700) }
+  })
+
+  test('rejects a database swapped only while SQLite opens it', async () => {
+    const f = await fixture()
+    f.store.createApproved({ automationId: 'original-readiness', idempotencyKey: 'original', definition: definition('original-readiness') })
+    f.store.close()
+    const original = new DatabaseSync(f.path); original.exec('PRAGMA journal_mode=DELETE'); original.close()
+    const evilState = join(f.root, 'evil')
+    const evilPath = join(evilState, 'automations.sqlite')
+    new AutomationStore({ path: evilPath, now: () => Date.parse('2026-09-11T00:00:00.000Z') }).close()
+    const evil = new DatabaseSync(evilPath); evil.exec('PRAGMA journal_mode=DELETE'); evil.close()
+    const held = `${f.path}.held`; const displaced = `${f.path}.displaced`
+    sqliteControls.beforeOpen = () => {
+      renameSync(f.path, held)
+      renameSync(evilPath, f.path)
+    }
+    sqliteControls.afterOpen = () => {
+      renameSync(f.path, displaced)
+      renameSync(held, f.path)
+    }
+    try { expectCode(() => listActiveAutomationsForReadiness(f.path), 'database-drift') }
+    finally { sqliteControls.beforeOpen = null; sqliteControls.afterOpen = null }
+  })
 })
 
 function definition(name: string) {

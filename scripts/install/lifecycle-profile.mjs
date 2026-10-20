@@ -1172,6 +1172,24 @@ function validateHostUpdateManifest(manifest, expected, transactionRoot, identit
       || manifest.state !== 'swapped' && manifest.state !== 'committed' && manifest.state !== 'cleanup-started')) {
     fail('native settings recovery requires a started joint candidate')
   }
+  if (migration.programReadinessRecovery !== undefined) {
+    if (!programUpdate || !migration.candidateEverStarted || migration.nativeSettingsImport !== undefined
+      || !['swapped', 'failed', 'committed', 'cleanup-started'].includes(manifest.state)
+      || !exactKeys(migration.programReadinessRecovery, ['permit'])
+      || !exactKeys(migration.programReadinessRecovery.permit,
+        ['protocol', 'schemaVersion', 'homePath', 'profile', 'transactionId', 'baseManifestDigest',
+          'immutableManifestDigest', 'candidateIdentity', 'originalIdentity', 'sourceProofDigest', 'hostPlanDigest',
+          'sourceCohortDigest', 'ownerGrantDigest', 'oldInstaller', 'readinessInstaller',
+          'issuedAt', 'authority', 'keyId', 'signature'])
+      || migration.programReadinessRecovery.permit.protocol
+        !== 'dsh-enhanced/owner-program-readiness-recovery/v1'
+      || migration.programReadinessRecovery.permit.transactionId !== manifest.id
+      || migration.programReadinessRecovery.permit.homePath !== expected.homePath
+      || migration.programReadinessRecovery.permit.profile !== expected.profile
+      || !isDeepStrictEqual(migration.programReadinessRecovery.permit.oldInstaller, migration.localSource.installer)) {
+      fail('program readiness recovery requires a started owner program candidate')
+    }
+  }
   if (migration.plan.status !== 'update' && !sameHostSource) fail('Host 更新事务不能记录 current 计划。')
   if (manifest.serviceMasks.length !== 0 && manifest.serviceMasks.length !== manifest.services.length) {
     fail('Host 更新事务 service mask inventory 无效。')
@@ -7013,6 +7031,52 @@ async function admitHostSettingsRecovery({ homePath, physicalHomePath, profile, 
   return manifest
 }
 
+async function admitHostProgramReadinessRecovery({ homePath, physicalHomePath, profile, transactionRoot,
+  physicalTransactionRoot, serviceContext, installerRoot }) {
+  const { admitOwnerProgramReadinessRecovery, readRecoveryReceipt } = await import('./owner-program-readiness-recovery.mjs')
+  let manifest = await loadManifest(physicalTransactionRoot, { homePath, profile, transactionPath: transactionRoot })
+  const cleanupOnly = ['committed', 'cleanup-started'].includes(manifest.state)
+  const firstAdmission = manifest.hostMigration.programReadinessRecovery === undefined
+  if (firstAdmission
+    && (!['swapped', 'failed'].includes(manifest.state)
+      || !['starting', 'failed'].includes(manifest.hostMigration.phase)
+      || manifest.serviceAcceptance !== undefined)) {
+    fail('program readiness recovery requires the started unaccepted candidate')
+  }
+  const backupHome = join(transactionRoot, 'original-home')
+  await assertCriticalDirectory(physicalHomePath, manifest.stagedIdentity)
+  if (!cleanupOnly) {
+    await assertCriticalDirectory(backupHome, manifest.originalIdentity)
+    if (firstAdmission) await assertHostSettingsRecoveryContained(manifest, serviceContext, homePath, backupHome)
+  }
+  await verifyHostPlanBinding(manifest.hostMigration.plan, homePath, 'candidate')
+  const { verifyHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
+  const candidateHome = await canonicalJointCandidateHome(physicalHomePath, homePath)
+  await verifyHostLocalSourceUpdate({ proof: manifest.hostMigration.localSource,
+    homePath, physicalHome: candidateHome, selection: 'candidate' })
+  if (!cleanupOnly) {
+    const { validateHostLocalProfileUpdate } = await import('./host-local-profile-update.mjs')
+    const profiles = await validateHostLocalProfileUpdate({ preparation: manifest.hostMigration.preparation,
+      stagedHome: candidateHome, originalPhysicalHome: backupHome,
+      ownerSourceRepair: { homePath, sourceProof: manifest.hostMigration.localSource } })
+    if (!isDeepStrictEqual(profiles, manifest.hostMigration.profileProof)) {
+      fail('program readiness recovery candidate profile proof differs')
+    }
+  }
+  const { envelope, created } = await admitOwnerProgramReadinessRecovery({ manifest, homePath, profile, installerRoot })
+  if (cleanupOnly) {
+    if (await readRecoveryReceipt({ manifest, envelope, homePath, profile }) === undefined) {
+      fail('committed readiness recovery lacks signed attestation')
+    }
+  } else if (firstAdmission) await assertHostSettingsRecoveryContained(manifest, serviceContext, homePath, backupHome)
+  if (created) {
+    manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+      hostMigration: { ...manifest.hostMigration, programReadinessRecovery: envelope } }, manifest.state)
+  }
+  serviceContext.readinessRecoveryPermitDigest = sha256(JSON.stringify(envelope.permit))
+  return manifest
+}
+
 async function verifyHostPlanBinding(plan, homePath, selection = 'original') {
   const path = join(homePath, '.dsh-rsi-host.json')
   if (plan.schemaVersion === 2 && selection === 'original') {
@@ -7745,6 +7809,30 @@ async function awaitHostRsiRuntimeSuccessor({ homePath, dshExecutable, target, t
 }
 
 async function awaitHostOwnerRepairReadiness({ manifestPath, homePath, dshExecutable, sourceProof, startedAt }) {
+  const persisted = JSON.parse(await readFile(manifestPath, 'utf8'))
+  if (persisted.hostMigration?.programReadinessRecovery !== undefined) {
+    if (sourceProof.protocol !== OWNER_PROGRAM_PROTOCOL
+      || !isDeepStrictEqual(persisted.hostMigration.localSource, sourceProof)) {
+      fail('program readiness recovery source proof differs')
+    }
+    const recoveryHelper = join(dirname(SCRIPT_PATH), 'owner-program-readiness-recovery.mjs')
+    const script = [
+      "import { readFile } from 'node:fs/promises'",
+      "import { pathToFileURL } from 'node:url'",
+      'const [manifestPath, helperPath, startedAt] = process.argv.slice(1)',
+      "const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))",
+      'const { awaitOwnerProgramRecoveryReady } = await import(pathToFileURL(helperPath).href)',
+      'const result = await awaitOwnerProgramRecoveryReady({ manifest, envelope: manifest.hostMigration.programReadinessRecovery, homePath: manifest.homePath, profile: manifest.profile, startedAt: Number(startedAt) })',
+      'process.stdout.write(JSON.stringify(result))',
+    ].join('\n')
+    const result = await run(process.execPath, ['--input-type=module', '-e', script,
+      manifestPath, recoveryHelper, String(startedAt)], { capture: true, timeoutMs: 120_000, passFds: [3],
+      env: { ...process.env, DSH_HOME: homePath, NODE_OPTIONS: '', NODE_PATH: '',
+        PATH: [dirname(dshExecutable), dirname(process.execPath), '/usr/bin', '/bin'].join(':') } })
+    const attestation = JSON.parse(result.stdout)
+    if (attestation.mode !== 'ready') fail('owner program recovery readiness did not pass')
+    return attestation
+  }
   const { assertLocalSourceInstaller } = await import('./local-source-maintenance.mjs')
   await assertLocalSourceInstaller(sourceProof.installer)
   const programUpdate = sourceProof.protocol === OWNER_PROGRAM_PROTOCOL
@@ -7770,6 +7858,36 @@ async function awaitHostOwnerRepairReadiness({ manifestPath, homePath, dshExecut
       PATH: [dirname(dshExecutable), dirname(process.execPath), '/usr/bin', '/bin'].join(':') } })
   if (JSON.parse(result.stdout).mode !== 'ready') fail('owner repair native readiness did not pass')
   await assertLocalSourceInstaller(sourceProof.installer)
+}
+
+async function publishReadinessRecoveryReceipt(path, source) {
+  if (!isAbsolute(path) || resolve(path) !== path || typeof source !== 'string'
+    || Buffer.byteLength(source) < 1 || Buffer.byteLength(source) > 65_536) {
+    fail('invalid readiness recovery receipt publication')
+  }
+  const temporary = `${path}.pending-${randomUUID()}`
+  const file = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600)
+  try { await file.writeFile(source); await file.sync() } finally { await file.close() }
+  const script = [
+    'import ctypes, os, stat, sys',
+    'source, destination = sys.argv[1:]',
+    'parent, source_name = os.path.split(source)',
+    'destination_parent, destination_name = os.path.split(destination)',
+    'if parent != destination_parent: raise RuntimeError("receipt parent differs")',
+    'directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)',
+    'try:',
+    '  item = os.stat(source_name, dir_fd=directory, follow_symlinks=False)',
+    '  if not stat.S_ISREG(item.st_mode) or item.st_uid != os.getuid() or item.st_nlink != 1 or item.st_mode & 0o077: raise RuntimeError("receipt temporary file unsafe")',
+    '  libc = ctypes.CDLL(None, use_errno=True)',
+    '  renameat2 = getattr(libc, "renameat2", None)',
+    '  if renameat2 is None: raise RuntimeError("renameat2 unavailable")',
+    '  if renameat2(directory, source_name.encode(), directory, destination_name.encode(), 1) != 0: raise RuntimeError("receipt noreplace errno=%d" % ctypes.get_errno())',
+    '  os.fsync(directory)',
+    'finally:',
+    '  os.close(directory)',
+  ].join('\n')
+  await run('/usr/bin/python3', ['-I', '-S', '-c', script, temporary, path],
+    { capture: true, timeoutMs: 30_000, passFds: [3], env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' } })
 }
 
 async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePath, transactionRoot,
@@ -7876,9 +7994,25 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
       fail(`candidate systemd unit properties changed after acceptance: ${expected.unit}`)
     }
   }
-  if (ownerRepair) await awaitHostOwnerRepairReadiness({ manifestPath: join(physicalTransactionRoot, 'manifest.json'),
+  let readinessAttestation
+  if (ownerRepair) readinessAttestation = await awaitHostOwnerRepairReadiness({ manifestPath: join(physicalTransactionRoot, 'manifest.json'),
     homePath, dshExecutable: plan.candidateRuntime.dshPath, sourceProof: migration.localSource, startedAt: ownerRepairStartedAt })
   await verifyAuthority()
+  if (migration.programReadinessRecovery !== undefined) {
+    const { readRecoveryReceipt, createRecoveryReceipt, recoveryReceiptPath } = await import('./owner-program-readiness-recovery.mjs')
+    const envelope = migration.programReadinessRecovery
+    const existing = await readRecoveryReceipt({ manifest, envelope, homePath, profile: manifest.profile })
+    if (existing === undefined) {
+      const receipt = await createRecoveryReceipt({ manifest, envelope, homePath,
+        profile: manifest.profile, readiness: readinessAttestation })
+      const receiptPath = recoveryReceiptPath(homePath, manifest.id)
+      const receiptSource = `${JSON.stringify(receipt)}\n`
+      await publishReadinessRecoveryReceipt(receiptPath, receiptSource)
+      if (await readRecoveryReceipt({ manifest, envelope, homePath, profile: manifest.profile }) === undefined) {
+        fail('readiness recovery attestation was not durably readable')
+      }
+    }
+  }
   manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
     hostMigration: { ...manifest.hostMigration, phase: 'committed' } }, 'committed')
   if (manifest.hostMigration.localSource?.successorIntent) {
@@ -7903,11 +8037,21 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
     : `managed Host updated: ${plan.originalRuntime.version} -> ${plan.candidateRuntime.version}\n`)
 }
 
+function assertReadinessRecoveryAdmissionGate(manifest, serviceContext) {
+  const migration = manifest.hostMigration
+  if (migration.programReadinessRecovery !== undefined
+    && serviceContext?.readinessRecoveryPermitDigest
+      !== sha256(JSON.stringify(migration.programReadinessRecovery.permit))) {
+    fail('signed readiness recovery requires explicit admitted lifecycle operation')
+  }
+}
+
 async function recoverHostUpdate({ manifest: initial, homePath, physicalHomePath, profile,
   transactionRoot, physicalTransactionRoot, serviceContext }) {
   if (serviceContext === undefined) fail('Host update recovery requires systemd service context')
   let manifest = initial
   const migration = manifest.hostMigration
+  assertReadinessRecoveryAdmissionGate(manifest, serviceContext)
   const backupHome = join(transactionRoot, 'original-home')
   const failedHome = join(transactionRoot, 'failed-home')
   const current = await existingIdentity(physicalHomePath)
@@ -7917,6 +8061,21 @@ async function recoverHostUpdate({ manifest: initial, homePath, physicalHomePath
   const originalBackup = backup !== undefined && sameIdentity(backup, manifest.originalIdentity)
   if (!originalLive && !candidateLive && !(current === undefined && originalBackup)) {
     fail('Host update recovery found unknown Home identities; retain transaction')
+  }
+  if (migration.programReadinessRecovery !== undefined
+    && ['committed', 'cleanup-started'].includes(manifest.state)) {
+    const { readRecoveryReceipt } = await import('./owner-program-readiness-recovery.mjs')
+    if (!candidateLive || manifest.state === 'committed' && !originalBackup
+      || await readRecoveryReceipt({ manifest, envelope: migration.programReadinessRecovery,
+        homePath, profile }) === undefined) {
+      fail('committed readiness recovery lacks candidate, backup, or signed attestation')
+    }
+    if (manifest.state === 'committed') {
+      manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+        hostMigration: { ...manifest.hostMigration, phase: 'cleanup-started' } }, 'cleanup-started')
+    }
+    await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome })
+    return 'host-candidate-committed'
   }
   if (migration.phase === 'initializing' && manifest.serviceMasks.length === 0) {
     if (!originalLive || backup !== undefined) fail('Host initializing recovery found modified Home')
@@ -8020,6 +8179,7 @@ async function main() {
   const homePath = await canonicalMissingAllowed(suppliedHomePath)
   const recoveryOperation = operation === 'recover' || operation === 'service-recover'
     || operation === 'host-recover' || operation === 'host-recover-settings'
+    || operation === 'host-recover-readiness'
   const dshExecutable = await realpath(suppliedDshExecutable).catch(() => fail('DSH executable must exist'))
   const bwrapExecutable = recoveryOperation ? suppliedBwrapExecutable
     : await trustedSystemExecutable(suppliedBwrapExecutable, 'bwrap')
@@ -8087,7 +8247,7 @@ async function main() {
   }
   if (operation === 'host-update' || operation === 'host-recover' || operation === 'host-local-update' || operation === 'host-owner-repair'
     || operation === 'host-owner-repair-successor' || operation === 'host-program-update'
-    || operation === 'host-recover-settings') {
+    || operation === 'host-recover-settings' || operation === 'host-recover-readiness') {
     const ownerSuccessor = operation === 'host-owner-repair-successor'
     const ownerRepair = operation === 'host-owner-repair' || ownerSuccessor
     const programUpdate = operation === 'host-program-update'
@@ -8104,11 +8264,25 @@ async function main() {
     const paths = lifecyclePaths(homePath)
     const hostPaths = { homePath, physicalHomePath: paths.physicalHomePath,
       transactionRoot: paths.transactionPath, physicalTransactionRoot: paths.physicalTransactionRoot }
-    if (operation === 'host-recover' || operation === 'host-recover-settings') {
+    if (operation === 'host-recover' || operation === 'host-recover-settings'
+      || operation === 'host-recover-readiness') {
       if (operation === 'host-recover-settings') {
         if (planPath === undefined) fail('host-recover-settings requires an independently verified signed permit', 2)
         await admitHostSettingsRecovery({ ...hostPaths, profile, serviceContext, permitPath: planPath })
-      } else if (planPath !== undefined) fail('host-recover does not accept plan.json', 2)
+      } else if (operation === 'host-recover-readiness') {
+        if (targets.length !== 3 || planPath === undefined) {
+          fail('host-recover-readiness requires exactly one reviewed installer root', 2)
+        }
+        await admitHostProgramReadinessRecovery({ ...hostPaths, profile, serviceContext, installerRoot: planPath })
+      } else {
+        if (planPath !== undefined) fail('host-recover does not accept plan.json', 2)
+        const pending = await existingIdentity(hostPaths.physicalTransactionRoot) === undefined ? undefined
+          : await loadManifest(hostPaths.physicalTransactionRoot,
+            { homePath, profile, transactionPath: hostPaths.transactionRoot })
+        if (pending?.hostMigration?.programReadinessRecovery !== undefined) {
+          fail('bound readiness recovery requires host-recover-readiness with the signed reviewed installer')
+        }
+      }
       await recoverBoundTransaction({ ...hostPaths, profile, serviceContext })
       return
     }
@@ -8201,6 +8375,7 @@ export const lifecycleProfileTest = Object.freeze({
   ownerRepairRestorationPolicy, serviceReadySignal, serviceRuntimeReady, readRawServiceState,
   stopAndResetServiceUnits,
   assertHostSettingsRecoveryAdmission, assertHostSettingsRecoveryServiceState, readHostSettingsRecoveryFile,
+  publishReadinessRecoveryReceipt, assertReadinessRecoveryAdmissionGate,
   canonicalJointCandidateHome,
   assertSnapshotTreeSafe, captureOwnerRepairObserverSocket, discardCopiedOwnerObserverSocket,
   compactSupervisedSnapshot, validSupervisedLifecycle, validSupervisedManifestPhase, sameHomeOwnershipEvidence,

@@ -275,6 +275,20 @@ test('pending v4 owner transaction uses bound original installer recovery before
   expect(calls).toEqual([`- ${process.execPath} ${join(f.repository, 'scripts', 'install', 'upgrade-program.mjs')} --dsh-home ${f.home} --profile owner --recover`])
 })
 
+test('a readiness recovery envelope never selects an executable path through the ordinary updater', async () => {
+  const f = await fixture(), owner = (await detectFrozenOwner(f.home))!
+  const transaction = `${f.home}.dsh-enhanced-transaction`
+  await mkdir(transaction, { mode: 0o700 })
+  await writeFile(join(transaction, 'manifest.json'), JSON.stringify({ version: 4, homePath: f.home,
+    profile: f.profile, transactionPath: transaction, hostMigration: {
+      localSource: { protocol: 'dsh-enhanced/host-owner-program-update/v1', ownerUpdate: { installer: { root: f.repository } } },
+      programReadinessRecovery: { permit: { readinessInstaller: { root: '/untrusted/installer' } } },
+    } }), { mode: 0o600 })
+  const { adapter, calls } = ports(f.repository)
+  await expect(runFrozenOwnerUpdate(owner, { dryRun: false }, adapter)).rejects.toThrow('独立审核')
+  expect(calls).toEqual([])
+})
+
 test('Linux frozen route rejects extra authority flags and uses bound target without npm installer', async () => {
   const f = await fixture()
   const selfUpdate = vi.fn(async () => ({ fromVersion: VERSION, selector: 'latest', installedVersion: VERSION,

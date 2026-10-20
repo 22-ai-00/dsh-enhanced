@@ -15,7 +15,7 @@ const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const fail = message => { throw new Error(`Program upgrade: ${message}`) }
 
 export function parseProgramUpgradeArgs(args) {
-  const result = { selector: 'latest', dryRun: false, recover: false }
+  const result = { selector: 'latest', dryRun: false, recover: false, recoverReadiness: false }
   const seen = new Set()
   for (let index = 0; index < args.length; index++) {
     const key = args[index]
@@ -23,6 +23,7 @@ export function parseProgramUpgradeArgs(args) {
     seen.add(key)
     if (key === '--dry-run') result.dryRun = true
     else if (key === '--recover') result.recover = true
+    else if (key === '--recover-readiness') result.recoverReadiness = true
     else if (['--dsh-home', '--profile', '--dsh-version'].includes(key)) {
       const value = args[++index]
       if (!value || value.startsWith('-')) fail(`${key} requires a value`)
@@ -32,6 +33,9 @@ export function parseProgramUpgradeArgs(args) {
   if (!isAbsolute(result.home ?? '') || resolve(result.home) !== result.home
     || !profilePattern.test(result.profile ?? '')
     || !['latest', '0.2.1-rc.2'].includes(result.selector)) fail('expected an absolute Home, an existing profile and a supported Host selector')
+  if (result.recoverReadiness && (result.recover || seen.has('--dsh-version'))) {
+    fail('readiness recovery cannot select a Host version or another recovery mode')
+  }
   return result
 }
 
@@ -81,20 +85,29 @@ export async function runProgramUpgrade(options) {
     const proof = pending.hostMigration?.localSource
     if (pending.version !== 4 || pending.operation !== 'host-update'
       || pending.homePath !== home || pending.profile !== profile
-      || pending.transactionPath !== transactionPath || proof?.installer?.root !== root
-      || proof.protocol !== 'dsh-enhanced/host-owner-program-update/v1') fail('pending transaction belongs to another reviewed installer or operation')
-    if (options.dryRun) { process.stdout.write('将先恢复现有程序升级事务；不拉取或重建安装器。\n'); return 0 }
+      || pending.transactionPath !== transactionPath || !options.recoverReadiness && proof?.installer?.root !== root
+      || proof?.protocol !== 'dsh-enhanced/host-owner-program-update/v1') fail('pending transaction belongs to another reviewed installer or operation')
+    if (pending.hostMigration.programReadinessRecovery !== undefined && !options.recoverReadiness) {
+      fail('pending signed readiness recovery requires the separately reviewed checkout and --recover-readiness; the original installer must remain unchanged')
+    }
+    if (options.dryRun) {
+      process.stdout.write(options.recoverReadiness
+        ? '将使用当前独立安装器核验并恢复候选的就绪检查；保留原安装器、授权和当前数据。\n'
+        : '将先恢复现有程序升级事务；不拉取或重建安装器。\n')
+      return 0
+    }
     const { assertLocalSourceInstaller } = await import('./local-source-maintenance.mjs')
     await assertLocalSourceInstaller(proof.installer)
     const original = pending.hostMigration.plan.originalRuntime
     const env = { ...process.env, DSH_HOME: home, NODE_OPTIONS: '', NODE_PATH: '',
       PATH: [original.binDirectory, dirname(process.execPath), process.env.PATH ?? '/usr/bin:/bin'].join(':') }
-    const status = await runLifecycle(['host-recover', profile, home, original.dshPath,
-      '/usr/bin/bwrap', '/usr/bin/systemctl', '/usr/bin/journalctl'], env)
+    const status = await runLifecycle([options.recoverReadiness ? 'host-recover-readiness' : 'host-recover',
+      profile, home, original.dshPath, '/usr/bin/bwrap', '/usr/bin/systemctl', '/usr/bin/journalctl',
+      ...(options.recoverReadiness ? [root] : [])], env)
     if (status === 0) process.stdout.write('已有程序升级事务已完成恢复。再次运行同一升级命令可检查更新。\n')
     return status
   }
-  if (options.recover) fail('no pending program upgrade transaction')
+  if (options.recover || options.recoverReadiness) fail('no pending program upgrade transaction')
   const cohort = await privateJson(join(home, 'rsi-local-cohorts', profile, 'receipt.json'), 20_971_520)
   if (cohort.schemaVersion !== 1 || await realpath(cohort.sourceRepository) !== root
     || cohort.root !== join(home, 'rsi-local-cohorts', profile)) fail('frozen source does not belong to this installer')

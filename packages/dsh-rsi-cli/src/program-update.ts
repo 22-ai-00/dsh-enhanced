@@ -327,6 +327,9 @@ async function pendingInstaller(owner: FrozenOwner): Promise<string | undefined>
     || typeof root !== 'string' || root !== owner.repository) {
     fail('待恢复事务未绑定现有 owner 源码与 profile；未更新源码')
   }
+  if (migration?.programReadinessRecovery !== undefined) {
+    fail('该事务已绑定独立审核的就绪修复安装器；请从该审核版本运行 upgrade-program.mjs --recover-readiness。原安装器和当前 Home 已保留，未自动执行事务中提供的路径')
+  }
   await ownedDirectory(root)
   return root
 }
