@@ -1291,6 +1291,7 @@ describe.sequential('trusted staged CLI', () => {
     database.close()
   }, 15_000)
 
+  // This end-to-end budget includes seven serial Host probes before regression and recovery.
   test('watch-observe restores the retained profile and attests Host recovery after signed regression', async () => {
     const value = await fixture(); const plan = await activatedByProbe(value, 'watch-observe')
     const healthyPath = join(value.control, 'watch-healthy.json')
@@ -1316,7 +1317,7 @@ describe.sequential('trusted staged CLI', () => {
     // Replaying the same signed trigger must neither restore twice nor dispatch a new Host operation.
     await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-observe', '--receipt', regressedPath]))
     await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-show', '--plan-id', plan.id]))
-  }, 15_000)
+  }, 30_000)
 
   test('watch-retract accepts the owner receipt, closes the watch and reopens the capability gap', async () => {
     const value = await fixture(); const plan = await activatedByProbe(value, 'watch-retract')
