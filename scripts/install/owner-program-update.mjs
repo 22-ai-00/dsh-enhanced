@@ -99,25 +99,32 @@ function overlayChain(api, owner, source) {
     resources: owner.original.resources, dshHome: owner.homePath, profile: owner.profile,
     bootstrapSource: owner.original.receiptSource })
 }
-function grantProjection(value, configPath) {
-  if (value === null || value === undefined) return value
-  const result = structuredClone(value)
-  // Only the Host's exact program inventory and the release policies' Host
-  // baseline can change. Identically named fields in other grants remain exact.
-  if (configPath.endsWith('/host-authority.json')) {
-    delete result.packages
-    delete result.hostDeploymentInputs
-  } else if (configPath.endsWith('/release.json')) {
-    if (!Array.isArray(result.policies)) fail('release policy inventory differs')
-    result.policies = result.policies.map(policy => {
-      const item = { ...policy }
-      delete item.dshBaseline
-      return item
+function expectedGrant(value, configPath, context) {
+  const expected = structuredClone(value)
+  if (!context) return expected
+  const { rebase, rebaseValue } = context
+  if (!rebase || typeof rebaseValue !== 'function') fail('verified Host rebase is missing')
+  if (configPath.endsWith('/release.json') || configPath.endsWith('/adoption.json')) {
+    if (!Array.isArray(expected.policies)) fail('release policy inventory differs')
+    expected.policies = expected.policies.map(policy => {
+      if (!policy || typeof policy !== 'object' || typeof policy.dshBaseline !== 'string') {
+        fail('release policy baseline differs')
+      }
+      return { ...policy, dshBaseline: rebaseValue(policy, rebase).dshBaseline }
     })
   }
-  return result
+  if (configPath.endsWith('/adoption.json')) {
+    if (!expected.executor || typeof expected.executor !== 'object'
+      || typeof expected.executor.id !== 'string' || typeof expected.executor.path !== 'string'
+      || typeof expected.executor.sha256 !== 'string' || typeof expected.executor.version !== 'string') {
+      fail('adoption executor differs')
+    }
+    const pin = rebaseValue(expected.executor, rebase)
+    expected.executor = { ...expected.executor, version: pin.version, path: pin.path, sha256: pin.sha256 }
+  }
+  return expected
 }
-export function assertOwnerProgramAuthorityPreserved(before, after) {
+export function assertOwnerProgramAuthorityPreserved(before, after, context) {
   if (!before || !after || !same(Object.keys(before).sort(), Object.keys(after).sort())) fail('authority file inventory changed')
   for (const path of Object.keys(before)) {
     if (!path.endsWith('.json')) {
@@ -128,7 +135,7 @@ export function assertOwnerProgramAuthorityPreserved(before, after) {
     const newValue = parse(after[path], `new authority ${path}`)
     if (oldValue.grant || newValue.grant) {
       if (!oldValue.grant || !newValue.grant
-        || !same(grantProjection(oldValue.grant, path), grantProjection(newValue.grant, path))) {
+        || !same(expectedGrant(oldValue.grant, path, context), newValue.grant)) {
         fail(`finite authorization changed: ${path}`)
       }
     }
@@ -162,7 +169,7 @@ export function assertOwnerProgramManifestPreserved(rebasedBefore, after) {
 function authoritySemanticDigest(files) {
   return hash(json(Object.fromEntries(Object.entries(files)
     .filter(([path]) => path.endsWith('.json')).map(([path, value]) => [path,
-      grantProjection(parse(value, `authority ${path}`).grant ?? null, path)]))))
+      parse(value, `authority ${path}`).grant ?? null]))))
 }
 export function assertOwnerProgramWindow(manifest, now = Date.now()) {
   if (!Number.isSafeInteger(now) || now < 1
@@ -808,7 +815,7 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
   if (!same(Object.keys(files).sort(), Object.keys(original.fileDigests).sort())) {
     fail('owner authority inventory changed')
   }
-  assertOwnerProgramAuthorityPreserved(original.files, files)
+  assertOwnerProgramAuthorityPreserved(original.files, files, { rebase, rebaseValue: api.rebaseRsiHostValue })
   const oldTrustDigest = api.control.controlPlaneDigest(await api.control.loadTrustConfig(
     physical(homePath, stageHome, join(resources.configRoot, 'trust.json'))))
   const newTrustDigest = api.control.controlPlaneDigest(compiled.trust)
@@ -946,7 +953,6 @@ export async function verifyOwnerProgramUpdate({ ownerUpdate, ownerUpdateNext, h
       || ownerUpdateNext.manifestDigest !== hash(files[manifestPath])) {
       fail('signed owner program update differs')
     }
-    assertOwnerProgramAuthorityPreserved(original.files, files)
   } else if (!same(chain.records, original.overlay.records)
     || journalSource !== original.journalSource || creationSource !== original.creationSource
     || !same(files, original.files) || !same(patches, original.patches)) {
@@ -957,6 +963,10 @@ export async function verifyOwnerProgramUpdate({ ownerUpdate, ownerUpdateNext, h
   if (phase === 'original' && !same(runtime, original.runtime)
     || phase === 'after-finalize' && runtime.receiptDigest !== chain.latest.runtimeReceiptDigest) {
     fail('authority runtime receipt differs')
+  }
+  if (phase === 'after-finalize') {
+    const rebase = await rebaseFor(ownerUpdate, api, runtime.runtime)
+    assertOwnerProgramAuthorityPreserved(original.files, files, { rebase, rebaseValue: api.rebaseRsiHostValue })
   }
   if (phase === 'before-finalize') {
     await standingData(homePath, physicalHome, ownerUpdate.profile, { ledgerChanged: true })

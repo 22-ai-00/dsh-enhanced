@@ -15,16 +15,24 @@ import { applyOwnerProgramAuthorityCas, assertOwnerProgramAuthorityPreserved, as
 
 const old = {
   '/private/owner/config/release.json': JSON.stringify({ grant: { id: 'release-1', expiresAt: 456,
-    maxReleases: 10, policies: [{ candidateId: 'example', dshBaseline: 'old' }] } }),
+    maxReleases: 10, policies: [{ candidateId: 'example', dshBaseline: 'old', capabilities: ['tool'] }] } }),
   '/private/owner/config/host-authority.json': JSON.stringify({ grant: { id: 'host-1',
     notBefore: 123, expiresAt: 456, maximumReloads: 1000, owner: { principalId: 'owner-1' },
-    packages: [{ path: '/old/package', sha256: 'a'.repeat(64) }],
-    hostDeploymentInputs: ['package.json'] } }),
+    packages: ['@dsh-enhanced/example'], hostDeploymentInputs: ['package.json'] } }),
+  '/private/owner/config/adoption.json': JSON.stringify({ grant: { id: 'adoption-1', expiresAt: 456,
+    maxAdoptions: 10, owner: { principalId: 'owner-1' }, ledger: { id: 'ledger-1' },
+    target: { dshHome: '/private/owner', profile: 'web' }, handoff: { coordinatorId: 'coordinator' },
+    liveQualification: { id: 'qualification-1' }, hostDeploymentInputs: ['package.json'],
+    executor: { id: 'executor-1', version: 'old', path: '/old/package', sha256: 'a'.repeat(64) },
+    policies: [{ candidateId: 'example', dshBaseline: 'old', requires: ['signed'] }] } }),
   '/private/owner/config/trust.json': JSON.stringify({ installationId: 'stable' }),
   '/private/owner/config/key.pem': 'fixed private key',
 }
 type FileMap = Record<string, string>
 const yamlApi = { isAlias, isMap, isScalar, isSeq, parseDocument }
+const authorityRebase = { oldHostRoot: '/old', oldHostVersion: 'old', candidateHostVersion: 'new',
+  pins: { '/old/package': { path: '/new/package', sha256: 'b'.repeat(64) } } }
+const authorityContext = { rebase: authorityRebase, rebaseValue: rebaseRsiHostValue }
 
 test('owner program patch updates preserve inert Loader tags through repeated verifier and control-plane writes', () => {
   const api = { readRsiHostPatchConfig, replaceRsiHostPatchConfig }
@@ -67,13 +75,15 @@ test('updates both applied service receipts for the next upgrade and preserves o
 
 test('preserves finite grant identity, lifetime, limits and owner while rebasing program pins', () => {
   const next = structuredClone(old)
-  const host = JSON.parse(next['/private/owner/config/host-authority.json'])
-  host.grant.packages = [{ path: '/new/package', sha256: 'b'.repeat(64) }]
-  next['/private/owner/config/host-authority.json'] = JSON.stringify(host)
   const release = JSON.parse(next['/private/owner/config/release.json'])
   release.grant.policies[0].dshBaseline = 'new'
   next['/private/owner/config/release.json'] = JSON.stringify(release)
-  expect(() => assertOwnerProgramAuthorityPreserved(old, next)).not.toThrow()
+  const adoption = JSON.parse(next['/private/owner/config/adoption.json'])
+  adoption.grant.executor = { ...adoption.grant.executor, path: '/new/package', sha256: 'b'.repeat(64), version: 'new' }
+  adoption.grant.policies[0].dshBaseline = 'new'
+  next['/private/owner/config/adoption.json'] = JSON.stringify(adoption)
+  expect(() => assertOwnerProgramAuthorityPreserved(old, next, authorityContext)).not.toThrow()
+  expect(() => assertOwnerProgramAuthorityPreserved(old, next)).toThrow(/finite authorization changed/u)
 })
 
 for (const [name, change] of [
@@ -87,6 +97,40 @@ for (const [name, change] of [
   change(host.grant)
   next['/private/owner/config/host-authority.json'] = JSON.stringify(host)
   expect(() => assertOwnerProgramAuthorityPreserved(old, next)).toThrow(/finite authorization changed/u)
+})
+
+for (const [name, path, change] of [
+  ['adoption executor id', 'adoption', grant => { grant.executor.id = 'forged' }],
+  ['adoption executor path', 'adoption', grant => { grant.executor.path = '/other/package' }],
+  ['adoption executor hash', 'adoption', grant => { grant.executor.sha256 = 'c'.repeat(64) }],
+  ['adoption executor version', 'adoption', grant => { grant.executor.version = 'forged' }],
+  ['adoption owner', 'adoption', grant => { grant.owner.principalId = 'other' }],
+  ['adoption expiry', 'adoption', grant => { grant.expiresAt++ }],
+  ['adoption budget', 'adoption', grant => { grant.maxAdoptions++ }],
+  ['adoption ledger', 'adoption', grant => { grant.ledger.id = 'other' }],
+  ['adoption target', 'adoption', grant => { grant.target.profile = 'other' }],
+  ['adoption handoff', 'adoption', grant => { grant.handoff.coordinatorId = 'other' }],
+  ['adoption qualification', 'adoption', grant => { grant.liveQualification.id = 'other' }],
+  ['adoption inputs', 'adoption', grant => { grant.hostDeploymentInputs.push('other') }],
+  ['adoption policy', 'adoption', grant => { grant.policies[0].requires = ['unsigned'] }],
+  ['release policy', 'release', grant => { grant.policies[0].capabilities = ['other'] }],
+  ['Host packages', 'host-authority', grant => { grant.packages.push('other') }],
+  ['Host inputs', 'host-authority', grant => { grant.hostDeploymentInputs.push('other') }],
+]) test(`rejects changed ${name} under a verified Host rebase`, () => {
+  const next = structuredClone(old)
+  for (const basename of ['release', 'adoption']) {
+    const config = JSON.parse(next[`/private/owner/config/${basename}.json`])
+    config.grant.policies[0].dshBaseline = 'new'
+    if (basename === 'adoption') config.grant.executor = {
+      ...config.grant.executor, path: '/new/package', sha256: 'b'.repeat(64), version: 'new',
+    }
+    next[`/private/owner/config/${basename}.json`] = JSON.stringify(config)
+  }
+  const configPath = `/private/owner/config/${path}.json`
+  const config = JSON.parse(next[configPath])
+  change(config.grant)
+  next[configPath] = JSON.stringify(config)
+  expect(() => assertOwnerProgramAuthorityPreserved(old, next, authorityContext)).toThrow(/finite authorization changed/u)
 })
 
 test('rejects replaced credentials or authority file inventory', () => {
