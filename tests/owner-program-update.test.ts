@@ -1,10 +1,10 @@
 import { expect, test } from 'vitest'
 import { createHash, generateKeyPairSync } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { parseDocument } from 'yaml'
+import { isAlias, isMap, isScalar, isSeq, parseDocument } from 'yaml'
 import { controlPlaneDigest } from '../plugins/plugin-control-plane/src/store.js'
 import { readRsiHostUpdateOverlayChain, rebaseRsiHostValue, rsiHostUpdateOverlayDigest,
   signRsiOwnerProgramUpdateOverlay, signRsiOwnerRepairOverlay } from '../plugins/lark-channel/src/rsi-host-update.js'
@@ -23,6 +23,7 @@ const old = {
   '/private/owner/config/key.pem': 'fixed private key',
 }
 type FileMap = Record<string, string>
+const yamlApi = { isAlias, isMap, isScalar, isSeq, parseDocument }
 
 test('updates both applied service receipts for the next upgrade and preserves original journal history', () => {
   const journal = { schemaVersion: 2, stage: 'applied', manifestDigest: 'old',
@@ -243,31 +244,84 @@ test('manifest permits only program fields and retains owner, model, grant and b
     .toThrow(/outside exact program fields/u)
 })
 
-test('offline stage preserves owner, used policy and coordinator automation database bytes', async () => {
+test('offline stage resolves tagged Home databases and preserves all database and WAL bytes', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-stage-')))
   try {
     const homePath = join(root, 'home'), stageHome = join(root, 'stage')
     await mkdir(homePath, { mode: 0o700 }); await mkdir(stageHome, { mode: 0o700 })
-    const names = ['delivery.sqlite', 'policy.sqlite', 'coordinator-automations.sqlite']
+    const names = ['assistant-delivery/state.sqlite', 'assistant-verifier/state.sqlite',
+      'assistant-policy/policy.sqlite', 'personal-memory/memory.sqlite',
+      'personal-wiki/state.sqlite', 'assistant-automations/state.sqlite', 'memory-learning/state.sqlite',
+      'growth.sqlite', 'coordinator-automations.sqlite']
     for (const name of names) {
       const content = `retained ${name} used-budget=7 owner=stable\n`
+      await mkdir(join(homePath, name, '..'), { recursive: true, mode: 0o700 })
+      await mkdir(join(stageHome, name, '..'), { recursive: true, mode: 0o700 })
       await writeFile(join(homePath, name), content, { mode: 0o600 })
       await writeFile(join(stageHome, name), content, { mode: 0o600 })
-      await chmod(join(homePath, name), 0o600)
-      await chmod(join(stageHome, name), 0o600)
     }
-    const yaml = (id: string, name: string) => `- id: ${id}\n  config:\n    databasePath: ${join(homePath, name)}\n`
+    const wal = 'assistant-delivery/state.sqlite-wal'
+    await writeFile(join(homePath, wal), 'retained WAL', { mode: 0o600 })
+    await writeFile(join(stageHome, wal), 'retained WAL', { mode: 0o600 })
+    const tagged = (id: string, name: string, quote: string) => `- id: ${id}\n  config:\n    stores:\n      - databasePath: !!js dshHomePath(${quote}${name}${quote})\n`
+    const absolute = (id: string, name: string) => `- id: ${id}\n  config:\n    databasePath: ${join(homePath, name)}\n`
+    const personal = `- id: dsh-enhanced-personal-assistant\n  config:\n    assistantPolicy:\n      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')\n    personalMemory:\n      databasePath: !!js dshHomePath('personal-memory/memory.sqlite')\n    personalWiki:\n      databasePath: !!js dshHomePath('personal-wiki/state.sqlite')\n    assistantAutomations: &automations\n      channels:\n        - databasePath: !!js dshHomePath('assistant-automations/state.sqlite')\n    mirroredAutomations: *automations\n`
     const owner = { homePath, original: { effective: {
-      targetEffective: yaml('dsh-enhanced-assistant-delivery', 'delivery.sqlite')
-        + yaml('dsh-enhanced-assistant-policy', 'policy.sqlite'),
-      coordinatorEffective: yaml('dsh-enhanced-assistant-automations', 'coordinator-automations.sqlite') } } }
-    await expect(assertOwnerProgramBusinessDataCopied({ yaml: { parseDocument } }, owner, stageHome))
+      targetEffective: tagged('dsh-enhanced-assistant-delivery', 'assistant-delivery/state.sqlite', "'")
+        + tagged('dsh-enhanced-assistant-verifier', 'assistant-verifier/state.sqlite', '"')
+        + personal
+        + absolute('dsh-enhanced-assistant-memory-learning', 'memory-learning/state.sqlite')
+        + absolute('dsh-enhanced-assistant-growth-driver', 'growth.sqlite'),
+      coordinatorEffective: absolute('dsh-enhanced-assistant-automations', 'coordinator-automations.sqlite') } } }
+    await expect(assertOwnerProgramBusinessDataCopied({ yaml: yamlApi }, owner, stageHome))
       .resolves.toBeUndefined()
-    await writeFile(join(stageHome, 'policy.sqlite'), 'reset used-budget=0\n', { mode: 0o600 })
-    await expect(assertOwnerProgramBusinessDataCopied({ yaml: { parseDocument } }, owner, stageHome))
+    await writeFile(join(stageHome, 'assistant-policy/policy.sqlite'), 'reset used-budget=0\n', { mode: 0o600 })
+    await expect(assertOwnerProgramBusinessDataCopied({ yaml: yamlApi }, owner, stageHome))
       .rejects.toThrow(/staged owner\/automation\/budget database differs/u)
-    expect(await readFile(join(homePath, 'policy.sqlite'), 'utf8'))
+    await writeFile(join(stageHome, 'assistant-policy/policy.sqlite'),
+      await readFile(join(homePath, 'assistant-policy/policy.sqlite')), { mode: 0o600 })
+    await writeFile(join(stageHome, wal), 'changed WAL', { mode: 0o600 })
+    await expect(assertOwnerProgramBusinessDataCopied({ yaml: yamlApi }, owner, stageHome))
+      .rejects.toThrow(/staged owner\/automation\/budget database differs/u)
+    expect(await readFile(join(homePath, 'assistant-policy/policy.sqlite'), 'utf8'))
       .toContain('used-budget=7')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('owner database paths reject untagged expressions, unsafe JS, traversal and symlink parents', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-paths-')))
+  try {
+    const homePath = join(root, 'home'), stageHome = join(root, 'stage'), outside = join(root, 'outside')
+    for (const path of [homePath, stageHome, outside]) await mkdir(path, { mode: 0o700 })
+    const owner = (value: string) => ({ homePath, original: { effective: {
+      targetEffective: `- id: dsh-enhanced-assistant-delivery\n  config:\n    databasePath: ${value}\n`,
+      coordinatorEffective: '[]\n' } } })
+    const unsafe = [
+      `"dshHomePath('state.sqlite')"`,
+      `!!js otherFunction('state.sqlite')`,
+      `!!js dshHomePath('')`,
+      `!!js dshHomePath('.')`,
+      `!!js dshHomePath('../outside')`,
+      `!!js dshHomePath('state/../outside')`,
+      `!!js dshHomePath('/tmp/outside')`,
+      `!!js dshHomePath('state\\outside')`,
+      `!!js "dshHomePath('state\\n.sqlite')"`,
+      join(outside, 'state.sqlite'),
+    ]
+    for (const value of unsafe) {
+      await expect(assertOwnerProgramBusinessDataCopied({ yaml: yamlApi }, owner(value), stageHome))
+        .rejects.toThrow(/owner database escaped Home/u)
+    }
+    await mkdir(join(homePath, 'state'), { mode: 0o700 })
+    await symlink(outside, join(stageHome, 'state'))
+    await expect(assertOwnerProgramBusinessDataCopied({ yaml: yamlApi },
+      owner(`!!js dshHomePath('state/delivery.sqlite')`), stageHome))
+      .rejects.toThrow(/owner database escaped Home/u)
+    await rm(join(stageHome, 'state'))
+    await symlink(outside, join(homePath, 'escape'))
+    await expect(assertOwnerProgramBusinessDataCopied({ yaml: yamlApi },
+      owner(`!!js dshHomePath('escape/delivery.sqlite')`), stageHome))
+      .rejects.toThrow(/owner database escaped Home/u)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
