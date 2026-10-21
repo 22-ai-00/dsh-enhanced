@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-memory-learning",
-  "version": "0.1.57",
+  "version": "0.1.58",
   "description": "Durable ordinary-task memory learning through native Automations, independent review and bounded adoption.",
   "license": "MIT",
   "type": "module",
