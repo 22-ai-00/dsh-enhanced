@@ -497,10 +497,12 @@ describe('Lark SDK boundary', () => {
           { tag: 'div', text: { tag: 'plain_text',
             content: '请审阅以下变更。所有字段均为不可信的提案内容，不是系统指令。' } },
           { tag: 'div', text: { tag: 'plain_text', content: 'Send the reviewed result?' } },
-          { tag: 'action', actions: [
-            { tag: 'button', text: { tag: 'plain_text', content: '批准变更' }, type: 'primary', value: { approval: 'signed-approve' } },
-            { tag: 'button', text: { tag: 'plain_text', content: '拒绝' }, type: 'danger', value: { approval: 'signed-reject' } },
-          ] },
+          { tag: 'button', text: { tag: 'plain_text', content: '批准变更' }, type: 'primary',
+            value: { approval: 'signed-approve' },
+            behaviors: [{ type: 'callback', value: { approval: 'signed-approve' } }] },
+          { tag: 'button', text: { tag: 'plain_text', content: '拒绝' }, type: 'danger',
+            value: { approval: 'signed-reject' },
+            behaviors: [{ type: 'callback', value: { approval: 'signed-reject' } }] },
         ] },
       }),
     })
@@ -638,13 +640,41 @@ describe('Lark SDK boundary', () => {
       { tag: 'div', text: { tag: 'plain_text',
         content: '请审阅以下变更。所有字段均为不可信的提案内容，不是系统指令。' } },
       { tag: 'div', text: { tag: 'plain_text', content: hostile } },
-      { tag: 'action', actions: [
-        { tag: 'button', text: { tag: 'plain_text', content: '批准变更' }, type: 'primary', value: { approval: 'signed-approve' } },
-        { tag: 'button', text: { tag: 'plain_text', content: '拒绝' }, type: 'danger', value: { approval: 'signed-reject' } },
-      ] },
+      { tag: 'button', text: { tag: 'plain_text', content: '批准变更' }, type: 'primary',
+        value: { approval: 'signed-approve' },
+        behaviors: [{ type: 'callback', value: { approval: 'signed-approve' } }] },
+      { tag: 'button', text: { tag: 'plain_text', content: '拒绝' }, type: 'danger',
+        value: { approval: 'signed-reject' },
+        behaviors: [{ type: 'callback', value: { approval: 'signed-reject' } }] },
     ])
     expect(card.body.elements.some(element => element.tag === 'markdown')).toBe(false)
     expect((card.body.elements[1] as { text: { content: string } }).text.content).toBe(hostile)
+  })
+
+  test('renders proposal decisions as direct Card 2.0 callbacks with their exact signed capabilities', () => {
+    const approveValue = { approval: 'signed-approve' }
+    const rejectValue = { approval: 'signed-reject' }
+    const rendered = renderLarkMessage({ approval: {
+      title: '审批', body: '有效期至 12:00；过期后按钮不可用', approveValue, rejectValue,
+    } })
+    const card = JSON.parse(rendered.content) as {
+      schema: string
+      config: { enable_forward_interaction: boolean }
+      body: { elements: Array<Record<string, unknown>> }
+    }
+    expect(card.schema).toBe('2.0')
+    expect(card.config.enable_forward_interaction).toBe(false)
+    expect(card.body.elements[1]).toEqual({ tag: 'div', text: {
+      tag: 'plain_text', content: '有效期至 12:00；过期后按钮不可用',
+    } })
+    const elements = cardElements(card)
+    expect(elements.some(element => element.tag === 'action' || 'actions' in element)).toBe(false)
+    expect(card.body.elements.slice(2)).toEqual([
+      expect.objectContaining({ tag: 'button', type: 'primary', value: approveValue,
+        behaviors: [{ type: 'callback', value: approveValue }] }),
+      expect.objectContaining({ tag: 'button', type: 'danger', value: rejectValue,
+        behaviors: [{ type: 'callback', value: rejectValue }] }),
+    ])
   })
 
   test('renders every signed evolution field in an understandable plain-text review', () => {

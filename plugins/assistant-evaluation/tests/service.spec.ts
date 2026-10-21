@@ -1,4 +1,7 @@
-import { Context } from '@deepseek-ai/cordis'
+import { Context, symbols } from '@deepseek-ai/cordis'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -28,6 +31,50 @@ async function harness() {
 }
 
 describe('assistant evaluation service', () => {
+  test('registers once per actual Tools and Skills generation and releases registrations on replacement', async () => {
+    const ctx = new Context(); contexts.push(ctx)
+    await ctx.plugin(SystemPrompt)
+    let toolsFiber = await ctx.plugin(ToolRuntime)
+    let skillsFiber = await ctx.plugin(SkillRegistry)
+    const tools = Reflect.get(ctx.tools, symbols.original) as ToolRuntime
+    const skills = Reflect.get(ctx.skills, symbols.original) as SkillRegistry
+    const registerTools = vi.spyOn(tools, 'register')
+    const registerSkills = vi.spyOn(skills, 'register')
+    const evaluationFiber = await ctx.plugin(AssistantEvaluationService, { databasePath: ':memory:' })
+    expect(registerTools).toHaveBeenCalledTimes(2)
+    expect(registerSkills).toHaveBeenCalledTimes(1)
+    expect(ctx.tools.schemas().filter(schema => schema.name.startsWith('evaluation_'))).toHaveLength(2)
+    expect(await ctx.skills.get('personal-assistant-self-evaluation')).toBeDefined()
+
+    await toolsFiber.dispose()
+    await skillsFiber.dispose()
+    expect(tools.schemas().filter(schema => schema.name.startsWith('evaluation_'))).toHaveLength(0)
+    expect(await skills.get('personal-assistant-self-evaluation')).toBeUndefined()
+    toolsFiber = await ctx.plugin(ToolRuntime)
+    skillsFiber = await ctx.plugin(SkillRegistry)
+    expect(ctx.tools.schemas().filter(schema => schema.name.startsWith('evaluation_'))).toHaveLength(2)
+    expect(await ctx.skills.get('personal-assistant-self-evaluation')).toBeDefined()
+
+    await evaluationFiber.dispose()
+    expect(ctx.tools.schemas().filter(schema => schema.name.startsWith('evaluation_'))).toHaveLength(0)
+    expect(await ctx.skills.get('personal-assistant-self-evaluation')).toBeUndefined()
+  })
+
+  test('binds Tools and Skills that appear after Evaluation starts', async () => {
+    const ctx = new Context(); contexts.push(ctx)
+    await ctx.plugin(SystemPrompt)
+    const evaluationFiber = await ctx.plugin(AssistantEvaluationService, { databasePath: ':memory:' })
+    expect(ctx.get('tools')).toBeUndefined()
+    expect(ctx.get('skills')).toBeUndefined()
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(SkillRegistry)
+    expect(ctx.tools.schemas().filter(schema => schema.name.startsWith('evaluation_'))).toHaveLength(2)
+    expect(await ctx.skills.get('personal-assistant-self-evaluation')).toBeDefined()
+    await evaluationFiber.dispose()
+    expect(ctx.tools.schemas().filter(schema => schema.name.startsWith('evaluation_'))).toHaveLength(0)
+    expect(await ctx.skills.get('personal-assistant-self-evaluation')).toBeUndefined()
+  })
+
   test('exposes an exact Host scope fence without treating empty scope as evidence', async () => {
     const { automations, ctx, service } = await harness()
     const scope = service.canonicalHostScope({ workspace: '/work/alpha', preset: 'primary' })

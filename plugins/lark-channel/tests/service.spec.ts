@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, test, vi } from 'vitest'
 import { signLarkApprovalAction } from '../src/approval.ts'
@@ -183,6 +184,86 @@ describe('Lark Cordis service', () => {
     expect(markers).toEqual([])
     expect(markers.join(' ')).not.toContain('secret-value-must-not-leak')
     await ctx.fiber.restart()
+  })
+
+  test('leaves a genuine startup failure loud without a ready consumer and preserves its cause for a late one', async () => {
+    if (process.env.LARK_STARTUP_FAILURE_CHILD === '1') {
+      const ctx = new Context()
+      const failure = new Error('credential lease revoked before registration')
+      ctx.provide('assistantDelivery', { registerAdapter: vi.fn() })
+      ctx.provide('credentialsKeychain', { withSecret: async () => { throw failure } })
+      const service = new LarkChannelService(ctx, {
+        enabled: true, account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+        credentialHandle: 'lark-app-secret', allowedCalendarIds: ['cal'],
+      }, { createTransport: () => transport() })
+      await new Promise(resolve => setImmediate(resolve))
+      await expect(service.whenReady()).rejects.toBe(failure)
+      await expect(service.readCalendarEventPage({ calendarId: 'cal', startTime: 1, endTime: 2,
+        pageSize: 1, signal: new AbortController().signal })).rejects.toBe(failure)
+      await ctx.fiber.restart()
+      return
+    }
+    const child = spawnSync(process.execPath, ['../../node_modules/vitest/vitest.mjs', 'run', 'tests/service.spec.ts',
+      '-t', 'leaves a genuine startup failure loud without a ready consumer'], {
+      cwd: process.cwd(), env: { ...process.env, LARK_STARTUP_FAILURE_CHILD: '1' },
+      encoding: 'utf8', timeout: 15_000,
+    })
+    expect(child.error).toBeUndefined()
+    expect(child.status).toBe(1)
+    const output = child.stdout + child.stderr
+    expect(output).toMatch(/Tests\s+1 passed/u)
+    expect(output).toContain('Unhandled Rejection')
+    expect(output).toContain('credential lease revoked before registration')
+  })
+
+  test('observes a credential failure that lands during Cordis teardown without a ready consumer', async () => {
+    const ctx = new Context()
+    ctx.provide('assistantDelivery', { registerAdapter: vi.fn() })
+    let rejectLease!: (error: unknown) => void
+    ctx.provide('credentialsKeychain', { withSecret: () => new Promise((_resolve, reject) => {
+      rejectLease = reject
+    }) })
+    const service = new LarkChannelService(ctx, {
+      enabled: true, account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+      credentialHandle: 'lark-app-secret',
+    }, { createTransport: () => transport() })
+    const restart = ctx.fiber.restart()
+    await vi.waitFor(() => expect(() => service.health()).toThrow(/disposed/u))
+    rejectLease(new Error('credential lease disposed before registration'))
+    await restart
+    await new Promise(resolve => setImmediate(resolve))
+  })
+
+  test('does not hide a credential failure that precedes Cordis teardown in the same turn', async () => {
+    if (process.env.LARK_STARTUP_FAILURE_CHILD === '2') {
+      const ctx = new Context()
+      const failure = new Error('credential lease failed before teardown')
+      let rejectLease!: (error: unknown) => void
+      ctx.provide('assistantDelivery', { registerAdapter: vi.fn() })
+      ctx.provide('credentialsKeychain', { withSecret: () => new Promise((_resolve, reject) => {
+        rejectLease = reject
+      }) })
+      new LarkChannelService(ctx, {
+        enabled: true, account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+        credentialHandle: 'lark-app-secret',
+      }, { createTransport: () => transport() })
+      rejectLease(failure)
+      for (let i = 0; i < 6; i += 1) await Promise.resolve()
+      await ctx.fiber.restart()
+      await new Promise(resolve => setImmediate(resolve))
+      return
+    }
+    const child = spawnSync(process.execPath, ['../../node_modules/vitest/vitest.mjs', 'run', 'tests/service.spec.ts',
+      '-t', 'does not hide a credential failure that precedes Cordis teardown'], {
+      cwd: process.cwd(), env: { ...process.env, LARK_STARTUP_FAILURE_CHILD: '2' },
+      encoding: 'utf8', timeout: 15_000,
+    })
+    expect(child.error).toBeUndefined()
+    expect(child.status).toBe(1)
+    const output = child.stdout + child.stderr
+    expect(output).toMatch(/Tests\s+1 passed/u)
+    expect(output).toContain('Unhandled Rejection')
+    expect(output).toContain('credential lease failed before teardown')
   })
 
   test('treats a stopped delivery registry as benign teardown instead of a fatal cause', async () => {

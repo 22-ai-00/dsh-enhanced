@@ -91,6 +91,7 @@ export class LarkChannelService extends Service {
   private readonly allowedCalendarIds: ReadonlySet<string>
   private disabled = false
   private active = true
+  private startupFailed = false
 
   constructor(ctx: Context, input: import('./config.js').Config, options: LarkChannelServiceOptions = {}) {
     super(ctx, 'larkChannel')
@@ -124,9 +125,13 @@ export class LarkChannelService extends Service {
       }
       this.lifecycle = this.runAdapter(delivery, config, createTransport, appSecret, undefined, lifecycleMarker)
     }
-    void this.lifecycle.catch(error => this.ready.reject(error))
+    void this.lifecycle.catch(error => this.rejectReady(error))
     ctx.effect(() => async () => {
       this.active = false
+      // Teardown can reject an unobserved readiness promise while the Host is
+      // already unwinding. Observe only this disposal race; genuine startup
+      // failures before disposal must remain visible to the Host.
+      if (!this.startupFailed) void this.ready.promise.catch(() => {})
       this.stopController.abort(new Error('lark-channel stopped'))
       await this.lifecycle.catch(() => {})
     }, 'lark-channel.transport')
@@ -238,7 +243,7 @@ export class LarkChannelService extends Service {
         this.ready.resolve()
         return
       }
-      this.ready.reject(error)
+      this.rejectReady(error)
       throw error
     } finally {
       generation.abort(new Error('lark-channel credential generation ended'))
@@ -273,6 +278,11 @@ export class LarkChannelService extends Service {
 
   private assertActive(): void {
     if (!this.active) throw new Error('lark-channel service is disposed')
+  }
+
+  private rejectReady(error: unknown): void {
+    if (this.active && !this.stopController.signal.aborted) this.startupFailed = true
+    this.ready.reject(error)
   }
 
   private assertCalendarAccess(calendarId: string): void {

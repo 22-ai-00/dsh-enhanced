@@ -394,31 +394,53 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       defaultSummaryWindowMs: this.config.defaultSummaryWindowMs,
       maxSummaryWindowMs: this.config.maxSummaryWindowMs,
     })
-    // `inject()` covers a ToolRuntime that arrives or reloads later. Cordis does
-    // not replay every already-present optional service into a newly constructed
-    // Service, so register against the current runtime as well.
-    const registeredTools = ctx.get('tools') as ToolRuntime | undefined
-    const disposeCurrentTools = registeredTools === undefined
-      ? undefined
-      : registerEvaluationTools(registeredTools, this)
-    ctx.inject(['tools'], toolsCtx => {
-      const tools = toolsCtx.tools
-      if (tools === registeredTools) return
-      return registerEvaluationTools(tools, this)
-    })
-    const registeredSkills = ctx.get('skills') as SkillRegistry | undefined
+    // A Context lookup creates a fresh traceable proxy. Compare the underlying
+    // service generation, and hand the existing registration to the injected
+    // Fiber so provider removal releases it before a replacement registers.
+    let toolsBinding: { identity: object, dispose: () => void } | undefined
+    const bindTools = (tools: ToolRuntime) => {
+      const identity = serviceIdentity(tools)
+      if (toolsBinding?.identity === identity) return toolsBinding.dispose
+      toolsBinding?.dispose()
+      const unregister = registerEvaluationTools(tools, this)
+      let disposed = false
+      const binding = { identity, dispose: () => {
+        if (disposed) return
+        disposed = true
+        if (toolsBinding === binding) toolsBinding = undefined
+        unregister()
+      } }
+      toolsBinding = binding
+      return binding.dispose
+    }
+    const currentTools = ctx.get('tools') as ToolRuntime | undefined
+    if (currentTools !== undefined) bindTools(currentTools)
+    ctx.inject(['tools'], toolsCtx => bindTools(toolsCtx.tools))
     const registerSkill = (skills: SkillRegistry) => skills.register({
       name: 'personal-assistant-self-evaluation',
       description: 'Review one completed task against run evidence and confirmed Memory, then store a low-trust self-assessment.',
       source: 'bundled',
       content: ASSISTANT_EVALUATION_SKILL,
     })
-    const disposeCurrentSkill = registeredSkills === undefined ? undefined : registerSkill(registeredSkills)
-    ctx.inject(['skills'], skillsCtx => {
-      const skills = skillsCtx.get('skills') as SkillRegistry
-      if (skills === registeredSkills) return
-      return registerSkill(skills)
-    })
+    let skillBinding: { identity: object, dispose: () => void } | undefined
+    const bindSkill = (skills: SkillRegistry) => {
+      const identity = serviceIdentity(skills)
+      if (skillBinding?.identity === identity) return skillBinding.dispose
+      skillBinding?.dispose()
+      const unregister = registerSkill(skills)
+      let disposed = false
+      const binding = { identity, dispose: () => {
+        if (disposed) return
+        disposed = true
+        if (skillBinding === binding) skillBinding = undefined
+        unregister()
+      } }
+      skillBinding = binding
+      return binding.dispose
+    }
+    const currentSkills = ctx.get('skills') as SkillRegistry | undefined
+    if (currentSkills !== undefined) bindSkill(currentSkills)
+    ctx.inject(['skills'], skillsCtx => bindSkill(skillsCtx.get('skills') as SkillRegistry))
     const currentEvolution = ctx.get('assistantEvolution' as never) as unknown
     const disposeCurrentProjector = isTrustedEvaluationProjector(currentEvolution)
       ? this.bindProjector(currentEvolution)
@@ -467,8 +489,8 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       this.automationBinding?.dispose()
       this.deliveryBinding?.dispose()
       this.verifierBinding?.dispose()
-      disposeCurrentTools?.()
-      disposeCurrentSkill?.()
+      toolsBinding?.dispose()
+      skillBinding?.dispose()
       await Promise.allSettled(this.activeProjections.values())
       this.store.close()
     }, 'assistant-evaluation.database')
