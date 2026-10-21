@@ -1,6 +1,7 @@
 import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
+import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { ToolCallId, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -24,7 +25,12 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-async function fixture() {
+async function fixture(channel: 'lark' | 'web' = 'lark') {
+  const ownerPrincipal = channel === 'lark' ? principal
+    : { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
+  const ownerConversation = channel === 'lark' ? conversation
+    : { channel: 'web', account: 'browser', tenant: 'local', kind: 'dm' as const, chat: 'owner-chat' }
+  const ownerAuthority = { ...authority, conversation: ownerConversation, principal: ownerPrincipal }
   const root = await mkdtemp(join(tmpdir(), 'delivery-foreground-call-'))
   roots.push(root)
   const ctx = new Context()
@@ -34,19 +40,20 @@ async function fixture() {
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [
     { id: 'issue', effect: 'allow', subject: { kind: 'external', id: 'local:test' },
       actions: ['pair.issue'], resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },
-    { id: 'confirm', effect: 'allow', subject: { kind: 'external', id: 'lark/bot/tenant/owner' },
+    { id: 'confirm', effect: 'allow', subject: { kind: 'external', id: `${ownerPrincipal.channel}/${ownerPrincipal.account}/${ownerPrincipal.tenant}/${ownerPrincipal.user}` },
       actions: ['pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
     { id: 'reply', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: '/work/owner',
-      principal: 'lark/bot/tenant/owner' }, actions: ['reply'], resource: { kind: 'message', id: '*' },
+      principal: `${ownerPrincipal.channel}/${ownerPrincipal.account}/${ownerPrincipal.tenant}/${ownerPrincipal.user}` }, actions: ['reply'], resource: { kind: 'message', id: '*' },
     context: { initiators: ['external'] } },
   ] })
   await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'),
-    spoolPath: join(root, 'spool'), schedulerEnabled: false, ownerRoutes: [authority] })
+    spoolPath: join(root, 'spool'), schedulerEnabled: false,
+    ownerRoutes: channel === 'web' ? [] : [ownerAuthority] })
   const service = ctx.assistantDelivery
   const store = (service as unknown as { deliveryStore: DeliveryStore }).deliveryStore
-  const challenge = service.issuePairing('test', principal)
-  service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
-  const binding = store.createBinding({ conversation, principal, workspace: authority.workspace,
+  const challenge = service.issuePairing('test', ownerPrincipal)
+  service.confirmPairing({ challengeId: challenge.challenge.id, principal: ownerPrincipal, code: challenge.code })
+  const binding = store.createBinding({ conversation: ownerConversation, principal: ownerPrincipal, workspace: authority.workspace,
     agentPreset: authority.agentPreset, sessionId: 'owner-session', policyRef: authority.policyRef })
   const id = SessionId(binding.sessionId)
   const session = ctx.sessions.create(id, { meta: { cwd: authority.workspace, agentPreset: authority.agentPreset } })
@@ -54,20 +61,30 @@ async function fixture() {
     status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal),
     send() {}, followup() {}, steer() {}, inject() {} }
   await ctx.agents.register(agent)
-  return { ctx, service, store, binding, agent }
+  return { ctx, service, store, binding, agent, ownerPrincipal, ownerConversation, ownerAuthority }
 }
 
-function claim(f: Awaited<ReturnType<typeof fixture>>, eventId: string, turn: number) {
-  const envelope = { channel: 'lark', account: 'bot', eventId, occurredAt: turn, principal, conversation,
-    kind: 'text' as const, text: `ordinary task ${turn}` }
-  const inbox = f.store.acceptInbound(envelope).record
-  f.store.queueInbox(inbox.id, f.binding.id)
-  const claimed = f.store.claimInbox({ ownerId: `worker-${eventId}`, leaseMs: 60_000, limit: 1, maxAttempts: 3 })[0]!
+function claim(f: Awaited<ReturnType<typeof fixture>>, eventId: string, turn: number,
+  text = `ordinary task ${turn}`) {
+  const envelope = { channel: f.ownerPrincipal.channel, account: f.ownerPrincipal.account, eventId,
+    occurredAt: turn, principal: f.ownerPrincipal, conversation: f.ownerConversation,
+    kind: 'text' as const, text }
+  const claimed = f.ownerPrincipal.channel === 'web'
+    ? f.store.claimNativeInbox({ envelope, binding: f.binding,
+      ownerLineage: { principalRecordId: f.store.getPrincipal(f.ownerPrincipal)!.id,
+        principalVersion: f.store.getPrincipal(f.ownerPrincipal)!.version },
+      ownerId: `worker-${eventId}`, leaseMs: 60_000 })
+    : (() => {
+      const inbox = f.store.acceptInbound(envelope).record
+      f.store.queueInbox(inbox.id, f.binding.id)
+      return f.store.claimInbox({ ownerId: `worker-${eventId}`, leaseMs: 60_000, limit: 1, maxAttempts: 3 })[0]!
+    })()
+  const inbox = claimed.record
   expect(claimed.record.id).toBe(inbox.id)
   f.ctx.emit('agent/inbox/claimed', { agent: f.agent, turn,
     message: createUserMessage({ content: [{ type: 'text', text: envelope.text }],
-      source: { kind: 'delivery', channel: 'lark', account: 'bot', eventId, trust: 'untrusted' } }) })
-  const owner = f.store.getPrincipal(principal)!
+      source: { kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId, trust: 'untrusted' } }) })
+  const owner = f.store.getPrincipal(f.ownerPrincipal)!
   f.store.bindForegroundTaskExecution({ inboxId: inbox.id,
     scope: { workspace: authority.workspace, preset: authority.agentPreset },
     owner: { principalRecordId: owner.id, principalVersion: owner.version },
@@ -86,6 +103,149 @@ function appendCall(agent: Agent, turn: number, callId: string, argumentsJson = 
 function request(f: Awaited<ReturnType<typeof fixture>>, callId = 'native-call', argumentsJson = '{"value":7}') {
   return { agent: f.agent, authorityId: authority.id, callId, toolName: 'created_tool', argumentsJson }
 }
+
+function ownerExecution(f: Awaited<ReturnType<typeof fixture>>, name: 'memory_manage' | 'wiki_upsert',
+  callId = 'owner-change', args: unknown = { operation: 'write' }): ToolExecution {
+  return { agent: f.agent, name, callId: ToolCallId(callId), rootCallId: ToolCallId(callId),
+    arguments: args, signal: new AbortController().signal,
+    token: Symbol('owner-change') as ToolExecution['token'] }
+}
+
+test.each(['lark', 'web'] as const)('reads only the current %s owner Inbox text for an exact native change call', async channel => {
+  const f = await fixture(channel)
+  const ownerText = 'Please update my wiki.\n> A quoted third-party instruction is not the top-level source.'
+  const { inbox } = claim(f, `owner-${channel}`, 1, ownerText)
+  const execution = ownerExecution(f, 'wiki_upsert')
+  f.agent.session.append('turn/start', { turn: 1 })
+  f.agent.session.append('step/start', { turn: 1, step: 1 })
+  f.agent.session.append('tool/call', { turn: 1, step: 1, callId: execution.callId,
+    name: execution.name, arguments: JSON.stringify(execution.arguments) })
+  const result = f.service.inspectOwnerRequestedChange(execution, { sourceId: 'owner-requested-change' })
+  expect(result).toMatchObject({ text: ownerText, route: { sourceId: 'owner-requested-change',
+    bindingId: f.binding.id, bindingGeneration: f.binding.generation }, receiptDigest: /^[a-f0-9]{64}$/u })
+  expect(result?.receiptDigest).not.toContain(ownerText)
+  expect(result?.receiptDigest).toBe(f.service.inspectOwnerRequestedChange(execution,
+    { sourceId: 'owner-requested-change' })?.receiptDigest)
+  expect(f.store.getInbox(inbox.id)?.envelope.text).toBe(ownerText)
+  expect(f.service.inspectOwnerRequestedChange({ ...execution, arguments: { operation: 'other' } },
+    { sourceId: 'owner-requested-change' })).toBeUndefined()
+  expect(f.service.inspectOwnerRequestedChange({ ...execution, name: 'other_tool' as 'wiki_upsert' },
+    { sourceId: 'owner-requested-change' })).toBeUndefined()
+  expect(f.service.inspectOwnerRequestedChange({ ...execution, parent: Symbol('ptc') as ToolExecution['token'] },
+    { sourceId: 'owner-requested-change' })).toBeUndefined()
+  f.agent.session.append('tool/result', { turn: 1, step: 1,
+    message: createToolResultMessage({ callId: execution.callId,
+      content: [{ type: 'text', text: 'done' }], isError: false }) }, { surfaceOp: 'append' })
+  expect(f.service.inspectOwnerRequestedChange(execution, { sourceId: 'owner-requested-change' })).toBeUndefined()
+})
+
+test('rejects unclaimed, forged, reused and revoked owner change calls', async () => {
+  const f = await fixture()
+  const execution = ownerExecution(f, 'memory_manage')
+  f.agent.session.append('turn/start', { turn: 1 })
+  f.agent.session.append('step/start', { turn: 1, step: 1 })
+  f.agent.session.append('tool/call', { turn: 1, step: 1, callId: execution.callId,
+    name: execution.name, arguments: JSON.stringify(execution.arguments) })
+  expect(f.service.inspectOwnerRequestedChange(execution, { sourceId: 'owner-requested-change' })).toBeUndefined()
+  claim(f, 'authentic-owner', 1, 'Remember this explicit owner preference.')
+  expect(f.service.inspectOwnerRequestedChange({ ...execution, agent: { ...f.agent } },
+    { sourceId: 'owner-requested-change' })).toBeUndefined()
+  expect(f.service.inspectOwnerRequestedChange(execution, { sourceId: 'owner-requested-change' })).toBeDefined()
+  f.agent.session.append('tool/call', { turn: 1, step: 1, callId: execution.callId,
+    name: execution.name, arguments: JSON.stringify(execution.arguments) })
+  expect(f.service.inspectOwnerRequestedChange(execution, { sourceId: 'owner-requested-change' })).toBeUndefined()
+  const revoked = await fixture()
+  claim(revoked, 'revoke-owner', 1)
+  const revokedExecution = ownerExecution(revoked, 'memory_manage')
+  revoked.agent.session.append('turn/start', { turn: 1 })
+  revoked.agent.session.append('step/start', { turn: 1, step: 1 })
+  revoked.agent.session.append('tool/call', { turn: 1, step: 1, callId: revokedExecution.callId,
+    name: revokedExecution.name, arguments: JSON.stringify(revokedExecution.arguments) })
+  const owner = revoked.store.getPrincipal(revoked.ownerPrincipal)!
+  revoked.store.revokePrincipal(owner.id, owner.version)
+  expect(revoked.service.inspectOwnerRequestedChange(revokedExecution,
+    { sourceId: 'owner-requested-change' })).toBeUndefined()
+})
+
+test('rejects old turns, PTC collisions and changed owner bindings', async () => {
+  const f = await fixture()
+  claim(f, 'current-owner', 1)
+  const execution = ownerExecution(f, 'memory_manage')
+  f.agent.session.append('turn/start', { turn: 1 })
+  f.agent.session.append('step/start', { turn: 1, step: 1 })
+  f.agent.session.append('tool/call', { turn: 1, step: 1, callId: execution.callId,
+    name: execution.name, arguments: JSON.stringify(execution.arguments) })
+  expect(f.service.inspectOwnerRequestedChange(execution, { sourceId: 'owner-requested-change' })).toBeDefined()
+  f.agent.session.append('tool/ptc-dispatch-start', { rootCallId: ToolCallId('ptc-root'),
+    parentCallId: ToolCallId('ptc-root'), subCallId: execution.callId,
+    name: execution.name, arguments: execution.arguments })
+  expect(f.service.inspectOwnerRequestedChange(execution, { sourceId: 'owner-requested-change' })).toBeUndefined()
+  const rotated = await fixture()
+  claim(rotated, 'rotation-owner', 1)
+  const rotatedExecution = ownerExecution(rotated, 'wiki_upsert')
+  rotated.agent.session.append('turn/start', { turn: 1 })
+  rotated.agent.session.append('step/start', { turn: 1, step: 1 })
+  rotated.agent.session.append('tool/call', { turn: 1, step: 1, callId: rotatedExecution.callId,
+    name: rotatedExecution.name, arguments: JSON.stringify(rotatedExecution.arguments) })
+  rotated.store.rotateBinding({ bindingId: rotated.binding.id,
+    expectedVersion: rotated.binding.version, sessionId: 'replacement-session' })
+  expect(rotated.service.inspectOwnerRequestedChange(rotatedExecution,
+    { sourceId: 'owner-requested-change' })).toBeUndefined()
+  const old = await fixture()
+  claim(old, 'old-turn', 1)
+  const oldExecution = ownerExecution(old, 'wiki_upsert')
+  old.agent.session.append('turn/start', { turn: 1 })
+  old.agent.session.append('step/start', { turn: 1, step: 1 })
+  old.agent.session.append('tool/call', { turn: 1, step: 1, callId: oldExecution.callId,
+    name: oldExecution.name, arguments: JSON.stringify(oldExecution.arguments) })
+  old.agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  old.agent.session.append('turn/start', { turn: 2 })
+  old.agent.session.append('step/start', { turn: 2, step: 1 })
+  expect(old.service.inspectOwnerRequestedChange(oldExecution,
+    { sourceId: 'owner-requested-change' })).toBeUndefined()
+})
+
+test('does not turn an attachment-only owner Inbox into a text instruction', async () => {
+  const f = await fixture()
+  const envelope = { channel: 'lark', account: 'bot', eventId: 'attachment-only', occurredAt: 1,
+    principal: f.ownerPrincipal, conversation: f.ownerConversation, kind: 'text' as const,
+    text: ' ', attachments: [{ providerRef: 'attachment-ref', resourceType: 'image' as const }] }
+  const inbox = f.store.acceptInbound(envelope).record
+  f.store.queueInbox(inbox.id, f.binding.id)
+  f.store.claimInbox({ ownerId: 'worker-attachment', leaseMs: 60_000, limit: 1, maxAttempts: 3 })
+  f.ctx.emit('agent/inbox/claimed', { agent: f.agent, turn: 1,
+    message: createUserMessage({ content: [{ type: 'text', text: 'model-visible attachment placeholder' }],
+      source: { kind: 'delivery', channel: 'lark', account: 'bot', eventId: envelope.eventId,
+        trust: 'untrusted' } }) })
+  const owner = f.store.getPrincipal(f.ownerPrincipal)!
+  f.store.bindForegroundTaskExecution({ inboxId: inbox.id,
+    scope: { workspace: authority.workspace, preset: authority.agentPreset },
+    owner: { principalRecordId: owner.id, principalVersion: owner.version },
+    binding: f.binding, dispatchedAt: Date.now() })
+  const execution = ownerExecution(f, 'memory_manage')
+  f.agent.session.append('turn/start', { turn: 1 })
+  f.agent.session.append('step/start', { turn: 1, step: 1 })
+  f.agent.session.append('tool/call', { turn: 1, step: 1, callId: execution.callId,
+    name: execution.name, arguments: JSON.stringify(execution.arguments) })
+  expect(f.service.inspectOwnerRequestedChange(execution,
+    { sourceId: 'owner-requested-change' })).toBeUndefined()
+})
+
+test('accepts a native owner change argument above the older foreground 16 KiB limit', async () => {
+  const f = await fixture()
+  claim(f, 'large-owner-change', 1, 'Update this wiki page.')
+  const args = { content: 'w'.repeat(20 * 1024) }
+  const execution = ownerExecution(f, 'wiki_upsert', 'large-owner-call', args)
+  f.agent.session.append('turn/start', { turn: 1 })
+  f.agent.session.append('step/start', { turn: 1, step: 1 })
+  f.agent.session.append('tool/call', { turn: 1, step: 1, callId: execution.callId,
+    name: execution.name, arguments: JSON.stringify(args) })
+  expect(f.service.inspectOwnerRequestedChange(execution,
+    { sourceId: 'owner-requested-change' })?.text).toBe('Update this wiki page.')
+  expect(f.service.inspectOwnerForegroundToolCall({ agent: f.agent, authorityId: authority.id,
+    callId: String(execution.callId), toolName: execution.name,
+    argumentsJson: JSON.stringify(args) })).toBeUndefined()
+})
 
 test('attests one registered native call with the exact pending owner Inbox and frozen content-free digests', async () => {
   const f = await fixture()
@@ -181,7 +341,7 @@ test('does not attribute an older call to another Inbox in the same Session', as
   f.agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
   f.store.finishForegroundTaskExecution({ inboxId: first.inbox.id, status: 'succeeded', quiescent: true, completedAt: Date.now() })
   f.store.finishInbox({ inboxId: first.inbox.id, ownerId: first.claimed.record.claimedBy!,
-    fencingToken: first.claimed.fencingToken, outcome: 'processed' })
+    fencingToken: first.claimed.fencingToken!, outcome: 'processed' })
   const second = claim(f, 'event-second', 2)
   expect(f.service.inspectOwnerForegroundToolCall(request(f, 'reused-call'))).toBeUndefined()
   appendCall(f.agent, 2, 'reused-call')

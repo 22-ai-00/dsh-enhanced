@@ -17,7 +17,7 @@ export type { HumanApprovalAnswerer } from './approval-routing.js'
 export { isAutoReviewEscalation } from './auto-review.js'
 export type { AutoReviewAssessment, AutoReviewConfig } from './auto-review.js'
 export { AUTO_REVIEW_APPROVAL_REASON, HUMAN_APPROVAL_REASON } from './tool-risk.js'
-export type { NativeFullReviewerReconciliation, PolicyBudgetConfig, PolicyHostConfiguration } from './service.js'
+export type { NativeFullReviewerReconciliation, OwnerRequestedChangeContext, OwnerRequestedChangeInput, PolicyBudgetConfig, PolicyHostConfiguration } from './service.js'
 export { APPROVAL_DISPLAY_BUDGET } from './ledger.js'
 export { ApprovalSettlementConflict, validateApprovalSettlement } from './settlement.js'
 export type {

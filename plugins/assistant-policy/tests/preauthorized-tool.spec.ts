@@ -1,4 +1,4 @@
-import { Context } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
@@ -151,6 +151,83 @@ describe('trusted Host tool preauthorization', () => {
     active = false
     expect((await execute(current.ctx, current.owner, name)).isError).toBe(true)
     expect(current.asks()).toBe(1)
+    expect(executions).toBe(1)
+    await current.ctx.fiber.restart()
+  })
+
+  test.each([
+    ['memory_manage', 'dsh-enhanced-personal-memory'],
+    ['wiki_upsert', 'dsh-enhanced-personal-wiki'],
+  ])('reserves %s to its exact personal-domain Fiber', async (name, fiberName) => {
+    const current = await fixture()
+    let executions = 0
+    const tool = definition(name, () => { executions += 1 })
+    current.ctx.tools.register(tool)
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(current.ctx, tool, () => true)).toThrow(/reserved/)
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(
+      trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-actions'), tool, () => true,
+    )).toThrow(/reserved/)
+    const remove = current.ctx.assistantPolicy.registerPreauthorizedTool(
+      trustedActionsCaller(current.ctx, fiberName), tool, () => true,
+    )
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(false)
+    expect(current.asks()).toBe(0)
+    expect(executions).toBe(1)
+    remove()
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(true)
+    expect(current.asks()).toBe(1)
+    await current.ctx.fiber.restart()
+  })
+
+  test.each(['memory_manage', 'wiki_upsert'])('accepts %s from the actual Service inject Fiber', async name => {
+    const current = await fixture()
+    let executions = 0
+    let observedFiber = ''
+    const tool = definition(name, () => { executions += 1 })
+    current.ctx.tools.register(tool)
+    class PersonalMemoryService extends Service {
+      constructor(ctx: Context) {
+        super(ctx, 'memoryFixture')
+        ctx.inject(['tools'], toolsCtx => {
+          observedFiber = toolsCtx.fiber.name
+          toolsCtx.get('assistantPolicy')?.registerPreauthorizedTool(toolsCtx, tool, () => true)
+        })
+      }
+    }
+    class PersonalWikiService extends Service {
+      constructor(ctx: Context) {
+        super(ctx, 'wikiFixture')
+        ctx.inject(['tools'], toolsCtx => {
+          observedFiber = toolsCtx.fiber.name
+          toolsCtx.get('assistantPolicy')?.registerPreauthorizedTool(toolsCtx, tool, () => true)
+        })
+      }
+    }
+    const plugin = name === 'memory_manage' ? PersonalMemoryService : PersonalWikiService
+    await current.ctx.plugin(plugin)
+    expect(observedFiber).toBe(name === 'memory_manage' ? 'PersonalMemoryService' : 'PersonalWikiService')
+    expect(current.ctx.tools.get(name, current.owner)).toBe(tool)
+    expect(current.ctx.assistantPolicy.isPreauthorizedTool({ name, agent: current.owner,
+      arguments: { command: 'node trusted-task.js' }, signal: new AbortController().signal } as never)).toBe(true)
+    const result = await execute(current.ctx, current.owner, name)
+    expect(result.isError, JSON.stringify(result)).toBe(false)
+    expect(current.asks()).toBe(0)
+    expect(executions).toBe(1)
+    await current.ctx.fiber.restart()
+  })
+
+  test('memory preauthorization leaves the separate Policy rule and budget guard active', async () => {
+    const current = await fixture({ rules: [{ id: 'budget-memory', effect: 'allow', actions: ['execute'],
+      resource: { kind: 'tool', id: 'memory_manage' }, budget: { id: 'memory-calls', amount: 1 } }],
+    budgets: [{ id: 'memory-calls', metric: 'calls', limit: 1, periodMs: 60_000, scope: 'subject' }] })
+    let executions = 0
+    const tool = definition('memory_manage', () => { executions += 1 })
+    current.ctx.tools.register(tool)
+    current.ctx.assistantPolicy.registerPreauthorizedTool(
+      trustedActionsCaller(current.ctx, 'dsh-enhanced-personal-memory'), tool, () => true)
+    expect((await execute(current.ctx, current.owner, 'memory_manage')).isError).toBe(false)
+    expect((await execute(current.ctx, current.owner, 'memory_manage')).isError).toBe(true)
+    expect(current.asks()).toBe(0)
     expect(executions).toBe(1)
     await current.ctx.fiber.restart()
   })
@@ -327,7 +404,7 @@ describe('trusted Host tool preauthorization', () => {
     current.ctx.tools.register(unapproved)
 
     expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx), unapproved, () => true))
-      .toThrow('reserved for approved assistant-actions GitHub tools')
+      .toThrow('reserved for the exact owning assistant-actions')
     await current.ctx.fiber.restart()
   })
 
@@ -339,9 +416,9 @@ describe('trusted Host tool preauthorization', () => {
     current.ctx.tools.register(bash)
 
     expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx), bash, () => true))
-      .toThrow('reserved for approved assistant-actions GitHub tools')
+      .toThrow('reserved for the exact owning assistant-actions')
     expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(current.ctx, commit, () => true))
-      .toThrow('reserved for approved assistant-actions GitHub tools')
+      .toThrow('reserved for the exact owning assistant-actions')
     await current.ctx.fiber.restart()
   })
 

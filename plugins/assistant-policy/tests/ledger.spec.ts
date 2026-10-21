@@ -8,6 +8,54 @@ import { Worker } from 'node:worker_threads'
 import { afterEach, describe, expect, test } from 'vitest'
 import { PolicyLedger, PolicyLedgerError } from '../src/ledger.ts'
 
+test('owner-request creation is terminal in one transaction and exact existing proposals never upgrade', async () => {
+  const path = await temporaryDatabase()
+  let now = 1_000
+  const ledger = new PolicyLedger({ path, now: () => now })
+  const input = {
+    idempotencyKey: 'owner-request-one', requester: 'agent:primary', principal: 'owner:lark:123',
+    action: 'memory.add', resource: { kind: 'memory', id: 'fact:one' },
+    diff: '+ name: Rui', summary: 'Remember name', notAfter: 2_000,
+    dispatch: { routeVersion: 2 as const, sourceId: 'lark', bindingId: 'binding',
+      bindingVersion: 1, bindingGeneration: 1, workspace: '/work/alpha',
+      principal: 'owner:lark:123', principalRecordId: 'owner-row', principalVersion: 1 },
+  }
+  const created = ledger.recoverOrCreateOwnerRequestedProposal(input, 'owner-request:sha256:call', () => {})
+  expect(created).toMatchObject({ kind: 'proposal', proposal: { status: 'approved', version: 2, replayed: false } })
+  expect(ledger.listPendingApprovalDispatches()).toEqual([])
+  if (created.kind !== 'proposal') throw new Error('expected proposal')
+  expect(ledger.getProposal(created.proposal.proposalId)).toMatchObject({
+    status: 'approved', decidedBy: input.principal, decisionReason: 'owner-request:sha256:call', version: 2,
+  })
+  expect(ledger.recoverOrCreateOwnerRequestedProposal(input, 'other-reason', () => {}))
+    .toMatchObject({ kind: 'proposal', proposal: { status: 'approved', replayed: true } })
+  const pendingInput = { ...input, idempotencyKey: 'pending-one' }
+  const pending = ledger.recoverOrCreateProposal(pendingInput)
+  expect(pending).toMatchObject({ kind: 'proposal', proposal: { status: 'pending' } })
+  expect(ledger.recoverOrCreateOwnerRequestedProposal(pendingInput, 'owner-request:sha256:call', () => {}))
+    .toMatchObject({ kind: 'proposal', proposal: { status: 'pending', replayed: true } })
+  if (pending.kind !== 'proposal') throw new Error('expected pending proposal')
+  ledger.decideProposal({ proposalId: pending.proposal.proposalId, principal: input.principal,
+    decision: 'rejected', reason: 'owner declined', expectedVersion: 1 })
+  expect(ledger.recoverOrCreateOwnerRequestedProposal(pendingInput, 'owner-request:sha256:call', () => {}))
+    .toMatchObject({ kind: 'proposal', proposal: { status: 'rejected', replayed: true } })
+  const expiringInput = { ...input, idempotencyKey: 'existing-expiry' }
+  ledger.recoverOrCreateProposal(expiringInput)
+  expect(() => ledger.recoverOrCreateOwnerRequestedProposal({ ...input, principal: 'owner:other' }, 'reason', () => {}))
+    .toThrowError(expect.objectContaining<Partial<PolicyLedgerError>>({ code: 'unauthorized' }))
+  expect(() => ledger.recoverOrCreateOwnerRequestedProposal({ ...input, idempotencyKey: 'rollback' }, 'reason', () => {
+    throw new Error('stale')
+  })).toThrow('stale')
+  expect(ledger.listPendingApprovalDispatches()).toHaveLength(1)
+  now = 2_000
+  ledger.expireProposals(100)
+  expect(ledger.recoverOrCreateOwnerRequestedProposal(expiringInput, 'reason', () => {}))
+    .toMatchObject({ kind: 'proposal', proposal: { status: 'expired', replayed: true } })
+  expect(ledger.recoverOrCreateOwnerRequestedProposal({ ...input, idempotencyKey: 'expired' }, 'reason', () => {}))
+    .toMatchObject({ kind: 'abandoned' })
+  ledger.close()
+})
+
 const temporaryRoots: string[] = []
 
 async function temporaryDatabase() {

@@ -181,7 +181,7 @@ export class PersonalMemoryService extends Service {
   private readonly proposals: MemoryProposalManager
   private readonly policy: AssistantPolicyService
   private delivery: Pick<AssistantDeliveryService,
-    'prepareAgentApproval' | 'preferencePrincipalForAgent' | 'prepareOwnerApprovalForPreference'> | undefined
+    'prepareAgentApproval' | 'preferencePrincipalForAgent' | 'prepareOwnerApprovalForPreference' | 'inspectOwnerRequestedChange'> | undefined
   private readonly promotionBridge: PreferenceMemoryPromotionBridge
   private readonly learning: MemoryLearningService | undefined
   private readonly headlessNamespaces = new WeakMap<Agent, MemoryOwnerNamespace>()
@@ -425,6 +425,101 @@ export class PersonalMemoryService extends Service {
       ttlMs,
       mutation: input.mutation,
     })
+  }
+
+  /** Model tool entry: only a live owner call can enter Policy's bounded review. */
+  async proposeFromTool(exec: ToolExecution, input: ServiceProposalInput): Promise<MemoryProposalResult> {
+    if (exec.signal.aborted) throw new PersonalMemoryError('policy-denied', 'memory tool execution was cancelled')
+    if (exec.name !== 'memory_manage' || exec.agent === undefined
+      || exec.arguments === null || typeof exec.arguments !== 'object') {
+      return this.propose(exec.agent, input)
+    }
+    const args = exec.arguments as Record<string, unknown>
+    if (args.operation !== input.mutation.op || args.idempotency_key !== input.idempotencyKey
+      || (input.mutation.op !== 'add' && input.mutation.op !== 'replace')
+      || input.mutation.entry.sensitivity !== 'private') {
+      return this.propose(exec.agent, input)
+    }
+    const frozenInput = structuredClone(input)
+    const inputJson = JSON.stringify(input)
+    const argsJson = JSON.stringify(exec.arguments)
+    const policy = this.policy as AssistantPolicyService & {
+      runOwnerRequestedChange?: <T>(request: {
+        execution: ToolExecution; resourceKind: 'memory'; operation: 'add' | 'replace';
+        policyIdempotencyKey: string;
+        resolveOwnerRequest: () => ReturnType<NonNullable<AssistantDeliveryService['inspectOwnerRequestedChange']>>;
+        resolveCurrentTarget?: () => unknown;
+      }, commit: () => T) => Promise<T>
+    }
+    if (typeof policy.runOwnerRequestedChange !== 'function') return this.propose(exec.agent, frozenInput)
+    this.assertActive()
+    const scope = this.agentScope(exec.agent)
+    const approval = this.resolveApprovalRoute(exec.agent, scope, input.principal)
+    this.assertMutationIdentity({ ...scope, namespace: approval.namespace }, input.mutation)
+    const replacement = input.mutation.op === 'replace'
+      ? this.memoryStore.get(approval.namespace, input.mutation.identity, input.mutation.id)
+      : undefined
+    const replacementMutation = input.mutation.op === 'replace' ? input.mutation : undefined
+    if (input.mutation.op === 'replace'
+      && (replacement?.sensitivity !== 'private' || replacement.version !== input.mutation.expectedVersion)) {
+      return this.propose(exec.agent, frozenInput)
+    }
+    const decision = this.policy.authorizeAgent(exec.agent, 'propose', {
+      kind: 'memory', id: input.mutation.op,
+    }, { idempotencyKey: `memory-propose:${input.idempotencyKey}` })
+    if (decision.effect !== 'allow') throw decisionError(decision)
+    const result = await policy.runOwnerRequestedChange({
+      execution: exec,
+      resourceKind: 'memory',
+      operation: input.mutation.op,
+      policyIdempotencyKey: `personal-memory:${input.idempotencyKey}`,
+      resolveOwnerRequest: () => this.delivery?.inspectOwnerRequestedChange?.(exec, { sourceId: APPROVAL_SOURCE_ID }),
+      ...(replacementMutation === undefined ? {} : { resolveCurrentTarget: () => {
+        const current = this.memoryStore.get(approval.namespace, replacementMutation.identity, replacementMutation.id)
+        if (current === undefined || current.version !== replacementMutation.expectedVersion
+          || current.sensitivity !== 'private') return undefined
+        return current
+      } }),
+    }, () => {
+      if (exec.signal.aborted || JSON.stringify(input) !== inputJson
+        || JSON.stringify(exec.arguments) !== argsJson) {
+        throw new PersonalMemoryError('policy-denied', 'memory tool request changed during owner review')
+      }
+      if (input.mutation.op === 'replace') {
+        const current = this.memoryStore.get(approval.namespace, input.mutation.identity, input.mutation.id)
+        if (current?.sensitivity !== 'private' || current.version !== replacement?.version) {
+          throw new PersonalMemoryError('policy-denied', 'memory replacement target changed during owner review')
+        }
+      }
+      return this.propose(exec.agent, frozenInput)
+    })
+    if (result.status !== 'approved' || result.record !== undefined) return result
+    const stored = this.memoryStore.getProposal(result.proposalId)
+    const record = stored?.resultMemoryId === undefined ? undefined
+      : this.memoryStore.get(stored.namespace, stored.mutation.identity, stored.resultMemoryId)
+    return record === undefined ? result : Object.freeze({ ...result, record })
+  }
+
+  hasCurrentOwnerToolProof(exec: ToolExecution): boolean {
+    const args = exec.arguments as Record<string, unknown> | null
+    const eligible = typeof (this.policy as { runOwnerRequestedChange?: unknown }).runOwnerRequestedChange === 'function'
+      && args !== null && typeof args === 'object'
+      && (args.operation === 'add' || args.operation === 'replace')
+      && (args.entry as { sensitivity?: unknown } | undefined)?.sensitivity === 'private'
+      && this.delivery?.inspectOwnerRequestedChange?.(exec, { sourceId: APPROVAL_SOURCE_ID }) !== undefined
+    if (!eligible || args?.operation !== 'replace') return eligible
+    if (exec.agent === undefined || (args.owner !== 'agent' && args.owner !== 'user')
+      || (args.scope !== 'workspace' && args.scope !== 'user-global')
+      || typeof args.memory_id !== 'string' || typeof args.expected_version !== 'number') return false
+    try {
+      const scope = this.agentScope(exec.agent)
+      const approval = this.resolveApprovalRoute(exec.agent, scope, undefined)
+      const identity: MemoryIdentity = { owner: args.owner, scope: args.scope,
+        ...(args.scope === 'workspace' ? { workspace: scope.workspace } : {}),
+        ...(args.owner === 'agent' ? { agentPreset: scope.agentPreset } : {}) }
+      const target = this.memoryStore.get(approval.namespace, identity, args.memory_id)
+      return target?.sensitivity === 'private' && target.version === args.expected_version
+    } catch { return false }
   }
 
   decideProposal(input: MemoryProposalDecisionInput): MemoryProposalResult {

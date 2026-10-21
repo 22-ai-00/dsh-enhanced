@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { PersonalMemoryService } from './service.js'
-import type { MemoryEntryInput, MemoryIdentity, MemoryKnowledge, MemoryMutation } from './types.js'
+import type { MemoryEntryInput, MemoryIdentity, MemoryKnowledge, MemoryMutation, MemoryRecord } from './types.js'
 
 const KNOWLEDGE_SCHEMA = {
   type: 'object', additionalProperties: false, properties: {
@@ -17,6 +17,11 @@ function knowledgeOutput(knowledge: MemoryKnowledge) {
     ...(knowledge.counterexamples === undefined ? {} : { counterexamples: [...knowledge.counterexamples] }),
     ...(knowledge.claim === undefined ? {} : { claim: { ...knowledge.claim } }),
   }
+}
+
+function recordOutput(record: MemoryRecord) {
+  const { knowledge, ...rest } = record
+  return { ...rest, ...(knowledge === undefined ? {} : { knowledge: knowledgeOutput(knowledge) }) }
 }
 
 const SEARCH_OUTPUT = {
@@ -62,6 +67,27 @@ const MANAGE_OUTPUT = {
     expiresAt: { type: 'integer', required: true },
     summary: { type: 'string', required: true },
     diff: { type: 'string', required: true },
+    record: {
+      type: 'object', additionalProperties: false, properties: {
+        id: { type: 'string', required: true }, owner: { type: 'string', required: true },
+        scope: { type: 'string', required: true }, workspace: { type: 'string' },
+        agentPreset: { type: 'string' }, kind: { type: 'string', required: true },
+        content: { type: 'string', required: true }, sensitivity: { type: 'string', required: true },
+        trust: { type: 'string', required: true }, confidence: { type: 'number', required: true },
+        namespace: { type: 'object', additionalProperties: false, properties: {
+          mode: { type: 'string', required: true }, principalDigest: { type: 'string', required: true },
+          principalRecordId: { type: 'string' }, principalVersion: { type: 'integer' },
+          lineageId: { type: 'string' }, lineageVersion: { type: 'integer' },
+        } },
+        contentHash: { type: 'string', required: true }, status: { type: 'string', required: true },
+        provenance: { type: 'object', additionalProperties: false, properties: {
+          source: { type: 'string', required: true }, observedAt: { type: 'integer', required: true }, uri: { type: 'string' },
+        } },
+        expiresAt: { type: 'integer' }, supersedes: { type: 'string' },
+        knowledge: KNOWLEDGE_SCHEMA, version: { type: 'integer', required: true },
+        createdAt: { type: 'integer', required: true }, updatedAt: { type: 'integer', required: true },
+      },
+    },
   },
 } as const
 
@@ -237,9 +263,9 @@ export function registerMemoryTools(ctx: Context, service: PersonalMemoryService
     },
   }))
 
-  ctx.tools.register(defineTool({
+  const manage = defineTool({
     name: 'memory_manage',
-    description: 'Propose an add, replace, or remove operation for durable memory. This never commits directly; the bound principal must approve the complete diff.',
+    description: 'Manage durable memory. An explicit current owner request to add or replace an ordinary private fact, name, or preference may be independently reviewed and committed immediately; other changes remain approval proposals. If the owner asks to wait for approval, do not claim a write before approval.',
     parameters: {
       operation: { type: 'string', required: true, enum: ['add', 'replace', 'remove'] },
       owner: { type: 'string', required: true, enum: ['agent', 'user'] },
@@ -282,7 +308,7 @@ export function registerMemoryTools(ctx: Context, service: PersonalMemoryService
           ? { op: 'replace', identity, ...target, entry: requireEntry(args.entry) }
           : { op: 'remove', identity, ...target }
       }
-      const proposal = service.propose(exec.agent, {
+      const proposal = await service.proposeFromTool(exec, {
         idempotencyKey: args.idempotency_key,
         mutation,
       })
@@ -293,7 +319,17 @@ export function registerMemoryTools(ctx: Context, service: PersonalMemoryService
         expiresAt: proposal.expiresAt,
         summary: proposal.summary,
         diff: proposal.diff,
+        ...(proposal.record === undefined ? {} : { record: recordOutput(proposal.record) }),
       }
     },
-  }))
+  })
+  ctx.tools.register(manage)
+  const policy = ctx.get('assistantPolicy') as { registerPreauthorizedTool?: (
+    caller: Context, definition: typeof manage, authorize: (exec: Parameters<PersonalMemoryService['hasCurrentOwnerToolProof']>[0]) => boolean,
+  ) => void } | undefined
+  try { policy?.registerPreauthorizedTool?.(ctx, manage, exec => service.hasCurrentOwnerToolProof(exec)) }
+  catch (error) {
+    if (!(error instanceof Error) || !error.message.startsWith('assistant-policy: preauthorization is reserved for ')) throw error
+    // An older Policy release does not have the exact memory tool allowlist.
+  }
 }
