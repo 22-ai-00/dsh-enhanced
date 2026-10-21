@@ -36,6 +36,10 @@ async function run(source: string, overrides: Partial<NativeMacProcessInput> = {
   return await runNativeMacProcess({ ...input, source, deadline: Date.now() + 20_000, ...overrides })
 }
 
+function processDiagnostic(result: Awaited<ReturnType<typeof run>>) {
+  return JSON.stringify({ status: result.status, reason: result.reason, pid: result.pid, exitCode: result.exitCode })
+}
+
 mac('native macOS deny-default process', () => {
   test('runs one Node process with a clean environment and a private writable workspace', async () => {
     const result = await run('const fs=require("node:fs");fs.writeFileSync("made.txt","yes");console.log(process.env.HOME, process.env.NODE_OPTIONS || "clean", process.pid)', { workspaceWritable: true })
@@ -142,19 +146,51 @@ mac('native macOS deny-default process', () => {
     expect(displaced).toMatchObject({ status: 'failed', quiescent: true, reason: 'invalid-runtime-read-roots' })
   })
 
-  test('deadline, cancellation and output overflow close the process', async () => {
-    const timed = await run('setInterval(()=>{},1000)', { deadline: Date.now() + 200 })
-    expect(timed).toMatchObject({ status: 'timed-out', quiescent: true })
+  test('a running process reaches its deadline and closes', async () => {
+    const timed = await run('process.stdout.write("ready\\n");setInterval(()=>{},1000)',
+      { deadline: Date.now() + 5_000 })
+    expect(timed, processDiagnostic(timed)).toMatchObject({ status: 'timed-out', quiescent: true })
+    expect(timed.stdout).toContain('ready\n')
+    expect(timed.pid).toBeTypeOf('number')
+    expect(() => process.kill(timed.pid!, 0)).toThrow()
+  }, 12_000)
+
+  test('an expired pre-spawn deadline fails without a process', async () => {
+    const result = await run('process.stdout.write("FORBIDDEN")', { deadline: Date.now() - 1 })
+    expect(result).toMatchObject({ status: 'failed', quiescent: true, reason: 'invalid-deadline' })
+    expect(result.pid).toBeUndefined()
+    expect(result.exitCode).toBeUndefined()
+    expect(result.stdout).toBe('')
+  })
+
+  test('cancels a confirmed running process and closes it', async () => {
+    const marker = join(workspace, 'ready-cancel.txt')
+    await rm(marker, { force: true })
     const controller = new AbortController()
-    setTimeout(() => controller.abort(), 200)
-    const cancelled = await run('setInterval(()=>{},1000)', { signal: controller.signal })
-    expect(cancelled).toMatchObject({ status: 'cancelled', quiescent: true })
+    const pending = run('require("node:fs").writeFileSync("ready-cancel.txt","ready");setInterval(()=>{},1000)',
+      { signal: controller.signal, workspaceWritable: true, deadline: Date.now() + 10_000 })
+    let cancelled!: Awaited<ReturnType<typeof run>>
+    try {
+      const limit = Date.now() + 5_000
+      while (Date.now() < limit && await readFile(marker, 'utf8').catch(() => undefined) !== 'ready') {
+        await new Promise<void>(resolve => setTimeout(resolve, 25))
+      }
+      expect(await readFile(marker, 'utf8')).toBe('ready')
+    } finally {
+      controller.abort()
+      try { cancelled = await pending }
+      finally { await rm(marker, { force: true }) }
+    }
+    expect(cancelled, processDiagnostic(cancelled)).toMatchObject({ status: 'cancelled', quiescent: true })
+    expect(cancelled.pid).toBeTypeOf('number')
+    expect(() => process.kill(cancelled.pid!, 0)).toThrow()
+  }, 12_000)
+
+  test('output overflow closes the process', async () => {
     const overflow = await run('process.stdout.write("x".repeat(100000))', { maxOutputBytes: 16 })
     expect(overflow).toMatchObject({ status: 'output-limit', quiescent: true })
-    for (const result of [timed, cancelled, overflow]) {
-      expect(result.pid).toBeTypeOf('number')
-      expect(() => process.kill(result.pid!, 0)).toThrow()
-    }
+    expect(overflow.pid).toBeTypeOf('number')
+    expect(() => process.kill(overflow.pid!, 0)).toThrow()
   })
 
   test('invalid UTF-8 never expands the combined output byte limit', async () => {
