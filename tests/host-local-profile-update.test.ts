@@ -281,6 +281,93 @@ test('derives internal peer overrides only inside the selected runtime closure',
   expect(workspace.overrides['@dsh-enhanced/demo@0.1.48>@dsh-enhanced/acp']).toBe(`file:${acp.tarball}`)
 })
 
+test.each([
+  ['without an original age field', undefined],
+  ['with an existing age exclusion', ['left-pad@1.0.0']],
+] as const)('accepts pnpm release-age exclusions only for exact verified packages in each selected closure %s', async (_label, originalExcludes) => {
+  const input = await fixture()
+  for (const home of [input.originalHome, input.stagedHome]) for (const name of ['assistant', 'acp']) {
+    const path = join(home, 'profiles', name, 'pnpm-workspace.yaml')
+    const workspace = parse(await readFile(path, 'utf8'))
+    if (originalExcludes !== undefined) workspace.minimumReleaseAgeExclude = [...originalExcludes]
+    await writeFile(path, stringify(workspace))
+  }
+  const runPnpm = async (...args: Parameters<typeof input.runPnpm>) => {
+    await input.runPnpm(...args)
+    const options = args[1]
+    if (options.phase !== 'resolve') return
+    const name = basename(options.cwd) === 'assistant' ? '@dsh-enhanced/demo' : '@dsh-enhanced/acp'
+    const path = join(options.cwd, 'pnpm-workspace.yaml')
+    const workspace = parse(await readFile(path, 'utf8'))
+    workspace.minimumReleaseAgeExclude = [...(workspace.minimumReleaseAgeExclude ?? []), `${name}@0.1.48`]
+    await writeFile(path, stringify(workspace))
+  }
+  const preparation = await prepareHostLocalProfileUpdate({ ...input, runPnpm })
+  for (const name of ['assistant', 'acp']) {
+    const workspace = parse(await readFile(join(input.preparationRoot, name, 'pnpm-workspace.yaml'), 'utf8'))
+    expect(workspace.minimumReleaseAgeExclude).toEqual([
+      ...(originalExcludes ?? []), `@dsh-enhanced/${name === 'assistant' ? 'demo' : 'acp'}@0.1.48`,
+    ])
+  }
+  await materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
+    logicalHome: input.originalHome, runPnpm, runCandidateDsh: async () => {} })
+  await validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome })
+  const stagedPath = join(input.stagedHome, 'profiles', 'assistant', 'pnpm-workspace.yaml')
+  const staged = parse(await readFile(stagedPath, 'utf8'))
+  staged.minimumReleaseAgeExclude.push('@dsh-enhanced/acp@0.1.48')
+  await writeFile(stagedPath, stringify(staged))
+  await expect(validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome }))
+    .rejects.toThrow('staged metadata drift: assistant/pnpm-workspace.yaml')
+})
+
+test.each([
+  ['outside selected closure', ['@dsh-enhanced/acp@0.1.48'], 'unauthorized prepared minimumReleaseAgeExclude'],
+  ['wrong version', ['@dsh-enhanced/demo@0.1.49'], 'unauthorized prepared minimumReleaseAgeExclude'],
+  ['version range', ['@dsh-enhanced/demo@^0.1.48'], 'unauthorized prepared minimumReleaseAgeExclude'],
+  ['wildcard', ['@dsh-enhanced/demo@*'], 'unauthorized prepared minimumReleaseAgeExclude'],
+  ['third-party package', ['left-pad@1.0.0'], 'unauthorized prepared minimumReleaseAgeExclude'],
+  ['duplicate addition', ['@dsh-enhanced/demo@0.1.48', '@dsh-enhanced/demo@0.1.48'],
+    'duplicate prepared minimumReleaseAgeExclude'],
+  ['non-array policy', '@dsh-enhanced/demo@0.1.48', 'workspace minimumReleaseAgeExclude must be a string list'],
+] as const)('rejects pnpm release-age exclusion for %s', async (_label, exclusions, message) => {
+  const input = await fixture(['assistant'])
+  const runPnpm = async (...args: Parameters<typeof input.runPnpm>) => {
+    await input.runPnpm(...args)
+    if (args[1].phase !== 'resolve') return
+    const path = join(args[1].cwd, 'pnpm-workspace.yaml')
+    const workspace = parse(await readFile(path, 'utf8'))
+    workspace.minimumReleaseAgeExclude = exclusions
+    await writeFile(path, stringify(workspace))
+  }
+  await expect(prepareHostLocalProfileUpdate({ ...input, runPnpm })).rejects.toThrow(message)
+})
+
+test('preserves original age rules as an ordered prefix and rejects strict or unrelated workspace changes', async () => {
+  for (const kind of ['reordered', 'strict', 'unrelated'] as const) {
+    const input = await fixture(['assistant'])
+    const originalPath = join(input.originalHome, 'profiles', 'assistant', 'pnpm-workspace.yaml')
+    const original = parse(await readFile(originalPath, 'utf8'))
+    original.minimumReleaseAgeExclude = ['left-pad@1.0.0']
+    if (kind === 'strict') original.minimumReleaseAgeStrict = true
+    await writeFile(originalPath, stringify(original))
+    const runPnpm = async (...args: Parameters<typeof input.runPnpm>) => {
+      await input.runPnpm(...args)
+      if (args[1].phase !== 'resolve') return
+      const path = join(args[1].cwd, 'pnpm-workspace.yaml')
+      const workspace = parse(await readFile(path, 'utf8'))
+      workspace.minimumReleaseAgeExclude = kind === 'reordered'
+        ? ['@dsh-enhanced/demo@0.1.48', 'left-pad@1.0.0']
+        : ['left-pad@1.0.0', '@dsh-enhanced/demo@0.1.48']
+      if (kind === 'unrelated') workspace.allowBuilds = { arbitrary: true }
+      await writeFile(path, stringify(workspace))
+    }
+    const message = kind === 'reordered' ? 'ordered prefix'
+      : kind === 'strict' ? 'strict minimum release age forbids new exclusions'
+        : 'unexpected prepared pnpm-workspace.yaml'
+    await expect(prepareHostLocalProfileUpdate({ ...input, runPnpm })).rejects.toThrow(message)
+  }
+})
+
 test('requires one installed physical provider and resolves a selected peer to it', async () => {
   const input = await fixture(['assistant'])
   reviewed.peers['@dsh-enhanced/demo'] = { '@dsh-enhanced/acp': '^0.1.0' }
