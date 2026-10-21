@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-deepseek-budget",
-  "version": "0.1.58",
+  "version": "0.1.59",
   "description": "A DeepSeek Harness plugin for Assistant Deepseek Budget.",
   "license": "MIT",
   "type": "module",
