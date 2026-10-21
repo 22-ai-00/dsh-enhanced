@@ -2,27 +2,27 @@
 
 更新：2026-10-21。本页是唯一进展入口；验收见[合同](rsi-acceptance.md)，发行见[发布协议](releasing.md)，历史实施与证据查 Git。
 
-## 当前修复
+## 当前修复与待验收
 
-- Linux 主服务因一页 Wiki 的日期字段不符合 canonical ISO 格式而启动失败，随后凭据释放错误遮蔽原始错误。已备份并规范化该页日期、保持正文不变，恢复与原收据一致的 SDK；主服务、协调器和监控已运行，飞书连接就绪。原 owner、97 项身份/期限/预算字段、6 项授权及 54 个原会话文件保留。
-- 提案审批卡的 Card 2.0 按钮结构、Cordis 代理导致的重复工具/技能注册、停服时的 readiness 拒绝处理已随 `0.1.58` 发布。线上五条失败审批均已过期，不能据此补发或批准；新版本部署后须用新提案验收实际投递和点击回调。
-- Linux 普通升级在切换前被 workspace 元数据校验拦截：pnpm 11.7 会给刚发布的包追加精确版本的 `minimumReleaseAgeExclude`。兼容性修复仅接受已验证、属于当前 profile 闭包的候选精确版本，保留原规则并拒绝其他配置变化；完整检查及下一补丁版本发布待完成。
+- Linux 的 Wiki 日期格式错误已修复，正文保留；与安装收据不一致的 SDK 已恢复。审批卡的 Card 2.0 按钮结构、Cordis 重复注册及停服时的 readiness 错误处理已修复并部署到 `0.1.59`。
+- **待验收：新提案审批卡的实际投递和点击回调。** 已请 owner 在真实会话中发起新提案并点击拒绝；当前尚无升级后新提案。五条旧失败审批均已过期，六条旧收件状态结果不确定，均未重放。原中断任务不会因服务恢复而自动续跑。
 
 ## 当前版本与下一步
 
-- **`0.1.58` 已公开发布，配套私有 Host `0.2.1-rc.2`。** 精确源码 `5349850a9f9153ea9738ebeb8002e755af64a536`；37/37 个包在 Mac/Linux 的独立公开 registry 回读中，精确版本和 `latest` 均为 `0.1.58`，七项安装资产与该源码匹配。[Release](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39561115296) 的 Publish 与 Record 均成功。Mac 生产安装仍为 `0.1.55`，本轮未升级。
-- Mac arm64 与 Linux 均使用公开 tag 和 npm 制品在全新私有临时 Home 完成七条命令（各 7/7 退出 0）：Host `0.2.1-rc.2` 版本核对、七个增强 bundle `0.1.58` 与 base 的组合配置、SDK 导入通过。临时安装未注册常驻服务，也未进行 owner 配对或业务授权。
-- 下一步完成升级兼容性修复、保留 owner 的生产升级及新审批卡投递/点击验收；再按合同验证真实普通任务的学习与后续复用。
+- **`0.1.59` 已公开发布并安装到远程 Linux，Host 为 `0.2.1-rc.2`。** 发布源码 `c0866530149fa032021a5e6c16b81094046ddac4`；[Release](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39583820771) 的 Publish 与 Record 均成功。Mac/Linux 分别回读公开 registry：37/37 个包的精确版本及 `latest` 均为 `0.1.59`，七项安装资产与发布源码匹配。
+- Mac arm64 与 Linux 的公开制品全新临时安装各 7/7 命令退出 0，覆盖 Host 版本、七个增强 bundle 与 base 的组合配置及 SDK 导入。临时安装未注册服务或进行 owner 配对；Mac 生产安装仍为 `0.1.55`，本轮未升级。
+- 下一步完成新审批卡投递与点击验收，再按合同验证真实普通任务的学习和后续复用。
 
 ## Linux 保留 owner 升级
 
 - 冻结 owner 的产品入口为 `dsh-rsi update --all --yes`：沿原收据绑定的官方干净源码，成对更新 target/coordinator 与私有 Host，事务内停启受管服务。原 Host 仅支持 `0.2.0-rc.2` / `0.2.1-rc.2` 到 `0.2.1-rc.2`；要求原授权有效、双服务活动、无已采用或未结的源码 activation。旧 CLI 首次须先单独自升级；适用条件与恢复见[维护说明](../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)。
-- Linux 当前 CLI 为 `0.1.58`，生产 cohort 仍为 `0.1.57` / `c77fa41941274d8bf104c403919f214f537e2a8b`，Host 为 `0.2.1-rc.2`。本次普通升级退出 1、停在切换前；Home inode 与双 DSH 服务的 PID、InvocationID、NRestarts 未变，监控已恢复活动，失败事务归档保留。
-- 失败后保留复核三项均 PASS：97 项身份/期限/预算字段、6 项规范化 grants、54 个原会话文件、14 项非程序配置行以及旧提案/投递状态均保留，未重绑 owner。模型配置与凭据引用按审计范围保留，不据此声称外部凭据已实际调用。原始记录在忽略目录 `docs/evidence/linux-upgrade-20261021-v0158/` 与 `docs/evidence/release-v0158-public/`。
+- 该 Linux 实例的快捷命令 `dsh-upgrade` 已实际执行一次并退出 0：CLI 和生产 cohort 从旧版更新为 `0.1.59`，26 个运行包的源码、收据及实际文件均核对通过。升级兼容 pnpm 11.7 为新发布包添加的精确版本 `minimumReleaseAgeExclude`，只接受已验证候选闭包中的新增项。
+- 四项升级后审计均退出 0：原 owner、97 项身份/期限/预算字段、6 项授权、54 个原会话文件及 14 项非程序配置行保留。模型配置与凭据引用保留不代表外部凭据已实际调用。双 DSH 服务及监控正常，间隔 79 秒的两次检查身份稳定、重启计数为 0；飞书已连接，未见本次事故的五类错误标记。
+- 验收脚本曾错误要求原子升级前后 Home inode 相等；原失败记录保留，已用冻结事务的 original/staged 身份完成独立对账，再运行原四项内容审计。未重复执行升级。原始命令、退出码及报告在忽略目录 `docs/evidence/linux-upgrade-20261021-v0159/`。
 
 ## 精确源码验证
 
-- `0.1.58` 同源码 [dev CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39556678252) 与 [main CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39561108319) 均 5/5 成功。正式 Release 再跑完整 `pnpm check`：38 组测试、8889 通过 / 99 跳过、37 包 dry-run pack；跳过项不算实机通过。新增升级兼容性修复尚待精确源码的完整检查。
+- `0.1.59` 发布源码的 [dev CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39577561069) 与 [main CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39582825989) 均 5/5 成功。正式 Release 完整 `pnpm check` 退出 0：38 组测试、8899 通过 / 102 跳过、37 包 dry-run pack；本地 Mac 同源码完整检查也通过。跳过项不算实机通过。公开安装证据在忽略目录 `docs/evidence/release-v0159-public/`。
 
 ## 能力边界
 
