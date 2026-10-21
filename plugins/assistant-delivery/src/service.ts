@@ -3,6 +3,7 @@ import { isAbsolute } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
@@ -798,7 +799,48 @@ function isModelSelectionPayload(value: unknown): value is ModelSelectionPayload
 }
 
 const toolApprovalArgumentBytes = 16 * 1024
+const ownerRequestedChangeArgumentBytes = 64 * 1024
 const toolApprovalIdentityBytes = 512
+
+function inspectUnsettledNativeCall(
+  events: readonly SessionEvent[], turn: number, callId: string,
+  toolName: string, argumentsJson: string, argumentBytes = toolApprovalArgumentBytes,
+): Readonly<{ id: string; toolName: string; eventSeq: number; eventDigest: string; argumentsDigest: string }> | undefined {
+  if (!callId || !toolName || Buffer.byteLength(callId) > toolApprovalIdentityBytes
+    || Buffer.byteLength(toolName) > toolApprovalIdentityBytes
+    || Buffer.byteLength(argumentsJson) > argumentBytes) return undefined
+  const openTurn = events.findLast(event => event.type === 'turn/start' || event.type === 'turn/end')
+  if (openTurn?.type !== 'turn/start' || openTurn.data.turn !== turn) return undefined
+  const nativeCalls = events.filter((event): event is SessionEvent<'tool/call'> => event.type === 'tool/call' && event.seq > openTurn.seq
+    && event.data.turn === turn && String(event.data.callId) === callId)
+  const unresolved = nativeCalls.filter(call => !events.some(event => event.type === 'tool/result'
+    && event.seq > call.seq && String(event.data.message.source.callId) === String(call.data.callId)))
+  if (unresolved.length !== 1) return undefined
+  const call = unresolved[0]!
+  const currentStep = events.findLast(event => (event.type === 'step/start' || event.type === 'step/end')
+    && event.data.turn === turn)
+  if (call.data.name !== toolName || !Number.isSafeInteger(call.seq) || !Number.isSafeInteger(call.data.step)
+    || typeof call.data.arguments !== 'string'
+    || Buffer.byteLength(call.data.arguments) > argumentBytes
+    || events.some(event => event !== call && ((event.type === 'tool/call'
+      && String(event.data.callId) === callId)
+      || (event.type === 'tool/ptc-dispatch-start' && String(event.data.subCallId) === callId)))
+    || currentStep?.type !== 'step/start' || currentStep.seq <= openTurn.seq
+    || currentStep.seq >= call.seq || currentStep.data.step !== call.data.step
+    || events.filter(event => event.type === 'step/start' && event.data.turn === turn
+      && event.data.step === call.data.step).length !== 1) return undefined
+  let normalizedArguments: string
+  try {
+    const parsed: unknown = JSON.parse(call.data.arguments)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    normalizedArguments = JSON.stringify(parsed)
+  } catch { return undefined }
+  const argumentsDigest = createHash('sha256').update(normalizedArguments).digest('hex')
+  if (argumentsDigest !== createHash('sha256').update(argumentsJson).digest('hex')) return undefined
+  const eventDigest = createHash('sha256').update(JSON.stringify(['tool/call', call.seq,
+    call.data.turn, call.data.step, callId, toolName, call.data.arguments])).digest('hex')
+  return Object.freeze({ id: callId, toolName, eventSeq: call.seq, eventDigest, argumentsDigest })
+}
 const toolApprovalReasonBytes = 2 * 1024
 const permissionEventTypes = [
   'permission/preset',
@@ -2304,6 +2346,8 @@ export class AssistantDeliveryService extends Service {
       leaseMs: this.config.leaseMs,
       prepare: (binding, envelope) => this.prepareForegroundTaskAcceptance(binding, envelope),
       complete: (handle, input) => this.completeForegroundTaskAcceptance(handle, input),
+      beginExecution: (binding, envelope) => this.beginForegroundTaskExecution(binding, envelope),
+      completeExecution: (inboxId, input) => this.completeForegroundTaskExecution(inboxId, input),
       claimed: (agent, envelope, turn) => this.capturePreferenceTurn(agent,
         { kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId: envelope.eventId }, turn),
       notifications: binding => this.deliveryStore.listOutbox({ bindingId: binding.id, limit: 50 }).filter(record => record.status === 'accepted'
@@ -2361,43 +2405,83 @@ export class AssistantDeliveryService extends Service {
       binding: { id: turn.bindingId, version: turn.bindingVersion, generation: route.generation },
     })
     if (task === undefined) return undefined
-    const events = input.agent.session.snapshotEvents()
-    const openTurn = events.findLast(event => event.type === 'turn/start' || event.type === 'turn/end')
-    if (openTurn?.type !== 'turn/start' || openTurn.data.turn !== turn.turn) return undefined
-    const nativeCalls = events.filter((event): event is SessionEvent<'tool/call'> => event.type === 'tool/call' && event.seq > openTurn.seq
-      && event.data.turn === turn.turn && String(event.data.callId) === input.callId)
-    const unresolved = nativeCalls.filter(call => !events.some(event => event.type === 'tool/result'
-      && event.seq > call.seq && String(event.data.message.source.callId) === String(call.data.callId)))
-    if (unresolved.length !== 1) return undefined
-    const call = unresolved[0]!
-    const currentStep = events.findLast(event => (event.type === 'step/start' || event.type === 'step/end')
-      && event.data.turn === turn.turn)
-    if (String(call.data.callId) !== input.callId || call.data.name !== input.toolName
-      || !Number.isSafeInteger(call.seq) || !Number.isSafeInteger(call.data.step)
-      || typeof call.data.arguments !== 'string'
-      || Buffer.byteLength(call.data.arguments) > toolApprovalArgumentBytes
-      || events.some(event => event !== call && ((event.type === 'tool/call'
-        && String(event.data.callId) === input.callId)
-        || (event.type === 'tool/ptc-dispatch-start' && String(event.data.subCallId) === input.callId)))
-      || currentStep?.type !== 'step/start' || currentStep.seq <= openTurn.seq
-      || currentStep.seq >= call.seq || currentStep.data.step !== call.data.step
-      || events.filter(event => event.type === 'step/start' && event.data.turn === turn.turn
-        && event.data.step === call.data.step).length !== 1) return undefined
-    let normalizedArguments: string
-    try {
-      const parsed: unknown = JSON.parse(call.data.arguments)
-      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
-      normalizedArguments = JSON.stringify(parsed)
-    } catch { return undefined }
-    const argumentsDigest = createHash('sha256').update(normalizedArguments).digest('hex')
-    if (argumentsDigest !== createHash('sha256').update(input.argumentsJson).digest('hex')) return undefined
-    const eventDigest = createHash('sha256').update(JSON.stringify(['tool/call', call.seq,
-      call.data.turn, call.data.step, input.callId, input.toolName, call.data.arguments])).digest('hex')
-    if (this.deliveryStore.inspectPendingForegroundToolTask({ inboxId: task.inboxId,
+    const call = inspectUnsettledNativeCall(input.agent.session.snapshotEvents(), turn.turn,
+      input.callId, input.toolName, input.argumentsJson)
+    if (call === undefined || this.deliveryStore.inspectPendingForegroundToolTask({ inboxId: task.inboxId,
       sessionId: task.sessionId, scope: task.scope, owner: task.owner, binding: task.binding }) === undefined) return undefined
     return Object.freeze({ protocol: 'assistant-delivery/foreground-tool-call/v1' as const, task,
-      turn: turn.turn, call: Object.freeze({ id: input.callId, toolName: input.toolName,
-        eventSeq: call.seq, eventDigest, argumentsDigest }) })
+      turn: turn.turn, call })
+  }
+
+  /** Host-only, read-only source proof for an owner's live memory or wiki tool call. */
+  inspectOwnerRequestedChange(
+    execution: ToolExecution,
+    input: { sourceId: string },
+  ): Readonly<{ route: ApprovalDispatchRouteV2; text: string; receiptDigest: string }> | undefined {
+    if (!this.active || !execution || typeof execution !== 'object'
+      || !input || typeof input.sourceId !== 'string'
+      || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(input.sourceId)
+      || (execution.name !== 'memory_manage' && execution.name !== 'wiki_upsert')
+      || typeof execution.callId !== 'string' || typeof execution.rootCallId !== 'string'
+      || execution.agent === undefined || typeof execution.signal?.aborted !== 'boolean'
+      || execution.signal.aborted
+      || execution.parent !== undefined
+      || String(execution.rootCallId) !== String(execution.callId)) return undefined
+    const argumentsJson = serializeCodeDispatchArguments(execution.arguments)
+    if (argumentsJson === undefined) return undefined
+    const agent = execution.agent
+    const agents = this.context.get('agents')
+    const sessions = this.context.get('sessions')
+    if (agents === undefined || sessions === undefined
+      || typeof agent.session !== 'object' || agent.session === null
+      || String(agent.id) !== String(agent.session.id)
+      || agents.get(agent.id) !== agent || sessions.get(agent.id) !== agent.session) return undefined
+    const turn = this.currentPreferenceTurn(agent)
+    if (turn === undefined) return undefined
+    const binding = this.deliveryStore.getBinding(turn.bindingId)
+    if (binding?.status !== 'active' || binding.sessionId !== turn.sessionId
+      || binding.version !== turn.bindingVersion) return undefined
+    const task = this.deliveryStore.inspectPendingForegroundToolTask({
+      inboxId: turn.sourceInboxId, sessionId: turn.sessionId, scope: turn.scope,
+      owner: turn.principalLineage,
+      binding: { id: turn.bindingId, version: turn.bindingVersion, generation: binding.generation },
+    })
+    if (task === undefined) return undefined
+    const call = inspectUnsettledNativeCall(agent.session.snapshotEvents(), turn.turn,
+      String(execution.callId), execution.name, argumentsJson, ownerRequestedChangeArgumentBytes)
+    if (call === undefined) return undefined
+    const inbox = this.deliveryStore.getInbox(task.inboxId)
+    if (inbox?.status !== 'claimed' || inbox.bindingId !== task.binding.id
+      || inbox.envelope.kind !== 'text' || inbox.envelope.text.trim().length === 0
+      || inbox.envelope.eventId !== turn.sourceEventId) return undefined
+    let route: ApprovalDispatchRouteV2
+    try { route = this.prepareAgentApproval(agent, input) }
+    catch (error) {
+      if (error instanceof AssistantDeliveryError && error.code === 'missing-binding') return undefined
+      throw error
+    }
+    if (route.bindingId !== task.binding.id
+      || route.bindingVersion !== task.binding.version
+      || route.bindingGeneration !== task.binding.generation
+      || route.principalRecordId !== task.owner.principalRecordId
+      || route.principalVersion !== task.owner.principalVersion
+      || route.principal !== turn.principalId
+      || route.workspace !== turn.scope.workspace
+      || agents.get(agent.id) !== agent || sessions.get(agent.id) !== agent.session
+      || this.currentPreferenceTurn(agent) !== turn
+      || this.deliveryStore.inspectPendingForegroundToolTask({ inboxId: task.inboxId,
+        sessionId: task.sessionId, scope: task.scope, owner: task.owner,
+        binding: task.binding }) === undefined
+      || inspectUnsettledNativeCall(agent.session.snapshotEvents(), turn.turn,
+        String(execution.callId), execution.name, argumentsJson,
+        ownerRequestedChangeArgumentBytes) === undefined) return undefined
+    const receiptDigest = createHash('sha256').update(JSON.stringify([
+      'assistant-delivery/owner-requested-change/v1', route.principalRecordId,
+      route.principalVersion, route.bindingId, route.bindingVersion,
+      route.bindingGeneration, route.sourceId, inbox.id, inbox.envelopeHash, task.sessionId,
+      turn.turn, call.eventSeq, call.eventDigest, call.id, call.toolName, call.argumentsDigest,
+    ])).digest('hex')
+    return Object.freeze({ route, text: inbox.envelope.text, receiptDigest })
   }
 
   currentPreferenceTurn(agent: Agent): Readonly<DeliveryPreferenceTurnAttestation> | undefined {

@@ -1,6 +1,6 @@
 # @dsh-enhanced/personal-memory
 
-面向个人助理的短期上下文之外长期记忆：保存简短且稳定的事实、偏好、约定和经验，按 user/agent 与 user-global/workspace 双维隔离。手动写入走 `assistant-policy` 的持久审批提案；可选有限授权支持独立审查后的事实/经验采用。研究资料、文档和项目知识不属于这里，应交给 `personal-wiki`。
+面向个人助理的短期上下文之外长期记忆：保存简短且稳定的事实、偏好、约定和经验，按 user/agent 与 user-global/workspace 双维隔离。当前 owner 明确要求的普通私有 add/replace 经独立审查后可即时提交；其他手动写入走 `assistant-policy` 的持久审批提案。可选有限授权支持独立审查后的事实/经验采用。研究资料、文档和项目知识不属于这里，应交给 `personal-wiki`。
 
 ## 安装
 
@@ -47,7 +47,7 @@ dsh --profile web --dump-config
 
 - `memory_search`：显式检索当前 agent 可见的四个域；ASCII 词元（含紧邻 CJK 的 Latin 词元）与相邻 CJK unigram/bigram 均可召回；标点、空白或 Latin 文本两侧的 CJK 不会组成人工 bigram。排序和 tie-break 确定，读取不更新任何计数。
 - `memory_search_confirmed`：面向后台复盘的窄查询；服务端固定只返回非敏感、`user-confirmed` 的 `instruction` / `preference`，调用方不能通过参数放宽 trust、kind 或 sensitivity。
-- `memory_manage`：只创建 add/replace/remove 提案，返回完整 diff、proposal id、TTL 和版本；它没有直接提交路径，也不接受模型提供 principal 或 TTL。principal、workspace 和飞书投递 binding 必须来自当前 Agent 的 authenticated Delivery owner route，TTL 来自可信配置；没有活动绑定时 fail closed。
+- `memory_manage`：当前轮 owner 明确要求写入普通私有名字、偏好或长期记忆时，add/replace 可经 Delivery 原文及精确工具参数证明、Policy 独立有界审查后直接批准并提交，返回 `approved` 和实际 `record`。助手自行建议、歧义、owner 明确要求“等我批准”、remove、`sensitive` 条目、缺少当前 proof 或审查未通过时仍返回待审批提案，不表示已写入。模型不能提供 principal、TTL 或批准标志；来源路由和 TTL 由可信服务决定。
 - `ctx.personalMemory.decideProposal(...)`：供绑定 owner 的可信通道/UI 决定提案。principal、版本、决定内容和理由均受幂等/CAS 约束。
 - `ctx.personalMemory.exportJson(agent)`：导出版本化 JSON，不包含哈希、状态、时间戳、token 表或审计表。
 - `ctx.personalMemory.proposeImport(...)`：先验证整个有界文档，再为每条记录创建审批提案；Agent 路径同样由 Delivery 派生审批 authority，未批准前不会写入 memory record。仅在未组合 Delivery 的可信本地/headless 集成中，程序化调用方可以显式传入 principal；一旦 Delivery 可用就不能用该字段覆盖绑定 owner。
@@ -62,7 +62,7 @@ dsh --profile web --dump-config
 
 ## 有限授权的事实与经验采用
 
-可选 `automaticLearning` 为 Host 提供 `adoptReviewedLearning({request})`、`lookupLearningAdoption({request})` 和记忆审查所需的 `inspectLearningTarget(...)`。学习生产者还可调用 `listLearningTargets({owner,limit})`（默认 20，范围 1–100），获取经当前 Delivery owner、Policy、Evaluation 和原任务来源复核的可管理事实/经验摘要；来源暂失时返回空列表，人工改写、失效或撤回的版本不会列出。`inspectLearningAdoptionAvailability({owner})` 只读返回当前授权指纹、到期时间、剩余修改次数与内容字节数及 `available`，不登记授权或消耗额度。两项查询都要求与配置授权完全一致的 owner；目标在来源复核后排序限量。这些接口不注册为模型工具；`memory_manage` 仍只创建手动审批提案。此组件负责采用与召回；普通任务自动发现、提取和调度由独立 [assistant-memory-learning](../assistant-memory-learning/README.md) bundle 提供。新插件生成与动态工程采用另按当前状态验收。
+可选 `automaticLearning` 为 Host 提供 `adoptReviewedLearning({request})`、`lookupLearningAdoption({request})` 和记忆审查所需的 `inspectLearningTarget(...)`。学习生产者还可调用 `listLearningTargets({owner,limit})`（默认 20，范围 1–100），获取经当前 Delivery owner、Policy、Evaluation 和原任务来源复核的可管理事实/经验摘要；来源暂失时返回空列表，人工改写、失效或撤回的版本不会列出。`inspectLearningAdoptionAvailability({owner})` 只读返回当前授权指纹、到期时间、剩余修改次数与内容字节数及 `available`，不登记授权或消耗额度。两项查询都要求与配置授权完全一致的 owner；目标在来源复核后排序限量。这些接口不注册为模型工具；`memory_manage` 仅当前 owner 明确请求通过独立审查时直接提交，其余仍创建手动审批提案。此组件负责采用与召回；普通任务自动发现、提取和调度由独立 [assistant-memory-learning](../assistant-memory-learning/README.md) bundle 提供。新插件生成与动态工程采用另按当前状态验收。
 
 授权包含独立的 `authorityId`、精确 `owner`、固定 `reviewAuthorityId` / `reviewAuthorityDigest`、`expiresAt`、`maxMutations`（1–1000）、`maxTotalContentBytes`、`maxRecordTtlMs`、允许的 `kinds`（fact/experience）和 `operations`（add/replace/remove）。owner 包含 Delivery route id/hash、principal id/record/version、绝对 workspace 与 preset。采用授权、Delivery 路由和审查授权的 ID 分别管理；同一采用授权 ID 的内容不可更改，重启、撤回或失败不能重置已用额度。授权到期停止新写入，记录仍按独立 TTL 和当前来源有效性参与读取。
 
@@ -150,7 +150,7 @@ JSON 导入是一组独立、可重放的提案，不承诺跨所有记录的一
 
 ## 延迟审批的提交闭环
 
-`memory_manage` 只创建提案，永不直接写入。提案与 Policy 的 durable approval-dispatch route 在同一事务创建，Delivery 会把 Policy 冻结的 summary/diff/版本投递给 exact owner binding。审批可能发生在原 turn 结束之后（例如几分钟后在飞书卡片上点击），因此本插件会周期性调用 `reconcileProposals()`：读取 policy 账本中该提案的**终态**，再用与 `decideProposal` 完全相同的事务路径提交。
+`memory_manage` 先形成提案；仅当前 owner 明确请求通过 Policy 独立审查并取得精确原子批准时，才在同次调用内写入并返回实际记录。其他提案与 Policy 的 durable approval-dispatch route 在同一事务创建，Delivery 会把 Policy 冻结的 summary/diff/版本投递给 exact owner binding。审批可能发生在原 turn 结束之后（例如几分钟后在飞书卡片上点击），因此本插件会周期性调用 `reconcileProposals()`：读取 policy 账本中该提案的**终态**，再用与 `decideProposal` 完全相同的事务路径提交。
 
 三条边界：
 
@@ -167,7 +167,7 @@ JSON 导入是一组独立、可重放的提案，不承诺跨所有记录的一
 ## 权限与非目标
 
 - 文件系统：读写配置的 SQLite 数据库及其 WAL/SHM 辅助文件；工具证据功能另读取当前 Session 原始事件，并经 Host FS 与原生 `read` 管线重读显式授权文件。它不写用户文件。
-- 网络：本插件不直接发网络请求；工具证据重读可调用 Host 配置的远端 FS provider。组合 Delivery 时只写 durable dispatch，由 channel 插件负责发送审批卡片。
+- 网络：本插件不直接发网络请求；工具证据重读可调用 Host 配置的远端 FS provider。当前 owner 直接请求由 Policy 使用本轮已解析的模型 supplier 做独立审查；其他提案的 durable dispatch 由 Delivery/channel 投递审批卡片。
 - 子进程、凭据、浏览器、安装脚本：无。
 - 数据敏感性：`sensitive` 只表示禁止环境快照；显式、已授权的搜索仍可能把内容发送给当前模型。真正的密码/API key 应放在后续 `credentials-keychain`，不要写入 memory。
 - 非目标：向量数据库、无授权写入、自动遗忘/dreaming、知识图谱、Wiki 长文、跨设备同步和多用户 ACL。

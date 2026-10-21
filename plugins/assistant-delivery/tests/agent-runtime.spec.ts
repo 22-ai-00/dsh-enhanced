@@ -41,7 +41,7 @@ import {
 } from '@deepseek-ai/dsh-session'
 import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
-import { defineTool, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolExecution, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import ApprovalService, { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { approvalReviewerOf, AssistantPolicyService, type PolicyRule, type PolicyBudgetConfig } from '@dsh-enhanced/assistant-policy'
 import { AssistantAutomationsService, type AutomationProposalResult } from '@dsh-enhanced/assistant-automations'
@@ -3729,10 +3729,34 @@ describe('real native Delivery Agent runtime', () => {
         { id: 'web-reply', effect: 'allow', subject, actions: ['reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
         { id: 'web-goal', effect: 'allow', subject, actions: ['create', 'observe', 'inspect', 'snapshot'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['external'] } },
         { id: 'web-tool', effect: 'allow', subject, actions: ['execute'], resource: { kind: 'tool', id: 'goal_create' }, context: { initiators: ['external'] } },
+        { id: 'web-owner-change-tool', effect: 'allow', subject, actions: ['execute'], resource: { kind: 'tool', id: 'memory_manage' }, context: { initiators: ['external'] } },
       ], presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
     }, realPersistence(JsonlPersistence, root, new Map()))
     const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
     operator.handoffOwner(webPrincipal)
+    let observedOwnerChange: ReturnType<AssistantDeliveryService['inspectOwnerRequestedChange']>
+    let ownerChangeExecution: ToolExecution | undefined
+    fixture.ctx.tools.register(defineTool({ name: 'memory_manage', description: 'Web owner request source probe',
+      parameters: {}, output: { schema: { type: 'object', additionalProperties: false,
+        properties: { observed: { type: 'boolean', required: true } } },
+      render: (_args, result) => [{ type: 'text', text: JSON.stringify(result) }] },
+      async execute(_args, execution) {
+        ownerChangeExecution = execution
+        observedOwnerChange = fixture.service.inspectOwnerRequestedChange(execution,
+          { sourceId: 'web-owner-memory' })
+        return { observed: observedOwnerChange !== undefined }
+      },
+    }))
+    vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+      fixture.llm.requests.push(options)
+      if (fixture.llm.requests.length > 1) { yield* textStopChunks('Web owner request observed.'); return }
+      const id = ToolCallId('web-owner-memory-native-call')
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 0, id, name: 'memory_manage', argumentsDelta: '{}' }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id,
+        name: 'memory_manage', arguments: '{}' } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+    })
     fixture.ctx.sessionProjections.register(agentPresetProjectionDefinition as never)
     let webFiber: { dispose(): Promise<void> } | undefined
     const eventAbort = new AbortController()
@@ -3831,6 +3855,7 @@ describe('real native Delivery Agent runtime', () => {
       let goalCreated = false
       fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
         if (agent.id !== created.sessionId) return await next()
+        if (goalCreated) return await next()
         const human = fixture.service.currentPreferenceTurn(agent)
         expect(human).toMatchObject({ sessionId: created.sessionId, principalId: 'web/browser/local/owner' })
         humanTurn = human !== undefined
@@ -3850,7 +3875,18 @@ describe('real native Delivery Agent runtime', () => {
       await vi.waitFor(() => expect(goalCreated).toBe(true), { timeout: 5_000 })
       await vi.waitFor(() => expect(operator.getInboxByProviderEvent('web', 'browser', 'native-owner-message')?.status).toBe('processed'), { timeout: 5_000 })
       expect(humanTurn).toBe(true)
-      expect(fixture.llm.requests).toHaveLength(1)
+      expect(observedOwnerChange).toMatchObject({ text: 'Finish the Web owner project',
+        route: { sourceId: 'web-owner-memory', bindingId: binding.id,
+          bindingGeneration: binding.generation }, receiptDigest: /^[a-f0-9]{64}$/u })
+      expect(ownerChangeExecution).toBeDefined()
+      expect(fixture.service.inspectOwnerRequestedChange(ownerChangeExecution!,
+        { sourceId: 'web-owner-memory' })).toBeUndefined()
+      const settledExecution = operator.getInboxByProviderEvent('web', 'browser', 'native-owner-message')!
+      const executionDb = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      try { expect(executionDb.prepare('SELECT status, completed_at FROM delivery_foreground_executions WHERE inbox_id = ?')
+        .get(settledExecution.id)).toMatchObject({ status: 'succeeded', completed_at: expect.any(Number) }) }
+      finally { executionDb.close() }
+      expect(fixture.llm.requests).toHaveLength(2)
       expect(fixture.ctx.agents.get(created.sessionId)).toBeUndefined()
       await vi.waitFor(() => expect(forwarded.map(ownerAddedCount)).toEqual([4, 4]))
       expect([createdAgentEvents, disposedAgentEvents]).toEqual([1, 1])
@@ -4142,10 +4178,45 @@ describe('real native Delivery Agent runtime', () => {
       expect(fixture.llm.requests).toHaveLength(0)
       expect(fixture.ctx.agents.get(handle.agent.id)).toBeUndefined()
       const db = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
-      try { expect(db.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get(handle.agent.id)).toMatchObject({ state: 'released' }) }
+      try {
+        expect(db.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get(handle.agent.id)).toMatchObject({ state: 'released' })
+        const inbox = operator.getInboxByProviderEvent('web', 'browser', 'cancel-me')!
+        expect(db.prepare('SELECT status, completed_at FROM delivery_foreground_executions WHERE inbox_id = ?')
+          .get(inbox.id)).toMatchObject({ status: 'unknown', completed_at: expect.any(Number) })
+      }
       finally { db.close() }
       await fixture.service.tick()
       expect(started).toBe(1)
+    } finally { await fiber.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
+  })
+
+  test('settles the native Web foreground record when the prompt invoke fails before dispatch', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-invoke-failure-')); roots.push(root)
+    const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [{ id: 'web-ingest', effect: 'allow', subject: { kind: 'external', id: 'web/browser/local/owner' },
+        actions: ['ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } }],
+    })
+    const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') }); operator.handoffOwner(webPrincipal)
+    let access: ReturnType<AssistantDeliveryService['bindNativeWebOwner']> | undefined
+    const fiber = fixture.ctx.plugin({ inject: ['assistantDelivery', 'agents', 'sessions'], apply(ctx: Context) {
+      access = ctx.assistantDelivery.bindNativeWebOwner(ctx, { principal: webPrincipal, workspace: root, preset: 'primary' })
+    } })
+    try {
+      await fiber
+      await access!.create({ sessionId: 'native-before-invoke' as SessionId,
+        meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'mock', model: 'delivery-model' } })
+      const content = [{ type: 'text' as const, text: 'Save this request' }]
+      await expect(access!.prompt({ sessionId: 'native-before-invoke', requestId: 'before-invoke-fails',
+        text: content[0]!.text, content }, async () => { throw new Error('invoke failed before dispatch') },
+      new AbortController().signal)).rejects.toThrow('invoke failed before dispatch')
+      const inbox = operator.getInboxByProviderEvent('web', 'browser', 'before-invoke-fails')!
+      expect(inbox.status).toBe('dead_letter')
+      const db = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      try { expect(db.prepare('SELECT status, completed_at FROM delivery_foreground_executions WHERE inbox_id = ?')
+        .get(inbox.id)).toMatchObject({ status: 'unknown', completed_at: expect.any(Number) }) }
+      finally { db.close() }
+      expect(fixture.llm.requests).toHaveLength(0)
     } finally { await fiber.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
   })
 
@@ -11857,5 +11928,52 @@ test('attests ordinary tool calls through real AgentLoop and ToolRuntime in two 
         toolName, argumentsJson: '{}' })).toBeUndefined()
     }
     expect(fixture.sends.filter(intent => intent.idempotencyKey.startsWith('inbound:'))).toHaveLength(2)
+  } finally { await fixture.ctx.fiber.restart() }
+}, 20_000)
+
+test('reads the real Lark owner Inbox in a native memory tool callback without an owner route', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'delivery-owner-change-lark-'))
+  roots.push(root)
+  const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+    presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
+    policyRules: [{ id: 'owner-change-execute', effect: 'allow', subject: {
+      kind: 'agent', id: 'primary', workspace: root, principal: 'lark/bot-1/tenant-a/ou_owner',
+    }, actions: ['execute'], resource: { kind: 'tool', id: 'memory_manage' }, context: { initiators: ['external'] } }],
+  })
+  const ownerText = 'Remember the exact owner preference.'
+  let proof: ReturnType<AssistantDeliveryService['inspectOwnerRequestedChange']>
+  let execution: ToolExecution | undefined
+  fixture.ctx.tools.register(defineTool({ name: 'memory_manage', description: 'Lark owner request source probe',
+    parameters: {}, output: { schema: { type: 'object', additionalProperties: false,
+      properties: { observed: { type: 'boolean', required: true } } },
+    render: (_args, result) => [{ type: 'text', text: JSON.stringify(result) }] },
+    async execute(_args, current) {
+      execution = current
+      proof = fixture.service.inspectOwnerRequestedChange(current, { sourceId: 'lark-owner-memory' })
+      return { observed: proof !== undefined }
+    },
+  }))
+  vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+    fixture.llm.requests.push(options)
+    if (fixture.llm.requests.length > 1) { yield* textStopChunks('Owner request observed.'); return }
+    const id = ToolCallId('lark-owner-memory-native-call')
+    yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+    yield { type: 'tool-call-delta', index: 0, id, name: 'memory_manage', argumentsDelta: '{}' }
+    yield { type: 'block-end', index: 0,
+      block: { type: 'tool-call', id, name: 'memory_manage', arguments: '{}' } }
+    yield { type: 'finish', reason: { kind: 'tool-calls' } }
+  })
+  try {
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const accepted = await fixture.service.acceptInbound(message('lark-owner-change-native', ownerText))
+    await drive(fixture.service)
+    expect(proof).toMatchObject({ text: ownerText, route: { sourceId: 'lark-owner-memory' },
+      receiptDigest: /^[a-f0-9]{64}$/u })
+    expect(fixture.llm.requests).toHaveLength(2)
+    expect(execution).toBeDefined()
+    expect(fixture.service.inspectOwnerRequestedChange(execution!,
+      { sourceId: 'lark-owner-memory' })).toBeUndefined()
+    expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)?.status).toBe('processed')
   } finally { await fixture.ctx.fiber.restart() }
 }, 20_000)

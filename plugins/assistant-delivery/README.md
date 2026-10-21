@@ -35,6 +35,8 @@ Host-only `validateOwnerAgentForRoute(agent, authorityId)` 为有限动态工具
 
 Host-only `inspectOwnerForegroundToolCall({ agent, authorityId, callId, toolName, argumentsJson })` 另核对当前认领的具体 Inbox、尚未结束的原生 turn、pending 前台执行记录及唯一未结算的 `tool/call` 事件。工具名和实际参数须与事件一致；返回内容无关的 task/owner/binding、turn、调用事件与参数摘要，不返回任务正文或参数。同 Session、开放 turn 或 owner 身份本身不足以产生证明；Host 直接调用、PTC 子调用、旧或重复事件保持未归因。此只读接口不迁移数据库，不授予执行权限，也不证明任务成功；消费者须保留后续 canonical 反馈与独立验收边界。
 
+Host-only `inspectOwnerRequestedChange(execution, { sourceId })` 限定当前认证 owner 主 Agent 的未结 `memory_manage` 或 `wiki_upsert` 原生调用。它复核已认领的原 Inbox、当前 turn、实际工具名与参数（最多 64 KiB）、owner lineage 和 binding 代次，返回 `prepareAgentApproval` 的精确 route、Inbox 原始正文及只含身份与摘要的 SHA256 receipt。空正文、附件单独输入、PTC、历史或已结算调用均无证明。正文可能包含引用文字；哪些内容构成 owner 指令仍须由 Policy 隔离审查。原生 Web 输入在派发时登记同一前台执行记录并在 drain 时结算，失败或取消不留待结记录。该只读接口不要求 RSI `ownerRoutes` 配置、不注册 Agent 工具，也不授权写入。
+
 ## 配置
 
 | 字段 | 默认值 | 含义 |

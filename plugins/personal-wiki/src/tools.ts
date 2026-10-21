@@ -133,9 +133,9 @@ export function registerWikiTools(
     },
   }))
 
-  ctx.tools.register(defineTool({
+  const upsert = defineTool({
     name: 'wiki_upsert',
-    description: 'Propose one complete wiki page create or revision-CAS update. The tool never commits without owner approval.',
+    description: 'Create or revise one complete wiki page with revision CAS. An explicit current owner request may commit after independent review; otherwise this remains an approval proposal. If the owner asks to wait for approval, wait.',
     parameters: {
       operation: { type: 'string', required: true, enum: ['create', 'update'] },
       idempotency_key: { type: 'string', required: true },
@@ -165,6 +165,20 @@ export function registerWikiTools(
           proposalId: { type: 'string', required: true }, status: { type: 'string', required: true },
           version: { type: 'integer', required: true }, expiresAt: { type: 'integer', required: true },
           summary: { type: 'string', required: true }, diff: { type: 'string', required: true },
+          page: { type: 'object', additionalProperties: false, properties: {
+            metadata: { type: 'object', additionalProperties: false, properties: {
+              id: { type: 'string', required: true }, title: { type: 'string', required: true },
+              type: { type: 'string', required: true }, authority: { type: 'string', required: true },
+              status: { type: 'string', required: true }, tags: { type: 'array', required: true, items: { type: 'string' } },
+              aliases: { type: 'array', required: true, items: { type: 'string' } },
+              sources: { type: 'array', required: true, items: { type: 'object', additionalProperties: false,
+                properties: { uri: { type: 'string', required: true }, sha256: { type: 'string', required: true } } } },
+              derivedFrom: { type: 'array', items: { type: 'string' } },
+              created: { type: 'string', required: true }, updated: { type: 'string', required: true },
+            } },
+            body: { type: 'string', required: true }, relativePath: { type: 'string', required: true },
+            revision: { type: 'string', required: true },
+          } },
         },
       },
       render: (_args, value) => [{ type: 'text', text: renderUntrustedJson('wiki_proposal_results', value) }],
@@ -183,7 +197,7 @@ export function registerWikiTools(
         }
         mutation = { op: 'update', pageId: args.page_id, expectedRevision: args.expected_revision, input }
       }
-      const proposal = service.propose(exec.agent, {
+      const proposal = await service.proposeFromTool(exec, {
         idempotencyKey: args.idempotency_key,
         mutation,
       })
@@ -194,9 +208,19 @@ export function registerWikiTools(
         expiresAt: proposal.expiresAt,
         summary: proposal.summary,
         diff: proposal.diff,
+        ...(proposal.page === undefined ? {} : { page: proposal.page }),
       }
     },
-  }))
+  })
+  ctx.tools.register(upsert)
+  const policy = ctx.get('assistantPolicy') as { registerPreauthorizedTool?: (
+    caller: Context, definition: typeof upsert, authorize: (exec: Parameters<PersonalWikiService['hasCurrentOwnerToolProof']>[0]) => boolean,
+  ) => void } | undefined
+  try { policy?.registerPreauthorizedTool?.(ctx, upsert, exec => service.hasCurrentOwnerToolProof(exec)) }
+  catch (error) {
+    if (!(error instanceof Error) || !error.message.startsWith('assistant-policy: preauthorization is reserved for ')) throw error
+    // An older Policy release does not have the exact wiki tool allowlist.
+  }
 
   ctx.tools.register(defineTool({
     name: 'wiki_lint',

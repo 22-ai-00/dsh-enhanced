@@ -500,7 +500,12 @@ export class WikiProposalManager {
     }
     const policyProposal = recovery.proposal
     const attached = this.store.attachPolicy(id, policyProposal.proposalId, policyProposal.expiresAt)
-    return result(attached, saved.replayed || policyProposal.replayed)
+    if (attached.status !== 'pending') return this.getProposal(id)!
+    if (policyProposal.status === 'pending') return result(attached, saved.replayed || policyProposal.replayed)
+    const snapshot = this.policy.getProposal(policyProposal.proposalId)
+    return snapshot === undefined
+      ? this.settleSecurityConflict(attached, saved.replayed || policyProposal.replayed)
+      : this.settleSnapshot(attached, snapshot, attached.version, saved.replayed || policyProposal.replayed)
   }
 
   decide(input: WikiProposalDecisionInput): WikiProposalResult {

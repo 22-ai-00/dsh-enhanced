@@ -1084,6 +1084,61 @@ export class PolicyLedger {
     })
   }
 
+  /** Create and decide a fresh, exact owner-request proposal in one write transaction. */
+  recoverOrCreateOwnerRequestedProposal(
+    input: ApprovalProposalRecoveryInput,
+    reason: string,
+    assertCurrent: () => void,
+  ): ApprovalProposalRecoveryResult {
+    const diffHash = this.#validateProposalContent(input)
+    requireBoundedText(reason, 'reason', textLimits.reason)
+    if (!Number.isSafeInteger(input.notAfter) || input.notAfter < 0) {
+      throw new PolicyLedgerError('invalid-input', 'proposal notAfter must be a non-negative safe integer')
+    }
+    const intentHash = approvalRecoveryIntentHash(input)
+    return this.#transaction(() => {
+      assertCurrent()
+      const existing = this.#proposalByIdempotencyKey(input.idempotencyKey)
+      if (existing !== undefined) {
+        this.#assertExistingProposalMatches(existing, input, diffHash, existing.expires_at === input.notAfter)
+        return Object.freeze({ kind: 'proposal' as const, proposal: this.#proposalResult(existing, true) })
+      }
+      const tombstone = this.#database.prepare(`
+        SELECT idempotency_key, not_after, abandoned_at, intent_hash
+        FROM approval_idempotency_tombstones WHERE idempotency_key = ?
+      `).get(input.idempotencyKey) as {
+        idempotency_key: string; not_after: number; abandoned_at: number; intent_hash: string
+      } | undefined
+      if (tombstone !== undefined) {
+        if (tombstone.intent_hash === legacyApprovalIntentHash || tombstone.intent_hash !== intentHash) {
+          throw new PolicyLedgerError('idempotency-conflict', 'idempotency key was abandoned for another or unverifiable proposal intent')
+        }
+        return Object.freeze({ kind: 'abandoned' as const, idempotencyKey: tombstone.idempotency_key,
+          notAfter: tombstone.not_after, abandonedAt: tombstone.abandoned_at, replayed: true })
+      }
+      const now = this.#now()
+      if (now >= input.notAfter) {
+        this.#database.prepare(`
+          INSERT INTO approval_idempotency_tombstones(idempotency_key, not_after, abandoned_at, intent_hash)
+          VALUES (?, ?, ?, ?)
+        `).run(input.idempotencyKey, input.notAfter, now, intentHash)
+        return Object.freeze({ kind: 'abandoned' as const, idempotencyKey: input.idempotencyKey,
+          notAfter: input.notAfter, abandonedAt: now, replayed: false })
+      }
+      assertCurrent()
+      const inserted = this.#insertProposal(input, diffHash, now, input.notAfter)
+      this.#database.prepare(`
+        UPDATE approval_proposals
+        SET status = 'approved', decided_at = ?, decided_by = ?, decision_reason = ?,
+            diff_text = NULL, version = version + 1
+        WHERE id = ? AND status = 'pending' AND version = 1
+      `).run(now, input.principal, reason, inserted.proposalId)
+      return Object.freeze({ kind: 'proposal' as const, proposal: Object.freeze({
+        ...inserted, status: 'approved' as const, version: 2,
+      }) })
+    })
+  }
+
   decideProposal(input: ApprovalDecisionInput): ApprovalProposalResult {
     requireBoundedText(input.proposalId, 'proposalId', textLimits.id)
     requireBoundedText(input.principal, 'principal', textLimits.id)

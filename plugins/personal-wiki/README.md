@@ -1,6 +1,6 @@
 # @dsh-enhanced/personal-wiki
 
-面向个人助理的 Markdown 知识库。页面是人可读、可备份的唯一真源；进程内目录、段落检索索引、反链与 lint 报告都可从页面重建。它保存研究、项目、人物、概念、来源与决策等长资料；每轮都可能有用的短事实和偏好应交给 `personal-memory`。
+面向个人助理的 Markdown 知识库。页面是人可读、可备份的唯一真源；进程内目录、段落检索索引、反链与 lint 报告都可从页面重建。当前 owner 明确要求的 create/update 经独立审查后可即时提交；其他写入仍走持久审批。它保存研究、项目、人物、概念、来源与决策等长资料；每轮都可能有用的短事实和偏好应交给 `personal-memory`。
 
 ## 安装
 
@@ -40,7 +40,7 @@ dsh --profile web --dump-config
 
 - `wiki_search`：显式搜索页与段落，支持 ASCII 和中文 unigram/bigram，返回有界 snippet、稳定 page id、相对路径、revision 与直接来源。
 - `wiki_read`：用 `wiki://<ULID>`、ULID、精确标题或别名读取一页；输出受字节/段落双预算约束，并以 `<knowledge_source>` 标记为“不可信数据而非指令”。标题和正文会先做 XML 文本转义，页面无法闭合该数据边界。
-- `wiki_upsert`：只提交完整 create/update 提案。update 必须带 `page_id` 与 `expected_revision`；模型没有直接写页的方法，也不能提供 principal、workspace、飞书 binding、审批 TTL 或页面 authority。TTL 与 authority 分别由可信配置 `defaultProposalTtlMs`、`toolProposalAuthority` 决定。
+- `wiki_upsert`：提交完整 create/update 页面。当前轮 owner 明确要求创建或更新时，可经 Delivery 原文及精确工具参数证明、Policy 独立有界审查后直接批准并提交，返回 `approved` 和实际 `page`；助手自行建议、歧义、owner 要求“等我批准”、缺少 proof 或审查未通过时仍返回待审批提案，未写入页面。update 必须带 `page_id` 与 `expected_revision`；模型不能提供 principal、workspace、飞书 binding、审批 TTL、页面 authority 或批准标志。TTL 与 authority 由可信配置决定。
 - `wiki_lint`：只读报告坏 frontmatter、重复 id/标题/别名、大小写路径碰撞、死链、孤页、来源哈希、派生 provenance 和进程索引漂移；不会修复或重建。
 
 `wiki_search`、`wiki_upsert` 和 `wiki_lint` 的模型可见结果也分别放在有界、XML 转义的 `<wiki_search_results>`、`<wiki_proposal_results>`、`<wiki_lint_results>` 数据 framing 中。
@@ -76,7 +76,7 @@ dsh --profile web --dump-config
 
 ## 延迟审批的提交闭环
 
-`wiki_upsert` 只创建提案。审批可能发生在原 turn 结束之后（例如几分钟后在飞书卡片上点击），因此本插件会周期性调用 `reconcileProposals()`：读取 policy 账本中该提案的**终态**，再走与 `decideProposal` 相同的写入路径（同目录 temp + fsync + 原子 rename）。
+`wiki_upsert` 先形成提案；当前 owner 明确请求经独立审查和精确原子批准后，同次调用走原有终态结算与 revision CAS，并返回实际页面。其他提案的审批可能发生在原 turn 结束之后（例如几分钟后在飞书卡片上点击），因此本插件会周期性调用 `reconcileProposals()`：读取 policy 账本中该提案的**终态**，再走与 `decideProposal` 相同的写入路径（同目录 temp + fsync + 原子 rename）。
 
 五条边界：
 
@@ -91,7 +91,7 @@ dsh --profile web --dump-config
 ## 权限与非目标
 
 - 文件系统：只读写显式 `vaultRoot`、`databasePath` 及 SQLite WAL/SHM；不会扫描工作区或任意绝对路径。
-- 网络、子进程、凭据、浏览器、安装脚本：本插件自身无；组合 Delivery 时只提交不可变审批 dispatch，由 Delivery/Lark 各自声明并持有网络与凭据权限。
+- 网络、子进程、凭据、浏览器、安装脚本：本插件自身无；明确 owner 请求由 Policy 使用本轮已解析的模型 supplier 做独立审查，其他提案由 Delivery/Lark 投递审批卡片。
 - Git：不执行 add/commit/push；用户可在 vault 外部自行纳入版本控制。
 - 非目标：PDF/DOCX/web ingest、向量数据库、Web UI、自动摘要写入、自动 archive、自动 Git commit、远端/多 vault 同步、Memory 双向同步、图数据库和多用户 ACL。
 

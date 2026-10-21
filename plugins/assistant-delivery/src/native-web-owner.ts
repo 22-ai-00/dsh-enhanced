@@ -32,6 +32,8 @@ interface OwnerPort {
   leaseMs: number
   prepare(binding: ConversationBinding, envelope: InboundEnvelope): AcceptanceHandle | undefined
   complete(handle: AcceptanceHandle, input: { status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; quiescent: boolean }): Promise<void>
+  beginExecution(binding: ConversationBinding, envelope: InboundEnvelope): string | undefined
+  completeExecution(inboxId: string, input: { status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; quiescent: boolean }): void
   claimed(agent: Agent, envelope: InboundEnvelope, turn: number): void
   released(): void
   notifications(binding: ConversationBinding): ReadonlyArray<{ id: string; text: string; createdAt: number }>
@@ -46,6 +48,7 @@ interface Execution {
     fencingToken: number
     envelope: InboundEnvelope
     acceptance?: AcceptanceHandle
+    executionInboxId?: string
     permit: { inserted(): boolean; dispose(): void }
     turn?: number
     completed?: boolean
@@ -234,6 +237,8 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
           this.port.claimed(entry.handle.agent, envelope, turn)
         } })
       entry.input = { ...claim, envelope, ...(acceptance === undefined ? {} : { acceptance }), permit, admitting: true }
+      const executionInboxId = this.port.beginExecution(binding, envelope)
+      if (executionInboxId !== undefined) entry.input.executionInboxId = executionInboxId
       this.store.markInboxDispatching({ ...claim, binding })
       entry.lease.assert()
       const result = await invoke()
@@ -274,6 +279,7 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
     entry.input?.permit.dispose()
     if (entry.input !== undefined) {
       const status = !quiescent ? 'unknown' : succeeded ? 'succeeded' : entry.input.completed === false ? 'failed' : 'cancelled'
+      if (entry.input.executionInboxId !== undefined) this.port.completeExecution(entry.input.executionInboxId, { status, quiescent })
       if (entry.input.acceptance !== undefined) await this.port.complete(entry.input.acceptance, { status, quiescent })
       this.store.finishInbox({ inboxId: entry.input.inboxId, ownerId: this.#ownerId, fencingToken: entry.input.fencingToken,
         outcome: succeeded && quiescent ? 'processed' : 'dead_letter',

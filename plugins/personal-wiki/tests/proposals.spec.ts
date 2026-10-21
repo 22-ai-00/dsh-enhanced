@@ -77,6 +77,38 @@ const v2Dispatch: ApprovalDispatchRouteV2 = {
 }
 
 describe('approval-gated wiki proposals', () => {
+  test('settles a freshly owner-approved Policy proposal before returning the real page', async () => {
+    const fixture = await harness(() => Date.now())
+    fixture.ctx.provide('llm' as never, { async * stream() {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: '{"decision":"execute"}' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '{"decision":"execute"}' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } } as never)
+    // This manager uses the same Policy ledger and vault as the plugin service.
+    const input = { ...proposalInput(), idempotencyKey: 'wiki:owner-request', dispatch: v2Dispatch,
+      principal: v2Dispatch.principal }
+    const agent = { session: { header: { cwd: '/work/alpha', agentPreset: 'primary' },
+      requestHeader: () => ({ config: { provider: 'p', model: 'm' } }), snapshotEvents: () => [] } }
+    const execution = { agent, signal: new AbortController().signal, name: 'wiki_upsert',
+      callId: 'wiki-owner-call', arguments: { operation: 'create', title: input.mutation.input.title } }
+    const context = { route: v2Dispatch, text: 'Create this wiki page now', receiptDigest: 'a'.repeat(64) }
+    const policy = fixture.policy
+    const manager = new WikiProposalManager(fixture.vault, fixture.store, policy, () => Date.now())
+    const approved = await policy.runOwnerRequestedChange({
+      execution: execution as never, resourceKind: 'wiki', operation: 'create',
+      policyIdempotencyKey: `personal-wiki:${input.idempotencyKey}`,
+      resolveOwnerRequest: () => context,
+    }, () => manager.propose(input))
+    expect(approved).toMatchObject({ status: 'approved', version: 2,
+      page: { metadata: { title: 'Personal assistant' } } })
+    expect(fixture.vault.read({ ref: approved.page!.metadata.id, maxBytes: 1000, maxParagraphs: 10 }).text)
+      .toContain('A reviewed knowledge page.')
+    expect(manager.propose(input)).toMatchObject({ status: 'approved', page: { metadata: { id: approved.page!.metadata.id } } })
+    fixture.store.close()
+    await fixture.ctx.fiber.restart()
+  })
+
   test('round-trips the complete v2 dispatch through SQLite and Policy', async () => {
     const fixture = await harness()
     const recover = vi.spyOn(fixture.policy, 'recoverOrCreateProposal')

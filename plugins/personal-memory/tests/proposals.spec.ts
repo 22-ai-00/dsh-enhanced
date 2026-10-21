@@ -76,6 +76,43 @@ function proposalInput(content = 'Remember this stable fact') {
 }
 
 describe('approval-gated memory proposals', () => {
+  test('returns the actual record when fresh owner review atomically approves Policy', async () => {
+    const fixture = await harness(() => Date.now())
+    fixture.ctx.provide('llm' as never, { async * stream() {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: '{"decision":"execute"}' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '{"decision":"execute"}' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } } as never)
+    const route = {
+      routeVersion: 2 as const, sourceId: 'dsh-enhanced-personal-memory',
+      bindingId: 'binding-owner-dm', workspace: '/work/alpha',
+      principal: 'owner:lark:123', bindingVersion: 1, bindingGeneration: 1,
+      principalRecordId: 'principal-row-proposals', principalVersion: 1,
+    }
+    const deliveryNamespace: MemoryOwnerNamespace = { mode: 'delivery',
+      principalDigest: memoryPrincipalDigest(route.principal),
+      principalRecordId: route.principalRecordId, principalVersion: route.principalVersion }
+    const input = { ...proposalInput('My name is Rui'), idempotencyKey: 'memory:owner-request',
+      namespace: deliveryNamespace, dispatch: route }
+    const agent = { session: { header: { cwd: '/work/alpha', agentPreset: 'primary' },
+      requestHeader: () => ({ config: { provider: 'p', model: 'm' } }), snapshotEvents: () => [] } }
+    const execution = { agent, signal: new AbortController().signal, name: 'memory_manage',
+      callId: 'memory-owner-call', arguments: { operation: 'add', content: input.mutation.entry.content } }
+    const context = { route, text: 'Remember my name is Rui', receiptDigest: 'b'.repeat(64) }
+    const approved = await fixture.policy.runOwnerRequestedChange({
+      execution: execution as never, resourceKind: 'memory', operation: 'add',
+      policyIdempotencyKey: `personal-memory:${input.idempotencyKey}`,
+      resolveOwnerRequest: () => context,
+    }, () => fixture.manager.propose(input))
+    expect(approved).toMatchObject({ status: 'approved', version: 2,
+      record: { content: 'My name is Rui' } })
+    expect(fixture.manager.propose(input)).toMatchObject({ status: 'approved', replayed: true })
+    expect(fixture.memory.get(deliveryNamespace, identity, approved.record!.id)?.content).toBe('My name is Rui')
+    fixture.memory.close()
+    await fixture.ctx.fiber.restart()
+  })
+
   test('schema v4 migration preserves pending approvals and legacy mutation receipts exactly', async () => {
     const f = await harness()
     const input = proposalInput()
