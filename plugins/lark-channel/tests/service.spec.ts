@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { stripVTControlCharacters } from 'node:util'
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, test, vi } from 'vitest'
 import { signLarkApprovalAction } from '../src/approval.ts'
@@ -205,12 +206,12 @@ describe('Lark Cordis service', () => {
     }
     const child = spawnSync(process.execPath, ['../../node_modules/vitest/vitest.mjs', 'run', 'tests/service.spec.ts',
       '-t', 'leaves a genuine startup failure loud without a ready consumer'], {
-      cwd: process.cwd(), env: { ...process.env, LARK_STARTUP_FAILURE_CHILD: '1' },
+      cwd: process.cwd(), env: { ...process.env, FORCE_COLOR: '1', LARK_STARTUP_FAILURE_CHILD: '1' },
       encoding: 'utf8', timeout: 15_000,
     })
     expect(child.error).toBeUndefined()
     expect(child.status).toBe(1)
-    const output = child.stdout + child.stderr
+    const output = stripVTControlCharacters(child.stdout + child.stderr)
     expect(output).toMatch(/Tests\s+1 passed/u)
     expect(output).toContain('Unhandled Rejection')
     expect(output).toContain('credential lease revoked before registration')
@@ -255,12 +256,12 @@ describe('Lark Cordis service', () => {
     }
     const child = spawnSync(process.execPath, ['../../node_modules/vitest/vitest.mjs', 'run', 'tests/service.spec.ts',
       '-t', 'does not hide a credential failure that precedes Cordis teardown'], {
-      cwd: process.cwd(), env: { ...process.env, LARK_STARTUP_FAILURE_CHILD: '2' },
+      cwd: process.cwd(), env: { ...process.env, FORCE_COLOR: '1', LARK_STARTUP_FAILURE_CHILD: '2' },
       encoding: 'utf8', timeout: 15_000,
     })
     expect(child.error).toBeUndefined()
     expect(child.status).toBe(1)
-    const output = child.stdout + child.stderr
+    const output = stripVTControlCharacters(child.stdout + child.stderr)
     expect(output).toMatch(/Tests\s+1 passed/u)
     expect(output).toContain('Unhandled Rejection')
     expect(output).toContain('credential lease failed before teardown')
