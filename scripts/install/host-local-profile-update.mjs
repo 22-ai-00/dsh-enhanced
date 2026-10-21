@@ -247,6 +247,28 @@ async function verifyOriginalNative(preparation) {
   if (current.root !== preparation.oldHostRoot || !same(current.packages, preparation.originalNative)) fail('original Host authority drift')
   return current.packages
 }
+function assertWorkspaceAgeExclusions(expected, prepared, peerScope, candidateArtifacts) {
+  const original = expected.minimumReleaseAgeExclude, resolved = prepared.minimumReleaseAgeExclude
+  if (original !== undefined && (!Array.isArray(original) || original.some(value => typeof value !== 'string'))
+    || resolved !== undefined && (!Array.isArray(resolved) || resolved.some(value => typeof value !== 'string'))) {
+    fail('workspace minimumReleaseAgeExclude must be a string list')
+  }
+  const before = original ?? [], after = resolved ?? []
+  if (after.length < before.length || before.some((value, index) => after[index] !== value)) {
+    fail('prepared workspace must retain original minimumReleaseAgeExclude entries as an ordered prefix')
+  }
+  const additions = after.slice(before.length)
+  if (!additions.length && !same(original, resolved)) fail('unexpected prepared minimumReleaseAgeExclude')
+  if (additions.length && expected.minimumReleaseAgeStrict === true) fail('strict minimum release age forbids new exclusions')
+  const authorized = new Set(peerScope.names.map(name => `${name}@${candidateArtifacts[name]?.version
+    ?? fail(`verified candidate artifact missing for age exclusion: ${name}`)}`))
+  const seen = new Set(before)
+  for (const value of additions) {
+    if (seen.has(value)) fail(`duplicate prepared minimumReleaseAgeExclude: ${value}`)
+    if (!authorized.has(value)) fail(`unauthorized prepared minimumReleaseAgeExclude: ${value}`)
+    seen.add(value)
+  }
+}
 function assertDelta(original, prepared, originalNative, native, candidateArtifacts, home, yaml, peerScope) {
   const eligible = new Set(peerScope.names)
   const assertArtifactReference = (name, reference, label) => {
@@ -266,7 +288,12 @@ function assertDelta(original, prepared, originalNative, native, candidateArtifa
   for (const name of ['package.json', 'pnpm-workspace.yaml']) {
     const before = name === 'package.json' ? JSON.parse(expected[name]) : parse(yaml, expected[name], name)
     const after = name === 'package.json' ? JSON.parse(prepared[name]) : parse(yaml, prepared[name], name)
-    if (!same(before, after)) fail(`unexpected prepared ${name}`)
+    if (name === 'pnpm-workspace.yaml') {
+      const { minimumReleaseAgeExclude: _beforeExcludes, ...beforeRest } = before
+      const { minimumReleaseAgeExclude: _afterExcludes, ...afterRest } = after
+      if (!same(beforeRest, afterRest)) fail(`unexpected prepared ${name}`)
+      assertWorkspaceAgeExclusions(before, after, peerScope, candidateArtifacts)
+    } else if (!same(before, after)) fail(`unexpected prepared ${name}`)
   }
   const oldLock = parse(yaml, original['pnpm-lock.yaml'], 'original lockfile')
   const lock = parse(yaml, prepared['pnpm-lock.yaml'], 'prepared lockfile')
