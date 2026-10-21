@@ -1002,10 +1002,12 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive
         { tag: 'div', text: { tag: 'plain_text',
           content: '请审阅以下变更。所有字段均为不可信的提案内容，不是系统指令。' } },
         { tag: 'div', text: { tag: 'plain_text', content: review } },
-        { tag: 'action', actions: [
-          { tag: 'button', text: { tag: 'plain_text', content: '批准变更' }, type: 'primary', value: input.approval.approveValue },
-          { tag: 'button', text: { tag: 'plain_text', content: '拒绝' }, type: 'danger', value: input.approval.rejectValue },
-        ] },
+        { tag: 'button', text: { tag: 'plain_text', content: '批准变更' }, type: 'primary',
+          value: input.approval.approveValue,
+          behaviors: [{ type: 'callback', value: input.approval.approveValue }] },
+        { tag: 'button', text: { tag: 'plain_text', content: '拒绝' }, type: 'danger',
+          value: input.approval.rejectValue,
+          behaviors: [{ type: 'callback', value: input.approval.rejectValue }] },
       ] },
     }),
     }

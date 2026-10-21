@@ -1,5 +1,5 @@
 import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, symbols } from '@deepseek-ai/cordis'
 import { type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
@@ -335,6 +335,44 @@ function completionEvent(
 }
 
 describe('preference learning service', () => {
+  test('registers tools once per Cordis runtime generation and releases them on replacement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'preference-tool-registration-')); roots.push(root)
+    const ctx = new Context(); contexts.push(ctx)
+    await ctx.plugin(SystemPrompt)
+    let toolsFiber = await ctx.plugin(ToolRuntime)
+    await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [] })
+    const tools = Reflect.get(ctx.tools, symbols.original) as ToolRuntime
+    const registerTools = vi.spyOn(tools, 'register')
+    const preferenceFiber = await ctx.plugin(PreferenceLearningService, {
+      databasePath: join(root, 'preferences.sqlite'), autonomousT1Enabled: false,
+    })
+    expect(registerTools).toHaveBeenCalledTimes(3)
+    expect(ctx.tools.schemas().filter(schema => schema.name.startsWith('preference_'))).toHaveLength(3)
+
+    await toolsFiber.dispose()
+    expect(tools.schemas().filter(schema => schema.name.startsWith('preference_'))).toHaveLength(0)
+    toolsFiber = await ctx.plugin(ToolRuntime)
+    expect(ctx.tools.schemas().filter(schema => schema.name.startsWith('preference_'))).toHaveLength(3)
+
+    await preferenceFiber.dispose()
+    expect(ctx.tools.schemas().filter(schema => schema.name.startsWith('preference_'))).toHaveLength(0)
+  })
+
+  test('binds Tools when they appear after Preference starts', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'preference-late-tools-')); roots.push(root)
+    const ctx = new Context(); contexts.push(ctx)
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [] })
+    const preferenceFiber = await ctx.plugin(PreferenceLearningService, {
+      databasePath: join(root, 'preferences.sqlite'), autonomousT1Enabled: false,
+    })
+    expect(ctx.get('tools')).toBeUndefined()
+    await ctx.plugin(ToolRuntime)
+    expect(ctx.tools.schemas().filter(schema => schema.name.startsWith('preference_'))).toHaveLength(3)
+    await preferenceFiber.dispose()
+    expect(ctx.tools.schemas().filter(schema => schema.name.startsWith('preference_'))).toHaveLength(0)
+  })
+
   test('compensates confirmed Memory after lost ACK, then reconciles cancellation before result', async () => {
     let clock = Date.now() + 1_000
     const fixture = await harness({ now: () => clock })

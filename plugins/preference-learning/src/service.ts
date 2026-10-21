@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Context, Service, symbols } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import Schema from '@deepseek-ai/schemastery'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
@@ -110,6 +110,17 @@ export class PreferenceLearningError extends Error {
 
 function decisionError(decision: PolicyDecision): PreferenceLearningError {
   return new PreferenceLearningError('policy-denied', `preference access denied: ${decision.reasonCode}`)
+}
+
+function serviceIdentity(value: object): object {
+  try {
+    const original = Reflect.get(value, symbols.original) as unknown
+    return (typeof original === 'object' && original !== null) || typeof original === 'function'
+      ? original as object
+      : value
+  } catch {
+    return value
+  }
 }
 
 /** Fixed Policy subject used by the non-model supervised-growth runbook. */
@@ -305,15 +316,27 @@ export class PreferenceLearningService extends Service {
       return this.bindDeliveryProducer(delivery)
     })
 
-    const registeredTools = ctx.get('tools') as ToolRuntime | undefined
-    const disposeCurrentTools = registeredTools === undefined
-      ? undefined
-      : registerPreferenceTools(registeredTools, this)
-    ctx.inject(['tools'], toolsCtx => {
-      const tools = toolsCtx.tools
-      if (tools === registeredTools) return
-      return registerPreferenceTools(tools, this)
-    })
+    // A Context lookup returns a fresh traceable proxy each time. Transfer an
+    // already-present registration to the injected Fiber for provider teardown.
+    let toolsBinding: { identity: object, dispose: () => void } | undefined
+    const bindTools = (tools: ToolRuntime) => {
+      const identity = serviceIdentity(tools)
+      if (toolsBinding?.identity === identity) return toolsBinding.dispose
+      toolsBinding?.dispose()
+      const unregister = registerPreferenceTools(tools, this)
+      let disposed = false
+      const binding = { identity, dispose: () => {
+        if (disposed) return
+        disposed = true
+        if (toolsBinding === binding) toolsBinding = undefined
+        unregister()
+      } }
+      toolsBinding = binding
+      return binding.dispose
+    }
+    const currentTools = ctx.get('tools') as ToolRuntime | undefined
+    if (currentTools !== undefined) bindTools(currentTools)
+    ctx.inject(['tools'], toolsCtx => bindTools(toolsCtx.tools))
     this.store.maintain(this.config.maintenanceBatchSize)
     if (this.config.enabled && this.config.autonomousT1Enabled) {
       this.store.activateReadyScopes(this.config.maintenanceBatchSize)
@@ -339,7 +362,7 @@ export class PreferenceLearningService extends Service {
       this.deliveryBinding = undefined
       this.memoryPromotionBinding?.dispose()
       this.memoryPromotionBinding = undefined
-      disposeCurrentTools?.()
+      toolsBinding?.dispose()
       this.store.close()
     }, 'preference-learning.database')
   }
