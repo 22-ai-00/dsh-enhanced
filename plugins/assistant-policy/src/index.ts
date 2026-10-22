@@ -39,6 +39,8 @@ export type {
   ApprovalProposalRecoveryInput,
   ApprovalProposalRecoveryResult,
   ApprovalProposalResult,
+  ApprovalProposalRouteState,
+  ApprovalProposalRouteStates,
   ApprovalProposalStatus,
   AuditEvent,
   BudgetReservationResult,

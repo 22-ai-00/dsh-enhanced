@@ -265,7 +265,7 @@ export function registerMemoryTools(ctx: Context, service: PersonalMemoryService
 
   const manage = defineTool({
     name: 'memory_manage',
-    description: 'Manage durable memory. An explicit current owner request to add or replace an ordinary private fact, name, or preference may be independently reviewed and committed immediately; other changes remain approval proposals. If the owner asks to wait for approval, do not claim a write before approval.',
+    description: 'Manage durable memory. For a current request to remember or change a fact, name, or preference, check current memory and call this tool if the requested record is missing or different. An explicit owner add/replace request may commit after independent review; other changes remain approval proposals. Report a new write only when this tool returns approved with a record; earlier assistant claims or Policy approval alone do not prove storage. Rejected or expired proposals are not saved memories. A new owner message explicitly requesting the change again after rejection or expiry needs a new idempotency key; tool retries for the same request retain its key. If the owner asks to wait for approval, wait.',
     parameters: {
       operation: { type: 'string', required: true, enum: ['add', 'replace', 'remove'] },
       owner: { type: 'string', required: true, enum: ['agent', 'user'] },

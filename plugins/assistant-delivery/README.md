@@ -334,6 +334,8 @@ Profile 还必须为当前 owner principal 添加精确授权，例如：`subjec
 
 延迟审批由 domain 先通过 `prepareAgentApproval()` 从当前 Agent 的 active owner binding 派生不可伪造的 source/binding/workspace/principal route，再把该 route 随 Policy proposal 持久化；background Agent 可由可信 runner 使用 `bindAgentApprovalRoute()` 临时绑定 automation definition 中的 immutable `deliveryBindingId`，该绑定不会注册为模型工具。Delivery 在同一 owner 事务内从 active binding 派生 canonical external `principalId`，并把它固定到私有 workflow template content/digest；Host resolver 在返回 prompt 前会再次核对 exact binding version/generation 与 principal。该 principal 不进入 Growth trace 或 Growth 数据库。Delivery tick 会在发送前领取 Policy dispatch，以 `approval-card:<proposalId>` / `approval:<proposalId>` 写入同一 Outbox，再用 CAS 标记已入队；若进程在两步之间退出，重放仍命中同一 intent。schema v6 另以带版本 fence 的持久 `(createdAt, proposalId)` 高水位分页扫描 pending dispatch：无效 route 不会被伪标为已入队，但也不能用一个 poison page 永久饿死后续审批；扫描到尾后回绕重试这些条目，Host 重启与并发 scanner 都不会倒退覆盖新游标。
 
+原生 owner Agent 每步 prompt 的只读审批状态由 Delivery 按当前直连 active owner binding、workspace、preset 和 Policy `history` 权限重新读取；只查询 personal-memory 与 personal-wiki 两个精确 v2 route，每源最多五条。首次发现真实提案后才挂载 Agent-scoped context，普通无提案会话保持原有 prompt 装配。context 只含经过领域资源格式筛选的提案 ID、资源 ID、动作、状态、版本、时间与截断标志；不包含审批正文、摘要或 diff。owner、binding 或服务权限失效时旧状态不再输出，读取失败显示不可用。状态不是操作授权：拒绝或过期的旧卡不能继续索批；新 owner 消息再次明确请求时才可通过正常工具发起新请求。Policy 批准也不证明领域写入完成，需核实工具的 record/page 结果或当前读取；此状态不会自动重放、发送或写 Memory/Wiki。
+
 Policy 的 `approved` 只表示 owner 决定，不表示领域变更已经应用。schema v10 的 Host-only
 presentation publisher 由 Delivery 只向当前 Evolution 或 Automations 实例签发、可撤销的进程内 capability；它不是
 公开 service API，也不能由普通调用方伪造。该 capability 接收领域结算或 Automation incident 生成的单调版本 typed
