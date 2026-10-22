@@ -2,24 +2,26 @@
 
 更新：2026-10-22。本页是唯一进展入口；验收见[合同](rsi-acceptance.md)，发行见[发布协议](releasing.md)，历史实施与证据查 Git。
 
-## 当前交付
+## 当前边界
 
-- `0.1.61` 已公开发布。修复 Responses 审查中将正常续接元数据误判为拒绝的问题；仍要求唯一且末尾的正常完成事件，拒绝工具调用、截断和畸形结果，并记录不含正文的回退原因。
-- 本次代码支持认证主人明确要求时直接执行普通称呼、私有记忆新增/替换、本地 Wiki 创建/更新。助手自行提议、含糊要求、删除、敏感内容或明确“等我批准”继续审批；原授权、预算、版本冲突和幂等检查保留。此前已拒绝的提案不重放。
-- 远程 Linux 为 `0.1.61`、Host 为 `0.2.1-rc.2`；真实 owner 免审批写入尚未通过。新消息未调用记忆工具，助手将已拒绝旧提案误称为待审批。开发分支已补当前 owner 绑定下的只读动态状态，拒绝/过期不再作为待审批依据，工具说明要求核实实际写入结果；待完整检查、发布升级及新消息验收。旧拒绝提案不重放。
+- 公开发布 `0.1.62`（tag `v0.1.62`，CI 自动 record）：修复原生对话中 owner 审批状态不刷新。
+- dev 已实现、待 owner 授权发布的能力（计划 `0.1.63`）：修复 pnpm 11.7.0 下 npm 安装在 `dsh plugin add` 阶段的双链缺陷——
+  1. add 前向 profile `pnpm-workspace.yaml` 写入经评审决策表 `koffi: true`、`protobufjs: false`：未决占位收敛为表内决策，owner 显式布尔保留（`koffi: false` 单向警告），冲突值与表外未决占位 fail-fast，不替未评审脚本做决定。
+  2. add 前自愈“半装 bundle”：本次目标包已在 `dependencies`、未注册 `dsh.profile.bundles` 且 node_modules 元数据声明 `dsh.bundle` 时，原子移除残留条目，使 Host reconcile 重新注册；避免仅 `pnpm approve-builds` 后重试 exit 0 却零 bundle 装入。畸形 `bundles` 字段 fail-closed 不写盘。
+  - 同一裸 add 缺陷覆盖 macOS 已停止 Home 的 npm 升级：完整 profile 备份之后收敛，失败随整 profile 回滚。traex provider 补装的“已装”判据从 node_modules 目录改为注册名单（独立评审拦下：旧判据在半装现场会跳过重试）。Linux bwrap 事务升级全程 `ignore-scripts`，无此缺陷，不接入；本地 cohort 的 `allowBuilds` 由冻结收据合并。
+- 触发来源：另一台 Linux（profile web / supervised-growth / Host 0.2.1-rc.2）首装报 `[ERR_PNPM_IGNORED_BUILDS] koffi@3.1.1`。
+
+## 活跃阻塞与下次验收
+
+- `0.1.63` 未发布，等待 owner 明确授权（仅 prepare + push tag，record 由 CI 完成）。
+- 发布后首次验收：故障机以相同 `DSH_HOME`、profile、参数重跑安装器，add exit 0 且失败批次 bundle 完整注册；CI 安装/运行就绪/发布验证全绿。
+- 故障机立即恢复：用 dev 安装器重跑；或先在报错 profile 执行 `pnpm approve-builds koffi`，再手工删除 `package.json` 中失败批次残留（在 `dependencies`、不在 `dsh.profile.bundles` 的目标包），再用相同参数重装。
 
 ## 最新验证
 
-- 动态状态修复通过独立代码审查及局部检查：Policy 450 通过/2 跳过，Delivery 353 通过，Memory 192 通过，Wiki 70 通过。真实 Linux 当前 Responses 模型在一次隔离只读观察中选择了 `memory_search`，未输出旧审批说法；没有执行工具，不代表记忆已保存或端到端验收通过。新证据位于 `docs/evidence/approval-status-context-20261022/`。
-- 发布源码 `146359d85aaee83b325641c860bc9f8d36c9711b`。[dev CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39711087764) 与 [main CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39716404846) 均 5/5 成功；[Release](https://github.com/22-ai-00/dsh-enhanced/actions/runs/39716574584) 的 Publish、Record 均成功。发布完整 `pnpm check`：8950 通过、102 跳过、37 包 dry-run pack。首轮 Linux 用例超时及后续同源复测记录保留，未调整超时；跳过项不算实机通过。
-- Mac arm64 与 Linux 的公开安装均独立复核 PASS：37/37 包的精确版本及 `latest` 为 `0.1.61`，七个安装资产匹配发布源码，7/7 验收命令成功，Policy 75/75 文件匹配修复构建。Host 为 `0.2.1-rc.2`。临时安装跳过真实 owner 配对、业务授权及受管服务；Mac 复用了下载缓存并在线刷新元数据，不是冷缓存验收。首次 registry 可见性延迟及缓存失败证据保留。
-- Linux 程序升级的 15 条命令与前后四项保留审计均退出 0，核对 26 个运行包；owner、授权原期限与已用额度、会话、历史和非程序配置保留。62 份升级证据独立复核 PASS。两次健康采样相隔 140.5 秒，三个服务在采样间身份稳定、重启计数为 0，飞书已连接，未见所查关键错误。辅助监控由既有升级快捷脚本暂停约 31 分 41 秒后恢复。
-- 原始命令、退出码、哈希及报告位于忽略目录 `docs/evidence/release-v0161-public/`，审查与兼容性复现在 `docs/evidence/owner-requested-20261021/`。
-
-## 升级与边界
-
-- Linux 程序升级入口为 `dsh-rsi update --all --yes`；当前实例已提供 `dsh-upgrade`。沿官方干净源码更新成对的 target/coordinator 与私有 Host，保留 owner 和既有授权。适用条件与恢复见[维护说明](../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)。
-- Mac arm64 生产仍为 `0.1.55`，本轮只做公开临时安装与代码验证；此前是完整备份后重装、重新配对并启动 supervised 服务。冻结 owner/source/cohort Home 的普通原地升级与跨版本私有 Host 更新仍不支持；Intel Mac 实机未验收。
-- Mac 新工具创建与采用使用 `macos-seatbelt`，无需 Docker。沙箱禁止联网和子进程，工作目录只读，次数及累计时长有限；缺少内存、CPU、磁盘硬配额，不等同于 Linux 双进程隔离。任意 shell 的 `isolation_run` 仍需 Docker。
+- 真实 pinned Host `0.2.1-rc.2` + pnpm 11.7.0 隔离 HOME 实验：复现未决策 koffi 退出 1 与依赖残留；证实仅 approve-builds 后重试为零 bundle 死安装、删残留后 reconcile 恢复注册；新安装器双函数全链路 exit 0（cnoke 自检一次、三 bundle 注册、`pendingBuilds: []`、健康幂等、dry-run 不写盘）。证据与限制见忽略目录 `docs/evidence/koffi-half-install-2026-10-22.md`。
+- `tests/installers.spec.ts` 全文件 469 通过 / 1 跳过（评审修复后最终工作树）；新增 build-policy 决策表 9 例、幂等 1 例、半装自愈 4 例、provider 补装半装重试与畸形 `bundles` 拒绝 2 例、macOS npm 升级收敛与回滚 2 例，launchd fixture 修正为健康注册形态，koffi=false 警告断言收紧为独有文案。
+- 独立只读对抗评审通过（MEDIUM 1、LOW 1 均已修复并回归）。
+- 根 `pnpm check`（2026-10-22）：validate / lint / build / typecheck / test:root（76 文件 1168 通过、5 跳过）/ pack:check 全过；评审修复后 installers 全文件独占重跑 469/1 全绿（改动仅限安装脚本与该测试文件）。递归包测试中 plugin-control-plane 10 个真子进程文件与 assistant-evaluation 1 个时序用例在高负载下假失败（耗时齐刷刷停在 15s 超时、1261ms>1000ms），独占串行重跑 36/36 与 18/18 全过，与本改动无关。
 
 普通使用驱动持续自迭代的完整闭环尚未验收。工程测试、安装、服务就绪和升级保留不证明后续任务的质量、成本、延迟或回归收益。

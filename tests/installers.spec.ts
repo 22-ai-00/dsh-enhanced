@@ -7921,6 +7921,11 @@ require('node:module').syncBuiltinESMExports()
         ? '@dsh-enhanced/assistant-goals@1.4.0'
         : join(repoRoot, 'plugins', 'assistant-goals'))
       expect(result.stdout).toContain('macOS 已停止 Home 升级')
+      if (source === 'npm') {
+        expect(result.stdout).toContain('profile 依赖构建策略')
+      } else {
+        expect(result.stdout).not.toContain('profile 依赖构建策略')
+      }
       expect(result.stdout).not.toMatch(/systemctl|journalctl/iu)
       expect(await readFile(f.operationLog, 'utf8')).toBe('')
     },
@@ -8115,6 +8120,56 @@ require('node:module').syncBuiltinESMExports()
     const profileEntries = await readdir(join(f.dshHome, 'profiles'))
     expect(profileEntries.some(name => name.startsWith('web.failed-upgrade.'))).toBe(true)
     expect(profileEntries.some(name => name.includes('upgrade-backup'))).toBe(false)
+  })
+
+  test('macOS npm supervised upgrade converges the build policy before the bare add', async () => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised',
+      managedDependencies: ['personal-assistant', 'assistant-recovery'],
+      systemd: {},
+    })
+    // The default fixture workspace is the pnpm 10 era shape (no allowBuilds);
+    // pnpm 11 exits nonzero on the undecided koffi script during this bare add.
+    const workspaceBefore = await readFile(join(f.profileDirectory, 'pnpm-workspace.yaml'), 'utf8')
+    expect(workspaceBefore).not.toContain('allowBuilds')
+    const processView = await macUpgradeProcessView(f.dshHome, f.root)
+    const result = runInstaller(join(f.fixtureInstallDirectory, 'install-npm.sh'), [
+      '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes',
+    ], f.dshHome, 'Darwin', {
+      ...lifecycleEnvironment(f.dshHome, f.fakeBin), ...processView.environment,
+    })
+
+    expect(await readFile(processView.marker, 'utf8')).toMatch(/parsed=[1-9]\d* removed=[1-9]\d*/u)
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('macOS profile 原地升级通过')
+    const converged = parse(await readFile(join(f.profileDirectory, 'pnpm-workspace.yaml'), 'utf8'))
+    expect(converged).toMatchObject({ allowBuilds: { koffi: true, protobufjs: false } })
+    expect(await readFile(f.dshLog, 'utf8')).toContain('plugin\t--profile\tweb\tadd')
+    expect((await readdir(join(f.dshHome, 'profiles'))).some(name => name.includes('upgrade-backup'))).toBe(false)
+  })
+
+  test('macOS npm supervised upgrade restores the profile when build policy preparation fails', async () => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised',
+      managedDependencies: ['personal-assistant', 'assistant-recovery'],
+      systemd: {},
+    })
+    await writeFile(join(f.profileDirectory, 'pnpm-workspace.yaml'),
+      'packages:\n  - .\nallowBuilds:\n  koffi: true\n  protobufjs: false\n  some-native: set this to true or false\n')
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+    const processView = await macUpgradeProcessView(f.dshHome, f.root)
+    const result = runInstaller(join(f.fixtureInstallDirectory, 'install-npm.sh'), [
+      '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--yes',
+    ], f.dshHome, 'Darwin', {
+      ...lifecycleEnvironment(f.dshHome, f.fakeBin), ...processView.environment,
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('原 profile 已恢复')
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    // The unreviewed placeholder is restored byte-for-byte and the add never ran.
+    expect(await readFile(join(f.profileDirectory, 'pnpm-workspace.yaml'), 'utf8')).toContain('some-native: set this to true or false')
+    expect(await readFile(f.dshLog, 'utf8')).not.toContain('plugin\t--profile\tweb\tadd')
   })
 
   test('macOS auto selects native ordinary-use learning', async () => {
@@ -8436,11 +8491,15 @@ printf '%s\\n' '{not-json'
 
   test.each([
     { name: 'fresh Host profile', workspace: undefined, expectedStatus: 71 },
-    { name: 'existing profile and pnpm placeholder', workspace: 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nsharedWorkspaceLockfile: false\nallowBuilds:\n  protobufjs: set this to true or false\n  koffi: set this to true or false\n', expectedStatus: 71 },
+    { name: 'existing profile and pnpm placeholders', workspace: 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nsharedWorkspaceLockfile: false\nallowBuilds:\n  protobufjs: set this to true or false\n  koffi: set this to true or false\n', expectedStatus: 71 },
     { name: 'existing explicit false', workspace: 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  protobufjs: false\n  other-native: true\n', expectedStatus: 71 },
-    { name: 'existing explicit true conflict', workspace: 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  protobufjs: true\n', expectedStatus: 1 },
-    { name: 'existing unknown decision conflict', workspace: 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  protobufjs: ask-owner\n', expectedStatus: 1 },
-  ])('npm install applies exact profile build policy before package add: $name', async ({ workspace, expectedStatus }) => {
+    { name: 'existing explicit koffi true', workspace: 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  koffi: true\n', expectedStatus: 71 },
+    { name: 'existing explicit koffi false is honored with a warning', workspace: 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  koffi: false\n', expectedStatus: 71, warning: '保留 owner 显式决策 koffi=false' },
+    { name: 'existing explicit true conflict', workspace: 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  protobufjs: true\n', expectedStatus: 1, expectedError: 'protobufjs build decision conflicts with false' },
+    { name: 'existing unknown protobufjs decision conflict', workspace: 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  protobufjs: ask-owner\n', expectedStatus: 1, expectedError: 'protobufjs build decision must be true or false' },
+    { name: 'existing unknown koffi decision conflict', workspace: 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  koffi: ask-owner\n', expectedStatus: 1, expectedError: 'koffi build decision must be true or false' },
+    { name: 'unreviewed placeholder outside the decision table', workspace: 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  koffi: true\n  protobufjs: false\n  some-native: set this to true or false\n', expectedStatus: 1, expectedError: 'unreviewed pending build decisions require an explicit boolean' },
+  ])('npm install applies exact profile build policy before package add: $name', async ({ workspace, expectedStatus, expectedError, warning }) => {
     const root = await temporaryDshHome()
     const dshHome = join(root, 'home')
     const profileDirectory = join(dshHome, 'profiles', 'probe')
@@ -8482,23 +8541,321 @@ exit 0
     const finalWorkspace = await readFile(join(profileDirectory, 'pnpm-workspace.yaml'), 'utf8')
     if (expectedStatus === 71) {
       expect(operations).toContain('add\n')
+      const expectedKoffi = workspace?.includes('koffi: false') ? false : true
       expect(parse(finalWorkspace)).toMatchObject({
         packages: ['.'], nodeLinker: 'hoisted', autoInstallPeers: false,
-        allowBuilds: { protobufjs: false },
+        allowBuilds: { protobufjs: false, koffi: expectedKoffi },
       })
       if (workspace?.includes('sharedWorkspaceLockfile')) {
-        expect(parse(finalWorkspace)).toMatchObject({ sharedWorkspaceLockfile: false,
-          allowBuilds: { koffi: 'set this to true or false' } })
+        expect(parse(finalWorkspace)).toMatchObject({ sharedWorkspaceLockfile: false })
       }
       if (workspace?.includes('other-native')) expect(parse(finalWorkspace)).toMatchObject({ allowBuilds: { 'other-native': true } })
-      if (workspace?.includes('protobufjs: false')) expect(finalWorkspace).toBe(workspace)
+      if (warning !== undefined) expect(result.stderr).toContain(warning)
+      else expect(result.stderr).not.toContain('profile 依赖构建策略')
     } else {
       expect(operations).not.toContain('add\n')
       expect(finalWorkspace).toBe(workspace)
-      expect(result.stderr).toContain('protobufjs build decision conflicts with false')
+      expect(result.stderr).toContain(expectedError)
     }
   })
 
+  test('npm install build-policy preparation is idempotent across reruns', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'home')
+    const profileDirectory = join(dshHome, 'profiles', 'probe')
+    const fakeBin = join(root, 'bin')
+    const logPath = join(root, 'operations.log')
+    await mkdir(fakeBin, { recursive: true })
+    await writeFile(logPath, '')
+    await mkdir(profileDirectory, { recursive: true })
+    await writeFile(join(profileDirectory, 'package.json'), '{"name":"dsh-profile-probe","private":true,"dependencies":{},"dsh":{"profile":{"bundles":[]}}}\n')
+    const workspaceWithPlaceholders = 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  protobufjs: set this to true or false\n  koffi: set this to true or false\n'
+    await writeFile(join(profileDirectory, 'pnpm-workspace.yaml'), workspaceWithPlaceholders)
+    const hostExecutable = await nativeInstallerHost(root, `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '0.2.1-rc.2\\n'; exit 0; fi
+if [[ "$*" == *'plugin --profile probe add '* ]]; then
+  printf 'add\\n' >> "$INSTALL_LOG"
+  exit 71
+fi
+exit 0
+`)
+    await symlink(hostExecutable, join(fakeBin, 'dsh'))
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+if [[ "\${1:-}" == 'view' ]]; then printf '"0.1.55"\\n'; exit 0; fi
+exit 0
+`)
+    const args = [
+      '--profile', 'probe', '--scenario', 'core', '--lark', 'skip', '--model', 'skip', '--model-route', 'skip',
+      '--no-service', '--yes', '--plugin-version', '0.1.55',
+    ] as const
+    const env = { PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`, INSTALL_LOG: logPath }
+    const first = runInstaller(npmInstaller, args, dshHome, undefined, env)
+    expect(first.status, first.stderr).toBe(71)
+    const converged = await readFile(join(profileDirectory, 'pnpm-workspace.yaml'), 'utf8')
+    expect(parse(converged)).toMatchObject({ allowBuilds: { protobufjs: false, koffi: true } })
+    const second = runInstaller(npmInstaller, args, dshHome, undefined, env)
+    expect(second.status, second.stderr).toBe(71)
+    expect(await readFile(join(profileDirectory, 'pnpm-workspace.yaml'), 'utf8')).toBe(converged)
+  })
+
+  const writeInstalledBundleMetadata = async (profileDirectory: string, name: string, isBundle: boolean) => {
+    const packageDirectory = join(profileDirectory, 'node_modules', name)
+    await mkdir(packageDirectory, { recursive: true })
+    await writeFile(join(packageDirectory, 'package.json'), isBundle
+      ? '{"name":"placeholder","dsh":{"bundle":"./cordis.patch.yml"}}\n'
+      : '{"name":"placeholder"}\n')
+  }
+
+  test('npm install drops half-installed bundle dependencies before retry', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'home')
+    const profileDirectory = join(dshHome, 'profiles', 'probe')
+    const fakeBin = join(root, 'bin')
+    const logPath = join(root, 'operations.log')
+    await mkdir(fakeBin, { recursive: true })
+    await writeFile(logPath, '')
+    await mkdir(profileDirectory, { recursive: true })
+    await writeFile(join(profileDirectory, 'pnpm-workspace.yaml'),
+      'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  koffi: true\n  protobufjs: false\n')
+    await writeFile(join(profileDirectory, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-probe',
+      private: true,
+      dependencies: {
+        '@dsh-enhanced/personal-assistant': '0.1.55',
+        '@dsh-enhanced/plugin-control-plane': '0.1.55',
+        '@dsh-enhanced/owner-plain': '1.2.3',
+      },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
+    }, null, 2) + '\n')
+    await writeInstalledBundleMetadata(profileDirectory, '@dsh-enhanced/personal-assistant', true)
+    await writeInstalledBundleMetadata(profileDirectory, '@dsh-enhanced/plugin-control-plane', true)
+    await writeInstalledBundleMetadata(profileDirectory, '@dsh-enhanced/owner-plain', false)
+    const hostExecutable = await nativeInstallerHost(root, `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '0.2.1-rc.2\\n'; exit 0; fi
+if [[ "$*" == *'plugin --profile probe add '* ]]; then
+  printf 'add\\n' >> "$INSTALL_LOG"
+  exit 71
+fi
+exit 0
+`)
+    await symlink(hostExecutable, join(fakeBin, 'dsh'))
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+if [[ "\${1:-}" == 'view' ]]; then printf '"0.1.55"\\n'; exit 0; fi
+exit 0
+`)
+    const result = runInstaller(npmInstaller, [
+      '--profile', 'probe', '--scenario', 'core', '--lark', 'skip', '--model', 'skip', '--model-route', 'skip',
+      '--no-service', '--yes', '--plugin-version', '0.1.55',
+    ], dshHome, undefined, { PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`, INSTALL_LOG: logPath })
+    expect(result.status, result.stderr).toBe(71)
+    expect(await readFile(logPath, 'utf8')).toContain('add\n')
+    const manifest = parse(await readFile(join(profileDirectory, 'package.json'), 'utf8'))
+    expect(manifest.dependencies).toEqual({ '@dsh-enhanced/owner-plain': '1.2.3' })
+    expect(manifest.dsh.profile.bundles).toEqual(['@deepseek-ai/dsh-base'])
+    expect(result.stdout).toContain('半装 bundle')
+  })
+
+  test('npm install keeps registered bundles and plain dependencies untouched on rerun', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'home')
+    const profileDirectory = join(dshHome, 'profiles', 'probe')
+    const fakeBin = join(root, 'bin')
+    const logPath = join(root, 'operations.log')
+    await mkdir(fakeBin, { recursive: true })
+    await writeFile(logPath, '')
+    await mkdir(profileDirectory, { recursive: true })
+    await writeFile(join(profileDirectory, 'pnpm-workspace.yaml'),
+      'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  koffi: true\n  protobufjs: false\n')
+    const originalManifest = JSON.stringify({
+      name: 'dsh-profile-probe',
+      private: true,
+      dependencies: {
+        '@dsh-enhanced/personal-assistant': '0.1.55',
+        '@dsh-enhanced/owner-tool': '1.2.3',
+      },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@dsh-enhanced/personal-assistant'] } },
+    }, null, 2) + '\n'
+    await writeFile(join(profileDirectory, 'package.json'), originalManifest)
+    await writeInstalledBundleMetadata(profileDirectory, '@dsh-enhanced/personal-assistant', true)
+    await writeInstalledBundleMetadata(profileDirectory, '@dsh-enhanced/owner-tool', false)
+    const hostExecutable = await nativeInstallerHost(root, `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '0.2.1-rc.2\\n'; exit 0; fi
+if [[ "$*" == *'plugin --profile probe add '* ]]; then
+  printf 'add\\n' >> "$INSTALL_LOG"
+  exit 71
+fi
+exit 0
+`)
+    await symlink(hostExecutable, join(fakeBin, 'dsh'))
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+if [[ "\${1:-}" == 'view' ]]; then printf '"0.1.55"\\n'; exit 0; fi
+exit 0
+`)
+    const result = runInstaller(npmInstaller, [
+      '--profile', 'probe', '--scenario', 'core', '--lark', 'skip', '--model', 'skip', '--model-route', 'skip',
+      '--no-service', '--yes', '--plugin-version', '0.1.55',
+    ], dshHome, undefined, { PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`, INSTALL_LOG: logPath })
+    expect(result.status, result.stderr).toBe(71)
+    expect(await readFile(join(profileDirectory, 'package.json'), 'utf8')).toBe(originalManifest)
+    expect(result.stdout).not.toContain('半装 bundle')
+  })
+
+  test('npm install keeps an unregistered dependency without dsh.bundle metadata', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'home')
+    const profileDirectory = join(dshHome, 'profiles', 'probe')
+    const fakeBin = join(root, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    await mkdir(profileDirectory, { recursive: true })
+    await writeFile(join(profileDirectory, 'pnpm-workspace.yaml'),
+      'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  koffi: true\n  protobufjs: false\n')
+    await writeFile(join(profileDirectory, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-probe',
+      private: true,
+      dependencies: { '@dsh-enhanced/plugin-control-plane': '0.1.55' },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
+    }, null, 2) + '\n')
+    // Installed tree does not declare dsh.bundle (or is unreadable): never prune.
+    await writeInstalledBundleMetadata(profileDirectory, '@dsh-enhanced/plugin-control-plane', false)
+    const hostExecutable = await nativeInstallerHost(root, `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '0.2.1-rc.2\\n'; exit 0; fi
+if [[ "$*" == *'plugin --profile probe add '* ]]; then exit 71; fi
+exit 0
+`)
+    await symlink(hostExecutable, join(fakeBin, 'dsh'))
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+if [[ "\${1:-}" == 'view' ]]; then printf '"0.1.55"\\n'; exit 0; fi
+exit 0
+`)
+    const result = runInstaller(npmInstaller, [
+      '--profile', 'probe', '--scenario', 'core', '--lark', 'skip', '--model', 'skip', '--model-route', 'skip',
+      '--no-service', '--yes', '--plugin-version', '0.1.55',
+    ], dshHome, undefined, { PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin` })
+    expect(result.status, result.stderr).toBe(71)
+    const manifest = parse(await readFile(join(profileDirectory, 'package.json'), 'utf8'))
+    expect(manifest.dependencies).toEqual({ '@dsh-enhanced/plugin-control-plane': '0.1.55' })
+  })
+
+  test('npm install dry-run reports half-installed cleanup without writing', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'home')
+    const profileDirectory = join(dshHome, 'profiles', 'probe')
+    const fakeBin = join(root, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    await mkdir(profileDirectory, { recursive: true })
+    await writeFile(join(profileDirectory, 'pnpm-workspace.yaml'),
+      'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  koffi: true\n  protobufjs: false\n')
+    const originalManifest = JSON.stringify({
+      name: 'dsh-profile-probe',
+      private: true,
+      dependencies: { '@dsh-enhanced/personal-assistant': '0.1.55' },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
+    }, null, 2) + '\n'
+    await writeFile(join(profileDirectory, 'package.json'), originalManifest)
+    await writeInstalledBundleMetadata(profileDirectory, '@dsh-enhanced/personal-assistant', true)
+    const hostExecutable = await nativeInstallerHost(root, `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '0.2.1-rc.2\\n'; exit 0; fi
+exit 0
+`)
+    await symlink(hostExecutable, join(fakeBin, 'dsh'))
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+if [[ "\${1:-}" == 'view' ]]; then printf '"0.1.55"\\n'; exit 0; fi
+exit 0
+`)
+    const result = runInstaller(npmInstaller, [
+      '--profile', 'probe', '--dry-run', '--scenario', 'core', '--lark', 'skip',
+      '--yes', '--plugin-version', '0.1.55',
+    ], dshHome, undefined, { PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin` })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('半装修复')
+    expect(await readFile(join(profileDirectory, 'package.json'), 'utf8')).toBe(originalManifest)
+  })
+
+  test('agent provider add retries a half-installed bundle left by a failed add', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'home')
+    const profileDirectory = join(dshHome, 'profiles', 'probe')
+    const fakeBin = join(root, 'bin')
+    const logPath = join(root, 'dsh.log')
+    await mkdir(fakeBin, { recursive: true })
+    await symlink(process.execPath, join(fakeBin, 'node'))
+    await writeFile(logPath, '')
+    // A failed pnpm add links node_modules and writes the dependency, but the
+    // Host never registers the bundle: the old directory-exists early return
+    // treated this as installed and skipped the retrying add entirely.
+    await mkdir(join(profileDirectory, 'node_modules/@dsh-enhanced/traex-acp-provider'), { recursive: true })
+    await writeFile(join(profileDirectory, 'node_modules/@dsh-enhanced/traex-acp-provider/package.json'),
+      '{"name":"@dsh-enhanced/traex-acp-provider","dsh":{"bundle":"./cordis.patch.yml"}}\n')
+    await writeFile(join(profileDirectory, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-probe',
+      private: true,
+      dependencies: { '@dsh-enhanced/traex-acp-provider': '0.1.55' },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
+    }, null, 2) + '\n')
+    await writeFile(join(profileDirectory, 'pnpm-workspace.yaml'),
+      'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\nallowBuilds:\n  koffi: true\n  protobufjs: false\n')
+    const hostExecutable = await nativeInstallerHost(root, `#!/bin/bash
+printf '%s\\n' "$*" >> "$DSH_LOG"
+exit 0
+`)
+    await symlink(hostExecutable, join(fakeBin, 'dsh'))
+    const runEnsure = () => spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_ensure_agent_bundle traex-agent probe "$2" npm "$3" 0.1.55 0',
+      'installer-test', installerLibrary, dshHome, repoRoot,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`, DSH_LOG: logPath },
+    })
+    const result = runEnsure()
+    expect(result.status, result.stderr).toBe(0)
+    expect(await readFile(logPath, 'utf8')).toContain('plugin --profile probe add @dsh-enhanced/traex-acp-provider@0.1.55')
+    // The stale dependency entry is pruned before the add so the Host
+    // reconciler registers the bundle instead of skipping it as pre-existing.
+    const manifest = parse(await readFile(join(profileDirectory, 'package.json'), 'utf8'))
+    expect(manifest.dependencies).toEqual({})
+    // Once registered, the function is a pure no-op: no second add.
+    await writeFile(join(profileDirectory, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-probe',
+      private: true,
+      dependencies: { '@dsh-enhanced/traex-acp-provider': '0.1.55' },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@dsh-enhanced/traex-acp-provider'] } },
+    }, null, 2) + '\n')
+    await writeFile(logPath, '')
+    const rerun = runEnsure()
+    expect(rerun.status, rerun.stderr).toBe(0)
+    expect(await readFile(logPath, 'utf8')).toBe('')
+  })
+
+  test('half-installed cleanup refuses a profile manifest with a malformed bundles list', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'home')
+    const profileDirectory = join(dshHome, 'profiles', 'probe')
+    const fakeBin = join(root, 'bin')
+    await mkdir(fakeBin, { recursive: true })
+    await symlink(process.execPath, join(fakeBin, 'node'))
+    await mkdir(profileDirectory, { recursive: true })
+    const originalManifest = JSON.stringify({
+      name: 'dsh-profile-probe',
+      private: true,
+      dependencies: { '@dsh-enhanced/personal-assistant': '0.1.55' },
+      dsh: { profile: { bundles: '@dsh-enhanced/personal-assistant' } },
+    }, null, 2) + '\n'
+    await writeFile(join(profileDirectory, 'package.json'), originalManifest)
+    const result = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_prune_half_installed_bundles probe "$2" 0 @dsh-enhanced/personal-assistant@0.1.55',
+      'installer-test', installerLibrary, dshHome,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin` },
+    })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('profile bundles is not a string array')
+    expect(await readFile(join(profileDirectory, 'package.json'), 'utf8')).toBe(originalManifest)
+  })
 
   test('npm installer with its sibling common rejects an unsupported exact host version', async () => {
     const dshHome = await temporaryDshHome()
@@ -9674,7 +10031,10 @@ export async function runLaunchdControl(args) {
     await symlink(packageExecutable, join(setupDirectory, 'dsh-lark-setup'))
     await writeFile(join(dshHome, 'profiles', profile, 'package.json'), JSON.stringify({
       name: `dsh-profile-${profile}`, type: 'module',
-      dependencies: { '@dsh-enhanced/lark-channel': '0.0.0' }, dsh: { profile: { bundles: [] } },
+      // A healthy prior add leaves the bundle both in dependencies and in the
+      // Host's registered bundle list; this rerun only reconciles service state.
+      dependencies: { '@dsh-enhanced/lark-channel': '0.0.0' },
+      dsh: { profile: { bundles: ['@dsh-enhanced/lark-channel'] } },
     }))
     if (installer === npmInstaller) {
       await writeFile(join(dshHome, 'profiles', profile, 'pnpm-workspace.yaml'),

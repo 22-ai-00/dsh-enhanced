@@ -22,15 +22,32 @@ bash scripts/install/install-local.sh
 
 ## 首次安装依赖审批
 
-公开 npm 新装会在调用 `dsh plugin add` 前，由 DSH 初始化目标 profile 的 workspace，并在该 profile 的 `pnpm-workspace.yaml` 中明确设置 `allowBuilds.protobufjs: false`。`protobufjs` 的 postinstall 只输出依赖版本建议，已发布的 SDK 使用预构建文件，不需要执行该脚本。重试时，安装器只会将 pnpm 留下的 `set this to true or false` 未决占位改成 `false`；已有 `false` 保持原样，`true` 或其它值则拒绝覆盖。其它依赖的构建决策保持原样，不会自动批准。
+公开 npm 安装会在调用 `dsh plugin add` 前，由 DSH 初始化目标 profile 的 workspace，并在该 profile 的 `pnpm-workspace.yaml` 中写入经评审的有界决策表：`allowBuilds.koffi: true`、`allowBuilds.protobufjs: false`。
 
-Linux `autonomy` 场景需要原生依赖 `koffi`。pnpm 11.7.0 首次安装可能以 `ERR_PNPM_IGNORED_BUILDS` 停止，并列出 `koffi` 和实际 profile 目录。进入该报错中的目录，使用同一个 pnpm 11.7.0 执行：
+- `koffi` 是预编译原生 FFI 绑定：assistant-skills 等批次经 `@deepseek-ai/dsh-fs-local`、`@deepseek-ai/dsh-session-persistence-jsonl` 引入 3.1.1，`@dsh-enhanced/assistant-actions` 直接依赖 3.2.1；最小的 health/personal-assistant 闭包不含它，但 skills/supervised 批次必含，并非仅 `autonomy` 场景需要。`assistant-actions` 的 Linux broker 通过它调用 libc `getsockopt` 做 SO_PEERCRED 对端鉴权（`broker-peer-linux`）；fs/persistence 包仅在 Windows 惰性加载它做文件 ACL。设为 `true` 与源码根 `pnpm-workspace.yaml` 及本地 cohort 收据冻结值一致；其安装脚本（cnoke `--prebuild`）在平台预编译绑定已随 optionalDependencies 安装时只做一次 `require` 自检即返回，不编译、不联网，预编译缺失时才回退源码构建作为兜底。
+- `protobufjs` 的 postinstall 只输出依赖版本建议，已发布的 SDK 使用预构建文件，设为 `false`。
+
+重试时安装器把 pnpm 留下的 `set this to true or false` 未决占位收敛为表内决策；已是相同布尔的键保持原样。owner 显式写入的 `koffi: false` 会被尊重并继续安装，但安装器会警告其后果：预编译绑定缺失时运行期失败，且该 profile 日后原地转换为本地 supervised-growth cohort 时会因构建策略与收据冻结值冲突被拒绝，需手工改回 `true`。`protobufjs: true`、任何非布尔标量、非标量值都会使安装停止，不会覆盖 owner 决策。决策表之外若还残留未决占位，安装器同样停止并列出包名，要求 owner 在 `pnpm-workspace.yaml` 手工写明布尔后重跑，不会替未评审的依赖做决定。
+
+旧版本安装器（0.1.62 及更早）只预置 `protobufjs`，Linux 首次安装可能以 `ERR_PNPM_IGNORED_BUILDS` 停止并列出 `koffi` 与实际 profile 目录。手工逃生步骤：进入报错中的目录，使用同一个 pnpm 11.7.0 执行：
 
 ```sh
 pnpm approve-builds koffi
 ```
 
-该命令只批准并构建当前 profile 的 `koffi`；成功后返回原工作目录，使用相同的 `DSH_HOME`、profile 和参数重跑安装命令。不要使用 `--all` 批准其它待审依赖。`--yes` 不代替 pnpm 的依赖构建审批。
+该命令只批准当前 profile 的 `koffi`（pnpm 据 `node_modules/.modules.yaml` 的待审集合写入 `true` 并补跑脚本）；成功后返回原工作目录，使用相同的 `DSH_HOME`、profile 和参数重跑安装命令。不要使用 `--all` 批准其它待审依赖；`--yes` 不代替 pnpm 的依赖构建审批。
+
+覆盖范围：首装、traex provider 补装与 macOS 已停止 Home 的 npm 升级都执行同一决策表；macOS 在完整备份 profile 之后、裸 `dsh plugin add` 之前收敛，该步失败随整 profile 回滚恢复。Linux 的 lark/supervised 与 core/web/autonomy 升级在 bwrap 事务副本内以 `ignore-scripts` 执行 add（pnpm 11.7.0 在该模式下不触发未决构建审批门），不写该表；本地 cohort 的 `allowBuilds` 由冻结收据合并。
+
+### 失败 add 的半装 bundle 自愈
+
+pnpm 在执行构建脚本前已把依赖写入 profile 的 `package.json`；待审脚本致 `pnpm add` 非零退出后，Host 的 bundle 注册（reconcile）不再执行，留下“依赖已存在、`dsh.profile.bundles` 未注册”的半装条目。Host 的 reconcile 只注册本次新增的依赖，因此直接重试同一条 add 即使 exit 0 也会跳过这些 bundle——进程正常却没有任何 bundle 装入。
+
+0.1.63 起的安装器在每次裸 `dsh plugin add` 前检查本次即将安装的目标：若某目标已在 `dependencies` 中、不在 `dsh.profile.bundles` 中，且 `node_modules/<pkg>/package.json` 声明了 `dsh.bundle`，则先从 `package.json` 原子移除该残留条目并打印中文说明，随后的 add 会重写 lockfile 并让 Host 完成注册。检查仅限本次目标包（`@dsh-enhanced/*`、`@deepseek-ai/*`）；健康 profile 上无输出、不写盘；`--dry-run` 只报告将移除的包名。
+
+macOS 已停止 Home 升级失败会把完整备份恢复回原 profile，Linux bwrap 事务升级失败则不激活副本，二者都不会在原 profile 留下半装条目，因此该自愈只在首装与 provider 补装路径执行；升级目标本身也都是已注册 bundle，检查对其恒为空操作。
+
+0.1.62 及更早安装器失败的现场，仅执行 `pnpm approve-builds koffi` 后重跑**旧安装器仍会 exit 0 但不注册失败批次的 bundle**。恢复方式二选一：用 0.1.63 及更新的安装器以相同 `DSH_HOME`、profile 和参数直接重跑（预置决策与半装修复都会自动完成）；或在报错 profile 先执行 `pnpm approve-builds koffi`，再手工编辑该 profile 的 `package.json`，把失败批次残留在 `dependencies` 中、但不在 `dsh.profile.bundles` 中的目标条目删除，最后用相同参数重跑安装。
 
 ## 安装入口
 

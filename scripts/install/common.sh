@@ -1071,7 +1071,7 @@ dsh_enhanced_resolve_npm_cohort() {
 # Ensure the provider bundle backing an agent route is installed into the
 # profile before we enable and resolve it.  The flag path pre-selects the slug
 # with every other bundle; this covers interactive selection made after the main
-# install, and is a no-op when the bundle is already present.
+# install, and is a no-op when the bundle is already registered.
 dsh_enhanced_ensure_agent_bundle() {
   local provider="$1"
   local profile="$2"
@@ -1082,7 +1082,11 @@ dsh_enhanced_ensure_agent_bundle() {
   local dry_run="$7"
   dsh_enhanced_is_agent_route "$provider" || return 0
   local slug='traex-acp-provider'
-  if [[ "$dry_run" != '1' && -d "$dsh_home/profiles/$profile/node_modules/@dsh-enhanced/$slug" ]]; then
+  # Registration is the source of truth, not the node_modules directory: a
+  # failed pnpm add leaves the directory linked while the Host never registers
+  # the bundle, so the directory check would skip the half-installed retry.
+  if [[ "$dry_run" != '1' ]] \
+    && dsh_enhanced_bundle_registered "$dsh_home/profiles/$profile" "@dsh-enhanced/$slug"; then
     return 0
   fi
   local target
@@ -1098,19 +1102,26 @@ dsh_enhanced_ensure_agent_bundle() {
   printf '\n为 traex-agent 安装 provider bundle：\n'
   if [[ "$source_mode" == 'npm' ]]; then
     dsh_enhanced_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || return $?
+    dsh_enhanced_prune_half_installed_bundles "$profile" "$dsh_home" "$dry_run" "$target" || return $?
   fi
   dsh_enhanced_run "$dry_run" dsh plugin --profile "$profile" add "$target"
 }
 
-# pnpm 11 requires an explicit decision even for protobufjs's advisory-only
-# postinstall. Keep this decision in the profile that DSH actually installs,
-# using DSH's own initializer for a fresh profile and its installed YAML parser.
+# pnpm 11 requires an explicit decision for every build script. Write the
+# reviewed, bounded decision table into the profile DSH actually installs into:
+# koffi=true: the prebuilt N-API binding the wider closure needs
+# (assistant-actions calls libc getsockopt through it for the Linux SO_PEERCRED
+# broker peer check; dsh-fs-local and session-persistence load it lazily for
+# Windows file APIs). The install script only self-tests the prebuilt binding,
+# and the value must match what local-cohort receipts freeze. protobufjs=false
+# (advisory-only postinstall). A fresh profile uses DSH's own initializer and
+# its installed YAML parser.
 dsh_enhanced_prepare_profile_build_policy() {
   local profile="$1" dsh_home="$2" dry_run="$3"
   local profile_directory="$dsh_home/profiles/$profile"
   local workspace="$profile_directory/pnpm-workspace.yaml"
   if [[ "$dry_run" == '1' ]]; then
-    printf 'profile 依赖构建策略：将由 Host 初始化 profile，并仅将 protobufjs 的非必需脚本设为 false。\n'
+    printf 'profile 依赖构建策略：add 前将确保 pnpm-workspace.yaml 含经评审决策 koffi=true（平台预编译绑定时其安装脚本仅做加载自检，不编译、不联网）与 protobufjs=false（仅输出版本建议）；新 profile 先由 Host 初始化 workspace，owner 已有的显式布尔决策保持原样。\n'
     dsh_enhanced_print_command dsh plugin --profile "$profile" version-exemptions
     return 0
   fi
@@ -1141,15 +1152,51 @@ if (!metadata.isFile() || metadata.isSymbolicLink()) fail('workspace is not a re
 const original = readFileSync(workspace, 'utf8')
 const document = parseDocument(original, { uniqueKeys: true, strict: true })
 if (document.errors.length > 0 || !isMap(document.contents)) fail('workspace is not an unambiguous YAML mapping')
+// Canonical decisions reviewed for the Host dependency closure; keep in sync
+// with the root pnpm-workspace.yaml frozen into local-cohort receipts.
+const table = new Map([['koffi', true], ['protobufjs', false]])
+const PLACEHOLDER = 'set this to true or false'
 const builds = document.get('allowBuilds', true)
 if (builds !== undefined && !isMap(builds)) fail('allowBuilds is not a mapping')
-const decision = builds?.get('protobufjs', true)
-if (decision !== undefined) {
-  if (!isScalar(decision)) fail('protobufjs build decision is not a scalar')
-  if (decision.value === false) process.exit(0)
-  if (decision.value !== 'set this to true or false') fail('protobufjs build decision conflicts with false')
+const honoredOwnerBooleans = []
+let changed = false
+for (const [name, canonical] of table) {
+  const decision = builds?.get(name, true)
+  if (decision === undefined) {
+    document.setIn(['allowBuilds', name], canonical)
+    changed = true
+    continue
+  }
+  if (!isScalar(decision)) fail(`${name} build decision is not a scalar`)
+  if (decision.value === canonical) continue
+  if (decision.value === PLACEHOLDER) {
+    document.setIn(['allowBuilds', name], canonical)
+    changed = true
+    continue
+  }
+  if (typeof decision.value !== 'boolean') fail(`${name} build decision must be true or false`)
+  // protobufjs has no reason to run: an owner opt-in still refuses rather than
+  // silently diverging. koffi is a real native binding, so an explicit owner
+  // boolean wins; only surface the one-way consequences of choosing false.
+  if (name === 'protobufjs') fail('protobufjs build decision conflicts with false')
+  honoredOwnerBooleans.push(name)
 }
-document.setIn(['allowBuilds', 'protobufjs'], false)
+if (honoredOwnerBooleans.includes('koffi')) {
+  console.warn('profile 依赖构建策略：保留 owner 显式决策 koffi=false；平台预编译绑定缺失时 koffi 会在运行期失败，且该 profile 日后原地转换为本地 supervised-growth cohort 会因构建策略冲突被拒绝，届时需手工把 koffi 改回 true 后重试。')
+}
+// A placeholder pnpm left for anything outside the reviewed table means this
+// add would exit nonzero: name it instead of converging an unreviewed script.
+const unknownPending = builds === undefined
+  ? []
+  : builds.items
+      .filter(item => isScalar(item.key) && typeof item.key.value === 'string'
+        && !table.has(item.key.value)
+        && isScalar(item.value) && item.value.value === PLACEHOLDER)
+      .map(item => item.key.value)
+if (unknownPending.length > 0) {
+  fail(`unreviewed pending build decisions require an explicit boolean in pnpm-workspace.yaml before retrying: ${unknownPending.join(', ')}`)
+}
+if (!changed) process.exit(0)
 const temporary = join(dirname(workspace), `.pnpm-workspace.yaml.dsh-enhanced-${randomBytes(12).toString('hex')}`)
 let descriptor
 try {
@@ -1161,6 +1208,109 @@ try {
   descriptor = undefined
   chmodSync(temporary, metadata.mode & 0o777)
   renameSync(temporary, workspace)
+} finally {
+  if (descriptor !== undefined) closeSync(descriptor)
+  rmSync(temporary, { force: true })
+}
+NODE
+}
+
+# True (0) only when the profile manifest explicitly registers the named
+# bundle in the Host's bundle list. A node_modules directory or dependency
+# entry left by a failed add does not count; a missing or unreadable manifest
+# is treated as "not registered" so the caller proceeds to install.
+dsh_enhanced_bundle_registered() {
+  local profile_directory="$1" name="$2"
+  node - "$profile_directory/package.json" "$name" <<'NODE'
+const { readFileSync } = require('node:fs')
+let manifest
+try {
+  manifest = JSON.parse(readFileSync(process.argv[2], 'utf8'))
+} catch {
+  process.exit(1)
+}
+const bundles = manifest?.dsh?.profile?.bundles
+process.exit(Array.isArray(bundles) && bundles.includes(process.argv[3]) ? 0 : 1)
+NODE
+}
+
+# A failed `dsh plugin add` (pnpm 11 exits nonzero on an undecided build
+# script) leaves package.json dependencies in place, while the manager only
+# registers profile bundles after a zero exit. Retrying the same add then
+# succeeds yet skips registration, because reconciliation treats the dependency
+# as pre-existing — an install that exits 0 with zero bundles loaded. Drop the
+# half-installed entries for the exact targets about to be added so the Host's
+# own reconciliation registers them; pnpm rewrites the lockfile on the add.
+dsh_enhanced_prune_half_installed_bundles() {
+  local profile="$1" dsh_home="$2" dry_run="$3"
+  shift 3
+  local profile_directory="$dsh_home/profiles/$profile"
+  node - "$profile_directory/package.json" "$profile_directory" "$dry_run" "$@" <<'NODE'
+const { openSync, closeSync, readFileSync, renameSync, rmSync, writeSync, lstatSync, chmodSync, existsSync } = require('node:fs')
+const { dirname, join } = require('node:path')
+const { randomBytes } = require('node:crypto')
+const manifestPath = process.argv[2]
+const profileDirectory = process.argv[3]
+const dryRun = process.argv[4] === '1'
+const specName = spec => {
+  const at = spec.lastIndexOf('@')
+  return at > 0 ? spec.slice(0, at) : spec
+}
+const names = [...new Set(process.argv.slice(5).map(specName))]
+  .filter(name => /^@(?:dsh-enhanced|deepseek-ai)\//u.test(name))
+if (names.length === 0) process.exit(0)
+if (!existsSync(manifestPath)) process.exit(0)
+const fail = message => { throw new Error(`half-installed bundle cleanup: ${message}`) }
+const metadata = lstatSync(manifestPath)
+if (!metadata.isFile() || metadata.isSymbolicLink()) fail('profile package.json is not a regular file')
+let manifest
+try {
+  manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+} catch (error) {
+  fail(`profile package.json is not valid JSON: ${error.message}`)
+}
+if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) {
+  fail('profile package.json is not an object')
+}
+const dependencies = manifest.dependencies ?? {}
+if (typeof dependencies !== 'object' || dependencies === null || Array.isArray(dependencies)) {
+  fail('profile dependencies is not an object')
+}
+const bundlesValue = manifest.dsh?.profile?.bundles
+if (bundlesValue !== undefined
+  && !(Array.isArray(bundlesValue) && bundlesValue.every(value => typeof value === 'string'))) {
+  fail('profile bundles is not a string array')
+}
+const registered = new Set(bundlesValue ?? [])
+const declaresBundle = name => {
+  try {
+    const pkg = JSON.parse(readFileSync(join(profileDirectory, 'node_modules', name, 'package.json'), 'utf8'))
+    return pkg?.dsh?.bundle !== undefined
+  } catch {
+    return false
+  }
+}
+const stale = names.filter(name => Object.prototype.hasOwnProperty.call(dependencies, name)
+  && !registered.has(name) && declaresBundle(name))
+if (stale.length === 0) process.exit(0)
+if (dryRun) {
+  console.log(`profile 半装修复：上次失败的 add 已在依赖中留下未注册 bundle（${stale.join(', ')}）；将先从 package.json 移除残留再重新安装，使 Host 完成 bundle 注册。`)
+  process.exit(0)
+}
+console.log(`检测到上次安装失败遗留的半装 bundle（依赖已存在但未注册到 profile）：${stale.join(', ')}；已移除 package.json 中的残留条目，随后重新安装以完成注册。`)
+for (const name of stale) delete dependencies[name]
+manifest.dependencies = dependencies
+const temporary = join(dirname(manifestPath), `.package.json.dsh-enhanced-${randomBytes(12).toString('hex')}`)
+let descriptor
+try {
+  descriptor = openSync(temporary, 'wx', 0o600)
+  const output = Buffer.from(JSON.stringify(manifest, undefined, 2) + '\n')
+  let position = 0
+  while (position < output.length) position += writeSync(descriptor, output, position, output.length - position)
+  closeSync(descriptor)
+  descriptor = undefined
+  chmodSync(temporary, metadata.mode & 0o777)
+  renameSync(temporary, manifestPath)
 } finally {
   if (descriptor !== undefined) closeSync(descriptor)
   rmSync(temporary, { force: true })
@@ -3158,12 +3308,16 @@ dsh_enhanced_macos_stopped_upgrade() {
   local profile="$1"
   local dsh_home="$2"
   local dry_run="$3"
-  shift 3
+  local source_mode="$4"
+  shift 4
   local profile_directory="$dsh_home/profiles/$profile"
   if [[ "$dry_run" == '1' ]]; then
     printf '\nmacOS 已停止 Home 升级：\n'
     printf '  - 将备份完整 profile，精确更新现有受管 bundle，并执行组合与临时 Host 激活验证。\n'
     printf '  - 失败将恢复原 profile；不执行飞书 onboarding，不创建或启动 LaunchAgent。\n'
+    if [[ "$source_mode" == 'npm' ]]; then
+      dsh_enhanced_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run"
+    fi
     dsh_enhanced_print_command env npm_config_loglevel=error dsh plugin --profile "$profile" add "$@"
     dsh_enhanced_print_command dsh --profile "$profile" --dump-config
     dsh_enhanced_print_command dsh --profile "$profile" --host 127.0.0.1 --no-open --port 0
@@ -3187,7 +3341,16 @@ dsh_enhanced_macos_stopped_upgrade() {
     return $?
   fi
   local failure=''
-  npm_config_loglevel=error dsh plugin --profile "$profile" add "$@" || failure='package update failed'
+  # This is a bare `dsh plugin add` (no ignore-scripts unlike the Linux bwrap
+  # transaction), so pnpm 11 rejects an undecided build script the same way as
+  # a first install. Write the reviewed table after the backup: if anything
+  # later fails, the restored profile is byte-identical to the quiesced one.
+  if [[ "$source_mode" == 'npm' ]]; then
+    dsh_enhanced_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || failure='build policy preparation failed'
+  fi
+  if [[ -z "$failure" ]]; then
+    npm_config_loglevel=error dsh plugin --profile "$profile" add "$@" || failure='package update failed'
+  fi
   if [[ -z "$failure" ]] && ! dsh --profile "$profile" --dump-config >/dev/null; then
     failure='profile composition failed'
   fi
@@ -4083,7 +4246,7 @@ NODE
       if [[ "$dry_run" != '1' ]]; then dsh_enhanced_finish_host_update "$profile" "$dsh_home"; fi
       return $?
     fi
-    dsh_enhanced_macos_stopped_upgrade "$profile" "$dsh_home" "$dry_run" "${targets[@]}" || return $?
+    dsh_enhanced_macos_stopped_upgrade "$profile" "$dsh_home" "$dry_run" "$source_mode" "${targets[@]}" || return $?
     if [[ "$dry_run" != '1' ]]; then dsh_enhanced_finish_host_update "$profile" "$dsh_home"; fi
     return $?
   fi
@@ -4103,11 +4266,13 @@ NODE
   elif [[ "$dry_run" == '1' ]]; then
     if [[ "$source_mode" == 'npm' ]]; then
       dsh_enhanced_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || return $?
+      dsh_enhanced_prune_half_installed_bundles "$profile" "$dsh_home" "$dry_run" "${targets[@]}" || return $?
     fi
     dsh_enhanced_print_command env npm_config_loglevel=error dsh plugin --profile "$profile" add "${targets[@]}"
   else
     if [[ "$source_mode" == 'npm' ]]; then
       dsh_enhanced_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || return $?
+      dsh_enhanced_prune_half_installed_bundles "$profile" "$dsh_home" "$dry_run" "${targets[@]}" || return $?
     fi
     npm_config_loglevel=error dsh plugin --profile "$profile" add "${targets[@]}" || return $?
   fi
