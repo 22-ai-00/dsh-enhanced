@@ -77,7 +77,8 @@ dsh-rsi install --help
 - **报 `exactly one current owner DM is required`**：先确认受管服务已启动，用本人账号给机器人私聊发送 `/model` 并完成卡片确认；保留已有绑定，再用相同的 `dsh-rsi install` 命令续跑。该步骤不要求重新授予业务权限。
 - **没有 Web 地址或服务未运行**：先运行 `dsh-rsi status` 和 `dsh-rsi logs --profile web --lines 100`。仅对已注册服务使用 `dsh-rsi start --profile web`；若选了 `core` / `web` 或 `--no-service`，参照上文的私有 Host 前台命令及版本说明。
 - **模型无法对话**：检查默认模型、登录或 API Key。安装时的模型设置会选择当前 profile 默认模型；参照[模型指南](../../docs/models.md)，勿把密钥贴入命令行或日志。
-- **Linux 依赖构建被 pnpm 拒绝**：若报错明确指向 `koffi` 和 profile 目录，在该目录用相同 pnpm 版本运行 `pnpm approve-builds koffi`，再以同一 Home / profile 重试；不要批准全部待审脚本。更多首次安装依赖说明见[维护说明](maintenance.md#首次安装依赖审批)。
+- **Linux 依赖构建被 pnpm 拒绝**：当前安装器已在 `dsh plugin add` 前自动写入经评审决策（`koffi: true`、`protobufjs: false`）；仅旧版安装器首装、报出决策表之外的未知待审包、或 profile 预设有冲突值时才需手工处理——在报错的 profile 目录用相同 pnpm 版本运行 `pnpm approve-builds <包名>`（或在 `pnpm-workspace.yaml` 写明布尔），再以同一 Home / profile 重试；不要批准全部待审脚本。更多首次安装依赖说明见[维护说明](maintenance.md#首次安装依赖审批)。
+- **旧版首装中断后重跑成功但 bundle 未装入**：0.1.62 及更早安装器若在 `dsh plugin add` 阶段失败，依赖已写入 profile `package.json` 而 bundle 尚未注册；仅 `pnpm approve-builds koffi` 后重跑旧安装器可能 exit 0 却没有 bundle 装入。0.1.63 起的安装器会在 add 前自动移除这类半装残留并完成注册（重跑时留意“半装 bundle”提示）；旧版手工恢复步骤见[维护说明](maintenance.md#失败-add-的半装-bundle-自愈)。
 - **升级或恢复被拒绝**：保留报错与状态，查看[维护说明](maintenance.md)和 [CLI 指南](../../packages/dsh-rsi-cli/README.md)；不要通过删账本或重装掩盖未知结果。
 
 <details>
