@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { LlmRuntime, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { reviewOwnerRequest } from '../src/owner-request-review.ts'
+import { reviewOwnerRequest, reviewOwnerRequestDetailed } from '../src/owner-request-review.ts'
 import { AssistantPolicyService } from '../src/service.ts'
 
 const base = {
@@ -14,7 +14,7 @@ const base = {
   signal: new AbortController().signal,
 }
 
-function runtime(response: string | 'freeze') {
+function runtime(response: string | 'freeze', replay = false) {
   const calls: unknown[] = []
   const llm = { async * stream(options: unknown): AsyncIterable<StreamChunk> {
     calls.push(options)
@@ -22,16 +22,70 @@ function runtime(response: string | 'freeze') {
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text: response }
     yield { type: 'block-end', index: 0, block: { type: 'text', text: response } }
-    yield { type: 'finish', reason: { kind: 'stop' } }
+    yield { type: 'finish', reason: { kind: 'stop' }, ...(replay ? { replayState: {
+      response: { id: 'response-1', status: 'completed' }, blocks: [{ index: 0 }],
+    } } : {}) }
   } } as LlmRuntime
   return { llm, calls }
 }
 
 describe('isolated owner request review', () => {
+  test('accepts a stopped text decision with adapter replay metadata', async () => {
+    const llm = { async * stream(): AsyncIterable<StreamChunk> {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '{"decision":"execute"}' } }
+      yield { type: 'finish', reason: { kind: 'stop' }, replayState: {
+        response: { id: 'response-1', status: 'completed' }, blocks: [{ index: 0 }],
+      } }
+    } } as unknown as LlmRuntime
+    expect(await reviewOwnerRequest(llm, base)).toBe(true)
+  })
+
+  test.each([
+    { name: 'missing finish', finish: false, trailing: [] as StreamChunk[] },
+    { name: 'second finish', finish: true, trailing: [{ type: 'finish', reason: { kind: 'stop' } }] as StreamChunk[] },
+    { name: 'text after finish', finish: true, trailing: [{ type: 'text-delta', index: 0, text: 'more' }] as StreamChunk[] },
+    { name: 'tool after finish', finish: true, trailing: [{ type: 'tool-call-delta', index: 1,
+      id: 'call-1' as never, argumentsDelta: '{}', name: 'untrusted-tool' }] as StreamChunk[] },
+  ])('rejects $name even when the visible text says execute', async ({ finish, trailing }) => {
+    const llm = { async * stream(): AsyncIterable<StreamChunk> {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '{"decision":"execute"}' } }
+      if (finish) yield { type: 'finish', reason: { kind: 'stop' }, replayState: { response: {} } }
+      for (const chunk of trailing) yield chunk
+    } } as unknown as LlmRuntime
+    expect(await reviewOwnerRequestDetailed(llm, base)).toBe('stream-invalid')
+  })
   test('accepts only strict execute JSON on the frozen session route with no tools', async () => {
     const { llm, calls } = runtime('{"decision":"execute"}')
     expect(await reviewOwnerRequest(llm, base)).toBe(true)
     expect(calls).toMatchObject([{ provider: 'current-provider', model: 'current-model', tools: [], maxTokens: 64 }])
+  })
+
+  test.each([
+    { output: '{"decision":"ask"}', reason: { kind: 'stop' } as const },
+    { output: '{"decision":"execute","extra":1}', reason: { kind: 'stop' } as const },
+    { output: '{"decision":"execute"}', reason: { kind: 'max-tokens' } as const },
+    { output: '{"decision":"execute"}', reason: { kind: 'tool-calls' } as const },
+  ])('replay metadata cannot authorize a $reason.kind or malformed response', async ({ output, reason }) => {
+    const llm = { async * stream(): AsyncIterable<StreamChunk> {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: output } }
+      yield { type: 'finish', reason, replayState: {
+        response: { id: 'response-1', status: 'completed', decision: 'execute' }, blocks: [{ index: 0 }],
+      } }
+    } } as unknown as LlmRuntime
+    expect(await reviewOwnerRequest(llm, base)).toBe(false)
+  })
+
+  test('replay metadata cannot authorize a tool-call stream', async () => {
+    const llm = { async * stream(): AsyncIterable<StreamChunk> {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '{"decision":"execute"}' } }
+      yield { type: 'tool-call-delta', index: 1, id: 'call-1' as never, argumentsDelta: '{}', name: 'untrusted-tool' }
+      yield { type: 'finish', reason: { kind: 'stop' }, replayState: { response: {}, blocks: [] } }
+    } } as unknown as LlmRuntime
+    expect(await reviewOwnerRequest(llm, base)).toBe(false)
   })
 
   test.each(['{"decision":"ask"}', '{"decision":"execute","extra":true}', '```json\n{"decision":"execute"}\n```'])
@@ -43,6 +97,23 @@ describe('isolated owner request review', () => {
     const start = Date.now()
     expect(await reviewOwnerRequest(runtime('freeze').llm, base)).toBe(false)
     expect(Date.now() - start).toBeLessThan(1000)
+  })
+
+  test('categorizes a timeout, ask, malformed JSON, and invalid stream without retaining content', async () => {
+    expect(await reviewOwnerRequestDetailed(runtime('freeze').llm, base)).toBe('timeout')
+    expect(await reviewOwnerRequestDetailed(runtime('{"decision":"ask"}', true).llm, base)).toBe('ask')
+    expect(await reviewOwnerRequestDetailed(runtime('invalid', true).llm, base)).toBe('malformed')
+    const failed = { async * stream(): AsyncIterable<StreamChunk> {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      throw new Error('adapter failed')
+    } } as unknown as LlmRuntime
+    expect(await reviewOwnerRequestDetailed(failed, base)).toBe('error')
+    const incomplete = { async * stream(): AsyncIterable<StreamChunk> {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '{"decision":"execute"}' } }
+      yield { type: 'finish', reason: { kind: 'max-tokens' }, replayState: { response: {} } }
+    } } as unknown as LlmRuntime
+    expect(await reviewOwnerRequestDetailed(incomplete, base)).toBe('stream-invalid')
   })
 
   test('bounds output while it is still streaming', async () => {
@@ -63,7 +134,7 @@ test('service scopes one reviewed owner request to its exact proposal and persis
   const root = await mkdtemp(join(tmpdir(), 'owner-request-policy-'))
   const ctx = new Context()
   try {
-    ctx.provide('llm' as never, runtime('{"decision":"execute"}').llm as never)
+    ctx.provide('llm' as never, runtime('{"decision":"execute"}', true).llm as never)
     const policy = new AssistantPolicyService(ctx, {
       databasePath: join(root, 'policy.sqlite'), autoReview: { enabled: true }, rules: [],
     })
@@ -85,8 +156,26 @@ test('service scopes one reviewed owner request to its exact proposal and persis
       resolveOwnerRequest: () => context }, () => policy.recoverOrCreateProposal(proposal))
     expect(result).toMatchObject({ kind: 'proposal', proposal: { status: 'approved', version: 2 } })
     expect(policy.listPendingApprovalDispatches()).toEqual([])
+    expect(policy.queryAudit().filter(event => event.action === 'owner-request.review'))
+      .toMatchObject([{ outcome: 'reviewed', reasonCode: 'scope-matched' }])
     expect(policy.recoverOrCreateProposal({ ...proposal, idempotencyKey: 'second' }))
       .toMatchObject({ kind: 'proposal', proposal: { status: 'pending' } })
+    ctx.set('llm' as never, runtime('{"decision":"ask"}', true).llm as never)
+    const askProposal = { ...proposal, idempotencyKey: 'ask-key' }
+    expect(await policy.runOwnerRequestedChange({ execution: execution as never,
+      resourceKind: 'memory', operation: 'add', policyIdempotencyKey: askProposal.idempotencyKey,
+      resolveOwnerRequest: () => context }, () => policy.recoverOrCreateProposal(askProposal)))
+      .toMatchObject({ kind: 'proposal', proposal: { status: 'pending' } })
+    ctx.set('llm' as never, runtime('{"decision":"execute"}', true).llm as never)
+    const wrongProposal = { ...proposal, idempotencyKey: 'wrong-key' }
+    expect(await policy.runOwnerRequestedChange({ execution: execution as never,
+      resourceKind: 'memory', operation: 'add', policyIdempotencyKey: 'expected-key',
+      resolveOwnerRequest: () => context }, () => policy.recoverOrCreateProposal(wrongProposal)))
+      .toMatchObject({ kind: 'proposal', proposal: { status: 'pending' } })
+    expect(policy.queryAudit().filter(event => event.action === 'owner-request.review').map(event => event.reasonCode))
+      .toEqual(['scope-matched', 'review-ask', 'scope-mismatch'])
+    expect(JSON.stringify(policy.queryAudit())).not.toContain('请记住')
+    expect(JSON.stringify(policy.queryAudit())).not.toContain('Rui')
     await ctx.fiber.restart()
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -186,6 +275,8 @@ test('missing model uses the proposal path; a changed owner receipt cannot commi
     expect(await policy.runOwnerRequestedChange({ execution: execution as never, resourceKind: 'memory',
       operation: 'add', policyIdempotencyKey: proposal.idempotencyKey, resolveOwnerRequest: owner },
     () => policy.recoverOrCreateProposal(proposal))).toMatchObject({ kind: 'proposal', proposal: { status: 'pending' } })
+    expect(policy.queryAudit().filter(event => event.action === 'owner-request.review').map(event => [event.outcome, event.reasonCode]))
+      .toEqual([['interrupted', 'request-changed-or-error'], ['reviewed', 'route-missing']])
     await ctx.fiber.restart()
   } finally {
     await rm(root, { recursive: true, force: true })

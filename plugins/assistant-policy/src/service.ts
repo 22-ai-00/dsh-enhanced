@@ -9,7 +9,7 @@ import Schema from '@deepseek-ai/schemastery'
 import type { ToolDefinition, ToolExecution, ToolGuard } from '@deepseek-ai/dsh-tools'
 import type { ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import { isAutoReviewEscalation, registerAutoReviewAnswerer, type AutoReviewConfig } from './auto-review.js'
-import { reviewOwnerRequest } from './owner-request-review.js'
+import { reviewOwnerRequestDetailed, type OwnerRequestReviewResult } from './owner-request-review.js'
 import { HumanApprovalRouter, type HumanApprovalAnswerer } from './approval-routing.js'
 import {
   approvalPermissionFingerprint,
@@ -111,6 +111,7 @@ interface OwnerRequestedScope {
   readonly reason: string
   readonly requester: string
   used: boolean
+  mismatch: boolean
 }
 
 /** Read-only, Host-only record of the active policy configuration. */
@@ -890,6 +891,7 @@ export class AssistantPolicyService extends Service {
       && input.dispatch !== undefined
       && canonicalJson(input.dispatch) === canonicalJson(scope.route)
     if (eligible) scope.used = true
+    else if (scope !== undefined) scope.mismatch = true
     const result = eligible
       ? this.ledger.recoverOrCreateOwnerRequestedProposal(input, scope.reason, scope.assertCurrent)
       : this.ledger.recoverOrCreateProposal(input)
@@ -911,87 +913,121 @@ export class AssistantPolicyService extends Service {
 
   /** One synchronous domain commit can use a freshly reviewed owner request for one exact proposal. */
   async runOwnerRequestedChange<T>(input: OwnerRequestedChangeInput, commit: () => T): Promise<T> {
-    this.assertActive()
     const execution = input.execution
-    const agent = execution.agent
-    const resourceKind = input.resourceKind
-    const operation = input.operation
-    const key = input.policyIdempotencyKey
-    const expectedName = resourceKind === 'memory' ? 'memory_manage' : 'wiki_upsert'
-    const expectedOperation = `${resourceKind}.${operation}`
-    const requester = agent === undefined ? undefined : `agent:${agent.session.header.agentPreset}`
-    const originalCallId = String(execution.callId)
-    const initialEmergency = this.ledger.getEmergencyStop()
-    const assertNotCancelled = (): void => {
-      this.assertActive()
-      if (execution.signal.aborted) throw new Error('assistant-policy: owner request execution cancelled')
-    }
-    assertNotCancelled()
-    if (agent === undefined || !['memory', 'wiki'].includes(resourceKind) || execution.name !== expectedName
-      || (resourceKind === 'memory' && !['add', 'replace'].includes(operation))
-      || (resourceKind === 'wiki' && !['create', 'update'].includes(operation))) return commit()
-    const context = input.resolveOwnerRequest()
-    const config = agent.session.requestHeader()?.config
-    const reviewConfig = this.configuration.autoReview
-    const llm = this.policyContext.get('llm')
-    if (context === undefined || reviewConfig?.enabled === false || llm === undefined
-      || typeof config?.provider !== 'string' || typeof config.model !== 'string'
-      || initialEmergency.enabled) { assertNotCancelled(); return commit() }
-    const args = canonicalJson(execution.arguments)
-    const requiresTarget = operation === 'replace' || operation === 'update'
-    let target: unknown
-    try { target = requiresTarget ? input.resolveCurrentTarget?.() : undefined } catch { assertNotCancelled(); return commit() }
-    const targetJson = requiresTarget ? canonicalJson(target) : undefined
-    const receipt = canonicalJson(context)
-    const routeConfig = canonicalJson(config)
-    const permissionFingerprint = approvalPermissionFingerprint(agent.session.snapshotEvents())
-    const currentLlm = llmIdentity(llm)
-    if (args === undefined || receipt === undefined || (requiresTarget && (target === null || targetJson === undefined))
-      || Buffer.byteLength(args) + Buffer.byteLength(targetJson ?? '') > 64 * 1024
-      || context.route.routeVersion !== 2
-      || !/^[a-f0-9]{64}$/iu.test(context.receiptDigest)
-      || context.text.trim() === '' || context.route.principal.trim() === ''
-      || context.route.workspace !== agent.session.header.cwd) { assertNotCancelled(); return commit() }
-    const frozenArgs = freezeDeep(structuredClone(execution.arguments))
-    const frozenTarget = requiresTarget ? freezeDeep(structuredClone(target)) : undefined
-    const frozenRoute = freezeDeep(structuredClone(context.route))
-    const reason = `owner-request:${context.receiptDigest}:call:${createHash('sha256').update(originalCallId).digest('hex')}`
-    const assertCurrent = (): void => {
-      this.assertActive()
-      const emergency = this.ledger.getEmergencyStop()
-      if (execution.signal.aborted || emergency.enabled || emergency.version !== initialEmergency.version
-        || canonicalJson(execution.arguments) !== args
-        || String(execution.callId) !== originalCallId || execution.name !== expectedName
-        || input.resourceKind !== resourceKind || input.operation !== operation || input.policyIdempotencyKey !== key
-        || (requiresTarget && canonicalJson(input.resolveCurrentTarget?.()) !== targetJson)
-        || `agent:${agent.session.header.agentPreset}` !== requester
-        || canonicalJson(input.resolveOwnerRequest()) !== receipt
-        || canonicalJson(agent.session.requestHeader()?.config) !== routeConfig
-        || approvalPermissionFingerprint(agent.session.snapshotEvents()) !== permissionFingerprint
-        || llmIdentity(this.policyContext.get('llm')) !== currentLlm) {
-        throw new Error('assistant-policy: owner request changed or execution cancelled')
-      }
-    }
-    assertCurrent()
-    const approved = await reviewOwnerRequest(llm, {
-      ownerText: context.text, toolName: execution.name, arguments: frozenArgs,
-      currentTarget: frozenTarget,
-      resourceKind, operation,
-      provider: config.provider, model: config.model,
-      timeoutMs: Math.min(reviewConfig?.timeoutMs ?? 30_000, 30_000),
-      maxTokens: Math.min(reviewConfig?.maxTokens ?? 512, 512),
-      signal: AbortSignal.any([execution.signal, this.ownerReviewAbort.signal]),
-    })
-    assertCurrent()
-    if (!approved) return commit()
-    if (this.ownerRequestedScope !== undefined) throw new Error('assistant-policy: nested owner request scope')
-    this.ownerRequestedScope = { key, route: frozenRoute,
-      principal: frozenRoute.principal, action: expectedOperation, resourceKind,
-      requester: requester!, used: false, assertCurrent, reason }
+    const callHash = createHash('sha256').update(String(execution.callId)).digest('hex')
+    let reviewOutcome = 'context-missing'
+    let interrupted = false
+    let receiptDigest: string | undefined
     try {
-      return commit()
+      this.assertActive()
+      const agent = execution.agent
+      const resourceKind = input.resourceKind
+      const operation = input.operation
+      const key = input.policyIdempotencyKey
+      const expectedName = resourceKind === 'memory' ? 'memory_manage' : 'wiki_upsert'
+      const expectedOperation = `${resourceKind}.${operation}`
+      const requester = agent === undefined ? undefined : `agent:${agent.session.header.agentPreset}`
+      const originalCallId = String(execution.callId)
+      const initialEmergency = this.ledger.getEmergencyStop()
+      const assertNotCancelled = (): void => {
+        this.assertActive()
+        if (execution.signal.aborted) throw new Error('assistant-policy: owner request execution cancelled')
+      }
+      assertNotCancelled()
+      if (agent === undefined || !['memory', 'wiki'].includes(resourceKind) || execution.name !== expectedName
+        || (resourceKind === 'memory' && !['add', 'replace'].includes(operation))
+        || (resourceKind === 'wiki' && !['create', 'update'].includes(operation))) { reviewOutcome = 'context-invalid'; return commit() }
+      const context = input.resolveOwnerRequest()
+      if (context !== undefined && /^[a-f0-9]{64}$/iu.test(context.receiptDigest)) receiptDigest = context.receiptDigest
+      const config = agent.session.requestHeader()?.config
+      const reviewConfig = this.configuration.autoReview
+      const llm = this.policyContext.get('llm')
+      if (context === undefined || reviewConfig?.enabled === false || llm === undefined
+        || typeof config?.provider !== 'string' || typeof config.model !== 'string'
+        || initialEmergency.enabled) {
+        reviewOutcome = context === undefined ? 'context-missing' : reviewConfig?.enabled === false ? 'review-disabled'
+          : llm === undefined ? 'model-missing' : initialEmergency.enabled ? 'emergency-stop' : 'route-missing'
+        assertNotCancelled(); return commit()
+      }
+      const args = canonicalJson(execution.arguments)
+      const requiresTarget = operation === 'replace' || operation === 'update'
+      let target: unknown
+      try { target = requiresTarget ? input.resolveCurrentTarget?.() : undefined } catch { reviewOutcome = 'target-unavailable'; assertNotCancelled(); return commit() }
+      const targetJson = requiresTarget ? canonicalJson(target) : undefined
+      const receipt = canonicalJson(context)
+      const routeConfig = canonicalJson(config)
+      const permissionFingerprint = approvalPermissionFingerprint(agent.session.snapshotEvents())
+      const currentLlm = llmIdentity(llm)
+      if (args === undefined || receipt === undefined || (requiresTarget && (target === null || targetJson === undefined))
+        || Buffer.byteLength(args) + Buffer.byteLength(targetJson ?? '') > 64 * 1024
+        || context.route.routeVersion !== 2
+        || !/^[a-f0-9]{64}$/iu.test(context.receiptDigest)
+        || context.text.trim() === '' || context.route.principal.trim() === ''
+        || context.route.workspace !== agent.session.header.cwd) {
+        reviewOutcome = args === undefined || Buffer.byteLength(args) + Buffer.byteLength(targetJson ?? '') > 64 * 1024
+          ? 'input-limit' : requiresTarget && (target === null || targetJson === undefined)
+            ? 'target-unavailable' : 'context-invalid'
+        assertNotCancelled(); return commit()
+      }
+      const frozenArgs = freezeDeep(structuredClone(execution.arguments))
+      const frozenTarget = requiresTarget ? freezeDeep(structuredClone(target)) : undefined
+      const frozenRoute = freezeDeep(structuredClone(context.route))
+      const reason = `owner-request:${context.receiptDigest}:call:${createHash('sha256').update(originalCallId).digest('hex')}`
+      const assertCurrent = (): void => {
+        this.assertActive()
+        const emergency = this.ledger.getEmergencyStop()
+        if (execution.signal.aborted || emergency.enabled || emergency.version !== initialEmergency.version
+          || canonicalJson(execution.arguments) !== args
+          || String(execution.callId) !== originalCallId || execution.name !== expectedName
+          || input.resourceKind !== resourceKind || input.operation !== operation || input.policyIdempotencyKey !== key
+          || (requiresTarget && canonicalJson(input.resolveCurrentTarget?.()) !== targetJson)
+          || `agent:${agent.session.header.agentPreset}` !== requester
+          || canonicalJson(input.resolveOwnerRequest()) !== receipt
+          || canonicalJson(agent.session.requestHeader()?.config) !== routeConfig
+          || approvalPermissionFingerprint(agent.session.snapshotEvents()) !== permissionFingerprint
+          || llmIdentity(this.policyContext.get('llm')) !== currentLlm) {
+          throw new Error('assistant-policy: owner request changed or execution cancelled')
+        }
+      }
+      assertCurrent()
+      const result: OwnerRequestReviewResult = await reviewOwnerRequestDetailed(llm, {
+        ownerText: context.text, toolName: execution.name, arguments: frozenArgs,
+        currentTarget: frozenTarget,
+        resourceKind, operation,
+        provider: config.provider, model: config.model,
+        timeoutMs: Math.min(reviewConfig?.timeoutMs ?? 30_000, 30_000),
+        maxTokens: Math.min(reviewConfig?.maxTokens ?? 512, 512),
+        signal: AbortSignal.any([execution.signal, this.ownerReviewAbort.signal]),
+      })
+      reviewOutcome = `review-${result}`
+      assertCurrent()
+      if (result !== 'execute') return commit()
+      if (this.ownerRequestedScope !== undefined) throw new Error('assistant-policy: nested owner request scope')
+      this.ownerRequestedScope = { key, route: frozenRoute,
+        principal: frozenRoute.principal, action: expectedOperation, resourceKind,
+        requester: requester!, used: false, mismatch: false, assertCurrent, reason }
+      try {
+        return commit()
+      } finally {
+        reviewOutcome = this.ownerRequestedScope.mismatch ? 'scope-mismatch'
+          : this.ownerRequestedScope.used ? 'scope-matched' : 'scope-unused'
+        this.ownerRequestedScope = undefined
+      }
+    } catch (error) {
+      interrupted = true
+      if (reviewOutcome === 'context-missing' || reviewOutcome.startsWith('review-')) {
+        reviewOutcome = execution.signal.aborted ? 'request-cancelled' : 'request-changed-or-error'
+      } else if (reviewOutcome === 'scope-matched' || reviewOutcome === 'scope-mismatch') {
+        reviewOutcome = 'commit-error'
+      }
+      throw error
     } finally {
-      this.ownerRequestedScope = undefined
+      // One bounded, content-free diagnostic per call; the ledger hashes the id again.
+      if (this.active) this.ledger.appendAudit({ actor: 'assistant-policy', action: 'owner-request.review',
+        resource: { kind: 'tool-call', id: callHash },
+        outcome: interrupted ? 'interrupted' : 'reviewed',
+        reasonCode: reviewOutcome, details: { callHash, ...(receiptDigest === undefined ? {} : { receiptDigest }) },
+      })
     }
   }
 

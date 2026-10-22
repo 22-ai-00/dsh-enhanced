@@ -23,30 +23,39 @@ export interface OwnerRequestReviewInput {
 
 /** Failure, malformed output and a non-cooperating stream all retain the normal proposal path. */
 export async function reviewOwnerRequest(llm: LlmRuntime, input: OwnerRequestReviewInput): Promise<boolean> {
-  if (input.signal.aborted) return false
+  return (await reviewOwnerRequestDetailed(llm, input)) === 'execute'
+}
+
+export type OwnerRequestReviewResult = 'execute' | 'ask' | 'malformed' | 'timeout' | 'stream-invalid' | 'error' | 'input-limit' | 'cancelled'
+
+/** The result is categorical; no model text or tool arguments escape this reviewer. */
+export async function reviewOwnerRequestDetailed(llm: LlmRuntime, input: OwnerRequestReviewInput): Promise<OwnerRequestReviewResult> {
+  if (input.signal.aborted) return 'cancelled'
   const args = JSON.stringify(input.arguments)
   const target = input.currentTarget === undefined ? undefined : JSON.stringify(input.currentTarget)
   if (args === undefined || (input.currentTarget !== undefined && target === undefined)
     || Buffer.byteLength(args) + Buffer.byteLength(target ?? '') > 64 * 1024
-    || Buffer.byteLength(input.ownerText) > 8 * 1024) return false
+    || Buffer.byteLength(input.ownerText) > 8 * 1024) return 'input-limit'
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), input.timeoutMs)
-  let resolveCancelled!: (value: false) => void
-  const cancelled = new Promise<false>(resolve => { resolveCancelled = resolve })
-  const onParentAbort = () => { controller.abort(); resolveCancelled(false) }
+  let timedOut = false
+  const timer = setTimeout(() => { timedOut = true; controller.abort() }, input.timeoutMs)
+  let resolveCancelled!: (value: OwnerRequestReviewResult) => void
+  const cancelled = new Promise<OwnerRequestReviewResult>(resolve => { resolveCancelled = resolve })
+  const onParentAbort = () => { controller.abort(); resolveCancelled('cancelled') }
   input.signal.addEventListener('abort', onParentAbort, { once: true })
   if (input.signal.aborted) onParentAbort()
   let deadline: ReturnType<typeof setTimeout> | undefined
-  const hard = new Promise<false>(resolve => {
-    deadline = setTimeout(() => resolve(false), input.timeoutMs + 250)
+  const hard = new Promise<OwnerRequestReviewResult>(resolve => {
+    deadline = setTimeout(() => resolve('timeout'), input.timeoutMs + 250)
     deadline.unref()
   })
   timer.unref()
-  const operation = (async (): Promise<boolean> => {
+  const operation = (async (): Promise<OwnerRequestReviewResult> => {
     try {
       const assembler = new BlockAssembler()
       let streamBytes = 0
       let streamChunks = 0
+      let sawFinish = false
       for await (const chunk of llm.stream({
         provider: input.provider,
         model: input.model,
@@ -63,28 +72,39 @@ export async function reviewOwnerRequest(llm: LlmRuntime, input: OwnerRequestRev
         maxTokens: input.maxTokens,
         signal: controller.signal,
       })) {
-        if (controller.signal.aborted || ++streamChunks > MAX_STREAM_CHUNKS) return false
-        if (chunk.type === 'tool-call-delta') return false
-        if (chunk.type === 'finish' && chunk.replayState !== undefined) return false
+        if (controller.signal.aborted) return timedOut ? 'timeout' : 'cancelled'
+        if (sawFinish) return 'stream-invalid'
+        if (++streamChunks > MAX_STREAM_CHUNKS) return 'stream-invalid'
+        if (chunk.type === 'tool-call-delta') return 'stream-invalid'
+        if (chunk.type === 'finish') {
+          sawFinish = true
+          if (chunk.reason.kind !== 'stop') return 'stream-invalid'
+        }
+        // replayState is adapter-private metadata, not reviewer content or authority.
+        // Do not retain it in the reviewer assembler.
         if (chunk.type === 'block-end') {
-          if (chunk.block.type !== 'text' && chunk.block.type !== 'reasoning') return false
+          if (chunk.block.type !== 'text' && chunk.block.type !== 'reasoning') return 'stream-invalid'
           streamBytes += Buffer.byteLength(chunk.block.text)
         } else if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
           streamBytes += Buffer.byteLength(chunk.text)
         }
-        if (streamBytes > MAX_STREAM_BYTES) return false
-        assembler.push(chunk)
+        if (streamBytes > MAX_STREAM_BYTES) return 'stream-invalid'
+        assembler.push(chunk.type === 'finish' ? { type: 'finish', reason: chunk.reason } : chunk)
       }
-      if (controller.signal.aborted || input.signal.aborted || assembler.finish.kind !== 'stop') return false
+      if (controller.signal.aborted || input.signal.aborted) return timedOut ? 'timeout' : 'cancelled'
+      if (!sawFinish || assembler.finish.kind !== 'stop') return 'stream-invalid'
       const blocks = assembler.blocks()
-      if (blocks.some(block => block.type !== 'text' && block.type !== 'reasoning')) return false
+      if (blocks.some(block => block.type !== 'text' && block.type !== 'reasoning')) return 'stream-invalid'
       const output = blocks.filter(block => block.type === 'text').map(block => block.text).join('')
-      if (Buffer.byteLength(output) > 256) return false
-      const parsed: unknown = JSON.parse(output)
-      return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
-        && Object.keys(parsed).length === 1 && (parsed as { decision?: unknown }).decision === 'execute'
+      if (Buffer.byteLength(output) > 256) return 'malformed'
+      let parsed: unknown
+      try { parsed = JSON.parse(output) } catch { return 'malformed' }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)
+        || Object.keys(parsed).length !== 1) return 'malformed'
+      const decision = (parsed as { decision?: unknown }).decision
+      return decision === 'execute' || decision === 'ask' ? decision : 'malformed'
     } catch {
-      return false
+      return controller.signal.aborted ? timedOut ? 'timeout' : 'cancelled' : 'error'
     }
   })()
   try {
