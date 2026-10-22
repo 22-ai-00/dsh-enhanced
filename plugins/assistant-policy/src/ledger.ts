@@ -115,6 +115,27 @@ export type ApprovalDispatchRoute = ApprovalDispatchRouteV1 | ApprovalDispatchRo
 
 export type ApprovalProposalStatus = 'approved' | 'expired' | 'pending' | 'rejected'
 
+/**
+ * Policy fact for an exact owner route. Excludes diff, summary and reason;
+ * caller-owned action/resource metadata still needs source and byte limits.
+ */
+export interface ApprovalProposalRouteState {
+  proposalId: string
+  resource: { kind: string; id: string }
+  action: string
+  /** Pending past its deadline is projected as expired without writing the ledger. */
+  status: ApprovalProposalStatus
+  version: number
+  createdAt: number
+  expiresAt: number
+  decidedAt?: number
+}
+
+export interface ApprovalProposalRouteStates {
+  proposals: readonly ApprovalProposalRouteState[]
+  truncated: boolean
+}
+
 export interface ApprovalProposalResult {
   proposalId: string
   status: ApprovalProposalStatus
@@ -1294,6 +1315,76 @@ export class PolicyLedger {
       LIMIT ?
     `).all(this.#now(), cursorCreatedAt, cursorCreatedAt, cursorCreatedAt, cursorProposalId, limit) as unknown as DispatchRow[]
     return rows.map(row => this.#dispatchSnapshot(row))
+  }
+
+  /** Read-only, exact v2 owner-route facts; action/resource remain caller metadata. */
+  listProposalStatesForRoute(route: ApprovalDispatchRouteV2, limit = 10): ApprovalProposalRouteStates {
+    if (route === null || typeof route !== 'object' || Array.isArray(route)
+      || route.routeVersion !== 2) {
+      throw new PolicyLedgerError('invalid-input', 'approval proposal route must be v2')
+    }
+    for (const [field, value, maxBytes] of [
+      ['sourceId', route.sourceId, textLimits.id],
+      ['bindingId', route.bindingId, textLimits.id],
+      ['workspace', route.workspace, textLimits.workspace],
+      ['principal', route.principal, textLimits.id],
+      ['principalRecordId', route.principalRecordId, textLimits.principalRecordId],
+    ] as const) {
+      if (typeof value !== 'string') {
+        throw new PolicyLedgerError('invalid-input', `approval proposal route ${field} must be text`)
+      }
+      requireBoundedText(value, `approval proposal route ${field}`, maxBytes)
+    }
+    if (!isAbsolute(route.workspace)) {
+      throw new PolicyLedgerError('invalid-path', 'approval proposal route workspace must be absolute')
+    }
+    if (route.principalRecordId.normalize('NFC').trim() !== route.principalRecordId) {
+      throw new PolicyLedgerError('invalid-input', 'approval proposal route principalRecordId must be normalized and trimmed')
+    }
+    requirePositiveSafeInteger(route.bindingVersion, 'approval proposal route bindingVersion')
+    requirePositiveSafeInteger(route.bindingGeneration, 'approval proposal route bindingGeneration')
+    requirePositiveSafeInteger(route.principalVersion, 'approval proposal route principalVersion')
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) {
+      throw new PolicyLedgerError('invalid-input', 'approval proposal state limit must be between 1 and 20')
+    }
+    const now = this.#now()
+    const rows = this.#database.prepare(`
+      SELECT p.id, p.action, p.resource_kind, p.resource_id, p.status,
+             p.version, p.created_at, p.expires_at, p.decided_at
+      FROM approval_dispatches d
+      JOIN approval_proposals p ON p.id = d.proposal_id
+      WHERE d.route_version = 2 AND d.source_id = ? AND d.binding_id = ?
+        AND d.binding_version = ? AND d.binding_generation = ?
+        AND d.workspace = ? AND d.principal = ? AND p.principal = ?
+        AND d.principal_record_id = ? AND d.principal_version = ?
+      ORDER BY p.created_at DESC, p.id DESC
+      LIMIT ?
+    `).all(route.sourceId, route.bindingId, route.bindingVersion,
+      route.bindingGeneration, route.workspace, route.principal, route.principal,
+      route.principalRecordId, route.principalVersion, limit + 1) as unknown as Array<{
+        id: string
+        action: string
+        resource_kind: string
+        resource_id: string
+        status: ApprovalProposalStatus
+        version: number
+        created_at: number
+        expires_at: number
+        decided_at: number | null
+      }>
+    return Object.freeze({
+      proposals: Object.freeze(rows.slice(0, limit).map(row => Object.freeze({
+        proposalId: row.id,
+        resource: Object.freeze({ kind: row.resource_kind, id: row.resource_id }),
+        action: row.action,
+        status: row.status === 'pending' && row.expires_at <= now ? 'expired' as const : row.status,
+        version: row.version,
+        createdAt: row.created_at,
+        expiresAt: row.expires_at,
+        ...(row.decided_at === null ? {} : { decidedAt: row.decided_at }),
+      }))),
+      truncated: rows.length > limit,
+    })
   }
 
   markApprovalDispatchEnqueued(

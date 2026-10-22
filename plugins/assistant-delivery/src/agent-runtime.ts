@@ -66,6 +66,7 @@ import {
   serializeLearningExport,
 } from './learning-command.js'
 import type { DeliveryInboundRuntime } from './service.js'
+import { renderOwnerApprovalStatus, type OwnerApprovalStatusRead } from './approval-status-context.js'
 import {
   isExactDeliveryCommand,
   learningDispatchRecoveryCode,
@@ -116,6 +117,7 @@ interface DshDeliveryRuntimeOptions {
   workspace: string
   agentPreset: string
   getAgentPresets(): Pick<AgentPresets, 'mount' | 'resolve'> | undefined
+  readOwnerApprovalStatus(agent: Agent): OwnerApprovalStatusRead | undefined
   policyRef: string
   provider: string
   model: string
@@ -2124,6 +2126,35 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     agentCtx.on('session/event', (eventSession, event) => {
       if (eventSession !== agent.session) return
       if (event.type === 'turn/end' || event.type === 'tool/result') installUserCancelledToolNotice()
+    })
+    // A context registration changes native cold-resume accounting even if its
+    // text is empty. Install only after a real proposal is visible (or a read
+    // failed), then re-read on every prompt assembly. Live proposal creation
+    // becomes visible after the tool result/turn settles.
+    let approvalStatusInstalled = false
+    const currentApprovalStatus = (): OwnerApprovalStatusRead | 'unavailable' | undefined => {
+      try { return this.options.readOwnerApprovalStatus(agent) }
+      catch { return 'unavailable' }
+    }
+    const installApprovalStatus = (): void => {
+      if (approvalStatusInstalled) return
+      const status = currentApprovalStatus()
+      if (status === undefined || (status !== 'unavailable'
+        && status.memory.proposals.length === 0 && status.wiki.proposals.length === 0)) return
+      approvalStatusInstalled = true
+      agentCtx.inject(['systemPrompt'], promptCtx => promptCtx.systemPrompt.context({
+        name: 'assistant-delivery:owner-approval-status',
+        order: 261,
+        text: () => {
+          const current = currentApprovalStatus()
+          return current === undefined ? '' : renderOwnerApprovalStatus(current)
+        },
+      }))
+    }
+    installApprovalStatus()
+    agentCtx.on('session/event', (eventSession, event) => {
+      if (eventSession === agent.session && (event.type === 'tool/result' || event.type === 'turn/end'
+        || event.type === 'user/message')) installApprovalStatus()
     })
     await agentPresets?.mount(agentCtx, presetId)
   }

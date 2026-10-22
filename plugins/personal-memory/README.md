@@ -45,6 +45,8 @@ dsh --profile web --dump-config
 
 ## 行为与工具
 
+保存结论以当前工具结果为准：`approved` 与实际 `record` 一起返回才表示本次写入成功；已有内容可用 `memory_search` 核对。旧助手回复、仅 Policy 批准或待决提案都不能证明已保存。拒绝或过期的提案保持终态；主人再次明确提出的新请求使用新幂等键，同一请求的重试保留原键。
+
 - `memory_search`：显式检索当前 agent 可见的四个域；ASCII 词元（含紧邻 CJK 的 Latin 词元）与相邻 CJK unigram/bigram 均可召回；标点、空白或 Latin 文本两侧的 CJK 不会组成人工 bigram。排序和 tie-break 确定，读取不更新任何计数。
 - `memory_search_confirmed`：面向后台复盘的窄查询；服务端固定只返回非敏感、`user-confirmed` 的 `instruction` / `preference`，调用方不能通过参数放宽 trust、kind 或 sensitivity。
 - `memory_manage`：当前轮 owner 明确要求写入普通私有名字、偏好或长期记忆时，add/replace 可经 Delivery 原文及精确工具参数证明、Policy 独立有界审查后直接批准并提交，返回 `approved` 和实际 `record`。助手自行建议、歧义、owner 明确要求“等我批准”、remove、`sensitive` 条目、缺少当前 proof 或审查未通过时仍返回待审批提案，不表示已写入。模型不能提供 principal、TTL 或批准标志；来源路由和 TTL 由可信服务决定。

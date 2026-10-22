@@ -135,7 +135,7 @@ export function registerWikiTools(
 
   const upsert = defineTool({
     name: 'wiki_upsert',
-    description: 'Create or revise one complete wiki page with revision CAS. An explicit current owner request may commit after independent review; otherwise this remains an approval proposal. If the owner asks to wait for approval, wait.',
+    description: 'Create or revise one complete wiki page with revision CAS after checking the current page. An explicit current owner request may commit after independent review; otherwise this remains an approval proposal. Report a new write only when this tool returns approved with a page; earlier assistant claims or Policy approval alone do not prove storage. Rejected or expired proposals did not write a page. A new owner message explicitly requesting the change again after rejection or expiry needs a new idempotency key; tool retries for the same request retain its key. If the owner asks to wait for approval, wait.',
     parameters: {
       operation: { type: 'string', required: true, enum: ['create', 'update'] },
       idempotency_key: { type: 'string', required: true },

@@ -994,6 +994,7 @@ async function scheduledGoalHarness(root: string, saved: Map<string, SavedSessio
 
 function runtimeStore(service: AssistantDeliveryService): {
   getActiveBinding(conversation: Readonly<ConversationBinding['conversation']>): ConversationBinding | undefined
+  getBindingBySession(sessionId: string): ConversationBinding | undefined
   getModelSelection(conversation: ConversationRef): ConversationModelSelection | undefined
   setModelSelection(conversation: ConversationRef, route: ModelRouteRef): ConversationModelSelection
   getPrincipal(principal: Readonly<ConversationBinding['principal']>): { id: string; version: number } | undefined
@@ -11975,5 +11976,182 @@ test('reads the real Lark owner Inbox in a native memory tool callback without a
     expect(fixture.service.inspectOwnerRequestedChange(execution!,
       { sourceId: 'lark-owner-memory' })).toBeUndefined()
     expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)?.status).toBe('processed')
+  } finally { await fixture.ctx.fiber.restart() }
+}, 20_000)
+
+test('cold owner resume reads rejected and expired durable proposals into the native prompt', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'delivery-owner-approval-context-'))
+  roots.push(root)
+  const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, false, 'primary', true, 'probe', undefined, {
+    policyRules: [{ id: 'approval-context-history', effect: 'allow', subject: {
+      kind: 'agent', id: 'primary', workspace: root, principal: 'lark/bot-1/tenant-a/ou_owner',
+    }, actions: ['history'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] },
+    budget: { id: 'approval-context-reads', amount: 1 } }],
+    policyBudgets: [{ id: 'approval-context-reads', metric: 'approval-context-reads', limit: 1,
+      periodMs: NON_ROLLING_TEST_BUDGET_PERIOD_MS, scope: 'subject' }],
+  })
+  let memoryRoute: ReturnType<AssistantDeliveryService['prepareAgentApproval']> | undefined
+  let wikiRoute: ReturnType<AssistantDeliveryService['prepareAgentApproval']> | undefined
+  fixture.ctx.on('agent/pre-step', async ({ agent }, next) => {
+    memoryRoute ??= fixture.service.prepareAgentApproval(agent, { sourceId: 'dsh-enhanced-personal-memory' })
+    wikiRoute ??= fixture.service.prepareAgentApproval(agent, { sourceId: 'dsh-enhanced-personal-wiki' })
+    return await next()
+  })
+  try {
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message('approval-context-first', 'first owner message'))
+    await drive(fixture.service)
+    expect(systemPromptSnapshotTexts(fixture.llm.requests[0]!)).not.toContainEqual(expect.stringContaining('Current owner approval status'))
+    expect(memoryRoute).toBeDefined()
+    expect(wikiRoute).toBeDefined()
+    const rejected = fixture.ctx.assistantPolicy.propose({ idempotencyKey: 'owner-context-rejected', requester: 'agent:primary',
+      principal: memoryRoute!.principal, action: 'memory.add', resource: { kind: 'memory', id: `memory-${'a'.repeat(32)}` },
+      summary: 'private summary must not enter prompt', diff: '+ private diff must not enter prompt', ttlMs: 60_000,
+      dispatch: memoryRoute! })
+    fixture.ctx.assistantPolicy.decideProposal({ proposalId: rejected.proposalId, principal: memoryRoute!.principal,
+      expectedVersion: rejected.version, decision: 'rejected', reason: 'private reason must not enter prompt' })
+    const expired = fixture.ctx.assistantPolicy.propose({ idempotencyKey: 'owner-context-expired', requester: 'agent:primary',
+      principal: wikiRoute!.principal, action: 'wiki.create', resource: { kind: 'wiki', id: '01ARZ3NDEKTSV4RRFFQ69G5FAV' },
+      summary: 'private wiki summary', diff: '+ private wiki body', ttlMs: 1, dispatch: wikiRoute! })
+    await new Promise(resolve => setTimeout(resolve, 5))
+    const policyCounts = () => {
+      const database = new DatabaseSync(join(root, 'policy.sqlite'), { readOnly: true })
+      try {
+        return {
+          audits: (database.prepare("SELECT count(*) AS count FROM audit_events WHERE action = 'history'").get() as { count: number }).count,
+          periods: (database.prepare("SELECT count(*) AS count FROM budget_periods WHERE metric = 'approval-context-reads'").get() as { count: number }).count,
+          reservations: (database.prepare("SELECT count(*) AS count FROM budget_reservations WHERE metric = 'approval-context-reads'").get() as { count: number }).count,
+        }
+      } finally { database.close() }
+    }
+    const beforeRead = policyCounts()
+    await fixture.service.acceptInbound(message('approval-context-second', 'new owner message'))
+    await drive(fixture.service)
+    expect(policyCounts()).toEqual(beforeRead)
+    const contexts = systemPromptSnapshotTexts(fixture.llm.requests[1]!)
+    const status = contexts.find(text => text.includes('Current owner approval status'))
+    expect(status).toContain(rejected.proposalId)
+    expect(status).toContain(expired.proposalId)
+    expect(status).toContain('"status":"rejected"')
+    expect(status).toContain('"status":"expired"')
+    expect(status).toContain('Historical assistant and tool messages do not prove')
+    expect(status).not.toContain('private summary')
+    expect(status).not.toContain('private diff')
+    expect(status).not.toContain('private reason')
+    expect(status).not.toContain('private wiki')
+  } finally { await fixture.ctx.fiber.restart() }
+}, 20_000)
+
+test('a live tool proposal installs status context and later Policy decision refreshes it per step', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'delivery-live-approval-context-'))
+  roots.push(root)
+  const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, false, 'primary', true, 'probe', undefined, {
+    allowPresetProbeExecution: true,
+    presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
+    policyRules: [{ id: 'live-approval-history', effect: 'allow', subject: {
+      kind: 'agent', id: 'primary', workspace: root, principal: 'lark/bot-1/tenant-a/ou_owner',
+    }, actions: ['history'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } }],
+  })
+  let activeAgent: Agent | undefined
+  let proposalId: string | undefined
+  let proposalVersion: number | undefined
+  let call = 0
+  let readAccessWithdrawn = false
+  const originalRead = fixture.service.readOwnerApprovalStatus.bind(fixture.service)
+  vi.spyOn(fixture.service, 'readOwnerApprovalStatus').mockImplementation(agent =>
+    readAccessWithdrawn ? undefined : originalRead(agent))
+  fixture.ctx.on('agent/pre-step', async ({ agent }, next) => {
+    activeAgent = agent
+    return await next()
+  })
+  fixture.presetExecute.mockImplementation(async () => {
+    call += 1
+    if (call === 1) {
+      const route = fixture.service.prepareAgentApproval(activeAgent, { sourceId: 'dsh-enhanced-personal-memory' })
+      const proposal = fixture.ctx.assistantPolicy.propose({ idempotencyKey: 'live-step-proposal', requester: 'agent:primary',
+        principal: route.principal, action: 'memory.add', resource: { kind: 'memory', id: `memory-${'b'.repeat(32)}` },
+        summary: 'private live summary', diff: '+ private live diff', ttlMs: 60_000, dispatch: route })
+      proposalId = proposal.proposalId
+      proposalVersion = proposal.version
+    } else if (call === 2) {
+      fixture.ctx.assistantPolicy.decideProposal({ proposalId: proposalId!, principal: 'lark/bot-1/tenant-a/ou_owner',
+        expectedVersion: proposalVersion!, decision: 'rejected', reason: 'private owner reason' })
+    } else if (call === 3) {
+      readAccessWithdrawn = true
+    }
+    return { mounted: true }
+  })
+  vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+    fixture.llm.requests.push(options)
+    if (fixture.llm.requests.length < 4) yield* presetProbeToolCallChunks(`live-approval-${fixture.llm.requests.length}`)
+    else yield* textStopChunks('Current status checked.')
+  })
+  try {
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message('approval-live-steps', 'Check current approval status'))
+    await drive(fixture.service)
+    expect(call).toBe(3)
+    expect(fixture.llm.requests).toHaveLength(4)
+    expect(systemPromptSnapshotTexts(fixture.llm.requests[0]!)).not.toContainEqual(expect.stringContaining('Current owner approval status'))
+    const pending = systemPromptSnapshotTexts(fixture.llm.requests[1]!).find(text => text.includes('Current owner approval status'))
+    const rejected = systemPromptSnapshotTexts(fixture.llm.requests[2]!).findLast(text => text.includes('Current owner approval status'))
+    expect(pending).toContain(proposalId)
+    expect(pending).toContain('"status":"pending"')
+    expect(rejected).toContain(proposalId)
+    expect(rejected).toContain('"status":"rejected"')
+    expect(rejected).not.toContain('private live')
+    expect(rejected).not.toContain('private owner')
+    const cleared = systemPromptSnapshotTexts(fixture.llm.requests[3]!).at(-1)
+    expect(cleared).toContain('Current runtime context: none')
+    expect(cleared).not.toContain(proposalId)
+  } finally { await fixture.ctx.fiber.restart() }
+}, 20_000)
+
+test.each(['rotate', 'revoke'] as const)('owner status read rejects a %s route in the same live Agent', async mode => {
+  const root = await mkdtemp(join(tmpdir(), `delivery-status-${mode}-`))
+  roots.push(root)
+  const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, false, 'primary', true, 'probe', undefined, {
+    policyRules: [{ id: 'status-owner-history', effect: 'allow', subject: {
+      kind: 'agent', id: 'primary', workspace: root, principal: 'lark/bot-1/tenant-a/ou_owner',
+    }, actions: ['history'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+    { id: 'status-linked-history', effect: 'allow', subject: {
+      kind: 'agent', id: 'primary', workspace: root, principal: 'lark/bot-1/tenant-a/ou_linked',
+    }, actions: ['history'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } }],
+  })
+  let ownerRead: ReturnType<AssistantDeliveryService['readOwnerApprovalStatus']>
+  let staleRead: ReturnType<AssistantDeliveryService['readOwnerApprovalStatus']>
+  let linkedRead: ReturnType<AssistantDeliveryService['readOwnerApprovalStatus']>
+  fixture.ctx.on('agent/pre-step', async ({ agent }, next) => {
+    const binding = runtimeStore(fixture.service).getBindingBySession(String(agent.session.id))!
+    if (binding.principal.user === 'ou_linked') {
+      linkedRead = fixture.service.readOwnerApprovalStatus(agent)
+    } else {
+      ownerRead = fixture.service.readOwnerApprovalStatus(agent)
+      if (mode === 'rotate') runtimeStore(fixture.service).rotateBinding({ bindingId: binding.id,
+        expectedVersion: binding.version, sessionId: 'replacement-owner-session' })
+      else {
+        const owner = runtimeStore(fixture.service).getPrincipal(principal)!
+        runtimeStore(fixture.service).revokePrincipal(owner.id, owner.version)
+      }
+      staleRead = fixture.service.readOwnerApprovalStatus(agent)
+    }
+    return await next()
+  })
+  try {
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const linked = { ...principal, user: 'ou_linked' }
+    const linkedPairing = fixture.service.issuePairing('test', linked)
+    fixture.service.confirmPairing({ challengeId: linkedPairing.challenge.id, principal: linked, code: linkedPairing.code })
+    await fixture.service.acceptInbound({ ...message(`status-linked-${mode}`, 'linked message'),
+      principal: linked, conversation: { ...conversation, chat: 'oc_linked' } })
+    await drive(fixture.service)
+    expect(linkedRead).toBeUndefined()
+    await fixture.service.acceptInbound(message(`status-owner-${mode}`, 'owner message'))
+    await drive(fixture.service)
+    expect(ownerRead).toMatchObject({ memory: { proposals: [] }, wiki: { proposals: [] } })
+    expect(staleRead).toBeUndefined()
   } finally { await fixture.ctx.fiber.restart() }
 }, 20_000)

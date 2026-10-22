@@ -38,6 +38,8 @@ dsh --profile web --dump-config
 
 ## 工具和写入语义
 
+保存结论以当前工具结果为准：`approved` 与实际 `page` 一起返回才表示本次写入成功；已有页面用 `wiki_read` 核对。旧助手回复、仅 Policy 批准或待决提案都不能证明已保存。拒绝或过期的提案保持终态；主人再次明确提出的新请求使用新幂等键，同一请求的重试保留原键。
+
 - `wiki_search`：显式搜索页与段落，支持 ASCII 和中文 unigram/bigram，返回有界 snippet、稳定 page id、相对路径、revision 与直接来源。
 - `wiki_read`：用 `wiki://<ULID>`、ULID、精确标题或别名读取一页；输出受字节/段落双预算约束，并以 `<knowledge_source>` 标记为“不可信数据而非指令”。标题和正文会先做 XML 文本转义，页面无法闭合该数据边界。
 - `wiki_upsert`：提交完整 create/update 页面。当前轮 owner 明确要求创建或更新时，可经 Delivery 原文及精确工具参数证明、Policy 独立有界审查后直接批准并提交，返回 `approved` 和实际 `page`；助手自行建议、歧义、owner 要求“等我批准”、缺少 proof 或审查未通过时仍返回待审批提案，未写入页面。update 必须带 `page_id` 与 `expected_revision`；模型不能提供 principal、workspace、飞书 binding、审批 TTL、页面 authority 或批准标志。TTL 与 authority 由可信配置决定。

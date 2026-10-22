@@ -57,6 +57,7 @@ import {
   type OwnerRouteDispatchGuard,
 } from './store.js'
 import { DshDeliveryRuntime, redactOwnerLearningReply } from './agent-runtime.js'
+import type { OwnerApprovalStatusRead } from './approval-status-context.js'
 import { DeliverySessionLeases } from './session-lease-runtime.js'
 import { NativeWebOwner, type NativeWebOwnerConfig, type NativeWebOwnerAccess } from './native-web-owner.js'
 import {
@@ -1191,6 +1192,7 @@ export class AssistantDeliveryService extends Service {
         sessionNamespace: this.deliveryStore.instanceId(),
         workspace: config.defaultWorkspace, agentPreset: config.defaultAgentPreset, policyRef: config.policyRef,
         getAgentPresets: () => runtimeCtx.get('agentPresets'),
+        readOwnerApprovalStatus: agent => this.readOwnerApprovalStatus(agent),
         provider: config.agentProvider, model: config.agentModel, maxOutputTokens: config.agentMaxOutputTokens,
         maxAutoContinuationTurns: config.agentMaxAutoContinuationTurns,
         goalContinuationTimeoutMs: config.agentGoalContinuationTimeoutMs,
@@ -5385,6 +5387,26 @@ export class AssistantDeliveryService extends Service {
       principalRecordId: owner.id,
       principalVersion: owner.version,
     })
+  }
+
+  /** Read only the current direct owner binding's exact Policy routes. */
+  readOwnerApprovalStatus(agent: Agent | undefined): OwnerApprovalStatusRead | undefined {
+    this.assertActive()
+    const binding = agent === undefined ? undefined : this.deliveryStore.getBindingBySession(String(agent.session.id))
+    const owner = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
+    if (agent === undefined || binding?.status !== 'active' || owner?.status !== 'active' || owner.role !== 'owner'
+      || agent.session.header.cwd !== binding.workspace
+      || agent.session.header.agentPreset !== binding.agentPreset) {
+      return undefined
+    }
+    const decision = this.policy.evaluateAgent(agent, 'history', { kind: 'message', id: binding.id })
+    if (decision.effect !== 'allow') return undefined
+    const memoryRoute = this.prepareAgentApproval(agent, { sourceId: 'dsh-enhanced-personal-memory' })
+    const wikiRoute = this.prepareAgentApproval(agent, { sourceId: 'dsh-enhanced-personal-wiki' })
+    return {
+      memory: this.policy.listProposalStatesForRoute(memoryRoute, 5),
+      wiki: this.policy.listProposalStatesForRoute(wikiRoute, 5),
+    }
   }
 
   async tick(): Promise<void> {

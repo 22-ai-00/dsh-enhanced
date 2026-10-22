@@ -35,6 +35,7 @@ import {
   type ApprovalProposalRecoveryInput,
   type ApprovalProposalRecoveryResult,
   type ApprovalDispatchRouteV2,
+  type ApprovalProposalRouteStates,
   type ApprovalProposalResult,
   type AuditEvent,
   type BudgetReservationInput,
@@ -1037,6 +1038,12 @@ export class AssistantPolicyService extends Service {
   ): ApprovalDispatchSnapshot[] {
     this.assertActive()
     return this.ledger.listPendingApprovalDispatches(limit, after)
+  }
+
+  /** Host-only facts for the current owner route; no diff, summary or reason. */
+  listProposalStatesForRoute(route: ApprovalDispatchRouteV2, limit = 10): ApprovalProposalRouteStates {
+    this.assertActive()
+    return this.ledger.listProposalStatesForRoute(route, limit)
   }
 
   markApprovalDispatchEnqueued(
