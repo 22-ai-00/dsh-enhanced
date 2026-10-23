@@ -29,7 +29,8 @@ class Adapter extends LlmAdapter {
 async function fixture(mode?: Adapter['mode']) {
   const root = await mkdtemp(join(tmpdir(), 'source-review-native-')), ctx = new Context()
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: 'GLOBAL PERSONA MUST NOT LEAK' } })
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true,
+    systemPrompt: { personaPrefix: 'GLOBAL PERSONA MUST NOT LEAK' } })
   ctx.tools.register({ name: 'global_write', description: 'A global tool that review must never inherit.',
     parameters: { type: 'object', properties: {} },
     output: { schema: { type: 'string' }, render: () => [{ type: 'text', text: 'forbidden' }] },
@@ -61,6 +62,9 @@ test('runs one native turn with the exact inherited model, isolated prompt and z
   expect(f.adapter.requests).toHaveLength(1)
   expect(f.adapter.requests[0]).toMatchObject({ provider: 'supplier', model: 'task-model', reasoningEffort: 'high', maxTokens: 512 })
   expect(f.adapter.requests[0]!.tools ?? []).toEqual([])
+  expect(f.adapter.requests[0]!.messages).toHaveLength(3)
+  expect(f.adapter.requests[0]!.messages[2]).toMatchObject({ role: 'user', source: { kind: 'runtime-context',
+    sections: [{ name: 'working-directory:current', text: `Current working directory: ${JSON.stringify(f.root)}.` }] } })
   expect(JSON.stringify(f.adapter.requests[0]!.messages.filter(message => message.role === 'system'))).not.toContain('GLOBAL PERSONA')
   expect(f.assertCurrent.mock.calls.length).toBeGreaterThan(3)
 })

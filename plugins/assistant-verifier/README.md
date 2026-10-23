@@ -175,6 +175,8 @@ sourceReviews:
 
 Host 独立读取精确 PR ref、单一 base parent、改动范围和已检查 tree/patch digest，再给全新、无 preset、无工具的原生 Agent 审查。候选代码和任务文本仅作为不可信数据；固定政策、模型、一次调用、输入字节、输出 token、期限与累计调用数构成审查边界。完整 `completed` 回合、用量和严格 JSON 结果缺一不可；源码审查不等于行为改善证明，后续构建、签名和采用仍有各自检查。
 
+源码、记忆和创建/修订审查允许 pinned Host 追加必需的工作目录快照：来源、唯一 `working-directory:current` section 和正文必须精确匹配本次 owner workspace。该消息仍计入总输入字节上限；其他额外消息、上下文或改写的任务/规则保持拒绝。旧的两消息请求继续兼容，不改变已冻结模型、预算或未知操作的恢复方式。
+
 持久账本位于 `databasePath + '.source-reviews'`，目录须私有且 canonical。调用前落 claim；崩溃、取消或不明确结果不会自动重调模型。相同授权下的已完成批准可在再次核对来源与 PR 后恢复同一 decision 文件；改变政策、模型、目录或额度须使用新的授权标识。拒绝不会写批准文件。已 claim 的未知调用需要管理员核查本地 Session/账本，Host 返回的 `sessionId` 可定位该请求的原生会话；当前没有自动重审或模型自我批准入口。
 
 新增权限为：读取固定 Git executable/仓库、执行受限 Git 读命令、经 Host 模型供应商发送任务目标与补丁、写私有 SQLite/Session/decision。模型不能读取凭据、执行命令或写文件。该进程内工具边界不构成 OS 隔离；候选构建与 decision 写权限必须由部署隔离。原始任务、补丁、审查输出和账本留本地，不提交到 GitHub。

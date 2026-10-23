@@ -12,6 +12,7 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { matchesIsolatedModelMessages } from '@dsh-enhanced/assistant-growth-contract'
 import type { SourceReviewConfig, SourceReviewModelSelection, SourceReviewRequest } from './source-review.js'
 
 const instruction = [
@@ -73,9 +74,8 @@ export async function runNativeSourceReview(ctx: Context, input: {
           if (calls !== 0 || options.provider !== model.provider || options.model !== model.model
             || options.reasoningEffort !== model.reasoningEffort || options.maxTokens !== config.maxOutputTokens
             || (options.tools?.length ?? 0) !== 0 || agentCtx.tools.schemas(agent).length !== 0
-            || options.system !== undefined || options.messages.length !== 2 || options.messages[0]?.role !== 'system'
-            || acceptanceDigest(options.messages[0].content) !== acceptanceDigest([{ type: 'text', text: prompt }])
-            || options.messages[1]?.role !== 'user' || acceptanceDigest(options.messages[1].content) !== acceptanceDigest([{ type: 'text', text: data }])
+            || options.system !== undefined || !matchesIsolatedModelMessages(options.messages,
+              { system: prompt, user: data, workspace: request.source.owner.workspace })
             || Buffer.byteLength(JSON.stringify(options.messages)) > config.maxInputBytes) {
             violated = true; agent.cancel({ kind: 'hook', reason: 'source-review-contract-changed' })
             throw new Error('source review model contract changed')

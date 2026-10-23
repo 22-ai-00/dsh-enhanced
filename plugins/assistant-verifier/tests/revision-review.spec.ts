@@ -123,7 +123,8 @@ async function fixture() {
   inspectPreparedRevisionReviewContext: vi.fn(async () => ({ patch: '+ owner_sum signed addition',
     changedPaths: ['plugins/owner-sum/src/index.ts'] })) }
   const ctx = new Context(); contexts.push(ctx)
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: 'GLOBAL PERSONA MUST NOT LEAK' } })
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true,
+    systemPrompt: { personaPrefix: 'GLOBAL PERSONA MUST NOT LEAK' } })
   ctx.tools.register({ name: 'global_write', description: 'Forbidden inherited tool', parameters: { type: 'object', properties: {} },
     output: { schema: { type: 'string' }, render: () => [{ type: 'text', text: 'forbidden' }] },
     execute: async () => { throw new Error('review executed a global tool') } })

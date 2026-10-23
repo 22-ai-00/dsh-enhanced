@@ -2,7 +2,7 @@
 
 普通任务驱动的持久事实与经验学习。一次 owner 配置与有限授权后，原生 Automations 发现已完成的普通对话，原生 Agent 提取候选，独立 Verifier 重读来源审查，Personal Memory 在授权范围内采用。后续任务沿 Memory 的动态检索与 System Prompt seam 使用已采用记录。无需逐条调用捕获或批准工具。
 
-兼容当前 DSH `0.2.0-rc.2`、Cordis `4.0.4` 和本仓库 `0.1.49` 同批 Delivery、Evaluation、Automations、Policy、Verifier、Memory。安装本包不会启用其他 bundle。发布 patch 默认禁用，必须先配置下述 owner/grants 和预算，再启用该稳定行。
+验证基线为仓库固定的 DSH `0.2.1-rc.2`、Cordis `4.0.5` 与同批 Delivery、Evaluation、Automations、Policy、Verifier、Memory。安装本包不会启用其他 bundle。发布 patch 默认禁用，必须先配置下述 owner/grants 和预算，再启用该稳定行。
 
 ```sh
 dsh plugin --profile assistant add @dsh-enhanced/assistant-memory-learning
@@ -45,6 +45,8 @@ Policy 最少需要这些准确 owner/workspace、`initiators: ['background']` �
 提取快照、原生 occurrence、候选请求和原始终态指纹持久化。付费 admission 后失败保留消耗，绝不换 operation ID 自动重跑。未保存 request 证明尚未调用审查/采用：学习意图终结为 failed，释放队列容量；原生 Automation 仍可标记 unknown，表示付费模型调用成本/结果未确认，而非记忆写入发生。已保存请求的 unknown 只用同请求查询原始采用/审查回执；approved 可在当前来源和原授权内完成采用，unknown 不重复审查，过期/撤回/修订后的旧意图停止采用。失败历史保留。
 
 卸载/依赖更换先关闭 admission、移除 executor、取消执行并持久化未结任务，然后等待 drain。关闭有 5 秒上界；超时报告失败并保留未知结果，不能据此宣称外部执行已释放。迟到模型输出不再触发审查或采用。队列由原生 Automations 拥有：本包不增加 timer、AgentLoop 或 Goal 状态机。
+
+提取的原生请求允许 DSH 必需的当前工作目录快照，但会逐字核验它与冻结 owner workspace 一致；额外上下文仍在模型派发前拒绝。这一兼容仅影响新提取，旧失败的付费 operation 不会自动重试。
 
 ## 权限与数据边界
 
