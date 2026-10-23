@@ -44,3 +44,8 @@ canonical 任务结果，替换/删除必须指定记录版本；模型不能设
 
 本包只使用 Node `crypto` 计算 canonical SHA-256 与验签，不访问网络、文件系统、子进程、凭据或
 浏览器，也没有 install script。
+
+`matchesIsolatedModelMessages` 是原生无工具提取/审查回合共用的请求消息边界。除精确的
+system/user 正文外，仅允许当前 DSH AgentLoop 的必需 `working-directory:current`
+runtime-context 快照，正文和来源都必须指向冻结的 workspace；其他上下文或额外消息拒绝。
+调用方仍负责冻结供应商、模型、工具表、请求字节和输出额度的校验。

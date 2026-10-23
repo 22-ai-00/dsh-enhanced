@@ -5,7 +5,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
+import { growthObjectDigest, matchesIsolatedModelMessages } from '@dsh-enhanced/assistant-growth-contract'
 
 export interface CreationModel { provider: string; model: string; reasoningEffort?: string }
 interface NativeInput {
@@ -64,9 +64,8 @@ export async function runNativeCreationTurn(ctx: Context, input: NativeInput): P
           if (calls !== 0 || options.provider !== model.provider || options.model !== model.model
             || options.reasoningEffort !== model.reasoningEffort || options.maxTokens !== input.maxOutputTokens
             || (options.tools?.length ?? 0) !== 0 || agentCtx.tools.schemas(agent).length !== 0
-            || options.system !== undefined || options.messages.length !== 2 || options.messages[0]?.role !== 'system'
-            || growthObjectDigest(options.messages[0].content) !== growthObjectDigest([{ type: 'text', text: prompt }])
-            || options.messages[1]?.role !== 'user' || growthObjectDigest(options.messages[1].content) !== growthObjectDigest([{ type: 'text', text: data }])
+            || options.system !== undefined || !matchesIsolatedModelMessages(options.messages,
+              { system: prompt, user: data, workspace: owner.workspace })
             || Buffer.byteLength(JSON.stringify(options.messages)) > input.maxInputBytes) {
             violated = true; agent.cancel({ kind: 'hook', reason: 'creation-review-contract-changed' })
             throw new Error('creation review model contract changed')

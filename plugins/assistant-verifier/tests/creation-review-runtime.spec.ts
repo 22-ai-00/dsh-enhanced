@@ -115,7 +115,8 @@ async function fixture() {
   inspectPreparedCreationReviewContext: vi.fn(async () => ({ patch: '+ owner_sum signed addition',
     changedPaths: ['plugins/owner-sum/src/index.ts'] })) }
   const ctx = new Context(); contexts.push(ctx)
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: 'GLOBAL PERSONA MUST NOT LEAK' } })
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true,
+    systemPrompt: { personaPrefix: 'GLOBAL PERSONA MUST NOT LEAK' } })
   ctx.tools.register({ name: 'global_write', description: 'Forbidden inherited tool', parameters: { type: 'object', properties: {} },
     output: { schema: { type: 'string' }, render: () => [{ type: 'text', text: 'forbidden' }] },
     execute: async () => { throw new Error('review executed a global tool') } })
@@ -153,6 +154,11 @@ test('uses two fresh inherited-model Agent turns, private challenge cases, exact
   expect(new Set(result.certificate.observations.map(item => item.jobId)).size).toBe(2)
   expect(observer.run).toHaveBeenCalledTimes(3)
   expect(f.adapter.requests).toHaveLength(2)
+  for (const item of f.adapter.requests) {
+    expect(item.messages).toHaveLength(3)
+    expect(item.messages[2]).toMatchObject({ role: 'user', source: { kind: 'runtime-context', form: 'snapshot',
+      sections: [{ name: 'working-directory:current', text: `Current working directory: ${JSON.stringify(f.root)}.` }] } })
+  }
   expect(f.adapter.requests.every(item => item.provider === 'supplier' && item.model === 'task-model'
     && item.reasoningEffort === 'high' && (item.tools?.length ?? 0) === 0)).toBe(true)
   expect(f.adapter.requests[0]!.maxTokens).toBe(1023)
