@@ -905,7 +905,7 @@ async function writeManifest(transactionRoot, manifest, state, details = {}) {
   return next
 }
 
-async function loadManifest(physicalTransactionRoot, expected) {
+async function loadManifest(physicalTransactionRoot, expected, validationTransactionRoot = physicalTransactionRoot) {
   let rootDescriptor
   let manifestDescriptor
   let manifest
@@ -931,7 +931,7 @@ async function loadManifest(physicalTransactionRoot, expected) {
     if (rootDescriptor !== undefined) closeSync(rootDescriptor)
   }
   if (manifest?.version === HOST_UPDATE_MANIFEST_VERSION) {
-    validateHostUpdateManifest(manifest, expected, physicalTransactionRoot)
+    validateHostUpdateManifest(manifest, expected, validationTransactionRoot, physicalTransactionRoot)
     return manifest
   }
   const initializingServiceManifest = isServiceManifestVersion(manifest?.version)
@@ -1195,6 +1195,23 @@ function validateHostUpdateManifest(manifest, expected, transactionRoot, identit
       || migration.programReadinessRecovery.permit.profile !== expected.profile
       || !isDeepStrictEqual(migration.programReadinessRecovery.permit.oldInstaller, migration.localSource.installer)) {
       fail('program readiness recovery requires a started owner program candidate')
+    }
+  }
+  if (migration.rollbackReadinessRecovery !== undefined) {
+    const permit = migration.rollbackReadinessRecovery?.permit
+    if (!programUpdate || migration.candidateEverStarted !== false
+      || manifest.state !== 'preparing' || migration.phase !== 'prepared'
+      || migration.programReadinessRecovery !== undefined || migration.nativeSettingsImport !== undefined
+      || !exactKeys(migration.rollbackReadinessRecovery, ['permit'])
+      || !exactKeys(permit, ['protocol', 'schemaVersion', 'homePath', 'profile', 'transactionId',
+        'baseManifestDigest', 'immutableManifestDigest', 'originalIdentity', 'unitBeforeDigests',
+        'activeServices', 'sourceProofDigest', 'hostPlanDigest', 'ownerGrantDigest', 'oldInstaller',
+        'readinessInstaller', 'issuedAt', 'authority', 'keyId', 'signature'])
+      || permit.protocol !== 'dsh-enhanced/owner-program-rollback-readiness-recovery/v1'
+      || permit.transactionId !== manifest.id || permit.homePath !== expected.homePath
+      || permit.profile !== expected.profile
+      || !isDeepStrictEqual(permit.oldInstaller, migration.localSource.installer)) {
+      fail('program rollback readiness recovery requires a prepared original owner program')
     }
   }
   if (migration.plan.status !== 'update' && !sameHostSource) fail('Host 更新事务不能记录 current 计划。')
@@ -1936,14 +1953,16 @@ function serviceCommandEnvironment() {
     PATH: '/usr/bin:/bin',
     LANG: 'C',
     LC_ALL: 'C',
+    TZ: 'UTC',
     ...(process.env.HOME === undefined ? {} : { HOME: process.env.HOME }),
     ...(process.env.DBUS_SESSION_BUS_ADDRESS === undefined ? {} : { DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS }),
     ...(process.env.XDG_RUNTIME_DIR === undefined ? {} : { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR }),
   }
 }
 
-async function runServiceCommand(executable, args) {
-  return await run(executable, args, { env: serviceCommandEnvironment(), capture: true, timeoutMs: 30_000 })
+async function runServiceCommand(executable, args, { rejectTruncated = false } = {}) {
+  return await run(executable, args, { env: serviceCommandEnvironment(), capture: true,
+    rejectTruncated, timeoutMs: 30_000 })
 }
 
 async function withCrashStopGuardian(
@@ -3355,10 +3374,10 @@ function serviceRuntimeReady(previous, service, originalRestoration) {
     && (originalRestoration === undefined || service.mainPid !== previous.mainPid)
 }
 
-async function larkJournalStates(journalctlExecutable, service) {
+async function larkJournalStates(journalctlExecutable, service, { rejectTruncated = false } = {}) {
   const result = await runServiceCommand(journalctlExecutable, [
     '--user', '--unit', service.unit, `_SYSTEMD_INVOCATION_ID=${service.invocationId}`, '--output=cat', '--no-pager',
-  ])
+  ], { rejectTruncated })
   return result.stdout.split('\n').flatMap(line => {
     const normalized = line.trim()
     if (!normalized.startsWith(LARK_STATE_PREFIX)) return []
@@ -7120,6 +7139,203 @@ async function admitHostProgramReadinessRecovery({ homePath, physicalHomePath, p
   return manifest
 }
 
+async function originalRunningServiceProof(systemctlExecutable, service, createdAt) {
+  const raw = await readRawServiceState(systemctlExecutable, service.unit)
+  assertExpectedServiceEnvironment(raw, service)
+  if (!['loaded', 'masked'].includes(raw.loadState) || raw.activeState !== 'active'
+    || raw.subState !== 'running' || raw.mainPid <= 0 || raw.controlPid !== 0
+    || !/^[a-f0-9]{32}$/u.test(raw.invocationId) || raw.invocationId === service.invocationId) {
+    fail(`original service is not the fresh running invocation: ${service.unit}`)
+  }
+  const shown = parseSystemdShowProperties((await runServiceCommand(systemctlExecutable,
+    ['--user', '--timestamp=us', 'show', service.unit, '--no-pager', '--property=Id', '--property=ExecMainStartTimestamp'])).stdout,
+  service.unit, ['Id', 'ExecMainStartTimestamp'])
+  const startTimestamp = shown.ExecMainStartTimestamp
+  const timestampMatch = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})\.(\d{6}) UTC$/u.exec(startTimestamp)
+  // Automation updatedAt is millisecond precision. Round the systemd microsecond
+  // start up so a registration earlier within the same millisecond cannot pass.
+  const startedAt = timestampMatch === null ? NaN
+    : Date.parse(`${timestampMatch[1]}T${timestampMatch[2]}.${timestampMatch[3]}Z`)
+      + (timestampMatch[3].slice(3) === '000' ? 0 : 1)
+  if (shown.Id !== service.unit
+    || timestampMatch === null
+    || !Number.isSafeInteger(startedAt) || !Number.isSafeInteger(Date.parse(createdAt))
+    || startedAt <= Date.parse(createdAt) || startedAt > Date.now()) {
+    fail(`original service has no trustworthy post-transaction start timestamp: ${service.unit}`)
+  }
+  const after = await readRawServiceState(systemctlExecutable, service.unit)
+  if (after.mainPid !== raw.mainPid || after.invocationId !== raw.invocationId
+    || after.nRestarts !== raw.nRestarts || after.activeState !== 'active' || after.subState !== 'running') {
+    fail(`original service changed while its start timestamp was captured: ${service.unit}`)
+  }
+  return { unit: service.unit, mainPid: raw.mainPid, invocationId: raw.invocationId,
+    nRestarts: raw.nRestarts, startTimestamp, startedAt }
+}
+
+function assertRollbackLarkWindow(states, baseline) {
+  if (!LARK_ACCEPTED_STATES.has(latestLarkState(states))
+    || baseline !== undefined && (states.length < baseline
+      || states.slice(baseline).some(state => !LARK_ACCEPTED_STATES.has(state)))) {
+    fail('original target Lark service changed connection state during rollback readiness')
+  }
+  return baseline ?? states.length
+}
+
+async function completeHostProgramRollbackReadinessRecovery({ homePath, physicalHomePath, profile,
+  transactionRoot, physicalTransactionRoot, serviceContext, installerRoot,
+  parentFsyncPath = LOCK_PARENT_FD_PATH }) {
+  const helper = await import('./owner-program-rollback-recovery.mjs')
+  const verifyArchivedIntent = async intent => {
+    const prefix = `${homePath}.dsh-enhanced-rollback-recovered-${profile}-`
+    if (typeof intent?.transactionId !== 'string' || typeof intent.archivePath !== 'string'
+      || !isAbsolute(intent.archivePath) || resolve(intent.archivePath) !== intent.archivePath
+      || dirname(intent.archivePath) !== dirname(homePath) || !intent.archivePath.startsWith(prefix)) {
+      fail('completed rollback recovery has no bounded private archive intent')
+    }
+    const archived = await loadManifest(intent.archivePath,
+      { homePath, profile, transactionPath: transactionRoot }, physicalTransactionRoot)
+    const envelope = archived.hostMigration.rollbackReadinessRecovery
+    await helper.verifyRollbackRecoveryIntent({ manifest: archived, envelope, intent, homePath, profile,
+      historical: true })
+    const transactionIntent = await helper.readRollbackRecoveryIntentSource(homePath, profile, archived.id)
+    if (!isDeepStrictEqual(transactionIntent, intent)) fail('rollback transaction intent differs from latest locator')
+    if (await helper.readRollbackRecoveryReceipt({ manifest: archived, envelope, intent,
+      homePath, profile, historical: true }) === undefined) {
+      fail('completed rollback archive has no signed readiness attestation')
+    }
+    return archived
+  }
+  if (await existingIdentity(physicalTransactionRoot) === undefined) {
+    const intent = await helper.readRollbackRecoveryIntentSource(homePath, profile)
+    if (intent === undefined) fail('completed rollback recovery has no private latest locator')
+    await verifyArchivedIntent(intent)
+    process.stderr.write(`Host update rollback archive was previously accepted; current service health is not asserted; evidence: ${intent.archivePath}\n`)
+    return
+  }
+  let manifest = await loadManifest(physicalTransactionRoot, { homePath, profile, transactionPath: transactionRoot })
+  if (manifest.hostMigration?.localSource?.protocol !== OWNER_PROGRAM_PROTOCOL
+    || manifest.state !== 'preparing' || manifest.hostMigration.phase !== 'prepared'
+    || manifest.hostMigration.candidateEverStarted !== false
+    || await existingIdentity(join(transactionRoot, 'original-home')) !== undefined
+    || await existingIdentity(join(transactionRoot, 'failed-home')) !== undefined) {
+    fail('rollback readiness recovery requires the prepared original Home before candidate start')
+  }
+  await assertCriticalDirectory(physicalHomePath, manifest.originalIdentity)
+  await verifyHostPlanBinding(manifest.hostMigration.plan, homePath, 'original')
+  const { verifyHostLocalSourceOriginalForPrestartRecovery } = await import('./host-local-source-update.mjs')
+  await verifyHostLocalSourceOriginalForPrestartRecovery({ proof: manifest.hostMigration.localSource,
+    homePath, physicalHome: physicalHomePath })
+  const originalProfile = await readProfile(physicalHomePath, profile)
+  if (sha256(originalProfile.source) !== manifest.originalProfileDigest) {
+    fail('rollback readiness original profile changed')
+  }
+  const restored = await Promise.all(manifest.services.map(async service => {
+    const unit = manifest.hostMigration.units.find(item => item.unit === service.unit)
+    const fragment = await snapshotServiceFile(service.fragment.path, unit.before)
+    return { ...service, fragment: { path: fragment.path, identity: fragment.identity,
+      parentPath: fragment.parentPath, parentIdentity: fragment.parentIdentity,
+      ancestorChain: fragment.ancestorChain, sha256: fragment.sha256 } }
+  }))
+  await assertUnitUniverseStable(serviceContext.systemctlExecutable, manifest.unitUniverse,
+    homePath, manifest.foreignOwnership)
+  const capture = () => Promise.all(restored.map(service => originalRunningServiceProof(
+    serviceContext.systemctlExecutable, service, manifest.createdAt)))
+  const activeServices = await capture()
+  const { envelope, created } = await helper.admitOwnerProgramRollbackRecovery({ manifest,
+    homePath, profile, installerRoot, activeServices })
+  if (created) {
+    await assertCriticalDirectory(physicalHomePath, manifest.originalIdentity)
+    await assertServiceFilesUnchanged(restored)
+    if (!isDeepStrictEqual(await capture(), activeServices)) {
+      fail('original service invocation changed before rollback permit publication')
+    }
+    manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+      hostMigration: { ...manifest.hostMigration, rollbackReadinessRecovery: envelope } }, manifest.state)
+  }
+  serviceContext.rollbackReadinessPermitDigest = sha256(JSON.stringify(envelope.permit))
+  assertReadinessRecoveryAdmissionGate(manifest, serviceContext)
+  let intent = await helper.readRollbackRecoveryIntentSource(homePath, profile, manifest.id)
+  if (intent === undefined) {
+    intent = await helper.createRollbackRecoveryIntent({ manifest, envelope, homePath, profile })
+    await publishReadinessRecoveryReceipt(helper.rollbackRecoveryTransactionIntentPath(homePath, profile, manifest.id),
+      `${JSON.stringify(intent)}\n`)
+  }
+  await helper.verifyRollbackRecoveryIntent({ manifest, envelope, intent, homePath, profile })
+  await helper.publishRollbackRecoveryLocator(homePath, profile, intent, verifyArchivedIntent)
+  if (await existingIdentity(intent.archivePath) !== undefined) {
+    fail('rollback archive already exists while original transaction is pending')
+  }
+  const { ownerRepairActivationInspector } = await import('./owner-repair-readiness.mjs')
+  const owner = sourceOwner(manifest.hostMigration.localSource)
+  const activation = await ownerRepairActivationInspector({ ownerRepair: owner,
+    installer: manifest.hostMigration.localSource.installer, homePath, targetProfile: profile,
+    coordinatorProfile: owner.coordinatorProfile })
+  const coordinatorStart = envelope.permit.activeServices.find(item => item.unit === `dsh-profile-${owner.coordinatorProfile}.service`).startedAt
+  const timeouts = serviceTimeouts()
+  const samples = Math.max(4, timeouts.stabilitySamples)
+  const gap = Math.max(12_000, timeouts.stability) / (samples - 1)
+  let larkBaseline
+  for (let sample = 0; sample < samples; sample += 1) {
+    if (sample > 0) await new Promise(resolveDelay => setTimeout(resolveDelay, gap))
+    await assertCriticalDirectory(physicalHomePath, manifest.originalIdentity)
+    await assertServiceFilesUnchanged(restored)
+    await assertUnitUniverseStable(serviceContext.systemctlExecutable, manifest.unitUniverse,
+      homePath, manifest.foreignOwnership)
+    const current = await capture()
+    if (!isDeepStrictEqual(current, envelope.permit.activeServices)) {
+      fail('original service invocation changed during rollback readiness recovery')
+    }
+    for (const service of restored) {
+      const proof = current.find(item => item.unit === service.unit)
+      if (!await journalHasReadyMarker(serviceContext.journalctlExecutable, proof)) {
+        fail(`original service has no ready marker for its invocation: ${service.unit}`)
+      }
+    }
+    const target = current.find(item => item.unit === `dsh-profile-${profile}.service`)
+    const larkStates = await larkJournalStates(serviceContext.journalctlExecutable, target,
+      { rejectTruncated: true })
+    larkBaseline = assertRollbackLarkWindow(larkStates, larkBaseline)
+    if (!activation(coordinatorStart)) fail('original coordinator has no fresh owner-bound activation')
+  }
+  await finalizeAcceptedServices({ ...serviceContext,
+    dshExecutable: await realpath(manifest.hostMigration.plan.originalRuntime.dshPath),
+    services: restored, serviceMasks: manifest.serviceMasks,
+    serviceStartBarriers: manifest.serviceStartBarriers,
+    containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
+    homePath, targetProfile: profile, unitUniverse: manifest.unitUniverse,
+    foreignOwnership: manifest.foreignOwnership, cleanProfiles: [], acceptance: activeServices,
+    requireLarkReady: true })
+  await assertServiceFilesUnchanged(restored)
+  const afterLark = await larkJournalStates(serviceContext.journalctlExecutable,
+    activeServices.find(item => item.unit === `dsh-profile-${profile}.service`), { rejectTruncated: true })
+  assertRollbackLarkWindow(afterLark, larkBaseline)
+  if (!isDeepStrictEqual(await capture(), envelope.permit.activeServices)
+    || !activation(coordinatorStart)) fail('original service changed after enablement restoration')
+  const existing = await helper.readRollbackRecoveryReceipt({ manifest, envelope, intent, homePath, profile })
+  if (existing === undefined) {
+    const receipt = await helper.createRollbackRecoveryReceipt({ manifest, envelope, intent, homePath,
+      profile, accepted: activeServices })
+    await publishReadinessRecoveryReceipt(helper.rollbackRecoveryReceiptPath(homePath, profile, manifest.id),
+      `${JSON.stringify(receipt)}\n`)
+    if (await helper.readRollbackRecoveryReceipt({ manifest, envelope, intent, homePath, profile }) === undefined) {
+      fail('rollback readiness receipt was not durably readable')
+    }
+  }
+  await assertCriticalDirectory(physicalHomePath, manifest.originalIdentity)
+  await assertServiceFilesUnchanged(restored)
+  const finalLark = await larkJournalStates(serviceContext.journalctlExecutable,
+    activeServices.find(item => item.unit === `dsh-profile-${profile}.service`), { rejectTruncated: true })
+  assertRollbackLarkWindow(finalLark, larkBaseline)
+  if (!isDeepStrictEqual(await capture(), envelope.permit.activeServices)
+    || !activation(coordinatorStart)) {
+    fail('original service or owner activation changed before rollback archive')
+  }
+  await moveBoundDirectoryNoReplace(physicalTransactionRoot, intent.archivePath,
+    manifest.transactionIdentity)
+  await fsyncPath(parentFsyncPath, true)
+  process.stderr.write(`Host update original services accepted without restart; evidence: ${intent.archivePath}\n`)
+}
+
 async function verifyHostPlanBinding(plan, homePath, selection = 'original') {
   const path = join(homePath, '.dsh-rsi-host.json')
   if (plan.schemaVersion === 2 && selection === 'original') {
@@ -8089,6 +8305,11 @@ function assertReadinessRecoveryAdmissionGate(manifest, serviceContext) {
       !== sha256(JSON.stringify(migration.programReadinessRecovery.permit))) {
     fail('signed readiness recovery requires explicit admitted lifecycle operation')
   }
+  if (migration.rollbackReadinessRecovery !== undefined
+    && serviceContext?.rollbackReadinessPermitDigest
+      !== sha256(JSON.stringify(migration.rollbackReadinessRecovery.permit))) {
+    fail('signed rollback readiness recovery requires explicit admitted lifecycle operation')
+  }
 }
 
 async function recoverHostUpdate({ manifest: initial, homePath, physicalHomePath, profile,
@@ -8224,7 +8445,7 @@ async function main() {
   const homePath = await canonicalMissingAllowed(suppliedHomePath)
   const recoveryOperation = operation === 'recover' || operation === 'service-recover'
     || operation === 'host-recover' || operation === 'host-recover-settings'
-    || operation === 'host-recover-readiness'
+    || operation === 'host-recover-readiness' || operation === 'host-recover-rollback-readiness'
   const dshExecutable = await realpath(suppliedDshExecutable).catch(() => fail('DSH executable must exist'))
   const bwrapExecutable = recoveryOperation ? suppliedBwrapExecutable
     : await trustedSystemExecutable(suppliedBwrapExecutable, 'bwrap')
@@ -8292,7 +8513,8 @@ async function main() {
   }
   if (operation === 'host-update' || operation === 'host-recover' || operation === 'host-local-update' || operation === 'host-owner-repair'
     || operation === 'host-owner-repair-successor' || operation === 'host-program-update'
-    || operation === 'host-recover-settings' || operation === 'host-recover-readiness') {
+    || operation === 'host-recover-settings' || operation === 'host-recover-readiness'
+    || operation === 'host-recover-rollback-readiness') {
     const ownerSuccessor = operation === 'host-owner-repair-successor'
     const ownerRepair = operation === 'host-owner-repair' || ownerSuccessor
     const programUpdate = operation === 'host-program-update'
@@ -8310,7 +8532,7 @@ async function main() {
     const hostPaths = { homePath, physicalHomePath: paths.physicalHomePath,
       transactionRoot: paths.transactionPath, physicalTransactionRoot: paths.physicalTransactionRoot }
     if (operation === 'host-recover' || operation === 'host-recover-settings'
-      || operation === 'host-recover-readiness') {
+      || operation === 'host-recover-readiness' || operation === 'host-recover-rollback-readiness') {
       if (operation === 'host-recover-settings') {
         if (planPath === undefined) fail('host-recover-settings requires an independently verified signed permit', 2)
         await admitHostSettingsRecovery({ ...hostPaths, profile, serviceContext, permitPath: planPath })
@@ -8319,6 +8541,12 @@ async function main() {
           fail('host-recover-readiness requires exactly one reviewed installer root', 2)
         }
         await admitHostProgramReadinessRecovery({ ...hostPaths, profile, serviceContext, installerRoot: planPath })
+      } else if (operation === 'host-recover-rollback-readiness') {
+        if (targets.length !== 3 || planPath === undefined) {
+          fail('host-recover-rollback-readiness requires exactly one reviewed installer root', 2)
+        }
+        await completeHostProgramRollbackReadinessRecovery({ ...hostPaths, profile, serviceContext, installerRoot: planPath })
+        return
       } else {
         if (planPath !== undefined) fail('host-recover does not accept plan.json', 2)
         const pending = await existingIdentity(hostPaths.physicalTransactionRoot) === undefined ? undefined
@@ -8326,6 +8554,9 @@ async function main() {
             { homePath, profile, transactionPath: hostPaths.transactionRoot })
         if (pending?.hostMigration?.programReadinessRecovery !== undefined) {
           fail('bound readiness recovery requires host-recover-readiness with the signed reviewed installer')
+        }
+        if (pending?.hostMigration?.rollbackReadinessRecovery !== undefined) {
+          fail('bound rollback readiness recovery requires host-recover-rollback-readiness with the signed reviewed installer')
         }
       }
       await recoverBoundTransaction({ ...hostPaths, profile, serviceContext })
@@ -8414,6 +8645,8 @@ async function main() {
 }
 
 export const lifecycleProfileTest = Object.freeze({
+  originalRunningServiceProof, larkJournalStates, assertRollbackLarkWindow,
+  completeHostProgramRollbackReadinessRecovery,
   reconcileHostUnitSources, validateHostUpdateManifest, hostOwnerProgramSelection, isOwnerSourceProof,
   assertHostOwnerSuccessorAdmission, ownerSuccessorServiceBarriers, ownerSuccessorRecoveryDecision,
   inspectStoppedOwnerSuccessor, hostUnitProperties, canonicalOwnerSuccessorBackup,

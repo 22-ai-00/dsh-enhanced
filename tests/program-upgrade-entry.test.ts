@@ -53,10 +53,15 @@ describe('program-only upgrade entry', () => {
       profile: 'assistant', selector: 'latest', dryRun: true, recover: false })
     expect(parseProgramUpgradeArgs([...base, '--recover'])).toMatchObject({ recover: true })
     expect(parseProgramUpgradeArgs([...base, '--recover-readiness'])).toMatchObject({ recoverReadiness: true, recover: false })
+    expect(parseProgramUpgradeArgs([...base, '--recover-rollback-readiness']))
+      .toMatchObject({ recoverRollbackReadiness: true, recover: false, recoverReadiness: false })
     for (const args of [[], ['--dsh-home', 'relative', '--profile', 'assistant'],
       [...base, '--install-owner'], [...base, '--permission-preset', 'danger-full-access'],
       [...base, '--dsh-version', 'next'], [...base, '--profile', 'web'],
-      [...base, '--recover-readiness', '--recover'], [...base, '--recover-readiness', '--dsh-version', 'latest']]) {
+      [...base, '--recover-readiness', '--recover'], [...base, '--recover-readiness', '--dsh-version', 'latest'],
+      [...base, '--recover-rollback-readiness', '--recover'],
+      [...base, '--recover-rollback-readiness', '--recover-readiness'],
+      [...base, '--recover-rollback-readiness', '--dsh-version', 'latest']]) {
       expect(() => parseProgramUpgradeArgs(args)).toThrow()
     }
   })

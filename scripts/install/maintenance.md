@@ -126,6 +126,12 @@ dsh-rsi update --all --yes
 
 若有普通待恢复的程序升级事务，CLI 先用**原安装器**恢复，本次不拉取新源码；恢复后再次执行同一升级命令。若报错指出事务已绑定独立审核的签名 readiness 修复安装器，须从**该许可绑定的独立审核 checkout** 显式运行 `node scripts/install/upgrade-program.mjs --dsh-home <绝对Home路径> --profile <原target> --recover-readiness`；不要修改原安装器或删除事务。`--dry-run` 仅显示计划。拒绝或失败时保留报错及事务现场；不要删除账本或改用 `reinstall` 冒充保留数据的升级。当前发布与实机验收状态见 [RSI 状态](../../docs/rsi-status.md)。macOS 冻结 owner/source Home 仍不支持普通原地升级。
 
+若同 Host 程序升级停在 `preparing/prepared`、候选从未启动、原 Home 与 unit 已恢复且两个原服务已重新就绪，旧恢复器可能因运行中的 Automations WAL 增长而拒绝严格快照。这一精确情形可从独立审核、构建并冻结的 checkout 显式执行 `node scripts/install/upgrade-program.mjs --dsh-home <绝对Home路径> --profile <原target> --recover-rollback-readiness`。入口绑定原事务、原安装器、当前 Home 和 unit，以及当前运行实例的签名许可；通过 SQLite 一致性只读事务核对精确 owner 激活，并检查 Host、飞书连接和连续稳定样本。它保留当前运行实例和恢复后产生的数据，只完成原事务的服务收尾与归档；不回灌旧 Home、Session 或数据库。未完成事务的重入仍核对同一运行实例，身份或证据变化会拒绝；已归档重入只检查本地私有归档内的历史签名一致性，不证明服务当前健康或独立的外部身份。每次事务的许可、归档及回执分别保留。此入口不处理已启动候选或尚未回退的 Home，也不能替代普通升级。原安装器在事务处理期间必须保持不变。
+
+断连恢复后，未完成事务可以重试，但每次都须重新通过完整的稳定窗口和归档前检查。固定签名回执记录某次已通过的窗口；若归档前中断，重试不会把旧回执当作本轮健康证明，也不承诺服务在不同尝试之间持续在线。
+
+切换前若发现受管服务以外的进程仍持有 Home 文件或目录，安装器会拒绝继续。先确认占用者及其用途；对可暂停的目录监控使用其正常服务停止方式，事务完成后恢复原服务状态。不要删除仍在使用的数据、杀死不明进程或绕过进程占用检查。
+
 ### 旧 Home 的联合 Host / 源码迁移
 
 开发 checkout 提供显式 `host-local-update`，适用于尚无 owner 授权、具有精确匹配的惰性预备协调器及单个活动目标服务的 Linux Home。原 Host 必须有可验证的私有缓存收据；支持未绑定 Home 的 `0.1.x → 0.2.0-rc.2`，以及已绑定 `0.2.0-rc.2` 的同 Host 源码更新。它不是普通 `dsh-rsi update` 的自动路径，也不自动开启学习。其他状态仍拒绝，不能删除协调器标记或伪造 Host 绑定来满足前提。
