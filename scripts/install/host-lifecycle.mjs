@@ -102,7 +102,28 @@ function quote(value) {
   return `"${value.replaceAll('%', '%%').replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`
 }
 
-/** Preserve the exact installer-rendered unit except its Host executable and PATH. */
+const legacyStartLimit = 'StartLimitIntervalSec=0\n'
+const finiteStartLimit = 'StartLimitIntervalSec=600\nStartLimitBurst=3\n'
+const legacyRestartComment = '# exit (including a clean but unintended Host exit) is restarted.  Disabling\n'
+  + "# systemd's start-rate limiter keeps a long-lived personal assistant from\n"
+  + '# becoming permanently inactive after a transient dependency outage.\n'
+const finiteRestartComment = '# exit is restarted within a finite start budget. Repeated failure stays\n'
+  + '# stopped for diagnosis instead of continuously interrupting the owner.\n'
+
+/** Migrate only the two installer-rendered start-budget fields of a captured unit. */
+export function finiteHostUnitStartLimit(originalSource) {
+  const once = value => originalSource.split(value).length === 2
+  const legacy = once(legacyStartLimit) && once(legacyRestartComment)
+  const finite = once(finiteStartLimit) && once(finiteRestartComment)
+  if (legacy === finite || legacy && (originalSource.includes(finiteStartLimit) || originalSource.includes(finiteRestartComment))
+    || finite && (originalSource.includes(legacyStartLimit) || originalSource.includes(legacyRestartComment))) {
+    throw new Error('unit source has an unrecognized installer start limit')
+  }
+  return finite ? originalSource : originalSource.replace(legacyStartLimit, finiteStartLimit)
+    .replace(legacyRestartComment, finiteRestartComment)
+}
+
+/** Preserve the installer-rendered unit except its Host executable, PATH, and start budget. */
 export function candidateHostUnitSource(service, originalSource, oldDshPath, newDshPath, oldHostRoot) {
   if (service.dshPath !== oldDshPath || !absolute(newDshPath)
     || !absolute(oldHostRoot) || !oldDshPath.startsWith(`${oldHostRoot}/`)
@@ -120,7 +141,8 @@ export function candidateHostUnitSource(service, originalSource, oldDshPath, new
   if (originalSource.split(oldPathLine).length !== 2 || originalSource.split(oldExec).length !== 2) {
     throw new Error('unit source is not the captured installer rendering')
   }
-  return { source: originalSource.replace(oldPathLine, newPathLine).replace(oldExec, newExec), pathEnvironment: `PATH=${newPath}` }
+  return { source: finiteHostUnitStartLimit(originalSource).replace(oldPathLine, newPathLine).replace(oldExec, newExec),
+    pathEnvironment: `PATH=${newPath}` }
 }
 
 export function classifyHostUnitBytes(current, before, after) {

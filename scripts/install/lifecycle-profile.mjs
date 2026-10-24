@@ -8,7 +8,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { assertLifecycleLocalSourceReplayMetadata, assertLifecycleNpmMetadataSafe, classifyLifecycleScenario, lifecycleWorkspacePaths, prepareLifecycleNpmMetadata, readRsiCoordinatorReceipt, validateRsiCoordinatorPair } from './lifecycle-config.mjs'
-import { candidateHostUnitSource, classifyHostUnitBytes, hostLocalSourcePlanMode, hostOwnerSourceRepairSelection, parseHostUpdatePlan } from './host-lifecycle.mjs'
+import { candidateHostUnitSource, classifyHostUnitBytes, finiteHostUnitStartLimit, hostLocalSourcePlanMode, hostOwnerSourceRepairSelection, parseHostUpdatePlan } from './host-lifecycle.mjs'
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const VALIDATOR_PATH = join(dirname(SCRIPT_PATH), 'lifecycle-config.mjs')
@@ -1085,6 +1085,12 @@ const HOST_UPDATE_PHASES = new Set([
   'committed', 'cleanup-started', 'failed',
 ])
 
+function validSameHostUnitTransition(unit) {
+  // Already persisted transactions may have kept the original unit unchanged.
+  if (unit.before === unit.after) return true
+  try { return unit.after === finiteHostUnitStartLimit(unit.before) } catch { return false }
+}
+
 function validateHostUpdateManifest(manifest, expected, transactionRoot, identityRoot = transactionRoot) {
   const migration = manifest.hostMigration
   const ownerRepair = isOwnerSourceProof(migration?.localSource)
@@ -1145,7 +1151,8 @@ function validateHostUpdateManifest(manifest, expected, transactionRoot, identit
     || migration.units.some(unit => !SYSTEMD_UNIT.test(unit.unit)
       || unit.profile !== SYSTEMD_UNIT.exec(unit.unit)?.[1]
       || typeof unit.before !== 'string' || typeof unit.after !== 'string'
-      || (sameHostSource ? unit.before !== unit.after : unit.before === unit.after)
+      || (sameHostSource ? programUpdate ? !validSameHostUnitTransition(unit) : unit.before !== unit.after
+        : unit.before === unit.after)
       || !validDigest(unit.beforeDigest) || !validDigest(unit.afterDigest)
       || sha256(unit.before) !== unit.beforeDigest || sha256(unit.after) !== unit.afterDigest)
     || migration.unitProperties !== undefined && (!Array.isArray(migration.unitProperties)
@@ -7321,7 +7328,9 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
     }
     const before = await snapshotServiceFile(service.fragment.path)
     const candidate = localSourceMode === 'same-host'
-      ? { source: before.source, pathEnvironment: service.pathEnvironment }
+      ? { source: localSource?.protocol === OWNER_PROGRAM_PROTOCOL
+        ? finiteHostUnitStartLimit(before.source) : before.source,
+      pathEnvironment: service.pathEnvironment }
       : candidateHostUnitSource(service, before.source,
         service.dshPath, plan.candidateRuntime.dshPath, plan.originalRuntime.root)
     if (await existingIdentity(serviceMaskPath(service.unit)) !== undefined
