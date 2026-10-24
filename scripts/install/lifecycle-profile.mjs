@@ -1249,9 +1249,9 @@ function validDigest(value) {
 
 function validCompactOperatorProof(proof) {
   const expected = {
-    // v24 adds natural feedback and v25 adds foreground completion ordering;
-    // the owner snapshot contract is unchanged. Retain known upgrade sources.
-    'assistant-delivery/active-lark-owner-bindings-snapshot/v1': [23, 24, 25],
+    // v24 adds natural feedback, v25 foreground completion ordering, and v26
+    // restart fences; the owner snapshot contract is unchanged.
+    'assistant-delivery/active-lark-owner-bindings-snapshot/v1': [23, 24, 25, 26],
     'assistant-recovery/operator-snapshot/v1': [5],
     'assistant-automations-operator-snapshot/v1': [15],
   }
@@ -2517,7 +2517,16 @@ async function inspectServiceUnit(systemctlExecutable, unit, dshExecutable) {
   const fragment = await snapshotServiceFile(shown.FragmentPath)
   const expectedUnitDirectory = await canonicalMissingAllowed(join(process.env.HOME ?? '', '.config', 'systemd', 'user'))
   if (fragment.path !== join(expectedUnitDirectory, unit)) fail(`systemd unit fragment 不属于当前用户安装目录：${unit}`)
-  const parsed = rendererUnitPattern(match[1]).exec(fragment.source)
+  // Legacy installed units remain recognizable for transactional migration.
+  // New units cap both planned and systemd automatic starts in the same window.
+  const normalizedSource = fragment.source
+    .replace('StartLimitIntervalSec=600\nStartLimitBurst=3\n', 'StartLimitIntervalSec=0\n')
+    .replace('# exit is restarted within a finite start budget. Repeated failure stays\n'
+      + '# stopped for diagnosis instead of continuously interrupting the owner.\n',
+    '# exit (including a clean but unintended Host exit) is restarted.  Disabling\n'
+      + "# systemd's start-rate limiter keeps a long-lived personal assistant from\n"
+      + '# becoming permanently inactive after a transient dependency outage.\n')
+  const parsed = rendererUnitPattern(match[1]).exec(normalizedSource)
   if (parsed === null) fail(`systemd unit 不是 installer renderer 的精确输出：${unit}`)
   const workingDirectory = parsed[1].replaceAll('%%', '%').replace(/\/$/u, '')
   const dshEnvironment = decodeUnitQuoted(parsed[2], 'DSH_HOME')
@@ -8282,7 +8291,7 @@ async function main() {
     if (!PROFILE_NAME.test(profile) || (joint ? targets.length < (ownerRepair ? 6 : 5) || targets.length > 7 : targets.length < 2 || targets.length > 3)) {
       fail('Host update requires systemctl, journalctl and plan.json; local migration also requires source preparation and reviewed installer roots; owner repair requires an explicit permission preset and accepts an optional auxiliary artifact root', 2)
     }
-    if (programUpdate && targets.length > 6) fail('program update does not accept permission or legacy fallback overrides', 2)
+    if (programUpdate && targets.length > 7) fail('program update does not accept permission or legacy fallback overrides', 2)
     const [suppliedSystemctl, suppliedJournalctl, planPath] = targets
     const serviceContext = {
       systemctlExecutable: await trustedServiceExecutable(suppliedSystemctl, 'systemctl'),
@@ -8318,7 +8327,8 @@ async function main() {
       dshExecutable, serviceContext, ...(joint ? { localSourceInput: {
         preparationRoot: targets[3], installerRoot: targets[4],
         ...(ownerRepair ? { ownerRepairPreset: targets[5], ...(targets[6] ? { auxiliaryRoot: targets[6] } : {}) }
-          : programUpdate ? { ownerProgramUpdate: true, ...(targets[5] ? { auxiliaryRoot: targets[5] } : {}) }
+          : programUpdate ? { ownerProgramUpdate: true, ...(targets[5] ? { auxiliaryRoot: targets[5] } : {}),
+            ...(targets[6] ? { restartConfigPath: targets[6] } : {}) }
           : { ...(targets[5] ? { auxiliaryRoot: targets[5] } : {}), ...(targets[6] ? { globalDshRoot: targets[6] } : {}) }),
       } } : {}) })
     return

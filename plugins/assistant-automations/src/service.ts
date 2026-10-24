@@ -406,7 +406,7 @@ export class AssistantAutomationsService extends Service implements
   private approvalDelivery: Pick<
     AssistantDeliveryService,
     'prepareAgentApproval' | 'prepareWorkflowApproval'
-  > | undefined
+  > & { isMaintenanceDraining?: () => boolean } | undefined
   private workflowTemplateResolver: WorkflowTemplateResolver | undefined
   private evaluation: AssistantEvaluationService | undefined
   private active = true
@@ -452,6 +452,7 @@ export class AssistantAutomationsService extends Service implements
     ))
     this.coordinator = new AutomationCoordinator({
       beforeDispatch: () => this.revalidatePromotedWorkflows(true),
+      dispatchPaused: () => this.approvalDelivery?.isMaintenanceDraining?.() === true,
       store: this.store,
       artifacts,
       runner,
@@ -1801,6 +1802,12 @@ export class AssistantAutomationsService extends Service implements
   async whenIdle(): Promise<void> {
     this.assertActive()
     await this.coordinator.whenIdle()
+  }
+
+  /** Conservative Host-only drain proof across all tasks in the shared database. */
+  isRestartQuiescent(): boolean {
+    if (!this.active || this.stopping || !this.coordinator.isRunnerQuiescent()) return false
+    try { return this.store.countInFlightTasks() === 0 } catch { return false }
   }
 
   health(): ReturnType<AutomationStore['health']> {

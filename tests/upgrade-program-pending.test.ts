@@ -3,7 +3,18 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { runProgramUpgrade } from '../scripts/install/upgrade-program.mjs'
+import { parseProgramUpgradeArgs, runProgramUpgrade } from '../scripts/install/upgrade-program.mjs'
+
+test('program CLI keeps restart config opt-in and requires a canonical absolute path', () => {
+  const base = ['--dsh-home', '/private/owner', '--profile', 'assistant']
+  expect(parseProgramUpgradeArgs(base).restartConfigPath).toBeUndefined()
+  expect(parseProgramUpgradeArgs([...base, '--restart-config', '/private/restart.json']).restartConfigPath)
+    .toBe('/private/restart.json')
+  expect(() => parseProgramUpgradeArgs([...base, '--restart-config', '../restart.json']))
+    .toThrow(/restart config path must be absolute/u)
+  expect(() => parseProgramUpgradeArgs([...base, '--restart-config', '/private/../restart.json']))
+    .toThrow(/restart config path must be absolute/u)
+})
 
 test('program entry accepts only its exact pending manifest up to 8 MiB', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-program-pending-test-')))
@@ -25,6 +36,13 @@ test('program entry accepts only its exact pending manifest up to 8 MiB', async 
     await writeFile(manifestPath, JSON.stringify(large), { mode: 0o600 })
     const options = { home, profile: 'owner', selector: 'latest', dryRun: true, recover: false }
     expect(await runProgramUpgrade(options)).toBe(0)
+    const restartPath = join(root, 'restart.json')
+    await writeFile(manifestPath, JSON.stringify({ ...base, hostMigration: { localSource: {
+      ...base.hostMigration.localSource, ownerUpdate: { restartConfigSourcePath: restartPath },
+    } } }), { mode: 0o600 })
+    expect(await runProgramUpgrade({ ...options, restartConfigPath: restartPath })).toBe(0)
+    await expect(runProgramUpgrade({ ...options, restartConfigPath: join(root, 'different.json') }))
+      .rejects.toThrow(/pending restart config input differs/u)
     const exactLimit = 8 * 1024 * 1024 - Buffer.byteLength(JSON.stringify({ ...base, padding: '' }))
     await writeFile(manifestPath, JSON.stringify({ ...base, padding: 'x'.repeat(exactLimit) }))
     expect(await runProgramUpgrade(options)).toBe(0)

@@ -1119,7 +1119,8 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     // Delivery's durable interruption receipt acknowledges an unknown task outcome,
     // not a completed task. Keep the original request free of a misleading DONE.
     const interrupted = intent.idempotencyKey.startsWith('inbound:')
-      && intent.idempotencyKey.endsWith(':interrupted')
+      && (intent.idempotencyKey.endsWith(':interrupted') || intent.idempotencyKey.endsWith(':maintenance')
+        || intent.idempotencyKey.endsWith(':maintenance-failed'))
     if (this.statusReactions && intent.replyToEventId !== undefined && !interrupted) {
       void this.addReaction(intent.replyToEventId, 'DONE')
     }

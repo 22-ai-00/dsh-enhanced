@@ -444,12 +444,32 @@ describe('side-effect-free active Lark owner snapshot', () => {
     expect(inspectActiveLarkOwnerBindingsLocally(larkQuery(inactiveOwner.path)).bindings).toEqual([])
   })
 
+  test('reads a real pre-upgrade schema 25 owner snapshot without migrating its database', async () => {
+    const fixture = await larkSeeded()
+    fixture.store.close()
+    const database = new DatabaseSync(fixture.path)
+    try { database.exec(`DROP TRIGGER delivery_restart_inbox_claim_fence;
+      DROP TRIGGER delivery_restart_outbox_claim_fence;
+      DROP TABLE delivery_restart_fence; PRAGMA user_version=25;`) }
+    finally { database.close() }
+    const paths = [fixture.path, `${fixture.path}-wal`, `${fixture.path}-shm`, `${fixture.path}-journal`]
+    const before = await Promise.all(paths.map(fingerprint))
+    const snapshot = inspectActiveLarkOwnerBindingsLocally(larkQuery(fixture.path))
+    expect(snapshot.schemaVersion).toBe(25)
+    expect(snapshot.bindings).toHaveLength(1)
+    expect(snapshot.bindings[0]!.id).toBe(fixture.binding.id)
+    expect(await Promise.all(paths.map(fingerprint))).toEqual(before)
+  })
+
   test('reads a real pre-upgrade schema 24 owner snapshot without migrating its database', async () => {
     const fixture = await larkSeeded()
     fixture.store.close()
     const database = new DatabaseSync(fixture.path)
     try {
-      database.exec(`DROP TRIGGER delivery_foreground_identity_immutable;
+      database.exec(`DROP TRIGGER delivery_restart_inbox_claim_fence;
+        DROP TRIGGER delivery_restart_outbox_claim_fence;
+        DROP TABLE delivery_restart_fence;
+        DROP TRIGGER delivery_foreground_identity_immutable;
         DROP TRIGGER delivery_foreground_terminal_immutable;
         DROP TRIGGER delivery_foreground_terminal_delete_immutable;
         DROP TRIGGER delivery_foreground_completion_after_update;
@@ -481,7 +501,10 @@ describe('side-effect-free active Lark owner snapshot', () => {
     const fixture = await larkSeeded()
     fixture.store.close()
     const database = new DatabaseSync(fixture.path)
-    database.exec('DROP TABLE delivery_natural_objective_intents; PRAGMA user_version=23;')
+    database.exec(`DROP TRIGGER delivery_restart_inbox_claim_fence;
+      DROP TRIGGER delivery_restart_outbox_claim_fence;
+      DROP TABLE delivery_restart_fence;
+      DROP TABLE delivery_natural_objective_intents; PRAGMA user_version=23;`)
     database.close()
     const before = await fingerprint(fixture.path)
     const snapshot = inspectActiveLarkOwnerBindingsLocally(larkQuery(fixture.path))

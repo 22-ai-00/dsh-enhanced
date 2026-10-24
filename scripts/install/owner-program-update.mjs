@@ -389,8 +389,126 @@ function assertOwner(ownerUpdate, homePath, installer, hostPlan = ownerUpdate?.h
     || ownerUpdate.hostPlanDigest !== hash(JSON.stringify(hostPlan))) fail('owner program proof binding differs')
 }
 
+const deliveryId = 'dsh-enhanced-assistant-delivery'
+const personalId = 'dsh-enhanced-personal-assistant'
+const controlPlaneId = 'dsh-enhanced-plugin-control-plane'
+const restartRuleId = 'rsi-owner-maintenance-restart'
+const restartKeys = ['allowedTools', 'databasePath', 'maxModelRequests', 'maxToolCalls',
+  'ownerRouteId', 'taskTimeoutMs']
+const restartToolName = /^[a-z][a-z0-9_]{0,63}$/u
+
+/** This is a new, explicitly reviewed capability on the one existing owner route. */
+export function validateOwnerProgramRestartConfig(value, homePath, delivery) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || !same(Object.keys(value).sort(), restartKeys)
+    || !delivery || typeof delivery !== 'object' || Array.isArray(delivery)
+    || Object.hasOwn(delivery, 'restart')
+    || !Array.isArray(delivery.ownerRoutes) || delivery.ownerRoutes.length !== 1
+    || typeof delivery.ownerRoutes[0]?.id !== 'string'
+    || value.ownerRouteId !== delivery.ownerRoutes[0].id
+    || value.databasePath !== join(homePath, 'assistant-delivery', 'restart.sqlite')
+    || value.databasePath === delivery.databasePath
+    || !Number.isSafeInteger(value.maxModelRequests) || value.maxModelRequests < 1 || value.maxModelRequests > 256
+    || !Number.isSafeInteger(value.maxToolCalls) || value.maxToolCalls < 1 || value.maxToolCalls > 1024
+    || !Number.isSafeInteger(value.taskTimeoutMs) || value.taskTimeoutMs < 60_000 || value.taskTimeoutMs > 3_600_000
+    || !Array.isArray(value.allowedTools) || value.allowedTools.length > 32
+    || value.allowedTools.some(name => typeof name !== 'string' || !restartToolName.test(name)
+      || name === 'delivery_request_restart')
+    || new Set(value.allowedTools).size !== value.allowedTools.length) {
+    fail('restart config exceeds the exact owner route, path, budget, or tool scope')
+  }
+  return Object.fromEntries(restartKeys.map(key => [key, value[key]]))
+}
+
+export async function readOwnerProgramRestartConfig(path, homePath, delivery) {
+  const source = (await bytes(path, 8192)).toString('utf8')
+  return validateOwnerProgramRestartConfig(parse(source, 'restart config'), homePath, delivery)
+}
+
+export function frozenRestartConfig(ownerUpdate, api) {
+  const { restartConfig, restartConfigDigest, restartConfigSourcePath } = ownerUpdate
+  if (restartConfig === undefined && restartConfigDigest === undefined && restartConfigSourcePath === undefined) return undefined
+  if (!exact(restartConfigSourcePath) || !hex.test(restartConfigDigest)
+    || !ownerUpdate.original?.patches?.[ownerUpdate.profile]) fail('restart config proof differs')
+  const delivery = patchConfig(api, ownerUpdate.original.patches[ownerUpdate.profile], deliveryId)
+  const validated = validateOwnerProgramRestartConfig(restartConfig, ownerUpdate.homePath, delivery)
+  if (!same(validated, restartConfig) || hash(JSON.stringify(validated)) !== restartConfigDigest) {
+    fail('restart config digest differs from frozen proof')
+  }
+  return validated
+}
+
+export function ownerProgramRestartRule(original, delivery, restartConfig) {
+  const route = delivery.ownerRoutes?.find(item => item.id === restartConfig.ownerRouteId)
+  const bindings = original.ownerSnapshot?.bindings
+  const binding = bindings?.[0]
+  const principal = route?.principal
+  const components = [principal?.channel, principal?.account, principal?.tenant, principal?.user]
+  const principalId = components.every(item => typeof item === 'string' && item.length > 0)
+    ? components.map(encodeURIComponent).join('/') : undefined
+  if (bindings?.length !== 1 || !binding || typeof binding.id !== 'string' || !binding.id
+    || binding.status !== 'active' || binding.owner?.status !== 'active' || binding.owner.role !== 'owner'
+    || route?.workspace !== binding.workspace || route.agentPreset !== binding.agentPreset
+    || route.policyRef !== binding.policyRef || !same(route.conversation, binding.conversation)
+    || !same(principal, binding.principal) || !principalId
+    || principalId !== original.manifest?.sourceReviews?.owner?.principalId) {
+    fail('restart Policy rule is not bound to the one active owner route')
+  }
+  return { id: restartRuleId, effect: 'allow',
+    subject: { kind: 'agent', id: binding.agentPreset, workspace: binding.workspace, principal: principalId },
+    actions: ['maintenance.restart'], resource: { kind: 'message', id: `maintenance:${restartConfig.ownerRouteId}` },
+    context: { initiators: ['external'] } }
+}
+
+/** Preserve the general manifest rule; authorize only the derived Delivery observer digest. */
+export function assertOwnerProgramRestartManifestPreserved(before, after, restartConfig, targetPatch, api) {
+  if (restartConfig === undefined) return assertOwnerProgramManifestPreserved(before, after)
+  const delivery = patchConfig(api, targetPatch, deliveryId)
+  if (!same(delivery.restart, restartConfig)) fail('restart config differs from the reviewed Delivery patch')
+  const previous = before.controlPlane.runtimeObserver.targets.find(item => item.entryId === deliveryId)
+  const current = after.controlPlane.runtimeObserver.targets.find(item => item.entryId === deliveryId)
+  if (!previous || !current || current.configDigest !== api.control.runtimeConfigDigest(delivery)) {
+    fail('restart Delivery observer digest differs')
+  }
+  const personal = patchConfig(api, targetPatch, personalId)
+  const previousPersonal = before.controlPlane.runtimeObserver.targets.find(item => item.entryId === personalId)
+  const currentPersonal = after.controlPlane.runtimeObserver.targets.find(item => item.entryId === personalId)
+  if (!previousPersonal || !currentPersonal || currentPersonal.configDigest !== api.control.runtimeConfigDigest(personal)) {
+    fail('restart Policy observer digest differs')
+  }
+  const normalized = structuredClone(after)
+  normalized.controlPlane.runtimeObserver.targets.find(item => item.entryId === deliveryId).configDigest = previous.configDigest
+  normalized.controlPlane.runtimeObserver.targets.find(item => item.entryId === personalId).configDigest = previousPersonal.configDigest
+  assertOwnerProgramManifestPreserved(before, normalized)
+}
+
+export function compileOwnerProgramRestartConfig(api, targetPatch, manifest, restartConfig, homePath, original) {
+  if (restartConfig === undefined) return targetPatch
+  const originalDelivery = patchConfig(api, targetPatch, deliveryId)
+  validateOwnerProgramRestartConfig(restartConfig, homePath, originalDelivery)
+  const targets = manifest.controlPlane?.runtimeObserver?.targets
+  const deliveryTargets = targets?.filter(item => item.entryId === deliveryId)
+  const personalTargets = targets?.filter(item => item.entryId === personalId)
+  const originalPersonal = patchConfig(api, targetPatch, personalId)
+  const rules = originalPersonal.assistantPolicy?.rules
+  if (deliveryTargets?.length !== 1 || personalTargets?.length !== 1
+    || deliveryTargets[0].configDigest !== api.control.runtimeConfigDigest(originalDelivery)
+    || personalTargets[0].configDigest !== api.control.runtimeConfigDigest(originalPersonal)
+    || !Array.isArray(rules) || rules.some(item => item.id === restartRuleId)) {
+    fail('existing Delivery or Policy observer digest differs')
+  }
+  const rule = ownerProgramRestartRule(original, originalDelivery, restartConfig)
+  let changed = replacePatchConfig(api, targetPatch, deliveryId, originalDelivery,
+    { ...originalDelivery, restart: restartConfig })
+  changed = replacePatchConfig(api, changed, personalId, originalPersonal,
+    { ...originalPersonal, assistantPolicy: { ...originalPersonal.assistantPolicy, rules: [...rules, rule] } })
+  deliveryTargets[0].configDigest = api.control.runtimeConfigDigest(patchConfig(api, changed, deliveryId))
+  personalTargets[0].configDigest = api.control.runtimeConfigDigest(patchConfig(api, changed, personalId))
+  return changed
+}
+
 export async function captureOwnerProgramUpdate({ homePath, profile, installer, dshPath,
-  dshEnvironment = process.env, hostPlan }) {
+  dshEnvironment = process.env, hostPlan, restartConfigPath }) {
   if (!exact(homePath) || !profileName.test(profile) || !exact(dshPath)
     || !hostPlan?.originalRuntime || !hostPlan?.candidateRuntime
     || !exact(hostPlan.originalRuntime.root) || !exact(hostPlan.candidateRuntime.root)
@@ -514,6 +632,13 @@ export async function captureOwnerProgramUpdate({ homePath, profile, installer, 
   const result = { protocol, homePath, profile, coordinatorProfile: manifest.coordinatorProfile,
     installer, dshPath, host: { dshDigest: composed.dshDigest, version: composed.dshVersion },
     hostPlan, hostPlanDigest: hash(JSON.stringify(hostPlan)), original }
+  if (restartConfigPath !== undefined) {
+    const restartConfig = await readOwnerProgramRestartConfig(restartConfigPath, homePath,
+      patchConfig(api, patches[profile], deliveryId))
+    result.restartConfigSourcePath = restartConfigPath
+    result.restartConfig = restartConfig
+    result.restartConfigDigest = hash(JSON.stringify(restartConfig))
+  }
   await verifyOwnerProgramUpdate({ ownerUpdate: result, homePath, installer, phase: 'original' })
   return result
 }
@@ -729,6 +854,7 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
     || typeof coordinatorBase !== 'string') fail('invalid staged owner program input')
   await privateDirectory(stageHome)
   const api = await apiFor(installer)
+  const restartConfig = frozenRestartConfig(ownerUpdate, api)
   const before = await verifyOwnerProgramUpdate({ ownerUpdate, homePath, physicalHome: stageHome,
     installer, phase: 'before-finalize', record })
   const stageRuntime = await api.readRsiAuthorityRuntimeReceipt({ logicalHome: homePath,
@@ -793,11 +919,12 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
   }
   targetPatch = replacePatchConfig(api, targetPatch, 'dsh-enhanced-assistant-verifier', oldVerifier,
     { ...oldVerifier, creationReviews: manifest.pluginCreation.reviews })
+  targetPatch = compileOwnerProgramRestartConfig(api, targetPatch, manifest, restartConfig, homePath, original)
   for (const target of manifest.controlPlane.runtimeObserver.targets) {
     if (target.entryId === 'dsh-enhanced-assistant-verifier') target.configDigest =
       api.control.runtimeConfigDigest(patchConfig(api, targetPatch, target.entryId))
   }
-  assertOwnerProgramManifestPreserved(rebasedManifest, manifest)
+  assertOwnerProgramRestartManifestPreserved(rebasedManifest, manifest, restartConfig, targetPatch, api)
   targetPatch = replacePatchConfig(api, targetPatch, 'dsh-enhanced-plugin-control-plane',
     preDigestControlPlane, manifest.controlPlane)
   if (rebase.oldHostRoot !== hostPlan.candidateRuntime.root && targetPatch.includes(rebase.oldHostRoot)) fail('owner patch retains an old Host path')
@@ -900,6 +1027,7 @@ export async function verifyOwnerProgramUpdate({ ownerUpdate, ownerUpdateNext, h
     || !exact(physicalHome)) fail('invalid owner verification phase')
   await privateDirectory(physicalHome)
   const api = await apiFor(installer), original = ownerUpdate.original
+  const restartConfig = frozenRestartConfig(ownerUpdate, api)
   const selectedDigests = phase === 'after-finalize' ? ownerUpdateNext.files : original.fileDigests
   if (!same(Object.keys(selectedDigests).sort(), Object.keys(original.fileDigests).sort())) {
     fail('owner file inventory changed')
@@ -912,6 +1040,30 @@ export async function verifyOwnerProgramUpdate({ ownerUpdate, ownerUpdateNext, h
   const patches = await currentPatches(homePath, physicalHome, patchDigests)
   const manifestPath = join(original.resources.configRoot, 'manifest.json')
   const manifest = parse(files[manifestPath], 'verified owner manifest')
+  if (phase === 'after-finalize') {
+    const previousDelivery = patchConfig(api, original.patches[ownerUpdate.profile], deliveryId)
+    const delivered = patchConfig(api, patches[ownerUpdate.profile], deliveryId)
+    const expectedDelivery = restartConfig === undefined ? previousDelivery
+      : { ...previousDelivery, restart: restartConfig }
+    const previousPersonal = patchConfig(api, original.patches[ownerUpdate.profile], personalId)
+    const personal = patchConfig(api, patches[ownerUpdate.profile], personalId)
+    const expectedPersonal = restartConfig === undefined ? previousPersonal
+      : { ...previousPersonal, assistantPolicy: { ...previousPersonal.assistantPolicy,
+        rules: [...previousPersonal.assistantPolicy.rules,
+          ownerProgramRestartRule(original, previousDelivery, restartConfig)] } }
+    const observed = manifest.controlPlane?.runtimeObserver?.targets?.find(item => item.entryId === deliveryId)
+    const observedPersonal = manifest.controlPlane?.runtimeObserver?.targets?.find(item => item.entryId === personalId)
+    const patchedControl = patchConfig(api, patches[ownerUpdate.profile], controlPlaneId)
+    if (!same(delivered, expectedDelivery)
+      || !same(personal, expectedPersonal)
+      || !same(patchedControl.runtimeObserver, manifest.controlPlane?.runtimeObserver)
+      || !observed || observed.configDigest !== api.control.runtimeConfigDigest(delivered)) {
+      fail('signed Delivery restart config or observer digest differs')
+    }
+    if (!observedPersonal || observedPersonal.configDigest !== api.control.runtimeConfigDigest(personal)) {
+      fail('signed restart Policy rule or observer digest differs')
+    }
+  }
   if (manifest.targetProfile !== ownerUpdate.profile || manifest.coordinatorProfile !== ownerUpdate.coordinatorProfile
     || !same(manifest.sourceReviews.owner, original.manifest.sourceReviews.owner)
     || !same(manifest.growthDriver, original.manifest.growthDriver)

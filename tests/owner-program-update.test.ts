@@ -6,11 +6,16 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { isAlias, isMap, isScalar, isSeq, parseDocument } from 'yaml'
 import { controlPlaneDigest } from '../plugins/plugin-control-plane/src/store.js'
+import { runtimeConfigDigest } from '../plugins/plugin-control-plane/src/runtime-observer-protocol.js'
+import { compilePolicy, evaluatePolicy } from '../plugins/assistant-policy/src/evaluator.js'
 import { readRsiHostPatchConfig, readRsiHostUpdateOverlayChain, rebaseRsiHostValue, replaceRsiHostPatchConfig,
   rsiHostUpdateOverlayDigest,
   signRsiOwnerProgramUpdateOverlay, signRsiOwnerRepairOverlay } from '../plugins/lark-channel/src/rsi-host-update.js'
 import { applyOwnerProgramAuthorityCas, assertOwnerProgramAuthorityPreserved, assertOwnerProgramOriginalComposition, assertOwnerProgramWindow,
   assertOwnerProgramBusinessDataCopied, assertOwnerProgramManifestPreserved, stageOwnerProgramUpdate,
+  assertOwnerProgramRestartManifestPreserved, compileOwnerProgramRestartConfig, frozenRestartConfig,
+  ownerProgramRestartRule,
+  readOwnerProgramRestartConfig, validateOwnerProgramRestartConfig,
   verifyOwnerProgramUpdate, updateOwnerProgramJournal, patchConfig, replacePatchConfig } from '../scripts/install/owner-program-update.mjs'
 
 const old = {
@@ -310,6 +315,169 @@ test('manifest permits only program fields and retains owner, model, grant and b
   resetGrant.pluginCreation.creation.maxCreates = 1000
   expect(() => assertOwnerProgramManifestPreserved(baseline, resetGrant))
     .toThrow(/outside exact program fields/u)
+})
+
+test('owner-private restart config fixes one route, database, finite budgets and explicit tools', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-restart-')))
+  const home = join(root, 'home'), input = join(root, 'restart.json')
+  await mkdir(home, { mode: 0o700 })
+  const delivery = { databasePath: join(home, 'assistant-delivery', 'state.sqlite'),
+    ownerRoutes: [{ id: 'owner-route' }] }
+  const restart = { databasePath: join(home, 'assistant-delivery', 'restart.sqlite'),
+    ownerRouteId: 'owner-route', maxModelRequests: 12, maxToolCalls: 24,
+    taskTimeoutMs: 300_000, allowedTools: ['delivery_reply', 'delivery_status'] }
+  try {
+    await writeFile(input, JSON.stringify(restart), { mode: 0o600 })
+    expect(await readOwnerProgramRestartConfig(input, home, delivery)).toEqual(restart)
+    for (const changed of [
+      { ...restart, ownerRouteId: 'other' },
+      { ...restart, databasePath: join(root, 'escape.sqlite') },
+      { ...restart, maxModelRequests: 257 },
+      { ...restart, maxToolCalls: 1025 },
+      { ...restart, taskTimeoutMs: 3_600_001 },
+      { ...restart, allowedTools: ['delivery_reply', 'delivery_reply'] },
+      { ...restart, allowedTools: ['tool_*'] },
+      { ...restart, surprise: true },
+    ]) expect(() => validateOwnerProgramRestartConfig(changed, home, delivery)).toThrow(/restart config exceeds/u)
+    expect(() => validateOwnerProgramRestartConfig(restart, home, { ...delivery,
+      ownerRoutes: [{ id: 'owner-route' }, { id: 'other' }] })).toThrow(/restart config exceeds/u)
+    expect(() => validateOwnerProgramRestartConfig(restart, home, { ...delivery, restart }))
+      .toThrow(/restart config exceeds/u)
+    await chmod(input, 0o644)
+    await expect(readOwnerProgramRestartConfig(input, home, delivery)).rejects.toThrow(/unsafe file/u)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('restart manifest permits only the derived Delivery observer digest', () => {
+  const home = '/private/owner'
+  const restart = { databasePath: `${home}/assistant-delivery/restart.sqlite`, ownerRouteId: 'owner-route',
+    maxModelRequests: 12, maxToolCalls: 24, taskTimeoutMs: 300_000, allowedTools: ['delivery_reply'] }
+  const originalDelivery = { databasePath: `${home}/assistant-delivery/state.sqlite`,
+    ownerRoutes: [{ id: 'owner-route' }] }
+  const personal = { assistantPolicy: { rules: [{ id: 'rsi-owner-maintenance-restart', effect: 'allow',
+    subject: { kind: 'agent', id: 'standard', workspace: '/private/work', principal: 'lark/primary/personal/user' },
+    actions: ['maintenance.restart'], resource: { kind: 'message', id: 'maintenance:owner-route' },
+    context: { initiators: ['external'] } }] } }
+  const targetPatch = `[
+    { id: dsh-enhanced-assistant-delivery, config: ${JSON.stringify({ ...originalDelivery, restart })} },
+    { id: dsh-enhanced-personal-assistant, config: ${JSON.stringify(personal)} }
+  ]`
+  const digest = runtimeConfigDigest({ ...originalDelivery, restart })
+  const creation = { reviews: { runner: { path: '/old' } },
+    capabilities: { runner: { path: '/old' }, maxAdoptions: 2 },
+    verifications: { authority: { digest: 'a' } } }
+  const before = { controlPlane: { sourceBuild: { image: 'old' },
+    creationVerifications: creation.verifications, creationCapabilities: creation.capabilities,
+    runtimeObserver: { targets: [
+      { entryId: 'dsh-enhanced-assistant-delivery', configDigest: 'a'.repeat(64) },
+      { entryId: 'dsh-enhanced-personal-assistant', configDigest: 'a'.repeat(64) },
+      { entryId: 'dsh-enhanced-assistant-verifier', configDigest: 'a'.repeat(64) },
+    ] } }, pluginCreation: creation }
+  const after = structuredClone(before)
+  after.controlPlane.runtimeObserver.targets[0]!.configDigest = digest
+  after.controlPlane.runtimeObserver.targets[1]!.configDigest = runtimeConfigDigest(personal)
+  const api = { readRsiHostPatchConfig, control: { runtimeConfigDigest } }
+  expect(() => assertOwnerProgramRestartManifestPreserved(before, after, restart, targetPatch, api)).not.toThrow()
+  const unrelated = structuredClone(after)
+  unrelated.controlPlane.runtimeObserver.targets.push({ entryId: 'other', configDigest: 'b'.repeat(64) })
+  expect(() => assertOwnerProgramRestartManifestPreserved(before, unrelated, restart, targetPatch, api))
+    .toThrow(/runtime observer identity changed/u)
+  const forged = structuredClone(after)
+  forged.controlPlane.runtimeObserver.targets[0]!.configDigest = 'b'.repeat(64)
+  expect(() => assertOwnerProgramRestartManifestPreserved(before, forged, restart, targetPatch, api))
+    .toThrow(/restart Delivery observer digest differs/u)
+  const other = structuredClone(after)
+  other.pluginCreation.capabilities.maxAdoptions = 10
+  expect(() => assertOwnerProgramRestartManifestPreserved(before, other, restart, targetPatch, api))
+    .toThrow(/outside exact program fields/u)
+})
+
+test('restart compiler changes only Delivery config and its Control Plane observer digest', () => {
+  const home = '/private/owner'
+  const principal = { channel: 'lark', account: 'primary', tenant: 'personal', user: 'user' }
+  const conversation = { channel: 'lark', account: 'primary', tenant: 'personal', kind: 'dm', chat: 'chat' }
+  const ownerRoute = { id: 'owner-route', principal, conversation, workspace: '/private/work',
+    agentPreset: 'standard', policyRef: 'owner-dm' }
+  const delivery = { databasePath: `${home}/assistant-delivery/state.sqlite`,
+    ownerRoutes: [ownerRoute] }
+  const personal = { assistantPolicy: { rules: [{ id: 'existing', effect: 'deny' }] } }
+  const restart = { databasePath: `${home}/assistant-delivery/restart.sqlite`, ownerRouteId: 'owner-route',
+    maxModelRequests: 12, maxToolCalls: 24, taskTimeoutMs: 300_000, allowedTools: ['delivery_reply'] }
+  const patch = `[
+    { id: dsh-enhanced-assistant-delivery, config: ${JSON.stringify(delivery)} },
+    { id: dsh-enhanced-personal-assistant, config: ${JSON.stringify(personal)} },
+    { id: unrelated, config: { value: !!js "dshHomePath('unrelated/state.sqlite')" } }
+  ]`
+  const originalDigest = runtimeConfigDigest(delivery)
+  const original = { ownerSnapshot: { bindings: [{ id: 'binding-1', status: 'active',
+    owner: { status: 'active', role: 'owner' }, workspace: ownerRoute.workspace,
+    agentPreset: ownerRoute.agentPreset, policyRef: ownerRoute.policyRef, conversation, principal }] },
+  manifest: { sourceReviews: { owner: { principalId: 'lark/primary/personal/user' } } } }
+  const manifest = { controlPlane: { runtimeObserver: { targets: [
+    { entryId: 'dsh-enhanced-assistant-delivery', configDigest: originalDigest },
+    { entryId: 'dsh-enhanced-personal-assistant', configDigest: runtimeConfigDigest(personal) },
+    { entryId: 'unrelated', configDigest: 'a'.repeat(64) },
+  ] } } }
+  const api = { readRsiHostPatchConfig, replaceRsiHostPatchConfig, control: { runtimeConfigDigest } }
+  expect(compileOwnerProgramRestartConfig(api, patch, structuredClone(manifest), undefined, home, original)).toBe(patch)
+  const next = structuredClone(manifest)
+  const compiled = compileOwnerProgramRestartConfig(api, patch, next, restart, home, original)
+  expect(patchConfig(api, compiled, 'dsh-enhanced-assistant-delivery')).toEqual({ ...delivery, restart })
+  expect(patchConfig(api, compiled, 'dsh-enhanced-personal-assistant').assistantPolicy.rules).toEqual([
+    personal.assistantPolicy.rules[0],
+    { id: 'rsi-owner-maintenance-restart', effect: 'allow',
+      subject: { kind: 'agent', id: 'standard', workspace: '/private/work',
+        principal: 'lark/primary/personal/user' }, actions: ['maintenance.restart'],
+      resource: { kind: 'message', id: 'maintenance:owner-route' }, context: { initiators: ['external'] } },
+  ])
+  const rule = patchConfig(api, compiled, 'dsh-enhanced-personal-assistant').assistantPolicy.rules[1]
+  const policy = compilePolicy([rule])
+  const request = { subject: { kind: 'agent', id: 'standard', workspace: '/private/work',
+    principal: 'lark/primary/personal/user' }, action: 'maintenance.restart',
+  resource: { kind: 'message', id: 'maintenance:owner-route' }, context: { initiator: 'external' } }
+  expect(evaluatePolicy(policy, request).effect).toBe('allow')
+  const rotated = structuredClone(original)
+  rotated.ownerSnapshot.bindings[0]!.id = 'binding-rotated'
+  expect(ownerProgramRestartRule(rotated, delivery, restart)).toEqual(rule)
+  for (const changed of [
+    { ...request, resource: { kind: 'message', id: 'maintenance:other-route' } },
+    { ...request, subject: { ...request.subject, principal: 'lark/primary/personal/other' } },
+    { ...request, subject: { ...request.subject, workspace: '/private/other' } },
+    { ...request, context: { initiator: 'background' } },
+  ]) expect(evaluatePolicy(policy, changed).effect).toBe('deny')
+  expect(compiled).toContain('!!js')
+  expect(next.controlPlane.runtimeObserver.targets).toEqual([
+    { entryId: 'dsh-enhanced-assistant-delivery', configDigest: runtimeConfigDigest({ ...delivery, restart }) },
+    { entryId: 'dsh-enhanced-personal-assistant',
+      configDigest: runtimeConfigDigest(patchConfig(api, compiled, 'dsh-enhanced-personal-assistant')) },
+    manifest.controlPlane.runtimeObserver.targets[2],
+  ])
+  const drift = structuredClone(manifest)
+  drift.controlPlane.runtimeObserver.targets[0]!.configDigest = 'b'.repeat(64)
+  expect(() => compileOwnerProgramRestartConfig(api, patch, drift, restart, home, original))
+    .toThrow(/existing Delivery or Policy observer digest differs/u)
+})
+
+test('frozen restart proof rejects resumed config content or digest drift', () => {
+  const home = '/private/owner'
+  const delivery = { databasePath: `${home}/assistant-delivery/state.sqlite`,
+    ownerRoutes: [{ id: 'owner-route' }] }
+  const restart = validateOwnerProgramRestartConfig({
+    databasePath: `${home}/assistant-delivery/restart.sqlite`, ownerRouteId: 'owner-route',
+    maxModelRequests: 12, maxToolCalls: 24, taskTimeoutMs: 300_000, allowedTools: ['delivery_reply'],
+  }, home, delivery)
+  const proof = { homePath: home, profile: 'assistant', restartConfigSourcePath: '/private/restart.json',
+    restartConfig: restart, restartConfigDigest: createHash('sha256').update(JSON.stringify(restart)).digest('hex'),
+    original: { patches: { assistant: `[{ id: dsh-enhanced-assistant-delivery, config: ${JSON.stringify(delivery)} }]` } } }
+  const api = { readRsiHostPatchConfig }
+  expect(frozenRestartConfig(proof, api)).toEqual(restart)
+  expect(() => frozenRestartConfig({ ...proof, restartConfig: { ...restart, maxToolCalls: 25 } }, api))
+    .toThrow(/restart config digest differs/u)
+  expect(() => frozenRestartConfig({ ...proof, restartConfigDigest: 'a'.repeat(64) }, api))
+    .toThrow(/restart config digest differs/u)
+  expect(() => frozenRestartConfig({ ...proof, restartConfigSourcePath: '../restart.json' }, api))
+    .toThrow(/restart config proof differs/u)
+  expect(frozenRestartConfig({ homePath: home }, api)).toBeUndefined()
 })
 
 test('offline stage resolves tagged Home databases and preserves all database and WAL bytes', async () => {

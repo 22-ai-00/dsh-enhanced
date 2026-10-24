@@ -2156,6 +2156,17 @@ export class AutomationStore {
     }
   }
 
+  /** Global database count: another profile's claim also blocks Host restart. */
+  countInFlightTasks(): number {
+    if (this.closed) throw new AutomationStoreError('invalid-state', 'automation store is closed')
+    const row = this.database.prepare("SELECT COUNT(*) AS count FROM automation_tasks WHERE status IN ('claimed', 'running')")
+      .get() as { count: number }
+    if (!Number.isSafeInteger(row.count) || row.count < 0) {
+      throw new AutomationStoreError('invalid-state', 'automation in-flight count is invalid')
+    }
+    return row.count
+  }
+
   changeApproved(input: {
     automationId: string
     operation: 'delete' | 'pause' | 'resume'

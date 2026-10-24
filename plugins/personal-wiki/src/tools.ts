@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { PersonalWikiService } from './service.js'
 import type { WikiPageInput, WikiSource, WikiUpsertMutation } from './types.js'
 
@@ -43,7 +43,7 @@ export function registerWikiTools(
   service: PersonalWikiService,
   options: { proposalAuthority: typeof AUTHORITY[number] },
 ): void {
-  ctx.tools.register(defineTool({
+  const search = defineTool({
     name: 'wiki_search',
     description: 'Search the personal Markdown wiki with bounded, CJK-aware paragraph retrieval.',
     parameters: { query: { type: 'string', required: true }, limit: { type: 'integer' } },
@@ -88,9 +88,10 @@ export function registerWikiTools(
         })),
       }
     },
-  }))
+  })
+  ctx.tools.register(search)
 
-  ctx.tools.register(defineTool({
+  const read = defineTool({
     name: 'wiki_read',
     description: 'Read one wiki page by wiki:// id, stable id, exact title, or exact alias with bounded output.',
     parameters: {
@@ -131,7 +132,16 @@ export function registerWikiTools(
         sources: page.sources.map(source => ({ uri: source.uri, sha256: source.sha256 })),
       }
     },
-  }))
+  })
+  ctx.tools.register(read)
+  ctx.inject(['assistantDelivery'], deliveryCtx => {
+    const delivery = deliveryCtx.get('assistantDelivery') as {
+      registerRestartSafeTool?: (owner: Context, definition: ToolDefinition) => () => void
+    }
+    const removeSearch = delivery.registerRestartSafeTool?.(ctx, search)
+    const removeRead = delivery.registerRestartSafeTool?.(ctx, read)
+    return () => { removeSearch?.(); removeRead?.() }
+  })
 
   const upsert = defineTool({
     name: 'wiki_upsert',

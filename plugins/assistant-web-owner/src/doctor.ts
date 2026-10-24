@@ -88,10 +88,10 @@ export function inspectAutonomyOwner(profile: AutonomyDoctorProfile): { status: 
     database.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 1000; BEGIN;')
     // Deliberately pinned rather than imported: each Delivery schema must be
     // reviewed before this self-contained read-only gate accepts it. v25 adds
-    // foreground completion sequencing; the principal authority fields read
-    // below are unchanged from v24. Unknown versions still fail closed.
+    // foreground completion sequencing and v26 restart fences; the principal
+    // authority fields read below are unchanged from v24. Unknown versions fail closed.
     const schemaVersion = (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
-    if (schemaVersion !== 24 && schemaVersion !== 25) return { status: 'unavailable' }
+    if (schemaVersion !== 24 && schemaVersion !== 25 && schemaVersion !== 26) return { status: 'unavailable' }
     const row = database.prepare('SELECT principal_json, role, status, version, linked_to_id FROM delivery_principals WHERE id = ?').get(profile.grant.principalRecordId)
     if (!row || row.role !== 'owner' || row.status !== 'active' || row.version !== profile.grant.principalVersion || row.linked_to_id !== null
       || typeof row.principal_json !== 'string' || !isDeepStrictEqual(JSON.parse(row.principal_json), profile.principal)) return { status: 'mismatch' }

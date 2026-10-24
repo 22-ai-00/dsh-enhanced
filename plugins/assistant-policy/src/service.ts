@@ -524,6 +524,7 @@ export class AssistantPolicyService extends Service {
       : definition.name === 'proactive_status' ? 'dsh-enhanced-assistant-proactive'
       : definition.name === 'memory_manage' ? ['dsh-enhanced-personal-memory', 'PersonalMemoryService']
       : definition.name === 'wiki_upsert' ? ['dsh-enhanced-personal-wiki', 'PersonalWikiService']
+      : definition.name === 'delivery_request_restart' ? ['dsh-enhanced-assistant-delivery', 'AssistantDeliveryService']
       : ['skill_run', 'skill_status'].includes(definition.name) ? 'dsh-enhanced-assistant-skills' : undefined
     if (expectedCaller === undefined || !(Array.isArray(expectedCaller)
       ? expectedCaller.includes(caller.fiber.name) : caller.fiber.name === expectedCaller)) {

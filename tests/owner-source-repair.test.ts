@@ -105,6 +105,10 @@ test('owner repair retains exact binding and main database identity across SQLit
     database: { ...original.database, size: '120', mtimeNs: '2000', digest: 'f'.repeat(64) },
     sidecars: { wal: null, shm: null }, storageDigest: '1'.repeat(64), snapshotDigest: '2'.repeat(64) }
   expect(ownerRepairSnapshotEquivalent(afterCheckpoint, original)).toBe(true)
+  expect(ownerRepairSnapshotEquivalent({ ...afterCheckpoint, schemaVersion: 26 },
+    { ...original, schemaVersion: 26 })).toBe(true)
+  expect(ownerRepairSnapshotEquivalent({ ...afterCheckpoint, schemaVersion: 27 },
+    { ...original, schemaVersion: 27 })).toBe(false)
   const differences = [
     { ...afterCheckpoint, protocol: 'forged' },
     { ...afterCheckpoint, schemaVersion: 26 },

@@ -1,13 +1,17 @@
-import { chmodSync, mkdirSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { ToolExecution } from '@deepseek-ai/dsh-tools'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { ToolDefinition, ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 import Schema from '@deepseek-ai/schemastery'
+import { RestartStore, type RestartRecord } from './restart-store.js'
+import { restartDigest, type RestartConfig } from './restart-runtime.js'
+import { version } from './version.js'
 import { acceptanceCanonicalJson, goalDefinitionSituation } from '@dsh-enhanced/task-acceptance-contract'
 import {
   approvalReviewerOf,
@@ -439,6 +443,8 @@ export interface OwnerForegroundLearningTask {
 export interface Config {
   databasePath: string
   spoolPath: string
+  /** Explicit owner-scoped, finite same-code maintenance authority. Disabled when absent. */
+  restart?: RestartConfig
   schedulerEnabled?: boolean
   tickIntervalMs?: number
   leaseMs?: number
@@ -468,6 +474,9 @@ export interface Config {
 }
 
 export interface DeliveryInboundRuntime extends InboundMessageProcessor {
+  canRequestRestart?(agent: Agent): boolean
+  requestRestart?(agent: Agent, reason: string): { id: string; status: string }
+  resumeRestart?(record: RestartRecord, binding: Readonly<ConversationBinding>, envelope: Readonly<InboundEnvelope>, signal: AbortSignal): Promise<unknown>
   createSession(input: {
     envelope: Readonly<InboundEnvelope>
     generation: number
@@ -617,6 +626,14 @@ function isOwnerGoalSnapshotLocator(value: unknown): value is OwnerGoalExecution
 const configSchema = Schema.object({
   databasePath: Schema.string().required(),
   spoolPath: Schema.string().required(),
+  restart: Schema.union([Schema.object({
+    databasePath: Schema.string().required(),
+    ownerRouteId: Schema.string().min(1).required(),
+    maxModelRequests: Schema.number().step(1).min(1).max(256).required(),
+    maxToolCalls: Schema.number().step(1).min(1).max(1024).required(),
+    taskTimeoutMs: Schema.number().step(1).min(60_000).max(3_600_000).required(),
+    allowedTools: Schema.array(Schema.string().min(1)).required(),
+  })]),
   schedulerEnabled: Schema.boolean().default(true),
   tickIntervalMs: Schema.number().step(1).min(100).default(1_000),
   leaseMs: Schema.number().step(1).min(1_000).default(30_000),
@@ -1039,6 +1056,13 @@ export class AssistantDeliveryService extends Service {
   static Config = configSchema
 
   private readonly deliveryStore: DeliveryStore
+  private readonly restartStore: RestartStore | undefined
+  private readonly restartInvocationId = process.env.INVOCATION_ID ?? `standalone-${randomUUID()}`
+  private restartCodeDigest = ''
+  private restartNoticeCursor: { createdAt: number; id: string } | undefined
+  private restartFlight: Promise<void> | undefined
+  private readonly restartController = new AbortController()
+  private readonly restartSafeDefinitions = new Set<Readonly<{ caller: Context; definition: ToolDefinition }>>()
   private readonly context: Context
   private readonly policy: AssistantPolicyService
   private readonly registry: DeliveryAdapterRegistry
@@ -1143,6 +1167,32 @@ export class AssistantDeliveryService extends Service {
     }
     this.ownerRouteGuard = Object.freeze(ownerRouteGuard)
     this.deliveryStore = new DeliveryStore({ path: config.databasePath, maxTextBytes: config.maxTextBytes })
+    if (config.restart !== undefined && (!isAbsolute(config.restart.databasePath)
+      || config.restart.databasePath === config.databasePath || !this.ownerRoutes.has(config.restart.ownerRouteId))) {
+      throw new Error('assistant-delivery: restart requires a separate absolute journal and an exact configured owner route')
+    }
+    try { this.restartStore = config.restart === undefined ? undefined : new RestartStore({ path: config.restart.databasePath }) }
+    catch (error) {
+      this.restartStore = undefined
+      ctx.logger.warn(`assistant-delivery: planned restart disabled; journal unavailable: ${String(error)}`)
+    }
+    if (this.restartStore !== undefined) {
+      const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js'
+      this.restartCodeDigest = restartDigest(['service', 'agent-runtime', 'restart-runtime', 'restart-native', 'restart-store', 'tools']
+        .map(name => createHash('sha256').update(readFileSync(new URL(`./${name}.${extension}`, import.meta.url))).digest('hex')))
+    }
+    if (this.restartStore !== undefined) {
+      const permitted = (): boolean => this.restartDispatchPermitted(ctx.get('agents')?.currentInitiator())
+      ctx.on('agent/pre-step', async (_payload, next) => permitted() ? await next() : { kind: 'reject' as const }, { prepend: true })
+      ctx.on('llm/stream', async function* (_options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) {
+        if (!permitted()) throw new Error('assistant-delivery: Host is draining for planned maintenance')
+        yield* next()
+      }, { prepend: true })
+      ctx.on('tools/execute', async (execution, next) => {
+        if (!this.restartDispatchPermitted(execution.agent)) throw new Error('assistant-delivery: Host is draining for planned maintenance')
+        return await next()
+      }, { prepend: true })
+    }
     ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
       this.capturePreferenceTurn(agent, message.source, turn)
     })
@@ -1191,6 +1241,14 @@ export class AssistantDeliveryService extends Service {
       this.nativeWebRuntime = webRuntime
       runtimeCtx.effect(() => () => { if (this.nativeWebRuntime === webRuntime) this.nativeWebRuntime = undefined })
       const unregister = this.registerInboundRuntime(new DshDeliveryRuntime(runtimeCtx, policy, {
+        ...(this.restartStore === undefined ? {} : { restart: { store: this.restartStore, config: config.restart,
+          invocationId: this.restartInvocationId,
+          authorize: (record: RestartRecord) => this.restartAuthorized(record),
+          authorizeTask: (inboxId: string) => this.restartAuthorized({ inboxId }),
+          onContinuationAdmitted: (record: RestartRecord, sessionId: string) =>
+            this.releaseRestartFenceOnAdmission(record, sessionId),
+          isRestartSafeTool: (agent: Agent, name: string) => this.isRestartSafeTool(agent, name),
+        } }),
         sessionLeases,
         sessionNamespace: this.deliveryStore.instanceId(),
         workspace: config.defaultWorkspace, agentPreset: config.defaultAgentPreset, policyRef: config.policyRef,
@@ -1204,7 +1262,15 @@ export class AssistantDeliveryService extends Service {
         completeForegroundTaskAcceptance: (handle, input) => this.completeForegroundTaskAcceptance(handle, input),
         recordForegroundTaskModelSelection: (handle, input) => this.deliveryStore.recordForegroundTaskModelSelection({ contractId: handle.contractId, ...input }),
         beginForegroundTaskExecution: (binding, envelope) => this.beginForegroundTaskExecution(binding, envelope),
-        recordForegroundExecutionModelSelection: (inboxId, input) => this.deliveryStore.recordForegroundExecutionModelSelection({ inboxId, ...input }),
+        recordForegroundExecutionModelSelection: (inboxId, input) => {
+          this.deliveryStore.recordForegroundExecutionModelSelection({ inboxId, ...input })
+          if (this.restartStore?.getTask(inboxId) !== undefined) {
+            if (this.restartStore.getRequestForTask(inboxId) === undefined) {
+              try { this.restartStore.observeModel(inboxId, input) }
+              catch (error) { this.context.logger.warn(`assistant-delivery: restart model observation unavailable: ${String(error)}`) }
+            } else this.restartStore.captureModel(inboxId, input)
+          }
+        },
         completeForegroundTaskExecution: (inboxId, input) => this.completeForegroundTaskExecution(inboxId, input),
         modelPickerTtlMs: config.modelPickerTtlMs,
         permissionPickerTtlMs: config.permissionPickerTtlMs,
@@ -1264,7 +1330,7 @@ export class AssistantDeliveryService extends Service {
       return approvalCtx.assistantPolicy.registerHumanApprovalAnswerer((request, next) =>
         this.requestToolApproval(approvalCtx, request, next))
     }, 'assistant-delivery.tool-approval-route'))
-    ctx.inject(['tools'], toolsCtx => registerDeliveryTools(toolsCtx, this))
+    ctx.inject(['tools', 'assistantPolicy'], toolsCtx => registerDeliveryTools(toolsCtx, this))
     // rc.1 exposes questions as an Agent-scoped waterfall. Delivery is one
     // answerer in that chain, so Web and other frontends may call `next()` and
     // coexist without a competing service provider or a private ApiProxy seam.
@@ -1316,6 +1382,7 @@ export class AssistantDeliveryService extends Service {
       }
       await this.stopInternal()
       await this.registry.stop()
+      this.restartStore?.close()
       this.deliveryStore.close()
     }, 'assistant-delivery.runtime')
   }
@@ -2078,6 +2145,26 @@ export class AssistantDeliveryService extends Service {
     const dispatchedAt = Date.now()
     this.deliveryStore.bindForegroundTaskExecution({ inboxId: inbox.id,
       scope: { workspace: binding.workspace, preset: binding.agentPreset }, owner, binding, dispatchedAt })
+    try {
+    if (this.restartStore !== undefined) {
+      const route = this.resolveOwnerRoute(this.config.restart.ownerRouteId)
+      if (route.binding.id === binding.id) this.restartStore.beginTask({
+        inboxId: inbox.id, eventId: inbox.eventId, owner,
+        binding: { id: binding.id, version: binding.version, generation: binding.generation,
+          sessionId: binding.sessionId, workspace: binding.workspace, preset: binding.agentPreset,
+          conversation: binding.conversation, principal: binding.principal, policyRef: binding.policyRef,
+          authorityHash: route.snapshot.authorityHash },
+        sourceInvocationId: this.restartInvocationId,
+        maxModelRequests: this.config.restart.maxModelRequests,
+        maxToolCalls: this.config.restart.maxToolCalls,
+        maxOutputTokens: this.config.agentMaxOutputTokens,
+        deadline: dispatchedAt + this.config.restart.taskTimeoutMs,
+        capabilityDigest: this.restartCapabilityDigest(),
+      })
+    }
+    } catch (error) {
+      this.context.logger.warn(`assistant-delivery: restart eligibility observation unavailable: ${String(error)}`)
+    }
     this.observeForegroundBegin(Object.freeze({ protocol: 'assistant-delivery/foreground-task/v1' as const, inboxId: inbox.id,
       sessionId: binding.sessionId, scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
       owner: Object.freeze({ principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion }),
@@ -4448,6 +4535,7 @@ export class AssistantDeliveryService extends Service {
           beforeInboxId: record.id,
           failureCode: 'new-session-before-dispatch',
         })
+        this.restartStore?.cancelForBinding(binding.id)
         await this.runtime?.cancelActive?.(binding, 'new')
         await this.inbound.cancelUndispatchedClaims(fence.claimedInboxIds, 'new')
         const rotated = await this.rotateBinding(envelope, binding, record.id, recoverySignal)
@@ -4485,6 +4573,7 @@ export class AssistantDeliveryService extends Service {
         })
         // Holding the transition while the live turn drains prevents a later
         // message from overtaking the durable stop acknowledgement.
+        this.restartStore?.cancelForBinding(binding.id)
         await this.runtime?.cancelActive?.(binding, 'stop')
         await this.inbound.cancelUndispatchedClaims(fence.claimedInboxIds, 'stop')
         record = this.deliveryStore.queueInbox(record.id, binding.id)
@@ -4559,6 +4648,30 @@ export class AssistantDeliveryService extends Service {
 
   #notificationGuard(record: Readonly<OutboxRecord>): Extract<import('./types.js').AdapterSendResult, { outcome: 'not-sent' }> | undefined {
     const key = record.intent.idempotencyKey
+    if (key.startsWith('inbound:') && (key.endsWith(':maintenance') || key.endsWith(':maintenance-failed'))) {
+      try {
+        const failed = key.endsWith(':maintenance-failed')
+        const inboxId = key.slice('inbound:'.length, -(failed ? ':maintenance-failed'.length : ':maintenance'.length))
+        const request = this.restartStore?.getRequestForTask(inboxId)
+        const task = this.restartStore?.getTask(inboxId)
+        const inbox = this.deliveryStore.getInbox(inboxId)
+        const binding = this.deliveryStore.getBinding(record.intent.bindingId)
+        if (request === undefined || task === undefined || inbox === undefined || binding === undefined
+          || request.status === 'cancelled' || (failed ? request.status !== 'failed' : !this.restartAuthorized(request))
+          || task.binding.id !== binding.id || task.binding.version !== binding.version || task.binding.generation !== binding.generation
+          || task.owner.principalRecordId !== this.ownerLineageForBinding(binding)?.principalRecordId
+          || task.owner.principalVersion !== this.ownerLineageForBinding(binding)?.principalVersion
+          || inbox.bindingId !== binding.id || inbox.eventId !== record.intent.replyToEventId
+          || !this.isInboundAuthorized(binding, inbox.envelope)
+          || this.deliveryStore.getOutboxByIdempotencyKey(`inbound:${inbox.id}:reply`) !== undefined
+          || this.deliveryStore.getOutboxByIdempotencyKey(`inbound:${inbox.eventId}:reply`) !== undefined) throw new Error('maintenance notice is stale')
+        const decision = this.policy.evaluate({ subject: { kind: 'agent', id: binding.agentPreset,
+          workspace: binding.workspace, principal: externalPrincipalId(binding.principal) },
+          action: 'reply', resource: { kind: 'message', id: binding.id }, context: { initiator: 'external' } })
+        if (decision.effect !== 'allow') throw new Error('maintenance notice permission changed')
+      } catch { return { outcome: 'not-sent', failureCode: 'maintenance-notice-stale', retryable: false } }
+      return undefined
+    }
     if (key.startsWith('inbound:') && key.endsWith(':interrupted')) {
       try {
         const inboxId = key.slice('inbound:'.length, -':interrupted'.length)
@@ -5440,10 +5553,217 @@ export class AssistantDeliveryService extends Service {
     }
   }
 
+  private restartCapabilityDigest(): string {
+    return restartDigest({ protocol: 'assistant-delivery/restart/v1', version, code: this.restartCodeDigest,
+      config: this.config.restart, maxOutputTokens: this.config.agentMaxOutputTokens })
+  }
+
+  private restartAuthorized(record: Pick<RestartRecord, 'inboxId'> & Partial<Pick<RestartRecord, 'id'>>): boolean {
+    try {
+      if (!this.active || this.restartStore === undefined || this.restartController.signal.aborted) return false
+      const current = record.id === undefined ? this.restartStore.getRequestForTask(record.inboxId) : this.restartStore.getRequest(record.id)
+      const task = this.restartStore.getTask(record.inboxId)
+      if ((record.id !== undefined && current === undefined) || task === undefined
+        || (current !== undefined && ['cancelled', 'failed', 'completed'].includes(current.status))
+        || Date.now() >= task.deadline || task.capabilityDigest !== this.restartCapabilityDigest()) return false
+      const route = this.resolveOwnerRoute(this.config.restart.ownerRouteId)
+      const binding = route.binding
+      const owner = this.ownerLineageForBinding(binding)
+      const inbox = this.deliveryStore.getInbox(record.inboxId)
+      if (owner?.principalRecordId !== task.owner.principalRecordId || owner.principalVersion !== task.owner.principalVersion
+        || binding.id !== task.binding.id || binding.version !== task.binding.version || binding.generation !== task.binding.generation
+        || binding.sessionId !== task.binding.sessionId || binding.workspace !== task.binding.workspace
+        || binding.agentPreset !== task.binding.preset || binding.policyRef !== task.binding.policyRef
+        || route.snapshot.authorityHash !== task.binding.authorityHash
+        || inbox?.bindingId !== binding.id || inbox.eventId !== task.eventId
+        || !['claimed', 'processed'].includes(inbox.status) || !this.isInboundAuthorized(binding, inbox.envelope)
+        || this.deliveryStore.hasRestartCancellationAfter(inbox.id, binding)
+        || this.deliveryStore.getOutboxByIdempotencyKey(`inbound:${inbox.id}:reply`) !== undefined
+        || this.deliveryStore.getOutboxByIdempotencyKey(`inbound:${inbox.eventId}:reply`) !== undefined) return false
+      const decision = this.policy.evaluate({ subject: { kind: 'agent', id: binding.agentPreset,
+        workspace: binding.workspace, principal: externalPrincipalId(binding.principal) },
+        action: 'maintenance.restart', resource: { kind: 'message', id: `maintenance:${this.config.restart.ownerRouteId}` }, context: { initiator: 'external' } })
+      return decision.effect === 'allow'
+    } catch { return false }
+  }
+
+  /** Host-only maintenance gate shared by the native background scheduler. */
+  isMaintenanceDraining(): boolean { return this.active && this.deliveryStore.getRestartFence() !== undefined }
+
+  private restartDispatchPermitted(agent: Agent | undefined): boolean {
+    if (!this.active) return false
+    const fence = this.deliveryStore.getRestartFence()
+    if (fence === undefined) return true
+    const request = this.restartStore?.getRequest(fence.requestId)
+    const task = request === undefined ? undefined : this.restartStore?.getTask(request.inboxId)
+    return request?.status === 'resuming' && task !== undefined && agent?.session.id === task.binding.sessionId
+      && this.restartAuthorized(request)
+  }
+
+  /** Run only from native maintenance after the continuation notice is durably flushed. */
+  private releaseRestartFenceOnAdmission(record: RestartRecord, sessionId: string): void {
+    const current = this.restartStore?.getRequest(record.id)
+    const task = this.restartStore?.getTask(record.inboxId)
+    const fence = this.deliveryStore.getRestartFence()
+    if (current?.status !== 'resuming' || current.continuationHolderId !== this.ownerId
+      || current.restartInvocationId !== this.restartInvocationId
+      || current.sourceInvocationId === this.restartInvocationId
+      || current.inboxId !== record.inboxId || task?.binding.sessionId !== sessionId
+      || fence?.requestId !== record.id || fence.sourceInvocationId !== record.sourceInvocationId
+      || !this.restartAuthorized(current)) {
+      throw new AssistantDeliveryError('runtime-conflict', 'restart admission no longer owns the maintenance fence')
+    }
+    this.deliveryStore.clearRestartFence(record.id)
+    if (this.deliveryStore.getRestartFence()?.requestId === record.id) {
+      throw new AssistantDeliveryError('runtime-conflict', 'restart maintenance fence could not be released')
+    }
+  }
+
+  private otherRestartWorkQuiescent(agent: Agent): boolean {
+    if (this.context.get('agents')?.list().some(other => other !== agent)) return false
+    const automations = this.context.get('assistantAutomations') as { isRestartQuiescent?: () => boolean } | undefined
+    return automations === undefined || automations.isRestartQuiescent?.() === true
+  }
+
+  canRequestRestart(agent: Agent | undefined): boolean {
+    return this.active && agent !== undefined && this.otherRestartWorkQuiescent(agent)
+      && this.runtime?.canRequestRestart?.(agent) === true
+  }
+
+  requestRestart(agent: Agent | undefined, reason: string): { id: string; status: string } {
+    this.assertActive()
+    if (agent === undefined || this.restartStore === undefined || this.runtime?.requestRestart === undefined) {
+      throw new AssistantDeliveryError('runtime-unavailable', 'planned restart is not configured for this owner')
+    }
+    if (!this.otherRestartWorkQuiescent(agent)) throw new AssistantDeliveryError('runtime-conflict', 'other Host work has not drained')
+    const result = this.runtime.requestRestart(agent, reason)
+    try { this.deliveryStore.setRestartFence(result.id, this.restartInvocationId) }
+    catch (error) { this.restartStore.fail(result.id, 'restart-drain-fence-unavailable'); throw error }
+    return result
+  }
+
+  get supportsPlannedRestart(): boolean { return this.restartStore !== undefined }
+
+  /** Host-side registration of an exact, currently mounted read-only definition. */
+  registerRestartSafeTool(caller: Context, definition: ToolDefinition): () => void {
+    if (this.restartStore === undefined) return () => {}
+    const trusted = definition.name === 'delivery_status'
+      ? caller.fiber.name === 'AssistantDeliveryService'
+        && caller.fiber.parent.fiber === this.context.fiber
+      : definition.name === 'wiki_read' || definition.name === 'wiki_search'
+        ? caller.fiber.name === 'PersonalWikiService' || caller.fiber.name === 'dsh-enhanced-personal-wiki'
+        : definition.name === 'memory_search'
+          && (caller.fiber.name === 'PersonalMemoryService' || caller.fiber.name === 'dsh-enhanced-personal-memory')
+    // The installed Cordis fork declares FiberState as an ambient const enum;
+    // its ACTIVE and LOADING numeric values are 2 and 1, respectively.
+    if (!trusted || caller.fiber.uid === null || (caller.fiber.state !== 1 && caller.fiber.state !== 2)) {
+      throw new AssistantDeliveryError('runtime-conflict', 'restart-safe tool registration requires a trusted live provider')
+    }
+    const entry = { caller, definition }
+    this.restartSafeDefinitions.add(entry)
+    const remove = () => { this.restartSafeDefinitions.delete(entry) }
+    try { caller.effect(() => remove, 'assistant-delivery.restart-safe-tool') }
+    catch (error) { remove(); throw error }
+    return remove
+  }
+
+  isRestartSafeTool(agent: Agent, name: string): boolean {
+    if (!this.active || this.restartStore === undefined) return false
+    let current: ToolDefinition | undefined
+    try { current = agent.ctx.tools.get(name, agent) } catch { return false }
+    if (current === undefined) return false
+    for (const entry of this.restartSafeDefinitions) {
+      if (entry.definition === current && entry.definition.name === name
+        && entry.caller.fiber.uid !== null && entry.caller.fiber.state === 2) return true
+    }
+    return false
+  }
+
+  /** Startup/tick reconciliation uses the existing native runtime, never requeues the old Inbox. */
+  private drainRestartContinuations(): void {
+    if (this.restartFlight !== undefined || this.restartStore === undefined || this.runtime?.resumeRestart === undefined) return
+    const store = this.restartStore
+    const pending = store.listRequests({ statuses: ['requested', 'checkpoint', 'ready', 'restarting', 'restarted', 'resuming'], limit: 100 })
+    for (const record of pending) {
+      if (Date.now() >= (store.getTask(record.inboxId)?.deadline ?? 0)) store.fail(record.id, 'restart-deadline-expired')
+      else if (['requested', 'checkpoint', 'ready'].includes(record.status) && Date.now() >= record.createdAt + 120_000) {
+        store.fail(record.id, 'restart-handoff-timeout')
+      }
+      else if (record.sourceInvocationId !== this.restartInvocationId
+        && ['requested', 'checkpoint'].includes(record.status)) store.fail(record.id, 'restart-checkpoint-not-quiescent')
+      else if (record.status === 'resuming' && record.continuationHolderId !== this.ownerId) {
+        // A later restart must not blindly execute a possibly dispatched continuation.
+        store.fail(record.id, 'restart-continuation-outcome-unknown')
+      }
+    }
+    const candidate = pending.find(record => record.status === 'restarted' && store.getRequest(record.id)?.status === 'restarted'
+      && record.restartInvocationId === this.restartInvocationId && record.sourceInvocationId !== this.restartInvocationId)
+    if (candidate === undefined) return
+    if (!this.restartAuthorized(candidate)) { store.fail(candidate.id, 'restart-authority-changed'); return }
+    const task = store.getTask(candidate.inboxId)!
+    const binding = this.deliveryStore.getBinding(task.binding.id)!
+    const inbox = this.deliveryStore.getInbox(candidate.inboxId)!
+    const claimed = store.claimContinuation(candidate.id, { holderId: this.ownerId, invocationId: this.restartInvocationId })
+    const runtime = this.runtime
+    const flight = (async () => {
+      try {
+        await runtime!.resumeRestart!(claimed, binding, inbox.envelope, this.restartController.signal)
+      } catch (error) {
+        if (this.active) {
+          const current = store.getRequest(claimed.id)
+          if (current?.status === 'resuming') store.fail(claimed.id, 'restart-continuation-failed')
+          this.context.logger.warn(`assistant-delivery: restart continuation failed: ${String(error)}`)
+        }
+      }
+    })().finally(() => { if (this.restartFlight === flight) this.restartFlight = undefined })
+    this.restartFlight = flight
+  }
+
+  private drainRestartFailureNotices(): void {
+    if (this.restartStore === undefined) return
+    let records = this.restartStore.listRequests({ statuses: ['failed'], limit: 100,
+      ...(this.restartNoticeCursor === undefined ? {} : { after: this.restartNoticeCursor }) })
+    if (records.length === 0 && this.restartNoticeCursor !== undefined) {
+      this.restartNoticeCursor = undefined
+      records = this.restartStore.listRequests({ statuses: ['failed'], limit: 100 })
+    }
+    for (const record of records) {
+      this.restartNoticeCursor = { createdAt: record.createdAt, id: record.id }
+      const task = this.restartStore.getTask(record.inboxId)
+      const inbox = this.deliveryStore.getInbox(record.inboxId)
+      const binding = task === undefined ? undefined : this.deliveryStore.getBinding(task.binding.id)
+      const key = `inbound:${record.inboxId}:maintenance-failed`
+      if (task === undefined || inbox === undefined || binding?.status !== 'active'
+        || binding.version !== task.binding.version || binding.generation !== task.binding.generation
+        || this.deliveryStore.getActiveBinding(binding.conversation)?.id !== binding.id
+        || this.ownerLineageForBinding(binding)?.principalRecordId !== task.owner.principalRecordId
+        || !this.isInboundAuthorized(binding, inbox.envelope)
+        || this.deliveryStore.getOutboxByIdempotencyKey(key) !== undefined
+        || this.deliveryStore.getOutboxByIdempotencyKey(`inbound:${inbox.id}:reply`) !== undefined
+        || this.deliveryStore.getOutboxByIdempotencyKey(`inbound:${inbox.eventId}:reply`) !== undefined) continue
+      try {
+        this.replyCommand(binding, { idempotencyKey: key, replyToEventId: inbox.eventId,
+          text: '维护恢复未能安全完成，当前任务已停止自动继续，服务仍可接收新请求。已保存原会话；可能已经执行的操作不会自动重做。' })
+      } catch (error) {
+        if (this.active) this.context.logger.warn(`assistant-delivery: restart failure notice: ${String(error)}`)
+      }
+    }
+  }
+
   async tick(): Promise<void> {
     this.assertActive()
     await this.drainInboundAdmissions()
-    await this.inbound.tick()
+    this.drainRestartContinuations()
+    const restartFence = this.deliveryStore.getRestartFence()
+    if (restartFence !== undefined) {
+      const record = this.restartStore?.getRequest(restartFence.requestId)
+      if (record === undefined || ['failed', 'cancelled', 'completed'].includes(record.status)) {
+        this.deliveryStore.clearRestartFence(restartFence.requestId)
+      }
+    }
+    const maintenance = this.restartStore?.listRequests({ statuses: ['requested', 'checkpoint', 'ready', 'restarting', 'restarted'], limit: 1 })
+    if (maintenance === undefined || maintenance.length === 0) await this.inbound.tick()
+    this.drainRestartFailureNotices()
     await this.drainInterruptedInboxNotices()
     await this.drainModelSelectionSettlements()
     this.drainApprovalDispatches()
@@ -5466,6 +5786,7 @@ export class AssistantDeliveryService extends Service {
       this.workflowTraceFlight,
       this.inboundAdmissionRecoveryFlight,
       this.interruptedInboxNoticeFlight,
+      this.restartFlight,
     ])
   }
 
@@ -5749,6 +6070,7 @@ export class AssistantDeliveryService extends Service {
     this.preferenceProjectionRetryTimer = undefined
     this.cancelModelSelectionWaiters()
     this.inboundAdmissionRecoveryController.abort(new Error('assistant-delivery is stopping'))
+    this.restartController.abort(new Error('assistant-delivery is stopping'))
     const admissionRecovery = this.inboundAdmissionRecoveryFlight === undefined
       ? undefined
       : Promise.race([
@@ -5767,6 +6089,7 @@ export class AssistantDeliveryService extends Service {
       this.preferenceProjectionFlight,
       this.naturalObjectiveFlight,
       this.workflowTraceFlight,
+      this.restartFlight,
     ])
   }
 

@@ -10,15 +10,15 @@
 
 ## 活跃交付与下次验收
 
-- 本轮中断修复已完成代码及生产独立验收。下一次普通任务仍须观察实际答复、学习和后续收益。
+- 活跃交付：受控同码重启、持久 checkpoint、原任务自动续办，已通过完整工程检查与独立验收，待受管部署和生产核验。普通任务保持原能力，只有可证明无未知副作用的只读任务可自动续办；接回原 Session 后立即恢复其它会话和后台调度。独立飞书接入及任意硬崩溃恢复尚未交付。
 - 旧飞书进度句柄未持久化，不能原位关闭历史气泡；以新增中断说明为准。平台接受通知不代表用户已读，也不代表先前未知写操作已核对。
 - 401 个 Hermes 迁移页已通过安装版解析器检查；连同既有页面共 402 页，ID 全部唯一。此结果不证明完整记忆迁移或长期学习闭环。
 
 ## 最新验证
 
-- `pnpm check` 的 validate、lint、build、typecheck 通过；首次根测试因临时诊断注入的未处理错误退出 1。无诊断完整根测试重跑退出 0（1170 通过、5 跳过）；37 包测试日志全部 Done（7816 通过、96 跳过），其父进程退出码因输出截断未留存；`pnpm pack:check` 退出 0。独立代码审查 PASS；不声称首次组合命令退出成功。
-- `node scripts/install/upgrade-program.mjs --dsh-home /data00/home/jiataorui/.dsh --profile assistant --dsh-version 0.2.1-rc.2` 退出 0，事务已关闭。两个服务均新启动且 ready、无自动重启，飞书 connected；包含截图两条请求的 3 条中断通知均 accepted、各发送一次。
-- 升级前后独立只读复算 8 项保留检查全部通过：owner、绑定、模型选择、原未知结果记录、原 Session 和全部 403 个 Wiki Markdown 文件保持一致，无 claimed Inbox。独立生产审查 PASS；未验证新的模型任务或在线 Wiki 内存快照。为升级空间清理了约 8 GiB 超过 30 天且未被进程打开的 npm 临时下载文件。
-- 私有执行摘要、文件保留快照和检查日志位于忽略目录 `docs/evidence/interrupted-delivery-20261024/`。
+- 最终 `VITEST_MAX_WORKERS=4 pnpm_config_workspace_concurrency=4 pnpm check` 退出 0：根测试 1180 通过、5 跳过，37 包测试 7884 通过、96 跳过；validate、零警告 lint、build、typecheck 及 37 包 dry-run pack 全部通过。Delivery 包含外部 helper 和恢复模块；独立源码与工程验收 PASS。
+- 原生恢复集成 19 项、持久化 9 项全部通过。真实 AgentLoop 测试中，续办挂起时其它会话仍可完成模型、工具及回复，原会话串行且等待不耗重试额度；跨 Session 委派在适配器前被拒绝。生产数据库副本迁移 25→26，owner 与 Inbox 数量保留，两个 claim trigger 均存在。
+- 本机上一版中断通知修复已部署：截图对应请求保持未知结果，3 条幂等说明均已被平台接受；不证明用户已读或此前写操作已核对。当前两个服务正常运行且自动重启次数为 0。
+- 当前私有日志、生产迁移副本和部署保留快照位于忽略目录 `docs/evidence/planned-restart-20261024/`；既有中断修复证据在 `docs/evidence/interrupted-delivery-20261024/`。尚未进行生产新任务的真实维护续办。
 
 普通使用驱动持续自迭代的完整闭环尚未验收。工程测试、安装、服务就绪和升级保留不证明后续任务的质量、成本、延迟或回归收益。

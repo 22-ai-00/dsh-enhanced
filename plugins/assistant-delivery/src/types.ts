@@ -856,6 +856,7 @@ export type DeliveryProgressUpdate =
   | { kind: 'tool-finished'; callId: string; failed: boolean; resultPreview?: string; code?: string }
   | { kind: 'todos'; todos: readonly DeliveryProgressTodo[] }
   | { kind: 'completed' }
+  | { kind: 'paused' }
   | { kind: 'failed'; code?: string }
 
 export interface DeliveryProgressTodo {
