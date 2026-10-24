@@ -109,6 +109,8 @@ Web 会话可调用 `assistant_health`。正常长连接状态为 `larkChannel.s
 
 ## 常见问题
 
+- **一直显示“正在继续处理（第 N 步）”：**该文字是最后一次进度，不是服务存活证明。先核对 Host 日志与 Delivery Inbox；`dispatch-ambiguous` 表示任务在派发后中断、结果未确认。服务恢复后，Delivery 会为仍有效的 owner 普通请求补发一次中断说明，不自动重做原动作，也不加 DONE。旧进度句柄只在原进程内，重启后不能原位关闭旧气泡；以持久回复为准。不要在当前 Agent 的 shell 中安排重启自身来刷新 Wiki，正常 `wiki_upsert` 提交会更新目录。
+
 - **凭据或 bot identity 错误：**核对 App ID/Secret、`feishu`/`lark` domain 和机器人能力；重跑向导会更新同一 Keychain 条目。
 - **一键创建链接过期或被拒绝：**重跑 `dsh-lark-setup --profile web --create-app`。链接只在页面显示的期限内有效，且只能由一位用户确认。
 - **长连接成功但一直等不到短语：**确认事件接收方式是长连接、已经添加 `im.message.receive_v1`、应用版本已发布且你在可用范围内，并在机器人私聊原样发送短语。

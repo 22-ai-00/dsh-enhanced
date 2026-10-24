@@ -196,6 +196,7 @@ const goalOutcomeFeedbackFooter = [
   '`helpful` 等只记录偏好，不会被当成目标成败。',
 ].join('\n')
 const goalWakeCompletionNotice = '目标已通过独立验收并完成。'
+const interruptedTurnNotice = '这次请求在执行过程中被中断，当前已停止等待；已有操作的结果尚未确认，因此没有自动重跑。你可以继续发送消息；涉及写入的任务需要先核对现有结果。'
 
 interface GoalOutcomeFeedbackAuthority {
   issueOwnerGoalOutcomeFeedbackTarget(locator: Readonly<OwnerGoalOutcomeFeedbackLocator>): unknown
@@ -1085,6 +1086,8 @@ export class AssistantDeliveryService extends Service {
   private preferenceProjectionFlight: Promise<void> | undefined
   private inboundAdmissionRecoveryFlight: Promise<void> | undefined
   private inboundAdmissionRecoveryAfterSequence = 0
+  private interruptedInboxNoticeFlight: Promise<void> | undefined
+  private interruptedInboxNoticeAfterSequence = 0
   private readonly inboundAdmissionRecoveryController = new AbortController()
   private workflowTraceRetryTimer: ReturnType<typeof setTimeout> | undefined
   private preferenceProjectionRetryTimer: ReturnType<typeof setTimeout> | undefined
@@ -4555,6 +4558,29 @@ export class AssistantDeliveryService extends Service {
   }
 
   #notificationGuard(record: Readonly<OutboxRecord>): Extract<import('./types.js').AdapterSendResult, { outcome: 'not-sent' }> | undefined {
+    const key = record.intent.idempotencyKey
+    if (key.startsWith('inbound:') && key.endsWith(':interrupted')) {
+      try {
+        const inboxId = key.slice('inbound:'.length, -':interrupted'.length)
+        const inbox = this.deliveryStore.getInbox(inboxId)
+        const binding = this.deliveryStore.getBinding(record.intent.bindingId)
+        if (record.intent.text !== interruptedTurnNotice || inbox === undefined || binding === undefined
+          || !this.deliveryStore.canSendInterruptedInboxNotice(record)
+          || !this.isInboundAuthorized(binding, inbox.envelope)) {
+          throw new Error('interrupted Inbox authority changed')
+        }
+        const reply = this.policy.evaluate({
+          subject: { kind: 'agent', id: binding.agentPreset, workspace: binding.workspace,
+            principal: externalPrincipalId(binding.principal) },
+          action: 'reply', resource: { kind: 'message', id: binding.id },
+          context: { initiator: 'external' },
+        })
+        if (reply.effect !== 'allow') throw new Error('interrupted Inbox reply authority changed')
+      } catch {
+        return { outcome: 'not-sent', failureCode: 'interrupted-inbox-authority-revoked', retryable: false }
+      }
+      return undefined
+    }
     const metadata = record.intent.metadata
     const nativeKeys = Object.keys(metadata ?? {}).filter(key => key.startsWith('dsh.native-notice'))
     if (nativeKeys.length > 0) {
@@ -5165,6 +5191,7 @@ export class AssistantDeliveryService extends Service {
     modelPicker?: ModelPickerIntent
     permissionPicker?: PermissionPickerIntent
     replyToEventId: string
+    interruptedInboxId?: string
   }): OutboxRecord {
     this.assertActive()
     const binding = this.deliveryStore.getBinding(bindingInput.id)
@@ -5192,7 +5219,7 @@ export class AssistantDeliveryService extends Service {
       throw new AssistantDeliveryError('missing-binding', 'control command binding principal is no longer active')
     }
     const format = this.replyFormat(binding.conversation, input.format) ?? 'plain'
-    return this.deliveryStore.enqueue({
+    const intent: OutboundIntent = {
       idempotencyKey,
       bindingId: binding.id,
       target: { conversation: binding.conversation, principal: binding.principal },
@@ -5203,7 +5230,11 @@ export class AssistantDeliveryService extends Service {
         ? {}
         : { permissionPicker: input.permissionPicker }),
       replyToEventId: input.replyToEventId,
-    })
+    }
+    return input.interruptedInboxId === undefined
+      ? this.deliveryStore.enqueue(intent)
+      : this.deliveryStore.enqueueInterruptedInboxNotice({ inboxId: input.interruptedInboxId,
+        binding, intent })
   }
 
   /**
@@ -5413,6 +5444,7 @@ export class AssistantDeliveryService extends Service {
     this.assertActive()
     await this.drainInboundAdmissions()
     await this.inbound.tick()
+    await this.drainInterruptedInboxNotices()
     await this.drainModelSelectionSettlements()
     this.drainApprovalDispatches()
     await this.outbound.tick()
@@ -5433,6 +5465,7 @@ export class AssistantDeliveryService extends Service {
       this.naturalObjectiveFlight,
       this.workflowTraceFlight,
       this.inboundAdmissionRecoveryFlight,
+      this.interruptedInboxNoticeFlight,
     ])
   }
 
@@ -5479,6 +5512,51 @@ export class AssistantDeliveryService extends Service {
       .finally(() => { if (this.inboundAdmissionRecoveryFlight === flight) this.inboundAdmissionRecoveryFlight = undefined })
     this.inboundAdmissionRecoveryFlight = flight
     return flight
+  }
+
+  private drainInterruptedInboxNotices(): Promise<void> {
+    if (this.interruptedInboxNoticeFlight !== undefined) return this.interruptedInboxNoticeFlight
+    const flight = this.runInterruptedInboxNotices()
+      .finally(() => { if (this.interruptedInboxNoticeFlight === flight) this.interruptedInboxNoticeFlight = undefined })
+    this.interruptedInboxNoticeFlight = flight
+    return flight
+  }
+
+  private async runInterruptedInboxNotices(): Promise<void> {
+    let pending = this.deliveryStore.listInterruptedInboxNotices({
+      afterSequence: this.interruptedInboxNoticeAfterSequence, limit: 100,
+    })
+    if (pending.length === 0 && this.interruptedInboxNoticeAfterSequence !== 0) {
+      this.interruptedInboxNoticeAfterSequence = 0
+      pending = this.deliveryStore.listInterruptedInboxNotices({ limit: 100 })
+    }
+    for (const inbox of pending) {
+      if (!this.active) return
+      this.interruptedInboxNoticeAfterSequence = inbox.admissionCursor.sequence
+      try {
+        const current = this.deliveryStore.getInbox(inbox.id)
+        if (current?.status !== 'dead_letter' || current.failureCode !== 'dispatch-ambiguous'
+          || current.bindingId === undefined
+          || this.deliveryStore.getDeadLetterResolution({ kind: 'inbox', id: current.id,
+            attemptCount: current.attemptCount }) !== undefined
+          || this.deliveryStore.getOutboxByIdempotencyKey(`inbound:${current.id}:reply`) !== undefined
+          || this.deliveryStore.getOutboxByIdempotencyKey(`inbound:${current.eventId}:reply`) !== undefined
+          || this.deliveryStore.getOutboxByIdempotencyKey(`inbound:${current.id}:interrupted`) !== undefined) continue
+        const binding = this.deliveryStore.getBinding(current.bindingId)
+        if (binding?.status !== 'active'
+          || this.deliveryStore.getActiveBinding(current.envelope.conversation)?.id !== binding.id
+          || this.deliveryStore.getPrincipal(binding.principal)?.role !== 'owner'
+          || !this.isInboundAuthorized(binding, current.envelope)
+          || this.registry.get(binding.conversation.channel, binding.conversation.account) === undefined) continue
+        this.replyCommand(binding, { idempotencyKey: `inbound:${current.id}:interrupted`,
+          interruptedInboxId: current.id, replyToEventId: current.eventId, text: interruptedTurnNotice })
+      } catch (error) {
+        if (!this.active) return
+        if ((error instanceof AssistantDeliveryError && (error.code === 'policy-denied' || error.code === 'missing-binding'))
+          || (error instanceof DeliveryStoreError && error.code === 'version-conflict')) continue
+        this.context.logger.warn(`assistant-delivery: interrupted Inbox notice ${inbox.id}: ${String(error)}`)
+      }
+    }
   }
 
   private async runInboundAdmissionRecovery(): Promise<void> {

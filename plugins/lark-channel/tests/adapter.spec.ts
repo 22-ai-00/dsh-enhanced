@@ -382,6 +382,21 @@ describe('Lark delivery adapter', () => {
     })
   })
 
+  test('delivers an interruption receipt without marking the original task DONE', async () => {
+    const f = fixture()
+    await f.adapter.start(f.context)
+    await expect(f.adapter.send(intent({
+      idempotencyKey: 'inbound:inbox_interrupted:interrupted',
+      text: '这次请求在执行过程中被中断，已有操作的结果尚未确认。',
+    }), new AbortController().signal)).resolves.toEqual({
+      outcome: 'accepted', providerMessageId: 'om_sent',
+    })
+    expect(f.transport.send).toHaveBeenCalledWith('oc_dm', {
+      text: '这次请求在执行过程中被中断，已有操作的结果尚未确认。',
+    }, { replyTo: 'om_in', requestKey: 'inbound:inbox_interrupted:interrupted' })
+    expect(f.transport.addReaction).not.toHaveBeenCalled()
+  })
+
   test('keeps a successful final reply accepted when the DONE reaction fails', async () => {
     const f = fixture()
     await f.adapter.start(f.context)

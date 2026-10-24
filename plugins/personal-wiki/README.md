@@ -49,6 +49,8 @@ dsh --profile web --dump-config
 
 插件还注册一个短的 `personal-wiki-workflow` Skill，要求 search/read 后再提案、保留 `wiki://` 引用、把来源视为数据，并禁止绕过审批直接用 shell 改 vault。
 
+`wiki_upsert` 提交时会更新当前进程目录，无需重启助理。Skill 明确提醒不要在前台工具里安排重启正在答复的 Host，以免最终回复尚未投递就中断；外部文件引起的索引漂移应报告给运维处理。
+
 `wiki_upsert` 会从当前 Agent 的 Delivery owner binding 派生 exact principal、workspace 和 binding，并让 Policy 在创建提案的同一事务中持久化审批投递。模型无法改写该路由。没有 Delivery 的可信 headless 宿主仍可通过 `ctx.personalWiki.propose(..., { principal })` 显式指定 principal；模型工具没有这个兼容入口，缺少路由时会 fail closed。
 
 `ctx.personalWiki.decideProposal(...)` 面向可信通道/UI。提案绑定 principal、TTL、版本和完整目标 Markdown。direct decide 与重启 reconcile 都使用 Policy 的共享 settlement validator，逐项核对 proposal id、requester、principal、action、resource、summary、expiry、version、decider 和本地 exact diff 的 SHA-256；任一不一致会持久化为 `conflicted`，绝不写 vault。批准 update 时还会重新读取 SHA-256 revision；外部编辑同样令提案进入 `conflicted`，不会覆盖新内容。policy 与 Wiki 状态分别持久化；Wiki 会先保存含 absolute deadline 和 exact dispatch 的恢复意图，再调用 Policy 的单事务 recover-or-create。Policy 会优先返回已存在的 exact proposal；若 deadline 已过且 proposal 不存在，则永久 tombstone 该 idempotency key，阻止另一个进程随后创建孤儿审批或续期。即使 Policy proposal 已提交、投递或批准而本地 attachment 尚未提交，重启后的 reconcile 也能找回同一 proposal，无需原 Agent 再提一次。只读 scoped lookup 仅用于诊断，不参与创建决策。
