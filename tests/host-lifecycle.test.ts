@@ -5,11 +5,21 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { candidateHostUnitSource, classifyHostUnitBytes, parseHostUpdatePlan } from '../scripts/install/host-lifecycle.mjs'
+import { candidateHostUnitSource, classifyHostUnitBytes, finiteHostUnitStartLimit, hostLocalSourcePlanMode,
+  parseHostUpdatePlan } from '../scripts/install/host-lifecycle.mjs'
 import { lifecycleProfileTest } from '../scripts/install/lifecycle-profile.mjs'
 import { createSystemdUserUnit, systemdServicePaths } from '../plugins/lark-channel/src/systemd.ts'
 
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
+const finiteStartLimit = 'StartLimitIntervalSec=600\nStartLimitBurst=3\n'
+const legacyStartLimit = 'StartLimitIntervalSec=0\n'
+const finiteRestartComment = '# exit is restarted within a finite start budget. Repeated failure stays\n'
+  + '# stopped for diagnosis instead of continuously interrupting the owner.\n'
+const legacyRestartComment = '# exit (including a clean but unintended Host exit) is restarted.  Disabling\n'
+  + "# systemd's start-rate limiter keeps a long-lived personal assistant from\n"
+  + '# becoming permanently inactive after a transient dependency outage.\n'
+const legacyUnit = (source: string) => source.replace(finiteStartLimit, legacyStartLimit)
+  .replace(finiteRestartComment, legacyRestartComment)
 const old = { version: '0.1.5-rc.3', root: '/private/hosts/0.1.5-rc.3',
   dshPath: '/private/hosts/0.1.5-rc.3/node_modules/.bin/dsh',
   binDirectory: '/private/hosts/0.1.5-rc.3/node_modules/.bin',
@@ -572,17 +582,19 @@ describe('managed Host transaction inputs', () => {
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)
 
-  it('changes only the Host executable and PATH of an exact unit', () => {
+  it('changes only the Host executable, PATH, and legacy start budget of an exact unit', () => {
     const service = { profile: 'owner', nodePath: '/usr/bin/node', dshPath: old.dshPath,
       pathEnvironment: `PATH=/usr/bin:${old.binDirectory}:/bin` }
-    const before = `[Unit]\nDescription=example\n[Service]\nEnvironment="PATH=/usr/bin:${old.binDirectory}:/bin"\n`
+    const before = `[Unit]\nDescription=example\n${legacyStartLimit}[Service]\nEnvironment="PATH=/usr/bin:${old.binDirectory}:/bin"\n`
       + `ExecStart="/usr/bin/node" --disable-warning=ExperimentalWarning "${old.dshPath}" --profile owner --no-open\n`
-      + 'Environment="DSH_HOME=/private/home"\n'
+      + `${legacyRestartComment}Environment="DSH_HOME=/private/home"\n`
     const result = candidateHostUnitSource(service, before, old.dshPath, candidate.dshPath, old.root)
     expect(result.source).toContain(`ExecStart="/usr/bin/node" --disable-warning=ExperimentalWarning "${candidate.dshPath}"`)
     expect(result.source).toContain('Environment="DSH_HOME=/private/home"')
     expect(result.source).toContain(candidate.binDirectory)
     expect(result.source).not.toContain(old.binDirectory)
+    expect(result.source).toContain(finiteStartLimit)
+    expect(result.source).toContain(finiteRestartComment)
     expect(result.pathEnvironment.split(':')[0]).toBe(`PATH=${candidate.binDirectory}`)
     expect(classifyHostUnitBytes(before, before, result.source)).toBe('before')
     expect(classifyHostUnitBytes(result.source, before, result.source)).toBe('after')
@@ -593,13 +605,120 @@ describe('managed Host transaction inputs', () => {
     const canonicalDsh = `${old.root}/node_modules/@deepseek-ai/dsh/lib/bin.js`
     const service = { profile: 'owner', nodePath: '/usr/bin/node', dshPath: canonicalDsh,
       pathEnvironment: `PATH=/usr/bin:${old.binDirectory}:${old.root}/node_modules:/bin` }
-    const before = `[Service]\nEnvironment="${service.pathEnvironment}"\n`
+    const before = `[Unit]\n${finiteStartLimit}[Service]\nEnvironment="${service.pathEnvironment}"\n`
       + `ExecStart="/usr/bin/node" --disable-warning=ExperimentalWarning "${canonicalDsh}" --profile owner --no-open\n`
+      + finiteRestartComment
     const result = candidateHostUnitSource(service, before, canonicalDsh, candidate.dshPath, old.root)
     expect(result.source).toContain(candidate.dshPath)
     expect(result.pathEnvironment).toContain(candidate.binDirectory)
     expect(result.pathEnvironment.split(':')[0]).toBe(`PATH=${candidate.binDirectory}`)
     expect(result.pathEnvironment).not.toContain(old.root)
+    expect(result.source).toContain(finiteStartLimit)
+  })
+
+  it('migrates only a recognized legacy start budget and is idempotent for a finite unit', () => {
+    const finite = createSystemdUserUnit({ unitName: 'dsh-profile-owner.service',
+      unitPath: '/private/systemd/dsh-profile-owner.service', dshHome: '/private/home', profile: 'owner',
+      profileDirectory: '/private/home/profiles/owner', nodePath: '/usr/bin/node', dshPath: old.dshPath,
+      path: `/usr/bin:${old.binDirectory}:/bin` })
+    const legacy = legacyUnit(finite)
+    expect(legacy).not.toBe(finite)
+    expect(finiteHostUnitStartLimit(legacy)).toBe(finite)
+    expect(finiteHostUnitStartLimit(finite)).toBe(finite)
+    expect(legacy.replace(legacyStartLimit, finiteStartLimit)
+      .replace(legacyRestartComment, finiteRestartComment)).toBe(finite)
+    expect(() => finiteHostUnitStartLimit(legacy.replace(legacyRestartComment, finiteRestartComment)))
+      .toThrow('unrecognized installer start limit')
+  })
+
+  itLinux('binds a same-Host start-budget migration to exact manifest digests and restores old bytes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-same-host-start-budget-'))
+    try {
+      const home = join(root, 'home'), transactionRoot = join(root, 'transaction')
+      const unitPath = join(root, 'dsh-profile-owner.service')
+      await mkdir(home, { mode: 0o700 })
+      await mkdir(transactionRoot, { mode: 0o700 })
+      const transaction = await lstat(transactionRoot)
+      const runtime = { ...old, version: '0.2.1-rc.2', root: '/private/hosts/0.2.1-rc.2',
+        dshPath: '/private/hosts/0.2.1-rc.2/node_modules/.bin/dsh',
+        binDirectory: '/private/hosts/0.2.1-rc.2/node_modules/.bin' }
+      const bindingSource = `${JSON.stringify({ schemaVersion: 1, cacheRoot: '/private/hosts',
+        version: runtime.version, receiptDigest: runtime.receiptDigest })}\n`
+      const sameHostPlan = { schemaVersion: 1, status: 'current', canonicalHome: home,
+        bindingPath: join(home, '.dsh-rsi-host.json'), originalBindingSource: bindingSource,
+        originalBindingDigest: digest(bindingSource), originalRuntime: runtime,
+        candidateRuntime: runtime, candidateBindingSource: bindingSource }
+      expect(hostLocalSourcePlanMode(sameHostPlan)).toBe('same-host')
+      const finite = createSystemdUserUnit({ unitName: 'dsh-profile-owner.service', unitPath,
+        dshHome: home, profile: 'owner', profileDirectory: join(home, 'profiles', 'owner'),
+        nodePath: process.execPath, dshPath: runtime.dshPath, path: `${runtime.binDirectory}:/usr/bin` })
+      const before = legacyUnit(finite), after = finiteHostUnitStartLimit(before)
+      expect(after).toBe(finite)
+      await writeFile(unitPath, before, { mode: 0o600 })
+      const unit = { unit: 'dsh-profile-owner.service', profile: 'owner', path: unitPath,
+        before, after, beforeDigest: digest(before), afterDigest: digest(after),
+        pathEnvironment: `PATH=${runtime.binDirectory}:/usr/bin` }
+      const manifest = { version: 4, id: 'same-host-start-budget', homePath: home, canonicalHome: home,
+        transactionPath: transactionRoot, transactionIdentity: { dev: String(transaction.dev),
+          ino: String(transaction.ino), uid: transaction.uid, mode: transaction.mode },
+        profile: 'owner', operation: 'host-update',
+        services: [{ unit: unit.unit, profile: 'owner', wasActive: true }], unitUniverse: [unit.unit],
+        foreignOwnership: [], serviceMasks: [], serviceStartBarriers: [], containmentMasks: [],
+        containmentMaskIntents: [], containmentStartBarriers: [],
+        hostMigration: { plan: sameHostPlan, units: [unit], phase: 'initializing', candidateEverStarted: false,
+          originalExternalLinksDigest: 'a'.repeat(64),
+          localSource: { protocol: 'dsh-enhanced/host-local-source-update/v1', homePath: home, profile: 'owner' } } }
+      const written = await lifecycleProfileTest.writeManifest(transactionRoot, manifest, 'preparing')
+      const expected = { homePath: home, transactionPath: transactionRoot, profile: 'owner' }
+      expect(() => lifecycleProfileTest.validateHostUpdateManifest(written, expected, transactionRoot)).toThrow()
+      const persistedOld = await lifecycleProfileTest.writeManifest(transactionRoot,
+        { ...manifest, hostMigration: { ...manifest.hostMigration,
+          units: [{ ...unit, after: before, afterDigest: digest(before) }] } }, 'preparing')
+      expect(() => lifecycleProfileTest.validateHostUpdateManifest(persistedOld, expected, transactionRoot)).not.toThrow()
+      const coordinatorProfile = `rsi-owner-${digest('owner').slice(0, 12)}`
+      const coordinatorUnit = `dsh-profile-${coordinatorProfile}.service`
+      const coordinatorPath = join(root, coordinatorUnit)
+      const coordinatorFinite = createSystemdUserUnit({ unitName: coordinatorUnit, unitPath: coordinatorPath,
+        dshHome: home, profile: coordinatorProfile, profileDirectory: join(home, 'profiles', coordinatorProfile),
+        nodePath: process.execPath, dshPath: runtime.dshPath, path: `${runtime.binDirectory}:/usr/bin` })
+      const coordinatorBefore = legacyUnit(coordinatorFinite)
+      const secondUnit = { unit: coordinatorUnit, profile: coordinatorProfile, path: coordinatorPath,
+        before: coordinatorBefore, after: coordinatorFinite, beforeDigest: digest(coordinatorBefore),
+        afterDigest: digest(coordinatorFinite), pathEnvironment: `PATH=${runtime.binDirectory}:/usr/bin` }
+      const services = [unit, secondUnit].map((entry, index) => ({ unit: entry.unit, profile: entry.profile,
+        wasActive: true, mainPid: 101 + index, invocationId: `original-${index}` }))
+      const originalReadiness = { schemaVersion: 1, services: services.map(service => ({
+        unit: service.unit, profile: service.profile, invocationId: service.invocationId, mainPid: service.mainPid,
+        hostReady: false, coordinatorActivated: service.profile === coordinatorProfile ? false : null })) }
+      const program = { ...manifest, services, unitUniverse: services.map(service => service.unit),
+        hostMigration: { ...manifest.hostMigration, units: [unit, secondUnit], bwrapExecutable: '/usr/bin/true',
+          originalReadiness, localSource: { protocol: 'dsh-enhanced/host-owner-program-update/v1',
+            homePath: home, profile: 'owner', ownerUpdate: { coordinatorProfile, hostPlan: sameHostPlan } } } }
+      const programWritten = await lifecycleProfileTest.writeManifest(transactionRoot, program, 'preparing')
+      expect(() => lifecycleProfileTest.validateHostUpdateManifest(programWritten, expected, transactionRoot)).not.toThrow()
+      const repair = { ...program, hostMigration: { ...program.hostMigration,
+        localSource: { protocol: 'dsh-enhanced/host-owner-source-repair/v1', homePath: home, profile: 'owner',
+          ownerRepair: { coordinatorProfile, permissionPreset: 'workspace-write' } } } }
+      const repairWritten = await lifecycleProfileTest.writeManifest(transactionRoot, repair, 'preparing')
+      expect(() => lifecycleProfileTest.validateHostUpdateManifest(repairWritten, expected, transactionRoot)).toThrow()
+      const repairOld = await lifecycleProfileTest.writeManifest(transactionRoot, { ...repair,
+        hostMigration: { ...repair.hostMigration, units: [unit, secondUnit].map(entry => ({ ...entry,
+          after: entry.before, afterDigest: entry.beforeDigest })) } }, 'preparing')
+      expect(() => lifecycleProfileTest.validateHostUpdateManifest(repairOld, expected, transactionRoot)).not.toThrow()
+      const programOld = await lifecycleProfileTest.writeManifest(transactionRoot, { ...program,
+        hostMigration: { ...program.hostMigration, units: [unit, secondUnit].map(entry => ({ ...entry,
+          after: entry.before, afterDigest: entry.beforeDigest })) } }, 'preparing')
+      expect(() => lifecycleProfileTest.validateHostUpdateManifest(programOld, expected, transactionRoot)).not.toThrow()
+      await lifecycleProfileTest.reconcileHostUnitSources([unit], 'after')
+      expect(await readFile(unitPath, 'utf8')).toBe(after)
+      await lifecycleProfileTest.reconcileHostUnitSources([unit], 'before')
+      expect(await readFile(unitPath, 'utf8')).toBe(before)
+      const invalid = await lifecycleProfileTest.writeManifest(transactionRoot, { ...program,
+        hostMigration: { ...program.hostMigration,
+          units: [{ ...unit, after: after.replace('StartLimitBurst=3', 'StartLimitBurst=4'),
+            afterDigest: digest(after.replace('StartLimitBurst=3', 'StartLimitBurst=4')) }, secondUnit] } }, 'preparing')
+      expect(() => lifecycleProfileTest.validateHostUpdateManifest(invalid, expected, transactionRoot)).toThrow()
+    } finally { await rm(root, { recursive: true, force: true }) }
   })
 
   itLinux('returns current without creating a transaction or touching Home', async () => {
@@ -704,6 +823,28 @@ describe('managed Host transaction inputs', () => {
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 90_000)
 
+  itLinux('migrates a recognized legacy unit to the finite start budget during managed Host update', async () => {
+    const fixture = await controlledHostFixture(true)
+    try {
+      const before = await Promise.all(['web', 'dormant'].map(async profile => {
+        const path = join(fixture.unitDirectory, `dsh-profile-${profile}.service`)
+        const source = legacyUnit(await readFile(path, 'utf8'))
+        await writeFile(path, source, { mode: 0o600 })
+        return source
+      }))
+      const result = fixture.run('host-update')
+      expect(result.status, result.stderr).toBe(0)
+      for (const [index, profile] of ['web', 'dormant'].entries()) {
+        const after = await readFile(join(fixture.unitDirectory, `dsh-profile-${profile}.service`), 'utf8')
+        expect(before[index]).toContain(legacyStartLimit)
+        expect(after).toContain(finiteStartLimit)
+        expect(after).toContain(finiteRestartComment)
+        expect(after).not.toContain(legacyRestartComment)
+        expect(after).toContain(fixture.candidateRuntime.dshPath)
+      }
+    } finally { await rm(fixture.root, { recursive: true, force: true }) }
+  }, 90_000)
+
   itLinux('rejects an external Home symlink created by candidate dump-config before swap', async () => {
     const fixture = await controlledHostFixture(false, 'external')
     try {
@@ -748,6 +889,10 @@ describe('managed Host transaction inputs', () => {
   itLinux('restores original unit bytes and active set after a prestart rename-gap crash', async () => {
     const fixture = await controlledHostFixture(true)
     try {
+      for (const profile of ['web', 'dormant']) {
+        const path = join(fixture.unitDirectory, `dsh-profile-${profile}.service`)
+        await writeFile(path, legacyUnit(await readFile(path, 'utf8')), { mode: 0o600 })
+      }
       const before = await Promise.all(['web', 'dormant'].map(profile =>
         readFile(join(fixture.unitDirectory, `dsh-profile-${profile}.service`), 'utf8')))
       const crashed = fixture.run('host-update', true)
@@ -763,6 +908,7 @@ describe('managed Host transaction inputs', () => {
       for (const [index, profile] of ['web', 'dormant'].entries()) {
         expect(await readFile(join(fixture.unitDirectory, `dsh-profile-${profile}.service`), 'utf8'))
           .toBe(before[index])
+        expect(before[index]).toContain(legacyStartLimit)
       }
       expect(await readFile(join(fixture.home, '.dsh-rsi-host.json'), 'utf8'))
         .toBe(fixture.originalBindingSource)

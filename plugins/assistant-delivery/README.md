@@ -394,7 +394,7 @@ Automation incident 使用 `automation-incident:<incidentId>:g<generation>` 同�
 
 冻结 owner 安装通过 `scripts/install/upgrade-program.mjs --restart-config /absolute/private.json` 增加能力：该文件须 owner-private，包含 `databasePath`（固定 Home 下 `assistant-delivery/restart.sqlite`）、`ownerRouteId`、`maxModelRequests`、`maxToolCalls`、`taskTimeoutMs`、`allowedTools`。安装事务冻结内容和摘要，精确新增稳定 owner route 的许可（每次执行仍复核当前 binding）并更新签名 overlay；恢复不重读配置输入。升级后用 `scripts/install/restart-supervisor.mjs --dry-run` 验证并以 `--install` 安装 Home 外的私有配置和 user timer/oneshot；参数见该脚本，helper 随本包发布。
 
-这是同码、事先保存的维护恢复；不提供代码升级，不恢复未知派发，不保证硬崩溃后任意指令继续，也不保证目标离线期间飞书消息不丢。独立接入进程仍是后续交付。外部 helper 与目标同 UID，不构成恶意代码的 OS 隔离；有宿主 shell 权限的模型仍须遵守既有 sandbox/Policy。每个任务最多申请一次，执行器还有时间窗重启次数上限；新受管 unit 同时限制 600 秒内最多 3 次启动，重复启动失败会停止并保留诊断，不无限抖动。通知或监督器在 120 秒内未接管则解除维护栅栏并报告失败；监督器重开不会重置已派发重启的观察期限。维护期间普通 `/status` 会随其它消息排队，`/stop`、`/new` 可直接撤销。额度是调用次数、单次输出和时间上限，不是精确总费用上限。
+这是同码、事先保存的维护恢复；不提供代码升级，不恢复未知派发，不保证硬崩溃后任意指令继续，也不保证目标离线期间飞书消息不丢。独立接入进程仍是后续交付。外部 helper 与目标同 UID，不构成恶意代码的 OS 隔离；有宿主 shell 权限的模型仍须遵守既有 sandbox/Policy。每个任务最多申请一次，执行器还有时间窗重启次数上限；新建或经受管程序升级的 unit 同时限制 600 秒内最多 3 次启动，重复启动失败会停止并保留诊断，不无限抖动。同 Host 版本升级也会事务式迁移旧 unit 的启动限制，保留原启动命令和环境变量，失败回滚恢复原 unit 字节。通知或监督器在 120 秒内未接管则解除维护栅栏并报告失败；监督器重开不会重置已派发重启的观察期限。维护期间普通 `/status` 会随其它消息排队，`/stop`、`/new` 可直接撤销。额度是调用次数、单次输出和时间上限，不是精确总费用上限。
 
 ## Goals 单次唤醒边界
 
