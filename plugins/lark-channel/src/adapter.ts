@@ -1116,7 +1116,11 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     if (!/^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u.test(result.messageId)) {
       return { outcome: 'unknown', failureCode: 'invalid-provider-result' }
     }
-    if (this.statusReactions && intent.replyToEventId !== undefined) {
+    // Delivery's durable interruption receipt acknowledges an unknown task outcome,
+    // not a completed task. Keep the original request free of a misleading DONE.
+    const interrupted = intent.idempotencyKey.startsWith('inbound:')
+      && intent.idempotencyKey.endsWith(':interrupted')
+    if (this.statusReactions && intent.replyToEventId !== undefined && !interrupted) {
       void this.addReaction(intent.replyToEventId, 'DONE')
     }
     return { outcome: 'accepted', providerMessageId: result.messageId }

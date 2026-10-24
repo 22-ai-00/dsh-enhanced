@@ -377,6 +377,7 @@ Automation incident 使用 `automation-incident:<incidentId>:g<generation>` 同�
 - `health().deadLetterInbox/deadLetterOutbox/unknownOutbox` 保留为历史 terminal 行总数以兼容旧消费者；告警与健康聚合应使用 `actionableDeadLetterInbox/actionableDeadLetterOutbox/actionableUnknownOutbox`。对应 `resolved*` 字段统计当前 exact attempt 已有 cancel tombstone 的行，因此 operator 已处理的历史不会让系统永久 degraded。
 - `unknown_after_send` cancel 后仍保留为独立的 ambiguous 状态和原始 resolution receipt，不伪装成确定未发送；该 exact attempt 不会再被自动 reconcile/send，并视为 lane terminal，cancel receipt 也不能改写成 retry。若平台随后给出匹配 provider message id 的 delivered/read receipt，外部事实可单调提升当前状态并清除当前失败标记，原 cancel/attempt ledger 仍保留。普通尚未结算的 unknown 只能由显式、Policy-gated operator `retry` 重新入队；稳定 owner route 禁止 retry，只能原 lineage reconcile/cancel/park。系统从不自动重发 unknown send。
 - Agent dispatch 前写 `dispatch-started` marker。此后进程崩溃会进入 `dispatch-ambiguous` dead letter，避免自动产生第二个 turn；这会牺牲一次自动重放，需要 owner 审阅后显式 retry。
+- 对仍绑定当前 owner 的外部普通请求，恢复扫描会在没有最终回复时持久排入一次中断说明，沿用当前入站、回复和发送前授权；历史已中断记录也会扫描。已有最终回复（包括发送结果未知）或 operator 已结算的记录不另发通知。通知不重跑 Agent、不把原执行改成成功，也不确认之前写入是否完成。
 - `/permission` 是受限例外：它使用专用 commit/cancel/failure recovery marker，并以精确 Inbox id（兼容旧 event id）与 `replyToEventId` 共同证明终态 Outbox；崩溃恢复不会把普通 background Outbox 或同名伪造 key 当成完成见证。
 - 当前 DSH `0.2.0-rc.2` 的 `followup()` 没有跨进程 `sourceEventId` 唯一接纳/完成 handle，因此本包诚实承诺“持久 event 去重 + at-most-once 自动 Agent dispatch”，不声称端到端 exactly-once。若宿主未来提供该 seam，可升级为安全的 at-least-once wake。
 - Outbox adapter 抛异常一律视为可能已发送；不会按照普通 5xx 重试。

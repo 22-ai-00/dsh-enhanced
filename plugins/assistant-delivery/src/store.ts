@@ -3593,6 +3593,108 @@ export class DeliveryStore {
     return rows.map(inboxFromRow)
   }
 
+  /** Scan durable, unacknowledged dispatched turns without replaying their Agent work. */
+  listInterruptedInboxNotices(input: { afterSequence?: number; limit?: number } = {}): InboxRecord[] {
+    this.assertOpen()
+    const afterSequence = input.afterSequence ?? 0
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
+      throw new DeliveryStoreError('conflict', 'invalid interrupted Inbox cursor')
+    }
+    const limit = boundedMaintenanceLimit(input.limit, 100, 'interrupted Inbox')
+    const rows = this.database.prepare(`${inboxSelect}
+      WHERE inbox_messages.status = 'dead_letter'
+        AND inbox_messages.failure_code = 'dispatch-ambiguous'
+        AND json_extract(inbox_messages.envelope_json, '$.kind') = 'text'
+        AND inbox_messages.channel != 'web'
+        AND inbox_messages.binding_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM delivery_foreground_executions AS execution
+          WHERE execution.inbox_id = inbox_messages.id
+        )
+        AND admission_sequence > ?
+        AND NOT EXISTS (
+          SELECT 1 FROM dead_letter_resolutions AS resolution
+          WHERE resolution.kind = 'inbox' AND resolution.message_id = inbox_messages.id
+            AND resolution.attempt_count = inbox_messages.attempt_count
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM outbox_messages AS reply
+          WHERE reply.idempotency_key IN (
+            'inbound:' || inbox_messages.id || ':reply',
+            'inbound:' || inbox_messages.event_id || ':reply',
+            'inbound:' || inbox_messages.id || ':interrupted'
+          )
+        )
+      ORDER BY admission_sequence LIMIT ?
+    `).all(afterSequence, limit) as unknown as InboxRow[]
+    return rows.map(inboxFromRow)
+  }
+
+  /** The final notice decision and Outbox insert share one SQLite writer fence. */
+  enqueueInterruptedInboxNotice(input: {
+    inboxId: string
+    binding: Readonly<ConversationBinding>
+    intent: OutboundIntent
+  }): OutboxRecord {
+    this.assertOpen()
+    return this.transaction(() => {
+      if (!this.interruptedInboxNoticeCurrent(input)) {
+        throw new DeliveryStoreError('version-conflict', 'interrupted Inbox notice lost its exact owner or reply fence')
+      }
+      return this.enqueueIntent(input.intent, false)
+    })
+  }
+
+  /** Recheck a queued interruption notice immediately before an adapter send. */
+  canSendInterruptedInboxNotice(record: Readonly<OutboxRecord>): boolean {
+    this.assertOpen()
+    const key = record.intent.idempotencyKey
+    if (!key.startsWith('inbound:') || !key.endsWith(':interrupted')) return false
+    const inboxId = key.slice('inbound:'.length, -':interrupted'.length)
+    const binding = this.getBinding(record.intent.bindingId)
+    return binding !== undefined
+      && this.getOutboxByIdempotencyKey(key)?.id === record.id
+      && this.interruptedInboxNoticeCurrent({ inboxId, binding, intent: record.intent })
+  }
+
+  private interruptedInboxNoticeCurrent(input: {
+    inboxId: string
+    binding: Readonly<ConversationBinding>
+    intent: OutboundIntent
+  }): boolean {
+    const inbox = this.getInbox(input.inboxId)
+    const binding = inbox?.bindingId === undefined ? undefined : this.getBinding(inbox.bindingId)
+    const owner = binding === undefined ? undefined : this.getBindingPrincipal(binding.id)
+    const execution = this.database.prepare(`
+        SELECT principal_record_id, principal_version, binding_id, binding_version,
+          binding_generation, workspace, preset
+        FROM delivery_foreground_executions WHERE inbox_id = ?
+    `).get(input.inboxId) as {
+      principal_record_id: string; principal_version: number; binding_id: string
+      binding_version: number; binding_generation: number; workspace: string; preset: string
+    } | undefined
+    return inbox?.status === 'dead_letter' && inbox.failureCode === 'dispatch-ambiguous'
+      && inbox.envelope.kind === 'text' && inbox.channel !== 'web'
+      && binding?.status === 'active' && binding.id === input.binding.id
+      && binding.version === input.binding.version && binding.generation === input.binding.generation
+      && binding.sessionId === input.binding.sessionId
+      && this.getActiveBinding(inbox.envelope.conversation)?.id === binding.id
+      && owner?.status === 'active' && owner.role === 'owner'
+      && execution?.principal_record_id === owner.id && execution.principal_version === owner.version
+      && execution.binding_id === binding.id && execution.binding_version === binding.version
+      && execution.binding_generation === binding.generation
+      && execution.workspace === binding.workspace && execution.preset === binding.agentPreset
+      && principalHash(inbox.envelope.principal) === principalHash(binding.principal)
+      && conversationHash(inbox.envelope.conversation) === conversationHash(binding.conversation)
+      && input.intent.bindingId === binding.id
+      && input.intent.replyToEventId === inbox.eventId
+      && input.intent.idempotencyKey === `inbound:${inbox.id}:interrupted`
+      && this.getDeadLetterResolution({ kind: 'inbox', id: inbox.id,
+        attemptCount: inbox.attemptCount }) === undefined
+      && this.getOutboxByIdempotencyKey(`inbound:${inbox.id}:reply`) === undefined
+      && this.getOutboxByIdempotencyKey(`inbound:${inbox.eventId}:reply`) === undefined
+  }
+
   listInbox(input: { bindingId?: string; limit?: number } = {}): InboxRecord[] {
     this.assertOpen()
     const limit = Math.max(1, Math.min(100, input.limit ?? 20))

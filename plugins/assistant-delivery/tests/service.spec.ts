@@ -263,6 +263,19 @@ function runtimeStoreFromService(service: AssistantDeliveryService): DeliverySto
   return (service as unknown as { deliveryStore: DeliveryStore }).deliveryStore
 }
 
+function recordPendingForeground(root: string, store: DeliveryStore, inboxId: string,
+  binding: ConversationBinding): void {
+  const owner = store.getPrincipal(binding.principal)!
+  const db = new DatabaseSync(join(root, 'delivery.sqlite'))
+  db.prepare(`INSERT INTO delivery_foreground_executions (
+    inbox_id, workspace, preset, principal_record_id, principal_version,
+    binding_id, binding_version, binding_generation, dispatched_at, status, quiescent
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0)`).run(inboxId,
+    binding.workspace, binding.agentPreset, owner.id, owner.version,
+    binding.id, binding.version, binding.generation, Date.now())
+  db.close()
+}
+
 function approvalRouteFor(
   service: AssistantDeliveryService,
   binding: Readonly<ConversationBinding>,
@@ -308,6 +321,229 @@ async function boundApprovalHarness(options: MountHarnessOptions & {
 }
 
 describe('assistant delivery Cordis service', () => {
+  test('notifies an owner once after a dispatched turn was interrupted across restart', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-interrupted-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const original = runtimeStoreFromService(first.service)
+    const binding = original.createBinding({ conversation, principal, workspace: '/work/alpha',
+      agentPreset: 'primary', sessionId: 'interrupted-session', policyRef: 'owner-dm' })
+    const inbox = original.acceptInbound({ ...envelope, eventId: 'evt-interrupted' }).record
+    original.queueInbox(inbox.id, binding.id)
+    const claim = original.claimInbox({ ownerId: 'worker', leaseMs: 30_000, limit: 1, maxAttempts: 3 })[0]!
+    original.markInboxDispatching({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken, binding })
+    recordPendingForeground(root, original, inbox.id, binding)
+    original.finishInbox({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken,
+      outcome: 'dead_letter', failureCode: 'dispatch-ambiguous' })
+    await first.ctx.fiber.restart()
+
+    const reopened = await mountHarness(root)
+    const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+    reopened.service.registerInboundRuntime({ createSession: async () => ({ sessionId: 'unexpected',
+      workspace: '/work/alpha', agentPreset: 'primary', policyRef: 'owner-dm' }), process })
+    const send = vi.fn(async () => ({ outcome: 'accepted' as const, providerMessageId: 'om_interrupted' }))
+    await reopened.service.registerAdapter({ channel: 'lark', account: 'bot-1',
+      capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'] },
+      start: async () => {}, send })
+    await reopened.service.tick()
+    await reopened.service.whenIdle()
+    const store = runtimeStoreFromService(reopened.service)
+    const notice = store.getOutboxByIdempotencyKey(`inbound:${inbox.id}:interrupted`)
+    expect(notice).toMatchObject({ status: 'accepted', intent: { replyToEventId: 'evt-interrupted',
+      text: expect.stringContaining('结果尚未确认') } })
+    expect(store.getInbox(inbox.id)).toMatchObject({ status: 'dead_letter', failureCode: 'dispatch-ambiguous' })
+    const evidence = new DatabaseSync(join(root, 'delivery.sqlite'))
+    expect(evidence.prepare(`SELECT status, quiescent, completed_at FROM delivery_foreground_executions
+      WHERE inbox_id = ?`).get(inbox.id)).toEqual({ status: 'pending', quiescent: 0, completed_at: null })
+    evidence.close()
+    expect(process).not.toHaveBeenCalled()
+    await reopened.service.tick()
+    expect(send).toHaveBeenCalledTimes(1)
+    await reopened.ctx.fiber.restart()
+  })
+
+  test('does not notify an interrupted turn with an unknown final reply or revoked owner', async () => {
+    const { ctx, service, root } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const store = runtimeStoreFromService(service)
+    const binding = store.createBinding({ conversation, principal, workspace: '/work/alpha',
+      agentPreset: 'primary', sessionId: 'interrupted-guard-session', policyRef: 'owner-dm' })
+    const interrupt = (eventId: string) => {
+      const inbox = store.acceptInbound({ ...envelope, eventId }).record
+      store.queueInbox(inbox.id, binding.id)
+      const claim = store.claimInbox({ ownerId: 'worker', leaseMs: 30_000, limit: 1, maxAttempts: 3 })[0]!
+      store.markInboxDispatching({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken, binding })
+      recordPendingForeground(root, store, inbox.id, binding)
+      store.finishInbox({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken,
+        outcome: 'dead_letter', failureCode: 'dispatch-ambiguous' })
+      return inbox
+    }
+    const replied = interrupt('evt-already-replied')
+    store.enqueue({ idempotencyKey: `inbound:${replied.id}:reply`, bindingId: binding.id,
+      target: { conversation, principal }, text: 'previous answer', format: 'plain',
+      replyToEventId: replied.eventId })
+    const db = new DatabaseSync(join(root, 'delivery.sqlite'))
+    db.prepare(`UPDATE outbox_messages SET status = 'unknown_after_send'
+      WHERE idempotency_key = ?`).run(`inbound:${replied.id}:reply`)
+    db.close()
+    const send = vi.fn(async () => ({ outcome: 'accepted' as const, providerMessageId: 'om_guard' }))
+    await service.registerAdapter({ channel: 'lark', account: 'bot-1',
+      capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'] },
+      start: async () => {}, send })
+    await service.tick()
+    expect(store.getOutboxByIdempotencyKey(`inbound:${replied.id}:interrupted`)).toBeUndefined()
+    expect(send).not.toHaveBeenCalled()
+
+    const revoked = interrupt('evt-owner-revoked')
+    const owner = store.getPrincipal(principal)!
+    store.revokePrincipal(owner.id, owner.version)
+    await service.tick()
+    expect(store.getOutboxByIdempotencyKey(`inbound:${revoked.id}:interrupted`)).toBeUndefined()
+    expect(send).not.toHaveBeenCalled()
+    await ctx.fiber.restart()
+  })
+
+  test('advances its durable admission cursor past a full page of interrupted turns', async () => {
+    const { ctx, service, root } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const store = runtimeStoreFromService(service)
+    const binding = store.createBinding({ conversation, principal, workspace: '/work/alpha',
+      agentPreset: 'primary', sessionId: 'interrupted-page-session', policyRef: 'owner-dm' })
+    for (let index = 0; index < 101; index += 1) {
+      const inbox = store.acceptInbound({ ...envelope, eventId: `evt-interrupted-page-${index}` }).record
+      store.queueInbox(inbox.id, binding.id)
+      const claim = store.claimInbox({ ownerId: 'worker', leaseMs: 30_000, limit: 1, maxAttempts: 3 })[0]!
+      store.markInboxDispatching({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken, binding })
+      recordPendingForeground(root, store, inbox.id, binding)
+      store.finishInbox({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken,
+        outcome: 'dead_letter', failureCode: 'dispatch-ambiguous' })
+    }
+    const count = () => {
+      const db = new DatabaseSync(join(root, 'delivery.sqlite'))
+      const row = db.prepare(`SELECT COUNT(*) AS count FROM outbox_messages
+        WHERE idempotency_key LIKE 'inbound:%:interrupted'`).get() as { count: number }
+      db.close()
+      return row.count
+    }
+    await service.tick()
+    expect(count()).toBe(0)
+    await service.registerAdapter({ channel: 'lark', account: 'bot-1',
+      capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'] },
+      start: async () => {}, send: async () => ({ outcome: 'accepted', providerMessageId: 'om_page' }) })
+    await service.tick()
+    expect(count()).toBe(1)
+    await service.tick()
+    expect(count()).toBe(101)
+    await ctx.fiber.restart()
+  })
+
+  test('does not queue an interrupted notice after reply policy is removed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-interrupted-policy-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const store = runtimeStoreFromService(first.service)
+    const binding = store.createBinding({ conversation, principal, workspace: '/work/alpha',
+      agentPreset: 'primary', sessionId: 'interrupted-policy-session', policyRef: 'owner-dm' })
+    const inbox = store.acceptInbound({ ...envelope, eventId: 'evt-interrupted-policy' }).record
+    store.queueInbox(inbox.id, binding.id)
+    const claim = store.claimInbox({ ownerId: 'worker', leaseMs: 30_000, limit: 1, maxAttempts: 3 })[0]!
+    store.markInboxDispatching({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken, binding })
+    recordPendingForeground(root, store, inbox.id, binding)
+    store.finishInbox({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken,
+      outcome: 'dead_letter', failureCode: 'dispatch-ambiguous' })
+    await first.ctx.fiber.restart()
+
+    const denied = await mountHarness(root, false)
+    const send = vi.fn(async () => ({ outcome: 'accepted' as const, providerMessageId: 'om_denied' }))
+    await denied.service.registerAdapter({ channel: 'lark', account: 'bot-1',
+      capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'] },
+      start: async () => {}, send })
+    await denied.service.tick()
+    expect(runtimeStoreFromService(denied.service).getOutboxByIdempotencyKey(`inbound:${inbox.id}:interrupted`))
+      .toBeUndefined()
+    expect(send).not.toHaveBeenCalled()
+    await denied.ctx.fiber.restart()
+  })
+
+  test('stops a queued interruption notice when owner policy is revoked before send', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-interrupted-send-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const store = runtimeStoreFromService(first.service)
+    const binding = store.createBinding({ conversation, principal, workspace: '/work/alpha',
+      agentPreset: 'primary', sessionId: 'interrupted-send-session', policyRef: 'owner-dm' })
+    const inbox = store.acceptInbound({ ...envelope, eventId: 'evt-interrupted-send' }).record
+    store.queueInbox(inbox.id, binding.id)
+    const claim = store.claimInbox({ ownerId: 'worker', leaseMs: 30_000, limit: 1, maxAttempts: 3 })[0]!
+    store.markInboxDispatching({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken, binding })
+    recordPendingForeground(root, store, inbox.id, binding)
+    store.finishInbox({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken,
+      outcome: 'dead_letter', failureCode: 'dispatch-ambiguous' })
+    await first.service.registerAdapter({ channel: 'lark', account: 'bot-1',
+      capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'] },
+      start: async () => {}, send: async () => ({ outcome: 'accepted', providerMessageId: 'never' }) })
+    await (first.service as unknown as { drainInterruptedInboxNotices(): Promise<void> })
+      .drainInterruptedInboxNotices()
+    expect(store.getOutboxByIdempotencyKey(`inbound:${inbox.id}:interrupted`)).toMatchObject({ status: 'pending' })
+    await first.ctx.fiber.restart()
+
+    const denied = await mountHarness(root, false)
+    const send = vi.fn(async () => ({ outcome: 'accepted' as const, providerMessageId: 'om_revoked' }))
+    await denied.service.registerAdapter({ channel: 'lark', account: 'bot-1',
+      capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'] },
+      start: async () => {}, send })
+    await denied.service.tick()
+    expect(send).not.toHaveBeenCalled()
+    expect(runtimeStoreFromService(denied.service).getOutboxByIdempotencyKey(`inbound:${inbox.id}:interrupted`))
+      .toMatchObject({ status: 'dead', failureCode: 'interrupted-inbox-authority-revoked' })
+    await denied.ctx.fiber.restart()
+  })
+
+  test('atomically rejects a late final reply or operator decision before interruption enqueue', async () => {
+    const { ctx, service, root } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const store = runtimeStoreFromService(service)
+    const binding = store.createBinding({ conversation, principal, workspace: '/work/alpha',
+      agentPreset: 'primary', sessionId: 'interrupted-race-session', policyRef: 'owner-dm' })
+    const interrupt = (eventId: string) => {
+      const inbox = store.acceptInbound({ ...envelope, eventId }).record
+      store.queueInbox(inbox.id, binding.id)
+      const claim = store.claimInbox({ ownerId: 'worker', leaseMs: 30_000, limit: 1, maxAttempts: 3 })[0]!
+      store.markInboxDispatching({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken, binding })
+      recordPendingForeground(root, store, inbox.id, binding)
+      store.finishInbox({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken,
+        outcome: 'dead_letter', failureCode: 'dispatch-ambiguous' })
+      return store.getInbox(inbox.id)!
+    }
+    const intent = (inbox: ReturnType<typeof interrupt>) => ({
+      idempotencyKey: `inbound:${inbox.id}:interrupted`, bindingId: binding.id,
+      target: { conversation, principal }, text: 'interrupted', format: 'plain' as const,
+      replyToEventId: inbox.eventId,
+    })
+    const replied = interrupt('evt-interrupted-late-reply')
+    store.enqueue({ ...intent(replied), idempotencyKey: `inbound:${replied.id}:reply`, text: 'final' })
+    expect(() => store.enqueueInterruptedInboxNotice({ inboxId: replied.id, binding, intent: intent(replied) }))
+      .toThrowError(expect.objectContaining({ code: 'version-conflict' }))
+    expect(store.getOutboxByIdempotencyKey(`inbound:${replied.id}:interrupted`)).toBeUndefined()
+
+    const resolved = interrupt('evt-interrupted-operator-resolved')
+    store.resolveInbox({ inboxId: resolved.id, expectedAttemptCount: resolved.attemptCount,
+      resolution: 'cancel', operatorId: 'owner-operator' })
+    expect(() => store.enqueueInterruptedInboxNotice({ inboxId: resolved.id, binding, intent: intent(resolved) }))
+      .toThrowError(expect.objectContaining({ code: 'version-conflict' }))
+    expect(store.getOutboxByIdempotencyKey(`inbound:${resolved.id}:interrupted`)).toBeUndefined()
+    await ctx.fiber.restart()
+  })
+
   test('observes only authenticated foreground execution receipts and isolates observer changes', async () => {
     const { ctx, service } = await harness()
     let current = true
