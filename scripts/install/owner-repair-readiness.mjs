@@ -39,9 +39,9 @@ export async function ownerRepairActivationInspector({ ownerRepair, installer, h
     join(installer.root, 'plugins', 'plugin-control-plane', 'lib', 'store.js')]
   const paths = await Promise.all(modules.map(path => realpath(path)))
   if (paths.some(path => !path.startsWith(`${installer.root}${sep}`))) fail('reviewed activation API escapes installer')
-  const [{ listActiveAutomationsLocally, AutomationOperatorSnapshotError }, { controlPlaneDigest }] = await Promise.all(
+  const [{ listActiveAutomationsForReadiness, AutomationOperatorSnapshotError }, { controlPlaneDigest }] = await Promise.all(
     paths.map(path => import(pathToFileURL(path).href)))
-  if (typeof listActiveAutomationsLocally !== 'function'
+  if (typeof listActiveAutomationsForReadiness !== 'function'
     || typeof AutomationOperatorSnapshotError !== 'function' || typeof controlPlaneDigest !== 'function') {
     fail('reviewed activation API is unavailable')
   }
@@ -49,7 +49,7 @@ export async function ownerRepairActivationInspector({ ownerRepair, installer, h
   const database = join(homePath, 'rsi-coordinators', coordinatorProfile, 'automations.sqlite')
   const inspect = since => {
     if (!Number.isSafeInteger(since) || since < 0) fail('invalid activation timestamp')
-    const records = listActiveAutomationsLocally(database)
+    const records = listActiveAutomationsForReadiness(database)
     if (!Array.isArray(records)) fail('reviewed activation inventory is invalid')
     return records.some(record => matchesOwnerRepairActivation(record, id, scope, since))
   }

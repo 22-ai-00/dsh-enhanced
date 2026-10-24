@@ -194,44 +194,50 @@ describe('main：update 命令派发', () => {
   const noFrozenOwner = async () => undefined
 
   test('不带 --all 时只升级自身，绝不调用安装器', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-update-all-'))
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     const install = makeInstall()
     const selfUpdate = makeSelfUpdate()
     try {
-      const code = await main(['update'], { HOME: '/h' }, { install, selfUpdate, findRunning: noRunning })
+      const code = await main(['update'], { HOME: root, DSH_HOME: join(root, '.dsh') },
+        { install, selfUpdate, findRunning: noRunning })
       expect(code).toBe(0)
       expect(selfUpdate).toHaveBeenCalledTimes(1)
       expect(install).not.toHaveBeenCalled()
-    } finally { write.mockRestore() }
+    } finally { write.mockRestore(); await rm(root, { recursive: true, force: true }) }
   })
 
   test('--all 在自身升级后把 --operation upgrade 交给安装器', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-update-all-'))
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     const install = makeInstall()
     const selfUpdate = makeSelfUpdate()
     try {
-      const code = await main(['update', '--all'], { HOME: '/h' }, {
+      const code = await main(['update', '--all'], { HOME: root, DSH_HOME: join(root, '.dsh') }, {
         platform: 'linux', install, selfUpdate, findRunning: noRunning, detectFrozenOwner: noFrozenOwner,
+        managedServicePids: async () => ({ pids: [], errors: [] }),
       })
       expect(code).toBe(0)
       expect(selfUpdate).toHaveBeenCalledTimes(1)
       expect(install).toHaveBeenCalledTimes(1)
-      const passed = install.mock.calls[0]![0] as { passthrough: readonly string[] }
+      const passed = install.mock.calls[0]![0] as { passthrough: readonly string[]; recoveryOnly?: boolean }
+      expect(passed.recoveryOnly).toBeUndefined()
       expect(passed.passthrough).toContain('--operation')
       expect(passed.passthrough).toContain('upgrade')
-    } finally { write.mockRestore() }
+    } finally { write.mockRestore(); await rm(root, { recursive: true, force: true }) }
   })
 
   test('Mac --all requires an explicit stopped Home confirmation before self-update', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-update-all-'))
     const error = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     const install = makeInstall(), selfUpdate = makeSelfUpdate()
     try {
-      expect(await main(['update', '--all'], { HOME: '/h' }, {
+      expect(await main(['update', '--all'], { HOME: root, DSH_HOME: join(root, '.dsh') }, {
         platform: 'darwin', install, selfUpdate, findRunning: noRunning,
       })).toBe(1)
       expect(selfUpdate).not.toHaveBeenCalled()
       expect(install).not.toHaveBeenCalled()
-    } finally { error.mockRestore() }
+    } finally { error.mockRestore(); await rm(root, { recursive: true, force: true }) }
   })
 
   test('Mac --all refuses frozen owner resources and any running managed Host before self-update', async () => {
@@ -352,27 +358,31 @@ describe('main：update 命令派发', () => {
   })
 
   test('自身升级失败时不继续升级插件集合', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-update-all-'))
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     const error = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     const install = makeInstall()
     const selfUpdate = vi.fn<SelfUpdateFn>(async () => { throw new PurgeError('npm 失败') })
     try {
-      expect(await main(['update', '--all'], { HOME: '/h' }, {
+      expect(await main(['update', '--all'], { HOME: root, DSH_HOME: join(root, '.dsh') }, {
         platform: 'linux', install, selfUpdate, findRunning: noRunning, detectFrozenOwner: noFrozenOwner,
+        managedServicePids: async () => ({ pids: [], errors: [] }),
       })).toBe(1)
       expect(selfUpdate).toHaveBeenCalledTimes(1)
       expect(install).not.toHaveBeenCalled()
-    } finally { write.mockRestore(); error.mockRestore() }
+    } finally { write.mockRestore(); error.mockRestore(); await rm(root, { recursive: true, force: true }) }
   })
 
   test('--all 时安装器退出码原样透传', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-update-all-'))
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     const install = makeInstall(7)
     const selfUpdate = makeSelfUpdate()
     try {
-      expect(await main(['update', '--all'], { HOME: '/h' }, {
+      expect(await main(['update', '--all'], { HOME: root, DSH_HOME: join(root, '.dsh') }, {
         platform: 'linux', install, selfUpdate, findRunning: noRunning, detectFrozenOwner: noFrozenOwner,
+        managedServicePids: async () => ({ pids: [], errors: [] }),
       })).toBe(7)
-    } finally { write.mockRestore() }
+    } finally { write.mockRestore(); await rm(root, { recursive: true, force: true }) }
   })
 })
