@@ -3880,6 +3880,44 @@ export class DeliveryStore {
     return this.getInbox(inboxId)!
   }
 
+  /** A durable control message wins even while its async binding transition is waiting. */
+  hasRestartCancellationAfter(inboxId: string, binding: Readonly<ConversationBinding>): boolean {
+    this.assertOpen()
+    const rows = this.database.prepare(`SELECT message.envelope_json FROM inbox_messages AS message
+      JOIN delivery_inbox_admissions AS admission ON admission.inbox_id = message.id
+      WHERE admission.admission_sequence > (SELECT admission_sequence FROM delivery_inbox_admissions WHERE inbox_id = ?)
+        AND message.status != 'dead_letter'
+        AND json_extract(message.envelope_json, '$.kind') = 'command'
+        AND json_extract(message.envelope_json, '$.conversation') = json(?)
+        AND json_extract(message.envelope_json, '$.principal') = json(?)`)
+      .all(inboxId, conversationJson(binding.conversation), principalJson(binding.principal)) as { envelope_json: string }[]
+    return rows.some(row => isExactDeliveryCommand(parseDeliveryCommand(JSON.parse(row.envelope_json) as InboundEnvelope), 'stop', 'new', 'clear'))
+  }
+
+  /** The fence and Inbox claims share this database's write transaction. */
+  setRestartFence(requestId: string, sourceInvocationId: string): void {
+    this.assertOpen()
+    this.transaction(() => {
+      const current = this.getRestartFence()
+      if (current !== undefined && (current.requestId !== requestId || current.sourceInvocationId !== sourceInvocationId)) {
+        throw new DeliveryStoreError('conflict', 'another restart owns the delivery drain fence')
+      }
+      this.database.prepare('INSERT OR IGNORE INTO delivery_restart_fence VALUES (1, ?, ?)').run(requestId, sourceInvocationId)
+    })
+  }
+
+  getRestartFence(): { requestId: string; sourceInvocationId: string } | undefined {
+    this.assertOpen()
+    const row = this.database.prepare('SELECT request_id, source_invocation_id FROM delivery_restart_fence WHERE singleton = 1')
+      .get() as { request_id: string; source_invocation_id: string } | undefined
+    return row === undefined ? undefined : { requestId: row.request_id, sourceInvocationId: row.source_invocation_id }
+  }
+
+  clearRestartFence(requestId: string): void {
+    this.assertOpen()
+    this.database.prepare('DELETE FROM delivery_restart_fence WHERE singleton = 1 AND request_id = ?').run(requestId)
+  }
+
   claimInbox(input: {
     ownerId: string
     leaseMs: number
@@ -3900,6 +3938,7 @@ export class DeliveryStore {
     const now = this.now()
     const claims: { record: InboxRecord; fencingToken: number }[] = []
     this.transaction(() => {
+      if (this.getRestartFence() !== undefined) return
       this.database.prepare(`
         UPDATE inbox_messages SET status = 'dead_letter', failure_code = 'attempts-exhausted',
           next_attempt_at = NULL, updated_at = ?
@@ -5784,97 +5823,102 @@ export class DeliveryStore {
     const claims: { record: OutboxRecord; fencingToken: number; mode: 'reconcile' | 'send' }[] = []
     const validatedOwnerRouteIds: string[] = []
     this.transaction(() => {
-      this.database.prepare(`
-        UPDATE outbox_messages SET status = 'dead', failure_code = 'attempts-exhausted',
-          next_attempt_at = NULL, updated_at = ?
-        WHERE rowid IN (
-          SELECT candidate.rowid FROM outbox_messages AS candidate
-          WHERE candidate.status = 'retry_wait' AND candidate.next_attempt_at <= ?
-            AND (
-              SELECT COUNT(*) FROM outbox_attempts AS history
-              WHERE history.outbox_id = candidate.id AND history.operation = 'send'
-            ) >= ?
-          ORDER BY candidate.rowid LIMIT ?
-        )
-      `).run(now, now, input.maxAttempts, maintenanceLimit)
-      this.database.prepare(`
-        UPDATE outbox_messages SET status = 'dead', failure_code = 'reconcile-attempts-exhausted',
-          next_attempt_at = NULL, updated_at = ?
-        WHERE rowid IN (
-          SELECT candidate.rowid FROM outbox_messages AS candidate
-          WHERE candidate.status = 'unknown_after_send'
-            AND NOT EXISTS (
-              SELECT 1 FROM dead_letter_resolutions AS resolution
-              WHERE resolution.kind = 'outbox' AND resolution.message_id = candidate.id
-                AND resolution.attempt_count = candidate.attempt_count AND resolution.resolution = 'cancel'
-            )
-            AND (
-              SELECT COUNT(*) FROM outbox_attempts AS history
-              WHERE history.outbox_id = candidate.id AND history.operation = 'reconcile'
-            ) >= ?
-          ORDER BY candidate.rowid LIMIT ?
-        )
-      `).run(now, input.maxAttempts, maintenanceLimit)
-      const ownerRouteRows = this.database.prepare(`
-        SELECT id FROM outbox_messages
-        WHERE status IN ('pending', 'retry_wait') AND claimed_by IS NULL
-          AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-          AND json_type(intent_json, '$.metadata."dsh.route.authority"') IS NOT NULL
-        ORDER BY rowid LIMIT ?
-      `).all(now, maintenanceLimit) as unknown as { id: string }[]
-      const ownerRouteGuard = input.ownerRouteGuard ?? { ownerRoutes: [], authorize: () => false }
-      for (const row of ownerRouteRows) {
-        const record = this.getOutbox(row.id)
-        if (record === undefined) continue
-        const inspected = this.inspectOwnerRouteDispatch(record, ownerRouteGuard)
-        if (inspected.kind === 'deferred') {
-          this.deferOwnerRouteBeforeClaim(
-            record,
-            inspected.failureCode,
-            now,
-            now + Math.max(1, Math.min(input.leaseMs, 30_000)),
+      const restartFenceActive = this.getRestartFence() !== undefined
+      // Drain without changing queued retries or unresolved sends. Only a
+      // plain maintenance acknowledgement may start during this fence.
+      if (!restartFenceActive) {
+        this.database.prepare(`
+          UPDATE outbox_messages SET status = 'dead', failure_code = 'attempts-exhausted',
+            next_attempt_at = NULL, updated_at = ?
+          WHERE rowid IN (
+            SELECT candidate.rowid FROM outbox_messages AS candidate
+            WHERE candidate.status = 'retry_wait' AND candidate.next_attempt_at <= ?
+              AND (
+                SELECT COUNT(*) FROM outbox_attempts AS history
+                WHERE history.outbox_id = candidate.id AND history.operation = 'send'
+              ) >= ?
+            ORDER BY candidate.rowid LIMIT ?
           )
-          continue
+        `).run(now, now, input.maxAttempts, maintenanceLimit)
+        this.database.prepare(`
+          UPDATE outbox_messages SET status = 'dead', failure_code = 'reconcile-attempts-exhausted',
+            next_attempt_at = NULL, updated_at = ?
+          WHERE rowid IN (
+            SELECT candidate.rowid FROM outbox_messages AS candidate
+            WHERE candidate.status = 'unknown_after_send'
+              AND NOT EXISTS (
+                SELECT 1 FROM dead_letter_resolutions AS resolution
+                WHERE resolution.kind = 'outbox' AND resolution.message_id = candidate.id
+                  AND resolution.attempt_count = candidate.attempt_count AND resolution.resolution = 'cancel'
+              )
+              AND (
+                SELECT COUNT(*) FROM outbox_attempts AS history
+                WHERE history.outbox_id = candidate.id AND history.operation = 'reconcile'
+              ) >= ?
+            ORDER BY candidate.rowid LIMIT ?
+          )
+        `).run(now, input.maxAttempts, maintenanceLimit)
+        const ownerRouteRows = this.database.prepare(`
+          SELECT id FROM outbox_messages
+          WHERE status IN ('pending', 'retry_wait') AND claimed_by IS NULL
+            AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+            AND json_type(intent_json, '$.metadata."dsh.route.authority"') IS NOT NULL
+          ORDER BY rowid LIMIT ?
+        `).all(now, maintenanceLimit) as unknown as { id: string }[]
+        const ownerRouteGuard = input.ownerRouteGuard ?? { ownerRoutes: [], authorize: () => false }
+        for (const row of ownerRouteRows) {
+          const record = this.getOutbox(row.id)
+          if (record === undefined) continue
+          const inspected = this.inspectOwnerRouteDispatch(record, ownerRouteGuard)
+          if (inspected.kind === 'deferred') {
+            this.deferOwnerRouteBeforeClaim(
+              record,
+              inspected.failureCode,
+              now,
+              now + Math.max(1, Math.min(input.leaseMs, 30_000)),
+            )
+            continue
+          }
+          if (inspected.kind !== 'authorized') {
+            const failureCode = inspected.kind === 'denied'
+              ? inspected.failureCode
+              : 'owner-route-receipt-invalid'
+            this.deadLetterOwnerRouteBeforeClaim(record, ownerId, failureCode, now)
+            continue
+          }
+          if (!this.ownerRouteIsProvablyUnsent(record)) {
+            this.deadLetterOwnerRouteBeforeClaim(record, ownerId, 'owner-route-send-proof-missing', now)
+            continue
+          }
+          if (!this.rebindOwnerRouteBeforeClaim(record, inspected)) {
+            this.deadLetterOwnerRouteBeforeClaim(record, ownerId, 'owner-route-rebind-conflict', now)
+            continue
+          }
+          validatedOwnerRouteIds.push(record.id)
         }
-        if (inspected.kind !== 'authorized') {
-          const failureCode = inspected.kind === 'denied'
-            ? inspected.failureCode
-            : 'owner-route-receipt-invalid'
-          this.deadLetterOwnerRouteBeforeClaim(record, ownerId, failureCode, now)
-          continue
-        }
-        if (!this.ownerRouteIsProvablyUnsent(record)) {
-          this.deadLetterOwnerRouteBeforeClaim(record, ownerId, 'owner-route-send-proof-missing', now)
-          continue
-        }
-        if (!this.rebindOwnerRouteBeforeClaim(record, inspected)) {
-          this.deadLetterOwnerRouteBeforeClaim(record, ownerId, 'owner-route-rebind-conflict', now)
-          continue
-        }
-        validatedOwnerRouteIds.push(record.id)
+        this.database.prepare(`
+          UPDATE outbox_messages SET status = 'dead', failure_code = CASE
+              WHEN status = 'unknown_after_send' THEN 'binding-revoked-unknown'
+              ELSE 'binding-revoked'
+            END,
+            next_attempt_at = NULL, updated_at = ?
+          WHERE rowid IN (
+            SELECT candidate.rowid FROM outbox_messages AS candidate
+            WHERE candidate.status IN ('pending', 'retry_wait', 'unknown_after_send')
+              AND json_type(candidate.intent_json, '$.metadata."dsh.route.authority"') IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM dead_letter_resolutions AS resolution
+                WHERE resolution.kind = 'outbox' AND resolution.message_id = candidate.id
+                  AND resolution.attempt_count = candidate.attempt_count AND resolution.resolution = 'cancel'
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM conversation_bindings AS binding
+                WHERE binding.id = candidate.binding_id AND binding.status = 'active'
+              )
+            ORDER BY candidate.rowid LIMIT ?
+          )
+        `).run(now, maintenanceLimit)
       }
-      this.database.prepare(`
-        UPDATE outbox_messages SET status = 'dead', failure_code = CASE
-            WHEN status = 'unknown_after_send' THEN 'binding-revoked-unknown'
-            ELSE 'binding-revoked'
-          END,
-          next_attempt_at = NULL, updated_at = ?
-        WHERE rowid IN (
-          SELECT candidate.rowid FROM outbox_messages AS candidate
-          WHERE candidate.status IN ('pending', 'retry_wait', 'unknown_after_send')
-            AND json_type(candidate.intent_json, '$.metadata."dsh.route.authority"') IS NULL
-            AND NOT EXISTS (
-              SELECT 1 FROM dead_letter_resolutions AS resolution
-              WHERE resolution.kind = 'outbox' AND resolution.message_id = candidate.id
-                AND resolution.attempt_count = candidate.attempt_count AND resolution.resolution = 'cancel'
-            )
-            AND NOT EXISTS (
-              SELECT 1 FROM conversation_bindings AS binding
-              WHERE binding.id = candidate.binding_id AND binding.status = 'active'
-            )
-          ORDER BY candidate.rowid LIMIT ?
-        )
-      `).run(now, maintenanceLimit)
       const ownerRouteClaimClause = validatedOwnerRouteIds.length === 0
         ? `AND (
             json_type(candidate.intent_json, '$.metadata."dsh.route.authority"') IS NULL
@@ -5889,6 +5933,13 @@ export class DeliveryStore {
         SELECT candidate.id, candidate.status FROM outbox_messages AS candidate
         WHERE candidate.status IN ('pending', 'retry_wait', 'unknown_after_send')
           AND candidate.claimed_by IS NULL
+          ${restartFenceActive ? `AND candidate.status IN ('pending', 'retry_wait')
+          AND candidate.idempotency_key GLOB 'inbound:*:maintenance'
+          AND json_extract(candidate.intent_json, '$.format') = 'plain'
+          AND json_type(candidate.intent_json, '$.metadata') IS NULL
+          AND json_type(candidate.intent_json, '$.approval') IS NULL
+          AND json_type(candidate.intent_json, '$.modelPicker') IS NULL
+          AND json_type(candidate.intent_json, '$.permissionPicker') IS NULL` : ''}
           AND NOT EXISTS (
             SELECT 1 FROM dead_letter_resolutions AS resolution
             WHERE resolution.kind = 'outbox' AND resolution.message_id = candidate.id
@@ -5923,6 +5974,7 @@ export class DeliveryStore {
             WHERE earlier.lane_hash = candidate.lane_hash
               AND earlier.rowid < candidate.rowid
               AND earlier.status NOT IN ('accepted', 'delivered', 'read', 'dead')
+              ${restartFenceActive ? "AND earlier.idempotency_key GLOB 'inbound:*:maintenance'" : ''}
               AND NOT EXISTS (
                 SELECT 1 FROM dead_letter_resolutions AS resolution
                 WHERE resolution.kind = 'outbox' AND resolution.message_id = earlier.id

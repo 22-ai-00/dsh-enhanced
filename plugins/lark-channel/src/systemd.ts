@@ -127,7 +127,8 @@ export function createSystemdUserUnit(input: SystemdUnitInput): string {
 Description=DeepSeek Harness profile ${input.profile}
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=0
+StartLimitIntervalSec=600
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -138,9 +139,8 @@ Environment=${unitQuote('DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus')}
 Environment=${unitQuote('XDG_RUNTIME_DIR=%t')}
 ${environmentLines}ExecStart=${unitLiteralQuote(input.nodePath)} --disable-warning=ExperimentalWarning ${unitLiteralQuote(input.dshPath)} --profile ${input.profile} --no-open
 # A deliberate systemctl user stop remains stopped, while every process
-# exit (including a clean but unintended Host exit) is restarted.  Disabling
-# systemd's start-rate limiter keeps a long-lived personal assistant from
-# becoming permanently inactive after a transient dependency outage.
+# exit is restarted within a finite start budget. Repeated failure stays
+# stopped for diagnosis instead of continuously interrupting the owner.
 Restart=always
 RestartSec=5
 TimeoutStopSec=30

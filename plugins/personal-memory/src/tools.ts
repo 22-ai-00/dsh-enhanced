@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { PersonalMemoryService } from './service.js'
 import type { MemoryEntryInput, MemoryIdentity, MemoryKnowledge, MemoryMutation, MemoryRecord } from './types.js'
 
@@ -188,7 +188,7 @@ export function registerMemoryTools(ctx: Context, service: PersonalMemoryService
       return { ...rest, complete: nextOffset === null, ...(nextOffset === null ? {} : { nextOffset }) }
     },
   }))
-  ctx.tools.register(defineTool({
+  const search = defineTool({
     name: 'memory_search',
     description: 'Search short, durable personal memories visible to the current agent and workspace. Check recorded applicability, counterexamples and any claim disagreement against current evidence before applying a memory.',
     parameters: {
@@ -222,7 +222,14 @@ export function registerMemoryTools(ctx: Context, service: PersonalMemoryService
         })),
       }
     },
-  }))
+  })
+  ctx.tools.register(search)
+  ctx.inject(['assistantDelivery'], deliveryCtx => {
+    const delivery = deliveryCtx.get('assistantDelivery') as {
+      registerRestartSafeTool?: (owner: Context, definition: ToolDefinition) => () => void
+    }
+    return delivery.registerRestartSafeTool?.(ctx, search)
+  })
 
   ctx.tools.register(defineTool({
     name: 'memory_search_confirmed',

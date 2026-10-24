@@ -155,6 +155,10 @@ function updateEvents(
     const text = todoText(update)
     return text === '' ? [] : textEvents(`todos-${sequence}-${step}`, text)
   }
+  if (update.kind === 'paused') return [
+    ...textEvents(`paused-${sequence}-${step}`, '任务已保存，维护重启后将自动继续。'),
+    progressEvent('RUN_FINISHED', { threadId: chatId, runId: `delivery-${sequence}`, status: 'done' }),
+  ]
   if (update.kind === 'completed') return [progressEvent('RUN_FINISHED', {
     threadId: chatId, runId: `delivery-${sequence}`, status: 'done',
   })]
@@ -206,7 +210,7 @@ export class LarkProgressPresenter {
     const current = previous.then(() => this.apply(key, intent)).catch(this.onFailure)
     this.queues.set(key, current)
     await current
-    if ((intent.update.kind === 'completed' || intent.update.kind === 'failed')
+    if ((intent.update.kind === 'completed' || intent.update.kind === 'failed' || intent.update.kind === 'paused')
       && this.queues.get(key) === current) this.queues.delete(key)
   }
 
@@ -237,7 +241,7 @@ export class LarkProgressPresenter {
     }
     const run = this.runs.get(key)
     if (run === undefined) return
-    const terminal = intent.update.kind === 'completed' || intent.update.kind === 'failed'
+    const terminal = intent.update.kind === 'completed' || intent.update.kind === 'failed' || intent.update.kind === 'paused'
     try {
       const events = updateEvents(
         intent.update,

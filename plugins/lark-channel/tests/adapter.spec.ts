@@ -382,18 +382,18 @@ describe('Lark delivery adapter', () => {
     })
   })
 
-  test('delivers an interruption receipt without marking the original task DONE', async () => {
+  test.each(['interrupted', 'maintenance', 'maintenance-failed'])('delivers a %s receipt without marking the original task DONE', async suffix => {
     const f = fixture()
     await f.adapter.start(f.context)
     await expect(f.adapter.send(intent({
-      idempotencyKey: 'inbound:inbox_interrupted:interrupted',
+      idempotencyKey: `inbound:inbox_interrupted:${suffix}`,
       text: '这次请求在执行过程中被中断，已有操作的结果尚未确认。',
     }), new AbortController().signal)).resolves.toEqual({
       outcome: 'accepted', providerMessageId: 'om_sent',
     })
     expect(f.transport.send).toHaveBeenCalledWith('oc_dm', {
       text: '这次请求在执行过程中被中断，已有操作的结果尚未确认。',
-    }, { replyTo: 'om_in', requestKey: 'inbound:inbox_interrupted:interrupted' })
+    }, { replyTo: 'om_in', requestKey: `inbound:inbox_interrupted:${suffix}` })
     expect(f.transport.addReaction).not.toHaveBeenCalled()
   })
 
@@ -483,6 +483,18 @@ describe('Lark delivery adapter', () => {
     expect(eventContent('RUN_FINISHED')).toEqual({
       threadId: 'oc_dm', runId: 'delivery-1', status: 'done',
     })
+  })
+
+  test('closes planned-maintenance progress with a saved-task notice and no task success reaction', async () => {
+    const f = fixture()
+    await f.adapter.start(f.context)
+    const common = { bindingId: 'binding-1', eventId: 'om_in', target: intent().target }
+    await f.adapter.progress?.({ ...common, update: { kind: 'started' } })
+    await f.adapter.progress?.({ ...common, update: { kind: 'paused' } })
+    const serialized = JSON.stringify(f.transport.writeProgress.mock.calls)
+    expect(serialized).toContain('任务已保存，维护重启后将自动继续。')
+    expect(serialized).toContain('RUN_FINISHED')
+    expect(f.transport.addReaction).not.toHaveBeenCalled()
   })
 
   test('keeps tool arguments and results out of group progress', async () => {

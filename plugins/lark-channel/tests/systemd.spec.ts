@@ -43,7 +43,7 @@ describe('DSH profile systemd user service', () => {
     expect(unit).toContain('WorkingDirectory=/home/test/.dsh/profiles/web')
     expect(unit).toContain('Environment="DSH_HOME=/home/test/.dsh"')
     expect(unit).toContain('Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus"')
-    expect(unit).toContain('StartLimitIntervalSec=0')
+    expect(unit).toContain('StartLimitIntervalSec=600\nStartLimitBurst=3')
     expect(unit).toContain('Restart=always')
     expect(unit).toContain('TimeoutStopSec=30')
     expect(unit).toContain('UMask=0077')

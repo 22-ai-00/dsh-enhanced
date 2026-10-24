@@ -2,7 +2,37 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 25
+export const deliverySchemaVersion = 26
+
+const restartFenceSchema = `
+  CREATE TABLE IF NOT EXISTS delivery_restart_fence (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    request_id TEXT NOT NULL,
+    source_invocation_id TEXT NOT NULL
+  ) STRICT;
+`
+
+const restartInboxFenceSchema = `
+  CREATE TRIGGER IF NOT EXISTS delivery_restart_inbox_claim_fence
+    BEFORE UPDATE OF status ON inbox_messages
+    WHEN NEW.status = 'claimed' AND OLD.status != 'claimed'
+      AND EXISTS(SELECT 1 FROM delivery_restart_fence WHERE singleton = 1)
+    BEGIN SELECT RAISE(ABORT, 'planned restart blocks new inbox claims'); END;
+`
+
+const restartOutboxFenceSchema = `
+  CREATE TRIGGER IF NOT EXISTS delivery_restart_outbox_claim_fence
+    BEFORE UPDATE OF status ON outbox_messages
+    WHEN NEW.status = 'attempting' AND OLD.status != 'attempting'
+      AND NOT (NEW.idempotency_key GLOB 'inbound:*:maintenance'
+        AND COALESCE(json_extract(NEW.intent_json, '$.format') = 'plain', 0)
+        AND json_type(NEW.intent_json, '$.metadata') IS NULL
+        AND json_type(NEW.intent_json, '$.approval') IS NULL
+        AND json_type(NEW.intent_json, '$.modelPicker') IS NULL
+        AND json_type(NEW.intent_json, '$.permissionPicker') IS NULL)
+      AND EXISTS(SELECT 1 FROM delivery_restart_fence WHERE singleton = 1)
+    BEGIN SELECT RAISE(ABORT, 'planned restart blocks new outbound sends'); END;
+`
 
 const goalOutcomeTargetSchema = `
   CREATE TABLE IF NOT EXISTS delivery_goal_outcome_targets (
@@ -1252,6 +1282,16 @@ function migrateObserved(database: DatabaseSync): void {
     database.exec(`${foregroundCompletionSchema} PRAGMA user_version = 25;`)
     version = 25
   }
+  if (version === 25) {
+    database.exec(restartFenceSchema)
+    // Historical partial ledgers may omit a message lane entirely. There is
+    // no claim to fence for an absent table; every existing lane gets its
+    // trigger in this same migration transaction (including old open writers).
+    if (hasTable(database, 'inbox_messages')) database.exec(restartInboxFenceSchema)
+    if (hasTable(database, 'outbox_messages')) database.exec(restartOutboxFenceSchema)
+    database.exec('PRAGMA user_version = 26;')
+    version = 26
+  }
   if (version === deliverySchemaVersion) return
   database.exec(`
     ${deliveryInstanceSchema}
@@ -1470,7 +1510,10 @@ function migrateObserved(database: DatabaseSync): void {
     ${goalOutcomeTargetSchema}
 
     ${workflowOwnerAnchoredSchema}
-    PRAGMA user_version = 25;
+    ${restartFenceSchema}
+    ${restartInboxFenceSchema}
+    ${restartOutboxFenceSchema}
+    PRAGMA user_version = 26;
   `)
 }
 

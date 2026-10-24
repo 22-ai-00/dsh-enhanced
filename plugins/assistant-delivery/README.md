@@ -8,12 +8,12 @@
 
 ## 兼容性与安装顺序
 
-- DSH / Agent / Agent Presets / LLM / Session：`0.2.0-rc.2`
-- `@deepseek-ai/dsh-attachment`：`0.2.0-rc.2`，仅图片入站路径需要的可选 Host service
-- `@deepseek-ai/dsh-user-questions`：`0.2.0-rc.2`。它定义 `ctx.userQuestions.ask()` 和 Agent-scoped `user-questions/request` answerer waterfall；Web Host 通过 Remote Events 在 live root Agent scope 提供 answerer。该 seam 没有可供 Delivery 消费的独立 question request/answer 事件流。
-- `@deepseek-ai/dsh-commands`：`0.2.0-rc.2`，可选 Host command service；按当前命令语法/执行契约只委托安全的原生 `/compact`。`/help`、`/status`、`/session`、`/new`、`/clear`、`/stop`、`/feedback`、`/learning` 及模型/权限控制命令都由 Delivery 自有；其他原生命令即使被宿主发布也不委托、不进入 LLM
-- `@deepseek-ai/dsh-goal`：`0.2.0-rc.2`，可选原生目标服务；启用 `agentGoalContinuationTimeoutMs` 时还须由 Host 挂载同版本 `dsh-goal-round-driver`，仅安装服务不产生自动续跑
-- `@deepseek-ai/dsh-permission-presets` / `@deepseek-ai/dsh-sandbox-policy` / `@deepseek-ai/dsh-user-approval`：`0.2.0-rc.2`，权限档位命令使用 preset service，并通过 sandbox/approval 包的 canonical setter 固化执行事实；所需 Host service 缺失时命令 fail closed
+- DSH / Agent / Agent Presets / LLM / Session：`0.2.1-rc.2`
+- `@deepseek-ai/dsh-attachment`：`0.2.1-rc.2`，仅图片入站路径需要的可选 Host service
+- `@deepseek-ai/dsh-user-questions`：`0.2.1-rc.2`。它定义 `ctx.userQuestions.ask()` 和 Agent-scoped `user-questions/request` answerer waterfall；Web Host 通过 Remote Events 在 live root Agent scope 提供 answerer。该 seam 没有可供 Delivery 消费的独立 question request/answer 事件流。
+- `@deepseek-ai/dsh-commands`：`0.2.1-rc.2`，可选 Host command service；按当前命令语法/执行契约只委托安全的原生 `/compact`。`/help`、`/status`、`/session`、`/new`、`/clear`、`/stop`、`/feedback`、`/learning` 及模型/权限控制命令都由 Delivery 自有；其他原生命令即使被宿主发布也不委托、不进入 LLM
+- `@deepseek-ai/dsh-goal`：`0.2.1-rc.2`，可选原生目标服务；启用 `agentGoalContinuationTimeoutMs` 时还须由 Host 挂载同版本 `dsh-goal-round-driver`，仅安装服务不产生自动续跑
+- `@deepseek-ai/dsh-permission-presets` / `@deepseek-ai/dsh-sandbox-policy` / `@deepseek-ai/dsh-user-approval`：`0.2.1-rc.2`，权限档位命令使用 preset service，并通过 sandbox/approval 包的 canonical setter 固化执行事实；所需 Host service 缺失时命令 fail closed
 - Cordis：`^4.0.1`
 - `@dsh-enhanced/assistant-policy`：`>=0.1.43 <0.2.0`，硬依赖
 - Preference Learning 是反向订阅 `subscribePreferenceFeedback()` 的可选下游；Delivery 不声明对它的 peer/runtime 依赖，避免消息核心与学习插件形成双向包依赖
@@ -180,7 +180,7 @@ cursor 的 protocol、数据库 epoch、稳定 owner scopeKey 和 sequence 必�
 
 ### 跨渠道 `ask_user_question`
 
-DSH `0.2.0-rc.2` 的 `ctx.userQuestions.ask()` 会把带 `agent` 的请求派发到该 exact live runtime root 的 Agent-scoped `user-questions/request` waterfall；随产品交付的 Web Host 通过 Remote Events 在同一 scope 注册 answerer。`dsh-user-questions` 不发布独立 request/answer 审计流，因此渠道集成必须直接注册 scoped answerer，并在其中完成 owner binding、adapter 能力、取消和回答校验。Delivery answerer 以前置顺序尝试有能力的渠道，避免先注册的远端 answerer 长时间等待而阻塞渠道；无 Delivery 路由、渠道不可用或回答畸形时继续 waterfall，已存在但失效的 owner binding 则以 `ASK_ABORTED` 失败关闭。没有 answerer 接受请求时 Host 以 `NO_PROVIDER` 失败，不会无限等待；多个 answerer 按 waterfall 组合顺序串联，当前 API 不承诺跨 UI 的竞速认领语义。
+DSH `0.2.1-rc.2` 的 `ctx.userQuestions.ask()` 会把带 `agent` 的请求派发到该 exact live runtime root 的 Agent-scoped `user-questions/request` waterfall；随产品交付的 Web Host 通过 Remote Events 在同一 scope 注册 answerer。`dsh-user-questions` 不发布独立 request/answer 审计流，因此渠道集成必须直接注册 scoped answerer，并在其中完成 owner binding、adapter 能力、取消和回答校验。Delivery answerer 以前置顺序尝试有能力的渠道，避免先注册的远端 answerer 长时间等待而阻塞渠道；无 Delivery 路由、渠道不可用或回答畸形时继续 waterfall，已存在但失效的 owner binding 则以 `ASK_ABORTED` 失败关闭。没有 answerer 接受请求时 Host 以 `NO_PROVIDER` 失败，不会无限等待；多个 answerer 按 waterfall 组合顺序串联，当前 API 不承诺跨 UI 的竞速认领语义。
 
 渠道自由文本只有在明确回复对应问题消息时才会结算，并要求 account、tenant、conversation、principal、binding version/generation 与当前 owner fence 全部匹配；同一路由恰好只有一个 pending question 也不会吞掉未引用的新消息。匹配回答直接恢复原来的工具调用，不写 Inbox、不作为普通新消息排队；`/stop`、`/new`、`/clear` 仍按渠道正常命令接入规则取消旧 wait（例如群聊可能仍要求 @ 机器人），问题卡的取消按钮则不依赖文字命令。问题发往原 binding 会话，不保证是私聊：若原会话是群聊，问题正文和选项对该群可见，敏感问题应在私聊中发起或改用其他交互方式。
 
@@ -228,7 +228,7 @@ Session 续约间隔取有效 lease 的约三分之一，有效期限使用 `min
 
 渠道 command envelope 只接受从正文第一字节开始的小写 ASCII slash 语法。未知命令、当前 preset 未发布的命令，以及大写、空命令等非法 slash 形态都只返回确定性帮助/错误，绝不作为自然语言进入 LLM。普通 Agent turn 只有在 session persistence `flush()` 明确返回 `true` 后才入队最终回复；返回 `false` 或抛错时不宣称任务成功。
 
-Agent Loop 以 `max-tokens` 结束、正常结束却没有正文，或完整正文超过 `maxTextBytes` 时，Delivery 默认在同一 session 中发起最多两轮后台恢复：先续写缺失部分；若仍未结束，最后一次机会优先根据当前请求和其后全部已有回答片段压缩为预算内的完整答案，不会把同一长会话中更早已完成的任务混入结论。空回答会重新生成，首轮即超长的回答会直接压缩。每个片段先持久化，再开始下一轮；恢复轮沿用已经选定的 provider、model 和 effort，但 source 明确标记为 Delivery 的内部 notice。恢复轮禁止工具执行：DSH `0.2.0-rc.2` 仍可能把 scoped tool schema 序列化给 provider，但任何调用都会在审批和执行前被拒绝，并立即结束该恢复轮；工具状态也不会展示给用户，后续恢复仍受同一总轮数限制。最终只投递一次合并后的完整回复并标记完成，不需要用户发送”继续”。
+Agent Loop 以 `max-tokens` 结束、正常结束却没有正文，或完整正文超过 `maxTextBytes` 时，Delivery 默认在同一 session 中发起最多两轮后台恢复：先续写缺失部分；若仍未结束，最后一次机会优先根据当前请求和其后全部已有回答片段压缩为预算内的完整答案，不会把同一长会话中更早已完成的任务混入结论。空回答会重新生成，首轮即超长的回答会直接压缩。每个片段先持久化，再开始下一轮；恢复轮沿用已经选定的 provider、model 和 effort，但 source 明确标记为 Delivery 的内部 notice。恢复轮禁止工具执行：DSH `0.2.1-rc.2` 仍可能把 scoped tool schema 序列化给 provider，但任何调用都会在审批和执行前被拒绝，并立即结束该恢复轮；工具状态也不会展示给用户，后续恢复仍受同一总轮数限制。最终只投递一次合并后的完整回复并标记完成，不需要用户发送”继续”。
 后台恢复是新的、有界模型 turn，可能产生额外模型用量，不是对同一个已提交请求的透明重试。若恢复轮失败或次数耗尽、没有新增正文，或已经持久化但无法建立安全调度边界，Delivery 才保留当前最佳正文、附加明确的未完成提示并标记失败；完全没有可用正文时发送重试提示。失败提示不再要求用户发送“继续”这类协议词。若任何片段无法确认持久化，则不投递该结果，也不宣称完成。这些失败回复不会进入 completed-turn preference projection。`agentMaxAutoContinuationTurns` 设为 `0` 时保留直接失败提示行为。
 
 `agentGoalContinuationTimeoutMs` 默认是 `0`，保持既有的前台回复后立即释放 Agent 行为。设为正值时，Delivery 先完成并入队原始前台回复，再保留同一 Session、Agent 与已固定的 GoalId，让 Host 的原生 `goal-round-driver` 在其自己的调度边界续跑；Delivery 不创建目标轮、不接管轮次，累计上限仍由 DSH 的 `maxGoalRounds` 限制。原回复只是该入站任务的结果，绝不表示业务目标已经达成。
@@ -379,8 +379,22 @@ Automation incident 使用 `automation-incident:<incidentId>:g<generation>` 同�
 - Agent dispatch 前写 `dispatch-started` marker。此后进程崩溃会进入 `dispatch-ambiguous` dead letter，避免自动产生第二个 turn；这会牺牲一次自动重放，需要 owner 审阅后显式 retry。
 - 对仍绑定当前 owner 的外部普通请求，恢复扫描会在没有最终回复时持久排入一次中断说明，沿用当前入站、回复和发送前授权；历史已中断记录也会扫描。已有最终回复（包括发送结果未知）或 operator 已结算的记录不另发通知。通知不重跑 Agent、不把原执行改成成功，也不确认之前写入是否完成。
 - `/permission` 是受限例外：它使用专用 commit/cancel/failure recovery marker，并以精确 Inbox id（兼容旧 event id）与 `replyToEventId` 共同证明终态 Outbox；崩溃恢复不会把普通 background Outbox 或同名伪造 key 当成完成见证。
-- 当前 DSH `0.2.0-rc.2` 的 `followup()` 没有跨进程 `sourceEventId` 唯一接纳/完成 handle，因此本包诚实承诺“持久 event 去重 + at-most-once 自动 Agent dispatch”，不声称端到端 exactly-once。若宿主未来提供该 seam，可升级为安全的 at-least-once wake。
+- 当前 DSH `0.2.1-rc.2` 的 `followup()` 没有跨进程 `sourceEventId` 唯一接纳/完成 handle，因此本包诚实承诺“持久 event 去重 + at-most-once 自动 Agent dispatch”，不声称端到端 exactly-once。若宿主未来提供该 seam，可升级为安全的 at-least-once wake。
 - Outbox adapter 抛异常一律视为可能已发送；不会按照普通 5xx 重试。
+
+## 受控维护重启
+
+显式配置 `restart` 后，当前 owner route 的前台任务在首次派发前冻结 owner/binding/Session、实际模型与 reasoning effort、单次输出上限、模型/工具调用次数和绝对截止时间。`allowedTools` 只选取已由可信服务登记实际定义对象的只读工具作为恢复能力：`delivery_status`、`wiki_search`、`wiki_read`、`memory_search`。同名 scope 覆盖、提供者卸载或未登记定义不会继承资格。普通任务仅记录模型、调用量与恢复资格，原有工具、时限和模型选择不受恢复配置限制；执行写工具、委派、超额、模型变化或不明结果只会失去自动续办资格。申请恢复后才强制冻结的剩余额度、截止时间和只读工具清单。它不增加原 Policy 权限。旧任务不会被追补为可恢复任务。
+
+`delivery_request_restart(reason)` 只接受原因，不接受 unit、路径或命令。调用须通过当前 owner 的精确 `maintenance.restart` 许可，且是该模型响应唯一的工具调用；活动 acceptance/native goal 或其他未静止的 Agent/Automations 会拒绝。原生 `concludeTurn()` 结束当前轮，工具结果和完整 Session 经过 persistence flush；实际 Agent teardown 与租约释放后才写 `ready`。schema 26 的全局维护栅栏与 Inbox claim 共享 SQLite 写事务，后台 Automations 同步暂停新领取，Outbox 仅发送本次维护通知并等待已有发送结算，已接收的控制命令仍可撤销恢复。恢复过程中原任务不被标为成功。
+
+私有 sidecar 账本采用 WAL/FULL、CAS 和不可变预算预留。外部 `bin/dsh-restart-supervisor.js` 在安装器同名生命周期锁内检查原任务、维护通知 accepted、全部 Session lease/Automations 静止、当前 Policy 紧急停止和维护许可，以及 unit、profile、cohort receipt 和已安装代码摘要。它持久领取后至多执行一次固定的 `systemctl --user restart`；命令结果不明时只观察，不重发。新 InvocationID、Host ready、飞书连接及稳定窗口全部满足才允许续办。
+
+新 Host 在同一 Session 和原 Inbox/foreground execution 下追加固定、稳定 ID 的 Host notice，复用原生 AgentLoop。原生 API 以 `role:user` 承载 notice，`source` 明确为 Host；它不创建新的认证入站消息或 owner 授权。Session 的 inbox-splice 和领取记录必须在模型调用前落盘；恢复不重置模型、预算和截止时间。新 Host 稳定、原 Session 已独占且续办 notice 已落盘并重验授权后，即解除全局维护暂停；其它会话和后台任务恢复正常收发，原会话仍按 Session lease 串行执行，不必等待续办任务完成。`/stop`、`/new`、撤权、模型/代码漂移及未知外部结果阻止自动重放。维护失败写幂等说明，不添加 DONE；原进度可用时追加“任务已保存”并关闭这一次 COT run；平台 `RUN_FINISHED.status=done` 只结束该进度流，原任务回执仍 pending，消息不添加 DONE reaction。历史遗失的进度句柄无法原位关闭。
+
+冻结 owner 安装通过 `scripts/install/upgrade-program.mjs --restart-config /absolute/private.json` 增加能力：该文件须 owner-private，包含 `databasePath`（固定 Home 下 `assistant-delivery/restart.sqlite`）、`ownerRouteId`、`maxModelRequests`、`maxToolCalls`、`taskTimeoutMs`、`allowedTools`。安装事务冻结内容和摘要，精确新增稳定 owner route 的许可（每次执行仍复核当前 binding）并更新签名 overlay；恢复不重读配置输入。升级后用 `scripts/install/restart-supervisor.mjs --dry-run` 验证并以 `--install` 安装 Home 外的私有配置和 user timer/oneshot；参数见该脚本，helper 随本包发布。
+
+这是同码、事先保存的维护恢复；不提供代码升级，不恢复未知派发，不保证硬崩溃后任意指令继续，也不保证目标离线期间飞书消息不丢。独立接入进程仍是后续交付。外部 helper 与目标同 UID，不构成恶意代码的 OS 隔离；有宿主 shell 权限的模型仍须遵守既有 sandbox/Policy。每个任务最多申请一次，执行器还有时间窗重启次数上限；新受管 unit 同时限制 600 秒内最多 3 次启动，重复启动失败会停止并保留诊断，不无限抖动。通知或监督器在 120 秒内未接管则解除维护栅栏并报告失败；监督器重开不会重置已派发重启的观察期限。维护期间普通 `/status` 会随其它消息排队，`/stop`、`/new` 可直接撤销。额度是调用次数、单次输出和时间上限，不是精确总费用上限。
 
 ## Goals 单次唤醒边界
 
@@ -394,7 +408,7 @@ Cordis 按上下文读取 service 时可能产生不同 proxy 对象，Host 不�
 
 - **文件系统：**读写配置的 SQLite 与私有 spool 目录，并在 fresh Agent create 前创建缺失的 workspace；cold resume 只验证原目录仍存在。图片字节通过宿主 AttachmentStore 持久化；标准 `attachment-local` 将其写入 `$DSH_HOME/attachments/v1`，Delivery 自己不把字节写进 SQLite、spool 或 session 日志。Delivery 本身不读取任意 workspace 文件。挂载 preset 后，获 Policy 允许的文件工具可在 DSH 文件权限边界内读取 workspace。
 - **网络：**本包自身无网络访问；网络权限属于注册的渠道 adapter。
-- **进程/浏览器：**Delivery 本身不启动 subprocess、shell 或 browser；它挂载的 preset 可以暴露 Bash/Pwsh，真正执行由宿主 sandbox、approval 与 Policy 三层共同约束。
+- **进程/浏览器：**常驻 Delivery 服务不启动 subprocess、shell 或 browser；可选外部维护 helper 仅执行安装器固定的 systemd/journal/flock 命令并读取受保护的状态与代码；它挂载的 preset 可以暴露 Bash/Pwsh，真正执行由宿主 sandbox、approval 与 Policy 三层共同约束。
 - **凭据：**不接收、存储或输出 provider token；adapter 必须通过 SecretRef/后续 credentials service 获取。
 - **数据：**Inbox/Outbox 会保存消息正文、外部 identity 和 route，属于 PII。入站只登记最多 10 个受限 provider descriptor；授权图片会额外保存经过校验的 AttachmentStore 引用和内容摘要，provider reference 始终留在隔离账本而不进入 prompt、模型请求或工具输出。图片二进制遵循所选 AttachmentStore 的保留策略；标准 `attachment-local` 当前没有引用垃圾回收。文件、音频、视频和 sticker 仍保持 metadata quarantine。当前版本也不自动清理 Delivery 历史，请依部署的数据保留策略备份/轮换私有数据库和附件对象。
 

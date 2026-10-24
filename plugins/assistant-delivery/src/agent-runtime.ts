@@ -66,6 +66,9 @@ import {
   serializeLearningExport,
 } from './learning-command.js'
 import type { DeliveryInboundRuntime } from './service.js'
+import { attachRestartRun, restartDigest, restartContinuationText, type RestartConfig, type RestartRun } from './restart-runtime.js'
+import type { RestartRecord, RestartStore } from './restart-store.js'
+import { admitRestartContinuation, createRestartContinuation } from './restart-native.js'
 import { renderOwnerApprovalStatus, type OwnerApprovalStatusRead } from './approval-status-context.js'
 import {
   isExactDeliveryCommand,
@@ -112,6 +115,10 @@ declare module '@deepseek-ai/dsh-llm' {
 }
 
 interface DshDeliveryRuntimeOptions {
+  restart?: { store: RestartStore; config: RestartConfig; invocationId: string;
+    authorize(record: RestartRecord): boolean; authorizeTask(inboxId: string): boolean;
+    onContinuationAdmitted(record: RestartRecord, sessionId: string): void;
+    isRestartSafeTool(agent: Agent, name: string): boolean }
   sessionLeases: DeliverySessionLeases
   sessionNamespace: string
   workspace: string
@@ -1474,6 +1481,24 @@ function userCancelledToolNotice(events: readonly SessionEvent[]): string {
 }
 
 export class DshDeliveryRuntime implements DeliveryInboundRuntime {
+  private readonly restartRuns = new WeakMap<Agent, RestartRun>()
+
+  canRequestRestart(agent: Agent): boolean { return this.restartRuns.get(agent)?.canRequest() === true }
+
+  requestRestart(agent: Agent, reason: string): { id: string; status: string } {
+    const run = this.restartRuns.get(agent)
+    if (run === undefined) throw new Error('assistant-delivery: this foreground task has no restart authority')
+    const record = run.request(reason)
+    return { id: record.id, status: record.status }
+  }
+
+  async resumeRestart(record: RestartRecord, binding: Readonly<ConversationBinding>, envelope: Readonly<InboundEnvelope>, signal: AbortSignal): Promise<unknown> {
+    const restart = this.options.restart
+    if (restart === undefined || !restart.authorize(record)) throw new Error('assistant-delivery: restart continuation is not authorized')
+    return await this.process(binding, envelope, signal, undefined, () => {
+      if (!restart.authorize(record)) throw new Error('assistant-delivery: restart continuation authority changed')
+    }, record)
+  }
   readonly dispatchControl = 'explicit' as const
   private readonly activeSessionControls = new Map<string, ActiveSessionControl>()
   private readonly sessionLeases: DeliverySessionLeases
@@ -1900,6 +1925,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     message: ReturnType<typeof createUserMessage>,
     onClaimed?: (turn: number) => void,
     onSettled?: () => void,
+    admit?: () => Promise<import('./restart-native.js').RestartContinuationInspection>,
   ): Promise<number | undefined> {
     return new Promise((resolve, reject) => {
       let claimedTurn: number | undefined
@@ -1949,7 +1975,11 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         }
       })
       try {
-        agent.followup(message)
+        if (admit === undefined) agent.followup(message)
+        else void admit().then(state => {
+          if (state.kind === 'settled') settle(state.turn)
+          else if (state.kind !== 'pending') fail(new Error('assistant-delivery: continuation was already dispatched without a settled result'))
+        }, fail)
       } catch (error) {
         fail(error)
       }
@@ -3690,6 +3720,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     outerSignal: AbortSignal,
     prepared?: Readonly<PreparedInboundMessage>,
     markDispatching?: MarkInboundDispatching,
+    restartContinuation?: RestartRecord,
   ): Promise<InboundProcessResult> {
     const sessionCommand = parseDeliveryCommand(envelope)
     if (envelope.kind === 'command' && sessionCommand === undefined) {
@@ -3745,6 +3776,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           markDispatching()
           lease.assert()
         },
+        restartContinuation,
       )
     } catch (error) {
       if (control?.command !== undefined && causedByUserCancellation(error)) {
@@ -3770,6 +3802,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     sessionCommand: ParsedDeliveryCommand | undefined,
     prepared?: Readonly<PreparedInboundMessage>,
     markDispatching?: MarkInboundDispatching,
+    restartContinuation?: RestartRecord,
   ): Promise<InboundProcessResult> {
     if (sessionCommand?.name === 'feedback') {
       return await this.runFeedbackCommand(
@@ -3891,9 +3924,12 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     if (agents === undefined || sessions === undefined) {
       return { outcome: 'not-processed', failureCode: 'agent-runtime-unavailable', retryable: true }
     }
-    const persistedSelection = this.options.getModelSelection(envelope.conversation)
+    const restart = this.options.restart
+    const continuationTask = restartContinuation === undefined ? undefined : restart?.store.getTask(restartContinuation.inboxId)
+    if (restartContinuation !== undefined && continuationTask?.model === undefined) throw new Error('assistant-delivery: restart model is not frozen')
+    const persistedSelection = restartContinuation === undefined ? this.options.getModelSelection(envelope.conversation) : undefined
     const requestedRoute = toModelRoute(persistedSelection
-      ?? prepared?.modelRoute
+      ?? continuationTask?.model ?? prepared?.modelRoute
       ?? { provider: this.options.provider, model: this.options.model })
     const resolvedRoute = await this.resolveExecutionRoute(
       envelope.conversation,
@@ -3917,6 +3953,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     let removeAbort: (() => void) | undefined
     let removeProgress: (() => void) | undefined
     let progressOpen = true
+    let restartRun: RestartRun | undefined
+    let restartCheckpoint: RestartRecord | undefined
     let progressQueue = Promise.resolve()
     const publishProgress = (update: DeliveryProgressUpdate): void => {
       if (!progressOpen) return
@@ -4015,8 +4053,27 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       // an owner tool can create/resume a goal in that very first turn and the
       // host driver is otherwise free to claim its first round at idle.
       goalContinuation = this.waitForNativeGoalContinuation(binding, envelope, agent, signal)
-      acceptance = this.options.prepareForegroundTaskAcceptance(binding, envelope)
-      foregroundExecution = this.options.beginForegroundTaskExecution(binding, envelope)
+      acceptance = restartContinuation === undefined ? this.options.prepareForegroundTaskAcceptance(binding, envelope) : undefined
+      foregroundExecution = restartContinuation?.inboxId ?? this.options.beginForegroundTaskExecution(binding, envelope)
+      if (restart !== undefined && foregroundExecution !== undefined && restart.store.getTask(foregroundExecution) !== undefined) {
+        if (restartContinuation !== undefined) {
+          const checkpoint = restartContinuation.checkpoint
+          if (checkpoint === undefined || restartDigest(agent.session.snapshotEvents().slice(0, checkpoint.sessionEventCount)) !== checkpoint.sessionDigest
+            || checkpoint.continuationTextDigest !== restartDigest(restartContinuationText)
+            || createRestartContinuation({ continuationId: restartContinuation.id, text: restartContinuationText }).id !== checkpoint.continuationMessageId) {
+            throw new Error('assistant-delivery: restart checkpoint does not match the persisted Session')
+          }
+        }
+        restartRun = attachRestartRun({ agent, inboxId: foregroundExecution, binding, envelope,
+          store: restart.store, config: restart.config,
+          isRestartSafeTool: restart.isRestartSafeTool,
+          ...(restartContinuation === undefined ? {} : { continuation: restartContinuation }),
+          authorize: () => checkAuthorization() === 'authorized' && restart.authorizeTask(foregroundExecution!),
+          authorizeRestart: () => acceptance === undefined && !goalContinuation?.pinActiveArmedGoal()
+            && restart.authorizeTask(foregroundExecution!),
+        })
+        this.restartRuns.set(agent, restartRun)
+      }
       if (acceptance !== undefined || foregroundExecution !== undefined) removeAcceptanceRequest = this.ctx.on('session/event', (session, event) => {
         if (session !== agent.session || event.type !== 'request/header') return
         // `agent/request` exposes the candidate route.  The native loop writes
@@ -4030,11 +4087,39 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       // Once the durable marker exists, even a synchronous followup failure is ambiguous:
       // implementations may enqueue before throwing, so no retry is safe.
       dispatched = true
-      const message = createUserMessage({ content, source: {
+      const message = restartContinuation === undefined ? createUserMessage({ content, source: {
         kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId: envelope.eventId,
         trust: 'untrusted',
-      } })
-      let deliveryTurn = await this.followupTurn(agent, message)
+      } }) : createRestartContinuation({ continuationId: restartContinuation.id, text: restartContinuationText })
+      let deliveryTurn = await this.followupTurn(agent, message, undefined, undefined, restartContinuation === undefined ? undefined
+        : () => admitRestartContinuation(agent, message, { signal,
+          authorize: () => {
+            this.sessionLeases.assert(String(agent.session.id))
+            if (!restart!.authorize(restartContinuation)) throw new Error('restart authority changed')
+          },
+          flush: () => sessions.flush(agent.session),
+          onAdmitted: () => {
+            this.sessionLeases.assert(String(agent.session.id))
+            restart!.onContinuationAdmitted(restartContinuation, String(agent.session.id))
+          },
+        }))
+      if (restartRun?.requested() !== undefined) {
+        await this.waitForAgentIdle(agent, signal)
+        restartCheckpoint = await restartRun.checkpoint()
+        this.options.replyCommand(binding, envelope.eventId, {
+          text: '已保存当前任务，准备进行维护重启；服务就绪后会自动继续，无需重新发送请求。', format: 'plain',
+        }, `inbound:${foregroundExecution}:maintenance`)
+        publishProgress({ kind: 'paused' })
+        // Presentation failure cannot leave the task stuck before the durable handoff.
+        let progressTimeout: ReturnType<typeof setTimeout> | undefined
+        try {
+          await Promise.race([progressQueue, new Promise<void>(resolve => {
+            progressTimeout = setTimeout(resolve, 5_000)
+            progressTimeout.unref?.()
+          })])
+        } finally { if (progressTimeout !== undefined) clearTimeout(progressTimeout) }
+        return { outcome: 'processed' }
+      }
       let completionKind: AutomaticCompletionKind | undefined
       let automaticTurns = 0
       let assembledText = ''
@@ -4306,12 +4391,12 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           handle,
           () => goalContinuation?.dispose(),
           !goalContinuationQuiescent,
-          goalContinuation?.teardownTimeoutMs(),
+          restartCheckpoint === undefined && restartContinuation === undefined ? goalContinuation?.teardownTimeoutMs() : 10_000,
         )
       } finally {
         acceptanceSucceeded = acceptanceSucceeded && disposed && !signal.aborted
           && (goalContinuation?.isQuiescent() ?? true)
-        if (foregroundExecution !== undefined) {
+        if (foregroundExecution !== undefined && restartCheckpoint === undefined) {
           try {
             this.options.completeForegroundTaskExecution(foregroundExecution, {
               status: acceptanceSucceeded ? 'succeeded' : 'unknown', quiescent: acceptanceSucceeded,
@@ -4320,7 +4405,23 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
             this.ctx.logger.warn(`assistant-delivery: foreground execution completion failed: ${String(error)}`)
           }
         }
-        if (acceptance !== undefined) {
+        if (restart !== undefined && restartContinuation === undefined && restartCheckpoint === undefined) {
+          const unfinished = restartRun?.requested()
+          if (unfinished !== undefined) restart.store.fail(unfinished.id, 'restart-checkpoint-failed')
+        }
+        if (restart !== undefined && restartCheckpoint !== undefined) {
+          if (disposed && !signal.aborted && restart.authorize(restartCheckpoint)) restart.store.ready(restartCheckpoint.id)
+          else restart.store.fail(restartCheckpoint.id, 'restart-teardown-not-quiescent')
+        }
+        if (restart !== undefined && restartContinuation !== undefined) {
+          const current = restart.store.getRequest(restartContinuation.id)
+          if (current?.status === 'resuming') {
+            if (acceptanceSucceeded) restart.store.complete(restartContinuation.id)
+            else restart.store.fail(restartContinuation.id, 'restart-continuation-outcome-unknown')
+          }
+        }
+        restartRun?.dispose()
+        if (acceptance !== undefined && restartCheckpoint === undefined) {
           try {
             await this.options.completeForegroundTaskAcceptance(acceptance, {
               status: acceptanceSucceeded ? 'succeeded' : 'unknown', quiescent: acceptanceSucceeded,

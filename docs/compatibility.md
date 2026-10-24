@@ -1,5 +1,11 @@
 # 兼容性基线
 
+## 同码维护恢复（Delivery schema 26）
+
+Delivery v26 只新增与 Inbox claim 同库的持久维护栅栏，owner snapshot 协议及原记录不变；只读 operator、Web doctor 和安装生命周期接受 v26，未知 schema 继续拒绝。独立 restart sidecar 使用 schema 1。旧任务没有冻结的模型、预算和 checkpoint，不参与自动续办。
+
+该可选能力须同批部署 Delivery、Policy（精确工具 preauthorization）、Automations（维护暂停）、Personal Memory/Wiki（确切只读工具定义）和 Lark Channel（暂停/失败展示）；固定外部 helper 随 Delivery 包发布，执行前验证完整 cohort 代码与外部 Host receipt 的可执行清单。新受管 systemd unit 设置 600 秒内最多 3 次启动，旧无限重启 unit 仅接受迁移读取。DSH/Cordis 依赖不变。实际使用锁定 Host 的 `concludeTurn`、Session flush、Agent maintenance/inbox 及 JSONL 恢复契约；`role:user` Host notice 不作为新的认证用户任务。安装与恢复细节见 [Delivery](../plugins/assistant-delivery/README.md#受控维护重启)。
+
 ## Linux 既有 owner 的程序升级
 
 `dsh-rsi update --all --yes` 为冻结源码的 Linux 安装提供专用程序升级事务：沿安装收据绑定的官方 `dev` / `main` 分支快进源码，在 Home 外准备依赖，再成对停服、复制 Home、更新程序和私有 Host，最后检查本次启动的目标与协调器。它保留原 owner 绑定、模型配置、凭据引用、授权原期限、累计已用额度和业务历史；不重新 onboarding，不重置额度或自动续期。当前入口仅接受未发生源码采用的安装及 `0.2.0-rc.2` / `0.2.1-rc.2` 原 Host，候选固定为 `0.2.1-rc.2`。它不扩展 Mac 冻结 Home 或 `0.1 → 0.2` 迁移范围。

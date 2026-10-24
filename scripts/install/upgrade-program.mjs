@@ -24,15 +24,18 @@ export function parseProgramUpgradeArgs(args) {
     if (key === '--dry-run') result.dryRun = true
     else if (key === '--recover') result.recover = true
     else if (key === '--recover-readiness') result.recoverReadiness = true
-    else if (['--dsh-home', '--profile', '--dsh-version'].includes(key)) {
+    else if (['--dsh-home', '--profile', '--dsh-version', '--restart-config'].includes(key)) {
       const value = args[++index]
       if (!value || value.startsWith('-')) fail(`${key} requires a value`)
-      result[key === '--dsh-home' ? 'home' : key === '--profile' ? 'profile' : 'selector'] = value
+      result[key === '--dsh-home' ? 'home' : key === '--profile' ? 'profile'
+        : key === '--restart-config' ? 'restartConfigPath' : 'selector'] = value
     } else fail(`unknown option ${key}`)
   }
   if (!isAbsolute(result.home ?? '') || resolve(result.home) !== result.home
     || !profilePattern.test(result.profile ?? '')
     || !['latest', '0.2.1-rc.2'].includes(result.selector)) fail('expected an absolute Home, an existing profile and a supported Host selector')
+  if (result.restartConfigPath !== undefined && (!isAbsolute(result.restartConfigPath)
+    || resolve(result.restartConfigPath) !== result.restartConfigPath)) fail('restart config path must be absolute and canonical')
   if (result.recoverReadiness && (result.recover || seen.has('--dsh-version'))) {
     fail('readiness recovery cannot select a Host version or another recovery mode')
   }
@@ -87,6 +90,10 @@ export async function runProgramUpgrade(options) {
       || pending.homePath !== home || pending.profile !== profile
       || pending.transactionPath !== transactionPath || !options.recoverReadiness && proof?.installer?.root !== root
       || proof?.protocol !== 'dsh-enhanced/host-owner-program-update/v1') fail('pending transaction belongs to another reviewed installer or operation')
+    if (options.restartConfigPath !== undefined
+      && options.restartConfigPath !== proof.ownerUpdate?.restartConfigSourcePath) {
+      fail('pending restart config input differs from the frozen transaction')
+    }
     if (pending.hostMigration.programReadinessRecovery !== undefined && !options.recoverReadiness) {
       fail('pending signed readiness recovery requires the separately reviewed checkout and --recover-readiness; the original installer must remain unchanged')
     }
@@ -128,6 +135,7 @@ export async function runProgramUpgrade(options) {
     const { prepareRsiLocalUpdate } = await import(pathToFileURL(join(root, 'plugins/lark-channel/lib/rsi-local-update.js')).href)
     const prepared = await prepareRsiLocalUpdate({ dshHome: home, profile, sourceRepository: root, signal: controller.signal })
     if (prepared.source.sourceCommit === cohort.sourceCommit && hostPlan.status === 'current') {
+      if (options.restartConfigPath !== undefined) fail('restart config requires a new reviewed source cohort')
       process.stdout.write(`程序与 DSH 已是当前源码版本（${prepared.source.sourceCommit.slice(0, 12)}），无需停服。\n`)
       return 0
     }
@@ -145,7 +153,7 @@ export async function runProgramUpgrade(options) {
     controller.signal.throwIfAborted()
     const status = await runLifecycle(['host-program-update', profile, home, hostPlan.originalRuntime.dshPath,
       '/usr/bin/bwrap', '/usr/bin/systemctl', '/usr/bin/journalctl', planPath, prepared.root, root,
-      join(runRoot, 'auxiliary')], env)
+      join(runRoot, 'auxiliary'), ...(options.restartConfigPath ? [options.restartConfigPath] : [])], env)
     if (status !== 0) return status
     const after = await privateJson(join(home, '.dsh-rsi-host.json'), 16_384)
     const installed = await privateJson(join(home, 'rsi-local-cohorts', profile, 'receipt.json'), 20_971_520)

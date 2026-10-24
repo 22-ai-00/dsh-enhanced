@@ -239,12 +239,13 @@ export async function verifyHostLocalSourceOriginalForPrestartRecovery({ proof, 
 }
 
 export async function prepareHostLocalSourceUpdate({ homePath, profile, preparationRoot, installerRoot, auxiliaryRoot,
-  ownerRepairPreset, ownerRepairPredecessor, ownerProgramUpdate, hostPlan, dshPath, dshEnvironment }) {
+  ownerRepairPreset, ownerRepairPredecessor, ownerProgramUpdate, restartConfigPath, hostPlan, dshPath, dshEnvironment }) {
   await privateHome(homePath)
   if (!profileName.test(profile) || !exact(preparationRoot) || !exact(installerRoot)) fail('invalid source preparation input')
   if (ownerRepairPredecessor !== undefined && ownerRepairPreset === undefined) fail('owner successor requires an explicit repair preset')
   if (ownerProgramUpdate !== undefined && ownerProgramUpdate !== true
     || ownerProgramUpdate && (ownerRepairPreset !== undefined || ownerRepairPredecessor !== undefined)) fail('program update cannot change repair permissions')
+  if (restartConfigPath !== undefined && !ownerProgramUpdate) fail('restart config requires a program update')
   const installer = await bindLocalSourceInstaller(installerRoot)
   const api = await loadLocalSourceInstaller(installer, { ownerRepair: ownerRepairPreset !== undefined || ownerProgramUpdate === true })
   const preparation = await api.readRsiLocalUpdateLocked({ dshHome: homePath, profile, root: preparationRoot })
@@ -253,7 +254,7 @@ export async function prepareHostLocalSourceUpdate({ homePath, profile, preparat
   if (ownerProgramUpdate) {
     const helper = await import('./owner-program-update.mjs')
     ownerUpdate = await helper.captureOwnerProgramUpdate({ homePath, profile, installer,
-      dshPath, dshEnvironment, hostPlan })
+      dshPath, dshEnvironment, hostPlan, restartConfigPath })
     const source = await api.readRsiSourceWorkspace({ dshHome: preparation.candidateHome, profile,
       sourceRepository: preparation.source.repository })
     const sourceBuild = await api.readRsiBuildEnvironment({ dshHome: preparation.candidateHome, profile, source })

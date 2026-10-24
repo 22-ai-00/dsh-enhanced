@@ -128,6 +128,8 @@ export class AutomationRunnerFailureError extends Error {
 export interface AutomationCoordinatorOptions {
   /** Host proof revalidation before every timer, manual, or internal dispatch tick. */
   beforeDispatch?: () => void
+  /** Synchronous Host maintenance fence, checked immediately before task claims. */
+  dispatchPaused?: () => boolean
   store: AutomationStore
   artifacts: AutomationArtifactStore
   runner: AutomationRunner
@@ -188,6 +190,7 @@ function recorderErrorCode(error: unknown): string {
 
 export class AutomationCoordinator {
   private readonly beforeDispatch: (() => void) | undefined
+  private readonly dispatchPaused: (() => boolean) | undefined
   private readonly store: AutomationStore
   private readonly artifacts: AutomationArtifactStore
   private readonly runner: AutomationRunner
@@ -214,6 +217,7 @@ export class AutomationCoordinator {
       throw new Error('assistant-automations: maxConcurrency must be between 1 and 100')
     }
     this.beforeDispatch = options.beforeDispatch
+    this.dispatchPaused = options.dispatchPaused
     this.store = options.store
     this.artifacts = options.artifacts
     this.runner = options.runner
@@ -241,6 +245,9 @@ export class AutomationCoordinator {
     const now = this.now()
     if (!this.ensureDuty(now)) return
     this.beforeDispatch?.()
+    // No await separates this gate from claimNextTask. While paused, leave
+    // scheduled work and retry accounting untouched for the resumed Host.
+    if (this.dispatchPaused?.() === true) return
     this.store.recoverExpiredCircuitProbes({ now })
     this.store.recoverExpiredTasks({ now, limit: this.maxCatchUp })
     this.dispatchPendingEvaluations()
@@ -271,6 +278,7 @@ export class AutomationCoordinator {
       const claimAvailability = this.hostAvailability(
         this.store.listClaimableHostExecutionRequirements(), 'claim',
       )
+      if (this.dispatchPaused?.() === true) return
       const claimed = this.store.claimNextTask({
         ownerId: this.ownerId,
         fencingToken: this.fencingToken!,
@@ -319,6 +327,9 @@ export class AutomationCoordinator {
       ])
     }
   }
+
+  /** In-memory runners and evaluation writes must join before Host restart. */
+  isRunnerQuiescent(): boolean { return this.active.size === 0 && this.activeEvaluations.size === 0 }
 
   async cancel(taskId: string): Promise<void> {
     this.store.requestCancellation({ taskId, now: this.now() })

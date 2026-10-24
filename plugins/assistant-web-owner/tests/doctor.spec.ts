@@ -38,10 +38,10 @@ describe('autonomy doctor profile and persisted owner checks', () => {
     expect(existsSync(profile.stateRoot)).toBe(false)
   })
 
-  it('accepts reviewed Delivery v24 and v25 owner snapshots without changing either database', () => {
+  it('accepts reviewed Delivery v24, v25 and v26 owner snapshots without changing either database', () => {
     const { home, source, databasePath } = fixture()
     const profile = inspectAutonomyProfile(source, 'web', home)
-    for (const version of [24, 25]) {
+    for (const version of [24, 25, 26]) {
       const db = new DatabaseSync(databasePath)
       try { db.exec(`PRAGMA user_version=${version}`) } finally { db.close() }
       const before = readFileSync(databasePath)
@@ -60,7 +60,7 @@ describe('autonomy doctor profile and persisted owner checks', () => {
     const db = new DatabaseSync(databasePath)
     try {
       expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(deliverySchemaVersion)
-      for (const version of [deliverySchemaVersion - 2, deliverySchemaVersion + 1]) {
+      for (const version of [23, deliverySchemaVersion + 1]) {
         db.exec(`PRAGMA user_version=${version}`)
         expect(inspectAutonomyOwner(profile)).toEqual({ status: 'unavailable' })
         expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(version)
