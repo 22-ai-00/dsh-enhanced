@@ -414,7 +414,9 @@ describe('fixed-unit restart supervisor', () => {
     } finally { f.close() }
   })
 
-  test('the real kernel rendezvous lock excludes a second supervisor', async () => {
+  // The production system adapter uses Linux flock and the installer's exact
+  // /tmp rendezvous. Portable supervisor behavior is covered with fakeSystem.
+  test.skipIf(process.platform !== 'linux')('the real kernel rendezvous lock excludes a second supervisor', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-restart-lock-'))
     roots.push(root)
     const system = createSystemRestartSupervisor()
@@ -430,7 +432,7 @@ describe('fixed-unit restart supervisor', () => {
     expect(await system.withLock(root, async () => 'third')).toBe('third')
   })
 
-  test('a busy installer lock prevents the helper from opening any Home ledger', async () => {
+  test.skipIf(process.platform !== 'linux')('a busy installer lock prevents the helper from opening any Home ledger', async () => {
     const f = await fixture()
     try {
       const system = createSystemRestartSupervisor()
@@ -452,7 +454,7 @@ describe('fixed-unit restart supervisor', () => {
     } finally { f.close() }
   })
 
-  test('two processes sharing the durable journal cannot each issue the restart', async () => {
+  test.skipIf(process.platform !== 'linux')('two processes sharing the durable journal cannot each issue the restart', async () => {
     const f = await fixture()
     const contender = new RestartStore({ path: f.config.databasePath, now: f.now })
     try {
