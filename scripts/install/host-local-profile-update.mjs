@@ -11,7 +11,8 @@ import { prepareHostLocalSharedFallback, retireHostLocalSharedFallback,
   verifyRetiredHostLocalSharedFallback } from './host-local-fallback.mjs'
 import { verifyHostLegacySettingsImport } from './host-legacy-settings.mjs'
 import { nativeAuthority, inventory, readMetadata, writeMetadata, pnpmEnvironment, oldHostLinks,
-  localCohortPins, sourceDigest, metadataNames, nativeName, snapshotName, assertPeerBindings } from './host-profile-update.mjs'
+  localCohortPins, sourceDigest, metadataNames, nativeName, snapshotName, assertPeerBindings,
+  bindInstalledPnpmStore } from './host-profile-update.mjs'
 
 const enhancedName = /^@dsh-enhanced\/[a-z0-9][a-z0-9._-]*$/u
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -633,6 +634,7 @@ export async function validateHostLocalProfileUpdate({ preparation, stagedHome,
   originalPhysicalHome = preparation.originalHome, legacySettingsImport, ownerSourceRepair }) {
   const stage = await directory(stagedHome)
   const original = await directory(originalPhysicalHome)
+  const storeMetadataDigests = {}
   if (stage === original || inside(original, stage) || inside(stage, original)
     || stage !== preparation.originalHome && inside(preparation.originalHome, stage)) fail('stage overlaps original Home')
   const yaml = parser(preparation.candidateDshPath)
@@ -695,6 +697,9 @@ export async function validateHostLocalProfileUpdate({ preparation, stagedHome,
         roots(profile.metadata).manifest.name, yaml)
       continue
     }
+    if (preparation.persistentPnpmStore !== undefined) {
+      storeMetadataDigests[profile.name] = await bindInstalledPnpmStore(preparation, profile.path)
+    }
     const declared = roots(profile.metadata).dependencies
     const installed = Object.keys(declared).length ? await verifyInstalled(profile.path, preparation.candidateArtifacts, peerScope, yaml)
       : { found: new Set(), owned: new Map() }
@@ -712,6 +717,7 @@ export async function validateHostLocalProfileUpdate({ preparation, stagedHome,
   }
   await oldHostLinks(join(stage, 'profiles', 'node_modules'), preparation.oldHostRoot, preparation.candidateHostRoot, false)
   return { schemaVersion: 1, profileNames: actual.map(item => item.name), metadataDigest: digest(JSON.stringify(preparation.profiles)),
+    ...(preparation.persistentPnpmStore === undefined ? {} : { storeMetadataDigests }),
     artifactDigest: digest(JSON.stringify(preparation.candidateArtifacts)) }
 }
 
@@ -752,6 +758,7 @@ export async function materializeHostLocalProfileUpdate({ preparation, stagedHom
     await runPnpm(['install', '--offline', '--frozen-lockfile', '--ignore-scripts'], {
       cwd: join(logicalHome, 'profiles', profile.name), env, signal, phase: 'materialize', pnpmPath,
       logicalHome, stagedHome: stage })
+    if (preparation.persistentPnpmStore !== undefined) await bindInstalledPnpmStore(preparation, dest.path, true)
   }
   await oldHostLinks(join(stage, 'profiles', 'node_modules'), preparation.oldHostRoot, preparation.candidateHostRoot, true)
   for (const profile of preparation.profiles) {

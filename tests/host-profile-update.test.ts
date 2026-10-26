@@ -1,11 +1,11 @@
 import { afterEach, expect, test } from 'vitest'
-import { cp, lstat, mkdir, mkdtemp, readFile, readlink, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readlink, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse, stringify } from 'yaml'
-import { materializeHostProfileUpdate, prepareHostProfileUpdate, validateHostProfileUpdate } from '../scripts/install/host-profile-update.mjs'
+import { bindInstalledPnpmStore, materializeHostProfileUpdate, prepareHostProfileUpdate, validateHostProfileUpdate } from '../scripts/install/host-profile-update.mjs'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -140,6 +140,79 @@ test('migrates all profiles, removes old pnpm natives and proven old fallback li
   expect(await lstat(join(f.stagedHome, 'profiles/node_modules/@deepseek-ai/old-only')).catch(() => undefined)).toBeUndefined()
   expect(await readlink(join(f.stagedHome, 'profiles/node_modules/@deepseek-ai/cordis'))).toBe(join(f.candidateHost, 'node_modules/@deepseek-ai/cordis'))
   expect(await validateHostProfileUpdate({ preparation, stagedHome: f.stagedHome })).toEqual(proof)
+})
+
+test('binds freshly installed pnpm metadata to a persistent store without changing the lock graph', async () => {
+  const f = await fixture(['alpha'])
+  const storePath = join(f.root, 'persistent-store', 'v11')
+  await mkdir(storePath, { recursive: true, mode: 0o700 })
+  const entry = await lstat(storePath)
+  const preparation = { ...await prepareHostProfileUpdate(f), persistentPnpmStore: {
+    storePath, identity: { dev: String(entry.dev), ino: String(entry.ino), uid: entry.uid, mode: entry.mode },
+    transactionRoot: join(f.root, 'transaction'),
+  } }
+  const lockPath = join(f.stagedHome, 'profiles/alpha/pnpm-lock.yaml')
+  const lock = await readFile(join(f.preparationRoot, 'alpha/pnpm-lock.yaml'), 'utf8')
+  const metadataPath = join(f.stagedHome, 'profiles/alpha/node_modules/.modules.yaml')
+  let generated = ''
+  const runPnpm: typeof f.runPnpm = async (...args) => {
+    await f.runPnpm(...args)
+    if (args[1].phase !== 'materialize') return
+    generated = `${JSON.stringify({ hoistPattern: ['*'], nodeLinker: 'isolated',
+      storeDir: join(f.preparationRoot, 'store', 'v11'), virtualStoreDir: '.pnpm' }, null, 2)}\n`
+    await writeFile(metadataPath, generated)
+  }
+  const proof = await materializeHostProfileUpdate({ preparation, stagedHome: f.stagedHome,
+    logicalHome: f.originalHome, runPnpm, runCandidateDsh: async () => {} })
+  const bound = await readFile(metadataPath, 'utf8')
+  expect(JSON.parse(bound)).toEqual({ ...JSON.parse(generated), storeDir: storePath })
+  expect(bound).toBe(generated.replace(JSON.stringify(join(f.preparationRoot, 'store', 'v11')), JSON.stringify(storePath)))
+  expect(await readFile(lockPath, 'utf8')).toBe(lock)
+  expect(proof.storeMetadataDigests).toHaveProperty('alpha')
+  await rm(join(f.preparationRoot, 'store'), { recursive: true, force: true })
+  expect(await validateHostProfileUpdate({ preparation, stagedHome: f.stagedHome })).toEqual(proof)
+  await writeFile(metadataPath, generated)
+  await expect(validateHostProfileUpdate({ preparation, stagedHome: f.stagedHome }))
+    .rejects.toThrow('pnpm installed storeDir changed after binding')
+  await writeFile(metadataPath, bound)
+  await chmod(storePath, 0o777)
+  await expect(validateHostProfileUpdate({ preparation, stagedHome: f.stagedHome }))
+    .rejects.toThrow('persistent pnpm store identity changed')
+})
+
+test('rejects unsafe persistent stores and installed metadata before rebinding', async () => {
+  const f = await fixture(['alpha'])
+  const storePath = join(f.root, 'persistent-store', 'v11')
+  await mkdir(storePath, { recursive: true, mode: 0o700 })
+  const entry = await lstat(storePath)
+  const preparation = { ...await prepareHostProfileUpdate(f), persistentPnpmStore: {
+    storePath, identity: { dev: String(entry.dev), ino: String(entry.ino), uid: entry.uid, mode: entry.mode },
+    transactionRoot: join(f.root, 'transaction'),
+  } }
+  const metadataPath = join(f.stagedHome, 'profiles/alpha/node_modules/.modules.yaml')
+  const runPnpm: typeof f.runPnpm = async (...args) => {
+    await f.runPnpm(...args)
+    if (args[1].phase === 'materialize') {
+      await writeFile(metadataPath, JSON.stringify({ storeDir: join(f.preparationRoot, 'store', 'v11') }))
+    }
+  }
+  await symlink(storePath, join(f.root, 'store-alias'))
+  preparation.persistentPnpmStore.storePath = join(f.root, 'store-alias')
+  await expect(materializeHostProfileUpdate({ preparation, stagedHome: f.stagedHome,
+    logicalHome: f.originalHome, runPnpm, runCandidateDsh: async () => {} }))
+    .rejects.toThrow('persistent pnpm store is not external and canonical')
+  preparation.persistentPnpmStore.storePath = storePath
+  await writeFile(metadataPath, JSON.stringify({ storeDir: join(f.preparationRoot, 'store', 'v11') }))
+  const replacement = join(f.root, 'replacement.yaml')
+  await writeFile(replacement, await readFile(metadataPath))
+  await rm(metadataPath)
+  await symlink(replacement, metadataPath)
+  await expect(validateHostProfileUpdate({ preparation, stagedHome: f.stagedHome }))
+    .rejects.toThrow('pnpm installed metadata is unsafe')
+  await rm(metadataPath)
+  await writeFile(metadataPath, JSON.stringify({ storeDir: join(f.root, 'other-store', 'v11') }))
+  await expect(bindInstalledPnpmStore(preparation, join(f.stagedHome, 'profiles/alpha'), true))
+    .rejects.toThrow('pnpm installed storeDir differs from isolated install')
 })
 
 test('migrates an edge-scoped native override again while preserving a frozen non-native override', async () => {
@@ -308,11 +381,27 @@ test('includes a clean profile without inventing a package-manager lockfile', as
   await writeFile(join(clean, 'pnpm-workspace.yaml'), stringify({ packages: ['.'], nodeLinker: 'hoisted', autoInstallPeers: false }))
   await writeFile(join(clean, 'cordis.patch.yml'), '[]\n')
   await cp(clean, join(f.stagedHome, 'profiles', 'clean-web'), { recursive: true })
-  const preparation = await prepareHostProfileUpdate(f)
+  const prepared = await prepareHostProfileUpdate(f)
+  const storePath = join(f.root, 'persistent-store', 'v11')
+  await mkdir(storePath, { recursive: true, mode: 0o700 })
+  const entry = await lstat(storePath)
+  const preparation = { ...prepared, persistentPnpmStore: {
+    storePath, identity: { dev: String(entry.dev), ino: String(entry.ino), uid: entry.uid, mode: entry.mode },
+    transactionRoot: join(f.root, 'transaction'),
+  } }
   expect(preparation.profiles.find(x => x.name === 'clean-web')?.fallbackOnly).toBe(true)
+  const runPnpm: typeof f.runPnpm = async (...args) => {
+    await f.runPnpm(...args)
+    if (args[1].phase === 'materialize') {
+      await writeFile(join(f.stagedHome, 'profiles/alpha/node_modules/.modules.yaml'),
+        JSON.stringify({ storeDir: join(f.preparationRoot, 'store', 'v11') }))
+    }
+  }
   const proof = await materializeHostProfileUpdate({ preparation, stagedHome: f.stagedHome, logicalHome: f.originalHome,
-    runPnpm: f.runPnpm, runCandidateDsh: async () => {} })
+    runPnpm, runCandidateDsh: async () => {} })
   expect(proof.profileNames).toContain('clean-web')
+  expect(Object.keys(proof.storeMetadataDigests)).toEqual(['alpha'])
+  expect(await validateHostProfileUpdate({ preparation, stagedHome: f.stagedHome })).toEqual(proof)
   expect(await lstat(join(f.stagedHome, 'profiles', 'clean-web', 'pnpm-lock.yaml')).catch(() => undefined)).toBeUndefined()
   expect(f.calls.filter(x => x.includes('clean-web'))).toEqual([])
 })
