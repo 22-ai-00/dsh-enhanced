@@ -5183,8 +5183,9 @@ async function resolvedPnpmStorePath(pnpmPath, homePath, profilePath) {
   let canonical
   try { canonical = await realpath(value) } catch { fail('npm cohort pnpm store 不存在或不可解析；尚未创建事务或修改 DSH_HOME。') }
   const entry = await lstat(canonical).catch(() => undefined)
-  if (!entry?.isDirectory() || entry.isSymbolicLink()) fail('npm cohort pnpm store 不是安全目录；尚未创建事务或修改 DSH_HOME。')
-  if (inside(homePath, canonical)) fail('npm cohort pnpm store 不能位于 DSH_HOME 内；尚未创建事务或修改 DSH_HOME。')
+  if (!entry?.isDirectory() || entry.isSymbolicLink() || entry.uid !== currentUid()
+    || isGroupOrOtherWritable(entry)) fail('npm cohort pnpm store 不是当前用户拥有的安全目录；尚未创建事务或修改 DSH_HOME。')
+  if (inside(homePath, canonical) || inside(canonical, homePath)) fail('npm cohort pnpm store 不能位于 DSH_HOME 内或包含 DSH_HOME；尚未创建事务或修改 DSH_HOME。')
   let selected
   try {
     selected = await run(pnpmPath, ['store', 'path'], {
@@ -7569,6 +7570,22 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
     if (String(unitParent.dev) !== String(homeParent.dev)) fail('Host Home and unit directory must share filesystem')
   }
   assertLockParentStable(homePath)
+  // Resolve from the verified Home parent. Running pnpm in a live profile can
+  // consult its stale .modules.yaml and recreate a previously removed
+  // transaction store before the Home swap even starts.
+  const storeSelectionCwd = dirname(homePath)
+  const selectionRoot = await lstat(storeSelectionCwd)
+  if (await realpath(storeSelectionCwd) !== storeSelectionCwd
+    || !selectionRoot.isDirectory() || selectionRoot.isSymbolicLink()
+    || selectionRoot.uid !== currentUid() || isGroupOrOtherWritable(selectionRoot)) {
+    fail('Host persistent pnpm store selection directory is unsafe')
+  }
+  const selectedPnpmStore = await resolvedPnpmStorePath('pnpm', homePath, storeSelectionCwd)
+  if (inside(transactionRoot, selectedPnpmStore.storePath)
+    || inside(selectedPnpmStore.storePath, transactionRoot)) {
+    fail('Host persistent pnpm store overlaps upgrade transaction')
+  }
+  const persistentPnpmStore = { ...selectedPnpmStore, transactionRoot }
   await mkdir(physicalTransactionRoot, { mode: 0o700 })
   const stageHome = join(transactionRoot, 'staged-home')
   const backupHome = join(transactionRoot, 'original-home')
@@ -7608,11 +7625,12 @@ async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, 
     }
     const prepareProfiles = localSource
       ? (await import('./host-local-profile-update.mjs')).prepareHostLocalProfileUpdate : prepareHostProfileUpdate
-    const preparation = await prepareProfiles({ originalHome: homePath,
+    const preparedProfiles = await prepareProfiles({ originalHome: homePath,
       originalDshPath: plan.originalRuntime.dshPath, candidateDshPath: plan.candidateRuntime.dshPath,
       preparationRoot, approvedBackupNames, runPnpm,
       ...(localSource ? { candidateHome, candidateArtifacts: jointArtifacts.candidateArtifacts,
         installer: localSource.installer, globalDshRoot: localSourceInput.globalDshRoot } : {}) })
+    const preparation = { ...preparedProfiles, persistentPnpmStore }
     manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
       hostMigration: { ...manifest.hostMigration, preparation } }, 'preparing')
     const masks = await prepareBoundMasks(physicalTransactionRoot, services.map(service => service.unit), 'managed')
@@ -8176,7 +8194,19 @@ async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePa
             homePath, baseManifestDigest: migration.nativeSettingsImport.permit.baseManifestDigest },
         }) })
       if (JSON.stringify(profiles) !== JSON.stringify(migration.profileProof)) fail('candidate Host profile proof changed')
-    } else await verifyRsiHostUpdate({ homePath, physicalHome: physicalHomePath, hostPlan: plan, proof: migration.rsiProof })
+    } else {
+      await verifyRsiHostUpdate({ homePath, physicalHome: physicalHomePath, hostPlan: plan, proof: migration.rsiProof })
+      if (migration.preparation.persistentPnpmStore !== undefined) {
+        const { bindInstalledPnpmStore } = await import('./host-profile-update.mjs')
+        for (const profile of migration.preparation.profiles) {
+          if (profile.fallbackOnly) continue
+          const observed = await bindInstalledPnpmStore(migration.preparation, join(physicalHomePath, 'profiles', profile.name))
+          if (observed !== migration.profileProof.storeMetadataDigests?.[profile.name]) {
+            fail(`candidate Host pnpm store binding changed: ${profile.name}`)
+          }
+        }
+      }
+    }
   }
   await verifyAuthority(ownerRepair && !migration.candidateEverStarted)
   await verifyHostPlanBinding(plan, homePath, 'candidate')

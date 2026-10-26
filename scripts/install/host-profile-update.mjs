@@ -1,8 +1,9 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { lstat, mkdir, readFile, readdir, readlink, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { assertLifecycleNpmMetadataSafe } from './lifecycle-config.mjs'
 
 let yaml
@@ -309,6 +310,67 @@ async function readMetadata(path) {
 
 const sourceDigest = source => source === undefined ? null : hash(source)
 
+/** Bind pnpm metadata to an existing external store after the isolated offline
+ * install. The installed package graph uses copied files, so only storeDir in
+ * the freshly generated metadata needs to change. Never rebind a copied or
+ * malformed metadata file from the original Home. */
+export async function bindInstalledPnpmStore(preparation, profilePath, rewrite = false) {
+  const selected = preparation.persistentPnpmStore
+  if (selected === undefined) {
+    if (rewrite) fail('persistent pnpm store proof is missing')
+    return null // Recovery of a signed transaction created by an older installer.
+  }
+  const storePath = selected.storePath
+  if (typeof storePath !== 'string' || !isAbsolute(storePath) || resolve(storePath) !== storePath
+    || await realpath(storePath) !== storePath
+    || typeof selected.transactionRoot !== 'string'
+    || !isAbsolute(selected.transactionRoot) || resolve(selected.transactionRoot) !== selected.transactionRoot
+    || inside(preparation.originalHome, storePath) || inside(storePath, preparation.originalHome)
+    || inside(selected.transactionRoot, storePath) || inside(storePath, selected.transactionRoot)
+    || inside(preparation.preparationRoot, storePath) || inside(storePath, preparation.preparationRoot)) {
+    fail('persistent pnpm store is not external and canonical')
+  }
+  const store = await lstat(storePath)
+  if (!store.isDirectory() || store.isSymbolicLink() || store.uid !== process.getuid()
+    || store.mode & 0o022 || String(store.dev) !== selected.identity?.dev
+    || String(store.ino) !== selected.identity?.ino || store.uid !== selected.identity?.uid
+    || store.mode !== selected.identity?.mode) fail('persistent pnpm store identity changed')
+  const metadataPath = join(profilePath, 'node_modules', '.modules.yaml')
+  const before = await lstat(metadataPath)
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1
+    || before.uid !== process.getuid() || before.mode & 0o022
+    || before.size < 1 || before.size > 16 * 1024 * 1024) fail('pnpm installed metadata is unsafe')
+  const source = await readFile(metadataPath, 'utf8'), after = await lstat(metadataPath)
+  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+    || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) fail('pnpm installed metadata changed while reading')
+  const parser = loadYaml(preparation.candidateDshPath)
+  const document = parser.parseDocument(source, { uniqueKeys: true, strict: true })
+  if (document.errors.length || document.warnings.length) fail('pnpm installed metadata is invalid')
+  const node = document.get('storeDir', true)
+  if (!parser.isScalar(node) || typeof node.value !== 'string') fail('pnpm installed storeDir is absent')
+  if (rewrite) {
+    const expected = join(preparation.preparationRoot, 'store', 'v11')
+    if (node.value !== expected || !Array.isArray(node.range)
+      || !Number.isSafeInteger(node.range[0]) || !Number.isSafeInteger(node.range[1])
+      || node.range[0] < 0 || node.range[1] <= node.range[0]
+      || node.range[1] > source.length) fail('pnpm installed storeDir differs from isolated install')
+    const rewritten = `${source.slice(0, node.range[0])}${JSON.stringify(storePath)}${source.slice(node.range[1])}`
+    const next = parser.parseDocument(rewritten, { uniqueKeys: true, strict: true })
+    const original = document.toJS({ maxAliasCount: 0 })
+    if (next.errors.length || next.warnings.length || !plain(original)
+      || !isDeepStrictEqual(next.toJS({ maxAliasCount: 0 }), { ...original, storeDir: storePath })) {
+      fail('pnpm installed metadata changed outside storeDir')
+    }
+    const temporary = `${metadataPath}.${randomUUID()}.tmp`
+    await writeFile(temporary, rewritten, { flag: 'wx', mode: before.mode & 0o777 })
+    try { await rename(temporary, metadataPath) }
+    catch (error) { await rm(temporary, { force: true }); throw error }
+    return hash(rewritten)
+  }
+  if (node.value !== storePath) fail('pnpm installed storeDir changed after binding')
+  return hash(source)
+}
+
 function pnpmEnvironment(preparationRoot, more = {}, trustVerifiedLockfile = false) {
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(?:p?npm_config_|PNPM_HOME$|NODE_OPTIONS$|NODE_PATH$|XDG_)/iu.test(key)))
   return { ...inherited, ...more, HOME: join(preparationRoot, 'home'), XDG_CONFIG_HOME: join(preparationRoot, 'config'),
@@ -512,6 +574,7 @@ export async function validateHostProfileUpdate({ preparation, stagedHome, autho
   if (stage === preparation.originalHome || inside(preparation.originalHome, stage)) fail('stage overlaps original Home')
   const actual = await inventory(stage, preparation.approvedBackupNames)
   if (JSON.stringify(actual.map(x => x.name)) !== JSON.stringify(preparation.profiles.map(x => x.name))) fail('profile inventory changed')
+  const storeMetadataDigests = {}
   for (const profile of actual) {
     const expected = preparation.profiles.find(x => x.name === profile.name)
     const allowedPatch = authorizedPatchDigests[profile.name]
@@ -528,6 +591,9 @@ export async function validateHostProfileUpdate({ preparation, stagedHome, autho
     await oldHostLinks(join(profile.path, 'node_modules'), preparation.oldHostRoot, preparation.candidateHostRoot, false)
     await oldHostLinks(join(profile.path, '.dsh-module-fallback', 'node_modules'), preparation.oldHostRoot, preparation.candidateHostRoot, false)
     if (expected.fallbackOnly) continue
+    if (preparation.persistentPnpmStore !== undefined) {
+      storeMetadataDigests[profile.name] = await bindInstalledPnpmStore(preparation, profile.path)
+    }
     const modules = join(profile.path, 'node_modules', '.pnpm')
     if ((await stat(modules).catch(() => undefined))?.isDirectory() !== true) fail(`profile was not materialized: ${profile.name}`)
     if (JSON.stringify(await nonNativePackages(profile.path)) !== JSON.stringify(expected.nonNativePackages)) fail(`non-native package bytes changed: ${profile.name}`)
@@ -539,6 +605,7 @@ export async function validateHostProfileUpdate({ preparation, stagedHome, autho
   for (const name of Object.keys(authorizedPatchDigests)) if (!actual.some(profile => profile.name === name)) fail(`authorized patch profile is unknown: ${name}`)
   await oldHostLinks(join(stage, 'profiles', 'node_modules'), preparation.oldHostRoot, preparation.candidateHostRoot, false)
   return { schemaVersion: 1, profileNames: actual.map(x => x.name), metadataDigest: hash(JSON.stringify(preparation.profiles)),
+    ...(preparation.persistentPnpmStore === undefined ? {} : { storeMetadataDigests }),
     profiles: preparation.profiles.map(profile => ({ name: profile.name, backupOf: profile.backupOf,
       originalDigests: profile.originalDigests, preparedDigests: profile.preparedDigests,
       nonNativePackageDigest: hash(JSON.stringify(profile.nonNativePackages)),
@@ -568,6 +635,7 @@ export async function materializeHostProfileUpdate({ preparation, stagedHome, lo
     const env = pnpmEnvironment(preparation.preparationRoot, { DSH_HOME: logicalHome, pnpm_config_offline: 'true',
       pnpm_config_frozen_lockfile: 'true', pnpm_config_package_import_method: 'copy' }, true)
     await runPnpm(['install', '--offline', '--frozen-lockfile', '--ignore-scripts'], { cwd: join(logicalHome, 'profiles', profile.name), env, signal, phase: 'materialize', pnpmPath })
+    if (preparation.persistentPnpmStore !== undefined) await bindInstalledPnpmStore(preparation, dest.path, true)
   }
   await oldHostLinks(join(stage, 'profiles', 'node_modules'), preparation.oldHostRoot, preparation.candidateHostRoot, true)
   for (const profile of preparation.profiles) {

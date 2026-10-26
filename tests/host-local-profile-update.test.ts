@@ -264,6 +264,38 @@ test('rejects changed original Host dependency authority and staged override tam
     .rejects.toThrow('staged metadata drift: assistant/pnpm-workspace.yaml')
 })
 
+test('binds local cohort install metadata to a persistent pnpm store and detects store drift', async () => {
+  const input = await fixture(['assistant'])
+  const storePath = join(input.root, 'persistent-store', 'v11')
+  await mkdir(storePath, { recursive: true, mode: 0o700 })
+  const entry = await lstat(storePath)
+  const preparation = { ...await prepareHostLocalProfileUpdate(input), persistentPnpmStore: {
+    storePath, identity: { dev: String(entry.dev), ino: String(entry.ino), uid: entry.uid, mode: entry.mode },
+    transactionRoot: join(input.root, 'transaction'),
+  } }
+  const metadataPath = join(input.stagedHome, 'profiles/assistant/node_modules/.modules.yaml')
+  const lockPath = join(input.stagedHome, 'profiles/assistant/pnpm-lock.yaml')
+  const expectedLock = await readFile(join(input.preparationRoot, 'assistant/pnpm-lock.yaml'), 'utf8')
+  let generated = ''
+  const runPnpm: typeof input.runPnpm = async (...args) => {
+    await input.runPnpm(...args)
+    if (args[1].phase !== 'materialize') return
+    generated = `${JSON.stringify({ hoistPattern: ['*'], nodeLinker: 'isolated',
+      storeDir: join(input.preparationRoot, 'store', 'v11'), virtualStoreDir: '.pnpm' }, null, 2)}\n`
+    await writeFile(metadataPath, generated)
+  }
+  const proof = await materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
+    logicalHome: input.originalHome, runPnpm, runCandidateDsh: async () => {} })
+  expect(JSON.parse(await readFile(metadataPath, 'utf8'))).toEqual({ ...JSON.parse(generated), storeDir: storePath })
+  expect(await readFile(lockPath, 'utf8')).toBe(expectedLock)
+  expect(proof.storeMetadataDigests).toHaveProperty('assistant')
+  await rm(join(input.preparationRoot, 'store'), { recursive: true, force: true })
+  expect(await validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome })).toEqual(proof)
+  await chmod(storePath, 0o777)
+  await expect(validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome }))
+    .rejects.toThrow('persistent pnpm store identity changed')
+})
+
 test('derives internal peer overrides only inside the selected runtime closure', async () => {
   const input = await fixture(['assistant'])
   reviewed.peers['@dsh-enhanced/demo'] = { '@dsh-enhanced/acp': '^0.1.0' }
@@ -718,10 +750,28 @@ test('preserves a locked dependency-free profile without creating a pnpm store',
       filteredInstall: false,
     }))
   }
-  const preparation = await prepareHostLocalProfileUpdate(input)
+  const prepared = await prepareHostLocalProfileUpdate(input)
+  const storePath = join(input.root, 'persistent-store', 'v11')
+  await mkdir(storePath, { recursive: true, mode: 0o700 })
+  const entry = await lstat(storePath)
+  const preparation = { ...prepared, persistentPnpmStore: {
+    storePath, identity: { dev: String(entry.dev), ino: String(entry.ino), uid: entry.uid, mode: entry.mode },
+    transactionRoot: join(input.root, 'transaction'),
+  } }
   expect(preparation.profiles.find(profile => profile.name === 'headless')?.fallbackOnly).toBe(true)
-  await materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
-    logicalHome: input.originalHome, runPnpm: input.runPnpm, runCandidateDsh: async () => {} })
+  const headlessMetadata = await readFile(join(input.stagedHome, 'profiles/headless/node_modules/.modules.yaml'), 'utf8')
+  const runPnpm: typeof input.runPnpm = async (...args) => {
+    await input.runPnpm(...args)
+    if (args[1].phase === 'materialize') {
+      await writeFile(join(input.stagedHome, 'profiles/assistant/node_modules/.modules.yaml'),
+        JSON.stringify({ storeDir: join(input.preparationRoot, 'store', 'v11') }))
+    }
+  }
+  const proof = await materializeHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome,
+    logicalHome: input.originalHome, runPnpm, runCandidateDsh: async () => {} })
+  expect(Object.keys(proof.storeMetadataDigests)).toEqual(['assistant'])
+  expect(await validateHostLocalProfileUpdate({ preparation, stagedHome: input.stagedHome })).toEqual(proof)
+  expect(await readFile(join(input.stagedHome, 'profiles/headless/node_modules/.modules.yaml'), 'utf8')).toBe(headlessMetadata)
   expect(await readFile(join(input.stagedHome, 'profiles', 'headless', 'pnpm-lock.yaml'), 'utf8'))
     .toBe(await readFile(join(input.originalHome, 'profiles', 'headless', 'pnpm-lock.yaml'), 'utf8'))
 })

@@ -115,6 +115,8 @@ node -e 'const fs=require("node:fs"),p=require("node:path"),os=require("node:os"
 
 ## 现有 Linux 冻结 owner 程序升级
 
+从 `0.1.63` 起，Host 和本地程序升级会在停服前从 Home 的父目录解析持久 pnpm store，核对目录归属、权限和身份，再绑定到事务。隔离安装仍使用临时 store 和复制导入；安装完成后仅将新生成的 `.modules.yaml` 的 `storeDir` 改为已验证的持久路径，并在切换和恢复检查中复核路径身份及元数据摘要，避免事务清理后 pnpm 重建旧事务目录。无需安装的 fallback profile 保持原样。此修复通过正常升级生效，不应直接修改生产安装元数据；既有未完成事务仍使用其原安装器恢复。
+
 从 CLI `0.1.57` 起，对支持的现有 Linux owner/cohort Home，可运行：
 
 ```sh
