@@ -230,6 +230,25 @@ interface IncidentRow {
   version: number
 }
 
+// A no-run Host availability failure belongs to its exact definition. Once a
+// different system-owned definition replaces it, keep the row as history but
+// remove it from current health and notification projections. Resolved rows
+// still need their pending presentation so an earlier card can be closed.
+const obsoleteAvailabilityIncidentSql = (alias: string) => `
+  ${alias}.state IN ('open', 'recovering')
+  AND ${alias}.stage IN ('materialize', 'claim')
+  AND ${alias}.run_id IS NULL
+  AND ${alias}.failure_class = 'configuration'
+  AND ${alias}.failure_phase = 'executor-availability'
+  AND ${alias}.side_effect_state = 'none'
+  AND EXISTS (
+    SELECT 1 FROM automation_definitions AS current_definition
+    WHERE current_definition.id = ${alias}.automation_id
+      AND current_definition.system_owner IS NOT NULL
+      AND current_definition.definition_hash <> ${alias}.definition_hash
+  )
+`
+
 interface ScopedRunRow extends RunRow {
   scope_snapshot_hash: string | null
   scope_snapshot_json: string | null
@@ -2017,8 +2036,9 @@ export class AutomationStore {
     }
     const output: AutomationIncident[] = []
     const rows = this.database.prepare(`
-      SELECT * FROM automation_incidents
+      SELECT * FROM automation_incidents AS incident_row
       WHERE alert_status = 'pending'
+        AND NOT (${obsoleteAvailabilityIncidentSql('incident_row')})
       ORDER BY updated_at, id LIMIT 1000
     `).all() as unknown as IncidentRow[]
     for (const row of rows) {
@@ -2091,7 +2111,10 @@ export class AutomationStore {
    */
   getIncidentNotificationTarget(incidentId: string): AutomationIncidentNotificationTarget | undefined {
     const id = text(incidentId, 'incidentId', 1_000)
-    const row = this.database.prepare('SELECT * FROM automation_incidents WHERE id = ?')
+    const row = this.database.prepare(`
+      SELECT * FROM automation_incidents AS incident_row
+      WHERE id = ? AND NOT (${obsoleteAvailabilityIncidentSql('incident_row')})
+    `)
       .get(id) as IncidentRow | undefined
     if (row === undefined) return undefined
     const value = incident(row)
@@ -2149,9 +2172,13 @@ export class AutomationStore {
         "SELECT COALESCE(MIN(created_at), 0) AS count FROM automation_evaluation_outbox WHERE status = 'pending'",
       ),
       openCircuits: scalar("SELECT COUNT(*) AS count FROM automation_circuits WHERE state <> 'closed'"),
-      openIncidents: scalar("SELECT COUNT(*) AS count FROM automation_incidents WHERE state <> 'resolved'"),
+      openIncidents: scalar(`
+        SELECT COUNT(*) AS count FROM automation_incidents AS incident_row
+        WHERE state <> 'resolved' AND NOT (${obsoleteAvailabilityIncidentSql('incident_row')})
+      `),
       pendingIncidentAlerts: scalar(
-        "SELECT COUNT(*) AS count FROM automation_incidents WHERE alert_status = 'pending'",
+        `SELECT COUNT(*) AS count FROM automation_incidents AS incident_row
+         WHERE alert_status = 'pending' AND NOT (${obsoleteAvailabilityIncidentSql('incident_row')})`,
       ),
     }
   }

@@ -281,7 +281,7 @@ export async function planRestartSupervisorInstall(input, dependencies = {}) {
     readyTimeoutMs: 120_000, stableWindowMs: 12_000, maxRestarts: 3, windowMs: 600_000,
   }
   const service = `[Unit]\nDescription=DSH fixed restart observer for ${input.profile}\n
-[Service]\nType=oneshot\nWorkingDirectory=${stateDir}\nUnsetEnvironment=DSH_HOME\nExecStart=${node} ${helper} --config ${configPath} --once\nTimeoutStartSec=180\nNoNewPrivileges=yes\n` 
+[Service]\nType=oneshot\nWorkingDirectory=${stateDir}\nUnsetEnvironment=DSH_HOME\nExecStart=${node} --disable-warning=ExperimentalWarning ${helper} --config ${configPath} --once\nTimeoutStartSec=180\nNoNewPrivileges=yes\n`
   const timer = `[Unit]\nDescription=Poll DSH restart requests for ${input.profile}\n
 [Timer]\nOnBootSec=15s\nOnUnitInactiveSec=2s\nAccuracySec=1s\nUnit=${serviceName}\nPersistent=false\n
 [Install]\nWantedBy=timers.target\n`
