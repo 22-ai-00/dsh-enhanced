@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -96,7 +97,7 @@ describe('external restart supervisor installer', () => {
       { userHome: sample.userHome, showUnit: sample.showUnit })
     expect(plan.helper).toBe(join(sample.packageRoot, 'bin', 'dsh-restart-supervisor.js'))
     expect(plan.configPath.startsWith(sample.home)).toBe(false)
-    expect(plan.serviceSource).toContain(`ExecStart=${sample.input.nodePath} ${plan.helper} --config ${plan.configPath} --once`)
+    expect(plan.serviceSource).toContain(`ExecStart=${sample.input.nodePath} --disable-warning=ExperimentalWarning ${plan.helper} --config ${plan.configPath} --once`)
     expect(plan.serviceSource).toContain('UnsetEnvironment=DSH_HOME')
     expect(plan.serviceSource).not.toContain(`WorkingDirectory=${sample.home}`)
     expect(plan.timerSource).toContain(`Unit=${plan.serviceName}`)
@@ -125,6 +126,35 @@ describe('external restart supervisor installer', () => {
     expect((await stat(plan.configPath)).mode & 0o777).toBe(0o600)
     expect((await stat(plan.stateDir)).mode & 0o777).toBe(0o700)
     expect(await readFile(plan.servicePath, 'utf8')).toBe(plan.serviceSource)
+  })
+
+  it('suppresses SQLite experimental warnings without hiding ordinary warnings or errors', () => {
+    const result = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', '-e',
+      "require('node:sqlite'); process.emitWarning('ordinary-warning-marker'); setImmediate(() => { throw new Error('real-error-marker') })"],
+    { encoding: 'utf8', timeout: 10_000 })
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(1)
+    expect(result.stderr).not.toContain('ExperimentalWarning')
+    expect(result.stderr).toContain('ordinary-warning-marker')
+    expect(result.stderr).toContain('real-error-marker')
+  })
+
+  it('updates an installed supervisor without changing or restarting the Host', async () => {
+    const sample = await fixture()
+    const plan = await planRestartSupervisorInstall(sample.input,
+      { userHome: sample.userHome, showUnit: sample.showUnit })
+    const hostSource = await readFile(sample.fragment, 'utf8')
+    await installRestartSupervisorPlan({ ...plan,
+      serviceSource: plan.serviceSource.replace(' --disable-warning=ExperimentalWarning', ''),
+    }, { systemctl: () => {} })
+    expect(await readFile(plan.servicePath, 'utf8')).not.toContain('--disable-warning')
+    const calls: string[][] = []
+    await installRestartSupervisorPlan(plan, { systemctl: (...args: string[]) => { calls.push(args) } })
+    expect(calls).toEqual([['daemon-reload'], ['enable', '--now', plan.timerName]])
+    expect(await readFile(plan.servicePath, 'utf8')).toBe(plan.serviceSource)
+    expect(await readFile(plan.timerPath, 'utf8')).toBe(plan.timerSource)
+    expect((await stat(plan.configPath)).mode & 0o777).toBe(0o600)
+    expect(await readFile(sample.fragment, 'utf8')).toBe(hostSource)
   })
 
   it('rejects cohort drift, missing frozen helper, and Home upgrade transaction', async () => {
