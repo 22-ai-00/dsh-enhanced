@@ -22,7 +22,9 @@ function unsupportedError(): Error {
 
 function runtime(replyCommand: ReturnType<typeof vi.fn>) {
   const resume = vi.fn(async () => { throw unsupportedError() })
-  const lease = { signal: new AbortController().signal, dispatch: vi.fn(), close: vi.fn(), assert: vi.fn() }
+  const controller = new AbortController()
+  const lease = { signal: controller.signal, dispatch: vi.fn(), close: vi.fn(), assert: vi.fn(),
+    cancel: vi.fn((reason: unknown) => controller.abort(reason)) }
   const sessionLeases = {
     open: vi.fn(() => lease), assert: lease.assert, resume,
   }
@@ -34,6 +36,7 @@ function runtime(replyCommand: ReturnType<typeof vi.fn>) {
   const options = {
     sessionLeases, workspace: binding.workspace, agentPreset: binding.agentPreset, policyRef: binding.policyRef,
     provider: 'provider', model: 'model', maxOutputTokens: 100, maxAutoContinuationTurns: 0, goalContinuationTimeoutMs: 0,
+    taskTimeoutMs: 1_800_000,
     maxTextBytes: 1_000, permissionPickerTtlMs: 1_000, modelPickerTtlMs: 1_000,
     getAgentPresets: () => undefined, getModelSelection: () => undefined,
     clearStaleModelReasoningEffort: () => ({ applied: false }), imageMaterializer: { materialize: async () => [] },
