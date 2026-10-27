@@ -38,10 +38,10 @@ describe('autonomy doctor profile and persisted owner checks', () => {
     expect(existsSync(profile.stateRoot)).toBe(false)
   })
 
-  it('accepts reviewed Delivery v24, v25 and v26 owner snapshots without changing either database', () => {
+  it('accepts reviewed Delivery v24 through v27 owner snapshots without changing either database', () => {
     const { home, source, databasePath } = fixture()
     const profile = inspectAutonomyProfile(source, 'web', home)
-    for (const version of [24, 25, 26]) {
+    for (const version of [24, 25, 26, 27]) {
       const db = new DatabaseSync(databasePath)
       try { db.exec(`PRAGMA user_version=${version}`) } finally { db.close() }
       const before = readFileSync(databasePath)
