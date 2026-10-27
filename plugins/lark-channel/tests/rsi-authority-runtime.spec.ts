@@ -5,9 +5,11 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+import { parseDocument, stringify } from 'yaml'
 import { loadTrustConfig } from '@dsh-enhanced/plugin-control-plane'
 import { prepareRsiAuthorityRuntime, replaceRsiAuthorityRuntimeInStage } from '../src/rsi-authority-runtime.js'
+import { rsiBuildResources as io } from '../src/rsi-build.js'
 import { createRsiAuthorityFixture } from './fixtures/rsi-authorities.js'
 
 const roots: string[] = []
@@ -39,6 +41,48 @@ async function fixture() {
     input: { dshHome: home, profile: 'owner' } }
 }
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
+const CONTROL_PACKAGE = '@dsh-enhanced/plugin-control-plane'
+const CONTRACT_PACKAGE = '@dsh-enhanced/assistant-growth-contract'
+
+async function managedHoistedProfile(f: Awaited<ReturnType<typeof fixture>>) {
+  const profileRoot = join(f.home, 'profiles', 'owner')
+  const modules = join(profileRoot, 'node_modules')
+  const namespace = join(modules, '@dsh-enhanced')
+  const installed = join(namespace, 'plugin-control-plane')
+  const contract = join(namespace, 'assistant-growth-contract')
+  await mkdir(namespace, { recursive: true, mode: 0o700 })
+  await cp(f.packageRoot, installed, { recursive: true })
+  await cp(join(f.packageRoot, 'node_modules', CONTRACT_PACKAGE), contract, { recursive: true })
+  await rm(join(installed, 'node_modules'), { recursive: true })
+  const control = JSON.parse(await readFile(join(installed, 'package.json'), 'utf8')) as {
+    version: string; dependencies: Record<string, string>
+  }
+  const version = control.version
+  control.dependencies[CONTRACT_PACKAGE] = version
+  await writeFile(join(installed, 'package.json'), JSON.stringify(control))
+  await writeFile(join(profileRoot, 'package.json'), JSON.stringify({ name: 'dsh-profile-owner', private: true,
+    dependencies: { [CONTROL_PACKAGE]: version } }))
+  await writeFile(join(profileRoot, 'pnpm-workspace.yaml'), stringify({ packages: ['.'],
+    nodeLinker: 'hoisted', autoInstallPeers: false }))
+  const selected = `${version}(@dsh-enhanced/assistant-policy@${version})`
+  await mkdir(join(modules, '.pnpm'), { mode: 0o700 })
+  const metadata = stringify({ nodeLinker: 'hoisted', packageManager: 'pnpm@11.7.0',
+    layoutVersion: 5, virtualStoreDir: '.pnpm', hoistedLocations: {
+      [`${CONTROL_PACKAGE}@${selected}`]: [`node_modules/${CONTROL_PACKAGE}`],
+      [`${CONTRACT_PACKAGE}@${version}`]: [`node_modules/${CONTRACT_PACKAGE}`],
+    } })
+  await writeFile(join(modules, '.modules.yaml'), metadata)
+  const lock = stringify({ lockfileVersion: '9.0', importers: { '.': { dependencies: {
+    [CONTROL_PACKAGE]: { specifier: version, version: selected },
+  } } }, snapshots: {
+    [`${CONTROL_PACKAGE}@${selected}`]: { dependencies: { [CONTRACT_PACKAGE]: version } },
+    [`${CONTRACT_PACKAGE}@${version}`]: {},
+  } })
+  const rootLock = join(profileRoot, 'pnpm-lock.yaml'), installedLock = join(modules, '.pnpm', 'lock.yaml')
+  await writeFile(rootLock, lock)
+  await writeFile(installedLock, lock)
+  return { installed, contract, metadata: join(modules, '.modules.yaml'), rootLock, installedLock, lock, version, selected }
+}
 
 test('copied Linux authority modules load and invoke without the Mac isolation package', async () => {
   const f = await fixture()
@@ -232,6 +276,84 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
     await rename(stageHome, f.home)
     expect(await prepareRsiAuthorityRuntime(f.input, { packageRoot: join(f.home, relative(stageHome, installed)) }))
       .toHaveProperty('root', f.final)
+  }, 120_000)
+
+  test('prepares a managed hoisted profile twice and survives a Home stage swap', async () => {
+    const f = await fixture()
+    const managed = await managedHoistedProfile(f)
+    const initial = await prepareRsiAuthorityRuntime(f.input, { packageRoot: managed.installed })
+    expect(await prepareRsiAuthorityRuntime(f.input, { packageRoot: managed.installed })).toEqual(initial)
+    const stageHome = join(f.root, 'hoisted-stage-home'), previousHome = join(f.root, 'hoisted-previous-home')
+    await cp(f.home, stageHome, { recursive: true })
+    const stagedPackage = join(stageHome, 'profiles', 'owner', 'node_modules', '@dsh-enhanced', 'plugin-control-plane')
+    await replaceRsiAuthorityRuntimeInStage({ logicalHome: f.home, physicalHome: stageHome, profile: 'owner' },
+      { packageRoot: stagedPackage })
+    const receipt = JSON.parse(await readFile(join(stageHome, 'rsi-authority-runtimes', 'owner', 'receipt.json'), 'utf8')) as {
+      entries: Array<{ path: string; sourcePath: string }>
+    }
+    const contractSource = receipt.entries.find(entry => entry.path === 'node_modules/@dsh-enhanced/assistant-growth-contract/package.json')
+    expect(contractSource?.sourcePath).toBe(join(f.home, 'profiles', 'owner', 'node_modules', '@dsh-enhanced',
+      'assistant-growth-contract', 'package.json'))
+    expect(receipt.entries.some(entry => entry.sourcePath.startsWith(stageHome))).toBe(false)
+    await rename(f.home, previousHome)
+    await rename(stageHome, f.home)
+    expect(await prepareRsiAuthorityRuntime(f.input, { packageRoot: join(f.home, 'profiles', 'owner',
+      'node_modules', '@dsh-enhanced', 'plugin-control-plane') })).toEqual(initial)
+  }, 120_000)
+
+  test('managed hoisted proof rejects missing metadata, false locations, lock drift, versions and contract escape', async () => {
+    const f = await fixture()
+    const managed = await managedHoistedProfile(f)
+    const originalMetadata = await readFile(managed.metadata)
+    await rm(managed.metadata)
+    await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: managed.installed })).rejects.toThrow()
+    await writeFile(managed.metadata, originalMetadata)
+    const falseLocations = parseDocument(originalMetadata.toString('utf8'))
+    falseLocations.setIn(['hoistedLocations', `${CONTRACT_PACKAGE}@${managed.version}`],
+      ['node_modules/@dsh-enhanced/another-contract'])
+    await writeFile(managed.metadata, falseLocations.toString())
+    await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: managed.installed }))
+      .rejects.toThrow('installed locations differ')
+    await writeFile(managed.metadata, originalMetadata)
+    const changedLock = parseDocument(managed.lock)
+    changedLock.setIn(['snapshots', `${CONTROL_PACKAGE}@${managed.selected}`, 'dependencies', CONTRACT_PACKAGE], '0.0.0')
+    await writeFile(managed.rootLock, changedLock.toString())
+    await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: managed.installed })).rejects.toThrow()
+    await writeFile(managed.rootLock, managed.lock)
+    await writeFile(managed.installedLock, changedLock.toString())
+    await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: managed.installed }))
+      .rejects.toThrow('installed lock dependency edge differs')
+    await writeFile(managed.installedLock, managed.lock)
+    const contractManifestPath = join(managed.contract, 'package.json')
+    const contractManifest = await readFile(contractManifestPath)
+    await writeFile(contractManifestPath, JSON.stringify({ ...JSON.parse(contractManifest.toString('utf8')), version: '0.0.0' }))
+    await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: managed.installed }))
+      .rejects.toThrow('shared contract identity or dependency boundary differs')
+    await writeFile(contractManifestPath, contractManifest)
+    await prepareRsiAuthorityRuntime(f.input, { packageRoot: managed.installed })
+    const escaped = join(f.root, 'outside-contract')
+    await cp(managed.contract, escaped, { recursive: true })
+    await rm(managed.contract, { recursive: true })
+    await symlink(escaped, managed.contract, 'dir')
+    await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: managed.installed }))
+      .rejects.toThrow('outside its dependency edge')
+  }, 120_000)
+
+  test('managed hoisted proof changed after reading aborts before publishing runtime', async () => {
+    const f = await fixture()
+    const managed = await managedHoistedProfile(f)
+    const command = io.command
+    const spy = vi.spyOn(io, 'command').mockImplementation(async (...args) => {
+      const output = await command(...args)
+      await writeFile(managed.metadata, `${await readFile(managed.metadata, 'utf8')}\n# changed after proof read\n`)
+      return output
+    })
+    try {
+      await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: managed.installed }))
+        .rejects.toThrow('managed hoisted proof changed')
+      await expect(lstat(f.final)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(spy).toHaveBeenCalledOnce()
+    } finally { spy.mockRestore() }
   }, 120_000)
 
   test('rejects contract resolution inherited from an ancestor node_modules', async () => {
