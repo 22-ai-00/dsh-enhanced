@@ -68,6 +68,8 @@ pnpm release:record
 
 发布后逐包核对 npm 上的精确版本、dist-tag 与包集合，再从公开 tag 下载安装资产并核对摘要。在隔离的临时 Home 验证公开包安装与配置加载，不修改现有生产 Home；完整 supervised 安装仍须完成真实身份配对及必要的模型、预算和构建环境设置，轻量安装测试不替代该授权流程。最后将 `main` 的发布账本记录同步回 `dev`。
 
+涉及 Linux supervised 安装或依赖布局的修改，还须在安装器实际生成的 hoisted profile 上验证私有授权运行时准备，覆盖支持的 Node 22 和当前开发 Node。使用真实安装元数据和锁文件执行 `--prepare-authorities`，或分别调用同一运行时与资源准备函数；核验独立程序可运行、重复准备不更换内容或身份。此检查不绑定 owner、不签发任务授权、不启动 Host，也不替代 Docker 构建及完整 supervised 就绪验收。仅通过 core 激活或模拟 setup 返回值，不能证明该准备步骤可用。
+
 ## 失败重试与不可变标签
 
 若发版中途出现暂时性失败，`pending` 会保留。请在 GitHub Actions 中 rerun 原 run，或手动运行 Release workflow 并输入同一个现有 tag；不要为重试创建或移动标签。
