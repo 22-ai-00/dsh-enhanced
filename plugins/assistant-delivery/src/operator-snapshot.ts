@@ -207,7 +207,7 @@ export interface ActiveLarkOwnerBinding extends Readonly<ConversationBinding> {
 
 export interface ActiveLarkOwnerBindingsSnapshot {
   readonly protocol: typeof activeLarkOwnerBindingsSnapshotProtocol
-  readonly schemaVersion: 23 | 24 | 25 | 26
+  readonly schemaVersion: 23 | 24 | 25 | 26 | 27
   readonly scope: Readonly<Omit<ActiveLarkOwnerBindingsQuery, 'databasePath'>>
   readonly database: DeliveryOperatorFileIdentity
   readonly sidecars: Readonly<{
@@ -786,11 +786,11 @@ export function inspectActiveLarkOwnerBindingsLocally(input: ActiveLarkOwnerBind
     if (queryOnly.query_only !== 1) operatorFail('database-corrupt', 'read-only guard was not enabled')
     const version = (database.prepare('PRAGMA user_version').get() as { user_version?: unknown }).user_version
     // A staged upgrade reads owner identity before starting the new Host.
-    // v24 adds natural feedback, v25 foreground completion ordering, and v26
-    // restart fences. The owner tables read here are unchanged in these four
-    // reviewed schemas. Do not migrate the source or accept future versions.
-    if (version !== 23 && version !== 24 && version !== 25 && version !== 26) {
-      operatorFail('schema-unsupported', 'expected schema 23, 24, 25 or 26')
+    // v24 adds natural feedback, v25 foreground completion ordering, v26
+    // restart fences, and v27 progress handles. The owner tables read here
+    // are unchanged in these five reviewed schemas. Do not accept future versions.
+    if (version !== 23 && version !== 24 && version !== 25 && version !== 26 && version !== 27) {
+      operatorFail('schema-unsupported', 'expected schema 23, 24, 25, 26 or 27')
     }
     const quick = database.prepare('PRAGMA quick_check').all() as unknown as Array<{ quick_check?: unknown }>
     if (quick.length !== 1 || quick[0]?.quick_check !== 'ok') operatorFail('database-corrupt', 'SQLite quick_check failed')

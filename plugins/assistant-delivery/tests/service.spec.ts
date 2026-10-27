@@ -31,6 +31,8 @@ import type {
   ConversationBinding,
   ConversationRef,
   DeliveryAdapter,
+  DeliveryAdapterContext,
+  DeliveryProgressIntent,
   ForegroundTaskObservationRegistration,
   InboundEnvelope,
   ModelSelectionSettlementInput,
@@ -321,6 +323,42 @@ async function boundApprovalHarness(options: MountHarnessOptions & {
 }
 
 describe('assistant delivery Cordis service', () => {
+  test.each([['revoked owner', true], ['policy denied', false]] as const)(
+    'does not expose durable progress recovery after %s', async (_reason, allowed) => {
+      const { ctx, service } = await harness(allowed)
+      const store = runtimeStoreFromService(service)
+      const issued = store.issuePairing(principal, { ttlMs: 5_000, maxAttempts: 3 })
+      store.confirmPairing({ challengeId: issued.challenge.id, principal, code: issued.code })
+      const binding = store.createBinding({ conversation, principal, workspace: '/work/alpha',
+        agentPreset: 'primary', sessionId: 'session-progress-authority', policyRef: 'owner-dm' })
+      const inbox = store.acceptInbound({ ...envelope, eventId: 'evt-progress-authority' }).record
+      store.queueInbox(inbox.id, binding.id)
+      const claim = store.claimInbox({ ownerId: 'progress-worker', leaseMs: 30_000, limit: 1, maxAttempts: 3 })[0]!
+      const progress: DeliveryProgressIntent = { bindingId: binding.id, eventId: inbox.eventId,
+        target: { conversation, principal }, update: { kind: 'started' } }
+      const fingerprint = 'a'.repeat(64)
+      store.beginProgress(progress, fingerprint, 1, true)
+      store.attachProgressHandle(progress, fingerprint, JSON.stringify({ cotId: 'cot-authority', messageId: 'om-authority' }))
+      store.finishInbox({ inboxId: inbox.id, ownerId: 'progress-worker',
+        fencingToken: claim.fencingToken, outcome: 'dead_letter', failureCode: 'dispatch-ambiguous' })
+      if (allowed) {
+        const owner = store.getPrincipal(principal)!
+        store.revokePrincipal(owner.id, owner.version)
+      }
+      let adapterContext: DeliveryAdapterContext | undefined
+      const unregister = await service.registerAdapter({ channel: 'lark', account: 'bot-1',
+        capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'] },
+        start: async context => { adapterContext = context },
+        send: async () => ({ outcome: 'accepted', providerMessageId: 'unused' }),
+      })
+      expect(adapterContext?.progressJournal).toBeDefined()
+      expect(await adapterContext!.progressJournal!.get(progress, fingerprint)).toBeUndefined()
+      expect(await adapterContext!.progressJournal!.recover('lark', 'bot-1', fingerprint, 16)).toEqual([])
+      await unregister()
+      await ctx.fiber.restart()
+    },
+  )
+
   test('notifies an owner once after a dispatched turn was interrupted across restart', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-interrupted-'))
     roots.push(root)

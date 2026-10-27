@@ -6,6 +6,7 @@ import { LARK_APPROVAL_CARD_MAX_BYTES, renderLarkMessage } from '../src/sdk.ts'
 import { LarkTransportError } from '../src/types.ts'
 import type {
   DeliveryAdapterContext,
+  DeliveryProgressJournal,
   InboxStatus,
   InboundEnvelope,
   ModelPickerState,
@@ -484,6 +485,31 @@ describe('Lark delivery adapter', () => {
       threadId: 'oc_dm', runId: 'delivery-1', status: 'done',
     })
   })
+
+  test('bounds disposal while a recovered progress update never returns', async () => {
+    const f = fixture({ progressCredentialFingerprint: 'a'.repeat(64) })
+    const record = { bindingId: 'binding-1', eventId: 'om_in', target: intent().target,
+      providerHandle: JSON.stringify({ cotId: 'cot-1', messageId: 'om_cot' }), sequence: 1,
+      step: 1, showDetails: false, state: 'pending' as const,
+      terminal: { kind: 'failed' as const, code: 'INTERRUPTED_RESULT_UNKNOWN' } }
+    f.context.progressJournal = {
+      recover: async () => [record],
+      stageTerminal: async () => record,
+      get: async () => record,
+    } as unknown as DeliveryProgressJournal
+    let started!: () => void
+    const attempted = new Promise<void>(resolve => { started = resolve })
+    f.transport.writeProgress.mockImplementation(async () => {
+      started()
+      await new Promise<void>(() => {})
+    })
+    const dispose = await f.adapter.start(f.context)
+    await attempted
+    const before = Date.now()
+    await dispose()
+    expect(Date.now() - before).toBeLessThan(6_500)
+    expect(f.transport.writeProgress).toHaveBeenCalledOnce()
+  }, 8_000)
 
   test('closes planned-maintenance progress with a saved-task notice and no task success reaction', async () => {
     const f = fixture()

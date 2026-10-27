@@ -271,6 +271,7 @@ interface PermissionHarnessOptions {
   maxTextBytes?: number
   maxAutoContinuationTurns?: number
   goalContinuationTimeoutMs?: number
+  taskTimeoutMs?: number
   allowPresetProbeExecution?: boolean
 }
 
@@ -712,6 +713,7 @@ async function runtimeHarness(
     ...(permissions?.ownerRoutes === undefined ? {} : { ownerRoutes: permissions.ownerRoutes }),
     schedulerEnabled: false, defaultWorkspace: workspace, defaultAgentPreset: agentPreset, agentProvider: defaultRoute.provider,
     agentModel: defaultRoute.model,
+    ...(permissions?.taskTimeoutMs === undefined ? {} : { agentTaskTimeoutMs: permissions.taskTimeoutMs }),
     ...(permissions?.leaseMs === undefined ? {} : { leaseMs: permissions.leaseMs }),
     ...(permissions?.maxTextBytes === undefined ? {} : { maxTextBytes: permissions.maxTextBytes }),
     ...(permissions?.maxAutoContinuationTurns === undefined
@@ -740,7 +742,7 @@ async function runtimeHarness(
       }
     } }
   await ctx.assistantDelivery.registerAdapter(channel)
-  return { ctx, llm, alternate, permissionPresets, presetExecute, progresses, sends, service: ctx.assistantDelivery }
+  return { ctx, llm, alternate, permissionPresets, presetExecute, progresses, sends, channel, service: ctx.assistantDelivery }
 }
 
 async function drive(service: AssistantDeliveryService): Promise<void> {
@@ -10526,6 +10528,98 @@ describe('real native Delivery Agent runtime', () => {
     }
   })
 
+  test('stages terminal progress without waiting for a hung provider and bounds its drain', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-progress-drain-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    let terminal = false
+    vi.spyOn(fixture.channel, 'progress').mockImplementation(async intent => {
+      fixture.progresses.push(intent)
+      if (intent.update.kind === 'started') await held
+      if (intent.update.kind === 'completed') terminal = true
+    })
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const accepted = await fixture.service.acceptInbound(message('evt-progress-drain', 'Complete a normal reply'))
+    let completed = false
+    const running = fixture.service.tick().then(() => fixture.service.whenIdle()).then(() => { completed = true })
+    try {
+      await vi.waitFor(() => expect(terminal).toBe(true), { timeout: 2_000 })
+      expect(completed).toBe(false)
+      await vi.waitFor(() => expect(completed).toBe(true), { timeout: 6_000 })
+      expect(runtimeStore(fixture.service).getInbox(accepted.inboxId!)).toMatchObject({ status: 'processed' })
+      expect(fixture.llm.requests).toHaveLength(1)
+    } finally {
+      release()
+      await running
+      await fixture.ctx.fiber.restart()
+    }
+  }, 10_000)
+
+  test.each(['tool', 'model'] as const)('bounds an ordinary foreground task whose %s ignores cancellation', async mode => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-task-deadline-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [{ id: 'task-deadline-tool', effect: 'allow',
+        subject: { kind: 'agent', id: 'primary', workspace: root, principal: 'lark/bot-1/tenant-a/ou_owner' },
+        actions: ['execute'], resource: { kind: 'tool', id: 'preset_probe' }, context: { initiators: ['external'] } }],
+      presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
+      allowPresetProbeExecution: true, taskTimeoutMs: 1_000,
+    })
+    let retainedAgent: Agent | undefined
+    fixture.ctx.on('agent/pre-step', async ({ agent }, next) => { retainedAgent = agent; return await next() })
+    let begin!: () => void
+    let release!: () => void
+    const started = new Promise<void>(resolve => { begin = resolve })
+    const held = new Promise<void>(resolve => { release = resolve })
+    fixture.presetExecute.mockImplementationOnce(async () => { begin(); await held; return { mounted: true } })
+    vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+      fixture.llm.requests.push(options)
+      if (mode === 'model') { begin(); await held; return }
+      const id = ToolCallId('task-deadline-tool')
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 0, id, name: 'preset_probe', argumentsDelta: '{}' }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'preset_probe', arguments: '{}' } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+    })
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const accepted = await fixture.service.acceptInbound(message('evt-task-deadline', 'Run the bounded task'))
+    const binding = runtimeStore(fixture.service).getActiveBinding(conversation)!
+    const secondHost = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
+    const running = fixture.service.tick().then(() => fixture.service.whenIdle())
+    try {
+      await Promise.race([started, running.then(() => { throw new Error('task ended before execution') })])
+      expect(secondHost.claimSessionLease({ kind: 'bound', binding }, 'second-host', 1_000)).toMatchObject({ kind: 'busy' })
+      let completed = false
+      void running.then(() => { completed = true })
+      await vi.waitFor(() => expect(completed).toBe(true), { timeout: 3_000 })
+      expect(runtimeStore(fixture.service).getInbox(accepted.inboxId!)).toMatchObject({ status: 'dead_letter', failureCode: 'processor-ambiguous' })
+      expect(fixture.progresses.at(-1)?.update).toEqual({ kind: 'failed', code: 'agent-task-timeout' })
+      expect(fixture.llm.requests).toHaveLength(1)
+      // Finishing presentation does not claim the underlying operation stopped.
+      expect(secondHost.claimSessionLease({ kind: 'bound', binding }, 'second-host', 1_000)).toMatchObject({ kind: 'unknown' })
+      const late = await retainedAgent!.ctx.tools.execute({ callId: ToolCallId('late-after-deadline'),
+        name: 'preset_probe', agent: retainedAgent!, signal: new AbortController().signal, arguments: {} })
+      expect(late.isError).toBe(true)
+      expect(fixture.presetExecute).toHaveBeenCalledTimes(mode === 'tool' ? 1 : 0)
+      await fixture.service.tick()
+      expect(fixture.llm.requests).toHaveLength(1)
+      release()
+      await vi.waitFor(() => expect(fixture.ctx.agents.get(retainedAgent!.id)).toBeUndefined())
+      const next = secondHost.claimSessionLease({ kind: 'bound', binding }, 'second-host', 1_000)
+      expect(next.kind).toBe('claimed')
+      if (next.kind === 'claimed') expect(secondHost.finishSessionLease(next.lease, { quiescent: true })).toBe(true)
+    } finally {
+      release()
+      await running
+      secondHost.close()
+      await fixture.ctx.fiber.restart()
+    }
+  }, 10_000)
+
   test('releases each quiescent foreground Session fence before the next inbound turn', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-session-lease-normal-'))
     roots.push(root)
@@ -10685,6 +10779,7 @@ describe('real native Delivery Agent runtime', () => {
     try {
       await entered.promise
       expect(runtimeStore(fixture.service).listOutbox()).toHaveLength(1)
+      expect(fixture.progresses.some(item => item.update.kind === 'completed')).toBe(false)
       if (failure === 'reject') release.resolve()
       if (failure === 'revoke') {
         expect(runtimeStore(fixture.service).revokePrincipal(owner.id, owner.version)).toMatchObject({ status: 'revoked' })
@@ -10702,6 +10797,9 @@ describe('real native Delivery Agent runtime', () => {
         contract: { task: { kind: 'foreground-turn', ref: accepted.inboxId } },
         execution: { status: 'unknown', quiescent: false }, receipt: { objectiveStatus: 'unknown' },
       }])
+      expect(fixture.progresses.some(item => item.update.kind === 'completed')).toBe(false)
+      if (failure !== 'revoke') expect(fixture.progresses.at(-1)?.update)
+        .toEqual({ kind: 'failed', code: 'INTERRUPTED_RESULT_UNKNOWN' })
     } finally {
       if (deadline !== undefined) clearTimeout(deadline)
       release.resolve()

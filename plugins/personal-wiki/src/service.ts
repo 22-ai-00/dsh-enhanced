@@ -77,7 +77,7 @@ Use Personal Wiki for durable, human-readable research, project, person, concept
 3. Call wiki_upsert only with a complete reviewed page. An explicit current owner create/update request can commit after independent review; otherwise it remains an approval proposal. If the owner asks to wait for approval, wait. Do not write vault files through shell tools.
 4. Call wiki_lint to report dead links, duplicates, provenance errors, or index drift. A lint result does not authorize repairs, archival, or synchronization. Handle a separately requested create/update through wiki_upsert under rule 3; other changes still require their own authorization.
 5. Verify the current page before saying it is saved. A previous assistant claim or Policy approval is not a write receipt; wiki_upsert must return approved with a page, or wiki_read must confirm the current contents. A rejected or expired proposal is not waiting for approval. A distinct new owner request uses a new idempotency key; retrying the same request keeps its key.
-6. wiki_upsert updates the live catalog when it commits; it does not require restarting the assistant. Do not restart or schedule a restart of the serving Host from a foreground tool to refresh the wiki: that can terminate this turn before its final reply is delivered. Report externally introduced index drift for operator reconciliation instead of killing the current conversation.
+6. Authorized wiki_search and wiki_read refresh the catalog from valid Markdown on every call, including changes committed by another process; wiki_upsert updates it when it commits. No refresh command or Host restart is needed. Never restart or schedule a restart of the serving Host to refresh the wiki: that can terminate this turn before its final reply is delivered. If a refresh reports an invalid page, report the error instead of claiming old results are current.
 
 Keep curated Markdown as truth. A derived page must cite direct curated evidence and must not summarize another derived page.`
 
@@ -182,6 +182,7 @@ export class PersonalWikiService extends Service {
 
   search(agent: Agent | undefined, request: { query: string; limit?: number; authorizationIdempotencyKey?: string }): WikiSearchHit[] {
     this.authorize(agent, 'search', 'catalog', request.authorizationIdempotencyKey)
+    this.vault.rebuild()
     return this.vault.search({
       query: request.query,
       limit: request.limit ?? this.config.searchLimit,
@@ -191,6 +192,7 @@ export class PersonalWikiService extends Service {
 
   read(agent: Agent | undefined, request: { ref: string; maxBytes?: number; maxParagraphs?: number; authorizationIdempotencyKey?: string }): WikiReadResult {
     this.authorize(agent, 'read', request.ref, request.authorizationIdempotencyKey)
+    this.vault.rebuild()
     return this.vault.read({
       ref: request.ref,
       maxBytes: request.maxBytes ?? this.config.readMaxBytes,

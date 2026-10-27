@@ -422,7 +422,7 @@ export function ownerRepairPatchEquivalent({ yaml, planned, applied }) {
 
 function ownerSnapshotIdentity(snapshot) {
   if (snapshot?.protocol !== 'assistant-delivery/active-lark-owner-bindings-snapshot/v1'
-    || ![23, 24, 25, 26].includes(snapshot.schemaVersion)
+    || ![23, 24, 25, 26, 27].includes(snapshot.schemaVersion)
     || !snapshot.scope || typeof snapshot.scope !== 'object' || Array.isArray(snapshot.scope)
     || !['account', 'tenant', 'workspace', 'agentPreset'].every(key => typeof snapshot.scope[key] === 'string')
     || !Array.isArray(snapshot.bindings) || snapshot.bindings.length !== 1

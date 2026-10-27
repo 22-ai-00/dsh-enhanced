@@ -199,6 +199,18 @@ describe('supervised lifecycle v3 invariants', () => {
     })).toBe(false)
   })
 
+  test('accepts reviewed Delivery schema 27 compact proofs and rejects schema 28', () => {
+    const accepted = structuredClone(supervisedManifestFixture('post-swap-accepted'))
+    for (const proof of [accepted.source.deliveryProof, accepted.previewAcceptance.deliveryProof,
+      accepted.postSwapAcceptance.deliveryProof]) proof.schemaVersion = 27
+    expect(lifecycleProfileTest.validSupervisedLifecycle(accepted)).toBe(true)
+    accepted.source.deliveryProof.schemaVersion = 28
+    expect(lifecycleProfileTest.validSupervisedLifecycle(accepted)).toBe(false)
+    accepted.source.deliveryProof.schemaVersion = 27
+    accepted.postSwapAcceptance.deliveryProof.schemaVersion = 28
+    expect(lifecycleProfileTest.validSupervisedLifecycle(accepted)).toBe(false)
+  })
+
   test('requires post-swap proof to bind the accepted systemd InvocationID', () => {
     const accepted = supervisedManifestFixture('post-swap-accepted')
     expect(lifecycleProfileTest.validSupervisedLifecycle(accepted)).toBe(true)
@@ -817,7 +829,7 @@ interface LifecycleRunOptions {
   supervisedMockFailure?: 'active' | 'host-exit' | 'post-swap' | 'preview'
   supervisedProofDrift?: boolean
   supervisedUnmanagedAutomationDrift?: boolean
-  deliverySnapshotSchema?: 23 | 24 | 25 | 26
+  deliverySnapshotSchema?: 23 | 24 | 25 | 26 | 27
 }
 
 async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
@@ -4248,7 +4260,7 @@ describe('one-click installers', () => {
     await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
-  test.each([23, 24, 25, 26] as const)('supervised service upgrade completes preview, swap, active acceptance, and cleanup with Delivery schema %s', async deliverySnapshotSchema => {
+  test.each([23, 24, 25, 26, 27] as const)('supervised service upgrade completes preview, swap, active acceptance, and cleanup with Delivery schema %s', async deliverySnapshotSchema => {
     const f = await lifecycleFixture({ effectiveScenario: 'supervised', deliverySnapshotSchema, systemd: { units: [{ profile: 'web', active: true }] } })
     const result = runServiceLifecycle(
       ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' },

@@ -872,9 +872,37 @@ export interface DeliveryProgressIntent {
   update: DeliveryProgressUpdate
 }
 
+/** Opaque provider handle and minimal state needed to close an existing progress surface. */
+export interface DeliveryProgressRecord {
+  bindingId: string
+  eventId: string
+  target: DeliveryTarget
+  providerHandle?: string
+  sequence: number
+  step: number
+  showDetails: boolean
+  state: 'creating' | 'active' | 'pending' | 'delivered'
+  terminal?: Extract<DeliveryProgressUpdate, { kind: 'completed' | 'failed' | 'paused' }>
+}
+
+/**
+ * Delivery owns this journal. An adapter must never use it to repeat the original task or create
+ * a second provider progress message after a create request may have reached the provider.
+ */
+export interface DeliveryProgressJournal {
+  begin(intent: DeliveryProgressIntent, credentialFingerprint: string, sequence: number, showDetails: boolean): Promise<{ record: DeliveryProgressRecord; created: boolean } | undefined>
+  get(intent: DeliveryProgressIntent, credentialFingerprint: string): Promise<DeliveryProgressRecord | undefined>
+  created(intent: DeliveryProgressIntent, credentialFingerprint: string, providerHandle: string): Promise<DeliveryProgressRecord | undefined>
+  advance(intent: DeliveryProgressIntent, credentialFingerprint: string): Promise<DeliveryProgressRecord | undefined>
+  stageTerminal(intent: DeliveryProgressIntent, credentialFingerprint: string): Promise<DeliveryProgressRecord | undefined>
+  delivered(intent: DeliveryProgressIntent, credentialFingerprint: string): Promise<void>
+  recover(channel: string, account: string, credentialFingerprint: string, limit: number): Promise<readonly DeliveryProgressRecord[]>
+}
+
 export interface DeliveryAdapterContext {
   accept(envelope: InboundEnvelope): Promise<{ duplicate: boolean; inboxId: string; status: InboxStatus }>
   receipt(receipt: DeliveryReceipt): Promise<void>
+  progressJournal?: DeliveryProgressJournal
 }
 
 export interface DeliveryAdapter {

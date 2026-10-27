@@ -4,11 +4,13 @@ import { type Agent } from '@deepseek-ai/dsh-agent'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { PERSONAL_WIKI_SKILL, PersonalWikiError, PersonalWikiService } from '../src/service.ts'
+import { createPageId, serializePage } from '../src/page.ts'
+import { WikiVaultError } from '../src/vault.ts'
 
 const temporaryRoots: string[] = []
 
@@ -39,9 +41,9 @@ function agent(options: { cwd?: string; preset?: string } = {}): Agent {
   }
 }
 
-async function harness(allow = true) {
-  const root = await mkdtemp(join(tmpdir(), 'personal-wiki-service-'))
-  temporaryRoots.push(root)
+async function harness(allow = true, sharedRoot?: string) {
+  const root = sharedRoot ?? await mkdtemp(join(tmpdir(), 'personal-wiki-service-'))
+  if (sharedRoot === undefined) temporaryRoots.push(root)
   const ctx = new Context()
   await ctx.plugin(SkillRegistry)
   await ctx.plugin(AssistantPolicyService, {
@@ -80,6 +82,128 @@ function input(title = 'Agent architecture') {
 }
 
 describe('personal wiki Cordis service', () => {
+  test('sees another service instance approved writes without restart and preserves revision CAS', async () => {
+    const a = await harness()
+    const b = await harness(true, a.root)
+    const fixture = agent({ cwd: '/work/alpha', preset: 'primary' })
+
+    const create = a.service.propose(fixture, {
+      idempotencyKey: 'shared:create', principal: 'owner:lark:123',
+      mutation: { op: 'create', input: input('Shared knowledge') },
+    })
+    const created = a.service.decideProposal({
+      proposalId: create.proposalId, principal: 'owner:lark:123',
+      expectedVersion: 1, decision: 'approved', reason: 'reviewed',
+    }).page!
+    expect(b.service.search(fixture, { query: 'Shared knowledge' })[0]?.pageId).toBe(created.metadata.id)
+    expect(b.service.read(fixture, { ref: created.metadata.id }).revision).toBe(created.revision)
+
+    const update = a.service.propose(fixture, {
+      idempotencyKey: 'shared:update', principal: 'owner:lark:123',
+      mutation: {
+        op: 'update', pageId: created.metadata.id, expectedRevision: created.revision,
+        input: { ...input('Shared knowledge'), body: '# Shared knowledge\n\nCross-process approved update.' },
+      },
+    })
+    const updated = a.service.decideProposal({
+      proposalId: update.proposalId, principal: 'owner:lark:123',
+      expectedVersion: 1, decision: 'approved', reason: 'reviewed',
+    }).page!
+    expect(b.service.read(fixture, { ref: created.metadata.id }).text).toContain('Cross-process approved update')
+    expect(b.service.read(fixture, { ref: created.metadata.id }).revision).toBe(updated.revision)
+    expect(() => b.service.propose(fixture, {
+      idempotencyKey: 'shared:stale-update', principal: 'owner:lark:123',
+      mutation: {
+        op: 'update', pageId: created.metadata.id, expectedRevision: created.revision,
+        input: input('Shared knowledge'),
+      },
+    })).toThrowError(expect.objectContaining<Partial<WikiVaultError>>({ code: 'revision-conflict' }))
+
+    await b.ctx.fiber.restart()
+    await a.ctx.fiber.restart()
+  })
+
+  test('refreshes external atomic replacement, creation, and deletion on authorized reads', async () => {
+    const { ctx, root, service } = await harness()
+    const fixture = agent({ cwd: '/work/alpha', preset: 'primary' })
+    const proposal = service.propose(fixture, {
+      idempotencyKey: 'external:seed', principal: 'owner:lark:123',
+      mutation: { op: 'create', input: input('Replaceable') },
+    })
+    const page = service.decideProposal({
+      proposalId: proposal.proposalId, principal: 'owner:lark:123',
+      expectedVersion: 1, decision: 'approved', reason: 'reviewed',
+    }).page!
+    const path = join(root, 'vault', page.relativePath)
+    const before = await readFile(path, 'utf8')
+    const edited = before.replace('Durable personal assistant design.', 'Externally replaced content.')
+    await writeFile(`${path}.tmp`, edited, { mode: 0o600 })
+    await rename(`${path}.tmp`, path)
+    expect(service.search(fixture, { query: 'Externally replaced' })[0]?.pageId).toBe(page.metadata.id)
+    expect(service.read(fixture, { ref: page.metadata.id }).text).toContain('Externally replaced content')
+    expect(await readFile(path, 'utf8')).toBe(edited)
+
+    const newId = createPageId(Date.now())
+    const newPath = join(root, 'vault', 'wiki', 'concepts', `external-new--${newId.toLowerCase()}.md`)
+    await writeFile(newPath, serializePage({ ...page.metadata, id: newId, title: 'External new' },
+      '# External new\n\nBrand new external knowledge.'), { mode: 0o600 })
+    expect(service.search(fixture, { query: 'Brand new external knowledge' })[0]?.pageId).toBe(newId)
+    expect(service.read(fixture, { ref: newId }).text).toContain('Brand new external knowledge')
+
+    await rm(newPath)
+    await rm(path)
+    expect(service.search(fixture, { query: 'Brand new external knowledge' })).toEqual([])
+    expect(() => service.read(fixture, { ref: page.metadata.id }))
+      .toThrowError(expect.objectContaining<Partial<WikiVaultError>>({ code: 'not-found' }))
+    expect(service.health().pages).toBe(0)
+    await ctx.fiber.restart()
+  })
+
+  test('fails closed on invalid Markdown or symlinks, keeps last-good snapshot, and recovers after repair', async () => {
+    const { ctx, root, service } = await harness()
+    const fixture = agent({ cwd: '/work/alpha', preset: 'primary' })
+    const proposal = service.propose(fixture, {
+      idempotencyKey: 'recover:seed', principal: 'owner:lark:123',
+      mutation: { op: 'create', input: input('Recovery seed') },
+    })
+    const page = service.decideProposal({
+      proposalId: proposal.proposalId, principal: 'owner:lark:123',
+      expectedVersion: 1, decision: 'approved', reason: 'reviewed',
+    }).page!
+    const concepts = join(root, 'vault', 'wiki', 'concepts')
+    const bad = join(concepts, 'bad.md')
+    await writeFile(bad, 'corrupt page', { mode: 0o600 })
+    expect(() => service.search(fixture, { query: 'Recovery seed' }))
+      .toThrowError(expect.objectContaining<Partial<WikiVaultError>>({ code: 'invalid-frontmatter' }))
+    expect(service.health().pages).toBe(1)
+    await rm(bad)
+    expect(service.search(fixture, { query: 'Recovery seed' })[0]?.pageId).toBe(page.metadata.id)
+
+    const outside = join(root, 'outside.md')
+    await writeFile(outside, 'outside')
+    await symlink(outside, join(concepts, 'escape.md'))
+    expect(() => service.read(fixture, { ref: page.metadata.id }))
+      .toThrowError(expect.objectContaining<Partial<WikiVaultError>>({ code: 'symlink' }))
+    expect(service.health().pages).toBe(1)
+    await rm(join(concepts, 'escape.md'))
+    expect(service.read(fixture, { ref: page.metadata.id }).pageId).toBe(page.metadata.id)
+    await ctx.fiber.restart()
+  })
+
+  test('denied read and search do not scan invalid vault contents or write them', async () => {
+    const { ctx, root, service } = await harness(false)
+    const bad = join(root, 'vault', 'wiki', 'concepts', 'bad.md')
+    await writeFile(bad, 'corrupt page', { mode: 0o600 })
+    const fixture = agent({ cwd: '/work/alpha', preset: 'primary' })
+    expect(() => service.search(fixture, { query: 'bad' }))
+      .toThrowError(expect.objectContaining<Partial<PersonalWikiError>>({ code: 'policy-denied' }))
+    expect(() => service.read(fixture, { ref: 'bad' }))
+      .toThrowError(expect.objectContaining<Partial<PersonalWikiError>>({ code: 'policy-denied' }))
+    expect(await readFile(bad, 'utf8')).toBe('corrupt page')
+    expect(service.health().pages).toBe(0)
+    await ctx.fiber.restart()
+  })
+
   test('registers ctx.personalWiki and exposes only policy-gated page operations', async () => {
     const { ctx, service } = await harness()
     const fixture = agent({ cwd: '/work/alpha', preset: 'primary' })
@@ -148,6 +272,8 @@ describe('personal wiki Cordis service', () => {
       expect(PERSONAL_WIKI_SKILL).toContain(tool)
     }
     expect(PERSONAL_WIKI_SKILL).toContain('untrusted')
+    expect(PERSONAL_WIKI_SKILL).toContain('wiki_search and wiki_read refresh')
+    expect(PERSONAL_WIKI_SKILL).toContain('Never restart')
     expect(PERSONAL_WIKI_SKILL).not.toMatch(/automatic(?:ally)? (?:archive|commit|synchron)/i)
     expect(PERSONAL_WIKI_SKILL).not.toMatch(/(?:file|https?):\/\//)
     await ctx.fiber.restart()

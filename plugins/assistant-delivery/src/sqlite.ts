@@ -2,7 +2,35 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 26
+export const deliverySchemaVersion = 27
+
+/** Provider progress is a presentation journal, keyed to the authoritative Inbox. */
+const progressSchema = `
+  CREATE TABLE IF NOT EXISTS delivery_progress (
+    inbox_id TEXT PRIMARY KEY REFERENCES inbox_messages(id),
+    binding_id TEXT NOT NULL REFERENCES conversation_bindings(id),
+    binding_version INTEGER NOT NULL CHECK(binding_version >= 1),
+    binding_generation INTEGER NOT NULL CHECK(binding_generation >= 1),
+    target_hash TEXT NOT NULL CHECK(length(target_hash) = 64),
+    credential_hash TEXT NOT NULL CHECK(length(credential_hash) = 64),
+    provider_handle TEXT CHECK(provider_handle IS NULL OR length(provider_handle) BETWEEN 2 AND 2048),
+    sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 9007199254740991),
+    step INTEGER NOT NULL DEFAULT 0 CHECK(step BETWEEN 0 AND 9007199254740991),
+    show_details INTEGER NOT NULL CHECK(show_details IN (0, 1)),
+    state TEXT NOT NULL CHECK(state IN ('creating', 'active', 'pending', 'delivered')),
+    terminal_kind TEXT CHECK(terminal_kind IN ('completed', 'failed', 'paused')),
+    terminal_code TEXT,
+    retry_attempts INTEGER NOT NULL DEFAULT 0 CHECK(retry_attempts BETWEEN 0 AND 8),
+    next_retry_at INTEGER NOT NULL DEFAULT 0 CHECK(next_retry_at >= 0),
+    created_at INTEGER NOT NULL CHECK(created_at >= 0),
+    updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+    CHECK((state = 'creating' AND provider_handle IS NULL)
+      OR (state = 'active' AND provider_handle IS NOT NULL AND terminal_kind IS NULL)
+      OR (state IN ('pending', 'delivered') AND provider_handle IS NOT NULL AND terminal_kind IS NOT NULL))
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS delivery_progress_recovery
+    ON delivery_progress(state, next_retry_at, created_at);
+`
 
 const restartFenceSchema = `
   CREATE TABLE IF NOT EXISTS delivery_restart_fence (
@@ -1292,6 +1320,10 @@ function migrateObserved(database: DatabaseSync): void {
     database.exec('PRAGMA user_version = 26;')
     version = 26
   }
+  if (version === 26) {
+    database.exec(`${progressSchema} PRAGMA user_version = 27;`)
+    version = 27
+  }
   if (version === deliverySchemaVersion) return
   database.exec(`
     ${deliveryInstanceSchema}
@@ -1513,7 +1545,8 @@ function migrateObserved(database: DatabaseSync): void {
     ${restartFenceSchema}
     ${restartInboxFenceSchema}
     ${restartOutboxFenceSchema}
-    PRAGMA user_version = 26;
+    ${progressSchema}
+    PRAGMA user_version = 27;
   `)
 }
 

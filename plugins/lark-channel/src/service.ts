@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { type AssistantDeliveryService, DeliveryAdapterRegistryStoppedError } from '@dsh-enhanced/assistant-delivery'
 import { LarkDeliveryAdapter } from './adapter.js'
@@ -213,6 +213,8 @@ export class LarkChannelService extends Service {
       onConnected: () => lifecycleMarker('lark-channel: connected'),
       onDisconnected: () => lifecycleMarker('lark-channel: disconnected'),
       approvalSecret: appSecret,
+      progressCredentialFingerprint: createHash('sha256')
+        .update(JSON.stringify([config.appId, config.domain, appSecret])).digest('hex'),
       showProgress: config.showProgress,
       progressDetails: config.progressDetails,
       statusReactions: config.statusReactions,
