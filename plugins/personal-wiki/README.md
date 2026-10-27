@@ -49,7 +49,7 @@ dsh --profile web --dump-config
 
 插件还注册一个短的 `personal-wiki-workflow` Skill，要求 search/read 后再提案、保留 `wiki://` 引用、把来源视为数据，并禁止绕过审批直接用 shell 改 vault。
 
-`wiki_upsert` 提交时会更新当前进程目录，无需重启助理。Skill 明确提醒不要在前台工具里安排重启正在答复的 Host，以免最终回复尚未投递就中断；外部文件引起的索引漂移应报告给运维处理。
+获授权的 `wiki_search` / `wiki_read` 每次调用前都会从当前有效 Markdown 重建目录，包括另一进程已批准写入以及外部增改删；`wiki_upsert` 提交时也会更新目录。不需要手动刷新或重启助理。Skill 明确提醒不要为刷新知识而重启正在答复的 Host，以免最终回复尚未投递就中断。页面不合法或有 symlink 时，该次读取明确失败，修复后下一次调用自动恢复；失败的重建不会替换上一次可用快照。
 
 `wiki_upsert` 会从当前 Agent 的 Delivery owner binding 派生 exact principal、workspace 和 binding，并让 Policy 在创建提案的同一事务中持久化审批投递。模型无法改写该路由。没有 Delivery 的可信 headless 宿主仍可通过 `ctx.personalWiki.propose(..., { principal })` 显式指定 principal；模型工具没有这个兼容入口，缺少路由时会 fail closed。
 
@@ -59,7 +59,7 @@ dsh --profile web --dump-config
 
 页面只位于固定目录 `wiki/{sources,people,projects,concepts,decisions,questions,meta}`。严格 JSON-compatible YAML frontmatter 包含 ULID、标题、类型、状态、authority、tags、aliases、直接 sources、创建/更新时间；未知字段和坏 SHA-256 会明确报错。`curated` 页面是独立真源；`derived` 页面必须指向直接 curated evidence，禁止 derived page 再总结 derived page。
 
-启动时构建不可变进程快照。人工编辑后需显式 `rebuild` 才进入 search/read；失败的 rebuild 保留上一个可用快照。页面写入使用同目录 `0600` 临时文件、文件 fsync、atomic rename 和目录 fsync。页面目录为 `0700`，拒绝相对 root、`..`、绝对子路径、symlink、非普通文件、越界 realpath、大小写碰撞和超限页面。
+启动时构建进程快照；获授权的 service search/read 每次调用先重建，人工编辑或其他进程写入后无需显式 `rebuild`。底层 `WikiVault` 直接使用时仍提供显式 `rebuild`。失败的重建保留上一个可用快照，但 service search/read 会抛错，不把旧结果称为最新。页面写入使用同目录 `0600` 临时文件、文件 fsync、atomic rename 和目录 fsync。页面目录为 `0700`，拒绝相对 root、`..`、绝对子路径、symlink、非普通文件、越界 realpath、大小写碰撞和超限页面。
 
 备份时以整个 `vault/wiki` 为准；`state.sqlite` 只需在还要保留未决审批时一并备份。删除进程索引无需恢复，因为它只存在内存中。
 

@@ -229,7 +229,10 @@ test('successor accepts only a byte-identical copied owner database with the sam
   expect(ownerRepairSuccessorSnapshotEquivalent({ ...copied, schemaVersion: 26 },
     { ...original, schemaVersion: 26 })).toBe(true)
   expect(ownerRepairSuccessorSnapshotEquivalent({ ...copied, schemaVersion: 27 },
-    { ...original, schemaVersion: 27 })).toBe(false)
+    { ...original, schemaVersion: 27 })).toBe(true)
+  expect(ownerRepairSuccessorSnapshotEquivalent({ ...copied, schemaVersion: 28 },
+    { ...original, schemaVersion: 28 })).toBe(false)
+  expect(ownerRepairSuccessorSnapshotEquivalent({ ...copied, schemaVersion: 27 }, original)).toBe(false)
   expect(ownerRepairSuccessorSnapshotEquivalent({ ...copied, storageDigest: 'd'.repeat(64) }, original)).toBe(false)
   expect(ownerRepairSuccessorSnapshotEquivalent({ ...copied, database: { device: '2', inode: '43' } }, original)).toBe(false)
   expect(ownerRepairSuccessorSnapshotEquivalent({ ...copied, scope: { ...copied.scope, account: 'other' } }, original)).toBe(false)

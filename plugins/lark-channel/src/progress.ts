@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
-import type { DeliveryProgressIntent, DeliveryProgressUpdate } from '@dsh-enhanced/assistant-delivery'
+import type {
+  DeliveryProgressIntent, DeliveryProgressJournal, DeliveryProgressRecord, DeliveryProgressUpdate,
+} from '@dsh-enhanced/assistant-delivery'
 import type { LarkProgressEvent, LarkProgressHandle, LarkTransport } from './types.js'
 
 const MAX_EVENT_CONTENT_CHARS = 4_096
@@ -164,6 +166,18 @@ function updateEvents(
   })]
   // A failed turn may have produced no step at all (the provider can fail before any output), so
   // state the failure in the panel body too; RUN_ERROR alone leaves the surface on its opening line.
+  if (update.code === 'agent-task-timeout') return [
+    ...textEvents(`failed-${sequence}-${step}`, '任务已超时，处理已停止。'),
+    progressEvent('RUN_ERROR', { message: '任务已超时，处理已停止。', code: 'TASK_TIMEOUT' }),
+  ]
+  if (update.code === 'INTERRUPTED_RESULT_UNKNOWN') return [
+    ...textEvents(`failed-${sequence}-${step}`, '执行被中断，已有操作的结果尚未确认。'),
+    progressEvent('RUN_ERROR', { message: '执行被中断，结果尚未确认。', code: 'TASK_RESULT_UNKNOWN' }),
+  ]
+  if (update.code === 'user-stopped') return [
+    ...textEvents(`failed-${sequence}-${step}`, '任务已停止。'),
+    progressEvent('RUN_ERROR', { message: '任务已停止。', code: 'TASK_STOPPED' }),
+  ]
   const code = !showDetails || update.code === undefined ? undefined : boundedLabel(update.code, 80)
   return [
     ...textEvents(`failed-${sequence}-${step}`,
@@ -190,6 +204,9 @@ interface LiveProgress {
 export class LarkProgressPresenter {
   private readonly runs = new Map<string, LiveProgress>()
   private readonly queues = new Map<string, Promise<void>>()
+  private journal: DeliveryProgressJournal | undefined
+  private credentialFingerprint: string | undefined
+  private closed = false
   private sequence = 0
 
   constructor(
@@ -199,32 +216,95 @@ export class LarkProgressPresenter {
     private readonly onFailure: (error: unknown) => void,
   ) {}
 
+  bindJournal(journal: DeliveryProgressJournal | undefined, credentialFingerprint: string | undefined): void {
+    this.closed = false
+    this.journal = journal
+    this.credentialFingerprint = credentialFingerprint
+  }
+
+  stop(): void { this.closed = true }
+
+  private fromRecord(key: string, record: DeliveryProgressRecord): LiveProgress | undefined {
+    if (record.providerHandle === undefined) return undefined
+    let handle: LarkProgressHandle
+    try {
+      const parsed = JSON.parse(record.providerHandle) as LarkProgressHandle
+      if (typeof parsed.cotId !== 'string' || typeof parsed.messageId !== 'string'
+        || parsed.cotId === '' || parsed.messageId === '') return undefined
+      handle = parsed
+    } catch { return undefined }
+    const run: LiveProgress = {
+      handle, chatId: record.target.conversation.chat, sequence: record.sequence,
+      step: record.step, showDetails: record.showDetails && record.target.conversation.kind === 'dm',
+      targetKey: JSON.stringify(record.target),
+    }
+    this.sequence = Math.max(this.sequence, run.sequence)
+    this.runs.set(key, run)
+    return run
+  }
+
+  async recover(channel: string, account: string): Promise<void> {
+    const journal = this.journal
+    const fingerprint = this.credentialFingerprint
+    if (!this.enabled || journal === undefined || fingerprint === undefined) return
+    for (const record of await journal.recover(channel, account, fingerprint, 1_000)) {
+      if (this.closed) return
+      if (record.terminal === undefined) continue
+      await this.publish({ bindingId: record.bindingId, eventId: record.eventId,
+        target: record.target, update: record.terminal })
+    }
+  }
+
   private showDetails(intent: Readonly<DeliveryProgressIntent>): boolean {
     return this.details === 'direct' && intent.target.conversation.kind === 'dm'
   }
 
   async publish(intent: Readonly<DeliveryProgressIntent>): Promise<void> {
-    if (!this.enabled) return
+    if (!this.enabled || this.closed) return
+    const terminal = intent.update.kind === 'completed' || intent.update.kind === 'failed'
+      || intent.update.kind === 'paused'
+    if (terminal && this.journal !== undefined && this.credentialFingerprint !== undefined) {
+      try {
+        // This durable write precedes the provider queue. A slow earlier step cannot strand the
+        // only terminal signal in process memory when the Host stops.
+        await this.journal.stageTerminal(intent, this.credentialFingerprint)
+      } catch (error) {
+        this.onFailure(error)
+        return
+      }
+    }
     const key = JSON.stringify([intent.bindingId, intent.eventId])
     const previous = this.queues.get(key) ?? Promise.resolve()
     const current = previous.then(() => this.apply(key, intent)).catch(this.onFailure)
     this.queues.set(key, current)
     await current
-    if ((intent.update.kind === 'completed' || intent.update.kind === 'failed' || intent.update.kind === 'paused')
-      && this.queues.get(key) === current) this.queues.delete(key)
+    if (terminal && this.queues.get(key) === current) this.queues.delete(key)
   }
 
   private async apply(key: string, intent: Readonly<DeliveryProgressIntent>): Promise<void> {
+    if (this.closed) return
+    const journal = this.journal
+    const fingerprint = this.credentialFingerprint
     if (intent.update.kind === 'started') {
       if (this.runs.has(key)) return
+      if (journal !== undefined && fingerprint !== undefined) {
+        const reservation = await journal.begin(intent, fingerprint, ++this.sequence, this.showDetails(intent))
+        if (reservation === undefined || !reservation.created) {
+          if (reservation !== undefined) this.fromRecord(key, reservation.record)
+          return
+        }
+      }
       const handle = await this.transport.createProgress(intent.target.conversation.chat, {
         replyTo: intent.eventId,
         hidden: false,
       })
+      const recorded = journal !== undefined && fingerprint !== undefined
+        ? await journal.created(intent, fingerprint, JSON.stringify(handle)) : undefined
+      if (journal !== undefined && fingerprint !== undefined && recorded === undefined) return
       const run = {
         handle,
         chatId: intent.target.conversation.chat,
-        sequence: ++this.sequence,
+        sequence: recorded?.sequence ?? ++this.sequence,
         step: 0,
         showDetails: this.showDetails(intent),
         targetKey: JSON.stringify(intent.target),
@@ -239,20 +319,37 @@ export class LarkProgressPresenter {
       ))
       return
     }
-    const run = this.runs.get(key)
+    let run = this.runs.get(key)
+    if (run === undefined && journal !== undefined && fingerprint !== undefined) {
+      const record = await journal.get(intent, fingerprint)
+      if (record !== undefined) run = this.fromRecord(key, record)
+    }
     if (run === undefined) return
     const terminal = intent.update.kind === 'completed' || intent.update.kind === 'failed' || intent.update.kind === 'paused'
-    try {
+    if (journal !== undefined && fingerprint !== undefined) {
+      const record = terminal
+        ? await journal.stageTerminal(intent, fingerprint)
+        : await journal.advance(intent, fingerprint)
+      if (record === undefined || record.state === 'delivered' || record.state === 'creating') return
+      run.step = record.step
+      if (terminal && record.terminal === undefined) return
       const events = updateEvents(
-        intent.update,
+        terminal ? record.terminal! : intent.update,
         run.chatId,
         run.sequence,
-        ++run.step,
+        run.step,
         run.showDetails && run.targetKey === JSON.stringify(intent.target),
       )
       if (events.length > 0) await this.transport.writeProgress(run.handle, events)
-    } finally {
-      if (terminal) this.runs.delete(key)
+      if (terminal) {
+        await journal.delivered(intent, fingerprint)
+        this.runs.delete(key)
+      }
+      return
     }
+    const events = updateEvents(intent.update, run.chatId, run.sequence, ++run.step,
+      run.showDetails && run.targetKey === JSON.stringify(intent.target))
+    if (events.length > 0) await this.transport.writeProgress(run.handle, events)
+    if (terminal) this.runs.delete(key)
   }
 }

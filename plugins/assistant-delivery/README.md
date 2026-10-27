@@ -58,6 +58,7 @@ Host-only `inspectOwnerRequestedChange(execution, { sourceId })` 限定当前认
 | `agentMaxOutputTokens` | `8192` | 单轮模型输出上限 |
 | `agentMaxAutoContinuationTurns` | `2` | 截断、空响应或超出渠道正文预算时的后台自动恢复轮数；范围 `0`–`8`，设为 `0` 可关闭 |
 | `agentGoalContinuationTimeoutMs` | `0` | 在原始前台回复已入队后，保留同一 Agent 等待当前已 armed 的原生目标继续执行的时间上限；范围 `0`–`300000` 毫秒，默认关闭，需 Host 挂载原生 GoalService 与 goal-round-driver |
+| `agentTaskTimeoutMs` | `1800000` | 每个入站前台执行的总时间上限，范围 `1000`–`86400000` 毫秒；超时取消原生 Agent 并结束等待，未确认的操作保持 unknown，不自动重放 |
 | `modelPickerTtlMs` | `900000` | `/model` 选择卡片的签名提交有效期；范围 1 分钟至 24 小时 |
 | `permissionPickerTtlMs` | `900000` | `/permissions` 三档权限卡片的签名提交有效期；范围 1 分钟至 24 小时 |
 | `toolApprovalTtlMs` | `300000` | 当前 open turn 的即时工具审批有效期；范围 1 秒至 5 分钟 |
@@ -383,6 +384,10 @@ Automation incident 使用 `automation-incident:<incidentId>:g<generation>` 同�
 - Outbox adapter 抛异常一律视为可能已发送；不会按照普通 5xx 重试。
 
 ## 受控维护重启
+
+普通前台任务默认有 30 分钟执行期限（`agentTaskTimeoutMs`）。期限到达后取消原生 Agent，并给合作的取消流程最多 1 秒写入原生结束事件；不响应取消的模型或工具不再无限占用 Delivery 等待。未确认停止的操作保持 unknown，Session lease 在真实 disposer 完成前继续阻止接管和迟到工具，不自动重放写入任务。
+
+schema v27 持久保存渠道进度句柄及待发送终态。终态先入账，再调用渠道接口；普通退出最多等待进度 5 秒。支持此接口的适配器在重连后依据 Inbox 和执行回执收尾，不能将中断或未知结果显示为任务成功。旧版本未保存的句柄无法回填，也不能据此原位关闭历史气泡。
 
 显式配置 `restart` 后，当前 owner route 的前台任务在首次派发前冻结 owner/binding/Session、实际模型与 reasoning effort、单次输出上限、模型/工具调用次数和绝对截止时间。`allowedTools` 只选取已由可信服务登记实际定义对象的只读工具作为恢复能力：`delivery_status`、`wiki_search`、`wiki_read`、`memory_search`。同名 scope 覆盖、提供者卸载或未登记定义不会继承资格。普通任务仅记录模型、调用量与恢复资格，原有工具、时限和模型选择不受恢复配置限制；执行写工具、委派、超额、模型变化或不明结果只会失去自动续办资格。申请恢复后才强制冻结的剩余额度、截止时间和只读工具清单。它不增加原 Policy 权限。旧任务不会被追补为可恢复任务。
 

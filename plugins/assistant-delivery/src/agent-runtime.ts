@@ -130,6 +130,8 @@ interface DshDeliveryRuntimeOptions {
   model: string
   maxOutputTokens: number
   maxAutoContinuationTurns: number
+  /** Finite wall-clock budget for one inbound execution, including native tools. */
+  taskTimeoutMs: number
   /** Zero retains the historic foreground-disposal behavior. */
   goalContinuationTimeoutMs: number
   maxTextBytes: number
@@ -239,6 +241,13 @@ interface ModelCommandReply {
 }
 
 const SAFE_NATIVE_COMMANDS = new Set(['compact'])
+
+class AgentTaskTimeoutError extends Error {
+  constructor() {
+    super('assistant-delivery: foreground task exceeded its execution deadline')
+    this.name = 'AgentTaskTimeoutError'
+  }
+}
 
 class UserSessionCancellation extends Error {
   constructor(readonly command: 'new' | 'stop') {
@@ -1926,11 +1935,15 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     onClaimed?: (turn: number) => void,
     onSettled?: () => void,
     admit?: () => Promise<import('./restart-native.js').RestartContinuationInspection>,
+    signal?: AbortSignal,
   ): Promise<number | undefined> {
     return new Promise((resolve, reject) => {
       let claimedTurn: number | undefined
       let settled = false
+      let abortDeadline: ReturnType<typeof setTimeout> | undefined
       const cleanup = (): void => {
+        if (abortDeadline !== undefined) clearTimeout(abortDeadline)
+        signal?.removeEventListener('abort', aborted)
         removeClaimed()
         removeDiscarded()
         removeSessionEvent()
@@ -1946,6 +1959,13 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         settled = true
         cleanup()
         reject(error)
+      }
+      const aborted = (): void => {
+        // Let cooperative native cancellation persist its tool result and
+        // turn/end before disposing. Uncooperative tools get only this grace.
+        abortDeadline ??= setTimeout(() => fail(signal?.reason
+          ?? new Error('assistant-delivery: execution aborted')), 1_000)
+        abortDeadline.unref?.()
       }
       const removeClaimed = this.ctx.on('agent/inbox/claimed', event => {
         if (event.agent === agent && event.message.id === message.id) {
@@ -1974,6 +1994,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           settle(claimedTurn)
         }
       })
+      signal?.addEventListener('abort', aborted, { once: true })
+      if (signal?.aborted) { fail(signal.reason); return }
       try {
         if (admit === undefined) agent.followup(message)
         else void admit().then(state => {
@@ -2095,7 +2117,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       return await this.followupTurn(agent, message, onClaimed, () => {
         exactTurnSettled = true
         releaseToolBarriers()
-      })
+      }, undefined, signal)
     } catch (error) {
       if (signal.aborted) signal.throwIfAborted()
       if (submitted || error instanceof AutomaticCompletionAuthorizationError
@@ -3762,8 +3784,15 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       throw error
     }
     let control: ActiveSessionControl | undefined
+    let taskDeadline: ReturnType<typeof setTimeout> | undefined
     try {
       control = this.beginSessionControl(binding.sessionId, lease.signal)
+      taskDeadline = setTimeout(() => {
+        // Cancel the durable lease as well as the local wait: late tools and
+        // model requests must remain fenced until real teardown is observed.
+        lease.cancel(new AgentTaskTimeoutError())
+      }, this.options.taskTimeoutMs)
+      taskDeadline.unref?.()
       lease.dispatch()
       return await this.processControlled(
         binding,
@@ -3790,6 +3819,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       }
       throw error
     } finally {
+      if (taskDeadline !== undefined) clearTimeout(taskDeadline)
       if (control !== undefined) this.endSessionControl(binding.sessionId, control)
       lease.close()
     }
@@ -3948,6 +3978,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     let foregroundExecution: string | undefined
     let removeAcceptanceRequest: (() => void) | undefined
     let acceptanceSucceeded = false
+    let completionPending = false
     let goalContinuation: GoalContinuationWait | undefined
     let goalContinuationQuiescent = true
     let removeAbort: (() => void) | undefined
@@ -3956,13 +3987,29 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     let restartRun: RestartRun | undefined
     let restartCheckpoint: RestartRecord | undefined
     let progressQueue = Promise.resolve()
+    let progressTerminal = false
+    const drainProgress = async (): Promise<void> => {
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      try {
+        await Promise.race([progressQueue, new Promise<void>(resolve => {
+          timeout = setTimeout(resolve, 5_000)
+          timeout.unref?.()
+        })])
+      } finally { if (timeout !== undefined) clearTimeout(timeout) }
+    }
     const publishProgress = (update: DeliveryProgressUpdate): void => {
-      if (!progressOpen) return
-      progressQueue = progressQueue
-        .then(async () => {
-          if (checkAuthorization() !== 'authorized') return
-          await this.options.progress(binding, envelope.eventId, update)
-        })
+      const terminal = update.kind === 'completed' || update.kind === 'failed' || update.kind === 'paused'
+      if ((!progressOpen && !terminal) || progressTerminal) return
+      if (terminal) progressTerminal = true
+      const publish = async (): Promise<void> => {
+        if ((!terminal && progressTerminal) || checkAuthorization() !== 'authorized') return
+        await this.options.progress(binding, envelope.eventId, update)
+      }
+      // Terminal journaling must not wait behind a slow provider's step updates.
+      // The adapter preserves provider ordering after staging the durable result.
+      progressQueue = (terminal
+        ? Promise.all([progressQueue, publish()]).then(() => {})
+        : progressQueue.then(publish))
         // Progress is presentation-only: its provider failure must never retry an Agent turn.
         .catch(() => {})
     }
@@ -4102,22 +4149,14 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
             this.sessionLeases.assert(String(agent.session.id))
             restart!.onContinuationAdmitted(restartContinuation, String(agent.session.id))
           },
-        }))
+        }), signal)
       if (restartRun?.requested() !== undefined) {
         await this.waitForAgentIdle(agent, signal)
         restartCheckpoint = await restartRun.checkpoint()
         this.options.replyCommand(binding, envelope.eventId, {
           text: '已保存当前任务，准备进行维护重启；服务就绪后会自动继续，无需重新发送请求。', format: 'plain',
         }, `inbound:${foregroundExecution}:maintenance`)
-        publishProgress({ kind: 'paused' })
-        // Presentation failure cannot leave the task stuck before the durable handoff.
-        let progressTimeout: ReturnType<typeof setTimeout> | undefined
-        try {
-          await Promise.race([progressQueue, new Promise<void>(resolve => {
-            progressTimeout = setTimeout(resolve, 5_000)
-            progressTimeout.unref?.()
-          })])
-        } finally { if (progressTimeout !== undefined) clearTimeout(progressTimeout) }
+        // Publish the maintenance handoff only after teardown and ready commit.
         return { outcome: 'processed' }
       }
       let completionKind: AutomaticCompletionKind | undefined
@@ -4324,7 +4363,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         goalContinuationQuiescent = await goalContinuation.settle()
       }
       signal.throwIfAborted()
-      publishProgress({ kind: 'completed' })
+      completionPending = true
       acceptanceSucceeded = goalContinuationQuiescent
       return { outcome: 'processed' }
     } catch (error) {
@@ -4337,7 +4376,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         return { outcome: 'processed' }
       }
       if (dispatched) {
-        publishProgress({ kind: 'failed' })
+        publishProgress({ kind: 'failed', ...(signal.reason instanceof AgentTaskTimeoutError
+          ? { code: 'agent-task-timeout' } : {}) })
         throw new Error(`assistant-delivery: Agent turn became ambiguous: ${String(error)}`, { cause: error })
       }
       if (causedByDurableIdentity(error)) {
@@ -4385,13 +4425,15 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       removeProgress?.()
       progressOpen = false
       let disposed = false
+      let maintenanceReady = false
       try {
         disposed = await this.disposeAfterReplyBoundary(
           binding.sessionId,
           handle,
           () => goalContinuation?.dispose(),
           !goalContinuationQuiescent,
-          restartCheckpoint === undefined && restartContinuation === undefined ? goalContinuation?.teardownTimeoutMs() : 10_000,
+          restartCheckpoint === undefined && restartContinuation === undefined
+            ? goalContinuation?.teardownTimeoutMs() ?? 10_000 : 10_000,
         )
       } finally {
         acceptanceSucceeded = acceptanceSucceeded && disposed && !signal.aborted
@@ -4402,6 +4444,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
               status: acceptanceSucceeded ? 'succeeded' : 'unknown', quiescent: acceptanceSucceeded,
             })
           } catch (error) {
+            acceptanceSucceeded = false
             this.ctx.logger.warn(`assistant-delivery: foreground execution completion failed: ${String(error)}`)
           }
         }
@@ -4410,7 +4453,10 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           if (unfinished !== undefined) restart.store.fail(unfinished.id, 'restart-checkpoint-failed')
         }
         if (restart !== undefined && restartCheckpoint !== undefined) {
-          if (disposed && !signal.aborted && restart.authorize(restartCheckpoint)) restart.store.ready(restartCheckpoint.id)
+          if (disposed && !signal.aborted && restart.authorize(restartCheckpoint)) {
+            restart.store.ready(restartCheckpoint.id)
+            maintenanceReady = true
+          }
           else restart.store.fail(restartCheckpoint.id, 'restart-teardown-not-quiescent')
         }
         if (restart !== undefined && restartContinuation !== undefined) {
@@ -4430,6 +4476,14 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
             this.ctx.logger.warn(`assistant-delivery: acceptance completion failed: ${String(error)}`)
           }
         }
+        // A provider-confirmed success cannot precede the durable execution
+        // result: teardown can still fail after the final reply was queued.
+        if (restartCheckpoint !== undefined) publishProgress(maintenanceReady
+          ? { kind: 'paused' } : { kind: 'failed', code: 'INTERRUPTED_RESULT_UNKNOWN' })
+        else if (completionPending) publishProgress(acceptanceSucceeded
+          ? { kind: 'completed' } : { kind: 'failed', code: 'INTERRUPTED_RESULT_UNKNOWN' })
+        // Terminal journal admission precedes the bounded provider drain.
+        await drainProgress()
       }
     }
   }

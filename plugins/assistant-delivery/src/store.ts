@@ -82,6 +82,8 @@ import type {
   DeliveryPresentation,
   DeliveryPresentationUpdate,
   DeliveryPrincipal,
+  DeliveryProgressIntent,
+  DeliveryProgressRecord,
   DeliveryReceipt,
   ExternalPrincipalKey,
   InboundEnvelope,
@@ -111,6 +113,25 @@ interface ForegroundSourceRow {
   status: ForegroundExecution['status']; quiescent: number; completed_at: number; execution_ref: string
   model_selection_state: ForegroundExecution['modelSelectionState']; model_provider: string | null
   model_id: string | null; model_reasoning_effort: string | null; completion_sequence: number
+}
+
+interface ProgressRow {
+  inbox_id: string
+  binding_id: string
+  binding_version: number
+  binding_generation: number
+  target_hash: string
+  credential_hash: string
+  provider_handle: string | null
+  sequence: number
+  step: number
+  show_details: number
+  state: DeliveryProgressRecord['state']
+  terminal_kind: 'completed' | 'failed' | 'paused' | null
+  terminal_code: string | null
+  retry_attempts: number
+  next_retry_at: number
+  created_at: number
 }
 
 function foregroundSourceByteLimit(value: number | undefined): number {
@@ -2108,6 +2129,10 @@ export type NaturalObjectiveIntent = Readonly<{
 
 export class DeliveryStore {
   private readonly database: DatabaseSync
+  /** Scan position only; every candidate is authorized again before a provider retry. */
+  private readonly progressRecoveryCursors = new Map<string, {
+    credentialFingerprint: string; createdAt: number; inboxId: string
+  }>()
   private readonly databaseInstanceId: string
   private readonly now: () => number
   private readonly codeGenerator: () => string
@@ -3539,6 +3564,224 @@ export class DeliveryStore {
     const row = this.database.prepare(`${inboxSelect} WHERE channel = ? AND account = ? AND event_id = ?`)
       .get(channel, account, eventId) as InboxRow | undefined
     return row === undefined ? undefined : inboxFromRow(row)
+  }
+
+  private progressAuthority(intent: DeliveryProgressIntent, credentialFingerprint: string): {
+    inbox: InboxRecord; binding: ConversationBinding; targetHash: string
+  } | undefined {
+    if (!/^[0-9a-f]{64}$/u.test(credentialFingerprint)) return undefined
+    const target = canonicalTarget(intent.target)
+    const inbox = this.getInboxByProviderEvent(target.conversation.channel, target.conversation.account, intent.eventId)
+    const binding = this.getBinding(intent.bindingId)
+    const activeBinding = this.getActiveBinding(target.conversation)
+    const principal = this.getPrincipal(target.principal)
+    if (inbox?.bindingId !== intent.bindingId || binding?.status !== 'active'
+      || activeBinding?.id !== binding.id || principal?.status !== 'active'
+      || JSON.stringify(canonicalTarget({ conversation: binding.conversation, principal: binding.principal })) !== JSON.stringify(target)
+      || JSON.stringify(canonicalTarget({ conversation: inbox.envelope.conversation,
+        principal: inbox.envelope.principal })) !== JSON.stringify(target)) return undefined
+    return { inbox, binding, targetHash: createHash('sha256').update(JSON.stringify(target)).digest('hex') }
+  }
+
+  private progressRecord(row: ProgressRow, inbox: InboxRecord): DeliveryProgressRecord {
+    return {
+      bindingId: row.binding_id,
+      eventId: inbox.eventId,
+      target: { conversation: inbox.envelope.conversation, principal: inbox.envelope.principal },
+      ...(row.provider_handle === null ? {} : { providerHandle: row.provider_handle }),
+      sequence: row.sequence,
+      step: row.step,
+      showDetails: row.show_details === 1,
+      state: row.state,
+      ...(row.terminal_kind === null ? {} : { terminal: row.terminal_kind === 'failed'
+        ? { kind: 'failed' as const, ...(row.terminal_code === null ? {} : { code: row.terminal_code }) }
+        : { kind: row.terminal_kind } }),
+    }
+  }
+
+  private progressRow(inboxId: string): ProgressRow | undefined {
+    return this.database.prepare('SELECT * FROM delivery_progress WHERE inbox_id = ?').get(inboxId) as ProgressRow | undefined
+  }
+
+  /** Reserve before provider I/O; a stranded creating row must never trigger another create. */
+  beginProgress(intent: DeliveryProgressIntent, credentialFingerprint: string, sequence: number, showDetails: boolean): {
+    record: DeliveryProgressRecord; created: boolean
+  } | undefined {
+    this.assertOpen()
+    if (intent.update.kind !== 'started' || !Number.isSafeInteger(sequence) || sequence < 1
+      || typeof showDetails !== 'boolean') return undefined
+    return this.transaction(() => {
+      const authority = this.progressAuthority(intent, credentialFingerprint)
+      if (authority === undefined || authority.inbox.status !== 'claimed') return undefined
+      const previous = this.progressRow(authority.inbox.id)
+      if (previous !== undefined) {
+        return previous.binding_id === intent.bindingId && previous.binding_version === authority.binding.version
+          && previous.binding_generation === authority.binding.generation
+          && previous.target_hash === authority.targetHash && previous.credential_hash === credentialFingerprint
+          ? { record: this.progressRecord(previous, authority.inbox), created: false } : undefined
+      }
+      this.database.prepare(`INSERT INTO delivery_progress(
+        inbox_id, binding_id, binding_version, binding_generation, target_hash, credential_hash,
+        sequence, step, show_details, state, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 'creating', ?, ?)`).run(
+        authority.inbox.id, intent.bindingId, authority.binding.version, authority.binding.generation,
+        authority.targetHash, credentialFingerprint, sequence, showDetails ? 1 : 0, this.now(), this.now(),
+      )
+      return { record: this.progressRecord(this.progressRow(authority.inbox.id)!, authority.inbox), created: true }
+    })
+  }
+
+  getProgress(intent: DeliveryProgressIntent, credentialFingerprint: string): DeliveryProgressRecord | undefined {
+    this.assertOpen()
+    const authority = this.progressAuthority(intent, credentialFingerprint)
+    if (authority === undefined) return undefined
+    const row = this.progressRow(authority.inbox.id)
+    if (row === undefined || row.binding_id !== intent.bindingId || row.binding_version !== authority.binding.version
+      || row.binding_generation !== authority.binding.generation || row.target_hash !== authority.targetHash
+      || row.credential_hash !== credentialFingerprint) return undefined
+    return this.progressRecord(row, authority.inbox)
+  }
+
+  attachProgressHandle(intent: DeliveryProgressIntent, credentialFingerprint: string, providerHandle: string): DeliveryProgressRecord | undefined {
+    this.assertOpen()
+    if (typeof providerHandle !== 'string' || providerHandle.length < 2 || Buffer.byteLength(providerHandle) > 2_048) return undefined
+    return this.transaction(() => {
+      const current = this.getProgress(intent, credentialFingerprint)
+      if (current?.state !== 'creating') return undefined
+      const inbox = this.getInboxByProviderEvent(intent.target.conversation.channel, intent.target.conversation.account, intent.eventId)!
+      this.database.prepare(`UPDATE delivery_progress SET provider_handle = ?,
+        state = CASE WHEN terminal_kind IS NULL THEN 'active' ELSE 'pending' END,
+        retry_attempts = CASE WHEN terminal_kind IS NULL THEN 0 ELSE 1 END,
+        next_retry_at = CASE WHEN terminal_kind IS NULL THEN 0 ELSE ? END, updated_at = ?
+        WHERE inbox_id = ? AND state = 'creating' AND provider_handle IS NULL`).run(
+          providerHandle, this.now() + 10_000, this.now(), inbox.id,
+        )
+      return this.getProgress(intent, credentialFingerprint)
+    })
+  }
+
+  advanceProgress(intent: DeliveryProgressIntent, credentialFingerprint: string): DeliveryProgressRecord | undefined {
+    this.assertOpen()
+    return this.transaction(() => {
+      const current = this.getProgress(intent, credentialFingerprint)
+      if (current?.state !== 'active' || current.providerHandle === undefined) return undefined
+      const inbox = this.getInboxByProviderEvent(intent.target.conversation.channel, intent.target.conversation.account, intent.eventId)!
+      this.database.prepare(`UPDATE delivery_progress SET step = step + 1, updated_at = ?
+        WHERE inbox_id = ? AND state = 'active' AND step < 9007199254740991`).run(this.now(), inbox.id)
+      return this.getProgress(intent, credentialFingerprint)
+    })
+  }
+
+  stageProgressTerminal(intent: DeliveryProgressIntent, credentialFingerprint: string): DeliveryProgressRecord | undefined {
+    this.assertOpen()
+    if (!['completed', 'failed', 'paused'].includes(intent.update.kind)) return undefined
+    return this.transaction(() => {
+      const authority = this.progressAuthority(intent, credentialFingerprint)
+      if (authority === undefined) return undefined
+      const inbox = authority.inbox
+      const code = intent.update.kind === 'failed' ? intent.update.code?.slice(0, 80) ?? null : null
+      const current = this.getProgress(intent, credentialFingerprint)
+      if (current === undefined) {
+        if (this.progressRow(inbox.id) !== undefined) return undefined
+        // A terminal may bypass queued provider steps before `started` reserved a row. Fence the
+        // would-be create instead of constructing an untracked progress message after completion.
+        this.database.prepare(`INSERT INTO delivery_progress(
+          inbox_id, binding_id, binding_version, binding_generation, target_hash, credential_hash,
+          sequence, step, show_details, state, terminal_kind, terminal_code, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, 0, 'creating', ?, ?, ?, ?)`).run(
+          inbox.id, intent.bindingId, authority.binding.version, authority.binding.generation,
+          authority.targetHash, credentialFingerprint, intent.update.kind, code, this.now(), this.now(),
+        )
+        return this.getProgress(intent, credentialFingerprint)
+      }
+      if (current.state === 'creating') {
+        this.database.prepare(`UPDATE delivery_progress SET terminal_kind = ?, terminal_code = ?, updated_at = ?
+          WHERE inbox_id = ? AND state = 'creating'`).run(intent.update.kind, code, this.now(), inbox.id)
+        return this.getProgress(intent, credentialFingerprint)
+      }
+      if (current.state !== 'active') return current
+      this.database.prepare(`UPDATE delivery_progress SET state = 'pending', terminal_kind = ?, terminal_code = ?,
+        step = step + 1, retry_attempts = 1, next_retry_at = ?, updated_at = ?
+        WHERE inbox_id = ? AND state = 'active'`).run(
+        intent.update.kind, code, this.now() + 10_000, this.now(), inbox.id,
+      )
+      return this.getProgress(intent, credentialFingerprint)
+    })
+  }
+
+  confirmProgressTerminal(intent: DeliveryProgressIntent, credentialFingerprint: string): void {
+    this.assertOpen()
+    const current = this.getProgress(intent, credentialFingerprint)
+    if (current?.state !== 'pending') return
+    const inbox = this.getInboxByProviderEvent(intent.target.conversation.channel, intent.target.conversation.account, intent.eventId)!
+    this.database.prepare("UPDATE delivery_progress SET state = 'delivered', updated_at = ? WHERE inbox_id = ? AND state = 'pending'")
+      .run(this.now(), inbox.id)
+  }
+
+  /** Only authoritative settled Inbox rows are eligible for restart repair. */
+  recoverProgress(channel: string, account: string, credentialFingerprint: string, limit: number,
+    authorize?: (binding: ConversationBinding, inbox: InboxRecord) => boolean): DeliveryProgressRecord[] {
+    this.assertOpen()
+    if (!/^[0-9a-f]{64}$/u.test(credentialFingerprint) || !Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) return []
+    const cursorKey = JSON.stringify([channel, account])
+    const previous = this.progressRecoveryCursors.get(cursorKey)
+    const cursor = previous?.credentialFingerprint === credentialFingerprint ? previous : undefined
+    let nextCursor: typeof previous
+    const result = this.transaction(() => {
+      const rows = this.database.prepare(`SELECT progress.* FROM delivery_progress AS progress
+        JOIN inbox_messages AS inbox ON inbox.id = progress.inbox_id
+        WHERE inbox.channel = ? AND inbox.account = ? AND progress.credential_hash = ?
+          AND inbox.status IN ('processed', 'dead_letter')
+          AND progress.state IN ('active', 'pending') AND progress.provider_handle IS NOT NULL
+          AND progress.retry_attempts < 8 AND progress.next_retry_at <= ?
+          AND (? = 0 OR progress.created_at > ?
+            OR (progress.created_at = ? AND progress.inbox_id > ?))
+        ORDER BY progress.created_at, progress.inbox_id LIMIT ?`).all(
+          channel, account, credentialFingerprint, this.now(), cursor === undefined ? 0 : 1,
+          cursor?.createdAt ?? 0, cursor?.createdAt ?? 0, cursor?.inboxId ?? '', limit,
+        ) as unknown as ProgressRow[]
+      if (rows.length === 0) return []
+      const recovered: DeliveryProgressRecord[] = []
+      for (const row of rows) {
+        nextCursor = { credentialFingerprint, createdAt: row.created_at, inboxId: row.inbox_id }
+        const inbox = this.getInbox(row.inbox_id)
+        if (inbox === undefined || inbox.bindingId !== row.binding_id) continue
+        const intent: DeliveryProgressIntent = { bindingId: row.binding_id, eventId: inbox.eventId,
+          target: { conversation: inbox.envelope.conversation, principal: inbox.envelope.principal }, update: { kind: 'started' } }
+        const current = this.getProgress(intent, credentialFingerprint)
+        if (current === undefined) continue
+        const binding = this.getBinding(row.binding_id)!
+        if (authorize !== undefined && !authorize(binding, inbox)) continue
+        if (this.database.prepare(`SELECT 1 FROM delivery_session_leases
+          WHERE session_id = ? AND state = 'dispatched' AND lease_until > ?`).get(binding.sessionId, this.now()) !== undefined) continue
+        const execution = this.database.prepare('SELECT status, quiescent FROM delivery_foreground_executions WHERE inbox_id = ?')
+          .get(inbox.id) as { status: string; quiescent: number } | undefined
+        if (inbox.status === 'dead_letter' && inbox.failureCode === 'dispatch-ambiguous' && execution?.status === 'pending') {
+          this.database.prepare(`UPDATE delivery_foreground_executions SET status = 'unknown', quiescent = 0,
+            completed_at = MAX(dispatched_at, ?), execution_ref = inbox_id WHERE inbox_id = ? AND status = 'pending'`)
+            .run(this.now(), inbox.id)
+        }
+        const succeeded = inbox.status === 'processed' && execution?.status === 'succeeded' && execution.quiescent === 1
+        const terminal = current.terminal?.kind === 'failed' || current.terminal?.kind === 'paused'
+          ? current.terminal
+          : succeeded ? { kind: 'completed' as const }
+            : { kind: 'failed' as const, code: 'INTERRUPTED_RESULT_UNKNOWN' }
+        this.database.prepare(`UPDATE delivery_progress SET state = 'pending', terminal_kind = ?, terminal_code = ?,
+          step = step + ?, retry_attempts = retry_attempts + 1, next_retry_at = ?, updated_at = ?
+          WHERE inbox_id = ? AND state IN ('active', 'pending') AND retry_attempts < 8`).run(
+            terminal.kind, terminal.kind === 'failed' ? terminal.code ?? null : null,
+            row.state === 'active' || row.terminal_kind !== terminal.kind ? 1 : 0,
+            this.now() + Math.min(300_000, 10_000 * (2 ** row.retry_attempts)), this.now(), inbox.id,
+          )
+        recovered.push(this.getProgress(intent, credentialFingerprint)!)
+        // Claim one retry per sweep so stopping cannot consume a later record's retry budget.
+        break
+      }
+      return recovered
+    })
+    if (nextCursor === undefined) this.progressRecoveryCursors.delete(cursorKey)
+    else this.progressRecoveryCursors.set(cursorKey, nextCursor)
+    return result
   }
 
   /** Return the oldest durable admission that did not finish before another Inbox. */

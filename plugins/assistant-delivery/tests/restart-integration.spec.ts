@@ -18,7 +18,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { AssistantDeliveryService } from '../src/service.ts'
 import { RestartStore } from '../src/restart-store.ts'
 import { DeliveryStore } from '../src/store.ts'
-import type { DeliveryAdapter, InboundEnvelope, OutboundIntent } from '../src/types.ts'
+import type { DeliveryAdapter, DeliveryProgressIntent, InboundEnvelope, OutboundIntent } from '../src/types.ts'
 
 const roots: string[] = []
 const sourceInvocation = '11111111111111111111111111111111'
@@ -136,6 +136,7 @@ interface Host {
   service: AssistantDeliveryService
   model: ScriptedModel
   sends: OutboundIntent[]
+  progresses: DeliveryProgressIntent[]
   events: SessionEvent[]
   sessionIds: string[]
   readCalls(): number
@@ -270,14 +271,16 @@ async function mountHost(root: string, invocationId: string, script: ModelScript
   ctx.llm.registerAdapter(['fixture'], model)
   await ctx.plugin(AgentLoop, { agents: [] })
   const sends: OutboundIntent[] = []
+  const progresses: DeliveryProgressIntent[] = []
   const adapter: DeliveryAdapter = { channel: 'lark', account: 'bot-1',
     capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'] },
+    progress: async intent => { progresses.push(intent) },
     start: async () => {}, send: async intent => {
       sends.push(intent)
       return { outcome: 'accepted', providerMessageId: `om_${createHash('sha256').update(intent.idempotencyKey).digest('hex').slice(0, 32)}` }
     } }
   await ctx.assistantDelivery.registerAdapter(adapter)
-  return { ctx, service: ctx.assistantDelivery, model, sends, events, sessionIds,
+  return { ctx, service: ctx.assistantDelivery, model, sends, progresses, events, sessionIds,
     readCalls: () => ordinaryReadCalls,
     shadowCalls: () => shadowStatusCalls,
     dispose: async () => { await ctx.fiber.restart() } }
@@ -308,6 +311,7 @@ async function seedRequest(root: string, allowedTools: string[] = [], taskTimeou
     try {
       const record = journal.getRequestForTask(accepted.inboxId)
       expect(record?.status).toBe('ready')
+      expect(first.progresses.at(-1)?.update).toEqual({ kind: 'paused' })
       expect(record?.checkpoint).toBeDefined()
       expect(journal.getTask(accepted.inboxId)?.model).toMatchObject({ provider: 'fixture', model: 'restart-model' })
       expect(journal.getTask(accepted.inboxId)?.modelRequests).toBe(1)
@@ -375,6 +379,35 @@ function inboundAttemptCount(root: string, eventId: string): number | undefined 
 }
 
 describe('planned restart across real Delivery, Policy, AgentLoop and JSONL Sessions', () => {
+  test('does not announce a resumable maintenance handoff when native teardown fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'delivery-restart-teardown-'))
+    roots.push(root)
+    const host = await mountHost(root, sourceInvocation, 'request')
+    const resume = host.ctx.agents.resume.bind(host.ctx.agents)
+    vi.spyOn(host.ctx.agents, 'resume').mockImplementationOnce(async options => {
+      const handle = await resume(options)
+      return new Proxy(handle, { get(target, key, receiver) {
+        if (key === 'dispose') return async () => {
+          await target.dispose()
+          throw new Error('fixture native teardown failed')
+        }
+        return Reflect.get(target, key, receiver)
+      } })
+    })
+    try {
+      const challenge = host.service.issuePairing('test', principal)
+      host.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+      const accepted = await host.service.acceptInbound(inbound('restart-teardown-failed', 'Continue after maintenance'))
+      await drive(host.service)
+      const journal = new RestartStore({ path: join(root, 'restart.sqlite'), readOnly: true })
+      try { expect(journal.getRequestForTask(accepted.inboxId)?.status).toBe('failed') }
+      finally { journal.close() }
+      expect(host.progresses.some(item => item.update.kind === 'paused' || item.update.kind === 'completed')).toBe(false)
+      expect(host.progresses.at(-1)?.update).toEqual({ kind: 'failed', code: 'INTERRUPTED_RESULT_UNKNOWN' })
+      expect(host.model.requests).toHaveLength(1)
+    } finally { await host.dispose() }
+  })
+
   test('restart observation storage failure cannot stop ordinary owner work', async () => {
     const root = await mkdtemp(join(tmpdir(), 'delivery-restart-integration-')); roots.push(root)
     const host = await mountHost(root, sourceInvocation, 'ordinary', { maxModelRequests: 1, maxToolCalls: 1 })

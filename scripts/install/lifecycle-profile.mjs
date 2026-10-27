@@ -1273,9 +1273,9 @@ function validDigest(value) {
 
 function validCompactOperatorProof(proof) {
   const expected = {
-    // v24 adds natural feedback, v25 foreground completion ordering, and v26
-    // restart fences; the owner snapshot contract is unchanged.
-    'assistant-delivery/active-lark-owner-bindings-snapshot/v1': [23, 24, 25, 26],
+    // v24 adds natural feedback, v25 foreground completion ordering, v26
+    // restart fences, and v27 progress handles; owner identity is unchanged.
+    'assistant-delivery/active-lark-owner-bindings-snapshot/v1': [23, 24, 25, 26, 27],
     'assistant-recovery/operator-snapshot/v1': [5],
     'assistant-automations-operator-snapshot/v1': [15],
   }

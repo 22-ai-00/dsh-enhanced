@@ -45,7 +45,7 @@ export function registerWikiTools(
 ): void {
   const search = defineTool({
     name: 'wiki_search',
-    description: 'Search the personal Markdown wiki with bounded, CJK-aware paragraph retrieval.',
+    description: 'Search the personal Markdown wiki with bounded, CJK-aware paragraph retrieval. Authorized calls refresh from current valid vault Markdown, including other-process writes, without a Host restart. Use wiki_upsert for writes; never restart the Host to refresh knowledge.',
     parameters: { query: { type: 'string', required: true }, limit: { type: 'integer' } },
     output: {
       schema: {
@@ -93,7 +93,7 @@ export function registerWikiTools(
 
   const read = defineTool({
     name: 'wiki_read',
-    description: 'Read one wiki page by wiki:// id, stable id, exact title, or exact alias with bounded output.',
+    description: 'Read one wiki page by wiki:// id, stable id, exact title, or exact alias with bounded output. Authorized calls refresh from current valid vault Markdown, including other-process writes, without a Host restart. Use wiki_upsert for writes; never restart the Host to refresh knowledge.',
     parameters: {
       ref: { type: 'string', required: true },
       max_bytes: { type: 'integer' },
@@ -145,7 +145,7 @@ export function registerWikiTools(
 
   const upsert = defineTool({
     name: 'wiki_upsert',
-    description: 'Create or revise one complete wiki page with revision CAS after checking the current page. An explicit current owner request may commit after independent review; otherwise this remains an approval proposal. Report a new write only when this tool returns approved with a page; earlier assistant claims or Policy approval alone do not prove storage. Rejected or expired proposals did not write a page. A new owner message explicitly requesting the change again after rejection or expiry needs a new idempotency key; tool retries for the same request retain its key. If the owner asks to wait for approval, wait.',
+    description: 'Create or revise one complete wiki page with revision CAS after checking the current page. Use this tool for wiki writes; never edit the vault with shell tools or restart the Host to refresh it. Authorized wiki_search and wiki_read automatically refresh from current valid Markdown. An explicit current owner request may commit after independent review; otherwise this remains an approval proposal. Report a new write only when this tool returns approved with a page; earlier assistant claims or Policy approval alone do not prove storage. Rejected or expired proposals did not write a page. A new owner message explicitly requesting the change again after rejection or expiry needs a new idempotency key; tool retries for the same request retain its key. If the owner asks to wait for approval, wait.',
     parameters: {
       operation: { type: 'string', required: true, enum: ['create', 'update'] },
       idempotency_key: { type: 'string', required: true },

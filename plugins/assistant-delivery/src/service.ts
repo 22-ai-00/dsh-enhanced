@@ -126,6 +126,7 @@ import type {
   DeliveryPreferenceProducer,
   DeliveryPreferencePrincipalAttestation,
   DeliveryPreferenceTurnAttestation,
+  DeliveryProgressIntent,
   DeliveryPresentationUpdate,
   DeliveryToolApprovalRequest,
   DeliveryUserQuestionOutcome,
@@ -447,6 +448,8 @@ export interface Config {
   restart?: RestartConfig
   schedulerEnabled?: boolean
   tickIntervalMs?: number
+  /** Upper bound for one ordinary foreground task, including silent model/tool waits. */
+  agentTaskTimeoutMs?: number
   leaseMs?: number
   maxAttempts?: number
   maxConcurrency?: number
@@ -636,6 +639,7 @@ const configSchema = Schema.object({
   })]),
   schedulerEnabled: Schema.boolean().default(true),
   tickIntervalMs: Schema.number().step(1).min(100).default(1_000),
+  agentTaskTimeoutMs: Schema.number().step(1).min(1_000).max(86_400_000).default(1_800_000),
   leaseMs: Schema.number().step(1).min(1_000).default(30_000),
   maxAttempts: Schema.number().step(1).min(1).max(100).default(5),
   maxConcurrency: Schema.number().step(1).min(1).max(100).default(4),
@@ -1211,6 +1215,24 @@ export class AssistantDeliveryService extends Service {
         if (!this.active) return
         this.deliveryStore.recordReceipt(receipt)
       },
+      progressJournal: {
+        begin: async (intent, fingerprint, sequence, showDetails) => this.progressAuthorized(intent)
+          ? this.deliveryStore.beginProgress(intent, fingerprint, sequence, showDetails) : undefined,
+        get: async (intent, fingerprint) => this.progressAuthorized(intent)
+          ? this.deliveryStore.getProgress(intent, fingerprint) : undefined,
+        created: async (intent, fingerprint, handle) => this.progressAuthorized(intent)
+          ? this.deliveryStore.attachProgressHandle(intent, fingerprint, handle) : undefined,
+        advance: async (intent, fingerprint) => this.progressAuthorized(intent)
+          ? this.deliveryStore.advanceProgress(intent, fingerprint) : undefined,
+        stageTerminal: async (intent, fingerprint) => this.progressAuthorized(intent)
+          ? this.deliveryStore.stageProgressTerminal(intent, fingerprint) : undefined,
+        delivered: async (intent, fingerprint) => {
+          if (this.progressAuthorized(intent)) this.deliveryStore.confirmProgressTerminal(intent, fingerprint)
+        },
+        recover: async (channel, account, fingerprint, limit) => this.active
+          ? this.deliveryStore.recoverProgress(channel, account, fingerprint, limit,
+            (binding, inbox) => this.isInboundAuthorized(binding, inbox.envelope)) : [],
+      },
     })
     const imageMaterializer = new InboundImageMaterializer({
       store: this.deliveryStore,
@@ -1256,6 +1278,7 @@ export class AssistantDeliveryService extends Service {
         readOwnerApprovalStatus: agent => this.readOwnerApprovalStatus(agent),
         provider: config.agentProvider, model: config.agentModel, maxOutputTokens: config.agentMaxOutputTokens,
         maxAutoContinuationTurns: config.agentMaxAutoContinuationTurns,
+        taskTimeoutMs: config.agentTaskTimeoutMs,
         goalContinuationTimeoutMs: config.agentGoalContinuationTimeoutMs,
         maxTextBytes: config.maxTextBytes,
         prepareForegroundTaskAcceptance: (binding, envelope) => this.prepareForegroundTaskAcceptance(binding, envelope),
@@ -3171,6 +3194,16 @@ export class AssistantDeliveryService extends Service {
     const stored = this.deliveryStore.publishDeliveryPresentation(input)
     void this.drainDeliveryPresentations()
     return stored
+  }
+
+  private progressAuthorized(intent: Readonly<DeliveryProgressIntent>): boolean {
+    if (!this.active) return false
+    const inbox = this.deliveryStore.getInboxByProviderEvent(
+      intent.target.conversation.channel, intent.target.conversation.account, intent.eventId,
+    )
+    const binding = this.deliveryStore.getBinding(intent.bindingId)
+    return inbox !== undefined && binding !== undefined && inbox.bindingId === binding.id
+      && this.isInboundAuthorized(binding, inbox.envelope)
   }
 
   private isInboundAuthorized(

@@ -87,6 +87,8 @@ export interface LarkAdapterOptions {
   onDisconnected?(): void
   showProgress?: boolean
   progressDetails?: 'off' | 'direct'
+  /** SHA-256 of the exact app identity and secret, never the secret itself. */
+  progressCredentialFingerprint?: string
   statusReactions?: boolean
   userQuestionTtlMs?: number
   approvalSecret?: string
@@ -527,6 +529,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   private readonly statusReactions: boolean
   private readonly userQuestionTtlMs: number
   private readonly progressPresenter: LarkProgressPresenter
+  private readonly progressCredentialFingerprint: string | undefined
   private readonly pendingToolApprovals = new Map<string, PendingToolApproval>()
   private readonly pendingUserQuestions = new Map<string, PendingUserQuestion>()
   private readonly userQuestionAnswerEvents = new Map<string, ReturnType<typeof setTimeout>>()
@@ -570,6 +573,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     this.advanceModelPicker = options.advanceModelPicker
     this.statusReactions = options.statusReactions ?? true
     this.userQuestionTtlMs = options.userQuestionTtlMs ?? 24 * 60 * 60 * 1_000
+    this.progressCredentialFingerprint = options.progressCredentialFingerprint
     this.progressPresenter = new LarkProgressPresenter(
       transport,
       options.showProgress ?? true,
@@ -582,6 +586,16 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     this.closing = false
     this.presentationGeneration += 1
     this.state = 'connecting'
+    this.progressPresenter.bindJournal(context.progressJournal, this.progressCredentialFingerprint)
+    let recovery: Promise<void> | undefined
+    let recoveryTimer: ReturnType<typeof setInterval> | undefined
+    const recover = () => {
+      if (recovery !== undefined || this.closing
+        || (this.state !== 'connected' && this.state !== 'connected-with-gap')) return
+      recovery = this.progressPresenter.recover(this.channel, this.account)
+        .catch(error => this.recordPresentationFailure(error))
+        .finally(() => { recovery = undefined })
+    }
     const unsubscribe = this.transport.subscribe({
       message: async message => {
         // A reply to a live question card is already an explicit interaction
@@ -623,6 +637,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       reconnected: () => {
         this.state = 'connected-with-gap'
         this.onConnected?.()
+        recover()
       },
       error: error => {
         this.lastErrorCode = error.code
@@ -636,7 +651,11 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       await this.transport.connect()
       this.state = 'connected'
       this.onConnected?.()
+      recover()
+      recoveryTimer = setInterval(recover, 10_000)
+      recoveryTimer.unref?.()
     } catch (error) {
+      this.progressPresenter.stop()
       unsubscribe()
       this.state = 'disconnected'
       this.cancelPendingToolApprovals('unavailable', true)
@@ -648,15 +667,26 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     return async () => {
       if (!active) return
       active = false
+      if (recoveryTimer !== undefined) clearInterval(recoveryTimer)
+      this.closing = true
+      this.progressPresenter.stop()
       unsubscribe()
       this.leaveConnected('disconnected')
       this.cancelPendingToolApprovals('unavailable', true)
       this.cancelPendingUserQuestions()
       this.clearUserQuestionAnswerEvents()
       this.cancelModelSelectionUpdates()
-      this.closing = true
       await this.drainToolApprovalUpdates()
       await this.transport.disconnect()
+      if (recovery !== undefined) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          await Promise.race([recovery, new Promise<void>(resolve => {
+            timer = setTimeout(resolve, 5_000)
+            timer.unref?.()
+          })])
+        } finally { if (timer !== undefined) clearTimeout(timer) }
+      }
     }
   }
 
