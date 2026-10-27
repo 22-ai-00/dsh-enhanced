@@ -3846,7 +3846,7 @@ export class DeliveryStore {
     const limit = boundedMaintenanceLimit(input.limit, 100, 'interrupted Inbox')
     const rows = this.database.prepare(`${inboxSelect}
       WHERE inbox_messages.status = 'dead_letter'
-        AND inbox_messages.failure_code = 'dispatch-ambiguous'
+        AND inbox_messages.failure_code IN ('dispatch-ambiguous', 'agent-task-timeout')
         AND json_extract(inbox_messages.envelope_json, '$.kind') = 'text'
         AND inbox_messages.channel != 'web'
         AND inbox_messages.binding_id IS NOT NULL
@@ -3916,7 +3916,8 @@ export class DeliveryStore {
       principal_record_id: string; principal_version: number; binding_id: string
       binding_version: number; binding_generation: number; workspace: string; preset: string
     } | undefined
-    return inbox?.status === 'dead_letter' && inbox.failureCode === 'dispatch-ambiguous'
+    return inbox?.status === 'dead_letter'
+      && (inbox.failureCode === 'dispatch-ambiguous' || inbox.failureCode === 'agent-task-timeout')
       && inbox.envelope.kind === 'text' && inbox.channel !== 'web'
       && binding?.status === 'active' && binding.id === input.binding.id
       && binding.version === input.binding.version && binding.generation === input.binding.generation

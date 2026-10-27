@@ -4376,8 +4376,12 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         return { outcome: 'processed' }
       }
       if (dispatched) {
-        publishProgress({ kind: 'failed', ...(signal.reason instanceof AgentTaskTimeoutError
+        const timedOut = signal.reason instanceof AgentTaskTimeoutError
+        publishProgress({ kind: 'failed', ...(timedOut
           ? { code: 'agent-task-timeout' } : {}) })
+        // Preserve an exact durable diagnosis so the existing interruption
+        // Outbox can notify the owner even when progress presentation failed.
+        if (timedOut) return { outcome: 'not-processed', failureCode: 'agent-task-timeout', retryable: false }
         throw new Error(`assistant-delivery: Agent turn became ambiguous: ${String(error)}`, { cause: error })
       }
       if (causedByDurableIdentity(error)) {

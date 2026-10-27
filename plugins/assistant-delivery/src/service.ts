@@ -202,6 +202,7 @@ const goalOutcomeFeedbackFooter = [
 ].join('\n')
 const goalWakeCompletionNotice = '目标已通过独立验收并完成。'
 const interruptedTurnNotice = '这次请求在执行过程中被中断，当前已停止等待；已有操作的结果尚未确认，因此没有自动重跑。你可以继续发送消息；涉及写入的任务需要先核对现有结果。'
+const timedOutTurnNotice = '这次请求等待超时；已有操作的结果尚未确认，因此不会自动重跑。'
 
 interface GoalOutcomeFeedbackAuthority {
   issueOwnerGoalOutcomeFeedbackTarget(locator: Readonly<OwnerGoalOutcomeFeedbackLocator>): unknown
@@ -4710,7 +4711,9 @@ export class AssistantDeliveryService extends Service {
         const inboxId = key.slice('inbound:'.length, -':interrupted'.length)
         const inbox = this.deliveryStore.getInbox(inboxId)
         const binding = this.deliveryStore.getBinding(record.intent.bindingId)
-        if (record.intent.text !== interruptedTurnNotice || inbox === undefined || binding === undefined
+        const expectedNotice = inbox?.failureCode === 'agent-task-timeout'
+          ? timedOutTurnNotice : interruptedTurnNotice
+        if (record.intent.text !== expectedNotice || inbox === undefined || binding === undefined
           || !this.deliveryStore.canSendInterruptedInboxNotice(record)
           || !this.isInboundAuthorized(binding, inbox.envelope)) {
           throw new Error('interrupted Inbox authority changed')
@@ -5889,7 +5892,8 @@ export class AssistantDeliveryService extends Service {
       this.interruptedInboxNoticeAfterSequence = inbox.admissionCursor.sequence
       try {
         const current = this.deliveryStore.getInbox(inbox.id)
-        if (current?.status !== 'dead_letter' || current.failureCode !== 'dispatch-ambiguous'
+        if (current?.status !== 'dead_letter'
+          || (current.failureCode !== 'dispatch-ambiguous' && current.failureCode !== 'agent-task-timeout')
           || current.bindingId === undefined
           || this.deliveryStore.getDeadLetterResolution({ kind: 'inbox', id: current.id,
             attemptCount: current.attemptCount }) !== undefined
@@ -5903,7 +5907,8 @@ export class AssistantDeliveryService extends Service {
           || !this.isInboundAuthorized(binding, current.envelope)
           || this.registry.get(binding.conversation.channel, binding.conversation.account) === undefined) continue
         this.replyCommand(binding, { idempotencyKey: `inbound:${current.id}:interrupted`,
-          interruptedInboxId: current.id, replyToEventId: current.eventId, text: interruptedTurnNotice })
+          interruptedInboxId: current.id, replyToEventId: current.eventId,
+          text: current.failureCode === 'agent-task-timeout' ? timedOutTurnNotice : interruptedTurnNotice })
       } catch (error) {
         if (!this.active) return
         if ((error instanceof AssistantDeliveryError && (error.code === 'policy-denied' || error.code === 'missing-binding'))

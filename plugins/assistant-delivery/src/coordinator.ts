@@ -819,6 +819,11 @@ export class InboundCoordinator {
       return
     }
     if (dispatchMarked && result.outcome !== 'processed') {
+      if (result.failureCode === 'agent-task-timeout') {
+        this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken,
+          outcome: 'dead_letter', failureCode: 'agent-task-timeout' })
+        return
+      }
       if (permissionDispatchRecoveryFromFailureCode(result.failureCode) !== undefined
         || isFeedbackDispatchRecoveryCode(result.failureCode)
         || isFeedbackRetryableFailureCode(result.failureCode)
@@ -838,6 +843,11 @@ export class InboundCoordinator {
   private finishInbound(inboxId: string, fencingToken: number, result: InboundProcessResult): void {
     if (result.outcome === 'processed') {
       this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken, outcome: 'processed' })
+      return
+    }
+    if (result.failureCode === 'agent-task-timeout') {
+      this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken,
+        outcome: 'dead_letter', failureCode: 'agent-task-timeout' })
       return
     }
     if (result.failureCode === 'session-lease-busy'

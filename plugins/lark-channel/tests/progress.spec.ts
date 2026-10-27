@@ -154,7 +154,8 @@ describe('Lark durable progress presentation', () => {
     expect(createProgress).toHaveBeenCalledOnce()
     const writes = writeProgress.mock.calls as unknown as Array<[unknown, unknown]>
     expect(writes.at(-1)?.[0]).toEqual({ cotId: 'cot-1', messageId: 'om-progress' })
-    expect(JSON.stringify(writes.at(-1)?.[1])).toContain('任务已超时，处理已停止')
+    expect(JSON.stringify(writes.at(-1)?.[1])).toContain('任务等待已超时，结果尚未确认')
+    expect(JSON.stringify(writes.at(-1)?.[1])).not.toContain('处理已停止')
     expect(state.record()?.state).toBe('delivered')
     await second.recover('lark', 'bot')
     expect(writeProgress).toHaveBeenCalledTimes(3)
