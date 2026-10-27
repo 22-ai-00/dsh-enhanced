@@ -402,7 +402,58 @@ describe('assistant delivery Cordis service', () => {
     await reopened.ctx.fiber.restart()
   })
 
-  test('does not notify an interrupted turn with an unknown final reply or revoked owner', async () => {
+  test('sends one durable timeout notice after restart without replaying the foreground task', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-timeout-notice-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const original = runtimeStoreFromService(first.service)
+    const binding = original.createBinding({ conversation, principal, workspace: '/work/alpha',
+      agentPreset: 'primary', sessionId: 'timed-out-session', policyRef: 'owner-dm' })
+    const inbox = original.acceptInbound({ ...envelope, eventId: 'evt-agent-task-timeout' }).record
+    original.queueInbox(inbox.id, binding.id)
+    const claim = original.claimInbox({ ownerId: 'worker', leaseMs: 30_000, limit: 1, maxAttempts: 3 })[0]!
+    original.markInboxDispatching({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken, binding })
+    recordPendingForeground(root, original, inbox.id, binding)
+    original.finishInbox({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken,
+      outcome: 'dead_letter', failureCode: 'agent-task-timeout' })
+    const legacy = original.acceptInbound({ ...envelope, eventId: 'evt-old-processor-ambiguous' }).record
+    original.queueInbox(legacy.id, binding.id)
+    const legacyClaim = original.claimInbox({ ownerId: 'worker', leaseMs: 30_000, limit: 1, maxAttempts: 3 })[0]!
+    original.markInboxDispatching({ inboxId: legacy.id, ownerId: 'worker',
+      fencingToken: legacyClaim.fencingToken, binding })
+    recordPendingForeground(root, original, legacy.id, binding)
+    original.finishInbox({ inboxId: legacy.id, ownerId: 'worker', fencingToken: legacyClaim.fencingToken,
+      outcome: 'dead_letter', failureCode: 'processor-ambiguous' })
+    await first.ctx.fiber.restart()
+
+    const reopened = await mountHarness(root)
+    const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+    reopened.service.registerInboundRuntime({ createSession: async () => ({ sessionId: 'unexpected',
+      workspace: '/work/alpha', agentPreset: 'primary', policyRef: 'owner-dm' }), process })
+    const send = vi.fn(async () => ({ outcome: 'accepted' as const, providerMessageId: 'om_timeout' }))
+    await reopened.service.registerAdapter({ channel: 'lark', account: 'bot-1',
+      capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'] },
+      start: async () => {}, send })
+    await reopened.service.tick()
+    await reopened.service.whenIdle()
+    const store = runtimeStoreFromService(reopened.service)
+    expect(store.getOutboxByIdempotencyKey(`inbound:${inbox.id}:interrupted`)).toMatchObject({
+      status: 'accepted', intent: { replyToEventId: inbox.eventId,
+        text: '这次请求等待超时；已有操作的结果尚未确认，因此不会自动重跑。' },
+    })
+    expect(store.getInbox(inbox.id)).toMatchObject({ status: 'dead_letter',
+      failureCode: 'agent-task-timeout', attemptCount: 1 })
+    expect(store.getOutboxByIdempotencyKey(`inbound:${legacy.id}:interrupted`)).toBeUndefined()
+    expect(process).not.toHaveBeenCalled()
+    await reopened.service.tick()
+    expect(send).toHaveBeenCalledOnce()
+    await reopened.ctx.fiber.restart()
+  })
+
+  test.each(['dispatch-ambiguous', 'agent-task-timeout'] as const)(
+    'does not notify %s with an unknown final reply or revoked owner', async failureCode => {
     const { ctx, service, root } = await harness()
     const challenge = service.issuePairing('test', principal)
     service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
@@ -416,7 +467,7 @@ describe('assistant delivery Cordis service', () => {
       store.markInboxDispatching({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken, binding })
       recordPendingForeground(root, store, inbox.id, binding)
       store.finishInbox({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken,
-        outcome: 'dead_letter', failureCode: 'dispatch-ambiguous' })
+        outcome: 'dead_letter', failureCode })
       return inbox
     }
     const replied = interrupt('evt-already-replied')
@@ -479,7 +530,8 @@ describe('assistant delivery Cordis service', () => {
     await ctx.fiber.restart()
   })
 
-  test('does not queue an interrupted notice after reply policy is removed', async () => {
+  test.each(['dispatch-ambiguous', 'agent-task-timeout'] as const)(
+    'does not queue a %s notice after reply policy is removed', async failureCode => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-interrupted-policy-'))
     roots.push(root)
     const first = await mountHarness(root)
@@ -494,7 +546,7 @@ describe('assistant delivery Cordis service', () => {
     store.markInboxDispatching({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken, binding })
     recordPendingForeground(root, store, inbox.id, binding)
     store.finishInbox({ inboxId: inbox.id, ownerId: 'worker', fencingToken: claim.fencingToken,
-      outcome: 'dead_letter', failureCode: 'dispatch-ambiguous' })
+      outcome: 'dead_letter', failureCode })
     await first.ctx.fiber.restart()
 
     const denied = await mountHarness(root, false)

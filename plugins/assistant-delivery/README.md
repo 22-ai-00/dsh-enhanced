@@ -385,7 +385,7 @@ Automation incident 使用 `automation-incident:<incidentId>:g<generation>` 同�
 
 ## 受控维护重启
 
-普通前台任务默认有 30 分钟执行期限（`agentTaskTimeoutMs`）。期限到达后取消原生 Agent，并给合作的取消流程最多 1 秒写入原生结束事件；不响应取消的模型或工具不再无限占用 Delivery 等待。未确认停止的操作保持 unknown，Session lease 在真实 disposer 完成前继续阻止接管和迟到工具，不自动重放写入任务。
+普通前台任务默认有 30 分钟执行期限（`agentTaskTimeoutMs`）。期限到达后取消原生 Agent，并给合作的取消流程最多 1 秒写入原生结束事件；不响应取消的模型或工具不再无限占用 Delivery 等待。超时原因持久写入 Inbox，进度接口失败时仍通过原有 Outbox 发送幂等中断通知，不标 DONE。未确认停止的操作保持 unknown，Session lease 在真实 disposer 完成前继续阻止接管和迟到工具，不自动重放写入任务。
 
 schema v27 持久保存渠道进度句柄及待发送终态。终态先入账，再调用渠道接口；普通退出最多等待进度 5 秒。支持此接口的适配器在重连后依据 Inbox 和执行回执收尾，不能将中断或未知结果显示为任务成功。旧版本未保存的句柄无法回填，也不能据此原位关闭历史气泡。
 

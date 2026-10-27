@@ -668,7 +668,6 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       if (!active) return
       active = false
       if (recoveryTimer !== undefined) clearInterval(recoveryTimer)
-      this.closing = true
       this.progressPresenter.stop()
       unsubscribe()
       this.leaveConnected('disconnected')
@@ -676,6 +675,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       this.cancelPendingUserQuestions()
       this.clearUserQuestionAnswerEvents()
       this.cancelModelSelectionUpdates()
+      this.closing = true
       await this.drainToolApprovalUpdates()
       await this.transport.disconnect()
       if (recovery !== undefined) {

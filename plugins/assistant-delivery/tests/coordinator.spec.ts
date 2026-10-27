@@ -1008,6 +1008,41 @@ describe('adapter registry and delivery coordinator', () => {
     }
   })
 
+  test('keeps a post-dispatch task timeout as a non-retryable dead letter even if a processor requests retry', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('explicit-post-dispatch-timeout').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-explicit-post-dispatch-timeout', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'long task',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const process = vi.fn(async (
+      _binding: unknown, _envelope: unknown, _signal: AbortSignal, _prepared?: unknown,
+      markDispatching?: () => void,
+    ) => {
+      markDispatching!()
+      return { outcome: 'not-processed' as const, failureCode: 'agent-task-timeout', retryable: true }
+    })
+    const coordinator = new InboundCoordinator({ store: f.store,
+      processor: () => ({ dispatchControl: 'explicit' as const, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000, now: () => 1_000, random: () => 0 })
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      f.setNow(1_100)
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(process).toHaveBeenCalledOnce()
+      expect(f.store.getInbox(record.id)).toMatchObject({
+        status: 'dead_letter', attemptCount: 1, failureCode: 'agent-task-timeout',
+      })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
   test('throws from an explicit gate whose durable marker write fails', async () => {
     const f = await fixture()
     const target = f.makeIntent('explicit-marker-failure').target

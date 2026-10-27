@@ -167,16 +167,16 @@ function updateEvents(
   // A failed turn may have produced no step at all (the provider can fail before any output), so
   // state the failure in the panel body too; RUN_ERROR alone leaves the surface on its opening line.
   if (update.code === 'agent-task-timeout') return [
-    ...textEvents(`failed-${sequence}-${step}`, '任务已超时，处理已停止。'),
-    progressEvent('RUN_ERROR', { message: '任务已超时，处理已停止。', code: 'TASK_TIMEOUT' }),
+    ...textEvents(`failed-${sequence}-${step}`, '本次等待已超时；已有操作的结果尚未确认，不会自动重跑。'),
+    progressEvent('RUN_ERROR', { message: '任务等待已超时，结果尚未确认。', code: 'TASK_TIMEOUT' }),
   ]
   if (update.code === 'INTERRUPTED_RESULT_UNKNOWN') return [
     ...textEvents(`failed-${sequence}-${step}`, '执行被中断，已有操作的结果尚未确认。'),
     progressEvent('RUN_ERROR', { message: '执行被中断，结果尚未确认。', code: 'TASK_RESULT_UNKNOWN' }),
   ]
   if (update.code === 'user-stopped') return [
-    ...textEvents(`failed-${sequence}-${step}`, '任务已停止。'),
-    progressEvent('RUN_ERROR', { message: '任务已停止。', code: 'TASK_STOPPED' }),
+    ...textEvents(`failed-${sequence}-${step}`, '已响应停止请求，结束本次等待。'),
+    progressEvent('RUN_ERROR', { message: '已结束本次等待。', code: 'TASK_STOPPED' }),
   ]
   const code = !showDetails || update.code === undefined ? undefined : boundedLabel(update.code, 80)
   return [

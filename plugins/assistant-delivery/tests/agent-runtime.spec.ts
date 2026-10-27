@@ -10568,6 +10568,10 @@ describe('real native Delivery Agent runtime', () => {
       presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
       allowPresetProbeExecution: true, taskTimeoutMs: 1_000,
     })
+    if (mode === 'model') vi.spyOn(fixture.channel, 'progress').mockImplementation(async intent => {
+      fixture.progresses.push(intent)
+      throw new Error('fixture progress provider is unavailable')
+    })
     let retainedAgent: Agent | undefined
     fixture.ctx.on('agent/pre-step', async ({ agent }, next) => { retainedAgent = agent; return await next() })
     let begin!: () => void
@@ -10596,7 +10600,7 @@ describe('real native Delivery Agent runtime', () => {
       let completed = false
       void running.then(() => { completed = true })
       await vi.waitFor(() => expect(completed).toBe(true), { timeout: 3_000 })
-      expect(runtimeStore(fixture.service).getInbox(accepted.inboxId!)).toMatchObject({ status: 'dead_letter', failureCode: 'processor-ambiguous' })
+      expect(runtimeStore(fixture.service).getInbox(accepted.inboxId!)).toMatchObject({ status: 'dead_letter', failureCode: 'agent-task-timeout' })
       expect(fixture.progresses.at(-1)?.update).toEqual({ kind: 'failed', code: 'agent-task-timeout' })
       expect(fixture.llm.requests).toHaveLength(1)
       // Finishing presentation does not claim the underlying operation stopped.
@@ -10606,6 +10610,13 @@ describe('real native Delivery Agent runtime', () => {
       expect(late.isError).toBe(true)
       expect(fixture.presetExecute).toHaveBeenCalledTimes(mode === 'tool' ? 1 : 0)
       await fixture.service.tick()
+      await fixture.service.whenIdle()
+      await fixture.service.tick()
+      await fixture.service.whenIdle()
+      const notices = fixture.sends.filter(item => item.idempotencyKey === `inbound:${accepted.inboxId}:interrupted`)
+      expect(notices).toHaveLength(1)
+      expect(notices[0]?.text).toContain('超时')
+      expect(notices[0]?.text).toContain('结果尚未确认')
       expect(fixture.llm.requests).toHaveLength(1)
       release()
       await vi.waitFor(() => expect(fixture.ctx.agents.get(retainedAgent!.id)).toBeUndefined())
