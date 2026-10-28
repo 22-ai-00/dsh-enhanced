@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, readFile, realpath, rm } from 'node:fs/promises'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
@@ -57,6 +57,17 @@ export interface LinuxNamespaceResult {
   reason?: string
 }
 
+/** Host-only binary repository transport; never exposed as an ordinary tool input. */
+export interface LinuxRepositoryNamespaceInput extends Omit<LinuxNamespaceInput, 'files' | 'profile'> {
+  archive: { bytes: Uint8Array; sha256: string }
+}
+export interface LinuxRepositoryNamespaceResult extends Omit<LinuxNamespaceResult, 'artifacts'> {
+  artifacts: { path: string; bytes: Buffer; sha256: string }[]
+}
+export const LINUX_REPOSITORY_INPUT_BYTES = 64 * 1024 ** 2
+export const LINUX_REPOSITORY_INPUT_MOUNT_BYTES = LINUX_REPOSITORY_INPUT_BYTES + 4096
+export const LINUX_REPOSITORY_ARTIFACT_BYTES = 32 * 1024 ** 2
+
 function fail(message: string): never { throw new Error(`linux namespace: ${message}`) }
 function canonical(path: string): boolean { return isAbsolute(path) && resolve(path) === path
   && !path.includes('\0') && !path.includes('\r') && !path.includes('\n') }
@@ -73,7 +84,7 @@ async function privateDirectory(path: string): Promise<void> {
     fail('state root must be owner-private')
   }
 }
-async function validate(input: LinuxNamespaceInput): Promise<void> {
+async function validate(input: LinuxNamespaceInput, repository = false): Promise<void> {
   if (process.platform !== 'linux' || process.getuid?.() === 0) fail('requires non-root Linux')
   await privateDirectory(input.stateRoot)
   for (const source of ['/usr', '/lib', '/lib64']) {
@@ -89,10 +100,10 @@ async function validate(input: LinuxNamespaceInput): Promise<void> {
   if (!Array.isArray(input.argv) || input.argv.length < 1 || input.argv.length > 64
     || !input.argv.every((arg, i) => typeof arg === 'string' && arg.length <= 65_536
       && !arg.includes('\0') && (i !== 0 || canonical(arg)))) fail('invalid command')
-  if (!integer(input.workspaceBytes, 4096, 4 * 1024 ** 3) || input.workspaceBytes % 4096 !== 0
-    || !integer(input.tmpBytes, 4096, 2 * 1024 ** 3) || input.tmpBytes % 4096 !== 0
+  if (!integer(input.workspaceBytes, 4096, (repository ? 8 : 4) * 1024 ** 3) || input.workspaceBytes % 4096 !== 0
+    || !integer(input.tmpBytes, 4096, (repository ? 4 : 2) * 1024 ** 3) || input.tmpBytes % 4096 !== 0
     || !integer(input.workspaceInodes, 16, 1_000_000) || !integer(input.tmpInodes, 16, 1_000_000)
-    || !integer(input.maxArtifactBytes ?? MAX_INPUT_BYTES, 1, MAX_INPUT_BYTES)
+    || !integer(input.maxArtifactBytes ?? MAX_INPUT_BYTES, 1, (repository ? LINUX_REPOSITORY_ARTIFACT_BYTES : MAX_INPUT_BYTES))
     || !integer(input.timeoutMs, 1, 1_800_000) || !integer(input.maxOutputBytes, 1, 1_048_576)) fail('invalid limits')
   if (!Array.isArray(input.files) || input.files.length > 128 || !Array.isArray(input.artifacts ?? [])
     || (input.artifacts?.length ?? 0) > 128) fail('invalid files or artifacts')
@@ -130,11 +141,26 @@ function identity(value: Message): LinuxCandidateIdentity {
 
 /** A process primitive. The caller's afterExit/onStop implement cgroup proof. */
 export async function runLinuxNamespace(input: LinuxNamespaceInput): Promise<LinuxNamespaceResult> {
-  await validate(input)
+  return await runNamespace(input) as LinuxNamespaceResult
+}
+
+export async function runLinuxRepositoryNamespace(input: LinuxRepositoryNamespaceInput): Promise<LinuxRepositoryNamespaceResult> {
+  if (!input.archive || !(input.archive.bytes instanceof Uint8Array)
+    || input.archive.bytes.byteLength < 1 || input.archive.bytes.byteLength > LINUX_REPOSITORY_INPUT_BYTES
+    || !/^[0-9a-f]{64}$/u.test(input.archive.sha256)
+    || createHash('sha256').update(input.archive.bytes).digest('hex') !== input.archive.sha256) fail('invalid repository archive')
+  // Snapshot the caller-owned view before asynchronous admission or pipe writes.
+  const archive = { bytes: Buffer.from(input.archive.bytes), sha256: input.archive.sha256 }
+  return await runNamespace({ ...input, files: [], profile: 'repository',
+    maxArtifactBytes: input.maxArtifactBytes ?? LINUX_REPOSITORY_ARTIFACT_BYTES }, archive) as LinuxRepositoryNamespaceResult
+}
+
+async function runNamespace(input: LinuxNamespaceInput, archive?: { bytes: Buffer; sha256: string }): Promise<Omit<LinuxNamespaceResult, 'artifacts'> & { artifacts: LinuxNamespaceResult['artifacts'] | LinuxRepositoryNamespaceResult['artifacts'] }> {
+  await validate(input, archive !== undefined)
   const jobPath = join(input.stateRoot, `namespace-${input.namespaceId ?? randomUUID()}`)
   await mkdir(jobPath, { mode: 0o700 })
   const deadline = Date.now() + input.timeoutMs
-  const config = { schemaVersion: 1, jobPath, argv: input.argv, files: input.files,
+  const config = { schemaVersion: archive ? 2 : 1, ...(archive ? { archive: { size: archive.bytes.length, sha256: archive.sha256 } } : {}), jobPath, argv: input.argv, files: input.files,
     artifacts: input.artifacts ?? [], readOnlyRoots: input.readOnlyRoots ?? [],
     workspaceBytes: input.workspaceBytes, workspaceInodes: input.workspaceInodes,
     tmpBytes: input.tmpBytes, tmpInodes: input.tmpInodes,
@@ -150,7 +176,7 @@ export async function runLinuxNamespace(input: LinuxNamespaceInput): Promise<Lin
     'IFS= read -r gate <&3 || exit 125; [ "$gate" = START ] || exit 125; exec 3<&-; exec "$@"',
     'dsh-keeper-gate', '/usr/bin/unshare', '--user', '--map-root-user', '--mount', '--fork',
     '--kill-child=SIGKILL', '--net', '--ipc', '--uts', process.execPath, WORKER], {
-    stdio: ['pipe', 'pipe', 'pipe', 'pipe'], shell: false, detached: true,
+    stdio: archive ? ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe', 'pipe'], shell: false, detached: true,
     env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
   })
   const messages: Message[] = []
@@ -185,6 +211,24 @@ export async function runLinuxNamespace(input: LinuxNamespaceInput): Promise<Lin
     }
     child.kill('SIGKILL')
   }
+  const archivePipe = child.stdio[4] as import('node:stream').Writable | null
+  const artifactPipe = (child.stdio as Array<import('node:stream').Readable | import('node:stream').Writable | null | undefined>)[5] as import('node:stream').Readable | null
+  archivePipe?.on('error', () => stop('unknown'))
+  let exporting = false
+  let binaryBytes = 0
+  const binaryChunks: Buffer[] = []
+  const binaryDone = new Promise<void>(resolveBinary => {
+    if (!artifactPipe) { resolveBinary(); return }
+    artifactPipe.on('data', (chunk: Buffer) => {
+      binaryBytes += chunk.length
+      if (!exporting || binaryBytes > (input.maxArtifactBytes ?? MAX_INPUT_BYTES)) { stop('unknown'); return }
+      binaryChunks.push(chunk)
+    })
+    artifactPipe.once('end', resolveBinary)
+    artifactPipe.once('error', () => { stop('unknown'); resolveBinary() })
+    artifactPipe.once('close', resolveBinary)
+  })
+  let archiveSent: Promise<void> | undefined
   const timer = setTimeout(() => stop('timed-out'), Math.max(1, deadline - Date.now()))
   const assertLive = (): void => {
     if (Date.now() >= deadline) stop('timed-out')
@@ -248,6 +292,13 @@ export async function runLinuxNamespace(input: LinuxNamespaceInput): Promise<Lin
       closed.then(() => fail('keeper exited during admission')), interrupted()])
     assertLive()
     keeperGate?.end('START\n')
+    if (archive && archivePipe) {
+      archiveSent = new Promise<void>(resolveSent => {
+        // One bounded buffer is queued; the stream owns backpressure until EOF.
+        archivePipe.end(archive.bytes, resolveSent)
+        archivePipe.once('close', resolveSent)
+      })
+    }
     const ready = await next()
     if (ready.type !== 'READY') fail('worker failed before candidate gate')
     candidate = identity(ready)
@@ -263,18 +314,38 @@ export async function runLinuxNamespace(input: LinuxNamespaceInput): Promise<Lin
     await Promise.race([Promise.resolve().then(() => { assertLive(); return input.afterExit(exited as unknown as LinuxCandidateExit) }),
       closed.then(() => fail('worker exited before cgroup proof')), interrupted()])
     assertLive()
+    exporting = true
     send('EXPORT')
     const result = await next()
     if (result.type !== 'RESULT' || !['succeeded', 'failed'].includes(result.status as string)
       || !Array.isArray(result.artifacts) || typeof result.stdout !== 'string' || typeof result.stderr !== 'string'
       || Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) > input.maxOutputBytes
-      || result.artifacts.length !== (input.artifacts?.length ?? 0)
+      || (archive ? result.status === 'succeeded' && result.artifacts.length !== (input.artifacts?.length ?? 0)
+        || result.status !== 'succeeded' && result.artifacts.length !== 0
+        : result.artifacts.length !== (input.artifacts?.length ?? 0))
       || new Set(result.artifacts.map(file => file?.path)).size !== result.artifacts.length
       || result.artifacts.some(file => !file || !safePath(file.path) || !(input.artifacts ?? []).includes(file.path)
-        || typeof file.content !== 'string' || !file.content.isWellFormed())
-      || result.artifacts.reduce((bytes, file) => bytes + Buffer.byteLength(file.content), 0) > (input.maxArtifactBytes ?? MAX_INPUT_BYTES)) {
+        || (archive ? !integer(file.size, 0, input.maxArtifactBytes ?? LINUX_REPOSITORY_ARTIFACT_BYTES)
+          || typeof file.sha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(file.sha256)
+          : typeof file.content !== 'string' || !file.content.isWellFormed()))
+      || result.artifacts.reduce((bytes, file) => bytes + (archive ? file.size : Buffer.byteLength(file.content)), 0)
+        > (input.maxArtifactBytes ?? MAX_INPUT_BYTES)) {
       fail('worker result violates bounds')
     }
+    let artifacts: LinuxNamespaceResult['artifacts'] | LinuxRepositoryNamespaceResult['artifacts']
+    if (archive) {
+      await Promise.race([binaryDone, interrupted()])
+      if (!artifactPipe?.readableEnded || binaryBytes !== result.artifacts.reduce((size, file) => size + file.size, 0)) {
+        fail('binary artifact length or EOF mismatch')
+      }
+      const bytes = Buffer.concat(binaryChunks, binaryBytes)
+      let offset = 0
+      artifacts = result.artifacts.map(file => {
+        const content = bytes.subarray(offset, offset += file.size)
+        if (createHash('sha256').update(content).digest('hex') !== file.sha256) fail('binary artifact digest mismatch')
+        return { path: file.path, bytes: content, sha256: file.sha256 }
+      })
+    } else artifacts = result.artifacts as LinuxNamespaceResult['artifacts']
     child.stdin?.end()
     const done = await Promise.race([closed, interrupted()])
     if (done.code !== 0 || stopped || raw !== '') fail('worker did not exit cleanly')
@@ -282,7 +353,7 @@ export async function runLinuxNamespace(input: LinuxNamespaceInput): Promise<Lin
     return { status: result.status as LinuxNamespaceResult['status'], namespaceExited: true,
       ...(typeof result.exitCode === 'number' ? { exitCode: result.exitCode } : {}),
       stdout: result.stdout, stderr: result.stderr,
-      artifacts: result.artifacts as LinuxNamespaceResult['artifacts'],
+      artifacts,
       ...(typeof result.reason === 'string' ? { reason: result.reason } : {}) }
   } catch (error) {
     if (!stopped) stop('unknown')
@@ -303,6 +374,9 @@ export async function runLinuxNamespace(input: LinuxNamespaceInput): Promise<Lin
     if (cleanup) await cleanup.catch(cause => {
       cleanupError = cause instanceof Error ? cause : new Error('cleanup failed')
     })
+    archivePipe?.destroy()
+    artifactPipe?.destroy()
+    if (archiveSent) await archiveSent
     if (!cleanupError && completed) await rm(jobPath, { recursive: true, force: true })
   }
 }

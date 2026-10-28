@@ -10,12 +10,19 @@ export { validateNativeMacRuntime, verifyNativeMacRuntime, hashNativeMacRuntimeT
 export { NativeMacVerifierRunner, type NativeMacVerifierRunnerConfig } from './native-verifier-runner.js'
 export { hashLinuxRuntimeTree, verifyLinuxRuntime, validateLinuxRuntime, linuxRuntimeDigest, type LinuxRuntime } from './linux-runtime.js'
 export { runLinuxNamespace, type LinuxNamespaceInput, type LinuxNamespaceResult, type LinuxCandidateIdentity, type LinuxCandidateExit } from './linux-namespace.js'
+export { runLinuxRepositoryNamespace, type LinuxRepositoryNamespaceInput, type LinuxRepositoryNamespaceResult } from './linux-namespace.js'
 export { LinuxCgroupLease, type LinuxCgroupRoots, type LinuxCgroupLimits, type LinuxCgroupIdentity, type LinuxCgroupSnapshot } from './linux-cgroups.js'
 export { LinuxVerifierRunner, type LinuxVerifierRunnerConfig } from './linux-verifier-runner.js'
 export { prepareLinuxExecutionIntent, runLinuxExecution, readLinuxExecutionReceipt, readLinuxExecutionPartialCleanupProof,
   reconcileLinuxExecution, linuxExecutionReceiptBinding, type LinuxExecutionReceipt } from './linux-execution.js'
+export { prepareLinuxRepositoryIntent, runLinuxRepositoryExecution, readLinuxRepositoryReceipt, reconcileLinuxRepositoryExecution,
+  type LinuxRepositoryExecutionContext, type LinuxRepositoryExecutionRequest, type LinuxRepositoryExecutionReceipt, type LinuxRepositoryExecutionOutcome,
+  type LinuxRepositoryArtifact, type LinuxRepositoryArtifactSummary } from './linux-execution.js'
 export { linuxExecutionContractDigest, linuxExecutionIntentDigest, linuxExecutionResourcesDigest,
-  type LinuxExecutionContract, type LinuxExecutionIntent, type LinuxExecutionResources, type LinuxReceiptBinding,
+  linuxJobResourceReservation, LINUX_REPOSITORY_STORAGE_BYTES,
+  type LinuxExecutionContract, type LinuxExecutionContractV1, type LinuxRepositoryExecutionContract,
+  type LinuxExecutionIntent, type LinuxExecutionIntentV1, type LinuxRepositoryExecutionIntent,
+  type LinuxExecutionResources, type LinuxReceiptBinding,
   type LinuxExecutionPartialCleanupProof } from './linux-execution-contract.js'
 export { inspectIsolationGrant, type IsolationGrantDiagnostic, type IsolationGrantDiagnosticReason } from './diagnostics.js'
 export { probeIsolationRuntime, probeLinuxIsolationRuntime, type LinuxIsolationProbeConfig } from './probe.js'

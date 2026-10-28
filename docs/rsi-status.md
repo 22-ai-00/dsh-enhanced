@@ -5,7 +5,7 @@
 ## 当前交付
 
 - 去除 Linux 安装与自迭代的 Docker 依赖，保留普通隔离执行、完整源码修复、工具创建/修订、独立验收、发布采用与回退；不能关闭功能或用 macOS 受限创建路径代替。实现边界见[原生运行时](dockerless-runtime.md)。
-- Linux x64 原生底座、持久执行及私有 Verifier 已提交。本轮显式配置的 `isolation_run`、operator 恢复/探针和原生结果保留已通过集成及分范围独立复核。下一能力是完整仓库源码构建与持久 source job，随后接通行为验收、发布和保权安装迁移。生产仍使用 Docker，v2 准入明确拒绝，arm64 尚未实测。
+- Linux x64 原生底座、持久执行及私有 Verifier、显式配置的 `isolation_run`、operator 恢复/探针和原生结果保留已提交。本轮增加仓库归档与二进制产物的持久执行接口；下一能力是完整源码构建与持久 source job，随后接通行为验收、发布和保权安装迁移。生产仍使用 Docker，cgroup v2 准入明确拒绝，arm64 尚未实测。
 
 ## 已有能力与生产边界
 
@@ -24,7 +24,7 @@
 
 ## 最新验证
 
-- 持久执行提交 `841642b3` 的 `VITEST_MAX_WORKERS=4 pnpm_config_workspace_concurrency=4 pnpm check` 退出 0：9184 通过、166 跳过，含零警告 lint、构建、类型检查与 37 包 dry-run pack。该冻结提交不包含本轮公开工具接入。
-- 本轮公开工具最终整包实测：`DSH_NATIVE_CGROUP_REAL=1 VITEST_MAX_WORKERS=4 pnpm --filter @dsh-enhanced/assistant-isolation test --testTimeout=15000` 退出 0，313 通过、52 跳过；构建、隔离及 3 个消费者包类型检查、零警告 lint 和 dry-run pack 全过，源码摘要前后一致。配置/公开服务、CLI/保留清理、deadline 修复分别获得独立 PASS。首轮暴露的 deadline 竞态已修复，86 项定向回归包含真实子进程树停止；失败日志保留。本轮完整根检查尚未运行。
-- 原生证据位于忽略目录 `docs/evidence/dockerless-20261028/`、`dockerless-execution-20261028/` 与 `dockerless-public-20261028/`。真实 cgroup v1、namespace、固定工具链及保留 store/cache 的无网络冻结安装均有证据；pnpm 小型 fixture、Docker 路由 fixture 与真实全仓源码构建不混同。
+- 公开工具提交 `85815e36` 的 `VITEST_MAX_WORKERS=4 pnpm_config_workspace_concurrency=4 pnpm check` 退出 0：9208 通过、203 跳过，含零警告 lint、构建、类型检查与 37 包 dry-run pack。该冻结提交不包含本轮仓库二进制接口。
+- 本轮仓库接口最终整包实测：`DSH_NATIVE_CGROUP_REAL=1 VITEST_MAX_WORKERS=4 pnpm --filter @dsh-enhanced/assistant-isolation test --testTimeout=15000` 退出 0，372 通过、52 跳过；构建、隔离及 3 个消费者包类型检查、零警告 lint 和 dry-run pack 全过，86 个文件摘要前后一致。namespace 与持久层经过独立审查。此前失败日志保留：退出观测及授权期限测试竞态已修正，一次 lost-resource-ack 清理未确认尚未复现、根因未确定；不宣称这次失败已修复。完整根检查和完整源码 prepare 尚未验收。
+- 原生证据位于忽略目录 `docs/evidence/dockerless-20261028/`、`dockerless-execution-20261028/`、`dockerless-public-20261028/` 与 `dockerless-repository-20261028/`。真实 cgroup v1、namespace、固定工具链及保留 store/cache 的无网络冻结安装均有证据；pnpm 小型 fixture、Docker 路由 fixture 与真实全仓源码构建不混同。
 - 已发布 `0.1.65` 的跨平台 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/40508948330)、[Release](https://github.com/22-ai-00/dsh-enhanced/actions/runs/40508965179)、37 包 npm 元数据与公开安装资产核对通过。全新 hoisted profile 的 core 激活及 Node 22/24 授权准备通过，远端两个 Host 就绪且原 Inbox/Outbox、owner 和会话文件保留；安装就绪不证明真实任务完成或长期收益。

@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { processExited, sameDaemonWitness, validateCreationWitness, type CreationWitness, type DaemonWitness } from './runtime-witness.js'
 import type { SystemdBinding } from './daemon-binding.js'
 import { receiptData, type IsolationCleanupReceipt } from './cleanup-receipt.js'
-import { linuxExecutionContractDigest, linuxExecutionIntentDigest, linuxExecutionResourcesDigest, validateLinuxExecutionContract, validateLinuxExecutionIntent, validateLinuxExecutionResources, validateLinuxReceiptBinding, validateLinuxExecutionPartialCleanupProof, type LinuxExecutionContract, type LinuxExecutionIntent, type LinuxExecutionResources, type LinuxReceiptBinding, type LinuxExecutionPartialCleanupProof } from './linux-execution-contract.js'
+import { linuxExecutionContractDigest, linuxExecutionIntentDigest, linuxExecutionResourcesDigest, linuxJobResourceReservation, validateLinuxExecutionContract, validateLinuxExecutionIntent, validateLinuxExecutionResources, validateLinuxReceiptBinding, validateLinuxExecutionPartialCleanupProof, type LinuxExecutionContract, type LinuxExecutionIntent, type LinuxExecutionResources, type LinuxReceiptBinding, type LinuxExecutionPartialCleanupProof } from './linux-execution-contract.js'
 import { pruneResult, validateRetention } from './storage-policy.js'
 import type { IsolationArtifactBinding, IsolationGrant, IsolationIdentity, IsolationJob, IsolationResult, IsolationStatus, IsolationStorageBudget } from './types.js'
 
@@ -192,6 +192,11 @@ export class IsolationLedger {
       || intent.nativeNonce !== row.native_nonce || intent.deadline !== row.deadline || row.reserved_duration_ms > contract.limits.maxDurationMs
       || row.reserved_memory_mib < contract.limits.memoryMiB + contract.limits.workspaceMiB + contract.keeperLimits.memoryMiB
       || row.reserved_workspace_inodes < contract.limits.workspaceInodes) fail('invalid-input', 'Linux intent differs from job reservation')
+    if (contract.schemaVersion === 2) {
+      const minimum = linuxJobResourceReservation(contract)
+      if (row.reserved_memory_mib < minimum.memoryMiB || row.reserved_workspace_inodes < minimum.workspaceInodes
+        || row.reserved_storage_bytes < minimum.storageBytes) fail('invalid-input', 'Linux repository intent exceeds job reservation')
+    }
   }
   syncGrants(grants: IsolationGrant[], authority?: IsolationControllerAuthority): void {
     if (!Array.isArray(grants)) fail('invalid-input')
@@ -216,6 +221,11 @@ export class IsolationLedger {
         || input.durationMs > linuxContract.limits.maxDurationMs
         || input.resourceReservation.memoryMiB < linuxContract.limits.memoryMiB + linuxContract.limits.workspaceMiB + linuxContract.keeperLimits.memoryMiB
         || input.resourceReservation.workspaceInodes < linuxContract.limits.workspaceInodes) fail('invalid-input', 'Linux resources must be reserved')
+      if (linuxContract.schemaVersion === 2) {
+        const minimum = linuxJobResourceReservation(linuxContract)
+        if (input.resourceReservation.memoryMiB < minimum.memoryMiB || input.resourceReservation.workspaceInodes < minimum.workspaceInodes
+          || input.storageBudget.reservedBytes < minimum.storageBytes) fail('invalid-input', 'Linux repository resources must be reserved')
+      }
     } else if (input.linuxContract !== undefined) fail('invalid-input')
     const binding = input.artifactBinding === undefined ? undefined : artifactBinding(input.artifactBinding)
     const reservation = input.resourceReservation === undefined ? undefined : input.resourceReservation

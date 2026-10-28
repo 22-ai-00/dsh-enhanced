@@ -46,4 +46,6 @@ v1 和 v2 分别验证。v1 使用 freezer 与 pidfd，在冻结、终止、重�
 
 Linux x64 的 cgroup v1、namespace/seccomp 与固定工具链原语已经分别通过独立复核。namespace 覆盖非 root、无 capabilities、共享内存、终端、嵌套构建 namespace、Host 退出/停顿与控制 pipe 故障；工具链覆盖删除准备环境后从保留缓存在无网络环境中全新冻结安装。持久执行已接入 schema 8 账本和私有 Linux Verifier API：持久 intent 先于资源创建，keeper 与候选分别准入，收据与真实资源消失共同决定释放容量；临时故障可在同一 Host 内重试清理，未知任务不重派。历史后端身份与已用预算保持不变。显式配置的普通工具与 operator 恢复/探针已通过集成与范围内独立复核；安装器、完整源码及自迭代采用链尚未接通，不能据此宣称完整能力等价。
 
+仓库持久执行新增独立 schema 2 合同和二进制通道，支持 64 MiB 归档、32 MiB 产物、8 GiB workspace、4 GiB 可执行 tmp 与嵌套 namespace。候选退出且资源消失后才接收产物；私有收据绑定摘要，字节保存在受限 spool。账本准入包含全部临时挂载与持久存储，最大产物对应执行层 108 MiB；上层暂存归档和 pack 必须另外预留。此层仍不等于完整源码 prepare 或根 `pnpm check` 已在原生环境验收。
+
 本机为 cgroup v1；`systemd-run --user` 对 MemoryMax/TasksMax/CPUQuota 返回成功，但进程未进入这些控制器的独立任务组，因此这不能作为硬配额证明。原生 system 级任务确有独立控制器组。已验证用户 namespace 与 bubblewrap 可执行；bubblewrap 的 `--size` 单独只限制 tmpfs 字节数，不能代替明确的 inode 限额。实现必须覆盖这些差异。

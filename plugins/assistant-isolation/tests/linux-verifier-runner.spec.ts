@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { setTimeout as pause } from 'node:timers/promises'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { defaultLimits } from '../src/config.js'
 import { IsolationLedger } from '../src/ledger.js'
 import { linuxExecutionContractDigest, type LinuxExecutionContract } from '../src/linux-execution-contract.js'
@@ -161,15 +161,54 @@ describe.skipIf(!real)('finite Linux private verifier API with real kernel bound
     } finally { db.close(); await runner.close() }
   }, 15_000)
 
-  test('expiry bounds the execution deadline and denies new admission', async () => {
-    const input = { ...await fixture(), expiresAt: Date.now() + 1500 }, runner = new LinuxVerifierRunner(input)
+  test('persisted grant expiry bounds an admitted execution and denies new admission', async () => {
+    const input = await fixture(), runner = new LinuxVerifierRunner(input), db = database(input)
+    const originalPrepare = IsolationLedger.prototype.prepare
+    const prepare = vi.spyOn(IsolationLedger.prototype, 'prepare')
+    let expiresAt = 0
+    // Runtime verification and storage observation remain real. Narrow only this
+    // fixture's persisted grant at admission, so their variable cost cannot use
+    // up the execution window. The configured run/duration budgets stay intact.
+    prepare.mockImplementation(function (this: IsolationLedger, admission) {
+      if (admission.identity.workspace === input.stateRoot && admission.idempotencyKey === 'expiry') {
+        expiresAt = Date.now() + 2500
+        expect(expiresAt).toBeLessThan(input.expiresAt)
+        db.prepare('UPDATE isolation_grants SET expires_at=? WHERE id=?').run(expiresAt, 'verification')
+        prepare.mockRestore()
+      }
+      return Reflect.apply(originalPrepare, this, [admission])
+    })
     try {
-      const result = await runner.run('expiry', 'import time; time.sleep(30)', '', new AbortController().signal)
-      expect(result.status).not.toBe('succeeded')
+      const pending = runner.run('expiry', 'import time; time.sleep(30)', '', new AbortController().signal)
+      // Attach a rejection handler while observing admission; awaiting pending
+      // below still fails on any error instead of accepting a prestart rejection.
+      void pending.catch(() => {})
+      await expect.poll(() => db.prepare('SELECT status FROM isolation_jobs WHERE idempotency_key=?').get('expiry')?.status,
+        { timeout: 8000 }).toBe('running')
+      const admitted = db.prepare('SELECT deadline,created_at,reserved_duration_ms FROM isolation_jobs WHERE idempotency_key=?').get('expiry')!
+      expect(admitted.deadline).toBe(expiresAt)
+      expect(expiresAt).toBeLessThan((admitted.created_at as number) + input.maxDurationMs)
+      expect(admitted.reserved_duration_ms).toBe(input.maxDurationMs)
+      const result = await pending
+      expect(['cancelled', 'timed-out']).toContain(result.status)
       expect(result.quiescent).toBe(true)
+      expect(Date.now()).toBeGreaterThanOrEqual(expiresAt)
+      expect(db.prepare('SELECT expires_at,max_runs,max_total_duration_ms FROM isolation_grants WHERE id=?').get('verification'))
+        .toMatchObject({ expires_at: expiresAt, max_runs: input.maxRuns, max_total_duration_ms: input.maxTotalDurationMs })
       await expect(runner.run('expired', 'print("bad")', '', new AbortController().signal)).rejects.toThrow('unauthorized')
+      expect(db.prepare('SELECT COUNT(*) AS n FROM isolation_jobs').get()?.n).toBe(1)
+    } finally { prepare.mockRestore(); await runner.close(); db.close() }
+  }, 20_000)
+
+  test('an already expired configured authority denies admission without creating a job', async () => {
+    const input = { ...await fixture(), expiresAt: Date.now() - 1 }, runner = new LinuxVerifierRunner(input)
+    try {
+      await expect(runner.run('already-expired', 'print("bad")', '', new AbortController().signal)).rejects.toThrow('unauthorized')
+      const db = database(input)
+      try { expect(db.prepare('SELECT COUNT(*) AS n FROM isolation_jobs').get()?.n).toBe(0) } finally { db.close() }
+      expect(await readdir(join(input.stateRoot, 'linux-executions'))).toEqual([])
     } finally { await runner.close() }
-  }, 10_000)
+  })
 
   test('verifies the entire runtime for every new key before reserving or dispatching', async () => {
     const input = await fixture(), runner = new LinuxVerifierRunner(input)

@@ -7,22 +7,37 @@ import { linuxExecutionContractDigest, linuxExecutionIntentDigest, linuxExecutio
   linuxExecutionPartialCleanupProofDigest, validateLinuxExecutionPartialCleanupProof,
   validateLinuxExecutionContract, validateLinuxExecutionIntent, validateLinuxExecutionResources,
   type LinuxExecutionContract, type LinuxExecutionIntent, type LinuxExecutionResources, type LinuxReceiptBinding,
-  type LinuxExecutionPartialCleanupProof } from './linux-execution-contract.js'
-import { runLinuxNamespace, type LinuxCandidateIdentity } from './linux-namespace.js'
+  type LinuxExecutionPartialCleanupProof, type LinuxExecutionIntentV1, type LinuxRepositoryExecutionContract, type LinuxRepositoryExecutionIntent } from './linux-execution-contract.js'
+import { runLinuxNamespace, runLinuxRepositoryNamespace, type LinuxCandidateIdentity } from './linux-namespace.js'
 import type { IsolationFile, IsolationResult } from './types.js'
 import { pruneResult, validateRetention } from './storage-policy.js'
 
-export interface LinuxExecutionReceipt {
+export interface LinuxExecutionReceiptV1 {
   schemaVersion: 1
-  intent: LinuxExecutionIntent
+  intent: LinuxExecutionIntentV1
   resources: LinuxExecutionResources
   result: IsolationResult
   completedAt: number
   receiptDigest: string
 }
+export interface LinuxRepositoryArtifactSummary { path: string; bytes: number; sha256: string }
+export interface LinuxRepositoryArtifact { path: string; bytes: Buffer; sha256: string }
+export interface LinuxRepositoryExecutionReceipt extends Omit<LinuxExecutionReceiptV1, 'schemaVersion' | 'intent'> {
+  schemaVersion: 2
+  intent: LinuxRepositoryExecutionIntent
+  repositoryArtifacts: LinuxRepositoryArtifactSummary[]
+}
+export type LinuxExecutionReceipt = LinuxExecutionReceiptV1 | LinuxRepositoryExecutionReceipt
+export interface LinuxRepositoryExecutionContext { stateRoot: string; contract: LinuxRepositoryExecutionContract; intent: LinuxRepositoryExecutionIntent }
+export interface LinuxRepositoryExecutionRequest {
+  argv: readonly string[]
+  archive: { bytes: Uint8Array; sha256: string }
+  artifacts: readonly string[]
+  readOnlyRoots?: readonly string[]
+}
 interface Context { stateRoot: string; contract: LinuxExecutionContract; intent: LinuxExecutionIntent }
 interface Journal {
-  schemaVersion: 1
+  schemaVersion: 1 | 2
   intent: LinuxExecutionIntent
   creator: LinuxCgroupIdentity
   phase: 'prepared' | 'creating-worker' | 'creating-keeper' | 'recorded' | 'keeper-admitted' | 'worker-admitted' | 'running' | 'settled' | 'prestart-quiesced' | 'unknown'
@@ -32,6 +47,7 @@ interface Journal {
   keeperIdentity: LinuxCgroupIdentity | null
   namespace: LinuxCgroupDirectory | null
   result: IsolationResult | null
+  repositoryArtifacts?: LinuxRepositoryArtifactSummary[] | null
 }
 const active = new Set<string>()
 // This is a drain witness, never an execution grant. It permits only cleanup
@@ -211,12 +227,12 @@ function validateResult(value: unknown, ctx: Context): asserts value is Isolatio
     if (typeof artifact.path !== 'string' || !safePath(artifact.path) || names.has(artifact.path) || typeof artifact.content !== 'string' || !artifact.content.isWellFormed()) fail('invalid result artifact')
     names.add(artifact.path); bytes += Buffer.byteLength(artifact.content)
   }
-  if (bytes > ctx.contract.limits.maxArtifactBytes) fail('result artifacts exceed bounds')
+  if (bytes > ctx.contract.limits.maxArtifactBytes || ctx.contract.schemaVersion === 2 && item.artifacts.length !== 0) fail('result artifacts exceed bounds')
 }
 async function readJournal(ctx: Context): Promise<Journal> {
   const value = await readRecord(paths(ctx).journal)
-  keys(value, ['schemaVersion', 'intent', 'creator', 'phase', 'worker', 'keeper', 'workerIdentity', 'keeperIdentity', 'namespace', 'result'])
-  if (value.schemaVersion !== 1 || canonical(value.intent) !== canonical(ctx.intent) || !phases.includes(value.phase as string)) fail('journal intent or phase differs')
+  keys(value, ['schemaVersion', 'intent', 'creator', 'phase', 'worker', 'keeper', 'workerIdentity', 'keeperIdentity', 'namespace', 'result', ...(ctx.intent.schemaVersion === 2 ? ['repositoryArtifacts'] : [])])
+  if (value.schemaVersion !== ctx.intent.schemaVersion || canonical(value.intent) !== canonical(ctx.intent) || !phases.includes(value.phase as string)) fail('journal intent or phase differs')
   validateIdentity(value.creator, ctx.intent)
   for (const kind of ['worker', 'keeper'] as const) {
     if (value[kind] !== null) validateSnapshot(value[kind], kind, ctx)
@@ -228,6 +244,10 @@ async function readJournal(ctx: Context): Promise<Journal> {
     if (value.namespace.path !== ctx.intent.namespacePath || !Number.isSafeInteger(value.namespace.dev) || !positive(value.namespace.ino)) fail('namespace journal identity differs')
   }
   if (value.result !== null) validateResult(value.result, ctx)
+  if (ctx.intent.schemaVersion === 2) {
+    if (value.phase === 'settled') validateArtifactSummaries(value.repositoryArtifacts, ctx)
+    else if (value.repositoryArtifacts !== null) fail('repository journal artifact phase differs')
+  }
   if (value.keeper && !value.worker || value.phase === 'prepared' && (value.worker || value.keeper || value.namespace || value.result)
     || ['recorded', 'keeper-admitted', 'worker-admitted', 'running', 'settled'].includes(value.phase as string) && (!value.worker || !value.keeper)
     || value.phase === 'settled' && (!value.result || !(value.result as IsolationResult).quiescent)) fail('journal phase fields differ')
@@ -292,23 +312,29 @@ async function boundedAdmission<T>(operation: () => Promise<T>, signal: AbortSig
 
 /** Persists intent without creating cgroups or admitting a process. The Host must
  * persist this value in its ledger and mark dispatch before calling run(). */
-export async function prepareLinuxExecutionIntent(input: { stateRoot: string; contract: LinuxExecutionContract;
-  job: { id: string; requestDigest: string; nativeResourceId: string; nativeNonce: string; deadline: number } }): Promise<LinuxExecutionIntent> {
+interface PrepareInput { stateRoot: string; contract: LinuxExecutionContract;
+  job: { id: string; requestDigest: string; nativeResourceId: string; nativeNonce: string; deadline: number } }
+export async function prepareLinuxExecutionIntent(input: PrepareInput): Promise<LinuxExecutionIntent> {
+  if (input.contract.schemaVersion !== 1) fail('repository authority requires the repository API')
+  return await prepareIntent(input)
+}
+async function prepareIntent(input: PrepareInput, repository?: LinuxRepositoryExecutionIntent['repository']): Promise<LinuxExecutionIntent> {
   const uid = platform(), contract = validateLinuxExecutionContract(input.contract)
   if (contract.cgroupRoots.mode !== 'v1') fail('cgroup v2 process placement is not yet verified')
-  if (input.job.deadline <= Date.now() || !positive(input.job.deadline) || contract.limits.workspaceMiB > 4096 || contract.limits.maxDurationMs > 1_800_000) fail('invalid execution deadline or namespace limits')
-  const intent = validateLinuxExecutionIntent({ schemaVersion: 1, jobId: input.job.id, requestDigest: input.job.requestDigest,
+  if (input.job.deadline <= Date.now() || !positive(input.job.deadline) || contract.limits.workspaceMiB > (contract.schemaVersion === 2 ? 8192 : 4096) || contract.limits.maxDurationMs > 1_800_000) fail('invalid execution deadline or namespace limits')
+  const intent = validateLinuxExecutionIntent({ schemaVersion: contract.schemaVersion, ...(repository ? { repository } : {}), jobId: input.job.id, requestDigest: input.job.requestDigest,
     nativeResourceId: input.job.nativeResourceId, nativeNonce: input.job.nativeNonce,
     contractDigest: linuxExecutionContractDigest(contract), bootId: await boot(), uid, deadline: input.job.deadline,
     namespacePath: join(input.stateRoot, 'namespaces', `namespace-${input.job.id}-${input.job.nativeNonce}`),
     workerNonce: randomBytes(16).toString('hex'), keeperNonce: randomBytes(16).toString('hex'), roots: await rootsIdentity(contract) }, contract)
   await setup(input.stateRoot)
+  if (contract.schemaVersion === 2) await childDirectory(input.stateRoot, 'artifacts')
   const creator = await currentIdentity(process.pid)
   if (!creator) fail('Host identity unavailable')
   const ctx = { stateRoot: input.stateRoot, contract, intent }
   await checkLive(ctx)
   if (await exists(intent.namespacePath) || await exists(paths(ctx).receipt) || await exists(paths(ctx).partial)) fail('execution identity already exists')
-  await writeRecord(paths(ctx).journal, { schemaVersion: 1, intent, creator, phase: 'prepared', worker: null, keeper: null,
+  await writeRecord(paths(ctx).journal, { schemaVersion: intent.schemaVersion, ...(intent.schemaVersion === 2 ? { repositoryArtifacts: null } : {}), intent, creator, phase: 'prepared', worker: null, keeper: null,
     workerIdentity: null, keeperIdentity: null, namespace: null, result: null } satisfies Journal, true)
   return intent
 }
@@ -357,7 +383,7 @@ async function cleanNamespace(ctx: Context, journal: Journal): Promise<void> {
       const target = join(directory, entry.name), item = await lstat(target)
       if (item.isSymbolicLink() || item.uid !== ctx.intent.uid || (item.mode & 0o022) !== 0 || item.dev !== info.dev) fail('namespace staging identity differs')
       if (item.isDirectory()) {
-        if (!/^(?:workspace|tmp|shm|identity|immutable(?:\/(?:usr|lib|lib64|runtime(?:\/(?:[0-9]|1[0-5]))?))?)$/u.test(name)) fail('unexpected namespace directory')
+        if (!/^(?:workspace|tmp|shm|input|identity|immutable(?:\/(?:usr|lib|lib64|runtime(?:\/(?:[0-9]|1[0-5]))?))?)$/u.test(name)) fail('unexpected namespace directory')
         await walk(target, name)
       } else {
         if (!item.isFile() || item.nlink !== 1 || !/^(?:seccomp\.bpf|identity\/(?:passwd|group|nsswitch\.conf|hosts))$/u.test(name)) fail('unexpected namespace file')
@@ -372,11 +398,17 @@ async function cleanNamespace(ctx: Context, journal: Journal): Promise<void> {
   if (await exists(path)) fail('namespace cleanup unproven')
 }
 function receiptValue(ctx: Context, journal: Journal, value: unknown): LinuxExecutionReceipt {
-  keys(value, ['schemaVersion', 'intent', 'resources', 'result', 'completedAt', 'receiptDigest'])
-  if (value.schemaVersion !== 1 || canonical(value.intent) !== canonical(ctx.intent) || !positive(value.completedAt)
+  keys(value, ['schemaVersion', 'intent', 'resources', 'result', 'completedAt', 'receiptDigest', ...(ctx.intent.schemaVersion === 2 ? ['repositoryArtifacts'] : [])])
+  if (value.schemaVersion !== ctx.intent.schemaVersion || canonical(value.intent) !== canonical(ctx.intent) || !positive(value.completedAt)
     || value.completedAt < 1 || value.completedAt > Date.now() + 1000 || typeof value.receiptDigest !== 'string') fail('receipt binding differs')
   const complete = validateLinuxExecutionResources(value.resources, ctx.intent, ctx.contract)
   validateResult(value.result, ctx)
+  if (ctx.intent.schemaVersion === 2) {
+    validateArtifactSummaries(value.repositoryArtifacts, ctx)
+    if ((value.result.status !== 'succeeded' && value.repositoryArtifacts.length !== 0)
+      || value.result.status === 'succeeded' && canonical(value.repositoryArtifacts.map(item => item.path)) !== canonical((ctx.intent as LinuxRepositoryExecutionIntent).repository.artifacts)) fail('receipt artifact outcome differs')
+    if (canonical(value.repositoryArtifacts) !== canonical(journal.repositoryArtifacts)) fail('receipt artifact summaries differ')
+  }
   const { receiptDigest, ...body } = value
   if (!value.result.quiescent || journal.phase !== 'settled' || canonical(value.result) !== canonical(journal.result)
     || canonical(complete) !== canonical(resources(journal, ctx)) || receiptDigest !== digest(body)) fail('receipt content differs')
@@ -424,10 +456,12 @@ async function persistPartialProof(ctx: Context, journal: Journal, result: Isola
 }
 async function persistReceipt(ctx: Context, journal: Journal, complete: LinuxExecutionResources, result: IsolationResult, repairIncomplete = false): Promise<LinuxExecutionReceipt> {
   if (!result.quiescent || !await absentGroups(ctx) || await exists(ctx.intent.namespacePath)) fail('cannot receipt unproven cleanup')
+  if (ctx.intent.schemaVersion === 2 && journal.repositoryArtifacts == null) journal.repositoryArtifacts = []
   journal.phase = 'settled'; journal.result = result
   await writeRecord(paths(ctx).journal, journal)
-  const body = { schemaVersion: 1 as const, intent: ctx.intent, resources: complete, result, completedAt: Date.now() }
-  const receipt: LinuxExecutionReceipt = { ...body, receiptDigest: digest(body) }
+  const body = { schemaVersion: ctx.intent.schemaVersion, intent: ctx.intent, resources: complete, result, completedAt: Date.now(),
+    ...(ctx.intent.schemaVersion === 2 ? { repositoryArtifacts: journal.repositoryArtifacts } : {}) }
+  const receipt = { ...body, receiptDigest: digest(body) } as LinuxExecutionReceipt
   if (repairIncomplete) await repairPlaceholder(paths(ctx).receipt)
   await writeRecord(paths(ctx).receipt, receipt, true)
   return receipt
@@ -439,6 +473,7 @@ async function persistReceipt(ctx: Context, journal: Journal, complete: LinuxExe
 export async function retainLinuxExecutionResult(input: Context & { resources: LinuxExecutionResources;
   result: IsolationResult; fenced: () => boolean; compact: () => IsolationResult | undefined }): Promise<number> {
   const ctx = await context(input), locations = paths(ctx)
+  if (ctx.contract.schemaVersion !== 1) fail('repository receipts require repository retention')
   const complete = validateLinuxExecutionResources(input.resources, ctx.intent, ctx.contract)
   const intentDigest = linuxExecutionIntentDigest(ctx.intent), resourcesDigest = linuxExecutionResourcesDigest(complete)
   if (!input.fenced() || active.has(locations.journal) || input.result.jobId !== ctx.intent.jobId || !input.result.quiescent
@@ -510,11 +545,15 @@ export async function retainLinuxExecutionResult(input: Context & { resources: L
   return removedBytes
 }
 
-export async function runLinuxExecution(input: Context & { argv: readonly string[]; files: readonly IsolationFile[];
+type RunInput = Context & { argv: readonly string[]; files: readonly IsolationFile[];
   artifacts?: readonly string[]; readOnlyRoots?: readonly string[]; signal: AbortSignal;
-  recordResources: (value: LinuxExecutionResources) => Promise<void>; authorizeStart: () => Promise<boolean> | boolean }): Promise<{
-    result: IsolationResult; resources?: LinuxExecutionResources; receipt?: LinuxExecutionReceipt; partialProof?: LinuxExecutionPartialCleanupProof
-  }> {
+  recordResources: (value: LinuxExecutionResources) => Promise<void>; authorizeStart: () => Promise<boolean> | boolean }
+type RunOutcome = { result: IsolationResult; resources?: LinuxExecutionResources; receipt?: LinuxExecutionReceipt; partialProof?: LinuxExecutionPartialCleanupProof }
+export async function runLinuxExecution(input: RunInput): Promise<RunOutcome> {
+  if (input.contract.schemaVersion !== 1) fail('repository authority requires the repository API')
+  return await runExecution(input)
+}
+async function runExecution(input: RunInput, archive?: { bytes: Buffer; sha256: string }): Promise<RunOutcome> {
   const ctx = await context(input), key = paths(ctx).journal
   if (completedRuns.has(key)) fail('execution is single-use; drained runs are recovery-only')
   if (active.has(key)) fail('execution is already owned')
@@ -530,6 +569,7 @@ export async function runLinuxExecution(input: Context & { argv: readonly string
     const admissionSignal = AbortSignal.any([input.signal, admissionAbort.signal])
     const admissions = new Set<Promise<void>>()
     let result: IsolationResult = { jobId: ctx.intent.jobId, status: 'unknown', quiescent: false, stdout: '', stderr: '', artifacts: [] }
+    let binaryArtifacts: LinuxRepositoryArtifact[] = []
     let cleanup: Promise<void> | undefined
     const stopGroups = (): Promise<void> => {
       admissionAbort.abort()
@@ -609,16 +649,20 @@ export async function runLinuxExecution(input: Context & { argv: readonly string
         void pending.then(() => admissions.delete(pending), () => admissions.delete(pending))
         return pending
       }
-      const raw = await runLinuxNamespace({ stateRoot: join(ctx.stateRoot, 'namespaces'), namespaceId: `${ctx.intent.jobId}-${ctx.intent.nativeNonce}`,
-        argv: args.argv, files: args.files, artifacts: args.artifacts, readOnlyRoots: args.readOnlyRoots,
+      const namespaceInput = { stateRoot: join(ctx.stateRoot, 'namespaces'), namespaceId: `${ctx.intent.jobId}-${ctx.intent.nativeNonce}`,
+        argv: args.argv, artifacts: args.artifacts, readOnlyRoots: args.readOnlyRoots,
         workspaceBytes: ctx.contract.limits.workspaceMiB * 1024 * 1024, workspaceInodes: ctx.contract.limits.workspaceInodes,
-        tmpBytes: Math.max(1, Math.min(64, ctx.contract.limits.memoryMiB / 4)) * 1024 * 1024, tmpInodes: ctx.contract.limits.workspaceInodes,
+        tmpBytes: (ctx.contract.schemaVersion === 2 ? ctx.contract.limits.tmpMiB : Math.max(1, Math.min(64, ctx.contract.limits.memoryMiB / 4))) * 1024 * 1024,
+        tmpInodes: ctx.contract.schemaVersion === 2 ? ctx.contract.limits.tmpInodes : ctx.contract.limits.workspaceInodes,
         timeoutMs: Math.max(1, executionDeadline - Date.now()),
         maxOutputBytes: ctx.contract.limits.maxOutputBytes, maxArtifactBytes: ctx.contract.limits.maxArtifactBytes,
-        profile: ctx.contract.profile, signal: input.signal, beforeKeeperStart: identity => trackedAdmit('keeper', identity),
-        beforeStart: identity => trackedAdmit('worker', identity), afterExit: async () => { await cleanLease(worker!) }, onStop: stopGroups })
+        signal: input.signal, beforeKeeperStart: (identity: LinuxCandidateIdentity) => trackedAdmit('keeper', identity),
+        beforeStart: (identity: LinuxCandidateIdentity) => trackedAdmit('worker', identity), afterExit: async () => { await cleanLease(worker!) }, onStop: stopGroups }
+      const raw = archive ? await runLinuxRepositoryNamespace({ ...namespaceInput, archive })
+        : await runLinuxNamespace({ ...namespaceInput, files: args.files, profile: ctx.contract.profile })
+      if (archive) binaryArtifacts = (raw.artifacts as LinuxRepositoryArtifact[]).map(item => ({ ...item, bytes: Buffer.from(item.bytes) }))
       result = { jobId: ctx.intent.jobId, status: raw.status, quiescent: false, stdout: raw.stdout, stderr: raw.stderr,
-        artifacts: raw.artifacts, ...(raw.exitCode === undefined ? {} : { exitCode: raw.exitCode }), ...(raw.reason ? { reason: raw.reason.slice(0, 8192) } : {}) }
+        artifacts: archive ? [] : raw.artifacts as IsolationFile[], ...(raw.exitCode === undefined ? {} : { exitCode: raw.exitCode }), ...(raw.reason ? { reason: raw.reason.slice(0, 8192) } : {}) }
     } catch (error) {
       result.reason = (error instanceof Error ? error.message : 'execution failed').slice(0, 8192)
       result.status = input.signal.aborted ? 'cancelled' : Date.now() >= executionDeadline ? 'timed-out' : 'unknown'
@@ -642,7 +686,13 @@ export async function runLinuxExecution(input: Context & { argv: readonly string
     validateResult(result, ctx)
     let receipt: LinuxExecutionReceipt | undefined
     let partialProof: LinuxExecutionPartialCleanupProof | undefined
-    if (result.quiescent && complete) receipt = await persistReceipt(ctx, journal, complete, result)
+    if (result.quiescent && complete) {
+      if (ctx.intent.schemaVersion === 2) {
+        if (result.status === 'succeeded' && canonical(binaryArtifacts.map(item => item.path)) !== canonical(ctx.intent.repository.artifacts)) fail('repository artifacts differ from declared paths')
+        journal.repositoryArtifacts = await writeArtifactSpool(ctx, result.status === 'succeeded' ? binaryArtifacts : [])
+      }
+      receipt = await persistReceipt(ctx, journal, complete, result)
+    }
     else if (result.quiescent) partialProof = await persistPartialProof(ctx, journal, result)
     else { journal.phase = 'unknown'; journal.result = result; await writeRecord(key, journal) }
     finalized = !!receipt || !!partialProof
@@ -688,6 +738,7 @@ export async function reconcileLinuxExecution(input: Context): Promise<{ quiesce
       completedRuns.delete(key)
       return { quiescent: true, partialProof: proof }
     }
+    if (ctx.intent.schemaVersion === 2) { await removeArtifactSpool(ctx); journal.repositoryArtifacts = [] }
     const recovered = await persistReceipt(ctx, journal, complete, result, true)
     completedRuns.delete(key)
     return { quiescent: true, resources: complete, receipt: recovered }
@@ -702,4 +753,168 @@ export async function reconcileLinuxExecution(input: Context): Promise<{ quiesce
     await writeRecord(key, journal)
     return { quiescent: false, ...(complete ? { resources: complete } : {}) }
   } finally { active.delete(key) }
+}
+
+function validateArtifactSummaries(value: unknown, ctx: Context): asserts value is LinuxRepositoryArtifactSummary[] {
+  if (ctx.intent.schemaVersion !== 2 || !Array.isArray(value) || value.length > ctx.contract.limits.maxFiles) fail('invalid repository summaries')
+  let total = 0
+  const names = new Set<string>()
+  for (const item of value) {
+    keys(item, ['path', 'bytes', 'sha256'])
+    if (typeof item.path !== 'string' || !ctx.intent.repository.artifacts.includes(item.path) || names.has(item.path)
+      || !Number.isSafeInteger(item.bytes) || (item.bytes as number) < 0
+      || typeof item.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(item.sha256)) fail('repository artifact binding differs')
+    total += item.bytes as number; names.add(item.path)
+  }
+  if (total > ctx.contract.limits.maxArtifactBytes) fail('repository artifacts exceed bounds')
+}
+function spoolPath(ctx: Context): string { return join(ctx.stateRoot, 'artifacts', `${ctx.intent.jobId}-${ctx.intent.nativeNonce}`) }
+async function writeArtifactSpool(ctx: Context, artifacts: LinuxRepositoryArtifact[]): Promise<LinuxRepositoryArtifactSummary[]> {
+  const summaries = artifacts.map(item => ({ path: item.path, bytes: item.bytes.length, sha256: item.sha256 }))
+  validateArtifactSummaries(summaries, ctx)
+  for (const item of artifacts) if (!Buffer.isBuffer(item.bytes) || createHash('sha256').update(item.bytes).digest('hex') !== item.sha256) fail('repository artifact digest differs')
+  if (!artifacts.length) return []
+  await privateDirectory(join(ctx.stateRoot, 'artifacts'))
+  const directory = spoolPath(ctx)
+  await mkdir(directory, { mode: 0o700 })
+  await syncDirectory(dirname(directory))
+  await privateDirectory(directory)
+  for (let index = 0; index < artifacts.length; index++) {
+    const target = join(directory, `${index}.bin`), temporary = `${target}.${randomBytes(16).toString('hex')}.tmp`
+    try {
+      const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+      try { await handle.writeFile(artifacts[index]!.bytes); await handle.sync() } finally { await handle.close() }
+      if (await exists(target)) fail('repository spool identity already exists')
+      await rename(temporary, target)
+      await syncDirectory(directory)
+    } finally { await unlink(temporary).catch(error => { if (!missing(error)) throw error }) }
+  }
+  return summaries
+}
+async function readArtifactSpool(ctx: Context, summaries: LinuxRepositoryArtifactSummary[]): Promise<LinuxRepositoryArtifact[]> {
+  validateArtifactSummaries(summaries, ctx)
+  if (!summaries.length) return []
+  const directory = spoolPath(ctx)
+  await privateDirectory(join(ctx.stateRoot, 'artifacts'))
+  await privateDirectory(directory)
+  const entries = await readdir(directory)
+  if (canonical(entries.sort()) !== canonical(summaries.map((_, index) => `${index}.bin`).sort())) fail('repository spool inventory differs')
+  const result: LinuxRepositoryArtifact[] = []
+  for (let index = 0; index < summaries.length; index++) {
+    const item = summaries[index]!, path = join(directory, `${index}.bin`)
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    try {
+      const info = await handle.stat(), named = await lstat(path)
+      if (!info.isFile() || named.isSymbolicLink() || info.uid !== ctx.intent.uid || (info.mode & 0o7777) !== 0o600
+        || info.nlink !== 1 || info.size !== item.bytes || named.dev !== info.dev || named.ino !== info.ino) fail('repository spool identity differs')
+      const bytes = Buffer.alloc(item.bytes)
+      let offset = 0
+      while (offset < bytes.length) {
+        const part = await handle.read(bytes, offset, bytes.length - offset, offset)
+        if (part.bytesRead === 0) fail('repository spool truncated')
+        offset += part.bytesRead
+      }
+      if ((await handle.read(Buffer.alloc(1), 0, 1, offset)).bytesRead !== 0) fail('repository spool grew')
+      const after = await handle.stat()
+      if (bytes.length !== item.bytes || after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs
+        || after.nlink !== 1 || createHash('sha256').update(bytes).digest('hex') !== item.sha256) fail('repository spool digest differs')
+      result.push({ path: item.path, bytes, sha256: item.sha256 })
+    } finally { await handle.close() }
+  }
+  return result
+}
+/** Only recovery after proven cgroup/namespace absence can discard an orphan
+ * spool. The inventory is bounded and never follows a caller-controlled link. */
+async function removeArtifactSpool(ctx: Context): Promise<void> {
+  await privateDirectory(join(ctx.stateRoot, 'artifacts'))
+  const directory = spoolPath(ctx)
+  if (!await exists(directory)) return
+  await privateDirectory(directory)
+  const entries = await readdir(directory)
+  let total = 0
+  if (entries.length > 256) fail('orphan spool inventory exceeds bounds')
+  for (const name of entries) {
+    if (!/^(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-7])\.bin(?:\.[a-f0-9]{32}\.tmp)?$/u.test(name)) fail('orphan spool entry differs')
+    const info = await lstat(join(directory, name))
+    if (!info.isFile() || info.isSymbolicLink() || info.uid !== ctx.intent.uid || (info.mode & 0o7777) !== 0o600
+      || info.nlink !== 1 || info.size > ctx.contract.limits.maxArtifactBytes) fail('orphan spool identity differs')
+    total += info.size
+    if (total > 2 * ctx.contract.limits.maxArtifactBytes) fail('orphan spool exceeds bounds')
+  }
+  for (const name of entries) await unlink(join(directory, name))
+  await rmdir(directory)
+  await syncDirectory(dirname(directory))
+}
+function repositoryRequest(input: LinuxRepositoryExecutionRequest, contract: LinuxRepositoryExecutionContract): {
+  request: LinuxRepositoryExecutionRequest & { archive: { bytes: Buffer; sha256: string } }
+  binding: LinuxRepositoryExecutionIntent['repository']
+} {
+  if (!input.archive || !(input.archive.bytes instanceof Uint8Array) || input.archive.bytes.byteLength < 1
+    || input.archive.bytes.byteLength > contract.limits.maxInputBytes) fail('repository archive exceeds bounds')
+  // Snapshot all caller-owned values before the first asynchronous operation.
+  const request = { argv: [...input.argv], artifacts: [...input.artifacts], readOnlyRoots: [...(input.readOnlyRoots ?? [])],
+    archive: { bytes: Buffer.from(input.archive.bytes), sha256: input.archive.sha256 } }
+  if (!/^[a-f0-9]{64}$/u.test(request.archive.sha256)
+    || createHash('sha256').update(request.archive.bytes).digest('hex') !== request.archive.sha256
+    || request.argv.length < 1 || request.argv.length > 64
+    || request.argv.some((arg, index) => typeof arg !== 'string' || arg.length > 65_536 || arg.includes('\0')
+      || index === 0 && (!isAbsolute(arg) || resolve(arg) !== arg || /[\r\n]/u.test(arg)))
+    || request.artifacts.length > contract.limits.maxFiles || request.artifacts.some(item => typeof item !== 'string' || !safePath(item))
+    || new Set(request.artifacts).size !== request.artifacts.length || request.readOnlyRoots.length > 16
+    || request.readOnlyRoots.some(root => typeof root !== 'string' || !isAbsolute(root) || root === '/' || resolve(root) !== root || /[\p{Cc}\\]/u.test(root))) fail('repository request differs')
+  const archive = { bytes: request.archive.bytes.length, sha256: request.archive.sha256 }
+  const binding = { archive, artifacts: request.artifacts,
+    executionDigest: digest({ argv: request.argv, archive, artifacts: request.artifacts, readOnlyRoots: request.readOnlyRoots }) }
+  return { request, binding }
+}
+export async function prepareLinuxRepositoryIntent(input: PrepareInput & LinuxRepositoryExecutionRequest & {
+  contract: LinuxRepositoryExecutionContract
+}): Promise<LinuxRepositoryExecutionIntent> {
+  const contract = validateLinuxExecutionContract(input.contract)
+  if (contract.schemaVersion !== 2) fail('repository contract required')
+  const { binding } = repositoryRequest(input, contract)
+  return await prepareIntent({ ...input, contract }, binding) as LinuxRepositoryExecutionIntent
+}
+/** Binary bytes are returned only after successful receipt validation and fresh
+ * kernel absence checks. Reopening a completed identity only reads its receipt. */
+export async function readLinuxRepositoryReceipt(input: LinuxRepositoryExecutionContext): Promise<{
+  receipt: LinuxRepositoryExecutionReceipt; artifacts: LinuxRepositoryArtifact[]
+} | undefined> {
+  if (input.contract.schemaVersion !== 2 || input.intent.schemaVersion !== 2) fail('repository context required')
+  const ctx = await context(input), receipt = await readLinuxExecutionReceipt(ctx)
+  if (!receipt) return undefined
+  if (receipt.schemaVersion !== 2) fail('repository receipt required')
+  if (receipt.result.status !== 'succeeded' && receipt.repositoryArtifacts.length) fail('unsuccessful receipt contains artifacts')
+  const artifacts = receipt.result.status === 'succeeded' ? await readArtifactSpool(ctx, receipt.repositoryArtifacts) : []
+  const verified = await readLinuxExecutionReceipt(ctx)
+  if (verified?.receiptDigest !== receipt.receiptDigest) fail('repository receipt changed')
+  return { receipt, artifacts }
+}
+export type LinuxRepositoryExecutionOutcome = Omit<RunOutcome, 'receipt'> & { receipt?: LinuxRepositoryExecutionReceipt; artifacts: LinuxRepositoryArtifact[] }
+export async function runLinuxRepositoryExecution(input: LinuxRepositoryExecutionContext & LinuxRepositoryExecutionRequest & {
+  signal: AbortSignal; recordResources: (value: LinuxExecutionResources) => Promise<void>; authorizeStart: () => Promise<boolean> | boolean
+}): Promise<LinuxRepositoryExecutionOutcome> {
+  const contract = validateLinuxExecutionContract(input.contract)
+  if (contract.schemaVersion !== 2 || input.intent.schemaVersion !== 2) fail('repository context required')
+  const { request, binding } = repositoryRequest(input, contract)
+  if (canonical(binding) !== canonical(input.intent.repository)) fail('repository request binding differs')
+  const ctx = { stateRoot: input.stateRoot, contract, intent: input.intent }
+  const existing = await readLinuxRepositoryReceipt(ctx)
+  if (existing) return { result: existing.receipt.result, resources: existing.receipt.resources, ...existing }
+  const outcome = await runExecution({ ...input, ...ctx, ...request, files: [] }, request.archive)
+  const settled = outcome.receipt ? await readLinuxRepositoryReceipt(ctx) : undefined
+  const { receipt, ...rest } = outcome
+  if (receipt && receipt.schemaVersion !== 2) fail('repository receipt required')
+  return { ...rest, ...(receipt ? { receipt } : {}), artifacts: settled?.artifacts ?? [] }
+}
+export async function reconcileLinuxRepositoryExecution(input: LinuxRepositoryExecutionContext): Promise<{
+  quiescent: boolean; resources?: LinuxExecutionResources; receipt?: LinuxRepositoryExecutionReceipt;
+  partialProof?: LinuxExecutionPartialCleanupProof; artifacts: LinuxRepositoryArtifact[]
+}> {
+  if (input.contract.schemaVersion !== 2 || input.intent.schemaVersion !== 2) fail('repository context required')
+  const outcome = await reconcileLinuxExecution(input)
+  const settled = outcome.receipt ? await readLinuxRepositoryReceipt(input) : undefined
+  const { receipt, ...rest } = outcome
+  if (receipt && receipt.schemaVersion !== 2) fail('repository receipt required')
+  return { ...rest, ...(receipt ? { receipt } : {}), artifacts: settled?.artifacts ?? [] }
 }

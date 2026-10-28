@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statfsSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, fstatSync, readSync, writeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statfsSync, writeFileSync } from 'node:fs'
+import { Socket } from 'node:net'
 import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -16,9 +18,13 @@ let gateClosed = false
 let finished = false
 let revoked = false
 let watchdog
+let archiveInput
+let binaryOutput
 function revoke() {
   if (finished || revoked) return
   revoked = true
+  archiveInput?.destroy()
+  binaryOutput?.destroy()
   if (gate?.pid && !gateClosed) {
     gate.stdio[3]?.destroy()
     try { process.kill(-gate.pid, 'SIGKILL') } catch (error) { if (error.code !== 'ESRCH') throw error }
@@ -156,6 +162,74 @@ function boundArtifact(workspace, path, byteLimit) {
   return { path, content }
 }
 
+async function receiveArchive(config, target, assertLive) {
+  const fd = openSync(target, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o400)
+  const hash = createHash('sha256')
+  let count = 0
+  archiveInput = new Socket({ fd: 4, readable: true, writable: false })
+  try {
+    for await (const bytes of archiveInput) {
+      assertLive()
+      count += bytes.length
+      if (count > config.archive.size) fail('archive input exceeds declared length')
+      hash.update(bytes)
+      let offset = 0
+      while (offset < bytes.length) offset += writeSync(fd, bytes, offset, bytes.length - offset)
+    }
+    assertLive()
+    if (count !== config.archive.size || hash.digest('hex') !== config.archive.sha256
+      || fstatSync(fd).size !== count) fail('archive input length or digest mismatch')
+  } finally { archiveInput.destroy(); closeSync(fd) }
+}
+function sameFile(before, after) {
+  return before.dev === after.dev && before.ino === after.ino && before.size === after.size
+    && before.mtimeNs === after.mtimeNs && before.ctimeNs === after.ctimeNs
+    && after.isFile() && after.nlink === 1n
+}
+async function exportBinary(workspace, path, byteLimit, assertLive) {
+  const parts = pathParts(path)
+  let parent = workspace
+  const parents = []
+  for (const part of parts.slice(0, -1)) {
+    parent = join(parent, part)
+    const info = lstatSync(parent, { bigint: true })
+    if (!info.isDirectory() || info.isSymbolicLink()) fail('artifact parent is unsafe')
+    parents.push({ path: parent, info })
+  }
+  const target = join(parent, parts.at(-1))
+  const info = lstatSync(target, { bigint: true })
+  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1n || info.size > BigInt(byteLimit)) fail('artifact is not a bounded regular file')
+  const fd = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  const verify = () => {
+    assertLive()
+    if (!sameFile(info, fstatSync(fd, { bigint: true })) || !sameFile(info, lstatSync(target, { bigint: true }))) fail('artifact metadata changed')
+    for (const parent of parents) {
+      const again = lstatSync(parent.path, { bigint: true })
+      if (!again.isDirectory() || again.isSymbolicLink() || again.dev !== parent.info.dev || again.ino !== parent.info.ino
+        || again.mtimeNs !== parent.info.mtimeNs || again.ctimeNs !== parent.info.ctimeNs) fail('artifact parent changed')
+    }
+  }
+  const hash = createHash('sha256')
+  const bytes = Buffer.allocUnsafe(65536)
+  let count = 0
+  try {
+    verify()
+    for (;;) {
+      verify()
+      const read = readSync(fd, bytes, 0, Math.min(bytes.length, byteLimit - count + 1), null)
+      if (read === 0) break
+      count += read
+      if (count > byteLimit || count > Number(info.size)) fail('artifact exceeds bound')
+      hash.update(bytes.subarray(0, read))
+      await new Promise((resolve, reject) => binaryOutput.write(bytes.subarray(0, read), error => error ? reject(error) : resolve()))
+      verify()
+    }
+    verify()
+    if (count !== Number(info.size)) fail('artifact length changed')
+    return { path, size: count, sha256: hash.digest('hex') }
+  } finally { closeSync(fd) }
+}
+
 function bwrapArgs(config, workspace, tmp, shm, pinned) {
   const args = ['--unshare-all', '--unshare-user', '--uid', '65534', '--gid', '65534',
     '--cap-drop', 'ALL', '--die-with-parent', '--new-session', '--clearenv',
@@ -166,6 +240,7 @@ function bwrapArgs(config, workspace, tmp, shm, pinned) {
     '--ro-bind', join(config.jobPath, 'identity'), '/etc',
     '--dir', '/workspace', '--bind', workspace, '/workspace',
     '--dir', '/tmp', '--bind', tmp, '/tmp']
+  if (config.schemaVersion === 2) args.push('--dir', '/input', '--ro-bind', join(config.jobPath, 'input', 'source.tar'), '/input/source.tar')
   if (config.readOnlyRoots.length > 0) args.push('--dir', '/runtime')
   for (let i = 0; i < config.readOnlyRoots.length; i++) {
     const root = config.readOnlyRoots[i]
@@ -186,13 +261,21 @@ async function main() {
   const payload = await line()
   if (payload === undefined) fail('request missing')
   const config = JSON.parse(payload)
-  if (!config || config.schemaVersion !== 1 || !['ordinary', 'repository'].includes(config.profile)
+  if (!config || ![1, 2].includes(config.schemaVersion) || !['ordinary', 'repository'].includes(config.profile)
     || !Number.isSafeInteger(config.workspaceBytes) || !Number.isSafeInteger(config.workspaceInodes)
     || !Number.isSafeInteger(config.tmpBytes) || !Number.isSafeInteger(config.tmpInodes)
     || !Number.isSafeInteger(config.deadline) || config.deadline <= Date.now() || config.deadline > Date.now() + 1_800_000
-    || !Number.isSafeInteger(config.maxArtifactBytes) || config.maxArtifactBytes < 1 || config.maxArtifactBytes > 1_048_576
+    || !Number.isSafeInteger(config.maxArtifactBytes) || config.maxArtifactBytes < 1 || config.maxArtifactBytes > (config.schemaVersion === 2 ? 33_554_432 : 1_048_576)
     || !Number.isSafeInteger(config.maxOutputBytes) || !Array.isArray(config.argv)
     || !Array.isArray(config.files) || !Array.isArray(config.artifacts) || !Array.isArray(config.readOnlyRoots)) fail('invalid request')
+  const repository = config.schemaVersion === 2
+  if (repository && (config.profile !== 'repository' || !config.archive || !Number.isSafeInteger(config.archive.size)
+    || config.archive.size < 1 || config.archive.size > 67_108_864 || !/^[0-9a-f]{64}$/u.test(config.archive.sha256)
+    || config.files.length !== 0)) fail('invalid repository request')
+  if (config.workspaceBytes < 4096 || config.workspaceBytes > (repository ? 8 : 4) * 1024 ** 3 || config.workspaceBytes % 4096 !== 0
+    || config.tmpBytes < 4096 || config.tmpBytes > (repository ? 4 : 2) * 1024 ** 3 || config.tmpBytes % 4096 !== 0
+    || config.workspaceInodes < 16 || config.workspaceInodes > 1_000_000 || config.tmpInodes < 16 || config.tmpInodes > 1_000_000
+    || config.maxOutputBytes < 1 || config.maxOutputBytes > 1_048_576 || config.artifacts.length > 128) fail('invalid resource bounds')
   const names = new Set()
   for (const file of config.files) {
     pathParts(file.path)
@@ -217,8 +300,15 @@ async function main() {
   }
   const workspace = join(config.jobPath, 'workspace'), tmp = join(config.jobPath, 'tmp'), shm = join(config.jobPath, 'shm')
   tmpfs(workspace, config.workspaceBytes, config.workspaceInodes, false)
-  tmpfs(tmp, config.tmpBytes, config.tmpInodes, true)
+  tmpfs(tmp, config.tmpBytes, config.tmpInodes, !repository)
   tmpfs(shm, 1_048_576, 4096, true)
+  if (repository) {
+    const input = join(config.jobPath, 'input')
+    tmpfs(input, 67_112_960, 16, true)
+    await receiveArchive(config, join(input, 'source.tar'), assertLive)
+    binaryOutput = new Socket({ fd: 5, readable: false, writable: true })
+    binaryOutput.on('error', closeControl)
+  }
   const identityDirectory = join(config.jobPath, 'identity')
   mkdirSync(identityDirectory, { mode: 0o755 })
   writeFileSync(join(identityDirectory, 'passwd'), 'nobody:x:65534:65534:Sandbox:/workspace:/bin/sh\n', { flag: 'wx', mode: 0o444 })
@@ -287,14 +377,25 @@ async function main() {
   stdout = decode(chunksOut); stderr = decode(chunksErr)
   say({ type: 'EXIT', ...identity, ...exit, exceeded })
   if (await line() !== 'EXPORT') fail('external quiescence proof missing')
+  assertLive()
   const artifacts = []
   let artifactBytes = 0
-  for (const path of config.artifacts) {
-    const file = boundArtifact(workspace, path, config.maxArtifactBytes)
-    artifactBytes += Buffer.byteLength(file.content)
-    if (artifactBytes > config.maxArtifactBytes) fail('artifact output exceeds bound')
-    artifacts.push(file)
+  if (!repository || !exceeded && exit.code === 0) {
+    for (const path of config.artifacts) {
+      assertLive()
+      const file = repository
+        ? await exportBinary(workspace, path, config.maxArtifactBytes - artifactBytes, assertLive)
+        : boundArtifact(workspace, path, config.maxArtifactBytes)
+      artifactBytes += repository ? file.size : Buffer.byteLength(file.content)
+      if (artifactBytes > config.maxArtifactBytes) fail('artifact output exceeds bound')
+      artifacts.push(file)
+    }
   }
+  if (repository) await new Promise((resolve, reject) => {
+    binaryOutput.once('error', reject)
+    binaryOutput.end(resolve)
+  })
+  assertLive()
   finished = true
   say({ type: 'RESULT', status: !exceeded && exit.code === 0 ? 'succeeded' : 'failed',
     exitCode: exit.code, stdout: exceeded ? '' : stdout, stderr: exceeded ? '' : stderr,
@@ -305,4 +406,4 @@ main().catch(error => {
   revoke()
   try { say({ type: 'ERROR', reason: error instanceof Error ? error.message : 'worker failed' }) } catch {}
   process.exitCode = 1
-}).finally(() => { clearTimeout(watchdog); process.stdin.destroy() })
+}).finally(() => { clearTimeout(watchdog); process.stdin.destroy(); archiveInput?.destroy(); binaryOutput?.destroy() })

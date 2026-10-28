@@ -323,6 +323,7 @@ describe('Linux cgroup boundary', () => {
 
   it.runIf(process.env.DSH_NATIVE_CGROUP_REAL === '1')('does not prove termination with a missing freezer and a live process in another controller', async () => {
     const lease = await create(), child = blockedChild()
+    const closed = new Promise<void>(resolveClosed => child.once('close', () => resolveClosed()))
     try {
       // Simulate a historical partial placement. The retained ChildProcess is
       // the only safe authority to stop a gate absent from the freezer group.
@@ -331,8 +332,11 @@ describe('Linux cgroup boundary', () => {
       const recovered = await LinuxCgroupLease.recover(lease.snapshot)
       expect(await recovered.terminateAndProve(100)).toBe(false)
       expect(await recovered.removeWhenEmpty()).toBe(false)
+      expect(child.exitCode).toBeNull()
+      expect(child.signalCode).toBeNull()
     } finally {
       child.kill('SIGKILL')
+      await closed
       const recovered = await LinuxCgroupLease.recover(lease.snapshot)
       expect(await recovered.terminateAndProve(5_000)).toBe(true)
       expect(await recovered.removeWhenEmpty()).toBe(true)
