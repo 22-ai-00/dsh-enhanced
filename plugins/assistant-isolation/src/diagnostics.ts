@@ -70,9 +70,9 @@ export function inspectIsolationGrant(input: { stateRoot: string; grant: Isolati
     database = new DatabaseSync(path, { readOnly: true })
     database.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=250; BEGIN;'); transaction = true
     const version = (database.prepare('PRAGMA user_version').get() as { user_version?: unknown }).user_version
-    if (version !== 7) return unavailable('schema-unsupported')
+    if (version !== 7 && version !== 8) return unavailable('schema-unsupported')
     const schema = database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value?: unknown } | undefined
-    if (schema?.value !== '7') return unavailable('schema-unsupported')
+    if (schema?.value !== String(version)) return unavailable('schema-unsupported')
     const row = database.prepare('SELECT revision, expires_at, max_runs, max_total_duration_ms, revoked, principal_digest, principal_record_id, principal_version, workspace, agent_preset FROM isolation_grants WHERE id=?').get(grant.id) as Record<string, unknown> | undefined
     if (row !== undefined) {
       const positiveFields = ['revision', 'expires_at', 'max_runs', 'max_total_duration_ms', 'principal_version'] as const

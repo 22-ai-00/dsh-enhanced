@@ -1,4 +1,5 @@
 import type { GoalArtifactAdmission } from '@dsh-enhanced/task-acceptance-contract'
+import type { LinuxExecutionContract, LinuxExecutionIntent, LinuxExecutionResources } from './linux-execution-contract.js'
 import type { CreationWitness } from './runtime-witness.js'
 
 /** Owner identity is attested by the Host, never supplied in a model tool call. */
@@ -91,7 +92,10 @@ export interface IsolationJob {
   idempotencyKey: string
   requestDigest: string
   /** Explicit backend identity; legacy v6 rows migrate to docker. */
-  backend: 'docker' | 'macos-seatbelt'
+  backend: 'docker' | 'macos-seatbelt' | 'linux-native'
+  linuxContract?: LinuxExecutionContract
+  linuxIntent?: LinuxExecutionIntent
+  linuxResources?: LinuxExecutionResources
   containerName: string
   nativeResourceId?: string
   nativeNonce?: string

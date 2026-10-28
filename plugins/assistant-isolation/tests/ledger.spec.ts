@@ -25,8 +25,8 @@ describe('IsolationLedger', () => {
     expect((database.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode).toBe('wal')
     expect((statSync(file).mode & 0o777)).toBe(0o600)
     expect((statSync(join(file, '..')).mode & 0o777)).toBe(0o700)
-    expect((database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('7')
-    expect((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(7)
+    expect((database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('8')
+    expect((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(8)
     expect((database.prepare('PRAGMA auto_vacuum').get() as { auto_vacuum: number }).auto_vacuum).toBe(2)
     database.close()
   })
@@ -144,8 +144,8 @@ describe('IsolationLedger', () => {
     expect(error(() => ledger.prepare({ ...input('new'), resourceReservation: reservation() })).code).toBe('unauthorized')
     ledger.close()
     const reopened = new DatabaseSync(file)
-    expect((reopened.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(7)
-    expect((reopened.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('7')
+    expect((reopened.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(8)
+    expect((reopened.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('8')
     expect((reopened.prepare("SELECT COUNT(*) AS count FROM isolation_jobs WHERE id='legacy'").get() as { count: number }).count).toBe(1)
     reopened.close()
   })
@@ -216,7 +216,7 @@ describe('IsolationLedger', () => {
         reservedMemoryMiB: original.reservedMemoryMiB, reservedWorkspaceInodes: original.reservedWorkspaceInodes,
         requestDigest: original.requestDigest, status: 'prepared' })
       const db = new DatabaseSync(file)
-      try { expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(7) }
+      try { expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(8) }
       finally { db.close() }
     } finally { ledger.close() }
   })

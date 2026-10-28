@@ -5,7 +5,7 @@
 ## 当前交付
 
 - 去除 Linux 安装与自迭代的 Docker 依赖，保留普通隔离执行、完整源码修复、工具创建/修订、独立验收、发布采用与回退能力；不能关闭功能或复用 macOS 的受限创建路径代替。实现边界与验收见[原生运行时](dockerless-runtime.md)。
-- Linux x64 原语已实现并完成独立复核：cgroup v1 硬配额、受控 namespace 工作区/闸门，以及摘要固定的 Node/pnpm 与离线依赖准备。下一交付是原生持久执行、keeper 配额与崩溃对账；随后接通完整源码/行为验收和保权迁移。v2 准入尚未实机验证，明确拒绝。生产仍使用既有 Docker 后端，尚未切换。
+- Linux x64 已有 cgroup v1 硬配额、受控 namespace、固定 Node/pnpm 与离线依赖。当前交付把 keeper 与候选分别限额，并接入持久执行、schema 8 账本和私有 Verifier；普通工具、完整源码/行为验收、安装器及保权迁移尚未接通。v2 准入尚未实机验证，明确拒绝。生产仍使用既有 Docker 后端。
 
 ## 当前边界
 
@@ -27,7 +27,8 @@
 
 ## 最新验证
 
-- 原生底座聚焦验证：cgroup 13 项、namespace 18 项、真实控制管道故障 2 项、运行时摘要 4 项、工具链准备/取消 2 项通过；组合实机探针 9 项通过。保留的 store/cache 在独立无网络 namespace 中完成全新冻结离线安装。三项独立复核仅对各自原语给出 PASS；不覆盖生产账本、keeper 配额、v2、arm64、完整源码/发布及 owner 迁移。命令与原始证据保存在忽略目录 `docs/evidence/dockerless-20261028/`；本次根目录检查仍在运行。
+- 原生底座提交 `11501864` 的 `VITEST_MAX_WORKERS=4 pnpm_config_workspace_concurrency=4 pnpm check` 退出 0：9145 通过、116 跳过，含零警告 lint、构建、类型检查与 37 包 dry-run pack。原语独立复核通过；保留的 store/cache 在无网络 namespace 中完成全新冻结安装。该结果不覆盖后续未提交的持久执行接入。
+- 持久执行当前聚焦证据：keeper/namespace 47 项、实机组合探针 11 项、执行与恢复 30 项、私有 Verifier API 20 项通过。覆盖部分创建、Host 退出、收据写入中断、临时清理故障后同 Host 恢复、有限预算及同键不重派；ledger 迁移保留旧 Docker/macOS 身份及已用额度。整包集成回归 252 通过、52 跳过，构建、类型检查、零警告 lint 和 dry-run pack 退出 0；已核对新增模块及运行时文件随包发布。keeper、持久执行、账本及私有 Verifier 分别获得范围内独立 PASS。原始命令、退出码、摘要与限制位于忽略目录 `docs/evidence/dockerless-execution-20261028/`；未运行本轮完整根检查，Docker 路由兼容用 fixture 验证，不代表真实 Docker 重跑。
 
 - 精确发布源码的本地 `VITEST_MAX_WORKERS=4 pnpm_config_workspace_concurrency=4 pnpm check` 退出 0：9118 通过、103 跳过，含零警告 lint、构建、类型检查与 37 包 dry-run pack。[首轮 CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/40504965747) 与[主分支复跑](https://github.com/22-ai-00/dsh-enhanced/actions/runs/40508948330) 的 Linux、macOS、Windows 全部通过，独立发布前复核 PASS。
 - [Release](https://github.com/22-ai-00/dsh-enhanced/actions/runs/40508965179) 发布和账本记录成功；发布环境检查为 9119 通过、102 跳过。37 包 npm 精确版本、`latest`、普通和安装器元数据，以及 7 个公开安装资产与 6 项固定摘要均通过；前两次查询命中旧缓存，第三次同步后通过。
