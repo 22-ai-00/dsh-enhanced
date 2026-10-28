@@ -2,9 +2,9 @@ import { createHash } from 'node:crypto'
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { hashLinuxRuntimeTree, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import { hashLinuxRuntimeTree, linuxRuntimeDigest, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { linuxPluginBehaviorRuntimeDigest, prepareLinuxPluginBehaviorRuntime, readLinuxPluginBehaviorRuntime,
+import { linuxPluginBehaviorRuntimeDigest, prepareLinuxPluginBehaviorRuntime, readLinuxPluginBehaviorPreparation, readLinuxPluginBehaviorRuntime,
   validateLinuxPluginBehaviorRuntime, verifyLinuxPluginBehaviorRuntime, type LinuxPluginBehaviorRuntime } from '../src/linux-behavior-runtime.js'
 
 const sha = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
@@ -63,6 +63,9 @@ describe.runIf(process.platform === 'linux' && process.env.DSH_LINUX_BEHAVIOR_PR
     const receipt = await readFile(join(home, 'observer', 'behavior.json'))
     expect(await prepareLinuxPluginBehaviorRuntime({ runtime: base, root: join(home, 'observer') })).toEqual(descriptor)
     expect(await readLinuxPluginBehaviorRuntime({ runtime: base, root: join(home, 'observer') })).toEqual(descriptor)
+    expect(await readLinuxPluginBehaviorPreparation({ runtime: base, root: join(home, 'observer') })).toEqual({
+      descriptor, baseRuntimeDigest: linuxRuntimeDigest(base), preparationDigest: JSON.parse(receipt.toString()).receiptDigest,
+    })
     expect(await readFile(join(home, 'observer', 'behavior.json'))).toEqual(receipt)
     expect(await verifyLinuxPluginBehaviorRuntime(descriptor)).toEqual(descriptor)
     expect(linuxPluginBehaviorRuntimeDigest(descriptor)).toMatch(/^[a-f0-9]{64}$/u)

@@ -181,6 +181,26 @@ export function controlPlaneDigest(value: unknown): string {
   return createHash('sha256').update(canonical(value)).digest('hex')
 }
 
+/** Structural validation precedes this exact prepared-build binding check. */
+function creationVerificationMatchesPreparedEvidence(certificate: PluginCreationVerificationCertificate,
+  evidence: SourcePreparedEvidence): boolean {
+  if (certificate.protocol === 'assistant-growth/creation-verification/v1') {
+    return evidence.schemaVersion === 1 && !Object.hasOwn(certificate, 'execution')
+  }
+  const execution = certificate.execution
+  if (certificate.protocol === 'assistant-growth/creation-verification/v2') {
+    return evidence.schemaVersion === 2 && evidence.boundary === 'macos-seatbelt-single-process-v1'
+      && execution?.boundary === 'macos-seatbelt-single-process-v1'
+      && execution.runtimeDigest === evidence.runtimeDigest
+      && execution.buildEvidenceDigest === controlPlaneDigest(evidence)
+  }
+  return certificate.protocol === 'assistant-growth/creation-verification/v3'
+    && evidence.schemaVersion === 3 && evidence.boundary === 'linux-native-repository-v1'
+    && execution?.boundary === 'linux-native-process-seccomp-v1'
+    && execution.buildRuntimeDigest === evidence.runtimeDigest
+    && execution.buildEvidenceDigest === controlPlaneDigest(evidence)
+}
+
 function bounded(value: string, field: string, maximum = 1_000): string {
   if (typeof value !== 'string') throw new ControlPlaneStoreError('invalid-input', `${field} must be text`)
   const result = value.normalize('NFC').trim()
@@ -2793,6 +2813,7 @@ export class ControlPlaneStore {
     const job = this.getPreparedSourceJob(plan.id)
     const reference = this.getOwnerTaskFailureReference(plan.gapId)
     if (!reference || !plan.sourceCheck || !plan.preparedEvidence || !plan.creation?.growthRun
+      || !creationVerificationMatchesPreparedEvidence(certificate, plan.preparedEvidence)
       || !job.intent.creation?.growthRun || plan.digest !== certificate.plan.digest || plan.name !== certificate.plan.name
       || plan.sourceCheck.treeDigest !== certificate.plan.sourceTreeDigest
       || plan.sourceCheck.patchDigest !== certificate.plan.sourcePatchDigest
@@ -2834,6 +2855,11 @@ export class ControlPlaneStore {
     } catch { throw new ControlPlaneStoreError('invalid-state', 'stored creation verification certificate is corrupt') }
     if (certificate.plan.id !== planId || controlPlaneDigest(certificate) !== row.certificate_digest) {
       throw new ControlPlaneStoreError('invalid-state', 'stored creation verification certificate digest changed')
+    }
+    const plan = this.getSourcePlan(planId)
+    if (certificate.plan.digest !== plan.digest || !plan.preparedEvidence
+      || !creationVerificationMatchesPreparedEvidence(certificate, plan.preparedEvidence)) {
+      throw new ControlPlaneStoreError('invalid-state', 'stored creation verification certificate does not match exact prepared source')
     }
     return certificate
   }

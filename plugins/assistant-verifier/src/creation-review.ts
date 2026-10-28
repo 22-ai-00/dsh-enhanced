@@ -1,15 +1,16 @@
 import { createHash, createPrivateKey, createPublicKey, type KeyObject } from 'node:crypto'
 import { lstatSync, readFileSync, realpathSync } from 'node:fs'
-import { isAbsolute, resolve } from 'node:path'
+import { dirname, isAbsolute, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { canonicalGrowthJson, growthObjectDigest, sourceGrowthEvidenceDigest, sourceGrowthRunDigest, validateCreationAcceptanceAuthorityRef,
   verifyPluginCreationVerificationCertificate,
   validateSourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationRequest,
-  type PluginCreationVerificationResult, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+  type PluginCreationVerificationResult, type PluginCreationVerificationCertificate,
+  type PluginCreationVerificationLinuxExecution, type PluginCreationVerificationMacosExecution } from '@dsh-enhanced/assistant-growth-contract'
 import { CreationReviewStore } from './creation-review-store.js'
 import { runNativeCreationTurn, type CreationModel } from './creation-review-native.js'
-import { behaviorNativeRuntimeDigest, NATIVE_BEHAVIOR_BOUNDARY, validatePluginBehaviorDeploymentConfig,
-  type PluginBehaviorDeploymentConfig } from './plugin-behavior-config.js'
+import { behaviorNativeRuntimeDigest, LINUX_BEHAVIOR_BOUNDARY, NATIVE_BEHAVIOR_BOUNDARY, validateCreationBehaviorDeploymentConfig,
+  type CreationBehaviorDeploymentConfig } from './plugin-behavior-config.js'
 
 type PluginBehaviorRunner = import('./plugin-behavior-runner.js').PluginBehaviorRunner
 
@@ -47,7 +48,7 @@ export interface CreationReviewConfig {
   keyPath: string
   expiresAt: number
   maxVerifications: number
-  runner: PluginBehaviorDeploymentConfig
+  runner: CreationBehaviorDeploymentConfig
   policy: string
   maxInputBytes: number
   maxOutputTokens: number
@@ -106,8 +107,8 @@ export function validateCreationReviewConfig(input: CreationReviewConfig): Creat
   integer(item.receiptTtlMs, 1000, 86_400_000, 'receipt ttl')
   if (typeof item.policy !== 'string' || !item.policy.trim() || item.policy.includes('\0')
     || !item.policy.isWellFormed() || Buffer.byteLength(item.policy) > 8192) throw new Error('creation review invalid policy')
-  const runner = item.runner as PluginBehaviorDeploymentConfig
-  validatePluginBehaviorDeploymentConfig(runner)
+  const runner = item.runner as CreationBehaviorDeploymentConfig
+  validateCreationBehaviorDeploymentConfig(runner)
   privatePath(runner.stateRoot, 'runner root')
   integer(runner.expiresAt, 1, 8_640_000_000_000_000, 'runner expiry')
   integer(runner.maxRuns, 1, 10_000, 'runner quota')
@@ -161,7 +162,41 @@ export interface PreparedCreationPort {
   }
   withPreparedCreationFence<T>(input: { planId: string; planDigest: string; artifactSha256: string;
     growthRunDigest: string; referenceDigest: string }, callback: () => T): T
+  inspectPreparedCreationLinuxBuild?(planId: string, signal: AbortSignal): Promise<{
+    runtime: import('@dsh-enhanced/assistant-isolation').LinuxRuntime; evidenceDigest: string
+  }>
   inspectPreparedCreationReviewContext(planId: string, signal: AbortSignal): Promise<{ patch: string; changedPaths: string[] }>
+}
+
+/** Full repository preparation only; the private port separately checks its live receipt and job. */
+function linuxCreationBuildEvidenceDigest(value: unknown): string {
+  const evidence = exact(value, ['schemaVersion', 'kind', 'boundary', 'runtimeDigest', 'executionContractDigest',
+    'buildScriptSha256', 'archive', 'receipt', 'environment', 'checks', 'pack', 'logDigest', 'durationMs', 'preparedAt'], 'Linux build evidence')
+  if (evidence.schemaVersion !== 3 || evidence.kind !== 'dsh-source-prepared-evidence'
+    || evidence.boundary !== 'linux-native-repository-v1') throw new Error('creation requires full Linux repository preparation')
+  const digest = (value: unknown): void => { if (typeof value !== 'string' || !SHA.test(value)) throw new Error('creation Linux evidence digest invalid') }
+  for (const key of ['runtimeDigest', 'executionContractDigest', 'buildScriptSha256', 'logDigest']) digest(evidence[key])
+  const archive = exact(evidence.archive, ['sizeBytes', 'sha256'], 'Linux archive')
+  integer(archive.sizeBytes, 1, 64 * 1024 * 1024, 'Linux archive bytes'); digest(archive.sha256)
+  const receipt = exact(evidence.receipt, ['requestDigest', 'nativeNonce', 'nativeResourceId', 'intentDigest',
+    'resourcesDigest', 'receiptDigest'], 'Linux receipt')
+  for (const key of ['requestDigest', 'intentDigest', 'resourcesDigest', 'receiptDigest']) digest(receipt[key])
+  if (typeof receipt.nativeNonce !== 'string' || !/^[a-f0-9]{32}$/u.test(receipt.nativeNonce)
+    || typeof receipt.nativeResourceId !== 'string' || !/^linux-[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/u.test(receipt.nativeResourceId))
+    throw new Error('creation Linux receipt identity invalid')
+  const environment = exact(evidence.environment, ['npmConfigIgnoreScripts', 'frozenLockfile', 'offline', 'nodeVersion', 'pnpmVersion'], 'Linux environment')
+  if (environment.npmConfigIgnoreScripts !== true || environment.frozenLockfile !== true || environment.offline !== true
+    || !['nodeVersion', 'pnpmVersion'].every(key => typeof environment[key] === 'string' && environment[key] !== '' && (environment[key] as string).length <= 64))
+    throw new Error('creation Linux build environment invalid')
+  const checks = ['source-archive-integrity', 'frozen-offline-install', 'repository-pnpm-check', 'source-input-recheck', 'package-integrity']
+  if (canonicalGrowthJson(evidence.checks) !== canonicalGrowthJson(checks)) throw new Error('creation Linux repository checks incomplete')
+  const pack = exact(evidence.pack, ['name', 'version', 'sizeBytes', 'sha256'], 'Linux pack')
+  if (typeof pack.name !== 'string' || !pack.name || pack.name.length > 214
+    || typeof pack.version !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._+=-]{0,63}$/u.test(pack.version)) throw new Error('creation Linux package invalid')
+  integer(pack.sizeBytes, 1, 512 * 1024, 'Linux package bytes'); digest(pack.sha256)
+  integer(evidence.durationMs, 0, Number.MAX_SAFE_INTEGER, 'Linux build duration')
+  integer(evidence.preparedAt, 0, Number.MAX_SAFE_INTEGER, 'Linux prepared time')
+  return createHash('sha256').update(canonicalGrowthJson(evidence)).digest('hex')
 }
 
 /** Host lifecycle owner; no candidate, model tool, or public request supplies task evidence. */
@@ -230,6 +265,7 @@ export class CreationReviewRuntime {
       if (!port || typeof port.inspectPreparedCreation !== 'function' || typeof port.withPreparedCreationFence !== 'function'
         || typeof port.inspectPreparedCreationReviewContext !== 'function') throw new Error('creation source port unavailable')
       const snapshot = port.inspectPreparedCreation(request.planId)
+      if (snapshot.protocol !== 'dsh-prepared-creation/v1') throw new Error('creation source protocol changed')
       const { plan, source, reference, artifact } = snapshot
       const run = plan.creation?.growthRun
       validateSourceGrowthRunBinding(run)
@@ -256,7 +292,7 @@ export class CreationReviewRuntime {
       }
       const sourceBinding = { referenceDigest: sourceGrowthEvidenceDigest(reference), ownerDigest: sourceGrowthEvidenceDigest(reference.owner),
         growthRunDigest: sourceGrowthRunDigest(frozen) }
-      const nativeExecution = 'backend' in config.runner && config.runner.backend === 'macos-seatbelt'
+      let nativeExecution: PluginCreationVerificationMacosExecution | PluginCreationVerificationLinuxExecution | undefined = 'backend' in config.runner && config.runner.backend === 'macos-seatbelt'
         ? (() => {
           const evidence = plan.preparedEvidence
           const runtimeDigest = behaviorNativeRuntimeDigest(config.runner.runtime)
@@ -265,6 +301,26 @@ export class CreationReviewRuntime {
           return { boundary: NATIVE_BEHAVIOR_BOUNDARY as typeof NATIVE_BEHAVIOR_BOUNDARY, runtimeDigest,
             buildEvidenceDigest: createHash('sha256').update(canonicalGrowthJson(evidence)).digest('hex') }
         })() : undefined
+      if ('backend' in config.runner && config.runner.backend === 'linux-native') {
+        const buildEvidenceDigest = linuxCreationBuildEvidenceDigest(plan.preparedEvidence)
+        if (typeof port.inspectPreparedCreationLinuxBuild !== 'function') throw new Error('Linux build inspection unavailable')
+        const build = await port.inspectPreparedCreationLinuxBuild(plan.id, signal)
+        signal.throwIfAborted()
+        if (build.evidenceDigest !== buildEvidenceDigest) throw new Error('Linux build evidence snapshot changed')
+        const [{ linuxRuntimeDigest }, { linuxPluginBehaviorRuntimeDigest, readLinuxPluginBehaviorPreparation }] = await Promise.all([
+          import('@dsh-enhanced/assistant-isolation'), import('./linux-behavior-runtime.js'),
+        ])
+        const preparation = await readLinuxPluginBehaviorPreparation({ runtime: build.runtime,
+          root: dirname(config.runner.runtime.runtime.root.path), signal })
+        const runtimeDigest = linuxPluginBehaviorRuntimeDigest(config.runner.runtime)
+        const buildRuntimeDigest = linuxRuntimeDigest(build.runtime)
+        if (plan.preparedEvidence?.runtimeDigest !== buildRuntimeDigest
+          || preparation.baseRuntimeDigest !== buildRuntimeDigest
+          || linuxPluginBehaviorRuntimeDigest(preparation.descriptor) !== runtimeDigest
+          || !SHA.test(preparation.preparationDigest)) throw new Error('Linux build and observer preparation mismatch')
+        nativeExecution = { boundary: LINUX_BEHAVIOR_BOUNDARY, runtimeDigest, buildRuntimeDigest,
+          buildEvidenceDigest, observerPreparationDigest: preparation.preparationDigest }
+      }
       const fenceInput = { planId: plan.id, planDigest: plan.digest, artifactSha256: plan.preparedEvidence.pack.sha256,
         growthRunDigest: sourceBinding.growthRunDigest, referenceDigest: sourceBinding.referenceDigest }
       const fence = <T>(callback: () => T): T => port.withPreparedCreationFence(fenceInput, callback)
@@ -358,8 +414,8 @@ export class CreationReviewRuntime {
       const expiresAt = Math.min(verifiedAt + config.receiptTtlMs, config.expiresAt, config.runner.expiresAt,
         plan.expiresAt, plan.creation.grant.expiresAt, frozen.expiresAt)
       if (expiresAt <= verifiedAt) throw new Error('creation verification windows closed')
-      const body = { protocol: nativeExecution ? 'assistant-growth/creation-verification/v2' as const
-        : 'assistant-growth/creation-verification/v1' as const,
+      const body = { protocol: nativeExecution?.boundary === LINUX_BEHAVIOR_BOUNDARY ? 'assistant-growth/creation-verification/v3' as const
+        : nativeExecution ? 'assistant-growth/creation-verification/v2' as const : 'assistant-growth/creation-verification/v1' as const,
         verificationId: `creation-${binding.slice(0, 40)}`, authority,
         plan: { id: plan.id, digest: plan.digest, name: plan.name, sourceTreeDigest: plan.sourceCheck.treeDigest,
           sourcePatchDigest: plan.sourceCheck.patchDigest, artifactSha256: plan.preparedEvidence.pack.sha256,

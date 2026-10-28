@@ -54,10 +54,11 @@ test.skipIf(process.platform !== 'linux')('admits durable Linux modify preparati
   const config = normalizeControlPlaneConfig({ ...base, sourceBuild, sourceJobs: { ...sourceJobs, allowedModes: ['modify'] } })
   expect(config.sourceBuild).toEqual(sourceBuild)
   expect(config.sourceJobs?.allowedModes).toEqual(['modify'])
-  for (const field of ['sourceReleases', 'sourceReleaseExecution', 'sourceAdoptions', 'creationVerifications',
+  for (const field of ['sourceReleases', 'sourceReleaseExecution', 'sourceAdoptions',
     'revisionVerifications', 'revisionRegressions', 'creationCapabilities']) {
-    expect(() => normalizeControlPlaneConfig({ ...config, [field]: {} })).toThrow('not yet connected to independent behavior and release authorities')
+    expect(() => normalizeControlPlaneConfig({ ...config, [field]: {} })).toThrow('not yet connected to revision, adoption and release authorities')
   }
+  expect(() => normalizeControlPlaneConfig({ ...config, creationVerifications: {} as never })).toThrow('requires the dual-UID repository boundary')
   expect(existsSync(base.statePath)).toBe(false)
   expect(existsSync(sourceBuild.stateRoot)).toBe(false)
 })

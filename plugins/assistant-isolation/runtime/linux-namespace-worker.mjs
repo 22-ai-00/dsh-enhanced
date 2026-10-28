@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, chownSync, closeSync, constants, cpSync, fstatSync, readSync, writeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, statfsSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, chownSync, closeSync, constants, cpSync, fchmodSync, fstatSync, readSync, writeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, statfsSync, unlinkSync, writeFileSync } from 'node:fs'
 import { Socket } from 'node:net'
 import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -181,7 +181,25 @@ async function receiveArchive(config, target, assertLive) {
     assertLive()
     if (count !== config.archive.size || hash.digest('hex') !== config.archive.sha256
       || fstatSync(fd).size !== count) fail('archive input length or digest mismatch')
+    // Creation modes are filtered by the Host umask. Only the checked archive
+    // is shared with the subordinate candidate, after its bytes are complete.
+    fchmodSync(fd, config.schemaVersion === 3 ? 0o444 : 0o400)
   } finally { archiveInput.destroy(); closeSync(fd) }
+}
+// cpSync preserves file modes but filters newly created directories through
+// the Host umask. Snapshot directories are validated as 0755 before copying.
+function restoreIdentityDirectoryModes(path) {
+  chmodSync(path, 0o755)
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    if (entry.isDirectory()) restoreIdentityDirectoryModes(join(path, entry.name))
+  }
+}
+function writeIdentityFile(path, content) {
+  const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o400)
+  try {
+    writeFileSync(fd, content)
+    fchmodSync(fd, 0o444)
+  } finally { closeSync(fd) }
 }
 function sameFile(before, after) {
   return before.dev === after.dev && before.ino === after.ino && before.size === after.size
@@ -422,17 +440,17 @@ async function main() {
     cpSync(join(config.systemSnapshot.root.path, 'etc'), identityDirectory, {
       recursive: true, dereference: false, verbatimSymlinks: true,
     })
-    chmodSync(identityDirectory, 0o755)
+    restoreIdentityDirectoryModes(identityDirectory)
     for (const name of ['passwd', 'group', 'nsswitch.conf', 'hosts', 'hostname']) {
       const target = join(identityDirectory, name)
       try { unlinkSync(target) } catch (error) { if (error.code !== 'ENOENT') throw error }
     }
   } else mkdirSync(identityDirectory, { mode: 0o755 })
-  writeFileSync(join(identityDirectory, 'passwd'), 'nobody:x:65534:65534:Sandbox:/workspace:/bin/sh\n', { flag: 'wx', mode: 0o444 })
-  writeFileSync(join(identityDirectory, 'group'), 'nobody:x:65534:\n', { flag: 'wx', mode: 0o444 })
-  writeFileSync(join(identityDirectory, 'nsswitch.conf'), 'passwd: files\ngroup: files\nhosts: files\n', { flag: 'wx', mode: 0o444 })
-  writeFileSync(join(identityDirectory, 'hosts'), '127.0.0.1 localhost\n::1 localhost\n', { flag: 'wx', mode: 0o444 })
-  if (config.schemaVersion === 3) writeFileSync(join(identityDirectory, 'hostname'), 'dsh-sandbox\n', { flag: 'wx', mode: 0o444 })
+  writeIdentityFile(join(identityDirectory, 'passwd'), 'nobody:x:65534:65534:Sandbox:/workspace:/bin/sh\n')
+  writeIdentityFile(join(identityDirectory, 'group'), 'nobody:x:65534:\n')
+  writeIdentityFile(join(identityDirectory, 'nsswitch.conf'), 'passwd: files\ngroup: files\nhosts: files\n')
+  writeIdentityFile(join(identityDirectory, 'hosts'), '127.0.0.1 localhost\n::1 localhost\n')
+  if (config.schemaVersion === 3) writeIdentityFile(join(identityDirectory, 'hostname'), 'dsh-sandbox\n')
   const pinned = join(config.jobPath, 'immutable')
   mkdirSync(pinned, { mode: 0o700 })
   if (dual) {

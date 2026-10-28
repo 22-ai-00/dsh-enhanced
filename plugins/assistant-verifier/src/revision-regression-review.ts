@@ -13,6 +13,8 @@ import { CreationReviewStore } from './creation-review-store.js'
 import { COMPARISON_RULES, SCHEMA_RULES, RULES_VERSION, compareCase, compileCreationReviewConfig,
   parseCases, projectCreationSchemas, type Case, type CreationReviewConfig } from './creation-review.js'
 
+import { validatePluginBehaviorDeploymentConfig } from './plugin-behavior-config.js'
+
 type PluginBehaviorRunner = import('./plugin-behavior-runner.js').PluginBehaviorRunner
 type Observation = import('./plugin-behavior-runner.js').PluginBehaviorObservation
 const PURPOSE = 'assistant-growth/revision-regression-review/v1'
@@ -40,7 +42,9 @@ function legacyConfig(input: RevisionRegressionReviewConfig): CreationReviewConf
 }
 
 export function validateRevisionRegressionReviewConfig(input: RevisionRegressionReviewConfig): RevisionRegressionReviewConfig {
-  const checked = compileCreationReviewConfig(legacyConfig(input)).config
+  const legacy = legacyConfig(input)
+  validatePluginBehaviorDeploymentConfig(legacy.runner)
+  const checked = compileCreationReviewConfig(legacy).config
   if (checked.runner.maxRuns < checked.maxVerifications * (2 + 2 * checked.maxCases)) {
     throw new Error('revision regression runner cannot cover paired observations')
   }

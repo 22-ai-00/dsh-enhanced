@@ -93,7 +93,9 @@ function observed(record: CreationCapabilityRecord, result: CreationCapabilityOb
 function sameExecution(record: CreationCapabilityRecord, config: CreationCapabilityConfig): boolean {
   return record.certificate.protocol === 'assistant-growth/creation-verification/v1'
     ? !('backend' in config.runner)
-    : 'backend' in config.runner && config.runner.backend === 'macos-seatbelt'
+    : record.certificate.protocol === 'assistant-growth/creation-verification/v2'
+      && record.certificate.execution?.boundary === 'macos-seatbelt-single-process-v1'
+      && 'backend' in config.runner && config.runner.backend === 'macos-seatbelt'
       && record.certificate.execution?.runtimeDigest === nativeMacRuntimeDigest(config.runner.runtime)
 }
 

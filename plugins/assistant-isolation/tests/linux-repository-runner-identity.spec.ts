@@ -29,7 +29,7 @@ test.runIf(process.platform === 'linux' && (process.getuid?.() ?? 0) > 0)('expli
 })
 
 describe.skipIf(!real)('finite repository runner with dual kernel identity', () => {
-  test('keeps the original proof, binary receipt and spent grant across reopening without replay', async () => {
+  test.each([0o022, 0o077])('keeps readable immutable inputs and the original proof across reopening under Host umask %s', async hostUmask => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-runner-identity-'))
     const decoded = JSON.parse(await readFile(runtimeFile!, 'utf8')) as {
       environment: Required<Pick<LinuxRepositoryRunnerConfig, 'runtime' | 'systemSnapshot' | 'userNamespace'>> }
@@ -45,9 +45,16 @@ describe.skipIf(!real)('finite repository runner with dual kernel identity', () 
         maxArtifactBytes: 32 * 1024 ** 2, maxFiles: 8, memoryMiB: 256, pidsLimit: 64, cpus: 1,
         workspaceMiB: 8, workspaceInodes: 256, tmpMiB: 8, tmpInodes: 128, inputMiB: 65, inputInodes: 16 } }
     const payload = Buffer.from([0, 255, 128, 3])
-    const request = { argv: ['/bin/sh', '-ec', 'cat /input/source.tar > package.tgz; /runtime/0/bin/node -e "console.log(process.getuid())"'],
+    const inputCheck = `const fs=require('node:fs'),assert=require('node:assert/strict');
+for(const path of ['/input/source.tar','/etc/passwd','/etc/group','/etc/nsswitch.conf','/etc/hosts','/etc/hostname']) {
+  assert.equal(fs.statSync(path).mode & 511,292); assert.ok(fs.readFileSync(path).length > 0);
+  assert.throws(() => fs.writeFileSync(path,'changed'));
+}
+assert.ok(fs.readFileSync('/etc/ssl/openssl.cnf').length > 0); console.log(process.getuid());`
+    const request = { argv: ['/bin/sh', '-ec', 'cat /input/source.tar > package.tgz; exec /runtime/0/bin/node -e "$1"',
+      'immutable-input-check', inputCheck],
       archive: { bytes: payload.length, sha256: createHash('sha256').update(payload).digest('hex') }, artifacts: ['package.tgz'] }
-    let current: LinuxRepositoryRunner | undefined, clean = false, loads = 0
+    let current: LinuxRepositoryRunner | undefined, previousUmask: number | undefined, clean = false, loads = 0
     try {
       const otherRoot = await mkdtemp(join(root, 'other-runtime-'))
       const other = await linuxRuntimeFixture(otherRoot)
@@ -60,11 +67,15 @@ describe.skipIf(!real)('finite repository runner with dual kernel identity', () 
       try { expect(untouched.prepare('SELECT COUNT(*) AS n FROM isolation_jobs').get()?.n).toBe(0) }
       finally { untouched.close() }
       expect(loads).toBe(0)
+      // This file runs serially in its own Vitest fork; keeper children inherit
+      // this mask. Restore it even on failure instead of changing Host defaults.
+      previousUmask = process.umask(hostUmask)
       current = new LinuxRepositoryRunner(input)
       const first = await current.run('source-job', request, async () => { loads++; return payload }, new AbortController().signal)
       expect(first.result, JSON.stringify(first.result)).toMatchObject({ status: 'succeeded', quiescent: true, stdout: '65534\n' })
       expect(first.artifacts[0]?.bytes.equals(payload)).toBe(true)
       expect(first.receiptBinding?.receiptDigest).toMatch(/^[a-f0-9]{64}$/u)
+      expect(await current.inspectSuccessfulExecution('source-job')).toEqual(first)
       expect(await current.inspectQuiescence('source-job')).toBe('quiescent')
       await current.close(); current = undefined
 
@@ -72,6 +83,7 @@ describe.skipIf(!real)('finite repository runner with dual kernel identity', () 
       const { userNamespace: _mapping, systemSnapshot: _snapshot, ...legacy } = input
       expect(() => new LinuxRepositoryRunner(legacy)).toThrow('foreign authority or backend')
       current = new LinuxRepositoryRunner(input)
+      expect(await current.inspectSuccessfulExecution('source-job')).toEqual(first)
       const cached = await current.run('source-job', request, async () => { loads++; throw new Error('must not replay') }, new AbortController().signal)
       expect(cached.result).toEqual(first.result)
       expect(cached.receiptBinding).toEqual(first.receiptBinding)
@@ -96,6 +108,7 @@ describe.skipIf(!real)('finite repository runner with dual kernel identity', () 
         clean = true
       } finally { db.close() }
     } finally {
+      if (previousUmask !== undefined) process.umask(previousUmask)
       await current?.close()
       // Preserve private recovery evidence if any resource proof failed.
       if (clean) await rm(root, { recursive: true, force: true })

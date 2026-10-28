@@ -67,6 +67,7 @@ describe.skipIf(!real)('finite private repository runner with actual Linux recei
     expect(result.artifacts[0]!.bytes.equals(Buffer.from([0, 255, 128, 1]))).toBe(true)
     expect(result.receiptBinding?.receiptDigest).toMatch(/^[a-f0-9]{64}$/u)
     expect(result).toMatchObject({ runtimeDigest: first.runtimeDigest, contractDigest: first.contractDigest })
+    expect(await first.inspectSuccessfulExecution('source-job')).toEqual(result)
     expect(await first.inspectQuiescence('source-job')).toBe('quiescent')
     const never = async (): Promise<Uint8Array> => { throw new Error('archive factory must not replay') }
     expect((await first.run('source-job', request, never, new AbortController().signal)).result).toEqual(result.result)
@@ -74,6 +75,8 @@ describe.skipIf(!real)('finite private repository runner with actual Linux recei
     const reopened = runner(input), cached = await reopened.run('source-job', request, never, new AbortController().signal)
     expect(cached.result).toEqual(result.result)
     expect(cached.artifacts[0]!.bytes.equals(result.artifacts[0]!.bytes)).toBe(true)
+    expect(await reopened.inspectSuccessfulExecution('source-job')).toEqual(result)
+    expect(await reopened.inspectSuccessfulExecution('missing')).toBeUndefined()
     expect(loads).toBe(1)
     const db = database(input)
     try {
@@ -81,11 +84,28 @@ describe.skipIf(!real)('finite private repository runner with actual Linux recei
       await absence(db, 'source-job')
       const intent = JSON.parse(db.prepare('SELECT linux_intent_json FROM isolation_jobs').get()?.linux_intent_json as string)
       await mkdir(intent.namespacePath, { mode: 0o700 })
+      expect(await reopened.inspectSuccessfulExecution('source-job')).toBeUndefined()
       expect(await reopened.inspectQuiescence('source-job')).toBe('unknown')
       expect(await reopened.run('source-job', request, never, new AbortController().signal))
         .toMatchObject({ result: { status: 'unknown', quiescent: false }, artifacts: [] })
       await rm(intent.namespacePath, { recursive: true })
       expect(await reopened.inspectQuiescence('source-job')).toBe('quiescent')
+      const spool = join(input.stateRoot, 'linux-executions/artifacts', `${intent.jobId}-${intent.nativeNonce}`, '0.bin')
+      const original = await readFile(spool)
+      try {
+        await writeFile(spool, Buffer.alloc(original.length))
+        expect(await reopened.inspectSuccessfulExecution('source-job')).toBeUndefined()
+      } finally { await writeFile(spool, original) }
+      expect(await reopened.inspectSuccessfulExecution('source-job')).toEqual(result)
+      const receiptPath = join(input.stateRoot, 'linux-executions/receipts', `${intent.jobId}-${intent.nativeNonce}.json`)
+      const originalReceipt = await readFile(receiptPath)
+      try {
+        const changed = JSON.parse(originalReceipt.toString('utf8'))
+        changed.result.stdout = 'receipt drift'
+        await writeFile(receiptPath, JSON.stringify(changed))
+        expect(await reopened.inspectSuccessfulExecution('source-job')).toBeUndefined()
+      } finally { await writeFile(receiptPath, originalReceipt) }
+      expect(await reopened.inspectSuccessfulExecution('source-job')).toEqual(result)
     } finally { db.close() }
     expect(await reopened.inspectQuiescence('missing')).toBe('unknown')
   })

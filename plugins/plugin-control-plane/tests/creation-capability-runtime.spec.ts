@@ -137,6 +137,51 @@ test('signed legacy v1 certificate remains eligible for the Docker runner', asyn
   await runtime.close()
 })
 
+test.each(['adopt', 'restore'] as const)('signed Linux v3 cannot %s through a matching macOS runtime digest', async phase => {
+  const f = fixture(), root = resolve('fixture-native-runtime')
+  const native: NativeMacRuntime = { schemaVersion: 1, platform: `darwin-${process.arch}` as NativeMacRuntime['platform'],
+    nodePath: resolve(root, 'node'), nodeSha256: 'a'.repeat(64), modulesPath: resolve(root, 'node_modules'),
+    roots: [{ path: root, dev: 1, ino: 2, sha256: 'b'.repeat(64) }], versions: { ...f.certificate.environment, typescript: '6.0.3' } }
+  const runtimeDigest = nativeMacRuntimeDigest(native)
+  f.config.runner = { backend: 'macos-seatbelt', runtime: native, stateRoot: resolve(root, 'state'), expiresAt: expiry(),
+    maxRuns: 5, maxTotalDurationMs: 30_000, maxDurationMs: 10_000, maxOutputBytes: 65_536 }
+  const setCertificate = (linux: boolean): void => {
+    f.certificate.protocol = linux ? 'assistant-growth/creation-verification/v3' : 'assistant-growth/creation-verification/v2'
+    f.certificate.execution = linux
+      ? { boundary: 'linux-native-process-seccomp-v1', runtimeDigest, buildEvidenceDigest: 'c'.repeat(64),
+        buildRuntimeDigest: 'd'.repeat(64), observerPreparationDigest: 'e'.repeat(64) }
+      : { boundary: 'macos-seatbelt-single-process-v1', runtimeDigest, buildEvidenceDigest: 'c'.repeat(64) }
+    const { signature: _signature, ...unsigned } = f.certificate
+    f.certificate.signature = sign(null, Buffer.from(canonicalGrowthJson(unsigned)), verifier.privateKey).toString('base64url')
+    expect(verifyPluginCreationVerificationCertificate(f.certificate, f.certificate.authority, verifierPublicKey)).toBe(true)
+  }
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  const original = f.runner.run.bind(f.runner)
+  // Even a matching observation cannot convert this runner's adoption authority
+  // to Linux. The protocol fence must run before discovery or mounting.
+  f.runner.run = async input => ({ ...await original(input), boundary: f.certificate.execution!.boundary, runtimeDigest })
+  let alias: string | undefined
+  if (phase === 'restore') {
+    setCertificate(false)
+    const first = f.runtime(); await first.start()
+    expect(first.eligible('plan-1')).toBe(true)
+    await first.adopt('plan-1', new AbortController().signal)
+    alias = f.journal.inspect('plan-1')!.tools![0]!.name
+    expect(f.ctx.tools.get(alias)).toBeDefined()
+    await first.close()
+  }
+  setCertificate(true)
+  const runtime = f.runtime(); await runtime.start()
+  expect(runtime.eligible('plan-1')).toBe(false)
+  await expect(runtime.adopt('plan-1', new AbortController().signal)).rejects.toThrow('not eligible')
+  if (phase === 'restore') {
+    expect(f.ctx.tools.get(alias!)).toBeUndefined()
+    expect(f.journal.inspect('plan-1')).toMatchObject({ status: 'closed', reason: 'authority-source-or-mount-invalid' })
+  } else expect(f.journal.inspect('plan-1')).toBeUndefined()
+  expect(f.counts()).toMatchObject({ discoveries: phase === 'restore' ? 1 : 0, invokes: 0 })
+  await runtime.close()
+})
+
 test.each([
   ['docker', 'discover'], ['docker', 'invoke'],
   ['macos-seatbelt', 'discover'], ['macos-seatbelt', 'invoke'],

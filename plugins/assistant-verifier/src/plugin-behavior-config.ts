@@ -12,6 +12,7 @@ export interface LinuxPluginBehaviorRunnerConfig extends Omit<LinuxVerifierRunne
 export type PluginBehaviorRunnerConfig = Omit<IsolatedVerifierRunnerConfig, 'command'>
   | Omit<NativeMacVerifierRunnerConfig, 'source'>
   | LinuxPluginBehaviorRunnerConfig
+export type CreationBehaviorDeploymentConfig = PluginBehaviorDeploymentConfig | Omit<LinuxPluginBehaviorRunnerConfig, 'authorityDigest'>
 export type PluginBehaviorDeploymentConfig = Omit<IsolatedVerifierRunnerConfig, 'command' | 'authorityDigest'>
   | Omit<NativeMacVerifierRunnerConfig, 'source' | 'authorityDigest'>
 
@@ -125,14 +126,21 @@ export function validatePluginBehaviorRunnerConfig(value: unknown): PluginBehavi
 }
 
 /** Deployment values omit the digest, which the authenticated owner binds at construction. */
-export function validatePluginBehaviorDeploymentConfig(value: unknown): PluginBehaviorDeploymentConfig {
+export function validateCreationBehaviorDeploymentConfig(value: unknown): CreationBehaviorDeploymentConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype
     || Object.hasOwn(value, 'authorityDigest')
     || Reflect.ownKeys(value).some(key => typeof key !== 'string')
-    || Object.getOwnPropertyDescriptor(value, 'backend')?.value === 'linux-native'
     || !Object.values(Object.getOwnPropertyDescriptors(value)).every(item => item.enumerable && 'value' in item))
     throw new Error('invalid plugin behavior deployment config')
   const checked = validatePluginBehaviorRunnerConfig({ ...value, authorityDigest: '0'.repeat(64) })
   const { authorityDigest: _authorityDigest, ...deployment } = checked
-  return deployment as PluginBehaviorDeploymentConfig
+  return deployment as CreationBehaviorDeploymentConfig
+}
+
+/** Older behavior consumers cannot acquire Linux creation authority. */
+export function validatePluginBehaviorDeploymentConfig(value: unknown): PluginBehaviorDeploymentConfig {
+  if (value && typeof value === 'object'
+    && Object.getOwnPropertyDescriptor(value, 'backend')?.value === 'linux-native')
+    throw new Error('invalid plugin behavior deployment config')
+  return validateCreationBehaviorDeploymentConfig(value) as PluginBehaviorDeploymentConfig
 }

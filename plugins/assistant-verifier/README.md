@@ -87,7 +87,7 @@ Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始
 
 macOS 使用显式 `backend: 'macos-seatbelt'`、私有固定 `runtime` 与相同的持久次数、时长和输出预算；部署配置省略 `authorityDigest`，认证 Host 在构造时注入。`validatePluginBehaviorDeploymentConfig` 与 `validatePluginBehaviorRunnerConfig` 是同步严格校验。固定源码在只读 Seatbelt 单进程中加载 Cordis、SystemPrompt、Tools 和候选，只将操作输入传入候选；预期答案、签名私钥和持久账本留在 Host。Host 安全解析 npm tarball 为普通文件，拒绝链接及越界路径；从已核验的 runtime 填入环境与 `macos-seatbelt-single-process-v1` 边界。候选仍与观察代码同进程，其输出和结果均视为不可信，必须由独立私有 held-out 答案裁决；该边界不声称具备 Linux 双进程隔离的等价防篡改性。v2 创建证书签名绑定运行时摘要和固定构建证据摘要，采用及后续调用再次比对运行时；旧 v1 凭证及 Docker 路径保留。
 
-Linux 原生私有 API 使用 `backend: 'linux-native'`、`runtime: LinuxPluginBehaviorRuntime`、当前用户已委派的 `cgroupRoots` 和相同的有限 authority 字段；调用者不能提供命令、源码、镜像或资源策略。先从 `@dsh-enhanced/assistant-verifier/linux-behavior-runtime` 导入 `prepareLinuxPluginBehaviorRuntime({ runtime: baseLinuxRuntime, root: privateDestination, signal })`，取得独立目录内的固定运行时描述。该目录保存 `behavior.json` 和 `runtime/`，后者只读映射到 `/runtime/0`。原基底、源码身份、安装回执、主人与额度均不被改写。此入口仅供可信 Host 使用；`validatePluginBehaviorDeploymentConfig` 仍拒绝 Linux，`creationReviews`、修订证书、采用及安装默认值尚未接线。
+Linux 原生私有 API 使用 `backend: 'linux-native'`、`runtime: LinuxPluginBehaviorRuntime`、当前用户已委派的 `cgroupRoots` 和相同的有限 authority 字段；调用者不能提供命令、源码、镜像或资源策略。先从 `@dsh-enhanced/assistant-verifier/linux-behavior-runtime` 导入 `prepareLinuxPluginBehaviorRuntime({ runtime: baseLinuxRuntime, root: privateDestination, signal })`，取得独立目录内的固定运行时描述。该目录保存 `behavior.json` 和 `runtime/`，后者只读映射到 `/runtime/0`。原基底、源码身份、安装回执、主人与额度均不被改写。此入口仅供可信 Host 使用。创建验收使用专门的 `validateCreationBehaviorDeploymentConfig`；通用 `validatePluginBehaviorDeploymentConfig` 仍拒绝 Linux，修订、回归、采用及安装默认值尚未接线。
 
 原生准备在私有目录中限量复制基底，使用固定 `/usr/bin/cc` 及其已核验的 root-owned 工具链编译已发布 C 资产，不下载依赖、不运行候选或安装脚本。C 字节及父/候选 JavaScript 与 Docker 观察器同源，仅变更固定运行时路径；编译器、依赖、源码和产物摘要绑定到新回执，重用时漂移即拒绝。准备会读基底/系统编译器与头文件、写新私有目录并启动受限编译子进程；运行只接收包和输入，不接触 Host 凭据、浏览器、Docker socket 或验收答案。独占锁协调本 API；崩溃留下的锁拒绝继续，不自动夺锁。该权限边界不隔离同 UID 的恶意 Host 插件。
 
@@ -115,7 +115,7 @@ Linux 原生私有 API 使用 `backend: 'linux-native'`、`runtime: LinuxPluginB
 | `owner` | `authorityId`, `authorityHash`, `principalId`, `principalRecordId`, `principalVersion`, `workspace`, `agentPreset`。workspace 为已存在的 canonical 绝对路径。 |
 | `keyPath` | owner 私有、单链接、非符号链接的 Ed25519 PKCS8 文件；不会交给模型或容器。 |
 | `maxVerifications` | 1–1000；失败与未知派发也消费持久额度，不随重启返还。 |
-| `runner` | `stateRoot`, `image`, `dockerPath`, `expiresAt`, `maxRuns`, `maxTotalDurationMs`, `maxDurationMs`, `maxOutputBytes`；使用当前锁文件的专用观察镜像。最坏每次消耗 `1 + maxCases` 个独立容器调用。 |
+| `runner` | Docker 使用 `stateRoot`, `image`, `dockerPath` 及有限期限、次数、时长和输出预算；macOS/Linux 使用上文的显式原生配置。最坏每次消耗 `1 + maxCases` 个独立观察调用。 |
 | `policy` | owner 固定的验收政策，最多 8192 字节。 |
 | `maxInputBytes`, `maxOutputTokens` | 输入 4096–262144 字节，每个模型回合 1–32768 输出 token。 |
 | `maxDurationMs`, `maxCases`, `receiptTtlMs` | 整次验收 1 秒至 30 分钟；2–8 个不同输入；回执 1 秒至 24 小时，受所有原授权窗口收窄。 |
@@ -124,11 +124,13 @@ Linux 原生私有 API 使用 `backend: 'linux-native'`、`runtime: LinuxPluginB
 
 封存精确 tgz 后，第一轮全新、无工具的原生 Agent 从当前认证任务/纠正正文与候选参数结构生成私有用例；不读取候选代码、测试或调用结果。schema 的说明文字不进入此轮。Host 在调用前持久保存用例，分别在独立子进程执行并精确比较文本或 JSON 值。第二轮全新 Agent 检查实际已核对的源码补丁、任务语义与固定用例；两轮均使用来源 Growth run 的准确模型，不增加默认供应商或隐式恢复切换。
 
-只有实际比较通过、源码审查通过且最终当前来源 fence 有效，才签发 `assistant-growth/creation-verification/v1` Ed25519 凭证。它绑定任务修订、Growth run、精确源码/制品、私有合同摘要、观察作业、SDK 环境、模型和预算。私有 SQLite 在每次派发前持久 claim；崩溃、取消或不明执行不自动重放。含糊任务、不可支持的行为或缺失证据保持 `unknown`。
+只有实际比较通过、源码审查通过且最终当前来源 fence 有效，才签发 Ed25519 凭证：Docker 使用 `assistant-growth/creation-verification/v1`，macOS 使用 v2，Linux 使用 v3。它们绑定任务修订、Growth run、精确源码/制品、私有合同摘要、观察作业、SDK 环境、模型和预算。私有 SQLite 在每次派发前持久 claim；崩溃、取消或不明执行不自动重放。含糊任务、不可支持的行为或缺失证据保持 `unknown`。
+
+Linux 创建验收要求 Control Plane 的双 UID 完整仓库构建。派发前通过私有 `inspectPreparedCreationLinuxBuild` 重读原成功任务的收据和包，核对实际资源已经消失、当前 owner、信任配置、固定基底与全部构建证据；不会重新执行或退款。随后用 `readLinuxPluginBehaviorPreparation` 校验同一基底生成的观察器及其准备回执。v3 分别签名绑定观察器运行时 `runtimeDigest`、构建基底 `buildRuntimeDigest`、完整构建证据 `buildEvidenceDigest` 和准备回执 `observerPreparationDigest`。发现与每条用例都必须返回匹配的 Linux 边界和运行时。512 KiB 制品上限及两轮原模型预算保持不变；v3 不会进入尚未接通的旧采用路径。
 
 生成用例与源码审查仍依赖模型语义判断；剥离 schema 说明和禁止工具不证明模型判断总是正确。此凭证仅证明这些任务派生检查通过，不是 owner 审批、通用目标成功、发布许可或采用授权。Control Plane 仍保留 `pending-approval`；之后的有限采用、Cordis 动态加载及真实后续收益必须分别验收。
 
-新增数据与权限：读取当前 Host 认证任务和检查补丁，向该任务模型供应商发送这些材料；写私有合同、观察摘要、模型 Session、有限额度与签名账本；读取私有签名密钥，并通过固定 Docker executable 执行封存候选。没有浏览器或运行时联网容器权限，没有安装脚本或公开验收写工具。
+新增数据与权限：读取当前 Host 认证任务和检查补丁，向该任务模型供应商发送这些材料；写私有合同、观察摘要、模型 Session、有限额度与签名账本；读取私有签名密钥，通过所配置的固定隔离后端执行封存候选。Linux 还读取既有构建收据、封存包及独立准备回执。没有浏览器或候选运行时网络权限，没有安装脚本或公开验收写工具。
 
 ## 已采用插件的新任务修订验收
 
