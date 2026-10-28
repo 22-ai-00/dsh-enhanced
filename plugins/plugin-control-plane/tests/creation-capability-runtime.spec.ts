@@ -1,4 +1,5 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -6,6 +7,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { canonicalGrowthJson, SourceGrowthRunUnavailableError,
   verifyPluginCreationVerificationCertificate, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { nativeMacRuntimeDigest, type NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 import { afterEach, expect, test } from 'vitest'
 import { CreationCapabilityRuntime } from '../src/creation-capability-runtime.js'
 import type { CreationCapabilityConfig, CreationCapabilityJournalPort, CreationCapabilityObservation,
@@ -132,6 +134,51 @@ test('signed legacy v1 certificate remains eligible for the Docker runner', asyn
   const runtime = f.runtime()
   await runtime.start()
   expect(runtime.eligible('plan-1')).toBe(true)
+  await runtime.close()
+})
+
+test.each([
+  ['docker', 'discover'], ['docker', 'invoke'],
+  ['macos-seatbelt', 'discover'], ['macos-seatbelt', 'invoke'],
+] as const)('Linux %s/%s evidence cannot satisfy an existing adoption certificate', async (backend, operation) => {
+  const f = fixture()
+  if (backend === 'macos-seatbelt') {
+    const root = resolve('fixture-native-runtime')
+    const runtime: NativeMacRuntime = { schemaVersion: 1,
+      platform: `darwin-${process.arch}` as NativeMacRuntime['platform'],
+      nodePath: resolve(root, 'node'), nodeSha256: 'a'.repeat(64),
+      modulesPath: resolve(root, 'node_modules'), roots: [{ path: root, dev: 1, ino: 2, sha256: 'b'.repeat(64) }],
+      versions: { ...f.certificate.environment, typescript: '6.0.3' } }
+    f.config.runner = { backend, runtime, stateRoot: resolve(root, 'state'), expiresAt: expiry(),
+      maxRuns: 5, maxTotalDurationMs: 30_000, maxDurationMs: 10_000, maxOutputBytes: 65_536 }
+    f.certificate.protocol = 'assistant-growth/creation-verification/v2'
+    f.certificate.execution = { boundary: 'macos-seatbelt-single-process-v1',
+      runtimeDigest: nativeMacRuntimeDigest(runtime), buildEvidenceDigest: 'c'.repeat(64) }
+    const { signature: _signature, ...unsigned } = f.certificate
+    f.certificate.signature = sign(null, Buffer.from(canonicalGrowthJson(unsigned)), verifier.privateKey).toString('base64url')
+  }
+  expect(verifyPluginCreationVerificationCertificate(f.certificate, f.certificate.authority, verifierPublicKey)).toBe(true)
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  const original = f.runner.run.bind(f.runner)
+  f.runner.run = async input => ({ ...await original(input),
+    boundary: input.operation.kind === operation ? 'linux-native-process-seccomp-v1'
+      : backend === 'docker' ? 'process-seccomp-v1' : 'macos-seatbelt-single-process-v1',
+    runtimeDigest: f.certificate.execution?.runtimeDigest ?? 'f'.repeat(64) })
+  const runtime = f.runtime()
+  await runtime.start()
+  expect(runtime.eligible('plan-1')).toBe(true)
+  if (operation === 'discover') {
+    await expect(runtime.adopt('plan-1', new AbortController().signal)).rejects.toThrow('certificate mismatch')
+    expect(f.journal.inspect('plan-1')).toMatchObject({ status: 'unknown', reason: 'adoption-unsettled' })
+    expect(f.journal.inspect('plan-1')?.tools).toBeUndefined()
+  } else {
+    await runtime.adopt('plan-1', new AbortController().signal)
+    const name = f.journal.inspect('plan-1')!.tools![0]!.name
+    const exec = { callId: 'linux-boundary-mismatch', agent: { session: { id: 'session-1' } },
+      signal: new AbortController().signal } as unknown as ToolRunContext
+    await expect(f.ctx.tools.get(name)!.execute({ query: 'test' }, exec)).rejects.toThrow('invocation unknown or changed')
+    expect([...f.calls.values()]).toEqual([{ status: 'unknown', result: undefined }])
+  }
   await runtime.close()
 })
 

@@ -75,3 +75,17 @@ test.runIf(process.platform === 'linux')('the release adapter Node copy must mat
   const changed = { ...runtime, root: { ...runtime.root, sha256: await hashLinuxRuntimeTree(runtime.root.path) } }
   await expect(verifyLinuxRuntime(changed)).rejects.toThrow('release Node differs')
 })
+
+test('cancelled runtime validation does not start filesystem access', async () => {
+  const reason = new Error('owner disposed'), signal = AbortSignal.abort(reason)
+  await expect(hashLinuxRuntimeTree('/missing-runtime', signal)).rejects.toBe(reason)
+  await expect(verifyLinuxRuntime({} as LinuxRuntime, signal)).rejects.toBe(reason)
+})
+
+test.runIf(process.platform === 'linux')('runtime traversal stops on cancellation and remains reusable', async () => {
+  const runtime = await fixture(), controller = new AbortController(), reason = new Error('verification cancelled')
+  const pending = hashLinuxRuntimeTree(runtime.root.path, controller.signal)
+  controller.abort(reason)
+  await expect(pending).rejects.toBe(reason)
+  await expect(hashLinuxRuntimeTree(runtime.root.path)).resolves.toBe(runtime.root.sha256)
+})

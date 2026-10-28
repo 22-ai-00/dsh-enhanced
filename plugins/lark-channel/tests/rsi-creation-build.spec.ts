@@ -371,6 +371,35 @@ describe.skipIf(process.platform !== 'linux' || process.arch !== 'x64')('private
     expect((await readdir(join(abort.home, 'rsi-creation-builds')))).toEqual([])
   })
 
+  test('unreviewed Host wrapper changes reject even when fixed worker and candidate bodies are unchanged', async () => {
+    const f = await fixture()
+    const path = join(f.repository, 'plugins/assistant-verifier/src/plugin-behavior-runner.ts')
+    const approved = await readFile(path, 'utf8')
+    await writeFile(path, `${approved}\n// unreviewed Host wrapper change\n`)
+    await expect(prepareRsiCreationBuildEnvironment(f.args)).rejects.toThrow('trusted asset changed')
+    await expect(lstat(join(f.home, 'rsi-creation-builds'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(behaviorBuilds(await calls(f.calls))).toBe(0)
+  })
+
+  test('a reviewed legacy recipe cannot be mixed with the current builder, launcher and Host wrapper', async () => {
+    const f = await fixture()
+    const path = join(f.repository, 'scripts/isolation/plugin-verifier.Dockerfile')
+    // Reconstruct the exact older recipe without depending on Git history or
+    // embedding another complete asset. Its digest proves this is a known pin,
+    // rather than the arbitrary corruption checked by the drift cases above.
+    const legacy = (await readFile(path, 'utf8'))
+      .replace(/^ARG TARGETARCH\n/mu, '')
+      .replace(/^RUN test .*\n && test .*\n && cc /mu, 'RUN cc ')
+      .replace(/^ && cc .* -DDSH_LAUNCHER_TEST .*\n/mu, '')
+      .replace(/ \\\n && \/tmp\/launcher-test\n/u, '\n')
+      .replace('= 4.0.5', '= 4.0.4').replaceAll('= 0.2.1-rc.2', '= 0.2.0-rc.2')
+    expect(createHash('sha256').update(legacy).digest('hex')).toBe('e3d4aad5d1a1fda8c1a01d080f32aceb9d6438954169b412ed96e8dde2fd22b2')
+    await writeFile(path, legacy)
+    await expect(prepareRsiCreationBuildEnvironment(f.args)).rejects.toThrow('trusted asset changed')
+    await expect(lstat(join(f.home, 'rsi-creation-builds'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(behaviorBuilds(await calls(f.calls))).toBe(0)
+  })
+
   test('failed behavior build leaves no receipt and later asset drift prevents replay', async () => {
     const failed = await fixture()
     await writeFile(failed.state, 'build-fail')

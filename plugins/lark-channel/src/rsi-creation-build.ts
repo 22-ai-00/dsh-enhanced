@@ -21,6 +21,17 @@ const HOST_020_FIXED = {
   ...FIXED,
   'scripts/isolation/plugin-verifier.Dockerfile': '9301bf426688c46f3d4fd8bcae7acde5da283ed6730f87be1f225d93fca95823',
 } as const
+// The Linux observer adds Host-side delegation around the same fixed marker
+// bodies. Review its whole source with each supported Host recipe as an exact
+// set, while retaining the previously approved sets above unchanged.
+const LINUX_OBSERVER_FIXED = {
+  ...FIXED,
+  'plugins/assistant-verifier/src/plugin-behavior-runner.ts': 'e3a0813efe494ee9788eff83ae6b149ec81b68ba5297d35a992672cd2009f7a4',
+} as const
+const LINUX_OBSERVER_HOST_020_FIXED = {
+  ...HOST_020_FIXED,
+  'plugins/assistant-verifier/src/plugin-behavior-runner.ts': LINUX_OBSERVER_FIXED['plugins/assistant-verifier/src/plugin-behavior-runner.ts'],
+} as const
 const LEGACY_FIXED = {
   ...FIXED,
   'plugins/assistant-verifier/src/plugin-behavior-runner.ts': '1a7f5d9a686cc8615e403a9f5536701d759fc40ef9fa5fe7c29cbddb2891c187',
@@ -103,6 +114,7 @@ async function inputs(source: RsiSourceWorkspace): Promise<Inputs> {
   }
   const matches = (pins: Record<string, string>) => Object.entries(pins).every(([name, expected]) => digest(files.get(name)!) === expected)
   if (!matches(FIXED) && !matches(HOST_020_FIXED)
+    && !matches(LINUX_OBSERVER_FIXED) && !matches(LINUX_OBSERVER_HOST_020_FIXED)
     && !(io.hostPlatform() === 'linux/amd64' && matches(LEGACY_FIXED))) fail('trusted asset changed')
   const manifest = JSON.parse(files.get('package.json')!.toString('utf8')) as Record<string, unknown>
   if (manifest.name !== 'dsh-enhanced' || manifest.version !== source.version

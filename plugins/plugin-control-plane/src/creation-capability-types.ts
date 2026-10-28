@@ -84,7 +84,8 @@ export interface CreationCapabilityObservation {
   quiescent: boolean
   jobId?: string
   artifactSha256: string
-  boundary?: 'process-seccomp-v1' | 'macos-seatbelt-single-process-v1'
+  /** Evidence can describe an unsupported backend; adoption still requires its certificate boundary. */
+  boundary?: 'process-seccomp-v1' | 'macos-seatbelt-single-process-v1' | 'linux-native-process-seccomp-v1'
   runtimeDigest?: string
   reason?: string
   environment?: PluginCreationVerificationCertificate['environment']

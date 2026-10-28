@@ -1,10 +1,15 @@
 import { createHash } from 'node:crypto'
 import { IsolatedVerifierRunner, NativeMacVerifierRunner, type IsolatedVerifierRunnerConfig,
   type NativeMacVerifierRunnerConfig } from '@dsh-enhanced/assistant-isolation'
-import { behaviorNativeRuntimeDigest, NATIVE_BEHAVIOR_BOUNDARY, validatePluginBehaviorRunnerConfig,
+import { behaviorNativeRuntimeDigest, NATIVE_BEHAVIOR_BOUNDARY, LINUX_BEHAVIOR_BOUNDARY, validatePluginBehaviorRunnerConfig,
   type PluginBehaviorRunnerConfig } from './plugin-behavior-config.js'
-export { NATIVE_BEHAVIOR_BOUNDARY, validatePluginBehaviorRunnerConfig, validatePluginBehaviorDeploymentConfig } from './plugin-behavior-config.js'
-export type { PluginBehaviorRunnerConfig, PluginBehaviorDeploymentConfig } from './plugin-behavior-config.js'
+export { NATIVE_BEHAVIOR_BOUNDARY, LINUX_BEHAVIOR_BOUNDARY, validatePluginBehaviorRunnerConfig, validatePluginBehaviorDeploymentConfig } from './plugin-behavior-config.js'
+export type { PluginBehaviorRunnerConfig, PluginBehaviorDeploymentConfig, LinuxPluginBehaviorRunnerConfig } from './plugin-behavior-config.js'
+export { LINUX_BEHAVIOR_COMMAND, validateLinuxPluginBehaviorRuntime, verifyLinuxPluginBehaviorRuntime,
+  linuxPluginBehaviorRuntimeDigest, prepareLinuxPluginBehaviorRuntime, readLinuxPluginBehaviorRuntime } from './linux-behavior-runtime.js'
+export type { LinuxPluginBehaviorRuntime } from './linux-behavior-runtime.js'
+import { linuxPluginBehaviorRuntimeDigest } from './linux-behavior-runtime.js'
+import { LinuxBehaviorRunner } from './linux-behavior-runner.js'
 import { nativeBehaviorFiles } from './native-behavior-artifact.js'
 import { NATIVE_BEHAVIOR_SOURCE } from './native-behavior-worker.js'
 
@@ -27,7 +32,7 @@ export interface PluginBehaviorObservation {
   readonly quiescent: boolean
   readonly jobId?: string
   readonly artifactSha256: string
-  readonly boundary?: typeof BOUNDARY | typeof NATIVE_BEHAVIOR_BOUNDARY
+  readonly boundary?: typeof BOUNDARY | typeof NATIVE_BEHAVIOR_BOUNDARY | typeof LINUX_BEHAVIOR_BOUNDARY
   readonly runtimeDigest?: string
   readonly reason?: string
   readonly environment?: Readonly<{ node: string; cordis: string; tools: string; systemPrompt: string }>
@@ -113,10 +118,22 @@ function validObservation(value: unknown, operation: PluginBehaviorOperation, sh
   return true
 }
 
+function validLinuxFrame(value: PluginBehaviorObservation, operation: PluginBehaviorOperation,
+  expected: NonNullable<PluginBehaviorObservation['environment']>): boolean {
+  const fields = ['schemaVersion', 'boundary', 'status', 'artifactSha256', 'quiescent', 'environment', 'schemaDigest',
+    operation.kind === 'discover' ? 'schemas' : 'calls']
+  const environment = value.environment!
+  return Object.keys(value).length === fields.length && fields.every(key => Object.hasOwn(value, key))
+    && Object.keys(environment).length === 4
+    && Object.entries(expected).every(([key, version]) => environment[key as keyof typeof expected] === version)
+    && (operation.kind === 'discover' || value.calls!.every(call => !Array.isArray(call) && Object.keys(call).length === 3))
+}
+
 /** Host-only behavior observation. The candidate and worker receive no oracle or promotion authority. */
 export class PluginBehaviorRunner {
-  readonly #runner: IsolatedVerifierRunner | NativeMacVerifierRunner
+  readonly #runner: IsolatedVerifierRunner | NativeMacVerifierRunner | LinuxBehaviorRunner
   readonly #native: boolean
+  readonly #linux: boolean
   readonly #runtimeDigest?: string
   readonly #authorityDigest: string
   readonly #environment?: NonNullable<PluginBehaviorObservation['environment']>
@@ -125,7 +142,13 @@ export class PluginBehaviorRunner {
     const config = validatePluginBehaviorRunnerConfig(input)
     this.#authorityDigest = config.authorityDigest
     this.#native = 'backend' in config && config.backend === 'macos-seatbelt'
-    if (this.#native) {
+    this.#linux = 'backend' in config && config.backend === 'linux-native'
+    if ('backend' in config && config.backend === 'linux-native') {
+      const versions = config.runtime.runtime.versions
+      this.#runtimeDigest = linuxPluginBehaviorRuntimeDigest(config.runtime)
+      this.#environment = { node: versions.node, cordis: versions.cordis, tools: versions.tools, systemPrompt: versions.systemPrompt }
+      this.#runner = new LinuxBehaviorRunner(config)
+    } else if (this.#native) {
       const native = config as Omit<NativeMacVerifierRunnerConfig, 'source'>
       this.#runtimeDigest = behaviorNativeRuntimeDigest(native.runtime)
       this.#environment = { node: native.runtime.versions.node, cordis: native.runtime.versions.cordis,
@@ -141,8 +164,13 @@ export class PluginBehaviorRunner {
       ({ status: 'unknown', quiescent, artifactSha256, reason, ...(jobId ? { jobId } : {}) })
     if (!Buffer.isBuffer(input.artifact) || input.artifact.length < 1 || input.artifact.length > MAX_PACK_BYTES)
       return unknown('plugin-artifact-out-of-bound', true)
-    try { if (!validOperation(input.operation)) return unknown('plugin-operation-invalid', true) }
-    catch { return unknown('plugin-operation-invalid', true) }
+    let operation: PluginBehaviorOperation
+    try {
+      const serialized = canonicalJson(input.operation)
+      const snapshot: unknown = serialized === undefined ? undefined : JSON.parse(serialized)
+      if (!validOperation(snapshot)) return unknown('plugin-operation-invalid', true)
+      operation = snapshot
+    } catch { return unknown('plugin-operation-invalid', true) }
     let staged: ReturnType<typeof nativeBehaviorFiles> | undefined
     if (this.#native) {
       try { staged = nativeBehaviorFiles(input.artifact) }
@@ -151,11 +179,11 @@ export class PluginBehaviorRunner {
     // Stable per frozen request: the durable runner must see identical bytes for a replay key.
     // This is only frame correlation. Single-process candidate output is untrusted.
     const nonce = this.#native ? createHash('sha256').update(JSON.stringify({ authorityDigest: this.#authorityDigest,
-      key: input.key, artifactSha256, operation: input.operation })).digest('hex') : undefined
+      key: input.key, artifactSha256, operation })).digest('hex') : undefined
     const request = this.#native
       ? { schemaVersion: 1, nonce, artifactSha256, entry: staged!.entry,
-        modulesPath: this.#modulesPath!, operation: input.operation }
-      : { schemaVersion: 1, sha256: artifactSha256, sizeBytes: input.artifact.length, operation: input.operation }
+        modulesPath: this.#modulesPath!, operation }
+      : { schemaVersion: 1, sha256: artifactSha256, sizeBytes: input.artifact.length, operation }
     const stdin = canonicalJson(request)
     if (stdin === undefined || Buffer.byteLength(stdin) > MAX_OPERATION_BYTES) return unknown('plugin-operation-out-of-bound', true)
     let isolated
@@ -175,13 +203,13 @@ export class PluginBehaviorRunner {
         if (!value || typeof value !== 'object' || Array.isArray(value)) return unknown('plugin-worker-output-invalid', true, isolated.jobId)
         const frame = value as Record<string, unknown>
         const header = frame.wireVersion === 1 && frame.nonce === nonce && frame.artifactSha256 === artifactSha256
-          && frame.operationDigest === createHash('sha256').update(JSON.stringify(input.operation)).digest('hex')
+          && frame.operationDigest === createHash('sha256').update(JSON.stringify(operation)).digest('hex')
         if (!header) return unknown('plugin-worker-output-invalid', true, isolated.jobId)
         if (frame.status === 'unknown' && typeof frame.reason === 'string' && frame.reason.length > 0
           && frame.reason.length <= 128 && Object.keys(frame).length === 6) return unknown(frame.reason, true, isolated.jobId)
         if (frame.status !== 'result' || !SHA256.test(frame.schemaDigest as string)
           || Object.keys(frame).length !== 7) return unknown('plugin-worker-observation-invalid', true, isolated.jobId)
-        if (input.operation.kind === 'discover') {
+        if (operation.kind === 'discover') {
           if (!Array.isArray(frame.schemas) || frame.schemas.length < 1 || frame.schemas.length > 64
             || frame.calls !== undefined || createHash('sha256').update(JSON.stringify(frame.schemas)).digest('hex') !== frame.schemaDigest)
             return unknown('plugin-worker-observation-invalid', true, isolated.jobId)
@@ -193,8 +221,8 @@ export class PluginBehaviorRunner {
             names.add(name)
           }
         } else {
-          const calls = input.operation.calls
-          if (frame.schemaDigest !== input.operation.schemaDigest || !Array.isArray(frame.calls)
+          const calls = operation.calls
+          if (frame.schemaDigest !== operation.schemaDigest || !Array.isArray(frame.calls)
             || frame.calls.length !== calls.length || frame.schemas !== undefined
             || frame.calls.some((call, index) => !call || typeof call !== 'object'
               || (call as { id?: string }).id !== calls[index]!.id
@@ -204,7 +232,7 @@ export class PluginBehaviorRunner {
         return { status: 'observed', quiescent: true, artifactSha256, jobId: isolated.jobId,
           boundary: NATIVE_BEHAVIOR_BOUNDARY, runtimeDigest: this.#runtimeDigest!, environment: this.#environment!,
           schemaDigest: frame.schemaDigest as string,
-          ...(input.operation.kind === 'discover' ? { schemas: frame.schemas as unknown[] }
+          ...(operation.kind === 'discover' ? { schemas: frame.schemas as unknown[] }
             : { calls: frame.calls as { id: string; toolName: string; result: unknown }[] }) }
       }
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
@@ -213,11 +241,14 @@ export class PluginBehaviorRunner {
           && typeof record.reason === 'string' && record.reason.length > 0 && record.reason.length <= 128
           && Object.keys(record).length === 4) return unknown(record.reason, true, isolated.jobId)
       }
-      if (!validObservation(value, input.operation, artifactSha256)) return unknown('plugin-worker-observation-invalid', true, isolated.jobId)
+      if (!validObservation(value, operation, artifactSha256)) return unknown('plugin-worker-observation-invalid', true, isolated.jobId)
       const observation = value as PluginBehaviorObservation
+      if (this.#linux && !validLinuxFrame(observation, operation, this.#environment!))
+        return unknown('plugin-worker-observation-invalid', true, isolated.jobId)
       return { status: 'observed', quiescent: true, artifactSha256, jobId: isolated.jobId,
+        ...(this.#linux ? { boundary: LINUX_BEHAVIOR_BOUNDARY, runtimeDigest: this.#runtimeDigest! } : {}),
         environment: observation.environment!, schemaDigest: observation.schemaDigest!,
-        ...(input.operation.kind === 'discover' ? { schemas: observation.schemas! } : { calls: observation.calls! }) }
+        ...(operation.kind === 'discover' ? { schemas: observation.schemas! } : { calls: observation.calls! }) }
     } catch { return unknown('plugin-worker-output-invalid', true, isolated.jobId) }
   }
   close(): Promise<void> { return this.#runner.close() }
