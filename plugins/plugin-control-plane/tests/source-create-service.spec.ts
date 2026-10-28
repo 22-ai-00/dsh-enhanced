@@ -16,6 +16,7 @@ import { isSourceOwnerContinuation, pluginCreationVerificationSigningPayload, so
   pluginRevisionVerificationSigningPayload, pluginRevisionRegressionSigningPayload, type PluginRevisionRegressionCertificate, type RevisionRegressionAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type PluginRevisionVerificationCertificate,
   type SourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import type { ForegroundToolCallAttestation, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
+import { linuxRuntimeDigest, type LinuxRepositoryRunnerConfig, type LinuxRepositoryRunnerResult, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import { afterEach, expect, it, vi } from 'vitest'
 import { PluginControlPlaneService, normalizeControlPlaneConfig, type Config } from '../src/service.ts'
 import { ControlPlaneStore, controlPlaneDigest } from '../src/store.ts'
@@ -23,14 +24,30 @@ import { checkedSourceSnapshot } from '../src/source-workspace.ts'
 import * as build from '../src/source-build.ts'
 import * as trust from '../src/trust.ts'
 import { defaultHostAttestationPolicy } from '../src/trust.ts'
-import type { DockerSourcePreparedEvidence } from '../src/types.ts'
+import type { DockerSourcePreparedEvidence, LinuxSourcePreparedEvidence } from '../src/types.ts'
+import * as linuxBuild from '../src/linux-source-build.ts'
+import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 import type { CreationCapabilityConfig, CreationCapabilityObservation } from '../src/creation-capability-types.ts'
 import { CreationCapabilityRuntime } from '../src/creation-capability-runtime.ts'
 import { createSourceCreationFixture } from './helpers/source-creation-fixture.ts'
 import { sourceGrowthRunFixture } from './helpers/source-growth-run-fixture.ts'
 
 vi.mock('../src/source-build.ts', async original => ({ ...await original<typeof build>(), runDockerPreparedChecks: vi.fn() }))
+vi.mock('../src/linux-source-build.ts', async original => ({ ...await original<typeof linuxBuild>(), runLinuxPreparedChecks: vi.fn() }))
 vi.mock('../src/trust.ts', async original => ({ ...await original<typeof trust>(), loadTrustConfig: vi.fn() }))
+const linuxTransport = vi.hoisted(() => ({ inspect: vi.fn<() => Promise<LinuxRepositoryRunnerResult | undefined>>(),
+  run: vi.fn(), close: vi.fn(async () => undefined), verify: vi.fn(async (runtime: LinuxRuntime) => runtime) }))
+vi.mock('@dsh-enhanced/assistant-isolation', async original => ({ ...await original<typeof import('@dsh-enhanced/assistant-isolation')>(),
+  verifyLinuxRuntime: linuxTransport.verify,
+  LinuxRepositoryRunner: class {
+    contractDigest = 'f'.repeat(64)
+    runtimeDigest: string
+    run = linuxTransport.run
+    inspectSuccessfulExecution = linuxTransport.inspect
+    close = linuxTransport.close
+    constructor(config: LinuxRepositoryRunnerConfig) { this.runtimeDigest = linuxRuntimeDigest(config.runtime) }
+  },
+}))
 const runnerRun = vi.hoisted(() => vi.fn())
 vi.mock('@dsh-enhanced/assistant-verifier/plugin-behavior-runner', () => ({
   PluginBehaviorRunner: class {
@@ -46,7 +63,7 @@ const baselineRepository = fileURLToPath(new URL('../../..', import.meta.url)).r
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); vi.resetAllMocks() })
 
-async function fixture(withVerification = false, withAdoption = false, withRetention = false, withRevision = false, withRegression = false) {
+async function fixture(withVerification = false, withAdoption = false, withRetention = false, withRevision = false, withRegression = false, withLinux = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-created-service-')))
   const { repository } = await createSourceCreationFixture(baselineRepository, join(root, 'source'))
   const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: repository, encoding: 'utf8' }).trim()
@@ -166,6 +183,13 @@ async function fixture(withVerification = false, withAdoption = false, withReten
       ownerRouteId: 'route', principalId: 'owner', workspace: root, preset: 'primary', budgetId: 'source-budget', budgetAmount: 1,
       ...(withRevision ? { revision: { id: 'owner-revise', expiresAt: now + 600_000, maxRevisions: 1, namePrefix: 'rsi-service-' } } : {}),
       creation: { id: 'owner-create', expiresAt: now + 600_000, maxCreates: 2, namePrefix: 'rsi-service-' } } }
+  if (withLinux) config.sourceBuild = { ...linuxSourceConfig(), stateRoot: join(root, 'linux-build'), expiresAt: now + 600_000,
+    userNamespace: { schemaVersion: 1, ownerUid: process.getuid!(), ownerGid: process.getgid!(),
+      candidateUid: process.getuid!() + 65536, candidateGid: process.getgid!() + 65536,
+      hostNamespace: { dev: 1, ino: 7 }, helpers: { uid: { path: '/usr/bin/newuidmap', sha256: '1'.repeat(64) },
+        gid: { path: '/usr/bin/newgidmap', sha256: '2'.repeat(64) } } },
+    systemSnapshot: { schemaVersion: 1, root: { path: '/approved/system', dev: 1, ino: 3, sha256: '3'.repeat(64) },
+      manifestSha256: '4'.repeat(64), bytes: 4096, entries: 16 } }
   if (withRevision) {
     git('branch', '-M', 'dev')
     const remote = join(root, 'managed-source.git')
@@ -203,8 +227,37 @@ async function fixture(withVerification = false, withAdoption = false, withReten
     return checked
   })
   else vi.mocked(build.runDockerPreparedChecks).mockResolvedValue(checked)
+  let linuxChecked: build.SourceBuildResult<LinuxSourcePreparedEvidence> | undefined
+  let linuxExecution: LinuxRepositoryRunnerResult | undefined
+  if (withLinux) {
+    const configBuild = config.sourceBuild as build.LinuxSourceBuildConfig
+    const stdout = 'fixture-success\n', stderr = ''
+    const linuxEvidence: LinuxSourcePreparedEvidence = { schemaVersion: 3, kind: 'dsh-source-prepared-evidence',
+      boundary: 'linux-native-repository-v1', runtimeDigest: linuxRuntimeDigest(configBuild.runtime), executionContractDigest: 'f'.repeat(64),
+      buildScriptSha256: createHash('sha256').update(linuxBuild.LINUX_PREPARED_SOURCE_BUILD_SCRIPT).digest('hex'),
+      archive: { sizeBytes: 10240, sha256: 'a'.repeat(64) },
+      receipt: { requestDigest: 'a'.repeat(64), nativeNonce: 'b'.repeat(32),
+        nativeResourceId: 'linux-11111111-1111-4111-8111-111111111111', intentDigest: 'c'.repeat(64),
+        resourcesDigest: 'd'.repeat(64), receiptDigest: 'e'.repeat(64) },
+      environment: { ...evidence.environment, offline: true },
+      checks: ['source-archive-integrity', 'frozen-offline-install', 'repository-pnpm-check', 'source-input-recheck', 'package-integrity'],
+      pack: evidence.pack, logDigest: createHash('sha256').update(stdout + '\0' + stderr).digest('hex'), durationMs: 1, preparedAt: now }
+    linuxChecked = { ...checked, evidence: linuxEvidence }
+    const preparedLinux = linuxChecked
+    vi.mocked(linuxBuild.runLinuxPreparedChecks).mockImplementation(async input => {
+      const snapshot = await checkedSourceSnapshot(input.worktree, input.baseCommit, input.scope, process.env)
+      preparedLinux.treeDigest = snapshot.checkedTreeDigest
+      preparedLinux.patchDigest = snapshot.checkedPatchDigest
+      return preparedLinux
+    })
+    linuxExecution = { result: { jobId: 'native-build', status: 'succeeded', quiescent: true, exitCode: 0, stdout, stderr, artifacts: [] },
+      artifacts: [{ path: linuxBuild.LINUX_SOURCE_PACK_PATH, sha256: evidence.pack.sha256, bytes: packArtifact }],
+      receiptBinding: linuxEvidence.receipt, runtimeDigest: linuxEvidence.runtimeDigest, contractDigest: linuxEvidence.executionContractDigest }
+    linuxTransport.inspect.mockResolvedValue(linuxExecution)
+    linuxTransport.verify.mockImplementation(async runtime => runtime)
+  }
   return { root, repository, git, ctx, config, capability, service, automations, policy, store, source, owner,
-    deliveryPorts, evaluationPorts, foregroundCall, publicKey, verification, request, checked, growthRun, inspectGrowthRun,
+    deliveryPorts, evaluationPorts, foregroundCall, publicKey, verification, request, checked, linuxChecked, linuxExecution, growthRun, inspectGrowthRun,
     unregisterGrowthRun, authority, signing, revisionAuthority, revisionVerification, regressionAuthority, regressionVerification, setSource: (next: OwnerForegroundLearningTask) => { activeSource = next },
     setLaterSource: (next: OwnerForegroundLearningTask) => { laterSource = next },
     notifyTaskChange: () => { for (const listener of taskChangeListeners) listener() },
@@ -236,6 +289,92 @@ function signedCertificate(f: Awaited<ReturnType<typeof fixture>>, planId: strin
   alter?.(unsigned)
   return { ...unsigned, signature: sign(null, Buffer.from(pluginCreationVerificationSigningPayload(unsigned)), privateKey).toString('base64url') }
 }
+
+// The transport is controlled here; real native receipt/behavior acceptance is
+// separate. The generator, owner fence, source jobs, artifact store and signing are real.
+it.skipIf(process.platform !== 'linux' || !process.getuid?.())('verifies Linux creation through its original build receipt without replay or adoption', async () => {
+  const f = await fixture(true, false, false, false, false, true)
+  const { userNamespace: _mapping, systemSnapshot: _snapshot, ...legacy } = f.config.sourceBuild as build.LinuxSourceBuildConfig
+  expect(() => normalizeControlPlaneConfig({ ...f.config, sourceBuild: legacy })).toThrow(/dual-UID repository boundary/)
+  const { creationVerifications: _verification, ...preparationOnly } = f.config
+  expect(() => normalizeControlPlaneConfig({ ...preparationOnly, sourceBuild: legacy })).not.toThrow()
+  f.verification.mockImplementation(async request => {
+    const inspected = await f.service.inspectPreparedCreationLinuxBuild(request.planId, new AbortController().signal)
+    expect(inspected).toEqual({ runtime: (f.config.sourceBuild as build.LinuxSourceBuildConfig).runtime,
+      evidenceDigest: controlPlaneDigest(f.linuxChecked!.evidence) })
+    return { status: 'verified', certificate: signedCertificate(f, request.planId, f.signing.privateKey, unsigned => {
+      unsigned.protocol = 'assistant-growth/creation-verification/v3'
+      unsigned.execution = { boundary: 'linux-native-process-seccomp-v1', runtimeDigest: '1'.repeat(64),
+        buildRuntimeDigest: f.linuxChecked!.evidence.runtimeDigest, buildEvidenceDigest: inspected.evidenceDigest,
+        observerPreparationDigest: '2'.repeat(64) }
+    }) }
+  })
+  const job = await f.service.enqueueSourceJob(f.request)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const planId = f.store.getSourceJob(job.id)!.planId!
+  expect(f.store.getCreationVerificationStatus(planId)).toBe('verified')
+  const certificate = f.service.inspectVerifiedCreation(planId)
+  expect(certificate).toMatchObject({ protocol: 'assistant-growth/creation-verification/v3', execution: {
+    buildRuntimeDigest: f.linuxChecked!.evidence.runtimeDigest, buildEvidenceDigest: controlPlaneDigest(f.linuxChecked!.evidence) } })
+  expect(linuxTransport.inspect).toHaveBeenCalledExactlyOnceWith(job.id, expect.any(AbortSignal))
+  expect(linuxTransport.run).not.toHaveBeenCalled()
+  expect(build.runDockerPreparedChecks).not.toHaveBeenCalled()
+  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
+  const before = f.store.getSourceJob(job.id)
+  await f.service.inspectPreparedCreationLinuxBuild(planId, new AbortController().signal)
+  f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
+  expect(f.store.getSourceJob(job.id)).toEqual(before)
+  expect(f.service.inspectVerifiedCreation(planId)).toEqual(certificate)
+  expect(f.verification).toHaveBeenCalledOnce()
+  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
+  expect(f.config.creationCapabilities).toBeUndefined()
+})
+
+it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each([
+  'missing', 'receipt', 'runtime', 'contract', 'unknown', 'live', 'exit', 'path', 'artifact', 'extra-artifact', 'log',
+] as const)('rejects Linux creation when original build evidence is %s', async fault => {
+  const f = await fixture(true, false, false, false, false, true)
+  const job = await f.service.enqueueSourceJob(f.request)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const planId = f.store.getSourceJob(job.id)!.planId!, execution = structuredClone(f.linuxExecution!)
+  if (fault === 'receipt') execution.receiptBinding!.receiptDigest = '0'.repeat(64)
+  if (fault === 'runtime') execution.runtimeDigest = '0'.repeat(64)
+  if (fault === 'contract') execution.contractDigest = '0'.repeat(64)
+  if (fault === 'unknown') execution.result.status = 'unknown'
+  if (fault === 'live') execution.result.quiescent = false
+  if (fault === 'exit') execution.result.exitCode = 1
+  if (fault === 'path') execution.artifacts[0]!.path = 'different.tgz'
+  if (fault === 'artifact') execution.artifacts[0]!.bytes[0] = execution.artifacts[0]!.bytes[0]! ^ 1
+  if (fault === 'extra-artifact') execution.artifacts.push(execution.artifacts[0]!)
+  if (fault === 'log') execution.result.stdout = 'different\n'
+  linuxTransport.inspect.mockResolvedValue(fault === 'missing' ? undefined : execution)
+  const before = f.store.getSourceJob(job.id)
+  await expect(f.service.inspectPreparedCreationLinuxBuild(planId, new AbortController().signal)).rejects.toThrow(/original Linux build receipt or artifact changed/)
+  expect(f.store.getSourceJob(job.id)).toEqual(before)
+  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
+  expect(linuxTransport.run).not.toHaveBeenCalled()
+})
+
+it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['cancel', 'owner', 'expiry', 'trust'] as const)(
+  'fences Linux build receipt reads against concurrent %s changes', async fault => {
+    const f = await fixture(true, false, false, false, false, true)
+    const job = await f.service.enqueueSourceJob(f.request)
+    f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+    const planId = f.store.getSourceJob(job.id)!.planId!, abort = new AbortController()
+    linuxTransport.inspect.mockImplementationOnce(async () => {
+      if (fault === 'cancel') abort.abort(new Error('fixture cancelled'))
+      if (fault === 'owner') f.owner.principalVersion += 1
+      if (fault === 'expiry') f.advance(700_000)
+      if (fault === 'trust') {
+        const original = await trust.loadTrustConfig(f.config.trustPath)
+        vi.mocked(trust.loadTrustConfig).mockResolvedValue({ ...original, installationId: '00000000-0000-4000-8000-000000000002' })
+      }
+      return f.linuxExecution
+    })
+    await expect(f.service.inspectPreparedCreationLinuxBuild(planId, abort.signal)).rejects.toThrow()
+    expect(linuxTransport.run).not.toHaveBeenCalled()
+    expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
+  })
 
 it('automatically verifies a pinned task creation after prepare and retains exact signed evidence without replay', async () => {
   const f = await fixture(true)

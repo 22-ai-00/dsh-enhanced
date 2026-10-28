@@ -51,8 +51,8 @@ import { Ed25519ApprovalAuthority } from './approval.js'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from './store.js'
 import { runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
 import { runNativePreparedChecks } from './native-source-build.js'
-import { runLinuxPreparedChecks } from './linux-source-build.js'
-import { LinuxRepositoryRunner, NativeMacVerifierRunner } from '@dsh-enhanced/assistant-isolation'
+import { LINUX_PREPARED_SOURCE_BUILD_SCRIPT, LINUX_SOURCE_PACK_PATH, runLinuxPreparedChecks } from './linux-source-build.js'
+import { LinuxRepositoryRunner, NativeMacVerifierRunner, linuxRuntimeDigest, verifyLinuxRuntime, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import { NATIVE_SOURCE_COMPILER } from './native-source-build-worker.js'
 import { awaitSourceSignal, inspectSourceContext, inspectSourceTargetsContext, type SourceInspection, type SourceTargetsInspection } from './source-context.js'
 import { inspectSourceRevisionContext, prepareRevisedPluginWorkspace, verifyRevisedPluginWorkspace } from './source-revision.js'
@@ -208,9 +208,12 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
   }
   if (config.sourceBuild !== undefined && 'backend' in config.sourceBuild && config.sourceBuild.backend === 'linux-native') {
     if (!config.sourceJobs) throw new Error('plugin-control-plane: Linux repository preparation requires durable sourceJobs')
+    if (config.creationVerifications && (!config.sourceBuild.userNamespace || !config.sourceBuild.systemSnapshot)) {
+      throw new Error('plugin-control-plane: Linux creation verification requires the dual-UID repository boundary')
+    }
     if (config.sourceApprovals || config.sourceReleases || config.sourceReleaseExecution || config.sourceAdoptions
-      || config.creationVerifications || config.revisionVerifications || config.revisionRegressions || config.creationCapabilities) {
-      throw new Error('plugin-control-plane: Linux repository preparation is not yet connected to independent behavior and release authorities')
+      || config.revisionVerifications || config.revisionRegressions || config.creationCapabilities) {
+      throw new Error('plugin-control-plane: Linux repository preparation is not yet connected to revision, adoption and release authorities')
     }
   }
   if (config.sourceReleases !== undefined) {
@@ -1322,6 +1325,56 @@ export class PluginControlPlaneService extends Service {
     const review = await inspectPreparedCreationPatch(prepared.plan, environment, combined)
     current()
     return review
+  }
+
+  /** Host-only read of the original successful build; never admits or replays a job. */
+  inspectPreparedCreationLinuxBuild = async (planId: string, signal: AbortSignal): Promise<{
+    runtime: LinuxRuntime; evidenceDigest: string
+  }> => {
+    const combined = AbortSignal.any([this.abort.signal, signal, AbortSignal.timeout(120_000)])
+    combined.throwIfAborted()
+    const prepared = this.inspectPreparedCreation(planId), build = this.config.sourceBuild
+    const native = this.nativeSourceRunner, evidence = prepared.plan.preparedEvidence
+    if (!build || !('backend' in build) || build.backend !== 'linux-native' || !build.userNamespace || !build.systemSnapshot
+      || native?.backend !== 'linux-native'
+      || evidence?.schemaVersion !== 3 || evidence.boundary !== 'linux-native-repository-v1'
+      || !('backend' in prepared.job.intent.build) || prepared.job.intent.build.backend !== 'linux-native'
+      || prepared.job.intent.nativeResource?.backend !== 'linux-native' || prepared.job.intent.nativeResource.key !== prepared.job.id
+      || evidence.runtimeDigest !== linuxRuntimeDigest(build.runtime)
+      || evidence.runtimeDigest !== native.runner.runtimeDigest || evidence.executionContractDigest !== native.runner.contractDigest
+      || evidence.buildScriptSha256 !== createHash('sha256').update(LINUX_PREPARED_SOURCE_BUILD_SCRIPT).digest('hex')) {
+      throw new Error('creation verification Linux build binding unavailable')
+    }
+    const evidenceDigest = controlPlaneDigest(evidence)
+    const current = () => this.withPreparedCreationFence({ planId, planDigest: prepared.plan.digest,
+      artifactSha256: evidence.pack.sha256, growthRunDigest: sourceGrowthRunDigest(prepared.plan.creation!.growthRun!),
+      referenceDigest: controlPlaneDigest(prepared.reference) }, () => {
+      combined.throwIfAborted()
+      if (this.nativeSourceRunner !== native || this.config.sourceBuild !== build || Date.now() >= build.expiresAt
+        || controlPlaneDigest(this.store.getSourcePlan(planId).preparedEvidence) !== evidenceDigest
+        || controlPlaneDigest(this.store.getPreparedSourceJob(planId)) !== controlPlaneDigest(prepared.job)) {
+        throw new Error('creation verification Linux build authority changed')
+      }
+    })
+    current()
+    if (controlPlaneDigest(await this.boundTrust()) !== prepared.job.intent.trustDigest) throw new Error('creation verification trust changed')
+    await verifyLinuxRuntime(build.runtime, combined)
+    current()
+    const execution = await native.runner.inspectSuccessfulExecution(prepared.job.id, combined)
+    current()
+    const artifact = execution?.artifacts[0]
+    if (!execution || execution.runtimeDigest !== evidence.runtimeDigest || execution.contractDigest !== evidence.executionContractDigest
+      || execution.result.status !== 'succeeded' || !execution.result.quiescent || execution.result.exitCode !== 0
+      || !execution.receiptBinding || controlPlaneDigest(execution.receiptBinding) !== controlPlaneDigest(evidence.receipt)
+      || execution.artifacts.length !== 1 || artifact?.path !== LINUX_SOURCE_PACK_PATH || artifact.sha256 !== evidence.pack.sha256
+      || artifact.bytes.length !== evidence.pack.sizeBytes || !Buffer.from(artifact.bytes).equals(prepared.artifact)
+      || createHash('sha256').update((execution.result.stdout ?? '') + '\0' + (execution.result.stderr ?? '')).digest('hex') !== evidence.logDigest) {
+      throw new Error('creation verification original Linux build receipt or artifact changed')
+    }
+    if (controlPlaneDigest(await this.boundTrust()) !== prepared.job.intent.trustDigest) throw new Error('creation verification trust changed')
+    await verifyLinuxRuntime(build.runtime, combined)
+    current()
+    return { runtime: structuredClone(build.runtime), evidenceDigest }
   }
 
   /** Signed behavior evidence over stored pack/checks. Adoption must await async review-context recheck. */

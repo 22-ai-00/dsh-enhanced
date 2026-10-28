@@ -1,13 +1,15 @@
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
+import { pluginCreationVerificationSigningPayload, sourceGrowthRunDigest,
+  type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from '../src/store.ts'
 import type { SourceBuildConfig } from '../src/source-build.ts'
 import type { SourceJobIntent } from '../src/source-job-types.ts'
-import type { LinuxSourcePreparedEvidence, SourcePreparedEvidence } from '../src/types.ts'
+import type { LinuxSourcePreparedEvidence, PluginSourcePlan, SourcePreparedEvidence } from '../src/types.ts'
 import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 import { sourceGrowthRunFixture } from './helpers/source-growth-run-fixture.ts'
 
@@ -19,6 +21,9 @@ const now = 1_800_000_000_000
 const bytes = Buffer.from([0, 255, 128, 10])
 const id = `source-job-${'d'.repeat(64)}`
 type Backend = 'docker' | 'macos-seatbelt' | 'linux-native'
+const signing = generateKeyPairSync('ed25519')
+const creationAcceptance: CreationAcceptanceAuthorityRef = { protocol: 'assistant-growth/creation-acceptance-authority/v1',
+  authorityId: 'creation-verifier', keyId: 'creation-key', authorityDigest: hex('verifier'), namePrefix: 'agent-', expiresAt: now + 60_000 }
 
 function build(backend: Backend): SourceBuildConfig {
   if (backend === 'linux-native') return { ...linuxSourceConfig(), expiresAt: now + 600_000 }
@@ -52,7 +57,7 @@ function evidence(schema: 1 | 2 | 3): SourcePreparedEvidence {
     commands: [{ command: 'pnpm', args: ['check'], exitCode: 0, durationMs: 1, logDigest: hex('logs') }], pack, preparedAt: now + 1 }
 }
 
-async function fixture(backend: Backend = 'linux-native', mode: 'modify' | 'create' | 'revise-created' = 'create') {
+async function fixture(backend: Backend = 'linux-native', mode: 'modify' | 'create' | 'revise-created' = 'create', withVerification = false) {
   const root = await mkdtemp(join(tmpdir(), 'linux-source-job-store-')); roots.push(root)
   const path = join(root, 'state.sqlite'), store = new ControlPlaneStore({ path, now: () => now })
   const owner = { receiptVersion: 2 as const, authorityId: 'owner-route', authorityHash: hex('owner'), principalId: 'owner',
@@ -60,6 +65,7 @@ async function fixture(backend: Backend = 'linux-native', mode: 'modify' | 'crea
   const gap = store.recordOwnerTaskFailureGap({ schemaVersion: 1, owner, outcomeId: 'owner-outcome', sourceDigest: hex('source'),
     projection: { subjectKind: 'foreground-turn', subjectRef: 'owner-inbox', version: 1, digest: hex('projection'), disposition: 'upsert' } })
   const run = sourceGrowthRunFixture(store.getOwnerTaskFailureReference(gap.id)!, now)
+  if (withVerification) run.creationAcceptance = creationAcceptance
   const generatorDigest = mode === 'modify' ? MODIFY_GENERATOR_DIGEST : hex('generator')
   const creation = { grant: { id: 'owner-create', namePrefix: 'agent-', maxCreates: 1, expiresAt: now + 60_000 }, generatorDigest, growthRun: run }
   const revision = { grant: { id: 'owner-revise', namePrefix: 'agent-', maxRevisions: 1, expiresAt: now + 60_000 }, generatorDigest,
@@ -86,6 +92,123 @@ async function fixture(backend: Backend = 'linux-native', mode: 'modify' | 'crea
     prepared: { treeDigest: hex('tree'), patchDigest: hex('patch'), checkedAt: now + 1, evidence: evidence(schema) } } }
   return { path, store, source, enqueue, claim, completion, fence }
 }
+
+function signedCertificate(f: Awaited<ReturnType<typeof fixture>>, plan: PluginSourcePlan,
+  version: 1 | 2 | 3): PluginCreationVerificationCertificate {
+  const reference = f.store.getOwnerTaskFailureReference(plan.gapId)!, prepared = plan.preparedEvidence!
+  const body: Omit<PluginCreationVerificationCertificate, 'signature'> = {
+    protocol: `assistant-growth/creation-verification/v${version}`, verificationId: 'fixture-verification', authority: creationAcceptance,
+    plan: { id: plan.id, digest: plan.digest, name: plan.name, sourceTreeDigest: plan.sourceCheck!.treeDigest,
+      sourcePatchDigest: plan.sourceCheck!.patchDigest, artifactSha256: prepared.pack.sha256,
+      artifactBytes: prepared.pack.sizeBytes, generatorDigest: plan.generatorDigest },
+    source: { referenceDigest: controlPlaneDigest(reference), ownerDigest: controlPlaneDigest(reference.owner),
+      growthRunDigest: sourceGrowthRunDigest(plan.creation!.growthRun!) },
+    contractDigest: hex('contract'), schemaDigest: hex('schema'),
+    environment: { node: 'node22', cordis: 'cordis4', tools: 'tools1', systemPrompt: 'prompt1' },
+    model: plan.creation!.growthRun!.model,
+    budget: { modelCalls: 2, maxOutputTokens: 1024, maxDurationMs: 30_000, maxCases: 2 },
+    sessions: { contract: 'contract-session', sourceReview: 'review-session' },
+    observations: ['one', 'two'].map(caseId => ({ caseId, jobId: `job-${caseId}`,
+      operationDigest: hex(`operation-${caseId}`), observationDigest: hex(`observation-${caseId}`) })),
+    reviewDigest: hex('review'), verifiedAt: now, expiresAt: now + 30_000,
+    ...(version === 1 ? {} : { execution: version === 2
+      ? { boundary: 'macos-seatbelt-single-process-v1' as const, runtimeDigest: hex('runtime'), buildEvidenceDigest: controlPlaneDigest(prepared) }
+      : { boundary: 'linux-native-process-seccomp-v1' as const, runtimeDigest: hex('behavior-runtime'), buildRuntimeDigest: hex('runtime'),
+        buildEvidenceDigest: controlPlaneDigest(prepared), observerPreparationDigest: hex('observer-preparation') } }),
+  }
+  return { ...body, signature: sign(null, Buffer.from(pluginCreationVerificationSigningPayload(body)), signing.privateKey).toString('base64url') }
+}
+
+function persistCertificate(database: DatabaseSync, certificate: PluginCreationVerificationCertificate): void {
+  // Recompute the outer digest so reads must check the prepared binding itself.
+  database.prepare(`UPDATE source_creation_verifications SET status='verified',certificate_json=?,certificate_digest=? WHERE plan_id=?`)
+    .run(JSON.stringify(certificate), controlPlaneDigest(certificate), certificate.plan.id)
+}
+
+describe('creation verification exact prepared execution binding', () => {
+  const matrix = (['docker', 'macos-seatbelt', 'linux-native'] as const).flatMap((backend, index) =>
+    ([1, 2, 3] as const).map(version => [backend, index + 1 as 1 | 2 | 3, version, version === index + 1] as const))
+  it.each(matrix)('binds %s/schema%s only to certificate v%s on write and read (accepted=%s)', async (backend, schema, version, accepted) => {
+    const f = await fixture(backend, 'create', true)
+    try {
+      const request = f.completion(schema)
+      const plan = f.fence(() => f.store.createSourcePlan({ ...request, preparedArtifact: bytes })).result
+      const certificate = signedCertificate(f, plan, version)
+      f.fence(() => f.store.claimCreationVerification(plan.id))
+      const database = new DatabaseSync(f.path)
+      try {
+        if (!accepted) {
+          expect(() => f.fence(() => f.store.recordCreationVerification(certificate))).toThrow(/does not match exact prepared source/)
+          expect(f.store.getCreationVerificationStatus(plan.id)).toBe('claimed')
+          persistCertificate(database, certificate)
+          expect(() => f.store.getCreationVerification(plan.id)).toThrow(/does not match exact prepared source/)
+          return
+        }
+        f.fence(() => f.store.recordCreationVerification(certificate))
+        expect(f.store.getCreationVerification(plan.id)).toEqual(certificate)
+        const read = f.store.getCreationVerification(plan.id)!
+        read.plan.name = 'agent-mutated'
+        if (read.execution) read.execution.runtimeDigest = hex('mutated-runtime')
+        expect(f.store.getCreationVerification(plan.id)).toEqual(certificate)
+        const rows = () => ['source_creation_verifications', 'source_plans', 'source_jobs', 'source_creation_grants', 'operation_receipts']
+          .map(table => database.prepare(`SELECT * FROM ${table}`).all())
+        const original = rows()
+        f.store.close()
+        const reopened = new ControlPlaneStore({ path: f.path, now: () => now + 1_000_000 })
+        try {
+          // Historical reads do not renew expiry, consume grants or rewrite evidence.
+          expect(reopened.getCreationVerification(plan.id)).toEqual(certificate)
+          expect(rows()).toEqual(original)
+        } finally { reopened.close() }
+      } finally { database.close() }
+    } finally { try { f.store.close() } catch {} }
+  })
+
+  const tampering = (['macos-seatbelt', 'linux-native'] as const).flatMap(backend =>
+    (['runtime', 'build-evidence'] as const).map(field => [backend, field] as const))
+  it.each(tampering)('rejects %s certificate %s mismatch on write and corrupted readback', async (backend, field) => {
+    const f = await fixture(backend, 'create', true), version = backend === 'macos-seatbelt' ? 2 : 3
+    try {
+      const request = f.completion(version)
+      const plan = f.fence(() => f.store.createSourcePlan({ ...request, preparedArtifact: bytes })).result
+      const certificate = signedCertificate(f, plan, version)
+      f.fence(() => { f.store.claimCreationVerification(plan.id); f.store.recordCreationVerification(certificate) })
+      const changed = structuredClone(certificate)
+      if (field === 'build-evidence') changed.execution!.buildEvidenceDigest = hex('other-evidence')
+      else if (changed.execution!.boundary === 'linux-native-process-seccomp-v1') changed.execution!.buildRuntimeDigest = hex('other-runtime')
+      else changed.execution!.runtimeDigest = hex('other-runtime')
+      expect(() => f.fence(() => f.store.recordCreationVerification(changed))).toThrow(/does not match exact prepared source/)
+      const database = new DatabaseSync(f.path)
+      try {
+        persistCertificate(database, changed)
+        expect(() => f.store.getCreationVerification(plan.id)).toThrow(/does not match exact prepared source/)
+      } finally { database.close() }
+    } finally { f.store.close() }
+  })
+
+  it.each(['receipt', 'archive', 'execution-contract', 'build-script', 'logs'] as const)(
+    'binds Linux full prepared evidence including %s beyond artifact and runtime', async field => {
+      const f = await fixture('linux-native', 'create', true)
+      try {
+        const request = f.completion(3)
+        const plan = f.fence(() => f.store.createSourcePlan({ ...request, preparedArtifact: bytes })).result
+        const certificate = signedCertificate(f, plan, 3), changedEvidence = structuredClone(plan.preparedEvidence!) as LinuxSourcePreparedEvidence
+        if (field === 'receipt') changedEvidence.receipt.receiptDigest = hex('other-receipt')
+        if (field === 'archive') changedEvidence.archive.sha256 = hex('other-archive')
+        if (field === 'execution-contract') changedEvidence.executionContractDigest = hex('other-contract')
+        if (field === 'build-script') changedEvidence.buildScriptSha256 = hex('other-script')
+        if (field === 'logs') changedEvidence.logDigest = hex('other-logs')
+        certificate.execution!.buildEvidenceDigest = controlPlaneDigest(changedEvidence)
+        f.fence(() => f.store.claimCreationVerification(plan.id))
+        expect(() => f.fence(() => f.store.recordCreationVerification(certificate))).toThrow(/does not match exact prepared source/)
+        const database = new DatabaseSync(f.path)
+        try {
+          persistCertificate(database, certificate)
+          expect(() => f.store.getCreationVerification(plan.id)).toThrow(/does not match exact prepared source/)
+        } finally { database.close() }
+      } finally { f.store.close() }
+    })
+})
 
 describe('three backend durable source compatibility', () => {
   it.each(['modify', 'create', 'revise-created'] as const)('round trips Linux %s without changing intent, operation or evidence digest', async mode => {

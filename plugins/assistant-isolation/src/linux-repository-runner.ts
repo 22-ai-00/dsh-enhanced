@@ -116,6 +116,7 @@ export class LinuxRepositoryRunner {
   #runGeneration = 0
   readonly #pending = new Map<string, Promise<LinuxRepositoryRunnerResult>>()
   readonly #calls = new Set<Promise<LinuxRepositoryRunnerResult>>()
+  readonly #inspections = new Set<Promise<LinuxRepositoryRunnerResult | undefined>>()
   readonly #ready: Promise<void>
   #controller: IsolationControllerAuthority | undefined
   #timer: ReturnType<typeof setInterval> | undefined
@@ -412,6 +413,43 @@ export class LinuxRepositoryRunner {
       } catch { return this.#output({ ...result, status: 'unknown', quiescent: false, reason: 'repository-settlement-unconfirmed' }) }
     } finally { clearInterval(timer) }
   }
+  /** Read the original successful execution only. This cannot admit, recover or
+   * replay a job, and close() drains every outstanding receipt read. */
+  inspectSuccessfulExecution = (key: string, signal?: AbortSignal): Promise<LinuxRepositoryRunnerResult | undefined> => {
+    if (!validKey(key)) return Promise.reject(new Error('invalid Linux repository key'))
+    const call = this.#inspectSuccessfulExecution(key, signal)
+    this.#inspections.add(call)
+    const finished = (): void => { this.#inspections.delete(call) }
+    void call.then(finished, finished)
+    return call
+  }
+  async #inspectSuccessfulExecution(key: string, signal?: AbortSignal): Promise<LinuxRepositoryRunnerResult | undefined> {
+    const live = (): void => {
+      if (!this.#active || signal?.aborted || Date.now() >= this.#input.expiresAt) throw new Error('Linux repository unavailable')
+    }
+    const available = (): void => {
+      live(); this.#available(signal)
+      if (!this.#proofIdentity() || !this.#ledger.permitsGrant(this.#identity, GRANT)) throw new Error('Linux repository authority unavailable')
+    }
+    live()
+    await this.#ready
+    available()
+    try {
+      const job = this.#find(key)
+      if (!job || !this.#owns(job) || job.grantRevision !== 1 || !job.linuxContract || job.linuxContract.schemaVersion === 1 || linuxExecutionContractDigest(job.linuxContract) !== this.contractDigest
+        || !job.dispatchAttempted || job.status !== 'succeeded' || job.result?.status !== 'succeeded' || !job.result.quiescent
+        || !job.linuxIntent || job.linuxIntent.schemaVersion === 1 || !job.linuxResources || this.#pending.has(job.id)) return undefined
+      const verified = await readLinuxRepositoryReceipt({ stateRoot: this.#executionRoot, contract: job.linuxContract, intent: job.linuxIntent })
+      available()
+      // The reader proves fresh kernel absence and actual spool integrity. Bind
+      // all of its identities to the original ledger, including after the await.
+      if (!verified || canonical(job) !== canonical(this.#find(key))
+        || canonical(verified.receipt.intent) !== canonical(job.linuxIntent)
+        || canonical(verified.receipt.resources) !== canonical(job.linuxResources)
+        || canonical(verified.receipt.result) !== canonical(job.result)) return undefined
+      return this.#output(job.result, verified.artifacts, linuxExecutionReceiptBinding(verified.receipt))
+    } catch { available(); return undefined }
+  }
   async inspectQuiescence(key: string): Promise<'quiescent' | 'unknown'> {
     if (!validKey(key)) throw new Error('invalid Linux repository key')
     await this.#ready
@@ -435,7 +473,7 @@ export class LinuxRepositoryRunner {
     if (this.#closePromise) return await this.#closePromise
     this.#active = false; this.#abort.abort(); clearInterval(this.#timer)
     this.#closePromise = (async () => {
-      await Promise.allSettled([this.#ready, this.#sweep, ...this.#calls])
+      await Promise.allSettled([this.#ready, this.#sweep, ...this.#calls, ...this.#inspections])
       try { if (this.#controller) this.#ledger.releaseController(this.#controller) } finally { this.#ledger.close() }
     })()
     return await this.#closePromise

@@ -7,7 +7,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { afterEach, expect, test, vi } from 'vitest'
-import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson, verifyPluginCreationVerificationCertificate, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { nativeMacRuntimeDigest, type NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 import { CreationCapabilityJournal, creationCapabilityPublicKey, validateCreationCapabilityConfig,
   verifyCreationCapabilityReceipt } from '../src/creation-capability-journal.js'
@@ -126,6 +126,17 @@ test('native adoption requires a signed v2 certificate pinned to its exact runne
   try {
     expect(() => journal.claim({ certificate: f.certificate('legacy'), artifact: f.artifact })).toThrow()
     expect(() => journal.claim({ certificate: nativeCertificate('mismatch', d('f')), artifact: f.artifact })).toThrow()
+    const { signature: _signature, ...nativeBody } = nativeCertificate('linux', nativeMacRuntimeDigest(runtime))
+    const linuxBody: Omit<PluginCreationVerificationCertificate, 'signature'> = { ...nativeBody,
+      protocol: 'assistant-growth/creation-verification/v3', execution: {
+        boundary: 'linux-native-process-seccomp-v1', runtimeDigest: nativeMacRuntimeDigest(runtime),
+        buildRuntimeDigest: d('d'), buildEvidenceDigest: d('c'), observerPreparationDigest: d('e') } }
+    const linuxCertificate = { ...linuxBody, signature: sign(null, Buffer.from(canonicalGrowthJson(linuxBody)),
+      f.verifier.privateKey).toString('base64url') }
+    const verifierPublicKey = f.verifier.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+    expect(verifyPluginCreationVerificationCertificate(linuxCertificate, linuxCertificate.authority, verifierPublicKey)).toBe(true)
+    expect(() => journal.claim({ certificate: linuxCertificate, artifact: f.artifact })).toThrow()
+    expect(journal.list()).toEqual([])
     const record = journal.claim({ certificate: nativeCertificate('native', nativeMacRuntimeDigest(runtime)), artifact: f.artifact })
     expect(record.created).toBe(true)
     expect(record.record.certificate.protocol).toBe('assistant-growth/creation-verification/v2')

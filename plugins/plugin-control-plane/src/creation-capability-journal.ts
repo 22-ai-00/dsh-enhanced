@@ -114,7 +114,8 @@ function receiptBody(receipt: CreationCapabilityReceipt): Omit<CreationCapabilit
 }
 function compatibleExecution(certificate: PluginCreationVerificationCertificate, config: CreationCapabilityConfig): boolean {
   if (certificate.protocol === 'assistant-growth/creation-verification/v1') return !('backend' in config.runner)
-  return 'backend' in config.runner && config.runner.backend === 'macos-seatbelt'
+  return certificate.protocol === 'assistant-growth/creation-verification/v2'
+    && 'backend' in config.runner && config.runner.backend === 'macos-seatbelt'
     && certificate.execution?.boundary === 'macos-seatbelt-single-process-v1'
     && certificate.execution.runtimeDigest === nativeMacRuntimeDigest(config.runner.runtime)
 }

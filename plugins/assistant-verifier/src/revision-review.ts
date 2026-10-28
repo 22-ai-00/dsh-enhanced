@@ -10,6 +10,7 @@ import { CreationReviewStore } from './creation-review-store.js'
 import { CASE_RULES, COMPARISON_RULES, REVIEW_RULES, RULES_VERSION, SCHEMA_RULES,
   compareCase, compileCreationReviewConfig, parseCases, parseReview, projectCreationSchemas,
   type CreationReviewConfig } from './creation-review.js'
+import { validatePluginBehaviorDeploymentConfig } from './plugin-behavior-config.js'
 import { runNativeCreationTurn, type CreationModel } from './creation-review-native.js'
 
 type PluginBehaviorRunner = import('./plugin-behavior-runner.js').PluginBehaviorRunner
@@ -35,12 +36,14 @@ export interface RevisionReviewAuthorityInspection {
 }
 
 export function validateRevisionReviewConfig(input: RevisionReviewConfig): RevisionReviewConfig {
+  validatePluginBehaviorDeploymentConfig(Object.getOwnPropertyDescriptor(input, 'runner')?.value)
   return compileCreationReviewConfig(input).config
 }
 
 export function compileRevisionReviewConfig(input: RevisionReviewConfig): {
   config: RevisionReviewConfig; authority: RevisionAcceptanceAuthorityRef; publicKey: string; privateKey: KeyObject
 } {
+  validatePluginBehaviorDeploymentConfig(Object.getOwnPropertyDescriptor(input, 'runner')?.value)
   const checked = compileCreationReviewConfig(input)
   const authorityDigest = growthObjectDigest({ purpose: REVISION_PURPOSE,
     baseRules: RULES_VERSION, caseRules: CASE_RULES, comparisonRules: COMPARISON_RULES,

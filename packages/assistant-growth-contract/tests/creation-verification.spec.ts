@@ -1,8 +1,9 @@
-import { generateKeyPairSync, sign } from 'node:crypto'
-import { describe, expect, test } from 'vitest'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { describe, expect, expectTypeOf, test } from 'vitest'
 import { pluginCreationVerificationSigningPayload, validateCreationAcceptanceAuthorityRef,
   validatePluginCreationVerificationCertificate, verifyPluginCreationVerificationCertificate,
-  type PluginCreationVerificationCertificate } from '../src/creation-verification.js'
+  type PluginCreationVerificationCertificate, type PluginCreationVerificationCertificateV2,
+  type PluginCreationVerificationCertificateV3 } from '../src/creation-verification.js'
 
 const hash = 'a'.repeat(64)
 const { privateKey, publicKey } = generateKeyPairSync('ed25519')
@@ -26,17 +27,33 @@ function fixture(): PluginCreationVerificationCertificate {
   return { ...body, signature: sign(null, Buffer.from(pluginCreationVerificationSigningPayload(body)), privateKey).toString('base64url') }
 }
 
+function linuxFixture(): PluginCreationVerificationCertificateV3 {
+  const { signature: _signature, ...legacyBody } = fixture()
+  const body: Omit<PluginCreationVerificationCertificateV3, 'signature'> = {
+    ...legacyBody, protocol: 'assistant-growth/creation-verification/v3',
+    execution: { boundary: 'linux-native-process-seccomp-v1', runtimeDigest: 'b'.repeat(64),
+      buildRuntimeDigest: 'c'.repeat(64), buildEvidenceDigest: 'd'.repeat(64), observerPreparationDigest: 'e'.repeat(64) },
+  }
+  return { ...body, signature: sign(null, Buffer.from(pluginCreationVerificationSigningPayload(body)), privateKey).toString('base64url') }
+}
+
 describe('task-derived creation verification certificate', () => {
   test('native v2 signs the actual boundary, runtime and build evidence while v1 stays byte compatible', () => {
     const old = fixture()
     expect(Object.hasOwn(old, 'execution')).toBe(false)
     const { signature: _signature, ...legacyBody } = old
-    const body: Omit<PluginCreationVerificationCertificate, 'signature'> = {
+    const body: Omit<PluginCreationVerificationCertificateV2, 'signature'> = {
       ...legacyBody, protocol: 'assistant-growth/creation-verification/v2',
       execution: { boundary: 'macos-seatbelt-single-process-v1', runtimeDigest: 'b'.repeat(64), buildEvidenceDigest: 'c'.repeat(64) },
     }
-    const certificate: PluginCreationVerificationCertificate = { ...body,
+    const certificate: PluginCreationVerificationCertificateV2 = { ...body,
       signature: sign(null, Buffer.from(pluginCreationVerificationSigningPayload(body)), privateKey).toString('base64url') }
+    expectTypeOf<PluginCreationVerificationCertificateV2['execution']['boundary']>().toEqualTypeOf<'macos-seatbelt-single-process-v1'>()
+    expect(createHash('sha256').update(pluginCreationVerificationSigningPayload(legacyBody)).digest('hex'))
+      .toBe('4292d80d47d8384e25fee474f82738288a98f39327d440c3bd0fb413b092ecf8')
+    expect(createHash('sha256').update(pluginCreationVerificationSigningPayload(body)).digest('hex'))
+      .toBe('61e01df9c131a0d6d27d44318c3cfc13a462f042157f43b60a89936630c0af98')
+    expect(Object.keys(body.execution).sort()).toEqual(['boundary', 'buildEvidenceDigest', 'runtimeDigest'])
     expect(verifyPluginCreationVerificationCertificate(certificate, certificate.authority, pem, 20_000)).toBe(true)
     for (const execution of [{ ...body.execution, runtimeDigest: 'd'.repeat(64) },
       { ...body.execution, buildEvidenceDigest: 'e'.repeat(64) },
@@ -46,6 +63,103 @@ describe('task-derived creation verification certificate', () => {
     }
     expect(() => validatePluginCreationVerificationCertificate({ ...old, execution: body.execution })).toThrow()
     expect(() => validatePluginCreationVerificationCertificate({ ...certificate, execution: undefined })).toThrow()
+    for (const key of ['buildRuntimeDigest', 'observerPreparationDigest']) {
+      expect(() => validatePluginCreationVerificationCertificate({ ...certificate, execution: { ...certificate.execution, [key]: hash } })).toThrow()
+    }
+  })
+
+  test('Linux v3 signs all execution bindings with a real Ed25519 key', () => {
+    const certificate = linuxFixture()
+    expectTypeOf<PluginCreationVerificationCertificateV3['execution']['boundary']>().toEqualTypeOf<'linux-native-process-seccomp-v1'>()
+    expect(Object.keys(certificate.execution).sort()).toEqual([
+      'boundary', 'buildEvidenceDigest', 'buildRuntimeDigest', 'observerPreparationDigest', 'runtimeDigest',
+    ])
+    expect(() => validatePluginCreationVerificationCertificate(certificate)).not.toThrow()
+    expect(verifyPluginCreationVerificationCertificate(certificate, certificate.authority, pem, 20_000)).toBe(true)
+    expect(verifyPluginCreationVerificationCertificate(JSON.parse(JSON.stringify(certificate)), certificate.authority, pem, 20_000)).toBe(true)
+  })
+
+  test.each(['runtimeDigest', 'buildRuntimeDigest', 'buildEvidenceDigest', 'observerPreparationDigest'] as const)(
+    'Linux v3 rejects tampering, omission and invalid digest encoding for %s', key => {
+      const certificate = linuxFixture()
+      const tampered = { ...certificate, execution: { ...certificate.execution, [key]: 'f'.repeat(64) } }
+      expect(() => validatePluginCreationVerificationCertificate(tampered)).not.toThrow()
+      expect(verifyPluginCreationVerificationCertificate(tampered, certificate.authority, pem, 20_000)).toBe(false)
+      const { [key]: _omitted, ...missing } = certificate.execution
+      expect(() => validatePluginCreationVerificationCertificate({ ...certificate, execution: missing })).toThrow()
+      for (const invalid of [undefined, null, 1, 'a'.repeat(63), 'a'.repeat(65), 'A'.repeat(64), 'g'.repeat(64)]) {
+        expect(() => validatePluginCreationVerificationCertificate({ ...certificate,
+          execution: { ...certificate.execution, [key]: invalid } })).toThrow()
+      }
+    })
+
+  test('Linux v3 rejects missing, extra and cross-protocol execution fields without converting legacy certificates', () => {
+    const certificate = linuxFixture()
+    const { execution, ...missing } = certificate
+    expect(() => validatePluginCreationVerificationCertificate(missing)).toThrow()
+    expect(() => validatePluginCreationVerificationCertificate({ ...certificate, execution: undefined })).toThrow()
+    expect(() => validatePluginCreationVerificationCertificate({ ...certificate, execution: { ...execution, extra: hash } })).toThrow()
+    expect(() => validatePluginCreationVerificationCertificate({ ...certificate, extra: hash })).toThrow()
+    const { boundary: _boundary, ...missingBoundary } = execution
+    expect(() => validatePluginCreationVerificationCertificate({ ...certificate, execution: missingBoundary })).toThrow()
+    for (const boundary of ['macos-seatbelt-single-process-v1', 'process-seccomp-v1', 'docker', undefined]) {
+      const mixed = { ...certificate, execution: { ...execution, boundary } }
+      expect(() => validatePluginCreationVerificationCertificate(mixed)).toThrow()
+      expect(verifyPluginCreationVerificationCertificate(mixed, certificate.authority, pem, 20_000)).toBe(false)
+    }
+    for (const protocol of ['assistant-growth/creation-verification/v1', 'assistant-growth/creation-verification/v2',
+      'assistant-growth/creation-verification/v4']) {
+      expect(() => validatePluginCreationVerificationCertificate({ ...certificate, protocol })).toThrow()
+    }
+    const macosExecution: PluginCreationVerificationCertificateV2['execution'] = {
+      boundary: 'macos-seatbelt-single-process-v1', runtimeDigest: hash, buildEvidenceDigest: hash,
+    }
+    expect(() => validatePluginCreationVerificationCertificate({ ...certificate, execution: macosExecution })).toThrow()
+    expect(() => validatePluginCreationVerificationCertificate({ ...certificate,
+      execution: { ...macosExecution, boundary: execution.boundary } })).toThrow()
+    expect(() => validatePluginCreationVerificationCertificate({ ...fixture(), protocol: certificate.protocol })).toThrow()
+    expect(() => validatePluginCreationVerificationCertificate({ ...fixture(), execution })).toThrow()
+    const old: PluginCreationVerificationCertificateV2 = {
+      ...certificate, protocol: 'assistant-growth/creation-verification/v2', execution: macosExecution,
+    }
+    const { signature: _signature, ...oldBody } = old
+    const signedOld = { ...old, signature: sign(null,
+      Buffer.from(pluginCreationVerificationSigningPayload(oldBody)), privateKey).toString('base64url') }
+    expect(verifyPluginCreationVerificationCertificate(signedOld, certificate.authority, pem, 20_000)).toBe(true)
+    expect(verifyPluginCreationVerificationCertificate({ ...signedOld, protocol: certificate.protocol, execution },
+      certificate.authority, pem, 20_000)).toBe(false)
+  })
+
+  test('Linux v3 retains artifact, owner, model, budget and expiry constraints', () => {
+    const certificate = linuxFixture()
+    expect(() => validatePluginCreationVerificationCertificate({ ...certificate,
+      plan: { ...certificate.plan, artifactBytes: 512 * 1024 } })).not.toThrow()
+    for (const invalid of [
+      { plan: { ...certificate.plan, artifactBytes: 512 * 1024 + 1 } },
+      { plan: { ...certificate.plan, name: 'foreign-tool' } },
+      { source: { ...certificate.source, ownerDigest: '' } },
+      { model: { ...certificate.model, model: '' } },
+      { budget: { ...certificate.budget, modelCalls: 3 } },
+      { budget: { ...certificate.budget, maxOutputTokens: 32_769 } },
+      { budget: { ...certificate.budget, maxDurationMs: 1_800_001 } },
+      { budget: { ...certificate.budget, maxCases: 9 } },
+      { expiresAt: certificate.authority.expiresAt + 1 },
+      { expiresAt: certificate.verifiedAt },
+    ]) expect(() => validatePluginCreationVerificationCertificate({ ...certificate, ...invalid })).toThrow()
+    expect(verifyPluginCreationVerificationCertificate(certificate, { ...certificate.authority, authorityDigest: hash.replace(/^a/u, 'b') }, pem, 20_000)).toBe(false)
+    expect(verifyPluginCreationVerificationCertificate(certificate, certificate.authority, pem, certificate.expiresAt)).toBe(false)
+    expect(verifyPluginCreationVerificationCertificate(certificate, certificate.authority, pem, certificate.verifiedAt - 1)).toBe(false)
+  })
+
+  test('Linux v3 rejects protocol and execution accessors without evaluating them', () => {
+    for (const target of ['protocol', 'execution', 'runtimeDigest']) {
+      const certificate = linuxFixture()
+      let read = false
+      Object.defineProperty(target === 'runtimeDigest' ? certificate.execution : certificate, target,
+        { enumerable: true, get: () => { read = true; throw new Error('getter executed') } })
+      expect(() => validatePluginCreationVerificationCertificate(certificate)).toThrow()
+      expect(read).toBe(false)
+    }
   })
   test('verifies a bounded certificate with a real Ed25519 signature and frozen authority', () => {
     const certificate = fixture()
