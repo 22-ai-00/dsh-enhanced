@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { JsonSchemaNode, ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { canonicalGrowthJson, SourceGrowthRunUnavailableError } from '@dsh-enhanced/assistant-growth-contract'
-import { nativeMacRuntimeDigest } from '@dsh-enhanced/assistant-isolation'
+import { creationCapabilityExecutionMatches, verifyCreationCapabilityExecution } from './creation-capability-execution.js'
 import type { CreationCapabilityCallEvidence, CreationCapabilityConfig, CreationCapabilityJournalPort, CreationCapabilityObservation,
   CreationCapabilityPorts, CreationCapabilityRecord, CreationCapabilityRunner, CreationCapabilityTool } from './creation-capability-types.js'
 
@@ -91,12 +91,7 @@ function observed(record: CreationCapabilityRecord, result: CreationCapabilityOb
 }
 
 function sameExecution(record: CreationCapabilityRecord, config: CreationCapabilityConfig): boolean {
-  return record.certificate.protocol === 'assistant-growth/creation-verification/v1'
-    ? !('backend' in config.runner)
-    : record.certificate.protocol === 'assistant-growth/creation-verification/v2'
-      && record.certificate.execution?.boundary === 'macos-seatbelt-single-process-v1'
-      && 'backend' in config.runner && config.runner.backend === 'macos-seatbelt'
-      && record.certificate.execution?.runtimeDigest === nativeMacRuntimeDigest(config.runner.runtime)
+  return creationCapabilityExecutionMatches(record.certificate, config.runner)
 }
 
 type Mounted = { fiber: { dispose(): Promise<void>; state: number }; aliases: readonly string[] }
@@ -154,6 +149,7 @@ export class CreationCapabilityRuntime {
       if (!this.ports.inspectRetained || !this.ports.recheckRetained) fail('retained source authority unavailable')
       await this.ports.recheckRetained(record, signal)
     } else await this.ports.recheck(record.planId, signal)
+    await verifyCreationCapabilityExecution(record.certificate, this.config.runner, signal)
     signal.throwIfAborted()
     const current = retained ? this.ports.inspectRetained!(record) : this.ports.inspect(record.planId)
     this.ports.withCurrent(record, () => {
@@ -227,7 +223,9 @@ export class CreationCapabilityRuntime {
       if (!sameCertificate(current.certificate, pinned.certificate)
         || sha(current.artifact) !== sha(pinned.artifact)) fail('source changed before claim')
       const source = await this.ports.captureSource?.(planId, activeSignal)
+      await verifyCreationCapabilityExecution(current.certificate, this.config.runner, activeSignal)
       activeSignal.throwIfAborted()
+      if (!this.eligible(planId)) fail('plan is no longer eligible')
       const latestBeforeClaim = this.ports.inspect(planId)
       if (!sameCertificate(current.certificate, latestBeforeClaim.certificate)
         || sha(current.artifact) !== sha(latestBeforeClaim.artifact)) fail('source changed during source capture')
@@ -245,7 +243,11 @@ export class CreationCapabilityRuntime {
           fail('discovery unknown or certificate mismatch')
         const tools = this.makeTools(record, result.schemas)
         await this.ports.recheck(planId, activeSignal)
+        await verifyCreationCapabilityExecution(record.certificate, this.config.runner, activeSignal)
         activeSignal.throwIfAborted()
+        if (!this.admission || this.closed || Date.now() >= this.config.expiresAt
+          || Date.now() >= this.config.runner.expiresAt || Date.now() >= record.certificate.expiresAt
+          || !sameExecution(record, this.config)) fail('authority or verification expired before authorization')
         const latest = this.ports.inspect(planId)
         this.ports.withCurrent(record, () => {
           if (!sameCertificate(latest.certificate, record.certificate)
@@ -407,11 +409,14 @@ export class CreationCapabilityRuntime {
     if (this.closed || !this.started) return
     for (const record of this.journal.list()) {
       if (record.status !== 'authorized' && record.status !== 'active') continue
+      if (this.closed) return
+      const controller = new AbortController()
+      this.operations.add(controller)
       try {
-        await this.checked(record, new AbortController().signal)
+        await this.checked(record, controller.signal)
         if (!this.mounted.has(record.planId)) {
-          await this.mount(record)
-          await this.checked(record, new AbortController().signal)
+          await this.mount(record, controller.signal)
+          await this.checked(record, controller.signal)
           if (record.status === 'authorized') this.ports.withCurrent(record, () => this.journal.activate(record.planId))
         }
       } catch (error) {
@@ -425,7 +430,7 @@ export class CreationCapabilityRuntime {
         if (this.closed) continue
         if (!(error instanceof SourceGrowthRunUnavailableError))
           this.journal.settle(record.planId, 'closed', 'authority-source-or-mount-invalid')
-      }
+      } finally { this.operations.delete(controller) }
     }
   }
 

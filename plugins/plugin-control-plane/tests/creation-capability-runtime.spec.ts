@@ -8,7 +8,9 @@ import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { canonicalGrowthJson, SourceGrowthRunUnavailableError,
   verifyPluginCreationVerificationCertificate, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { nativeMacRuntimeDigest, type NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
-import { afterEach, expect, test } from 'vitest'
+import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/plugin-behavior-runner'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+import * as execution from '../src/creation-capability-execution.js'
 import { CreationCapabilityRuntime } from '../src/creation-capability-runtime.js'
 import type { CreationCapabilityConfig, CreationCapabilityJournalPort, CreationCapabilityObservation,
   CreationCapabilityPorts, CreationCapabilityRecord, CreationCapabilityRunner } from '../src/creation-capability-types.js'
@@ -18,7 +20,10 @@ const expiry = () => Date.now() + 60_000
 const verifier = generateKeyPairSync('ed25519')
 const verifierPublicKey = verifier.publicKey.export({ format: 'pem', type: 'spki' }).toString()
 const fixtures: Context[] = []
-afterEach(async () => { for (const ctx of fixtures.splice(0)) await ctx.fiber.dispose() })
+afterEach(async () => {
+  for (const ctx of fixtures.splice(0)) await ctx.fiber.dispose()
+  vi.restoreAllMocks()
+})
 
 function legacyCertificate(planId: string, name: string, artifact: Buffer, schemaDigest: string,
   environment: PluginCreationVerificationCertificate['environment']): PluginCreationVerificationCertificate {
@@ -121,12 +126,309 @@ function fixture() {
     close: async () => { closeCount++ },
   }
   const runtime = () => new CreationCapabilityRuntime({ ctx, config, journal, ports, createRunner: async () => runner })
-  return { ctx, runtime, journal, calls, schemas, runner, certificate, config, ports,
+  return { ctx, runtime, journal, calls, schemas, runner, certificate, artifact, config, ports,
     setSourceValid: (value: boolean) => { sourceValid = value },
     setSourceAvailable: (value: boolean) => { sourceAvailable = value },
     setCallerValid: (value: boolean) => { callerValid = value },
     counts: () => ({ discoveries, invokes, closeCount, journalCloseCount }) }
 }
+
+// These tests exercise the actual Cordis lifecycle with a controlled runtime
+// verifier and behavior runner. Real filesystem/provenance validation has its
+// own helper tests and Linux integration evidence.
+function linuxFixture() {
+  const f = fixture(), root = resolve('fixture-linux-observer/runtime')
+  f.config.maxCallsPerAdoption = 2
+  const claimCall = f.journal.claimCall
+  f.journal.claimCall = input => {
+    if (!f.calls.has(input.key) && f.calls.size >= f.config.maxCallsPerAdoption) throw new Error('call quota exhausted')
+    return claimCall(input)
+  }
+  f.certificate.environment.node = 'v22.23.2'
+  const descriptor: LinuxPluginBehaviorRuntime = { schemaVersion: 1,
+    runtime: { schemaVersion: 1, backend: 'linux-native', platform: `linux-${process.arch}` as 'linux-x64' | 'linux-arm64',
+      sourceCommit: '1'.repeat(40), lockSha256: '2'.repeat(64), root: { path: root, dev: 1, ino: 2, sha256: '3'.repeat(64) },
+      nodePath: resolve(root, 'bin/node'), nodeSha256: '4'.repeat(64), pnpmPath: resolve(root, 'pnpm/bin/pnpm.mjs'),
+      nativePnpmPath: resolve(root, 'pnpm-native/pnpm'), nativePnpmRoot: resolve(root, 'pnpm-native'),
+      modulesPath: resolve(root, 'node_modules'), storePath: resolve(root, 'store'), cachePath: resolve(root, 'cache'),
+      versions: { ...f.certificate.environment, node: 'v22.23.2', pnpm: '11.7.0', typescript: '6.0.3' } },
+    observer: { schemaVersion: 1, sourceSha256: '5'.repeat(64), workerSha256: '6'.repeat(64), candidateSha256: '7'.repeat(64),
+      launcherSha256: '8'.repeat(64), parentProtectSha256: '9'.repeat(64), childProtectSha256: 'a'.repeat(64) } }
+  f.config.runner = { backend: 'linux-native', runtime: descriptor, stateRoot: resolve(root, '../../state'),
+    cgroupRoots: { mode: 'v1', cpu: '/sys/fs/cgroup/cpu/dsh-native/uid-1000', memory: '/sys/fs/cgroup/memory/dsh-native/uid-1000',
+      pids: '/sys/fs/cgroup/pids/dsh-native/uid-1000', freezer: '/sys/fs/cgroup/freezer/dsh-native/uid-1000' },
+    expiresAt: expiry(), maxRuns: 8, maxTotalDurationMs: 60_000, maxDurationMs: 10_000, maxOutputBytes: 65_536 }
+  f.certificate.protocol = 'assistant-growth/creation-verification/v3'
+  f.certificate.execution = { boundary: 'linux-native-process-seccomp-v1', runtimeDigest: linuxPluginBehaviorRuntimeDigest(descriptor),
+    buildEvidenceDigest: 'c'.repeat(64), buildRuntimeDigest: 'd'.repeat(64), observerPreparationDigest: 'e'.repeat(64) }
+  const resign = (): void => {
+    const { signature: _signature, ...unsigned } = f.certificate
+    f.certificate.signature = sign(null, Buffer.from(canonicalGrowthJson(unsigned)), verifier.privateKey).toString('base64url')
+  }
+  resign()
+  expect(verifyPluginCreationVerificationCertificate(f.certificate, f.certificate.authority, verifierPublicKey)).toBe(true)
+  const original = f.runner.run.bind(f.runner)
+  f.runner.run = async input => ({ ...await original(input), boundary: 'linux-native-process-seccomp-v1',
+    runtimeDigest: f.certificate.execution!.runtimeDigest })
+  const verify = vi.spyOn(execution, 'verifyCreationCapabilityExecution').mockImplementation(async (certificate, runner, signal) => {
+    signal.throwIfAborted()
+    if (!execution.creationCapabilityExecutionMatches(certificate, runner)) throw new Error('controlled runtime mismatch')
+  })
+  const exec = (callId: string, signal = new AbortController().signal) => ({ callId,
+    agent: { session: { id: 'session-1' } }, signal }) as unknown as ToolRunContext
+  return { ...f, descriptor, verify, exec, resign }
+}
+
+function deferred() {
+  let resolve!: () => void
+  const promise = new Promise<void>(done => { resolve = done })
+  return { promise, resolve }
+}
+
+describe.runIf(process.platform === 'linux')('Linux created capability execution', () => {
+
+test('Linux v3 adopts and restores finite tools, caches exact calls and never replays unknown calls', async () => {
+  const f = linuxFixture()
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  const first = f.runtime(); await first.start()
+  expect(first.eligible('plan-1')).toBe(true)
+  await first.adopt('plan-1', new AbortController().signal)
+  const alias = f.journal.inspect('plan-1')!.tools![0]!.name
+  expect(f.verify).toHaveBeenCalledTimes(4)
+  const call = () => f.ctx.tools.get(alias)!.execute({ query: 'hello' }, f.exec('same-call'))
+  const value = await call()
+  expect(await call()).toEqual(value)
+  expect(f.counts()).toMatchObject({ discoveries: 1, invokes: 1 })
+  await first.close()
+  const restored = f.runtime(); await restored.start()
+  expect(await call()).toEqual(value)
+  const key = [...f.calls.keys()][0]!
+  f.calls.set(key, { status: 'unknown' })
+  await expect(call()).rejects.toThrow('already claimed or unknown')
+  expect(f.counts()).toMatchObject({ discoveries: 1, invokes: 1 })
+  await f.ctx.tools.get(alias)!.execute({ query: 'second' }, f.exec('second-call'))
+  await expect(f.ctx.tools.get(alias)!.execute({ query: 'third' }, f.exec('third-call'))).rejects.toThrow('quota exhausted')
+  expect(f.counts().invokes).toBe(2)
+  await restored.close()
+  expect(f.ctx.tools.get(alias)).toBeUndefined()
+})
+
+test('retained Linux v2 adoption restores and invokes after original certificate expiry and source GC', async () => {
+  const f = linuxFixture()
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  const first = f.runtime(); await first.start(); await first.adopt('plan-1', new AbortController().signal)
+  const record = f.journal.inspect('plan-1')!, alias = record.tools![0]!.name
+  record.receipt!.protocol = 'dsh-created-capability-adoption/v2'
+  await first.close()
+  f.certificate.expiresAt = Date.now() - 1; f.resign()
+  f.ports.inspect = vi.fn(() => { throw new Error('original source garbage collected') })
+  f.ports.recheck = vi.fn(async () => { throw new Error('original grant expired') })
+  f.ports.inspectRetained = vi.fn(() => ({ certificate: f.certificate, artifact: f.artifact, owner: f.config.owner }))
+  f.ports.recheckRetained = vi.fn(async () => {})
+  const restored = f.runtime(); await restored.start()
+  await expect(f.ctx.tools.get(alias)!.execute({ query: 'retained' }, f.exec('retained-call'))).resolves.toMatchObject({ value: { answer: 'ok' } })
+  expect(f.ports.inspect).not.toHaveBeenCalled()
+  expect(f.ports.recheck).not.toHaveBeenCalled()
+  expect(f.ports.recheckRetained).toHaveBeenCalled()
+  expect(f.counts()).toMatchObject({ discoveries: 1, invokes: 1 })
+  await restored.close()
+})
+
+test.each(['descriptor', 'preparation'] as const)('Linux %s mismatch before claim consumes no adoption or runner quota', async mismatch => {
+  const f = linuxFixture(), runtime = f.runtime(); await runtime.start()
+  if (mismatch === 'descriptor') f.descriptor.observer.workerSha256 = 'f'.repeat(64)
+  else f.verify.mockRejectedValueOnce(new Error('preparation receipt mismatch'))
+  await expect(runtime.adopt('plan-1', new AbortController().signal)).rejects.toThrow()
+  expect(f.journal.list()).toEqual([])
+  expect(f.counts()).toMatchObject({ discoveries: 0, invokes: 0 })
+  await runtime.close()
+})
+
+test.each(['owner', 'expiry', 'cancel', 'close'] as const)('Linux asynchronous preclaim %s change suppresses journal claim and discovery', async change => {
+  const f = linuxFixture(), entered = deferred(), release = deferred(), cancel = new AbortController()
+  f.verify.mockImplementationOnce(async (_certificate, _runner, signal) => {
+    entered.resolve()
+    if (change === 'close') await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+    else await release.promise
+  })
+  const runtime = f.runtime(); await runtime.start()
+  const adopting = runtime.adopt('plan-1', cancel.signal), denied = expect(adopting).rejects.toThrow()
+  await entered.promise
+  let closing: Promise<void> | undefined
+  if (change === 'owner') f.setSourceValid(false)
+  if (change === 'expiry') f.config.expiresAt = Date.now() - 1
+  if (change === 'cancel') cancel.abort()
+  if (change === 'close') closing = runtime.close()
+  release.resolve()
+  await denied; await closing
+  expect(f.journal.list()).toEqual([])
+  expect(f.counts()).toMatchObject({ discoveries: 0, invokes: 0 })
+  await runtime.close()
+})
+
+test.each(['discover', 'invoke'] as const)('Linux %s boundary mismatch never authorizes tools or returns a completed result', async phase => {
+  const f = linuxFixture()
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  const original = f.runner.run.bind(f.runner)
+  f.runner.run = async input => ({ ...await original(input), boundary: input.operation.kind === phase
+    ? 'macos-seatbelt-single-process-v1' : 'linux-native-process-seccomp-v1' })
+  const runtime = f.runtime(); await runtime.start()
+  if (phase === 'discover') {
+    await expect(runtime.adopt('plan-1', new AbortController().signal)).rejects.toThrow('certificate mismatch')
+    expect(f.journal.inspect('plan-1')?.status).toBe('unknown')
+    expect(f.journal.inspect('plan-1')?.tools).toBeUndefined()
+  } else {
+    await runtime.adopt('plan-1', new AbortController().signal)
+    const alias = f.journal.inspect('plan-1')!.tools![0]!.name
+    await expect(f.ctx.tools.get(alias)!.execute({ query: 'test' }, f.exec('wrong-boundary'))).rejects.toThrow('invocation unknown')
+    expect([...f.calls.values()].map(call => call.status)).toEqual(['unknown'])
+  }
+  await runtime.close()
+})
+
+test.each(['owner', 'runtime', 'expiry', 'cancel', 'close'] as const)('Linux %s change after discovery prevents authorization and mounting', async change => {
+  const f = linuxFixture(), entered = deferred(), release = deferred(), cancel = new AbortController()
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  const original = f.runner.run.bind(f.runner)
+  f.runner.run = async input => {
+    const result = await original(input)
+    if (input.operation.kind === 'discover') f.verify.mockImplementationOnce(async (_certificate, _runner, signal) => {
+      entered.resolve()
+      if (change === 'close') await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+      else await release.promise
+    })
+    return result
+  }
+  const runtime = f.runtime(); await runtime.start()
+  const adopting = runtime.adopt('plan-1', cancel.signal), denied = expect(adopting).rejects.toThrow()
+  await entered.promise
+  let closing: Promise<void> | undefined
+  if (change === 'owner') f.setSourceValid(false)
+  if (change === 'runtime') f.descriptor.observer.workerSha256 = 'f'.repeat(64)
+  if (change === 'expiry') f.certificate.expiresAt = Date.now() - 1
+  if (change === 'cancel') cancel.abort()
+  if (change === 'close') closing = runtime.close()
+  release.resolve()
+  await denied; await closing
+  expect(f.journal.inspect('plan-1')).toMatchObject({ status: 'unknown', reason: 'adoption-unsettled' })
+  expect(f.journal.inspect('plan-1')?.tools).toBeUndefined()
+  expect(f.counts()).toMatchObject({ discoveries: 1, invokes: 0 })
+  await runtime.close()
+})
+
+test('Linux runtime verification failure before a call claim consumes no call quota and allows a checked retry', async () => {
+  const f = linuxFixture()
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  const runtime = f.runtime(); await runtime.start(); await runtime.adopt('plan-1', new AbortController().signal)
+  const alias = f.journal.inspect('plan-1')!.tools![0]!.name
+  f.verify.mockRejectedValueOnce(new Error('observer preparation changed'))
+  await expect(f.ctx.tools.get(alias)!.execute({ query: 'test' }, f.exec('retryable-preflight'))).rejects.toThrow('preparation changed')
+  expect(f.calls.size).toBe(0)
+  expect(f.counts().invokes).toBe(0)
+  await expect(f.ctx.tools.get(alias)!.execute({ query: 'test' }, f.exec('retryable-preflight'))).resolves.toMatchObject({ value: { answer: 'ok' } })
+  expect(f.calls.size).toBe(1)
+  expect(f.counts().invokes).toBe(1)
+  await runtime.close()
+})
+
+test.each(['owner', 'runtime', 'expiry', 'cancel', 'close'] as const)('Linux %s change during pre-dispatch runtime verification prevents a call claim', async change => {
+  const f = linuxFixture()
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  const runtime = f.runtime(); await runtime.start(); await runtime.adopt('plan-1', new AbortController().signal)
+  const entered = deferred(), release = deferred(), cancel = new AbortController()
+  f.verify.mockImplementationOnce(async (_certificate, _runner, signal) => {
+    entered.resolve()
+    if (change === 'close') await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+    else await release.promise
+  })
+  const alias = f.journal.inspect('plan-1')!.tools![0]!.name
+  const call = f.ctx.tools.get(alias)!.execute({ query: 'test' }, f.exec('pre-dispatch-change', cancel.signal))
+  const denied = expect(call).rejects.toThrow()
+  await entered.promise
+  let closing: Promise<void> | undefined
+  if (change === 'owner') f.setCallerValid(false)
+  if (change === 'runtime') f.descriptor.observer.workerSha256 = 'f'.repeat(64)
+  if (change === 'expiry') f.config.runner.expiresAt = Date.now() - 1
+  if (change === 'cancel') cancel.abort()
+  if (change === 'close') closing = runtime.close()
+  release.resolve()
+  await denied; await closing
+  expect(f.calls.size).toBe(0)
+  expect(f.counts().invokes).toBe(0)
+  await runtime.close()
+})
+
+test.each(['descriptor', 'preparation'] as const)('Linux %s mismatch on restore closes the row without discovery or mounting', async mismatch => {
+  const f = linuxFixture()
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  const first = f.runtime(); await first.start(); await first.adopt('plan-1', new AbortController().signal)
+  const alias = f.journal.inspect('plan-1')!.tools![0]!.name
+  await first.close()
+  if (mismatch === 'descriptor') f.descriptor.observer.workerSha256 = 'f'.repeat(64)
+  else f.verify.mockRejectedValueOnce(new Error('preparation receipt mismatch'))
+  const restored = f.runtime(); await restored.start()
+  expect(f.journal.inspect('plan-1')).toMatchObject({ status: 'closed', reason: 'authority-source-or-mount-invalid' })
+  expect(f.ctx.tools.get(alias)).toBeUndefined()
+  expect(f.counts()).toMatchObject({ discoveries: 1, invokes: 0 })
+  await restored.close()
+})
+
+test.each(['owner', 'runtime', 'expiry', 'cancel', 'close'] as const)('Linux %s change during post-result runtime verification withholds result and preserves unknown', async change => {
+  const f = linuxFixture()
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  const runtime = f.runtime(); await runtime.start(); await runtime.adopt('plan-1', new AbortController().signal)
+  const entered = deferred(), release = deferred(), cancel = new AbortController()
+  const original = f.runner.run.bind(f.runner)
+  f.runner.run = async input => {
+    const result = await original(input)
+    if (input.operation.kind === 'invoke') f.verify.mockImplementationOnce(async (_certificate, _runner, signal) => {
+      entered.resolve()
+      if (change === 'close') await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+      else await release.promise
+    })
+    return result
+  }
+  const alias = f.journal.inspect('plan-1')!.tools![0]!.name
+  const call = f.ctx.tools.get(alias)!.execute({ query: 'test' }, f.exec('late-change', cancel.signal))
+  const denied = expect(call).rejects.toThrow()
+  await entered.promise
+  let closing: Promise<void> | undefined
+  if (change === 'owner') f.setSourceValid(false)
+  if (change === 'runtime') f.descriptor.observer.workerSha256 = 'f'.repeat(64)
+  if (change === 'expiry') f.config.expiresAt = Date.now() - 1
+  if (change === 'cancel') cancel.abort()
+  if (change === 'close') closing = runtime.close()
+  release.resolve()
+  await denied; await closing
+  expect(f.counts().invokes).toBe(1)
+  expect([...f.calls.values()].map(call => call.status)).toEqual(['unknown'])
+  await runtime.close()
+})
+
+test('close cancels and drains Linux restore verification before closing runner and journal', async () => {
+  const f = linuxFixture()
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  const first = f.runtime(); await first.start(); await first.adopt('plan-1', new AbortController().signal)
+  const alias = f.journal.inspect('plan-1')!.tools![0]!.name
+  await first.close()
+  const entered = deferred(), aborted = deferred(), release = deferred()
+  f.verify.mockImplementationOnce(async (_certificate, _runner, signal) => {
+    entered.resolve()
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => { aborted.resolve(); resolve() }, { once: true }))
+    await release.promise
+  })
+  const runtime = f.runtime(), starting = runtime.start()
+  await entered.promise
+  const closing = runtime.close()
+  await aborted.promise
+  expect(f.counts()).toMatchObject({ closeCount: 1, journalCloseCount: 1 })
+  expect(f.ctx.tools.get(alias)).toBeUndefined()
+  release.resolve()
+  await starting; await closing
+  expect(f.counts()).toMatchObject({ discoveries: 1, closeCount: 2, journalCloseCount: 2 })
+})
+
+})
 
 test('signed legacy v1 certificate remains eligible for the Docker runner', async () => {
   const f = fixture()

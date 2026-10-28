@@ -208,12 +208,12 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
   }
   if (config.sourceBuild !== undefined && 'backend' in config.sourceBuild && config.sourceBuild.backend === 'linux-native') {
     if (!config.sourceJobs) throw new Error('plugin-control-plane: Linux repository preparation requires durable sourceJobs')
-    if (config.creationVerifications && (!config.sourceBuild.userNamespace || !config.sourceBuild.systemSnapshot)) {
+    if ((config.creationVerifications || config.creationCapabilities) && (!config.sourceBuild.userNamespace || !config.sourceBuild.systemSnapshot)) {
       throw new Error('plugin-control-plane: Linux creation verification requires the dual-UID repository boundary')
     }
     if (config.sourceApprovals || config.sourceReleases || config.sourceReleaseExecution || config.sourceAdoptions
-      || config.revisionVerifications || config.revisionRegressions || config.creationCapabilities) {
-      throw new Error('plugin-control-plane: Linux repository preparation is not yet connected to revision, adoption and release authorities')
+      || config.revisionVerifications || config.revisionRegressions) {
+      throw new Error('plugin-control-plane: Linux repository preparation is not yet connected to revision and release authorities')
     }
   }
   if (config.sourceReleases !== undefined) {
@@ -294,6 +294,12 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
     const capability = config.creationCapabilities
     const verification = config.creationVerifications
     const jobs = config.sourceJobs
+    const build = config.sourceBuild
+    const buildBackend = build && 'backend' in build ? build.backend : 'docker'
+    const adoptionBackend = 'backend' in capability.runner ? capability.runner.backend : 'docker'
+    if (!build || buildBackend !== adoptionBackend) {
+      throw new Error('plugin-control-plane: creation build, verification and adoption require matching execution backends')
+    }
     if (!verification || !jobs?.creation || capability.namePrefix !== jobs.creation.namePrefix
       || capability.owner.authorityId !== jobs.ownerRouteId || capability.owner.principalId !== jobs.principalId
       || capability.owner.workspace !== jobs.workspace || capability.owner.agentPreset !== jobs.preset
@@ -584,6 +590,10 @@ export class PluginControlPlaneService extends Service {
               },
               recheck: async (planId, signal) => {
                 await this.inspectPreparedCreationReviewContext(planId, signal)
+                if (this.config.sourceBuild && 'backend' in this.config.sourceBuild
+                  && this.config.sourceBuild.backend === 'linux-native') {
+                  await this.inspectPreparedCreationLinuxBuild(planId, signal)
+                }
                 if (!this.inspectVerifiedCreation(planId)) throw new Error('created capability independent certificate changed')
               },
               captureSource: async (planId, signal) => {
@@ -629,9 +639,6 @@ export class PluginControlPlaneService extends Service {
               },
             } })
             this.creationCapabilityRuntimes.add(capabilities)
-            await capabilities.start()
-            this.abort.signal.throwIfAborted()
-            this.creationCapabilityRuntime = capabilities
             unsubscribeTaskChanges = evaluation.onTrustedTaskChange(() => this.reconcileCreatedCapabilities())
           } catch (error) {
             unsubscribeTaskChanges?.()
@@ -668,7 +675,12 @@ export class PluginControlPlaneService extends Service {
         this.nativeSourceRunner = nativeRunner
         let runtime: SourceJobRuntime
         const preparationGeneration = {}
-        try { runtime = new SourceJobRuntime({ config: this.config.sourceJobs!, build: sourceBuild, statePath: this.config.statePath, store: this.store,
+        try {
+          // Restored fresh adoptions read their original Linux build receipt.
+          // Their source runner must exist before capability reconciliation.
+          await capabilities?.start()
+          this.abort.signal.throwIfAborted()
+          runtime = new SourceJobRuntime({ config: this.config.sourceJobs!, build: sourceBuild, statePath: this.config.statePath, store: this.store,
           ports: {
             automations: {
               registerHostExecutor: executor => current('automations').registerHostExecutor(executor),
@@ -725,6 +737,7 @@ export class PluginControlPlaneService extends Service {
           throw error
         }
         this.sourceRuntimes.add(runtime)
+        this.creationCapabilityRuntime = capabilities
         const close = async (): Promise<void> => {
           unsubscribeTaskChanges?.()
           if (this.sourceRuntime === runtime) this.sourceRuntime = undefined

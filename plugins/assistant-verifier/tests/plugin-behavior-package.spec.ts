@@ -42,6 +42,7 @@ test('a packed Verifier resolves its Isolation runner in a cold profile without 
     expect(manifest.dependencies['@dsh-enhanced/assistant-isolation']).toBe(isolationManifest.version)
     expect(manifest.dsh.bundle.patch).toBe('./cordis.patch.yml')
     expect(manifest.exports['./linux-behavior-runtime']?.default).toBe('./lib/linux-behavior-runtime.js')
+    expect(manifest.exports['./plugin-behavior-config']?.default).toBe('./lib/plugin-behavior-config.js')
     expect(await readFile(join(scope, 'assistant-verifier', 'runtime', 'plugin-observer-launcher.c')))
       .toEqual(await readFile(join(repository, 'scripts', 'isolation', 'plugin-observer-launcher.c')))
     const deepseek = join(profile, 'node_modules', '@deepseek-ai')
@@ -64,7 +65,13 @@ test('a packed Verifier resolves its Isolation runner in a cold profile without 
     const assets = pathToFileURL(join(scope, 'assistant-verifier', 'lib', 'linux-behavior-assets.js')).href
     const runtime = pathToFileURL(join(scope, 'assistant-verifier', 'lib', 'linux-behavior-runtime.js')).href
     const loaded = spawnSync(process.execPath, ['--input-type=module', '-e',
-      `const {PluginBehaviorRunner}=await import(${JSON.stringify(runner)});
+      `import {createRequire} from 'node:module';
+const require=createRequire(${JSON.stringify(join(profile, 'entry.mjs'))});
+const config=require('@dsh-enhanced/assistant-verifier/plugin-behavior-config');
+const linux=require('@dsh-enhanced/assistant-verifier/linux-behavior-runtime');
+if(typeof config.validateCreationBehaviorDeploymentConfig!=='function'
+ ||typeof linux.verifyLinuxPluginBehaviorAdoptionRuntime!=='function') throw Error('packed adoption exports missing');
+const {PluginBehaviorRunner}=await import(${JSON.stringify(runner)});
 if(typeof PluginBehaviorRunner!=='function') throw Error('runner missing');
 const {prepareLinuxPluginBehaviorRuntime}=await import(${JSON.stringify(runtime)});
 if(typeof prepareLinuxPluginBehaviorRuntime!=='function') throw Error('runtime preparation missing');

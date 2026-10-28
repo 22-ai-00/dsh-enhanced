@@ -15,6 +15,10 @@
       "types": "./lib/plugin-behavior-runner.d.ts",
       "default": "./lib/plugin-behavior-runner.js"
     },
+    "./plugin-behavior-config": {
+      "types": "./lib/plugin-behavior-config.d.ts",
+      "default": "./lib/plugin-behavior-config.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json",
     "./linux-behavior-runtime": {
