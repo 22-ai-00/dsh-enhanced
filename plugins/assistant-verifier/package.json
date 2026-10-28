@@ -16,10 +16,15 @@
       "default": "./lib/plugin-behavior-runner.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./linux-behavior-runtime": {
+      "types": "./lib/linux-behavior-runtime.d.ts",
+      "default": "./lib/linux-behavior-runtime.js"
+    }
   },
   "files": [
     "lib",
+    "runtime",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"

@@ -35,11 +35,15 @@ test('a packed Verifier resolves its Isolation runner in a cold profile without 
       command('tar', ['-xzf', join(artifacts, packed[0]!), '-C', destination, '--strip-components=1'])
     }
     const manifest = JSON.parse(await readFile(join(scope, 'assistant-verifier', 'package.json'), 'utf8')) as {
-      dependencies: Record<string, string>; dsh: { bundle: { patch: string } }
+      dependencies: Record<string, string>; dsh: { bundle: { patch: string } };
+      exports: Record<string, { default: string }>
     }
     const isolationManifest = JSON.parse(await readFile(join(scope, 'assistant-isolation', 'package.json'), 'utf8')) as { version: string }
     expect(manifest.dependencies['@dsh-enhanced/assistant-isolation']).toBe(isolationManifest.version)
     expect(manifest.dsh.bundle.patch).toBe('./cordis.patch.yml')
+    expect(manifest.exports['./linux-behavior-runtime']?.default).toBe('./lib/linux-behavior-runtime.js')
+    expect(await readFile(join(scope, 'assistant-verifier', 'runtime', 'plugin-observer-launcher.c')))
+      .toEqual(await readFile(join(repository, 'scripts', 'isolation', 'plugin-observer-launcher.c')))
     const deepseek = join(profile, 'node_modules', '@deepseek-ai')
     await mkdir(deepseek)
     for (const slug of ['cordis', 'dsh-tools', 'schemastery']) {
@@ -57,8 +61,18 @@ test('a packed Verifier resolves its Isolation runner in a cold profile without 
     await rename(disabled, isolation)
     const home = join(root, 'home')
     await mkdir(home)
+    const assets = pathToFileURL(join(scope, 'assistant-verifier', 'lib', 'linux-behavior-assets.js')).href
+    const runtime = pathToFileURL(join(scope, 'assistant-verifier', 'lib', 'linux-behavior-runtime.js')).href
     const loaded = spawnSync(process.execPath, ['--input-type=module', '-e',
-      `const {PluginBehaviorRunner}=await import(${JSON.stringify(runner)}); if(typeof PluginBehaviorRunner!=='function') throw Error('runner missing');`],
+      `const {PluginBehaviorRunner}=await import(${JSON.stringify(runner)});
+if(typeof PluginBehaviorRunner!=='function') throw Error('runner missing');
+const {prepareLinuxPluginBehaviorRuntime}=await import(${JSON.stringify(runtime)});
+if(typeof prepareLinuxPluginBehaviorRuntime!=='function') throw Error('runtime preparation missing');
+if(process.platform==='linux') {
+const {loadLinuxBehaviorAssets}=await import(${JSON.stringify(assets)});
+const value=await loadLinuxBehaviorAssets();
+if(!/^[a-f0-9]{64}$/.test(value.sourceSha256)||!value.worker.includes('/runtime/0/dsh-plugin-verifier/candidate-launcher')
+ ||value.worker.includes('/opt/dsh-plugin-verifier')||!value.launcher.includes('PR_SET_DUMPABLE')) throw Error('packed observer assets differ'); }`],
     { cwd: profile, encoding: 'utf8', timeout: 10_000, env: { ...process.env, HOME: home } })
     expect(loaded.status, loaded.stderr).toBe(0)
     expect(existsSync(join(home, '.dsh', 'assistant-isolation'))).toBe(false)

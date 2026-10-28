@@ -69,13 +69,15 @@ export function validateLinuxRuntime(value: unknown): LinuxRuntime {
 }
 
 /** Hash paths, metadata and bytes; links are recorded but never followed during traversal. */
-export async function hashLinuxRuntimeTree(root: string): Promise<string> {
+export async function hashLinuxRuntimeTree(root: string, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted()
   if (!canonical(root) || await realpath(root) !== root) throw new Error('noncanonical Linux runtime root')
   const base = await lstat(root)
   if (!base.isDirectory() || base.isSymbolicLink() || base.uid !== process.getuid?.()) throw new Error('unsafe Linux runtime root')
   let count = 0, bytes = 0
   const hash = createHash('sha256')
   const visit = async (path: string): Promise<void> => {
+    signal?.throwIfAborted()
     if (++count > MAX_ENTRIES) throw new Error('Linux runtime entry limit')
     const item = await lstat(path)
     if (item.uid !== process.getuid?.()) throw new Error('Linux runtime owner mismatch')
@@ -98,7 +100,10 @@ export async function hashLinuxRuntimeTree(root: string): Promise<string> {
         const opened = await descriptor.stat()
         if (!opened.isFile() || opened.dev !== item.dev || opened.ino !== item.ino || opened.size !== item.size) throw new Error('Linux runtime file changed')
         const fileHash = createHash('sha256')
-        for await (const chunk of createReadStream(path, { fd: descriptor.fd, autoClose: false })) fileHash.update(chunk as Buffer)
+        for await (const chunk of createReadStream(path, { fd: descriptor.fd, autoClose: false, signal })) {
+          signal?.throwIfAborted()
+          fileHash.update(chunk as Buffer)
+        }
         const after = await descriptor.stat()
         if (after.dev !== item.dev || after.ino !== item.ino || after.size !== item.size || after.mtimeMs !== item.mtimeMs) throw new Error('Linux runtime file changed')
         fileDigest = fileHash.digest('hex')
@@ -109,6 +114,7 @@ export async function hashLinuxRuntimeTree(root: string): Promise<string> {
     } else throw new Error('Linux runtime special or linked file')
   }
   await visit(root)
+  signal?.throwIfAborted()
   return hash.digest('hex')
 }
 
@@ -117,23 +123,25 @@ export function linuxRuntimeDigest(value: LinuxRuntime): string {
 }
 
 /** Perform the full tree check before giving a candidate access to the toolchain. */
-export async function verifyLinuxRuntime(value: LinuxRuntime): Promise<LinuxRuntime> {
+export async function verifyLinuxRuntime(value: LinuxRuntime, signal?: AbortSignal): Promise<LinuxRuntime> {
+  signal?.throwIfAborted()
   const runtime = validateLinuxRuntime(value)
   if (process.platform !== 'linux') throw new Error('Linux runtime requires Linux')
   if (await realpath(runtime.root.path) !== runtime.root.path) throw new Error('Linux runtime root moved')
   const root = await lstat(runtime.root.path)
   if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== process.getuid?.()
     || root.dev !== runtime.root.dev || root.ino !== runtime.root.ino
-    || await hashLinuxRuntimeTree(runtime.root.path) !== runtime.root.sha256) throw new Error('Linux runtime root differs')
+    || await hashLinuxRuntimeTree(runtime.root.path, signal) !== runtime.root.sha256) throw new Error('Linux runtime root differs')
   const node = await lstat(runtime.nodePath)
   if (!node.isFile() || node.isSymbolicLink() || node.nlink !== 1 || node.mode & 0o022
     || await realpath(runtime.nodePath) !== runtime.nodePath
-    || digest(await readFile(runtime.nodePath)) !== runtime.nodeSha256) throw new Error('Linux runtime Node differs')
+    || digest(await readFile(runtime.nodePath, { signal })) !== runtime.nodeSha256) throw new Error('Linux runtime Node differs')
   for (const [key, name] of [['typescript', 'typescript'], ['cordis', '@deepseek-ai/cordis'],
     ['tools', '@deepseek-ai/dsh-tools'], ['systemPrompt', '@deepseek-ai/dsh-system-prompt']] as const) {
+    signal?.throwIfAborted()
     const path = join(runtime.modulesPath, name, 'package.json')
     if (!within(await realpath(path), runtime.root.path)) throw new Error('Linux runtime package escaped root')
-    const manifest = JSON.parse(await readFile(path, 'utf8')) as { version?: string }
+    const manifest = JSON.parse(await readFile(path, { encoding: 'utf8', signal })) as { version?: string }
     if (manifest.version !== runtime.versions[key]) throw new Error('Linux runtime package version differs')
   }
   const nativePnpm = await lstat(runtime.nativePnpmPath)
@@ -145,22 +153,22 @@ export async function verifyLinuxRuntime(value: LinuxRuntime): Promise<LinuxRunt
   const releaseNode = await lstat(releaseNodePath)
   if (!releaseNode.isFile() || releaseNode.isSymbolicLink() || releaseNode.nlink !== 1
     || releaseNode.mode & 0o022 || await realpath(releaseNodePath) !== releaseNodePath
-    || digest(await readFile(releaseNodePath)) !== runtime.nodeSha256) {
+    || digest(await readFile(releaseNodePath, { signal })) !== runtime.nodeSha256) {
     throw new Error('Linux runtime release Node differs')
   }
-  const nativeManifest = JSON.parse(await readFile(join(runtime.nativePnpmRoot, 'package.json'), 'utf8')) as {
+  const nativeManifest = JSON.parse(await readFile(join(runtime.nativePnpmRoot, 'package.json'), { encoding: 'utf8', signal })) as {
     name?: string; version?: string }
   if (nativeManifest.name !== '@pnpm/exe' || nativeManifest.version !== runtime.versions.pnpm) {
     throw new Error('Linux runtime native pnpm package differs')
   }
-  const lock = await readFile(join(runtime.root.path, 'pnpm-lock.yaml'))
+  const lock = await readFile(join(runtime.root.path, 'pnpm-lock.yaml'), { signal })
   if (digest(lock) !== runtime.lockSha256) throw new Error('Linux runtime lock differs')
   const env = { PATH: '/usr/bin:/bin', HOME: '/nonexistent', LANG: 'C', LC_ALL: 'C' }
   const [observedNode, observedPnpm, observedNativePnpm, observedReleaseNode] = await Promise.all([
-    execFileAsync(runtime.nodePath, ['--version'], { timeout: 5_000, maxBuffer: 1024, env }),
-    execFileAsync(runtime.nodePath, [runtime.pnpmPath, '--version'], { timeout: 5_000, maxBuffer: 1024, env }),
-    execFileAsync(runtime.nativePnpmPath, ['--version'], { timeout: 5_000, maxBuffer: 1024, env }),
-    execFileAsync(releaseNodePath, ['--version'], { timeout: 5_000, maxBuffer: 1024, env }),
+    execFileAsync(runtime.nodePath, ['--version'], { timeout: 5_000, maxBuffer: 1024, env, signal, killSignal: 'SIGKILL' }),
+    execFileAsync(runtime.nodePath, [runtime.pnpmPath, '--version'], { timeout: 5_000, maxBuffer: 1024, env, signal, killSignal: 'SIGKILL' }),
+    execFileAsync(runtime.nativePnpmPath, ['--version'], { timeout: 5_000, maxBuffer: 1024, env, signal, killSignal: 'SIGKILL' }),
+    execFileAsync(releaseNodePath, ['--version'], { timeout: 5_000, maxBuffer: 1024, env, signal, killSignal: 'SIGKILL' }),
   ])
   if (observedNode.stdout.trim() !== runtime.versions.node
     || observedPnpm.stdout.trim() !== runtime.versions.pnpm
@@ -168,5 +176,6 @@ export async function verifyLinuxRuntime(value: LinuxRuntime): Promise<LinuxRunt
     || observedReleaseNode.stdout.trim() !== runtime.versions.node) {
     throw new Error('Linux runtime executable version differs')
   }
+  signal?.throwIfAborted()
   return runtime
 }

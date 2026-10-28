@@ -216,7 +216,7 @@ export class LinuxVerifierRunner {
     const existing = this.#ledger.findJobByKey(this.#identity, `authority:${this.#input.authorityDigest}`, 'verification', key)
     if (existing) return await this.#existing(existing, request, requestDigest)
     // Full tree and executable verification is repeated for each newly admitted request.
-    await verifyLinuxRuntime(this.#input.runtime)
+    await verifyLinuxRuntime(this.#input.runtime, AbortSignal.any([signal, this.#abort.signal]))
     this.#available(signal)
     const observation = await observeStorage(this.#input.stateRoot)
     this.#available(signal)

@@ -87,6 +87,12 @@ Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始
 
 macOS 使用显式 `backend: 'macos-seatbelt'`、私有固定 `runtime` 与相同的持久次数、时长和输出预算；部署配置省略 `authorityDigest`，认证 Host 在构造时注入。`validatePluginBehaviorDeploymentConfig` 与 `validatePluginBehaviorRunnerConfig` 是同步严格校验。固定源码在只读 Seatbelt 单进程中加载 Cordis、SystemPrompt、Tools 和候选，只将操作输入传入候选；预期答案、签名私钥和持久账本留在 Host。Host 安全解析 npm tarball 为普通文件，拒绝链接及越界路径；从已核验的 runtime 填入环境与 `macos-seatbelt-single-process-v1` 边界。候选仍与观察代码同进程，其输出和结果均视为不可信，必须由独立私有 held-out 答案裁决；该边界不声称具备 Linux 双进程隔离的等价防篡改性。v2 创建证书签名绑定运行时摘要和固定构建证据摘要，采用及后续调用再次比对运行时；旧 v1 凭证及 Docker 路径保留。
 
+Linux 原生私有 API 使用 `backend: 'linux-native'`、`runtime: LinuxPluginBehaviorRuntime`、当前用户已委派的 `cgroupRoots` 和相同的有限 authority 字段；调用者不能提供命令、源码、镜像或资源策略。先从 `@dsh-enhanced/assistant-verifier/linux-behavior-runtime` 导入 `prepareLinuxPluginBehaviorRuntime({ runtime: baseLinuxRuntime, root: privateDestination, signal })`，取得独立目录内的固定运行时描述。该目录保存 `behavior.json` 和 `runtime/`，后者只读映射到 `/runtime/0`。原基底、源码身份、安装回执、主人与额度均不被改写。此入口仅供可信 Host 使用；`validatePluginBehaviorDeploymentConfig` 仍拒绝 Linux，`creationReviews`、修订证书、采用及安装默认值尚未接线。
+
+原生准备在私有目录中限量复制基底，使用固定 `/usr/bin/cc` 及其已核验的 root-owned 工具链编译已发布 C 资产，不下载依赖、不运行候选或安装脚本。C 字节及父/候选 JavaScript 与 Docker 观察器同源，仅变更固定运行时路径；编译器、依赖、源码和产物摘要绑定到新回执，重用时漂移即拒绝。准备会读基底/系统编译器与头文件、写新私有目录并启动受限编译子进程；运行只接收包和输入，不接触 Host 凭据、浏览器、Docker socket 或验收答案。独占锁协调本 API；崩溃留下的锁拒绝继续，不自动夺锁。该权限边界不隔离同 UID 的恶意 Host 插件。
+
+原生执行保留父/候选分进程、固定 seccomp、Node 权限及父进程保护，外层使用 Linux `ordinary` 隔离策略。Host 逐次核验固定资产和环境，等待私有收据与真实资源结束后才返回 `linux-native-process-seccomp-v1` 观察及运行时摘要。取消和 `close()` 也覆盖执行前的工具链校验；未知历史不重派，准备校验失败不冒称历史资源已经静止。该观察仍需独立验收，不能当作签名证书或发布授权。
+
 `run({ key, artifact, operation, signal })` 接受真实 tgz 的 `Buffer`：`operation: { kind: 'discover' }` 返回工具 schema 与摘要；`{ kind: 'invoke', schemaDigest, calls: [{ id, toolName, arguments }] }` 仅在 schema 摘要匹配时执行调用。每包最多 512 KiB，每轮最多 8 次调用。两轮分别消耗持久预算，key 须绑定候选、操作与调用输入；派发不明的 key 不重放。
 
 新版镜像的父观察器不导入候选；候选在另一个受限进程中用固定 Cordis、SystemPrompt 和原生 Tools 加载，不提供模拟 Agent、owner 或缺失注入。父进程核对包字节、调用身份和结果大小，自行计算 schema 摘要与环境版本，等候子进程真实退出；候选 stdout/stderr 不作为父观察协议。worker 协议 v2 拒绝旧同进程镜像的 v1 结果，需要重新构建专用镜像。候选没有工具、注入不满足、包非法、超时、结果帧非法或无法确认资源结束时返回 `unknown`。
