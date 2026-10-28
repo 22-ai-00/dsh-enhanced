@@ -133,11 +133,12 @@ export async function runLinuxNamespace(input: LinuxNamespaceInput): Promise<Lin
   await validate(input)
   const jobPath = join(input.stateRoot, `namespace-${input.namespaceId ?? randomUUID()}`)
   await mkdir(jobPath, { mode: 0o700 })
+  const deadline = Date.now() + input.timeoutMs
   const config = { schemaVersion: 1, jobPath, argv: input.argv, files: input.files,
     artifacts: input.artifacts ?? [], readOnlyRoots: input.readOnlyRoots ?? [],
     workspaceBytes: input.workspaceBytes, workspaceInodes: input.workspaceInodes,
     tmpBytes: input.tmpBytes, tmpInodes: input.tmpInodes,
-    maxOutputBytes: input.maxOutputBytes, maxArtifactBytes: input.maxArtifactBytes ?? MAX_INPUT_BYTES, profile: input.profile, deadline: Date.now() + input.timeoutMs }
+    maxOutputBytes: input.maxOutputBytes, maxArtifactBytes: input.maxArtifactBytes ?? MAX_INPUT_BYTES, profile: input.profile, deadline }
   const encoded = JSON.stringify(config)
   if (Buffer.byteLength(encoded) > MAX_INPUT_BYTES + 300_000) {
     await rm(jobPath, { recursive: true, force: true })
@@ -163,7 +164,9 @@ export async function runLinuxNamespace(input: LinuxNamespaceInput): Promise<Lin
   const stopNotice = new Promise<void>(resolveStop => { signalStop = resolveStop })
   const stop = (why: typeof reason): void => {
     if (stopped) return
-    reason = why; stopped = true
+    // The worker can enforce the shared deadline before the Host timer gets a
+    // turn. Classify only the first observed stop; an earlier fault stays unknown.
+    reason = why === 'unknown' && Date.now() >= deadline ? 'timed-out' : why; stopped = true
     signalStop()
     cleanup = new Promise<void>(resolveCleanup => {
       let settled = false
@@ -182,7 +185,11 @@ export async function runLinuxNamespace(input: LinuxNamespaceInput): Promise<Lin
     }
     child.kill('SIGKILL')
   }
-  const timer = setTimeout(() => stop('timed-out'), input.timeoutMs)
+  const timer = setTimeout(() => stop('timed-out'), Math.max(1, deadline - Date.now()))
+  const assertLive = (): void => {
+    if (Date.now() >= deadline) stop('timed-out')
+    if (stopped) fail('execution stopped')
+  }
   // A worker can disappear between protocol observation and write(). Writable
   // errors are independent of ChildProcess 'error' and must revoke the job.
   child.stdin?.on('error', () => stop('unknown'))
@@ -221,12 +228,14 @@ export async function runLinuxNamespace(input: LinuxNamespaceInput): Promise<Lin
   })
   child.stderr?.on('data', (chunk: Buffer) => { diagnostic = (diagnostic + chunk.toString('utf8')).slice(-4096) })
   const next = async (): Promise<Message> => {
+    assertLive()
     if (messages.length) return messages.shift()!
     return await Promise.race([new Promise<Message>(resolveNext => waiters.push(resolveNext)),
       closed.then(() => fail('worker exited before protocol completed')), interrupted()])
   }
   const send = (message: string): void => {
-    if (!stopped) child.stdin?.write(message + '\n')
+    assertLive()
+    child.stdin?.write(message + '\n')
   }
   try {
     send(encoded)
@@ -234,26 +243,26 @@ export async function runLinuxNamespace(input: LinuxNamespaceInput): Promise<Lin
     const stat = await readFile(`/proc/${child.pid}/stat`, 'utf8')
     const keeper = identity({ type: 'KEEPER', pid: child.pid,
       startTicks: Number(stat.slice(stat.lastIndexOf(')') + 2).trim().split(' ')[19]) })
-    if (stopped) fail('keeper stopped before admission')
-    await Promise.race([Promise.resolve().then(() => input.beforeKeeperStart(keeper)),
+    assertLive()
+    await Promise.race([Promise.resolve().then(() => { assertLive(); return input.beforeKeeperStart(keeper) }),
       closed.then(() => fail('keeper exited during admission')), interrupted()])
-    if (stopped) fail('keeper stopped during admission')
+    assertLive()
     keeperGate?.end('START\n')
     const ready = await next()
     if (ready.type !== 'READY') fail('worker failed before candidate gate')
     candidate = identity(ready)
-    await Promise.race([Promise.resolve().then(() => input.beforeStart(candidate!)),
+    await Promise.race([Promise.resolve().then(() => { assertLive(); return input.beforeStart(candidate!) }),
       closed.then(() => fail('worker exited during admission')), interrupted()])
-    if (stopped) fail('worker stopped during admission')
+    assertLive()
     send('START')
     const exited = await next()
     if (exited.type !== 'EXIT' || exited.pid !== candidate.pid || exited.startTicks !== candidate.startTicks
       || !(exited.code === null || integer(exited.code as number, 0, 255))
       || !(exited.signal === null || typeof exited.signal === 'string')
       || typeof exited.exceeded !== 'boolean') fail('invalid candidate exit')
-    await Promise.race([Promise.resolve().then(() => input.afterExit(exited as unknown as LinuxCandidateExit)),
+    await Promise.race([Promise.resolve().then(() => { assertLive(); return input.afterExit(exited as unknown as LinuxCandidateExit) }),
       closed.then(() => fail('worker exited before cgroup proof')), interrupted()])
-    if (stopped) fail('worker stopped before artifact export')
+    assertLive()
     send('EXPORT')
     const result = await next()
     if (result.type !== 'RESULT' || !['succeeded', 'failed'].includes(result.status as string)
@@ -269,6 +278,7 @@ export async function runLinuxNamespace(input: LinuxNamespaceInput): Promise<Lin
     child.stdin?.end()
     const done = await Promise.race([closed, interrupted()])
     if (done.code !== 0 || stopped || raw !== '') fail('worker did not exit cleanly')
+    assertLive()
     return { status: result.status as LinuxNamespaceResult['status'], namespaceExited: true,
       ...(typeof result.exitCode === 'number' ? { exitCode: result.exitCode } : {}),
       stdout: result.stdout, stderr: result.stderr,

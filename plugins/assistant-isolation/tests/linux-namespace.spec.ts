@@ -305,9 +305,51 @@ beforeStart:()=>{throw Error('candidate must not start');},afterExit:()=>{},onSt
       argv: ['/bin/sh', '-c', 'sleep 20 & wait'],
       beforeStart: identity => { started = identity },
     })
-    expect(result.status).toBe('timed-out')
+    expect(result.status, JSON.stringify(result)).toBe('timed-out')
     if (started) expect(spawnSync('/bin/kill', ['-0', String(started.pid)]).status).not.toBe(0)
   })
+
+  test('times out an observed descendant tree and checks the captured process identities stopped', async () => {
+    let observed: Promise<LinuxCandidateIdentity[]> | undefined
+    const capture = async (pid: number, found: LinuxCandidateIdentity[]): Promise<boolean> => {
+      try {
+        const raw = await readFile(`/proc/${pid}/stat`, 'utf8')
+        const fields = raw.slice(raw.lastIndexOf(') ') + 2).trim().split(' ')
+        found.push({ pid, startTicks: Number(fields[19]) })
+        let sleep = (await readFile(`/proc/${pid}/comm`, 'utf8')).trim() === 'sleep'
+        const children = (await readFile(`/proc/${pid}/task/${pid}/children`, 'utf8')).trim()
+        for (const child of children ? children.split(/\s+/u).map(Number) : []) sleep = await capture(child, found) || sleep
+        return sleep
+      } catch (error) {
+        if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) return false
+        throw error
+      }
+    }
+    const { result } = await run({ timeoutMs: 2500, argv: ['/bin/sh', '-c', 'sleep 30 & wait'],
+      beforeStart: identity => {
+        observed = (async () => {
+          const until = Date.now() + 2000
+          while (Date.now() < until) {
+            const found: LinuxCandidateIdentity[] = []
+            if (await capture(identity.pid, found)) return found
+            await new Promise(resolve => setTimeout(resolve, 20))
+          }
+          return []
+        })()
+      } })
+    expect(result.status, JSON.stringify(result)).toBe('timed-out')
+    const descendants = await observed
+    expect(descendants, JSON.stringify(result)).toBeDefined()
+    expect(descendants!.length).toBeGreaterThan(1)
+    for (const item of descendants!) {
+      try {
+        const raw = await readFile(`/proc/${item.pid}/stat`, 'utf8')
+        const fields = raw.slice(raw.lastIndexOf(') ') + 2).trim().split(' ')
+        expect(fields[0] === 'Z' || fields[0] === 'X' || Number(fields[19]) !== item.startTicks,
+          `captured process ${item.pid} is still executing`).toBe(true)
+      } catch (error) { if (!['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error }
+    }
+  }, 8000)
 
   test('reports cleanup failure as unknown and does not claim a clean stop', async () => {
     const { result } = await run({ timeoutMs: 600,

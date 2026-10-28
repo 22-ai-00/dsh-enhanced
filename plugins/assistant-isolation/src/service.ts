@@ -21,6 +21,10 @@ import { maintainIsolationStorage, observeStorage } from './storage.js'
 import type { IsolationIdentity, IsolationJob, IsolationRequest, IsolationResult } from './types.js'
 import { inspectIsolationGrant } from './diagnostics.js'
 import { bindIsolationStateSocket } from './state-socket-binding.js'
+import { linuxExecutionContractDigest, linuxJobResourceReservation, validateLinuxExecutionContract, type LinuxExecutionContract } from './linux-execution-contract.js'
+import { linuxRuntimeDigest, verifyLinuxRuntime } from './linux-runtime.js'
+import { linuxExecutionReceiptBinding, prepareLinuxExecutionIntent, readLinuxExecutionPartialCleanupProof, readLinuxExecutionReceipt, runLinuxExecution } from './linux-execution.js'
+import { reconcileLinuxJob } from './linux-job-recovery.js'
 
 export { Config }
 export const isolationPrincipalDigest = (principal: string): string => createHash('sha256').update(principal).digest('hex')
@@ -48,12 +52,14 @@ function waitForControllerRetry(signal: AbortSignal, timeout: number): Promise<v
 }
 declare module '@deepseek-ai/cordis' { interface Context { assistantIsolation: AssistantIsolationService } }
 
-/** Trusted Host broker. Only bounded input copies cross into the job-specific Docker volume. */
+/** Trusted Host broker. Only bounded inline inputs cross into the isolated workspace. */
 export class AssistantIsolationService extends Service {
   static { Object.defineProperty(this, 'name', { value: 'dsh-enhanced-assistant-isolation' }) }
   static Config = Config
   readonly #config: ReturnType<typeof validateConfig>
   readonly #ledger: IsolationLedger
+  readonly #linuxContract: LinuxExecutionContract | undefined
+  readonly #executionRoot: string
   #authority: IsolationControllerAuthority | undefined
   readonly #ready: Promise<void>
   readonly #jobs = new Map<string, { abort: AbortController; done: Promise<IsolationResult> }>()
@@ -72,7 +78,17 @@ export class AssistantIsolationService extends Service {
     mkdirSync(root, { recursive: true, mode: 0o700 })
     if (realpathSync(root) !== root || !lstatSync(root).isDirectory() || lstatSync(root).uid !== process.getuid?.()) throw new Error('assistant-isolation: private owned state root required')
     chmodSync(root, 0o700)
-    bindIsolationStateSocket(root, this.#config.socketPath)
+    this.#executionRoot = join(root, 'linux-executions')
+    if (this.#config.backend === 'linux-native') {
+      const linux = this.#config.linux!
+      this.#linuxContract = validateLinuxExecutionContract({ schemaVersion: 1, backend: 'linux-native',
+        runtimeDigest: linuxRuntimeDigest(linux.runtime), profile: 'ordinary', limits: this.#config.limits,
+        keeperLimits: { memoryMiB: 128, pidsLimit: 64, cpus: 0.5 }, cgroupRoots: linux.cgroupRoots })
+      mkdirSync(this.#executionRoot, { recursive: true, mode: 0o700 })
+      const native = lstatSync(this.#executionRoot)
+      if (realpathSync(this.#executionRoot) !== this.#executionRoot || !native.isDirectory() || native.isSymbolicLink()
+        || native.uid !== process.getuid?.() || native.mode & 0o077) throw new Error('assistant-isolation: private owned Linux execution root required')
+    } else bindIsolationStateSocket(root, this.#config.socketPath)
     this.#ledger = new IsolationLedger(join(root, 'ledger.sqlite'))
     ctx.on('internal/plugin', fiber => { if (fiber === ctx.fiber && fiber.uid === null) this.#abortStartup() })
     ctx.on('tools/execute', async (execution, next) => {
@@ -124,6 +140,7 @@ export class AssistantIsolationService extends Service {
     }, 5000)
     this.#timer.unref()
     await this.#recover()
+    if (this.#config.backend === 'linux-native') await verifyLinuxRuntime(this.#config.linux!.runtime)
     this.#recoveryAbort.signal.throwIfAborted()
     this.#registerRuntime()
   }
@@ -151,7 +168,12 @@ export class AssistantIsolationService extends Service {
         if (!this.#active) break
         if (this.#jobs.has(job.id)) continue
         const signal = AbortSignal.any([this.#recoveryAbort.signal, AbortSignal.timeout(30_000)])
-        if (await reconcileUnknownJob(this.#ledger, this.#controller(), job, this.#config.dockerPath, signal, this.#config.socketPath)) {
+        if (job.backend === 'linux-native') {
+          await reconcileLinuxJob(this.#ledger, this.#controller(), job, this.#executionRoot, signal)
+          continue
+        }
+        if (job.backend === 'docker' && this.#config.backend === 'docker'
+          && await reconcileUnknownJob(this.#ledger, this.#controller(), job, this.#config.dockerPath, signal, this.#config.socketPath)) {
           await rm(join(this.#config.stateRoot, 'workspaces', job.id), { recursive: true, force: true })
         }
       }
@@ -218,6 +240,17 @@ export class AssistantIsolationService extends Service {
       cursor = page.at(-1)!.id
       for (const job of page) {
         if (!this.#active) return
+        if (job.backend === 'linux-native') {
+          await reconcileLinuxJob(this.#ledger, this.#controller(), job, this.#executionRoot, this.#recoveryAbort.signal)
+          continue
+        }
+        // A different backend cannot authenticate historical external resources.
+        if (job.backend !== 'docker' || this.#config.backend !== 'docker') {
+          if (job.status === 'prepared' || job.status === 'running') this.#ledger.settle(job.id, job.version, {
+            jobId: job.id, status: 'unknown', quiescent: false, stdout: '', stderr: '', artifacts: [], reason: 'controller-recovery-backend-unavailable',
+          }, this.#controller())
+          continue
+        }
         const removed = await removeIsolatedContainer(this.#config.dockerPath, job.containerName, { socketPath: this.#config.socketPath, signal: this.#recoveryAbort.signal })
         if (!this.#active) return
         // An absent object does not prove a timed-out daemon create request
@@ -285,18 +318,37 @@ export class AssistantIsolationService extends Service {
     await this.#ready
     signal.throwIfAborted()
     const request = normalizeRequest(input, this.#config.limits)
-    const observation = await observeStorage(this.#config.stateRoot)
-    signal.throwIfAborted()
     const identity = this.#identity(agent, request.grantId)
     const producer = this.ctx.get('assistantGoals' as never, false) as { currentArtifactAdmission?(agent: Agent): GoalArtifactAdmission | undefined } | undefined
     const admission = producer?.currentArtifactAdmission?.(agent!)
+    const requestDigest = this.#linuxContract
+      ? digest({ request, backend: 'linux-native', contract: linuxExecutionContractDigest(this.#linuxContract) })
+      : digest({ request, image: this.#config.image, limits: this.#config.limits })
+    const existing = this.#ledger.findJobByKey(identity, String(agent!.session.id), request.grantId, request.idempotencyKey)
+    if (existing) {
+      if (existing.backend !== this.#config.backend || existing.requestDigest !== requestDigest
+        || this.#linuxContract && (!existing.linuxContract || linuxExecutionContractDigest(existing.linuxContract) !== linuxExecutionContractDigest(this.#linuxContract))) {
+        throw new IsolationLedgerError('conflict', 'idempotency key has a different request or backend')
+      }
+      const result = await this.#jobs.get(existing.id)?.done ?? existing.result ?? {
+        jobId: existing.id, status: 'unknown' as const, quiescent: false, stdout: '', stderr: '', artifacts: [], reason: 'job-in-progress-no-replay',
+      }
+      if (digest(this.#identity(agent, request.grantId)) !== digest(identity)) throw new Error('assistant-isolation: owner changed')
+      return structuredClone(result)
+    }
+    if (this.#linuxContract) await verifyLinuxRuntime(this.#config.linux!.runtime)
+    const observation = await observeStorage(this.#config.stateRoot)
+    signal.throwIfAborted()
+    if (digest(this.#identity(agent, request.grantId)) !== digest(identity)) throw new Error('assistant-isolation: owner changed')
+    const resources = this.#linuxContract ? linuxJobResourceReservation(this.#linuxContract) : undefined
     const prepared = this.#ledger.prepare({ ...(admission ? { artifactBinding: { admission: validateGoalArtifactAdmission(admission), paths: request.artifacts ?? [] } } : {}), identity, sessionId: String(agent!.session.id), grantId: request.grantId,
-      idempotencyKey: request.idempotencyKey, requestDigest: digest({ request, image: this.#config.image, limits: this.#config.limits }),
-      resourceReservation: { memoryMiB: this.#config.limits.memoryMiB + this.#config.limits.workspaceMiB + 32,
-        workspaceInodes: this.#config.limits.workspaceInodes, maxMemoryMiB: this.#config.maxReservedMemoryMiB,
+      idempotencyKey: request.idempotencyKey, requestDigest, backend: this.#config.backend,
+      ...(this.#linuxContract ? { linuxContract: this.#linuxContract } : {}),
+      resourceReservation: { memoryMiB: resources?.memoryMiB ?? this.#config.limits.memoryMiB + this.#config.limits.workspaceMiB + 32,
+        workspaceInodes: resources?.workspaceInodes ?? this.#config.limits.workspaceInodes, maxMemoryMiB: this.#config.maxReservedMemoryMiB,
         maxWorkspaceInodes: this.#config.maxReservedWorkspaceInodes },
       storageBudget: { maxStateBytes: this.#config.storage.maxStateBytes, maxJobRecords: this.#config.storage.maxJobRecords,
-        reservedBytes: plannedStorageBytes(this.#config.limits), ...(observation ? { observation } : {}) },
+        reservedBytes: resources?.storageBytes ?? plannedStorageBytes(this.#config.limits), ...(observation ? { observation } : {}) },
       durationMs: request.timeoutMs!, maxActiveJobs: this.#config.maxConcurrentJobs, authority: this.#controller() })
     if (!prepared.created) {
       const current = this.#jobs.get(prepared.job.id)
@@ -325,6 +377,47 @@ export class AssistantIsolationService extends Service {
     } finally { this.#jobs.delete(prepared.job.id) }
   }
 
+  async #executeLinux(initial: IsolationJob, request: IsolationRequest, signal: AbortSignal,
+    authorized: () => boolean, update: (job: IsolationJob) => void): Promise<IsolationResult> {
+    let job = initial
+    const contract = this.#linuxContract!
+    const current = (next: IsolationJob): void => { job = next; update(next) }
+    let result: IsolationResult = { jobId: job.id, status: 'failed', quiescent: true,
+      stdout: '', stderr: '', artifacts: [], reason: 'preparation-failed' }
+    try {
+      if (!authorized()) throw new Error('authorization-denied-before-create')
+      const intent = await prepareLinuxExecutionIntent({ stateRoot: this.#executionRoot, contract,
+        job: { id: job.id, requestDigest: job.requestDigest, nativeResourceId: job.nativeResourceId!, nativeNonce: job.nativeNonce!, deadline: job.deadline } })
+      if (!authorized()) throw new Error('authorization-denied-before-create')
+      current(this.#ledger.markLinuxCreateIntent(job.id, job.version, intent, this.#controller()))
+      current(this.#ledger.markDispatched(job.id, job.version, this.#controller()))
+      await runLinuxExecution({ stateRoot: this.#executionRoot, contract, intent,
+        argv: ['/bin/sh', '-c', 'PATH=/runtime/0/bin:/runtime/0/pnpm-native:/usr/bin:/bin; export PATH; exec /bin/sh -c "$1"', 'dsh-isolation', request.command],
+        files: request.files ?? [], artifacts: request.artifacts ?? [], readOnlyRoots: [this.#config.linux!.runtime.root.path], signal,
+        recordResources: async resources => {
+          if (!authorized()) throw new Error('authorization-denied-before-create')
+          current(this.#ledger.recordLinuxResources(job.id, job.version, resources, this.#controller()))
+        }, authorizeStart: () => {
+          if (!authorized()) return false
+          current(this.#ledger.start(job.id, job.version, this.#controller()))
+          return true
+        } })
+      const ctx = { stateRoot: this.#executionRoot, contract, intent }
+      const receipt = await readLinuxExecutionReceipt(ctx)
+      if (!receipt) {
+        const proof = await readLinuxExecutionPartialCleanupProof(ctx)
+        if (proof) return this.#ledger.settleLinuxPrestartCleanup(job.id, job.version, proof, this.#controller()).result!
+        throw new Error('Linux execution receipt unavailable')
+      }
+      if (!job.linuxResources) current(this.#ledger.recordLinuxResources(job.id, job.version, receipt.resources, this.#controller()))
+      return this.#ledger.settleLinuxReceipt(job.id, job.version, linuxExecutionReceiptBinding(receipt), receipt.result, this.#controller()).result!
+    } catch {
+      if (job.dispatchAttempted) result = { ...result, status: 'unknown', quiescent: false, reason: 'runner-exception-no-replay' }
+      try { return this.#ledger.settle(job.id, job.version, result, this.#controller()).result! }
+      catch { return { ...result, status: 'unknown', quiescent: false, reason: 'settlement-unconfirmed' } }
+    }
+  }
+
   async #execute(agent: Agent, identity: IsolationIdentity, initial: IsolationJob, request: IsolationRequest, signal: AbortSignal): Promise<IsolationResult> {
     let job = initial
     const abort = new AbortController()
@@ -344,6 +437,7 @@ export class AssistantIsolationService extends Service {
     let creationWitness: CreationWitness | undefined
     let result: IsolationResult = { jobId: job.id, status: 'failed', quiescent: true, stdout: '', stderr: '', artifacts: [], reason: 'preparation-failed' }
     try {
+      if (job.backend === 'linux-native') return await this.#executeLinux(job, request, AbortSignal.any([signal, abort.signal]), authorized, next => { job = next })
       const workspacePath = await stageWorkspace(this.#config.stateRoot, job.id, request)
       if (!authorized()) throw new Error('authorization-denied-before-create')
       job = this.#ledger.markDispatched(job.id, job.version, this.#controller())

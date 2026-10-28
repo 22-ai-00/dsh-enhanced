@@ -2,6 +2,7 @@ import { lstat, opendir, realpath, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { IsolationControllerAuthority, IsolationLedger } from './ledger.js'
 import { validateStoragePolicy } from './storage-policy.js'
+import { retainLinuxExecutionResult } from './linux-execution.js'
 import type { IsolationStorageObservation, IsolationStoragePolicy } from './types.js'
 
 /** A bounded observation, not an atomic snapshot or a filesystem quota. */
@@ -65,21 +66,42 @@ export async function maintainIsolationStorage(ledger: IsolationLedger, authorit
   const cutoff = Math.max(0, now - policy.resultRetentionMs)
   const fenced = (): boolean => ledger.hasController(authority)
   if (!fenced()) throw new Error('assistant-isolation: controller unavailable')
-  const page = ledger.retentionCandidates(cutoff, afterId, 16)
+  const page = ledger.retentionCandidates(cutoff, afterId, 16, policy.resultRetentionMs > 0)
   const counts = { checked: 0, pruned: 0, logicalBytesRemoved: 0, stagingCleaned: 0, retained: 0 }
   for (const candidate of page) {
     if (!fenced()) throw new Error('assistant-isolation: controller unavailable')
+    let version = candidate.version
     const eligible = (): boolean => {
       const job = ledger.get(candidate.id)
-      return fenced() && job?.version === candidate.version && job.updatedAt <= cutoff
+      return fenced() && job?.version === version && (job.updatedAt <= cutoff
+        || policy.resultRetentionMs > 0 && job.backend === 'linux-native' && job.result?.retention?.kind === 'pruned')
         && ['succeeded', 'failed', 'cancelled', 'timed-out'].includes(job.status) && job.result?.quiescent === true
     }
     counts.checked++
     if (!eligible() || !await cleanStaging(root, candidate.id, eligible)) { counts.retained++; continue }
     counts.stagingCleaned++
     if (policy.resultRetentionMs > 0) {
-      const result = ledger.compactResult(candidate.id, candidate.version, cutoff, authority)
-      if (result.changed) { counts.pruned++; counts.logicalBytesRemoved += result.removedBytes }
+      const compact = () => {
+        if (!eligible()) throw new Error('assistant-isolation: retention authority ended')
+        const before = ledger.get(candidate.id)!
+        if (before.result?.retention) return before.result
+        const result = ledger.compactResult(candidate.id, version, cutoff, authority)
+        const after = ledger.get(candidate.id)!
+        version = after.version
+        if (result.changed) { counts.pruned++; counts.logicalBytesRemoved += result.removedBytes }
+        return after.result
+      }
+      const job = ledger.get(candidate.id)!
+      if (job.backend === 'linux-native' && job.dispatchAttempted) {
+        // Never discard recovery evidence before the exact ledger terminal row
+        // has a durable result marker. Failures preserve the pair for retry.
+        try {
+          if (!job.linuxContract || !job.linuxIntent || !job.linuxResources || !job.result) throw new Error('missing Linux retention binding')
+          counts.logicalBytesRemoved += await retainLinuxExecutionResult({ stateRoot: join(root, 'linux-executions'),
+            contract: job.linuxContract, intent: job.linuxIntent, resources: job.linuxResources,
+            result: job.result, fenced: eligible, compact })
+        } catch { counts.retained++ }
+      } else compact()
     }
   }
   const maintenance = ledger.maintainStorage(authority)

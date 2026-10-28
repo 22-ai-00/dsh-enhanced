@@ -18,7 +18,7 @@ export { linuxExecutionContractDigest, linuxExecutionIntentDigest, linuxExecutio
   type LinuxExecutionContract, type LinuxExecutionIntent, type LinuxExecutionResources, type LinuxReceiptBinding,
   type LinuxExecutionPartialCleanupProof } from './linux-execution-contract.js'
 export { inspectIsolationGrant, type IsolationGrantDiagnostic, type IsolationGrantDiagnosticReason } from './diagnostics.js'
-export { probeIsolationRuntime } from './probe.js'
+export { probeIsolationRuntime, probeLinuxIsolationRuntime, type LinuxIsolationProbeConfig } from './probe.js'
 export * from './audit-archive.js'
 export { isolationPrincipalDigest } from './service.js'
 export type * from './types.js'

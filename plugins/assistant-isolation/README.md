@@ -12,15 +12,16 @@ lease interval plus ordinary boot time before treating readiness as a failure.
 
 `@dsh-enhanced/assistant-isolation` adds `isolation_run` to the native DSH ToolRuntime. An operator grants a finite number of offline shell jobs to one authenticated owner, workspace and agent preset. Each job receives only explicitly supplied text files in a fresh scratch directory. Results and artifacts are untrusted process output; exit code zero does not establish that a user goal was achieved.
 
-This is the first actual isolation component of autonomy work packages 08–10. External action/credential brokerage, rollback/compensation and installer bootstrap remain separate delivery requirements. It does not isolate arbitrary Host plugins or replace the native AgentLoop. The Host, Docker daemon, configured image and local operator remain trusted. Each workspace uses a private tmpfs volume with byte and inode hard limits. A persistent pool bounds admitted worker/workspace/keeper reservations across this ledger; it is not a machine-wide guarantee against Docker/kernel overhead or unrelated workloads. Do not treat this initial component as a complete hostile-code production platform.
+This is the first actual isolation component of autonomy work packages 08–10. External action/credential brokerage, rollback/compensation and installer bootstrap remain separate delivery requirements. It does not isolate arbitrary Host plugins or replace the native AgentLoop. The Host, local operator, configured runtime and kernel remain trusted; the Docker backend also trusts its daemon and image. Each workspace uses a private tmpfs volume with byte and inode hard limits. A persistent pool bounds admitted worker/workspace/keeper reservations across this ledger; it is not a machine-wide guarantee against runtime/kernel overhead or unrelated workloads. Do not treat this initial component as a complete hostile-code production platform.
 
 ## Native Linux building blocks
 
 The Host-only `runLinuxNamespace`, `LinuxCgroupLease`, and `LinuxRuntime`
-exports provide Docker-free building blocks on non-root Linux. They do not yet
-replace the public tool. The private verifier API also accepts the explicit
-`LinuxVerifierRunnerConfig` described below; production setup still selects its
-existing backend until installation and owner migration are integrated.
+exports provide Docker-free execution on non-root Linux. The public tool accepts
+explicit `backend: 'linux-native'` configuration; the private verifier also
+accepts `LinuxVerifierRunnerConfig` below. Omitting `backend` retains Docker
+configuration semantics. Production setup still selects its existing backend
+until installation and owner migration are integrated.
 
 `runLinuxNamespace` uses fixed `unshare`, mount, bubblewrap and Python/libseccomp
 programs, with a shipped digest-checked syscall policy. It exposes system runtime
@@ -58,6 +59,45 @@ service, reads provider credentials, accesses a browser, downloads images or
 runs an install lifecycle script. See the [delivery boundary](../../docs/dockerless-runtime.md)
 for remaining integration and acceptance.
 
+### Public native execution
+
+Configure `backend: 'linux-native'` and `linux: { runtime, cgroupRoots }` alongside
+the existing `stateRoot`, finite `grants`, limits and storage policy. `runtime`
+is the digest-pinned `LinuxRuntime` prepared by the native toolchain bootstrap;
+`cgroupRoots` identifies the current user's verified v1 controller delegation.
+The synchronous Cordis Config rejects invalid bindings and insufficient pools;
+service readiness and every newly admitted request recheck the runtime tree.
+This branch does not require an image or resolve a Docker socket.
+
+`isolation_run` keeps its existing request, owner/Policy checks, goal artifact
+binding and cancellation contract. Inline files enter a fresh bounded workspace;
+exported artifacts come back only after cleanup proof. Node and pnpm use the
+pinned runtime PATH. The ledger reserves worker, keeper, workspace, temporary
+and shared-memory allowances before dispatch. Changing backend or contract
+under an existing idempotency key is a conflict and never creates a new job.
+
+Startup and background recovery use each job's persisted backend. Native cleanup
+uses the original contract and private receipts; a native-configured service
+leaves historical Docker unknown resources occupied for their original cleanup
+path. Switching configuration does not extend grants or reset budgets.
+
+`dsh-isolation probe-native /absolute/runtime-config.json` accepts an owned JSON
+file containing exactly `{ runtime, cgroupRoots }`. It tests pinned Node,
+non-root execution, a canary artifact and actual cleanup without Docker or a
+production grant. Unproven cleanup retains its private evidence directory.
+`reconcile /absolute/private/state-root` dispatches cleanup by persisted backend;
+Docker arguments are unused for a native-only ledger. `revoke` first persists
+revocation and lets a live controller stop its work. For pending native jobs it
+also reports `nativeResourcesQuiescent` and `nativeRetained`; exit 2 indicates
+that cleanup is not yet confirmed. It never takes over a live controller.
+
+Positive result retention first commits the ledger's result digest, then
+replaces native journal/receipt bodies with digest-only records. Interrupted
+replacement is retried with the same controller and row-version checks. Unknown
+or unproven work retains its recovery evidence; the default zero-retention
+policy keeps all bodies. Cached results continue through the ledger and cannot
+replay execution after body pruning.
+
 ### Durable native verification
 
 `IsolatedVerifierRunner` accepts either the existing Docker configuration or an
@@ -86,9 +126,8 @@ Historical Docker/macOS rows retain their own backend identity; switching this
 API does not reconcile those external resources or reset their grants.
 
 These APIs still require non-root Linux with verified v1 delegation and the
-fixed namespace dependencies. Public `isolation_run`, installer migration,
-complete repository builds, behavior certificates and release/adoption are
-separate integration steps. V2, arm64 execution and a reboot with changed kernel
+fixed namespace dependencies. Installer migration, complete repository builds,
+behavior certificates and release/adoption remain separate integration steps. V2, arm64 execution and a reboot with changed kernel
 resource identity remain outside the current live acceptance.
 
 ## Native macOS execution primitive
@@ -150,7 +189,7 @@ dsh plugin --profile <profile> add @dsh-enhanced/assistant-isolation
 
 Required Host services: `agents`, `tools`, `assistantDelivery`, and `assistantPolicy`. The bundle is independently publishable; installing it does not install or activate peers. Without the services it does not register an execution tool. With no grants it does not execute jobs. No Docker image is downloaded by the plugin.
 
-The supported execution path is a non-root Linux or macOS Host process with access to a local Docker daemon. Linux defaults to `/var/run/docker.sock`; macOS defaults to the current user's Docker Desktop socket at `~/.docker/run/docker.sock`. The socket must exist at runtime and remain the same local Unix socket through creation, execution and cleanup. macOS requires an owner-owned socket and private Docker run directory; a remote `DOCKER_HOST`, Docker context or socket path outside that user directory is never used. Configure an already-present, operator-reviewed image **ID** (`sha256:` plus 64 hexadecimal digits), containing `/bin/sh`, a trusted `/bin/busybox` with `sleep`, `stat` and `cat`, and the commands needed for the task. Image-declared `VOLUME` entries are rejected to prevent extra writable Docker volumes. A tag or remote repository digest is not accepted as a substitute for the local immutable image ID. Failed Docker operations do not fall back to a Host shell.
+The Docker backend supports a non-root Linux or macOS Host process with access to a local Docker daemon. Linux defaults to `/var/run/docker.sock`; macOS defaults to the current user's Docker Desktop socket at `~/.docker/run/docker.sock`. The socket must exist at runtime and remain the same local Unix socket through creation, execution and cleanup. macOS requires an owner-owned socket and private Docker run directory; a remote `DOCKER_HOST`, Docker context or socket path outside that user directory is never used. Configure an already-present, operator-reviewed image **ID** (`sha256:` plus 64 hexadecimal digits), containing `/bin/sh`, a trusted `/bin/busybox` with `sleep`, `stat` and `cat`, and the commands needed for the task. Image-declared `VOLUME` entries are rejected to prevent extra writable Docker volumes. A tag or remote repository digest is not accepted as a substitute for the local immutable image ID. Failed Docker operations do not fall back to a Host shell.
 
 ## Configuration
 
@@ -248,7 +287,7 @@ The default command keeps bodies. Maintenance rejects a competing live controlle
 
 ## Worker-protected audit archive
 
-The Host-only archive command copies the schema 6 lifecycle audit into canonical, hash-linked NDJSON batches. The archive is immutable by protocol and content address: a published batch is never overwritten, and any conflicting content is rejected; this is not an operating-system immutable-bit guarantee. The command freezes a SQLite audit high-water mark and reads only through that fixed snapshot. The main database schema and data, including audit, jobs, grants and controller state, remain unchanged; a SQLite read-only snapshot may create or use WAL/SHM coordination sidecars. Repeating an interrupted or completed export is idempotent: already committed matching batches are retained. Files are committed with private permissions using a synced exclusive temporary file, a no-overwrite hard link, temporary unlink and directory sync; a matching crash residue is recovered under the archive lock. The verifier checks the complete local batch chain, including canonical records, contiguous sequence numbers and the previous-batch digest, and reports the source binding plus external anchor tuple `{ archiveInstanceId, highestSequence, headDigest }`. An empty or control-only directory is not a verifiable archive.
+The Host-only archive command copies the supported schema 7/8 lifecycle audit into canonical, hash-linked NDJSON batches. The archive is immutable by protocol and content address: a published batch is never overwritten, and any conflicting content is rejected; this is not an operating-system immutable-bit guarantee. The command freezes a SQLite audit high-water mark and reads only through that fixed snapshot. The main database schema and data, including audit, jobs, grants and controller state, remain unchanged; a SQLite read-only snapshot may create or use WAL/SHM coordination sidecars. Repeating an interrupted or completed export is idempotent: already committed matching batches are retained. Files are committed with private permissions using a synced exclusive temporary file, a no-overwrite hard link, temporary unlink and directory sync; a matching crash residue is recovered under the archive lock. The verifier checks the complete local batch chain, including canonical records, contiguous sequence numbers and the previous-batch digest, and reports the source binding plus external anchor tuple `{ archiveInstanceId, highestSequence, headDigest }`. An empty or control-only directory is not a verifiable archive.
 
 Prepare two distinct canonical, operator-owned directories before running the command; neither directory may be a symlink, group/other-accessible, or the same directory. The archive command does not create or loosen the state root. For a new archive directory, use an owner-only umask and mode explicitly:
 
@@ -270,10 +309,10 @@ The local hash chain proves integrity and linkage relative to a trusted digest; 
 
 | Surface | Authority |
 | --- | --- |
-| Filesystem | Host owns a `0700` state directory, `0600` ledger and per-job staging. A separate operator-owned `0700` audit archive may contain canonical hash-linked NDJSON batches; neither state nor archive root is mounted or bind-mounted into a worker. The worker sees its byte/inode-limited tmpfs workspace plus its configured image. Console/artifact results and diagnostic witnesses persist in the private ledger. The Host reads Linux `/proc`, the protected `/run/docker.pid`, and socket metadata for best-effort diagnostics; missing metadata never grants release. No writable Host bind is exposed. Observed storage admission and opt-in result retention are described below; they are not a hard filesystem quota. |
-| Network | Host uses the fixed local Docker Unix socket. The worker has `--network none`, no Host socket/config mount and no external action endpoint. |
-| Subprocess | Host starts the fixed configured Docker executable and packaged detached Node supervisor, and may read fixed docker.service/docker.socket properties through /usr/bin/systemctl for diagnostics. Workers run `/bin/sh` with non-root UID/GID, read-only image filesystem, dropped capabilities, `no-new-privileges`, memory/CPU/PID limits, bounded `/tmp` and `/dev/shm`, and disabled Docker log storage. A fixed BusyBox keeper retains the job volume across execution-container removal and does not execute job code. |
-| Credentials | Worker receives no Host environment or credential files. The Docker daemon access itself is a privileged trusted Host capability. Images must contain no embedded secrets. |
+| Filesystem | Host owns a `0700` state directory, `0600` ledger and per-job staging. A separate operator-owned `0700` audit archive may contain canonical hash-linked NDJSON batches; neither state nor archive root is mounted or bind-mounted into a worker. The worker sees its byte/inode-limited tmpfs workspace plus its configured image or approved native runtime roots. Console/artifact results and diagnostic witnesses persist in the private ledger. The Host reads Linux `/proc`, the protected `/run/docker.pid`, and socket metadata for best-effort diagnostics; missing metadata never grants release. No writable Host bind is exposed. Observed storage admission and opt-in result retention are described below; they are not a hard filesystem quota. |
+| Network | Docker uses its fixed local Unix socket; native Linux does not contact Docker. Workers have no network, Host socket/config mount or external action endpoint. |
+| Subprocess | Native Linux uses the fixed packaged keeper, unshare, mount, bubblewrap and Python/libseccomp programs described above. Docker starts the fixed configured Docker executable and packaged detached Node supervisor, and may read fixed docker.service/docker.socket properties through /usr/bin/systemctl for diagnostics. Workers run `/bin/sh` with non-root UID/GID, read-only image filesystem, dropped capabilities, `no-new-privileges`, memory/CPU/PID limits, bounded `/tmp` and `/dev/shm`, and disabled Docker log storage. A fixed BusyBox keeper retains the job volume across execution-container removal and does not execute job code. |
+| Credentials | Worker receives no Host environment or credential files. The Docker daemon access itself is a privileged trusted Host capability. Images and approved runtime roots must contain no embedded secrets. |
 | Browser | None. |
 | Install scripts | No runtime provisioning, image pull or privileged install hook. Standard package build/prepack only. |
 
@@ -301,7 +340,7 @@ The default export is the Cordis plugin object with stable name, Config and appl
 
 ### 可信目标产物与独立验收
 
-schema v6 新增可空的 artifact admission 绑定，v1–v5 行迁移后保留且不会被追认为目标产物。Host 在真实 Goals native round 内，于 Docker 派发前固定 step acceptance ID/digest、run、turn 与声明输出路径；相同幂等键不会重新绑定。运行中若原 admission 改变则取消。私有 `readAcceptedArtifact` 只读取同一 v4 step scope/owner/Session 的成功、已静止、有效期内且正文未清理的产物；较新的同路径失败尝试禁止回退旧结果。
+schema v6 新增可空的 artifact admission 绑定，v1–v5 行迁移后保留且不会被追认为目标产物。Host 在真实 Goals native round 内，于隔离任务派发前固定 step acceptance ID/digest、run、turn 与声明输出路径；相同幂等键不会重新绑定。运行中若原 admission 改变则取消。私有 `readAcceptedArtifact` 只读取同一 v4 step scope/owner/Session 的成功、已静止、有效期内且正文未清理的产物；较新的同路径失败尝试禁止回退旧结果。
 
 Host Verifier 可使用导出的 `IsolatedVerifierRunner` 在独立私有 stateRoot 中验收复制产物。该类没有模型工具入口，固定 authority/镜像/命令、次数、累计预留时长及期限，可选 `socketPath` 与普通隔离任务遵循相同的本地 Docker socket 约束，并复用相同 Docker supervisor 和资源边界。验收任务与原产物 job 是不同 ID；验收不在宿主执行模型代码。未知派发仍保留资源占用且不自动重放，重复 setup 或重启也不会重置预算。
 

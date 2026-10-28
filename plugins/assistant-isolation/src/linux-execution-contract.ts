@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { posix } from 'node:path'
 import type { LinuxCgroupDirectory, LinuxCgroupLimits, LinuxCgroupRoots, LinuxCgroupSnapshot } from './linux-cgroups.js'
+import { plannedStorageBytes } from './storage-policy.js'
 import type { IsolationLimits } from './types.js'
 
 export interface LinuxExecutionContract {
@@ -223,4 +224,12 @@ export function validateLinuxReceiptBinding(value: unknown): LinuxReceiptBinding
     || !/^linux-[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/u.test(value.nativeResourceId)
     || !matches(value.intentDigest, HEX) || !matches(value.resourcesDigest, HEX) || !matches(value.receiptDigest, HEX)) fail()
   return clone(value as unknown as LinuxReceiptBinding)
+}
+
+/** All tmpfs mounts, keeper capacity and durable staging are admitted together. */
+export function linuxJobResourceReservation(contract: LinuxExecutionContract): { memoryMiB: number; workspaceInodes: number; storageBytes: number } {
+  const { limits, keeperLimits } = validateLinuxExecutionContract(contract)
+  return { memoryMiB: limits.memoryMiB + limits.workspaceMiB
+    + Math.ceil(Math.max(1, Math.min(64, limits.memoryMiB / 4))) + 1 + keeperLimits.memoryMiB,
+  workspaceInodes: 2 * limits.workspaceInodes + 4096 + 32, storageBytes: 3 * plannedStorageBytes(limits) }
 }
