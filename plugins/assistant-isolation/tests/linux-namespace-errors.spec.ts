@@ -8,6 +8,9 @@ import { describe, expect, test, vi } from 'vitest'
 const control = vi.hoisted(() => ({
   missingExecutable: undefined as string | undefined,
   closeKeeperGate: false,
+  protocolFixture: undefined as 'waiting' | 'ready' | 'complete' | undefined,
+  onSpawn: undefined as (() => void) | undefined,
+  onOutput: undefined as ((chunk: string) => void) | undefined,
   children: [] as Array<{
     child: ChildProcess
     closed: Promise<void>
@@ -26,9 +29,36 @@ vi.mock('node:child_process', async (importOriginal) => {
       if (args[0] !== '/bin/sh') return actual.spawn(...args)
       const child = control.missingExecutable
         ? actual.spawn(control.missingExecutable, [], args[2])
+        : control.protocolFixture
+          ? actual.spawn(process.execPath, ['-e', `
+const fs=require('node:fs'), lines=require('node:readline').createInterface({input:process.stdin});
+const ticks=Number(fs.readFileSync('/proc/self/stat','utf8').split(') ')[1].split(' ')[19]);
+const identity={pid:process.pid,startTicks:ticks}; let configured=false;
+const say=value=>process.stdout.write(JSON.stringify(value)+'\\n');
+lines.on('line',line=>{
+ if(!configured){configured=true; if(${JSON.stringify(control.protocolFixture)}!=='waiting')say({type:'READY',...identity});return;}
+ if(line==='EXPIRE'){say({type:'ERROR',reason:'fixture worker deadline'});process.exitCode=1;lines.close();process.stdin.destroy();}
+ if(line==='FAULT'){process.stdout.write('invalid protocol\\n');}
+ if(line==='START')say({type:'EXIT',...identity,code:0,signal:null,exceeded:false});
+ if(line==='EXPORT')say({type:'RESULT',status:'succeeded',stdout:'fixture',stderr:'',artifacts:[]});
+});
+lines.on('close',()=>process.stdin.destroy());
+`], args[2])
         : control.closeKeeperGate
           ? actual.spawn('/bin/sh', ['-c', 'printf gate-ready >&2; exec /usr/bin/cat >/dev/null'], args[2])
           : actual.spawn(process.execPath, ['-e', 'process.exit(17)'], args[2])
+      control.onSpawn?.()
+      if (child.stdout && control.onOutput) {
+        const stdout = child.stdout, emit = stdout.emit
+        vi.spyOn(stdout, 'emit').mockImplementation((event, ...values) => {
+          if (event === 'data') control.onOutput?.(String(values[0]))
+          return emit.call(stdout, event, ...values)
+        })
+      }
+      if (control.protocolFixture) {
+        if (child.stdin) vi.spyOn(child.stdin, 'write')
+        if (child.stdio[3]) vi.spyOn(child.stdio[3] as import('node:stream').Writable, 'end')
+      }
       const pipeErrors: string[] = []
       const processErrors: string[] = []
       const keeperPipeErrors: string[] = []
@@ -134,5 +164,102 @@ describe.runIf(process.platform === 'linux' && process.getuid?.() !== 0)('Linux 
     const { spawned } = await run(true)
     expect(spawned.processErrors).toEqual(['ENOENT'])
     expect(spawned.child.pid).toBeUndefined()
+  })
+})
+
+describe.runIf(process.platform === 'linux' && process.getuid?.() !== 0)('Linux namespace shared deadline ordering', () => {
+  type Scenario = 'worker-deadline' | 'setup-expired' | 'setup-partial' | 'keeper-expired'
+    | 'candidate-expired' | 'protocol-before-deadline' | 'success-after-deadline' | 'deadline-cleanup-failed'
+  async function run(scenario: Scenario) {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-namespace-deadline-order-'))
+    const clock = { now: 1_000_000 }, timeoutMs = 1234, deadline = clock.now + timeoutMs
+    // Only Host wall-clock classification and timer dispatch are controlled.
+    // Child pipes, exit/close events and /proc PID/start-time identities are real.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    vi.spyOn(Date, 'now').mockImplementation(() => clock.now)
+    const timers = vi.spyOn(globalThis, 'setTimeout')
+    control.children = []
+    control.protocolFixture = ['worker-deadline', 'protocol-before-deadline', 'deadline-cleanup-failed'].includes(scenario)
+      ? 'waiting' : 'complete'
+    control.onSpawn = () => {
+      if (scenario === 'setup-expired') clock.now = deadline + 1
+      if (scenario === 'setup-partial') clock.now += 500
+    }
+    control.onOutput = chunk => {
+      if (chunk.includes('fixture worker deadline') || scenario === 'success-after-deadline' && chunk.includes('RESULT')) {
+        clock.now = deadline
+      }
+    }
+    const beforeKeeperStart = vi.fn(() => {
+      if (scenario === 'keeper-expired') { clock.now = deadline; return }
+      if (scenario === 'setup-partial') throw new Error('pre-deadline setup failure')
+      if (control.protocolFixture === 'waiting') {
+        setImmediate(() => control.children[0]!.child.stdin?.write(scenario === 'protocol-before-deadline' ? 'FAULT\n' : 'EXPIRE\n'))
+      }
+    })
+    const beforeStart = vi.fn(() => { if (scenario === 'candidate-expired') clock.now = deadline })
+    const onStop = vi.fn(() => {
+      if (scenario === 'protocol-before-deadline') clock.now = deadline + 1
+      if (scenario === 'deadline-cleanup-failed') throw new Error('cleanup evidence unavailable')
+    })
+    try {
+      const result = await runLinuxNamespace({ stateRoot, argv: ['/usr/bin/true'], files: [],
+        workspaceBytes: 1048576, workspaceInodes: 128, tmpBytes: 1048576, tmpInodes: 128,
+        timeoutMs, maxOutputBytes: 8192, profile: 'ordinary', signal: new AbortController().signal,
+        beforeKeeperStart, beforeStart, afterExit: () => {}, onStop })
+      const child = control.children[0]!.child
+      const keeper = child.stdio[3] as import('node:stream').Writable
+      return { result, beforeKeeperStart, beforeStart, onStop, hostDelay: timers.mock.calls[0]?.[1],
+        candidateReleased: vi.mocked(child.stdin!.write).mock.calls.some(call => String(call[0]) === 'START\n'),
+        keeperReleased: vi.mocked(keeper.end).mock.calls.some(call => String(call[0]) === 'START\n') }
+    } finally {
+      for (const { child, closed } of control.children) { child.kill('SIGKILL'); await closed }
+      control.protocolFixture = undefined; control.onSpawn = undefined; control.onOutput = undefined
+      vi.useRealTimers(); vi.restoreAllMocks()
+      await rm(stateRoot, { recursive: true, force: true })
+    }
+  }
+
+  test('classifies a worker deadline ERROR/close before the delayed Host timer as timed-out', async () => {
+    const { result, onStop } = await run('worker-deadline')
+    expect(result).toMatchObject({ status: 'timed-out', namespaceExited: true })
+    expect(onStop).toHaveBeenCalledOnce()
+  })
+
+  test('arms the Host timer for the shared deadline remaining after setup', async () => {
+    const { result, hostDelay } = await run('setup-partial')
+    expect(hostDelay).toBe(734)
+    expect(result).toMatchObject({ status: 'unknown', namespaceExited: true })
+  })
+
+  test('expires setup before keeper admission even when the Host timer has not dispatched', async () => {
+    const { result, beforeKeeperStart, hostDelay, keeperReleased } = await run('setup-expired')
+    expect(hostDelay).toBe(1)
+    expect(result).toMatchObject({ status: 'timed-out', namespaceExited: true })
+    expect(beforeKeeperStart).not.toHaveBeenCalled()
+    expect(keeperReleased).toBe(false)
+  })
+
+  test.each(['keeper-expired', 'candidate-expired'] as const)('fences %s admission before releasing START', async scenario => {
+    const { result, keeperReleased, candidateReleased } = await run(scenario)
+    expect(result).toMatchObject({ status: 'timed-out', namespaceExited: true })
+    expect(candidateReleased).toBe(false)
+    if (scenario === 'keeper-expired') expect(keeperReleased).toBe(false)
+  })
+
+  test('keeps a protocol fault observed before the deadline unknown after cleanup crosses the deadline', async () => {
+    const { result } = await run('protocol-before-deadline')
+    expect(result).toMatchObject({ status: 'unknown', namespaceExited: true })
+  })
+
+  test('does not accept a late successful protocol result ahead of the delayed Host timer', async () => {
+    const { result } = await run('success-after-deadline')
+    expect(result).toMatchObject({ status: 'timed-out', namespaceExited: true })
+  })
+
+  test('retains unknown when cleanup evidence fails after a worker deadline', async () => {
+    const { result } = await run('deadline-cleanup-failed')
+    expect(result).toMatchObject({ status: 'unknown', namespaceExited: true })
+    expect(result.reason).toContain('cleanup unproven: cleanup evidence unavailable')
   })
 })

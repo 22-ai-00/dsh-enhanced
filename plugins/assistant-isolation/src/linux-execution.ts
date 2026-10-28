@@ -10,6 +10,7 @@ import { linuxExecutionContractDigest, linuxExecutionIntentDigest, linuxExecutio
   type LinuxExecutionPartialCleanupProof } from './linux-execution-contract.js'
 import { runLinuxNamespace, type LinuxCandidateIdentity } from './linux-namespace.js'
 import type { IsolationFile, IsolationResult } from './types.js'
+import { pruneResult, validateRetention } from './storage-policy.js'
 
 export interface LinuxExecutionReceipt {
   schemaVersion: 1
@@ -430,6 +431,83 @@ async function persistReceipt(ctx: Context, journal: Journal, complete: LinuxExe
   if (repairIncomplete) await repairPlaceholder(paths(ctx).receipt)
   await writeRecord(paths(ctx).receipt, receipt, true)
   return receipt
+}
+
+/** Host-only result retention. The synchronous callback must persist the ledger
+ * marker before either private evidence copy is replaced. A mixed pair after a
+ * crash is independently verifiable against that marker and can be retried. */
+export async function retainLinuxExecutionResult(input: Context & { resources: LinuxExecutionResources;
+  result: IsolationResult; fenced: () => boolean; compact: () => IsolationResult | undefined }): Promise<number> {
+  const ctx = await context(input), locations = paths(ctx)
+  const complete = validateLinuxExecutionResources(input.resources, ctx.intent, ctx.contract)
+  const intentDigest = linuxExecutionIntentDigest(ctx.intent), resourcesDigest = linuxExecutionResourcesDigest(complete)
+  if (!input.fenced() || active.has(locations.journal) || input.result.jobId !== ctx.intent.jobId || !input.result.quiescent
+    || !['succeeded', 'failed', 'cancelled', 'timed-out'].includes(input.result.status)) fail('retention authority differs')
+  if (!await absentGroups(ctx) || await exists(ctx.intent.namespacePath)) fail('retention resources still present')
+  const originals = await Promise.all([readRecord(locations.journal), readRecord(locations.receipt)])
+  if ((originals[0] as Record<string, unknown>).kind !== 'result-pruned'
+    && (originals[1] as Record<string, unknown>).kind !== 'result-pruned') {
+    receiptValue(ctx, await readJournal(ctx), originals[1])
+  }
+  const resultMatches = (value: unknown, expected: IsolationResult): void => {
+    validateResult(value, ctx)
+    const matched = expected.retention ? pruneResult(value, expected.retention.prunedAt) : value
+    if (!matched || canonical(matched) !== canonical(expected)) fail('retention result differs')
+  }
+  let receiptDigest: string | undefined
+  for (let index = 0; index < originals.length; index++) {
+    const value = originals[index] as Record<string, unknown>
+    if (value.kind === 'result-pruned') {
+      keys(value, ['schemaVersion', 'kind', 'record', 'intentDigest', 'resourcesDigest', 'receiptDigest', 'originalRecordDigest', 'result', 'tombstoneDigest'])
+      const { tombstoneDigest, ...body } = value
+      if (value.schemaVersion !== 1 || value.record !== (index === 0 ? 'journal' : 'receipt')
+        || value.intentDigest !== intentDigest || value.resourcesDigest !== resourcesDigest
+        || !input.result.retention || !validateRetention(input.result.retention)
+        || canonical(value.result) !== canonical(input.result) || tombstoneDigest !== digest(body)
+        || typeof value.receiptDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(value.receiptDigest)
+        || typeof value.originalRecordDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(value.originalRecordDigest)) fail('retention tombstone differs')
+    } else if (index === 0) {
+      const journal = await readJournal(ctx)
+      if (digest(journal) !== digest(value) || journal.phase !== 'settled'
+        || canonical(resources(journal, ctx)) !== canonical(complete)) fail('retention journal differs')
+      resultMatches(journal.result, input.result)
+    } else {
+      keys(value, ['schemaVersion', 'intent', 'resources', 'result', 'completedAt', 'receiptDigest'])
+      const { receiptDigest: recordedDigest, ...body } = value
+      if (value.schemaVersion !== 1 || canonical(value.intent) !== canonical(ctx.intent)
+        || canonical(validateLinuxExecutionResources(value.resources, ctx.intent, ctx.contract)) !== canonical(complete)
+        || !positive(value.completedAt) || value.completedAt > Date.now() + 1000 || recordedDigest !== digest(body)) fail('retention receipt differs')
+      resultMatches(value.result, input.result)
+    }
+    if (index === 1 || value.kind === 'result-pruned') {
+      if (receiptDigest && receiptDigest !== value.receiptDigest) fail('retention receipt identity differs')
+      receiptDigest = value.receiptDigest as string
+    }
+  }
+  if (!input.fenced()) fail('retention authority ended')
+  const retained = input.compact()
+  if (!retained?.retention || !validateRetention(retained.retention)
+    || canonical(retained) !== canonical(input.result.retention ? input.result : pruneResult(input.result, retained.retention.prunedAt))) fail('retention marker not persisted')
+  let removedBytes = 0
+  for (let index = 0; index < originals.length; index++) {
+    const original = originals[index] as Record<string, unknown>
+    if (original.kind === 'result-pruned') continue
+    const path = index === 0 ? locations.journal : locations.receipt
+    const body = { schemaVersion: 1, kind: 'result-pruned', record: index === 0 ? 'journal' : 'receipt',
+      intentDigest, resourcesDigest, receiptDigest, originalRecordDigest: digest(original), result: retained }
+    const tombstone = { ...body, tombstoneDigest: digest(body) }
+    const temporary = `${path}.${randomBytes(16).toString('hex')}.tmp`
+    try {
+      const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+      try { await handle.writeFile(JSON.stringify(tombstone)); await handle.sync() } finally { await handle.close() }
+      // Recheck the exact file and controller/version immediately before rename.
+      if (digest(await readRecord(path)) !== digest(original) || !input.fenced()) fail('retention evidence changed')
+      await rename(temporary, path)
+      await syncDirectory(dirname(path))
+      removedBytes += Math.max(0, Buffer.byteLength(JSON.stringify(original)) - Buffer.byteLength(JSON.stringify(tombstone)))
+    } finally { await unlink(temporary).catch(error => { if (!missing(error)) throw error }) }
+  }
+  return removedBytes
 }
 
 export async function runLinuxExecution(input: Context & { argv: readonly string[]; files: readonly IsolationFile[];

@@ -55,7 +55,7 @@
 | [memory-wiki-bridge](memory-wiki-bridge) | `@dsh-enhanced/memory-wiki-bridge` | 实验性 | 只通过公开 service 生成带稳定 provenance 的 Memory↔Wiki 审批提案。 |
 | [assistant-health](assistant-health) | `@dsh-enhanced/assistant-health` | 实验性 | 聚合 provider 自有 health seam 的脱敏 liveness/readiness/详细报告。 |
 | [assistant-recovery](assistant-recovery) | `@dsh-enhanced/assistant-recovery` | 实验性 | 无模型、固定 catalog、带幂等步骤账本的 `supervised-growth/v2` Host 恢复控制面。 |
-| [assistant-isolation](assistant-isolation) | `@dsh-enhanced/assistant-isolation` | 实验性 | 有限 owner 授权的离线 Linux Docker 执行、私有审计与外部撤销；生产磁盘配额及动作代理待补。 |
+| [assistant-isolation](assistant-isolation) | `@dsh-enhanced/assistant-isolation` | 实验性 | 有限 owner 授权的离线 Linux 原生/Docker 执行、持久恢复、私有审计与外部撤销；原生安装迁移及动作代理待补。 |
 | [assistant-actions](assistant-actions) | `@dsh-enhanced/assistant-actions` | 实验性 | 有限 owner 授权的 GitHub 动作；内嵌兼容模式保留 PR/check/review inspection，外部 v1 broker 仅支持 expected-head commit 与 repository/branch/file inspection。Host projection 携带保守 allowlist；外部 broker 以双向 Linux `SO_PEERCRED` pin 和独立 action/admin sockets 隔离数据面/控制面，并保留 admin 容量；action group/ACL 可接入独立 Host UID。独立 UID、service-manager unit、key、credential 与基础设施仍由部署方提供。 |
 | [plugin-control-plane](plugin-control-plane) | `@dsh-enhanced/plugin-control-plane` | 实验性 | 按能力发现、owner 审批、隔离验证与原子启用 bundle；源码创建/修改只允许 linked Git worktree + `pnpm check` + PR。 |
 

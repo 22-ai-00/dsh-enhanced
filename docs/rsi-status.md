@@ -4,34 +4,27 @@
 
 ## 当前交付
 
-- 去除 Linux 安装与自迭代的 Docker 依赖，保留普通隔离执行、完整源码修复、工具创建/修订、独立验收、发布采用与回退能力；不能关闭功能或复用 macOS 的受限创建路径代替。实现边界与验收见[原生运行时](dockerless-runtime.md)。
-- Linux x64 已有 cgroup v1 硬配额、受控 namespace、固定 Node/pnpm 与离线依赖。当前交付把 keeper 与候选分别限额，并接入持久执行、schema 8 账本和私有 Verifier；普通工具、完整源码/行为验收、安装器及保权迁移尚未接通。v2 准入尚未实机验证，明确拒绝。生产仍使用既有 Docker 后端。
+- 去除 Linux 安装与自迭代的 Docker 依赖，保留普通隔离执行、完整源码修复、工具创建/修订、独立验收、发布采用与回退；不能关闭功能或用 macOS 受限创建路径代替。实现边界见[原生运行时](dockerless-runtime.md)。
+- Linux x64 原生底座、持久执行及私有 Verifier 已提交。本轮显式配置的 `isolation_run`、operator 恢复/探针和原生结果保留已通过集成及分范围独立复核。下一能力是完整仓库源码构建与持久 source job，随后接通行为验收、发布和保权安装迁移。生产仍使用 Docker，v2 准入明确拒绝，arm64 尚未实测。
 
-## 当前边界
+## 已有能力与生产边界
 
-- 公开发布 `0.1.65`，发布源码 `e9513c92`。本机既有 CLI 与 owner 部署仍为 `0.1.64`（部署源码 `6566b460`），Host 为 `0.2.1-rc.2`。远端 Linux 已恢复用户备份并安装公开 `0.1.65`，保留主人绑定、会话模型选择和历史；目标与协调器已按不含新插件创建授权的范围部署记忆学习、源码修复与恢复协调。
-- 授权 Wiki 查询自动读取最新合法文件；批准写入、外部原子替换及增删在下次读取生效，无需重启 Host。无效页面或符号链接使刷新失败，修复文件后可再次刷新；未授权查询不会扫描文件。
-- 原生前台任务默认等待上限为 30 分钟，取消收尾和进度等待均有界。Delivery 持久保存新任务的卡片句柄和终态，重连后在当前 owner、绑定和凭据校验下有限重试原位收尾。超时保留专用失败码和幂等通知；未知副作用不自动重放，未静止租约不会提前释放，也不把停止等待说成工具已停止。
-- 受控同码维护重启先保存任务和 Session，再由 Home 外监督器重启；安全续办保持原模型和剩余预算。仅接受可证明无未知副作用的只读任务，每个任务最多申请一次；服务限制 600 秒内最多 3 次启动。
-- 本地程序升级使用 Home 外持久 pnpm store 和受管切换事务；当前两个活动 profile 已完成正常升级，无遗留事务。监督器和目录监控已恢复运行。
-- Linux supervised 初装的 hoisted 依赖布局修复已发布：仅在受管 profile 的包声明、两份锁文件和 pnpm 安装位置共同证明精确依赖边时准备授权运行时；任意目录的平铺依赖、版本漂移或校验期间变更仍拒绝。
+- 公开版本 `0.1.65`（发布源码 `e9513c92`）；本机 CLI/owner 仍为 `0.1.64`，Host `0.2.1-rc.2`。远端恢复用户备份并安装 `0.1.65`，目标与协调器已在原授权内就绪，未新增插件创建授权。
+- Wiki 合法内容在下次授权读取时刷新，无需重启。前台等待、取消和进度收尾有界，Delivery 持久保存新任务卡片和终态；重连后校验 owner/凭据再有限重试。旧气泡无持久句柄时不能回填，未知副作用不自动重跑。
+- 同码维护重启保存任务与 Session，由 Home 外监督器执行；仅续办能证明无未知副作用的只读任务，保留原模型和剩余预算，每任务最多一次。程序升级保留持久 pnpm store 与切换事务；既有活动 profile 无遗留升级事务。
+- 原生普通任务有 worker/keeper 分组硬限额、持久 intent、私有收据和资源消失证明。临时清理故障可同 Host 重试；释放容量不改变 unknown 正文、不退还预算、不重派命令。正结果保留策略先提交账本摘要，再删除私有证据的正文副本；默认保留正文。
 
 ## 下次验收与限制
 
-- 远端历史 owner 工作区使用 `/home` 符号链接别名；创建评审要求真实路径，因此暂不授予新插件创建。部署配置对齐原绑定，未手工改库或重建 owner；恢复完整创建能力仍需受管工作区迁移。`/new` 会沿用旧工作区，不能完成该迁移。
-- 模型迁移保留三个 API provider 在迁移时的配置快照与凭据；三条自定义模型路线实际调用成功，官方 DeepSeek 路线返回 401，远端部署默认改为已验证的自定义模型。源机随后发生的模型配置变更未追随覆盖。旧私聊仍保留其 TraeX 选择，登录及无 prompt ACP 模型目录检查通过；尚未验证该会话的新复杂任务。
-- 升级后观察尚未收到新 owner 请求；仍待真实复杂任务自然结束，以及任务主动请求维护重启后的原会话续办、其它会话恢复和最终回复。服务就绪与工程测试不能代替这些结果。
-- 旧版未持久化句柄的进度气泡不能回填；历史 pending/unknown 与中断记录保留，未经核对不自动重跑。独立飞书接入及任意硬崩溃续办尚未交付，维护切换会中断连接；监督器与 Host 同 UID，不构成恶意代码的操作系统隔离。
-- 完整 Hermes 迁移尚未完成，历史会话库及 75 项技能不在本轮迁移验证内。普通使用驱动持续学习与能力改进的完整闭环仍未验收，不能把部署或工程门通过说成长期收益证明。
-- 公开 core 安装仍有既存 peer 提示：`llm-route-capabilities` 的 `dsh-llm@0.2.1-rc.2` 未单独安装在 profile 包树，Host 提供精确版本；插件激活和配置加载通过。
+- 完整源码路径必须保留精确 Git tree、全新冻结离线安装、根 `pnpm check`、打包及前后输入/产物复核；完整 source job、独立行为证书、发布采用/物理回退和安装默认值尚未完成原生接线。
+- 迁移必须保留主人、会话、凭据、授权范围/期限、已用额度、未知记录与回退点。远端工作区使用 `/home` 符号链接别名，新插件创建仍需受管工作区迁移；不能重建 owner 或靠 `/new` 绕过。后续远端部署还需恢复 SSH 认证。
+- provider 迁移保留三个 API provider；三条自定义路线调用成功，官方 DeepSeek 返回 401。远端默认使用已验证的自定义模型，旧私聊保留 TraeX 选择；尚未收到升级后的真实复杂任务结果，也未验收主动维护重启后的原会话续办与最终回复。
+- 任意硬崩溃续办与独立飞书连接尚未交付，维护切换仍中断连接。监督器与 Host 同 UID，不隔离恶意 Host 插件。完整 Hermes 历史库和 75 项技能迁移未完成；普通使用驱动长期学习收益的完整闭环仍待实证。
+- 公开 core 安装仍有既存 `llm-route-capabilities` 的 Host peer 提示；Host 提供精确 `dsh-llm` 版本，已验证插件激活与配置加载。
 
 ## 最新验证
 
-- 原生底座提交 `11501864` 的 `VITEST_MAX_WORKERS=4 pnpm_config_workspace_concurrency=4 pnpm check` 退出 0：9145 通过、116 跳过，含零警告 lint、构建、类型检查与 37 包 dry-run pack。原语独立复核通过；保留的 store/cache 在无网络 namespace 中完成全新冻结安装。该结果不覆盖后续未提交的持久执行接入。
-- 持久执行当前聚焦证据：keeper/namespace 47 项、实机组合探针 11 项、执行与恢复 30 项、私有 Verifier API 20 项通过。覆盖部分创建、Host 退出、收据写入中断、临时清理故障后同 Host 恢复、有限预算及同键不重派；ledger 迁移保留旧 Docker/macOS 身份及已用额度。整包集成回归 252 通过、52 跳过，构建、类型检查、零警告 lint 和 dry-run pack 退出 0；已核对新增模块及运行时文件随包发布。keeper、持久执行、账本及私有 Verifier 分别获得范围内独立 PASS。原始命令、退出码、摘要与限制位于忽略目录 `docs/evidence/dockerless-execution-20261028/`；未运行本轮完整根检查，Docker 路由兼容用 fixture 验证，不代表真实 Docker 重跑。
-
-- 精确发布源码的本地 `VITEST_MAX_WORKERS=4 pnpm_config_workspace_concurrency=4 pnpm check` 退出 0：9118 通过、103 跳过，含零警告 lint、构建、类型检查与 37 包 dry-run pack。[首轮 CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/40504965747) 与[主分支复跑](https://github.com/22-ai-00/dsh-enhanced/actions/runs/40508948330) 的 Linux、macOS、Windows 全部通过，独立发布前复核 PASS。
-- [Release](https://github.com/22-ai-00/dsh-enhanced/actions/runs/40508965179) 发布和账本记录成功；发布环境检查为 9119 通过、102 跳过。37 包 npm 精确版本、`latest`、普通和安装器元数据，以及 7 个公开安装资产与 6 项固定摘要均通过；前两次查询命中旧缓存，第三次同步后通过。
-- 全新隔离 Home 的公开 Lark 安装、实际插件激活和配置加载退出 0。按公开安装器清单补齐 supervised 包后，使用其原生 Host 解析与 `dsh-rsi-setup --prepare-authorities`，Node `22.23.2` 与 `24.7.0` 均退出 0：7 个程序、8 个适配器、14 个身份就绪，重复准备的返回值及两份收据摘要不变，授权状态和配置目录为空。该隔离测试未绑定真实 owner、调用模型或启动常驻服务，仅覆盖发布与准备，独立复核 PASS；远端有限授权的部署验收见本节末条。
-- 修复前的真实公开 `0.1.64` hoisted profile 复现原依赖边错误，修复后通过；12 项聚焦测试覆盖拒绝越界、版本和锁文件漂移、校验中变更及重复准备。私有命令、日志与保留的失败探针位于 `docs/evidence/hoisted-authority-20261027/`。
-- 远端原生部署返回 `ready`；28 个目标包与 7 个协调器包均为 `0.1.65`，两个 Host 活动且无自动重启，目标飞书已连接、无插件激活警告。Docker `29.4.1/linux/amd64`、官方源码、源码/发布/行为构建收据及镜像检查通过；临时下载转发已关闭。原 6 条 Inbox、5 条 Outbox、owner 绑定和模型选择逐行保留，4 份会话文件字节不变。按插件目录执行的 `rsi-install.spec.ts` 为 11 项通过；部署证据及失败重试保存在 `docs/evidence/remote-recovery-20261027/`。以上证明安装与就绪，不证明复杂任务自然结束或长期学习收益。
+- 持久执行提交 `841642b3` 的 `VITEST_MAX_WORKERS=4 pnpm_config_workspace_concurrency=4 pnpm check` 退出 0：9184 通过、166 跳过，含零警告 lint、构建、类型检查与 37 包 dry-run pack。该冻结提交不包含本轮公开工具接入。
+- 本轮公开工具最终整包实测：`DSH_NATIVE_CGROUP_REAL=1 VITEST_MAX_WORKERS=4 pnpm --filter @dsh-enhanced/assistant-isolation test --testTimeout=15000` 退出 0，313 通过、52 跳过；构建、隔离及 3 个消费者包类型检查、零警告 lint 和 dry-run pack 全过，源码摘要前后一致。配置/公开服务、CLI/保留清理、deadline 修复分别获得独立 PASS。首轮暴露的 deadline 竞态已修复，86 项定向回归包含真实子进程树停止；失败日志保留。本轮完整根检查尚未运行。
+- 原生证据位于忽略目录 `docs/evidence/dockerless-20261028/`、`dockerless-execution-20261028/` 与 `dockerless-public-20261028/`。真实 cgroup v1、namespace、固定工具链及保留 store/cache 的无网络冻结安装均有证据；pnpm 小型 fixture、Docker 路由 fixture 与真实全仓源码构建不混同。
+- 已发布 `0.1.65` 的跨平台 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/40508948330)、[Release](https://github.com/22-ai-00/dsh-enhanced/actions/runs/40508965179)、37 包 npm 元数据与公开安装资产核对通过。全新 hoisted profile 的 core 激活及 Node 22/24 授权准备通过，远端两个 Host 就绪且原 Inbox/Outbox、owner 和会话文件保留；安装就绪不证明真实任务完成或长期收益。
