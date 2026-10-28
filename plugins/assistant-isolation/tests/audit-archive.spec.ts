@@ -51,6 +51,31 @@ describe('isolation audit archive', () => {
     ledger.close()
   })
 
+  it('reads schema-7 sources and schema-6 archives and appends schema-8 batches without rewriting history', () => {
+    const stateRoot = privateRoot('legacy-schema-state'); const archiveDirectory = privateRoot('legacy-schema-archive')
+    const ledger = prepare(stateRoot, 0); ledger.close()
+    // The audit schema is identical in 7 and 8; these markers exercise the read-only source gate.
+    const database = new DatabaseSync(join(stateRoot, 'ledger.sqlite'))
+    database.exec("PRAGMA user_version=7; UPDATE schema_meta SET value='7' WHERE key='schema-version';")
+    database.close()
+    const initial = archiveIsolationAudit({ stateRoot, archiveDirectory })
+    const firstName = archiveFiles(archiveDirectory)[0]!
+    expect(JSON.parse(readFileSync(join(archiveDirectory, firstName), 'utf8').split('\n')[0]!).ledgerSchema).toBe(7)
+    const legacyName = rewriteArchive(archiveDirectory, firstName, lines => {
+      const manifest = { ...JSON.parse(lines[0]!), ledgerSchema: 6 }
+      return [JSON.stringify(manifest, Object.keys(manifest).sort()), ...lines.slice(1)]
+    })
+    expect(verifyIsolationAuditArchive(archiveDirectory)).toMatchObject({ valid: true, recordCount: initial.verification.recordCount })
+    const legacyContent = readFileSync(join(archiveDirectory, legacyName))
+    const upgraded = new DatabaseSync(join(stateRoot, 'ledger.sqlite'))
+    upgraded.exec("PRAGMA user_version=8; UPDATE schema_meta SET value='8' WHERE key='schema-version'; INSERT INTO isolation_audit(occurred_at,action,detail) VALUES (10001,'linux-upgrade','preserved');")
+    upgraded.close()
+    const result = archiveIsolationAudit({ stateRoot, archiveDirectory })
+    expect(result).toMatchObject({ createdRecords: 1, verification: { valid: true, fileCount: 2, recordCount: 2 } })
+    expect(readFileSync(join(archiveDirectory, legacyName))).toEqual(legacyContent)
+    expect(JSON.parse(readFileSync(join(archiveDirectory, result.createdFiles[0]!), 'utf8').split('\n')[0]!).ledgerSchema).toBe(8)
+  })
+
   it('creates a single empty genesis with a durable random instance identity', () => {
     const stateRoot = privateRoot('empty-state'); const archiveDirectory = privateRoot('empty-archive'); const ledger = new IsolationLedger(join(stateRoot, 'ledger.sqlite')); ledger.close()
     const result = archiveIsolationAudit({ stateRoot, archiveDirectory })

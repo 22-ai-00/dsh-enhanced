@@ -1,4 +1,5 @@
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, readdir, readlink, rm, stat, writeFile } from 'node:fs/promises'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
@@ -22,6 +23,7 @@ describe.skipIf(!available)('real Linux namespace execution', () => {
       workspaceBytes: 1024 * 1024, workspaceInodes: 128,
       tmpBytes: 1024 * 1024, tmpInodes: 128, timeoutMs: 5000, maxOutputBytes: 8192,
       profile: 'ordinary', signal: controller.signal,
+      beforeKeeperStart: () => {},
       beforeStart: identity => { seen.start = identity },
       afterExit: exit => { seen.exit = exit },
       onStop: () => { seen.stopped = true },
@@ -45,6 +47,157 @@ describe.skipIf(!available)('real Linux namespace execution', () => {
     })
     expect(result).toMatchObject({ status: 'succeeded', namespaceExited: true, stdout: 'hello',
       artifacts: [{ path: 'report.txt', content: 'saved' }] })
+  })
+
+  test('keeps the exact keeper PID outside namespaces and staging until durable admission', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-keeper-admission-'))
+    const namespaceId = `${randomUUID()}-${randomBytes(16).toString('hex')}`
+    const jobPath = join(stateRoot, `namespace-${namespaceId}`)
+    let keeper: LinuxCandidateIdentity | undefined
+    try {
+      const { result } = await run({ stateRoot, namespaceId,
+        files: [{ path: 'staged.txt', content: 'private' }],
+        argv: ['/bin/sh', '-c', 'test -f staged.txt && printf admitted'],
+        beforeKeeperStart: async identity => {
+          keeper = identity
+          expect(await readdir(stateRoot)).toEqual([`namespace-${namespaceId}`])
+          for (let sample = 0; sample < 2; sample++) {
+            expect(await readdir(jobPath)).toEqual([])
+            expect(await readFile(`/proc/${identity.pid}/comm`, 'utf8')).toBe('sh\n')
+            expect((await readFile(`/proc/${identity.pid}/task/${identity.pid}/children`, 'utf8')).trim()).toBe('')
+            for (const name of ['user', 'mnt', 'net']) {
+              expect(await readlink(`/proc/${identity.pid}/ns/${name}`)).toBe(await readlink(`/proc/self/ns/${name}`))
+            }
+            await new Promise(resolve => setTimeout(resolve, 30))
+          }
+        },
+        beforeStart: async () => {
+          expect(keeper).toBeDefined()
+          expect((await readFile(`/proc/${keeper!.pid}/cmdline`, 'utf8')).startsWith('/usr/bin/unshare\0')).toBe(true)
+          const raw = await readFile(`/proc/${keeper!.pid}/stat`, 'utf8')
+          expect(Number(raw.slice(raw.lastIndexOf(')') + 2).trim().split(' ')[19])).toBe(keeper!.startTicks)
+        },
+      })
+      expect(result).toMatchObject({ status: 'succeeded', stdout: 'admitted', namespaceExited: true })
+      expect(await readdir(stateRoot)).toEqual([])
+    } finally { await rm(stateRoot, { recursive: true, force: true }) }
+  })
+
+  test.each(['reject', 'timeout', 'abort'] as const)('does not release keeper admission after %s, including a late callback', async mode => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-keeper-revoked-'))
+    const controller = new AbortController()
+    let late: (() => void) | undefined
+    let candidateStarted = false
+    let keeper: LinuxCandidateIdentity | undefined
+    const before = Date.now()
+    try {
+      const { result } = await run({ stateRoot, signal: controller.signal,
+        timeoutMs: mode === 'timeout' ? 200 : 5000,
+        beforeKeeperStart: async identity => {
+          keeper = identity
+          expect(await readdir(join(stateRoot, (await readdir(stateRoot))[0]!))).toEqual([])
+          if (mode === 'reject') throw new Error('keeper admission rejected')
+          if (mode === 'abort') setTimeout(() => controller.abort(), 30)
+          await new Promise<void>(resolve => { late = resolve })
+        },
+        beforeStart: () => { candidateStarted = true },
+      })
+      expect(Date.now() - before).toBeLessThan(3000)
+      expect(result).toMatchObject({ status: mode === 'reject' ? 'unknown' : mode === 'abort' ? 'cancelled' : 'timed-out',
+        namespaceExited: true, artifacts: [] })
+      expect(candidateStarted).toBe(false)
+      expect(keeper).toBeDefined()
+      expect(spawnSync('/bin/kill', ['-0', String(keeper!.pid)]).status).not.toBe(0)
+      late?.()
+      await new Promise(resolve => setTimeout(resolve, 30))
+      expect(candidateStarted).toBe(false)
+      expect(await readdir(stateRoot)).toEqual([])
+    } finally { late?.(); await rm(stateRoot, { recursive: true, force: true }) }
+  })
+
+  test('the waiting keeper exits on Host disconnect before admission completes', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-keeper-host-loss-'))
+    const marker = join(stateRoot, 'keeper.json')
+    const entry = pathToFileURL(join(import.meta.dirname, '../src/linux-namespace.ts')).href
+    const script = `import {runLinuxNamespace} from ${JSON.stringify(entry)};
+import {writeFile} from 'node:fs/promises';
+await runLinuxNamespace({stateRoot:${JSON.stringify(stateRoot)},argv:['/usr/bin/true'],files:[],
+workspaceBytes:1048576,workspaceInodes:128,tmpBytes:1048576,tmpInodes:128,timeoutMs:20000,maxOutputBytes:8192,
+profile:'ordinary',signal:new AbortController().signal,
+beforeKeeperStart:async identity=>{await writeFile(${JSON.stringify(marker)},JSON.stringify(identity)); await new Promise(()=>{});},
+beforeStart:()=>{throw Error('candidate must not start');},afterExit:()=>{},onStop:()=>{}});`
+    const host = spawn(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script],
+      { stdio: ['ignore', 'ignore', 'pipe'], env: { PATH: '/usr/bin:/bin' } })
+    let diagnostic = ''
+    host.stderr.on('data', chunk => { diagnostic += String(chunk) })
+    let keeper: LinuxCandidateIdentity | undefined
+    const live = async (): Promise<boolean> => {
+      if (!keeper) return false
+      try {
+        const raw = await readFile(`/proc/${keeper.pid}/stat`, 'utf8')
+        const fields = raw.slice(raw.lastIndexOf(')') + 2).trim().split(' ')
+        return fields[0] !== 'Z' && Number(fields[19]) === keeper.startTicks
+      } catch (error) { if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) return false; throw error }
+    }
+    try {
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline && !keeper) {
+        try { keeper = JSON.parse(await readFile(marker, 'utf8')) as LinuxCandidateIdentity } catch {}
+        if (!keeper) await new Promise(resolve => setTimeout(resolve, 20))
+      }
+      expect(keeper, diagnostic).toBeDefined()
+      expect(await readFile(`/proc/${keeper!.pid}/comm`, 'utf8')).toBe('sh\n')
+      const stopped = new Promise<void>(resolveExit => host.once('close', () => resolveExit()))
+      host.kill('SIGKILL')
+      await stopped
+      const until = Date.now() + 2000
+      while (await live() && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 20))
+      expect(await live()).toBe(false)
+      const directories = (await readdir(stateRoot)).filter(name => name.startsWith('namespace-'))
+      expect(directories).toHaveLength(1)
+      expect(await readdir(join(stateRoot, directories[0]!))).toEqual([])
+    } finally {
+      host.kill('SIGKILL')
+      if (await live()) { try { process.kill(keeper!.pid, 'SIGKILL') } catch {} }
+      await rm(stateRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('stages and exports ordinary paths containing Unicode, spaces and shell syntax as literal filenames', async () => {
+    const path = '中文 目录/结果 $(touch escaped).txt'
+    const { result } = await run({ files: [{ path, content: '普通输入' }], artifacts: [path],
+      argv: ['/usr/bin/python3', '-I', '-S', '-c', 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); assert p.read_text()=="普通输入"; p.write_text("结果"); assert not pathlib.Path("escaped").exists()', path] })
+    expect(result).toMatchObject({ status: 'succeeded', artifacts: [{ path, content: '结果' }] })
+  })
+
+  test('enforces the configured total artifact byte limit', async () => {
+    const exact = await run({ maxArtifactBytes: 6, artifacts: ['a', 'b'],
+      argv: ['/bin/sh', '-c', 'printf abc > a; printf def > b'] })
+    expect(exact.result).toMatchObject({ status: 'succeeded', artifacts: [{ path: 'a', content: 'abc' }, { path: 'b', content: 'def' }] })
+    const exceeded = await run({ maxArtifactBytes: 5, artifacts: ['a', 'b'],
+      argv: ['/bin/sh', '-c', 'printf abc > a; printf def > b'] })
+    expect(exceeded.result).toMatchObject({ status: 'unknown', namespaceExited: true, artifacts: [] })
+    const large = await run({ maxArtifactBytes: 2, artifacts: ['a'], argv: ['/bin/sh', '-c', 'printf abc > a'] })
+    expect(large.result).toMatchObject({ status: 'unknown', namespaceExited: true, artifacts: [] })
+  })
+
+  test.each([0, -1, 1_048_577, 1.5, NaN])('rejects invalid artifact byte limit %s before keeper admission', async maxArtifactBytes => {
+    await expect(run({ maxArtifactBytes })).rejects.toThrow('invalid limits')
+  })
+
+  test.each(['/absolute', '../escape', 'a/../b', './a', 'a//b', 'a/', 'a\\b', 'control\nname', 'control\u007fname'])('rejects unsafe input path %j', async path => {
+    await expect(run({ files: [{ path, content: 'x' }] })).rejects.toThrow('invalid input file')
+    await expect(run({ artifacts: [path] })).rejects.toThrow('invalid artifact path')
+  })
+
+  test('rejects duplicate files, file parent collisions and duplicate artifacts', async () => {
+    await expect(run({ files: [{ path: 'same', content: 'a' }, { path: 'same', content: 'b' }] })).rejects.toThrow('invalid input file')
+    await expect(run({ files: [{ path: 'same', content: 'a' }, { path: 'same/child', content: 'b' }] })).rejects.toThrow('collide')
+    await expect(run({ artifacts: ['same', 'same'] })).rejects.toThrow('invalid artifact path')
+  })
+
+  test.each(['../escape', randomUUID(), `${randomUUID()}-${'x'.repeat(32)}`, `${randomUUID()}-${'a'.repeat(31)}`])('rejects invalid namespace identity %s', async namespaceId => {
+    await expect(run({ namespaceId })).rejects.toThrow('invalid namespace id')
   })
 
   test('cannot see host Home or sysfs, and network is disconnected', async () => {
@@ -211,7 +364,7 @@ print('denied')`
 import {writeFile} from 'node:fs/promises';
 await runLinuxNamespace({stateRoot:${JSON.stringify(stateRoot)},argv:['/bin/sh','-c','sleep 30 & wait'],files:[],
 workspaceBytes:1048576,workspaceInodes:128,tmpBytes:1048576,tmpInodes:128,timeoutMs:20000,maxOutputBytes:8192,
-profile:'ordinary',signal:new AbortController().signal,
+profile:'ordinary',signal:new AbortController().signal,beforeKeeperStart:()=>{},
 beforeStart:identity=>writeFile(${JSON.stringify(marker)},JSON.stringify(identity)),afterExit:()=>{},onStop:()=>{}});`
     const host = spawn(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e',
       hostSignal === 'SIGSTOP' ? script.replace('timeoutMs:20000', 'timeoutMs:2000') : script],

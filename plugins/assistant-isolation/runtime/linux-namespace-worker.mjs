@@ -1,10 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statfsSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const TMPFS_MAGIC = 0x01021994
-const PATH = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/u
+const CONTROL = /[\p{Cc}]/u
 const MAX_PROTOCOL = 1_400_000
 const FILTER_COMPILER = fileURLToPath(new URL('./linux-seccomp.py', import.meta.url))
 const say = value => process.stdout.write(`${JSON.stringify(value)}\n`)
@@ -112,7 +112,9 @@ function compiledFilter(jobPath, profile) {
   return openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
 }
 function pathParts(path) {
-  if (!PATH.test(path) || path.length > 4096 || path.split('/').some(part => part === '.' || part === '..')) fail('unsafe path')
+  if (typeof path !== 'string' || path.length < 1 || path.length > 4096 || isAbsolute(path)
+    || path.includes('\\') || CONTROL.test(path)
+    || path.split('/').some(part => part.length === 0 || part === '.' || part === '..')) fail('unsafe path')
   return path.split('/')
 }
 function stage(workspace, file) {
@@ -188,8 +190,19 @@ async function main() {
     || !Number.isSafeInteger(config.workspaceBytes) || !Number.isSafeInteger(config.workspaceInodes)
     || !Number.isSafeInteger(config.tmpBytes) || !Number.isSafeInteger(config.tmpInodes)
     || !Number.isSafeInteger(config.deadline) || config.deadline <= Date.now() || config.deadline > Date.now() + 1_800_000
+    || !Number.isSafeInteger(config.maxArtifactBytes) || config.maxArtifactBytes < 1 || config.maxArtifactBytes > 1_048_576
     || !Number.isSafeInteger(config.maxOutputBytes) || !Array.isArray(config.argv)
     || !Array.isArray(config.files) || !Array.isArray(config.artifacts) || !Array.isArray(config.readOnlyRoots)) fail('invalid request')
+  const names = new Set()
+  for (const file of config.files) {
+    pathParts(file.path)
+    if (names.has(file.path) || typeof file.content !== 'string' || !file.content.isWellFormed()) fail('invalid input file')
+    names.add(file.path)
+  }
+  if ([...names].some(name => [...names].some(other => other !== name && other.startsWith(`${name}/`)))
+    || config.files.reduce((bytes, file) => bytes + Buffer.byteLength(file.content), 0) > 1_048_576) fail('input files exceed bounds or collide')
+  for (const path of config.artifacts) pathParts(path)
+  if (new Set(config.artifacts).size !== config.artifacts.length) fail('duplicate artifacts')
   // This deadline belongs to the keeper, independently of the Host process.
   // Closing the Host control pipe also revokes the candidate's execution.
   watchdog = setTimeout(() => { closeControl(); process.stdin.destroy() }, Math.max(1, config.deadline - Date.now()))
@@ -277,9 +290,9 @@ async function main() {
   const artifacts = []
   let artifactBytes = 0
   for (const path of config.artifacts) {
-    const file = boundArtifact(workspace, path, 1_048_576)
+    const file = boundArtifact(workspace, path, config.maxArtifactBytes)
     artifactBytes += Buffer.byteLength(file.content)
-    if (artifactBytes > 1_048_576) fail('artifact output exceeds bound')
+    if (artifactBytes > config.maxArtifactBytes) fail('artifact output exceeds bound')
     artifacts.push(file)
   }
   finished = true

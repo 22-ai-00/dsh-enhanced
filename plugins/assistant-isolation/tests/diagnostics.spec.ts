@@ -39,6 +39,22 @@ describe('read-only isolation grant diagnostics', () => {
     ledger.close()
   })
 
+  it('reads both schema 7 and 8 without migrating or changing either schema marker', () => {
+    const stateRoot = root(); const file = join(stateRoot, 'ledger.sqlite'); const ledger = new IsolationLedger(file, { now })
+    ledger.syncGrants([grant()]); ledger.close()
+    for (const version of [7, 8]) {
+      const database = new DatabaseSync(file)
+      database.exec(`PRAGMA user_version=${version}; UPDATE schema_meta SET value='${version}' WHERE key='schema-version';`); database.close()
+      const before = readFileSync(file)
+      expect(inspectIsolationGrant({ stateRoot, grant: grant(), now: 10_000 })).toMatchObject({ status: 'available', runsUsed: 0 })
+      expect(readFileSync(file)).toEqual(before)
+      const checked = new DatabaseSync(file, { readOnly: true })
+      expect(checked.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: version })
+      expect(checked.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get()).toMatchObject({ value: String(version) })
+      checked.close()
+    }
+  })
+
   it('classifies revocation, expiry, and exhausted historical budgets without refunding unknown work', () => {
     const stateRoot = root(); const configured = grant({ maxRuns: 1, maxTotalDurationMs: 500 }); const ledger = new IsolationLedger(join(stateRoot, 'ledger.sqlite'), { now })
     ledger.syncGrants([configured]); const job = prepare(ledger); ledger.settle(job.id, job.version, { jobId: job.id, status: 'unknown', quiescent: false, stdout: '', stderr: '', artifacts: [] }); ledger.revoke(configured.id, configured.revision, 'operator')

@@ -25,27 +25,58 @@ await writeFile(secret, randomBytes(32).toString('hex'), { mode: 0o600 })
 const evidence = []
 
 async function run(name, script, options = {}) {
-  const lease = await LinuxCgroupLease.create({ roots, jobId: randomUUID(), nonce: randomBytes(16).toString('hex'),
-    limits: { memoryMiB: 128, pidsLimit: 32, cpus: 0.5 }, deadline: Date.now() + 30_000 })
-  let stopped
-  const cleanup = () => stopped ??= (async () => {
-    assert.equal(await lease.terminateAndProve(5_000), true, 'entire candidate group must stop')
-    assert.equal(await lease.removeWhenEmpty(), true, 'all resource groups must be removed')
-  })()
+  const leases = []
+  const admissions = {}
+  const observations = {}
+  const create = async (role, limits) => {
+    const lease = await LinuxCgroupLease.create({ roots, jobId: randomUUID(), nonce: randomBytes(16).toString('hex'),
+      limits, deadline: Date.now() + 30_000 })
+    leases.push(lease)
+    observations[role] = { limits, directories: lease.snapshot.directories }
+    return lease
+  }
+  const cleanups = new Map()
+  const cleanup = lease => {
+    if (!cleanups.has(lease)) cleanups.set(lease, (async () => {
+      const memory = lease.snapshot.directories.memory?.path
+      if (memory) {
+        observations[lease === leases[0] ? 'keeper' : 'candidate'].memory = Object.fromEntries(await Promise.all(
+          ['memory.max_usage_in_bytes', 'memory.failcnt', 'memory.oom_control'].map(async key => [key,
+            await readFile(join(memory, key), 'utf8').catch(error => `unavailable: ${error.code}`)])))
+      }
+      assert.equal(await lease.terminateAndProve(5_000), true, 'entire resource group must stop')
+      assert.equal(await lease.removeWhenEmpty(), true, 'all resource groups must be removed')
+    })())
+    return cleanups.get(lease)
+  }
   try {
-    const result = await runLinuxNamespace({ stateRoot: root, argv: ['/usr/bin/python3', '-I', '-S', '-c', script],
+    // The keeper must be bounded before unshare, Node, mounts or input staging.
+    // Candidate admission moves its gate into a distinct independently bounded group.
+    const keeper = await create('keeper', { memoryMiB: 128, pidsLimit: 64, cpus: 0.5 })
+    const candidate = await create('candidate', { memoryMiB: 128, pidsLimit: 32, cpus: 0.5 })
+    const namespaceId = `${randomUUID()}-${randomBytes(16).toString('hex')}`
+    const admit = async (role, lease, identity) => {
+      await lease.admit({ pid: identity.pid, startTicks: String(identity.startTicks),
+        uid: owner, bootId: lease.snapshot.bootId })
+      admissions[role] = { ...identity, cgroup: await readFile(`/proc/${identity.pid}/cgroup`, 'utf8') }
+    }
+    const result = await runLinuxNamespace({ stateRoot: root, namespaceId,
+      argv: ['/usr/bin/python3', '-I', '-S', '-c', script],
       files: [{ path: 'input.txt', content: 'native-input' }], artifacts: [], readOnlyRoots: [],
       workspaceBytes: 4 * 1024 * 1024, workspaceInodes: 64, tmpBytes: 1024 * 1024, tmpInodes: 32,
       timeoutMs: 10_000, maxOutputBytes: 16_384, profile: 'ordinary', signal: new AbortController().signal,
       ...options,
-      beforeStart: identity => lease.admit({ pid: identity.pid, startTicks: String(identity.startTicks),
-        uid: owner, bootId: lease.snapshot.bootId }),
-      afterExit: cleanup, onStop: cleanup })
-    await cleanup()
-    evidence.push({ name, status: result.status, exitCode: result.exitCode, stdout: result.stdout, reason: result.reason })
+      beforeKeeperStart: identity => admit('keeper', keeper, identity),
+      beforeStart: identity => admit('candidate', candidate, identity),
+      afterExit: () => cleanup(candidate),
+      onStop: async () => { await cleanup(candidate); await cleanup(keeper) } })
+    await cleanup(candidate)
+    await cleanup(keeper)
+    evidence.push({ name, namespaceId, status: result.status, exitCode: result.exitCode,
+      stdout: result.stdout, reason: result.reason, admissions, resourceGroups: observations })
     assert.equal(result.namespaceExited, true, JSON.stringify(result))
     return result
-  } finally { await cleanup() }
+  } finally { for (const lease of [...leases].reverse()) await cleanup(lease) }
 }
 
 try {
@@ -53,6 +84,16 @@ try {
   assert.equal(ordinary.status, 'succeeded')
   assert.equal(ordinary.stdout.trim(), 'ok')
   assert.deepEqual(ordinary.artifacts, [{ path: 'output.txt', content: 'native-result' }])
+
+  const unicode = await run('unicode-space-artifact', 'from pathlib import Path; Path("中文 目录").mkdir(); Path("中文 目录/结果.txt").write_text("真实结果")',
+    { artifacts: ['中文 目录/结果.txt'], maxArtifactBytes: 12 })
+  assert.equal(unicode.status, 'succeeded')
+  assert.deepEqual(unicode.artifacts, [{ path: '中文 目录/结果.txt', content: '真实结果' }])
+
+  const artifactLimit = await run('artifact-total-byte-limit', "from pathlib import Path; Path('a').write_text('abc'); Path('b').write_text('def')",
+    { artifacts: ['a', 'b'], maxArtifactBytes: 5 })
+  assert.equal(artifactLimit.status, 'unknown')
+  assert.deepEqual(artifactLimit.artifacts, [])
 
   const hidden = await run('host-files-and-network', `import os,socket
 assert not os.path.exists(${JSON.stringify(secret)})

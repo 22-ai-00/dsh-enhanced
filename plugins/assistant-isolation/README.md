@@ -1,6 +1,6 @@
 # Assistant Isolation
 
-Host-only `inspectIsolationGrant({ stateRoot, grant, now? })` supplies a read-only schema 6 snapshot for operator diagnostics. It compares every configured grant field with persisted authority and reports revocation, expiry, historical run/duration reservations across revisions, and active/unknown jobs. It never creates or migrates a database, claims a controller, renews authority, refunds reservations, or returns commands/artifacts. Missing, unsupported or corrupt state is unavailable. `available` refers only to these grant checks; the Web owner doctor combines it with owner checks and a real temporary isolation probe. It is not a Policy, resource-admission or complete autonomy verdict.
+Host-only `inspectIsolationGrant({ stateRoot, grant, now? })` supplies a read-only schema 7/8 snapshot for operator diagnostics. It compares every configured grant field with persisted authority and reports revocation, expiry, historical run/duration reservations across revisions, and active/unknown jobs. It never creates or migrates a database, claims a controller, renews authority, refunds reservations, or returns commands/artifacts. Missing, unsupported or corrupt state is unavailable. `available` refers only to these grant checks; the Web owner doctor combines it with owner checks and a real temporary isolation probe. It is not a Policy, resource-admission or complete autonomy verdict.
 
 After a Host crash, startup waits up to 31 seconds for the previous controller's
 30-second lease to expire naturally. The service and its injected consumers stay
@@ -18,8 +18,9 @@ This is the first actual isolation component of autonomy work packages 08–10. 
 
 The Host-only `runLinuxNamespace`, `LinuxCgroupLease`, and `LinuxRuntime`
 exports provide Docker-free building blocks on non-root Linux. They do not yet
-replace the public tool or durable verifier backend. Production configuration
-and historical Docker jobs retain their existing behavior.
+replace the public tool. The private verifier API also accepts the explicit
+`LinuxVerifierRunnerConfig` described below; production setup still selects its
+existing backend until installation and owner migration are integrated.
 
 `runLinuxNamespace` uses fixed `unshare`, mount, bubblewrap and Python/libseccomp
 programs, with a shipped digest-checked syscall policy. It exposes system runtime
@@ -32,8 +33,9 @@ The caller must keep exposed runtime roots free of secrets. Input and exported
 UTF-8 artifacts have separate 1 MiB bounds; binary build artifacts and whole
 repository staging are outside this primitive's current interface.
 
-The fixed gate waits until the caller's `beforeStart` admits its exact PID/start
-time to resource controls. `afterExit` must prove the entire candidate group
+The keeper's fixed gate waits for `beforeKeeperStart` before unshare, mounts or
+staging. A separate candidate gate waits until `beforeStart` admits its exact
+PID/start time to resource controls. `afterExit` must prove the candidate group
 quiet before export; `onStop` must reconcile it after cancellation or failure.
 Callback failure or timeout returns `unknown`. The trusted keeper independently
 revokes work on Host disconnect or deadline. `namespaceExited` only proves that
@@ -55,6 +57,39 @@ outside links, writable contents and drift. None of these exports activates a
 service, reads provider credentials, accesses a browser, downloads images or
 runs an install lifecycle script. See the [delivery boundary](../../docs/dockerless-runtime.md)
 for remaining integration and acceptance.
+
+### Durable native verification
+
+`IsolatedVerifierRunner` accepts either the existing Docker configuration or an
+explicit `backend: 'linux-native'` configuration with a verified `LinuxRuntime`
+and delegated `cgroupRoots`. `LinuxVerifierRunner` is also exported directly.
+The API remains `run(key, artifact, stdin, signal)` and `close()`; the fixed
+operator command receives `artifact` and `input` files in the private workspace.
+Its PATH uses the pinned runtime's Node/pnpm. Ordinary agent tools do not receive
+this constructor or the verifier's authority.
+
+The native backend reuses the same schema 8 ledger, finite verification grant,
+controller lease, idempotency key and resource pool. It keeps execution records
+in a private `linux-executions` child directory. Kernel resource identity and a
+durable create intent precede execution. Worker and keeper have separate groups;
+the keeper has 128 MiB memory including swap, 64 PIDs and 0.5 CPU. Reservations
+include both groups plus workspace, temporary and shared-memory allowances.
+Runtime drift, lost authorization or controller fencing stops new admission.
+
+The shared `prepareLinuxExecutionIntent` / `runLinuxExecution` helpers own the
+durable journal, both group lifetimes and private receipts. Recovery reads
+original identities and proves actual group/workspace absence. A missing or
+partial creation record never grants permission to run the command again or to
+signal an unidentified process. Proven cleanup releases active capacity while
+preserving an existing unknown result and its consumed run/duration budget.
+Historical Docker/macOS rows retain their own backend identity; switching this
+API does not reconcile those external resources or reset their grants.
+
+These APIs still require non-root Linux with verified v1 delegation and the
+fixed namespace dependencies. Public `isolation_run`, installer migration,
+complete repository builds, behavior certificates and release/adoption are
+separate integration steps. V2, arm64 execution and a reboot with changed kernel
+resource identity remain outside the current live acceptance.
 
 ## Native macOS execution primitive
 

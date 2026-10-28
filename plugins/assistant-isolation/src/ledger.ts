@@ -1,11 +1,12 @@
 import { validateGoalArtifactAdmission } from '@dsh-enhanced/task-acceptance-contract'
 import { chmodSync, mkdirSync } from 'node:fs'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, normalize } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { processExited, sameDaemonWitness, validateCreationWitness, type CreationWitness, type DaemonWitness } from './runtime-witness.js'
 import type { SystemdBinding } from './daemon-binding.js'
 import { receiptData, type IsolationCleanupReceipt } from './cleanup-receipt.js'
+import { linuxExecutionContractDigest, linuxExecutionIntentDigest, linuxExecutionResourcesDigest, validateLinuxExecutionContract, validateLinuxExecutionIntent, validateLinuxExecutionResources, validateLinuxReceiptBinding, validateLinuxExecutionPartialCleanupProof, type LinuxExecutionContract, type LinuxExecutionIntent, type LinuxExecutionResources, type LinuxReceiptBinding, type LinuxExecutionPartialCleanupProof } from './linux-execution-contract.js'
 import { pruneResult, validateRetention } from './storage-policy.js'
 import type { IsolationArtifactBinding, IsolationGrant, IsolationIdentity, IsolationJob, IsolationResult, IsolationStatus, IsolationStorageBudget } from './types.js'
 
@@ -16,7 +17,7 @@ export class IsolationLedgerError extends Error {
 }
 export interface IsolationControllerAuthority { ownerId: string; fence: number }
 
-const schemaVersion = 7
+const schemaVersion = 8
 const outputMaximum = 1_048_576
 const artifactMaximum = 128
 const textMaximum = 16_384
@@ -64,7 +65,7 @@ function result(value: IsolationResult, allowRetention = false): IsolationResult
 }
 
 type GrantRow = { id: string; digest: string; revision: number; expires_at: number; max_runs: number; max_total_duration_ms: number; revoked: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string }
-type JobRow = { id: string; grant_id: string; grant_revision: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string; session_id: string; idempotency_key: string; request_digest: string; container_name: string | null; backend_kind: 'docker' | 'macos-seatbelt'; native_resource_id: string | null; native_nonce: string | null; deadline: number; reserved_duration_ms: number; reserved_memory_mib: number; reserved_workspace_inodes: number; reserved_storage_bytes: number; status: IsolationStatus; version: number; created_at: number; updated_at: number; result_json: string | null; dispatch_attempted: number; creation_witness_json: string | null; artifact_binding_json: string | null }
+type JobRow = { id: string; grant_id: string; grant_revision: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string; session_id: string; idempotency_key: string; request_digest: string; container_name: string | null; backend_kind: IsolationJob['backend']; linux_contract_json: string | null; linux_intent_json: string | null; linux_resources_json: string | null; native_resource_id: string | null; native_nonce: string | null; deadline: number; reserved_duration_ms: number; reserved_memory_mib: number; reserved_workspace_inodes: number; reserved_storage_bytes: number; status: IsolationStatus; version: number; created_at: number; updated_at: number; result_json: string | null; dispatch_attempted: number; creation_witness_json: string | null; artifact_binding_json: string | null }
 type ResourceReservation = { memoryMiB: number; workspaceInodes: number; maxMemoryMiB: number; maxWorkspaceInodes: number }
 
 function open(path: string): DatabaseSync {
@@ -111,10 +112,17 @@ function open(path: string): DatabaseSync {
       CREATE INDEX isolation_jobs_grant ON isolation_jobs(grant_id);
       CREATE INDEX isolation_jobs_recoverable ON isolation_jobs(status, updated_at);
       UPDATE schema_meta SET value='7' WHERE key='schema-version'; PRAGMA user_version=7; COMMIT;`)
+    if ([0, 1, 2, 3, 4, 5, 6, 7].includes(version)) database.exec(`BEGIN IMMEDIATE;
+      CREATE TABLE isolation_jobs_v8 (id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL, session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, container_name TEXT UNIQUE, backend_kind TEXT NOT NULL CHECK(backend_kind IN ('docker','macos-seatbelt','linux-native')), native_resource_id TEXT UNIQUE, native_nonce TEXT, deadline INTEGER NOT NULL, reserved_duration_ms INTEGER NOT NULL, reserved_memory_mib INTEGER NOT NULL DEFAULT 0, reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0, reserved_storage_bytes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL CHECK(status IN ('prepared','running','succeeded','failed','cancelled','timed-out','unknown')), version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result_json TEXT, dispatch_attempted INTEGER NOT NULL DEFAULT 0 CHECK(dispatch_attempted IN (0,1)), creation_witness_json TEXT, artifact_binding_json TEXT, linux_contract_json TEXT, linux_intent_json TEXT, linux_resources_json TEXT, CHECK((backend_kind='docker' AND container_name IS NOT NULL AND native_resource_id IS NULL AND native_nonce IS NULL) OR (backend_kind='macos-seatbelt' AND container_name IS NULL AND native_resource_id IS NOT NULL AND native_nonce IS NOT NULL AND reserved_memory_mib=0 AND reserved_workspace_inodes=0 AND linux_contract_json IS NULL AND linux_intent_json IS NULL AND linux_resources_json IS NULL) OR (backend_kind='linux-native' AND container_name IS NULL AND native_resource_id IS NOT NULL AND native_nonce IS NOT NULL AND reserved_memory_mib>0 AND reserved_workspace_inodes>0 AND reserved_storage_bytes>0 AND linux_contract_json IS NOT NULL)), CHECK(backend_kind='linux-native' OR (linux_contract_json IS NULL AND linux_intent_json IS NULL AND linux_resources_json IS NULL)), UNIQUE(principal_digest, principal_record_id, principal_version, workspace, agent_preset, session_id, grant_id, idempotency_key)) STRICT;
+      INSERT INTO isolation_jobs_v8 (id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,backend_kind,native_resource_id,native_nonce,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,status,version,created_at,updated_at,result_json,dispatch_attempted,creation_witness_json,artifact_binding_json) SELECT id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,backend_kind,native_resource_id,native_nonce,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,status,version,created_at,updated_at,result_json,dispatch_attempted,creation_witness_json,artifact_binding_json FROM isolation_jobs;
+      DROP TABLE isolation_jobs; ALTER TABLE isolation_jobs_v8 RENAME TO isolation_jobs;
+      CREATE INDEX isolation_jobs_grant ON isolation_jobs(grant_id);
+      CREATE INDEX isolation_jobs_recoverable ON isolation_jobs(status, updated_at);
+      UPDATE schema_meta SET value='8' WHERE key='schema-version'; PRAGMA user_version=8; COMMIT;`)
     database.exec("CREATE INDEX IF NOT EXISTS isolation_artifact_contract ON isolation_jobs(json_extract(artifact_binding_json, '$.admission.contractId')) WHERE artifact_binding_json IS NOT NULL")
-    if (![0, 1, 2, 3, 4, 5, 6, schemaVersion].includes(version)) fail('schema')
+    if (![0, 1, 2, 3, 4, 5, 6, 7, schemaVersion].includes(version)) fail('schema')
     const marker = database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value?: unknown } | undefined
-    if (marker?.value !== '7' || (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version !== 7) fail('schema')
+    if (marker?.value !== '8' || (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version !== 8) fail('schema')
     if (path !== ':memory:') chmodSync(path, 0o600)
     return database
   } catch (error) { database.close(); throw error }
@@ -144,7 +152,8 @@ export class IsolationLedger {
     const jobIdentity = identity({ principalDigest: row.principal_digest, principalRecordId: row.principal_record_id, principalVersion: row.principal_version, workspace: row.workspace, agentPreset: row.agent_preset })
     if (!text(row.id) || !text(row.grant_id) || !safePositive(row.grant_revision) || !text(row.session_id) || !text(row.idempotency_key) || !text(row.request_digest) || !positiveTime(row.deadline) || !safePositive(row.reserved_duration_ms) || !safeTime(row.reserved_memory_mib) || !safeTime(row.reserved_workspace_inodes) || !safeTime(row.reserved_storage_bytes) || !safePositive(row.version) || !safeTime(row.created_at) || !safeTime(row.updated_at) || row.updated_at < row.created_at || !['prepared', 'running', 'succeeded', 'failed', 'cancelled', 'timed-out', 'unknown'].includes(row.status)) fail('schema')
     if (!((row.backend_kind === 'docker' && text(row.container_name) && row.native_resource_id === null && row.native_nonce === null)
-      || (row.backend_kind === 'macos-seatbelt' && row.container_name === null && text(row.native_resource_id) && text(row.native_nonce) && row.reserved_memory_mib === 0 && row.reserved_workspace_inodes === 0))) fail('schema')
+      || (row.backend_kind === 'macos-seatbelt' && row.container_name === null && text(row.native_resource_id) && text(row.native_nonce) && row.reserved_memory_mib === 0 && row.reserved_workspace_inodes === 0)
+      || (row.backend_kind === 'linux-native' && row.container_name === null && row.native_resource_id === `linux-${row.id}` && /^[a-f0-9]{32}$/u.test(row.native_nonce ?? '') && row.reserved_memory_mib > 0 && row.reserved_workspace_inodes > 0 && row.reserved_storage_bytes > 0))) fail('schema')
     if (![0, 1].includes(row.dispatch_attempted)) fail('schema')
     let witness: CreationWitness | undefined
     if (row.creation_witness_json !== null) {
@@ -153,10 +162,36 @@ export class IsolationLedger {
     }
     let binding: IsolationArtifactBinding | undefined
     if (row.artifact_binding_json !== null) { try { binding = artifactBinding(JSON.parse(row.artifact_binding_json)) } catch { fail('schema') } }
+    let linuxContract: LinuxExecutionContract | undefined
+    let linuxIntent: LinuxExecutionIntent | undefined
+    let linuxResources: LinuxExecutionResources | undefined
+    try {
+      if (row.backend_kind === 'linux-native') {
+        linuxContract = validateLinuxExecutionContract(JSON.parse(row.linux_contract_json!))
+        if (!/^[a-f0-9]{64}$/u.test(row.request_digest) || row.reserved_duration_ms > linuxContract.limits.maxDurationMs
+          || row.reserved_memory_mib < linuxContract.limits.memoryMiB + linuxContract.limits.workspaceMiB + linuxContract.keeperLimits.memoryMiB
+          || row.reserved_workspace_inodes < linuxContract.limits.workspaceInodes) fail('schema')
+        if (row.linux_intent_json !== null) {
+          linuxIntent = validateLinuxExecutionIntent(JSON.parse(row.linux_intent_json), linuxContract)
+          this.#bindLinuxIntent(row, linuxIntent, linuxContract)
+        }
+        if (row.linux_resources_json !== null) {
+          if (!linuxIntent || !row.dispatch_attempted) fail('schema')
+          linuxResources = validateLinuxExecutionResources(JSON.parse(row.linux_resources_json), linuxIntent, linuxContract)
+        }
+        if (row.dispatch_attempted && !linuxIntent || row.status === 'running' && !linuxResources) fail('schema')
+      } else if (row.linux_contract_json !== null || row.linux_intent_json !== null || row.linux_resources_json !== null) fail('schema')
+    } catch { fail('schema', 'invalid persisted Linux execution binding') }
     let parsed: IsolationResult | undefined
     if (row.result_json !== null) { try { parsed = result(JSON.parse(row.result_json) as IsolationResult, true) } catch { fail('schema') }; if (parsed.jobId !== row.id || (row.status === 'prepared' || row.status === 'running') || parsed.status !== row.status) fail('schema') }
     else if (row.status !== 'prepared' && row.status !== 'running') fail('schema')
-    return frozen({ ...(binding ? { artifactBinding: binding } : {}), id: row.id, grantId: row.grant_id, grantRevision: row.grant_revision, identity: jobIdentity, sessionId: row.session_id, idempotencyKey: row.idempotency_key, requestDigest: row.request_digest, containerName: row.container_name ?? '', backend: row.backend_kind, ...(row.native_resource_id ? { nativeResourceId: row.native_resource_id } : {}), ...(row.native_nonce ? { nativeNonce: row.native_nonce } : {}), deadline: row.deadline, reservedDurationMs: row.reserved_duration_ms, reservedMemoryMiB: row.reserved_memory_mib, reservedWorkspaceInodes: row.reserved_workspace_inodes, reservedStorageBytes: row.reserved_storage_bytes, dispatchAttempted: row.dispatch_attempted === 1, ...(witness ? { creationWitness: witness } : {}), status: row.status, version: row.version, createdAt: row.created_at, updatedAt: row.updated_at, ...(parsed ? { result: parsed } : {}) })
+    return frozen({ ...(linuxContract ? { linuxContract } : {}), ...(linuxIntent ? { linuxIntent } : {}), ...(linuxResources ? { linuxResources } : {}), ...(binding ? { artifactBinding: binding } : {}), id: row.id, grantId: row.grant_id, grantRevision: row.grant_revision, identity: jobIdentity, sessionId: row.session_id, idempotencyKey: row.idempotency_key, requestDigest: row.request_digest, containerName: row.container_name ?? '', backend: row.backend_kind, ...(row.native_resource_id ? { nativeResourceId: row.native_resource_id } : {}), ...(row.native_nonce ? { nativeNonce: row.native_nonce } : {}), deadline: row.deadline, reservedDurationMs: row.reserved_duration_ms, reservedMemoryMiB: row.reserved_memory_mib, reservedWorkspaceInodes: row.reserved_workspace_inodes, reservedStorageBytes: row.reserved_storage_bytes, dispatchAttempted: row.dispatch_attempted === 1, ...(witness ? { creationWitness: witness } : {}), status: row.status, version: row.version, createdAt: row.created_at, updatedAt: row.updated_at, ...(parsed ? { result: parsed } : {}) })
+  }
+  #bindLinuxIntent(row: JobRow, intent: LinuxExecutionIntent, contract: LinuxExecutionContract): void {
+    if (intent.jobId !== row.id || intent.requestDigest !== row.request_digest || intent.nativeResourceId !== row.native_resource_id
+      || intent.nativeNonce !== row.native_nonce || intent.deadline !== row.deadline || row.reserved_duration_ms > contract.limits.maxDurationMs
+      || row.reserved_memory_mib < contract.limits.memoryMiB + contract.limits.workspaceMiB + contract.keeperLimits.memoryMiB
+      || row.reserved_workspace_inodes < contract.limits.workspaceInodes) fail('invalid-input', 'Linux intent differs from job reservation')
   }
   syncGrants(grants: IsolationGrant[], authority?: IsolationControllerAuthority): void {
     if (!Array.isArray(grants)) fail('invalid-input')
@@ -172,16 +207,25 @@ export class IsolationLedger {
       for (const row of this.#database.prepare('SELECT id, revision, revoked FROM isolation_grants').all() as Array<{ id: string; revision: number; revoked: number }>) if (!seen.has(row.id) && row.revoked === 0) { this.#database.prepare('UPDATE isolation_grants SET revoked=1, revoke_reason=? WHERE id=?').run('removed-from-config', row.id); this.#audit(now, 'grant-revoked', null, row.id, 'removed-from-config') }
     })
   }
-  prepare(input: { identity: IsolationIdentity; sessionId: string; grantId: string; idempotencyKey: string; requestDigest: string; durationMs: number; maxActiveJobs?: number; authority?: IsolationControllerAuthority; resourceReservation?: ResourceReservation; storageBudget?: IsolationStorageBudget; artifactBinding?: IsolationArtifactBinding; backend?: 'docker' | 'macos-seatbelt' }): { job: IsolationJob; created: boolean } {
-    if (!input || typeof input !== 'object' || ![6, 7, 8, 9, 10, 11, 12].includes(Object.keys(input).length) || !onlyKeys(input, ['identity', 'sessionId', 'grantId', 'idempotencyKey', 'requestDigest', 'durationMs', 'maxActiveJobs', 'authority', 'resourceReservation', 'storageBudget', 'artifactBinding', 'backend']) || !text(input.sessionId) || !text(input.grantId) || !text(input.idempotencyKey) || !text(input.requestDigest) || !safePositive(input.durationMs) || (input.maxActiveJobs !== undefined && !safePositive(input.maxActiveJobs)) || (input.backend !== undefined && input.backend !== 'docker' && input.backend !== 'macos-seatbelt') || (input.backend === 'macos-seatbelt' && input.resourceReservation !== undefined)) fail('invalid-input')
+  prepare(input: { identity: IsolationIdentity; sessionId: string; grantId: string; idempotencyKey: string; requestDigest: string; durationMs: number; maxActiveJobs?: number; authority?: IsolationControllerAuthority; resourceReservation?: ResourceReservation; storageBudget?: IsolationStorageBudget; artifactBinding?: IsolationArtifactBinding; backend?: IsolationJob['backend']; linuxContract?: LinuxExecutionContract }): { job: IsolationJob; created: boolean } {
+    if (!input || typeof input !== 'object' || ![6, 7, 8, 9, 10, 11, 12, 13].includes(Object.keys(input).length) || !onlyKeys(input, ['identity', 'sessionId', 'grantId', 'idempotencyKey', 'requestDigest', 'durationMs', 'maxActiveJobs', 'authority', 'resourceReservation', 'storageBudget', 'artifactBinding', 'backend', 'linuxContract']) || !text(input.sessionId) || !text(input.grantId) || !text(input.idempotencyKey) || !text(input.requestDigest) || !safePositive(input.durationMs) || (input.maxActiveJobs !== undefined && !safePositive(input.maxActiveJobs)) || (input.backend !== undefined && input.backend !== 'docker' && input.backend !== 'macos-seatbelt' && input.backend !== 'linux-native') || (input.backend === 'macos-seatbelt' && input.resourceReservation !== undefined)) fail('invalid-input')
+    let linuxContract: LinuxExecutionContract | undefined
+    if (input.backend === 'linux-native') {
+      try { linuxContract = validateLinuxExecutionContract(input.linuxContract) } catch { fail('invalid-input', 'Linux contract required') }
+      if (!/^[a-f0-9]{64}$/u.test(input.requestDigest) || !input.resourceReservation || !input.storageBudget
+        || input.durationMs > linuxContract.limits.maxDurationMs
+        || input.resourceReservation.memoryMiB < linuxContract.limits.memoryMiB + linuxContract.limits.workspaceMiB + linuxContract.keeperLimits.memoryMiB
+        || input.resourceReservation.workspaceInodes < linuxContract.limits.workspaceInodes) fail('invalid-input', 'Linux resources must be reserved')
+    } else if (input.linuxContract !== undefined) fail('invalid-input')
     const binding = input.artifactBinding === undefined ? undefined : artifactBinding(input.artifactBinding)
     const reservation = input.resourceReservation === undefined ? undefined : input.resourceReservation
     if (reservation !== undefined && (!reservation || typeof reservation !== 'object' || Object.keys(reservation).length !== 4 || !onlyKeys(reservation, ['memoryMiB', 'workspaceInodes', 'maxMemoryMiB', 'maxWorkspaceInodes']) || !safePositive(reservation.memoryMiB) || !safePositive(reservation.workspaceInodes) || !safePositive(reservation.maxMemoryMiB) || !safePositive(reservation.maxWorkspaceInodes) || reservation.memoryMiB > reservation.maxMemoryMiB || reservation.workspaceInodes > reservation.maxWorkspaceInodes)) fail('invalid-input', 'invalid resource reservation')
     const storage = input.storageBudget
     if (storage !== undefined && (!storage || typeof storage !== 'object' || !onlyKeys(storage, ['maxStateBytes', 'maxJobRecords', 'reservedBytes', 'observation']) || ![3, 4].includes(Object.keys(storage).length) || !safePositive(storage.maxStateBytes) || !safePositive(storage.maxJobRecords) || !safePositive(storage.reservedBytes) || (storage.observation !== undefined && (!storage.observation || typeof storage.observation !== 'object' || Object.keys(storage.observation).length !== 2 || !onlyKeys(storage.observation, ['bytes', 'observedAt']) || !safeTime(storage.observation.bytes) || !safeTime(storage.observation.observedAt))))) fail('invalid-input', 'invalid storage budget')
     const who = identity(input.identity); const controller = this.#authority(input.authority)
+    if (input.backend === 'linux-native' && !controller) fail('invalid-input', 'Linux writes require controller authority')
     return this.#transaction(() => { const now = this.#nowValue(); this.#requireController(controller, now); const existing = this.#database.prepare('SELECT * FROM isolation_jobs WHERE principal_digest=? AND principal_record_id=? AND principal_version=? AND workspace=? AND agent_preset=? AND session_id=? AND grant_id=? AND idempotency_key=?').get(who.principalDigest, who.principalRecordId, who.principalVersion, who.workspace, who.agentPreset, input.sessionId, input.grantId, input.idempotencyKey) as JobRow | undefined
-      if (existing) { const job = this.#decodeJob(existing); if (job.requestDigest !== input.requestDigest || job.backend !== (input.backend ?? 'docker')) fail('conflict', 'idempotency key has a different request or backend'); return { job, created: false } }
+      if (existing) { const job = this.#decodeJob(existing); if (job.requestDigest !== input.requestDigest || job.backend !== (input.backend ?? 'docker') || (linuxContract && linuxExecutionContractDigest(job.linuxContract!) !== linuxExecutionContractDigest(linuxContract))) fail('conflict', 'idempotency key has a different request or backend'); return { job, created: false } }
       const current = this.#grant(input.grantId)
       if (!current || current.revoked || current.expires_at <= now || current.principal_digest !== who.principalDigest || current.principal_record_id !== who.principalRecordId || current.principal_version !== who.principalVersion || current.workspace !== who.workspace || current.agent_preset !== who.agentPreset) fail('unauthorized')
       if (input.maxActiveJobs !== undefined) {
@@ -214,11 +258,43 @@ export class IsolationLedger {
         if (!safeTime(reserved) || observation.bytes > storage.maxStateBytes || reserved > storage.maxStateBytes - observation.bytes) fail('unauthorized', 'isolation storage budget exhausted')
       }
       const id = randomUUID(); const deadline = Math.min(now + input.durationMs, current.expires_at)
-      const native = input.backend === 'macos-seatbelt'
-      this.#database.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,backend_kind,native_resource_id,native_nonce,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,dispatch_attempted,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0, 'prepared',1,?,?)").run(id, input.grantId, current.revision, who.principalDigest, who.principalRecordId, who.principalVersion, who.workspace, who.agentPreset, input.sessionId, input.idempotencyKey, input.requestDigest, native ? null : `dsh-isolation-${id}`, native ? 'macos-seatbelt' : 'docker', native ? `native-${id}` : null, native ? randomUUID() : null, deadline, input.durationMs, reservation?.memoryMiB ?? 0, reservation?.workspaceInodes ?? 0, storage?.reservedBytes ?? 0, now, now)
+      const native = input.backend === 'macos-seatbelt' || input.backend === 'linux-native'
+      this.#database.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,backend_kind,native_resource_id,native_nonce,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,linux_contract_json,dispatch_attempted,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0, 'prepared',1,?,?)").run(id, input.grantId, current.revision, who.principalDigest, who.principalRecordId, who.principalVersion, who.workspace, who.agentPreset, input.sessionId, input.idempotencyKey, input.requestDigest, native ? null : `dsh-isolation-${id}`, input.backend ?? 'docker', native ? `${input.backend === 'linux-native' ? 'linux' : 'native'}-${id}` : null, input.backend === 'linux-native' ? randomBytes(16).toString('hex') : native ? randomUUID() : null, deadline, input.durationMs, reservation?.memoryMiB ?? 0, reservation?.workspaceInodes ?? 0, storage?.reservedBytes ?? 0, linuxContract ? JSON.stringify(linuxContract) : null, now, now)
       if (binding) this.#database.prepare('UPDATE isolation_jobs SET artifact_binding_json=? WHERE id=?').run(JSON.stringify(binding), id)
       this.#audit(now, 'job-prepared', id, input.grantId, `revision:${current.revision}${reservation ? `;reservation:memoryMiB:${reservation.memoryMiB},workspaceInodes:${reservation.workspaceInodes}` : ''}${storage ? `;storageBytes:${storage.reservedBytes}` : ''}`)
       return { job: this.#job(id)!, created: true }
+    })
+  }
+  markLinuxCreateIntent(jobId: string, expectedVersion: number, intent: LinuxExecutionIntent, authority: IsolationControllerAuthority): IsolationJob {
+    if (!text(jobId) || !safePositive(expectedVersion)) fail('invalid-input')
+    const controller = this.#authority(authority); if (!controller) fail('invalid-input')
+    return this.#transaction(() => {
+      const now = this.#nowValue(); this.#requireController(controller, now)
+      const job = this.#job(jobId); if (!job) fail('not-found'); if (job.version !== expectedVersion) fail('conflict')
+      if (job.backend !== 'linux-native' || job.status !== 'prepared' || job.dispatchAttempted || job.linuxIntent || !this.usable(jobId)) fail('invalid-state')
+      let checked: LinuxExecutionIntent
+      try { checked = validateLinuxExecutionIntent(intent, job.linuxContract!) } catch { fail('invalid-input') }
+      const row = this.#database.prepare('SELECT * FROM isolation_jobs WHERE id=?').get(jobId) as JobRow
+      this.#bindLinuxIntent(row, checked, job.linuxContract!)
+      const changed = this.#database.prepare("UPDATE isolation_jobs SET linux_intent_json=?, version=version+1, updated_at=? WHERE id=? AND version=? AND status='prepared' AND dispatch_attempted=0 AND linux_intent_json IS NULL").run(JSON.stringify(checked), now, jobId, expectedVersion)
+      if (changed.changes !== 1) fail('conflict')
+      this.#audit(now, 'linux-create-intent', jobId, job.grantId, linuxExecutionIntentDigest(checked))
+      return this.#job(jobId)!
+    })
+  }
+  recordLinuxResources(jobId: string, expectedVersion: number, resources: LinuxExecutionResources, authority: IsolationControllerAuthority): IsolationJob {
+    if (!text(jobId) || !safePositive(expectedVersion)) fail('invalid-input')
+    const controller = this.#authority(authority); if (!controller) fail('invalid-input')
+    return this.#transaction(() => {
+      const now = this.#nowValue(); this.#requireController(controller, now)
+      const job = this.#job(jobId); if (!job) fail('not-found'); if (job.version !== expectedVersion) fail('conflict')
+      if (job.backend !== 'linux-native' || job.status !== 'prepared' || !job.dispatchAttempted || !job.linuxIntent || job.linuxResources) fail('invalid-state')
+      let checked: LinuxExecutionResources
+      try { checked = validateLinuxExecutionResources(resources, job.linuxIntent, job.linuxContract!) } catch { fail('invalid-input') }
+      const changed = this.#database.prepare("UPDATE isolation_jobs SET linux_resources_json=?, version=version+1, updated_at=? WHERE id=? AND version=? AND status='prepared' AND dispatch_attempted=1 AND linux_resources_json IS NULL").run(JSON.stringify(checked), now, jobId, expectedVersion)
+      if (changed.changes !== 1) fail('conflict')
+      this.#audit(now, 'linux-resources-created', jobId, job.grantId, linuxExecutionResourcesDigest(checked))
+      return this.#job(jobId)!
     })
   }
   /** Commit the crash boundary before a supervisor can receive create authority. */
@@ -232,7 +308,7 @@ export class IsolationLedger {
       const job = this.#job(jobId)
       if (!job) fail('not-found')
       if (job.version !== expectedVersion) fail('conflict')
-      if (job.status !== 'prepared' || job.dispatchAttempted || !this.usable(jobId)) fail('invalid-state')
+      if (job.status !== 'prepared' || job.dispatchAttempted || !this.usable(jobId) || job.backend === 'linux-native' && !job.linuxIntent) fail('invalid-state')
       const changed = this.#database.prepare("UPDATE isolation_jobs SET dispatch_attempted=1, version=version+1, updated_at=? WHERE id=? AND version=? AND status='prepared' AND dispatch_attempted=0").run(now, jobId, expectedVersion)
       if (changed.changes !== 1) fail('conflict')
       this.#audit(now, 'supervisor-spawn-intent', jobId, job.grantId, 'create-authority-may-be-dispatched')
@@ -242,7 +318,7 @@ export class IsolationLedger {
   start(jobId: string, expectedVersion: number, authority?: IsolationControllerAuthority): IsolationJob {
     if (!text(jobId) || !safePositive(expectedVersion)) fail('invalid-input')
     const controller = this.#authority(authority)
-    return this.#transaction(() => { const now = this.#nowValue(); this.#requireController(controller, now); const job = this.#job(jobId); if (!job) fail('not-found'); if (job.version !== expectedVersion) fail('conflict', 'job version differs'); if (job.status !== 'prepared') fail('invalid-state')
+    return this.#transaction(() => { const now = this.#nowValue(); this.#requireController(controller, now); const job = this.#job(jobId); if (!job) fail('not-found'); if (job.version !== expectedVersion) fail('conflict', 'job version differs'); if (job.status !== 'prepared' || job.backend === 'linux-native' && (!controller || !job.dispatchAttempted || !job.linuxIntent || !job.linuxResources)) fail('invalid-state')
       const current = this.#grant(job.grantId)
       if (!current || current.revoked || current.revision !== job.grantRevision || current.expires_at <= now || job.deadline <= now || current.principal_digest !== job.identity.principalDigest || current.principal_record_id !== job.identity.principalRecordId || current.principal_version !== job.identity.principalVersion || current.workspace !== job.identity.workspace || current.agent_preset !== job.identity.agentPreset) fail('unauthorized')
       const changed = this.#database.prepare("UPDATE isolation_jobs SET status='running', dispatch_attempted=1, version=version+1, updated_at=? WHERE id=? AND version=? AND status='prepared'").run(now, jobId, expectedVersion)
@@ -259,8 +335,9 @@ export class IsolationLedger {
     if (value.reason === 'docker-creation-unconfirmed' && value.quiescent) fail('invalid-input')
     const controller = this.#authority(authority)
     return this.#transaction(() => { const now = this.#nowValue(); this.#requireController(controller, now); const job = this.#job(jobId); if (!job) fail('not-found'); if (job.version !== expectedVersion) fail('conflict', 'job version differs')
+      if (job.backend === 'linux-native' && !controller) fail('invalid-input', 'Linux writes require controller authority')
       if (witness && !job.dispatchAttempted) fail('invalid-state')
-      if (job.backend === 'macos-seatbelt' && job.dispatchAttempted && value.status !== 'unknown') fail('invalid-state', 'native dispatch requires a durable receipt')
+      if (job.backend !== 'docker' && job.dispatchAttempted && value.status !== 'unknown') fail('invalid-state', 'native dispatch requires a durable receipt')
       if (job.dispatchAttempted && value.status === 'unknown' && value.quiescent) fail('invalid-state', 'dispatch requires independent quiescence evidence')
       if (job.status !== 'prepared' && job.status !== 'running') {
         if (job.result && equal(job.result, value)) return job
@@ -295,6 +372,87 @@ export class IsolationLedger {
       this.#audit(now, 'native-receipt-settled', jobId, job.grantId, value.status)
       return this.#job(jobId)!
     })
+  }
+  #linuxReceiptJob(jobId: string, expectedVersion: number, input: LinuxReceiptBinding, controller: IsolationControllerAuthority): { job: IsolationJob; binding: LinuxReceiptBinding; now: number } {
+    const now = this.#nowValue(); this.#requireController(controller, now)
+    let binding: LinuxReceiptBinding
+    try { binding = validateLinuxReceiptBinding(input) } catch { fail('invalid-input') }
+    const job = this.#job(jobId); if (!job) fail('not-found'); if (job.version !== expectedVersion) fail('conflict')
+    if (job.backend !== 'linux-native' || !job.dispatchAttempted || !job.linuxIntent || !job.linuxResources
+      || job.requestDigest !== binding.requestDigest || job.nativeNonce !== binding.nativeNonce || job.nativeResourceId !== binding.nativeResourceId
+      || linuxExecutionIntentDigest(job.linuxIntent) !== binding.intentDigest || linuxExecutionResourcesDigest(job.linuxResources) !== binding.resourcesDigest) fail('invalid-state', 'Linux receipt binding differs')
+    return { job, binding, now }
+  }
+  /** Only the Host can attest receipt integrity and exact kernel quiescence. */
+  settleLinuxReceipt(jobId: string, expectedVersion: number, binding: LinuxReceiptBinding, input: IsolationResult, authority: IsolationControllerAuthority): IsolationJob {
+    const value = result(input)
+    if (!text(jobId) || !safePositive(expectedVersion) || value.jobId !== jobId || !value.quiescent) fail('invalid-input')
+    const controller = this.#authority(authority); if (!controller) fail('invalid-input')
+    return this.#transaction(() => {
+      const { job, binding: checked, now } = this.#linuxReceiptJob(jobId, expectedVersion, binding, controller)
+      if (!['prepared', 'running'].includes(job.status)) fail('invalid-state', 'existing unknown requires reconciliation')
+      const changed = this.#database.prepare("UPDATE isolation_jobs SET status=?, result_json=?, version=version+1, updated_at=? WHERE id=? AND version=? AND status IN ('prepared','running')").run(value.status, JSON.stringify(value), now, jobId, expectedVersion)
+      if (changed.changes !== 1) fail('conflict')
+      this.#audit(now, 'linux-receipt-settled', jobId, job.grantId, JSON.stringify(checked))
+      return this.#job(jobId)!
+    })
+  }
+  settleLinuxReconciledUnknown(jobId: string, expectedVersion: number, binding: LinuxReceiptBinding, authority: IsolationControllerAuthority): IsolationJob {
+    if (!text(jobId) || !safePositive(expectedVersion)) fail('invalid-input')
+    const controller = this.#authority(authority); if (!controller) fail('invalid-input')
+    return this.#transaction(() => {
+      const { job, binding: checked, now } = this.#linuxReceiptJob(jobId, expectedVersion, binding, controller)
+      if (job.status !== 'unknown' || !job.result || job.result.quiescent) fail('invalid-state')
+      const changed = this.#database.prepare("UPDATE isolation_jobs SET result_json=?, version=version+1, updated_at=? WHERE id=? AND version=? AND status='unknown'").run(JSON.stringify({ ...job.result, quiescent: true }), now, jobId, expectedVersion)
+      if (changed.changes !== 1) fail('conflict')
+      this.#audit(now, 'linux-unknown-quiesced', jobId, job.grantId, JSON.stringify(checked))
+      return this.#job(jobId)!
+    })
+  }
+  /** Recover a lost resources acknowledgement; never reopens start admission. */
+  recordLinuxRecoveredResources(jobId: string, expectedVersion: number, resources: LinuxExecutionResources, authority: IsolationControllerAuthority): IsolationJob {
+    if (!text(jobId) || !safePositive(expectedVersion)) fail('invalid-input')
+    const controller = this.#authority(authority); if (!controller) fail('invalid-input')
+    return this.#transaction(() => {
+      const now = this.#nowValue(); this.#requireController(controller, now)
+      const job = this.#job(jobId); if (!job) fail('not-found'); if (job.version !== expectedVersion) fail('conflict')
+      if (job.backend !== 'linux-native' || !job.dispatchAttempted || job.status !== 'unknown' || job.result?.quiescent !== false
+        || !job.linuxIntent || !job.linuxContract || job.linuxResources) fail('invalid-state')
+      let checked: LinuxExecutionResources
+      try { checked = validateLinuxExecutionResources(resources, job.linuxIntent, job.linuxContract) } catch { fail('invalid-input') }
+      const changed = this.#database.prepare("UPDATE isolation_jobs SET linux_resources_json=?,version=version+1,updated_at=? WHERE id=? AND version=? AND status='unknown' AND linux_resources_json IS NULL").run(JSON.stringify(checked), now, jobId, expectedVersion)
+      if (changed.changes !== 1) fail('conflict')
+      this.#audit(now, 'linux-resources-recovered', jobId, job.grantId, linuxExecutionResourcesDigest(checked))
+      return this.#job(jobId)!
+    })
+  }
+  /** Exact pre-start absence proof releases capacity, never the original outcome or budget. */
+  settleLinuxPrestartCleanup(jobId: string, expectedVersion: number, proof: LinuxExecutionPartialCleanupProof, authority: IsolationControllerAuthority): IsolationJob {
+    if (!text(jobId) || !safePositive(expectedVersion)) fail('invalid-input')
+    let checked: LinuxExecutionPartialCleanupProof
+    try { checked = validateLinuxExecutionPartialCleanupProof(proof) } catch { fail('invalid-input') }
+    const controller = this.#authority(authority); if (!controller) fail('invalid-input')
+    return this.#transaction(() => {
+      const now = this.#nowValue(); this.#requireController(controller, now)
+      const job = this.#job(jobId); if (!job) fail('not-found'); if (job.version !== expectedVersion) fail('conflict')
+      if (job.backend !== 'linux-native' || !job.dispatchAttempted || !job.linuxIntent || job.linuxResources
+        || !['prepared', 'unknown'].includes(job.status) || job.result?.quiescent === true
+        || checked.jobId !== job.id || checked.requestDigest !== job.requestDigest || checked.nativeNonce !== job.nativeNonce
+        || checked.nativeResourceId !== job.nativeResourceId || checked.intentDigest !== linuxExecutionIntentDigest(job.linuxIntent)
+        || checked.observedAt < job.createdAt || checked.observedAt > now) fail('invalid-state')
+      const value: IsolationResult = job.result ? { ...job.result, quiescent: true }
+        : { jobId, status: 'unknown', quiescent: true, stdout: '', stderr: '', artifacts: [], reason: 'linux-prestart-cleanup-confirmed' }
+      const changed = this.#database.prepare("UPDATE isolation_jobs SET status='unknown',result_json=?,version=version+1,updated_at=? WHERE id=? AND version=? AND status IN ('prepared','unknown')").run(JSON.stringify(value), now, jobId, expectedVersion)
+      if (changed.changes !== 1) fail('conflict')
+      this.#audit(now, 'linux-prestart-quiesced', jobId, job.grantId, JSON.stringify(checked))
+      return this.#job(jobId)!
+    })
+  }
+  findJobByKey(value: IsolationIdentity, sessionId: string, grantId: string, key: string): IsolationJob | undefined {
+    const who = identity(value)
+    if (!text(sessionId) || !text(grantId) || !text(key)) fail('invalid-input')
+    const row = this.#database.prepare('SELECT * FROM isolation_jobs WHERE principal_digest=? AND principal_record_id=? AND principal_version=? AND workspace=? AND agent_preset=? AND session_id=? AND grant_id=? AND idempotency_key=?').get(who.principalDigest, who.principalRecordId, who.principalVersion, who.workspace, who.agentPreset, sessionId, grantId, key) as JobRow | undefined
+    return row ? this.#decodeJob(row) : undefined
   }
   findNativeVerifierJob(principalDigest: string, stateRoot: string, key: string): IsolationJob | undefined {
     if (!text(principalDigest) || !text(stateRoot) || !text(key)) fail('invalid-input')

@@ -11,6 +11,12 @@ export { NativeMacVerifierRunner, type NativeMacVerifierRunnerConfig } from './n
 export { hashLinuxRuntimeTree, verifyLinuxRuntime, validateLinuxRuntime, linuxRuntimeDigest, type LinuxRuntime } from './linux-runtime.js'
 export { runLinuxNamespace, type LinuxNamespaceInput, type LinuxNamespaceResult, type LinuxCandidateIdentity, type LinuxCandidateExit } from './linux-namespace.js'
 export { LinuxCgroupLease, type LinuxCgroupRoots, type LinuxCgroupLimits, type LinuxCgroupIdentity, type LinuxCgroupSnapshot } from './linux-cgroups.js'
+export { LinuxVerifierRunner, type LinuxVerifierRunnerConfig } from './linux-verifier-runner.js'
+export { prepareLinuxExecutionIntent, runLinuxExecution, readLinuxExecutionReceipt, readLinuxExecutionPartialCleanupProof,
+  reconcileLinuxExecution, linuxExecutionReceiptBinding, type LinuxExecutionReceipt } from './linux-execution.js'
+export { linuxExecutionContractDigest, linuxExecutionIntentDigest, linuxExecutionResourcesDigest,
+  type LinuxExecutionContract, type LinuxExecutionIntent, type LinuxExecutionResources, type LinuxReceiptBinding,
+  type LinuxExecutionPartialCleanupProof } from './linux-execution-contract.js'
 export { inspectIsolationGrant, type IsolationGrantDiagnostic, type IsolationGrantDiagnosticReason } from './diagnostics.js'
 export { probeIsolationRuntime } from './probe.js'
 export * from './audit-archive.js'

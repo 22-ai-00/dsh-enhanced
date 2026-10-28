@@ -11,8 +11,10 @@ import { plannedStorageBytes } from './storage-policy.js'
 import type { IsolationJob, IsolationRequest, IsolationResult } from './types.js'
 import type { CreationWitness } from './runtime-witness.js'
 import { bindIsolationStateSocket } from './state-socket-binding.js'
+import { LinuxVerifierRunner, type LinuxVerifierRunnerConfig } from './linux-verifier-runner.js'
 
 export interface IsolatedVerifierRunnerConfig {
+  backend?: 'docker'
   stateRoot: string
   image: string
   dockerPath: string
@@ -27,7 +29,7 @@ export interface IsolatedVerifierRunnerConfig {
 }
 
 /** Operator-owned verification jobs. No Agent or model tool receives this runner. */
-export class IsolatedVerifierRunner {
+class DockerVerifierRunner {
   readonly #input: Readonly<IsolatedVerifierRunnerConfig>
   readonly #config: ReturnType<typeof validateConfig>
   readonly #ledger: IsolationLedger
@@ -78,6 +80,17 @@ export class IsolatedVerifierRunner {
       cursor = jobs.at(-1)!.id
       for (const job of jobs) {
         if (!this.#active) return
+        if (job.backend !== 'docker' || !job.containerName) {
+          // Switching the configured backend grants no cleanup authority over
+          // another backend's resources. Keep its history and occupied capacity.
+          if (job.status === 'prepared' || job.status === 'running') {
+            this.#ledger.settle(job.id, job.version, job.result
+              ? { ...job.result, status: 'unknown', quiescent: false }
+              : { jobId: job.id, status: 'unknown', quiescent: false, stdout: '', stderr: '', artifacts: [],
+                reason: 'verification-recovery-backend-mismatch' }, this.#controller)
+          }
+          continue
+        }
         const removed = await removeIsolatedContainer(this.#config.dockerPath, job.containerName, { socketPath: this.#config.socketPath, signal: this.#abort.signal })
         const quiescent = removed && !job.dispatchAttempted
         // Preserve any durable process evidence. Recovery only changes the
@@ -151,4 +164,15 @@ export class IsolatedVerifierRunner {
     })()
     return await this.#closePromise
   }
+}
+
+/** Selects a private verifier backend; existing Docker configuration remains valid. */
+export class IsolatedVerifierRunner {
+  readonly #runner: DockerVerifierRunner | LinuxVerifierRunner
+  constructor(input: IsolatedVerifierRunnerConfig | LinuxVerifierRunnerConfig) {
+    this.#runner = input.backend === 'linux-native' ? new LinuxVerifierRunner(input) : new DockerVerifierRunner(input)
+  }
+  run = (key: string, artifact: string, stdin: string, signal: AbortSignal): Promise<IsolationResult> =>
+    this.#runner.run(key, artifact, stdin, signal)
+  close = (): Promise<void> => this.#runner.close()
 }
