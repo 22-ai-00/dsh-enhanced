@@ -1,6 +1,11 @@
 # RSI 当前状态
 
-更新：2026-10-27。本页是唯一进展入口；验收见[合同](rsi-acceptance.md)，发行见[发布协议](releasing.md)，历史实施与证据查 Git。
+更新：2026-10-28。本页是唯一进展入口；验收见[合同](rsi-acceptance.md)，发行见[发布协议](releasing.md)，历史实施与证据查 Git。
+
+## 当前交付
+
+- 去除 Linux 安装与自迭代的 Docker 依赖，保留普通隔离执行、完整源码修复、工具创建/修订、独立验收、发布采用与回退能力；不能关闭功能或复用 macOS 的受限创建路径代替。实现边界与验收见[原生运行时](dockerless-runtime.md)。
+- Linux x64 原语已实现并完成独立复核：cgroup v1 硬配额、受控 namespace 工作区/闸门，以及摘要固定的 Node/pnpm 与离线依赖准备。下一交付是原生持久执行、keeper 配额与崩溃对账；随后接通完整源码/行为验收和保权迁移。v2 准入尚未实机验证，明确拒绝。生产仍使用既有 Docker 后端，尚未切换。
 
 ## 当前边界
 
@@ -21,6 +26,8 @@
 - 公开 core 安装仍有既存 peer 提示：`llm-route-capabilities` 的 `dsh-llm@0.2.1-rc.2` 未单独安装在 profile 包树，Host 提供精确版本；插件激活和配置加载通过。
 
 ## 最新验证
+
+- 原生底座聚焦验证：cgroup 13 项、namespace 18 项、真实控制管道故障 2 项、运行时摘要 4 项、工具链准备/取消 2 项通过；组合实机探针 9 项通过。保留的 store/cache 在独立无网络 namespace 中完成全新冻结离线安装。三项独立复核仅对各自原语给出 PASS；不覆盖生产账本、keeper 配额、v2、arm64、完整源码/发布及 owner 迁移。命令与原始证据保存在忽略目录 `docs/evidence/dockerless-20261028/`；本次根目录检查仍在运行。
 
 - 精确发布源码的本地 `VITEST_MAX_WORKERS=4 pnpm_config_workspace_concurrency=4 pnpm check` 退出 0：9118 通过、103 跳过，含零警告 lint、构建、类型检查与 37 包 dry-run pack。[首轮 CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/40504965747) 与[主分支复跑](https://github.com/22-ai-00/dsh-enhanced/actions/runs/40508948330) 的 Linux、macOS、Windows 全部通过，独立发布前复核 PASS。
 - [Release](https://github.com/22-ai-00/dsh-enhanced/actions/runs/40508965179) 发布和账本记录成功；发布环境检查为 9119 通过、102 跳过。37 包 npm 精确版本、`latest`、普通和安装器元数据，以及 7 个公开安装资产与 6 项固定摘要均通过；前两次查询命中旧缓存，第三次同步后通过。

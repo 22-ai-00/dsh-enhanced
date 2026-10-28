@@ -14,6 +14,48 @@ lease interval plus ordinary boot time before treating readiness as a failure.
 
 This is the first actual isolation component of autonomy work packages 08–10. External action/credential brokerage, rollback/compensation and installer bootstrap remain separate delivery requirements. It does not isolate arbitrary Host plugins or replace the native AgentLoop. The Host, Docker daemon, configured image and local operator remain trusted. Each workspace uses a private tmpfs volume with byte and inode hard limits. A persistent pool bounds admitted worker/workspace/keeper reservations across this ledger; it is not a machine-wide guarantee against Docker/kernel overhead or unrelated workloads. Do not treat this initial component as a complete hostile-code production platform.
 
+## Native Linux building blocks
+
+The Host-only `runLinuxNamespace`, `LinuxCgroupLease`, and `LinuxRuntime`
+exports provide Docker-free building blocks on non-root Linux. They do not yet
+replace the public tool or durable verifier backend. Production configuration
+and historical Docker jobs retain their existing behavior.
+
+`runLinuxNamespace` uses fixed `unshare`, mount, bubblewrap and Python/libseccomp
+programs, with a shipped digest-checked syscall policy. It exposes system runtime
+directories and explicit read-only runtime roots, creates bounded workspace/tmp
+tmpfs mounts, and uses a 1 MiB shared-memory mount. The candidate has UID/GID
+65534, no effective capabilities, no network, a private PID view and a clean
+environment. It cannot see Host Home, sysfs, credentials or control sockets.
+Only the repository profile allows nested user namespaces for repository tests.
+The caller must keep exposed runtime roots free of secrets. Input and exported
+UTF-8 artifacts have separate 1 MiB bounds; binary build artifacts and whole
+repository staging are outside this primitive's current interface.
+
+The fixed gate waits until the caller's `beforeStart` admits its exact PID/start
+time to resource controls. `afterExit` must prove the entire candidate group
+quiet before export; `onStop` must reconcile it after cancellation or failure.
+Callback failure or timeout returns `unknown`. The trusted keeper independently
+revokes work on Host disconnect or deadline. `namespaceExited` only proves that
+keeper's close; it is not a durable resource-cleanup or task-success receipt.
+
+`LinuxCgroupLease` configures and reads back CPU, memory including swap, and PID
+limits in pre-delegated v1 controllers. Admission is one-shot; shutdown fences
+late admission and uses freezer/pidfd checks before proving all groups empty.
+Recovery checks boot, owner and directory identities. V2 admission is currently
+rejected because its process-placement path has not been verified. The caller
+still owns pre-creation durable intent, controller exclusivity, orphan recovery,
+keeper resource reservations, authorization and budgets. The repository's
+one-time delegation script is an operator provisioning aid, not a privileged
+runtime broker or a sudo rule for a writable checkout.
+
+`LinuxRuntime` verification binds Node, native pnpm, frozen dependencies and
+retained store/cache to device/inode and deterministic tree hashes. It rejects
+outside links, writable contents and drift. None of these exports activates a
+service, reads provider credentials, accesses a browser, downloads images or
+runs an install lifecycle script. See the [delivery boundary](../../docs/dockerless-runtime.md)
+for remaining integration and acceptance.
+
 ## Native macOS execution primitive
 
 The Host-only `runNativeMacProcess` export runs one digest-pinned Node process
