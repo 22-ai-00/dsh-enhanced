@@ -10,7 +10,7 @@ import { LinuxCgroupLease } from '../src/linux-cgroups.js'
 import { linuxExecutionReceiptBinding, prepareLinuxExecutionIntent, readLinuxExecutionReceipt, readLinuxExecutionPartialCleanupProof,
   reconcileLinuxExecution, runLinuxExecution } from '../src/linux-execution.js'
 import { linuxExecutionIntentDigest, linuxExecutionResourcesDigest,
-  type LinuxExecutionContract, type LinuxExecutionIntent, type LinuxExecutionResources } from '../src/linux-execution-contract.js'
+  type LinuxExecutionContract, type LinuxExecutionContractV1, type LinuxExecutionIntent, type LinuxExecutionResources } from '../src/linux-execution-contract.js'
 
 // Fail only reads of this test's real kernel cgroup inventory. Recovery later
 // reads the actual kernel again; no successful quiet/absence result is mocked.
@@ -42,7 +42,7 @@ vi.mock('node:fs/promises', async importOriginal => {
 
 const uid = process.getuid?.() ?? 0
 const real = process.env.DSH_NATIVE_CGROUP_REAL === '1' && process.platform === 'linux' && uid > 0
-const contract = (overrides: Partial<LinuxExecutionContract['limits']> = {}): LinuxExecutionContract => ({ schemaVersion: 1,
+const contract = (overrides: Partial<LinuxExecutionContractV1['limits']> = {}): LinuxExecutionContractV1 => ({ schemaVersion: 1,
   backend: 'linux-native', runtimeDigest: 'a'.repeat(64), profile: 'ordinary',
   limits: { maxDurationMs: 5000, maxInputBytes: 4096, maxOutputBytes: 4096, maxArtifactBytes: 4096, maxFiles: 8,
     memoryMiB: 128, workspaceMiB: 4, workspaceInodes: 256, pidsLimit: 32, cpus: 0.5, ...overrides },

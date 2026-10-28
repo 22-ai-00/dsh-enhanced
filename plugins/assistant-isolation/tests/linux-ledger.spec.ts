@@ -7,7 +7,7 @@ import { IsolationLedger, type IsolationControllerAuthority } from '../src/ledge
 import { inspectIsolationGrant } from '../src/diagnostics.ts'
 import { linuxExecutionContractDigest, linuxExecutionIntentDigest, linuxExecutionResourcesDigest, validateLinuxExecutionContract, validateLinuxExecutionIntent, validateLinuxExecutionResources, type LinuxExecutionContract, type LinuxExecutionIntent, type LinuxExecutionResources, type LinuxReceiptBinding } from '../src/linux-execution-contract.ts'
 import type { IsolationGrant, IsolationJob, IsolationResult } from '../src/types.ts'
-import { linuxExecutionPartialCleanupProofDigest, type LinuxExecutionPartialCleanupProof } from '../src/linux-execution-contract.ts'
+import { linuxExecutionPartialCleanupProofDigest, linuxJobResourceReservation, type LinuxExecutionPartialCleanupProof, type LinuxRepositoryExecutionContract } from '../src/linux-execution-contract.ts'
 
 const directories: string[] = []
 const ledgers: IsolationLedger[] = []
@@ -88,6 +88,34 @@ describe('Linux durable execution values', () => {
 })
 
 describe('Linux IsolationLedger', () => {
+  it('reserves all repository mounts and durable binary spool before admitting a job', () => {
+    const { ledger, authority } = setup()
+    const repository: LinuxRepositoryExecutionContract = { ...contract, schemaVersion: 2, profile: 'repository',
+      limits: { ...contract.limits, maxInputBytes: 64 * 1024 ** 2, maxArtifactBytes: 32 * 1024 ** 2,
+        tmpMiB: 32, tmpInodes: 128, inputMiB: 65, inputInodes: 16 },
+      keeperLimits: { memoryMiB: 256, pidsLimit: 64, cpus: 0.5 } }
+    const minimum = linuxJobResourceReservation(repository)
+    const resources = { memoryMiB: minimum.memoryMiB, workspaceInodes: minimum.workspaceInodes,
+      maxMemoryMiB: minimum.memoryMiB, maxWorkspaceInodes: minimum.workspaceInodes }
+    const storage = { ...request().storageBudget, reservedBytes: minimum.storageBytes, maxStateBytes: 4 * minimum.storageBytes }
+    const input = { ...request(), authority, linuxContract: repository, resourceReservation: resources, storageBudget: storage }
+    for (const mutation of [
+      { resourceReservation: { ...resources, memoryMiB: minimum.memoryMiB - 1 } },
+      { resourceReservation: { ...resources, workspaceInodes: minimum.workspaceInodes - 1 } },
+      { storageBudget: { ...storage, reservedBytes: minimum.storageBytes - 1 } },
+    ]) expect(() => ledger.prepare({ ...input, ...mutation })).toThrow(/repository resources must be reserved/u)
+    expect(ledger.findJobByKey(identity, 'session', 'grant', 'key')).toBeUndefined()
+    const job = ledger.prepare(input).job
+    const bound = ledger.markLinuxCreateIntent(job.id, job.version, {
+      ...intent(job), schemaVersion: 2, contractDigest: linuxExecutionContractDigest(repository),
+      repository: { archive: { bytes: 1024, sha256: 'a'.repeat(64) }, artifacts: ['package.tgz'], executionDigest: 'b'.repeat(64) },
+    }, authority)
+    expect(bound).toMatchObject({ reservedMemoryMiB: minimum.memoryMiB, reservedWorkspaceInodes: minimum.workspaceInodes,
+      reservedStorageBytes: 108 * 1024 ** 2, linuxIntent: { schemaVersion: 2 } })
+    expect(ledger.prepare(input)).toEqual({ created: false, job: bound })
+    expect(() => ledger.prepare({ ...input, idempotencyKey: 'second' })).toThrow(/resource pool exhausted/u)
+  })
+
   it('requires finite resource/storage reservation and a frozen contract, keeps random job identities and owner-scoped keys', () => {
     const { ledger, authority } = setup()
     for (const mutation of [{ linuxContract: undefined }, { resourceReservation: undefined }, { storageBudget: undefined }, { durationMs: 1001 }, { requestDigest: 'bad' }, { resourceReservation: { ...request().resourceReservation, memoryMiB: 111 } }, { resourceReservation: { ...request().resourceReservation, workspaceInodes: 127 } }]) {

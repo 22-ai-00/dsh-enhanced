@@ -4,7 +4,7 @@ import type { LinuxCgroupDirectory, LinuxCgroupLimits, LinuxCgroupRoots, LinuxCg
 import { plannedStorageBytes } from './storage-policy.js'
 import type { IsolationLimits } from './types.js'
 
-export interface LinuxExecutionContract {
+export interface LinuxExecutionContractV1 {
   schemaVersion: 1
   backend: 'linux-native'
   runtimeDigest: string
@@ -13,7 +13,7 @@ export interface LinuxExecutionContract {
   keeperLimits: LinuxCgroupLimits
   cgroupRoots: LinuxCgroupRoots
 }
-export interface LinuxExecutionIntent {
+export interface LinuxExecutionIntentV1 {
   schemaVersion: 1
   jobId: string
   requestDigest: string
@@ -28,6 +28,22 @@ export interface LinuxExecutionIntent {
   keeperNonce: string
   roots: Record<string, LinuxCgroupDirectory>
 }
+/** Repository authority is explicit and cannot enter the ordinary text runner. */
+export interface LinuxRepositoryExecutionContract extends Omit<LinuxExecutionContractV1, 'schemaVersion' | 'profile' | 'limits'> {
+  schemaVersion: 2
+  profile: 'repository'
+  limits: IsolationLimits & { tmpMiB: number; tmpInodes: number; inputMiB: 65; inputInodes: 16 }
+}
+export type LinuxExecutionContract = LinuxExecutionContractV1 | LinuxRepositoryExecutionContract
+export interface LinuxRepositoryExecutionIntent extends Omit<LinuxExecutionIntentV1, 'schemaVersion'> {
+  schemaVersion: 2
+  repository: { archive: { bytes: number; sha256: string }; artifacts: string[]; executionDigest: string }
+}
+export type LinuxExecutionIntent = LinuxExecutionIntentV1 | LinuxRepositoryExecutionIntent
+/** Maximum local spool reservation: two 32 MiB artifact copies, three 14 MiB
+ * JSON records and 2 MiB metadata headroom. Archives use only memory/pipes here;
+ * a source-job ledger must add its own archive/pack staging budget before prepare. */
+export const LINUX_REPOSITORY_STORAGE_BYTES = 108 * 1024 ** 2
 export interface LinuxExecutionResources {
   schemaVersion: 1
   intentDigest: string
@@ -110,15 +126,19 @@ function directory(value: unknown, expected: string): asserts value is LinuxCgro
 }
 export function validateLinuxExecutionContract(value: unknown): LinuxExecutionContract {
   object(value, ['schemaVersion', 'backend', 'runtimeDigest', 'profile', 'limits', 'keeperLimits', 'cgroupRoots'])
-  if (value.schemaVersion !== 1 || value.backend !== 'linux-native' || !matches(value.runtimeDigest, HEX) || !['ordinary', 'repository'].includes(value.profile as string)) fail()
-  object(value.limits, ['maxDurationMs', 'maxInputBytes', 'maxOutputBytes', 'maxArtifactBytes', 'maxFiles', 'memoryMiB', 'workspaceMiB', 'workspaceInodes', 'pidsLimit', 'cpus'])
+  if (![1, 2].includes(value.schemaVersion as number) || value.backend !== 'linux-native' || !matches(value.runtimeDigest, HEX) || !['ordinary', 'repository'].includes(value.profile as string)) fail()
+  object(value.limits, ['maxDurationMs', 'maxInputBytes', 'maxOutputBytes', 'maxArtifactBytes', 'maxFiles', 'memoryMiB', 'workspaceMiB', 'workspaceInodes', 'pidsLimit', 'cpus', ...(value.schemaVersion === 2 ? ['tmpMiB', 'tmpInodes', 'inputMiB', 'inputInodes'] : [])])
   for (const [key, item] of Object.entries(value.limits)) if (key !== 'cpus' && !positive(item)) fail()
   limits({ memoryMiB: value.limits.memoryMiB, pidsLimit: value.limits.pidsLimit, cpus: value.limits.cpus })
-  if ((value.limits.maxInputBytes as number) > 1_048_576 || (value.limits.maxOutputBytes as number) > 1_048_576
-    || (value.limits.maxArtifactBytes as number) > 1_048_576 || (value.limits.maxFiles as number) > 128
+  if (value.schemaVersion === 2 && (value.profile !== 'repository' || value.limits.inputMiB !== 65 || value.limits.inputInodes !== 16
+    || (value.limits.tmpMiB as number) > 4096 || (value.limits.tmpInodes as number) > 1_000_000 || (value.limits.tmpInodes as number) < 16
+    || (value.limits.workspaceMiB as number) > 8192 || (value.limits.maxDurationMs as number) > 1_800_000)) fail()
+  if ((value.limits.maxInputBytes as number) > (value.schemaVersion === 2 ? 64 * 1024 ** 2 : 1_048_576) || (value.limits.maxOutputBytes as number) > 1_048_576
+    || (value.limits.maxArtifactBytes as number) > (value.schemaVersion === 2 ? 32 * 1024 ** 2 : 1_048_576) || (value.limits.maxFiles as number) > 128
     || (value.limits.workspaceInodes as number) < 16 || (value.limits.workspaceInodes as number) > 1_000_000
     || (value.limits.workspaceMiB as number) > 65_536) fail()
   limits(value.keeperLimits)
+  if (value.schemaVersion === 2 && (value.keeperLimits.memoryMiB < 256 || value.keeperLimits.pidsLimit < 64 || value.keeperLimits.cpus < 0.5)) fail()
   const roots = value.cgroupRoots as LinuxCgroupRoots
   if (!roots || !['v1', 'v2'].includes(roots.mode)) fail()
   object(roots, roots.mode === 'v1' ? ['mode', ...controllers] : ['mode', 'unified'])
@@ -131,11 +151,21 @@ export function validateLinuxExecutionContract(value: unknown): LinuxExecutionCo
 }
 export function linuxExecutionContractDigest(value: LinuxExecutionContract): string { return digest(validateLinuxExecutionContract(value)) }
 function intentValue(value: unknown): LinuxExecutionIntent {
-  object(value, ['schemaVersion', 'jobId', 'requestDigest', 'nativeResourceId', 'nativeNonce', 'contractDigest', 'bootId', 'uid', 'deadline', 'namespacePath', 'workerNonce', 'keeperNonce', 'roots'])
-  if (value.schemaVersion !== 1 || !matches(value.jobId, UUID) || !matches(value.requestDigest, HEX) || value.nativeResourceId !== `linux-${value.jobId}`
+  object(value, ['schemaVersion', 'jobId', 'requestDigest', 'nativeResourceId', 'nativeNonce', 'contractDigest', 'bootId', 'uid', 'deadline', 'namespacePath', 'workerNonce', 'keeperNonce', 'roots', ...((value as Record<string, unknown> | null)?.schemaVersion === 2 ? ['repository'] : [])])
+  if (![1, 2].includes(value.schemaVersion as number) || !matches(value.jobId, UUID) || !matches(value.requestDigest, HEX) || value.nativeResourceId !== `linux-${value.jobId}`
     || !matches(value.nativeNonce, NONCE) || !matches(value.contractDigest, HEX) || !matches(value.bootId, UUID)
     || !positive(value.uid) || value.uid > 0xffff_fffe || !positive(value.deadline) || !path(value.namespacePath)
     || !matches(value.workerNonce, NONCE) || !matches(value.keeperNonce, NONCE) || value.workerNonce === value.keeperNonce) fail()
+  if (value.schemaVersion === 2) {
+    object(value.repository, ['archive', 'artifacts', 'executionDigest'])
+    object(value.repository.archive, ['bytes', 'sha256'])
+    if (!positive(value.repository.archive.bytes) || value.repository.archive.bytes > 64 * 1024 ** 2
+      || !matches(value.repository.archive.sha256, HEX) || !matches(value.repository.executionDigest, HEX)
+      || !Array.isArray(value.repository.artifacts) || value.repository.artifacts.length > 128
+      || value.repository.artifacts.some(item => typeof item !== 'string' || item.length < 1 || item.length > 4096
+        || posix.isAbsolute(item) || /[\p{Cc}\\]/u.test(item) || item.split('/').some(part => !part || part === '.' || part === '..'))
+      || new Set(value.repository.artifacts).size !== value.repository.artifacts.length) fail()
+  }
   const roots = value.roots
   const keys = roots && typeof roots === 'object' && Object.hasOwn(roots, 'unified') ? ['unified'] : controllers
   object(roots, keys)
@@ -154,7 +184,9 @@ function intentValue(value: unknown): LinuxExecutionIntent {
 export function validateLinuxExecutionIntent(value: unknown, contract: LinuxExecutionContract): LinuxExecutionIntent {
   const checked = validateLinuxExecutionContract(contract)
   const intent = intentValue(value)
-  if (intent.contractDigest !== linuxExecutionContractDigest(checked)) fail()
+  if (intent.contractDigest !== linuxExecutionContractDigest(checked) || intent.schemaVersion !== checked.schemaVersion
+    || intent.schemaVersion === 2 && (intent.repository.archive.bytes > checked.limits.maxInputBytes
+      || intent.repository.artifacts.length > checked.limits.maxFiles)) fail()
   const entries = rootEntries(checked.cgroupRoots)
   object(intent.roots, entries.map(([key]) => key))
   for (const [key, root] of entries) directory(intent.roots[key], root)
@@ -228,7 +260,13 @@ export function validateLinuxReceiptBinding(value: unknown): LinuxReceiptBinding
 
 /** All tmpfs mounts, keeper capacity and durable staging are admitted together. */
 export function linuxJobResourceReservation(contract: LinuxExecutionContract): { memoryMiB: number; workspaceInodes: number; storageBytes: number } {
-  const { limits, keeperLimits } = validateLinuxExecutionContract(contract)
+  const checked = validateLinuxExecutionContract(contract)
+  const { limits, keeperLimits } = checked
+  if (checked.schemaVersion === 2) return {
+    memoryMiB: limits.memoryMiB + limits.workspaceMiB + checked.limits.tmpMiB + checked.limits.inputMiB + 1 + keeperLimits.memoryMiB,
+    workspaceInodes: limits.workspaceInodes + checked.limits.tmpInodes + checked.limits.inputInodes + 4096 + 32,
+    storageBytes: 2 * limits.maxArtifactBytes + 44 * 1024 ** 2,
+  }
   return { memoryMiB: limits.memoryMiB + limits.workspaceMiB
     + Math.ceil(Math.max(1, Math.min(64, limits.memoryMiB / 4))) + 1 + keeperLimits.memoryMiB,
   workspaceInodes: 2 * limits.workspaceInodes + 4096 + 32, storageBytes: 3 * plannedStorageBytes(limits) }

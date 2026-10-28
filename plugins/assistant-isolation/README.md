@@ -31,8 +31,8 @@ tmpfs mounts, and uses a 1 MiB shared-memory mount. The candidate has UID/GID
 environment. It cannot see Host Home, sysfs, credentials or control sockets.
 Only the repository profile allows nested user namespaces for repository tests.
 The caller must keep exposed runtime roots free of secrets. Input and exported
-UTF-8 artifacts have separate 1 MiB bounds; binary build artifacts and whole
-repository staging are outside this primitive's current interface.
+UTF-8 artifacts have separate 1 MiB bounds. The separate repository API below
+provides binary transport without expanding this text API's permissions.
 
 The keeper's fixed gate waits for `beforeKeeperStart` before unshare, mounts or
 staging. A separate candidate gate waits until `beforeStart` admits its exact
@@ -129,6 +129,36 @@ These APIs still require non-root Linux with verified v1 delegation and the
 fixed namespace dependencies. Installer migration, complete repository builds,
 behavior certificates and release/adoption remain separate integration steps. V2, arm64 execution and a reboot with changed kernel
 resource identity remain outside the current live acceptance.
+
+### Durable repository execution
+
+Host-only `prepareLinuxRepositoryIntent`, `runLinuxRepositoryExecution`,
+`readLinuxRepositoryReceipt` and `reconcileLinuxRepositoryExecution` share the
+same durable execution engine. They require an explicit schema 2 repository
+contract, a frozen command/archive/artifact binding, and caller-owned finite
+authorization and controller admission. This is not an agent-visible tool or a
+complete source-build adapter.
+
+`runLinuxRepositoryNamespace` transports a SHA-256-bound archive of at most
+64 MiB through a dedicated input pipe and a read-only `/input/source.tar` mount.
+It exports at most 32 MiB of binary artifacts through a separate pipe after the
+candidate group is proven quiet. Neither transport pipe reaches the candidate.
+Repository limits allow an 8 GiB workspace, 4 GiB executable temporary mount,
+nested namespaces and a 30-minute deadline. Ordinary execution retains its
+existing bounds and non-executable temporary mount.
+
+The durable receipt contains artifact paths, lengths and hashes; bytes remain in
+an owner-only bounded spool. Reading a successful receipt rechecks both kernel
+absence and spool integrity. Failed or unknown executions return no binary
+artifacts, and a recovered identity never dispatches the command again. Partial
+creation and failed writes retain their original recovery fences.
+
+`linuxJobResourceReservation` includes every tmpfs, keeper capacity and durable
+spool; the ledger enforces these minima for schema 2. At the maximum artifact
+size, the execution spool and journal allowance is 108 MiB. A caller that stages
+its own archive or output pack must reserve that additional storage before
+staging. Full Git-tree preparation, offline root `pnpm check`, behavior
+verification and release/adoption remain separate integration work.
 
 ## Native macOS execution primitive
 

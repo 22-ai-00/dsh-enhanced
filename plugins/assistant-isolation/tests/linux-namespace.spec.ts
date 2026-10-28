@@ -341,13 +341,23 @@ beforeStart:()=>{throw Error('candidate must not start');},afterExit:()=>{},onSt
     const descendants = await observed
     expect(descendants, JSON.stringify(result)).toBeDefined()
     expect(descendants!.length).toBeGreaterThan(1)
-    for (const item of descendants!) {
+    const executing = async (item: LinuxCandidateIdentity): Promise<boolean> => {
       try {
         const raw = await readFile(`/proc/${item.pid}/stat`, 'utf8')
         const fields = raw.slice(raw.lastIndexOf(') ') + 2).trim().split(' ')
-        expect(fields[0] === 'Z' || fields[0] === 'X' || Number(fields[19]) !== item.startTicks,
-          `captured process ${item.pid} is still executing`).toBe(true)
-      } catch (error) { if (!['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error }
+        return fields[0] !== 'Z' && fields[0] !== 'X' && Number(fields[19]) === item.startTicks
+      } catch (error) {
+        if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) return false
+        throw error
+      }
+    }
+    // This raw namespace test has no cgroup proof; kill propagation is asynchronous.
+    const stoppedBy = Date.now() + 1000
+    while ((await Promise.all(descendants!.map(executing))).some(Boolean) && Date.now() < stoppedBy) {
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    for (const item of descendants!) {
+      expect(await executing(item), `captured process ${item.pid} is still executing`).toBe(false)
     }
   }, 8000)
 
@@ -423,15 +433,20 @@ beforeStart:identity=>writeFile(${JSON.stringify(marker)},JSON.stringify(identit
     }
     try {
       const deadline = Date.now() + 8000
+      let sawBwrap = false
       while (Date.now() < deadline) {
         try {
           candidate = JSON.parse(await readFile(marker, 'utf8')) as LinuxCandidateIdentity
-          if ((await readFile(`/proc/${candidate.pid}/cmdline`, 'utf8')).includes('bwrap')) break
+          if ((await readFile(`/proc/${candidate.pid}/cmdline`, 'utf8')).includes('bwrap')) {
+            sawBwrap = true
+            break
+          }
         } catch { /* The gate marker and exec are asynchronous. */ }
         await new Promise(resolve => setTimeout(resolve, 25))
       }
       expect(candidate, diagnostic).toBeDefined()
-      expect((await readFile(`/proc/${candidate!.pid}/cmdline`, 'utf8')).includes('bwrap')).toBe(true)
+      // The admitted PID can exec between reads; assert the observed command.
+      expect(sawBwrap, diagnostic).toBe(true)
       const capture = async (pid: number): Promise<void> => {
         try {
           const raw = await readFile(`/proc/${pid}/stat`, 'utf8')

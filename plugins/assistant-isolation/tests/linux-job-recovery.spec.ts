@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { defaultLimits } from '../src/config.js'
+import { LinuxCgroupLease } from '../src/linux-cgroups.js'
 import { IsolationLedger } from '../src/ledger.js'
 import { linuxJobResourceReservation, type LinuxExecutionContract } from '../src/linux-execution-contract.js'
 import { prepareLinuxExecutionIntent, runLinuxExecution } from '../src/linux-execution.js'
@@ -98,15 +99,35 @@ describe.skipIf(!real)('single-job recovery with actual Linux kernel receipts', 
   test.each(['partial', 'complete', 'lost-resource-ack'] as const)('reconciles %s proof and preserves finite grant budget', async mode => {
     const ctx = await dispatched(); let job = ctx.job
     const abort = new AbortController(); if (mode === 'partial') abort.abort()
-    const outcome = await runLinuxExecution({ stateRoot: ctx.stateRoot, contract: ctx.contract, intent: ctx.intent,
+    const cleanupDiagnostics: unknown[] = []
+    const terminate = LinuxCgroupLease.prototype.terminateAndProve, remove = LinuxCgroupLease.prototype.removeWhenEmpty
+    const observeCleanup = async (stage: string, lease: LinuxCgroupLease, operation: () => Promise<boolean>): Promise<boolean> => {
+      try {
+        const proven = await operation()
+        if (!proven) cleanupDiagnostics.push({ stage, snapshot: lease.snapshot, proven })
+        return proven
+      } catch (error) {
+        cleanupDiagnostics.push({ stage, snapshot: lease.snapshot, error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : String(error) })
+        throw error
+      }
+    }
+    const terminateSpy = vi.spyOn(LinuxCgroupLease.prototype, 'terminateAndProve').mockImplementation(function (this: LinuxCgroupLease, timeout) {
+      return observeCleanup('terminate', this, async () => await terminate.call(this, timeout))
+    })
+    const removeSpy = vi.spyOn(LinuxCgroupLease.prototype, 'removeWhenEmpty').mockImplementation(function (this: LinuxCgroupLease) {
+      return observeCleanup('remove', this, async () => await remove.call(this))
+    })
+    let outcome: Awaited<ReturnType<typeof runLinuxExecution>>
+    try { outcome = await runLinuxExecution({ stateRoot: ctx.stateRoot, contract: ctx.contract, intent: ctx.intent,
       argv: ['/bin/sh', '-c', 'printf once'], files: [], signal: abort.signal,
       recordResources: async resources => {
         if (mode !== 'lost-resource-ack') job = ctx.ledger.recordLinuxResources(job.id, job.version, resources, ctx.authority)
       }, authorizeStart: () => {
         if (mode === 'lost-resource-ack') return false
         job = ctx.ledger.start(job.id, job.version, ctx.authority); return true
-      } })
-    expect(outcome.result.quiescent).toBe(true)
+      } }) } finally { terminateSpy.mockRestore(); removeSpy.mockRestore() }
+    expect(outcome.result.quiescent, JSON.stringify({ mode, outcome, cleanupDiagnostics, journal: JSON.parse(await readFile(
+      join(ctx.stateRoot, 'jobs', `${ctx.intent.jobId}-${ctx.intent.nativeNonce}.json`), 'utf8')) })).toBe(true)
     expect(mode === 'partial' ? outcome.partialProof : outcome.receipt).toBeDefined()
     expect(await reconcileLinuxJob(ctx.ledger, ctx.authority, job, ctx.stateRoot)).toBe(true)
     expect(ctx.ledger.get(job.id)?.result).toEqual(mode === 'partial'
