@@ -4,7 +4,8 @@ import { dirname, isAbsolute, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { canonicalGrowthJson, validatePluginCreationVerificationCertificate,
   type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
-import { nativeMacRuntimeDigest, validateNativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
+import { validateNativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
+import { creationCapabilityExecutionMatches, validateLinuxCreationCapabilityRunner } from './creation-capability-execution.js'
 import { validateCreationCapabilitySource, type CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import type { CreationCapabilityCall, CreationCapabilityCallEvidence, CreationCapabilityConfig,
   CreationCapabilityForegroundCallWitness, CreationCapabilityJournalPort,
@@ -113,11 +114,7 @@ function receiptBody(receipt: CreationCapabilityReceipt): Omit<CreationCapabilit
   return body
 }
 function compatibleExecution(certificate: PluginCreationVerificationCertificate, config: CreationCapabilityConfig): boolean {
-  if (certificate.protocol === 'assistant-growth/creation-verification/v1') return !('backend' in config.runner)
-  return certificate.protocol === 'assistant-growth/creation-verification/v2'
-    && 'backend' in config.runner && config.runner.backend === 'macos-seatbelt'
-    && certificate.execution?.boundary === 'macos-seatbelt-single-process-v1'
-    && certificate.execution.runtimeDigest === nativeMacRuntimeDigest(config.runner.runtime)
+  return creationCapabilityExecutionMatches(certificate, config.runner)
 }
 function receiptShape(value: unknown): CreationCapabilityReceipt {
   const v = obj(value, ['protocol','authorityId','authorityDigest','keyId','planId','planDigest','verificationDigest',
@@ -159,13 +156,17 @@ export function validateCreationCapabilityConfig(value: unknown): asserts value 
     const retention = obj(v.retention, ['maximumLifetimeMs'])
     int(retention.maximumLifetimeMs, 1, 30 * 86_400_000)
   }
-  const native = !!v.runner && typeof v.runner === 'object' && (v.runner as { backend?: unknown }).backend === 'macos-seatbelt'
-  const runner = obj(v.runner, ['stateRoot',...(native ? ['backend','runtime'] : ['image','dockerPath']),
+  const backend = !!v.runner && typeof v.runner === 'object'
+    ? Object.getOwnPropertyDescriptor(v.runner, 'backend')?.value : undefined
+  const native = backend === 'macos-seatbelt', linux = backend === 'linux-native'
+  const runner = obj(v.runner, ['stateRoot',...(linux ? ['backend','runtime','cgroupRoots']
+    : native ? ['backend','runtime'] : ['image','dockerPath']),
     'expiresAt','maxRuns','maxTotalDurationMs','maxDurationMs','maxOutputBytes',
-    ...(!native && v.runner && typeof v.runner === 'object' && Object.hasOwn(v.runner, 'socketPath') ? ['socketPath'] : [])])
+    ...(!native && !linux && v.runner && typeof v.runner === 'object' && Object.hasOwn(v.runner, 'socketPath') ? ['socketPath'] : [])])
   const root = path(runner.stateRoot)
   privateStat(root, 'directory')
-  if (native) validateNativeMacRuntime(runner.runtime)
+  if (linux) validateLinuxCreationCapabilityRunner(runner)
+  else if (native) validateNativeMacRuntime(runner.runtime)
   else {
     str(runner.image, /^(?:[a-z0-9][a-z0-9._:/-]*@)?sha256:[a-f0-9]{64}$/u, 512)
     const dockerPath = path(runner.dockerPath)

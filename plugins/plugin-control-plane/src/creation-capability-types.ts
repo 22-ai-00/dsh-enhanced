@@ -1,6 +1,7 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
-import type { NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxCgroupRoots, NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
 import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 
@@ -27,6 +28,16 @@ export interface CreationCapabilityConfig {
     image: string
     dockerPath: string
     socketPath?: string
+    expiresAt: number
+    maxRuns: number
+    maxTotalDurationMs: number
+    maxDurationMs: number
+    maxOutputBytes: number
+  } | {
+    backend: 'linux-native'
+    runtime: LinuxPluginBehaviorRuntime
+    cgroupRoots: LinuxCgroupRoots
+    stateRoot: string
     expiresAt: number
     maxRuns: number
     maxTotalDurationMs: number

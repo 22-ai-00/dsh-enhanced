@@ -258,7 +258,7 @@ Host 可在调用源码检查时单独请求 `capturePack`，从同一次已核�
 
 Linux 创建准备可接通独立 `creationVerifications`，必须同时配置双 UID 的 `userNamespace` 与 `systemSnapshot`。Host 私有 `inspectPreparedCreationLinuxBuild` 只读原任务的成功收据、真实包和资源消失证明，并核对当前 owner、信任配置、固定运行时与完整构建 evidence；缺证、未知结果或漂移均拒绝，不重派构建。v3 证书在写入及读回时再次绑定 schema 3 构建证据、基底和不可变计划，不能用旧 Docker/macOS 证书替代。普通 schema 2 原生准备与历史读取保持兼容，但不能据此取得新的 v3 签名。
 
-已有插件修订验收、有限审批、发布和采用尚未接通；配置这些未完成的组合会明确拒绝启动。已签创建仍为 `pending-approval`，不能据此替换需要完整自迭代链的生产部署。
+Linux 创建证书可接下述有限动态采用，构建和采用后端必须一致。已有插件修订验收、源码审批、发布及源码发布采用尚未接通；配置这些未完成的组合会明确拒绝启动。动态工具采用不改变源码计划的 `pending-approval`，不能据此替换需要完整自迭代链的生产部署。
 
 ### 持久源码检查任务（Docker 可选，Linux 原生必需）
 
@@ -428,7 +428,9 @@ creationCapabilities:
 
 原生 SourceJobs 续跑自动消费精确验收凭证、复验工作树和当前 canonical 来源，先持久 claim，再独立发现工具 schema，签发绑定制品、来源、schema、别名、授权和期限的采用回执。`retention` 是显式可选授权，取值为 1 ms 至 30 天；仅对已完成首次采用的版本生效。首次采用仍须新鲜验收凭证、创建授权和完整源码复验。配置 retention 时采用回执使用 v2，使用截止时间固定为采用时刻加 `maximumLifetimeMs`、`creationCapabilities.expiresAt`、`runner.expiresAt` 三者最早者；重启不重新计时。没有 retention 的旧配置和 v1 回执继续在原验收窗口结束时失效。`statePath/creation-adoptions.sqlite` 保存不可变授权、512 KiB 内精确包及累计额度；更换 runner 状态目录不能重置采用额度，修改同一 ledger 的授权定义会拒绝。失败或 unknown 消费额度，不自动重放；重启只恢复已授权的同一凭证和制品，不重新发现或签发。模型没有采用、签名或账本工具。
 
-Host 用真实 Cordis Fiber 动态注册受控 `evolved_<插件名>_<plan hash>_<序号>` 原生工具入口。候选代码在每次 discovery/invoke 的独立离线 Docker 子进程中创建自己的 Cordis Context 并挂载；Host 不导入候选代码。当前只支持原生 Tools/SystemPrompt 服务的有界纯工具插件；每次调用新建 candidate Context，不支持跨调用候选内存状态或任意 Host 服务桥接。包读取、临时制品、容器、Docker 子进程、私有 ledger 和密钥读取属于本授权；容器无 Host 挂载、网络或凭据，不执行包安装脚本。限制详见 [行为执行器](../../scripts/isolation/README.md#plugin-behavior-verifier-image)。
+Linux 采用使用显式 `runner.backend: linux-native`、签名时的完整 `LinuxPluginBehaviorRuntime`、当前 UID 的 `cgroupRoots` 及相同的有限 runner 字段，不配置镜像。仅接受 v3 创建证书；其四项执行绑定随完整证书摘要写入原采用回执，无需新建账本或更换回执协议。首次采用复核原成功构建收据；挂载、恢复及每次调用复核私有 `behavior.json`、签名基底/准备摘要和实际保留观察器。采用后的 v2 保留期不要求旧构建授权、原工具链或编译器继续存在，仍要求精确观察器可用以及当前 owner/任务来源有效。取消与关闭会等待这些检查结束；验收失败不挂载工具，未知调用不重派。Linux 可选校验模块仅在显式配置时加载，基础 Control Plane 不要求安装 Verifier。已有 Docker 账本不能改写为 Linux 账本；保权安装迁移仍是独立交付。
+
+Host 用真实 Cordis Fiber 动态注册受控 `evolved_<插件名>_<plan hash>_<序号>` 原生工具入口。候选代码在每次 discovery/invoke 中创建自己的 Cordis Context 并挂载：Docker 使用离线容器，Linux 使用原生父/候选隔离进程，macOS 使用 Seatbelt 受限单进程；Host 不导入候选代码。当前只支持原生 Tools/SystemPrompt 服务的有界纯工具插件；每次调用新建 candidate Context，不支持跨调用候选内存状态或任意 Host 服务桥接。Host 的包读取、临时制品、所选后端进程与隔离资源、私有 ledger 和密钥读取属于本授权；Linux 另读取固定只读运行时和准备回执。候选无法读取 Host 凭据、签名私钥或私有验收数据，无网络，不执行包安装脚本。各后端限制详见 [行为执行器](../assistant-verifier/README.md#新插件包的隔离行为观察)。
 
 调用经过原生 ToolRuntime/Policy，须由 Delivery 证明当前注册的真实 Agent、Session 和 owner lineage；Policy 还须允许该 owner scope 下的准确工具别名或有限别名模式。输入、结果和累计调用均有界；同一 Agent Session/call id/参数的已完成调用回读缓存，unknown 不再派发。候选注释不进入 Host 描述，输出作为不可信数据。每次异步检查后、派发前和落账前重验真实调用者与 canonical 来源，撤权或纠正期间的迟到结果不能变成成功。
 

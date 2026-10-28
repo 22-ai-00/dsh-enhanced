@@ -17,6 +17,7 @@ import { isSourceOwnerContinuation, pluginCreationVerificationSigningPayload, so
   type SourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import type { ForegroundToolCallAttestation, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import { linuxRuntimeDigest, type LinuxRepositoryRunnerConfig, type LinuxRepositoryRunnerResult, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
+import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
 import { afterEach, expect, it, vi } from 'vitest'
 import { PluginControlPlaneService, normalizeControlPlaneConfig, type Config } from '../src/service.ts'
 import { ControlPlaneStore, controlPlaneDigest } from '../src/store.ts'
@@ -36,7 +37,12 @@ vi.mock('../src/source-build.ts', async original => ({ ...await original<typeof 
 vi.mock('../src/linux-source-build.ts', async original => ({ ...await original<typeof linuxBuild>(), runLinuxPreparedChecks: vi.fn() }))
 vi.mock('../src/trust.ts', async original => ({ ...await original<typeof trust>(), loadTrustConfig: vi.fn() }))
 const linuxTransport = vi.hoisted(() => ({ inspect: vi.fn<() => Promise<LinuxRepositoryRunnerResult | undefined>>(),
-  run: vi.fn(), close: vi.fn(async () => undefined), verify: vi.fn(async (runtime: LinuxRuntime) => runtime) }))
+  run: vi.fn(), close: vi.fn(async () => undefined), verify: vi.fn(async (runtime: LinuxRuntime) => runtime),
+  adoptionVerify: vi.fn(async () => undefined) }))
+vi.mock('@dsh-enhanced/assistant-verifier/linux-behavior-runtime', async original => ({
+  ...await original<typeof import('@dsh-enhanced/assistant-verifier/linux-behavior-runtime')>(),
+  verifyLinuxPluginBehaviorAdoptionRuntime: linuxTransport.adoptionVerify,
+}))
 vi.mock('@dsh-enhanced/assistant-isolation', async original => ({ ...await original<typeof import('@dsh-enhanced/assistant-isolation')>(),
   verifyLinuxRuntime: linuxTransport.verify,
   LinuxRepositoryRunner: class {
@@ -190,6 +196,21 @@ async function fixture(withVerification = false, withAdoption = false, withReten
         gid: { path: '/usr/bin/newgidmap', sha256: '2'.repeat(64) } } },
     systemSnapshot: { schemaVersion: 1, root: { path: '/approved/system', dev: 1, ino: 3, sha256: '3'.repeat(64) },
       manifestSha256: '4'.repeat(64), bytes: 4096, entries: 16 } }
+  if (withLinux && capability) {
+    const build = config.sourceBuild as build.LinuxSourceBuildConfig, base = build.runtime
+    const runtimeRoot = '/approved/observer-runtime'
+    const runtime: LinuxPluginBehaviorRuntime = { schemaVersion: 1, runtime: { ...base,
+      root: { ...base.root, path: runtimeRoot, ino: 10, sha256: '1'.repeat(64) },
+      nodePath: runtimeRoot + '/bin/node', pnpmPath: runtimeRoot + '/pnpm/bin/pnpm.mjs',
+      nativePnpmPath: runtimeRoot + '/pnpm-native/pnpm', nativePnpmRoot: runtimeRoot + '/pnpm-native',
+      modulesPath: runtimeRoot + '/node_modules', storePath: runtimeRoot + '/store', cachePath: runtimeRoot + '/cache',
+    }, observer: { schemaVersion: 1, sourceSha256: '2'.repeat(64), workerSha256: '3'.repeat(64), candidateSha256: '4'.repeat(64),
+      launcherSha256: '5'.repeat(64), parentProtectSha256: '6'.repeat(64), childProtectSha256: '7'.repeat(64) } }
+    const previous = capability.runner
+    capability.runner = { backend: 'linux-native', runtime, cgroupRoots: build.cgroupRoots,
+      stateRoot: previous.stateRoot, expiresAt: previous.expiresAt, maxRuns: previous.maxRuns,
+      maxTotalDurationMs: previous.maxTotalDurationMs, maxDurationMs: previous.maxDurationMs, maxOutputBytes: previous.maxOutputBytes }
+  }
   if (withRevision) {
     git('branch', '-M', 'dev')
     const remote = join(root, 'managed-source.git')
@@ -290,6 +311,106 @@ function signedCertificate(f: Awaited<ReturnType<typeof fixture>>, planId: strin
   return { ...unsigned, signature: sign(null, Buffer.from(pluginCreationVerificationSigningPayload(unsigned)), privateKey).toString('base64url') }
 }
 
+function signedAdoptionCertificate(f: Awaited<ReturnType<typeof fixture>>, planId: string): PluginCreationVerificationCertificate {
+  return signedCertificate(f, planId, f.signing.privateKey, body => {
+    body.schemaDigest = candidateSchemaDigest; body.environment = candidateEnvironment
+    const runner = f.capability?.runner
+    if (runner && 'backend' in runner && runner.backend === 'linux-native') {
+      body.protocol = 'assistant-growth/creation-verification/v3'
+      body.execution = { boundary: 'linux-native-process-seccomp-v1', runtimeDigest: linuxPluginBehaviorRuntimeDigest(runner.runtime),
+        buildRuntimeDigest: f.linuxChecked!.evidence.runtimeDigest,
+        buildEvidenceDigest: controlPlaneDigest(f.linuxChecked!.evidence), observerPreparationDigest: '2'.repeat(64) }
+    }
+  })
+}
+
+function installCandidateRunner(f: Awaited<ReturnType<typeof fixture>>): void {
+  runnerRun.mockImplementation(async (input: { artifact: Buffer; operation: { kind: string;
+    calls?: readonly { id: string; toolName: string }[] } }): Promise<CreationCapabilityObservation> => {
+    const configured = f.capability!.runner
+    const common = { status: 'observed' as const, quiescent: true,
+      artifactSha256: createHash('sha256').update(input.artifact).digest('hex'),
+      schemaDigest: candidateSchemaDigest, environment: candidateEnvironment,
+      ...('backend' in configured && configured.backend === 'linux-native'
+        ? { boundary: 'linux-native-process-seccomp-v1' as const, runtimeDigest: linuxPluginBehaviorRuntimeDigest(configured.runtime) } : {}) }
+    return input.operation.kind === 'discover' ? { ...common, schemas: candidateSchemas }
+      : { ...common, calls: input.operation.calls!.map(call => ({ id: call.id, toolName: call.toolName,
+        result: { isError: false, value: { answer: 'ok' }, content: [{ type: 'text', text: 'ok' }] } })) }
+  })
+}
+
+async function startCapabilityHost(f: Awaited<ReturnType<typeof fixture>>) {
+  const context = new Context()
+  cleanup.push(async () => context.fiber.dispose())
+  await mountAgentLoopTestDependencies(context, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  context.provide('assistantDelivery' as never, f.deliveryPorts)
+  context.provide('assistantEvaluation' as never, f.evaluationPorts)
+  context.provide('assistantVerifier' as never, { verifyPluginCreation: f.verification })
+  new AssistantPolicyService(context, { databasePath: join(f.root, 'policy.sqlite'),
+    budgets: [{ id: 'source-budget', metric: 'automation-runs', limit: 3, periodMs: 60_000, scope: 'global' }], rules: [
+      { id: 'reconcile', effect: 'allow', subject: { kind: 'background', id: 'plugin-control-plane-source', workspace: f.root, principal: 'owner' }, actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
+      { id: 'execute', effect: 'allow', subject: { kind: 'background', id: '*', workspace: f.root, principal: 'owner' }, actions: ['execute'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
+    ] })
+  new AssistantAutomationsService(context, { databasePath: join(f.root, 'automations.sqlite'),
+    runsPath: join(f.root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0 })
+  return { context, service: new PluginControlPlaneService(context, f.config) }
+}
+
+it.skipIf(process.platform !== 'linux' || !process.getuid?.())('restores fresh Linux v1 adoption after its build reader is initialized without redispatch or renewed call quota', async () => {
+  const f = await fixture(true, true, false, false, false, true)
+  f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedAdoptionCertificate(f, request.planId) }))
+  installCandidateRunner(f)
+  const job = await f.service.enqueueSourceJob(f.request)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const planId = f.store.getSourceJob(job.id)!.planId!, adopted = f.service.inspectCreatedCapability(planId)!
+  expect(adopted.status).toBe('active')
+  const alias = adopted.aliases[0]!, execution = (callId: string) => ({ callId,
+    agent: { session: { id: 'session-1' }, owner: f.owner }, signal: new AbortController().signal }) as unknown as ToolRunContext
+  await expect(f.ctx.tools.get(alias)!.execute({ query: 'hello' }, execution('cached'))).resolves.toMatchObject({ value: { answer: 'ok' } })
+  const calls = f.service.inspectCreatedCapabilityCalls(planId), reads = linuxTransport.inspect.mock.calls.length
+  await f.ctx.fiber.dispose()
+  let releaseReceipt!: () => void, receiptEntered!: () => void, observeStartup!: (promise: Promise<void>) => void
+  const receiptGate = new Promise<void>(resolve => { releaseReceipt = resolve })
+  const inspectingReceipt = new Promise<void>(resolve => { receiptEntered = resolve })
+  const startup = new Promise<void>(resolve => { observeStartup = resolve })
+  const originalStart = CreationCapabilityRuntime.prototype.start
+  const start = vi.spyOn(CreationCapabilityRuntime.prototype, 'start').mockImplementation(function (this: CreationCapabilityRuntime) {
+    const pending = originalStart.call(this)
+    observeStartup(pending)
+    return pending
+  })
+  linuxTransport.inspect.mockImplementationOnce(async () => {
+    receiptEntered()
+    await receiptGate
+    return f.linuxExecution
+  })
+  const restored = await startCapabilityHost(f)
+  const unregister = restored.service.registerSourceGrowthRunProducer({ protocol: 'assistant-growth-source-run-producer/v1', inspect: f.inspectGrowthRun })
+  cleanup.push(unregister)
+  try {
+    await inspectingReceipt
+    // Cold restore rechecks real source and the original build asynchronously.
+    // A pending receipt read must not publish a ready service or mounted alias.
+    expect(restored.service.inspectCreatedCapability(planId)).toBeUndefined()
+    expect(restored.service.canEnqueueSource()).toBe(false)
+    expect(restored.context.tools.get(alias)).toBeUndefined()
+  } finally { releaseReceipt() }
+  // Await actual restoration, rather than vi.waitFor's unrelated 1-second default.
+  await startup
+  start.mockRestore()
+  expect(restored.context.tools.get(alias)).toBeDefined()
+  expect(restored.service.inspectCreatedCapability(planId)).toEqual(adopted)
+  expect(restored.service.inspectCreatedCapabilityCalls(planId)).toEqual(calls)
+  expect(linuxTransport.inspect.mock.calls.length).toBeGreaterThan(reads)
+  await expect(restored.context.tools.get(alias)!.execute({ query: 'hello' }, execution('cached'))).resolves.toMatchObject({ value: { answer: 'ok' } })
+  await expect(restored.context.tools.get(alias)!.execute({ query: 'next' }, execution('second'))).resolves.toMatchObject({ value: { answer: 'ok' } })
+  await expect(restored.context.tools.get(alias)!.execute({ query: 'third' }, execution('third'))).rejects.toThrow()
+  expect(runnerRun).toHaveBeenCalledTimes(3)
+  expect(f.verification).toHaveBeenCalledOnce()
+  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
+  expect(linuxTransport.run).not.toHaveBeenCalled()
+})
+
 // The transport is controlled here; real native receipt/behavior acceptance is
 // separate. The generator, owner fence, source jobs, artifact store and signing are real.
 it.skipIf(process.platform !== 'linux' || !process.getuid?.())('verifies Linux creation through its original build receipt without replay or adoption', async () => {
@@ -374,6 +495,76 @@ it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['cancel', '
     await expect(f.service.inspectPreparedCreationLinuxBuild(planId, abort.signal)).rejects.toThrow()
     expect(linuxTransport.run).not.toHaveBeenCalled()
     expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
+  })
+
+it.skipIf(process.platform !== 'linux' || !process.getuid?.())('preflights matching Linux build and adoption backends and retains undelivered authority gates', async () => {
+  const f = await fixture(true, true, false, false, false, true)
+  expect(() => normalizeControlPlaneConfig(f.config)).not.toThrow()
+  const build = f.config.sourceBuild as build.LinuxSourceBuildConfig
+  const { userNamespace: _mapping, systemSnapshot: _snapshot, ...legacy } = build
+  expect(() => normalizeControlPlaneConfig({ ...f.config, sourceBuild: legacy })).toThrow(/dual-UID/)
+  const runner = f.capability!.runner
+  const dockerRunner = { stateRoot: runner.stateRoot, image: `sha256:${'a'.repeat(64)}`, dockerPath: '/usr/bin/docker',
+    expiresAt: runner.expiresAt, maxRuns: runner.maxRuns, maxTotalDurationMs: runner.maxTotalDurationMs,
+    maxDurationMs: runner.maxDurationMs, maxOutputBytes: runner.maxOutputBytes }
+  expect(() => normalizeControlPlaneConfig({ ...f.config,
+    creationCapabilities: { ...f.capability!, runner: dockerRunner } })).toThrow(/matching execution backends/)
+  const dockerBuild: build.SourceBuildConfig = { dockerPath: '/usr/bin/docker', image: `fixture@sha256:${'a'.repeat(64)}`,
+    timeoutMs: 60_000, versioning: 'patch', memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 }
+  expect(() => normalizeControlPlaneConfig({ ...f.config, sourceBuild: dockerBuild })).toThrow(/matching execution backends/)
+  expect(() => normalizeControlPlaneConfig({ ...f.config,
+    revisionVerifications: { authority: f.revisionAuthority, publicKey: f.publicKey } })).toThrow(/not yet connected to revision and release/)
+  expect(() => normalizeControlPlaneConfig({ ...f.config, sourceAdoptions: {} as NonNullable<Config['sourceAdoptions']> }))
+    .toThrow(/not yet connected to revision and release/)
+})
+
+it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['protocol', 'build-runtime', 'build-evidence'] as const)(
+  'rejects a signed Linux creation certificate with mismatched %s provenance before discovery', async fault => {
+    const f = await fixture(true, true, false, false, false, true)
+    f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedCertificate(f, request.planId,
+      f.signing.privateKey, body => {
+        if (fault === 'protocol') return
+        const certificate = signedAdoptionCertificate(f, request.planId)
+        body.protocol = certificate.protocol
+        body.execution = { ...certificate.execution!,
+          ...(fault === 'build-runtime' ? { buildRuntimeDigest: '0'.repeat(64) } : { buildEvidenceDigest: '0'.repeat(64) }) }
+      }) }))
+    const job = await f.service.enqueueSourceJob(f.request)
+    f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+    const planId = f.store.getSourceJob(job.id)!.planId!
+    expect(f.service.inspectVerifiedCreation(planId)).toBeUndefined()
+    expect(f.store.getCreationVerificationStatus(planId)).toBe('unknown')
+    expect(f.service.inspectCreatedCapability(planId)).toBeUndefined()
+    expect(runnerRun).not.toHaveBeenCalled()
+    expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
+    expect(linuxTransport.run).not.toHaveBeenCalled()
+  })
+
+it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['missing', 'receipt'] as const)(
+  'fresh Linux adoption rechecks the original successful build after discovery and closes %s receipts without redispatch', async fault => {
+    const f = await fixture(true, true, false, false, false, true)
+    f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedAdoptionCertificate(f, request.planId) }))
+    installCandidateRunner(f)
+    const originalRun = runnerRun.getMockImplementation()!
+    runnerRun.mockImplementation(async input => {
+      const result = await originalRun(input)
+      const changed = structuredClone(f.linuxExecution!)
+      changed.receiptBinding!.receiptDigest = '0'.repeat(64)
+      linuxTransport.inspect.mockResolvedValue(fault === 'missing' ? undefined : changed)
+      return result
+    })
+    const job = await f.service.enqueueSourceJob(f.request)
+    f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+    const planId = f.store.getSourceJob(job.id)!.planId!, frozenJob = structuredClone(f.store.getSourceJob(job.id))
+    expect(f.service.inspectCreatedCapability(planId)).toEqual({ status: 'unknown', aliases: [] })
+    expect(linuxTransport.inspect).toHaveBeenCalledTimes(2)
+    expect(runnerRun).toHaveBeenCalledOnce()
+    f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
+    expect(f.store.getSourceJob(job.id)).toEqual(frozenJob)
+    expect(f.verification).toHaveBeenCalledOnce()
+    expect(runnerRun).toHaveBeenCalledOnce()
+    expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
+    expect(linuxTransport.run).not.toHaveBeenCalled()
   })
 
 it('automatically verifies a pinned task creation after prepare and retains exact signed evidence without replay', async () => {
@@ -533,29 +724,26 @@ it.each(['correction', 'withdrawal'] as const)(
     f.notifyTaskChange()
   }, 60_000)
 
-it.each(['correction', 'withdrawal'] as const)(
-  'retained adoption uses the frozen artifact after plan GC, then closes on current %s', async change => {
-    const f = await fixture(true, true, true)
-    f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedCertificate(f, request.planId,
-      f.signing.privateKey, body => { body.schemaDigest = candidateSchemaDigest; body.environment = candidateEnvironment }) }))
-    runnerRun.mockImplementation(async (input: { artifact: Buffer; operation: { kind: string;
-      calls?: readonly { id: string; toolName: string }[] } }): Promise<CreationCapabilityObservation> => {
-      const common = { status: 'observed' as const, quiescent: true,
-        artifactSha256: createHash('sha256').update(input.artifact).digest('hex'),
-        schemaDigest: candidateSchemaDigest, environment: candidateEnvironment }
-      return input.operation.kind === 'discover' ? { ...common, schemas: candidateSchemas }
-        : { ...common, calls: input.operation.calls!.map(call => ({ id: call.id, toolName: call.toolName,
-          result: { isError: false, value: { answer: 'ok' }, content: [{ type: 'text', text: 'ok' }] } })) }
-    })
+it.for([
+  { backend: 'docker', change: 'correction' }, { backend: 'docker', change: 'withdrawal' },
+  { backend: 'linux-native', change: 'correction' }, { backend: 'linux-native', change: 'withdrawal' },
+] as const)(
+  'retained $backend adoption uses the frozen artifact after plan GC, then closes on current $change', { timeout: 60_000 }, async ({ backend, change }, context) => {
+    const linux = backend === 'linux-native'
+    if (linux && (process.platform !== 'linux' || !process.getuid?.())) context.skip()
+    const f = await fixture(true, true, true, false, false, linux)
+    f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedAdoptionCertificate(f, request.planId) }))
+    installCandidateRunner(f)
     const job = await f.service.enqueueSourceJob(f.request)
     f.advance(); await f.automations.tick(); await f.automations.whenIdle()
     const planId = f.store.getSourceJob(job.id)!.planId!
     const adopted = f.service.inspectCreatedCapability(planId)!
     expect(adopted.status).toBe('active')
     const archive = f.service.inspectCreatedCapabilitySource(planId)!
+    const checked = linux ? f.linuxChecked! : f.checked
     expect(archive).toMatchObject({ protocol: 'dsh-created-capability-source-archive/v1', planId,
-      artifactSha256: f.checked.evidence.pack.sha256,
-      source: { treeDigest: f.checked.treeDigest, patchDigest: f.checked.patchDigest } })
+      artifactSha256: checked.evidence.pack.sha256,
+      source: { treeDigest: checked.treeDigest, patchDigest: checked.patchDigest } })
     expect(archive.source.files.find(file => file.path.endsWith('/README.md'))?.content).toBe('# Created plugin\n')
     expect(Object.isFrozen(archive.source.files)).toBe(true)
     const alias = adopted.aliases[0]!
@@ -566,7 +754,13 @@ it.each(['correction', 'withdrawal'] as const)(
     } as unknown as ToolRunContext)
     await expect(execute('before-expiry')).resolves.toMatchObject({ value: { answer: 'ok' } })
     const producerCalls = f.inspectGrowthRun.mock.calls.length
+    const originalBuildReads = linuxTransport.inspect.mock.calls.length
+    const originalRuntimeReads = linuxTransport.verify.mock.calls.length
     f.advance(901_000)
+    if (linux) {
+      linuxTransport.inspect.mockRejectedValue(new Error('expired original build authority must not be read'))
+      linuxTransport.verify.mockRejectedValue(new Error('expired base runtime must not be read'))
+    }
     expect(f.service.inspectVerifiedCreation(planId)).toBeUndefined()
     expect(() => f.service.inspectPreparedCreation(planId)).toThrow()
     const plan = f.store.getSourcePlan(planId)
@@ -580,25 +774,11 @@ it.each(['correction', 'withdrawal'] as const)(
     expect(() => normalizeControlPlaneConfig(f.config)).not.toThrow()
     await f.unregisterGrowthRun()
     await f.ctx.fiber.dispose()
-    const startHost = async () => {
-      const context = new Context()
-      cleanup.push(async () => context.fiber.dispose())
-      await mountAgentLoopTestDependencies(context, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
-      context.provide('assistantDelivery' as never, f.deliveryPorts)
-      context.provide('assistantEvaluation' as never, f.evaluationPorts)
-      context.provide('assistantVerifier' as never, { verifyPluginCreation: f.verification })
-      new AssistantPolicyService(context, { databasePath: join(f.root, 'policy.sqlite'),
-        budgets: [{ id: 'source-budget', metric: 'automation-runs', limit: 3, periodMs: 60_000, scope: 'global' }], rules: [
-          { id: 'reconcile', effect: 'allow', subject: { kind: 'background', id: 'plugin-control-plane-source', workspace: f.root, principal: 'owner' }, actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
-          { id: 'execute', effect: 'allow', subject: { kind: 'background', id: '*', workspace: f.root, principal: 'owner' }, actions: ['execute'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
-        ] })
-      new AssistantAutomationsService(context, { databasePath: join(f.root, 'automations.sqlite'),
-        runsPath: join(f.root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0 })
-      return { context, service: new PluginControlPlaneService(context, f.config) }
-    }
+    const startHost = () => startCapabilityHost(f)
     const restored = await startHost()
     hostCtx = restored.context
     const restarted = restored.service
+    await vi.waitFor(() => expect(restarted.inspectCreatedCapability(planId)?.status).toBe('active'))
     await vi.waitFor(() => expect(hostCtx.tools.get(alias)).toBeDefined())
     expect(restarted.inspectCreatedCapability(planId)?.status).toBe('active')
     expect(restarted.inspectCreatedCapabilitySource(planId)).toEqual(archive)
@@ -615,9 +795,17 @@ it.each(['correction', 'withdrawal'] as const)(
     expect(restarted.inspectCreatedCapabilitySource(planId)).toBeUndefined()
     Object.assign(f.owner, originalOwner)
     await expect(execute('after-expiry')).resolves.toMatchObject({ value: { answer: 'ok' } })
+    await expect(execute('after-expiry')).resolves.toMatchObject({ value: { answer: 'ok' } })
     await expect(execute('third-call')).rejects.toThrow()
     expect(f.inspectGrowthRun.mock.calls.length).toBe(producerCalls)
     expect(runnerRun).toHaveBeenCalledTimes(3)
+    if (linux) {
+      expect(linuxTransport.inspect).toHaveBeenCalledTimes(originalBuildReads)
+      expect(linuxTransport.verify).toHaveBeenCalledTimes(originalRuntimeReads)
+      expect(linuxTransport.adoptionVerify).toHaveBeenCalled()
+      expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
+      expect(linuxTransport.run).not.toHaveBeenCalled()
+    }
     f.setSource(change === 'correction'
       ? { ...f.source, source: { ...f.source.source, objective: 'owner corrected the original task' } }
       : { ...f.source, canonical: { ...f.source.canonical,
@@ -637,7 +825,7 @@ it.each(['correction', 'withdrawal'] as const)(
     expect(expiredHost.service.inspectCreatedCapability(planId)?.status).toBe('closed')
     expect(hostCtx.tools.get(alias)).toBeUndefined()
     expect(runnerRun).toHaveBeenCalledTimes(3)
-  }, 60_000)
+  })
 
 it('preflights independent adoption key, owner and namespace before constructing a Host service', async () => {
   const f = await fixture(true, true)

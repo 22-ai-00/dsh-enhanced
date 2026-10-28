@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto'
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { hashLinuxRuntimeTree, linuxRuntimeDigest, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { linuxPluginBehaviorRuntimeDigest, prepareLinuxPluginBehaviorRuntime, readLinuxPluginBehaviorPreparation, readLinuxPluginBehaviorRuntime,
-  validateLinuxPluginBehaviorRuntime, verifyLinuxPluginBehaviorRuntime, type LinuxPluginBehaviorRuntime } from '../src/linux-behavior-runtime.js'
+  validateLinuxPluginBehaviorRuntime, verifyLinuxPluginBehaviorAdoptionRuntime, verifyLinuxPluginBehaviorRuntime, type LinuxPluginBehaviorRuntime } from '../src/linux-behavior-runtime.js'
+import * as behaviorAssets from '../src/linux-behavior-assets.js'
 
 const sha = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 let home: string, base: LinuxRuntime, descriptor: LinuxPluginBehaviorRuntime
@@ -122,6 +123,142 @@ describe.runIf(process.platform === 'linux' && process.env.DSH_LINUX_BEHAVIOR_PR
     await chmod(path, 0o600); await writeFile(path, JSON.stringify(changed)); await chmod(path, 0o444)
     try { await expect(readLinuxPluginBehaviorRuntime({ runtime: base, root })).rejects.toThrow('compiler identity differs') }
     finally { await chmod(path, 0o600); await writeFile(path, original); await chmod(path, 0o444) }
+  }, 120_000)
+
+  const adoptionInput = async (): Promise<Parameters<typeof verifyLinuxPluginBehaviorAdoptionRuntime>[0]> => ({
+    runtime: descriptor, buildRuntimeDigest: linuxRuntimeDigest(base),
+    preparationDigest: JSON.parse(await readFile(join(home, 'observer', 'behavior.json'), 'utf8')).receiptDigest,
+    signal: new AbortController().signal,
+  })
+  const replaceReceipt = async (bytes: string | Buffer): Promise<void> => {
+    const path = join(home, 'observer', 'behavior.json')
+    await chmod(path, 0o600); await writeFile(path, bytes); await chmod(path, 0o444)
+  }
+  const sealReceipt = (content: Record<string, unknown>): string => JSON.stringify({ ...content, receiptDigest: sha(JSON.stringify(content)) })
+
+  it('adopts the immutable observer after the original base is unavailable without recreating it', async () => {
+    const input = await adoptionInput(), root = join(home, 'observer'), receiptPath = join(root, 'behavior.json')
+    const before = await lstat(receiptPath), bytes = await readFile(receiptPath), inventory = await readdir(root)
+    const baseFile = join(base.root.path, 'source', 'retained.txt'), original = await readFile(baseFile)
+    await chmod(baseFile, 0o600); await writeFile(baseFile, 'changed base'); await chmod(baseFile, 0o444)
+    try { await expect(readLinuxPluginBehaviorPreparation({ runtime: base, root })).rejects.toThrow('Linux runtime root differs') }
+    finally { await chmod(baseFile, 0o600); await writeFile(baseFile, original); await chmod(baseFile, 0o444) }
+    await rename(base.root.path, base.root.path + '-unavailable')
+    try {
+      await expect(readLinuxPluginBehaviorPreparation({ runtime: base, root })).rejects.toThrow('ENOENT')
+      await expect(verifyLinuxPluginBehaviorAdoptionRuntime(input)).resolves.toBeUndefined()
+      expect(await readFile(receiptPath)).toEqual(bytes)
+      expect(await lstat(receiptPath)).toEqual(before)
+      expect(await readdir(root)).toEqual(inventory)
+      await expect(lstat(base.root.path)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { await rename(base.root.path + '-unavailable', base.root.path) }
+  }, 120_000)
+
+  it('binds the signed base, preparation receipt and exact configured observer', async () => {
+    const input = await adoptionInput()
+    for (const altered of [
+      { ...input, buildRuntimeDigest: '0'.repeat(64) },
+      { ...input, preparationDigest: '0'.repeat(64) },
+      { ...input, runtime: { ...descriptor, observer: { ...descriptor.observer, compilerSha256: '0'.repeat(64) } } },
+      { ...input, runtime: { ...descriptor, runtime: { ...descriptor.runtime, root: { ...descriptor.runtime.root, sha256: '0'.repeat(64) } } } },
+    ]) await expect(verifyLinuxPluginBehaviorAdoptionRuntime(altered)).rejects.toThrow()
+    const path = join(home, 'observer', 'behavior.json'), original = await readFile(path)
+    const { receiptDigest: _digest, ...content } = JSON.parse(original.toString()) as Record<string, unknown>
+    try {
+      // Recomputing the outer receipt cannot change the original signed provenance.
+      await replaceReceipt(sealReceipt({ ...content, compilerSha256: '0'.repeat(64) }))
+      await expect(verifyLinuxPluginBehaviorAdoptionRuntime(input)).rejects.toThrow('receipt identity differs')
+      for (const changed of [{ ...content, compilerSha256: 'invalid' }, { ...content, extra: true }, { ...content, schemaVersion: 2 }]) {
+        const raw = sealReceipt(changed)
+        await replaceReceipt(raw)
+        await expect(verifyLinuxPluginBehaviorAdoptionRuntime({ ...input, preparationDigest: JSON.parse(raw).receiptDigest }))
+          .rejects.toThrow('invalid receipt')
+      }
+      await replaceReceipt(JSON.stringify({ ...content, receiptDigest: '0'.repeat(64) }))
+      await expect(verifyLinuxPluginBehaviorAdoptionRuntime({ ...input, preparationDigest: '0'.repeat(64) }))
+        .rejects.toThrow('receipt identity differs')
+    } finally { await replaceReceipt(original) }
+  })
+
+  it('rejects observer aliases, unexpected root names and unsafe private receipt storage', async () => {
+    const input = await adoptionInput(), root = join(home, 'observer'), path = join(root, 'behavior.json')
+    const alias = join(home, 'observer-alias')
+    const relocate = (target: string): LinuxPluginBehaviorRuntime => ({ ...descriptor, runtime: {
+      ...descriptor.runtime, root: { ...descriptor.runtime.root, path: target },
+      nodePath: join(target, 'bin/node'), pnpmPath: join(target, 'pnpm/bin/pnpm.mjs'),
+      nativePnpmPath: join(target, 'pnpm-native/pnpm'), nativePnpmRoot: join(target, 'pnpm-native'),
+      modulesPath: join(target, 'node_modules'), storePath: join(target, 'store'), cachePath: join(target, 'cache'),
+    } })
+    await symlink(root, alias)
+    try {
+      await expect(verifyLinuxPluginBehaviorAdoptionRuntime({ ...input, runtime: relocate(join(alias, 'runtime')) }))
+        .rejects.toThrow('unsafe private directory')
+    } finally { await rm(alias) }
+    await chmod(root, 0o755)
+    try { await expect(verifyLinuxPluginBehaviorAdoptionRuntime(input)).rejects.toThrow('unsafe private directory') }
+    finally { await chmod(root, 0o700) }
+    // Keep the exact inventory so the receipt reader itself rejects the alias.
+    await rename(path, join(home, 'original.json')); await symlink('../original.json', path)
+    try { await expect(verifyLinuxPluginBehaviorAdoptionRuntime(input)).rejects.toThrow('unsafe Linux behavior asset') }
+    finally { await rm(path); await rename(join(home, 'original.json'), path) }
+    const original = await readFile(path), { receiptDigest: _digest, ...content } = JSON.parse(original.toString()) as Record<string, unknown>
+    const altered = relocate(join(root, 'renamed-runtime')), raw = sealReceipt({ ...content, descriptor: altered })
+    await replaceReceipt(raw)
+    try {
+      await expect(verifyLinuxPluginBehaviorAdoptionRuntime({ ...input, runtime: altered, preparationDigest: JSON.parse(raw).receiptDigest }))
+        .rejects.toThrow('receipt identity differs')
+    } finally { await replaceReceipt(original) }
+  })
+
+  it('rehashes the clone and verifies fixed observer assets even with resealed tree and receipt digests', async () => {
+    const input = await adoptionInput(), path = join(descriptor.runtime.root.path, 'dsh-plugin-verifier', 'worker.mjs')
+    const original = await readFile(path), receipt = await readFile(join(home, 'observer', 'behavior.json'))
+    await chmod(path, 0o600); await writeFile(path, 'tampered'); await chmod(path, 0o444)
+    try {
+      await expect(verifyLinuxPluginBehaviorAdoptionRuntime(input)).rejects.toThrow('Linux runtime root differs')
+      const altered = { ...descriptor, observer: { ...descriptor.observer, workerSha256: sha('tampered') },
+        runtime: { ...descriptor.runtime, root: { ...descriptor.runtime.root, sha256: await hashLinuxRuntimeTree(descriptor.runtime.root.path) } } }
+      const { receiptDigest: _digest, ...content } = JSON.parse(receipt.toString()) as Record<string, unknown>
+      const raw = sealReceipt({ ...content, descriptor: altered })
+      await replaceReceipt(raw)
+      await expect(verifyLinuxPluginBehaviorAdoptionRuntime({ ...input, runtime: altered, preparationDigest: JSON.parse(raw).receiptDigest }))
+        .rejects.toThrow('observer asset differs')
+    } finally {
+      await chmod(path, 0o600); await writeFile(path, original); await chmod(path, 0o444)
+      await replaceReceipt(receipt)
+    }
+  }, 120_000)
+
+  it.each(['bytes', 'inode'])('rejects receipt %s changes while the real observer verification runs', async kind => {
+    const input = await adoptionInput(), path = join(home, 'observer', 'behavior.json'), bytes = await readFile(path)
+    const load = behaviorAssets.loadLinuxBehaviorAssets
+    const spy = vi.spyOn(behaviorAssets, 'loadLinuxBehaviorAssets').mockImplementationOnce(async () => {
+      const assets = await load()
+      if (kind === 'bytes') await replaceReceipt(Buffer.concat([bytes, Buffer.from('\n')]))
+      else {
+        const replacement = join(home, 'receipt-replacement.json')
+        await writeFile(replacement, bytes, { mode: 0o444 }); await rename(replacement, path)
+      }
+      return assets
+    })
+    try {
+      await expect(verifyLinuxPluginBehaviorAdoptionRuntime(input)).rejects.toThrow('preparation receipt changed during verification')
+      expect(spy).toHaveBeenCalledOnce()
+    } finally { spy.mockRestore(); await replaceReceipt(bytes) }
+  }, 120_000)
+
+  it('honors cancellation before reading and during real observer verification', async () => {
+    const input = await adoptionInput(), abort = new AbortController(), reason = new Error('caller closed')
+    abort.abort(reason)
+    await expect(verifyLinuxPluginBehaviorAdoptionRuntime({ ...input, signal: abort.signal })).rejects.toBe(reason)
+    const active = new AbortController(), load = behaviorAssets.loadLinuxBehaviorAssets
+    const spy = vi.spyOn(behaviorAssets, 'loadLinuxBehaviorAssets').mockImplementationOnce(async () => {
+      const assets = await load(); active.abort(reason); return assets
+    })
+    try {
+      await expect(verifyLinuxPluginBehaviorAdoptionRuntime({ ...input, signal: active.signal })).rejects.toBe(reason)
+      expect(spy).toHaveBeenCalledOnce()
+    } finally { spy.mockRestore() }
   }, 120_000)
 
   it('rejects escaping base links and cleans a failed clone without changing the base', async () => {

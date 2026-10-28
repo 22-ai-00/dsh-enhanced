@@ -8,7 +8,8 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { afterEach, expect, test, vi } from 'vitest'
 import { canonicalGrowthJson, verifyPluginCreationVerificationCertificate, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
-import { nativeMacRuntimeDigest, type NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
+import { linuxRuntimeDigest, nativeMacRuntimeDigest, type NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
+import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
 import { CreationCapabilityJournal, creationCapabilityPublicKey, validateCreationCapabilityConfig,
   verifyCreationCapabilityReceipt } from '../src/creation-capability-journal.js'
 import { CreationCapabilityRuntime } from '../src/creation-capability-runtime.js'
@@ -56,6 +57,36 @@ function fixture(maxAdoptions = 2, maxCalls = 3) {
     return { ...unsigned, signature: sign(null, Buffer.from(canonicalGrowthJson(unsigned)), verifier.privateKey).toString('base64url') }
   }
   return { root, config, path, artifact, certificate, signing, verifier }
+}
+
+function linuxFixture(maxAdoptions = 2, maxCalls = 3) {
+  const f = fixture(maxAdoptions, maxCalls), runtimeRoot = join(f.root, 'observer-runtime')
+  const runtime: LinuxPluginBehaviorRuntime = { schemaVersion: 1, runtime: {
+    schemaVersion: 1, backend: 'linux-native', platform: `linux-${process.arch}` as 'linux-x64' | 'linux-arm64',
+    sourceCommit: '1'.repeat(40), lockSha256: d('a'), root: { path: runtimeRoot, dev: 1, ino: 2, sha256: d('b') },
+    nodePath: join(runtimeRoot, 'bin/node'), nodeSha256: d('c'), pnpmPath: join(runtimeRoot, 'pnpm/bin/pnpm.mjs'),
+    nativePnpmPath: join(runtimeRoot, 'pnpm-native/pnpm'), nativePnpmRoot: join(runtimeRoot, 'pnpm-native'),
+    modulesPath: join(runtimeRoot, 'node_modules'), storePath: join(runtimeRoot, 'store'), cachePath: join(runtimeRoot, 'cache'),
+    versions: { node: 'v22.23.2', pnpm: '11.7.0', typescript: '6.0.3', cordis: '4.0.5', tools: '0.2.1-rc.2', systemPrompt: '0.2.1-rc.2' },
+  }, observer: { schemaVersion: 1, sourceSha256: d('d'), workerSha256: d('e'), candidateSha256: d('f'),
+    launcherSha256: d('0'), parentProtectSha256: d('1'), childProtectSha256: d('2') } }
+  const config: CreationCapabilityConfig = { ...f.config, runner: {
+    backend: 'linux-native', runtime, cgroupRoots: { mode: 'v1', cpu: '/sys/fs/cgroup/cpu/dsh-native/uid-1000',
+      memory: '/sys/fs/cgroup/memory/dsh-native/uid-1000', pids: '/sys/fs/cgroup/pids/dsh-native/uid-1000',
+      freezer: '/sys/fs/cgroup/freezer/dsh-native/uid-1000' },
+    stateRoot: f.root, expiresAt: f.config.runner.expiresAt, maxRuns: 5,
+    maxTotalDurationMs: 30_000, maxDurationMs: 10_000, maxOutputBytes: 65536,
+  } }
+  const certificate = (planId: string, lifetimeMs = 90_000, schemaDigest = d('5')): PluginCreationVerificationCertificate => {
+    const { signature: _signature, ...legacy } = f.certificate(planId, lifetimeMs, schemaDigest)
+    const body: Omit<PluginCreationVerificationCertificate, 'signature'> = { ...legacy,
+      protocol: 'assistant-growth/creation-verification/v3', execution: {
+        boundary: 'linux-native-process-seccomp-v1', runtimeDigest: linuxPluginBehaviorRuntimeDigest(runtime),
+        buildRuntimeDigest: d('6'), buildEvidenceDigest: d('7'), observerPreparationDigest: d('8'),
+      } }
+    return { ...body, signature: sign(null, Buffer.from(canonicalGrowthJson(body)), f.verifier.privateKey).toString('base64url') }
+  }
+  return { ...f, config, runtime, legacyCertificate: f.certificate, certificate }
 }
 
 function archivedFixture(f: ReturnType<typeof fixture>, planId = 'one') {
@@ -141,6 +172,194 @@ test('native adoption requires a signed v2 certificate pinned to its exact runne
     expect(record.created).toBe(true)
     expect(record.record.certificate.protocol).toBe('assistant-growth/creation-verification/v2')
   } finally { journal.close() }
+})
+
+test.skipIf(process.platform !== 'linux')('Linux adoption preflight keeps exact schemas, private paths and finite owner caps', () => {
+  const f = linuxFixture()
+  validateCreationCapabilityConfig(f.config)
+  const runner = f.config.runner
+  expect('backend' in runner && runner.backend).toBe('linux-native')
+  if (!('backend' in runner) || runner.backend !== 'linux-native') throw new Error('fixture backend')
+  for (const bad of [
+    { ...runner, image: `runner@sha256:${d('a')}` }, { ...runner, dockerPath: '/usr/bin/docker' },
+    { ...runner, socketPath: '/var/run/docker.sock' }, { ...runner, extra: true },
+    { ...runner, backend: 'linux-other' }, { ...runner, maxRuns: 1025 },
+    { ...runner, maxOutputBytes: 65535 }, { ...runner, maxOutputBytes: 65537 },
+    { ...runner, maxDurationMs: runner.maxTotalDurationMs + 1 },
+    { ...runner, cgroupRoots: { ...runner.cgroupRoots, extra: true } },
+    { ...runner, cgroupRoots: { mode: 'v2', unified: '/sys/fs/cgroup/dsh' } },
+    { ...runner, cgroupRoots: { ...runner.cgroupRoots, cpu: 'relative' } },
+    { ...runner, runtime: { ...runner.runtime, extra: true } },
+    { ...runner, runtime: { ...runner.runtime, observer: { ...runner.runtime.observer, workerSha256: 'invalid' } } },
+  ]) expect(() => validateCreationCapabilityConfig({ ...f.config, runner: bad })).toThrow()
+  let invoked = 0
+  for (const [target, key] of [[{ ...runner }, 'backend'], [{ ...runner }, 'runtime'],
+    [{ ...runner.cgroupRoots }, 'cpu'], [{ ...runner.runtime.observer }, 'workerSha256']] as const) {
+    Object.defineProperty(target, key, { enumerable: true, get() { invoked++; return 'untrusted' } })
+    const bad = key === 'cpu' ? { ...runner, cgroupRoots: target }
+      : key === 'workerSha256' ? { ...runner, runtime: { ...runner.runtime, observer: target } } : target
+    expect(() => validateCreationCapabilityConfig({ ...f.config, runner: bad })).toThrow()
+  }
+  expect(invoked).toBe(0)
+  chmodSync(f.root, 0o755)
+  expect(() => validateCreationCapabilityConfig(f.config)).toThrow()
+  chmodSync(f.root, 0o700)
+  chmodSync(f.config.keyPath, 0o644)
+  expect(() => validateCreationCapabilityConfig(f.config)).toThrow()
+})
+
+test.skipIf(process.platform !== 'linux')('signed Linux v3 adoption reopens with its receipt and consumes cached and unknown call reservations once', () => {
+  const f = linuxFixture(1, 2), certificate = f.certificate('linux')
+  const verifierPublicKey = f.verifier.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  expect(verifyPluginCreationVerificationCertificate(certificate, certificate.authority, verifierPublicKey)).toBe(true)
+  let journal = new CreationCapabilityJournal({ path: f.path, config: f.config }), dispatches = 0
+  const reserve = (key: string) => {
+    const result = journal.claimCall({ planId: 'linux', key, argumentsDigest: d('a') })
+    if (result.created) dispatches++
+    return result
+  }
+  expect(journal.claim({ certificate, artifact: f.artifact }).created).toBe(true)
+  expect(journal.claim({ certificate, artifact: f.artifact }).created).toBe(false)
+  const receipt = journal.authorize('linux', tools).receipt!, authorityDigest = journal.authorityDigest
+  expect(receipt.protocol).toBe('dsh-created-capability-adoption/v1')
+  expect(receipt.expiresAt).toBe(Math.min(f.config.expiresAt, f.config.runner.expiresAt, certificate.expiresAt))
+  expect(verifyCreationCapabilityReceipt(receipt, authorityDigest, journal.publicKey)).toBe(true)
+  expect(journal.activate('linux').status).toBe('active')
+  expect(reserve('completed').created).toBe(true)
+  journal.settleCall({ planId: 'linux', key: 'completed', status: 'completed', result: { value: 'cached' }, jobId: 'job-one' })
+  expect(reserve('completed')).toMatchObject({ created: false, call: { status: 'completed', result: { value: 'cached' } } })
+  expect(reserve('uncertain').created).toBe(true)
+  expect(dispatches).toBe(2)
+  journal.close()
+  journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  try {
+    expect(journal.authorityDigest).toBe(authorityDigest)
+    expect(journal.inspect('linux')).toMatchObject({ status: 'active', receipt, certificate })
+    journal.recoverClaims()
+    expect(reserve('completed')).toMatchObject({ created: false, call: { status: 'completed', result: { value: 'cached' } } })
+    expect(reserve('uncertain')).toMatchObject({ created: false, call: { status: 'unknown' } })
+    expect(dispatches).toBe(2)
+    expect(journal.listCallEvidence('linux').map(call => call.status).sort()).toEqual(['completed', 'unknown'])
+    expect(() => reserve('over-quota')).toThrow()
+    expect(() => journal.settleCall({ planId: 'linux', key: 'uncertain', status: 'completed', result: 'late' })).toThrow()
+    expect(() => journal.claim({ certificate: f.certificate('second'), artifact: f.artifact })).toThrow()
+  } finally { journal.close() }
+})
+
+test.skipIf(process.platform !== 'linux')('Linux v3 keeps the retained v2 receipt deadline independent of certificate freshness', () => {
+  const f = linuxFixture(1, 2), now = Date.now()
+  f.config.retention = { maximumLifetimeMs: 15_000 }
+  f.config.expiresAt = now + 12_000
+  f.config.runner.expiresAt = now + 10_000
+  const certificate = f.certificate('retained', 2_000)
+  let journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  journal.claim({ certificate, artifact: f.artifact })
+  const receipt = journal.authorize('retained', tools).receipt!
+  expect(receipt.protocol).toBe('dsh-created-capability-adoption/v2')
+  expect(receipt.expiresAt).toBe(f.config.runner.expiresAt)
+  journal.activate('retained')
+  journal.claimCall({ planId: 'retained', key: 'cached', argumentsDigest: d('a') })
+  journal.settleCall({ planId: 'retained', key: 'cached', status: 'completed', result: 'retained-result' })
+  journal.close()
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 3_000)
+  journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  try {
+    expect(journal.inspect('retained')?.receipt).toEqual(receipt)
+    expect(() => journal.claim({ certificate, artifact: f.artifact })).toThrow()
+    expect(verifyCreationCapabilityReceipt(receipt, journal.authorityDigest, journal.publicKey)).toBe(true)
+    expect(journal.claimCall({ planId: 'retained', key: 'fresh', argumentsDigest: d('b') }).created).toBe(true)
+    clock.mockReturnValue(receipt.expiresAt)
+    expect(verifyCreationCapabilityReceipt(receipt, journal.authorityDigest, journal.publicKey)).toBe(false)
+    expect(() => journal.claimCall({ planId: 'retained', key: 'expired', argumentsDigest: d('c') })).toThrow()
+    expect(journal.claimCall({ planId: 'retained', key: 'cached', argumentsDigest: d('a') }).call.result).toBe('retained-result')
+    expect(journal.inspect('retained')?.receipt).toEqual(receipt)
+  } finally { journal.close() }
+})
+
+test.skipIf(process.platform !== 'linux')('Linux rejects legacy certificates, wrong boundaries and a build-base or changed observer digest', () => {
+  const f = linuxFixture(), certificate = f.certificate('linux')
+  const journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  try {
+    const { signature: _signature, ...body } = certificate
+    const v2 = { ...body, protocol: 'assistant-growth/creation-verification/v2' as const,
+      execution: { boundary: 'macos-seatbelt-single-process-v1' as const, runtimeDigest: certificate.execution!.runtimeDigest,
+        buildEvidenceDigest: d('c') } }
+    const macCertificate = { ...v2, signature: sign(null, Buffer.from(canonicalGrowthJson(v2)), f.verifier.privateKey).toString('base64url') }
+    expect(() => journal.claim({ certificate: f.legacyCertificate('legacy'), artifact: f.artifact })).toThrow()
+    expect(() => journal.claim({ certificate: macCertificate, artifact: f.artifact })).toThrow()
+    for (const execution of [
+      { ...certificate.execution!, runtimeDigest: d('f') },
+      { ...certificate.execution!, runtimeDigest: linuxRuntimeDigest(f.runtime.runtime) },
+      { ...certificate.execution!, boundary: 'macos-seatbelt-single-process-v1' },
+    ]) {
+      const wrong = { ...body, execution }
+      const signed = { ...wrong, signature: sign(null, Buffer.from(canonicalGrowthJson(wrong)), f.verifier.privateKey).toString('base64url') }
+      expect(() => journal.claim({ certificate: signed as PluginCreationVerificationCertificate, artifact: f.artifact })).toThrow()
+    }
+    expect(journal.list()).toEqual([])
+    journal.claim({ certificate, artifact: f.artifact })
+  } finally { journal.close() }
+  const legacy = fixture()
+  const docker = new CreationCapabilityJournal({ path: legacy.path, config: legacy.config })
+  try {
+    expect(() => docker.claim({ certificate, artifact: f.artifact })).toThrow()
+  } finally { docker.close() }
+})
+
+test.skipIf(process.platform !== 'linux').each(['runtimeDigest', 'buildRuntimeDigest', 'buildEvidenceDigest', 'observerPreparationDigest'] as const)(
+  'the adoption receipt binds the full Linux certificate including %s', field => {
+    const f = linuxFixture(), certificate = f.certificate('linux')
+    const journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+    journal.claim({ certificate, artifact: f.artifact })
+    journal.authorize('linux', tools); journal.activate('linux')
+    const { signature: _signature, ...body } = certificate
+    const changed = { ...body, execution: { ...body.execution!, [field]: d('9') } }
+    const signed = { ...changed, signature: sign(null, Buffer.from(canonicalGrowthJson(changed)), f.verifier.privateKey).toString('base64url') }
+    const key = f.verifier.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+    expect(verifyPluginCreationVerificationCertificate(signed, signed.authority, key)).toBe(true)
+    const encoded = canonicalGrowthJson(signed), raw = new DatabaseSync(f.path)
+    try {
+      raw.prepare('UPDATE adoptions SET certificate_json=?,certificate_digest=? WHERE plan_id=?')
+        .run(encoded, createHash('sha256').update(encoded).digest('hex'), 'linux')
+      expect(() => journal.inspect('linux')).toThrow()
+    } finally { raw.close(); journal.close() }
+    expect(() => new CreationCapabilityJournal({ path: f.path, config: f.config })).toThrow()
+  })
+
+test.skipIf(process.platform !== 'linux')('a Linux runner cannot reinterpret an existing Docker ledger or reset its owner grant', () => {
+  const f = linuxFixture(1, 1), legacy = fixture(1, 1)
+  const dockerConfig = { ...f.config, runner: legacy.config.runner }
+  const docker = new CreationCapabilityJournal({ path: f.path, config: dockerConfig })
+  docker.claim({ certificate: f.legacyCertificate('docker'), artifact: f.artifact })
+  docker.authorize('docker', tools); docker.activate('docker')
+  docker.claimCall({ planId: 'docker', key: 'uncertain', argumentsDigest: d('a') })
+  docker.close()
+  expect(() => new CreationCapabilityJournal({ path: f.path, config: f.config })).toThrow()
+  const original = new CreationCapabilityJournal({ path: f.path, config: dockerConfig })
+  try {
+    original.recoverClaims()
+    expect(original.claimCall({ planId: 'docker', key: 'uncertain', argumentsDigest: d('a') }).call.status).toBe('unknown')
+    expect(() => original.claimCall({ planId: 'docker', key: 'new', argumentsDigest: d('a') })).toThrow()
+  } finally { original.close() }
+  const linux = linuxFixture(1, 1)
+  const journal = new CreationCapabilityJournal({ path: linux.path, config: linux.config })
+  journal.claim({ certificate: linux.certificate('linux'), artifact: linux.artifact })
+  journal.authorize('linux', tools); journal.activate('linux')
+  journal.claimCall({ planId: 'linux', key: 'uncertain', argumentsDigest: d('a') })
+  const receipt = journal.inspect('linux')!.receipt!
+  journal.close()
+  for (const config of [{ ...linux.config, maxCallsPerAdoption: 2 },
+    { ...linux.config, runner: { ...linux.config.runner, maxRuns: 6 } },
+    { ...linux.config, retention: { maximumLifetimeMs: 5_000 } }]) {
+    expect(() => new CreationCapabilityJournal({ path: linux.path, config })).toThrow()
+  }
+  const reopened = new CreationCapabilityJournal({ path: linux.path, config: linux.config })
+  try {
+    reopened.recoverClaims()
+    expect(reopened.inspect('linux')?.receipt).toEqual(receipt)
+    expect(reopened.claimCall({ planId: 'linux', key: 'uncertain', argumentsDigest: d('a') }).call.status).toBe('unknown')
+    expect(() => reopened.claimCall({ planId: 'linux', key: 'new', argumentsDigest: d('a') })).toThrow()
+  } finally { reopened.close() }
 })
 
 test('historical signed source survives expiry, closure and restart without renewed quota', () => {

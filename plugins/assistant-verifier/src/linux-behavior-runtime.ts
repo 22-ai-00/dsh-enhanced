@@ -230,6 +230,44 @@ export async function verifyLinuxPluginBehaviorRuntime(value: LinuxPluginBehavio
   return descriptor
 }
 
+/** Adoption rechecks the retained clone, not the expired build authority. The
+ * independently signed preparation digest binds the original compiler/base
+ * provenance; it does not assert that either is still installed. */
+export async function verifyLinuxPluginBehaviorAdoptionRuntime(input: {
+  runtime: LinuxPluginBehaviorRuntime; buildRuntimeDigest: string; preparationDigest: string; signal: AbortSignal
+}): Promise<void> {
+  input.signal.throwIfAborted()
+  const expected = validateLinuxPluginBehaviorRuntime(input.runtime)
+  const expectedDigest = linuxPluginBehaviorRuntimeDigest(expected)
+  const { buildRuntimeDigest, preparationDigest } = input
+  if (typeof buildRuntimeDigest !== 'string' || !HEX.test(buildRuntimeDigest)
+    || typeof preparationDigest !== 'string' || !HEX.test(preparationDigest)) fail('invalid signed preparation identity')
+  const signal = AbortSignal.any([input.signal, AbortSignal.timeout(120_000)])
+  const root = dirname(expected.runtime.root.path)
+  await privateDirectory(root)
+  if ((await readdir(root)).sort().join() !== 'behavior.json,runtime') fail('receipt inventory differs')
+  const receiptPath = join(root, 'behavior.json'), before = await lstat(receiptPath)
+  if (before.uid !== process.getuid?.()) fail('unsafe preparation receipt')
+  const raw = await readBehaviorFile(receiptPath, 1024 * 1024)
+  const receipt = JSON.parse(raw.toString('utf8')) as Receipt
+  if (!plain(receipt, 'baseRuntimeDigest,compilerSha256,descriptor,receiptDigest,schemaVersion') || receipt.schemaVersion !== 1
+    || typeof receipt.compilerSha256 !== 'string' || !HEX.test(receipt.compilerSha256)
+    || typeof receipt.baseRuntimeDigest !== 'string' || !HEX.test(receipt.baseRuntimeDigest)
+    || typeof receipt.receiptDigest !== 'string' || !HEX.test(receipt.receiptDigest)) fail('invalid receipt')
+  const { receiptDigest, ...content } = receipt
+  const descriptor = validateLinuxPluginBehaviorRuntime(receipt.descriptor)
+  if (receiptDigest !== sha(JSON.stringify(content)) || receiptDigest !== preparationDigest
+    || receipt.baseRuntimeDigest !== buildRuntimeDigest
+    || descriptor.runtime.root.path !== join(root, 'runtime')
+    || linuxPluginBehaviorRuntimeDigest(descriptor) !== expectedDigest) fail('receipt identity differs')
+  signal.throwIfAborted()
+  await verifyLinuxPluginBehaviorRuntime(descriptor, signal)
+  signal.throwIfAborted()
+  if (!(await readBehaviorFile(receiptPath, 1024 * 1024)).equals(raw)
+    || stamp(await lstat(receiptPath)) !== stamp(before)) fail('preparation receipt changed during verification')
+  signal.throwIfAborted()
+}
+
 /** Read-only reopen; compiler, base and fixed-source drift invalidate reuse. */
 export async function readLinuxPluginBehaviorPreparation(input: { runtime: LinuxRuntime; root: string; signal?: AbortSignal }): Promise<{
   descriptor: LinuxPluginBehaviorRuntime; baseRuntimeDigest: string; preparationDigest: string
