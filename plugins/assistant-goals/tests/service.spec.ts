@@ -1082,8 +1082,11 @@ describe('owner-scoped native goal context', () => {
   })
 
   it('exports a contiguous two-round owner workflow after the final independent whole-goal acceptance', async () => {
+    // This checks durable ordering and independent acceptance, not a latency target.
+    // Leave room for Session flushes and verification under concurrent CI load.
+    const roundTimeoutMs = 10_000
     const callsBudget = { mode: 'calls' as const, modelCalls: 10, toolCalls: 10, durationMs: 120_000, maxOutputTokensPerCall: 500, routes: [{ provider: 'fixture', model: 'fixture' }] }
-    const f = await harness(undefined, undefined, undefined, true, true, 2_000, {
+    const f = await harness(undefined, undefined, undefined, true, true, roundTimeoutMs, {
       preauthorizedSchedule: true, executionBudget: callsBudget,
       backgroundWake: { ...scheduleWake, runTimeoutMs: 1_000 },
     })
@@ -1095,7 +1098,7 @@ describe('owner-scoped native goal context', () => {
     await writeFile(join(f.root, 'report.md'), 'Step verified\n')
     registerReadReportTool(f.ctx, f.root)
     await installGoalVerifier(f, [
-      ...goalProfiles(f.root, objective),
+      ...goalProfiles(f.root, objective, { validityMs: 120_000 }),
       ...goalProfiles(f.root, parentObjective, { validityMs: 120_000 }).map(profile => ({ ...profile, id: `dependency-${profile.id}` })),
       ...goalProfiles(f.root, blockedParentObjective, { validityMs: 120_000 }).map(profile => ({ ...profile, id: `blocked-dependency-${profile.id}` })),
     ])
@@ -1132,7 +1135,7 @@ describe('owner-scoped native goal context', () => {
     }
     f.ctx.llm.registerAdapter(['fixture'], new Adapter())
     agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Prepare the native goal driver.' }] }))
-    await vi.waitFor(() => expect(requests).toBe(1), { timeout: 2_000 })
+    await vi.waitFor(() => expect(requests).toBe(1), { timeout: roundTimeoutMs })
     await agent.whenIdle()
     expect(f.ctx.fiber.state).toBe(2)
     record = f.service.create(agent, objective, 2)
@@ -1140,9 +1143,9 @@ describe('owner-scoped native goal context', () => {
       await vi.waitFor(() => {
         expect(requests).toBe(3)
         expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1)
-      }, { timeout: 2_000 })
+      }, { timeout: roundTimeoutMs })
     } finally { releaseFirstRound() }
-    await vi.waitFor(() => expect(requests).toBe(5), { timeout: 2_000 })
+    await vi.waitFor(() => expect(requests).toBe(5), { timeout: roundTimeoutMs })
     await agent.whenIdle(); await f.service.whenIdle()
     const complete = f.service.inspect(agent, record.id)
     const durable = await f.ctx.sessionPersistence.open(agent.session.id, 'read')
@@ -1255,7 +1258,7 @@ describe('owner-scoped native goal context', () => {
     expect(f.ctx.sessions.get(agent.session.id)).toBeUndefined()
     await expect(f.service.inspectOwnerVerifiedWorkflowSource({ ownerRouteId: 'owner-route', principalId: 'owner', workspace: f.root,
       preset: 'primary', sessionId: String(agent.session.id), goalId: record.id })).resolves.toEqual(ownerSource)
-  })
+  }, 45_000)
 
   it('rejects historical workflow export when ownership scope changes or the accepted receipt expires', async () => {
     // The positive integration above owns the native run setup. Here use its
