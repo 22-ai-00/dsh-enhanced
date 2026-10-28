@@ -350,6 +350,9 @@ async function createFixture(): Promise<ReleaseFixture> {
     mkdir(storeRoot, { mode: 0o700 }),
   ])
   await cp(pnpmSourceRoot, pnpmRoot, { recursive: true })
+  // A frozen toolchain can already contain a read-only Node. Replace only the
+  // fixture's copied entry, leaving the approved source tree untouched.
+  await rm(buildNodePath, { force: true })
   await copyFile(nodePath, buildNodePath)
   const originalPnpm = join(pnpmRoot, 'pnpm'); const copiedPnpm = join(pnpmRoot, '.pnpm-copy')
   await copyFile(originalPnpm, copiedPnpm); await rm(originalPnpm); await writeFile(originalPnpm, await readFile(copiedPnpm), { mode: 0o700 }); await rm(copiedPnpm)
