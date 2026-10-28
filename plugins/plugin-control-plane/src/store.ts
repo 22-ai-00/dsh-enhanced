@@ -746,6 +746,52 @@ function activationFromRow(row: ActivationRow): PluginActivationPlan {
 
 function preparedEvidenceFromStored(value: unknown): SourcePreparedEvidence {
   const item = objectRecord(value, 'stored source prepared evidence')
+  if (item['schemaVersion'] === 3) {
+    exactKeys(item, ['schemaVersion', 'kind', 'boundary', 'runtimeDigest', 'executionContractDigest', 'buildScriptSha256',
+      'archive', 'receipt', 'environment', 'checks', 'pack', 'logDigest', 'durationMs', 'preparedAt'], 'stored Linux source prepared evidence')
+    const archive = objectRecord(item['archive'], 'stored Linux source archive')
+    exactKeys(archive, ['sizeBytes', 'sha256'], 'stored Linux source archive')
+    const receipt = objectRecord(item['receipt'], 'stored Linux source receipt binding')
+    exactKeys(receipt, ['requestDigest', 'nativeNonce', 'nativeResourceId', 'intentDigest', 'resourcesDigest', 'receiptDigest'],
+      'stored Linux source receipt binding')
+    const environment = objectRecord(item['environment'], 'stored Linux source environment')
+    exactKeys(environment, ['npmConfigIgnoreScripts', 'frozenLockfile', 'offline', 'nodeVersion', 'pnpmVersion'], 'stored Linux source environment')
+    const pack = objectRecord(item['pack'], 'stored Linux source pack')
+    exactKeys(pack, ['name', 'version', 'sizeBytes', 'sha256'], 'stored Linux source pack')
+    const digest = (value: unknown): value is string => typeof value === 'string' && DIGEST.test(value)
+    const size = (value: unknown, maximum: number): boolean => Number.isSafeInteger(value) && Number(value) >= 1 && Number(value) <= maximum
+    const storedChecks = item['checks']
+    const checks = ['source-archive-integrity', 'frozen-offline-install', 'repository-pnpm-check', 'source-input-recheck', 'package-integrity'] as const
+    if (item['kind'] !== 'dsh-source-prepared-evidence' || item['boundary'] !== 'linux-native-repository-v1'
+      || !digest(item['runtimeDigest']) || !digest(item['executionContractDigest']) || !digest(item['buildScriptSha256'])
+      || !size(archive['sizeBytes'], 64 * 1024 * 1024) || !digest(archive['sha256'])
+      || !['requestDigest', 'intentDigest', 'resourcesDigest', 'receiptDigest'].every(key => digest(receipt[key]))
+      || typeof receipt['nativeNonce'] !== 'string' || !/^[a-f0-9]{32}$/u.test(receipt['nativeNonce'])
+      || typeof receipt['nativeResourceId'] !== 'string' || !/^linux-[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/u.test(receipt['nativeResourceId'])
+      || environment['npmConfigIgnoreScripts'] !== true || environment['frozenLockfile'] !== true || environment['offline'] !== true
+      || !['nodeVersion', 'pnpmVersion'].every(key => typeof environment[key] === 'string' && environment[key] !== '' && (environment[key] as string).length <= 64)
+      || !Array.isArray(storedChecks) || storedChecks.length !== checks.length || checks.some((check, index) => storedChecks[index] !== check)
+      || typeof pack['name'] !== 'string' || pack['name'] === '' || pack['name'].length > 214
+      || typeof pack['version'] !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._+=-]{0,63}$/u.test(pack['version'])
+      || !size(pack['sizeBytes'], MAX_PREPARED_ARTIFACT_BYTES) || !digest(pack['sha256']) || !digest(item['logDigest'])
+      || !Number.isSafeInteger(item['durationMs']) || Number(item['durationMs']) < 0
+      || !Number.isSafeInteger(item['preparedAt']) || Number(item['preparedAt']) < 0) {
+      throw new ControlPlaneStoreError('invalid-state', 'stored Linux source prepared evidence is corrupt')
+    }
+    // Pure structural validation keeps the independent authority runtime free of
+    // an isolation executor import. The runner verifies the private receipt.
+    return Object.freeze({ schemaVersion: 3 as const, kind: 'dsh-source-prepared-evidence' as const,
+      boundary: 'linux-native-repository-v1' as const, runtimeDigest: item['runtimeDigest'],
+      executionContractDigest: item['executionContractDigest'], buildScriptSha256: item['buildScriptSha256'],
+      archive: Object.freeze({ sizeBytes: Number(archive['sizeBytes']), sha256: String(archive['sha256']) }),
+      receipt: Object.freeze({ requestDigest: String(receipt['requestDigest']), nativeNonce: String(receipt['nativeNonce']),
+        nativeResourceId: String(receipt['nativeResourceId']), intentDigest: String(receipt['intentDigest']),
+        resourcesDigest: String(receipt['resourcesDigest']), receiptDigest: String(receipt['receiptDigest']) }),
+      environment: Object.freeze({ npmConfigIgnoreScripts: true as const, frozenLockfile: true as const, offline: true as const,
+        nodeVersion: String(environment['nodeVersion']), pnpmVersion: String(environment['pnpmVersion']) }), checks: Object.freeze(checks),
+      pack: Object.freeze({ name: pack['name'], version: pack['version'], sizeBytes: Number(pack['sizeBytes']), sha256: pack['sha256'] }),
+      logDigest: item['logDigest'], durationMs: Number(item['durationMs']), preparedAt: Number(item['preparedAt']) })
+  }
   if (item['schemaVersion'] === 2) {
     exactKeys(item, ['schemaVersion', 'kind', 'boundary', 'runtimeDigest', 'fixedCompilerSha256', 'checks', 'pack', 'preparedAt'], 'stored native source prepared evidence')
     const pack = objectRecord(item['pack'], 'stored native source pack')
@@ -859,7 +905,7 @@ function sourceFromRow(row: SourceRow): PluginSourcePlan {
   }
   const revision = row.revision_json === null ? undefined : revisionBindingFromStored(JSON.parse(row.revision_json) as unknown)
   const prepared = row.mode === 'modify' || row.mode === 'prepared-create' || row.mode === 'prepared-revise'
-  if (prepared !== (preparedEvidence !== undefined) || (row.mode === 'modify' && preparedEvidence?.schemaVersion !== 1)
+  if (prepared !== (preparedEvidence !== undefined) || (row.mode === 'modify' && preparedEvidence?.schemaVersion === 2)
     || (row.mode === 'prepared-create') !== (creation !== undefined) || (row.mode === 'prepared-revise') !== (revision !== undefined)
     || ((row.mode === 'prepared-create' || row.mode === 'prepared-revise') && (!['pending-approval', 'expired'].includes(row.status) || (creation ?? revision)?.generatorDigest !== row.generator_digest
       || row.approval_json !== null || row.release_authorization_json !== null || row.release_id !== null))
@@ -1272,10 +1318,21 @@ function releaseArtifact(evidence: SourceReleaseSuccessEvidence): SourceReleaseA
     capabilities: evidence.capabilities, authorities: evidence.authorities, requires: evidence.requires }
 }
 
+function sourceBuildEvidenceSchema(build: SourceJobIntent['build']): 1 | 2 | 3 {
+  if (!('backend' in build)) return 1
+  if (build.backend === 'macos-seatbelt') return 2
+  if (build.backend === 'linux-native') return 3
+  throw new ControlPlaneStoreError('invalid-state', 'source job build backend is unknown')
+}
+
 function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
   const intent = objectRecord(value, 'source job intent')
-  const native = typeof intent['build'] === 'object' && intent['build'] !== null
-    && (intent['build'] as Record<string, unknown>)['backend'] === 'macos-seatbelt'
+  const build = objectRecord(intent['build'], 'source job build')
+  const backend = build['backend']
+  if (Object.hasOwn(build, 'backend') && backend !== 'macos-seatbelt' && backend !== 'linux-native') {
+    throw new ControlPlaneStoreError('invalid-input', 'source job build backend is unknown')
+  }
+  const native = backend === 'macos-seatbelt' || backend === 'linux-native'
   exactKeys(intent, ['authority', 'owner', 'ownerDigest', 'trustDigest', 'repository', 'name', 'gapId', 'gapRevision', 'gapDigest',
     'baseCommit', 'files', 'ttlMs', 'build', 'worktree', native ? 'nativeResource' : 'containerName', ...(Object.hasOwn(intent, 'baseline') ? ['baseline'] : []),
     ...(Object.hasOwn(intent, 'mode') ? ['mode'] : []), ...(Object.hasOwn(intent, 'creation') ? ['creation'] : []), ...(Object.hasOwn(intent, 'revision') ? ['revision'] : [])], 'source job intent')
@@ -1301,7 +1358,7 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
     || !Array.isArray(intent['files']) || intent['files'].length === 0 || intent['files'].length > 64
     || !Number.isSafeInteger(intent['ttlMs']) || Number(intent['ttlMs']) < 60_000 || Number(intent['ttlMs']) > 86_400_000
     || (!native && (typeof intent['containerName'] !== 'string' || !/^dsh-source-job-[a-f0-9]{64}$/u.test(intent['containerName'] as string)))
-    || (native && (intent['mode'] !== 'create' && intent['mode'] !== 'revise-created'))
+    || (backend === 'macos-seatbelt' && (intent['mode'] !== 'create' && intent['mode'] !== 'revise-created'))
     || (intent['mode'] !== undefined && intent['mode'] !== 'create' && intent['mode'] !== 'revise-created')
     || (intent['mode'] === 'create') !== Object.hasOwn(intent, 'creation')
     || (intent['mode'] === 'revise-created') !== Object.hasOwn(intent, 'revision')) {
@@ -1310,7 +1367,7 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
   if (native) {
     const resource = objectRecord(intent['nativeResource'], 'native source job resource')
     exactKeys(resource, ['backend', 'key'], 'native source job resource')
-    if (resource['backend'] !== 'macos-seatbelt' || typeof resource['key'] !== 'string'
+    if (resource['backend'] !== backend || typeof resource['key'] !== 'string'
       || !/^source-job-[a-f0-9]{64}$/u.test(resource['key'])) {
       throw new ControlPlaneStoreError('invalid-input', 'native source job resource is invalid')
     }
@@ -1352,7 +1409,7 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
     name: intent['name'] as string, gapId: intent['gapId'] as string, gapRevision: Number(intent['gapRevision']), gapDigest: intent['gapDigest'] as string,
     baseCommit: intent['baseCommit'] as string, files: Object.freeze(files), ttlMs: Number(intent['ttlMs']), build: intent['build'] as SourceJobIntent['build'],
     worktree: intent['worktree'] as string,
-    ...(native ? { nativeResource: Object.freeze({ backend: 'macos-seatbelt' as const,
+    ...(native ? { nativeResource: Object.freeze({ backend,
       key: (intent['nativeResource'] as { key: string }).key }) }
       : { containerName: intent['containerName'] as string }),
     ...(creation === undefined ? {} : { mode: 'create' as const, creation }),
@@ -2469,9 +2526,9 @@ export class ControlPlaneStore {
         throw new ControlPlaneStoreError('invalid-input', 'modify source plan prepared digests are invalid')
       }
       preparedEvidence = preparedEvidenceFromStored(input.prepared.evidence)
-      if ((mode === 'modify' && preparedEvidence.schemaVersion !== 1)
-        || (preparedEvidence.schemaVersion === 2 && input.sourceJob === undefined)) {
-        throw new ControlPlaneStoreError('invalid-input', 'native source evidence requires a durable created plugin job')
+      if ((mode === 'modify' && preparedEvidence.schemaVersion === 2)
+        || (preparedEvidence.schemaVersion !== 1 && input.sourceJob === undefined)) {
+        throw new ControlPlaneStoreError('invalid-input', 'native source evidence requires a matching durable source job')
       }
     } else if (input.prepared !== undefined) {
       throw new ControlPlaneStoreError('invalid-input', 'create source plans cannot carry prepared evidence')
@@ -2548,7 +2605,7 @@ export class ControlPlaneStore {
           || sourceJob.intent.baseCommit !== input.baseCommit || sourceJob.intent.name !== name
           || sourceJob.intent.repository !== input.repository || sourceJob.intent.worktree !== input.worktree || sourceJob.intent.ttlMs !== input.ttlMs
           || (mode === 'prepared-create') !== (sourceJob.intent.mode === 'create')
-          || (preparedEvidence !== undefined && ('backend' in sourceJob.intent.build) !== (preparedEvidence.schemaVersion === 2))
+          || (preparedEvidence !== undefined && preparedEvidence.schemaVersion !== sourceBuildEvidenceSchema(sourceJob.intent.build))
           || (mode === 'prepared-create' && controlPlaneDigest(sourceJob.intent.creation) !== controlPlaneDigest(creation))
           || (mode === 'prepared-revise') !== (sourceJob.intent.mode === 'revise-created')
           || (mode === 'prepared-revise' && controlPlaneDigest(sourceJob.intent.revision) !== controlPlaneDigest(revision))) {
@@ -2657,6 +2714,7 @@ export class ControlPlaneStore {
       || job.intent.creation.generatorDigest !== plan.generatorDigest
       || job.intent.repository !== plan.repository || job.intent.worktree !== plan.worktree
       || job.intent.baseCommit !== plan.baseCommit || job.intent.name !== plan.name
+      || plan.preparedEvidence.schemaVersion !== sourceBuildEvidenceSchema(job.intent.build)
       || plan.expiresAt !== plan.createdAt + job.intent.ttlMs) {
       throw new ControlPlaneStoreError('invalid-state', 'prepared creation source job binding is corrupt')
     }
@@ -2702,6 +2760,7 @@ export class ControlPlaneStore {
       || job.intent.revision.generatorDigest !== plan.generatorDigest
       || job.intent.repository !== plan.repository || job.intent.worktree !== plan.worktree
       || job.intent.baseCommit !== plan.baseCommit || job.intent.name !== plan.name
+      || plan.preparedEvidence.schemaVersion !== sourceBuildEvidenceSchema(job.intent.build)
       || plan.expiresAt !== plan.createdAt + job.intent.ttlMs) {
       throw new ControlPlaneStoreError('invalid-state', 'prepared revision source job binding is corrupt')
     }

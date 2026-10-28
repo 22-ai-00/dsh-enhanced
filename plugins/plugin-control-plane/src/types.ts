@@ -1,3 +1,4 @@
+import type { LinuxReceiptBinding } from '@dsh-enhanced/assistant-isolation'
 import type { CatalogEntry, CatalogPackage } from './catalog.js'
 import type { LiveQualificationTerms } from './live-qualification.js'
 import type { AdoptionHandoffTerms } from './adoption-handoff.js'
@@ -299,7 +300,24 @@ export interface NativeSourcePreparedEvidence {
   preparedAt: number
 }
 
-export type SourcePreparedEvidence = DockerSourcePreparedEvidence | NativeSourcePreparedEvidence
+export interface LinuxSourcePreparedEvidence {
+  schemaVersion: 3
+  kind: 'dsh-source-prepared-evidence'
+  boundary: 'linux-native-repository-v1'
+  runtimeDigest: string
+  executionContractDigest: string
+  buildScriptSha256: string
+  archive: { sizeBytes: number; sha256: string }
+  receipt: LinuxReceiptBinding
+  environment: { npmConfigIgnoreScripts: true; frozenLockfile: true; offline: true; nodeVersion: string; pnpmVersion: string }
+  checks: readonly ['source-archive-integrity', 'frozen-offline-install', 'repository-pnpm-check', 'source-input-recheck', 'package-integrity']
+  pack: DockerSourcePreparedEvidence['pack']
+  logDigest: string
+  durationMs: number
+  preparedAt: number
+}
+
+export type SourcePreparedEvidence = DockerSourcePreparedEvidence | NativeSourcePreparedEvidence | LinuxSourcePreparedEvidence
 
 export interface SourceReleasePolicy {
   targetBranch: string

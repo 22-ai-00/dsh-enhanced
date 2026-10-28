@@ -1,3 +1,4 @@
+import { cleanedLinuxSourcePreflight, consumeCleanedLinuxSourcePreflight, consumeLinuxSourceNotStarted } from './linux-source-preflight.js'
 import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type AdoptionCoordinatorConfig } from './adoption-coordinator.js'
 import { CreationCapabilityJournal, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
 import { CreationCapabilityRuntime } from './creation-capability-runtime.js'
@@ -50,7 +51,8 @@ import { Ed25519ApprovalAuthority } from './approval.js'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from './store.js'
 import { runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
 import { runNativePreparedChecks } from './native-source-build.js'
-import { NativeMacVerifierRunner } from '@dsh-enhanced/assistant-isolation'
+import { runLinuxPreparedChecks } from './linux-source-build.js'
+import { LinuxRepositoryRunner, NativeMacVerifierRunner } from '@dsh-enhanced/assistant-isolation'
 import { NATIVE_SOURCE_COMPILER } from './native-source-build-worker.js'
 import { awaitSourceSignal, inspectSourceContext, inspectSourceTargetsContext, type SourceInspection, type SourceTargetsInspection } from './source-context.js'
 import { inspectSourceRevisionContext, prepareRevisedPluginWorkspace, verifyRevisedPluginWorkspace } from './source-revision.js'
@@ -197,11 +199,18 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
   }
   if (config.sourceApprovals !== undefined) validateSourceApprovalClientConfig(config.sourceApprovals)
   if (config.sourceBuild !== undefined) validateSourceBuildConfig(config.sourceBuild)
-  if (config.sourceBuild !== undefined && 'backend' in config.sourceBuild) {
+  if (config.sourceBuild !== undefined && 'backend' in config.sourceBuild && config.sourceBuild.backend === 'macos-seatbelt') {
     if (!config.sourceJobs?.allowedModes || config.sourceJobs.allowedModes.some(mode => mode === 'modify')
       || config.sourceReleases !== undefined || config.sourceReleaseExecution !== undefined
       || config.sourceAdoptions !== undefined || config.sourceApprovals !== undefined) {
       throw new Error('plugin-control-plane: native source build only supports Host-scaffolded create/revise-created')
+    }
+  }
+  if (config.sourceBuild !== undefined && 'backend' in config.sourceBuild && config.sourceBuild.backend === 'linux-native') {
+    if (!config.sourceJobs) throw new Error('plugin-control-plane: Linux repository preparation requires durable sourceJobs')
+    if (config.sourceApprovals || config.sourceReleases || config.sourceReleaseExecution || config.sourceAdoptions
+      || config.creationVerifications || config.revisionVerifications || config.revisionRegressions || config.creationCapabilities) {
+      throw new Error('plugin-control-plane: Linux repository preparation is not yet connected to independent behavior and release authorities')
     }
   }
   if (config.sourceReleases !== undefined) {
@@ -312,7 +321,8 @@ export class PluginControlPlaneService extends Service {
   private liveRuntime: LiveQualificationRuntime | undefined
   private assertLiveRuntime: ((planId: string) => void) | undefined
   private sourceRuntime: SourceJobRuntime | undefined
-  private nativeSourceRunner: NativeMacVerifierRunner | undefined
+  private nativeSourceRunner: { backend: 'macos-seatbelt'; runner: NativeMacVerifierRunner }
+    | { backend: 'linux-native'; runner: LinuxRepositoryRunner } | undefined
   private readonly sourceRuntimes = new Set<SourceJobRuntime>()
   private creationCapabilityRuntime: CreationCapabilityRuntime | undefined
   private readonly creationCapabilityRuntimes = new Set<CreationCapabilityRuntime>()
@@ -628,13 +638,25 @@ export class PluginControlPlaneService extends Service {
           }
         }
         const sourceBuild = this.config.sourceBuild!
-        let nativeRunner: NativeMacVerifierRunner | undefined
+        let nativeRunner: typeof this.nativeSourceRunner
         try {
-          nativeRunner = 'backend' in sourceBuild ? new NativeMacVerifierRunner({ backend: 'macos-seatbelt',
+          nativeRunner = !('backend' in sourceBuild) ? undefined : sourceBuild.backend === 'macos-seatbelt'
+            ? { backend: 'macos-seatbelt', runner: new NativeMacVerifierRunner({ backend: 'macos-seatbelt',
             stateRoot: sourceBuild.stateRoot, authorityDigest: sourceBuild.authorityDigest,
             runtime: sourceBuild.runtime, source: NATIVE_SOURCE_COMPILER, expiresAt: sourceBuild.expiresAt,
             maxRuns: sourceBuild.maxRuns, maxTotalDurationMs: sourceBuild.maxTotalDurationMs,
-            maxDurationMs: sourceBuild.timeoutMs, maxOutputBytes: sourceBuild.outputBytes }) : undefined
+            maxDurationMs: sourceBuild.timeoutMs, maxOutputBytes: sourceBuild.outputBytes }) }
+            : { backend: 'linux-native', runner: new LinuxRepositoryRunner({ backend: 'linux-native',
+              stateRoot: sourceBuild.stateRoot, authorityDigest: sourceBuild.authorityDigest,
+              runtime: sourceBuild.runtime, cgroupRoots: sourceBuild.cgroupRoots, expiresAt: sourceBuild.expiresAt,
+              maxRuns: sourceBuild.maxRuns, maxTotalDurationMs: sourceBuild.maxTotalDurationMs,
+              ...(sourceBuild.userNamespace === undefined ? {} : { userNamespace: sourceBuild.userNamespace,
+                systemSnapshot: sourceBuild.systemSnapshot! }),
+              limits: { maxDurationMs: sourceBuild.timeoutMs, maxInputBytes: 64 * 1024 ** 2,
+                maxOutputBytes: sourceBuild.outputBytes, maxArtifactBytes: 32 * 1024 ** 2, maxFiles: 128,
+                memoryMiB: sourceBuild.memoryMiB, cpus: sourceBuild.cpus, pidsLimit: sourceBuild.pidsLimit,
+                workspaceMiB: sourceBuild.workspaceMiB, workspaceInodes: sourceBuild.workspaceInodes,
+                tmpMiB: sourceBuild.temporaryMiB, tmpInodes: sourceBuild.temporaryInodes, inputMiB: 65, inputInodes: 16 } }) }
         } catch (error) {
           unsubscribeTaskChanges?.()
           if (capabilities) { await capabilities.close(); this.creationCapabilityRuntimes.delete(capabilities) }
@@ -642,6 +664,7 @@ export class PluginControlPlaneService extends Service {
         }
         this.nativeSourceRunner = nativeRunner
         let runtime: SourceJobRuntime
+        const preparationGeneration = {}
         try { runtime = new SourceJobRuntime({ config: this.config.sourceJobs!, build: sourceBuild, statePath: this.config.statePath, store: this.store,
           ports: {
             automations: {
@@ -686,11 +709,14 @@ export class PluginControlPlaneService extends Service {
               if (!job.planId) throw new Error('source job has no released plan')
               await this.adoptOwnerSourceRelease({ sourcePlanId: job.planId, signal, expectedTrustDigest: job.intent.trustDigest, assertCurrent })
             } } : {}),
-          trust: () => this.boundTrust(), prepare: (job, signal, assertCurrent) => this.prepareSourceJob(job, signal, assertCurrent),
-          ...(nativeRunner ? { inspectNativeQuiescence: (key: string) => nativeRunner.inspectQuiescence(key) } : {}),
+          trust: () => this.boundTrust(), prepare: (job, signal, assertCurrent) => this.prepareSourceJob(job, signal, assertCurrent,
+            nativeRunner?.backend === 'linux-native' ? { runner: nativeRunner.runner, generation: preparationGeneration } : undefined),
+          ...(nativeRunner?.backend === 'linux-native' ? { isPreparationNotStarted: (error: unknown, job: SourceJobRecord) =>
+            consumeCleanedLinuxSourcePreflight(error, job, preparationGeneration) } : {}),
+          ...(nativeRunner ? { inspectNativeQuiescence: (key: string) => nativeRunner.runner.inspectQuiescence(key) } : {}),
         }) } catch (error) {
           if (this.nativeSourceRunner === nativeRunner) this.nativeSourceRunner = undefined
-          await nativeRunner?.close()
+          await nativeRunner?.runner.close()
           unsubscribeTaskChanges?.()
           if (capabilities) { await capabilities.close(); this.creationCapabilityRuntimes.delete(capabilities) }
           throw error
@@ -704,7 +730,7 @@ export class PluginControlPlaneService extends Service {
           if (this.nativeSourceRunner === nativeRunner) this.nativeSourceRunner = undefined
           this.sourceRuntimes.delete(runtime)
           if (this.creationCapabilityRuntime === capabilities) this.creationCapabilityRuntime = undefined
-          const results = await Promise.allSettled([nativeRunner?.close(), capabilities?.close()])
+          const results = await Promise.allSettled([nativeRunner?.runner.close(), capabilities?.close()])
           if (capabilities) this.creationCapabilityRuntimes.delete(capabilities)
           const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
           if (closeError !== undefined || failures.length) {
@@ -1600,12 +1626,22 @@ export class PluginControlPlaneService extends Service {
     return this.sourceRuntime.reconcileUnknown(input)
   }
 
-  private async prepareSourceJob(job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>): Promise<PluginSourcePlan> {
+  private async prepareSourceJob(job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>,
+    preflight?: { runner: LinuxRepositoryRunner; generation: object }): Promise<PluginSourcePlan> {
     this.abort.signal.throwIfAborted()
-    if (this.sourceBuilds.size !== 0 || this.sourceInspections.size !== 0) throw new Error('plugin-control-plane: another source operation is draining')
+    if (this.sourceBuilds.size !== 0 || this.sourceInspections.size !== 0) {
+      const error = new Error('plugin-control-plane: another source operation is draining')
+      // This call has not created an operation/worktree or called a runner.
+      if (preflight && job.intent.nativeResource?.backend === 'linux-native' && job.intent.nativeResource.key === job.id
+        && controlPlaneDigest(job.intent) === job.intentDigest) {
+        throw cleanedLinuxSourcePreflight(error, job, preflight.generation, () => !this.abort.signal.aborted
+          && this.nativeSourceRunner?.backend === 'linux-native' && this.nativeSourceRunner.runner === preflight.runner)
+      }
+      throw error
+    }
     const intent = job.intent
     const operation = this.prepareSourcePlanOwned({ gapId: intent.gapId, name: intent.name, repository: intent.repository, files: intent.files,
-      idempotencyKey: `source-job-plan:${job.id}`, expectedBaseCommit: intent.baseCommit, ttlMs: intent.ttlMs, timeoutMs: intent.build.timeoutMs, offline: true, signal, assertCurrent }, job)
+      idempotencyKey: `source-job-plan:${job.id}`, expectedBaseCommit: intent.baseCommit, ttlMs: intent.ttlMs, timeoutMs: intent.build.timeoutMs, offline: true, signal, assertCurrent }, job, preflight)
     this.sourceBuilds.add(operation)
     try { return await operation } finally { this.sourceBuilds.delete(operation) }
   }
@@ -1902,7 +1938,8 @@ export class PluginControlPlaneService extends Service {
     return operation
   }
 
-  private async prepareSourcePlanOwned(input: Parameters<PluginControlPlaneService['prepareModifySourcePlan']>[0], sourceJob?: SourceJobRecord): Promise<PluginSourcePlan> {
+  private async prepareSourcePlanOwned(input: Parameters<PluginControlPlaneService['prepareModifySourcePlan']>[0], sourceJob?: SourceJobRecord,
+    preflight?: { runner: LinuxRepositoryRunner; generation: object }): Promise<PluginSourcePlan> {
     const signal = input.signal === undefined ? this.abort.signal : AbortSignal.any([this.abort.signal, input.signal])
     const gapOwner = sourceJob?.intent.owner ?? input.owner
     const creating = sourceJob?.intent.mode === 'create'
@@ -1944,8 +1981,10 @@ export class PluginControlPlaneService extends Service {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 900_000 || ttlMs > 86_400_000) {
       throw new ControlPlaneCliError('INVALID_ARGUMENT', 'ttlMs must be an integer within 900000..86400000')
     }
-    const maximumTimeoutMs = this.config.sourceBuild !== undefined && !('backend' in this.config.sourceBuild)
-      && ['repository', 'portable-repository'].includes(this.config.sourceBuild.profile ?? '') ? 1_800_000 : 240_000
+    const buildConfig = this.config.sourceBuild
+    const repositoryBuild = buildConfig !== undefined && ('backend' in buildConfig
+      ? buildConfig.backend === 'linux-native' : ['repository', 'portable-repository'].includes(buildConfig.profile ?? ''))
+    const maximumTimeoutMs = repositoryBuild ? 1_800_000 : 240_000
     const timeoutMs = input.timeoutMs ?? 180_000
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 60_000 || timeoutMs > maximumTimeoutMs) {
       throw new ControlPlaneCliError('INVALID_ARGUMENT', `timeoutMs must be an integer within 60000..${maximumTimeoutMs}`)
@@ -1965,6 +2004,7 @@ export class PluginControlPlaneService extends Service {
     const stateRoot = join(this.config.statePath, 'source-worktrees')
     const isolated = await createIsolatedWorktree({ stateRoot, repository, baseCommit, environment,
       ...(sourceJob === undefined ? {} : { worktreeName: basename(sourceJob.intent.worktree) }) })
+    let linuxBuildInvoked = false
     try {
       const generated = revision !== undefined ? await prepareRevisedPluginWorkspace({ worktree: isolated.worktree,
         baseCommit, name, files: input.files, environment, signal, assertCurrent, revision, parentSource: parent!.source, parentCertificate: parent!.certificate })
@@ -1991,12 +2031,21 @@ export class PluginControlPlaneService extends Service {
           parentCertificate: parent!.certificate, files: input.files } }), ...(capturePack ? { capturePack: true as const } : {}) }
       const checked = 'backend' in configured
         ? await (async () => {
-          if ((!creating && !revising) || sourceJob === undefined || this.nativeSourceRunner === undefined
-            || sourceJob.intent.nativeResource?.key !== sourceJob.id) {
-            throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'native source preparation requires a durable Host-scaffolded creation job')
+          const native = this.nativeSourceRunner
+          if (sourceJob === undefined || native === undefined || native.backend !== configured.backend
+            || sourceJob.intent.nativeResource?.backend !== configured.backend || sourceJob.intent.nativeResource.key !== sourceJob.id) {
+            throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'native source preparation requires its bound durable source job')
+          }
+          if (configured.backend === 'linux-native' && native.backend === 'linux-native') {
+            linuxBuildInvoked = true
+            return runLinuxPreparedChecks({ ...common, config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
+              runner: native.runner, sourceJob: { id: sourceJob.id } })
+          }
+          if (configured.backend !== 'macos-seatbelt' || native.backend !== 'macos-seatbelt' || !creating && !revising) {
+            throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'macOS source preparation requires a Host-scaffolded creation job')
           }
           return runNativePreparedChecks({ ...common, config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
-            runner: this.nativeSourceRunner, sourceJob: { id: sourceJob.id } })
+            runner: native.runner, sourceJob: { id: sourceJob.id } })
         })()
         : await runDockerPreparedChecks({ ...common, config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
           ...(sourceJob === undefined ? {} : { sourceJob: { id: sourceJob.id, containerName: sourceJob.intent.containerName! } }) })
@@ -2027,6 +2076,15 @@ export class PluginControlPlaneService extends Service {
         prepared: { treeDigest: checked.treeDigest, patchDigest: checked.patchDigest, checkedAt: checked.checkedAt, evidence: checked.evidence } }).result)
     } catch (error) {
       await isolated.remove()
+      if (preflight && sourceJob && sourceJob.intent.nativeResource?.backend === 'linux-native'
+        && sourceJob.intent.nativeResource.key === sourceJob.id && controlPlaneDigest(sourceJob.intent) === sourceJob.intentDigest) {
+        // Preserve native authority checks across asynchronous worktree cleanup.
+        // The runtime consumes the complete chain immediately before its original claim CAS.
+        throw cleanedLinuxSourcePreflight(error, sourceJob, preflight.generation,
+          () => !this.abort.signal.aborted && this.nativeSourceRunner?.backend === 'linux-native'
+            && this.nativeSourceRunner.runner === preflight.runner
+            && (!linuxBuildInvoked || consumeLinuxSourceNotStarted(error, { runner: preflight.runner, key: sourceJob.id })))
+      }
       throw error
     }
   }

@@ -126,15 +126,15 @@ Historical Docker/macOS rows retain their own backend identity; switching this
 API does not reconcile those external resources or reset their grants.
 
 These APIs still require non-root Linux with verified v1 delegation and the
-fixed namespace dependencies. Installer migration, complete repository builds,
-behavior certificates and release/adoption remain separate integration steps. V2, arm64 execution and a reboot with changed kernel
+fixed namespace dependencies. Installer migration, behavior certificates and
+release/adoption remain separate integration steps. V2, arm64 execution and a reboot with changed kernel
 resource identity remain outside the current live acceptance.
 
 ### Durable repository execution
 
 Host-only `prepareLinuxRepositoryIntent`, `runLinuxRepositoryExecution`,
 `readLinuxRepositoryReceipt` and `reconcileLinuxRepositoryExecution` share the
-same durable execution engine. They require an explicit schema 2 repository
+same durable execution engine. They require an explicit schema 2 or 3 repository
 contract, a frozen command/archive/artifact binding, and caller-owned finite
 authorization and controller admission. This is not an agent-visible tool or a
 complete source-build adapter.
@@ -154,11 +154,70 @@ artifacts, and a recovered identity never dispatches the command again. Partial
 creation and failed writes retain their original recovery fences.
 
 `linuxJobResourceReservation` includes every tmpfs, keeper capacity and durable
-spool; the ledger enforces these minima for schema 2. At the maximum artifact
+spool; the ledger enforces these minima for both repository schemas. At the maximum artifact
 size, the execution spool and journal allowance is 108 MiB. A caller that stages
 its own archive or output pack must reserve that additional storage before
-staging. Full Git-tree preparation, offline root `pnpm check`, behavior
-verification and release/adoption remain separate integration work.
+staging.
+
+Schema 3 additionally binds a `userNamespace` mapping, `systemSnapshot` and the
+packaged execution implementation digest. It uses the owner's existing
+`/etc/subuid` and `/etc/subgid` allocation and digest-pinned, system-owned
+`newuidmap`/`newgidmap` helpers; execution never allocates or widens those ranges.
+Namespace UID/GID 0 map to the Host owner, and candidate UID/GID 65534 map to the
+allocated subordinate identity. The fixed entry drops UID/GID privileges, clears
+supplementary groups and all capabilities, enables no-new-privileges and waits for an independent Host
+check before executing candidate code. The Host persists both namespace and
+candidate witnesses before START. An absent witness can prove a failed setup
+quiet, but cannot authorize candidate execution or a successful result.
+
+The system snapshot copies a fixed closure of system tools and shared
+libraries from trusted root-owned paths, bounded to 640 MiB and 32,768 entries.
+An optional verified `LinuxRuntime` supplies only its pinned Node executable at
+`/usr/bin/node`; separate provenance binds that copy to the runtime and its
+original Node digest. This supports nested repository tests without depending
+on a Host Node installation. The snapshot hashes the inventory and bytes,
+rewrites only internal symlinks and mounts the result read-only; it does not
+mount the Host's `/etc` or mutable executable search paths. Schema 3 provides a
+fixed `dsh-sandbox` hostname and a read-only synthetic `/etc/hostname`. A separate 8 MiB /
+16,384-inode identity mount is included in schema 3 reservations. Recovery uses
+the original namespace ancestry, PID start times, freezer membership and pidfds
+before terminating descendants; allowing a subordinate UID alone is insufficient.
+Schema 1/2 jobs retain their original single-identity cleanup interpretation.
+
+Host-only `LinuxRepositoryRunner` adds a private, immutable finite authority,
+controller lease and schema 8 ledger to these repository primitives. It reserves
+capacity before calling the archive factory, freezes the archive digest and
+command under the source-job key, and passes a cancellation signal to the
+factory. Factory deadlines, grant expiry and controller loss abort that signal
+before settling the job. A trusted factory must honor cancellation and await its
+child processes; the runner does not isolate arbitrary Host callbacks.
+
+The runner reserves another 256 MiB of Host staging memory and 96 MiB of staging
+storage in addition to the execution minima. Reopening the same authority keeps
+its original expiry and consumed run/duration budget. A repeated key never
+reruns the factory or command; binary results require the original successful
+receipt, intact spool and fresh resource-absence proof. Foreign ledgers are
+rejected before migration or controller acquisition. `close()` fences admission
+and waits for active work and recovery.
+
+A private, single-use admission refusal can prove that this call never created
+an execution. It is valid only for the original runner, request, controller and
+state-directory/database identities; a concurrent or later call with the same
+key invalidates it. Ledger refusals require a known rejection before any insert
+and a confirmed rollback. Callers consume the proof after their own cleanup,
+immediately before settling their original task. Missing records, uncertain
+database errors and historical interrupted calls do not provide this proof;
+`inspectQuiescence()` still returns `unknown` for a missing key. No spent budget
+is refunded and no command is replayed.
+
+Providing both `userNamespace` and `systemSnapshot` selects schema 3; omitting
+both retains schema 2. Mixed or partial configuration is rejected. A ledger
+containing one repository schema cannot be reopened as the other schema.
+
+Control Plane's explicit Linux source-build adapter uses this runner for exact
+Git-tree preparation, frozen offline installation, root `pnpm check` and pack
+verification. Behavior verification and release/adoption still need their own
+native integration; repository execution alone does not authorize adoption.
 
 ## Native macOS execution primitive
 

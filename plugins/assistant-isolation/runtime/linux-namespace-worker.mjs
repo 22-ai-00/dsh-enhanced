@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { closeSync, constants, fstatSync, readSync, writeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statfsSync, writeFileSync } from 'node:fs'
+import { chmodSync, chownSync, closeSync, constants, cpSync, fstatSync, readSync, writeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, statfsSync, unlinkSync, writeFileSync } from 'node:fs'
 import { Socket } from 'node:net'
 import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -9,6 +9,7 @@ const TMPFS_MAGIC = 0x01021994
 const CONTROL = /[\p{Cc}]/u
 const MAX_PROTOCOL = 1_400_000
 const FILTER_COMPILER = fileURLToPath(new URL('./linux-seccomp.py', import.meta.url))
+const CANDIDATE_ENTRY = fileURLToPath(new URL('./linux-candidate-entry.py', import.meta.url))
 const say = value => process.stdout.write(`${JSON.stringify(value)}\n`)
 const fail = message => { throw new Error(`linux namespace worker: ${message}`) }
 let buffer = ''
@@ -27,6 +28,7 @@ function revoke() {
   binaryOutput?.destroy()
   if (gate?.pid && !gateClosed) {
     gate.stdio[3]?.destroy()
+    gate.stdio[6]?.destroy()
     try { process.kill(-gate.pid, 'SIGKILL') } catch (error) { if (error.code !== 'ESRCH') throw error }
     gate.kill('SIGKILL')
   }
@@ -163,7 +165,7 @@ function boundArtifact(workspace, path, byteLimit) {
 }
 
 async function receiveArchive(config, target, assertLive) {
-  const fd = openSync(target, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o400)
+  const fd = openSync(target, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, config.schemaVersion === 3 ? 0o444 : 0o400)
   const hash = createHash('sha256')
   let count = 0
   archiveInput = new Socket({ fd: 4, readable: true, writable: false })
@@ -231,6 +233,26 @@ async function exportBinary(workspace, path, byteLimit, assertLive) {
 }
 
 function bwrapArgs(config, workspace, tmp, shm, pinned) {
+  if (config.schemaVersion === 3) {
+    const args = ['--unshare-pid', '--unshare-net', '--unshare-ipc', '--unshare-uts', '--hostname', 'dsh-sandbox', '--unshare-cgroup-try',
+      '--cap-drop', 'ALL', '--cap-add', 'CAP_SETUID', '--cap-add', 'CAP_SETGID', '--cap-add', 'CAP_SETPCAP',
+      '--die-with-parent', '--new-session', '--clearenv', '--ro-bind', join(pinned, 'usr'), '/usr',
+      '--symlink', 'usr/bin', '/bin', '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib64', '/lib64',
+      '--proc', '/proc', '--dev', '/dev', '--bind', shm, '/dev/shm', '--remount-ro', '/dev',
+      '--ro-bind', join(config.jobPath, 'identity'), '/etc', '--dir', '/run',
+      '--bind', workspace, '/workspace', '--bind', tmp, '/tmp',
+      '--dir', '/input', '--ro-bind', join(config.jobPath, 'input', 'source.tar'), '/input/source.tar',
+      '--ro-bind', CANDIDATE_ENTRY, '/dsh-candidate-entry.py']
+    if (config.readOnlyRoots.length) args.push('--dir', '/runtime')
+    for (let i = 0; i < config.readOnlyRoots.length; i++) args.push('--ro-bind', join(pinned, 'runtime', String(i)), `/runtime/${i}`)
+    // Bwrap has already reduced its setup caps when it performs chdir. Only
+    // the fully dropped entry may enter the subordinate-owned 0700 workspace.
+    args.push('--remount-ro', '/', '--chdir', '/', '--setenv', 'HOME', '/workspace',
+      '--setenv', 'TMPDIR', '/tmp', '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'LANG', 'C', '--setenv', 'LC_ALL', 'C',
+      '--info-fd', '5', '--seccomp', '4', '--', '/usr/bin/python3', '-I', '-S', '/dsh-candidate-entry.py',
+      String(config.deadline), JSON.stringify(config.argv))
+    return args
+  }
   const args = ['--unshare-all', '--unshare-user', '--uid', '65534', '--gid', '65534',
     '--cap-drop', 'ALL', '--die-with-parent', '--new-session', '--clearenv',
     '--ro-bind', join(pinned, 'usr'), '/usr', '--ro-bind', join(pinned, 'lib'), '/lib',
@@ -257,18 +279,88 @@ function bwrapArgs(config, workspace, tmp, shm, pinned) {
   return args
 }
 
+function dualMapping(config) {
+  const mapping = config.userNamespace
+  if (!mapping || mapping.schemaVersion !== 1 || process.getuid() !== 0 || process.getgid() !== 0
+    || !Number.isSafeInteger(mapping.ownerUid) || mapping.ownerUid < 1
+    || !Number.isSafeInteger(mapping.ownerGid) || mapping.ownerGid < 1
+    || !Number.isSafeInteger(mapping.candidateUid) || mapping.candidateUid < 1 || mapping.candidateUid === mapping.ownerUid
+    || !Number.isSafeInteger(mapping.candidateGid) || mapping.candidateGid < 1 || mapping.candidateGid === mapping.ownerGid) fail('invalid keeper dual mapping')
+  const expected = (owner, candidate) => [[0, owner, 1], [65534, candidate, 1]]
+  const observed = path => readFileSync(path, 'ascii').trim().split('\n').map(row => row.trim().split(/\s+/u).map(Number))
+  if (JSON.stringify(observed('/proc/self/uid_map')) !== JSON.stringify(expected(mapping.ownerUid, mapping.candidateUid))
+    || JSON.stringify(observed('/proc/self/gid_map')) !== JSON.stringify(expected(mapping.ownerGid, mapping.candidateGid))
+    // Node getgroups() adds the effective GID even when supplementary groups
+    // are empty; the kernel status field is the supplementary inventory.
+    || !/^Groups:\s*$/mu.test(readFileSync('/proc/self/status', 'ascii'))) fail('keeper mapping differs')
+}
+
+async function entryReady(infoPipe, entryPipe, assertLive) {
+  // Neither trusted pipe accepts a namespace-local PID as a Host PID.
+  const bounded = (stream, parse, limit) => new Promise((resolve, reject) => {
+    let text = '', settled = false
+    const finish = (error, value) => {
+      if (settled) return
+      settled = true
+      stream.off('data', data); stream.off('end', end); stream.off('error', end); stream.off('close', end)
+      if (error) { closeControl(); reject(error) }
+      else resolve(value)
+    }
+    const end = () => finish(new Error('trusted candidate gate closed'))
+    const data = chunk => {
+      text += chunk.toString('ascii')
+      if (text.length > limit) { finish(new Error('trusted candidate gate exceeded bound')); return }
+      try {
+        const value = parse(text)
+        if (value !== undefined) finish(undefined, value)
+      } catch (error) { finish(error) }
+    }
+    stream.on('data', data); stream.once('end', end); stream.once('error', end); stream.once('close', end)
+  })
+  const info = bounded(infoPipe, text => {
+    if (!text.trimEnd().endsWith('}')) return undefined
+    const value = JSON.parse(text)
+    if (!Number.isSafeInteger(value['child-pid']) || value['child-pid'] < 1) fail('invalid bwrap parent identity')
+    return value
+  }, 4096)
+  const ready = bounded(entryPipe, text => {
+    if (!text.endsWith('\n')) return undefined
+    if (text !== 'READY\n') fail('unexpected candidate privilege message')
+    return true
+  }, 16)
+  // Consume both pending streams on revoke, closure, and protocol failure.
+  const outcomes = await Promise.allSettled([info, ready])
+  for (const outcome of outcomes) if (outcome.status === 'rejected') throw outcome.reason
+  assertLive()
+  const parent = outcomes[0].value['child-pid']
+  const children = readFileSync(`/proc/${parent}/task/${parent}/children`, 'ascii').trim().split(/\s+/u)
+  if (children.length !== 1 || !/^[1-9][0-9]*$/u.test(children[0])) fail('bwrap entry is not its sole child')
+  const pid = Number(children[0]), startTicks = processStartTicks(pid)
+  const fields = Object.fromEntries(readFileSync(`/proc/${pid}/status`, 'ascii').split('\n').filter(row => row.includes(':')).map(row => {
+    const index = row.indexOf(':'); return [row.slice(0, index), row.slice(index + 1).trim()]
+  }))
+  if (fields.Uid?.split(/\s+/u).join() !== '65534,65534,65534,65534'
+    || fields.Gid?.split(/\s+/u).join() !== '65534,65534,65534,65534' || fields.Groups !== ''
+    || ['CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb'].some(key => !/^0+$/u.test(fields[key] ?? ''))
+    || fields.NoNewPrivs !== '1' || fields.Seccomp !== '2'
+    || readlinkSync(`/proc/${pid}/ns/user`) !== readlinkSync('/proc/self/ns/user')
+    || processStartTicks(pid) !== startTicks) fail('candidate privilege identity differs')
+  return { pid, startTicks }
+}
+
 async function main() {
   const payload = await line()
   if (payload === undefined) fail('request missing')
   const config = JSON.parse(payload)
-  if (!config || ![1, 2].includes(config.schemaVersion) || !['ordinary', 'repository'].includes(config.profile)
+  if (!config || ![1, 2, 3].includes(config.schemaVersion) || !['ordinary', 'repository'].includes(config.profile)
     || !Number.isSafeInteger(config.workspaceBytes) || !Number.isSafeInteger(config.workspaceInodes)
     || !Number.isSafeInteger(config.tmpBytes) || !Number.isSafeInteger(config.tmpInodes)
     || !Number.isSafeInteger(config.deadline) || config.deadline <= Date.now() || config.deadline > Date.now() + 1_800_000
-    || !Number.isSafeInteger(config.maxArtifactBytes) || config.maxArtifactBytes < 1 || config.maxArtifactBytes > (config.schemaVersion === 2 ? 33_554_432 : 1_048_576)
+    || !Number.isSafeInteger(config.maxArtifactBytes) || config.maxArtifactBytes < 1 || config.maxArtifactBytes > (config.schemaVersion >= 2 ? 33_554_432 : 1_048_576)
     || !Number.isSafeInteger(config.maxOutputBytes) || !Array.isArray(config.argv)
     || !Array.isArray(config.files) || !Array.isArray(config.artifacts) || !Array.isArray(config.readOnlyRoots)) fail('invalid request')
-  const repository = config.schemaVersion === 2
+  const repository = config.schemaVersion >= 2
+  const dual = config.schemaVersion === 3
   if (repository && (config.profile !== 'repository' || !config.archive || !Number.isSafeInteger(config.archive.size)
     || config.archive.size < 1 || config.archive.size > 67_108_864 || !/^[0-9a-f]{64}$/u.test(config.archive.sha256)
     || config.files.length !== 0)) fail('invalid repository request')
@@ -291,6 +383,15 @@ async function main() {
   watchdog = setTimeout(() => { closeControl(); process.stdin.destroy() }, Math.max(1, config.deadline - Date.now()))
   const assertLive = () => { if (revoked || ended || Date.now() >= config.deadline) fail('execution authority ended') }
   assertLive()
+  if (dual) {
+    dualMapping(config)
+    const { verifyLinuxSystemSnapshot } = await import('../lib/linux-system-snapshot.js')
+    await verifyLinuxSystemSnapshot(config.systemSnapshot)
+    assertLive()
+    say({ type: 'NAMESPACE_READY', pid: process.pid, startTicks: processStartTicks(process.pid) })
+    if (await line() !== 'NAMESPACE_ACK') fail('keeper namespace binding missing')
+    assertLive()
+  }
   ownedDirectory(config.jobPath)
   for (const source of ['/usr', '/lib', '/lib64']) {
     if (!existsSync(source)) continue
@@ -302,24 +403,47 @@ async function main() {
   tmpfs(workspace, config.workspaceBytes, config.workspaceInodes, false)
   tmpfs(tmp, config.tmpBytes, config.tmpInodes, !repository)
   tmpfs(shm, 1_048_576, 4096, true)
+  if (dual) {
+    chownSync(workspace, 65534, 65534)
+    chownSync(shm, 65534, 65534)
+    chmodSync(tmp, 0o1777)
+  }
   if (repository) {
     const input = join(config.jobPath, 'input')
     tmpfs(input, 67_112_960, 16, true)
+    if (dual) chmodSync(input, 0o755)
     await receiveArchive(config, join(input, 'source.tar'), assertLive)
     binaryOutput = new Socket({ fd: 5, readable: false, writable: true })
     binaryOutput.on('error', closeControl)
   }
   const identityDirectory = join(config.jobPath, 'identity')
-  mkdirSync(identityDirectory, { mode: 0o755 })
+  if (dual) {
+    tmpfs(identityDirectory, 8 * 1024 ** 2, 16384, true)
+    cpSync(join(config.systemSnapshot.root.path, 'etc'), identityDirectory, {
+      recursive: true, dereference: false, verbatimSymlinks: true,
+    })
+    chmodSync(identityDirectory, 0o755)
+    for (const name of ['passwd', 'group', 'nsswitch.conf', 'hosts', 'hostname']) {
+      const target = join(identityDirectory, name)
+      try { unlinkSync(target) } catch (error) { if (error.code !== 'ENOENT') throw error }
+    }
+  } else mkdirSync(identityDirectory, { mode: 0o755 })
   writeFileSync(join(identityDirectory, 'passwd'), 'nobody:x:65534:65534:Sandbox:/workspace:/bin/sh\n', { flag: 'wx', mode: 0o444 })
   writeFileSync(join(identityDirectory, 'group'), 'nobody:x:65534:\n', { flag: 'wx', mode: 0o444 })
   writeFileSync(join(identityDirectory, 'nsswitch.conf'), 'passwd: files\ngroup: files\nhosts: files\n', { flag: 'wx', mode: 0o444 })
   writeFileSync(join(identityDirectory, 'hosts'), '127.0.0.1 localhost\n::1 localhost\n', { flag: 'wx', mode: 0o444 })
+  if (config.schemaVersion === 3) writeFileSync(join(identityDirectory, 'hostname'), 'dsh-sandbox\n', { flag: 'wx', mode: 0o444 })
   const pinned = join(config.jobPath, 'immutable')
   mkdirSync(pinned, { mode: 0o700 })
-  pinnedReadOnly('/usr', join(pinned, 'usr'))
-  pinnedReadOnly('/lib', join(pinned, 'lib'))
-  if (existsSync('/lib64')) pinnedReadOnly('/lib64', join(pinned, 'lib64'))
+  if (dual) {
+    pinnedReadOnly(join(config.systemSnapshot.root.path, 'usr'), join(pinned, 'usr'))
+    const entry = lstatSync(CANDIDATE_ENTRY)
+    if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== 0 || entry.nlink !== 1 || entry.mode & 0o022) fail('unsafe trusted entry')
+  } else {
+    pinnedReadOnly('/usr', join(pinned, 'usr'))
+    pinnedReadOnly('/lib', join(pinned, 'lib'))
+    if (existsSync('/lib64')) pinnedReadOnly('/lib64', join(pinned, 'lib64'))
+  }
   if (config.readOnlyRoots.length > 0) mkdirSync(join(pinned, 'runtime'), { mode: 0o700 })
   for (let i = 0; i < config.readOnlyRoots.length; i++) {
     const root = config.readOnlyRoots[i]
@@ -334,8 +458,8 @@ async function main() {
   assertLive()
   try {
     gate = spawn('/bin/sh', ['-c', 'IFS= read -r gate <&3 || exit 125; [ "$gate" = START ] || exit 125; exec 3<&-; exec "$@"',
-      'dsh-native-gate', '/usr/bin/bwrap', ...args], {
-      stdio: ['ignore', 'pipe', 'pipe', 'pipe', filter], shell: false, detached: true,
+      'dsh-native-gate', dual ? join(pinned, 'usr/bin/bwrap') : '/usr/bin/bwrap', ...args], {
+      stdio: dual ? ['ignore', 'pipe', 'pipe', 'pipe', filter, 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe', 'pipe', filter], shell: false, detached: true,
       env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
     })
   } finally { closeSync(filter) }
@@ -344,6 +468,7 @@ async function main() {
     gate.once('close', (code, signal) => { gateClosed = true; resolve({ code, signal }) })
   })
   gate.stdio[3]?.on('error', closeControl)
+  gate.stdio[6]?.on('error', closeControl)
   if (!gate.pid) fail('candidate gate did not start')
   assertLive()
   const identity = { pid: gate.pid, startTicks: processStartTicks(gate.pid) }
@@ -354,7 +479,6 @@ async function main() {
     gate.kill('SIGKILL')
     fail('candidate start not authorized')
   }
-  gate.stdio[3].end('START\n')
   let stdout = '', stderr = '', outputBytes = 0, exceeded = false
   const chunksOut = [], chunksErr = []
   const append = (which, chunk) => {
@@ -369,6 +493,16 @@ async function main() {
   }
   gate.stdout.on('data', chunk => append('out', chunk))
   gate.stderr.on('data', chunk => append('err', chunk))
+  const entry = dual ? entryReady(gate.stdio[5], gate.stdio[6], assertLive) : undefined
+  gate.stdio[3].end('START\n')
+  if (entry) {
+    const candidate = await entry.catch(error => { throw new Error(`${error.message}; entry: ${Buffer.concat(chunksErr).toString('utf8').slice(-2048)}`) })
+    say({ type: 'CANDIDATE_READY', ...candidate })
+    if (await line() !== 'CANDIDATE_START') fail('candidate identity binding missing')
+    assertLive()
+    if (processStartTicks(candidate.pid) !== candidate.startTicks) fail('candidate identity changed at gate')
+    gate.stdio[6].end('START\n')
+  }
   const exit = await gateExit
   const decode = chunks => {
     try { return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)) }

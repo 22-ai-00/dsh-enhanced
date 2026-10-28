@@ -8,6 +8,7 @@ import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SourceJobRuntime } from '../src/source-jobs.ts'
+import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST } from '../src/store.ts'
 import type { SourceJobRecord } from '../src/source-job-types.ts'
 import type { SourcePreparedEvidence } from '../src/types.ts'
@@ -32,7 +33,7 @@ function evidence(): SourcePreparedEvidence {
     commands: [{ command: 'pnpm', args: ['check'], exitCode: 0, durationMs: 1, logDigest: 'e'.repeat(64) }], pack: { name: 'health-helper', version: '1.0.0', sizeBytes: 1, sha256: 'd'.repeat(64) }, preparedAt: Date.now() }
 }
 
-async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; policyExecute?: boolean; continuations?: boolean } = {}) {
+async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; policyExecute?: boolean; continuations?: boolean; linux?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-native-source-jobs-'))); roots.push(root)
   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true }); await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export {}\n')
   execFileSync('/usr/bin/git', ['init', root]); execFileSync('/usr/bin/git', ['-C', root, 'config', 'user.email', 'test@example.invalid']); execFileSync('/usr/bin/git', ['-C', root, 'config', 'user.name', 'Test']); execFileSync('/usr/bin/git', ['-C', root, 'add', '.']); execFileSync('/usr/bin/git', ['-C', root, 'commit', '-m', 'fixture'])
@@ -59,7 +60,8 @@ async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; polic
     return options.continuations ? withGapSourceFence(job.intent.gapId, job.intent.owner, create) : create()
   })
   const approvePrepared = vi.fn(async () => { throw new Error('authority temporarily unavailable') })
-  const createRuntime = () => new SourceJobRuntime({ config, build, statePath: root, store, ports: { automations, delivery: { validateOwnerRoute: () => owner } }, trust: async () => trust(root), prepare,
+  const runtimeBuild = options.linux ? linuxSourceConfig() : build
+  const createRuntime = () => new SourceJobRuntime({ config, build: runtimeBuild, statePath: root, store, ports: { automations, delivery: { validateOwnerRoute: () => owner } }, trust: async () => trust(root), prepare,
     ...(options.continuations ? { approvePrepared, withGapSourceFence } : {}),
   })
   const runtime = createRuntime()
@@ -69,6 +71,33 @@ async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; polic
 }
 
 describe('native Automations + Policy source jobs', () => {
+  it('keeps a Linux unknown charged in real Policy and never dispatches it again on restart', async () => {
+    let now = Date.UTC(2026, 8, 20, 12, 0, 5)
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const f = await fixture({ linux: true })
+    const reserve = vi.spyOn(f.policy, 'reserve'), finalize = vi.spyOn(f.policy, 'finalize'), release = vi.spyOn(f.policy, 'release')
+    f.prepare.mockRejectedValueOnce(new Error('native result is unknown'))
+    let restarted: SourceJobRuntime | undefined
+    try {
+      const queued = await f.enqueue('linux:unknown-budget')
+      now += 1_100
+      await f.automations.tick(); await f.automations.whenIdle()
+      expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'unknown', intent: { nativeResource: { backend: 'linux-native', key: queued.id } } })
+      expect(reserve).toHaveBeenCalledOnce()
+      expect(finalize).toHaveBeenCalledWith(expect.any(String), 1)
+      expect(release).not.toHaveBeenCalled()
+      await expect(f.runtime.reconcileUnknown({ id: queued.id, owner: OWNER })).rejects.toThrow(/quiescence/)
+      await f.runtime.close()
+      restarted = f.createRuntime(); restarted.start()
+      now += 1_100
+      await f.automations.tick(); await f.automations.whenIdle()
+      expect(f.store.getSourceJob(queued.id)?.status).toBe('unknown')
+      expect(f.prepare).toHaveBeenCalledOnce()
+      expect(reserve).toHaveBeenCalledOnce()
+      expect(release).not.toHaveBeenCalled()
+    } finally { await restarted?.close(); await f.runtime.close(); f.store.close(); await f.ctx.fiber.dispose() }
+  })
+
   it('charges native continuation occurrences and cannot bypass an exhausted budget on restart', async () => {
     let now = Date.UTC(2026, 8, 20, 12, 0, 5)
     vi.spyOn(Date, 'now').mockImplementation(() => now)

@@ -71,7 +71,7 @@ export interface SourceJobIntent {
   /** Historical Docker row identity; absent for native jobs. */
   containerName?: string
   /** Durable native ledger key, never interpreted as a Docker container. */
-  nativeResource?: { backend: 'macos-seatbelt'; key: string }
+  nativeResource?: { backend: 'macos-seatbelt' | 'linux-native'; key: string }
 }
 
 export type SourceJobStatus = 'queued' | 'running' | 'prepared' | 'failed' | 'unknown'

@@ -4,9 +4,21 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
 import { normalizeControlPlaneConfig } from '../src/index.ts'
+import { validateSourceBuildConfig, type LinuxSourceBuildConfig } from '../src/source-build.ts'
+import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
+
+function dualLinuxConfig(): LinuxSourceBuildConfig & Required<Pick<LinuxSourceBuildConfig, 'userNamespace' | 'systemSnapshot'>> {
+  const ownerUid = process.getuid!(), ownerGid = process.getgid!()
+  return { ...linuxSourceConfig(), userNamespace: { schemaVersion: 1, ownerUid, ownerGid,
+    candidateUid: ownerUid + 65536, candidateGid: ownerGid + 65536,
+    hostNamespace: { dev: 1, ino: 7 }, helpers: {
+      uid: { path: '/usr/bin/newuidmap', sha256: '1'.repeat(64) }, gid: { path: '/usr/bin/newgidmap', sha256: '2'.repeat(64) } } },
+    systemSnapshot: { schemaVersion: 1, root: { path: '/approved/system', dev: 1, ino: 3, sha256: '3'.repeat(64) },
+      manifestSha256: '4'.repeat(64), bytes: 4096, entries: 16 } }
+}
 
 test('normalizes deployable minimal and coordinator profiles without creating state resources', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cp-deployment-config-')); roots.push(root)
@@ -29,4 +41,72 @@ test('rejects an unbudgeted coordinator and a source adoption chain without rele
   expect(() => normalizeControlPlaneConfig({ ...base, sourceAdoptions: { profile: 'primary', planTtlMs: 60_000, timeoutMs: 1_000,
     authority: { executable: { path: '/bin/true', sha256: 'a'.repeat(64) }, configPath: '/tmp/authority.json', timeoutMs: 1_000 } } })).toThrow('sourceAdoptions requires sourceReleaseExecution')
   expect(existsSync(base.statePath)).toBe(false)
+})
+
+test.skipIf(process.platform !== 'linux')('admits durable Linux modify preparation without activating unfinished authority lanes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cp-linux-deployment-config-')); roots.push(root)
+  const base = { catalogPath: join(root, 'catalog.json'), trustPath: join(root, 'trust.json'), statePath: join(root, 'state') }
+  const sourceBuild = { ...linuxSourceConfig(), stateRoot: join(root, 'repository-jobs') }
+  const sourceJobs = { authorityId: 'source-grant', expiresAt: Date.now() + 60_000, maxSubmissions: 2,
+    repository: root, workspace: root, preset: 'primary', ownerRouteId: 'owner-route', principalId: 'owner',
+    budgetId: 'source-budget', budgetAmount: 1, allowedModes: ['modify'] as const }
+  expect(() => normalizeControlPlaneConfig({ ...base, sourceBuild })).toThrow('requires durable sourceJobs')
+  const config = normalizeControlPlaneConfig({ ...base, sourceBuild, sourceJobs: { ...sourceJobs, allowedModes: ['modify'] } })
+  expect(config.sourceBuild).toEqual(sourceBuild)
+  expect(config.sourceJobs?.allowedModes).toEqual(['modify'])
+  for (const field of ['sourceReleases', 'sourceReleaseExecution', 'sourceAdoptions', 'creationVerifications',
+    'revisionVerifications', 'revisionRegressions', 'creationCapabilities']) {
+    expect(() => normalizeControlPlaneConfig({ ...config, [field]: {} })).toThrow('not yet connected to independent behavior and release authorities')
+  }
+  expect(existsSync(base.statePath)).toBe(false)
+  expect(existsSync(sourceBuild.stateRoot)).toBe(false)
+})
+
+test.skipIf(process.platform !== 'linux' || !process.getuid?.())('normalizes paired repository identities synchronously without acquiring runtime resources', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cp-dual-linux-config-')); roots.push(root)
+  const sourceBuild = { ...dualLinuxConfig(), stateRoot: join(root, 'repository-jobs') }
+  const config = normalizeControlPlaneConfig({ catalogPath: join(root, 'catalog.json'), trustPath: join(root, 'trust.json'),
+    statePath: join(root, 'state'), sourceBuild, sourceJobs: { authorityId: 'source-grant', expiresAt: Date.now() + 60_000,
+      maxSubmissions: 2, repository: root, workspace: root, preset: 'primary', ownerRouteId: 'owner-route', principalId: 'owner',
+      budgetId: 'source-budget', budgetAmount: 1, allowedModes: ['modify'] } })
+  expect(config.sourceBuild).toEqual(sourceBuild)
+  expect(existsSync(sourceBuild.stateRoot)).toBe(false)
+  expect(existsSync(join(root, 'state'))).toBe(false)
+  const legacy = linuxSourceConfig()
+  expect(() => validateSourceBuildConfig(legacy)).not.toThrow()
+  expect('userNamespace' in legacy).toBe(false)
+})
+
+test.skipIf(process.platform !== 'linux' || !process.getuid?.()).each([
+  ['partial mapping', (config: ReturnType<typeof dualLinuxConfig>) => { delete (config as LinuxSourceBuildConfig).systemSnapshot }],
+  ['partial snapshot', (config: ReturnType<typeof dualLinuxConfig>) => { delete (config as LinuxSourceBuildConfig).userNamespace }],
+  ['wrong owner UID', (config: ReturnType<typeof dualLinuxConfig>) => { config.userNamespace.ownerUid++ }],
+  ['wrong owner GID', (config: ReturnType<typeof dualLinuxConfig>) => { config.userNamespace.ownerGid++ }],
+  ['candidate UID equals owner', (config: ReturnType<typeof dualLinuxConfig>) => { config.userNamespace.candidateUid = config.userNamespace.ownerUid }],
+  ['candidate GID equals owner', (config: ReturnType<typeof dualLinuxConfig>) => { config.userNamespace.candidateGid = config.userNamespace.ownerGid }],
+  ['low candidate UID', (config: ReturnType<typeof dualLinuxConfig>) => { config.userNamespace.candidateUid = 65535 }],
+  ['overflow candidate GID', (config: ReturnType<typeof dualLinuxConfig>) => { config.userNamespace.candidateGid = 0xffff_ffff }],
+  ['fractional namespace inode', (config: ReturnType<typeof dualLinuxConfig>) => { config.userNamespace.hostNamespace.ino = 1.5 }],
+  ['helper path substitution', (config: ReturnType<typeof dualLinuxConfig>) => { config.userNamespace.helpers.uid.path = '/tmp/newuidmap' as '/usr/bin/newuidmap' }],
+  ['malformed helper hash', (config: ReturnType<typeof dualLinuxConfig>) => { config.userNamespace.helpers.gid.sha256 = 'bad' }],
+  ['extra mapping key', (config: ReturnType<typeof dualLinuxConfig>) => { Object.assign(config.userNamespace, { extra: true }) }],
+  ['extra helper key', (config: ReturnType<typeof dualLinuxConfig>) => { Object.assign(config.userNamespace.helpers.uid, { extra: true }) }],
+  ['array mapping', (config: ReturnType<typeof dualLinuxConfig>) => { config.userNamespace = [] as unknown as typeof config.userNamespace }],
+  ['null snapshot', (config: ReturnType<typeof dualLinuxConfig>) => { config.systemSnapshot = null as unknown as typeof config.systemSnapshot }],
+  ['snapshot schema', (config: ReturnType<typeof dualLinuxConfig>) => { config.systemSnapshot.schemaVersion = 2 as 1 }],
+  ['snapshot manifest hash', (config: ReturnType<typeof dualLinuxConfig>) => { config.systemSnapshot.manifestSha256 = 'BAD' }],
+  ['snapshot byte limit', (config: ReturnType<typeof dualLinuxConfig>) => { config.systemSnapshot.bytes = 640 * 1024 ** 2 + 1 }],
+  ['snapshot entry limit', (config: ReturnType<typeof dualLinuxConfig>) => { config.systemSnapshot.entries = 32769 }],
+  ['snapshot unsafe path', (config: ReturnType<typeof dualLinuxConfig>) => { config.systemSnapshot.root.path = '/approved/system/../system' }],
+  ['snapshot state overlap', (config: ReturnType<typeof dualLinuxConfig>) => { config.systemSnapshot.root.path = config.stateRoot + '/snapshot' }],
+  ['snapshot state ancestor', (config: ReturnType<typeof dualLinuxConfig>) => { config.systemSnapshot.root.path = '/approved' }],
+  ['snapshot runtime overlap', (config: ReturnType<typeof dualLinuxConfig>) => { config.systemSnapshot.root.path = config.runtime.root.path + '/system' }],
+  ['snapshot runtime filesystem alias', (config: ReturnType<typeof dualLinuxConfig>) => {
+    config.systemSnapshot.root.dev = config.runtime.root.dev; config.systemSnapshot.root.ino = config.runtime.root.ino
+  }],
+  ['extra snapshot root key', (config: ReturnType<typeof dualLinuxConfig>) => { Object.assign(config.systemSnapshot.root, { extra: true }) }],
+] as const)('rejects %s before any repository authority is constructed', (_name, change) => {
+  const config = dualLinuxConfig()
+  change(config)
+  expect(() => validateSourceBuildConfig(config)).toThrow('Linux source build configuration is invalid')
 })

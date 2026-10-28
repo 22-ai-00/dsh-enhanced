@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { readFile, lstat, mkdir, readdir, realpath, rmdir, statfs, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import { setTimeout as pause } from 'node:timers/promises'
+import { linuxUserNamespaceProof, validateLinuxUserNamespaceWitness, type LinuxUserNamespaceWitness } from './linux-user-namespace.js'
 
 /** A resource boundary only. The caller must still isolate files, network and credentials. */
 export type LinuxCgroupRoots = { mode: 'v1'; cpu: string; memory: string; pids: string; freezer: string }
@@ -9,6 +10,12 @@ export type LinuxCgroupRoots = { mode: 'v1'; cpu: string; memory: string; pids: 
 export interface LinuxCgroupLimits { memoryMiB: number; pidsLimit: number; cpus: number }
 export interface LinuxCgroupIdentity { pid: number; startTicks: string; bootId: string; uid: number }
 export interface LinuxCgroupDirectory { path: string; dev: number; ino: number }
+/** Extra termination authority is bound only by the new repository protocol;
+ * it never changes the interpretation of an old cgroup snapshot. */
+export interface LinuxCgroupNamespaceTermination {
+  witness: LinuxUserNamespaceWitness
+  outsideGate?: LinuxCgroupIdentity
+}
 export interface LinuxCgroupSnapshot {
   schemaVersion: 1
   mode: LinuxCgroupRoots['mode']
@@ -190,18 +197,23 @@ async function fixedPython(source: string, data: object): Promise<void> {
   if (output.code !== 0) fail(`pidfd operation was unproven: ${output.stderr.slice(-160)}`)
 }
 
-async function killWithPidfds(path: string, owner: number, mode: LinuxCgroupRoots['mode']): Promise<void> {
+async function killWithPidfds(path: string, owner: number, mode: LinuxCgroupRoots['mode'], namespaceTermination?: LinuxCgroupNamespaceTermination): Promise<void> {
   const processes: Array<[number, string]> = []
   for (const pid of await readProcesses(path)) {
     const current = await processIdentity(pid)
     if (!current) continue
-    if (current.uid !== owner || current.state === 'Z') fail('cgroup contains an unexpected process')
+    if (current.state === 'Z' || !namespaceTermination && current.uid !== owner) fail('cgroup contains an unexpected process')
     processes.push([pid, current.startTicks])
   }
   if (!processes.length) return
   const relative = path.slice('/sys/fs/cgroup/'.length).split('/').slice(mode === 'v1' ? 1 : 0).join('/')
   const membership = mode === 'v1' ? ['freezer', `/${relative}`] : ['', `/${relative}`]
-  await fixedPython(PIDFD_KILL, { uid: owner, cgroup: membership, processes })
+  if (namespaceTermination) {
+    if (mode !== 'v1') fail('mapped repository termination requires verified v1 freezer')
+    await linuxUserNamespaceProof({ operation: 'kill', witness: namespaceTermination.witness,
+      outsideGates: namespaceTermination.outsideGate ? [namespaceTermination.outsideGate] : [],
+      cgroup: membership, freezerPath: path, processes })
+  } else await fixedPython(PIDFD_KILL, { uid: owner, cgroup: membership, processes })
 }
 
 /** Existing jobs are recovery-only: dispatch is never inferred from a cgroup directory.
@@ -215,6 +227,7 @@ export class LinuxCgroupLease {
   #allowAdmission: boolean
   #closing = false
   #operation: Promise<void> = Promise.resolve()
+  #namespaceTermination?: LinuxCgroupNamespaceTermination
   private constructor(snapshot: LinuxCgroupSnapshot, allowAdmission: boolean) {
     this.snapshot = Object.freeze({ ...snapshot, limits: Object.freeze({ ...snapshot.limits }),
       directories: Object.freeze(Object.fromEntries(Object.entries(snapshot.directories).map(([key, value]) => [key, Object.freeze({ ...value })]))) })
@@ -271,7 +284,7 @@ export class LinuxCgroupLease {
       throw error
     }
   }
-  static async recover(snapshot: LinuxCgroupSnapshot): Promise<LinuxCgroupLease> {
+  static async recover(snapshot: LinuxCgroupSnapshot, namespaceTermination?: LinuxCgroupNamespaceTermination): Promise<LinuxCgroupLease> {
     if (!snapshot || !keys(snapshot, ['schemaVersion', 'mode', 'bootId', 'jobId', 'nonce', 'uid', 'deadline', 'limits', 'directories'])
       || snapshot.schemaVersion !== 1 || snapshot.uid !== uid() || !UUID.test(snapshot.bootId)
       || !UUID.test(snapshot.jobId) || !HEX.test(snapshot.nonce) || !positive(snapshot.deadline)) fail('invalid recovery snapshot')
@@ -283,8 +296,22 @@ export class LinuxCgroupLease {
     const expected = snapshot.mode === 'v1' ? CONTROLLERS : ['unified']
     if (!keys(snapshot.directories, expected)) fail('recovery controller inventory differs')
     const lease = new LinuxCgroupLease(snapshot, false)
+    if (namespaceTermination) lease.bindUserNamespace(namespaceTermination)
     await lease.#verify(true)
     return lease
+  }
+  /** Bind a Host-observed immutable anchor before releasing candidate START.
+   * Recovery receives the original witness from its versioned private journal. */
+  bindUserNamespace(value: LinuxCgroupNamespaceTermination): void {
+    if (!value || !keys(value, value.outsideGate ? ['witness', 'outsideGate'] : ['witness'])) fail('invalid namespace termination binding')
+    const witness = validateLinuxUserNamespaceWitness(value.witness)
+    if (this.snapshot.mode !== 'v1' || witness.bootId !== this.snapshot.bootId || witness.ownerUid !== this.snapshot.uid) fail('namespace termination owner differs')
+    const gate = value.outsideGate
+    if (gate && (!keys(gate, ['pid', 'startTicks', 'bootId', 'uid']) || !positive(gate.pid) || !TICKS.test(gate.startTicks)
+      || gate.bootId !== this.snapshot.bootId || gate.uid !== this.snapshot.uid)) fail('invalid original keeper gate')
+    const binding = Object.freeze({ witness, ...(gate ? { outsideGate: Object.freeze({ ...gate }) } : {}) })
+    if (this.#namespaceTermination && JSON.stringify(this.#namespaceTermination) !== JSON.stringify(binding)) fail('namespace termination binding changed')
+    this.#namespaceTermination = binding
   }
   async #verify(allowMissing = false): Promise<void> {
     if (await bootId() !== this.snapshot.bootId) fail('job boot identity changed')
@@ -400,7 +427,7 @@ export class LinuxCgroupLease {
       await writeFile(join(freezer, 'freezer.state'), 'FROZEN\n')
       while (Date.now() < deadline && (await readFile(join(freezer, 'freezer.state'), 'utf8')).trim() !== 'FROZEN') await pause(20)
       if ((await readFile(join(freezer, 'freezer.state'), 'utf8')).trim() !== 'FROZEN') return false
-      try { await killWithPidfds(freezer, this.snapshot.uid, 'v1') }
+      try { await killWithPidfds(freezer, this.snapshot.uid, 'v1', this.#namespaceTermination) }
       finally { await writeFile(join(freezer, 'freezer.state'), 'THAWED\n') }
     }
     while (Date.now() < deadline) {
