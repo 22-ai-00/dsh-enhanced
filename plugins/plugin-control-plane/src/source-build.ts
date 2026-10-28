@@ -10,7 +10,7 @@ import type { PluginCreationVerificationCertificate } from '@dsh-enhanced/assist
 import { verifyCreatedPluginWorkspace, type SourceCreationBinding } from './source-creation.js'
 import { checkedSourceSnapshot, runLocalBuffer, runLocalCommand } from './source-workspace.js'
 import type { DockerSourcePreparedEvidence, SourcePreparedEvidence } from './types.js'
-import type { NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxRuntime, LinuxCgroupRoots, LinuxSystemSnapshot, LinuxUserNamespaceMapping, NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 
 export interface DockerSourceBuildConfig {
   /** Canonical owner-controlled docker client. */
@@ -51,7 +51,23 @@ export interface NativeSourceBuildConfig {
   versioning?: 'patch'
 }
 
-export type SourceBuildConfig = DockerSourceBuildConfig | NativeSourceBuildConfig
+export interface LinuxSourceBuildConfig extends Omit<NativeSourceBuildConfig, 'backend' | 'runtime'> {
+  backend: 'linux-native'
+  runtime: LinuxRuntime
+  cgroupRoots: LinuxCgroupRoots
+  memoryMiB: number
+  cpus: number
+  pidsLimit: number
+  workspaceMiB: number
+  temporaryMiB: number
+  workspaceInodes: number
+  temporaryInodes: number
+  /** Paired owner-approved repository identities; omitted for the legacy boundary. */
+  userNamespace?: LinuxUserNamespaceMapping
+  systemSnapshot?: LinuxSystemSnapshot
+}
+
+export type SourceBuildConfig = DockerSourceBuildConfig | NativeSourceBuildConfig | LinuxSourceBuildConfig
 
 /** Keep Config synchronous and independent of the Mac executor package: Linux
  * authority runtimes copy this module without assistant-isolation. The native
@@ -75,6 +91,71 @@ function validNativeRuntimeShape(value: unknown): value is NativeMacRuntime {
     && new Set(runtime.roots.map(root => root.path)).size === runtime.roots.length
     && runtime.roots.some(root => within(runtime.nodePath, root.path) && runtime.nodePath !== root.path)
     && runtime.roots.some(root => within(runtime.modulesPath, root.path))
+}
+
+/** Shape-only: the independently copied authority module cannot load isolation. */
+function validLinuxRuntimeShape(value: unknown): value is LinuxRuntime {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const item = value as LinuxRuntime
+  const hex = (part: unknown): boolean => typeof part === 'string' && /^[a-f0-9]{64}$/u.test(part)
+  const canonical = (part: unknown): part is string => typeof part === 'string' && isAbsolute(part)
+    && resolve(part) === part && !/[\p{Cc}]/u.test(part)
+  return Object.keys(item).sort().join() === 'backend,cachePath,lockSha256,modulesPath,nativePnpmPath,nativePnpmRoot,nodePath,nodeSha256,platform,pnpmPath,root,schemaVersion,sourceCommit,storePath,versions'
+    && item.schemaVersion === 1 && item.backend === 'linux-native' && item.platform === `linux-${process.arch}`
+    && typeof item.sourceCommit === 'string' && /^[a-f0-9]{40}$/u.test(item.sourceCommit) && item.sourceCommit !== '0'.repeat(40)
+    && hex(item.lockSha256) && hex(item.nodeSha256) && !!item.root
+    && Object.keys(item.root).sort().join() === 'dev,ino,path,sha256'
+    && canonical(item.root.path) && item.root.path !== '/' && hex(item.root.sha256)
+    && Number.isSafeInteger(item.root.dev) && item.root.dev >= 0 && Number.isSafeInteger(item.root.ino) && item.root.ino >= 0
+    && item.nodePath === join(item.root.path, 'bin', 'node')
+    && item.pnpmPath === join(item.root.path, 'pnpm', 'bin', 'pnpm.mjs')
+    && item.nativePnpmRoot === join(item.root.path, 'pnpm-native')
+    && item.nativePnpmPath === join(item.nativePnpmRoot, 'pnpm')
+    && item.modulesPath === join(item.root.path, 'node_modules') && item.storePath === join(item.root.path, 'store')
+    && item.cachePath === join(item.root.path, 'cache') && !!item.versions
+    && Object.keys(item.versions).sort().join() === 'cordis,node,pnpm,systemPrompt,tools,typescript'
+    && item.versions.node === 'v22.23.2' && item.versions.pnpm === '11.7.0'
+    && ['typescript', 'cordis', 'tools', 'systemPrompt'].every(key => {
+      const version = item.versions[key as 'typescript']
+      return typeof version === 'string' && version.length > 0 && version.length <= 128
+    })
+}
+
+function identityFields(value: unknown, names: string): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
+    && Object.keys(value).sort().join() === names
+}
+
+/** Shape checks only: the runner verifies helpers, kernel mapping and snapshot
+ * bytes at dispatch. This file also runs in standalone authority copies. */
+function validLinuxRepositoryIdentity(config: LinuxSourceBuildConfig): boolean {
+  const mapping = config.userNamespace, snapshot = config.systemSnapshot
+  if (mapping === undefined || snapshot === undefined) return mapping === undefined && snapshot === undefined
+  const natural = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0
+  const hex = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value)
+  const canonical = (value: unknown): value is string => typeof value === 'string' && isAbsolute(value)
+    && resolve(value) === value && value !== '/' && !/[\p{Cc}\\]/u.test(value)
+  if (!identityFields(mapping, 'candidateGid,candidateUid,helpers,hostNamespace,ownerGid,ownerUid,schemaVersion')
+    || mapping.schemaVersion !== 1 || !natural(mapping.ownerUid) || mapping.ownerUid === 0
+    || mapping.ownerUid !== process.getuid?.() || !natural(mapping.ownerGid) || mapping.ownerGid !== process.getgid?.()
+    || !natural(mapping.candidateUid) || mapping.candidateUid < 65_536 || mapping.candidateUid > 0xffff_fffe
+    || !natural(mapping.candidateGid) || mapping.candidateGid < 65_536 || mapping.candidateGid > 0xffff_fffe
+    || mapping.ownerUid === mapping.candidateUid || mapping.ownerGid === mapping.candidateGid
+    || !identityFields(mapping.hostNamespace, 'dev,ino') || !natural(mapping.hostNamespace.dev)
+    || !natural(mapping.hostNamespace.ino) || mapping.hostNamespace.ino === 0
+    || !identityFields(mapping.helpers, 'gid,uid')) return false
+  for (const kind of ['uid', 'gid'] as const) {
+    const helper = mapping.helpers[kind]
+    if (!identityFields(helper, 'path,sha256') || helper.path !== `/usr/bin/new${kind}map` || !hex(helper.sha256)) return false
+  }
+  if (!identityFields(snapshot, 'bytes,entries,manifestSha256,root,schemaVersion') || snapshot.schemaVersion !== 1
+    || !identityFields(snapshot.root, 'dev,ino,path,sha256') || !canonical(snapshot.root.path)
+    || !natural(snapshot.root.dev) || !natural(snapshot.root.ino) || !hex(snapshot.root.sha256) || !hex(snapshot.manifestSha256)
+    || !natural(snapshot.bytes) || snapshot.bytes < 1 || snapshot.bytes > 640 * 1024 ** 2
+    || !natural(snapshot.entries) || snapshot.entries < 2 || snapshot.entries > 32768) return false
+  const overlaps = (left: string, right: string): boolean => left === right || left.startsWith(right + sep) || right.startsWith(left + sep)
+  return !overlaps(snapshot.root.path, config.stateRoot) && !overlaps(snapshot.root.path, config.runtime.root.path)
+    && !(snapshot.root.dev === config.runtime.root.dev && snapshot.root.ino === config.runtime.root.ino)
 }
 
 export interface SourceBuildResult<E extends SourcePreparedEvidence = SourcePreparedEvidence> {
@@ -533,6 +614,35 @@ export function validateSourceBuildConfig(config: SourceBuildConfig): void {
     throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source build configuration is invalid')
   }
   if ('backend' in config) {
+    if (config.backend === 'linux-native') {
+      const allowed = new Set(['backend', 'runtime', 'cgroupRoots', 'stateRoot', 'authorityDigest', 'expiresAt', 'maxRuns',
+        'maxTotalDurationMs', 'timeoutMs', 'outputBytes', 'versioning', 'memoryMiB', 'cpus', 'pidsLimit', 'workspaceMiB',
+        'temporaryMiB', 'workspaceInodes', 'temporaryInodes', 'userNamespace', 'systemSnapshot'])
+      const integer = (value: number, min: number, max: number): boolean => Number.isSafeInteger(value) && value >= min && value <= max
+      const roots = config.cgroupRoots
+      if (Object.keys(config).some(key => !allowed.has(key)) || !validLinuxRuntimeShape(config.runtime)
+        || typeof config.stateRoot !== 'string' || !isAbsolute(config.stateRoot) || resolve(config.stateRoot) !== config.stateRoot
+        || config.stateRoot === '/' || /[\p{Cc}\\]/u.test(config.stateRoot)
+        || config.stateRoot === config.runtime.root.path || config.stateRoot.startsWith(config.runtime.root.path + sep)
+        || config.runtime.root.path.startsWith(config.stateRoot + sep)
+        || typeof config.authorityDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(config.authorityDigest)
+        || !integer(config.expiresAt, 1, Number.MAX_SAFE_INTEGER) || !integer(config.maxRuns, 1, 1000)
+        || !integer(config.maxTotalDurationMs, 60_000, 86_400_000) || !integer(config.timeoutMs, 60_000, 1_800_000)
+        || config.timeoutMs > config.maxTotalDurationMs
+        || !integer(config.outputBytes, 4096, 1_048_576) || config.versioning !== undefined && config.versioning !== 'patch'
+        || !integer(config.memoryMiB, 128, 16384) || !Number.isFinite(config.cpus) || config.cpus < 0.25 || config.cpus > 16
+        || !integer(config.pidsLimit, 16, 1024) || !integer(config.workspaceMiB, 64, 8192)
+        || !integer(config.temporaryMiB, 32, 4096) || !integer(config.workspaceInodes, 16, 1_000_000)
+        || !integer(config.temporaryInodes, 16, 1_000_000) || !roots || roots.mode !== 'v1'
+        || Object.keys(roots).sort().join() !== 'cpu,freezer,memory,mode,pids'
+        || new Set([roots.cpu, roots.memory, roots.pids, roots.freezer]).size !== 4
+        || [roots.cpu, roots.memory, roots.pids, roots.freezer].some(root => typeof root !== 'string'
+          || !new RegExp(`^/sys/fs/cgroup/[A-Za-z0-9_,]+/dsh-native/uid-${process.getuid?.()}$`, 'u').test(root))
+        || !validLinuxRepositoryIdentity(config)) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'Linux source build configuration is invalid')
+      }
+      return
+    }
     const allowed = new Set(['backend', 'runtime', 'stateRoot', 'authorityDigest', 'expiresAt', 'maxRuns',
       'maxTotalDurationMs', 'timeoutMs', 'outputBytes', 'versioning'])
     if (config.backend !== 'macos-seatbelt' || Object.keys(config).some(key => !allowed.has(key))
@@ -550,7 +660,9 @@ export function validateSourceBuildConfig(config: SourceBuildConfig): void {
     catch { throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'native source runtime configuration is invalid') }
     return
   }
-  if (config === null || typeof config !== 'object' || Array.isArray(config) || (config.profile !== undefined && config.profile !== 'standard' && config.profile !== 'repository' && config.profile !== 'portable-repository')
+  const allowedDockerKeys = new Set(['dockerPath', 'socketPath', 'daemonId', 'image', 'timeoutMs', 'memoryMiB', 'cpus',
+    'pidsLimit', 'workspaceMiB', 'outputBytes', 'versioning', 'profile', 'temporaryMiB', 'repositorySandbox'])
+  if (config === null || typeof config !== 'object' || Array.isArray(config) || Object.keys(config).some(key => !allowedDockerKeys.has(key)) || (config.profile !== undefined && config.profile !== 'standard' && config.profile !== 'repository' && config.profile !== 'portable-repository')
     || (config.versioning !== undefined && config.versioning !== 'patch')
     || (config.temporaryMiB !== undefined && !Number.isSafeInteger(config.temporaryMiB))
     || (config.profile === 'portable-repository' && config.repositorySandbox === undefined)
@@ -642,16 +754,35 @@ function portableArgs(socket: string | undefined, configDirectory: string | unde
   return socket === undefined ? args : ['--config', configDirectory!, '-H', `unix://${socket}`, ...args]
 }
 
-async function sourceTree(worktree: string, baseCommit: string, scope: readonly string[], environment: NodeJS.ProcessEnv): Promise<{ tree: string; temporary: string; cleanup: () => Promise<void> }> {
+export async function sourceTree(worktree: string, baseCommit: string, scope: readonly string[], environment: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<{ tree: string; temporary: string; cleanup: () => Promise<void> }> {
   const temporary = await mkdtemp(join(tmpdir(), 'dsh-source-build-index-'))
   try {
     const env = { ...environment, GIT_INDEX_FILE: join(temporary, 'index') }
-    await runLocalCommand('git', ['read-tree', baseCommit], worktree, env)
-    await runLocalCommand('git', ['--literal-pathspecs', 'add', '--all', '--', ...scope], worktree, env)
-    const tree = (await runLocalCommand('git', ['write-tree'], worktree, env, { capture: true })).trim()
+    await runLocalCommand('git', ['read-tree', baseCommit], worktree, env, signal ? { signal } : {})
+    await runLocalCommand('git', ['--literal-pathspecs', 'add', '--all', '--', ...scope], worktree, env, signal ? { signal } : {})
+    const tree = (await runLocalCommand('git', ['write-tree'], worktree, env, { capture: true, ...(signal ? { signal } : {}) })).trim()
     if (!/^[a-f0-9]{40}$/u.test(tree)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'temporary source tree is invalid')
     return { tree, temporary, cleanup: async () => { await rm(temporary, { recursive: true, force: true }) } }
   } catch (error) { await rm(temporary, { recursive: true, force: true }); throw error }
+}
+
+export async function verifySourcePreparation(input: Pick<Parameters<typeof runDockerPreparedChecks>[0],
+  'worktree' | 'baseCommit' | 'name' | 'scope' | 'environment' | 'signal' | 'assertCurrent' | 'creation' | 'revision'>): Promise<void> {
+  if (input.creation === undefined && input.revision === undefined) return
+  if (input.creation !== undefined && input.revision !== undefined) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source build has conflicting preparation authorities')
+  if ((input.creation?.grant ?? input.revision!.binding.grant).expiresAt <= Date.now()) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation grant expired before build')
+  const verified = input.revision === undefined ? await verifyCreatedPluginWorkspace({ worktree: input.worktree, baseCommit: input.baseCommit,
+    name: input.name, environment: input.environment, signal: input.signal, assertCurrent: input.assertCurrent,
+    creation: input.creation! }) : await verifyRevisedPluginWorkspace({ worktree: input.worktree, baseCommit: input.baseCommit,
+      name: input.name, environment: input.environment, signal: input.signal, assertCurrent: input.assertCurrent,
+      revision: input.revision.binding, parentSource: input.revision.parentSource, parentCertificate: input.revision.parentCertificate, files: input.revision.files })
+  const expected = [...input.scope].sort()
+  const actual = [...verified.scope].sort()
+  if (expected.length !== actual.length || expected.some((path, index) => path !== actual[index])) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation build scope differs from verified scope')
+  }
+  await input.assertCurrent()
+  if ((input.creation?.grant ?? input.revision!.binding.grant).expiresAt <= Date.now()) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation grant expired before build')
 }
 
 /**
@@ -706,23 +837,7 @@ export async function runDockerPreparedChecks(input: {
   }
   let creationSnapshot: Awaited<ReturnType<typeof checkedSourceSnapshot>> | undefined
   let baseLockDigest: string | undefined
-  const verifyCreation = async (): Promise<void> => {
-    if (input.creation === undefined && input.revision === undefined) return
-    if (input.creation !== undefined && input.revision !== undefined) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source build has conflicting preparation authorities')
-    if ((input.creation?.grant ?? input.revision!.binding.grant).expiresAt <= Date.now()) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation grant expired before build')
-    const verified = input.revision === undefined ? await verifyCreatedPluginWorkspace({ worktree: input.worktree, baseCommit: input.baseCommit,
-      name: input.name, environment: input.environment, signal: input.signal, assertCurrent: input.assertCurrent,
-      creation: input.creation! }) : await verifyRevisedPluginWorkspace({ worktree: input.worktree, baseCommit: input.baseCommit,
-        name: input.name, environment: input.environment, signal: input.signal, assertCurrent: input.assertCurrent,
-        revision: input.revision.binding, parentSource: input.revision.parentSource, parentCertificate: input.revision.parentCertificate, files: input.revision.files })
-    const expected = [...input.scope].sort()
-    const actual = [...verified.scope].sort()
-    if (expected.length !== actual.length || expected.some((path, index) => path !== actual[index])) {
-      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation build scope differs from verified scope')
-    }
-    await input.assertCurrent()
-    if ((input.creation?.grant ?? input.revision!.binding.grant).expiresAt <= Date.now()) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation grant expired before build')
-  }
+  const verifyCreation = (): Promise<void> => verifySourcePreparation(input)
   if (input.creation !== undefined || input.revision !== undefined) {
     await verifyCreation()
     creationSnapshot = await checkedSourceSnapshot(input.worktree, input.baseCommit, input.scope, input.environment, undefined, input.signal)

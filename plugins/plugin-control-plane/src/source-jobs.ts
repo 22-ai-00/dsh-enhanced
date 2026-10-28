@@ -8,7 +8,7 @@ import { awaitSourceSignal, inspectSourceContext } from './source-context.js'
 import { assertPluginModificationAllowed, removeSourceJobWorktree, validateScopedPluginFiles, type ScopedPluginFile } from './source-workspace.js'
 import { assertManagedVersionPaths } from './source-versioning.js'
 import { resolveSourceBaseline, validateSourceBaselineConfig } from './source-baseline.js'
-import { removeSourceJobContainer, type SourceBuildConfig } from './source-build.js'
+import { removeSourceJobContainer, validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
 import { inspectSourceRevisionContext, validateSourceRevisionGrant } from './source-revision.js'
 import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import type { PluginCreationVerificationCertificate, PluginRevisionParentBinding } from '@dsh-enhanced/assistant-growth-contract'
@@ -57,6 +57,7 @@ export function validateSourceJobsConfig(value: SourceJobsConfig, build?: Source
     || !Number.isSafeInteger(value.budgetAmount) || value.budgetAmount < 1) {
     throw new Error('plugin-control-plane: invalid sourceJobs authority configuration')
   }
+  validateSourceBuildConfig(build)
   if (value.baseline !== undefined) validateSourceBaselineConfig(value.baseline)
   if (value.allowedModes !== undefined && (!Array.isArray(value.allowedModes) || value.allowedModes.length < 1
     || value.allowedModes.length > 3 || new Set(value.allowedModes).size !== value.allowedModes.length
@@ -65,7 +66,7 @@ export function validateSourceJobsConfig(value: SourceJobsConfig, build?: Source
   }
   if (value.creation !== undefined) validateSourceCreationGrant(value.creation)
   if (value.revision !== undefined) validateSourceRevisionGrant(value.revision)
-  if (build !== undefined && 'backend' in build
+  if ('backend' in build && build.backend === 'macos-seatbelt'
     && (!value.allowedModes || value.allowedModes.some(mode => mode === 'modify')
       || value.creation === undefined && value.revision === undefined)) {
     throw new Error('plugin-control-plane: native source jobs require finite create/revise-created grants')
@@ -115,6 +116,8 @@ export class SourceJobRuntime {
     adoptionTimeoutMs?: number
     prepare: (job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>) => Promise<PluginSourcePlan>
     inspectNativeQuiescence?: (key: string) => Promise<'quiescent' | 'unknown'>
+    /** Linux service-owned, single-use proof of no admission and completed/no Host cleanup. */
+    isPreparationNotStarted?: (error: unknown, owned: SourceJobRecord) => boolean
   }) {
     validateSourceJobsConfig(options.config, options.build)
     this.authorityDigest = controlPlaneDigest({ config: options.config, build: options.build })
@@ -442,7 +445,7 @@ export class SourceJobRuntime {
       files: structuredClone(input.files), ttlMs: input.ttlMs, build: structuredClone(this.options.build),
       worktree: join(this.options.statePath, 'source-worktrees', `worktree-job-${token}`),
       ...('backend' in this.options.build
-        ? { nativeResource: { backend: 'macos-seatbelt' as const, key: id } }
+        ? { nativeResource: { backend: this.options.build.backend, key: id } }
         : { containerName: `dsh-source-job-${token}` }),
     }
     await assertCurrent()
@@ -734,6 +737,7 @@ export class SourceJobRuntime {
       return failure(false)
     }
     let claimed = false
+    let claimedJob: SourceJobRecord | undefined
     const growthController = (job.intent.creation?.growthRun ?? job.intent.revision?.growthRun) === undefined ? undefined : new AbortController()
     if (growthController) this.growthControllers.add(growthController)
     const signal = AbortSignal.any([input.signal, this.abort.signal,
@@ -749,6 +753,7 @@ export class SourceJobRuntime {
       job = this.options.store.claimSourceJob({ id: job.id, revision: job.revision, definitionHash: input.definitionHash, occurrenceId: input.occurrenceId })
       claimed = true
       const owned = job
+      claimedJob = owned
       const assertCurrent = async (): Promise<void> => {
         signal.throwIfAborted(); this.assertOwner(owned)
         const current = this.options.store.getSourceJob(owned.id)
@@ -775,8 +780,20 @@ export class SourceJobRuntime {
       if (!claimed && error instanceof SourceGrowthRunUnavailableError) return failure(false)
       if (!claimed && current?.status === 'queued'
         && (current.revision !== job.revision || current.definitionHash !== input.definitionHash)) return failure(false)
-      if (current?.status === 'queued' || (current?.status === 'running' && current.occurrenceId === input.occurrenceId)) {
-        this.options.store.settleSourceJob({ id: current.id, revision: current.revision, status: claimed ? 'unknown' : 'failed', failureCode: claimed ? 'source-job-interrupted' : 'source-job-preflight-rejected' })
+      if (claimed && claimedJob && current?.status === 'running' && current.revision === claimedJob.revision
+        && current.occurrenceId === claimedJob.occurrenceId && current.intentDigest === claimedJob.intentDigest) {
+        let notStarted = false
+        try { notStarted = this.options.isPreparationNotStarted?.(error, claimedJob) === true } catch { /* Unavailable proof remains unknown. */ }
+        if (notStarted) {
+          this.options.store.settleSourceJob({ id: claimedJob.id, revision: claimedJob.revision,
+            status: 'failed', failureCode: 'source-job-preparation-not-started' })
+          return { outcome: 'failed', failureClass: 'configuration', failurePhase: 'host-execution',
+            failureCode: 'source-job-preparation-not-started', sideEffectState: 'possible', retryability: 'unsafe' }
+        }
+      }
+      if (!claimed && current?.status === 'queued' && current.revision === job.revision
+        || claimed && current?.status === 'running' && current.revision === job.revision && current.occurrenceId === input.occurrenceId) {
+        this.options.store.settleSourceJob({ id: job.id, revision: job.revision, status: claimed ? 'unknown' : 'failed', failureCode: claimed ? 'source-job-interrupted' : 'source-job-preflight-rejected' })
       }
       return failure(claimed)
     } finally {
@@ -793,7 +810,8 @@ export class SourceJobRuntime {
       const trust = await this.options.trust()
       if (controlPlaneDigest(trust) !== job.intent.trustDigest) throw new Error('source job trust changed')
       if ('backend' in job.intent.build) {
-        if (job.intent.nativeResource?.backend !== 'macos-seatbelt' || job.intent.nativeResource.key !== job.id
+        if (job.intent.nativeResource?.backend !== job.intent.build.backend || job.intent.nativeResource.key !== job.id
+          || controlPlaneDigest(this.options.build) !== controlPlaneDigest(job.intent.build)
           || await this.options.inspectNativeQuiescence?.(job.id) !== 'quiescent') {
           throw new Error('native source job has no valid durable quiescence receipt')
         }

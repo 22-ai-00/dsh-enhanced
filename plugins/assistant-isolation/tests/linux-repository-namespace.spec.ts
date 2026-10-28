@@ -189,7 +189,10 @@ print('bounded')`] })
     const result = await run({ archive: { bytes, sha256: digest(bytes) }, workspaceBytes: 4 * 1024 ** 2,
       argv: ['/bin/sh', '-ec', 'cp /input/source.tar result.bin'] })
     expect(result.status, JSON.stringify({ ...result, artifacts: [] })).toBe('succeeded')
-    expect(result.artifacts).toEqual([{ path: 'result.bin', bytes, sha256: digest(bytes) }])
+    expect(result.artifacts).toHaveLength(1)
+    expect(result.artifacts[0]!.path).toBe('result.bin')
+    expect(result.artifacts[0]!.sha256).toBe(digest(bytes))
+    expect(result.artifacts[0]!.bytes.equals(bytes)).toBe(true)
   })
 
   test('streams the maximum archive and binary output bounds without JSON expansion', async () => {

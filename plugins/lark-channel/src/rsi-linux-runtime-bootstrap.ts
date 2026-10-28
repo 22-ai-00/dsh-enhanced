@@ -9,10 +9,10 @@ import { hashLinuxRuntimeTree, verifyLinuxRuntime, type LinuxRuntime } from '@ds
 import { parse as parseYaml } from 'yaml'
 import { readRsiSourceWorkspace, type RsiSourceWorkspace } from './rsi-source.js'
 
-const NODE_VERSION = 'v22.23.2'
+export const NODE_VERSION = 'v22.23.2'
 const PNPM_VERSION = '11.7.0'
 // nodejs.org/dist/v22.23.2/SHASUMS256.txt and the exact npm package tarballs.
-const NODE_ARCHIVES = {
+export const NODE_ARCHIVES = {
   x64: 'b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a',
   arm64: '013b59cfd2819703a6f4a14ab891fc46fc2a4e3f5bcd92de3fb4929b43e35b30',
 } as const
@@ -155,7 +155,7 @@ async function run(file: string, args: string[], cwd: string, environment: NodeJ
     })
   })
 }
-async function officialArchive(path: string | undefined, url: string, expected: string, maximum: number,
+export async function officialArchive(path: string | undefined, url: string, expected: string, maximum: number,
   stage: string, signal: AbortSignal): Promise<string> {
   const destination = join(stage, `archive-${expected.slice(0, 16)}.tgz`)
   if (path === undefined) {
@@ -178,7 +178,7 @@ async function officialArchive(path: string | undefined, url: string, expected: 
   if (archive.length < 1 || archive.length > maximum || sha(archive) !== expected) fail('official archive digest differs')
   return destination
 }
-async function extractExact(archive: string, member: string, cwd: string, signal: AbortSignal,
+export async function extractExact(archive: string, member: string, cwd: string, signal: AbortSignal,
   maximum: number): Promise<Buffer> {
   return run('/usr/bin/tar', ['-xOzf', archive, member], cwd,
     { PATH: '/usr/bin:/bin', HOME: '/nonexistent', LANG: 'C', LC_ALL: 'C', COPYFILE_DISABLE: '1' }, signal, 120_000, maximum)

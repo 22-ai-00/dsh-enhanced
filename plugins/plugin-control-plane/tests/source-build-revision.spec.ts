@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { PluginCreationVerificationCertificate, SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
-import { afterAll, afterEach, beforeAll, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, expect, test, vi } from 'vitest'
 import { captureCreationCapabilitySource } from '../src/creation-capability-source.js'
 import { runDockerPreparedChecks, type SourceBuildConfig } from '../src/source-build.js'
 import { inspectSourceCreationContext, prepareCreatedPluginWorkspace } from '../src/source-creation.js'
@@ -15,6 +15,14 @@ import { prepareRevisedPluginWorkspace, type SourceRevisionBinding, type SourceR
 import { controlPlaneDigest } from '../src/store.js'
 import { checkedSourceSnapshot, createIsolatedWorktree } from '../src/source-workspace.js'
 import { createSourceCreationFixture } from './helpers/source-creation-fixture.js'
+
+import { runLinuxPreparedChecks } from '../src/linux-source-build.js'
+import { linuxSourceConfig, linuxMockRunner } from './helpers/linux-source-build-fixture.js'
+
+vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => {
+  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>()
+  return { ...actual, verifyLinuxRuntime: vi.fn(async value => value) }
+})
 
 const sourceRoot = fileURLToPath(new URL('../../..', import.meta.url)).replace(/\/$/u, '')
 let cloneRoot: string
@@ -177,3 +185,19 @@ test('current scaffold, lock, unsubmitted candidate change and expired grant fai
     binding: { ...f.binding, grant: { ...f.binding.grant, expiresAt: Date.now() - 1 } } } })).rejects.toThrow(/grant expired/)
   await noDockerRun(f.dockerPath)
 }, 30_000)
+
+test('preserves real revision proof and rejects parent drift before Linux dispatch', async () => {
+  const f = await fixture(), config = linuxSourceConfig()
+  const { runner, run } = linuxMockRunner(config, request => {
+    expect(request.argv).toContain('DSH_SOURCE_TRUST_LOCKFILE=true')
+  })
+  const input = { ...f.input, config, runner, sourceJob: { id: 'source-job-' + '2'.repeat(64) } }
+  const result = await runLinuxPreparedChecks(input)
+  expect(result.evidence.schemaVersion).toBe(3)
+  expect(result.evidence.pack.version).toBe('0.1.0')
+  expect(run).toHaveBeenCalledOnce()
+  await expect(runLinuxPreparedChecks({ ...input, revision: { ...f.revision,
+    binding: { ...f.binding, parent: { ...f.binding.parent, sourceDigest: h('0') } } } })).rejects.toThrow(/parent binding/u)
+  expect(run).toHaveBeenCalledOnce()
+  await noDockerRun(f.dockerPath)
+}, 30000)

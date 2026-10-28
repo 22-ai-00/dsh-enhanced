@@ -3,6 +3,9 @@ import { posix } from 'node:path'
 import type { LinuxCgroupDirectory, LinuxCgroupLimits, LinuxCgroupRoots, LinuxCgroupSnapshot } from './linux-cgroups.js'
 import { plannedStorageBytes } from './storage-policy.js'
 import type { IsolationLimits } from './types.js'
+import type { LinuxSystemSnapshot } from './linux-system-snapshot.js'
+import { validateLinuxUserNamespaceMapping, validateLinuxUserNamespaceWitness,
+  type LinuxUserNamespaceMapping, type LinuxUserNamespaceWitness } from './linux-user-namespace.js'
 
 export interface LinuxExecutionContractV1 {
   schemaVersion: 1
@@ -29,14 +32,21 @@ export interface LinuxExecutionIntentV1 {
   roots: Record<string, LinuxCgroupDirectory>
 }
 /** Repository authority is explicit and cannot enter the ordinary text runner. */
-export interface LinuxRepositoryExecutionContract extends Omit<LinuxExecutionContractV1, 'schemaVersion' | 'profile' | 'limits'> {
+export interface LinuxRepositoryExecutionContractV2 extends Omit<LinuxExecutionContractV1, 'schemaVersion' | 'profile' | 'limits'> {
   schemaVersion: 2
   profile: 'repository'
   limits: IsolationLimits & { tmpMiB: number; tmpInodes: number; inputMiB: 65; inputInodes: 16 }
 }
+export interface LinuxRepositoryExecutionContractV3 extends Omit<LinuxRepositoryExecutionContractV2, 'schemaVersion'> {
+  schemaVersion: 3
+  implementationDigest: string
+  userNamespace: LinuxUserNamespaceMapping
+  systemSnapshot: LinuxSystemSnapshot
+}
+export type LinuxRepositoryExecutionContract = LinuxRepositoryExecutionContractV2 | LinuxRepositoryExecutionContractV3
 export type LinuxExecutionContract = LinuxExecutionContractV1 | LinuxRepositoryExecutionContract
 export interface LinuxRepositoryExecutionIntent extends Omit<LinuxExecutionIntentV1, 'schemaVersion'> {
-  schemaVersion: 2
+  schemaVersion: 2 | 3
   repository: { archive: { bytes: number; sha256: string }; artifacts: string[]; executionDigest: string }
 }
 export type LinuxExecutionIntent = LinuxExecutionIntentV1 | LinuxRepositoryExecutionIntent
@@ -44,12 +54,20 @@ export type LinuxExecutionIntent = LinuxExecutionIntentV1 | LinuxRepositoryExecu
  * JSON records and 2 MiB metadata headroom. Archives use only memory/pipes here;
  * a source-job ledger must add its own archive/pack staging budget before prepare. */
 export const LINUX_REPOSITORY_STORAGE_BYTES = 108 * 1024 ** 2
-export interface LinuxExecutionResources {
+export interface LinuxExecutionResourcesV1 {
   schemaVersion: 1
   intentDigest: string
   worker: LinuxCgroupSnapshot
   keeper: LinuxCgroupSnapshot
 }
+export interface LinuxExecutionResourcesV2 extends Omit<LinuxExecutionResourcesV1, 'schemaVersion'> {
+  schemaVersion: 2
+  userNamespace: {
+    witness: LinuxUserNamespaceWitness
+    keeperGate: { pid: number; startTicks: string; bootId: string; uid: number }
+  } | null
+}
+export type LinuxExecutionResources = LinuxExecutionResourcesV1 | LinuxExecutionResourcesV2
 /** Host validates the private receipt and kernel evidence before presenting this binding. */
 export interface LinuxReceiptBinding {
   requestDigest: string
@@ -125,20 +143,30 @@ function directory(value: unknown, expected: string): asserts value is LinuxCgro
   if (value.path !== expected || !natural(value.dev) || !positive(value.ino)) fail()
 }
 export function validateLinuxExecutionContract(value: unknown): LinuxExecutionContract {
-  object(value, ['schemaVersion', 'backend', 'runtimeDigest', 'profile', 'limits', 'keeperLimits', 'cgroupRoots'])
-  if (![1, 2].includes(value.schemaVersion as number) || value.backend !== 'linux-native' || !matches(value.runtimeDigest, HEX) || !['ordinary', 'repository'].includes(value.profile as string)) fail()
-  object(value.limits, ['maxDurationMs', 'maxInputBytes', 'maxOutputBytes', 'maxArtifactBytes', 'maxFiles', 'memoryMiB', 'workspaceMiB', 'workspaceInodes', 'pidsLimit', 'cpus', ...(value.schemaVersion === 2 ? ['tmpMiB', 'tmpInodes', 'inputMiB', 'inputInodes'] : [])])
+  object(value, ['schemaVersion', 'backend', 'runtimeDigest', 'profile', 'limits', 'keeperLimits', 'cgroupRoots', ...((value as Record<string, unknown> | null)?.schemaVersion === 3 ? ['implementationDigest', 'userNamespace', 'systemSnapshot'] : [])])
+  if (![1, 2, 3].includes(value.schemaVersion as number) || value.backend !== 'linux-native' || !matches(value.runtimeDigest, HEX) || !['ordinary', 'repository'].includes(value.profile as string)) fail()
+  object(value.limits, ['maxDurationMs', 'maxInputBytes', 'maxOutputBytes', 'maxArtifactBytes', 'maxFiles', 'memoryMiB', 'workspaceMiB', 'workspaceInodes', 'pidsLimit', 'cpus', ...(value.schemaVersion !== 1 ? ['tmpMiB', 'tmpInodes', 'inputMiB', 'inputInodes'] : [])])
   for (const [key, item] of Object.entries(value.limits)) if (key !== 'cpus' && !positive(item)) fail()
   limits({ memoryMiB: value.limits.memoryMiB, pidsLimit: value.limits.pidsLimit, cpus: value.limits.cpus })
-  if (value.schemaVersion === 2 && (value.profile !== 'repository' || value.limits.inputMiB !== 65 || value.limits.inputInodes !== 16
+  if (value.schemaVersion !== 1 && (value.profile !== 'repository' || value.limits.inputMiB !== 65 || value.limits.inputInodes !== 16
     || (value.limits.tmpMiB as number) > 4096 || (value.limits.tmpInodes as number) > 1_000_000 || (value.limits.tmpInodes as number) < 16
     || (value.limits.workspaceMiB as number) > 8192 || (value.limits.maxDurationMs as number) > 1_800_000)) fail()
-  if ((value.limits.maxInputBytes as number) > (value.schemaVersion === 2 ? 64 * 1024 ** 2 : 1_048_576) || (value.limits.maxOutputBytes as number) > 1_048_576
-    || (value.limits.maxArtifactBytes as number) > (value.schemaVersion === 2 ? 32 * 1024 ** 2 : 1_048_576) || (value.limits.maxFiles as number) > 128
+  if ((value.limits.maxInputBytes as number) > (value.schemaVersion !== 1 ? 64 * 1024 ** 2 : 1_048_576) || (value.limits.maxOutputBytes as number) > 1_048_576
+    || (value.limits.maxArtifactBytes as number) > (value.schemaVersion !== 1 ? 32 * 1024 ** 2 : 1_048_576) || (value.limits.maxFiles as number) > 128
     || (value.limits.workspaceInodes as number) < 16 || (value.limits.workspaceInodes as number) > 1_000_000
     || (value.limits.workspaceMiB as number) > 65_536) fail()
   limits(value.keeperLimits)
-  if (value.schemaVersion === 2 && (value.keeperLimits.memoryMiB < 256 || value.keeperLimits.pidsLimit < 64 || value.keeperLimits.cpus < 0.5)) fail()
+  if (value.schemaVersion !== 1 && (value.keeperLimits.memoryMiB < 256 || value.keeperLimits.pidsLimit < 64 || value.keeperLimits.cpus < 0.5)) fail()
+  if (value.schemaVersion === 3) {
+    if (!matches(value.implementationDigest, HEX)) fail()
+    validateLinuxUserNamespaceMapping(value.userNamespace)
+    object(value.systemSnapshot, ['schemaVersion', 'root', 'manifestSha256', 'bytes', 'entries'])
+    const snapshot = value.systemSnapshot
+    object(snapshot.root, ['path', 'dev', 'ino', 'sha256'])
+    if (snapshot.schemaVersion !== 1 || !path(snapshot.root.path) || !natural(snapshot.root.dev) || !positive(snapshot.root.ino)
+      || !matches(snapshot.root.sha256, HEX) || !matches(snapshot.manifestSha256, HEX)
+      || !positive(snapshot.bytes) || snapshot.bytes > 640 * 1024 ** 2 || !positive(snapshot.entries) || snapshot.entries > 32768) fail()
+  }
   const roots = value.cgroupRoots as LinuxCgroupRoots
   if (!roots || !['v1', 'v2'].includes(roots.mode)) fail()
   object(roots, roots.mode === 'v1' ? ['mode', ...controllers] : ['mode', 'unified'])
@@ -151,12 +179,12 @@ export function validateLinuxExecutionContract(value: unknown): LinuxExecutionCo
 }
 export function linuxExecutionContractDigest(value: LinuxExecutionContract): string { return digest(validateLinuxExecutionContract(value)) }
 function intentValue(value: unknown): LinuxExecutionIntent {
-  object(value, ['schemaVersion', 'jobId', 'requestDigest', 'nativeResourceId', 'nativeNonce', 'contractDigest', 'bootId', 'uid', 'deadline', 'namespacePath', 'workerNonce', 'keeperNonce', 'roots', ...((value as Record<string, unknown> | null)?.schemaVersion === 2 ? ['repository'] : [])])
-  if (![1, 2].includes(value.schemaVersion as number) || !matches(value.jobId, UUID) || !matches(value.requestDigest, HEX) || value.nativeResourceId !== `linux-${value.jobId}`
+  object(value, ['schemaVersion', 'jobId', 'requestDigest', 'nativeResourceId', 'nativeNonce', 'contractDigest', 'bootId', 'uid', 'deadline', 'namespacePath', 'workerNonce', 'keeperNonce', 'roots', ...([2, 3].includes((value as Record<string, unknown> | null)?.schemaVersion as number) ? ['repository'] : [])])
+  if (![1, 2, 3].includes(value.schemaVersion as number) || !matches(value.jobId, UUID) || !matches(value.requestDigest, HEX) || value.nativeResourceId !== `linux-${value.jobId}`
     || !matches(value.nativeNonce, NONCE) || !matches(value.contractDigest, HEX) || !matches(value.bootId, UUID)
     || !positive(value.uid) || value.uid > 0xffff_fffe || !positive(value.deadline) || !path(value.namespacePath)
     || !matches(value.workerNonce, NONCE) || !matches(value.keeperNonce, NONCE) || value.workerNonce === value.keeperNonce) fail()
-  if (value.schemaVersion === 2) {
+  if (value.schemaVersion !== 1) {
     object(value.repository, ['archive', 'artifacts', 'executionDigest'])
     object(value.repository.archive, ['bytes', 'sha256'])
     if (!positive(value.repository.archive.bytes) || value.repository.archive.bytes > 64 * 1024 ** 2
@@ -185,8 +213,9 @@ export function validateLinuxExecutionIntent(value: unknown, contract: LinuxExec
   const checked = validateLinuxExecutionContract(contract)
   const intent = intentValue(value)
   if (intent.contractDigest !== linuxExecutionContractDigest(checked) || intent.schemaVersion !== checked.schemaVersion
-    || intent.schemaVersion === 2 && (intent.repository.archive.bytes > checked.limits.maxInputBytes
+    || intent.schemaVersion !== 1 && (intent.repository.archive.bytes > checked.limits.maxInputBytes
       || intent.repository.artifacts.length > checked.limits.maxFiles)) fail()
+  if (checked.schemaVersion === 3 && checked.userNamespace.ownerUid !== intent.uid) fail()
   const entries = rootEntries(checked.cgroupRoots)
   object(intent.roots, entries.map(([key]) => key))
   for (const [key, root] of entries) directory(intent.roots[key], root)
@@ -210,8 +239,8 @@ function snapshotValue(value: unknown): LinuxCgroupSnapshot {
   return value as unknown as LinuxCgroupSnapshot
 }
 function resourcesValue(value: unknown): LinuxExecutionResources {
-  object(value, ['schemaVersion', 'intentDigest', 'worker', 'keeper'])
-  if (value.schemaVersion !== 1 || !matches(value.intentDigest, HEX)) fail()
+  object(value, ['schemaVersion', 'intentDigest', 'worker', 'keeper', ...((value as Record<string, unknown> | null)?.schemaVersion === 2 ? ['userNamespace'] : [])])
+  if (![1, 2].includes(value.schemaVersion as number) || !matches(value.intentDigest, HEX)) fail()
   const worker = snapshotValue(value.worker), keeper = snapshotValue(value.keeper)
   if (worker.mode !== keeper.mode || worker.bootId !== keeper.bootId || worker.jobId !== keeper.jobId || worker.uid !== keeper.uid
     || worker.deadline !== keeper.deadline || worker.nonce === keeper.nonce) fail()
@@ -219,13 +248,26 @@ function resourcesValue(value: unknown): LinuxExecutionResources {
     const left = worker.directories[key]!, right = keeper.directories[key]!
     if (posix.dirname(left.path) !== posix.dirname(right.path) || left.dev !== right.dev || left.ino === right.ino) fail()
   }
+  if (value.schemaVersion === 2 && value.userNamespace !== null) {
+    object(value.userNamespace, ['witness', 'keeperGate'])
+    const witness = validateLinuxUserNamespaceWitness(value.userNamespace.witness)
+    const gate = value.userNamespace.keeperGate
+    object(gate, ['pid', 'startTicks', 'bootId', 'uid'])
+    if (witness.bootId !== worker.bootId || witness.ownerUid !== worker.uid || !positive(gate.pid)
+      || typeof gate.startTicks !== 'string' || !/^[1-9][0-9]{0,63}$/u.test(gate.startTicks)
+      || gate.bootId !== worker.bootId || gate.uid !== worker.uid) fail()
+  }
   return value as unknown as LinuxExecutionResources
 }
 export function validateLinuxExecutionResources(value: unknown, intent: LinuxExecutionIntent, contract: LinuxExecutionContract): LinuxExecutionResources {
   const checked = validateLinuxExecutionIntent(intent, contract)
   resourcesValue(value)
-  object(value, ['schemaVersion', 'intentDigest', 'worker', 'keeper'])
-  if (value.schemaVersion !== 1 || value.intentDigest !== linuxExecutionIntentDigest(checked)) fail()
+  object(value, ['schemaVersion', 'intentDigest', 'worker', 'keeper', ...(contract.schemaVersion === 3 ? ['userNamespace'] : [])])
+  if (value.schemaVersion !== (contract.schemaVersion === 3 ? 2 : 1) || value.intentDigest !== linuxExecutionIntentDigest(checked)) fail()
+  if (contract.schemaVersion === 3) {
+    const bound = value.userNamespace as LinuxExecutionResourcesV2['userNamespace']
+    if (bound && canonical(bound.witness.mapping) !== canonical(contract.userNamespace)) fail()
+  }
   const entries = rootEntries(contract.cgroupRoots)
   for (const kind of ['worker', 'keeper'] as const) {
     const item = value[kind]
@@ -262,9 +304,9 @@ export function validateLinuxReceiptBinding(value: unknown): LinuxReceiptBinding
 export function linuxJobResourceReservation(contract: LinuxExecutionContract): { memoryMiB: number; workspaceInodes: number; storageBytes: number } {
   const checked = validateLinuxExecutionContract(contract)
   const { limits, keeperLimits } = checked
-  if (checked.schemaVersion === 2) return {
-    memoryMiB: limits.memoryMiB + limits.workspaceMiB + checked.limits.tmpMiB + checked.limits.inputMiB + 1 + keeperLimits.memoryMiB,
-    workspaceInodes: limits.workspaceInodes + checked.limits.tmpInodes + checked.limits.inputInodes + 4096 + 32,
+  if (checked.schemaVersion !== 1) return {
+    memoryMiB: limits.memoryMiB + limits.workspaceMiB + checked.limits.tmpMiB + checked.limits.inputMiB + 1 + keeperLimits.memoryMiB + (checked.schemaVersion === 3 ? 8 : 0),
+    workspaceInodes: limits.workspaceInodes + checked.limits.tmpInodes + checked.limits.inputInodes + 4096 + 32 + (checked.schemaVersion === 3 ? 16_384 : 0),
     storageBytes: 2 * limits.maxArtifactBytes + 44 * 1024 ** 2,
   }
   return { memoryMiB: limits.memoryMiB + limits.workspaceMiB

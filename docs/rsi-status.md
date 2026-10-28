@@ -5,7 +5,7 @@
 ## 当前交付
 
 - 去除 Linux 安装与自迭代的 Docker 依赖，保留普通隔离执行、完整源码修复、工具创建/修订、独立验收、发布采用与回退；不能关闭功能或用 macOS 受限创建路径代替。实现边界见[原生运行时](dockerless-runtime.md)。
-- Linux x64 原生底座、持久执行及私有 Verifier、显式配置的 `isolation_run`、operator 恢复/探针和原生结果保留已提交。本轮增加仓库归档与二进制产物的持久执行接口；下一能力是完整源码构建与持久 source job，随后接通行为验收、发布和保权安装迁移。生产仍使用 Docker，cgroup v2 准入明确拒绝，arm64 尚未实测。
+- Linux x64 原生底座、持久执行及私有 Verifier、显式配置的 `isolation_run`、operator 恢复/探针、原生结果保留与完整源码 prepare 已验收当前范围。下一交付是原生父/候选行为观察及独立验收，随后接通发布和保权安装迁移。生产仍使用 Docker，cgroup v2 准入明确拒绝，arm64 尚未实测。
 
 ## 已有能力与生产边界
 
@@ -16,7 +16,7 @@
 
 ## 下次验收与限制
 
-- 完整源码路径必须保留精确 Git tree、全新冻结离线安装、根 `pnpm check`、打包及前后输入/产物复核；完整 source job、独立行为证书、发布采用/物理回退和安装默认值尚未完成原生接线。
+- 完整源码路径保留精确 Git tree、全新冻结离线安装、根 `pnpm check`、打包及前后输入/产物复核；repository 双 UID、固定 Node 与只读系统工具快照、持久 source job 已整合。明确未启动的本次失败在清理和原 claim 核验后终结；历史缺证及辅助清理不明仍保留 unknown。公开服务的已有工具修订、独立行为证书、发布采用/物理回退和安装默认值尚未完成原生接线；修订须保留真实已采用父版的前置条件。
 - 迁移必须保留主人、会话、凭据、授权范围/期限、已用额度、未知记录与回退点。远端工作区使用 `/home` 符号链接别名，新插件创建仍需受管工作区迁移；不能重建 owner 或靠 `/new` 绕过。后续远端部署还需恢复 SSH 认证。
 - provider 迁移保留三个 API provider；三条自定义路线调用成功，官方 DeepSeek 返回 401。远端默认使用已验证的自定义模型，旧私聊保留 TraeX 选择；尚未收到升级后的真实复杂任务结果，也未验收主动维护重启后的原会话续办与最终回复。
 - 任意硬崩溃续办与独立飞书连接尚未交付，维护切换仍中断连接。监督器与 Host 同 UID，不隔离恶意 Host 插件。完整 Hermes 历史库和 75 项技能迁移未完成；普通使用驱动长期学习收益的完整闭环仍待实证。
@@ -24,7 +24,8 @@
 
 ## 最新验证
 
-- 公开工具提交 `85815e36` 的 `VITEST_MAX_WORKERS=4 pnpm_config_workspace_concurrency=4 pnpm check` 退出 0：9208 通过、203 跳过，含零警告 lint、构建、类型检查与 37 包 dry-run pack。该冻结提交不包含本轮仓库二进制接口。
-- 本轮仓库接口最终整包实测：`DSH_NATIVE_CGROUP_REAL=1 VITEST_MAX_WORKERS=4 pnpm --filter @dsh-enhanced/assistant-isolation test --testTimeout=15000` 退出 0，372 通过、52 跳过；构建、隔离及 3 个消费者包类型检查、零警告 lint 和 dry-run pack 全过，86 个文件摘要前后一致。namespace 与持久层经过独立审查。此前失败日志保留：退出观测及授权期限测试竞态已修正，一次 lost-resource-ack 清理未确认尚未复现、根因未确定；不宣称这次失败已修复。完整根检查和完整源码 prepare 尚未验收。
+- 整合后冻结源码的根 `VITEST_MAX_WORKERS=4 pnpm_config_workspace_concurrency=4 pnpm check` 退出 0：9409 通过、278 跳过、37 包 dry-run pack；1780 项源码摘要前后一致，日志、清单和新增模块已独立核验。
+- 当前原生 runner 在双 UID/cgroup v1 隔离中执行完整仓库 `d8dce785` 的 prepare：新离线冻结安装、根 `pnpm check`、输入复核及真实包产物均成功，9228 通过、242 跳过、37 包 dry-run pack；约 29 分钟，产物 94974 字节。运行时仍如实绑定工具链源码 `905df42e`；内层检查不是对未提交改动的重复检查。独立复核确认收据/账本/产物摘要一致、9 个资源路径及记录的原进程消失、已用 1 次/1800000 ms 预算保留。先前失败和本次成功原始证据分别归档于忽略目录 `docs/evidence/dockerless-source-20261028/`。
+- 双 UID 持久协议实机 18 项通过，旧执行/恢复 67 项通过；原证据和限制保留。此前旧协议一次 lost-resource-ack 清理未确认尚未复现、根因未确定，新协议测试不替代该失败的根因证明。
 - 原生证据位于忽略目录 `docs/evidence/dockerless-20261028/`、`dockerless-execution-20261028/`、`dockerless-public-20261028/` 与 `dockerless-repository-20261028/`。真实 cgroup v1、namespace、固定工具链及保留 store/cache 的无网络冻结安装均有证据；pnpm 小型 fixture、Docker 路由 fixture 与真实全仓源码构建不混同。
 - 已发布 `0.1.65` 的跨平台 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/40508948330)、[Release](https://github.com/22-ai-00/dsh-enhanced/actions/runs/40508965179)、37 包 npm 元数据与公开安装资产核对通过。全新 hoisted profile 的 core 激活及 Node 22/24 授权准备通过，远端两个 Host 就绪且原 Inbox/Outbox、owner 和会话文件保留；安装就绪不证明真实任务完成或长期收益。

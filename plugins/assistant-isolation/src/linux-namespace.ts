@@ -1,11 +1,14 @@
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { lstat, mkdir, readFile, realpath, rm } from 'node:fs/promises'
+import { lstat, mkdir, readFile, realpath, rm, stat } from 'node:fs/promises'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { fileURLToPath } from 'node:url'
+import type { LinuxUserNamespaceMapping } from './linux-user-namespace.js'
+import type { LinuxSystemSnapshot } from './linux-system-snapshot.js'
 
 const WORKER = fileURLToPath(new URL('../runtime/linux-namespace-worker.mjs', import.meta.url))
+const USERNS_LAUNCHER = fileURLToPath(new URL('../runtime/linux-userns-launcher.py', import.meta.url))
 const CONTROL = /[\p{Cc}]/u
 const NAMESPACE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-[0-9a-f]{32}$/iu
 const MAX_INPUT_BYTES = 1_048_576
@@ -60,6 +63,12 @@ export interface LinuxNamespaceResult {
 /** Host-only binary repository transport; never exposed as an ordinary tool input. */
 export interface LinuxRepositoryNamespaceInput extends Omit<LinuxNamespaceInput, 'files' | 'profile'> {
   archive: { bytes: Uint8Array; sha256: string }
+  userNamespace?: LinuxUserNamespaceMapping
+  systemSnapshot?: LinuxSystemSnapshot
+  /** Bind an independently observed user namespace before keeper setup. */
+  onUserNamespaceReady?: (identity: LinuxCandidateIdentity) => Promise<void> | void
+  /** Persist the independently observed, fully dropped entry before exec. */
+  beforeCandidateExec?: (identity: LinuxCandidateIdentity) => Promise<void> | void
 }
 export interface LinuxRepositoryNamespaceResult extends Omit<LinuxNamespaceResult, 'artifacts'> {
   artifacts: { path: string; bytes: Buffer; sha256: string }[]
@@ -132,6 +141,37 @@ async function validate(input: LinuxNamespaceInput, repository = false): Promise
     || typeof input.afterExit !== 'function' || typeof input.onStop !== 'function') fail('missing admission or cleanup')
 }
 
+async function validateUserNamespace(input: LinuxRepositoryNamespaceInput): Promise<void> {
+  const mapping = input.userNamespace
+  if (!mapping || !input.systemSnapshot || typeof input.onUserNamespaceReady !== 'function'
+    || typeof input.beforeCandidateExec !== 'function') fail('dual identity requires snapshot and both gates')
+  const keys = (value: object, names: string): boolean => Object.keys(value).sort().join() === names
+  if (!keys(mapping, 'candidateGid,candidateUid,helpers,hostNamespace,ownerGid,ownerUid,schemaVersion')
+    || mapping.schemaVersion !== 1 || mapping.ownerUid !== process.getuid?.() || mapping.ownerGid !== process.getgid?.()
+    || !integer(mapping.candidateUid, 1, 4_294_967_294) || !integer(mapping.candidateGid, 1, 4_294_967_294)
+    || mapping.candidateUid === mapping.ownerUid || mapping.candidateGid === mapping.ownerGid
+    || !mapping.hostNamespace || !keys(mapping.hostNamespace, 'dev,ino')
+    || !integer(mapping.hostNamespace.dev, 0, Number.MAX_SAFE_INTEGER) || !integer(mapping.hostNamespace.ino, 1, Number.MAX_SAFE_INTEGER)
+    || !mapping.helpers || !keys(mapping.helpers, 'gid,uid')) fail('invalid dual identity mapping')
+  const current = await stat('/proc/self/ns/user')
+  if (current.dev !== mapping.hostNamespace.dev || current.ino !== mapping.hostNamespace.ino) fail('host user namespace differs')
+  for (const kind of ['uid', 'gid'] as const) {
+    const helper = mapping.helpers[kind], path = `/usr/bin/new${kind}map`
+    if (!helper || !keys(helper, 'path,sha256') || helper.path !== path || !/^[0-9a-f]{64}$/u.test(helper.sha256)) fail('invalid mapping helper')
+    const info = await lstat(path)
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== 0 || info.mode & 0o022
+      || !(info.mode & 0o4000) || info.size > MAX_INPUT_BYTES || await realpath(path) !== path
+      || createHash('sha256').update(await readFile(path)).digest('hex') !== helper.sha256) fail('unsafe mapping helper')
+  }
+  // Legacy callers also import this core-only primitive directly as .ts in a
+  // fresh Node process. Resolve package helpers only for the new repository mode.
+  const { verifyLinuxSystemSnapshot } = await import('./linux-system-snapshot.js')
+  await verifyLinuxSystemSnapshot(input.systemSnapshot)
+  const root = input.systemSnapshot.root.path
+  if (root === input.stateRoot || root.startsWith(input.stateRoot + sep) || input.stateRoot.startsWith(root + sep)) fail('snapshot overlaps private state')
+  input.signal.throwIfAborted()
+}
+
 interface Message { type: string; [key: string]: unknown }
 function identity(value: Message): LinuxCandidateIdentity {
   if (!integer(value.pid as number, 1, Number.MAX_SAFE_INTEGER)
@@ -141,7 +181,12 @@ function identity(value: Message): LinuxCandidateIdentity {
 
 /** A process primitive. The caller's afterExit/onStop implement cgroup proof. */
 export async function runLinuxNamespace(input: LinuxNamespaceInput): Promise<LinuxNamespaceResult> {
-  return await runNamespace(input) as LinuxNamespaceResult
+  const legacy: LinuxNamespaceInput & Partial<LinuxRepositoryNamespaceInput> = { ...input }
+  delete legacy.userNamespace
+  delete legacy.systemSnapshot
+  delete legacy.onUserNamespaceReady
+  delete legacy.beforeCandidateExec
+  return await runNamespace(legacy) as LinuxNamespaceResult
 }
 
 export async function runLinuxRepositoryNamespace(input: LinuxRepositoryNamespaceInput): Promise<LinuxRepositoryNamespaceResult> {
@@ -151,16 +196,25 @@ export async function runLinuxRepositoryNamespace(input: LinuxRepositoryNamespac
     || createHash('sha256').update(input.archive.bytes).digest('hex') !== input.archive.sha256) fail('invalid repository archive')
   // Snapshot the caller-owned view before asynchronous admission or pipe writes.
   const archive = { bytes: Buffer.from(input.archive.bytes), sha256: input.archive.sha256 }
-  return await runNamespace({ ...input, files: [], profile: 'repository',
-    maxArtifactBytes: input.maxArtifactBytes ?? LINUX_REPOSITORY_ARTIFACT_BYTES }, archive) as LinuxRepositoryNamespaceResult
+  const dual = input.userNamespace !== undefined || input.systemSnapshot !== undefined
+    || input.onUserNamespaceReady !== undefined || input.beforeCandidateExec !== undefined
+  const deadline = dual ? Date.now() + input.timeoutMs : undefined
+  // Freeze mutable caller metadata before an asynchronous gate can replace it.
+  const frozen = dual ? structuredClone({ userNamespace: input.userNamespace, systemSnapshot: input.systemSnapshot }) : undefined
+  const request = { ...input, ...frozen }
+  if (dual) await validateUserNamespace(request)
+  return await runNamespace({ ...request, files: [], profile: 'repository',
+    maxArtifactBytes: input.maxArtifactBytes ?? LINUX_REPOSITORY_ARTIFACT_BYTES }, archive, deadline) as LinuxRepositoryNamespaceResult
 }
 
-async function runNamespace(input: LinuxNamespaceInput, archive?: { bytes: Buffer; sha256: string }): Promise<Omit<LinuxNamespaceResult, 'artifacts'> & { artifacts: LinuxNamespaceResult['artifacts'] | LinuxRepositoryNamespaceResult['artifacts'] }> {
+async function runNamespace(input: LinuxNamespaceInput & Partial<Pick<LinuxRepositoryNamespaceInput,
+  'userNamespace' | 'systemSnapshot' | 'onUserNamespaceReady' | 'beforeCandidateExec'>>, archive?: { bytes: Buffer; sha256: string }, absoluteDeadline?: number): Promise<Omit<LinuxNamespaceResult, 'artifacts'> & { artifacts: LinuxNamespaceResult['artifacts'] | LinuxRepositoryNamespaceResult['artifacts'] }> {
   await validate(input, archive !== undefined)
+  const dual = input.userNamespace !== undefined
   const jobPath = join(input.stateRoot, `namespace-${input.namespaceId ?? randomUUID()}`)
   await mkdir(jobPath, { mode: 0o700 })
-  const deadline = Date.now() + input.timeoutMs
-  const config = { schemaVersion: archive ? 2 : 1, ...(archive ? { archive: { size: archive.bytes.length, sha256: archive.sha256 } } : {}), jobPath, argv: input.argv, files: input.files,
+  const deadline = absoluteDeadline ?? Date.now() + input.timeoutMs
+  const config = { schemaVersion: dual ? 3 : archive ? 2 : 1, ...(dual ? { userNamespace: input.userNamespace, systemSnapshot: input.systemSnapshot } : {}), ...(archive ? { archive: { size: archive.bytes.length, sha256: archive.sha256 } } : {}), jobPath, argv: input.argv, files: input.files,
     artifacts: input.artifacts ?? [], readOnlyRoots: input.readOnlyRoots ?? [],
     workspaceBytes: input.workspaceBytes, workspaceInodes: input.workspaceInodes,
     tmpBytes: input.tmpBytes, tmpInodes: input.tmpInodes,
@@ -174,8 +228,10 @@ async function runNamespace(input: LinuxNamespaceInput, archive?: { bytes: Buffe
   // until the caller durably admits its exact host identity through fd 3.
   const child = spawn('/bin/sh', ['-c',
     'IFS= read -r gate <&3 || exit 125; [ "$gate" = START ] || exit 125; exec 3<&-; exec "$@"',
-    'dsh-keeper-gate', '/usr/bin/unshare', '--user', '--map-root-user', '--mount', '--fork',
-    '--kill-child=SIGKILL', '--net', '--ipc', '--uts', process.execPath, WORKER], {
+    'dsh-keeper-gate', ...(dual ? ['/usr/bin/python3', '-I', '-S', USERNS_LAUNCHER,
+      JSON.stringify(input.userNamespace), String(deadline), process.execPath, WORKER]
+      : ['/usr/bin/unshare', '--user', '--map-root-user', '--mount', '--fork',
+        '--kill-child=SIGKILL', '--net', '--ipc', '--uts', process.execPath, WORKER])], {
     stdio: archive ? ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe', 'pipe'], shell: false, detached: true,
     env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
   })
@@ -299,6 +355,15 @@ async function runNamespace(input: LinuxNamespaceInput, archive?: { bytes: Buffe
         archivePipe.once('close', resolveSent)
       })
     }
+    if (dual) {
+      const namespace = await next()
+      if (namespace.type !== 'NAMESPACE_READY') fail(`keeper namespace was not observed: ${String(namespace.reason ?? diagnostic)}`)
+      const keeperIdentity = identity(namespace)
+      await Promise.race([Promise.resolve().then(() => { assertLive(); return input.onUserNamespaceReady!(keeperIdentity) }),
+        closed.then(() => fail('keeper exited during namespace binding')), interrupted()])
+      assertLive()
+      send('NAMESPACE_ACK')
+    }
     const ready = await next()
     if (ready.type !== 'READY') fail('worker failed before candidate gate')
     candidate = identity(ready)
@@ -306,6 +371,15 @@ async function runNamespace(input: LinuxNamespaceInput, archive?: { bytes: Buffe
       closed.then(() => fail('worker exited during admission')), interrupted()])
     assertLive()
     send('START')
+    if (dual) {
+      const entry = await next()
+      if (entry.type !== 'CANDIDATE_READY') fail(`candidate privilege gate missing: ${String(entry.reason ?? diagnostic)}`)
+      const entryIdentity = identity(entry)
+      await Promise.race([Promise.resolve().then(() => { assertLive(); return input.beforeCandidateExec!(entryIdentity) }),
+        closed.then(() => fail('worker exited during candidate binding')), interrupted()])
+      assertLive()
+      send('CANDIDATE_START')
+    }
     const exited = await next()
     if (exited.type !== 'EXIT' || exited.pid !== candidate.pid || exited.startTicks !== candidate.startTicks
       || !(exited.code === null || integer(exited.code as number, 0, 255))

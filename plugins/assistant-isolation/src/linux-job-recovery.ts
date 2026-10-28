@@ -1,5 +1,6 @@
 import { IsolationLedgerError, type IsolationControllerAuthority, type IsolationLedger } from './ledger.js'
-import { linuxExecutionReceiptBinding, readLinuxExecutionReceipt, reconcileLinuxExecution } from './linux-execution.js'
+import { linuxExecutionReceiptBinding, readLinuxExecutionReceipt, readLinuxRepositoryReceipt,
+  reconcileLinuxExecution, reconcileLinuxRepositoryExecution } from './linux-execution.js'
 import type { IsolationJob, IsolationResult } from './types.js'
 
 /** Reconcile one persisted native job without replay or changing its authority. */
@@ -24,9 +25,12 @@ export async function reconcileLinuxJob(ledger: IsolationLedger, authority: Isol
   if (job.linuxIntent && job.linuxContract) {
     try {
       const ctx = { stateRoot: executionRoot, contract: job.linuxContract, intent: job.linuxIntent }
-      const receipt = await readLinuxExecutionReceipt(ctx)
+      const repository = job.linuxContract.schemaVersion !== 1 && job.linuxIntent.schemaVersion !== 1
+        ? { ...ctx, contract: job.linuxContract, intent: job.linuxIntent } : undefined
+      const receipt = repository ? (await readLinuxRepositoryReceipt(repository))?.receipt : await readLinuxExecutionReceipt(ctx)
       current()
-      const recovered = receipt ? { receipt, resources: receipt.resources } : await reconcileLinuxExecution(ctx)
+      const recovered = receipt ? { receipt, resources: receipt.resources }
+        : repository ? await reconcileLinuxRepositoryExecution(repository) : await reconcileLinuxExecution(ctx)
       current()
       if (!job.linuxResources && recovered.resources && job.status === 'prepared') {
         job = ledger.recordLinuxResources(job.id, job.version, recovered.resources, authority)

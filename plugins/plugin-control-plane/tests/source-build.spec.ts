@@ -14,6 +14,14 @@ import { inspectSourceCreationContext, prepareCreatedPluginWorkspace, type Sourc
 import { createIsolatedWorktree } from '../src/source-workspace.ts'
 import { createSourceCreationFixture } from './helpers/source-creation-fixture.ts'
 
+import { runLinuxPreparedChecks } from '../src/linux-source-build.js'
+import { linuxSourceConfig, linuxMockRunner } from './helpers/linux-source-build-fixture.js'
+
+vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => {
+  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>()
+  return { ...actual, verifyLinuxRuntime: vi.fn(async value => value) }
+})
+
 const indices = vi.hoisted(() => [] as string[])
 const indexHook = vi.hoisted(() => ({ run: undefined as undefined | (() => Promise<void>) }))
 vi.mock('node:fs/promises', async importOriginal => {
@@ -470,3 +478,19 @@ it('keeps durable resource state unknown when daemon absence cannot be establish
   const f = await fixture(marker, 'exit 1')
   await expect(removeSourceJobContainer(f.config, { id: `source-job-${'b'.repeat(64)}`, containerName: `dsh-source-job-${'b'.repeat(64)}` })).rejects.toThrow(/absence is unproven/)
 })
+
+it('preserves real creation proof and trusted baseline in Linux repository dispatch', async () => {
+  const f = await creationFixture(), config = linuxSourceConfig()
+  const { runner, run } = linuxMockRunner(config, request => {
+    expect(request.argv).toContain('DSH_SOURCE_TRUST_LOCKFILE=true')
+    expect(request.argv).toContain(`DSH_SOURCE_BASE_LOCK_SHA256=${createHash('sha256').update(
+      execFileSync('/usr/bin/git', ['show', `${f.baseCommit}:pnpm-lock.yaml`], { cwd: f.repository })).digest('hex')}`)
+  })
+  const input = { ...f.input, config, runner, sourceJob: { id: 'source-job-' + '1'.repeat(64) } }
+  const result = await runLinuxPreparedChecks(input)
+  expect(result.evidence.schemaVersion).toBe(3)
+  expect(result.evidence.pack.version).toBe('0.1.0')
+  expect(run).toHaveBeenCalledOnce()
+  await expect(runLinuxPreparedChecks({ ...input, scope: [`plugins/${f.name}`] })).rejects.toThrow(/scope differs/u)
+  await expect(lstat(`${f.dockerPath}.args`)).rejects.toMatchObject({ code: 'ENOENT' })
+}, creationProofTestTimeoutMs)

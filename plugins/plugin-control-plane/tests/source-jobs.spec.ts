@@ -9,12 +9,14 @@ import { isSourceOwnerContinuation } from '@dsh-enhanced/assistant-growth-contra
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { approvalSigningPayload, Ed25519ApprovalAuthority } from '../src/approval.ts'
 import { Ed25519SourceReleaseAuthorizationAuthority, sourceReleaseAuthorizationSigningPayload } from '../src/release.ts'
+import { cleanedLinuxSourcePreflight, consumeCleanedLinuxSourcePreflight } from '../src/linux-source-preflight.ts'
 import { SourceJobRuntime } from '../src/source-jobs.ts'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from '../src/store.ts'
 import { controlPlaneSchemaVersion } from '../src/sqlite.ts'
 import type { SourceJobRecord } from '../src/source-job-types.ts'
-import type { PluginSourcePlan } from '../src/types.ts'
+import type { PluginSourcePlan, SourcePreparedEvidence } from '../src/types.ts'
 import * as sourceBuild from '../src/source-build.ts'
+import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 import { createSourceCreationFixture } from './helpers/source-creation-fixture.ts'
 import { sourceGrowthRunFixture } from './helpers/source-growth-run-fixture.ts'
 
@@ -28,7 +30,7 @@ const evidence = () => ({ schemaVersion: 1 as const, kind: 'dsh-source-prepared-
 
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean; releases?: boolean; execution?: boolean; adoption?: boolean; creation?: boolean; allowedModes?: readonly ('create' | 'modify' | 'revise-created')[] } = {}) {
+async function fixture(options: { preflightGeneration?: object; typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean; releases?: boolean; execution?: boolean; adoption?: boolean; creation?: boolean; allowedModes?: readonly ('create' | 'modify' | 'revise-created')[]; sourceBuild?: sourceBuild.SourceBuildConfig; inspectNativeQuiescence?: (key: string) => Promise<'quiescent' | 'unknown'>; preparedEvidence?: SourcePreparedEvidence } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-source-jobs-runtime-'))); roots.push(root)
   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true })
   await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export const committed = true\n')
@@ -88,7 +90,7 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
       mode: job.intent.mode === 'create' ? 'prepared-create' : 'modify',
       ...(job.intent.mode === 'create' ? { creation: job.intent.creation! } : {}), ttlMs: job.intent.ttlMs,
       idempotencyKey: `source-job-plan:${job.id}`, sourceJob: { jobId: job.id, jobRevision: job.revision, occurrenceId: job.occurrenceId! },
-      prepared: { treeDigest: 'b'.repeat(64), patchDigest: 'c'.repeat(64), checkedAt: Date.now(), evidence: evidence() } }).result
+      prepared: { treeDigest: 'b'.repeat(64), patchDigest: 'c'.repeat(64), checkedAt: Date.now(), evidence: options.preparedEvidence ?? evidence() } }).result
     return options.typed === true ? withGapSourceFence!(job.intent.gapId, job.intent.owner, create) : create()
   })
   const config = { authorityId: 'source-authority', expiresAt: Date.now() + 60_000, maxSubmissions: 2, repository: sourceRepository,
@@ -112,7 +114,9 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
   const adoptReleased = vi.fn(async (_job: SourceJobRecord, _signal: AbortSignal, assertCurrent: () => Promise<void>) => {
     await assertCurrent(); adoptionForward()
   })
-  const createRuntime = () => new SourceJobRuntime({ config, build: { ...build, ...(options.versioning ? { versioning: 'patch' as const } : {}) }, statePath: root, store, ports: { automations: automations as never, delivery },
+  const createRuntime = () => new SourceJobRuntime({ config, build: { ...(options.sourceBuild ?? build), ...(options.versioning ? { versioning: 'patch' as const } : {}) }, statePath: root, store, ports: { automations: automations as never, delivery },
+    ...(options.preflightGeneration ? { isPreparationNotStarted: (error: unknown, owned: SourceJobRecord) => consumeCleanedLinuxSourcePreflight(error, owned, options.preflightGeneration!) } : {}),
+    ...(options.inspectNativeQuiescence === undefined ? {} : { inspectNativeQuiescence: options.inspectNativeQuiescence }),
     assertGrowthRun: expected => { if (controlPlaneDigest(expected) !== controlPlaneDigest(growthRun)) throw new Error('growth run changed') },
     ...(withGapSourceFence === undefined ? {} : { withGapSourceFence }), trust: async () => trust as any, prepare, ...(options.approvals ? { approvePrepared } : {}), ...(options.releases ? { releasePrepared } : {}), ...(options.execution ? { advanceReleased, releaseTimeoutMs: 60_000 } : {}), ...(options.adoption ? { adoptReleased, adoptionTimeoutMs: 60_000 } : {}) })
   const runtime = createRuntime()
@@ -130,6 +134,83 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
 }
 
 describe('durable source-job runtime', () => {
+  it.each(['modify', 'create'] as const)('restores a queued Linux %s through the existing Host executor', async mode => {
+    const linux: SourcePreparedEvidence = { schemaVersion: 3, kind: 'dsh-source-prepared-evidence', boundary: 'linux-native-repository-v1',
+      runtimeDigest: hex('runtime'), executionContractDigest: hex('contract'), buildScriptSha256: hex('script'), archive: { sizeBytes: 10240, sha256: hex('archive') },
+      receipt: { requestDigest: hex('request'), nativeNonce: 'a'.repeat(32), nativeResourceId: 'linux-11111111-1111-4111-8111-111111111111',
+        intentDigest: hex('intent'), resourcesDigest: hex('resources'), receiptDigest: hex('receipt') },
+      environment: { npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true, nodeVersion: 'v22.23.2', pnpmVersion: '11.7.0' },
+      checks: ['source-archive-integrity', 'frozen-offline-install', 'repository-pnpm-check', 'source-input-recheck', 'package-integrity'],
+      pack: evidence().pack, logDigest: hex('logs'), durationMs: 1, preparedAt: Date.now() }
+    const f = await fixture({ sourceBuild: linuxSourceConfig(), preparedEvidence: linux, ...(mode === 'create' ? { typed: true, creation: true } : {}) })
+    let restarted: SourceJobRuntime | undefined
+    try {
+      const queued = mode === 'modify' ? await f.enqueue() : await f.runtime.enqueue({ gapId: f.gap.id, name: 'agent-creation-runtime-probe', repository: f.sourceRepository,
+        files: [{ path: 'src/index.ts', content: 'export const candidate = true\n' }], mode: 'create', growthRun: f.growthRun!,
+        idempotencyKey: 'create:linux-runtime', expectedBaseCommit: f.sourceHead, ttlMs: 900_000,
+        owner: OWNER, signal: new AbortController().signal, assertCurrent: () => undefined })
+      const original = f.store.getSourceJob(queued.id)!
+      await f.runtime.close()
+      restarted = f.createRuntime(); restarted.start()
+      const activation = f.activation(queued.id)
+      const result = await f.executor!.execute({ occurrenceId: 'linux-restored', automationId: queued.id,
+        definitionHash: activation.definitionHash, executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset },
+        principal: OWNER.principalId, ownerRouteId: OWNER.ownerRouteId, activationNonce: activation.activationNonce,
+        catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
+      expect(result.outcome).toBe('succeeded')
+      const prepared = f.store.getSourceJob(queued.id)!
+      expect(prepared).toMatchObject({ status: 'prepared', intentDigest: original.intentDigest, intent: original.intent })
+      expect(f.store.getSourcePlan(prepared.planId!).preparedEvidence).toEqual(linux)
+      expect(f.prepare).toHaveBeenCalledOnce()
+    } finally { await restarted?.close(); await f.runtime.close(); f.store.close() }
+  })
+
+  it.each(['absent', 'unknown', 'boolean', 'rejected', 'quiescent'] as const)('retains Linux unknown until an exact quiescence receipt (%s)', async proof => {
+    const inspect = vi.fn(async () => {
+      if (proof === 'rejected') throw new Error('native ledger unavailable')
+      return proof === 'boolean' ? true as unknown as 'quiescent' : proof === 'quiescent' ? 'quiescent' as const : 'unknown' as const
+    })
+    const f = await fixture({ sourceBuild: linuxSourceConfig(), ...(proof === 'absent' ? {} : { inspectNativeQuiescence: inspect }) })
+    let restarted: SourceJobRuntime | undefined
+    try {
+      const queued = await f.enqueue(), frozen = f.store.getSourceJob(queued.id)!
+      expect(frozen.intent).toMatchObject({ nativeResource: { backend: 'linux-native', key: queued.id } })
+      expect(frozen.intent.containerName).toBeUndefined()
+      f.store.claimSourceJob({ id: queued.id, revision: frozen.revision, definitionHash: frozen.definitionHash!, occurrenceId: 'linux-interrupted' })
+      await f.runtime.close()
+      restarted = f.createRuntime(); restarted.start()
+      const unknown = f.store.getSourceJob(queued.id)!
+      expect(unknown.status).toBe('unknown')
+      const cleanup = vi.spyOn(sourceBuild, 'removeSourceJobContainer')
+      const reconcile = restarted.reconcileUnknown({ id: queued.id, owner: OWNER })
+      if (proof === 'quiescent') await expect(reconcile).resolves.toMatchObject({ status: 'failed', failureCode: 'source-job-resources-reconciled' })
+      else { await expect(reconcile).rejects.toThrow(); expect(f.store.getSourceJob(queued.id)).toEqual(unknown) }
+      if (proof !== 'absent') expect(inspect).toHaveBeenCalledWith(queued.id)
+      expect(f.prepare).not.toHaveBeenCalled()
+      expect(cleanup).not.toHaveBeenCalled()
+      const raw = new DatabaseSync(join(f.root, 'control.sqlite'))
+      try { expect(raw.prepare('SELECT submissions FROM source_job_authorities').get()).toEqual({ submissions: 1 }) }
+      finally { raw.close() }
+    } finally { await restarted?.close(); await f.runtime.close(); f.store.close() }
+  })
+
+  it('rejects a quiescence inspector attached to a different Linux build ledger', async () => {
+    const config = linuxSourceConfig(), inspect = vi.fn(async () => 'quiescent' as const)
+    const f = await fixture({ sourceBuild: config, inspectNativeQuiescence: inspect })
+    let restarted: SourceJobRuntime | undefined
+    try {
+      const queued = await f.enqueue(), frozen = f.store.getSourceJob(queued.id)!
+      f.store.claimSourceJob({ id: queued.id, revision: frozen.revision, definitionHash: frozen.definitionHash!, occurrenceId: 'linux-interrupted' })
+      await f.runtime.close()
+      config.stateRoot = '/different/ledger'
+      restarted = f.createRuntime(); restarted.start()
+      await expect(restarted.reconcileUnknown({ id: queued.id, owner: OWNER })).rejects.toThrow(/quiescence/)
+      expect(inspect).not.toHaveBeenCalled()
+      expect(f.store.getSourceJob(queued.id)?.status).toBe('unknown')
+      expect(f.prepare).not.toHaveBeenCalled()
+    } finally { await restarted?.close(); await f.runtime.close(); f.store.close() }
+  })
+
   it('rejects modification at the Host enqueue boundary when only creation is granted', async () => {
     const f = await fixture({ creation: true, allowedModes: ['create'] })
     try {
@@ -707,5 +788,56 @@ describe('durable source-job runtime', () => {
       expect(f.prepare).not.toHaveBeenCalled()
       await runtime.close()
     } finally { try { await f.runtime.close() } catch {} f.store.close() }
+  })
+})
+
+
+describe('Linux original-call negative proof fencing', () => {
+  it.each(['valid', 'plain', 'id', 'digest', 'revision', 'occurrence', 'generation'] as const)('accepts only the original owned claim: %s', async kind => {
+    const generation = {}, f = await fixture({ sourceBuild: linuxSourceConfig(), preflightGeneration: generation })
+    try {
+      f.prepare.mockImplementationOnce(async owned => {
+        const bound = { ...owned, ...(kind === 'id' ? { id: 'other' } : {}), ...(kind === 'digest' ? { intentDigest: hex('other') } : {}),
+          ...(kind === 'revision' ? { revision: owned.revision + 1 } : {}), ...(kind === 'occurrence' ? { occurrenceId: 'other' } : {}) }
+        throw kind === 'plain' ? new Error('Linux source preparation failed before execution admission')
+          : cleanedLinuxSourcePreflight(new Error('preflight failed after confirmed cleanup'), bound, kind === 'generation' ? {} : generation)
+      })
+      const queued = await f.enqueue(), active = f.activation(queued.id)
+      const outcome = await f.executor!.execute({ occurrenceId: 'preflight', automationId: queued.id, definitionHash: active.definitionHash,
+        executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
+        ownerRouteId: OWNER.ownerRouteId, activationNonce: active.activationNonce, catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
+      expect(outcome.outcome).toBe(kind === 'valid' ? 'failed' : 'unknown')
+      expect(f.store.getSourceJob(queued.id)?.status).toBe(kind === 'valid' ? 'failed' : 'unknown')
+    } finally { await f.runtime.close(); f.store.close() }
+  })
+
+  it('does not settle a newer running revision using an older claim proof', async () => {
+    const generation = {}, f = await fixture({ sourceBuild: linuxSourceConfig(), preflightGeneration: generation })
+    try {
+      f.prepare.mockImplementationOnce(async owned => {
+        const proof = cleanedLinuxSourcePreflight(new Error('preflight'), owned, generation)
+        const db = new DatabaseSync(join(f.root, 'control.sqlite'))
+        try { db.prepare('UPDATE source_jobs SET revision=revision+1 WHERE id=?').run(owned.id) } finally { db.close() }
+        throw proof
+      })
+      const queued = await f.enqueue(), active = f.activation(queued.id)
+      await f.executor!.execute({ occurrenceId: 'old-claim', automationId: queued.id, definitionHash: active.definitionHash,
+        executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
+        ownerRouteId: OWNER.ownerRouteId, activationNonce: active.activationNonce, catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
+      expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'running', occurrenceId: 'old-claim', revision: 4 })
+    } finally { await f.runtime.close(); f.store.close() }
+  })
+
+  it('does not mutate a running claim when claim acknowledgement was lost before ownership was recorded', async () => {
+    const f = await fixture(), original = f.store.claimSourceJob.bind(f.store)
+    try {
+      vi.spyOn(f.store, 'claimSourceJob').mockImplementationOnce(input => { original(input); throw new Error('claim acknowledgement lost') })
+      const queued = await f.enqueue(), active = f.activation(queued.id)
+      await f.executor!.execute({ occurrenceId: 'winner', automationId: queued.id, definitionHash: active.definitionHash,
+        executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
+        ownerRouteId: OWNER.ownerRouteId, activationNonce: active.activationNonce, catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
+      expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'running', occurrenceId: 'winner' })
+      expect(f.prepare).not.toHaveBeenCalled()
+    } finally { await f.runtime.close(); f.store.close() }
   })
 })

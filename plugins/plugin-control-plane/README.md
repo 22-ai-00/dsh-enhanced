@@ -200,7 +200,7 @@ schema 17 在成功启用前保存 `package.json`、`pnpm-lock.yaml`、`cordis.p
 
 `source-plan` / `scaffold` 只在 owner 审批的 linked、clean worktree 和固定 generator digest 上生成插件并运行 `pnpm check`。local checks 使用临时 Git index 对 exact scope 计算 staged tree/patch digest，不污染工作树的真实 index。owner 必须在 checks 之后为 exact source digests、scope 和 release policy 签发独立 authorization，随后才能执行 `release-start`。
 
-`prepareModifySourcePlan` 是另一条待审批修改路径：它只接受现有非保护插件树内的有界文件集，并用临时 Git index 生成精确 tree 后以 `git archive` stdin 传入 owner 配置的 Docker image。容器没有 Host bind mount、网络、特权或调用者环境，使用只读根、非 root UID、`cap-drop=ALL`、`no-new-privileges`、固定 CPU/内存/PID/tmpfs 限制和离线 `pnpm install --ignore-scripts`、`pnpm check`、`pnpm pack`。镜像必须由 registry manifest digest 或本地 image content ID 固定，并预热离线 pnpm store。控制面在持久化前重算 tree/patch digest；任意漂移、取消、超时或容器失败都会删除 worktree 而不创建计划。`.git`、`.gitattributes` 与 `.gitmodules` 不能通过该路径修改。
+`prepareModifySourcePlan` 是另一条待审批修改路径：它只接受现有非保护插件树内的有界文件集，并用临时 Git index 生成精确 tree。默认 Docker 后端以 `git archive` stdin 传入 owner 配置的镜像；显式 Linux 原生后端见下文。容器没有 Host bind mount、网络、特权或调用者环境，使用只读根、非 root UID、`cap-drop=ALL`、`no-new-privileges`、固定 CPU/内存/PID/tmpfs 限制和离线 `pnpm install --ignore-scripts`、`pnpm check`、`pnpm pack`。镜像必须由 registry manifest digest 或本地 image content ID 固定，并预热离线 pnpm store。控制面在持久化前重算 tree/patch digest；任意漂移、取消、超时或构建失败都会删除 worktree 而不创建计划。`.git`、`.gitattributes` 与 `.gitmodules` 不能通过该路径修改。
 
 `inspectSource` 只从当前 `HEAD` 的 Git objects 读取非保护插件的已跟踪普通文本文件；它不读取工作树。调用者可先请求空 `paths` 获得有界 manifest，再将返回的 `baseCommit` 用作读取和 `prepareModifySourcePlan.expectedBaseCommit` 的精确绑定。HEAD 已移动、二进制/生成/隐藏路径、symlink、submodule 或越界路径都会被拒绝。清单最多 1024 条，内容最多 64 个文件、单文件 64 KiB、合计 256 KiB；返回真实 blob 大小并支持普通可执行文本文件。整个读取请求从服务入口起受 15 秒截止时间控制；取消会终止正在运行的 Git 子进程，异步权限检查的迟到结果不再生效，Fiber 卸载等待请求收尾。
 
@@ -242,7 +242,23 @@ Host 可在调用源码检查时单独请求 `capturePack`，从同一次已核�
 
 普通 owner 失败触发的持久创建任务会自动捕获包，并在同一 SQLite 事务中保存字节、pending 计划和任务终态；旧计划与手工来源保持兼容，不因此获得验收资格。schema 30 的私有 BLOB 账本按 SHA-256 去重，限制 256 件、总计 128 MiB，读写均核对真实字节；额度耗尽拒绝提交，不丢弃在用制品。Host-only `inspectPreparedCreation(planId)` 在当前 owner 与 canonical writer fence 内返回绑定的计划、持久任务、真实 Delivery 来源和包；过期、纠正、换 owner、缺包或损坏均拒绝，不向模型状态工具返回正文。现有 Host/CLI 过期 worktree 维护在完成清理后回收 orphan 或仅被已过期计划引用的包；计划与摘要历史保留。这只提供独立观察的交接，创建计划仍不能走旧修改审批、发布或采用；独立验收与有限工具采用另见下文。
 
-### 持久源码检查任务（可选）
+### Linux 原生完整源码准备
+
+显式配置 `sourceBuild.backend: linux-native` 使用 `assistant-isolation` 的固定工具链、namespace/seccomp 与独立 worker/keeper cgroup，不调用 Docker。必须同时配置持久 `sourceJobs`；构建器与持久任务格式支持修改、创建及修订，并保留原有 owner、scope、基线、版本策略和次数预算。当前公开服务只接通修改及创建准备，已有工具的修订还依赖尚未接通的行为证书与已采用能力查询，不能通过配置绕过。运行时需要已经验证的 cgroup v1 委派；安装默认值和已有 owner 的自动迁移尚未接通。
+
+原生配置固定 `runtime`、`cgroupRoots`、私有 `stateRoot`、`authorityDigest`、`expiresAt`、`maxRuns` 和 `maxTotalDurationMs`。另需明确 `timeoutMs`、`outputBytes`、`memoryMiB`、`cpus`、`pidsLimit`、`workspaceMiB`、`temporaryMiB`、`workspaceInodes` 与 `temporaryInodes`；最大允许 30 分钟、16 GiB 内存、16 CPU、1024 PID、8 GiB workspace 和 4 GiB 临时目录。每次请求取调用方与配置 timeout 的较小值，不能扩大授权。
+
+完整系统工具环境可同时配置 `userNamespace` 与 `systemSnapshot`，选择 repository 执行合同 schema 3。前者绑定当前 Host owner、系统已分配的 subordinate UID/GID 和映射 helper 摘要；后者固定只读系统工具及库的内容与目录身份。运行时、快照和私有状态目录必须互不重叠，不能只提供其中一个字段。Lark 安装库的 `prepareLinuxRsiRepositoryRuntime` 在独立目录准备该环境及官方 Node 附带的 npm/npx，保留原 runtime 和源码回执；目前尚未接到安装默认流程。
+
+完整检查仍执行精确归档复核、全新 `pnpm install --offline --frozen-lockfile --ignore-scripts`、根 `pnpm check`、输入复核和包内容验证。固定的 Node、原生 pnpm、store/cache 来自只读 runtime；缓存复制到有界 workspace，pnpm 11 使用明确的 `pnpm_config_store_dir`。两遍归档必须匹配长度及 SHA-256，最多 64 MiB；存在有效 `export-subst` 的输入拒绝归档。Git 索引准备与归档子进程受同一取消信号控制。
+
+成功结果使用独立 schema 3 `linux-native-repository-v1` evidence，绑定工具链、执行合同、构建脚本、归档、私有收据及包摘要。最多 32 MiB 的二进制包经独立通道返回，只有执行成功、资源消失和内容复核都通过后才能保存计划。重复 source-job key 不重派命令；未知结果不改为成功，也不退还已用预算。Cordis 卸载先等待源码任务关闭，再关闭对应 runner。
+
+本次调用能证明尚未启动、且 Host 工作树和相关子进程已清理的失败，会自动结束为 `failed`，不再永久等待不存在的执行收据。证明绑定原任务 claim、运行代次及执行器；预算或存储准入拒绝还要求确认数据库回滚成功。最终状态写入前才消费证明，清理期间的执行器、数据库或同 key 调用变化会使其失效。历史缺失记录、工作树取得失败及无法证明辅助清理的异常仍为 `unknown`；该路径不退款、不重派，也不把缺少记录当作资源已消失。
+
+当前这条路径只交付完整源码准备与持久任务接线。Linux 行为证书、有限审批、发布和采用尚未接通；配置这些未完成的组合会明确拒绝启动。不能据此替换需要完整自迭代链的生产部署，亦不能把原生 evidence 当作旧 Docker/macOS 证书。
+
+### 持久源码检查任务（Docker 可选，Linux 原生必需）
 
 Growth Driver 设置 `pluginSourceProposals.preparationMode: durable` 后，`plugin_source_prepare` 只提交任务，`plugin_source_job_status` 回读当前 owner 的状态。控制面还必须配置独立于模型回合的有限 Host 授权：
 
@@ -260,7 +276,7 @@ sourceJobs:
   budgetAmount: 1
 ```
 
-还需安装兼容的 `assistant-delivery` 和 `assistant-automations` Host peers；后者显式开启现有 scheduler，Policy 允许该 scope 下的 `plugin-control-plane-source` reconcile 及对应后台任务 execute，并配置 `source-check-runs` 的 `automation-runs` 预算。此预算计源码检查和后续恢复轮次，不代表模型 token/费用预算；希望所有作业共享额度时用 Policy 的 `global` 或 `workspace` scope，`subject` 按 automation 分开计费。缺少 peer 或授权时不执行。`sourceBuild` 决定镜像和检查上限，模型不能改写队列权限、owner、路径或构建限制。
+还需安装兼容的 `assistant-delivery` 和 `assistant-automations` Host peers；后者显式开启现有 scheduler，Policy 允许该 scope 下的 `plugin-control-plane-source` reconcile 及对应后台任务 execute，并配置 `source-check-runs` 的 `automation-runs` 预算。此预算计源码检查和后续恢复轮次，不代表模型 token/费用预算；希望所有作业共享额度时用 Policy 的 `global` 或 `workspace` scope，`subject` 按 automation 分开计费。缺少 peer 或授权时不执行。`sourceBuild` 决定镜像或原生运行时及检查上限，模型不能改写队列权限、owner、路径或构建限制。
 
 任务先冻结完整 Delivery v2 回执、trust 摘要、gap revision/digest、read base、文件内容及构建配置，再以 **paused → 绑定规范化 definition hash → active** 注册到 Automations 的一次性 Host executor。源码只存控制面私有 SQLite；Automation definition 和模型状态投影不包含文件内容。相同 authority 的期限、配置和累计提交上限不可重置；同 key 不同内容拒绝。全账本同时最多一个 `queued/running/unknown` 任务。
 

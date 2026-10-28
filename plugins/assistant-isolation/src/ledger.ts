@@ -1,3 +1,4 @@
+import { markLinuxLedgerAdmissionRefusal } from './linux-repository-admission.js'
 import { validateGoalArtifactAdmission } from '@dsh-enhanced/task-acceptance-contract'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -133,7 +134,16 @@ export class IsolationLedger {
   readonly #database: DatabaseSync
   readonly #now: () => number
   constructor(path: string, { now = Date.now }: { now?: () => number } = {}) { this.#database = open(path); this.#now = now }
-  #transaction<T>(operation: () => T): T { this.#database.exec('BEGIN IMMEDIATE'); try { const value = operation(); this.#database.exec('COMMIT'); return value } catch (error) { try { this.#database.exec('ROLLBACK') } catch {}; throw error } }
+  #transaction<T>(operation: () => T, rolledBack?: (error: unknown) => void): T {
+    this.#database.exec('BEGIN IMMEDIATE')
+    try { const value = operation(); this.#database.exec('COMMIT'); return value }
+    catch (error) {
+      let confirmed = false
+      try { this.#database.exec('ROLLBACK'); confirmed = true } catch { /* Preserve the original failure. */ }
+      if (confirmed) { try { rolledBack?.(error) } catch { /* Evidence must never change the original API error. */ } }
+      throw error
+    }
+  }
   #nowValue(): number { const value = this.#now(); if (!safeTime(value)) fail('invalid-input', 'clock returned invalid time'); return value }
   #grant(id: string): GrantRow | undefined { return this.#database.prepare('SELECT * FROM isolation_grants WHERE id = ?').get(id) as GrantRow | undefined }
   #job(id: string): IsolationJob | undefined { const row = this.#database.prepare('SELECT * FROM isolation_jobs WHERE id = ?').get(id) as JobRow | undefined; return row ? this.#decodeJob(row) : undefined }
@@ -171,6 +181,11 @@ export class IsolationLedger {
         if (!/^[a-f0-9]{64}$/u.test(row.request_digest) || row.reserved_duration_ms > linuxContract.limits.maxDurationMs
           || row.reserved_memory_mib < linuxContract.limits.memoryMiB + linuxContract.limits.workspaceMiB + linuxContract.keeperLimits.memoryMiB
           || row.reserved_workspace_inodes < linuxContract.limits.workspaceInodes) fail('schema')
+        if (linuxContract.schemaVersion !== 1) {
+          const minimum = linuxJobResourceReservation(linuxContract)
+          if (row.reserved_memory_mib < minimum.memoryMiB || row.reserved_workspace_inodes < minimum.workspaceInodes
+            || row.reserved_storage_bytes < minimum.storageBytes) fail('schema')
+        }
         if (row.linux_intent_json !== null) {
           linuxIntent = validateLinuxExecutionIntent(JSON.parse(row.linux_intent_json), linuxContract)
           this.#bindLinuxIntent(row, linuxIntent, linuxContract)
@@ -179,7 +194,8 @@ export class IsolationLedger {
           if (!linuxIntent || !row.dispatch_attempted) fail('schema')
           linuxResources = validateLinuxExecutionResources(JSON.parse(row.linux_resources_json), linuxIntent, linuxContract)
         }
-        if (row.dispatch_attempted && !linuxIntent || row.status === 'running' && !linuxResources) fail('schema')
+        if (row.dispatch_attempted && !linuxIntent || row.status === 'running' && !linuxResources
+          || ['running', 'succeeded'].includes(row.status) && linuxResources?.schemaVersion === 2 && !linuxResources.userNamespace) fail('schema')
       } else if (row.linux_contract_json !== null || row.linux_intent_json !== null || row.linux_resources_json !== null) fail('schema')
     } catch { fail('schema', 'invalid persisted Linux execution binding') }
     let parsed: IsolationResult | undefined
@@ -192,7 +208,7 @@ export class IsolationLedger {
       || intent.nativeNonce !== row.native_nonce || intent.deadline !== row.deadline || row.reserved_duration_ms > contract.limits.maxDurationMs
       || row.reserved_memory_mib < contract.limits.memoryMiB + contract.limits.workspaceMiB + contract.keeperLimits.memoryMiB
       || row.reserved_workspace_inodes < contract.limits.workspaceInodes) fail('invalid-input', 'Linux intent differs from job reservation')
-    if (contract.schemaVersion === 2) {
+    if (contract.schemaVersion !== 1) {
       const minimum = linuxJobResourceReservation(contract)
       if (row.reserved_memory_mib < minimum.memoryMiB || row.reserved_workspace_inodes < minimum.workspaceInodes
         || row.reserved_storage_bytes < minimum.storageBytes) fail('invalid-input', 'Linux repository intent exceeds job reservation')
@@ -221,7 +237,7 @@ export class IsolationLedger {
         || input.durationMs > linuxContract.limits.maxDurationMs
         || input.resourceReservation.memoryMiB < linuxContract.limits.memoryMiB + linuxContract.limits.workspaceMiB + linuxContract.keeperLimits.memoryMiB
         || input.resourceReservation.workspaceInodes < linuxContract.limits.workspaceInodes) fail('invalid-input', 'Linux resources must be reserved')
-      if (linuxContract.schemaVersion === 2) {
+      if (linuxContract.schemaVersion !== 1) {
         const minimum = linuxJobResourceReservation(linuxContract)
         if (input.resourceReservation.memoryMiB < minimum.memoryMiB || input.resourceReservation.workspaceInodes < minimum.workspaceInodes
           || input.storageBudget.reservedBytes < minimum.storageBytes) fail('invalid-input', 'Linux repository resources must be reserved')
@@ -234,45 +250,59 @@ export class IsolationLedger {
     if (storage !== undefined && (!storage || typeof storage !== 'object' || !onlyKeys(storage, ['maxStateBytes', 'maxJobRecords', 'reservedBytes', 'observation']) || ![3, 4].includes(Object.keys(storage).length) || !safePositive(storage.maxStateBytes) || !safePositive(storage.maxJobRecords) || !safePositive(storage.reservedBytes) || (storage.observation !== undefined && (!storage.observation || typeof storage.observation !== 'object' || Object.keys(storage.observation).length !== 2 || !onlyKeys(storage.observation, ['bytes', 'observedAt']) || !safeTime(storage.observation.bytes) || !safeTime(storage.observation.observedAt))))) fail('invalid-input', 'invalid storage budget')
     const who = identity(input.identity); const controller = this.#authority(input.authority)
     if (input.backend === 'linux-native' && !controller) fail('invalid-input', 'Linux writes require controller authority')
+    let refusal: Error | undefined, insertAttempted = false
+    function refuse(code: IsolationLedgerErrorCode, message?: string): never { refusal = new IsolationLedgerError(code, message); throw refusal }
     return this.#transaction(() => { const now = this.#nowValue(); this.#requireController(controller, now); const existing = this.#database.prepare('SELECT * FROM isolation_jobs WHERE principal_digest=? AND principal_record_id=? AND principal_version=? AND workspace=? AND agent_preset=? AND session_id=? AND grant_id=? AND idempotency_key=?').get(who.principalDigest, who.principalRecordId, who.principalVersion, who.workspace, who.agentPreset, input.sessionId, input.grantId, input.idempotencyKey) as JobRow | undefined
       if (existing) { const job = this.#decodeJob(existing); if (job.requestDigest !== input.requestDigest || job.backend !== (input.backend ?? 'docker') || (linuxContract && linuxExecutionContractDigest(job.linuxContract!) !== linuxExecutionContractDigest(linuxContract))) fail('conflict', 'idempotency key has a different request or backend'); return { job, created: false } }
       const current = this.#grant(input.grantId)
-      if (!current || current.revoked || current.expires_at <= now || current.principal_digest !== who.principalDigest || current.principal_record_id !== who.principalRecordId || current.principal_version !== who.principalVersion || current.workspace !== who.workspace || current.agent_preset !== who.agentPreset) fail('unauthorized')
+      if (!current || current.revoked || current.expires_at <= now || current.principal_digest !== who.principalDigest || current.principal_record_id !== who.principalRecordId || current.principal_version !== who.principalVersion || current.workspace !== who.workspace || current.agent_preset !== who.agentPreset) refuse('unauthorized')
       if (input.maxActiveJobs !== undefined) {
         const active = this.#database.prepare("SELECT COUNT(*) AS count FROM isolation_jobs WHERE status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0)").get() as { count: number }
-        if (!safeTime(active.count) || active.count >= input.maxActiveJobs) fail('unauthorized', 'active isolation job limit reached')
+        if (!safeTime(active.count)) fail('unauthorized', 'active isolation job limit reached')
+        if (active.count >= input.maxActiveJobs) refuse('unauthorized', 'active isolation job limit reached')
       }
       const usage = this.#database.prepare('SELECT COUNT(*) AS runs, COALESCE(SUM(reserved_duration_ms), 0) AS duration FROM isolation_jobs WHERE grant_id=?').get(input.grantId) as { runs: number; duration: number }
-      if (!safeTime(usage.runs) || !safeTime(usage.duration) || usage.runs >= current.max_runs || input.durationMs > current.max_total_duration_ms || usage.duration > current.max_total_duration_ms - input.durationMs) fail('unauthorized', 'grant budget exhausted')
+      if (!safeTime(usage.runs) || !safeTime(usage.duration)) fail('unauthorized', 'grant budget exhausted')
+      if (usage.runs >= current.max_runs || input.durationMs > current.max_total_duration_ms || usage.duration > current.max_total_duration_ms - input.durationMs) refuse('unauthorized', 'grant budget exhausted')
       if (reservation) {
         const occupied = "status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0)"
         const legacy = this.#database.prepare(`SELECT COUNT(*) AS count FROM isolation_jobs WHERE (${occupied}) AND (reserved_memory_mib = 0 OR reserved_workspace_inodes = 0)`).get() as { count: number }
-        if (!safeTime(legacy.count) || legacy.count > 0) fail('unauthorized', 'active legacy job has no resource reservation')
+        if (!safeTime(legacy.count)) fail('unauthorized', 'active legacy job has no resource reservation')
+        if (legacy.count > 0) refuse('unauthorized', 'active legacy job has no resource reservation')
         const resources = this.#database.prepare(`SELECT COALESCE(SUM(reserved_memory_mib), 0) AS memory, COALESCE(SUM(reserved_workspace_inodes), 0) AS inodes FROM isolation_jobs WHERE ${occupied}`).get() as { memory: number; inodes: number }
-        if (!safeTime(resources.memory) || !safeTime(resources.inodes) || resources.memory > reservation.maxMemoryMiB - reservation.memoryMiB || resources.inodes > reservation.maxWorkspaceInodes - reservation.workspaceInodes) fail('unauthorized', 'isolation resource pool exhausted')
+        if (!safeTime(resources.memory) || !safeTime(resources.inodes)) fail('unauthorized', 'isolation resource pool exhausted')
+        if (resources.memory > reservation.maxMemoryMiB - reservation.memoryMiB || resources.inodes > reservation.maxWorkspaceInodes - reservation.workspaceInodes) refuse('unauthorized', 'isolation resource pool exhausted')
       }
       if (storage) {
         const observation = storage.observation
-        if (!observation) fail('unauthorized', 'storage observation unavailable')
-        if (observation.observedAt > now || now - observation.observedAt > 5_000) fail('invalid-input', 'storage observation is stale')
+        if (!observation) refuse('unauthorized', 'storage observation unavailable')
+        if (observation.observedAt > now || now - observation.observedAt > 5_000) refuse('invalid-input', 'storage observation is stale')
         const records = this.#database.prepare('SELECT COUNT(*) AS count FROM isolation_jobs').get() as { count: number }
-        if (!safeTime(records.count) || records.count >= storage.maxJobRecords) fail('unauthorized', 'isolation job record limit reached')
+        if (!safeTime(records.count)) fail('unauthorized', 'isolation job record limit reached')
+        if (records.count >= storage.maxJobRecords) refuse('unauthorized', 'isolation job record limit reached')
         const occupied = "status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0)"
         const legacy = this.#database.prepare(`SELECT COUNT(*) AS count FROM isolation_jobs WHERE (${occupied}) AND reserved_storage_bytes = 0`).get() as { count: number }
-        if (!safeTime(legacy.count) || legacy.count > 0) fail('unauthorized', 'active legacy job has no storage reservation')
+        if (!safeTime(legacy.count)) fail('unauthorized', 'active legacy job has no storage reservation')
+        if (legacy.count > 0) refuse('unauthorized', 'active legacy job has no storage reservation')
         const reservations = this.#database.prepare(`SELECT COALESCE(SUM(reserved_storage_bytes), 0) AS bytes FROM isolation_jobs WHERE ${occupied}`).get() as { bytes: number }
         if (!safeTime(reservations.bytes)) fail('schema')
         const reserved = reservations.bytes + storage.reservedBytes
         // SQLite reusable pages cannot cover staging growth outside the database.
         // Keep the whole future allocation even when that double-counts reusable space.
-        if (!safeTime(reserved) || observation.bytes > storage.maxStateBytes || reserved > storage.maxStateBytes - observation.bytes) fail('unauthorized', 'isolation storage budget exhausted')
+        if (!safeTime(reserved)) fail('unauthorized', 'isolation storage budget exhausted')
+        if (observation.bytes > storage.maxStateBytes || reserved > storage.maxStateBytes - observation.bytes) refuse('unauthorized', 'isolation storage budget exhausted')
       }
       const id = randomUUID(); const deadline = Math.min(now + input.durationMs, current.expires_at)
       const native = input.backend === 'macos-seatbelt' || input.backend === 'linux-native'
+      insertAttempted = true
       this.#database.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,backend_kind,native_resource_id,native_nonce,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,linux_contract_json,dispatch_attempted,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0, 'prepared',1,?,?)").run(id, input.grantId, current.revision, who.principalDigest, who.principalRecordId, who.principalVersion, who.workspace, who.agentPreset, input.sessionId, input.idempotencyKey, input.requestDigest, native ? null : `dsh-isolation-${id}`, input.backend ?? 'docker', native ? `${input.backend === 'linux-native' ? 'linux' : 'native'}-${id}` : null, input.backend === 'linux-native' ? randomBytes(16).toString('hex') : native ? randomUUID() : null, deadline, input.durationMs, reservation?.memoryMiB ?? 0, reservation?.workspaceInodes ?? 0, storage?.reservedBytes ?? 0, linuxContract ? JSON.stringify(linuxContract) : null, now, now)
       if (binding) this.#database.prepare('UPDATE isolation_jobs SET artifact_binding_json=? WHERE id=?').run(JSON.stringify(binding), id)
       this.#audit(now, 'job-prepared', id, input.grantId, `revision:${current.revision}${reservation ? `;reservation:memoryMiB:${reservation.memoryMiB},workspaceInodes:${reservation.workspaceInodes}` : ''}${storage ? `;storageBytes:${storage.reservedBytes}` : ''}`)
       return { job: this.#job(id)!, created: true }
+    }, error => {
+      if (input.backend === 'linux-native' && controller && !insertAttempted && error === refusal) {
+        markLinuxLedgerAdmissionRefusal(refusal!, { ledger: this, key: input.idempotencyKey, requestDigest: input.requestDigest, authority: controller })
+      }
     })
   }
   markLinuxCreateIntent(jobId: string, expectedVersion: number, intent: LinuxExecutionIntent, authority: IsolationControllerAuthority): IsolationJob {
@@ -329,6 +359,7 @@ export class IsolationLedger {
     if (!text(jobId) || !safePositive(expectedVersion)) fail('invalid-input')
     const controller = this.#authority(authority)
     return this.#transaction(() => { const now = this.#nowValue(); this.#requireController(controller, now); const job = this.#job(jobId); if (!job) fail('not-found'); if (job.version !== expectedVersion) fail('conflict', 'job version differs'); if (job.status !== 'prepared' || job.backend === 'linux-native' && (!controller || !job.dispatchAttempted || !job.linuxIntent || !job.linuxResources)) fail('invalid-state')
+      if (job.linuxResources?.schemaVersion === 2 && !job.linuxResources.userNamespace) fail('invalid-state', 'Linux namespace admission is missing')
       const current = this.#grant(job.grantId)
       if (!current || current.revoked || current.revision !== job.grantRevision || current.expires_at <= now || job.deadline <= now || current.principal_digest !== job.identity.principalDigest || current.principal_record_id !== job.identity.principalRecordId || current.principal_version !== job.identity.principalVersion || current.workspace !== job.identity.workspace || current.agent_preset !== job.identity.agentPreset) fail('unauthorized')
       const changed = this.#database.prepare("UPDATE isolation_jobs SET status='running', dispatch_attempted=1, version=version+1, updated_at=? WHERE id=? AND version=? AND status='prepared'").run(now, jobId, expectedVersion)
@@ -401,6 +432,7 @@ export class IsolationLedger {
     return this.#transaction(() => {
       const { job, binding: checked, now } = this.#linuxReceiptJob(jobId, expectedVersion, binding, controller)
       if (!['prepared', 'running'].includes(job.status)) fail('invalid-state', 'existing unknown requires reconciliation')
+      if (value.status === 'succeeded' && job.linuxResources?.schemaVersion === 2 && !job.linuxResources.userNamespace) fail('invalid-state', 'Linux namespace admission is missing')
       const changed = this.#database.prepare("UPDATE isolation_jobs SET status=?, result_json=?, version=version+1, updated_at=? WHERE id=? AND version=? AND status IN ('prepared','running')").run(value.status, JSON.stringify(value), now, jobId, expectedVersion)
       if (changed.changes !== 1) fail('conflict')
       this.#audit(now, 'linux-receipt-settled', jobId, job.grantId, JSON.stringify(checked))
