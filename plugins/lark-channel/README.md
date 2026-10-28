@@ -176,6 +176,8 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 
 ## 当前限制
 
+- 开发中的 Linux 原生工具链准备器 `prepareLinuxRsiRuntime` 可从摘要固定的官方 Node/pnpm 归档和冻结源码清单准备独立运行时，保留离线安装所需 store/cache。它使用私有目录、受限子进程及准备期 npm 网络下载，不读取模型凭据或运行依赖安装脚本；重复准备验证原收据和完整树摘要。当前尚未接入默认安装、owner 迁移或完整自迭代链，不能据此省略现有安装器的 Docker 要求。实施边界见[原生运行时](../../docs/dockerless-runtime.md)。
+
 - v0.1 支持文本、受限图片描述符、文本/Markdown-card 出站、durable proposal、owner-DM 一次性工具审批、模型/权限卡片、reaction 和原生进度；模型不能提交任意 card JSON，也不能直接控制 reaction 或进度载荷。
 - 只有图片资源具备受限下载能力，且依赖 AttachmentStore 与模型图片能力；文件、音频、视频和 sticker 只进入 metadata quarantine。没有病毒扫描、附件上传或消息编辑。
 - 单应用长连接是集群竞争消费，不提供广播、多节点 exactly-once 或断线历史补拉；目标部署是受 supervisor 管理的单机进程。
