@@ -3,7 +3,7 @@ import { chmod, cp, lstat, mkdir, readdir, realpath, rename, rm, writeFile } fro
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { rsiBuildResources as io, type RsiBuildEnvironment } from './rsi-build.js'
-import type { RsiReleaseBuildEnvironment } from './rsi-release-build.js'
+import type { PreparedReleaseBuildEnvironment } from './rsi-release-build.js'
 import type { RsiLocalCohort } from './rsi-local-cohort.js'
 import { readRsiLocalUpdateLocked } from './rsi-local-update.js'
 
@@ -64,7 +64,7 @@ function encode(body: object): string { return JSON.stringify({ ...body, receipt
 export async function stageRsiLocalUpdateResources(input: {
   logicalHome: string; stagePhysicalHome: string; profile: string; preparationRoot: string; signal?: AbortSignal
 }): Promise<{ cohort: RsiLocalCohort; sourceBuild: RsiBuildEnvironment;
-  releaseBuild: RsiReleaseBuildEnvironment; proof: RsiLocalResourceProof }> {
+  releaseBuild: PreparedReleaseBuildEnvironment; proof: RsiLocalResourceProof }> {
   const signal = AbortSignal.any([input.signal ?? new AbortController().signal, AbortSignal.timeout(600_000)])
   const { logicalHome, stagePhysicalHome, profile } = input
   if (!exact(logicalHome) || !exact(stagePhysicalHome) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(profile)
@@ -99,10 +99,10 @@ export async function stageRsiLocalUpdateResources(input: {
   } }
   const releaseRoot = join(logicalHome, kinds[2], profile)
   const oldReleaseRoot = join(prepared.candidateHome, kinds[2], profile)
-  const releaseBuild: RsiReleaseBuildEnvironment = { ...prepared.build.releaseBuild,
+  const releaseBuild: PreparedReleaseBuildEnvironment = { ...prepared.build.releaseBuild,
     releaseBuild: Object.fromEntries(Object.entries(prepared.build.releaseBuild.releaseBuild).map(([key, pin]) => [key,
       inside(oldReleaseRoot, pin.path) ? { ...pin, path: join(releaseRoot, relative(oldReleaseRoot, pin.path)) } : pin,
-    ])) as unknown as RsiReleaseBuildEnvironment['releaseBuild'] }
+    ])) as unknown as PreparedReleaseBuildEnvironment['releaseBuild'] }
   const releaseBody = receipt(await io.readStable(join(prepared.candidateHome, kinds[2], profile, 'bootstrap.json'), 65_536, true))
   const receipts: Record<Kind, { name: string; source: string }> = {
     'rsi-local-cohorts': { name: 'receipt.json', source: JSON.stringify(cohort) },
