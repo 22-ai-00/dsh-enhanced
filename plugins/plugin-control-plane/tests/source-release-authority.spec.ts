@@ -15,23 +15,64 @@ import { managedPatchVersionFiles } from '../src/source-versioning.ts'
 import { checkedSourceSnapshot } from '../src/source-workspace.ts'
 import { controlPlaneDigest, ControlPlaneStore, MODIFY_GENERATOR_DIGEST } from '../src/store.ts'
 import type { OwnerTaskFailureReference } from '../src/owner-task-gap-types.ts'
-import type { SourcePreparedEvidence } from '../src/types.ts'
+import type { LinuxSourcePreparedEvidence, SourcePreparedEvidence } from '../src/types.ts'
+import type { SourceJobIntent, SourceJobRecord } from '../src/source-job-types.ts'
+import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 
-const roots: string[] = []; const stores: ControlPlaneStore[] = []; const env = { PATH: process.env.PATH!, LANG: 'C', LC_ALL: 'C' }; const hex = (c: string) => c.repeat(64)
+const roots: string[] = []; const stores: ControlPlaneStore[] = []; const env = { PATH: process.env.PATH!, LANG: 'C', LC_ALL: 'C' }
+const hex = (c: string) => c.repeat(64)
+const digest = (value: string) => createHash('sha256').update(value).digest('hex')
 const localTest = process.platform === 'linux' ? test : test.skip
 afterEach(async () => { for (const store of stores.splice(0)) store.close(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 function owner(): OwnerTaskFailureReference { return { schemaVersion: 1, owner: { receiptVersion: 2, authorityId: 'owner', authorityHash: hex('a'), principalId: 'principal', principalRecordId: 'record', principalVersion: 1, workspace: '/workspace', agentPreset: 'default', bindingVersion: 1, generation: 1 }, outcomeId: 'outcome', projection: { subjectKind: 'foreground-turn', subjectRef: 'turn', version: 1, digest: hex('b'), disposition: 'upsert' }, sourceDigest: hex('c') } }
 
-async function fixture(ready = true) {
-  const root = await mkdtemp(join(await realpath(tmpdir()), 'source-release-authority-')); roots.push(root); const repository = join(root, 'repo'); const plugin = join(repository, 'plugins', 'health-helper'); const worktreeRoot = join(root, 'worktrees'); const worktree = join(worktreeRoot, 'prepared')
+async function fixture(ready = true, backend: 'docker' | 'linux-native' = 'docker') {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'source-release-authority-')); roots.push(root); const repository = join(root, 'repo'); const plugin = join(repository, 'plugins', 'health-helper'); const worktreeRoot = join(root, 'worktrees')
+  // Native jobs pin the worktree basename to worktree-job-<job-id-digest>;
+  // claimJob derives the same token from suffix 'one' below.
+  const worktreeToken = createHash('sha256').update('one').digest('hex')
+  const worktree = join(worktreeRoot, backend === 'linux-native' ? `worktree-job-${worktreeToken}` : 'prepared')
   await mkdir(join(plugin, 'src'), { recursive: true, mode: 0o700 }); const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: repository, env, encoding: 'utf8' }).trim()
   await writeFile(join(plugin, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/health-helper', version: '0.1.0', dsh: { bundle: { patch: './cordis.patch.yml' } }, scripts: { build: 'tsc' } }, null, 2) + '\n', { mode: 0o600 }); await writeFile(join(plugin, 'src/version.ts'), "export const version = '0.1.0'\n", { mode: 0o600 }); await writeFile(join(plugin, 'src/tool.ts'), 'export const value = 1\n', { mode: 0o600 })
   git('init', '-q'); git('config', 'user.email', 'tests@example.invalid'); git('config', 'user.name', 'Tests'); git('add', '.'); git('commit', '-qm', 'base'); const baseCommit = git('rev-parse', 'HEAD'); await mkdir(worktreeRoot, { mode: 0o700 }); git('worktree', 'add', '--detach', worktree, baseCommit); await chmod(worktree, 0o700)
   const version = await managedPatchVersionFiles({ worktree, baseCommit, name: 'health-helper', environment: env }); for (const file of version.files) await writeFile(join(worktree, 'plugins/health-helper', file.path), file.content, { mode: 0o600 }); await writeFile(join(worktree, 'plugins/health-helper/src/tool.ts'), 'export const value = 2\n', { mode: 0o600 })
   const now = Date.now(); const controlDatabasePath = join(root, 'control.sqlite'); const store = new ControlPlaneStore({ path: controlDatabasePath, now: () => now }); stores.push(store); const key = generateKeyPairSync('ed25519'); const keyPath = join(root, 'key.pem'); await writeFile(keyPath, key.privateKey.export({ format: 'pem', type: 'pkcs8' }), { mode: 0o600 }); await chmod(keyPath, 0o600)
   const source = owner(); const gap = store.recordOwnerTaskFailureGap(source); const snapshot = await checkedSourceSnapshot(worktree, baseCommit, ['plugins/health-helper'], env)
-  const prepared: SourcePreparedEvidence = { schemaVersion: 1, kind: 'dsh-source-prepared-evidence', environment: { npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true, nodeVersion: 'v24', pnpmVersion: '11' }, commands: [{ command: 'docker', args: ['run', '-i', '--pull', 'never', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--user', '65534:65534', '--env', 'PLUGIN_ROOT=plugins/health-helper', '--entrypoint', '/bin/sh', 'sha256:image', '-ceu', PREPARED_SOURCE_BUILD_SCRIPT], exitCode: 0, durationMs: 1, logDigest: hex('d') }], pack: { name: 'health-helper.tgz', version: version.version, sizeBytes: 1, sha256: hex('e') }, preparedAt: now }
-  const plan = store.withOwnerTaskFailureGapAdmission(gap.id, () => store.createSourcePlan({ gapId: gap.id, repository, worktree, baseCommit, name: 'health-helper', generatorDigest: MODIFY_GENERATOR_DIGEST, scope: ['plugins/health-helper'], mode: 'modify', ttlMs: 120_000, idempotencyKey: 'release-authority', prepared: { treeDigest: snapshot.checkedTreeDigest, patchDigest: snapshot.checkedPatchDigest, checkedAt: now, evidence: prepared } }).result)
+  const dockerPrepared: SourcePreparedEvidence = { schemaVersion: 1, kind: 'dsh-source-prepared-evidence', environment: { npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true, nodeVersion: 'v24', pnpmVersion: '11' }, commands: [{ command: 'docker', args: ['run', '-i', '--pull', 'never', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--user', '65534:65534', '--env', 'PLUGIN_ROOT=plugins/health-helper', '--entrypoint', '/bin/sh', 'sha256:image', '-ceu', PREPARED_SOURCE_BUILD_SCRIPT], exitCode: 0, durationMs: 1, logDigest: hex('d') }], pack: { name: 'health-helper.tgz', version: version.version, sizeBytes: 1, sha256: hex('e') }, preparedAt: now }
+  const linuxPrepared = (): LinuxSourcePreparedEvidence => ({ schemaVersion: 3, kind: 'dsh-source-prepared-evidence', boundary: 'linux-native-repository-v1',
+    runtimeDigest: digest('linux-runtime'), executionContractDigest: digest('linux-execution-contract'), buildScriptSha256: digest('linux-build-script'), archive: { sizeBytes: 10240, sha256: digest('linux-archive') },
+    receipt: { requestDigest: digest('linux-request'), nativeNonce: 'b'.repeat(32), nativeResourceId: 'linux-11111111-1111-4111-8111-111111111111',
+      intentDigest: digest('linux-intent'), resourcesDigest: digest('linux-resources'), receiptDigest: digest('linux-receipt') },
+    environment: { npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true, nodeVersion: 'v22.23.2', pnpmVersion: '11.7.0' },
+    checks: ['source-archive-integrity', 'frozen-offline-install', 'repository-pnpm-check', 'source-input-recheck', 'package-integrity'],
+    pack: { name: 'health-helper.tgz', version: version.version, sizeBytes: 1, sha256: digest('linux-pack') }, logDigest: digest('linux-log'), durationMs: 1, preparedAt: now })
+  const prepared: SourcePreparedEvidence = backend === 'linux-native' ? linuxPrepared() : dockerPrepared
+  type GapRecord = ReturnType<ControlPlaneStore['recordOwnerTaskFailureGap']>
+  const claimJob = (targetGap: GapRecord, suffix: string): SourceJobRecord | undefined => {
+    if (backend !== 'linux-native') return undefined
+    const jobId = `source-job-${createHash('sha256').update(suffix).digest('hex')}`
+    const intent: SourceJobIntent = {
+      authority: { id: 'source-grant', digest: digest('source-grant'), expiresAt: now + 600_000, maxSubmissions: 2 },
+      owner: { receiptVersion: 2, authorityId: source.owner.authorityId, authorityHash: source.owner.authorityHash,
+        principalId: source.owner.principalId, principalRecordId: source.owner.principalRecordId, principalVersion: source.owner.principalVersion,
+        workspace: source.owner.workspace, agentPreset: source.owner.agentPreset, bindingVersion: source.owner.bindingVersion, generation: source.owner.generation },
+      ownerDigest: controlPlaneDigest(source.owner), trustDigest: digest('source-trust'),
+      repository, name: 'health-helper', gapId: targetGap.id, gapRevision: targetGap.revision, gapDigest: controlPlaneDigest(targetGap),
+      baseCommit, files: [{ path: 'plugins/health-helper/src/tool.ts', content: 'export const value = 2\n' }],
+      ttlMs: 120_000, build: { ...linuxSourceConfig(), expiresAt: now + 600_000 },
+      worktree, nativeResource: { backend: 'linux-native', key: jobId } }
+    let running: SourceJobRecord | undefined
+    store.withOwnerTaskFailureGapAdmission(targetGap.id, () => {
+      const queued = store.enqueueSourceJob({ id: jobId, automationId: jobId, idempotencyKey: `linux-job-${suffix}`, intent })
+      const bound = store.bindSourceJobDefinition({ id: jobId, revision: queued.revision, definitionHash: digest('definition') })
+      running = store.claimSourceJob({ id: jobId, revision: bound.revision, definitionHash: digest('definition'), occurrenceId: 'occurrence' })
+    })
+    return running
+  }
+  const runningJob = claimJob(gap, 'one')
+  const plan = store.withOwnerTaskFailureGapAdmission(gap.id, () => store.createSourcePlan({ gapId: gap.id, repository, worktree, baseCommit, name: 'health-helper', generatorDigest: MODIFY_GENERATOR_DIGEST, scope: ['plugins/health-helper'], mode: 'modify', ttlMs: 120_000, idempotencyKey: 'release-authority',
+    ...(runningJob ? { sourceJob: { jobId: runningJob.id, jobRevision: runningJob.revision, occurrenceId: runningJob.occurrenceId! } } : {}),
+    prepared: { treeDigest: snapshot.checkedTreeDigest, patchDigest: snapshot.checkedPatchDigest, checkedAt: now, evidence: prepared } }).result)
   const common = { id: 'grant', expiresAt: now + 60_000, repository, worktreeRoot, owner: { authorityId: source.owner.authorityId, authorityHash: source.owner.authorityHash, principalId: source.owner.principalId, principalRecordId: source.owner.principalRecordId, principalVersion: source.owner.principalVersion, workspace: source.owner.workspace, agentPreset: source.owner.agentPreset }, plugins: ['health-helper'], maxChangedFiles: 8, maxChangedBytes: 4096, receiptTtlMs: 30_000, versioning: 'patch' as const }
   const approval: SourceApprovalAuthorityConfig = { schemaVersion: 1, authority: 'approval', keyId: 'key', keyPath, statePath: join(root, 'approval.sqlite'), controlDatabasePath, grant: { ...common, maxApprovals: 2 } }
   const approvalRequest = { protocol: 'dsh-source-approval/v1' as const, planId: plan.id, planDigest: plan.digest, sourceReferenceDigest: controlPlaneDigest(source) }
@@ -46,8 +87,10 @@ async function fixture(ready = true) {
   const second = async () => {
     const secondSource = { ...source, outcomeId: 'outcome-two', projection: { ...source.projection, subjectRef: 'turn-two' } }
     const secondGap = store.recordOwnerTaskFailureGap(secondSource)
+    const secondJob = claimJob(secondGap, 'two')
     const candidate = store.withOwnerTaskFailureGapAdmission(secondGap.id, () => store.createSourcePlan({ gapId: secondGap.id, repository, worktree, baseCommit,
       name: 'health-helper', generatorDigest: MODIFY_GENERATOR_DIGEST, scope: ['plugins/health-helper'], mode: 'modify', ttlMs: 120_000,
+      ...(secondJob ? { sourceJob: { jobId: secondJob.id, jobRevision: secondJob.revision, occurrenceId: secondJob.occurrenceId! } } : {}),
       idempotencyKey: 'release-authority-two', prepared: { treeDigest: snapshot.checkedTreeDigest, patchDigest: snapshot.checkedPatchDigest, checkedAt: now, evidence: prepared } }).result)
     const request = { protocol: 'dsh-source-approval/v1' as const, planId: candidate.id, planDigest: candidate.digest, sourceReferenceDigest: controlPlaneDigest(secondSource) }
     const signed = await authorizePreparedSource(approval, request)
@@ -63,6 +106,14 @@ async function fixture(ready = true) {
 localTest('signs exactly one ready owner source release and replays the immutable authorization', async () => {
   const f = await fixture(); const authorization = await authorizePreparedSourceRelease(f.release, f.request); const replay = await authorizePreparedSourceRelease(f.release, f.request)
   expect(replay).toEqual(authorization); expect(authorization.releasePolicy).toMatchObject({ packageVersion: '0.1.1', packageName: '@dsh-enhanced/health-helper', registryReference: expect.stringContaining('/packages/%2540dsh-enhanced%252Fhealth-helper/0.1.1/package.tgz') })
+  const verifier = new Ed25519SourceReleaseAuthorizationAuthority(f.key.publicKey.export({ format: 'pem', type: 'spki' }), 'release', 'key', () => Date.now())
+  await expect(verifier.verify(authorization, f.plan)).resolves.toMatchObject({ planId: f.plan.id })
+})
+
+localTest('authorizes a linux-native schema3 ready plan for release without any Docker evidence', async () => {
+  const f = await fixture(true, 'linux-native')
+  const authorization = await authorizePreparedSourceRelease(f.release, f.request)
+  expect(authorization.releasePolicy).toMatchObject({ packageVersion: f.version.version, packageName: '@dsh-enhanced/health-helper' })
   const verifier = new Ed25519SourceReleaseAuthorizationAuthority(f.key.publicKey.export({ format: 'pem', type: 'spki' }), 'release', 'key', () => Date.now())
   await expect(verifier.verify(authorization, f.plan)).resolves.toMatchObject({ planId: f.plan.id })
 })

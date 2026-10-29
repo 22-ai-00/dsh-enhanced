@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
@@ -43,7 +43,7 @@ test('rejects an unbudgeted coordinator and a source adoption chain without rele
   expect(existsSync(base.statePath)).toBe(false)
 })
 
-test.skipIf(process.platform !== 'linux')('admits durable Linux modify preparation without activating unfinished authority lanes', async () => {
+test.skipIf(process.platform !== 'linux')('admits durable Linux modify preparation and the connected source release and adoption lanes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cp-linux-deployment-config-')); roots.push(root)
   const base = { catalogPath: join(root, 'catalog.json'), trustPath: join(root, 'trust.json'), statePath: join(root, 'state') }
   const sourceBuild = { ...linuxSourceConfig(), stateRoot: join(root, 'repository-jobs') }
@@ -54,9 +54,17 @@ test.skipIf(process.platform !== 'linux')('admits durable Linux modify preparati
   const config = normalizeControlPlaneConfig({ ...base, sourceBuild, sourceJobs: { ...sourceJobs, allowedModes: ['modify'] } })
   expect(config.sourceBuild).toEqual(sourceBuild)
   expect(config.sourceJobs?.allowedModes).toEqual(['modify'])
-  for (const field of ['sourceReleases', 'sourceReleaseExecution', 'sourceAdoptions']) {
-    expect(() => normalizeControlPlaneConfig({ ...config, [field]: {} })).toThrow('not yet connected to source release and adoption authorities')
-  }
+  const approvalAuthority = { executable: { path: '/bin/true', sha256: 'a'.repeat(64) },
+    configPath: join(root, 'source-authority.json'), timeoutMs: 1_000 }
+  // Empty lane objects reach each lane's own validator instead of a backend placeholder refusal.
+  expect(() => normalizeControlPlaneConfig({ ...config, sourceReleases: {} as never })).toThrow('unknown or missing fields')
+  expect(() => normalizeControlPlaneConfig({ ...config, sourceReleaseExecution: {} as never })).toThrow('invalid sourceReleaseExecution config')
+  expect(() => normalizeControlPlaneConfig({ ...config, sourceAdoptions: {} as never })).toThrow('invalid source adoption config')
+  // The generic chain gates remain backend-independent: releases need approvals plus Host patch versioning.
+  expect(() => normalizeControlPlaneConfig({ ...config, sourceReleases: approvalAuthority }))
+    .toThrow('sourceReleases requires sourceApprovals and Host patch versioning')
+  expect(() => normalizeControlPlaneConfig({ ...config, sourceBuild: { ...sourceBuild, versioning: 'patch' as const },
+    sourceReleases: approvalAuthority })).toThrow('sourceReleases requires sourceApprovals and Host patch versioning')
   for (const field of ['revisionVerifications', 'revisionRegressions']) {
     expect(() => normalizeControlPlaneConfig({ ...config, [field]: {} })).toThrow('dual-UID repository boundary')
   }
@@ -68,8 +76,20 @@ test.skipIf(process.platform !== 'linux')('admits durable Linux modify preparati
     .toThrow('regression requires independently configured review and retained parent source')
   expect(() => normalizeControlPlaneConfig({ ...config, creationCapabilities: {} as never })).toThrow('requires the dual-UID repository boundary')
   expect(() => normalizeControlPlaneConfig({ ...config, creationVerifications: {} as never })).toThrow('requires the dual-UID repository boundary')
+  // The full approval → release → execution → adoption chain normalizes on the linux-native modify boundary.
+  const reviewRoot = join(root, 'review-decisions'); await mkdir(reviewRoot, { mode: 0o700 })
+  const chained = normalizeControlPlaneConfig({ catalogPath: join(root, 'catalog-chain.json'), trustPath: join(root, 'trust-chain.json'),
+    statePath: join(root, 'state-chain'), sourceBuild: { ...sourceBuild, versioning: 'patch' as const }, sourceJobs,
+    sourceApprovals: approvalAuthority, sourceReleases: approvalAuthority,
+    sourceReleaseExecution: { reviewDecisionRoot: reviewRoot, timeoutMs: 60_000 },
+    sourceAdoptions: { profile: 'primary', planTtlMs: 60_000, timeoutMs: 1_000, authority: approvalAuthority } })
+  expect(chained.sourceApprovals).toEqual(approvalAuthority)
+  expect(chained.sourceReleases).toEqual(approvalAuthority)
+  expect(chained.sourceReleaseExecution).toMatchObject({ reviewDecisionRoot: reviewRoot, timeoutMs: 60_000 })
+  expect(chained.sourceAdoptions).toMatchObject({ profile: 'primary' })
   expect(existsSync(base.statePath)).toBe(false)
   expect(existsSync(sourceBuild.stateRoot)).toBe(false)
+  expect(existsSync(join(root, 'state-chain'))).toBe(false)
 })
 
 test.skipIf(process.platform !== 'linux' || !process.getuid?.())('normalizes paired repository identities synchronously without acquiring runtime resources', async () => {

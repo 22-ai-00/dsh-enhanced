@@ -212,9 +212,6 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
       && (!config.sourceBuild.userNamespace || !config.sourceBuild.systemSnapshot)) {
       throw new Error('plugin-control-plane: Linux independent verification requires the dual-UID repository boundary')
     }
-    if (config.sourceApprovals || config.sourceReleases || config.sourceReleaseExecution || config.sourceAdoptions) {
-      throw new Error('plugin-control-plane: Linux repository preparation is not yet connected to source release and adoption authorities')
-    }
   }
   if (config.sourceReleases !== undefined) {
     validateSourceReleaseClientConfig(config.sourceReleases)

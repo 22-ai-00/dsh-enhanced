@@ -244,7 +244,7 @@ Host 可在调用源码检查时单独请求 `capturePack`，从同一次已核�
 
 ### Linux 原生完整源码准备
 
-显式配置 `sourceBuild.backend: linux-native` 使用 `assistant-isolation` 的固定工具链、namespace/seccomp 与独立 worker/keeper cgroup，不调用 Docker。必须同时配置持久 `sourceJobs`；构建器与持久任务格式支持修改、创建及修订，并保留原有 owner、scope、基线、版本策略和次数预算。当前公开服务只接通修改及创建准备，已有工具的修订还依赖尚未接通的行为证书与已采用能力查询，不能通过配置绕过。运行时需要已经验证的 cgroup v1 委派；安装默认值和已有 owner 的自动迁移尚未接通。
+显式配置 `sourceBuild.backend: linux-native` 使用 `assistant-isolation` 的固定工具链、namespace/seccomp 与独立 worker/keeper cgroup，不调用 Docker。必须同时配置持久 `sourceJobs`；构建器与持久任务格式支持修改、创建及修订，并保留原有 owner、scope、基线、版本策略和次数预算。修改准备、创建准备、已有工具的修订 v2 及配对回归均已接通；修改计划的源码审批、发布与源码发布采用在同一 linux-native 边界接通（见下节）。运行时需要已经验证的 cgroup v1 委派；无 Docker 安装默认值和已有 owner 的保权自动迁移尚未接通。
 
 原生配置固定 `runtime`、`cgroupRoots`、私有 `stateRoot`、`authorityDigest`、`expiresAt`、`maxRuns` 和 `maxTotalDurationMs`。另需明确 `timeoutMs`、`outputBytes`、`memoryMiB`、`cpus`、`pidsLimit`、`workspaceMiB`、`temporaryMiB`、`workspaceInodes` 与 `temporaryInodes`；最大允许 30 分钟、16 GiB 内存、16 CPU、1024 PID、8 GiB workspace 和 4 GiB 临时目录。每次请求取调用方与配置 timeout 的较小值，不能扩大授权。
 
@@ -258,7 +258,7 @@ Host 可在调用源码检查时单独请求 `capturePack`，从同一次已核�
 
 Linux 创建准备可接通独立 `creationVerifications`，必须同时配置双 UID 的 `userNamespace` 与 `systemSnapshot`。Host 私有 `inspectPreparedCreationLinuxBuild` 只读原任务的成功收据、真实包和资源消失证明，并核对当前 owner、信任配置、固定运行时与完整构建 evidence；缺证、未知结果或漂移均拒绝，不重派构建。v3 证书在写入及读回时再次绑定 schema 3 构建证据、基底和不可变计划，不能用旧 Docker/macOS 证书替代。普通 schema 2 原生准备与历史读取保持兼容，但不能据此取得新的 v3 签名。
 
-Linux 创建证书可接下述有限动态采用，构建和采用后端必须一致。已有插件修订验收、源码审批、发布及源码发布采用尚未接通；配置这些未完成的组合会明确拒绝启动。动态工具采用不改变源码计划的 `pending-approval`，不能据此替换需要完整自迭代链的生产部署。
+Linux 创建证书可接下述有限动态采用，构建和采用后端必须一致。linux-native 边界现已接通对已有插件的修改链：修订 v2 与配对回归 v2，以及修改计划的源码审批、发布与源码发布采用均消费同一份 schema 3 仓库准备 evidence，不再要求任何 Docker 命令证据；schema 2 macOS 单进程证据永远不能支撑全仓修改。尚未接通的是无 Docker 全新安装默认值、docker→linux-native 保权迁移与进程内热加载；配置后端不支持的组合（如 macOS 全仓修改、linux-native 缺持久 sourceJobs 或双 UID、跨采用链缺上游环节）仍会明确拒绝启动。动态工具采用不改变源码计划的 `pending-approval`，不能据此替换需要完整自迭代链的生产部署。
 
 ### 持久源码检查任务（Docker 可选，Linux 原生必需）
 

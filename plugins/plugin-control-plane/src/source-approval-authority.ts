@@ -169,14 +169,30 @@ export function validateSourceApprovalAuthorityConfig(value: unknown): asserts v
 }
 
 export function sourceAuthorityValidatePrepared(plan: PluginSourcePlan, now: number, status: PluginSourcePlan['status'] = 'pending-approval'): void {
-  if (plan.status !== status || plan.mode !== 'modify' || plan.sourceCheck === undefined || plan.preparedEvidence === undefined
-    || plan.preparedEvidence.schemaVersion !== 1
-    || now > plan.expiresAt || plan.preparedEvidence.preparedAt > plan.sourceCheck.checkedAt || plan.sourceCheck.checkedAt > plan.createdAt
-    || plan.preparedEvidence.preparedAt > now || plan.preparedEvidence.environment.npmConfigIgnoreScripts !== true
-    || plan.preparedEvidence.environment.frozenLockfile !== true || plan.preparedEvidence.environment.offline !== true
-    || plan.preparedEvidence.commands.length !== 1)
+  const evidence = plan.preparedEvidence
+  if (plan.status !== status || plan.mode !== 'modify' || plan.sourceCheck === undefined || evidence === undefined
+    || now > plan.expiresAt || evidence.preparedAt > plan.sourceCheck.checkedAt || plan.sourceCheck.checkedAt > plan.createdAt
+    || evidence.preparedAt > now)
     fail()
-  const command = plan.preparedEvidence.commands[0]!
+  if (evidence.schemaVersion === 3) {
+    // Linux native repository preparation is proven by its own pinned check
+    // sequence under linux-native-repository-v1; there is no Docker command
+    // line to pin. The private native receipt binding was verified by the
+    // prepare runner and is structurally revalidated when the control database
+    // is independently reopened.
+    const checks = ['source-archive-integrity', 'frozen-offline-install', 'repository-pnpm-check', 'source-input-recheck', 'package-integrity'] as const
+    if (evidence.boundary !== 'linux-native-repository-v1'
+      || evidence.environment.npmConfigIgnoreScripts !== true || evidence.environment.frozenLockfile !== true || evidence.environment.offline !== true
+      || evidence.checks.length !== checks.length || checks.some((check, index) => evidence.checks[index] !== check)) fail()
+    return
+  }
+  // The macOS single-process schema can never back a full-repository modify plan.
+  if (evidence.schemaVersion === 2) fail()
+  if (evidence.environment.npmConfigIgnoreScripts !== true
+    || evidence.environment.frozenLockfile !== true || evidence.environment.offline !== true
+    || evidence.commands.length !== 1)
+    fail()
+  const command = evidence.commands[0]!
   const pairs = (left: string, right: string): boolean => command.args.some((value, index) => value === left && command.args[index + 1] === right)
   if (command.command !== 'docker' || command.args[0] !== 'run' || command.args[1] !== '-i' || command.args[2] !== '--pull'
     || command.args[3] !== 'never' || !pairs('--network', 'none') || !command.args.includes('--read-only')
