@@ -513,9 +513,10 @@ it.skipIf(process.platform !== 'linux' || !process.getuid?.())('preflights match
     timeoutMs: 60_000, versioning: 'patch', memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 }
   expect(() => normalizeControlPlaneConfig({ ...f.config, sourceBuild: dockerBuild })).toThrow(/matching execution backends/)
   expect(() => normalizeControlPlaneConfig({ ...f.config,
-    revisionVerifications: { authority: f.revisionAuthority, publicKey: f.publicKey } })).toThrow(/not yet connected to revision and release/)
+    revisionVerifications: { authority: f.revisionAuthority, publicKey: f.publicKey } }))
+    .toThrow(/revision verification requires its separate finite grant/)
   expect(() => normalizeControlPlaneConfig({ ...f.config, sourceAdoptions: {} as NonNullable<Config['sourceAdoptions']> }))
-    .toThrow(/not yet connected to revision and release/)
+    .toThrow(/not yet connected to source release and adoption authorities/)
 })
 
 it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['protocol', 'build-runtime', 'build-evidence'] as const)(

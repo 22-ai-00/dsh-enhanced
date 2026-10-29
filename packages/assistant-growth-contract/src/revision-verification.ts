@@ -1,7 +1,7 @@
 import { createPublicKey, verify } from 'node:crypto'
 import { canonicalGrowthJson } from './canonical.js'
 import { validatePluginCreationVerificationCertificate,
-  type PluginCreationVerificationCertificate } from './creation-verification.js'
+  type PluginCreationVerificationCertificate, type PluginCreationVerificationLinuxExecution } from './creation-verification.js'
 
 /** Owner policy frozen before a revision candidate can be written. */
 export interface RevisionAcceptanceAuthorityRef {
@@ -22,11 +22,19 @@ export interface PluginRevisionParentBinding {
   sourceDigest: string
 }
 
-export type PluginRevisionVerificationCertificate = Omit<PluginCreationVerificationCertificate, 'protocol' | 'authority'> & {
-  protocol: 'assistant-growth/revision-verification/v1'
-  authority: RevisionAcceptanceAuthorityRef
-  parent: PluginRevisionParentBinding
-}
+export type PluginRevisionVerificationCertificate =
+  Omit<PluginCreationVerificationCertificate, 'protocol' | 'authority' | 'execution'> & {
+    protocol: 'assistant-growth/revision-verification/v1' | 'assistant-growth/revision-verification/v2'
+    authority: RevisionAcceptanceAuthorityRef
+    parent: PluginRevisionParentBinding
+    /** Required exactly for v2 with the Linux native boundary; rejected for v1. */
+    execution?: PluginCreationVerificationLinuxExecution
+  }
+
+export type PluginRevisionVerificationCertificateV1 = PluginRevisionVerificationCertificate &
+  { protocol: 'assistant-growth/revision-verification/v1'; execution?: never }
+export type PluginRevisionVerificationCertificateV2 = PluginRevisionVerificationCertificate &
+  { protocol: 'assistant-growth/revision-verification/v2'; execution: PluginCreationVerificationLinuxExecution }
 
 /** Host-only request; the producer must reread the current parent and candidate. */
 export interface PluginRevisionVerificationRequest {
@@ -38,11 +46,17 @@ export type PluginRevisionVerificationResult =
   | { status: 'verified'; certificate: PluginRevisionVerificationCertificate }
   | { status: 'rejected' | 'unknown'; reason: string }
 
-const domain = 'assistant-growth/revision-verification/v1\0'
+const domainV1 = 'assistant-growth/revision-verification/v1\0'
+const domainV2 = 'assistant-growth/revision-verification/v2\0'
 const digest = /^[a-f0-9]{64}$/u
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u
 const certificateKeys = ['protocol', 'verificationId', 'authority', 'plan', 'parent', 'source', 'contractDigest',
   'schemaDigest', 'environment', 'model', 'budget', 'sessions', 'observations', 'reviewDigest', 'verifiedAt', 'expiresAt'] as const
+
+function certificateKeysFor(value: unknown): readonly string[] {
+  const protocol = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'protocol')?.value : undefined
+  return protocol === 'assistant-growth/revision-verification/v2' ? [...certificateKeys, 'execution'] : certificateKeys
+}
 
 function fail(label: string): never { throw new Error(`invalid plugin revision verification ${label}`) }
 function record(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
@@ -76,23 +90,25 @@ export function validatePluginRevisionParentBinding(value: unknown): asserts val
 }
 
 export function validatePluginRevisionVerificationCertificate(value: unknown): asserts value is PluginRevisionVerificationCertificate {
-  const item = record(value, [...certificateKeys, 'signature'], 'certificate')
-  if (item.protocol !== 'assistant-growth/revision-verification/v1') fail('protocol')
+  const protocol: unknown = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'protocol')?.value : undefined
+  const linux = protocol === 'assistant-growth/revision-verification/v2'
+  const item = record(value, [...certificateKeysFor(value), 'signature'], 'certificate')
+  if (!linux && item.protocol !== 'assistant-growth/revision-verification/v1') fail('protocol')
   const authority = item.authority
   validateRevisionAcceptanceAuthorityRef(authority)
   validatePluginRevisionParentBinding(item.parent)
   const { parent: _parent, ...creationShape } = item
   validatePluginCreationVerificationCertificate({ ...creationShape,
-    protocol: 'assistant-growth/creation-verification/v1',
+    protocol: linux ? 'assistant-growth/creation-verification/v3' : 'assistant-growth/creation-verification/v1',
     authority: { ...authority, protocol: 'assistant-growth/creation-acceptance-authority/v1' },
   })
   if (Buffer.byteLength(canonicalGrowthJson(item)) > 65_536) fail('certificate bytes')
 }
 
 export function pluginRevisionVerificationSigningPayload(value: Omit<PluginRevisionVerificationCertificate, 'signature'>): string {
-  const body = record(value, certificateKeys, 'signing body')
+  const body = record(value, certificateKeysFor(value), 'signing body')
   validatePluginRevisionVerificationCertificate({ ...body, signature: 'A'.repeat(86) })
-  return domain + canonicalGrowthJson(body)
+  return (body.protocol === 'assistant-growth/revision-verification/v2' ? domainV2 : domainV1) + canonicalGrowthJson(body)
 }
 
 /** Signature and authority equality only; consumers must also recheck provenance and parent currency. */

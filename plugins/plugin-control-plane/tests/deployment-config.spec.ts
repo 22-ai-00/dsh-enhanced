@@ -54,10 +54,18 @@ test.skipIf(process.platform !== 'linux')('admits durable Linux modify preparati
   const config = normalizeControlPlaneConfig({ ...base, sourceBuild, sourceJobs: { ...sourceJobs, allowedModes: ['modify'] } })
   expect(config.sourceBuild).toEqual(sourceBuild)
   expect(config.sourceJobs?.allowedModes).toEqual(['modify'])
-  for (const field of ['sourceReleases', 'sourceReleaseExecution', 'sourceAdoptions',
-    'revisionVerifications', 'revisionRegressions']) {
-    expect(() => normalizeControlPlaneConfig({ ...config, [field]: {} })).toThrow('not yet connected to revision and release authorities')
+  for (const field of ['sourceReleases', 'sourceReleaseExecution', 'sourceAdoptions']) {
+    expect(() => normalizeControlPlaneConfig({ ...config, [field]: {} })).toThrow('not yet connected to source release and adoption authorities')
   }
+  for (const field of ['revisionVerifications', 'revisionRegressions']) {
+    expect(() => normalizeControlPlaneConfig({ ...config, [field]: {} })).toThrow('dual-UID repository boundary')
+  }
+  const dual = normalizeControlPlaneConfig({ catalogPath: join(root, 'catalog-dual.json'), trustPath: join(root, 'trust-dual.json'),
+    statePath: join(root, 'state-dual'), sourceBuild: { ...dualLinuxConfig(), stateRoot: join(root, 'dual-jobs') }, sourceJobs })
+  expect(() => normalizeControlPlaneConfig({ ...dual, revisionVerifications: {} as never }))
+    .toThrow('revision verification requires its separate finite grant and retained adopted source')
+  expect(() => normalizeControlPlaneConfig({ ...dual, revisionRegressions: {} as never }))
+    .toThrow('regression requires independently configured review and retained parent source')
   expect(() => normalizeControlPlaneConfig({ ...config, creationCapabilities: {} as never })).toThrow('requires the dual-UID repository boundary')
   expect(() => normalizeControlPlaneConfig({ ...config, creationVerifications: {} as never })).toThrow('requires the dual-UID repository boundary')
   expect(existsSync(base.statePath)).toBe(false)

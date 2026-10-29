@@ -168,8 +168,8 @@ export interface PreparedCreationPort {
   inspectPreparedCreationReviewContext(planId: string, signal: AbortSignal): Promise<{ patch: string; changedPaths: string[] }>
 }
 
-/** Full repository preparation only; the private port separately checks its live receipt and job. */
-function linuxCreationBuildEvidenceDigest(value: unknown): string {
+/** Full repository preparation only; the private port separately checks its live receipt and job. Creation and revision share the schema v3 evidence shape. */
+export function linuxPreparedBuildEvidenceDigest(value: unknown): string {
   const evidence = exact(value, ['schemaVersion', 'kind', 'boundary', 'runtimeDigest', 'executionContractDigest',
     'buildScriptSha256', 'archive', 'receipt', 'environment', 'checks', 'pack', 'logDigest', 'durationMs', 'preparedAt'], 'Linux build evidence')
   if (evidence.schemaVersion !== 3 || evidence.kind !== 'dsh-source-prepared-evidence'
@@ -302,7 +302,7 @@ export class CreationReviewRuntime {
             buildEvidenceDigest: createHash('sha256').update(canonicalGrowthJson(evidence)).digest('hex') }
         })() : undefined
       if ('backend' in config.runner && config.runner.backend === 'linux-native') {
-        const buildEvidenceDigest = linuxCreationBuildEvidenceDigest(plan.preparedEvidence)
+        const buildEvidenceDigest = linuxPreparedBuildEvidenceDigest(plan.preparedEvidence)
         if (typeof port.inspectPreparedCreationLinuxBuild !== 'function') throw new Error('Linux build inspection unavailable')
         const build = await port.inspectPreparedCreationLinuxBuild(plan.id, signal)
         signal.throwIfAborted()
