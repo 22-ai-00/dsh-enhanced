@@ -16,6 +16,7 @@ import { installDshResidentService } from './resident.js'
 import { prepareRsiSourceWorkspace } from './rsi-source.js'
 import { prepareRsiBuildEnvironment, RsiBuildUnavailableError } from './rsi-build.js'
 import { prepareRsiReleaseBuildEnvironment, RsiReleaseBuildUnavailableError } from './rsi-release-build.js'
+import { prepareLinuxRsiRuntime, LinuxRsiRuntimeUnavailableError } from './rsi-linux-runtime-bootstrap.js'
 import { prepareRsiAuthorityRuntime } from './rsi-authority-runtime.js'
 import { prepareRsiAuthorityResources } from './rsi-authority-resources.js'
 import { version } from './version.js'
@@ -616,6 +617,23 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
             return { ...provisioned, sourceBuild: build.sourceBuild, creationBuild: nativeRsiCreationBuild(build),
               capabilities: ['native-memory-learning', 'verified-plugin-creation', 'dynamic-tool-adoption'] }
           }
+          // Linux prepares the schema 3 native runtime by default: no Docker
+          // CLI, daemon, socket or image is involved. An explicit --docker-path
+          // keeps the legacy image path available during migration coexistence.
+          if (process.platform === 'linux' && !args.dockerPath) {
+            const build = await prepareLinuxRsiRuntime({ dshHome: args.dshHome, profile: args.profile!, source,
+              signal: controller.signal })
+            try {
+              const release = await prepareRsiReleaseBuildEnvironment({ dshHome: args.dshHome, profile: args.profile!,
+                build, signal: controller.signal })
+              return { ...provisioned, sourceBuild: build, releaseBuild: release }
+            } catch (error) {
+              controller.signal.throwIfAborted()
+              if (!args.optionalBuild || !(error instanceof RsiReleaseBuildUnavailableError)) throw error
+              process.stderr.write(`自迭代发布构建环境未就绪：${error.message}。已保留源码、验证运行时与原生工具链。\n`)
+              return { ...provisioned, sourceBuild: build, releaseBuildUnavailable: error.message }
+            }
+          }
           const build = await prepareRsiBuildEnvironment({ dshHome: args.dshHome, profile: args.profile!, source,
             dockerPath: args.dockerPath, signal: controller.signal })
           try {
@@ -630,7 +648,8 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
           }
         } catch (error) {
           controller.signal.throwIfAborted()
-          if (!args.optionalBuild || !(error instanceof RsiBuildUnavailableError)) throw error
+          if (!args.optionalBuild
+            || !(error instanceof RsiBuildUnavailableError || error instanceof LinuxRsiRuntimeUnavailableError)) throw error
           process.stderr.write(`自迭代构建环境未就绪：${error.message}。已保留源码准备结果。\n`)
           return { ...provisioned, buildUnavailable: error.message }
         }

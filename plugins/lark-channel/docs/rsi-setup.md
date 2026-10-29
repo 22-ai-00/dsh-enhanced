@@ -39,7 +39,7 @@ macOS x64 / Apple Silicon 的 `supervised` 使用一个原生 Node Host，由当
 
 输出 JSON 的 `repository` 与 `baseline` 可直接用于 `sourceJobs`；Growth 与相关授权须引用同一仓库。初始发布分支为 `repairs`，受管基准为 `refs/dsh-source/repairs`。重复执行会复用并核对已保存的来源和版本，保留已推进的发布分支及基准；它不会把日常修复回退到安装版本。不同版本或来源不能覆盖已有目录，须先完成部署迁移。准备过程需要 Git，官方来源还需要访问 GitHub；失败或中断不会被当成完成。
 
-Linux 上的新安装还会自动准备授权工具与本地发布资源，无需手工复制程序、生成密钥或创建 registry。`--prepare-build` 在构建准备前执行此步骤，因此 Docker 不可用时也能保留它们。已有安装可独立运行，不需要 Git、Docker、源码 checkout 或 owner manifest：
+Linux 上的新安装还会自动准备授权工具与本地发布资源，无需手工复制程序、生成密钥或创建 registry。`--prepare-build` 在构建准备前执行此步骤，因此构建环境未就绪时也能保留它们。已有安装可独立运行，不需要 Git、Docker、源码 checkout 或 owner manifest：
 
 ```sh
 ~/.dsh/profiles/web/node_modules/.bin/dsh-rsi-setup \
@@ -58,7 +58,7 @@ Linux 上的新安装还会自动准备授权工具与本地发布资源，无�
 
 Linux 安装器从已批准的源码构建镜像准备独立行为镜像，资源保存在 `$DSH_HOME/rsi-creation-builds/<profile>`。临时上下文只含固定受信任 worker/launcher、Dockerfile、清单和锁文件，不复制候选、owner 凭据或期望行为。首次镜像准备可能访问 Debian 包源；运行候选时禁用网络。重复安装核验原始回执、输入摘要、Docker 可执行文件和实际不可变镜像 ID；镜像缺失或输入漂移不会触发重建。macOS 行为 runner 复用上文私有原生运行时。两种平台的验收与调用均使用独立私有 runner 账本，额度和 unknown 不因重启重置。该安装配置本身不证明普通任务收益或完整自迭代闭环。
 
-Linux 新安装还会尝试准备离线构建镜像。当前完整仓库检查沿用已验证的 Linux x64、Docker Server `29.4.1/linux/amd64` 与嵌套 sandbox 配置；不满足这些前置条件时，安装器保留源码并报告 `buildUnavailable`，普通 Agent 安装继续，但不声称源码修复构建已经可用。macOS 原生准备失败会停止安装，不由 `--optional-build` 掩盖；已有资源不一致也会停止安装。
+Linux 新安装默认准备原生离线构建运行时（sourceBuild schema 3，`backend: linux-native`），不调用 Docker CLI、daemon、socket，也不拉取镜像：按固定摘要从 nodejs.org 与 npm registry 下载官方 Node v22.23.2 和 pnpm 11.7.0，经私有 user/mount/PID/network 命名空间（bubblewrap）与无凭据环境先 `pnpm fetch --frozen-lockfile --ignore-scripts` 预取，再以 `--offline` 完成安装，随后的候选与发布构建全部离线运行。前置为 Linux x64/arm64、`/usr/bin/{git,curl,tar,bwrap,unshare,mount,bash,python3}` 可用，以及 bwrap 全命名空间隔离和有界 tmpfs 挂载探测通过；不满足这些环境前置时，安装器保留源码并报告 `buildUnavailable`，普通 Agent 安装继续，但不声称源码修复构建已经可用。清单不完整、回执或内容漂移、网络失败等完整性错误始终致命，不由 `--optional-build` 掩盖；macOS 原生准备失败同样停止安装，已有资源不一致也会停止安装。迁移并存期间，显式传入绝对路径 `--docker-path` 仍走旧的不可变镜像准备路径，该路径沿用已验证的 Docker Server `29.4.1/linux/amd64` 与嵌套 sandbox 配置；同一 profile 的原生回执与镜像回执互不续跑。
 
 支持的环境可单独运行严格构建准备：
 
@@ -67,7 +67,7 @@ Linux 新安装还会尝试准备离线构建镜像。当前完整仓库检查�
   --prepare-build --profile web --dsh-home "$HOME/.dsh"
 ```
 
-Linux 输出中的 `sourceBuild` 可用于 Control Plane manifest。Linux 安装器还自动从同一不可变镜像导出原生 Node、pnpm、离线 store 和供应链策略缓存，输出 `releaseBuild` 可直接用于本地发布 adapter 的 `build` 配置；无需手填工具链路径和摘要。资源保存在 `$DSH_HOME/rsi-release-builds/<profile>`，回执固定所有文件内容与模式。导出只创建未启动的容器，复制固定路径后删除容器，不执行其中的源码。发布仍使用本机 `/usr/bin/bwrap` 和 `/usr/bin/tar`；`--optional-build` 在缺少这些前置条件时报告 `releaseBuildUnavailable`，保留已准备的源码验证镜像。实际复制、工具链版本校验或已有回执漂移失败仍会停止安装。配置使用不可变镜像 ID，并将私有回执与 seccomp 保存到 `$DSH_HOME/rsi-builds/<profile>`。重新执行会核对来源、构建输入与本地镜像；不会静默换镜像或重新构建丢失的已登记镜像。Docker 构建脚本、Dockerfile 与 seccomp 必须匹配安装包内登记的摘要，只把 lock、workspace 配置及包清单放入构建上下文；不复制源码、主机包缓存或凭据。首次镜像准备需要网络，随后候选构建离线运行。macOS 的 `--prepare-build` 仅输出不含 owner 授权的 runtime/sourceBuild 基础回执；`--install-owner` 编译时才加入绑定安装、owner、期限与额度的 sourceBuild 配置。
+Linux 输出中的 `sourceBuild` 可用于 Control Plane manifest：默认为完整的 schema 3 原生运行时环境（绑定运行时全树摘要、固定 Node/pnpm 与锁文件）；显式 `--docker-path` 时为旧的镜像 sourceBuild 回执。默认路径下，安装器在已独立验证的原生运行时上复核全树摘要，再把固定的 pnpm-native 工具链、离线 store 和供应链策略缓存三树复制到 `$DSH_HOME/rsi-release-builds/<profile>`，输出 schema 2 的 `releaseBuild`（`backend: linux-native`，以 `runtimeDigest` 而非镜像 ID 固定输入），可直接用于本地发布 adapter 的 `build` 配置，无需手填工具链路径和摘要。复制不跟随符号链接、不执行其中的源码，也不创建容器；每个发布环境持有独立的空 `store/v11/projects`，不沿用运行时内的过期项目链接。旧镜像路径仍只创建未启动的容器、复制固定路径后删除容器。两种路径的发布执行都使用本机 `/usr/bin/bwrap` 和 `/usr/bin/tar`，并校验导出的 Node 为 v22.23.2、pnpm 为 11.7.0；`--optional-build` 仅在缺少这些环境前置时报告 `releaseBuildUnavailable`（原生路径保留已准备并验证的运行时，镜像路径保留源码验证镜像）。实际复制、工具链版本校验或已有回执漂移失败仍会停止安装；Docker 与原生收据互不能续，缺失子目录视为漂移而不是新环境，不会静默重建或换后端。镜像路径的配置使用不可变镜像 ID，并将私有回执与 seccomp 保存到 `$DSH_HOME/rsi-builds/<profile>`；Docker 构建脚本、Dockerfile 与 seccomp 必须匹配安装包内登记的摘要，构建上下文只放 lock、workspace 配置及包清单，不复制源码、主机包缓存或凭据。首次运行时准备需要网络，随后候选构建离线运行。macOS 的 `--prepare-build` 仅输出不含 owner 授权的 runtime/sourceBuild 基础回执；`--install-owner` 编译时才加入绑定安装、owner、期限与额度的 sourceBuild 配置。
 
 Linux 自动配置使用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID 和 4 GiB 工作区上限；Linux repository 构建保持 2 GiB 临时目录。宿主需提供相应资源。嵌套 sandbox 的系统路径与 seccomp 边界见[构建镜像指南](../../../scripts/isolation/README.md#nested-sandbox-profile)。macOS 原生构建按固定 60 秒单次、1 MiB 输出、1000 次及 24 小时累计运行限额授予，独立行为 runner 保留各自原有额度。准备资源只完成安装前置步骤；`--install-owner` 会核对已安装 Host、owner 和最终配置后再应用。
 

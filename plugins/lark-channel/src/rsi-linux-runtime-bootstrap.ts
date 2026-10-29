@@ -32,6 +32,12 @@ const canonical = (path: string) => typeof path === 'string' && isAbsolute(path)
 const within = (path: string, root: string): boolean => path === root || path.startsWith(root + sep)
 function fail(message: string): never { throw new Error(`rsi Linux runtime: ${message}`) }
 
+/** Environmental prerequisites are missing (platform, binaries, namespace or
+ * tmpfs support). Integrity/identity failures stay hard errors via fail(). */
+export class LinuxRsiRuntimeUnavailableError extends Error {
+  constructor(message: string) { super(`rsi Linux runtime unavailable: ${message}`) }
+}
+
 export interface LinuxRsiBuildEnvironment {
   schemaVersion: 3
   backend: 'linux-native'
@@ -185,25 +191,26 @@ export async function extractExact(archive: string, member: string, cwd: string,
 }
 
 async function doctor(): Promise<void> {
-  if (process.platform !== 'linux' || !['x64', 'arm64'].includes(process.arch)) fail('Linux x64/arm64 required')
+  const unavailable = (message: string): never => { throw new LinuxRsiRuntimeUnavailableError(message) }
+  if (process.platform !== 'linux' || !['x64', 'arm64'].includes(process.arch)) unavailable('Linux x64/arm64 required')
   const env = { PATH: '/usr/bin:/bin', HOME: '/nonexistent', LANG: 'C', LC_ALL: 'C' }
   for (const command of ['/usr/bin/git', '/usr/bin/curl', '/usr/bin/tar', '/usr/bin/bwrap',
     '/usr/bin/unshare', '/usr/bin/mount', '/usr/bin/bash', '/usr/bin/python3']) {
     const result = spawnSync(command, ['--version'], { env, timeout: 5_000, maxBuffer: 4096 })
-    if (result.error || result.status !== 0) fail(`required Linux prerequisite unavailable: ${command}`)
+    if (result.error || result.status !== 0) unavailable(`required Linux prerequisite unavailable: ${command}`)
   }
   const bwrap = spawnSync('/usr/bin/bwrap', ['--unshare-all', '--ro-bind', '/usr', '/usr',
     '--ro-bind', '/lib', '/lib', ...(process.arch === 'x64' ? ['--ro-bind', '/lib64', '/lib64'] : []),
     '--proc', '/proc', '--dev', '/dev', '--dir', '/tmp', '/usr/bin/true'],
   { env, timeout: 5_000, maxBuffer: 4096 })
-  if (bwrap.error || bwrap.status !== 0) fail('Linux namespace sandbox unavailable')
+  if (bwrap.error || bwrap.status !== 0) unavailable('Linux namespace sandbox unavailable')
   const probe = await mkdtemp(join(tmpdir(), 'dsh-linux-runtime-doctor-'))
   try {
     const mounted = spawnSync('/usr/bin/unshare', ['--user', '--map-root-user', '--mount', '--pid', '--fork',
       '--kill-child=SIGKILL', '/usr/bin/bash', '-c',
       'set -eu; mount -t tmpfs -o size=1048576,nr_inodes=16 tmpfs "$1"; test "$(stat -f -c %T "$1")" = tmpfs',
       'dsh-linux-doctor', probe], { env, timeout: 5_000, maxBuffer: 4096 })
-    if (mounted.error || mounted.status !== 0) fail('bounded Linux tmpfs unavailable')
+    if (mounted.error || mounted.status !== 0) unavailable('bounded Linux tmpfs unavailable')
   } finally { await rm(probe, { recursive: true, force: true }) }
 }
 
