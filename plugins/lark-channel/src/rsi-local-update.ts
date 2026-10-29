@@ -2,21 +2,24 @@ import { createHash } from 'node:crypto'
 import { lstat, mkdir, readdir, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { rsiBuildResources as io, readRsiBuildEnvironment } from './rsi-build.js'
+import { rsiBuildResources as io } from './rsi-build.js'
 import { readRsiReleaseBuildEnvironment } from './rsi-release-build.js'
 import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages,
   type RsiLocalCohort, type RsiLocalCohortPorts } from './rsi-local-cohort.js'
 import { prepareRsiSourceWorkspace, readRsiSourceWorkspace } from './rsi-source.js'
 import { prepareRsiSourceUpdate, readRsiSourceUpdate, type RsiSourceUpdateCandidate } from './rsi-source-update.js'
 import { withDshHomeLifecycleLock } from './setup.js'
-import { prepareRsiLocalUpdateBuild } from './rsi-local-update-build.js'
+import * as localUpdateBuild from './rsi-local-update-build.js'
 import { rsiLocalUpdateBundles } from './rsi-local-roots-extension.js'
 
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 const fail = (message: string): never => { throw new Error(`rsi local update: ${message}`) }
 const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 export interface RsiLocalUpdateInput { dshHome: string; profile: string; sourceRepository: string;
-  rootExtension?: 'memory-learning'; signal?: AbortSignal }
+  rootExtension?: 'memory-learning'; signal?: AbortSignal
+  /** Explicit absolute Docker executable keeps the legacy image backend during
+   * coexistence; on Linux an omitted value selects the native runtime. */
+  dockerPath?: string }
 export interface RsiLocalUpdatePreparation {
   schemaVersion: 1 | 2
   mode: 'prepared'
@@ -29,7 +32,7 @@ export interface RsiLocalUpdatePreparation {
   originalCohortDigest: string
   source: RsiSourceUpdateCandidate
   cohort: RsiLocalCohort
-  build: Awaited<ReturnType<typeof prepareRsiLocalUpdateBuild>>['evidence'] | null
+  build: Awaited<ReturnType<typeof localUpdateBuild.prepareRsiLocalUpdateBuild>>['evidence'] | null
   receiptDigest: string
 }
 
@@ -75,7 +78,7 @@ export async function readRsiLocalUpdateLocked(input: { dshHome: string; profile
     sourceRepository: source.repository, signal })
   if (workspace.sourceCommit !== source.sourceCommit || workspace.version !== source.version) fail('candidate workspace differs from prepared source')
   const cohort = await readRsiLocalCohort({ dshHome: saved.candidateHome, profile: input.profile, source: workspace })
-  const sourceBuild = await readRsiBuildEnvironment({ dshHome: saved.candidateHome, profile: input.profile, source: workspace, signal })
+  const sourceBuild = await localUpdateBuild.readRsiLocalUpdateSourceBuild({ dshHome: saved.candidateHome, profile: input.profile, source: workspace, signal })
   const releaseBuild = await readRsiReleaseBuildEnvironment({ dshHome: saved.candidateHome, profile: input.profile, build: sourceBuild, signal })
   if (!isDeepStrictEqual(saved.cohort, cohort) || !isDeepStrictEqual(saved.build, { sourceBuild, releaseBuild })) fail('prepared build or cohort differs')
   await verifyRsiLocalInstalledPackages({ cohort: original, profilePath: join(input.dshHome, 'profiles', input.profile) })
@@ -162,8 +165,9 @@ export async function prepareRsiLocalUpdate(input: RsiLocalUpdateInput,
     const workspace = await prepareRsiSourceWorkspace({ dshHome: candidateHome, profile: input.profile,
       version: source.version, sourceRepository: source.repository, signal })
     if (workspace.sourceCommit !== source.sourceCommit) fail('candidate checkout differs from merged source')
-    const builder = ports ? undefined : await prepareRsiLocalUpdateBuild({ dshHome: candidateHome,
-      profile: input.profile, source: workspace, signal })
+    const builder = ports ? undefined : await localUpdateBuild.prepareRsiLocalUpdateBuild({ dshHome: candidateHome,
+      profile: input.profile, source: workspace, signal,
+      ...(input.dockerPath ? { dockerPath: input.dockerPath } : {}) })
     const cohort = await prepareRsiLocalCohort({ dshHome: candidateHome, profile: input.profile,
       source: workspace, bundles, signal }, ports ?? builder!.ports)
     const verifyOriginal = async () => {

@@ -73,6 +73,10 @@ export async function stageRsiLocalUpdateResources(input: {
   await io.directory(stagePhysicalHome)
   const prepared = await readRsiLocalUpdateLocked({ dshHome: logicalHome, profile, root: input.preparationRoot, signal })
   if (!prepared.build || inside(stagePhysicalHome, prepared.root) || inside(prepared.root, stagePhysicalHome)) fail('stage overlaps preparation')
+  // Native (schema 3) candidates stage rsi-linux-runtimes rather than the image
+  // receipt tree; their relocation lands with the native install transaction.
+  // A native receipt can never be silently rehomed through the Docker layout.
+  if (prepared.build.sourceBuild.schemaVersion === 3) fail('native runtime candidate activation is not available on the Docker staging path')
   const original = {} as Record<Kind, Entry[]>, candidate = {} as Record<Kind, Entry[]>
   for (const kind of kinds) {
     await io.directory(join(logicalHome, kind)); await io.directory(join(stagePhysicalHome, kind))
