@@ -1,16 +1,18 @@
 import { createHash, sign, type KeyObject } from 'node:crypto'
+import { dirname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { canonicalGrowthJson, growthObjectDigest, pluginRevisionVerificationSigningPayload,
   sourceGrowthEvidenceDigest, sourceGrowthRunDigest, validatePluginRevisionParentBinding,
   validateRevisionAcceptanceAuthorityRef, validateSourceGrowthRunBinding,
-  verifyPluginRevisionVerificationCertificate, type PluginRevisionParentBinding,
+  verifyPluginRevisionVerificationCertificate, type PluginCreationVerificationLinuxExecution,
+  type PluginRevisionParentBinding,
   type PluginRevisionVerificationCertificate, type PluginRevisionVerificationRequest,
   type PluginRevisionVerificationResult, type RevisionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
 import { CreationReviewStore } from './creation-review-store.js'
 import { CASE_RULES, COMPARISON_RULES, REVIEW_RULES, RULES_VERSION, SCHEMA_RULES,
-  compareCase, compileCreationReviewConfig, parseCases, parseReview, projectCreationSchemas,
-  type CreationReviewConfig } from './creation-review.js'
-import { validatePluginBehaviorDeploymentConfig } from './plugin-behavior-config.js'
+  compareCase, compileCreationReviewConfig, linuxPreparedBuildEvidenceDigest, parseCases, parseReview,
+  projectCreationSchemas, type CreationReviewConfig } from './creation-review.js'
+import { LINUX_BEHAVIOR_BOUNDARY, validateCreationBehaviorDeploymentConfig } from './plugin-behavior-config.js'
 import { runNativeCreationTurn, type CreationModel } from './creation-review-native.js'
 
 type PluginBehaviorRunner = import('./plugin-behavior-runner.js').PluginBehaviorRunner
@@ -36,14 +38,14 @@ export interface RevisionReviewAuthorityInspection {
 }
 
 export function validateRevisionReviewConfig(input: RevisionReviewConfig): RevisionReviewConfig {
-  validatePluginBehaviorDeploymentConfig(Object.getOwnPropertyDescriptor(input, 'runner')?.value)
+  validateCreationBehaviorDeploymentConfig(Object.getOwnPropertyDescriptor(input, 'runner')?.value)
   return compileCreationReviewConfig(input).config
 }
 
 export function compileRevisionReviewConfig(input: RevisionReviewConfig): {
   config: RevisionReviewConfig; authority: RevisionAcceptanceAuthorityRef; publicKey: string; privateKey: KeyObject
 } {
-  validatePluginBehaviorDeploymentConfig(Object.getOwnPropertyDescriptor(input, 'runner')?.value)
+  validateCreationBehaviorDeploymentConfig(Object.getOwnPropertyDescriptor(input, 'runner')?.value)
   const checked = compileCreationReviewConfig(input)
   const authorityDigest = growthObjectDigest({ purpose: REVISION_PURPOSE,
     baseRules: RULES_VERSION, caseRules: CASE_RULES, comparisonRules: COMPARISON_RULES,
@@ -62,7 +64,8 @@ export interface PreparedRevisionPort {
     protocol: 'dsh-prepared-revision/v1'
     plan: { id: string; digest: string; name: string; mode: string; status: string; expiresAt: number;
       generatorDigest: string; sourceCheck?: { treeDigest: string; patchDigest: string };
-      preparedEvidence?: { pack: { sha256: string; sizeBytes: number } };
+      preparedEvidence?: { schemaVersion?: number; boundary?: string; runtimeDigest?: string;
+        pack: { sha256: string; sizeBytes: number } };
       sourceRevision?: { grant: { namePrefix: string; expiresAt: number }; growthRun: unknown; parent: PluginRevisionParentBinding } }
     job: { intent: { revision?: unknown } }
     reference: { owner: Record<string, unknown>; sourceDigest: string; outcomeId: string }
@@ -73,6 +76,9 @@ export interface PreparedRevisionPort {
   }
   withPreparedRevisionFence<T>(input: { planId: string; planDigest: string; artifactSha256: string;
     growthRunDigest: string; referenceDigest: string; parentDigest: string }, callback: () => T): T
+  inspectPreparedRevisionLinuxBuild?(planId: string, signal: AbortSignal): Promise<{
+    runtime: import('@dsh-enhanced/assistant-isolation').LinuxRuntime; evidenceDigest: string
+  }>
   inspectPreparedRevisionReviewContext(planId: string, signal: AbortSignal): Promise<{ patch: string; changedPaths: string[] }>
 }
 
@@ -176,6 +182,27 @@ export class RevisionReviewRuntime {
       const sourceBinding = { referenceDigest: sourceGrowthEvidenceDigest(reference), ownerDigest: sourceGrowthEvidenceDigest(reference.owner),
         growthRunDigest: sourceGrowthRunDigest(frozen) }
       const parentDigest = sourceGrowthEvidenceDigest(parent)
+      let linuxExecution: PluginCreationVerificationLinuxExecution | undefined
+      if ('backend' in config.runner && config.runner.backend === 'linux-native') {
+        const buildEvidenceDigest = linuxPreparedBuildEvidenceDigest(plan.preparedEvidence)
+        if (typeof port.inspectPreparedRevisionLinuxBuild !== 'function') throw new Error('Linux build inspection unavailable')
+        const build = await port.inspectPreparedRevisionLinuxBuild(plan.id, signal)
+        signal.throwIfAborted()
+        if (build.evidenceDigest !== buildEvidenceDigest) throw new Error('Linux build evidence snapshot changed')
+        const [{ linuxRuntimeDigest }, { linuxPluginBehaviorRuntimeDigest, readLinuxPluginBehaviorPreparation }] = await Promise.all([
+          import('@dsh-enhanced/assistant-isolation'), import('./linux-behavior-runtime.js'),
+        ])
+        const preparation = await readLinuxPluginBehaviorPreparation({ runtime: build.runtime,
+          root: dirname(config.runner.runtime.runtime.root.path), signal })
+        const runtimeDigest = linuxPluginBehaviorRuntimeDigest(config.runner.runtime)
+        const buildRuntimeDigest = linuxRuntimeDigest(build.runtime)
+        if (plan.preparedEvidence?.runtimeDigest !== buildRuntimeDigest
+          || preparation.baseRuntimeDigest !== buildRuntimeDigest
+          || linuxPluginBehaviorRuntimeDigest(preparation.descriptor) !== runtimeDigest
+          || !SHA.test(preparation.preparationDigest)) throw new Error('Linux build and observer preparation mismatch')
+        linuxExecution = { boundary: LINUX_BEHAVIOR_BOUNDARY, runtimeDigest, buildRuntimeDigest,
+          buildEvidenceDigest, observerPreparationDigest: preparation.preparationDigest }
+      }
       const fenceInput = { planId: plan.id, planDigest: plan.digest, artifactSha256: plan.preparedEvidence.pack.sha256,
         growthRunDigest: sourceBinding.growthRunDigest, referenceDigest: sourceBinding.referenceDigest, parentDigest }
       const fence = <T>(callback: () => T): T => port.withPreparedRevisionFence(fenceInput, callback)
@@ -184,7 +211,8 @@ export class RevisionReviewRuntime {
       const binding = growthObjectDigest({ purpose: REVISION_PURPOSE, request, authority, parent, parentDigest,
         plan: { id: plan.id, digest: plan.digest, tree: plan.sourceCheck.treeDigest, patch: plan.sourceCheck.patchDigest,
           artifact: plan.preparedEvidence.pack }, source: sourceBinding, model,
-        budget: { maxOutputTokens: config.maxOutputTokens, maxDurationMs: config.maxDurationMs, maxCases: config.maxCases } })
+        budget: { maxOutputTokens: config.maxOutputTokens, maxDurationMs: config.maxDurationMs, maxCases: config.maxCases },
+        ...(linuxExecution ? { execution: linuxExecution } : {}) })
       const claim = fence(() => this.#store.claim(plan.id, binding, config.authorityId, authority.authorityDigest, config.maxVerifications))
       if (claim.state === 'certificate') return claim.certificate && claim.certificate.expiresAt > Date.now()
         && canonicalGrowthJson(claim.certificate.parent) === canonicalGrowthJson(parent)
@@ -198,7 +226,9 @@ export class RevisionReviewRuntime {
       signal.throwIfAborted(); fence(() => {})
       const discovery = await observer.run({ key: growthObjectDigest([binding, 'discover']), artifact, operation: { kind: 'discover' }, signal })
       if (discovery.status !== 'observed' || !discovery.quiescent || !discovery.schemaDigest || !discovery.schemas
-        || !discovery.environment || !discovery.jobId || discovery.artifactSha256 !== plan.preparedEvidence.pack.sha256) {
+        || !discovery.environment || !discovery.jobId || discovery.artifactSha256 !== plan.preparedEvidence.pack.sha256
+        || linuxExecution && (discovery.boundary !== linuxExecution.boundary
+          || discovery.runtimeDigest !== linuxExecution.runtimeDigest)) {
         this.#store.unknown(plan.id, binding, 'schema-observation-unknown')
         return { status: 'unknown', reason: 'schema-observation-unknown' }
       }
@@ -230,6 +260,8 @@ export class RevisionReviewRuntime {
         if (observed.status !== 'observed' || !observed.quiescent || !observed.jobId
           || observed.schemaDigest !== discovery.schemaDigest || observed.artifactSha256 !== plan.preparedEvidence.pack.sha256
           || canonicalGrowthJson(observed.environment) !== canonicalGrowthJson(discovery.environment)
+          || linuxExecution && (observed.boundary !== linuxExecution.boundary
+            || observed.runtimeDigest !== linuxExecution.runtimeDigest)
           || observed.calls?.length !== 1 || observed.calls[0]?.id !== item.id || jobs.has(observed.jobId)) {
           this.#store.unknown(plan.id, binding, 'case-observation-unknown')
           return { status: 'unknown', reason: 'case-observation-unknown' }
@@ -266,7 +298,9 @@ export class RevisionReviewRuntime {
         plan.expiresAt, revision.grant.expiresAt, frozen.expiresAt)
       if (expiresAt <= verifiedAt) throw new Error('revision verification windows closed')
       const body: Omit<PluginRevisionVerificationCertificate, 'signature'> = {
-        protocol: 'assistant-growth/revision-verification/v1', verificationId: `revision-${binding.slice(0, 40)}`,
+        protocol: linuxExecution ? 'assistant-growth/revision-verification/v2' as const
+          : 'assistant-growth/revision-verification/v1' as const,
+        verificationId: `revision-${binding.slice(0, 40)}`,
         authority, plan: { id: plan.id, digest: plan.digest, name: plan.name,
           sourceTreeDigest: plan.sourceCheck.treeDigest, sourcePatchDigest: plan.sourceCheck.patchDigest,
           artifactSha256: plan.preparedEvidence.pack.sha256, artifactBytes: artifact.length,
@@ -276,6 +310,7 @@ export class RevisionReviewRuntime {
         budget: { modelCalls: 2, maxOutputTokens: config.maxOutputTokens, maxDurationMs: config.maxDurationMs,
           maxCases: config.maxCases }, sessions: { contract: contract.sessionId, sourceReview: review.sessionId },
         observations, reviewDigest: review.outputDigest, verifiedAt, expiresAt,
+        ...(linuxExecution ? { execution: linuxExecution } : {}),
       }
       const signature = sign(null, Buffer.from(pluginRevisionVerificationSigningPayload(body)), privateKey).toString('base64url')
       const certificate = { ...body, signature }

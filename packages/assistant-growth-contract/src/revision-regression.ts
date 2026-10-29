@@ -13,8 +13,17 @@ export interface RevisionRegressionAcceptanceAuthorityRef {
   expiresAt: number
 }
 
+/** Linux observation provenance shared by the paired parent/candidate runs. */
+export interface PluginRevisionRegressionLinuxExecution {
+  boundary: 'linux-native-process-seccomp-v1'
+  /** Fixed behavior runtime descriptor that produced both paired observations. */
+  runtimeDigest: string
+  /** Validated private observer preparation receipt shared by both sides. */
+  observerPreparationDigest: string
+}
+
 export interface PluginRevisionRegressionCertificate {
-  protocol: 'assistant-growth/revision-regression/v1'
+  protocol: 'assistant-growth/revision-regression/v1' | 'assistant-growth/revision-regression/v2'
   verificationId: string
   authority: RevisionRegressionAcceptanceAuthorityRef
   plan: PluginRevisionVerificationCertificate['plan']
@@ -37,7 +46,14 @@ export interface PluginRevisionRegressionCertificate {
   verifiedAt: number
   expiresAt: number
   signature: string
+  /** Required exactly for v2: the Linux native runtime of both paired observations; rejected for v1. */
+  execution?: PluginRevisionRegressionLinuxExecution
 }
+
+export type PluginRevisionRegressionCertificateV1 = PluginRevisionRegressionCertificate &
+  { protocol: 'assistant-growth/revision-regression/v1'; execution?: never }
+export type PluginRevisionRegressionCertificateV2 = PluginRevisionRegressionCertificate &
+  { protocol: 'assistant-growth/revision-regression/v2'; execution: PluginRevisionRegressionLinuxExecution }
 
 export interface PluginRevisionRegressionRequest {
   protocol: 'assistant-growth/revision-regression-request/v1'
@@ -48,12 +64,18 @@ export type PluginRevisionRegressionResult =
   | { status: 'verified'; certificate: PluginRevisionRegressionCertificate }
   | { status: 'rejected' | 'unknown'; reason: string }
 
-const domain = 'assistant-growth/revision-regression/v1\0'
+const domainV1 = 'assistant-growth/revision-regression/v1\0'
+const domainV2 = 'assistant-growth/revision-regression/v2\0'
 const digest = /^[a-f0-9]{64}$/u
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u
 const keys = ['protocol', 'verificationId', 'authority', 'plan', 'parent', 'source', 'contractDigest',
   'schemaDigest', 'environment', 'model', 'candidateVerificationDigest', 'sourceDigest',
   'schemaCompatibilityDigest', 'budget', 'observations', 'verifiedAt', 'expiresAt'] as const
+
+function certificateKeysFor(value: unknown): readonly string[] {
+  const protocol = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'protocol')?.value : undefined
+  return protocol === 'assistant-growth/revision-regression/v2' ? [...keys, 'execution'] : keys
+}
 
 function fail(label: string): never { throw new Error(`invalid plugin revision regression ${label}`) }
 function record(value: unknown, expected: readonly string[], label: string): Record<string, unknown> {
@@ -102,8 +124,16 @@ export function validatePluginRevisionRegressionRequest(value: unknown): asserts
 }
 
 export function validatePluginRevisionRegressionCertificate(value: unknown): asserts value is PluginRevisionRegressionCertificate {
-  const item = record(value, [...keys, 'signature'], 'certificate')
-  if (item.protocol !== 'assistant-growth/revision-regression/v1') fail('protocol')
+  const protocol: unknown = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'protocol')?.value : undefined
+  const linux = protocol === 'assistant-growth/revision-regression/v2'
+  const item = record(value, [...certificateKeysFor(value), 'signature'], 'certificate')
+  if (!linux && item.protocol !== 'assistant-growth/revision-regression/v1') fail('protocol')
+  if (linux) {
+    const execution = record(item.execution, ['boundary', 'runtimeDigest', 'observerPreparationDigest'], 'execution')
+    if (execution.boundary !== 'linux-native-process-seccomp-v1') fail('execution boundary')
+    sha(execution.runtimeDigest, 'runtimeDigest')
+    sha(execution.observerPreparationDigest, 'observerPreparationDigest')
+  }
   id(item.verificationId, 'verificationId')
   validateRevisionRegressionAcceptanceAuthorityRef(item.authority)
   const authority = item.authority
@@ -157,9 +187,9 @@ export function validatePluginRevisionRegressionCertificate(value: unknown): ass
 }
 
 export function pluginRevisionRegressionSigningPayload(value: Omit<PluginRevisionRegressionCertificate, 'signature'>): string {
-  const body = record(value, keys, 'signing body')
+  const body = record(value, certificateKeysFor(value), 'signing body')
   validatePluginRevisionRegressionCertificate({ ...body, signature: 'A'.repeat(86) })
-  return domain + canonicalGrowthJson(body)
+  return (body.protocol === 'assistant-growth/revision-regression/v2' ? domainV2 : domainV1) + canonicalGrowthJson(body)
 }
 
 /** Signature and authority equality only; consumers must recheck parent certificate bindings, provenance and source currency. */

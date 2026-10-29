@@ -6,14 +6,14 @@ import { canonicalGrowthJson, growthObjectDigest, pluginRevisionRegressionSignin
   validatePluginRevisionVerificationCertificate, validateRevisionRegressionAcceptanceAuthorityRef,
   validateSourceGrowthRunBinding, verifyPluginRevisionRegressionCertificate,
   type PluginCreationVerificationCertificate, type PluginRevisionRegressionCertificate,
-  type PluginRevisionRegressionRequest, type PluginRevisionRegressionResult,
-  type PluginRevisionParentBinding, type PluginRevisionVerificationCertificate,
-  type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
+  type PluginRevisionRegressionLinuxExecution, type PluginRevisionRegressionRequest,
+  type PluginRevisionRegressionResult, type PluginRevisionParentBinding,
+  type PluginRevisionVerificationCertificate, type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
 import { CreationReviewStore } from './creation-review-store.js'
 import { COMPARISON_RULES, SCHEMA_RULES, RULES_VERSION, compareCase, compileCreationReviewConfig,
   parseCases, projectCreationSchemas, type Case, type CreationReviewConfig } from './creation-review.js'
 
-import { validatePluginBehaviorDeploymentConfig } from './plugin-behavior-config.js'
+import { LINUX_BEHAVIOR_BOUNDARY, validateCreationBehaviorDeploymentConfig } from './plugin-behavior-config.js'
 
 type PluginBehaviorRunner = import('./plugin-behavior-runner.js').PluginBehaviorRunner
 type Observation = import('./plugin-behavior-runner.js').PluginBehaviorObservation
@@ -43,7 +43,7 @@ function legacyConfig(input: RevisionRegressionReviewConfig): CreationReviewConf
 
 export function validateRevisionRegressionReviewConfig(input: RevisionRegressionReviewConfig): RevisionRegressionReviewConfig {
   const legacy = legacyConfig(input)
-  validatePluginBehaviorDeploymentConfig(legacy.runner)
+  validateCreationBehaviorDeploymentConfig(legacy.runner)
   const checked = compileCreationReviewConfig(legacy).config
   if (checked.runner.maxRuns < checked.maxVerifications * (2 + 2 * checked.maxCases)) {
     throw new Error('revision regression runner cannot cover paired observations')
@@ -119,7 +119,10 @@ function retainedCases(value: RetainedCases | undefined, parent: PluginCreationV
   return { cases: parsed.cases, schemas }
 }
 
-/** Independent paired Docker regression; this runtime has no LLM service and cannot switch a tool. */
+/** Independent paired regression on the retained parent and the candidate.
+ * Docker keeps the v1 protocol; linux-native requires a creation v3 parent and
+ * a revision v2 candidate and signs the shared observer identity as v2. This
+ * runtime has no LLM service and cannot switch a tool. */
 export class RevisionRegressionReviewRuntime {
   readonly #compiled: ReturnType<typeof compileRevisionRegressionReviewConfig>
   readonly #store: CreationReviewStore<PluginRevisionRegressionCertificate>
@@ -184,6 +187,23 @@ export class RevisionRegressionReviewRuntime {
       validatePluginRevisionVerificationCertificate(candidate.certificate)
       validatePluginCreationVerificationCertificate(parent.certificate)
       validatePluginRevisionParentBinding(parent.binding)
+      const linux = 'backend' in config.runner && config.runner.backend === 'linux-native'
+      const parentExecution = parent.certificate.protocol === 'assistant-growth/creation-verification/v3'
+        ? parent.certificate.execution : undefined
+      const candidateExecution = candidate.certificate.protocol === 'assistant-growth/revision-verification/v2'
+        ? candidate.certificate.execution : undefined
+      if (linux && (!parentExecution || !candidateExecution
+        || parentExecution.boundary !== LINUX_BEHAVIOR_BOUNDARY
+        || candidateExecution.boundary !== LINUX_BEHAVIOR_BOUNDARY
+        || parentExecution.runtimeDigest !== candidateExecution.runtimeDigest
+        || parentExecution.buildRuntimeDigest !== candidateExecution.buildRuntimeDigest
+        || parentExecution.observerPreparationDigest !== candidateExecution.observerPreparationDigest)) {
+        throw new Error('Linux regression requires a creation v3 parent and revision v2 candidate on one observer')
+      }
+      if (!linux && (parent.certificate.protocol === 'assistant-growth/creation-verification/v3'
+        || candidate.certificate.protocol === 'assistant-growth/revision-verification/v2')) {
+        throw new Error('Linux-native certificates require a Linux-native regression runtime')
+      }
       const now = Date.now()
       const sourceBinding = { referenceDigest: sourceGrowthEvidenceDigest(reference),
         ownerDigest: sourceGrowthEvidenceDigest(reference.owner), growthRunDigest: sourceGrowthRunDigest(frozen) }
@@ -216,6 +236,21 @@ export class RevisionRegressionReviewRuntime {
       for (const key of ['authorityId', 'authorityHash', 'principalId', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset']) {
         if (reference.owner[key] !== config.owner[key as keyof typeof config.owner]) throw new Error('regression owner changed')
       }
+      let linuxExecution: PluginRevisionRegressionLinuxExecution | undefined
+      if (linux && 'backend' in config.runner && config.runner.backend === 'linux-native') {
+        const { linuxPluginBehaviorRuntimeDigest, readLinuxPluginBehaviorDeploymentPreparation } = await import('./linux-behavior-runtime.js')
+        const runtimeDigest = linuxPluginBehaviorRuntimeDigest(config.runner.runtime)
+        const preparation = await readLinuxPluginBehaviorDeploymentPreparation({ runtime: config.runner.runtime, signal })
+        signal.throwIfAborted()
+        if (linuxPluginBehaviorRuntimeDigest(preparation.descriptor) !== runtimeDigest
+          || runtimeDigest !== candidateExecution!.runtimeDigest
+          || preparation.baseRuntimeDigest !== candidateExecution!.buildRuntimeDigest
+          || preparation.preparationDigest !== candidateExecution!.observerPreparationDigest) {
+          throw new Error('Linux regression observer differs from signed candidate preparation')
+        }
+        linuxExecution = { boundary: LINUX_BEHAVIOR_BOUNDARY, runtimeDigest,
+          observerPreparationDigest: preparation.preparationDigest }
+      }
       const fenceInput = { planId: plan.id, planDigest: plan.digest, artifactSha256: candidate.certificate.plan.artifactSha256,
         growthRunDigest: sourceBinding.growthRunDigest, referenceDigest: sourceBinding.referenceDigest,
         parentDigest, candidateVerificationDigest, sourceDigest: candidate.sourceDigest,
@@ -224,7 +259,8 @@ export class RevisionRegressionReviewRuntime {
       fence(() => {})
       const binding = growthObjectDigest({ purpose: PURPOSE, request, authority, fenceInput,
         parentCertificateDigest: parent.binding.certificateDigest, candidateVerificationDigest,
-        budget: { maxCases: config.maxCases, maxDurationMs: config.maxDurationMs, maxRuns: 2 + 2 * config.maxCases } })
+        budget: { maxCases: config.maxCases, maxDurationMs: config.maxDurationMs, maxRuns: 2 + 2 * config.maxCases },
+        ...(linuxExecution ? { execution: linuxExecution } : {}) })
       const claim = fence(() => this.#store.claim(plan.id, binding, config.authorityId, authority.authorityDigest, config.maxVerifications))
       if (claim.state === 'certificate') return claim.certificate
         && verifyPluginRevisionRegressionCertificate(claim.certificate, authority, publicKey)
@@ -242,7 +278,9 @@ export class RevisionRegressionReviewRuntime {
         const result = await observer.run({ key: growthObjectDigest([binding, side, 'discover']),
           artifact, operation: { kind: 'discover' }, signal })
         if (result.status !== 'observed' || !result.quiescent || !result.jobId || jobs.has(result.jobId)
-          || result.artifactSha256 !== expectedSha || !result.schemaDigest || !result.schemas || !result.environment) {
+          || result.artifactSha256 !== expectedSha || !result.schemaDigest || !result.schemas || !result.environment
+          || linuxExecution && (result.boundary !== linuxExecution.boundary
+            || result.runtimeDigest !== linuxExecution.runtimeDigest)) {
           throw new Error(`${side} schema observation unknown`)
         }
         jobs.add(result.jobId); fence(() => {})
@@ -285,6 +323,8 @@ export class RevisionRegressionReviewRuntime {
             || observed.artifactSha256 !== (side === 'parent' ? parent.binding.artifactSha256 : candidate.certificate.plan.artifactSha256)
             || observed.schemaDigest !== operation.schemaDigest
             || canonicalGrowthJson(observed.environment) !== canonicalGrowthJson(parentDiscovery.environment)
+            || linuxExecution && (observed.boundary !== linuxExecution.boundary
+              || observed.runtimeDigest !== linuxExecution.runtimeDigest)
             || observed.calls?.length !== 1 || observed.calls[0]?.id !== item.id
             || observed.calls[0]?.toolName !== item.toolName) throw new Error(`${side} case observation unknown`)
           jobs.add(observed.jobId)
@@ -310,7 +350,9 @@ export class RevisionRegressionReviewRuntime {
         plan.expiresAt, plan.sourceRevision.grant.expiresAt, frozen.expiresAt, candidate.certificate.expiresAt)
       if (expiresAt <= verifiedAt) throw new Error('regression verification windows closed')
       const body: Omit<PluginRevisionRegressionCertificate, 'signature'> = {
-        protocol: 'assistant-growth/revision-regression/v1', verificationId: `regression-${binding.slice(0, 40)}`,
+        protocol: linuxExecution ? 'assistant-growth/revision-regression/v2' as const
+          : 'assistant-growth/revision-regression/v1' as const,
+        verificationId: `regression-${binding.slice(0, 40)}`,
         authority, plan: candidate.certificate.plan, parent: parent.binding, source: sourceBinding,
         contractDigest: parent.certificate.contractDigest, schemaDigest: candidateDiscovery.schemaDigest!,
         environment: candidateDiscovery.environment!, model: frozen.model,
@@ -318,6 +360,7 @@ export class RevisionRegressionReviewRuntime {
         schemaCompatibilityDigest: growthObjectDigest(parentSchemas),
         budget: { maxCases: config.maxCases, maxDurationMs: config.maxDurationMs, maxRuns: 2 + 2 * config.maxCases },
         observations, verifiedAt, expiresAt,
+        ...(linuxExecution ? { execution: linuxExecution } : {}),
       }
       const certificate = { ...body, signature: sign(null,
         Buffer.from(pluginRevisionRegressionSigningPayload(body)), privateKey).toString('base64url') }

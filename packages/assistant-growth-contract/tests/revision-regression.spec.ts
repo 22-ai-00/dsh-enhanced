@@ -37,6 +37,16 @@ function certificate(): PluginRevisionRegressionCertificate {
   return { ...body, signature: sign(null, Buffer.from(pluginRevisionRegressionSigningPayload(body)), privateKey).toString('base64url') }
 }
 
+function linuxCertificate(): PluginRevisionRegressionCertificate {
+  const { signature: _signature, ...v1 } = certificate()
+  const body: Omit<PluginRevisionRegressionCertificate, 'signature'> = {
+    ...v1, protocol: 'assistant-growth/revision-regression/v2' as const,
+    execution: { boundary: 'linux-native-process-seccomp-v1' as const,
+      runtimeDigest: hash, observerPreparationDigest: hash },
+  }
+  return { ...body, signature: sign(null, Buffer.from(pluginRevisionRegressionSigningPayload(body)), privateKey).toString('base64url') }
+}
+
 function sourceRun(): SourceGrowthRunBinding {
   return {
     protocol: 'assistant-growth/source-run/v1', runId: 'run-1', intentDigest: hash, configDigest: hash, ownerDigest: hash,
@@ -139,5 +149,59 @@ describe('independent retained-parent regression contract', () => {
       get: () => { read = true; throw Error('read') } })
     expect(() => validateSourceGrowthRunBinding(accessor)).toThrow()
     expect(read).toBe(false)
+  })
+
+  describe('linux native v2', () => {
+    test('accepts a signed v2 certificate with the shared Linux observation identity', () => {
+      const signed = linuxCertificate()
+      expect(signed.protocol).toBe('assistant-growth/revision-regression/v2')
+      expect(() => validatePluginRevisionRegressionCertificate(signed)).not.toThrow()
+      expect(verifyPluginRevisionRegressionCertificate(signed, signed.authority, pem, 20_000)).toBe(true)
+      expect(verifyPluginRevisionRegressionCertificate(JSON.parse(JSON.stringify(signed)),
+        signed.authority, pem, 20_000)).toBe(true)
+    })
+
+    test('uses a signing domain distinct from v1 and revision verification', () => {
+      const signed = linuxCertificate()
+      const { signature: _signature, ...body } = signed
+      const v1DomainSignature = sign(null,
+        Buffer.from('assistant-growth/revision-regression/v1\0' + canonicalGrowthJson(body)),
+        privateKey).toString('base64url')
+      expect(verifyPluginRevisionRegressionCertificate({ ...signed, signature: v1DomainSignature },
+        signed.authority, pem, 20_000)).toBe(false)
+      const revisionDomainSignature = sign(null,
+        Buffer.from('assistant-growth/revision-verification/v2\0' + canonicalGrowthJson(body)),
+        privateKey).toString('base64url')
+      expect(verifyPluginRevisionRegressionCertificate({ ...signed, signature: revisionDomainSignature },
+        signed.authority, pem, 20_000)).toBe(false)
+    })
+
+    test('keeps v1 and v2 execution shapes mutually exclusive', () => {
+      const v1 = certificate(), v2 = linuxCertificate()
+      expect(() => validatePluginRevisionRegressionCertificate({ ...v1, execution: v2.execution })).toThrow()
+      const { execution: _execution, ...v2WithoutExecution } = v2
+      expect(() => validatePluginRevisionRegressionCertificate(v2WithoutExecution)).toThrow()
+      expect(() => validatePluginRevisionRegressionCertificate({ ...v2,
+        execution: { ...v2.execution!, boundary: 'macos-seatbelt-single-process-v1' } })).toThrow()
+      expect(() => validatePluginRevisionRegressionCertificate({ ...v2,
+        execution: { ...v2.execution!, runtimeDigest: 'x'.repeat(64) } })).toThrow()
+      expect(() => validatePluginRevisionRegressionCertificate({ ...v2,
+        execution: { boundary: 'linux-native-process-seccomp-v1', runtimeDigest: hash } })).toThrow()
+    })
+
+    test('binds the runtime and observer preparation to the signature', () => {
+      const signed = linuxCertificate()
+      expect(verifyPluginRevisionRegressionCertificate({ ...signed,
+        execution: { ...signed.execution!, runtimeDigest: otherHash } }, signed.authority, pem, 20_000)).toBe(false)
+      expect(verifyPluginRevisionRegressionCertificate({ ...signed,
+        execution: { ...signed.execution!, observerPreparationDigest: otherHash } },
+        signed.authority, pem, 20_000)).toBe(false)
+    })
+
+    test('historical v1 certificates remain valid after the v2 extension', () => {
+      const signed = certificate()
+      expect(() => validatePluginRevisionRegressionCertificate(signed)).not.toThrow()
+      expect(verifyPluginRevisionRegressionCertificate(signed, signed.authority, pem, 20_000)).toBe(true)
+    })
   })
 })

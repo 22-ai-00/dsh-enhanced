@@ -267,13 +267,13 @@ test('owner withdrawal during Linux source review suppresses signing after both 
   expect(f.runtime.inspect({ owner: f.owner })?.remainingVerifications).toBe(1)
 })
 
-test('general deployment, revision, and regression config reject Linux before key reads or resource acquisition', async () => {
+test('general deployment config rejects Linux while revision and regression compile accept it', async () => {
   const f = await fixture()
   expect(() => validatePluginBehaviorDeploymentConfig(f.config.runner)).toThrow('deployment config')
-  const invalidKey = { ...f.config, keyPath: join(f.root, 'missing-key.pem') }
-  expect(() => compileRevisionReviewConfig(invalidKey)).toThrow('deployment config')
-  const { policy: _policy, maxInputBytes: _maxInputBytes, maxOutputTokens: _maxOutputTokens, ...regression } = invalidKey
-  expect(() => compileRevisionRegressionReviewConfig(regression)).toThrow('deployment config')
+  expect(() => compileRevisionReviewConfig(f.config)).not.toThrow()
+  const { policy: _policy, maxInputBytes: _maxInputBytes, maxOutputTokens: _maxOutputTokens, ...regression } = f.config
+  regression.runner = { ...f.config.runner, maxRuns: f.config.maxVerifications * (2 + 2 * f.config.maxCases) }
+  expect(() => compileRevisionRegressionReviewConfig(regression)).not.toThrow()
   expect(observer.run).not.toHaveBeenCalled()
   expect(f.adapter.requests).toHaveLength(0)
 })

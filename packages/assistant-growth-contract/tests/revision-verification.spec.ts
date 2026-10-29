@@ -33,6 +33,16 @@ function certificate(): PluginRevisionVerificationCertificate {
   return { ...body, signature: sign(null, Buffer.from(pluginRevisionVerificationSigningPayload(body)), privateKey).toString('base64url') }
 }
 
+function linuxCertificate(): PluginRevisionVerificationCertificate {
+  const { signature: _signature, ...v1 } = certificate()
+  const body: Omit<PluginRevisionVerificationCertificate, 'signature'> = {
+    ...v1, protocol: 'assistant-growth/revision-verification/v2' as const,
+    execution: { boundary: 'linux-native-process-seccomp-v1' as const, runtimeDigest: hash,
+      buildRuntimeDigest: hash, buildEvidenceDigest: hash, observerPreparationDigest: hash },
+  }
+  return { ...body, signature: sign(null, Buffer.from(pluginRevisionVerificationSigningPayload(body)), privateKey).toString('base64url') }
+}
+
 function sourceRun(): SourceGrowthRunBinding {
   return {
     protocol: 'assistant-growth/source-run/v1', runId: 'run-1', intentDigest: hash, configDigest: hash, ownerDigest: hash,
@@ -129,5 +139,56 @@ describe('independent adopted-tool revision verification', () => {
     })
     expect(() => validateSourceGrowthRunBinding(accessor)).toThrow()
     expect(read).toBe(false)
+  })
+
+  describe('linux native v2', () => {
+    test('accepts a signed v2 certificate with the four Linux execution digests', () => {
+      const signed = linuxCertificate()
+      expect(signed.protocol).toBe('assistant-growth/revision-verification/v2')
+      expect(() => validatePluginRevisionVerificationCertificate(signed)).not.toThrow()
+      expect(verifyPluginRevisionVerificationCertificate(signed, signed.authority, pem, 20_000)).toBe(true)
+      expect(verifyPluginRevisionVerificationCertificate(JSON.parse(JSON.stringify(signed)),
+        signed.authority, pem, 20_000)).toBe(true)
+    })
+
+    test('uses a signing domain distinct from v1 and creation', () => {
+      const signed = linuxCertificate()
+      const { signature: _signature, ...body } = signed
+      const v1DomainSignature = sign(null,
+        Buffer.from('assistant-growth/revision-verification/v1\0' + canonicalGrowthJson(body)),
+        privateKey).toString('base64url')
+      expect(verifyPluginRevisionVerificationCertificate({ ...signed, signature: v1DomainSignature },
+        signed.authority, pem, 20_000)).toBe(false)
+      const creationDomainSignature = sign(null, Buffer.from(canonicalGrowthJson(body)), privateKey).toString('base64url')
+      expect(verifyPluginRevisionVerificationCertificate({ ...signed, signature: creationDomainSignature },
+        signed.authority, pem, 20_000)).toBe(false)
+    })
+
+    test('keeps v1 and v2 execution shapes mutually exclusive', () => {
+      const v1 = certificate(), v2 = linuxCertificate()
+      expect(() => validatePluginRevisionVerificationCertificate({ ...v1, execution: v2.execution })).toThrow()
+      const { execution: _execution, ...v2WithoutExecution } = v2
+      expect(() => validatePluginRevisionVerificationCertificate(v2WithoutExecution)).toThrow()
+      expect(() => validatePluginRevisionVerificationCertificate({ ...v2,
+        execution: { ...v2.execution!, boundary: 'macos-seatbelt-single-process-v1' } })).toThrow()
+      expect(() => validatePluginRevisionVerificationCertificate({ ...v2,
+        execution: { ...v2.execution!, observerPreparationDigest: 'x'.repeat(64) } })).toThrow()
+      expect(() => validatePluginRevisionVerificationCertificate({ ...v2,
+        execution: { ...v2.execution!, buildRuntimeDigest: undefined } })).toThrow()
+    })
+
+    test('binds every Linux execution digest to the signature', () => {
+      const signed = linuxCertificate()
+      for (const field of ['runtimeDigest', 'buildRuntimeDigest', 'buildEvidenceDigest', 'observerPreparationDigest'] as const) {
+        expect(verifyPluginRevisionVerificationCertificate({ ...signed,
+          execution: { ...signed.execution!, [field]: otherHash } }, signed.authority, pem, 20_000)).toBe(false)
+      }
+    })
+
+    test('historical v1 certificates remain valid after the v2 extension', () => {
+      const signed = certificate()
+      expect(() => validatePluginRevisionVerificationCertificate(signed)).not.toThrow()
+      expect(verifyPluginRevisionVerificationCertificate(signed, signed.authority, pem, 20_000)).toBe(true)
+    })
   })
 })
