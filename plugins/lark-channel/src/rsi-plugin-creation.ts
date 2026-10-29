@@ -8,6 +8,7 @@ import type { CreationReviewConfig } from '@dsh-enhanced/assistant-verifier'
 import type { Config as ControlPlaneConfig, CreationCapabilityConfig, CreationCapabilityOwner } from '@dsh-enhanced/plugin-control-plane'
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
 import type { RsiCreationBuildEnvironment } from './rsi-creation-build.js'
+import type { LinuxRsiCreationBuildEnvironment } from './rsi-linux-creation-build.js'
 import type { NativeRsiCreationBuildEnvironment } from './rsi-native-runtime-bootstrap.js'
 
 export type SourceCreationGrant = NonNullable<NonNullable<ControlPlaneConfig['sourceJobs']>['creation']>
@@ -66,6 +67,43 @@ function exact(value: unknown, fields: readonly string[]): boolean {
 
 function publicKeyAt(path: string): string {
   return createPublicKey(createPrivateKey(readFileSync(path))).export({ format: 'pem', type: 'spki' }).toString()
+}
+
+/** The review and adoption runners must be the same backend. Linux native
+ * runners additionally pin the delegated cgroup roots; Docker runners pin the
+ * image and client. Mixed backends can never share a finite creation grant. */
+function pairedRunnerMatches(
+  reviews: CreationReviewConfig['runner'], capabilities: CreationCapabilityConfig['runner']): boolean {
+  const reviewBackend = 'backend' in reviews ? reviews.backend : undefined
+  const capabilityBackend = 'backend' in capabilities ? capabilities.backend : undefined
+  if (reviewBackend !== capabilityBackend) return false
+  if ('backend' in reviews && 'backend' in capabilities
+    && reviews.backend === 'linux-native' && capabilities.backend === 'linux-native') {
+    return isDeepStrictEqual(reviews.runtime, capabilities.runtime)
+      && isDeepStrictEqual(reviews.cgroupRoots, capabilities.cgroupRoots)
+  }
+  if ('backend' in reviews && 'backend' in capabilities
+    && reviews.backend === 'macos-seatbelt' && capabilities.backend === 'macos-seatbelt') {
+    return isDeepStrictEqual(reviews.runtime, capabilities.runtime)
+  }
+  if (!('backend' in reviews) && !('backend' in capabilities)) {
+    return reviews.image === capabilities.image && reviews.dockerPath === capabilities.dockerPath
+      && reviews.socketPath === capabilities.socketPath
+  }
+  return false
+}
+
+type CreationBuild = RsiCreationBuildEnvironment | NativeRsiCreationBuildEnvironment | LinuxRsiCreationBuildEnvironment
+
+/** Project the prepared immutable build receipt onto the backend-specific
+ * runner binding shared by review and adoption. */
+function creationRunnerBackend(build: CreationBuild) {
+  if (build.schemaVersion === 2) return { backend: 'macos-seatbelt' as const, runtime: build.runtime }
+  if (build.schemaVersion === 3) {
+    return { backend: 'linux-native' as const, runtime: build.behavior, cgroupRoots: build.cgroupRoots }
+  }
+  return { image: build.image, dockerPath: build.dockerPath,
+    ...(build.socketPath ? { socketPath: build.socketPath } : {}) }
 }
 
 /** Admission of a complete finite chain; no resource is created or reset here. */
@@ -136,13 +174,7 @@ export function validateRsiPluginCreationSetup(input: unknown, expectedOwner: Cr
     || reviews.runner.maxRuns < reviews.maxVerifications * (reviews.maxCases + 1)
     || capabilities.runner.maxRuns < capabilities.maxAdoptions + capabilities.maxCallRecords
     || capabilities.maxCallRecords < capabilities.maxAdoptions * capabilities.maxCallsPerAdoption
-    || ('backend' in reviews.runner !== 'backend' in capabilities.runner)
-    || ('backend' in reviews.runner && 'backend' in capabilities.runner
-      ? reviews.runner.backend !== 'macos-seatbelt' || capabilities.runner.backend !== 'macos-seatbelt'
-        || !isDeepStrictEqual(reviews.runner.runtime, capabilities.runner.runtime)
-      : !('backend' in reviews.runner) && !('backend' in capabilities.runner)
-        && (reviews.runner.image !== capabilities.runner.image || reviews.runner.dockerPath !== capabilities.runner.dockerPath
-          || reviews.runner.socketPath !== capabilities.runner.socketPath))) {
+    || !pairedRunnerMatches(reviews.runner, capabilities.runner)) {
     fail('creation runner limits cannot cover finite grants')
   }
   if (!exact(setup.verifications, ['authority', 'publicKey'])) fail('invalid creation verification fields')
@@ -155,23 +187,22 @@ export function validateRsiPluginCreationSetup(input: unknown, expectedOwner: Cr
 
 /** Compile one stable installation grant from the already prepared private identities. */
 export function createRsiPluginCreationSetup(input: {
-  resources: RsiAuthorityResources; build: RsiCreationBuildEnvironment | NativeRsiCreationBuildEnvironment; owner: CreationCapabilityOwner;
+  resources: RsiAuthorityResources; build: CreationBuild; owner: CreationCapabilityOwner;
   expiresAt: number; now: number
 }): RsiPluginCreationSetup {
   const { resources, build, owner, expiresAt, now } = input
-  if (resources?.schemaVersion !== 1 || ![1, 2].includes(build?.schemaVersion)
+  if (resources?.schemaVersion !== 1 || ![1, 2, 3].includes(build?.schemaVersion)
     || !uuid.test(resources.installationId)
     || !Number.isSafeInteger(expiresAt) || expiresAt <= now) fail('invalid installation or expiry')
   const prefix = `owner-${resources.installationId.slice(0, 8)}-`
   const creation: SourceCreationGrant = { id: `creation-source-${resources.installationId}`, expiresAt,
     maxCreates: limits.creates, namePrefix: prefix }
+  const runnerBackend = creationRunnerBackend(build)
   const reviews: CreationReviewConfig = {
     authorityId: `creation-review-${resources.installationId}`, owner, namePrefix: prefix,
     keyId: `creation-review-${resources.installationId}-key`, keyPath: resources.identities.review.keyPath,
     expiresAt, maxVerifications: limits.verifications,
-    runner: { stateRoot: join(resources.stateRoot, 'creation-review-runner'),
-      ...(build.schemaVersion === 2 ? { backend: 'macos-seatbelt' as const, runtime: build.runtime }
-        : { image: build.image, dockerPath: build.dockerPath, ...(build.socketPath ? { socketPath: build.socketPath } : {}) }),
+    runner: { stateRoot: join(resources.stateRoot, 'creation-review-runner'), ...runnerBackend,
       expiresAt, maxRuns: limits.reviewRuns,
       maxTotalDurationMs: limits.reviewRuns * limits.runnerDurationMs, maxDurationMs: limits.runnerDurationMs,
       maxOutputBytes: 262_144 },
@@ -186,9 +217,7 @@ export function createRsiPluginCreationSetup(input: {
     maxTools: limits.tools, maxCallsPerAdoption: limits.callsPerAdoption,
     maxCallRecords: limits.callRecords, maxInputBytes: limits.inputBytes,
     retention: { maximumLifetimeMs: limits.retentionLifetimeMs },
-    runner: { stateRoot: join(resources.stateRoot, 'creation-adoption-runner'),
-      ...(build.schemaVersion === 2 ? { backend: 'macos-seatbelt' as const, runtime: build.runtime }
-        : { image: build.image, dockerPath: build.dockerPath, ...(build.socketPath ? { socketPath: build.socketPath } : {}) }),
+    runner: { stateRoot: join(resources.stateRoot, 'creation-adoption-runner'), ...runnerBackend,
       expiresAt, maxRuns: limits.adoptionRuns,
       maxTotalDurationMs: 86_400_000, maxDurationMs: limits.runnerDurationMs, maxOutputBytes: 65_536 },
   }
