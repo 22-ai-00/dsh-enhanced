@@ -516,7 +516,7 @@ it.skipIf(process.platform !== 'linux' || !process.getuid?.())('preflights match
     revisionVerifications: { authority: f.revisionAuthority, publicKey: f.publicKey } }))
     .toThrow(/revision verification requires its separate finite grant/)
   expect(() => normalizeControlPlaneConfig({ ...f.config, sourceAdoptions: {} as NonNullable<Config['sourceAdoptions']> }))
-    .toThrow(/not yet connected to source release and adoption authorities/)
+    .toThrow(/invalid source adoption config/)
 })
 
 it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['protocol', 'build-runtime', 'build-evidence'] as const)(

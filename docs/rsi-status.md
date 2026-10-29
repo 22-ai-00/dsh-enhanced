@@ -6,7 +6,7 @@
 
 - 去除 Linux 安装与自迭代的 Docker 依赖，保留普通隔离执行、完整源码修复、工具创建/修订、独立验收、有限采用、发布与回退，不能关闭功能或改用受限创建路径。范围见[原生运行时](dockerless-runtime.md)。
 - 原生执行、全仓 prepare、父/候选独立观察及创建 v3 已接入有限工具采用。原账本和回执保留完整证书绑定、已用额度、缓存及 unknown；首次采用复核原构建，后续调用及冷恢复复核保留观察器和当前 owner/来源。retained v2 不依赖过期构建授权、旧基底或编译器，不退款或重派。
-- Linux 修订 v2 与配对回归 v2 已接通同一原生观察器：修订重开双 UID 全仓构建、复核完整构建证据与保留准备回执后签 revision-verification/v2（execution 绑定边界与四项摘要）；回归强制 creation v3 父证书 + revision v2 候选证书同族（边界/观察器运行时/构建基底/准备回执全等），复用部署共享观察器只读重开 `<root>/behavior.json` 锚定后签 revision-regression/v2；准入前漂移为 stale-source 不派不扣，准入后 unknown 持久不重放。下一步为源码发布采用链与物理回退、无 Docker 安装器与保权迁移、进程内热加载。生产仍使用 Docker；当前实机仅证明 Linux x64/cgroup v1，cgroup v2 明确拒绝，arm64 未实测。首次采用约 38 秒、冷恢复约 13 秒、简单工具调用约 25 秒，完整运行时重复校验仍有明显开销，不能称为完全无感。
+- Linux 修订 v2 与配对回归 v2 已接通同一原生观察器：修订重开双 UID 全仓构建、复核完整构建证据与保留准备回执后签 revision-verification/v2（execution 绑定边界与四项摘要）；回归强制 creation v3 父证书 + revision v2 候选证书同族（边界/观察器运行时/构建基底/准备回执全等），复用部署共享观察器只读重开 `<root>/behavior.json` 锚定后签 revision-regression/v2；准入前漂移为 stale-source 不派不扣，准入后 unknown 持久不重放。linux-native 同一 schema 3 仓库边界现已接通修改计划的独立源码审批、发布、发布执行、有限采用及采用后物理回退，不再要求任何 Docker 命令证据；schema 2 macOS 单进程证据永不支撑全仓修改，历史 schema 1 Docker 证据按原版本读取、不改写不重跑。下一步为无 Docker 全新安装器与 docker→linux-native 保权迁移、进程内热加载。生产实例尚未经无 Docker 安装迁移；当前实机仅证明 Linux x64/cgroup v1，cgroup v2 明确拒绝，arm64 未实测。首次采用约 38 秒、冷恢复约 13 秒、简单工具调用约 25 秒，完整运行时重复校验仍有明显开销，不能称为完全无感。
 
 ## 已有部署与未完成边界
 

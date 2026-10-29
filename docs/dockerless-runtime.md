@@ -48,7 +48,7 @@ v1 和 v2 分别验证。v1 使用 freezer 与 pidfd，在冻结、终止、重�
 
 ## 当前实机发现
 
-Linux x64 的 cgroup v1、namespace/seccomp 与固定工具链原语已经分别通过独立复核。namespace 覆盖非 root、无 capabilities、共享内存、终端、嵌套构建 namespace、Host 退出/停顿与控制 pipe 故障；工具链覆盖删除准备环境后从保留缓存在无网络环境中全新冻结安装。持久执行已接入 schema 8 账本和私有 Linux Verifier API：持久 intent 先于资源创建，keeper 与候选分别准入，收据与真实资源消失共同决定释放容量；临时故障可在同一 Host 内重试清理，未知任务不重派。历史后端身份与已用预算保持不变。显式配置的普通工具、operator 恢复/探针及完整源码 prepare 已接通；创建独立行为签名及有限采用、Linux 修订 v2 与配对回归 v2 的范围证据见当前状态；无 Docker 安装器、保权迁移、源码发布采用链与进程内热加载尚待接线，不能据此宣称完整能力等价。
+Linux x64 的 cgroup v1、namespace/seccomp 与固定工具链原语已经分别通过独立复核。namespace 覆盖非 root、无 capabilities、共享内存、终端、嵌套构建 namespace、Host 退出/停顿与控制 pipe 故障；工具链覆盖删除准备环境后从保留缓存在无网络环境中全新冻结安装。持久执行已接入 schema 8 账本和私有 Linux Verifier API：持久 intent 先于资源创建，keeper 与候选分别准入，收据与真实资源消失共同决定释放容量；临时故障可在同一 Host 内重试清理，未知任务不重派。历史后端身份与已用预算保持不变。显式配置的普通工具、operator 恢复/探针及完整源码 prepare 已接通；创建独立行为签名及有限采用、Linux 修订 v2 与配对回归 v2 的范围证据见当前状态；linux-native 修改计划的源码审批、发布、发布执行、有限采用及采用后物理回退也已在同一 schema 3 仓库边界接通。无 Docker 全新安装器、docker→linux-native 保权迁移与进程内热加载尚待接线，不能据此宣称完整能力等价。
 
 仓库持久执行通过独立合同和二进制通道支持 64 MiB 归档、32 MiB 产物、8 GiB workspace、4 GiB 可执行 tmp 与嵌套 namespace。双 UID 使用 schema 3，额外绑定固定映射、系统工具快照及执行实现摘要；历史 schema 1/2 不重新解释。候选退出且资源消失后才接收产物；私有收据绑定摘要，字节保存在受限 spool。账本准入包含全部临时挂载与持久存储，上层归档和 pack 暂存另外预留。完整源码 prepare 已在本机真实执行全新离线冻结安装、根 `pnpm check`、输入复核及打包；明确未启动且清理完成的本次失败可以终结，历史缺证仍保持 unknown，不重派或退还预算。当前证明范围及检查计数见[当前状态](rsi-status.md)。
 
