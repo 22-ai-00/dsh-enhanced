@@ -147,15 +147,17 @@ macOS 本地 cohort 安装沿用冻结制品与安装文件校验，持同一个
 
 ```sh
 dsh-rsi-setup --prepare-local-update --profile web --dsh-home "$HOME/.dsh"
+# 迁移并存期需要旧镜像收据时，可显式指定绝对路径：
+#   --docker-path /usr/bin/docker
 ```
 
 尚未安装 RSI owner 权限的旧冻结 profile 若缺少 Memory Learning，可在已审核并构建的 checkout 中显式追加 `--add-memory-learning`。它只允许这一根包扩展，生成独立 schema 2 候选；准备前后检查真实 pre-owner 权限与签名历史。后续 checkout 维护事务核验精确新增的默认 disabled、无 config 行及全部原配置，仍不启用 scheduler 或学习。原 schema 1 更新保持原 roots；已有 owner/coordinator 不支持这条扩展。具体命令与恢复边界见[安装器指南](../../../scripts/install/README.md#checkout-内的-pre-owner-冻结源码维护)。
 
 它从既有冻结收据读取源码路径，固定上游已提交 HEAD 和当前修复分支；两条修复 ref 必须已对齐。可直接快进时复用提交，分叉时在私有新仓库合并；冲突会停止准备并保留原始分支。上游的精确包版本可以不同于已安装版本，未提交修改不进入候选。源码、tarball 及准备收据保存在 Home 同级的私有 `.dsh-rsi-local-updates-<home-hash>/` 内；相同原始制品、上游和修复提交会复用已核验的准备结果，变化则使用另一目录。准备期间上游、原始收据或已安装包变化时不返回成功。
 
-更新构建先用已固定摘要的 manifest-only Docker 构建器准备依赖镜像，再导出独立 Node/pnpm/store/cache。候选的 build/pack 脚本在现有 release adapter 的离线 bubblewrap 环境内运行，只挂载构建副本、输出及只读工具链/依赖，不提供原 Home、原 Git 仓库、凭据或环境变量。此步骤需要与首次构建准备相同的 Linux x64、Docker 和 bubblewrap 支持；没有宿主机直接构建的回退路径。输出 `mode: prepared` 只表示源码和制品已准备，尚未迁移签名源码历史、构建/授权配置或切换服务；当前普通 upgrade 仍拒绝冻结本地安装。尚无 owner/coordinator 的安装可显式使用[本地 checkout 维护事务](../../../scripts/install/README.md#checkout-内的-pre-owner-冻结源码维护)；已配置 owner 的冻结安装尚不支持完整升级。激活须由停机事务重新核对当前状态，不能把准备收据当作激活授权。
+Linux 更新构建默认准备摘要固定的原生运行时（schema 3，backend `linux-native`）：从 nodejs.org 与 npm registry 下载官方 Node v22.23.2、pnpm 11.7.0，在 bubblewrap 私有 user/mount/pid 命名空间、无凭据环境内先 `pnpm fetch --frozen-lockfile --ignore-scripts` 再离线安装，并把运行时全树摘要写入候选 `rsi-linux-runtimes/<profile>/bootstrap.json`；随后导出同摘要工具链/store/cache 三树到 `rsi-release-builds`，输出 schema 2 release 收据（`runtimeDigest` 而非 image ID）。候选的 build/pack 脚本在现有 release adapter 的离线 bubblewrap 环境内运行，只挂载构建副本、输出及只读工具链/依赖，不提供原 Home、原 Git 仓库、凭据或环境变量。全程不调用 Docker CLI、daemon、socket 或镜像；前置（Linux x64/arm64、bwrap/unshare/mount 等）缺失时准备失败，运行时完整性错误始终致命。显式绝对路径 `--docker-path` 改用旧 manifest-only 镜像构建器（schema 1）；两类后端收据目录（`rsi-linux-runtimes` 与 `rsi-builds`）互斥、互不续跑，同一候选同时存在两类收据判为不可重放漂移。输出 `mode: prepared` 只表示源码和制品已准备，尚未迁移签名源码历史、构建/授权配置或切换服务；当前普通 upgrade 仍拒绝冻结本地安装。尚无 owner/coordinator 的安装可显式使用[本地 checkout 维护事务](../../../scripts/install/README.md#checkout-内的-pre-owner-冻结源码维护)；已配置 owner 的冻结安装尚不支持完整升级。原生候选的资源迁移随原生安装事务交付，在此之前需要走现有停机激活事务的旧安装可显式使用 `--docker-path` 准备镜像候选。激活须由停机事务重新核对当前状态，不能把准备收据当作激活授权。
 
-安装事务可通过只读候选检查重新验证源提交、原安装、tarball、固定构建器和导出的工具链；它不会执行 Docker 或候选脚本，也不会补建丢失的资源。这里的构建资源检查证明本地记录和文件仍匹配，不证明 Docker 镜像当前可运行。源码维护 helper 在独立 Home 副本中导入新提交、更新受管 refs，并保留最初 bootstrap、Git 对象及 `baseline.initialCommit`；既有 Host 密钥签名的 `maintenance.json` 使后续源码读取和候选准备解析到新版本。Control Plane schema 28 将该维护记录与旧 release 收据一起校验，拒绝未结源码任务、断链、旧 tip 或不匹配的 Host 身份。它是完整升级事务的内部接口，尚未开放为直接替换运行中 Agent 的命令；协议边界见[兼容性说明](../../../docs/compatibility.md#本地源码维护历史control-plane-schema-28)。
+安装事务可通过只读候选检查重新验证源提交、原安装、tarball、固定构建运行时和导出的工具链；它不会执行 Docker 或候选脚本，也不会补建丢失的资源。这里的构建资源检查证明本地记录和文件仍匹配，不证明旧 Docker 镜像当前可运行，也不重新下载或修复原生运行时。源码维护 helper 在独立 Home 副本中导入新提交、更新受管 refs，并保留最初 bootstrap、Git 对象及 `baseline.initialCommit`；既有 Host 密钥签名的 `maintenance.json` 使后续源码读取和候选准备解析到新版本。Control Plane schema 28 将该维护记录与旧 release 收据一起校验，拒绝未结源码任务、断链、旧 tip 或不匹配的 Host 身份。它是完整升级事务的内部接口，尚未开放为直接替换运行中 Agent 的命令；协议边界见[兼容性说明](../../../docs/compatibility.md#本地源码维护历史control-plane-schema-28)。
 
 内部激活准备已包含停服账本预检、维护签名生成和三类资源副本迁移。预检不会创建或迁移账本；非空 WAL/回滚日志、未结源码工作或冲突的部署观察须先在原 Host 对账。签名绑定原始与副本一致的部署及 readiness。资源迁移只重定位副本中的 tarball、构建器和发布工具链收据，并保留原安装与候选；替换或验证失败时尝试恢复副本原资源；已验证后的备份清理失败及进程崩溃由外层事务恢复或丢弃副本。成对包安装另由内部 `stageRsiLocalPairPackages` 处理：先核对两个 profile 的原制品文件、直接依赖、原生 Loader bundle 集合及固定 overrides，只替换原 cohort 拥有的精确依赖边；保留 profile 配置与注释，拒绝候选更改既有 build-script 决定或新增允许。两边安装和文件核验全部成功后才推进协调器登记，同版本源码更新也按制品字节核验。调用方须持有生命周期锁，并在隔离环境把可丢弃的已停写 Home 副本映射到原逻辑路径，准备相符的独立 pnpm store/cache；pnpm 会沿旧 `node_modules/.modules.yaml` 读取 store，且安装需要原 profile 的 lockfile 策略校验缓存和依赖包，仅复制源码构建缓存不足以离线安装。组件不自行建立这些边界，也不会放宽已有 lockfile 或脚本策略。安装中断或失败保留副本供外层恢复或丢弃，不宣称双方原子回滚。已配置 owner 的冻结安装仍需接入完整 owner 配置迁移、观察中的部署/回退证明、服务切换与崩溃恢复，因此这些成对内部组件不能当作升级成功。
 

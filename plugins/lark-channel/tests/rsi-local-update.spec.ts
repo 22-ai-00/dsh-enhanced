@@ -1,10 +1,14 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
 import * as sourceBuild from '../src/rsi-build.js'
 import * as releaseBuild from '../src/rsi-release-build.js'
+import * as linuxBootstrap from '../src/rsi-linux-runtime-bootstrap.js'
+import * as localUpdateBuild from '../src/rsi-local-update-build.js'
+import { prepareRsiLocalUpdateBuild, readRsiLocalUpdateSourceBuild } from '../src/rsi-local-update-build.js'
 import { prepareRsiLocalCohort, verifyRsiLocalInstalledPackages } from '../src/rsi-local-cohort.js'
 import { prepareRsiLocalUpdate, readRsiLocalUpdate } from '../src/rsi-local-update.js'
 import { parseRsiSetupArgs } from '../src/rsi-setup.js'
@@ -137,7 +141,7 @@ linuxTest('default preparation refuses missing isolated build inputs without run
   value.scripts = { build: `node -e 'require("node:fs").writeFileSync(${JSON.stringify(marker)},"ran")'` }
   await writeFile(manifest, JSON.stringify(value, null, 2) + '\n')
   git(f.sourceRepository, 'add', '.'); git(f.sourceRepository, 'commit', '-m', 'build requires isolation')
-  // This minimal fixture has no digest-pinned Docker builder inputs.
+  // This minimal fixture has neither frozen native manifests nor legacy Docker builder inputs.
   await expect(prepareRsiLocalUpdate(f.args)).rejects.toThrow()
   await expect(readFile(marker)).rejects.toMatchObject({ code: 'ENOENT' })
   await verifyRsiLocalInstalledPackages({ cohort: f.original, profilePath: f.profilePath })
@@ -161,7 +165,7 @@ test('CLI preparation derives the existing source and cannot be combined with ac
   const base = ['--prepare-local-update', '--profile', 'owner', '--dsh-home', '/private/home']
   expect(parseRsiSetupArgs(base)).toMatchObject({ prepareLocalUpdate: true, profile: 'owner' })
   for (const flags of [['--apply'], ['--start'], ['--install-owner'], ['--install-local-cohort'], ['--prepare-source'],
-    ['--prepare-build'], ['--bundle', 'target'], ['--manifest', '/private/manifest.json']]) {
+    ['--prepare-build'], ['--bundle', 'target'], ['--manifest', '/private/manifest.json'], ['--optional-build']]) {
     expect(() => parseRsiSetupArgs([...base, ...flags])).toThrow('cannot be combined')
   }
   expect(() => parseRsiSetupArgs(['--prepare-local-update'])).toThrow('requires --profile')
@@ -169,6 +173,54 @@ test('CLI preparation derives the existing source and cannot be combined with ac
   for (const flags of [[], ['--install-owner'], ['--install-local-cohort'], ['--apply']]) {
     expect(() => parseRsiSetupArgs([...flags, '--add-memory-learning'])).toThrow('requires --prepare-local-update')
   }
+  // Linux defaults to the native runtime; an explicit absolute --docker-path is
+  // the only way to keep preparing a legacy image receipt.
+  if (process.platform === 'darwin') {
+    expect(() => parseRsiSetupArgs([...base, '--docker-path', '/usr/bin/docker']))
+      .toThrow('--docker-path is not supported by macOS')
+  } else {
+    expect(parseRsiSetupArgs([...base, '--docker-path', '/usr/bin/docker']))
+      .toMatchObject({ dockerPath: '/usr/bin/docker' })
+  }
+  expect(() => parseRsiSetupArgs([...base, '--docker-path', 'relative']))
+    .toThrow(process.platform === 'darwin' ? '--docker-path is not supported by macOS' : '--docker-path must be absolute')
+})
+
+test('local update source build reader dispatches on mutually exclusive receipt trees', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'rsi-lub-read-')); roots.push(home)
+  const input = { dshHome: home, profile: 'web', source: { sourceCommit: 'x' } as never }
+  await expect(readRsiLocalUpdateSourceBuild(input)).rejects.toThrow('candidate build environment is missing')
+  const native = vi.spyOn(linuxBootstrap, 'readLinuxRsiRuntime')
+    .mockResolvedValue({ backend: 'linux-native' } as Awaited<ReturnType<typeof linuxBootstrap.readLinuxRsiRuntime>>)
+  const docker = vi.spyOn(sourceBuild, 'readRsiBuildEnvironment')
+    .mockResolvedValue({ schemaVersion: 1 } as Awaited<ReturnType<typeof sourceBuild.readRsiBuildEnvironment>>)
+  await mkdir(join(home, 'rsi-linux-runtimes', 'web'), { recursive: true })
+  expect(await readRsiLocalUpdateSourceBuild(input)).toMatchObject({ backend: 'linux-native' })
+  expect(native).toHaveBeenCalledTimes(1)
+  expect(docker).not.toHaveBeenCalled()
+  await mkdir(join(home, 'rsi-builds', 'web'), { recursive: true })
+  await expect(readRsiLocalUpdateSourceBuild(input)).rejects.toThrow('both linux-native and Docker build receipts')
+  await rm(join(home, 'rsi-linux-runtimes'), { recursive: true, force: true })
+  expect(await readRsiLocalUpdateSourceBuild(input)).toMatchObject({ schemaVersion: 1 })
+  expect(docker).toHaveBeenCalledTimes(1)
+})
+
+test.skipIf(process.platform !== 'linux')('Linux local update builder uses the native runtime unless an explicit docker path is given', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'rsi-lub-build-')); roots.push(home)
+  const native = vi.spyOn(linuxBootstrap, 'prepareLinuxRsiRuntime')
+    .mockRejectedValue(new Error('native backend selected'))
+  const docker = vi.spyOn(sourceBuild, 'prepareRsiBuildEnvironment')
+    .mockRejectedValue(new Error('docker backend selected'))
+  const input = { dshHome: home, profile: 'web', source: { sourceCommit: 'x' } as never, signal: AbortSignal.timeout(5_000) }
+  await expect(prepareRsiLocalUpdateBuild(input)).rejects.toThrow('native backend selected')
+  expect(native).toHaveBeenCalledTimes(1)
+  expect(docker).not.toHaveBeenCalled()
+  vi.clearAllMocks()
+  await expect(prepareRsiLocalUpdateBuild({ ...input, dockerPath: '/usr/bin/docker' }))
+    .rejects.toThrow('docker backend selected')
+  expect(docker).toHaveBeenCalledTimes(1)
+  expect(docker.mock.calls[0]![0]).toMatchObject({ dockerPath: '/usr/bin/docker' })
+  expect(native).not.toHaveBeenCalled()
 })
 
 linuxTest('explicit pre-owner extension freezes exactly one disabled bundle without changing the installed Home', async () => {
@@ -228,10 +280,10 @@ linuxTest('schema 2 reader rechecks roots, build identity, current cohort and ow
   // Only the independently tested external build readers are ports here. Git,
   // source/cohort receipts, actual tarball inventory and pre-owner checks are real.
   const build = {
-    sourceBuild: { proof: 'controlled source-build identity' } as unknown as Awaited<ReturnType<typeof sourceBuild.readRsiBuildEnvironment>>,
+    sourceBuild: { proof: 'controlled source-build identity' } as unknown as Awaited<ReturnType<typeof localUpdateBuild.readRsiLocalUpdateSourceBuild>>,
     releaseBuild: { proof: 'controlled release-build identity' } as unknown as Awaited<ReturnType<typeof releaseBuild.readRsiReleaseBuildEnvironment>>,
   }
-  vi.spyOn(sourceBuild, 'readRsiBuildEnvironment').mockResolvedValue(build.sourceBuild)
+  vi.spyOn(localUpdateBuild, 'readRsiLocalUpdateSourceBuild').mockResolvedValue(build.sourceBuild)
   vi.spyOn(releaseBuild, 'readRsiReleaseBuildEnvironment').mockResolvedValue(build.releaseBuild)
   const candidate = { ...prepared, build }
   const encode = (value: object) => {
