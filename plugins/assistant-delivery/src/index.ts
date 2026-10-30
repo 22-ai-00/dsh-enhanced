@@ -26,13 +26,13 @@ export { deliverySchemaVersion } from './sqlite.js'
 export {
   ActiveLarkOwnerBindingsSnapshotError, activeLarkOwnerBindingsSnapshotProtocol,
   inspectActiveLarkOwnerBindingsLocally, inspectActiveWebOwnerBindingLocally,
-  listActiveIdleWebOwnerBindingsLocally,
+  listActiveIdleWebOwnerBindingsLocally, inspectRevokedOwnerRouteLocally, revokedOwnerRouteSnapshotProtocol,
 } from './operator-snapshot.js'
 export type {
   ActiveIdleWebOwnerBindingsInspection, ActiveLarkOwnerBinding, ActiveLarkOwnerBindingsQuery,
   ActiveLarkOwnerBindingsSnapshot, ActiveLarkOwnerBindingsSnapshotErrorCode,
   ActiveWebOwnerBindingInspection, ActiveWebOwnerBindingQuery, ActiveWebOwnerBindingSnapshot,
-  DeliveryOperatorFileIdentity,
+  DeliveryOperatorFileIdentity, RevokedOwnerRouteQuery, RevokedOwnerRouteSnapshot,
 } from './operator-snapshot.js'
 
 export function apply(ctx: Context, config: import('./service.js').Config): void {

@@ -11,6 +11,8 @@ import { assertNoMacProcessConnection, macCleanupPinnedDirectory, macConnectionI
 import { normalizeAutomationDefinition } from './store.js'
 import type { AutomationDefinition, AutomationRecord, AutomationStatus } from './types.js'
 
+export const automationRetirementSnapshotProtocol = 'assistant-automations/retirement-snapshot/v1' as const
+
 export const automationsOperatorSnapshotProtocol = 'assistant-automations-operator-snapshot/v1' as const
 
 export type AutomationOperatorSnapshotErrorCode =
@@ -67,6 +69,56 @@ export interface AutomationsOperatorSnapshot {
   readonly inventoryDigest: string
   /** Complete definition inventory, including paused and deleted rows. */
   readonly records: readonly AutomationOperatorRecord[]
+}
+
+/** Privileged upgrade proof: definitions can contain task prompts and authority. */
+export interface AutomationRetirementDefinitionRecord extends AutomationOperatorRecord {
+  readonly definition: AutomationDefinition
+  readonly createIdempotencyKeyDigest: string
+  /** Exact typed original columns, excluding only status/next-run/update/version. */
+  readonly immutableDigest: string
+}
+
+export interface AutomationRetirementReceipt {
+  readonly owner: string
+  readonly automationId: string
+  readonly operationId: string
+  readonly definitionHash: string
+  readonly expectedVersion: number
+  readonly definitionVersion: number
+  readonly automationStatus: 'paused'
+  readonly reason: 'owner-revoked'
+  readonly evidenceDigest: string
+  readonly retiredAt: number
+}
+
+export interface AutomationRetirementHistoryTable {
+  readonly name: string
+  readonly rowCount: number
+  readonly digest: string
+}
+
+export interface AutomationRetirementSchemaEntry {
+  readonly type: 'table' | 'index' | 'trigger'
+  readonly name: string
+  readonly table: string
+  /** Exact SQLite schema SQL; implicit indexes have null SQL. */
+  readonly sql: string | null
+}
+
+export interface AutomationRetirementSnapshot {
+  readonly protocol: typeof automationRetirementSnapshotProtocol
+  readonly schemaVersion: 15 | 16
+  readonly database: AutomationOperatorFileIdentity
+  readonly sidecars: AutomationsOperatorSnapshot['sidecars']
+  readonly storageDigest: string
+  readonly inFlightCount: number
+  readonly records: readonly AutomationRetirementDefinitionRecord[]
+  readonly retirements: readonly AutomationRetirementReceipt[]
+  readonly historyTables: readonly AutomationRetirementHistoryTable[]
+  readonly schemaEntries: readonly AutomationRetirementSchemaEntry[]
+  readonly schemaDigest: string
+  readonly snapshotDigest: string
 }
 
 interface DefinitionRow {
@@ -774,10 +826,253 @@ function publicRecord(record: InternalAutomationOperatorRecord): AutomationOpera
   })
 }
 
-function readSnapshot(databasePath: string): {
+const retirementColumns: Readonly<Record<string, string>> = {
+  "automation_attempts": "attempt_number:INTEGER automation_snapshot_hash:TEXT automation_snapshot_json:TEXT created_at:INTEGER failure_code:TEXT fencing_token:INTEGER finished_at:INTEGER id:TEXT owner_id:TEXT session_id:TEXT started_at:INTEGER status:TEXT task_id:TEXT updated_at:INTEGER",
+  "automation_changes": "automation_id:TEXT created_at:INTEGER expected_version:INTEGER idempotency_key:TEXT input_hash:TEXT operation:TEXT result_json:TEXT",
+  "automation_circuit_operations": "automation_id:TEXT created_at:INTEGER definition_hash:TEXT expected_circuit_version:INTEGER input_hash:TEXT lease_ms:INTEGER operation_id:TEXT result_json:TEXT system_owner:TEXT",
+  "automation_circuits": "automation_id:TEXT definition_hash:TEXT failure_class:TEXT failure_code:TEXT failure_phase:TEXT opened_at:INTEGER probe_lease_until:INTEGER probe_task_id:TEXT probe_token:TEXT state:TEXT updated_at:INTEGER version:INTEGER",
+  "automation_definitions": "create_idempotency_key:TEXT created_at:INTEGER definition_hash:TEXT definition_json:TEXT id:TEXT next_run_at:INTEGER status:TEXT system_owner:TEXT updated_at:INTEGER version:INTEGER",
+  "automation_evaluation_outbox": "attempt_count:INTEGER created_at:INTEGER id:TEXT last_error_code:TEXT last_failure_at:INTEGER next_attempt_at:INTEGER observation_kind:TEXT payload_json:TEXT run_id:TEXT status:TEXT updated_at:INTEGER",
+  "automation_growth_artifacts": "approval_diff_hash:TEXT artifact_id:TEXT automation_id:TEXT canary_evaluation_digest:TEXT canary_evaluation_id:TEXT canary_evaluation_proof_json:TEXT canary_run_id:TEXT canary_task_id:TEXT candidate_digest:TEXT candidate_id:TEXT candidate_revision:INTEGER created_at:INTEGER deadline_at:INTEGER definition_hash:TEXT definition_version:INTEGER evidence_count:INTEGER evidence_digest:TEXT experiment_id:TEXT owner_binding_id:TEXT preset:TEXT principal_id:TEXT privacy_attestation_json:TEXT proposal_id:TEXT shadow_task_id:TEXT state:TEXT steps_json:TEXT template_digest:TEXT template_ref:TEXT updated_at:INTEGER workspace:TEXT",
+  "automation_growth_operations": "created_at:INTEGER operation_id:TEXT operation_kind:TEXT payload_digest:TEXT receipt_json:TEXT status:TEXT updated_at:INTEGER",
+  "automation_incidents": "alert_ref:TEXT alert_status:TEXT automation_id:TEXT definition_hash:TEXT failure_class:TEXT failure_code:TEXT failure_phase:TEXT id:TEXT lifecycle_generation:INTEGER notification_route_id:TEXT opened_at:INTEGER presentation_revision:INTEGER resolved_at:INTEGER retryability:TEXT run_id:TEXT side_effect_state:TEXT stage:TEXT state:TEXT updated_at:INTEGER version:INTEGER",
+  "automation_occurrences": "automation_id:TEXT created_at:INTEGER dry_run:INTEGER external_event_digest:TEXT external_event_json:TEXT id:TEXT reason:TEXT scheduled_at:INTEGER status:TEXT trigger_key:TEXT trigger_kind:TEXT updated_at:INTEGER",
+  "automation_proposals": "change_hash:TEXT change_json:TEXT created_at:INTEGER dispatch_json:TEXT expires_at:INTEGER id:TEXT idempotency_key:TEXT policy_proposal_id:TEXT principal:TEXT requester:TEXT result_automation_id:TEXT status:TEXT ttl_ms:INTEGER updated_at:INTEGER version:INTEGER",
+  "automation_runs": "artifact_ref:TEXT attempt_id:TEXT automation_id:TEXT created_at:INTEGER definition_hash:TEXT delivery_ref:TEXT delivery_status:TEXT diagnostic_json:TEXT evidence_json:TEXT evidence_status:TEXT execution_mode:TEXT id:TEXT occurrence_id:TEXT output_preview:TEXT session_id:TEXT status:TEXT task_id:TEXT updated_at:INTEGER usage_json:TEXT",
+  "automation_system_reconciles": "automation_id:TEXT created_at:INTEGER idempotency_key:TEXT input_hash:TEXT result_json:TEXT system_owner:TEXT",
+  "automation_system_retirements": "automation_id:TEXT definition_hash:TEXT definition_version:INTEGER evidence_digest:TEXT expected_version:INTEGER operation_id:TEXT reason:TEXT retired_at:INTEGER system_owner:TEXT",
+  "automation_task_acceptance": "binding_generation:INTEGER binding_id:TEXT binding_version:INTEGER contract_digest:TEXT contract_id:TEXT dispatched_at:INTEGER preset:TEXT principal_record_id:TEXT principal_version:INTEGER quiescent:INTEGER submitted:INTEGER task_id:TEXT workspace:TEXT",
+  "automation_tasks": "attempt_count:INTEGER automation_id:TEXT cancel_requested:INTEGER claimed_by:TEXT created_at:INTEGER fencing_token:INTEGER id:TEXT lease_until:INTEGER occurrence_id:TEXT status:TEXT updated_at:INTEGER",
+  "duty_lease": "fencing_token:INTEGER lease_until:INTEGER owner_id:TEXT singleton:INTEGER updated_at:INTEGER"
+}
+
+const retirementIndexes: Readonly<Record<string, string>> = {
+  "automation_circuit_operation_scope": "automation_circuit_operations",
+  "automation_due": "automation_definitions",
+  "automation_evaluation_dispatch": "automation_evaluation_outbox",
+  "automation_growth_artifact_state": "automation_growth_artifacts",
+  "automation_incident_alert_outbox": "automation_incidents",
+  "automation_occurrence_history": "automation_occurrences",
+  "automation_open_circuits": "automation_circuits",
+  "automation_open_incidents": "automation_incidents",
+  "automation_task_claim": "automation_tasks"
+}
+
+const retirementAdditions: Readonly<Record<string, string>> = {
+  "automation_system_retirements": "CREATE TABLE automation_system_retirements (\n    system_owner TEXT NOT NULL,\n    automation_id TEXT NOT NULL,\n    operation_id TEXT NOT NULL UNIQUE,\n    definition_hash TEXT NOT NULL CHECK(length(definition_hash) = 64),\n    expected_version INTEGER NOT NULL CHECK(expected_version >= 1),\n    definition_version INTEGER NOT NULL CHECK(definition_version = expected_version + 1),\n    reason TEXT NOT NULL CHECK(reason = 'owner-revoked'),\n    evidence_digest TEXT NOT NULL CHECK(length(evidence_digest) = 64),\n    retired_at INTEGER NOT NULL CHECK(retired_at >= 0),\n    PRIMARY KEY(system_owner, automation_id)\n  ) STRICT",
+  "automation_retired_no_activate_insert": "CREATE TRIGGER automation_retired_no_activate_insert BEFORE INSERT ON automation_definitions\n    WHEN NEW.status = 'active' AND EXISTS (\n      SELECT 1 FROM automation_system_retirements WHERE system_owner = NEW.system_owner AND automation_id = NEW.id\n    ) BEGIN SELECT RAISE(ABORT, 'system automation is retired'); END",
+  "automation_retired_no_activate_update": "CREATE TRIGGER automation_retired_no_activate_update BEFORE UPDATE ON automation_definitions\n    WHEN NEW.status = 'active' AND EXISTS (\n      SELECT 1 FROM automation_system_retirements WHERE system_owner = NEW.system_owner AND automation_id = NEW.id\n    ) BEGIN SELECT RAISE(ABORT, 'system automation is retired'); END",
+  "automation_retirements_no_delete": "CREATE TRIGGER automation_retirements_no_delete BEFORE DELETE ON automation_system_retirements\n    BEGIN SELECT RAISE(ABORT, 'system retirement is permanent'); END",
+  "automation_retirements_no_update": "CREATE TRIGGER automation_retirements_no_update BEFORE UPDATE ON automation_system_retirements\n    BEGIN SELECT RAISE(ABORT, 'system retirement is immutable'); END"
+}
+
+function normalizedSchemaSql(sql: string): string {
+  // Whitespace normalization must never rewrite string or quoted identifier bytes.
+  return sql.replace(/'(?:''|[^'])*'|"(?:""|[^"])*"|\s+/gu,
+    token => /^\s/u.test(token) ? ' ' : token).trim()
+}
+
+function inspectRetirementSchema(database: DatabaseSync, version: 15 | 16): readonly AutomationRetirementSchemaEntry[] {
+  const raw = database.prepare(`SELECT type, name, tbl_name AS "table", sql
+    FROM sqlite_schema ORDER BY type COLLATE BINARY, name COLLATE BINARY`).all()
+  const entries: AutomationRetirementSchemaEntry[] = []
+  const expectedTables = Object.keys(retirementColumns).filter(name => version === 16 || name !== 'automation_system_retirements')
+  const seenTables = new Set<string>(); const seenIndexes = new Set<string>(); const seenAdditions = new Set<string>()
+  for (const row of raw) {
+    if ((row.type !== 'table' && row.type !== 'index' && row.type !== 'trigger')
+      || typeof row.name !== 'string' || typeof row.table !== 'string'
+      || (row.sql !== null && typeof row.sql !== 'string') || !expectedTables.includes(row.table)) {
+      fail('schema-unsupported', 'unreviewed schema entry')
+    }
+    const entry = row as unknown as AutomationRetirementSchemaEntry
+    if (entry.type === 'table') {
+      if (entry.name !== entry.table || entry.sql === null || !expectedTables.includes(entry.name)) {
+        fail('schema-unsupported', 'unreviewed table')
+      }
+      const columns = database.prepare(`PRAGMA table_xinfo("${entry.name}")`).all()
+      if (columns.some(column => column.hidden !== 0)
+        || columns.map(column => `${column.name}:${column.type}`).sort().join(' ') !== retirementColumns[entry.name]) {
+        fail('schema-unsupported', 'unreviewed table columns')
+      }
+      seenTables.add(entry.name)
+    } else if (entry.type === 'index') {
+      if (entry.sql === null) {
+        if (!new RegExp(`^sqlite_autoindex_${entry.table}_[1-9][0-9]*$`, 'u').test(entry.name)) {
+          fail('schema-unsupported', 'unreviewed implicit index')
+        }
+      } else if (retirementIndexes[entry.name] !== entry.table) fail('schema-unsupported', 'unreviewed index')
+      else seenIndexes.add(entry.name)
+    }
+    const addition = retirementAdditions[entry.name]
+    if (entry.type === 'trigger' || addition !== undefined) {
+      if (version !== 16 || addition === undefined || entry.sql === null
+        || normalizedSchemaSql(entry.sql) !== normalizedSchemaSql(addition)) {
+        fail('schema-unsupported', 'retirement schema protection is missing or changed')
+      }
+      seenAdditions.add(entry.name)
+    }
+    entries.push({ type: entry.type, name: entry.name, table: entry.table, sql: entry.sql })
+  }
+  const tableKinds = database.prepare('PRAGMA table_list').all().filter(row => row.schema === 'main' && row.name !== 'sqlite_schema')
+  if (expectedTables.some(name => !seenTables.has(name))
+    || Object.keys(retirementIndexes).some(name => !seenIndexes.has(name))
+    || (version === 16 && Object.keys(retirementAdditions).some(name => !seenAdditions.has(name)))
+    || tableKinds.length !== expectedTables.length
+    || tableKinds.some(row => row.type !== 'table' || row.strict !== 1)) {
+    fail('schema-unsupported', 'reviewed schema is incomplete')
+  }
+  return freeze(entries)
+}
+
+/** Length framing and type tags make NULL/text/BLOB/integers/reals unambiguous. */
+function typedRowDigest(table: string, columns: readonly string[], row: Record<string, unknown>): string {
+  const hash = createHash('sha256')
+  hash.update(JSON.stringify({ protocol: 'assistant-automations/retirement-row/v1', table, columns }))
+  for (let index = 0; index < columns.length; index++) {
+    const kind = row[`t${index}`]; const value = row[`v${index}`]
+    let bytes: Buffer
+    if (kind === 'null' && value === null) bytes = Buffer.alloc(0)
+    else if (kind === 'integer' && typeof value === 'bigint') bytes = Buffer.from(value.toString(), 'ascii')
+    else if (kind === 'real' && typeof value === 'number') {
+      bytes = Buffer.allocUnsafe(8); bytes.writeDoubleBE(value)
+    } else if ((kind === 'text' || kind === 'blob') && value instanceof Uint8Array) bytes = Buffer.from(value)
+    else return fail('database-corrupt', 'history value has an unsupported SQLite representation')
+    hash.update(`\0${kind}:${bytes.length}:`); hash.update(bytes)
+  }
+  return hash.digest('hex')
+}
+
+function typedProjection(columns: readonly string[]): string {
+  return columns.map((column, index) => `typeof("${column}") AS "t${index}",
+    CASE WHEN typeof("${column}") = 'text' THEN CAST("${column}" AS BLOB) ELSE "${column}" END AS "v${index}"`).join(', ')
+}
+
+function inspectHistoryTable(database: DatabaseSync, name: string): AutomationRetirementHistoryTable {
+  // Sort columns independently of migration-era physical column order. Every
+  // actual column is included; inspectRetirementSchema validated the full set.
+  const columns = retirementColumns[name]!.split(' ').map(column => column.split(':')[0]!)
+  const statement = database.prepare(`SELECT ${typedProjection(columns)} FROM "${name}"`)
+  statement.setReadBigInts(true)
+  const rows: string[] = []
+  // Bound memory by fixed-size digests, not stored task/message bodies. Sorting
+  // row hashes defines a canonical multiset and supports WITHOUT ROWID tables.
+  for (const row of statement.iterate()) rows.push(typedRowDigest(name, columns, row))
+  const hash = createHash('sha256')
+  hash.update(JSON.stringify({ protocol: 'assistant-automations/retirement-table/v1', name, columns, rowCount: rows.length }))
+  for (const digest of rows.sort()) hash.update(`\0${digest}`)
+  return freeze({ name, rowCount: rows.length, digest: hash.digest('hex') })
+}
+
+function inspectRetirementDefinitions(
+  database: DatabaseSync, records: readonly InternalAutomationOperatorRecord[],
+): readonly AutomationRetirementDefinitionRecord[] {
+  const columns = ['id', 'system_owner', 'definition_hash', 'definition_json', 'created_at', 'create_idempotency_key']
+  const statement = database.prepare(`SELECT create_idempotency_key, ${typedProjection(columns)}
+    FROM automation_definitions WHERE id = ?`)
+  statement.setReadBigInts(true)
+  return freeze(records.map(record => {
+    const row = statement.get(record.id)
+    if (row === undefined || !canonicalText(row.create_idempotency_key, 500)) {
+      return fail('database-corrupt', 'definition creation identity is invalid')
+    }
+    // SQLite TEXT decoding must not collapse distinct malformed UTF-8 bytes
+    // into the same JavaScript replacement characters in the public inventory.
+    for (const [index, value] of [record.id, record.owner ?? null, record.definitionHash,
+      JSON.stringify(record.definition), null, row.create_idempotency_key].entries()) {
+      if (index === 4 || value === null) continue
+      const bytes = row[`v${index}`]
+      if (!(bytes instanceof Uint8Array) || !Buffer.from(bytes).equals(Buffer.from(value))) {
+        return fail('database-corrupt', 'definition text bytes are not canonical UTF-8')
+      }
+    }
+    const createIdempotencyKeyDigest = typedRowDigest('automation_definitions/create-idempotency-key',
+      ['create_idempotency_key'], { t0: row.t5, v0: row.v5 })
+    return { ...record, createIdempotencyKeyDigest, immutableDigest: typedRowDigest('automation_definitions', columns, row) }
+  }))
+}
+
+function retirementDeleteIsRecorded(
+  database: DatabaseSync, record: InternalAutomationOperatorRecord, definitionVersion: number,
+): boolean {
+  // changeApproved(delete) is the only legal transition after retirement: one
+  // version increment, the same definition/owner, and its atomic change receipt.
+  // Match the exact stored bytes of the writer's public AutomationRecord so an
+  // arbitrary deleted status, version or timestamp cannot stand in for that API.
+  if (record.status !== 'deleted' || record.version !== definitionVersion + 1) return false
+  const result = JSON.stringify({
+    id: record.id, ...(record.owner === undefined ? {} : { owner: record.owner }),
+    definition: record.definition, status: record.status, createdAt: record.createdAt,
+    updatedAt: record.updatedAt, version: record.version,
+  })
+  const changes = database.prepare(`SELECT input_hash FROM automation_changes
+    WHERE automation_id = ? AND operation = 'delete' AND expected_version = ?
+      AND created_at = ? AND CAST(result_json AS BLOB) = ? LIMIT 2`)
+    .all(record.id, definitionVersion, record.updatedAt, Buffer.from(result))
+  return changes.length === 1 && typeof changes[0]?.input_hash === 'string' && digestPattern.test(changes[0].input_hash)
+}
+
+function inspectRetirements(database: DatabaseSync, records: readonly InternalAutomationOperatorRecord[]): readonly AutomationRetirementReceipt[] {
+  const definitions = new Map(records.map(record => [record.id, record]))
+  const operations = new Set<string>(); const tuples = new Set<string>()
+  return freeze(database.prepare(`SELECT *, CAST(system_owner AS BLOB) AS owner_bytes,
+    CAST(automation_id AS BLOB) AS automation_bytes, CAST(operation_id AS BLOB) AS operation_bytes
+    FROM automation_system_retirements
+    ORDER BY system_owner COLLATE BINARY, automation_id COLLATE BINARY`).all().map(row => {
+    if (!canonicalText(row.system_owner, 200) || !canonicalText(row.automation_id, 500)
+      || !canonicalText(row.operation_id, 500) || typeof row.definition_hash !== 'string' || !digestPattern.test(row.definition_hash)
+      || !safeInteger(row.expected_version, 1) || !safeInteger(row.definition_version, 2)
+      || row.definition_version !== row.expected_version + 1 || row.reason !== 'owner-revoked'
+      || typeof row.evidence_digest !== 'string' || !digestPattern.test(row.evidence_digest) || !safeInteger(row.retired_at)) {
+      return fail('database-corrupt', 'system retirement receipt is invalid')
+    }
+    for (const [value, bytes] of [[row.system_owner, row.owner_bytes], [row.automation_id, row.automation_bytes],
+      [row.operation_id, row.operation_bytes]]) {
+      if (typeof value !== 'string' || !(bytes instanceof Uint8Array) || !Buffer.from(bytes).equals(Buffer.from(value))) {
+        return fail('database-corrupt', 'retirement text bytes are not canonical UTF-8')
+      }
+    }
+    const record = definitions.get(row.automation_id)
+    const tuple = JSON.stringify([row.system_owner, row.automation_id])
+    if (operations.has(row.operation_id) || tuples.has(tuple)) {
+      return fail('database-corrupt', 'system retirement receipt identity is duplicated')
+    }
+    // Permanent markers outlive physical definition deletion. If the row still
+    // exists, accept only the exact retired state or its recorded formal delete.
+    if (record !== undefined && (record.owner !== row.system_owner || record.definitionHash !== row.definition_hash
+      || record.nextRunAt !== undefined
+      || !(record.status === 'paused' && record.version === row.definition_version && record.updatedAt === row.retired_at
+        || retirementDeleteIsRecorded(database, record, row.definition_version)))) {
+      return fail('database-corrupt', 'system retirement receipt is not bound to its exact definition')
+    }
+    operations.add(row.operation_id); tuples.add(tuple)
+    return {
+      owner: row.system_owner, automationId: row.automation_id, operationId: row.operation_id,
+      definitionHash: row.definition_hash, expectedVersion: row.expected_version, definitionVersion: row.definition_version,
+      automationStatus: 'paused' as const, reason: 'owner-revoked' as const, evidenceDigest: row.evidence_digest, retiredAt: row.retired_at,
+    }
+  }))
+}
+
+function retirementContents(database: DatabaseSync, version: 15 | 16, records: readonly InternalAutomationOperatorRecord[]) {
+  const schemaEntries = inspectRetirementSchema(database, version)
+  const schemaDigest = sha256(JSON.stringify({ protocol: 'assistant-automations/retirement-schema/v1', schemaEntries }))
+  const historyTables = Object.keys(retirementColumns).filter(name => name !== 'automation_definitions'
+    && name !== 'automation_system_retirements').sort().map(name => inspectHistoryTable(database, name))
+  return freeze({
+    records: inspectRetirementDefinitions(database, records),
+    retirements: version === 15 ? [] : inspectRetirements(database, records),
+    historyTables, schemaEntries, schemaDigest,
+  })
+}
+
+interface OperatorReadResult {
   snapshot: AutomationsOperatorSnapshot
   internalRecords: readonly InternalAutomationOperatorRecord[]
-} {
+}
+
+function readSnapshot(databasePath: string, retirement: true): AutomationRetirementSnapshot
+function readSnapshot(databasePath: string, retirement?: false): OperatorReadResult
+function readSnapshot(databasePath: string, retirement = false): OperatorReadResult | AutomationRetirementSnapshot {
   const path = privateDatabasePath(databasePath)
   // Pin the private parent directory for the whole snapshot so an ancestor
   // rename or a same-name directory swap cannot retarget the database path
@@ -790,10 +1085,7 @@ function readSnapshot(databasePath: string): {
   let copyFiles: readonly OpenedFile[] = []
   let database: DatabaseSync | undefined
   let transaction = false
-  let result: {
-    snapshot: AutomationsOperatorSnapshot
-    internalRecords: readonly InternalAutomationOperatorRecord[]
-  } | undefined
+  let result: OperatorReadResult | AutomationRetirementSnapshot | undefined
   let deferred: unknown
   // Descriptors the snapshot itself holds; these are excluded when proving that
   // SQLite opened the pinned inode, so the connection can never vouch for itself.
@@ -897,7 +1189,9 @@ function readSnapshot(databasePath: string): {
     const queryOnly = (database.prepare('PRAGMA query_only').get() as { query_only?: unknown }).query_only
     if (queryOnly !== 1) fail('database-unavailable', 'read-only guard was not enabled')
     const version = (database.prepare('PRAGMA user_version').get() as { user_version?: unknown }).user_version
-    if (version !== automationSchemaVersion) fail('schema-unsupported', `expected schema ${automationSchemaVersion}`)
+    if (version !== automationSchemaVersion && !(retirement && version === 15)) {
+      fail('schema-unsupported', retirement ? 'expected schema 15 or 16' : `expected schema ${automationSchemaVersion}`)
+    }
     const check = database.prepare('PRAGMA quick_check').all() as unknown as Array<{ quick_check?: unknown }>
     if (check.length !== 1 || check[0]?.quick_check !== 'ok') fail('database-corrupt', 'SQLite quick_check failed')
     const rows = database.prepare(`
@@ -924,6 +1218,9 @@ function readSnapshot(databasePath: string): {
     const foreignKeys = database.prepare('PRAGMA foreign_key_check').all()
     if (foreignKeys.length !== 0) fail('database-corrupt', 'foreign-key integrity check failed')
     const records = freeze(internalRecords.map(publicRecord))
+    const proof = retirement ? retirementContents(database, version as 15 | 16, internalRecords) : undefined
+    // History scans can lazily open SQLite resources as well.
+    if (inodeBindSupported) assertConnectionBound(bound, selfDescriptors())
     database.exec('ROLLBACK'); transaction = false
     database.close(); database = undefined
     assertJournalAbsent(path)
@@ -950,7 +1247,21 @@ function readSnapshot(databasePath: string): {
       inventoryDigest,
       records,
     })
-    result = { snapshot, internalRecords }
+    if (proof !== undefined) {
+      const semantic = {
+        protocol: automationRetirementSnapshotProtocol,
+        schemaVersion: version as 15 | 16,
+        storageDigest,
+        inFlightCount: inFlight.count,
+        ...proof,
+      }
+      result = freeze({
+        ...semantic,
+        database: identity(source),
+        sidecars: freeze({ wal: wal === null ? null : identity(wal), shm: shm === null ? null : identity(shm) }),
+        snapshotDigest: sha256(JSON.stringify(semantic)),
+      })
+    } else result = { snapshot, internalRecords }
   } catch (error) {
     deferred = error
   } finally {
@@ -998,6 +1309,14 @@ function readSnapshot(databasePath: string): {
  */
 export function inspectAutomationsOperatorSnapshot(databasePath: string): AutomationsOperatorSnapshot {
   return readSnapshot(databasePath).snapshot
+}
+
+/**
+ * Privileged read-only v15/v16 upgrade proof. Never migrates or opens a writable
+ * SQLite handle. History bodies remain private; their exact typed bytes are hashed.
+ */
+export function inspectAutomationRetirementSnapshot(databasePath: string): AutomationRetirementSnapshot {
+  return readSnapshot(databasePath, true)
 }
 
 /** Compatibility name for callers built against the earlier inventory proposal. */

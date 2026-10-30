@@ -1,9 +1,12 @@
 /** Offline RSI authority rebasing for a copied, stopped DSH_HOME. This module
  * deliberately imports the migration-aware frozen cohort from that Home. */
-import { createHash } from 'node:crypto'
-import { lstat, readFile, readdir, realpath, writeFile } from 'node:fs/promises'
+import { createHash, createPrivateKey, createPublicKey } from 'node:crypto'
+import { constants } from 'node:fs'
+import { createRequire } from 'node:module'
+import { isDeepStrictEqual } from 'node:util'
+import { lstat, open, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises'
 import { DatabaseSync } from 'node:sqlite'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -47,9 +50,6 @@ async function sourceAt(logicalHome, physicalHome, path, maximum) {
 async function boundSourceAt(logicalHome, physicalHome, path, maximum) {
   return (await boundBytes(physical(logicalHome, physicalHome, path), maximum)).toString('utf8')
 }
-async function readJson(logicalHome, physicalHome, path, maximum) {
-  return JSON.parse(await sourceAt(logicalHome, physicalHome, path, maximum))
-}
 async function saveJson(logicalHome, physicalHome, path, value) {
   await writeFile(physical(logicalHome, physicalHome, path), json(value), { mode: 0o600 })
 }
@@ -59,28 +59,32 @@ function receiptBody(receipt, digestName) {
   if (hash(JSON.stringify(body)) !== digest) fail('receipt digest differs')
   return body
 }
+async function installationAt(homePath, physicalHome, targetProfile, read = sourceAt) {
+  if (!profileName.test(targetProfile)) fail('invalid RSI target profile')
+  const root = join(homePath, 'rsi-authorities', targetProfile)
+  const resourcesReceipt = JSON.parse(await read(homePath, physicalHome, join(root, 'bootstrap.json'), 65_536))
+  receiptBody(resourcesReceipt, 'receiptDigest')
+  if (resourcesReceipt.schemaVersion !== 1 || resourcesReceipt.dshHome !== homePath
+    || resourcesReceipt.profile !== targetProfile || resourcesReceipt.resources?.root !== root) fail('authority resource binding differs')
+  const coordinatorPath = join(homePath, `.rsi-coordinator-${hash(targetProfile).slice(0, 16)}.json`)
+  const coordinator = JSON.parse(await read(homePath, physicalHome, coordinatorPath, 65_536))
+  if (coordinator.schemaVersion !== 1 || coordinator.targetProfile !== targetProfile
+    || !profileName.test(coordinator.coordinatorProfile) || coordinator.coordinatorProfile === targetProfile) fail('coordinator binding differs')
+  const configRoot = join(root, 'config'), manifestPath = join(configRoot, 'manifest.json')
+  const manifest = JSON.parse(await read(homePath, physicalHome, manifestPath, 2_097_152))
+  if (manifest.schemaVersion !== 1 || manifest.targetProfile !== targetProfile
+    || manifest.coordinatorProfile !== coordinator.coordinatorProfile || manifest.controlPlane?.statePath === undefined) fail('owner manifest differs')
+  const ledgerPath = join(manifest.controlPlane.statePath, 'control.sqlite')
+  return { targetProfile, coordinatorProfile: coordinator.coordinatorProfile, root, configRoot,
+    resources: resourcesReceipt.resources, resourcesReceipt, manifestPath, manifest, ledgerPath }
+}
 async function installations(homePath, physicalHome = homePath) {
   const parent = join(physicalHome, 'rsi-authorities')
   if (await optional(parent) === undefined) return []
   const result = []
   for (const targetProfile of (await readdir(parent)).sort()) {
     if (!profileName.test(targetProfile)) fail(`unknown RSI authority entry: ${targetProfile}`)
-    const root = join(homePath, 'rsi-authorities', targetProfile)
-    const resourcesReceipt = await readJson(homePath, physicalHome, join(root, 'bootstrap.json'), 65_536)
-    receiptBody(resourcesReceipt, 'receiptDigest')
-    if (resourcesReceipt.schemaVersion !== 1 || resourcesReceipt.dshHome !== homePath
-      || resourcesReceipt.profile !== targetProfile || resourcesReceipt.resources?.root !== root) fail('authority resource binding differs')
-    const coordinatorPath = join(homePath, `.rsi-coordinator-${hash(targetProfile).slice(0, 16)}.json`)
-    const coordinator = await readJson(homePath, physicalHome, coordinatorPath, 65_536)
-    if (coordinator.schemaVersion !== 1 || coordinator.targetProfile !== targetProfile
-      || !profileName.test(coordinator.coordinatorProfile) || coordinator.coordinatorProfile === targetProfile) fail('coordinator binding differs')
-    const configRoot = join(root, 'config'), manifestPath = join(configRoot, 'manifest.json')
-    const manifest = await readJson(homePath, physicalHome, manifestPath, 2_097_152)
-    if (manifest.schemaVersion !== 1 || manifest.targetProfile !== targetProfile
-      || manifest.coordinatorProfile !== coordinator.coordinatorProfile || manifest.controlPlane?.statePath === undefined) fail('owner manifest differs')
-    const ledgerPath = join(manifest.controlPlane.statePath, 'control.sqlite')
-    result.push({ targetProfile, coordinatorProfile: coordinator.coordinatorProfile, root, configRoot,
-      resources: resourcesReceipt.resources, manifestPath, manifest, ledgerPath })
+    result.push(await installationAt(homePath, physicalHome, targetProfile))
   }
   return result
 }
@@ -198,50 +202,59 @@ function assertUnitProperties(value) {
     || Object.values(value).some(item => typeof item !== 'string')) fail('candidate unit properties are incomplete')
 }
 
-async function ownerConfiguration(installation, homePath, physicalHome, modules) {
+async function ownerConfiguration(installation, homePath, physicalHome, modules, inspection = {}) {
+  const readSource = inspection.sourceAt ?? sourceAt
+  const readBound = inspection.boundSourceAt ?? boundSourceAt
+  const exists = inspection.optionalAt ?? (path => optional(physical(homePath, physicalHome, path)))
   const receiptPath = join(installation.configRoot, 'bootstrap.json')
-  const bootstrapSource = await sourceAt(homePath, physicalHome, receiptPath, 2_097_152)
+  const bootstrapSource = await readSource(homePath, physicalHome, receiptPath, 2_097_152)
   const receipt = JSON.parse(bootstrapSource)
   if (receipt.schemaVersion !== 1 || !receipt.files || receipt.result?.manifestPath !== installation.manifestPath
     || receipt.result?.targetProfile !== installation.targetProfile || receipt.result?.coordinatorProfile !== installation.coordinatorProfile) fail('owner bootstrap receipt differs')
   const overlayPath = join(installation.configRoot, 'host-update-overlays.json')
-  const overlaySource = await optional(physical(homePath, physicalHome, overlayPath))
-    ? await sourceAt(homePath, physicalHome, overlayPath, 2_097_152) : undefined
+  const overlaySource = await exists(overlayPath)
+    ? await readSource(homePath, physicalHome, overlayPath, 2_097_152) : undefined
   const overlay = modules.hostUpdate.readRsiHostUpdateOverlayChain({ source: overlaySource,
     resources: installation.resources, dshHome: homePath, profile: installation.targetProfile, bootstrapSource })
   const ownerUpdate = overlay.records.findLast(record => ['rsi-owner-repair-overlay', 'rsi-owner-program-update-overlay'].includes(record.kind))
   const ownerAfter = ownerUpdate?.kind === 'rsi-owner-repair-overlay' ? ownerUpdate.repair.after : ownerUpdate?.update.after
-  if (ownerAfter && (hash(await sourceAt(homePath, physicalHome, join(homePath, '.rsi-setup-journal.json'), 2_097_152)) !== ownerAfter.journalDigest
-    || hash(await sourceAt(homePath, physicalHome, join(homePath, 'rsi-creation-builds', installation.targetProfile, 'bootstrap.json'), 65_536)) !== ownerAfter.creationReceiptDigest)) {
+  if (ownerAfter && (hash(await readSource(homePath, physicalHome, join(homePath, '.rsi-setup-journal.json'), 2_097_152)) !== ownerAfter.journalDigest
+    || hash(await readSource(homePath, physicalHome, join(homePath, 'rsi-creation-builds', installation.targetProfile, 'bootstrap.json'), 65_536)) !== ownerAfter.creationReceiptDigest)) {
     fail(`owner ${ownerUpdate.kind === 'rsi-owner-repair-overlay' ? 'repair' : 'program update'} journal or creation receipt changed`)
   }
   const effective = overlay.latest ?? receipt
+  if (inspection.sourceOnly && (!effective.files || typeof effective.files !== 'object' || Array.isArray(effective.files)
+    || Object.keys(effective.files).length > 512)) fail('scanner source file inventory is invalid')
   const sources = {}
   for (const [path, digest] of Object.entries(effective.files)) {
     if (!inside(installation.configRoot, path) || [receiptPath, overlayPath].includes(path) || !/^[a-f0-9]{64}$/u.test(digest)) fail('owner config file pin is invalid')
-    const source = await sourceAt(homePath, physicalHome, path, 2_097_152)
+    const source = await readSource(homePath, physicalHome, path, 2_097_152)
     if (hash(source) !== digest) fail(`owner config changed: ${path}`)
     sources[path] = source
   }
-  const patches = { targetPatch: await boundSourceAt(homePath, physicalHome, join(homePath, 'profiles', installation.targetProfile, 'cordis.patch.yml'), 2_097_152),
-    coordinatorPatch: await boundSourceAt(homePath, physicalHome, join(homePath, 'profiles', installation.coordinatorProfile, 'cordis.patch.yml'), 2_097_152) }
+  const patches = { targetPatch: await readBound(homePath, physicalHome, join(homePath, 'profiles', installation.targetProfile, 'cordis.patch.yml'), 2_097_152),
+    coordinatorPatch: await readBound(homePath, physicalHome, join(homePath, 'profiles', installation.coordinatorProfile, 'cordis.patch.yml'), 2_097_152) }
   if (effective.result.manifestDigest !== hash(sources[installation.manifestPath])) fail('owner manifest changed')
   if (overlay.latest) {
-    const current = await watchedPlans(installation, homePath, physicalHome, modules)
+    // The existing Host update path retains its original current-plan read.
+    // A source-only repair/program overlay does not use that value below.
+    const ownerChange = ['rsi-owner-repair-overlay', 'rsi-owner-program-update-overlay'].includes(overlay.latest.kind)
+    const current = inspection.sourceOnly && ownerChange ? []
+      : await (inspection.watchedPlans ?? watchedPlans)(installation, homePath, physicalHome, modules)
     if (hash(json({ files: effective.files, patches: overlay.latest.patches })) !== effective.planDigest) fail('owner overlay plan changed')
     if (['rsi-owner-repair-overlay', 'rsi-owner-program-update-overlay'].includes(overlay.latest.kind)) {
       if (overlay.latest.patches[installation.coordinatorProfile] !== hash(patches.coordinatorPatch)) fail(`owner ${overlay.latest.kind === 'rsi-owner-repair-overlay' ? 'repair' : 'program update'} coordinator patch changed`)
     } else if (current[0]?.id === overlay.latest.currentPlanId) {
       for (const [profile, digest] of Object.entries(overlay.latest.patches)) {
         if (!profileName.test(profile) && !/^\.[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.plugin-backup-[A-Za-z0-9-]{1,36}$/u.test(profile)) fail('owner patch overlay profile differs')
-        const source = await boundSourceAt(homePath, physicalHome, join(homePath, 'profiles', profile, 'cordis.patch.yml'), 2_097_152)
+        const source = await readBound(homePath, physicalHome, join(homePath, 'profiles', profile, 'cordis.patch.yml'), 2_097_152)
         if (hash(source) !== digest) fail('owner patch overlay changed')
       }
       if (overlay.latest.patches[installation.targetProfile] !== hash(patches.targetPatch)
         || overlay.latest.patches[installation.coordinatorProfile] !== hash(patches.coordinatorPatch)) fail('current owner patch overlay changed')
     }
   }
-  return { receiptPath, receipt, bootstrapSource, overlayPath, overlay, effective, sources, patches }
+  return { receiptPath, receipt, bootstrapSource, overlayPath, overlaySource, overlay, effective, sources, patches }
 }
 
 function originalSnapshot(context, unitProperties) {
@@ -568,4 +581,248 @@ export async function verifyRsiHostUpdate({ homePath, physicalHome, hostPlan, pr
     } finally { db.close() }
   }
   return proof
+}
+
+const scannerOwnerSourceProtocol = 'host-rsi/scanner-owner-source/v1'
+function scannerSourceUnavailable() {
+  const error = new Error('Host RSI scanner owner source is unavailable')
+  error.code = 'rsi-scanner-owner-source-unavailable'
+  throw error
+}
+const sourceRoles = ['approval', 'release', 'adoption', 'observation', 'qualification', 'host',
+  'pr', 'review', 'merge', 'build', 'sign', 'publish', 'registry-verify', 'catalog-admission']
+const sourceSameFile = (left, right) => left.dev === right.dev && left.ino === right.ino && left.size === right.size
+  && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs && left.mode === right.mode
+  && left.uid === right.uid && left.nlink === right.nlink
+function sourceFreeze(value) {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.values(value).forEach(sourceFreeze); Object.freeze(value)
+  }
+  return value
+}
+function sourceCanonicalPath(path) {
+  if (typeof path !== 'string' || path === '/' || !isAbsolute(path) || resolve(path) !== path
+    || path.normalize('NFC') !== path || /[\p{Cc}]/u.test(path)) fail('invalid scanner source path')
+  return path
+}
+
+/** Pins only this inspection's sources. No source chmod, directory creation or SQLite write is performed. */
+async function scannerSourceObservation(homePath, physicalHome) {
+  const physicalRoot = await realpath(physicalHome)
+  if (physicalRoot !== physicalHome && !/^\/proc\/self\/fd\/[0-9]+$/u.test(physicalHome)) fail('scanner source Home is symlinked')
+  const directories = new Map(), files = new Map(), absent = new Set()
+  async function directory(path, privateMode = false) {
+    let pinned = directories.get(path)
+    if (!pinned) {
+      const linked = await lstat(path, { bigint: true })
+      if (!linked.isDirectory() || linked.isSymbolicLink() || linked.uid !== BigInt(process.getuid())
+        || linked.mode & 0o7022n) fail('unsafe scanner source directory')
+      const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+      try {
+        const opened = await handle.stat({ bigint: true })
+        if (!sourceSameFile(linked, opened)) fail('scanner source directory changed')
+        pinned = { handle, metadata: opened }; directories.set(path, pinned)
+      } catch (error) { await handle.close(); throw error }
+    }
+    if (privateMode && pinned.metadata.mode & 0o077n) fail('scanner source directory is not private')
+    return pinned
+  }
+  function mapped(path) { sourceCanonicalPath(path); return physical(homePath, physicalRoot, path) }
+  async function parent(path, privateMode) {
+    let current = physicalRoot
+    await directory(current, true)
+    for (const part of relative(physicalRoot, dirname(path)).split(sep).filter(Boolean)) {
+      current = join(current, part); await directory(current)
+    }
+    return directory(dirname(path), privateMode)
+  }
+  async function bytes(handle, metadata) {
+    const value = Buffer.alloc(Number(metadata.size)); let offset = 0
+    while (offset < value.length) {
+      const { bytesRead } = await handle.read(value, offset, value.length - offset, offset)
+      if (!bytesRead) fail('scanner source file changed during read')
+      offset += bytesRead
+    }
+    return value
+  }
+  function safeFile(metadata, maximum, privateMode) {
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1n
+      || metadata.uid !== BigInt(process.getuid()) || metadata.mode & BigInt(privateMode ? 0o7077 : 0o7022)
+      || metadata.size < 1n || metadata.size > BigInt(maximum)) fail('unsafe scanner source file')
+  }
+  async function read(path, maximum = 2_097_152, privateMode = true, expose = true) {
+    const physicalPath = mapped(path), parentPin = await parent(physicalPath, privateMode)
+    let pinned = files.get(path)
+    if (!pinned) {
+      const linked = await lstat(physicalPath, { bigint: true }); safeFile(linked, maximum, privateMode)
+      const anchored = process.platform === 'linux' ? `/proc/self/fd/${parentPin.handle.fd}/${basename(physicalPath)}` : physicalPath
+      const handle = await open(anchored, constants.O_RDONLY | constants.O_NOFOLLOW)
+      try {
+        const opened = await handle.stat({ bigint: true })
+        if (!sourceSameFile(linked, opened) || !sourceSameFile(opened, await lstat(physicalPath, { bigint: true }))) fail('scanner source file changed during open')
+        const value = await bytes(handle, opened)
+        if (!sourceSameFile(opened, await handle.stat({ bigint: true }))) fail('scanner source file changed during read')
+        pinned = { path, physicalPath, handle, metadata: opened, digest: hash(value), privateMode, expose }
+        files.set(path, pinned)
+        return value
+      } catch (error) { await handle.close(); throw error }
+    }
+    safeFile(pinned.metadata, maximum, privateMode)
+    pinned.privateMode ||= privateMode; pinned.expose ||= expose
+    const value = await bytes(pinned.handle, pinned.metadata)
+    if (hash(value) !== pinned.digest) fail('scanner source file drifted')
+    return value
+  }
+  const text = bytes => {
+    const value = bytes.toString('utf8')
+    if (!Buffer.from(value).equals(bytes)) fail('scanner source text is not canonical UTF-8')
+    return value
+  }
+  return {
+    physicalRoot,
+    sourceAt: async (_home, _physical, path, maximum) => text(await read(path, maximum)),
+    boundSourceAt: async (_home, _physical, path, maximum) => text(await read(path, maximum, false)),
+    read,
+    optionalAt: async path => {
+      const physicalPath = mapped(path); await parent(physicalPath, true)
+      try { return await lstat(physicalPath) } catch (error) {
+        if (error.code !== 'ENOENT') throw error
+        absent.add(path); return undefined
+      }
+    },
+    async verify() {
+      for (const [path, pinned] of directories) {
+        const linked = await lstat(path, { bigint: true }), opened = await pinned.handle.stat({ bigint: true })
+        if (!linked.isDirectory() || linked.isSymbolicLink() || linked.dev !== pinned.metadata.dev || linked.ino !== pinned.metadata.ino
+          || opened.dev !== pinned.metadata.dev || opened.ino !== pinned.metadata.ino
+          || linked.mode !== pinned.metadata.mode || opened.mode !== pinned.metadata.mode || linked.uid !== pinned.metadata.uid) fail('scanner source directory drifted')
+      }
+      const anchored = await stat(physicalHome, { bigint: true }), original = directories.get(physicalRoot).metadata
+      if (anchored.dev !== original.dev || anchored.ino !== original.ino) fail('scanner source Home drifted')
+      for (const pinned of files.values()) {
+        if (!sourceSameFile(pinned.metadata, await lstat(pinned.physicalPath, { bigint: true }))
+          || !sourceSameFile(pinned.metadata, await pinned.handle.stat({ bigint: true }))
+          || hash(await bytes(pinned.handle, pinned.metadata)) !== pinned.digest) fail('scanner source file drifted')
+      }
+      for (const path of absent) if (await optional(mapped(path))) fail('scanner source appeared during inspection')
+    },
+    sources: () => [...files.values()].filter(file => file.expose)
+      .map(file => ({ path: file.path, digest: file.digest, private: file.privateMode })).sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0),
+    async close() { await Promise.all([...files.values(), ...directories.values()].map(pin => pin.handle.close())) },
+  }
+}
+
+async function scannerSourceModules(homePath, observer, profile) {
+  const root = await realpath(join(observer.physicalRoot, 'profiles', profile, 'node_modules', '@dsh-enhanced', 'lark-channel'))
+  if (!inside(observer.physicalRoot, root)) fail('scanner source reader is outside Home')
+  const path = join(root, 'lib', 'rsi-host-update.js')
+  await observer.read(join(homePath, relative(observer.physicalRoot, path)), 2_097_152, false, false)
+  const contractPath = await realpath(createRequire(join(root, 'package.json')).resolve('@dsh-enhanced/assistant-growth-contract'))
+  if (!inside(observer.physicalRoot, contractPath)) fail('scanner owner validator is outside Home')
+  await observer.read(join(homePath, relative(observer.physicalRoot, contractPath)), 2_097_152, false, false)
+  // Fence this explicitly required validator before evaluating hostUpdate, whose
+  // relative imports may also use it. This is not a general ESM closure check:
+  // the caller supplies trusted installed code and its bounded import namespace.
+  const contract = await import(pathToFileURL(contractPath).href)
+  if (typeof contract.validateMemoryLearningOwner !== 'function') fail('scanner owner validator is unavailable')
+  const hostUpdate = await import(pathToFileURL(path).href)
+  if (typeof hostUpdate.readRsiHostUpdateOverlayChain !== 'function' || typeof hostUpdate.rsiHostUpdateOverlayDigest !== 'function') fail('scanner source reader is unavailable')
+  return { hostUpdate, contract }
+}
+
+async function scannerSourceResources(installation, observer) {
+  const { resources, resourcesReceipt } = installation
+  const root = installation.root, uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u
+  if (resources.schemaVersion !== 1 || !uuid.test(resources.installationId) || !uuid.test(resources.ledgerId)
+    || resources.installationId === resources.ledgerId || resources.configRoot !== installation.configRoot
+    || resources.stateRoot !== join(root, 'state') || resources.registry?.id !== `registry-${resources.installationId}`
+    || resources.registry.root !== join(root, 'registry') || resources.registry.locator !== pathToFileURL(resources.registry.root).href
+    || resources.catalog?.id !== `catalog-${resources.installationId}` || resources.catalog.path !== join(root, 'catalog.json')
+    || !isDeepStrictEqual(Object.keys(resources.identities ?? {}).sort(), [...sourceRoles].sort())
+    || !isDeepStrictEqual(Object.keys(resourcesReceipt.keyDigests ?? {}).sort(), [...sourceRoles].sort())) fail('scanner source resource receipt differs')
+  for (const role of sourceRoles) {
+    const identity = resources.identities[role], authority = `${role}-${resources.installationId}`
+    if (!identity || !isDeepStrictEqual(Object.keys(identity).sort(), ['authority', 'keyId', 'keyPath', 'publicKeyPem'])
+      || identity.authority !== authority || identity.keyId !== `${authority}-key` || identity.keyPath !== join(root, 'identities', `${role}.pem`)
+      || !/^[a-f0-9]{64}$/u.test(resourcesReceipt.keyDigests[role])) fail('scanner source identity binding differs')
+  }
+  // Only the source-chain signer is read. Other live authority keys/catalogs,
+  // grant ledgers and expiry are not admission conditions for permanent retirement.
+  const host = resources.identities.host
+  const keyBytes = await observer.read(host.keyPath, 16_384)
+  const key = createPrivateKey(keyBytes)
+  if (key.asymmetricKeyType !== 'ed25519' || hash(keyBytes) !== resourcesReceipt.keyDigests.host
+    || createPublicKey(key).export({ format: 'pem', type: 'spki' }).toString() !== host.publicKeyPem) fail('scanner source signer changed')
+  // Bind the observer identity to the original bootstrap without returning it.
+  const keyPath = installation.manifest.controlPlane.runtimeObserver?.keyPath
+  if (typeof keyPath !== 'string') fail('scanner source observer is unavailable')
+  const observerBytes = await observer.read(keyPath, 32)
+  if (observerBytes.length !== 32) fail('scanner source observer differs')
+  return hash(observerBytes)
+}
+
+/**
+ * Read-only provenance of the original frozen owner, never its current active or
+ * revoked status and never new authorization. The caller holds the Home lifecycle
+ * lock; physicalHome may name its controlled staged copy (or pinned /proc fd).
+ * Bootstrap and owner repair/program overlays do not require an active binding or
+ * Control Plane read. A Host-update overlay reuses watchedPlans' read-only SQLite
+ * connection; SQLite may update its SHM coordination index, not durable owner data.
+ * No Store, migrator, checkpoint, authority preparation or grant API is invoked.
+ * Direct reader/validator entries are pinned; the caller is responsible for the
+ * trusted installed JS dependency closure and its bounded execution namespace.
+ * This helper proves business-source provenance, not complete module safety.
+ */
+export async function inspectRsiScannerOwnerSource({ homePath, physicalHome = homePath, profile }) {
+  let observer
+  try {
+    sourceCanonicalPath(homePath); sourceCanonicalPath(physicalHome)
+    if (typeof profile !== 'string' || !profileName.test(profile)) fail('invalid scanner source profile')
+    observer = await scannerSourceObservation(homePath, physicalHome)
+    const installation = await installationAt(homePath, physicalHome, profile, observer.sourceAt)
+    const modules = await scannerSourceModules(homePath, observer, profile)
+    const observerDigest = await scannerSourceResources(installation, observer)
+    let sqliteRead = false
+    const inspected = await ownerConfiguration(installation, homePath, physicalHome, modules, {
+      sourceAt: observer.sourceAt, boundSourceAt: observer.boundSourceAt, optionalAt: observer.optionalAt, sourceOnly: true,
+      watchedPlans: async (...args) => {
+        sqliteRead = true
+        const cp = await realpath(join(observer.physicalRoot, 'profiles', profile, 'node_modules', '@dsh-enhanced', 'plugin-control-plane'))
+        if (!inside(observer.physicalRoot, cp)) fail('scanner source plan reader is outside Home')
+        // Validate the same private ledger path and every ancestor before the
+        // existing read-only query. Its bytes are checked again at the final
+        // source fence; SHM remains SQLite coordination, not owner provenance.
+        await observer.read(installation.ledgerPath, 268_435_456, true, false)
+        const reader = join(cp, 'lib', 'store.js')
+        await observer.read(join(homePath, relative(observer.physicalRoot, reader)), 2_097_152, false, false)
+        const store = await import(pathToFileURL(reader).href)
+        if (typeof store.readCurrentRuntimeEpochDeployment !== 'function') fail('scanner source current-plan reader is unavailable')
+        return watchedPlans(args[0], homePath, observer.physicalRoot, { store })
+      },
+    })
+    if (inspected.receipt.observerKeyDigest !== observerDigest || inspected.effective.result?.schemaVersion !== 1
+      || !/^[a-f0-9]{64}$/u.test(inspected.receipt.planDigest)
+      || !inspected.effective.files || Object.keys(inspected.effective.files).length > 512) fail('scanner source bootstrap differs')
+    const manifest = JSON.parse(inspected.sources[installation.manifestPath])
+    if (!isDeepStrictEqual(manifest, installation.manifest)) fail('scanner source effective manifest drifted')
+    const owner = manifest.sourceReviews?.owner
+    modules.contract.validateMemoryLearningOwner(owner)
+    if (!isDeepStrictEqual(owner, manifest.memoryLearning?.learning?.owner ?? owner)) fail('scanner source frozen owner differs')
+    if (inspected.overlay.latest) {
+      const runtimePath = join(homePath, 'rsi-authority-runtimes', profile, 'receipt.json')
+      if (hash(await observer.read(runtimePath)) !== inspected.overlay.latest.runtimeReceiptDigest) fail('scanner source runtime receipt changed')
+    }
+    await observer.verify()
+    const sourceFiles = observer.sources()
+    const locate = path => sourceFiles.find(file => file.path === path)
+    const unsigned = { protocol: scannerOwnerSourceProtocol, homePath, profile, coordinatorProfile: installation.coordinatorProfile,
+      owner: structuredClone(owner), manifest: locate(installation.manifestPath), bootstrap: locate(inspected.receiptPath),
+      resources: locate(join(installation.root, 'bootstrap.json')),
+      overlay: inspected.overlaySource === undefined ? null : { ...locate(inspected.overlayPath),
+        latestDigest: modules.hostUpdate.rsiHostUpdateOverlayDigest(inspected.overlay.latest), sequence: inspected.overlay.records.length },
+      sourceFiles, sqliteReadOnlyPlan: sqliteRead }
+    return sourceFreeze({ ...unsigned, sourceDigest: hash(JSON.stringify(unsigned)) })
+  } catch { scannerSourceUnavailable() } finally {
+    try { await observer?.close() } catch { scannerSourceUnavailable() }
+  }
 }

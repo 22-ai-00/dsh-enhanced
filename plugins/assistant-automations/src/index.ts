@@ -21,6 +21,8 @@ export type {
 export {
   AutomationOperatorSnapshotError,
   automationDefinitionDigest,
+  automationRetirementSnapshotProtocol,
+  inspectAutomationRetirementSnapshot,
   inspectAutomationInventoryLocally,
   inspectAutomationsOperatorSnapshot,
   listActiveAutomationsForReadiness,
@@ -32,6 +34,11 @@ export type {
   AutomationOperatorRecord,
   AutomationOperatorSnapshotErrorCode,
   AutomationsOperatorSnapshot,
+  AutomationRetirementSnapshot,
+  AutomationRetirementDefinitionRecord,
+  AutomationRetirementReceipt,
+  AutomationRetirementHistoryTable,
+  AutomationRetirementSchemaEntry,
 } from './operator.js'
 
 export function apply(ctx: Context, config: import('./service.js').Config): void {
