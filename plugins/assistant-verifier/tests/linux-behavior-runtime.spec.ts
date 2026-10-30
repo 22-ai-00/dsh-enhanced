@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { hashLinuxRuntimeTree, linuxRuntimeDigest, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
@@ -9,6 +9,22 @@ import { linuxPluginBehaviorRuntimeDigest, prepareLinuxPluginBehaviorRuntime, re
 import * as behaviorAssets from '../src/linux-behavior-assets.js'
 
 const sha = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
+async function withUmask<T>(mask: number, callback: () => Promise<T>): Promise<T> {
+  const previous = process.umask(mask)
+  try { return await callback() } finally { process.umask(previous) }
+}
+async function retainedTree(root: string): Promise<string[]> {
+  const rows: string[] = []
+  const visit = async (path: string, name: string): Promise<void> => {
+    const info = await lstat(path, { bigint: true })
+    const content = info.isSymbolicLink() ? await readlink(path) : info.isFile() ? sha(await readFile(path)) : ''
+    rows.push(JSON.stringify([name, info.dev.toString(), info.ino.toString(), info.mode.toString(),
+      info.mtimeNs.toString(), info.ctimeNs.toString(), content]))
+    if (info.isDirectory()) for (const child of (await readdir(path)).sort()) await visit(join(path, child), `${name}/${child}`)
+  }
+  await visit(root, '.')
+  return rows
+}
 let home: string, base: LinuxRuntime, descriptor: LinuxPluginBehaviorRuntime
 const makeBase = async (root: string): Promise<LinuxRuntime> => {
   await mkdir(root, { mode: 0o700 })
@@ -70,6 +86,29 @@ describe.runIf(process.platform === 'linux' && process.env.DSH_LINUX_BEHAVIOR_PR
     expect(await readFile(join(home, 'observer', 'behavior.json'))).toEqual(receipt)
     expect(await verifyLinuxPluginBehaviorRuntime(descriptor)).toEqual(descriptor)
     expect(linuxPluginBehaviorRuntimeDigest(descriptor)).toMatch(/^[a-f0-9]{64}$/u)
+  }, 120_000)
+
+  it('prepares under secure umask and preserves both retained trees when reopened under either umask', async () => {
+    const root = join(home, 'secure-observer'), baseBefore = await retainedTree(base.root.path)
+    const prepared = await withUmask(0o077, () => prepareLinuxPluginBehaviorRuntime({ runtime: base, root }))
+    expect(await retainedTree(base.root.path)).toEqual(baseBefore)
+    const observerRoot = join(prepared.runtime.root.path, 'dsh-plugin-verifier')
+    for (const name of ['worker.mjs', 'candidate.mjs']) expect((await lstat(join(observerRoot, name))).mode & 0o777).toBe(0o444)
+    for (const name of ['candidate-launcher', 'parent-protect.so', 'child-protect.so']) {
+      expect((await lstat(join(observerRoot, name))).mode & 0o777).toBe(0o555)
+    }
+    const receiptPath = join(root, 'behavior.json'), receipt = await readFile(receiptPath)
+    expect((await lstat(receiptPath)).mode & 0o777).toBe(0o444)
+    const observerBefore = await retainedTree(root)
+    for (const mask of [0o022, 0o077]) await withUmask(mask, async () => {
+      expect(await prepareLinuxPluginBehaviorRuntime({ runtime: base, root })).toEqual(prepared)
+      expect(await readLinuxPluginBehaviorRuntime({ runtime: base, root })).toEqual(prepared)
+      expect(await readLinuxPluginBehaviorPreparation({ runtime: base, root })).toEqual({
+        descriptor: prepared, baseRuntimeDigest: linuxRuntimeDigest(base), preparationDigest: JSON.parse(receipt.toString()).receiptDigest,
+      })
+      expect(await retainedTree(root)).toEqual(observerBefore)
+      expect(await retainedTree(base.root.path)).toEqual(baseBefore)
+    })
   }, 120_000)
 
   it('validates synchronously and rejects shape, getters, overlap and unsafe paths', async () => {
@@ -135,6 +174,25 @@ describe.runIf(process.platform === 'linux' && process.env.DSH_LINUX_BEHAVIOR_PR
     await chmod(path, 0o600); await writeFile(path, bytes); await chmod(path, 0o444)
   }
   const sealReceipt = (content: Record<string, unknown>): string => JSON.stringify({ ...content, receiptDigest: sha(JSON.stringify(content)) })
+
+  it('rejects retained observer permission drift without changing its tree even when its receipt is resealed', async () => {
+    const root = join(home, 'observer'), path = join(descriptor.runtime.root.path, 'dsh-plugin-verifier', 'worker.mjs')
+    const receipt = await readFile(join(root, 'behavior.json')), baseBefore = await retainedTree(base.root.path)
+    await chmod(path, 0o400)
+    try {
+      const altered = { ...descriptor, runtime: { ...descriptor.runtime, root: { ...descriptor.runtime.root,
+        sha256: await hashLinuxRuntimeTree(descriptor.runtime.root.path) } } }
+      const { receiptDigest: _digest, ...content } = JSON.parse(receipt.toString()) as Record<string, unknown>
+      await replaceReceipt(sealReceipt({ ...content, descriptor: altered }))
+      const before = await retainedTree(root)
+      await withUmask(0o077, async () => {
+        await expect(prepareLinuxPluginBehaviorRuntime({ runtime: base, root })).rejects.toThrow('observer asset mode differs')
+        await expect(readLinuxPluginBehaviorRuntime({ runtime: base, root })).rejects.toThrow('observer asset mode differs')
+      })
+      expect(await retainedTree(root)).toEqual(before)
+      expect(await retainedTree(base.root.path)).toEqual(baseBefore)
+    } finally { await chmod(path, 0o444); await replaceReceipt(receipt) }
+  }, 120_000)
 
   it('adopts the immutable observer after the original base is unavailable without recreating it', async () => {
     const input = await adoptionInput(), root = join(home, 'observer'), receiptPath = join(root, 'behavior.json')

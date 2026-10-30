@@ -357,6 +357,8 @@ async function prepareUnlocked(input: { runtime: LinuxRuntime; root: string; sig
     await mkdir(observerRoot, { mode: 0o700 })
     await writeFile(join(observerRoot, 'worker.mjs'), assets.worker, { flag: 'wx', mode: 0o444 })
     await writeFile(join(observerRoot, 'candidate.mjs'), assets.candidate, { flag: 'wx', mode: 0o444 })
+    await chmod(join(observerRoot, 'worker.mjs'), 0o444)
+    await chmod(join(observerRoot, 'candidate.mjs'), 0o444)
     await symlink('../node_modules', join(observerRoot, 'node_modules'))
     await mkdir(join(observerRoot, 'plugins'), { mode: 0o700 })
     await mkdir(join(observerRoot, 'plugins', 'assistant-verifier'), { mode: 0o700 })
@@ -383,6 +385,7 @@ async function prepareUnlocked(input: { runtime: LinuxRuntime; root: string; sig
       launcherSha256: hashes[0]!, parentProtectSha256: hashes[1]!, childProtectSha256: hashes[2]! } }
     const content = { schemaVersion: 1 as const, descriptor, baseRuntimeDigest: linuxRuntimeDigest(base), compilerSha256 }
     await writeFile(join(stage, 'behavior.json'), JSON.stringify({ ...content, receiptDigest: sha(JSON.stringify(content)) }) + '\n', { flag: 'wx', mode: 0o444 })
+    await chmod(join(stage, 'behavior.json'), 0o444)
     await sync(join(stage, 'behavior.json')); await sync(root); await sync(stage)
     signal.throwIfAborted()
     if (await exists(input.root)) fail('root appeared during preparation')
