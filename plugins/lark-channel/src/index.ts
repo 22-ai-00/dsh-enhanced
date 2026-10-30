@@ -56,6 +56,22 @@ export type {
   SupervisedGrowthManagedAutomationProjectionRecord,
 } from './supervised-growth-setup.js'
 
+// Installation-only maintenance must not turn optional Automations/Policy peers
+// into eager dependencies of the ordinary Lark adapter.
+export async function deriveScannerRetirementConfiguration(input: Parameters<typeof import('./rsi-scanner-retirement-config.js').deriveScannerRetirementConfiguration>[0]) {
+  return (await import('./rsi-scanner-retirement-config.js')).deriveScannerRetirementConfiguration(input)
+}
+export async function captureScannerRetirementPlan(input: Parameters<typeof import('./rsi-scanner-retirement-stage.js').captureScannerRetirementPlan>[0]) {
+  return (await import('./rsi-scanner-retirement-stage.js')).captureScannerRetirementPlan(input)
+}
+export async function applyScannerRetirementPlan(input: Parameters<typeof import('./rsi-scanner-retirement-stage.js').applyScannerRetirementPlan>[0]) {
+  return (await import('./rsi-scanner-retirement-stage.js')).applyScannerRetirementPlan(input)
+}
+export async function verifyScannerRetirementPersistence(input: Parameters<typeof import('./rsi-scanner-retirement-stage.js').verifyScannerRetirementPersistence>[0]) {
+  return (await import('./rsi-scanner-retirement-stage.js')).verifyScannerRetirementPersistence(input)
+}
+export type { ScannerRetirementPlan, ScannerRetirementCompletion, ScannerRetirementCapture } from './rsi-scanner-retirement-stage.js'
+
 export function apply(ctx: Context, config: import('./config.js').Config): void {
   const normalized = Config(config)
   if (normalized.enabled && normalized.credentialHandle !== undefined) {

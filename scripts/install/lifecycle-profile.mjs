@@ -95,6 +95,65 @@ const SUPERVISED_UPGRADE_PROTOCOL = 'dsh-enhanced/supervised-lifecycle/v1'
 const SUPERVISED_UNINSTALL_PROTOCOL = 'dsh-enhanced/supervised-uninstall/v1'
 const SERVICE_CLEANUP_PROTOCOL = 'dsh-enhanced/service-cleanup/v1'
 const SUPERVISED_POLL_INTERVAL_MS = 100
+const SCANNER_RETIREMENT_PROTOCOL = 'dsh-enhanced/scanner-retirement-transaction/v1'
+const SCANNER_RETIREMENT_TIMEOUT_MS = 30_000
+const SCANNER_RETIREMENT_ARTIFACT_MAX_BYTES = 8 * 1024 * 1024
+const SCANNER_RETIREMENT_SOURCE_PROGRAM = String.raw`
+import { pathToFileURL } from 'node:url'
+const [helperPath, homePath, profile] = process.argv.slice(1)
+const helper = await import(pathToFileURL(helperPath).href)
+process.stdout.write(JSON.stringify(await helper.inspectRsiScannerOwnerSource({ homePath, physicalHome: homePath, profile })))
+`
+const SCANNER_RETIREMENT_OPERATOR_PROGRAM = String.raw`
+import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import { readFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
+const [action, home, profile, dsh, sourcePath, sourceDigest, capturePath, captureDigest, completionPath, completionDigest] = process.argv.slice(1)
+const hash = bytes => createHash('sha256').update(bytes).digest('hex')
+const read = async (path, expected) => {
+  const bytes = await readFile(path)
+  if (bytes.length > 8 * 1024 * 1024 || hash(bytes) !== expected) throw new Error('scanner retirement artifact differs')
+  return JSON.parse(bytes.toString('utf8'))
+}
+const source = await read(sourcePath, sourceDigest)
+if (source.homePath !== home || source.profile !== profile) throw new Error('scanner retirement source scope differs')
+const require = createRequire(join(home, 'profiles', profile, 'package.json'))
+const lark = await import(require.resolve('@dsh-enhanced/lark-channel'))
+const scope = { dshHome: home, profile, owner: source.ownerSource.owner, effectiveConfig: source.effectiveConfig }
+const dump = () => {
+  const result = spawnSync(dsh, ['--profile', profile, '--dump-config'], {
+    encoding: 'utf8', timeout: 10000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, DSH_HOME: home },
+  })
+  if (result.error || result.status !== 0) throw new Error('scanner retirement candidate configuration unavailable')
+  return result.stdout
+}
+let result
+if (action === 'capture') {
+  const candidateConfig = dump()
+  const { effectiveConfigDigest: originalDigest, ...original } = await lark.deriveScannerRetirementConfiguration(scope)
+  const { effectiveConfigDigest: candidateConfigDigest, ...candidate } = await lark.deriveScannerRetirementConfiguration({ ...scope, effectiveConfig: candidateConfig })
+  if (originalDigest !== source.source.effectiveConfigDigest || !isDeepStrictEqual(original, candidate)) {
+    throw new Error('scanner retirement candidate participation changed')
+  }
+  result = { candidateConfigDigest, capture: await lark.captureScannerRetirementPlan({ ...scope,
+    expectedStorageDigest: source.source.automationsProof.storageDigest }) }
+} else {
+  const captured = await read(capturePath, captureDigest)
+  if (captured.capture.status !== 'prepared') throw new Error('scanner retirement plan is missing')
+  const plan = captured.capture.plan
+  if (action === 'apply') {
+    if (hash(dump()) !== captured.candidateConfigDigest) throw new Error('scanner retirement candidate configuration drifted')
+    result = await lark.applyScannerRetirementPlan({ plan, effectiveConfig: source.effectiveConfig,
+      signal: AbortSignal.timeout(25000) })
+  } else if (action === 'verify') {
+    result = await lark.verifyScannerRetirementPersistence({ plan, completion: await read(completionPath, completionDigest) })
+  } else throw new Error('unknown scanner retirement action')
+}
+process.stdout.write(JSON.stringify(result))
+`
 const SUPERVISED_OPERATOR_PROGRAM = String.raw`
 import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
@@ -355,7 +414,7 @@ function withBindingDigest(manifest) {
 }
 
 function sameIdentity(actual, expected) {
-  return expected !== undefined && actual.isDirectory()
+  return expected !== undefined && actual !== undefined && actual !== null && actual.isDirectory()
     && String(actual.dev) === expected.dev
     && String(actual.ino) === expected.ino
     && (expected.uid === undefined || actual.uid === expected.uid)
@@ -893,6 +952,7 @@ function manifestMaximumBytes(manifest) {
 
 async function writeManifest(transactionRoot, manifest, state, details = {}) {
   const next = withBindingDigest({ ...manifest, ...details, state, updatedAt: new Date().toISOString() })
+  assertScannerRetirementBinding(next)
   if (!validManifestTopLevel(next)) {
     fail('生命周期事务 manifest 包含未知顶层字段，拒绝持久化（可能绕过 bindingDigest 信封）。')
   }
@@ -1076,6 +1136,7 @@ async function loadManifest(physicalTransactionRoot, expected, validationTransac
     fail(`拒绝未绑定或校验失败的生命周期事务 manifest：${expected.transactionPath}`)
   }
   if (expected.homePath !== manifest.canonicalHome) fail(`生命周期事务 manifest 与当前 DSH_HOME 未绑定：${expected.transactionPath}`)
+  assertScannerRetirementBinding(manifest)
   return manifest
 }
 
@@ -1323,12 +1384,149 @@ function validDatabasePaths(paths) {
       && paths[key] !== '' && paths[key] !== '.' && !isAbsolute(paths[key]) && !paths[key].split('/').includes('..'))
 }
 
+const scannerBindingDigest = value => sha256(canonicalJson(JSON.parse(JSON.stringify(value))))
+function validScannerIdentity(value) {
+  return exactKeys(value, ['dev', 'ino', 'uid', 'mode'])
+    && ['dev', 'ino'].every(key => typeof value[key] === 'string' && /^\d+$/u.test(value[key]))
+    && Number.isSafeInteger(value.uid) && value.uid >= 0 && Number.isSafeInteger(value.mode) && value.mode >= 0
+}
+function validScannerArtifact(value, kind) {
+  return exactKeys(value, ['file', 'digest']) && value.file === `scanner-retirement-${kind}.json` && validDigest(value.digest)
+}
+function validScannerRetirement(value, source) {
+  if (!exactKeys(value, ['protocol', 'phase', 'transactionId', 'homePath', 'profile', 'originalIdentity',
+    'stagedIdentity', 'sourceDigest', 'sourceArtifact'], ['captureArtifact', 'completionArtifact', 'planDigest', 'unmanagedAutomationsDigest'])
+    || value.protocol !== SCANNER_RETIREMENT_PROTOCOL || !['source-bound', 'prepared', 'unchanged', 'completed'].includes(value.phase)
+    || typeof value.transactionId !== 'string' || !/^[a-f0-9-]{36}$/u.test(value.transactionId)
+    || typeof value.homePath !== 'string' || !isAbsolute(value.homePath) || resolve(value.homePath) !== value.homePath
+    || typeof value.profile !== 'string' || !PROFILE_NAME.test(value.profile)
+    || !validScannerIdentity(value.originalIdentity) || !validScannerIdentity(value.stagedIdentity)
+    || !validScannerArtifact(value.sourceArtifact, 'source') || source === undefined
+    || value.sourceDigest !== scannerBindingDigest(source)) return false
+  const required = value.phase === 'source-bound' ? [] : value.phase === 'unchanged' ? ['captureArtifact']
+    : value.phase === 'prepared' ? ['captureArtifact', 'planDigest']
+      : ['captureArtifact', 'planDigest', 'completionArtifact', 'unmanagedAutomationsDigest']
+  return ['captureArtifact', 'completionArtifact', 'planDigest', 'unmanagedAutomationsDigest'].every(key =>
+    required.includes(key) ? (key.endsWith('Artifact') ? validScannerArtifact(value[key], key === 'captureArtifact' ? 'capture' : 'completion') : validDigest(value[key]))
+      : value[key] === undefined)
+}
+
+function assertScannerRetirementBinding(manifest) {
+  const value = manifest.supervisedLifecycle?.scannerRetirement
+  if (value === undefined) return
+  if (!validScannerRetirement(value, manifest.supervisedLifecycle.source)
+    || manifest.operation !== 'upgrade' || manifest.version !== SUPERVISED_SERVICE_MANIFEST_VERSION
+    || value.transactionId !== manifest.id || value.homePath !== manifest.homePath || value.profile !== manifest.profile
+    || !isDeepStrictEqual(value.originalIdentity, manifest.originalIdentity)
+    || !isDeepStrictEqual(value.stagedIdentity, manifest.stagedIdentity)) fail('scanner retirement transaction binding differs')
+}
+
+// The source remains immutable. Only a fully verified completed subtransaction
+// may supply a different candidate baseline; restoration always uses source.
+function scannerCandidateSource(manifest) {
+  const source = manifest.supervisedLifecycle.source
+  assertScannerRetirementBinding(manifest)
+  const value = manifest.supervisedLifecycle.scannerRetirement
+  if (value === undefined || value.phase === 'unchanged') return source
+  if (value.phase !== 'completed') fail('scanner retirement must complete before candidate activation')
+  return { ...source, unmanagedAutomationsDigest: value.unmanagedAutomationsDigest }
+}
+
+async function assertScannerOriginalRestorePossible(manifest, physicalTransactionRoot) {
+  if (manifest.supervisedLifecycle?.scannerRetirement === undefined) return
+  assertScannerRetirementBinding(manifest)
+  if (['swapped', 'committed', 'service-accepted', 'cleanup-started'].includes(manifest.state)
+    || ['swapped', 'starting', 'service-accepted'].includes(manifest.servicePhase)
+      && manifest.supervisedLifecycle.startAttempt?.kind !== 'restore-source'
+    || ['post-swap-pending', 'post-swap-accepted'].includes(manifest.supervisedLifecycle.phase)) {
+    fail('scanner retirement candidate was adopted; missing Home cannot restore the old scanner state')
+  }
+  // Directory rename can win before the journal update. A missing stage cannot
+  // be treated as proof that the original backup is still safe to restore.
+  await assertCriticalDirectory(join(physicalTransactionRoot, 'staged-home'), manifest.stagedIdentity)
+}
+
+async function readScannerArtifact(physicalTransactionRoot, manifest, reference) {
+  if (!['source', 'capture', 'completion'].some(kind => validScannerArtifact(reference, kind))) fail('invalid scanner retirement artifact reference')
+  const root = await open(physicalTransactionRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+  let file
+  try {
+    const rootStat = await root.stat()
+    if (!sameIdentity(rootStat, manifest.transactionIdentity) || rootStat.uid !== currentUid() || (rootStat.mode & 0o077) !== 0) fail('unsafe scanner retirement transaction root')
+    const path = `/proc/self/fd/${root.fd}/${reference.file}`
+    file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const before = await file.stat({ bigint: true })
+    if (!before.isFile() || before.uid !== BigInt(currentUid()) || before.nlink !== 1n || (before.mode & 0o077n) !== 0n
+      || before.size > BigInt(SCANNER_RETIREMENT_ARTIFACT_MAX_BYTES)) fail('unsafe scanner retirement artifact')
+    const bytes = await file.readFile()
+    const after = await file.stat({ bigint: true }), named = await lstat(path, { bigint: true })
+    if (['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs', 'mode', 'uid', 'nlink'].some(key => before[key] !== after[key] || before[key] !== named[key])
+      || !sameIdentity(await lstat(physicalTransactionRoot), manifest.transactionIdentity)
+      || sha256(bytes) !== reference.digest) fail('scanner retirement artifact changed')
+    return JSON.parse(bytes.toString('utf8'))
+  } finally { await file?.close(); await root.close() }
+}
+
+async function writeScannerArtifact(physicalTransactionRoot, manifest, kind, value) {
+  const bytes = `${JSON.stringify(value)}\n`
+  if (Buffer.byteLength(bytes) > SCANNER_RETIREMENT_ARTIFACT_MAX_BYTES) fail('scanner retirement artifact exceeds limit')
+  const reference = { file: `scanner-retirement-${kind}.json`, digest: sha256(bytes) }
+  if (!validScannerArtifact(reference, kind) || !['source', 'capture', 'completion'].includes(kind)) fail('invalid scanner retirement artifact kind')
+  await assertCriticalDirectory(physicalTransactionRoot, manifest.transactionIdentity)
+  const file = await open(join(physicalTransactionRoot, reference.file), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+  try { await file.writeFile(bytes); await file.sync() } finally { await file.close() }
+  await fsyncPath(physicalTransactionRoot, true)
+  await readScannerArtifact(physicalTransactionRoot, manifest, reference)
+  return reference
+}
+
+async function readScannerRetirementEvidence(physicalTransactionRoot, manifest) {
+  assertScannerRetirementBinding(manifest)
+  const journal = manifest.supervisedLifecycle.scannerRetirement
+  if (journal === undefined) return undefined
+  const source = await readScannerArtifact(physicalTransactionRoot, manifest, journal.sourceArtifact)
+  if (!exactKeys(source, ['protocol', 'transactionId', 'homePath', 'profile', 'source', 'effectiveConfig', 'ownerSource'])
+    || source.protocol !== 'dsh-enhanced/scanner-retirement-source/v1' || source.transactionId !== manifest.id
+    || source.homePath !== manifest.homePath || source.profile !== manifest.profile
+    || scannerBindingDigest(source.source) !== journal.sourceDigest
+    || typeof source.effectiveConfig !== 'string' || sha256(source.effectiveConfig) !== source.source.effectiveConfigDigest
+    || source.ownerSource?.protocol !== 'host-rsi/scanner-owner-source/v1'
+    || source.ownerSource.homePath !== manifest.homePath || source.ownerSource.profile !== manifest.profile
+    || !validDigest(source.ownerSource.sourceDigest)) fail('scanner retirement source evidence differs')
+  if (journal.phase === 'source-bound') return { source }
+  const captured = await readScannerArtifact(physicalTransactionRoot, manifest, journal.captureArtifact)
+  if (!exactKeys(captured, ['candidateConfigDigest', 'capture']) || !validDigest(captured.candidateConfigDigest)) fail('invalid scanner retirement capture')
+  const capture = captured.capture
+  if (journal.phase === 'unchanged') {
+    if (!exactKeys(capture, ['status', 'reason', 'effectiveConfigDigest', 'beforeSnapshotDigest', 'storageDigest'])
+      || capture.status !== 'no-op' || !['owner-active', 'no-targets'].includes(capture.reason)
+      || capture.effectiveConfigDigest !== source.source.effectiveConfigDigest || !validDigest(capture.beforeSnapshotDigest)
+      || capture.storageDigest !== source.source.automationsProof.storageDigest) fail('scanner retirement no-op differs')
+    return { source, captured }
+  }
+  const plan = capture?.plan
+  if (!exactKeys(capture, ['status', 'plan']) || capture.status !== 'prepared' || plan?.planDigest !== journal.planDigest
+    || plan.dshHome !== manifest.homePath || plan.profile !== manifest.profile
+    || !isDeepStrictEqual(plan.owner, source.ownerSource.owner)
+    || plan.effectiveConfigDigest !== source.source.effectiveConfigDigest
+    || plan.automationsDatabasePath !== join(manifest.homePath, source.source.databasePaths.automations)
+    || plan.before?.storageDigest !== source.source.automationsProof.storageDigest
+    || plan.ownerProof?.storageDigest !== source.source.deliveryProof.storageDigest
+    || unmanagedAutomationDigest(plan.before.records) !== source.source.unmanagedAutomationsDigest) fail('scanner retirement plan source differs')
+  if (journal.phase === 'prepared') return { source, captured }
+  const completion = await readScannerArtifact(physicalTransactionRoot, manifest, journal.completionArtifact)
+  if (completion?.planDigest !== plan.planDigest || unmanagedAutomationDigest(completion.after.records) !== journal.unmanagedAutomationsDigest) {
+    fail('scanner retirement completion baseline differs')
+  }
+  return { source, captured, completion }
+}
+
 function validSupervisedLifecycle(value, operation = 'upgrade') {
   const uninstall = operation === 'uninstall'
   if (uninstall) return validSupervisedUninstallLifecycle(value)
   if (operation !== 'upgrade' || !exactKeys(value, ['protocol', 'phase', 'activationNonce'], [
     'catalogDigest', 'databasePaths', 'source', 'previewPlan', 'previewAcceptance', 'activePlan',
-    'startAttempt', 'postSwapAcceptance',
+    'startAttempt', 'postSwapAcceptance', 'scannerRetirement',
   ]) || value.protocol !== SUPERVISED_UPGRADE_PROTOCOL
     || !SUPERVISED_UPGRADE_PHASES.has(value.phase) || typeof value.activationNonce !== 'string'
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value.activationNonce)) return false
@@ -1337,6 +1535,9 @@ function validSupervisedLifecycle(value, operation = 'upgrade') {
   const paths = value.databasePaths
   if (paths !== undefined && !validDatabasePaths(paths)) return false
   const source = value.source
+  if (value.scannerRetirement !== undefined && (!validScannerRetirement(value.scannerRetirement, source)
+    || value.phase === 'source-pending'
+    || value.phase !== 'source-attested' && !['completed', 'unchanged'].includes(value.scannerRetirement.phase))) return false
   if (source !== undefined && (!exactKeys(source, [
     'effectiveConfigDigest', 'semanticDigest', 'databasePaths', 'ownerBindingDigest',
     'deliveryProof', 'recoveryProof', 'automationsProof', 'unmanagedAutomationsDigest', 'activePlan',
@@ -1410,7 +1611,8 @@ function validSupervisedLifecycle(value, operation = 'upgrade') {
     acceptance.recoveryProof.bootstrap.generation === acceptance.generation
     && acceptance.recoveryProof.bootstrap.attestationSetDigest === plan.attestationSetDigest
     && acceptance.ownerBindingDigest === plan.ownerBindingDigest
-    && acceptance.unmanagedAutomationsDigest === value.source.unmanagedAutomationsDigest
+    && acceptance.unmanagedAutomationsDigest === (value.scannerRetirement?.phase === 'completed'
+      ? value.scannerRetirement.unmanagedAutomationsDigest : value.source.unmanagedAutomationsDigest)
     && JSON.stringify(acceptance.databasePaths) === JSON.stringify(value.databasePaths)
   )
   return phaseOrder.includes(value.phase) && requiredByPhase[value.phase].every(key => value[key] !== undefined)
@@ -1908,6 +2110,7 @@ async function recoverBoundTransaction({
 }
 
 function run(executable, args, { cwd, env = process.env, capture = false, rejectTruncated = false, passFds = [], timeoutMs } = {}) {
+  if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1)) fail('subprocess deadline must be a positive finite duration')
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(executable, args, {
       cwd,
@@ -1938,7 +2141,8 @@ function run(executable, args, { cwd, env = process.env, capture = false, reject
     child.once('error', rejectRun)
     child.once('close', (code, signal) => {
       if (timeout !== undefined) clearTimeout(timeout)
-      if (code === 0 && rejectTruncated && truncated) rejectRun(new LifecycleError(`${basename(executable)} output exceeds verification limit`, 1))
+      if (timedOut) rejectRun(new LifecycleError(`${basename(executable)} timed out after ${timeoutMs}ms`, 1))
+      else if (code === 0 && rejectTruncated && truncated) rejectRun(new LifecycleError(`${basename(executable)} output exceeds verification limit`, 1))
       else if (code === 0) resolveRun({ stdout, stderr })
       else rejectRun(new LifecycleError(
         timedOut
@@ -3633,6 +3837,7 @@ async function acceptedServicesStillBound({
 }
 
 async function removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome }) {
+  await assertScannerRetirementPersistent({ manifest, physicalTransactionRoot })
   if (manifest.localSourceMaintenance !== undefined) {
     const service = manifest.services.find(service => service.profile === manifest.profile)
     await assertLocalSourceHome({ manifest, physicalHome: manifest.homePath, selection: 'candidate',
@@ -3790,12 +3995,14 @@ async function removeCommittedTransactionBound({
     if (!entries.includes('manifest.json')) {
       fail(`service-aware transaction root 在清理前缺少 manifest：${transactionRoot}`)
     }
-    const allowedCleanupEntries = new Set(['manifest.json', 'service-mask-staging', 'service-enablement',
+    const scannerArtifacts = manifest.supervisedLifecycle?.scannerRetirement === undefined ? []
+      : ['sourceArtifact', 'captureArtifact', 'completionArtifact'].map(key => manifest.supervisedLifecycle.scannerRetirement[key]?.file).filter(Boolean)
+    const allowedCleanupEntries = new Set(['manifest.json', 'service-mask-staging', 'service-enablement', ...scannerArtifacts,
       ...(manifest.version === HOST_UPDATE_MANIFEST_VERSION ? ['host-preparation'] : [])])
     const unknownEntries = entries.filter(entry => !allowedCleanupEntries.has(entry))
     if (unknownEntries.length > 0) fail(`service-aware cleanup 包含未知事务条目：${unknownEntries.join(', ')}`)
     for (const entry of entries) {
-      if (entry === 'manifest.json') continue
+      if (entry === 'manifest.json' || scannerArtifacts.includes(entry)) continue
       await assertOwnedPrivateDirectory(join(cleanupFdPath, entry))
       if (entry === 'host-preparation') {
         if (manifest.hostMigration.preparation?.preparationRoot !== join(transactionRoot, entry)) {
@@ -3809,6 +4016,16 @@ async function removeCommittedTransactionBound({
     const cleanupBeforeManifest = fstatSync(cleanupDescriptor)
     if (!sameIdentity(cleanupBeforeManifest, expectedTransactionIdentity)) {
       fail(`service-aware transaction root 在 manifest 删除前发生替换：${transactionRoot}`)
+    }
+    if (scannerArtifacts.length > 0) {
+      // Keep the evidence together. Deleting its files one by one would leave a
+      // still-canonical journal unrecoverable if cleanup crashed between files.
+      await readScannerRetirementEvidence(physicalTransactionRoot, manifest)
+      assertLockParentStable(manifest.homePath)
+      await moveBoundDirectoryNoReplace(physicalTransactionRoot, anchoredSibling(`${transactionRoot}.completed-${manifest.id}`),
+        expectedTransactionIdentity, { path: physicalTransactionRoot, identity: expectedTransactionIdentity })
+      await fsyncPath(LOCK_PARENT_FD_PATH, true)
+      return
     }
     await rm(join(cleanupFdPath, 'manifest.json'))
     await fsyncPath(cleanupFdPath, true)
@@ -3828,6 +4045,13 @@ async function recoverServiceTransaction({
   manifest, homePath, physicalHomePath, profile, transactionRoot, physicalTransactionRoot, backupHome,
   homeStat, backupStat, homeIsOriginal, homeIsStaged, backupIsOriginal, serviceContext, dshExecutable,
 }) {
+  if (manifest.supervisedLifecycle?.scannerRetirement !== undefined) {
+    await readScannerRetirementEvidence(physicalTransactionRoot, manifest)
+    if (homeIsStaged) await assertScannerRetirementPersistent({ manifest, physicalTransactionRoot })
+    if (homeIsOriginal || homeStat === undefined && backupIsOriginal) {
+      await assertScannerOriginalRestorePossible(manifest, physicalTransactionRoot)
+    }
+  }
   if (manifest.localSourceMaintenance !== undefined) {
     if (serviceContext.localSourceInstallerRoot !== manifest.localSourceMaintenance.installer.root
       || serviceContext.bwrapExecutable === undefined) fail('local source recovery requires the explicitly reviewed installer root and bwrap')
@@ -3922,7 +4146,7 @@ async function recoverServiceTransaction({
         supervisedCatalogDigest: manifest.supervisedLifecycle.catalogDigest,
         supervisedPlan: manifest.supervisedLifecycle.activePlan,
         previewAcceptance: manifest.supervisedLifecycle.previewAcceptance,
-        supervisedSource: manifest.supervisedLifecycle.source,
+        supervisedSource: homeIsStaged ? scannerCandidateSource(manifest) : manifest.supervisedLifecycle.source,
       }
     : undefined
   if (supervisedSource && manifest.supervisedLifecycle.source === undefined) {
@@ -4600,6 +4824,7 @@ async function sandboxRun(context, command, options = {}) {
   try {
     return await run(invocation.executable, invocation.args, {
       capture: options.capture,
+      timeoutMs: options.timeoutMs, rejectTruncated: options.rejectTruncated,
       passFds: [resources.stage.fd, resources.validator.fd, ...(resources.store === undefined ? [] : [resources.store.fd]), ...(resources.cache === undefined ? [] : [resources.cache.fd]), ...readonlyRoots.map(root => root.handle.fd), ...localPackageRoots.map(root => root.handle.fd)],
     })
   } finally {
@@ -4756,6 +4981,10 @@ function sourceSupervisedPlan(source) {
 }
 
 async function persistSourceRestoreAttempt({ manifest, physicalTransactionRoot, homePath, profile, dshExecutable }) {
+  if (manifest.supervisedLifecycle?.scannerRetirement !== undefined) {
+    await assertScannerOriginalRestorePossible(manifest, physicalTransactionRoot)
+    await assertCriticalDirectory(homePath, manifest.originalIdentity)
+  }
   const raw = compactSupervisedSnapshot(await runSupervisedOperatorDirect({ homePath, profile, dshExecutable }, 'snapshot'), false)
   const lifecycle = manifest.operation === 'uninstall' ? {
     ...manifest.supervisedLifecycle, phase: 'source-attested',
@@ -4800,7 +5029,8 @@ async function runSupervisedOperator(context, action, nonce, extraEnvironment) {
   const result = await sandboxRun(context, [
     process.execPath, '--input-type=module', '--eval', SUPERVISED_OPERATOR_PROGRAM,
     action, context.homePath, context.profile, context.dshExecutable, ...(nonce === undefined ? [] : [nonce]),
-  ], { capture: true, extraEnvironment: extraEnvironment ?? context.supervisedOperatorEnvironment })
+  ], { capture: true, rejectTruncated: true, timeoutMs: context.operatorTimeoutMs ?? SCANNER_RETIREMENT_TIMEOUT_MS,
+    extraEnvironment: extraEnvironment ?? context.supervisedOperatorEnvironment })
   return parseJsonOutput(result.stdout, action)
 }
 
@@ -4810,8 +5040,90 @@ async function runSupervisedOperatorDirect(context, action, nonce) {
   const result = await run(process.execPath, [
     '--input-type=module', '--eval', SUPERVISED_OPERATOR_PROGRAM,
     action, homePath, profile, dshExecutable, ...(effectiveNonce === undefined ? [] : [effectiveNonce]),
-  ], { capture: true, env: { ...process.env, DSH_HOME: homePath } })
+  ], { capture: true, rejectTruncated: true, timeoutMs: context.operatorTimeoutMs ?? SCANNER_RETIREMENT_TIMEOUT_MS,
+    env: { ...process.env, DSH_HOME: homePath } })
   return parseJsonOutput(result.stdout, action)
+}
+
+async function captureScannerRetirementSource({ manifest, physicalTransactionRoot, sandbox }) {
+  await assertCriticalDirectory(sandbox.stageHome, manifest.stagedIdentity)
+  const effectiveConfig = (await sandboxRun(sandbox, [sandbox.dshExecutable, '--profile', manifest.profile, '--dump-config'],
+    { capture: true, rejectTruncated: true, timeoutMs: SCANNER_RETIREMENT_TIMEOUT_MS })).stdout
+  if (sha256(effectiveConfig) !== manifest.supervisedLifecycle.source.effectiveConfigDigest) fail('scanner retirement frozen source configuration drifted')
+  // The legacy installed reader and its dependencies run with logical Home
+  // mapped to the stopped copy, never in the parent's original Home namespace.
+  const ownerResult = await sandboxRun(sandbox, [process.execPath, '--input-type=module', '--eval', SCANNER_RETIREMENT_SOURCE_PROGRAM,
+    join(dirname(SCRIPT_PATH), 'host-rsi-update.mjs'), manifest.homePath, manifest.profile],
+  { capture: true, rejectTruncated: true, timeoutMs: SCANNER_RETIREMENT_TIMEOUT_MS, readonlyRoots: [dirname(SCRIPT_PATH)] })
+  const ownerSource = parseJsonOutput(ownerResult.stdout, 'scanner-retirement-source')
+  await assertCriticalDirectory(sandbox.stageHome, manifest.stagedIdentity)
+  const sourceArtifact = await writeScannerArtifact(physicalTransactionRoot, manifest, 'source', {
+    protocol: 'dsh-enhanced/scanner-retirement-source/v1', transactionId: manifest.id,
+    homePath: manifest.homePath, profile: manifest.profile, source: manifest.supervisedLifecycle.source, effectiveConfig, ownerSource,
+  })
+  const scannerRetirement = { protocol: SCANNER_RETIREMENT_PROTOCOL, phase: 'source-bound', transactionId: manifest.id,
+    homePath: manifest.homePath, profile: manifest.profile, originalIdentity: manifest.originalIdentity, stagedIdentity: manifest.stagedIdentity,
+    sourceDigest: scannerBindingDigest(manifest.supervisedLifecycle.source), sourceArtifact }
+  const next = { ...manifest, supervisedLifecycle: { ...manifest.supervisedLifecycle, scannerRetirement } }
+  await readScannerRetirementEvidence(physicalTransactionRoot, next)
+  return writeManifest(physicalTransactionRoot, next, 'prepared')
+}
+
+async function runScannerRetirementOperator({ manifest, physicalTransactionRoot, sandbox, action }) {
+  const evidence = await readScannerRetirementEvidence(physicalTransactionRoot, manifest)
+  const journal = manifest.supervisedLifecycle?.scannerRetirement
+  if (evidence === undefined || !['capture', 'apply', 'verify'].includes(action)
+    || action === 'capture' && journal.phase !== 'source-bound'
+    || action === 'apply' && journal.phase !== 'prepared'
+    || action === 'verify' && journal.phase !== 'completed') fail('invalid scanner retirement operator phase')
+  if (action !== 'verify' && (sandbox === undefined || manifest.servicePhase !== 'stopped'
+    || manifest.supervisedLifecycle.phase !== 'source-attested')) fail('scanner retirement writes require a stopped private stage')
+  await assertCriticalDirectory(sandbox?.stageHome ?? manifest.homePath, manifest.stagedIdentity)
+  await assertCriticalDirectory(manifest.transactionPath, manifest.transactionIdentity)
+  const referenceArgs = [journal.sourceArtifact, journal.captureArtifact, journal.completionArtifact].flatMap(reference =>
+    reference === undefined ? ['', ''] : [join(manifest.transactionPath, reference.file), reference.digest])
+  const command = [process.execPath, '--input-type=module', '--eval', SCANNER_RETIREMENT_OPERATOR_PROGRAM,
+    action, manifest.homePath, manifest.profile, sandbox?.dshExecutable ?? '',
+    ...referenceArgs]
+  const options = { capture: true, rejectTruncated: true, timeoutMs: SCANNER_RETIREMENT_TIMEOUT_MS }
+  const result = sandbox === undefined
+    ? await run(command[0], command.slice(1), { ...options, env: { ...process.env, DSH_HOME: manifest.homePath } })
+    : await sandboxRun(sandbox, command, { ...options, readonlyRoots: [manifest.transactionPath] })
+  await assertCriticalDirectory(sandbox?.stageHome ?? manifest.homePath, manifest.stagedIdentity)
+  await readScannerRetirementEvidence(physicalTransactionRoot, manifest)
+  return parseJsonOutput(result.stdout, `scanner-retirement-${action}`)
+}
+
+async function prepareScannerRetirement({ manifest, physicalTransactionRoot, sandbox }) {
+  if (manifest.supervisedLifecycle?.scannerRetirement === undefined) return manifest
+  const captured = await runScannerRetirementOperator({ manifest, physicalTransactionRoot, sandbox, action: 'capture' })
+  const captureArtifact = await writeScannerArtifact(physicalTransactionRoot, manifest, 'capture', captured)
+  let next = { ...manifest, supervisedLifecycle: { ...manifest.supervisedLifecycle, scannerRetirement: {
+    ...manifest.supervisedLifecycle.scannerRetirement, captureArtifact,
+    ...(captured.capture?.status === 'no-op' ? { phase: 'unchanged' } : { phase: 'prepared', planDigest: captured.capture?.plan?.planDigest }),
+  } } }
+  await readScannerRetirementEvidence(physicalTransactionRoot, next)
+  // Persist original tuples before the first formal Policy/Automations write.
+  next = await writeManifest(physicalTransactionRoot, next, 'prepared')
+  if (captured.capture.status === 'no-op') return next
+  const completion = await runScannerRetirementOperator({ manifest: next, physicalTransactionRoot, sandbox, action: 'apply' })
+  const completionArtifact = await writeScannerArtifact(physicalTransactionRoot, next, 'completion', completion)
+  next = { ...next, supervisedLifecycle: { ...next.supervisedLifecycle, scannerRetirement: {
+    ...next.supervisedLifecycle.scannerRetirement, phase: 'completed', completionArtifact,
+    unmanagedAutomationsDigest: unmanagedAutomationDigest(completion.after.records),
+  } } }
+  await assertScannerRetirementPersistent({ manifest: next, physicalTransactionRoot, sandbox })
+  return writeManifest(physicalTransactionRoot, next, 'prepared')
+}
+
+async function assertScannerRetirementPersistent({ manifest, physicalTransactionRoot, sandbox }) {
+  const journal = manifest.supervisedLifecycle?.scannerRetirement
+  if (journal === undefined) return
+  const evidence = await readScannerRetirementEvidence(physicalTransactionRoot, manifest)
+  if (journal.phase === 'unchanged') return
+  if (journal.phase !== 'completed' || evidence.completion === undefined) fail('scanner retirement completion is missing')
+  const current = await runScannerRetirementOperator({ manifest, physicalTransactionRoot, sandbox, action: 'verify' })
+  if (unmanagedAutomationDigest(current.records) !== journal.unmanagedAutomationsDigest) fail('scanner retirement unmanaged inventory drifted')
 }
 
 function validSupervisedCapabilityProof(proof) {
@@ -4904,7 +5216,7 @@ async function awaitSupervisedSuccessor(context, baseline, stage, timeoutMillise
   for (;;) {
     try {
       if (context.host?.closed()) fail('supervised preview Host exited before attestation completed.')
-      const snapshot = await runSupervisedOperator(context, `attest-${stage}`)
+      const snapshot = await runSupervisedOperator({ ...context, operatorTimeoutMs: Math.max(1, deadline - Date.now()) }, `attest-${stage}`)
       const proof = compactSupervisedSnapshot(snapshot)
       assertSupervisedOwnerBindingStable(context.supervisedSource, proof)
       if (proof.recoveryProof.bootstrap.generation <= baseline.recoveryProof.bootstrap.generation) {
@@ -4934,7 +5246,7 @@ async function awaitSupervisedDirectSuccessor(context, baseline, stage, timeoutM
   let lastError
   for (;;) {
     try {
-      const snapshot = await runSupervisedOperatorDirect(context, `attest-${stage}`, context.supervisedNonce)
+      const snapshot = await runSupervisedOperatorDirect({ ...context, operatorTimeoutMs: Math.max(1, deadline - Date.now()) }, `attest-${stage}`, context.supervisedNonce)
       const proof = compactSupervisedSnapshot(snapshot)
       assertSupervisedOwnerBindingStable(context.supervisedSource, proof)
       if (proof.recoveryProof.bootstrap.generation <= baseline.recoveryProof.bootstrap.generation) {
@@ -6456,6 +6768,9 @@ async function performLifecycle({
     if (supervisedOwner) {
       const copiedSource = compactSupervisedSnapshot(await runSupervisedOperator(sandbox, 'attest-active'))
       assertCopiedSupervisedSnapshot(manifest.supervisedLifecycle.source, copiedSource)
+      if (operation === 'upgrade' && rsiCoordinator !== undefined && localSourceMaintenance === undefined) {
+        manifest = await captureScannerRetirementSource({ manifest, physicalTransactionRoot, sandbox })
+      }
     }
     let archivedProfile
     if (operation === 'upgrade') {
@@ -6511,6 +6826,7 @@ async function performLifecycle({
         await writeFileAtomic(join(stageHome, rsiCoordinator.receipt.relativePath), JSON.stringify(nextReceipt))
         await validateComposedConfig(coordinatorContext, 'coordinator-after')
         const candidate = await captureRsiCoordinator({ homePath, profile, dshExecutable, sandbox })
+        manifest = await prepareScannerRetirement({ manifest, physicalTransactionRoot, sandbox })
         const overlayPath = join(stageHome, `.rsi-coordinator-preview-${manifest.id}.yml`)
         await writeFile(overlayPath, candidate.contract.previewPatch, { mode: 0o600, flag: 'wx' })
         try { await activateInSandbox({ ...coordinatorContext, runtimePatch: join(homePath, basename(overlayPath)) }) }
@@ -6567,7 +6883,7 @@ async function performLifecycle({
         },
       }, 'prepared')
       const previewContext = { ...sandbox, supervisedNonce: nonce, supervisedCatalogDigest: preview.catalogDigest,
-        supervisedPlan: preview.plan, supervisedSource: manifest.supervisedLifecycle.source,
+        supervisedPlan: preview.plan, supervisedSource: scannerCandidateSource(manifest),
         supervisedOperatorEnvironment: overlayEnvironment }
       manifest = await writeManifest(physicalTransactionRoot, {
         ...manifest, supervisedLifecycle: { ...manifest.supervisedLifecycle, phase: 'preview-running' },
@@ -6583,6 +6899,7 @@ async function performLifecycle({
         await host.close()
         await rm(overlay.stagePath, { force: true })
       }
+      await assertScannerRetirementPersistent({ manifest, physicalTransactionRoot, sandbox })
       manifest = await writeManifest(physicalTransactionRoot, {
         ...manifest, supervisedLifecycle: {
           ...manifest.supervisedLifecycle, phase: 'preview-accepted',
@@ -6674,6 +6991,9 @@ async function performLifecycle({
         ...serviceContext, services, serviceMasks, homePath, dshExecutable, unitUniverse, foreignOwnership,
       })
     }
+    // Verify while the logical Home mount point still exists. No candidate
+    // writer runs between this fence and the two bound directory renames.
+    await assertScannerRetirementPersistent({ manifest, physicalTransactionRoot, sandbox })
     await moveBoundDirectoryNoReplace(physicalHomePath, backupHome, manifest.originalIdentity,
       { path: physicalTransactionRoot, identity: manifest.transactionIdentity })
     assertLockParentStable(homePath)
@@ -6717,6 +7037,7 @@ async function performLifecycle({
     if (supervisedOwner && operation === 'uninstall') await assertArchivedProfile(physicalHomePath, manifest)
     if (serviceContext !== undefined) {
       if (supervisedOwner && operation === 'upgrade') {
+        await assertScannerRetirementPersistent({ manifest, physicalTransactionRoot })
         const rawBeforeStart = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
           homePath, profile, dshExecutable,
         }, 'snapshot'), false)
@@ -6777,7 +7098,7 @@ async function performLifecycle({
               supervisedCatalogDigest: manifest.supervisedLifecycle.catalogDigest,
               supervisedPlan: manifest.supervisedLifecycle.activePlan,
               previewAcceptance: manifest.supervisedLifecycle.previewAcceptance,
-              supervisedSource: manifest.supervisedLifecycle.source,
+              supervisedSource: scannerCandidateSource(manifest),
             }, { recoveryProof: { bootstrap: {
               generation: manifest.supervisedLifecycle.startAttempt.baselineGeneration,
             } } }, 'active', timeouts.ready)
@@ -6858,6 +7179,7 @@ async function performLifecycle({
       await assertInstallerCleanWebProfile(physicalHomePath, profile, manifest.cleanProfileDigest)
       if (supervisedOwner) await assertArchivedProfile(physicalHomePath, manifest)
     }
+    await assertScannerRetirementPersistent({ manifest, physicalTransactionRoot })
     manifest = await writeManifest(physicalTransactionRoot, manifest, 'cleanup-started')
     committedCleanup = true
     await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome })
@@ -6894,11 +7216,16 @@ async function performLifecycle({
     } else if (serviceContext !== undefined) {
       try {
         if (liveAfterFailure === undefined && sameIdentity(backupAfterFailure, manifest.originalIdentity)) {
+          await assertScannerOriginalRestorePossible(persisted ?? manifest, physicalTransactionRoot)
           assertLockParentStable(homePath)
           await moveBoundDirectoryNoReplace(backupHome, physicalHomePath, manifest.originalIdentity,
             { path: physicalTransactionRoot, identity: manifest.transactionIdentity })
           await fsyncPath(physicalTransactionRoot, true)
           await fsyncPath(LOCK_PARENT_FD_PATH, true)
+        }
+        if ((persisted ?? manifest).supervisedLifecycle?.scannerRetirement !== undefined) {
+          await assertScannerOriginalRestorePossible(persisted ?? manifest, physicalTransactionRoot)
+          await assertCriticalDirectory(physicalHomePath, (persisted ?? manifest).originalIdentity)
         }
         manifest = await stopRelatedServices(
           serviceContext.systemctlExecutable, services, homePath, dshExecutable, unitUniverse, timeouts.stop,
@@ -8677,6 +9004,10 @@ async function main() {
 }
 
 export const lifecycleProfileTest = Object.freeze({
+  validScannerRetirement, assertScannerRetirementBinding, scannerCandidateSource,
+  readScannerArtifact, writeScannerArtifact, readScannerRetirementEvidence, scannerBindingDigest, unmanagedAutomationDigest,
+  SCANNER_RETIREMENT_OPERATOR_PROGRAM, SCANNER_RETIREMENT_SOURCE_PROGRAM, assertScannerOriginalRestorePossible,
+  sandboxRun, prepareScannerRetirement, assertScannerRetirementPersistent,
   originalRunningServiceProof, larkJournalStates, assertRollbackLarkWindow,
   completeHostProgramRollbackReadinessRecovery,
   reconcileHostUnitSources, validateHostUpdateManifest, hostOwnerProgramSelection, isOwnerSourceProof,

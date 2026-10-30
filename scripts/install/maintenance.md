@@ -103,6 +103,10 @@ uninstall 不访问 npm registry 或 pnpm store。`web` / `autonomy` 仍使用�
 Linux `supervised` 的已登记 RSI 双 Host 可以在同一个 Home 事务中成对升级插件：目标及协调器必须处于活动状态，安装收据和现有版本一致，共享 catalog/trust、owner 与 handoff 通过核对。协调器只包含原生基础配置及 Policy、Automations、Control Plane 三个增强包，三包随目标同批更新。npm 路径先分别准备并完整预取两个 profile 的锁文件；切换前更新副本收据并实际激活两个 profile。协调器预览只在进程 overlay 中关闭 scheduler，真实启动须生成本次启动后的 owner-bound Automation 登记。原始/候选的有效配置、收据和包版本在恢复、接受及清理前重新核对。停服前还要求旧协调器本次 InvocationID 已有就绪信号；缺少信号时原服务继续运行。切换前失败可恢复原活动服务；切换后失败保持双服务停止、保留新旧 Home 与事务供对账，不自动覆盖可能已迁移的状态。固定本地源码或存在 `rsi-local-cohorts` 的安装在 registry 查询、停服和包修改前拒绝普通 npm 升级，包括尚未生成协调器收据的冻结安装。开发版 `dsh-rsi-setup --prepare-local-update` 可在 Home 外准备保留既有修复的合并源码与隔离构建制品；尚无 RSI owner/coordinator 的安装可使用下述 checkout 内显式维护入口。已授权双 Host 的通用源码升级仍未开放；下文仅开放符合严格条件的程序升级，已 applied、未首次采用的失败首启另有有界 `host-owner-repair` 入口。详见 [RSI 配置](../../plugins/lark-channel/docs/rsi-setup.md)；成对卸载仍未支持。跨版本 Host 更新作为插件升级之后的独立阶段，见下文。
 
 
+成对升级还在第一个候选 Host 启动前处理已撤权 owner 的旧扫描：以原 manifest/签名 overlay 的冻结身份为准，核验 Delivery 撤权状态后，在副本中通过正式 Policy/Automations 入口永久退休精确匹配的 usage、memory、task-observation 和 live-qualification 定义。原配置、原数据库证明和固定操作标识先落盘，历史、unknown 与原预算账户保留；读取和维护都在有期限的隔离子进程内。身份仍有效时仅校验，不退休扫描。原 source 证明不会被改写，只有完整退休证明可解释这几行的预期变化，其余非受管状态仍严格核对。
+
+此迁移不恢复已撤销身份，也不签发或转移新 owner 的 grant。切换后候选缺失、退休证据损坏或原目录被移回 canonical Home 时，恢复器拒绝启动旧扫描并保留现场。成功清理通过一次目录重命名，将 journal 与完整证明保留到原事务路径加 `.completed-<事务 ID>` 的私有目录；该目录是历史证据，不是后续健康检查。正式安装与生产验收范围仍以 [RSI 当前状态](../../docs/rsi-status.md) 为准。
+
 ## 查找私有 Host 入口
 
 `dsh-rsi status` 中的 Host 版本来自全局 PATH。旧 Home 或自定义缓存应读取 Home 自身的绑定；下面只输出入口路径，不输出凭据：

@@ -20,9 +20,9 @@ import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, basename, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
-import { canonicalConversation, canonicalPrincipal } from './canonical.js'
+import { canonicalConversation, canonicalOwnerRouteAuthority, canonicalPrincipal, externalPrincipalId, ownerRouteAuthorityHash } from './canonical.js'
 import { deliverySchemaVersion } from './sqlite.js'
-import type { ConversationBinding, DeliveryPrincipal, ExternalPrincipalKey } from './types.js'
+import type { ConversationBinding, DeliveryPrincipal, ExternalPrincipalKey, OwnerRouteAuthority, OwnerRouteStateInspection } from './types.js'
 
 export interface ActiveWebOwnerBindingQuery {
   databasePath: string
@@ -222,6 +222,29 @@ export interface ActiveLarkOwnerBindingsSnapshot {
   readonly snapshotDigest: string
 }
 
+export const revokedOwnerRouteSnapshotProtocol = 'assistant-delivery/revoked-owner-route-snapshot/v1' as const
+
+/** Frozen installer configuration and exact durable owner lineage; never model input. */
+export interface RevokedOwnerRouteQuery {
+  databasePath: string
+  authority: OwnerRouteAuthority
+  principalRecordId: string
+  frozenPrincipalVersion: number
+}
+
+/** An observation of revocation, not authorization for writes or execution. */
+export interface RevokedOwnerRouteSnapshot {
+  readonly protocol: typeof revokedOwnerRouteSnapshotProtocol
+  readonly schemaVersion: ActiveLarkOwnerBindingsSnapshot['schemaVersion']
+  readonly authority: Readonly<OwnerRouteAuthority>
+  readonly frozenPrincipalVersion: number
+  readonly state: Readonly<Extract<OwnerRouteStateInspection, { status: 'revoked' }>>
+  readonly database: DeliveryOperatorFileIdentity
+  readonly sidecars: ActiveLarkOwnerBindingsSnapshot['sidecars']
+  readonly storageDigest: string
+  readonly snapshotDigest: string
+}
+
 export type ActiveLarkOwnerBindingsSnapshotErrorCode
   = | 'invalid-path'
     | 'invalid-scope'
@@ -233,6 +256,7 @@ export type ActiveLarkOwnerBindingsSnapshotErrorCode
     | 'database-corrupt'
     | 'database-drift'
     | 'too-many-bindings'
+    | 'owner-not-revoked'
 
 export class ActiveLarkOwnerBindingsSnapshotError extends Error {
   constructor(readonly code: ActiveLarkOwnerBindingsSnapshotErrorCode, message: string) {
@@ -702,13 +726,17 @@ function operatorClassifySqlite(error: unknown): never {
   operatorFail('database-corrupt', 'database cannot produce a valid snapshot')
 }
 
-/**
- * Produces one exact, content-free Lark owner-DM inventory without opening a
- * writable connection to the source. A temporary private byte-for-byte view
- * is used when WAL state exists so SQLite cannot update the source WAL index.
- */
-export function inspectActiveLarkOwnerBindingsLocally(input: ActiveLarkOwnerBindingsQuery): ActiveLarkOwnerBindingsSnapshot {
-  const scope = operatorScope(input); const path = operatorDatabasePath(input.databasePath)
+interface OperatorDatabaseSnapshot<T> {
+  readonly schemaVersion: ActiveLarkOwnerBindingsSnapshot['schemaVersion']
+  readonly database: DeliveryOperatorFileIdentity
+  readonly sidecars: ActiveLarkOwnerBindingsSnapshot['sidecars']
+  readonly storageDigest: string
+  readonly value: T
+}
+
+/** Shared source-preserving reader: every operator proof uses the same storage fences. */
+function operatorInspectDatabase<T>(databasePath: string, inspect: (database: DatabaseSync) => T): OperatorDatabaseSnapshot<T> {
+  const path = operatorDatabasePath(databasePath)
   // Pin the private parent directory for the whole snapshot so an ancestor
   // rename or a same-name directory swap cannot retarget the database path
   // between the path checks and the read.
@@ -718,7 +746,7 @@ export function inspectActiveLarkOwnerBindingsLocally(input: ActiveLarkOwnerBind
   let temporaryPath: string | undefined; let temporaryPinned: OperatorPinnedTemp | undefined
   let copyFiles: readonly OperatorFile[] = []
   let database: DatabaseSync | undefined; let transaction = false; let deferred: unknown
-  let result: ActiveLarkOwnerBindingsSnapshot | undefined
+  let result: OperatorDatabaseSnapshot<T> | undefined
   // Descriptors the snapshot itself holds; these are excluded when proving that
   // SQLite opened the pinned inode, so the connection can never vouch for itself.
   const selfDescriptors = (): ReadonlySet<number> => new Set([
@@ -795,35 +823,9 @@ export function inspectActiveLarkOwnerBindingsLocally(input: ActiveLarkOwnerBind
     const quick = database.prepare('PRAGMA quick_check').all() as unknown as Array<{ quick_check?: unknown }>
     if (quick.length !== 1 || quick[0]?.quick_check !== 'ok') operatorFail('database-corrupt', 'SQLite quick_check failed')
     if (database.prepare('PRAGMA foreign_key_check').all().length !== 0) operatorFail('database-corrupt', 'foreign-key integrity check failed')
-    const rows = database.prepare(`
-      SELECT binding.id AS binding_id, binding.conversation_hash, binding.conversation_json,
-        binding.principal_id, binding.principal_json AS binding_principal_json, binding.workspace,
-        binding.agent_preset, binding.session_id, binding.generation, binding.policy_ref,
-        binding.status AS binding_status, binding.created_at AS binding_created_at,
-        binding.updated_at AS binding_updated_at, binding.version AS binding_version,
-        owner.id AS owner_id, owner.key_hash AS owner_key_hash, owner.principal_json AS owner_principal_json,
-        owner.role AS owner_role, owner.status AS owner_status, owner.linked_to_id,
-        owner.created_at AS owner_created_at, owner.updated_at AS owner_updated_at, owner.version AS owner_version,
-        NULL AS lease_state
-      FROM conversation_bindings AS binding
-      JOIN delivery_principals AS owner ON owner.id = binding.principal_id
-      WHERE binding.status = 'active' AND owner.role = 'owner' AND owner.status = 'active'
-        AND binding.workspace = ? AND binding.agent_preset = ?
-        AND json_extract(owner.principal_json, '$.channel') = 'lark'
-        AND json_extract(owner.principal_json, '$.account') = ?
-        AND json_extract(owner.principal_json, '$.tenant') = ?
-        AND json_extract(binding.conversation_json, '$.channel') = 'lark'
-        AND json_extract(binding.conversation_json, '$.account') = ?
-        AND json_extract(binding.conversation_json, '$.tenant') = ?
-        AND json_extract(binding.conversation_json, '$.kind') = 'dm'
-      ORDER BY binding.id COLLATE BINARY
-      LIMIT ?
-    `).all(scope.workspace, scope.agentPreset, scope.account, scope.tenant, scope.account, scope.tenant, operatorMaximumBindings + 1) as unknown as LarkOwnerRow[]
-    if (rows.length > operatorMaximumBindings) operatorFail('too-many-bindings', `more than ${operatorMaximumBindings} bindings match`)
-    // The main query has now opened the WAL/SHM fds; re-prove every inode the
-    // result depends on is still the pinned one (non-WAL keeps just the source).
+    const value = inspect(database)
+    // The caller query has opened the WAL/SHM fds; prove all represented inodes.
     if (operatorInodeBindSupported) operatorAssertConnectionBound(bound, selfDescriptors())
-    const bindings = operatorFreeze(rows.map(row => operatorBinding(row, scope)))
     database.exec('ROLLBACK'); transaction = false; database.close(); database = undefined
     operatorAssertUnchanged(source); operatorAssertSidecar(walPath, wal); operatorAssertSidecar(shmPath, shm)
     const databaseIdentity = operatorFileIdentity(source)
@@ -831,11 +833,7 @@ export function inspectActiveLarkOwnerBindingsLocally(input: ActiveLarkOwnerBind
     const storageDigest = operatorSha256(operatorCanonicalJson({
       protocol: 'assistant-delivery/operator-storage/v1', database: source.digest, wal: wal?.digest ?? null,
     }))
-    const unsigned: Omit<ActiveLarkOwnerBindingsSnapshot, 'snapshotDigest'> = operatorFreeze({
-      protocol: activeLarkOwnerBindingsSnapshotProtocol, schemaVersion: version, scope,
-      database: databaseIdentity, sidecars, storageDigest, bindings,
-    })
-    result = operatorFreeze({ ...unsigned, snapshotDigest: operatorSha256(operatorCanonicalJson(unsigned)) })
+    result = operatorFreeze({ schemaVersion: version, database: databaseIdentity, sidecars, storageDigest, value })
   } catch (error) { deferred = error } finally {
     if (transaction) try { database?.exec('ROLLBACK') } catch (error) { deferred ??= error }
     try { database?.close() } catch (error) { deferred ??= error }
@@ -868,4 +866,117 @@ export function inspectActiveLarkOwnerBindingsLocally(input: ActiveLarkOwnerBind
     operatorClassifySqlite(deferred)
   }
   return result!
+}
+
+/**
+ * Produces one exact, content-free Lark owner-DM inventory without opening a
+ * writable connection to the source. A temporary private byte-for-byte view
+ * is used when WAL state exists so SQLite cannot update the source WAL index.
+ */
+export function inspectActiveLarkOwnerBindingsLocally(input: ActiveLarkOwnerBindingsQuery): ActiveLarkOwnerBindingsSnapshot {
+  const scope = operatorScope(input)
+  const snapshot = operatorInspectDatabase(input.databasePath, database => {
+    const rows = database.prepare(`
+      SELECT binding.id AS binding_id, binding.conversation_hash, binding.conversation_json,
+        binding.principal_id, binding.principal_json AS binding_principal_json, binding.workspace,
+        binding.agent_preset, binding.session_id, binding.generation, binding.policy_ref,
+        binding.status AS binding_status, binding.created_at AS binding_created_at,
+        binding.updated_at AS binding_updated_at, binding.version AS binding_version,
+        owner.id AS owner_id, owner.key_hash AS owner_key_hash, owner.principal_json AS owner_principal_json,
+        owner.role AS owner_role, owner.status AS owner_status, owner.linked_to_id,
+        owner.created_at AS owner_created_at, owner.updated_at AS owner_updated_at, owner.version AS owner_version,
+        NULL AS lease_state
+      FROM conversation_bindings AS binding
+      JOIN delivery_principals AS owner ON owner.id = binding.principal_id
+      WHERE binding.status = 'active' AND owner.role = 'owner' AND owner.status = 'active'
+        AND binding.workspace = ? AND binding.agent_preset = ?
+        AND json_extract(owner.principal_json, '$.channel') = 'lark'
+        AND json_extract(owner.principal_json, '$.account') = ?
+        AND json_extract(owner.principal_json, '$.tenant') = ?
+        AND json_extract(binding.conversation_json, '$.channel') = 'lark'
+        AND json_extract(binding.conversation_json, '$.account') = ?
+        AND json_extract(binding.conversation_json, '$.tenant') = ?
+        AND json_extract(binding.conversation_json, '$.kind') = 'dm'
+      ORDER BY binding.id COLLATE BINARY
+      LIMIT ?
+    `).all(scope.workspace, scope.agentPreset, scope.account, scope.tenant, scope.account, scope.tenant, operatorMaximumBindings + 1) as unknown as LarkOwnerRow[]
+    if (rows.length > operatorMaximumBindings) operatorFail('too-many-bindings', `more than ${operatorMaximumBindings} bindings match`)
+    return operatorFreeze(rows.map(row => operatorBinding(row, scope)))
+  })
+  const unsigned: Omit<ActiveLarkOwnerBindingsSnapshot, 'snapshotDigest'> = operatorFreeze({
+    protocol: activeLarkOwnerBindingsSnapshotProtocol, schemaVersion: snapshot.schemaVersion, scope,
+    database: snapshot.database, sidecars: snapshot.sidecars, storageDigest: snapshot.storageDigest, bindings: snapshot.value,
+  })
+  return operatorFreeze({ ...unsigned, snapshotDigest: operatorSha256(operatorCanonicalJson(unsigned)) })
+}
+
+interface RevokedOwnerRow {
+  id: unknown
+  key_hash: unknown
+  principal_json: unknown
+  role: unknown
+  status: unknown
+  linked_to_id: unknown
+  created_at: unknown
+  updated_at: unknown
+  version: unknown
+}
+
+/**
+ * Observe the exact revoked durable owner using trusted frozen installer
+ * authority. No active binding is required, and no permission is granted.
+ * Uses the same pinned, source-preserving SQLite reader as the active inventory.
+ */
+export function inspectRevokedOwnerRouteLocally(input: RevokedOwnerRouteQuery): RevokedOwnerRouteSnapshot {
+  try {
+    let authority: OwnerRouteAuthority
+    try { authority = canonicalOwnerRouteAuthority(input.authority) }
+    catch { return operatorFail('invalid-scope', 'frozen owner authority is invalid') }
+    if (!operatorText(input.principalRecordId, 128) || !identifier(input.principalRecordId, 'principal_')
+      || !operatorInteger(input.frozenPrincipalVersion, 1)) {
+      operatorFail('invalid-scope', 'frozen owner lineage is invalid')
+    }
+    const principalId = externalPrincipalId(authority.principal)
+    const authorityHash = ownerRouteAuthorityHash(authority)
+    const snapshot = operatorInspectDatabase(input.databasePath, database => {
+      const row = database.prepare(`
+        SELECT id, key_hash, principal_json, role, status, linked_to_id, created_at, updated_at, version
+        FROM delivery_principals WHERE id = ?
+      `).get(input.principalRecordId) as RevokedOwnerRow | undefined
+      if (row === undefined) operatorFail('owner-not-revoked', 'exact revoked owner was not observed')
+      let principal: ExternalPrincipalKey
+      try {
+        if (typeof row.principal_json !== 'string') throw new Error('invalid identity')
+        principal = canonicalPrincipal(JSON.parse(row.principal_json))
+        if (row.principal_json !== JSON.stringify(principal)
+          || row.key_hash !== operatorSha256(row.principal_json)) throw new Error('invalid identity')
+      } catch { return operatorFail('database-corrupt', 'owner identity metadata is inconsistent') }
+      if (!operatorInteger(row.version, 1) || !operatorInteger(row.created_at)
+        || !operatorInteger(row.updated_at) || row.updated_at < row.created_at) {
+        operatorFail('database-corrupt', 'owner lineage metadata is inconsistent')
+      }
+      if (row.id !== input.principalRecordId || externalPrincipalId(principal) !== principalId
+        || row.role !== 'owner' || row.status !== 'revoked' || row.linked_to_id !== null
+        || row.version < input.frozenPrincipalVersion) {
+        operatorFail('owner-not-revoked', 'exact revoked owner was not observed')
+      }
+      const state: RevokedOwnerRouteSnapshot['state'] = operatorFreeze({
+        status: 'revoked', authorityId: authority.id, authorityHash, principalId,
+        principalRecordId: input.principalRecordId, principalVersion: row.version,
+      })
+      return state
+    })
+    const unsigned: Omit<RevokedOwnerRouteSnapshot, 'snapshotDigest'> = operatorFreeze({
+      protocol: revokedOwnerRouteSnapshotProtocol, schemaVersion: snapshot.schemaVersion,
+      authority, frozenPrincipalVersion: input.frozenPrincipalVersion, state: snapshot.value,
+      database: snapshot.database, sidecars: snapshot.sidecars, storageDigest: snapshot.storageDigest,
+    })
+    return operatorFreeze({ ...unsigned, snapshotDigest: operatorSha256(operatorCanonicalJson(unsigned)) })
+  } catch (error) {
+    // Keep database rows, caller configuration and source paths out of failures.
+    throw new ActiveLarkOwnerBindingsSnapshotError(
+      error instanceof ActiveLarkOwnerBindingsSnapshotError ? error.code : 'database-corrupt',
+      'delivery revoked owner snapshot: inspection failed',
+    )
+  }
 }

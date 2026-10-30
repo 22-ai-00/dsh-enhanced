@@ -904,6 +904,19 @@ async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
   expect(lifecycleSource).toContain(supervisedHost)
   expect(lifecycleSource).toContain(supervisedCapability)
   const supervisedMock = `
+async function testSupervisedHost(context) {
+  const home = context.stageHome ?? context.homePath
+  let fixtureInventory
+  try { fixtureInventory = JSON.parse(await readFile(join(home, '.scanner-retirement-fixture.json'), 'utf8')) } catch {}
+  if (fixtureInventory && fixtureInventory.mode !== 'no-op') {
+    const retired = await lstat(join(home, '.scanner-retired')).then(() => true, () => false)
+    const manifest = JSON.parse(await readFile(join(process.env.LIFECYCLE_ORIGINAL_HOME + '.dsh-enhanced-transaction', 'manifest.json'), 'utf8'))
+    const phase = manifest.supervisedLifecycle.scannerRetirement.phase
+    await writeFile(process.env.LIFECYCLE_OPERATION_LOG, 'scanner-host retirement=' + phase + ' retired=' + retired + '\\n', { flag: 'a' })
+    if (!retired || phase !== 'completed') throw new Error('fixture Host entered before retirement completion')
+  }
+  return { closed: () => process.env.LIFECYCLE_SUPERVISED_MOCK_FAILURE === 'host-exit', close: async () => {} }
+}
 async function testSupervisedOperator(action, nonce, direct, context) {
   let archivePresent = false
   for (const candidate of [context?.stageHome, context?.homePath]) {
@@ -916,6 +929,13 @@ async function testSupervisedOperator(action, nonce, direct, context) {
         + '\\tarchive=' + String(archivePresent) + '\\n', { flag: 'a' })
   }
   const digest = '${digest64}'
+  const mockHome = direct ? context.homePath : context.stageHome ?? context.homePath
+  const effectiveConfig = await readFile(join(mockHome, 'profiles', context.profile, '.lifecycle-dump-config'), 'utf8')
+    .catch(() => readFile(join(mockHome, '.lifecycle-dump-config'), 'utf8'))
+  const configDigest = sha256(effectiveConfig)
+  let fixtureInventory
+  try { fixtureInventory = JSON.parse(await readFile(join(mockHome, '.scanner-retirement-fixture.json'), 'utf8')) } catch {}
+  const fixtureRetired = await lstat(join(mockHome, '.scanner-retired')).then(() => true, () => false)
   const database = { device: '1', inode: '2', size: '3', digest }
   const generationFile = process.env.LIFECYCLE_SUPERVISED_GENERATION_FILE
   let persistedGeneration = 0
@@ -939,7 +959,7 @@ async function testSupervisedOperator(action, nonce, direct, context) {
     && !(stage === 'active' && source)) throw new Error('injected supervised ' + stage + ' failure')
   if (action.startsWith('prepare-')) {
     const plan = {
-      patchDigest: digest, effectiveConfigDigest: digest, attestationSetDigest: digest,
+      patchDigest: digest, effectiveConfigDigest: configDigest, attestationSetDigest: digest,
       managedInventoryDigest: digest, ownerBindingDigest: digest,
       externalProviderExemptions: stage === 'preview' ? ['larkChannel'] : [],
     }
@@ -957,18 +977,18 @@ async function testSupervisedOperator(action, nonce, direct, context) {
     bootstrap: { status: raw ? 'running' : 'succeeded', generation, attestationValid: !raw,
       attestationSetDigest: raw ? '' : digest, attestations: raw ? [] : [{ automationId: 'recovery:supervised-growth',
         activationState: stage, activationNonce: effectiveNonce, activationPlanDigest: digest }] } }
-  return { effectiveConfigDigest: digest, semanticDigest: digest,
+  return { effectiveConfigDigest: configDigest, semanticDigest: digest,
     databasePaths: { delivery: 'delivery.sqlite', automations: 'automations.sqlite', recovery: 'recovery.sqlite' },
     ownerBindingDigest: ownerDigest,
     delivery: { protocol: 'assistant-delivery/active-lark-owner-bindings-snapshot/v1', schemaVersion: ${options.deliverySnapshotSchema ?? 24}, database,
       snapshotDigest: digest, storageDigest: digest, bindings: [{ id: 'binding-1' }] },
     recovery, automations: { protocol: 'assistant-automations-operator-snapshot/v1', schemaVersion: 16, database,
       snapshotDigest: digest, inventoryDigest: digest, storageDigest: digest, inFlightCount: raw ? 1 : 0,
-      records: [{ id: 'owner:user-job', owner: 'owner', definitionHash: unmanagedDefinition, status: 'paused',
+      records: fixtureInventory ? (fixtureRetired ? fixtureInventory.after : fixtureInventory.before) : [{ id: 'owner:user-job', owner: 'owner', definitionHash: unmanagedDefinition, status: 'paused',
         createdAt: 1, updatedAt: 1, version: 1, runningTaskCount: 0 }], sidecars: { wal: null, shm: null } },
     managedProjection: { protocol: 'dsh-enhanced/supervised-growth-managed-automations/v1', records: [], digest },
     ...(raw ? {} : { attestation: { protocol: 'dsh-enhanced/supervised-growth-lifecycle-attestation/v1',
-      stage, externalProviderExemptions: stage === 'preview' ? ['larkChannel'] : [], effectiveConfigDigest: digest,
+      stage, externalProviderExemptions: stage === 'preview' ? ['larkChannel'] : [], effectiveConfigDigest: configDigest,
       attestationDigest: digest, recovery: { activationNonceDigest: sha256(effectiveNonce), catalogDigest: digest,
         bootstrapAttestationSetDigest: digest } } }),
   }
@@ -1050,7 +1070,7 @@ async function testSupervisedOperator(action, nonce, direct, context) {
       + "  if (process.env.LIFECYCLE_SUPERVISED_MOCK === '1') return testSupervisedOperator(action, nonce ?? context.supervisedNonce, true, context)\n",
   ).replace(
     supervisedHost,
-    supervisedHost + "  if (process.env.LIFECYCLE_SUPERVISED_MOCK === '1') return { closed: () => process.env.LIFECYCLE_SUPERVISED_MOCK_FAILURE === 'host-exit', close: async () => {} }\n",
+    supervisedHost + "  if (process.env.LIFECYCLE_SUPERVISED_MOCK === '1') return testSupervisedHost(context)\n",
   ).replace(
     supervisedCapability,
     supervisedCapability + "  if (process.env.LIFECYCLE_SUPERVISED_MOCK === '1') return\n",
@@ -2083,7 +2103,7 @@ function runPreOwnerLifecycle(f: Awaited<ReturnType<typeof preOwnerLifecycleFixt
   })
 }
 
-async function rsiPairLifecycleFixture() {
+async function rsiPairLifecycleFixture(scannerMode: 'no-op' | 'complete' | 'partial-fail' = 'no-op') {
   const coordinator = 'rsi-web-test'
   const f = await lifecycleFixture({ readiness: 'host', effectiveScenario: 'supervised',
     managedDependencies: ['personal-assistant', 'plugin-control-plane'],
@@ -2182,6 +2202,48 @@ for(const [name,version] of Object.entries(manifest.dependencies)) {
   const journal = await readFile(journalPath, 'utf8')
   await writeFile(journalPath, journal.replace("invocation?.startsWith('fresh-')",
     `(invocation?.startsWith('fresh-') || invocation === 'original-${coordinator}')`))
+  // These paired-flow fixtures mock systemd/DSH and the installed source reader
+  // and migration APIs, while the parent journal/artifact/phase/cleanup code is real.
+  const fixtureOwner = { authorityId: 'owner-route', authorityHash: digest64, principalId: 'owner',
+    principalRecordId: 'principal_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', principalVersion: 1,
+    workspace: join(f.dshHome, 'workspace'), agentPreset: 'default' }
+  const ordinary = { id: 'owner:user-job', owner: 'owner', definitionHash: digest64, status: 'paused',
+    createdAt: 1, updatedAt: 1, version: 1, runningTaskCount: 0 }
+  const scanner = { ...ordinary, id: `usage-scan-${digest64}`, owner: 'assistant-growth-usage', status: 'active', nextRunAt: 2 }
+  const inventory = { mode: scannerMode, before: scannerMode === 'no-op' ? [ordinary] : [ordinary, scanner],
+    after: scannerMode === 'no-op' ? [ordinary] : [ordinary, { ...scanner, status: 'paused', nextRunAt: undefined, updatedAt: 2, version: 2 }] }
+  await writeFile(join(f.dshHome, '.scanner-retirement-fixture.json'), JSON.stringify(inventory), { mode: 0o600 })
+  const diagnosticsPath = join(f.fixtureInstallDirectory, 'lifecycle-profile.mjs')
+  await writeFile(diagnosticsPath, (await readFile(diagnosticsPath, 'utf8')).replace(
+    '  main().catch(error => {\n', '  main().catch(error => {\n    process.stderr.write(String(error?.stack ?? error) + "\\n")\n').replace(
+    '    const persisted = await loadManifest(physicalTransactionRoot, { homePath, profile, transactionPath: transactionRoot }).catch(() => undefined)',
+    '    process.stderr.write("fixture primary lifecycle failure: " + String(error?.stack ?? error) + "\\n")\n    const persisted = await loadManifest(physicalTransactionRoot, { homePath, profile, transactionPath: transactionRoot }).catch(() => undefined)'))
+  const sourceHelperPath = join(f.fixtureInstallDirectory, 'host-rsi-update.mjs')
+  const sourceHelper = await readFile(sourceHelperPath, 'utf8')
+  const sourceEntry = 'export async function inspectRsiScannerOwnerSource({ homePath, physicalHome = homePath, profile }) {\n'
+  expect(sourceHelper).toContain(sourceEntry)
+  await writeFile(sourceHelperPath, sourceHelper.replace(sourceEntry, sourceEntry
+    + `  return ${JSON.stringify({ protocol: 'host-rsi/scanner-owner-source/v1', homePath: f.dshHome, profile: 'web', sourceDigest: digest64, owner: fixtureOwner })}\n`))
+  const larkModule = join(f.profileDirectory, 'node_modules', '@dsh-enhanced', 'lark-channel')
+  await mkdir(larkModule, { recursive: true })
+  await writeFile(join(larkModule, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/lark-channel', version: '0.1.0', type: 'module', exports: './index.js' }))
+  await writeFile(join(larkModule, 'index.js'), `import {createHash} from 'node:crypto';import {readFile,writeFile} from 'node:fs/promises';import {join} from 'node:path';
+const hash=x=>createHash('sha256').update(x).digest('hex'),home=process.env.DSH_HOME;
+const inventory=JSON.parse(await readFile(join(home,'.scanner-retirement-fixture.json'),'utf8'));
+const log=action=>writeFile(process.env.LIFECYCLE_OPERATION_LOG,'scanner-api '+action+'\\n',{flag:'a'});
+export async function deriveScannerRetirementConfiguration(input){return {effectiveConfigDigest:hash(input.effectiveConfig),owner:input.owner,dshHome:input.dshHome,profile:input.profile};}
+export async function captureScannerRetirementPlan(input){await log('capture');if(inventory.mode==='no-op')return {status:'no-op',reason:'owner-active',effectiveConfigDigest:hash(input.effectiveConfig),beforeSnapshotDigest:'${digest64}',storageDigest:input.expectedStorageDigest};
+return {status:'prepared',plan:{protocol:'lark-channel/scanner-retirement-plan/v1',planDigest:'${digest64}',dshHome:input.dshHome,profile:input.profile,owner:input.owner,effectiveConfigDigest:hash(input.effectiveConfig),automationsDatabasePath:join(input.dshHome,'automations.sqlite'),before:{storageDigest:input.expectedStorageDigest,records:inventory.before},ownerProof:{storageDigest:'${digest64}'},operations:[{owner:'assistant-growth-usage',automationId:'usage-scan-${digest64}',operationId:'owner-revoked:${digest64}',expectedVersion:1}]}};}
+export async function applyScannerRetirementPlan({plan,signal}){signal.throwIfAborted();await log('apply');await writeFile(join(home,'.scanner-retired'),'fixture permanent marker');if(inventory.mode==='partial-fail')throw new Error('injected partial scanner maintenance failure');return {protocol:'lark-channel/scanner-retirement-completion/v1',planDigest:plan.planDigest,after:{records:inventory.after}};}
+export async function verifyScannerRetirementPersistence({plan,completion}){await log('verify');await readFile(join(home,'.scanner-retired'));if(completion.planDigest!==plan.planDigest)throw new Error('fixture completion differs');return {records:inventory.after};}
+`)
+  const namespacePath = join(f.fakeBin, 'bwrap'), namespaceSource = await readFile(namespacePath, 'utf8')
+  // A real mount namespace keeps logical Home argv unchanged. Preserve that one
+  // argument in the fixture operator; its mock API writes only mapped DSH_HOME.
+  const remap = "  if (value === logicalHome || value.startsWith(logicalHome + '/')) command[index] = stageHome + value.slice(logicalHome.length)"
+  expect(namespaceSource).toContain(remap)
+  await writeFile(namespacePath, namespaceSource.replace(remap,
+    `  if (index === 5 && command[3]?.includes('const [action, home, profile, dsh, sourcePath')) continue\n` + remap))
   // This fixture's bwrap substitute maps argv paths to the staged directory.
   // Map literals during path validation too, matching the real mount namespace.
   const validatorPath = join(f.fixtureInstallDirectory, 'lifecycle-config.mjs')
@@ -4123,6 +4185,102 @@ describe('one-click installers', () => {
     }
     expect(await readFile(f.operationLog, 'utf8')).toContain(`pair-add ${f.coordinator}`)
     await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 30_000)
+
+  // Parent lifecycle flow is real; systemd, DSH and retirement API/owner
+  // observations remain fixtures. Formal DB/namespace migration is separate.
+  test('RSI scanner migration completes before first Host and archives only the changed candidate baseline', async () => {
+    const f = await rsiPairLifecycleFixture('complete')
+    const ledger = { unknown: ['old-job'], spent: 3, maximum: 4 }
+    await writeFile(join(f.dshHome, 'old-ledger.json'), JSON.stringify(ledger), { mode: 0o600 })
+    const result = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
+    expect(result.status, result.stderr).toBe(0)
+    const operations = await readFile(f.operationLog, 'utf8')
+    expect(operations.indexOf('scanner-api apply')).toBeGreaterThanOrEqual(0)
+    expect(operations.indexOf('scanner-host retirement=completed retired=true')).toBeGreaterThan(operations.indexOf('scanner-api apply'))
+    expect(JSON.parse(await readFile(join(f.dshHome, 'old-ledger.json'), 'utf8'))).toEqual(ledger)
+    expect(await readFile(join(f.dshHome, '.scanner-retired'), 'utf8')).toBe('fixture permanent marker')
+    const completed = (await readdir(f.root)).filter(name => name.startsWith('home.dsh-enhanced-transaction.completed-'))
+    expect(completed).toHaveLength(1)
+    const archived = join(f.root, completed[0]!), manifest = JSON.parse(await readFile(join(archived, 'manifest.json'), 'utf8'))
+    const journal = manifest.supervisedLifecycle.scannerRetirement
+    expect(journal.phase).toBe('completed')
+    expect(journal.unmanagedAutomationsDigest).not.toBe(manifest.supervisedLifecycle.source.unmanagedAutomationsDigest)
+    const evidence = await lifecycleProfileTest.readScannerRetirementEvidence(archived, manifest)
+    expect(evidence.source.source).toEqual(manifest.supervisedLifecycle.source)
+    expect(lifecycleProfileTest.scannerCandidateSource(manifest)).toEqual({ ...manifest.supervisedLifecycle.source,
+      unmanagedAutomationsDigest: journal.unmanagedAutomationsDigest })
+    for (const key of ['sourceArtifact', 'captureArtifact', 'completionArtifact']) {
+      const reference = journal[key], path = join(archived, reference.file)
+      expect((await lstat(path)).mode & 0o777).toBe(0o600)
+      expect(createHash('sha256').update(await readFile(path)).digest('hex')).toBe(reference.digest)
+    }
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 30_000)
+
+  test('RSI scanner partial maintenance failure preserves original Home and prepared tuple evidence without first Host', async () => {
+    const f = await rsiPairLifecycleFixture('partial-fail'), receipt = await readFile(f.receiptPath, 'utf8')
+    const result = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('injected partial scanner maintenance failure')
+    await expect(stat(join(f.dshHome, '.scanner-retired'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(f.receiptPath, 'utf8')).toBe(receipt)
+    expect((await readFile(f.operationLog, 'utf8'))).not.toContain('scanner-host')
+    for (const profile of ['web', f.coordinator]) {
+      expect(JSON.parse(await readFile(join(f.dshHome, 'profiles', profile, 'node_modules', '@dsh-enhanced', 'plugin-control-plane', 'package.json'), 'utf8')).version).toBe('0.1.0')
+      expect((await readLifecycleSystemdState(f.systemdState)).units[`dsh-profile-${profile}.service`].activeState).toBe('active')
+    }
+    const failed = (await readdir(f.root)).filter(name => name.startsWith('home.dsh-enhanced-transaction.failed-'))
+    expect(failed).toHaveLength(1)
+    const archived = join(f.root, failed[0]!), manifest = JSON.parse(await readFile(join(archived, 'manifest.json'), 'utf8'))
+    expect(manifest.supervisedLifecycle.scannerRetirement.phase).toBe('prepared')
+    const evidence = await lifecycleProfileTest.readScannerRetirementEvidence(archived, manifest)
+    expect(evidence.captured.capture.plan.operations).toMatchObject([{ operationId: `owner-revoked:${digest64}`, expectedVersion: 1 }])
+    expect(manifest.supervisedLifecycle.scannerRetirement.completionArtifact).toBeUndefined()
+    expect(await readFile(join(archived, 'staged-home', '.scanner-retired'), 'utf8')).toBe('fixture permanent marker')
+  }, 30_000)
+
+  test('RSI scanner adopted journal refuses manual original-Home replacement without clearing phase or starting source services', async () => {
+    const f = await rsiPairLifecycleFixture('complete')
+    const failed = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', systemdStartFailsProfile: f.coordinator })
+    expect(failed.status).not.toBe(0)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`, backup = join(transaction, 'original-home')
+    const before = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(before.supervisedLifecycle.scannerRetirement.phase).toBe('completed')
+    expect(before.supervisedLifecycle.phase).toBe('post-swap-pending')
+    await rename(f.dshHome, join(f.root, 'removed-adopted-candidate'))
+    await rename(backup, f.dshHome)
+    const priorCommands = (await readLifecycleSystemdLog(f.systemdLog)).length
+    const retried = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
+    expect(retried.status).not.toBe(0)
+    expect(retried.stderr).toContain('candidate was adopted')
+    const after = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(after.supervisedLifecycle.phase).toBe(before.supervisedLifecycle.phase)
+    expect(after.supervisedLifecycle.scannerRetirement).toEqual(before.supervisedLifecycle.scannerRetirement)
+    expect((await readLifecycleSystemdLog(f.systemdLog)).slice(priorCommands).some(command => command[1] === 'start')).toBe(false)
+    await expect(stat(join(f.dshHome, '.scanner-retired'))).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 30_000)
+
+  test('RSI scanner cleanup crash keeps all proof archives together and resumes without renewed package or maintenance work', async () => {
+    const f = await rsiPairLifecycleFixture('complete')
+    const crashed = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', crashAfterCleanupMetadata: true })
+    expect(crashed.status).not.toBe(0)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`, manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    const evidence = await lifecycleProfileTest.readScannerRetirementEvidence(transaction, manifest)
+    expect(evidence.completion.planDigest).toBe(evidence.captured.capture.plan.planDigest)
+    const before = await readFile(f.operationLog, 'utf8')
+    const recovered = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
+    expect(recovered.status, recovered.stderr).toBe(0)
+    const after = await readFile(f.operationLog, 'utf8')
+    expect(after.match(/^pair-add/gmu)?.length).toBe(before.match(/^pair-add/gmu)?.length)
+    expect(after.match(/^scanner-api apply/gmu)?.length).toBe(1)
+    const completed = (await readdir(f.root)).filter(name => name.startsWith('home.dsh-enhanced-transaction.completed-'))
+    expect(completed).toHaveLength(1)
+    const archived = join(f.root, completed[0]!), archivedManifest = JSON.parse(await readFile(join(archived, 'manifest.json'), 'utf8'))
+    await expect(lifecycleProfileTest.readScannerRetirementEvidence(archived, archivedManifest)).resolves.toEqual(evidence)
+    await expect(stat(transaction)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 30_000)
 
   test('RSI pair coordinator package failure preserves the original pair and receipt', async () => {
