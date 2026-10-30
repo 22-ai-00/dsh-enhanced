@@ -8,6 +8,8 @@
 
 发布前仍须通过仓库完整检查、精确发布源码的跨平台 CI、安装器版本与摘要一致性检查，以及已实现能力的安装和运行就绪验证。CI 与 Release 共同读取根目录 `.node-version`，并使用相同的 Vitest 工作进程上限，保持 Node 与测试并发基线一致。身份校验、有限预算、独立验收与回滚保护不因实验性发布而放宽；已知的安装失败或安全问题不能留给用户探索。
 
+Linux 原生隔离测试另使用固定的 Node `22.23.2`：CI 与 Release 的 Linux job 先将该版本安装到只读 namespace 可见的 `/usr/bin/node`，再按 `.node-version` 切回工作区 Node，并分别校验两个版本。不能用工作区 Node 替代隔离运行时基线。跨平台测试继续验证可移植的源码准备契约；非 Linux Host 验证 Linux 专用执行入口在派发前拒绝。
+
 ## 版本账本
 
 仓库级版本记录在 [`release-manifest.json`](../release-manifest.json)。查看当前版本、待发布版本和下一个默认版本：

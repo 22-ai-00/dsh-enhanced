@@ -2,7 +2,7 @@
 // runner outcomes. These do not establish full repository runtime acceptance.
 import { execFileSync, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -128,7 +128,33 @@ async function fixture(mode = 'success') {
     sourceJob: { id: 'source-job-' + '1'.repeat(64) }, capturePack: true as const } }
 }
 
-test('archives an exact scoped Git tree and binds binary pack bytes and private receipt without Docker', async () => {
+test('freezes the exact scoped source tree on every Host before platform-specific execution', async () => {
+  const f = await fixture()
+  const snapshot = await sourceBuild.sourceTree(f.input.worktree, f.input.baseCommit, f.input.scope,
+    f.input.environment, f.input.signal)
+  try {
+    const git = (...args: string[]) => execFileSync('/usr/bin/git', args,
+      { cwd: f.worktree, env: f.input.environment, encoding: 'utf8' })
+    expect(git('show', `${snapshot.tree}:plugins/helper/index.js`)).toBe('new\n')
+    expect(git('show', `${snapshot.tree}:unrelated`)).toBe('base\n')
+    expect(f.run).not.toHaveBeenCalled()
+  } finally { await snapshot.cleanup() }
+  await expect(stat(snapshot.temporary)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+test.runIf(process.platform !== 'linux')('refuses Linux dispatch before archive or runner work on another Host', async () => {
+  const f = await fixture(), assertCurrent = vi.fn(async () => {})
+  await expect(runLinuxPreparedChecks({ ...f.input, assertCurrent })).rejects.toThrow('Linux source build durable authority is invalid')
+  expect(assertCurrent).not.toHaveBeenCalled()
+  expect(f.run).not.toHaveBeenCalled()
+  expect(f.archived()).toBeUndefined()
+})
+
+// Only the Linux execution adapter needs its native Host. Shape, script and
+// source-tree contracts above continue to run on macOS as well.
+const linuxExecutionTest = test.runIf(process.platform === 'linux')
+
+linuxExecutionTest('archives an exact scoped Git tree and binds binary pack bytes and private receipt without Docker', async () => {
   const f = await fixture()
   const result = await runLinuxPreparedChecks(f.input)
   expect(result.evidence).toMatchObject({ schemaVersion: 3, boundary: 'linux-native-repository-v1',
@@ -138,24 +164,24 @@ test('archives an exact scoped Git tree and binds binary pack bytes and private 
   expect(f.run).toHaveBeenCalledOnce()
 })
 
-test.each(['digest', 'path', 'receipt', 'unquiet', 'failure', 'source drift'])('rejects %s without prepared evidence', async mode => {
+linuxExecutionTest.each(['digest', 'path', 'receipt', 'unquiet', 'failure', 'source drift'])('rejects %s without prepared evidence', async mode => {
   const f = await fixture(mode)
   await expect(runLinuxPreparedChecks(f.input)).rejects.toThrow(/Linux source build/u)
 })
 
-test('freezes archive metadata across distinct wall-clock seconds', async () => {
+linuxExecutionTest('freezes archive metadata across distinct wall-clock seconds', async () => {
   const f = await fixture('delayed archive')
   expect((await runLinuxPreparedChecks(f.input)).evidence.schemaVersion).toBe(3)
 })
 
-test('rejects second-pass archive bytes differing from the declared digest', async () => {
+linuxExecutionTest('rejects second-pass archive bytes differing from the declared digest', async () => {
   const f = await fixture()
   archiveFault.enabled = true
   await expect(runLinuxPreparedChecks(f.input)).rejects.toThrow('archive changed before admission')
   expect(archiveFault.count).toBe(2)
 })
 
-test('rejects parsed export-subst from the frozen tree before runner admission', async () => {
+linuxExecutionTest('rejects parsed export-subst from the frozen tree before runner admission', async () => {
   const f = await fixture()
   await writeFile(join(f.worktree, '.gitattributes'), 'plugins/helper/index.js export-subst\n')
   const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: f.worktree, env: f.input.environment, encoding: 'utf8' }).trim()
@@ -165,14 +191,14 @@ test('rejects parsed export-subst from the frozen tree before runner admission',
   expect(f.run).not.toHaveBeenCalled()
 })
 
-test('rejects a first-pass archive above 64MiB before runner admission', async () => {
+linuxExecutionTest('rejects a first-pass archive above 64MiB before runner admission', async () => {
   const f = await fixture()
   archiveFault.oversize = true
   await expect(runLinuxPreparedChecks(f.input)).rejects.toThrow('archive exceeds 64MiB')
   expect(f.run).not.toHaveBeenCalled()
 })
 
-test('propagates a shorter per-call deadline into the admitted runner signal', async () => {
+linuxExecutionTest('propagates a shorter per-call deadline into the admitted runner signal', async () => {
   const f = await fixture('deadline'), timeout = new AbortController()
   const spy = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(timeout.signal)
   const operation = runLinuxPreparedChecks(f.input)
@@ -224,7 +250,7 @@ test.runIf(process.platform === 'linux')('cancels a stopped actual read-tree bef
 })
 
 
-test('certifies this-call archive rejection before admission, with private one-use runner/key binding', async () => {
+linuxExecutionTest('certifies this-call archive rejection before admission, with private one-use runner/key binding', async () => {
   const f = await fixture(); archiveFault.oversize = true
   const error = await runLinuxPreparedChecks(f.input).catch(error => error)
   expect(error).toBeInstanceOf(Error)
@@ -237,7 +263,7 @@ test('certifies this-call archive rejection before admission, with private one-u
   expect(consumeLinuxSourceNotStarted(error, { runner: f.input.runner, key: f.input.sourceJob.id })).toBe(false)
 })
 
-test('does not certify arbitrary runner failure or a failed private index cleanup', async () => {
+linuxExecutionTest('does not certify arbitrary runner failure or a failed private index cleanup', async () => {
   const f = await fixture()
   f.run.mockRejectedValueOnce(new Error('budget exhausted'))
   const error = await runLinuxPreparedChecks(f.input).catch(error => error)
