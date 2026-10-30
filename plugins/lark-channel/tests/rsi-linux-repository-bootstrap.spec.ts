@@ -20,7 +20,7 @@ vi.mock('../src/rsi-linux-runtime-bootstrap.js', async importOriginal => ({
   prepareLinuxRsiRuntime: mocks.base, readLinuxRsiRuntime: mocks.readBase, officialArchive: mocks.archive,
 }))
 import { hashLinuxRuntimeTree, verifyLinuxRuntime, verifyLinuxSystemSnapshot } from '@dsh-enhanced/assistant-isolation'
-import { prepareLinuxRsiRepositoryRuntime } from '../src/rsi-linux-repository-bootstrap.js'
+import { prepareLinuxRsiRepositoryRuntime, readLinuxRsiRepositoryRuntime } from '../src/rsi-linux-repository-bootstrap.js'
 
 const directories: string[] = []
 const sha = (value: Buffer | string): string => createHash('sha256').update(value).digest('hex')
@@ -82,6 +82,62 @@ beforeEach(() => {
   mocks.abi.mockImplementation(async (snapshot, runtime) => { await verifyLinuxSystemSnapshot(snapshot); await verifyLinuxRuntime(runtime) })
 })
 afterEach(async () => { for (const path of directories.splice(0)) await rm(path, { recursive: true, force: true }) })
+
+async function retainedTree(path: string): Promise<unknown[]> {
+  const entries: unknown[] = []
+  const visit = async (current: string): Promise<void> => {
+    const info = await lstat(current, { bigint: true })
+    entries.push([current, String(info.dev), String(info.ino), String(info.mode), String(info.mtimeNs), String(info.ctimeNs),
+      info.isFile() ? sha(await readFile(current)) : undefined])
+    if (info.isDirectory()) for (const name of (await readdir(current)).sort()) await visit(join(current, name))
+  }
+  await visit(path)
+  return entries
+}
+
+test.runIf(process.platform === 'linux')('existing-only reader never constructs a missing repository family or receipt', async () => {
+  const { input } = await fixture(), parent = join(input.dshHome, 'rsi-linux-repository-runtimes')
+  await expect(readLinuxRsiRepositoryRuntime(input)).rejects.toMatchObject({ code: 'ENOENT' })
+  await expect(lstat(parent)).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(mocks.base).not.toHaveBeenCalled(); expect(mocks.archive).not.toHaveBeenCalled()
+  expect(mocks.snapshot).not.toHaveBeenCalled()
+  await mkdir(parent, { mode: 0o700 })
+  await expect(readLinuxRsiRepositoryRuntime(input)).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(await readdir(parent)).toEqual([])
+  await prepareLinuxRsiRepositoryRuntime(input)
+  await rm(join(parent, input.profile, 'bootstrap.json'))
+  const before = await retainedTree(parent)
+  vi.clearAllMocks()
+  await expect(readLinuxRsiRepositoryRuntime(input)).rejects.toThrow('inventory differs')
+  expect(await retainedTree(parent)).toEqual(before)
+  expect(mocks.base).not.toHaveBeenCalled(); expect(mocks.archive).not.toHaveBeenCalled()
+  expect(mocks.snapshot).not.toHaveBeenCalled()
+})
+
+test.runIf(process.platform === 'linux')('existing-only reader preserves identity and metadata while verifying retained inputs', async () => {
+  const { input } = await fixture(), result = await prepareLinuxRsiRepositoryRuntime(input)
+  const parent = join(input.dshHome, 'rsi-linux-repository-runtimes'), before = await retainedTree(parent)
+  vi.clearAllMocks()
+  expect(await readLinuxRsiRepositoryRuntime(input)).toEqual(result)
+  expect(await readLinuxRsiRepositoryRuntime(input)).toEqual(result)
+  expect(await retainedTree(parent)).toEqual(before)
+  expect(mocks.readBase).toHaveBeenCalledTimes(2); expect(mocks.mapping).toHaveBeenCalledTimes(2)
+  expect(mocks.abi).toHaveBeenCalledTimes(2); expect(mocks.verifyMapping).toHaveBeenCalledTimes(2)
+  expect(mocks.base).not.toHaveBeenCalled(); expect(mocks.archive).not.toHaveBeenCalled()
+  expect(mocks.snapshot).not.toHaveBeenCalled()
+})
+
+test.runIf(process.platform === 'linux')('existing-only reader rejects runtime drift without repairing it', async () => {
+  const { input } = await fixture(), result = await prepareLinuxRsiRepositoryRuntime(input)
+  const path = join(result.runtime.storePath, 'data')
+  await chmod(path, 0o644); await writeFile(path, 'tampered-store'); await chmod(path, 0o444)
+  const parent = join(input.dshHome, 'rsi-linux-repository-runtimes'), before = await retainedTree(parent)
+  vi.clearAllMocks()
+  await expect(readLinuxRsiRepositoryRuntime(input)).rejects.toThrow('root differs')
+  expect(await retainedTree(parent)).toEqual(before)
+  expect(mocks.base).not.toHaveBeenCalled(); expect(mocks.archive).not.toHaveBeenCalled()
+  expect(mocks.snapshot).not.toHaveBeenCalled()
+})
 
 test.runIf(process.platform === 'linux')('separate readable clone retains immutable old runtime, official npm entry layout and idempotent receipt', async () => {
   const { input, runtime } = await fixture(), before = await hashLinuxRuntimeTree(runtime.root.path)

@@ -7,9 +7,9 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
 import { createServer } from 'node:net'
 import { parse } from 'yaml'
-import { prepareRsiBuildEnvironment, type RsiBuildEnvironment } from '../src/rsi-build.js'
+import { prepareRsiBuildEnvironment, RsiBuildUnavailableError, type RsiBuildEnvironment } from '../src/rsi-build.js'
 import { materializeRsiCreationBuildInStage, prepareRsiCreationBuildEnvironment, readRsiCreationBuildInStage,
-  readRsiCreationBuildEnvironment } from '../src/rsi-creation-build.js'
+  readRsiCreationBuildEnvironment, verifyRsiCreationBuildEnvironmentReady } from '../src/rsi-creation-build.js'
 import type { RsiSourceWorkspace } from '../src/rsi-source.js'
 
 const roots: string[] = []
@@ -100,7 +100,7 @@ async function fixture(architecture: 'x64' | 'arm64' = 'x64', rootParent = tmpdi
     `const otherArch=arch==='arm64'?'amd64':'arm64'\n` +
     `const safe=process.env.DOCKER_CONFIG&&fs.statSync(process.env.DOCKER_CONFIG).isDirectory()&&!process.env.DOCKER_HOST&&!process.env.DOCKER_CONTEXT\n` +
     `fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify({args,raw,safe})+'\\n')\nif(!safe)process.exit(91)\n` +
-    `if(args[0]==='version'){console.log('29.4.1/linux/'+arch);process.exit(0)}\n` +
+    `if(args[0]==='version'){if(state==='daemon-down')process.exit(6);if(state==='probe-wait')Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,30000);console.log('29.4.1/linux/'+arch);process.exit(0)}\n` +
     `if(args[0]==='info'){console.log(state==='wrong-daemon'?'BAD-DAEMON-0000':'TEST-DAEMON-0000');process.exit(0)}\n` +
     `if(args[0]==='build'){const behavior=args.some(a=>a.endsWith('/plugin-verifier.Dockerfile'));` +
     `if(behavior){const context=args.at(-1);if(fs.existsSync(path.join(context,'plugins/assistant-verifier/src'))` +
@@ -110,7 +110,8 @@ async function fixture(architecture: 'x64' | 'arm64' = 'x64', rootParent = tmpdi
     `if(args[0]==='image'&&args[1]==='tag')process.exit(0)\n` +
     `if(args[0]==='image'&&args[1]==='rm')process.exit(0)\n` +
     `if(args[0]==='image'&&args[1]==='inspect'){const target=args.at(-1);` +
-    `if(state==='missing-behavior'&&target===${JSON.stringify(behaviorImage)})process.exit(5);` +
+    `if(state==='missing-behavior'&&target===${JSON.stringify(behaviorImage)}||state==='missing-source'&&target===${JSON.stringify(sourceImage)})process.exit(5);` +
+    `if(state==='bad-id'){console.log('sha256:'+('c'.repeat(64))+'/linux/'+arch);process.exit(0)}` +
     `console.log((target===${JSON.stringify(behaviorImage)}||target.startsWith('dsh-plugin-verifier:')?${JSON.stringify(behaviorImage)}:${JSON.stringify(sourceImage)})+'/linux/'+(state==='bad-platform'?otherArch:arch));process.exit(0)}\nprocess.exit(90)\n`
   await writeFile(docker, executable, { mode: 0o700 }); await chmod(docker, 0o700)
   // Seed the trusted Linux source image before the portable Mac test switches
@@ -170,6 +171,7 @@ test.each(['x64', 'arm64'] as const)('portable behavior image binds the same mac
     expect(prepared).toEqual({ schemaVersion: 1, sourceCommit: f.source.sourceCommit,
       sourceImage, image: behaviorImage, dockerPath: f.docker, socketPath: socket })
     expect(await readRsiCreationBuildEnvironment(input)).toEqual(prepared)
+    expect(await verifyRsiCreationBuildEnvironmentReady(input)).toEqual(prepared)
     const observed = await calls(f.calls) as { args: string[]; raw: string[]; safe: boolean }[]
     expect(observed.filter(item => item.raw[0] === '--config').every(item => item.raw[2] === '-H'
       && item.raw[3] === `unix://${socket}` && item.safe)).toBe(true)
@@ -186,8 +188,10 @@ test.each(['x64', 'arm64'] as const)('portable behavior image binds the same mac
     expect(await readRsiCreationBuildInStage({ logicalHome, stagePhysicalHome, profile: 'owner',
       stagedSource, stagedBuild })).toEqual(prepared)
     await writeFile(f.state, 'wrong-daemon')
+    await expect(verifyRsiCreationBuildEnvironmentReady(input)).rejects.toThrow('daemon differs')
     await expect(prepareRsiCreationBuildEnvironment(input)).rejects.toThrow('receipt differs')
     await writeFile(f.state, 'bad-platform')
+    await expect(verifyRsiCreationBuildEnvironmentReady(input)).rejects.toThrow('platform differs')
     await expect(prepareRsiCreationBuildEnvironment(input)).rejects.toThrow('platform differs')
   } finally {
     Object.defineProperty(process, 'platform', platform)
@@ -198,6 +202,16 @@ test.each(['x64', 'arm64'] as const)('portable behavior image binds the same mac
     await new Promise<void>(resolve => server.close(() => resolve()))
   }
 })
+
+async function immutableBuildReceipts(home: string): Promise<unknown[]> {
+  const rows: unknown[] = []
+  for (const relative of ['rsi-builds/owner/bootstrap.json', 'rsi-builds/owner/seccomp.json', 'rsi-creation-builds/owner/bootstrap.json']) {
+    const path = join(home, relative), info = await lstat(path, { bigint: true })
+    rows.push([relative, String(info.dev), String(info.ino), String(info.mode), String(info.mtimeNs), String(info.ctimeNs),
+      (await readFile(path)).toString('base64')])
+  }
+  return rows
+}
 
 async function rebaseStageBuild(f: Awaited<ReturnType<typeof fixture>>, stagePhysicalHome: string,
   logicalHome: string): Promise<RsiBuildEnvironment> {
@@ -215,6 +229,63 @@ async function rebaseStageBuild(f: Awaited<ReturnType<typeof fixture>>, stagePhy
 }
 
 describe.skipIf(process.platform !== 'linux' || process.arch !== 'x64')('private RSI plugin behavior image preparation', () => {
+  test('readiness verifies both frozen images and leaves every original receipt unchanged', async () => {
+    const f = await fixture(), start = (await calls(f.calls)).length
+    await expect(verifyRsiCreationBuildEnvironmentReady(f.args)).rejects.toThrow()
+    expect((await calls(f.calls)).length).toBe(start)
+    await expect(lstat(join(f.home, 'rsi-creation-builds'))).rejects.toMatchObject({ code: 'ENOENT' })
+    const prepared = await prepareRsiCreationBuildEnvironment(f.args), count = (await calls(f.calls)).length
+    const before = await immutableBuildReceipts(f.home)
+    expect(await verifyRsiCreationBuildEnvironmentReady(f.args)).toEqual(prepared)
+    const queries = (await calls(f.calls)).slice(count)
+    expect(queries.every(call => call.safe && ['version', 'info', 'image'].includes(call.args[0]!))).toBe(true)
+    expect(queries.filter(call => call.args[0] === 'image').map(call => call.args))
+      .toEqual([sourceImage, behaviorImage].map(image => ['image', 'inspect', '--format', '{{.Id}}/{{.Os}}/{{.Architecture}}', image]))
+    expect(await immutableBuildReceipts(f.home)).toEqual(before)
+    expect(await readdir(join(f.home, 'rsi-creation-builds'))).toEqual(['owner'])
+    expect(await readdir(join(f.home, 'rsi-builds'))).toEqual(['owner'])
+  })
+
+  test('readiness distinguishes missing daemon or either image from changed identity and platform', async () => {
+    const f = await fixture(); await prepareRsiCreationBuildEnvironment(f.args)
+    const before = await immutableBuildReceipts(f.home), count = (await calls(f.calls)).length
+    for (const state of ['daemon-down', 'missing-source', 'missing-behavior']) {
+      await writeFile(f.state, state)
+      await expect(verifyRsiCreationBuildEnvironmentReady(f.args)).rejects.toBeInstanceOf(RsiBuildUnavailableError)
+      expect(await immutableBuildReceipts(f.home)).toEqual(before)
+    }
+    for (const state of ['bad-id', 'bad-platform']) {
+      await writeFile(f.state, state)
+      await expect(verifyRsiCreationBuildEnvironmentReady(f.args)).rejects.not.toBeInstanceOf(RsiBuildUnavailableError)
+      expect(await immutableBuildReceipts(f.home)).toEqual(before)
+    }
+    expect((await calls(f.calls)).slice(count).every(call => ['version', 'info', 'image'].includes(call.args[0]!))).toBe(true)
+    expect(await readdir(join(f.home, 'rsi-creation-builds'))).toEqual(['owner'])
+  })
+
+  test('readiness rejects receipt drift before Docker and cancels active queries without changing resources', async () => {
+    const f = await fixture(); await prepareRsiCreationBuildEnvironment(f.args)
+    const receipt = join(f.home, 'rsi-creation-builds', 'owner', 'bootstrap.json'), original = await readFile(receipt)
+    const callsBefore = await readFile(f.calls)
+    await writeFile(receipt, original.toString('utf8').replace(behaviorImage, sourceImage))
+    await expect(verifyRsiCreationBuildEnvironmentReady(f.args)).rejects.toThrow('receipt differs')
+    expect(await readFile(f.calls)).toEqual(callsBefore)
+    await writeFile(receipt, original)
+    const before = await immutableBuildReceipts(f.home)
+    await expect(verifyRsiCreationBuildEnvironmentReady({ ...f.args,
+      signal: AbortSignal.abort(new Error('pre-cancelled readiness')) })).rejects.toThrow('pre-cancelled readiness')
+    expect(await readFile(f.calls)).toEqual(callsBefore)
+    await writeFile(f.state, 'probe-wait')
+    const controller = new AbortController(), pending = verifyRsiCreationBuildEnvironmentReady({ ...f.args, signal: controller.signal })
+    const timer = setTimeout(() => controller.abort(new Error('cancelled readiness')), 300)
+    try { await expect(pending).rejects.toThrow('cancelled readiness') }
+    finally { clearTimeout(timer) }
+    const observed = (await calls(f.calls)).slice(callsBefore.toString('utf8').trim().split('\n').length)
+    expect(observed.map(call => call.args[0])).toEqual(['version'])
+    expect(await immutableBuildReceipts(f.home)).toEqual(before)
+    expect(await readdir(join(f.home, 'rsi-creation-builds'))).toEqual(['owner'])
+  })
+
   test('retains the exact prior Host asset receipt without allowing subsequent asset changes', async () => {
     const f = await fixture('x64', tmpdir(), true)
     const prepared = await prepareRsiCreationBuildEnvironment(f.args)

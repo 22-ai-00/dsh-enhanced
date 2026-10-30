@@ -217,6 +217,35 @@ export async function readRsiCreationBuildEnvironment(input: Input): Promise<Rsi
   return replay(final, input, expected, dockerSha256, undefined, input.signal)
 }
 
+/** Verify the frozen source and behavior images without building, pulling or
+ * changing the installed receipt. The ordinary reader never invokes Docker. */
+export async function verifyRsiCreationBuildEnvironmentReady(input: Input): Promise<RsiCreationBuildEnvironment> {
+  const signal = AbortSignal.any([input.signal ?? new AbortController().signal, AbortSignal.timeout(120_000)])
+  signal.throwIfAborted()
+  const recorded = await readRsiCreationBuildEnvironment({ ...input, signal })
+  const parent = join(input.dshHome, 'rsi-creation-builds')
+  signal.throwIfAborted()
+  const scratch = await mkdtemp(join(parent, `.${input.profile}-ready-`))
+  try {
+    await chmod(scratch, 0o700)
+    await mkdir(join(scratch, 'docker-config'), { mode: 0o700 })
+    const build = input.build.sourceBuild, platform = io.hostPlatform()
+    const daemonId = await io.runtime(build.dockerPath, scratch, signal, platform, build.socketPath)
+    if (daemonId !== build.daemonId) fail('Docker daemon differs from approved source build')
+    for (const image of [recorded.sourceImage, recorded.image]) {
+      await io.imageExists(recorded.dockerPath, image, scratch, signal, platform, recorded.socketPath, true)
+    }
+    if (await io.runtime(build.dockerPath, scratch, signal, platform, build.socketPath) !== daemonId) {
+      fail('Docker daemon changed during readiness check')
+    }
+    if (!isDeepStrictEqual(await readRsiCreationBuildEnvironment({ ...input, signal }), recorded)) {
+      fail('recorded behavior build changed during readiness check')
+    }
+    signal.throwIfAborted()
+    return recorded
+  } finally { await rm(scratch, { recursive: true, force: true }); await io.syncDirectory(parent) }
+}
+
 export async function readRsiCreationBuildInStage(input: {
   logicalHome: string; stagePhysicalHome: string; profile: string
   stagedSource: RsiSourceWorkspace; stagedBuild: RsiBuildEnvironment; signal?: AbortSignal

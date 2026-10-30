@@ -13,10 +13,12 @@ import { defaultStoragePolicy, plannedStorageBytes } from './storage-policy.js'
 import { observeStorage } from './storage.js'
 import { normalizeRequest } from './workspace.js'
 import type { IsolationIdentity, IsolationJob, IsolationLimits, IsolationRequest, IsolationResult } from './types.js'
+import { inspectLinuxRunnerState, validateLinuxRunnerStateSeal, type LinuxRunnerStateSeal } from './linux-runner-state.js'
 
 export interface LinuxVerifierRunnerConfig {
   backend: 'linux-native'
   stateRoot: string
+  stateSeal?: LinuxRunnerStateSeal
   authorityDigest: string
   command: string
   expiresAt: number
@@ -67,6 +69,8 @@ export class LinuxVerifierRunner {
       || !Number.isSafeInteger(input.expiresAt) || input.expiresAt < 1
       || !isAbsolute(input.stateRoot) || resolve(input.stateRoot) !== input.stateRoot || input.stateRoot === '/'
       || /[\p{Cc}\\]/u.test(input.stateRoot)) throw new Error('invalid Linux verifier authority')
+    const stateSeal = input.stateSeal === undefined ? undefined : Object.freeze(validateLinuxRunnerStateSeal(input.stateSeal))
+    if (stateSeal) inspectLinuxRunnerState({ stateRoot: input.stateRoot, stateSeal, kind: 'verification' })
     const runtime = validateLinuxRuntime(input.runtime)
     if (runtime.root.path === input.stateRoot || runtime.root.path.startsWith(input.stateRoot + sep)
       || input.stateRoot.startsWith(runtime.root.path + sep)) throw new Error('Linux verifier state overlaps runtime')
@@ -78,7 +82,8 @@ export class LinuxVerifierRunner {
     if (limits.workspaceMiB > 4096 || this.#reservedMemory() > MAX_MEMORY || this.#reservedInodes() > MAX_INODES) {
       throw new Error('Linux verifier limits exceed resource pool')
     }
-    this.#input = Object.freeze({ ...input, runtime, limits: this.#contract.limits, cgroupRoots: this.#contract.cgroupRoots })
+    this.#input = Object.freeze({ ...input, runtime, limits: this.#contract.limits, cgroupRoots: this.#contract.cgroupRoots,
+      ...(stateSeal ? { stateSeal } : {}) })
     const root = input.stateRoot
     mkdirSync(root, { recursive: true, mode: 0o700 })
     const info = lstatSync(root)
@@ -107,6 +112,8 @@ export class LinuxVerifierRunner {
   }
   #reservedInodes(): number { return 2 * this.#contract.limits.workspaceInodes + 4096 + 32 }
   #authority(): IsolationControllerAuthority {
+    if (this.#input.stateSeal) inspectLinuxRunnerState({ stateRoot: this.#input.stateRoot,
+      stateSeal: this.#input.stateSeal, kind: 'verification' })
     if (!this.#controller || !this.#ledger.hasController(this.#controller)) throw new Error('Linux verifier controller unavailable')
     return this.#controller
   }
@@ -118,6 +125,8 @@ export class LinuxVerifierRunner {
     const ownerId = randomUUID(), deadline = Date.now() + STARTUP_TIMEOUT
     for (;;) {
       this.#abort.signal.throwIfAborted()
+      if (this.#input.stateSeal) inspectLinuxRunnerState({ stateRoot: this.#input.stateRoot,
+        stateSeal: this.#input.stateSeal, kind: 'verification' })
       try { this.#controller = this.#ledger.claimController(ownerId, TTL); break } catch (error) {
         if (!(error instanceof IsolationLedgerError) || error.code !== 'unauthorized' || Date.now() >= deadline) throw error
         await pause(Math.min(250, deadline - Date.now()), undefined, { signal: this.#abort.signal })
@@ -128,6 +137,8 @@ export class LinuxVerifierRunner {
       maxRuns: this.#input.maxRuns, maxTotalDurationMs: this.#input.maxTotalDurationMs }], this.#controller)
     this.#timer = setInterval(() => {
       try {
+        if (this.#input.stateSeal) inspectLinuxRunnerState({ stateRoot: this.#input.stateRoot,
+          stateSeal: this.#input.stateSeal, kind: 'verification' })
         if (this.#controller && this.#ledger.renewController(this.#controller, TTL)) {
           this.#scheduleRecovery()
           return

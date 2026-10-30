@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { validateCreationAcceptanceAuthorityRef, type CreationAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
 import type { CreationReviewConfig } from '@dsh-enhanced/assistant-verifier'
+import type { LinuxRunnerStateSeal } from '@dsh-enhanced/assistant-isolation'
 import type { Config as ControlPlaneConfig, CreationCapabilityConfig, CreationCapabilityOwner } from '@dsh-enhanced/plugin-control-plane'
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
 import type { RsiCreationBuildEnvironment } from './rsi-creation-build.js'
@@ -189,8 +190,10 @@ export function validateRsiPluginCreationSetup(input: unknown, expectedOwner: Cr
 export function createRsiPluginCreationSetup(input: {
   resources: RsiAuthorityResources; build: CreationBuild; owner: CreationCapabilityOwner;
   expiresAt: number; now: number
+  stateSeals?: { review: LinuxRunnerStateSeal; adoption: LinuxRunnerStateSeal }
 }): RsiPluginCreationSetup {
   const { resources, build, owner, expiresAt, now } = input
+  if (input.stateSeals && (build.schemaVersion !== 3 || !exact(input.stateSeals, ['review', 'adoption']))) fail('state seals require the complete Linux runner pair')
   if (resources?.schemaVersion !== 1 || ![1, 2, 3].includes(build?.schemaVersion)
     || !uuid.test(resources.installationId)
     || !Number.isSafeInteger(expiresAt) || expiresAt <= now) fail('invalid installation or expiry')
@@ -203,6 +206,7 @@ export function createRsiPluginCreationSetup(input: {
     keyId: `creation-review-${resources.installationId}-key`, keyPath: resources.identities.review.keyPath,
     expiresAt, maxVerifications: limits.verifications,
     runner: { stateRoot: join(resources.stateRoot, 'creation-review-runner'), ...runnerBackend,
+      ...(input.stateSeals ? { stateSeal: input.stateSeals.review } : {}),
       expiresAt, maxRuns: limits.reviewRuns,
       maxTotalDurationMs: limits.reviewRuns * limits.runnerDurationMs, maxDurationMs: limits.runnerDurationMs,
       maxOutputBytes: 262_144 },
@@ -218,6 +222,7 @@ export function createRsiPluginCreationSetup(input: {
     maxCallRecords: limits.callRecords, maxInputBytes: limits.inputBytes,
     retention: { maximumLifetimeMs: limits.retentionLifetimeMs },
     runner: { stateRoot: join(resources.stateRoot, 'creation-adoption-runner'), ...runnerBackend,
+      ...(input.stateSeals ? { stateSeal: input.stateSeals.adoption } : {}),
       expiresAt, maxRuns: limits.adoptionRuns,
       maxTotalDurationMs: 86_400_000, maxDurationMs: limits.runnerDurationMs, maxOutputBytes: 65_536 },
   }

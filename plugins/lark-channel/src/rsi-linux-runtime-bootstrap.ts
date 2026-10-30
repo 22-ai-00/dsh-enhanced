@@ -190,9 +190,15 @@ export async function extractExact(archive: string, member: string, cwd: string,
     { PATH: '/usr/bin:/bin', HOME: '/nonexistent', LANG: 'C', LC_ALL: 'C', COPYFILE_DISABLE: '1' }, signal, 120_000, maximum)
 }
 
+function requireLinuxPlatform(): void {
+  if (process.platform !== 'linux' || !['x64', 'arm64'].includes(process.arch)) {
+    throw new LinuxRsiRuntimeUnavailableError('Linux x64/arm64 required')
+  }
+}
+
 async function doctor(): Promise<void> {
   const unavailable = (message: string): never => { throw new LinuxRsiRuntimeUnavailableError(message) }
-  if (process.platform !== 'linux' || !['x64', 'arm64'].includes(process.arch)) unavailable('Linux x64/arm64 required')
+  requireLinuxPlatform()
   const env = { PATH: '/usr/bin:/bin', HOME: '/nonexistent', LANG: 'C', LC_ALL: 'C' }
   for (const command of ['/usr/bin/git', '/usr/bin/curl', '/usr/bin/tar', '/usr/bin/bwrap',
     '/usr/bin/unshare', '/usr/bin/mount', '/usr/bin/bash', '/usr/bin/python3']) {
@@ -243,7 +249,7 @@ async function readExisting(final: string, input: LinuxRsiBootstrapInput,
     || receipt.runtime.sourceCommit !== receipt.sourceCommit || receipt.runtime.lockSha256 !== receipt.lockSha256) {
     fail('Linux runtime receipt differs')
   }
-  await verifyLinuxRuntime(receipt.runtime)
+  await verifyLinuxRuntime(receipt.runtime, input.signal)
   return { schemaVersion: 3, backend: 'linux-native', sourceCommit: receipt.sourceCommit,
     lockSha256: receipt.lockSha256, runtime: receipt.runtime }
 }
@@ -378,9 +384,10 @@ export async function prepareLinuxRsiRuntime(input: LinuxRsiBootstrapInput): Pro
 
 export async function readLinuxRsiRuntime(input: LinuxRsiBootstrapInput): Promise<LinuxRsiBuildEnvironment> {
   input.signal?.throwIfAborted()
-  await doctor()
+  requireLinuxPlatform()
   if (!canonical(input.dshHome) || !PROFILE.test(input.profile) || input.source.schemaVersion !== 1) fail('invalid bootstrap identity')
   await privateDirectory(input.dshHome)
   await sourceIdentity(input)
+  await privateDirectory(join(input.dshHome, 'rsi-linux-runtimes'))
   return readExisting(join(input.dshHome, 'rsi-linux-runtimes', input.profile), input, await frozenManifests(input.source))
 }

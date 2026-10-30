@@ -7,7 +7,8 @@ import { linuxRuntimeDigest, type LinuxRuntime } from '@dsh-enhanced/assistant-i
 import type { LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
 import { rsiBuildResources as io } from './rsi-build.js'
 import { discoverLinuxCgroupRoots, RsiLinuxCgroupUnavailableError, type LinuxV1CgroupRoots } from './rsi-linux-cgroup-roots.js'
-import { prepareLinuxRsiRepositoryRuntime, type LinuxRsiRepositoryBuildEnvironment } from './rsi-linux-repository-bootstrap.js'
+import { prepareLinuxRsiRepositoryRuntime, readLinuxRsiRepositoryRuntime,
+  type LinuxRsiRepositoryBuildEnvironment } from './rsi-linux-repository-bootstrap.js'
 import { LinuxRsiRuntimeUnavailableError, type LinuxRsiBootstrapInput } from './rsi-linux-runtime-bootstrap.js'
 
 /** Creation family, schema 3: the Linux native behavior runtime. The Docker
@@ -18,6 +19,9 @@ export interface LinuxRsiCreationBuildEnvironment {
   sourceCommit: string
   behavior: LinuxPluginBehaviorRuntime
   cgroupRoots: LinuxV1CgroupRoots
+  /** Original schema4 base, already verified against the behavior preparation.
+   * The installer requires this binding; generic legacy setup callers may omit it. */
+  buildRuntimeDigest?: string
 }
 
 export interface LinuxRsiCreationPrepareInput extends LinuxRsiBootstrapInput {
@@ -112,7 +116,7 @@ async function environmentGap<T>(label: string, signal: AbortSignal, operation: 
 
 function project(receipt: Receipt): LinuxRsiCreationBuildEnvironment {
   return { schemaVersion: 3, backend: 'linux-native', sourceCommit: receipt.sourceCommit,
-    behavior: receipt.behavior, cgroupRoots: receipt.cgroupRoots }
+    behavior: receipt.behavior, cgroupRoots: receipt.cgroupRoots, buildRuntimeDigest: receipt.buildRuntimeDigest }
 }
 
 async function validateIdentity(input: LinuxRsiCreationPrepareInput): Promise<void> {
@@ -217,9 +221,9 @@ export async function prepareLinuxRsiCreationBuildEnvironment(input: LinuxRsiCre
   } finally { await rm(stage, { recursive: true, force: true }); await io.syncDirectory(parent) }
 }
 
-/** Read-only verification of a recorded Linux creation receipt. This never
- * compiles, downloads or starts anything: the schema4 repository receipt is
- * replayed, cgroup roots re-discovered and the retained observer reopened. */
+/** Verify an existing Linux creation family without preparing missing inputs.
+ * Fixed runtime integrity probes, read-only cgroup discovery and retained
+ * observer verification remain part of reopening the recorded receipts. */
 export async function readLinuxRsiCreationBuildEnvironment(input: LinuxRsiCreationPrepareInput):
   Promise<LinuxRsiCreationBuildEnvironment> {
   await validateIdentity(input)
@@ -227,12 +231,8 @@ export async function readLinuxRsiCreationBuildEnvironment(input: LinuxRsiCreati
   const parent = join(input.dshHome, 'rsi-linux-creation-builds'), final = join(parent, input.profile)
   const signal = input.signal ?? new AbortController().signal
   await io.directory(parent)
-  const repository = await prepareLinuxRsiRepositoryRuntime({
+  const repository = await readLinuxRsiRepositoryRuntime({
     dshHome: input.dshHome, profile: input.profile, source: input.source, signal,
-    ...(input.nodeArchivePath ? { nodeArchivePath: input.nodeArchivePath } : {}),
-    ...(input.pnpmArchivePath ? { pnpmArchivePath: input.pnpmArchivePath } : {}),
-    ...(input.pnpmExeArchivePath ? { pnpmExeArchivePath: input.pnpmExeArchivePath } : {}),
-    ...(input.pnpmNativeArchivePath ? { pnpmNativeArchivePath: input.pnpmNativeArchivePath } : {}),
   })
   const cgroupRoots = await discoverLinuxCgroupRoots({ signal })
   return await replayExisting(input, final, repository, cgroupRoots, peer, signal)

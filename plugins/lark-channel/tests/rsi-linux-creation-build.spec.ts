@@ -11,7 +11,7 @@ import { prepareLinuxRsiCreationBuildEnvironment, readLinuxRsiCreationBuildEnvir
   RsiLinuxCreationBuildUnavailableError, type LinuxRsiCreationPrepareInput } from '../src/rsi-linux-creation-build.js'
 
 const mocks = vi.hoisted(() => ({
-  repository: vi.fn(), cgroup: vi.fn(), prepareBehavior: vi.fn(), deployment: vi.fn(), behaviorDigest: vi.fn(),
+  repository: vi.fn(), readRepository: vi.fn(), cgroup: vi.fn(), prepareBehavior: vi.fn(), deployment: vi.fn(), behaviorDigest: vi.fn(),
 }))
 vi.mock('node:module', async importOriginal => ({
   ...await importOriginal<typeof import('node:module')>(),
@@ -21,7 +21,9 @@ vi.mock('node:module', async importOriginal => ({
       linuxPluginBehaviorRuntimeDigest: mocks.behaviorDigest }),
     { resolve: (specifier: string) => specifier }),
 }))
-vi.mock('../src/rsi-linux-repository-bootstrap.js', () => ({ prepareLinuxRsiRepositoryRuntime: mocks.repository }))
+vi.mock('../src/rsi-linux-repository-bootstrap.js', () => ({
+  prepareLinuxRsiRepositoryRuntime: mocks.repository, readLinuxRsiRepositoryRuntime: mocks.readRepository,
+}))
 vi.mock('../src/rsi-linux-cgroup-roots.js', async importOriginal => ({
   ...await importOriginal<typeof import('../src/rsi-linux-cgroup-roots.js')>(),
   discoverLinuxCgroupRoots: mocks.cgroup,
@@ -79,6 +81,7 @@ async function fixture(): Promise<Context> {
     lockSha256: runtime.lockSha256, runtime,
     systemSnapshot: { schemaVersion: 1, root: { path: join(parent, 'system'), dev: 3, ino: 4, sha256: 't'.repeat(64) } },
     userNamespace: { schemaVersion: 1, ownerUid: process.getuid!(), ownerGid: process.getgid!() } }
+  mocks.readRepository.mockResolvedValue(repository)
   return { input, parent, final: join(home, 'rsi-linux-creation-builds', 'unit'),
     behaviorRoot: join(stateRoot, 'linux-creation-behavior'), repository, roots: cgroupRoots() }
 }
@@ -95,11 +98,73 @@ beforeEach(async () => {
 })
 afterEach(async () => { for (const path of directories.splice(0)) await rm(path, { recursive: true, force: true }) })
 
+async function retainedIdentity(path: string): Promise<unknown[]> {
+  const entries: unknown[] = []
+  const visit = async (current: string): Promise<void> => {
+    const info = await lstat(current, { bigint: true })
+    entries.push([current, String(info.dev), String(info.ino), String(info.mode), String(info.mtimeNs), String(info.ctimeNs),
+      info.isFile() ? sha(await readFile(current, 'utf8')) : undefined])
+    if (info.isDirectory()) for (const name of (await readdir(current)).sort()) await visit(join(current, name))
+  }
+  await visit(path)
+  return entries
+}
+
+test.runIf(process.platform === 'linux')('existing-only creation reader rejects missing family or receipt without preparing it', async () => {
+  const ctx = await fixture(), parent = dirname(ctx.final)
+  mocks.repository.mockResolvedValue(ctx.repository); mocks.cgroup.mockResolvedValue(ctx.roots)
+  await expect(readLinuxRsiCreationBuildEnvironment(ctx.input)).rejects.toMatchObject({ code: 'ENOENT' })
+  await expect(lstat(parent)).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(mocks.repository).not.toHaveBeenCalled(); expect(mocks.prepareBehavior).not.toHaveBeenCalled()
+  await mkdir(parent, { mode: 0o700 })
+  await expect(readLinuxRsiCreationBuildEnvironment(ctx.input)).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(await readdir(parent)).toEqual([])
+  await prepareLinuxRsiCreationBuildEnvironment(ctx.input)
+  await rm(join(ctx.final, 'bootstrap.json'))
+  const before = await retainedIdentity(parent)
+  vi.clearAllMocks()
+  await expect(readLinuxRsiCreationBuildEnvironment(ctx.input)).rejects.toThrow('incomplete or unexpected')
+  expect(await retainedIdentity(parent)).toEqual(before)
+  expect(mocks.repository).not.toHaveBeenCalled(); expect(mocks.prepareBehavior).not.toHaveBeenCalled()
+})
+
+test.runIf(process.platform === 'linux')('existing-only creation reader retains identity and never forwards preparation archives', async () => {
+  const ctx = await fixture()
+  mocks.repository.mockResolvedValue(ctx.repository); mocks.cgroup.mockResolvedValue(ctx.roots)
+  const environment = await prepareLinuxRsiCreationBuildEnvironment(ctx.input)
+  const before = await retainedIdentity(dirname(ctx.final))
+  vi.clearAllMocks()
+  const input = { ...ctx.input, nodeArchivePath: '/missing/node.tgz', pnpmArchivePath: '/missing/pnpm.tgz',
+    pnpmExeArchivePath: '/missing/exe.tgz', pnpmNativeArchivePath: '/missing/native.tgz' }
+  expect(await readLinuxRsiCreationBuildEnvironment(input)).toEqual(environment)
+  expect(await readLinuxRsiCreationBuildEnvironment(input)).toEqual(environment)
+  expect(await retainedIdentity(dirname(ctx.final))).toEqual(before)
+  expect(mocks.repository).not.toHaveBeenCalled(); expect(mocks.prepareBehavior).not.toHaveBeenCalled()
+  expect(mocks.readRepository).toHaveBeenCalledTimes(2)
+  for (const [request] of mocks.readRepository.mock.calls) {
+    expect(Object.keys(request).sort()).toEqual(['dshHome', 'profile', 'signal', 'source'])
+  }
+  expect(mocks.deployment).toHaveBeenCalledTimes(2)
+})
+
+test.runIf(process.platform === 'linux')('missing retained repository fails creation read without reconstructing any dependency', async () => {
+  const ctx = await fixture()
+  mocks.repository.mockResolvedValue(ctx.repository); mocks.cgroup.mockResolvedValue(ctx.roots)
+  await prepareLinuxRsiCreationBuildEnvironment(ctx.input)
+  const before = await retainedIdentity(dirname(ctx.final))
+  vi.clearAllMocks()
+  mocks.readRepository.mockRejectedValueOnce(Object.assign(new Error('repository receipt missing'), { code: 'ENOENT' }))
+  await expect(readLinuxRsiCreationBuildEnvironment(ctx.input)).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(await retainedIdentity(dirname(ctx.final))).toEqual(before)
+  expect(mocks.repository).not.toHaveBeenCalled(); expect(mocks.prepareBehavior).not.toHaveBeenCalled()
+  expect(mocks.cgroup).not.toHaveBeenCalled(); expect(mocks.deployment).not.toHaveBeenCalled()
+})
+
 test.runIf(process.platform === 'linux')('prepares the shared behavior runtime once and replays the immutable receipt', async () => {
   const ctx = await fixture()
   mocks.repository.mockResolvedValue(ctx.repository); mocks.cgroup.mockResolvedValue(ctx.roots)
   const env = await prepareLinuxRsiCreationBuildEnvironment(ctx.input)
-  expect(Object.keys(env).sort()).toEqual(['backend', 'behavior', 'cgroupRoots', 'schemaVersion', 'sourceCommit'])
+  expect(Object.keys(env).sort()).toEqual(['backend', 'behavior', 'buildRuntimeDigest', 'cgroupRoots', 'schemaVersion', 'sourceCommit'])
   expect(env).toMatchObject({ schemaVersion: 3, backend: 'linux-native', sourceCommit: ctx.repository.sourceCommit })
   expect(env.behavior.runtime).toEqual(ctx.repository.runtime)
   expect((await lstat(ctx.final)).mode & 0o777).toBe(0o700)
@@ -111,7 +176,8 @@ test.runIf(process.platform === 'linux')('prepares the shared behavior runtime o
   // Replay re-runs repository and cgroup discovery but never recompiles or re-downloads.
   expect(await prepareLinuxRsiCreationBuildEnvironment(ctx.input)).toEqual(env)
   expect(await readLinuxRsiCreationBuildEnvironment(ctx.input)).toEqual(env)
-  expect(mocks.repository).toHaveBeenCalledTimes(3); expect(mocks.cgroup).toHaveBeenCalledTimes(3)
+  expect(mocks.repository).toHaveBeenCalledTimes(2); expect(mocks.readRepository).toHaveBeenCalledTimes(1)
+  expect(mocks.cgroup).toHaveBeenCalledTimes(3)
   expect(mocks.prepareBehavior).toHaveBeenCalledTimes(1)
   expect(mocks.deployment).toHaveBeenCalledTimes(3)
   expect(await readdir(join(ctx.parent, 'home', 'rsi-linux-creation-builds'))).toEqual(['unit'])

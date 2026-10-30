@@ -1,6 +1,6 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
-import type { LinuxCgroupRoots, NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxCgroupRoots, LinuxRunnerStateSeal, NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 import type { LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
 import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
@@ -37,6 +37,7 @@ export interface CreationCapabilityConfig {
     backend: 'linux-native'
     runtime: LinuxPluginBehaviorRuntime
     cgroupRoots: LinuxCgroupRoots
+    stateSeal?: LinuxRunnerStateSeal
     stateRoot: string
     expiresAt: number
     maxRuns: number

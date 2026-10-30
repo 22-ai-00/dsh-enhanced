@@ -11,6 +11,7 @@ import { rsiSetupPorts } from '../src/rsi-setup.js'
 import { RsiBuildUnavailableError, type RsiBuildEnvironment } from '../src/rsi-build.js'
 import { RsiInstalledInputsUnavailableError } from '../src/rsi-install-inputs.js'
 import { rsiBootstrapFixture } from './fixtures/rsi-bootstrap.js'
+import { nativePreparedFixture } from './fixtures/rsi-linux-install.js'
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(cleanups.splice(0).map(cleanup => cleanup())) })
@@ -75,12 +76,44 @@ async function fixture() {
 }
 
 describe.skipIf(process.platform !== 'linux')('automatic owner deployment', () => {
+  test('installs and reopens the complete native family without renewing terms or reconstructing a missing unused ledger', async () => {
+    const f = await fixture(), prepared = await f.ports.prepare(f.input, new AbortController().signal)
+    const native = await nativePreparedFixture(prepared.resources, prepared.source)
+    vi.mocked(f.ports.prepare).mockResolvedValue({ ...prepared, build: { sourceBuild: native.sourceBuild },
+      creationBuild: native.creationBuild, runnerStates: native.runnerStates })
+    const first = await installRsiOwnerDeployment(f.input, f.ports)
+    expect(first.mode).toBe('ready'); expect(f.starts).toEqual([f.coordinator, f.profile])
+    const path = join(prepared.resources.configRoot, 'manifest.json'), bytes = await readFile(path, 'utf8')
+    const manifest = JSON.parse(bytes)
+    expect(manifest.controlPlane.sourceBuild).toMatchObject({ backend: 'linux-native', stateSeal: native.runnerStates.sourceBuild })
+    expect(manifest.controlPlane.sourceJobs.revision).toEqual(manifest.pluginRevision.revision)
+    expect(manifest.growthDriver.pluginSourceProposals).toMatchObject({ allowCreation: true, allowRevision: true })
+    expect(manifest.pluginCreation.reviews.runner.stateSeal).toEqual(native.runnerStates.creationReview)
+    expect(manifest.pluginCreation.capabilities.runner.stateSeal).toEqual(native.runnerStates.creationAdoption)
+    expect(manifest.pluginRevision.reviews.runner.stateSeal).toEqual(native.runnerStates.revisionReview)
+    expect(manifest.pluginRevision.regressions.runner.stateSeal).toEqual(native.runnerStates.revisionRegression)
+    const grant = await readFile(join(prepared.resources.configRoot, 'host-authority.json'), 'utf8')
+    expect(await installRsiOwnerDeployment(f.input, f.ports)).toEqual(first)
+    expect(await readFile(path, 'utf8')).toBe(bytes)
+    expect(await readFile(join(prepared.resources.configRoot, 'host-authority.json'), 'utf8')).toBe(grant)
+    // No task has ever opened this lazy reviewer. Its pre-initialized ledger is
+    // still mandatory and must not be silently treated as a fresh budget.
+    const ledger = join(prepared.resources.stateRoot, 'revision-review-runner', 'ledger.sqlite')
+    await rm(ledger)
+    vi.mocked(f.ports.stop).mockClear()
+    await expect(installRsiOwnerDeployment(f.input, f.ports)).rejects.toThrow()
+    expect(f.ports.stop).not.toHaveBeenCalled()
+    await expect(readFile(ledger)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(path, 'utf8')).toBe(bytes)
+  }, 120_000)
+
   test('rejects persisted creation, receipt and grant file drift before either Host is stopped', async () => {
     const f = await fixture()
     for (const name of ['creation-review-runner', 'creation-adoption-runner']) {
       await mkdir(join(f.f.input.resources.stateRoot, name), { mode: 0o700 })
     }
     const prepared = await f.ports.prepare(f.input, new AbortController().signal)
+    if ('backend' in prepared.build.sourceBuild) throw new Error('expected legacy Docker fixture')
     vi.mocked(f.ports.prepare).mockResolvedValue({ ...prepared, creationBuild: {
       schemaVersion: 1, sourceCommit: prepared.source.sourceCommit,
       sourceImage: prepared.build.sourceBuild.image, image: `sha256:${'b'.repeat(64)}`,
@@ -108,6 +141,7 @@ describe.skipIf(process.platform !== 'linux')('automatic owner deployment', () =
       await mkdir(join(f.f.input.resources.stateRoot, name), { mode: 0o700 })
     }
     const prepared = await f.ports.prepare(f.input, new AbortController().signal)
+    if ('backend' in prepared.build.sourceBuild) throw new Error('expected legacy Docker fixture')
     const creationBuild = { schemaVersion: 1 as const, sourceCommit: prepared.source.sourceCommit,
       sourceImage: prepared.build.sourceBuild.image, image: `sha256:${'b'.repeat(64)}`,
       dockerPath: prepared.build.sourceBuild.dockerPath }
@@ -177,6 +211,7 @@ describe.skipIf(process.platform !== 'linux')('automatic owner deployment', () =
     // Even if new build resources are available, replay must preserve a legacy
     // installation's authorization scope rather than enable created plugins.
     const prepared = await f.ports.prepare(f.input, new AbortController().signal)
+    if ('backend' in prepared.build.sourceBuild) throw new Error('expected legacy Docker fixture')
     vi.mocked(f.ports.prepare).mockResolvedValue({ ...prepared, creationBuild: {
       schemaVersion: 1, sourceCommit: prepared.source.sourceCommit,
       sourceImage: prepared.build.sourceBuild.image, image: `sha256:${'b'.repeat(64)}`,
