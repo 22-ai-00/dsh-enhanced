@@ -9,7 +9,7 @@ import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { afterEach, expect, it, vi } from 'vitest'
 import { validateNativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
-import { removeSourceJobContainer, runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from '../src/source-build.ts'
+import { removeSourceJobContainer, runDockerPreparedChecks, validateSourceBuildConfig, verifySourcePreparation, type SourceBuildConfig } from '../src/source-build.ts'
 import { inspectSourceCreationContext, prepareCreatedPluginWorkspace, type SourceCreationGrant } from '../src/source-creation.ts'
 import { createIsolatedWorktree } from '../src/source-workspace.ts'
 import { createSourceCreationFixture } from './helpers/source-creation-fixture.ts'
@@ -487,6 +487,15 @@ it('preserves real creation proof and trusted baseline in Linux repository dispa
       execFileSync('/usr/bin/git', ['show', `${f.baseCommit}:pnpm-lock.yaml`], { cwd: f.repository })).digest('hex')}`)
   })
   const input = { ...f.input, config, runner, sourceJob: { id: 'source-job-' + '1'.repeat(64) } }
+  // The real creation proof and exact scope are portable Host contracts.
+  await verifySourcePreparation(input)
+  await expect(verifySourcePreparation({ ...input, scope: [`plugins/${f.name}`] })).rejects.toThrow(/scope differs/u)
+  if (process.platform !== 'linux') {
+    await expect(runLinuxPreparedChecks(input)).rejects.toThrow('Linux source build durable authority is invalid')
+    expect(run).not.toHaveBeenCalled()
+    await expect(lstat(`${f.dockerPath}.args`)).rejects.toMatchObject({ code: 'ENOENT' })
+    return
+  }
   const result = await runLinuxPreparedChecks(input)
   expect(result.evidence.schemaVersion).toBe(3)
   expect(result.evidence.pack.version).toBe('0.1.0')
