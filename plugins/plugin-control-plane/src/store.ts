@@ -201,6 +201,46 @@ function creationVerificationMatchesPreparedEvidence(certificate: PluginCreation
     && execution.buildEvidenceDigest === controlPlaneDigest(evidence)
 }
 
+/** Legacy revision v1 has no execution claim; Linux requires its own signed build provenance. */
+function revisionVerificationMatchesPreparedEvidence(certificate: PluginRevisionVerificationCertificate,
+  evidence: SourcePreparedEvidence): boolean {
+  if (certificate.protocol === 'assistant-growth/revision-verification/v1') {
+    return evidence.schemaVersion !== 3 && !Object.hasOwn(certificate, 'execution')
+  }
+  const execution = certificate.execution
+  return certificate.protocol === 'assistant-growth/revision-verification/v2'
+    && evidence.schemaVersion === 3 && evidence.boundary === 'linux-native-repository-v1'
+    && execution?.boundary === 'linux-native-process-seccomp-v1'
+    && execution.buildRuntimeDigest === evidence.runtimeDigest
+    && execution.buildEvidenceDigest === controlPlaneDigest(evidence)
+}
+
+/** Retained certificates must refer to the exact candidate and one parent/candidate observer family. */
+function revisionRegressionMatchesCandidate(certificate: PluginRevisionRegressionCertificate,
+  candidate: PluginRevisionVerificationCertificate, parent: PluginCreationVerificationCertificate): boolean {
+  if (certificate.candidateVerificationDigest !== controlPlaneDigest(candidate)
+    || controlPlaneDigest(certificate.plan) !== controlPlaneDigest(candidate.plan)
+    || controlPlaneDigest(certificate.source) !== controlPlaneDigest(candidate.source)
+    || controlPlaneDigest(certificate.parent) !== controlPlaneDigest(candidate.parent)
+    || certificate.contractDigest !== parent.contractDigest
+    || candidate.parent.planId !== parent.plan.id
+    || candidate.parent.certificateDigest !== controlPlaneDigest(parent)
+    || candidate.parent.artifactSha256 !== parent.plan.artifactSha256) return false
+  if (candidate.protocol === 'assistant-growth/revision-verification/v1') {
+    return certificate.protocol === 'assistant-growth/revision-regression/v1'
+      && !Object.hasOwn(certificate, 'execution') && parent.protocol !== 'assistant-growth/creation-verification/v3'
+  }
+  const execution = certificate.execution, candidateExecution = candidate.execution, parentExecution = parent.execution
+  return certificate.protocol === 'assistant-growth/revision-regression/v2'
+    && parent.protocol === 'assistant-growth/creation-verification/v3'
+    && execution?.boundary === 'linux-native-process-seccomp-v1'
+    && candidateExecution?.boundary === execution.boundary && parentExecution?.boundary === execution.boundary
+    && execution.runtimeDigest === candidateExecution.runtimeDigest && execution.runtimeDigest === parentExecution.runtimeDigest
+    && execution.observerPreparationDigest === candidateExecution.observerPreparationDigest
+    && execution.observerPreparationDigest === parentExecution.observerPreparationDigest
+    && candidateExecution.buildRuntimeDigest === parentExecution.buildRuntimeDigest
+}
+
 function bounded(value: string, field: string, maximum = 1_000): string {
   if (typeof value !== 'string') throw new ControlPlaneStoreError('invalid-input', `${field} must be text`)
   const result = value.normalize('NFC').trim()
@@ -2919,6 +2959,7 @@ export class ControlPlaneStore {
     const reference = this.getOwnerTaskFailureReference(plan.gapId)
     validateCreationCapabilitySource(source, certificate)
     if (!reference || controlPlaneDigest(plan.sourceRevision?.parent) !== controlPlaneDigest(certificate.parent) || !plan.sourceCheck || !plan.preparedEvidence || !plan.sourceRevision?.growthRun
+      || !revisionVerificationMatchesPreparedEvidence(certificate, plan.preparedEvidence)
       || !job.intent.revision?.growthRun || plan.digest !== certificate.plan.digest || plan.name !== certificate.plan.name
       || plan.sourceCheck.treeDigest !== certificate.plan.sourceTreeDigest
       || plan.sourceCheck.patchDigest !== certificate.plan.sourcePatchDigest
@@ -2966,6 +3007,19 @@ export class ControlPlaneStore {
     } catch { throw new ControlPlaneStoreError('invalid-state', 'stored revision verification certificate is corrupt') }
     if (certificate.plan.id !== planId || controlPlaneDigest(certificate) !== row.certificate_digest) {
       throw new ControlPlaneStoreError('invalid-state', 'stored revision verification certificate digest changed')
+    }
+    // Check retained immutable metadata without reopening expired build/grant authority.
+    const plan = this.getSourcePlan(planId)
+    if (plan.mode !== 'prepared-revise' || !plan.sourceRevision || !plan.sourceCheck
+      || certificate.plan.digest !== plan.digest || certificate.plan.name !== plan.name
+      || certificate.plan.generatorDigest !== plan.generatorDigest
+      || certificate.plan.sourceTreeDigest !== plan.sourceCheck.treeDigest
+      || certificate.plan.sourcePatchDigest !== plan.sourceCheck.patchDigest
+      || controlPlaneDigest(certificate.parent) !== controlPlaneDigest(plan.sourceRevision.parent)
+      || !plan.preparedEvidence || certificate.plan.artifactSha256 !== plan.preparedEvidence.pack.sha256
+      || certificate.plan.artifactBytes !== plan.preparedEvidence.pack.sizeBytes
+      || !revisionVerificationMatchesPreparedEvidence(certificate, plan.preparedEvidence)) {
+      throw new ControlPlaneStoreError('invalid-state', 'stored revision verification certificate does not match exact prepared source')
     }
     return certificate
   }
@@ -3030,6 +3084,7 @@ export class ControlPlaneStore {
     const previousJobs = new Set([...(parent?.observations ?? []), ...(candidate?.observations ?? [])].map(item => item.jobId))
     if (certificate.verifiedAt > this.#now() || certificate.expiresAt <= this.#now()
       || !candidate || !parent || !source || !reference || !run?.revisionRegressionAcceptance
+      || !revisionRegressionMatchesCandidate(certificate, candidate, parent)
       || !job.intent.revision?.growthRun.revisionRegressionAcceptance
       || controlPlaneDigest(certificate.plan) !== controlPlaneDigest(candidate.plan)
       || controlPlaneDigest(certificate.source) !== controlPlaneDigest(candidate.source)
@@ -3080,6 +3135,10 @@ export class ControlPlaneStore {
     } catch { throw new ControlPlaneStoreError('invalid-state', 'stored revision regression certificate is corrupt') }
     if (certificate.plan.id !== planId || controlPlaneDigest(certificate) !== row.certificate_digest) {
       throw new ControlPlaneStoreError('invalid-state', 'stored revision regression certificate digest changed')
+    }
+    const candidate = this.getRevisionVerification(planId), parent = this.getCreationVerification(certificate.parent.planId)
+    if (!candidate || !parent || !revisionRegressionMatchesCandidate(certificate, candidate, parent)) {
+      throw new ControlPlaneStoreError('invalid-state', 'stored revision regression certificate does not match exact candidate execution')
     }
     return certificate
   }

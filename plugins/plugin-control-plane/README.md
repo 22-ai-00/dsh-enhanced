@@ -379,6 +379,8 @@ Host 从当前受信任基线生成同名 scaffold，将父归档的候选文件
 
 同一 `revision.id` 的累计额度独立保存，失败/unknown 不返还，幂等请求不重复扣取；同时消费既有 `maxSubmissions` 和 Policy 预算。成功构建产生 `prepared-revise`。原生续跑仅调用独立修订验收；新证书以专用签名域绑定父证书、制品、签名归档与源码摘要及新任务/model/run。claimed unknown 不自动重验；验证结果与精确 staged 源码在同一事务落账。
 
+Linux 修订的原生自动化等待窗口覆盖构建、独立修订验收和可选父行为回归；两项验收分别预留最多 30 分钟。执行及续办仍受原任务/授权期限和各阶段预算约束，不延长已授权期限、不重派 unknown。历史 Docker/macOS 自动化定义保持原样。
+
 Host-only `inspectCreatedCapabilityRevisionCandidate(planId)` 验签并核对当前 owner，可在来源更正/撤回、授权和证书到期、制品/worktree 回收及 Host 冷启动后读取历史候选。该候选没有执行回执，不注册工具、不替换父版本、不扩大或续期旧创建/采用额度；后续版本切换须另有有限授权和父版本回归验证。旧配置不会自动获得修订能力，owner 安装器目前不生成这一授权。
 
 ### 修订候选的独立父行为回归门
@@ -388,6 +390,8 @@ Host-only `inspectCreatedCapabilityRevisionCandidate(planId)` 验签并核对当
 候选先通过新任务独立验收，再由原生 SourceJobs 接续私有 `verifyPluginRevisionRegression`：Verifier 从旧创建审查账本读取精确签名父证书对应的 held-out cases，不能从候选源码或新模型重新生成。两侧分别在新的有限隔离授权下 discover/invoke，工具名和参数 schema 投影、SDK 环境必须兼容，每个父用例分别比较独立 expected；结果原始摘要无需相同。历史父数据可以过期，但不能把旧创建/采用授权当作执行许可。缺失或篡改私有用例、未知观察、来源更正或写入失败保留独立 claim，不重放。
 
 Host-only `inspectPreparedRevisionRegression` 提供精确父/候选不可变制品；`withPreparedRevisionRegressionFence` 核对当前新任务、model/run、父归档、候选验收、源码与回归引用后同步落账。主账本 schema 34 的 `source_revision_regressions` 独立保存结果，冷启动不重派 settled/claimed 操作；旧计划和额度不改写。`inspectVerifiedRevisionRegression` 只在新窗口与当前来源有效时返回签名证书。成功仍为 `pending-approval`，没有工具、采用收据或版本切换；稳定入口切换与回退必须另外获得有限授权。配置和私有用例读取细节见 [Verifier](../assistant-verifier/README.md)。
+
+主账本在入库和历史回读时独立核对 Linux 修订证书的构建运行时及完整准备证据摘要；回归证书须绑定精确候选证书和同族父证书，并匹配双方共享观察器的边界、运行时与准备回执。历史回读只核对保留的不可变元数据，不重建产物、不要求旧授权仍有效，也不授予新的执行权限。
 
 ### 新工具插件的有限动态采用
 

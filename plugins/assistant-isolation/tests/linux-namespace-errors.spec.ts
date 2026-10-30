@@ -120,7 +120,8 @@ describe.runIf(process.platform === 'linux' && process.getuid?.() !== 0)('Linux 
           await spawned.ready
           spawned.child.kill('SIGKILL')
           // Keep the parent event loop ahead of the close event while the kernel
-          // closes the peer, so the actual small START write observes EPIPE.
+          // closes the peer. Node exposes this descriptor as a socket: the
+          // pending read can observe ECONNRESET before the START write's EPIPE.
           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
         },
         beforeStart, afterExit, onStop,
@@ -152,10 +153,13 @@ describe.runIf(process.platform === 'linux' && process.getuid?.() !== 0)('Linux 
     expect(remaining).toEqual([])
   })
 
-  test('revokes a real keeper gate EPIPE without an unhandled private-descriptor error', async () => {
+  test('revokes a real keeper gate disconnect without an unhandled private-descriptor error', async () => {
     const { result, spawned, remaining } = await run(false, true)
-    expect(spawned.keeperPipeErrors).toContain('EPIPE')
+    expect(spawned.keeperPipeErrors.length).toBeGreaterThan(0)
+    expect(spawned.keeperPipeErrors.every(code => code === 'EPIPE' || code === 'ECONNRESET')).toBe(true)
+    expect(spawned.child.stdio[3]?.destroyed).toBe(true)
     expect(spawned.processErrors).toEqual([])
+    expect(spawned.child.exitCode !== null || spawned.child.signalCode !== null).toBe(true)
     expect(result.namespaceExited).toBe(true)
     expect(remaining).toEqual([])
   })

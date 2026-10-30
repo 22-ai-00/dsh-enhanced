@@ -226,14 +226,59 @@ describe('requestGitHubBroker', () => {
   })
 
   it('bounds an asynchronous authorization gate and never writes after late settlement', async () => {
-    let received = false, release: (() => void) | undefined
+    let received = false, connections = 0, accepted: Socket | undefined
+    let release: (() => void) | undefined, enter: (() => void) | undefined, closeSocket: (() => void) | undefined
     const held = new Promise<void>(resolvePromise => { release = resolvePromise })
-    const fixture = await socketServer(socket => { const greeting = hello(); socket.write(encodeBrokerFrame(greeting, 2 * 1024 * 1024)); socket.on('data', () => { received = true }) })
+    const entered = new Promise<void>(resolvePromise => { enter = resolvePromise })
+    const closed = new Promise<void>(resolvePromise => { closeSocket = resolvePromise })
+    const fixture = await socketServer(socket => {
+      connections++; accepted = socket
+      socket.once('close', () => closeSocket?.())
+      const greeting = hello(); socket.write(encodeBrokerFrame(greeting, 2 * 1024 * 1024))
+      socket.on('data', () => { received = true })
+    })
+    const gate = vi.fn(async (_hello: BrokerServerHello, _request: BrokerClientRequest, gateSignal: AbortSignal) => {
+      expect(gateSignal.aborted).toBe(false); enter?.()
+      await held
+      expect(gateSignal.aborted).toBe(true)
+    })
+    const controller = new AbortController()
+    let requester: Socket | undefined
+    const connection = options(fixture.path, { timeoutMs: 30, beforeWrite: gate,
+      inspectPeerCredentials: socket => {
+        requester = socket
+        return { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0, pid: process.pid }
+      } })
+    // Keep the handshake and UDS close native. Start advancing the request's
+    // deadline only after its signed hello has actually entered authorization;
+    // timing out before hello would not exercise this gate or its late result.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
-      await expect(requestGitHubBroker(options(fixture.path, { timeoutMs: 30, beforeWrite: async (_hello, _request, gateSignal) => { expect(gateSignal.aborted).toBe(false); await held; expect(gateSignal.aborted).toBe(true) } }), intent())).rejects.toSatisfy((error: unknown) => { expectClientError(error, 'timeout', 'not-dispatched'); return true })
-      release?.(); await new Promise(resolvePromise => setImmediate(resolvePromise))
+      let settled = false
+      const result = requestGitHubBroker(connection, intent(), controller.signal).then(
+        value => { settled = true; return value },
+        error => { settled = true; return error as unknown },
+      )
+      await Promise.race([entered, result.then(value => { throw value })])
+      expect(gate).toHaveBeenCalledOnce()
+      expect(requester).toBeDefined()
+      const write = vi.spyOn(requester!, 'write')
+      await vi.advanceTimersByTimeAsync(29)
+      expect(settled).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expectClientError(await result, 'timeout', 'not-dispatched')
+      await closed
+      release?.(); await gate.mock.results[0]!.value
+      await new Promise(resolvePromise => setImmediate(resolvePromise))
       expect(received).toBe(false)
-    } finally { await close(fixture.server) }
+      expect(write).not.toHaveBeenCalled()
+      expect(connections).toBe(1)
+      expect(accepted?.destroyed).toBe(true)
+    } finally {
+      controller.abort(new Error('authorization fixture cleanup')); release?.()
+      vi.useRealTimers()
+      await close(fixture.server)
+    }
   })
 
   it('reports a signed but mismatched response as post-dispatch unknown and never reconnects', async () => {

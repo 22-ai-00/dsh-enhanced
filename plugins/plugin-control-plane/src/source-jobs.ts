@@ -501,10 +501,21 @@ export class SourceJobRuntime {
     catch (error) { if (error instanceof SourceGrowthRunUnavailableError) return true; throw error }
   }
 
+  private linuxRevisionReviewTimeoutMs(): number {
+    // A Linux revision can run two independently bounded reviews after its
+    // repository build. This outer window never changes their own budgets or
+    // the frozen source expiry; legacy backend definitions retain their identity.
+    if (!('backend' in this.options.build) || this.options.build.backend !== 'linux-native') return 0
+    return (this.options.verifyPreparedRevision ? 1_800_000 : 0)
+      + (this.options.verifyPreparedRevisionRegression ? 1_800_000 : 0)
+  }
+
   private definition(job: SourceJobRecord): HostAutomationDefinition {
     const config = this.options.config
     return { name: `Source check: ${job.intent.name}`, schedule: { kind: 'at', at: new Date(job.dispatchAt ?? job.createdAt + 1000).toISOString() },
-      workspace: config.workspace, agentPreset: config.preset, timeoutMs: job.intent.build.timeoutMs + 120_000 + (this.options.advanceReleased ? this.options.releaseTimeoutMs ?? 40_000 : 0) + (this.options.adoptReleased ? this.options.adoptionTimeoutMs ?? 60_000 : 0),
+      workspace: config.workspace, agentPreset: config.preset, timeoutMs: job.intent.build.timeoutMs + 120_000
+        + (job.intent.mode === 'revise-created' ? this.linuxRevisionReviewTimeoutMs() : 0)
+        + (this.options.advanceReleased ? this.options.releaseTimeoutMs ?? 40_000 : 0) + (this.options.adoptReleased ? this.options.adoptionTimeoutMs ?? 60_000 : 0),
       misfire: { kind: 'latest' }, overlap: 'skip', retrySafety: 'never', maxRetries: 0, principal: config.principalId,
       ...(config.budgetId === undefined ? {} : { budgetId: config.budgetId, budgetAmount: config.budgetAmount! }),
       execution: { kind: 'host', executorId: EXECUTOR, executorContractVersion: 1, runbookId: EXECUTOR, runbookVersion: 1, catalogDigest: CATALOG,
@@ -634,7 +645,7 @@ export class SourceJobRuntime {
   private continuationTimeoutMs(): number {
     const release = this.options.releaseTimeoutMs ?? 40_000, adoption = this.options.adoptionTimeoutMs ?? 60_000
     const needed = (this.options.adoptReleased ? adoption : 0) + (this.options.advanceReleased ? release + 40_000 : this.options.releasePrepared ? 40_000 : 10_000)
-    return Math.max(this.options.verifyPreparedCreation ? 1_800_000 : 10_000, needed)
+    return Math.max(this.linuxRevisionReviewTimeoutMs(), this.options.verifyPreparedCreation ? 1_800_000 : 10_000, needed)
   }
 
   private continuationSignalTimeoutMs(job: SourceJobRecord): number {
@@ -742,7 +753,9 @@ export class SourceJobRuntime {
     if (growthController) this.growthControllers.add(growthController)
     const signal = AbortSignal.any([input.signal, this.abort.signal,
       ...(growthController ? [growthController.signal] : []),
-      AbortSignal.timeout(Math.max(1, Math.min(job.intent.build.timeoutMs + 120_000 + (this.options.verifyPreparedCreation ? 1_800_000 : 0)
+      AbortSignal.timeout(Math.max(1, Math.min(job.intent.build.timeoutMs + 120_000
+        + (job.intent.mode === 'revise-created' && this.linuxRevisionReviewTimeoutMs()
+          ? this.linuxRevisionReviewTimeoutMs() : this.options.verifyPreparedCreation ? 1_800_000 : 0)
         + (this.options.advanceReleased ? this.options.releaseTimeoutMs ?? 40_000 : 0) + (this.options.adoptReleased ? this.options.adoptionTimeoutMs ?? 60_000 : 0), job.expiresAt - Date.now())))])
     try {
       this.assertOwner(job)

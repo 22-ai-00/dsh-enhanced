@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { HostAutomationExecutor, SystemAutomationReconcileInput } from '@dsh-enhanced/assistant-automations'
+import { automationDefinitionDigest, type HostAutomationExecutor, type SystemAutomationReconcileInput } from '@dsh-enhanced/assistant-automations'
 import { isSourceOwnerContinuation } from '@dsh-enhanced/assistant-growth-contract'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { approvalSigningPayload, Ed25519ApprovalAuthority } from '../src/approval.ts'
@@ -13,7 +13,7 @@ import { cleanedLinuxSourcePreflight, consumeCleanedLinuxSourcePreflight } from 
 import { SourceJobRuntime } from '../src/source-jobs.ts'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from '../src/store.ts'
 import { controlPlaneSchemaVersion } from '../src/sqlite.ts'
-import type { SourceJobRecord } from '../src/source-job-types.ts'
+import type { SourceJobRecord, SourceJobsConfig } from '../src/source-job-types.ts'
 import type { PluginSourcePlan, SourcePreparedEvidence } from '../src/types.ts'
 import * as sourceBuild from '../src/source-build.ts'
 import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
@@ -27,6 +27,87 @@ const receipt = () => ({ receiptVersion: 2 as const, authorityId: OWNER.ownerRou
   principalRecordId: OWNER.principalRecordId, principalVersion: OWNER.principalVersion, workspace: OWNER.workspace, agentPreset: OWNER.preset, bindingVersion: 1, generation: 1 })
 const build = { dockerPath: '/usr/bin/docker', image: `example@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000, memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 } as const
 const evidence = () => ({ schemaVersion: 1 as const, kind: 'dsh-source-prepared-evidence' as const, environment: { npmConfigIgnoreScripts: true as const, frozenLockfile: true as const, offline: true, nodeVersion: 'test', pnpmVersion: 'test' }, commands: [{ command: 'pnpm', args: ['check'], exitCode: 0 as const, durationMs: 1, logDigest: 'e'.repeat(64) }], pack: { name: 'health-helper', version: '1.0.0', sizeBytes: 1, sha256: 'd'.repeat(64) }, preparedAt: Date.now() })
+
+/** Orchestration boundary only: durable source/reviewer ports are simulated.
+ * The real revision enqueue, certificates and native definition are exercised
+ * in source-create-service.spec.ts; these tests inspect the dispatched signals. */
+function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: number; revision?: boolean; regression?: boolean;
+  sourceBuild?: sourceBuild.SourceBuildConfig } = {}) {
+  const now = Date.now(), expiry = now + (options.remainingMs ?? 10_800_000)
+  const config: SourceJobsConfig = { authorityId: 'revision-timeouts', expiresAt: expiry, maxSubmissions: 1,
+    repository: '/repository', allowedModes: ['revise-created'], ownerRouteId: OWNER.ownerRouteId,
+    principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId: 'revision-runs', budgetAmount: 1,
+    revision: { id: 'revision-timeouts', expiresAt: expiry, maxRevisions: 1, namePrefix: 'agent-' } }
+  const settings = options.sourceBuild ?? linuxSourceConfig()
+  const reference = { schemaVersion: 1 as const, owner: receipt(), outcomeId: 'revision-timeouts',
+    projection: { subjectKind: 'foreground-turn' as const, subjectRef: 'revision-inbox', version: 1, digest: hex('projection'), disposition: 'upsert' as const },
+    sourceDigest: hex('source') }
+  const growthRun = sourceGrowthRunFixture(reference, now)
+  growthRun.revisionAcceptance = { protocol: 'assistant-growth/revision-acceptance-authority/v1', authorityId: 'reviewer',
+    keyId: 'reviewer-key', authorityDigest: hex('reviewer'), namePrefix: 'agent-', expiresAt: expiry }
+  growthRun.revisionRegressionAcceptance = { protocol: 'assistant-growth/revision-regression-acceptance-authority/v1', authorityId: 'regression',
+    keyId: 'regression-key', authorityDigest: hex('regression'), namePrefix: 'agent-', expiresAt: expiry }
+  const parent = { planId: 'parent', certificateDigest: hex('certificate'), artifactSha256: hex('artifact'),
+    sourceArchiveDigest: hex('archive'), sourceDigest: hex('parent-source') }
+  const trust = { dshHome: '/dsh', executor: { environmentAllowlist: [] } }
+  const gap = { revision: 1 }
+  let job: SourceJobRecord = { id: 'revision-job', automationId: 'revision-job', idempotencyKey: 'revision-job', revision: 1,
+    status: options.prepared ? 'prepared' : 'queued', createdAt: now, updatedAt: now, expiresAt: expiry,
+    ...(options.prepared ? { planId: 'revision-plan' } : {}), intentDigest: hex('intent'),
+    intent: { mode: 'revise-created', authority: { id: config.authorityId, digest: controlPlaneDigest({ config, build: settings }), expiresAt: expiry, maxSubmissions: 1 },
+      owner: reference.owner, ownerDigest: controlPlaneDigest(reference.owner), trustDigest: controlPlaneDigest(trust),
+      repository: config.repository, name: 'agent-timeouts', gapId: 'revision-gap', gapRevision: 1, gapDigest: controlPlaneDigest(gap),
+      baseCommit: 'a'.repeat(40), files: [], ttlMs: 10_800_000, worktree: '/worktree', build: settings,
+      revision: { grant: config.revision!, generatorDigest: hex('generator'), parent, growthRun } } }
+  let revisionStatus: 'verified' | undefined = options.revision === false ? 'verified' : undefined
+  let regressionStatus: 'verified' | undefined
+  const store = { interruptSourceJobs: () => {}, listSourceJobs: () => [job], getSourceJob: () => job,
+    getSourceJobByAutomation: () => job, getOwnerTaskFailureReference: () => reference, getGap: () => gap,
+    listPreparedSourceApprovalJobs: () => job.status === 'prepared' ? [job] : [],
+    getSourcePlan: () => ({ id: 'revision-plan', mode: 'prepared-revise', status: 'pending-approval', expiresAt: expiry,
+      sourceRevision: job.intent.revision }), getRevisionVerificationStatus: () => revisionStatus,
+    getRevisionRegressionStatus: () => regressionStatus,
+    bindSourceJobDefinition: (input: { definitionHash: string }) => (job = { ...job, revision: job.revision + 1, definitionHash: input.definitionHash }),
+    claimSourceJob: (input: { occurrenceId: string }) => (job = { ...job, revision: job.revision + 1, status: 'running', occurrenceId: input.occurrenceId }),
+    settleSourceJob: (input: { status: SourceJobRecord['status']; failureCode: string }) => (job = { ...job, ...input }),
+  }
+  const executors = new Map<string, HostAutomationExecutor>()
+  const registrations = new Map<string, { definitionHash: string; activationNonce: string; ownerRouteId: string; definitionVersion: number; automationStatus: string }>()
+  const reconciles: SystemAutomationReconcileInput[] = []
+  const automations = { registerHostExecutor: (executor: HostAutomationExecutor) => {
+    executors.set(executor.descriptor.executorId, executor); return () => { executors.delete(executor.descriptor.executorId) }
+  }, reconcileSystem: (input: SystemAutomationReconcileInput) => {
+    reconciles.push(input)
+    const execution = input.definition.execution!
+    registrations.set(input.automationId, { definitionHash: automationDefinitionDigest(input.definition), activationNonce: execution.activationNonce,
+      ownerRouteId: execution.ownerRouteId, definitionVersion: (registrations.get(input.automationId)?.definitionVersion ?? 0) + 1,
+      automationStatus: input.desiredStatus ?? 'active' })
+  }, inspectSystemOwnedActivation: (input: { automationId: string }) => registrations.get(input.automationId),
+  inspectSystemOwned: (input: { automationId: string }) => ({ ...registrations.get(input.automationId)!, latestTerminalRuns: {} }) }
+  const signals: AbortSignal[] = []
+  const review = vi.fn(async (_job: SourceJobRecord, signal: AbortSignal) => { signals.push(signal); revisionStatus = 'verified' })
+  const regression = vi.fn(async (_job: SourceJobRecord, signal: AbortSignal) => { signals.push(signal); regressionStatus = 'verified' })
+  const prepare = vi.fn(async (_job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>) => {
+    await assertCurrent(); signals.push(signal); job = { ...job, status: 'prepared', planId: 'revision-plan' }
+    return store.getSourcePlan() as PluginSourcePlan
+  })
+  const runtime = new SourceJobRuntime({ config, build: settings, statePath: '/state', store: store as unknown as ControlPlaneStore,
+    ports: { automations: automations as never, delivery: { validateOwnerRoute: receipt } }, trust: async () => trust as never,
+    withGapSourceFence: (_gap, _owner, callback) => callback(), assertGrowthRun: () => {},
+    inspectRevisionParent: () => ({ name: job.intent.name, parent, source: {} as never, certificate: {} as never }),
+    prepare, verifyPreparedCreation: async () => {}, ...(options.revision === false ? {} : { verifyPreparedRevision: review }),
+    ...(options.regression === false ? {} : { verifyPreparedRevisionRegression: regression }) })
+  runtime.start()
+  const execute = (continuation = false, signal = new AbortController().signal) => {
+    const automationId = continuation ? 'source-job-prepared-continuations' : job.automationId
+    const executor = executors.get(continuation ? 'plugin-control-plane-source-continuations-v1' : 'plugin-control-plane-source-check')!
+    const registration = registrations.get(automationId)!
+    return executor.execute({ automationId, occurrenceId: 'timeout-occurrence', definitionHash: registration.definitionHash,
+      executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
+      ownerRouteId: OWNER.ownerRouteId, activationNonce: registration.activationNonce, catalogDigest: executor.descriptor.catalogDigest, signal })
+  }
+  return { runtime, execute, review, regression, prepare, signals, reconciles, config, get job() { return job } }
+}
 
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
@@ -134,6 +215,86 @@ async function fixture(options: { preflightGeneration?: object; typed?: boolean;
 }
 
 describe('durable source-job runtime', () => {
+  it('passes the complete Linux revision occurrence window through both sequential reviews', async () => {
+    const f = revisionTimeoutFixture(), frozen = structuredClone({ config: f.config, intent: f.job.intent, expiresAt: f.job.expiresAt })
+    const timeout = vi.spyOn(AbortSignal, 'timeout')
+    try {
+      expect(await f.execute()).toMatchObject({ outcome: 'succeeded' })
+      expect(timeout).toHaveBeenCalledWith(3_780_000)
+      expect(f.prepare).toHaveBeenCalledOnce(); expect(f.review).toHaveBeenCalledOnce(); expect(f.regression).toHaveBeenCalledOnce()
+      expect(f.signals).toHaveLength(3)
+      expect(f.signals.every(signal => signal === f.signals[0] && !signal.aborted)).toBe(true)
+      expect(f.reconciles.find(input => input.automationId === f.job.id)?.definition.timeoutMs).toBe(3_780_000)
+      expect({ config: f.config, intent: f.job.intent, expiresAt: f.job.expiresAt }).toEqual(frozen)
+    } finally { await f.runtime.close() }
+  })
+
+  it.each([
+    { revision: true, regression: true, timeoutMs: 3_600_000 },
+    { revision: true, regression: false, timeoutMs: 1_800_000 },
+    { revision: false, regression: true, timeoutMs: 1_800_000 },
+  ])('reserves bounded continuation time for enabled Linux reviews: %j', async options => {
+    const f = revisionTimeoutFixture({ prepared: true, ...options }), timeout = vi.spyOn(AbortSignal, 'timeout')
+    try {
+      expect(await f.execute(true)).toMatchObject({ outcome: 'succeeded' })
+      expect(timeout).toHaveBeenCalledWith(options.timeoutMs)
+      expect(f.reconciles[0]!.definition.timeoutMs).toBe(options.timeoutMs)
+      expect(f.review).toHaveBeenCalledTimes(options.revision ? 1 : 0)
+      expect(f.regression).toHaveBeenCalledTimes(options.regression ? 1 : 0)
+      expect(f.prepare).not.toHaveBeenCalled()
+    } finally { await f.runtime.close() }
+  })
+
+  it.each([false, true])('keeps the original expiry as the shorter %s continuation signal deadline', async continuation => {
+    const f = revisionTimeoutFixture({ prepared: continuation, remainingMs: 600_000 }), timeout = vi.spyOn(AbortSignal, 'timeout')
+    const frozenExpiry = f.job.expiresAt
+    try {
+      expect(await f.execute(continuation)).toMatchObject({ outcome: 'succeeded' })
+      const duration = timeout.mock.calls.at(-1)![0]
+      expect(duration).toBeGreaterThan(590_000); expect(duration).toBeLessThanOrEqual(600_000)
+      expect(f.job.expiresAt).toBe(frozenExpiry)
+      expect(f.config.expiresAt).toBe(frozenExpiry)
+    } finally { await f.runtime.close() }
+  })
+
+  it.each(['deadline', 'caller'] as const)('aborts a Linux revision continuation on %s without starting paired regression', async cause => {
+    const f = revisionTimeoutFixture({ prepared: true, remainingMs: 600_000 }), deadline = new AbortController(), caller = new AbortController()
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal)
+    const reason = new Error(`${cause} interrupted`)
+    f.review.mockImplementationOnce(async (_job, signal) => new Promise<void>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+    }))
+    try {
+      const pending = f.execute(true, caller.signal)
+      await vi.waitFor(() => expect(f.review).toHaveBeenCalledOnce())
+      expect(timeout.mock.calls[0]![0]).toBeLessThanOrEqual(600_000)
+      ;(cause === 'deadline' ? deadline : caller).abort(reason)
+      expect(await pending).toMatchObject({ outcome: 'unknown' })
+      expect(f.review.mock.calls[0]![1].reason).toBe(reason)
+      expect(f.regression).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled()
+      expect(f.job.status).toBe('prepared')
+    } finally { await f.runtime.close() }
+  })
+
+  it.each(['Docker', 'macOS'] as const)('retains the legacy %s occurrence definition when Linux review hooks are present', async backend => {
+    const settings: sourceBuild.SourceBuildConfig = backend === 'Docker' ? build : {
+      backend: 'macos-seatbelt', stateRoot: '/approved/state', authorityDigest: hex('mac-authority'),
+      expiresAt: Date.now() + 60_000, maxRuns: 2, maxTotalDurationMs: 120_000, timeoutMs: 60_000, outputBytes: 4096,
+      runtime: { schemaVersion: 1, platform: `darwin-${process.arch}` as 'darwin-x64' | 'darwin-arm64',
+        nodePath: '/approved/node/bin/node', nodeSha256: hex('node'), modulesPath: '/approved/modules',
+        roots: [{ path: '/approved/node', dev: 1, ino: 2, sha256: hex('node-root') },
+          { path: '/approved/modules', dev: 3, ino: 4, sha256: hex('modules-root') }],
+        versions: { node: 'v24.22.0', typescript: '6.0.3', cordis: '1', tools: '1', systemPrompt: '1' } },
+    }
+    const f = revisionTimeoutFixture({ sourceBuild: settings }), timeout = vi.spyOn(AbortSignal, 'timeout')
+    try {
+      expect(f.reconciles.find(input => input.automationId === f.job.id)?.definition.timeoutMs).toBe(180_000)
+      expect(await f.execute()).toMatchObject({ outcome: 'succeeded' })
+      expect(timeout).toHaveBeenCalledWith(1_980_000)
+      expect(f.reconciles[0]!.definition.timeoutMs).toBe(1_800_000)
+    } finally { await f.runtime.close() }
+  })
+
   it.each(['modify', 'create'] as const)('restores a queued Linux %s through the existing Host executor', async mode => {
     const linux: SourcePreparedEvidence = { schemaVersion: 3, kind: 'dsh-source-prepared-evidence', boundary: 'linux-native-repository-v1',
       runtimeDigest: hex('runtime'), executionContractDigest: hex('contract'), buildScriptSha256: hex('script'), archive: { sizeBytes: 10240, sha256: hex('archive') },
