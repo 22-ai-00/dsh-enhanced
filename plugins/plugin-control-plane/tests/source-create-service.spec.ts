@@ -358,59 +358,99 @@ async function startCapabilityHost(f: Awaited<ReturnType<typeof fixture>>) {
 }
 
 it.skipIf(process.platform !== 'linux' || !process.getuid?.())('restores fresh Linux v1 adoption after its build reader is initialized without redispatch or renewed call quota', async () => {
-  const f = await fixture(true, true, false, false, false, true)
-  f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedAdoptionCertificate(f, request.planId) }))
-  installCandidateRunner(f)
-  const job = await f.service.enqueueSourceJob(f.request)
-  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-  const planId = f.store.getSourceJob(job.id)!.planId!, adopted = f.service.inspectCreatedCapability(planId)!
-  expect(adopted.status).toBe('active')
-  const alias = adopted.aliases[0]!, execution = (callId: string) => ({ callId,
-    agent: { session: { id: 'session-1' }, owner: f.owner }, signal: new AbortController().signal }) as unknown as ToolRunContext
-  await expect(f.ctx.tools.get(alias)!.execute({ query: 'hello' }, execution('cached'))).resolves.toMatchObject({ value: { answer: 'ok' } })
-  const calls = f.service.inspectCreatedCapabilityCalls(planId), reads = linuxTransport.inspect.mock.calls.length
-  await f.ctx.fiber.dispose()
-  let releaseReceipt!: () => void, receiptEntered!: () => void, observeStartup!: (promise: Promise<void>) => void
-  const receiptGate = new Promise<void>(resolve => { releaseReceipt = resolve })
-  const inspectingReceipt = new Promise<void>(resolve => { receiptEntered = resolve })
-  const startup = new Promise<void>(resolve => { observeStartup = resolve })
-  const originalStart = CreationCapabilityRuntime.prototype.start
-  const start = vi.spyOn(CreationCapabilityRuntime.prototype, 'start').mockImplementation(function (this: CreationCapabilityRuntime) {
-    const pending = originalStart.call(this)
-    observeStartup(pending)
-    return pending
-  })
-  linuxTransport.inspect.mockImplementationOnce(async () => {
-    receiptEntered()
-    await receiptGate
-    return f.linuxExecution
-  })
-  const restored = await startCapabilityHost(f)
-  const unregister = restored.service.registerSourceGrowthRunProducer({ protocol: 'assistant-growth-source-run-producer/v1', inspect: f.inspectGrowthRun })
-  cleanup.push(unregister)
+  // Real Git preparation, adoption, cold source checks and restored calls share
+  // this case's budget, like the neighboring durable-adoption tests (60s).
+  const began = performance.now(), timings: Record<string, { durationMs: number; atMs: number }> = {}
+  let phase = 'fixture', failedPhase = '', failure: unknown
+  const measured = async <T>(name: string, work: () => Promise<T>, remaining = 55_000 - (performance.now() - began)): Promise<T> => {
+    phase = name
+    const entered = performance.now()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([work(), new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${name} exceeded the bounded adoption recovery budget`)), Math.max(1, remaining))
+      })])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+      timings[name] = { durationMs: Math.round(performance.now() - entered), atMs: Math.round(entered - began) }
+    }
+  }
+  let releaseReceipt = () => {}, restoreStart = () => {}, closeRuntime: (() => Promise<void>) | undefined
   try {
-    await inspectingReceipt
-    // Cold restore rechecks real source and the original build asynchronously.
-    // A pending receipt read must not publish a ready service or mounted alias.
+    const f = await measured('fixture', () => fixture(true, true, false, false, false, true))
+    f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedAdoptionCertificate(f, request.planId) }))
+    installCandidateRunner(f)
+    const { planId, adopted, alias, execution, calls, reads } = await measured('first-adopt-call', async () => {
+      const job = await f.service.enqueueSourceJob(f.request)
+      f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+      const planId = f.store.getSourceJob(job.id)!.planId!, adopted = f.service.inspectCreatedCapability(planId)!
+      expect(adopted.status).toBe('active')
+      const alias = adopted.aliases[0]!, execution = (callId: string) => ({ callId,
+        agent: { session: { id: 'session-1' }, owner: f.owner }, signal: new AbortController().signal }) as unknown as ToolRunContext
+      await expect(f.ctx.tools.get(alias)!.execute({ query: 'hello' }, execution('cached'))).resolves.toMatchObject({ value: { answer: 'ok' } })
+      return { planId, adopted, alias, execution, calls: f.service.inspectCreatedCapabilityCalls(planId), reads: linuxTransport.inspect.mock.calls.length }
+    })
+    await measured('dispose-first-host', () => f.ctx.fiber.dispose())
+    let receiptEntered!: () => void, observeStartup!: (promise: Promise<void>) => void
+    const receiptGate = new Promise<void>(resolve => { releaseReceipt = resolve })
+    const inspectingReceipt = new Promise<void>(resolve => { receiptEntered = resolve })
+    const startup = new Promise<void>(resolve => { observeStartup = resolve })
+    // Attach a handler immediately, including when Host construction itself fails.
+    void startup.catch(() => undefined)
+    const originalStart = CreationCapabilityRuntime.prototype.start
+    const start = vi.spyOn(CreationCapabilityRuntime.prototype, 'start').mockImplementation(function (this: CreationCapabilityRuntime) {
+      closeRuntime = this.close.bind(this)
+      const pending = originalStart.call(this)
+      observeStartup(pending)
+      return pending
+    })
+    restoreStart = () => start.mockRestore()
+    linuxTransport.inspect.mockImplementationOnce(async () => {
+      receiptEntered()
+      await receiptGate
+      return f.linuxExecution
+    })
+    const restored = await measured('construct-restored-host', () => startCapabilityHost(f))
+    const unregister = restored.service.registerSourceGrowthRunProducer({ protocol: 'assistant-growth-source-run-producer/v1', inspect: f.inspectGrowthRun })
+    cleanup.push(unregister)
+    await measured('receipt-enter', () => Promise.race([inspectingReceipt, startup.then(() => {
+      throw new Error('creation startup completed before original Linux build receipt inspection')
+    })]))
+    // Cold restore must not publish readiness or aliases while the receipt read
+    // is pending. Startup includes mounting and the subsequent authority recheck.
     expect(restored.service.inspectCreatedCapability(planId)).toBeUndefined()
     expect(restored.service.canEnqueueSource()).toBe(false)
     expect(restored.context.tools.get(alias)).toBeUndefined()
-  } finally { releaseReceipt() }
-  // Await actual restoration, rather than vi.waitFor's unrelated 1-second default.
-  await startup
-  start.mockRestore()
-  expect(restored.context.tools.get(alias)).toBeDefined()
-  expect(restored.service.inspectCreatedCapability(planId)).toEqual(adopted)
-  expect(restored.service.inspectCreatedCapabilityCalls(planId)).toEqual(calls)
-  expect(linuxTransport.inspect.mock.calls.length).toBeGreaterThan(reads)
-  await expect(restored.context.tools.get(alias)!.execute({ query: 'hello' }, execution('cached'))).resolves.toMatchObject({ value: { answer: 'ok' } })
-  await expect(restored.context.tools.get(alias)!.execute({ query: 'next' }, execution('second'))).resolves.toMatchObject({ value: { answer: 'ok' } })
-  await expect(restored.context.tools.get(alias)!.execute({ query: 'third' }, execution('third'))).rejects.toThrow()
-  expect(runnerRun).toHaveBeenCalledTimes(3)
-  expect(f.verification).toHaveBeenCalledOnce()
-  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
-  expect(linuxTransport.run).not.toHaveBeenCalled()
-})
+    releaseReceipt()
+    await measured('startup-complete', () => startup)
+    restoreStart()
+    expect(restored.context.tools.get(alias)).toBeDefined()
+    expect(restored.service.inspectCreatedCapability(planId)).toEqual(adopted)
+    expect(restored.service.inspectCreatedCapabilityCalls(planId)).toEqual(calls)
+    expect(linuxTransport.inspect.mock.calls.length).toBeGreaterThan(reads)
+    await measured('restored-calls', async () => {
+      await expect(restored.context.tools.get(alias)!.execute({ query: 'hello' }, execution('cached'))).resolves.toMatchObject({ value: { answer: 'ok' } })
+      await expect(restored.context.tools.get(alias)!.execute({ query: 'next' }, execution('second'))).resolves.toMatchObject({ value: { answer: 'ok' } })
+      await expect(restored.context.tools.get(alias)!.execute({ query: 'third' }, execution('third'))).rejects.toThrow()
+    })
+    expect(runnerRun).toHaveBeenCalledTimes(3)
+    expect(f.verification).toHaveBeenCalledOnce()
+    expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
+    expect(linuxTransport.run).not.toHaveBeenCalled()
+  } catch (error) { failure = error; failedPhase = phase }
+  finally {
+    // Release the test gate before cancelling the real runtime so disposal can
+    // drain an in-flight receipt read; restore the prototype even after failure.
+    releaseReceipt()
+    restoreStart()
+    try { if (closeRuntime) await measured('cancel-restored-runtime', closeRuntime, 4_000) }
+    catch (error) { failure = new AggregateError(failure === undefined ? [error] : [failure, error], 'adoption recovery cleanup failed') }
+  }
+  const diagnostics = JSON.stringify({ failedPhase, elapsedMs: Math.round(performance.now() - began), timings,
+    receiptReads: linuxTransport.inspect.mock.calls.length, runtimeChecks: linuxTransport.verify.mock.calls.length })
+  if (failure !== undefined) throw new Error(`adoption recovery ${diagnostics}: ${String(failure)}`, { cause: failure })
+  console.info('adoption recovery phases', diagnostics)
+}, 60_000)
 
 // The transport is controlled here; real native receipt/behavior acceptance is
 // separate. The generator, owner fence, source jobs, artifact store and signing are real.
