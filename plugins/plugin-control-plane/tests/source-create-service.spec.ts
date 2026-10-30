@@ -13,6 +13,7 @@ import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { isSourceOwnerContinuation, pluginCreationVerificationSigningPayload, sourceGrowthRunDigest, SourceGrowthRunUnavailableError,
+  verifyPluginRevisionVerificationCertificate, verifyPluginRevisionRegressionCertificate,
   pluginRevisionVerificationSigningPayload, pluginRevisionRegressionSigningPayload, type PluginRevisionRegressionCertificate, type RevisionRegressionAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type PluginRevisionVerificationCertificate,
   type SourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import type { ForegroundToolCallAttestation, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
@@ -1257,17 +1258,21 @@ function signedRevisionCertificate(f: Awaited<ReturnType<typeof fixture>>, planI
       { caseId: 'case-two', jobId: 'revision-job-two', operationDigest: 'e'.repeat(64), observationDigest: 'f'.repeat(64) }],
     reviewDigest: '1'.repeat(64), verifiedAt: Date.now(), expiresAt: Date.now() + 300_000,
   }
+  const runner = f.capability?.runner
+  if (runner && 'backend' in runner && runner.backend === 'linux-native') {
+    body.protocol = 'assistant-growth/revision-verification/v2'
+    body.execution = { boundary: 'linux-native-process-seccomp-v1', runtimeDigest: linuxPluginBehaviorRuntimeDigest(runner.runtime),
+      buildRuntimeDigest: plan.preparedEvidence!.schemaVersion === 3 ? plan.preparedEvidence!.runtimeDigest : '0'.repeat(64),
+      buildEvidenceDigest: controlPlaneDigest(plan.preparedEvidence), observerPreparationDigest: '2'.repeat(64) }
+  }
   alter?.(body)
   return { ...body, signature: sign(null, Buffer.from(pluginRevisionVerificationSigningPayload(body)), f.signing.privateKey).toString('base64url') }
 }
 
-async function revisionFixture(withRegression = false) {
-  const f = await fixture(true, true, true, true, withRegression)
-  f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedCertificate(f, request.planId,
-    f.signing.privateKey, body => { body.schemaDigest = candidateSchemaDigest; body.environment = candidateEnvironment }) }))
-  runnerRun.mockImplementation(async (input: { artifact: Buffer; operation: { kind: string } }) => ({ status: 'observed', quiescent: true,
-    artifactSha256: createHash('sha256').update(input.artifact).digest('hex'), schemaDigest: candidateSchemaDigest,
-    schemas: candidateSchemas, environment: candidateEnvironment }))
+async function revisionFixture(withRegression = false, withLinux = false) {
+  const f = await fixture(true, true, true, true, withRegression, withLinux)
+  f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedAdoptionCertificate(f, request.planId) }))
+  installCandidateRunner(f)
   const initial = await f.service.enqueueSourceJob(f.request)
   f.advance(); await f.automations.tick(); await f.automations.whenIdle()
   const parentPlanId = f.store.getSourceJob(initial.id)!.planId!
@@ -1582,9 +1587,149 @@ function signedRegressionCertificate(f: Awaited<ReturnType<typeof revisionFixtur
       candidate: { jobId: `regression-candidate-${index}`, operationDigest: '5'.repeat(64), observationDigest: '6'.repeat(64) } })),
     verifiedAt: Date.now(), expiresAt: Math.min(candidate.expiresAt, Date.now() + 120_000),
   }
+  if (candidate.protocol === 'assistant-growth/revision-verification/v2') {
+    body.protocol = 'assistant-growth/revision-regression/v2'
+    const { boundary, runtimeDigest, observerPreparationDigest } = candidate.execution!
+    body.execution = { boundary, runtimeDigest, observerPreparationDigest }
+  }
   alter?.(body)
   return { ...body, signature: sign(null, Buffer.from(pluginRevisionRegressionSigningPayload(body)), f.signing.privateKey).toString('base64url') }
 }
+
+it.skipIf(process.platform !== 'linux' || !process.getuid?.())('Linux revision and paired regression bind the prepared build and retained observer through cold reads and GC', async () => {
+  const f = await revisionFixture(true, true)
+  const parentReceipt = f.service.inspectCreatedCapability(f.parentPlanId)
+  f.revisionVerification.mockImplementation(async request => ({ status: 'verified', certificate: signedRevisionCertificate(f, request.planId) }))
+  f.regressionVerification.mockImplementation(async request => ({ status: 'verified', certificate: signedRegressionCertificate(f, request.planId) }))
+  const definitions = vi.spyOn(f.automations, 'reconcileSystem')
+  const queued = await f.service.enqueueSourceJob(f.revisionRequest)
+  const registered = definitions.mock.calls.find(([input]) => input.automationId === queued.id)?.[0]
+  expect(registered?.definition.timeoutMs).toBeGreaterThanOrEqual(f.config.sourceBuild!.timeoutMs + 120_000 + 2 * 1_800_000)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const planId = f.store.getSourceJob(queued.id)!.planId!, candidate = f.store.getRevisionVerification(planId)!
+  const regression = f.service.inspectVerifiedRevisionRegression(planId)!
+  expect(candidate).toMatchObject({ protocol: 'assistant-growth/revision-verification/v2',
+    execution: { boundary: 'linux-native-process-seccomp-v1', buildEvidenceDigest: controlPlaneDigest(f.linuxChecked!.evidence) } })
+  expect(regression).toMatchObject({ protocol: 'assistant-growth/revision-regression/v2',
+    execution: { boundary: candidate.execution!.boundary, runtimeDigest: candidate.execution!.runtimeDigest,
+      observerPreparationDigest: candidate.execution!.observerPreparationDigest } })
+  expect(Object.keys(regression.execution!).sort()).toEqual(['boundary', 'observerPreparationDigest', 'runtimeDigest'])
+  expect(regression.candidateVerificationDigest).toBe(controlPlaneDigest(candidate))
+  expect(f.service.inspectCreatedCapability(f.parentPlanId)).toEqual(parentReceipt)
+  expect(f.service.inspectCreatedCapabilitySource(f.parentPlanId)).toEqual(f.archive)
+  expect(f.service.inspectCreatedCapability(planId)).toBeUndefined()
+  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledTimes(2)
+  expect(build.runDockerPreparedChecks).not.toHaveBeenCalled()
+  const restarted = await restartRegressionHost(f)
+  expect(restarted.service.inspectVerifiedRevisionRegression(planId)).toEqual(regression)
+  f.advance(901_000)
+  await restarted.service.gcPreparedSourceWorktrees()
+  const historical = new ControlPlaneStore({ path: join(f.config.statePath, 'control.sqlite') })
+  try {
+    expect(historical.getRevisionVerification(planId)).toEqual(candidate)
+    expect(historical.getRevisionRegression(planId)).toEqual(regression)
+  } finally { historical.close() }
+  expect(restarted.service.inspectVerifiedRevisionRegression(planId)).toBeUndefined()
+  expect(f.revisionVerification).toHaveBeenCalledOnce()
+  expect(f.regressionVerification).toHaveBeenCalledOnce()
+  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledTimes(2)
+  expect(linuxTransport.run).not.toHaveBeenCalled()
+}, 60_000)
+
+it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['protocol', 'build-runtime', 'build-evidence'] as const)(
+  'Linux revision rejects genuinely signed %s provenance without replay', async fault => {
+    const f = await revisionFixture(false, true)
+    f.revisionVerification.mockImplementation(async request => {
+      const certificate = signedRevisionCertificate(f, request.planId, body => {
+        if (fault === 'protocol') { body.protocol = 'assistant-growth/revision-verification/v1'; delete body.execution }
+        else body.execution![fault === 'build-runtime' ? 'buildRuntimeDigest' : 'buildEvidenceDigest'] = '0'.repeat(64)
+      })
+      expect(verifyPluginRevisionVerificationCertificate(certificate, f.revisionAuthority, f.publicKey)).toBe(true)
+      return { status: 'verified', certificate }
+    })
+    const queued = await f.service.enqueueSourceJob(f.revisionRequest)
+    f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+    const planId = f.store.getSourceJob(queued.id)!.planId!
+    expect(f.store.getRevisionVerificationStatus(planId)).toBe('unknown')
+    expect(f.store.getRevisionVerification(planId)).toBeUndefined()
+    expect(f.service.inspectCreatedCapability(planId)).toBeUndefined()
+    f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
+    expect(f.revisionVerification).toHaveBeenCalledOnce()
+    expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledTimes(2)
+    expect(linuxTransport.run).not.toHaveBeenCalled()
+  }, 60_000)
+
+it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['runtimeDigest', 'observerPreparationDigest'] as const)(
+  'Linux regression rejects a signed candidate from a different parent %s family', async field => {
+    const f = await revisionFixture(true, true)
+    f.revisionVerification.mockImplementation(async request => ({ status: 'verified',
+      certificate: signedRevisionCertificate(f, request.planId, body => { body.execution![field] = '0'.repeat(64) }) }))
+    f.regressionVerification.mockImplementation(async request => {
+      const certificate = signedRegressionCertificate(f, request.planId)
+      expect(verifyPluginRevisionRegressionCertificate(certificate, f.regressionAuthority, f.publicKey)).toBe(true)
+      return { status: 'verified', certificate }
+    })
+    const queued = await f.service.enqueueSourceJob(f.revisionRequest)
+    f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+    const planId = f.store.getSourceJob(queued.id)!.planId!
+    expect(f.store.getRevisionVerificationStatus(planId)).toBe('verified')
+    expect(f.store.getRevisionRegressionStatus(planId)).toBe('unknown')
+    expect(f.store.getRevisionRegression(planId)).toBeUndefined()
+    f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
+    expect(f.regressionVerification).toHaveBeenCalledOnce()
+    expect(f.revisionVerification).toHaveBeenCalledOnce()
+    expect(linuxTransport.run).not.toHaveBeenCalled()
+  }, 60_000)
+
+it.skipIf(process.platform !== 'linux' || !process.getuid?.())('Linux retained revision and regression reads reject signed provenance changes with recomputed row digests', async () => {
+  const f = await revisionFixture(true, true)
+  f.revisionVerification.mockImplementation(async request => ({ status: 'verified', certificate: signedRevisionCertificate(f, request.planId) }))
+  f.regressionVerification.mockImplementation(async request => ({ status: 'verified', certificate: signedRegressionCertificate(f, request.planId) }))
+  const queued = await f.service.enqueueSourceJob(f.revisionRequest)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const planId = f.store.getSourceJob(queued.id)!.planId!, candidate = f.store.getRevisionVerification(planId)!
+  const regression = f.store.getRevisionRegression(planId)!, source = f.store.readRevisionSource(planId)!
+  const db = new DatabaseSync(join(f.config.statePath, 'control.sqlite'))
+  const write = (table: 'source_revision_verifications' | 'source_revision_regressions',
+    certificate: PluginRevisionVerificationCertificate | PluginRevisionRegressionCertificate) =>
+    db.prepare(`UPDATE ${table} SET certificate_json=?,certificate_digest=? WHERE plan_id=?`)
+      .run(JSON.stringify(certificate), controlPlaneDigest(certificate), planId)
+  try {
+    for (const fault of ['protocol', 'buildRuntimeDigest', 'buildEvidenceDigest', 'name', 'sourceTreeDigest', 'sourcePatchDigest'] as const) {
+      const changed = signedRevisionCertificate(f, planId, body => {
+        if (fault === 'protocol') { body.protocol = 'assistant-growth/revision-verification/v1'; delete body.execution }
+        else if (fault === 'name') body.plan.name = 'rsi-service-different'
+        else if (fault === 'sourceTreeDigest' || fault === 'sourcePatchDigest') body.plan[fault] = '0'.repeat(64)
+        else body.execution![fault] = '0'.repeat(64)
+      })
+      expect(verifyPluginRevisionVerificationCertificate(changed, f.revisionAuthority, f.publicKey)).toBe(true)
+      expect(() => f.store.withOwnerTaskFailureGapAdmission(f.revisionRequest.gapId,
+        () => f.store.recordRevisionVerification(changed, source))).toThrow()
+      write('source_revision_verifications', changed)
+      expect(() => f.store.getRevisionVerification(planId)).toThrow(/exact prepared source/)
+      write('source_revision_verifications', candidate)
+    }
+    for (const fault of ['protocol', 'runtimeDigest', 'observerPreparationDigest', 'candidateVerificationDigest'] as const) {
+      const changed = signedRegressionCertificate(f, planId, body => {
+        if (fault === 'protocol') { body.protocol = 'assistant-growth/revision-regression/v1'; delete body.execution }
+        else if (fault === 'candidateVerificationDigest') body.candidateVerificationDigest = '0'.repeat(64)
+        else body.execution![fault] = '0'.repeat(64)
+      })
+      expect(verifyPluginRevisionRegressionCertificate(changed, f.regressionAuthority, f.publicKey)).toBe(true)
+      expect(() => f.store.withOwnerTaskFailureGapAdmission(f.revisionRequest.gapId,
+        () => f.store.recordRevisionRegression(changed))).toThrow(/exact parent and candidate/)
+      write('source_revision_regressions', changed)
+      expect(() => f.store.getRevisionRegression(planId)).toThrow(/exact candidate execution/)
+      write('source_revision_regressions', regression)
+    }
+    expect(f.store.getRevisionVerification(planId)).toEqual(candidate)
+    expect(f.store.getRevisionRegression(planId)).toEqual(regression)
+  } finally {
+    write('source_revision_verifications', candidate)
+    write('source_revision_regressions', regression)
+    db.close()
+  }
+}, 60_000)
 
 it('native revision pins and retains independent parent regression without renewing any execution receipt', async () => {
   const f = await revisionFixture(true)
