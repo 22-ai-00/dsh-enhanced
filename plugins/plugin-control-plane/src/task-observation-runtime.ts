@@ -1,3 +1,4 @@
+import { ScannerOwnerGuard, ScannerOwnerUnavailable, drainScannerFlights } from './scanner-owner-runtime.js'
 import { randomUUID } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
 import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutorInput, HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
@@ -19,8 +20,8 @@ const EXECUTOR = 'plugin-control-plane-task-observations-v1'
 const CATALOG = controlPlaneDigest({ executor: EXECUTOR, version: 1 })
 const same = (a: unknown, b: unknown): boolean => controlPlaneDigest(a) === controlPlaneDigest(b)
 type Evaluation = Pick<AssistantEvaluationService, 'canonicalHostScope' | 'getTrustedForegroundLearningProjection' | 'withTrustedCanonicalTaskWriterFence' | 'onTrustedTaskChange'>
-type Delivery = Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'inspectOwnerForegroundLearningTask'>
-type Automations = Pick<AssistantAutomationsService, 'registerHostExecutor' | 'reconcileSystem' | 'inspectSystemOwnedActivation'>
+type Delivery = Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'inspectOwnerRouteState' | 'inspectOwnerForegroundLearningTask'>
+type Automations = Pick<AssistantAutomationsService, 'inspectSystemOwnedRetirement' | 'retireSystemOwned' | 'onSchedulerWake' | 'registerHostExecutor' | 'reconcileSystem' | 'inspectSystemOwned' | 'inspectSystemOwnedActivation'>
 
 export { taskObservationOwner } from './task-observation-evidence.js'
 
@@ -57,6 +58,9 @@ export class TaskObservationRuntime {
   private unregister?: () => void
   private unsubscribe?: () => void
   private closing?: Promise<void>
+  private readonly ownerGuard: ScannerOwnerGuard
+  private unsubscribeWake: (() => void) | undefined
+  private initialized = false
   private active = false
   private scanning = false
   private lastError: string | null = null
@@ -73,9 +77,18 @@ export class TaskObservationRuntime {
     this.trustDigest = controlPlaneDigest(options.trust)
     this.scanId = `task-observation-scan-${this.lane}`
     this.activationNonce = controlPlaneDigest({ config: this.configDigest, generation: this.generation })
+    const scope = options.config.scope
+    this.ownerGuard = new ScannerOwnerGuard(OWNER, this.scanId, { authorityId: scope.ownerRouteId,
+      principalId: scope.principalId, workspace: scope.workspace, agentPreset: scope.preset }, options.delivery, options.automations)
   }
 
   start(): void {
+    let recoverNativeScanner = false
+    try { this.ownerGuard.check() } catch (error) {
+      this.lastError = String(error).slice(0, 200)
+      if (this.ownerGuard.retired) return
+      recoverNativeScanner = this.ownerGuard.canReconcileScanner
+    }
     this.unregister = this.options.automations.registerHostExecutor({
       descriptor: { executorId: EXECUTOR, contractVersion: 1, catalogDigest: CATALOG },
       accepts: spec => spec.executorId === EXECUTOR && spec.executorContractVersion === 1 && spec.catalogDigest === CATALOG
@@ -88,36 +101,56 @@ export class TaskObservationRuntime {
       },
     })
     this.active = true
+    this.unsubscribeWake = this.options.automations.onSchedulerWake(() => {
+      if (!this.active || this.initialized || this.ownerGuard.retired) return
+      try { this.initializeScanner() }
+      catch (error) { this.lastError = String(error).slice(0, 200) }
+    })
     this.unsubscribe = this.options.evaluation.onTrustedTaskChange(() => this.scan())
-    this.options.automations.reconcileSystem({ owner: OWNER, automationId: this.scanId,
-      idempotencyKey: `${this.scanId}:${this.generation}`, desiredStatus: 'active', definition: this.definition() })
+    if (recoverNativeScanner) {
+      try {
+        this.options.automations.reconcileSystem({ owner: OWNER, automationId: this.scanId,
+          idempotencyKey: `${this.scanId}:${this.generation}`, desiredStatus: 'active', definition: this.definition() })
+      } catch (error) { this.lastError = String(error).slice(0, 200) }
+    }
     this.scan()
+  }
+
+  private initializeScanner() {
+    const owner = this.owner()
+    if (!this.initialized) {
+      this.options.automations.reconcileSystem({ owner: OWNER, automationId: this.scanId,
+        idempotencyKey: `${this.scanId}:${this.generation}`, desiredStatus: 'active', definition: this.definition() })
+      this.initialized = true
+    }
+    return owner
   }
 
   close(): Promise<void> {
     return this.closing ??= (async () => {
       this.active = false
       try {
-        const current = this.options.automations.inspectSystemOwnedActivation({ owner: OWNER, automationId: this.scanId })
-        if (current?.activationNonce === this.activationNonce) this.options.automations.reconcileSystem({ owner: OWNER,
+        const current = this.initialized && !this.ownerGuard.retired
+          ? this.options.automations.inspectSystemOwnedActivation({ owner: OWNER, automationId: this.scanId }) : undefined
+        if (!this.ownerGuard.retired && this.initialized && current?.activationNonce === this.activationNonce) this.options.automations.reconcileSystem({ owner: OWNER,
           automationId: this.scanId, idempotencyKey: `${this.scanId}:${this.generation}:pause`, desiredStatus: 'paused', definition: this.definition() })
       } finally {
         this.abort.abort()
-        try { this.unsubscribe?.() } finally {
+        try { this.unsubscribeWake?.(); this.unsubscribe?.() } finally {
           try { this.unregister?.() } finally {
-            await Promise.allSettled(this.flights)
-            this.options.store.close()
+            try { await drainScannerFlights(this.flights) } finally { this.options.store.close() }
           }
         }
       }
     })()
   }
 
-  health = () => ({ connected: this.active, lastError: this.lastError })
+  health = () => ({ connected: this.active && !this.ownerGuard.retired, lastError: this.lastError })
 
   private current(): void {
     this.abort.signal.throwIfAborted()
     if (!this.active) throw new Error('task observation runtime unavailable')
+    this.ownerGuard.check()
     this.options.assertCurrent()
   }
   private owner(): TaskObservationOwner {
@@ -155,13 +188,13 @@ export class TaskObservationRuntime {
     if (!this.active || this.scanning) return
     this.scanning = true
     try {
-      this.current()
+      this.initializeScanner()
       this.lastError = null
       const store = this.options.store, now = Date.now(), config = this.options.config
       const prior = store.listTaskObservations(this.lane, 1000)
       for (const record of prior.filter(record => record.state === 'pending' || record.state === 'signed')) {
         try { this.fence(record.batch, () => {}); return }
-        catch { store.staleTaskObservation(record.batch.id) }
+        catch (error) { if (error instanceof ScannerOwnerUnavailable) throw error; store.staleTaskObservation(record.batch.id) }
       }
       if (now >= config.policy.expiresAt) return
       const owner = this.owner()
@@ -225,13 +258,13 @@ export class TaskObservationRuntime {
           continue
         }
         if (record.state !== 'pending' && record.state !== 'signed') continue
-        try { this.fence(record.batch, () => {}) } catch { this.options.store.staleTaskObservation(record.batch.id); continue }
+        try { this.fence(record.batch, () => {}) } catch (error) { if (error instanceof ScannerOwnerUnavailable) throw error; this.options.store.staleTaskObservation(record.batch.id); continue }
         const receipt = record.receipt ?? await (this.options.request?.(record.batch, signal)
           ?? requestTaskObservation(this.options.config.authority, { protocol: 'dsh-task-observation/v1',
             observationId: record.batch.id, observationDigest: record.batch.digest }, signal))
         signal.throwIfAborted(); this.current()
         if (receipt.expiresAt <= Date.now()) { this.options.store.staleTaskObservation(record.batch.id); continue }
-        try { this.fence(record.batch, () => {}) } catch { this.options.store.staleTaskObservation(record.batch.id); continue }
+        try { this.fence(record.batch, () => {}) } catch (error) { if (error instanceof ScannerOwnerUnavailable) throw error; this.options.store.staleTaskObservation(record.batch.id); continue }
         const key = resolveTrustKey(this.options.trust, 'host-attestation', receipt.authority, receipt.keyId)
         const authority = new Ed25519PostActivationObservationAuthority(key.publicKeyPem, key.authority, key.keyId, { receiptTtlMs: 300_000 })
         try {
@@ -239,6 +272,7 @@ export class TaskObservationRuntime {
           signal.throwIfAborted()
           this.fence(record.batch, () => this.options.store.signTaskObservation(record.batch.id, receipt))
         } catch (error) {
+          if (error instanceof ScannerOwnerUnavailable) throw error
           this.options.store.staleTaskObservation(record.batch.id)
           throw error
         }

@@ -78,8 +78,9 @@ async function fixture(status: 'achieved' | 'not-achieved' = 'achieved') {
       withTrustedCanonicalTaskWriterFence: (input, callback) => evaluation.withCanonicalTaskWriterFence(input.scope,
         { scopeWatermark: input.scopeWatermark, evidence: input.evidence }, callback),
       onTrustedTaskChange: () => unsubscribe },
-    delivery: { validateOwnerRoute: () => owner, inspectOwnerForegroundLearningTask: () => available ? structuredClone(source) : undefined },
-    automations: { registerHostExecutor: value => { executor = value; return unregister },
+    delivery: { validateOwnerRoute: () => owner, inspectOwnerRouteState: () => ({ status: 'active' as const, receipt: owner }), inspectOwnerForegroundLearningTask: () => available ? structuredClone(source) : undefined },
+    automations: { onSchedulerWake: () => () => {}, inspectSystemOwnedRetirement: () => undefined, retireSystemOwned: () => { throw new Error('unexpected retirement') },
+      inspectSystemOwned: () => ({ latestTerminalRuns: {} }) as never, registerHostExecutor: value => { executor = value; return unregister },
       reconcileSystem: input => { scheduleStatus = input.desiredStatus; automationId = input.automationId; definition = input.definition as unknown as typeof definition; return {} as never },
       inspectSystemOwnedActivation: () => ({ definitionHash: 'definition-hash', activationNonce: definition.execution.activationNonce }) as never },
     assertCurrent() {}, rollback, request }

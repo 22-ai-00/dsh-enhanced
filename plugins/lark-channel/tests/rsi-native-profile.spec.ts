@@ -177,14 +177,18 @@ describe('native owner learning profile', () => {
     const automations = new AssistantAutomationsService(ctx, AutomationsConfig(personal.assistantAutomations))
     const evaluation = new AssistantEvaluationService(ctx, { databasePath: join(input.dshHome, 'evaluation.sqlite'), projectionIntervalMs: 0 })
     const config = compiled.manifest.memoryLearning.learning, owner = compiled.manifest.owner
-    const delivery = {
-      validateOwnerRoute: () => owner,
+    const route: ReturnType<LearningPorts['delivery']['validateOwnerRoute']> = {
+      ...owner, receiptVersion: 2, bindingVersion: 1, generation: 1,
+    }
+    const delivery: LearningPorts['delivery'] = {
+      validateOwnerRoute: () => route,
+      inspectOwnerRouteState: () => ({ status: 'active', receipt: route }),
       listOwnerForegroundTaskSources: () => ({ items: [], nextCursor: { protocol: 'assistant-delivery/owner-foreground-source-cursor/v1',
         epoch: 'fixture-epoch', scopeKey: 'fixture-owner', sequence: 0 }, watermark: 0, hasMore: false }),
       inspectOwnerForegroundTaskSource: () => undefined,
       withOwnerForegroundTaskSourcesFence: () => { throw new Error('no task source in this test') },
       inspectOwnerForegroundLearningTask: () => undefined,
-    } as unknown as LearningPorts['delivery']
+    }
     const memory = {
       listLearningTargets: () => [], inspectLearningAdoptionAvailability: () => ({ authorityId: config.adoptionAuthorityId,
         grantDigest: config.adoptionGrantDigest, expiresAt: config.expiresAt, remainingMutations: 1,

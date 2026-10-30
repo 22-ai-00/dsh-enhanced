@@ -590,6 +590,39 @@ describe('assistant automations Cordis service', () => {
     await fixture.ctx.fiber.restart()
   })
 
+  test('permanent retirement requires existing reconcile Policy and does not reserve a budget', async () => {
+    for (const allow of [false, true]) {
+      const fixture = await harness(allow)
+      const store = (fixture.service as unknown as { store: AutomationStore }).store
+      store.reconcileSystemOwned({ owner: 'scanner', automationId: 'retire', idempotencyKey: 'seed', definition: systemHostDefinition() })
+      const reserve = vi.spyOn(fixture.ctx.assistantPolicy, 'reserve')
+      const input = { owner: 'scanner', automationId: 'retire', operationId: 'retirement',
+        definitionHash: store.getDefinitionHash('retire')!, expectedVersion: 1,
+        reason: 'owner-revoked' as const, evidenceDigest: 'a'.repeat(64) }
+      if (!allow) {
+        expect(() => fixture.service.retireSystemOwned(input)).toThrow()
+        expect(fixture.service.inspectSystemOwnedRetirement(input)).toBeUndefined()
+        expect(store.get('retire')).toMatchObject({ status: 'active', version: 1 })
+      } else {
+        expect(() => fixture.service.retireSystemOwned({ ...input, expectedVersion: 2 })).toThrow(/version/)
+        expect(fixture.service.inspectSystemOwnedRetirement(input)).toBeUndefined()
+        const receipt = fixture.service.retireSystemOwned(input)
+        expect(fixture.service.retireSystemOwned(input)).toEqual({ ...receipt, replayed: true })
+        expect(fixture.service.inspectSystemOwnedRetirement(input)).toEqual({ ...receipt, replayed: true })
+        const current = store.get('retire')!
+        for (const activationNonce of ['identity-b', 'activation-1']) {
+          const host = systemHostDefinition()
+          expect(() => fixture.service.reconcileSystem({ owner: 'scanner', automationId: 'retire',
+            idempotencyKey: activationNonce, definition: { ...host, execution: { ...host.execution, activationNonce } } }))
+            .toThrow(/permanently retired/)
+        }
+        expect(store.get('retire')).toEqual(current)
+      }
+      expect(reserve).not.toHaveBeenCalled()
+      await fixture.ctx.fiber.restart()
+    }
+  })
+
   test('arms a Host-only exact circuit probe without clearing it or crossing definition ABA', async () => {
     const fixture = await harness()
     const store = (fixture.service as unknown as { store: AutomationStore }).store

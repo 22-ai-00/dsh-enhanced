@@ -149,6 +149,7 @@ import type {
   OwnerForegroundTaskSourceRef,
   OwnerApprovalForPreferenceInput,
   OwnerApprovalForPreferenceResult,
+  OwnerRouteStateInspection,
   OwnerRouteValidationReceipt,
   OutboundIntent,
   OutboxRecord,
@@ -4926,6 +4927,56 @@ export class AssistantDeliveryService extends Service {
       authorityId,
       binding,
       snapshot: ownerRouteBindingSnapshot(authority, binding),
+    }
+  }
+
+  /**
+   * Read-only Host observation of the configured owner, even after its binding
+   * has been revoked. Missing routes and transient failures are not revocation.
+   */
+  inspectOwnerRouteState(input: {
+    authorityId: string
+    principalId: string
+    workspace: string
+    agentPreset: string
+  }): OwnerRouteStateInspection {
+    this.assertActive()
+    let authorityId: string
+    try {
+      authorityId = canonicalOwnerRouteId(input.authorityId)
+    } catch {
+      return Object.freeze({ status: 'unavailable', reason: 'authority-invalid' })
+    }
+    const authority = this.ownerRoutes.get(authorityId)
+    if (authority === undefined) {
+      return Object.freeze({ status: 'unavailable', reason: 'authority-unconfigured' })
+    }
+    const principalId = externalPrincipalId(authority.principal)
+    // Equality with the bounded, validated authority also excludes malformed
+    // scope values. Match validateOwnerRoute's NFC/trim normalization first.
+    const text = (value: unknown): string | undefined => typeof value === 'string'
+      ? value.normalize('NFC').trim() : undefined
+    if (text(input.principalId) !== principalId || text(input.workspace) !== authority.workspace
+      || text(input.agentPreset) !== authority.agentPreset) {
+      return Object.freeze({ status: 'unavailable', reason: 'scope-mismatch' })
+    }
+    try {
+      // Do not resolve an active binding before checking the durable owner:
+      // revokePrincipal/handoffOwner revoke that binding in the same transaction.
+      const owner = this.deliveryStore.getPrincipal(authority.principal)
+      if (owner?.role !== 'owner' || externalPrincipalId(owner.principal) !== principalId) {
+        return Object.freeze({ status: 'unavailable', reason: 'owner-unavailable' })
+      }
+      if (owner.status === 'revoked') {
+        return Object.freeze({ status: 'revoked', authorityId,
+          authorityHash: ownerRouteAuthorityHash(authority), principalId,
+          principalRecordId: owner.id, principalVersion: owner.version })
+      }
+      return Object.freeze({ status: 'active', receipt: this.validateOwnerRoute(input) })
+    } catch (error) {
+      return Object.freeze({ status: 'unavailable', reason:
+        error instanceof AssistantDeliveryError && error.code === 'missing-binding'
+          ? 'route-unavailable' : 'inspection-unavailable' })
     }
   }
 

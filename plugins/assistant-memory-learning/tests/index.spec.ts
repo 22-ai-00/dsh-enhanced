@@ -35,7 +35,7 @@ describe('dsh-enhanced-assistant-memory-learning', () => {
       policy: 'Retain explicit owner statements.', maxInputBytes: 32_768, maxOutputTokens: 512, timeoutMs: 1000,
       budgetId: 'learning', budgetAmount: 1, scanBudgetId: 'scan', scanBudgetAmount: 1,
       reviewAuthorityId: 'review', reviewAuthorityDigest: 'b'.repeat(64), adoptionAuthorityId: 'adopt', adoptionGrantDigest: 'c'.repeat(64) }
-    const methods = ['validateOwnerRoute', 'listOwnerForegroundTaskSources', 'inspectOwnerForegroundTaskSource',
+    const methods = ['inspectOwnerRouteState', 'inspectSystemOwnedRetirement', 'retireSystemOwned', 'onSchedulerWake', 'validateOwnerRoute', 'listOwnerForegroundTaskSources', 'inspectOwnerForegroundTaskSource',
       'withOwnerForegroundTaskSourcesFence', 'inspectOwnerForegroundLearningTask', 'canonicalHostScope',
       'listTrustedTaskLearningProjections', 'withTrustedCanonicalScopeWriterFence', 'getTrustedForegroundLearningProjection',
       'inspectTrustedTaskOwnerRevision', 'registerHostExecutor', 'reconcileSystem', 'inspectSystemOwnedActivation', 'inspectSystemOwned',

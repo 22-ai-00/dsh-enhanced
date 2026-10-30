@@ -1,3 +1,4 @@
+import { ScannerOwnerGuard, ScannerOwnerUnavailable, drainScannerFlights } from './scanner-owner-runtime.js'
 import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutorInput, HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
@@ -12,8 +13,8 @@ const OWNER = 'assistant-growth-usage'
 const EXECUTOR = 'assistant-growth-usage-v1'
 const CATALOG = acceptanceDigest({ executor: EXECUTOR, version: 1 })
 type Evaluation = Pick<AssistantEvaluationService, 'canonicalHostScope' | 'listTrustedTaskLearningProjections' | 'withTrustedCanonicalTaskWriterFence' | 'onTrustedTaskChange'>
-type Delivery = Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'inspectOwnerForegroundLearningTask'>
-type Automations = Pick<AssistantAutomationsService, 'registerHostExecutor' | 'reconcileSystem' | 'inspectSystemOwnedActivation' | 'inspectSystemOwned'>
+type Delivery = Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'inspectOwnerRouteState' | 'inspectOwnerForegroundLearningTask'>
+type Automations = Pick<AssistantAutomationsService, 'inspectSystemOwnedRetirement' | 'retireSystemOwned' | 'onSchedulerWake' | 'registerHostExecutor' | 'reconcileSystem' | 'inspectSystemOwnedActivation' | 'inspectSystemOwned'>
 export interface UsageReviewInput {
   id: string
   intentDigest: string
@@ -39,6 +40,9 @@ export class UsageLearningRuntime {
   private readonly flights = new Set<Promise<unknown>>()
   private unregister: (() => void) | undefined
   private unsubscribe: (() => void) | undefined
+  private readonly ownerGuard: ScannerOwnerGuard
+  private unsubscribeWake: (() => void) | undefined
+  private initialized = false
   private active = false
   private scanning = false
   private lastError: string | null = null
@@ -55,6 +59,10 @@ export class UsageLearningRuntime {
     if (typeof ports.evaluation.listTrustedTaskLearningProjections !== 'function'
       || typeof ports.evaluation.withTrustedCanonicalTaskWriterFence !== 'function'
       || typeof ports.evaluation.onTrustedTaskChange !== 'function'
+      || typeof ports.delivery.inspectOwnerRouteState !== 'function'
+      || typeof ports.automations.inspectSystemOwnedRetirement !== 'function'
+      || typeof ports.automations.retireSystemOwned !== 'function'
+      || typeof ports.automations.onSchedulerWake !== 'function'
       || typeof ports.delivery.inspectOwnerForegroundLearningTask !== 'function'
       || typeof ports.automations.registerHostExecutor !== 'function'
       || typeof ports.automations.inspectSystemOwnedActivation !== 'function') {
@@ -69,12 +77,19 @@ export class UsageLearningRuntime {
       ...(allowRevision ? { allowRevision: true } : {}),
       ...(allowModification === false ? { allowModification: false } : {}) } })
     this.scanId = `usage-scan-${this.lane}`
+    this.ownerGuard = new ScannerOwnerGuard(OWNER, this.scanId, { authorityId: config.scope.ownerRouteId,
+      principalId: config.scope.principalId, workspace: config.scope.workspace, agentPreset: config.scope.preset }, ports.delivery, ports.automations)
   }
-  health = () => ({ enabled: true, connected: this.active, lastScanAt: this.lastScanAt,
+  health = () => ({ enabled: true, connected: this.active && !this.ownerGuard.retired, lastScanAt: this.lastScanAt,
     lastError: this.lastError, counts: this.store.counts(this.lane) })
 
   start(): void {
-    this.store.interrupt(this.lane)
+    let recoverNativeScanner = false
+    try { this.ownerGuard.check() } catch (error) {
+      this.lastError = String(error).slice(0, 200)
+      if (this.ownerGuard.retired) return
+      recoverNativeScanner = this.ownerGuard.canReconcileScanner
+    }
     this.unregister = this.ports.automations.registerHostExecutor({
       descriptor: { executorId: EXECUTOR, contractVersion: 1, catalogDigest: CATALOG },
       accepts: spec => spec.executorId === EXECUTOR && spec.executorContractVersion === 1
@@ -87,25 +102,45 @@ export class UsageLearningRuntime {
       },
     })
     this.active = true
+    this.unsubscribeWake = this.ports.automations.onSchedulerWake(() => {
+      if (!this.active || this.initialized || this.ownerGuard.retired) return
+      try { this.initializeScanner() }
+      catch (error) { this.lastError = String(error).slice(0, 200) }
+    })
     this.unsubscribe = this.ports.evaluation.onTrustedTaskChange(() => this.scan())
     // This persisted scan also discovers writes made by another Host process.
-    this.ports.automations.reconcileSystem({ owner: OWNER, automationId: this.scanId,
-      idempotencyKey: `${this.scanId}:${this.configDigest}`, desiredStatus: 'active', definition: this.definition() })
+    if (recoverNativeScanner) {
+      try {
+        this.ports.automations.reconcileSystem({ owner: OWNER, automationId: this.scanId,
+          idempotencyKey: `${this.scanId}:${this.configDigest}`, desiredStatus: 'active', definition: this.definition() })
+      } catch (error) { this.lastError = String(error).slice(0, 200) }
+    }
     this.scan()
+  }
+
+  private initializeScanner() {
+    const owner = this.owner()
+    if (!this.initialized) {
+      this.store.interrupt(this.lane)
+      this.ports.automations.reconcileSystem({ owner: OWNER, automationId: this.scanId,
+        idempotencyKey: `${this.scanId}:${this.configDigest}`, desiredStatus: 'active', definition: this.definition() })
+      this.initialized = true
+    }
+    return owner
   }
 
   close(): Promise<void> {
     return this.closing ??= (async () => {
       this.active = false
-      this.unsubscribe?.(); this.unregister?.()
+      this.unsubscribeWake?.(); this.unsubscribe?.(); this.unregister?.()
       this.abort.abort(new Error('usage learning provider disposed'))
-      await Promise.allSettled(this.flights)
-      this.store.close()
+      try { await drainScannerFlights(this.flights) } finally { this.store.close() }
     })()
   }
 
   private owner() {
     if (!this.active) throw new Error('usage learning unavailable')
+    this.ownerGuard.check()
     const scope = this.config.scope!
     return this.ports.delivery.validateOwnerRoute({ authorityId: scope.ownerRouteId, principalId: scope.principalId,
       workspace: scope.workspace, agentPreset: scope.preset })
@@ -159,6 +194,7 @@ export class UsageLearningRuntime {
         || !same(binding.budget, job.intent.budget)) return undefined
       return structuredClone(binding)
     } catch (error) {
+      if (error instanceof ScannerOwnerUnavailable && !this.ownerGuard.retired) throw new SourceGrowthRunUnavailableError(error.message)
       const code = error instanceof Error ? (error as Error & { code?: string }).code : undefined
       if (code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED'
         || code === 'ERR_SQLITE_ERROR' && error instanceof Error && /database (?:is )?(?:busy|locked)/iu.test(error.message)) {
@@ -173,10 +209,10 @@ export class UsageLearningRuntime {
     if (!this.active || this.scanning) return
     this.scanning = true
     try {
-      const owner = this.owner()
+      const owner = this.initializeScanner()
       for (const job of this.store.pending(this.lane)) if (job.state === 'queued') {
         try { this.source(job); this.schedule(job) }
-        catch { this.store.settle(job.id, 'failed', 'queued-source-or-schedule-unavailable') }
+        catch (error) { if (error instanceof ScannerOwnerUnavailable) throw error; this.store.settle(job.id, 'failed', 'queued-source-or-schedule-unavailable') }
       }
       const scope = this.ports.evaluation.canonicalHostScope({ workspace: owner.workspace, preset: owner.agentPreset })
       let stop = false
@@ -218,7 +254,7 @@ export class UsageLearningRuntime {
         if (!page.hasMore) break
       }
       for (const job of this.store.pending(this.lane)) if (job.state === 'queued') {
-        try { this.schedule(job) } catch { this.store.settle(job.id, 'failed', 'schedule-rejected') }
+        try { this.schedule(job) } catch (error) { if (error instanceof ScannerOwnerUnavailable) throw error; this.store.settle(job.id, 'failed', 'schedule-rejected') }
       }
       this.lastError = null; this.lastScanAt = Date.now()
     } catch (error) { this.lastError = error instanceof Error ? error.message.slice(0, 200) : 'usage-scan-failed' }

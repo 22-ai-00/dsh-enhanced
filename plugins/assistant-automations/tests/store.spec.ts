@@ -48,7 +48,7 @@ describe('automation SQLite store', () => {
     expect((await stat(join(fixture.root, 'state'))).mode & 0o777).toBe(0o700)
     expect((await stat(fixture.path)).mode & 0o777).toBe(0o600)
     const database = new DatabaseSync(fixture.path, { readOnly: true })
-    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 })
+    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 16 })
     expect(database.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
     expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all())
       .toEqual(expect.arrayContaining([
@@ -114,7 +114,7 @@ describe('automation SQLite store', () => {
     await chmod(path, 0o600)
 
     const migrated = openAutomationDatabase(path)
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 16 })
     expect(migrated.prepare(`
       SELECT id, lifecycle_generation, presentation_revision, alert_status, alert_ref
       FROM automation_incidents ORDER BY id
@@ -165,7 +165,7 @@ describe('automation SQLite store', () => {
     await chmod(path, 0o600)
 
     const migrated = openAutomationDatabase(path)
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 16 })
     const rows = migrated.prepare(`
       SELECT status, attempt_count, last_error_code FROM automation_evaluation_outbox ORDER BY id
     `).all()
@@ -220,7 +220,7 @@ describe('automation SQLite store', () => {
         delivery_status: 'pending', delivery_ref: null, failure_class: 'unknown',
       },
     ])
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 16 })
     migrated.close()
   })
 
@@ -268,7 +268,7 @@ describe('automation SQLite store', () => {
     `).get()).toEqual({
       state: 'open', probe_token: null, probe_lease_until: null, probe_task_id: null, version: 7,
     })
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 16 })
     expect(migrated.prepare(`
       SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'automation_incidents'
     `).get()).toEqual({ name: 'automation_incidents' })
@@ -640,6 +640,95 @@ describe('automation SQLite store', () => {
       operationId: 'recovery-config:v2:stale-revision',
     })).toThrowError(expect.objectContaining<Partial<AutomationStoreError>>({ code: 'version-conflict' }))
     restarted.close()
+  })
+
+  test('migrates v15 and permanently retires exact identities without touching queued or unknown history', async () => {
+    const fixture = await store(() => 1_000)
+    const original = { owner: 'scanner-a', automationId: 'old-scan', idempotencyKey: 'active-cache', definition: definition() }
+    fixture.store.reconcileSystemOwned(original)
+    fixture.store.createManual({ automationId: original.automationId, requestId: 'unknown', dryRun: false })
+    const duty = fixture.store.acquireDuty({ ownerId: 'test', now: 1_000, leaseMs: 10_000 })
+    const claim = { ownerId: 'test', fencingToken: duty.fencingToken, now: 1_001, leaseMs: 1_000 }
+    const unknownTask = fixture.store.claimNextTask(claim)!
+    fixture.store.startTask({ ...claim, taskId: unknownTask.id, sessionId: 'historic-session' })
+    fixture.store.recoverExpiredTasks({ now: 2_002 })
+    fixture.store.createManual({ automationId: original.automationId, requestId: 'queued', dryRun: false })
+    fixture.store.close()
+    // A real v15 upgrade, rather than merely testing a newly-created schema.
+    const legacy = new DatabaseSync(fixture.path)
+    legacy.exec(`DROP TRIGGER automation_retired_no_activate_insert;
+      DROP TRIGGER automation_retired_no_activate_update;
+      DROP TRIGGER automation_retirements_no_update;
+      DROP TRIGGER automation_retirements_no_delete;
+      DROP TABLE automation_system_retirements; PRAGMA user_version = 15;`)
+    legacy.close()
+    const reopened = new AutomationStore({ path: fixture.path, now: () => 3_000 })
+    const input = { owner: original.owner, automationId: original.automationId,
+      operationId: 'retire-old-scan', definitionHash: reopened.getDefinitionHash(original.automationId)!,
+      expectedVersion: 1, reason: 'owner-revoked' as const, evidenceDigest: 'e'.repeat(64) }
+    const db = new DatabaseSync(fixture.path)
+    const history = () => ['automation_occurrences', 'automation_tasks', 'automation_attempts', 'automation_runs']
+      .map(table => JSON.stringify(db.prepare(`SELECT * FROM ${table} ORDER BY id`).all()))
+    const before = history()
+    expect(JSON.stringify(reopened.listRuns({ automationId: original.automationId, limit: 10 }))).toContain('unknown')
+    for (const bad of [ { expectedVersion: 2 }, { definitionHash: '0'.repeat(64) },
+      { owner: 'scanner-b' }, { automationId: 'missing' }, { evidenceDigest: 'not-a-digest' } ]) {
+      expect(() => reopened.retireSystemOwned({ ...input, ...bad })).toThrow()
+      expect(reopened.inspectSystemOwnedRetirement(input)).toBeUndefined()
+    }
+    const receipt = reopened.retireSystemOwned(input)
+    expect(receipt).toEqual({ ...input, definitionVersion: 2, automationStatus: 'paused', retiredAt: 3_000, replayed: false })
+    expect(Object.isFrozen(receipt)).toBe(true)
+    expect(history()).toEqual(before)
+    expect(reopened.get(original.automationId)).toMatchObject({ status: 'paused', version: 2, nextRunAt: undefined })
+    expect(reopened.retireSystemOwned(input)).toEqual({ ...receipt, replayed: true })
+    expect(() => reopened.retireSystemOwned({ ...input, evidenceDigest: 'f'.repeat(64) })).toThrow(/conflicts/)
+    for (const reconciliation of [original,
+      { ...original, idempotencyKey: 'changed-nonce-or-definition', definition: definition({ name: 'New identity' }) },
+      { ...original, idempotencyKey: 'paused-rewrite', desiredStatus: 'paused' as const }]) {
+      expect(() => reopened.reconcileSystemOwned(reconciliation)).toThrow(/permanently retired/)
+    }
+    expect(() => reopened.changeApproved({ automationId: original.automationId, operation: 'resume',
+      expectedVersion: 2, idempotencyKey: 'owner-resume' })).toThrow(/permanently retired/)
+    const queued = reopened.listTasks({ automationId: original.automationId, limit: 10 }).find(task => task.status === 'scheduled')!
+    expect(reopened.claimTask({ ...claim, now: 3_000, taskId: queued.id })).toBeUndefined()
+    expect(reopened.claimNextTask({ ...claim, now: 3_000 })).toBeUndefined()
+    expect(reopened.materializeDue({ now: Date.parse('2026-08-22T00:00:00Z'), misfireGraceMs: 60_000, maxCatchUp: 10 })).toEqual([])
+    expect(history()).toEqual(before)
+    expect(() => db.prepare("UPDATE automation_definitions SET status = 'active' WHERE id = ?").run(original.automationId)).toThrow(/retired/)
+    expect(() => db.exec('DELETE FROM automation_system_retirements')).toThrow(/permanent/)
+    expect(() => db.exec('UPDATE automation_system_retirements SET retired_at = 42')).toThrow(/immutable/)
+    // New owner/new automation identity is independent; returning A -> B -> A is fenced.
+    reopened.reconcileSystemOwned({ ...original, owner: 'scanner-b', automationId: 'new-scan', idempotencyKey: 'b' })
+    expect(reopened.get('new-scan')?.status).toBe('active')
+    reopened.close()
+    const restarted = new AutomationStore({ path: fixture.path, now: () => 4_000 })
+    expect(restarted.retireSystemOwned(input)).toEqual({ ...receipt, replayed: true })
+    expect(() => restarted.reconcileSystemOwned(original)).toThrow(/permanently retired/)
+    restarted.changeApproved({ automationId: original.automationId, operation: 'delete', expectedVersion: 2, idempotencyKey: 'delete-retired' })
+    expect(restarted.inspectSystemOwnedRetirement(input)).toEqual({ ...receipt, replayed: true })
+    expect(() => restarted.retireSystemOwned(input)).toThrow(/no longer matches/)
+    expect(() => restarted.reconcileSystemOwned({ ...original, idempotencyKey: 'recreate' })).toThrow(/permanently retired/)
+    expect(history()).toEqual(before)
+    db.close()
+    restarted.close()
+  })
+
+  test('retirement accepts paused definitions while ordinary pauses still resume', async () => {
+    const fixture = await store(() => 1_000)
+    const reconcile = { owner: 'scanner', automationId: 'pause-resume', idempotencyKey: 'original', definition: definition() }
+    fixture.store.reconcileSystemOwned(reconcile)
+    const definitionHash = fixture.store.getDefinitionHash(reconcile.automationId)!
+    fixture.store.pauseSystemOwned({ ...reconcile, operationId: 'normal-pause', definitionHash, expectedVersion: 1 })
+    fixture.store.changeApproved({ automationId: reconcile.automationId, operation: 'resume', expectedVersion: 2, idempotencyKey: 'cached-resume' })
+    expect(fixture.store.get(reconcile.automationId)?.status).toBe('active')
+    fixture.store.pauseSystemOwned({ ...reconcile, operationId: 'normal-pause-again', definitionHash, expectedVersion: 3 })
+    fixture.store.retireSystemOwned({ ...reconcile, operationId: 'retire-paused', definitionHash, expectedVersion: 4,
+      reason: 'owner-revoked', evidenceDigest: 'a'.repeat(64) })
+    expect(() => fixture.store.changeApproved({ automationId: reconcile.automationId, operation: 'resume', expectedVersion: 2, idempotencyKey: 'cached-resume' }))
+      .toThrow(/permanently retired/)
+    expect(fixture.store.get(reconcile.automationId)).toMatchObject({ status: 'paused', version: 5 })
+    fixture.store.close()
   })
 
   test('materializes stable occurrences with latest/skip/bounded replay and survives rollback/restart', async () => {

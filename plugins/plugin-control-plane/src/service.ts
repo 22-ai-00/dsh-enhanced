@@ -475,9 +475,14 @@ export class PluginControlPlaneService extends Service {
             },
             delivery: {
               validateOwnerRoute: input => delivery().validateOwnerRoute(input),
+              inspectOwnerRouteState: input => delivery().inspectOwnerRouteState(input),
               inspectOwnerForegroundLearningTask: input => delivery().inspectOwnerForegroundLearningTask(input),
             },
             automations: {
+              inspectSystemOwnedRetirement: input => automations().inspectSystemOwnedRetirement(input),
+              onSchedulerWake: listener => automations().onSchedulerWake(listener),
+              retireSystemOwned: input => automations().retireSystemOwned(input),
+              inspectSystemOwned: input => automations().inspectSystemOwned(input),
               registerHostExecutor: input => automations().registerHostExecutor(input),
               reconcileSystem: input => automations().reconcileSystem(input),
               inspectSystemOwnedActivation: input => automations().inspectSystemOwnedActivation(input),
@@ -527,9 +532,14 @@ export class PluginControlPlaneService extends Service {
             },
             delivery: {
               validateOwnerRoute: input => delivery().validateOwnerRoute(input),
+              inspectOwnerRouteState: input => delivery().inspectOwnerRouteState(input),
               inspectOwnerForegroundLearningTask: input => delivery().inspectOwnerForegroundLearningTask(input),
             },
             automations: {
+              inspectSystemOwnedRetirement: input => automations().inspectSystemOwnedRetirement(input),
+              onSchedulerWake: listener => automations().onSchedulerWake(listener),
+              retireSystemOwned: input => automations().retireSystemOwned(input),
+              inspectSystemOwned: input => automations().inspectSystemOwned(input),
               registerHostExecutor: input => automations().registerHostExecutor(input),
               reconcileSystem: input => automations().reconcileSystem(input),
               inspectSystemOwnedActivation: input => automations().inspectSystemOwnedActivation(input),

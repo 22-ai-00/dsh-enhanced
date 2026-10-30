@@ -88,7 +88,7 @@ function automationSnapshot(input: {
   ])
   return Object.freeze({
     protocol: 'assistant-automations-operator-snapshot/v1',
-    schemaVersion: 15,
+    schemaVersion: 16,
     database: Object.freeze({
       device: '3', inode: '4', size: '4096', mtimeNs: '10', digest: databaseDigest,
     }),

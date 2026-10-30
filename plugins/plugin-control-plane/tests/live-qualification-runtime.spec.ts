@@ -152,8 +152,10 @@ test('live scan waits for every started task, then freezes an observed failure a
       withTrustedCanonicalTaskWriterFence: (_input, callback) => ({ matched: true, value: callback() }),
       onTrustedTaskChange: callback => { taskChange = callback; return () => {} } },
     delivery: { validateOwnerRoute: () => ({ ...owner, receiptVersion: 2, bindingVersion: 1, generation: 1 }),
+      inspectOwnerRouteState: () => ({ status: 'active', receipt: { ...owner, receiptVersion: 2, bindingVersion: 1, generation: 1 } }),
       inspectOwnerForegroundLearningTask: input => [...sources.values()].find(source => source.canonical.triggerOutcomeId === input.outcomeId) },
-    automations: { registerHostExecutor: value => { executor = value; return () => {} },
+    automations: { onSchedulerWake: () => () => {}, inspectSystemOwnedRetirement: () => undefined, retireSystemOwned: () => { throw new Error('unexpected retirement') },
+      inspectSystemOwned: () => ({ latestTerminalRuns: {} }) as never, registerHostExecutor: value => { executor = value; return () => {} },
       reconcileSystem: input => { automationId = input.automationId; definition = input.definition as typeof definition; return {} as never },
       inspectSystemOwnedActivation: () => ({ definitionHash: 'definition-hash', activationNonce: definition.execution.activationNonce }) as never },
   }
@@ -252,8 +254,10 @@ test('real live-plan final CAS runs under one combined canonical fence and rejec
             { scopeWatermark: input.scopeWatermark, evidence: input.evidence }, callback)
         }, onTrustedTaskChange: () => () => {} },
       delivery: { validateOwnerRoute: () => ({ ...owner, receiptVersion: 2, bindingVersion: 1, generation: 1 }),
+      inspectOwnerRouteState: () => ({ status: 'active', receipt: { ...owner, receiptVersion: 2, bindingVersion: 1, generation: 1 } }),
         inspectOwnerForegroundLearningTask: input => input.outcomeId === voteSource().canonical.triggerOutcomeId ? voteSource() : undefined },
-      automations: { registerHostExecutor: input => { executor = input; return () => {} },
+      automations: { onSchedulerWake: () => () => {}, inspectSystemOwnedRetirement: () => undefined, retireSystemOwned: () => { throw new Error('unexpected retirement') },
+      inspectSystemOwned: () => ({ latestTerminalRuns: {} }) as never, registerHostExecutor: input => { executor = input; return () => {} },
         reconcileSystem: input => { automationId = input.automationId; definition = input.definition as typeof definition; return {} as never },
         inspectSystemOwnedActivation: () => ({ definitionHash: 'definition-hash', activationNonce: definition.execution.activationNonce }) as never },
       request: async batch => {

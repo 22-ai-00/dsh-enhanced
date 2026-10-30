@@ -505,6 +505,12 @@ export interface SystemOwnedAutomationPauseReceipt {
   automationStatus: 'paused'
   replayed: boolean
 }
+/** Permanent Host retirement; only identity and trusted evidence digests are retained. */
+export interface SystemOwnedAutomationRetirementReceipt extends SystemOwnedAutomationPauseReceipt {
+  reason: 'owner-revoked'
+  evidenceDigest: string
+  retiredAt: number
+}
 export type AutomationDeliveryStatus = 'enqueued' | 'pending' | 'suppressed'
 export type AutomationEvidenceStatus = 'pending' | 'recorded' | 'suppressed'
 export type AutomationEvaluationStatus = 'pending' | 'recorded' | 'dead-letter'

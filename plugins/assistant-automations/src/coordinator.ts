@@ -126,6 +126,8 @@ export class AutomationRunnerFailureError extends Error {
 }
 
 export interface AutomationCoordinatorOptions {
+  /** Synchronous Host wake notification before duty acquisition or dispatch work. */
+  beforeTick?: () => void
   /** Host proof revalidation before every timer, manual, or internal dispatch tick. */
   beforeDispatch?: () => void
   /** Synchronous Host maintenance fence, checked immediately before task claims. */
@@ -189,6 +191,7 @@ function recorderErrorCode(error: unknown): string {
 }
 
 export class AutomationCoordinator {
+  private readonly beforeTick: (() => void) | undefined
   private readonly beforeDispatch: (() => void) | undefined
   private readonly dispatchPaused: (() => boolean) | undefined
   private readonly store: AutomationStore
@@ -216,6 +219,7 @@ export class AutomationCoordinator {
     if (!Number.isSafeInteger(options.maxConcurrency) || options.maxConcurrency <= 0 || options.maxConcurrency > 100) {
       throw new Error('assistant-automations: maxConcurrency must be between 1 and 100')
     }
+    this.beforeTick = options.beforeTick
     this.beforeDispatch = options.beforeDispatch
     this.dispatchPaused = options.dispatchPaused
     this.store = options.store
@@ -242,6 +246,7 @@ export class AutomationCoordinator {
 
   async tick(): Promise<void> {
     if (this.stopped) throw new Error('assistant-automations coordinator is stopped')
+    try { this.beforeTick?.() } catch { /* Host wake observers cannot block ordinary scheduling. */ }
     const now = this.now()
     if (!this.ensureDuty(now)) return
     this.beforeDispatch?.()
