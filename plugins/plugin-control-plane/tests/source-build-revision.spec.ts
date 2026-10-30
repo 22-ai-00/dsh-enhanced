@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import type { PluginCreationVerificationCertificate, SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { afterAll, afterEach, beforeAll, expect, test, vi } from 'vitest'
 import { captureCreationCapabilitySource } from '../src/creation-capability-source.js'
-import { runDockerPreparedChecks, type SourceBuildConfig } from '../src/source-build.js'
+import { runDockerPreparedChecks, verifySourcePreparation, type SourceBuildConfig } from '../src/source-build.js'
 import { inspectSourceCreationContext, prepareCreatedPluginWorkspace } from '../src/source-creation.js'
 import { prepareRevisedPluginWorkspace, type SourceRevisionBinding, type SourceRevisionGrant } from '../src/source-revision.js'
 import { controlPlaneDigest } from '../src/store.js'
@@ -192,6 +192,17 @@ test('preserves real revision proof and rejects parent drift before Linux dispat
     expect(request.argv).toContain('DSH_SOURCE_TRUST_LOCKFILE=true')
   })
   const input = { ...f.input, config, runner, sourceJob: { id: 'source-job-' + '2'.repeat(64) } }
+  // Revision proof and parent binding are portable source contracts; only the
+  // Linux execution adapter requires a Linux Host.
+  await verifySourcePreparation(input)
+  await expect(verifySourcePreparation({ ...input, revision: { ...f.revision,
+    binding: { ...f.binding, parent: { ...f.binding.parent, sourceDigest: h('0') } } } })).rejects.toThrow(/parent binding/u)
+  if (process.platform !== 'linux') {
+    await expect(runLinuxPreparedChecks(input)).rejects.toThrow('Linux source build durable authority is invalid')
+    expect(run).not.toHaveBeenCalled()
+    await noDockerRun(f.dockerPath)
+    return
+  }
   const result = await runLinuxPreparedChecks(input)
   expect(result.evidence.schemaVersion).toBe(3)
   expect(result.evidence.pack.version).toBe('0.1.0')
