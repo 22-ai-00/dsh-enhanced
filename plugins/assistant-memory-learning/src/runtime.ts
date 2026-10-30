@@ -1,3 +1,4 @@
+import { ScannerOwnerGuard, ScannerOwnerUnavailable } from './scanner-owner-runtime.js'
 import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutorInput, HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
 import type { AssistantDeliveryService, OwnerForegroundTaskSource, OwnerForegroundTaskSourceContent, OwnerForegroundTaskSourceCursor, OwnerForegroundTaskSourceScope } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
@@ -11,11 +12,11 @@ import type { LearningConfig, LearningJob, LearningSnapshot } from './types.js'
 const OWNER = 'assistant-memory-learning'
 const EXECUTOR = 'assistant-memory-learning-v1'
 const CATALOG = growthObjectDigest({ executor: EXECUTOR, contract: 1 })
-type Delivery = Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'listOwnerForegroundTaskSources' | 'withOwnerForegroundTaskSourcesFence' | 'inspectOwnerForegroundLearningTask'> & {
+type Delivery = Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'inspectOwnerRouteState' | 'listOwnerForegroundTaskSources' | 'withOwnerForegroundTaskSourcesFence' | 'inspectOwnerForegroundLearningTask'> & {
   inspectOwnerForegroundTaskSource(input: OwnerForegroundTaskSourceScope & { inboxId: string }): Readonly<OwnerForegroundTaskSource> | undefined
 }
 type Evaluation = Pick<AssistantEvaluationService, 'canonicalHostScope' | 'listTrustedTaskLearningProjections' | 'withTrustedCanonicalScopeWriterFence' | 'getTrustedForegroundLearningProjection' | 'inspectTrustedTaskOwnerRevision'>
-type Automations = Pick<AssistantAutomationsService, 'registerHostExecutor' | 'reconcileSystem' | 'inspectSystemOwnedActivation' | 'inspectSystemOwned'>
+type Automations = Pick<AssistantAutomationsService, 'inspectSystemOwnedRetirement' | 'retireSystemOwned' | 'onSchedulerWake' | 'registerHostExecutor' | 'reconcileSystem' | 'inspectSystemOwnedActivation' | 'inspectSystemOwned'>
 type Target = LearningSnapshot['targets'][number]
 interface Memory {
   listLearningTargets(input: { owner: LearningConfig['owner']; limit?: number }): readonly Target[]
@@ -55,6 +56,9 @@ export class MemoryLearningRuntime {
   private readonly abort = new AbortController()
   private readonly flights = new Set<Promise<unknown>>()
   private unregister: (() => void) | undefined
+  private readonly ownerGuard: ScannerOwnerGuard
+  private unsubscribeWake: (() => void) | undefined
+  private initialized = false
   private active = false
   private scanning = false
   private lastError: string | null = null
@@ -66,10 +70,11 @@ export class MemoryLearningRuntime {
     this.configDigest = growthObjectDigest(this.config)
     this.lane = growthObjectDigest([this.config.authorityId, this.config.owner])
     this.scanId = `memory-scan-${this.lane}`
+    this.ownerGuard = new ScannerOwnerGuard(OWNER, this.scanId, this.scope(), ports.delivery, ports.automations, this.config.owner)
     for (const [port, methods] of [
-      [ports.delivery, ['validateOwnerRoute', 'listOwnerForegroundTaskSources', 'inspectOwnerForegroundTaskSource', 'withOwnerForegroundTaskSourcesFence', 'inspectOwnerForegroundLearningTask']],
+      [ports.delivery, ['inspectOwnerRouteState', 'validateOwnerRoute', 'listOwnerForegroundTaskSources', 'inspectOwnerForegroundTaskSource', 'withOwnerForegroundTaskSourcesFence', 'inspectOwnerForegroundLearningTask']],
       [ports.evaluation, ['canonicalHostScope', 'listTrustedTaskLearningProjections', 'withTrustedCanonicalScopeWriterFence', 'getTrustedForegroundLearningProjection', 'inspectTrustedTaskOwnerRevision']],
-      [ports.automations, ['registerHostExecutor', 'reconcileSystem', 'inspectSystemOwnedActivation', 'inspectSystemOwned']],
+      [ports.automations, ['inspectSystemOwnedRetirement', 'retireSystemOwned', 'onSchedulerWake', 'registerHostExecutor', 'reconcileSystem', 'inspectSystemOwnedActivation', 'inspectSystemOwned']],
       [ports.memory, ['listLearningTargets', 'inspectLearningAdoptionAvailability', 'lookupLearningAdoption', 'adoptReviewedLearning']],
       [ports.verifier, ['inspectMemoryLearningReviewAvailability', 'reviewMemoryLearning', 'lookupMemoryLearningReview']],
       [ports.policy, ['evaluate', 'authorize']],
@@ -77,13 +82,18 @@ export class MemoryLearningRuntime {
     this.store = new LearningStore(this.config.databasePath, { authorityId: this.config.authorityId,
       configDigest: this.configDigest, maxExtractions: this.config.maxExtractions })
   }
-  health = () => ({ enabled: true, connected: this.active, lastScanAt: this.lastScanAt,
+  health = () => ({ enabled: true, connected: this.active && !this.ownerGuard.retired, lastScanAt: this.lastScanAt,
     lastError: this.lastError, counts: this.store.counts(this.lane), ...this.store.availability() })
 
   start(): void {
     if (this.active || this.closing) throw new Error('memory learning runtime cannot be started twice')
+    let recoverNativeScanner = false
+    try { this.ownerGuard.check() } catch (error) {
+      this.lastError = String(error).slice(0, 200)
+      if (this.ownerGuard.retired) return
+      recoverNativeScanner = this.ownerGuard.canReconcileScanner
+    }
     try {
-      this.store.interrupt(this.lane)
       this.unregister = this.ports.automations.registerHostExecutor({
         descriptor: { executorId: EXECUTOR, contractVersion: 1, catalogDigest: CATALOG },
         accepts: spec => spec.executorId === EXECUTOR && spec.executorContractVersion === 1 && spec.catalogDigest === CATALOG
@@ -96,20 +106,40 @@ export class MemoryLearningRuntime {
         },
       })
       this.active = true
-      this.owner()
-      this.ports.automations.reconcileSystem({ owner: OWNER, automationId: this.scanId,
-        idempotencyKey: `${this.scanId}:${this.configDigest}`, desiredStatus: 'active', definition: this.definition() })
+      this.unsubscribeWake = this.ports.automations.onSchedulerWake(() => {
+        if (!this.active || this.initialized || this.ownerGuard.retired) return
+        try { this.initializeScanner() }
+        catch (error) { this.lastError = String(error).slice(0, 200) }
+      })
+
       // One bounded activation reconciliation; subsequent scans are native jobs.
+      if (recoverNativeScanner) {
+        try {
+          this.ports.automations.reconcileSystem({ owner: OWNER, automationId: this.scanId,
+            idempotencyKey: `${this.scanId}:${this.configDigest}`, desiredStatus: 'active', definition: this.definition() })
+        } catch (error) { this.lastError = String(error).slice(0, 200) }
+      }
       this.scan()
     } catch (error) {
-      this.active = false; this.unregister?.(); this.abort.abort(error); this.store.close(); throw error
+      this.active = false; this.unsubscribeWake?.(); this.unregister?.(); this.abort.abort(error); this.store.close(); throw error
     }
   }
+  private initializeScanner() {
+    const owner = this.owner()
+    if (!this.initialized) {
+      this.store.interrupt(this.lane)
+      this.ports.automations.reconcileSystem({ owner: OWNER, automationId: this.scanId,
+        idempotencyKey: `${this.scanId}:${this.configDigest}`, desiredStatus: 'active', definition: this.definition() })
+      this.initialized = true
+    }
+    return owner
+  }
+
   close(): Promise<void> {
     return this.closing ??= (async () => {
-      this.active = false; this.unregister?.()
+      this.active = false; this.unsubscribeWake?.(); this.unregister?.()
       this.abort.abort(new Error('memory learning provider disposed'))
-      this.store.interrupt(this.lane)
+      if (!this.ownerGuard.retired && this.initialized) this.store.interrupt(this.lane)
       const deadline = AbortSignal.timeout(5000)
       let release!: () => void
       const expired = new Promise<boolean>(resolve => {
@@ -131,6 +161,7 @@ export class MemoryLearningRuntime {
   }
   private owner(): void {
     if (!this.active) throw new Error('memory learning unavailable')
+    this.ownerGuard.check()
     const current = this.ports.delivery.validateOwnerRoute(this.scope())
     for (const key of Object.keys(this.config.owner) as (keyof LearningConfig['owner'])[]) {
       if (current[key] !== this.config.owner[key]) throw new Error('memory learning owner authority changed')
@@ -209,7 +240,7 @@ export class MemoryLearningRuntime {
     this.scanning = true
     try {
       this.lastError = null
-      this.owner()
+      this.initializeScanner()
       // Lost acknowledgements reconcile before admitting more paid work.
       for (const job of this.store.pending(this.lane)) if (job.state === 'unknown') {
         if (job.request) this.reconcile(job)
@@ -280,6 +311,7 @@ export class MemoryLearningRuntime {
           }
           this.withSource(job, () => this.schedule(job))
         } catch (error) {
+          if (error instanceof ScannerOwnerUnavailable) throw error
           if (error instanceof SourceObsolete) this.store.settle(pending.id, 'superseded', reasonText(error.message))
           // Missing source/provider/scheduling readiness keeps the same durable intent.
           else if (!(error instanceof SourcePending)) this.lastError = String(error).slice(0, 200)
@@ -331,6 +363,7 @@ export class MemoryLearningRuntime {
   }
   private reconcile(job: LearningJob): void {
     try {
+      this.owner()
       const prior = this.ports.memory.lookupLearningAdoption({ request: job.request! })
       if (prior) { this.store.settle(job.id, 'adopted', 'reconciled-original-adoption', prior.receiptDigest); return }
       this.withSource(job, () => undefined)

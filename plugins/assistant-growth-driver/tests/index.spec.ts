@@ -300,6 +300,7 @@ async function mount(opts: MountOptions = {}): Promise<Harness> {
   const learningSource = vi.fn()
   ctx.provide('assistantDelivery' as never, {
     validateOwnerRoute: receipts,
+    inspectOwnerRouteState: () => ({ status: 'active', receipt: receipts() }),
     inspectOwnerModelSelection: modelSelection,
     inspectOwnerForegroundLearningTask: learningSource,
     commitOwnerAnchoredWorkflowTrace: ownerAnchoredCommit,

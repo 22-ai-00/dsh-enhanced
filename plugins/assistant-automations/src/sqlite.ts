@@ -2,7 +2,37 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const automationSchemaVersion = 15
+export const automationSchemaVersion = 16
+
+const retirementTablesV16 = `
+  CREATE TABLE IF NOT EXISTS automation_system_retirements (
+    system_owner TEXT NOT NULL,
+    automation_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL UNIQUE,
+    definition_hash TEXT NOT NULL CHECK(length(definition_hash) = 64),
+    expected_version INTEGER NOT NULL CHECK(expected_version >= 1),
+    definition_version INTEGER NOT NULL CHECK(definition_version = expected_version + 1),
+    reason TEXT NOT NULL CHECK(reason = 'owner-revoked'),
+    evidence_digest TEXT NOT NULL CHECK(length(evidence_digest) = 64),
+    retired_at INTEGER NOT NULL CHECK(retired_at >= 0),
+    PRIMARY KEY(system_owner, automation_id)
+  ) STRICT;
+  CREATE TRIGGER IF NOT EXISTS automation_retirements_no_update BEFORE UPDATE ON automation_system_retirements
+    BEGIN SELECT RAISE(ABORT, 'system retirement is immutable'); END;
+  CREATE TRIGGER IF NOT EXISTS automation_retirements_no_delete BEFORE DELETE ON automation_system_retirements
+    BEGIN SELECT RAISE(ABORT, 'system retirement is permanent'); END;
+`
+
+const retirementActivationTriggersV16 = `
+  CREATE TRIGGER IF NOT EXISTS automation_retired_no_activate_insert BEFORE INSERT ON automation_definitions
+    WHEN NEW.status = 'active' AND EXISTS (
+      SELECT 1 FROM automation_system_retirements WHERE system_owner = NEW.system_owner AND automation_id = NEW.id
+    ) BEGIN SELECT RAISE(ABORT, 'system automation is retired'); END;
+  CREATE TRIGGER IF NOT EXISTS automation_retired_no_activate_update BEFORE UPDATE ON automation_definitions
+    WHEN NEW.status = 'active' AND EXISTS (
+      SELECT 1 FROM automation_system_retirements WHERE system_owner = NEW.system_owner AND automation_id = NEW.id
+    ) BEGIN SELECT RAISE(ABORT, 'system automation is retired'); END;
+`
 
 const growthTablesV10 = `
   CREATE TABLE automation_growth_operations (
@@ -397,7 +427,9 @@ function migrate(database: DatabaseSync): void {
       binding_id TEXT NOT NULL, binding_version INTEGER NOT NULL CHECK(binding_version >= 1), binding_generation INTEGER NOT NULL CHECK(binding_generation >= 1),
       dispatched_at INTEGER NOT NULL, submitted INTEGER NOT NULL DEFAULT 0 CHECK(submitted IN (0, 1)), quiescent INTEGER NOT NULL DEFAULT 0 CHECK(quiescent IN (0, 1))
     ) STRICT;
-    PRAGMA user_version = 15;
+    ${retirementTablesV16}
+    ${retirementActivationTriggersV16}
+    PRAGMA user_version = 16;
     COMMIT;
     `)
     return
@@ -776,6 +808,13 @@ function migrate(database: DatabaseSync): void {
       PRAGMA user_version = 15;
       COMMIT;
     `)
+    version = 15
+  }
+  if (version === 15) {
+    // Historical migration fixtures may contain only the affected ledger.
+    const hasDefinitions = database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'automation_definitions'").get() !== undefined
+    database.exec(`BEGIN IMMEDIATE; ${retirementTablesV16}
+      ${hasDefinitions ? retirementActivationTriggersV16 : ''} PRAGMA user_version = 16; COMMIT;`)
   }
 }
 

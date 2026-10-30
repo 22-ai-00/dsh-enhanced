@@ -1,6 +1,7 @@
 import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assistant-evaluation'
@@ -59,6 +60,7 @@ async function fixture(options: { maxPending?: number; maxExtractions?: number; 
     epoch: 'delivery-epoch', scopeKey: 'delivery-owner-scope', sequence })
   const delivery = {
     validateOwnerRoute: () => ({ ...owner }),
+    inspectOwnerRouteState: () => ({ status: 'active' as const, receipt: { ...owner } }),
     listOwnerForegroundTaskSources: ({ after }: { after?: { sequence: number } }) => {
       const items = [...sources.values()].filter(item => item.sequence > (after?.sequence ?? 0)).map(metadata)
       return { items, nextCursor: cursor(nextSequence), watermark: nextSequence, hasMore: false }
@@ -382,3 +384,95 @@ test('noncooperative extraction cannot hold shutdown forever or dispatch a late 
   expect(restarted.health().counts.failed).toBe(1)
   expect(f.extract).toHaveBeenCalledTimes(1)
 }, 15_000)
+
+
+test('revoked learning scanner preserves an existing unknown request and grant usage through restart', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-09-29T12:00:10Z'))
+  const f = await fixture(); f.addSource('first')
+  f.verifier.reviewMemoryLearning.mockImplementationOnce(async request => f.receipt(request, 'unknown'))
+  const runtime = f.create(); await f.tick()
+  expect(runtime.health().counts.unknown).toBe(1)
+  const before = runtime.health()
+  const identity = f.automations.listSystemOwned({ owner: 'assistant-memory-learning' }).find(item => item.automationId.startsWith('memory-scan-'))!
+  const lookup = vi.spyOn(f.verifier, 'lookupMemoryLearningReview').mockClear()
+  vi.spyOn(f.delivery, 'inspectOwnerRouteState').mockReturnValue({ status: 'revoked', ...f.owner, principalVersion: f.owner.principalVersion + 1 } as never)
+  runtime.scan()
+  expect(f.automations.inspectSystemOwnedRetirement(identity)).toMatchObject({ reason: 'owner-revoked' })
+  await runtime.close()
+  vi.spyOn(f.delivery, 'inspectOwnerRouteState').mockReturnValue({ status: 'active', receipt: f.owner } as never)
+  const restarted = f.create(); restarted.scan(); await f.tick()
+  expect(restarted.health()).toMatchObject({ connected: false, counts: before.counts, remainingExtractions: before.remainingExtractions })
+  expect(lookup).not.toHaveBeenCalled()
+  expect(f.extract).toHaveBeenCalledTimes(1)
+  expect(f.verifier.reviewMemoryLearning).toHaveBeenCalledTimes(1)
+  expect(f.memory.adoptReviewedLearning).not.toHaveBeenCalled()
+})
+
+test('unavailable learning owner does not retire or supersede queued jobs and recovers on a native scan', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-09-29T12:00:10Z'))
+  const f = await fixture(); f.addSource('first'); const runtime = f.create()
+  const identity = f.automations.listSystemOwned({ owner: 'assistant-memory-learning' }).find(item => item.automationId.startsWith('memory-scan-'))!
+  const inspection = vi.spyOn(f.delivery, 'inspectOwnerRouteState').mockImplementation(() => { throw new Error('SQLITE_BUSY') })
+  runtime.scan(); await f.tick()
+  expect(f.automations.inspectSystemOwnedRetirement(identity)).toBeUndefined()
+  expect(runtime.health().counts.queued).toBe(1)
+  expect(f.extract).not.toHaveBeenCalled()
+  inspection.mockReturnValue({ status: 'active', receipt: f.owner } as never)
+  runtime.scan(); await f.tick()
+  // A prior native failed occurrence is never retried under a fresh operation.
+  expect(f.extract).not.toHaveBeenCalled()
+  expect(runtime.health().counts.failed).toBe(1)
+})
+
+
+test('startup with a temporarily unavailable owner recovers in the same instance through the native cron', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-09-29T12:00:10Z'))
+  const f = await fixture()
+  const inspection = vi.spyOn(f.delivery, 'inspectOwnerRouteState').mockReturnValue({ status: 'unavailable', reason: 'missing-binding' } as never)
+  const runtime = f.create()
+  const identity = f.automations.listSystemOwned({ owner: 'assistant-memory-learning' })[0]!
+  expect(identity.automationStatus).toBe('active')
+  expect(Object.values(runtime.health().counts).every(count => count === 0)).toBe(true)
+  expect(f.automations.inspectSystemOwnedRetirement(identity)).toBeUndefined()
+  inspection.mockReturnValue({ status: 'active', receipt: f.owner } as never)
+  f.addSource('after-recovery')
+  vi.setSystemTime(Date.now() + 60_000)
+  await f.automations.tick(); await f.automations.whenIdle()
+  expect(runtime.health().counts.queued).toBe(1)
+  await f.tick()
+  expect(f.extract).toHaveBeenCalledTimes(1)
+  expect(runtime.health().counts.adopted).toBe(1)
+})
+
+
+test('startup retirement inspection outage preserves an unknown request, paused old job and consumed grant', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-09-29T12:00:10Z'))
+  const f = await fixture(); f.addSource('unknown-source')
+  f.verifier.reviewMemoryLearning.mockImplementationOnce(async request => f.receipt(request, 'unknown'))
+  const first = f.create(); await f.tick()
+  expect(first.health().counts.unknown).toBe(1)
+  f.addSource('paused-source'); first.scan()
+  const paused = f.automations.listSystemOwned({ owner: 'assistant-memory-learning' })
+    .find(item => item.automationId.startsWith('memory-learning:') && !f.automations.inspectSystemOwned(item).latestTerminalRuns.production)!
+  expect(paused).toBeDefined()
+  f.automations.pauseSystemOwned({ ...paused, operationId: 'pause-old-learning-job', expectedVersion: paused.definitionVersion })
+  await first.close()
+  const read = () => {
+    const db = new DatabaseSync(f.config.databasePath, { readOnly: true })
+    try { return ['jobs', 'grant_record', 'cursors'].map(table => db.prepare(`SELECT * FROM ${table} ORDER BY 1,2`).all()) }
+    finally { db.close() }
+  }
+  const before = read(), definition = f.automations.inspectSystemOwned(paused)
+  const calls = { extract: f.extract.mock.calls.length, review: f.verifier.reviewMemoryLearning.mock.calls.length,
+    lookup: f.verifier.lookupMemoryLearningReview.mock.calls.length }
+  const inspection = vi.spyOn(f.automations, 'inspectSystemOwnedRetirement')
+    .mockImplementation(() => { throw new Error('temporary retirement read unavailable') })
+  f.create()
+  expect(read()).toEqual(before)
+  expect(f.automations.inspectSystemOwned(paused)).toEqual(definition)
+  expect(definition.automationStatus).toBe('paused')
+  expect(f.extract).toHaveBeenCalledTimes(calls.extract)
+  expect(f.verifier.reviewMemoryLearning).toHaveBeenCalledTimes(calls.review)
+  expect(f.verifier.lookupMemoryLearningReview).toHaveBeenCalledTimes(calls.lookup)
+  inspection.mockRestore()
+})

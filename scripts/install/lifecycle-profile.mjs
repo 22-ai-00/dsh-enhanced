@@ -1277,7 +1277,9 @@ function validCompactOperatorProof(proof) {
     // restart fences, and v27 progress handles; owner identity is unchanged.
     'assistant-delivery/active-lark-owner-bindings-snapshot/v1': [23, 24, 25, 26, 27],
     'assistant-recovery/operator-snapshot/v1': [5],
-    'assistant-automations-operator-snapshot/v1': [15],
+    // v16 adds durable scanner retirement; compact identity/digest fields remain
+    // unchanged. Keep v15 proofs for recovery of existing lifecycle journals.
+    'assistant-automations-operator-snapshot/v1': [15, 16],
   }
   const additional = proof?.protocol === 'assistant-delivery/active-lark-owner-bindings-snapshot/v1'
     ? ['storageDigest'] : proof?.protocol === 'assistant-automations-operator-snapshot/v1' ? ['inventoryDigest', 'storageDigest']

@@ -54,7 +54,7 @@ export interface AutomationOperatorRecord {
 
 export interface AutomationsOperatorSnapshot {
   readonly protocol: typeof automationsOperatorSnapshotProtocol
-  readonly schemaVersion: 15
+  readonly schemaVersion: 16
   readonly database: AutomationOperatorFileIdentity
   readonly sidecars: Readonly<{
     wal: AutomationOperatorFileIdentity | null
@@ -935,14 +935,14 @@ function readSnapshot(databasePath: string): {
     }))
     const inventoryDigest = sha256(JSON.stringify({
       protocol: automationsOperatorSnapshotProtocol,
-      schemaVersion: 15 as const,
+      schemaVersion: 16 as const,
       storageDigest,
       inFlightCount: inFlight.count,
       records,
     }))
     const snapshot = freeze({
       protocol: automationsOperatorSnapshotProtocol,
-      schemaVersion: 15 as const,
+      schemaVersion: 16 as const,
       database: identity(source),
       sidecars: freeze({ wal: wal === null ? null : identity(wal), shm: shm === null ? null : identity(shm) }),
       storageDigest,

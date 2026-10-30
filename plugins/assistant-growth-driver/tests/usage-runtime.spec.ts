@@ -41,6 +41,7 @@ async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missi
   let reply: OwnerForegroundLearningTask['source']['reply']
   const delivery = {
     validateOwnerRoute: () => ({ ...owner }),
+    inspectOwnerRouteState: () => ({ status: 'active' as const, receipt: { ...owner } }),
     inspectOwnerForegroundLearningTask: ({ outcomeId }: { outcomeId: string }): OwnerForegroundLearningTask | undefined => {
       const canonical = evaluation.getTrustedTaskLearningProjection({ scope: evaluation.canonicalHostScope({ workspace: root, preset: 'primary' }), outcomeId })
       if (!canonical || canonical.projection.subjectKind !== 'foreground-turn') return undefined
@@ -82,7 +83,7 @@ async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missi
     for (let i = 0; i < 3; i += 1) { await automations.tick(); await automations.whenIdle() }
   }
   cleanup.push(async () => { for (const runtime of runtimes) await runtime.close(); producer.close(); await ctx.fiber.restart(); await rm(root, { recursive: true, force: true }) })
-  return { ctx, root, config, owner, policy, evaluation, automations, sourceModel, review, create, append, tick,
+  return { ctx, root, config, owner, policy, delivery, evaluation, automations, sourceModel, review, create, append, tick,
     setReply: (value: OwnerForegroundLearningTask['source']['reply']) => { reply = value },
     setCreationAuthority: (value: CreationAcceptanceAuthorityRef | undefined) => { currentCreationAuthority = value },
     setRevisionAuthority: (value: RevisionAcceptanceAuthorityRef | undefined) => { currentRevisionAuthority = value },
@@ -526,4 +527,120 @@ test('provider disposal aborts and drains a running review before closing its st
   const restarted = f.create()
   expect(restarted.health().counts).toEqual({ unknown: 1 })
   expect(f.review).toHaveBeenCalledTimes(1)
+})
+
+
+test('explicit owner revocation retires only discovery and preserves unknown work across restart and ABA', async () => {
+  const f = await fixture(); f.append(); const runtime = f.create()
+  f.review.mockResolvedValueOnce('unknown'); await f.tick()
+  expect(runtime.health().counts).toEqual({ unknown: 1 })
+  const identity = f.automations.listSystemOwned({ owner: 'assistant-growth-usage' }).find(item => item.automationId.startsWith('usage-scan-'))!
+  vi.spyOn(f.delivery, 'inspectOwnerRouteState').mockReturnValue({ status: 'revoked', ...f.owner } as never)
+  runtime.scan()
+  expect(f.automations.inspectSystemOwnedRetirement(identity)).toMatchObject({ reason: 'owner-revoked', automationStatus: 'paused' })
+  expect(runtime.health().counts).toEqual({ unknown: 1 })
+  await runtime.close()
+  vi.spyOn(f.delivery, 'inspectOwnerRouteState').mockReturnValue({ status: 'active', receipt: f.owner })
+  const restarted = f.create(); restarted.scan(); await f.tick()
+  expect(restarted.health()).toMatchObject({ connected: false, counts: { unknown: 1 } })
+  expect(f.review).toHaveBeenCalledTimes(1)
+  expect(f.automations.inspectSystemOwned(identity).automationStatus).toBe('paused')
+})
+
+test('temporary owner inspection failure preserves queued work and native recovery without retirement', async () => {
+  const f = await fixture(); f.append(); const first = f.create(); await first.close()
+  const identity = f.automations.listSystemOwned({ owner: 'assistant-growth-usage' }).find(item => item.automationId.startsWith('usage-scan-'))!
+  const inspection = vi.spyOn(f.delivery, 'inspectOwnerRouteState').mockReturnValue({ status: 'unavailable', reason: 'missing-binding' } as never)
+  const runtime = f.create(); runtime.scan()
+  expect(runtime.health().counts).toEqual({ queued: 1 })
+  expect(f.automations.inspectSystemOwnedRetirement(identity)).toBeUndefined()
+  expect(f.review).not.toHaveBeenCalled()
+  inspection.mockReturnValue({ status: 'active', receipt: f.owner })
+  runtime.scan(); await f.tick()
+  expect(f.review).toHaveBeenCalledTimes(1)
+  expect(runtime.health().counts).toEqual({ reviewed: 1 })
+})
+
+
+test('startup temporary owner unavailability recovers through the native scan without restarting', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-09-29T12:00:10Z'))
+  const f = await fixture()
+  const inspection = vi.spyOn(f.delivery, 'inspectOwnerRouteState').mockReturnValue({ status: 'unavailable', reason: 'missing-binding' } as never)
+  const runtime = f.create()
+  const identity = f.automations.listSystemOwned({ owner: 'assistant-growth-usage' })[0]!
+  expect(identity.automationStatus).toBe('active')
+  expect(f.review).not.toHaveBeenCalled()
+  inspection.mockReturnValue({ status: 'active', receipt: f.owner }); f.append()
+  vi.setSystemTime(Date.now() + 60_000)
+  await f.automations.tick(); await f.automations.whenIdle()
+  expect(runtime.health().counts).toEqual({ queued: 1 })
+  vi.setSystemTime(Date.now() + 1500)
+  await f.automations.tick(); await f.automations.whenIdle()
+  expect(f.review).toHaveBeenCalledTimes(1)
+  expect(runtime.health().counts).toEqual({ reviewed: 1 })
+  expect(f.automations.inspectSystemOwnedRetirement(identity)).toBeUndefined()
+})
+
+
+test('startup retirement read outage establishes a fresh Usage cron and recovers on its native tick', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-09-29T12:00:10Z'))
+  const f = await fixture()
+  const inspection = vi.spyOn(f.automations, 'inspectSystemOwnedRetirement')
+    .mockImplementation(() => { throw new Error('temporary retirement read unavailable') })
+  const runtime = f.create(), identity = f.automations.listSystemOwned({ owner: 'assistant-growth-usage' })[0]!
+  expect(identity.automationStatus).toBe('active')
+  expect(f.review).not.toHaveBeenCalled()
+  inspection.mockRestore(); f.append(); vi.setSystemTime(Date.now() + 60_000)
+  await f.automations.tick(); await f.automations.whenIdle()
+  expect(runtime.health().counts).toEqual({ queued: 1 })
+  vi.setSystemTime(Date.now() + 1500)
+  await f.automations.tick(); await f.automations.whenIdle()
+  expect(f.review).toHaveBeenCalledTimes(1)
+  expect(runtime.health().counts).toEqual({ reviewed: 1 })
+})
+
+
+test('native scheduler wake silently restores fresh Usage registration after both startup APIs recover', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-09-29T12:00:10Z'))
+  const f = await fixture()
+  const inspection = vi.spyOn(f.automations, 'inspectSystemOwnedRetirement')
+    .mockImplementation(() => { throw new Error('SQLITE_BUSY retirement inspection') })
+  const reconciliation = vi.spyOn(f.automations, 'reconcileSystem')
+    .mockImplementation(() => { throw new Error('SQLITE_BUSY scanner registration') })
+  const runtime = f.create()
+  expect(f.automations.listSystemOwned({ owner: 'assistant-growth-usage' })).toEqual([])
+  inspection.mockRestore(); reconciliation.mockRestore()
+  vi.setSystemTime(Date.now() + 1000)
+  await f.automations.tick(); await f.automations.whenIdle()
+  const identity = f.automations.listSystemOwned({ owner: 'assistant-growth-usage' })[0]!
+  expect(identity.automationStatus).toBe('active')
+  expect(runtime.health().lastScanAt).toBeNull()
+  expect(f.review).not.toHaveBeenCalled()
+  f.append(); vi.setSystemTime(Date.now() + 59_000)
+  await f.automations.tick(); await f.automations.whenIdle()
+  expect(runtime.health().counts).toEqual({ queued: 1 })
+  vi.setSystemTime(Date.now() + 1500)
+  await f.automations.tick(); await f.automations.whenIdle()
+  expect(f.review).toHaveBeenCalledTimes(1)
+})
+
+
+test('Usage close unregisters recovery before closing its store while Automations continues ticking', async () => {
+  const f = await fixture()
+  const onWake = f.automations.onSchedulerWake.bind(f.automations), disposers: ReturnType<typeof vi.fn>[] = []
+  vi.spyOn(f.automations, 'onSchedulerWake').mockImplementation(listener => {
+    const dispose = vi.fn(onWake(listener)); disposers.push(dispose); return dispose
+  })
+  const inspection = vi.spyOn(f.automations, 'inspectSystemOwnedRetirement')
+    .mockImplementation(() => { throw new Error('SQLITE_BUSY retirement inspection') })
+  const reconciliation = vi.spyOn(f.automations, 'reconcileSystem')
+    .mockImplementation(() => { throw new Error('SQLITE_BUSY scanner registration') })
+  const runtime = f.create(); await runtime.close()
+  expect(disposers).toHaveLength(1); expect(disposers[0]).toHaveBeenCalledOnce()
+  inspection.mockRestore(); reconciliation.mockRestore()
+  const restored = vi.spyOn(f.automations, 'reconcileSystem')
+  await f.automations.tick(); await f.automations.whenIdle()
+  expect(restored).not.toHaveBeenCalled()
+  expect(f.automations.listSystemOwned({ owner: 'assistant-growth-usage' })).toEqual([])
+  expect(f.review).not.toHaveBeenCalled()
 })

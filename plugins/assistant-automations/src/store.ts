@@ -48,6 +48,7 @@ import type {
   SystemOwnedAutomationHealthProjection,
   SystemOwnedAutomationIdentityProjection,
   SystemOwnedAutomationPauseReceipt,
+  SystemOwnedAutomationRetirementReceipt,
   HostExecutionRequirement,
   HostExecutorAvailabilityDecision,
   HostExecutorAvailabilityStage,
@@ -1376,6 +1377,7 @@ export class AutomationStore {
       ...(exact ? { expectedDefinitionHash: input.expectedDefinitionHash, expectedVersion: input.expectedVersion } : {}) })
     const definitionHash = hash(definition)
     return this.transaction(() => {
+      this.assertSystemNotRetired(owner, id)
       const prior = this.database.prepare(`
         SELECT input_hash, result_json FROM automation_system_reconciles WHERE idempotency_key = ?
       `).get(idempotencyKey) as { input_hash: string; result_json: string } | undefined
@@ -1914,6 +1916,89 @@ export class AutomationStore {
     })
   }
 
+  private assertSystemNotRetired(owner: string | undefined, automationId: string): void {
+    if (owner !== undefined && this.inspectSystemOwnedRetirement({ owner, automationId }) !== undefined) {
+      throw new AutomationStoreError('invalid-state', 'system-owned automation is permanently retired')
+    }
+  }
+
+  inspectSystemOwnedRetirement(input: {
+    owner: string
+    automationId: string
+  }): Readonly<SystemOwnedAutomationRetirementReceipt> | undefined {
+    const owner = text(input.owner, 'owner', 200)
+    const automationId = text(input.automationId, 'automationId', 500)
+    const row = this.database.prepare(`SELECT * FROM automation_system_retirements
+      WHERE system_owner = ? AND automation_id = ?`).get(owner, automationId) as {
+        operation_id: string; definition_hash: string; expected_version: number; definition_version: number
+        reason: 'owner-revoked'; evidence_digest: string; retired_at: number
+      } | undefined
+    return row === undefined ? undefined : Object.freeze({
+      owner, automationId, operationId: row.operation_id, definitionHash: row.definition_hash,
+      expectedVersion: row.expected_version, definitionVersion: row.definition_version,
+      automationStatus: 'paused', reason: row.reason, evidenceDigest: row.evidence_digest,
+      retiredAt: row.retired_at, replayed: true,
+    })
+  }
+
+  retireSystemOwned(input: {
+    owner: string
+    operationId: string
+    automationId: string
+    definitionHash: string
+    expectedVersion: number
+    reason: 'owner-revoked'
+    evidenceDigest: string
+  }): SystemOwnedAutomationRetirementReceipt {
+    const owner = text(input.owner, 'owner', 200)
+    const operationId = text(input.operationId, 'operationId', 500)
+    const automationId = text(input.automationId, 'automationId', 500)
+    if (!/^[a-f0-9]{64}$/u.test(input.definitionHash) || !/^[a-f0-9]{64}$/u.test(input.evidenceDigest)
+      || input.reason !== 'owner-revoked' || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+      throw new AutomationStoreError('invalid-definition', 'system retirement tuple is invalid')
+    }
+    return this.transaction(() => {
+      const prior = this.inspectSystemOwnedRetirement({ owner, automationId })
+      const operation = this.database.prepare(`SELECT system_owner, automation_id FROM automation_system_retirements
+        WHERE operation_id = ?`).get(operationId) as { system_owner: string; automation_id: string } | undefined
+      if ((operation !== undefined && (operation.system_owner !== owner || operation.automation_id !== automationId))
+        || (prior !== undefined && (prior.operationId !== operationId || prior.definitionHash !== input.definitionHash
+          || prior.expectedVersion !== input.expectedVersion || prior.evidenceDigest !== input.evidenceDigest
+          || prior.reason !== input.reason))) {
+        throw new AutomationStoreError('idempotency-conflict', 'system retirement operation conflicts with existing retirement')
+      }
+      const current = this.database.prepare('SELECT * FROM automation_definitions WHERE id = ?')
+        .get(automationId) as DefinitionRow | undefined
+      if (current === undefined || current.system_owner !== owner || current.definition_hash !== input.definitionHash) {
+        throw new AutomationStoreError('not-found', 'exact system-owned automation definition was not found')
+      }
+      if (prior !== undefined) {
+        if (current.status !== 'paused' || current.next_run_at !== null || current.version !== prior.definitionVersion) {
+          throw new AutomationStoreError('invalid-state', 'system retirement receipt no longer matches the definition state')
+        }
+        return prior
+      }
+      if (current.version !== input.expectedVersion) {
+        throw new AutomationStoreError('version-conflict', 'system-owned automation version changed before retirement')
+      }
+      if (current.status !== 'active' && current.status !== 'paused') {
+        throw new AutomationStoreError('invalid-state', 'only active or paused system-owned automations can be retired')
+      }
+      const retiredAt = this.now()
+      const changed = this.database.prepare(`UPDATE automation_definitions
+        SET status = 'paused', next_run_at = NULL, updated_at = ?, version = version + 1
+        WHERE id = ? AND system_owner = ? AND definition_hash = ? AND version = ? AND status IN ('active', 'paused')`)
+        .run(retiredAt, automationId, owner, input.definitionHash, input.expectedVersion)
+      if (changed.changes !== 1) throw new AutomationStoreError('version-conflict', 'system retirement CAS failed')
+      this.database.prepare(`INSERT INTO automation_system_retirements(
+        system_owner, automation_id, operation_id, definition_hash, expected_version, definition_version,
+        reason, evidence_digest, retired_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(owner, automationId, operationId, input.definitionHash, input.expectedVersion,
+          input.expectedVersion + 1, input.reason, input.evidenceDigest, retiredAt)
+      return Object.freeze({ ...this.inspectSystemOwnedRetirement({ owner, automationId })!, replayed: false })
+    })
+  }
+
   inspectSystemOwned(input: {
     owner: string
     automationId: string
@@ -2202,6 +2287,8 @@ export class AutomationStore {
   }): AutomationRecord {
     const inputHash = hash(input)
     return this.transaction(() => {
+      const existing = this.get(input.automationId)
+      if (input.operation === 'resume') this.assertSystemNotRetired(existing?.owner, input.automationId)
       const prior = this.database.prepare(
         'SELECT input_hash, result_json FROM automation_changes WHERE idempotency_key = ?',
       ).get(input.idempotencyKey) as { input_hash: string; result_json: string } | undefined
@@ -2326,6 +2413,8 @@ export class AutomationStore {
       const created: AutomationOccurrence[] = []
       for (const row of due) {
         const automation = record(row)
+        if (automation.owner !== undefined
+          && this.inspectSystemOwnedRetirement({ owner: automation.owner, automationId: automation.id }) !== undefined) continue
         if (isHostAutomationDefinition(automation.definition)) {
           const availability = this.exactHostAvailability(
             input.hostAvailability, automation.id, row.definition_hash, 'materialize',
@@ -3821,6 +3910,8 @@ export class AutomationStore {
   ): AutomationTask | undefined {
     const storedAutomation = this.get(row.automation_id)
     if (storedAutomation === undefined) return undefined
+    if (storedAutomation.owner !== undefined
+      && this.inspectSystemOwnedRetirement({ owner: storedAutomation.owner, automationId: storedAutomation.id }) !== undefined) return undefined
     // claimTask() bypasses claimNextTask()'s candidate scan, so retain the
     // same exact paused-Growth proof here as an independent admission fence.
     const designatedGrowthTask = storedAutomation.status === 'paused'

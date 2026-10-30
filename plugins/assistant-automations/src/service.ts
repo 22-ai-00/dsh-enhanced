@@ -91,6 +91,7 @@ import type {
   SystemOwnedAutomationHealthProjection,
   SystemOwnedAutomationIdentityProjection,
   SystemOwnedAutomationPauseReceipt,
+  SystemOwnedAutomationRetirementReceipt,
   HostAutomationExecutor,
 } from './types.js'
 import { parseExternalEventEnvelope } from './external-event.js'
@@ -391,6 +392,7 @@ export class AssistantAutomationsService extends Service implements
   private readonly preparationRunner: AutomationPreparationRunner
   private readonly coordinator: AutomationCoordinator
   private readonly hostExecutors = new HostAutomationExecutorRegistry()
+  private readonly schedulerWakeListeners = new Set<() => void>()
   private readonly hostShutdowns = new Set<() => Promise<void>>()
   private readonly config: Required<Config>
   private readonly evaluationProducerGeneration = `assistant-automations:${randomUUID()}`
@@ -451,6 +453,7 @@ export class AssistantAutomationsService extends Service implements
       }),
     ))
     this.coordinator = new AutomationCoordinator({
+      beforeTick: () => this.notifySchedulerWake(),
       beforeDispatch: () => this.revalidatePromotedWorkflows(true),
       dispatchPaused: () => this.approvalDelivery?.isMaintenanceDraining?.() === true,
       store: this.store,
@@ -523,6 +526,7 @@ export class AssistantAutomationsService extends Service implements
     ctx.inject(['tools'], toolsCtx => registerAutomationTools(toolsCtx, this))
     ctx.effect(() => async () => {
       this.stopping = true
+      this.schedulerWakeListeners.clear()
       try {
         const stopped = await Promise.allSettled([...this.hostShutdowns].map(stop => stop()))
         for (const result of stopped) if (result.status === 'rejected') ctx.logger.error(result.reason)
@@ -1794,6 +1798,39 @@ export class AssistantAutomationsService extends Service implements
     return this.reconcileSystem(input)
   }
 
+  /** Host-only lifecycle notification; synchronous listeners own their bounded retry guard. */
+  onSchedulerWake(listener: () => void): () => void {
+    this.assertActive()
+    if (typeof listener !== 'function') {
+      throw new AssistantAutomationsError('invalid-input', 'scheduler wake listener is required')
+    }
+    // A distinct registration preserves independent lifetimes even when two
+    // consumers pass the same callback. Cordis traces this.ctx to the use site.
+    const wake = () => listener()
+    const unregister = () => { this.schedulerWakeListeners.delete(wake) }
+    this.ctx.effect(() => {
+      this.schedulerWakeListeners.add(wake)
+      return unregister
+    }, 'assistant-automations.scheduler-wake')
+    return unregister
+  }
+
+  private notifySchedulerWake(): void {
+    if (!this.active || this.stopping) return
+    // Registrations added during a wake wait until the next native tick.
+    const listeners = [...this.schedulerWakeListeners]
+    for (const listener of listeners) {
+      if (!this.active || this.stopping) break
+      if (!this.schedulerWakeListeners.has(listener)) continue
+      try {
+        const returned: unknown = listener()
+        // The contract is synchronous. Do not await an accidentally returned
+        // Promise or let its rejection escape into the native scheduler.
+        if (returned !== undefined) void Promise.resolve(returned).catch(() => {})
+      } catch { /* Durable consumer initialization retries at the next native tick. */ }
+    }
+  }
+
   async tick(): Promise<void> {
     this.assertActive()
     await this.coordinator.tick()
@@ -1880,6 +1917,33 @@ export class AssistantAutomationsService extends Service implements
     ].join(':') })
     if (decision.effect !== 'allow') throw policyError(decision)
     return this.store.pauseSystemOwned(input)
+  }
+
+  inspectSystemOwnedRetirement(input: { owner: string; automationId: string }):
+    Readonly<SystemOwnedAutomationRetirementReceipt> | undefined {
+    this.assertActive()
+    return this.store.inspectSystemOwnedRetirement(input)
+  }
+
+  /** Host-only permanent retirement, authorized through the existing reconcile Policy. */
+  retireSystemOwned(input: Parameters<AutomationStore['retireSystemOwned']>[0]): SystemOwnedAutomationRetirementReceipt {
+    this.assertActive()
+    const current = this.store.get(input.automationId)
+    if (current === undefined || current.owner !== input.owner) {
+      throw new AssistantAutomationsError('not-found', 'exact system-owned automation was not found')
+    }
+    if (this.store.getDefinitionHash(input.automationId) !== input.definitionHash) {
+      throw new AssistantAutomationsError('invalid-input', 'system retirement definition hash does not match')
+    }
+    const decision = this.policy.authorize({
+      subject: { kind: 'background', id: input.owner,
+        workspace: current.definition.workspace, principal: current.definition.principal },
+      action: 'reconcile', resource: { kind: 'automation', id: input.automationId },
+      context: { initiator: 'background' },
+    }, { idempotencyKey: [ 'automation-system-retire', input.owner, input.automationId,
+      input.definitionHash, input.expectedVersion, input.reason, input.evidenceDigest, input.operationId ].join(':') })
+    if (decision.effect !== 'allow') throw policyError(decision)
+    return this.store.retireSystemOwned(input)
   }
 
   resolveQualityEvidence(input: Parameters<AutomationStore['resolveQualityEvidence']>[0]):

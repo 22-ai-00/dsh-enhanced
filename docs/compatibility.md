@@ -1,5 +1,11 @@
 # 兼容性基线
 
+## 撤销 owner 的后台扫描（Automations schema 16）
+
+Automations v16 在原库中新增不可删除的 system-owned 扫描退休标记；迁移保留旧定义、任务、unknown 和运行历史。退休只暂停精确匹配的扫描定义并清空下次执行时间，旧 reconcile 回执、resume 和调度准入均不能重新激活该身份。安装生命周期继续接受历史 v15 快照，并明确接受 v16；未知版本仍拒绝，不能用回退数据库版本恢复已退休扫描。
+
+Delivery 的只读 owner 状态查询与 Automations 的退休、原生 tick 唤醒 API 要同批部署到 Growth Driver、Memory Learning 和 Control Plane 所在 Host。明确撤权才允许退休；临时不可用只关闭业务准入，借助原生 scheduler tick 重试初始化，不新增轮询循环，不重派旧 unknown，也不重置授权或预算。Memory 的撤权证明允许同一 principal record 版本递增，活动授权仍精确匹配原版本。本次不改变 DSH/Cordis ABI，不为新 owner 转移旧 grant。
+
 ## 同码维护恢复（Delivery schema 26）
 
 Delivery v26 只新增与 Inbox claim 同库的持久维护栅栏，owner snapshot 协议及原记录不变；只读 operator、Web doctor 和安装生命周期接受 v26，未知 schema 继续拒绝。独立 restart sidecar 使用 schema 1。旧任务没有冻结的模型、预算和 checkpoint，不参与自动续办。

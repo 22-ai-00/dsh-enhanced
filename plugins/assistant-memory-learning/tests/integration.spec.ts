@@ -20,6 +20,7 @@ import { MemoryReviewRuntime, type MemoryReviewConfig } from '../../assistant-ve
 import { SourceReviewStore } from '../../assistant-verifier/lib/source-review-store.js'
 import { MemoryStore } from '../../personal-memory/lib/store.js'
 import { MemoryLearningRuntime } from '../src/runtime.ts'
+import { ScannerOwnerGuard } from '../src/scanner-owner-runtime.ts'
 import type { LearningConfig, LearningJob } from '../src/types.ts'
 
 const cleanups: (() => Promise<void>)[] = []
@@ -111,9 +112,14 @@ async function fixture(options: { verdict?: 'approved' | 'rejected' | 'unknown';
       if (options.loseAdoptionAck && adoptCalls === 1) throw new Error('fixture: durable adoption ACK lost')
       return receipt
     } }
-  const runtime = new MemoryLearningRuntime(config, { delivery: ctx.assistantDelivery, evaluation: ctx.assistantEvaluation,
-    automations: ctx.assistantAutomations, memory: memoryPort, verifier: verifierPort,
-    policy: ctx.assistantPolicy, extract })
+  const runtimes: MemoryLearningRuntime[] = []
+  const createRuntime = () => {
+    const instance = new MemoryLearningRuntime(config, { delivery: ctx.assistantDelivery, evaluation: ctx.assistantEvaluation,
+      automations: ctx.assistantAutomations, memory: memoryPort, verifier: verifierPort,
+      policy: ctx.assistantPolicy, extract })
+    runtimes.push(instance); return instance
+  }
+  const runtime = createRuntime()
   const id = SessionId('owner-session'), session = Session.create(id, [], { version: SESSION_FORMAT_VERSION,
     id, createdAt: Date.now(), isSeeded: false, cwd: root, agentPreset: 'primary' })
   session.append('user/message', createUserMessage({ source: { kind: 'user' },
@@ -121,7 +127,7 @@ async function fixture(options: { verdict?: 'approved' | 'rejected' | 'unknown';
   const agent: Agent = { id, session, options: {}, inbox: createInboxStub(), ctx, status: 'idle',
     cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal),
     send() {}, followup() {}, steer() {}, inject() {} }
-  cleanups.push(async () => { await runtime.close(); await reviewer.close(); reviewLedger.close();
+  cleanups.push(async () => { for (const instance of runtimes) await instance.close(); await reviewer.close(); reviewLedger.close();
     await ctx.fiber.restart(); deliveryStore.close(); evaluationStore.close(); await rm(root, { recursive: true, force: true }) })
   function source(text = 'Atlas uses pnpm for this workspace.') {
     const eventId = `task-${Math.random().toString(36).slice(2)}`
@@ -174,7 +180,7 @@ async function fixture(options: { verdict?: 'approved' | 'rejected' | 'unknown';
     throw new Error(`memory learning did not drain after three native ticks: ${JSON.stringify(observations)}`)
   }
   return { root, ctx, owner, authority, principal, binding, deliveryStore, evaluationStore,
-    runtime, source, feedback, run, agent, extract, reviewCalls, reviewer, reviewLedger,
+    runtime, createRuntime, source, feedback, run, agent, extract, reviewCalls, reviewer, reviewLedger,
     get adoptCalls() { return adoptCalls },
     unloadEvaluation: async () => { await evaluationFiber.dispose() },
     restoreEvaluation: async () => { evaluationFiber = await ctx.plugin(AssistantEvaluationService,
@@ -296,4 +302,173 @@ test('late canonical owner feedback supersedes a pending fact with an experience
   expect(f.extract.mock.calls.map(([input]) => input.job.intent.kind)).toContain('experience')
   expect(f.ctx.personalMemory.search(f.agent, { query: 'dependency updates pnpm lockfile' }).map(hit => hit.record.kind))
     .toEqual(['experience'])
+})
+
+
+test.each([2, 4])('real Delivery revoked version %i retires the Memory scanner frozen at version 1 without transferring its grant', async revokedVersion => {
+  const f = await fixture()
+  const route = { authorityId: f.owner.authorityId, principalId: f.owner.principalId,
+    workspace: f.owner.workspace, agentPreset: f.owner.agentPreset }
+  expect(f.ctx.assistantDelivery.validateOwnerRoute(route).principalVersion).toBe(1)
+  f.runtime.start()
+  const before = f.runtime.health()
+  const identity = f.ctx.assistantAutomations.listSystemOwned({ owner: 'assistant-memory-learning' })[0]!
+  const replacement = { ...f.principal, user: 'replacement-owner' }
+  f.deliveryStore.handoffOwner(replacement)
+  expect(f.ctx.assistantDelivery.inspectOwnerRouteState(route)).toMatchObject({ status: 'revoked',
+    principalRecordId: f.owner.principalRecordId, principalVersion: 2 })
+  if (revokedVersion === 4) {
+    f.deliveryStore.handoffOwner(f.principal)
+    f.deliveryStore.createBinding({ principal: f.principal, conversation: f.authority.conversation,
+      workspace: f.root, agentPreset: f.owner.agentPreset, policyRef: f.authority.policyRef, sessionId: 'owner-aba-session' })
+    expect(f.ctx.assistantDelivery.inspectOwnerRouteState(route)).toMatchObject({ status: 'active', receipt: { principalVersion: 3 } })
+    f.runtime.scan()
+    // A restored owner cannot use the frozen v1 extraction/review/adoption grants.
+    expect(f.runtime.health().lastError).toContain('owner authority changed')
+    expect(f.ctx.assistantAutomations.inspectSystemOwnedRetirement(identity)).toBeUndefined()
+    f.deliveryStore.handoffOwner(replacement)
+  }
+  expect(f.ctx.assistantDelivery.inspectOwnerRouteState(route)).toMatchObject({ status: 'revoked',
+    principalRecordId: f.owner.principalRecordId, principalVersion: revokedVersion })
+  f.runtime.scan()
+  expect(f.ctx.assistantAutomations.inspectSystemOwnedRetirement(identity)).toMatchObject({ reason: 'owner-revoked', automationStatus: 'paused' })
+  expect(f.runtime.health()).toMatchObject({ connected: false, counts: before.counts,
+    remainingExtractions: before.remainingExtractions })
+  expect(f.extract).not.toHaveBeenCalled(); expect(f.reviewCalls).not.toHaveBeenCalled()
+  expect(f.adoptCalls).toBe(0)
+})
+
+test('real revoked principal version below the frozen grant cannot retire a newer Memory scanner lineage', async () => {
+  const f = await fixture(); f.runtime.start()
+  const identity = f.ctx.assistantAutomations.listSystemOwned({ owner: 'assistant-memory-learning' })[0]!
+  f.deliveryStore.handoffOwner({ ...f.principal, user: 'replacement-owner' })
+  const route = { authorityId: f.owner.authorityId, principalId: f.owner.principalId,
+    workspace: f.owner.workspace, agentPreset: f.owner.agentPreset }
+  expect(f.ctx.assistantDelivery.inspectOwnerRouteState(route)).toMatchObject({ status: 'revoked', principalVersion: 2 })
+  const guard = new ScannerOwnerGuard('assistant-memory-learning', identity.automationId, route,
+    f.ctx.assistantDelivery, f.ctx.assistantAutomations, { ...f.owner, principalVersion: 3 })
+  expect(() => guard.check()).toThrow('scanner owner lineage unavailable')
+  expect(guard.retired).toBe(false)
+  expect(f.ctx.assistantAutomations.inspectSystemOwnedRetirement(identity)).toBeUndefined()
+  expect(f.ctx.assistantAutomations.inspectSystemOwned(identity).automationStatus).toBe('active')
+  expect(f.extract).not.toHaveBeenCalled(); expect(f.reviewCalls).not.toHaveBeenCalled()
+  expect(f.adoptCalls).toBe(0)
+})
+
+
+test('startup retirement inspection outage establishes a fresh native Memory wake and recovers in the same instance', async () => {
+  let now = Math.floor(Date.now() / 60_000) * 60_000 + 10_000
+  vi.spyOn(Date, 'now').mockImplementation(() => now)
+  const f = await fixture()
+  const inspection = vi.spyOn(f.ctx.assistantAutomations, 'inspectSystemOwnedRetirement')
+    .mockImplementation(() => { throw new Error('temporary retirement read unavailable') })
+  f.runtime.start()
+  expect(f.ctx.assistantAutomations.listSystemOwned({ owner: 'assistant-memory-learning' })).toMatchObject([
+    { automationStatus: 'active' },
+  ])
+  expect(f.runtime.health().remainingExtractions).toBe(8)
+  expect(f.extract).not.toHaveBeenCalled(); expect(f.reviewCalls).not.toHaveBeenCalled()
+  inspection.mockRestore()
+  f.source(); now += 60_000
+  await f.ctx.assistantAutomations.tick(); await f.ctx.assistantAutomations.whenIdle()
+  expect(f.runtime.health().counts.queued, JSON.stringify({ health: f.runtime.health(),
+    native: f.ctx.assistantAutomations.listSystemOwned({ owner: 'assistant-memory-learning' })
+      .map(identity => f.ctx.assistantAutomations.inspectSystemOwned(identity)) })).toBe(1)
+  now += 1500
+  await f.ctx.assistantAutomations.tick(); await f.ctx.assistantAutomations.whenIdle()
+  expect(f.runtime.health().counts.adopted).toBe(1)
+  expect(f.extract).toHaveBeenCalledOnce(); expect(f.reviewCalls).toHaveBeenCalledOnce()
+})
+
+test('unreadable retirement cannot bypass the native Memory activation fence after real owner ABA', async () => {
+  const f = await fixture(); f.runtime.start()
+  const identity = f.ctx.assistantAutomations.listSystemOwned({ owner: 'assistant-memory-learning' })[0]!
+  f.deliveryStore.handoffOwner({ ...f.principal, user: 'replacement-owner' }); f.runtime.scan()
+  const retirement = f.ctx.assistantAutomations.inspectSystemOwnedRetirement(identity)
+  expect(retirement).toBeDefined()
+  await f.runtime.close()
+  f.deliveryStore.handoffOwner(f.principal)
+  f.deliveryStore.createBinding({ principal: f.principal, conversation: f.authority.conversation,
+    workspace: f.root, agentPreset: f.owner.agentPreset, policyRef: f.authority.policyRef, sessionId: 'owner-aba-session' })
+  const before = f.ctx.assistantAutomations.inspectSystemOwned(identity)
+  const inspection = vi.spyOn(f.ctx.assistantAutomations, 'inspectSystemOwnedRetirement')
+    .mockImplementation(() => { throw new Error('temporary retirement read unavailable') })
+  const reconciliation = vi.spyOn(f.ctx.assistantAutomations, 'reconcileSystem')
+  const restored = f.createRuntime(); restored.start()
+  expect(reconciliation).toHaveBeenCalledOnce()
+  expect(f.ctx.assistantAutomations.inspectSystemOwned(identity)).toEqual(before)
+  inspection.mockRestore()
+  expect(f.ctx.assistantAutomations.inspectSystemOwnedRetirement(identity)).toEqual(retirement)
+  expect(f.extract).not.toHaveBeenCalled(); expect(f.reviewCalls).not.toHaveBeenCalled()
+  expect(f.adoptCalls).toBe(0)
+})
+
+test('explicitly revoked Memory owner blocks reconciliation even when retirement inspection is unavailable', async () => {
+  const f = await fixture()
+  f.deliveryStore.handoffOwner({ ...f.principal, user: 'replacement-owner' })
+  const inspection = vi.spyOn(f.ctx.assistantAutomations, 'inspectSystemOwnedRetirement')
+    .mockImplementation(() => { throw new Error('temporary retirement read unavailable') })
+  const reconciliation = vi.spyOn(f.ctx.assistantAutomations, 'reconcileSystem')
+  f.runtime.start()
+  expect(reconciliation).not.toHaveBeenCalled()
+  expect(f.ctx.assistantAutomations.listSystemOwned({ owner: 'assistant-memory-learning' })).toEqual([])
+  expect(f.extract).not.toHaveBeenCalled(); expect(f.reviewCalls).not.toHaveBeenCalled()
+  inspection.mockRestore()
+})
+
+
+test('native scheduler wake silently initializes fresh Memory after both retirement inspection and reconcile recover', async () => {
+  let now = Math.floor(Date.now() / 60_000) * 60_000 + 10_000
+  vi.spyOn(Date, 'now').mockImplementation(() => now)
+  const f = await fixture()
+  const inspection = vi.spyOn(f.ctx.assistantAutomations, 'inspectSystemOwnedRetirement')
+    .mockImplementation(() => { throw new Error('SQLITE_BUSY retirement inspection') })
+  const reconciliation = vi.spyOn(f.ctx.assistantAutomations, 'reconcileSystem')
+    .mockImplementation(() => { throw new Error('SQLITE_BUSY scanner registration') })
+  f.runtime.start()
+  expect(f.ctx.assistantAutomations.listSystemOwned({ owner: 'assistant-memory-learning' })).toEqual([])
+  expect(f.runtime.health().remainingExtractions).toBe(8)
+  expect(f.extract).not.toHaveBeenCalled(); expect(f.reviewCalls).not.toHaveBeenCalled()
+  inspection.mockRestore(); reconciliation.mockRestore()
+  now += 1000
+  await f.ctx.assistantAutomations.tick(); await f.ctx.assistantAutomations.whenIdle()
+  const identity = f.ctx.assistantAutomations.listSystemOwned({ owner: 'assistant-memory-learning' })[0]!
+  expect(identity.automationStatus).toBe('active')
+  // The recovery callback only restores the cron; it cannot run source scans,
+  // reserve a learning admission, or bypass the native automation budget.
+  expect(f.runtime.health().lastScanAt).toBeNull()
+  expect(Object.values(f.runtime.health().counts).every(count => count === 0)).toBe(true)
+  expect(f.runtime.health().remainingExtractions).toBe(8)
+  expect(f.ctx.assistantAutomations.inspectSystemOwned(identity).latestTerminalRuns.production).toBeUndefined()
+  f.source(); now += 59_000
+  await f.ctx.assistantAutomations.tick(); await f.ctx.assistantAutomations.whenIdle()
+  expect(f.runtime.health().counts.queued).toBe(1)
+  expect(f.ctx.assistantAutomations.inspectSystemOwned(identity).latestTerminalRuns.production)
+    .toMatchObject({ status: 'succeeded', diagnostic: { budgetSettlementState: 'finalized' } })
+  now += 1500
+  await f.ctx.assistantAutomations.tick(); await f.ctx.assistantAutomations.whenIdle()
+  expect(f.runtime.health().counts.adopted).toBe(1)
+  expect(f.extract).toHaveBeenCalledOnce(); expect(f.reviewCalls).toHaveBeenCalledOnce()
+})
+
+
+test('Memory close unregisters native scheduler recovery before its store closes while Automations keeps ticking', async () => {
+  const f = await fixture()
+  const onWake = f.ctx.assistantAutomations.onSchedulerWake.bind(f.ctx.assistantAutomations)
+  const disposers: ReturnType<typeof vi.fn>[] = []
+  vi.spyOn(f.ctx.assistantAutomations, 'onSchedulerWake').mockImplementation(listener => {
+    const dispose = vi.fn(onWake(listener)); disposers.push(dispose); return dispose
+  })
+  const inspection = vi.spyOn(f.ctx.assistantAutomations, 'inspectSystemOwnedRetirement')
+    .mockImplementation(() => { throw new Error('SQLITE_BUSY retirement inspection') })
+  const reconciliation = vi.spyOn(f.ctx.assistantAutomations, 'reconcileSystem')
+    .mockImplementation(() => { throw new Error('SQLITE_BUSY scanner registration') })
+  f.runtime.start(); await f.runtime.close()
+  expect(disposers).toHaveLength(1); expect(disposers[0]).toHaveBeenCalledOnce()
+  inspection.mockRestore(); reconciliation.mockRestore()
+  const restored = vi.spyOn(f.ctx.assistantAutomations, 'reconcileSystem')
+  await f.ctx.assistantAutomations.tick(); await f.ctx.assistantAutomations.whenIdle()
+  expect(restored).not.toHaveBeenCalled()
+  expect(f.ctx.assistantAutomations.listSystemOwned({ owner: 'assistant-memory-learning' })).toEqual([])
+  expect(f.extract).not.toHaveBeenCalled(); expect(f.reviewCalls).not.toHaveBeenCalled()
 })

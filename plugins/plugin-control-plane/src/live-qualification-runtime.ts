@@ -1,3 +1,4 @@
+import { ScannerOwnerGuard, ScannerOwnerUnavailable, drainScannerFlights } from './scanner-owner-runtime.js'
 import { randomUUID } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
 import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutorInput, HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
@@ -19,8 +20,8 @@ const EXECUTOR = 'plugin-control-plane-live-qualification-v1'
 const CATALOG = controlPlaneDigest({ executor: EXECUTOR, version: 1 })
 const same = (a: unknown, b: unknown): boolean => controlPlaneDigest(a) === controlPlaneDigest(b)
 type Evaluation = Pick<AssistantEvaluationService, 'canonicalHostScope' | 'getTrustedForegroundLearningProjection' | 'withTrustedCanonicalTaskWriterFence' | 'onTrustedTaskChange'>
-type Delivery = Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'inspectOwnerForegroundLearningTask'>
-type Automations = Pick<AssistantAutomationsService, 'registerHostExecutor' | 'reconcileSystem' | 'inspectSystemOwnedActivation'>
+type Delivery = Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'inspectOwnerRouteState' | 'inspectOwnerForegroundLearningTask'>
+type Automations = Pick<AssistantAutomationsService, 'inspectSystemOwnedRetirement' | 'retireSystemOwned' | 'onSchedulerWake' | 'registerHostExecutor' | 'reconcileSystem' | 'inspectSystemOwned' | 'inspectSystemOwnedActivation'>
 
 export interface LiveQualificationConfig {
   scope: { ownerRouteId: string; principalId: string; workspace: string; preset: string }
@@ -60,6 +61,9 @@ export class LiveQualificationRuntime {
   private unregister?: () => void
   private unsubscribe?: () => void
   private closing?: Promise<void>
+  private readonly ownerGuard: ScannerOwnerGuard
+  private unsubscribeWake: (() => void) | undefined
+  private initialized = false
   private active = false
   private runtimeWasAvailable = false
   private scanning = false
@@ -80,9 +84,18 @@ export class LiveQualificationRuntime {
     this.trustDigest = controlPlaneDigest(options.trust)
     this.scanId = `live-qualification-scan-${this.lane}`
     this.activationNonce = controlPlaneDigest({ config: this.configDigest, generation: this.generation })
+    const scope = options.config.scope
+    this.ownerGuard = new ScannerOwnerGuard(OWNER, this.scanId, { authorityId: scope.ownerRouteId,
+      principalId: scope.principalId, workspace: scope.workspace, agentPreset: scope.preset }, options.delivery, options.automations)
   }
 
   start(): void {
+    let recoverNativeScanner = false
+    try { this.ownerGuard.check() } catch (error) {
+      this.lastError = String(error).slice(0, 200)
+      if (this.ownerGuard.retired) return
+      recoverNativeScanner = this.ownerGuard.canReconcileScanner
+    }
     this.unregister = this.options.automations.registerHostExecutor({
       descriptor: { executorId: EXECUTOR, contractVersion: 1, catalogDigest: CATALOG },
       accepts: spec => spec.executorId === EXECUTOR && spec.executorContractVersion === 1 && spec.catalogDigest === CATALOG
@@ -95,36 +108,56 @@ export class LiveQualificationRuntime {
       },
     })
     this.active = true
+    this.unsubscribeWake = this.options.automations.onSchedulerWake(() => {
+      if (!this.active || this.initialized || this.ownerGuard.retired) return
+      try { this.initializeScanner() }
+      catch (error) { this.lastError = String(error).slice(0, 200) }
+    })
     this.unsubscribe = this.options.evaluation.onTrustedTaskChange(() => this.scan())
-    this.options.automations.reconcileSystem({ owner: OWNER, automationId: this.scanId,
-      idempotencyKey: `${this.scanId}:${this.generation}`, desiredStatus: 'active', definition: this.definition() })
+    if (recoverNativeScanner) {
+      try {
+        this.options.automations.reconcileSystem({ owner: OWNER, automationId: this.scanId,
+          idempotencyKey: `${this.scanId}:${this.generation}`, desiredStatus: 'active', definition: this.definition() })
+      } catch (error) { this.lastError = String(error).slice(0, 200) }
+    }
     this.scan()
+  }
+
+  private initializeScanner() {
+    const owner = this.owner()
+    if (!this.initialized) {
+      this.options.automations.reconcileSystem({ owner: OWNER, automationId: this.scanId,
+        idempotencyKey: `${this.scanId}:${this.generation}`, desiredStatus: 'active', definition: this.definition() })
+      this.initialized = true
+    }
+    return owner
   }
 
   close(): Promise<void> {
     return this.closing ??= (async () => {
       this.active = false
       try {
-        const current = this.options.automations.inspectSystemOwnedActivation({ owner: OWNER, automationId: this.scanId })
-        if (current?.activationNonce === this.activationNonce) this.options.automations.reconcileSystem({ owner: OWNER,
+        const current = this.initialized && !this.ownerGuard.retired
+          ? this.options.automations.inspectSystemOwnedActivation({ owner: OWNER, automationId: this.scanId }) : undefined
+        if (!this.ownerGuard.retired && this.initialized && current?.activationNonce === this.activationNonce) this.options.automations.reconcileSystem({ owner: OWNER,
           automationId: this.scanId, idempotencyKey: `${this.scanId}:${this.generation}:pause`, desiredStatus: 'paused', definition: this.definition() })
       } finally {
         this.abort.abort()
-        try { this.unsubscribe?.() } finally {
+        try { this.unsubscribeWake?.(); this.unsubscribe?.() } finally {
           try { this.unregister?.() } finally {
-            await Promise.allSettled(this.flights)
-            this.options.store.close()
+            try { await drainScannerFlights(this.flights) } finally { this.options.store.close() }
           }
         }
       }
     })()
   }
 
-  health = () => ({ connected: this.active, lastError: this.lastError })
+  health = () => ({ connected: this.active && !this.ownerGuard.retired, lastError: this.lastError })
 
   private current(): void {
     this.abort.signal.throwIfAborted()
     if (!this.active) throw new Error('live qualification runtime unavailable')
+    this.ownerGuard.check()
     this.options.assertCurrent()
   }
   private owner(): TaskObservationOwner {
@@ -225,7 +258,7 @@ export class LiveQualificationRuntime {
     if (!this.active || this.scanning) return
     this.scanning = true
     try {
-      this.current()
+      this.initializeScanner()
       this.lastError = null
       if (!this.options.runtimeAvailable() && !this.runtimeWasAvailable) return
       if (this.options.runtimeAvailable()) this.runtimeWasAvailable = true
@@ -239,7 +272,8 @@ export class LiveQualificationRuntime {
             if (record.state === 'stale') continue
             const historical = plan.status === 'activated'
             try { this.fence(record.batch, () => {}, historical) }
-            catch {
+            catch (error) {
+              if (error instanceof ScannerOwnerUnavailable) throw error
               if (record.state === 'applied' && record.receipt?.disposition === 'qualified') {
                 store.invalidateLiveQualification({ planId: plan.id, batchId: record.batch.id,
                   reason: 'live-qualification-unconfirmable' })
@@ -304,6 +338,7 @@ export class LiveQualificationRuntime {
   private async execute(input: HostAutomationExecutorInput): Promise<HostAutomationExecutorResult> {
     let began = false
     try {
+      const owner = this.owner()
       const scope = this.options.config.scope
       const registration = this.options.automations.inspectSystemOwnedActivation({ owner: OWNER, automationId: this.scanId })
       if (input.executionMode !== 'production' || input.automationId !== this.scanId || input.activationNonce !== this.activationNonce
@@ -317,7 +352,6 @@ export class LiveQualificationRuntime {
       // observer at the first actual cron tick is no longer a startup race.
       if (!this.options.runtimeAvailable()) this.runtimeWasAvailable = true
       this.scan()
-      const owner = this.owner()
       if (owner.authorityId !== scope.ownerRouteId || owner.principalId !== scope.principalId
         || owner.workspace !== scope.workspace || owner.agentPreset !== scope.preset) throw new Error('live qualification owner route changed')
       if (!this.options.runtimeAvailable()) throw new Error('live qualification Host observer unavailable')
@@ -328,7 +362,8 @@ export class LiveQualificationRuntime {
         for (const record of records) {
           if (record.state !== 'pending' && record.state !== 'signed') continue
           try { this.fence(record.batch, () => {}) }
-          catch {
+          catch (error) {
+            if (error instanceof ScannerOwnerUnavailable) throw error
             this.options.store.staleLiveQualification(record.batch.id)
             this.options.store.requestActivationRollback({ planId: plan.id, expectedRevision: plan.revision,
               fence: record.batch.fence, failureCode: 'live-qualification-unconfirmable' })

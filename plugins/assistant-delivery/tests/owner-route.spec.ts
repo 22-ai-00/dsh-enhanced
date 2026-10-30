@@ -10,6 +10,8 @@ import {
   AssistantDeliveryService,
   type DeliveryPresentationUpdate,
   type OwnerRouteAuthority,
+  type OwnerRouteStateInspection,
+  ownerRouteAuthorityHash,
 } from '../src/index.ts'
 import { deliverySchemaVersion } from '../src/sqlite.ts'
 import { DeliveryStore } from '../src/store.ts'
@@ -149,6 +151,177 @@ async function dispose(fixture: Fixture): Promise<void> {
   await fixture.ctx.fiber.restart()
   contexts.delete(fixture.ctx)
 }
+
+const ownerScope = { authorityId: authority.id, principalId: 'lark/bot-1/tenant-a/ou_owner',
+  workspace: '/work/alpha', agentPreset: 'primary' }
+
+function deliveryRows(fixture: Fixture): unknown {
+  const database = new DatabaseSync(join(fixture.root, 'delivery.sqlite'), { readOnly: true })
+  try {
+    const tables = database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
+      .all() as { name: string }[]
+    return tables.map(({ name }) => ({ name,
+      rows: database.prepare(`SELECT * FROM "${name.replaceAll('"', '""')}"`).all() }))
+  } finally {
+    database.close()
+  }
+}
+
+function inspectWithoutChanges(fixture: Fixture, input = ownerScope): OwnerRouteStateInspection {
+  const before = deliveryRows(fixture)
+  const inspection = fixture.service.inspectOwnerRouteState(input)
+  expect(deliveryRows(fixture)).toEqual(before)
+  return inspection
+}
+
+describe('read-only owner route state inspection', () => {
+  test('returns the existing active receipt without changing owner, binding or message history', async () => {
+    const f = await fixture()
+    pairAndBind(f)
+    f.store.acceptInbound({ channel: principal.channel, account: principal.account,
+      eventId: 'state-inspection-history', occurredAt: 1, principal, conversation,
+      kind: 'text', text: 'Private owner message must stay in the ledger.' })
+    f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
+      idempotencyKey: 'state-inspection-history', text: 'Private historical response.' })
+    const receipt = f.service.validateOwnerRoute(ownerScope)
+    const inspection = inspectWithoutChanges(f)
+    expect(inspection).toEqual({ status: 'active', receipt })
+    expect(Object.isFrozen(inspection)).toBe(true)
+    if (inspection.status === 'active') expect(Object.isFrozen(inspection.receipt)).toBe(true)
+    expect(inspectWithoutChanges(f, { authorityId: ` ${authority.id} `,
+      principalId: ` ${ownerScope.principalId} `, workspace: ' /work/alpha ', agentPreset: ' primary ' }))
+      .toEqual({ status: 'active', receipt })
+  })
+
+  test('proves exact durable owner revocation without requiring an active binding, including after restart', async () => {
+    const f = await fixture()
+    pairAndBind(f)
+    const owner = f.store.getPrincipal(principal)!
+    const revoked = f.store.revokePrincipal(owner.id, owner.version)
+    expect(f.store.getActiveBinding(conversation)).toBeUndefined()
+    const resolve = vi.spyOn(f.service, 'resolveOwnerRoute')
+    const expected = { status: 'revoked', authorityId: authority.id,
+      authorityHash: ownerRouteAuthorityHash(authority), principalId: ownerScope.principalId,
+      principalRecordId: revoked.id, principalVersion: revoked.version }
+    expect(inspectWithoutChanges(f)).toEqual(expected)
+    expect(resolve).not.toHaveBeenCalled()
+    expect(() => f.service.validateOwnerRoute(ownerScope))
+      .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    await dispose(f)
+    const restarted = await mount(f.root)
+    expect(inspectWithoutChanges(restarted)).toEqual(expected)
+  })
+
+  test.each([
+    ['unknown authority', { authorityId: 'unconfigured' }, 'authority-unconfigured'],
+    ['invalid authority', { authorityId: 'invalid\nauthority' }, 'authority-invalid'],
+    ['principal', { principalId: 'lark/bot-1/tenant-a/ou_other' }, 'scope-mismatch'],
+    ['workspace', { workspace: '/work/other' }, 'scope-mismatch'],
+    ['preset', { agentPreset: 'other' }, 'scope-mismatch'],
+    ['invalid scope', { workspace: '/work/alpha\u0000' }, 'scope-mismatch'],
+  ] as const)('does not expose revoked owner state for %s', async (_label, change, reason) => {
+    const f = await fixture()
+    pairAndBind(f)
+    const owner = f.store.getPrincipal(principal)!
+    f.store.revokePrincipal(owner.id, owner.version)
+    const read = vi.spyOn(f.store, 'getPrincipal')
+    expect(inspectWithoutChanges(f, { ...ownerScope, ...change })).toEqual({ status: 'unavailable', reason })
+    expect(read).not.toHaveBeenCalled()
+  })
+
+  test('does not create a missing owner or binding, or treat them as revocation', async () => {
+    const f = await fixture()
+    expect(inspectWithoutChanges(f)).toEqual({ status: 'unavailable', reason: 'owner-unavailable' })
+    f.store.ensureOwner(principal)
+    expect(inspectWithoutChanges(f)).toEqual({ status: 'unavailable', reason: 'route-unavailable' })
+    expect(f.store.getPrincipal(principal)).toMatchObject({ status: 'active', version: 1 })
+    expect(f.store.listBindings(conversation)).toEqual([])
+  })
+
+  test('does not treat a revoked linked principal as revoked owner authority', async () => {
+    const linked = { ...principal, user: 'ou_other' }
+    const f = await fixture([{ ...authority, principal: linked }])
+    f.store.ensureOwner(principal)
+    const challenge = f.service.issuePairing('test', linked)
+    f.service.confirmPairing({ challengeId: challenge.challenge.id, principal: linked, code: challenge.code })
+    const row = f.store.getPrincipal(linked)!
+    expect(row).toMatchObject({ role: 'linked', status: 'active' })
+    f.store.revokePrincipal(row.id, row.version)
+    expect(inspectWithoutChanges(f, { ...ownerScope, principalId: 'lark/bot-1/tenant-a/ou_other' }))
+      .toEqual({ status: 'unavailable', reason: 'owner-unavailable' })
+  })
+
+  test.each([
+    ['conversation', { conversation: { ...conversation, chat: 'other' } }],
+    ['workspace', { workspace: '/work/other' }],
+    ['preset', { agentPreset: 'other' }],
+    ['policy', { policyRef: 'other' }],
+    ['generation', { minimumGeneration: 2 }],
+  ] as const)('keeps active owner route %s drift unavailable', async (_label, change) => {
+    const configured = { ...authority, ...change }
+    const f = await fixture([configured])
+    pairAndBind(f)
+    expect(inspectWithoutChanges(f, { ...ownerScope,
+      workspace: configured.workspace, agentPreset: configured.agentPreset }))
+      .toEqual({ status: 'unavailable', reason: 'route-unavailable' })
+  })
+
+  test('follows ordinary /new binding replacement without revoking the durable owner', async () => {
+    const f = await fixture()
+    const first = pairAndBind(f)
+    const owner = f.store.getPrincipal(principal)!
+    const second = f.store.rotateBinding({ bindingId: first.id, expectedVersion: first.version,
+      sessionId: 'state-inspection-new-session' })
+    expect(f.store.getBinding(first.id)).toMatchObject({ status: 'revoked' })
+    expect(inspectWithoutChanges(f)).toEqual({ status: 'active', receipt: {
+      ...f.service.validateOwnerRoute(ownerScope), principalRecordId: owner.id,
+      principalVersion: owner.version, generation: second.generation, bindingVersion: second.version,
+    } })
+  })
+
+  test.each(['principal', 'binding'] as const)('keeps a transient %s read failure unavailable without exposing its error', async stage => {
+    const f = await fixture()
+    pairAndBind(f)
+    const read = stage === 'principal' ? 'getPrincipal' : 'getActiveBinding'
+    vi.spyOn(f.store, read).mockImplementationOnce(() => {
+      throw new Error('SQLITE_BUSY private path /secret/owner.sqlite and private principal')
+    })
+    expect(inspectWithoutChanges(f)).toEqual({ status: 'unavailable', reason: 'inspection-unavailable' })
+    expect(inspectWithoutChanges(f)).toEqual({ status: 'active', receipt: f.service.validateOwnerRoute(ownerScope) })
+  })
+
+  test('keeps a closed database unavailable without interpreting the missing binding as revocation', async () => {
+    const f = await fixture()
+    pairAndBind(f)
+    f.store.close()
+    expect(inspectWithoutChanges(f)).toEqual({ status: 'unavailable', reason: 'inspection-unavailable' })
+  })
+
+  test('observes explicit A to B to A handoff as a new owner version while retaining all history', async () => {
+    const f = await fixture()
+    pairAndBind(f)
+    const ownerA = f.store.getPrincipal(principal)!
+    const principalB = { ...principal, user: 'ou_other' }
+    f.store.handoffOwner(principalB)
+    const revoked = inspectWithoutChanges(f)
+    expect(revoked).toEqual({ status: 'revoked', authorityId: authority.id,
+      authorityHash: ownerRouteAuthorityHash(authority), principalId: ownerScope.principalId,
+      principalRecordId: ownerA.id, principalVersion: ownerA.version + 1 })
+    const returned = f.store.handoffOwner(principal)
+    expect(returned).toMatchObject({ id: ownerA.id, status: 'active', version: ownerA.version + 2 })
+    expect(inspectWithoutChanges(f)).toEqual({ status: 'unavailable', reason: 'route-unavailable' })
+    const binding = f.store.createBinding({ conversation, principal, workspace: authority.workspace,
+      agentPreset: authority.agentPreset, policyRef: authority.policyRef, sessionId: 'state-inspection-returned-A' })
+    expect(inspectWithoutChanges(f)).toEqual({ status: 'active', receipt: {
+      ...f.service.validateOwnerRoute(ownerScope), principalRecordId: ownerA.id,
+      principalVersion: returned.version, generation: binding.generation,
+    } })
+    expect(f.store.getPrincipal(principalB)).toMatchObject({ role: 'owner', status: 'revoked' })
+    await dispose(f)
+    const restarted = await mount(f.root)
+    expect(inspectWithoutChanges(restarted)).toEqual({ status: 'active', receipt: restarted.service.validateOwnerRoute(ownerScope) })
+  })
+})
 
 describe('stable owner route authority', () => {
   test('inherits the exact owner conversation model selection, including after restart', async () => {

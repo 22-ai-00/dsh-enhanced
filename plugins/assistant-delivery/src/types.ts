@@ -153,6 +153,13 @@ export interface OwnerRouteValidationReceipt {
   generation: number
 }
 
+/** Content-free Host observation; only an exact durable owner row proves revocation. */
+export type OwnerRouteStateInspection =
+  | { status: 'active'; receipt: Readonly<OwnerRouteValidationReceipt> }
+  | { status: 'revoked'; authorityId: string; authorityHash: string; principalId: string;
+    principalRecordId: string; principalVersion: number }
+  | { status: 'unavailable'; reason: string }
+
 /** A provider/model route without persistence metadata. */
 export interface ModelRouteRef {
   provider: string

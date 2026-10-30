@@ -199,6 +199,22 @@ describe('supervised lifecycle v3 invariants', () => {
     })).toBe(false)
   })
 
+  test('accepts only reviewed Automations schema 15 and 16 compact proofs across all lifecycle phases', () => {
+    const locations = ['source', 'previewAcceptance', 'postSwapAcceptance'] as const
+    for (const schemaVersion of [15, 16]) {
+      const accepted = structuredClone(supervisedManifestFixture('post-swap-accepted'))
+      for (const location of locations) accepted[location].automationsProof = {
+        ...accepted[location].automationsProof, schemaVersion,
+      }
+      expect(lifecycleProfileTest.validSupervisedLifecycle(accepted), `reviewed schema ${schemaVersion}`).toBe(true)
+    }
+    for (const schemaVersion of [14, 17, 0, -1, 16.5, '16', null]) for (const location of locations) {
+      const rejected = structuredClone(supervisedManifestFixture('post-swap-accepted'))
+      rejected[location].automationsProof = { ...rejected[location].automationsProof, schemaVersion } as never
+      expect(lifecycleProfileTest.validSupervisedLifecycle(rejected), `${location} schema ${schemaVersion}`).toBe(false)
+    }
+  })
+
   test('accepts reviewed Delivery schema 27 compact proofs and rejects schema 28', () => {
     const accepted = structuredClone(supervisedManifestFixture('post-swap-accepted'))
     for (const proof of [accepted.source.deliveryProof, accepted.previewAcceptance.deliveryProof,
@@ -946,7 +962,7 @@ async function testSupervisedOperator(action, nonce, direct, context) {
     ownerBindingDigest: ownerDigest,
     delivery: { protocol: 'assistant-delivery/active-lark-owner-bindings-snapshot/v1', schemaVersion: ${options.deliverySnapshotSchema ?? 24}, database,
       snapshotDigest: digest, storageDigest: digest, bindings: [{ id: 'binding-1' }] },
-    recovery, automations: { protocol: 'assistant-automations-operator-snapshot/v1', schemaVersion: 15, database,
+    recovery, automations: { protocol: 'assistant-automations-operator-snapshot/v1', schemaVersion: 16, database,
       snapshotDigest: digest, inventoryDigest: digest, storageDigest: digest, inFlightCount: raw ? 1 : 0,
       records: [{ id: 'owner:user-job', owner: 'owner', definitionHash: unmanagedDefinition, status: 'paused',
         createdAt: 1, updatedAt: 1, version: 1, runningTaskCount: 0 }], sidecars: { wal: null, shm: null } },
@@ -2329,9 +2345,78 @@ function startServiceLifecycle(
   child.stderr.on('data', chunk => { stderr += String(chunk) })
   return {
     child,
+    output: () => ({ stdout, stderr, pid: child.pid, status: child.exitCode, signal: child.signalCode }),
+    exited: new Promise<void>(resolveExit => { child.once('exit', () => resolveExit()); child.once('error', () => resolveExit()) }),
     done: new Promise<{ status: number | null; stdout: string; stderr: string }>(resolveDone => {
       child.once('close', status => resolveDone({ status, stdout, stderr }))
     }),
+  }
+}
+
+// Only the two long-lived guardian cases below need observation before exit.
+async function lifecycleResult(lifecycle: Pick<ReturnType<typeof startServiceLifecycle>, 'done' | 'output'>, phase: string, timeoutMs: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([lifecycle.done, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${phase} exceeded its remaining budget: ${JSON.stringify(lifecycle.output())}`)), Math.max(1, timeoutMs))
+    })])
+  } finally { if (timer !== undefined) clearTimeout(timer) }
+}
+
+async function withGuardianFixtureCleanup(
+  f: Awaited<ReturnType<typeof lifecycleFixture>>,
+  lifecycles: ReturnType<typeof startServiceLifecycle>[], check: () => Promise<void>,
+) {
+  let failure: unknown
+  try { await check() } catch (error) { failure = error }
+  try {
+    // Stop the parent first: it must not create another detached guardian while
+    // cleanup reads registration metadata. Its exit is distinct from pipe close.
+    for (const { child } of lifecycles) if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+      try { process.kill(-child.pid, 'SIGKILL') } catch (error: any) { if (error.code !== 'ESRCH') throw error }
+    }
+    await lifecycleResult({ done: Promise.all(lifecycles.map(item => item.exited)).then(() => ({ status: 0, stdout: '', stderr: '' })),
+      output: () => ({ stdout: '', stderr: '', pid: undefined, status: null, signal: null }) }, 'parent cleanup', 1000)
+    const source = await readFile(join(f.fixtureInstallDirectory, 'lifecycle-profile.mjs'), 'utf8')
+    const begin = source.indexOf('const source = String.raw`', source.indexOf('async function withCrashStopGuardian('))
+    const end = source.indexOf('`\n  const guardian = spawn(', begin)
+    if (begin < 0 || end < 0) throw new Error('fixture guardian source is unavailable')
+    const guardianSource = source.slice(begin + 'const source = String.raw`'.length, end)
+    const identity = async (pid: string) => {
+      try {
+        if ((await stat(`/proc/${pid}`)).uid !== process.getuid?.()) return undefined
+        const args = (await readFile(`/proc/${pid}/cmdline`, 'utf8')).split('\0')
+        if (args[0] !== process.execPath || args[1] !== '-e' || args[2] !== guardianSource
+          || args[3] !== join(f.fakeBin, 'systemctl') || args[6] !== f.dshHome) return undefined
+        const raw = await readFile(`/proc/${pid}/stat`, 'utf8'), fields = raw.slice(raw.lastIndexOf(') ') + 2).split(' ')
+        return Number(fields[2]) === Number(pid) ? fields[19] : undefined
+      } catch (error: any) { if (['ENOENT', 'ESRCH', 'EACCES'].includes(error.code)) return undefined; throw error }
+    }
+    let closed = false
+    void Promise.all(lifecycles.map(item => item.done)).then(() => { closed = true })
+    const deadline = Date.now() + 2000
+    while (!closed && Date.now() < deadline) {
+      for (const pid of (await readdir('/proc')).filter(name => /^\d+$/u.test(name))) {
+        const ticks = await identity(pid)
+        if (ticks !== undefined && await identity(pid) === ticks) {
+          try { process.kill(-Number(pid), 'SIGKILL') } catch (error: any) { if (error.code !== 'ESRCH') throw error }
+        }
+      }
+      // A pre-registration child still holds stderr. Re-scan until it has exec'd
+      // and is identifiable, and require pipe close before removing this fixture.
+      if (!closed) await new Promise(resolveDelay => setTimeout(resolveDelay, 25))
+    }
+    if (!closed) throw new Error(`fixture guardian pipes remain open: ${f.root}`)
+  } catch (error) {
+    const index = temporaryRoots.indexOf(f.root)
+    if (index >= 0) temporaryRoots.splice(index, 1) // Preserve unproven cleanup for diagnosis.
+    failure = new AggregateError(failure === undefined ? [error] : [failure, error], 'fixture cleanup failed')
+  }
+  if (failure !== undefined) {
+    const state = await readFile(f.systemdState, 'utf8').catch(error => String(error))
+    const log = await readFile(f.systemdLog, 'utf8').catch(error => String(error))
+    throw new Error(`${String(failure)}\n${JSON.stringify({ root: f.root, output: lifecycles.map(item => item.output()),
+      state, systemdLogTail: log.slice(-8192) })}`, { cause: failure })
   }
 }
 
@@ -6429,69 +6514,96 @@ describe('one-click installers', () => {
       ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
       { guardianDisconnectAfterStart: true, systemdDynamicProfile: 'conflict', systemdDynamicReportedDshHome: '__other__' },
     )
-    try {
-      const deadline = Date.now() + 4_000
+    const lifecycles = [lifecycle]
+    await withGuardianFixtureCleanup(f, lifecycles, async () => {
+      // Like the adjacent persistent-owner test, allow startup plus two real
+      // censuses. Never interpret an unstarted fixture as an ownership result.
+      const deadline = Date.now() + 12_000
+      let observed = false
       while (Date.now() < deadline) {
         const commands = await readLifecycleSystemdLog(f.systemdLog)
         const ownershipReads = commands.filter(command => command[1] === 'show'
           && command[2] === 'dsh-profile-conflict.service'
           && command.includes('--property=Environment') && command.includes('--property=WorkingDirectory')).length
-        if (ownershipReads >= 2) break
+        const state = await readLifecycleSystemdState(f.systemdState)
+        if (state.units['dsh-profile-conflict.service'] !== undefined && ownershipReads >= 2) { observed = true; break }
+        if (lifecycle.child.exitCode !== null || lifecycle.child.signalCode !== null) {
+          throw new Error(`lifecycle exited before two ownership observations: ${JSON.stringify(lifecycle.output())}`)
+        }
         await new Promise(resolveDelay => setTimeout(resolveDelay, 25))
       }
+      if (!observed) throw new Error(`dynamic conflict unit did not reach two ownership observations: ${JSON.stringify(lifecycle.output())}`)
       const commands = await readLifecycleSystemdLog(f.systemdLog)
       expect(commands.some(command => ['stop', 'disable', 'mask'].includes(command[1])
         && command.includes('dsh-profile-conflict.service'))).toBe(false)
       expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-conflict.service'])
         .toMatchObject({ activeState: 'active', unitFileState: 'enabled' })
       expect(lifecycle.child.exitCode).toBeNull()
-      const contender = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+      const pending = startServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+      lifecycles.push(pending)
+      const contender = await lifecycleResult(pending, 'competing lifecycle', 3000)
       expect(contender.status).not.toBe(0)
       expect(contender.stderr).toMatch(/busy|lock|正在|并发|占用/iu)
-    } finally {
-      const guardianPid = Number(await readFile(join(f.root, 'guardian.pid'), 'utf8').catch(() => '0'))
-      if (Number.isSafeInteger(guardianPid) && guardianPid > 1) try { process.kill(-guardianPid, 'SIGKILL') } catch {}
-      if (lifecycle.child.pid !== undefined && lifecycle.child.exitCode === null) try { process.kill(-lifecycle.child.pid, 'SIGKILL') } catch {}
-      await lifecycle.done
-    }
-  }, 15_000)
+    })
+    // 12s observation + 3s cleanup + fixture/contender, matching the neighboring
+    // long-lived guardian case rather than changing the global test timeout.
+  }, 25_000)
 
   test('dynamic same-home containment persists a bound mask ledger and completes recovery on retry', async () => {
+    const started = Date.now(), durations: Record<string, number> = {}
     const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
-    const first = runServiceLifecycle(
-      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
-      { systemdDynamicProfile: 'late' },
-    )
+    durations.fixture = Date.now() - started
+    const lifecycles: ReturnType<typeof startServiceLifecycle>[] = []
+    let phase = 'first containment'
+    await withGuardianFixtureCleanup(f, lifecycles, async () => {
+      const firstStarted = Date.now()
+      const pendingFirst = startServiceLifecycle(
+        ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+        { systemdDynamicProfile: 'late' },
+      )
 
-    expect(first.status).not.toBe(0)
-    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
-    const firstManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
-    const containment = firstManifest.containmentMasks.find((mask: { unit: string }) => (
-      mask.unit === 'dsh-profile-late.service'
-    ))
-    expect(containment).toMatchObject({ target: '/dev/null' })
-    const installed = await lstat(containment.path)
-    expect({ dev: String(installed.dev), ino: String(installed.ino), uid: installed.uid, mode: installed.mode })
-      .toEqual(containment.identity)
+      lifecycles.push(pendingFirst)
+      // Keep the original 15s test budget; reserve 3s for exact fixture cleanup.
+      const first = await lifecycleResult(pendingFirst, phase, started + 12_000 - Date.now())
+      durations.first = Date.now() - firstStarted
+      expect(first.status).not.toBe(0)
+      const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+      const firstManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+      const containment = firstManifest.containmentMasks.find((mask: { unit: string }) => (
+        mask.unit === 'dsh-profile-late.service'
+      ))
+      expect(containment).toMatchObject({ target: '/dev/null' })
+      const installed = await lstat(containment.path)
+      expect({ dev: String(installed.dev), ino: String(installed.ino), uid: installed.uid, mode: installed.mode })
+        .toEqual(containment.identity)
 
-    const second = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+      phase = 'recovery'
+      const recoveryStarted = Date.now()
+      const pendingSecond = startServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+      lifecycles.push(pendingSecond)
+      const second = await lifecycleResult(pendingSecond, phase, started + 12_000 - Date.now())
+      durations.recovery = Date.now() - recoveryStarted
 
-    expect(second.status, second.stderr).toBe(0)
-    await expect(stat(transaction)).rejects.toMatchObject({ code: 'ENOENT' })
-    const state = await readLifecycleSystemdState(f.systemdState)
-    expect(state.units['dsh-profile-late.service']).toMatchObject({
-      activeState: 'inactive', starts: 1, unitFileState: 'disabled',
-      boundMaskPresentWhenRuntimeUnmasked: true, boundMaskPersistedWhenRuntimeUnmasked: true,
+      expect(second.status, second.stderr).toBe(0)
+      await expect(stat(transaction)).rejects.toMatchObject({ code: 'ENOENT' })
+      const state = await readLifecycleSystemdState(f.systemdState)
+      expect(state.units['dsh-profile-late.service']).toMatchObject({
+        activeState: 'inactive', starts: 1, unitFileState: 'disabled',
+        boundMaskPresentWhenRuntimeUnmasked: true, boundMaskPersistedWhenRuntimeUnmasked: true,
+      })
+      const recoveryCommands = (await readLifecycleSystemdLog(f.systemdLog)).slice(
+        (await readLifecycleSystemdLog(f.systemdLog)).findIndex(command => command[1] === 'unmask'
+          && command[2] === '--runtime' && command.includes('dsh-profile-late.service')),
+      )
+      expect(recoveryCommands[0]).toEqual(expect.arrayContaining([
+        '--user', 'unmask', '--runtime', 'dsh-profile-late.service',
+      ]))
+      expect(recoveryCommands.some(command => command[1] === 'start'
+        && command.includes('dsh-profile-late.service'))).toBe(false)
+      console.info('lifecycle phase durations', JSON.stringify({ durations, firstStatus: first.status, recoveryStatus: second.status }))
+    }).catch(error => {
+      throw new Error(`lifecycle phase=${phase} durations=${JSON.stringify(durations)} elapsedMs=${Date.now() - started}\n${String(error)}`, { cause: error })
     })
-    const recoveryCommands = (await readLifecycleSystemdLog(f.systemdLog)).slice(
-      (await readLifecycleSystemdLog(f.systemdLog)).findIndex(command => command[1] === 'unmask'
-        && command[2] === '--runtime' && command.includes('dsh-profile-late.service')),
-    )
-    expect(recoveryCommands[0]).toEqual(expect.arrayContaining([
-      '--user', 'unmask', '--runtime', 'dsh-profile-late.service',
-    ]))
-    expect(recoveryCommands.some(command => command[1] === 'start'
-      && command.includes('dsh-profile-late.service'))).toBe(false)
   }, 15_000)
 
   test('persisted containment ownership requires coherent HOME and WorkingDirectory evidence', () => {
