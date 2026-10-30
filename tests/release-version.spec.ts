@@ -1155,7 +1155,7 @@ describe('release version workflow', () => {
     )
     expect(manifest.scripts.test).toBe('pnpm run build && pnpm run test:built')
     expect(manifest.scripts['test:root']).toBe('vitest run --testTimeout=15000 --dir tests')
-    expect(manifest.scripts['test:built']).toBe('pnpm run test:root && pnpm --recursive --if-present run test --testTimeout=15000')
+    expect(manifest.scripts['test:built']).toBe('pnpm run test:root && pnpm --recursive --no-sort --if-present run test --testTimeout=15000')
     expect(manifest.scripts.typecheck).toMatch(/^pnpm run build &&/)
     expect(manifest.scripts['typecheck:built']).toBe('pnpm --recursive --if-present run typecheck')
     expect(manifest.scripts.check).toBe('pnpm run validate && pnpm run lint && pnpm run build && pnpm run typecheck:built && pnpm run test:built && pnpm run pack:check')
@@ -1182,7 +1182,7 @@ describe('release version workflow', () => {
     }
     expect(linuxPackages).toContain('run: pnpm run validate && pnpm run lint')
     expect(linuxPackages).toContain('run: pnpm run build && pnpm run typecheck:built')
-    expect(linuxPackages).toContain('run: pnpm --recursive --if-present run test --testTimeout=15000')
+    expect(linuxPackages).toContain('run: pnpm --recursive --no-sort --if-present run test --testTimeout=15000')
     expect(linuxPackages).toContain('run: pnpm run pack:check')
     expect(linuxPackages).not.toContain('run: pnpm run test:root')
     expect(linuxRoot).toContain('run: pnpm run test:root')

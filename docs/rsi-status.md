@@ -6,7 +6,7 @@
 
 - 去除 Linux 安装与自迭代的 Docker 依赖，保留普通隔离执行、完整源码修复、工具创建/修订、独立验收、有限采用、发布与回退，不能关闭功能或改用受限创建路径。范围见[原生运行时](dockerless-runtime.md)。
 - 原生执行、全仓 prepare、父/候选独立观察及创建 v3 已接入有限工具采用。原账本和回执保留完整证书绑定、已用额度、缓存及 unknown；首次采用复核原构建，后续调用及冷恢复复核保留观察器和当前 owner/来源。retained v2 不依赖过期构建授权、旧基底或编译器，不退款或重派。
-- Linux 修订 v2 与配对回归 v2 已接通同一原生观察器：修订重开双 UID 全仓构建、复核完整构建证据与保留准备回执后签 revision-verification/v2（execution 绑定边界与四项摘要）；回归强制 creation v3 父证书 + revision v2 候选证书同族（边界/观察器运行时/构建基底/准备回执全等），复用部署共享观察器只读重开 `<root>/behavior.json` 锚定后签 revision-regression/v2；准入前漂移为 stale-source 不派不扣，准入后 unknown 持久不重放。linux-native 同一 schema 3 仓库边界现已接通修改计划的独立源码审批、发布、发布执行、有限采用及采用后物理回退，不再要求任何 Docker 命令证据；schema 2 macOS 单进程证据永不支撑全仓修改，历史 schema 1 Docker 证据按原版本读取、不改写不重跑。修订的外层等待预算和持久证书来源校验已补齐。下一验收先为完整检查留出可靠的构建时间余量，再接无 Docker 安装器与 docker→linux-native 保权迁移、进程内热加载。生产实例尚未经无 Docker 安装迁移；当前实机仅证明 Linux x64/cgroup v1，cgroup v2 明确拒绝，arm64 未实测。首次采用约 38 秒、冷恢复约 13 秒、简单工具调用约 25 秒，完整运行时重复校验仍有明显开销，不能称为完全无感。
+- Linux 修订 v2 与配对回归 v2 已接通同一原生观察器：修订重开双 UID 全仓构建、复核完整构建证据与保留准备回执后签 revision-verification/v2（execution 绑定边界与四项摘要）；回归强制 creation v3 父证书 + revision v2 候选证书同族（边界/观察器运行时/构建基底/准备回执全等），复用部署共享观察器只读重开 `<root>/behavior.json` 锚定后签 revision-regression/v2；准入前漂移为 stale-source 不派不扣，准入后 unknown 持久不重放。linux-native 同一 schema 3 仓库边界现已接通修改计划的独立源码审批、发布、发布执行、有限采用及采用后物理回退，不再要求任何 Docker 命令证据；schema 2 macOS 单进程证据永不支撑全仓修改，历史 schema 1 Docker 证据按原版本读取、不改写不重跑。修订的外层等待预算和持久证书来源校验已补齐。下一验收接无 Docker 安装器与 docker→linux-native 保权迁移、进程内热加载，并验证完整原生准备在原授权时限内完成。生产实例尚未经无 Docker 安装迁移；当前实机仅证明 Linux x64/cgroup v1，cgroup v2 明确拒绝，arm64 未实测。首次采用约 38 秒、冷恢复约 13 秒、简单工具调用约 25 秒，完整运行时重复校验仍有明显开销，不能称为完全无感。
 
 ## 已有部署与未完成边界
 
@@ -19,7 +19,7 @@
 
 ## 最新验证
 
-- 根 `VITEST_MAX_WORKERS=4 pnpm_config_workspace_concurrency=4 pnpm check` 退出 0：9696 项测试通过、298 项条件跳过、0 失败，清单/lint/typecheck/构建及 37 包 dry-run pack 全通过。检查期间 1801 个文件摘要未变；日志 SHA-256 `cbfe47a90c66f69ab02fa7f26276fa08cad18de6890a34a1f64793e1d93292fb`。原始日志及前后快照位于忽略目录 `docs/evidence/linux-revision-integration/attempt-2/`。
-- 本轮覆盖 Linux 修订串行审核的外层时限、原期限与取消、Docker/macOS 原定义、真签名但错误构建/观察器来源、持久记录篡改及过期 GC 后的历史读取。修订服务整合 103 项、SourceJobs 65 项均通过；隔离断管和 Broker 授权超时测试保留真实 I/O，修正内核错误码/握手竞态，未改生产 Broker 客户端。整合仍使用受控来源和隔离端口，不能替代实际 Linux 修订全链。
-- 全检耗时 1792.27 秒，接近单轮原生构建的 1800 秒上限；完整 prepare 另有安装与产物步骤，不能据此保证原授权内稳定完成。下一步保留全部验收项，减少检查的串行等待和重复开销，不延长已用授权或重派旧 unknown。
+- 无既有 `lib/node_modules` 的源码副本完成 `pnpm install --frozen-lockfile` 后，根 `VITEST_MAX_WORKERS=4 pnpm_config_workspace_concurrency=4 pnpm check` 退出 0：9696 项测试通过、298 项条件跳过、0 失败，清单/lint/typecheck/构建及 37 包 dry-run pack 全通过。检查期间两工作区的 1802 个源码文件摘要均未变；日志 SHA-256 `b3b69a2dc67cd141602bcf7c8219de9823d677c572d1ed0db65cbffbc8dd5267`。原始日志及前后快照位于忽略目录 `docs/evidence/check-scheduling/clean-attempt-1/`。
+- 包测试在全部构建完成后取消拓扑等待，保持原并发、超时与全部验收项；构建仍串行。Verifier 在私有源码副本中真实打包，三包从空 `lib` 经原 `prepack` 生成产物，原工作区产物的内容、inode 和修改时间保持不变；冷 profile 的依赖缺失、导出及运行时资产验证仍通过。
+- 本次宿主机全检耗时 1636.00 秒（27 分 16 秒），较前次 1792.27 秒减少 156.28 秒（8.72%）。距 1800 秒上限约有 164 秒余量；完整原生 prepare 另有安装与产物步骤及隔离环境开销，尚不能保证原授权内稳定完成，不延长已用授权或重派旧 unknown。
 - 历史 Linux 创建/有限采用已在真实 Delivery、Session、AgentLoop/ToolRuntime 路径验证，但使用脚本供应商、内存渠道和受控 Growth 来源。新修订及发布/物理回退全链、真实 provider/Lark 复杂任务和长期学习收益尚未验收。旧工作区两次修订试验在 prepare 阶段终止，不能用于最新源码验收，也不自动重跑。

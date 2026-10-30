@@ -237,6 +237,8 @@ Web client 与工作区接线：本包构建期复用 `dsh-api-session-controlle
 
 原生 Memory benchmark 和 supervised 配置的可选开发依赖扩大了 workspace 类型构建环。根 `build:bootstrap` 先生成共享包、Policy、Delivery/Evaluation、Isolation、Verifier 和 Automations，再按依赖顺序预建 Preference Learning、Health、Evolution、Growth Experiments、Heartbeat、Recovery 和 Goals，随后以 `--workspace-concurrency=1` 递归构建。循环开发依赖下的并发 emit 会让其他包读取正在重写的声明；串行递归阶段避免这类读写重叠，bootstrap 则提供空 `lib` 环境下所需的声明。这里只调整仓库构建顺序，不改变发布包或运行时服务激活。清洁构建验证必须使用不含既有 `lib` 和 `node_modules` 的源码副本。
 
+全部构建和类型检查完成后，根 `test:built` 与 CI 的包测试使用 `--no-sort`，让已有空闲测试槽直接运行下一个包，不再等待整组依赖包测试结束。pnpm 的工作区并发上限、Vitest worker 上限、测试超时和验收范围均保持原值；构建仍按上述顺序串行执行。测试只能读取共享构建产物：Verifier 的真实打包测试在私有临时源码副本中执行 `prepack`，避免重写其他测试正在读取的工作区 `lib`。新增会生成文件的测试也必须隔离输出，不能依赖包测试的先后顺序。
+
 PersonalMemory 工具证据恢复使用 `@deepseek-ai/dsh-fs`、`dsh-fs-local`、`dsh-tool-fs`、`dsh-session-persistence-jsonl@0.1.2-rc.1` 与既有 AgentLoop/ToolRuntime/pruner 基线。FS 是可选 Host peer，Local/Tool/JSONL 仅作为根集成测试依赖，不随 Memory 自动启用。正常 append `tool/result` 的 `sourceEventSeqs` 指向对应 `tool/call`；指向旧 result 的复制与 replacement 不视为原始观察。Cordis 4.0.2 每次服务查询可返回新 trace proxy，代际检查使用公开 `Service.tracker` 的 per-instance 元数据。升级这些契约须重跑实际 JSONL 关闭/重建与文件授权回归。Memory schema 6 从 v5 增加独立 metadata 索引，升级前排空旧 writer。
 
 
