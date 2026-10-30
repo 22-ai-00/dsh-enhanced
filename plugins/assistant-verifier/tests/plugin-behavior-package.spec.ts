@@ -5,8 +5,14 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { expect, test } from 'vitest'
+import { copyPackWorkspace, snapshotPackageLibraries } from './helpers/pack-workspace.js'
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+const packedPackages = [
+  ['packages', 'task-acceptance-contract'],
+  ['plugins', 'assistant-isolation'],
+  ['plugins', 'assistant-verifier'],
+] as const
 
 function command(file: string, args: string[], cwd = repository): string {
   const result = spawnSync(file, args, { cwd, encoding: 'utf8', timeout: 60_000 })
@@ -17,23 +23,28 @@ function command(file: string, args: string[], cwd = repository): string {
 test('a packed Verifier resolves its Isolation runner in a cold profile without mounting the Isolation bundle', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-verifier-pack-'))
   try {
+    const sharedLibraries = await snapshotPackageLibraries(repository, packedPackages)
+    const workspace = join(root, 'workspace')
+    await copyPackWorkspace(repository, workspace, packedPackages)
+    expect(await realpath(join(workspace, 'plugins', 'assistant-verifier', 'node_modules', '@dsh-enhanced', 'assistant-isolation')))
+      .toBe(await realpath(join(workspace, 'plugins', 'assistant-isolation')))
     const profile = join(root, 'profile')
     const scope = join(profile, 'node_modules', '@dsh-enhanced')
     await mkdir(scope, { recursive: true })
-    for (const [kind, slug] of [
-      ['packages', 'task-acceptance-contract'],
-      ['plugins', 'assistant-verifier'],
-      ['plugins', 'assistant-isolation'],
-    ] as const) {
+    for (const [kind, slug] of packedPackages) {
       const artifacts = join(root, `pack-${slug}`)
       await mkdir(artifacts)
-      command('pnpm', ['--dir', join(repository, kind, slug), 'pack', '--pack-destination', artifacts])
+      const packageRoot = join(workspace, kind, slug)
+      expect(existsSync(join(packageRoot, 'lib'))).toBe(false)
+      command('pnpm', ['--dir', packageRoot, 'pack', '--pack-destination', artifacts], workspace)
+      expect(existsSync(join(packageRoot, 'lib', 'index.js'))).toBe(true)
       const packed = (await readdir(artifacts)).filter(name => name.endsWith('.tgz'))
       expect(packed).toHaveLength(1)
       const destination = join(scope, slug)
       await mkdir(destination)
       command('tar', ['-xzf', join(artifacts, packed[0]!), '-C', destination, '--strip-components=1'])
     }
+    expect(await snapshotPackageLibraries(repository, packedPackages)).toEqual(sharedLibraries)
     const manifest = JSON.parse(await readFile(join(scope, 'assistant-verifier', 'package.json'), 'utf8')) as {
       dependencies: Record<string, string>; dsh: { bundle: { patch: string } };
       exports: Record<string, { default: string }>

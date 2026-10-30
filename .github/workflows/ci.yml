@@ -107,7 +107,7 @@ jobs:
         run: pnpm run build && pnpm run typecheck:built
 
       - name: Verify package tests
-        run: pnpm --recursive --if-present run test --testTimeout=15000
+        run: pnpm --recursive --no-sort --if-present run test --testTimeout=15000
 
       - name: Verify package packs
         run: pnpm run pack:check
