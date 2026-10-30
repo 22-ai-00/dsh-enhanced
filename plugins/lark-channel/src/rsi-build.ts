@@ -181,7 +181,7 @@ function dockerArgs(args: string[], scratch: string, socket?: string): string[] 
 
 // Shared by the release-toolchain preparer; these helpers never change a profile.
 export const rsiBuildResources = { directory, readStable, writeExclusive, syncDirectory, command, isolatedEnvironment,
-  hostPlatform, localSocket, dockerArgs }
+  hostPlatform, localSocket, dockerArgs, runtime, imageExists }
 
 async function dockerExecutable(requested?: string): Promise<{ path: string; sha256: string }> {
   let path = requested
@@ -218,8 +218,13 @@ async function runtime(dockerPath: string, scratch: string, signal: AbortSignal,
   const arch = platform.endsWith('/arm64') ? 'arm64' : 'amd64'
   if (output !== `29.4.1/linux/${arch}`) throw new RsiBuildUnavailableError(`Docker Server 29.4.1/linux/${arch} is required`)
   if (socket === undefined) return undefined
-  const daemonId = await command(dockerPath, dockerArgs(['info', '--format', '{{.ID}}'], scratch, socket),
-    isolatedEnvironment(scratch), signal, 10_000, 4096)
+  let daemonId: string
+  try { daemonId = await command(dockerPath, dockerArgs(['info', '--format', '{{.ID}}'], scratch, socket),
+    isolatedEnvironment(scratch), signal, 10_000, 4096) }
+  catch {
+    signal.throwIfAborted()
+    throw new RsiBuildUnavailableError('local Docker daemon is unavailable')
+  }
   if (!/^[A-Za-z0-9][A-Za-z0-9:._-]{7,127}$/u.test(daemonId)) fail('Docker daemon identity is invalid')
   return daemonId
 }
@@ -296,10 +301,17 @@ function buildConfig(dockerPath: string, image: string, seccompPath: string, soc
     : { ...common, temporaryMiB: 4_096, profile: 'portable-repository', repositorySandbox: { seccompPath }, socketPath: socket, daemonId: daemonId! }
 }
 
-async function imageExists(dockerPath: string, image: string, scratch: string, signal: AbortSignal, platform: string, socket?: string): Promise<void> {
+async function imageExists(dockerPath: string, image: string, scratch: string, signal: AbortSignal, platform: string,
+  socket?: string, unavailable = false): Promise<void> {
   const arch = platform.endsWith('/arm64') ? 'arm64' : 'amd64'
-  const actual = await command(dockerPath, dockerArgs(['image', 'inspect', '--format', '{{.Id}}/{{.Os}}/{{.Architecture}}', image], scratch, socket),
-    isolatedEnvironment(scratch), signal, 30_000, 4096)
+  let actual: string
+  try { actual = await command(dockerPath, dockerArgs(['image', 'inspect', '--format', '{{.Id}}/{{.Os}}/{{.Architecture}}', image], scratch, socket),
+    isolatedEnvironment(scratch), signal, 30_000, 4096) }
+  catch (error) {
+    signal.throwIfAborted()
+    if (unavailable) throw new RsiBuildUnavailableError('recorded Docker image is unavailable')
+    throw error
+  }
   if (actual !== `${image}/linux/${arch}`) fail('Docker image ID or platform differs from builder receipt')
 }
 
@@ -348,6 +360,34 @@ export async function readRsiBuildEnvironment(input: { dshHome: string; profile:
     sourceCommit: input.source.sourceCommit, dockerPath: docker.path, dockerSha256: docker.sha256,
     inputHashes: source.hashes, contextFiles: source.contextFiles, lockSha256: source.lockSha256,
     hostPlatform: platform, socket, daemonId: saved.daemonId }, undefined, signal)
+}
+
+/** Check the recorded environment using bounded Docker queries only. Missing
+ * images remain unavailable; this never prepares or repairs a build receipt. */
+export async function verifyRsiBuildEnvironmentReady(input: { dshHome: string; profile: string;
+  source: RsiSourceWorkspace; signal?: AbortSignal }): Promise<RsiBuildEnvironment> {
+  const signal = AbortSignal.any([input.signal ?? new AbortController().signal, AbortSignal.timeout(120_000)])
+  signal.throwIfAborted()
+  const recorded = await readRsiBuildEnvironment({ ...input, signal })
+  const parent = join(input.dshHome, 'rsi-builds')
+  signal.throwIfAborted()
+  const scratch = await mkdtemp(join(parent, `.${input.profile}-ready-`))
+  try {
+    await chmod(scratch, 0o700)
+    await mkdir(join(scratch, 'docker-config'), { mode: 0o700 })
+    const build = recorded.sourceBuild, platform = hostPlatform()
+    const daemonId = await runtime(build.dockerPath, scratch, signal, platform, build.socketPath)
+    if (daemonId !== build.daemonId) fail('Docker daemon differs from builder receipt')
+    await imageExists(build.dockerPath, build.image, scratch, signal, platform, build.socketPath, true)
+    if (await runtime(build.dockerPath, scratch, signal, platform, build.socketPath) !== daemonId) {
+      fail('Docker daemon changed during readiness check')
+    }
+    if (!isDeepStrictEqual(await readRsiBuildEnvironment({ ...input, signal }), recorded)) {
+      fail('recorded build changed during readiness check')
+    }
+    signal.throwIfAborted()
+    return recorded
+  } finally { await rm(scratch, { recursive: true, force: true }); await syncDirectory(parent) }
 }
 
 /** Caller holds the DSH_HOME lifecycle lock; no profile or service is changed here. */

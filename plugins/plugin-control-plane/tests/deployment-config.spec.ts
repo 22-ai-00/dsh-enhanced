@@ -2,10 +2,22 @@ import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, expect, test } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import { afterEach, expect, test, vi } from 'vitest'
 import { normalizeControlPlaneConfig } from '../src/index.ts'
+import { PluginControlPlaneService } from '../src/service.ts'
 import { validateSourceBuildConfig, type LinuxSourceBuildConfig } from '../src/source-build.ts'
 import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
+
+const runners = vi.hoisted(() => ({ construct: vi.fn(), close: vi.fn(async () => undefined) }))
+vi.mock('@dsh-enhanced/assistant-isolation', async original => ({
+  ...await original<typeof import('@dsh-enhanced/assistant-isolation')>(),
+  LinuxRepositoryRunner: class {
+    constructor(config: unknown) { runners.construct(config) }
+    close = runners.close
+    inspectQuiescence = async () => 'unknown' as const
+  },
+}))
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -139,4 +151,99 @@ test.skipIf(process.platform !== 'linux' || !process.getuid?.()).each([
   const config = dualLinuxConfig()
   change(config)
   expect(() => validateSourceBuildConfig(config)).toThrow('Linux source build configuration is invalid')
+})
+
+test.skipIf(process.platform !== 'linux')('Linux state seal validation is pure, bounded to an external canonical reference and optional for legacy configs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cp-linux-state-seal-config-')); roots.push(root)
+  const sourceBuild = { ...linuxSourceConfig(), stateRoot: join(root, 'runner'),
+    stateSeal: { path: join(root, 'seals', 'runner.json'), sha256: 'd'.repeat(64) } }
+  expect(() => validateSourceBuildConfig(sourceBuild)).not.toThrow()
+  const config = normalizeControlPlaneConfig({ catalogPath: join(root, 'catalog.json'), trustPath: join(root, 'trust.json'),
+    statePath: join(root, 'state'), sourceBuild, sourceJobs: { authorityId: 'source-grant', expiresAt: Date.now() + 60_000,
+      maxSubmissions: 2, repository: root, workspace: root, preset: 'primary', ownerRouteId: 'owner-route', principalId: 'owner',
+      budgetId: 'source-budget', budgetAmount: 1, allowedModes: ['modify'] } })
+  expect(config.sourceBuild).toEqual(sourceBuild)
+  expect(existsSync(sourceBuild.stateRoot)).toBe(false)
+  expect(existsSync(sourceBuild.stateSeal.path)).toBe(false)
+  expect(existsSync(join(root, 'state'))).toBe(false)
+  expect(() => validateSourceBuildConfig(linuxSourceConfig())).not.toThrow()
+})
+
+test.skipIf(process.platform !== 'linux').each([
+  undefined, null, [], false,
+  { path: 'relative/seal.json', sha256: 'a'.repeat(64) },
+  { path: '/approved/seals/../seal.json', sha256: 'a'.repeat(64) },
+  { path: '/approved/state', sha256: 'a'.repeat(64) },
+  { path: '/approved/state/seal.json', sha256: 'a'.repeat(64) },
+  { path: '/approved/seal\t.json', sha256: 'a'.repeat(64) },
+  { path: '/approved/seal\x7f.json', sha256: 'a'.repeat(64) },
+  { path: '/approved/seal\\name.json', sha256: 'a'.repeat(64) },
+  { path: '/', sha256: 'a'.repeat(64) },
+  { path: '/approved/seal.json', sha256: 'A'.repeat(64) },
+  { path: '/approved/seal.json', sha256: 'a'.repeat(63) },
+  { path: '/approved/seal.json', sha256: 'z'.repeat(64) },
+  { path: '/approved/seal.json', sha256: 'a'.repeat(64), extra: true },
+])('rejects a malformed Linux source state seal %#', stateSeal => {
+  expect(() => validateSourceBuildConfig({ ...linuxSourceConfig(), stateSeal } as never)).toThrow()
+})
+
+test.skipIf(process.platform !== 'linux')('rejects seal accessors and hidden or symbol fields without evaluating getters', () => {
+  for (const field of ['stateSeal', 'path', 'sha256']) {
+    const stateSeal = { path: '/approved/seal.json', sha256: 'a'.repeat(64) }
+    const config = { ...linuxSourceConfig(), stateSeal }, getter = vi.fn(() => { throw new Error('getter executed') })
+    Object.defineProperty(field === 'stateSeal' ? config : stateSeal, field, { enumerable: true, get: getter })
+    expect(() => validateSourceBuildConfig(config)).toThrow()
+    expect(getter).not.toHaveBeenCalled()
+  }
+  for (const extra of ['hidden', Symbol('authority')]) {
+    const stateSeal = { path: '/approved/seal.json', sha256: 'a'.repeat(64) }
+    Object.defineProperty(stateSeal, extra, { value: true, enumerable: false })
+    expect(() => validateSourceBuildConfig({ ...linuxSourceConfig(), stateSeal })).toThrow()
+  }
+  const stateSeal = Object.assign(Object.create({ inherited: true }) as object,
+    { path: '/approved/seal.json', sha256: 'a'.repeat(64) })
+  expect(() => validateSourceBuildConfig({ ...linuxSourceConfig(), stateSeal } as never)).toThrow()
+  const inherited = Object.assign(Object.create({ stateSeal: { path: '/approved/seal.json', sha256: 'a'.repeat(64) } }) as object,
+    linuxSourceConfig())
+  expect(() => validateSourceBuildConfig(inherited as never)).toThrow('state seal is invalid')
+})
+
+test('rejects state seals on Docker and macOS source configs', () => {
+  const docker = { dockerPath: '/usr/bin/docker', image: 'sha256:' + 'a'.repeat(64), timeoutMs: 60_000,
+    memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 }
+  const native = { backend: 'macos-seatbelt' as const, stateRoot: '/approved/mac-state', authorityDigest: 'a'.repeat(64),
+    expiresAt: Date.now() + 60_000, maxRuns: 1, maxTotalDurationMs: 60_000, timeoutMs: 1000, outputBytes: 4096,
+    runtime: { schemaVersion: 1 as const, platform: `darwin-${process.arch}` as 'darwin-x64' | 'darwin-arm64',
+      nodePath: '/approved/mac-runtime/bin/node', nodeSha256: 'a'.repeat(64), modulesPath: '/approved/mac-runtime/node_modules',
+      roots: [{ path: '/approved/mac-runtime', dev: 1, ino: 2, sha256: 'b'.repeat(64) }],
+      versions: { node: 'v22.23.2', typescript: '6', cordis: '4', tools: '1', systemPrompt: '1' } } }
+  for (const config of [docker, native]) {
+    expect(() => validateSourceBuildConfig(config)).not.toThrow()
+    expect(() => validateSourceBuildConfig({ ...config, stateSeal: { path: '/approved/seal.json', sha256: 'c'.repeat(64) } } as never))
+      .toThrow('state seal is invalid')
+  }
+})
+
+test.skipIf(process.platform !== 'linux').each([false, true])('passes the optional state seal unchanged to the service-owned Linux runner (%s)', async sealed => {
+  const root = await mkdtemp(join(tmpdir(), 'cp-linux-state-seal-service-')); roots.push(root)
+  const context = new Context(), callsBefore = runners.construct.mock.calls.length
+  context.provide('assistantAutomations' as never, { registerHostExecutor: () => () => undefined,
+    reconcileSystem: () => undefined, reconcileSystemExact: () => undefined, pauseSystemOwned: () => undefined,
+    inspectSystemOwnedActivation: () => undefined, inspectSystemOwned: () => undefined } as never)
+  context.provide('assistantDelivery' as never, { validateOwnerRoute: () => { throw new Error('no jobs dispatched') } } as never)
+  const sourceBuild = { ...linuxSourceConfig(), stateRoot: join(root, 'runner'),
+    ...(sealed ? { stateSeal: { path: join(root, 'seals', 'runner.json'), sha256: 'c'.repeat(64) } } : {}) }
+  try {
+    const service = new PluginControlPlaneService(context, { catalogPath: join(root, 'catalog.json'), trustPath: join(root, 'trust.json'),
+      statePath: join(root, 'state'), sourceBuild, sourceJobs: { authorityId: 'source-grant', expiresAt: Date.now() + 60_000,
+        maxSubmissions: 2, repository: root, workspace: root, preset: 'primary', ownerRouteId: 'owner-route', principalId: 'owner',
+        budgetId: 'source-budget', budgetAmount: 1, allowedModes: ['modify'] } })
+    await vi.waitFor(() => expect(service.canEnqueueSource()).toBe(true))
+    const received = runners.construct.mock.calls[callsBefore]?.[0] as Record<string, unknown>
+    expect(received.backend).toBe('linux-native')
+    if (sealed) expect(received.stateSeal).toEqual(sourceBuild.stateSeal)
+    else expect(received).not.toHaveProperty('stateSeal')
+    expect(existsSync(sourceBuild.stateRoot)).toBe(false)
+    if (sourceBuild.stateSeal) expect(existsSync(sourceBuild.stateSeal.path)).toBe(false)
+  } finally { await context.fiber.dispose() }
 })

@@ -10,7 +10,7 @@ import type { PluginCreationVerificationCertificate } from '@dsh-enhanced/assist
 import { verifyCreatedPluginWorkspace, type SourceCreationBinding } from './source-creation.js'
 import { checkedSourceSnapshot, runLocalBuffer, runLocalCommand } from './source-workspace.js'
 import type { DockerSourcePreparedEvidence, SourcePreparedEvidence } from './types.js'
-import type { LinuxRuntime, LinuxCgroupRoots, LinuxSystemSnapshot, LinuxUserNamespaceMapping, NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
+import type { LinuxRuntime, LinuxCgroupRoots, LinuxRunnerStateSeal, LinuxSystemSnapshot, LinuxUserNamespaceMapping, NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 
 export interface DockerSourceBuildConfig {
   /** Canonical owner-controlled docker client. */
@@ -65,6 +65,8 @@ export interface LinuxSourceBuildConfig extends Omit<NativeSourceBuildConfig, 'b
   /** Paired owner-approved repository identities; omitted for the legacy boundary. */
   userNamespace?: LinuxUserNamespaceMapping
   systemSnapshot?: LinuxSystemSnapshot
+  /** Owner-frozen runner state identity, kept outside the writable state tree. */
+  stateSeal?: LinuxRunnerStateSeal
 }
 
 export type SourceBuildConfig = DockerSourceBuildConfig | NativeSourceBuildConfig | LinuxSourceBuildConfig
@@ -124,6 +126,20 @@ function validLinuxRuntimeShape(value: unknown): value is LinuxRuntime {
 function identityFields(value: unknown, names: string): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
     && Object.keys(value).sort().join() === names
+}
+
+/** Pure shape validation: opening the seal and its bound ledger is owned by the
+ * Linux runner, including in independently copied authority programs. */
+function validLinuxStateSeal(value: unknown, stateRoot: string): value is LinuxRunnerStateSeal {
+  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype
+    || Reflect.ownKeys(value).length !== 2
+    || !Reflect.ownKeys(value).every(key => key === 'path' || key === 'sha256')
+    || !Object.values(Object.getOwnPropertyDescriptors(value)).every(field => field.enumerable && 'value' in field)) return false
+  const seal = value as Record<string, unknown>
+  return typeof seal.path === 'string' && isAbsolute(seal.path) && resolve(seal.path) === seal.path
+    && seal.path !== '/' && !/[\p{Cc}\\]/u.test(seal.path)
+    && seal.path !== stateRoot && !seal.path.startsWith(stateRoot + sep)
+    && typeof seal.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(seal.sha256)
 }
 
 /** Shape checks only: the runner verifies helpers, kernel mapping and snapshot
@@ -613,11 +629,16 @@ export function validateSourceBuildConfig(config: SourceBuildConfig): void {
   if (config === null || typeof config !== 'object' || Array.isArray(config)) {
     throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source build configuration is invalid')
   }
+  const sealField = Object.getOwnPropertyDescriptor(config, 'stateSeal')
+  if ('stateSeal' in config && !sealField || sealField && (!sealField.enumerable || !('value' in sealField)
+    || Object.getOwnPropertyDescriptor(config, 'backend')?.value !== 'linux-native')) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source build state seal is invalid')
+  }
   if ('backend' in config) {
     if (config.backend === 'linux-native') {
       const allowed = new Set(['backend', 'runtime', 'cgroupRoots', 'stateRoot', 'authorityDigest', 'expiresAt', 'maxRuns',
         'maxTotalDurationMs', 'timeoutMs', 'outputBytes', 'versioning', 'memoryMiB', 'cpus', 'pidsLimit', 'workspaceMiB',
-        'temporaryMiB', 'workspaceInodes', 'temporaryInodes', 'userNamespace', 'systemSnapshot'])
+        'temporaryMiB', 'workspaceInodes', 'temporaryInodes', 'userNamespace', 'systemSnapshot', 'stateSeal'])
       const integer = (value: number, min: number, max: number): boolean => Number.isSafeInteger(value) && value >= min && value <= max
       const roots = config.cgroupRoots
       if (Object.keys(config).some(key => !allowed.has(key)) || !validLinuxRuntimeShape(config.runtime)
@@ -638,7 +659,8 @@ export function validateSourceBuildConfig(config: SourceBuildConfig): void {
         || new Set([roots.cpu, roots.memory, roots.pids, roots.freezer]).size !== 4
         || [roots.cpu, roots.memory, roots.pids, roots.freezer].some(root => typeof root !== 'string'
           || !new RegExp(`^/sys/fs/cgroup/[A-Za-z0-9_,]+/dsh-native/uid-${process.getuid?.()}$`, 'u').test(root))
-        || !validLinuxRepositoryIdentity(config)) {
+        || !validLinuxRepositoryIdentity(config)
+        || Object.hasOwn(config, 'stateSeal') && !validLinuxStateSeal(config.stateSeal, config.stateRoot)) {
         throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'Linux source build configuration is invalid')
       }
       return

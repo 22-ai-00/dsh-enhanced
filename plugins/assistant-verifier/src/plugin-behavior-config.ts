@@ -69,6 +69,13 @@ function positive(value: unknown, max: number): boolean { return Number.isSafeIn
 function absolute(value: unknown): value is string {
   return typeof value === 'string' && isAbsolute(value) && resolve(value) === value && !value.includes('\0')
 }
+function linuxStateSeal(value: unknown, stateRoot: string): void {
+  if (!exactKeys(value, ['path', 'sha256']) || !absolute(value.path) || value.path === '/'
+    || /[\p{Cc}\\]/u.test(value.path) || value.path === stateRoot || value.path.startsWith(stateRoot + sep)
+    || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(value.sha256)) {
+    throw new Error('invalid plugin behavior Linux state seal')
+  }
+}
 function nativeRuntime(value: unknown): asserts value is NativeMacRuntime {
   if (!exactKeys(value, ['schemaVersion','platform','nodePath','nodeSha256','roots','modulesPath','versions'])
     || value.schemaVersion !== 1 || value.platform !== `darwin-${process.arch}`
@@ -103,7 +110,7 @@ export function validatePluginBehaviorRunnerConfig(value: unknown): PluginBehavi
   const backend = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'backend')?.value : undefined
   const native = backend === 'macos-seatbelt', linux = backend === 'linux-native'
   const fields = linux ? ['backend', 'runtime', 'cgroupRoots'] : native ? ['backend', 'runtime'] : ['image', 'dockerPath']
-  if (!exactKeys(value, [...common, ...fields], native || linux ? [] : ['socketPath'])
+  if (!exactKeys(value, [...common, ...fields], linux ? ['stateSeal'] : native ? [] : ['socketPath'])
     || !absolute(value.stateRoot) || typeof value.authorityDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(value.authorityDigest)
     || !positive(value.expiresAt, 8_640_000_000_000_000) || !positive(value.maxRuns, 10_000)
     || !positive(value.maxTotalDurationMs, 86_400_000) || !positive(value.maxDurationMs, 300_000)
@@ -116,6 +123,7 @@ export function validatePluginBehaviorRunnerConfig(value: unknown): PluginBehavi
       throw new Error('invalid plugin behavior Linux config')
     linuxRuntime(value.runtime)
     linuxCgroups(value.cgroupRoots)
+    if (Object.hasOwn(value, 'stateSeal')) linuxStateSeal(value.stateSeal, value.stateRoot)
   } else if (native) nativeRuntime(value.runtime)
   else if (typeof value.image !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(value.image)
     || !absolute(value.dockerPath) || Object.hasOwn(value, 'socketPath')

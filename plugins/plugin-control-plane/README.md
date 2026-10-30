@@ -198,6 +198,8 @@ schema 17 在成功启用前保存 `package.json`、`pnpm-lock.yaml`、`cordis.p
 
 ## 源码能力 lane 和边界
 
+公开 `validateSourceBuildConfig` 只验证构建配置组件；完整部署仍须通过 `normalizeControlPlaneConfig`，Linux repository 后端必须同时配置持久 `sourceJobs`。Linux 的可选 `stateSeal: { path, sha256 }` 固定已初始化 runner 账本的外部 seal，并由运行时在写入前核验；它不会在配置校验期间初始化数据库。Docker/macOS 配置不接受此字段。
+
 `source-plan` / `scaffold` 只在 owner 审批的 linked、clean worktree 和固定 generator digest 上生成插件并运行 `pnpm check`。local checks 使用临时 Git index 对 exact scope 计算 staged tree/patch digest，不污染工作树的真实 index。owner 必须在 checks 之后为 exact source digests、scope 和 release policy 签发独立 authorization，随后才能执行 `release-start`。
 
 `prepareModifySourcePlan` 是另一条待审批修改路径：它只接受现有非保护插件树内的有界文件集，并用临时 Git index 生成精确 tree。默认 Docker 后端以 `git archive` stdin 传入 owner 配置的镜像；显式 Linux 原生后端见下文。容器没有 Host bind mount、网络、特权或调用者环境，使用只读根、非 root UID、`cap-drop=ALL`、`no-new-privileges`、固定 CPU/内存/PID/tmpfs 限制和离线 `pnpm install --ignore-scripts`、`pnpm check`、`pnpm pack`。镜像必须由 registry manifest digest 或本地 image content ID 固定，并预热离线 pnpm store。控制面在持久化前重算 tree/patch digest；任意漂移、取消、超时或构建失败都会删除 worktree 而不创建计划。`.git`、`.gitattributes` 与 `.gitmodules` 不能通过该路径修改。

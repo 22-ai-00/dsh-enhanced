@@ -162,6 +162,7 @@ export function validateCreationCapabilityConfig(value: unknown): asserts value 
   const runner = obj(v.runner, ['stateRoot',...(linux ? ['backend','runtime','cgroupRoots']
     : native ? ['backend','runtime'] : ['image','dockerPath']),
     'expiresAt','maxRuns','maxTotalDurationMs','maxDurationMs','maxOutputBytes',
+    ...(linux && Object.hasOwn(v.runner as object, 'stateSeal') ? ['stateSeal'] : []),
     ...(!native && !linux && v.runner && typeof v.runner === 'object' && Object.hasOwn(v.runner, 'socketPath') ? ['socketPath'] : [])])
   const root = path(runner.stateRoot)
   privateStat(root, 'directory')

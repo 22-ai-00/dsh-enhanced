@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
 import { createServer } from 'node:net'
-import { prepareRsiBuildEnvironment, readRsiBuildEnvironment, RsiBuildUnavailableError } from '../src/rsi-build.js'
+import { prepareRsiBuildEnvironment, readRsiBuildEnvironment, verifyRsiBuildEnvironmentReady, RsiBuildUnavailableError } from '../src/rsi-build.js'
 import type { RsiSourceWorkspace } from '../src/rsi-source.js'
 
 const roots: string[] = []
@@ -60,7 +60,7 @@ async function fixture(architecture: 'x64' | 'arm64' = 'x64') {
     `&&!process.env.DOCKER_HOST&&!process.env.DOCKER_CONTEXT\n` +
     `fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify({args,raw,safe})+'\\n')\n` +
     `if(!safe)process.exit(91)\n` +
-    `if(args[0]==='version'){console.log((state==='wrong-runtime'?'28.0.0':'29.4.1')+'/linux/${imageArch}');process.exit(0)}\n` +
+    `if(args[0]==='version'){if(state==='daemon-down')process.exit(6);if(state==='probe-wait')Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,30000);console.log((state==='wrong-runtime'?'28.0.0':'29.4.1')+'/linux/${imageArch}');process.exit(0)}\n` +
     `if(args[0]==='info'){console.log(state==='wrong-daemon'?'BAD-DAEMON-0000':'TEST-DAEMON-0000');process.exit(0)}\n` +
     `if(args[0]==='build'){if(state==='build-fail')process.exit(4);` +
     `if(state==='build-wait')setTimeout(()=>process.exit(0),30000);else process.exit(0)}\n` +
@@ -74,6 +74,16 @@ async function fixture(architecture: 'x64' | 'arm64' = 'x64') {
 
 async function calls(path: string): Promise<{ args: string[]; raw: string[]; safe: boolean }[]> {
   return (await readFile(path, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { args: string[]; raw: string[]; safe: boolean })
+}
+
+async function immutableBuildFiles(root: string): Promise<unknown[]> {
+  const rows: unknown[] = []
+  for (const name of (await readdir(root)).sort()) {
+    const path = join(root, name), info = await lstat(path, { bigint: true })
+    rows.push([name, String(info.dev), String(info.ino), String(info.mode), String(info.mtimeNs), String(info.ctimeNs),
+      (await readFile(path)).toString('base64')])
+  }
+  return rows
 }
 
 async function architectureNode(root: string, architecture: 'x64' | 'arm64', platform: 'darwin' | 'linux'): Promise<string> {
@@ -112,6 +122,7 @@ test.each(['x64', 'arm64'] as const)('macOS %s portable repository build binds l
     expect(first.sourceBuild.repositorySandbox).toEqual({ seccompPath: join(f.home, 'rsi-builds', 'owner', 'seccomp.json') })
     expect((await readdir(join(f.home, 'rsi-builds', 'owner'))).sort()).toEqual(['bootstrap.json', 'seccomp.json'])
     expect(await readRsiBuildEnvironment(f.args)).toEqual(first)
+    expect(await verifyRsiBuildEnvironmentReady(f.args)).toEqual(first)
     const receiptPath = join(f.home, 'rsi-builds', 'owner', 'bootstrap.json')
     const receiptBytes = await readFile(receiptPath)
     const receipt = JSON.parse(receiptBytes.toString('utf8')) as Record<string, unknown>
@@ -128,9 +139,11 @@ test.each(['x64', 'arm64'] as const)('macOS %s portable repository build binds l
       && item.args.includes(`linux/${imageArch}`))).toBe(true)
     expect(await prepareRsiBuildEnvironment({ ...f.args, socketPath: socket })).toEqual(first)
     await writeFile(f.state, 'wrong-daemon')
+    await expect(verifyRsiBuildEnvironmentReady(f.args)).rejects.toThrow('daemon differs')
     await expect(prepareRsiBuildEnvironment({ ...f.args, socketPath: socket })).rejects.toThrow('build receipt differs')
     await writeFile(f.state, 'ready')
     await writeFile(f.state, 'bad-platform')
+    await expect(verifyRsiBuildEnvironmentReady(f.args)).rejects.toThrow('platform differs')
     await expect(prepareRsiBuildEnvironment({ ...f.args, socketPath: socket })).rejects.toThrow('platform differs')
   } finally {
     Object.defineProperty(process, 'platform', platform)
@@ -160,6 +173,63 @@ test('missing macOS Docker Desktop socket reports build unavailable before creat
 })
 
 describe.skipIf(process.platform !== 'linux' || process.arch !== 'x64')('private RSI repository builder', () => {
+  test('readiness queries the exact retained image without changing receipts or building resources', async () => {
+    const f = await fixture()
+    await expect(verifyRsiBuildEnvironmentReady(f.args)).rejects.toThrow()
+    await expect(lstat(join(f.home, 'rsi-builds'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(lstat(f.calls)).rejects.toMatchObject({ code: 'ENOENT' })
+    const prepared = await prepareRsiBuildEnvironment(f.args), start = (await calls(f.calls)).length
+    const final = join(f.home, 'rsi-builds', 'owner'), before = await immutableBuildFiles(final)
+    expect(await verifyRsiBuildEnvironmentReady(f.args)).toEqual(prepared)
+    const observed = (await calls(f.calls)).slice(start)
+    expect(observed.every(call => call.safe && ['version', 'info', 'image'].includes(call.args[0]!))).toBe(true)
+    expect(observed.filter(call => call.args[0] === 'image').map(call => call.args))
+      .toEqual([['image', 'inspect', '--format', '{{.Id}}/{{.Os}}/{{.Architecture}}', IMAGE]])
+    expect(await immutableBuildFiles(final)).toEqual(before)
+    expect(await readdir(join(f.home, 'rsi-builds'))).toEqual(['owner'])
+  })
+
+  test('readiness keeps missing runtime or image separate from integrity drift and never rebuilds', async () => {
+    const f = await fixture(); await prepareRsiBuildEnvironment(f.args)
+    const final = join(f.home, 'rsi-builds', 'owner'), before = await immutableBuildFiles(final)
+    const start = (await calls(f.calls)).length
+    for (const state of ['daemon-down', 'wrong-runtime', 'missing-image']) {
+      await writeFile(f.state, state)
+      await expect(verifyRsiBuildEnvironmentReady(f.args)).rejects.toBeInstanceOf(RsiBuildUnavailableError)
+      expect(await immutableBuildFiles(final)).toEqual(before)
+    }
+    for (const state of ['bad-inspect', 'bad-platform']) {
+      await writeFile(f.state, state)
+      await expect(verifyRsiBuildEnvironmentReady(f.args)).rejects.not.toBeInstanceOf(RsiBuildUnavailableError)
+      expect(await immutableBuildFiles(final)).toEqual(before)
+    }
+    expect((await calls(f.calls)).slice(start).every(call => ['version', 'info', 'image'].includes(call.args[0]!))).toBe(true)
+    expect(await readdir(join(f.home, 'rsi-builds'))).toEqual(['owner'])
+  })
+
+  test('readiness refuses changed inputs before probing and preserves receipts when cancelled in a query', async () => {
+    const f = await fixture(); await prepareRsiBuildEnvironment(f.args)
+    const final = join(f.home, 'rsi-builds', 'owner'), before = await immutableBuildFiles(final)
+    const start = await readFile(f.calls)
+    const lock = join(f.repository, 'pnpm-lock.yaml')
+    await writeFile(lock, 'changed-lock\n')
+    await expect(verifyRsiBuildEnvironmentReady(f.args)).rejects.toThrow('receipt differs')
+    expect(await readFile(f.calls)).toEqual(start)
+    await writeFile(lock, 'lockfileVersion: 9.0\n')
+    const preaborted = AbortSignal.abort(new Error('pre-cancelled readiness'))
+    await expect(verifyRsiBuildEnvironmentReady({ ...f.args, signal: preaborted })).rejects.toThrow('pre-cancelled readiness')
+    expect(await readFile(f.calls)).toEqual(start)
+    await writeFile(f.state, 'probe-wait')
+    const controller = new AbortController(), pending = verifyRsiBuildEnvironmentReady({ ...f.args, signal: controller.signal })
+    const timer = setTimeout(() => controller.abort(new Error('cancelled readiness')), 300)
+    try { await expect(pending).rejects.toThrow('cancelled readiness') }
+    finally { clearTimeout(timer) }
+    const observed = (await calls(f.calls)).slice(start.toString('utf8').trim().split('\n').length)
+    expect(observed.map(call => call.args[0])).toEqual(['version'])
+    expect(await immutableBuildFiles(final)).toEqual(before)
+    expect(await readdir(join(f.home, 'rsi-builds'))).toEqual(['owner'])
+  })
+
   test('reads pinned inputs without Docker calls and refuses missing or changed resources', async () => {
     const f = await fixture()
     await expect(readRsiBuildEnvironment(f.args)).rejects.toThrow()

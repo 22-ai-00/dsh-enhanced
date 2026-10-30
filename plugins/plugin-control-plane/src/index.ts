@@ -43,6 +43,7 @@ export * from './types.js'
 export * from './trust.js'
 export type * from './source-job-types.js'
 export { validateSourceBaselineConfig } from './source-baseline.js'
+export { validateSourceBuildConfig } from './source-build.js'
 export type { SourceBaselineConfig } from './source-baseline.js'
 export { parseSourceMaintenanceRecord, signSourceMaintenanceRecord, sourceBaselineChain, sourceMaintenanceDigest,
   sourceMaintenanceSourceFieldsDigest, verifySourceMaintenanceRecords } from './source-maintenance.js'

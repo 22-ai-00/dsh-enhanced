@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -146,6 +146,8 @@ test('native adoption requires a signed v2 certificate pinned to its exact runne
     stateRoot: f.root, expiresAt: Date.now() + 120_000, maxRuns: 5,
     maxTotalDurationMs: 30_000, maxDurationMs: 10_000, maxOutputBytes: 65536 } }
   validateCreationCapabilityConfig(config)
+  expect(() => validateCreationCapabilityConfig({ ...config, runner: { ...config.runner,
+    stateSeal: { path: f.root + '-seal.json', sha256: d('a') } } })).toThrow()
   const nativeCertificate = (planId: string, runtimeDigest: string): PluginCreationVerificationCertificate => {
     const { signature: _signature, ...legacy } = f.certificate(planId)
     const body: Omit<PluginCreationVerificationCertificate, 'signature'> = { ...legacy,
@@ -206,6 +208,69 @@ test.skipIf(process.platform !== 'linux')('Linux adoption preflight keeps exact 
   chmodSync(f.root, 0o700)
   chmodSync(f.config.keyPath, 0o644)
   expect(() => validateCreationCapabilityConfig(f.config)).toThrow()
+})
+
+test.skipIf(process.platform !== 'linux')('sealed Linux adoption binds both seal fields to the immutable journal authority and retained unknown calls', () => {
+  const f = linuxFixture(1, 1), runner = f.config.runner
+  if (!('backend' in runner) || runner.backend !== 'linux-native') throw new Error('fixture backend')
+  const stateSeal = { path: f.root + '-seal.json', sha256: d('a') }
+  const config: CreationCapabilityConfig = { ...f.config, runner: { ...runner, stateSeal } }
+  validateCreationCapabilityConfig(config)
+  let journal = new CreationCapabilityJournal({ path: f.path, config })
+  journal.claim({ certificate: f.certificate('sealed'), artifact: f.artifact })
+  journal.authorize('sealed', tools); journal.activate('sealed')
+  journal.claimCall({ planId: 'sealed', key: 'unknown', argumentsDigest: d('a') })
+  const authorityDigest = journal.authorityDigest, receipt = journal.inspect('sealed')!.receipt!
+  journal.close()
+  const changes = [{ ...stateSeal, sha256: d('b') }, { ...stateSeal, path: f.root + '-other-seal.json' }]
+  for (const changedSeal of changes) {
+    expect(() => new CreationCapabilityJournal({ path: f.path, config: { ...config,
+      runner: { ...runner, stateSeal: changedSeal } } })).toThrow()
+  }
+  // Hold path, key and every other grant field fixed to show that each seal
+  // field changes the actual computed authority, independently of DB identity.
+  const retained = join(f.root, 'retained-journal.sqlite')
+  renameSync(f.path, retained)
+  try {
+    for (const changedSeal of changes) {
+      const fresh = new CreationCapabilityJournal({ path: f.path, config: { ...config,
+        runner: { ...runner, stateSeal: changedSeal } } })
+      try { expect(fresh.authorityDigest).not.toBe(authorityDigest) }
+      finally { fresh.close() }
+      rmSync(f.path)
+    }
+  } finally { rmSync(f.path, { force: true }); renameSync(retained, f.path) }
+  journal = new CreationCapabilityJournal({ path: f.path, config })
+  try {
+    expect(journal.authorityDigest).toBe(authorityDigest)
+    expect(journal.inspect('sealed')?.receipt).toEqual(receipt)
+    journal.recoverClaims()
+    expect(journal.claimCall({ planId: 'sealed', key: 'unknown', argumentsDigest: d('a') }))
+      .toMatchObject({ created: false, call: { status: 'unknown' } })
+    expect(() => journal.claimCall({ planId: 'sealed', key: 'new', argumentsDigest: d('a') })).toThrow()
+  } finally { journal.close() }
+})
+
+test.skipIf(process.platform !== 'linux')('Linux adoption rejects malformed, undefined and inherited seal references without invoking accessors', () => {
+  const f = linuxFixture(), runner = f.config.runner
+  if (!('backend' in runner) || runner.backend !== 'linux-native') throw new Error('fixture backend')
+  const seal = { path: f.root + '-seal.json', sha256: d('a') }
+  for (const stateSeal of [undefined, null, {}, { ...seal, extra: true }, { ...seal, path: 'relative' },
+    { ...seal, path: f.root }, { ...seal, path: join(f.root, 'seal.json') }, { ...seal, sha256: 'invalid' },
+    Object.create(seal) as object]) {
+    expect(() => validateCreationCapabilityConfig({ ...f.config, runner: { ...runner, stateSeal } })).toThrow()
+  }
+  for (const field of ['stateSeal', 'path', 'sha256']) {
+    const stateSeal = { ...seal }, candidate = { ...runner, stateSeal }
+    const getter = vi.fn(() => { throw new Error('getter invoked') })
+    Object.defineProperty(field === 'stateSeal' ? candidate : stateSeal, field, { enumerable: true, get: getter })
+    expect(() => validateCreationCapabilityConfig({ ...f.config, runner: candidate })).toThrow()
+    expect(getter).not.toHaveBeenCalled()
+  }
+  const inheritedRunner = Object.assign(Object.create({ stateSeal: seal }) as object, runner)
+  expect(() => validateCreationCapabilityConfig({ ...f.config, runner: inheritedRunner })).toThrow()
+  const docker = fixture()
+  expect(() => validateCreationCapabilityConfig({ ...docker.config, runner: { ...docker.config.runner, stateSeal: seal } })).toThrow()
 })
 
 test.skipIf(process.platform !== 'linux')('signed Linux v3 adoption reopens with its receipt and consumes cached and unknown call reservations once', () => {

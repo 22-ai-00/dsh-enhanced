@@ -657,6 +657,7 @@ export class PluginControlPlaneService extends Service {
               stateRoot: sourceBuild.stateRoot, authorityDigest: sourceBuild.authorityDigest,
               runtime: sourceBuild.runtime, cgroupRoots: sourceBuild.cgroupRoots, expiresAt: sourceBuild.expiresAt,
               maxRuns: sourceBuild.maxRuns, maxTotalDurationMs: sourceBuild.maxTotalDurationMs,
+              ...(sourceBuild.stateSeal === undefined ? {} : { stateSeal: sourceBuild.stateSeal }),
               ...(sourceBuild.userNamespace === undefined ? {} : { userNamespace: sourceBuild.userNamespace,
                 systemSnapshot: sourceBuild.systemSnapshot! }),
               limits: { maxDurationMs: sourceBuild.timeoutMs, maxInputBytes: 64 * 1024 ** 2,

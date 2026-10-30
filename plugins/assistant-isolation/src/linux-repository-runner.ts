@@ -13,6 +13,7 @@ import { reconcileLinuxJob } from './linux-job-recovery.js'
 import { consumeLinuxLedgerAdmissionRefusal, linuxRepositoryAdmissionRefusal, withLinuxLedgerAdmissionAttempt } from './linux-repository-admission.js'
 import { linuxRuntimeDigest, validateLinuxRuntime, verifyLinuxRuntime, type LinuxRuntime } from './linux-runtime.js'
 import { observeStorage } from './storage.js'
+import { inspectLinuxRunnerState, validateLinuxRunnerStateSeal, type LinuxRunnerStateSeal } from './linux-runner-state.js'
 import type { IsolationIdentity, IsolationJob, IsolationResult } from './types.js'
 import { verifyLinuxSystemSnapshotRuntimeDependencies, type LinuxSystemSnapshot } from './linux-system-snapshot.js'
 import { linuxRepositoryImplementationDigest, verifyLinuxUserNamespaceMapping, type LinuxUserNamespaceMapping } from './linux-user-namespace.js'
@@ -20,6 +21,7 @@ import { linuxRepositoryImplementationDigest, verifyLinuxUserNamespaceMapping, t
 export interface LinuxRepositoryRunnerConfig {
   readonly backend: 'linux-native'
   readonly stateRoot: string
+  readonly stateSeal?: LinuxRunnerStateSeal
   readonly authorityDigest: string
   readonly expiresAt: number
   readonly maxRuns: number
@@ -129,12 +131,14 @@ export class LinuxRepositoryRunner {
 
   constructor(input: LinuxRepositoryRunnerConfig) {
     if (process.platform !== 'linux' || !['x64', 'arm64'].includes(process.arch) || !process.getuid?.()
-      || !input || Object.keys(input).sort().join() !== ['authorityDigest', 'backend', 'cgroupRoots', 'expiresAt', 'limits', 'maxRuns', 'maxTotalDurationMs', 'runtime', 'stateRoot', ...(input.userNamespace !== undefined ? ['systemSnapshot', 'userNamespace'] : [])].sort().join()
+      || !input || Object.keys(input).sort().join() !== ['authorityDigest', 'backend', 'cgroupRoots', 'expiresAt', 'limits', 'maxRuns', 'maxTotalDurationMs', 'runtime', 'stateRoot', ...(input.stateSeal !== undefined ? ['stateSeal'] : []), ...(input.userNamespace !== undefined ? ['systemSnapshot', 'userNamespace'] : [])].sort().join()
       || (input.userNamespace === undefined) !== (input.systemSnapshot === undefined) || input.backend !== 'linux-native' || !/^[a-f0-9]{64}$/u.test(input.authorityDigest)
       || !positive(input.expiresAt) || !positive(input.maxRuns) || input.maxRuns > 1000
       || !positive(input.maxTotalDurationMs) || input.maxTotalDurationMs > 86_400_000
       || !isAbsolute(input.stateRoot) || resolve(input.stateRoot) !== input.stateRoot || input.stateRoot === '/'
       || /[\p{Cc}\\]/u.test(input.stateRoot)) throw new Error('invalid Linux repository authority')
+    const stateSeal = input.stateSeal === undefined ? undefined : Object.freeze(validateLinuxRunnerStateSeal(input.stateSeal))
+    if (stateSeal) inspectLinuxRunnerState({ stateRoot: input.stateRoot, stateSeal, kind: 'repository' })
     const runtime = validateLinuxRuntime(input.runtime)
     if (runtime.root.path === input.stateRoot || runtime.root.path.startsWith(input.stateRoot + sep)
       || input.stateRoot.startsWith(runtime.root.path + sep)) throw new Error('Linux repository state overlaps runtime')
@@ -150,6 +154,7 @@ export class LinuxRepositoryRunner {
     const reservation = this.#reservation()
     if (reservation.memoryMiB > MAX_MEMORY || reservation.workspaceInodes > MAX_INODES) throw new Error('Linux repository limits exceed resource pool')
     this.#input = Object.freeze({ ...input, runtime, limits: checked.limits, cgroupRoots: checked.cgroupRoots,
+      ...(stateSeal ? { stateSeal } : {}),
       ...(checked.schemaVersion === 3 ? { userNamespace: checked.userNamespace, systemSnapshot: checked.systemSnapshot } : {}) })
     this.#identity = Object.freeze({ principalDigest: input.authorityDigest, principalRecordId: `repository:${input.authorityDigest}`,
       principalVersion: 1, workspace: input.stateRoot, agentPreset: 'repository' })
@@ -179,6 +184,8 @@ export class LinuxRepositoryRunner {
     return { ...minimum, memoryMiB: minimum.memoryMiB + 256, storageBytes: minimum.storageBytes + 96 * 1024 ** 2 }
   }
   #authority(): IsolationControllerAuthority {
+    if (this.#input.stateSeal) inspectLinuxRunnerState({ stateRoot: this.#input.stateRoot,
+      stateSeal: this.#input.stateSeal, kind: 'repository' })
     if (!this.#controller || !this.#ledger.hasController(this.#controller)) throw new Error('Linux repository controller unavailable')
     return this.#controller
   }
@@ -192,6 +199,8 @@ export class LinuxRepositoryRunner {
   }
   #proofIdentity(): boolean {
     try {
+      if (this.#input.stateSeal) inspectLinuxRunnerState({ stateRoot: this.#input.stateRoot,
+        stateSeal: this.#input.stateSeal, kind: 'repository' })
       const path = join(this.#input.stateRoot, 'ledger.sqlite'), root = lstatSync(this.#input.stateRoot), file = lstatSync(path)
       return realpathSync(this.#input.stateRoot) === this.#input.stateRoot && root.isDirectory() && !root.isSymbolicLink()
         && root.uid === process.getuid?.() && !(root.mode & 0o077) && root.dev === this.#stateIdentity.dev && root.ino === this.#stateIdentity.ino
@@ -206,6 +215,8 @@ export class LinuxRepositoryRunner {
     const owner = randomUUID(), deadline = Date.now() + 31_000
     for (;;) {
       this.#abort.signal.throwIfAborted()
+      if (this.#input.stateSeal) inspectLinuxRunnerState({ stateRoot: this.#input.stateRoot,
+        stateSeal: this.#input.stateSeal, kind: 'repository' })
       try { this.#controller = this.#ledger.claimController(owner, TTL); break } catch (error) {
         if (!(error instanceof IsolationLedgerError) || error.code !== 'unauthorized' || Date.now() >= deadline) throw error
         await pause(Math.min(250, deadline - Date.now()), undefined, { signal: this.#abort.signal })
@@ -216,6 +227,8 @@ export class LinuxRepositoryRunner {
       maxRuns: this.#input.maxRuns, maxTotalDurationMs: this.#input.maxTotalDurationMs }], this.#controller)
     this.#timer = setInterval(() => {
       try {
+        if (this.#input.stateSeal) inspectLinuxRunnerState({ stateRoot: this.#input.stateRoot,
+          stateSeal: this.#input.stateSeal, kind: 'repository' })
         if (this.#controller && this.#ledger.renewController(this.#controller, TTL)) {
           if (!this.#sweep) {
             const sweep = this.#ready.then(() => this.#recover())

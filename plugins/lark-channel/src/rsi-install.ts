@@ -8,13 +8,21 @@ import { isDeepStrictEqual } from 'node:util'
 import { controlPlaneDigest, queryRuntimeObserver, runtimeConfigDigest, type RuntimeObserverConfig } from '@dsh-enhanced/plugin-control-plane'
 import { withDshHomeLifecycleLock } from './setup.js'
 import { prepareRsiSourceWorkspace } from './rsi-source.js'
-import { prepareRsiBuildEnvironment, RsiBuildUnavailableError, rsiBuildResources as io } from './rsi-build.js'
-import { prepareRsiReleaseBuildEnvironment, RsiReleaseBuildUnavailableError } from './rsi-release-build.js'
+import { verifyRsiBuildEnvironmentReady, RsiBuildUnavailableError, rsiBuildResources as io } from './rsi-build.js'
+import { prepareRsiReleaseBuildEnvironment, readRsiReleaseBuildEnvironment,
+  RsiReleaseBuildUnavailableError, type PreparedReleaseBuildEnvironment } from './rsi-release-build.js'
 import { prepareRsiAuthorityRuntime } from './rsi-authority-runtime.js'
 import { prepareRsiAuthorityResources } from './rsi-authority-resources.js'
-import { createRsiBootstrapManifest } from './rsi-bootstrap-manifest.js'
-import { prepareRsiCreationBuildEnvironment, type RsiCreationBuildEnvironment } from './rsi-creation-build.js'
+import { createRsiBootstrapManifest, type RsiBootstrapSourceBuild } from './rsi-bootstrap-manifest.js'
+import { verifyRsiCreationBuildEnvironmentReady, type RsiCreationBuildEnvironment } from './rsi-creation-build.js'
 import { validateRsiPluginCreationSetup } from './rsi-plugin-creation.js'
+import { validateRsiPluginRevisionSetup } from './rsi-plugin-revision.js'
+import { prepareLinuxRsiRuntime, readLinuxRsiRuntime, LinuxRsiRuntimeUnavailableError } from './rsi-linux-runtime-bootstrap.js'
+import { prepareLinuxRsiRepositoryRuntime, readLinuxRsiRepositoryRuntime } from './rsi-linux-repository-bootstrap.js'
+import { prepareLinuxRsiCreationBuildEnvironment, readLinuxRsiCreationBuildEnvironment,
+  RsiLinuxCreationBuildUnavailableError, type LinuxRsiCreationBuildEnvironment } from './rsi-linux-creation-build.js'
+import { discoverLinuxCgroupRoots, RsiLinuxCgroupUnavailableError } from './rsi-linux-cgroup-roots.js'
+import { prepareRsiLinuxRunnerStates, type RsiLinuxRunnerStates } from './rsi-linux-runner-states.js'
 import { inspectRsiOwnerConfiguration, prepareRsiOwnerConfiguration } from './rsi-bootstrap.js'
 import { collectRsiInstalledInputs, RsiInstalledInputsUnavailableError } from './rsi-install-inputs.js'
 import { captureRsiSystemdUnitProperties, readRsiSystemdUnitProperties } from './rsi-systemd-bootstrap.js'
@@ -46,23 +54,57 @@ async function prepareResources(input: RsiInstallInput, signal: AbortSignal) {
   const source = await prepareRsiSourceWorkspace({ ...input, version, signal })
   const runtime = await prepareRsiAuthorityRuntime({ ...input, signal })
   const resources = await prepareRsiAuthorityResources({ ...input, signal })
-  const build = await prepareRsiBuildEnvironment({ ...input, source, signal })
-  const release = await prepareRsiReleaseBuildEnvironment({ ...input, build, signal })
   const storedManifest = join(resources.configRoot, 'manifest.json')
   const previous = await exists(storedManifest)
     ? JSON.parse((await io.readStable(storedManifest, 2_097_152, true)).toString('utf8')) as RsiSetupManifest
     : undefined
   if (previous?.pluginCreation !== undefined) validateRsiPluginCreationSetup(previous.pluginCreation, previous.sourceReviews.owner)
-  const creationBuild: RsiCreationBuildEnvironment | undefined = previous && previous.pluginCreation === undefined
-    ? undefined : await prepareRsiCreationBuildEnvironment({ ...input, source, build, signal })
-  if (creationBuild) {
-    for (const name of ['creation-review-runner', 'creation-adoption-runner']) {
-      const path = join(resources.stateRoot, name)
-      if (!await exists(path)) await mkdir(path, { mode: 0o700 })
-      await io.directory(path)
-    }
+  if (previous?.pluginRevision !== undefined) validateRsiPluginRevisionSetup(previous.pluginRevision, previous.sourceReviews.owner)
+  const priorBuild = previous?.controlPlane.sourceBuild
+  if (previous && (!priorBuild || 'backend' in priorBuild && priorBuild.backend !== 'linux-native')) {
+    fail('existing Linux installation has an unsupported build backend')
   }
-  return { source, runtime, resources, build, release, ...(creationBuild ? { creationBuild } : {}) }
+  // New Linux installations use the complete native boundary. An ordinary
+  // retry preserves the exact old backend; migration needs its own signed handoff.
+  const native = !previous || priorBuild !== undefined && 'backend' in priorBuild
+  const enableCreation = !previous || previous.pluginCreation !== undefined
+  let build: { sourceBuild: RsiBootstrapSourceBuild }
+  let release: PreparedReleaseBuildEnvironment
+  let creationBuild: RsiCreationBuildEnvironment | LinuxRsiCreationBuildEnvironment | undefined
+  let runnerStates: RsiLinuxRunnerStates | undefined
+  const directories: string[] = []
+  if (native) {
+    const resourceInput = { ...input, source, signal }
+    const base = await (previous ? readLinuxRsiRuntime : prepareLinuxRsiRuntime)(resourceInput)
+    release = await (previous ? readRsiReleaseBuildEnvironment : prepareRsiReleaseBuildEnvironment)({ ...resourceInput, build: base })
+    const repository = await (previous ? readLinuxRsiRepositoryRuntime : prepareLinuxRsiRepositoryRuntime)(resourceInput)
+    const cgroupRoots = await discoverLinuxCgroupRoots({ signal })
+    build = { sourceBuild: { backend: 'linux-native', repository, cgroupRoots } }
+    directories.push('linux-source-build-runner')
+    if (enableCreation) {
+      creationBuild = await (previous ? readLinuxRsiCreationBuildEnvironment : prepareLinuxRsiCreationBuildEnvironment)({
+        ...resourceInput, stateRoot: resources.stateRoot,
+      })
+      if (!isDeepStrictEqual(creationBuild.cgroupRoots, cgroupRoots)) fail('creation cgroup roots changed during preparation')
+      if (!previous || previous.pluginRevision) directories.push('revision-review-runner', 'revision-regression-runner')
+    }
+    runnerStates = await prepareRsiLinuxRunnerStates(resources, {
+      creation: enableCreation, revision: enableCreation && (!previous || previous.pluginRevision !== undefined),
+    }, previous)
+  } else {
+    const legacy = await verifyRsiBuildEnvironmentReady({ ...input, source, signal })
+    build = legacy
+    release = await readRsiReleaseBuildEnvironment({ ...input, build: legacy, signal })
+    if (enableCreation) creationBuild = await verifyRsiCreationBuildEnvironmentReady({ ...input, source, build: legacy, signal })
+  }
+  if (creationBuild) directories.push('creation-review-runner', 'creation-adoption-runner')
+  for (const name of directories) {
+    const path = join(resources.stateRoot, name)
+    if (!previous && !await exists(path)) await mkdir(path, { mode: 0o700 })
+    await io.directory(path)
+  }
+  return { source, runtime, resources, build, release, ...(creationBuild ? { creationBuild } : {}),
+    ...(runnerStates ? { runnerStates } : {}) }
 }
 async function ensureCoordinator(input: RsiInstallInput, coordinator: string,
   executor: RsiAuthorityConfigInput['executor'], signal: AbortSignal, systemctlPin: RsiAuthorityConfigInput['systemctl']): Promise<void> {
@@ -228,7 +270,9 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
     try { prepared = await ports.prepare(input, signal) }
     catch (error) {
       signal.throwIfAborted()
-      if (error instanceof RsiBuildUnavailableError || error instanceof RsiReleaseBuildUnavailableError) return { mode: 'not-ready', reason: error.message }
+      if (error instanceof RsiBuildUnavailableError || error instanceof RsiReleaseBuildUnavailableError
+        || error instanceof LinuxRsiRuntimeUnavailableError || error instanceof RsiLinuxCgroupUnavailableError
+        || error instanceof RsiLinuxCreationBuildUnavailableError) return { mode: 'not-ready', reason: error.message }
       throw error
     }
     const { resources, runtime, source, build, release } = prepared
@@ -282,6 +326,8 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
     const manifest = createRsiBootstrapManifest({ dshHome: input.dshHome, targetProfile: pair[0], coordinatorProfile: pair[1],
       targetEffective, owner: binding, resources, runtime, source, sourceBuild: build.sourceBuild,
       ...(enableCreation && prepared.creationBuild ? { creationBuild: prepared.creationBuild } : {}),
+      ...(prepared.runnerStates ? { runnerStates: prepared.runnerStates } : {}),
+      ...(previousManifest ? { enableRevision: previousManifest.pluginRevision !== undefined } : {}),
       git: installed.git, now, expiresAt, plugins: installed.plugins,
       observerTargets: installed.observerTargets, hostDeploymentInputs: installed.hostDeploymentInputs })
     if (previousManifest && !isDeepStrictEqual(previousManifest, manifest)) fail('existing manifest differs before stopping Hosts')

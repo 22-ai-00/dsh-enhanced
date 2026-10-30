@@ -267,3 +267,17 @@ export async function prepareLinuxRsiRepositoryRuntime(input: LinuxRsiBootstrapI
     }
   }
 }
+
+/** Reopen only the existing schema4 repository family. Missing or damaged
+ * receipts are errors; preparation and archive inputs are never consulted. */
+export async function readLinuxRsiRepositoryRuntime(input: LinuxRsiBootstrapInput): Promise<LinuxRsiRepositoryBuildEnvironment> {
+  input.signal?.throwIfAborted()
+  if (!canonical(input.dshHome) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(input.profile)
+    || input.source.schemaVersion !== 1) fail('invalid bootstrap identity')
+  await privateDirectory(input.dshHome)
+  const parent = join(input.dshHome, 'rsi-linux-repository-runtimes')
+  await privateDirectory(parent)
+  const mapping = await readLinuxUserNamespaceMapping()
+  const base = await readLinuxRsiRuntime(input)
+  return readExisting(join(parent, input.profile), input, base.runtime, mapping)
+}

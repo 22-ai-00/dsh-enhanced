@@ -2,7 +2,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { type ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
 import { normalizeConfig, type AssistantGrowthDriverConfig } from '@dsh-enhanced/assistant-growth-driver'
-import { normalizeControlPlaneConfig, type Config as ControlPlaneConfig } from '@dsh-enhanced/plugin-control-plane'
+import { controlPlaneDigest, normalizeControlPlaneConfig, type Config as ControlPlaneConfig } from '@dsh-enhanced/plugin-control-plane'
 import { validateSourceReviewConfig, type SourceReviewConfig } from '@dsh-enhanced/assistant-verifier'
 import { isMap, isSeq, parseDocument, type Document, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
 
@@ -10,6 +10,7 @@ import type { RsiServiceEnvironments } from './rsi-service-setup.js'
 import { resolveRsiOwnerRoute, rsiCoordinatorAutomationDatabasePath } from './rsi-owner-profile.js'
 import { validateRsiMemoryLearningSetup, type RsiMemoryLearningSetup } from './rsi-memory-learning.js'
 import { validateRsiPluginCreationSetup, type RsiPluginCreationSetup } from './rsi-plugin-creation.js'
+import { validateRsiPluginRevisionSetup, type RsiPluginRevisionSetup } from './rsi-plugin-revision.js'
 
 /** Private, owner supplied input for the two-host RSI overlay. */
 export interface RsiSetupManifest {
@@ -22,6 +23,9 @@ export interface RsiSetupManifest {
   sourceReviews: SourceReviewConfig
   memoryLearning?: RsiMemoryLearningSetup
   pluginCreation?: RsiPluginCreationSetup
+  pluginRevision?: RsiPluginRevisionSetup
+  /** Frozen initial Linux build/observer pairing; retained generations require a separate handoff. */
+  linuxBuild?: { schemaVersion: 1; sourceBuildDigest: string; behaviorRuntimeDigest?: string }
   coordinator: { budgetId: string; budgetAmount: number; timeoutMs: number }
   limits: { periodMs: number; reviews: number; discovery: number; source: number; observations: number; coordinator: number; qualification?: number }
 }
@@ -107,6 +111,20 @@ function absolute(value: string, label: string): string { if (!isAbsolute(value)
 function same(value: unknown, expected: unknown, label: string): void { if (!isDeepStrictEqual(value, expected)) fail(`${label} does not match owner scope`) }
 
 function validatedCreation(manifest: RsiSetupManifest, expectedOwner: RsiSetupManifest['sourceReviews']['owner']): RsiPluginCreationSetup | undefined {
+  const build = manifest.controlPlane.sourceBuild, binding = manifest.linuxBuild
+  if (build && 'backend' in build && build.backend === 'linux-native') {
+    const behavior = manifest.pluginCreation?.reviews.runner
+    const keys = ['schemaVersion', 'sourceBuildDigest', ...(behavior ? ['behaviorRuntimeDigest'] : [])]
+    if (!binding || Object.keys(binding).sort().join() !== keys.sort().join() || binding.schemaVersion !== 1
+      || binding.sourceBuildDigest !== controlPlaneDigest(build)
+      || behavior && (!('backend' in behavior) || behavior.backend !== 'linux-native'
+        || binding.behaviorRuntimeDigest !== controlPlaneDigest(behavior.runtime)
+        || behavior.runtime.runtime.sourceCommit !== build.runtime.sourceCommit
+        || behavior.runtime.runtime.lockSha256 !== build.runtime.lockSha256
+        || !isDeepStrictEqual(behavior.cgroupRoots, build.cgroupRoots))) {
+      fail('Linux source build or creation family differs from its frozen binding')
+    }
+  } else if (binding !== undefined) fail('Linux build binding requires the native repository backend')
   const jobs = manifest.controlPlane.sourceJobs
   const creation = manifest.pluginCreation === undefined ? undefined
     : validateRsiPluginCreationSetup(manifest.pluginCreation, expectedOwner)
@@ -130,6 +148,34 @@ function validatedCreation(manifest: RsiSetupManifest, expectedOwner: RsiSetupMa
     fail('creation requires a complete independently verified adoption setup')
   }
   return creation
+}
+
+function validatedRevision(manifest: RsiSetupManifest, expectedOwner: RsiSetupManifest['sourceReviews']['owner'],
+  creation: RsiPluginCreationSetup | undefined): RsiPluginRevisionSetup | undefined {
+  const jobs = manifest.controlPlane.sourceJobs
+  const revision = manifest.pluginRevision === undefined ? undefined
+    : validateRsiPluginRevisionSetup(manifest.pluginRevision, expectedOwner)
+  const growth = normalizeConfig(manifest.growthDriver)
+  if (!revision) {
+    if (jobs?.revision || manifest.controlPlane.revisionVerifications || manifest.controlPlane.revisionRegressions
+      || growth.pluginSourceProposals.allowRevision) fail('revision requires a complete independent review and regression setup')
+    return undefined
+  }
+  same(jobs?.revision, revision.revision, 'source revision grant')
+  same(manifest.controlPlane.revisionVerifications, revision.verifications, 'revision verification authority')
+  same(manifest.controlPlane.revisionRegressions, revision.regressionVerifications, 'revision regression authority')
+  if (!creation || !jobs || !growth.pluginSourceProposals.allowRevision || !growth.pluginSourceProposals.allowCreation
+    || revision.revision.expiresAt > jobs.expiresAt || revision.revision.expiresAt !== creation.creation.expiresAt
+    || revision.revision.namePrefix !== creation.creation.namePrefix
+    || !manifest.controlPlane.sourceBuild || !('backend' in manifest.controlPlane.sourceBuild)
+    || manifest.controlPlane.sourceBuild.backend !== 'linux-native'
+    || !('backend' in creation.reviews.runner) || creation.reviews.runner.backend !== 'linux-native'
+    || !('backend' in revision.reviews.runner) || revision.reviews.runner.backend !== 'linux-native'
+    || !isDeepStrictEqual(creation.reviews.runner.runtime, revision.reviews.runner.runtime)
+    || !isDeepStrictEqual(creation.reviews.runner.cgroupRoots, revision.reviews.runner.cgroupRoots)) {
+    fail('revision requires the same finite native creation family')
+  }
+  return revision
 }
 
 
@@ -232,6 +278,7 @@ export function compileRsiPersonalAssistantOptions(input: {
   const memory = input.manifest.memoryLearning === undefined ? undefined
     : validateRsiMemoryLearningSetup(input.manifest.memoryLearning, input.manifest.sourceReviews.owner)
   const creation = validatedCreation(input.manifest, input.manifest.sourceReviews.owner)
+  validatedRevision(input.manifest, input.manifest.sourceReviews.owner, creation)
   if (creation) same(input.scope, { workspace: creation.capabilities.owner.workspace,
     preset: creation.capabilities.owner.agentPreset, principal: creation.capabilities.owner.principalId }, 'creation Policy scope')
   configurePersonal(document, personal, input.manifest, input.scope, input.budgetIds, memory, creation)
@@ -264,6 +311,7 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   const memory = input.manifest.memoryLearning === undefined ? undefined
     : validateRsiMemoryLearningSetup(input.manifest.memoryLearning, expectedOwner)
   const creation = validatedCreation(input.manifest, expectedOwner)
+  const revision = validatedRevision(input.manifest, expectedOwner, creation)
 
   const cp = structuredClone(input.manifest.controlPlane)
   if (!cp.sourceBuild || !cp.sourceApprovals || !cp.sourceReleases || !cp.sourceReleaseExecution || !cp.sourceAdoptions || !cp.runtimeObserver || !cp.foregroundDeployments || !cp.taskObservations) fail('target controlPlane lacks a complete source adoption chain')
@@ -312,6 +360,10 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   replaceNode(target.document, verifier, 'sourceReviews', input.manifest.sourceReviews)
   if (memory) replaceNode(target.document, verifier, 'memoryReviews', memory.reviews)
   if (creation) replaceNode(target.document, verifier, 'creationReviews', creation.reviews)
+  if (revision) {
+    replaceNode(target.document, verifier, 'revisionReviews', revision.reviews)
+    replaceNode(target.document, verifier, 'revisionRegressions', revision.regressions)
+  }
   if (memory) {
     let learner = row(target.rows, 'dsh-enhanced-assistant-memory-learning')
     if (!learner) {
@@ -327,7 +379,11 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-growth-driver', true)
   replaceNode(target.document, required(target.rows, 'dsh-enhanced-assistant-growth-driver'), 'config', input.manifest.growthDriver)
   cloneEffectiveConfig(target, effective, 'dsh-enhanced-plugin-control-plane')
-  replaceNode(target.document, required(target.rows, 'dsh-enhanced-plugin-control-plane'), 'config', cp)
+  // Native review authorities share immutable runtime descriptors in memory.
+  // Emit independent YAML values so a subsequent raw Loader digest has no aliases.
+  const nativeCp = 'backend' in cp.sourceBuild && cp.sourceBuild.backend === 'linux-native'
+  required(target.rows, 'dsh-enhanced-plugin-control-plane').set('config', target.document.createNode(cp,
+    { aliasDuplicateObjects: !nativeCp }))
 
   // Coordinator is intentionally sparse. Base rows must match the installed
   // base patch exactly, while enhanced rows are an explicit three-bundle set.

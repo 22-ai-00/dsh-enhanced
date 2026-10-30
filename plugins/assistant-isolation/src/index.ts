@@ -13,6 +13,8 @@ export { runLinuxNamespace, type LinuxNamespaceInput, type LinuxNamespaceResult,
 export { runLinuxRepositoryNamespace, type LinuxRepositoryNamespaceInput, type LinuxRepositoryNamespaceResult } from './linux-namespace.js'
 export { LinuxCgroupLease, type LinuxCgroupRoots, type LinuxCgroupLimits, type LinuxCgroupIdentity, type LinuxCgroupSnapshot } from './linux-cgroups.js'
 export { LinuxVerifierRunner, type LinuxVerifierRunnerConfig } from './linux-verifier-runner.js'
+export { prepareLinuxRunnerState, inspectLinuxRunnerState, validateLinuxRunnerStateSeal,
+  type LinuxRunnerStateSeal } from './linux-runner-state.js'
 export { consumeLinuxRepositoryAdmissionRefusal } from './linux-repository-admission.js'
 export { LinuxRepositoryRunner, type LinuxRepositoryRunnerConfig, type LinuxRepositoryRunnerRequest, type LinuxRepositoryRunnerResult } from './linux-repository-runner.js'
 export { prepareLinuxSystemSnapshot, verifyLinuxSystemSnapshot, verifyLinuxSystemSnapshotRuntimeDependencies, type LinuxSystemSnapshot } from './linux-system-snapshot.js'

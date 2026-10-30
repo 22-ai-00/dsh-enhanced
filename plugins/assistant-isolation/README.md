@@ -100,6 +100,23 @@ replay execution after body pruning.
 
 ### Durable native verification
 
+New managed installations can freeze a `stateSeal: { path, sha256 }` on
+`LinuxVerifierRunnerConfig` and `LinuxRepositoryRunnerConfig`. Before issuing
+owner grants, `prepareLinuxRunnerState({ stateRoot, sealPath, kind })` initializes
+an empty schema 8 ledger and publishes a private seal outside the runner root.
+The caller creates both private directories first. First installation must pass
+`requireEmpty: true`, including when an earlier preparation left a valid seal:
+all business tables and history sequences must still be empty, with no pending
+WAL or shared-memory state. Loss of outer installation files cannot renew an
+already used sealed ledger. The seal binds the purpose,
+owner UID, original directory and database inodes, and fixed schema. Freeze its
+reference in the owner configuration and authority digest. Restart and install
+retry use the existing-only `inspectLinuxRunnerState()`; missing or replaced
+roots, ledgers or seals fail before writable startup. A used unsealed ledger or
+incomplete initialization needs explicit reconciliation. The helper never
+renews grants, clears history or replays unknown jobs. Configurations without a
+seal retain their original behavior and have not acquired this protection.
+
 `IsolatedVerifierRunner` accepts either the existing Docker configuration or an
 explicit `backend: 'linux-native'` configuration with a verified `LinuxRuntime`
 and delegated `cgroupRoots`. `LinuxVerifierRunner` is also exported directly.

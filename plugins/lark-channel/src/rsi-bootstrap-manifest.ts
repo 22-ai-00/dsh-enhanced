@@ -1,7 +1,8 @@
 import { isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { type ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
-import { PROTECTED_PLUGIN_DENYLIST, runtimeConfigDigest, validateHostDeploymentInputs, type RuntimeObserverTarget } from '@dsh-enhanced/plugin-control-plane'
+import { linuxRuntimeDigest } from '@dsh-enhanced/assistant-isolation'
+import { PROTECTED_PLUGIN_DENYLIST, controlPlaneDigest, runtimeConfigDigest, validateHostDeploymentInputs, type RuntimeObserverTarget } from '@dsh-enhanced/plugin-control-plane'
 import { isAlias, isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
 
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
@@ -14,6 +15,10 @@ import { createRsiMemoryLearningSetup } from './rsi-memory-learning.js'
 import { compileRsiPersonalAssistantOptions } from './rsi-profile.js'
 import type { RsiCreationBuildEnvironment } from './rsi-creation-build.js'
 import { createRsiPluginCreationSetup } from './rsi-plugin-creation.js'
+import type { LinuxRsiCreationBuildEnvironment } from './rsi-linux-creation-build.js'
+import { compileRsiLinuxSourceBuild, type RsiLinuxSourceBuildPreparation } from './rsi-linux-source-build.js'
+import { createRsiPluginRevisionSetup } from './rsi-plugin-revision.js'
+import { validateRsiLinuxRunnerStates, type RsiLinuxRunnerStates } from './rsi-linux-runner-states.js'
 
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const pluginPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u
@@ -23,7 +28,9 @@ const mutableRows = new Set(['dsh-enhanced-personal-assistant', 'dsh-enhanced-as
   'dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-memory-learning', 'dsh-enhanced-plugin-control-plane'])
 const day = 86_400_000
 
-export interface RsiBootstrapManifestInput {
+export type RsiBootstrapSourceBuild = RsiBuildEnvironment['sourceBuild'] | RsiLinuxSourceBuildPreparation
+
+export interface RsiBootstrapManifestInput<Build extends RsiBootstrapSourceBuild = RsiBuildEnvironment['sourceBuild']> {
   dshHome: string
   targetProfile: string
   coordinatorProfile: string
@@ -33,9 +40,12 @@ export interface RsiBootstrapManifestInput {
   resources: RsiAuthorityResources
   runtime: RsiAuthorityRuntime
   source: RsiSourceWorkspace
-  sourceBuild: RsiBuildEnvironment['sourceBuild']
-  /** Prepared immutable behavior image; absent for legacy manifests. */
-  creationBuild?: RsiCreationBuildEnvironment
+  sourceBuild: Build
+  /** Prepared immutable behavior environment; absent for legacy manifests. */
+  creationBuild?: RsiCreationBuildEnvironment | LinuxRsiCreationBuildEnvironment
+  /** A retry explicitly preserves the original revision opt-in. */
+  enableRevision?: boolean
+  runnerStates?: RsiLinuxRunnerStates
   git: Pin
   now: number
   expiresAt: number
@@ -102,7 +112,7 @@ export function rawLoaderConfig(node: Node | string | number | boolean | null | 
 }
 
 /** This only creates a candidate deployment contract. It performs no I/O and issues no authority. */
-export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): RsiSetupManifest {
+export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiBootstrapSourceBuild>): RsiSetupManifest {
   canonical(input.dshHome, 'dshHome')
   if (!profilePattern.test(input.targetProfile) || !profilePattern.test(input.coordinatorProfile)
     || input.targetProfile === input.coordinatorProfile) fail('profiles must be distinct valid names')
@@ -117,7 +127,9 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
     || !Number.isSafeInteger(input.owner.owner.version) || input.owner.owner.version < 1) fail('active Lark owner receipt is invalid')
   canonical(input.owner.workspace, 'owner workspace')
   if (!input.resources || input.resources.schemaVersion !== 1 || !input.runtime || input.runtime.schemaVersion !== 1
-    || !input.source || input.source.schemaVersion !== 1 || !input.sourceBuild || input.sourceBuild.versioning !== 'patch') fail('prepared RSI inputs are incomplete')
+    || !input.source || input.source.schemaVersion !== 1 || !input.sourceBuild
+    || !('backend' in input.sourceBuild) && input.sourceBuild.versioning !== 'patch'
+    || input.enableRevision !== undefined && typeof input.enableRevision !== 'boolean') fail('prepared RSI inputs are incomplete')
   for (const [label, path] of [['resource root', input.resources.root], ['state root', input.resources.stateRoot],
     ['config root', input.resources.configRoot], ['source checkout', input.source.repository], ['source release remote', input.source.baseline.remote],
     ['runtime root', input.runtime.root], ['git', input.git?.path]] as const) canonical(path, label)
@@ -181,6 +193,21 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
   const reviewOwner = { authorityId: routeId, authorityHash: resolvedOwner.route.authorityHash, principalId,
     principalRecordId: input.owner.owner.id, principalVersion: input.owner.owner.version,
     workspace: input.owner.workspace, agentPreset: input.owner.agentPreset }
+  const nativeBuild = 'backend' in input.sourceBuild ? input.sourceBuild : undefined
+  const enableRevision = input.enableRevision ?? (nativeBuild !== undefined && input.creationBuild !== undefined)
+  if (nativeBuild && !input.runnerStates) fail('native installation requires frozen runner states')
+  if (!nativeBuild && input.runnerStates) fail('runner states require the native backend')
+  const runnerStates = nativeBuild ? validateRsiLinuxRunnerStates(input.resources, {
+    sourceBuild: input.runnerStates!.sourceBuild,
+    ...(input.creationBuild ? { creationReview: input.runnerStates!.creationReview!, creationAdoption: input.runnerStates!.creationAdoption! } : {}),
+    ...(enableRevision ? { revisionReview: input.runnerStates!.revisionReview!, revisionRegression: input.runnerStates!.revisionRegression! } : {}),
+  }, {
+    creation: input.creationBuild !== undefined, revision: enableRevision,
+  }) : undefined
+  const sourceBuild = nativeBuild ? compileRsiLinuxSourceBuild({ prepared: nativeBuild,
+    resources: input.resources, source: input.source, owner: reviewOwner, now: input.now, expiresAt: input.expiresAt,
+    stateSeal: runnerStates!.sourceBuild })
+    : input.sourceBuild as RsiBuildEnvironment['sourceBuild']
 
   const personal = rows.get('dsh-enhanced-personal-assistant')
   if (!personal || personal.get('disabled') === true || personal.get('name') !== '@dsh-enhanced/personal-assistant') fail('effective personal assistant is missing')
@@ -252,8 +279,9 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
     serviceEnvironment: { target: targetEnvironment, coordinator: { DSH_SYSTEMD_HOST_ATTESTOR_CONFIG: hostPath } },
     controlPlane: {
       catalogPath: input.resources.catalog.path, statePath: join(state, 'control-plane'), trustPath: join(config, 'trust.json'),
-      sourceBuild: { ...input.sourceBuild },
-      sourceJobs: { authorityId: `source-jobs-${installation}`, expiresAt: input.expiresAt, maxSubmissions: 1000,
+      sourceBuild: { ...sourceBuild },
+      sourceJobs: { authorityId: `source-jobs-${installation}`, expiresAt: input.expiresAt,
+        maxSubmissions: nativeBuild ? 48 : 1000,
         repository: input.source.repository, baseline: { ...input.source.baseline }, ...scope,
         budgetId: `rsi-source-${installation}`, budgetAmount: 1 },
       sourceApprovals: client('approval'), sourceReleases: client('release'), sourceReleaseExecution: releaseConfig,
@@ -291,17 +319,42 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
       coordinator: 1440, qualification: 1440 },
   }
   if (input.creationBuild) {
-    if (input.creationBuild.sourceCommit !== input.source.sourceCommit
-      || input.creationBuild.sourceImage !== input.sourceBuild.image
-      || input.creationBuild.dockerPath !== input.sourceBuild.dockerPath) fail('creation image differs from approved source build')
+    if (input.creationBuild.sourceCommit !== input.source.sourceCommit) fail('creation environment differs from approved source build')
+    if (input.creationBuild.schemaVersion === 3) {
+      if (!nativeBuild || input.creationBuild.backend !== 'linux-native'
+        || input.creationBuild.buildRuntimeDigest !== linuxRuntimeDigest(nativeBuild.repository.runtime)
+        || input.creationBuild.behavior.runtime.sourceCommit !== input.source.sourceCommit
+        || input.creationBuild.behavior.runtime.lockSha256 !== nativeBuild.repository.lockSha256
+        || input.creationBuild.behavior.runtime.root.path !== join(state, 'linux-creation-behavior', 'runtime')
+        || !isDeepStrictEqual(input.creationBuild.cgroupRoots, nativeBuild.cgroupRoots)) {
+        fail('creation runtime differs from approved repository build')
+      }
+    } else if ('backend' in sourceBuild || input.creationBuild.sourceImage !== sourceBuild.image
+      || input.creationBuild.dockerPath !== sourceBuild.dockerPath) fail('creation image differs from approved source build')
     const creation = createRsiPluginCreationSetup({ resources: input.resources, build: input.creationBuild,
-      owner: reviewOwner, now: input.now, expiresAt: input.expiresAt })
+      owner: reviewOwner, now: input.now, expiresAt: input.expiresAt,
+      ...(runnerStates ? { stateSeals: { review: runnerStates.creationReview!, adoption: runnerStates.creationAdoption! } } : {}) })
     manifest.pluginCreation = creation
     manifest.controlPlane.sourceJobs!.creation = creation.creation
     manifest.controlPlane.creationVerifications = creation.verifications
     manifest.controlPlane.creationCapabilities = creation.capabilities
     manifest.growthDriver.pluginSourceProposals!.allowCreation = true
   }
+  if (enableRevision) {
+    if (!nativeBuild || input.creationBuild?.schemaVersion !== 3 || !manifest.pluginCreation) {
+      fail('revision requires the complete native creation and adoption setup')
+    }
+    const revision = createRsiPluginRevisionSetup({ resources: input.resources, build: input.creationBuild,
+      owner: reviewOwner, now: input.now, expiresAt: input.expiresAt,
+      stateSeals: { review: runnerStates!.revisionReview!, regression: runnerStates!.revisionRegression! } })
+    manifest.pluginRevision = revision
+    manifest.controlPlane.sourceJobs!.revision = revision.revision
+    manifest.controlPlane.revisionVerifications = revision.verifications
+    manifest.controlPlane.revisionRegressions = revision.regressionVerifications
+    manifest.growthDriver.pluginSourceProposals!.allowRevision = true
+  }
+  if (nativeBuild) manifest.linuxBuild = { schemaVersion: 1, sourceBuildDigest: controlPlaneDigest(sourceBuild),
+    ...(input.creationBuild?.schemaVersion === 3 ? { behaviorRuntimeDigest: controlPlaneDigest(input.creationBuild.behavior) } : {}) }
   // Delivery, Growth and Verifier final options are determined by compileRsiProfiles.
   // Observe their final raw Loader options, not the pre-install dump. Neither
   // embeds runtimeObserver, so there is no configuration-digest cycle.
@@ -315,7 +368,9 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
     { entryId: 'dsh-enhanced-assistant-verifier', module: '@dsh-enhanced/assistant-verifier',
       configDigest: runtimeConfigDigest({ ...verifierRaw, sourceReviews: manifest.sourceReviews,
         memoryReviews: memoryLearning.reviews,
-        ...(manifest.pluginCreation ? { creationReviews: manifest.pluginCreation.reviews } : {}) }), services: ['assistantVerifier'] },
+        ...(manifest.pluginCreation ? { creationReviews: manifest.pluginCreation.reviews } : {}),
+        ...(manifest.pluginRevision ? { revisionReviews: manifest.pluginRevision.reviews,
+          revisionRegressions: manifest.pluginRevision.regressions } : {}) }), services: ['assistantVerifier'] },
     { entryId: 'dsh-enhanced-personal-assistant', module: '@dsh-enhanced/personal-assistant',
       configDigest: runtimeConfigDigest(compileRsiPersonalAssistantOptions({
         effectiveConfig: rawLoaderConfig(personalConfig, 'personal assistant') as Record<string, unknown>,
