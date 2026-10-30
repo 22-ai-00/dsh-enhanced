@@ -171,6 +171,41 @@ test.skipIf(process.platform !== 'linux')('Host update refuses unfinished work b
   expect(await discoverRsiHostUpdateBackups({ homePath: f.home })).toEqual({ approvedBackupNames: [f.backup] })
 }, 120_000)
 
+test.skipIf(process.platform !== 'linux')('Host update signs and verifies a generated runtime receipt over 64 KiB and rejects oversized or changed receipts', async () => {
+  const f = await installedFixture()
+  const stageHome = join(f.f.root, 'large-receipt-stage')
+  await cp(f.home, stageHome, { recursive: true, verbatimSymlinks: true })
+  const libraries = join(stageHome, 'profiles', 'target', 'node_modules', '@dsh-enhanced', 'plugin-control-plane', 'lib')
+  for (let index = 0; index < 100; index++) {
+    await file(join(libraries, `receipt-fixture-${index}-${'x'.repeat(180)}.js`), 'export {}\n')
+  }
+  const proof = await prepareRsiHostUpdate({ homePath: f.home, stageHome, hostPlan: f.hostPlan,
+    unitTransitions: f.unitTransitions, transactionId: 'large-authority-receipt', systemctlExecutable: '/usr/bin/true' })
+  const path = join(stageHome, 'rsi-authority-runtimes', 'target', 'receipt.json')
+  const bytes = await readFile(path)
+  expect(bytes.length).toBeGreaterThan(65_536)
+  expect(proof.installations[0].runtimeReceiptDigest).toBe(hash(bytes))
+  const verify = () => verifyRsiHostUpdate({ homePath: f.home, physicalHome: stageHome, hostPlan: f.hostPlan, proof })
+  await expect(verify()).resolves.toEqual(proof)
+  expect(await readFile(path)).toEqual(bytes)
+
+  const changed = JSON.parse(bytes.toString('utf8'))
+  changed.root = join(f.home, 'rsi-authority-runtimes', 'wrong-profile')
+  await writeFile(path, JSON.stringify(changed))
+  await expect(verify()).rejects.toThrow('receipt digest differs')
+  const { digest: _digest, ...body } = changed
+  changed.digest = hash(JSON.stringify(body))
+  await writeFile(path, JSON.stringify(changed))
+  await expect(verify()).rejects.toThrow('runtime receipt shape differs')
+
+  const oversized = Buffer.concat([bytes, Buffer.alloc(2_097_153 - bytes.length, 0x20)])
+  await writeFile(path, oversized)
+  await expect(verify()).rejects.toThrow('unsafe private file')
+  expect(await readFile(path)).toEqual(oversized)
+  await writeFile(path, bytes)
+  await expect(verify()).resolves.toEqual(proof)
+}, 120_000)
+
 test.skipIf(process.platform !== 'linux')('staged RSI Host maintenance preserves history and used grants across repeated updates and a subsequent adoption', async () => {
   const f = await installedFixture()
   const originalBootstrap = await readFile(join(f.f.input.resources.configRoot, 'bootstrap.json'))

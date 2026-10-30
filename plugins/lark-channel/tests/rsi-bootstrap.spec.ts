@@ -109,7 +109,7 @@ describe.skipIf(process.platform !== 'linux')('owner configuration preparation',
     } finally { await fixture.cleanup() }
   }, 120_000)
 
-  test('pre-stop inspection accepts signed backup profiles and rejects backup or runtime receipt drift', async () => {
+  test('pre-stop inspection and retry accept signed backup profiles with a large runtime receipt and reject drift', async () => {
     const f = await rsiBootstrapFixture()
     try {
       const { manifest, resources } = f.input
@@ -131,7 +131,11 @@ describe.skipIf(process.platform !== 'linux')('owner configuration preparation',
         digests[profile] = sha(source)
       }
       const runtimePath = join(home, 'rsi-authority-runtimes', manifest.targetProfile, 'receipt.json')
-      const runtimeSource = await readFile(runtimePath)
+      // Receipt paths vary with the installed package layout. Keep valid JSON
+      // larger than the former 64 KiB read limit, signed as these exact bytes.
+      const runtimeSource = Buffer.concat([await readFile(runtimePath), Buffer.from(' '.repeat(70_000))])
+      await writeFile(runtimePath, runtimeSource)
+      const runtimeIdentity = await lstat(runtimePath)
       const host = resources.identities.host
       const overlay = signRsiHostUpdateOverlay({ schemaVersion: 1, kind: 'rsi-host-update-overlay',
         transactionId: 'backup-restart', dshHome: home, targetProfile: manifest.targetProfile,
@@ -146,6 +150,9 @@ describe.skipIf(process.platform !== 'linux')('owner configuration preparation',
       const inspect = () => inspectRsiOwnerConfiguration({ manifest, resources, patches,
         signal: new AbortController().signal })
       await expect(inspect()).resolves.toBeUndefined()
+      await expect(prepareRsiOwnerConfiguration(f.input, f)).resolves.toEqual(result)
+      expect(await readFile(runtimePath)).toEqual(runtimeSource)
+      expect((await lstat(runtimePath)).ino).toBe(runtimeIdentity.ino)
       const backupPath = join(home, 'profiles', backup, 'cordis.patch.yml')
       await writeFile(backupPath, '[]\n')
       await expect(inspect()).rejects.toThrow('before stopping Hosts')
