@@ -11,7 +11,7 @@ import { compileRsiAuthorityConfigs, type RsiAuthorityConfigInput } from './rsi-
 import { compileRsiProfiles } from './rsi-profile.js'
 import { validateRsiAuthorities } from './rsi-setup.js'
 import { prepareRsiAuthorityResources } from './rsi-authority-resources.js'
-import { prepareRsiAuthorityRuntime } from './rsi-authority-runtime.js'
+import { prepareRsiAuthorityRuntime, RSI_AUTHORITY_RUNTIME_RECEIPT_MAX_BYTES } from './rsi-authority-runtime.js'
 import { readRsiHostUpdateOverlayChain, type RsiOwnerOverlay } from './rsi-host-update.js'
 import { readRsiSourceMaintenance } from './rsi-source-maintenance.js'
 import { rsiBuildResources as io } from './rsi-build.js'
@@ -114,7 +114,7 @@ export async function inspectRsiOwnerConfiguration(input: {
     if (Object.entries(patchDigests).some(([profile, digest]) => overlay.latest?.patches[profile] !== digest)
       || hash(json({ files: effective.files, patches: overlay.latest.patches })) !== overlay.latest.planDigest
       || overlay.latest.runtimeReceiptDigest !== hash(await privateFile(join(home,
-        'rsi-authority-runtimes', manifest.targetProfile, 'receipt.json'), 65_536)))
+        'rsi-authority-runtimes', manifest.targetProfile, 'receipt.json'), RSI_AUTHORITY_RUNTIME_RECEIPT_MAX_BYTES)))
       fail('signed owner profiles changed before stopping Hosts')
   } else if (hash(json({ files: effective.files, patches })) !== receipt.planDigest) {
     fail('owner receipt digest changed before stopping Hosts')
@@ -236,7 +236,7 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
       if (Object.entries(patchDigests).some(([profile, digest]) => overlay.latest?.patches[profile] !== digest)
         || hash(json({ files: expectedFiles, patches: overlay.latest.patches })) !== overlay.latest.planDigest
         || overlay.latest.runtimeReceiptDigest !== hash(await privateFile(join(home,
-          'rsi-authority-runtimes', manifest.targetProfile, 'receipt.json'), 65_536))) fail('signed Host update differs from compiled configuration')
+          'rsi-authority-runtimes', manifest.targetProfile, 'receipt.json'), RSI_AUTHORITY_RUNTIME_RECEIPT_MAX_BYTES))) fail('signed Host update differs from compiled configuration')
     } else if (hash(json({ files: expectedFiles, patches })) !== receipt.planDigest) fail('owner or compiled profiles changed')
     return result
   }

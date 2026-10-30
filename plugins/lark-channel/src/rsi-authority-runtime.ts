@@ -40,12 +40,20 @@ const EXECUTABLES: Record<Executable, string> = {
   hostAttestor: 'dsh-systemd-host-attestor.js',
 }
 const MAX_ENTRIES = 512, MAX_FILE = 160_000_000, MAX_TOTAL = 256_000_000
+// A finite budget for long installed paths, shared by every receipt reader and writer.
+export const RSI_AUTHORITY_RUNTIME_RECEIPT_MAX_BYTES = 2 * 1024 * 1024
 const CONTRACT_PACKAGE = '@dsh-enhanced/assistant-growth-contract'
 const CONTROL_PACKAGE = '@dsh-enhanced/plugin-control-plane'
 const CONTRACT_ROOT = `node_modules/${CONTRACT_PACKAGE}`
 const RUNTIME_DIRECTORIES = ['bin', 'lib', 'node_modules', 'node_modules/@dsh-enhanced', CONTRACT_ROOT, `${CONTRACT_ROOT}/lib`]
 function fail(message: string): never { throw new Error(`rsi authority runtime: ${message}`) }
 function hash(bytes: Buffer | string): string { return createHash('sha256').update(bytes).digest('hex') }
+function serializeReceipt(runtime: RsiAuthorityRuntime, entries: Entry[]): Buffer {
+  const body = { ...runtime, entries }
+  const bytes = Buffer.from(JSON.stringify({ ...body, digest: hash(JSON.stringify(body)) }))
+  if (bytes.length > RSI_AUTHORITY_RUNTIME_RECEIPT_MAX_BYTES) fail('receipt byte bound exceeded')
+  return bytes
+}
 function exactPath(path: string): boolean { return isAbsolute(path) && resolve(path) === path
   && !path.includes('\0') && !path.includes('\r') && !path.includes('\n') }
 function environment(home: string): NodeJS.ProcessEnv { return { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', HOME: home } }
@@ -257,7 +265,8 @@ async function verifyTree(root: string, entries: Entry[], signal: AbortSignal): 
   await visit(root)
   if (expected.size) fail('deployed asset missing')
   const receipt = await lstat(join(root, 'receipt.json'))
-  if (!receipt.isFile() || receipt.nlink !== 1 || (receipt.mode & 0o777) !== 0o600) fail('unsafe receipt')
+  if (!receipt.isFile() || receipt.nlink !== 1 || (receipt.mode & 0o777) !== 0o600
+    || receipt.size > RSI_AUTHORITY_RUNTIME_RECEIPT_MAX_BYTES) fail('unsafe receipt')
 }
 async function verifyRuntime(runtime: RsiAuthorityRuntime, signal: AbortSignal): Promise<void> {
   const env = environment(runtime.root)
@@ -282,7 +291,7 @@ export async function readRsiAuthorityRuntimeReceipt(input: {
   const { logicalHome, physicalHome, profile } = input
   if (!exactPath(logicalHome) || !exactPath(physicalHome) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(profile)) fail('invalid copied runtime binding')
   const root = join(physicalHome, 'rsi-authority-runtimes', profile)
-  const source = await io.readStable(join(root, 'receipt.json'), 65_536, true)
+  const source = await io.readStable(join(root, 'receipt.json'), RSI_AUTHORITY_RUNTIME_RECEIPT_MAX_BYTES, true)
   const receipt = JSON.parse(source.toString('utf8')) as Receipt
   const { digest, ...body } = receipt
   if (receipt.schemaVersion !== 1 || receipt.root !== join(logicalHome, 'rsi-authority-runtimes', profile)
@@ -323,6 +332,7 @@ export async function replaceRsiAuthorityRuntimeInStage(input: {
       sourceSize: file.bytes.length, sourceMode: file.sourceMode }
   }).sort((a, b) => a.path.localeCompare(b.path))
   const runtime = result(final, entries)
+  const receiptBytes = serializeReceipt(runtime, entries)
   const stage = await mkdtemp(join(parent, `.${input.profile}-update-`))
   const backup = await mkdtemp(join(parent, `.${input.profile}-previous-`))
   await rm(backup, { recursive: true })
@@ -335,8 +345,7 @@ export async function replaceRsiAuthorityRuntimeInStage(input: {
       await writeFile(join(stage, file.path), deployedBytes(file, final), entry.mode)
     }
     await verifySources(source, signal)
-    const body = { ...runtime, entries }
-    await writeFile(join(stage, 'receipt.json'), Buffer.from(JSON.stringify({ ...body, digest: hash(JSON.stringify(body)) })), 0o600)
+    await writeFile(join(stage, 'receipt.json'), receiptBytes, 0o600)
     await verifyTree(stage, entries, signal)
     for (const directory of [...RUNTIME_DIRECTORIES].reverse()) await io.syncDirectory(join(stage, directory))
     await io.syncDirectory(stage)
@@ -389,7 +398,7 @@ export async function prepareRsiAuthorityRuntime(input: { dshHome: string; profi
   const runtime = result(final, entries)
   try {
     await lstat(final)
-    const receipt = JSON.parse((await io.readStable(join(final, 'receipt.json'), 65_536, true)).toString('utf8')) as Receipt
+    const receipt = JSON.parse((await io.readStable(join(final, 'receipt.json'), RSI_AUTHORITY_RUNTIME_RECEIPT_MAX_BYTES, true)).toString('utf8')) as Receipt
     const { digest, ...body } = receipt
     if (hash(JSON.stringify(body)) !== digest || !isDeepStrictEqual(body, { ...runtime, entries })) fail('runtime differs from receipt')
     await verifyTree(final, entries, signal)
@@ -401,6 +410,7 @@ export async function prepareRsiAuthorityRuntime(input: { dshHome: string; profi
     try { await lstat(final); fail('existing runtime is incomplete') }
     catch (found) { if ((found as NodeJS.ErrnoException).code !== 'ENOENT') throw found }
   }
+  const receiptBytes = serializeReceipt(runtime, entries)
   const stage = await mkdtemp(join(parent, `.${input.profile}-stage-`))
   let claimed: { dev: number; ino: number } | undefined
   try {
@@ -412,8 +422,7 @@ export async function prepareRsiAuthorityRuntime(input: { dshHome: string; profi
       await writeFile(join(stage, file.path), deployedBytes(file, final), entry.mode)
     }
     await verifySources(source, signal)
-    const body = { ...runtime, entries }
-    await writeFile(join(stage, 'receipt.json'), Buffer.from(JSON.stringify({ ...body, digest: hash(JSON.stringify(body)) })), 0o600)
+    await writeFile(join(stage, 'receipt.json'), receiptBytes, 0o600)
     for (const directory of [...RUNTIME_DIRECTORIES].reverse()) await io.syncDirectory(join(stage, directory))
     await io.syncDirectory(stage)
     signal.throwIfAborted()

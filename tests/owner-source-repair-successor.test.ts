@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync } from 'node:crypto'
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -10,6 +10,8 @@ import { appendOwnerSourceRepairMaintenance, boundOwnerRepairCandidateRuntimeRec
   selectOwnerRepairPermission, verifyOwnerSourceRepair } from '../scripts/install/owner-source-repair.mjs'
 import { readRsiHostUpdateOverlayChain, rsiHostUpdateOverlayDigest,
   signRsiOwnerRepairOverlay } from '../plugins/lark-channel/src/rsi-host-update.js'
+import { rsiBootstrapFixture } from '../plugins/lark-channel/tests/fixtures/rsi-bootstrap.js'
+import { readRsiAuthorityRuntimeReceipt } from '../plugins/lark-channel/src/rsi-authority-runtime.js'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -81,8 +83,9 @@ test('successor append accepts signed seq1 trust bytes, but rejects staged trust
   expect(stageState.appendCount).toBe(1)
 })
 
-test('successor pre-finalize accepts only an explicitly bound candidate runtime receipt', async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-owner-successor-phases-')))
+test.skipIf(process.platform !== 'linux')('successor pre-finalize accepts a valid signed receipt over 64 KiB only for its bound stage and rejects oversized receipts', async () => {
+  const runtimeFixture = await rsiBootstrapFixture()
+  const root = runtimeFixture.root
   roots.push(root)
   const homePath = join(root, 'home'), stageHome = join(root, 'stage')
   const profile = 'target', coordinatorProfile = 'coordinator'
@@ -94,16 +97,22 @@ test('successor pre-finalize accepts only an explicitly bound candidate runtime 
     await mkdir(dirname(path), { recursive: true, mode: 0o700 })
     await writeFile(path, source, { mode: 0o600 })
   }
-  await mkdir(homePath, { mode: 0o700 })
   await mkdir(stageHome, { mode: 0o700 })
   await mkdir(join(stageHome, 'rsi-authorities', profile, 'state'), { recursive: true, mode: 0o700 })
   const bootstrapSource = '{"bootstrap":true}\n'
   const journalSource = '{"stage":"applied"}\n'
   const creationSource = '{"creation":true}\n'
   const manifestSource = '{"version":"first-repair"}\n'
-  const oldRuntimeSource = '{"runtime":"old"}\n'
-  const candidateRuntimeSource = '{"runtime":"candidate"}\n'
+  await cp(join(homePath, 'rsi-authority-runtimes'), join(stageHome, 'rsi-authority-runtimes'), { recursive: true })
   const runtimePath = join(stageHome, 'rsi-authority-runtimes', profile, 'receipt.json')
+  const originalRuntimeSource = await readFile(runtimePath, 'utf8')
+  // JSON whitespace preserves the writer's body digest; the signed overlay below binds these exact large bytes.
+  const oldRuntimeSource = `${originalRuntimeSource}${' '.repeat(70_000)}`
+  const candidateRuntimeSource = `${oldRuntimeSource}\n`
+  await writeFile(runtimePath, oldRuntimeSource)
+  expect(Buffer.byteLength(oldRuntimeSource)).toBeGreaterThan(65_536)
+  const validated = await readRsiAuthorityRuntimeReceipt({ logicalHome: homePath, physicalHome: stageHome, profile })
+  expect(validated.receiptDigest).toBe(sha(oldRuntimeSource))
   const manifestPath = join(configRoot, 'manifest.json')
   const files: Record<string, string> = { [manifestPath]: manifestSource,
     [join(configRoot, 'trust.json')]: '{"version":"first-repair"}\n' }
@@ -163,6 +172,12 @@ test('successor pre-finalize accepts only an explicitly bound candidate runtime 
     .resolves.toMatchObject({ phase: 'before-finalize' })
   await expect(verifyOwnerSourceRepair({ ...input, candidateRuntimeReceiptDigest: sha('wrong candidate') }))
     .rejects.toThrow('owner runtime receipt differs from the selected stage')
+  const oversized = `${candidateRuntimeSource}${' '.repeat(2_097_153 - Buffer.byteLength(candidateRuntimeSource))}`
+  await writeFile(runtimePath, oversized)
+  await expect(verifyOwnerSourceRepair({ ...input, candidateRuntimeReceiptDigest: sha(oversized) }))
+    .rejects.toThrow('unsafe file')
+  expect(await readFile(runtimePath, 'utf8')).toBe(oversized)
+  await writeFile(runtimePath, candidateRuntimeSource)
   await expect(verifyOwnerSourceRepair({ ...input, phase: 'original' }))
     .rejects.toThrow('owner runtime receipt differs from the selected stage')
   await expect(verifyOwnerSourceRepair({ ...input, ownerRepair: { ...ownerRepair,
@@ -179,7 +194,7 @@ test('successor pre-finalize accepts only an explicitly bound candidate runtime 
   await writeFile(join(physicalConfig, 'bootstrap.json'), '{"bootstrap":false}\n')
   await expect(verifyOwnerSourceRepair({ ...input, candidateRuntimeReceiptDigest: sha(candidateRuntimeSource) }))
     .rejects.toThrow('original owner bootstrap or journal changed')
-})
+}, 120_000)
 
 test('successor keeps the already selected permission preset instead of resetting authority', () => {
   const effective = `- id: permission

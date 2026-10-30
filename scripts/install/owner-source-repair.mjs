@@ -764,7 +764,7 @@ export async function captureOwnerSourceRepair({ homePath, profile, installer, p
   const releaseAuthority = parsed(files[join(config, 'release.json')], 'release authority')
   const trust = parsed(files[join(config, 'trust.json')], 'owner trust')
   const runtimeReceiptPath = join(homePath, 'rsi-authority-runtimes', profile, 'receipt.json')
-  const runtimeReceiptDigest = hash(await stable(runtimeReceiptPath, 65_536))
+  const runtimeReceiptDigest = hash(await stable(runtimeReceiptPath))
   const sourceDigest = hash(json(sourceState))
   const original = { resources, runtime, source, sourceDigest, sourceState, owner, ownerSnapshot,
     manifest, manifestSource, receipt, receiptSource, journal, journalSource, files, patches,
@@ -841,7 +841,7 @@ export async function captureOwnerSourceRepairSuccessor({ predecessorProof, home
   const creationSource = (await stable(creationPath, 65_536)).toString('utf8')
   if (hash(creationSource) !== latest.repair.after.creationReceiptDigest) fail('successor creation receipt changed')
   const runtimeReceiptPath = join(homePath, 'rsi-authority-runtimes', profile, 'receipt.json')
-  const runtimeReceiptDigest = hash(await stable(runtimeReceiptPath, 65_536))
+  const runtimeReceiptDigest = hash(await stable(runtimeReceiptPath))
   if (runtimeReceiptDigest !== latest.runtimeReceiptDigest) fail('successor runtime receipt changed')
   const patches = {}, environments = {}, units = {}
   for (const [index, name] of [profile, previous.coordinatorProfile].entries()) {
@@ -992,7 +992,7 @@ export async function verifyOwnerSourceRepair({ ownerRepair, ownerRepairNext, ho
     await assertIssuerStateAbsent({ resources: original.resources, files: original.files,
       homePath, physicalHome })
     const runtimeReceiptPath = join(physicalHome, 'rsi-authority-runtimes', ownerRepair.profile, 'receipt.json')
-    if (hash(await stable(runtimeReceiptPath, 65_536))
+    if (hash(await stable(runtimeReceiptPath))
       !== (candidateRuntimeReceiptDigest ?? original.runtimeReceiptDigest)) {
       fail('owner runtime receipt differs from the selected stage')
     }
@@ -1054,7 +1054,7 @@ export async function verifyOwnerSourceRepair({ ownerRepair, ownerRepairNext, ho
       || hash(await stable(join(physicalHome, 'rsi-creation-builds', ownerRepair.profile,
         'bootstrap.json'), 65_536)) !== overlay.repair.after.creationReceiptDigest
       || hash(await stable(join(physicalHome, 'rsi-authority-runtimes', ownerRepair.profile,
-        'receipt.json'), 65_536)) !== overlay.runtimeReceiptDigest) fail('signed owner repair successor differs')
+        'receipt.json'))) !== overlay.runtimeReceiptDigest) fail('signed owner repair successor differs')
     for (const [name, digest] of Object.entries(overlay.patches)) {
       if (hash(await stable(join(physicalHome, 'profiles', name, 'cordis.patch.yml'),
         2_097_152, false)) !== digest) fail('signed repaired patch changed')

@@ -340,7 +340,7 @@ async function authorityStateCas({ config, oldConfig, oldTrustDigest, newTrustDi
 async function verifyRuntimeReceiptPhysical(homePath, physicalHome, profile) {
   const logicalRoot = join(homePath, 'rsi-authority-runtimes', profile)
   const root = physical(homePath, physicalHome, logicalRoot)
-  const source = await privateBytes(join(root, 'receipt.json'), 65_536)
+  const source = await privateBytes(join(root, 'receipt.json'))
   const receipt = JSON.parse(source.toString('utf8'))
   receiptBody(receipt, 'digest')
   if (receipt.schemaVersion !== 1 || receipt.root !== logicalRoot || !Array.isArray(receipt.entries)

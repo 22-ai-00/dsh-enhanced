@@ -8,7 +8,8 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { parseDocument, stringify } from 'yaml'
 import { loadTrustConfig } from '@dsh-enhanced/plugin-control-plane'
-import { prepareRsiAuthorityRuntime, replaceRsiAuthorityRuntimeInStage } from '../src/rsi-authority-runtime.js'
+import { prepareRsiAuthorityRuntime, readRsiAuthorityRuntimeReceipt, replaceRsiAuthorityRuntimeInStage,
+  RSI_AUTHORITY_RUNTIME_RECEIPT_MAX_BYTES } from '../src/rsi-authority-runtime.js'
 import { rsiBuildResources as io } from '../src/rsi-build.js'
 import { createRsiAuthorityFixture } from './fixtures/rsi-authorities.js'
 
@@ -43,6 +44,14 @@ async function fixture() {
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
 const CONTROL_PACKAGE = '@dsh-enhanced/plugin-control-plane'
 const CONTRACT_PACKAGE = '@dsh-enhanced/assistant-growth-contract'
+
+async function moveToLongSourcePath(f: Awaited<ReturnType<typeof fixture>>, length: number): Promise<string> {
+  let packageRoot = join(f.root, 'long-source')
+  while (packageRoot.length < length) packageRoot = join(packageRoot, 'p'.repeat(Math.max(1, Math.min(200, length - packageRoot.length - 1))))
+  await mkdir(dirname(packageRoot), { recursive: true, mode: 0o700 })
+  await rename(f.packageRoot, packageRoot)
+  return packageRoot
+}
 
 async function managedHoistedProfile(f: Awaited<ReturnType<typeof fixture>>) {
   const profileRoot = join(f.home, 'profiles', 'owner')
@@ -108,6 +117,64 @@ test('copied Linux authority modules load and invoke without the Mac isolation p
 })
 
 describe.skipIf(process.platform !== 'linux')('private authority runtime', () => {
+  test('replays a generated receipt larger than 64 KiB without changing bytes, inodes or pins', async () => {
+    const f = await fixture()
+    const packageRoot = await moveToLongSourcePath(f, 650)
+    const runtime = await prepareRsiAuthorityRuntime(f.input, { packageRoot })
+    const receiptPath = join(f.final, 'receipt.json'), bytes = await readFile(receiptPath)
+    expect(bytes.length).toBeGreaterThan(65_536)
+    const paths = [f.final, receiptPath, runtime.node.path, ...Object.values(runtime.executables).map(pin => pin.path),
+      ...Object.values(runtime.releaseAdapters).map(pin => pin.path)]
+    const identities = await Promise.all(paths.map(async path => {
+      const item = await lstat(path)
+      return { dev: item.dev, ino: item.ino, mode: item.mode, nlink: item.nlink }
+    }))
+    expect(await prepareRsiAuthorityRuntime(f.input, { packageRoot })).toEqual(runtime)
+    expect(await readFile(receiptPath)).toEqual(bytes)
+    expect(await Promise.all(paths.map(async path => {
+      const item = await lstat(path)
+      return { dev: item.dev, ino: item.ino, mode: item.mode, nlink: item.nlink }
+    }))).toEqual(identities)
+    expect(await readRsiAuthorityRuntimeReceipt({ logicalHome: f.home, physicalHome: f.home, profile: 'owner' }))
+      .toEqual({ runtime, receiptDigest: sha(bytes) })
+    expect(await replaceRsiAuthorityRuntimeInStage({ logicalHome: f.home, physicalHome: f.home, profile: 'owner' },
+      { packageRoot })).toEqual(runtime)
+    expect(await readFile(receiptPath)).toEqual(bytes)
+  }, 120_000)
+
+  test('rejects oversized generated receipts before installation or stage replacement and bounds both readers', async () => {
+    const f = await fixture()
+    await prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot })
+    const receiptPath = join(f.final, 'receipt.json'), bytes = await readFile(receiptPath)
+    const identity = await lstat(receiptPath), nodeIdentity = await lstat(join(f.final, 'node'))
+    const packageRoot = await moveToLongSourcePath(f, 3800)
+    const libraries = (await readdir(join(packageRoot, 'lib'))).filter(name => name.endsWith('.js'))
+    const contractLibraries = (await readdir(join(packageRoot, 'node_modules', CONTRACT_PACKAGE, 'lib')))
+      .filter(name => name.endsWith('.js'))
+    // Stay below the 512-entry bound while making actual serialized source paths exceed the byte budget.
+    for (let index = 18 + libraries.length + contractLibraries.length; index < 500; index++) {
+      await writeFile(join(packageRoot, 'lib', `extra-${index}-${'x'.repeat(215)}.js`), 'export {}\n')
+    }
+    const freshHome = join(f.root, 'fresh-home')
+    await mkdir(freshHome, { mode: 0o700 })
+    await expect(prepareRsiAuthorityRuntime({ dshHome: freshHome, profile: 'owner' }, { packageRoot }))
+      .rejects.toThrow('receipt byte bound exceeded')
+    expect(await readdir(join(freshHome, 'rsi-authority-runtimes'))).toEqual([])
+    await expect(replaceRsiAuthorityRuntimeInStage({ logicalHome: f.home, physicalHome: f.home, profile: 'owner' },
+      { packageRoot })).rejects.toThrow('receipt byte bound exceeded')
+    expect(await readdir(join(f.home, 'rsi-authority-runtimes'))).toEqual(['owner'])
+    expect(await readFile(receiptPath)).toEqual(bytes)
+    expect(await lstat(receiptPath)).toMatchObject({ dev: identity.dev, ino: identity.ino })
+    expect(await lstat(join(f.final, 'node'))).toMatchObject({ dev: nodeIdentity.dev, ino: nodeIdentity.ino })
+    const oversized = Buffer.concat([bytes, Buffer.alloc(RSI_AUTHORITY_RUNTIME_RECEIPT_MAX_BYTES + 1 - bytes.length, 0x20)])
+    await writeFile(receiptPath, oversized)
+    await expect(readRsiAuthorityRuntimeReceipt({ logicalHome: f.home, physicalHome: f.home, profile: 'owner' }))
+      .rejects.toThrow('unsafe file')
+    await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot })).rejects.toThrow('unsafe file')
+    expect(await readFile(receiptPath)).toEqual(oversized)
+    expect(await lstat(receiptPath)).toMatchObject({ dev: identity.dev, ino: identity.ino })
+  }, 120_000)
+
   test('copies runnable official assets, returns trust-compatible private pins, and replays identically', async () => {
     const f = await fixture()
     const result = await prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot })
