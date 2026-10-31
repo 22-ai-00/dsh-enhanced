@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { constants, createReadStream, type Stats } from 'node:fs'
-import { chmod, lstat, mkdir, open, readdir, readlink, realpath, symlink,
+import { chmod, lstat, mkdir, open, readdir, readFile, readlink, realpath, symlink,
   type FileHandle } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -28,6 +28,7 @@ export interface LinuxRsiNativeRelocationInput {
 
 export interface LinuxRsiNativeRelocationElement {
   name: 'runtime' | 'repository-runtime' | 'system' | 'behavior-runtime'
+    | 'release-toolchain' | 'release-store' | 'release-cache'
   logicalPath: string
   physicalPath: string
   dev: number
@@ -46,7 +47,10 @@ export interface LinuxRsiNativeRelocationProof {
   logicalHome: string
   behaviorRootRelative: string
   elements: LinuxRsiNativeRelocationElement[]
-  digests: { runtime: string; repository: string; behavior: string; creation: string; relocation: string }
+  digests: {
+    runtime: string; repository: string; behavior: string; creation: string; release: string
+    relocation: string
+  }
 }
 
 type JsonObject = Record<string, unknown>
@@ -70,6 +74,7 @@ interface SourceState {
   behavior: LinuxPluginBehaviorRuntime
   behaviorReceipt: JsonObject
   creationReceipt: JsonObject
+  releaseReceipt: JsonObject
 }
 
 const PEER_SPECIFIER = '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
@@ -81,7 +86,8 @@ const MAX_ENTRIES = 500_000
 const MAX_BYTES = 8 * 1024 ** 3
 const MAX_RECEIPT_BYTES = 4 * 1024 * 1024
 const CHUNK = 64 * 1024
-const ELEMENT_NAMES: readonly ElementName[] = ['runtime', 'repository-runtime', 'system', 'behavior-runtime']
+const ELEMENT_NAMES: readonly ElementName[] = ['runtime', 'repository-runtime', 'system', 'behavior-runtime',
+  'release-toolchain', 'release-store', 'release-cache']
 
 function fail(message: string): never { throw new Error(`rsi Linux native relocation: ${message}`) }
 const sha = (value: Buffer | string): string => createHash('sha256').update(value).digest('hex')
@@ -235,6 +241,9 @@ const repositoryRuntimeRelative = (profile: string): string => `rsi-linux-reposi
 const systemRelative = (profile: string): string => `rsi-linux-repository-runtimes/${profile}/system`
 const behaviorRelative = (profile: string): string => `rsi-authorities/${profile}/state/linux-creation-behavior/runtime`
 const creationRelative = (profile: string): string => `rsi-linux-creation-builds/${profile}`
+const releaseRelative = (profile: string): string => `rsi-release-builds/${profile}`
+const releaseTreeRelative = (profile: string, name: 'cache' | 'store' | 'toolchain'): string =>
+  `${releaseRelative(profile)}/${name}`
 const runtimeFamily = (profile: string): string => `rsi-linux-runtimes/${profile}`
 const repositoryFamily = (profile: string): string => `rsi-linux-repository-runtimes/${profile}`
 const authorityFamily = (profile: string): string => `rsi-authorities/${profile}`
@@ -248,6 +257,9 @@ function relativeOf(name: ElementName, profile: string): string {
     case 'repository-runtime': return repositoryRuntimeRelative(profile)
     case 'system': return systemRelative(profile)
     case 'behavior-runtime': return behaviorRelative(profile)
+    case 'release-toolchain': return releaseTreeRelative(profile, 'toolchain')
+    case 'release-store': return releaseTreeRelative(profile, 'store')
+    case 'release-cache': return releaseTreeRelative(profile, 'cache')
   }
 }
 
@@ -320,6 +332,147 @@ async function treeMeta(path: string, root: JsonObject, signal: AbortSignal | un
   const recorded = stringField(root, 'sha256', 'invalid recorded root')
   if (!HEX.test(recorded) || await hashTree(path, signal, 'source tree differs') !== recorded) {
     fail('source tree digest differs')
+  }
+}
+
+/** The release build pins are sealed content digests produced by the Control
+ * Plane release adapter, which canonicalises keys and sorts directory entries.
+ * Re-deriving them here authenticates the source trees before they are copied
+ * and proves the copy carries exactly the pinned bytes after it. */
+function canonicalReleaseValue(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalReleaseValue).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.entries(value as JsonObject).filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalReleaseValue(item)}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+const RELEASE_PIN_MAX_BYTES = 268_435_456
+
+async function releaseInventory(path: string, signal: AbortSignal | undefined): Promise<string> {
+  checkAbort(signal)
+  const owner = process.getuid?.()
+  const root = await realpath(path)
+  if (root !== path) fail('source release tree is not canonical')
+  const info = await lstat(path)
+  if (!info.isDirectory() || info.isSymbolicLink() || info.mode & 0o022
+    || owner !== undefined && info.uid !== owner) fail('unsafe source release tree')
+  const entries: JsonObject[] = []
+  const visit = async (directory: string, prefix: string): Promise<void> => {
+    checkAbort(signal)
+    for (const name of (await readdir(directory)).sort()) {
+      checkAbort(signal)
+      const entryPath = join(directory, name)
+      const entryName = prefix === '' ? name : `${prefix}/${name}`
+      const entry = await lstat(entryPath)
+      if ((!entry.isSymbolicLink() && entry.mode & 0o022)
+        || owner !== undefined && entry.uid !== owner) fail('unsafe source release tree entry')
+      if (entry.isDirectory()) {
+        entries.push({ path: entryName, type: 'directory', mode: entry.mode & 0o777 })
+        await visit(entryPath, entryName)
+      } else if (entry.isFile()) {
+        if (entry.size > RELEASE_PIN_MAX_BYTES) fail('source release tree file is oversized')
+        const bytes = await readFile(entryPath)
+        entries.push({ path: entryName, type: 'file', mode: entry.mode & 0o777, bytes: bytes.length,
+          sha256: sha(bytes) })
+      } else if (entry.isSymbolicLink()) {
+        const target = await readlink(entryPath)
+        if (isAbsolute(target)) fail('source release tree has an absolute symlink')
+        const resolved = resolve(dirname(entryPath), target)
+        if (resolved !== path && !resolved.startsWith(`${path}/`)) {
+          fail('source release tree has an escaping symlink')
+        }
+        entries.push({ path: entryName, type: 'symlink', target })
+      } else fail('source release tree has an unsupported entry')
+    }
+  }
+  await visit(path, '')
+  return sha(canonicalReleaseValue(entries))
+}
+
+async function pinnedExecutableDigest(path: string, signal: AbortSignal | undefined): Promise<string> {
+  checkAbort(signal)
+  const owner = process.getuid?.()
+  const info = await lstat(path)
+  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size < 1
+    || info.mode & 0o022 || (info.mode & 0o111) === 0 || owner !== undefined && info.uid !== owner && info.uid !== 0
+    || await realpath(path) !== path) fail('unsafe source release executable')
+  if (info.size > RELEASE_PIN_MAX_BYTES) fail('source release executable is oversized')
+  return sha(await readFile(path))
+}
+
+function releasePin(value: unknown, message: string): { path: string; sha256: string } {
+  const item = object(value, message)
+  exactKeys(item, ['path', 'sha256'], message)
+  const path = stringField(item, 'path', message)
+  if (!canonical(path)) fail(message)
+  return { path, sha256: hexField(item, 'sha256', message) }
+}
+
+interface ReleasePins {
+  sandboxExecutable: { path: string; sha256: string }
+  tarExecutable: { path: string; sha256: string }
+  nodeExecutable: { path: string; sha256: string }
+  pnpmExecutable: { path: string; sha256: string }
+  pnpmRoot: { path: string; sha256: string }
+  storeRoot: { path: string; sha256: string }
+  cacheRoot: { path: string; sha256: string }
+}
+
+const RELEASE_PIN_KEYS = ['cacheRoot', 'nodeExecutable', 'pnpmExecutable', 'pnpmRoot', 'sandboxExecutable',
+  'storeRoot', 'tarExecutable'] as const
+
+/** Validate the recorded pin layout against one Home without reading its trees. */
+function releaseLayout(receipt: JsonObject, home: string, profile: string): ReleasePins {
+  const build = object(receipt.releaseBuild, 'source release receipt differs')
+  exactKeys(build, RELEASE_PIN_KEYS, 'source release receipt differs')
+  const pins: ReleasePins = {
+    sandboxExecutable: releasePin(build.sandboxExecutable, 'source release receipt differs'),
+    tarExecutable: releasePin(build.tarExecutable, 'source release receipt differs'),
+    nodeExecutable: releasePin(build.nodeExecutable, 'source release receipt differs'),
+    pnpmExecutable: releasePin(build.pnpmExecutable, 'source release receipt differs'),
+    pnpmRoot: releasePin(build.pnpmRoot, 'source release receipt differs'),
+    storeRoot: releasePin(build.storeRoot, 'source release receipt differs'),
+    cacheRoot: releasePin(build.cacheRoot, 'source release receipt differs'),
+  }
+  if (pins.sandboxExecutable.path !== '/usr/bin/bwrap' || pins.tarExecutable.path !== '/usr/bin/tar'
+    || pins.pnpmRoot.path !== under(home, releaseTreeRelative(profile, 'toolchain'))
+    || pins.storeRoot.path !== under(home, releaseTreeRelative(profile, 'store'))
+    || pins.cacheRoot.path !== under(home, releaseTreeRelative(profile, 'cache'))
+    || pins.nodeExecutable.path !== join(pins.pnpmRoot.path, 'node')
+    || pins.pnpmExecutable.path !== join(pins.pnpmRoot.path, 'pnpm')) {
+    fail('source release receipt differs')
+  }
+  return pins
+}
+
+/** Re-derive every pin from the trees that are about to be copied. */
+async function releasePins(pins: ReleasePins, signal: AbortSignal | undefined): Promise<void> {
+  for (const [label, item, kind] of [
+    ['sandbox', pins.sandboxExecutable, 'executable'],
+    ['tar', pins.tarExecutable, 'executable'],
+    ['node', pins.nodeExecutable, 'executable'],
+    ['pnpm', pins.pnpmExecutable, 'executable'],
+    ['pnpm root', pins.pnpmRoot, 'tree'],
+    ['pnpm store', pins.storeRoot, 'tree'],
+    ['pnpm cache', pins.cacheRoot, 'tree'],
+  ] as const) {
+    const computed = kind === 'executable'
+      ? await pinnedExecutableDigest(item.path, signal)
+      : await releaseInventory(item.path, signal)
+    if (computed !== item.sha256) fail(`source release ${label} differs`)
+  }
+  // The stock release readers re-check these two semantics after the cutover.
+  const manifest = JSON.parse(await readFile(join(pins.pnpmRoot.path, 'package.json'), 'utf8')) as JsonObject
+  const version = stringField(manifest, 'version', 'source release pnpm manifest differs')
+  if (!SEMVER.test(version)) fail('source release pnpm manifest differs')
+  const storeVersion = Number.parseInt(version, 10)
+  const projects = join(pins.storeRoot.path, `v${storeVersion}`, 'projects')
+  const projectsInfo = await lstat(projects).catch(() => undefined)
+  if (projectsInfo === undefined || !projectsInfo.isDirectory() || projectsInfo.isSymbolicLink()) {
+    fail('source release pnpm store registry differs')
   }
 }
 
@@ -429,9 +582,27 @@ async function authenticateSource(home: string, profile: string, peer: LinuxBeha
     fail('source creation receipt differs')
   }
 
+  // The release build pins the fixed toolchain/store/cache trees that the
+  // native runner executes with; its receipt must describe this exact Home and
+  // the base runtime this Home was prepared from.
+  await inventory(under(home, releaseRelative(profile)), ['bootstrap.json', 'cache', 'store', 'toolchain'],
+    'source release family differs')
+  const releaseReceipt = await readReceipt(join(under(home, releaseRelative(profile)), 'bootstrap.json'), true)
+  exactKeys(releaseReceipt, ['backend', 'dshHome', 'profile', 'receiptDigest', 'releaseBuild', 'runtimeDigest',
+    'schemaVersion', 'sourceCommit'], 'source release receipt differs')
+  verifyReceiptDigest(releaseReceipt, 'source release receipt digest differs')
+  const baseRuntimeDigest = linuxRuntimeDigest(runtime)
+  if (releaseReceipt.schemaVersion !== 2 || releaseReceipt.backend !== 'linux-native'
+    || releaseReceipt.dshHome !== home || releaseReceipt.profile !== profile
+    || releaseReceipt.sourceCommit !== sourceCommit || releaseReceipt.runtimeDigest !== baseRuntimeDigest) {
+    fail('source release receipt differs')
+  }
+  const release = releaseLayout(releaseReceipt, home, profile)
+  await releasePins(release, signal)
+
   return {
     runtime, runtimeReceipt, repository, repositoryReceipt, snapshot, userNamespace,
-    behavior, behaviorReceipt, creationReceipt,
+    behavior, behaviorReceipt, creationReceipt, releaseReceipt,
   }
 }
 
@@ -525,7 +696,7 @@ async function copyEntry(source: string, destination: string, root: string, budg
 }
 
 async function copyTree(source: string, destination: string, signal: AbortSignal | undefined,
-  expectedSha256: string): Promise<TreeCopy> {
+  expectedSha256?: string): Promise<TreeCopy> {
   const root = await lstat(source)
   if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== process.getuid?.()
     || await realpath(source) !== source) fail('unsafe source tree')
@@ -533,8 +704,24 @@ async function copyTree(source: string, destination: string, signal: AbortSignal
   await copyDirectory(source, destination, root, source, budget, signal)
   const copied = await lstat(destination)
   const copiedSha256 = await hashTree(destination, signal, 'copied tree differs')
-  if (copiedSha256 !== expectedSha256) fail('copied tree digest differs')
+  if (expectedSha256 !== undefined && copiedSha256 !== expectedSha256) fail('copied tree digest differs')
   return { path: destination, dev: copied.dev, ino: copied.ino, sha256: copiedSha256, ...budget }
+}
+
+/** Re-seal the release receipt against the copied trees: pins only move, the
+ * runtime digest now binds the relocated base runtime. */
+function relocatedReleaseReceipt(source: JsonObject, sourceHome: string, logicalHome: string,
+  baseDigest: string): JsonObject {
+  const receipt = object(relocate(source, sourceHome, logicalHome), 'invalid relocated release receipt')
+  const build = object(receipt.releaseBuild, 'invalid relocated release receipt')
+  exactKeys(build, RELEASE_PIN_KEYS, 'invalid relocated release receipt')
+  for (const key of RELEASE_PIN_KEYS) {
+    const pin = releasePin(build[key], 'invalid relocated release receipt')
+    build[key] = pin
+  }
+  receipt.runtimeDigest = baseDigest
+  receipt.dshHome = logicalHome
+  return seal(receipt)
 }
 
 function setRoot(root: JsonObject, meta: TreeMeta): void {
@@ -630,7 +817,7 @@ function pureIdentity(input: LinuxRsiNativeRelocationInput): void {
 
 async function assertTargetsAbsent(physicalHome: string, profile: string): Promise<void> {
   for (const path of [runtimeFamily(profile), repositoryFamily(profile), authorityFamily(profile),
-    creationRelative(profile)]) {
+    creationRelative(profile), releaseRelative(profile)]) {
     if (await exists(under(physicalHome, path))) fail('relocation target already exists')
   }
 }
@@ -653,6 +840,7 @@ function relocationContent(proof: LinuxRsiNativeRelocationProof): JsonObject {
       repository: proof.digests.repository,
       behavior: proof.digests.behavior,
       creation: proof.digests.creation,
+      release: proof.digests.release,
     },
   }
 }
@@ -687,11 +875,23 @@ export async function relocateLinuxRsiNativeFamily(
   const logicalRepositoryPath = under(logicalHome, repositoryRuntimeRelative(profile))
   const logicalSystemPath = under(logicalHome, systemRelative(profile))
   const logicalBehaviorPath = under(logicalHome, behaviorRelative(profile))
+  const releaseFamilyPath = under(physicalHome, releaseRelative(profile))
+  const releasePaths = {
+    toolchain: under(physicalHome, releaseTreeRelative(profile, 'toolchain')),
+    store: under(physicalHome, releaseTreeRelative(profile, 'store')),
+    cache: under(physicalHome, releaseTreeRelative(profile, 'cache')),
+  }
+  const logicalReleasePaths = {
+    toolchain: under(logicalHome, releaseTreeRelative(profile, 'toolchain')),
+    store: under(logicalHome, releaseTreeRelative(profile, 'store')),
+    cache: under(logicalHome, releaseTreeRelative(profile, 'cache')),
+  }
 
   await makePrivateDirectory(under(physicalHome, runtimeFamily(profile)))
   await makePrivateDirectory(under(physicalHome, repositoryFamily(profile)))
   await makePrivateDirectory(under(physicalHome, behaviorFamily(profile)))
   await makePrivateDirectory(under(physicalHome, creationRelative(profile)))
+  await makePrivateDirectory(releaseFamilyPath)
 
   const runtimeCopy = await copyTree(source.runtime.root.path, runtimePath, signal,
     source.runtime.root.sha256)
@@ -705,6 +905,33 @@ export async function relocateLinuxRsiNativeFamily(
   checkAbort(signal)
   const behaviorCopy = await copyTree(source.behavior.runtime.root.path, behaviorPath, signal,
     source.behavior.runtime.root.sha256)
+  checkAbort(signal)
+
+  // The release trees are sealed by the Control Plane's canonical inventory
+  // digest, not by the runtime tree digest: copy them and immediately prove the
+  // copy against the authenticated pins.
+  const sourcePin = releaseLayout(source.releaseReceipt, sourceHome, profile)
+  const releaseCopies = {
+    toolchain: await copyTree(sourcePin.pnpmRoot.path, releasePaths.toolchain, signal),
+    store: await copyTree(sourcePin.storeRoot.path, releasePaths.store, signal),
+    cache: await copyTree(sourcePin.cacheRoot.path, releasePaths.cache, signal),
+  }
+  checkAbort(signal)
+  for (const [label, copy, pin] of [
+    ['toolchain', releaseCopies.toolchain, sourcePin.pnpmRoot],
+    ['store', releaseCopies.store, sourcePin.storeRoot],
+    ['cache', releaseCopies.cache, sourcePin.cacheRoot],
+  ] as const) {
+    if (await releaseInventory(copy.path, signal) !== pin.sha256) {
+      fail(`copied release ${label} differs`)
+    }
+  }
+  for (const [label, copy, pin] of [
+    ['node', join(releaseCopies.toolchain.path, 'node'), sourcePin.nodeExecutable],
+    ['pnpm', join(releaseCopies.toolchain.path, 'pnpm'), sourcePin.pnpmExecutable],
+  ] as const) {
+    if (await pinnedExecutableDigest(copy, signal) !== pin.sha256) fail(`copied release ${label} differs`)
+  }
   checkAbort(signal)
 
   const runtimeReceipt = relocatedRuntimeReceipt(source.runtimeReceipt, sourceHome, logicalHome,
@@ -736,18 +963,30 @@ export async function relocateLinuxRsiNativeFamily(
     element('repository-runtime', logicalRepositoryPath, repositoryCopy),
     element('system', logicalSystemPath, systemCopy),
     element('behavior-runtime', logicalBehaviorPath, behaviorCopy),
+    element('release-toolchain', logicalReleasePaths.toolchain, releaseCopies.toolchain),
+    element('release-store', logicalReleasePaths.store, releaseCopies.store),
+    element('release-cache', logicalReleasePaths.cache, releaseCopies.cache),
   ]
+  // The release receipt must bind the relocated base runtime while keeping the
+  // logical Home paths the post-cutover stock readers re-derive.
+  const releaseReceipt = relocatedReleaseReceipt(source.releaseReceipt, sourceHome, logicalHome,
+    linuxRuntimeDigest(validateRuntime(object(runtimeReceipt.runtime, 'invalid relocated runtime receipt'))))
+  if (releaseLayout(releaseReceipt, logicalHome, profile).pnpmRoot.path !== logicalReleasePaths.toolchain) {
+    fail('relocated release receipt differs')
+  }
   const digests = {
     runtime: stringField(runtimeReceipt, 'receiptDigest', 'invalid relocated runtime receipt'),
     repository: stringField(repositoryReceipt, 'receiptDigest', 'invalid relocated repository receipt'),
     behavior: stringField(behaviorReceipt, 'receiptDigest', 'invalid relocated behavior receipt'),
     creation: stringField(creationReceipt, 'receiptDigest', 'invalid relocated creation receipt'),
+    release: stringField(releaseReceipt, 'receiptDigest', 'invalid relocated release receipt'),
   }
 
   await writeReceipt(join(under(physicalHome, runtimeFamily(profile)), 'bootstrap.json'), runtimeReceipt)
   await writeReceipt(join(under(physicalHome, repositoryFamily(profile)), 'bootstrap.json'), repositoryReceipt)
   await writeReceipt(join(under(physicalHome, behaviorFamily(profile)), 'behavior.json'), behaviorReceipt)
   await writeReceipt(join(physicalHome, creationRelative(profile), 'bootstrap.json'), creationReceipt)
+  await writeReceipt(join(releaseFamilyPath, 'bootstrap.json'), releaseReceipt)
 
   const proof: LinuxRsiNativeRelocationProof = {
     schemaVersion: 1,
@@ -835,9 +1074,9 @@ function proofShape(proof: LinuxRsiNativeRelocationProof): {
   if (elements.size !== ELEMENT_NAMES.length) fail('invalid relocation proof elements')
 
   const digests = object(record.digests, 'invalid relocation proof digests')
-  exactKeys(digests, ['behavior', 'creation', 'relocation', 'repository', 'runtime'],
+  exactKeys(digests, ['behavior', 'creation', 'release', 'relocation', 'repository', 'runtime'],
     'invalid relocation proof digests')
-  for (const key of ['behavior', 'creation', 'relocation', 'repository', 'runtime']) {
+  for (const key of ['behavior', 'creation', 'release', 'relocation', 'repository', 'runtime']) {
     hexField(digests, key, 'invalid relocation proof digests')
   }
   return { record, elements, digests }
@@ -866,6 +1105,7 @@ interface PhysicalFamily {
   behavior: LinuxPluginBehaviorRuntime
   behaviorReceipt: JsonObject
   creationReceipt: JsonObject
+  releaseReceipt: JsonObject
 }
 
 async function readRelocated(physicalHome: string, profile: string, peer: LinuxBehaviorPeer,
@@ -878,6 +1118,8 @@ async function readRelocated(physicalHome: string, profile: string, peer: LinuxB
     join(under(physicalHome, behaviorFamily(profile)), 'behavior.json'), false)
   const creationReceipt = await readReceipt(
     join(join(physicalHome, creationRelative(profile)), 'bootstrap.json'), false)
+  const releaseReceipt = await readReceipt(
+    join(under(physicalHome, releaseRelative(profile)), 'bootstrap.json'), false)
   const runtimeRuntime = validateRuntime(runtimeReceipt.runtime)
   const repositoryRuntime = validateRuntime(repositoryReceipt.runtime)
   const snapshot = validateSnapshot(repositoryReceipt.systemSnapshot)
@@ -898,9 +1140,12 @@ async function readRelocated(physicalHome: string, profile: string, peer: LinuxB
   if (creationReceipt.schemaVersion !== 3 || creationReceipt.backend !== 'linux-native') {
     fail('relocated creation receipt differs')
   }
+  if (releaseReceipt.schemaVersion !== 2 || releaseReceipt.backend !== 'linux-native') {
+    fail('relocated release receipt differs')
+  }
   return {
     runtime: runtimeReceipt, repository: repositoryReceipt, snapshot, userNamespace,
-    runtimeRuntime, repositoryRuntime, behavior, behaviorReceipt, creationReceipt,
+    runtimeRuntime, repositoryRuntime, behavior, behaviorReceipt, creationReceipt, releaseReceipt,
   }
 }
 
@@ -908,10 +1153,11 @@ function sameTree(root: JsonObject, meta: ElementMeta): boolean {
   return root.dev === meta.dev && root.ino === meta.ino && root.sha256 === meta.sha256
 }
 
-function validateRelocatedReceipts(family: PhysicalFamily, logicalHome: string, profile: string,
-  elements: Map<ElementName, ElementMeta>, peer: LinuxBehaviorPeer, digests: JsonObject): void {
+async function validateRelocatedReceipts(family: PhysicalFamily, logicalHome: string, physicalHome: string,
+  profile: string, elements: Map<ElementName, ElementMeta>, peer: LinuxBehaviorPeer,
+  digests: JsonObject): Promise<void> {
   const { runtime, repository, snapshot, userNamespace, runtimeRuntime, repositoryRuntime, behavior,
-    behaviorReceipt, creationReceipt } = family
+    behaviorReceipt, creationReceipt, releaseReceipt } = family
   const runtimeMeta = elements.get('runtime') ?? fail('invalid relocation proof elements')
   const repositoryMeta = elements.get('repository-runtime') ?? fail('invalid relocation proof elements')
   const systemMeta = elements.get('system') ?? fail('invalid relocation proof elements')
@@ -958,6 +1204,43 @@ function validateRelocatedReceipts(family: PhysicalFamily, logicalHome: string, 
     || creationReceipt.sourceCommit !== repository.sourceCommit
     || creationReceipt.lockSha256 !== repository.lockSha256) fail('relocated creation receipt differs')
   if (digests.creation !== creationReceipt.receiptDigest) fail('relocated creation receipt digest differs')
+
+  // Release build: the pins must describe the logical Home, and re-deriving
+  // them from the physical trees must reproduce the sealed digests.
+  verifyReceiptDigest(releaseReceipt, 'relocated release receipt digest differs')
+  exactKeys(releaseReceipt, ['backend', 'dshHome', 'profile', 'receiptDigest', 'releaseBuild', 'runtimeDigest',
+    'schemaVersion', 'sourceCommit'], 'relocated release receipt differs')
+  const pins = releaseLayout(releaseReceipt, logicalHome, profile)
+  const toolchainMeta = elements.get('release-toolchain') ?? fail('invalid relocation proof elements')
+  const storeMeta = elements.get('release-store') ?? fail('invalid relocation proof elements')
+  const cacheMeta = elements.get('release-cache') ?? fail('invalid relocation proof elements')
+  if (releaseReceipt.dshHome !== logicalHome || releaseReceipt.profile !== profile
+    || releaseReceipt.sourceCommit !== repository.sourceCommit
+    || releaseReceipt.runtimeDigest !== linuxRuntimeDigest(runtimeRuntime)
+    || pins.pnpmRoot.path !== toolchainMeta.logicalPath || pins.storeRoot.path !== storeMeta.logicalPath
+    || pins.cacheRoot.path !== cacheMeta.logicalPath) {
+    fail('relocated release receipt differs')
+  }
+  if (digests.release !== releaseReceipt.receiptDigest) fail('relocated release receipt digest differs')
+  const physicalOf = (path: string): string => {
+    const suffix = relative(logicalHome, path)
+    if (suffix === '' || suffix.startsWith('..') || isAbsolute(suffix)) {
+      fail('relocated release receipt differs')
+    }
+    return under(physicalHome, suffix)
+  }
+  for (const [label, item, kind] of [
+    ['toolchain', pins.pnpmRoot, 'tree'],
+    ['store', pins.storeRoot, 'tree'],
+    ['cache', pins.cacheRoot, 'tree'],
+    ['node', pins.nodeExecutable, 'executable'],
+    ['pnpm', pins.pnpmExecutable, 'executable'],
+  ] as const) {
+    const physical = physicalOf(item.path)
+    const computed = kind === 'tree' ? await releaseInventory(physical, undefined)
+      : await pinnedExecutableDigest(physical, undefined)
+    if (computed !== item.sha256) fail(`relocated release ${label} differs`)
+  }
 }
 
 /** Re-derive a relocation proof from its physical Home without ever reading the
@@ -973,5 +1256,5 @@ export async function verifyLinuxRsiNativeRelocation(proof: LinuxRsiNativeReloca
 
   await verifyCopies(elements)
   const family = await readRelocated(physicalHome, profile, peer, elements)
-  validateRelocatedReceipts(family, logicalHome, profile, elements, peer, digests)
+  await validateRelocatedReceipts(family, logicalHome, physicalHome, profile, elements, peer, digests)
 }

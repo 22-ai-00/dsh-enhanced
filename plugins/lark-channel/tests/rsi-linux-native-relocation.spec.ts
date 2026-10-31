@@ -9,15 +9,21 @@ import { hashLinuxRuntimeTree, linuxRuntimeDigest, verifyLinuxRuntime,
 import type { LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
 import { relocateLinuxRsiNativeFamily, verifyLinuxRsiNativeRelocation,
   type LinuxRsiNativeRelocationElement, type LinuxRsiNativeRelocationProof } from '../src/rsi-linux-native-relocation.js'
+import { readRsiReleaseBuildEnvironment } from '../src/rsi-release-build.js'
 
 const mocks = vi.hoisted(() => ({ validateBehavior: vi.fn(), behaviorDigest: vi.fn() }))
-vi.mock('node:module', async importOriginal => ({
-  ...await importOriginal<typeof import('node:module')>(),
-  createRequire: () => Object.assign(
-    () => ({ validateLinuxPluginBehaviorRuntime: mocks.validateBehavior,
-      linuxPluginBehaviorRuntimeDigest: mocks.behaviorDigest }),
-    { resolve: (specifier: string) => specifier }),
-}))
+const PEER = '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
+vi.mock('node:module', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:module')>()
+  // Only the optional behavior peer is faked; every other resolution (the
+  // Control Plane release adapter used by the stock reader) stays real.
+  return { ...actual,
+    createRequire: (url: string) => Object.assign(
+      () => ({ validateLinuxPluginBehaviorRuntime: mocks.validateBehavior,
+        linuxPluginBehaviorRuntimeDigest: mocks.behaviorDigest }),
+      { resolve: (specifier: string) => specifier === PEER ? specifier : actual.createRequire(url).resolve(specifier) }),
+  }
+})
 
 const linux = test.runIf(process.platform === 'linux')
 const directories: string[] = []
@@ -137,10 +143,75 @@ interface Fixture {
   physicalHome: string
   logicalHome: string
   profile: string
-  trees: { runtime: string; repository: string; system: string; behavior: string }
+  trees: { runtime: string; repository: string; system: string; behavior: string
+    release: { toolchain: string; store: string; cache: string } }
 }
 
-/** Build the four receipt-bound families a prepared Linux-native Home carries. */
+/** Independent mirror of the release adapter's canonical inventory digest. */
+function canonicalRelease(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalRelease).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalRelease(item)}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+async function releaseInventoryDigest(root: string): Promise<string> {
+  const entries: Record<string, unknown>[] = []
+  const visit = async (directory: string, prefix: string): Promise<void> => {
+    for (const name of (await readdir(directory)).sort()) {
+      const path = join(directory, name)
+      const entryName = prefix === '' ? name : `${prefix}/${name}`
+      const info = await lstat(path)
+      if (info.isDirectory()) {
+        entries.push({ path: entryName, type: 'directory', mode: info.mode & 0o777 })
+        await visit(path, entryName)
+      } else if (info.isFile()) {
+        const bytes = await readFile(path)
+        entries.push({ path: entryName, type: 'file', mode: info.mode & 0o777, bytes: bytes.length,
+          sha256: sha(bytes) })
+      } else entries.push({ path: entryName, type: 'symlink', target: await readlink(path) })
+    }
+  }
+  await visit(root, '')
+  return sha(canonicalRelease(entries))
+}
+
+/** Stand-in for a host executable pin when the host does not ship one. */
+async function hostExecutableDigest(path: string, fallback: string): Promise<string> {
+  return sha(await readFile(path).catch(() => Buffer.from(fallback)))
+}
+
+/** A fixed toolchain/store/cache release tree set: the executable pins live in
+ * the toolchain, and the store keeps the pnpm version registry the readers check. */
+async function releaseTrees(profileRoot: string): Promise<{ toolchain: string; store: string; cache: string }> {
+  const toolchain = join(profileRoot, 'toolchain')
+  const store = join(profileRoot, 'store')
+  const cache = join(profileRoot, 'cache')
+  await privateDirectory(toolchain)
+  await privateDirectory(store)
+  await privateDirectory(cache)
+  const nodeScript = '#!/bin/sh\necho v22.23.2\n'
+  await write(join(toolchain, 'node'), nodeScript, 0o555)
+  await write(join(toolchain, 'pnpm'), '#!/bin/sh\necho 11.7.0\n', 0o555)
+  await write(join(toolchain, 'package.json'),
+    JSON.stringify({ name: 'dsh-local-toolchain', version: '11.7.0' }), 0o444)
+  await mkdir(join(toolchain, 'lib', 'bin'), { recursive: true, mode: 0o755 })
+  await chmod(join(toolchain, 'lib', 'bin'), 0o755)
+  await write(join(toolchain, 'lib', 'bin', 'pnpm.cjs'), 'module.exports = 1\n', 0o444)
+  await mkdir(join(store, 'v11', 'projects'), { recursive: true, mode: 0o755 })
+  await chmod(join(store, 'v11'), 0o755)
+  await chmod(join(store, 'v11', 'projects'), 0o755)
+  await write(join(store, 'v11', 'projects', 'registry.json'), '{"projects":[]}\n', 0o444)
+  await mkdir(join(cache, 'metadata'), { recursive: true, mode: 0o755 })
+  await chmod(join(cache, 'metadata'), 0o755)
+  await write(join(cache, 'metadata', 'state.json'), '{"cache":1}\n', 0o444)
+  return { toolchain, store, cache }
+}
+
+/** Build the five receipt-bound families a prepared Linux-native Home carries. */
 async function fixture(): Promise<Fixture> {
   const parent = await mkdtemp(join(await realpath(tmpdir()), 'dsh-linux-relocation-test-'))
   directories.push(parent)
@@ -253,12 +324,40 @@ async function fixture(): Promise<Fixture> {
     behavior: descriptor,
   }))
 
+  // The release build pins the executable toolchain and the pnpm store/cache
+  // that the native runner mounts read-only.
+  const releaseFamily = join(sourceHome, 'rsi-release-builds', PROFILE)
+  await privateDirectory(join(sourceHome, 'rsi-release-builds'))
+  await privateDirectory(releaseFamily)
+  const release = await releaseTrees(releaseFamily)
+  await writeReceipt(join(releaseFamily, 'bootstrap.json'), seal({
+    schemaVersion: 2,
+    backend: 'linux-native',
+    sourceCommit: SOURCE_COMMIT,
+    runtimeDigest: linuxRuntimeDigest(runtime),
+    releaseBuild: {
+      sandboxExecutable: { path: '/usr/bin/bwrap',
+        sha256: await hostExecutableDigest('/usr/bin/bwrap', hex('bwrap')) },
+      tarExecutable: { path: '/usr/bin/tar',
+        sha256: await hostExecutableDigest('/usr/bin/tar', hex('tar')) },
+      nodeExecutable: { path: join(release.toolchain, 'node'),
+        sha256: sha(await readFile(join(release.toolchain, 'node'))) },
+      pnpmExecutable: { path: join(release.toolchain, 'pnpm'),
+        sha256: sha(await readFile(join(release.toolchain, 'pnpm'))) },
+      pnpmRoot: { path: release.toolchain, sha256: await releaseInventoryDigest(release.toolchain) },
+      storeRoot: { path: release.store, sha256: await releaseInventoryDigest(release.store) },
+      cacheRoot: { path: release.cache, sha256: await releaseInventoryDigest(release.cache) },
+    },
+    dshHome: sourceHome,
+    profile: PROFILE,
+  }))
+
   return {
     sourceHome,
     physicalHome: join(parent, 'stage-home'),
     logicalHome: join(parent, 'logical-home'),
     profile: PROFILE,
-    trees,
+    trees: { ...trees, release },
   }
 }
 
@@ -275,8 +374,8 @@ function elementMap(proof: LinuxRsiNativeRelocationProof): Map<string, LinuxRsiN
 
 /** Recompute the relocation digest so narrower checks can be exercised alone. */
 function reseal(proof: LinuxRsiNativeRelocationProof): void {
-  const { runtime, repository, behavior, creation } = proof.digests
-  const content = { ...proof, digests: { runtime, repository, behavior, creation } }
+  const { runtime, repository, behavior, creation, release } = proof.digests
+  const content = { ...proof, digests: { runtime, repository, behavior, creation, release } }
   proof.digests = { ...content.digests, relocation: sha(JSON.stringify(content)) }
 }
 
@@ -302,7 +401,7 @@ async function structuralCopy(source: string, destination: string): Promise<void
 }
 
 describe('rsi Linux native relocation', () => {
-  linux('relocates the four receipt-bound families into a fresh physical Home', async () => {
+  linux('relocates the five receipt-bound families into a fresh physical Home', async () => {
     const ctx = await fixture()
     const before = await hashLinuxRuntimeTree(ctx.trees.runtime)
     const proof = await relocate(ctx)
@@ -320,8 +419,12 @@ describe('rsi Linux native relocation', () => {
       'repository-runtime': 'rsi-linux-repository-runtimes/unit/runtime',
       system: 'rsi-linux-repository-runtimes/unit/system',
       'behavior-runtime': 'rsi-authorities/unit/state/linux-creation-behavior/runtime',
+      'release-toolchain': 'rsi-release-builds/unit/toolchain',
+      'release-store': 'rsi-release-builds/unit/store',
+      'release-cache': 'rsi-release-builds/unit/cache',
     }
-    expect([...elements.keys()]).toEqual(['runtime', 'repository-runtime', 'system', 'behavior-runtime'])
+    expect([...elements.keys()]).toEqual(['runtime', 'repository-runtime', 'system', 'behavior-runtime',
+      'release-toolchain', 'release-store', 'release-cache'])
     for (const [name, suffix] of Object.entries(expected)) {
       const item = elements.get(name)!
       expect(item.physicalPath).toBe(join(ctx.physicalHome, suffix))
@@ -363,9 +466,23 @@ describe('rsi Linux native relocation', () => {
     expect(creationReceipt.dshHome).toBe(ctx.logicalHome)
     expect(receiptDigest(creationReceipt)).toBe(proof.digests.creation)
 
-    const { runtime: r, repository: p, behavior: b, creation: c } = proof.digests
+    const releaseReceipt = await readJson(homePath(ctx.physicalHome, 'rsi-release-builds/unit/bootstrap.json'))
+    expect(releaseReceipt.dshHome).toBe(ctx.logicalHome)
+    expect(releaseReceipt.runtimeDigest).toBe(linuxRuntimeDigest(
+      runtimeReceipt.runtime as LinuxRuntime))
+    expect(receiptDigest(releaseReceipt)).toBe(proof.digests.release)
+    const releaseBuild = releaseReceipt.releaseBuild as Record<string, { path: string; sha256: string }>
+    expect(releaseBuild.sandboxExecutable!.path).toBe('/usr/bin/bwrap')
+    expect(releaseBuild.pnpmRoot!.path).toBe(join(ctx.logicalHome, 'rsi-release-builds/unit/toolchain'))
+    expect(releaseBuild.storeRoot!.path).toBe(join(ctx.logicalHome, 'rsi-release-builds/unit/store'))
+    expect(releaseBuild.cacheRoot!.path).toBe(join(ctx.logicalHome, 'rsi-release-builds/unit/cache'))
+    expect(await releaseInventoryDigest(homePath(ctx.physicalHome, 'rsi-release-builds/unit/store')))
+      .toBe(releaseBuild.storeRoot!.sha256)
+
+    const { runtime: r, repository: p, behavior: b, creation: c, release: l } = proof.digests
     expect(proof.digests.relocation)
-      .toBe(sha(JSON.stringify({ ...proof, digests: { runtime: r, repository: p, behavior: b, creation: c } })))
+      .toBe(sha(JSON.stringify({ ...proof,
+        digests: { runtime: r, repository: p, behavior: b, creation: c, release: l } })))
     await verifyLinuxRsiNativeRelocation(proof)
     expect(await lstat(ctx.logicalHome).then(() => true, () => false)).toBe(false)
   })
@@ -379,6 +496,22 @@ describe('rsi Linux native relocation', () => {
     await expect(verifyLinuxRuntime(receipt.runtime as LinuxRuntime)).resolves.toMatchObject({ backend: 'linux-native' })
     const repository = await readJson(join(ctx.logicalHome, 'rsi-linux-repository-runtimes/unit/bootstrap.json'))
     await expect(verifyLinuxRuntime(repository.runtime as LinuxRuntime)).resolves.toMatchObject({ backend: 'linux-native' })
+  })
+
+  linux('accepts the relocated release family through the stock reader after the cutover rename', async () => {
+    const ctx = await fixture()
+    const proof = await relocate(ctx)
+    await verifyLinuxRsiNativeRelocation(proof)
+    await rename(ctx.physicalHome, ctx.logicalHome)
+    const runtime = (await readJson(join(ctx.logicalHome, 'rsi-linux-runtimes/unit/bootstrap.json')))
+      .runtime as LinuxRuntime
+    const release = await readRsiReleaseBuildEnvironment({
+      dshHome: ctx.logicalHome, profile: PROFILE,
+      build: { schemaVersion: 3, backend: 'linux-native', sourceCommit: SOURCE_COMMIT,
+        lockSha256: runtime.lockSha256, runtime },
+    })
+    expect(release).toMatchObject({ schemaVersion: 2, backend: 'linux-native',
+      sourceCommit: SOURCE_COMMIT, runtimeDigest: linuxRuntimeDigest(runtime) })
   })
 
   linux('refuses an existing target family directory', async () => {
@@ -423,6 +556,49 @@ describe('rsi Linux native relocation', () => {
     await write(join(ctx.sourceHome, 'outside-secret'), 'outside', 0o600)
     await symlink(join(ctx.sourceHome, 'outside-secret'), join(ctx.trees.runtime, 'escape'))
     await expectFailure(relocate(ctx), 'source tree differs')
+  })
+
+  linux('refuses a missing release build family', async () => {
+    const ctx = await fixture()
+    await rm(join(ctx.sourceHome, 'rsi-release-builds'), { recursive: true, force: true })
+    await expectFailure(relocate(ctx), 'source release family differs')
+  })
+
+  linux('refuses a source release pin that no longer matches its tree', async () => {
+    const ctx = await fixture()
+    const path = homePath(ctx.sourceHome, 'rsi-release-builds/unit/bootstrap.json')
+    const receipt = await readJson(path)
+    const build = receipt.releaseBuild as Record<string, { path: string; sha256: string }>
+    build.storeRoot!.sha256 = hex('tampered-store')
+    await writeReceipt(path, seal(receipt))
+    await expectFailure(relocate(ctx), 'source release pnpm store differs')
+  })
+
+  linux('refuses a source release receipt that records another Home', async () => {
+    const ctx = await fixture()
+    const path = homePath(ctx.sourceHome, 'rsi-release-builds/unit/bootstrap.json')
+    const receipt = await readJson(path)
+    receipt.dshHome = join(ctx.sourceHome, 'elsewhere')
+    await writeReceipt(path, seal(receipt))
+    await expectFailure(relocate(ctx), 'source release receipt differs')
+  })
+
+  linux('rejects a relocated release receipt whose recorded Home was rewritten', async () => {
+    const ctx = await fixture()
+    const proof = await relocate(ctx)
+    const path = homePath(ctx.physicalHome, 'rsi-release-builds/unit/bootstrap.json')
+    const receipt = await readJson(path)
+    receipt.dshHome = ctx.sourceHome
+    await writeReceipt(path, receipt)
+    await expectFailure(verifyLinuxRsiNativeRelocation(proof), 'relocated release receipt digest differs')
+  })
+
+  linux('rejects byte tampering of a copied release tree', async () => {
+    const ctx = await fixture()
+    const proof = await relocate(ctx)
+    await write(homePath(ctx.physicalHome, 'rsi-release-builds/unit/store/v11/projects/registry.json'),
+      '{"projects":["tampered"]}\n', 0o444)
+    await expectFailure(verifyLinuxRsiNativeRelocation(proof), 'relocated tree differs')
   })
 
   linux('rejects byte tampering of a copied tree', async () => {
@@ -497,6 +673,9 @@ describe('rsi Linux native relocation', () => {
           ['repository-runtime', 'rsi-linux-repository-runtimes/unit/runtime'],
           ['system', 'rsi-linux-repository-runtimes/unit/system'],
           ['behavior-runtime', 'rsi-authorities/unit/state/linux-creation-behavior/runtime'],
+          ['release-toolchain', 'rsi-release-builds/unit/toolchain'],
+          ['release-store', 'rsi-release-builds/unit/store'],
+          ['release-cache', 'rsi-release-builds/unit/cache'],
         ].map(([name, suffix]) => ({
           name: name as LinuxRsiNativeRelocationElement['name'],
           logicalPath: join(ctx.logicalHome, suffix!),
@@ -505,7 +684,8 @@ describe('rsi Linux native relocation', () => {
         })),
         digests: {
           runtime: hex('digest-runtime'), repository: hex('digest-repository'),
-          behavior: hex('digest-behavior'), creation: hex('digest-creation'), relocation: '',
+          behavior: hex('digest-behavior'), creation: hex('digest-creation'),
+          release: hex('digest-release'), relocation: '',
         },
       }
       reseal(proof)
