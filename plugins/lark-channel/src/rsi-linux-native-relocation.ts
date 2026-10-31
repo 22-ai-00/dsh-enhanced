@@ -8,9 +8,14 @@ import { isDeepStrictEqual } from 'node:util'
 
 import {
   hashLinuxRuntimeTree, linuxRuntimeDigest, validateLinuxRuntime, validateLinuxUserNamespaceMapping,
-  type LinuxRuntime,
+  type LinuxRuntime, type LinuxSystemSnapshot, type LinuxUserNamespaceMapping,
 } from '@dsh-enhanced/assistant-isolation'
 import type { LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
+import type { LinuxV1CgroupRoots } from './rsi-linux-cgroup-roots.js'
+import type { LinuxRsiCreationBuildEnvironment } from './rsi-linux-creation-build.js'
+import type { LinuxRsiRepositoryBuildEnvironment } from './rsi-linux-repository-bootstrap.js'
+import type { LinuxRsiBuildEnvironment } from './rsi-linux-runtime-bootstrap.js'
+import type { NativeRsiReleaseBuildEnvironment, RsiReleaseBuildConfig } from './rsi-release-build.js'
 
 /** Receipt-relocation primitive for moving one prepared Linux-native DSH Home
  * from a Docker volume onto a native filesystem without re-preparing it.
@@ -1246,6 +1251,62 @@ async function validateRelocatedReceipts(family: PhysicalFamily, logicalHome: st
 /** Re-derive a relocation proof from its physical Home without ever reading the
  * logical Home; the proof must still describe a byte-identical, un-opened copy. */
 export async function verifyLinuxRsiNativeRelocation(proof: LinuxRsiNativeRelocationProof): Promise<void> {
+  await openLinuxRsiNativeRelocatedFamily(proof)
+}
+
+/** The prepared families a verified relocation proof stands for, projected back
+ * into their typed build-environment shapes. Callers get the same values the
+ * stock readers would produce after the rename(2) cutover, without any host
+ * probe or logical-Home read (both are only valid post-cutover). */
+export interface LinuxRsiNativeRelocatedFamily {
+  runtime: LinuxRsiBuildEnvironment
+  repository: LinuxRsiRepositoryBuildEnvironment
+  behavior: LinuxPluginBehaviorRuntime
+  creationBuild: LinuxRsiCreationBuildEnvironment
+  release: NativeRsiReleaseBuildEnvironment
+}
+
+function relocatedFamily(family: PhysicalFamily, logicalHome: string): LinuxRsiNativeRelocatedFamily {
+  const message = 'relocated receipt differs'
+  const { runtime, behavior, creationReceipt, releaseReceipt } = family
+  const sourceCommit = stringField(runtime, 'sourceCommit', message)
+  const lockSha256 = hexField(runtime, 'lockSha256', message)
+  const cgroupRoots = validateCgroupRoots(creationReceipt.cgroupRoots, logicalHome)
+  const releaseBuild = object(releaseReceipt.releaseBuild, message)
+  return {
+    runtime: { schemaVersion: 3, backend: 'linux-native', sourceCommit, lockSha256, runtime: family.runtimeRuntime },
+    repository: {
+      schemaVersion: 4,
+      backend: 'linux-native',
+      sourceCommit,
+      lockSha256,
+      runtime: family.repositoryRuntime,
+      systemSnapshot: family.snapshot as unknown as LinuxSystemSnapshot,
+      userNamespace: family.userNamespace as unknown as LinuxUserNamespaceMapping,
+    },
+    behavior,
+    creationBuild: {
+      schemaVersion: 3,
+      backend: 'linux-native',
+      sourceCommit,
+      behavior,
+      cgroupRoots: cgroupRoots as unknown as LinuxV1CgroupRoots,
+      buildRuntimeDigest: hexField(creationReceipt, 'buildRuntimeDigest', message),
+    },
+    release: {
+      schemaVersion: 2,
+      backend: 'linux-native',
+      sourceCommit: stringField(releaseReceipt, 'sourceCommit', message),
+      runtimeDigest: hexField(releaseReceipt, 'runtimeDigest', message),
+      releaseBuild: releaseBuild as unknown as RsiReleaseBuildConfig,
+    },
+  }
+}
+
+/** Verify a relocation proof and return its typed families in one pass, so the
+ * ~585 MB release trees are hashed once instead of twice. */
+export async function openLinuxRsiNativeRelocatedFamily(
+  proof: LinuxRsiNativeRelocationProof): Promise<LinuxRsiNativeRelocatedFamily> {
   const { record, elements, digests } = proofShape(proof)
   if (relocationDigest(proof) !== digests.relocation) fail('relocation proof digest differs')
   if (process.platform !== 'linux') fail('Linux native relocation verification requires Linux')
@@ -1257,4 +1318,5 @@ export async function verifyLinuxRsiNativeRelocation(proof: LinuxRsiNativeReloca
   await verifyCopies(elements)
   const family = await readRelocated(physicalHome, profile, peer, elements)
   await validateRelocatedReceipts(family, logicalHome, physicalHome, profile, elements, peer, digests)
+  return relocatedFamily(family, logicalHome)
 }
