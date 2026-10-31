@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest'
 import { createHash, generateKeyPairSync } from 'node:crypto'
-import { chmod, link, mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, link, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -11,8 +11,10 @@ import { compilePolicy, evaluatePolicy } from '../plugins/assistant-policy/src/e
 import { readRsiHostPatchConfig, readRsiHostUpdateOverlayChain, rebaseRsiHostValue, replaceRsiHostPatchConfig,
   rsiHostUpdateOverlayDigest,
   signRsiOwnerProgramUpdateOverlay, signRsiOwnerRepairOverlay } from '../plugins/lark-channel/src/rsi-host-update.js'
+import { bindLocalSourceInstaller } from '../scripts/install/local-source-maintenance.mjs'
 import { applyOwnerProgramAuthorityCas, assertOwnerProgramAuthorityPreserved, assertOwnerProgramOriginalComposition, assertOwnerProgramWindow,
-  assertOwnerProgramBusinessDataCopied, assertOwnerProgramManifestPreserved, stageOwnerProgramUpdate,
+  assertOwnerProgramBusinessDataCopied, assertOwnerProgramManifestPreserved, assertNativeStageRelocation,
+  prepareOwnerProgramCreation, stageOwnerProgramUpdate,
   assertOwnerProgramRestartManifestPreserved, compileOwnerProgramRestartConfig, frozenRestartConfig,
   ownerProgramRestartRule,
   readOwnerProgramRestartConfig, validateOwnerProgramRestartConfig,
@@ -654,5 +656,181 @@ test('staged Host authority CAS migrates digests and retains used grant count', 
       grant_digest: controlPlaneDigest(newConfig.grant), config_digest: controlPlaneDigest(newConfig),
       trust_digest: newTrust })
     expect(await readFile(join(stage, 'host-grant.sqlite'))).toBeDefined()
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+const ownerInstallerModules = ['rsi-authority-resources', 'rsi-authority-runtime', 'rsi-source-maintenance',
+  'rsi-creation-build', 'rsi-source', 'rsi-build', 'rsi-local-update-build', 'rsi-release-build',
+  'rsi-profile', 'rsi-host-update', 'rsi-plugin-creation', 'rsi-install', 'rsi-service-environment',
+  'systemd', 'rsi-authority-config', 'rsi-bootstrap-manifest', 'rsi-setup', 'rsi-install-inputs',
+  'rsi-local-cohort', 'rsi-linux-creation-build', 'rsi-linux-native-materialize']
+
+const installerStub = (body: string) => `import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+const fixture = async () => JSON.parse(await readFile(join(root, 'fixture.json'), 'utf8'))
+const record = async (seam, input) => writeFile(join(root, 'calls.jsonl'),
+  JSON.stringify({ seam, input }) + '\\n', { flag: 'a' })
+${body}`
+
+/** A minimal reviewed installer tree whose lib modules answer from a fixture.
+ * The creation seams are recording stubs, so backend selection is testable on
+ * every platform; the native seam itself is covered by its own module tests. */
+async function ownerCreationInstaller(fixture: Record<string, unknown>) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-creation-')))
+  const lib = join(root, 'plugins/lark-channel/lib')
+  const control = join(root, 'node_modules/@dsh-enhanced/plugin-control-plane')
+  const yamlModule = join(root, 'node_modules/yaml')
+  for (const directory of [lib, control, yamlModule, join(root, 'packages'),
+    join(root, 'scripts/install')]) {
+    await mkdir(directory, { recursive: true, mode: 0o700 })
+  }
+  await writeFile(join(root, 'package.json'), '{"type":"module"}')
+  await writeFile(join(root, 'pnpm-lock.yaml'), 'fixture-lock')
+  await writeFile(join(root, 'plugins/lark-channel/package.json'), '{"type":"module"}')
+  await writeFile(join(yamlModule, 'package.json'), '{"name":"yaml","version":"2.0.0","main":"index.js"}')
+  await writeFile(join(yamlModule, 'index.js'), 'module.exports = { parse: () => [], stringify: () => "" }\n')
+  await writeFile(join(control, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/plugin-control-plane',
+    type: 'module', main: 'index.js', exports: { '.': './index.js', './package.json': './package.json' } }))
+  await writeFile(join(control, 'index.js'),
+    "import { createHash } from 'node:crypto'\nexport const controlPlaneDigest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')\n")
+  const seam = (directory: string, body: string) => `export async function ${body}(input) {
+  await record('${directory}', input)
+  const tree = join(input.dshHome, '${directory}', input.profile)
+  await mkdir(tree, { recursive: true, mode: 0o700 })
+  await writeFile(join(tree, 'bootstrap.json'), '{"seam":"${directory}"}', { mode: 0o600 })
+  return (await fixture()).creationBuild
+}`
+  const bodies: Record<string, string> = {
+    'rsi-source': 'export async function readRsiSourceWorkspace() { return (await fixture()).source }',
+    'rsi-local-update-build': 'export async function readRsiLocalUpdateSourceBuild() { return (await fixture()).build }',
+    'rsi-creation-build': seam('rsi-creation-builds', 'prepareRsiCreationBuildEnvironment'),
+    'rsi-linux-creation-build': seam('rsi-linux-creation-builds',
+      'prepareLinuxRsiCreationBuildEnvironment'),
+  }
+  for (const name of ownerInstallerModules) {
+    await writeFile(join(lib, `${name}.js`), installerStub(bodies[name] ?? 'export {}'))
+  }
+  await writeFile(join(root, 'fixture.json'), JSON.stringify(fixture))
+  return { root, binding: await bindLocalSourceInstaller(root) }
+}
+
+function ownerProgramUpdate(installer: { root: string, binding: unknown }, originalBuild: unknown) {
+  const hostPlan = {}
+  return { protocol: 'dsh-enhanced/host-owner-program-update/v1', homePath: join(installer.root, 'home'),
+    installer: installer.binding, hostPlan,
+    hostPlanDigest: createHash('sha256').update(JSON.stringify(hostPlan)).digest('hex'),
+    profile: 'assistant',
+    original: { build: originalBuild, source: { workspace: { sourceCommit: 'a'.repeat(40) } } } }
+}
+
+const candidateSource = (commit: string) => ({ sourceCommit: commit, workspace: { revision: 'candidate' } })
+const candidateBuild = (backend: 'docker' | 'linux-native', commit: string) => backend === 'docker'
+  ? { schemaVersion: 1, sourceCommit: commit } : { schemaVersion: 3, backend, sourceCommit: commit,
+    lockSha256: 'c'.repeat(64) }
+const creationBuild = (backend: 'docker' | 'linux-native', commit: string) => backend === 'docker'
+  ? { schemaVersion: 1, sourceBuild: { sourceCommit: commit } }
+  : { schemaVersion: 3, backend, sourceCommit: commit, behavior: {}, cgroupRoots: [] }
+
+async function recordedSeams(root: string) {
+  const lines = (await readFile(join(root, 'calls.jsonl'), 'utf8')).trim().split('\n')
+  return lines.map(line => JSON.parse(line) as { seam: string, input: Record<string, unknown> })
+}
+
+test('prepareOwnerProgramCreation performs the reviewed Docker -> linux-native backend transition', async () => {
+  const source = candidateSource('b'.repeat(40))
+  const build = candidateBuild('linux-native', source.sourceCommit)
+  const creation = creationBuild('linux-native', source.sourceCommit)
+  const installer = await ownerCreationInstaller({ source, build, creationBuild: creation })
+  try {
+    const candidateHome = join(installer.root, 'candidate')
+    await mkdir(candidateHome, { mode: 0o700 })
+    const ownerUpdate = ownerProgramUpdate(installer, candidateBuild('docker', 'a'.repeat(40)))
+    const result = await prepareOwnerProgramCreation({ ownerUpdate, candidateHome, source,
+      sourceBuild: build })
+    expect(result).toMatchObject({ schemaVersion: 1, backend: 'linux-native',
+      backendTransition: 'docker->linux-native', candidateHome, candidateSource: source,
+      candidateBuild: build, creationBuild: creation })
+    const seams = await recordedSeams(installer.root)
+    expect(seams.map(call => call.seam)).toEqual(['rsi-linux-creation-builds'])
+    expect(seams[0].input).toMatchObject({ dshHome: candidateHome, profile: 'assistant',
+      stateRoot: join(candidateHome, 'rsi-authorities', 'assistant', 'state') })
+    expect((await stat(join(candidateHome, 'rsi-authorities', 'assistant', 'state'))).mode & 0o777)
+      .toBe(0o700)
+    expect(result.receiptSha256).toBe(createHash('sha256').update(await readFile(
+      join(candidateHome, 'rsi-linux-creation-builds', 'assistant', 'bootstrap.json'))).digest('hex'))
+  } finally { await rm(installer.root, { recursive: true, force: true }) }
+})
+
+test('prepareOwnerProgramCreation refuses a native installation moving back to a Docker candidate', async () => {
+  const source = candidateSource('b'.repeat(40))
+  const installer = await ownerCreationInstaller({ source, build: candidateBuild('docker', source.sourceCommit),
+    creationBuild: creationBuild('docker', source.sourceCommit) })
+  try {
+    const candidateHome = join(installer.root, 'candidate')
+    await mkdir(candidateHome, { mode: 0o700 })
+    const ownerUpdate = ownerProgramUpdate(installer, candidateBuild('linux-native', 'a'.repeat(40)))
+    await expect(prepareOwnerProgramCreation({ ownerUpdate, candidateHome, source,
+      sourceBuild: candidateBuild('docker', source.sourceCommit) }))
+      .rejects.toThrow(/candidate build backend differs from the original installation/u)
+    await expect(readFile(join(installer.root, 'calls.jsonl')))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  } finally { await rm(installer.root, { recursive: true, force: true }) }
+})
+
+test('prepareOwnerProgramCreation keeps the Docker creation seam and omits a backend transition', async () => {
+  const source = candidateSource('b'.repeat(40))
+  const build = candidateBuild('docker', source.sourceCommit)
+  const creation = creationBuild('docker', source.sourceCommit)
+  const installer = await ownerCreationInstaller({ source, build, creationBuild: creation })
+  try {
+    const candidateHome = join(installer.root, 'candidate')
+    await mkdir(candidateHome, { mode: 0o700 })
+    const ownerUpdate = ownerProgramUpdate(installer, candidateBuild('docker', 'a'.repeat(40)))
+    const result = await prepareOwnerProgramCreation({ ownerUpdate, candidateHome, source,
+      sourceBuild: build })
+    expect(result).not.toHaveProperty('backendTransition')
+    expect(result).not.toHaveProperty('backend')
+    expect(result).toMatchObject({ schemaVersion: 1, candidateHome, candidateSource: source,
+      candidateBuild: build, creationBuild: creation })
+    const seams = await recordedSeams(installer.root)
+    expect(seams.map(call => call.seam)).toEqual(['rsi-creation-builds'])
+    expect(result.receiptSha256).toBe(createHash('sha256').update(await readFile(
+      join(candidateHome, 'rsi-creation-builds', 'assistant', 'bootstrap.json'))).digest('hex'))
+  } finally { await rm(installer.root, { recursive: true, force: true }) }
+})
+
+test('native stage dispatch requires the sealed C2-C relocation proof before any write', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-native-gate-')))
+  try {
+    const homePath = join(root, 'home'), stageHome = join(root, 'stage')
+    await mkdir(homePath, { mode: 0o700 }); await mkdir(stageHome, { mode: 0o700 })
+    const ownerUpdate = { homePath, profile: 'assistant' }
+    let error: (Error & { code?: string }) | undefined
+    try {
+      assertNativeStageRelocation(ownerUpdate, { native: true, profile: 'assistant', transactionId: 'tx-1' })
+    } catch (caught) { error = caught as Error & { code?: string } }
+    expect(error?.code).toBe('rsi-linux-native-stage-relocation-unavailable')
+    expect(error?.message).toMatch(/C2-C relocated-family proof/u)
+    expect(error?.message).toMatch(/native resource staging/u)
+    expect(error?.message).toMatch(/nothing has been written for transaction tx-1/u)
+    // The refusal happens before the materializer/freeze seams and before any
+    // owner manifest, overlay or journal write.
+    expect(await readdir(stageHome)).toEqual([])
+    expect(await readdir(homePath)).toEqual([])
+    expect(() => assertNativeStageRelocation({ ...ownerUpdate,
+      nativeRelocation: { schemaVersion: 1, backend: 'linux-native' } },
+    { native: true, profile: 'assistant', transactionId: 'tx-1' })).not.toThrow()
+    expect(() => assertNativeStageRelocation(ownerUpdate,
+      { native: false, profile: 'assistant', transactionId: 'tx-1' })).not.toThrow()
+    // A full stageOwnerProgramUpdate fixture needs the complete owner Home,
+    // control-plane ledger and overlay chain, so the dispatch ordering is
+    // pinned against the reviewed call site as well.
+    const script = await readFile(new URL('../scripts/install/owner-program-update.mjs', import.meta.url), 'utf8')
+    const gateAt = script.lastIndexOf('assertNativeStageRelocation(ownerUpdate, { native, profile, transactionId })')
+    expect(gateAt).toBeGreaterThan(script.indexOf(
+      "fail('candidate creation build backend differs from the candidate source build')"))
+    expect(gateAt).toBeLessThan(script.indexOf('await api.materializeLinuxRsiNativeInStage('))
   } finally { await rm(root, { recursive: true, force: true }) }
 })

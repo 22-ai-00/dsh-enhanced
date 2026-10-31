@@ -260,9 +260,6 @@ export async function prepareHostLocalSourceUpdate({ homePath, profile, preparat
       sourceRepository: preparation.source.repository })
     const sourceBuild = await readLocalCandidateSourceBuild(api, { dshHome: preparation.candidateHome,
       profile, source })
-    if (localCandidateBuildBackend(sourceBuild) === 'linux-native') {
-      fail(nativeCandidateRefusal('owner program update'))
-    }
     candidateCreation = await helper.prepareOwnerProgramCreation({ ownerUpdate, candidateHome: preparation.candidateHome,
       source, sourceBuild, installer })
   } else if (ownerRepairPreset !== undefined) {

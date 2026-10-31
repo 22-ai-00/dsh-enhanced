@@ -2,7 +2,7 @@
  * installation, a grant, an owner binding, or a new bootstrap receipt. */
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
-import { open, lstat, realpath, rename, readFile, readdir } from 'node:fs/promises'
+import { chmod, mkdir, open, lstat, realpath, rename, readFile, readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -10,8 +10,8 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual as same } from 'node:util'
 import { DatabaseSync } from 'node:sqlite'
-import { assertLocalSourceInstaller, localCandidateBuildBackend, nativeCandidateRefusal,
-  nativeOriginalRefusal, readLocalCandidateSourceBuild } from './local-source-maintenance.mjs'
+import { assertLocalSourceInstaller, localCandidateBuildBackend, nativeOriginalRefusal,
+  readLocalCandidateSourceBuild } from './local-source-maintenance.mjs'
 import { composeOwnerRepairProfiles, ownerRepairPatchEquivalent,
   ownerRepairSnapshotEquivalent } from './owner-source-repair.mjs'
 
@@ -23,11 +23,23 @@ const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const fail = message => { throw new Error(`Owner program update: ${message}`) }
 /**
  * A candidate build receipt is either the Docker schema 1 `RsiBuildEnvironment`
- * or the linux-native schema 3 `LinuxRsiBuildEnvironment`; native candidates are
- * refused above until the native owner-program activation slices exist.
+ * or the linux-native schema 3 `LinuxRsiBuildEnvironment`. Docker candidates and
+ * the Docker original keep their historical receipts and comparisons; native
+ * candidates have their own creation, staging and verification seams, but the
+ * native stage cannot be completed by this installer. That is enforced by two
+ * independent fail-closed gates with different preconditions:
+ *
+ * - `assertNativeStageRelocation` refuses the native materializer dispatch
+ *   without the sealed C2-C relocated-family proof (`ownerUpdate.nativeRelocation`):
+ *   an update always has a live logical Home and the staged copy already
+ *   carries the candidate families, so a fresh relocation cannot succeed.
+ * - `freezeNativeRunnerStates` refuses the manifest freeze until the native
+ *   runner-state and repository handover (C2-C) exists.
+ *
+ * Supplying the relocation proof lifts only the first gate; both must be
+ * replaced by C2-C before a native owner program update can complete.
  * @typedef {import('../../plugins/lark-channel/src/rsi-build.ts').RsiBuildEnvironment
  *   | import('../../plugins/lark-channel/src/rsi-linux-runtime-bootstrap.ts').LinuxRsiBuildEnvironment} LocalCandidateBuild */
-const nativeCandidateUnavailable = nativeCandidateRefusal('owner program update')
 const nativeOriginalUnavailable = nativeOriginalRefusal('owner program update')
 const exact = path => typeof path === 'string' && isAbsolute(path) && resolve(path) === path
   && !path.includes('\0') && !/[\r\n]/u.test(path)
@@ -91,7 +103,7 @@ async function apiFor(installer) {
     'rsi-creation-build', 'rsi-source', 'rsi-build', 'rsi-local-update-build', 'rsi-release-build',
     'rsi-profile', 'rsi-host-update', 'rsi-plugin-creation', 'rsi-install', 'rsi-service-environment',
     'systemd', 'rsi-authority-config', 'rsi-bootstrap-manifest', 'rsi-setup', 'rsi-install-inputs',
-    'rsi-local-cohort']
+    'rsi-local-cohort', 'rsi-linux-creation-build', 'rsi-linux-native-materialize']
   const api = Object.assign({}, ...await Promise.all(names.map(name => reviewedModule(root, name,
     name === 'rsi-local-update-build'))))
   const req = createRequire(join(installer.root, 'package.json'))
@@ -686,14 +698,37 @@ export async function prepareOwnerProgramCreation({ ownerUpdate, candidateHome, 
   const actualBuild = await readLocalCandidateSourceBuild(api, { dshHome: candidateHome,
     profile, source: actualSource, ...(signal ? { signal } : {}) })
   const actualBackend = localCandidateBuildBackend(actualBuild)
-  if (actualBackend === 'linux-native') fail(nativeCandidateUnavailable)
   const originalBackend = localCandidateBuildBackend(ownerUpdate.original?.build)
-  if (actualBackend !== 'unknown' && originalBackend !== 'unknown' && actualBackend !== originalBackend) {
+  // Docker -> linux-native is the one reviewed migration edge of the owner
+  // program update; an already native installation cannot move back to the
+  // Docker image backend, and every other differing pair stays refused.
+  const backendTransition = originalBackend === 'docker' && actualBackend === 'linux-native'
+    ? 'docker->linux-native' : undefined
+  if (!backendTransition && actualBackend !== 'unknown' && originalBackend !== 'unknown'
+    && actualBackend !== originalBackend) {
     fail('candidate build backend differs from the original installation')
   }
   if (!same(actualSource, source) || !same(actualBuild, sourceBuild)
     || actualSource.sourceCommit === ownerUpdate.original.source.workspace.sourceCommit) {
     fail('candidate source or build differs')
+  }
+  if (actualBackend === 'linux-native') {
+    // The native creation build keeps its own capability state outside every
+    // Docker receipt tree; the caller copies the resulting family into the
+    // stage with the relocation seam instead of the Docker materializer.
+    const authorities = join(candidateHome, 'rsi-authorities')
+    const authorityProfile = join(authorities, profile)
+    const stateRoot = join(authorityProfile, 'state')
+    await mkdir(stateRoot, { recursive: true, mode: 0o700 })
+    for (const directory of [authorities, authorityProfile, stateRoot]) await chmod(directory, 0o700)
+    await privateDirectory(stateRoot)
+    const creationBuild = await api.prepareLinuxRsiCreationBuildEnvironment({ dshHome: candidateHome,
+      profile, source: actualSource, stateRoot, ...(signal ? { signal } : {}) })
+    const receiptSha256 = hash(await bytes(join(candidateHome, 'rsi-linux-creation-builds', profile,
+      'bootstrap.json'), 65_536))
+    return { schemaVersion: 1, backend: 'linux-native', candidateHome, candidateSource: actualSource,
+      candidateBuild: actualBuild, creationBuild, receiptSha256,
+      ...(backendTransition ? { backendTransition } : {}) }
   }
   const creationBuild = await api.prepareRsiCreationBuildEnvironment({ dshHome: candidateHome,
     profile, source: actualSource, build: actualBuild, ...(signal ? { signal } : {}) })
@@ -875,6 +910,70 @@ export function updateOwnerProgramJournal(original, patches, manifestDigest, uni
   return journal
 }
 
+/** Freeze the linux-native runner-state references the compiled manifest binds.
+ *
+ * A linux-native manifest carries five live runner-state seals under
+ * `<stateRoot>/native-runner-states` (`sourceBuild`, `creationReview`,
+ * `creationAdoption` and, for revisions, `revisionReview`/`revisionRegression`),
+ * and its source-build grant is compiled from the `sourceBuild` seal. Producing
+ * those seals from a Docker installation is the authorized native handover:
+ * migrating the verifier rows (`migrateLinuxVerifierRunnerState`), preparing the
+ * repository handover state (`prepareLinuxRepositoryHandoverState`), renaming
+ * the staged Home into place and rebinding the seals to the live dev/ino
+ * identity. That transaction is the C2-C slice, so this installer stops here
+ * instead of writing a manifest whose references are half frozen.
+ *
+ * C2-C replaces this single call and returns
+ * `{ sourceBuild, creationBuild, creationSeals }`: the compiled
+ * `RsiLinuxSourceBuildConfig` from `compileRsiLinuxSourceBuild` with the frozen
+ * `sourceBuild` seal, the live creation build environment, and the
+ * `{review, adoption}` seals `createRsiPluginCreationSetup` needs. The caller
+ * then records `manifest.controlPlane.sourceBuild`, `manifest.linuxBuild` and
+ * the creation seals from that value.
+ *
+ * This is the second of the two native gates: `assertNativeStageRelocation`
+ * refuses the materializer dispatch without the sealed C2-C relocation proof,
+ * while this gate refuses the manifest freeze without the runner-state
+ * handover. Their preconditions differ (a relocated family in the stage versus
+ * live runner-state seals rebound to the staged Home), and supplying one does
+ * not satisfy the other; both stay fail-closed until C2-C lands. */
+function freezeNativeRunnerStates({ profile, transactionId, stageHome }) {
+  const error = new Error('Owner program update: linux-native owner program update cannot freeze '
+    + `runner state references: transaction ${transactionId} staged the ${profile} family in ${stageHome} `
+    + 'but the native creation/revision runner seals and the source-build repository handover are not '
+    + 'available in this installer; requires the authorized native runner-state handover (C2-C)')
+  error.code = 'rsi-linux-native-owner-program-handover-unavailable'
+  throw error
+}
+
+/** Refuse the linux-native stage dispatch without the sealed relocation proof.
+ *
+ * The native materializer relocates a candidate family into the staged Home.
+ * An owner program update always has a live logical Home, and the staged copy
+ * (the checked-out owner Home) already carries the candidate families, so a
+ * fresh relocation can never succeed here: the only native dispatch this
+ * installer could perform is a replay of a family relocated by the authorized
+ * C2-C transaction, which is why it requires `ownerUpdate.nativeRelocation`.
+ * The proof's shape and identity are validated by the materializer itself; this
+ * gate only requires it to be present before dispatch.
+ *
+ * The gate sits immediately before the materializer, before any manifest,
+ * overlay or journal write, and is complemented by `freezeNativeRunnerStates`
+ * at freeze time: supplying the proof lifts this gate without other changes
+ * but does not make the native stage complete. */
+export function assertNativeStageRelocation(ownerUpdate, { native, profile, transactionId }) {
+  if (!native) return
+  const proof = ownerUpdate?.nativeRelocation
+  if (proof && typeof proof === 'object' && !Array.isArray(proof)) return
+  const error = new Error('Owner program update: linux-native owner program update cannot stage the '
+    + `${profile} candidate family: it needs the sealed C2-C relocated-family proof `
+    + '(ownerUpdate.nativeRelocation) and the native resource staging that activates a schema-3 '
+    + `candidate, neither of which is available in this installer; nothing has been written for `
+    + `transaction ${transactionId} (no manifest, overlay or journal)`)
+  error.code = 'rsi-linux-native-stage-relocation-unavailable'
+  throw error
+}
+
 /** Stage a verified owner program update. `sourceBuild` is the original
  * `LocalCandidateBuild` and `candidateCreation.candidateBuild` the staged
  * candidate receipt; Docker receipts keep their current behaviour.
@@ -913,31 +1012,76 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
     fail('owner binding changed before program update')
   }
   await assertOwnerProgramBusinessDataCopied(api, ownerUpdate, stageHome)
-  const build = sourceBuild.sourceBuild ? sourceBuild : { schemaVersion: 1,
+  const native = localCandidateBuildBackend(sourceBuild) === 'linux-native'
+  // The prepared creation receipt owns the backend of the staged candidate;
+  // a native source build and a Docker build are never materialized through
+  // each other's seam, in either direction.
+  if (native !== (candidateCreation.backend === 'linux-native')) {
+    fail('candidate creation build backend differs from the candidate source build')
+  }
+  const build = native ? sourceBuild : sourceBuild.sourceBuild ? sourceBuild : { schemaVersion: 1,
     sourceCommit: source.sourceCommit, sourceBuild }
   const release = releaseBuild.releaseBuild ?? releaseBuild
   if (build.sourceCommit !== source.sourceCommit || releaseBuild.sourceCommit !== source.sourceCommit
     || candidateCreation.creationBuild?.sourceCommit !== source.sourceCommit) {
     fail('new program source/build binding differs')
   }
-  const creation = await api.materializeRsiCreationBuildInStage({
-    candidateHome: candidateCreation.candidateHome, stagePhysicalHome: stageHome,
-    logicalHome: homePath, profile, candidateSource: candidateCreation.candidateSource,
-    candidateBuild: candidateCreation.candidateBuild, stagedSource: source, stagedBuild: build })
-  if (creation.candidateReceiptSha256 !== candidateCreation.receiptSha256
-    || !same(creation.creationBuild, candidateCreation.creationBuild)) {
+  // The native stage is a relocation into a Home that is still live and whose
+  // staged copy already carries the candidate families, so it cannot be
+  // produced by this installer. Refuse at dispatch, before any manifest,
+  // overlay or journal write, instead of letting the materializer fail on an
+  // incidental relocation precondition; the freeze gate below stays
+  // independently fail-closed.
+  assertNativeStageRelocation(ownerUpdate, { native, profile, transactionId })
+  const creation = native
+    ? await api.materializeLinuxRsiNativeInStage({
+      candidateHome: candidateCreation.candidateHome, stagePhysicalHome: stageHome,
+      logicalHome: homePath, profile,
+      ...(ownerUpdate.nativeRelocation ? { relocation: ownerUpdate.nativeRelocation } : {}) })
+    : await api.materializeRsiCreationBuildInStage({
+      candidateHome: candidateCreation.candidateHome, stagePhysicalHome: stageHome,
+      logicalHome: homePath, profile, candidateSource: candidateCreation.candidateSource,
+      candidateBuild: candidateCreation.candidateBuild, stagedSource: source, stagedBuild: build })
+  if (creation.candidateReceiptSha256 !== candidateCreation.receiptSha256) {
     fail('materialized creation build differs')
   }
+  if (native) {
+    // The native seam hands back the relocated family and the preparation the
+    // source-build grant compiles from; the Docker creation build has no peer.
+    if (creation.relocation?.logicalHome !== homePath || creation.relocation?.physicalHome !== stageHome
+      || creation.sourceBuild?.backend !== 'linux-native'
+      || creation.sourceBuild.repository?.sourceCommit !== source.sourceCommit
+      || creation.family?.runtime?.sourceCommit !== source.sourceCommit
+      || creation.family?.repository?.sourceCommit !== source.sourceCommit
+      || creation.family?.creationBuild?.sourceCommit !== source.sourceCommit) {
+      fail('materialized creation build differs')
+    }
+  } else if (!same(creation.creationBuild, candidateCreation.creationBuild)) {
+    fail('materialized creation build differs')
+  }
+  // Native activation cannot finish here: the frozen runner-state references
+  // only exist after the authorized Docker-to-native handover, and writing the
+  // manifest without them would leave a half-bound authority. Fail closed at
+  // this one choke point, before any manifest, overlay or journal write.
+  const frozen = native ? await freezeNativeRunnerStates({ profile, transactionId, stageHome }) : undefined
   const rebase = await rebaseFor(ownerUpdate, api, runtime)
   const hostProfiles = api.rebaseRsiHostProfiles({ manifest: original.manifest,
     targetPatch: original.patches[profile], coordinatorPatch: original.patches[coordinator], rebase })
   const manifest = hostProfiles.manifest
   const rebasedManifest = structuredClone(manifest)
   const oldControlPlane = structuredClone(manifest.controlPlane)
-  manifest.controlPlane.sourceBuild = structuredClone(build.sourceBuild)
-  const freshCreation = api.createRsiPluginCreationSetup({ resources, build: creation.creationBuild,
+  manifest.controlPlane.sourceBuild = structuredClone(native ? frozen.sourceBuild : build.sourceBuild)
+  if (native) {
+    manifest.linuxBuild = { schemaVersion: 1,
+      sourceBuildDigest: api.control.controlPlaneDigest(frozen.sourceBuild),
+      ...(frozen.creationBuild.schemaVersion === 3
+        ? { behaviorRuntimeDigest: api.control.controlPlaneDigest(frozen.creationBuild.behavior) } : {}) }
+  }
+  const freshCreation = api.createRsiPluginCreationSetup({ resources,
+    build: native ? frozen.creationBuild : creation.creationBuild,
     owner: original.manifest.sourceReviews.owner,
-    now: original.now, expiresAt: original.manifest.sourceReviews.expiresAt })
+    now: original.now, expiresAt: original.manifest.sourceReviews.expiresAt,
+    ...(native ? { stateSeals: frozen.creationSeals } : {}) })
   manifest.pluginCreation = programCreation(manifest.pluginCreation, freshCreation)
   if (!same(manifest.controlPlane.sourceJobs.creation, original.manifest.controlPlane.sourceJobs.creation)) {
     fail('source creation grant changed')
@@ -1124,7 +1268,13 @@ export async function verifyOwnerProgramUpdate({ ownerUpdate, ownerUpdateNext, h
       [ownerUpdate.profile, ownerUpdate.coordinatorProfile].map(name => [name, patches[name]]))) {
     fail('owner journal or profile patch differs')
   }
-  const creationSource = (await bytes(join(physicalHome, 'rsi-creation-builds', ownerUpdate.profile,
+  // Each manifest reports the backend of the family it binds, so the creation
+  // receipt that the overlay chain digests is read from the same tree: the
+  // staged Docker Home keeps its original receipt through the before-finalize
+  // phase, while the delivered native Home only carries the native receipt.
+  const nativeReceipt = manifest.controlPlane?.sourceBuild?.backend === 'linux-native'
+  const creationSource = (await bytes(join(physicalHome,
+    nativeReceipt ? 'rsi-linux-creation-builds' : 'rsi-creation-builds', ownerUpdate.profile,
     'bootstrap.json'), 65_536)).toString('utf8')
   const overlaySource = await optional(join(physicalHome, 'rsi-authorities', ownerUpdate.profile,
     'config', 'host-update-overlays.json'), 2_097_152)

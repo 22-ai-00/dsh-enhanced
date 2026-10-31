@@ -216,13 +216,29 @@ async function ownerConfiguration(installation, homePath, physicalHome, modules,
     ? await readSource(homePath, physicalHome, overlayPath, 2_097_152) : undefined
   const overlay = modules.hostUpdate.readRsiHostUpdateOverlayChain({ source: overlaySource,
     resources: installation.resources, dshHome: homePath, profile: installation.targetProfile, bootstrapSource })
+  const effective = overlay.latest ?? receipt
   const ownerUpdate = overlay.records.findLast(record => ['rsi-owner-repair-overlay', 'rsi-owner-program-update-overlay'].includes(record.kind))
   const ownerAfter = ownerUpdate?.kind === 'rsi-owner-repair-overlay' ? ownerUpdate.repair.after : ownerUpdate?.update.after
+  // The creation receipt a program-update overlay digests comes from the
+  // backend the delivered manifest binds: Docker keeps `rsi-creation-builds`
+  // and linux-native keeps `rsi-linux-creation-builds`. Select that single tree
+  // from the delivered manifest the signed overlay inventory pins, instead of
+  // accepting either tree, so a Home carrying only the other backend's receipt
+  // cannot satisfy the signed digest.
+  const creationReceiptDigests = async () => {
+    const source = await readSource(homePath, physicalHome, installation.manifestPath, 2_097_152)
+    if (hash(source) !== effective.result?.manifestDigest) fail('owner manifest changed')
+    let manifest
+    try { manifest = JSON.parse(source) } catch { fail('owner manifest is invalid') }
+    const relative = manifest?.controlPlane?.sourceBuild?.backend === 'linux-native'
+      ? 'rsi-linux-creation-builds' : 'rsi-creation-builds'
+    const path = join(homePath, relative, installation.targetProfile, 'bootstrap.json')
+    return await exists(path) ? [hash(await readSource(homePath, physicalHome, path, 65_536))] : []
+  }
   if (ownerAfter && (hash(await readSource(homePath, physicalHome, join(homePath, '.rsi-setup-journal.json'), 2_097_152)) !== ownerAfter.journalDigest
-    || hash(await readSource(homePath, physicalHome, join(homePath, 'rsi-creation-builds', installation.targetProfile, 'bootstrap.json'), 65_536)) !== ownerAfter.creationReceiptDigest)) {
+    || !(await creationReceiptDigests()).includes(ownerAfter.creationReceiptDigest))) {
     fail(`owner ${ownerUpdate.kind === 'rsi-owner-repair-overlay' ? 'repair' : 'program update'} journal or creation receipt changed`)
   }
-  const effective = overlay.latest ?? receipt
   if (inspection.sourceOnly && (!effective.files || typeof effective.files !== 'object' || Array.isArray(effective.files)
     || Object.keys(effective.files).length > 512)) fail('scanner source file inventory is invalid')
   const sources = {}

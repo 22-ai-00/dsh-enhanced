@@ -388,22 +388,26 @@ const nativeCandidate = { schemaVersion: 3, backend: 'linux-native', sourceCommi
 const dockerCandidate = { schemaVersion: 1, sourceCommit: '2'.repeat(40),
   sourceBuild: { image: 'example:old', dockerPath: '/usr/bin/docker' } }
 
-test('installer refuses a linux-native candidate explicitly instead of reporting a missing build', async () => {
+test('installer prepares a linux-native candidate through the native creation seam', async () => {
   const setup = await fixture()
   const candidateHome = join(setup.preparationRoot, 'home')
   await mkdir(join(candidateHome, 'rsi-linux-runtimes', setup.profile), { recursive: true, mode: 0o700 })
   buildMocks.native.mockResolvedValue(nativeCandidate)
   setup.api.readRsiLocalUpdateSourceBuild = readRsiLocalUpdateSourceBuild
-  mocks.captureProgram.mockResolvedValue({ homePath: setup.homePath, profile: setup.profile })
-  const error = await prepareHostLocalSourceUpdate({ ...setup, ownerProgramUpdate: true }).catch(value => value)
-  expect(error).toBeInstanceOf(Error)
-  expect(error.message).toContain('a linux-native candidate build was found but the owner program update '
-    + 'for linux-native candidates is not available in this installer yet')
-  expect(error.message).not.toContain('candidate build environment is missing')
+  const ownerUpdate = { homePath: setup.homePath, profile: setup.profile,
+    installer: { root: setup.installerRoot } }
+  const candidateCreation = { schemaVersion: 1, backend: 'linux-native', candidateBuild: nativeCandidate,
+    receiptSha256: '8'.repeat(64) }
+  mocks.captureProgram.mockResolvedValue(ownerUpdate)
+  mocks.prepareProgramCreation.mockResolvedValue(candidateCreation)
+  const proof = await prepareHostLocalSourceUpdate({ ...setup, ownerProgramUpdate: true })
+  expect(proof.protocol).toBe('dsh-enhanced/host-owner-program-update/v1')
+  expect(proof.candidateCreation).toEqual(candidateCreation)
   expect(buildMocks.native).toHaveBeenCalledWith(expect.objectContaining({
     dshHome: candidateHome, profile: setup.profile }))
   expect(buildMocks.docker).not.toHaveBeenCalled()
-  expect(mocks.prepareProgramCreation).not.toHaveBeenCalled()
+  expect(mocks.prepareProgramCreation).toHaveBeenCalledWith(expect.objectContaining({
+    ownerUpdate, candidateHome, sourceBuild: nativeCandidate }))
 })
 
 test('installer rejects a candidate Home carrying both receipt trees', async () => {
