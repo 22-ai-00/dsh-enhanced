@@ -39,10 +39,10 @@ describe('read-only isolation grant diagnostics', () => {
     ledger.close()
   })
 
-  it('reads both schema 7 and 8 without migrating or changing either schema marker', () => {
+  it('reads schema 7, 8 and 9 without migrating or changing either schema marker', () => {
     const stateRoot = root(); const file = join(stateRoot, 'ledger.sqlite'); const ledger = new IsolationLedger(file, { now })
     ledger.syncGrants([grant()]); ledger.close()
-    for (const version of [7, 8]) {
+    for (const version of [7, 8, 9]) {
       const database = new DatabaseSync(file)
       database.exec(`PRAGMA user_version=${version}; UPDATE schema_meta SET value='${version}' WHERE key='schema-version';`); database.close()
       const before = readFileSync(file)

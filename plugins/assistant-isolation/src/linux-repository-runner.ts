@@ -93,8 +93,8 @@ function preflightLedger(root: string, identity: IsolationIdentity, schemaVersio
   const database = new DatabaseSync(path, { readOnly: true })
   try {
     database.exec('BEGIN')
-    if (database.prepare('PRAGMA user_version').get()?.user_version !== 8
-      || database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get()?.value !== '8') throw new Error('Linux repository ledger requires schema 8')
+    if (database.prepare('PRAGMA user_version').get()?.user_version !== 9
+      || database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get()?.value !== '9') throw new Error('Linux repository ledger requires schema 9')
     const values = [GRANT, identity.principalDigest, identity.principalRecordId, identity.principalVersion, identity.workspace, identity.agentPreset]
     const foreignGrant = database.prepare(`SELECT 1 FROM isolation_grants WHERE id<>? OR principal_digest<>? OR principal_record_id<>?
       OR principal_version<>? OR workspace<>? OR agent_preset<>? LIMIT 1`).get(...values)

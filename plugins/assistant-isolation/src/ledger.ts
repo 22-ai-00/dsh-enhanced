@@ -18,7 +18,7 @@ export class IsolationLedgerError extends Error {
 }
 export interface IsolationControllerAuthority { ownerId: string; fence: number }
 
-const schemaVersion = 8
+const schemaVersion = 9
 const outputMaximum = 1_048_576
 const artifactMaximum = 128
 const textMaximum = 16_384
@@ -51,7 +51,11 @@ function artifactBinding(value: IsolationArtifactBinding): IsolationArtifactBind
   return frozen({ admission: validateGoalArtifactAdmission(value.admission), paths: [...value.paths] })
 }
 
-function grantDigest(value: IsolationGrant): string { return JSON.stringify(value) }
+/** Canonical freeze-order JSON of the ten-key grant document used as the grant
+ * equality proof. Despite the name it is a fingerprint, not a cryptographic
+ * hash: it is compared byte-for-byte, and the authorized backend handover
+ * rewrites the verifier grant with the exact same byte formula. */
+export function grantDigest(value: IsolationGrant): string { return JSON.stringify(value) }
 
 function result(value: IsolationResult, allowRetention = false): IsolationResult {
   if (!value || typeof value !== 'object' || !text(value.jobId) || !['succeeded', 'failed', 'cancelled', 'timed-out', 'unknown'].includes(value.status)
@@ -66,7 +70,7 @@ function result(value: IsolationResult, allowRetention = false): IsolationResult
 }
 
 type GrantRow = { id: string; digest: string; revision: number; expires_at: number; max_runs: number; max_total_duration_ms: number; revoked: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string }
-type JobRow = { id: string; grant_id: string; grant_revision: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string; session_id: string; idempotency_key: string; request_digest: string; container_name: string | null; backend_kind: IsolationJob['backend']; linux_contract_json: string | null; linux_intent_json: string | null; linux_resources_json: string | null; native_resource_id: string | null; native_nonce: string | null; deadline: number; reserved_duration_ms: number; reserved_memory_mib: number; reserved_workspace_inodes: number; reserved_storage_bytes: number; status: IsolationStatus; version: number; created_at: number; updated_at: number; result_json: string | null; dispatch_attempted: number; creation_witness_json: string | null; artifact_binding_json: string | null }
+type JobRow = { id: string; grant_id: string; grant_revision: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string; session_id: string; idempotency_key: string; request_digest: string; container_name: string | null; backend_kind: IsolationJob['backend']; linux_contract_json: string | null; linux_intent_json: string | null; linux_resources_json: string | null; native_resource_id: string | null; native_nonce: string | null; deadline: number; reserved_duration_ms: number; reserved_memory_mib: number; reserved_workspace_inodes: number; reserved_storage_bytes: number; status: IsolationStatus; version: number; created_at: number; updated_at: number; result_json: string | null; dispatch_attempted: number; creation_witness_json: string | null; artifact_binding_json: string | null; migrated: number }
 type ResourceReservation = { memoryMiB: number; workspaceInodes: number; maxMemoryMiB: number; maxWorkspaceInodes: number }
 
 function open(path: string): DatabaseSync {
@@ -120,10 +124,17 @@ function open(path: string): DatabaseSync {
       CREATE INDEX isolation_jobs_grant ON isolation_jobs(grant_id);
       CREATE INDEX isolation_jobs_recoverable ON isolation_jobs(status, updated_at);
       UPDATE schema_meta SET value='8' WHERE key='schema-version'; PRAGMA user_version=8; COMMIT;`)
+    if ([0, 1, 2, 3, 4, 5, 6, 7, 8].includes(version)) database.exec(`BEGIN IMMEDIATE;
+      CREATE TABLE isolation_jobs_v9 (id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL, session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, container_name TEXT UNIQUE, backend_kind TEXT NOT NULL CHECK(backend_kind IN ('docker','macos-seatbelt','linux-native')), native_resource_id TEXT UNIQUE, native_nonce TEXT, deadline INTEGER NOT NULL, reserved_duration_ms INTEGER NOT NULL, reserved_memory_mib INTEGER NOT NULL DEFAULT 0, reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0, reserved_storage_bytes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL CHECK(status IN ('prepared','running','succeeded','failed','cancelled','timed-out','unknown')), version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result_json TEXT, dispatch_attempted INTEGER NOT NULL DEFAULT 0 CHECK(dispatch_attempted IN (0,1)), creation_witness_json TEXT, artifact_binding_json TEXT, linux_contract_json TEXT, linux_intent_json TEXT, linux_resources_json TEXT, migrated INTEGER NOT NULL DEFAULT 0 CHECK(migrated IN (0,1)), CHECK((backend_kind='docker' AND container_name IS NOT NULL AND native_resource_id IS NULL AND native_nonce IS NULL) OR (backend_kind='macos-seatbelt' AND container_name IS NULL AND native_resource_id IS NOT NULL AND native_nonce IS NOT NULL AND reserved_memory_mib=0 AND reserved_workspace_inodes=0 AND linux_contract_json IS NULL AND linux_intent_json IS NULL AND linux_resources_json IS NULL) OR (backend_kind='linux-native' AND container_name IS NULL AND native_resource_id IS NOT NULL AND native_nonce IS NOT NULL AND reserved_memory_mib>0 AND reserved_workspace_inodes>0 AND reserved_storage_bytes>0 AND linux_contract_json IS NOT NULL)), CHECK(backend_kind='linux-native' OR (linux_contract_json IS NULL AND linux_intent_json IS NULL AND linux_resources_json IS NULL)), UNIQUE(principal_digest, principal_record_id, principal_version, workspace, agent_preset, session_id, grant_id, idempotency_key)) STRICT;
+      INSERT INTO isolation_jobs_v9 (id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,backend_kind,native_resource_id,native_nonce,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,status,version,created_at,updated_at,result_json,dispatch_attempted,creation_witness_json,artifact_binding_json,linux_contract_json,linux_intent_json,linux_resources_json) SELECT id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,backend_kind,native_resource_id,native_nonce,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,status,version,created_at,updated_at,result_json,dispatch_attempted,creation_witness_json,artifact_binding_json,linux_contract_json,linux_intent_json,linux_resources_json FROM isolation_jobs;
+      DROP TABLE isolation_jobs; ALTER TABLE isolation_jobs_v9 RENAME TO isolation_jobs;
+      CREATE INDEX isolation_jobs_grant ON isolation_jobs(grant_id);
+      CREATE INDEX isolation_jobs_recoverable ON isolation_jobs(status, updated_at);
+      UPDATE schema_meta SET value='9' WHERE key='schema-version'; PRAGMA user_version=9; COMMIT;`)
     database.exec("CREATE INDEX IF NOT EXISTS isolation_artifact_contract ON isolation_jobs(json_extract(artifact_binding_json, '$.admission.contractId')) WHERE artifact_binding_json IS NOT NULL")
-    if (![0, 1, 2, 3, 4, 5, 6, 7, schemaVersion].includes(version)) fail('schema')
+    if (![0, 1, 2, 3, 4, 5, 6, 7, 8, schemaVersion].includes(version)) fail('schema')
     const marker = database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value?: unknown } | undefined
-    if (marker?.value !== '8' || (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version !== 8) fail('schema')
+    if (marker?.value !== '9' || (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version !== 9) fail('schema')
     if (path !== ':memory:') chmodSync(path, 0o600)
     return database
   } catch (error) { database.close(); throw error }
@@ -164,7 +175,7 @@ export class IsolationLedger {
     if (!((row.backend_kind === 'docker' && text(row.container_name) && row.native_resource_id === null && row.native_nonce === null)
       || (row.backend_kind === 'macos-seatbelt' && row.container_name === null && text(row.native_resource_id) && text(row.native_nonce) && row.reserved_memory_mib === 0 && row.reserved_workspace_inodes === 0)
       || (row.backend_kind === 'linux-native' && row.container_name === null && row.native_resource_id === `linux-${row.id}` && /^[a-f0-9]{32}$/u.test(row.native_nonce ?? '') && row.reserved_memory_mib > 0 && row.reserved_workspace_inodes > 0 && row.reserved_storage_bytes > 0))) fail('schema')
-    if (![0, 1].includes(row.dispatch_attempted)) fail('schema')
+    if (![0, 1].includes(row.dispatch_attempted) || ![0, 1].includes(row.migrated)) fail('schema')
     let witness: CreationWitness | undefined
     if (row.creation_witness_json !== null) {
       try { witness = validateCreationWitness(JSON.parse(row.creation_witness_json)) } catch { fail('schema') }
@@ -257,7 +268,7 @@ export class IsolationLedger {
       const current = this.#grant(input.grantId)
       if (!current || current.revoked || current.expires_at <= now || current.principal_digest !== who.principalDigest || current.principal_record_id !== who.principalRecordId || current.principal_version !== who.principalVersion || current.workspace !== who.workspace || current.agent_preset !== who.agentPreset) refuse('unauthorized')
       if (input.maxActiveJobs !== undefined) {
-        const active = this.#database.prepare("SELECT COUNT(*) AS count FROM isolation_jobs WHERE status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0)").get() as { count: number }
+        const active = this.#database.prepare("SELECT COUNT(*) AS count FROM isolation_jobs WHERE migrated=0 AND (status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0))").get() as { count: number }
         if (!safeTime(active.count)) fail('unauthorized', 'active isolation job limit reached')
         if (active.count >= input.maxActiveJobs) refuse('unauthorized', 'active isolation job limit reached')
       }
@@ -265,7 +276,7 @@ export class IsolationLedger {
       if (!safeTime(usage.runs) || !safeTime(usage.duration)) fail('unauthorized', 'grant budget exhausted')
       if (usage.runs >= current.max_runs || input.durationMs > current.max_total_duration_ms || usage.duration > current.max_total_duration_ms - input.durationMs) refuse('unauthorized', 'grant budget exhausted')
       if (reservation) {
-        const occupied = "status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0)"
+        const occupied = "migrated=0 AND (status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0))"
         const legacy = this.#database.prepare(`SELECT COUNT(*) AS count FROM isolation_jobs WHERE (${occupied}) AND (reserved_memory_mib = 0 OR reserved_workspace_inodes = 0)`).get() as { count: number }
         if (!safeTime(legacy.count)) fail('unauthorized', 'active legacy job has no resource reservation')
         if (legacy.count > 0) refuse('unauthorized', 'active legacy job has no resource reservation')
@@ -280,7 +291,7 @@ export class IsolationLedger {
         const records = this.#database.prepare('SELECT COUNT(*) AS count FROM isolation_jobs').get() as { count: number }
         if (!safeTime(records.count)) fail('unauthorized', 'isolation job record limit reached')
         if (records.count >= storage.maxJobRecords) refuse('unauthorized', 'isolation job record limit reached')
-        const occupied = "status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0)"
+        const occupied = "migrated=0 AND (status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0))"
         const legacy = this.#database.prepare(`SELECT COUNT(*) AS count FROM isolation_jobs WHERE (${occupied}) AND reserved_storage_bytes = 0`).get() as { count: number }
         if (!safeTime(legacy.count)) fail('unauthorized', 'active legacy job has no storage reservation')
         if (legacy.count > 0) refuse('unauthorized', 'active legacy job has no storage reservation')
@@ -567,7 +578,7 @@ export class IsolationLedger {
   }
   hasController(authority: IsolationControllerAuthority): boolean { const controller = this.#authority(authority); if (!controller) return false; const row = this.#database.prepare('SELECT owner_id, fence, expires_at FROM isolation_controller WHERE singleton=1').get() as { owner_id: string; fence: number; expires_at: number } | undefined; return !!row && row.owner_id === controller.ownerId && row.fence === controller.fence && safeTime(row.expires_at) && row.expires_at > this.#nowValue() }
   get(jobId: string): IsolationJob | undefined { if (!text(jobId)) fail('invalid-input'); return this.#job(jobId) }
-  recoverable(afterId = ''): IsolationJob[] { return (this.#database.prepare("SELECT * FROM isolation_jobs WHERE id > ? AND (status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0)) ORDER BY id ASC LIMIT 1000").all(afterId) as JobRow[]).map(row => this.#decodeJob(row)).filter(job => job.status === 'prepared' || job.status === 'running' || job.result?.quiescent === false) }
+  recoverable(afterId = ''): IsolationJob[] { return (this.#database.prepare("SELECT * FROM isolation_jobs WHERE id > ? AND migrated=0 AND (status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0)) ORDER BY id ASC LIMIT 1000").all(afterId) as JobRow[]).map(row => this.#decodeJob(row)).filter(job => job.status === 'prepared' || job.status === 'running' || job.result?.quiescent === false) }
   retentionCandidates(cutoff: number, afterId = '', limit = 16, includeCompactedNative = false): Array<{ id: string; version: number }> {
     if (typeof includeCompactedNative !== 'boolean' || !safeTime(cutoff) || typeof afterId !== 'string' || afterId.length > textMaximum || !safePositive(limit) || limit > 1_000) fail('invalid-input')
     const rows = this.#database.prepare("SELECT id, version FROM isolation_jobs WHERE id > ? AND status IN ('succeeded','failed','cancelled','timed-out') AND result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 1 AND ((updated_at <= ? AND json_extract(result_json, '$.retention') IS NULL) OR (? = 1 AND backend_kind = 'linux-native' AND json_extract(result_json, '$.retention.kind') = 'pruned')) ORDER BY id ASC LIMIT ?").all(afterId, cutoff, includeCompactedNative ? 1 : 0, limit) as Array<{ id: string; version: number }>
@@ -596,7 +607,7 @@ export class IsolationLedger {
     })
   }
   storageStats(): { jobRecords: number; reusableBytes: number; activeReservedBytes: number; legacyActiveJobs: number } {
-    const counts = this.#database.prepare("SELECT COUNT(*) AS jobRecords, COALESCE(SUM(CASE WHEN status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0) THEN reserved_storage_bytes ELSE 0 END), 0) AS activeReservedBytes, COUNT(CASE WHEN (status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0)) AND reserved_storage_bytes = 0 THEN 1 END) AS legacyActiveJobs FROM isolation_jobs").get() as { jobRecords: number; activeReservedBytes: number; legacyActiveJobs: number }
+    const counts = this.#database.prepare("SELECT COUNT(*) AS jobRecords, COALESCE(SUM(CASE WHEN migrated=0 AND (status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0)) THEN reserved_storage_bytes ELSE 0 END), 0) AS activeReservedBytes, COUNT(CASE WHEN migrated=0 AND (status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0)) AND reserved_storage_bytes = 0 THEN 1 END) AS legacyActiveJobs FROM isolation_jobs").get() as { jobRecords: number; activeReservedBytes: number; legacyActiveJobs: number }
     const pages = this.#database.prepare('PRAGMA page_size').get() as { page_size: number }
     const free = this.#database.prepare('PRAGMA freelist_count').get() as { freelist_count: number }
     if (!safeTime(counts.jobRecords) || !safeTime(counts.activeReservedBytes) || !safeTime(counts.legacyActiveJobs) || !safePositive(pages.page_size) || !safeTime(free.freelist_count) || free.freelist_count > Math.floor(Number.MAX_SAFE_INTEGER / pages.page_size)) fail('schema')

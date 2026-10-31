@@ -282,7 +282,7 @@ describe('real schema 7 migration', () => {
     mac = ledger.markDispatched(mac.id, mac.version, authority); mac = ledger.settle(mac.id, mac.version, outcome(mac, 'unknown', false), authority)
     ledger.close(); ledgers.splice(ledgers.indexOf(ledger), 1)
     const database = new DatabaseSync(file)
-    const columns = (database.prepare('PRAGMA table_info(isolation_jobs)').all() as Array<{ name: string }>).map(row => row.name).filter(name => !name.startsWith('linux_')).join(',')
+    const columns = (database.prepare('PRAGMA table_info(isolation_jobs)').all() as Array<{ name: string }>).map(row => row.name).filter(name => !name.startsWith('linux_') && name !== 'migrated').join(',')
     database.exec(`DROP INDEX isolation_artifact_contract; ALTER TABLE isolation_jobs RENAME TO saved_v8;
       CREATE TABLE isolation_jobs (id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL, session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, container_name TEXT UNIQUE, backend_kind TEXT NOT NULL CHECK(backend_kind IN ('docker','macos-seatbelt')), native_resource_id TEXT UNIQUE, native_nonce TEXT, deadline INTEGER NOT NULL, reserved_duration_ms INTEGER NOT NULL, reserved_memory_mib INTEGER NOT NULL DEFAULT 0, reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0, reserved_storage_bytes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL CHECK(status IN ('prepared','running','succeeded','failed','cancelled','timed-out','unknown')), version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result_json TEXT, dispatch_attempted INTEGER NOT NULL DEFAULT 0 CHECK(dispatch_attempted IN (0,1)), creation_witness_json TEXT, artifact_binding_json TEXT, CHECK((backend_kind='docker' AND container_name IS NOT NULL AND native_resource_id IS NULL AND native_nonce IS NULL) OR (backend_kind='macos-seatbelt' AND container_name IS NULL AND native_resource_id IS NOT NULL AND native_nonce IS NOT NULL AND reserved_memory_mib=0 AND reserved_workspace_inodes=0)), UNIQUE(principal_digest, principal_record_id, principal_version, workspace, agent_preset, session_id, grant_id, idempotency_key)) STRICT;
       INSERT INTO isolation_jobs (${columns}) SELECT ${columns} FROM saved_v8;
@@ -301,8 +301,8 @@ describe('real schema 7 migration', () => {
     expect(() => migrated.prepare({ ...request('new-linux'), authority })).toThrow(/budget exhausted/u)
     expect(migrated.findJobByKey(identity, 'session', 'grant', 'old-mac')).toEqual(mac)
     const after = new DatabaseSync(file)
-    expect((after.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(8)
-    const afterJobs = after.prepare('SELECT * FROM isolation_jobs ORDER BY id').all().map(row => { const { linux_contract_json, linux_intent_json, linux_resources_json, ...legacy } = row; expect([linux_contract_json, linux_intent_json, linux_resources_json]).toEqual([null, null, null]); return legacy })
+    expect((after.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(9)
+    const afterJobs = after.prepare('SELECT * FROM isolation_jobs ORDER BY id').all().map(row => { const { linux_contract_json, linux_intent_json, linux_resources_json, migrated, ...legacy } = row; expect([linux_contract_json, linux_intent_json, linux_resources_json]).toEqual([null, null, null]); expect(migrated).toBe(0); return legacy })
     expect(afterJobs).toEqual(beforeJobs)
     expect(after.prepare('SELECT * FROM isolation_grants').all()).toEqual(beforeGrants)
     expect(after.prepare('SELECT * FROM isolation_audit').all()).toEqual(beforeAudit)

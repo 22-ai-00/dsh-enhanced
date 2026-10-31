@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { IsolationLedger } from './ledger.js'
 
 export interface LinuxRunnerStateSeal { path: string; sha256: string }
-type Kind = 'repository' | 'verification'
+export type Kind = 'repository' | 'verification'
 interface FileIdentity { path: string; dev: number; ino: number }
 interface SealBody {
   schemaVersion: 1
@@ -17,7 +17,7 @@ interface SealBody {
   uid: number
   stateRoot: FileIdentity
   ledger: FileIdentity
-  ledgerSchemaVersion: 8
+  ledgerSchemaVersion: 9
   schemaSha256: string
 }
 const hex = /^[a-f0-9]{64}$/u
@@ -94,15 +94,15 @@ function schema(path: string, empty: boolean): string {
   if (info.size < 100) fail('ledger is incomplete')
   const db = new DatabaseSync(`${pathToFileURL(path).href}?immutable=1`, { readOnly: true })
   try {
-    if (db.prepare('PRAGMA user_version').get()?.user_version !== 8
-      || db.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get()?.value !== '8') fail('ledger schema differs')
+    if (db.prepare('PRAGMA user_version').get()?.user_version !== 9
+      || db.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get()?.value !== '9') fail('ledger schema differs')
     const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name").all()
       .map(row => String(row.name))
     if (tables.join() !== ['isolation_audit', 'isolation_controller', 'isolation_grants', 'isolation_jobs', 'schema_meta', 'sqlite_sequence'].join())
       fail('ledger schema is incomplete')
     const required: Record<string, string[]> = {
       isolation_grants: ['id', 'digest', 'revision', 'expires_at', 'max_runs', 'max_total_duration_ms', 'revoked', 'revoke_reason', 'principal_digest', 'principal_record_id', 'principal_version', 'workspace', 'agent_preset'],
-      isolation_jobs: ['id', 'grant_id', 'grant_revision', 'principal_digest', 'principal_record_id', 'principal_version', 'workspace', 'agent_preset', 'session_id', 'idempotency_key', 'request_digest', 'container_name', 'backend_kind', 'native_resource_id', 'native_nonce', 'deadline', 'reserved_duration_ms', 'reserved_memory_mib', 'reserved_workspace_inodes', 'reserved_storage_bytes', 'status', 'version', 'created_at', 'updated_at', 'result_json', 'dispatch_attempted', 'creation_witness_json', 'artifact_binding_json', 'linux_contract_json', 'linux_intent_json', 'linux_resources_json'],
+      isolation_jobs: ['id', 'grant_id', 'grant_revision', 'principal_digest', 'principal_record_id', 'principal_version', 'workspace', 'agent_preset', 'session_id', 'idempotency_key', 'request_digest', 'container_name', 'backend_kind', 'native_resource_id', 'native_nonce', 'deadline', 'reserved_duration_ms', 'reserved_memory_mib', 'reserved_workspace_inodes', 'reserved_storage_bytes', 'status', 'version', 'created_at', 'updated_at', 'result_json', 'dispatch_attempted', 'creation_witness_json', 'artifact_binding_json', 'linux_contract_json', 'linux_intent_json', 'linux_resources_json', 'migrated'],
       isolation_audit: ['sequence', 'occurred_at', 'action', 'job_id', 'grant_id', 'detail'],
       isolation_controller: ['singleton', 'owner_id', 'fence', 'expires_at'],
       schema_meta: ['key', 'value'], sqlite_sequence: ['name', 'seq'],
@@ -135,6 +135,17 @@ function emptySchema(path: string): string {
   return digest
 }
 
+/** Schema digest of an existing private v9 ledger, running every table and
+ * column gate from inspection. The ledger must already be checkpointed with
+ * no pending WAL (immutable reads never see WAL frames). Used by the authorized
+ * backend handover to reseal a migrated ledger inside a staging copy. */
+export function linuxRunnerStateSchemaDigest(path: string): string {
+  noPendingWal(path)
+  const digest = schema(path, false)
+  noPendingWal(path)
+  return digest
+}
+
 function readSeal(path: string): { body: SealBody; bytes: Buffer } {
   const before = privateFile(path, 16_384)
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
@@ -146,7 +157,7 @@ function readSeal(path: string): { body: SealBody; bytes: Buffer } {
       || body.schemaVersion !== 1 || body.protocol !== 'dsh-linux-runner-state/v1'
       || typeof body.id !== 'string' || !uuid.test(body.id) || !['repository', 'verification'].includes(String(body.kind))
       || body.uid !== owner() || !validIdentity(body.stateRoot) || !validIdentity(body.ledger)
-      || body.ledgerSchemaVersion !== 8 || typeof body.schemaSha256 !== 'string' || !hex.test(body.schemaSha256)) fail('seal body differs')
+      || body.ledgerSchemaVersion !== 9 || typeof body.schemaSha256 !== 'string' || !hex.test(body.schemaSha256)) fail('seal body differs')
     sameIdentity(privateFile(path, 16_384), identity(path, before))
     return { body: body as unknown as SealBody, bytes }
   } finally { closeSync(fd) }
@@ -202,7 +213,7 @@ export function prepareLinuxRunnerState(input: { stateRoot: string; sealPath: st
   syncFile(ledgerPath); syncFile(input.stateRoot, true)
   const body: SealBody = { schemaVersion: 1, protocol: 'dsh-linux-runner-state/v1', id: randomUUID(),
     kind: input.kind, uid: owner(), stateRoot: identity(input.stateRoot, root), ledger: identity(ledgerPath, ledger),
-    ledgerSchemaVersion: 8, schemaSha256 }
+    ledgerSchemaVersion: 9, schemaSha256 }
   const bytes = Buffer.from(JSON.stringify(body) + '\n'), temporary = join(dirname(input.sealPath), `.${randomUUID()}.tmp`)
   const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600)
   try {
@@ -217,4 +228,98 @@ export function prepareLinuxRunnerState(input: { stateRoot: string; sealPath: st
   const ref = { path: input.sealPath, sha256: sha(bytes) }
   inspectLinuxRunnerState({ stateRoot: input.stateRoot, stateSeal: ref, kind: input.kind })
   return ref
+}
+
+/** Read an existing seal without binding it to the current file identities.
+ * A staging copy gets fresh dev/ino nodes, so sameIdentity checks never apply
+ * there; shape, owner, protocol and purpose are still enforced. */
+function tolerantSealKind(path: string): Kind {
+  privateFile(path, 16_384)
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const bytes = readFileSync(fd)
+    const body = JSON.parse(bytes.toString('utf8')) as unknown
+    if (!exact(body, ['schemaVersion', 'protocol', 'id', 'kind', 'uid', 'stateRoot', 'ledger', 'ledgerSchemaVersion', 'schemaSha256'])
+      || body.schemaVersion !== 1 || body.protocol !== 'dsh-linux-runner-state/v1'
+      || typeof body.id !== 'string' || !uuid.test(body.id) || !['repository', 'verification'].includes(String(body.kind))
+      || body.uid !== owner() || !validIdentity(body.stateRoot) || !validIdentity(body.ledger)
+      || body.ledgerSchemaVersion !== 9 || typeof body.schemaSha256 !== 'string' || !hex.test(body.schemaSha256)) fail('seal body differs')
+    return body.kind as Kind
+  } finally { closeSync(fd) }
+}
+
+export interface LinuxRunnerStateResealInput {
+  /** Physical private state root inside the disposable staging copy; its
+   * dev/ino are the identities frozen in the new seal. */
+  stateRoot: string
+  /** Physical seal destination inside the staging copy. */
+  sealPath: string
+  kind: Kind
+  /** Logical live paths recorded in the seal body and returned in the ref.
+   * They differ from the physical paths while sealing a staging copy that a
+   * same-filesystem rename will later move onto the live location. */
+  logicalStateRoot?: string
+  logicalSealPath?: string
+  /** Require a brand-new empty ledger (fresh repository handover state);
+   * otherwise the ledger must already exist with migrated v9 history. */
+  requireEmpty?: boolean
+}
+
+/** Publish a fresh seal over a staging state tree. Unlike preparation this
+ * never inspects the result against the logical locations: the staging nodes
+ * reach their live paths only after the orchestrator's atomic rename. The new
+ * seal binds logical path strings to the physical staging identities that the
+ * rename preserves. */
+export function resealLinuxRunnerState(input: LinuxRunnerStateResealInput): LinuxRunnerStateSeal {
+  if (!input || typeof input !== 'object' || Object.getPrototypeOf(input) !== Object.prototype
+    || Reflect.ownKeys(input).some(key => !['stateRoot', 'sealPath', 'kind', 'logicalStateRoot', 'logicalSealPath', 'requireEmpty'].includes(String(key)))
+    || !['repository', 'verification'].includes(input.kind)
+    || (input.requireEmpty !== undefined && typeof input.requireEmpty !== 'boolean')
+    || (input.logicalStateRoot !== undefined && !canonical(input.logicalStateRoot))
+    || (input.logicalSealPath !== undefined && !canonical(input.logicalSealPath))) fail('invalid reseal input')
+  const logicalStateRoot = input.logicalStateRoot ?? input.stateRoot
+  const logicalSealPath = input.logicalSealPath ?? input.sealPath
+  locations(input.stateRoot, input.sealPath, input.kind)
+  if (!canonical(logicalStateRoot) || !canonical(logicalSealPath)
+    || logicalSealPath === logicalStateRoot || logicalSealPath.startsWith(logicalStateRoot + sep)
+    || logicalStateRoot.startsWith(logicalSealPath + sep)) fail('invalid logical state or seal binding')
+  const root = privateDirectory(input.stateRoot)
+  const ledgerPath = join(input.stateRoot, 'ledger.sqlite')
+  const requireEmpty = input.requireEmpty === true
+  if (requireEmpty) {
+    if (readdirSync(input.stateRoot).some(name => !['ledger.sqlite', 'ledger.sqlite-wal', 'ledger.sqlite-shm'].includes(name)))
+      fail('unsealed state is not an empty preparation')
+    noPendingWal(ledgerPath)
+    if (!exists(ledgerPath)) {
+      if (readdirSync(input.stateRoot).length) fail('unsealed ledger is missing')
+      const reserved = openSync(ledgerPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600)
+      closeSync(reserved)
+      const ledger = new IsolationLedger(ledgerPath)
+      ledger.close()
+    }
+  } else if (!exists(ledgerPath)) fail('migrated ledger is missing')
+  if (exists(input.sealPath)) {
+    if (tolerantSealKind(input.sealPath) !== input.kind) fail('existing seal purpose differs')
+    unlinkSync(input.sealPath)
+  }
+  const schemaSha256 = requireEmpty ? emptySchema(ledgerPath) : linuxRunnerStateSchemaDigest(ledgerPath)
+  const ledger = privateFile(ledgerPath)
+  const stateIdentity: FileIdentity = { path: logicalStateRoot, dev: root.dev, ino: root.ino }
+  const ledgerIdentity: FileIdentity = { path: join(logicalStateRoot, 'ledger.sqlite'), dev: ledger.dev, ino: ledger.ino }
+  syncFile(ledgerPath); syncFile(input.stateRoot, true)
+  const body: SealBody = { schemaVersion: 1, protocol: 'dsh-linux-runner-state/v1', id: randomUUID(),
+    kind: input.kind, uid: owner(), stateRoot: stateIdentity, ledger: ledgerIdentity,
+    ledgerSchemaVersion: 9, schemaSha256 }
+  const bytes = Buffer.from(JSON.stringify(body) + '\n'), temporary = join(dirname(input.sealPath), `.${randomUUID()}.tmp`)
+  const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600)
+  try {
+    writeFileSync(fd, bytes); fsyncSync(fd)
+    // link is an atomic no-replace publication; a raced seal is never overwritten.
+    linkSync(temporary, input.sealPath)
+  } finally {
+    closeSync(fd)
+    unlinkSync(temporary)
+  }
+  syncFile(dirname(input.sealPath), true)
+  return Object.freeze({ path: logicalSealPath, sha256: sha(bytes) })
 }

@@ -74,7 +74,7 @@ describe.runIf(process.platform === 'linux' && (process.getuid?.() ?? 0) > 0)('f
     expect(readdirSync(f.stateRoot)).toEqual(['ledger.sqlite'])
     const db = readonly(f.ledgerPath)
     try {
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(8)
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(9)
       for (const table of ['isolation_grants', 'isolation_jobs', 'isolation_controller', 'isolation_audit'])
         expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n).toBe(0)
     } finally { db.close() }

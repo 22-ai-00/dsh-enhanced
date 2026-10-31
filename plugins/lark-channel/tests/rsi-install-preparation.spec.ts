@@ -45,7 +45,7 @@ async function treeIdentity(path: string): Promise<unknown[]> {
 function assertEmptyLedger(path: string): void {
   const db = new DatabaseSync(`${pathToFileURL(path).href}?immutable=1`, { readOnly: true })
   try {
-    expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(8)
+    expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(9)
     expect(db.prepare('SELECT COUNT(*) AS n FROM isolation_jobs').get()?.n).toBe(0)
     expect(db.prepare('SELECT COUNT(*) AS n FROM isolation_grants').get()?.n).toBe(0)
   } finally { db.close() }

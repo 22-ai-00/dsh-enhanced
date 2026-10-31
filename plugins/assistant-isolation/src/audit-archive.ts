@@ -35,7 +35,7 @@ export interface IsolationAuditArchiveManifest {
   readonly count: number
   readonly firstSequence: number
   readonly lastSequence: number
-  readonly ledgerSchema: 6 | 7 | 8
+  readonly ledgerSchema: 6 | 7 | 8 | 9
   readonly previousDigest: string | null
   readonly protocol: typeof ISOLATION_AUDIT_ARCHIVE_PROTOCOL
   readonly snapshotThroughSequence: number
@@ -207,13 +207,13 @@ function validateLockedControlPath(identity: ControlFileIdentity): void {
 function decodeManifest(value: unknown): IsolationAuditArchiveManifest {
   const keys = ['archiveInstanceId', 'count', 'firstSequence', 'lastSequence', 'ledgerSchema', 'previousDigest', 'protocol', 'snapshotThroughSequence', 'sourceStateRootDigest', 'type', 'version']
   if (!plain(value) || !exactKeys(value, keys) || typeof value.archiveInstanceId !== 'string' || !ARCHIVE_INSTANCE_ID.test(value.archiveInstanceId) || typeof value.sourceStateRootDigest !== 'string' || !DIGEST.test(value.sourceStateRootDigest) || !safeNatural(value.count) || value.count > MAX_BATCH_SIZE
-    || !safePositive(value.firstSequence) || !safeNatural(value.lastSequence) || ![6, 7, 8].includes(value.ledgerSchema as number)
+    || !safePositive(value.firstSequence) || !safeNatural(value.lastSequence) || ![6, 7, 8, 9].includes(value.ledgerSchema as number)
     || (value.previousDigest !== null && (typeof value.previousDigest !== 'string' || !DIGEST.test(value.previousDigest)))
     || value.protocol !== ISOLATION_AUDIT_ARCHIVE_PROTOCOL || !safeNatural(value.snapshotThroughSequence) || value.type !== 'manifest' || value.version !== 1) fail('invalid-archive', 'invalid audit archive manifest')
   if (value.count === 0) {
     if (value.firstSequence !== 1 || value.lastSequence !== 0 || value.snapshotThroughSequence !== 0 || value.previousDigest !== null) fail('invalid-archive', 'invalid audit archive genesis manifest')
   } else if (value.lastSequence !== value.firstSequence + value.count - 1 || value.lastSequence > value.snapshotThroughSequence) fail('invalid-archive', 'inconsistent audit archive manifest bounds')
-  return freeze({ archiveInstanceId: value.archiveInstanceId, count: value.count, firstSequence: value.firstSequence, lastSequence: value.lastSequence, ledgerSchema: value.ledgerSchema as 6 | 7 | 8, previousDigest: value.previousDigest, protocol: ISOLATION_AUDIT_ARCHIVE_PROTOCOL, snapshotThroughSequence: value.snapshotThroughSequence, sourceStateRootDigest: value.sourceStateRootDigest, type: 'manifest', version: 1 })
+  return freeze({ archiveInstanceId: value.archiveInstanceId, count: value.count, firstSequence: value.firstSequence, lastSequence: value.lastSequence, ledgerSchema: value.ledgerSchema as 6 | 7 | 8 | 9, previousDigest: value.previousDigest, protocol: ISOLATION_AUDIT_ARCHIVE_PROTOCOL, snapshotThroughSequence: value.snapshotThroughSequence, sourceStateRootDigest: value.sourceStateRootDigest, type: 'manifest', version: 1 })
 }
 function decodeRecord(value: unknown): IsolationAuditArchiveRecord {
   const keys = ['action', 'detail', 'grantId', 'jobId', 'occurredAt', 'sequence']
@@ -416,7 +416,7 @@ function validateLedgerFile(state: SecureDirectory): { path: string; descriptor:
 function validateLedgerSnapshot(database: DatabaseSync): number {
   const userVersion = (database.prepare('PRAGMA user_version').get() as { user_version?: unknown }).user_version
   const schema = database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value?: unknown } | undefined
-  if (userVersion !== 7 && userVersion !== 8 || schema?.value !== String(userVersion)) fail('invalid-source', 'isolation ledger schema 7 or 8 is required')
+  if (userVersion !== 7 && userVersion !== 8 && userVersion !== 9 || schema?.value !== String(userVersion)) fail('invalid-source', 'isolation ledger schema 7, 8 or 9 is required')
   const highWater = (database.prepare("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='isolation_audit'), 0) AS sequence").get() as { sequence?: unknown }).sequence
   if (!safeNatural(highWater)) fail('invalid-source', 'isolation audit high-water is invalid')
   const bounds = database.prepare('SELECT COUNT(*) AS count, COALESCE(MIN(sequence), 0) AS first_sequence, COALESCE(MAX(sequence), 0) AS last_sequence FROM isolation_audit').get() as { count?: unknown; first_sequence?: unknown; last_sequence?: unknown }
@@ -450,7 +450,7 @@ function rowRecord(row: AuditRow, expectedSequence: number): IsolationAuditArchi
   return freeze({ action: row.action, detail: row.detail, grantId: row.grant_id, jobId: row.job_id, occurredAt: row.occurred_at, sequence: row.sequence }) as IsolationAuditArchiveRecord
 }
 function recordsEqual(left: IsolationAuditArchiveRecord, right: IsolationAuditArchiveRecord): boolean { return canonical(left) === canonical(right) }
-function makeManifest(archiveInstanceId: string, sourceStateRootDigest: string, firstSequence: number, lastSequence: number, count: number, snapshotThroughSequence: number, previousDigest: string | null, ledgerSchema: 7 | 8): IsolationAuditArchiveManifest {
+function makeManifest(archiveInstanceId: string, sourceStateRootDigest: string, firstSequence: number, lastSequence: number, count: number, snapshotThroughSequence: number, previousDigest: string | null, ledgerSchema: 7 | 8 | 9): IsolationAuditArchiveManifest {
   return freeze({ archiveInstanceId, count, firstSequence, lastSequence, ledgerSchema, previousDigest, protocol: ISOLATION_AUDIT_ARCHIVE_PROTOCOL, snapshotThroughSequence, sourceStateRootDigest, type: 'manifest', version: 1 })
 }
 function encodeFile(manifest: IsolationAuditArchiveManifest, records: readonly IsolationAuditArchiveRecord[]): Buffer {
@@ -521,7 +521,7 @@ export function archiveIsolationAudit(options: { stateRoot: string; archiveDirec
     const existing = verifyArchive(archive, controlLock, true, true, controlLock.file)
     const snapshot = openLedgerSnapshot(state); database = snapshot.database; ledgerDescriptor = snapshot.descriptor; transaction = true
     const highWater = snapshot.highWater
-    const ledgerSchema = (database.prepare('PRAGMA user_version').get() as { user_version: 7 | 8 }).user_version
+    const ledgerSchema = (database.prepare('PRAGMA user_version').get() as { user_version: 7 | 8 | 9 }).user_version
     if (existing.verification.highestSequence > highWater || existing.verification.snapshotThroughSequence > highWater) fail('conflict', 'archive does not match this isolation ledger')
     let archivedIndex = 0
     for (const file of existing.files) for (const record of file.records) {
