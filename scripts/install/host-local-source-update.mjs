@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto'
 import { lstat, readFile, readdir, realpath } from 'node:fs/promises'
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { assertLocalSourceInstaller, bindLocalSourceInstaller, loadLocalSourceInstaller } from './local-source-maintenance.mjs'
+import { assertLocalSourceInstaller, bindLocalSourceInstaller, loadLocalSourceInstaller,
+  localCandidateBuildBackend, nativeCandidateRefusal, readLocalCandidateSourceBuild } from './local-source-maintenance.mjs'
 import { materializeHostLocalArtifacts, prepareHostLocalArtifacts, verifyHostLocalArtifacts,
   verifyHostLocalArtifactsInHome } from './host-local-artifacts.mjs'
 
@@ -257,7 +258,11 @@ export async function prepareHostLocalSourceUpdate({ homePath, profile, preparat
       dshPath, dshEnvironment, hostPlan, restartConfigPath })
     const source = await api.readRsiSourceWorkspace({ dshHome: preparation.candidateHome, profile,
       sourceRepository: preparation.source.repository })
-    const sourceBuild = await api.readRsiBuildEnvironment({ dshHome: preparation.candidateHome, profile, source })
+    const sourceBuild = await readLocalCandidateSourceBuild(api, { dshHome: preparation.candidateHome,
+      profile, source })
+    if (localCandidateBuildBackend(sourceBuild) === 'linux-native') {
+      fail(nativeCandidateRefusal('owner program update'))
+    }
     candidateCreation = await helper.prepareOwnerProgramCreation({ ownerUpdate, candidateHome: preparation.candidateHome,
       source, sourceBuild, installer })
   } else if (ownerRepairPreset !== undefined) {
@@ -268,7 +273,11 @@ export async function prepareHostLocalSourceUpdate({ homePath, profile, preparat
       ...(ownerRepairPredecessor === undefined ? {} : { predecessorProof: ownerRepairPredecessor }) })
     const source = await api.readRsiSourceWorkspace({ dshHome: preparation.candidateHome, profile,
       sourceRepository: preparation.source.repository })
-    const sourceBuild = await api.readRsiBuildEnvironment({ dshHome: preparation.candidateHome, profile, source })
+    const sourceBuild = await readLocalCandidateSourceBuild(api, { dshHome: preparation.candidateHome,
+      profile, source })
+    if (localCandidateBuildBackend(sourceBuild) === 'linux-native') {
+      fail(nativeCandidateRefusal('owner source repair'))
+    }
     candidateCreation = await helper.prepareOwnerRepairCreation({ ownerRepair, candidateHome: preparation.candidateHome,
       source, sourceBuild, installer })
   } else {

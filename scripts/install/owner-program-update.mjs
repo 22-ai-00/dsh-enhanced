@@ -10,7 +10,8 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual as same } from 'node:util'
 import { DatabaseSync } from 'node:sqlite'
-import { assertLocalSourceInstaller } from './local-source-maintenance.mjs'
+import { assertLocalSourceInstaller, localCandidateBuildBackend, nativeCandidateRefusal,
+  nativeOriginalRefusal, readLocalCandidateSourceBuild } from './local-source-maintenance.mjs'
 import { composeOwnerRepairProfiles, ownerRepairPatchEquivalent,
   ownerRepairSnapshotEquivalent } from './owner-source-repair.mjs'
 
@@ -20,6 +21,14 @@ const json = value => `${JSON.stringify(value, null, 2)}\n`
 const hex = /^[a-f0-9]{64}$/u
 const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const fail = message => { throw new Error(`Owner program update: ${message}`) }
+/**
+ * A candidate build receipt is either the Docker schema 1 `RsiBuildEnvironment`
+ * or the linux-native schema 3 `LinuxRsiBuildEnvironment`; native candidates are
+ * refused above until the native owner-program activation slices exist.
+ * @typedef {import('../../plugins/lark-channel/src/rsi-build.ts').RsiBuildEnvironment
+ *   | import('../../plugins/lark-channel/src/rsi-linux-runtime-bootstrap.ts').LinuxRsiBuildEnvironment} LocalCandidateBuild */
+const nativeCandidateUnavailable = nativeCandidateRefusal('owner program update')
+const nativeOriginalUnavailable = nativeOriginalRefusal('owner program update')
 const exact = path => typeof path === 'string' && isAbsolute(path) && resolve(path) === path
   && !path.includes('\0') && !/[\r\n]/u.test(path)
 const inside = (root, path) => path === root || path.startsWith(`${root}${sep}`)
@@ -66,15 +75,25 @@ async function write(path, source) {
   try { await file.writeFile(source); await file.sync() } finally { await file.close() }
   await rename(temporary, path)
 }
+async function reviewedModule(root, name, optional = false) {
+  const path = join(root, `${name}.js`)
+  // The backend-agnostic candidate-build reader may postdate the packaged lib
+  // tree of an older installer; only its own absence is tolerated.
+  if (optional) {
+    try { await lstat(path) } catch (error) { if (error?.code === 'ENOENT') return {}; throw error }
+  }
+  return import(pathToFileURL(path).href)
+}
 async function apiFor(installer) {
   await assertLocalSourceInstaller(installer)
   const root = join(installer.root, 'plugins', 'lark-channel', 'lib')
   const names = ['rsi-authority-resources', 'rsi-authority-runtime', 'rsi-source-maintenance',
-    'rsi-creation-build', 'rsi-source', 'rsi-build', 'rsi-release-build', 'rsi-profile',
-    'rsi-host-update', 'rsi-plugin-creation', 'rsi-install', 'rsi-service-environment', 'systemd',
-    'rsi-authority-config', 'rsi-bootstrap-manifest', 'rsi-setup', 'rsi-install-inputs',
+    'rsi-creation-build', 'rsi-source', 'rsi-build', 'rsi-local-update-build', 'rsi-release-build',
+    'rsi-profile', 'rsi-host-update', 'rsi-plugin-creation', 'rsi-install', 'rsi-service-environment',
+    'systemd', 'rsi-authority-config', 'rsi-bootstrap-manifest', 'rsi-setup', 'rsi-install-inputs',
     'rsi-local-cohort']
-  const api = Object.assign({}, ...await Promise.all(names.map(name => import(pathToFileURL(join(root, `${name}.js`)).href))))
+  const api = Object.assign({}, ...await Promise.all(names.map(name => reviewedModule(root, name,
+    name === 'rsi-local-update-build'))))
   const req = createRequire(join(installer.root, 'package.json'))
   const controlPath = await realpath(createRequire(join(installer.root, 'plugins', 'lark-channel', 'package.json'))
     .resolve('@dsh-enhanced/plugin-control-plane'))
@@ -596,7 +615,9 @@ export async function captureOwnerProgramUpdate({ homePath, profile, installer, 
   const hostAuthority = parse(files[join(config, 'host-authority.json')], 'Host authority')
   const trust = parse(files[join(config, 'trust.json')], 'owner trust')
   const release = parse(files[join(config, 'release.json')], 'release authority')
-  const build = await api.readRsiBuildEnvironment({ dshHome: homePath, profile, source: source.workspace })
+  const build = await readLocalCandidateSourceBuild(api, { dshHome: homePath, profile,
+    source: source.workspace })
+  if (localCandidateBuildBackend(build) === 'linux-native') fail(nativeOriginalUnavailable)
   const releaseBuild = await api.readRsiReleaseBuildEnvironment({ dshHome: homePath, profile, build })
   const creationBuild = await api.readRsiCreationBuildEnvironment({ dshHome: homePath, profile,
     source: source.workspace, build })
@@ -643,6 +664,14 @@ export async function captureOwnerProgramUpdate({ homePath, profile, installer, 
   return result
 }
 
+/** Prepare the creation Home for an owner program update. `sourceBuild` is the
+ * candidate build receipt returned by the backend-agnostic reader: either the
+ * Docker schema 1 `RsiBuildEnvironment` or the linux-native schema 3
+ * `LinuxRsiBuildEnvironment`. Native candidates are refused until the native
+ * owner-program activation path exists; Docker receipts keep their historical
+ * equality checks unchanged.
+ * @param {{ownerUpdate: any, candidateHome: string, source: any,
+ *   sourceBuild: any, installer?: any, signal?: AbortSignal}} input */
 export async function prepareOwnerProgramCreation({ ownerUpdate, candidateHome, source, sourceBuild,
   installer = ownerUpdate?.installer, signal }) {
   assertOwner(ownerUpdate, ownerUpdate?.homePath, installer)
@@ -654,8 +683,14 @@ export async function prepareOwnerProgramCreation({ ownerUpdate, candidateHome, 
   const actualSource = await api.readRsiSourceWorkspace({ dshHome: candidateHome, profile,
     ...(source?.origin?.kind === 'local-head' ? { sourceRepository: source.origin.locator } : {}),
     ...(signal ? { signal } : {}) })
-  const actualBuild = await api.readRsiBuildEnvironment({ dshHome: candidateHome,
+  const actualBuild = await readLocalCandidateSourceBuild(api, { dshHome: candidateHome,
     profile, source: actualSource, ...(signal ? { signal } : {}) })
+  const actualBackend = localCandidateBuildBackend(actualBuild)
+  if (actualBackend === 'linux-native') fail(nativeCandidateUnavailable)
+  const originalBackend = localCandidateBuildBackend(ownerUpdate.original?.build)
+  if (actualBackend !== 'unknown' && originalBackend !== 'unknown' && actualBackend !== originalBackend) {
+    fail('candidate build backend differs from the original installation')
+  }
   if (!same(actualSource, source) || !same(actualBuild, sourceBuild)
     || actualSource.sourceCommit === ownerUpdate.original.source.workspace.sourceCommit) {
     fail('candidate source or build differs')
@@ -840,6 +875,14 @@ export function updateOwnerProgramJournal(original, patches, manifestDigest, uni
   return journal
 }
 
+/** Stage a verified owner program update. `sourceBuild` is the original
+ * `LocalCandidateBuild` and `candidateCreation.candidateBuild` the staged
+ * candidate receipt; Docker receipts keep their current behaviour.
+ * @param {{ownerUpdate: any, homePath: string, stageHome: string, record: any,
+ *   resources: any, runtime: any, source: any, sourceBuild: LocalCandidateBuild,
+ *   releaseBuild: any, candidateCreation: any, stageNativeEffective: any,
+ *   coordinatorBase: any, unitProperties: any, unitTransitions: any,
+ *   installer?: any, transactionId: string, hostPlan?: any}} input */
 export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome, record, resources, runtime,
   source, sourceBuild, releaseBuild, candidateCreation, stageNativeEffective, coordinatorBase,
   unitProperties, unitTransitions, installer = ownerUpdate?.installer, transactionId, hostPlan = ownerUpdate?.hostPlan }) {

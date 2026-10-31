@@ -7,11 +7,30 @@ const mocks = vi.hoisted(() => ({
   bind: vi.fn(), assert: vi.fn(), load: vi.fn(),
   auxVerify: vi.fn(), auxMaterialize: vi.fn(), auxVerifyHome: vi.fn(),
   captureOwner: vi.fn(), captureSuccessor: vi.fn(), prepareCreation: vi.fn(), appendOwner: vi.fn(), stageOwner: vi.fn(), verifyOwner: vi.fn(),
+  captureProgram: vi.fn(), prepareProgramCreation: vi.fn(), stageProgram: vi.fn(),
+  appendProgram: vi.fn(), verifyProgram: vi.fn(),
 }))
-vi.mock('../scripts/install/local-source-maintenance.mjs', () => ({
+const buildMocks = vi.hoisted(() => ({ docker: vi.fn(), native: vi.fn() }))
+vi.mock('../scripts/install/local-source-maintenance.mjs', async importOriginal => ({
+  ...await importOriginal<typeof import('../scripts/install/local-source-maintenance.mjs')>(),
   bindLocalSourceInstaller: mocks.bind,
   assertLocalSourceInstaller: mocks.assert,
   loadLocalSourceInstaller: mocks.load,
+}))
+vi.mock('../scripts/install/owner-program-update.mjs', () => ({
+  captureOwnerProgramUpdate: mocks.captureProgram,
+  prepareOwnerProgramCreation: mocks.prepareProgramCreation,
+  stageOwnerProgramUpdate: mocks.stageProgram,
+  appendOwnerProgramSourceMaintenance: mocks.appendProgram,
+  verifyOwnerProgramUpdate: mocks.verifyProgram,
+}))
+vi.mock('../plugins/lark-channel/src/rsi-build.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../plugins/lark-channel/src/rsi-build.js')>(),
+  readRsiBuildEnvironment: buildMocks.docker,
+}))
+vi.mock('../plugins/lark-channel/src/rsi-linux-runtime-bootstrap.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../plugins/lark-channel/src/rsi-linux-runtime-bootstrap.js')>(),
+  readLinuxRsiRuntime: buildMocks.native,
 }))
 vi.mock('../scripts/install/host-local-artifacts.mjs', () => ({
   prepareHostLocalArtifacts: vi.fn(),
@@ -31,6 +50,7 @@ vi.mock('../scripts/install/owner-source-repair.mjs', () => ({
 import { prepareHostLocalSourceUpdate, stageHostLocalSourceUpdate,
   stageResourcesForPreparation, verifyHostLocalSourceUpdate,
   finalizeHostLocalSourceUpdate, verifyHostLocalSourceOriginalForPrestartRecovery } from '../scripts/install/host-local-source-update.mjs'
+import { readRsiLocalUpdateSourceBuild } from '../plugins/lark-channel/src/rsi-local-update-build.js'
 
 const roots: string[] = []
 afterEach(async () => {
@@ -360,4 +380,78 @@ test.each([
   } } })
   await expect(stageResourcesForPreparation({ proof, homePath: setup.homePath,
     disposableHome: setup.disposableHome })).rejects.toThrow(/conflicting candidate artifact/u)
+})
+
+// Minimal mocked receipts; the runtime shape is exercised by the plugin reader suites.
+const nativeCandidate = { schemaVersion: 3, backend: 'linux-native', sourceCommit: '2'.repeat(40),
+  lockSha256: '3'.repeat(64), runtime: { schemaVersion: 1, backend: 'linux-native', root: '/run/rsi-native' } }
+const dockerCandidate = { schemaVersion: 1, sourceCommit: '2'.repeat(40),
+  sourceBuild: { image: 'example:old', dockerPath: '/usr/bin/docker' } }
+
+test('installer refuses a linux-native candidate explicitly instead of reporting a missing build', async () => {
+  const setup = await fixture()
+  const candidateHome = join(setup.preparationRoot, 'home')
+  await mkdir(join(candidateHome, 'rsi-linux-runtimes', setup.profile), { recursive: true, mode: 0o700 })
+  buildMocks.native.mockResolvedValue(nativeCandidate)
+  setup.api.readRsiLocalUpdateSourceBuild = readRsiLocalUpdateSourceBuild
+  mocks.captureProgram.mockResolvedValue({ homePath: setup.homePath, profile: setup.profile })
+  const error = await prepareHostLocalSourceUpdate({ ...setup, ownerProgramUpdate: true }).catch(value => value)
+  expect(error).toBeInstanceOf(Error)
+  expect(error.message).toContain('a linux-native candidate build was found but the owner program update '
+    + 'for linux-native candidates is not available in this installer yet')
+  expect(error.message).not.toContain('candidate build environment is missing')
+  expect(buildMocks.native).toHaveBeenCalledWith(expect.objectContaining({
+    dshHome: candidateHome, profile: setup.profile }))
+  expect(buildMocks.docker).not.toHaveBeenCalled()
+  expect(mocks.prepareProgramCreation).not.toHaveBeenCalled()
+})
+
+test('installer rejects a candidate Home carrying both receipt trees', async () => {
+  const setup = await fixture()
+  const candidateHome = join(setup.preparationRoot, 'home')
+  await mkdir(join(candidateHome, 'rsi-linux-runtimes', setup.profile), { recursive: true, mode: 0o700 })
+  await mkdir(join(candidateHome, 'rsi-builds', setup.profile), { recursive: true, mode: 0o700 })
+  setup.api.readRsiLocalUpdateSourceBuild = readRsiLocalUpdateSourceBuild
+  mocks.captureProgram.mockResolvedValue({ homePath: setup.homePath, profile: setup.profile })
+  const error = await prepareHostLocalSourceUpdate({ ...setup, ownerProgramUpdate: true }).catch(value => value)
+  expect(error.message).toContain('candidate contains both linux-native and Docker build receipts')
+  expect(error.message).not.toContain('candidate build environment is missing')
+  expect(buildMocks.docker).not.toHaveBeenCalled()
+  expect(buildMocks.native).not.toHaveBeenCalled()
+  expect(mocks.prepareProgramCreation).not.toHaveBeenCalled()
+})
+
+test('a Docker candidate keeps its historical Docker receipt on the installer path', async () => {
+  const setup = await fixture()
+  const candidateHome = join(setup.preparationRoot, 'home')
+  await mkdir(join(candidateHome, 'rsi-builds', setup.profile), { recursive: true, mode: 0o700 })
+  buildMocks.docker.mockResolvedValue(dockerCandidate)
+  setup.api.readRsiLocalUpdateSourceBuild = readRsiLocalUpdateSourceBuild
+  const ownerUpdate = { homePath: setup.homePath, profile: setup.profile, installer: { root: setup.installerRoot } }
+  const candidateCreation = { schemaVersion: 1, candidateBuild: dockerCandidate, receiptSha256: '7'.repeat(64) }
+  mocks.captureProgram.mockResolvedValue(ownerUpdate)
+  mocks.prepareProgramCreation.mockResolvedValue(candidateCreation)
+  const proof = await prepareHostLocalSourceUpdate({ ...setup, ownerProgramUpdate: true })
+  expect(proof.protocol).toBe('dsh-enhanced/host-owner-program-update/v1')
+  expect(proof.candidateCreation).toEqual(candidateCreation)
+  expect(buildMocks.docker).toHaveBeenCalledWith(expect.objectContaining({
+    dshHome: candidateHome, profile: setup.profile,
+    source: { root: join(setup.preparationRoot, 'source'), sourceCommit: '2'.repeat(40) } }))
+  expect(buildMocks.docker).toHaveBeenCalledTimes(1)
+  expect(mocks.prepareProgramCreation).toHaveBeenCalledWith(expect.objectContaining({
+    ownerUpdate, candidateHome, sourceBuild: dockerCandidate }))
+})
+
+test('an older installer without the backend-agnostic reader falls back to the Docker reader', async () => {
+  const setup = await fixture()
+  expect(setup.api.readRsiLocalUpdateSourceBuild).toBeUndefined()
+  const ownerUpdate = { homePath: setup.homePath, profile: setup.profile, installer: { root: setup.installerRoot } }
+  mocks.captureProgram.mockResolvedValue(ownerUpdate)
+  mocks.prepareProgramCreation.mockResolvedValue({ schemaVersion: 1, receiptSha256: 'a'.repeat(64) })
+  const proof = await prepareHostLocalSourceUpdate({ ...setup, ownerProgramUpdate: true })
+  expect(proof.protocol).toBe('dsh-enhanced/host-owner-program-update/v1')
+  expect(setup.api.readRsiBuildEnvironment).toHaveBeenCalledWith(expect.objectContaining({
+    dshHome: join(setup.preparationRoot, 'home'), profile: setup.profile }))
+  expect(mocks.prepareProgramCreation).toHaveBeenCalledWith(expect.objectContaining({
+    sourceBuild: { sourceBuild: 'candidate-build' } }))
 })

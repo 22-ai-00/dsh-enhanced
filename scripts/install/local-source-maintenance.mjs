@@ -20,9 +20,32 @@ const inside = (root, path) => path === root || path.startsWith(root + sep)
 const exactPath = path => typeof path === 'string' && isAbsolute(path) && resolve(path) === path && !path.includes('\0')
 const fail = message => { throw new Error(`Local source maintenance: ${message}`) }
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
-const modules = ['rsi-local-update', 'rsi-local-resources', 'rsi-source-maintenance',
+const modules = ['rsi-local-update', 'rsi-local-update-build', 'rsi-local-resources', 'rsi-source-maintenance',
   'rsi-local-activation', 'rsi-local-pair-install', 'rsi-local-cohort', 'rsi-authority-runtime', 'supervised-growth-profile']
 const ownerModules = ['rsi-source', 'rsi-build', 'rsi-authority-resources', 'rsi-setup', 'rsi-profile']
+
+/** One wording for the transition window in which an installer can recognise a
+ * linux-native receipt but cannot yet complete that transaction. Kept here so
+ * the program-update and source-repair layers cannot drift apart. */
+export const nativeCandidateRefusal = capability =>
+  `a linux-native candidate build was found but the ${capability} for linux-native candidates is not available in this installer yet`
+export const nativeOriginalRefusal = capability =>
+  `a linux-native installation was found but the ${capability} for linux-native installations is not available in this installer yet`
+
+/** Backend of a prepared candidate Home build receipt. Schema 3 is the native
+ * linux runtime; schema 1 is the legacy Docker image build. */
+export const localCandidateBuildBackend = build => build?.schemaVersion === 3 && build.backend === 'linux-native'
+  ? 'linux-native' : build?.schemaVersion === 1 ? 'docker' : 'unknown'
+
+/** Read a prepared candidate Home build through the backend-agnostic reader.
+ * Installers whose packaged lib tree predates that reader keep their historical
+ * Docker-only read; callers that cannot update the resulting backend refuse
+ * explicitly instead of continuing with the other backend's receipts. */
+export function readLocalCandidateSourceBuild(api, input) {
+  return typeof api.readRsiLocalUpdateSourceBuild === 'function'
+    ? api.readRsiLocalUpdateSourceBuild(input)
+    : api.readRsiBuildEnvironment(input)
+}
 const resourceKinds = ['rsi-sources', 'rsi-local-cohorts', 'rsi-builds', 'rsi-release-builds', 'rsi-authorities', 'rsi-authority-runtimes']
 const ownerFields = new Set(['sourceJobs', 'sourceApprovals', 'sourceReleases', 'sourceReleaseExecution',
   'sourceAdoptions', 'sourceBuild', 'runtimeObserver', 'foregroundDeployments', 'taskObservations', 'adoptionCoordinator',
@@ -124,7 +147,15 @@ async function load(binding, { ownerRepair = false } = {}) {
   const moduleRequire = createRequire(join(root, 'supervised-growth-profile.js'))
   if (!inside(binding.root, await realpath(moduleRequire.resolve('yaml/package.json')))) fail('YAML parser is outside the reviewed installer root')
   const selectedModules = ownerRepair ? [...modules, ...ownerModules] : modules
-  const result = Object.assign({}, ...await Promise.all(selectedModules.map(name => import(pathToFileURL(join(root, `${name}.js`)).href))))
+  const imported = await Promise.all(selectedModules.map(async name => {
+    const path = join(root, `${name}.js`)
+    // The backend-agnostic candidate-build reader may postdate an older
+    // installer's packaged lib tree; only its own absence is tolerated. Any
+    // other module missing from the reviewed tree stays fatal.
+    if (name === 'rsi-local-update-build' && !(await optional(path))) return {}
+    return import(pathToFileURL(path).href)
+  }))
+  const result = Object.assign({}, ...imported)
   result.yaml = require('yaml')
   return result
 }
