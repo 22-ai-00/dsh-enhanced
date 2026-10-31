@@ -1,0 +1,11 @@
+- insert:
+    - id: dsh-enhanced-assistant-work-items
+      name: '@dsh-enhanced/assistant-work-items'
+      inject:
+        - assistantPolicy
+      config:
+        enabled: false
+        mode: observe
+        databasePath: !!js dshHomePath('assistant-work-items/state.sqlite')
+        workRoot: !!js dshHomePath('assistant-work-items/work')
+        intakeSourceId: work-items/v1

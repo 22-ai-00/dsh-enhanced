@@ -37,6 +37,7 @@
 | [assistant-heartbeat](assistant-heartbeat) | `@dsh-enhanced/assistant-heartbeat` | 实验性 | 复用 Automations 的 active-hours 主动巡检、scratch CAS、busy coalescing 与成本硬界限。 |
 | [event-triggers](event-triggers) | `@dsh-enhanced/event-triggers` | 实验性 | 持久化 file、HTTPS/JSON、GitHub 仓库状态与 HMAC webhook 事件，支持有限 owner 授权观察与目标等待来源。 |
 | [assistant-proactive](assistant-proactive) | `@dsh-enhanced/assistant-proactive` | 实验性 | 已授权目标事件的收益筛选、静默记录、合并、冷却和持久预算；实际执行仍经 Goals 验收。 |
+| [assistant-work-items](assistant-work-items) | `@dsh-enhanced/assistant-work-items` | 实验性 | 外部信号→有界工作项账本→原生 automation occurrence 认领/汇报→owner 通知；默认 observe，复用 Automations/Delivery/Policy，不新增 loop、timer 或 outbox。 |
 
 ## 技能与持续成长
 

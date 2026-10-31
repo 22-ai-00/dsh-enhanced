@@ -1,0 +1,314 @@
+import { isAbsolute, resolve } from 'node:path'
+import Schema from '@deepseek-ai/schemastery'
+import type { WorkItemErrorCode, WorkItemReportStatus, WorkItemScope } from './types.ts'
+import { WorkItemError } from './types.ts'
+
+/** Raw operator configuration. Every field is optional except the two paths. */
+export interface Config {
+  enabled?: boolean
+  mode?: 'observe' | 'active'
+  databasePath?: string
+  workRoot?: string
+  intakeSourceId?: string
+  workerAutomationId?: string
+  scope?: ScopeConfig
+  admission?: AdmissionConfig
+  limits?: LimitsConfig
+  delivery?: DeliveryConfig
+}
+
+export interface ScopeConfig {
+  workspace?: string
+  preset?: string
+  principalId?: string
+  ownerRouteId?: string
+  expiresAt?: number
+}
+
+export interface AdmissionConfig {
+  allowedKinds?: string[]
+  maxOpenItems?: number
+  maxAdmitsPerHour?: number
+  dedupWindowMs?: number
+  cooldownMs?: number
+  maxBriefBytes?: number
+}
+
+export interface LimitsConfig {
+  leaseMs?: number
+  maxAttempts?: number
+  maxReportsPerItem?: number
+  maxReportBytes?: number
+}
+
+export interface DeliveryConfig {
+  notifyOn?: WorkItemReportStatus[]
+}
+
+/** Fully defaulted, validated configuration used by the service at runtime. */
+export interface NormalizedConfig {
+  readonly enabled: boolean
+  readonly mode: 'observe' | 'active'
+  readonly databasePath: string
+  readonly workRoot: string
+  readonly intakeSourceId: string
+  readonly workerAutomationId: string | null
+  readonly scope: WorkItemScope | null
+  readonly admission: NormalizedAdmission
+  readonly limits: NormalizedLimits
+  readonly notifyOn: readonly WorkItemReportStatus[]
+}
+
+export interface NormalizedAdmission {
+  readonly allowedKinds: readonly string[]
+  readonly maxOpenItems: number
+  readonly maxAdmitsPerHour: number
+  readonly dedupWindowMs: number
+  readonly cooldownMs: number
+  readonly maxBriefBytes: number
+}
+
+export interface NormalizedLimits {
+  readonly leaseMs: number
+  readonly maxAttempts: number
+  readonly maxReportsPerItem: number
+  readonly maxReportBytes: number
+}
+
+const KIND = /^[a-z][a-z0-9-]{0,63}$/
+const PRESET = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+const AUTOMATION_ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/
+const SOURCE_ID = /^[a-z0-9][a-z0-9._-]{0,63}\/v[0-9]{1,3}$/
+const SCOPE_KEYS = ['workspace', 'preset', 'principalId', 'ownerRouteId', 'expiresAt'] as const
+const ADMISSION_KEYS = ['allowedKinds', 'maxOpenItems', 'maxAdmitsPerHour', 'dedupWindowMs', 'cooldownMs', 'maxBriefBytes'] as const
+const LIMITS_KEYS = ['leaseMs', 'maxAttempts', 'maxReportsPerItem', 'maxReportBytes'] as const
+const DELIVERY_KEYS = ['notifyOn'] as const
+const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery'] as const
+const REPORT_STATUSES = ['progress', 'waiting', 'ready', 'blocked', 'failed'] as const
+const NOTIFY_STATUSES = ['ready', 'blocked', 'failed'] as const
+
+const scopeSchema = Schema.object({
+  workspace: Schema.string().required(),
+  preset: Schema.string().required(),
+  principalId: Schema.string().required(),
+  ownerRouteId: Schema.string().required(),
+  expiresAt: Schema.number().step(1).required(),
+})
+
+const admissionSchema = Schema.object({
+  allowedKinds: Schema.array(Schema.string()).default([]),
+  maxOpenItems: Schema.number().step(1).min(1).max(100).default(8),
+  maxAdmitsPerHour: Schema.number().step(1).min(1).max(100).default(4),
+  dedupWindowMs: Schema.number().step(1).min(3_600_000).max(2_592_000_000).default(604_800_000),
+  cooldownMs: Schema.number().step(1).min(0).max(86_400_000).default(600_000),
+  maxBriefBytes: Schema.number().step(1).min(256).max(65_536).default(8_192),
+})
+
+const limitsSchema = Schema.object({
+  leaseMs: Schema.number().step(1).min(30_000).max(86_400_000).default(900_000),
+  maxAttempts: Schema.number().step(1).min(1).max(10).default(3),
+  maxReportsPerItem: Schema.number().step(1).min(1).max(100).default(20),
+  maxReportBytes: Schema.number().step(1).min(256).max(65_536).default(16_384),
+})
+
+const deliverySchema = Schema.object({
+  notifyOn: Schema.array(Schema.union(NOTIFY_STATUSES)).default([...NOTIFY_STATUSES]),
+})
+
+/** Synchronous Standard-Schema validator used by DSH before construction. */
+export const ConfigSchema = Schema.object({
+  enabled: Schema.boolean().default(false),
+  mode: Schema.union(['observe', 'active'] as const).default('observe'),
+  databasePath: Schema.string().required(),
+  workRoot: Schema.string().required(),
+  intakeSourceId: Schema.string().default('work-items/v1'),
+  workerAutomationId: Schema.string(),
+  scope: scopeSchema,
+  admission: admissionSchema,
+  limits: limitsSchema,
+  delivery: deliverySchema,
+}) as Schema<Config>
+
+function fail(code: WorkItemErrorCode, message: string): never {
+  throw new WorkItemError(code, message)
+}
+
+function plainObject(value: unknown, field: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    fail('invalid-input', `${field} must be an object`)
+  }
+  return value as Record<string, unknown>
+}
+
+function rejectUnknown(value: Record<string, unknown>, allowed: readonly string[], field: string): void {
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) fail('invalid-input', `${field} contains unknown field ${key}`)
+  }
+}
+
+function assertAbsolute(value: string, field: string): string {
+  if (!isAbsolute(value)) fail('invalid-input', `${field} must be an absolute path`)
+  const normalized = resolve(value)
+  if (normalized === resolve('/')) fail('invalid-input', `${field} must not be the filesystem root`)
+  return normalized
+}
+
+/** Byte length under UTF-8 without allocating a Buffer for short values. */
+export function byteLength(value: string): number {
+  return Buffer.byteLength(value, 'utf8')
+}
+
+/** Normalize NFC, trim, reject empties and over-long text at a byte boundary. */
+export function text(value: unknown, field: string, maxBytes: number): string {
+  if (typeof value !== 'string') fail('invalid-input', `${field} must be a string`)
+  const normalized = value.normalize('NFC').trim()
+  if (normalized.length === 0) fail('invalid-input', `${field} must not be empty`)
+  if (byteLength(normalized) > maxBytes) fail('invalid-input', `${field} exceeds ${maxBytes} bytes`)
+  return normalized
+}
+
+/** Truncate to at most `maxBytes` UTF-8 bytes without splitting a code point. */
+export function truncateUtf8(value: string, maxBytes: number): { value: string; truncated: boolean } {
+  if (byteLength(value) <= maxBytes) return { value, truncated: false }
+  let low = 0
+  let high = value.length
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    if (byteLength(value.slice(0, middle)) <= maxBytes) low = middle
+    else high = middle - 1
+  }
+  let end = low
+  // Never leave a dangling high surrogate at the cut point.
+  const code = value.charCodeAt(end - 1)
+  if (end > 0 && code >= 0xd800 && code <= 0xdbff) end -= 1
+  return { value: value.slice(0, end), truncated: true }
+}
+
+function integer(value: unknown, field: string, minimum: number, maximum: number): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    fail('invalid-input', `${field} must be an integer between ${minimum} and ${maximum}`)
+  }
+  return value
+}
+
+function normalizeScope(raw: ScopeConfig | undefined, now: number): WorkItemScope | null {
+  if (raw === undefined) return null
+  const scope = plainObject(raw, 'scope')
+  rejectUnknown(scope, SCOPE_KEYS, 'scope')
+  const normalized: WorkItemScope = {
+    workspace: assertAbsolute(text(scope['workspace'], 'scope.workspace', 4_096), 'scope.workspace'),
+    preset: text(scope['preset'], 'scope.preset', 128),
+    principalId: text(scope['principalId'], 'scope.principalId', 256),
+    ownerRouteId: text(scope['ownerRouteId'], 'scope.ownerRouteId', 256),
+    expiresAt: integer(scope['expiresAt'], 'scope.expiresAt', 1, Number.MAX_SAFE_INTEGER),
+  }
+  if (!PRESET.test(normalized.preset)) fail('invalid-input', 'scope.preset has an invalid shape')
+  if (normalized.expiresAt <= now) fail('invalid-input', 'scope.expiresAt must be in the future')
+  return Object.freeze(normalized)
+}
+
+function normalizeAdmission(raw: AdmissionConfig | undefined, mode: 'observe' | 'active'): NormalizedAdmission {
+  const value = raw === undefined ? {} : plainObject(raw, 'admission')
+  rejectUnknown(value, ADMISSION_KEYS, 'admission')
+  const allowedKinds = (value['allowedKinds'] ?? []) as unknown
+  if (!Array.isArray(allowedKinds)) fail('invalid-input', 'admission.allowedKinds must be an array')
+  const kinds = allowedKinds.map(entry => text(entry, 'admission.allowedKinds[]', 64))
+  for (const kind of kinds) if (!KIND.test(kind)) fail('invalid-input', `admission.allowedKinds entry ${kind} has an invalid shape`)
+  if (new Set(kinds).size !== kinds.length) fail('invalid-input', 'admission.allowedKinds must not repeat an entry')
+  const normalized: NormalizedAdmission = Object.freeze({
+    allowedKinds: Object.freeze(kinds),
+    maxOpenItems: integer(value['maxOpenItems'] ?? 8, 'admission.maxOpenItems', 1, 100),
+    maxAdmitsPerHour: integer(value['maxAdmitsPerHour'] ?? 4, 'admission.maxAdmitsPerHour', 1, 100),
+    dedupWindowMs: integer(value['dedupWindowMs'] ?? 604_800_000, 'admission.dedupWindowMs', 3_600_000, 2_592_000_000),
+    cooldownMs: integer(value['cooldownMs'] ?? 600_000, 'admission.cooldownMs', 0, 86_400_000),
+    maxBriefBytes: integer(value['maxBriefBytes'] ?? 8_192, 'admission.maxBriefBytes', 256, 65_536),
+  })
+  if (mode === 'active' && kinds.length === 0) {
+    fail('kind-rejected', 'an active work-item intake requires at least one admission.allowedKinds entry')
+  }
+  return normalized
+}
+
+function normalizeLimits(raw: LimitsConfig | undefined): NormalizedLimits {
+  const value = raw === undefined ? {} : plainObject(raw, 'limits')
+  rejectUnknown(value, LIMITS_KEYS, 'limits')
+  return Object.freeze({
+    leaseMs: integer(value['leaseMs'] ?? 900_000, 'limits.leaseMs', 30_000, 86_400_000),
+    maxAttempts: integer(value['maxAttempts'] ?? 3, 'limits.maxAttempts', 1, 10),
+    maxReportsPerItem: integer(value['maxReportsPerItem'] ?? 20, 'limits.maxReportsPerItem', 1, 100),
+    maxReportBytes: integer(value['maxReportBytes'] ?? 16_384, 'limits.maxReportBytes', 256, 65_536),
+  })
+}
+
+function normalizeDelivery(raw: DeliveryConfig | undefined): readonly WorkItemReportStatus[] {
+  const value = raw === undefined ? {} : plainObject(raw, 'delivery')
+  rejectUnknown(value, DELIVERY_KEYS, 'delivery')
+  const notifyOn = (value['notifyOn'] ?? [...NOTIFY_STATUSES]) as unknown
+  if (!Array.isArray(notifyOn) || notifyOn.length === 0) fail('invalid-input', 'delivery.notifyOn must be a non-empty array')
+  const statuses = notifyOn.map(entry => {
+    if (typeof entry !== 'string' || !(NOTIFY_STATUSES as readonly string[]).includes(entry)) {
+      fail('invalid-input', `delivery.notifyOn entry ${String(entry)} is not a notifiable status`)
+    }
+    return entry as WorkItemReportStatus
+  })
+  if (new Set(statuses).size !== statuses.length) fail('invalid-input', 'delivery.notifyOn must not repeat an entry')
+  return Object.freeze(statuses)
+}
+
+/**
+ * Validate and default operator configuration synchronously.
+ *
+ * Unknown fields anywhere fail closed, paths must be absolute, and an
+ * `enabled: true` + `mode: 'active'` deployment must name its worker
+ * automation, owner scope and at least one admitted kind. The default
+ * deployment is `enabled: false`, `mode: 'observe'`: it writes only local
+ * observation rows and never calls automations or delivery.
+ */
+export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig {
+  const value = plainObject(raw, 'config')
+  rejectUnknown(value, TOP_LEVEL_KEYS, 'config')
+  const enabled = value['enabled'] ?? false
+  if (typeof enabled !== 'boolean') fail('invalid-input', 'enabled must be a boolean')
+  const mode = value['mode'] ?? 'observe'
+  if (mode !== 'observe' && mode !== 'active') fail('invalid-input', "mode must be 'observe' or 'active'")
+  const databasePath = assertAbsolute(text(value['databasePath'], 'databasePath', 4_096), 'databasePath')
+  const workRoot = assertAbsolute(text(value['workRoot'], 'workRoot', 4_096), 'workRoot')
+  if (databasePath === workRoot) fail('invalid-input', 'databasePath and workRoot must differ')
+  if (workRoot.startsWith(`${databasePath}/`)) fail('invalid-input', 'databasePath must not contain workRoot')
+  const intakeSourceId = text(value['intakeSourceId'] ?? 'work-items/v1', 'intakeSourceId', 128)
+  if (!SOURCE_ID.test(intakeSourceId)) fail('invalid-input', 'intakeSourceId must look like <source>/v<number>')
+  const rawAutomationId = value['workerAutomationId']
+  const workerAutomationId = rawAutomationId === undefined ? null : text(rawAutomationId, 'workerAutomationId', 128)
+  if (workerAutomationId !== null && !AUTOMATION_ID.test(workerAutomationId)) {
+    fail('invalid-input', 'workerAutomationId has an invalid shape')
+  }
+  const scope = normalizeScope(value['scope'] as ScopeConfig | undefined, now)
+  const admission = normalizeAdmission(value['admission'] as AdmissionConfig | undefined, mode)
+  const limits = normalizeLimits(value['limits'] as LimitsConfig | undefined)
+  const notifyOn = normalizeDelivery(value['delivery'] as DeliveryConfig | undefined)
+  if (enabled && mode === 'active' && (workerAutomationId === null || scope === null)) {
+    fail('invalid-input', "an active work-item deployment requires workerAutomationId and scope")
+  }
+  return Object.freeze({
+    enabled,
+    mode,
+    databasePath,
+    workRoot,
+    intakeSourceId,
+    workerAutomationId,
+    scope,
+    admission,
+    limits,
+    notifyOn,
+  })
+}
+
+/** True only when external admission and dispatch may happen. */
+export function isActive(config: NormalizedConfig): boolean {
+  return config.enabled && config.mode === 'active'
+}
+
+/** Prove the config exposes only known report statuses (used by tests). */
+export function knownReportStatuses(): readonly WorkItemReportStatus[] {
+  return REPORT_STATUSES
+}
