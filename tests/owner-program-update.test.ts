@@ -14,7 +14,7 @@ import { readRsiHostPatchConfig, readRsiHostUpdateOverlayChain, rebaseRsiHostVal
 import { bindLocalSourceInstaller } from '../scripts/install/local-source-maintenance.mjs'
 import { applyOwnerProgramAuthorityCas, assertOwnerProgramAuthorityPreserved, assertOwnerProgramOriginalComposition, assertOwnerProgramWindow,
   assertOwnerProgramBusinessDataCopied, assertOwnerProgramManifestPreserved, assertNativeStageRelocation,
-  freezeNativeRunnerStates, migrateNativeVerifierGrants,
+  freezeNativeRunnerStates, migrateNativeVerifierGrants, validateNativeOwnerProgramRunnerStates,
   prepareOwnerProgramCreation, stageOwnerProgramUpdate,
   assertOwnerProgramRestartManifestPreserved, compileOwnerProgramRestartConfig, frozenRestartConfig,
   ownerProgramRestartRule,
@@ -1273,6 +1273,52 @@ test('native verifier grant migration rewrites the Docker-era grants with the fr
     // A missing reviewed handover seam fails closed and names it.
     expect(refusalOf(() => migrate({ api: { creationAdoptionAuthorityDigest: api.creationAdoptionAuthorityDigest } }))
       .message).toMatch(/does not expose the reviewed handover seams/u)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('the cut-over linux-native manifest re-inspects its runner-state references', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-native-ready-')))
+  try {
+    const homePath = join(root, 'home')
+    await mkdir(homePath, { mode: 0o700 })
+    const resources = nativeResources(homePath)
+    const ownerUpdate = { original: { resources } }
+    const seal = nativeSeal(homePath, 'creation-review-runner')
+    const manifest = { controlPlane: { sourceBuild: { schemaVersion: 3, backend: 'linux-native',
+      stateSeal: seal } }, pluginCreation: { reviews: { runner: { stateSeal: seal } } } }
+    const calls: unknown[][] = []
+    const api = { prepareRsiLinuxRunnerStates: async (...input: unknown[]) => {
+      calls.push(input)
+      return { sourceBuild: seal, creationReview: seal, creationAdoption: seal }
+    } }
+    // The live manifest is the only source of references and the reviewed
+    // existing-only seam does the inspection; the installer adds no repair.
+    expect(await validateNativeOwnerProgramRunnerStates(api, ownerUpdate, manifest)).toBeUndefined()
+    expect(calls).toEqual([[resources, { creation: true, revision: false }, manifest]])
+    // A Docker-era or non-native manifest keeps the untouched readiness path.
+    await validateNativeOwnerProgramRunnerStates(api, ownerUpdate,
+      { controlPlane: { sourceBuild: { schemaVersion: 2, backend: 'docker' } } })
+    await validateNativeOwnerProgramRunnerStates(api, ownerUpdate, { controlPlane: {} })
+    expect(calls).toHaveLength(1)
+    // An installed installer tree without the reviewed seam cannot prove a
+    // linux-native cutover, so readiness fails closed instead of trusting it.
+    await expect(validateNativeOwnerProgramRunnerStates({}, ownerUpdate, manifest))
+      .rejects.toThrow(/the cut-over owner manifest is linux-native but this installer cannot re-inspect/u)
+    // A live Home whose seals were deleted or replaced after the cutover stops
+    // readiness; the inspected error keeps its original cause.
+    await expect(validateNativeOwnerProgramRunnerStates({ prepareRsiLinuxRunnerStates: async () => {
+      throw new Error('Linux runner state: seal reference or purpose differs')
+    } }, ownerUpdate, manifest)).rejects
+      .toThrow(/do not re-inspect on the live Home: Linux runner state: seal reference or purpose differs/u)
+    // The re-inspection only trusts authority resources that actually describe
+    // a state root, and a native manifest must carry creation authority.
+    await expect(validateNativeOwnerProgramRunnerStates(api,
+      { original: { resources: { ...resources, stateRoot: join(homePath, 'other') } } }, manifest))
+      .rejects.toThrow(/the owner authority resources do not describe a state root/u)
+    await expect(validateNativeOwnerProgramRunnerStates(api, ownerUpdate,
+      { controlPlane: { sourceBuild: { backend: 'linux-native' } } }))
+      .rejects.toThrow(/carries no creation authority for its runner-state references/u)
+    expect(calls).toHaveLength(1)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

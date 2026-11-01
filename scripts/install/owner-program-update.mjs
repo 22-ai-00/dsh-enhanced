@@ -1284,6 +1284,53 @@ export function migrateNativeVerifierGrants(input) {
   return Object.freeze(migrated)
 }
 
+/** Re-inspect the linux-native runner-state references a cut-over manifest binds.
+ *
+ * The stage phase proves the staged copy only: `freezeNativeRunnerStates` and
+ * `migrateNativeVerifierGrants` publish and rewrite the seals and grant rows
+ * before the rename(2) cutover, and nothing after the cutover proves the live
+ * Home still carries them. This is the read-only, fail-closed post-cutover
+ * check: it reuses the same reviewed `prepareRsiLinuxRunnerStates` validation
+ * path (seal path, digest, kind, uid, private permissions, state-root/ledger
+ * dev+ino identity, schema-9 ledger digest), so a seal deleted, replaced or
+ * relocated between staging and readiness stops readiness instead of leaving a
+ * Host that boots with a manifest it cannot honour.
+ *
+ * Docker manifests and Docker-era installer trees are unaffected: the check
+ * runs only for a `linux-native` source-build entry, and it fails closed when
+ * that entry exists but the installed installer has no runner-state seam.
+ * @param {{prepareRsiLinuxRunnerStates?: Function, control?: any}} api
+ * @param {{original: {resources: any}}} ownerUpdate
+ * @param {any} manifest updated owner setup manifest
+ */
+export async function validateNativeOwnerProgramRunnerStates(api, ownerUpdate, manifest) {
+  const build = manifest?.controlPlane?.sourceBuild
+  if (!build || typeof build !== 'object' || build.backend !== 'linux-native') return
+  if (typeof api?.prepareRsiLinuxRunnerStates !== 'function') {
+    fail('the cut-over owner manifest is linux-native but this installer cannot re-inspect its '
+      + 'runner-state references')
+  }
+  const resources = ownerUpdate?.original?.resources
+  if (!resources || typeof resources !== 'object' || !same(resources.stateRoot,
+    join(resources.root, 'state'))) {
+    fail('cannot re-inspect linux-native runner-state references: the owner authority resources '
+      + 'do not describe a state root')
+  }
+  const scope = { creation: Boolean(manifest.pluginCreation), revision: Boolean(manifest.pluginRevision) }
+  if (!scope.creation) {
+    fail('the cut-over linux-native owner manifest carries no creation authority for its '
+      + 'runner-state references')
+  }
+  try {
+    // `previous` selects the existing-only path: every reference comes from the
+    // manifest that was just installed, never from the staged copy.
+    await api.prepareRsiLinuxRunnerStates(resources, scope, manifest)
+  } catch (error) {
+    fail('the cut-over owner manifest runner-state references do not re-inspect on the live Home: '
+      + `${error?.message ?? error}`)
+  }
+}
+
 /** Refuse the linux-native stage dispatch without the sealed relocation proof.
  *
  * The native materializer relocates a candidate family into the staged Home.
@@ -1742,6 +1789,9 @@ export async function awaitOwnerProgramReady({ ownerUpdate, ownerUpdateNext, hom
     installer, phase: 'after-finalize' })
   const api = await apiFor(installer)
   const manifest = parse((await bytes(ownerUpdateNext.manifestPath)).toString('utf8'), 'updated owner manifest')
+  // The manifest is now live; prove the runner-state references it binds still
+  // exist on this Home before readiness polls the restarted Host.
+  await validateNativeOwnerProgramRunnerStates(api, ownerUpdate, manifest)
   const host = parse((await bytes(join(ownerUpdate.original.resources.configRoot,
     'host-authority.json'))).toString('utf8'), 'updated Host authority')
   if (!same(host.grant?.owner, ownerUpdate.original.manifest.sourceReviews.owner)
