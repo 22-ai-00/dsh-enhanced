@@ -1949,6 +1949,26 @@ export class WorkItemStore {
     return Object.freeze((this.#statement('SELECT * FROM work_item_report WHERE item_id = ? ORDER BY revision ASC').all(itemId) as Row[]).map(reportFromRow))
   }
 
+  /** Exact report and adjacent references, using the existing item/revision key. */
+  reportByRevision(itemId: string, revision: number): Readonly<{
+    report: WorkItemReportRecord
+    previousRevision: number | null
+    nextRevision: number | null
+  }> | undefined {
+    const row = this.#statement(`
+      SELECT report.*,
+        (SELECT MAX(revision) FROM work_item_report WHERE item_id = ? AND revision < ?) AS previous_revision,
+        (SELECT MIN(revision) FROM work_item_report WHERE item_id = ? AND revision > ?) AS next_revision
+      FROM work_item_report AS report WHERE item_id = ? AND revision = ?
+    `).get(itemId, revision, itemId, revision, itemId, revision) as Row | undefined
+    if (row === undefined) return undefined
+    return Object.freeze({
+      report: reportFromRow(row),
+      previousRevision: row['previous_revision'] === null ? null : Number(row['previous_revision']),
+      nextRevision: row['next_revision'] === null ? null : Number(row['next_revision']),
+    })
+  }
+
   /**
    * Append one report revision under the active claim, then apply the state
    * transition for that status.

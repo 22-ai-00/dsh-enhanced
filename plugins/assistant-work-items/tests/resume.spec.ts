@@ -267,6 +267,8 @@ describe('resume brief tool projection', () => {
 
     const execute = tool?.['execute'] as (args: Record<string, unknown>, exec: unknown) => Promise<Record<string, unknown>>
     const value = await execute({}, { agent: {} })
+    expect(value).not.toHaveProperty('acceptanceRef')
+    expect(value).not.toHaveProperty('leaseUntil')
     const resume = value['resume'] as Record<string, unknown>
     expect(Object.keys(resume)).toEqual(['resumed', 'priorAttempts', 'attempts', 'reports', 'reportsTotal', 'truncated'])
     expect((resume['attempts'] as Array<Record<string, unknown>>)[0]).toEqual({ attempt: 1, startedAt: 10 })

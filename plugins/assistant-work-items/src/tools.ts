@@ -28,6 +28,7 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
       'Claim the single work item bound to this automation occurrence and read its brief, acceptance refs and private work directory. '
       + 'A bounded, read-only resume brief (prior attempts, prior report summaries, latest settled outcome) is derived from the local ledger '
       + 'so a fresh occurrence can continue without prior model memory. '
+      + 'Use work_item_read_report with a resume report revision to recall its stored text and follow previousRevision to older reports. '
       + 'Call once before working; a repeated call from the same run replays the same claim instead of spending another attempt.',
     parameters: {},
     output: {
@@ -43,9 +44,11 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
           title: { type: 'string' as const, required: true },
           brief: { type: 'string' as const, required: true },
           briefTruncated: { type: 'boolean' as const, required: true },
+          acceptanceRef: { type: 'string' as const },
           workDir: { type: 'string' as const, required: true },
           attempt: { type: 'integer' as const, required: true },
           maxAttempts: { type: 'integer' as const, required: true },
+          leaseUntil: { type: 'integer' as const },
           replayed: { type: 'boolean' as const, required: true },
           resume: {
             type: 'object' as const,
@@ -122,9 +125,11 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
         title: value.title,
         brief: value.brief,
         briefTruncated: value.briefTruncated,
+        ...(value.acceptanceRef === null ? {} : { acceptanceRef: value.acceptanceRef }),
         workDir: value.workDir,
         attempt: value.attempt,
         maxAttempts: value.maxAttempts,
+        ...(value.leaseUntil === null ? {} : { leaseUntil: value.leaseUntil }),
         replayed: value.replayed,
         resume: {
           resumed: value.resume.resumed,
@@ -195,7 +200,7 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
         return [{
           type: 'text' as const,
           text: `Recorded report #${String(view.revision)} (${view.status}) for ${view.itemId}.`
-            + (view.notified ? ' The owner was notified.' : ''),
+            + (view.notified ? ' The owner notification was queued for delivery.' : ''),
         }]
       },
     },
@@ -289,4 +294,66 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
       }
     },
   }))
+
+  const readReportTool = defineTool({
+    name: 'work_item_read_report',
+    description:
+      'Read one stored report belonging only to this worker automation occurrence. '
+      + 'Start with a revision from claim.resume or status; follow previousRevision/nextRevision for older/newer reports. '
+      + 'offset and nextOffset are UTF-8 byte offsets; use nextOffset unchanged to continue. '
+      + 'max_bytes defaults to 4096 and must be 4–8192. storedTruncated means the original report was already shortened before storage. '
+      + 'Artifact paths are references only; this tool never reads files or changes the work-item ledger.',
+    parameters: {
+      revision: { type: 'integer', required: true },
+      offset: { type: 'integer' },
+      max_bytes: { type: 'integer' },
+    },
+    output: {
+      schema: {
+        type: 'object' as const,
+        additionalProperties: false,
+        properties: {
+          itemId: { type: 'string' as const, required: true },
+          revision: { type: 'integer' as const, required: true },
+          status: { type: 'string' as const, required: true },
+          summary: { type: 'string' as const, required: true },
+          offset: { type: 'integer' as const, required: true },
+          nextOffset: { type: 'integer' as const },
+          summaryBytes: { type: 'integer' as const, required: true },
+          storedTruncated: { type: 'boolean' as const, required: true },
+          artifactPaths: { type: 'array' as const, required: true, items: { type: 'string' as const } },
+          recordedAt: { type: 'integer' as const, required: true },
+          previousRevision: { type: 'integer' as const },
+          nextRevision: { type: 'integer' as const },
+        },
+      },
+      render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: renderUntrustedJson('work_item_read_report', value) }],
+    },
+    async execute(args, exec) {
+      const value = service.readReport(exec.agent, {
+        revision: args.revision,
+        ...(args.offset === undefined ? {} : { offset: args.offset }),
+        ...(args.max_bytes === undefined ? {} : { maxBytes: args.max_bytes }),
+      })
+      return {
+        itemId: value.itemId,
+        revision: value.revision,
+        status: value.status,
+        summary: value.summary,
+        offset: value.offset,
+        ...(value.nextOffset === null ? {} : { nextOffset: value.nextOffset }),
+        summaryBytes: value.summaryBytes,
+        storedTruncated: value.storedTruncated,
+        artifactPaths: [...value.artifactPaths],
+        recordedAt: value.recordedAt,
+        ...(value.previousRevision === null ? {} : { previousRevision: value.previousRevision }),
+        ...(value.nextRevision === null ? {} : { nextRevision: value.nextRevision }),
+      }
+    },
+  })
+  // The pinned defineTool DSL emits an open root parameter object. Close that
+  // same schema before registration so both its validator and model contract
+  // reject selectors such as itemId or path rather than silently ignoring them.
+  Object.assign(readReportTool.parameters, { additionalProperties: false })
+  ctx.tools.register(readReportTool)
 }

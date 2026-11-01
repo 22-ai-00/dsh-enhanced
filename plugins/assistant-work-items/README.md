@@ -2,7 +2,7 @@
 
 把外部信号沉淀为**有界、可恢复、可审计**的工作项账本，并用一次原生 automation occurrence 驱动 agent 认领、汇报和 owner 通知。本插件不创建第二套 agent loop、timer、outbox、预算系统、设置面板或 session store：调度复用 `assistant-automations` 的稳定 occurrence，执行复用原生 DSH Agent run，通知复用 `assistant-delivery.enqueueBackground()`，授权复用 `assistant-policy` 的默认拒绝。
 
-账本本身提供三条 CAS 工具：`work_item_claim`、`work_item_report`、`work_item_status`。在账本之上有一个默认关闭的**自动准入**切片：它从已认证的 in-tree 只读来源拉取真实信号并以相同闸门入账，因此普通使用（owner 自己发起的请求失败后，worker 被下一次 claim 唤醒）就会产生自驱工作项，无需 operator 手工调用 `admit(...)`，也无需新定时器。
+账本提供认领与汇报工具 `work_item_claim`、`work_item_report`，状态查询 `work_item_status`，以及只读报告召回 `work_item_read_report`。在账本之上有一个默认关闭的**自动准入**切片：它从已认证的 in-tree 只读来源拉取真实信号并以相同闸门入账，因此普通使用（owner 自己发起的请求失败后，worker 被下一次 claim 唤醒）就会产生自驱工作项，无需 operator 手工调用 `admit(...)`，也无需新定时器。
 
 终态报告只记录 worker 自己的结论；账本另有一条 append-only 的**结果结算**（outcome settlement）修订链，用 `assistant-delivery` 已认证的 execution 记录独立验证 `ready` 是否真的对应成功执行，并在证据窗内保持 `pending`、到期保持 `unverified`，绝不把 `ready` 当作目标达成。GitHub、邮件、IM、任务日历等**仓库外**来源属于独立插件的职责：它们实现一个只读 `WorkItemSignalSource`，用 `registerSignalSource(...)` 注册进来，就走与本内置来源完全相同的扫描、provenance、去重、冷却与已结项围栏，而不是另开写路径。
 
@@ -33,7 +33,9 @@ prompt: |-
   调用 work_item_claim。若没有工作项，直接结束，不要输出内容。
   否则按工作项的 brief 和 acceptanceRef 完成工作，用 work_item_report
   汇报 progress/ready/blocked/failed，并在结束前给出终态报告。
-allowed_tools: [work_item_claim, work_item_report, work_item_status]
+  resume 摘要不足时，用 work_item_read_report 按 revision 读取报告，沿
+  nextOffset 继续正文，沿 previousRevision 找回更早报告。
+allowed_tools: [work_item_claim, work_item_report, work_item_status, work_item_read_report]
 budgetId: <owner 批准的 automation-runs 预算>
 budgetAmount: 1
 ```
@@ -152,11 +154,12 @@ worker preset 需要与 definition 的 `agentPreset` 一致；`subject.id` 写�
 
 ## 工具
 
-三条工具都要求调用者是配置中的 worker automation 的 exact production occurrence；工具调用落到前台会话或非 production 运行会被拒绝。调用方 Agent 的 workspace 与 preset 还必须与 `scope` 一致，`scope.expiresAt` 过期时 claim/report/status 失败关闭。
+四条工具都要求调用者是配置中的 worker automation 的 exact production occurrence；工具调用落到前台会话或非 production 运行会被拒绝。调用方 Agent 的 workspace 与 preset 还必须与 `scope` 一致；claim 与 read_report 会复核 `scope.expiresAt`，过期即失败关闭。
 
 - `work_item_claim`：按 occurrence 找到唯一绑定的工作项，用 CAS 取得 claim，返回 `itemId`、kind、title、brief、`workDir`、attempt 等。claim 没有独立续租动作：`progress` 报告会顺延租约；同一 run 的重复认领只在租约仍有效时幂等重放，租约过期则生成新的 claim 行与新的 attempt（受 `maxAttempts` 约束）。
 - `work_item_report`：在活动 claim 下追加一条 append-only 报告修订（`progress` / `waiting` / `ready` / `blocked` / `failed`），可带 artifact 绝对路径；idempotency key 由 `status+summary+artifacts` 的 SHA-256 再按 item 与 claim 行限定，同一 claim 的重试返回已存修订而不重复写入，不同 claim 的同样文本则视为新修订。对已过期 claim 的报告会以 `claim-expired` 失败关闭。`waiting` 报告释放 claim 并按 `limits.waitingResumeMs` 安排一次**有界**恢复（受 `maxAttempts` 约束，见“生命周期与可靠性”）。终态报告会触发一次 owner 通知，通知失败只记录在报告行上，不删除报告证据。
-- `work_item_status`：只读返回当前 occurrence 绑定的工作项、活动 claim 和报告列表，不回显数据库路径、principal 或 Host 内部路径。
+- `work_item_status`：查询当前 occurrence 绑定的工作项、活动 claim 和报告列表；沿用既有租约恢复，不回显数据库路径、principal 或 Host 内部路径。
+- `work_item_read_report`：只读召回当前 occurrence 所属工作项的指定报告正文与 artifact 引用，支持 UTF-8 字节分页及相邻 revision 导航；不接受 item ID 或任意文件路径。
 
 `work_item_report` 的 `summary` 有字节上限（默认 16 KiB），超长会被截断并标记 `truncated`；artifact 路径必须是绝对路径，且位于该工作项的 scratch 目录或 `scope.workspace` 之内，相对路径与 `..` 逃逸一律拒绝。校验会逐级 realpath 每个已存在的路径组件，任何逃出根目录的符号链接都会失败关闭；scratch 目录仍应由部署者保持私有。
 
@@ -167,6 +170,23 @@ worker preset 需要与 definition 的 `agentPreset` 一致；`subject.id` 写�
 - 简报只从本插件的 append-only 本地账本派生：`work_item_event` 与 `work_item_report` 按 `(item_id, …)` 主键前缀做有界扫描（`LIMIT`），不引入新表、不改变 schema 版本（仍为 7）、不新增 timer，也不调用模型或 peer。
 - 报告 summary 在简报里最多保留 512 UTF-8 字节，超长按 UTF-8 边界截断并置 `summaryTruncated`；当前 attempt 自身不计入 `attempts`/`priorAttempts`。
 - 简报是派生展示，不改变 claim/report/结算语义；它不含数据库路径、delivery id 或 evidence blob。首次认领与旧账本行可能得到空简报（`resumed: false`），重放同一 claim 会重新计算并返回一致的简报，不会追加新的 claim/attempt/事件。
+
+### 摘要后的报告召回
+
+`work_item_claim` 现在也会把非空 `acceptanceRef` 和非空 `leaseUntil` 投影给模型；缺失值省略。`resume.reports[].revision` 是稳定的报告引用，摘要超过 512 字节或较早报告被最近 5 条上限排除时，可调用：
+
+```yaml
+work_item_read_report:
+  revision: 3
+  offset: 0
+  max_bytes: 4096
+```
+
+- `revision` 为必填正安全整数；`offset` 是已存正文的 UTF-8 **字节**偏移，默认 `0`；`max_bytes` 默认 `4096`，取值 `4–8192`。返回正文总字节数 `summaryBytes`；还有后文时返回 `nextOffset`，原样传回即可续读；末页省略该字段。偏移超出正文或落在多字节字符中间会拒绝，不会跳字或产生半个字符。
+- 返回实际存在的 `previousRevision` / `nextRevision`，首尾省略对应字段；因此可以从简报中的任一报告逐条找到早于最近 5 条的报告。`storedTruncated` 表示**原报告入库前**已被 `limits.maxReportBytes` 截断；召回只能恢复已存正文，不能恢复被丢弃的原输入。
+- 读取只访问当前 occurrence 绑定的 item/report，重查 owner route 的 principal、版本及 binding 代次，并重跑原准入授权；缺依赖、撤权、owner/代次变化或到期均失败关闭。拒绝读取不 park 工作项，不触发恢复、结算或新增账本行；schema 仍为 7。
+- `artifactPaths` 只是原报告登记的引用，不读取文件。正文及引用都按不可信数据渲染。`work_item_report` 显示通知已入队仅证明 Delivery 接受了 outbox 请求，不证明消息已发送、送达或已读；历史 `delivery: sent` 仍保留原枚举语义。
+- 新 automation 的不可变工具白名单和 preset 工具平面都须包含 `work_item_read_report`；已存在的 automation 不会因插件升级自动取得该工具。
 
 ## 生命周期与可靠性
 

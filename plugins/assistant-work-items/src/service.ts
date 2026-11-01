@@ -89,6 +89,24 @@ export interface WorkItemStatusView {
   readonly outcome: WorkItemOutcomeView | undefined
 }
 
+/** One byte-bounded page of an immutable, persisted report. */
+export interface WorkItemReportPage {
+  readonly itemId: string
+  readonly revision: number
+  readonly status: WorkItemReportStatus
+  readonly summary: string
+  /** UTF-8 byte offsets into the stored summary, never into arbitrary files. */
+  readonly offset: number
+  readonly nextOffset: number | null
+  readonly summaryBytes: number
+  /** Whether the original report was truncated before it entered the ledger. */
+  readonly storedTruncated: boolean
+  readonly artifactPaths: readonly string[]
+  readonly recordedAt: number
+  readonly previousRevision: number | null
+  readonly nextRevision: number | null
+}
+
 /** One lazy persistence stack; absent while the intake is disabled. */
 interface Components {
   readonly workspace: WorkItemWorkspace
@@ -468,6 +486,54 @@ export class AssistantWorkItemsService extends Service {
     })
   }
 
+  /**
+   * Recall one report belonging to the caller's exact production occurrence.
+   * This path performs no recovery, parking, settlement or ledger mutation.
+   */
+  readReport(agent: Agent | undefined, input: { revision: number; offset?: number; maxBytes?: number }): WorkItemReportPage {
+    const components = this.#required()
+    const occurrenceId = this.#occurrenceId(agent)
+    const item = components.store.findItemByOccurrence(occurrenceId)
+    if (item === undefined) fail('not-found', 'no work item is bound to this automation occurrence')
+    const receipt = this.#assertOwnerRoute(item)
+    if (receipt.principalVersion !== item.owner.principalVersion
+      || receipt.bindingVersion !== item.owner.bindingVersion
+      || receipt.generation !== item.owner.generation) {
+      fail('owner-route-invalid', 'owner route generation changed since admission')
+    }
+    const authority = components.authority.check(item)
+    if (authority.kind === 'revoked') fail('authority-revoked', 'admission mandate no longer permits report recall')
+    if (authority.kind === 'unavailable') fail('authority-unavailable', 'admission mandate could not be revalidated', authority.detail)
+
+    const offset = input.offset ?? 0
+    const maxBytes = input.maxBytes ?? 4_096
+    if (!Number.isSafeInteger(input.revision) || input.revision < 1) fail('invalid-input', 'revision must be a positive safe integer')
+    if (!Number.isSafeInteger(offset) || offset < 0) fail('invalid-input', 'offset must be a non-negative UTF-8 byte offset')
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 4 || maxBytes > 8_192) fail('invalid-input', 'maxBytes must be an integer between 4 and 8192')
+    const found = components.store.reportByRevision(item.id, input.revision)
+    if (found === undefined) fail('not-found', 'no report with this revision belongs to the current work item')
+    const bytes = Buffer.from(found.report.summary, 'utf8')
+    if (offset > bytes.length || (offset < bytes.length && (bytes[offset]! & 0xc0) === 0x80)) {
+      fail('invalid-input', 'offset must be within the stored summary at a UTF-8 character boundary')
+    }
+    let end = Math.min(offset + maxBytes, bytes.length)
+    while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end -= 1
+    return Object.freeze({
+      itemId: item.id,
+      revision: found.report.revision,
+      status: found.report.status,
+      summary: bytes.subarray(offset, end).toString('utf8'),
+      offset,
+      nextOffset: end < bytes.length ? end : null,
+      summaryBytes: bytes.length,
+      storedTruncated: found.report.truncated,
+      artifactPaths: found.report.artifactPaths,
+      recordedAt: found.report.recordedAt,
+      previousRevision: found.previousRevision,
+      nextRevision: found.nextRevision,
+    })
+  }
+
   /** Bounded health projection; never creates the ledger when disabled. */
   health(): WorkItemHealth {
     const config = this.#config
@@ -807,7 +873,7 @@ export class AssistantWorkItemsService extends Service {
   }
 
   /** Re-anchor a claim against the live owner route above the stored receipt. */
-  #assertOwnerRoute(item: WorkItemRecord): void {
+  #assertOwnerRoute(item: WorkItemRecord): Readonly<PeerOwnerRouteReceipt> {
     const config = this.#config
     const delivery = this.#delivery()
     if (delivery === undefined) fail('owner-route-unavailable', 'assistantDelivery is required to validate the owner route')
@@ -839,6 +905,7 @@ export class AssistantWorkItemsService extends Service {
     if (config.workerAutomationId !== item.workerAutomationId) {
       fail('identity-mismatch', 'item was dispatched to a different worker automation')
     }
+    return receipt
   }
 
   /**
