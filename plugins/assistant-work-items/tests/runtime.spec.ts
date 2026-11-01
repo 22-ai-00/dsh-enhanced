@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { WorkItemAdmission } from '../src/admission.ts'
 import { type Config, normalizeConfig, type NormalizedConfig } from '../src/config.ts'
 import { WorkItemDispatch } from '../src/dispatch.ts'
@@ -12,11 +12,14 @@ import { WorkItemLedger } from '../src/ledger.ts'
 import type {
   PeerAutomationsService,
   PeerDeliveryService,
+  PeerOwnerForegroundTaskSource,
+  PeerOwnerForegroundTaskSourcePage,
   PeerOwnerRouteReceipt,
   PeerPolicyDecision,
   PeerPolicyRequest,
   PeerPolicyService,
 } from '../src/peers.ts'
+import { OUTCOME_EVIDENCE_SOURCE } from '../src/outcome.ts'
 import { AssistantWorkItemsService } from '../src/service.ts'
 import { WorkItemStore } from '../src/store.ts'
 import type { WorkItemAdmitInput, WorkItemRecord, WorkItemReportRecord } from '../src/types.ts'
@@ -702,6 +705,7 @@ describe('work-item store projection', () => {
       INSERT INTO work_item_claim(item_id, run_id, occurrence_id, state, leased_until, created_at, updated_at)
         SELECT item_id, run_id, occurrence_id, state, leased_until, created_at, updated_at FROM work_item_claim_v2;
       DROP TABLE work_item_claim_v2;
+      DROP TABLE work_item_outcome;
       UPDATE work_item_schema_meta SET value = '1' WHERE key = 'schema_version';
       PRAGMA user_version = 1;
     `)
@@ -710,7 +714,7 @@ describe('work-item store projection', () => {
     closers.push(() => reopened.close())
     expect(reopened.findClaimByRun('run-1')).toMatchObject({ claimId: 1, itemId: admitted.item.id, state: 'active' })
     expect(reopened.findItemById(admitted.item.id)).toMatchObject({ state: 'claimed', owner: { generation: 2 } })
-    expect(reopened.stats()).toMatchObject({ items: 1, schemaVersion: 2 })
+    expect(reopened.stats()).toMatchObject({ items: 1, schemaVersion: 3, outcomes: 0, pendingOutcomes: 0 })
   })
 })
 
@@ -812,6 +816,9 @@ describe('work-item service identity and tools', () => {
     fixture.service.admit(signal())
     const tools = fixture.tools.registered
     expect(tools.map(tool => tool.name)).toEqual(['work_item_claim', 'work_item_report', 'work_item_status'])
+    // Settlement stays host-only: no model tool can observe or settle outcomes.
+    expect(tools).toHaveLength(3)
+    expect(tools.map(tool => tool.name).filter(name => /outcome|settle/.test(name))).toEqual([])
     const claimTool = tools[0] as RegisteredTool
     const claimed = await claimTool.execute({}, { agent: workerAgent('occ-1'), callId: 'call-1', rootCallId: 'root-1' })
     expect(claimed).toMatchObject({ itemId: expect.stringMatching(/^wi-/), runId: 'occ-1', attempt: 1 })
@@ -825,5 +832,131 @@ describe('work-item service identity and tools', () => {
     const statusTool = tools[2] as RegisteredTool
     const status = await statusTool.execute({}, { agent: workerAgent('occ-1'), callId: 'call-3', rootCallId: 'root-3' })
     expect(status).toMatchObject({ itemId: claimed['itemId'], state: 'ready', openItems: 0 })
+  })
+})
+
+describe('outcome settlement end to end', () => {
+  const SCOPE = { workspace: WORKSPACE, preset: PRESET, principalId: PRINCIPAL }
+
+  function settlementProvenance() {
+    return {
+      source: 'owner-foreground-failures',
+      sourceVersion: 'assistant-work-items/owner-foreground-failures/v1',
+      signalDigest: 'sha256:signal',
+      observedAt: 1_700_000_000_000,
+      evidence: { inboxId: 'inbox-1', executionStatus: 'failed', completionSequence: 4, authorityHash: 'sha256:authority' },
+    }
+  }
+
+  function pageWith(items: readonly PeerOwnerForegroundTaskSource[]): PeerOwnerForegroundTaskSourcePage {
+    return { items, nextCursor: null, watermark: 0, hasMore: false }
+  }
+
+  test('a ready report leaves a pending window until the delivery peer observes the repaired execution', async () => {
+    const fixture = await serviceHarness()
+    const admitted = fixture.service.admit(signal({ provenance: settlementProvenance() }))
+    expect(admitted.item.state).toBe('queued')
+    fixture.service.claim(workerAgent('occ-1'))
+    await fixture.service.report(workerAgent('occ-1'), {
+      status: 'ready',
+      summary: 'Repaired the execution.',
+      idempotencyKey: 'ready-key-1',
+    })
+    const pending = fixture.service.status(workerAgent('occ-1')).outcome
+    expect(pending?.outcome).toMatchObject({
+      revision: 1,
+      settledBy: 'report-ready',
+      objectiveStatus: 'unknown',
+      evidenceState: 'pending',
+      inboxId: 'inbox-1',
+      baselineSequence: 4,
+    })
+    expect(fixture.service.health().settlement).toMatchObject({ pending: 1, observed: 0, unverified: 0 })
+
+    const peer: PeerDeliveryService = fixture.delivery
+    peer.listOwnerForegroundTaskSources = () => pageWith([{
+      protocol: OUTCOME_EVIDENCE_SOURCE,
+      inboxId: 'inbox-1',
+      sourceDigest: 'sha256:digest',
+      completionSequence: 5,
+      authorityId: ROUTE,
+      authorityHash: 'sha256:authority',
+      principalId: PRINCIPAL,
+      scope: SCOPE,
+      binding: { id: 'binding-1', version: 3, generation: 2, sessionId: 'session-1' },
+      execution: { dispatchedAt: 1_700_000_000_000, status: 'succeeded', quiescent: true, completedAt: 1_700_000_100_000, executionRef: 'exec-1' },
+    }])
+    const report = fixture.service.settleOutcomes(true)
+    expect(report).toMatchObject({ skipped: null, degraded: null, failed: false, scanned: 1, settled: 1, expired: 0 })
+    const observed = fixture.service.status(workerAgent('occ-1')).outcome
+    expect(observed?.outcome).toMatchObject({
+      revision: 2,
+      settledBy: 'observed-evidence',
+      executionStatus: 'succeeded',
+      objectiveStatus: 'unknown',
+      trust: 'external-receipt',
+      evidenceState: 'observed',
+    })
+    expect(fixture.service.outcomes()).toHaveLength(1)
+    expect(fixture.service.health().settlement).toMatchObject({ pending: 0, observed: 1, unverified: 0 })
+  })
+
+  test('a missing dependency fails the pass as degraded, never as a silent success', async () => {
+    const fixture = await serviceHarness()
+    const missing = vi.spyOn(WorkItemStore.prototype, 'pendingOutcomes').mockImplementation(() => {
+      throw new WorkItemError('missing-dependency', 'assistantDelivery is required to settle outcomes')
+    })
+    try {
+      expect(fixture.service.settleOutcomes(true)).toMatchObject({
+        skipped: null,
+        degraded: 'missing-dependency',
+        failed: true,
+        scanned: 0,
+        settled: 0,
+        expired: 0,
+        observedItemIds: [],
+      })
+    } finally {
+      missing.mockRestore()
+    }
+    const broken = vi.spyOn(WorkItemStore.prototype, 'pendingOutcomes').mockImplementation(() => {
+      throw new Error('database is locked')
+    })
+    try {
+      expect(fixture.service.settleOutcomes(true)).toMatchObject({ skipped: null, degraded: null, failed: true })
+    } finally {
+      broken.mockRestore()
+    }
+  })
+
+  test('a window that closes on a healthy but silent channel ends unverified, not successful', async () => {
+    const realNow = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(realNow)
+    try {
+      const fixture = await serviceHarness()
+      fixture.service.admit(signal({ provenance: settlementProvenance() }))
+      fixture.service.claim(workerAgent('occ-1'))
+      await fixture.service.report(workerAgent('occ-1'), {
+        status: 'ready',
+        summary: 'Repaired the execution.',
+        idempotencyKey: 'ready-key-2',
+      })
+      const peer: PeerDeliveryService = fixture.delivery
+      peer.listOwnerForegroundTaskSources = () => pageWith([])
+      vi.setSystemTime(realNow + 604_800_000 + 60_000)
+      const report = fixture.service.settleOutcomes(true)
+      expect(report).toMatchObject({ degraded: null, failed: false, settled: 0, expired: 1 })
+      expect(fixture.service.status(workerAgent('occ-1')).outcome?.outcome).toMatchObject({
+        revision: 2,
+        settledBy: 'window-expired',
+        evidenceState: 'unverified',
+        evidenceReason: 'window-expired',
+        objectiveStatus: 'unknown',
+      })
+      expect(fixture.service.health().settlement).toMatchObject({ pending: 0, observed: 0, unverified: 1 })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

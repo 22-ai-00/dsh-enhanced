@@ -257,4 +257,125 @@ export interface WorkItemHealth {
   readonly dispatchUnknown: number
   readonly workerConnected: boolean
   readonly ownerRouteValid: boolean
+  readonly settlement: WorkItemSettlementHealth
+}
+
+/**
+ * How the guarded execution ended, as independently recorded by
+ * `assistant-delivery`.
+ *
+ * `unknown` is the honest default: the absence of evidence is not evidence of
+ * success, and a worker claiming success is not an execution outcome.
+ */
+export type WorkItemExecutionStatus = 'succeeded' | 'failed' | 'timed-out' | 'cancelled' | 'unknown'
+
+/**
+ * Objective outcome of the admitted work.
+ *
+ * Only an independent verifier may ever assert `achieved` or `partial`; this
+ * plugin derives nothing into those values from a worker self-report, and no
+ * automatic path sets them at all.
+ */
+export type WorkItemObjectiveStatus = 'achieved' | 'partial' | 'not-achieved' | 'unknown'
+
+/** Who produced the execution/objective claim recorded on one outcome. */
+export type WorkItemOutcomeTrust = 'agent-self-report' | 'external-receipt' | 'deterministic-check'
+
+/** Independent evidence state of one outcome revision. */
+export type WorkItemOutcomeEvidenceState = 'pending' | 'observed' | 'unverified' | 'not-applicable'
+
+/** Why an outcome revision carries no usable independent evidence. */
+export type WorkItemOutcomeEvidenceReason =
+  /** The item's signal has no independent execution channel to observe. */
+  | 'no-independent-source'
+  /** The observed receipt exceeded the evidence byte budget; it is dropped, never truncated. */
+  | 'evidence-too-large'
+  /** The bounded settlement window closed with no matching execution. */
+  | 'window-expired'
+  /** The window closed while the evidence channel was unavailable. */
+  | 'channel-unavailable'
+
+/** Which durable transition appended this outcome revision. */
+export type WorkItemOutcomeSettledBy =
+  | 'report-ready'
+  | 'report-blocked'
+  | 'report-failed'
+  | 'withdrawn'
+  | 'retry-exhausted'
+  | 'observed-evidence'
+  | 'window-expired'
+
+/**
+ * Allowlisted evidence captured from the delivery channel.
+ *
+ * These keys are all authenticated, delivery-owned identities; owner-facing
+ * text is deliberately excluded so an outcome never carries owner content.
+ */
+export interface WorkItemOutcomeEvidence {
+  readonly inboxId?: string
+  readonly completionSequence?: number
+  readonly completedAt?: number
+  readonly executionStatus?: string
+  readonly sourceDigest?: string
+  readonly bindingVersion?: number
+  readonly bindingGeneration?: number
+  readonly scope?: string
+}
+
+/**
+ * One append-only outcome revision.
+ *
+ * A terminal lifecycle state (`ready`, `blocked`, …) is a *report*, not proof:
+ * it says the worker stopped owning the item. This record is the separate,
+ * independently sourced evidence trail, and it only ever moves forward by
+ * appending a new revision for the same item.
+ */
+export interface WorkItemOutcomeRecord {
+  readonly itemId: string
+  readonly revision: number
+  readonly settledBy: WorkItemOutcomeSettledBy
+  readonly executionStatus: WorkItemExecutionStatus
+  readonly objectiveStatus: WorkItemObjectiveStatus
+  readonly trust: WorkItemOutcomeTrust
+  readonly evidenceState: WorkItemOutcomeEvidenceState
+  readonly evidenceReason: WorkItemOutcomeEvidenceReason | null
+  readonly evidence: WorkItemOutcomeEvidence | null
+  /** The admitted execution's completion sequence this outcome is fenced above. */
+  readonly baselineSequence: number | null
+  readonly inboxId: string | null
+  /** Authority hash admitted with this execution; the fence a receipt must match. */
+  readonly authorityHash: string | null
+  /** Deadline of the bounded settlement window; only pending outcomes have one. */
+  readonly deadlineAt: number | null
+  readonly settledAt: number
+  readonly recordedAt: number
+}
+
+/** One outcome revision joined with the report/delivery coordinates it refers to. */
+export interface WorkItemOutcomeView {
+  readonly outcome: WorkItemOutcomeRecord
+  readonly deliveryState: WorkItemDeliveryState | null
+  readonly reportRevision: number | null
+}
+
+/** Result of one bounded settlement pass. Host-only; never admits or wakes. */
+export interface WorkItemSettlementReport {
+  readonly skipped: 'disabled' | 'not-due' | 'no-pending' | null
+  readonly degraded: 'missing-dependency' | 'owner-route-unavailable' | null
+  /** True only when the evidence channel was reached but failed. */
+  readonly failed: boolean
+  readonly scanned: number
+  readonly settled: number
+  readonly expired: number
+  /** Item ids whose pending window resolved to an observed receipt this pass. */
+  readonly observedItemIds: readonly string[]
+}
+
+/** Bounded settlement health projection. */
+export interface WorkItemSettlementHealth {
+  readonly enabled: boolean
+  readonly pending: number
+  readonly observed: number
+  readonly unverified: number
+  readonly degraded: string | null
 }

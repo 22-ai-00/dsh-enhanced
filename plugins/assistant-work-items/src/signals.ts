@@ -572,7 +572,7 @@ export class OwnerForegroundFailureSource implements WorkItemSignalSource {
     const brief = [
       `The owner's foreground request in inbox ${source.inboxId} finished as ${subject}.`,
       `Completed at ${new Date(completedAt).toISOString()} in workspace ${source.scope.workspace} (binding ${bindingId}, version ${String(source.binding.version)}, generation ${String(source.binding.generation)}).`,
-      'Read the delivery history for this inbox and its execution, work out what went wrong or what the owner still needs,',
+      'Inspect what this automation and its peer services actually recorded for the execution, work out what went wrong or what the owner still needs,',
       'then make the smallest bounded repair you can justify and report exactly what you inspected, changed and could not change.',
       'Never re-send a message, guess the owner intent, or act outside this workspace.',
     ].join(' ')
@@ -593,6 +593,9 @@ export class OwnerForegroundFailureSource implements WorkItemSignalSource {
           inboxId: source.inboxId,
           executionStatus: status,
           completionSequence: source.completionSequence,
+          // Persisted so settlement can fence receipts against the owner route
+          // that admitted this execution, not against a same-pass value.
+          authorityHash: source.authorityHash,
           bindingVersion: source.binding.version,
           completedAt,
         }),

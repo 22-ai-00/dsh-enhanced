@@ -1,6 +1,14 @@
 import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import {
+  deriveReportOutcome,
+  deriveRetryExhaustedOutcome,
+  deriveWithdrawalOutcome,
+  expiredOutcome,
+  observedOutcome,
+  type WorkItemOutcomeDraft,
+} from './outcome.ts'
 import type {
   WorkItemClaimRecord,
   WorkItemClaimState,
@@ -8,7 +16,17 @@ import type {
   WorkItemDispatchRecord,
   WorkItemDispatchState,
   WorkItemEventRecord,
+  WorkItemExecutionStatus,
+  WorkItemObjectiveStatus,
+  WorkItemOutcomeEvidence,
+  WorkItemOutcomeEvidenceReason,
+  WorkItemOutcomeEvidenceState,
+  WorkItemOutcomeRecord,
+  WorkItemOutcomeSettledBy,
+  WorkItemOutcomeTrust,
+  WorkItemOutcomeView,
   WorkItemOwnerEvidence,
+  WorkItemProvenance,
   WorkItemRecord,
   WorkItemReportRecord,
   WorkItemReportStatus,
@@ -17,10 +35,36 @@ import type {
 } from './types.ts'
 import { CLAIMABLE_STATES, OPEN_STATES, WorkItemError } from './types.ts'
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
+/** Default bounded settlement window: seven days. */
+const DEFAULT_SETTLE_WINDOW_MS = 604_800_000
 const MEMORY_DATABASE = ':memory:'
 /** Bound parameters for `state IN (...)`, derived from the single state list. */
 const OPEN_STATE_PLACEHOLDERS = OPEN_STATES.map(() => '?').join(', ')
+
+/**
+ * Append-only outcome ledger.
+ *
+ * One row per outcome revision; a later observation of the same item appends a
+ * wider revision instead of rewriting the earlier one, so a `ready` history is
+ * never laundered into a success. The primary key already orders by item and
+ * revision, so the only extra index supports finding pending windows by deadline.
+ */
+const OUTCOME_SCHEMA = `CREATE TABLE work_item_outcome (
+        item_id TEXT NOT NULL REFERENCES work_item(id) ON DELETE RESTRICT,
+        revision INTEGER NOT NULL,
+        settled_by TEXT NOT NULL CHECK(settled_by IN ('report-ready', 'report-blocked', 'report-failed', 'withdrawn', 'retry-exhausted', 'observed-evidence', 'window-expired')),
+        execution_status TEXT NOT NULL CHECK(execution_status IN ('succeeded', 'failed', 'timed-out', 'cancelled', 'unknown')),
+        objective_status TEXT NOT NULL CHECK(objective_status IN ('achieved', 'partial', 'not-achieved', 'unknown')),
+        trust TEXT NOT NULL CHECK(trust IN ('agent-self-report', 'external-receipt', 'deterministic-check')),
+        evidence_state TEXT NOT NULL CHECK(evidence_state IN ('pending', 'observed', 'unverified', 'not-applicable')),
+        evidence_reason TEXT CHECK(evidence_reason IN ('no-independent-source', 'evidence-too-large', 'window-expired', 'channel-unavailable')),
+        evidence TEXT, baseline_sequence INTEGER, inbox_id TEXT, authority_hash TEXT, deadline_at INTEGER,
+        settled_at INTEGER NOT NULL, recorded_at INTEGER NOT NULL,
+        PRIMARY KEY(item_id, revision)
+      ) STRICT, WITHOUT ROWID;
+      CREATE INDEX work_item_outcome_pending_idx ON work_item_outcome(evidence_state, deadline_at);
+    `
 
 type Row = Record<string, unknown>
 
@@ -149,6 +193,7 @@ function validateSchema(database: DatabaseSync): void {
         delivery_id TEXT, recorded_at INTEGER NOT NULL,
         PRIMARY KEY(item_id, revision)
       ) STRICT;
+      ${OUTCOME_SCHEMA}
       CREATE TABLE work_item_dispatch (
         item_id TEXT PRIMARY KEY REFERENCES work_item(id) ON DELETE RESTRICT,
         automation_id TEXT NOT NULL, event_id TEXT NOT NULL,
@@ -161,8 +206,8 @@ function validateSchema(database: DatabaseSync): void {
       CREATE TABLE work_item_schema_meta (
         key TEXT PRIMARY KEY, value TEXT NOT NULL
       ) STRICT, WITHOUT ROWID;
-      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '2');
-      PRAGMA user_version = 2;
+      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '3');
+      PRAGMA user_version = 3;
       COMMIT;
     `)
     return
@@ -185,13 +230,23 @@ function validateSchema(database: DatabaseSync): void {
         SELECT item_id, run_id, occurrence_id, state, leased_until, created_at, updated_at FROM work_item_claim_v1;
       DROP TABLE work_item_claim_v1;
       CREATE INDEX work_item_claim_run_idx ON work_item_claim(run_id);
-      UPDATE work_item_schema_meta SET value = '2' WHERE key = 'schema_version';
       PRAGMA user_version = 2;
       COMMIT;
     `)
   }
-  if (version !== 1 && version !== SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
-  const expected = JSON.stringify(['work_item', 'work_item_claim', 'work_item_dispatch', 'work_item_event', 'work_item_report', 'work_item_schema_meta'])
+  if (version === 1 || version === 2) {
+    // v3 adds the append-only outcome ledger. No existing table changes, so the
+    // upgrade is a pure table creation that keeps every stored report intact.
+    database.exec(`
+      BEGIN IMMEDIATE;
+      ${OUTCOME_SCHEMA}
+      UPDATE work_item_schema_meta SET value = '3' WHERE key = 'schema_version';
+      PRAGMA user_version = 3;
+      COMMIT;
+    `)
+  }
+  if (version !== 1 && version !== 2 && version !== SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
+  const expected = JSON.stringify(['work_item', 'work_item_claim', 'work_item_dispatch', 'work_item_event', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta'])
   const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Row[]).map(row => String(row['name']))
   if (JSON.stringify(tables) !== expected) fail('storage', 'work-item database schema is not the expected shape')
 }
@@ -293,6 +348,41 @@ function dispatchFromRow(row: Row): WorkItemDispatchRecord {
   })
 }
 
+/** Decode stored evidence; malformed JSON fails closed to `null`. */
+function parseEvidence(stored: string): WorkItemOutcomeEvidence | null {
+  try {
+    return Object.freeze(JSON.parse(stored) as WorkItemOutcomeEvidence)
+  } catch {
+    return null
+  }
+}
+
+function outcomeFromRow(row: Row): WorkItemOutcomeRecord {
+  const evidence = optString(row['evidence'])
+  return Object.freeze({
+    itemId: String(row['item_id']),
+    revision: Number(row['revision']),
+    settledBy: String(row['settled_by']) as WorkItemOutcomeSettledBy,
+    executionStatus: String(row['execution_status']) as WorkItemExecutionStatus,
+    objectiveStatus: String(row['objective_status']) as WorkItemObjectiveStatus,
+    trust: String(row['trust']) as WorkItemOutcomeTrust,
+    evidenceState: String(row['evidence_state']) as WorkItemOutcomeEvidenceState,
+    evidenceReason: optString(row['evidence_reason']) as WorkItemOutcomeEvidenceReason | null,
+    // Malformed stored evidence is treated as absent rather than thrown: an
+    // unreadable receipt can never prove successful repair.
+    evidence: evidence === null ? null : parseEvidence(evidence),
+    baselineSequence: optNumber(row['baseline_sequence']),
+    inboxId: optString(row['inbox_id']),
+    authorityHash: optString(row['authority_hash']),
+    deadlineAt: optNumber(row['deadline_at']),
+    settledAt: Number(row['settled_at']),
+    recordedAt: Number(row['recorded_at']),
+  })
+}
+
+/** Latest outcome revision per item; older revisions stay as immutable history. */
+const LATEST_OUTCOME = 'SELECT item_id, MAX(revision) AS revision FROM work_item_outcome GROUP BY item_id'
+
 export interface ClaimResult {
   readonly item: WorkItemRecord
   readonly claim: WorkItemClaimRecord
@@ -330,6 +420,9 @@ export interface WorkItemStoreStats {
   readonly openItems: number
   readonly reports: number
   readonly dispatches: number
+  readonly outcomes: number
+  readonly pendingOutcomes: number
+  readonly unverifiedOutcomes: number
 }
 
 /**
@@ -343,10 +436,14 @@ export class WorkItemStore {
   readonly #database: DatabaseSync
   readonly #statements = new Map<string, ReturnType<DatabaseSync['prepare']>>()
   readonly #now: () => number
+  readonly #settleWindowMs: number
   #closed = false
 
-  constructor(path: string, options: { now?: () => number } = {}) {
+  constructor(path: string, options: { now?: () => number; settleWindowMs?: number } = {}) {
     this.#now = options.now ?? (() => Date.now())
+    const settleWindowMs = options.settleWindowMs ?? DEFAULT_SETTLE_WINDOW_MS
+    if (!Number.isSafeInteger(settleWindowMs) || settleWindowMs <= 0) fail('invalid-input', 'settleWindowMs must be a positive integer')
+    this.#settleWindowMs = settleWindowMs
     if (path !== MEMORY_DATABASE) prepareDatabaseFile(path)
     this.#database = new DatabaseSync(path)
     if (path !== MEMORY_DATABASE) {
@@ -418,6 +515,9 @@ export class WorkItemStore {
       openItems: count(`SELECT COUNT(*) AS count FROM work_item WHERE observed = 0 AND state IN ('queued', 'claimed', 'working', 'waiting')`),
       reports: count('SELECT COUNT(*) AS count FROM work_item_report'),
       dispatches: count('SELECT COUNT(*) AS count FROM work_item_dispatch'),
+      outcomes: count('SELECT COUNT(*) AS count FROM work_item_outcome'),
+      pendingOutcomes: count(`SELECT COUNT(*) AS count FROM work_item_outcome o JOIN (${LATEST_OUTCOME}) latest ON latest.item_id = o.item_id AND latest.revision = o.revision WHERE o.evidence_state = 'pending'`),
+      unverifiedOutcomes: count(`SELECT COUNT(*) AS count FROM work_item_outcome o JOIN (${LATEST_OUTCOME}) latest ON latest.item_id = o.item_id AND latest.revision = o.revision WHERE o.evidence_state = 'unverified'`),
     })
   }
 
@@ -454,6 +554,21 @@ export class WorkItemStore {
     this.#statement(
       'INSERT INTO work_item_schema_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
     ).run(key, value)
+  }
+
+  /** Drop one durable key/value row when its cursor no longer applies. */
+  deleteMeta(key: string): void {
+    this.#statement('DELETE FROM work_item_schema_meta WHERE key = ?').run(key)
+  }
+
+  /** Count latest outcome revisions in one evidence state. */
+  countLatestOutcomes(evidenceState: WorkItemOutcomeEvidenceState): number {
+    const row = this.#statement(`
+      SELECT COUNT(*) AS count FROM work_item_outcome o
+      JOIN (${LATEST_OUTCOME}) latest ON latest.item_id = o.item_id AND latest.revision = o.revision
+      WHERE o.evidence_state = ?
+    `).get(evidenceState) as Row
+    return Number(row['count'])
   }
 
   findItemByOccurrence(occurrenceId: string): WorkItemRecord | undefined {
@@ -586,9 +701,155 @@ export class WorkItemStore {
           previousState: item.state,
           ...(attribution === undefined ? {} : { sourceId: attribution.sourceId, externalId: attribution.externalId, observedAt: attribution.observedAt }),
         }, now)
+        this.#insertOutcome(item.id, deriveWithdrawalOutcome(now), now)
         retired.push(this.#requireItem(item.id))
       }
       return Object.freeze({ outcome: 'withdrawn' as const, items: Object.freeze(retired) })
+    })
+  }
+
+  /**
+   * Provenance of the admission that created this item.
+   *
+   * The event detail is the only durable place the signal evidence lives, and
+   * reading it inside the terminal transaction keeps baseline extraction atomic
+   * with the outcome it fences.
+   */
+  #admissionProvenance(itemId: string): WorkItemProvenance | null {
+    const row = this.#statement("SELECT detail FROM work_item_event WHERE item_id = ? AND kind IN ('admitted', 'observed') ORDER BY sequence ASC LIMIT 1")
+      .get(itemId) as Row | undefined
+    const detail = row === undefined ? null : optString(row['detail'])
+    if (detail === null) return null
+    try {
+      const parsed = JSON.parse(detail) as { provenance?: WorkItemProvenance }
+      return parsed.provenance ?? null
+    } catch {
+      // A malformed event is no baseline, so the item settles as
+      // `not-applicable` instead of opening an unverifiable window.
+      return null
+    }
+  }
+
+  /** Append one outcome revision; the revision number is derived, never supplied. */
+  #insertOutcome(itemId: string, draft: WorkItemOutcomeDraft, now: number): WorkItemOutcomeRecord {
+    const latest = this.latestOutcome(itemId)
+    const revision = latest === undefined ? 1 : latest.revision + 1
+    this.#statement(`
+      INSERT INTO work_item_outcome(item_id, revision, settled_by, execution_status, objective_status, trust,
+        evidence_state, evidence_reason, evidence, baseline_sequence, inbox_id, authority_hash, deadline_at, settled_at, recorded_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      itemId, revision, draft.settledBy, draft.executionStatus, draft.objectiveStatus, draft.trust,
+      draft.evidenceState, draft.evidenceReason,
+      draft.evidence === null ? null : JSON.stringify(draft.evidence),
+      draft.baselineSequence, draft.inboxId, draft.authorityHash, draft.deadlineAt, draft.settledAt, now,
+    )
+    const row = this.#statement('SELECT * FROM work_item_outcome WHERE item_id = ? AND revision = ?').get(itemId, revision) as Row | undefined
+    if (row === undefined) fail('storage', 'outcome row disappeared after insert')
+    return outcomeFromRow(row)
+  }
+
+  latestOutcome(itemId: string): WorkItemOutcomeRecord | undefined {
+    const row = this.#statement('SELECT * FROM work_item_outcome WHERE item_id = ? ORDER BY revision DESC LIMIT 1').get(itemId) as Row | undefined
+    return row === undefined ? undefined : outcomeFromRow(row)
+  }
+
+  /** Every outcome revision for one item, oldest first. */
+  outcomes(itemId: string): readonly WorkItemOutcomeRecord[] {
+    return Object.freeze((this.#statement('SELECT * FROM work_item_outcome WHERE item_id = ? ORDER BY revision ASC').all(itemId) as Row[]).map(outcomeFromRow))
+  }
+
+  /**
+   * Latest outcome plus the report delivery state it depends on.
+   *
+   * `reportRevision` is the terminal report that caused a report-derived
+   * transition; observation and expiry revisions keep pointing at it, while
+   * withdrawal and retry exhaustion never had a report.
+   */
+  outcomeView(itemId: string): WorkItemOutcomeView | undefined {
+    const outcome = this.latestOutcome(itemId)
+    if (outcome === undefined) return undefined
+    const reportBacked = outcome.settledBy === 'report-ready'
+      || outcome.settledBy === 'report-blocked'
+      || outcome.settledBy === 'report-failed'
+      || outcome.settledBy === 'observed-evidence'
+      || outcome.settledBy === 'window-expired'
+    const report = reportBacked ? this.lastReport(itemId) : undefined
+    return Object.freeze({
+      outcome,
+      deliveryState: report?.deliveryState ?? null,
+      reportRevision: report?.revision ?? null,
+    })
+  }
+
+  /** Latest outcomes, newest first, optionally filtered by evidence state. */
+  listOutcomes(options: { limit?: number; evidenceState?: WorkItemOutcomeEvidenceState } = {}): readonly WorkItemOutcomeView[] {
+    const limit = options.limit ?? 20
+    const conditions = ['1 = 1']
+    const parameters: Array<string | number> = []
+    if (options.evidenceState !== undefined) {
+      conditions.push('o.evidence_state = ?')
+      parameters.push(options.evidenceState)
+    }
+    parameters.push(limit)
+    const rows = this.#statement(`
+      SELECT o.* FROM work_item_outcome o
+      JOIN (${LATEST_OUTCOME}) latest ON latest.item_id = o.item_id AND latest.revision = o.revision
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY o.settled_at DESC, o.item_id ASC LIMIT ?
+    `).all(...parameters) as Row[]
+    return Object.freeze(rows.map(row => {
+      const view = this.outcomeView(String(row['item_id']))
+      if (view === undefined) fail('storage', 'outcome view disappeared while listing')
+      return view
+    }))
+  }
+
+  /**
+   * Latest outcome revisions still waiting for evidence, soonest deadline first.
+   *
+   * Only the newest revision per item is considered: an older revision that was
+   * superseded still says `pending` in the immutable row, but it is history, not
+   * an open window.
+   */
+  pendingOutcomes(limit: number): readonly WorkItemOutcomeRecord[] {
+    const rows = this.#statement(`
+      SELECT o.* FROM work_item_outcome o
+      JOIN (${LATEST_OUTCOME}) latest ON latest.item_id = o.item_id AND latest.revision = o.revision
+      WHERE o.evidence_state = 'pending' AND o.deadline_at IS NOT NULL
+      ORDER BY o.deadline_at ASC, o.item_id ASC LIMIT ?
+    `).all(limit) as Row[]
+    return Object.freeze(rows.map(outcomeFromRow))
+  }
+
+  /**
+   * Append the settling revision for one pending outcome.
+   *
+   * Compare-and-swap on the revision number: a concurrent pass that already
+   * settled the item fails here instead of overwriting its history.
+   *
+   * This intentionally appends no `work_item_event`: the outcome ledger is its
+   * own append-only audit trail, and duplicating every revision into the event
+   * log would mix worker lifecycle with independently sourced evidence.
+   */
+  settleOutcome(input: {
+    itemId: string
+    revision: number
+    evidence: WorkItemOutcomeEvidence | null
+    reason: WorkItemOutcomeEvidenceReason | null
+    degraded: boolean
+    expired: boolean
+  }): WorkItemOutcomeRecord {
+    return this.#transaction(() => {
+      const now = this.#now()
+      const latest = this.latestOutcome(input.itemId)
+      if (latest === undefined) fail('invalid-state', 'cannot settle an item without an outcome')
+      if (latest.revision !== input.revision) fail('invalid-state', 'outcome revision moved before settlement')
+      if (latest.evidenceState !== 'pending') fail('invalid-state', `outcome is ${latest.evidenceState}, not pending`)
+      const draft = input.expired
+        ? expiredOutcome(latest, now, input.degraded)
+        : observedOutcome(latest, input.evidence, input.reason, now)
+      return this.#insertOutcome(input.itemId, draft, now)
     })
   }
 
@@ -681,6 +942,7 @@ export class WorkItemStore {
           this.#statement("UPDATE work_item SET state = 'blocked', state_reason = 'retry-exhausted', lease_until = NULL, lease_run_id = NULL, updated_at = ? WHERE id = ?")
             .run(now, current.id)
           this.#appendEvent(current.id, 'blocked', 'recovery', { reason: 'retry-exhausted', attempt: current.attempt }, now)
+          this.#insertOutcome(current.id, deriveRetryExhaustedOutcome(now), now)
           return 'blocked'
         }
         this.#statement("UPDATE work_item SET state = 'queued', state_reason = 'lease-expired', lease_until = NULL, lease_run_id = NULL, updated_at = ? WHERE id = ?")
@@ -740,6 +1002,7 @@ export class WorkItemStore {
       if (item.attempt >= item.maxAttempts) {
         this.#statement("UPDATE work_item SET state = 'blocked', state_reason = 'retry-exhausted', updated_at = ? WHERE id = ?").run(now, item.id)
         this.#appendEvent(item.id, 'blocked', 'claim', { reason: 'retry-exhausted' }, now)
+        this.#insertOutcome(item.id, deriveRetryExhaustedOutcome(now), now)
         // Commit the terminal transition, then fail: throwing inside the
         // transaction would roll the durable blocked state back.
         return { exhausted: true as const }
@@ -859,6 +1122,15 @@ export class WorkItemStore {
           .run(input.status === 'waiting' ? 'released' : 'completed', now, claim.claimId)
       }
       this.#appendEvent(item.id, 'reported', 'worker', { revision, status: input.status }, now)
+      // The outcome revision is derived in the same transaction as the terminal
+      // state change, so a crash can never leave a `ready` item with no outcome.
+      const outcome = deriveReportOutcome({
+        status: input.status,
+        provenance: this.#admissionProvenance(item.id),
+        now,
+        windowMs: this.#settleWindowMs,
+      })
+      if (outcome !== null) this.#insertOutcome(item.id, outcome, now)
       const stored = this.#statement('SELECT * FROM work_item_report WHERE item_id = ? AND revision = ?').get(item.id, revision) as Row
       return Object.freeze({ item: this.#requireItem(item.id), report: reportFromRow(stored), replayed: false })
     })

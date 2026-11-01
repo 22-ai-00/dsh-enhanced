@@ -11,6 +11,7 @@ import type {
   PeerOwnerRouteReceipt,
   PeerPolicyService,
 } from './peers.js'
+import { settleOutcomes as runSettlement, type SettlementResult } from './settlement.js'
 import { WorkItemStore } from './store.js'
 import {
   WorkItemSignalIntake,
@@ -23,9 +24,12 @@ import type {
   WorkItemAdmitResult,
   WorkItemClaimRecord,
   WorkItemHealth,
+  WorkItemOutcomeEvidenceState,
+  WorkItemOutcomeView,
   WorkItemRecord,
   WorkItemReportRecord,
   WorkItemReportStatus,
+  WorkItemSettlementReport,
 } from './types.js'
 import { WorkItemError } from './types.js'
 import { WorkItemWorkspace } from './workspace.js'
@@ -71,6 +75,8 @@ export interface WorkItemStatusView {
   readonly claim: WorkItemClaimRecord | undefined
   readonly reports: readonly WorkItemReportRecord[]
   readonly openItems: number
+  /** Latest independent-outcome revision; `undefined` before any terminal move. */
+  readonly outcome: WorkItemOutcomeView | undefined
 }
 
 /** One lazy persistence stack; absent while the intake is disabled. */
@@ -168,6 +174,7 @@ export class AssistantWorkItemsService extends Service {
   claim(agent: Agent | undefined): WorkItemClaimView {
     const components = this.#required()
     this.#sweepQuietly(components)
+    this.#settleQuietly(components)
     const occurrenceId = this.#occurrenceId(agent)
     components.ledger.recover()
     const item = components.store.findItemByOccurrence(occurrenceId)
@@ -274,6 +281,63 @@ export class AssistantWorkItemsService extends Service {
     }
   }
 
+  /**
+   * Run one bounded settlement pass over the pending outcome windows.
+   *
+   * Host-only by design: there is deliberately no model tool for this, so a
+   * worker can never settle or launder its own outcome. Returns a report instead
+   * of throwing, and a disabled intake returns `skipped: 'disabled'`.
+   */
+  settleOutcomes(force = true): WorkItemSettlementReport {
+    if (!this.#config.enabled || this.#closed || !this.#config.settlement.enabled) {
+      return Object.freeze({
+        skipped: 'disabled',
+        degraded: null,
+        failed: false,
+        scanned: 0,
+        settled: 0,
+        expired: 0,
+        observedItemIds: Object.freeze([]),
+      })
+    }
+    try {
+      return this.#settlement(this.#open(), force).report
+    } catch (error) {
+      this.ctx.logger.warn(`assistant-work-items: settlement unavailable: ${describe(error)}`)
+      // Only a genuinely absent dependency is reported as such; any other
+      // failure is an undifferentiated degraded pass, never a silent success.
+      const degraded = error instanceof WorkItemError && error.code === 'missing-dependency'
+        ? 'missing-dependency' as const
+        : null
+      return Object.freeze({
+        skipped: null,
+        degraded,
+        failed: true,
+        scanned: 0,
+        settled: 0,
+        expired: 0,
+        observedItemIds: Object.freeze([]),
+      })
+    }
+  }
+
+  /**
+   * Read the latest outcome revision per item, newest first.
+   *
+   * Host-only projection for status/health consumers; the disabled default
+   * returns an empty list rather than opening the ledger.
+   */
+  outcomes(options: { limit?: number; evidenceState?: WorkItemOutcomeEvidenceState } = {}): readonly WorkItemOutcomeView[] {
+    const limit = options.limit ?? 20
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('invalid-input', 'limit must be an integer between 1 and 100')
+    if (!this.#config.enabled || this.#closed) return Object.freeze([])
+    const components = this.#open()
+    return components.store.listOutcomes({
+      limit,
+      ...(options.evidenceState === undefined ? {} : { evidenceState: options.evidenceState }),
+    })
+  }
+
   /** Read-only status of the item bound to the calling occurrence. */
   status(agent: Agent | undefined): WorkItemStatusView {
     const components = this.#required()
@@ -286,6 +350,7 @@ export class AssistantWorkItemsService extends Service {
       claim: components.store.activeClaim(item.id),
       reports: components.store.reports(item.id),
       openItems: components.store.countOpenItems(),
+      outcome: components.store.outcomeView(item.id),
     })
   }
 
@@ -301,6 +366,13 @@ export class AssistantWorkItemsService extends Service {
       dispatchUnknown: 0,
       workerConnected: config.enabled && this.#automations() !== undefined,
       ownerRouteValid: false,
+      settlement: Object.freeze({
+        enabled: config.enabled && config.settlement.enabled,
+        pending: 0,
+        observed: 0,
+        unverified: 0,
+        degraded: null,
+      }),
     })
     if (!config.enabled || this.#closed) return empty
     let components: Components
@@ -319,6 +391,13 @@ export class AssistantWorkItemsService extends Service {
       dispatchUnknown: components.store.countDispatchUnknown(),
       workerConnected: workerIsConnected(this.#automations()),
       ownerRouteValid: this.#ownerRouteValid(),
+      settlement: Object.freeze({
+        enabled: config.settlement.enabled,
+        pending: components.store.countLatestOutcomes('pending'),
+        observed: components.store.countLatestOutcomes('observed'),
+        unverified: components.store.countLatestOutcomes('unverified'),
+        degraded: this.#settlementDegraded(),
+      }),
     })
   }
 
@@ -349,6 +428,46 @@ export class AssistantWorkItemsService extends Service {
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: signal sweep failed: ${describe(error)}`)
     }
+  }
+
+  /** Best-effort settlement pass behind ordinary claim activity. */
+  #settleQuietly(components: Components): void {
+    if (!this.#config.settlement.enabled) return
+    try {
+      this.#settlement(components, false)
+    } catch (error) {
+      this.ctx.logger.warn(`assistant-work-items: settlement failed: ${describe(error)}`)
+    }
+  }
+
+  /** Build the bounded settlement pass from config; never admits or wakes. */
+  #settlement(components: Components, force: boolean): SettlementResult {
+    const config = this.#config
+    const scope = config.scope
+    return runSettlement({
+      store: components.store,
+      delivery: this.#delivery(),
+      scope: scope === null
+        ? null
+        : {
+          ownerRouteId: scope.ownerRouteId,
+          principalId: scope.principalId,
+          workspace: scope.workspace,
+          preset: scope.preset,
+        },
+      sweepIntervalMs: config.settlement.sweepIntervalMs,
+      maxSourcesPerSweep: config.settlement.maxSourcesPerSweep,
+      maxPendingPerSweep: config.settlement.maxPendingPerSweep,
+      maxSettlementsPerSweep: config.settlement.maxSettlementsPerSweep,
+      warn: message => this.ctx.logger.warn(message),
+    }, force)
+  }
+
+  /** Degradation visible in health without running a pass or touching SQLite. */
+  #settlementDegraded(): string | null {
+    if (!this.#config.settlement.enabled) return null
+    if (this.#config.scope === null) return 'owner-route-unavailable'
+    return this.#delivery() === undefined ? 'missing-dependency' : null
   }
 
   #required(): Components {

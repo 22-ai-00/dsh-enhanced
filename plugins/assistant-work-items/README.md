@@ -4,7 +4,7 @@
 
 账本本身提供三条 CAS 工具：`work_item_claim`、`work_item_report`、`work_item_status`。在账本之上有一个默认关闭的**自动准入**切片：它从已认证的 in-tree 只读来源拉取真实信号并以相同闸门入账，因此普通使用（owner 自己发起的请求失败后，worker 被下一次 claim 唤醒）就会产生自驱工作项，无需 operator 手工调用 `admit(...)`，也无需新定时器。
 
-当前内置的真实来源只有 `assistant-delivery` 的 owner foreground 失败/超时/取消记录（只读 API `listOwnerForegroundTaskSources`）。GitHub、邮件、IM、任务日历等**仓库外**来源属于独立插件的职责：它们实现一个只读 `WorkItemSignalSource`，用 `registerSignalSource(...)` 注册进来，就走与本内置来源完全相同的扫描、provenance、去重、冷却与已结项围栏，而不是另开写路径。
+终态报告只记录 worker 自己的结论；账本另有一条 append-only 的**结果结算**（outcome settlement）修订链，用 `assistant-delivery` 已认证的 execution 记录独立验证 `ready` 是否真的对应成功执行，并在证据窗内保持 `pending`、到期保持 `unverified`，绝不把 `ready` 当作目标达成。GitHub、邮件、IM、任务日历等**仓库外**来源属于独立插件的职责：它们实现一个只读 `WorkItemSignalSource`，用 `registerSignalSource(...)` 注册进来，就走与本内置来源完全相同的扫描、provenance、去重、冷却与已结项围栏，而不是另开写路径。
 
 ## 安装与启用
 
@@ -165,7 +165,7 @@ rules:
                     └─ delivery.enqueueBackground({ bindingId: 工作项创建时的 originBindingId })
 ```
 
-- 状态机：`queued / claimed / working / waiting / ready / blocked / failed / dropped`。`ready`、`blocked`、`failed`、`dropped` 为终态；`queued`、`waiting` 可被认领。
+- 状态机：`queued / claimed / working / waiting / ready / blocked / failed / dropped`。`ready`、`blocked`、`failed`、`dropped` 为终态；`queued`、`waiting` 可被认领。`ready` 表示 worker 汇报已完成，不代表目标已达成；独立结果证据见下节。
 - 准入闸门顺序：enabled → 输入规范化 → owner route 校验（失败时零写入、零唤醒）→ 去重窗口重放 → **跨窗口已结项围栏**（`ready/blocked/failed/dropped` 的旧项不会被同一 canonical signal 复活）→ kind allowlist → cooldown → 每小时准入上限 → 未结工作项上限 → observe 记录或 active 入账 + dispatch 行。active 路径还会在写库前调用一次 `assistant-policy` 的 `admit` 授权。
 - 自动准入（`sources`）：在 `claim()` 之前同步扫一遍已武装的来源，并按持久化的 `sweepIntervalMs` 做**运行间隔门控**（没有新 timer）。每个来源的游标 `signal.cursor:<source>` 和上次扫描时间 `signal.sweptAt:<source>` 都存在账本同一 SQLite 的 `work_item_schema_meta` 表中；adapter 抛错会把游标重置为空（下次从最旧信号重扫，去重保证重叠无害），并只记一条 warn，绝不让 claim 失败。每次扫描的准入数量由 `maxAdmitsPerSweep` 有界。
 - 信号以**规范化 canonical key**（对持久身份做 SHA-256，不是原文）去重；工作项上通过 `admitted` 事件 detail 的 `provenance`（source、sourceVersion、signalDigest、observedAt、evidence）记录来源、来源版本与观察时间。provenance 复用事件 detail，因此 schema 版本不变。
@@ -174,6 +174,18 @@ rules:
 - 租约到期不靠 timer 回收：admit/claim/status/list/health 以及启动恢复时惰性调用 `reclaimExpired()`；到期 claim 被显式置为 `expired` 并记事件，工作项回到 `queued`，dispatch 行同时回到 `pending` 以便 `wakePending()` 重新唤醒；超过 `maxAttempts` 的项标记 `blocked`。
 - 崩溃恢复：`ingestExternal` 已成功但 dispatch 行仍 pending 时，下一次有界恢复会重新唤醒（`ingestExternal` 幂等）；唤醒失败记录在 dispatch 行上并通过 `health().dispatchUnknown` 暴露，绝不重复报告。
 - SQLite 使用 `WAL`、`synchronous=FULL`、`BEGIN IMMEDIATE` 事务和 forward-only schema；`PRAGMA user_version` 只前进。升级写入边界要求单 writer：升级前停掉 DSH 进程。
+
+## 结果证据与结算（`ready` 只是报告）
+
+- 终态与客观结果分离：`ready` 只表示 worker 自报完成（`trust: agent-self-report`）；`objectiveStatus` 目前只能从独立证据推导为 `unknown`，不会出现 `achieved`/`partial`。
+- 每条终态报告在同一事务里追加一条 append-only 结果修订（`work_item_outcome`，主键 `item_id + revision`）：`report-ready`、`report-blocked`、`report-failed`、撤回 `cancelled/external-receipt`、重试耗尽 `retry-exhausted`。已结项的历史修订永不改写。
+- 只有带可结算 provenance（source=`owner-foreground-failures`、`evidence.inboxId`、`evidence.completionSequence`）的准入才打开证据窗：`evidenceState: pending`，`deadlineAt = 报告时间 + settlement.windowMs`，基线取准入 `admitted` 事件 detail 里的 provenance。没有独立来源时直接 `not-applicable`（`no-independent-source`），不制造假的“待验证”。
+- 结算不新增 timer：只在 `claim()` 或宿主显式 `settleOutcomes(force)` 时被动运行，受持久化键 `settlement.sweptAt` 门控；分页游标 `settlement.cursor` 仅在 peer 同时返回 `hasMore` 和非空 `nextCursor` 时保留，否则清除并从下一页顶部重新开始，避免把旧游标当成新证据。单次 pass 只读一页；`maxSourcesPerSweep` 是该页的**条数**（作为 `limit`），`maxPendingPerSweep` 是本 pass 检查的窗口数上限；待检查窗口按 `deadlineAt` 升序取前 N 个，超出部分顺延到后续 pass。`maxSettlementsPerSweep` 同时约束 observation 与 expiry 的追加总数。
+- 证据匹配是严格相等而非“看起来像”：同一 `inboxId`、scope/principal/authorityHash 与准入时持久化的 owner route 一致（不是本次 pass 重算的值）、`source.protocol` 必须等于本插件约定的证据协议、`execution.status === 'succeeded'`、`quiescent === true`，且 `completionSequence > baselineSequence`。命中后追加 revision N+1：`observed-evidence`、`executionStatus: succeeded`、`trust: external-receipt`、`evidenceState: observed`；observation 只扩大信任面，`objectiveStatus` 仍是 `unknown`。
+- 窗口到期仍无证据时追加 `window-expired`：保留原执行状态，`evidenceState: unverified`。channel 健康但安静记 `window-expired`；channel 不可用/路由撤销、或到期时本页读取抛错记 `channel-unavailable`（degraded）。两者都不会把结果写成成功；`channel-unavailable` 是终态，窗口关闭后不会因为之后 channel 恢复而重试成 observation。
+- 证据只保留 allowlist 字段（`inboxId`、`completionSequence`、`completedAt`、`executionStatus`、`sourceDigest`、`bindingVersion`、`bindingGeneration`、`scope`），总长不超过 2048 字节，不读取 owner 原文。超限负载**整体丢弃**、绝不截断：报告 ready 路径记为 `not-applicable` / `evidenceReason: 'evidence-too-large'`，结算路径记为 `unverified` / `evidence-too-large`。
+- host-only 接口：`settleOutcomes(force)`、`outcomes({ limit, evidenceState })`（没有对应的模型工具）；`status()` 增加 `outcome` 视图，`health().settlement` 与 `stats()` 暴露 pending/observed/unverified 计数。`settlement.enabled: false` 时报告 `skipped: 'disabled'` 且不扫描。
+- 缺 `assistant-delivery`、缺 `listOwnerForegroundTaskSources` 或 owner route 撤销时只返回 `degraded`/`failed` 并 warn，不抛错、不写假结算，也不会让 `claim()` 失败。
 
 ## 配置
 
@@ -204,10 +216,18 @@ rules:
 | `sources.foregroundFailures.maxCandidatesPerSweep` | `10` | 单次扫描最多读取的候选数（1–100） |
 | `sources.foregroundFailures.maxAdmitsPerSweep` | `2` | 单次扫描最多准入数量（1–10） |
 | `sources.foregroundFailures.sweepIntervalMs` | `3600000` | 两次自动扫描的最小间隔（60 秒–1 天，持久化门控） |
+| `settlement.enabled` | `true` | 是否在终态报告后维护独立结果证据窗 |
+| `settlement.windowMs` | `604800000` | 证据窗长度（1 小时–9 天） |
+| `settlement.sweepIntervalMs` | `600000` | 两次结算扫描的最小间隔（60 秒–1 天，持久化门控，无新 timer） |
+| `settlement.maxSourcesPerSweep` | `25` | 单次来源分页读取的页大小（每页条数，作为 `limit`，1–100） |
+| `settlement.maxPendingPerSweep` | `10` | 单次最多检查的 pending 窗口；按 `deadlineAt` 升序，超出部分顺延到后续 pass（1–50） |
+| `settlement.maxSettlementsPerSweep` | `10` | 单次最多追加的结算修订（1–50） |
 
 所有可变部署值都经过同步 Schemastery 校验；未知字段、相对路径、文件系统根目录、`databasePath` 与 `workRoot` 重叠、过期 scope 都会失败关闭。
 
 ## 权限与数据
+
+权限边界只有本地文件系统（显式 `databasePath` 与 `workRoot`）；跨插件调用只有只读的 `assistant-delivery` owner route/execution 查询，以及受 Policy 约束的 automation dispatch 与终态通知。
 
 - 文件系统：只读写显式 `databasePath` 和 `workRoot`；目录 `0700`，数据库文件 `0600`，拒绝 leaf symlink。artifact 只能落在工作项自己的 scratch 目录内。
 - 网络：插件自身不发网络请求。模型/工具调用发生在 `assistant-automations` 创建的原生 Agent run 内，其 provider 与工具权限由宿主和 Policy 决定。
@@ -215,18 +235,19 @@ rules:
 - 安装脚本：包内没有 postinstall 或其他生命周期脚本；`prepublishOnly` 只要求用 pnpm 发布。
 - 消息投递：只有 active 模式的终态报告才会经 `assistant-delivery` 入队；observe 模式从不调用 Delivery 的写接口。Delivery 会在入队和发送前重查 owner route、binding 版本/代次、有效期和 background `send` Policy。
 - 跨插件只读：自动来源使用 `assistant-delivery` 的 `validateOwnerRoute` + `listOwnerForegroundTaskSources`（owner 认证、游标分页、host 公开、只读，不触发任何发送或写操作）。`assistant-delivery` 缺失或版本过旧（无该 API）时，来源退化为 no-op 或 `degraded: 'unsupported'`，插件激活与 claim 都不会抛错。
+- 结果结算：只读取本地账本和 `assistant-delivery` 的只读 `listOwnerForegroundTaskSources`；不新增网络、子进程、凭据或写接口，结算失败/缺依赖时降级而不是重试外部写入。
 - 数据保留：账本保存外部 ID、标题、brief、owner 身份、报告正文和 artifact 路径，可能包含私人信息；备份时按 SQLite（含 WAL）一致性方式复制。删除 scratch 目录不影响账本，但会丢失完整 artifact。
 
 ## 限制
 
 - 单独使用 observe 模式没有产品价值：它只积累观察行，不唤醒、不通知。observe 仍要求 `assistant-delivery` 可用，因为准入要先校验 owner route；没有 Delivery 时准入记录不会写入（失败关闭），这是当前实现的已知限制。
 - 尚未**随包发布**仓库外真实来源（GitHub、邮件、IM、任务日历等）：插件提供了 `registerSignalSource(...)` 扩展点，但具体来源适配器仍待独立插件实现；内置来源只是 `assistant-delivery` 已认证的 owner foreground 记录，仍属于 in-tree 证据。
-- 内置来源的 title/brief 由 delivery 行的**元数据**派生（inbox、binding、版本/代次、完成时间），不读取 owner 原文；因此 brief 不是完整任务复述，worker 需要自己查 delivery history 定位上下文。
+- 内置来源的 title/brief 由 delivery 行的**元数据**派生（inbox、binding、版本/代次、完成时间），不读取 owner 原文；因此 brief 不是完整任务复述，worker 只能依据 brief、provenance 和自身可用工具定位上下文。
 - canonical key 以**单次 execution**（inbox + binding 版本/代次 + executionRef，不含 `disposition`）为单位，不是「同一意图第 N 次重复」；同一 execution 的状态修订（失败→撤回）共享同一身份，因此撤回能定位并退役已准入的项。owner 同一意图重试失败会产生新的工作项（cooldown 与 `maxOpenItems` 限制总量）。
 - 已准入信号的 `disposition` 若被修正为成功（`succeeded`，即不再产生候选），不会自动关闭旧工作项；只有 `cancelled` 撤回会传播到在途项。撤回报告已经交给 delivery 的终态报告无法撤回，worker 只能从后续工具调用看到 `dropped`。observe 模式不会新建在途项，但若切换前遗留的在途项仍在，撤回仍会把它退役（内部账本变化，不唤醒、不通知）。
 - 升级注意：本版本把 `disposition` 从 canonical key 移除。升级前已准入的旧工作项仍带旧 key，之后的撤回对它们会解析为 `absent`，只能等其自然结项；新信号不受影响。
 - 观察期记录会占用去重窗口：同一 signal 从 observe 切到 active 后，窗口内仍视为已准入；需要时等待窗口过期或换 `externalId`。
-- 没有评估、学习或采用反馈回路；工作项终态只是运维证据，不代表任务质量。
+- 没有评估、学习或采用反馈回路；工作项终态只是运维证据，不代表任务质量。`ready` 仅是 worker 自报，结果结算也只给出 `unknown/observed/unverified`，不证明修复质量，也不构成采用依据。
 - `stats().openItems` 与 `health().openItems` 只统计 `queued/claimed/working/waiting`，不含仍需人处理的 `ready/blocked` 终态项。
 - 精确定时仍属于 `assistant-automations`；本插件不自带 schedule、timer 或 retry daemon。
 

@@ -119,8 +119,75 @@ describe('dsh-enhanced-assistant-work-items entrypoint', () => {
       dispatchUnknown: 0,
       workerConnected: false,
       ownerRouteValid: false,
+      settlement: {
+        enabled: false,
+        pending: 0,
+        observed: 0,
+        unverified: 0,
+        degraded: null,
+      },
     })
     service.close()
     expect(await readdir(paths.root)).toEqual([])
+  })
+
+  test('settlement defaults are conservative and host controlled', async () => {
+    const paths = await location()
+    const config = normalizeConfig({ databasePath: paths.databasePath, workRoot: paths.workRoot }, Date.now())
+    expect(config.settlement).toEqual({
+      enabled: true,
+      windowMs: 604_800_000,
+      sweepIntervalMs: 600_000,
+      maxSourcesPerSweep: 25,
+      maxPendingPerSweep: 10,
+      maxSettlementsPerSweep: 10,
+    })
+  })
+
+  test('settlement bounds reject out of range values and unknown keys', async () => {
+    const paths = await location()
+    expect(() => normalizeConfig({
+      databasePath: paths.databasePath,
+      workRoot: paths.workRoot,
+      settlement: { windowMs: 1_000 },
+    } as unknown as Config, Date.now())).toThrow(/windowMs/)
+    expect(() => normalizeConfig({
+      databasePath: paths.databasePath,
+      workRoot: paths.workRoot,
+      settlement: { maxSettlementsPerSweep: 0 },
+    } as unknown as Config, Date.now())).toThrow(/maxSettlementsPerSweep/)
+    expect(() => normalizeConfig({
+      databasePath: paths.databasePath,
+      workRoot: paths.workRoot,
+      settlement: { windowMs: 604_800_000, extra: true },
+    } as unknown as Config, Date.now())).toThrow(/unknown field extra/)
+  })
+
+  test('settlement can be disabled without disabling intake', async () => {
+    const paths = await location()
+    const input: Config = {
+      databasePath: paths.databasePath,
+      workRoot: paths.workRoot,
+      enabled: true,
+      mode: 'observe',
+      settlement: { enabled: false },
+    }
+    const config = normalizeConfig(input, Date.now())
+    expect(config.settlement.enabled).toBe(false)
+    expect(config.settlement.windowMs).toBe(604_800_000)
+    expect(isActive(config)).toBe(false)
+    const ctx = new Context()
+    const service = new AssistantWorkItemsService(ctx, input)
+    expect(service.health().settlement.enabled).toBe(false)
+    expect(service.settleOutcomes(true)).toEqual({
+      skipped: 'disabled',
+      degraded: null,
+      failed: false,
+      scanned: 0,
+      settled: 0,
+      expired: 0,
+      observedItemIds: [],
+    })
+    service.close()
   })
 })

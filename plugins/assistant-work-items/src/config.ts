@@ -16,6 +16,7 @@ export interface Config {
   limits?: LimitsConfig
   delivery?: DeliveryConfig
   sources?: SourcesConfig
+  settlement?: SettlementConfig
 }
 
 export interface ScopeConfig {
@@ -44,6 +45,22 @@ export interface LimitsConfig {
 
 export interface DeliveryConfig {
   notifyOn?: WorkItemReportStatus[]
+}
+
+/**
+ * Bounded outcome settlement over the delivery evidence channel.
+ *
+ * Settlement is passive: it runs only when an unrelated call (a claim) already
+ * touches the ledger, never on a timer of its own, and it never admits, wakes or
+ * notifies. The window bounds how long an unverified outcome may stay pending.
+ */
+export interface SettlementConfig {
+  enabled?: boolean
+  windowMs?: number
+  sweepIntervalMs?: number
+  maxSourcesPerSweep?: number
+  maxPendingPerSweep?: number
+  maxSettlementsPerSweep?: number
 }
 
 /** Automatic signal sources mounted over optional peer services. */
@@ -79,6 +96,7 @@ export interface NormalizedConfig {
   readonly limits: NormalizedLimits
   readonly notifyOn: readonly WorkItemReportStatus[]
   readonly sources: NormalizedSources
+  readonly settlement: NormalizedSettlement
 }
 
 export interface NormalizedForegroundFailureSource {
@@ -88,6 +106,15 @@ export interface NormalizedForegroundFailureSource {
   readonly maxCandidatesPerSweep: number
   readonly maxAdmitsPerSweep: number
   readonly sweepIntervalMs: number
+}
+
+export interface NormalizedSettlement {
+  readonly enabled: boolean
+  readonly windowMs: number
+  readonly sweepIntervalMs: number
+  readonly maxSourcesPerSweep: number
+  readonly maxPendingPerSweep: number
+  readonly maxSettlementsPerSweep: number
 }
 
 export interface NormalizedSources {
@@ -118,9 +145,10 @@ const SCOPE_KEYS = ['workspace', 'preset', 'principalId', 'ownerRouteId', 'expir
 const ADMISSION_KEYS = ['allowedKinds', 'maxOpenItems', 'maxAdmitsPerHour', 'dedupWindowMs', 'cooldownMs', 'maxBriefBytes'] as const
 const LIMITS_KEYS = ['leaseMs', 'maxAttempts', 'maxReportsPerItem', 'maxReportBytes'] as const
 const DELIVERY_KEYS = ['notifyOn'] as const
+const SETTLEMENT_KEYS = ['enabled', 'windowMs', 'sweepIntervalMs', 'maxSourcesPerSweep', 'maxPendingPerSweep', 'maxSettlementsPerSweep'] as const
 const SOURCES_KEYS = ['foregroundFailures'] as const
 const FOREGROUND_FAILURE_KEYS = ['enabled', 'kind', 'includeTimedOut', 'maxCandidatesPerSweep', 'maxAdmitsPerSweep', 'sweepIntervalMs'] as const
-const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources'] as const
+const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement'] as const
 const REPORT_STATUSES = ['progress', 'waiting', 'ready', 'blocked', 'failed'] as const
 const NOTIFY_STATUSES = ['ready', 'blocked', 'failed'] as const
 
@@ -152,6 +180,15 @@ const deliverySchema = Schema.object({
   notifyOn: Schema.array(Schema.union(NOTIFY_STATUSES)).default([...NOTIFY_STATUSES]),
 })
 
+const settlementSchema = Schema.object({
+  enabled: Schema.boolean().default(true),
+  windowMs: Schema.number().step(1).min(3_600_000).max(777_600_000).default(604_800_000),
+  sweepIntervalMs: Schema.number().step(1).min(60_000).max(86_400_000).default(600_000),
+  maxSourcesPerSweep: Schema.number().step(1).min(1).max(100).default(25),
+  maxPendingPerSweep: Schema.number().step(1).min(1).max(50).default(10),
+  maxSettlementsPerSweep: Schema.number().step(1).min(1).max(50).default(10),
+})
+
 const foregroundFailureSchema = Schema.object({
   enabled: Schema.boolean().default(false),
   kind: Schema.string().default('foreground-repair'),
@@ -178,6 +215,7 @@ export const ConfigSchema = Schema.object({
   limits: limitsSchema,
   delivery: deliverySchema,
   sources: sourcesSchema,
+  settlement: settlementSchema,
 }) as Schema<Config>
 
 function fail(code: WorkItemErrorCode, message: string): never {
@@ -331,6 +369,21 @@ function normalizeSources(raw: SourcesConfig | undefined): NormalizedSources {
   })
 }
 
+function normalizeSettlement(raw: SettlementConfig | undefined): NormalizedSettlement {
+  const value = raw === undefined ? {} : plainObject(raw, 'settlement')
+  rejectUnknown(value, SETTLEMENT_KEYS, 'settlement')
+  const enabled = value['enabled'] ?? true
+  if (typeof enabled !== 'boolean') fail('invalid-input', 'settlement.enabled must be a boolean')
+  return Object.freeze({
+    enabled,
+    windowMs: integer(value['windowMs'] ?? 604_800_000, 'settlement.windowMs', 3_600_000, 777_600_000),
+    sweepIntervalMs: integer(value['sweepIntervalMs'] ?? 600_000, 'settlement.sweepIntervalMs', 60_000, 86_400_000),
+    maxSourcesPerSweep: integer(value['maxSourcesPerSweep'] ?? 25, 'settlement.maxSourcesPerSweep', 1, 100),
+    maxPendingPerSweep: integer(value['maxPendingPerSweep'] ?? 10, 'settlement.maxPendingPerSweep', 1, 50),
+    maxSettlementsPerSweep: integer(value['maxSettlementsPerSweep'] ?? 10, 'settlement.maxSettlementsPerSweep', 1, 50),
+  })
+}
+
 /** True when at least one automatic signal source is armed. */
 export function anySourceEnabled(config: NormalizedConfig): boolean {
   return config.sources.foregroundFailures.enabled
@@ -368,6 +421,7 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   const limits = normalizeLimits(value['limits'] as LimitsConfig | undefined)
   const notifyOn = normalizeDelivery(value['delivery'] as DeliveryConfig | undefined)
   const sources = normalizeSources(value['sources'] as SourcesConfig | undefined)
+  const settlement = normalizeSettlement(value['settlement'] as SettlementConfig | undefined)
   if (enabled && mode === 'active' && (workerAutomationId === null || scope === null)) {
     fail('invalid-input', "an active work-item deployment requires workerAutomationId and scope")
   }
@@ -386,6 +440,7 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     limits,
     notifyOn,
     sources,
+    settlement,
   })
 }
 
