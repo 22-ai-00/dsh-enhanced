@@ -126,6 +126,16 @@ async function fixture() {
       await writeFile(join(physicalHome, 'rsi-sources', profile, 'maintenance.json'), 'signed', { mode: 0o600 })
     }),
     verifyRsiLocalUpdateResources: vi.fn(async () => undefined),
+    stageLinuxRsiNativeResources: vi.fn(async ({ logicalHome, stagePhysicalHome }: { logicalHome: string, stagePhysicalHome: string }) => {
+      await writeFile(join(stagePhysicalHome, 'rsi-local-cohorts', profile, 'receipt.json'),
+        JSON.stringify(stagedCohort), { mode: 0o600 })
+      return { cohort: stagedCohort, family: { runtime: nativeRuntimeCandidate, release: nativeReleaseCandidate },
+        proof: { schemaVersion: 1, backend: 'linux-native', logicalHome, physicalHome: stagePhysicalHome,
+          profile, preparationDigest: preparation.receiptDigest, cohortDigest: stagedCohort.receiptDigest,
+          relocation: { protocol: 'dsh-enhanced/linux-rsi-native-relocation/v1', logicalHome,
+            physicalHome: stagePhysicalHome } } }
+    }),
+    verifyLinuxRsiNativeResources: vi.fn(async () => undefined),
     readRsiAuthorityRuntimeReceipt: vi.fn(async ({ physicalHome }: { physicalHome: string }) => runtimeReceipts.get(physicalHome)
       ?? { runtime, receiptDigest: '5'.repeat(64) }),
     replaceRsiAuthorityRuntimeInStage: vi.fn(async ({ physicalHome }: { physicalHome: string }) => {
@@ -137,7 +147,7 @@ async function fixture() {
   mocks.bind.mockResolvedValue({ root: installerRoot, digest: 'installer' })
   mocks.load.mockResolvedValue(api)
   return { root, homePath, profile, preparationRoot, installerRoot, disposableHome, stageHome,
-    api, record, stagedCohort, candidatePackage, stagedSources }
+    api, preparation, record, stagedCohort, candidatePackage, stagedSources }
 }
 
 test('binds reviewed pre-owner source and rebases authenticated artifacts for disposable preparation', async () => {
@@ -387,6 +397,8 @@ const nativeCandidate = { schemaVersion: 3, backend: 'linux-native', sourceCommi
   lockSha256: '3'.repeat(64), runtime: { schemaVersion: 1, backend: 'linux-native', root: '/run/rsi-native' } }
 const dockerCandidate = { schemaVersion: 1, sourceCommit: '2'.repeat(40),
   sourceBuild: { image: 'example:old', dockerPath: '/usr/bin/docker' } }
+const nativeRuntimeCandidate = { schemaVersion: 3, backend: 'linux-native', sourceCommit: '2'.repeat(40) }
+const nativeReleaseCandidate = { schemaVersion: 2, backend: 'linux-native', sourceCommit: '2'.repeat(40) }
 
 test('installer prepares a linux-native candidate through the native creation seam', async () => {
   const setup = await fixture()
@@ -458,4 +470,63 @@ test('an older installer without the backend-agnostic reader falls back to the D
     dshHome: join(setup.preparationRoot, 'home'), profile: setup.profile }))
   expect(mocks.prepareProgramCreation).toHaveBeenCalledWith(expect.objectContaining({
     sourceBuild: { sourceBuild: 'candidate-build' } }))
+})
+
+async function nativeProgramProof(setup: Awaited<ReturnType<typeof fixture>>) {
+  setup.preparation.build = { sourceBuild: nativeCandidate, releaseBuild: nativeReleaseCandidate }
+  const ownerUpdate = { homePath: setup.homePath, profile: setup.profile, homePlan: {}, members: [] }
+  mocks.captureProgram.mockResolvedValue(ownerUpdate)
+  mocks.prepareProgramCreation.mockResolvedValue({ schemaVersion: 1, backend: 'linux-native',
+    candidateBuild: nativeCandidate, receiptSha256: '8'.repeat(64) })
+  return prepareHostLocalSourceUpdate({ ...setup, ownerProgramUpdate: true })
+}
+
+test('stages a linux-native candidate through the native resource seam and binds the relocation proof', async () => {
+  const setup = await fixture()
+  const proof = await nativeProgramProof(setup)
+  expect(proof.protocol).toBe('dsh-enhanced/host-owner-program-update/v1')
+  const prepared = await stageResourcesForPreparation({ proof: JSON.parse(JSON.stringify(proof)),
+    homePath: setup.homePath, disposableHome: setup.disposableHome })
+  expect(setup.api.stageRsiLocalUpdateResources).not.toHaveBeenCalled()
+  expect(setup.api.stageLinuxRsiNativeResources).toHaveBeenCalledWith({
+    logicalHome: setup.homePath, stagePhysicalHome: setup.disposableHome, profile: setup.profile,
+    preparationRoot: setup.preparationRoot })
+  expect(prepared.resources.backend).toBe('linux-native')
+  expect(setup.api.verifyRsiLocalUpdateResources).not.toHaveBeenCalled()
+  expect(setup.api.verifyLinuxRsiNativeResources).not.toHaveBeenCalled()
+
+  const signed = await stageHostLocalSourceUpdate({ proof, homePath: setup.homePath, stageHome: setup.stageHome })
+  const relocation = { protocol: 'dsh-enhanced/linux-rsi-native-relocation/v1', logicalHome: setup.homePath,
+    physicalHome: setup.stageHome }
+  expect(setup.api.stageLinuxRsiNativeResources).toHaveBeenLastCalledWith(expect.objectContaining({
+    stagePhysicalHome: setup.stageHome }))
+  // The relocation proof the stage materialized is what the owner program update replays.
+  expect(signed.ownerUpdate.nativeRelocation).toEqual(relocation)
+  expect(signed.candidateBuild).toEqual({ sourceBuild: nativeRuntimeCandidate, releaseBuild: nativeReleaseCandidate })
+  expect(signed.resources).toEqual(expect.objectContaining({ backend: 'linux-native', relocation }))
+  // Verification dispatches on the staged backend, not on the installer's history.
+  expect(setup.api.verifyLinuxRsiNativeResources).toHaveBeenCalledWith({ proof: signed.resources,
+    physicalHome: setup.stageHome })
+  expect(setup.api.verifyRsiLocalUpdateResources).not.toHaveBeenCalled()
+  expect(setup.api.produceRsiLocalSourceMaintenance).toHaveBeenCalledWith(expect.objectContaining({
+    maintenanceMode: 'owner-ledger' }))
+})
+
+test('refuses a linux-native candidate when the reviewed installer exposes no native staging seam', async () => {
+  const setup = await fixture()
+  delete setup.api.stageLinuxRsiNativeResources
+  const proof = await nativeProgramProof(setup)
+  await expect(stageHostLocalSourceUpdate({ proof, homePath: setup.homePath,
+    stageHome: setup.stageHome })).rejects.toThrow(/rsi-linux-native-resources/u)
+  expect(setup.api.stageRsiLocalUpdateResources).not.toHaveBeenCalled()
+})
+
+test('refuses a linux-native candidate outside the owner-led source update transaction', async () => {
+  const setup = await fixture()
+  const proof = await prepareHostLocalSourceUpdate(setup)
+  setup.preparation.build = { sourceBuild: nativeCandidate, releaseBuild: nativeReleaseCandidate }
+  await expect(stageResourcesForPreparation({ proof, homePath: setup.homePath,
+    disposableHome: setup.disposableHome })).rejects.toThrow(/owner-led source update transaction/u)
+  expect(setup.api.stageRsiLocalUpdateResources).not.toHaveBeenCalled()
+  expect(setup.api.stageLinuxRsiNativeResources).not.toHaveBeenCalled()
 })

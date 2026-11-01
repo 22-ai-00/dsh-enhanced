@@ -21,7 +21,13 @@ const exactPath = path => typeof path === 'string' && isAbsolute(path) && resolv
 const fail = message => { throw new Error(`Local source maintenance: ${message}`) }
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const modules = ['rsi-local-update', 'rsi-local-update-build', 'rsi-local-resources', 'rsi-source-maintenance',
-  'rsi-local-activation', 'rsi-local-pair-install', 'rsi-local-cohort', 'rsi-authority-runtime', 'supervised-growth-profile']
+  'rsi-local-activation', 'rsi-local-pair-install', 'rsi-local-cohort', 'rsi-authority-runtime',
+  'rsi-linux-native-resources', 'supervised-growth-profile']
+/** Modules whose absence only fails closed on the path that needs them. The
+ * backend-agnostic candidate-build reader and the linux-native resource staging
+ * may postdate an older installer's packaged lib tree; the Docker path never
+ * reads either, so only their own absence is tolerated. */
+const optionalModules = new Set(['rsi-local-update-build', 'rsi-linux-native-resources'])
 const ownerModules = ['rsi-source', 'rsi-build', 'rsi-authority-resources', 'rsi-setup', 'rsi-profile']
 
 /** One wording for the transition window in which an installer can recognise a
@@ -149,10 +155,11 @@ async function load(binding, { ownerRepair = false } = {}) {
   const selectedModules = ownerRepair ? [...modules, ...ownerModules] : modules
   const imported = await Promise.all(selectedModules.map(async name => {
     const path = join(root, `${name}.js`)
-    // The backend-agnostic candidate-build reader may postdate an older
-    // installer's packaged lib tree; only its own absence is tolerated. Any
-    // other module missing from the reviewed tree stays fatal.
-    if (name === 'rsi-local-update-build' && !(await optional(path))) return {}
+    // The backend-agnostic candidate-build reader and the linux-native resource
+    // staging may postdate an older installer's packaged lib tree; only their own
+    // absence is tolerated. Any other module missing from the reviewed tree stays
+    // fatal, and the Docker path never reads the optional ones.
+    if (optionalModules.has(name) && !(await optional(path))) return {}
     return import(pathToFileURL(path).href)
   }))
   const result = Object.assign({}, ...imported)

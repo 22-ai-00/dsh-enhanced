@@ -25,19 +25,28 @@ const fail = message => { throw new Error(`Owner program update: ${message}`) }
  * A candidate build receipt is either the Docker schema 1 `RsiBuildEnvironment`
  * or the linux-native schema 3 `LinuxRsiBuildEnvironment`. Docker candidates and
  * the Docker original keep their historical receipts and comparisons; native
- * candidates have their own creation, staging and verification seams, but the
- * native stage cannot be completed by this installer. That is enforced by two
- * independent fail-closed gates with different preconditions:
+ * candidates have their own creation, staging and verification seams. The
+ * native stage is completed in three ordered steps, each fail-closed:
  *
  * - `assertNativeStageRelocation` refuses the native materializer dispatch
  *   without the sealed C2-C relocated-family proof (`ownerUpdate.nativeRelocation`):
  *   an update always has a live logical Home and the staged copy already
  *   carries the candidate families, so a fresh relocation cannot succeed.
- * - `freezeNativeRunnerStates` refuses the manifest freeze until the native
- *   runner-state and repository handover (C2-C) exists.
+ * - `freezeNativeRunnerStates` runs once the staged Home carries the relocated
+ *   family: it publishes the repository and verification seals over the staged
+ *   copy (`prepareLinuxRepositoryHandoverState`, `prepareLinuxVerifierHandoverState`),
+ *   compiles the source-build grant from the fresh repository seal
+ *   (`compileRsiLinuxSourceBuild`) and hands the creation seals and the
+ *   Docker-era verifier grants back to the caller.
+ * - `migrateNativeVerifierGrants` runs after `createRsiPluginCreationSetup`,
+ *   because the review authority digest embeds the runner state seal and can
+ *   only be recomputed once the creation authority exists. It rewrites each
+ *   staged verifier grant from the old Docker-era owner digest to the freshly
+ *   compiled one (`migrateLinuxVerifierRunnerState`) and reuses the frozen seal.
  *
- * Supplying the relocation proof lifts only the first gate; both must be
- * replaced by C2-C before a native owner program update can complete.
+ * `assertNativeRevisionAvailable` refuses a native update over a manifest that
+ * already carries a plugin revision: the revision runner-state roles belong to
+ * the deferred C2-D slice, so their seals cannot be frozen here.
  * @typedef {import('../../plugins/lark-channel/src/rsi-build.ts').RsiBuildEnvironment
  *   | import('../../plugins/lark-channel/src/rsi-linux-runtime-bootstrap.ts').LinuxRsiBuildEnvironment} LocalCandidateBuild */
 const nativeOriginalUnavailable = nativeOriginalRefusal('owner program update')
@@ -103,9 +112,14 @@ async function apiFor(installer) {
     'rsi-creation-build', 'rsi-source', 'rsi-build', 'rsi-local-update-build', 'rsi-release-build',
     'rsi-profile', 'rsi-host-update', 'rsi-plugin-creation', 'rsi-install', 'rsi-service-environment',
     'systemd', 'rsi-authority-config', 'rsi-bootstrap-manifest', 'rsi-setup', 'rsi-install-inputs',
-    'rsi-local-cohort', 'rsi-linux-creation-build', 'rsi-linux-native-materialize']
+    'rsi-local-cohort', 'rsi-linux-creation-build', 'rsi-linux-native-materialize',
+    'rsi-linux-source-build', 'rsi-linux-native-resources']
+  // The native runner-state handover re-exports only exist once the Linux-native
+  // resource module is installed; its absence keeps every Docker update working
+  // and fails closed inside the native freeze instead.
+  const optional = name => name === 'rsi-local-update-build' || name === 'rsi-linux-native-resources'
   const api = Object.assign({}, ...await Promise.all(names.map(name => reviewedModule(root, name,
-    name === 'rsi-local-update-build'))))
+    optional(name)))))
   const req = createRequire(join(installer.root, 'package.json'))
   const controlPath = await realpath(createRequire(join(installer.root, 'plugins', 'lark-channel', 'package.json'))
     .resolve('@dsh-enhanced/plugin-control-plane'))
@@ -910,40 +924,226 @@ export function updateOwnerProgramJournal(original, patches, manifestDigest, uni
   return journal
 }
 
+const nativeRunnerRoles = Object.freeze({
+  sourceBuild: ['linux-source-build-runner', 'repository'],
+  review: ['creation-review-runner', 'verification'],
+  adoption: ['creation-adoption-runner', 'verification'],
+})
+const sealedRoles = ['review', 'adoption']
+const nativeSealRoot = resources => join(resources.stateRoot, 'native-runner-states')
+
+/** Refuse a linux-native owner program update over a manifest that already
+ * carries a plugin revision.
+ *
+ * A linux-native manifest with a revision freezes five runner-state references:
+ * the creation pair and, for revisions, `revisionReview`/`revisionRegression`
+ * under `<stateRoot>/native-runner-states`. The revision roles, their authority
+ * digests and their runner-state handover belong to the deferred revision
+ * slice, so an update over such a manifest cannot produce a freeze that
+ * `validateRsiLinuxRunnerStates` accepts. Nothing is written: the gate runs
+ * before the native materializer and before any manifest, overlay or journal
+ * write, so the transaction stays untouched and a later slice can resume it. */
+export function assertNativeRevisionAvailable(ownerUpdate, { native, profile, transactionId }) {
+  if (!native) return
+  const revision = ownerUpdate?.original?.manifest?.pluginRevision
+  if (revision === undefined || revision === null) return
+  const error = new Error('Owner program update: linux-native owner program update cannot stage the '
+    + `${profile} candidate family: the original manifest already carries a plugin revision whose `
+    + 'revisionReview/revisionRegression runner-state roles are deferred to the later revision slice; '
+    + `nothing has been written for transaction ${transactionId} (no manifest, overlay or journal)`)
+  error.code = 'rsi-linux-native-revision-unavailable'
+  throw error
+}
+
 /** Freeze the linux-native runner-state references the compiled manifest binds.
  *
- * A linux-native manifest carries five live runner-state seals under
+ * A linux-native manifest carries runner-state seals under
  * `<stateRoot>/native-runner-states` (`sourceBuild`, `creationReview`,
- * `creationAdoption` and, for revisions, `revisionReview`/`revisionRegression`),
- * and its source-build grant is compiled from the `sourceBuild` seal. Producing
- * those seals from a Docker installation is the authorized native handover:
- * migrating the verifier rows (`migrateLinuxVerifierRunnerState`), preparing the
- * repository handover state (`prepareLinuxRepositoryHandoverState`), renaming
- * the staged Home into place and rebinding the seals to the live dev/ino
- * identity. That transaction is the C2-C slice, so this installer stops here
- * instead of writing a manifest whose references are half frozen.
+ * `creationAdoption` and, for revisions, the deferred revision pair), and its
+ * source-build grant is compiled from the `sourceBuild` seal. All five are
+ * sealed over the *staged* Home and recorded against the logical live paths, so
+ * the rename(2) cutover rebinds them to the live dev/ino identity.
  *
- * C2-C replaces this single call and returns
- * `{ sourceBuild, creationBuild, creationSeals }`: the compiled
- * `RsiLinuxSourceBuildConfig` from `compileRsiLinuxSourceBuild` with the frozen
- * `sourceBuild` seal, the live creation build environment, and the
- * `{review, adoption}` seals `createRsiPluginCreationSetup` needs. The caller
- * then records `manifest.controlPlane.sourceBuild`, `manifest.linuxBuild` and
- * the creation seals from that value.
+ * This publishes the three C+ roles against the staged copy:
  *
- * This is the second of the two native gates: `assertNativeStageRelocation`
- * refuses the materializer dispatch without the sealed C2-C relocation proof,
- * while this gate refuses the manifest freeze without the runner-state
- * handover. Their preconditions differ (a relocated family in the stage versus
- * live runner-state seals rebound to the staged Home), and supplying one does
- * not satisfy the other; both stay fail-closed until C2-C lands. */
-function freezeNativeRunnerStates({ profile, transactionId, stageHome }) {
-  const error = new Error('Owner program update: linux-native owner program update cannot freeze '
-    + `runner state references: transaction ${transactionId} staged the ${profile} family in ${stageHome} `
-    + 'but the native creation/revision runner seals and the source-build repository handover are not '
-    + 'available in this installer; requires the authorized native runner-state handover (C2-C)')
-  error.code = 'rsi-linux-native-owner-program-handover-unavailable'
-  throw error
+ * - `prepareLinuxRepositoryHandoverState` creates the empty repository ledger
+ *   and its seal (the repository runner is linux-native only, even when the
+ *   verifier ledgers carry Docker history).
+ * - `compileRsiLinuxSourceBuild` compiles the source-build grant from the fresh
+ *   repository seal, the candidate repository/runtime family and the resolved
+ *   source, returning the `RsiLinuxSourceBuildConfig` the manifest records.
+ * - `prepareLinuxVerifierHandoverState` seals the staged Docker-era verifier
+ *   ledgers and returns the grant each one carries, so the caller can prove the
+ *   staged copy is the live Docker-era owner grant before the authority digest
+ *   is recompiled.
+ *
+ * The verifier grant rewrite is deliberately not here: the review authority
+ * digest embeds the runner state seal, so it only exists after
+ * `createRsiPluginCreationSetup`; `migrateNativeVerifierGrants` performs that
+ * rewrite with the seals this function publishes. */
+export function freezeNativeRunnerStates(input) {
+  const { profile, transactionId, stageHome, homePath, resources, source, owner, now, expiresAt,
+    creation, api } = input ?? {}
+  const context = `transaction ${transactionId} (${profile})`
+  if (!exact(homePath) || !exact(stageHome) || stageHome === homePath || inside(homePath, stageHome)) {
+    fail(`cannot freeze linux-native runner state references for ${context}: invalid Home pair`)
+  }
+  if (resources?.schemaVersion !== 1 || !exact(resources.root)
+    || resources.stateRoot !== join(resources.root, 'state')
+    || !exact(resources.stateRoot) || !inside(homePath, resources.stateRoot)) {
+    fail(`cannot freeze linux-native runner state references for ${context}: the owner authority `
+      + `resources do not describe the state root of ${homePath}`)
+  }
+  if (source?.schemaVersion !== 1 || typeof source.sourceCommit !== 'string'
+    || !/^[a-f0-9]{40}$/u.test(source.sourceCommit)
+    || !owner || typeof owner !== 'object' || Array.isArray(owner)
+    || !Number.isSafeInteger(now) || now < 1
+    || !Number.isSafeInteger(expiresAt) || expiresAt <= now) {
+    fail(`cannot freeze linux-native runner state references for ${context}: the source, owner or `
+      + 'authority lifetime is incomplete')
+  }
+  const prepared = creation?.sourceBuild, creationBuild = creation?.family?.creationBuild
+  if (prepared?.backend !== 'linux-native' || prepared.repository?.schemaVersion !== 4
+    || prepared.repository.backend !== 'linux-native'
+    || prepared.repository.sourceCommit !== source.sourceCommit
+    || prepared.repository.lockSha256 === undefined || !prepared.cgroupRoots
+    || creationBuild?.schemaVersion !== 3 || creationBuild.backend !== 'linux-native'
+    || creationBuild.sourceCommit !== source.sourceCommit) {
+    fail(`cannot freeze linux-native runner state references for ${context}: the staged candidate `
+      + 'family is not the relocated linux-native build environment')
+  }
+  for (const name of ['prepareLinuxRepositoryHandoverState', 'prepareLinuxVerifierHandoverState',
+    'compileRsiLinuxSourceBuild']) {
+    if (typeof api?.[name] !== 'function') {
+      fail(`cannot freeze linux-native runner state references for ${context}: the installed installer `
+        + `does not expose the reviewed ${name} seam (rsi-linux-native-resources / rsi-linux-source-build)`)
+    }
+  }
+  const sealRoot = nativeSealRoot(resources)
+  const location = name => ({
+    stageStateRoot: physical(homePath, stageHome, join(resources.stateRoot, name)),
+    stageSealPath: physical(homePath, stageHome, join(sealRoot, `${name}.json`)),
+    liveStateRoot: join(resources.stateRoot, name),
+    liveSealPath: join(sealRoot, `${name}.json`),
+  })
+  const sourceBuildSeal = api.prepareLinuxRepositoryHandoverState(location(nativeRunnerRoles.sourceBuild[0]))
+  const sourceBuild = api.compileRsiLinuxSourceBuild({
+    prepared, resources, source, owner, now, expiresAt, stateSeal: sourceBuildSeal,
+  })
+  const verifierGrants = {}, creationSeals = {}
+  for (const role of sealedRoles) {
+    const [name] = nativeRunnerRoles[role]
+    const preparedRole = api.prepareLinuxVerifierHandoverState({ name, ...location(name) })
+    if (!preparedRole?.seal || typeof preparedRole.grant?.principalDigest !== 'string'
+      || !/^[a-f0-9]{64}$/u.test(preparedRole.grant.principalDigest)) {
+      fail(`cannot freeze linux-native runner state references for ${context}: the staged ${name} `
+        + 'state was not sealed with its Docker-era owner grant')
+    }
+    creationSeals[role] = preparedRole.seal
+    verifierGrants[role] = preparedRole.grant
+  }
+  return Object.freeze({
+    sourceBuild,
+    creationBuild,
+    creationSeals: Object.freeze(creationSeals),
+    verifierGrants: Object.freeze(verifierGrants),
+  })
+}
+
+/** Rewrite the staged verifier grants from the Docker-era owner authority to the
+ * freshly compiled linux-native one, reusing the seals the freeze published.
+ *
+ * The review authority digest covers the runner (including its state seal), so
+ * the new digest only exists after `createRsiPluginCreationSetup`; the adoption
+ * digest is derived from the creation capabilities the same setup produced.
+ * Each staged grant must still be the live Docker-era owner grant the freeze
+ * sealed, which the primitive proves against the published seal; the rewritten
+ * seal is then required to be the exact frozen reference. */
+export function migrateNativeVerifierGrants(input) {
+  const { transactionId, stageHome, homePath, resources, original, freshCreation, frozen, api, now } = input ?? {}
+  const context = `transaction ${transactionId}`
+  if (typeof api?.migrateLinuxVerifierRunnerState !== 'function'
+    || typeof api?.creationAdoptionAuthorityDigest !== 'function') {
+    fail(`cannot migrate the linux-native verifier grants for ${context}: the installed installer does `
+      + 'not expose the reviewed handover seams (rsi-linux-native-resources / rsi-plugin-creation)')
+  }
+  if (!exact(homePath) || !exact(stageHome) || stageHome === homePath
+    || !exact(resources?.stateRoot) || !inside(homePath, resources.stateRoot)) {
+    fail(`cannot migrate the linux-native verifier grants for ${context}: invalid Home or state root`)
+  }
+  const controlPlane = original?.manifest?.controlPlane
+  // The adoption authority digest is not recorded as a manifest field; it is
+  // recomputed from the manifest's creation capabilities with the same journal
+  // digest function the live control plane uses. Canonical JSON makes key order
+  // irrelevant, but the values must be identical to the live journal config —
+  // that identity is the invariant this comparison relies on.
+  const oldAuthorityDigest = {
+    review: controlPlane?.creationVerifications?.authority?.authorityDigest,
+    adoption: controlPlane?.creationCapabilities
+      ? api.creationAdoptionAuthorityDigest({ resources, capabilities: controlPlane.creationCapabilities })
+      : undefined,
+  }
+  const newAuthorityDigest = {
+    review: freshCreation?.verifications?.authority?.authorityDigest,
+    adoption: freshCreation?.capabilities
+      ? api.creationAdoptionAuthorityDigest({ resources, capabilities: freshCreation.capabilities })
+      : undefined,
+  }
+  const sealRoot = nativeSealRoot(resources), migrated = {}, plans = []
+  // Validate every role before mutating the staged Home: a later refusal must
+  // not leave an earlier verifier grant already rewritten in the stage.
+  for (const role of sealedRoles) {
+    const [name] = nativeRunnerRoles[role]
+    const oldDigest = oldAuthorityDigest[role], nextDigest = newAuthorityDigest[role]
+    const seal = frozen?.creationSeals?.[role], preparedGrant = frozen?.verifierGrants?.[role]
+    const runner = role === 'review' ? freshCreation?.reviews?.runner : freshCreation?.capabilities?.runner
+    if (typeof oldDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(oldDigest)) {
+      fail(`staged owner creation authority is incomplete: the original manifest carries no ${role} `
+        + `verifier authority digest for ${context}`)
+    }
+    if (typeof nextDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(nextDigest)) {
+      fail(`staged owner creation authority is incomplete: the compiled ${role} verifier authority `
+        + `digest is unavailable for ${context}`)
+    }
+    if (!seal || !preparedGrant || !same(runner?.stateSeal, seal)) {
+      fail(`cannot migrate the linux-native ${role} verifier grant for ${context}: the frozen seal is `
+        + 'not the one the compiled creation authority binds; the installed creation setup may not '
+        + 'accept the frozen runner state seals')
+    }
+    if (preparedGrant.principalDigest !== oldDigest) {
+      fail(`cannot migrate the linux-native ${role} verifier grant for ${context}: the staged grant is `
+        + 'not the live Docker-era owner grant')
+    }
+    if (!Number.isSafeInteger(runner.expiresAt) || runner.expiresAt < 1
+      || !Number.isSafeInteger(runner.maxRuns) || runner.maxRuns < 1
+      || !Number.isSafeInteger(runner.maxTotalDurationMs) || runner.maxTotalDurationMs < 1) {
+      fail(`cannot migrate the linux-native ${role} verifier grant for ${context}: the compiled runner `
+        + 'terms are incomplete')
+    }
+    plans.push(Object.freeze({ role, name, seal, oldDigest, nextDigest, runner }))
+  }
+  for (const { role, name, seal, oldDigest, nextDigest, runner } of plans) {
+    const result = api.migrateLinuxVerifierRunnerState({
+      name,
+      stageStateRoot: physical(homePath, stageHome, join(resources.stateRoot, name)),
+      stageSealPath: physical(homePath, stageHome, join(sealRoot, `${name}.json`)),
+      liveStateRoot: join(resources.stateRoot, name),
+      liveSealPath: join(sealRoot, `${name}.json`),
+      oldAuthorityDigest: oldDigest,
+      newAuthorityDigest: nextDigest,
+      existingSeal: seal,
+      expiresAt: runner.expiresAt,
+      maxRuns: runner.maxRuns,
+      maxTotalDurationMs: runner.maxTotalDurationMs,
+      now,
+    })
+    if (!same(result?.seal, seal)) {
+      fail(`migrated ${role} verifier seal is not the frozen reference for ${context}`)
+    }
+    migrated[role] = Object.freeze({ seal: result.seal, jobsMigrated: result.jobsMigrated,
+      activeSettled: result.activeSettled })
+  }
+  return Object.freeze(migrated)
 }
 
 /** Refuse the linux-native stage dispatch without the sealed relocation proof.
@@ -1030,8 +1230,10 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
   // staged copy already carries the candidate families, so it cannot be
   // produced by this installer. Refuse at dispatch, before any manifest,
   // overlay or journal write, instead of letting the materializer fail on an
-  // incidental relocation precondition; the freeze gate below stays
-  // independently fail-closed.
+  // incidental relocation precondition; a manifest that already carries a
+  // plugin revision is refused first because its revision runner-state roles
+  // cannot be frozen at all. Both gates stay independently fail-closed.
+  assertNativeRevisionAvailable(ownerUpdate, { native, profile, transactionId })
   assertNativeStageRelocation(ownerUpdate, { native, profile, transactionId })
   const creation = native
     ? await api.materializeLinuxRsiNativeInStage({
@@ -1059,11 +1261,14 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
   } else if (!same(creation.creationBuild, candidateCreation.creationBuild)) {
     fail('materialized creation build differs')
   }
-  // Native activation cannot finish here: the frozen runner-state references
-  // only exist after the authorized Docker-to-native handover, and writing the
-  // manifest without them would leave a half-bound authority. Fail closed at
-  // this one choke point, before any manifest, overlay or journal write.
-  const frozen = native ? await freezeNativeRunnerStates({ profile, transactionId, stageHome }) : undefined
+  // Freeze the native runner-state references over the staged copy. This is the
+  // one choke point where the seals the compiled manifest binds are published;
+  // it runs after the relocation (the staged Home must carry the relocated
+  // family) and before any manifest, overlay or journal write, so a failed
+  // handover leaves the transaction untouched.
+  const frozen = native ? freezeNativeRunnerStates({ profile, transactionId, stageHome, homePath,
+    resources, source, owner: original.manifest.sourceReviews.owner, now: original.now,
+    expiresAt: original.manifest.sourceReviews.expiresAt, creation, api }) : undefined
   const rebase = await rebaseFor(ownerUpdate, api, runtime)
   const hostProfiles = api.rebaseRsiHostProfiles({ manifest: original.manifest,
     targetPatch: original.patches[profile], coordinatorPatch: original.patches[coordinator], rebase })
@@ -1088,6 +1293,14 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
   }
   manifest.controlPlane.creationVerifications = manifest.pluginCreation.verifications
   manifest.controlPlane.creationCapabilities = manifest.pluginCreation.capabilities
+  // The review authority digest embeds the runner state seal, so the verifier
+  // grants can only be rewritten from the Docker-era owner authority to the
+  // compiled one now that the creation authority exists. The Docker path keeps
+  // its single creation seam.
+  if (native) {
+    migrateNativeVerifierGrants({ transactionId, stageHome, homePath, resources,
+      original, freshCreation, frozen, api, now: original.now })
+  }
   if (!same(manifest.sourceReviews.owner, original.manifest.sourceReviews.owner)
     || !same(manifest.growthDriver, original.manifest.growthDriver)
     || !same(manifest.memoryLearning, original.manifest.memoryLearning)

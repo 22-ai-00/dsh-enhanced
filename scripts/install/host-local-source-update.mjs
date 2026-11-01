@@ -181,6 +181,42 @@ function assertCandidateResources(resources, proof, physicalHome) {
       artifactIdentity(proof.candidateArtifacts))) fail('staged candidate resources differ')
 }
 
+/** The backend is read from the locked preparation, never from the stage: a
+ * schema 1 image build and a schema 3 linux-native runtime are never staged
+ * through each other's seam, in either direction. The locked reader already
+ * pins the backend, so only an explicit linux-native source build leaves the
+ * Docker staging path. */
+function candidateBackend(preparation) {
+  return localCandidateBuildBackend(preparation?.build?.sourceBuild) === 'linux-native' ? 'linux-native' : 'docker'
+}
+
+/** Stage the rebased cohort and, for a linux-native candidate, the relocated
+ * runtime/repository/behavior/creation/release families that replace the Docker
+ * build trees. Both seams return `{cohort, proof}` plus the reviewed builds the
+ * owner program update compiles its grants against; the Docker seam additionally
+ * carries the source build, and the native one fetches both from the relocated
+ * family so a caller never mixes a staged Home with candidate-side builds. */
+async function stageCandidateResources(api, { backend, owner, ...seam }) {
+  if (backend !== 'linux-native') {
+    return api.stageRsiLocalUpdateResources(seam)
+  }
+  // A linux-native candidate carries the owner families a pre-owner Home does not
+  // have; staging it without the owner-led transaction would relocate into a Home
+  // that never owned them.
+  if (!owner) fail('a linux-native candidate needs the owner-led source update transaction')
+  if (typeof api.stageLinuxRsiNativeResources !== 'function') {
+    // An installer packaged before the native resource seam can still read a
+    // native preparation; it must refuse the transaction instead of running the
+    // Docker staging path over it.
+    fail('a linux-native candidate build needs the reviewed rsi-linux-native-resources staging seam, '
+      + 'which this installer does not expose')
+  }
+  const staged = await api.stageLinuxRsiNativeResources(seam)
+  if (staged.proof?.backend !== 'linux-native' || staged.family?.runtime?.backend !== 'linux-native'
+    || staged.family?.release?.backend !== 'linux-native') fail('staged native candidate resources differ')
+  return { ...staged, sourceBuild: staged.family.runtime, releaseBuild: staged.family.release }
+}
+
 async function readOriginal(proof, homePath, api) {
   await privateHome(homePath)
   if (proof.homePath !== homePath || !profileName.test(proof.profile)) fail('source proof Home or profile differs')
@@ -310,12 +346,13 @@ export async function stageResourcesForPreparation({ proof, homePath, disposable
   assertProtocol(proof)
   await assertLocalSourceInstaller(proof.installer)
   const api = await loadLocalSourceInstaller(proof.installer, { ownerRepair: ownerMode(proof) })
-  await readOriginal(proof, homePath, api)
+  const { preparation } = await readOriginal(proof, homePath, api)
   await privateHome(disposableHome)
   if (disposableHome === homePath || disposableHome.startsWith(`${homePath}${sep}`)
     || homePath.startsWith(`${disposableHome}${sep}`)) fail('disposable Home overlaps the original')
-  const resources = await api.stageRsiLocalUpdateResources({ logicalHome: homePath, stagePhysicalHome: disposableHome,
-    profile: proof.profile, preparationRoot: proof.preparationRoot })
+  const resources = await stageCandidateResources(api, { logicalHome: homePath, stagePhysicalHome: disposableHome,
+    profile: proof.profile, preparationRoot: proof.preparationRoot, backend: candidateBackend(preparation),
+    owner: ownerMode(proof) })
   assertCandidateResources(resources, proof, disposableHome)
   const additional = proof.auxiliary ? (await materializeHostLocalArtifacts({ proof: proof.auxiliary,
     homePath, physicalHome: disposableHome })).artifacts : undefined
@@ -331,8 +368,9 @@ export async function stageHostLocalSourceUpdate({ proof, homePath, stageHome })
   await privateHome(stageHome)
   if (stageHome === homePath || stageHome.startsWith(`${homePath}${sep}`)
     || homePath.startsWith(`${stageHome}${sep}`)) fail('stage Home overlaps the original')
-  const resources = await api.stageRsiLocalUpdateResources({ logicalHome: homePath, stagePhysicalHome: stageHome,
-    profile: proof.profile, preparationRoot: proof.preparationRoot })
+  const resources = await stageCandidateResources(api, { logicalHome: homePath, stagePhysicalHome: stageHome,
+    profile: proof.profile, preparationRoot: proof.preparationRoot, backend: candidateBackend(preparation),
+    owner: ownerMode(proof) })
   assertCandidateResources(resources, proof, stageHome)
   const additional = proof.auxiliary ? (await materializeHostLocalArtifacts({ proof: proof.auxiliary,
     homePath, physicalHome: stageHome })).artifacts : undefined
@@ -357,6 +395,11 @@ export async function stageHostLocalSourceUpdate({ proof, homePath, stageHome })
   if (!same(staged.records, [...source.records, record]) || staged.workspace.sourceCommit !== proof.candidate.sourceCommit
     || staged.workspace.version !== proof.candidate.version || !same(staged.anchor, source.anchor)) fail('staged source chain differs')
   const sourceProof = { ...proof, record, resources: resources.proof,
+    // The native stage owns the proof the program-update materializer replays
+    // against the same stopped stage Home; injecting it here is what lifts the
+    // owner-program relocation gate without touching the captured original.
+    ...(programMode(proof) && resources.proof.backend === 'linux-native'
+      ? { ownerUpdate: { ...proof.ownerUpdate, nativeRelocation: resources.proof.relocation } } : {}),
     ...(ownerMode(proof) ? { candidateBuild: { sourceBuild: resources.sourceBuild, releaseBuild: resources.releaseBuild } } : {}),
     stagedCohortDigest: resources.cohort.receiptDigest,
     stagedArtifacts: mergeArtifacts(artifactMap(resources.cohort, homePath, proof.profile, stageHome), additional),
@@ -414,7 +457,14 @@ export async function verifyHostLocalSourceUpdate({ proof, homePath, physicalHom
     || proof.resources.preparationDigest !== proof.preparationDigest) fail('candidate source proof is incomplete')
   if (proof.record.after.cohortDigest !== proof.stagedCohortDigest
     || proof.record.before.cohortDigest !== proof.original.cohortDigest) fail('staged cohort record differs')
-  await api.verifyRsiLocalUpdateResources({ physicalHome, proof: proof.resources })
+  // The staged resource proof owns the backend: a linux-native Home is verified
+  // against its relocated families (the cutover rename keeps their sealed
+  // physical identity), a Docker-era one against the staged build image proof.
+  if (proof.resources.backend === 'linux-native') {
+    await api.verifyLinuxRsiNativeResources({ proof: proof.resources, physicalHome })
+  } else {
+    await api.verifyRsiLocalUpdateResources({ physicalHome, proof: proof.resources })
+  }
   const cohortPath = join(physicalHome, 'rsi-local-cohorts', proof.profile, 'receipt.json')
   await privateFileDigest(cohortPath)
   const cohort = JSON.parse((await readFile(cohortPath)).toString('utf8'))

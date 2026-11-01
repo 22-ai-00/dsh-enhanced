@@ -14,6 +14,7 @@ import { readRsiHostPatchConfig, readRsiHostUpdateOverlayChain, rebaseRsiHostVal
 import { bindLocalSourceInstaller } from '../scripts/install/local-source-maintenance.mjs'
 import { applyOwnerProgramAuthorityCas, assertOwnerProgramAuthorityPreserved, assertOwnerProgramOriginalComposition, assertOwnerProgramWindow,
   assertOwnerProgramBusinessDataCopied, assertOwnerProgramManifestPreserved, assertNativeStageRelocation,
+  assertNativeRevisionAvailable, freezeNativeRunnerStates, migrateNativeVerifierGrants,
   prepareOwnerProgramCreation, stageOwnerProgramUpdate,
   assertOwnerProgramRestartManifestPreserved, compileOwnerProgramRestartConfig, frozenRestartConfig,
   ownerProgramRestartRule,
@@ -663,7 +664,8 @@ const ownerInstallerModules = ['rsi-authority-resources', 'rsi-authority-runtime
   'rsi-creation-build', 'rsi-source', 'rsi-build', 'rsi-local-update-build', 'rsi-release-build',
   'rsi-profile', 'rsi-host-update', 'rsi-plugin-creation', 'rsi-install', 'rsi-service-environment',
   'systemd', 'rsi-authority-config', 'rsi-bootstrap-manifest', 'rsi-setup', 'rsi-install-inputs',
-  'rsi-local-cohort', 'rsi-linux-creation-build', 'rsi-linux-native-materialize']
+  'rsi-local-cohort', 'rsi-linux-creation-build', 'rsi-linux-native-materialize',
+  'rsi-linux-source-build', 'rsi-linux-native-resources']
 
 const installerStub = (body: string) => `import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
@@ -833,4 +835,226 @@ test('native stage dispatch requires the sealed C2-C relocation proof before any
       "fail('candidate creation build backend differs from the candidate source build')"))
     expect(gateAt).toBeLessThan(script.indexOf('await api.materializeLinuxRsiNativeInStage('))
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+const refusalOf = (run: () => unknown) => {
+  try { run() } catch (error) { return error as Error & { code?: string } }
+  throw new Error('expected the native handover seam to refuse')
+}
+const nativeCommit = 'b'.repeat(40)
+const nativeResources = (home: string) => ({ schemaVersion: 1, root: home,
+  stateRoot: join(home, 'state') })
+const nativeSource = { schemaVersion: 1, sourceCommit: nativeCommit }
+const nativeCreation = {
+  sourceBuild: { backend: 'linux-native', repository: { schemaVersion: 4, backend: 'linux-native',
+    sourceCommit: nativeCommit, lockSha256: 'c'.repeat(64) }, cgroupRoots: [] },
+  family: { creationBuild: { schemaVersion: 3, backend: 'linux-native', sourceCommit: nativeCommit } },
+}
+const nativeSealPath = (home: string, name: string) => join(home, 'state', 'native-runner-states',
+  `${name}.json`)
+const nativeSeal = (home: string, name: string) => ({ path: nativeSealPath(home, name),
+  sha256: 'd'.repeat(64) })
+const freezeInput = (root: string, homePath: string, stageHome: string) => ({ profile: 'assistant',
+  transactionId: 'tx-native', stageHome, homePath, resources: nativeResources(homePath),
+  source: nativeSource, owner: { principalId: 'owner-1' }, now: 1_000, expiresAt: 2_000,
+  creation: nativeCreation, api: {} })
+
+test('native revision manifests are refused before the relocation dispatch', async () => {
+  const revision = { schemaVersion: 1, pluginRevision: { revision: 2 } }
+  const error = refusalOf(() => assertNativeRevisionAvailable(
+    { original: { manifest: { pluginRevision: revision.pluginRevision } } },
+    { native: true, profile: 'assistant', transactionId: 'tx-2' }))
+  expect(error.code).toBe('rsi-linux-native-revision-unavailable')
+  expect(error.message).toMatch(/revisionReview\/revisionRegression/u)
+  expect(error.message).toMatch(/nothing has been written for transaction tx-2/u)
+  expect(() => assertNativeRevisionAvailable({ original: { manifest: { pluginRevision: {} } } },
+    { native: true, profile: 'assistant', transactionId: 'tx-2' })).toThrow(
+    /deferred to the later revision slice/u)
+  expect(() => assertNativeRevisionAvailable({ original: { manifest: {} } },
+    { native: true, profile: 'assistant', transactionId: 'tx-2' })).not.toThrow()
+  expect(() => assertNativeRevisionAvailable({ original: { manifest: { pluginRevision: revision.pluginRevision } } },
+    { native: false, profile: 'assistant', transactionId: 'tx-2' })).not.toThrow()
+  const script = await readFile(new URL('../scripts/install/owner-program-update.mjs', import.meta.url), 'utf8')
+  const revisionGateAt = script.lastIndexOf(
+    'assertNativeRevisionAvailable(ownerUpdate, { native, profile, transactionId })')
+  const relocationGateAt = script.lastIndexOf(
+    'assertNativeStageRelocation(ownerUpdate, { native, profile, transactionId })')
+  expect(revisionGateAt).toBeGreaterThan(-1)
+  expect(revisionGateAt).toBeLessThan(relocationGateAt)
+  expect(relocationGateAt).toBeLessThan(script.indexOf('await api.materializeLinuxRsiNativeInStage('))
+})
+
+test('native runner-state freeze refuses invalid inputs before touching the staged Home', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-native-freeze-')))
+  try {
+    const homePath = join(root, 'home'), stageHome = join(root, 'stage')
+    await mkdir(homePath, { mode: 0o700 }); await mkdir(stageHome, { mode: 0o700 })
+    expect(refusalOf(() => freezeNativeRunnerStates({ ...freezeInput(root, homePath, homePath) })).message)
+      .toMatch(/invalid Home pair/u)
+    expect(refusalOf(() => freezeNativeRunnerStates(
+      { ...freezeInput(root, homePath, homePath), stageHome: join(homePath, 'stage') })).message)
+      .toMatch(/invalid Home pair/u)
+    expect(refusalOf(() => freezeNativeRunnerStates({ ...freezeInput(root, homePath, stageHome),
+      resources: { schemaVersion: 1, root: '/elsewhere', stateRoot: '/elsewhere/state' } })).message)
+      .toMatch(/owner authority resources do not describe the state root/u)
+    expect(refusalOf(() => freezeNativeRunnerStates({ ...freezeInput(root, homePath, stageHome),
+      source: { schemaVersion: 1, sourceCommit: 'nope' } })).message)
+      .toMatch(/source, owner or authority lifetime is incomplete/u)
+    expect(refusalOf(() => freezeNativeRunnerStates({ ...freezeInput(root, homePath, stageHome),
+      expiresAt: 1_000 })).message)
+      .toMatch(/source, owner or authority lifetime is incomplete/u)
+    expect(refusalOf(() => freezeNativeRunnerStates({ ...freezeInput(root, homePath, stageHome),
+      creation: { ...nativeCreation, sourceBuild: { ...nativeCreation.sourceBuild,
+        repository: { ...nativeCreation.sourceBuild.repository, schemaVersion: 3 } } } })).message)
+      .toMatch(/not the relocated linux-native build environment/u)
+    // A missing reviewed native-resources seam fails closed and names it.
+    expect(refusalOf(() => freezeNativeRunnerStates(freezeInput(root, homePath, stageHome))).message)
+      .toMatch(/prepareLinuxRepositoryHandoverState seam \(rsi-linux-native-resources/u)
+    expect(await readdir(stageHome)).toEqual([])
+    expect(await readdir(homePath)).toEqual([])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('native runner-state freeze seals the repository before compiling and then the verifiers', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-native-handover-')))
+  try {
+    const homePath = join(root, 'home'), stageHome = join(root, 'stage')
+    await mkdir(homePath, { mode: 0o700 }); await mkdir(stageHome, { mode: 0o700 })
+    const order: string[] = []
+    const repositorySeal = nativeSeal(homePath, 'linux-source-build-runner')
+    const reviewSeal = nativeSeal(homePath, 'creation-review-runner')
+    const adoptionSeal = nativeSeal(homePath, 'creation-adoption-runner')
+    const compiled = { schemaVersion: 3, backend: 'linux-native', stateSeal: repositorySeal }
+    const api = {
+      prepareLinuxRepositoryHandoverState: (input: Record<string, unknown>) => {
+        order.push('repository')
+        expect(input).toEqual({ stageStateRoot: join(stageHome, 'state', 'linux-source-build-runner'),
+          stageSealPath: join(stageHome, 'state', 'native-runner-states',
+            'linux-source-build-runner.json'),
+          liveStateRoot: join(homePath, 'state', 'linux-source-build-runner'),
+          liveSealPath: nativeSealPath(homePath, 'linux-source-build-runner') })
+        return repositorySeal
+      },
+      compileRsiLinuxSourceBuild: (input: Record<string, unknown>) => {
+        order.push('compile')
+        expect(input).toMatchObject({ prepared: nativeCreation.sourceBuild, resources:
+          nativeResources(homePath), source: nativeSource, owner: { principalId: 'owner-1' },
+        now: 1_000, expiresAt: 2_000, stateSeal: repositorySeal })
+        return compiled
+      },
+      prepareLinuxVerifierHandoverState: (input: Record<string, unknown>) => {
+        order.push(String(input.name))
+        const grant = { principalDigest: 'a'.repeat(64), revision: 1, expiresAt: 2_000,
+          maxRuns: 160, maxTotalDurationMs: 4_800_000 }
+        return { seal: input.name === 'creation-review-runner' ? reviewSeal : adoptionSeal, grant }
+      },
+    }
+    const frozen = freezeNativeRunnerStates({ ...freezeInput(root, homePath, stageHome), api })
+    expect(order).toEqual(['repository', 'compile', 'creation-review-runner', 'creation-adoption-runner'])
+    expect(frozen.sourceBuild).toBe(compiled)
+    expect(frozen.creationBuild).toBe(nativeCreation.family.creationBuild)
+    expect(frozen.creationSeals).toEqual({ review: reviewSeal, adoption: adoptionSeal })
+    expect(Object.isFrozen(frozen) && Object.isFrozen(frozen.creationSeals)
+      && Object.isFrozen(frozen.verifierGrants)).toBe(true)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('native verifier grant migration rewrites the Docker-era grants with the frozen seals', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-native-migrate-')))
+  try {
+    const homePath = join(root, 'home'), stageHome = join(root, 'stage')
+    await mkdir(homePath, { mode: 0o700 }); await mkdir(stageHome, { mode: 0o700 })
+    const oldDigest = 'a'.repeat(64), newDigest = 'b'.repeat(64)
+    const reviewSeal = nativeSeal(homePath, 'creation-review-runner')
+    const adoptionSeal = nativeSeal(homePath, 'creation-adoption-runner')
+    const calls: Record<string, unknown>[] = []
+    const api = {
+      creationAdoptionAuthorityDigest: ({ capabilities }: { capabilities: { fresh?: boolean } }) =>
+        capabilities.fresh ? newDigest : oldDigest,
+      migrateLinuxVerifierRunnerState: (input: Record<string, unknown>) => {
+        calls.push(input)
+        return { seal: input.existingSeal, jobsMigrated: 2, activeSettled: 1 }
+      },
+    }
+    const original = { manifest: { controlPlane: {
+      creationVerifications: { authority: { authorityDigest: oldDigest } },
+      creationCapabilities: { fresh: false } } } }
+    const latest = { reviews: { runner: { stateSeal: reviewSeal, expiresAt: 5_000, maxRuns: 160,
+      maxTotalDurationMs: 4_800_000 } },
+    verifications: { authority: { authorityDigest: newDigest } },
+    capabilities: { fresh: true,
+      runner: { stateSeal: adoptionSeal, expiresAt: 5_000, maxRuns: 1_024, maxTotalDurationMs: 86_400_000 } } }
+    const frozen = { creationSeals: { review: reviewSeal, adoption: adoptionSeal },
+      verifierGrants: { review: { principalDigest: oldDigest }, adoption: { principalDigest: oldDigest } } }
+    const migrate = (overrides: Record<string, unknown> = {}) => migrateNativeVerifierGrants({
+      transactionId: 'tx-3', stageHome, homePath, resources: nativeResources(homePath), original,
+      freshCreation: latest, frozen, api, now: 4_000, ...overrides })
+    const migrated = migrate()
+    expect(calls.map(call => call.name))
+      .toEqual(['creation-review-runner', 'creation-adoption-runner'])
+    expect(calls[0]).toEqual({ name: 'creation-review-runner',
+      stageStateRoot: join(stageHome, 'state', 'creation-review-runner'),
+      stageSealPath: join(stageHome, 'state', 'native-runner-states', 'creation-review-runner.json'),
+      liveStateRoot: join(homePath, 'state', 'creation-review-runner'),
+      liveSealPath: nativeSealPath(homePath, 'creation-review-runner'),
+      oldAuthorityDigest: oldDigest, newAuthorityDigest: newDigest,
+      existingSeal: reviewSeal, expiresAt: 5_000, maxRuns: 160,
+      maxTotalDurationMs: 4_800_000, now: 4_000 })
+    expect(calls[1]).toMatchObject({ name: 'creation-adoption-runner', maxRuns: 1_024,
+      newAuthorityDigest: newDigest, existingSeal: adoptionSeal })
+    expect(migrated).toMatchObject({ review: { seal: reviewSeal, jobsMigrated: 2, activeSettled: 1 },
+      adoption: { seal: adoptionSeal } })
+    // The staged grant must still be the one the freeze sealed.
+    expect(refusalOf(() => migrate({ frozen: { ...frozen,
+      verifierGrants: { review: { principalDigest: 'e'.repeat(64) }, adoption: frozen.verifierGrants.adoption } } }))
+      .message).toMatch(/the staged grant is not the live Docker-era owner grant/u)
+    // Validation is two-pass: a later refusal must not leave the review grant
+    // already rewritten in the staged Home.
+    const before = calls.length
+    expect(refusalOf(() => migrate({ frozen: { ...frozen,
+      verifierGrants: { review: frozen.verifierGrants.review,
+        adoption: { principalDigest: 'f'.repeat(64) } } } })).message)
+      .toMatch(/the staged grant is not the live Docker-era owner grant/u)
+    expect(calls.length).toBe(before)
+    // The compiled authority must bind the frozen seal.
+    expect(refusalOf(() => migrate({ freshCreation: { ...latest, reviews: { ...latest.reviews,
+      runner: { ...latest.reviews.runner, stateSeal: adoptionSeal } } } })).message)
+      .toMatch(/the frozen seal is not the one the compiled creation authority binds/u)
+    // The original manifest must carry the Docker-era review digest.
+    expect(refusalOf(() => migrate({ original: { manifest: { controlPlane: {
+      creationCapabilities: { fresh: false } } } } })).message)
+      .toMatch(/staged owner creation authority is incomplete: the original manifest carries no review/u)
+    // A missing reviewed handover seam fails closed and names it.
+    expect(refusalOf(() => migrate({ api: { creationAdoptionAuthorityDigest: api.creationAdoptionAuthorityDigest } }))
+      .message).toMatch(/does not expose the reviewed handover seams/u)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('the native handover seams stay ordered around the creation authority', async () => {
+  const script = await readFile(new URL('../scripts/install/owner-program-update.mjs', import.meta.url), 'utf8')
+  const repository = script.indexOf('api.prepareLinuxRepositoryHandoverState(location(')
+  const compile = script.indexOf('api.compileRsiLinuxSourceBuild({')
+  const review = script.indexOf('api.prepareLinuxVerifierHandoverState({ name, ...location(name) })')
+  expect(repository).toBeGreaterThan(-1)
+  expect(repository).toBeLessThan(compile)
+  expect(compile).toBeLessThan(review)
+  const setup = script.indexOf('api.createRsiPluginCreationSetup({')
+  const migrated = script.indexOf('migrateNativeVerifierGrants({ transactionId, stageHome')
+  const capabilities = script.indexOf(
+    'manifest.controlPlane.creationCapabilities = manifest.pluginCreation.capabilities')
+  const frozenCall = script.indexOf('const frozen = native ? freezeNativeRunnerStates({')
+  expect(frozenCall).toBeGreaterThan(script.indexOf('await api.materializeLinuxRsiNativeInStage('))
+  expect(frozenCall).toBeLessThan(script.indexOf('manifest.controlPlane.sourceBuild ='))
+  expect(migrated).toBeGreaterThan(setup)
+  expect(migrated).toBeGreaterThan(capabilities)
+  expect(migrated).toBeLessThan(script.indexOf(
+    "fail('owner model, memory, budget, or service scope changed')"))
+  // The seals and grants the handover produces stay out of the persisted manifest.
+  const persisted = script.split('\n').filter(line =>
+    /^\s*manifest\.(controlPlane|linuxBuild|pluginCreation)/u.test(line))
+  expect(persisted.some(line => /stateSeal|creationSeals|verifierGrants/u.test(line))).toBe(false)
+  // The reviewed installer allowlist stays mirrored by this test's stub tree.
+  const names = script.match(/const names = \[([\s\S]*?)\]/u)?.[1] ?? ''
+  expect([...names.matchAll(/'([a-z0-9-]+)'/gu)].map(match => match[1]))
+    .toEqual(ownerInstallerModules)
 })
