@@ -225,6 +225,16 @@ rules:
 - 有界且诚实降级：每 sweep 最多 10 条，失败最多重试 5 次后标记 `export-attempts-exhausted`；部署没有精确 workspace+preset scope 时标记 `skipped`（`owner-route-unavailable`）；observe 模式不导出。状态写入 `work_item_outcome.evaluation_*`（schema v5 引入，v6/v7 保持），`health().evaluation` 与 `stats()` 暴露 `evaluationPending/exported/skipped`。
 - 依赖方向：本插件只以 **type-only import** 引用 `@dsh-enhanced/assistant-evaluation` 的 claims/registration 契约类型，并把该包声明为 optional peer + devDependency；Evaluation 保持 producer-agnostic，不依赖任何 producer 运行时。
 
+#### 工作项执行指标（metrics）
+
+投影的 `metrics` 不再只有 live 记录推算的 `latencyMs`/`retries`，而是同一账本里**可独立复算**的执行事实（`store.workItemExecutionMetrics(itemId, settledAt)`，只读、单条 SELECT、复用 prepared statement）：
+
+- `latencyMs`（存在时总是非负）：`settledAt − item.createdAt`，即从准入到该结算修订的墙钟时间；时间戳非安全整数时箝位为 0。item 行缺失时 `workItemExecutionMetrics` 返回 `undefined`，drain 路径回退到 `metricsFor(undefined)`（即 `{}`，**没有** `latencyMs`）。
+- `claims`/`retries`：`claims` 统计结算上界内的 `claimed` 事件数（每次成功 claim 在同一事务里恰好追加一条事件并原子递增 `attempt`，所以它就是 `settledAt` 时刻的尝试数，不会像可变的 `item.attempt` 那样吸收结算之后的重试；`work_item_event` 以 `(item_id, sequence)` 为主键，可按前缀索引搜索，避免扫全部历史 claim 行）；`retries = claims − 1`。`reports`/`waitingReports` 来自 `work_item_report`（按 `recorded_at`，其中 `waitingReports` 按 `status = 'waiting'`），`unknownDispatches`/`claimExpiries` 来自 `work_item_event` 的 `dispatch-unknown`/`claim-expired` 事件（按 `recorded_at`）。
+- 所有计数都以 **`settledAt` 为上界**（`recorded_at/created_at <= settledAt`）：结算之后才落库的行属于后续观察，不会被已结算修订吸收；同一 item 的新修订重新计算即可看到它们。边界是 1 ms 粒度、含等号的（`<=`），因此同一毫秒内、结算之后才提交的行仍会被计入；这里刻意不用严格 `<`，否则会把合法的同毫秒行漏掉。
+- 零/缺失计数直接省略（不写 `0`），值域是无符号安全整数；schema 仍是 v7，不新增表、不新增列。`workItemEvaluationClaims` 增加可选的第四个 `execution` 参数：drain 路径传入上面的只读计数包，直调三参数形式继续使用 live 记录回退，行为与旧版本一致（`{ latencyMs, retries? }`）。
+- 刻意**不采集 provider token/成本指标**：本插件与 `assistant-automations` 之间没有 run-usage 契约，无法区分「本工作项消耗」与「同一 run 的其他开销」，复制过去的数字会把成本重复计入 Evaluation；需要成本归因时应由拥有 provider 账本的 producer 自己投影。执行指标只回答「做过多少事、等多久、重试几次」，不回答 objective 是否达成。
+
 ## 配置
 
 | 字段 | 默认值 | 含义 |

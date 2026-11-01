@@ -5,7 +5,7 @@ import type {
   WorkItemEvaluationEvidenceState as WorkItemEvaluationEvidenceStateContract,
   WorkItemSettledBy as WorkItemEvaluationSettledByContract,
 } from '@dsh-enhanced/assistant-evaluation'
-import type { WorkItemStore } from './store.js'
+import type { WorkItemExecutionMetrics, WorkItemStore } from './store.js'
 import type {
   WorkItemEvaluationState,
   WorkItemOutcomeRecord,
@@ -120,13 +120,17 @@ function digestOf(claims: Omit<WorkItemEvaluationClaims, 'digest'>): string {
 /**
  * Project one store outcome into the exact claims Evaluation accepts.
  *
- * Returns `null` for revisions that are not exportable at all: a window still
- * `pending` can change, so publishing it would contradict a later revision.
+ * `execution` is the bounded ledger count bag when the caller could read it;
+ * omitting it keeps the live-record fallback so a direct projection call still
+ * works. Returns `null` for revisions that are not exportable at all: a window
+ * still `pending` can change, so publishing it would contradict a later
+ * revision.
  */
 export function workItemEvaluationClaims(
   outcome: WorkItemOutcomeRecord,
   scope: WorkItemEvaluationScope,
   item: WorkItemRecord | undefined,
+  execution?: Readonly<WorkItemExecutionMetrics>,
 ): WorkItemEvaluationClaims | null {
   if (outcome.evidenceState === 'pending') return null
   const evidenceState = outcome.evidenceState
@@ -139,7 +143,7 @@ export function workItemEvaluationClaims(
     situation: workItemEvaluationSituation(item?.kind ?? 'work-item'),
     occurredAt: outcome.settledAt,
     idempotencyKey: workItemEvaluationIdempotencyKey(outcome.itemId, outcome.revision, evidenceState),
-    metrics: metricsFor(item, outcome),
+    metrics: execution ?? metricsFor(item, outcome),
     objectiveStatus: 'unknown',
     deliveryStatus: 'unknown',
   }
@@ -322,7 +326,13 @@ export class WorkItemEvaluationExporter implements WorkItemEvaluationProducer {
       try {
         // The item row is read outside the append guard because a store fault
         // here must not reject a pass that other transactions already awaited.
-        claims = workItemEvaluationClaims(outcome, scope, store.findItemById(outcome.itemId))
+        const item = store.findItemById(outcome.itemId)
+        claims = workItemEvaluationClaims(
+          outcome,
+          scope,
+          item,
+          store.workItemExecutionMetrics(outcome.itemId, outcome.settledAt),
+        )
       } catch (error) {
         this.#degraded = describe(error)
         this.#options.warn?.(`assistant-work-items: Evaluation claims read failed: ${describe(error)}`)

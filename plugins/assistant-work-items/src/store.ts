@@ -640,6 +640,24 @@ export interface WorkItemStoreStats {
 }
 
 /**
+ * Durable execution facts one work item can contribute to an Evaluation claim.
+ *
+ * Only counts the ledger already records are exposed. No provider token/cost
+ * usage is read here: this ledger owns no run-usage contract, while the
+ * automation side records those figures for the same run scope, so copying them
+ * would double-count cost. Zero counts are omitted so a quiet item stays compact.
+ */
+export interface WorkItemExecutionMetrics {
+  readonly latencyMs: number
+  readonly retries?: number
+  readonly claims?: number
+  readonly reports?: number
+  readonly waitingReports?: number
+  readonly unknownDispatches?: number
+  readonly claimExpiries?: number
+}
+
+/**
  * Single-writer SQLite ledger.
  *
  * Every mutation runs inside `BEGIN IMMEDIATE`; the database file is created
@@ -1381,6 +1399,67 @@ export class WorkItemStore {
       else pending = count
     }
     return { pending, exported, skipped }
+  }
+
+  /**
+   * Bounded, read-only execution facts for one item at a settlement instant.
+   *
+   * Every counter is a COUNT over durable rows this ledger already keeps for
+   * the item; nothing is re-derived from live process state. `settledAt` bounds
+   * each read because rows recorded after the settled revision belong to a
+   * later observation and must not inflate an earlier claim. An absent item row
+   * returns `undefined` so the caller can keep the live-record fallback.
+   *
+   * Claims are counted from `claimed` ledger events rather than claim rows:
+   * each committed claim appends exactly one such event in the same transaction
+   * as the claim row and the `item.attempt` increment (the replay branch appends
+   * neither, retry-exhausted appends `blocked` only, and nothing deletes either
+   * record), while `work_item_claim` has no `item_id` index. `work_item_event`
+   * is `WITHOUT ROWID` keyed by `(item_id, sequence)`, so its count is an
+   * indexed prefix search instead of a scan of every claim ever recorded.
+   */
+  workItemExecutionMetrics(itemId: string, settledAt: number): WorkItemExecutionMetrics | undefined {
+    const item = this.findItemById(itemId)
+    if (item === undefined) return undefined
+    const row = this.#statement(`
+      SELECT
+        (SELECT COUNT(*) FROM work_item_event WHERE item_id = ? AND kind = 'claimed' AND recorded_at <= ?) AS claims,
+        (SELECT COUNT(*) FROM work_item_report WHERE item_id = ? AND recorded_at <= ?) AS reports,
+        (SELECT COUNT(*) FROM work_item_report WHERE item_id = ? AND recorded_at <= ? AND status = 'waiting') AS waiting_reports,
+        (SELECT COUNT(*) FROM work_item_event WHERE item_id = ? AND kind = 'dispatch-unknown' AND recorded_at <= ?) AS unknown_dispatches,
+        (SELECT COUNT(*) FROM work_item_event WHERE item_id = ? AND kind = 'claim-expired' AND recorded_at <= ?) AS claim_expiries
+    `).get(
+      itemId, settledAt,
+      itemId, settledAt,
+      itemId, settledAt,
+      itemId, settledAt,
+      itemId, settledAt,
+    ) as Row
+    const count = (value: unknown): number => {
+      const parsed = Number(value)
+      return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 0
+    }
+    const elapsed = settledAt - item.createdAt
+    const latencyMs = Number.isSafeInteger(elapsed) ? Math.max(0, elapsed) : 0
+    const claims = count(row['claims'])
+    // Each committed claim appends exactly one `claimed` event and increments
+    // `attempt` atomically, so the settlement-bounded event count is the attempt
+    // count at `settledAt` — unlike the mutable `item.attempt`, it cannot absorb
+    // retries that happen after the settled revision.
+    const retries = Math.max(0, claims - 1)
+    const reports = count(row['reports'])
+    const waitingReports = count(row['waiting_reports'])
+    const unknownDispatches = count(row['unknown_dispatches'])
+    const claimExpiries = count(row['claim_expiries'])
+    return Object.freeze({
+      latencyMs,
+      ...(retries > 0 ? { retries } : {}),
+      ...(claims > 0 ? { claims } : {}),
+      ...(reports > 0 ? { reports } : {}),
+      ...(waitingReports > 0 ? { waitingReports } : {}),
+      ...(unknownDispatches > 0 ? { unknownDispatches } : {}),
+      ...(claimExpiries > 0 ? { claimExpiries } : {}),
+    })
   }
 
   /** Mark one settled revision exported; CAS on `pending` so a replay is refused. */
