@@ -77,6 +77,30 @@ export interface WorkItemSignalSweep {
   readonly degraded?: string
 }
 
+/**
+ * A source registration handed to the intake by the Host or by a peer plugin.
+ *
+ * Registration is the only way an out-of-tree producer joins automatic intake:
+ * the intake never imports a concrete peer, and a registered source is read on
+ * exactly the same bounded path as the built-in adapter. Budgets default to the
+ * configured sweep budget, so a deployment can tune one number for every source.
+ */
+export interface WorkItemSignalRegistration {
+  readonly source: WorkItemSignalSource
+  /** Minimum interval between two sweeps of this source. */
+  readonly intervalMs?: number | undefined
+  readonly maxCandidatesPerSweep?: number | undefined
+  readonly maxAdmitsPerSweep?: number | undefined
+}
+
+/** One source plus the budgets it sweeps under. */
+interface ResolvedSignalSource {
+  readonly source: WorkItemSignalSource
+  readonly intervalMs: number
+  readonly maxCandidatesPerSweep: number
+  readonly maxAdmitsPerSweep: number
+}
+
 export type WorkItemSignalSkip = 'disabled' | 'not-due' | 'degraded'
 
 /** One source's contribution to a sweep, kept small enough to log. */
@@ -106,10 +130,14 @@ export interface SignalIntakeDependencies {
   readonly dispatch?: WorkItemDispatch | undefined
   readonly now?: (() => number) | undefined
   readonly warn?: ((message: string) => void) | undefined
-  /** Host/test supply. Absent sources fall back to the built-in adapter. */
+  /** Initial registrations supplied by the Host or a test; more may be added. */
   readonly sources?: readonly WorkItemSignalSource[] | undefined
 }
 
+/** Must be a subset of the provenance shape admission accepts (`admission.ts`). */
+const SIGNAL_SOURCE_ID = /^[a-z][a-z0-9-]{0,63}$/
+/** Id of the adapter armed by `sources.foregroundFailures`; a registration may shadow it. */
+const BUILT_IN_SOURCE_ID = 'owner-foreground-failures'
 const CURSOR_KEY_PREFIX = 'signal.cursor:'
 const SWEPT_KEY_PREFIX = 'signal.sweptAt:'
 const REJECTION_CODES = new Set(['cooldown', 'rate-limited', 'capacity', 'kind-rejected', 'source-rejected'])
@@ -143,17 +171,49 @@ export class WorkItemSignalIntake {
   readonly #deps: SignalIntakeDependencies
   readonly #now: () => number
   readonly #warn: (message: string) => void
+  /** Insertion-ordered registrations, so reports keep a stable order. */
+  readonly #registered = new Map<string, ResolvedSignalSource>()
 
   constructor(dependencies: SignalIntakeDependencies) {
     this.#deps = dependencies
     this.#now = dependencies.now ?? (() => Date.now())
     this.#warn = dependencies.warn ?? (() => {})
+    for (const source of dependencies.sources ?? []) this.register({ source })
+  }
+
+  /**
+   * Add one source and return an idempotent disposer.
+   *
+   * Registration is refused with `invalid-input` for a duplicate id or a
+   * malformed registration; a rejected registration leaves the intake intact.
+   */
+  register(registration: WorkItemSignalRegistration): () => void {
+    const resolved = this.#resolve(registration)
+    const id = resolved.source.id
+    if (this.#registered.has(id)) {
+      throw new WorkItemError('invalid-input', `the signal source ${id} is already registered`)
+    }
+    this.#registered.set(id, resolved)
+    return () => {
+      // Only retire this exact registration: a stale disposer from a replaced
+      // provider must not unregister a newer one that reuses the id.
+      if (this.#registered.get(id) === resolved) this.unregister(id)
+    }
+  }
+
+  /** Drop one source; `false` when it was never registered. */
+  unregister(id: string): boolean {
+    return this.#registered.delete(id)
+  }
+
+  /** Registered source ids, in sweep order. */
+  sources(): readonly string[] {
+    return Object.freeze([...this.#registered.keys()])
   }
 
   /** True when at least one adapter is armed, even if a peer is missing. */
   armed(): boolean {
-    const sources = this.#deps.sources
-    if (sources !== undefined) return sources.length > 0
+    if (this.#registered.size > 0) return true
     return this.#deps.config.sources.foregroundFailures.enabled
   }
 
@@ -174,9 +234,9 @@ export class WorkItemSignalIntake {
         reports.push(this.#sweepSource(source, force))
       } catch (error) {
         // A programming error in one adapter must not take down a claim.
-        this.#warn(`assistant-work-items: signal source ${source.id} failed: ${describe(error)}`)
+        this.#warn(`assistant-work-items: signal source ${source.source.id} failed: ${describe(error)}`)
         reports.push(Object.freeze({
-          ...emptyReport(source.id, null),
+          ...emptyReport(source.source.id, null),
           failed: true,
         }))
       }
@@ -184,24 +244,66 @@ export class WorkItemSignalIntake {
     return Object.freeze({ sources: Object.freeze(reports) })
   }
 
-  #sources(): readonly WorkItemSignalSource[] {
-    const supplied = this.#deps.sources
-    if (supplied !== undefined) return supplied
+  /**
+   * The registered sources, then the built-in adapter when the config arms it.
+   *
+   * The built-in adapter still resolves `assistant-delivery` lazily and skips
+   * itself when that peer is absent, so a late-mounted peer stays a no-op
+   * instead of an activation failure. A registration may shadow the built-in
+   * adapter by reusing its id.
+   */
+  #sources(): readonly ResolvedSignalSource[] {
+    const resolved: ResolvedSignalSource[] = [...this.#registered.values()]
     const config = this.#deps.config
-    if (!config.sources.foregroundFailures.enabled) return []
+    if (!config.sources.foregroundFailures.enabled || this.#registered.has(BUILT_IN_SOURCE_ID)) return resolved
     const delivery = this.#deps.delivery?.()
-    if (delivery === undefined) return []
-    return [new OwnerForegroundFailureSource(config, delivery)]
+    if (delivery === undefined) return resolved
+    resolved.push(Object.freeze({
+      source: new OwnerForegroundFailureSource(config, delivery),
+      intervalMs: config.sources.foregroundFailures.sweepIntervalMs,
+      maxCandidatesPerSweep: config.sources.foregroundFailures.maxCandidatesPerSweep,
+      maxAdmitsPerSweep: config.sources.foregroundFailures.maxAdmitsPerSweep,
+    }))
+    return resolved
   }
 
-  #sweepSource(source: WorkItemSignalSource, force: boolean): WorkItemSignalSourceReport {
+  /** Validate one registration; throws `invalid-input` instead of half-applying. */
+  #resolve(registration: WorkItemSignalRegistration): ResolvedSignalSource {
+    const source = registration?.source as WorkItemSignalSource | undefined
+    const id = source?.id
+    if (typeof id !== 'string' || !SIGNAL_SOURCE_ID.test(id)) {
+      throw new WorkItemError('invalid-input', 'a signal source id must be lower-kebab-case and at most 64 bytes')
+    }
+    if (typeof source?.sourceVersion !== 'string' || source.sourceVersion.length === 0) {
+      throw new WorkItemError('invalid-input', `the signal source ${id} needs a non-empty sourceVersion`)
+    }
+    if (typeof source?.sweep !== 'function') {
+      throw new WorkItemError('invalid-input', `the signal source ${id} needs a sweep function`)
+    }
+    const defaults = this.#deps.config.sources.foregroundFailures
+    const pick = (value: number | undefined, fallback: number, field: string): number => {
+      if (value === undefined) return fallback
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new WorkItemError('invalid-input', `the signal source ${id} has an invalid ${field}`)
+      }
+      return value
+    }
+    return Object.freeze({
+      source,
+      intervalMs: pick(registration.intervalMs, defaults.sweepIntervalMs, 'intervalMs'),
+      maxCandidatesPerSweep: pick(registration.maxCandidatesPerSweep, defaults.maxCandidatesPerSweep, 'maxCandidatesPerSweep'),
+      maxAdmitsPerSweep: pick(registration.maxAdmitsPerSweep, defaults.maxAdmitsPerSweep, 'maxAdmitsPerSweep'),
+    })
+  }
+
+  #sweepSource(resolved: ResolvedSignalSource, force: boolean): WorkItemSignalSourceReport {
     const config = this.#deps.config
     const store = this.#deps.store
     const now = this.#now()
-    const interval = config.sources.foregroundFailures.sweepIntervalMs
+    const source = resolved.source
     const sweptAtRaw = store.meta(`${SWEPT_KEY_PREFIX}${source.id}`)
     const sweptAt = sweptAtRaw === null ? null : Number(sweptAtRaw)
-    if (!force && sweptAt !== null && Number.isFinite(sweptAt) && now - sweptAt < interval) {
+    if (!force && sweptAt !== null && Number.isFinite(sweptAt) && now - sweptAt < resolved.intervalMs) {
       return emptyReport(source.id, 'not-due')
     }
     // Mark the attempt before it starts: a permanently failing adapter must
@@ -212,7 +314,7 @@ export class WorkItemSignalIntake {
     try {
       result = source.sweep({
         now,
-        limit: config.sources.foregroundFailures.maxCandidatesPerSweep,
+        limit: resolved.maxCandidatesPerSweep,
         cursor: this.#readCursor(source.id),
       })
     } catch (error) {
@@ -240,10 +342,19 @@ export class WorkItemSignalIntake {
         withdrawn += 1
         continue
       }
-      if (admitted >= config.sources.foregroundFailures.maxAdmitsPerSweep) {
+      if (admitted >= resolved.maxAdmitsPerSweep) {
         // Budget is finite per sweep; the cursor still advances so the next
         // sweep sees a different slice instead of the same head forever.
         break
+      }
+      if (candidate.provenance?.source !== source.id) {
+        // A source may only speak for itself: cross-attribution would let one
+        // adapter launder another source's provenance into the ledger.
+        rejected += 1
+        this.#warn(
+          `assistant-work-items: signal source ${source.id} dropped a candidate attributed to ${String(candidate.provenance?.source)}`,
+        )
+        continue
       }
       let outcome: WorkItemAdmitResult
       try {
@@ -338,7 +449,7 @@ export class WorkItemSignalIntake {
  * metadata, never from raw owner text (which is not part of this page).
  */
 export class OwnerForegroundFailureSource implements WorkItemSignalSource {
-  readonly id = 'owner-foreground-failures'
+  readonly id = BUILT_IN_SOURCE_ID
   readonly sourceVersion = 'assistant-delivery/owner-foreground-source/v1'
   readonly #config: NormalizedConfig
   readonly #delivery: PeerDeliveryService

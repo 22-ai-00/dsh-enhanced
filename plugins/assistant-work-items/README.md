@@ -4,7 +4,7 @@
 
 账本本身提供三条 CAS 工具：`work_item_claim`、`work_item_report`、`work_item_status`。在账本之上有一个默认关闭的**自动准入**切片：它从已认证的 in-tree 只读来源拉取真实信号并以相同闸门入账，因此普通使用（owner 自己发起的请求失败后，worker 被下一次 claim 唤醒）就会产生自驱工作项，无需 operator 手工调用 `admit(...)`，也无需新定时器。
 
-当前唯一内置的真实来源是 `assistant-delivery` 的 owner foreground 失败/超时/取消记录（只读 API `listOwnerForegroundTaskSources`）。GitHub、邮件、IM、任务日历等**仓库外**来源仍是后续独立插件的职责，通过可信 Host API `admit(...)` 提交；本插件不发明这类 API。
+当前内置的真实来源只有 `assistant-delivery` 的 owner foreground 失败/超时/取消记录（只读 API `listOwnerForegroundTaskSources`）。GitHub、邮件、IM、任务日历等**仓库外**来源属于独立插件的职责：它们实现一个只读 `WorkItemSignalSource`，用 `registerSignalSource(...)` 注册进来，就走与本内置来源完全相同的扫描、provenance、去重、冷却与已结项围栏，而不是另开写路径。
 
 ## 安装与启用
 
@@ -76,6 +76,39 @@ budgetAmount: 1
 ```
 
 `sources.foregroundFailures.enabled: true` 时，`claim()` 会先做一次被间隔门控的来源扫描；因此 worker 每次被唤醒时都会顺带消费新出现的 owner 失败请求。也可以由可信 Host 显式调用 `sweepSignals(force)` 立即扫描一次。
+
+### 注册自己的来源（外部信号插件）
+
+Host 或同 profile 的其他插件可以把自己的只读来源接进同一套自动准入：
+
+```ts
+const dispose = ctx.assistantWorkItems.registerSignalSource({
+  // 只读契约（由来源实现遵守）：sweep 只读外部系统，不写 delivery/automations
+  source: {
+    id: 'github-review-requests',            // 稳定 lower-kebab-case，同时是 provenance.source
+    sourceVersion: 'github-review-requests/v1',
+    sweep({ now, limit, cursor }) {
+      // 用 cursor 做有界分页；degraded 表示本次跑不了（例如缺少凭据），不是异常
+      return { candidates, cursor: nextCursor }
+    },
+  },
+  // 可选：不填时沿用 sources.foregroundFailures 的间隔/预算默认值
+  intervalMs: 900_000,
+  maxCandidatesPerSweep: 20,
+  maxAdmitsPerSweep: 3,
+})
+// 插件卸载 / 配置切换时撤销注册（幂等）
+ctx.effect(() => () => dispose())
+```
+
+约束：
+
+- 每个候选必须自带 `provenance`（source、sourceVersion、signalDigest、observedAt、可选 evidence）、`externalId`、`originBindingId` 和 `disposition`；admission 会逐字段严格校验，缺失或超长直接拒绝而不是猜。
+- `disposition: 'withdrawn'` 只被观察计数，不会产生工作项；已结项修复由跨窗口围栏挡住，来源不能复活它。
+- 注册在插件 disabled 或已 dispose 时失败关闭（`disabled` / `storage`），不会先排队再补扫；同一 id 重复注册或格式非法抛 `invalid-input`，且不影响已注册来源。
+- 来源仍然只依赖冻结的 owner route（`assistant-delivery` 的 `validateOwnerRoute`）；注册不绕过 Policy `admit` 授权。
+- 没有新定时器：来源只在 `claim()` 或显式 `sweepSignals(force)` 时被扫一次，受各自的持久化 `intervalMs` 门控。
+- 内置适配器的 id 是 `owner-foreground-failures`；用同一 id 注册表示**替换**内置适配器（不会双重扫描），该来源沿用内置适配器已有的 `signal.cursor:owner-foreground-failures` / `signal.sweptAt:owner-foreground-failures` 键，因此首次扫描可能被判为 `not-due`。
 
 ### Policy 最小规则
 
@@ -186,7 +219,7 @@ rules:
 ## 限制
 
 - 单独使用 observe 模式没有产品价值：它只积累观察行，不唤醒、不通知。observe 仍要求 `assistant-delivery` 可用，因为准入要先校验 owner route；没有 Delivery 时准入记录不会写入（失败关闭），这是当前实现的已知限制。
-- 尚未接入**仓库外**真实来源（GitHub、邮件、IM、任务日历等）：内置来源只是 `assistant-delivery` 已认证的 owner foreground 记录，仍属于 in-tree 证据。
+- 尚未**随包发布**仓库外真实来源（GitHub、邮件、IM、任务日历等）：插件提供了 `registerSignalSource(...)` 扩展点，但具体来源适配器仍待独立插件实现；内置来源只是 `assistant-delivery` 已认证的 owner foreground 记录，仍属于 in-tree 证据。
 - 内置来源的 title/brief 由 delivery 行的**元数据**派生（inbox、binding、版本/代次、完成时间），不读取 owner 原文；因此 brief 不是完整任务复述，worker 需要自己查 delivery history 定位上下文。
 - canonical key 以**单次 execution**（inbox + binding 版本/代次 + executionRef + disposition）为单位，不是「同一意图第 N 次重复」；owner 同一意图重试失败会产生新的工作项（cooldown 与 `maxOpenItems` 限制总量）。
 - 已准入信号的 `disposition` 若被修正（例如 `failed` 后重新成功），会产生**不同** canonical key，因此不会自动关闭旧工作项；撤回（`cancelled`）只被观察计数，不向在途工作项传播取消。

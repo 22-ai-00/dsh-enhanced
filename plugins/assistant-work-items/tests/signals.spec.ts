@@ -241,7 +241,7 @@ describe('automatic signal admission', () => {
     const script = scriptedSource([{ candidates, cursor: { sequence: 5 } }])
     const setup = await fixture({
       source: script.source,
-      extra: { admission: { allowedKinds: ['review', 'triage'], maxOpenItems: 8, maxAdmitsPerHour: 4, dedupWindowMs: 3_600_000, cooldownMs: 0, maxBriefBytes: 512 }, sources: { foregroundFailures: { enabled: true, kind: 'review', maxAdmitsPerSweep: 2, maxCandidatesPerSweep: 5 } } },
+      extra: { admission: { allowedKinds: ['review', 'triage'], maxOpenItems: 8, maxAdmitsPerHour: 4, dedupWindowMs: 3_600_000, cooldownMs: 0, maxBriefBytes: 512 }, sources: { foregroundFailures: { enabled: false, kind: 'review', maxAdmitsPerSweep: 2, maxCandidatesPerSweep: 5 } } },
     })
     const report = setup.intake.sweep(true)
     expect(report.sources[0]).toMatchObject({ scanned: 3, admitted: 2 })

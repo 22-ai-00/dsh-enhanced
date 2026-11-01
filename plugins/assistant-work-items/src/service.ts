@@ -12,7 +12,11 @@ import type {
   PeerPolicyService,
 } from './peers.js'
 import { WorkItemStore } from './store.js'
-import { WorkItemSignalIntake, type WorkItemSignalSweepReport } from './signals.js'
+import {
+  WorkItemSignalIntake,
+  type WorkItemSignalRegistration,
+  type WorkItemSignalSweepReport,
+} from './signals.js'
 import { registerWorkItemTools } from './tools.js'
 import type {
   WorkItemAdmitInput,
@@ -233,6 +237,24 @@ export class AssistantWorkItemsService extends Service {
       replayed: result.replayed,
       notified,
     })
+  }
+
+  /**
+   * Register one additional automatic source and return an idempotent disposer.
+   *
+   * This is the public extension point for an external signal producer (a
+   * repository watcher, a chat bridge, a scheduler): the producer supplies a
+   * read-only `WorkItemSignalSource`, gets the same bounded sweep, provenance,
+   * dedupe, cooldown and settled-item fence as the built-in adapter, and can be
+   * withdrawn by disposing the registration. Registration fails closed when the
+   * intake is disabled or already disposed, and never admits retroactively.
+   */
+  registerSignalSource(registration: WorkItemSignalRegistration): () => void {
+    const components = this.#available()
+    const dispose = components.signals.register(registration)
+    return () => {
+      dispose()
+    }
   }
 
   /**
