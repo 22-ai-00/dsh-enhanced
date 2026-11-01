@@ -212,6 +212,85 @@ export interface WorkItemProvenance {
   readonly evidence?: Readonly<Record<string, string | number | boolean>>
 }
 
+/**
+ * One external thread this item follows for settlement.
+ *
+ * `kind` is the registered thread source (lower-kebab), `ref` is that source's
+ * own host identifier. Nothing here is authenticated by this plugin; resolution
+ * is the registered source's synchronous, read-only answer.
+ */
+export interface WorkItemThreadRef {
+  readonly kind: string
+  readonly ref: string
+}
+
+/** Whether a followed thread has finished. */
+export type WorkItemThreadClosureState = 'open' | 'closed'
+
+/** How a closed thread ended, as its own source reports it. */
+export type WorkItemThreadOutcome = 'succeeded' | 'failed' | 'cancelled' | 'unknown'
+
+/** One synchronous, read-only observation of a followed thread. */
+export interface WorkItemThreadClosure {
+  readonly state: WorkItemThreadClosureState
+  readonly outcome: WorkItemThreadOutcome
+  /** The source's own canonical revision identity for this observation. */
+  readonly digest: string
+  readonly observedAt?: number
+}
+
+/**
+ * Host-only registration of one thread source.
+ *
+ * `resolve` must be synchronous and read-only: it observes, it never mutates
+ * the host or the ledger. `undefined` means "this source cannot answer right
+ * now", which keeps the follow open rather than guessing a closure.
+ */
+export interface WorkItemThreadSourceRegistration {
+  /** Stable lower-kebab id; also the `kind` an admission follows. */
+  readonly source: string
+  /** Registration generation; a follow records it and a stale one cannot close. */
+  readonly generation: string
+  resolve(ref: string): WorkItemThreadClosure | undefined
+}
+
+/** Persisted lifecycle of one followed thread. */
+export type WorkItemFollowState = 'open' | 'closed'
+
+/** Why an open follow currently cannot be resolved; never a silent loss. */
+export type WorkItemFollowDegradedReason = 'source-missing' | 'resolver-failed' | 'generation-mismatch'
+
+/** One persisted follow of an item's settlement on an external thread. */
+export interface WorkItemFollowRecord {
+  readonly itemId: string
+  readonly position: number
+  readonly kind: string
+  readonly ref: string
+  readonly state: WorkItemFollowState
+  /** Only a closed follow carries an outcome (and its source digest). */
+  readonly outcome: WorkItemThreadOutcome | null
+  readonly digest: string | null
+  /** Registered source at admission; persisted for audit and fencing. */
+  readonly source: string
+  /** Source generation at admission; a newer registration cannot close this follow. */
+  readonly sourceGeneration: string
+  readonly openedAt: number
+  readonly closedAt: number | null
+}
+
+/** Bounded follow health projection; counts only, never refs or digests. */
+export interface WorkItemFollowHealth {
+  readonly open: number
+  readonly closed: number
+  /**
+   * Open follows this host currently cannot resolve: the source is no longer
+   * registered, its generation moved, or its resolver failed. Such an item
+   * stays `waiting` and is never guessed closed.
+   */
+  readonly unresolved: number
+  readonly degraded: WorkItemFollowDegradedReason | null
+}
+
 /** Input accepted by `assistantWorkItems.admit()`. */
 export interface WorkItemAdmitInput {
   readonly kind: string
@@ -221,6 +300,14 @@ export interface WorkItemAdmitInput {
   readonly originBindingId: string
   readonly acceptanceRef?: string
   readonly provenance?: WorkItemProvenance
+  /**
+   * Threads whose eventual closure bounds this item's settlement wait.
+   *
+   * A follow is not authority: it can only end the bounded wait early and park
+   * the item in `waiting` while the thread is open. It never asserts that the
+   * objective was achieved, and it cannot observe delivery evidence.
+   */
+  readonly follows?: readonly WorkItemThreadRef[]
 }
 
 /** Why an admission did not create a new item. */
@@ -281,6 +368,7 @@ export interface WorkItemHealth {
   readonly ownerRouteValid: boolean
   readonly settlement: WorkItemSettlementHealth
   readonly evaluation: WorkItemEvaluationHealth
+  readonly follows: WorkItemFollowHealth
 }
 
 /**
@@ -317,6 +405,11 @@ export type WorkItemOutcomeEvidenceReason =
   | 'window-expired'
   /** The window closed while the evidence channel was unavailable. */
   | 'channel-unavailable'
+  /**
+   * A followed thread closed and ended the bounded wait. Thread closure is not
+   * independent delivery evidence, so the revision stays `unverified`.
+   */
+  | 'closed-by-thread'
 
 /** Which durable transition appended this outcome revision. */
 export type WorkItemOutcomeSettledBy =
@@ -327,6 +420,8 @@ export type WorkItemOutcomeSettledBy =
   | 'retry-exhausted'
   | 'observed-evidence'
   | 'window-expired'
+  /** Every followed thread closed; the deferred terminal report settled the item. */
+  | 'closed-by-thread'
 
 /**
  * Allowlisted evidence captured from the delivery channel.
@@ -404,6 +499,15 @@ export interface WorkItemSettlementReport {
   readonly scanned: number
   readonly settled: number
   readonly expired: number
+  /**
+   * Items still parked in `waiting` because at least one followed thread stayed
+   * open (or was unresolvable) this pass.
+   */
+  readonly deferred: number
+  /** Items whose deferred terminal report settled because all follows closed. */
+  readonly closedByThread: number
+  /** Resolution degradation observed this pass; `null` when every source spoke. */
+  readonly followDegraded: WorkItemFollowDegradedReason | null
   /** Item ids whose pending window resolved to an observed receipt this pass. */
   readonly observedItemIds: readonly string[]
 }

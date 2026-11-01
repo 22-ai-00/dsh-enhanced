@@ -7,6 +7,8 @@ import {
   deriveWithdrawalOutcome,
   expiredOutcome,
   observedOutcome,
+  threadClosureOutcome,
+  type WorkItemDeferredReportStatus,
   type WorkItemOutcomeDraft,
 } from './outcome.ts'
 import type {
@@ -17,6 +19,8 @@ import type {
   WorkItemDispatchState,
   WorkItemEventRecord,
   WorkItemEvaluationState,
+  WorkItemFollowRecord,
+  WorkItemFollowState,
   WorkItemExecutionStatus,
   WorkItemObjectiveStatus,
   WorkItemOutcomeEvidence,
@@ -33,10 +37,12 @@ import type {
   WorkItemReportStatus,
   WorkItemScope,
   WorkItemState,
+  WorkItemThreadClosure,
+  WorkItemThreadOutcome,
 } from './types.ts'
 import { CLAIMABLE_STATES, OPEN_STATES, WorkItemError } from './types.ts'
 
-const SCHEMA_VERSION = 5
+const SCHEMA_VERSION = 6
 /** Ambiguous wake failures one generation may retry before the gap stays visible. */
 const MAX_UNKNOWN_WAKE_ATTEMPTS = 1
 /** Default bounded settlement window: seven days. */
@@ -57,12 +63,12 @@ const OPEN_STATE_PLACEHOLDERS = OPEN_STATES.map(() => '?').join(', ')
 const OUTCOME_SCHEMA = `CREATE TABLE work_item_outcome (
         item_id TEXT NOT NULL REFERENCES work_item(id) ON DELETE RESTRICT,
         revision INTEGER NOT NULL,
-        settled_by TEXT NOT NULL CHECK(settled_by IN ('report-ready', 'report-blocked', 'report-failed', 'withdrawn', 'retry-exhausted', 'observed-evidence', 'window-expired')),
+        settled_by TEXT NOT NULL CHECK(settled_by IN ('report-ready', 'report-blocked', 'report-failed', 'withdrawn', 'retry-exhausted', 'observed-evidence', 'window-expired', 'closed-by-thread')),
         execution_status TEXT NOT NULL CHECK(execution_status IN ('succeeded', 'failed', 'timed-out', 'cancelled', 'unknown')),
         objective_status TEXT NOT NULL CHECK(objective_status IN ('achieved', 'partial', 'not-achieved', 'unknown')),
         trust TEXT NOT NULL CHECK(trust IN ('agent-self-report', 'external-receipt', 'deterministic-check')),
         evidence_state TEXT NOT NULL CHECK(evidence_state IN ('pending', 'observed', 'unverified', 'not-applicable')),
-        evidence_reason TEXT CHECK(evidence_reason IN ('no-independent-source', 'evidence-too-large', 'window-expired', 'channel-unavailable')),
+        evidence_reason TEXT CHECK(evidence_reason IN ('no-independent-source', 'evidence-too-large', 'window-expired', 'channel-unavailable', 'closed-by-thread')),
         evidence TEXT, baseline_sequence INTEGER, inbox_id TEXT, authority_hash TEXT, deadline_at INTEGER,
         settled_at INTEGER NOT NULL, recorded_at INTEGER NOT NULL,
         evaluation_state TEXT NOT NULL DEFAULT 'pending' CHECK(evaluation_state IN ('pending', 'exported', 'skipped')),
@@ -95,6 +101,33 @@ const OUTCOME_SCHEMA_V3 = `CREATE TABLE work_item_outcome (
       CREATE INDEX work_item_outcome_pending_idx ON work_item_outcome(evidence_state, deadline_at);
     `
 
+/**
+ * Followed external threads whose closure bounds an item's settlement wait.
+ *
+ * A row is not authority: it records which host-registered source observed
+ * which thread, at which registration generation. The table is append-only in
+ * practice (`open` -> `closed` once, CAS-guarded), so a duplicate or
+ * out-of-order closure can never reopen or double-settle an item.
+ */
+const FOLLOW_SCHEMA = `CREATE TABLE work_item_follow (
+        item_id TEXT NOT NULL REFERENCES work_item(id) ON DELETE RESTRICT,
+        position INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        ref TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('open', 'closed')),
+        outcome TEXT CHECK(outcome IN ('succeeded', 'failed', 'cancelled', 'unknown')),
+        digest TEXT,
+        source TEXT NOT NULL,
+        source_generation TEXT NOT NULL,
+        opened_at INTEGER NOT NULL,
+        closed_at INTEGER,
+        CHECK((state = 'open' AND outcome IS NULL AND digest IS NULL AND closed_at IS NULL)
+          OR (state = 'closed' AND outcome IS NOT NULL AND digest IS NOT NULL AND closed_at IS NOT NULL)),
+        PRIMARY KEY(item_id, position)
+      ) STRICT, WITHOUT ROWID;
+      CREATE INDEX work_item_follow_state_idx ON work_item_follow(state, source);
+    `
+
 type Row = Record<string, unknown>
 
 /** Every durable item column, in insert order. */
@@ -115,6 +148,19 @@ const ITEM_ALIASES = ITEM_COLUMNS.map(column => {
 const INSERT_ITEM = `INSERT INTO work_item(${ITEM_COLUMNS.join(', ')}) VALUES (${ITEM_COLUMNS.map(() => '?').join(', ')})`
 
 const REPORTABLE_STATES: readonly WorkItemState[] = ['claimed', 'working', 'waiting']
+
+/** Deferred terminal report statuses, the only ones a follow can defer. */
+const DEFERRED_REPORT_STATUSES: readonly WorkItemDeferredReportStatus[] = ['ready', 'blocked', 'failed']
+
+/** One validated follow, already resolved to its registered source at admission. */
+export interface WorkItemFollowInput {
+  readonly kind: string
+  readonly ref: string
+  /** Registered source key; equals `kind` and is persisted for audit. */
+  readonly source: string
+  /** Registration generation at admission; a newer one cannot close this row. */
+  readonly sourceGeneration: string
+}
 
 /**
  * Deterministic external event identity for one dispatch generation.
@@ -247,11 +293,12 @@ function validateSchema(database: DatabaseSync): void {
         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
         UNIQUE(automation_id, event_id)
       ) STRICT;
+      ${FOLLOW_SCHEMA}
       CREATE TABLE work_item_schema_meta (
         key TEXT PRIMARY KEY, value TEXT NOT NULL
       ) STRICT, WITHOUT ROWID;
-      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '5');
-      PRAGMA user_version = 5;
+      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '6');
+      PRAGMA user_version = 6;
       COMMIT;
     `)
     return
@@ -319,8 +366,30 @@ function validateSchema(database: DatabaseSync): void {
       COMMIT;
     `)
   }
-  if (version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
-  const expected = JSON.stringify(['work_item', 'work_item_claim', 'work_item_dispatch', 'work_item_event', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta'])
+  if (version === 1 || version === 2 || version === 3 || version === 4 || version === 5) {
+    // v6 adds followed-thread settlement. Two of its enum values land on the
+    // append-only outcome ledger, and SQLite cannot alter a CHECK, so the ledger
+    // is rebuilt: RENAME, create the widened shape, copy every row column for
+    // column, drop the old table, recreate both indexes. No row is dropped and
+    // no stored value changes; only the two CHECK lists gain `closed-by-thread`.
+    // The follow table itself is a pure additive creation.
+    database.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE work_item_outcome RENAME TO work_item_outcome_v5;
+      DROP INDEX work_item_outcome_pending_idx;
+      DROP INDEX work_item_outcome_evaluation_idx;
+      ${OUTCOME_SCHEMA}
+      INSERT INTO work_item_outcome(item_id, revision, settled_by, execution_status, objective_status, trust, evidence_state, evidence_reason, evidence, baseline_sequence, inbox_id, authority_hash, deadline_at, settled_at, recorded_at, evaluation_state, evaluation_digest, evaluation_recorded_at, evaluation_attempts)
+        SELECT item_id, revision, settled_by, execution_status, objective_status, trust, evidence_state, evidence_reason, evidence, baseline_sequence, inbox_id, authority_hash, deadline_at, settled_at, recorded_at, evaluation_state, evaluation_digest, evaluation_recorded_at, evaluation_attempts FROM work_item_outcome_v5;
+      DROP TABLE work_item_outcome_v5;
+      ${FOLLOW_SCHEMA}
+      UPDATE work_item_schema_meta SET value = '6' WHERE key = 'schema_version';
+      PRAGMA user_version = 6;
+      COMMIT;
+    `)
+  }
+  if (version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
+  const expected = JSON.stringify(['work_item', 'work_item_claim', 'work_item_dispatch', 'work_item_event', 'work_item_follow', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta'])
   const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Row[]).map(row => String(row['name']))
   if (JSON.stringify(tables) !== expected) fail('storage', 'work-item database schema is not the expected shape')
 }
@@ -461,6 +530,22 @@ function outcomeFromRow(row: Row): WorkItemOutcomeRecord {
 }
 
 /** Latest outcome revision per item; older revisions stay as immutable history. */
+function followFromRow(row: Row): WorkItemFollowRecord {
+  return Object.freeze({
+    itemId: String(row['item_id']),
+    position: Number(row['position']),
+    kind: String(row['kind']),
+    ref: String(row['ref']),
+    state: String(row['state']) as WorkItemFollowState,
+    outcome: optString(row['outcome']) as WorkItemThreadOutcome | null,
+    digest: optString(row['digest']),
+    source: String(row['source']),
+    sourceGeneration: String(row['source_generation']),
+    openedAt: Number(row['opened_at']),
+    closedAt: optNumber(row['closed_at']),
+  })
+}
+
 const LATEST_OUTCOME = 'SELECT item_id, MAX(revision) AS revision FROM work_item_outcome GROUP BY item_id'
 
 export interface ClaimResult {
@@ -507,6 +592,8 @@ export interface WorkItemStoreStats {
   readonly evaluationPending: number
   readonly evaluationExported: number
   readonly evaluationSkipped: number
+  /** Persisted followed-thread rows (open and closed). */
+  readonly follows: number
 }
 
 /**
@@ -606,6 +693,7 @@ export class WorkItemStore {
       evaluationPending: evaluations.pending,
       evaluationExported: evaluations.exported,
       evaluationSkipped: evaluations.skipped,
+      follows: count('SELECT COUNT(*) AS count FROM work_item_follow'),
     })
   }
 
@@ -709,6 +797,139 @@ export class WorkItemStore {
     return Number(row['count'])
   }
 
+  /** Follows of one item, in admission order (their stable position). */
+  follows(itemId: string): readonly WorkItemFollowRecord[] {
+    return Object.freeze((this.#statement('SELECT * FROM work_item_follow WHERE item_id = ? ORDER BY position ASC').all(itemId) as Row[]).map(followFromRow))
+  }
+
+  countOpenFollows(itemId: string): number {
+    const row = this.#statement("SELECT COUNT(*) AS count FROM work_item_follow WHERE item_id = ? AND state = 'open'").get(itemId) as Row
+    return Number(row['count'])
+  }
+
+  /** Global follow counts for health reporting (open rows of live items only). */
+  countFollows(): { open: number; closed: number } {
+    const liveStates = OPEN_STATES.map(() => '?').join(', ')
+    const open = this.#statement(`
+      SELECT COUNT(*) AS count FROM work_item_follow AS follow
+      JOIN work_item AS item ON item.id = follow.item_id
+      WHERE follow.state = 'open' AND item.observed = 0 AND item.state IN (${liveStates})
+    `).get(...OPEN_STATES) as Row
+    const closed = this.#statement("SELECT COUNT(*) AS count FROM work_item_follow WHERE state = 'closed'").get() as Row
+    return { open: Number(open['count']), closed: Number(closed['count']) }
+  }
+
+  /**
+   * Identity of every open follow on a live item, for health projections.
+   *
+   * A follow row outlives the item it parked when that item is withdrawn or
+   * otherwise settled by another path (no resolver ever observed those threads).
+   * Reporting those rows as gaps would make health permanently degraded over
+   * dead items, so only follows of still-open items count.
+   */
+  openFollowIdentities(): readonly { readonly source: string; readonly sourceGeneration: string }[] {
+    const liveStates = OPEN_STATES.map(() => '?').join(', ')
+    const rows = this.#statement(`
+      SELECT follow.source, follow.source_generation FROM work_item_follow AS follow
+      JOIN work_item AS item ON item.id = follow.item_id
+      WHERE follow.state = 'open' AND item.observed = 0 AND item.state IN (${liveStates})
+    `).all(...OPEN_STATES) as Row[]
+    return Object.freeze(rows.map(row => Object.freeze({
+      source: String(row['source']),
+      sourceGeneration: String(row['source_generation']),
+    })))
+  }
+
+  /** Open follows across live items, oldest first, bounded for diagnostics. */
+  listOpenFollows(limit: number): readonly WorkItemFollowRecord[] {
+    const liveStates = OPEN_STATES.map(() => '?').join(', ')
+    const rows = this.#statement(`
+      SELECT follow.* FROM work_item_follow AS follow
+      JOIN work_item AS item ON item.id = follow.item_id
+      WHERE follow.state = 'open' AND item.observed = 0 AND item.state IN (${liveStates})
+      ORDER BY follow.opened_at ASC, follow.item_id ASC, follow.position ASC LIMIT ?
+    `).all(...OPEN_STATES, limit) as Row[]
+    return Object.freeze(rows.map(followFromRow))
+  }
+
+  /**
+   * Close one open follow exactly once.
+   *
+   * The CAS on `state = 'open'` is what makes duplicate and out-of-order
+   * closures harmless: a second observation of the same closure changes no row
+   * and reports `undefined`, so no settlement signal can be produced twice.
+   */
+  closeFollow(itemId: string, position: number, closure: WorkItemThreadClosure, now = this.#now()): WorkItemFollowRecord | undefined {
+    if (closure.state !== 'closed') fail('invalid-input', 'only a closed thread observation can close a follow')
+    return this.#transaction(() => {
+      const changes = this.#statement(`
+        UPDATE work_item_follow SET state = 'closed', outcome = ?, digest = ?, closed_at = ?
+        WHERE item_id = ? AND position = ? AND state = 'open'
+      `).run(closure.outcome, closure.digest, now, itemId, position)
+      if (Number(changes.changes) === 0) return undefined
+      return this.follows(itemId)[position]
+    })
+  }
+
+  /**
+   * Waiting items that owe a thread-closure settlement.
+   *
+   * `waiting` with a terminal `last_report_status` is produced only by the
+   * deferred report branch, so this is exactly the deferred set. Selecting on
+   * the report status rather than on open follow rows keeps the sweep
+   * crash-safe: a crash after closing the last follow but before appending the
+   * outcome still finds the item on the next pass. A live lease is excluded
+   * (additionally to the state check) so a re-claimed item is never settled
+   * underneath its new worker.
+   */
+  itemsAwaitingThreadClosure(limit: number): readonly WorkItemRecord[] {
+    const rows = this.#statement(`
+      SELECT ${ITEM_ALIASES} FROM work_item
+      WHERE observed = 0 AND state = 'waiting' AND lease_until IS NULL
+        AND last_report_status IN ('ready', 'blocked', 'failed')
+      ORDER BY updated_at ASC, id ASC LIMIT ?
+    `).all(limit) as Row[]
+    return Object.freeze(rows.map(itemFromRow))
+  }
+
+  /**
+   * Settle one deferred item because every followed thread is closed.
+   *
+   * This appends at most one outcome revision, and a second call is a no-op.
+   * The transition reuses the recorded terminal report status, so the item
+   * still ends in the state the worker reported; the closure itself is never
+   * treated as evidence of objective achievement.
+   */
+  settleThreadClosure(itemId: string): WorkItemOutcomeRecord | undefined {
+    return this.#transaction(() => {
+      const item = this.#requireItem(itemId)
+      if (item.state !== 'waiting') fail('invalid-state', `item is ${item.state}, not awaiting thread closure`)
+      if (item.observed) fail('invalid-state', 'observed items never settle from a thread closure')
+      const status = item.lastReportStatus
+      if (status === null || !DEFERRED_REPORT_STATUSES.includes(status as WorkItemDeferredReportStatus)) {
+        fail('invalid-state', 'item has no deferred terminal report to settle')
+      }
+      if (this.countOpenFollows(item.id) > 0) fail('invalid-state', 'item still follows an open thread')
+      // Exactly-once: a settlement revision that already exists is authoritative,
+      // so a replay (duplicate closure, or a second sweep) appends nothing.
+      if (this.latestOutcome(item.id) !== undefined) return undefined
+      const now = this.#now()
+      const nextState: WorkItemState = status === 'ready' ? 'ready' : status === 'blocked' ? 'blocked' : 'failed'
+      const reason = status === 'blocked' ? 'reported-blocked' : status === 'failed' ? 'reported-failed' : null
+      this.#statement('UPDATE work_item SET state = ?, state_reason = ?, lease_until = NULL, updated_at = ? WHERE id = ?')
+        .run(nextState, reason, now, item.id)
+      this.#statement("UPDATE work_item_claim SET state = 'released', updated_at = ? WHERE item_id = ? AND state = 'active'")
+        .run(now, item.id)
+      this.#appendEvent(item.id, 'settled', 'settlement', { reason: 'closed-by-thread', reportStatus: status }, now)
+      const draft = threadClosureOutcome({
+        status: status as WorkItemDeferredReportStatus,
+        provenance: this.#admissionProvenance(item.id),
+        now,
+      })
+      return this.#insertOutcome(item.id, draft, now)
+    })
+  }
+
   /**
    * Ambiguous sends that still describe an actionable gap.
    *
@@ -731,7 +952,12 @@ export class WorkItemStore {
    * Insert one admitted item, its lifecycle event and its single dispatch row
    * in one transaction. A crash between these writes is impossible.
    */
-  admitItem(record: WorkItemRecord, event: { kind: string; actor: string; detail?: unknown }, dispatch: WorkItemDispatchRecord): void {
+  admitItem(
+    record: WorkItemRecord,
+    event: { kind: string; actor: string; detail?: unknown },
+    dispatch: WorkItemDispatchRecord,
+    follows: readonly WorkItemFollowInput[] = [],
+  ): void {
     this.#transaction(() => {
       this.#statement(INSERT_ITEM).run(
         record.id, record.dedupKey, record.dedupBucket, record.sourceId, record.kind, record.externalId,
@@ -747,6 +973,14 @@ export class WorkItemStore {
         INSERT INTO work_item_dispatch(item_id, automation_id, event_id, occurred_at, generation, wake_attempts, state, occurrence_id, reason, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(dispatch.itemId, dispatch.automationId, dispatch.eventId, dispatch.occurredAt, dispatch.generation, dispatch.wakeAttempts, dispatch.state, dispatch.occurrenceId, dispatch.reason, dispatch.createdAt, dispatch.updatedAt)
+      // Follows are inserted in the same transaction as the item, so a crash can
+      // never leave an admitted item whose bounded wait is unbounded by accident.
+      follows.forEach((follow, position) => {
+        this.#statement(`
+          INSERT INTO work_item_follow(item_id, position, kind, ref, state, outcome, digest, source, source_generation, opened_at, closed_at)
+          VALUES (?, ?, ?, ?, 'open', NULL, NULL, ?, ?, ?, NULL)
+        `).run(record.id, position, follow.kind, follow.ref, follow.source, follow.sourceGeneration, record.createdAt)
+      })
     })
   }
 
@@ -875,6 +1109,7 @@ export class WorkItemStore {
       || outcome.settledBy === 'report-failed'
       || outcome.settledBy === 'observed-evidence'
       || outcome.settledBy === 'window-expired'
+      || outcome.settledBy === 'closed-by-thread'
     const report = reportBacked ? this.lastReport(itemId) : undefined
     return Object.freeze({
       outcome,
@@ -1368,6 +1603,13 @@ export class WorkItemStore {
 
       let nextState: WorkItemState
       let reason: string | null = null
+      // A terminal report whose item still follows an open thread is parked in
+      // `waiting` instead of settling: the report is recorded and its status is
+      // remembered, but no outcome revision exists yet and the worker's run is
+      // complete. Settlement is deferred to a later bounded pass, so a closure
+      // that arrived before the report can never end the item early.
+      const followed = this.countOpenFollows(item.id) > 0
+      const deferred = followed && DEFERRED_REPORT_STATUSES.includes(input.status as WorkItemDeferredReportStatus) && !item.observed
       switch (input.status) {
         case 'progress':
           nextState = 'working'
@@ -1394,10 +1636,12 @@ export class WorkItemStore {
         this.#statement('UPDATE work_item_claim SET leased_until = ?, updated_at = ? WHERE claim_id = ?')
           .run(lease, now, claim.claimId)
       } else {
+        const storedState = deferred ? 'waiting' : nextState
+        const storedReason = deferred ? 'following-thread' : reason
         this.#statement('UPDATE work_item SET state = ?, state_reason = ?, lease_until = NULL, last_report_status = ?, updated_at = ? WHERE id = ?')
-          .run(nextState, reason, input.status, now, item.id)
+          .run(storedState, storedReason, input.status, now, item.id)
         this.#statement('UPDATE work_item_claim SET state = ?, updated_at = ? WHERE claim_id = ?')
-          .run(input.status === 'waiting' ? 'released' : 'completed', now, claim.claimId)
+          .run(input.status === 'waiting' && !deferred ? 'released' : 'completed', now, claim.claimId)
       }
       this.#appendEvent(item.id, 'reported', 'worker', { revision, status: input.status }, now)
       // `waiting` is not terminal: the item stays claimable, but nobody holds
@@ -1422,7 +1666,9 @@ export class WorkItemStore {
         now,
         windowMs: this.#settleWindowMs,
       })
-      if (outcome !== null) this.#insertOutcome(item.id, outcome, now)
+      // Deferred items deliberately get no outcome row here: the single outcome
+      // is appended by `settleThreadClosure()` once every follow is closed.
+      if (outcome !== null && !deferred) this.#insertOutcome(item.id, outcome, now)
       const stored = this.#statement('SELECT * FROM work_item_report WHERE item_id = ? AND revision = ?').get(item.id, revision) as Row
       return Object.freeze({ item: this.#requireItem(item.id), report: reportFromRow(stored), replayed: false })
     })

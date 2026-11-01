@@ -175,6 +175,38 @@ export function deriveReportOutcome(input: {
   }
 }
 
+/** Terminal report statuses whose settlement a followed thread can defer. */
+export type WorkItemDeferredReportStatus = Extract<WorkItemReportStatus, 'ready' | 'blocked' | 'failed'>
+
+/**
+ * Derive the outcome revision for a terminal report that was deferred until its
+ * followed threads closed.
+ *
+ * The report's own honest mapping is reused (a `ready` report stays
+ * `objectiveStatus: unknown`, a `blocked`/`failed` report stays
+ * `not-achieved`), but the revision is marked as thread-settled: closure is not
+ * delivery evidence, so the revision is `unverified` with `closed-by-thread`
+ * and never opens another window. This path can never derive `achieved` or
+ * `partial`.
+ */
+export function threadClosureOutcome(input: {
+  readonly status: WorkItemDeferredReportStatus
+  readonly provenance: WorkItemProvenance | null
+  readonly now: number
+}): WorkItemOutcomeDraft {
+  const base = deriveReportOutcome({ ...input, windowMs: 0 })
+  if (base === null) throw new Error('a terminal report status always derives an outcome')
+  return Object.freeze({
+    ...base,
+    settledBy: 'closed-by-thread' as const,
+    evidenceState: 'unverified' as const,
+    evidenceReason: 'closed-by-thread' as const,
+    evidence: null,
+    deadlineAt: null,
+    settledAt: input.now,
+  })
+}
+
 /** Derive the outcome for a dropped (withdrawn) item. */
 export function deriveWithdrawalOutcome(now: number): WorkItemOutcomeDraft {
   return Object.freeze({

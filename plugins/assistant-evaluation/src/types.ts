@@ -315,6 +315,13 @@ export type WorkItemSettledBy =
   | 'retry-exhausted'
   | 'observed-evidence'
   | 'window-expired'
+  /**
+   * Every followed external thread closed, so the bounded settlement wait ended
+   * before its deadline without in-window delivery evidence. The value is
+   * exported verbatim: it is still an unverified settlement and still cannot
+   * assert an objective.
+   */
+  | 'closed-by-thread'
 
 /** Work-item evidence vocabulary mirrored structurally. */
 export type WorkItemEvaluationEvidenceState = 'pending' | 'observed' | 'unverified' | 'not-applicable'

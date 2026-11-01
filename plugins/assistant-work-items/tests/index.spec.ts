@@ -127,6 +127,7 @@ describe('dsh-enhanced-assistant-work-items entrypoint', () => {
       dispatchUnknown: 0,
       workerConnected: false,
       ownerRouteValid: false,
+      follows: { open: 0, closed: 0, unresolved: 0, degraded: null },
       settlement: {
         enabled: false,
         pending: 0,
@@ -202,6 +203,9 @@ describe('dsh-enhanced-assistant-work-items entrypoint', () => {
       scanned: 0,
       settled: 0,
       expired: 0,
+      deferred: 0,
+      closedByThread: 0,
+      followDegraded: null,
       observedItemIds: [],
     })
     service.close()

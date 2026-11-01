@@ -26,7 +26,7 @@ import type { WorkItemAdmission } from './admission.ts'
 import type { WorkItemDispatch } from './dispatch.ts'
 import type { PeerDeliveryService, PeerOwnerForegroundTaskSource } from './peers.ts'
 import type { WorkItemStore } from './store.ts'
-import type { WorkItemAdmitResult, WorkItemProvenance, WorkItemRecord, WorkItemWithdrawResult } from './types.ts'
+import type { WorkItemAdmitResult, WorkItemProvenance, WorkItemRecord, WorkItemThreadRef, WorkItemWithdrawResult } from './types.ts'
 import { WorkItemError } from './types.ts'
 
 /** What one adapter sweep is allowed to spend. */
@@ -46,6 +46,11 @@ export interface WorkItemSignalCandidate {
   readonly brief: string
   readonly originBindingId: string
   readonly acceptanceRef?: string
+  /**
+   * External threads this work item follows. Optional: a source that does not
+   * model threads keeps admitting exactly as before.
+   */
+  readonly follows?: readonly WorkItemThreadRef[]
   readonly occurredAt: number
   readonly provenance: WorkItemProvenance
   /**
@@ -396,6 +401,7 @@ export class WorkItemSignalIntake {
           brief: candidate.brief,
           originBindingId: candidate.originBindingId,
           ...(candidate.acceptanceRef === undefined ? {} : { acceptanceRef: candidate.acceptanceRef }),
+          ...(candidate.follows === undefined ? {} : { follows: candidate.follows }),
           provenance: candidate.provenance,
         })
       } catch (error) {

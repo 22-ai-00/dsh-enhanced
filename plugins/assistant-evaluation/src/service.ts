@@ -1395,7 +1395,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
         const evidenceState = claims.evidenceState
         const occurredAt = claims.occurredAt
         if (!Number.isSafeInteger(revision) || revision < 1
-          || !['report-ready', 'report-blocked', 'report-failed', 'withdrawn', 'retry-exhausted', 'observed-evidence', 'window-expired'].includes(settledBy)
+          || !['report-ready', 'report-blocked', 'report-failed', 'withdrawn', 'retry-exhausted', 'observed-evidence', 'window-expired', 'closed-by-thread'].includes(settledBy)
           || !['observed', 'unverified', 'not-applicable'].includes(evidenceState)) {
           throw new AssistantEvaluationError('forbidden', 'work-item Evaluation settlement is invalid')
         }

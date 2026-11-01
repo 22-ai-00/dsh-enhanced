@@ -12,7 +12,7 @@ import type {
   PeerOwnerRouteReceipt,
   PeerPolicyService,
 } from './peers.js'
-import { settleOutcomes as runSettlement, type SettlementResult } from './settlement.js'
+import { settleOutcomes as runSettlement, type SettlementResult, type ThreadResolution } from './settlement.js'
 import { WorkItemStore } from './store.js'
 import {
   WorkItemSignalIntake,
@@ -25,6 +25,8 @@ import type {
   WorkItemAdmitResult,
   WorkItemClaimRecord,
   WorkItemEvaluationHealth,
+  WorkItemFollowDegradedReason,
+  WorkItemFollowRecord,
   WorkItemHealth,
   WorkItemOutcomeEvidenceState,
   WorkItemOutcomeView,
@@ -32,6 +34,8 @@ import type {
   WorkItemReportRecord,
   WorkItemReportStatus,
   WorkItemSettlementReport,
+  WorkItemThreadClosure,
+  WorkItemThreadSourceRegistration,
 } from './types.js'
 import { WorkItemError } from './types.js'
 import { WorkItemWorkspace } from './workspace.js'
@@ -118,6 +122,9 @@ export class AssistantWorkItemsService extends Service {
 
   readonly #config: NormalizedConfig
   readonly #evaluation: WorkItemEvaluationExporter
+  /** Host-registered followed-thread sources; empty means no follow can close. */
+  readonly #threadSources = new Map<string, WorkItemThreadSourceRegistration>()
+  #followDegraded: WorkItemFollowDegradedReason | null = null
   #components: Components | undefined
   #closed = false
 
@@ -291,6 +298,39 @@ export class AssistantWorkItemsService extends Service {
   }
 
   /**
+   * Register the only resolver for one followed-thread source.
+   *
+   * Host-only extension point. Registration is one-per-source, validated
+   * synchronously and revoked by the returned disposer. A follow recorded while
+   * a source is registered stores that source's generation, so replacing the
+   * source later degrades the follow to `unresolved` instead of trusting a
+   * stale closure. This adds resolution capability only: it is not authority to
+   * end an item, and a closure never claims an objective was achieved.
+   */
+  registerThreadSource(registration: WorkItemThreadSourceRegistration): () => void {
+    if (!this.#config.enabled || this.#closed) fail('disabled', 'the work-item intake is disabled')
+    if (registration === null || typeof registration !== 'object' || Array.isArray(registration)) {
+      fail('invalid-input', 'thread source registration must be an object')
+    }
+    const allowed = ['source', 'generation', 'resolve'] as const
+    for (const key of Object.keys(registration)) {
+      if (!(allowed as readonly string[]).includes(key)) fail('invalid-input', `thread source registration contains unknown field ${key}`)
+    }
+    const source = text(registration.source, 'thread source', 64)
+    if (!/^[a-z][a-z0-9-]{0,63}$/.test(source)) fail('invalid-input', 'thread source has an invalid shape')
+    text(registration.generation, 'thread source generation', 200)
+    if (typeof registration.resolve !== 'function') fail('invalid-input', 'thread source must expose a resolve function')
+    if (this.#threadSources.has(source)) fail('invalid-input', `thread source ${source} is already registered`)
+    const installed = registration
+    this.#threadSources.set(source, installed)
+    return () => {
+      // Only the disposer of the live registration may revoke it, so a stale
+      // disposer from a replaced source cannot delete the current one.
+      if (this.#threadSources.get(source) === installed) this.#threadSources.delete(source)
+    }
+  }
+
+  /**
    * Trusted Evaluation producer generation (fourth trusted producer).
    *
    * `assistant-evaluation` reads this before registering a sink; returning a
@@ -351,6 +391,9 @@ export class AssistantWorkItemsService extends Service {
         scanned: 0,
         settled: 0,
         expired: 0,
+        deferred: 0,
+        closedByThread: 0,
+        followDegraded: null,
         observedItemIds: Object.freeze([]),
       })
     }
@@ -372,6 +415,9 @@ export class AssistantWorkItemsService extends Service {
         scanned: 0,
         settled: 0,
         expired: 0,
+        deferred: 0,
+        closedByThread: 0,
+        followDegraded: null,
         observedItemIds: Object.freeze([]),
       })
     }
@@ -422,6 +468,7 @@ export class AssistantWorkItemsService extends Service {
       dispatchUnknown: 0,
       workerConnected: config.enabled && this.#automations() !== undefined,
       ownerRouteValid: false,
+      follows: Object.freeze({ open: 0, closed: 0, unresolved: 0, degraded: null }),
       settlement: Object.freeze({
         enabled: config.enabled && config.settlement.enabled,
         pending: 0,
@@ -455,6 +502,7 @@ export class AssistantWorkItemsService extends Service {
       dispatchUnknown: components.store.countDispatchUnknown(),
       workerConnected: workerIsConnected(this.#automations()),
       ownerRouteValid: this.#ownerRouteValid(),
+      follows: this.#followHealth(components.store),
       settlement: Object.freeze({
         enabled: config.settlement.enabled,
         pending: components.store.countLatestOutcomes('pending'),
@@ -559,7 +607,7 @@ export class AssistantWorkItemsService extends Service {
   #settlement(components: Components, force: boolean): SettlementResult {
     const config = this.#config
     const scope = config.scope
-    return runSettlement({
+    const result = runSettlement({
       store: components.store,
       delivery: this.#delivery(),
       scope: scope === null
@@ -574,8 +622,69 @@ export class AssistantWorkItemsService extends Service {
       maxSourcesPerSweep: config.settlement.maxSourcesPerSweep,
       maxPendingPerSweep: config.settlement.maxPendingPerSweep,
       maxSettlementsPerSweep: config.settlement.maxSettlementsPerSweep,
+      threads: follow => this.#resolveThread(follow),
       warn: message => this.ctx.logger.warn(message),
     }, force)
+    this.#followDegraded = result.report.followDegraded
+    return result
+  }
+
+  /**
+   * Resolve one open follow against its registered source.
+   *
+   * Synchronous and read-only: no timer, no promise, no write. Every refusal
+   * returns `unresolved` so the item stays parked and health can name the
+   * degradation, rather than a missing source or a stale generation being read
+   * as a closure.
+   */
+  #resolveThread(follow: WorkItemFollowRecord): ThreadResolution {
+    const registration = this.#threadSources.get(follow.source)
+    if (registration === undefined) return { kind: 'unresolved', reason: 'source-missing' }
+    // A source that regenerated cannot vouch for a follow recorded under its
+    // old generation; the closure may still be true, but it is not observed.
+    if (registration.generation !== follow.sourceGeneration) return { kind: 'unresolved', reason: 'generation-mismatch' }
+    let closure: WorkItemThreadClosure | undefined
+    try {
+      closure = registration.resolve(follow.ref)
+    } catch (error) {
+      this.ctx.logger.warn(`assistant-work-items: thread resolution failed for ${follow.source}: ${describe(error)}`)
+      return { kind: 'unresolved', reason: 'resolver-failed' }
+    }
+    if (closure === undefined) return { kind: 'unresolved', reason: 'resolver-failed' }
+    if (closure === null || typeof closure !== 'object' || Array.isArray(closure)) {
+      return { kind: 'unresolved', reason: 'resolver-failed' }
+    }
+    if (closure.state === 'open') return { kind: 'open' }
+    if (closure.state !== 'closed') return { kind: 'unresolved', reason: 'resolver-failed' }
+    if (!['succeeded', 'failed', 'cancelled', 'unknown'].includes(closure.outcome)
+      || typeof closure.digest !== 'string' || closure.digest.trim().length === 0
+      || (closure.observedAt !== undefined && (!Number.isSafeInteger(closure.observedAt) || closure.observedAt <= 0))) {
+      // A malformed closure is never a closure: fail closed toward `waiting`.
+      return { kind: 'unresolved', reason: 'resolver-failed' }
+    }
+    return { kind: 'closed', outcome: closure.outcome, digest: closure.digest }
+  }
+
+  /** Live follow counts and degradation; never resolves or writes anything. */
+  #followHealth(store: WorkItemStore): WorkItemHealth['follows'] {
+    const counts = store.countFollows()
+    let unresolved = 0
+    let missingSource = false
+    let mismatched = false
+    for (const identity of store.openFollowIdentities()) {
+      const registration = this.#threadSources.get(identity.source)
+      if (registration === undefined) {
+        unresolved += 1
+        missingSource = true
+      } else if (registration.generation !== identity.sourceGeneration) {
+        unresolved += 1
+        mismatched = true
+      }
+    }
+    const degraded: WorkItemFollowDegradedReason | null = missingSource
+      ? 'source-missing'
+      : mismatched ? 'generation-mismatch' : this.#followDegraded
+    return Object.freeze({ open: counts.open, closed: counts.closed, unresolved, degraded })
   }
 
   /** Degradation visible in health without running a pass or touching SQLite. */
@@ -610,6 +719,12 @@ export class AssistantWorkItemsService extends Service {
       workspace,
       policy: this.#policy(),
       delivery: this.#delivery(),
+      threadSource: kind => {
+        const registration = this.#threadSources.get(kind)
+        return registration === undefined
+          ? undefined
+          : Object.freeze({ source: registration.source, generation: registration.generation })
+      },
     })
     const dispatch = new WorkItemDispatch({
       config,

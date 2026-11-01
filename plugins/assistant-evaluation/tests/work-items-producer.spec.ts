@@ -175,6 +175,20 @@ describe('trusted work-item Evaluation producer', () => {
     }
   })
 
+  test('carries a thread-closure settlement verbatim and keeps it unverified', async () => {
+    const { service, producer } = setup(new WorkItemTestProducer())
+    await producer.append(claims({ settledBy: 'closed-by-thread', evidenceState: 'unverified' }))
+    const stored = service.query({ scope: SCOPE, limit: 10 })
+    expect(stored).toHaveLength(1)
+    expect(stored[0]).toMatchObject({
+      executionStatus: 'unknown',
+      objectiveStatus: 'unknown',
+      deliveryStatus: 'unknown',
+      trust: 'trusted',
+      evaluator: { id: 'assistant-work-items', version: 'unverified-v1' },
+    })
+  })
+
   test('replays an identical settlement without a second outcome', async () => {
     const { service, producer } = setup(new WorkItemTestProducer())
     await producer.append(claims())
@@ -205,6 +219,8 @@ describe('trusted work-item Evaluation producer', () => {
     await expect(registration.append({ ...claims(), evidenceState: 'pending' } as never))
       .rejects.toThrow(/settlement is invalid/)
     await expect(registration.append({ ...claims(), outcomeRevision: 0 } as never))
+      .rejects.toThrow(/settlement is invalid/)
+    await expect(registration.append({ ...claims(), settledBy: 'made-up-reason' } as never))
       .rejects.toThrow(/settlement is invalid/)
     await expect(registration.append({ ...claims(), idempotencyKey: 'work-items/forged' } as never))
       .rejects.toThrow(/identity is not deterministic/)

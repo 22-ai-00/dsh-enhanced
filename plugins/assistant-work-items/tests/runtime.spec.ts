@@ -904,6 +904,7 @@ describe('work-item store projection', () => {
         SELECT item_id, run_id, occurrence_id, state, leased_until, created_at, updated_at FROM work_item_claim_v2;
       DROP TABLE work_item_claim_v2;
       DROP TABLE work_item_outcome;
+      DROP TABLE work_item_follow;
       ALTER TABLE work_item_dispatch RENAME TO work_item_dispatch_v4;
       CREATE TABLE work_item_dispatch (
         item_id TEXT PRIMARY KEY REFERENCES work_item(id) ON DELETE RESTRICT,
@@ -925,7 +926,7 @@ describe('work-item store projection', () => {
     closers.push(() => reopened.close())
     expect(reopened.findClaimByRun('run-1')).toMatchObject({ claimId: 1, itemId: admitted.item.id, state: 'active' })
     expect(reopened.findItemById(admitted.item.id)).toMatchObject({ state: 'claimed', owner: { generation: 2 } })
-    expect(reopened.stats()).toMatchObject({ items: 1, schemaVersion: 5, outcomes: 0, pendingOutcomes: 0 })
+    expect(reopened.stats()).toMatchObject({ items: 1, schemaVersion: 6, outcomes: 0, pendingOutcomes: 0 })
   })
 })
 

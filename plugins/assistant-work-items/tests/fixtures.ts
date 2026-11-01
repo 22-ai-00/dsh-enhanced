@@ -87,8 +87,14 @@ export interface Harness {
   advance(ms: number): void
 }
 
+/** Optional host seams a test can wire into admission without a full service. */
+export interface HarnessOptions {
+  /** Registered thread source lookup; unset means every followed kind is forged. */
+  readonly threadSource?: (kind: string) => { readonly source: string; readonly generation: string } | undefined
+}
+
 /** Fresh plugin instance on a temp SQLite database, in active mode. */
-export async function harness(overrides: Partial<Config> = {}): Promise<Harness> {
+export async function harness(overrides: Partial<Config> = {}, options: HarnessOptions = {}): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), 'assistant-work-items-'))
   roots.push(root)
   let current = 1_700_000_000_000
@@ -128,6 +134,7 @@ export async function harness(overrides: Partial<Config> = {}): Promise<Harness>
     workspace,
     policy,
     delivery: deliveryPeer(),
+    ...(options.threadSource === undefined ? {} : { threadSource: options.threadSource }),
     now,
   })
   closers.push(() => store.close())

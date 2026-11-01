@@ -191,6 +191,18 @@ rules:
 - host-only 接口：`settleOutcomes(force)`、`outcomes({ limit, evidenceState })`（没有对应的模型工具）；`status()` 增加 `outcome` 视图，`health().settlement` 与 `stats()` 暴露 pending/observed/unverified 计数。`settlement.enabled: false` 时报告 `skipped: 'disabled'` 且不扫描。
 - 缺 `assistant-delivery`、缺 `listOwnerForegroundTaskSources` 或 owner route 撤销时只返回 `degraded`/`failed` 并 warn，不抛错、不写假结算，也不会让 `claim()` 失败。
 
+### 跟随线程的提前收束（follows）
+
+外部线程（ticket、PR 等）的关闭是**完成信号**，不是目标达成证据；它可以让一项进入终态报告后的等待提前结束，但不能替 owner 判断 objective 已实现。
+
+- 准入时可选 `follows: WorkItemThreadRef[]`（`{ kind, ref }`，最多 8 条，按 `kind + ref` 去重；非法/超限/伪造来源整条准入失败），持久化到 `work_item_follow`（schema v6，`STRICT` + `WITHOUT ROWID`，主键 `item_id + position`，并有 open 状态查询索引）。信号源候选也可带 `follows`，原样进入准入。
+- 只有 host 能注册解析器：`registerThreadSource({ source, generation, resolve(ref) })`。`resolve` **同步、只读、无 Promise**；每个 `source` 只能注册一次，重复/畸形注册 fail closed，返回的 disposer 撤销当前注册。注册的 `source` 必须与 follow 的 `kind` 同名：准入只把 `kind` 解析到对应注册，并把该注册的 `source`/`generation` 冻结在 follow 行上。
+- 终态报告遇到仍 open 的 follow 时不追加 outcome，而是把 item 停在 `waiting`（`stateReason: 'following-thread'`，`last_report_status` 记下报告状态，claim 行收尾）——此时仍可被认领，且 `settleOutcomes` 报告 `deferred`。
+- 结算 pass 在原有窗口检查之后、受同一 `maxSettlementsPerSweep` 预算约束地惰性解析 open follow：`open` 继续等待；`closed` 写回 `outcome`/`digest`/`closed_at`（CAS `state='open'`，重复或乱序的关闭只会命中一次）。当且仅当该 item 已无 open follow 时，恰好追加一条 `settledBy: 'closed-by-thread'`、`evidenceState: 'unverified'` 的修订；窗口到期仍是 `window-expired`。关闭**不会**设置 `objectiveStatus: achieved`，`observed` 仍只由交付 provenance 规则产生。结算候选同时要求 `waiting` 且没有 lease：被新 worker 重新 claim 的 item 不会被线程关闭在其运行期间收束。
+- 无法解析时保持 `waiting` 并显式降级，绝不把缺失当成关闭：`source-missing`（注册已撤销/从未注册）、`generation-mismatch`（注册代际与准入时冻结的代际不一致）、`resolver-failed`（resolver 抛错、返回 undefined 或畸形 closure）。`health().follows` 暴露 `open`/`closed`/`unresolved` 计数与 `degraded` 原因（`source-missing` > `generation-mismatch` > 最近一次结算的降级），`stats().follows` 暴露总数；不暴露 ref 或 digest。open/unresolved 只统计仍活跃的 item，撤回或被其他路径结项的 item 留下的 follow 行不会造成永久降级。
+- 没有 timer：只有 `claim()` 或宿主显式 `settleOutcomes(force)` 触发解析；无 follow 的 item 走原有窗口路径，行为不变。follow 不是新的 authority store，也不产生 objective-achievement 推断。
+- 与 Evaluation 的衔接：`closed-by-thread` 修订按 unverified 结算投影（`executionStatus: 'unknown'`、`evaluator.version: 'unverified-v1'`、`objectiveStatus`/`deliveryStatus` 为 `unknown`、`trust: 'trusted'`），幂等键仍为 `work-items/<itemId>/<revision>/<evidenceState>`。协议 `assistant-work-items/evaluation/v1` 原生接受该原因，不做 `window-expired` 之类的别名替换。
+
 ### 可信 Evaluation 导出（第四个 trusted producer）
 
 已结算的结果修订（`evidenceState != 'pending'`）会投影到 `@dsh-enhanced/assistant-evaluation` 的 trusted lane，作为该账本与交付/自动化的 latter 之外的**证据**，而不是目标判断：
@@ -199,7 +211,7 @@ rules:
 - `evidenceState: observed` → `executionStatus: succeeded` 且 `evaluator.version: settlement-v1`；`unverified` / `not-applicable` → `executionStatus: unknown` 且 `unverified-v1`。投影的 `objectiveStatus` 与 `deliveryStatus` 在类型和运行时都只能是 `unknown`：work-item 结算永远不能把自身升级为目标达成证据，也不会因报告过 `ready` 而被 Evaluation 当作 achieved。
 - 复用与 verifier 相同的私有 producer registration seam：`assistantEvaluation` 通过 `ctx` 发现本服务的 `trustedWorkItemProducerGeneration()` 与 `registerTrustedWorkItemEvaluationSink(registration)`，并校验 protocol（`assistant-work-items/evaluation/v1`）、generation、ownership 和单注册不变量；本插件不直接写 Evaluation 数据库。
 - `assistant-evaluation` 是可选 peer：缺席时结算行保持 `pending`，不阻塞 claim/report；绑定后下一次 drain 会补导既有 pending 行。
-- 有界且诚实降级：每 sweep 最多 10 条，失败最多重试 5 次后标记 `export-attempts-exhausted`；部署没有精确 workspace+preset scope 时标记 `skipped`（`owner-route-unavailable`）；observe 模式不导出。状态写入 `work_item_outcome.evaluation_*`（schema v5），`health().evaluation` 与 `stats()` 暴露 `evaluationPending/exported/skipped`。
+- 有界且诚实降级：每 sweep 最多 10 条，失败最多重试 5 次后标记 `export-attempts-exhausted`；部署没有精确 workspace+preset scope 时标记 `skipped`（`owner-route-unavailable`）；observe 模式不导出。状态写入 `work_item_outcome.evaluation_*`（schema v5 引入，v6 保持），`health().evaluation` 与 `stats()` 暴露 `evaluationPending/exported/skipped`。
 - 依赖方向：本插件只以 **type-only import** 引用 `@dsh-enhanced/assistant-evaluation` 的 claims/registration 契约类型，并把该包声明为 optional peer + devDependency；Evaluation 保持 producer-agnostic，不依赖任何 producer 运行时。
 
 ## 配置

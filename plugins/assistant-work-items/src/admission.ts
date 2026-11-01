@@ -3,7 +3,7 @@ import type { NormalizedConfig } from './config.ts'
 import { byteLength, isActive, truncateUtf8 } from './config.ts'
 import type { WorkItemLedger } from './ledger.ts'
 import type { PeerDeliveryService, PeerOwnerRouteReceipt, PeerPolicyService } from './peers.ts'
-import type { WorkItemStore } from './store.ts'
+import type { WorkItemFollowInput, WorkItemStore } from './store.ts'
 import type {
   WorkItemAdmitInput,
   WorkItemAdmitResult,
@@ -12,6 +12,7 @@ import type {
   WorkItemProvenance,
   WorkItemRecord,
   WorkItemState,
+  WorkItemThreadRef,
   WorkItemWithdrawResult,
 } from './types.ts'
 import { OPEN_STATES, WorkItemError } from './types.ts'
@@ -23,6 +24,9 @@ const BINDING_ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$/
 const SIGNAL_SOURCE = /^[a-z][a-z0-9-]{0,63}$/
 const SIGNAL_REVISION = /^[\x20-\x7e]{1,128}$/
 const EVIDENCE_KEY = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/
+const THREAD_REF = /^[\x20-\x7e]{1,1024}$/
+/** Hard cap on followed threads per item; keeps resolution bounded per sweep. */
+const MAX_FOLLOWS = 8
 const HOUR_MS = 3_600_000
 
 /** An item is settled when no further claim can move it without a new signal. */
@@ -78,6 +82,36 @@ function provenanceOf(value: WorkItemProvenance): WorkItemProvenance {
   })
 }
 
+/** Validate and dedupe the followed-thread list of one admission input. */
+function threadRefsOf(value: unknown): readonly WorkItemThreadRef[] {
+  if (value === undefined) return Object.freeze([])
+  if (!Array.isArray(value)) fail('invalid-input', 'follows must be an array of thread references')
+  if (value.length > MAX_FOLLOWS) fail('invalid-input', `follows accepts at most ${MAX_FOLLOWS} thread references`)
+  const seen = new Set<string>()
+  const refs: WorkItemThreadRef[] = []
+  for (const entry of value) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      fail('invalid-input', 'each follow must be a thread reference object')
+    }
+    const allowed = ['kind', 'ref'] as const
+    for (const key of Object.keys(entry)) {
+      const known = (allowed as readonly string[]).includes(key)
+      if (!known) fail('invalid-input', `follow contains unknown field ${key}`)
+    }
+    const kind = text(entry.kind, 'follows.kind', 64)
+    if (!KIND.test(kind)) fail('invalid-input', 'follows.kind has an invalid shape')
+    const ref = text(entry.ref, 'follows.ref', 1024)
+    if (!THREAD_REF.test(ref)) fail('invalid-input', 'follows.ref has an invalid shape')
+    // Duplicate refs collapse: an item can follow the same thread only once, so
+    // a repeated ref must not consume another position or budget slot.
+    const key = `${kind}\u0000${ref}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    refs.push(Object.freeze({ kind, ref }))
+  }
+  return Object.freeze(refs)
+}
+
 function fail(code: ConstructorParameters<typeof WorkItemError>[0], message: string, detail?: string): never {
   throw new WorkItemError(code, message, detail)
 }
@@ -106,6 +140,14 @@ export interface AdmissionDependencies {
   readonly workspace: WorkItemWorkspace
   readonly policy: PeerPolicyService | undefined
   readonly delivery: PeerDeliveryService | undefined
+  /**
+   * Look up the registered thread source for one ref kind.
+   *
+   * Synchronous and read-only; the intake stores the registration's identity so
+   * a later pass can detect a generation change instead of believing a stale
+   * closure. A ref whose source is not registered at admission is rejected.
+   */
+  readonly threadSource?: (kind: string) => { readonly source: string; readonly generation: string } | undefined
   readonly now?: () => number
   readonly newId?: () => string
 }
@@ -149,6 +191,7 @@ export class WorkItemAdmission {
     if (!config.enabled) fail('disabled', 'the work-item intake is disabled')
     const now = this.#now()
     const normalized = this.#normalize(input)
+    const follows = this.#followInputs(normalized.follows)
     const receipt = this.#validateOwnerRoute(now)
     const active = isActive(config)
 
@@ -246,6 +289,7 @@ export class WorkItemAdmission {
         detail,
       },
       dispatch,
+      follows,
     )
     return Object.freeze({ item, created: true, dispatch })
   }
@@ -357,9 +401,10 @@ export class WorkItemAdmission {
     originBindingId: string
     acceptanceRef: string | null
     provenance: WorkItemProvenance | null
+    follows: readonly WorkItemThreadRef[]
   } {
     if (input === null || typeof input !== 'object' || Array.isArray(input)) fail('invalid-input', 'admission input must be an object')
-    const allowed = ['kind', 'externalId', 'title', 'brief', 'originBindingId', 'acceptanceRef', 'provenance'] as const
+    const allowed = ['kind', 'externalId', 'title', 'brief', 'originBindingId', 'acceptanceRef', 'provenance', 'follows'] as const
     for (const key of Object.keys(input)) {
       if (!(allowed as readonly string[]).includes(key)) fail('invalid-input', `admission input contains unknown field ${key}`)
     }
@@ -373,7 +418,31 @@ export class WorkItemAdmission {
     if (!BINDING_ID.test(originBindingId)) fail('invalid-input', 'originBindingId has an invalid shape')
     const acceptanceRef = input.acceptanceRef === undefined ? null : text(input.acceptanceRef, 'acceptanceRef', 1_024)
     const provenance = input.provenance === undefined ? null : provenanceOf(input.provenance)
-    return { kind, externalId, title, brief, originBindingId, acceptanceRef, provenance }
+    return { kind, externalId, title, brief, originBindingId, acceptanceRef, provenance, follows: threadRefsOf(input.follows) }
+  }
+
+  /**
+   * Resolve admitted follow refs to durable follow rows.
+   *
+   * The registration is read once at admission so the stored `source` and
+   * `source_generation` are immutable facts of that admission: a later change of
+   * the source's generation degrades the follow rather than rewriting it.
+   */
+  #followInputs(follows: readonly WorkItemThreadRef[]): readonly WorkItemFollowInput[] {
+    if (follows.length === 0) return Object.freeze([])
+    const resolved = follows.map(ref => {
+      const registration = this.#deps.threadSource?.(ref.kind)
+      if (registration === undefined) {
+        fail('invalid-input', `followed thread kind ${ref.kind} has no registered source`)
+      }
+      return Object.freeze({
+        kind: ref.kind,
+        ref: ref.ref,
+        source: registration.source,
+        sourceGeneration: registration.generation,
+      })
+    })
+    return Object.freeze(resolved)
   }
 }
 

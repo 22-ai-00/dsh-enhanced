@@ -28,6 +28,15 @@ export const WORK_ITEM_EVALUATION_MAX_ATTEMPTS = 5
 /** Bounded exports per drain pass, so a busy ledger cannot starve the host. */
 export const WORK_ITEM_EVALUATION_MAX_PER_SWEEP = 10
 
+/**
+ * Protocol `assistant-work-items/evaluation/v1` enumerates its `settledBy`
+ * values and rejects anything else, and it natively carries
+ * `closed-by-thread`: a followed-thread closure is an unverified settlement, and
+ * the shared vocabulary says so exactly instead of aliasing it to a window
+ * expiry. Adding a local reason without widening the shared enum is what makes
+ * such a change a coordinated two-package one.
+ */
+
 /** Evidence states an exportable settlement can carry; `pending` is excluded. */
 export type WorkItemEvaluationEvidenceState = Exclude<WorkItemEvaluationEvidenceStateContract, 'pending'>
 /** Alias of the Evaluation contract's settled-by union. */

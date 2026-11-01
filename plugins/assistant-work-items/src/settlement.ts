@@ -21,7 +21,14 @@
 import type { PeerDeliveryService, PeerOwnerRouteReceipt, PeerOwnerForegroundTaskSource } from './peers.ts'
 import { matchesOutcomeEvidence, outcomeEvidenceFor } from './outcome.ts'
 import type { WorkItemStore } from './store.ts'
-import type { WorkItemOutcomeRecord, WorkItemOutcomeEvidenceReason, WorkItemSettlementReport } from './types.ts'
+import type {
+  WorkItemFollowDegradedReason,
+  WorkItemFollowRecord,
+  WorkItemOutcomeRecord,
+  WorkItemOutcomeEvidenceReason,
+  WorkItemSettlementReport,
+  WorkItemThreadOutcome,
+} from './types.ts'
 
 /** Canonical meta keys for the settlement cursors; both survive a restart. */
 const SWEPT_AT_META = 'settlement.sweptAt'
@@ -34,6 +41,12 @@ export interface SettlementScope {
   readonly preset: string
 }
 
+/** What the host's registered thread sources can say about one open follow. */
+export type ThreadResolution =
+  | { readonly kind: 'closed'; readonly outcome: WorkItemThreadOutcome; readonly digest: string }
+  | { readonly kind: 'open' }
+  | { readonly kind: 'unresolved'; readonly reason: WorkItemFollowDegradedReason }
+
 export interface SettlementOptions {
   readonly store: WorkItemStore
   readonly delivery: PeerDeliveryService | undefined
@@ -43,6 +56,12 @@ export interface SettlementOptions {
   readonly maxSourcesPerSweep: number
   readonly maxPendingPerSweep: number
   readonly maxSettlementsPerSweep: number
+  /**
+   * Synchronous, read-only resolution of one open follow against the host's
+   * registered thread sources. Absent when the host registered none, in which
+   * case every followed item simply stays parked and no follow is ever closed.
+   */
+  readonly threads?: (follow: WorkItemFollowRecord) => ThreadResolution
   readonly now?: () => number
   readonly warn?: (message: string) => void
 }
@@ -61,6 +80,9 @@ function emptyReport(): WorkItemSettlementReport {
     scanned: 0,
     settled: 0,
     expired: 0,
+    deferred: 0,
+    closedByThread: 0,
+    followDegraded: null,
     observedItemIds: Object.freeze([]),
   })
 }
@@ -84,16 +106,18 @@ export function settleOutcomes(options: SettlementOptions, force = false): Settl
   }
   store.setMeta(SWEPT_AT_META, String(now))
   const pending = store.pendingOutcomes(options.maxPendingPerSweep)
-  if (pending.length === 0) {
-    return Object.freeze({ report: Object.freeze({ ...emptyReport(), skipped: 'no-pending' as const }), observedItemIds: Object.freeze([]) })
-  }
 
   let degraded: WorkItemSettlementReport['degraded'] = null
   let failed = false
   let receipt: PeerOwnerRouteReceipt | undefined
   let sources: readonly PeerOwnerForegroundTaskSource[] = []
 
-  if (options.scope === null || options.delivery === undefined) {
+  // A deferred thread-closure settlement needs no delivery evidence, so an
+  // empty window set must not short-circuit the pass: the follows still get
+  // their one bounded resolution attempt.
+  if (pending.length === 0) {
+    // fall through to the deferred pass below
+  } else if (options.scope === null || options.delivery === undefined) {
     degraded = 'missing-dependency'
   } else if (options.delivery.listOwnerForegroundTaskSources === undefined) {
     degraded = 'missing-dependency'
@@ -187,15 +211,63 @@ export function settleOutcomes(options: SettlementOptions, force = false): Settl
     expired += 1
   }
 
+  // Bounded follow resolution. Every candidate contributes at most one extra
+  // append and shares the same settlement budget as observation and expiry, so
+  // a large follow set can never outrun the sweep bound.
+  let deferred = 0
+  let closedByThread = 0
+  let followDegraded: WorkItemFollowDegradedReason | null = null
+  const threads = options.threads
+  if (threads !== undefined) {
+    for (const item of store.itemsAwaitingThreadClosure(options.maxPendingPerSweep)) {
+      if (settled + expired + closedByThread >= options.maxSettlementsPerSweep) break
+      const open = store.follows(item.id).filter(follow => follow.state === 'open')
+      if (open.length > 0) {
+        for (const follow of open) {
+          let resolution: ThreadResolution
+          try {
+            resolution = threads(follow)
+          } catch (error) {
+            // A throwing resolver is data: the follow stays open and the pass
+            // reports the degradation instead of silently losing the item.
+            options.warn?.(`follow resolution failed for ${follow.itemId}#${String(follow.position)}: ${message(error)}`)
+            resolution = { kind: 'unresolved', reason: 'resolver-failed' }
+          }
+          if (resolution.kind === 'closed') {
+            // The store CAS makes a duplicate or out-of-order closure a no-op.
+            store.closeFollow(follow.itemId, follow.position, {
+              state: 'closed',
+              outcome: resolution.outcome,
+              digest: resolution.digest,
+            }, now)
+          } else if (resolution.kind === 'unresolved') {
+            followDegraded = followDegraded ?? resolution.reason
+          }
+        }
+        // Re-read instead of trusting the loop: a closure the store refused
+        // (forged ref, stale row) must keep the item parked.
+        if (store.countOpenFollows(item.id) > 0) {
+          deferred += 1
+          continue
+        }
+      }
+      // Exactly-once: a replay returns `undefined` and appends nothing.
+      if (store.settleThreadClosure(item.id) !== undefined) closedByThread += 1
+    }
+  }
+
   const observed = Object.freeze(observedItemIds)
   return Object.freeze({
     report: Object.freeze({
-      skipped: null,
+      skipped: pending.length === 0 && deferred === 0 && closedByThread === 0 ? 'no-pending' as const : null,
       degraded,
       failed,
       scanned: pending.length,
       settled,
       expired,
+      deferred,
+      closedByThread,
+      followDegraded,
       observedItemIds: observed,
     }),
     observedItemIds: observed,
