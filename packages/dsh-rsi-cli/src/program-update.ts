@@ -306,6 +306,50 @@ function execute(ports: ProgramUpdatePorts, command: string, args: readonly stri
   return result.stdout.trim()
 }
 
+interface SourceBranch { branch: 'dev' | 'main'; detachedHead?: string }
+
+/**
+ * Resolve the upstream branch the frozen update may fast-forward.
+ *
+ * The normal case is a linked checkout on `dev` or `main`. A bound owner Home
+ * may also have been installed from a detached checkout (a pinned commit);
+ * refusing that state makes an otherwise recoverable Home unable to update.
+ * Detached HEAD is therefore accepted when it is an ancestor of a locally
+ * recorded `origin/dev` or `origin/main`: the following `fetch` +
+ * `merge --ff-only` then fast-forwards to the upstream tip and aborts instead
+ * of rewriting history when the remote moved elsewhere. `dev` wins when both
+ * histories contain HEAD, so a force-rewritten `dev` may move such a checkout
+ * onto `main`; both are official branches and the fetch gate still applies.
+ * Any other detached commit or unknown branch refuses before any build or
+ * write, as does a detached commit for which neither candidate upstream has a
+ * local tracking ref.
+ */
+function resolveSourceBranch(ports: ProgramUpdatePorts, repo: string): SourceBranch {
+  const linked = ports.run('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], repo)
+  if (linked.status === 0) {
+    const branch = linked.stdout.trim()
+    if (branch !== 'dev' && branch !== 'main') fail('源码仓库当前分支必须是 dev 或 main')
+    return { branch }
+  }
+  if (linked.status !== 1) fail(`git symbolic-ref HEAD 退出码 ${linked.status ?? 'signal'}`)
+  const head = execute(ports, 'git', ['rev-parse', '--verify', 'HEAD^{commit}'], repo)
+  const behind: ('dev' | 'main')[] = []
+  for (const branch of ['dev', 'main'] as const) {
+    const ref = `refs/remotes/origin/${branch}`
+    const probe = ports.run('git', ['rev-parse', '--verify', '--quiet', ref], repo)
+    if (probe.status === 1) continue
+    if (probe.status !== 0) fail(`git rev-parse --verify ${ref} 退出码 ${probe.status ?? 'signal'}`)
+    const check = ports.run('git', ['merge-base', '--is-ancestor', 'HEAD', ref], repo)
+    if (check.status === 0) behind.push(branch)
+    else if (check.status !== 1) fail(`git merge-base --is-ancestor 退出码 ${check.status ?? 'signal'}`)
+  }
+  const branch = behind[0]
+  if (branch === undefined) {
+    fail(`源码仓库为 detached HEAD（${head.slice(0, 12)}），且不在本机记录的 origin/dev 或 origin/main 历史上；请先 git fetch origin 或切回 dev 或 main`)
+  }
+  return { branch, detachedHead: head }
+}
+
 /** Source branch update is distinct from a published npm release. */
 async function pendingInstaller(owner: FrozenOwner): Promise<string | undefined> {
   const transaction = `${owner.home}.dsh-enhanced-transaction`
@@ -351,11 +395,13 @@ export async function runFrozenOwnerUpdate(owner: FrozenOwner, options: { dryRun
   if (!/^(?:https:\/\/github\.com\/22-ai-00\/dsh-enhanced(?:\.git)?|git@github\.com:22-ai-00\/dsh-enhanced(?:\.git)?)$/u.test(origin)) {
     fail('已绑定源码仓库 origin 不是官方 GitHub 地址')
   }
-  const branch = execute(ports, 'git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], repo)
-  if (branch !== 'dev' && branch !== 'main') fail('源码仓库当前分支必须是 dev 或 main')
+  const { branch, detachedHead } = resolveSourceBranch(ports, repo)
   if (execute(ports, 'git', ['status', '--porcelain=v1', '--untracked-files=all'], repo) !== '') fail('源码仓库工作树不干净')
   const root = execute(ports, 'git', ['rev-parse', '--show-toplevel'], repo)
   if (root !== repo) fail('源码仓库根目录与绑定路径不一致')
+  if (detachedHead !== undefined) {
+    process.stdout.write(`冻结 owner：源码仓库位于 detached HEAD（${detachedHead.slice(0, 12)}），按 ${branch} 上游继续；更新后 HEAD 仍为 detached。\n`)
+  }
   process.stdout.write(`冻结 owner：沿已绑定源码仓库 ${repo} 的 ${branch} 分支升级；该源码提交可能尚未发布到 npm。\n`)
   if (options.dryRun) {
     process.stdout.write(`【dry-run】计划：git fetch origin ${branch}；git merge --ff-only FETCH_HEAD；pnpm install --frozen-lockfile；pnpm build；upgrade-program.mjs --dsh-home ${owner.home} --profile ${owner.profile} --dsh-version ${options.dshVersion ?? 'latest'} --dry-run。未更新源码或 Home。\n`)

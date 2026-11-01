@@ -43,7 +43,7 @@ dsh-rsi reinstall --dry-run             # 预览清理与重新安装两阶段
 dsh-rsi reinstall                       # 备份、删除、重新安装并重做 onboarding
 ```
 
-`update --all` 先升级 CLI，再更新已安装程序；它不是对所有 Home 通用的升级路径。从 CLI `0.1.57` 起，**支持的 Linux 现有冻结 owner/cohort Home** 可用上面的 `update --all --yes`：从 Home 原来绑定的官方源码仓库拉取干净的 `dev` 或 `main` 分支，把私有 Host 从 `0.2.0-rc.2` 或 `0.2.1-rc.2` 更新到 `0.2.1-rc.2`，同时更新冻结插件，并在事务中停启已注册服务。要求原 owner 授权有效、target/coordinator 双服务均活动，且无已采用的源码 activation 或未结 activation；原 owner 绑定、授权期限和已用额度、权限、凭据、模型、Session、Goal 及历史保留，不重新配对、续期或扩权。已过期授权会在预检中被拒绝，需先按原授权流程处理。
+`update --all` 先升级 CLI，再更新已安装程序；它不是对所有 Home 通用的升级路径。从 CLI `0.1.57` 起，**支持的 Linux 现有冻结 owner/cohort Home** 可用上面的 `update --all --yes`：从 Home 原来绑定的官方源码仓库拉取干净的 `dev` 或 `main` 分支，若绑定仓库是 detached HEAD，则仅当它位于本机记录的 `origin/dev` 或 `origin/main` 历史上时按该分支快进、更新后仍保持 detached（两者历史都包含 HEAD 时优先 `dev`；本机连 `origin/dev`、`origin/main` 的跟踪引用都没有，或浅历史无法判定时同样先拒绝），否则在写操作前拒绝；把私有 Host 从 `0.2.0-rc.2` 或 `0.2.1-rc.2` 更新到 `0.2.1-rc.2`，同时更新冻结插件，并在事务中停启已注册服务。要求原 owner 授权有效、target/coordinator 双服务均活动，且无已采用的源码 activation 或未结 activation；原 owner 绑定、授权期限和已用额度、权限、凭据、模型、Session、Goal 及历史保留，不重新配对、续期或扩权。已过期授权会在预检中被拒绝，需先按原授权流程处理。
 
 如果当前 CLI 仍是 `0.1.55` 等旧版，先单独运行一次 `dsh-rsi update`，确认新进程为 `0.1.57` 或更新版本，再运行 `dsh-rsi update --all --yes`；旧版 `--all` 不会重新执行新 CLI 来识别冻结 owner。普通待恢复事务会先用原安装器恢复，本次不拉取源码；恢复后再次运行同一升级命令。已绑定签名 readiness 修复的特殊事务按报错和[维护说明](../../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)处理。当前发布与实机验收状态见[RSI 状态](../../docs/rsi-status.md)。
 

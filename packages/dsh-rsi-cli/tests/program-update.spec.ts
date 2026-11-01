@@ -236,7 +236,7 @@ test('source branch update uses fetch, fast-forward merge, frozen install, build
   expect(calls[8]).toContain(`scripts/install/upgrade-program.mjs --dsh-home ${f.home} --profile owner --dsh-version 0.2.1-rc.2`)
 })
 
-test('rejects foreign origin, dirty tree and detached or divergent branches before build', async () => {
+test('rejects foreign origin, dirty tree and non-upstream branches before build', async () => {
   const f = await fixture(), owner = (await detectFrozenOwner(f.home))!
   for (const overrides of [
     { 'git remote get-url origin': 'https://example.org/other.git' },
@@ -258,6 +258,165 @@ test('rejects foreign origin, dirty tree and detached or divergent branches befo
   }
   await expect(runFrozenOwnerUpdate(owner, { dryRun: false }, adapter)).rejects.toThrow(/退出码 1/)
   expect(calls.some(call => call.includes('pnpm '))).toBe(false)
+})
+
+/** A bound checkout on a detached HEAD; unmodeled calls and missing refs fail loudly. */
+function detachedPorts(repo: string, head: string, options: {
+  refs?: { dev?: 'ancestor' | 'diverged'; main?: 'ancestor' | 'diverged' }
+  refProbeStatus?: number
+  symbolicStatus?: number
+  headStatus?: number
+  mergeStatus?: number
+  mergeBaseStatus?: number
+  dirty?: boolean
+} = {}) {
+  const calls: string[] = []
+  const refs = options.refs ?? {}
+  const refSha = (branch: 'dev' | 'main') => `${branch === 'dev' ? 'a' : 'b'}`.repeat(40)
+  const fixed: Record<string, { status: number; stdout: string }> = {
+    'git remote get-url origin': { status: 0, stdout: 'https://github.com/22-ai-00/dsh-enhanced.git' },
+    'git symbolic-ref --quiet --short HEAD': { status: options.symbolicStatus ?? 1, stdout: '' },
+    'git status --porcelain=v1 --untracked-files=all': { status: 0, stdout: options.dirty === true ? ' M file.ts\n' : '' },
+    'git rev-parse --show-toplevel': { status: 0, stdout: repo },
+    'git rev-parse --verify HEAD^{commit}': { status: options.headStatus ?? 0, stdout: head },
+    'git fetch origin dev': { status: 0, stdout: '' },
+    'git fetch origin main': { status: 0, stdout: '' },
+    'git merge --ff-only FETCH_HEAD': { status: options.mergeStatus ?? 0, stdout: '' },
+    'pnpm install --frozen-lockfile': { status: 0, stdout: '' },
+    'pnpm build': { status: 0, stdout: '' },
+  }
+  for (const branch of ['dev', 'main'] as const) {
+    const state = refs[branch]
+    fixed[`git rev-parse --verify --quiet refs/remotes/origin/${branch}`] = state === undefined
+      ? { status: 1, stdout: '' }
+      : { status: options.refProbeStatus ?? 0, stdout: refSha(branch) }
+    // A ref that is absent must abort (128) if the existence probe is ever dropped.
+    fixed[`git merge-base --is-ancestor HEAD refs/remotes/origin/${branch}`] = state === undefined
+      ? { status: 128, stdout: '' }
+      : { status: options.mergeBaseStatus ?? (state === 'ancestor' ? 0 : 1), stdout: '' }
+  }
+  const adapter: ProgramUpdatePorts = { run(command, args, cwd) {
+    const key = [command, ...args].join(' ')
+    calls.push(`${cwd ?? '-'} ${key}`)
+    if (Object.hasOwn(fixed, key)) return fixed[key]!
+    if (command === process.execPath && key.includes('upgrade-program.mjs')) return { status: 0, stdout: '' }
+    throw new Error(`unmodeled port call: ${key}`)
+  } }
+  return { adapter, calls }
+}
+
+const gitWrites = (calls: readonly string[]) => calls.filter(call => /git (?:fetch|merge --ff-only)/u.test(call))
+
+const sha = (digit: string) => digit.repeat(40)
+
+test('a detached HEAD on the origin/dev history fast-forwards along dev', async () => {
+  const f = await fixture(), owner = (await detectFrozenOwner(f.home))!
+  // Only origin/dev has a local tracking ref: a single-branch clone must still work.
+  const { adapter, calls } = detachedPorts(f.repository, sha('1'), { refs: { dev: 'ancestor' } })
+  expect(await runFrozenOwnerUpdate(owner, { dryRun: true }, adapter)).toBe(0)
+  expect(gitWrites(calls)).toEqual([])
+  calls.length = 0
+  expect(await runFrozenOwnerUpdate(owner, { dryRun: false }, adapter)).toBe(0)
+  expect(gitWrites(calls)).toEqual([
+    `${f.repository} git fetch origin dev`, `${f.repository} git merge --ff-only FETCH_HEAD`,
+  ])
+  expect(calls.some(call => call.includes('upgrade-program.mjs'))).toBe(true)
+})
+
+test('a detached HEAD behind the local origin/dev tip is still accepted', async () => {
+  const f = await fixture(), owner = (await detectFrozenOwner(f.home))!
+  const { adapter, calls } = detachedPorts(f.repository, sha('2'), { refs: { dev: 'ancestor' } })
+  expect(await runFrozenOwnerUpdate(owner, { dryRun: false }, adapter)).toBe(0)
+  expect(gitWrites(calls)).toEqual([
+    `${f.repository} git fetch origin dev`, `${f.repository} git merge --ff-only FETCH_HEAD`,
+  ])
+})
+
+test('a detached HEAD on the origin/main history fast-forwards along main', async () => {
+  const f = await fixture(), owner = (await detectFrozenOwner(f.home))!
+  const { adapter, calls } = detachedPorts(f.repository, sha('3'), { refs: { main: 'ancestor' } })
+  expect(await runFrozenOwnerUpdate(owner, { dryRun: false }, adapter)).toBe(0)
+  expect(gitWrites(calls)).toEqual([
+    `${f.repository} git fetch origin main`, `${f.repository} git merge --ff-only FETCH_HEAD`,
+  ])
+})
+
+test('a detached HEAD outside the tracked upstream histories is refused before build', async () => {
+  const f = await fixture(), owner = (await detectFrozenOwner(f.home))!
+  for (const refs of [{ dev: 'diverged', main: 'diverged' } as const, {}]) {
+    const { adapter, calls } = detachedPorts(f.repository, sha('4'), { refs })
+    await expect(runFrozenOwnerUpdate(owner, { dryRun: false }, adapter))
+      .rejects.toThrow(`detached HEAD（${'4'.repeat(12)}）`)
+    await expect(runFrozenOwnerUpdate(owner, { dryRun: false }, detachedPorts(f.repository, sha('4'), { refs }).adapter))
+      .rejects.toThrow('git fetch origin')
+    expect(gitWrites(calls)).toEqual([])
+    expect(calls.some(call => call.includes('pnpm '))).toBe(false)
+  }
+})
+
+test('an ambiguous detached history shared by dev and main prefers dev', async () => {
+  const f = await fixture(), owner = (await detectFrozenOwner(f.home))!
+  const { adapter, calls } = detachedPorts(f.repository, sha('5'), { refs: { dev: 'ancestor', main: 'ancestor' } })
+  expect(await runFrozenOwnerUpdate(owner, { dryRun: false }, adapter)).toBe(0)
+  expect(gitWrites(calls)).toEqual([
+    `${f.repository} git fetch origin dev`, `${f.repository} git merge --ff-only FETCH_HEAD`,
+  ])
+  expect(calls.some(call => call.includes('git fetch origin main'))).toBe(false)
+})
+
+test('a detached checkout whose fetch is not fast-forwardable stops before build', async () => {
+  const f = await fixture(), owner = (await detectFrozenOwner(f.home))!
+  const { adapter, calls } = detachedPorts(f.repository, sha('6'), { refs: { dev: 'ancestor' }, mergeStatus: 1 })
+  await expect(runFrozenOwnerUpdate(owner, { dryRun: false }, adapter)).rejects.toThrow(/退出码 1/)
+  expect(calls.some(call => call.includes('pnpm '))).toBe(false)
+  expect(calls.some(call => call.includes('upgrade-program.mjs'))).toBe(false)
+})
+
+test('an unexpected merge-base exit code is reported instead of being read as "not an ancestor"', async () => {
+  const f = await fixture(), owner = (await detectFrozenOwner(f.home))!
+  const { adapter, calls } = detachedPorts(f.repository, sha('a'), { refs: { dev: 'ancestor' }, mergeBaseStatus: 128 })
+  await expect(runFrozenOwnerUpdate(owner, { dryRun: false }, adapter))
+    .rejects.toThrow('git merge-base --is-ancestor 退出码 128')
+  expect(gitWrites(calls)).toEqual([])
+})
+
+test('an unexpected rev-parse exit code while probing a tracking ref is reported', async () => {
+  const f = await fixture(), owner = (await detectFrozenOwner(f.home))!
+  const { adapter, calls } = detachedPorts(f.repository, sha('b'), { refs: { dev: 'ancestor' }, refProbeStatus: 128 })
+  await expect(runFrozenOwnerUpdate(owner, { dryRun: false }, adapter))
+    .rejects.toThrow('git rev-parse --verify refs/remotes/origin/dev 退出码 128')
+  expect(gitWrites(calls)).toEqual([])
+})
+
+test('a failing symbolic-ref probe that is not the detached exit code is not treated as detached', async () => {
+  const f = await fixture(), owner = (await detectFrozenOwner(f.home))!
+  const { adapter, calls } = detachedPorts(f.repository, sha('7'), { symbolicStatus: 128 })
+  await expect(runFrozenOwnerUpdate(owner, { dryRun: false }, adapter)).rejects.toThrow('git symbolic-ref HEAD 退出码 128')
+  expect(calls.some(call => call.includes('rev-parse --verify HEAD'))).toBe(false)
+})
+
+test('a detached checkout whose HEAD cannot be resolved is refused before any fetch', async () => {
+  const f = await fixture(), owner = (await detectFrozenOwner(f.home))!
+  const { adapter, calls } = detachedPorts(f.repository, sha('8'), { refs: { dev: 'ancestor' }, headStatus: 1 })
+  await expect(runFrozenOwnerUpdate(owner, { dryRun: false }, adapter)).rejects.toThrow(/退出码 1/)
+  expect(gitWrites(calls)).toEqual([])
+})
+
+test('a detached checkout with a dirty work tree reports the tree, not the branch plan', async () => {
+  const f = await fixture(), owner = (await detectFrozenOwner(f.home))!
+  const { adapter, calls } = detachedPorts(f.repository, sha('9'), { refs: { dev: 'ancestor' }, dirty: true })
+  const written: string[] = []
+  const write = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
+    written.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString())
+    return true
+  })
+  try {
+    await expect(runFrozenOwnerUpdate(owner, { dryRun: false }, adapter)).rejects.toThrow('工作树不干净')
+  } finally {
+    write.mockRestore()
+  }
+  expect(written.join('')).not.toContain('detached HEAD')
+  expect(gitWrites(calls)).toEqual([])
 })
 
 test('pending v4 owner transaction uses bound original installer recovery before any Git command', async () => {
