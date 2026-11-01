@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -23,7 +23,7 @@ const contract: LinuxExecutionContract = {
 const request = (key = 'key') => ({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: key, requestDigest: 'c'.repeat(64), durationMs: 500, backend: 'linux-native' as const, linuxContract: contract,
   resourceReservation: { memoryMiB: 112, workspaceInodes: 128, maxMemoryMiB: 224, maxWorkspaceInodes: 256 },
   storageBudget: { maxStateBytes: 1_000_000, maxJobRecords: 100, reservedBytes: 4096, observation: { bytes: 0, observedAt: 10_000 } } })
-function root(): string { const path = mkdtempSync(join(tmpdir(), 'linux-ledger-')); chmodSync(path, 0o700); directories.push(path); return path }
+function root(): string { const path = realpathSync(mkdtempSync(join(tmpdir(), 'linux-ledger-'))); chmodSync(path, 0o700); directories.push(path); return path }
 function setup(file = ':memory:', now = () => 10_000): { ledger: IsolationLedger; authority: IsolationControllerAuthority } {
   const ledger = new IsolationLedger(file, { now }); ledgers.push(ledger)
   const authority = ledger.claimController('host', 1000); ledger.syncGrants([grant], authority)
