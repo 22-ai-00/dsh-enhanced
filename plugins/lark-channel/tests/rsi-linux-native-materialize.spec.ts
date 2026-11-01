@@ -6,7 +6,7 @@ import {
   materializeLinuxRsiNativeInStage, type LinuxRsiNativeMaterializeInput,
 } from '../src/rsi-linux-native-materialize.js'
 import type { LinuxRsiNativeRelocationProof } from '../src/rsi-linux-native-relocation.js'
-import { elementMap, fixture, homePath, PROFILE, readJson, releaseInventoryDigest,
+import { elementMap, fixture, homePath, privateDirectory, PROFILE, readJson, releaseInventoryDigest,
   removeFixtureDirectories, sha, SOURCE_COMMIT, type Fixture } from './fixtures/linux-native-home-fixture.js'
 
 const mocks = vi.hoisted(() => ({ validateBehavior: vi.fn(), behaviorDigest: vi.fn() }))
@@ -163,6 +163,32 @@ describe('rsi Linux native materialize', () => {
       .toBe(logical(ctx, TOOLCHAIN_RELATIVE))
   })
 
+  linux('stages in place when the live logical Home already exists and is attested', async () => {
+    const ctx = await fixture()
+    await privateDirectory(ctx.logicalHome)
+    const output = await materializeLinuxRsiNativeInStage({ ...input(ctx),
+      existingLogicalHome: ctx.logicalHome })
+    expect(output.relocation.logicalHome).toBe(ctx.logicalHome)
+    expect((await lstat(ctx.logicalHome)).isDirectory()).toBe(true)
+    expect((await readJson(staged(ctx, CREATION_RECEIPT))).dshHome).toBe(ctx.logicalHome)
+    expect((await readJson(staged(ctx, `rsi-release-builds/${PROFILE}/bootstrap.json`))).dshHome)
+      .toBe(ctx.logicalHome)
+
+    // Replay keeps the same sealed proof: the attestation is staging input only.
+    const replay = await materializeLinuxRsiNativeInStage({ ...input(ctx, output.relocation),
+      existingLogicalHome: ctx.logicalHome })
+    expect(replay).toEqual(output)
+    expect(Object.keys(replay.relocation).sort()).toEqual(Object.keys(output.relocation).sort())
+  })
+
+  linux('refuses an attested existing logical Home that is absent', async () => {
+    const ctx = await fixture()
+    await expect(materializeLinuxRsiNativeInStage({ ...input(ctx),
+      existingLogicalHome: ctx.logicalHome })).rejects.toThrow(
+      new RegExp(`^${RELOCATION_PREFIX}existing logical Home is missing$`, 'u'))
+    expect((await lstat(ctx.physicalHome).then(() => true, () => false))).toBe(false)
+  })
+
   linux('hashes the candidate and staged creation receipts as written', async () => {
     const ctx = await fixture()
     const output = await materializeLinuxRsiNativeInStage(input(ctx))
@@ -207,6 +233,16 @@ describe('rsi Linux native materialize', () => {
         relocation: '' } } as unknown as LinuxRsiNativeRelocationProof
     await expect(materializeLinuxRsiNativeInStage(input(ctx, proof))).rejects.toThrow(
       new RegExp(`^${PREFIX}.*replay relocation proof does not describe this Home pair`, 'u'))
+  })
+
+  test('rejects an existingLogicalHome that is not this logical Home', async () => {
+    const ctx = await fixture()
+    await expect(materializeLinuxRsiNativeInStage({ ...input(ctx),
+      existingLogicalHome: join(ctx.logicalHome, 'other') })).rejects.toThrow(
+      new RegExp(`^${PREFIX}.*existing logical Home is not this logical Home`, 'u'))
+    await expect(materializeLinuxRsiNativeInStage({ ...input(ctx),
+      existingLogicalHome: 'relative-home' })).rejects.toThrow(
+      new RegExp(`^${PREFIX}invalid existing logical Home`, 'u'))
   })
 
   test('rejects overlapping candidate, staged and logical Homes', async () => {

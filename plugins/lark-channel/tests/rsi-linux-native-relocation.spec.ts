@@ -1,4 +1,4 @@
-import { chmod, lstat, rename, rm, symlink } from 'node:fs/promises'
+import { chmod, lstat, realpath, rename, rm, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { hashLinuxRuntimeTree, linuxRuntimeDigest, verifyLinuxRuntime,
@@ -160,6 +160,61 @@ describe('rsi Linux native relocation', () => {
     await expectFailure(relocate(ctx), 'target')
   })
 
+  linux('stages in place against an attested live logical Home', async () => {
+    const ctx = await fixture()
+    // The Docker -> Linux-native cutover stage copies the live Home, so the
+    // logical Home already exists when the relocation runs.
+    await privateDirectory(ctx.logicalHome)
+    const proof = await relocateLinuxRsiNativeFamily({ sourceHome: ctx.sourceHome,
+      physicalHome: ctx.physicalHome, logicalHome: ctx.logicalHome, profile: ctx.profile,
+      existingLogicalHome: ctx.logicalHome })
+    expect(proof.sourceHome).toBe(ctx.sourceHome)
+    expect(proof.physicalHome).toBe(ctx.physicalHome)
+    expect(proof.logicalHome).toBe(ctx.logicalHome)
+    await verifyLinuxRsiNativeRelocation(proof)
+
+    // The receipts still record the logical Home, and the live Home survives untouched.
+    for (const relativePath of ['rsi-linux-runtimes/unit/bootstrap.json',
+      'rsi-linux-repository-runtimes/unit/bootstrap.json', 'rsi-linux-creation-builds/unit/bootstrap.json',
+      'rsi-release-builds/unit/bootstrap.json']) {
+      expect((await readJson(homePath(ctx.physicalHome, relativePath))).dshHome).toBe(ctx.logicalHome)
+    }
+    const live = await lstat(ctx.logicalHome)
+    expect(live.isDirectory()).toBe(true)
+    expect(live.mode & 0o077).toBe(0)
+    expect(await realpath(ctx.logicalHome)).toBe(ctx.logicalHome)
+    // Only the attestation skipped the absence guard: the staged Home is complete.
+    expect((await lstat(ctx.physicalHome)).isDirectory()).toBe(true)
+  })
+
+  linux('still refuses an occupied logical Home without the attestation', async () => {
+    const ctx = await fixture()
+    await privateDirectory(ctx.logicalHome)
+    await expectFailure(relocate(ctx), 'logical Home already exists')
+    expect(await lstat(ctx.physicalHome).then(() => true, () => false)).toBe(false)
+  })
+
+  linux('refuses an existingLogicalHome that is missing, non-canonical or another path', async () => {
+    const ctx = await fixture()
+    // Attested but absent: the guard is only replaced by proof that the Home is there.
+    await expectFailure(relocateLinuxRsiNativeFamily({ sourceHome: ctx.sourceHome,
+      physicalHome: ctx.physicalHome, logicalHome: ctx.logicalHome, profile: ctx.profile,
+      existingLogicalHome: ctx.logicalHome }), 'existing logical Home is missing')
+    // A symlink to another directory is not the Home itself.
+    const realHome = `${ctx.logicalHome}-real`
+    await privateDirectory(realHome)
+    await symlink(realHome, ctx.logicalHome)
+    await expectFailure(relocateLinuxRsiNativeFamily({ sourceHome: ctx.sourceHome,
+      physicalHome: ctx.physicalHome, logicalHome: ctx.logicalHome, profile: ctx.profile,
+      existingLogicalHome: ctx.logicalHome }), 'existing logical Home is not canonical')
+    await rm(ctx.logicalHome, { force: true })
+    // Canonical but not the logical Home value.
+    await expectFailure(relocateLinuxRsiNativeFamily({ sourceHome: ctx.sourceHome,
+      physicalHome: ctx.physicalHome, logicalHome: ctx.logicalHome, profile: ctx.profile,
+      existingLogicalHome: `${ctx.logicalHome}-other` }), 'existing logical Home is not this logical Home')
+    expect(await lstat(ctx.physicalHome).then(() => true, () => false)).toBe(false)
+  })
+
   linux('refuses an overlapping physical Home', async () => {
     const ctx = await fixture()
     await expectFailure(relocateLinuxRsiNativeFamily({ sourceHome: ctx.sourceHome,
@@ -293,6 +348,17 @@ describe('rsi Linux native relocation', () => {
       expect(error).toBeInstanceOf(Error)
       expect((error as Error).constructor).toBe(Error)
       expect((error as Error).message.startsWith(PREFIX)).toBe(true)
+      expect(await lstat(ctx.physicalHome).then(() => true, () => false)).toBe(false)
+    })
+
+    test('rejects an existingLogicalHome that is not this logical Home before any Linux work', async () => {
+      const ctx = await fixture()
+      await expectFailure(relocateLinuxRsiNativeFamily({ sourceHome: ctx.sourceHome,
+        physicalHome: ctx.physicalHome, logicalHome: ctx.logicalHome, profile: ctx.profile,
+        existingLogicalHome: join(ctx.logicalHome, 'other') }), 'existing logical Home is not this logical Home')
+      await expectFailure(relocateLinuxRsiNativeFamily({ sourceHome: ctx.sourceHome,
+        physicalHome: ctx.physicalHome, logicalHome: ctx.logicalHome, profile: ctx.profile,
+        existingLogicalHome: 'relative-home' }), 'invalid existingLogicalHome')
       expect(await lstat(ctx.physicalHome).then(() => true, () => false)).toBe(false)
     })
 

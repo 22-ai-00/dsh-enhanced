@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { chmodSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -10,8 +10,8 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { canonicalGrowthJson, verifyPluginCreationVerificationCertificate, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { linuxRuntimeDigest, nativeMacRuntimeDigest, type NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
-import { CreationCapabilityJournal, creationCapabilityPublicKey, validateCreationCapabilityConfig,
-  verifyCreationCapabilityReceipt } from '../src/creation-capability-journal.js'
+import { CreationCapabilityJournal, creationCapabilityAuthorityDigest, creationCapabilityPublicKey,
+  validateCreationCapabilityConfig, verifyCreationCapabilityReceipt } from '../src/creation-capability-journal.js'
 import { CreationCapabilityRuntime } from '../src/creation-capability-runtime.js'
 import { creationCapabilitySourceDigest, type CreationCapabilitySourceSnapshot } from '../src/creation-capability-source.js'
 import type { CreationCapabilityConfig, CreationCapabilityForegroundCallWitness, CreationCapabilityPorts, CreationCapabilityRunner,
@@ -133,6 +133,48 @@ test('owner key and config preflight are read-only and reject unsafe fields', ()
   Object.defineProperty(bad, 'keyPath', { enumerable: true, get() { invoked = true; return f.config.keyPath } })
   expect(() => validateCreationCapabilityConfig(bad)).toThrow()
   expect(invoked).toBe(false)
+})
+
+test('exported authority digest is exactly the journal authority digest for the same path and config', () => {
+  const f = fixture()
+  const journal = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  try {
+    expect(creationCapabilityAuthorityDigest({ path: f.path, config: f.config })).toBe(journal.authorityDigest)
+    expect(creationCapabilityAuthorityDigest({ path: f.path, config: structuredClone(f.config) })).toBe(journal.authorityDigest)
+    // Byte-for-byte recomputation of the pre-extraction inline expression, independent of the class.
+    const expected = createHash('sha256').update(canonicalGrowthJson({
+      semantics: 'dsh-created-capability-journal/v1:reserve-before-dispatch:unknown-no-retry:finite-owner-grant',
+      path: f.path, config: structuredClone(f.config),
+      keyFingerprint: createHash('sha256').update(readFileSync(f.config.keyPath)).digest('hex'),
+    })).digest('hex')
+    expect(journal.authorityDigest).toBe(expected)
+    expect(creationCapabilityAuthorityDigest({ path: f.path, config: f.config })).toBe(expected)
+  } finally { journal.close() }
+})
+
+test('exported authority digest binds the grant, the canonical journal path and the key bytes', () => {
+  const f = fixture()
+  const base = creationCapabilityAuthorityDigest({ path: f.path, config: f.config })
+  expect(creationCapabilityAuthorityDigest({ path: f.path, config: { ...f.config, maxAdoptions: 3 } })).not.toBe(base)
+  expect(creationCapabilityAuthorityDigest({ path: f.path,
+    config: { ...f.config, retention: { maximumLifetimeMs: 15_000 } } })).not.toBe(base)
+  expect(creationCapabilityAuthorityDigest({ path: join(f.root, 'other-journal.sqlite'), config: f.config })).not.toBe(base)
+  writeFileSync(f.config.keyPath, generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }))
+  expect(creationCapabilityAuthorityDigest({ path: f.path, config: f.config })).not.toBe(base)
+})
+
+test('exported authority digest fails closed for unsafe paths and missing or non-private keys', () => {
+  const f = fixture()
+  const valid = { path: f.path, config: f.config }
+  expect(creationCapabilityAuthorityDigest(valid)).toMatch(/^[a-f0-9]{64}$/u)
+  for (const path of ['creation-adoptions.sqlite', f.path + '/', `${f.root}/nested/../creation-adoptions.sqlite`]) {
+    expect(() => creationCapabilityAuthorityDigest({ path, config: f.config })).toThrow()
+  }
+  chmodSync(f.config.keyPath, 0o644)
+  expect(() => creationCapabilityAuthorityDigest(valid)).toThrow()
+  chmodSync(f.config.keyPath, 0o600)
+  rmSync(f.config.keyPath)
+  expect(() => creationCapabilityAuthorityDigest(valid)).toThrow()
 })
 
 test('native adoption requires a signed v2 certificate pinned to its exact runner runtime', () => {

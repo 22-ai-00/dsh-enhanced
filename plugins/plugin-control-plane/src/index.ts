@@ -11,7 +11,8 @@ export type { CreationCapabilityConfig, CreationCapabilityOwner, CreationCapabil
 export type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 export { inspectCreationCapabilityTaskAssociations } from './creation-capability-feedback.js'
 export type { CreationCapabilityFeedbackInput } from './creation-capability-feedback.js'
-export { validateCreationCapabilityConfig, verifyCreationCapabilityReceipt } from './creation-capability-journal.js'
+export { creationCapabilityAuthorityDigest, validateCreationCapabilityConfig,
+  verifyCreationCapabilityReceipt } from './creation-capability-journal.js'
 export * from './catalog.js'
 export * from './errors.js'
 export * from './source-workspace.js'

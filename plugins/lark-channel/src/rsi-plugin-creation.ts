@@ -236,3 +236,23 @@ export function createRsiPluginCreationSetup(input: {
   }
   return setup
 }
+
+/** Re-derive the adoption grant identity from a compiled capability config.
+ * A migrated runner grant must carry exactly the identity the control-plane
+ * service will sync, and that identity binds the logical authority state path. */
+export function creationAdoptionAuthorityDigest(input: {
+  resources: RsiAuthorityResources; capabilities: CreationCapabilityConfig
+}): string {
+  const { resources, capabilities } = input
+  if (resources?.schemaVersion !== 1 || !capabilities || typeof capabilities !== 'object'
+    || typeof capabilities.keyPath !== 'string') fail('invalid adoption authority input')
+  const controlPlane: typeof import('@dsh-enhanced/plugin-control-plane') =
+    installedPeer('@dsh-enhanced/plugin-control-plane')
+  if (typeof controlPlane.creationCapabilityAuthorityDigest !== 'function') {
+    fail('installed control-plane cannot derive the adoption authority digest')
+  }
+  return controlPlane.creationCapabilityAuthorityDigest({
+    path: join(resources.stateRoot, 'control-plane', 'creation-adoptions.sqlite'),
+    config: capabilities,
+  })
+}

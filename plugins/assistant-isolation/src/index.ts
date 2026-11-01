@@ -16,8 +16,9 @@ export { LinuxVerifierRunner, type LinuxVerifierRunnerConfig } from './linux-ver
 export { prepareLinuxRunnerState, inspectLinuxRunnerState, validateLinuxRunnerStateSeal,
   resealLinuxRunnerState, linuxRunnerStateSchemaDigest,
   type LinuxRunnerStateSeal, type Kind, type LinuxRunnerStateResealInput } from './linux-runner-state.js'
-export { migrateLinuxVerifierRunnerState, prepareLinuxRepositoryHandoverState,
-  type LinuxVerifierHandoverInput, type LinuxVerifierHandoverResult, type LinuxRepositoryHandoverInput } from './linux-runner-state-migration.js'
+export { migrateLinuxVerifierRunnerState, prepareLinuxVerifierHandoverState, prepareLinuxRepositoryHandoverState,
+  type LinuxVerifierHandoverInput, type LinuxVerifierHandoverResult, type LinuxRepositoryHandoverInput,
+  type LinuxVerifierHandoverPreparation, type LinuxVerifierHandoverPreparationInput } from './linux-runner-state-migration.js'
 export { grantDigest } from './ledger.js'
 export { consumeLinuxRepositoryAdmissionRefusal } from './linux-repository-admission.js'
 export { LinuxRepositoryRunner, type LinuxRepositoryRunnerConfig, type LinuxRepositoryRunnerRequest, type LinuxRepositoryRunnerResult } from './linux-repository-runner.js'

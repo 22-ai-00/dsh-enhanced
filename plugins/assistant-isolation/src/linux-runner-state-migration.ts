@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto'
-import { chmodSync, lstatSync, mkdirSync, realpathSync, unlinkSync } from 'node:fs'
+import { chmodSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync,
+  readFileSync, realpathSync, unlinkSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { grantDigest, IsolationLedger } from './ledger.js'
-import { resealLinuxRunnerState, type LinuxRunnerStateSeal } from './linux-runner-state.js'
+import { linuxRunnerStateSchemaDigest, resealLinuxRunnerState, validateLinuxRunnerStateSeal,
+  type LinuxRunnerStateSeal } from './linux-runner-state.js'
 import type { IsolationGrant } from './types.js'
 
 /**
@@ -27,6 +29,15 @@ import type { IsolationGrant } from './types.js'
  *  - the ledger is checkpointed with no sidecars and resealed over the staging
  *    file identities while recording the logical live paths.
  *
+ * A caller that must publish the seal before the handover (so the new authority
+ * digest can be recomputed from it) first calls
+ * prepareLinuxVerifierHandoverState, which upgrades the staged ledger to v9 and
+ * publishes the seal over it (it never reads a clock and performs no audited
+ * write). It then passes that ref as `existingSeal` to the handover itself. The primitive then proves the staged
+ * seal is that exact reference and that its body still binds the staging tree,
+ * performs the same rewrite, and returns the reusable ref instead of resealing.
+ * Without `existingSeal` nothing changes: a staged seal is still refused.
+ *
  * The primitive never reads a clock and never opens a runner: the orchestrator
  * supplies every value after recompiling the owner authority itself. Because the
  * rewritten grant is pinned to revision 1, the orchestrator must also pass the
@@ -42,7 +53,9 @@ import type { IsolationGrant } from './types.js'
 
 const DIGEST = /^[a-f0-9]{64}$/u
 const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/u
-const sha = (value: string): string => createHash('sha256').update(value).digest('hex')
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u
+const SEAL_KEYS = ['schemaVersion', 'protocol', 'id', 'kind', 'uid', 'stateRoot', 'ledger', 'ledgerSchemaVersion', 'schemaSha256']
+const sha = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 
 function fail(message: string): never { throw new Error(`Linux runner handover: ${message}`) }
 function canonical(value: unknown): value is string {
@@ -78,6 +91,75 @@ function removeSidecar(path: string): void {
   unlinkSync(path)
 }
 
+interface SealIdentity { path: string; dev: number; ino: number }
+interface SealBody {
+  schemaVersion: 1
+  protocol: 'dsh-linux-runner-state/v1'
+  id: string
+  kind: 'verification'
+  uid: number
+  stateRoot: SealIdentity
+  ledger: SealIdentity
+  ledgerSchemaVersion: 9
+  schemaSha256: string
+}
+function exact(value: unknown, keys: string[]): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
+    && Reflect.ownKeys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
+    && Object.values(Object.getOwnPropertyDescriptors(value)).every(item => item.enumerable && 'value' in item)
+}
+function sealIdentity(value: unknown): value is SealIdentity {
+  return exact(value, ['path', 'dev', 'ino']) && canonical(value.path)
+    && Number.isSafeInteger(value.dev) && Number(value.dev) >= 0
+    && Number.isSafeInteger(value.ino) && Number(value.ino) >= 0
+}
+/** Read back a staged seal written by resealLinuxRunnerState. The body records
+ * physical staging dev/ino next to the logical live paths, so this proves the
+ * reusable ref, the tree and the ledger all still describe the same state. */
+function readStagedSeal(path: string): { body: SealBody; bytes: Buffer } {
+  const info = lstatSync(path)
+  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== process.getuid?.()
+    || (info.mode & 0o777) !== 0o600 || info.size > 16_384) fail('existing seal is not a private canonical file')
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const opened = fstatSync(fd)
+    if (opened.dev !== info.dev || opened.ino !== info.ino) fail('existing seal changed while being read')
+    const bytes = readFileSync(fd)
+    const body: unknown = JSON.parse(bytes.toString('utf8'))
+    if (!exact(body, SEAL_KEYS) || body.schemaVersion !== 1 || body.protocol !== 'dsh-linux-runner-state/v1'
+      || typeof body.id !== 'string' || !UUID.test(body.id) || body.kind !== 'verification'
+      || body.uid !== process.getuid?.() || !sealIdentity(body.stateRoot) || !sealIdentity(body.ledger)
+      || body.ledgerSchemaVersion !== 9 || typeof body.schemaSha256 !== 'string' || !DIGEST.test(body.schemaSha256))
+      fail('existing seal body differs')
+    const after = lstatSync(path)
+    if (after.dev !== info.dev || after.ino !== info.ino || after.nlink !== 1) fail('existing seal changed while being read')
+    return { body: body as unknown as SealBody, bytes }
+  } finally { closeSync(fd) }
+}
+/** Prove `ref` is the staged seal and still binds the staging copy and the live
+ * locations. Runs before any ledger mutation and again before returning it. */
+function assertReusableSeal(input: LinuxVerifierHandoverInput, value: unknown): LinuxRunnerStateSeal {
+  let ref: LinuxRunnerStateSeal
+  try { ref = validateLinuxRunnerStateSeal(value) } catch { fail('invalid handover input') }
+  if (ref.path !== input.liveSealPath) fail('existing seal does not bind the live seal path')
+  if (!present(input.stageSealPath)) fail('existing seal is missing from the staging copy')
+  const { body, bytes } = readStagedSeal(input.stageSealPath)
+  if (sha(bytes) !== ref.sha256) fail('existing seal reference differs from the staged seal')
+  const ledgerPath = join(input.stageStateRoot, 'ledger.sqlite')
+  if (body.stateRoot.path !== input.liveStateRoot || body.ledger.path !== join(input.liveStateRoot, 'ledger.sqlite'))
+    fail('existing seal logical locations differ from the handover')
+  let digest: string
+  try { digest = linuxRunnerStateSchemaDigest(ledgerPath) } catch (error) {
+    fail(`existing seal ledger is not sealable (${(error as Error).message})`)
+  }
+  if (body.schemaSha256 !== digest) fail('existing seal schema digest differs from the staged ledger')
+  const root = lstatSync(input.stageStateRoot), ledger = lstatSync(ledgerPath)
+  if (body.stateRoot.dev !== root.dev || body.stateRoot.ino !== root.ino
+    || body.ledger.dev !== ledger.dev || body.ledger.ino !== ledger.ino)
+    fail('existing seal identities differ from the staging copy')
+  return ref
+}
+
 export interface LinuxVerifierHandoverInput {
   /** Runner role directory name (audit only); paths are supplied explicitly. */
   name: string
@@ -95,6 +177,10 @@ export interface LinuxVerifierHandoverInput {
   newAuthorityDigest: string
   /** Pre-upgrade workspace when the home itself is being relocated. */
   oldWorkspace?: string
+  /** Seal the caller already published with resealLinuxRunnerState over the same
+   * staging tree. Optional: omitting it keeps the original reseal-on-handover
+   * behavior and still refuses a pre-existing staged seal. */
+  existingSeal?: LinuxRunnerStateSeal
   expiresAt: number
   maxRuns: number
   maxTotalDurationMs: number
@@ -112,7 +198,8 @@ export function migrateLinuxVerifierRunnerState(input: LinuxVerifierHandoverInpu
   if (process.platform !== 'linux' || !process.getuid?.()) fail('requires non-root Linux')
   if (!input || typeof input !== 'object' || Object.getPrototypeOf(input) !== Object.prototype
     || Reflect.ownKeys(input).some(key => !['name', 'stageStateRoot', 'stageSealPath', 'liveStateRoot', 'liveSealPath',
-      'oldAuthorityDigest', 'newAuthorityDigest', 'oldWorkspace', 'expiresAt', 'maxRuns', 'maxTotalDurationMs', 'now'].includes(String(key)))
+      'oldAuthorityDigest', 'newAuthorityDigest', 'oldWorkspace', 'existingSeal', 'expiresAt', 'maxRuns',
+      'maxTotalDurationMs', 'now'].includes(String(key)))
     || typeof input.name !== 'string' || !NAME.test(input.name)
     || !canonical(input.stageStateRoot) || !canonical(input.stageSealPath)
     || !canonical(input.liveStateRoot) || !canonical(input.liveSealPath)
@@ -135,7 +222,10 @@ export function migrateLinuxVerifierRunnerState(input: LinuxVerifierHandoverInpu
   try { staged = lstatSync(ledgerPath) } catch { fail('verifier ledger is missing from the staging copy') }
   if (!staged.isFile() || staged.isSymbolicLink() || staged.uid !== process.getuid() || (staged.mode & 0o777) !== 0o600 || staged.nlink !== 1)
     fail('verifier ledger is not private and canonical')
-  if (present(input.stageSealPath)) fail('staging state was already handed over')
+  // Reuse path: the staged seal is expected, but only the exact caller-published
+  // reference that still binds this copy and the live locations is accepted.
+  const existingSeal = input.existingSeal === undefined ? undefined : assertReusableSeal(input, input.existingSeal)
+  if (existingSeal === undefined && present(input.stageSealPath)) fail('staging state was already handed over')
 
   // Opening through the current ledger brings any older schema to v9 (adding the
   // migrated column) using the shipped migration chain; the handover then only
@@ -229,6 +319,11 @@ export function migrateLinuxVerifierRunnerState(input: LinuxVerifierHandoverInpu
   removeSidecar(`${ledgerPath}-shm`)
   chmodSync(ledgerPath, 0o600)
 
+  if (existingSeal !== undefined) {
+    // The published seal is returned unchanged, so prove the rewrite left the
+    // sealed identities and schema exactly as they were before the transaction.
+    return Object.freeze({ seal: assertReusableSeal(input, existingSeal), jobsMigrated, activeSettled })
+  }
   privateSealParent(dirname(input.stageSealPath))
   const seal = resealLinuxRunnerState({
     stateRoot: input.stageStateRoot, sealPath: input.stageSealPath, kind: 'verification',
@@ -260,5 +355,113 @@ export function prepareLinuxRepositoryHandoverState(input: LinuxRepositoryHandov
   return resealLinuxRunnerState({
     stateRoot: input.stageStateRoot, sealPath: input.stageSealPath, kind: 'repository', requireEmpty: true,
     logicalStateRoot: input.liveStateRoot, logicalSealPath: input.liveSealPath,
+  })
+}
+
+export interface LinuxVerifierHandoverPreparationInput {
+  /** Runner role directory name (audit only); paths are supplied explicitly. */
+  name: string
+  /** Physical private state root inside the staging copy (cp target). */
+  stageStateRoot: string
+  /** Physical seal destination inside the staging copy. */
+  stageSealPath: string
+  /** Logical live state root recorded in the seal and returned as the grant workspace. */
+  liveStateRoot: string
+  /** Logical live seal path returned in the ref for the owner config. */
+  liveSealPath: string
+}
+
+export interface LinuxVerifierHandoverPreparation {
+  readonly seal: LinuxRunnerStateSeal
+  /** Identity of the staging copy's Docker-era grant. `principalDigest` is the
+   * `oldAuthorityDigest` the handover expects; the numeric fields are
+   * cross-checks only, because the caller supplies freshly compiled new terms. */
+  readonly grant: {
+    readonly principalDigest: string
+    readonly revision: number
+    readonly expiresAt: number
+    readonly maxRuns: number
+    readonly maxTotalDurationMs: number
+  }
+}
+
+/**
+ * Publish the verification seal over an unsealed staging copy before the new
+ * owner authority digest is compiled, then let migrateLinuxVerifierRunnerState
+ * (given this exact ref as `existingSeal`) perform the audited rewrite.
+ *
+ * Opening through the shipped ledger upgrades an older staging copy to v9 with
+ * the same chain the handover would use; that path is data-only, so the schema
+ * digest sealed here survives the later grant/job rewrite. One-shot by design:
+ * an existing staged seal means the handover already ran, and a staging copy
+ * whose grant is not the live Docker-era owner grant is never sealed.
+ */
+export function prepareLinuxVerifierHandoverState(
+  input: LinuxVerifierHandoverPreparationInput,
+): LinuxVerifierHandoverPreparation {
+  if (process.platform !== 'linux' || !process.getuid?.()) fail('requires non-root Linux')
+  if (!input || typeof input !== 'object' || Object.getPrototypeOf(input) !== Object.prototype
+    || Reflect.ownKeys(input).length !== 5
+    || !['name', 'stageStateRoot', 'stageSealPath', 'liveStateRoot', 'liveSealPath'].every(key => Object.hasOwn(input, key))
+    || typeof input.name !== 'string' || !NAME.test(input.name)
+    || !canonical(input.stageStateRoot) || !canonical(input.stageSealPath)
+    || !canonical(input.liveStateRoot) || !canonical(input.liveSealPath)) fail('invalid verifier handover preparation input')
+  if (input.stageSealPath === input.stageStateRoot || input.stageSealPath.startsWith(input.stageStateRoot + '/')
+    || input.stageStateRoot.startsWith(input.stageSealPath + '/')
+    || input.liveSealPath === input.liveStateRoot || input.liveSealPath.startsWith(input.liveStateRoot + '/')
+    || input.liveStateRoot.startsWith(input.liveSealPath + '/')) fail('state and seal paths are nested')
+
+  privateDirectory(input.stageStateRoot)
+  privateDirectory(dirname(input.stageStateRoot))
+  const ledgerPath = join(input.stageStateRoot, 'ledger.sqlite')
+  let staged
+  try { staged = lstatSync(ledgerPath) } catch { fail('verifier ledger is missing from the staging copy') }
+  if (!staged.isFile() || staged.isSymbolicLink() || staged.uid !== process.getuid() || (staged.mode & 0o777) !== 0o600 || staged.nlink !== 1)
+    fail('verifier ledger is not private and canonical')
+  // Publish exactly once: a staged seal is the handover's fingerprint, so it is
+  // never replaced on trust (reseal would otherwise unlink it).
+  if (present(input.stageSealPath)) fail('staging state was already handed over')
+
+  // The caller's `now` belongs to the audited handover; this pre-seal step only
+  // brings the schema forward, so it deliberately uses the ledger's own clock.
+  new IsolationLedger(ledgerPath).close()
+
+  const database = new DatabaseSync(ledgerPath, { enableForeignKeyConstraints: true })
+  let grant: Record<string, unknown> | undefined
+  try {
+    database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA synchronous = FULL;')
+    grant = database.prepare('SELECT revision, expires_at, max_runs, max_total_duration_ms, revoked, principal_digest,'
+      + ' principal_record_id, principal_version, agent_preset FROM isolation_grants WHERE id=?').get('verification') as Record<string, unknown> | undefined
+  } finally {
+    try { database.exec('PRAGMA wal_checkpoint(TRUNCATE)') } catch { /* Sidecars are probed below. */ }
+    database.close()
+  }
+  removeSidecar(`${ledgerPath}-wal`)
+  removeSidecar(`${ledgerPath}-shm`)
+  chmodSync(ledgerPath, 0o600)
+
+  if (!grant) fail('verifier grant is not the staged owner grant')
+  const { revision, expires_at: expiresAt, max_runs: maxRuns, max_total_duration_ms: maxTotalDurationMs,
+    revoked, principal_digest: principalDigest, principal_record_id: principalRecordId,
+    principal_version: principalVersion, agent_preset: preset } = grant
+  if (revision !== 1 || principalVersion !== 1 || preset !== 'verification' || revoked !== 0
+    || typeof principalDigest !== 'string' || !DIGEST.test(principalDigest)
+    || principalRecordId !== `verification:${principalDigest}`)
+    fail('verifier grant is not the staged owner grant')
+  // The caps are the ceilings the native runner config can express, so oversized
+  // Docker-era terms are refused with their own cause instead of being reported
+  // as an identity mismatch.
+  if (!positive(expiresAt, Number.MAX_SAFE_INTEGER)
+    || !positive(maxRuns, 10_000) || !positive(maxTotalDurationMs, 86_400_000))
+    fail('verifier grant exceeds the native handover budget')
+
+  privateSealParent(dirname(input.stageSealPath))
+  const seal = resealLinuxRunnerState({
+    stateRoot: input.stageStateRoot, sealPath: input.stageSealPath, kind: 'verification', requireEmpty: false,
+    logicalStateRoot: input.liveStateRoot, logicalSealPath: input.liveSealPath,
+  })
+  return Object.freeze({
+    seal,
+    grant: Object.freeze({ principalDigest, revision: 1, expiresAt, maxRuns, maxTotalDurationMs }),
   })
 }

@@ -27,6 +27,11 @@ import {
  * against the staged Home instead of relocating a second time (a second
  * relocation would fail on the existing destinations).
  *
+ * When the caller is staging an in-place cutover, the logical Home is the live
+ * Home and already exists; `existingLogicalHome` attests that fact so the
+ * relocation stages beside it instead of refusing an occupied Home. The staged
+ * receipts still record the logical Home and the sealed proof is unchanged.
+ *
  * It never cleans up. On any failure — including a crash or abort after the
  * first copy — the staged Home holds an unsealed partial relocation and the
  * sealed proof is gone, so a retry without that proof fails closed on the
@@ -57,6 +62,10 @@ function identity(input: LinuxRsiNativeMaterializeInput): void {
   const candidateHome = canonicalHome(input.candidateHome, 'candidate Home')
   const stagePhysicalHome = canonicalHome(input.stagePhysicalHome, 'staged Home')
   const logicalHome = canonicalHome(input.logicalHome, 'logical Home')
+  if (input.existingLogicalHome !== undefined) {
+    canonicalHome(input.existingLogicalHome, 'existing logical Home')
+    if (input.existingLogicalHome !== logicalHome) fail('existing logical Home is not this logical Home')
+  }
   if (typeof input.profile !== 'string' || !PROFILE.test(input.profile)) fail('invalid profile')
   if (overlap(candidateHome, stagePhysicalHome) || overlap(candidateHome, logicalHome)
     || overlap(stagePhysicalHome, logicalHome)) fail('candidate, staged and logical Homes must be disjoint')
@@ -120,6 +129,11 @@ export interface LinuxRsiNativeMaterializeInput {
   stagePhysicalHome: string
   /** Absolute path the staged Home will occupy after the cutover. */
   logicalHome: string
+  /** Set when that path is already occupied by the live Home being cut over
+   * in place (the Docker -> Linux-native staging case). It must equal
+   * `logicalHome`; the relocation then stages beside the live Home instead of
+   * refusing an occupied logical Home. Replay ignores it. */
+  existingLogicalHome?: string
   profile: string
   /** Sealed proof from an earlier run over the same Homes, when replaying. */
   relocation?: LinuxRsiNativeRelocationProof
@@ -149,7 +163,9 @@ export async function materializeLinuxRsiNativeInStage(
   let relocation = input.relocation
   if (relocation === undefined) {
     relocation = await relocateLinuxRsiNativeFamily({ sourceHome: candidateHome, physicalHome: stagePhysicalHome,
-      logicalHome, profile, ...(input.signal === undefined ? {} : { signal: input.signal }) })
+      logicalHome, profile, ...(input.existingLogicalHome === undefined
+        ? {} : { existingLogicalHome: input.existingLogicalHome }),
+      ...(input.signal === undefined ? {} : { signal: input.signal }) })
   } else {
     proofIdentity(relocation, input)
   }

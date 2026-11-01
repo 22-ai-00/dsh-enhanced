@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
-  readdirSync, realpathSync, renameSync, rmSync } from 'node:fs'
+  readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -8,8 +8,9 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { defaultLimits } from '../src/config.js'
 import { inspectIsolationGrant } from '../src/diagnostics.js'
 import { grantDigest, IsolationLedger } from '../src/ledger.js'
-import { migrateLinuxVerifierRunnerState, prepareLinuxRepositoryHandoverState } from '../src/linux-runner-state-migration.js'
-import { inspectLinuxRunnerState } from '../src/linux-runner-state.js'
+import { migrateLinuxVerifierRunnerState, prepareLinuxRepositoryHandoverState,
+  prepareLinuxVerifierHandoverState } from '../src/linux-runner-state-migration.js'
+import { inspectLinuxRunnerState, resealLinuxRunnerState, type LinuxRunnerStateSeal } from '../src/linux-runner-state.js'
 import { LinuxRepositoryRunner } from '../src/linux-repository-runner.js'
 import type { LinuxRuntime } from '../src/linux-runtime.js'
 import { LinuxVerifierRunner } from '../src/linux-verifier-runner.js'
@@ -72,6 +73,41 @@ function stageCopy(t: ReturnType<typeof tree>): void {
   cpSync(t.liveState, t.stageState, { recursive: true, preserveTimestamps: true })
   chmodSync(t.stageHome, 0o700); chmodSync(t.stageState, 0o700); chmodSync(t.stageRunner, 0o700)
   chmodSync(join(t.stageRunner, 'ledger.sqlite'), 0o600)
+}
+
+/** A caller that must publish the seal before the handover (to recompute the
+ * authority digest from it) writes exactly the seal the migration would: over
+ * the staged tree while recording the logical live paths. */
+function stageSeal(t: ReturnType<typeof tree>): LinuxRunnerStateSeal {
+  const parent = join(t.stageState, 'native-runner-states')
+  mkdirSync(parent, { recursive: true, mode: 0o700 }); chmodSync(parent, 0o700)
+  return resealLinuxRunnerState({ stateRoot: t.stageRunner, sealPath: t.stageSeal, kind: 'verification',
+    logicalStateRoot: t.liveRunner, logicalSealPath: t.liveSeal })
+}
+const sha256 = (value: Buffer): string => createHash('sha256').update(value).digest('hex')
+
+/** Rewrite the staged copy's job table to its schema 8 shape (v8 == v9 without
+ * the `migrated` flag) so the pre-seal step is proven on an older Docker-era
+ * copy. The DDL is derived from the live schema so it cannot drift silently. */
+function downgradeToSchema8(path: string): void {
+  const database = new DatabaseSync(path)
+  try {
+    const sql = (database.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name='isolation_jobs'").get() as { sql: string }).sql
+    const legacy = sql.replace(', migrated INTEGER NOT NULL DEFAULT 0 CHECK(migrated IN (0,1))', '')
+    if (legacy === sql || !/^CREATE TABLE "?isolation_jobs"? \(/u.test(legacy))
+      throw new Error('schema 8 downgrade fixture drifted from the sealed schema')
+    const columns = (database.prepare('PRAGMA table_info(isolation_jobs)').all() as Array<{ name: string }>)
+      .map(row => row.name).filter(name => name !== 'migrated').join(',')
+    database.exec(`DROP INDEX IF EXISTS isolation_artifact_contract; ALTER TABLE isolation_jobs RENAME TO saved_v9;
+      ${legacy};
+      INSERT INTO isolation_jobs (${columns}) SELECT ${columns} FROM saved_v9;
+      DROP TABLE saved_v9;
+      CREATE INDEX isolation_jobs_grant ON isolation_jobs(grant_id);
+      CREATE INDEX isolation_jobs_recoverable ON isolation_jobs(status, updated_at);
+      PRAGMA user_version=8; UPDATE schema_meta SET value='8' WHERE key='schema-version';`)
+    if ((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version !== 8)
+      throw new Error('schema 8 downgrade fixture did not apply')
+  } finally { database.close() }
 }
 
 /** Job ids by role; indexed access is unchecked, so the fixture names every
@@ -334,6 +370,176 @@ describe.runIf(process.platform === 'linux' && (process.getuid?.() ?? 0) > 0)('a
       oldAuthorityDigest: newDigest, newAuthorityDigest: 'c'.repeat(64) })).toThrow(/already handed over/u)
     expect(first.seal.path).toBe(t.liveSeal)
   })
+
+  test('reuses the caller-published staged seal instead of resealing it', () => {
+    const t = tree(); dockerLedger(t.ledgerPath, t.liveRunner)
+    stageCopy(t)
+    const published = stageSeal(t)
+    const sealed = readFileSync(t.stageSeal)
+    const stageLedger = join(t.stageRunner, 'ledger.sqlite')
+
+    // Without a handed-over ref a staged seal is still refused with the old error.
+    expect(() => migrateLinuxVerifierRunnerState(handoverInput(t))).toThrow(/already handed over/u)
+
+    const result = migrateLinuxVerifierRunnerState({ ...handoverInput(t), existingSeal: published })
+    expect(result.seal).toEqual(published)
+    expect(result.jobsMigrated).toBe(7)
+    expect(result.activeSettled).toBe(2)
+    // The published bytes are reused, not rewritten over fresh identities.
+    expect(readFileSync(t.stageSeal)).toEqual(sealed)
+    expect(existsSync(t.liveSeal)).toBe(false)
+    const staged = readonlyDb(stageLedger)
+    try {
+      expect(staged.prepare('SELECT COUNT(*) AS n FROM isolation_jobs WHERE migrated=1').get()?.n).toBe(7)
+      expect(staged.prepare('SELECT digest, principal_digest FROM isolation_grants WHERE id=?').get('verification'))
+        .toEqual({ digest: grantDigest(nextGrant(t)), principal_digest: newDigest })
+    } finally { staged.close() }
+
+    // The reused identities survive the same-filesystem cutover.
+    mkdirSync(t.backupHome, { mode: 0o700 })
+    renameSync(t.liveState, join(t.backupHome, 'state'))
+    renameSync(t.stageState, t.liveState)
+    inspectLinuxRunnerState({ stateRoot: t.liveRunner, stateSeal: result.seal, kind: 'verification' })
+  }, 30_000)
+
+  test('rejects a staged seal that is not the exact reusable reference without mutating the ledger', () => {
+    const t = tree(); dockerLedger(t.ledgerPath, t.liveRunner)
+    stageCopy(t)
+    const published = stageSeal(t)
+    const ledger = join(t.stageRunner, 'ledger.sqlite')
+    const before = ledgerFingerprint(ledger)
+    const refuse = (patch: Record<string, unknown>, pattern: RegExp): void => {
+      expect(() => migrateLinuxVerifierRunnerState(
+        { ...handoverInput(t), ...patch } as unknown as Parameters<typeof migrateLinuxVerifierRunnerState>[0]))
+        .toThrow(pattern)
+      expect(ledgerFingerprint(ledger)).toEqual(before)
+      expect(existsSync(t.liveSeal)).toBe(false)
+    }
+
+    // Not the logical live seal path, not the byte-identical seal, not a ref shape.
+    refuse({ existingSeal: { path: t.stageSeal, sha256: published.sha256 } }, /live seal path/u)
+    refuse({ existingSeal: { path: published.path, sha256: 'c'.repeat(64) } }, /reference differs/u)
+    refuse({ existingSeal: { ...published, extra: true } }, /invalid handover input/u)
+    refuse({ liveSealPath: join(t.parent, 'seals', 'creation-review-runner.json'), existingSeal: published },
+      /live seal path/u)
+
+    // A tampered but self-consistent seal body is still refused.
+    const original = JSON.parse(readFileSync(t.stageSeal, 'utf8')) as Record<string, unknown>
+    const tamper = (change: (body: Record<string, unknown>) => void, pattern: RegExp): void => {
+      const body = structuredClone(original)
+      change(body)
+      const bytes = Buffer.from(JSON.stringify(body) + '\n')
+      writeFileSync(t.stageSeal, bytes)
+      refuse({ existingSeal: { path: published.path, sha256: sha256(bytes) } }, pattern)
+    }
+    tamper(body => { body.kind = 'repository' }, /body differs/u)
+    tamper(body => { body.stateRoot = { ...(body.stateRoot as Record<string, unknown>), path: join(t.liveState, 'elsewhere') } },
+      /logical locations differ/u)
+    tamper(body => { body.schemaSha256 = '0'.repeat(64) }, /schema digest differs/u)
+    tamper(body => { body.ledger = { ...(body.ledger as Record<string, unknown>), ino: 1 } }, /identities differ/u)
+
+    // An unsealed or non-private staging copy never gets a seal on trust.
+    writeFileSync(t.stageSeal, Buffer.from(JSON.stringify(original) + '\n'))
+    rmSync(t.stageSeal)
+    refuse({ existingSeal: published }, /missing from the staging copy/u)
+    writeFileSync(t.stageSeal, Buffer.from(JSON.stringify(original) + '\n'))
+    chmodSync(t.stageSeal, 0o644)
+    refuse({ existingSeal: published }, /not a private canonical file/u)
+  }, 30_000)
+
+  test('pre-seals the staging copy for a digest compiled before the handover, upgrading a schema 8 copy', () => {
+    const t = tree(); dockerLedger(t.ledgerPath, t.liveRunner)
+    stageCopy(t)
+    downgradeToSchema8(join(t.stageRunner, 'ledger.sqlite'))
+    const preparation = { name: 'creation-review-runner', stageStateRoot: t.stageRunner, stageSealPath: t.stageSeal,
+      liveStateRoot: t.liveRunner, liveSealPath: t.liveSeal }
+
+    const prepared = prepareLinuxVerifierHandoverState(preparation)
+    expect(prepared.seal).toEqual({ path: t.liveSeal, sha256: expect.stringMatching(/^[a-f0-9]{64}$/u) })
+    // The Docker-era owner grant is the identity the caller recompiles against,
+    // and its terms are cross-checks only: the caller passes the new ones.
+    expect(prepared.grant).toEqual({ principalDigest: oldDigest, revision: 1, expiresAt: 100_000,
+      maxRuns: 8, maxTotalDurationMs: 10_000 })
+    const upgraded = readonlyDb(join(t.stageRunner, 'ledger.sqlite'))
+    try {
+      expect(upgraded.prepare('PRAGMA user_version').get()?.user_version).toBe(9)
+      expect(upgraded.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get()?.value).toBe('9')
+    } finally { upgraded.close() }
+    const sealed = readFileSync(t.stageSeal), sealedInode = lstatSync(t.stageSeal).ino
+
+    const result = migrateLinuxVerifierRunnerState({ ...handoverInput(t),
+      oldAuthorityDigest: prepared.grant.principalDigest, existingSeal: prepared.seal })
+    expect(result).toMatchObject({ seal: prepared.seal, jobsMigrated: 7, activeSettled: 2 })
+    // The ref compiled into the new digest is the one that survives unchanged.
+    expect(readFileSync(t.stageSeal)).toEqual(sealed)
+    expect(lstatSync(t.stageSeal).ino).toBe(sealedInode)
+    expect(() => prepareLinuxVerifierHandoverState(preparation)).toThrow(/already handed over/u)
+
+    mkdirSync(t.backupHome, { mode: 0o700 })
+    renameSync(t.liveState, join(t.backupHome, 'state'))
+    renameSync(t.stageState, t.liveState)
+    inspectLinuxRunnerState({ stateRoot: t.liveRunner, stateSeal: result.seal, kind: 'verification' })
+  }, 30_000)
+
+  test('refuses to pre-seal anything but an unsealed staging owner-grant copy', () => {
+    const t = tree(); dockerLedger(t.ledgerPath, t.liveRunner)
+    stageCopy(t)
+    const ledger = join(t.stageRunner, 'ledger.sqlite')
+    const refuse = (patch: Record<string, unknown>, pattern: RegExp): void => {
+      expect(() => prepareLinuxVerifierHandoverState({ name: 'creation-review-runner',
+        stageStateRoot: t.stageRunner, stageSealPath: t.stageSeal, liveStateRoot: t.liveRunner,
+        liveSealPath: t.liveSeal, ...patch } as unknown as Parameters<typeof prepareLinuxVerifierHandoverState>[0]))
+        .toThrow(pattern)
+      expect(existsSync(t.stageSeal)).toBe(false)
+      expect(existsSync(t.liveSeal)).toBe(false)
+    }
+    const mutate = (sql: string): void => {
+      const database = new DatabaseSync(ledger)
+      try { database.exec(`PRAGMA busy_timeout=5000; ${sql}`) } finally { database.close() }
+    }
+
+    refuse({ extra: true }, /invalid verifier handover preparation input/u)
+    refuse({ name: 'Creation Review' }, /invalid verifier handover preparation input/u)
+    refuse({ stageSealPath: join(t.stageRunner, 'seal.json') }, /state and seal paths are nested/u)
+    chmodSync(ledger, 0o644)
+    refuse({}, /verifier ledger is not private and canonical/u)
+    chmodSync(ledger, 0o600)
+
+    // A staged seal already means the handover ran: it is never replaced on trust,
+    // and the refusal happens before the ledger is opened or mutated.
+    stageSeal(t)
+    const sealed = readFileSync(t.stageSeal)
+    const sealedAt = lstatSync(t.stageSeal).mtimeMs
+    expect(() => prepareLinuxVerifierHandoverState({ name: 'creation-review-runner',
+      stageStateRoot: t.stageRunner, stageSealPath: t.stageSeal, liveStateRoot: t.liveRunner, liveSealPath: t.liveSeal }))
+      .toThrow(/already handed over/u)
+    expect(readFileSync(t.stageSeal)).toEqual(sealed)
+    expect(lstatSync(t.stageSeal).mtimeMs).toBe(sealedAt)
+    rmSync(t.stageSeal)
+
+    mutate("UPDATE isolation_grants SET revision=2 WHERE id='verification'")
+    refuse({}, /verifier grant is not the staged owner grant/u)
+    mutate("UPDATE isolation_grants SET revision=1, principal_record_id='verification:" + 'b'.repeat(64) + "' WHERE id='verification'")
+    refuse({}, /verifier grant is not the staged owner grant/u)
+    mutate(`UPDATE isolation_grants SET principal_record_id='verification:${oldDigest}', principal_version=2 WHERE id='verification'`)
+    refuse({}, /verifier grant is not the staged owner grant/u)
+    mutate("UPDATE isolation_grants SET principal_version=1, revoked=1 WHERE id='verification'")
+    refuse({}, /verifier grant is not the staged owner grant/u)
+    mutate("UPDATE isolation_grants SET revoked=0, agent_preset='repository' WHERE id='verification'")
+    refuse({}, /verifier grant is not the staged owner grant/u)
+    // Terms outside what the native runner config expresses are reported as a
+    // budget refusal, not as an identity mismatch.
+    mutate("UPDATE isolation_grants SET agent_preset='verification', max_runs=10001 WHERE id='verification'")
+    refuse({}, /verifier grant exceeds the native handover budget/u)
+    mutate("UPDATE isolation_grants SET max_runs=160, max_total_duration_ms=86400001 WHERE id='verification'")
+    refuse({}, /verifier grant exceeds the native handover budget/u)
+    mutate("UPDATE isolation_grants SET max_total_duration_ms=10000 WHERE id='verification'")
+    mutate("DELETE FROM isolation_grants WHERE id='verification'")
+    refuse({}, /verifier grant is not the staged owner grant/u)
+
+    rmSync(ledger)
+    refuse({}, /verifier ledger is missing from the staging copy/u)
+  }, 30_000)
 
   test('fails closed on a missing staged ledger or equal authority digests', () => {
     const t = tree(); dockerLedger(t.ledgerPath, t.liveRunner)

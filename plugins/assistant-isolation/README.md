@@ -117,6 +117,14 @@ incomplete initialization needs explicit reconciliation. The helper never
 renews grants, clears history or replays unknown jobs. Configurations without a
 seal retain their original behavior and have not acquired this protection.
 
+An authorized Docker-to-linux-native backend handover runs offline on a staged
+copy of the home. `prepareLinuxVerifierHandoverState({ name, stageStateRoot,
+stageSealPath, liveStateRoot, liveSealPath })` upgrades the staging ledger to
+schema 9 and publishes the seal before the new authority digest is compiled;
+`migrateLinuxVerifierRunnerState({ ..., existingSeal })` then proves that exact
+seal still binds the copy and performs the audited grant/job rewrite without
+resealing, so a digest compiled in between stays valid across the cutover.
+
 `IsolatedVerifierRunner` accepts either the existing Docker configuration or an
 explicit `backend: 'linux-native'` configuration with a verified `LinuxRuntime`
 and delegated `cgroupRoots`. `LinuxVerifierRunner` is also exported directly.

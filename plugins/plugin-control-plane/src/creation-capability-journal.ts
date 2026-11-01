@@ -192,6 +192,16 @@ export function creationCapabilityPublicKey(config: CreationCapabilityConfig): s
   return createPublicKey(createPrivateKey(keyBytes(config.keyPath))).export({ type: 'spki', format: 'pem' }).toString()
 }
 
+/**
+ * Stable journal authority identity: canonical journal path, the full capability grant and the
+ * signing key file fingerprint. It reads the key through the same private-file validation the
+ * journal uses, so a missing, non-canonical or non-private key fails closed.
+ */
+export function creationCapabilityAuthorityDigest(input: { path: string; config: CreationCapabilityConfig }): string {
+  return digest({ semantics: SEMANTICS, path: path(input.path), config: structuredClone(input.config),
+    keyFingerprint: sha(keyBytes(input.config.keyPath)) })
+}
+
 interface AdoptionRow { plan_id: string; status: CreationCapabilityRecord['status']; certificate_json: string; certificate_digest: string;
   artifact: Uint8Array; artifact_sha: string; tools_json: string | null; tools_digest: string | null; receipt_json: string | null; reason: string | null }
 interface CallRow { plan_id: string; call_key: string; arguments_digest: string; status: CreationCapabilityCall['status'];
@@ -214,8 +224,7 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
     if (!this.path.endsWith('/creation-adoptions.sqlite') || this.path === this.config.keyPath) fail()
     this.key = createPrivateKey(keyBytes(this.config.keyPath))
     this.publicKey = createPublicKey(this.key).export({ type: 'spki', format: 'pem' }).toString()
-    this.authorityDigest = digest({ semantics: SEMANTICS, path: this.path, config: this.config,
-      keyFingerprint: sha(keyBytes(this.config.keyPath)) })
+    this.authorityDigest = creationCapabilityAuthorityDigest({ path: this.path, config: this.config })
     privateStat(dirname(this.path), 'directory')
     try { const fd = openSync(this.path, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600)
       try { fsyncSync(fd) } finally { closeSync(fd) } }

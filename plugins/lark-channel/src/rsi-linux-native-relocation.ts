@@ -28,6 +28,12 @@ export interface LinuxRsiNativeRelocationInput {
   physicalHome: string
   logicalHome: string
   profile: string
+  /** Attests that `logicalHome` is the live Home already occupying its final
+   * path (the in-place Docker -> Linux-native cutover case). It must be the
+   * exact `logicalHome` value and resolve to itself; it then substitutes for
+   * the "logical Home already exists" refusal instead of weakening any other
+   * check, and the relocated receipts still record the logical Home. */
+  existingLogicalHome?: string
   signal?: AbortSignal
 }
 
@@ -811,6 +817,10 @@ function pureIdentity(input: LinuxRsiNativeRelocationInput): void {
     ['logicalHome', logicalHome]] as const) {
     if (!canonical(value)) fail(`invalid ${name}`)
   }
+  if (input.existingLogicalHome !== undefined) {
+    if (!canonical(input.existingLogicalHome)) fail('invalid existingLogicalHome')
+    if (input.existingLogicalHome !== logicalHome) fail('existing logical Home is not this logical Home')
+  }
   if (!PROFILE.test(input.profile)) fail('invalid profile')
   if (physicalHome === sourceHome || physicalHome === logicalHome || logicalHome === sourceHome) {
     fail('relocation homes overlap')
@@ -818,6 +828,14 @@ function pureIdentity(input: LinuxRsiNativeRelocationInput): void {
   if (within(physicalHome, sourceHome) || within(sourceHome, physicalHome)
     || within(logicalHome, sourceHome) || within(sourceHome, logicalHome)
     || within(physicalHome, logicalHome) || within(logicalHome, physicalHome)) fail('relocation homes overlap')
+}
+
+/** Substitute for the `logical Home already exists` refusal when the caller
+ * attests this is the live Home being cut over: the path must exist and be its
+ * own realpath, so a dangling path or a symlink to another Home still fails. */
+async function attestedLogicalHome(logicalHome: string): Promise<void> {
+  if (!(await exists(logicalHome))) fail('existing logical Home is missing')
+  if (await realpath(logicalHome) !== logicalHome) fail('existing logical Home is not canonical')
 }
 
 async function assertTargetsAbsent(physicalHome: string, profile: string): Promise<void> {
@@ -855,7 +873,9 @@ function relocationDigest(proof: LinuxRsiNativeRelocationProof): string {
 }
 
 /** Relocate one prepared Linux-native DSH Home onto a fresh physical Home.
- * The source is authenticated before copying and never modified. */
+ * The source is authenticated before copying and never modified. An
+ * `existingLogicalHome` attestation only replaces the "logical Home already
+ * exists" refusal; every other check and the proof shape stay the same. */
 export async function relocateLinuxRsiNativeFamily(
   input: LinuxRsiNativeRelocationInput): Promise<LinuxRsiNativeRelocationProof> {
   pureIdentity(input)
@@ -863,7 +883,9 @@ export async function relocateLinuxRsiNativeFamily(
   if (process.platform !== 'linux') fail('Linux native relocation requires Linux')
   signal?.throwIfAborted()
   await privateDirectory(sourceHome, 'unsafe source Home')
-  if (await exists(logicalHome)) fail('logical Home already exists')
+  if (input.existingLogicalHome === undefined) {
+    if (await exists(logicalHome)) fail('logical Home already exists')
+  } else await attestedLogicalHome(logicalHome)
   if (await exists(physicalHome)) await privateDirectory(physicalHome, 'unsafe physical Home')
   else await makePrivateDirectory(physicalHome)
   await assertTargetsAbsent(physicalHome, profile)
@@ -1318,5 +1340,38 @@ export async function openLinuxRsiNativeRelocatedFamily(
   await verifyCopies(elements)
   const family = await readRelocated(physicalHome, profile, peer, elements)
   await validateRelocatedReceipts(family, logicalHome, physicalHome, profile, elements, peer, digests)
+  return relocatedFamily(family, logicalHome)
+}
+
+/** Re-open a verified relocation at another physical Home; callers may only
+ * supply the proof's own physical Home or its logical Home.
+ *
+ * The one supported case is the rename(2) cutover: `rename` preserves dev/ino,
+ * so the staged trees keep their sealed content identity while their paths move
+ * under the live Home. Receipts record logical paths, so only the element and
+ * receipt roots change; the proof itself stays the sealed staged record and is
+ * never rewritten. */
+export async function openLinuxRsiNativeRelocatedFamilyAt(
+  proof: LinuxRsiNativeRelocationProof, physicalHome: string): Promise<LinuxRsiNativeRelocatedFamily> {
+  const { record, elements, digests } = proofShape(proof)
+  const stagedHome = stringField(record, 'physicalHome', 'invalid relocation proof')
+  if (!canonical(physicalHome)) fail('invalid relocation physical Home')
+  if (physicalHome === stagedHome) return openLinuxRsiNativeRelocatedFamily(proof)
+  const logicalHome = stringField(record, 'logicalHome', 'invalid relocation proof')
+  if (physicalHome !== logicalHome) fail('relocation proof does not describe this physical Home')
+  if (relocationDigest(proof) !== digests.relocation) fail('relocation proof digest differs')
+  if (process.platform !== 'linux') fail('Linux native relocation verification requires Linux')
+  const profile = stringField(record, 'profile', 'invalid relocation proof')
+  const moved = new Map<ElementName, ElementMeta>()
+  for (const name of ELEMENT_NAMES) {
+    const meta = elements.get(name) ?? fail('invalid relocation proof elements')
+    const suffix = relative(stagedHome, meta.physicalPath)
+    if (suffix === '' || suffix.startsWith('..') || isAbsolute(suffix)) fail('relocation element paths differ')
+    moved.set(name, { ...meta, physicalPath: under(physicalHome, suffix) })
+  }
+  const peer = behaviorPeer()
+  await verifyCopies(moved)
+  const family = await readRelocated(physicalHome, profile, peer, moved)
+  await validateRelocatedReceipts(family, logicalHome, physicalHome, profile, moved, peer, digests)
   return relocatedFamily(family, logicalHome)
 }
