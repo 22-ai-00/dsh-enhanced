@@ -40,6 +40,8 @@ Keep one active delivery in context. Completed work is a capability boundary, no
 
 ## Verification and delivery
 
+Keep only `dev` and `main` branches locally and on the remote. Develop, commit and push on `dev`; merge into `main` only when releasing after verification. Do not create feature or release branches. Before removing an existing branch, preserve its unique changes on `dev` and verify that no work is lost.
+
 Deliver capability-sized commits. After relevant checks and independent review, commit and push an independently usable capability to `dev` before starting another main capability; keep unfinished work out. Bulk version changes belong in a separate release commit when ready.
 
 Run root `pnpm check` before final delivery/publication: manifest validation, zero lint warnings, typechecking, tests, clean build and every package's dry-run pack. Inspect pack file lists when boundaries or `files` change. Capability checks do not replace full verification; skipped external tests do not establish live behavior. Keep development checks focused on changed behavior and concrete risks, not repeated live-model scenarios.
