@@ -124,21 +124,29 @@ rules:
     actions: [admit]
     resource: { kind: automation, id: work-item-worker }
 
-  # ② 允许 worker Agent 调用本插件的 CAS 工具（tool guard 默认拒绝）
+  # ② 允许 worker Agent 调用本插件的 CAS 工具（tool guard 默认拒绝）。
+  #    subject.id 是 worker 会话的 Agent preset id（即 definition.agentPreset /
+  #    scope.preset），不是 automation id，也不是 "primary"：assistant-policy 在
+  #    authorizeToolExecution 里用 session.header.agentPreset 作 subject.id。
   - id: allow-work-item-tools
     effect: allow
-    subject: { kind: agent, id: primary, workspace: /absolute/workspace }
+    subject: { kind: agent, id: <worker preset id>, workspace: /absolute/workspace }
     actions: [execute]
     resource: { kind: tool, id: "work_item_*" }
     context: { initiators: [background] }
 
-  # ③ 允许本插件经 Delivery 向固定 owner route 发通知
+  # ③ 允许本插件经 Delivery 向固定 owner route 发通知。
+  #    resource.id 是 assistant-delivery 的 conversation binding id（通知真正
+  #    投递所绑定的会话），不是 ownerRouteId：Delivery 的
+  #    enqueueBackgroundAuthorized 以 binding.id 作 resource.id 再次授权。
   - id: allow-work-item-owner-notify
     effect: allow
     subject: { kind: background, id: work-items/v1, workspace: /absolute/workspace, principal: <principal id> }
     actions: [send]
-    resource: { kind: message, id: 'route:<ownerRouteId>' }
+    resource: { kind: message, id: <conversation binding id> }
 ```
+
+worker preset 需要与 definition 的 `agentPreset` 一致；`subject.id` 写成 automation id、`primary` 或 route id 都会被判 `default-deny`（默认拒绝，不会报“配置错误”），这是最容易踩空的一处。同理 ③ 写成 `route:<ownerRouteId>` 会因为 binding 查不到而抛 `missing-binding`。
 
 注意：当前 `assistant-policy` 的资源类型词汇表没有 work-item/ticket kind，因此准入授权复用 `resource: { kind: automation, id: <workerAutomationId> }`。这是契约层面的错配，不是可配选项；后续若 Policy 增加专用 kind，应同步调整实现与规则。
 
