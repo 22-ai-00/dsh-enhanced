@@ -191,6 +191,17 @@ rules:
 - host-only 接口：`settleOutcomes(force)`、`outcomes({ limit, evidenceState })`（没有对应的模型工具）；`status()` 增加 `outcome` 视图，`health().settlement` 与 `stats()` 暴露 pending/observed/unverified 计数。`settlement.enabled: false` 时报告 `skipped: 'disabled'` 且不扫描。
 - 缺 `assistant-delivery`、缺 `listOwnerForegroundTaskSources` 或 owner route 撤销时只返回 `degraded`/`failed` 并 warn，不抛错、不写假结算，也不会让 `claim()` 失败。
 
+### 可信 Evaluation 导出（第四个 trusted producer）
+
+已结算的结果修订（`evidenceState != 'pending'`）会投影到 `@dsh-enhanced/assistant-evaluation` 的 trusted lane，作为该账本与交付/自动化的 latter 之外的**证据**，而不是目标判断：
+
+- 每个结算修订最多投影一条 Evaluation 记录，幂等键为确定性的 `work-items/<itemId>/<revision>/<evidenceState>`；相同重放安全，内容变化由 Evaluation 以 `idempotency-conflict` 失败关闭。
+- `evidenceState: observed` → `executionStatus: succeeded` 且 `evaluator.version: settlement-v1`；`unverified` / `not-applicable` → `executionStatus: unknown` 且 `unverified-v1`。投影的 `objectiveStatus` 与 `deliveryStatus` 在类型和运行时都只能是 `unknown`：work-item 结算永远不能把自身升级为目标达成证据，也不会因报告过 `ready` 而被 Evaluation 当作 achieved。
+- 复用与 verifier 相同的私有 producer registration seam：`assistantEvaluation` 通过 `ctx` 发现本服务的 `trustedWorkItemProducerGeneration()` 与 `registerTrustedWorkItemEvaluationSink(registration)`，并校验 protocol（`assistant-work-items/evaluation/v1`）、generation、ownership 和单注册不变量；本插件不直接写 Evaluation 数据库。
+- `assistant-evaluation` 是可选 peer：缺席时结算行保持 `pending`，不阻塞 claim/report；绑定后下一次 drain 会补导既有 pending 行。
+- 有界且诚实降级：每 sweep 最多 10 条，失败最多重试 5 次后标记 `export-attempts-exhausted`；部署没有精确 workspace+preset scope 时标记 `skipped`（`owner-route-unavailable`）；observe 模式不导出。状态写入 `work_item_outcome.evaluation_*`（schema v5），`health().evaluation` 与 `stats()` 暴露 `evaluationPending/exported/skipped`。
+- 依赖方向：本插件只以 **type-only import** 引用 `@dsh-enhanced/assistant-evaluation` 的 claims/registration 契约类型，并把该包声明为 optional peer + devDependency；Evaluation 保持 producer-agnostic，不依赖任何 producer 运行时。
+
 ## 配置
 
 | 字段 | 默认值 | 含义 |
@@ -240,7 +251,7 @@ rules:
 - 安装脚本：包内没有 postinstall 或其他生命周期脚本；`prepublishOnly` 只要求用 pnpm 发布。
 - 消息投递：只有 active 模式的终态报告才会经 `assistant-delivery` 入队；observe 模式从不调用 Delivery 的写接口。Delivery 会在入队和发送前重查 owner route、binding 版本/代次、有效期和 background `send` Policy。
 - 跨插件只读：自动来源使用 `assistant-delivery` 的 `validateOwnerRoute` + `listOwnerForegroundTaskSources`（owner 认证、游标分页、host 公开、只读，不触发任何发送或写操作）。`assistant-delivery` 缺失或版本过旧（无该 API）时，来源退化为 no-op 或 `degraded: 'unsupported'`，插件激活与 claim 都不会抛错。
-- 结果结算：只读取本地账本和 `assistant-delivery` 的只读 `listOwnerForegroundTaskSources`；不新增网络、子进程、凭据或写接口，结算失败/缺依赖时降级而不是重试外部写入。
+- 结果结算：只读取本地账本和 `assistant-delivery` 的只读 `listOwnerForegroundTaskSources`；不新增网络、子进程、凭据或写接口，结算失败/缺依赖时降级而不是重试外部写入。可选 `assistant-evaluation` 只通过进程内 registration 追加 trusted 证据，同样不发网络请求。
 - 数据保留：账本保存外部 ID、标题、brief、owner 身份、报告正文和 artifact 路径，可能包含私人信息；备份时按 SQLite（含 WAL）一致性方式复制。删除 scratch 目录不影响账本，但会丢失完整 artifact。
 
 ## 限制
@@ -252,7 +263,7 @@ rules:
 - 已准入信号的 `disposition` 若被修正为成功（`succeeded`，即不再产生候选），不会自动关闭旧工作项；只有 `cancelled` 撤回会传播到在途项。撤回报告已经交给 delivery 的终态报告无法撤回，worker 只能从后续工具调用看到 `dropped`。observe 模式不会新建在途项，但若切换前遗留的在途项仍在，撤回仍会把它退役（内部账本变化，不唤醒、不通知）。
 - 升级注意：本版本把 `disposition` 从 canonical key 移除。升级前已准入的旧工作项仍带旧 key，之后的撤回对它们会解析为 `absent`，只能等其自然结项；新信号不受影响。
 - 观察期记录会占用去重窗口：同一 signal 从 observe 切到 active 后，窗口内仍视为已准入；需要时等待窗口过期或换 `externalId`。
-- 没有评估、学习或采用反馈回路；工作项终态只是运维证据，不代表任务质量。`ready` 仅是 worker 自报，结果结算也只给出 `unknown/observed/unverified`，不证明修复质量，也不构成采用依据。
+- 工作项终态只是运维证据，不代表任务质量。`ready` 仅是 worker 自报，结果结算也只给出 `unknown/observed/unverified`；导出到 Evaluation 的是同一份证据，不证明修复质量，也不构成采用依据。
 - `stats().openItems` 与 `health().openItems` 只统计 `queued/claimed/working/waiting`，不含仍需人处理的 `ready/blocked` 终态项。
 - 精确定时仍属于 `assistant-automations`；本插件不自带 schedule、timer 或 retry daemon。
 

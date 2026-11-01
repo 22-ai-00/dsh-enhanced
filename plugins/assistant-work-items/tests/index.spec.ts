@@ -134,6 +134,14 @@ describe('dsh-enhanced-assistant-work-items entrypoint', () => {
         unverified: 0,
         degraded: null,
       },
+      evaluation: {
+        enabled: false,
+        connected: false,
+        pending: 0,
+        exported: 0,
+        skipped: 0,
+        degraded: null,
+      },
     })
     service.close()
     expect(await readdir(paths.root)).toEqual([])

@@ -1436,7 +1436,7 @@ describe('real native Delivery Agent runtime', () => {
     const states = new Map<string, { version: number; objectiveStatus: string }>()
     const registrationOwner = Object.freeze({ ownsTrustedAutomationEvaluationRegistration: () => false,
       ownsTrustedDeliveryEvaluationRegistration: (value: object) => value === registration,
-      ownsTrustedVerifierEvaluationRegistration: () => false })
+      ownsTrustedVerifierEvaluationRegistration: () => false, ownsTrustedWorkItemEvaluationRegistration: () => false })
     const evaluationCapabilities = new WeakMap<object, Record<string, unknown>>()
     const registration = Object.freeze({ protocol: TRUSTED_EVALUATION_PRODUCER_PROTOCOL, producer: 'assistant-delivery' as const,
       ownerRevisionProtocol: 'owner-objective-revision/v2' as const, generation: restarted.service.trustedEvaluationProducerGeneration(), owner: registrationOwner,
@@ -6575,7 +6575,7 @@ describe('real native Delivery Agent runtime', () => {
       owner: Object.freeze({
         ownsTrustedAutomationEvaluationRegistration: () => false,
         ownsTrustedDeliveryEvaluationRegistration: () => false,
-        ownsTrustedVerifierEvaluationRegistration: () => false,
+        ownsTrustedVerifierEvaluationRegistration: () => false, ownsTrustedWorkItemEvaluationRegistration: () => false,
       }),
       issueCapability: () => Object.freeze(Object.create(null) as object),
       append: () => { throw new Error('unreachable fake Evaluation append') },
@@ -6588,7 +6588,7 @@ describe('real native Delivery Agent runtime', () => {
     const registrationOwner = Object.freeze({
       ownsTrustedAutomationEvaluationRegistration: () => false,
       ownsTrustedDeliveryEvaluationRegistration: (value: object) => ownedRegistrations.has(value),
-      ownsTrustedVerifierEvaluationRegistration: () => false,
+      ownsTrustedVerifierEvaluationRegistration: () => false, ownsTrustedWorkItemEvaluationRegistration: () => false,
     })
     const exactRegistration = Object.freeze({
       protocol: TRUSTED_EVALUATION_PRODUCER_PROTOCOL,

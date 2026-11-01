@@ -4,6 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { WorkItemAdmission } from './admission.js'
 import { ConfigSchema, isActive, normalizeConfig, text, type Config, type NormalizedConfig } from './config.js'
 import { WorkItemDispatch } from './dispatch.js'
+import { WorkItemEvaluationExporter, type WorkItemEvaluationRegistration } from './evaluation.js'
 import { WorkItemLedger } from './ledger.js'
 import type {
   PeerAutomationsService,
@@ -23,6 +24,7 @@ import type {
   WorkItemAdmitInput,
   WorkItemAdmitResult,
   WorkItemClaimRecord,
+  WorkItemEvaluationHealth,
   WorkItemHealth,
   WorkItemOutcomeEvidenceState,
   WorkItemOutcomeView,
@@ -115,12 +117,26 @@ export class AssistantWorkItemsService extends Service {
   static Config = ConfigSchema
 
   readonly #config: NormalizedConfig
+  readonly #evaluation: WorkItemEvaluationExporter
   #components: Components | undefined
   #closed = false
 
   constructor(ctx: Context, input: Config) {
     super(ctx, 'assistantWorkItems')
     this.#config = Object.freeze(normalizeConfig(input, Date.now()))
+    // The Evaluation outbox is service state, not ledger state: it exists even
+    // for a disabled intake so `assistant-evaluation` can bind a generation,
+    // and it never opens SQLite until an export pass actually runs.
+    this.#evaluation = new WorkItemEvaluationExporter({
+      store: () => this.#components?.store,
+      scope: () => {
+        const scope = this.#config.scope
+        return scope === null ? null : Object.freeze({ workspace: scope.workspace, preset: scope.preset })
+      },
+      enabled: () => !this.#closed && isActive(this.#config) && this.#config.settlement.enabled,
+      now: () => Date.now(),
+      warn: message => this.ctx.logger.warn(message),
+    })
     ctx.effect(() => () => this.close(), 'assistant-work-items.store')
     ctx.inject(['tools'], toolsCtx => registerWorkItemTools(toolsCtx, this))
     // The disabled default must not create a directory, lock a file or open a
@@ -186,6 +202,9 @@ export class AssistantWorkItemsService extends Service {
     this.#assertOwnerRoute(item)
     const runId = occurrenceId
     const result = components.ledger.claim({ itemId: item.id, runId, occurrenceId })
+    // A claim can settle a prior window and unblock recovery, so it is a
+    // transaction boundary that may have produced a new exportable revision.
+    this.#drainEvaluation()
     return Object.freeze({
       itemId: result.item.id,
       runId: result.claim.runId,
@@ -237,6 +256,9 @@ export class AssistantWorkItemsService extends Service {
       }
     }
     const stored = components.store.reports(item.id).find(report => report.revision === result.report.revision)
+    // A terminal report appends the settlement outcome synchronously, so this
+    // is the main ordinary-use boundary that feeds the trusted lane.
+    this.#drainEvaluation()
     return Object.freeze({
       itemId: result.item.id,
       revision: result.report.revision,
@@ -263,6 +285,34 @@ export class AssistantWorkItemsService extends Service {
   registerSignalSource(registration: WorkItemSignalRegistration): () => void {
     const components = this.#available()
     const dispose = components.signals.register(registration)
+    return () => {
+      dispose()
+    }
+  }
+
+  /**
+   * Trusted Evaluation producer generation (fourth trusted producer).
+   *
+   * `assistant-evaluation` reads this before registering a sink; returning a
+   * fresh value on a new service instance is what makes a stale capability
+   * fail closed instead of appending to the wrong host.
+   */
+  trustedWorkItemProducerGeneration(): string {
+    return this.#evaluation.generation
+  }
+
+  /**
+   * Install the Evaluation-owned sink this plugin exports settled outcomes to.
+   *
+   * The registration is opaque: Evaluation passes its own capability and this
+   * plugin only validates the protocol, generation and ownership before using
+   * it. Exactly one sink is accepted; the returned disposer withdraws it.
+   */
+  registerTrustedWorkItemEvaluationSink(registration: Readonly<WorkItemEvaluationRegistration>): () => void {
+    if (this.#closed) fail('storage', 'the work-item intake is disposed')
+    // The exporter itself runs one bounded catch-up pass the moment the sink is
+    // installed, so the service boundary must not queue a redundant one.
+    const dispose = this.#evaluation.registerTrustedWorkItemEvaluationSink(registration)
     return () => {
       dispose()
     }
@@ -305,7 +355,9 @@ export class AssistantWorkItemsService extends Service {
       })
     }
     try {
-      return this.#settlement(this.#open(), force).report
+      const result = this.#settlement(this.#open(), force)
+      this.#drainEvaluation()
+      return result.report
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: settlement unavailable: ${describe(error)}`)
       // Only a genuinely absent dependency is reported as such; any other
@@ -377,6 +429,14 @@ export class AssistantWorkItemsService extends Service {
         unverified: 0,
         degraded: null,
       }),
+      evaluation: Object.freeze({
+        enabled: this.#evaluationEnabled(),
+        connected: this.#evaluation.connected,
+        pending: 0,
+        exported: 0,
+        skipped: 0,
+        degraded: this.#evaluation.degraded,
+      }),
     })
     if (!config.enabled || this.#closed) return empty
     let components: Components
@@ -402,6 +462,7 @@ export class AssistantWorkItemsService extends Service {
         unverified: components.store.countLatestOutcomes('unverified'),
         degraded: this.#settlementDegraded(),
       }),
+      evaluation: Object.freeze(this.#evaluationHealth(components)),
     })
   }
 
@@ -409,6 +470,7 @@ export class AssistantWorkItemsService extends Service {
   close(): void {
     if (this.#closed) return
     this.#closed = true
+    this.#evaluation.dispose()
     const components = this.#components
     this.#components = undefined
     if (components === undefined) return
@@ -417,6 +479,46 @@ export class AssistantWorkItemsService extends Service {
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: ledger close failed: ${describe(error)}`)
     }
+  }
+
+  /** Export is possible only from an active intake with settlement armed. */
+  #evaluationEnabled(): boolean {
+    return !this.#closed && isActive(this.#config) && this.#config.settlement.enabled
+  }
+
+  /** One bounded counts read for the export projection. */
+  #evaluationHealth(components: Components): WorkItemEvaluationHealth {
+    const counts = components.store.countEvaluations()
+    const enabled = this.#evaluationEnabled()
+    return {
+      enabled,
+      connected: this.#evaluation.connected,
+      pending: counts.pending,
+      exported: counts.exported,
+      skipped: counts.skipped,
+      degraded: this.#evaluationDegraded(counts.pending),
+    }
+  }
+
+  /**
+   * Health degradation: a settled revision can never reach the trusted lane.
+   *
+   * A missing optional sink is only a *gap* once something actually awaits
+   * export; a deployment that never installs Evaluation must not look degraded
+   * while it has nothing to export.
+   */
+  #evaluationDegraded(pending: number): string | null {
+    if (!this.#config.settlement.enabled) return null
+    if (this.#config.scope === null) return 'owner-route-unavailable'
+    if (!this.#evaluation.connected) return pending > 0 ? 'sink-unavailable' : null
+    return this.#evaluation.degraded
+  }
+
+  /** Fire-and-forget bounded drain; export failures must never fail a caller. */
+  #drainEvaluation(): void {
+    void this.#evaluation.drain().catch(error => {
+      this.ctx.logger.warn(`assistant-work-items: Evaluation export failed: ${describe(error)}`)
+    })
   }
 
   #available(): Components {

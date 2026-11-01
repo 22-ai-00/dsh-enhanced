@@ -16,6 +16,7 @@ import type {
   WorkItemDispatchRecord,
   WorkItemDispatchState,
   WorkItemEventRecord,
+  WorkItemEvaluationState,
   WorkItemExecutionStatus,
   WorkItemObjectiveStatus,
   WorkItemOutcomeEvidence,
@@ -35,7 +36,7 @@ import type {
 } from './types.ts'
 import { CLAIMABLE_STATES, OPEN_STATES, WorkItemError } from './types.ts'
 
-const SCHEMA_VERSION = 4
+const SCHEMA_VERSION = 5
 /** Ambiguous wake failures one generation may retry before the gap stays visible. */
 const MAX_UNKNOWN_WAKE_ATTEMPTS = 1
 /** Default bounded settlement window: seven days. */
@@ -50,9 +51,35 @@ const OPEN_STATE_PLACEHOLDERS = OPEN_STATES.map(() => '?').join(', ')
  * One row per outcome revision; a later observation of the same item appends a
  * wider revision instead of rewriting the earlier one, so a `ready` history is
  * never laundered into a success. The primary key already orders by item and
- * revision, so the only extra index supports finding pending windows by deadline.
+ * revision, so the only extra indexes support finding pending windows by
+ * deadline and replaying outcomes that still owe one trusted Evaluation append.
  */
 const OUTCOME_SCHEMA = `CREATE TABLE work_item_outcome (
+        item_id TEXT NOT NULL REFERENCES work_item(id) ON DELETE RESTRICT,
+        revision INTEGER NOT NULL,
+        settled_by TEXT NOT NULL CHECK(settled_by IN ('report-ready', 'report-blocked', 'report-failed', 'withdrawn', 'retry-exhausted', 'observed-evidence', 'window-expired')),
+        execution_status TEXT NOT NULL CHECK(execution_status IN ('succeeded', 'failed', 'timed-out', 'cancelled', 'unknown')),
+        objective_status TEXT NOT NULL CHECK(objective_status IN ('achieved', 'partial', 'not-achieved', 'unknown')),
+        trust TEXT NOT NULL CHECK(trust IN ('agent-self-report', 'external-receipt', 'deterministic-check')),
+        evidence_state TEXT NOT NULL CHECK(evidence_state IN ('pending', 'observed', 'unverified', 'not-applicable')),
+        evidence_reason TEXT CHECK(evidence_reason IN ('no-independent-source', 'evidence-too-large', 'window-expired', 'channel-unavailable')),
+        evidence TEXT, baseline_sequence INTEGER, inbox_id TEXT, authority_hash TEXT, deadline_at INTEGER,
+        settled_at INTEGER NOT NULL, recorded_at INTEGER NOT NULL,
+        evaluation_state TEXT NOT NULL DEFAULT 'pending' CHECK(evaluation_state IN ('pending', 'exported', 'skipped')),
+        evaluation_digest TEXT, evaluation_recorded_at INTEGER,
+        evaluation_attempts INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(item_id, revision)
+      ) STRICT, WITHOUT ROWID;
+      CREATE INDEX work_item_outcome_pending_idx ON work_item_outcome(evidence_state, deadline_at);
+      CREATE INDEX work_item_outcome_evaluation_idx ON work_item_outcome(evaluation_state, evidence_state);
+    `
+
+/**
+ * Frozen v3 shape of the outcome ledger. The v3 upgrade block must keep creating
+ * exactly this table because later version blocks add their own columns; reusing
+ * the current definition there would duplicate those columns on a v1/v2 upgrade.
+ */
+const OUTCOME_SCHEMA_V3 = `CREATE TABLE work_item_outcome (
         item_id TEXT NOT NULL REFERENCES work_item(id) ON DELETE RESTRICT,
         revision INTEGER NOT NULL,
         settled_by TEXT NOT NULL CHECK(settled_by IN ('report-ready', 'report-blocked', 'report-failed', 'withdrawn', 'retry-exhausted', 'observed-evidence', 'window-expired')),
@@ -223,8 +250,8 @@ function validateSchema(database: DatabaseSync): void {
       CREATE TABLE work_item_schema_meta (
         key TEXT PRIMARY KEY, value TEXT NOT NULL
       ) STRICT, WITHOUT ROWID;
-      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '4');
-      PRAGMA user_version = 4;
+      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '5');
+      PRAGMA user_version = 5;
       COMMIT;
     `)
     return
@@ -256,7 +283,7 @@ function validateSchema(database: DatabaseSync): void {
     // upgrade is a pure table creation that keeps every stored report intact.
     database.exec(`
       BEGIN IMMEDIATE;
-      ${OUTCOME_SCHEMA}
+      ${OUTCOME_SCHEMA_V3}
       UPDATE work_item_schema_meta SET value = '3' WHERE key = 'schema_version';
       PRAGMA user_version = 3;
       COMMIT;
@@ -275,7 +302,24 @@ function validateSchema(database: DatabaseSync): void {
       COMMIT;
     `)
   }
-  if (version !== 1 && version !== 2 && version !== 3 && version !== SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
+  if (version === 1 || version === 2 || version === 3 || version === 4) {
+    // v5 records the trusted Evaluation export state per settled outcome. Legacy
+    // rows default to `pending`, so an upgraded database replays exactly the
+    // settlements that have not reached Evaluation yet; no existing column is
+    // rewritten and no prior revision is dropped.
+    database.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE work_item_outcome ADD COLUMN evaluation_state TEXT NOT NULL DEFAULT 'pending' CHECK(evaluation_state IN ('pending', 'exported', 'skipped'));
+      ALTER TABLE work_item_outcome ADD COLUMN evaluation_digest TEXT;
+      ALTER TABLE work_item_outcome ADD COLUMN evaluation_recorded_at INTEGER;
+      ALTER TABLE work_item_outcome ADD COLUMN evaluation_attempts INTEGER NOT NULL DEFAULT 0;
+      CREATE INDEX work_item_outcome_evaluation_idx ON work_item_outcome(evaluation_state, evidence_state);
+      UPDATE work_item_schema_meta SET value = '5' WHERE key = 'schema_version';
+      PRAGMA user_version = 5;
+      COMMIT;
+    `)
+  }
+  if (version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
   const expected = JSON.stringify(['work_item', 'work_item_claim', 'work_item_dispatch', 'work_item_event', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta'])
   const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Row[]).map(row => String(row['name']))
   if (JSON.stringify(tables) !== expected) fail('storage', 'work-item database schema is not the expected shape')
@@ -409,6 +453,10 @@ function outcomeFromRow(row: Row): WorkItemOutcomeRecord {
     deadlineAt: optNumber(row['deadline_at']),
     settledAt: Number(row['settled_at']),
     recordedAt: Number(row['recorded_at']),
+    evaluationState: String(row['evaluation_state'] ?? 'pending') as WorkItemEvaluationState,
+    evaluationDigest: optString(row['evaluation_digest']),
+    evaluationRecordedAt: optNumber(row['evaluation_recorded_at']),
+    evaluationAttempts: Number(row['evaluation_attempts'] ?? 0),
   })
 }
 
@@ -455,6 +503,10 @@ export interface WorkItemStoreStats {
   readonly outcomes: number
   readonly pendingOutcomes: number
   readonly unverifiedOutcomes: number
+  /** Latest settled revisions still waiting for one trusted Evaluation append. */
+  readonly evaluationPending: number
+  readonly evaluationExported: number
+  readonly evaluationSkipped: number
 }
 
 /**
@@ -541,6 +593,7 @@ export class WorkItemStore {
 
   stats(): WorkItemStoreStats {
     const count = (sql: string): number => Number((this.#statement(sql).get() as Row)['count'])
+    const evaluations = this.countEvaluations()
     return Object.freeze({
       schemaVersion: Number((this.#database.prepare('PRAGMA user_version').get() as Row)['user_version']),
       items: count('SELECT COUNT(*) AS count FROM work_item'),
@@ -550,6 +603,9 @@ export class WorkItemStore {
       outcomes: count('SELECT COUNT(*) AS count FROM work_item_outcome'),
       pendingOutcomes: count(`SELECT COUNT(*) AS count FROM work_item_outcome o JOIN (${LATEST_OUTCOME}) latest ON latest.item_id = o.item_id AND latest.revision = o.revision WHERE o.evidence_state = 'pending'`),
       unverifiedOutcomes: count(`SELECT COUNT(*) AS count FROM work_item_outcome o JOIN (${LATEST_OUTCOME}) latest ON latest.item_id = o.item_id AND latest.revision = o.revision WHERE o.evidence_state = 'unverified'`),
+      evaluationPending: evaluations.pending,
+      evaluationExported: evaluations.exported,
+      evaluationSkipped: evaluations.skipped,
     })
   }
 
@@ -896,6 +952,96 @@ export class WorkItemStore {
         : observedOutcome(latest, input.evidence, input.reason, now)
       return this.#insertOutcome(input.itemId, draft, now)
     })
+  }
+
+  /**
+   * Latest outcome revisions that still owe exactly one trusted Evaluation
+   * append.
+   *
+   * Only the newest revision per item is exportable, and only once it carries a
+   * settled evidence state: an unresolved `pending` window is still changing, so
+   * exporting it early would publish a claim that later revisions contradict.
+   */
+  outcomesAwaitingEvaluation(limit: number, attemptBound = Number.MAX_SAFE_INTEGER): readonly WorkItemOutcomeRecord[] {
+    // A row that exhausted its bounded export attempts stays `pending` for
+    // health, but it must not keep a slot in every later sweep: otherwise an
+    // unreachable sink would permanently starve newer settlements behind the
+    // same handful of oldest rows.
+    const rows = this.#statement(`
+      SELECT o.* FROM work_item_outcome o
+      JOIN (${LATEST_OUTCOME}) latest ON latest.item_id = o.item_id AND latest.revision = o.revision
+      WHERE o.evaluation_state = 'pending' AND o.evidence_state != 'pending'
+        AND o.evaluation_attempts < ?
+      ORDER BY o.settled_at ASC, o.item_id ASC LIMIT ?
+    `).all(attemptBound, limit) as Row[]
+    return Object.freeze(rows.map(outcomeFromRow))
+  }
+
+  /** Count settled revisions that used up their bounded export attempts. */
+  countExhaustedEvaluations(attemptBound: number): number {
+    const row = this.#statement(`
+      SELECT COUNT(*) AS count FROM work_item_outcome o
+      JOIN (${LATEST_OUTCOME}) latest ON latest.item_id = o.item_id AND latest.revision = o.revision
+      WHERE o.evaluation_state = 'pending' AND o.evidence_state != 'pending'
+        AND o.evaluation_attempts >= ?
+    `).get(attemptBound) as Row
+    return Number(row['count'])
+  }
+
+  /** Count latest export-eligible revisions per Evaluation export state. */
+  countEvaluations(): { pending: number; exported: number; skipped: number } {
+    const rows = this.#statement(`
+      SELECT o.evaluation_state AS state, COUNT(*) AS count FROM work_item_outcome o
+      JOIN (${LATEST_OUTCOME}) latest ON latest.item_id = o.item_id AND latest.revision = o.revision
+      WHERE o.evidence_state != 'pending'
+      GROUP BY o.evaluation_state
+    `).all() as Row[]
+    let pending = 0
+    let exported = 0
+    let skipped = 0
+    for (const row of rows) {
+      const count = Number(row['count'])
+      const state = String(row['state'])
+      if (state === 'exported') exported = count
+      else if (state === 'skipped') skipped = count
+      else pending = count
+    }
+    return { pending, exported, skipped }
+  }
+
+  /** Mark one settled revision exported; CAS on `pending` so a replay is refused. */
+  markOutcomeExported(itemId: string, revision: number, digest: string, recordedAt: number): WorkItemOutcomeRecord {
+    const changes = this.#statement(`
+      UPDATE work_item_outcome SET evaluation_state = 'exported', evaluation_digest = ?, evaluation_recorded_at = ?
+      WHERE item_id = ? AND revision = ? AND evaluation_state = 'pending'
+    `).run(digest, recordedAt, itemId, revision).changes
+    if (changes !== 1) fail('invalid-state', 'outcome evaluation state moved before export')
+    return this.#requireOutcome(itemId, revision)
+  }
+
+  /** Mark one settled revision skipped; CAS on `pending`. */
+  markOutcomeSkipped(itemId: string, revision: number, recordedAt: number): WorkItemOutcomeRecord {
+    const changes = this.#statement(`
+      UPDATE work_item_outcome SET evaluation_state = 'skipped', evaluation_recorded_at = ?
+      WHERE item_id = ? AND revision = ? AND evaluation_state = 'pending'
+    `).run(recordedAt, itemId, revision).changes
+    if (changes !== 1) fail('invalid-state', 'outcome evaluation state moved before skip')
+    return this.#requireOutcome(itemId, revision)
+  }
+
+  /** Count one failed export attempt, saturated at the caller's bound. */
+  recordOutcomeEvaluationAttempt(itemId: string, revision: number, maxAttempts: number): WorkItemOutcomeRecord {
+    this.#statement(`
+      UPDATE work_item_outcome SET evaluation_attempts = MIN(evaluation_attempts + 1, ?)
+      WHERE item_id = ? AND revision = ? AND evaluation_state = 'pending'
+    `).run(maxAttempts, itemId, revision)
+    return this.#requireOutcome(itemId, revision)
+  }
+
+  #requireOutcome(itemId: string, revision: number): WorkItemOutcomeRecord {
+    const row = this.#statement('SELECT * FROM work_item_outcome WHERE item_id = ? AND revision = ?').get(itemId, revision) as Row | undefined
+    if (row === undefined) fail('storage', 'outcome row disappeared after update')
+    return outcomeFromRow(row)
   }
 
   appendEvent(itemId: string, kind: string, actor: string, detail?: unknown): void {

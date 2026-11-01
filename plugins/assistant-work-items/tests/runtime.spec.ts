@@ -925,7 +925,7 @@ describe('work-item store projection', () => {
     closers.push(() => reopened.close())
     expect(reopened.findClaimByRun('run-1')).toMatchObject({ claimId: 1, itemId: admitted.item.id, state: 'active' })
     expect(reopened.findItemById(admitted.item.id)).toMatchObject({ state: 'claimed', owner: { generation: 2 } })
-    expect(reopened.stats()).toMatchObject({ items: 1, schemaVersion: 4, outcomes: 0, pendingOutcomes: 0 })
+    expect(reopened.stats()).toMatchObject({ items: 1, schemaVersion: 5, outcomes: 0, pendingOutcomes: 0 })
   })
 })
 

@@ -280,6 +280,7 @@ export interface WorkItemHealth {
   readonly workerConnected: boolean
   readonly ownerRouteValid: boolean
   readonly settlement: WorkItemSettlementHealth
+  readonly evaluation: WorkItemEvaluationHealth
 }
 
 /**
@@ -371,7 +372,21 @@ export interface WorkItemOutcomeRecord {
   readonly deadlineAt: number | null
   readonly settledAt: number
   readonly recordedAt: number
+  /**
+   * Whether this revision has been handed to the trusted Evaluation producer
+   * seam. Only the newest revision of an item is ever exportable, and only once
+   * its evidence state is no longer `pending`.
+   */
+  readonly evaluationState: WorkItemEvaluationState
+  /** Digest of the exact claims exported, so a replay is provably identical. */
+  readonly evaluationDigest: string | null
+  readonly evaluationRecordedAt: number | null
+  /** Bounded export attempts; a stuck row stays visible instead of looping. */
+  readonly evaluationAttempts: number
 }
+
+/** Trusted Evaluation export state of one settled outcome revision. */
+export type WorkItemEvaluationState = 'pending' | 'exported' | 'skipped'
 
 /** One outcome revision joined with the report/delivery coordinates it refers to. */
 export interface WorkItemOutcomeView {
@@ -399,5 +414,19 @@ export interface WorkItemSettlementHealth {
   readonly pending: number
   readonly observed: number
   readonly unverified: number
+  readonly degraded: string | null
+}
+
+/** Bounded trusted-Evaluation export health projection; never exposes claims. */
+export interface WorkItemEvaluationHealth {
+  /** True only in `active` mode, where settlement can actually export. */
+  readonly enabled: boolean
+  /** The trusted Evaluation producer discovered a sink on the host, if any. */
+  readonly connected: boolean
+  /** Settled revisions not yet exported; non-zero with no sink is a visible gap. */
+  readonly pending: number
+  readonly exported: number
+  readonly skipped: number
+  /** Set when the last export attempt failed and the row stays retryable. */
   readonly degraded: string | null
 }

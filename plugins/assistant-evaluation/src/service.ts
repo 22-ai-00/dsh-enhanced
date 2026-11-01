@@ -37,6 +37,8 @@ import type {
   TrustedGoalOutcomeOwnerProof,
   TrustedEvaluationRegistrationOwner,
   TrustedVerifierEvaluationRegistration,
+  TrustedWorkItemEvaluationClaims,
+  TrustedWorkItemEvaluationRegistration,
   TrustedOutcomeReceipt,
   TrustedTaskLearningProjectionReceipt,
   TrustedTaskLearningProjectionFeedPage,
@@ -278,6 +280,11 @@ interface TrustedVerifierEvaluationProducer {
   registerTrustedVerifierEvaluationSink(registration: Readonly<TrustedVerifierEvaluationRegistration>): () => void
 }
 
+interface TrustedWorkItemEvaluationProducer {
+  trustedWorkItemProducerGeneration(): string
+  registerTrustedWorkItemEvaluationSink(registration: Readonly<TrustedWorkItemEvaluationRegistration>): () => void
+}
+
 interface TrustedGoalsOutcomeOwnerResolver {
   resolveOwnerGoalOutcomeFeedbackTarget(capability: unknown): TrustedGoalOutcomeOwnerProof
 }
@@ -337,6 +344,12 @@ function isTrustedVerifierEvaluationProducer(value: unknown): value is TrustedVe
     && typeof (value as Partial<TrustedVerifierEvaluationProducer>).registerTrustedVerifierEvaluationSink === 'function'
 }
 
+function isTrustedWorkItemEvaluationProducer(value: unknown): value is TrustedWorkItemEvaluationProducer {
+  return typeof value === 'object' && value !== null
+    && typeof (value as Partial<TrustedWorkItemEvaluationProducer>).trustedWorkItemProducerGeneration === 'function'
+    && typeof (value as Partial<TrustedWorkItemEvaluationProducer>).registerTrustedWorkItemEvaluationSink === 'function'
+}
+
 function isTrustedEvaluationProjector(value: unknown): value is TrustedEvaluationProjector {
   return typeof value === 'object' && value !== null
     && typeof (value as Partial<TrustedEvaluationProjector>).projectTrustedEvaluationTaskRevision === 'function'
@@ -360,9 +373,11 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   private automationBinding: TrustedProducerBinding<TrustedAutomationEvaluationProducer> | undefined
   private deliveryBinding: TrustedProducerBinding<TrustedDeliveryEvaluationProducer> | undefined
   private verifierBinding: TrustedProducerBinding<TrustedVerifierEvaluationProducer> | undefined
+  private workItemsBinding: TrustedProducerBinding<TrustedWorkItemEvaluationProducer> | undefined
   private readonly activeAutomationRegistrations = new WeakSet<object>()
   private readonly activeDeliveryRegistrations = new WeakSet<object>()
   private readonly activeVerifierRegistrations = new WeakSet<object>()
+  private readonly activeWorkItemRegistrations = new WeakSet<object>()
   private readonly activeProjections = new Map<string, Promise<void>>()
   private projectionTimer: ReturnType<typeof setInterval> | undefined
   private active = true
@@ -475,6 +490,13 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       if (!isTrustedVerifierEvaluationProducer(producer)) return
       return this.bindVerifierProducer(producer)
     })
+    const currentWorkItems = ctx.get('assistantWorkItems' as never) as unknown
+    if (isTrustedWorkItemEvaluationProducer(currentWorkItems)) this.bindWorkItemsProducer(currentWorkItems)
+    ctx.inject(['assistantWorkItems' as never], workItemsCtx => {
+      const producer = workItemsCtx.get('assistantWorkItems' as never) as unknown
+      if (!isTrustedWorkItemEvaluationProducer(producer)) return
+      return this.bindWorkItemsProducer(producer)
+    })
     if (this.config.projectionIntervalMs > 0) {
       this.projectionTimer = setInterval(() => {
         void this.reconcileProjections().catch(() => {})
@@ -489,6 +511,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       this.automationBinding?.dispose()
       this.deliveryBinding?.dispose()
       this.verifierBinding?.dispose()
+      this.workItemsBinding?.dispose()
       toolsBinding?.dispose()
       skillBinding?.dispose()
       await Promise.allSettled(this.activeProjections.values())
@@ -983,6 +1006,14 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       && this.activeVerifierRegistrations.has(registration)
   }
 
+  /** Work-items exports settled outcome revisions through the same ownership boundary. */
+  ownsTrustedWorkItemEvaluationRegistration(
+    registration: Readonly<TrustedWorkItemEvaluationRegistration>,
+  ): boolean {
+    return this.active && typeof registration === 'object' && registration !== null
+      && this.activeWorkItemRegistrations.has(registration)
+  }
+
   review(agent: Agent | undefined, input: EvaluationReviewRequest = {}): EvaluationReview {
     this.assertActive()
     const scope = this.agentScope(agent, 'evaluation_review')
@@ -1320,6 +1351,109 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       registered = false
       this.activeVerifierRegistrations.delete(registration)
       if (this.verifierBinding === binding) this.verifierBinding = previous
+      throw error
+    }
+    previous?.dispose()
+    return dispose
+  }
+
+  /**
+   * Bind the settled work-item producer.
+   *
+   * The envelope's objective and delivery status are always `unknown` and its
+   * execution status is derived here from the evidence state, never read from
+   * the producer. A work item can therefore contribute durable evidence without
+   * ever upgrading its own objective claim through Evaluation.
+   */
+  private bindWorkItemsProducer(producer: TrustedWorkItemEvaluationProducer): () => void {
+    const generation = hostIdentifier(producer.trustedWorkItemProducerGeneration(), 'trusted work-item generation', 200)
+    const current = this.workItemsBinding
+    if (current?.generation === generation) return current.dispose
+    let registered = true
+    let disposeRegistration: (() => void) | undefined
+    let binding!: TrustedProducerBinding<TrustedWorkItemEvaluationProducer>
+    const assertCurrent = () => {
+      this.assertActive()
+      if (!registered || this.workItemsBinding?.producer !== producer
+        || this.workItemsBinding.generation !== generation
+        || producer.trustedWorkItemProducerGeneration() !== generation) {
+        throw new AssistantEvaluationError('forbidden', 'stale work-item Evaluation producer capability')
+      }
+    }
+    const registration: TrustedWorkItemEvaluationRegistration = Object.freeze({
+      protocol: 'assistant-work-items/evaluation/v1' as const,
+      generation,
+      owner: this,
+      append: async (claims: Readonly<TrustedWorkItemEvaluationClaims>) => {
+        assertCurrent()
+        if (typeof claims !== 'object' || claims === null || Array.isArray(claims)) {
+          throw new AssistantEvaluationError('forbidden', 'work-item Evaluation claims are invalid')
+        }
+        const itemId = hostIdentifier(claims.itemId, 'work item id', 200)
+        const revision = claims.outcomeRevision
+        const settledBy = claims.settledBy
+        const evidenceState = claims.evidenceState
+        const occurredAt = claims.occurredAt
+        if (!Number.isSafeInteger(revision) || revision < 1
+          || !['report-ready', 'report-blocked', 'report-failed', 'withdrawn', 'retry-exhausted', 'observed-evidence', 'window-expired'].includes(settledBy)
+          || !['observed', 'unverified', 'not-applicable'].includes(evidenceState)) {
+          throw new AssistantEvaluationError('forbidden', 'work-item Evaluation settlement is invalid')
+        }
+        // The registration type already limits these to the literal `'unknown'`;
+        // re-proving them at runtime keeps a forged capability from widening it.
+        if (claims.objectiveStatus !== 'unknown' || claims.deliveryStatus !== 'unknown') {
+          throw new AssistantEvaluationError('forbidden', 'work-item Evaluation claims cannot assert an objective')
+        }
+        const idempotencyKey = `work-items/${itemId}/${String(revision)}/${evidenceState}`
+        if (claims.idempotencyKey !== idempotencyKey) {
+          throw new AssistantEvaluationError('forbidden', 'work-item Evaluation identity is not deterministic')
+        }
+        const digest = hostIdentifier(claims.digest, 'work-item outcome digest', 200)
+        const situation = hostIdentifier(claims.situation, 'work-item situation', this.config.maxSituationBytes)
+        if (!Number.isSafeInteger(occurredAt) || occurredAt < 0 || occurredAt > this.now()) {
+          throw new AssistantEvaluationError('forbidden', 'work-item Evaluation occurrence is invalid')
+        }
+        const scope = canonicalEvaluationScope(claims.scope).scope
+        this.appendTrusted({
+          scope,
+          situation,
+          executionStatus: evidenceState === 'observed' ? 'succeeded' : 'unknown',
+          objectiveStatus: 'unknown',
+          deliveryStatus: 'unknown',
+          source: { kind: 'system', id: 'assistant-work-items' },
+          trust: 'trusted',
+          evidence: [
+            { kind: 'work-item', ref: itemId },
+            { kind: 'work-item-outcome', ref: `${itemId}#${String(revision)}`, digest },
+          ],
+          metrics: claims.metrics,
+          occurredAt,
+          idempotencyKey,
+          evaluator: {
+            id: 'assistant-work-items',
+            version: evidenceState === 'observed' ? 'settlement-v1' : 'unverified-v1',
+          },
+        })
+      },
+    })
+    this.activeWorkItemRegistrations.add(registration)
+    const dispose = () => {
+      if (!registered) return
+      registered = false
+      this.activeWorkItemRegistrations.delete(registration)
+      if (this.workItemsBinding === binding) this.workItemsBinding = undefined
+      disposeRegistration?.()
+    }
+    binding = Object.freeze({ producer, generation, dispose })
+    const previous = this.workItemsBinding
+    this.workItemsBinding = binding
+    try {
+      disposeRegistration = producer.registerTrustedWorkItemEvaluationSink(registration)
+      if (typeof disposeRegistration !== 'function') throw new AssistantEvaluationError('forbidden', 'work-items returned no registration disposer')
+    } catch (error) {
+      registered = false
+      this.activeWorkItemRegistrations.delete(registration)
+      if (this.workItemsBinding === binding) this.workItemsBinding = previous
       throw error
     }
     previous?.dispose()

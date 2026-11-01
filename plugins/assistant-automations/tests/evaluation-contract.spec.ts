@@ -271,6 +271,7 @@ describe('Automations to Evaluation private capability', () => {
       ownsTrustedAutomationEvaluationRegistration: vi.fn(() => false),
       ownsTrustedDeliveryEvaluationRegistration: vi.fn(() => false),
       ownsTrustedVerifierEvaluationRegistration: vi.fn(() => false),
+      ownsTrustedWorkItemEvaluationRegistration: vi.fn(() => false),
     } satisfies TrustedEvaluationRegistrationOwner
     const fakeRegistration = {
       protocol: TRUSTED_EVALUATION_PRODUCER_PROTOCOL,

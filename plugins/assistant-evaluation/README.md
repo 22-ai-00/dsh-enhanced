@@ -40,6 +40,10 @@ ctx.assistantEvaluation.limits()
 
 `append()` 只接受 `external` 或 `self-reported` 等低信任输入；传入 `trusted` 会直接失败。Automations 的 production terminal receipt 与 Delivery 的 exact owner feedback 通过各自 durable outbox 和 Evaluation 私有 producer registration 写入，preview、复制 registration、过期 generation 或公开调用都不能进入可信 lane。相同 `idempotencyKey` 的完全相同输入安全重放；内容变化会以 `idempotency-conflict` 失败关闭。
 
+当前有四个 trusted producer：`assistant-automations`、`assistant-delivery`、`assistant-verifier` 与 `assistant-work-items`。`assistant-work-items` 把已结算的 work-item outcome（`observed` / `unverified` / `not-applicable`）通过同一私有 registration seam 投影为 trusted 证据；它的 `objectiveStatus`/`deliveryStatus` 恒为 `unknown`，`executionStatus` 由 evidence state 派生，因此 work-item 结算永远不能升级自身的目标判断（也没有 automation-run ref，`queryTasks()` 会把它保留为独立 outcome）。
+
+Evaluation 保持 producer-agnostic：registration/claims 类型在 `src/types.ts` 本地定义，不 import 任何 producer 运行时；producer 侧只以 type-only import + optional peer 引用这些契约类型。新增 producer 只需要在自己的 package 里实现 generation + sink 注册。
+
 `getTrustedOutcome()` 是供本地固定 Host runbook 做跨账本投影的精确读取 seam。它要求由
 `canonicalEvaluationHostScope()` 产生的冻结、不可序列化 scope token；缺失、跨 scope 或非
 `trusted` 的记录一律不返回。凭证只包含状态、来源、证据引用和 evaluator，不暴露 metrics、

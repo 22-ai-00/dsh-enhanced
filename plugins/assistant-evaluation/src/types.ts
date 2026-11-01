@@ -276,6 +276,55 @@ export interface TrustedEvaluationRegistrationOwner {
   ownsTrustedVerifierEvaluationRegistration(
     registration: Readonly<TrustedVerifierEvaluationRegistration>,
   ): boolean
+  ownsTrustedWorkItemEvaluationRegistration(
+    registration: Readonly<TrustedWorkItemEvaluationRegistration>,
+  ): boolean
+}
+
+/**
+ * Settled work-item claims one trusted Evaluation revision.
+ *
+ * The producer may state only facts it durably observed: the item, the outcome
+ * revision, how it settled, the evidence state and the deterministic identity.
+ * Objective and delivery status are literal `'unknown'` and there is no
+ * execution-status field at all, so this capability is type-level incapable of
+ * claiming that a work item achieved an objective.
+ */
+export interface TrustedWorkItemEvaluationClaims {
+  scope: Readonly<EvaluationScope>
+  itemId: string
+  outcomeRevision: number
+  settledBy: WorkItemSettledBy
+  evidenceState: Extract<WorkItemEvaluationEvidenceState, 'observed' | 'unverified' | 'not-applicable'>
+  situation: string
+  occurredAt: number
+  idempotencyKey: string
+  /** Digest of the immutable outcome revision this claim exports. */
+  digest: string
+  metrics: EvaluationMetrics
+  objectiveStatus: 'unknown'
+  deliveryStatus: 'unknown'
+}
+
+/** Work-item outcome vocabulary mirrored structurally; no runtime package dependency. */
+export type WorkItemSettledBy =
+  | 'report-ready'
+  | 'report-blocked'
+  | 'report-failed'
+  | 'withdrawn'
+  | 'retry-exhausted'
+  | 'observed-evidence'
+  | 'window-expired'
+
+/** Work-item evidence vocabulary mirrored structurally. */
+export type WorkItemEvaluationEvidenceState = 'pending' | 'observed' | 'unverified' | 'not-applicable'
+
+/** Private work-items-to-ledger capability; append is idempotent on the claims identity. */
+export interface TrustedWorkItemEvaluationRegistration {
+  protocol: 'assistant-work-items/evaluation/v1'
+  generation: string
+  owner: TrustedEvaluationRegistrationOwner
+  append(claims: Readonly<TrustedWorkItemEvaluationClaims>): Promise<void>
 }
 
 /** Private verifier-to-ledger capability.  It carries the immutable acceptance

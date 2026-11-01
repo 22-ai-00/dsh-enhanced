@@ -82,6 +82,56 @@ VALUES ('item-legacy', 1, 'blocked', 'Legacy report', 0, '[]', 'legacy-idem', 'l
 `
 
 /**
+ * Write a literal version 4 database: the outcome ledger and dispatch witness
+ * columns already exist, but no Evaluation projection columns do.
+ */
+function v4Database(): { path: string; root: string } {
+  const root = mkdtempSync(join(tmpdir(), 'work-items-v4-'))
+  chmodSync(root, 0o700)
+  const path = join(root, 'v4.sqlite')
+  const raw = new DatabaseSync(path)
+  chmodSync(path, 0o600)
+  raw.exec(ITEM_DDL)
+  raw.exec(`CREATE TABLE work_item_claim (
+      claim_id INTEGER PRIMARY KEY,
+      item_id TEXT NOT NULL REFERENCES work_item(id) ON DELETE RESTRICT,
+      run_id TEXT NOT NULL, occurrence_id TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('active', 'completed', 'released', 'expired')),
+      leased_until INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX work_item_claim_run_idx ON work_item_claim(run_id);
+    CREATE TABLE work_item_outcome (
+      item_id TEXT NOT NULL REFERENCES work_item(id) ON DELETE RESTRICT,
+      revision INTEGER NOT NULL,
+      settled_by TEXT NOT NULL CHECK(settled_by IN ('report-ready', 'report-blocked', 'report-failed', 'withdrawn', 'retry-exhausted', 'observed-evidence', 'window-expired')),
+      execution_status TEXT NOT NULL CHECK(execution_status IN ('succeeded', 'failed', 'timed-out', 'cancelled', 'unknown')),
+      objective_status TEXT NOT NULL CHECK(objective_status IN ('achieved', 'partial', 'not-achieved', 'unknown')),
+      trust TEXT NOT NULL CHECK(trust IN ('agent-self-report', 'external-receipt', 'deterministic-check')),
+      evidence_state TEXT NOT NULL CHECK(evidence_state IN ('pending', 'observed', 'unverified', 'not-applicable')),
+      evidence_reason TEXT CHECK(evidence_reason IN ('no-independent-source', 'evidence-too-large', 'window-expired', 'channel-unavailable')),
+      evidence TEXT, baseline_sequence INTEGER, inbox_id TEXT, authority_hash TEXT, deadline_at INTEGER,
+      settled_at INTEGER NOT NULL, recorded_at INTEGER NOT NULL,
+      PRIMARY KEY(item_id, revision)
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX work_item_outcome_pending_idx ON work_item_outcome(evidence_state, deadline_at);
+    ALTER TABLE work_item_dispatch ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE work_item_dispatch ADD COLUMN wake_attempts INTEGER NOT NULL DEFAULT 0;`)
+  raw.exec(ITEM_ROW)
+  raw.exec(`INSERT INTO work_item_claim(item_id, run_id, occurrence_id, state, leased_until, created_at, updated_at)
+    VALUES ('item-legacy', 'run-legacy', 'occ-legacy', 'active', 1700086400000, 1700000000000, 1700000000000);`)
+  raw.exec(`INSERT INTO work_item_dispatch(item_id, automation_id, event_id, occurred_at, state, occurrence_id, reason, created_at, updated_at, generation, wake_attempts)
+    VALUES ('item-legacy', 'work-items-worker', 'item-legacy', 1700000000000, 'dispatched', 'occ-legacy', NULL, 1700000000000, 1700000000000, 2, 1);
+    INSERT INTO work_item_outcome(item_id, revision, settled_by, execution_status, objective_status, trust,
+      evidence_state, evidence_reason, evidence, baseline_sequence, inbox_id, authority_hash, deadline_at, settled_at, recorded_at)
+    VALUES ('item-legacy', 2, 'observed-evidence', 'succeeded', 'unknown', 'external-receipt',
+      'observed', NULL, NULL, 5, 'inbox-1', 'sha256:authority', NULL, 1700000001000, 1700000001000);`)
+  raw.exec(`INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '4');
+    PRAGMA user_version = 4;`)
+  raw.close()
+  return { path, root }
+}
+
+/**
  * Write a literal pre-v3 database: schema *and* data exist independently of the
  * current store, so the upgrade path is exercised as a real old file would be.
  */
@@ -379,7 +429,7 @@ describe('work-item outcome ledger', () => {
     const { path, root } = legacyDatabase(2)
     const reopened = new WorkItemStore(path)
     try {
-      expect(reopened.stats()).toMatchObject({ schemaVersion: 4, items: 1, outcomes: 0, pendingOutcomes: 0 })
+      expect(reopened.stats()).toMatchObject({ schemaVersion: 5, items: 1, outcomes: 0, pendingOutcomes: 0 })
       // The old item and its report survive untouched, claims keep their id.
       expect(reopened.findItemById('item-legacy')).toMatchObject({ state: 'blocked' })
       expect(reopened.reports('item-legacy')).toHaveLength(1)
@@ -398,7 +448,7 @@ describe('work-item outcome ledger', () => {
     const { path, root } = legacyDatabase(3)
     const reopened = new WorkItemStore(path)
     try {
-      expect(reopened.stats()).toMatchObject({ schemaVersion: 4, items: 1, dispatches: 1, outcomes: 0 })
+      expect(reopened.stats()).toMatchObject({ schemaVersion: 5, items: 1, dispatches: 1, outcomes: 0 })
       // The stored identity is preserved verbatim: generation 0 is the
       // admission event, so an in-flight wake stays valid across the upgrade.
       expect(reopened.getDispatch('item-legacy')).toMatchObject({
@@ -418,11 +468,41 @@ describe('work-item outcome ledger', () => {
     }
   })
 
-  test('upgrades a literal version 1 database through the claim rebuild into v4', () => {
+  test('upgrades a literal version 4 database by adding the Evaluation projection state', () => {
+    const { path, root } = v4Database()
+    const reopened = new WorkItemStore(path)
+    try {
+      expect(reopened.stats()).toMatchObject({ schemaVersion: 5, items: 1, outcomes: 1, evaluationPending: 1 })
+      // Existing rows keep their ledger facts and default to an unexported state.
+      expect(reopened.latestOutcome('item-legacy')).toMatchObject({
+        revision: 2,
+        evidenceState: 'observed',
+        evaluationState: 'pending',
+        evaluationDigest: null,
+        evaluationRecordedAt: null,
+        evaluationAttempts: 0,
+      })
+      // The V4 witness columns are untouched by the additive migration.
+      expect(reopened.getDispatch('item-legacy')).toMatchObject({
+        generation: 2,
+        wakeAttempts: 1,
+        state: 'dispatched',
+      })
+      // A legacy observed settlement is immediately exportable.
+      expect(reopened.outcomesAwaitingEvaluation(10).map(outcome => outcome.revision)).toEqual([2])
+      reopened.markOutcomeExported('item-legacy', 2, 'a'.repeat(64), 1_700_000_002_000)
+      expect(reopened.stats()).toMatchObject({ evaluationPending: 0, evaluationExported: 1 })
+    } finally {
+      reopened.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('upgrades a literal version 1 database through the claim rebuild into v5', () => {
     const { path, root } = legacyDatabase(1)
     const reopened = new WorkItemStore(path)
     try {
-      expect(reopened.stats()).toMatchObject({ schemaVersion: 4, items: 1, outcomes: 0 })
+      expect(reopened.stats()).toMatchObject({ schemaVersion: 5, items: 1, outcomes: 0 })
       expect(reopened.reports('item-legacy')).toHaveLength(1)
       // v1 had no surrogate key; the rebuild assigns a fresh claim_id.
       const claimRow = reopened.findClaimByRun('run-legacy')
