@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -26,7 +26,7 @@ const now0 = 1_700_000_000_000
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 async function fixture(noticeStatus: 'accepted' | 'unknown_after_send' = 'accepted') {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-restart-supervisor-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-restart-supervisor-')))
   roots.push(root)
   const deliveryDatabasePath = join(root, 'delivery.sqlite')
   const databasePath = join(root, 'restart.sqlite')
@@ -306,7 +306,7 @@ describe('fixed-unit restart supervisor', () => {
       await writeFile(join(cohort, 'receipt.json'), receipt)
       await writeFile(join(profile, 'cordis.patch.yml'), patch)
       const policyDatabasePath = join(f.root, 'assistant-policy', 'policy.sqlite')
-      const external = await mkdtemp(join(tmpdir(), 'dsh-restart-host-'))
+      const external = await realpath(await mkdtemp(join(tmpdir(), 'dsh-restart-host-')))
       roots.push(external)
       const hostRoot = join(external, 'hosts', '0.2.1-rc.2')
       await mkdir(join(hostRoot, 'node_modules', '.bin'), { recursive: true })
@@ -345,6 +345,14 @@ describe('fixed-unit restart supervisor', () => {
             : path.endsWith('service.js') ? 'const service = 1\n' : 'const restart = 1\n').digest('hex') })),
         policyEvaluatorPath: join(policy, 'lib', 'evaluator.js') }
       expect(await inspectRestartPolicyAndCode(config, task)).toBe(true)
+      const hostAlias = join(external, 'hosts-alias')
+      await symlink(join(external, 'hosts'), hostAlias)
+      const aliasedBinding = JSON.stringify({ ...JSON.parse(hostBinding), cacheRoot: hostAlias })
+      await writeFile(join(f.root, '.dsh-rsi-host.json'), aliasedBinding)
+      expect(await inspectRestartPolicyAndCode({ ...config,
+        hostBindingDigest: createHash('sha256').update(aliasedBinding).digest('hex'),
+        hostReceiptPath: join(hostAlias, '0.2.1-rc.2', 'receipt.json') }, task)).toBe(false)
+      await writeFile(join(f.root, '.dsh-rsi-host.json'), hostBinding)
       expect(await inspectRestartPolicyAndCode(config,
         { ...task, binding: { ...task.binding, id: 'new-binding-after-new' } })).toBe(true)
       expect(await inspectRestartPolicyAndCode({ ...config, policyRules: [] }, task)).toBe(false)
@@ -417,7 +425,7 @@ describe('fixed-unit restart supervisor', () => {
   // The production system adapter uses Linux flock and the installer's exact
   // /tmp rendezvous. Portable supervisor behavior is covered with fakeSystem.
   test.skipIf(process.platform !== 'linux')('the real kernel rendezvous lock excludes a second supervisor', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-restart-lock-'))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-restart-lock-')))
     roots.push(root)
     const system = createSystemRestartSupervisor()
     let release!: () => void
