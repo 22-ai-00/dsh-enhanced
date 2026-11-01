@@ -8,6 +8,7 @@ import { WorkItemAdmission } from '../src/admission.ts'
 import { type Config, normalizeConfig } from '../src/config.ts'
 import type { PeerDeliveryService, PeerOwnerRouteReceipt, PeerPolicyRequest, PeerPolicyService } from '../src/peers.ts'
 import {
+  OwnerForegroundFailureSource,
   type WorkItemSignalCandidate,
   type WorkItemSignalSource,
   type WorkItemSignalSweep,
@@ -275,14 +276,232 @@ describe('automatic signal admission', () => {
     expect(setup.store.findItemById(id)?.state).toBe('ready')
   })
 
-  test('observes withdrawn signals but never admits them', async () => {
+  test('observes a withdrawal for an unknown execution without creating work', async () => {
     const script = scriptedSource([
       { candidates: [candidate({ disposition: 'withdrawn', externalId: 'owner-foreground:cancelled-1' })], cursor: undefined },
     ])
     const setup = await fixture({ source: script.source })
     const report = setup.intake.sweep(true)
-    expect(report.sources[0]).toMatchObject({ admitted: 0, withdrawn: 1 })
+    expect(report.sources[0]).toMatchObject({ admitted: 0, withdrawn: 1, retired: 0, rejected: 0 })
     expect(setup.store.stats().items).toBe(0)
+  })
+
+  test('retires the open item a withdrawn revision names and fails its pending wake-up', async () => {
+    const script = scriptedSource([
+      { candidates: [candidate({ disposition: 'withdrawn' })], cursor: undefined },
+    ])
+    const setup = await fixture({ source: script.source })
+    // Admit directly (not through the intake) so the dispatch is still pending;
+    // an intake admission would already have handed the wake-up to automations.
+    setup.admission.admit({
+      kind: 'review',
+      externalId: 'owner-foreground:canonical-1',
+      title: 'Repair a failed owner request',
+      brief: 'The owner request failed; inspect and repair.',
+      originBindingId: 'binding-1',
+      provenance: candidate().provenance,
+    })
+    const item = setup.store.listItems({ states: ['queued'] })[0]
+    expect(item).toBeDefined()
+    const id = item?.id ?? ''
+    expect(setup.store.getDispatch(id)?.state).toBe('pending')
+    setup.advance(60_000)
+    const report = setup.intake.sweep(true)
+    expect(report.sources[0]).toMatchObject({ admitted: 0, withdrawn: 1, retired: 1, rejected: 0 })
+    expect(setup.store.findItemById(id)).toMatchObject({
+      state: 'dropped',
+      stateReason: 'signal-withdrawn',
+      leaseUntil: null,
+      leaseRunId: null,
+      occurrenceId: null,
+    })
+    expect(setup.store.getDispatch(id)).toMatchObject({ state: 'failed', reason: 'signal-withdrawn' })
+    const withdrawal = setup.store.events(id).find(event => event.kind === 'withdrawn')
+    expect(withdrawal).toMatchObject({ actor: 'signal-intake' })
+    expect(JSON.parse(withdrawal?.detail ?? '{}')).toEqual({
+      stateReason: 'signal-withdrawn',
+      previousState: 'queued',
+      sourceId: 'test-source',
+      externalId: 'owner-foreground:canonical-1',
+      observedAt: T0,
+    })
+    expect(setup.store.stats().openItems).toBe(0)
+  })
+
+  test('leaves a settled item untouched when a late withdrawal arrives', async () => {
+    const script = scriptedSource([
+      { candidates: [candidate()], cursor: undefined },
+      { candidates: [candidate({ disposition: 'withdrawn', provenance: { source: 'test-source', sourceVersion: 'test-source/v1', signalDigest: 'sha256:digest-2', observedAt: T0 } })], cursor: undefined },
+    ])
+    const setup = await fixture({ source: script.source })
+    setup.intake.sweep(true)
+    const item = setup.store.listItems({ states: ['queued'] })[0]
+    const id = item?.id ?? ''
+    setup.ledger.claim({ itemId: id, runId: 'run-1', occurrenceId: 'occ-1' })
+    setup.ledger.report({ itemId: id, runId: 'run-1', status: 'ready', summary: 'Repaired.', artifactPaths: [], idempotencyKey: 'k-1' })
+    const eventsBefore = setup.store.events(id).length
+    setup.advance(3_600_001)
+    const report = setup.intake.sweep(true)
+    expect(report.sources[0]).toMatchObject({ admitted: 0, withdrawn: 1, retired: 0, rejected: 0 })
+    expect(setup.store.findItemById(id)?.state).toBe('ready')
+    expect(setup.store.events(id)).toHaveLength(eventsBefore)
+  })
+
+  test('releases the active claim when a claimed item is withdrawn, so its run can no longer report', async () => {
+    const script = scriptedSource([
+      { candidates: [candidate()], cursor: undefined },
+      { candidates: [candidate({ disposition: 'withdrawn', provenance: { source: 'test-source', sourceVersion: 'test-source/v1', signalDigest: 'sha256:digest-2', observedAt: T0 } })], cursor: undefined },
+    ])
+    const setup = await fixture({ source: script.source })
+    setup.intake.sweep(true)
+    const item = setup.store.listItems({ states: ['queued'] })[0]
+    const id = item?.id ?? ''
+    const claim = setup.ledger.claim({ itemId: id, runId: 'run-1', occurrenceId: 'occ-1' })
+    setup.advance(60_000)
+    const report = setup.intake.sweep(true)
+    expect(report.sources[0]).toMatchObject({ withdrawn: 1, retired: 1 })
+    expect(setup.store.findItemById(id)?.state).toBe('dropped')
+    expect(setup.store.activeClaim(id)).toBeUndefined()
+    expect(setup.store.findClaimByRun('run-1')).toMatchObject({ state: 'released', claimId: claim.claim.claimId })
+    // The worker's next report fails with the real surfaced code: the claim is
+    // released, so `report()` refuses before reaching the item's state.
+    let code: string | undefined
+    try {
+      setup.ledger.report({ itemId: id, runId: 'run-1', status: 'ready', summary: 'Late.', artifactPaths: [], idempotencyKey: 'k-late' })
+    } catch (error) {
+      code = (error as { code?: string }).code
+    }
+    expect(code).toBe('claim-conflict')
+  })
+
+  test('retires every open row of one canonical key when the dedup window rolled', async () => {
+    const setup = await fixture()
+    const input = {
+      kind: 'review',
+      externalId: 'owner-foreground:canonical-1',
+      title: 'Repair a failed owner request',
+      brief: 'The owner request failed; inspect and repair.',
+      originBindingId: 'binding-1',
+      provenance: candidate().provenance,
+    }
+    setup.admission.admit(input)
+    // The dedup window is a freshness bound, so a second admission past it
+    // creates another open row for the same canonical identity.
+    setup.advance(3_600_001)
+    setup.admission.admit(input)
+    const open = setup.store.listItems({ states: ['queued', 'claimed', 'working', 'waiting'] })
+    expect(open).toHaveLength(2)
+    const result = setup.admission.withdraw(input)
+    expect(result.outcome).toBe('withdrawn')
+    expect(result.items).toHaveLength(2)
+    for (const item of result.items) expect(item).toMatchObject({ state: 'dropped', stateReason: 'signal-withdrawn' })
+    // No surviving row can be handed to the worker by a later `wakePending()`.
+    expect(setup.store.stats().openItems).toBe(0)
+    expect(setup.store.listOpenDispatches(10)).toHaveLength(0)
+  })
+
+  test('retires a mixed dispatched/pending set without recalling the dispatched wake-up', async () => {
+    const setup = await fixture()
+    const input = {
+      kind: 'review',
+      externalId: 'owner-foreground:canonical-1',
+      title: 'Repair a failed owner request',
+      brief: 'The owner request failed; inspect and repair.',
+      originBindingId: 'binding-1',
+      provenance: candidate().provenance,
+    }
+    setup.admission.admit(input)
+    const first = setup.store.listItems({ states: ['queued'] })[0]
+    const firstId = first?.id ?? ''
+    setup.store.markDispatchDispatched(firstId, 'occ-first')
+    setup.advance(3_600_001)
+    setup.admission.admit(input)
+    const open = setup.store.listItems({ states: ['queued'] })
+    expect(open).toHaveLength(2)
+    const secondId = open.find(item => item.id !== firstId)?.id ?? ''
+    expect(setup.store.getDispatch(secondId)?.state).toBe('pending')
+    expect(setup.admission.withdraw(input)).toMatchObject({ outcome: 'withdrawn' })
+    // The already-delivered occurrence stays; the not-yet-delivered one is failed
+    // instead of re-armed, so neither can wake cancelled work.
+    expect(setup.store.getDispatch(firstId)).toMatchObject({ state: 'dispatched', occurrenceId: 'occ-first' })
+    expect(setup.store.getDispatch(secondId)).toMatchObject({ state: 'failed', reason: 'signal-withdrawn' })
+    expect(setup.store.listOpenDispatches(10)).toHaveLength(0)
+  })
+
+  test('leaves a wake-up already dispatched to the automation untouched', async () => {
+    const setup = await fixture()
+    const input = {
+      kind: 'review',
+      externalId: 'owner-foreground:canonical-1',
+      title: 'Repair a failed owner request',
+      brief: 'The owner request failed; inspect and repair.',
+      originBindingId: 'binding-1',
+      provenance: candidate().provenance,
+    }
+    setup.admission.admit(input)
+    const id = setup.store.listItems({ states: ['queued'] })[0]?.id ?? ''
+    setup.store.markDispatchDispatched(id, 'occ-1')
+    expect(setup.admission.withdraw(input)).toMatchObject({ outcome: 'withdrawn', items: [{ state: 'dropped' }] })
+    // Delivery to a running occurrence cannot be recalled; only future work is
+    // cancelled, so the dispatched row keeps its occurrence.
+    expect(setup.store.getDispatch(id)).toMatchObject({ state: 'dispatched', occurrenceId: 'occ-1' })
+  })
+
+  test('keeps repeated withdrawal sweeps idempotent', async () => {
+    const withdrawnCandidate = candidate({
+      disposition: 'withdrawn',
+      provenance: { source: 'test-source', sourceVersion: 'test-source/v1', signalDigest: 'sha256:digest-2', observedAt: T0 },
+    })
+    const script = scriptedSource([
+      { candidates: [candidate()], cursor: undefined },
+      { candidates: [withdrawnCandidate], cursor: undefined },
+      { candidates: [withdrawnCandidate], cursor: undefined },
+    ])
+    const setup = await fixture({ source: script.source })
+    setup.intake.sweep(true)
+    setup.advance(60_000)
+    expect(setup.intake.sweep(true).sources[0]).toMatchObject({ withdrawn: 1, retired: 1 })
+    const id = setup.store.listItems({ states: ['dropped'] })[0]?.id ?? ''
+    const events = setup.store.events(id).length
+    expect(setup.intake.sweep(true).sources[0]).toMatchObject({ withdrawn: 1, retired: 0 })
+    expect(setup.store.events(id)).toHaveLength(events)
+  })
+
+  test('refuses a withdrawal attributed to another source before it can retire work', async () => {
+    const script = scriptedSource([
+      { candidates: [candidate()], cursor: undefined },
+      { candidates: [candidate({ disposition: 'withdrawn', provenance: { source: 'other-source', sourceVersion: 'other-source/v1', signalDigest: 'sha256:digest-2', observedAt: T0 } })], cursor: undefined },
+    ])
+    const setup = await fixture({ source: script.source })
+    setup.intake.sweep(true)
+    const item = setup.store.listItems({ states: ['queued'] })[0]
+    setup.advance(60_000)
+    const report = setup.intake.sweep(true)
+    expect(report.sources[0]).toMatchObject({ withdrawn: 0, retired: 0, rejected: 1 })
+    expect(setup.store.findItemById(item?.id ?? '')?.state).toBe('queued')
+  })
+
+  test('withdraws through the admission API using canonical identity only', async () => {
+    const setup = await fixture()
+    const input = {
+      kind: 'review',
+      externalId: 'owner-foreground:canonical-1',
+      title: 'Repair a failed owner request',
+      brief: 'The owner request failed; inspect and repair.',
+      originBindingId: 'binding-1',
+      provenance: candidate().provenance,
+    }
+    expect(setup.admission.withdraw(input)).toEqual({ outcome: 'absent', items: [] })
+    setup.admission.admit(input)
+    expect(setup.admission.withdraw(input)).toMatchObject({
+      outcome: 'withdrawn',
+      items: [{ state: 'dropped', stateReason: 'signal-withdrawn' }],
+    })
+    // Idempotent: a terminal item is not rewritten and appends no event.
+    const id = setup.store.listItems({ states: ['dropped'] })[0]?.id ?? ''
+    const events = setup.store.events(id).length
+    expect(setup.admission.withdraw(input)).toMatchObject({ outcome: 'settled', items: [{ state: 'dropped' }] })
+    expect(setup.store.events(id)).toHaveLength(events)
   })
 
   test('contains an adapter failure, resets the cursor and keeps claiming safe', async () => {
@@ -463,4 +682,40 @@ test('admits a genuine delivery failure during claim without disturbing the clai
   })
   expect(admitted.brief).toContain('inbox-failed-1')
   expect(service.status(workerAgent('occ-2')).openItems).toBe(2)
+})
+
+test('gives one execution one identity across its failure and withdrawal revisions', async () => {
+  const setup = await fixture()
+  let status: 'failed' | 'cancelled' = 'failed'
+  const delivery: PeerDeliveryService = {
+    validateOwnerRoute: () => receipt(),
+    enqueueBackground: () => Promise.resolve({ id: 'outbox-1' }),
+    listOwnerForegroundTaskSources: () => ({
+      items: [{
+        protocol: 'assistant-delivery/owner-foreground-source/v1',
+        inboxId: 'inbox-1',
+        sourceDigest: 'sha256:digest-1',
+        completionSequence: 4,
+        authorityId: ROUTE,
+        authorityHash: 'sha256:authority',
+        principalId: PRINCIPAL,
+        scope: { workspace: WORKSPACE, preset: PRESET },
+        binding: { id: 'binding-1', version: 3, generation: 2, sessionId: 'session-1' },
+        execution: { dispatchedAt: T0 - 120_000, status, quiescent: true, completedAt: T0 - 60_000, executionRef: 'exec-1' },
+      }],
+      nextCursor: undefined,
+      watermark: 4,
+      hasMore: false,
+    }),
+  }
+  const source = new OwnerForegroundFailureSource(setup.config, delivery)
+  const failed = source.sweep({ now: T0, limit: 10, cursor: undefined }).candidates[0]
+  status = 'cancelled'
+  const withdrawn = source.sweep({ now: T0, limit: 10, cursor: undefined }).candidates[0]
+  expect(failed?.disposition).toBe('failure')
+  expect(withdrawn?.disposition).toBe('withdrawn')
+  expect(withdrawn?.externalId).toBe(failed?.externalId)
+  expect(withdrawn?.externalId).toMatch(/^owner-foreground:[a-f0-9]{64}$/)
+  expect(failed?.title).toBe('Repair a failed owner request')
+  expect(withdrawn?.title).toBe('Repair a cancelled owner request')
 })

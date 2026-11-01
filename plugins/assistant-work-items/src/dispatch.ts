@@ -56,7 +56,10 @@ export class WorkItemDispatch {
     if (automations === undefined) fail('missing-dependency', 'assistantAutomations is required to wake the worker')
     const dispatch = this.#deps.store.getDispatch(item.id)
     if (dispatch === undefined) fail('storage', 'work item has no dispatch row')
-    if (dispatch.state === 'dispatched') return
+    // Only a pending row may wake: a dispatched row already owns an occurrence,
+    // and a failed one was withdrawn or refused, so waking it would hand
+    // cancelled work to a live automation before the guarded mark throws.
+    if (dispatch.state !== 'pending') return
     try {
       const occurrence = automations.ingestExternal({
         sourceId: config.intakeSourceId,

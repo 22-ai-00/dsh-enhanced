@@ -12,6 +12,7 @@ import type {
   WorkItemProvenance,
   WorkItemRecord,
   WorkItemState,
+  WorkItemWithdrawResult,
 } from './types.ts'
 import { OPEN_STATES, WorkItemError } from './types.ts'
 import type { WorkItemWorkspace } from './workspace.ts'
@@ -245,6 +246,38 @@ export class WorkItemAdmission {
       dispatch,
     )
     return Object.freeze({ item, created: true, dispatch })
+  }
+
+  /**
+   * Retire the open item a withdrawn signal already produced, if any.
+   *
+   * Withdrawal shares `admit()`'s normalization and dedup identity, so a
+   * `cancelled` revision of an execution resolves to the same item as its
+   * `failed` revision. Every open row of that key is retired, not just the
+   * newest: the dedup window may have rolled while an older item stayed open.
+   * It deliberately skips the owner-route re-anchor, Policy
+   * authorization, cooldown, kind/rate/capacity gates and ledger recovery:
+   * those bound *new* work, while withdrawal only reduces pending work. It
+   * cannot recall a report already handed to `assistant-delivery`; it retires
+   * open state and a still-pending wake-up, and the worker's next tool call
+   * observes the dropped item.
+   */
+  withdraw(input: WorkItemAdmitInput): WorkItemWithdrawResult {
+    const config = this.#config
+    if (!config.enabled) fail('disabled', 'the work-item intake is disabled')
+    // Normalization is shared with admission, so a malformed withdrawal —
+    // including a malformed provenance shape — is rejected rather than guessed.
+    const normalized = this.#normalize(input)
+    const dedupKey = dedupKeyFor(config.intakeSourceId, normalized.kind, normalized.externalId)
+    // The dedup window is a freshness bound, so settle the whole dedup key
+    // across windows: a withdrawal may arrive long after the failure it
+    // cancels, and an older still-open row must not survive it.
+    const withdrawn = this.#deps.store.withdrawByDedupKey(dedupKey, {
+      sourceId: normalized.provenance?.source ?? config.intakeSourceId,
+      externalId: normalized.externalId,
+      observedAt: normalized.provenance?.observedAt ?? this.#now(),
+    })
+    return Object.freeze({ outcome: withdrawn.outcome, items: withdrawn.items })
   }
 
   /** Gates that would reject this kind right now; empty when it may proceed. */

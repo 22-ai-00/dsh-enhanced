@@ -26,7 +26,7 @@ import type { WorkItemAdmission } from './admission.ts'
 import type { WorkItemDispatch } from './dispatch.ts'
 import type { PeerDeliveryService, PeerOwnerForegroundTaskSource } from './peers.ts'
 import type { WorkItemStore } from './store.ts'
-import type { WorkItemAdmitResult, WorkItemProvenance, WorkItemRecord } from './types.ts'
+import type { WorkItemAdmitResult, WorkItemProvenance, WorkItemRecord, WorkItemWithdrawResult } from './types.ts'
 import { WorkItemError } from './types.ts'
 
 /** What one adapter sweep is allowed to spend. */
@@ -49,9 +49,9 @@ export interface WorkItemSignalCandidate {
   readonly occurredAt: number
   readonly provenance: WorkItemProvenance
   /**
-   * `withdrawn` candidates are observed but never admitted: a cancellation or
-   * correction must not create work, and admission's settled fence keeps any
-   * earlier item settled.
+   * `withdrawn` candidates are never admitted. A cancellation retires the open
+   * item the same canonical execution already produced, if one exists; a
+   * correction that does not match anything stays an observation.
    */
   readonly disposition: 'failure' | 'timeout' | 'withdrawn'
 }
@@ -112,7 +112,10 @@ export interface WorkItemSignalSourceReport {
   readonly admitted: number
   readonly duplicates: number
   readonly fenced: number
+  /** Withdrawn candidates observed in this sweep. */
   readonly withdrawn: number
+  /** Of those, items actually moved to `dropped` by this sweep. */
+  readonly retired: number
   readonly rejected: number
   readonly failed: boolean
 }
@@ -156,6 +159,7 @@ function emptyReport(source: string, skipped: WorkItemSignalSkip | null, degrade
     duplicates: 0,
     fenced: 0,
     withdrawn: 0,
+    retired: 0,
     rejected: 0,
     failed: false,
   })
@@ -335,26 +339,53 @@ export class WorkItemSignalIntake {
     let duplicates = 0
     let fenced = 0
     let withdrawn = 0
+    let retired = 0
     let rejected = 0
     for (const candidate of result.candidates) {
       scanned += 1
+      // A source may only speak for itself, and this check runs before the
+      // withdrawal branch: cross-attribution would otherwise let one source
+      // cancel another source's work, not just launder its provenance.
+      if (candidate.provenance?.source !== source.id) {
+        rejected += 1
+        this.#warn(
+          `assistant-work-items: signal source ${source.id} dropped a candidate attributed to ${String(candidate.provenance?.source)}`,
+        )
+        continue
+      }
       if (candidate.disposition === 'withdrawn') {
         withdrawn += 1
+        let withdrawal: WorkItemWithdrawResult
+        try {
+          withdrawal = this.#deps.admission.withdraw({
+            kind: candidate.kind,
+            externalId: candidate.externalId,
+            title: candidate.title,
+            brief: candidate.brief,
+            originBindingId: candidate.originBindingId,
+            ...(candidate.acceptanceRef === undefined ? {} : { acceptanceRef: candidate.acceptanceRef }),
+            provenance: candidate.provenance,
+          })
+        } catch (error) {
+          if (error instanceof WorkItemError && REJECTION_CODES.has(error.code)) {
+            rejected += 1
+            continue
+          }
+          this.#warn(`assistant-work-items: withdrawal of a ${source.id} signal failed: ${describe(error)}`)
+          rejected += 1
+          continue
+        }
+        // `absent` (never admitted) and `settled` (already terminal) stay
+        // observations; only real transitions are retirements, and one signal
+        // can retire several open rows when the dedup window rolled between
+        // admissions. A withdrawal never wakes the worker.
+        if (withdrawal.outcome === 'withdrawn') retired += withdrawal.items.length
         continue
       }
       if (admitted >= resolved.maxAdmitsPerSweep) {
         // Budget is finite per sweep; the cursor still advances so the next
         // sweep sees a different slice instead of the same head forever.
         break
-      }
-      if (candidate.provenance?.source !== source.id) {
-        // A source may only speak for itself: cross-attribution would let one
-        // adapter launder another source's provenance into the ledger.
-        rejected += 1
-        this.#warn(
-          `assistant-work-items: signal source ${source.id} dropped a candidate attributed to ${String(candidate.provenance?.source)}`,
-        )
-        continue
       }
       let outcome: WorkItemAdmitResult
       try {
@@ -395,6 +426,7 @@ export class WorkItemSignalIntake {
       duplicates,
       fenced,
       withdrawn,
+      retired,
       rejected,
       failed: false,
     })
@@ -522,8 +554,11 @@ export class OwnerForegroundFailureSource implements WorkItemSignalSource {
     if (typeof completedAt !== 'number' || !Number.isSafeInteger(completedAt) || completedAt <= 0) return null
     const bindingId = source.binding.id
     if (bindingId === '') return null
-    // Canonical key over durable, authenticated identities (not the text): the
-    // same execution revision maps to the same ledger dedup key forever.
+    // Canonical key over durable, authenticated identities (not the text and
+    // deliberately not the disposition): the key is the identity of one
+    // execution, so a `failed` revision and its later `cancelled` revision of
+    // the same executionRef map to the same item. Titles/briefs still differ
+    // per disposition; only the identity is status-independent.
     const canonical = sha256([
       this.id,
       source.inboxId,
@@ -531,7 +566,6 @@ export class OwnerForegroundFailureSource implements WorkItemSignalSource {
       String(source.binding.version),
       String(source.binding.generation),
       source.execution.executionRef,
-      disposition,
     ].join('\u0000'))
     const subject = disposition === 'withdrawn' ? 'cancelled' : disposition === 'timeout' ? 'timed-out' : 'failed'
     const title = `Repair a ${subject} owner request`

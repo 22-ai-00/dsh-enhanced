@@ -104,7 +104,8 @@ ctx.effect(() => () => dispose())
 约束：
 
 - 每个候选必须自带 `provenance`（source、sourceVersion、signalDigest、observedAt、可选 evidence）、`externalId`、`originBindingId` 和 `disposition`；admission 会逐字段严格校验，缺失或超长直接拒绝而不是猜。
-- `disposition: 'withdrawn'` 只被观察计数，不会产生工作项；已结项修复由跨窗口围栏挡住，来源不能复活它。
+- `disposition: 'withdrawn'` 永远不会产生新工作项。若同一 canonical execution 已有在途工作项（`queued/claimed/working/waiting`），撤回会把该 dedup key 下**所有**在途行退役为 `dropped`（`stateReason: 'signal-withdrawn'`），包括去重窗口滚动前遗留的旧行；已结项的同一信号仍由跨窗口围栏挡住，来源不能复活它。每次扫描报告新增 `retired`，只统计本次真正被退役的工作项（可能一次多条）；`withdrawn` 仍只统计观察到的撤回候选。
+- 撤回的边界：退役会释放活动 claim、把仍处于 `pending` 的 dispatch 行标为 `failed`（`reason: 'signal-withdrawn'`，不再重新武装唤醒），但**不能召回**已经交给 `assistant-delivery` 的报告/通知；随后 `claim`/`report` 会以 `claim-conflict` 失败（claim 已释放；若 owner route 恰好变化也可能先报 `owner-route-*`），status 工具会显示 `dropped`。撤回只读取规范化的 `externalId` 与来源归属，不重跑 owner route、Policy、cooldown、kind/rate/capacity 闸门，因为它只会减少待办工作；provenance 的来源与本次扫描来源不一致的候选会被直接拒绝。来源归属只保证「来源为自己发信号」：dedup identity 仍是 `intakeSourceId + kind + externalId`，扩展来源必须给 `externalId` 加自己的前缀，否则两个来源可能碰撞到同一工作项。
 - 注册在插件 disabled 或已 dispose 时失败关闭（`disabled` / `storage`），不会先排队再补扫；同一 id 重复注册或格式非法抛 `invalid-input`，且不影响已注册来源。
 - 来源仍然只依赖冻结的 owner route（`assistant-delivery` 的 `validateOwnerRoute`）；注册不绕过 Policy `admit` 授权。
 - 没有新定时器：来源只在 `claim()` 或显式 `sweepSignals(force)` 时被扫一次，受各自的持久化 `intervalMs` 门控。
@@ -221,8 +222,9 @@ rules:
 - 单独使用 observe 模式没有产品价值：它只积累观察行，不唤醒、不通知。observe 仍要求 `assistant-delivery` 可用，因为准入要先校验 owner route；没有 Delivery 时准入记录不会写入（失败关闭），这是当前实现的已知限制。
 - 尚未**随包发布**仓库外真实来源（GitHub、邮件、IM、任务日历等）：插件提供了 `registerSignalSource(...)` 扩展点，但具体来源适配器仍待独立插件实现；内置来源只是 `assistant-delivery` 已认证的 owner foreground 记录，仍属于 in-tree 证据。
 - 内置来源的 title/brief 由 delivery 行的**元数据**派生（inbox、binding、版本/代次、完成时间），不读取 owner 原文；因此 brief 不是完整任务复述，worker 需要自己查 delivery history 定位上下文。
-- canonical key 以**单次 execution**（inbox + binding 版本/代次 + executionRef + disposition）为单位，不是「同一意图第 N 次重复」；owner 同一意图重试失败会产生新的工作项（cooldown 与 `maxOpenItems` 限制总量）。
-- 已准入信号的 `disposition` 若被修正（例如 `failed` 后重新成功），会产生**不同** canonical key，因此不会自动关闭旧工作项；撤回（`cancelled`）只被观察计数，不向在途工作项传播取消。
+- canonical key 以**单次 execution**（inbox + binding 版本/代次 + executionRef，不含 `disposition`）为单位，不是「同一意图第 N 次重复」；同一 execution 的状态修订（失败→撤回）共享同一身份，因此撤回能定位并退役已准入的项。owner 同一意图重试失败会产生新的工作项（cooldown 与 `maxOpenItems` 限制总量）。
+- 已准入信号的 `disposition` 若被修正为成功（`succeeded`，即不再产生候选），不会自动关闭旧工作项；只有 `cancelled` 撤回会传播到在途项。撤回报告已经交给 delivery 的终态报告无法撤回，worker 只能从后续工具调用看到 `dropped`。observe 模式不会新建在途项，但若切换前遗留的在途项仍在，撤回仍会把它退役（内部账本变化，不唤醒、不通知）。
+- 升级注意：本版本把 `disposition` 从 canonical key 移除。升级前已准入的旧工作项仍带旧 key，之后的撤回对它们会解析为 `absent`，只能等其自然结项；新信号不受影响。
 - 观察期记录会占用去重窗口：同一 signal 从 observe 切到 active 后，窗口内仍视为已准入；需要时等待窗口过期或换 `externalId`。
 - 没有评估、学习或采用反馈回路；工作项终态只是运维证据，不代表任务质量。
 - `stats().openItems` 与 `health().openItems` 只统计 `queued/claimed/working/waiting`，不含仍需人处理的 `ready/blocked` 终态项。

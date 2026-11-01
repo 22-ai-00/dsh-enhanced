@@ -19,6 +19,8 @@ import { CLAIMABLE_STATES, OPEN_STATES, WorkItemError } from './types.ts'
 
 const SCHEMA_VERSION = 2
 const MEMORY_DATABASE = ':memory:'
+/** Bound parameters for `state IN (...)`, derived from the single state list. */
+const OPEN_STATE_PLACEHOLDERS = OPEN_STATES.map(() => '?').join(', ')
 
 type Row = Record<string, unknown>
 
@@ -308,6 +310,20 @@ export interface ReclaimResult {
   readonly blocked: readonly string[]
 }
 
+/** Which signal drove a withdrawal; recorded on every retired item's event. */
+export interface WithdrawAttribution {
+  readonly sourceId: string
+  readonly externalId: string
+  readonly observedAt: number
+}
+
+/** Result of retiring every open item of one canonical dedup key. */
+export interface WithdrawDedupResult {
+  readonly outcome: 'withdrawn' | 'settled' | 'absent'
+  /** Items actually retired (`withdrawn`), the newest item (`settled`), or none. */
+  readonly items: readonly WorkItemRecord[]
+}
+
 export interface WorkItemStoreStats {
   readonly schemaVersion: number
   readonly items: number
@@ -518,6 +534,64 @@ export class WorkItemStore {
     })
   }
 
+  /**
+   * Retire every open item a canonical signal produced, because it was withdrawn.
+   *
+   * This is the only lifecycle transition driven by the read side of autonomy
+   * rather than by a worker report. It is deliberately narrow: the items stop
+   * being open, their active claim (if any) is released so the current run
+   * cannot keep reporting, and a still-pending wake-up is failed rather than
+   * re-armed. A wake-up already handed to the automation is left alone —
+   * delivery to a running occurrence cannot be recalled from here.
+   *
+   * Withdrawal targets the whole dedup key, not the newest row, because the
+   * dedup window is a freshness bound: once it rolls, a still-open item can be
+   * re-admitted under the same key with a different bucket. Retiring only the
+   * newest row would leave the older one winnable by `wakePending()` on the next
+   * host start, i.e. cancelled work could still be woken. All rows of the key
+   * therefore settle together in one transaction.
+   *
+   * Idempotent: an already-terminal key is returned unchanged (`settled`) with
+   * no new event, so a repeated withdrawn revision never rewrites history.
+   */
+  withdrawByDedupKey(dedupKey: string, attribution?: WithdrawAttribution): WithdrawDedupResult {
+    const now = this.#now()
+    return this.#transaction(() => {
+      const rows = this.#statement(`
+        SELECT ${ITEM_ALIASES} FROM work_item
+        WHERE dedup_key = ? AND state IN (${OPEN_STATE_PLACEHOLDERS})
+        ORDER BY created_at ASC, id ASC
+      `).all(dedupKey, ...OPEN_STATES) as Row[]
+      if (rows.length === 0) {
+        const latest = this.findLatestItemByDedupKey(dedupKey)
+        return latest === undefined
+          ? Object.freeze({ outcome: 'absent' as const, items: Object.freeze([]) })
+          : Object.freeze({ outcome: 'settled' as const, items: Object.freeze([latest]) })
+      }
+      const retired: WorkItemRecord[] = []
+      for (const row of rows) {
+        const item = itemFromRow(row)
+        this.#statement(`
+          UPDATE work_item
+          SET state = 'dropped', state_reason = 'signal-withdrawn', lease_until = NULL, lease_run_id = NULL,
+              occurrence_id = NULL, updated_at = ?
+          WHERE id = ?
+        `).run(now, item.id)
+        this.#statement("UPDATE work_item_claim SET state = 'released', updated_at = ? WHERE item_id = ? AND state = 'active'")
+          .run(now, item.id)
+        this.#statement("UPDATE work_item_dispatch SET state = 'failed', reason = 'signal-withdrawn', updated_at = ? WHERE item_id = ? AND state = 'pending'")
+          .run(now, item.id)
+        this.#appendEvent(item.id, 'withdrawn', 'signal-intake', {
+          stateReason: 'signal-withdrawn',
+          previousState: item.state,
+          ...(attribution === undefined ? {} : { sourceId: attribution.sourceId, externalId: attribution.externalId, observedAt: attribution.observedAt }),
+        }, now)
+        retired.push(this.#requireItem(item.id))
+      }
+      return Object.freeze({ outcome: 'withdrawn' as const, items: Object.freeze(retired) })
+    })
+  }
+
   appendEvent(itemId: string, kind: string, actor: string, detail?: unknown): void {
     const now = this.#now()
     this.#transaction(() => {
@@ -554,8 +628,12 @@ export class WorkItemStore {
     const now = this.#now()
     this.#transaction(() => {
       this.#requireItem(itemId)
-      this.#statement("UPDATE work_item_dispatch SET state = 'dispatched', occurrence_id = ?, reason = NULL, updated_at = ? WHERE item_id = ?")
+      // Guarded transition: a wake-up that already committed must not be
+      // rewritten by a late bookkeeping write, and a withdrawal that failed the
+      // row in between must stay failed instead of masquerading as dispatched.
+      const changed = this.#statement("UPDATE work_item_dispatch SET state = 'dispatched', occurrence_id = ?, reason = NULL, updated_at = ? WHERE item_id = ? AND state = 'pending'")
         .run(occurrenceId, now, itemId)
+      if (Number(changed.changes) !== 1) fail('invalid-state', 'work item dispatch is no longer pending')
       this.#statement('UPDATE work_item SET occurrence_id = ?, updated_at = ? WHERE id = ?').run(occurrenceId, now, itemId)
       this.#appendEvent(itemId, 'dispatched', 'admission', { occurrenceId }, now)
     })

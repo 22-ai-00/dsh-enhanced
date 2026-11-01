@@ -209,6 +209,26 @@ export interface WorkItemAdmitInput {
 /** Why an admission did not create a new item. */
 export type WorkItemAdmitReason = 'duplicate' | 'fenced'
 
+/** What a withdrawal did to the item the canonical signal already produced. */
+export type WorkItemWithdrawOutcome =
+  /** An open item was moved to `dropped` and its pending dispatch failed. */
+  | 'withdrawn'
+  /** The item was already terminal; nothing changed (idempotent no-op). */
+  | 'settled'
+  /** No item was ever admitted for this canonical signal. */
+  | 'absent'
+
+/** Result of one withdrawal attempt. */
+export interface WorkItemWithdrawResult {
+  readonly outcome: WorkItemWithdrawOutcome
+  /**
+   * Items actually retired for `withdrawn` (there can be more than one when an
+   * older, still-open row lived in a previous dedup window), the newest item for
+   * `settled`, and empty for `absent`.
+   */
+  readonly items: readonly WorkItemRecord[]
+}
+
 /** Result of one admission attempt. */
 export interface WorkItemAdmitResult {
   readonly item: WorkItemRecord
