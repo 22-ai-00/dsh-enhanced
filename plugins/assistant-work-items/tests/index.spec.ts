@@ -128,6 +128,7 @@ describe('dsh-enhanced-assistant-work-items entrypoint', () => {
       workerConnected: false,
       ownerRouteValid: false,
       follows: { open: 0, closed: 0, unresolved: 0, degraded: null },
+      authority: { legacy: 0, parked: 0, lastDeniedAt: null, lastDeniedReason: null },
       settlement: {
         enabled: false,
         pending: 0,

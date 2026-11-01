@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { WorkItemAdmission } from '../src/admission.ts'
+import { WorkItemAuthority } from '../src/authority.ts'
 import { type Config, normalizeConfig, type NormalizedConfig } from '../src/config.ts'
 import { WorkItemDispatch } from '../src/dispatch.ts'
 import { WorkItemLedger } from '../src/ledger.ts'
@@ -25,6 +26,7 @@ import { WorkItemStore } from '../src/store.ts'
 import type { WorkItemAdmitInput, WorkItemRecord, WorkItemReportRecord } from '../src/types.ts'
 import { WorkItemError } from '../src/types.ts'
 import { WorkItemWorkspace } from '../src/workspace.ts'
+import { harness as fixturesHarness } from './fixtures.ts'
 
 const WORKER = 'work-items-worker'
 const SOURCE = 'work-items/v1'
@@ -81,17 +83,26 @@ function peerError(code: string): Error & { code: string } {
 
 function createPolicy() {
   const calls: Array<{ request: PeerPolicyRequest; options: unknown }> = []
-  let allow = true
+  let decision: PeerPolicyDecision = { effect: 'allow', reasonCode: 'rule-allow' }
+  let failure: Error | null = null
   const service: PeerPolicyService = {
     authorize(request, options) {
       calls.push({ request, options })
-      const decision: PeerPolicyDecision = allow
-        ? { effect: 'allow', reasonCode: 'rule-allow' }
-        : { effect: 'deny', reasonCode: 'default-deny' }
+      if (failure !== null) throw failure
       return decision
     },
   }
-  return { service, calls, setAllow(value: boolean) { allow = value } }
+  return {
+    service,
+    calls,
+    setAllow(value: boolean) {
+      decision = value
+        ? { effect: 'allow', reasonCode: 'rule-allow' }
+        : { effect: 'deny', reasonCode: 'default-deny' }
+    },
+    setDecision(value: PeerPolicyDecision) { decision = value },
+    setFailure(value: Error | null) { failure = value },
+  }
 }
 
 function createDelivery(options: { invalid?: boolean; failCode?: string } = {}) {
@@ -161,6 +172,9 @@ class FakePolicyPeer extends Service {
   authorize(request: PeerPolicyRequest, options?: { idempotencyKey?: string; auditDetails?: unknown }) {
     return this.spy.service.authorize(request, options)
   }
+  setAllow(value: boolean) { this.spy.setAllow(value) }
+  setDecision(value: PeerPolicyDecision) { this.spy.setDecision(value) }
+  setFailure(value: Error | null) { this.spy.setFailure(value) }
 }
 
 class FakeDeliveryPeer extends Service {
@@ -294,6 +308,7 @@ async function ledgerHarness(options: {
   const policy = createPolicy()
   const delivery = createDelivery()
   const automations = createAutomations()
+  const authority = new WorkItemAuthority({ policy: () => policy.service })
   const admission = new WorkItemAdmission({
     config,
     store,
@@ -309,12 +324,34 @@ async function ledgerHarness(options: {
     ledger,
     automations: automations.service,
     delivery: delivery.service,
+    authority,
     now,
   })
   closers.push(() => store.close())
   return {
-    root, config, workspace, store, ledger, admission, dispatch, policy, delivery, automations, now,
+    root, config, workspace, store, ledger, admission, authority, dispatch, policy, delivery, automations, now,
     advance(ms: number) { current += ms },
+  }
+}
+
+/** Read the service's durable rows through a second connection. */
+function readStore(fixture: Awaited<ReturnType<typeof serviceHarness>>): WorkItemStore {
+  const store = new WorkItemStore(join(fixture.root, 'state', 'state.sqlite'))
+  closers.push(() => store.close())
+  return store
+}
+
+/** Rewrite one stored mandate as a hostile/legacy shape would look on disk. */
+function rewriteBasis(fixture: { root: string }, itemId: string, mutate: (value: Record<string, unknown> | null) => unknown): void {
+  const raw = new DatabaseSync(join(fixture.root, 'state', 'state.sqlite'))
+  try {
+    const row = raw.prepare('SELECT authority_basis FROM work_item WHERE id = ?').get(itemId) as Record<string, unknown> | undefined
+    const current = typeof row?.['authority_basis'] === 'string' ? JSON.parse(String(row['authority_basis'])) as Record<string, unknown> : null
+    const next = mutate(current)
+    raw.prepare('UPDATE work_item SET authority_basis = ? WHERE id = ?')
+      .run(next === null ? null : JSON.stringify(next), itemId)
+  } finally {
+    raw.close()
   }
 }
 
@@ -877,6 +914,193 @@ describe('work-item ledger lifecycle', () => {
   })
 })
 
+
+describe('work-item admission authority revalidation', () => {
+  test('persists the exact audit basis and idempotency key of the admission decision', async () => {
+    const fixture = await ledgerHarness()
+    const admitted = fixture.admission.admit(signal())
+    const basis = admitted.item.authority
+    expect(basis).toEqual({
+      protocol: 'work-items/authority/v1',
+      action: 'admit',
+      subjectKind: 'background',
+      sourceId: SOURCE,
+      automationId: WORKER,
+      workspace: WORKSPACE,
+      principal: PRINCIPAL,
+      resourceKind: 'automation',
+      effect: 'allow',
+      reasonCode: 'rule-allow',
+      idempotencyKey: `work-item-admit:${admitted.item.dedupKey}:${String(admitted.item.dedupBucket)}`,
+      checkedAt: fixture.now(),
+    })
+    expect(fixture.store.findItemById(admitted.item.id)?.authority).toEqual(basis)
+    expect(fixture.policy.calls).toHaveLength(1)
+    expect(fixture.policy.calls[0]?.options).toEqual({ idempotencyKey: basis?.idempotencyKey })
+  })
+
+  test('replays the identical request under the same key and lets an allow proceed', async () => {
+    const fixture = await ledgerHarness()
+    const admitted = fixture.admission.admit(signal())
+    const check = fixture.authority.check(fixture.store.findItemById(admitted.item.id)!)
+    expect(check).toEqual({ kind: 'allow' })
+    expect(fixture.policy.calls).toHaveLength(2)
+    const [admission, revalidation] = fixture.policy.calls
+    expect(revalidation?.request).toEqual(admission?.request)
+    expect(revalidation?.options).toEqual(admission?.options)
+  })
+
+  test('a denied mandate parks the claimed item, mints a fresh wake and fails closed', async () => {
+    const fixture = await serviceHarness()
+    const admitted = fixture.service.admit(signal())
+    expect(fixture.automations?.calls).toHaveLength(1)
+    fixture.policy.setAllow(false)
+    expect(errorCode(() => fixture.service.claim(workerAgent('occ-1')))).toBe('authority-revoked')
+    const store = readStore(fixture)
+    expect(store.findItemById(admitted.item.id)).toMatchObject({
+      state: 'waiting',
+      stateReason: 'authority-revoked',
+      attempt: 0,
+    })
+    expect(store.findClaimByRun('occ-1')).toBeUndefined()
+    expect(store.getDispatch(admitted.item.id)).toMatchObject({
+      state: 'pending',
+      generation: 1,
+      reason: 'authority-resume',
+    })
+    expect(fixture.service.health().authority).toMatchObject({
+      legacy: 0,
+      parked: 1,
+      lastDeniedReason: 'default-deny',
+    })
+    // A repeated claim under the same denial is the same fail-closed outcome.
+    expect(errorCode(() => fixture.service.claim(workerAgent('occ-1')))).toBe('authority-revoked')
+    expect(store.findItemById(admitted.item.id)?.stateReason).toBe('authority-revoked')
+    expect(fixture.automations?.calls).toHaveLength(1)
+  })
+
+  test('a later allow resumes the same item unchanged, without re-admission', async () => {
+    const fixture = await serviceHarness()
+    const admitted = fixture.service.admit(signal())
+    fixture.policy.setAllow(false)
+    expect(errorCode(() => fixture.service.claim(workerAgent('occ-1')))).toBe('authority-revoked')
+    fixture.policy.setAllow(true)
+    const resumed = fixture.service.claim(workerAgent('occ-2'))
+    expect(resumed).toMatchObject({ itemId: admitted.item.id, runId: 'occ-2', state: 'claimed', attempt: 1 })
+    const store = readStore(fixture)
+    expect(store.findItemById(admitted.item.id)).toMatchObject({
+      state: 'claimed',
+      stateReason: null,
+      occurrenceId: 'occ-2',
+      attempt: 1,
+    })
+    expect(store.events(admitted.item.id).map(event => event.kind)).toEqual([
+      'admitted', 'dispatched', 'authority-revoked', 'dispatch-rearmed', 'authority-restored', 'dispatched', 'claimed',
+    ])
+    // Admission ran exactly once: the resume revalidated, it did not re-admit.
+    expect(store.findItemByDedup(admitted.item.dedupKey, admitted.item.dedupBucket)?.id).toBe(admitted.item.id)
+    expect(store.stats().items).toBe(1)
+  })
+
+  test('a missing policy peer is unavailable and never dispatches', async () => {
+    const fixture = await fixturesHarness()
+    const admitted = fixture.admission.admit(signal())
+    const authority = new WorkItemAuthority({ policy: () => undefined })
+    expect(authority.check(fixture.store.findItemById(admitted.item.id)!)).toEqual({
+      kind: 'unavailable',
+      detail: 'missing-policy',
+    })
+  })
+
+  test('a throwing policy peer is unavailable rather than terminal', async () => {
+    const fixture = await serviceHarness()
+    const admitted = fixture.service.admit(signal())
+    fixture.policy.setFailure(peerError('idempotency-conflict'))
+    expect(errorCode(() => fixture.service.claim(workerAgent('occ-1')))).toBe('authority-unavailable')
+    const store = readStore(fixture)
+    expect(store.findItemById(admitted.item.id)).toMatchObject({
+      state: 'waiting',
+      stateReason: 'authority-unavailable',
+    })
+    expect(store.getDispatch(admitted.item.id)).toMatchObject({ state: 'pending', reason: 'authority-resume' })
+    expect(fixture.service.health().authority).toMatchObject({
+      parked: 1,
+      lastDeniedReason: 'idempotency-conflict',
+    })
+    fixture.policy.setFailure(null)
+    expect(fixture.service.claim(workerAgent('occ-2'))).toMatchObject({ itemId: admitted.item.id, state: 'claimed' })
+  })
+
+  test('an emergency stop surfaces as a revoked mandate', async () => {
+    const fixture = await ledgerHarness()
+    const admitted = fixture.admission.admit(signal())
+    fixture.policy.setDecision({ effect: 'deny', reasonCode: 'emergency-stop' })
+    expect(fixture.authority.check(fixture.store.findItemById(admitted.item.id)!)).toEqual({
+      kind: 'revoked',
+      reasonCode: 'emergency-stop',
+    })
+  })
+
+  test('an unreadable stored basis is malformed and therefore revoked', async () => {
+    const fixture = await ledgerHarness()
+    const admitted = fixture.admission.admit(signal())
+    rewriteBasis(fixture, admitted.item.id, () => 'not-a-basis')
+    const stored = fixture.store.findItemById(admitted.item.id)!
+    expect(stored.authority).toEqual({})
+    expect(fixture.authority.check(stored)).toEqual({ kind: 'revoked', reasonCode: 'malformed-basis' })
+  })
+
+  test('legacy rows without a basis stay claimable and call no policy', async () => {
+    const fixture = await serviceHarness()
+    const admitted = fixture.service.admit(signal())
+    rewriteBasis(fixture, admitted.item.id, () => null)
+    const callsBefore = fixture.policy.calls.length
+    fixture.policy.setFailure(new Error('policy must not be consulted for a legacy row'))
+    const claim = fixture.service.claim(workerAgent('occ-1'))
+    expect(claim).toMatchObject({ itemId: admitted.item.id, state: 'claimed' })
+    // The legacy gate did not ask the policy a single time.
+    expect(fixture.policy.calls).toHaveLength(callsBefore)
+    const store = readStore(fixture)
+    expect(store.findItemById(admitted.item.id)?.authority).toBeNull()
+    // The claimable item remains a counted legacy row until it is observed.
+    expect(store.stats()).toMatchObject({ authorityLegacy: 1, authorityParked: 0 })
+    expect(fixture.service.health().authority).toMatchObject({ legacy: 1, parked: 0 })
+  })
+
+  test('the frozen basis, not the live config, drives the replayed request', async () => {
+    const fixture = await ledgerHarness()
+    const admitted = fixture.admission.admit(signal())
+    rewriteBasis(fixture, admitted.item.id, basis => ({ ...basis, sourceId: 'frozen/source' }))
+    const stored = fixture.store.findItemById(admitted.item.id)!
+    expect(stored.authority?.sourceId).toBe('frozen/source')
+    expect(fixture.authority.check(stored)).toEqual({ kind: 'allow' })
+    expect(fixture.policy.calls[1]?.request.subject.id).toBe('frozen/source')
+  })
+
+  test('dispatch refuses to wake a parked item until the mandate allows again', async () => {
+    const fixture = await ledgerHarness()
+    const admitted = fixture.admission.admit(signal())
+    fixture.policy.setAllow(false)
+    expect(fixture.dispatch.wake(admitted.item)).toBe(false)
+    expect(fixture.automations.calls).toHaveLength(0)
+    expect(fixture.store.findItemById(admitted.item.id)).toMatchObject({
+      state: 'waiting',
+      stateReason: 'authority-revoked',
+    })
+    expect(fixture.store.getDispatch(admitted.item.id)?.state).toBe('pending')
+    expect(fixture.dispatch.wakePending()).toHaveLength(0)
+    expect(fixture.automations.calls).toHaveLength(0)
+    fixture.policy.setAllow(true)
+    expect(fixture.dispatch.wakePending()).toHaveLength(1)
+    expect(fixture.automations.calls).toHaveLength(1)
+    expect(fixture.store.findItemById(admitted.item.id)).toMatchObject({
+      state: 'queued',
+      stateReason: null,
+    })
+    expect(fixture.store.getDispatch(admitted.item.id)?.state).toBe('dispatched')
+  })
+})
+
 describe('work-item store projection', () => {
   test('reads owner generation from its persisted column', async () => {
     const fixture = await ledgerHarness()
@@ -905,6 +1129,8 @@ describe('work-item store projection', () => {
       DROP TABLE work_item_claim_v2;
       DROP TABLE work_item_outcome;
       DROP TABLE work_item_follow;
+      ALTER TABLE work_item DROP COLUMN authority_basis;
+      ALTER TABLE work_item DROP COLUMN authority_checked_at;
       ALTER TABLE work_item_dispatch RENAME TO work_item_dispatch_v4;
       CREATE TABLE work_item_dispatch (
         item_id TEXT PRIMARY KEY REFERENCES work_item(id) ON DELETE RESTRICT,
@@ -926,7 +1152,7 @@ describe('work-item store projection', () => {
     closers.push(() => reopened.close())
     expect(reopened.findClaimByRun('run-1')).toMatchObject({ claimId: 1, itemId: admitted.item.id, state: 'active' })
     expect(reopened.findItemById(admitted.item.id)).toMatchObject({ state: 'claimed', owner: { generation: 2 } })
-    expect(reopened.stats()).toMatchObject({ items: 1, schemaVersion: 6, outcomes: 0, pendingOutcomes: 0 })
+    expect(reopened.stats()).toMatchObject({ items: 1, schemaVersion: 7, outcomes: 0, pendingOutcomes: 0 })
   })
 })
 

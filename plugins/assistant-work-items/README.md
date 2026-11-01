@@ -179,6 +179,17 @@ rules:
 - 唤醒记账诚实：peer 抛出的错误若表示「不知道是否已经提交」（非 `policy-denied`/`policy`、非去重冲突），dispatch 行记为 `state='failed'`、`reason='unknown_after_send'`，`health().dispatchUnknown` 因此只统计仍然**开放且未被观察**的 item 上真实存在的这种行：item 一旦被撤回、终结或观察，就不再计入，也不会再被恢复扫描。这样的行在同一代次身份下最多被惰性恢复重试 **1 次**（`wake_attempts` 持久计数）；重试成功则转为 `dispatched`，再次失败则保持 `failed`/`unknown_after_send`，把无法消除的缺口留给 owner，而不是无限重试或假装成功。持久身份冲突（`idempotency-conflict`）是确定性错误，记为独立原因 `idempotency-conflict` 并抛 typed `WorkItemError`（`dispatch-failed`）；没有 occurrence 查询接口时无法自动收敛，因此不静默吞掉。
 - SQLite 使用 `WAL`、`synchronous=FULL`、`BEGIN IMMEDIATE` 事务和 forward-only schema；`PRAGMA user_version` 只前进。升级写入边界要求单 writer：升级前停掉 DSH 进程。
 
+### 准入授权的复核（依次 claim / wake 之前）
+
+准入时的 `assistant-policy` allow 是**那一刻**的决定，不是永久的授权。工作项因此在真正派发之前会重新验证自己的“mandate”：同一个 `authorize(request, { idempotencyKey })` 请求在 claim 前和 wake 前各重跑一次，policy 仍是唯一权威。
+
+- 准入把 allow 决定持久化为工作项上的 `authority_basis`（**仅供审计/复核，不授予任何新权限**）：协议 `work-items/authority/v1`、`action: admit`、background 主体（来源 ID、workspace、principal）、resource（automation id）、`effect: allow`、`reasonCode`、可选 `ruleId`、确定性的 idempotency key 与 `checkedAt`。复核时用这份**冻结**的 basis 重建请求，不从当前配置重算，因此覆盖不了 admission 之后被替换的配置。
+- 复核结果只有两种：allow → 正常继续；deny / policy 抛错 / peer 缺失 / 决定畸形 → **fail closed**：把工作项停在 `waiting`（`stateReason` 为 `authority-revoked` 或 `authority-unavailable`，事件 detail 记 `reason` 与 `phase`），不 dispatch、不 claim、不标 `failed`，也绝不授予新 authority。`emergency-stop` 等 deny 原因原样上报。
+- claim 阶段的拒绝会额外重新武装 dispatch（新一代次、`reason: 'authority-resume'`）：occurrence 已存在、单靠 park 会让工作项永远没有下一次唤醒。重新武装只产生一次普通唤醒机会，真正的派发仍要先过同一道复核，因此不构成新的授权。
+- 之后 policy 重新 allow 时，同一工作项**原样恢复**（回到 `queued`，记 `authority-restored` 事件，不重新准入、不重置 attempt），下一次正常唤醒/认领即继续，这就是“在不变 mandate 下恢复”的原型。
+- 不可读/畸形的已存 basis 视为 `revoked`（`malformed-basis`），绝不按 legacy 放行；`null` basis 只对应升级前的旧行（schema v7 之前），按既有 legacy 语义保持可认领。observe 模式、`following-thread` 等待和既有 `waiting-resume` 路径不受影响。
+- 不带 basis 的内部构造（测试或旧行）按 legacy 处理；生产服务总是装配复核器。`health().authority` 暴露 `legacy`/`parked` 计数与最近一次拒绝的时间和原因，`stats()` 暴露 `authorityLegacy`/`authorityParked`；不暴露 basis 内容。
+
 ## 结果证据与结算（`ready` 只是报告）
 
 - 终态与客观结果分离：`ready` 只表示 worker 自报完成（`trust: agent-self-report`）；`objectiveStatus` 目前只能从独立证据推导为 `unknown`，不会出现 `achieved`/`partial`。
@@ -211,7 +222,7 @@ rules:
 - `evidenceState: observed` → `executionStatus: succeeded` 且 `evaluator.version: settlement-v1`；`unverified` / `not-applicable` → `executionStatus: unknown` 且 `unverified-v1`。投影的 `objectiveStatus` 与 `deliveryStatus` 在类型和运行时都只能是 `unknown`：work-item 结算永远不能把自身升级为目标达成证据，也不会因报告过 `ready` 而被 Evaluation 当作 achieved。
 - 复用与 verifier 相同的私有 producer registration seam：`assistantEvaluation` 通过 `ctx` 发现本服务的 `trustedWorkItemProducerGeneration()` 与 `registerTrustedWorkItemEvaluationSink(registration)`，并校验 protocol（`assistant-work-items/evaluation/v1`）、generation、ownership 和单注册不变量；本插件不直接写 Evaluation 数据库。
 - `assistant-evaluation` 是可选 peer：缺席时结算行保持 `pending`，不阻塞 claim/report；绑定后下一次 drain 会补导既有 pending 行。
-- 有界且诚实降级：每 sweep 最多 10 条，失败最多重试 5 次后标记 `export-attempts-exhausted`；部署没有精确 workspace+preset scope 时标记 `skipped`（`owner-route-unavailable`）；observe 模式不导出。状态写入 `work_item_outcome.evaluation_*`（schema v5 引入，v6 保持），`health().evaluation` 与 `stats()` 暴露 `evaluationPending/exported/skipped`。
+- 有界且诚实降级：每 sweep 最多 10 条，失败最多重试 5 次后标记 `export-attempts-exhausted`；部署没有精确 workspace+preset scope 时标记 `skipped`（`owner-route-unavailable`）；observe 模式不导出。状态写入 `work_item_outcome.evaluation_*`（schema v5 引入，v6/v7 保持），`health().evaluation` 与 `stats()` 暴露 `evaluationPending/exported/skipped`。
 - 依赖方向：本插件只以 **type-only import** 引用 `@dsh-enhanced/assistant-evaluation` 的 claims/registration 契约类型，并把该包声明为 optional peer + devDependency；Evaluation 保持 producer-agnostic，不依赖任何 producer 运行时。
 
 ## 配置

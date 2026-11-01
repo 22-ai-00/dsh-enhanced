@@ -32,6 +32,7 @@ import type {
   WorkItemOutcomeView,
   WorkItemOwnerEvidence,
   WorkItemProvenance,
+  WorkItemAuthorityBasis,
   WorkItemRecord,
   WorkItemReportRecord,
   WorkItemReportStatus,
@@ -42,7 +43,10 @@ import type {
 } from './types.ts'
 import { CLAIMABLE_STATES, OPEN_STATES, WorkItemError } from './types.ts'
 
-const SCHEMA_VERSION = 6
+const SCHEMA_VERSION = 7
+/** Waiting reasons that mean an admission mandate failed revalidation. */
+const AUTHORITY_REVOKED = 'authority-revoked'
+const AUTHORITY_UNAVAILABLE = 'authority-unavailable'
 /** Ambiguous wake failures one generation may retry before the gap stays visible. */
 const MAX_UNKNOWN_WAKE_ATTEMPTS = 1
 /** Default bounded settlement window: seven days. */
@@ -137,6 +141,7 @@ const ITEM_COLUMNS = [
   'principal_version', 'binding_version', 'owner_generation', 'owner_route_id', 'scope_expires_at', 'worker_automation_id',
   'state', 'state_reason', 'attempt', 'max_attempts', 'lease_until', 'lease_run_id', 'occurrence_id', 'work_dir',
   'last_report_status', 'observed', 'created_at', 'updated_at',
+  'authority_basis', 'authority_checked_at',
 ] as const
 
 /** Same columns projected with camelCase aliases for row decoding. */
@@ -254,6 +259,7 @@ function validateSchema(database: DatabaseSync): void {
         last_report_status TEXT CHECK(last_report_status IN ('progress', 'waiting', 'ready', 'blocked', 'failed')),
         observed INTEGER NOT NULL CHECK(observed IN (0, 1)),
         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        authority_basis TEXT, authority_checked_at INTEGER,
         UNIQUE(dedup_key, dedup_bucket)
       ) STRICT;
       CREATE TABLE work_item_event (
@@ -297,8 +303,8 @@ function validateSchema(database: DatabaseSync): void {
       CREATE TABLE work_item_schema_meta (
         key TEXT PRIMARY KEY, value TEXT NOT NULL
       ) STRICT, WITHOUT ROWID;
-      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '6');
-      PRAGMA user_version = 6;
+      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '7');
+      PRAGMA user_version = 7;
       COMMIT;
     `)
     return
@@ -388,7 +394,21 @@ function validateSchema(database: DatabaseSync): void {
       COMMIT;
     `)
   }
-  if (version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
+  if (version >= 1 && version <= 6) {
+    // v7 persists the audit-only admission mandate so claim and wake can replay
+    // the identical policy decision. Both columns are nullable and additive:
+    // pre-v7 rows stay `NULL` and are reported as legacy, never re-authorized
+    // from the current configuration.
+    database.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE work_item ADD COLUMN authority_basis TEXT;
+      ALTER TABLE work_item ADD COLUMN authority_checked_at INTEGER;
+      UPDATE work_item_schema_meta SET value = '7' WHERE key = 'schema_version';
+      PRAGMA user_version = 7;
+      COMMIT;
+    `)
+  }
+  if (!Number.isSafeInteger(version) || version < 1 || version > SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
   const expected = JSON.stringify(['work_item', 'work_item_claim', 'work_item_dispatch', 'work_item_event', 'work_item_follow', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta'])
   const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Row[]).map(row => String(row['name']))
   if (JSON.stringify(tables) !== expected) fail('storage', 'work-item database schema is not the expected shape')
@@ -400,6 +420,24 @@ function optString(value: unknown): string | null {
 
 function optNumber(value: unknown): number | null {
   return value === null || value === undefined ? null : Number(value)
+}
+
+/**
+ * Decode the persisted advisory basis.
+ *
+ * Unreadable JSON is returned as a structurally unusable sentinel rather than
+ * `null`: `null` means a legitimate pre-v7 row that must keep its legacy
+ * behaviour, while a malformed stored basis must be revalidated as revoked.
+ */
+function authorityBasisFromRow(value: unknown): WorkItemAuthorityBasis | null {
+  if (value === null || value === undefined) return null
+  try {
+    const parsed = JSON.parse(String(value)) as unknown
+    if (parsed === null || typeof parsed !== 'object') return {} as WorkItemAuthorityBasis
+    return Object.freeze(parsed as WorkItemAuthorityBasis)
+  } catch {
+    return {} as WorkItemAuthorityBasis
+  }
 }
 
 function itemFromRow(row: Row): WorkItemRecord {
@@ -433,6 +471,7 @@ function itemFromRow(row: Row): WorkItemRecord {
     scope,
     owner,
     workerAutomationId: String(row['workerAutomationId']),
+    authority: authorityBasisFromRow(row['authorityBasis']),
     state: String(row['state']) as WorkItemState,
     stateReason: optString(row['stateReason']),
     attempt: Number(row['attempt']),
@@ -594,6 +633,10 @@ export interface WorkItemStoreStats {
   readonly evaluationSkipped: number
   /** Persisted followed-thread rows (open and closed). */
   readonly follows: number
+  /** Open items admitted before the revalidation basis existed (schema < v7). */
+  readonly authorityLegacy: number
+  /** Open items parked because their admission mandate failed revalidation. */
+  readonly authorityParked: number
 }
 
 /**
@@ -694,6 +737,8 @@ export class WorkItemStore {
       evaluationExported: evaluations.exported,
       evaluationSkipped: evaluations.skipped,
       follows: count('SELECT COUNT(*) AS count FROM work_item_follow'),
+      authorityLegacy: this.countAuthorityLegacy(),
+      authorityParked: this.countAuthorityParked(),
     })
   }
 
@@ -794,6 +839,24 @@ export class WorkItemStore {
 
   countOpenItems(): number {
     const row = this.#statement(`SELECT COUNT(*) AS count FROM work_item WHERE observed = 0 AND state IN ('queued', 'claimed', 'working', 'waiting')`).get() as Row
+    return Number(row['count'])
+  }
+
+  /** Open items admitted before schema v7, i.e. with no persisted mandate. */
+  countAuthorityLegacy(): number {
+    const row = this.#statement(`
+      SELECT COUNT(*) AS count FROM work_item
+      WHERE observed = 0 AND state IN (${OPEN_STATE_PLACEHOLDERS}) AND authority_basis IS NULL
+    `).get(...OPEN_STATES) as Row
+    return Number(row['count'])
+  }
+
+  /** Open items parked because their admission mandate failed revalidation. */
+  countAuthorityParked(): number {
+    const row = this.#statement(`
+      SELECT COUNT(*) AS count FROM work_item
+      WHERE observed = 0 AND state = 'waiting' AND state_reason IN ('${AUTHORITY_REVOKED}', '${AUTHORITY_UNAVAILABLE}')
+    `).get() as Row
     return Number(row['count'])
   }
 
@@ -949,6 +1012,81 @@ export class WorkItemStore {
   }
 
   /**
+   * Park one item whose admission mandate failed revalidation.
+   *
+   * Parking is never terminal: the item stays `waiting` with a typed reason, its
+   * pending dispatch row is left intact, and it becomes claimable/wakeable again
+   * as soon as the identical mandate allows. Repeating the same park only
+   * refreshes the audit timestamp, so a sweep that observes the same denial on
+   * every tick does not flood the event log.
+   */
+  parkAuthority(
+    itemId: string,
+    reason: typeof AUTHORITY_REVOKED | typeof AUTHORITY_UNAVAILABLE,
+    detail: Readonly<Record<string, unknown>>,
+    now: number,
+  ): WorkItemRecord {
+    return this.#transaction(() => {
+      const item = this.#requireItem(itemId)
+      if (item.state === 'waiting' && item.stateReason === reason) {
+        this.#statement('UPDATE work_item SET authority_checked_at = ?, updated_at = ? WHERE id = ?').run(now, now, itemId)
+        return this.#requireItem(itemId)
+      }
+      this.#statement(`
+        UPDATE work_item
+        SET state = 'waiting', state_reason = ?, authority_checked_at = ?, updated_at = ?
+        WHERE id = ?
+      `).run(reason, now, now, itemId)
+      this.#appendEvent(itemId, reason, 'authority', {
+        ...detail,
+        previousState: item.state,
+        previousReason: item.stateReason,
+      }, now)
+      return this.#requireItem(itemId)
+    })
+  }
+
+  /**
+   * Record a successful revalidation of one item's mandate.
+   *
+   * Only a wait this gate itself created is lifted; a slice-9
+   * `following-thread` wait is a different concern and stays untouched.
+   */
+  restoreAuthority(itemId: string, now: number): WorkItemRecord {
+    return this.#transaction(() => {
+      const item = this.#requireItem(itemId)
+      this.#statement('UPDATE work_item SET authority_checked_at = ?, updated_at = ? WHERE id = ?').run(now, now, itemId)
+      if (item.state !== 'waiting' || (item.stateReason !== AUTHORITY_REVOKED && item.stateReason !== AUTHORITY_UNAVAILABLE)) {
+        return this.#requireItem(itemId)
+      }
+      this.#statement("UPDATE work_item SET state = 'queued', state_reason = NULL, updated_at = ? WHERE id = ?").run(now, itemId)
+      this.#appendEvent(itemId, 'authority-restored', 'authority', { previousReason: item.stateReason }, now)
+      return this.#requireItem(itemId)
+    })
+  }
+
+  /** Latest authority denial for bounded health reporting. */
+  lastAuthorityDenial(): { readonly at: number; readonly reason: string } | null {
+    const row = this.#statement(`
+      SELECT kind, detail, recorded_at FROM work_item_event
+      WHERE kind IN ('${AUTHORITY_REVOKED}', '${AUTHORITY_UNAVAILABLE}')
+      ORDER BY recorded_at DESC, sequence DESC LIMIT 1
+    `).get() as Row | undefined
+    if (row === undefined) return null
+    const detail = optString(row['detail'])
+    let reason: string = String(row['kind'])
+    if (detail !== null) {
+      try {
+        const parsed = JSON.parse(detail) as { reason?: unknown }
+        if (typeof parsed.reason === 'string' && parsed.reason.length > 0) reason = parsed.reason
+      } catch {
+        // Keep the event kind as the bounded fallback.
+      }
+    }
+    return Object.freeze({ at: Number(row['recorded_at']), reason })
+  }
+
+  /**
    * Insert one admitted item, its lifecycle event and its single dispatch row
    * in one transaction. A crash between these writes is impossible.
    */
@@ -967,6 +1105,7 @@ export class WorkItemStore {
         record.scope.ownerRouteId, record.scope.expiresAt, record.workerAutomationId, record.state, record.stateReason,
         record.attempt, record.maxAttempts, record.leaseUntil, record.leaseRunId, record.occurrenceId,
         record.workDir, record.lastReportStatus, record.observed ? 1 : 0, record.createdAt, record.updatedAt,
+        record.authority === null ? null : JSON.stringify(record.authority), null,
       )
       this.#appendEvent(record.id, event.kind, event.actor, event.detail, record.createdAt)
       this.#statement(`
@@ -1396,6 +1535,24 @@ export class WorkItemStore {
       if (current.wakeAttempts > MAX_UNKNOWN_WAKE_ATTEMPTS) fail('invalid-state', 'dispatch unknown retry budget is spent')
       this.#writeRearm(current, current.generation, current.eventId, current.occurredAt, current.wakeAttempts, 'unknown_after_send')
       return this.getDispatch(itemId) as WorkItemDispatchRecord
+    })
+  }
+
+  /**
+   * Re-arm a fresh wake after a claim-time revalidation denial.
+   *
+   * At claim time the occurrence already exists, so parking alone would leave
+   * the item without any future wake. A new generation is minted because the
+   * denied run never claimed the item; once the mandate allows again, the
+   * ordinary wake path hands the same item to a fresh occurrence.
+   */
+  rearmAuthority(itemId: string): void {
+    this.#transaction(() => {
+      const current = this.getDispatch(itemId)
+      if (current === undefined || current.state !== 'dispatched') return
+      const now = this.#now()
+      const generation = current.generation + 1
+      this.#writeRearm(current, generation, dispatchEventId(itemId, generation), now, 0, 'authority-resume')
     })
   }
 

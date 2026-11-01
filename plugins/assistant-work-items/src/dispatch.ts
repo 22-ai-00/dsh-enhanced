@@ -1,3 +1,4 @@
+import type { WorkItemAuthority } from './authority.ts'
 import type { NormalizedConfig } from './config.ts'
 import { isActive } from './config.ts'
 import type { WorkItemLedger } from './ledger.ts'
@@ -21,6 +22,8 @@ export interface DispatchDependencies {
   readonly ledger: WorkItemLedger
   readonly automations: PeerAutomationsService | undefined
   readonly delivery: PeerDeliveryService | undefined
+  /** Admission-mandate revalidation gate; unset means single-authority mode. */
+  readonly authority?: WorkItemAuthority
   readonly now?: () => number
 }
 
@@ -50,10 +53,17 @@ export class WorkItemDispatch {
    * distinct `(eventId, occurredAt)` pair so the automation intake starts a new
    * occurrence instead of replaying the completed one. Within one generation
    * the identity is stable, which is what makes a retry after a crash safe.
+   *
+   * Revalidation happens here, before the external effect: a revoked or
+   * unavailable mandate parks the item and returns `false` without creating an
+   * occurrence, so no worker run is ever started under a decision policy no
+   * longer supports. A later allow resumes the same row unchanged.
+   *
+   * Returns `true` only when this call actually handed the row to the worker.
    */
-  wake(item: WorkItemRecord): void {
+  wake(item: WorkItemRecord): boolean {
     const config = this.#deps.config
-    if (!isActive(config)) return
+    if (!isActive(config)) return false
     const automations = this.#deps.automations
     if (automations === undefined) fail('missing-dependency', 'assistantAutomations is required to wake the worker')
     const dispatch = this.#deps.store.getDispatch(item.id)
@@ -61,7 +71,8 @@ export class WorkItemDispatch {
     // Only a pending row may wake: a dispatched row already owns an occurrence,
     // and a failed one was withdrawn or refused, so waking it would hand
     // cancelled work to a live automation before the guarded mark throws.
-    if (dispatch.state !== 'pending') return
+    if (dispatch.state !== 'pending') return false
+    if (!this.#revalidate(item)) return false
     try {
       const occurrence = automations.ingestExternal({
         sourceId: config.intakeSourceId,
@@ -70,6 +81,7 @@ export class WorkItemDispatch {
         occurredAt: dispatch.occurredAt,
       })
       this.#deps.store.markDispatchDispatched(item.id, occurrence.id)
+      return true
     } catch (error) {
       const code = peerCode(error)
       // The persisted identity already belongs to a different event. Generation
@@ -84,7 +96,7 @@ export class WorkItemDispatch {
       // never created, and re-waking cannot change the policy decision.
       if (code === 'policy-denied' || code === 'policy') {
         this.#deps.store.markDispatchFailed(item.id, 'policy-denied')
-        return
+        return false
       }
       // Anything else is ambiguous: the peer may have committed the occurrence
       // before the failure. Record that honestly and spend the generation's one
@@ -98,6 +110,31 @@ export class WorkItemDispatch {
       }
       throw new WorkItemError('dispatch-failed', 'worker automation wake outcome is unknown', code)
     }
+  }
+
+  /**
+   * Apply the admission-mandate gate to one pending wake.
+   *
+   * A denied, missing, failing or malformed decision parks the item in
+   * `waiting` and returns `false`; an allow records the successful revalidation
+   * (lifting only a wait this gate created) and returns `true`. Items admitted
+   * before schema v7 have no basis and keep the legacy behaviour.
+   */
+  #revalidate(item: WorkItemRecord): boolean {
+    const authority = this.#deps.authority
+    if (authority === undefined) return true
+    const check = authority.check(item)
+    if (check.kind === 'legacy') return true
+    if (check.kind === 'revoked') {
+      this.#deps.ledger.parkAuthority(item, 'authority-revoked', { reason: check.reasonCode })
+      return false
+    }
+    if (check.kind === 'unavailable') {
+      this.#deps.ledger.parkAuthority(item, 'authority-unavailable', { reason: check.detail })
+      return false
+    }
+    this.#deps.ledger.restoreAuthority(item)
+    return true
   }
 
   /**
@@ -119,8 +156,7 @@ export class WorkItemDispatch {
       if (item === undefined || item.observed || !OPEN_STATES.includes(item.state)) return
       try {
         if (retryUnknown) this.#deps.store.retryUnknownDispatch(item.id)
-        this.wake(item)
-        woken.push(item)
+        if (this.wake(item)) woken.push(item)
       } catch (error) {
         if (!(error instanceof WorkItemError) || error.code !== 'dispatch-failed') throw error
       }

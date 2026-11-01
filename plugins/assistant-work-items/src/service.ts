@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { WorkItemAdmission } from './admission.js'
+import { WorkItemAuthority } from './authority.js'
 import { ConfigSchema, isActive, normalizeConfig, text, type Config, type NormalizedConfig } from './config.js'
 import { WorkItemDispatch } from './dispatch.js'
 import { WorkItemEvaluationExporter, type WorkItemEvaluationRegistration } from './evaluation.js'
@@ -23,6 +24,7 @@ import { registerWorkItemTools } from './tools.js'
 import type {
   WorkItemAdmitInput,
   WorkItemAdmitResult,
+  WorkItemAuthorityHealth,
   WorkItemClaimRecord,
   WorkItemEvaluationHealth,
   WorkItemFollowDegradedReason,
@@ -91,6 +93,7 @@ interface Components {
   readonly store: WorkItemStore
   readonly ledger: WorkItemLedger
   readonly admission: WorkItemAdmission
+  readonly authority: WorkItemAuthority
   readonly dispatch: WorkItemDispatch
   readonly signals: WorkItemSignalIntake
 }
@@ -207,6 +210,7 @@ export class AssistantWorkItemsService extends Service {
     const item = components.store.findItemByOccurrence(occurrenceId)
     if (item === undefined) fail('not-found', 'no work item is bound to this automation occurrence')
     this.#assertOwnerRoute(item)
+    this.#revalidateAuthority(components, item)
     const runId = occurrenceId
     const result = components.ledger.claim({ itemId: item.id, runId, occurrenceId })
     // A claim can settle a prior window and unblock recovery, so it is a
@@ -469,6 +473,7 @@ export class AssistantWorkItemsService extends Service {
       workerConnected: config.enabled && this.#automations() !== undefined,
       ownerRouteValid: false,
       follows: Object.freeze({ open: 0, closed: 0, unresolved: 0, degraded: null }),
+      authority: Object.freeze({ legacy: 0, parked: 0, lastDeniedAt: null, lastDeniedReason: null }),
       settlement: Object.freeze({
         enabled: config.enabled && config.settlement.enabled,
         pending: 0,
@@ -503,6 +508,7 @@ export class AssistantWorkItemsService extends Service {
       workerConnected: workerIsConnected(this.#automations()),
       ownerRouteValid: this.#ownerRouteValid(),
       follows: this.#followHealth(components.store),
+      authority: this.#authorityHealth(components.store),
       settlement: Object.freeze({
         enabled: config.settlement.enabled,
         pending: components.store.countLatestOutcomes('pending'),
@@ -726,12 +732,16 @@ export class AssistantWorkItemsService extends Service {
           : Object.freeze({ source: registration.source, generation: registration.generation })
       },
     })
+    // One lazy policy resolver serves admission and revalidation: a peer that
+    // registers after this plugin becomes visible to both without a restart.
+    const authority = new WorkItemAuthority({ policy: () => this.#policy() })
     const dispatch = new WorkItemDispatch({
       config,
       store,
       ledger,
       automations: this.#automations(),
       delivery: this.#delivery(),
+      authority,
     })
     // Signal sources are optional peers resolved lazily on every sweep, so a
     // deployment without `assistant-delivery` (or with the source disabled)
@@ -744,7 +754,7 @@ export class AssistantWorkItemsService extends Service {
       dispatch,
       warn: message => this.ctx.logger.warn(message),
     })
-    const installed: Components = { workspace, store, ledger, admission, dispatch, signals }
+    const installed: Components = { workspace, store, ledger, admission, authority, dispatch, signals }
     this.#components = installed
     try {
       // Bounded startup reconcile: lease reclaim is lazy forever, so a host that
@@ -821,6 +831,42 @@ export class AssistantWorkItemsService extends Service {
     if (config.workerAutomationId !== item.workerAutomationId) {
       fail('identity-mismatch', 'item was dispatched to a different worker automation')
     }
+  }
+
+  /**
+   * Re-validate the stored admission mandate before this claim is allowed.
+   *
+   * Policy remains the only authority: the exact admission request is replayed
+   * against the live policy under the same idempotency key. A denied, failing
+   * or malformed decision parks the item in `waiting` with a typed reason and
+   * fails the claim closed; the item is never claimed and never marked failed.
+   * A later allow resumes it through the same wake path.
+   */
+  #revalidateAuthority(components: Components, item: WorkItemRecord): void {
+    const check = components.authority.check(item)
+    if (check.kind === 'legacy') return
+    if (check.kind === 'allow') {
+      components.ledger.restoreAuthority(item)
+      return
+    }
+    if (check.kind === 'revoked') {
+      components.ledger.parkAuthority(item, 'authority-revoked', { reason: check.reasonCode, phase: 'claim' })
+      components.ledger.rearmAuthority(item)
+      fail('authority-revoked', `admission mandate no longer holds (${check.reasonCode})`)
+    }
+    components.ledger.parkAuthority(item, 'authority-unavailable', { reason: check.detail, phase: 'claim' })
+    components.ledger.rearmAuthority(item)
+    fail('authority-unavailable', 'admission mandate could not be revalidated', check.detail)
+  }
+
+  #authorityHealth(store: WorkItemStore): WorkItemAuthorityHealth {
+    const denied = store.lastAuthorityDenial()
+    return Object.freeze({
+      legacy: store.countAuthorityLegacy(),
+      parked: store.countAuthorityParked(),
+      lastDeniedAt: denied === null ? null : denied.at,
+      lastDeniedReason: denied === null ? null : denied.reason,
+    })
   }
 
   #ownerRouteValid(): boolean {

@@ -56,6 +56,8 @@ export type WorkItemErrorCode =
   | 'owner-route-invalid'
   | 'owner-route-expired'
   | 'owner-route-unavailable'
+  | 'authority-revoked'
+  | 'authority-unavailable'
   | 'missing-dependency'
   | 'not-found'
   | 'invalid-state'
@@ -100,6 +102,32 @@ export interface WorkItemOwnerEvidence {
   readonly generation: number
 }
 
+/**
+ * The admission decision an item was admitted under, persisted as audit-only.
+ *
+ * The fields are frozen at admission and never recomputed from the current
+ * configuration; revalidation replays the *identical* request and idempotency
+ * key against `assistant-policy`, which stays the only authority. This record
+ * grants nothing by itself.
+ */
+export interface WorkItemAuthorityBasis {
+  /** Literal protocol marker; a different value is treated as malformed. */
+  readonly protocol: 'work-items/authority/v1'
+  readonly action: 'admit'
+  readonly subjectKind: 'background'
+  /** Intake source id at admission; the dedup identity can shift later. */
+  readonly sourceId: string
+  readonly automationId: string
+  readonly workspace: string
+  readonly principal: string
+  readonly resourceKind: 'automation'
+  readonly effect: 'allow'
+  readonly reasonCode: string
+  readonly ruleId?: string
+  readonly idempotencyKey: string
+  readonly checkedAt: number
+}
+
 /** One durable work item. */
 export interface WorkItemRecord {
   readonly id: string
@@ -116,6 +144,8 @@ export interface WorkItemRecord {
   readonly scope: WorkItemScope
   readonly owner: WorkItemOwnerEvidence
   readonly workerAutomationId: string
+  /** Audit-only revalidation basis; `null` means a pre-v7 (legacy) item. */
+  readonly authority: WorkItemAuthorityBasis | null
   readonly state: WorkItemState
   readonly stateReason: string | null
   readonly attempt: number
@@ -351,6 +381,16 @@ export interface WorkItemNotification {
   readonly format: 'markdown'
 }
 
+/** Admission-authority revalidation projection for one health read. */
+export interface WorkItemAuthorityHealth {
+  /** Open items admitted before the basis was persisted; they gate nothing. */
+  readonly legacy: number
+  /** Open items currently parked by a failed revalidation. */
+  readonly parked: number
+  readonly lastDeniedAt: number | null
+  readonly lastDeniedReason: string | null
+}
+
 /** Bounded runtime health projection; never exposes paths or briefs. */
 export interface WorkItemHealth {
   readonly enabled: boolean
@@ -369,6 +409,7 @@ export interface WorkItemHealth {
   readonly settlement: WorkItemSettlementHealth
   readonly evaluation: WorkItemEvaluationHealth
   readonly follows: WorkItemFollowHealth
+  readonly authority: WorkItemAuthorityHealth
 }
 
 /**

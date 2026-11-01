@@ -1,12 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { NormalizedConfig } from './config.ts'
 import { byteLength, isActive, truncateUtf8 } from './config.ts'
+import { buildAuthorityBasis } from './authority.ts'
 import type { WorkItemLedger } from './ledger.ts'
 import type { PeerDeliveryService, PeerOwnerRouteReceipt, PeerPolicyService } from './peers.ts'
 import type { WorkItemFollowInput, WorkItemStore } from './store.ts'
 import type {
   WorkItemAdmitInput,
   WorkItemAdmitResult,
+  WorkItemAuthorityBasis,
   WorkItemDispatchRecord,
   WorkItemOwnerEvidence,
   WorkItemProvenance,
@@ -217,10 +219,11 @@ export class WorkItemAdmission {
     }
 
     const wouldReject = this.#gateReasons(normalized.kind, now)
+    let authority: WorkItemAuthorityBasis | null = null
     if (active) {
       const rejection = wouldReject[0]
       if (rejection !== undefined) fail(rejectionCode(rejection), rejectionMessage(rejection))
-      this.#authorize(active, receipt, normalized.kind, dedupKey, dedupBucket)
+      authority = this.#authorize(active, receipt, normalized.kind, dedupKey, dedupBucket, now)
     }
 
     const id = this.#newId()
@@ -252,6 +255,7 @@ export class WorkItemAdmission {
       scope,
       owner,
       workerAutomationId: config.workerAutomationId ?? '',
+      authority,
       state: active ? 'queued' : 'dropped',
       stateReason: active ? null : 'observe-only',
       attempt: 0,
@@ -338,26 +342,38 @@ export class WorkItemAdmission {
     return Object.freeze(reasons)
   }
 
-  #authorize(active: boolean, receipt: PeerOwnerRouteReceipt, kind: string, dedupKey: string, dedupBucket: number): void {
-    if (!active) return
+  #authorize(
+    active: boolean,
+    receipt: PeerOwnerRouteReceipt,
+    kind: string,
+    dedupKey: string,
+    dedupBucket: number,
+    now: number,
+  ): WorkItemAuthorityBasis | null {
+    if (!active) return null
     const policy = this.#deps.policy
     if (policy === undefined) fail('missing-dependency', 'assistantPolicy is required for active admission')
     const scope = this.#config.scope
     if (scope === null) fail('owner-route-unavailable', 'active admission requires a configured owner scope')
-    const decision = policy.authorize({
+    const sourceId = this.#config.intakeSourceId
+    const automationId = this.#config.workerAutomationId ?? ''
+    const request = {
       subject: {
-        kind: 'background',
-        id: this.#config.intakeSourceId,
+        kind: 'background' as const,
+        id: sourceId,
         workspace: receipt.workspace,
         principal: receipt.principalId,
       },
       action: 'admit',
-      resource: { kind: 'automation', id: this.#config.workerAutomationId ?? '' },
-      context: { initiator: 'background' },
-    }, { idempotencyKey: `work-item-admit:${dedupKey}:${String(dedupBucket)}` })
+      resource: { kind: 'automation' as const, id: automationId },
+      context: { initiator: 'background' as const },
+    }
+    const idempotencyKey = `work-item-admit:${dedupKey}:${String(dedupBucket)}`
+    const decision = policy.authorize(request, { idempotencyKey })
     if (decision.effect !== 'allow') {
       fail('source-rejected', `policy denied admission (${decision.reasonCode})`, kind)
     }
+    return buildAuthorityBasis({ request, decision, sourceId, automationId, idempotencyKey, checkedAt: now })
   }
 
   /** Re-anchor the configured owner scope against the live delivery route. */

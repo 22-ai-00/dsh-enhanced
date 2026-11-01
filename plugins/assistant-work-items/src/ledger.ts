@@ -100,6 +100,31 @@ export class WorkItemLedger {
   }
 
   /**
+   * Park an item whose admission mandate failed revalidation.
+   *
+   * The item stays open and resumable: no claim is started, no dispatch is
+   * retired, and the same item is claimed or woken unchanged once policy allows
+   * the identical mandate again.
+   */
+  parkAuthority(
+    item: WorkItemRecord,
+    reason: 'authority-revoked' | 'authority-unavailable',
+    detail: Readonly<Record<string, unknown>> = {},
+  ): WorkItemRecord {
+    return this.#store.parkAuthority(item.id, reason, detail, this.#now())
+  }
+
+  /** Record a successful revalidation, lifting only this gate's own wait. */
+  restoreAuthority(item: WorkItemRecord): WorkItemRecord {
+    return this.#store.restoreAuthority(item.id, this.#now())
+  }
+
+  /** Mint a fresh wake after a claim-time revalidation denial left no run. */
+  rearmAuthority(item: WorkItemRecord): void {
+    this.#store.rearmAuthority(item.id)
+  }
+
+  /**
    * Append a report revision under the active claim.
    *
    * The summary is truncated to `maxReportBytes` rather than rejected, because

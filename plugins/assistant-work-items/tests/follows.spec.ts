@@ -675,7 +675,7 @@ describe('follow health', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Schema: pure additive follow table and the frozen v5 -> v6 upgrade.
+// Schema: pure additive follow table and frozen v5 -> v6 / v6 -> v7 upgrades.
 // ---------------------------------------------------------------------------
 
 const LEGACY_DDL = `
@@ -792,13 +792,13 @@ function v5Database(): { path: string; root: string } {
   return { path, root }
 }
 
-describe('schema v6 followed threads', () => {
+describe('followed-thread persistence across schema upgrades', () => {
   test('creates the follow table in a fresh database and enforces its invariants', async () => {
     const fixture = await harness({}, { threadSource: TICKET })
     const raw = new DatabaseSync(fixture.config.databasePath)
     try {
       const version = raw.prepare('PRAGMA user_version').get() as Record<string, unknown>
-      expect(Number(version['user_version'])).toBe(6)
+      expect(Number(version['user_version'])).toBe(7)
       const columns = (raw.prepare('PRAGMA table_info(work_item_follow)').all() as Array<Record<string, unknown>>)
         .map(row => String(row['name']))
       expect(columns).toEqual([
@@ -806,7 +806,7 @@ describe('schema v6 followed threads', () => {
         'source', 'source_generation', 'opened_at', 'closed_at',
       ])
       const meta = raw.prepare("SELECT value FROM work_item_schema_meta WHERE key = 'schema_version'").get() as Record<string, unknown>
-      expect(meta['value']).toBe('6')
+      expect(meta['value']).toBe('7')
       const index = raw.prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'work_item_follow_state_idx'").get()
       expect(index).toBeDefined()
     } finally {
@@ -877,7 +877,7 @@ describe('schema v6 followed threads', () => {
     const raw = new DatabaseSync(fixture.path)
     try {
       const version = raw.prepare('PRAGMA user_version').get() as Record<string, unknown>
-      expect(Number(version['user_version'])).toBe(6)
+      expect(Number(version['user_version'])).toBe(7)
       const tables = (raw.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<Record<string, unknown>>)
         .map(row => String(row['name']))
       expect(tables).toEqual([

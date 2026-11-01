@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach } from 'vitest'
 import { WorkItemAdmission } from '../src/admission.ts'
+import { WorkItemAuthority } from '../src/authority.ts'
 import { normalizeConfig, type Config, type NormalizedConfig } from '../src/config.ts'
 import { WorkItemLedger } from '../src/ledger.ts'
 import type {
@@ -59,6 +60,39 @@ export function deliveryPeer(overrides: Partial<PeerDeliveryService> = {}): Peer
   }
 }
 
+/** Mutable policy double: flip the decision or make the peer throw mid-test. */
+export interface FakePolicy {
+  readonly service: PeerPolicyService
+  readonly requests: PeerPolicyRequest[]
+  readonly options: Array<{ readonly idempotencyKey?: string; readonly auditDetails?: unknown } | undefined>
+  decision: PeerPolicyDecision
+  failure: Error | null
+  allow(reasonCode?: string): void
+  deny(reasonCode?: string): void
+}
+
+export function fakePolicy(initial: PeerPolicyDecision = { effect: 'allow', reasonCode: 'rule-allow' }): FakePolicy {
+  const requests: PeerPolicyRequest[] = []
+  const options: Array<{ readonly idempotencyKey?: string; readonly auditDetails?: unknown } | undefined> = []
+  const policy: FakePolicy = {
+    requests,
+    options,
+    decision: initial,
+    failure: null,
+    service: {
+      authorize(request, opts) {
+        requests.push(request)
+        options.push(opts)
+        if (policy.failure !== null) throw policy.failure
+        return policy.decision
+      },
+    },
+    allow(reasonCode = 'rule-allow') { policy.decision = { effect: 'allow', reasonCode } },
+    deny(reasonCode = 'default-deny') { policy.decision = { effect: 'deny', reasonCode } },
+  }
+  return policy
+}
+
 export function signal(overrides: Partial<WorkItemAdmitInput> = {}): WorkItemAdmitInput {
   return {
     kind: 'review',
@@ -81,6 +115,8 @@ export interface Harness {
   readonly store: WorkItemStore
   readonly ledger: WorkItemLedger
   readonly admission: WorkItemAdmission
+  readonly authority: WorkItemAuthority
+  readonly policy: FakePolicy
   readonly config: NormalizedConfig
   readonly root: string
   now(): number
@@ -121,18 +157,14 @@ export async function harness(overrides: Partial<Config> = {}, options: HarnessO
   workspace.prepare()
   const store = new WorkItemStore(config.databasePath, { now, settleWindowMs: SETTLE_WINDOW })
   const ledger = new WorkItemLedger({ store, workspace, limits: config.limits, now })
-  const policy: PeerPolicyService = {
-    authorize(request: PeerPolicyRequest): PeerPolicyDecision {
-      void request
-      return { effect: 'allow', reasonCode: 'rule-allow' }
-    },
-  }
+  const policy = fakePolicy()
+  const authority = new WorkItemAuthority({ policy: () => policy.service })
   const admission = new WorkItemAdmission({
     config,
     store,
     ledger,
     workspace,
-    policy,
+    policy: policy.service,
     delivery: deliveryPeer(),
     ...(options.threadSource === undefined ? {} : { threadSource: options.threadSource }),
     now,
@@ -142,6 +174,8 @@ export async function harness(overrides: Partial<Config> = {}, options: HarnessO
     store,
     ledger,
     admission,
+    authority,
+    policy,
     config,
     root,
     now,
