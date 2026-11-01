@@ -6,12 +6,12 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { installRestartSupervisorPlan, planRestartSupervisorInstall } from '../scripts/install/restart-supervisor.mjs'
 
-const sha = (source: string) => createHash('sha256').update(source).digest('hex')
+const sha = (source: string | Uint8Array) => createHash('sha256').update(source).digest('hex')
 const roots: string[] = []
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-restart-install-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-restart-install-')))
   roots.push(root)
   const userHome = join(root, 'user'), home = join(root, 'dsh-home')
   await mkdir(userHome)
@@ -91,6 +91,15 @@ async function fixture() {
 }
 
 describe('external restart supervisor installer', () => {
+  it('rejects a symlink alias for an otherwise valid Home', async () => {
+    const sample = await fixture()
+    const alias = join(sample.root, 'dsh-home-alias')
+    await symlink(sample.home, alias)
+    await expect(planRestartSupervisorInstall({ ...sample.input, dshHome: alias },
+      { userHome: sample.userHome, showUnit: sample.showUnit }))
+      .rejects.toThrow('Home must be canonical')
+  })
+
   it('pins the frozen cohort helper and generates an external one-shot timer', async () => {
     const sample = await fixture()
     const plan = await planRestartSupervisorInstall(sample.input,

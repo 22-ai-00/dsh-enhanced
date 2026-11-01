@@ -1205,7 +1205,8 @@ describe('release version workflow', () => {
     expect(ciWorkflow).toContain('cancel-in-progress: true')
     const releaseManifest = await readJson(join(repoRoot, 'release-manifest.json'))
     expect(ciWorkflow).toContain(`@deepseek-ai/dsh@${releaseManifest.nextPinnedHostVersion}`)
-    expect(ciWorkflow).toContain('$(cd /tmp && pwd -P)')
+    expect(ciWorkflow).not.toContain("printf 'TMPDIR=")
+    expect(ciWorkflow).toContain('tests/native-macos.spec.ts')
     expect(releaseWorkflow).toContain("printf 'DSH_TEST_PNPM_ROOT=%s\\n'")
   })
 
