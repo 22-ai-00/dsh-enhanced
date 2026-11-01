@@ -214,8 +214,9 @@ describe('resume brief tool projection', () => {
   test('omits null optionals and keeps the output schema strict', async () => {
     const registered: Array<Record<string, unknown>> = []
     registerWorkItemTools(
-      { tools: { register: (tool: unknown) => { registered.push(tool as Record<string, unknown>) } } } as unknown as Context,
+      { tools: { register: (tool: unknown) => { registered.push(tool as Record<string, unknown>) } }, inject: () => {} } as unknown as Context,
       {
+        assertToolExecution: () => {},
         claim: () => ({
           itemId: 'item-1',
           runId: 'run-1',

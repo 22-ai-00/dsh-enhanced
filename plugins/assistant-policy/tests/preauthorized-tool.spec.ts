@@ -10,7 +10,9 @@ import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
+import { AssistantWorkItemsService } from '../../assistant-work-items/lib/service.js'
 import { setApprovalReviewer } from '../src/approval-reviewer.ts'
 import { AssistantPolicyService, type Config } from '../src/service.ts'
 
@@ -76,11 +78,12 @@ async function fixture(policy: Pick<Config, 'rules' | 'toolDefaultEffect' | 'bud
     ...policy,
   })
   let asks = 0
+  let approvalOutcome: 'allowed-once' | 'rejected' = 'rejected'
   ctx.on('approval/request', async () => {
     asks += 1
-    return 'rejected'
+    return approvalOutcome
   })
-  return { ctx, owner: createAgent(ctx), asks: () => asks }
+  return { ctx, owner: createAgent(ctx), asks: () => asks, allowApproval: () => { approvalOutcome = 'allowed-once' } }
 }
 
 async function execute(ctx: Context, owner: Agent, name = 'action_github_commit', signal = new AbortController().signal) {
@@ -104,6 +107,109 @@ afterEach(async () => {
 })
 
 describe('trusted Host tool preauthorization', () => {
+  test('executes real bounded work-item tools without approval and cannot approve past a changed owner', async () => {
+    const current = await fixture({ rules: [{ id: 'admit-work-item', effect: 'allow', actions: ['admit'],
+      subject: { kind: 'background', id: 'work-items/v1' }, resource: { kind: 'automation', id: 'work-item-worker' } }] })
+    const root = await mkdtemp(join(tmpdir(), 'assistant-policy-work-items-')); roots.push(root)
+    let ownerVersion = 1
+    current.ctx.provide('assistantDelivery' as never, {
+      validateOwnerRoute(input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }) {
+        return { receiptVersion: 2, ...input, authorityHash: 'sha256:owner', principalRecordId: 'owner-1', principalVersion: ownerVersion, bindingVersion: 1, generation: 1 }
+      },
+      enqueueBackground: () => Promise.resolve({ id: 'notification-outbox' }),
+    } as never)
+    current.ctx.provide('assistantAutomations' as never, {
+      ingestExternal: () => ({ id: 'work-item-occurrence', automationId: 'work-item-worker' }),
+    } as never)
+    const databasePath = join(root, 'work-items.sqlite')
+    try {
+      await current.ctx.plugin(AssistantWorkItemsService, {
+        enabled: true, mode: 'active', databasePath, workRoot: join(root, 'work'), workerAutomationId: 'work-item-worker',
+        scope: { workspace: '/work/alpha', preset: 'primary', principalId: 'owner:one', ownerRouteId: 'owner-route', expiresAt: Date.now() + 3_600_000 },
+        admission: { allowedKinds: ['review'] },
+      })
+      const admitted = current.ctx.assistantWorkItems.admit({ kind: 'review', externalId: 'native-tool-pipeline', title: 'Inspect a report', brief: 'Produce and recall a report.', originBindingId: 'owner-binding' })
+      current.owner.ctx.provide('assistantAutomationExecution' as never, Object.freeze({ mode: 'production', automationId: 'work-item-worker', occurrenceId: 'work-item-occurrence' }) as never)
+      const invoke = async (name: string, args: Record<string, unknown>) => await current.ctx.tools.execute({
+        callId: ToolCallId(`work-item-${name}-${Math.random()}`), name, arguments: args, signal: new AbortController().signal, agent: current.owner,
+      })
+      expect((await invoke('work_item_claim', {})).isError).toBe(false)
+      expect((await invoke('work_item_report', { status: 'ready', summary: 'Verified stored facts.' })).isError).toBe(false)
+      expect((await invoke('work_item_status', {})).isError).toBe(false)
+      expect((await invoke('work_item_read_report', { revision: 1 })).isError).toBe(false)
+      expect(current.asks()).toBe(0)
+      current.allowApproval()
+      ownerVersion = 2
+      const denied = await invoke('work_item_status', {})
+      expect(denied.isError).toBe(true)
+      expect(current.asks()).toBe(1)
+      expect(JSON.stringify(denied)).toContain('owner route generation changed')
+      // A legacy row is never automatically approved, but its original manual
+      // status path remains usable under the same still-valid owner authority.
+      ownerVersion = 1
+      const db = new DatabaseSync(databasePath)
+      try { db.prepare('UPDATE work_item SET authority_basis = NULL WHERE id = ?').run(admitted.item.id) } finally { db.close() }
+      expect((await invoke('work_item_status', {})).isError).toBe(false)
+      expect(current.asks()).toBe(2)
+    } finally { await current.ctx.fiber.restart() }
+  })
+
+  test.each(['work_item_claim', 'work_item_report', 'work_item_status', 'work_item_read_report'])('reserves %s to the actual WorkItems class Fiber and retains approval fallback', async name => {
+    const current = await fixture()
+    expect(current.ctx.assistantPolicy.workItemToolPreauthorizationVersion()).toBe(1)
+    let executions = 0
+    let active = true
+    const tool = definition(name, () => { executions += 1 })
+    current.ctx.tools.register(tool)
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(current.ctx, tool, () => true)).toThrow(/reserved/)
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-goals'), tool, () => true)).toThrow(/reserved/)
+    const caller = trustedActionsCaller(current.ctx, 'AssistantWorkItemsService')
+    const remove = current.ctx.assistantPolicy.registerPreauthorizedTool(caller, tool, () => active)
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(false)
+    expect(current.asks()).toBe(0)
+    active = false
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(true)
+    expect(current.asks()).toBe(1)
+    expect(executions).toBe(1)
+    remove()
+    await current.ctx.fiber.restart()
+  })
+
+  test.each(['deny', 'emergency-stop', 'budget'])('work-item preauthorization preserves the separate %s guard', async barrier => {
+    const current = await fixture(barrier === 'deny'
+      ? { rules: [{ id: 'deny-work-item', effect: 'deny', actions: ['execute'], resource: { kind: 'tool', id: 'work_item_claim' } }] }
+      : barrier === 'budget'
+        ? { rules: [{ id: 'budget-work-item', effect: 'allow', actions: ['execute'], resource: { kind: 'tool', id: 'work_item_claim' }, budget: { id: 'work-item-calls', amount: 1 } }], budgets: [{ id: 'work-item-calls', metric: 'calls', limit: 1, periodMs: 60_000, scope: 'subject' }] }
+        : {})
+    let executions = 0
+    const tool = definition('work_item_claim', () => { executions += 1 })
+    current.ctx.tools.register(tool)
+    current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'AssistantWorkItemsService'), tool, () => true)
+    if (barrier === 'budget') expect((await execute(current.ctx, current.owner, 'work_item_claim')).isError).toBe(false)
+    if (barrier === 'emergency-stop') current.ctx.assistantPolicy.setEmergencyStop({ enabled: true, actor: 'owner', reason: 'test stop' })
+    expect((await execute(current.ctx, current.owner, 'work_item_claim')).isError).toBe(true)
+    expect(executions).toBe(barrier === 'budget' ? 1 : 0)
+    expect(current.asks()).toBe(0)
+    await current.ctx.fiber.restart()
+  })
+
+  test('does not transfer a work-item grant to a scoped shadow and revokes it with its owning Fiber', async () => {
+    const current = await fixture()
+    const trusted = definition('work_item_status', () => {})
+    const shadow = definition('work_item_status', () => {})
+    current.ctx.tools.register(trusted)
+    const caller = trustedActionsCaller(current.ctx, 'AssistantWorkItemsService')
+    current.ctx.assistantPolicy.registerPreauthorizedTool(caller, trusted, () => true)
+    expect((await execute(current.ctx, current.owner, 'work_item_status')).isError).toBe(false)
+    await current.owner.ctx.inject(['tools'], scope => { scope.tools.register(shadow) })
+    expect(current.ctx.tools.get('work_item_status', current.owner)).toBe(shadow)
+    expect((await execute(current.ctx, current.owner, 'work_item_status')).isError).toBe(true)
+    expect(current.asks()).toBe(1)
+    await caller.fiber.dispose()
+    expect(current.ctx.assistantPolicy.isPreauthorizedTool({ name: 'work_item_status', agent: current.owner, arguments: { command: 'status' }, signal: new AbortController().signal } as never)).toBe(false)
+    await current.ctx.fiber.restart()
+  })
+
   test.each(['isolation_run', 'isolation_grants'])('reserves %s preauthorization to its exact plugin and keeps revoked grants closed', async name => {
     const current = await fixture()
     let executions = 0

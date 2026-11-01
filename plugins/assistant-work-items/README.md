@@ -188,6 +188,15 @@ work_item_read_report:
 - `artifactPaths` 只是原报告登记的引用，不读取文件。正文及引用都按不可信数据渲染。`work_item_report` 显示通知已入队仅证明 Delivery 接受了 outbox 请求，不证明消息已发送、送达或已读；历史 `delivery: sent` 仍保留原枚举语义。
 - 新 automation 的不可变工具白名单和 preset 工具平面都须包含 `work_item_read_report`；已存在的 automation 不会因插件升级自动取得该工具。
 
+### 已准入工作项的工具预授权
+
+支持 `workItemToolPreauthorizationVersion() === 1` 的 Policy 可让**已准入的正确 worker 调用**继续执行，无需为四条工作项工具逐次请求交互审查。注册只认当前真实工具 definition 和 `AssistantWorkItemsService` owning Fiber；同名工具、别的插件或别的 occurrence 不能借用。
+
+- 有界预检从冻结的 production occurrence 找到持久工作项，核对运行中的 workspace/preset、准入 scope、owner record/version、binding 版本/代次及有效期，并用原幂等键重查准入 Policy；只有仍为 `allow` 的现代账本项可自动通过。工具参数必须为普通 JSON 数据，隐藏字段、accessor、symbol、稀疏 artifact 数组及任意 item/path selector 均不通过。
+- claim 还核对剩余尝试和租约状态；可以只读证明租约已到期、让原 claim 执行路径回收，预检自身不回收。report 只接受有效认领内的新报告或同 claim 的精确幂等重放；status/read_report 可查询当前 occurrence 的 waiting/终态项，不要求活动租约。
+- 预检不调用 claim/status/report，不改工作项账本、不派发、不结算、不通知、不调用模型；准入 Policy 自己的审计仍按原规则保存。执行前会再次检查真实 owner、occurrence、原授权和本次参数，审批期间发生撤权或代次变化也不能越过这些边界。Policy 的独立 execute deny、急停和预算门继续生效。
+- legacy 行、未证明的调用及旧 Policy 保留原交互审批路径；这不授予额外工作项权限，实际执行仍须通过上述守卫。旧 Policy 缺版本能力时会记录可见 warning。工具按其 owning Fiber 注册，预授权另由嵌套 Policy injection 持有；Policy 替换/卸载会撤销旧注册，不会把旧能力留给新实例。
+
 ## 生命周期与可靠性
 
 ```

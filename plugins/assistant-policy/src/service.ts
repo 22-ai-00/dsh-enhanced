@@ -504,6 +504,8 @@ export class AssistantPolicyService extends Service {
   checkpointToolPreauthorizationVersion = (): 1 => { this.assertActive(); return 1 }
   /** Exact Skills definitions may authorize only their live isolated benchmark delegation. */
   delegatedSkillToolPreauthorizationVersion = (): 1 => { this.assertActive(); return 1 }
+  /** Exact work-item tools may reuse their durable occurrence/owner mandate. */
+  workItemToolPreauthorizationVersion = (): 1 => { this.assertActive(); return 1 }
 
   /**
    * Register one trusted Host-owned, finite authorization predicate for an
@@ -525,10 +527,11 @@ export class AssistantPolicyService extends Service {
       : definition.name === 'memory_manage' ? ['dsh-enhanced-personal-memory', 'PersonalMemoryService']
       : definition.name === 'wiki_upsert' ? ['dsh-enhanced-personal-wiki', 'PersonalWikiService']
       : definition.name === 'delivery_request_restart' ? ['dsh-enhanced-assistant-delivery', 'AssistantDeliveryService']
+      : ['work_item_claim', 'work_item_report', 'work_item_status', 'work_item_read_report'].includes(definition.name) ? 'AssistantWorkItemsService'
       : ['skill_run', 'skill_status'].includes(definition.name) ? 'dsh-enhanced-assistant-skills' : undefined
     if (expectedCaller === undefined || !(Array.isArray(expectedCaller)
       ? expectedCaller.includes(caller.fiber.name) : caller.fiber.name === expectedCaller)) {
-      throw new Error('assistant-policy: preauthorization is reserved for the exact owning assistant-actions, assistant-isolation, assistant-goals, assistant-proactive, assistant-skills, PersonalMemoryService or PersonalWikiService Fiber and tool')
+      throw new Error('assistant-policy: preauthorization is reserved for the exact owning assistant-actions, assistant-isolation, assistant-goals, assistant-proactive, assistant-skills, AssistantWorkItemsService, PersonalMemoryService or PersonalWikiService Fiber and tool')
     }
     if (options !== undefined && (typeof options.denialReason !== 'string' || options.denialReason.trim().length === 0 || options.denialReason.length > 512)) {
       throw new Error('assistant-policy: invalid preauthorization denial reason')

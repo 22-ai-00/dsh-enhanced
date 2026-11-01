@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { WorkItemAdmission } from './admission.js'
 import { WorkItemAuthority } from './authority.js'
 import { ConfigSchema, isActive, normalizeConfig, text, type Config, type NormalizedConfig } from './config.js'
@@ -20,7 +21,7 @@ import {
   type WorkItemSignalRegistration,
   type WorkItemSignalSweepReport,
 } from './signals.js'
-import { registerWorkItemTools } from './tools.js'
+import { registerWorkItemTools, workItemReportKey } from './tools.js'
 import type {
   WorkItemAdmitInput,
   WorkItemAdmitResult,
@@ -45,6 +46,38 @@ import { WorkItemWorkspace } from './workspace.js'
 
 function fail(code: ConstructorParameters<typeof WorkItemError>[0], message: string, detail?: string): never {
   throw new WorkItemError(code, message, detail)
+}
+
+/** Snapshot this shallow tool grammar without evaluating untrusted accessors. */
+function workItemToolArguments(candidate: unknown, allowed: readonly string[]): Record<string, unknown> {
+  if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(candidate))) fail('invalid-input', 'work-item tool arguments must be a plain object')
+  const names = Reflect.ownKeys(candidate)
+  if (names.length > allowed.length || names.some(key => typeof key !== 'string' || !allowed.includes(key))) fail('invalid-input', 'work-item tool arguments contain an unknown field')
+  const args: Record<string, unknown> = Object.create(null) as Record<string, unknown>
+  for (const key of names as string[]) {
+    const field = Object.getOwnPropertyDescriptor(candidate, key)
+    if (field === undefined || !field.enumerable || !('value' in field) || field.value === undefined) fail('invalid-input', 'work-item tool arguments must contain only enumerable data fields')
+    if (key !== 'artifacts') {
+      args[key] = field.value as unknown
+      continue
+    }
+    const paths = field.value as unknown
+    if (!Array.isArray(paths) || Object.getPrototypeOf(paths) !== Array.prototype) fail('invalid-input', 'artifacts must be a plain array')
+    const length = Object.getOwnPropertyDescriptor(paths, 'length')?.value as unknown
+    if (!Number.isSafeInteger(length) || (length as number) < 0 || (length as number) > 20) fail('invalid-input', 'at most 20 artifact paths are accepted')
+    const indices = Reflect.ownKeys(paths)
+    if (indices.length !== (length as number) + 1 || indices.some(index => typeof index !== 'string'
+      || (index !== 'length' && !/^(?:0|[1-9][0-9]*)$/u.test(index)))) fail('invalid-input', 'artifacts must not contain symbols, holes or extra fields')
+    const copied: string[] = []
+    for (let index = 0; index < (length as number); index += 1) {
+      const entry = Object.getOwnPropertyDescriptor(paths, String(index))
+      if (entry === undefined || !entry.enumerable || !('value' in entry) || typeof entry.value !== 'string') fail('invalid-input', 'artifacts must contain only enumerable string data entries')
+      copied.push(entry.value)
+    }
+    args[key] = copied
+  }
+  return args
 }
 
 /** Bounded, model-facing view of one successful claim. */
@@ -125,6 +158,8 @@ export interface WorkItemReportInput {
   readonly idempotencyKey: string
 }
 
+type WorkItemToolExecution = Pick<ToolExecution, 'name' | 'agent' | 'arguments'> & { readonly signal?: AbortSignal }
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     assistantWorkItems: AssistantWorkItemsService
@@ -183,6 +218,96 @@ export class AssistantWorkItemsService extends Service {
 
   get mode(): 'observe' | 'active' {
     return this.workItemsConfig.mode
+  }
+
+  /** Bounded admission check; no work-item recovery, writes, dispatch or model. */
+  preauthorizeTool(execution: ToolExecution): boolean {
+    try {
+      if (execution.signal.aborted) return false
+      this.workItemsCheckToolExecution(execution, true)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** Approval cannot extend the live occurrence/owner mandate at execution. */
+  assertToolExecution(execution: WorkItemToolExecution): void {
+    this.workItemsCheckToolExecution(execution, false)
+  }
+
+  private workItemsCheckToolExecution(execution: WorkItemToolExecution, requireModernMandate: boolean): void {
+    const config = this.workItemsConfig
+    if (execution.signal?.aborted) fail('invalid-state', 'the work-item tool execution was cancelled')
+    if (this.workItemsClosed || !isActive(config)) fail('disabled', 'active work-item intake is required')
+    const components = this.workItemsComponents
+    if (components === undefined) fail('storage', 'the work-item ledger is unavailable')
+    const occurrenceId = this.workItemsOccurrenceId(execution.agent)
+    const item = components.store.findItemByOccurrence(occurrenceId)
+    if (item === undefined) fail('not-found', 'no work item is bound to this automation occurrence')
+    const scope = config.scope
+    const header = execution.agent?.session?.header
+    if (scope === null || header?.cwd !== scope.workspace || header.agentPreset !== scope.preset
+      || item.scope.workspace !== scope.workspace || item.scope.preset !== scope.preset
+      || item.scope.principalId !== scope.principalId || item.scope.ownerRouteId !== scope.ownerRouteId
+      || item.owner.workspace !== scope.workspace || item.owner.agentPreset !== scope.preset) {
+      fail('identity-mismatch', 'work-item tool scope does not match the current worker and admitted owner')
+    }
+    if (scope.expiresAt <= Date.now()) fail('owner-route-expired', 'the configured work-item owner scope expired')
+    const owner = this.workItemsAssertOwnerRoute(item)
+    if (owner.principalVersion !== item.owner.principalVersion
+      || owner.bindingVersion !== item.owner.bindingVersion || owner.generation !== item.owner.generation) {
+      fail('owner-route-invalid', 'owner route generation changed since admission')
+    }
+    if (this.workItemsPolicy() === undefined) fail('missing-dependency', 'assistantPolicy is required for work-item tools')
+    const authority = components.authority.check(item)
+    if (authority.kind === 'revoked') fail('authority-revoked', 'admission mandate no longer permits this work-item tool')
+    if (authority.kind === 'unavailable') fail('authority-unavailable', 'admission mandate could not be revalidated', authority.detail)
+    if (requireModernMandate && authority.kind !== 'allow') fail('authority-unavailable', 'legacy work items require the ordinary approval path')
+
+    const active = components.store.activeClaim(item.id)
+    if (active !== undefined && active.runId !== occurrenceId && active.leasedUntil > Date.now()) fail('claim-conflict', 'another occurrence owns this work item')
+    const allowed = execution.name === 'work_item_report' ? ['status', 'summary', 'artifacts']
+      : execution.name === 'work_item_read_report' ? ['revision', 'offset', 'max_bytes']
+        : execution.name === 'work_item_claim' || execution.name === 'work_item_status' ? [] : undefined
+    if (allowed === undefined) fail('invalid-input', 'unknown work-item tool')
+    const args = workItemToolArguments(execution.arguments, allowed)
+
+    if (execution.name === 'work_item_status') return
+    if (execution.name === 'work_item_read_report') {
+      this.workItemsReadReportPage(components, item, {
+        revision: args.revision as number,
+        ...(args.offset === undefined ? {} : { offset: args.offset as number }),
+        ...(args.max_bytes === undefined ? {} : { maxBytes: args.max_bytes as number }),
+      })
+      return
+    }
+    const now = Date.now()
+    const claim = components.store.findClaimByRun(occurrenceId)
+    if (execution.name === 'work_item_claim') {
+      if (item.observed) fail('invalid-state', 'observed work items cannot be claimed')
+      if (claim?.itemId === item.id && claim.state === 'active' && claim.leasedUntil > now
+        && item.leaseRunId === occurrenceId && item.leaseUntil !== null && item.leaseUntil > now) return
+      if (item.attempt >= item.maxAttempts) fail('retry-exhausted', 'work item exhausted its attempt budget')
+      const recoverable = ['claimed', 'working'].includes(item.state) && item.leaseUntil !== null
+        && item.leaseUntil <= now && (active === undefined || active.leasedUntil <= now)
+      if (!['queued', 'waiting'].includes(item.state) && !recoverable) fail('claim-conflict', 'work item is not claimable')
+      return
+    }
+    if (typeof args.status !== 'string' || !['progress', 'waiting', 'ready', 'blocked', 'failed'].includes(args.status)
+      || typeof args.summary !== 'string' || args.summary.trim().length === 0) fail('invalid-input', 'work-item report requires a valid status and non-empty summary')
+    const artifacts = args.artifacts ?? []
+    if (!Array.isArray(artifacts) || artifacts.some(path => typeof path !== 'string')) fail('invalid-input', 'work-item report artifacts must be string paths')
+    components.workspace.validateArtifacts(item, artifacts)
+    if (claim === undefined || claim.itemId !== item.id) fail('claim-conflict', 'claim this item before reporting')
+    const reportCount = components.store.reportCount(item.id)
+    if (reportCount > 100) fail('storage', 'work item exceeds the bounded report history')
+    const key = `work-item-report:${workItemReportKey(args.status as WorkItemReportStatus, args.summary, artifacts)}\0${item.id}\0${String(claim.claimId)}`
+    if (components.store.reports(item.id).some(report => report.idempotencyKey === key)) return
+    if (claim.state !== 'active' || claim.leasedUntil <= now || item.leaseRunId !== occurrenceId
+      || item.leaseUntil === null || item.leaseUntil <= now) fail('claim-expired', 'report requires the current active claim')
+    if (!['claimed', 'working'].includes(item.state)) fail('invalid-state', 'work item is not reportable')
+    if (reportCount >= config.limits.maxReportsPerItem) fail('report-limit', 'work item reached maxReportsPerItem')
   }
 
   /**
@@ -508,6 +633,11 @@ export class AssistantWorkItemsService extends Service {
     if (authority.kind === 'revoked') fail('authority-revoked', 'admission mandate no longer permits report recall')
     if (authority.kind === 'unavailable') fail('authority-unavailable', 'admission mandate could not be revalidated', authority.detail)
 
+    return this.workItemsReadReportPage(components, item, input)
+  }
+
+  /** Pure SELECT/UTF-8 projection shared by preflight and the read tool. */
+  private workItemsReadReportPage(components: Components, item: WorkItemRecord, input: { revision: number; offset?: number; maxBytes?: number }): WorkItemReportPage {
     const offset = input.offset ?? 0
     const maxBytes = input.maxBytes ?? 4_096
     if (!Number.isSafeInteger(input.revision) || input.revision < 1) fail('invalid-input', 'revision must be a positive safe integer')

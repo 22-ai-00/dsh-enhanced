@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type { PeerPolicyService } from './peers.js'
 import type { AssistantWorkItemsService } from './service.js'
 import type { WorkItemReportStatus } from './types.js'
 
@@ -15,14 +16,22 @@ function renderUntrustedJson(tag: string, value: unknown): string {
 }
 
 /** Stable digest so a retried identical report replays instead of appending. */
-function reportKey(status: WorkItemReportStatus, summary: string, artifacts: readonly string[]): string {
+export function workItemReportKey(status: WorkItemReportStatus, summary: string, artifacts: readonly string[]): string {
   return createHash('sha256')
     .update(`${status}\0${summary}\0${artifacts.join('\0')}`)
     .digest('hex')
 }
 
 export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsService): void {
-  ctx.tools.register(defineTool({
+  const definitions: ToolDefinition[] = []
+  const register = (definition: ToolDefinition): void => {
+    // The pinned DSL otherwise leaves root arguments open. Reject selectors
+    // such as itemId/path in both its validator and the model-facing schema.
+    Object.assign(definition.parameters, { additionalProperties: false })
+    ctx.tools.register(definition)
+    definitions.push(definition)
+  }
+  register(defineTool({
     name: 'work_item_claim',
     description:
       'Claim the single work item bound to this automation occurrence and read its brief, acceptance refs and private work directory. '
@@ -115,6 +124,7 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
       },
     },
     async execute(_args, exec) {
+      service.assertToolExecution({ ...exec, name: 'work_item_claim', arguments: _args })
       const value = service.claim(exec.agent)
       return {
         itemId: value.itemId,
@@ -168,7 +178,7 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
     },
   }))
 
-  ctx.tools.register(defineTool({
+  register(defineTool({
     name: 'work_item_report',
     description:
       'Append one progress or terminal report to the claimed work item. This is the only write path: use progress for intermediate '
@@ -205,6 +215,7 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
       },
     },
     async execute(args, exec) {
+      service.assertToolExecution({ ...exec, name: 'work_item_report', arguments: args })
       const artifacts = args.artifacts ?? []
       const status = args.status
       if (!REPORT_STATUSES.includes(status)) {
@@ -214,7 +225,7 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
         status,
         summary: args.summary,
         artifactPaths: artifacts,
-        idempotencyKey: `work-item-report:${reportKey(status, args.summary, artifacts)}`,
+        idempotencyKey: `work-item-report:${workItemReportKey(status, args.summary, artifacts)}`,
       })
       return {
         itemId: value.itemId,
@@ -230,7 +241,7 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
     },
   }))
 
-  ctx.tools.register(defineTool({
+  register(defineTool({
     name: 'work_item_status',
     description:
       'Read the ledger state of the work item bound to this automation occurrence, including its claim and recent reports. '
@@ -269,6 +280,7 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
       render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: renderUntrustedJson('work_item_status', value) }],
     },
     async execute(_args, exec) {
+      service.assertToolExecution({ ...exec, name: 'work_item_status', arguments: _args })
       const view = service.status(exec.agent)
       const item = view.item
       return {
@@ -330,6 +342,7 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
       render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: renderUntrustedJson('work_item_read_report', value) }],
     },
     async execute(args, exec) {
+      service.assertToolExecution({ ...exec, name: 'work_item_read_report', arguments: args })
       const value = service.readReport(exec.agent, {
         revision: args.revision,
         ...(args.offset === undefined ? {} : { offset: args.offset }),
@@ -351,9 +364,22 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
       }
     },
   })
-  // The pinned defineTool DSL emits an open root parameter object. Close that
-  // same schema before registration so both its validator and model contract
-  // reject selectors such as itemId or path rather than silently ignoring them.
-  Object.assign(readReportTool.parameters, { additionalProperties: false })
-  ctx.tools.register(readReportTool)
+  register(readReportTool)
+  // A Policy generation owns its exact-definition predicates independently of
+  // the tools. Replacing/removing that optional peer disposes this child Fiber
+  // and its registrations without retaining a stale capability.
+  ctx.inject(['assistantPolicy'], policyCtx => {
+    const policy = policyCtx.get('assistantPolicy') as PeerPolicyService | undefined
+    let supported = false
+    try { supported = policy?.workItemToolPreauthorizationVersion?.() === 1 && typeof policy.registerPreauthorizedTool === 'function' } catch { /* unavailable peer: retain ordinary approval */ }
+    if (!supported || policy?.registerPreauthorizedTool === undefined) {
+      policyCtx.logger.warn('assistant-work-items: exact tool preauthorization is unavailable; the ordinary approval path remains active')
+      return
+    }
+    for (const definition of definitions) {
+      // No denialReason: legacy/unproven calls retain the ordinary approval
+      // fallback. Their execution still rechecks the real mandate below it.
+      policy.registerPreauthorizedTool(policyCtx, definition, execution => service.preauthorizeTool(execution))
+    }
+  })
 }

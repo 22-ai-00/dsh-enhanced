@@ -7,6 +7,9 @@
  * bounded `missing-dependency` failure, never a crash.
  */
 
+import type { Context } from '@deepseek-ai/cordis'
+import type { ToolDefinition, ToolExecution } from '@deepseek-ai/dsh-tools'
+
 export type PeerPolicyEffect = 'allow' | 'deny'
 export type PeerPolicyInitiator = 'background' | 'external' | 'foreground'
 export type PeerPolicySubjectKind = 'agent' | 'background' | 'external'
@@ -27,6 +30,14 @@ export interface PeerPolicyDecision {
 /** `assistant-policy` default-deny authorization surface. */
 export interface PeerPolicyService {
   authorize(request: PeerPolicyRequest, options?: { idempotencyKey?: string; auditDetails?: unknown }): PeerPolicyDecision
+  /** Absent on older Policy peers: keep their ordinary approval path. */
+  workItemToolPreauthorizationVersion?(): 1
+  registerPreauthorizedTool?(
+    caller: Context,
+    definition: ToolDefinition,
+    authorize: (execution: ToolExecution) => boolean,
+    options?: { denialReason: string },
+  ): () => void
 }
 
 /** `assistant-delivery` owner-route receipt (receiptVersion 2). */

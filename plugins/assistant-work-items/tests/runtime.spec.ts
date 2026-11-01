@@ -1,5 +1,6 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { ToolDefinition, ToolExecution } from '@deepseek-ai/dsh-tools'
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -210,6 +211,7 @@ function workerAgent(occurrenceId: string, automationId = WORKER, mode = 'produc
   const execution = Object.freeze({ mode, automationId, occurrenceId })
   return {
     ctx: { get: (name: string) => name === 'assistantAutomationExecution' ? execution : undefined },
+    session: { header: { cwd: WORKSPACE, agentPreset: PRESET } },
   } as unknown as Agent
 }
 
@@ -1587,6 +1589,234 @@ describe('Cordis traceable work-item service', () => {
     expect(next.readReport(agent, { revision: 1 }).summary).toBe('persisted before close')
     next.close()
     restarted.ctx.extend().assistantWorkItems.close()
+  })
+})
+
+describe('durable work-item tool preauthorization', () => {
+  function execution(agent: Agent | undefined, name = 'work_item_claim', args: unknown = {}): ToolExecution {
+    return { name, arguments: args, agent, signal: new AbortController().signal } as ToolExecution
+  }
+
+  function snapshot(root: string): unknown {
+    const db = new DatabaseSync(join(root, 'state', 'state.sqlite'), { readOnly: true })
+    try {
+      return db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name").all().map(row => ({
+        name: row['name'], rows: db.prepare(`SELECT * FROM "${String(row['name']).replaceAll('"', '""')}"`).all(),
+      }))
+    } finally { db.close() }
+  }
+
+  test('preauthorizes only exact bounded production calls without changing any work-item table', async () => {
+    const fixture = await serviceHarness()
+    fixture.service.admit(signal())
+    const agent = workerAgent('occ-1')
+    const before = snapshot(fixture.root)
+    expect(fixture.service.preauthorizeTool(execution(agent))).toBe(true)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_status'))).toBe(true)
+    for (const other of [undefined, foregroundAgent(), workerAgent('occ-1', WORKER, 'preview'), workerAgent('occ-1', 'other-worker'), workerAgent('unbound')]) {
+      expect(fixture.service.preauthorizeTool(execution(other))).toBe(false)
+    }
+    for (const args of [{ itemId: 'another-item' }, [], null]) expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_claim', args))).toBe(false)
+    const wrongScope = { ...agent, session: { header: { cwd: '/different', agentPreset: PRESET } } } as unknown as Agent
+    expect(fixture.service.preauthorizeTool(execution(wrongScope))).toBe(false)
+    const aborted = execution(agent)
+    const controller = new AbortController(); controller.abort()
+    expect(fixture.service.preauthorizeTool({ ...aborted, signal: controller.signal })).toBe(false)
+    expect(snapshot(fixture.root)).toEqual(before)
+  })
+
+  test('keeps report leases, exact terminal replay and waiting/terminal reads distinct', async () => {
+    const fixture = await serviceHarness()
+    fixture.service.admit(signal())
+    const agent = workerAgent('occ-1')
+    const ready = { status: 'ready', summary: 'finished safely' }
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_report', ready))).toBe(false)
+    fixture.service.claim(agent)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_report', ready))).toBe(true)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_report', { ...ready, artifacts: ['/outside/report'] }))).toBe(false)
+    const reportTool = fixture.tools.registered.find(tool => tool.name === 'work_item_report')!
+    await reportTool.execute(ready, { agent })
+    const before = snapshot(fixture.root)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_report', ready))).toBe(true)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_report', { ...ready, summary: 'different' }))).toBe(false)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_claim'))).toBe(false)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_status'))).toBe(true)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_read_report', { revision: 1 }))).toBe(true)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_read_report', { revision: 1, offset: 1_000 }))).toBe(false)
+    expect(snapshot(fixture.root)).toEqual(before)
+    expect(await reportTool.execute(ready, { agent })).toMatchObject({ replayed: true })
+  })
+
+  test('rejects accessors, hidden fields, symbols and sparse artifact arrays without invoking getters', async () => {
+    const fixture = await serviceHarness()
+    fixture.service.admit(signal())
+    const agent = workerAgent('occ-1')
+    fixture.service.claim(agent)
+    let getters = 0
+    const cases: Array<{ name: string; args: unknown }> = []
+    for (const key of ['status', 'summary', 'artifacts']) {
+      const args = { status: 'progress', summary: 'valid' }
+      Object.defineProperty(args, key, { enumerable: true, get: () => { getters += 1; return key === 'artifacts' ? [] : 'progress' } })
+      cases.push({ name: 'work_item_report', args })
+    }
+    for (const key of ['revision', 'offset', 'max_bytes']) {
+      const args = { revision: 1 }
+      Object.defineProperty(args, key, { enumerable: true, get: () => { getters += 1; return 1 } })
+      cases.push({ name: 'work_item_read_report', args })
+    }
+    const element: string[] = ['placeholder']
+    Object.defineProperty(element, '0', { enumerable: true, get: () => { getters += 1; return '/work/alpha/artifact' } })
+    cases.push({ name: 'work_item_report', args: { status: 'progress', summary: 'valid', artifacts: element } })
+    const sparse: string[] = []; sparse.length = 1
+    cases.push({ name: 'work_item_report', args: { status: 'progress', summary: 'valid', artifacts: sparse } })
+    const hidden = { status: 'progress', summary: 'valid' }
+    Object.defineProperty(hidden, 'artifacts', { enumerable: false, value: [] })
+    cases.push({ name: 'work_item_report', args: hidden })
+    cases.push({ name: 'work_item_claim', args: { [Symbol('hidden')]: 'value' } })
+    const before = snapshot(fixture.root)
+    for (const testCase of cases) {
+      const current = execution(agent, testCase.name, testCase.args)
+      expect(fixture.service.preauthorizeTool(current)).toBe(false)
+      expect(errorCode(() => fixture.service.assertToolExecution(current))).toBe('invalid-input')
+    }
+    expect(getters).toBe(0)
+    expect(snapshot(fixture.root)).toEqual(before)
+  })
+
+  test('allows current waiting occurrence reads without needing an active claim', async () => {
+    const fixture = await serviceHarness()
+    fixture.service.admit(signal())
+    const agent = workerAgent('occ-1')
+    fixture.service.claim(agent)
+    await fixture.service.report(agent, { status: 'waiting', summary: 'waiting for upstream', idempotencyKey: 'waiting' })
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_status'))).toBe(true)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_read_report', { revision: 1 }))).toBe(true)
+  })
+
+  test('does not recover expired claims and does not let execution approval extend revoked mandates', async () => {
+    const fixture = await serviceHarness()
+    fixture.service.admit(signal())
+    const agent = workerAgent('occ-1')
+    fixture.service.claim(agent)
+    const current = execution(agent, 'work_item_report', { status: 'progress', summary: 'still working' })
+    fixture.policy.setAllow(false)
+    const before = snapshot(fixture.root)
+    expect(fixture.service.preauthorizeTool(current)).toBe(false)
+    expect(errorCode(() => fixture.service.assertToolExecution(current))).toBe('authority-revoked')
+    expect(snapshot(fixture.root)).toEqual(before)
+    fixture.policy.setAllow(true)
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(Date.now() + fixture.config.limits.leaseMs + 1)
+      const expired = snapshot(fixture.root)
+      expect(fixture.service.preauthorizeTool(current)).toBe(false)
+      // The read-only proof may admit the existing bounded recovery path;
+      // only actual claim execution is allowed to mutate expired rows.
+      expect(fixture.service.preauthorizeTool(execution(agent))).toBe(true)
+      expect(snapshot(fixture.root)).toEqual(expired)
+    } finally { vi.useRealTimers() }
+  })
+
+  test('lets the real claim tool reclaim an expired lease within the original attempt budget', async () => {
+    const fixture = await serviceHarness()
+    fixture.service.admit(signal())
+    const agent = workerAgent('occ-1')
+    const tool = fixture.tools.registered.find(tool => tool.name === 'work_item_claim')!
+    expect(await tool.execute({}, { agent })).toMatchObject({ attempt: 1 })
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(Date.now() + fixture.config.limits.leaseMs + 1)
+      // Recovery re-dispatches a fresh occurrence, so the obsolete caller is
+      // rejected only after the original recovery/wake path has run.
+      await expect(tool.execute({}, { agent })).rejects.toMatchObject({ code: 'not-found' })
+      expect(await tool.execute({}, { agent: workerAgent('occ-2') })).toMatchObject({ attempt: 2, replayed: false })
+      const store = readStore(fixture)
+      expect(store.findClaimByRun('occ-1')).toMatchObject({ state: 'expired' })
+      expect(store.findClaimByRun('occ-2')).toMatchObject({ state: 'active' })
+      expect(store.events(store.findItemByOccurrence('occ-2')!.id).map(event => event.kind)).toContain('claim-expired')
+    } finally { vi.useRealTimers() }
+  })
+
+  test('leaves legacy items on the ordinary approval path while preserving their execution semantics', async () => {
+    const fixture = await serviceHarness()
+    const admitted = fixture.service.admit(signal())
+    rewriteBasis(fixture, admitted.item.id, () => null)
+    const agent = workerAgent('occ-1')
+    const current = execution(agent)
+    expect(fixture.service.preauthorizeTool(current)).toBe(false)
+    expect(() => fixture.service.assertToolExecution(current)).not.toThrow()
+    expect(await fixture.tools.registered[0]!.execute({}, { agent })).toMatchObject({ attempt: 1 })
+  })
+
+  test('rejects current-owner drift both before approval and again at execution', async () => {
+    const fixture = await serviceHarness()
+    fixture.service.admit(signal())
+    const agent = workerAgent('occ-1')
+    const current = execution(agent)
+    expect(fixture.service.preauthorizeTool(current)).toBe(true)
+    vi.spyOn(fixture.delivery, 'validateOwnerRoute').mockImplementation(input => ({ ...receipt(input), principalVersion: 8 }))
+    const before = snapshot(fixture.root)
+    expect(fixture.service.preauthorizeTool(current)).toBe(false)
+    expect(errorCode(() => fixture.service.assertToolExecution(current))).toBe('owner-route-invalid')
+    await expect(fixture.tools.registered[0]!.execute({}, { agent })).rejects.toMatchObject({ code: 'owner-route-invalid' })
+    expect(snapshot(fixture.root)).toEqual(before)
+  })
+
+  test('fails closed on a missing Policy peer and on owner-scope expiry without touching the ledger', async () => {
+    const fixture = await serviceHarness()
+    fixture.service.admit(signal())
+    const current = execution(workerAgent('occ-1'))
+    const before = snapshot(fixture.root)
+    const get = fixture.ctx.get.bind(fixture.ctx)
+    const lookup = vi.spyOn(fixture.ctx, 'get').mockImplementation(((name: string) => name === 'assistantPolicy' ? undefined : get(name as never)) as Context['get'])
+    expect(fixture.service.preauthorizeTool(current)).toBe(false)
+    expect(errorCode(() => fixture.service.assertToolExecution(current))).toBe('missing-dependency')
+    lookup.mockRestore()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(fixture.config.scope!.expiresAt + 1)
+      expect(fixture.service.preauthorizeTool(current)).toBe(false)
+      expect(errorCode(() => fixture.service.assertToolExecution(current))).toBe('owner-route-expired')
+    } finally { vi.useRealTimers() }
+    expect(snapshot(fixture.root)).toEqual(before)
+  })
+
+  test('owns exact-definition registrations in a Policy-generation injection and revokes them on replacement', async () => {
+    class PreauthorizationPolicyPeer extends FakePolicyPeer {
+      readonly definitions = new Set<ToolDefinition>()
+      readonly callers: string[] = []
+      workItemToolPreauthorizationVersion(): 1 { return 1 }
+      registerPreauthorizedTool(caller: Context, definition: ToolDefinition): () => void {
+        this.callers.push(caller.fiber.name)
+        this.definitions.add(definition)
+        const remove = () => { this.definitions.delete(definition) }
+        caller.effect(() => remove)
+        return remove
+      }
+    }
+    const root = await mkdtemp(join(tmpdir(), 'assistant-work-items-preauthorization-')); roots.push(root)
+    const ctx = new Context()
+    new FakeToolsPeer(ctx); new FakeDeliveryPeer(ctx); new FakeAutomationsPeer(ctx)
+    try {
+      const first = await ctx.plugin(PreauthorizationPolicyPeer)
+      const serviceFiber = await ctx.plugin(AssistantWorkItemsService, {
+        enabled: true, mode: 'active', databasePath: join(root, 'items.sqlite'), workRoot: join(root, 'work'), workerAutomationId: WORKER,
+        scope: { workspace: WORKSPACE, preset: PRESET, principalId: PRINCIPAL, ownerRouteId: ROUTE, expiresAt: Date.now() + 3_600_000 },
+        admission: { allowedKinds: ['review'] },
+      })
+      const old = ctx.get('assistantPolicy' as never) as unknown as PreauthorizationPolicyPeer
+      await vi.waitFor(() => expect(old.definitions.size).toBe(4))
+      expect(old.callers).toEqual(Array(4).fill('AssistantWorkItemsService'))
+      const definitions = [...old.definitions]
+      await first.dispose()
+      await vi.waitFor(() => expect(old.definitions.size).toBe(0))
+      await ctx.plugin(PreauthorizationPolicyPeer)
+      const next = ctx.get('assistantPolicy' as never) as unknown as PreauthorizationPolicyPeer
+      await vi.waitFor(() => expect(next.definitions.size).toBe(4))
+      expect([...next.definitions]).toEqual(definitions)
+      await serviceFiber.dispose()
+      await vi.waitFor(() => expect(next.definitions.size).toBe(0))
+    } finally { await ctx.fiber.restart() }
   })
 })
 
