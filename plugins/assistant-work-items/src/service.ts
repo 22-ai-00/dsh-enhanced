@@ -143,27 +143,30 @@ declare module '@deepseek-ai/cordis' {
 export class AssistantWorkItemsService extends Service {
   static Config = ConfigSchema
 
-  readonly #config: NormalizedConfig
-  readonly #evaluation: WorkItemEvaluationExporter
+  // Cordis traces this Service through caller-context proxies. JavaScript #
+  // private brands reject those receivers; TS-private members preserve the
+  // proxy's ctx without binding methods back to the provider instance.
+  private readonly workItemsConfig: NormalizedConfig
+  private readonly workItemsEvaluation: WorkItemEvaluationExporter
   /** Host-registered followed-thread sources; empty means no follow can close. */
-  readonly #threadSources = new Map<string, WorkItemThreadSourceRegistration>()
-  #followDegraded: WorkItemFollowDegradedReason | null = null
-  #components: Components | undefined
-  #closed = false
+  private readonly workItemsThreadSources = new Map<string, WorkItemThreadSourceRegistration>()
+  private workItemsFollowDegraded: WorkItemFollowDegradedReason | null = null
+  private workItemsComponents: Components | undefined
+  private workItemsClosed = false
 
   constructor(ctx: Context, input: Config) {
     super(ctx, 'assistantWorkItems')
-    this.#config = Object.freeze(normalizeConfig(input, Date.now()))
+    this.workItemsConfig = Object.freeze(normalizeConfig(input, Date.now()))
     // The Evaluation outbox is service state, not ledger state: it exists even
     // for a disabled intake so `assistant-evaluation` can bind a generation,
     // and it never opens SQLite until an export pass actually runs.
-    this.#evaluation = new WorkItemEvaluationExporter({
-      store: () => this.#components?.store,
+    this.workItemsEvaluation = new WorkItemEvaluationExporter({
+      store: () => this.workItemsComponents?.store,
       scope: () => {
-        const scope = this.#config.scope
+        const scope = this.workItemsConfig.scope
         return scope === null ? null : Object.freeze({ workspace: scope.workspace, preset: scope.preset })
       },
-      enabled: () => !this.#closed && isActive(this.#config) && this.#config.settlement.enabled,
+      enabled: () => !this.workItemsClosed && isActive(this.workItemsConfig) && this.workItemsConfig.settlement.enabled,
       now: () => Date.now(),
       warn: message => this.ctx.logger.warn(message),
     })
@@ -171,15 +174,15 @@ export class AssistantWorkItemsService extends Service {
     ctx.inject(['tools'], toolsCtx => registerWorkItemTools(toolsCtx, this))
     // The disabled default must not create a directory, lock a file or open a
     // database, so persistence starts only for an explicitly enabled intake.
-    if (this.#config.enabled) this.#open()
+    if (this.workItemsConfig.enabled) this.workItemsOpen()
   }
 
   get enabled(): boolean {
-    return this.#config.enabled
+    return this.workItemsConfig.enabled
   }
 
   get mode(): 'observe' | 'active' {
-    return this.#config.mode
+    return this.workItemsConfig.mode
   }
 
   /**
@@ -190,9 +193,9 @@ export class AssistantWorkItemsService extends Service {
    * observe mode stays free of external effects.
    */
   admit(input: WorkItemAdmitInput): WorkItemAdmitResult {
-    const components = this.#available()
+    const components = this.workItemsAvailable()
     const result = components.admission.admit(input)
-    if (result.created && isActive(this.#config)) {
+    if (result.created && isActive(this.workItemsConfig)) {
       try {
         components.dispatch.wake(result.item)
       } catch (error) {
@@ -218,24 +221,24 @@ export class AssistantWorkItemsService extends Service {
    * developer orchestration. A sweep failure never fails the claim.
    */
   claim(agent: Agent | undefined): WorkItemClaimView {
-    const components = this.#required()
-    this.#sweepQuietly(components)
-    this.#settleQuietly(components)
-    const occurrenceId = this.#occurrenceId(agent)
+    const components = this.workItemsRequired()
+    this.workItemsSweepQuietly(components)
+    this.workItemsSettleQuietly(components)
+    const occurrenceId = this.workItemsOccurrenceId(agent)
     components.ledger.recover()
     // Lease-expiry and waiting resume are generic recovery work, so ordinary
     // worker traffic is the lazy sweep that re-dispatches them. This is
     // best-effort: a recovery failure never blocks the caller's own claim.
-    this.#wakeQuietly(components)
+    this.workItemsWakeQuietly(components)
     const item = components.store.findItemByOccurrence(occurrenceId)
     if (item === undefined) fail('not-found', 'no work item is bound to this automation occurrence')
-    this.#assertOwnerRoute(item)
-    this.#revalidateAuthority(components, item)
+    this.workItemsAssertOwnerRoute(item)
+    this.workItemsRevalidateAuthority(components, item)
     const runId = occurrenceId
     const result = components.ledger.claim({ itemId: item.id, runId, occurrenceId })
     // A claim can settle a prior window and unblock recovery, so it is a
     // transaction boundary that may have produced a new exportable revision.
-    this.#drainEvaluation()
+    this.workItemsDrainEvaluation()
     // The resume brief is derived only after the claim committed, from the same
     // durable ledger; a missing row here means storage broke, so fail loudly
     // instead of handing the model an invented empty context.
@@ -268,8 +271,8 @@ export class AssistantWorkItemsService extends Service {
    * failure is recorded against the report instead of erasing report evidence.
    */
   async report(agent: Agent | undefined, input: WorkItemReportInput): Promise<WorkItemReportView> {
-    const components = this.#required()
-    const occurrenceId = this.#occurrenceId(agent)
+    const components = this.workItemsRequired()
+    const occurrenceId = this.workItemsOccurrenceId(agent)
     components.ledger.recover()
     const item = components.store.findItemByOccurrence(occurrenceId)
     if (item === undefined) fail('not-found', 'no work item is bound to this automation occurrence')
@@ -295,7 +298,7 @@ export class AssistantWorkItemsService extends Service {
     const stored = components.store.reports(item.id).find(report => report.revision === result.report.revision)
     // A terminal report appends the settlement outcome synchronously, so this
     // is the main ordinary-use boundary that feeds the trusted lane.
-    this.#drainEvaluation()
+    this.workItemsDrainEvaluation()
     return Object.freeze({
       itemId: result.item.id,
       revision: result.report.revision,
@@ -320,7 +323,7 @@ export class AssistantWorkItemsService extends Service {
    * intake is disabled or already disposed, and never admits retroactively.
    */
   registerSignalSource(registration: WorkItemSignalRegistration): () => void {
-    const components = this.#available()
+    const components = this.workItemsAvailable()
     const dispose = components.signals.register(registration)
     return () => {
       dispose()
@@ -338,7 +341,7 @@ export class AssistantWorkItemsService extends Service {
    * end an item, and a closure never claims an objective was achieved.
    */
   registerThreadSource(registration: WorkItemThreadSourceRegistration): () => void {
-    if (!this.#config.enabled || this.#closed) fail('disabled', 'the work-item intake is disabled')
+    if (!this.workItemsConfig.enabled || this.workItemsClosed) fail('disabled', 'the work-item intake is disabled')
     if (registration === null || typeof registration !== 'object' || Array.isArray(registration)) {
       fail('invalid-input', 'thread source registration must be an object')
     }
@@ -350,13 +353,13 @@ export class AssistantWorkItemsService extends Service {
     if (!/^[a-z][a-z0-9-]{0,63}$/.test(source)) fail('invalid-input', 'thread source has an invalid shape')
     text(registration.generation, 'thread source generation', 200)
     if (typeof registration.resolve !== 'function') fail('invalid-input', 'thread source must expose a resolve function')
-    if (this.#threadSources.has(source)) fail('invalid-input', `thread source ${source} is already registered`)
+    if (this.workItemsThreadSources.has(source)) fail('invalid-input', `thread source ${source} is already registered`)
     const installed = registration
-    this.#threadSources.set(source, installed)
+    this.workItemsThreadSources.set(source, installed)
     return () => {
       // Only the disposer of the live registration may revoke it, so a stale
       // disposer from a replaced source cannot delete the current one.
-      if (this.#threadSources.get(source) === installed) this.#threadSources.delete(source)
+      if (this.workItemsThreadSources.get(source) === installed) this.workItemsThreadSources.delete(source)
     }
   }
 
@@ -368,7 +371,7 @@ export class AssistantWorkItemsService extends Service {
    * fail closed instead of appending to the wrong host.
    */
   trustedWorkItemProducerGeneration(): string {
-    return this.#evaluation.generation
+    return this.workItemsEvaluation.generation
   }
 
   /**
@@ -379,10 +382,10 @@ export class AssistantWorkItemsService extends Service {
    * it. Exactly one sink is accepted; the returned disposer withdraws it.
    */
   registerTrustedWorkItemEvaluationSink(registration: Readonly<WorkItemEvaluationRegistration>): () => void {
-    if (this.#closed) fail('storage', 'the work-item intake is disposed')
+    if (this.workItemsClosed) fail('storage', 'the work-item intake is disposed')
     // The exporter itself runs one bounded catch-up pass the moment the sink is
     // installed, so the service boundary must not queue a redundant one.
-    const dispose = this.#evaluation.registerTrustedWorkItemEvaluationSink(registration)
+    const dispose = this.workItemsEvaluation.registerTrustedWorkItemEvaluationSink(registration)
     return () => {
       dispose()
     }
@@ -396,9 +399,9 @@ export class AssistantWorkItemsService extends Service {
    * so a caller never has to special-case activation.
    */
   sweepSignals(force = true): WorkItemSignalSweepReport {
-    if (!this.#config.enabled || this.#closed) return Object.freeze({ sources: [] })
+    if (!this.workItemsConfig.enabled || this.workItemsClosed) return Object.freeze({ sources: [] })
     try {
-      return this.#open().signals.sweep(force)
+      return this.workItemsOpen().signals.sweep(force)
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: signal sweep unavailable: ${describe(error)}`)
       return Object.freeze({ sources: [] })
@@ -413,7 +416,7 @@ export class AssistantWorkItemsService extends Service {
    * of throwing, and a disabled intake returns `skipped: 'disabled'`.
    */
   settleOutcomes(force = true): WorkItemSettlementReport {
-    if (!this.#config.enabled || this.#closed || !this.#config.settlement.enabled) {
+    if (!this.workItemsConfig.enabled || this.workItemsClosed || !this.workItemsConfig.settlement.enabled) {
       return Object.freeze({
         skipped: 'disabled',
         degraded: null,
@@ -428,8 +431,8 @@ export class AssistantWorkItemsService extends Service {
       })
     }
     try {
-      const result = this.#settlement(this.#open(), force)
-      this.#drainEvaluation()
+      const result = this.workItemsSettlement(this.workItemsOpen(), force)
+      this.workItemsDrainEvaluation()
       return result.report
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: settlement unavailable: ${describe(error)}`)
@@ -462,8 +465,8 @@ export class AssistantWorkItemsService extends Service {
   outcomes(options: { limit?: number; evidenceState?: WorkItemOutcomeEvidenceState } = {}): readonly WorkItemOutcomeView[] {
     const limit = options.limit ?? 20
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('invalid-input', 'limit must be an integer between 1 and 100')
-    if (!this.#config.enabled || this.#closed) return Object.freeze([])
-    const components = this.#open()
+    if (!this.workItemsConfig.enabled || this.workItemsClosed) return Object.freeze([])
+    const components = this.workItemsOpen()
     return components.store.listOutcomes({
       limit,
       ...(options.evidenceState === undefined ? {} : { evidenceState: options.evidenceState }),
@@ -472,8 +475,8 @@ export class AssistantWorkItemsService extends Service {
 
   /** Read-only status of the item bound to the calling occurrence. */
   status(agent: Agent | undefined): WorkItemStatusView {
-    const components = this.#required()
-    const occurrenceId = this.#occurrenceId(agent)
+    const components = this.workItemsRequired()
+    const occurrenceId = this.workItemsOccurrenceId(agent)
     components.ledger.recover()
     const item = components.store.findItemByOccurrence(occurrenceId)
     if (item === undefined) fail('not-found', 'no work item is bound to this automation occurrence')
@@ -491,11 +494,11 @@ export class AssistantWorkItemsService extends Service {
    * This path performs no recovery, parking, settlement or ledger mutation.
    */
   readReport(agent: Agent | undefined, input: { revision: number; offset?: number; maxBytes?: number }): WorkItemReportPage {
-    const components = this.#required()
-    const occurrenceId = this.#occurrenceId(agent)
+    const components = this.workItemsRequired()
+    const occurrenceId = this.workItemsOccurrenceId(agent)
     const item = components.store.findItemByOccurrence(occurrenceId)
     if (item === undefined) fail('not-found', 'no work item is bound to this automation occurrence')
-    const receipt = this.#assertOwnerRoute(item)
+    const receipt = this.workItemsAssertOwnerRoute(item)
     if (receipt.principalVersion !== item.owner.principalVersion
       || receipt.bindingVersion !== item.owner.bindingVersion
       || receipt.generation !== item.owner.generation) {
@@ -536,7 +539,7 @@ export class AssistantWorkItemsService extends Service {
 
   /** Bounded health projection; never creates the ledger when disabled. */
   health(): WorkItemHealth {
-    const config = this.#config
+    const config = this.workItemsConfig
     const empty: WorkItemHealth = Object.freeze({
       enabled: config.enabled,
       mode: config.mode,
@@ -544,7 +547,7 @@ export class AssistantWorkItemsService extends Service {
       lastAdmitAt: null,
       lastDispatchAt: null,
       dispatchUnknown: 0,
-      workerConnected: config.enabled && this.#automations() !== undefined,
+      workerConnected: config.enabled && this.workItemsAutomations() !== undefined,
       ownerRouteValid: false,
       follows: Object.freeze({ open: 0, closed: 0, unresolved: 0, degraded: null }),
       authority: Object.freeze({ legacy: 0, parked: 0, lastDeniedAt: null, lastDeniedReason: null }),
@@ -556,18 +559,18 @@ export class AssistantWorkItemsService extends Service {
         degraded: null,
       }),
       evaluation: Object.freeze({
-        enabled: this.#evaluationEnabled(),
-        connected: this.#evaluation.connected,
+        enabled: this.workItemsEvaluationEnabled(),
+        connected: this.workItemsEvaluation.connected,
         pending: 0,
         exported: 0,
         skipped: 0,
-        degraded: this.#evaluation.degraded,
+        degraded: this.workItemsEvaluation.degraded,
       }),
     })
-    if (!config.enabled || this.#closed) return empty
+    if (!config.enabled || this.workItemsClosed) return empty
     let components: Components
     try {
-      components = this.#open()
+      components = this.workItemsOpen()
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: ledger unavailable: ${describe(error)}`)
       return empty
@@ -579,28 +582,28 @@ export class AssistantWorkItemsService extends Service {
       lastAdmitAt: components.store.lastAdmitAt(),
       lastDispatchAt: components.store.lastDispatchedAt(),
       dispatchUnknown: components.store.countDispatchUnknown(),
-      workerConnected: workerIsConnected(this.#automations()),
-      ownerRouteValid: this.#ownerRouteValid(),
-      follows: this.#followHealth(components.store),
-      authority: this.#authorityHealth(components.store),
+      workerConnected: workerIsConnected(this.workItemsAutomations()),
+      ownerRouteValid: this.workItemsOwnerRouteValid(),
+      follows: this.workItemsFollowHealth(components.store),
+      authority: this.workItemsAuthorityHealth(components.store),
       settlement: Object.freeze({
         enabled: config.settlement.enabled,
         pending: components.store.countLatestOutcomes('pending'),
         observed: components.store.countLatestOutcomes('observed'),
         unverified: components.store.countLatestOutcomes('unverified'),
-        degraded: this.#settlementDegraded(),
+        degraded: this.workItemsSettlementDegraded(),
       }),
-      evaluation: Object.freeze(this.#evaluationHealth(components)),
+      evaluation: Object.freeze(this.workItemsEvaluationHealth(components)),
     })
   }
 
   /** Close the ledger exactly once; safe on an intake that never opened. */
   close(): void {
-    if (this.#closed) return
-    this.#closed = true
-    this.#evaluation.dispose()
-    const components = this.#components
-    this.#components = undefined
+    if (this.workItemsClosed) return
+    this.workItemsClosed = true
+    this.workItemsEvaluation.dispose()
+    const components = this.workItemsComponents
+    this.workItemsComponents = undefined
     if (components === undefined) return
     try {
       components.store.close()
@@ -610,21 +613,21 @@ export class AssistantWorkItemsService extends Service {
   }
 
   /** Export is possible only from an active intake with settlement armed. */
-  #evaluationEnabled(): boolean {
-    return !this.#closed && isActive(this.#config) && this.#config.settlement.enabled
+  private workItemsEvaluationEnabled(): boolean {
+    return !this.workItemsClosed && isActive(this.workItemsConfig) && this.workItemsConfig.settlement.enabled
   }
 
   /** One bounded counts read for the export projection. */
-  #evaluationHealth(components: Components): WorkItemEvaluationHealth {
+  private workItemsEvaluationHealth(components: Components): WorkItemEvaluationHealth {
     const counts = components.store.countEvaluations()
-    const enabled = this.#evaluationEnabled()
+    const enabled = this.workItemsEvaluationEnabled()
     return {
       enabled,
-      connected: this.#evaluation.connected,
+      connected: this.workItemsEvaluation.connected,
       pending: counts.pending,
       exported: counts.exported,
       skipped: counts.skipped,
-      degraded: this.#evaluationDegraded(counts.pending),
+      degraded: this.workItemsEvaluationDegraded(counts.pending),
     }
   }
 
@@ -635,27 +638,27 @@ export class AssistantWorkItemsService extends Service {
    * export; a deployment that never installs Evaluation must not look degraded
    * while it has nothing to export.
    */
-  #evaluationDegraded(pending: number): string | null {
-    if (!this.#config.settlement.enabled) return null
-    if (this.#config.scope === null) return 'owner-route-unavailable'
-    if (!this.#evaluation.connected) return pending > 0 ? 'sink-unavailable' : null
-    return this.#evaluation.degraded
+  private workItemsEvaluationDegraded(pending: number): string | null {
+    if (!this.workItemsConfig.settlement.enabled) return null
+    if (this.workItemsConfig.scope === null) return 'owner-route-unavailable'
+    if (!this.workItemsEvaluation.connected) return pending > 0 ? 'sink-unavailable' : null
+    return this.workItemsEvaluation.degraded
   }
 
   /** Fire-and-forget bounded drain; export failures must never fail a caller. */
-  #drainEvaluation(): void {
-    void this.#evaluation.drain().catch(error => {
+  private workItemsDrainEvaluation(): void {
+    void this.workItemsEvaluation.drain().catch(error => {
       this.ctx.logger.warn(`assistant-work-items: Evaluation export failed: ${describe(error)}`)
     })
   }
 
-  #available(): Components {
-    if (!this.#config.enabled) fail('disabled', 'the work-item intake is disabled')
-    return this.#open()
+  private workItemsAvailable(): Components {
+    if (!this.workItemsConfig.enabled) fail('disabled', 'the work-item intake is disabled')
+    return this.workItemsOpen()
   }
 
   /** Best-effort bounded sweep; log and continue on any failure. */
-  #sweepQuietly(components: Components): void {
+  private workItemsSweepQuietly(components: Components): void {
     if (!components.signals.armed()) return
     try {
       components.signals.sweep()
@@ -665,7 +668,7 @@ export class AssistantWorkItemsService extends Service {
   }
 
   /** Best-effort bounded re-dispatch sweep behind ordinary claim activity. */
-  #wakeQuietly(components: Components): void {
+  private workItemsWakeQuietly(components: Components): void {
     try {
       components.dispatch.wakePending()
     } catch (error) {
@@ -674,22 +677,22 @@ export class AssistantWorkItemsService extends Service {
   }
 
   /** Best-effort settlement pass behind ordinary claim activity. */
-  #settleQuietly(components: Components): void {
-    if (!this.#config.settlement.enabled) return
+  private workItemsSettleQuietly(components: Components): void {
+    if (!this.workItemsConfig.settlement.enabled) return
     try {
-      this.#settlement(components, false)
+      this.workItemsSettlement(components, false)
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: settlement failed: ${describe(error)}`)
     }
   }
 
   /** Build the bounded settlement pass from config; never admits or wakes. */
-  #settlement(components: Components, force: boolean): SettlementResult {
-    const config = this.#config
+  private workItemsSettlement(components: Components, force: boolean): SettlementResult {
+    const config = this.workItemsConfig
     const scope = config.scope
     const result = runSettlement({
       store: components.store,
-      delivery: this.#delivery(),
+      delivery: this.workItemsDelivery(),
       scope: scope === null
         ? null
         : {
@@ -702,10 +705,10 @@ export class AssistantWorkItemsService extends Service {
       maxSourcesPerSweep: config.settlement.maxSourcesPerSweep,
       maxPendingPerSweep: config.settlement.maxPendingPerSweep,
       maxSettlementsPerSweep: config.settlement.maxSettlementsPerSweep,
-      threads: follow => this.#resolveThread(follow),
+      threads: follow => this.workItemsResolveThread(follow),
       warn: message => this.ctx.logger.warn(message),
     }, force)
-    this.#followDegraded = result.report.followDegraded
+    this.workItemsFollowDegraded = result.report.followDegraded
     return result
   }
 
@@ -717,8 +720,8 @@ export class AssistantWorkItemsService extends Service {
    * degradation, rather than a missing source or a stale generation being read
    * as a closure.
    */
-  #resolveThread(follow: WorkItemFollowRecord): ThreadResolution {
-    const registration = this.#threadSources.get(follow.source)
+  private workItemsResolveThread(follow: WorkItemFollowRecord): ThreadResolution {
+    const registration = this.workItemsThreadSources.get(follow.source)
     if (registration === undefined) return { kind: 'unresolved', reason: 'source-missing' }
     // A source that regenerated cannot vouch for a follow recorded under its
     // old generation; the closure may still be true, but it is not observed.
@@ -746,13 +749,13 @@ export class AssistantWorkItemsService extends Service {
   }
 
   /** Live follow counts and degradation; never resolves or writes anything. */
-  #followHealth(store: WorkItemStore): WorkItemHealth['follows'] {
+  private workItemsFollowHealth(store: WorkItemStore): WorkItemHealth['follows'] {
     const counts = store.countFollows()
     let unresolved = 0
     let missingSource = false
     let mismatched = false
     for (const identity of store.openFollowIdentities()) {
-      const registration = this.#threadSources.get(identity.source)
+      const registration = this.workItemsThreadSources.get(identity.source)
       if (registration === undefined) {
         unresolved += 1
         missingSource = true
@@ -763,29 +766,29 @@ export class AssistantWorkItemsService extends Service {
     }
     const degraded: WorkItemFollowDegradedReason | null = missingSource
       ? 'source-missing'
-      : mismatched ? 'generation-mismatch' : this.#followDegraded
+      : mismatched ? 'generation-mismatch' : this.workItemsFollowDegraded
     return Object.freeze({ open: counts.open, closed: counts.closed, unresolved, degraded })
   }
 
   /** Degradation visible in health without running a pass or touching SQLite. */
-  #settlementDegraded(): string | null {
-    if (!this.#config.settlement.enabled) return null
-    if (this.#config.scope === null) return 'owner-route-unavailable'
-    return this.#delivery() === undefined ? 'missing-dependency' : null
+  private workItemsSettlementDegraded(): string | null {
+    if (!this.workItemsConfig.settlement.enabled) return null
+    if (this.workItemsConfig.scope === null) return 'owner-route-unavailable'
+    return this.workItemsDelivery() === undefined ? 'missing-dependency' : null
   }
 
-  #required(): Components {
-    const config = this.#config
+  private workItemsRequired(): Components {
+    const config = this.workItemsConfig
     if (!config.enabled) fail('disabled', 'the work-item intake is disabled')
     if (!isActive(config)) fail('observe-mode', 'the work-item intake is in observe mode; claim and report require mode: active')
-    return this.#open()
+    return this.workItemsOpen()
   }
 
-  #open(): Components {
-    const existing = this.#components
+  private workItemsOpen(): Components {
+    const existing = this.workItemsComponents
     if (existing !== undefined) return existing
-    if (this.#closed) fail('storage', 'the work-item intake is disposed')
-    const config = this.#config
+    if (this.workItemsClosed) fail('storage', 'the work-item intake is disposed')
+    const config = this.workItemsConfig
     const workspace = new WorkItemWorkspace(config.workRoot)
     workspace.prepare()
     const store = new WorkItemStore(config.databasePath)
@@ -797,10 +800,10 @@ export class AssistantWorkItemsService extends Service {
       store,
       ledger,
       workspace,
-      policy: this.#policy(),
-      delivery: this.#delivery(),
+      policy: this.workItemsPolicy(),
+      delivery: this.workItemsDelivery(),
       threadSource: kind => {
-        const registration = this.#threadSources.get(kind)
+        const registration = this.workItemsThreadSources.get(kind)
         return registration === undefined
           ? undefined
           : Object.freeze({ source: registration.source, generation: registration.generation })
@@ -808,13 +811,13 @@ export class AssistantWorkItemsService extends Service {
     })
     // One lazy policy resolver serves admission and revalidation: a peer that
     // registers after this plugin becomes visible to both without a restart.
-    const authority = new WorkItemAuthority({ policy: () => this.#policy() })
+    const authority = new WorkItemAuthority({ policy: () => this.workItemsPolicy() })
     const dispatch = new WorkItemDispatch({
       config,
       store,
       ledger,
-      automations: this.#automations(),
-      delivery: this.#delivery(),
+      automations: this.workItemsAutomations(),
+      delivery: this.workItemsDelivery(),
       authority,
     })
     // Signal sources are optional peers resolved lazily on every sweep, so a
@@ -824,12 +827,12 @@ export class AssistantWorkItemsService extends Service {
       config,
       store,
       admission,
-      delivery: () => this.#delivery(),
+      delivery: () => this.workItemsDelivery(),
       dispatch,
       warn: message => this.ctx.logger.warn(message),
     })
     const installed: Components = { workspace, store, ledger, admission, authority, dispatch, signals }
-    this.#components = installed
+    this.workItemsComponents = installed
     try {
       // Bounded startup reconcile: lease reclaim is lazy forever, so a host that
       // was down catches up on the first touch instead of on a timer.
@@ -842,7 +845,7 @@ export class AssistantWorkItemsService extends Service {
         }
       }
     } catch (error) {
-      this.#components = undefined
+      this.workItemsComponents = undefined
       store.close()
       throw error
     }
@@ -850,7 +853,7 @@ export class AssistantWorkItemsService extends Service {
   }
 
   /** Resolve the exact production automation occurrence for this agent. */
-  #occurrenceId(agent: Agent | undefined): string {
+  private workItemsOccurrenceId(agent: Agent | undefined): string {
     if (agent === undefined) fail('identity-mismatch', 'work-item tools require the worker automation run')
     const execution = (agent.ctx as unknown as { get(name: string): unknown }).get('assistantAutomationExecution')
     if (typeof execution !== 'object' || execution === null || Array.isArray(execution)
@@ -866,16 +869,16 @@ export class AssistantWorkItemsService extends Service {
     }
     const automationId = text(installed.automationId, 'automationId', 500)
     const occurrenceId = text(installed.occurrenceId, 'occurrenceId', 500)
-    if (automationId !== this.#config.workerAutomationId) {
+    if (automationId !== this.workItemsConfig.workerAutomationId) {
       fail('identity-mismatch', 'this automation is not the configured work-item worker')
     }
     return occurrenceId
   }
 
   /** Re-anchor a claim against the live owner route above the stored receipt. */
-  #assertOwnerRoute(item: WorkItemRecord): Readonly<PeerOwnerRouteReceipt> {
-    const config = this.#config
-    const delivery = this.#delivery()
+  private workItemsAssertOwnerRoute(item: WorkItemRecord): Readonly<PeerOwnerRouteReceipt> {
+    const config = this.workItemsConfig
+    const delivery = this.workItemsDelivery()
     if (delivery === undefined) fail('owner-route-unavailable', 'assistantDelivery is required to validate the owner route')
     const scope = item.scope
     if (scope.expiresAt <= Date.now()) fail('owner-route-expired', 'the work-item owner scope expired')
@@ -917,7 +920,7 @@ export class AssistantWorkItemsService extends Service {
    * fails the claim closed; the item is never claimed and never marked failed.
    * A later allow resumes it through the same wake path.
    */
-  #revalidateAuthority(components: Components, item: WorkItemRecord): void {
+  private workItemsRevalidateAuthority(components: Components, item: WorkItemRecord): void {
     const check = components.authority.check(item)
     if (check.kind === 'legacy') return
     if (check.kind === 'allow') {
@@ -934,7 +937,7 @@ export class AssistantWorkItemsService extends Service {
     fail('authority-unavailable', 'admission mandate could not be revalidated', check.detail)
   }
 
-  #authorityHealth(store: WorkItemStore): WorkItemAuthorityHealth {
+  private workItemsAuthorityHealth(store: WorkItemStore): WorkItemAuthorityHealth {
     const denied = store.lastAuthorityDenial()
     return Object.freeze({
       legacy: store.countAuthorityLegacy(),
@@ -944,11 +947,11 @@ export class AssistantWorkItemsService extends Service {
     })
   }
 
-  #ownerRouteValid(): boolean {
-    const config = this.#config
+  private workItemsOwnerRouteValid(): boolean {
+    const config = this.workItemsConfig
     const scope = config.scope
     if (scope === null) return false
-    const delivery = this.#delivery()
+    const delivery = this.workItemsDelivery()
     if (delivery === undefined) return false
     if (scope.expiresAt <= Date.now()) return false
     try {
@@ -964,15 +967,15 @@ export class AssistantWorkItemsService extends Service {
     }
   }
 
-  #policy(): PeerPolicyService | undefined {
+  private workItemsPolicy(): PeerPolicyService | undefined {
     return this.ctx.get('assistantPolicy') as PeerPolicyService | undefined
   }
 
-  #delivery(): PeerDeliveryService | undefined {
+  private workItemsDelivery(): PeerDeliveryService | undefined {
     return this.ctx.get('assistantDelivery') as PeerDeliveryService | undefined
   }
 
-  #automations(): PeerAutomationsService | undefined {
+  private workItemsAutomations(): PeerAutomationsService | undefined {
     return this.ctx.get('assistantAutomations') as PeerAutomationsService | undefined
   }
 }

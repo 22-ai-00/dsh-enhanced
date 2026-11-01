@@ -9,6 +9,7 @@ import { WorkItemAdmission } from '../src/admission.ts'
 import { WorkItemAuthority } from '../src/authority.ts'
 import { type Config, normalizeConfig, type NormalizedConfig } from '../src/config.ts'
 import { WorkItemDispatch } from '../src/dispatch.ts'
+import type { WorkItemEvaluationRegistration } from '../src/evaluation.ts'
 import { WorkItemLedger } from '../src/ledger.ts'
 import type {
   PeerAutomationsService,
@@ -220,9 +221,10 @@ async function serviceHarness(options: {
   mode?: 'observe' | 'active'
   withAutomations?: boolean
   extra?: Partial<Config>
+  root?: string
 } = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'assistant-work-items-service-'))
-  roots.push(root)
+  const root = options.root ?? await mkdtemp(join(tmpdir(), 'assistant-work-items-service-'))
+  if (options.root === undefined) roots.push(root)
   const ctx = new Context()
   const policy = new FakePolicyPeer(ctx)
   const delivery = new FakeDeliveryPeer(ctx)
@@ -1484,6 +1486,107 @@ describe('bounded report recall', () => {
       .output.render({}, { itemId: fixture.itemId, revision: 1, status: 'ready', notified: true })[0]!.text
     expect(rendered).toContain('queued for delivery')
     expect(rendered).not.toContain('owner was notified')
+  })
+})
+
+describe('Cordis traceable work-item service', () => {
+  test('serves getters and registrations through the real caller-context proxy', async () => {
+    const fixture = await serviceHarness()
+    const service = fixture.ctx.get('assistantWorkItems')!
+    expect(service).not.toBe(fixture.service)
+    expect(service.enabled).toBe(true)
+    expect(service.mode).toBe('active')
+    const revokeSignal = service.registerSignalSource({
+      source: { id: 'proxy-source', sourceVersion: 'proxy-source/v1', sweep: () => ({ candidates: [], cursor: null }) },
+    })
+    expect(service.sweepSignals(true).sources.map(source => source.source)).toContain('proxy-source')
+    revokeSignal()
+    revokeSignal()
+    expect(service.sweepSignals(true).sources.map(source => source.source)).not.toContain('proxy-source')
+    const registration = { source: 'proxy-ticket', generation: 'one', resolve: () => ({ state: 'open' as const, outcome: 'unknown' as const, digest: 'sha256:open' }) }
+    const revokeThread = service.registerThreadSource(registration)
+    expect(() => service.registerThreadSource(registration)).toThrow(/already registered/)
+    revokeThread()
+    revokeThread()
+    expect(() => service.registerThreadSource(registration)).not.toThrow()
+    expect(service.health()).toMatchObject({ enabled: true, mode: 'active', openItems: 0 })
+  })
+
+  test('claims, reports and recalls through a sibling proxy while preserving caller context', async () => {
+    const fixture = await serviceHarness()
+    const marker = Symbol('caller-context')
+    const caller = fixture.ctx.extend({ [marker]: 'consumer' })
+    const service = caller.assistantWorkItems
+    expect((service as unknown as { ctx: Context }).ctx).toBe(caller)
+    const seen: unknown[] = []
+    vi.spyOn(fixture.delivery, 'validateOwnerRoute').mockImplementation(function (this: FakeDeliveryPeer, input: RouteInput) {
+      seen.push((this.ctx as unknown as Record<symbol, unknown>)[marker])
+      return receipt(input)
+    })
+    service.admit(signal({ acceptanceRef: 'acceptance:proxy' }))
+    const agent = workerAgent('occ-1')
+    expect(service.claim(agent)).toMatchObject({ attempt: 1, acceptanceRef: 'acceptance:proxy' })
+    await service.report(agent, { status: 'progress', summary: 'proxy report content', idempotencyKey: 'proxy-report' })
+    expect(service.readReport(agent, { revision: 1 }).summary).toBe('proxy report content')
+    expect(service.status(agent).reports).toHaveLength(1)
+    // Admission captured its peers during provider construction; the live
+    // owner-route checks in claim/read must still use the consumer's context.
+    expect(seen).toContain('consumer')
+    expect(service.health()).toMatchObject({ openItems: 1, ownerRouteValid: true })
+    expect(errorCode(() => service.readReport(foregroundAgent(), { revision: 1 }))).toBe('identity-mismatch')
+    fixture.policy.setAllow(false)
+    expect(errorCode(() => service.readReport(agent, { revision: 1 }))).toBe('authority-revoked')
+  })
+
+  test('registers and revokes the trusted Evaluation sink through sibling proxies', async () => {
+    const fixture = await serviceHarness()
+    const service = fixture.ctx.assistantWorkItems
+    const sibling = fixture.ctx.extend().get('assistantWorkItems')!
+    const generation = service.trustedWorkItemProducerGeneration()
+    expect(sibling.trustedWorkItemProducerGeneration()).toBe(generation)
+    const owner: WorkItemEvaluationRegistration['owner'] = {
+      ownsTrustedAutomationEvaluationRegistration: () => false,
+      ownsTrustedDeliveryEvaluationRegistration: () => false,
+      ownsTrustedVerifierEvaluationRegistration: () => false,
+      ownsTrustedWorkItemEvaluationRegistration: value => value === registration,
+    }
+    const registration: WorkItemEvaluationRegistration = {
+      protocol: 'assistant-work-items/evaluation/v1', generation, owner,
+      append: () => Promise.resolve(),
+    }
+    const revoke = sibling.registerTrustedWorkItemEvaluationSink(registration)
+    expect(service.health().evaluation.connected).toBe(true)
+    expect(() => service.registerTrustedWorkItemEvaluationSink(registration)).toThrow(/already registered/)
+    revoke()
+    revoke()
+    expect(service.health().evaluation.connected).toBe(false)
+    const nextRevoke = service.registerTrustedWorkItemEvaluationSink(registration)
+    expect(sibling.health().evaluation.connected).toBe(true)
+    nextRevoke()
+    expect(() => service.registerTrustedWorkItemEvaluationSink({ ...registration, generation: 'stale-generation' })).toThrow(/generation is mismatched/)
+  })
+
+  test('shares close state across proxies, closes idempotently, and reopens durable reports in a new instance', async () => {
+    const fixture = await serviceHarness()
+    const service = fixture.ctx.get('assistantWorkItems')!
+    const sibling = fixture.ctx.extend().assistantWorkItems
+    const originalGeneration = service.trustedWorkItemProducerGeneration()
+    service.admit(signal())
+    const agent = workerAgent('occ-1')
+    const first = service.claim(agent)
+    await service.report(agent, { status: 'progress', summary: 'persisted before close', idempotencyKey: 'before-close' })
+    service.close()
+    sibling.close()
+    fixture.service.close()
+    expect(sibling.health()).toMatchObject({ openItems: 0, evaluation: { connected: false } })
+    expect(errorCode(() => sibling.claim(agent))).toBe('storage')
+    const restarted = await serviceHarness({ root: fixture.root })
+    const next = restarted.ctx.assistantWorkItems
+    expect(next.trustedWorkItemProducerGeneration()).not.toBe(originalGeneration)
+    expect(next.claim(agent)).toMatchObject({ itemId: first.itemId, replayed: true, attempt: 1 })
+    expect(next.readReport(agent, { revision: 1 }).summary).toBe('persisted before close')
+    next.close()
+    restarted.ctx.extend().assistantWorkItems.close()
   })
 })
 
