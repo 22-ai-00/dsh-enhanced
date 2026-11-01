@@ -120,17 +120,38 @@ function createDelivery(options: { invalid?: boolean; failCode?: string } = {}) 
   }
 }
 
+/**
+ * Mirror the real automation store's occurrence identity.
+ *
+ * The production intake derives the occurrence from
+ * `(automationId, triggerKind, triggerKey)` where the external trigger key is
+ * `(sourceId, eventId, occurredAt)`; an existing occurrence is returned as-is
+ * regardless of its status, so a completed occurrence is never re-run. The fake
+ * must behave the same way or a test can "pass" on an identity that the real
+ * peer would silently dedupe into a dead occurrence.
+ */
 function createAutomations(options: { failCode?: string } = {}) {
   const calls: IngestInput[] = []
+  const occurrences = new Map<string, { readonly id: string; readonly automationId: string; readonly eventId: string; readonly occurredAt: number }>()
   let failCode = options.failCode ?? ''
   const service: PeerAutomationsService = {
     ingestExternal(input) {
       calls.push(input)
       if (failCode !== '') throw peerError(failCode)
-      return { id: `occ-${String(calls.length)}`, automationId: input.automationId }
+      const key = `${input.automationId}\0${input.eventId}\0${String(input.occurredAt)}`
+      const existing = occurrences.get(key)
+      if (existing !== undefined) return existing
+      const occurrence = Object.freeze({
+        id: `occ-${String(occurrences.size + 1)}`,
+        automationId: input.automationId,
+        eventId: input.eventId,
+        occurredAt: input.occurredAt,
+      })
+      occurrences.set(key, occurrence)
+      return occurrence
     },
   }
-  return { service, calls, setFailCode(value: string) { failCode = value } }
+  return { service, calls, occurrences, setFailCode(value: string) { failCode = value } }
 }
 
 class FakePolicyPeer extends Service {
@@ -156,6 +177,7 @@ class FakeAutomationsPeer extends Service {
   constructor(ctx: Context) { super(ctx, 'assistantAutomations') }
   get calls(): IngestInput[] { return this.spy.calls }
   ingestExternal(input: IngestInput) { return this.spy.service.ingestExternal(input) }
+  setFailCode(value: string) { this.spy.setFailCode(value) }
 }
 
 interface RegisteredTool {
@@ -417,12 +439,122 @@ describe('work-item dispatch', () => {
     expect(fixture.store.getDispatch(admitted.item.id)).toMatchObject({ state: 'failed', reason: 'policy-denied' })
   })
 
-  test('surfaces an ambiguous wake failure and marks the dispatch failed', async () => {
+  test('an ambiguous wake failure is recorded honestly and retried once on the same identity', async () => {
     const fixture = await ledgerHarness()
     fixture.automations.setFailCode('runtime-conflict')
     const admitted = fixture.admission.admit(signal())
     expect(errorCode(() => fixture.dispatch.wake(admitted.item))).toBe('dispatch-failed')
-    expect(fixture.store.getDispatch(admitted.item.id)).toMatchObject({ state: 'failed', reason: 'dispatch-failed' })
+    expect(fixture.store.getDispatch(admitted.item.id)).toMatchObject({
+      state: 'failed',
+      reason: 'unknown_after_send',
+      wakeAttempts: 1,
+      generation: 0,
+      eventId: admitted.item.id,
+    })
+    expect(fixture.store.countDispatchUnknown()).toBe(1)
+
+    // The bounded lazy retry reuses the identical `(eventId, occurredAt)`, so
+    // it resolves the occurrence whether or not the first attempt committed.
+    fixture.automations.setFailCode('')
+    fixture.dispatch.wakePending()
+    expect(fixture.store.getDispatch(admitted.item.id)).toMatchObject({
+      state: 'dispatched',
+      occurrenceId: 'occ-1',
+      wakeAttempts: 1,
+      generation: 0,
+    })
+    expect(fixture.store.countDispatchUnknown()).toBe(0)
+  })
+
+  test('an unknown wake is retried at most once, then stays failed with its reason', async () => {
+    const fixture = await ledgerHarness()
+    fixture.automations.setFailCode('runtime-conflict')
+    const admitted = fixture.admission.admit(signal())
+    expect(errorCode(() => fixture.dispatch.wake(admitted.item))).toBe('dispatch-failed')
+    // The first lazy retry re-wakes the same generation and fails again; the
+    // sweep itself is best-effort and never throws at the caller.
+    expect(fixture.dispatch.wakePending()).toHaveLength(0)
+    expect(fixture.store.getDispatch(admitted.item.id)).toMatchObject({
+      state: 'failed',
+      reason: 'unknown_after_send',
+      wakeAttempts: 2,
+    })
+    expect(fixture.store.countDispatchUnknown()).toBe(1)
+    // Bounded: a now-healthy peer cannot make the exhausted row eligible again.
+    fixture.automations.setFailCode('')
+    expect(fixture.dispatch.wakePending()).toHaveLength(0)
+    expect(fixture.automations.calls).toHaveLength(2)
+    expect(fixture.store.countDispatchUnknown()).toBe(1)
+  })
+
+  test('an ambiguous send stops being reported once its item is withdrawn', async () => {
+    const fixture = await ledgerHarness()
+    fixture.automations.setFailCode('runtime-conflict')
+    const admitted = fixture.admission.admit(signal())
+    expect(errorCode(() => fixture.dispatch.wake(admitted.item))).toBe('dispatch-failed')
+    expect(fixture.store.countDispatchUnknown()).toBe(1)
+    fixture.automations.setFailCode('')
+    // The withdrawal settles the item without touching the already-failed
+    // dispatch row, which used to keep the counter non-zero forever.
+    expect(fixture.store.withdrawByDedupKey(admitted.item.dedupKey).outcome).toBe('withdrawn')
+    expect(fixture.store.countDispatchUnknown()).toBe(0)
+    expect(fixture.dispatch.wakePending()).toHaveLength(0)
+    expect(fixture.automations.calls).toHaveLength(1)
+  })
+
+  test('a hard recovery failure still propagates out of the lazy sweep', async () => {
+    const fixture = await ledgerHarness()
+    const admitted = fixture.admission.admit(signal())
+    const broken = new WorkItemDispatch({
+      config: fixture.config,
+      store: fixture.store,
+      ledger: fixture.ledger,
+      automations: undefined,
+      delivery: fixture.delivery.service,
+      now: fixture.now,
+    })
+    // A host missing the automations peer is not a per-row peer failure: the
+    // sweep must surface it instead of pretending recovery was attempted.
+    expect(errorCode(() => broken.wakePending())).toBe('missing-dependency')
+    expect(fixture.store.getDispatch(admitted.item.id)?.state).toBe('pending')
+  })
+
+  test('a persisted identity conflict is recorded distinctly instead of hidden', async () => {
+    const fixture = await ledgerHarness()
+    fixture.automations.setFailCode('idempotency-conflict')
+    const admitted = fixture.admission.admit(signal())
+    expect(errorCode(() => fixture.dispatch.wake(admitted.item))).toBe('dispatch-failed')
+    expect(fixture.store.getDispatch(admitted.item.id)).toMatchObject({
+      state: 'failed',
+      reason: 'idempotency-conflict',
+      generation: 0,
+    })
+    // It is a hard conflict, not an ambiguous send: never counted as unknown.
+    expect(fixture.store.countDispatchUnknown()).toBe(0)
+    fixture.automations.setFailCode('')
+    expect(fixture.dispatch.wakePending()).toHaveLength(0)
+  })
+
+  test('a crash after the peer committed resolves the same occurrence instead of duplicating it', async () => {
+    const fixture = await ledgerHarness()
+    const admitted = fixture.admission.admit(signal())
+    // Simulate the peer commit whose local bookkeeping never arrived: the
+    // occurrence exists, the dispatch row is still pending.
+    const committed = fixture.automations.service.ingestExternal({
+      sourceId: SOURCE,
+      automationId: WORKER,
+      eventId: admitted.item.id,
+      occurredAt: admitted.item.createdAt,
+    })
+    fixture.dispatch.wake(admitted.item)
+    expect(fixture.automations.occurrences.size).toBe(1)
+    expect(fixture.store.getDispatch(admitted.item.id)).toMatchObject({
+      state: 'dispatched',
+      occurrenceId: committed.id,
+    })
+    // A repeated wake of the same generation is the same external event.
+    fixture.dispatch.wakePending()
+    expect(fixture.automations.occurrences.size).toBe(1)
   })
 
   test('notifies the owner through delivery with the item binding', async () => {
@@ -664,7 +796,7 @@ describe('work-item ledger lifecycle', () => {
     expect(isolated.report.revision).toBe(1)
   })
 
-  test('lease recovery re-arms dispatch for the pending wake path', async () => {
+  test('lease recovery re-arms a NEW dispatch generation that really re-runs the worker', async () => {
     const fixture = await ledgerHarness()
     const admitted = fixture.admission.admit(signal())
     fixture.dispatch.wake(admitted.item)
@@ -672,10 +804,76 @@ describe('work-item ledger lifecycle', () => {
     fixture.ledger.claim({ itemId: admitted.item.id, runId: 'run-1', occurrenceId: 'occ-1' })
     fixture.advance(fixture.config.limits.leaseMs + 1)
     expect(fixture.ledger.recover().requeued).toContain(admitted.item.id)
-    expect(fixture.store.getDispatch(admitted.item.id)).toMatchObject({ state: 'pending', reason: 'lease-expired' })
+    const rearmed = fixture.store.getDispatch(admitted.item.id)
+    expect(rearmed).toMatchObject({ state: 'pending', reason: 'lease-expired', generation: 1 })
+    expect(rearmed?.eventId).toBe(`${admitted.item.id}#1`)
+    expect(rearmed?.occurredAt).toBe(fixture.now())
     fixture.dispatch.wakePending()
     expect(fixture.automations.calls).toHaveLength(2)
-    expect(fixture.store.getDispatch(admitted.item.id)).toMatchObject({ state: 'dispatched', occurrenceId: 'occ-2' })
+    expect(fixture.automations.calls[1]).toEqual({
+      sourceId: SOURCE,
+      automationId: WORKER,
+      eventId: `${admitted.item.id}#1`,
+      occurredAt: fixture.now(),
+    })
+    expect(fixture.store.getDispatch(admitted.item.id)).toMatchObject({
+      state: 'dispatched',
+      occurrenceId: 'occ-2',
+      generation: 1,
+    })
+    // The new occurrence is a real run: it can claim the item.
+    const claim = fixture.ledger.claim({ itemId: admitted.item.id, runId: 'run-2', occurrenceId: 'occ-2' })
+    expect(claim.item.state).toBe('claimed')
+  })
+
+  test('a waiting report schedules one delayed resume and never wakes it early', async () => {
+    const fixture = await ledgerHarness()
+    const admitted = fixture.admission.admit(signal())
+    fixture.dispatch.wake(admitted.item)
+    fixture.ledger.claim({ itemId: admitted.item.id, runId: 'run-1', occurrenceId: 'occ-1' })
+    fixture.ledger.report({
+      itemId: admitted.item.id,
+      runId: 'run-1',
+      status: 'waiting',
+      summary: 'Waiting on the upstream review.',
+      artifactPaths: [],
+      idempotencyKey: 'waiting-key-1',
+    })
+    const resume = fixture.store.getDispatch(admitted.item.id)
+    expect(resume).toMatchObject({ state: 'pending', reason: 'waiting-resume', generation: 1 })
+    expect(resume?.occurredAt).toBe(fixture.now() + fixture.config.limits.waitingResumeMs)
+    // Not due yet: the lazy sweep must not wake it early.
+    expect(fixture.dispatch.wakePending()).toHaveLength(0)
+    expect(fixture.automations.calls).toHaveLength(1)
+    fixture.advance(fixture.config.limits.waitingResumeMs)
+    fixture.dispatch.wakePending()
+    expect(fixture.automations.calls).toHaveLength(2)
+    expect(fixture.store.getDispatch(admitted.item.id)).toMatchObject({
+      state: 'dispatched',
+      occurrenceId: 'occ-2',
+      generation: 1,
+    })
+  })
+
+  test('a waiting resume is bounded by the attempt budget', async () => {
+    const fixture = await ledgerHarness({ extra: { limits: { maxAttempts: 1, waitingResumeMs: 60_000 } } })
+    const admitted = fixture.admission.admit(signal())
+    fixture.dispatch.wake(admitted.item)
+    fixture.ledger.claim({ itemId: admitted.item.id, runId: 'run-1', occurrenceId: 'occ-1' })
+    fixture.ledger.report({
+      itemId: admitted.item.id,
+      runId: 'run-1',
+      status: 'waiting',
+      summary: 'Waiting again.',
+      artifactPaths: [],
+      idempotencyKey: 'waiting-key-bounded',
+    })
+    // The attempt budget is spent, so no further generation is armed.
+    expect(fixture.store.getDispatch(admitted.item.id)).toMatchObject({
+      state: 'dispatched',
+      generation: 0,
+    })
+    expect(fixture.dispatch.wakePending()).toHaveLength(0)
   })
 })
 
@@ -706,6 +904,19 @@ describe('work-item store projection', () => {
         SELECT item_id, run_id, occurrence_id, state, leased_until, created_at, updated_at FROM work_item_claim_v2;
       DROP TABLE work_item_claim_v2;
       DROP TABLE work_item_outcome;
+      ALTER TABLE work_item_dispatch RENAME TO work_item_dispatch_v4;
+      CREATE TABLE work_item_dispatch (
+        item_id TEXT PRIMARY KEY REFERENCES work_item(id) ON DELETE RESTRICT,
+        automation_id TEXT NOT NULL, event_id TEXT NOT NULL,
+        occurred_at INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending', 'dispatched', 'failed')),
+        occurrence_id TEXT, reason TEXT,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        UNIQUE(automation_id, event_id)
+      ) STRICT;
+      INSERT INTO work_item_dispatch(item_id, automation_id, event_id, occurred_at, state, occurrence_id, reason, created_at, updated_at)
+        SELECT item_id, automation_id, event_id, occurred_at, state, occurrence_id, reason, created_at, updated_at FROM work_item_dispatch_v4;
+      DROP TABLE work_item_dispatch_v4;
       UPDATE work_item_schema_meta SET value = '1' WHERE key = 'schema_version';
       PRAGMA user_version = 1;
     `)
@@ -714,7 +925,7 @@ describe('work-item store projection', () => {
     closers.push(() => reopened.close())
     expect(reopened.findClaimByRun('run-1')).toMatchObject({ claimId: 1, itemId: admitted.item.id, state: 'active' })
     expect(reopened.findItemById(admitted.item.id)).toMatchObject({ state: 'claimed', owner: { generation: 2 } })
-    expect(reopened.stats()).toMatchObject({ items: 1, schemaVersion: 3, outcomes: 0, pendingOutcomes: 0 })
+    expect(reopened.stats()).toMatchObject({ items: 1, schemaVersion: 4, outcomes: 0, pendingOutcomes: 0 })
   })
 })
 
@@ -792,6 +1003,45 @@ describe('work-item service identity and tools', () => {
     const status = fixture.service.status(workerAgent('occ-1'))
     expect(status.reports).toHaveLength(1)
     expect(status.openItems).toBe(0)
+  })
+
+  test('claim lazily retries an unknown dispatch before resolving its occurrence', async () => {
+    const fixture = await serviceHarness()
+    fixture.automations?.setFailCode('runtime-conflict')
+    const admitted = fixture.service.admit(signal())
+    expect(admitted.dispatch).toMatchObject({ state: 'failed', reason: 'unknown_after_send' })
+    expect(fixture.service.health().dispatchUnknown).toBe(1)
+    fixture.automations?.setFailCode('')
+    expect(errorCode(() => fixture.service.claim(workerAgent('occ-1')))).toBeUndefined()
+    expect(fixture.service.health().dispatchUnknown).toBe(0)
+    expect(fixture.service.health().lastDispatchAt).not.toBeNull()
+  })
+
+  test('a waiting report resumes through the claim sweep only once it is due', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const start = Date.now()
+      const fixture = await serviceHarness({ extra: { limits: { waitingResumeMs: 60_000 } } })
+      fixture.service.admit(signal())
+      fixture.service.claim(workerAgent('occ-1'))
+      await fixture.service.report(workerAgent('occ-1'), {
+        status: 'waiting',
+        summary: 'Waiting on the upstream review.',
+        idempotencyKey: 'waiting-e2e',
+      })
+      expect(fixture.automations?.calls).toHaveLength(1)
+      // Halfway through the delay the sweep is still a no-op.
+      vi.setSystemTime(start + 30_000)
+      expect(errorCode(() => fixture.service.claim(workerAgent('occ-unknown')))).toBe('not-found')
+      expect(fixture.automations?.calls).toHaveLength(1)
+      // Once due, the ordinary claim traffic re-dispatches a fresh occurrence.
+      vi.setSystemTime(start + 60_000)
+      expect(errorCode(() => fixture.service.claim(workerAgent('occ-unknown')))).toBe('not-found')
+      expect(fixture.automations?.calls).toHaveLength(2)
+      expect(fixture.service.claim(workerAgent('occ-2'))).toMatchObject({ attempt: 2, replayed: false })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   test('rejects foreground, preview, foreign and unknown identities', async () => {

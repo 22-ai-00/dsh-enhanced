@@ -227,6 +227,8 @@ export class WorkItemAdmission {
       automationId: config.workerAutomationId ?? '',
       eventId: id,
       occurredAt: now,
+      generation: 0,
+      wakeAttempts: 0,
       state: active ? 'pending' : 'failed',
       occurrenceId: null,
       reason: active ? null : 'observe-only',

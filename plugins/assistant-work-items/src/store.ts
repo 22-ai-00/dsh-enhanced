@@ -35,7 +35,9 @@ import type {
 } from './types.ts'
 import { CLAIMABLE_STATES, OPEN_STATES, WorkItemError } from './types.ts'
 
-const SCHEMA_VERSION = 3
+const SCHEMA_VERSION = 4
+/** Ambiguous wake failures one generation may retry before the gap stays visible. */
+const MAX_UNKNOWN_WAKE_ATTEMPTS = 1
 /** Default bounded settlement window: seven days. */
 const DEFAULT_SETTLE_WINDOW_MS = 604_800_000
 const MEMORY_DATABASE = ':memory:'
@@ -86,6 +88,19 @@ const ITEM_ALIASES = ITEM_COLUMNS.map(column => {
 const INSERT_ITEM = `INSERT INTO work_item(${ITEM_COLUMNS.join(', ')}) VALUES (${ITEM_COLUMNS.map(() => '?').join(', ')})`
 
 const REPORTABLE_STATES: readonly WorkItemState[] = ['claimed', 'working', 'waiting']
+
+/**
+ * Deterministic external event identity for one dispatch generation.
+ *
+ * Generation 0 is the admission identity and equals the item id, so existing
+ * rows keep their exact `(event_id, occurred_at)` pair. Later generations append
+ * a suffix, because the automation intake dedupes occurrences by
+ * `(automationId, eventId, occurredAt)` and would replay a completed occurrence
+ * instead of starting a new run.
+ */
+export function dispatchEventId(itemId: string, generation: number): string {
+  return generation === 0 ? itemId : `${itemId}#${String(generation)}`
+}
 
 function fail(code: ConstructorParameters<typeof WorkItemError>[0], message: string, detail?: string): never {
   throw new WorkItemError(code, message, detail)
@@ -198,6 +213,8 @@ function validateSchema(database: DatabaseSync): void {
         item_id TEXT PRIMARY KEY REFERENCES work_item(id) ON DELETE RESTRICT,
         automation_id TEXT NOT NULL, event_id TEXT NOT NULL,
         occurred_at INTEGER NOT NULL,
+        generation INTEGER NOT NULL DEFAULT 0,
+        wake_attempts INTEGER NOT NULL DEFAULT 0,
         state TEXT NOT NULL CHECK(state IN ('pending', 'dispatched', 'failed')),
         occurrence_id TEXT, reason TEXT,
         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
@@ -206,8 +223,8 @@ function validateSchema(database: DatabaseSync): void {
       CREATE TABLE work_item_schema_meta (
         key TEXT PRIMARY KEY, value TEXT NOT NULL
       ) STRICT, WITHOUT ROWID;
-      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '3');
-      PRAGMA user_version = 3;
+      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '4');
+      PRAGMA user_version = 4;
       COMMIT;
     `)
     return
@@ -245,7 +262,20 @@ function validateSchema(database: DatabaseSync): void {
       COMMIT;
     `)
   }
-  if (version !== 1 && version !== 2 && version !== SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
+  if (version === 1 || version === 2 || version === 3) {
+    // v4 scopes a dispatch row to one delivery generation. Existing rows are
+    // generation 0, whose identity is exactly the stored `event_id` /
+    // `occurred_at`; no value is rewritten, so an in-flight wake stays valid.
+    database.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE work_item_dispatch ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE work_item_dispatch ADD COLUMN wake_attempts INTEGER NOT NULL DEFAULT 0;
+      UPDATE work_item_schema_meta SET value = '4' WHERE key = 'schema_version';
+      PRAGMA user_version = 4;
+      COMMIT;
+    `)
+  }
+  if (version !== 1 && version !== 2 && version !== 3 && version !== SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
   const expected = JSON.stringify(['work_item', 'work_item_claim', 'work_item_dispatch', 'work_item_event', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta'])
   const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Row[]).map(row => String(row['name']))
   if (JSON.stringify(tables) !== expected) fail('storage', 'work-item database schema is not the expected shape')
@@ -340,6 +370,8 @@ function dispatchFromRow(row: Row): WorkItemDispatchRecord {
     automationId: String(row['automation_id']),
     eventId: String(row['event_id']),
     occurredAt: Number(row['occurred_at']),
+    generation: Number(row['generation'] ?? 0),
+    wakeAttempts: Number(row['wake_attempts'] ?? 0),
     state: String(row['state']) as WorkItemDispatchState,
     occurrenceId: optString(row['occurrence_id']),
     reason: optString(row['reason']),
@@ -621,8 +653,21 @@ export class WorkItemStore {
     return Number(row['count'])
   }
 
+  /**
+   * Ambiguous sends that still describe an actionable gap.
+   *
+   * A failed row is dead weight once its item is terminal or observed (for
+   * example a withdrawal after an ambiguous send): no retry is owed and the
+   * owner already settled the item, so counting it would report a permanent
+   * false gap. The gate mirrors `wakePending()`'s eligibility check.
+   */
   countDispatchUnknown(): number {
-    const row = this.#statement("SELECT COUNT(*) AS count FROM work_item_dispatch WHERE state = 'failed' AND reason = 'unknown_after_send'").get() as Row
+    const row = this.#statement(`
+      SELECT COUNT(*) AS count FROM work_item_dispatch d
+      JOIN work_item i ON i.id = d.item_id
+      WHERE d.state = 'failed' AND d.reason = 'unknown_after_send'
+        AND i.observed = 0 AND i.state IN (${OPEN_STATE_PLACEHOLDERS})
+    `).get(...OPEN_STATES) as Row
     return Number(row['count'])
   }
 
@@ -643,9 +688,9 @@ export class WorkItemStore {
       )
       this.#appendEvent(record.id, event.kind, event.actor, event.detail, record.createdAt)
       this.#statement(`
-        INSERT INTO work_item_dispatch(item_id, automation_id, event_id, occurred_at, state, occurrence_id, reason, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(dispatch.itemId, dispatch.automationId, dispatch.eventId, dispatch.occurredAt, dispatch.state, dispatch.occurrenceId, dispatch.reason, dispatch.createdAt, dispatch.updatedAt)
+        INSERT INTO work_item_dispatch(item_id, automation_id, event_id, occurred_at, generation, wake_attempts, state, occurrence_id, reason, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(dispatch.itemId, dispatch.automationId, dispatch.eventId, dispatch.occurredAt, dispatch.generation, dispatch.wakeAttempts, dispatch.state, dispatch.occurrenceId, dispatch.reason, dispatch.createdAt, dispatch.updatedAt)
     })
   }
 
@@ -877,12 +922,35 @@ export class WorkItemStore {
     return row === undefined ? undefined : dispatchFromRow(row)
   }
 
+  /**
+   * Pending dispatches whose due time has arrived.
+   *
+   * `occurred_at` doubles as the due time: admission sets it to the admit
+   * instant, a lease reclaim re-arms it at the reclaim instant, and a `waiting`
+   * report re-arms it at `now + limits.waitingResumeMs`. Filtering here keeps
+   * recovery lazy and prevents an early wake of a deliberately delayed resume.
+   */
   listOpenDispatches(limit: number): readonly WorkItemDispatchRecord[] {
     return Object.freeze((this.#statement(`
       SELECT * FROM work_item_dispatch
-      WHERE state = 'pending'
-      ORDER BY created_at ASC LIMIT ?
-    `).all(limit) as Row[]).map(dispatchFromRow))
+      WHERE state = 'pending' AND occurred_at <= ?
+      ORDER BY occurred_at ASC, created_at ASC LIMIT ?
+    `).all(this.#now(), limit) as Row[]).map(dispatchFromRow))
+  }
+
+  /**
+   * Failed dispatches whose wake outcome is unknown and that still own one
+   * bounded retry inside the same generation.
+   */
+  listRetryableUnknownDispatches(limit: number): readonly WorkItemDispatchRecord[] {
+    return Object.freeze((this.#statement(`
+      SELECT d.* FROM work_item_dispatch d
+      JOIN work_item i ON i.id = d.item_id
+      WHERE d.state = 'failed' AND d.reason = 'unknown_after_send'
+        AND i.observed = 0 AND i.state IN (${OPEN_STATE_PLACEHOLDERS})
+        AND d.wake_attempts <= ?
+      ORDER BY d.updated_at ASC LIMIT ?
+    `).all(...OPEN_STATES, MAX_UNKNOWN_WAKE_ATTEMPTS, limit) as Row[]).map(dispatchFromRow))
   }
 
   markDispatchDispatched(itemId: string, occurrenceId: string): void {
@@ -907,6 +975,64 @@ export class WorkItemStore {
       this.#statement("UPDATE work_item_dispatch SET state = 'failed', reason = ?, updated_at = ? WHERE item_id = ?").run(reason, now, itemId)
       this.#appendEvent(itemId, 'dispatch-failed', 'admission', { reason }, now)
     })
+  }
+
+  /**
+   * Record an ambiguous wake failure: the peer may or may not have committed
+   * the occurrence, so the row is failed with `unknown_after_send` and the
+   * generation's retry budget is spent once.
+   *
+   * The identity is preserved, so a retry resolves the same occurrence instead
+   * of minting a second run.
+   */
+  markDispatchUnknown(itemId: string): WorkItemDispatchRecord {
+    const now = this.#now()
+    return this.#transaction(() => {
+      this.#requireItem(itemId)
+      const current = this.getDispatch(itemId)
+      if (current === undefined) fail('storage', 'work item has no dispatch row')
+      const attempts = current.wakeAttempts + 1
+      this.#statement("UPDATE work_item_dispatch SET state = 'failed', reason = 'unknown_after_send', wake_attempts = ?, updated_at = ? WHERE item_id = ?")
+        .run(attempts, now, itemId)
+      this.#appendEvent(itemId, 'dispatch-unknown', 'admission', { generation: current.generation, attempts, eventId: current.eventId }, now)
+      return this.getDispatch(itemId) as WorkItemDispatchRecord
+    })
+  }
+
+  /**
+   * Re-arm one failed-with-unknown row inside the *same* generation.
+   *
+   * The persisted event id and occurred-at are reused verbatim, so the retry is
+   * idempotent against the automation intake: if the first attempt did commit,
+   * the retry resolves that occurrence; if it did not, the retry creates it.
+   */
+  retryUnknownDispatch(itemId: string): WorkItemDispatchRecord {
+    return this.#transaction(() => {
+      this.#requireItem(itemId)
+      const current = this.getDispatch(itemId)
+      if (current === undefined) fail('storage', 'work item has no dispatch row')
+      if (current.state !== 'failed' || current.reason !== 'unknown_after_send') fail('invalid-state', 'dispatch is not awaiting an unknown-outcome retry')
+      if (current.wakeAttempts > MAX_UNKNOWN_WAKE_ATTEMPTS) fail('invalid-state', 'dispatch unknown retry budget is spent')
+      this.#writeRearm(current, current.generation, current.eventId, current.occurredAt, current.wakeAttempts, 'unknown_after_send')
+      return this.getDispatch(itemId) as WorkItemDispatchRecord
+    })
+  }
+
+  #writeRearm(
+    current: WorkItemDispatchRecord,
+    generation: number,
+    eventId: string,
+    occurredAt: number,
+    wakeAttempts: number,
+    reason: string,
+  ): void {
+    const now = this.#now()
+    this.#statement(`
+      UPDATE work_item_dispatch
+      SET event_id = ?, occurred_at = ?, generation = ?, wake_attempts = ?, state = 'pending', occurrence_id = NULL, reason = ?, updated_at = ?
+      WHERE item_id = ?
+    `).run(eventId, occurredAt, generation, wakeAttempts, reason, now, current.itemId)
+    this.#appendEvent(current.itemId, 'dispatch-rearmed', 'recovery', { reason, generation, eventId, occurredAt, wakeAttempts }, now)
   }
 
   /**
@@ -949,8 +1075,13 @@ export class WorkItemStore {
           .run(now, current.id)
         // Put the dispatch row back in the only state `wakePending()` scans, so
         // recovery is driven by the ordinary wake path rather than a side door.
-        this.#statement("UPDATE work_item_dispatch SET state = 'pending', occurrence_id = NULL, reason = 'lease-expired', updated_at = ? WHERE item_id = ?")
-          .run(now, current.id)
+        // A new generation is owed here: the previous occurrence completed (or
+        // died), so re-waking the old identity would be a silent no-op.
+        const dispatch = this.getDispatch(current.id)
+        if (dispatch !== undefined) {
+          const generation = dispatch.generation + 1
+          this.#writeRearm(dispatch, generation, dispatchEventId(current.id, generation), now, 0, 'lease-expired')
+        }
         this.#appendEvent(current.id, 'reclaimed', 'recovery', { reason: 'lease-expired', attempt: current.attempt }, now)
         return 'requeued'
       })
@@ -1058,6 +1189,7 @@ export class WorkItemStore {
     idempotencyKey: string
     maxReports: number
     leaseMs: number
+    waitingResumeMs: number
   }): ReportResult {
     return this.#transaction(() => {
       const item = this.#requireItem(input.itemId)
@@ -1122,6 +1254,20 @@ export class WorkItemStore {
           .run(input.status === 'waiting' ? 'released' : 'completed', now, claim.claimId)
       }
       this.#appendEvent(item.id, 'reported', 'worker', { revision, status: input.status }, now)
+      // `waiting` is not terminal: the item stays claimable, but nobody holds
+      // the lease and no event is owed, so a waiting item would never resume
+      // unless the report itself schedules the next generation. Resume is
+      // delayed by `waitingResumeMs` and bounded by the attempt budget, so a
+      // worker cannot spin occurrences by reporting `waiting` repeatedly.
+      const resume = input.status === 'waiting'
+        && !item.observed
+        && item.attempt < item.maxAttempts
+        && this.getDispatch(item.id) !== undefined
+      if (resume) {
+        const dispatch = this.getDispatch(item.id) as WorkItemDispatchRecord
+        const generation = dispatch.generation + 1
+        this.#writeRearm(dispatch, generation, dispatchEventId(item.id, generation), now + input.waitingResumeMs, 0, 'waiting-resume')
+      }
       // The outcome revision is derived in the same transaction as the terminal
       // state change, so a crash can never leave a `ready` item with no outcome.
       const outcome = deriveReportOutcome({

@@ -4,7 +4,7 @@ import type { WorkItemLedger } from './ledger.ts'
 import type { PeerAutomationsService, PeerDeliveryService } from './peers.ts'
 import type { WorkItemStore } from './store.ts'
 import type { WorkItemNotification, WorkItemRecord, WorkItemReportRecord } from './types.ts'
-import { WorkItemError } from './types.ts'
+import { OPEN_STATES, WorkItemError } from './types.ts'
 
 function fail(code: ConstructorParameters<typeof WorkItemError>[0], message: string, detail?: string): never {
   throw new WorkItemError(code, message, detail)
@@ -43,11 +43,13 @@ export class WorkItemDispatch {
   }
 
   /**
-   * Wake the worker automation for one admitted item.
+   * Wake the worker automation for one dispatch generation.
    *
-   * The event id is the item id, so a repeated wake is the same external event
-   * and the automations store deduplicates it. `occurredAt` therefore must stay
-   * the admission timestamp; changing it would look like a new occurrence.
+   * The event identity is read from the dispatch row, never reconstructed from
+   * the item: generation 0 uses the admission identity, and every re-arm has a
+   * distinct `(eventId, occurredAt)` pair so the automation intake starts a new
+   * occurrence instead of replaying the completed one. Within one generation
+   * the identity is stable, which is what makes a retry after a crash safe.
    */
   wake(item: WorkItemRecord): void {
     const config = this.#deps.config
@@ -63,36 +65,71 @@ export class WorkItemDispatch {
     try {
       const occurrence = automations.ingestExternal({
         sourceId: config.intakeSourceId,
-        automationId: config.workerAutomationId ?? '',
-        eventId: item.id,
+        automationId: dispatch.automationId === '' ? (config.workerAutomationId ?? '') : dispatch.automationId,
+        eventId: dispatch.eventId,
         occurredAt: dispatch.occurredAt,
       })
       this.#deps.store.markDispatchDispatched(item.id, occurrence.id)
     } catch (error) {
       const code = peerCode(error)
-      // The event already exists: a previous wake succeeded but the local
-      // bookkeeping did not commit. Recover the occurrence instead of failing.
+      // The persisted identity already belongs to a different event. Generation
+      // scoping makes this deterministic corruption rather than a replay, so it
+      // is recorded under its own reason and surfaced as a typed error instead
+      // of being laundered into a generic permanent failure.
       if (code === 'idempotency-conflict') {
         this.#deps.store.markDispatchFailed(item.id, 'idempotency-conflict')
-        return
+        throw new WorkItemError('dispatch-failed', 'worker automation wake hit a conflicting event identity', code)
       }
+      // A fail-closed policy refusal is a definitive answer: the occurrence was
+      // never created, and re-waking cannot change the policy decision.
       if (code === 'policy-denied' || code === 'policy') {
         this.#deps.store.markDispatchFailed(item.id, 'policy-denied')
         return
       }
-      this.#deps.store.markDispatchFailed(item.id, 'dispatch-failed')
-      throw new WorkItemError('dispatch-failed', 'worker automation wake failed', code)
+      // Anything else is ambiguous: the peer may have committed the occurrence
+      // before the failure. Record that honestly and spend the generation's one
+      // bounded retry on the identical identity, so the retry either resolves
+      // the committed occurrence or creates it.
+      try {
+        this.#deps.store.markDispatchUnknown(item.id)
+      } catch {
+        // If even the bookkeeping write fails, surface the original peer error;
+        // the row stays in whatever durable state the failed write left it.
+      }
+      throw new WorkItemError('dispatch-failed', 'worker automation wake outcome is unknown', code)
     }
   }
 
-  /** Wake every dispatch row still pending, bounded by `limit`. */
+  /**
+   * Bounded lazy sweep over dispatch rows this host still owes a run.
+   *
+   * Unknown-outcome rows get their one same-generation retry first, then due
+   * pending rows are woken normally. Nothing here runs on a timer: the sweep is
+   * driven by the existing claim/admit/report touches and by startup.
+   */
   wakePending(limit = 10): readonly WorkItemRecord[] {
     const woken: WorkItemRecord[] = []
+    const seen = new Set<string>()
+    // One row's peer failure must not abort recovery for the rest: the durable
+    // row already records its own state/reason. Only the expected ambiguous-wake
+    // outcome is swallowed; a missing dependency, storage fault or invalid state
+    // is a host/programming error and must surface instead of sweeping silently.
+    const attempt = (itemId: string, retryUnknown: boolean): void => {
+      const item = this.#deps.store.findItemById(itemId)
+      if (item === undefined || item.observed || !OPEN_STATES.includes(item.state)) return
+      try {
+        if (retryUnknown) this.#deps.store.retryUnknownDispatch(item.id)
+        this.wake(item)
+        woken.push(item)
+      } catch (error) {
+        if (!(error instanceof WorkItemError) || error.code !== 'dispatch-failed') throw error
+      }
+      seen.add(item.id)
+    }
+    for (const dispatch of this.#deps.store.listRetryableUnknownDispatches(limit)) attempt(dispatch.itemId, true)
     for (const dispatch of this.#deps.store.listOpenDispatches(limit)) {
-      const item = this.#deps.store.findItemById(dispatch.itemId)
-      if (item === undefined || item.observed) continue
-      this.wake(item)
-      woken.push(item)
+      if (seen.has(dispatch.itemId)) continue
+      attempt(dispatch.itemId, false)
     }
     return Object.freeze(woken)
   }

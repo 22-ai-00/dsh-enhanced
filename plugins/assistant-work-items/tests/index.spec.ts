@@ -64,9 +64,17 @@ describe('dsh-enhanced-assistant-work-items entrypoint', () => {
     expect(config.workerAutomationId).toBeNull()
     expect(config.scope).toBeNull()
     expect(config.admission).toMatchObject({ allowedKinds: [], maxOpenItems: 8, maxAdmitsPerHour: 4 })
-    expect(config.limits).toMatchObject({ leaseMs: 900_000, maxAttempts: 3, maxReportsPerItem: 20 })
+    expect(config.limits).toMatchObject({ leaseMs: 900_000, maxAttempts: 3, maxReportsPerItem: 20, waitingResumeMs: 300_000 })
     expect(config.notifyOn).toEqual(['ready', 'blocked', 'failed'])
     expect(isActive(config)).toBe(false)
+  })
+
+  test('rejects a waitingResumeMs outside its bounded range', async () => {
+    const paths = await location()
+    const base = { databasePath: paths.databasePath, workRoot: paths.workRoot }
+    expect(() => normalizeConfig({ ...base, limits: { waitingResumeMs: 59_999 } }, Date.now())).toThrow(/limits.waitingResumeMs/)
+    expect(() => normalizeConfig({ ...base, limits: { waitingResumeMs: 3_600_001 } }, Date.now())).toThrow(/limits.waitingResumeMs/)
+    expect(normalizeConfig({ ...base, limits: { waitingResumeMs: 60_000 } }, Date.now()).limits.waitingResumeMs).toBe(60_000)
   })
 
   test('rejects unknown fields and unsafe paths', async () => {

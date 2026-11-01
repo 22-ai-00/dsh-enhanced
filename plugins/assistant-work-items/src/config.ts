@@ -41,6 +41,7 @@ export interface LimitsConfig {
   maxAttempts?: number
   maxReportsPerItem?: number
   maxReportBytes?: number
+  waitingResumeMs?: number
 }
 
 export interface DeliveryConfig {
@@ -135,6 +136,15 @@ export interface NormalizedLimits {
   readonly maxAttempts: number
   readonly maxReportsPerItem: number
   readonly maxReportBytes: number
+  /**
+   * Delay before a `waiting` item is handed to a fresh occurrence again.
+   *
+   * `waiting` is not terminal: the worker stopped without finishing, so the
+   * item stays claimable. Re-arming is delayed rather than immediate so a
+   * worker that reports `waiting` in a loop cannot spin up occurrences in the
+   * same second, and it is bounded by the item's attempt budget.
+   */
+  readonly waitingResumeMs: number
 }
 
 const KIND = /^[a-z][a-z0-9-]{0,63}$/
@@ -143,7 +153,7 @@ const AUTOMATION_ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/
 const SOURCE_ID = /^[a-z0-9][a-z0-9._-]{0,63}\/v[0-9]{1,3}$/
 const SCOPE_KEYS = ['workspace', 'preset', 'principalId', 'ownerRouteId', 'expiresAt'] as const
 const ADMISSION_KEYS = ['allowedKinds', 'maxOpenItems', 'maxAdmitsPerHour', 'dedupWindowMs', 'cooldownMs', 'maxBriefBytes'] as const
-const LIMITS_KEYS = ['leaseMs', 'maxAttempts', 'maxReportsPerItem', 'maxReportBytes'] as const
+const LIMITS_KEYS = ['leaseMs', 'maxAttempts', 'maxReportsPerItem', 'maxReportBytes', 'waitingResumeMs'] as const
 const DELIVERY_KEYS = ['notifyOn'] as const
 const SETTLEMENT_KEYS = ['enabled', 'windowMs', 'sweepIntervalMs', 'maxSourcesPerSweep', 'maxPendingPerSweep', 'maxSettlementsPerSweep'] as const
 const SOURCES_KEYS = ['foregroundFailures'] as const
@@ -174,6 +184,7 @@ const limitsSchema = Schema.object({
   maxAttempts: Schema.number().step(1).min(1).max(10).default(3),
   maxReportsPerItem: Schema.number().step(1).min(1).max(100).default(20),
   maxReportBytes: Schema.number().step(1).min(256).max(65_536).default(16_384),
+  waitingResumeMs: Schema.number().step(1).min(60_000).max(3_600_000).default(300_000),
 })
 
 const deliverySchema = Schema.object({
@@ -326,6 +337,7 @@ function normalizeLimits(raw: LimitsConfig | undefined): NormalizedLimits {
     maxAttempts: integer(value['maxAttempts'] ?? 3, 'limits.maxAttempts', 1, 10),
     maxReportsPerItem: integer(value['maxReportsPerItem'] ?? 20, 'limits.maxReportsPerItem', 1, 100),
     maxReportBytes: integer(value['maxReportBytes'] ?? 16_384, 'limits.maxReportBytes', 256, 65_536),
+    waitingResumeMs: integer(value['waitingResumeMs'] ?? 300_000, 'limits.waitingResumeMs', 60_000, 3_600_000),
   })
 }
 

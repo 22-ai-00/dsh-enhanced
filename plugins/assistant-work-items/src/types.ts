@@ -167,12 +167,29 @@ export interface WorkItemReportRecord {
   readonly recordedAt: number
 }
 
-/** The single wake-up owed for one admitted item. */
+/**
+ * The single wake-up owed for one admitted item.
+ *
+ * `generation` scopes the external event identity to one delivery attempt of
+ * the item. Generation 0 is admission and keeps the historical identity
+ * (`eventId === itemId`, `occurredAt === item.createdAt`); every re-arm
+ * increments it and derives a fresh deterministic `eventId`, because the
+ * automation intake dedupes occurrences by `(automationId, eventId,
+ * occurredAt)` and would otherwise replay the *completed* occurrence instead of
+ * starting a new run.
+ *
+ * `wakeAttempts` counts ambiguous wake failures inside the current generation.
+ * It bounds recovery to exactly one re-wake: the row is retryable while the
+ * value is 1, and a second ambiguous failure leaves the row failed so the gap
+ * stays visible instead of looping forever.
+ */
 export interface WorkItemDispatchRecord {
   readonly itemId: string
   readonly automationId: string
   readonly eventId: string
   readonly occurredAt: number
+  readonly generation: number
+  readonly wakeAttempts: number
   readonly state: WorkItemDispatchState
   readonly occurrenceId: string | null
   readonly reason: string | null
@@ -254,6 +271,11 @@ export interface WorkItemHealth {
   readonly openItems: number
   readonly lastAdmitAt: number | null
   readonly lastDispatchAt: number | null
+  /**
+   * Dispatch rows failed with `unknown_after_send`: the peer may or may not
+   * have committed the occurrence. Non-zero means the database really holds
+   * such a gap; recovery retries each row once and then leaves it visible.
+   */
   readonly dispatchUnknown: number
   readonly workerConnected: boolean
   readonly ownerRouteValid: boolean

@@ -147,7 +147,7 @@ rules:
 三条工具都要求调用者是配置中的 worker automation 的 exact production occurrence；工具调用落到前台会话或非 production 运行会被拒绝。调用方 Agent 的 workspace 与 preset 还必须与 `scope` 一致，`scope.expiresAt` 过期时 claim/report/status 失败关闭。
 
 - `work_item_claim`：按 occurrence 找到唯一绑定的工作项，用 CAS 取得 claim，返回 `itemId`、kind、title、brief、`workDir`、attempt 等。claim 没有独立续租动作：`progress` 报告会顺延租约；同一 run 的重复认领只在租约仍有效时幂等重放，租约过期则生成新的 claim 行与新的 attempt（受 `maxAttempts` 约束）。
-- `work_item_report`：在活动 claim 下追加一条 append-only 报告修订（`progress` / `waiting` / `ready` / `blocked` / `failed`），可带 artifact 绝对路径；idempotency key 由 `status+summary+artifacts` 的 SHA-256 再按 item 与 claim 行限定，同一 claim 的重试返回已存修订而不重复写入，不同 claim 的同样文本则视为新修订。对已过期 claim 的报告会以 `claim-expired` 失败关闭。终态报告会触发一次 owner 通知，通知失败只记录在报告行上，不删除报告证据。
+- `work_item_report`：在活动 claim 下追加一条 append-only 报告修订（`progress` / `waiting` / `ready` / `blocked` / `failed`），可带 artifact 绝对路径；idempotency key 由 `status+summary+artifacts` 的 SHA-256 再按 item 与 claim 行限定，同一 claim 的重试返回已存修订而不重复写入，不同 claim 的同样文本则视为新修订。对已过期 claim 的报告会以 `claim-expired` 失败关闭。`waiting` 报告释放 claim 并按 `limits.waitingResumeMs` 安排一次**有界**恢复（受 `maxAttempts` 约束，见“生命周期与可靠性”）。终态报告会触发一次 owner 通知，通知失败只记录在报告行上，不删除报告证据。
 - `work_item_status`：只读返回当前 occurrence 绑定的工作项、活动 claim 和报告列表，不回显数据库路径、principal 或 Host 内部路径。
 
 `work_item_report` 的 `summary` 有字节上限（默认 16 KiB），超长会被截断并标记 `truncated`；artifact 路径必须是绝对路径，且位于该工作项的 scratch 目录或 `scope.workspace` 之内，相对路径与 `..` 逃逸一律拒绝。校验会逐级 realpath 每个已存在的路径组件，任何逃出根目录的符号链接都会失败关闭；scratch 目录仍应由部署者保持私有。
@@ -158,7 +158,8 @@ rules:
 外部信号 --admit--> 私有 SQLite 工作项账本
   ├─ observe: 只写 observed/dropped 行，绝不唤醒、绝不通知
   └─ active:  queued + dispatch 行
-        └─ automations.ingestExternal({ sourceId: intakeSourceId, automationId: workerAutomationId, eventId: 工作项 ID })
+        └─ automations.ingestExternal({ sourceId: intakeSourceId, automationId: workerAutomationId,
+                                         eventId: 工作项 ID 或 工作项 ID#代次, occurredAt: dispatch 行 })
               └─ 原生 Agent occurrence
                     ├─ work_item_claim  (CAS，租约默认 15 分钟)
                     ├─ work_item_report (append-only，终态通知)
@@ -171,8 +172,11 @@ rules:
 - 信号以**规范化 canonical key**（对持久身份做 SHA-256，不是原文）去重；工作项上通过 `admitted` 事件 detail 的 `provenance`（source、sourceVersion、signalDigest、observedAt、evidence）记录来源、来源版本与观察时间。provenance 复用事件 detail，因此 schema 版本不变。
 - 已结项修复不会被同一信号再次唤醒：owner 的失败前台请求在 owner 重试前一直是 `failed`，语义上必须由跨窗口围栏挡住，否则每个去重窗口都会重开同一修复。
 - 去重键 `sha256(sourceId\0kind\0externalId)` 加时间桶 UNIQUE；同一外部信号在 `dedupWindowMs` 内只入账一次，重放返回既有工作项。
-- 租约到期不靠 timer 回收：admit/claim/status/list/health 以及启动恢复时惰性调用 `reclaimExpired()`；到期 claim 被显式置为 `expired` 并记事件，工作项回到 `queued`，dispatch 行同时回到 `pending` 以便 `wakePending()` 重新唤醒；超过 `maxAttempts` 的项标记 `blocked`。
-- 崩溃恢复：`ingestExternal` 已成功但 dispatch 行仍 pending 时，下一次有界恢复会重新唤醒（`ingestExternal` 幂等）；唤醒失败记录在 dispatch 行上并通过 `health().dispatchUnknown` 暴露，绝不重复报告。
+- 唤醒身份按**代次**限定：`work_item_dispatch` 保存 `generation`、`event_id`、`occurred_at`，代次 0 就是准入事件（`event_id` = 工作项 ID、`occurred_at` = 准入时间）；每次重新武装都把 `generation + 1`、`event_id` 改写为确定性的 `工作项 ID#代次` 并写入新的 `occurred_at`。`wake()` 只使用 dispatch 行持久化的身份，绝不从工作项 ID 重新构造，因此重新武装一定对应 automation 侧的新 occurrence，而同一代次的重复唤醒仍解析到同一个 occurrence。
+- 租约到期不靠 timer 回收：admit/claim/status/list/health 以及启动恢复时惰性调用 `reclaimExpired()`；到期 claim 被显式置为 `expired` 并记事件，工作项回到 `queued`，dispatch 行在同一事务里进入下一个代次并回到 `pending`，由后续普通 worker 流量中的有界 `wakePending()` 扫到（`occurred_at <= now` 才唤醒，绝不提前）；超过 `maxAttempts` 的项标记 `blocked`。
+- `waiting` 报告会释放 claim 并**安排一次延迟恢复**：dispatch 行进入下一个代次、`reason = waiting-resume`、到期时间为报告时间 + `limits.waitingResumeMs`；只有 `attempt < maxAttempts`、未进入终态且未被观察时才安排，每次 waiting 报告最多一代，不会自旋。到期后由同一次惰性唤醒扫到，worker 以新 occurrence 重新认领并得到 `attempt + 1`。
+- 崩溃恢复：`ingestExternal` 已成功但 dispatch 行仍未记账时，该行保持 `pending` 且身份不变，下一次有界恢复用**同一代次身份**重新唤醒，automation store 以相同 `(automationId, eventId, occurredAt)` 幂等返回既有 occurrence，绝不重复运行、绝不重复报告。
+- 唤醒记账诚实：peer 抛出的错误若表示「不知道是否已经提交」（非 `policy-denied`/`policy`、非去重冲突），dispatch 行记为 `state='failed'`、`reason='unknown_after_send'`，`health().dispatchUnknown` 因此只统计仍然**开放且未被观察**的 item 上真实存在的这种行：item 一旦被撤回、终结或观察，就不再计入，也不会再被恢复扫描。这样的行在同一代次身份下最多被惰性恢复重试 **1 次**（`wake_attempts` 持久计数）；重试成功则转为 `dispatched`，再次失败则保持 `failed`/`unknown_after_send`，把无法消除的缺口留给 owner，而不是无限重试或假装成功。持久身份冲突（`idempotency-conflict`）是确定性错误，记为独立原因 `idempotency-conflict` 并抛 typed `WorkItemError`（`dispatch-failed`）；没有 occurrence 查询接口时无法自动收敛，因此不静默吞掉。
 - SQLite 使用 `WAL`、`synchronous=FULL`、`BEGIN IMMEDIATE` 事务和 forward-only schema；`PRAGMA user_version` 只前进。升级写入边界要求单 writer：升级前停掉 DSH 进程。
 
 ## 结果证据与结算（`ready` 只是报告）
@@ -209,6 +213,7 @@ rules:
 | `limits.maxAttempts` | `3` | 单工作项最大执行尝试（1–10） |
 | `limits.maxReportsPerItem` | `20` | 每项最大报告修订（1–100） |
 | `limits.maxReportBytes` | `16384` | 单条报告 summary UTF-8 上限（256 B–64 KiB） |
+| `limits.waitingResumeMs` | `300000` | `waiting` 报告后延迟重新唤醒 worker 的时间（60 秒–1 小时） |
 | `delivery.notifyOn` | `[ready, blocked, failed]` | 触发 owner 通知的终态报告状态 |
 | `sources.foregroundFailures.enabled` | `false` | 是否武装内置的 owner foreground 失败来源；关闭时扫描是 no-op |
 | `sources.foregroundFailures.kind` | `foreground-repair` | 该来源准入的工作项 kind；active 模式必须在 `admission.allowedKinds` 内 |

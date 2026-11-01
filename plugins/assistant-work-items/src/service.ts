@@ -177,6 +177,10 @@ export class AssistantWorkItemsService extends Service {
     this.#settleQuietly(components)
     const occurrenceId = this.#occurrenceId(agent)
     components.ledger.recover()
+    // Lease-expiry and waiting resume are generic recovery work, so ordinary
+    // worker traffic is the lazy sweep that re-dispatches them. This is
+    // best-effort: a recovery failure never blocks the caller's own claim.
+    this.#wakeQuietly(components)
     const item = components.store.findItemByOccurrence(occurrenceId)
     if (item === undefined) fail('not-found', 'no work item is bound to this automation occurrence')
     this.#assertOwnerRoute(item)
@@ -427,6 +431,15 @@ export class AssistantWorkItemsService extends Service {
       components.signals.sweep()
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: signal sweep failed: ${describe(error)}`)
+    }
+  }
+
+  /** Best-effort bounded re-dispatch sweep behind ordinary claim activity. */
+  #wakeQuietly(components: Components): void {
+    try {
+      components.dispatch.wakePending()
+    } catch (error) {
+      this.ctx.logger.warn(`assistant-work-items: dispatch recovery failed: ${describe(error)}`)
     }
   }
 

@@ -85,7 +85,7 @@ VALUES ('item-legacy', 1, 'blocked', 'Legacy report', 0, '[]', 'legacy-idem', 'l
  * Write a literal pre-v3 database: schema *and* data exist independently of the
  * current store, so the upgrade path is exercised as a real old file would be.
  */
-function legacyDatabase(version: 1 | 2): { path: string; root: string } {
+function legacyDatabase(version: 1 | 2 | 3): { path: string; root: string } {
   const root = mkdtempSync(join(tmpdir(), 'work-items-legacy-'))
   chmodSync(root, 0o700)
   const path = join(root, 'legacy.sqlite')
@@ -109,6 +109,24 @@ function legacyDatabase(version: 1 | 2): { path: string; root: string } {
         PRIMARY KEY(item_id, run_id)
       ) STRICT;`)
   raw.exec(ITEM_ROW)
+  if (version === 3) {
+    raw.exec(`CREATE TABLE work_item_outcome (
+        item_id TEXT NOT NULL REFERENCES work_item(id) ON DELETE RESTRICT,
+        revision INTEGER NOT NULL,
+        settled_by TEXT NOT NULL CHECK(settled_by IN ('report-ready', 'report-blocked', 'report-failed', 'withdrawn', 'retry-exhausted', 'observed-evidence', 'window-expired')),
+        execution_status TEXT NOT NULL CHECK(execution_status IN ('succeeded', 'failed', 'timed-out', 'cancelled', 'unknown')),
+        objective_status TEXT NOT NULL CHECK(objective_status IN ('achieved', 'partial', 'not-achieved', 'unknown')),
+        trust TEXT NOT NULL CHECK(trust IN ('agent-self-report', 'external-receipt', 'deterministic-check')),
+        evidence_state TEXT NOT NULL CHECK(evidence_state IN ('pending', 'observed', 'unverified', 'not-applicable')),
+        evidence_reason TEXT CHECK(evidence_reason IN ('no-independent-source', 'evidence-too-large', 'window-expired', 'channel-unavailable')),
+        evidence TEXT, baseline_sequence INTEGER, inbox_id TEXT, authority_hash TEXT, deadline_at INTEGER,
+        settled_at INTEGER NOT NULL, recorded_at INTEGER NOT NULL,
+        PRIMARY KEY(item_id, revision)
+      ) STRICT, WITHOUT ROWID;
+      CREATE INDEX work_item_outcome_pending_idx ON work_item_outcome(evidence_state, deadline_at);
+      INSERT INTO work_item_dispatch(item_id, automation_id, event_id, occurred_at, state, occurrence_id, reason, created_at, updated_at)
+        VALUES ('item-legacy', 'work-items-worker', 'item-legacy', 1700000000000, 'dispatched', 'occ-legacy', NULL, 1700000000000, 1700000000000);`)
+  }
   raw.exec(`INSERT INTO work_item_claim(item_id, run_id, occurrence_id, state, leased_until, created_at, updated_at)
     VALUES ('item-legacy', 'run-legacy', 'occ-legacy', 'active', 1700086400000, 1700000000000, 1700000000000);`)
   raw.exec(`INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '${String(version)}');
@@ -361,7 +379,7 @@ describe('work-item outcome ledger', () => {
     const { path, root } = legacyDatabase(2)
     const reopened = new WorkItemStore(path)
     try {
-      expect(reopened.stats()).toMatchObject({ schemaVersion: 3, items: 1, outcomes: 0, pendingOutcomes: 0 })
+      expect(reopened.stats()).toMatchObject({ schemaVersion: 4, items: 1, outcomes: 0, pendingOutcomes: 0 })
       // The old item and its report survive untouched, claims keep their id.
       expect(reopened.findItemById('item-legacy')).toMatchObject({ state: 'blocked' })
       expect(reopened.reports('item-legacy')).toHaveLength(1)
@@ -376,11 +394,35 @@ describe('work-item outcome ledger', () => {
     }
   })
 
-  test('upgrades a literal version 1 database through the claim rebuild into v3', () => {
+    test('upgrades a literal version 3 database by scoping dispatch rows to generation 0', () => {
+    const { path, root } = legacyDatabase(3)
+    const reopened = new WorkItemStore(path)
+    try {
+      expect(reopened.stats()).toMatchObject({ schemaVersion: 4, items: 1, dispatches: 1, outcomes: 0 })
+      // The stored identity is preserved verbatim: generation 0 is the
+      // admission event, so an in-flight wake stays valid across the upgrade.
+      expect(reopened.getDispatch('item-legacy')).toMatchObject({
+        eventId: 'item-legacy',
+        occurredAt: 1_700_000_000_000,
+        generation: 0,
+        wakeAttempts: 0,
+        state: 'dispatched',
+        occurrenceId: 'occ-legacy',
+      })
+      expect(reopened.findItemById('item-legacy')).toMatchObject({ state: 'blocked' })
+      reopened.setMeta('probe', 'ok')
+      expect(reopened.meta('probe')).toBe('ok')
+    } finally {
+      reopened.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('upgrades a literal version 1 database through the claim rebuild into v4', () => {
     const { path, root } = legacyDatabase(1)
     const reopened = new WorkItemStore(path)
     try {
-      expect(reopened.stats()).toMatchObject({ schemaVersion: 3, items: 1, outcomes: 0 })
+      expect(reopened.stats()).toMatchObject({ schemaVersion: 4, items: 1, outcomes: 0 })
       expect(reopened.reports('item-legacy')).toHaveLength(1)
       // v1 had no surrogate key; the rebuild assigns a fresh claim_id.
       const claimRow = reopened.findClaimByRun('run-legacy')

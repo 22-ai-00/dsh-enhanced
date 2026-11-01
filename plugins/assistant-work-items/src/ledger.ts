@@ -125,6 +125,7 @@ export class WorkItemLedger {
       idempotencyKey: request.idempotencyKey,
       maxReports: this.#limits.maxReportsPerItem,
       leaseMs: this.#limits.leaseMs,
+      waitingResumeMs: this.#limits.waitingResumeMs,
     })
   }
 
