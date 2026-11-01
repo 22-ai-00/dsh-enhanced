@@ -26,6 +26,8 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
     name: 'work_item_claim',
     description:
       'Claim the single work item bound to this automation occurrence and read its brief, acceptance refs and private work directory. '
+      + 'A bounded, read-only resume brief (prior attempts, prior report summaries, latest settled outcome) is derived from the local ledger '
+      + 'so a fresh occurrence can continue without prior model memory. '
       + 'Call once before working; a repeated call from the same run replays the same claim instead of spending another attempt.',
     parameters: {},
     output: {
@@ -45,6 +47,60 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
           attempt: { type: 'integer' as const, required: true },
           maxAttempts: { type: 'integer' as const, required: true },
           replayed: { type: 'boolean' as const, required: true },
+          resume: {
+            type: 'object' as const,
+            required: true,
+            additionalProperties: false,
+            properties: {
+              resumed: { type: 'boolean' as const, required: true },
+              priorAttempts: { type: 'integer' as const, required: true },
+              attempts: {
+                type: 'array' as const,
+                required: true,
+                items: {
+                  type: 'object' as const,
+                  additionalProperties: false,
+                  properties: {
+                    attempt: { type: 'integer' as const, required: true },
+                    runId: { type: 'string' as const },
+                    startedAt: { type: 'integer' as const, required: true },
+                    ended: { type: 'string' as const },
+                    terminalStatus: { type: 'string' as const },
+                  },
+                },
+              },
+              reports: {
+                type: 'array' as const,
+                required: true,
+                items: {
+                  type: 'object' as const,
+                  additionalProperties: false,
+                  properties: {
+                    revision: { type: 'integer' as const, required: true },
+                    status: { type: 'string' as const, required: true },
+                    summary: { type: 'string' as const, required: true },
+                    summaryTruncated: { type: 'boolean' as const, required: true },
+                    recordedAt: { type: 'integer' as const, required: true },
+                  },
+                },
+              },
+              reportsTotal: { type: 'integer' as const, required: true },
+              latestOutcome: {
+                type: 'object' as const,
+                additionalProperties: false,
+                properties: {
+                  revision: { type: 'integer' as const, required: true },
+                  settledBy: { type: 'string' as const, required: true },
+                  executionStatus: { type: 'string' as const, required: true },
+                  objectiveStatus: { type: 'string' as const, required: true },
+                  evidenceState: { type: 'string' as const, required: true },
+                  evidenceReason: { type: 'string' as const },
+                  settledAt: { type: 'integer' as const, required: true },
+                },
+              },
+              truncated: { type: 'boolean' as const, required: true },
+            },
+          },
         },
       },
       render: (_args: unknown, value: unknown) => {
@@ -70,6 +126,39 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
         attempt: value.attempt,
         maxAttempts: value.maxAttempts,
         replayed: value.replayed,
+        resume: {
+          resumed: value.resume.resumed,
+          priorAttempts: value.resume.priorAttempts,
+          attempts: value.resume.attempts.map(attempt => ({
+            attempt: attempt.attempt,
+            startedAt: attempt.startedAt,
+            ...(attempt.runId === null ? {} : { runId: attempt.runId }),
+            ...(attempt.ended === null ? {} : { ended: attempt.ended }),
+            ...(attempt.terminalStatus === null ? {} : { terminalStatus: attempt.terminalStatus }),
+          })),
+          reports: value.resume.reports.map(report => ({
+            revision: report.revision,
+            status: report.status,
+            summary: report.summary,
+            summaryTruncated: report.summaryTruncated,
+            recordedAt: report.recordedAt,
+          })),
+          reportsTotal: value.resume.reportsTotal,
+          ...(value.resume.latestOutcome === null
+            ? {}
+            : {
+              latestOutcome: {
+                revision: value.resume.latestOutcome.revision,
+                settledBy: value.resume.latestOutcome.settledBy,
+                executionStatus: value.resume.latestOutcome.executionStatus,
+                objectiveStatus: value.resume.latestOutcome.objectiveStatus,
+                evidenceState: value.resume.latestOutcome.evidenceState,
+                ...(value.resume.latestOutcome.evidenceReason === null ? {} : { evidenceReason: value.resume.latestOutcome.evidenceReason }),
+                settledAt: value.resume.latestOutcome.settledAt,
+              },
+            }),
+          truncated: value.resume.truncated,
+        },
       }
     },
   }))

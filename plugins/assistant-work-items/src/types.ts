@@ -197,6 +197,52 @@ export interface WorkItemReportRecord {
   readonly recordedAt: number
 }
 
+/** One attempt end as reconstructed from the append-only event ledger. */
+export interface WorkItemResumeAttempt {
+  readonly attempt: number
+  readonly runId: string | null
+  readonly startedAt: number
+  readonly ended: 'expired' | 'reclaimed' | 'attempt-exhausted' | 'reported' | 'settled' | null
+  readonly terminalStatus: WorkItemReportStatus | null
+}
+
+/** One prior worker report summary, bounded for the resume brief. */
+export interface WorkItemResumeReport {
+  readonly revision: number
+  readonly status: WorkItemReportStatus
+  readonly summary: string
+  readonly summaryTruncated: boolean
+  readonly recordedAt: number
+}
+
+/** Compact latest settled outcome; evidence, baseline, inbox and authority stay out. */
+export interface WorkItemResumeOutcome {
+  readonly revision: number
+  readonly settledBy: WorkItemOutcomeSettledBy
+  readonly executionStatus: WorkItemExecutionStatus
+  readonly objectiveStatus: WorkItemObjectiveStatus
+  readonly evidenceState: WorkItemOutcomeEvidenceState
+  readonly evidenceReason: WorkItemOutcomeEvidenceReason | null
+  readonly settledAt: number
+}
+
+/**
+ * Bounded, read-only brief for a fresh occurrence continuing an item.
+ *
+ * Everything here is derived from the local append-only ledger at claim time;
+ * it never carries model memory or peer calls, and `truncated` advertises that
+ * older attempts or report revisions were cut by the fixed caps.
+ */
+export interface WorkItemResumeContext {
+  readonly resumed: boolean
+  readonly priorAttempts: number
+  readonly attempts: readonly WorkItemResumeAttempt[]
+  readonly reports: readonly WorkItemResumeReport[]
+  readonly reportsTotal: number
+  readonly latestOutcome: WorkItemResumeOutcome | null
+  readonly truncated: boolean
+}
+
 /**
  * The single wake-up owed for one admitted item.
  *

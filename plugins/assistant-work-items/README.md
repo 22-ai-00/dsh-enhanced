@@ -152,6 +152,14 @@ rules:
 
 `work_item_report` 的 `summary` 有字节上限（默认 16 KiB），超长会被截断并标记 `truncated`；artifact 路径必须是绝对路径，且位于该工作项的 scratch 目录或 `scope.workspace` 之内，相对路径与 `..` 逃逸一律拒绝。校验会逐级 realpath 每个已存在的路径组件，任何逃出根目录的符号链接都会失败关闭；scratch 目录仍应由部署者保持私有。
 
+### 断点续办简报（resume）
+
+`work_item_claim` 的返回值里带一个**只读、有界**的 `resume` 对象，让新 occurrence 在没有上一次模型记忆的情况下继续：`resumed` / `priorAttempts`、最近 5 次**先前** attempt（attempt 号、可得的 run id、开始时间、结束方式 `expired` / `reclaimed` / `attempt-exhausted` / `reported` / `settled`、以及终态报告的状态）、最近 5 条先前报告（revision、status、summary、`summaryTruncated`、记录时间；按时间从旧到新排列）与真实的 `reportsTotal`、最近一条已结算结果（revision、`settledBy`、execution/objective/evidence 状态、结算时间），以及 `truncated` 表示上游历史是否被上述上限截断。
+
+- 简报只从本插件的 append-only 本地账本派生：`work_item_event` 与 `work_item_report` 按 `(item_id, …)` 主键前缀做有界扫描（`LIMIT`），不引入新表、不改变 schema 版本（仍为 7）、不新增 timer，也不调用模型或 peer。
+- 报告 summary 在简报里最多保留 512 UTF-8 字节，超长按 UTF-8 边界截断并置 `summaryTruncated`；当前 attempt 自身不计入 `attempts`/`priorAttempts`。
+- 简报是派生展示，不改变 claim/report/结算语义；它不含数据库路径、delivery id 或 evidence blob。首次认领与旧账本行可能得到空简报（`resumed: false`），重放同一 claim 会重新计算并返回一致的简报，不会追加新的 claim/attempt/事件。
+
 ## 生命周期与可靠性
 
 ```

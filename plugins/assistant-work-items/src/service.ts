@@ -35,6 +35,7 @@ import type {
   WorkItemRecord,
   WorkItemReportRecord,
   WorkItemReportStatus,
+  WorkItemResumeContext,
   WorkItemSettlementReport,
   WorkItemThreadClosure,
   WorkItemThreadSourceRegistration,
@@ -62,6 +63,7 @@ export interface WorkItemClaimView {
   readonly maxAttempts: number
   readonly leaseUntil: number | null
   readonly replayed: boolean
+  readonly resume: WorkItemResumeContext
 }
 
 /** Bounded, model-facing view of one appended report. */
@@ -216,6 +218,11 @@ export class AssistantWorkItemsService extends Service {
     // A claim can settle a prior window and unblock recovery, so it is a
     // transaction boundary that may have produced a new exportable revision.
     this.#drainEvaluation()
+    // The resume brief is derived only after the claim committed, from the same
+    // durable ledger; a missing row here means storage broke, so fail loudly
+    // instead of handing the model an invented empty context.
+    const resume = components.store.workItemResumeContext(result.item.id)
+    if (resume === undefined) fail('storage', 'work item disappeared before its resume brief was derived')
     return Object.freeze({
       itemId: result.item.id,
       runId: result.claim.runId,
@@ -231,6 +238,7 @@ export class AssistantWorkItemsService extends Service {
       maxAttempts: result.item.maxAttempts,
       leaseUntil: result.item.leaseUntil,
       replayed: result.replayed,
+      resume,
     })
   }
 

@@ -11,6 +11,7 @@ import {
   type WorkItemDeferredReportStatus,
   type WorkItemOutcomeDraft,
 } from './outcome.ts'
+import { truncateUtf8 } from './config.ts'
 import type {
   WorkItemClaimRecord,
   WorkItemClaimState,
@@ -36,12 +37,16 @@ import type {
   WorkItemRecord,
   WorkItemReportRecord,
   WorkItemReportStatus,
+  WorkItemResumeAttempt,
+  WorkItemResumeContext,
+  WorkItemResumeOutcome,
+  WorkItemResumeReport,
   WorkItemScope,
   WorkItemState,
   WorkItemThreadClosure,
   WorkItemThreadOutcome,
 } from './types.ts'
-import { CLAIMABLE_STATES, OPEN_STATES, WorkItemError } from './types.ts'
+import { CLAIMABLE_STATES, OPEN_STATES, TERMINAL_REPORT_STATUSES, WorkItemError } from './types.ts'
 
 const SCHEMA_VERSION = 7
 /** Waiting reasons that mean an admission mandate failed revalidation. */
@@ -51,6 +56,14 @@ const AUTHORITY_UNAVAILABLE = 'authority-unavailable'
 const MAX_UNKNOWN_WAKE_ATTEMPTS = 1
 /** Default bounded settlement window: seven days. */
 const DEFAULT_SETTLE_WINDOW_MS = 604_800_000
+/** Newest prior attempts one resume brief may carry. */
+const RESUME_ATTEMPT_LIMIT = 5
+/** Newest prior report summaries one resume brief may carry. */
+const RESUME_REPORT_LIMIT = 5
+/** UTF-8 byte budget for one resume report summary. */
+const RESUME_SUMMARY_BYTES = 512
+/** Hard row bound for the resume event scan; the newest events win. */
+const RESUME_EVENT_SCAN_LIMIT = 500
 const MEMORY_DATABASE = ':memory:'
 /** Bound parameters for `state IN (...)`, derived from the single state list. */
 const OPEN_STATE_PLACEHOLDERS = OPEN_STATES.map(() => '?').join(', ')
@@ -420,6 +433,24 @@ function optString(value: unknown): string | null {
 
 function optNumber(value: unknown): number | null {
   return value === null || value === undefined ? null : Number(value)
+}
+
+/** Positive safe integer or `null`; malformed detail never throws. */
+function optCount(value: unknown): number | null {
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null
+}
+
+/** Decode one event detail object; absent or malformed JSON yields `null`. */
+function eventDetail(value: unknown): Record<string, unknown> | null {
+  if (value === null || value === undefined) return null
+  try {
+    const parsed = JSON.parse(String(value)) as unknown
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    return parsed as Record<string, unknown>
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -1459,6 +1490,136 @@ export class WorkItemStore {
       ...(waitingReports > 0 ? { waitingReports } : {}),
       ...(unknownDispatches > 0 ? { unknownDispatches } : {}),
       ...(claimExpiries > 0 ? { claimExpiries } : {}),
+    })
+  }
+
+  /**
+   * Bounded, read-only resume brief for one item at a claim instant.
+   *
+   * Everything is derived from the item's own append-only ledger rows, so a
+   * fresh occurrence can continue without replaying a prior model's memory.
+   * Absent items return `undefined` (mirroring `workItemExecutionMetrics`) so
+   * the caller never invents an empty context for a row that vanished.
+   *
+   * The event read is a bounded newest-first scan of one item's primary-key
+   * prefix; it reconstructs prior attempts from the `claimed` event that
+   * records `{runId, attempt}` and the recovery/report events that end one.
+   * Malformed or absent detail JSON is skipped, never thrown. Reports are read
+   * newest-first through the same primary-key prefix and capped at five, with
+   * each summary cut to a safe UTF-8 byte boundary.
+   */
+  workItemResumeContext(itemId: string, now: number = this.#now()): WorkItemResumeContext | undefined {
+    const item = this.findItemById(itemId)
+    if (item === undefined) return undefined
+    const priorAttempts = Math.max(0, item.attempt - 1)
+    const eventRows = (this.#statement(`
+      SELECT sequence, kind, detail, recorded_at
+      FROM work_item_event
+      WHERE item_id = ? AND recorded_at <= ? AND kind IN ('claimed', 'claim-expired', 'reclaimed', 'blocked', 'reported', 'settled')
+      ORDER BY sequence DESC
+      LIMIT ${String(RESUME_EVENT_SCAN_LIMIT)}
+    `).all(itemId, now) as Row[]).reverse()
+    interface AttemptDraft {
+      readonly attempt: number
+      readonly runId: string | null
+      readonly startedAt: number
+      ended: WorkItemResumeAttempt['ended']
+      terminalStatus: WorkItemReportStatus | null
+    }
+    const byAttempt = new Map<number, AttemptDraft>()
+    const openNewest = (): AttemptDraft | undefined => {
+      const drafts = [...byAttempt.values()]
+      for (let index = drafts.length - 1; index >= 0; index -= 1) {
+        const draft = drafts[index]
+        if (draft !== undefined && draft.ended === null) return draft
+      }
+      return undefined
+    }
+    for (const row of eventRows) {
+      const kind = String(row['kind'])
+      const detail = eventDetail(row['detail'])
+      const recordedAt = Number(row['recorded_at'])
+      if (kind === 'claimed') {
+        const attempt = optCount(detail?.['attempt'])
+        if (attempt === null || attempt >= item.attempt || byAttempt.has(attempt)) continue
+        byAttempt.set(attempt, {
+          attempt,
+          runId: typeof detail?.['runId'] === 'string' ? detail['runId'] : null,
+          startedAt: recordedAt,
+          ended: null,
+          terminalStatus: null,
+        })
+        continue
+      }
+      // An end event names its attempt when it can; otherwise it ends the most
+      // recently started attempt still open. `reclaimExpired()` emits
+      // `claim-expired` then `reclaimed` for the same attempt, so the second
+      // event is ignored once the attempt is already closed.
+      const hinted = optCount(detail?.['attempt'])
+      const target = hinted === null
+        ? openNewest()
+        : (byAttempt.get(hinted)?.ended === null ? byAttempt.get(hinted) : undefined)
+      if (target === undefined) continue
+      if (kind === 'claim-expired') target.ended = 'expired'
+      else if (kind === 'reclaimed') target.ended = 'reclaimed'
+      else if (kind === 'blocked') {
+        if (detail?.['reason'] !== 'retry-exhausted') continue
+        target.ended = 'attempt-exhausted'
+      } else if (kind === 'reported') {
+        const status = typeof detail?.['status'] === 'string' ? detail['status'] as WorkItemReportStatus : null
+        if (status === null || !TERMINAL_REPORT_STATUSES.includes(status)) continue
+        target.ended = 'reported'
+        target.terminalStatus = status
+      } else if (kind === 'settled') target.ended = 'settled'
+    }
+    const attempts = Object.freeze([...byAttempt.values()]
+      .sort((left, right) => left.attempt - right.attempt)
+      .slice(-RESUME_ATTEMPT_LIMIT)
+      .map(draft => Object.freeze({
+        attempt: draft.attempt,
+        runId: draft.runId,
+        startedAt: draft.startedAt,
+        ended: draft.ended,
+        terminalStatus: draft.terminalStatus,
+      })))
+    const reportRows = (this.#statement(`
+      SELECT revision, status, summary, truncated, recorded_at
+      FROM work_item_report
+      WHERE item_id = ? AND recorded_at <= ?
+      ORDER BY revision DESC
+      LIMIT ${String(RESUME_REPORT_LIMIT)}
+    `).all(itemId, now) as Row[]).reverse()
+    const reports: readonly WorkItemResumeReport[] = Object.freeze(reportRows.map(row => {
+      const cut = truncateUtf8(String(row['summary']), RESUME_SUMMARY_BYTES)
+      return Object.freeze({
+        revision: Number(row['revision']),
+        status: String(row['status']) as WorkItemReportStatus,
+        summary: cut.value,
+        summaryTruncated: Number(row['truncated']) === 1 || cut.truncated,
+        recordedAt: Number(row['recorded_at']),
+      })
+    }))
+    const reportsTotal = this.reportCount(itemId)
+    const settled = this.latestOutcome(itemId)
+    const latestOutcome: WorkItemResumeOutcome | null = settled === undefined
+      ? null
+      : Object.freeze({
+        revision: settled.revision,
+        settledBy: settled.settledBy,
+        executionStatus: settled.executionStatus,
+        objectiveStatus: settled.objectiveStatus,
+        evidenceState: settled.evidenceState,
+        evidenceReason: settled.evidenceReason,
+        settledAt: settled.settledAt,
+      })
+    return Object.freeze({
+      resumed: priorAttempts > 0 || reports.length > 0 || latestOutcome !== null,
+      priorAttempts,
+      attempts,
+      reports,
+      reportsTotal,
+      latestOutcome,
+      truncated: priorAttempts > attempts.length || reportsTotal > reports.length,
     })
   }
 
