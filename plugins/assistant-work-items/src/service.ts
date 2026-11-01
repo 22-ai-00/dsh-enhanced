@@ -12,6 +12,7 @@ import type {
   PeerPolicyService,
 } from './peers.js'
 import { WorkItemStore } from './store.js'
+import { WorkItemSignalIntake, type WorkItemSignalSweepReport } from './signals.js'
 import { registerWorkItemTools } from './tools.js'
 import type {
   WorkItemAdmitInput,
@@ -75,6 +76,7 @@ interface Components {
   readonly ledger: WorkItemLedger
   readonly admission: WorkItemAdmission
   readonly dispatch: WorkItemDispatch
+  readonly signals: WorkItemSignalIntake
 }
 
 export interface WorkItemReportInput {
@@ -154,9 +156,14 @@ export class AssistantWorkItemsService extends Service {
    * Identity comes exclusively from the frozen, production automation
    * execution context installed by `assistant-automations`; a foreground
    * session, a preview run and another automation all fail closed.
+   *
+   * An armed signal source is swept here (bounded by the persisted
+   * `sweepIntervalMs`) so ordinary use keeps producing work without a timer or
+   * developer orchestration. A sweep failure never fails the claim.
    */
   claim(agent: Agent | undefined): WorkItemClaimView {
     const components = this.#required()
+    this.#sweepQuietly(components)
     const occurrenceId = this.#occurrenceId(agent)
     components.ledger.recover()
     const item = components.store.findItemByOccurrence(occurrenceId)
@@ -228,6 +235,23 @@ export class AssistantWorkItemsService extends Service {
     })
   }
 
+  /**
+   * Sweep every armed automatic source once and report what it did.
+   *
+   * Explicit host entry point; `force` ignores the persisted interval. The
+   * disabled default and a missing optional peer both return an empty report,
+   * so a caller never has to special-case activation.
+   */
+  sweepSignals(force = true): WorkItemSignalSweepReport {
+    if (!this.#config.enabled || this.#closed) return Object.freeze({ sources: [] })
+    try {
+      return this.#open().signals.sweep(force)
+    } catch (error) {
+      this.ctx.logger.warn(`assistant-work-items: signal sweep unavailable: ${describe(error)}`)
+      return Object.freeze({ sources: [] })
+    }
+  }
+
   /** Read-only status of the item bound to the calling occurrence. */
   status(agent: Agent | undefined): WorkItemStatusView {
     const components = this.#required()
@@ -295,6 +319,16 @@ export class AssistantWorkItemsService extends Service {
     return this.#open()
   }
 
+  /** Best-effort bounded sweep; log and continue on any failure. */
+  #sweepQuietly(components: Components): void {
+    if (!components.signals.armed()) return
+    try {
+      components.signals.sweep()
+    } catch (error) {
+      this.ctx.logger.warn(`assistant-work-items: signal sweep failed: ${describe(error)}`)
+    }
+  }
+
   #required(): Components {
     const config = this.#config
     if (!config.enabled) fail('disabled', 'the work-item intake is disabled')
@@ -328,7 +362,18 @@ export class AssistantWorkItemsService extends Service {
       automations: this.#automations(),
       delivery: this.#delivery(),
     })
-    const installed: Components = { workspace, store, ledger, admission, dispatch }
+    // Signal sources are optional peers resolved lazily on every sweep, so a
+    // deployment without `assistant-delivery` (or with the source disabled)
+    // stays a no-op instead of failing activation or a claim.
+    const signals = new WorkItemSignalIntake({
+      config,
+      store,
+      admission,
+      delivery: () => this.#delivery(),
+      dispatch,
+      warn: message => this.ctx.logger.warn(message),
+    })
+    const installed: Components = { workspace, store, ledger, admission, dispatch, signals }
     this.#components = installed
     try {
       // Bounded startup reconcile: lease reclaim is lazy forever, so a host that

@@ -2,7 +2,9 @@
 
 把外部信号沉淀为**有界、可恢复、可审计**的工作项账本，并用一次原生 automation occurrence 驱动 agent 认领、汇报和 owner 通知。本插件不创建第二套 agent loop、timer、outbox、预算系统、设置面板或 session store：调度复用 `assistant-automations` 的稳定 occurrence，执行复用原生 DSH Agent run，通知复用 `assistant-delivery.enqueueBackground()`，授权复用 `assistant-policy` 的默认拒绝。
 
-首个可工作的切片只提供内部账本和三条 CAS 工具：`work_item_claim`、`work_item_report`、`work_item_status`。它故意不内置任何真实外部来源（GitHub、邮件、IM 等）；外部来源应作为后续独立插件，通过可信 Host API `admit(...)` 提交信号。
+账本本身提供三条 CAS 工具：`work_item_claim`、`work_item_report`、`work_item_status`。在账本之上有一个默认关闭的**自动准入**切片：它从已认证的 in-tree 只读来源拉取真实信号并以相同闸门入账，因此普通使用（owner 自己发起的请求失败后，worker 被下一次 claim 唤醒）就会产生自驱工作项，无需 operator 手工调用 `admit(...)`，也无需新定时器。
+
+当前唯一内置的真实来源是 `assistant-delivery` 的 owner foreground 失败/超时/取消记录（只读 API `listOwnerForegroundTaskSources`）。GitHub、邮件、IM、任务日历等**仓库外**来源仍是后续独立插件的职责，通过可信 Host API `admit(...)` 提交；本插件不发明这类 API。
 
 ## 安装与启用
 
@@ -62,8 +64,18 @@ budgetAmount: 1
       ownerRouteId: <assistant-delivery owner route id>
       expiresAt: 1893456000000   # epoch ms，必须晚于当前时间
     admission:
-      allowedKinds: [review, triage]
+      allowedKinds: [review, triage, foreground-repair]
+    sources:
+      foregroundFailures:
+        enabled: true
+        kind: foreground-repair
+        includeTimedOut: true
+        maxCandidatesPerSweep: 10
+        maxAdmitsPerSweep: 2
+        sweepIntervalMs: 3600000
 ```
+
+`sources.foregroundFailures.enabled: true` 时，`claim()` 会先做一次被间隔门控的来源扫描；因此 worker 每次被唤醒时都会顺带消费新出现的 owner 失败请求。也可以由可信 Host 显式调用 `sweepSignals(force)` 立即扫描一次。
 
 ### Policy 最小规则
 
@@ -120,7 +132,10 @@ rules:
 ```
 
 - 状态机：`queued / claimed / working / waiting / ready / blocked / failed / dropped`。`ready`、`blocked`、`failed`、`dropped` 为终态；`queued`、`waiting` 可被认领。
-- 准入闸门顺序：enabled → 输入规范化 → owner route 校验（失败时零写入、零唤醒）→ 去重窗口重放 → kind allowlist → cooldown → 每小时准入上限 → 未结工作项上限 → observe 记录或 active 入账 + dispatch 行。active 路径还会在写库前调用一次 `assistant-policy` 的 `admit` 授权。
+- 准入闸门顺序：enabled → 输入规范化 → owner route 校验（失败时零写入、零唤醒）→ 去重窗口重放 → **跨窗口已结项围栏**（`ready/blocked/failed/dropped` 的旧项不会被同一 canonical signal 复活）→ kind allowlist → cooldown → 每小时准入上限 → 未结工作项上限 → observe 记录或 active 入账 + dispatch 行。active 路径还会在写库前调用一次 `assistant-policy` 的 `admit` 授权。
+- 自动准入（`sources`）：在 `claim()` 之前同步扫一遍已武装的来源，并按持久化的 `sweepIntervalMs` 做**运行间隔门控**（没有新 timer）。每个来源的游标 `signal.cursor:<source>` 和上次扫描时间 `signal.sweptAt:<source>` 都存在账本同一 SQLite 的 `work_item_schema_meta` 表中；adapter 抛错会把游标重置为空（下次从最旧信号重扫，去重保证重叠无害），并只记一条 warn，绝不让 claim 失败。每次扫描的准入数量由 `maxAdmitsPerSweep` 有界。
+- 信号以**规范化 canonical key**（对持久身份做 SHA-256，不是原文）去重；工作项上通过 `admitted` 事件 detail 的 `provenance`（source、sourceVersion、signalDigest、observedAt、evidence）记录来源、来源版本与观察时间。provenance 复用事件 detail，因此 schema 版本不变。
+- 已结项修复不会被同一信号再次唤醒：owner 的失败前台请求在 owner 重试前一直是 `failed`，语义上必须由跨窗口围栏挡住，否则每个去重窗口都会重开同一修复。
 - 去重键 `sha256(sourceId\0kind\0externalId)` 加时间桶 UNIQUE；同一外部信号在 `dedupWindowMs` 内只入账一次，重放返回既有工作项。
 - 租约到期不靠 timer 回收：admit/claim/status/list/health 以及启动恢复时惰性调用 `reclaimExpired()`；到期 claim 被显式置为 `expired` 并记事件，工作项回到 `queued`，dispatch 行同时回到 `pending` 以便 `wakePending()` 重新唤醒；超过 `maxAttempts` 的项标记 `blocked`。
 - 崩溃恢复：`ingestExternal` 已成功但 dispatch 行仍 pending 时，下一次有界恢复会重新唤醒（`ingestExternal` 幂等）；唤醒失败记录在 dispatch 行上并通过 `health().dispatchUnknown` 暴露，绝不重复报告。
@@ -149,6 +164,12 @@ rules:
 | `limits.maxReportsPerItem` | `20` | 每项最大报告修订（1–100） |
 | `limits.maxReportBytes` | `16384` | 单条报告 summary UTF-8 上限（256 B–64 KiB） |
 | `delivery.notifyOn` | `[ready, blocked, failed]` | 触发 owner 通知的终态报告状态 |
+| `sources.foregroundFailures.enabled` | `false` | 是否武装内置的 owner foreground 失败来源；关闭时扫描是 no-op |
+| `sources.foregroundFailures.kind` | `foreground-repair` | 该来源准入的工作项 kind；active 模式必须在 `admission.allowedKinds` 内 |
+| `sources.foregroundFailures.includeTimedOut` | `true` | 是否把 `timed-out` 的 owner 请求也当作待修复信号 |
+| `sources.foregroundFailures.maxCandidatesPerSweep` | `10` | 单次扫描最多读取的候选数（1–100） |
+| `sources.foregroundFailures.maxAdmitsPerSweep` | `2` | 单次扫描最多准入数量（1–10） |
+| `sources.foregroundFailures.sweepIntervalMs` | `3600000` | 两次自动扫描的最小间隔（60 秒–1 天，持久化门控） |
 
 所有可变部署值都经过同步 Schemastery 校验；未知字段、相对路径、文件系统根目录、`databasePath` 与 `workRoot` 重叠、过期 scope 都会失败关闭。
 
@@ -159,12 +180,16 @@ rules:
 - 子进程、凭据、浏览器：无。
 - 安装脚本：包内没有 postinstall 或其他生命周期脚本；`prepublishOnly` 只要求用 pnpm 发布。
 - 消息投递：只有 active 模式的终态报告才会经 `assistant-delivery` 入队；observe 模式从不调用 Delivery 的写接口。Delivery 会在入队和发送前重查 owner route、binding 版本/代次、有效期和 background `send` Policy。
+- 跨插件只读：自动来源使用 `assistant-delivery` 的 `validateOwnerRoute` + `listOwnerForegroundTaskSources`（owner 认证、游标分页、host 公开、只读，不触发任何发送或写操作）。`assistant-delivery` 缺失或版本过旧（无该 API）时，来源退化为 no-op 或 `degraded: 'unsupported'`，插件激活与 claim 都不会抛错。
 - 数据保留：账本保存外部 ID、标题、brief、owner 身份、报告正文和 artifact 路径，可能包含私人信息；备份时按 SQLite（含 WAL）一致性方式复制。删除 scratch 目录不影响账本，但会丢失完整 artifact。
 
 ## 限制
 
 - 单独使用 observe 模式没有产品价值：它只积累观察行，不唤醒、不通知。observe 仍要求 `assistant-delivery` 可用，因为准入要先校验 owner route；没有 Delivery 时准入记录不会写入（失败关闭），这是当前实现的已知限制。
-- 不内置真实外部来源；在来源插件出现前，只能由可信 Host 直接调用 `admit(...)`。
+- 尚未接入**仓库外**真实来源（GitHub、邮件、IM、任务日历等）：内置来源只是 `assistant-delivery` 已认证的 owner foreground 记录，仍属于 in-tree 证据。
+- 内置来源的 title/brief 由 delivery 行的**元数据**派生（inbox、binding、版本/代次、完成时间），不读取 owner 原文；因此 brief 不是完整任务复述，worker 需要自己查 delivery history 定位上下文。
+- canonical key 以**单次 execution**（inbox + binding 版本/代次 + executionRef + disposition）为单位，不是「同一意图第 N 次重复」；owner 同一意图重试失败会产生新的工作项（cooldown 与 `maxOpenItems` 限制总量）。
+- 已准入信号的 `disposition` 若被修正（例如 `failed` 后重新成功），会产生**不同** canonical key，因此不会自动关闭旧工作项；撤回（`cancelled`）只被观察计数，不向在途工作项传播取消。
 - 观察期记录会占用去重窗口：同一 signal 从 observe 切到 active 后，窗口内仍视为已准入；需要时等待窗口过期或换 `externalId`。
 - 没有评估、学习或采用反馈回路；工作项终态只是运维证据，不代表任务质量。
 - `stats().openItems` 与 `health().openItems` 只统计 `queued/claimed/working/waiting`，不含仍需人处理的 `ready/blocked` 终态项。

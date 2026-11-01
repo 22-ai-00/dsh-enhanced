@@ -15,6 +15,7 @@ export interface Config {
   admission?: AdmissionConfig
   limits?: LimitsConfig
   delivery?: DeliveryConfig
+  sources?: SourcesConfig
 }
 
 export interface ScopeConfig {
@@ -45,6 +46,26 @@ export interface DeliveryConfig {
   notifyOn?: WorkItemReportStatus[]
 }
 
+/** Automatic signal sources mounted over optional peer services. */
+export interface SourcesConfig {
+  foregroundFailures?: ForegroundFailureSourceConfig
+}
+
+/**
+ * Owner foreground failures observed through `assistant-delivery`.
+ *
+ * Disabled by default like the rest of the plugin: an operator must opt in,
+ * name the admitted kind and bound both the per-sweep scan and write budget.
+ */
+export interface ForegroundFailureSourceConfig {
+  enabled?: boolean
+  kind?: string
+  includeTimedOut?: boolean
+  maxCandidatesPerSweep?: number
+  maxAdmitsPerSweep?: number
+  sweepIntervalMs?: number
+}
+
 /** Fully defaulted, validated configuration used by the service at runtime. */
 export interface NormalizedConfig {
   readonly enabled: boolean
@@ -57,6 +78,20 @@ export interface NormalizedConfig {
   readonly admission: NormalizedAdmission
   readonly limits: NormalizedLimits
   readonly notifyOn: readonly WorkItemReportStatus[]
+  readonly sources: NormalizedSources
+}
+
+export interface NormalizedForegroundFailureSource {
+  readonly enabled: boolean
+  readonly kind: string
+  readonly includeTimedOut: boolean
+  readonly maxCandidatesPerSweep: number
+  readonly maxAdmitsPerSweep: number
+  readonly sweepIntervalMs: number
+}
+
+export interface NormalizedSources {
+  readonly foregroundFailures: NormalizedForegroundFailureSource
 }
 
 export interface NormalizedAdmission {
@@ -83,7 +118,9 @@ const SCOPE_KEYS = ['workspace', 'preset', 'principalId', 'ownerRouteId', 'expir
 const ADMISSION_KEYS = ['allowedKinds', 'maxOpenItems', 'maxAdmitsPerHour', 'dedupWindowMs', 'cooldownMs', 'maxBriefBytes'] as const
 const LIMITS_KEYS = ['leaseMs', 'maxAttempts', 'maxReportsPerItem', 'maxReportBytes'] as const
 const DELIVERY_KEYS = ['notifyOn'] as const
-const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery'] as const
+const SOURCES_KEYS = ['foregroundFailures'] as const
+const FOREGROUND_FAILURE_KEYS = ['enabled', 'kind', 'includeTimedOut', 'maxCandidatesPerSweep', 'maxAdmitsPerSweep', 'sweepIntervalMs'] as const
+const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources'] as const
 const REPORT_STATUSES = ['progress', 'waiting', 'ready', 'blocked', 'failed'] as const
 const NOTIFY_STATUSES = ['ready', 'blocked', 'failed'] as const
 
@@ -115,6 +152,19 @@ const deliverySchema = Schema.object({
   notifyOn: Schema.array(Schema.union(NOTIFY_STATUSES)).default([...NOTIFY_STATUSES]),
 })
 
+const foregroundFailureSchema = Schema.object({
+  enabled: Schema.boolean().default(false),
+  kind: Schema.string().default('foreground-repair'),
+  includeTimedOut: Schema.boolean().default(true),
+  maxCandidatesPerSweep: Schema.number().step(1).min(1).max(100).default(10),
+  maxAdmitsPerSweep: Schema.number().step(1).min(1).max(10).default(2),
+  sweepIntervalMs: Schema.number().step(1).min(60_000).max(86_400_000).default(3_600_000),
+})
+
+const sourcesSchema = Schema.object({
+  foregroundFailures: foregroundFailureSchema,
+})
+
 /** Synchronous Standard-Schema validator used by DSH before construction. */
 export const ConfigSchema = Schema.object({
   enabled: Schema.boolean().default(false),
@@ -127,6 +177,7 @@ export const ConfigSchema = Schema.object({
   admission: admissionSchema,
   limits: limitsSchema,
   delivery: deliverySchema,
+  sources: sourcesSchema,
 }) as Schema<Config>
 
 function fail(code: WorkItemErrorCode, message: string): never {
@@ -255,6 +306,36 @@ function normalizeDelivery(raw: DeliveryConfig | undefined): readonly WorkItemRe
   return Object.freeze(statuses)
 }
 
+function normalizeSources(raw: SourcesConfig | undefined): NormalizedSources {
+  const value = raw === undefined ? {} : plainObject(raw, 'sources')
+  rejectUnknown(value, SOURCES_KEYS, 'sources')
+  const foreground = value['foregroundFailures'] === undefined
+    ? {}
+    : plainObject(value['foregroundFailures'], 'sources.foregroundFailures')
+  rejectUnknown(foreground, FOREGROUND_FAILURE_KEYS, 'sources.foregroundFailures')
+  const enabled = foreground['enabled'] ?? false
+  if (typeof enabled !== 'boolean') fail('invalid-input', 'sources.foregroundFailures.enabled must be a boolean')
+  const kind = text(foreground['kind'] ?? 'foreground-repair', 'sources.foregroundFailures.kind', 64)
+  if (!KIND.test(kind)) fail('invalid-input', 'sources.foregroundFailures.kind has an invalid shape')
+  const includeTimedOut = foreground['includeTimedOut'] ?? true
+  if (typeof includeTimedOut !== 'boolean') fail('invalid-input', 'sources.foregroundFailures.includeTimedOut must be a boolean')
+  return Object.freeze({
+    foregroundFailures: Object.freeze({
+      enabled,
+      kind,
+      includeTimedOut,
+      maxCandidatesPerSweep: integer(foreground['maxCandidatesPerSweep'] ?? 10, 'sources.foregroundFailures.maxCandidatesPerSweep', 1, 100),
+      maxAdmitsPerSweep: integer(foreground['maxAdmitsPerSweep'] ?? 2, 'sources.foregroundFailures.maxAdmitsPerSweep', 1, 10),
+      sweepIntervalMs: integer(foreground['sweepIntervalMs'] ?? 3_600_000, 'sources.foregroundFailures.sweepIntervalMs', 60_000, 86_400_000),
+    }),
+  })
+}
+
+/** True when at least one automatic signal source is armed. */
+export function anySourceEnabled(config: NormalizedConfig): boolean {
+  return config.sources.foregroundFailures.enabled
+}
+
 /**
  * Validate and default operator configuration synchronously.
  *
@@ -286,8 +367,12 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   const admission = normalizeAdmission(value['admission'] as AdmissionConfig | undefined, mode)
   const limits = normalizeLimits(value['limits'] as LimitsConfig | undefined)
   const notifyOn = normalizeDelivery(value['delivery'] as DeliveryConfig | undefined)
+  const sources = normalizeSources(value['sources'] as SourcesConfig | undefined)
   if (enabled && mode === 'active' && (workerAutomationId === null || scope === null)) {
     fail('invalid-input', "an active work-item deployment requires workerAutomationId and scope")
+  }
+  if (enabled && mode === 'active' && sources.foregroundFailures.enabled && !admission.allowedKinds.includes(sources.foregroundFailures.kind)) {
+    fail('invalid-input', 'sources.foregroundFailures.kind must be one of admission.allowedKinds')
   }
   return Object.freeze({
     enabled,
@@ -300,6 +385,7 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     admission,
     limits,
     notifyOn,
+    sources,
   })
 }
 

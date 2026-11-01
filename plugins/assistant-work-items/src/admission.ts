@@ -9,15 +9,73 @@ import type {
   WorkItemAdmitResult,
   WorkItemDispatchRecord,
   WorkItemOwnerEvidence,
+  WorkItemProvenance,
   WorkItemRecord,
+  WorkItemState,
 } from './types.ts'
-import { WorkItemError } from './types.ts'
+import { OPEN_STATES, WorkItemError } from './types.ts'
 import type { WorkItemWorkspace } from './workspace.ts'
 
 const KIND = /^[a-z][a-z0-9-]{0,63}$/
 const EXTERNAL_ID = /^[\x20-\x7e]{1,256}$/
 const BINDING_ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$/
+const SIGNAL_SOURCE = /^[a-z][a-z0-9-]{0,63}$/
+const SIGNAL_REVISION = /^[\x20-\x7e]{1,128}$/
+const EVIDENCE_KEY = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/
 const HOUR_MS = 3_600_000
+
+/** An item is settled when no further claim can move it without a new signal. */
+function isSettled(state: WorkItemState): boolean {
+  return !OPEN_STATES.includes(state)
+}
+
+function provenanceOf(value: WorkItemProvenance): WorkItemProvenance {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    fail('invalid-input', 'provenance must be an object')
+  }
+  const allowed = ['source', 'sourceVersion', 'signalDigest', 'observedAt', 'evidence'] as const
+  for (const key of Object.keys(value)) {
+    if (!(allowed as readonly string[]).includes(key)) fail('invalid-input', `provenance contains unknown field ${key}`)
+  }
+  const source = text(value.source, 'provenance.source', 64)
+  if (!SIGNAL_SOURCE.test(source)) fail('invalid-input', 'provenance.source has an invalid shape')
+  const sourceVersion = text(value.sourceVersion, 'provenance.sourceVersion', 128)
+  if (!SIGNAL_REVISION.test(sourceVersion)) fail('invalid-input', 'provenance.sourceVersion has an invalid shape')
+  const signalDigest = text(value.signalDigest, 'provenance.signalDigest', 128)
+  if (!SIGNAL_REVISION.test(signalDigest)) fail('invalid-input', 'provenance.signalDigest has an invalid shape')
+  if (typeof value.observedAt !== 'number' || !Number.isSafeInteger(value.observedAt) || value.observedAt <= 0) {
+    fail('invalid-input', 'provenance.observedAt must be a positive integer timestamp')
+  }
+  let evidence: Record<string, string | number | boolean> | undefined
+  if (value.evidence !== undefined) {
+    if (value.evidence === null || typeof value.evidence !== 'object' || Array.isArray(value.evidence)) {
+      fail('invalid-input', 'provenance.evidence must be an object')
+    }
+    const entries = Object.entries(value.evidence)
+    if (entries.length > 8) fail('invalid-input', 'provenance.evidence accepts at most 8 entries')
+    evidence = {}
+    for (const [key, entry] of entries) {
+      if (!EVIDENCE_KEY.test(key)) fail('invalid-input', `provenance.evidence key ${key} has an invalid shape`)
+      if (typeof entry === 'string') {
+        if (byteLength(entry) > 256) fail('invalid-input', `provenance.evidence.${key} exceeds 256 bytes`)
+        evidence[key] = entry
+      } else if (typeof entry === 'boolean') {
+        evidence[key] = entry
+      } else if (typeof entry === 'number' && Number.isFinite(entry)) {
+        evidence[key] = entry
+      } else {
+        fail('invalid-input', `provenance.evidence.${key} must be a string, number or boolean`)
+      }
+    }
+  }
+  return Object.freeze({
+    source,
+    sourceVersion,
+    signalDigest,
+    observedAt: value.observedAt,
+    ...(evidence === undefined ? {} : { evidence: Object.freeze(evidence) }),
+  })
+}
 
 function fail(code: ConstructorParameters<typeof WorkItemError>[0], message: string, detail?: string): never {
   throw new WorkItemError(code, message, detail)
@@ -102,7 +160,16 @@ export class WorkItemAdmission {
     if (existing !== undefined) {
       const dispatch = this.#deps.store.getDispatch(existing.id)
       if (dispatch === undefined) fail('storage', 'admitted item is missing its dispatch row')
-      return Object.freeze({ item: existing, created: false, dispatch })
+      return Object.freeze({ item: existing, created: false, reason: 'duplicate', dispatch })
+    }
+    // The window is a freshness bound, not a settlement bound: once the same
+    // canonical signal has been settled (completed, blocked, failed, dropped),
+    // a later corrected or withdrawn revision must not revive it as new work.
+    const settled = this.#deps.store.findLatestItemByDedupKey(dedupKey)
+    if (settled !== undefined && isSettled(settled.state)) {
+      const dispatch = this.#deps.store.getDispatch(settled.id)
+      if (dispatch === undefined) fail('storage', 'admitted item is missing its dispatch row')
+      return Object.freeze({ item: settled, created: false, reason: 'fenced', dispatch })
     }
 
     const wouldReject = this.#gateReasons(normalized.kind, now)
@@ -165,12 +232,15 @@ export class WorkItemAdmission {
       createdAt: now,
       updatedAt: now,
     })
+    const detail: Record<string, unknown> = { kind: normalized.kind, dedupBucket }
+    if (normalized.provenance !== null) detail['provenance'] = normalized.provenance
+    if (!active) detail['wouldReject'] = wouldReject
     this.#deps.store.admitItem(
       item,
       {
         kind: active ? 'admitted' : 'observed',
         actor: 'admission',
-        detail: active ? { kind: normalized.kind, dedupBucket } : { kind: normalized.kind, dedupBucket, wouldReject },
+        detail,
       },
       dispatch,
     )
@@ -251,9 +321,10 @@ export class WorkItemAdmission {
     brief: string
     originBindingId: string
     acceptanceRef: string | null
+    provenance: WorkItemProvenance | null
   } {
     if (input === null || typeof input !== 'object' || Array.isArray(input)) fail('invalid-input', 'admission input must be an object')
-    const allowed = ['kind', 'externalId', 'title', 'brief', 'originBindingId', 'acceptanceRef'] as const
+    const allowed = ['kind', 'externalId', 'title', 'brief', 'originBindingId', 'acceptanceRef', 'provenance'] as const
     for (const key of Object.keys(input)) {
       if (!(allowed as readonly string[]).includes(key)) fail('invalid-input', `admission input contains unknown field ${key}`)
     }
@@ -266,7 +337,8 @@ export class WorkItemAdmission {
     const originBindingId = text(input.originBindingId, 'originBindingId', 256)
     if (!BINDING_ID.test(originBindingId)) fail('invalid-input', 'originBindingId has an invalid shape')
     const acceptanceRef = input.acceptanceRef === undefined ? null : text(input.acceptanceRef, 'acceptanceRef', 1_024)
-    return { kind, externalId, title, brief, originBindingId, acceptanceRef }
+    const provenance = input.provenance === undefined ? null : provenanceOf(input.provenance)
+    return { kind, externalId, title, brief, originBindingId, acceptanceRef, provenance }
   }
 }
 

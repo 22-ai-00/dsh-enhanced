@@ -415,6 +415,31 @@ export class WorkItemStore {
     return row === undefined ? undefined : itemFromRow(row)
   }
 
+  /**
+   * Latest item admitted for one canonical dedup key, across all windows.
+   *
+   * The dedup window forgets history when a bucket rolls over; this lookup is
+   * what lets a correction or withdrawal of an already-settled signal stay
+   * settled instead of reviving a completed item.
+   */
+  findLatestItemByDedupKey(dedupKey: string): WorkItemRecord | undefined {
+    const row = this.#statement(`SELECT ${ITEM_ALIASES} FROM work_item WHERE dedup_key = ? ORDER BY created_at DESC, id DESC LIMIT 1`).get(dedupKey) as Row | undefined
+    return row === undefined ? undefined : itemFromRow(row)
+  }
+
+  /** Read one durable key/value row from the schema-meta table. */
+  meta(key: string): string | null {
+    const row = this.#statement('SELECT value FROM work_item_schema_meta WHERE key = ?').get(key) as Row | undefined
+    return row === undefined ? null : String(row['value'])
+  }
+
+  /** Persist one durable key/value row; no schema change is required for it. */
+  setMeta(key: string, value: string): void {
+    this.#statement(
+      'INSERT INTO work_item_schema_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+    ).run(key, value)
+  }
+
   findItemByOccurrence(occurrenceId: string): WorkItemRecord | undefined {
     const row = this.#statement(`SELECT ${ITEM_ALIASES} FROM work_item WHERE occurrence_id = ?`).get(occurrenceId) as Row | undefined
     if (row !== undefined) return itemFromRow(row)

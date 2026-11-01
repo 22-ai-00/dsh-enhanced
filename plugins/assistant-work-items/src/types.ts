@@ -180,6 +180,21 @@ export interface WorkItemDispatchRecord {
   readonly updatedAt: number
 }
 
+/**
+ * Provenance of an automatically derived signal.
+ *
+ * The digest is the source's own canonical revision identity; it is never a
+ * hash of the owner-facing text, so a reworded but unchanged signal keeps its
+ * identity while a genuinely new revision changes it.
+ */
+export interface WorkItemProvenance {
+  readonly source: string
+  readonly sourceVersion: string
+  readonly signalDigest: string
+  readonly observedAt: number
+  readonly evidence?: Readonly<Record<string, string | number | boolean>>
+}
+
 /** Input accepted by `assistantWorkItems.admit()`. */
 export interface WorkItemAdmitInput {
   readonly kind: string
@@ -188,12 +203,18 @@ export interface WorkItemAdmitInput {
   readonly brief: string
   readonly originBindingId: string
   readonly acceptanceRef?: string
+  readonly provenance?: WorkItemProvenance
 }
+
+/** Why an admission did not create a new item. */
+export type WorkItemAdmitReason = 'duplicate' | 'fenced'
 
 /** Result of one admission attempt. */
 export interface WorkItemAdmitResult {
   readonly item: WorkItemRecord
   readonly created: boolean
+  /** Present only when `created` is `false`. */
+  readonly reason?: WorkItemAdmitReason
   readonly dispatch: WorkItemDispatchRecord
 }
 

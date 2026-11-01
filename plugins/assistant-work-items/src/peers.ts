@@ -49,6 +49,43 @@ export interface PeerOwnerRouteInspection {
   readonly reason?: string
 }
 
+/**
+ * One owner-authenticated foreground task, as exposed read-only by
+ * `assistant-delivery`'s `owner-foreground-source/v1` protocol.
+ *
+ * This is already-authoritative owner data: the owner submitted the request
+ * through their own route, the execution status is recorded by delivery, and
+ * the surface is cursor paged. A `failed`/`timed-out` execution is therefore a
+ * genuine correction/repair signal, not a fixed developer scenario.
+ */
+export interface PeerOwnerForegroundExecution {
+  readonly dispatchedAt: number
+  readonly status: 'succeeded' | 'failed' | 'timed-out' | 'cancelled' | 'unknown'
+  readonly quiescent: boolean
+  readonly completedAt: number
+  readonly executionRef: string
+}
+
+export interface PeerOwnerForegroundTaskSource {
+  readonly protocol: string
+  readonly inboxId: string
+  readonly sourceDigest: string
+  readonly completionSequence: number
+  readonly authorityId: string
+  readonly authorityHash: string
+  readonly principalId: string
+  readonly scope: Readonly<{ workspace: string; preset: string }>
+  readonly binding: Readonly<{ id: string; version: number; generation: number; sessionId: string }>
+  readonly execution: Readonly<PeerOwnerForegroundExecution>
+}
+
+export interface PeerOwnerForegroundTaskSourcePage {
+  readonly items: readonly PeerOwnerForegroundTaskSource[]
+  readonly nextCursor: unknown
+  readonly watermark: number
+  readonly hasMore: boolean
+}
+
 /** `assistant-delivery` surfaces used by this plugin. */
 export interface PeerDeliveryService {
   validateOwnerRoute(input: {
@@ -63,6 +100,21 @@ export interface PeerDeliveryService {
     workspace: string
     agentPreset: string
   }): PeerOwnerRouteInspection
+  /**
+   * Read-only, owner-authenticated page of foreground task sources.
+   *
+   * Optional: older delivery versions do not expose it, and a missing method
+   * degenerates the automatic source to a no-op instead of failing activation.
+   */
+  listOwnerForegroundTaskSources?(input: {
+    authorityId: string
+    principalId: string
+    workspace: string
+    agentPreset: string
+    expectedOwner: Readonly<{ authorityHash: string; principalRecordId: string; principalVersion: number }>
+    after?: unknown
+    limit?: number
+  }): Readonly<PeerOwnerForegroundTaskSourcePage>
   enqueueBackground(input: {
     sourceId: string
     workspace: string
