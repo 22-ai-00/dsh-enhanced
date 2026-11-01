@@ -167,7 +167,7 @@ worker preset 需要与 definition 的 `agentPreset` 一致；`subject.id` 写�
 
 `work_item_claim` 的返回值里带一个**只读、有界**的 `resume` 对象，让新 occurrence 在没有上一次模型记忆的情况下继续：`resumed` / `priorAttempts`、最近 5 次**先前** attempt（attempt 号、可得的 run id、开始时间、结束方式 `expired` / `reclaimed` / `attempt-exhausted` / `reported` / `settled`、以及终态报告的状态）、最近 5 条先前报告（revision、status、summary、`summaryTruncated`、记录时间；按时间从旧到新排列）与真实的 `reportsTotal`、最近一条已结算结果（revision、`settledBy`、execution/objective/evidence 状态、结算时间），以及 `truncated` 表示上游历史是否被上述上限截断。
 
-- 简报只从本插件的 append-only 本地账本派生：`work_item_event` 与 `work_item_report` 按 `(item_id, …)` 主键前缀做有界扫描（`LIMIT`），不引入新表、不改变 schema 版本（仍为 7）、不新增 timer，也不调用模型或 peer。
+- 简报只从本插件的 append-only 本地账本派生：`work_item_event` 与 `work_item_report` 按 `(item_id, …)` 主键前缀做有界扫描（`LIMIT`），不引入新表或 timer，也不调用模型或 peer。当前 schema 为 8，新增内容仅服务于下述有界续办索引。
 - 报告 summary 在简报里最多保留 512 UTF-8 字节，超长按 UTF-8 边界截断并置 `summaryTruncated`；当前 attempt 自身不计入 `attempts`/`priorAttempts`。
 - 简报是派生展示，不改变 claim/report/结算语义；它不含数据库路径、delivery id 或 evidence blob。首次认领与旧账本行可能得到空简报（`resumed: false`），重放同一 claim 会重新计算并返回一致的简报，不会追加新的 claim/attempt/事件。
 
@@ -184,7 +184,7 @@ work_item_read_report:
 
 - `revision` 为必填正安全整数；`offset` 是已存正文的 UTF-8 **字节**偏移，默认 `0`；`max_bytes` 默认 `4096`，取值 `4–8192`。返回正文总字节数 `summaryBytes`；还有后文时返回 `nextOffset`，原样传回即可续读；末页省略该字段。偏移超出正文或落在多字节字符中间会拒绝，不会跳字或产生半个字符。
 - 返回实际存在的 `previousRevision` / `nextRevision`，首尾省略对应字段；因此可以从简报中的任一报告逐条找到早于最近 5 条的报告。`storedTruncated` 表示**原报告入库前**已被 `limits.maxReportBytes` 截断；召回只能恢复已存正文，不能恢复被丢弃的原输入。
-- 读取只访问当前 occurrence 绑定的 item/report，重查 owner route 的 principal、版本及 binding 代次，并重跑原准入授权；缺依赖、撤权、owner/代次变化或到期均失败关闭。拒绝读取不 park 工作项，不触发恢复、结算或新增账本行；schema 仍为 7。
+- 读取只访问当前 occurrence 绑定的 item/report，重查 owner route 的 principal、版本及 binding 代次，并重跑原准入授权；缺依赖、撤权、owner/代次变化或到期均失败关闭。拒绝读取不 park 工作项，不触发恢复、结算或新增账本行，也不改变 schema。
 - `artifactPaths` 只是原报告登记的引用，不读取文件。正文及引用都按不可信数据渲染。`work_item_report` 显示通知已入队仅证明 Delivery 接受了 outbox 请求，不证明消息已发送、送达或已读；历史 `delivery: sent` 仍保留原枚举语义。
 - 新 automation 的不可变工具白名单和 preset 工具平面都须包含 `work_item_read_report`；已存在的 automation 不会因插件升级自动取得该工具。
 
@@ -219,7 +219,9 @@ work_item_read_report:
 - 去重键 `sha256(sourceId\0kind\0externalId)` 加时间桶 UNIQUE；同一外部信号在 `dedupWindowMs` 内只入账一次，重放返回既有工作项。
 - 唤醒身份按**代次**限定：`work_item_dispatch` 保存 `generation`、`event_id`、`occurred_at`，代次 0 就是准入事件（`event_id` = 工作项 ID、`occurred_at` = 准入时间）；每次重新武装都把 `generation + 1`、`event_id` 改写为确定性的 `工作项 ID#代次` 并写入新的 `occurred_at`。`wake()` 只使用 dispatch 行持久化的身份，绝不从工作项 ID 重新构造，因此重新武装一定对应 automation 侧的新 occurrence，而同一代次的重复唤醒仍解析到同一个 occurrence。
 - 租约到期不靠 timer 回收：admit/claim/status/list/health 以及启动恢复时惰性调用 `reclaimExpired()`；到期 claim 被显式置为 `expired` 并记事件，工作项回到 `queued`，dispatch 行在同一事务里进入下一个代次并回到 `pending`，由后续普通 worker 流量中的有界 `wakePending()` 扫到（`occurred_at <= now` 才唤醒，绝不提前）；超过 `maxAttempts` 的项标记 `blocked`。
-- `waiting` 报告会释放 claim 并**安排一次延迟恢复**：dispatch 行进入下一个代次、`reason = waiting-resume`、到期时间为报告时间 + `limits.waitingResumeMs`；只有 `attempt < maxAttempts`、未进入终态且未被观察时才安排，每次 waiting 报告最多一代，不会自旋。到期后由同一次惰性唤醒扫到，worker 以新 occurrence 重新认领并得到 `attempt + 1`。
+- `waiting` 报告会释放 claim 并**安排一次延迟恢复**：dispatch 行进入下一个代次、`reason = waiting-resume`、到期时间为报告时间 + `limits.waitingResumeMs`；只有 `attempt < maxAttempts`、未进入终态且未被观察时才安排，每次 waiting 报告最多一代。active intake 会通过 owning Fiber 的嵌套 injection 订阅原生 Automations `onSchedulerWake`，在已有 scheduler tick 到期时入队新 occurrence，无需用户再调用 claim；执行仍由原生 scheduler 负责，成功认领后才增加 attempt。
+- 原生唤醒每次先从部分 due 索引按 `(occurred_at, item_id)` 取最多 **10 个候选**，再逐项检查仍为 pending waiting-resume、item waiting 且最后报告 waiting、未观察、无活动 lease/claim、有剩余尝试、现代准入 mandate 和有效的精确 owner/scope；沿用 `dispatch.wake` 的原准入授权、稳定事件身份与 Automations ingest Policy。回调不调用全量租约回收、来源扫描、结算、tick/start、模型或预算 reserve。schema 8 只新增 dispatch due 与 active-claim 两个部分索引；历史行不改写，公平游标存于既有 meta 表，经过拒绝或失效项也会推进并轮转，避免后续项饥饿。
+- Automations peer 按调用时解析，晚加载或替换后由新 owning injection 重新订阅；旧代次 callback 被撤销，close 先停监听再关账本，同步重入会被隔离。disabled/observe 不订阅，也不因 tick 打开账本。旧 peer 缺 `onSchedulerWake` 时会 warn 并保留启动/claim 惰性恢复路径。要在空闲 Host 自动续办，仍须启用原生 Automations `schedulerEnabled`；`health().schedulerWake.subscribed` 只证明监听已安装，不证明调度器、duty 或任务执行已获授权。
 - 崩溃恢复：`ingestExternal` 已成功但 dispatch 行仍未记账时，该行保持 `pending` 且身份不变，下一次有界恢复用**同一代次身份**重新唤醒，automation store 以相同 `(automationId, eventId, occurredAt)` 幂等返回既有 occurrence，绝不重复运行、绝不重复报告。
 - 唤醒记账诚实：peer 抛出的错误若表示「不知道是否已经提交」（非 `policy-denied`/`policy`、非去重冲突），dispatch 行记为 `state='failed'`、`reason='unknown_after_send'`，`health().dispatchUnknown` 因此只统计仍然**开放且未被观察**的 item 上真实存在的这种行：item 一旦被撤回、终结或观察，就不再计入，也不会再被恢复扫描。这样的行在同一代次身份下最多被惰性恢复重试 **1 次**（`wake_attempts` 持久计数）；重试成功则转为 `dispatched`，再次失败则保持 `failed`/`unknown_after_send`，把无法消除的缺口留给 owner，而不是无限重试或假装成功。持久身份冲突（`idempotency-conflict`）是确定性错误，记为独立原因 `idempotency-conflict` 并抛 typed `WorkItemError`（`dispatch-failed`）；没有 occurrence 查询接口时无法自动收敛，因此不静默吞掉。
 - SQLite 使用 `WAL`、`synchronous=FULL`、`BEGIN IMMEDIATE` 事务和 forward-only schema；`PRAGMA user_version` 只前进。升级写入边界要求单 writer：升级前停掉 DSH 进程。
@@ -267,7 +269,7 @@ work_item_read_report:
 - `evidenceState: observed` → `executionStatus: succeeded` 且 `evaluator.version: settlement-v1`；`unverified` / `not-applicable` → `executionStatus: unknown` 且 `unverified-v1`。投影的 `objectiveStatus` 与 `deliveryStatus` 在类型和运行时都只能是 `unknown`：work-item 结算永远不能把自身升级为目标达成证据，也不会因报告过 `ready` 而被 Evaluation 当作 achieved。
 - 复用与 verifier 相同的私有 producer registration seam：`assistantEvaluation` 通过 `ctx` 发现本服务的 `trustedWorkItemProducerGeneration()` 与 `registerTrustedWorkItemEvaluationSink(registration)`，并校验 protocol（`assistant-work-items/evaluation/v1`）、generation、ownership 和单注册不变量；本插件不直接写 Evaluation 数据库。
 - `assistant-evaluation` 是可选 peer：缺席时结算行保持 `pending`，不阻塞 claim/report；绑定后下一次 drain 会补导既有 pending 行。
-- 有界且诚实降级：每 sweep 最多 10 条，失败最多重试 5 次后标记 `export-attempts-exhausted`；部署没有精确 workspace+preset scope 时标记 `skipped`（`owner-route-unavailable`）；observe 模式不导出。状态写入 `work_item_outcome.evaluation_*`（schema v5 引入，v6/v7 保持），`health().evaluation` 与 `stats()` 暴露 `evaluationPending/exported/skipped`。
+- 有界且诚实降级：每 sweep 最多 10 条，失败最多重试 5 次后标记 `export-attempts-exhausted`；部署没有精确 workspace+preset scope 时标记 `skipped`（`owner-route-unavailable`）；observe 模式不导出。状态写入 `work_item_outcome.evaluation_*`（schema v5 引入，后续版本保持），`health().evaluation` 与 `stats()` 暴露 `evaluationPending/exported/skipped`。
 - 依赖方向：本插件只以 **type-only import** 引用 `@dsh-enhanced/assistant-evaluation` 的 claims/registration 契约类型，并把该包声明为 optional peer + devDependency；Evaluation 保持 producer-agnostic，不依赖任何 producer 运行时。
 
 #### 工作项执行指标（metrics）
@@ -277,7 +279,7 @@ work_item_read_report:
 - `latencyMs`（存在时总是非负）：`settledAt − item.createdAt`，即从准入到该结算修订的墙钟时间；时间戳非安全整数时箝位为 0。item 行缺失时 `workItemExecutionMetrics` 返回 `undefined`，drain 路径回退到 `metricsFor(undefined)`（即 `{}`，**没有** `latencyMs`）。
 - `claims`/`retries`：`claims` 统计结算上界内的 `claimed` 事件数（每次成功 claim 在同一事务里恰好追加一条事件并原子递增 `attempt`，所以它就是 `settledAt` 时刻的尝试数，不会像可变的 `item.attempt` 那样吸收结算之后的重试；`work_item_event` 以 `(item_id, sequence)` 为主键，可按前缀索引搜索，避免扫全部历史 claim 行）；`retries = claims − 1`。`reports`/`waitingReports` 来自 `work_item_report`（按 `recorded_at`，其中 `waitingReports` 按 `status = 'waiting'`），`unknownDispatches`/`claimExpiries` 来自 `work_item_event` 的 `dispatch-unknown`/`claim-expired` 事件（按 `recorded_at`）。
 - 所有计数都以 **`settledAt` 为上界**（`recorded_at/created_at <= settledAt`）：结算之后才落库的行属于后续观察，不会被已结算修订吸收；同一 item 的新修订重新计算即可看到它们。边界是 1 ms 粒度、含等号的（`<=`），因此同一毫秒内、结算之后才提交的行仍会被计入；这里刻意不用严格 `<`，否则会把合法的同毫秒行漏掉。
-- 零/缺失计数直接省略（不写 `0`），值域是无符号安全整数；schema 仍是 v7，不新增表、不新增列。`workItemEvaluationClaims` 增加可选的第四个 `execution` 参数：drain 路径传入上面的只读计数包，直调三参数形式继续使用 live 记录回退，行为与旧版本一致（`{ latencyMs, retries? }`）。
+- 零/缺失计数直接省略（不写 `0`），值域是无符号安全整数；这些指标不新增表或列。`workItemEvaluationClaims` 增加可选的第四个 `execution` 参数：drain 路径传入上面的只读计数包，直调三参数形式继续使用 live 记录回退，行为与旧版本一致（`{ latencyMs, retries? }`）。
 - 刻意**不采集 provider token/成本指标**：本插件与 `assistant-automations` 之间没有 run-usage 契约，无法区分「本工作项消耗」与「同一 run 的其他开销」，复制过去的数字会把成本重复计入 Evaluation；需要成本归因时应由拥有 provider 账本的 producer 自己投影。执行指标只回答「做过多少事、等多久、重试几次」，不回答 objective 是否达成。
 
 ## 配置

@@ -20,7 +20,7 @@ export interface DispatchDependencies {
   readonly config: NormalizedConfig
   readonly store: WorkItemStore
   readonly ledger: WorkItemLedger
-  readonly automations: PeerAutomationsService | undefined
+  readonly automations: PeerAutomationsService | undefined | (() => PeerAutomationsService | undefined)
   readonly delivery: PeerDeliveryService | undefined
   /** Admission-mandate revalidation gate; unset means single-authority mode. */
   readonly authority?: WorkItemAuthority
@@ -64,7 +64,7 @@ export class WorkItemDispatch {
   wake(item: WorkItemRecord): boolean {
     const config = this.#deps.config
     if (!isActive(config)) return false
-    const automations = this.#deps.automations
+    const automations = typeof this.#deps.automations === 'function' ? this.#deps.automations() : this.#deps.automations
     if (automations === undefined) fail('missing-dependency', 'assistantAutomations is required to wake the worker')
     const dispatch = this.#deps.store.getDispatch(item.id)
     if (dispatch === undefined) fail('storage', 'work item has no dispatch row')

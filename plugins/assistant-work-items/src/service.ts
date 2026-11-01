@@ -158,6 +158,13 @@ export interface WorkItemReportInput {
   readonly idempotencyKey: string
 }
 
+export interface WorkItemSchedulerWakeHealth {
+  /** A listener is installed; this does not attest schedulerEnabled or duty. */
+  readonly subscribed: boolean
+  readonly lastWakeAt: number | null
+  readonly lastError: string | null
+}
+
 type WorkItemToolExecution = Pick<ToolExecution, 'name' | 'agent' | 'arguments'> & { readonly signal?: AbortSignal }
 
 declare module '@deepseek-ai/cordis' {
@@ -188,6 +195,10 @@ export class AssistantWorkItemsService extends Service {
   private workItemsFollowDegraded: WorkItemFollowDegradedReason | null = null
   private workItemsComponents: Components | undefined
   private workItemsClosed = false
+  private readonly workItemsSchedulerUnsubscribers = new Set<() => void>()
+  private workItemsSchedulerWaking = false
+  private workItemsSchedulerLastWakeAt: number | null = null
+  private workItemsSchedulerLastError: string | null = null
 
   constructor(ctx: Context, input: Config) {
     super(ctx, 'assistantWorkItems')
@@ -210,6 +221,76 @@ export class AssistantWorkItemsService extends Service {
     // The disabled default must not create a directory, lock a file or open a
     // database, so persistence starts only for an explicitly enabled intake.
     if (this.workItemsConfig.enabled) this.workItemsOpen()
+    if (isActive(this.workItemsConfig)) {
+      ctx.inject(['assistantAutomations'], wakeCtx => {
+        if (this.workItemsClosed) return
+        const peer = wakeCtx.get('assistantAutomations' as never) as PeerAutomationsService | undefined
+        if (typeof peer?.onSchedulerWake !== 'function') {
+          wakeCtx.logger.warn('assistant-work-items: native scheduler wake is unavailable; waiting resumes retain startup/claim recovery')
+          return
+        }
+        // Resolve on the consumer Context so Automations owns this effect on
+        // the injecting Fiber, not on its own provider or a cached root proxy.
+        let active = true
+        const unregister = peer.onSchedulerWake(() => {
+          if (active) this.workItemsOnSchedulerWake()
+        })
+        const remove = () => {
+          if (!active) return
+          active = false
+          this.workItemsSchedulerUnsubscribers.delete(remove)
+          unregister()
+        }
+        if (this.workItemsClosed) { remove(); return }
+        this.workItemsSchedulerUnsubscribers.add(remove)
+        wakeCtx.effect(() => remove, 'assistant-work-items.scheduler-wake')
+      })
+    }
+  }
+
+  /** One native wake may admit at most ten already-due waiting occurrences. */
+  private workItemsOnSchedulerWake(): void {
+    if (this.workItemsClosed || !isActive(this.workItemsConfig) || this.workItemsSchedulerWaking) return
+    const components = this.workItemsComponents
+    if (components === undefined) return
+    this.workItemsSchedulerWaking = true
+    this.workItemsSchedulerLastWakeAt = Date.now()
+    this.workItemsSchedulerLastError = null
+    try {
+      for (const selected of components.store.listDueWaitingResumes(10)) {
+        if (this.workItemsClosed) break
+        // Advance before examining authority, including on denied items. The
+        // next tick can reach later rows; pending rows remain available on wrap.
+        components.store.advanceWaitingResumeCursor(selected)
+        try {
+          const dispatch = components.store.getDispatch(selected.itemId)
+          const item = components.store.findItemById(selected.itemId)
+          const scope = this.workItemsConfig.scope
+          if (dispatch === undefined || dispatch.state !== 'pending' || dispatch.reason !== 'waiting-resume'
+            || dispatch.eventId !== selected.eventId || dispatch.generation !== selected.generation
+            || dispatch.occurredAt > Date.now() || item === undefined || item.state !== 'waiting'
+            || item.lastReportStatus !== 'waiting' || item.observed || item.leaseUntil !== null
+            || components.store.activeClaim(item.id) !== undefined || item.attempt >= item.maxAttempts
+            || item.authority === null || scope === null || scope.expiresAt <= Date.now()
+            || item.scope.workspace !== scope.workspace || item.scope.preset !== scope.preset
+            || item.scope.principalId !== scope.principalId || item.scope.ownerRouteId !== scope.ownerRouteId) continue
+          const owner = this.workItemsAssertOwnerRoute(item)
+          if (owner.principalVersion !== item.owner.principalVersion
+            || owner.bindingVersion !== item.owner.bindingVersion || owner.generation !== item.owner.generation) continue
+          // Reuse the existing mandate check, stable event identity, ingestion
+          // Policy and unknown-outcome handling. This does not run an Agent.
+          components.dispatch.wake(item)
+        } catch (error) {
+          this.workItemsSchedulerLastError = error instanceof WorkItemError ? error.code : 'scheduler-wake-failed'
+          this.ctx.logger.warn(`assistant-work-items: waiting resume wake failed: ${describe(error)}`)
+        }
+      }
+    } catch (error) {
+      this.workItemsSchedulerLastError = error instanceof WorkItemError ? error.code : 'scheduler-wake-failed'
+      this.ctx.logger.warn(`assistant-work-items: waiting resume scan failed: ${describe(error)}`)
+    } finally {
+      this.workItemsSchedulerWaking = false
+    }
   }
 
   get enabled(): boolean {
@@ -668,7 +749,7 @@ export class AssistantWorkItemsService extends Service {
   }
 
   /** Bounded health projection; never creates the ledger when disabled. */
-  health(): WorkItemHealth {
+  health(): WorkItemHealth & { readonly schedulerWake: WorkItemSchedulerWakeHealth } {
     const config = this.workItemsConfig
     const empty: WorkItemHealth = Object.freeze({
       enabled: config.enabled,
@@ -697,15 +778,18 @@ export class AssistantWorkItemsService extends Service {
         degraded: this.workItemsEvaluation.degraded,
       }),
     })
-    if (!config.enabled || this.workItemsClosed) return empty
+    const schedulerWake = Object.freeze({ subscribed: this.workItemsSchedulerUnsubscribers.size > 0,
+      lastWakeAt: this.workItemsSchedulerLastWakeAt, lastError: this.workItemsSchedulerLastError })
+    if (!config.enabled || this.workItemsClosed) return Object.freeze({ ...empty, schedulerWake })
     let components: Components
     try {
       components = this.workItemsOpen()
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: ledger unavailable: ${describe(error)}`)
-      return empty
+      return Object.freeze({ ...empty, schedulerWake })
     }
     return Object.freeze({
+      schedulerWake,
       enabled: true,
       mode: config.mode,
       openItems: components.store.countOpenItems(),
@@ -731,6 +815,9 @@ export class AssistantWorkItemsService extends Service {
   close(): void {
     if (this.workItemsClosed) return
     this.workItemsClosed = true
+    for (const unregister of this.workItemsSchedulerUnsubscribers) {
+      try { unregister() } catch (error) { this.ctx.logger.warn(`assistant-work-items: scheduler wake removal failed: ${describe(error)}`) }
+    }
     this.workItemsEvaluation.dispose()
     const components = this.workItemsComponents
     this.workItemsComponents = undefined
@@ -946,7 +1033,7 @@ export class AssistantWorkItemsService extends Service {
       config,
       store,
       ledger,
-      automations: this.workItemsAutomations(),
+      automations: () => this.workItemsAutomations(),
       delivery: this.workItemsDelivery(),
       authority,
     })

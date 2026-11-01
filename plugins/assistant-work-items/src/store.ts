@@ -48,7 +48,13 @@ import type {
 } from './types.ts'
 import { CLAIMABLE_STATES, OPEN_STATES, TERMINAL_REPORT_STATUSES, WorkItemError } from './types.ts'
 
-const SCHEMA_VERSION = 7
+const SCHEMA_VERSION = 8
+const WORK_ITEM_TABLE_NAMES = ['work_item', 'work_item_claim', 'work_item_dispatch', 'work_item_event', 'work_item_follow', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta']
+const WAITING_RESUME_CURSOR = 'scheduler.waiting-resume.cursor'
+const WAITING_RESUME_DUE_INDEX = `CREATE INDEX work_item_dispatch_waiting_due_idx
+  ON work_item_dispatch(occurred_at, item_id) WHERE state = 'pending' AND reason = 'waiting-resume'`
+const ACTIVE_CLAIM_ITEM_INDEX = `CREATE INDEX work_item_claim_active_item_idx
+  ON work_item_claim(item_id) WHERE state = 'active'`
 /** Waiting reasons that mean an admission mandate failed revalidation. */
 const AUTHORITY_REVOKED = 'authority-revoked'
 const AUTHORITY_UNAVAILABLE = 'authority-unavailable'
@@ -249,7 +255,13 @@ export function prepareDatabaseFile(path: string): void {
 
 function validateSchema(database: DatabaseSync): void {
   const version = (database.prepare('PRAGMA user_version').get() as Row)['user_version'] as number
-  const objects = database.prepare("SELECT type, name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all() as Row[]
+  const objects = database.prepare("SELECT type, name FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type, name").all() as Row[]
+  // Reject unowned objects before migrations can fire a trigger or update a
+  // foreign schema. `_` is literal here: sqliteXshadow is an application name.
+  if (version !== 0 && objects.some(row => String(row['type']) !== 'index'
+    && (String(row['type']) !== 'table' || !WORK_ITEM_TABLE_NAMES.includes(String(row['name']))))) {
+    fail('storage', 'work-item database contains an unexpected schema object')
+  }
   if (version === 0) {
     if (objects.length !== 0) fail('storage', 'new work-item database is not empty')
     database.exec(`
@@ -313,11 +325,13 @@ function validateSchema(database: DatabaseSync): void {
         UNIQUE(automation_id, event_id)
       ) STRICT;
       ${FOLLOW_SCHEMA}
+      ${WAITING_RESUME_DUE_INDEX};
+      ${ACTIVE_CLAIM_ITEM_INDEX};
       CREATE TABLE work_item_schema_meta (
         key TEXT PRIMARY KEY, value TEXT NOT NULL
       ) STRICT, WITHOUT ROWID;
-      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '7');
-      PRAGMA user_version = 7;
+      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '8');
+      PRAGMA user_version = 8;
       COMMIT;
     `)
     return
@@ -421,10 +435,26 @@ function validateSchema(database: DatabaseSync): void {
       COMMIT;
     `)
   }
+  if (version >= 1 && version <= 7) {
+    // Add only bounded scheduler lookup indexes. No stored task, report,
+    // occurrence, attempt, authority or budget value is rewritten.
+    database.exec(`BEGIN IMMEDIATE;
+      ${WAITING_RESUME_DUE_INDEX};
+      ${ACTIVE_CLAIM_ITEM_INDEX};
+      UPDATE work_item_schema_meta SET value = '8' WHERE key = 'schema_version';
+      PRAGMA user_version = 8;
+      COMMIT;`)
+  }
   if (!Number.isSafeInteger(version) || version < 1 || version > SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
-  const expected = JSON.stringify(['work_item', 'work_item_claim', 'work_item_dispatch', 'work_item_event', 'work_item_follow', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta'])
-  const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Row[]).map(row => String(row['name']))
+  const expected = JSON.stringify(WORK_ITEM_TABLE_NAMES)
+  const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*' ORDER BY name").all() as Row[]).map(row => String(row['name']))
   if (JSON.stringify(tables) !== expected) fail('storage', 'work-item database schema is not the expected shape')
+  for (const [name, sql] of [['work_item_dispatch_waiting_due_idx', WAITING_RESUME_DUE_INDEX], ['work_item_claim_active_item_idx', ACTIVE_CLAIM_ITEM_INDEX]]) {
+    const row = database.prepare('SELECT sql FROM sqlite_schema WHERE type = ? AND name = ?').get('index', name!) as Row | undefined
+    if (typeof row?.['sql'] !== 'string' || row['sql'].replace(/\s+/gu, ' ').trim() !== sql!.replace(/\s+/gu, ' ').trim()) {
+      fail('storage', 'work-item scheduler indexes do not match the expected shape')
+    }
+  }
 }
 
 function optString(value: unknown): string | null {
@@ -1696,6 +1726,36 @@ export class WorkItemStore {
       WHERE state = 'pending' AND occurred_at <= ?
       ORDER BY occurred_at ASC, created_at ASC LIMIT ?
     `).all(this.#now(), limit) as Row[]).map(dispatchFromRow))
+  }
+
+  /** At most ten due waiting resumes, with durable keyset round-robin fairness. */
+  listDueWaitingResumes(limit = 10): readonly WorkItemDispatchRecord[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) fail('invalid-input', 'waiting resume limit must be between 1 and 10')
+    let cursor: { occurredAt: number; itemId: string } | null = null
+    const stored = this.meta(WAITING_RESUME_CURSOR)
+    if (stored !== null) {
+      try {
+        const value = JSON.parse(stored) as Record<string, unknown>
+        if (value === null || typeof value !== 'object' || Array.isArray(value)
+          || !Number.isSafeInteger(value['occurredAt']) || Number(value['occurredAt']) < 0
+          || typeof value['itemId'] !== 'string' || !/^[a-z0-9-]{1,200}$/u.test(value['itemId'])) throw new Error('cursor')
+        cursor = { occurredAt: Number(value['occurredAt']), itemId: value['itemId'] }
+      } catch { fail('storage', 'waiting resume cursor is malformed') }
+    }
+    const select = (comparison: '>' | '<=', count: number): WorkItemDispatchRecord[] => (this.#statement(`
+      SELECT d.* FROM work_item_dispatch d INDEXED BY work_item_dispatch_waiting_due_idx
+      WHERE d.state = 'pending' AND d.reason = 'waiting-resume' AND d.occurred_at <= ?
+        AND (d.occurred_at, d.item_id) ${comparison} (?, ?)
+      ORDER BY d.occurred_at ASC, d.item_id ASC LIMIT ?
+    `).all(this.#now(), cursor?.occurredAt ?? 0, cursor?.itemId ?? '', count) as Row[]).map(dispatchFromRow)
+    const rows = select('>', limit)
+    if (cursor !== null && rows.length < limit) rows.push(...select('<=', limit - rows.length))
+    return Object.freeze(rows)
+  }
+
+  /** Advance even past denied/expired-owner rows so later items are not starved. */
+  advanceWaitingResumeCursor(dispatch: WorkItemDispatchRecord): void {
+    this.setMeta(WAITING_RESUME_CURSOR, JSON.stringify({ occurredAt: dispatch.occurredAt, itemId: dispatch.itemId }))
   }
 
   /**

@@ -139,6 +139,8 @@ export interface PeerDeliveryService {
 
 /** `assistant-automations` external-event intake. */
 export interface PeerAutomationsService {
+  /** Native scheduler lifecycle notification; absent on older peers. */
+  onSchedulerWake?(listener: () => void): () => void
   ingestExternal(input: {
     sourceId: string
     automationId: string
