@@ -26,6 +26,7 @@ export type { SourceAdoptionAuthorityConfig } from './source-adoption-authority.
 export * from './attestation.js'
 export * from './host-attestor.js'
 export * from './runtime-observer.js'
+export * from './in-process-reload.js'
 export type { ForegroundDeploymentConfig } from './foreground-deployment-runtime.js'
 export type * from './task-observation-types.js'
 export { validateTaskObservationAuthorityConfig } from './task-observation-authority.js'

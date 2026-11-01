@@ -109,6 +109,20 @@ function parseEvidence(value: unknown): HostAttestationEvidence {
       currentHostGeneration: integer(item.currentHostGeneration, 'currentHostGeneration', 1), checks, failures,
       profileRestored: item.profileRestored, probeDigest: text(item.probeDigest, 'probeDigest', DIGEST) }
   }
+  if (kind === 'in-process-reload') {
+    exact(item, ['kind', 'reloaded', 'previousHostGeneration', 'currentHostGeneration', 'previousInProcessGeneration',
+      'currentInProcessGeneration', 'fibersDisposed', 'checks', 'failures', 'probeDigest'], 'in-process reload evidence')
+    if (typeof item.reloaded !== 'boolean') throw new ControlPlaneStoreError('invalid-input', 'in-process reload evidence reloaded must be boolean')
+    const checks = integer(item.checks, 'checks'); const failures = integer(item.failures, 'failures')
+    if (failures > checks) throw new ControlPlaneStoreError('invalid-input', 'in-process reload failures exceed checks')
+    return { kind, reloaded: item.reloaded,
+      previousHostGeneration: integer(item.previousHostGeneration, 'previousHostGeneration'),
+      currentHostGeneration: integer(item.currentHostGeneration, 'currentHostGeneration', 1),
+      previousInProcessGeneration: integer(item.previousInProcessGeneration, 'previousInProcessGeneration'),
+      currentInProcessGeneration: integer(item.currentInProcessGeneration, 'currentInProcessGeneration'),
+      fibersDisposed: integer(item.fibersDisposed, 'fibersDisposed', 0), checks, failures,
+      probeDigest: text(item.probeDigest, 'probeDigest', DIGEST) }
+  }
   throw new ControlPlaneStoreError('invalid-input', 'host attestation evidence kind is invalid')
 }
 
@@ -174,13 +188,28 @@ export function parseHostAttestationReceipt(value: unknown): HostAttestationRece
 
 function assertPassedEvidence(receipt: HostAttestationReceipt, request: HostAttestationRequest): void {
   const evidence = receipt.evidence; const requirements = request.requirements
-  if (evidence.kind !== request.phase || requirements.kind !== request.phase) throw new ControlPlaneStoreError('conflict', 'host evidence is not for the requested phase')
+  // An in-process reload is evidence for the existing `reload` phase: the Host
+  // process generation must not change, so it must never be satisfiable by (or
+  // satisfy) the process-restart `reload` contract.
+  const inProcessUnderReload = request.phase === 'reload' && evidence.kind === 'in-process-reload' && requirements.kind === 'in-process-reload'
+  if (!inProcessUnderReload && (evidence.kind !== request.phase || requirements.kind !== request.phase)) {
+    throw new ControlPlaneStoreError('conflict', 'host evidence is not for the requested phase')
+  }
   if (receipt.outcome === 'failed') return
   let passed = false
   if (evidence.kind === 'reload' && requirements.kind === 'reload') {
     passed = evidence.reloaded && evidence.currentHostGeneration === receipt.hostGeneration
       && evidence.previousHostGeneration === requirements.previousHostGeneration
       && evidence.currentHostGeneration > requirements.previousHostGeneration
+  } else if (evidence.kind === 'in-process-reload' && requirements.kind === 'in-process-reload') {
+    passed = evidence.reloaded
+      && evidence.previousHostGeneration === requirements.previousHostGeneration
+      // An in-process reload must leave the Host process generation untouched.
+      && evidence.currentHostGeneration === requirements.previousHostGeneration
+      && evidence.currentHostGeneration === receipt.hostGeneration
+      && evidence.previousInProcessGeneration === requirements.previousInProcessGeneration
+      && evidence.currentInProcessGeneration === requirements.previousInProcessGeneration + 1
+      && evidence.checks >= requirements.minimumChecks && evidence.failures === 0
   } else if (evidence.kind === 'readiness' && requirements.kind === 'readiness') {
     passed = evidence.checks >= requirements.minimumChecks && evidence.failures === 0
   } else if (evidence.kind === 'effect-blocked-replay' && requirements.kind === 'effect-blocked-replay') {

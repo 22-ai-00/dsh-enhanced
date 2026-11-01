@@ -409,6 +409,19 @@ schema v27 持久保存渠道进度句柄及待发送终态。终态先入账，
 
 这是同码、事先保存的维护恢复；不提供代码升级，不恢复未知派发，不保证硬崩溃后任意指令继续，也不保证目标离线期间飞书消息不丢。独立接入进程仍是后续交付。外部 helper 与目标同 UID，不构成恶意代码的 OS 隔离；有宿主 shell 权限的模型仍须遵守既有 sandbox/Policy。每个任务最多申请一次，执行器还有时间窗重启次数上限；新建或经受管程序升级的 unit 同时限制 600 秒内最多 3 次启动，重复启动失败会停止并保留诊断，不无限抖动。同 Host 版本升级也会事务式迁移旧 unit 的启动限制，保留原启动命令和环境变量，失败回滚恢复原 unit 字节。通知或监督器在 120 秒内未接管则解除维护栅栏并报告失败；监督器重开不会重置已派发重启的观察期限。维护期间普通 `/status` 会随其它消息排队，`/stop`、`/new` 可直接撤销。额度是调用次数、单次输出和时间上限，不是精确总费用上限。
 
+### 同进程重载 adapter（未接线）
+
+`createInProcessReloadRuntime(ctx, options)` 是 control plane `in-process-reload` 合同的 Host 侧适配器。它**默认完全不生效**：`apply()` 不注册它，没有新配置字段、没有新工具、没有后台轮询，`--dump-config` 输出不变。它只导出工厂与类型，供未来 Host 接线使用。
+
+能力边界：
+
+- 只做 config/patch 重载：重读 profile 的 `cordis.yml` 并调用 Include 树的 `refresh()`/`await()`，让 pinned Loader 原地重启变化条目。已安装模块代码不会被重新导入（Loader 的 ESM import 有缓存），代码升级仍须走进程重启的既有 `reload` 路径；artifact 摘要变化由 control plane 直接拒绝。
+- 探针而非声明：成功只在真实观察到 profile 摘要变化、同一 Fiber 原地重启（uid 不变、store 重建、active）、模块实例未替换、pid/InvocationID 未变、Host 进程代次未变、0 失败时成立；否则 `reloaded:false` + `failures>0`，调用方据此保持 `rollback-pending`。`fibersDisposed` 对原地重启恒为 0（没有 Fiber 进入 DISPOSED，旧 effect 在重新 `apply` 前已 dispose）。
+- 代数：`hostGeneration` 必须由调用方注入（不自行发明）；`inProcessGeneration` 由 adapter 单调维护，每次完成的挂载尝试 +1。无法解析 Loader/include root/目标 entry、目标包不匹配、目标要求进程重启、warrant 摘要非法、Host 代次变化都在触碰树之前拒绝。
+- rollback 复用同一 warrant；没有调用方 `restore` 钩子证明 profile 已恢复时报告 `profileRestored:false`/`restored:false`，绝不声称恢复成功。
+- 权限：只读取 profile 的 `cordis.yml` 并在既有 Cordis 树内重启 entry；不启动 subprocess、不访问网络、不写 ledger；不持有额外凭据或文件权限。
+- 永不同进程热重载：control plane、assistant-delivery（本包）、assistant-isolation、lark-channel、改变依赖子树的插件、持有没有被证明的进程/cgroup 权限的插件。
+
 ## Goals 单次唤醒边界
 
 Delivery 只向 Goals 的已注册 Host capability 提供一次受限恢复：它重读当前 owner route、binding、原 Session、GoalId、revision 和 deadline，在重新加载原 Session 后重查状态，仅在 Goals 的 dispatch CAS 成功后恢复原生目标。它不把历史 Session snapshot、runtime context 或任意 `user/message` 当作新的 owner 输入；DSH 会把 runtime context snapshot 持久化为 user-role message，它不能替代人类回合证明。

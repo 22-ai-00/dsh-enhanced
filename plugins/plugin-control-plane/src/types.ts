@@ -42,6 +42,9 @@ export interface HostAttestationPolicy {
 
 export type HostAttestationRequirements =
   | { kind: 'reload'; previousHostGeneration: number }
+  /** In-process reload stays under the `reload` phase: the Host process generation must not change. */
+  | { kind: 'in-process-reload'; previousHostGeneration: number; previousInProcessGeneration: number;
+    artifactDigest: string; patchDigest: string; minimumChecks: number }
   | { kind: 'readiness'; minimumChecks: number }
   | { kind: 'effect-blocked-replay'; minimumDeliveryAttempts: number; minimumToolExecutionAttempts: number; maximumExternalEffects: 0 }
   | { kind: 'shadow'; minimumSamples: number; maximumMismatches: number; maximumExternalEffects: 0 }
@@ -87,6 +90,9 @@ export type StoredHostAttestationRequest = HostAttestationRequest | LegacyHostAt
 
 export type HostAttestationEvidence =
   | { kind: 'reload'; reloaded: boolean; previousHostGeneration: number; currentHostGeneration: number; probeDigest: string }
+  | { kind: 'in-process-reload'; reloaded: boolean; previousHostGeneration: number; currentHostGeneration: number;
+    previousInProcessGeneration: number; currentInProcessGeneration: number; fibersDisposed: number;
+    checks: number; failures: number; probeDigest: string }
   | { kind: 'readiness'; checks: number; failures: number; probeDigest: string }
   | { kind: 'effect-blocked-replay'; deliveryAttempts: number; deliveryBlocked: number; toolExecutionAttempts: number; toolExecutionBlocked: number; externalEffects: number; replayDigest: string }
   | { kind: 'shadow'; samples: number; mismatches: number; externalEffects: number; traceDigest: string }

@@ -186,6 +186,9 @@ async function derive(config: SystemdHostAuthorityConfig, request: HostAttestati
     { authority: trust.hostAttestor.authority, keyId: trust.hostAttestor.keyId,
       executable: { path: trust.hostAttestor.path, sha256: trust.hostAttestor.sha256 }, interpreter: trust.hostAttestor.interpreter })) fail()
   if (config.grant.profile.name !== plan.profile || config.grant.profile.path !== plan.target.profilePath) fail()
+  // An in-process reload never restarts the unit, so it can never be authorized by
+  // the systemd Host attestor: there is no witness/restart receipt to derive from.
+  if (request.requirements.kind === 'in-process-reload') fail()
   const key = resolveTrustKey(trust, 'approval', approvalReceipt.authority, approvalReceipt.keyId)
   const recovering = request.phase === 'rollback'
   const verifiedAt = recovering ? witness?.createdAt : dispatch.claimedAt

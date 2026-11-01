@@ -24,6 +24,14 @@ export * from './learning-command.js'
 export { externalPrincipalId, ownerRouteAuthorityHash } from './canonical.js'
 export { deliverySchemaVersion } from './sqlite.js'
 export {
+  createInProcessReloadRuntime,
+} from './in-process-reload-runtime.js'
+export type {
+  InProcessReloadRuntime, InProcessReloadRuntimeActivationInput, InProcessReloadRuntimeActivationResult,
+  InProcessReloadRuntimeOptions, InProcessReloadRuntimeProbe, InProcessReloadRuntimeRollbackInput,
+  InProcessReloadRuntimeRollbackResult, InProcessReloadRuntimeTarget,
+} from './in-process-reload-runtime.js'
+export {
   ActiveLarkOwnerBindingsSnapshotError, activeLarkOwnerBindingsSnapshotProtocol,
   inspectActiveLarkOwnerBindingsLocally, inspectActiveWebOwnerBindingLocally,
   listActiveIdleWebOwnerBindingsLocally, inspectRevokedOwnerRouteLocally, revokedOwnerRouteSnapshotProtocol,
