@@ -22,12 +22,13 @@ const fail = message => { throw new Error(`Local source maintenance: ${message}`
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const modules = ['rsi-local-update', 'rsi-local-update-build', 'rsi-local-resources', 'rsi-source-maintenance',
   'rsi-local-activation', 'rsi-local-pair-install', 'rsi-local-cohort', 'rsi-authority-runtime',
-  'rsi-linux-native-resources', 'supervised-growth-profile']
+  'rsi-linux-native-resources', 'rsi-plugin-revision', 'supervised-growth-profile']
 /** Modules whose absence only fails closed on the path that needs them. The
  * backend-agnostic candidate-build reader and the linux-native resource staging
  * may postdate an older installer's packaged lib tree; the Docker path never
  * reads either, so only their own absence is tolerated. */
-const optionalModules = new Set(['rsi-local-update-build', 'rsi-linux-native-resources'])
+const optionalModules = new Set(['rsi-local-update-build', 'rsi-linux-native-resources',
+  'rsi-plugin-revision'])
 const ownerModules = ['rsi-source', 'rsi-build', 'rsi-authority-resources', 'rsi-setup', 'rsi-profile']
 
 /** One wording for the transition window in which an installer can recognise a

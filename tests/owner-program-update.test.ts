@@ -14,7 +14,7 @@ import { readRsiHostPatchConfig, readRsiHostUpdateOverlayChain, rebaseRsiHostVal
 import { bindLocalSourceInstaller } from '../scripts/install/local-source-maintenance.mjs'
 import { applyOwnerProgramAuthorityCas, assertOwnerProgramAuthorityPreserved, assertOwnerProgramOriginalComposition, assertOwnerProgramWindow,
   assertOwnerProgramBusinessDataCopied, assertOwnerProgramManifestPreserved, assertNativeStageRelocation,
-  assertNativeRevisionAvailable, freezeNativeRunnerStates, migrateNativeVerifierGrants,
+  freezeNativeRunnerStates, migrateNativeVerifierGrants,
   prepareOwnerProgramCreation, stageOwnerProgramUpdate,
   assertOwnerProgramRestartManifestPreserved, compileOwnerProgramRestartConfig, frozenRestartConfig,
   ownerProgramRestartRule,
@@ -294,20 +294,34 @@ test('manifest permits only program fields and retains owner, model, grant and b
     capabilities: { runner: { path: '/old' }, maxAdoptions: 32 },
     verifications: { authority: { digest: 'a' }, publicKey: 'standing-key' },
     creation: { id: 'standing-grant', expiresAt: 100, maxCreates: 32 } }
+  const revision = { reviews: { runner: { path: '/old-review' }, maxVerifications: 32 },
+    regressions: { runner: { path: '/old-regression' }, maxVerifications: 32 },
+    revision: { id: 'revision-source-standing', expiresAt: 100, maxRevisions: 32,
+      namePrefix: 'owner-standing-' },
+    verifications: { authority: { digest: 'c' }, publicKey: 'revision-key' },
+    regressionVerifications: { authority: { digest: 'd' }, publicKey: 'revision-key' } }
   const baseline = { sourceReviews: { owner: { principalId: 'owner' }, expiresAt: 100 },
     growthDriver: { provider: 'standing-model-provider', model: 'standing-model' },
     coordinator: { budgetId: 'coordinator-budget', budgetAmount: 1 },
     controlPlane: { sourceBuild: { image: 'old' }, creationVerifications: creation.verifications,
       creationCapabilities: creation.capabilities,
+      revisionVerifications: revision.verifications,
+      revisionRegressions: revision.regressionVerifications,
       runtimeObserver: { targets: [{ entryId: 'dsh-enhanced-assistant-verifier',
-        configDigest: 'a'.repeat(64) }] } }, pluginCreation: creation }
+        configDigest: 'a'.repeat(64) }] } }, pluginCreation: creation, pluginRevision: revision }
   const next = structuredClone(baseline)
   next.controlPlane.sourceBuild.image = 'new'
   next.pluginCreation.reviews.runner.path = '/new'
   next.pluginCreation.capabilities.runner.path = '/new'
   next.pluginCreation.verifications.authority.digest = 'b'
+  next.pluginRevision.reviews.runner.path = '/new-review'
+  next.pluginRevision.regressions.runner.path = '/new-regression'
+  next.pluginRevision.verifications.authority.digest = 'e'
+  next.pluginRevision.regressionVerifications.authority.digest = 'f'
   next.controlPlane.creationVerifications = structuredClone(next.pluginCreation.verifications)
   next.controlPlane.creationCapabilities = structuredClone(next.pluginCreation.capabilities)
+  next.controlPlane.revisionVerifications = structuredClone(next.pluginRevision.verifications)
+  next.controlPlane.revisionRegressions = structuredClone(next.pluginRevision.regressionVerifications)
   next.controlPlane.runtimeObserver.targets[0].configDigest = 'b'.repeat(64)
   expect(() => assertOwnerProgramManifestPreserved(baseline, next)).not.toThrow()
   const changedModel = structuredClone(next)
@@ -318,6 +332,18 @@ test('manifest permits only program fields and retains owner, model, grant and b
   resetGrant.pluginCreation.creation.maxCreates = 1000
   expect(() => assertOwnerProgramManifestPreserved(baseline, resetGrant))
     .toThrow(/outside exact program fields/u)
+  const resetRevision = structuredClone(next)
+  resetRevision.pluginRevision.revision.expiresAt = 10_000
+  expect(() => assertOwnerProgramManifestPreserved(baseline, resetRevision))
+    .toThrow(/outside exact program fields/u)
+  const splitMirror = structuredClone(next)
+  splitMirror.controlPlane.revisionRegressions = structuredClone(revision.regressionVerifications)
+  expect(() => assertOwnerProgramManifestPreserved(baseline, splitMirror))
+    .toThrow(/revision authority mirror differs/u)
+  const droppedRevision = structuredClone(next)
+  delete droppedRevision.pluginRevision
+  expect(() => assertOwnerProgramManifestPreserved(baseline, droppedRevision))
+    .toThrow(/revision authority disappeared/u)
 })
 
 test('owner-private restart config fixes one route, database, finite budgets and explicit tools', async () => {
@@ -665,7 +691,7 @@ const ownerInstallerModules = ['rsi-authority-resources', 'rsi-authority-runtime
   'rsi-profile', 'rsi-host-update', 'rsi-plugin-creation', 'rsi-install', 'rsi-service-environment',
   'systemd', 'rsi-authority-config', 'rsi-bootstrap-manifest', 'rsi-setup', 'rsi-install-inputs',
   'rsi-local-cohort', 'rsi-linux-creation-build', 'rsi-linux-native-materialize',
-  'rsi-linux-source-build', 'rsi-linux-native-resources']
+  'rsi-linux-source-build', 'rsi-linux-native-resources', 'rsi-plugin-revision']
 
 const installerStub = (body: string) => `import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
@@ -859,28 +885,38 @@ const freezeInput = (root: string, homePath: string, stageHome: string) => ({ pr
   source: nativeSource, owner: { principalId: 'owner-1' }, now: 1_000, expiresAt: 2_000,
   creation: nativeCreation, api: {} })
 
-test('native revision manifests are refused before the relocation dispatch', async () => {
-  const revision = { schemaVersion: 1, pluginRevision: { revision: 2 } }
-  const error = refusalOf(() => assertNativeRevisionAvailable(
-    { original: { manifest: { pluginRevision: revision.pluginRevision } } },
-    { native: true, profile: 'assistant', transactionId: 'tx-2' }))
-  expect(error.code).toBe('rsi-linux-native-revision-unavailable')
-  expect(error.message).toMatch(/revisionReview\/revisionRegression/u)
-  expect(error.message).toMatch(/nothing has been written for transaction tx-2/u)
-  expect(() => assertNativeRevisionAvailable({ original: { manifest: { pluginRevision: {} } } },
-    { native: true, profile: 'assistant', transactionId: 'tx-2' })).toThrow(
-    /deferred to the later revision slice/u)
-  expect(() => assertNativeRevisionAvailable({ original: { manifest: {} } },
-    { native: true, profile: 'assistant', transactionId: 'tx-2' })).not.toThrow()
-  expect(() => assertNativeRevisionAvailable({ original: { manifest: { pluginRevision: revision.pluginRevision } } },
-    { native: false, profile: 'assistant', transactionId: 'tx-2' })).not.toThrow()
+test('native revision authority is frozen and recompiled inside the native stage', async () => {
   const script = await readFile(new URL('../scripts/install/owner-program-update.mjs', import.meta.url), 'utf8')
-  const revisionGateAt = script.lastIndexOf(
-    'assertNativeRevisionAvailable(ownerUpdate, { native, profile, transactionId })')
+  // The revision runner states are frozen with the creation ones, from the
+  // revision flag the manifest itself decides.
+  expect(script).toContain('const revision = original.manifest.pluginRevision !== undefined')
+  expect(script).toContain(
+    "if (revision && !native) fail('owner profile revision requires the linux-native candidate backend')")
+  expect(script).toContain('expiresAt: original.manifest.sourceReviews.expiresAt, revision, creation, api })')
+  // The reviewed revision setup is compiled from the creation build and frozen
+  // revision seals, then mirrored into the manifest and the verifier patch.
+  const setup = script.indexOf('api.createRsiPluginRevisionSetup({')
+  expect(setup).toBeGreaterThan(script.indexOf('api.createRsiPluginCreationSetup({'))
+  expect(setup).toBeLessThan(script.indexOf('migrateNativeVerifierGrants({ transactionId, stageHome'))
+  expect(script).toContain('build: frozen.creationBuild')
+  expect(script).toContain('expiresAt: freshCreation.creation.expiresAt')
+  expect(script).toContain('review: frozen.seals.revisionReview')
+  expect(script).toContain('regression: frozen.seals.revisionRegression')
+  expect(script).toContain('manifest.pluginRevision = programRevision(manifest.pluginRevision, freshRevision)')
+  expect(script).toContain(
+    'manifest.controlPlane.revisionVerifications = manifest.pluginRevision.verifications')
+  expect(script).toContain(
+    'manifest.controlPlane.revisionRegressions = manifest.pluginRevision.regressionVerifications')
+  expect(script).toContain("fail('source revision grant changed')")
+  expect(script).toContain("fail('revision finite grant or review authority changed')")
+  expect(script).toContain('revisionReviews: manifest.pluginRevision.reviews')
+  expect(script).toContain('revisionRegressions: manifest.pluginRevision.regressions')
+  // The removed deferred-slice gate must not come back.
+  expect(script).not.toContain('assertNativeRevisionAvailable')
+  expect(script).not.toContain('rsi-linux-native-revision-unavailable')
   const relocationGateAt = script.lastIndexOf(
     'assertNativeStageRelocation(ownerUpdate, { native, profile, transactionId })')
-  expect(revisionGateAt).toBeGreaterThan(-1)
-  expect(revisionGateAt).toBeLessThan(relocationGateAt)
+  expect(relocationGateAt).toBeGreaterThan(-1)
   expect(relocationGateAt).toBeLessThan(script.indexOf('await api.materializeLinuxRsiNativeInStage('))
 })
 
@@ -907,6 +943,12 @@ test('native runner-state freeze refuses invalid inputs before touching the stag
       creation: { ...nativeCreation, sourceBuild: { ...nativeCreation.sourceBuild,
         repository: { ...nativeCreation.sourceBuild.repository, schemaVersion: 3 } } } })).message)
       .toMatch(/not the relocated linux-native build environment/u)
+    expect(refusalOf(() => freezeNativeRunnerStates({ ...freezeInput(root, homePath, stageHome),
+      revision: 'yes' })).message).toMatch(/the revision role flag is not a boolean/u)
+    expect(refusalOf(() => freezeNativeRunnerStates({ ...freezeInput(root, homePath, stageHome),
+      revision: true, api: { prepareLinuxRepositoryHandoverState: () => ({}),
+        compileRsiLinuxSourceBuild: () => ({}), prepareLinuxVerifierHandoverState: () => ({}) } })).message)
+      .toMatch(/does not expose the reviewed createRsiPluginRevisionSetup seam/u)
     // A missing reviewed native-resources seam fails closed and names it.
     expect(refusalOf(() => freezeNativeRunnerStates(freezeInput(root, homePath, stageHome))).message)
       .toMatch(/prepareLinuxRepositoryHandoverState seam \(rsi-linux-native-resources/u)
@@ -924,6 +966,8 @@ test('native runner-state freeze seals the repository before compiling and then 
     const repositorySeal = nativeSeal(homePath, 'linux-source-build-runner')
     const reviewSeal = nativeSeal(homePath, 'creation-review-runner')
     const adoptionSeal = nativeSeal(homePath, 'creation-adoption-runner')
+    const revisionReviewSeal = nativeSeal(homePath, 'revision-review-runner')
+    const revisionRegressionSeal = nativeSeal(homePath, 'revision-regression-runner')
     const compiled = { schemaVersion: 3, backend: 'linux-native', stateSeal: repositorySeal }
     const api = {
       prepareLinuxRepositoryHandoverState: (input: Record<string, unknown>) => {
@@ -942,20 +986,31 @@ test('native runner-state freeze seals the repository before compiling and then 
         now: 1_000, expiresAt: 2_000, stateSeal: repositorySeal })
         return compiled
       },
+      createRsiPluginRevisionSetup: () => ({ reviews: {}, regressions: {} }),
       prepareLinuxVerifierHandoverState: (input: Record<string, unknown>) => {
         order.push(String(input.name))
+        const seals: Record<string, unknown> = { 'creation-review-runner': reviewSeal,
+          'creation-adoption-runner': adoptionSeal, 'revision-review-runner': revisionReviewSeal,
+          'revision-regression-runner': revisionRegressionSeal }
         const grant = { principalDigest: 'a'.repeat(64), revision: 1, expiresAt: 2_000,
           maxRuns: 160, maxTotalDurationMs: 4_800_000 }
-        return { seal: input.name === 'creation-review-runner' ? reviewSeal : adoptionSeal, grant }
+        return { seal: seals[String(input.name)], grant }
       },
     }
-    const frozen = freezeNativeRunnerStates({ ...freezeInput(root, homePath, stageHome), api })
-    expect(order).toEqual(['repository', 'compile', 'creation-review-runner', 'creation-adoption-runner'])
+    const frozen = freezeNativeRunnerStates({ ...freezeInput(root, homePath, stageHome), revision: true,
+      api })
+    expect(order).toEqual(['repository', 'compile', 'creation-review-runner',
+      'creation-adoption-runner', 'revision-review-runner', 'revision-regression-runner'])
     expect(frozen.sourceBuild).toBe(compiled)
     expect(frozen.creationBuild).toBe(nativeCreation.family.creationBuild)
-    expect(frozen.creationSeals).toEqual({ review: reviewSeal, adoption: adoptionSeal })
-    expect(Object.isFrozen(frozen) && Object.isFrozen(frozen.creationSeals)
+    expect(frozen.seals).toEqual({ review: reviewSeal, adoption: adoptionSeal,
+      revisionReview: revisionReviewSeal, revisionRegression: revisionRegressionSeal })
+    expect(Object.isFrozen(frozen) && Object.isFrozen(frozen.seals)
       && Object.isFrozen(frozen.verifierGrants)).toBe(true)
+    // Without the revision flag the manifest keeps the deferred Docker-era
+    // revision authority untouched instead of sealing unreferenced roles.
+    const creationOnly = freezeNativeRunnerStates({ ...freezeInput(root, homePath, stageHome), api })
+    expect(Object.keys(creationOnly.seals)).toEqual(['review', 'adoption'])
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
@@ -984,7 +1039,7 @@ test('native verifier grant migration rewrites the Docker-era grants with the fr
     verifications: { authority: { authorityDigest: newDigest } },
     capabilities: { fresh: true,
       runner: { stateSeal: adoptionSeal, expiresAt: 5_000, maxRuns: 1_024, maxTotalDurationMs: 86_400_000 } } }
-    const frozen = { creationSeals: { review: reviewSeal, adoption: adoptionSeal },
+    const frozen = { seals: { review: reviewSeal, adoption: adoptionSeal },
       verifierGrants: { review: { principalDigest: oldDigest }, adoption: { principalDigest: oldDigest } } }
     const migrate = (overrides: Record<string, unknown> = {}) => migrateNativeVerifierGrants({
       transactionId: 'tx-3', stageHome, homePath, resources: nativeResources(homePath), original,
@@ -1004,6 +1059,57 @@ test('native verifier grant migration rewrites the Docker-era grants with the fr
       newAuthorityDigest: newDigest, existingSeal: adoptionSeal })
     expect(migrated).toMatchObject({ review: { seal: reviewSeal, jobsMigrated: 2, activeSettled: 1 },
       adoption: { seal: adoptionSeal } })
+    // A manifest that already carries a revision migrates all four verifier
+    // grants, so the native Home never keeps a Docker-era revision runner.
+    const revisionReviewSeal = nativeSeal(homePath, 'revision-review-runner')
+    const revisionRegressionSeal = nativeSeal(homePath, 'revision-regression-runner')
+    const revisionDigest = 'c'.repeat(64), nextRevisionDigest = 'd'.repeat(64)
+    const revisionOriginal = { manifest: { controlPlane: {
+      ...original.manifest.controlPlane,
+      revisionVerifications: { authority: { authorityDigest: revisionDigest } },
+      revisionRegressions: { authority: { authorityDigest: revisionDigest } } } } }
+    const freshRevision = {
+      reviews: { runner: { stateSeal: revisionReviewSeal, expiresAt: 6_000, maxRuns: 160,
+        maxTotalDurationMs: 4_800_000 } },
+      verifications: { authority: { authorityDigest: nextRevisionDigest } },
+      regressions: { runner: { stateSeal: revisionRegressionSeal, expiresAt: 6_000, maxRuns: 320,
+        maxTotalDurationMs: 9_600_000 } },
+      regressionVerifications: { authority: { authorityDigest: nextRevisionDigest } } }
+    calls.length = 0
+    const revisionFrozen = { seals: { ...frozen.seals, revisionReview: revisionReviewSeal,
+      revisionRegression: revisionRegressionSeal },
+    verifierGrants: { ...frozen.verifierGrants,
+      revisionReview: { principalDigest: revisionDigest },
+      revisionRegression: { principalDigest: revisionDigest } } }
+    const revisionMigrated = migrate({ original: revisionOriginal, freshRevision,
+      frozen: revisionFrozen })
+    expect(calls.map(call => call.name)).toEqual(['creation-review-runner',
+      'creation-adoption-runner', 'revision-review-runner', 'revision-regression-runner'])
+    expect(calls[2]).toMatchObject({ name: 'revision-review-runner', maxRuns: 160,
+      oldAuthorityDigest: revisionDigest, newAuthorityDigest: nextRevisionDigest,
+      existingSeal: revisionReviewSeal })
+    expect(calls[3]).toMatchObject({ name: 'revision-regression-runner', maxRuns: 320,
+      oldAuthorityDigest: revisionDigest, newAuthorityDigest: nextRevisionDigest,
+      existingSeal: revisionRegressionSeal })
+    expect(revisionMigrated).toMatchObject({ revisionReview: { seal: revisionReviewSeal },
+      revisionRegression: { seal: revisionRegressionSeal } })
+    expect(refusalOf(() => migrate({ original: revisionOriginal, freshRevision,
+      frozen: { ...revisionFrozen, seals: { ...revisionFrozen.seals,
+        revisionRegression: adoptionSeal } } })).message)
+      .toMatch(/the frozen seal is not the one the compiled revision authority binds/u)
+    expect(refusalOf(() => migrate({ original: revisionOriginal, freshRevision,
+      frozen: { ...revisionFrozen, verifierGrants: { ...revisionFrozen.verifierGrants,
+        revisionReview: { principalDigest: 'e'.repeat(64) } } } })).message)
+      .toMatch(/the staged grant is not the live Docker-era owner grant/u)
+    expect(refusalOf(() => migrate({ original: revisionOriginal,
+      freshRevision: { ...freshRevision, verifications: { authority: {} } },
+      frozen: revisionFrozen })).message)
+      .toMatch(/compiled revisionReview verifier authority digest is unavailable/u)
+    expect(refusalOf(() => migrate({ original: { manifest: { controlPlane: {
+      ...original.manifest.controlPlane,
+      revisionRegressions: { authority: { authorityDigest: revisionDigest } } } } },
+    freshRevision, frozen: revisionFrozen })).message)
+      .toMatch(/the original manifest carries no revisionReview verifier authority digest/u)
     // The staged grant must still be the one the freeze sealed.
     expect(refusalOf(() => migrate({ frozen: { ...frozen,
       verifierGrants: { review: { principalDigest: 'e'.repeat(64) }, adoption: frozen.verifierGrants.adoption } } }))
@@ -1039,6 +1145,7 @@ test('the native handover seams stay ordered around the creation authority', asy
   expect(repository).toBeLessThan(compile)
   expect(compile).toBeLessThan(review)
   const setup = script.indexOf('api.createRsiPluginCreationSetup({')
+  const revisionSetup = script.indexOf('api.createRsiPluginRevisionSetup({')
   const migrated = script.indexOf('migrateNativeVerifierGrants({ transactionId, stageHome')
   const capabilities = script.indexOf(
     'manifest.controlPlane.creationCapabilities = manifest.pluginCreation.capabilities')
@@ -1046,13 +1153,19 @@ test('the native handover seams stay ordered around the creation authority', asy
   expect(frozenCall).toBeGreaterThan(script.indexOf('await api.materializeLinuxRsiNativeInStage('))
   expect(frozenCall).toBeLessThan(script.indexOf('manifest.controlPlane.sourceBuild ='))
   expect(migrated).toBeGreaterThan(setup)
+  expect(revisionSetup).toBeGreaterThan(setup)
+  expect(revisionSetup).toBeLessThan(migrated)
   expect(migrated).toBeGreaterThan(capabilities)
   expect(migrated).toBeLessThan(script.indexOf(
     "fail('owner model, memory, budget, or service scope changed')"))
-  // The seals and grants the handover produces stay out of the persisted manifest.
+  // The seals and grants the handover produces stay out of the persisted
+  // manifest; the revision authority mirrors the creation one.
   const persisted = script.split('\n').filter(line =>
-    /^\s*manifest\.(controlPlane|linuxBuild|pluginCreation)/u.test(line))
+    /^\s*manifest\.(controlPlane|linuxBuild|pluginCreation|pluginRevision)/u.test(line))
   expect(persisted.some(line => /stateSeal|creationSeals|verifierGrants/u.test(line))).toBe(false)
+  expect(persisted.some(line => /manifest\.pluginRevision\.(reviews|regressions)\b/u.test(line)))
+    .toBe(false)
+  expect(persisted.some(line => /revisionVerifications|revisionRegressions/u.test(line))).toBe(true)
   // The reviewed installer allowlist stays mirrored by this test's stub tree.
   const names = script.match(/const names = \[([\s\S]*?)\]/u)?.[1] ?? ''
   expect([...names.matchAll(/'([a-z0-9-]+)'/gu)].map(match => match[1]))
