@@ -346,6 +346,55 @@ test('manifest permits only program fields and retains owner, model, grant and b
     .toThrow(/revision authority disappeared/u)
 })
 
+test('manifest binds the native launch digest to the recompiled program', () => {
+  const baseline = { sourceReviews: { owner: { principalId: 'owner' }, expiresAt: 100 },
+    controlPlane: { sourceBuild: { image: 'old' },
+      creationVerifications: { authority: { digest: 'a' }, publicKey: 'standing-key' },
+      creationCapabilities: { runner: { image: 'old' } },
+      runtimeObserver: { targets: [{ entryId: 'dsh-enhanced-assistant-verifier', configDigest: 'a'.repeat(64) }] } },
+    pluginCreation: { reviews: { runner: { image: 'old' } }, capabilities: { runner: { image: 'old' } },
+      verifications: { authority: { digest: 'a' }, publicKey: 'standing-key' },
+      creation: { id: 'standing-grant', expiresAt: 100, maxCreates: 32 } } }
+  const next = structuredClone(baseline)
+  next.controlPlane.sourceBuild = { schemaVersion: 3, backend: 'linux-native', sourceCommit: 'a'.repeat(40) }
+  next.pluginCreation.reviews.runner = { backend: 'linux-native', stateRoot: '/state/review',
+    runtime: { runtime: { node: '/bin/node' } }, cgroupRoots: { cpu: '/cpu' } }
+  next.pluginCreation.capabilities.runner = { backend: 'linux-native', stateRoot: '/state/adoption',
+    runtime: { runtime: { node: '/bin/node' } }, cgroupRoots: { cpu: '/cpu' } }
+  next.controlPlane.creationVerifications = structuredClone(next.pluginCreation.verifications)
+  next.controlPlane.creationCapabilities = structuredClone(next.pluginCreation.capabilities)
+  next.linuxBuild = { schemaVersion: 1,
+    sourceBuildDigest: controlPlaneDigest(next.controlPlane.sourceBuild),
+    behaviorRuntimeDigest: controlPlaneDigest(next.pluginCreation.reviews.runner.runtime) }
+  expect(() => assertOwnerProgramManifestPreserved(baseline, next, controlPlaneDigest)).not.toThrow()
+  const forgedSource = structuredClone(next)
+  forgedSource.linuxBuild.sourceBuildDigest = controlPlaneDigest({ backend: 'linux-native', other: true })
+  expect(() => assertOwnerProgramManifestPreserved(baseline, forgedSource, controlPlaneDigest))
+    .toThrow(/linux build binding differs/u)
+  const forgedBehavior = structuredClone(next)
+  forgedBehavior.linuxBuild.behaviorRuntimeDigest = controlPlaneDigest({ runtime: { node: '/bin/other' } })
+  expect(() => assertOwnerProgramManifestPreserved(baseline, forgedBehavior, controlPlaneDigest))
+    .toThrow(/linux build binding differs/u)
+  const widened = structuredClone(next)
+  widened.linuxBuild.sourceCommit = 'b'.repeat(40)
+  expect(() => assertOwnerProgramManifestPreserved(baseline, widened, controlPlaneDigest))
+    .toThrow(/linux build binding differs/u)
+  const dockerSource = structuredClone(next)
+  dockerSource.controlPlane.sourceBuild = { image: 'old' }
+  expect(() => assertOwnerProgramManifestPreserved(baseline, dockerSource, controlPlaneDigest))
+    .toThrow(/linux build binding differs/u)
+  expect(() => assertOwnerProgramManifestPreserved(baseline, next))
+    .toThrow(/requires the control-plane digest/u)
+  const sealed = structuredClone(baseline)
+  sealed.linuxBuild = structuredClone(next.linuxBuild)
+  const removed = structuredClone(next)
+  delete removed.linuxBuild
+  expect(() => assertOwnerProgramManifestPreserved(sealed, removed, controlPlaneDigest))
+    .toThrow(/linux build binding disappeared/u)
+  expect(() => assertOwnerProgramManifestPreserved(baseline, removed, controlPlaneDigest))
+    .toThrow(/binding is required for the native repository backend/u)
+})
+
 test('owner-private restart config fixes one route, database, finite budgets and explicit tools', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-restart-')))
   const home = join(root, 'home'), input = join(root, 'restart.json')

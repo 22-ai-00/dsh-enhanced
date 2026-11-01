@@ -194,9 +194,38 @@ export function assertOwnerProgramAuthorityPreserved(before, after, context) {
     }
   }
 }
-export function assertOwnerProgramManifestPreserved(rebasedBefore, after) {
+/** The launch binding is a derived digest over the recompiled source build and
+ * creation behavior, so it changes exactly when those change and only if it
+ * still binds them. */
+function preservedLinuxBuild(after, controlPlaneDigest) {
+  if (typeof controlPlaneDigest !== 'function') fail('linux build binding requires the control-plane digest')
+  const build = after.controlPlane?.sourceBuild
+  const behavior = after.pluginCreation?.reviews?.runner
+  const binding = after.linuxBuild
+  const keys = ['schemaVersion', 'sourceBuildDigest', ...(behavior ? ['behaviorRuntimeDigest'] : [])]
+  if (!build || typeof build !== 'object' || Array.isArray(build) || build.backend !== 'linux-native'
+    || !binding || typeof binding !== 'object' || Array.isArray(binding)
+    || Reflect.ownKeys(binding).length !== keys.length
+    || Object.keys(binding).sort().join() !== keys.sort().join()
+    || binding.schemaVersion !== 1
+    || binding.sourceBuildDigest !== controlPlaneDigest(build)
+    || (behavior !== undefined && (typeof behavior !== 'object' || Array.isArray(behavior)
+      || behavior.backend !== 'linux-native'
+      || binding.behaviorRuntimeDigest !== controlPlaneDigest(behavior.runtime)))) {
+    fail('linux build binding differs from the recompiled program')
+  }
+  return structuredClone(binding)
+}
+export function assertOwnerProgramManifestPreserved(rebasedBefore, after, controlPlaneDigest) {
   const expected = structuredClone(rebasedBefore)
   expected.controlPlane.sourceBuild = structuredClone(after.controlPlane.sourceBuild)
+  if (after.linuxBuild !== undefined) expected.linuxBuild = preservedLinuxBuild(after, controlPlaneDigest)
+  else if (expected.linuxBuild !== undefined) fail('linux build binding disappeared outside the exact program fields')
+  // A natively bound source build must publish the binding: the profile loader
+  // rejects the pair after the swap, so refusing here keeps the stage untouched.
+  else if (after.controlPlane?.sourceBuild?.backend === 'linux-native') {
+    fail('linux build binding is required for the native repository backend')
+  }
   expected.pluginCreation.reviews.runner = structuredClone(after.pluginCreation.reviews.runner)
   expected.pluginCreation.capabilities.runner = structuredClone(after.pluginCreation.capabilities.runner)
   expected.pluginCreation.verifications.authority = structuredClone(after.pluginCreation.verifications.authority)
@@ -532,7 +561,7 @@ export function ownerProgramRestartRule(original, delivery, restartConfig) {
 
 /** Preserve the general manifest rule; authorize only the derived Delivery observer digest. */
 export function assertOwnerProgramRestartManifestPreserved(before, after, restartConfig, targetPatch, api) {
-  if (restartConfig === undefined) return assertOwnerProgramManifestPreserved(before, after)
+  if (restartConfig === undefined) return assertOwnerProgramManifestPreserved(before, after, api?.control?.controlPlaneDigest)
   const delivery = patchConfig(api, targetPatch, deliveryId)
   if (!same(delivery.restart, restartConfig)) fail('restart config differs from the reviewed Delivery patch')
   const previous = before.controlPlane.runtimeObserver.targets.find(item => item.entryId === deliveryId)
@@ -549,7 +578,7 @@ export function assertOwnerProgramRestartManifestPreserved(before, after, restar
   const normalized = structuredClone(after)
   normalized.controlPlane.runtimeObserver.targets.find(item => item.entryId === deliveryId).configDigest = previous.configDigest
   normalized.controlPlane.runtimeObserver.targets.find(item => item.entryId === personalId).configDigest = previousPersonal.configDigest
-  assertOwnerProgramManifestPreserved(before, normalized)
+  assertOwnerProgramManifestPreserved(before, normalized, api.control.controlPlaneDigest)
 }
 
 export function compileOwnerProgramRestartConfig(api, targetPatch, manifest, restartConfig, homePath, original) {
