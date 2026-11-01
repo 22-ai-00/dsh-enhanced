@@ -134,6 +134,10 @@ Linux 创建验收要求 Control Plane 的双 UID 完整仓库构建。派发前
 
 新增数据与权限：读取当前 Host 认证任务和检查补丁，向该任务模型供应商发送这些材料；写私有合同、观察摘要、模型 Session、有限额度与签名账本；读取私有签名密钥，通过所配置的固定隔离后端执行封存候选。Linux 还读取既有构建收据、封存包及独立准备回执。没有浏览器或候选运行时网络权限，没有安装脚本或公开验收写工具。
 
+离线维护内部 seam `CreationReviewStore.openExistingForMaintenance()` 只打开已存在的私有 canonical SQLite；`planGrantHandoff()` 冻结 transaction、installation、profile、三个 review lane 之一、文件 dev/ino、旧新 digest、maximum/used 、全库 grant/历史摘要及已有维护审计的数量和摘要。`applyGrantHandoff()` 仅 CAS 更新目标 grant 的 digest，同事务写不可变审计，不重置额度、不修改 claimed/unknown/rejected、历史证书或证据。精确重试只在完整 after snapshot 未变时幂等；新增验证或维护审计历史、计数不符、文件替换、未知 schema 或非零 SQLite user_version/application_id 均拒绝。普通运行时仍拒绝未经维护的 digest 变化。
+
+此 seam 尚未接入 installer，也不注册模型工具。调用方须在私有 stage 停止 writer，认证原 owner，并用 `configurationDigest` 绑定未扩大的 owner/key/publicKey/expiry/maximum 和冻结配置；store 不认证这些材料，不提供同 UID 恶意插件隔离。保留旧证书字节不意味着新 authority 可验证旧证书，也不证明跨 backend 采用或完整升级通过。
+
 ## 已采用插件的新任务修订验收
 
 `revisionReviews` 是可选、独立的 Host 配置，字段及限制与上表 `creationReviews` 相同；须单独配置修订 authority、Ed25519 密钥引用、政策和有限额度，密钥文件可与创建验收共用，但两种用途不能互相代用。用 `compileRevisionReviewConfig(config)` 取得 `{ authority, publicKey }`，仅将这两个公开字段交给 Control Plane 的 `revisionVerifications`；还须配置其独立的 `sourceJobs.revision` 授权和保留的已采用父版本源码。`revisionReviews` 缺省时不启用本轨，不借用创建验收引用或额度。修订 authority 使用 `assistant-growth/revision-acceptance-authority/v1` 和独立政策摘要，私有账本位于 `databasePath + '.revision-reviews'`；失败与 unknown 派发也占用修订额度，未知结果不自动重放。
