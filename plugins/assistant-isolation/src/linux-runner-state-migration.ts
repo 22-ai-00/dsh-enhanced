@@ -396,10 +396,9 @@ export interface LinuxVerifierHandoverPreparation {
  * an existing staged seal means the handover already ran, and a staging copy
  * whose grant is not the live Docker-era owner grant is never sealed.
  */
-export function prepareLinuxVerifierHandoverState(
-  input: LinuxVerifierHandoverPreparationInput,
-): LinuxVerifierHandoverPreparation {
-  if (process.platform !== 'linux' || !process.getuid?.()) fail('requires non-root Linux')
+function verifierPreparationInput(input: LinuxVerifierHandoverPreparationInput): number {
+  const uid = process.getuid?.()
+  if (process.platform !== 'linux' || !uid) fail('requires non-root Linux')
   if (!input || typeof input !== 'object' || Object.getPrototypeOf(input) !== Object.prototype
     || Reflect.ownKeys(input).length !== 5
     || !['name', 'stageStateRoot', 'stageSealPath', 'liveStateRoot', 'liveSealPath'].every(key => Object.hasOwn(input, key))
@@ -410,13 +409,19 @@ export function prepareLinuxVerifierHandoverState(
     || input.stageStateRoot.startsWith(input.stageSealPath + '/')
     || input.liveSealPath === input.liveStateRoot || input.liveSealPath.startsWith(input.liveStateRoot + '/')
     || input.liveStateRoot.startsWith(input.liveSealPath + '/')) fail('state and seal paths are nested')
+  return uid
+}
 
-  privateDirectory(input.stageStateRoot)
+export function prepareLinuxVerifierHandoverState(
+  input: LinuxVerifierHandoverPreparationInput,
+): LinuxVerifierHandoverPreparation {
+  const uid = verifierPreparationInput(input)
   privateDirectory(dirname(input.stageStateRoot))
+  privateDirectory(input.stageStateRoot)
   const ledgerPath = join(input.stageStateRoot, 'ledger.sqlite')
   let staged
   try { staged = lstatSync(ledgerPath) } catch { fail('verifier ledger is missing from the staging copy') }
-  if (!staged.isFile() || staged.isSymbolicLink() || staged.uid !== process.getuid() || (staged.mode & 0o777) !== 0o600 || staged.nlink !== 1)
+  if (!staged.isFile() || staged.isSymbolicLink() || staged.uid !== uid || (staged.mode & 0o777) !== 0o600 || staged.nlink !== 1)
     fail('verifier ledger is not private and canonical')
   // Publish exactly once: a staged seal is the handover's fingerprint, so it is
   // never replaced on trust (reseal would otherwise unlink it).
@@ -464,4 +469,52 @@ export function prepareLinuxVerifierHandoverState(
     seal,
     grant: Object.freeze({ principalDigest, revision: 1, expiresAt, maxRuns, maxTotalDurationMs }),
   })
+}
+
+export interface LinuxVerifierStagingPreparation {
+  /** `handover` when the staging copy carries the Docker-era verifier ledger;
+   * `fresh` when the role never ran under Docker and the staged tree has no
+   * ledger at all. */
+  readonly mode: 'handover' | 'fresh'
+  readonly seal: LinuxRunnerStateSeal
+  /** Only a handover result carries the staged Docker-era grant identity. */
+  readonly grant?: LinuxVerifierHandoverPreparation['grant']
+}
+
+/**
+ * One-shot staging seam for one verifier role of a Docker-era owner Home.
+ *
+ * The branch is decided from the staged tree, before anything is written: a
+ * staged ledger means the role has Docker-era verifier history and must go
+ * through prepareLinuxVerifierHandoverState (which upgrades it to v9 and
+ * publishes the seal its grant rewrite needs). A role the Docker-era Home never
+ * ran has no ledger — the live Home's verifier state directories are empty
+ * because that history lives in the Docker-era control plane — so its native
+ * state is exactly a fresh install's: an empty v9 ledger sealed under
+ * `logicalStateRoot`/`logicalSealPath`. The caller cannot request the weaker
+ * path for a role that has history, and a staged seal without a ledger is
+ * refused instead of overwritten.
+ */
+export function prepareLinuxVerifierStagingState(
+  input: LinuxVerifierHandoverPreparationInput,
+): LinuxVerifierStagingPreparation {
+  verifierPreparationInput(input)
+  if (!present(input.stageStateRoot)) {
+    mkdirSync(input.stageStateRoot, { recursive: true, mode: 0o700 })
+    chmodSync(input.stageStateRoot, 0o700)
+  }
+  privateDirectory(dirname(input.stageStateRoot))
+  privateDirectory(input.stageStateRoot)
+  const ledgerPath = join(input.stageStateRoot, 'ledger.sqlite')
+  if (present(ledgerPath)) {
+    const handedOver = prepareLinuxVerifierHandoverState(input)
+    return Object.freeze({ mode: 'handover', seal: handedOver.seal, grant: handedOver.grant })
+  }
+  if (present(input.stageSealPath)) fail('staging state was already sealed or handed over')
+  privateSealParent(dirname(input.stageSealPath))
+  const seal = resealLinuxRunnerState({
+    stateRoot: input.stageStateRoot, sealPath: input.stageSealPath, kind: 'verification', requireEmpty: true,
+    logicalStateRoot: input.liveStateRoot, logicalSealPath: input.liveSealPath,
+  })
+  return Object.freeze({ mode: 'fresh', seal })
 }

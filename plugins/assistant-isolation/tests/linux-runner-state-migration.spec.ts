@@ -9,7 +9,7 @@ import { defaultLimits } from '../src/config.js'
 import { inspectIsolationGrant } from '../src/diagnostics.js'
 import { grantDigest, IsolationLedger } from '../src/ledger.js'
 import { migrateLinuxVerifierRunnerState, prepareLinuxRepositoryHandoverState,
-  prepareLinuxVerifierHandoverState } from '../src/linux-runner-state-migration.js'
+  prepareLinuxVerifierHandoverState, prepareLinuxVerifierStagingState } from '../src/linux-runner-state-migration.js'
 import { inspectLinuxRunnerState, resealLinuxRunnerState, type LinuxRunnerStateSeal } from '../src/linux-runner-state.js'
 import { LinuxRepositoryRunner } from '../src/linux-repository-runner.js'
 import type { LinuxRuntime } from '../src/linux-runtime.js'
@@ -577,5 +577,74 @@ describe.runIf(process.platform === 'linux' && (process.getuid?.() ?? 0) > 0)('a
       await waitForControllerClaim(join(t.liveRunner, 'ledger.sqlite'))
       await new Promise(resolve => setImmediate(resolve))
     } finally { await runner.close() }
+  }, 30_000)
+
+  test('stages a Docker-era verifier role with no history as fresh native state', () => {
+    const t = tree()
+    const preparation = { name: 'creation-review-runner', stageStateRoot: t.stageRunner,
+      stageSealPath: t.stageSeal, liveStateRoot: t.liveRunner, liveSealPath: t.liveSeal }
+    // The Docker-era Home never ran this role: its live directory is empty and
+    // its jobs lived in the control plane, so the staged copy has no ledger and
+    // the native state is exactly a fresh install's empty v9 ledger.
+    const prepared = prepareLinuxVerifierStagingState(preparation)
+    expect(prepared.mode).toBe('fresh')
+    expect(prepared.grant).toBeUndefined()
+    expect(prepared.seal).toEqual({ path: t.liveSeal, sha256: expect.stringMatching(/^[a-f0-9]{64}$/u) })
+    expect(readdirSync(t.stageRunner).sort()).toEqual(['ledger.sqlite'])
+    const db = readonlyDb(join(t.stageRunner, 'ledger.sqlite'))
+    try {
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(9)
+      for (const table of ['isolation_grants', 'isolation_jobs', 'isolation_controller', 'isolation_audit'])
+        expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n).toBe(0)
+    } finally { db.close() }
+    // The dispatcher validates its input before it creates the staged tree, so
+    // a malformed preparation leaves the staging copy untouched.
+    const clean = tree()
+    expect(() => prepareLinuxVerifierStagingState({ ...preparation, stageStateRoot: clean.stageRunner,
+      stageSealPath: clean.stageSeal, liveStateRoot: clean.liveRunner, liveSealPath: clean.liveSeal,
+      extra: true } as unknown as Parameters<typeof prepareLinuxVerifierStagingState>[0]))
+      .toThrow(/invalid verifier handover preparation input/u)
+    expect(existsSync(clean.stageState)).toBe(false)
+    // One-shot: a published fresh state is inspected, never replaced.
+    expect(() => prepareLinuxVerifierStagingState(preparation)).toThrow(/already handed over/u)
+
+    // A tree that carries a Docker-era ledger still takes the handover path.
+    const handed = tree()
+    dockerLedger(handed.ledgerPath, handed.liveRunner)
+    stageCopy(handed)
+    const handedPrepared = prepareLinuxVerifierStagingState({ name: 'creation-review-runner',
+      stageStateRoot: handed.stageRunner, stageSealPath: handed.stageSeal,
+      liveStateRoot: handed.liveRunner, liveSealPath: handed.liveSeal })
+    expect(handedPrepared.mode).toBe('handover')
+    expect(handedPrepared.grant).toEqual({ principalDigest: oldDigest, revision: 1,
+      expiresAt: 100_000, maxRuns: 8, maxTotalDurationMs: 10_000 })
+
+    // Only an empty tree becomes fresh state: a stray file or an orphan seal is
+    // refused instead of being reinterpreted or overwritten.
+    const polluted = tree()
+    mkdirSync(join(polluted.stageHome, 'state', 'creation-review-runner'), { recursive: true, mode: 0o700 })
+    chmodSync(polluted.stageHome, 0o700); chmodSync(join(polluted.stageHome, 'state'), 0o700)
+    chmodSync(join(polluted.stageHome, 'state', 'creation-review-runner'), 0o700)
+    writeFileSync(join(polluted.stageHome, 'state', 'creation-review-runner', 'stray.txt'), 'x', { mode: 0o600 })
+    expect(() => prepareLinuxVerifierStagingState({ name: 'creation-review-runner',
+      stageStateRoot: polluted.stageRunner, stageSealPath: polluted.stageSeal,
+      liveStateRoot: polluted.liveRunner, liveSealPath: polluted.liveSeal }))
+      .toThrow(/unsealed state is not an empty preparation/u)
+    const orphaned = tree()
+    mkdirSync(join(orphaned.stageHome, 'state', 'native-runner-states'), { recursive: true, mode: 0o700 })
+    chmodSync(orphaned.stageHome, 0o700); chmodSync(join(orphaned.stageHome, 'state'), 0o700)
+    chmodSync(join(orphaned.stageHome, 'state', 'native-runner-states'), 0o700)
+    writeFileSync(orphaned.stageSeal, '{}', { mode: 0o600 })
+    expect(() => prepareLinuxVerifierStagingState({ name: 'creation-review-runner',
+      stageStateRoot: orphaned.stageRunner, stageSealPath: orphaned.stageSeal,
+      liveStateRoot: orphaned.liveRunner, liveSealPath: orphaned.liveSeal }))
+      .toThrow(/already sealed or handed over/u)
+
+    // The fresh state is exactly what a fresh install publishes: it inspects
+    // from the logical live location after the cutover.
+    mkdirSync(t.backupHome, { mode: 0o700 })
+    renameSync(t.liveState, join(t.backupHome, 'state'))
+    renameSync(t.stageState, t.liveState)
+    inspectLinuxRunnerState({ stateRoot: t.liveRunner, stateSeal: prepared.seal, kind: 'verification' })
   }, 30_000)
 })

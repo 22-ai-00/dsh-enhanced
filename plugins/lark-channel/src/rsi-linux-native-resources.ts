@@ -4,6 +4,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import {
   migrateLinuxVerifierRunnerState, prepareLinuxRepositoryHandoverState, prepareLinuxVerifierHandoverState,
+  prepareLinuxVerifierStagingState,
 } from '@dsh-enhanced/assistant-isolation'
 import { rsiBuildResources as io } from './rsi-build.js'
 import type { LinuxRsiBuildEnvironment } from './rsi-linux-runtime-bootstrap.js'
@@ -24,6 +25,7 @@ export {
   migrateLinuxVerifierRunnerState,
   prepareLinuxRepositoryHandoverState,
   prepareLinuxVerifierHandoverState,
+  prepareLinuxVerifierStagingState,
   prepareRsiLinuxRunnerStates,
   validateRsiLinuxRunnerStates,
 }

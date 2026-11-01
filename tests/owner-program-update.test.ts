@@ -929,6 +929,19 @@ const nativeSealPath = (home: string, name: string) => join(home, 'state', 'nati
   `${name}.json`)
 const nativeSeal = (home: string, name: string) => ({ path: nativeSealPath(home, name),
   sha256: 'd'.repeat(64) })
+// A staged fresh seal: the migration re-reads it from the staged copy, so the
+// fixture publishes the exact body whose digest the frozen record carries.
+const stagedNativeSeal = async (stageHome: string, home: string, name: string) => {
+  const body = JSON.stringify({ schemaVersion: 1, protocol: 'dsh-linux-runner-state/v1',
+    id: `verification:${name}`, kind: 'verification', uid: 1000,
+    stateRoot: { path: join(home, 'state', name), dev: 1, ino: 2 },
+    ledger: { path: join(home, 'state', name, 'ledger.sqlite'), dev: 1, ino: 3 },
+    ledgerSchemaVersion: 9, schemaSha256: 'e'.repeat(64) })
+  const staged = join(stageHome, 'state', 'native-runner-states', `${name}.json`)
+  await mkdir(join(stageHome, 'state', 'native-runner-states'), { recursive: true, mode: 0o700 })
+  await writeFile(staged, body, { mode: 0o600 })
+  return { path: nativeSealPath(home, name), sha256: createHash('sha256').update(body).digest('hex') }
+}
 const freezeInput = (root: string, homePath: string, stageHome: string) => ({ profile: 'assistant',
   transactionId: 'tx-native', stageHome, homePath, resources: nativeResources(homePath),
   source: nativeSource, owner: { principalId: 'owner-1' }, now: 1_000, expiresAt: 2_000,
@@ -996,7 +1009,7 @@ test('native runner-state freeze refuses invalid inputs before touching the stag
       revision: 'yes' })).message).toMatch(/the revision role flag is not a boolean/u)
     expect(refusalOf(() => freezeNativeRunnerStates({ ...freezeInput(root, homePath, stageHome),
       revision: true, api: { prepareLinuxRepositoryHandoverState: () => ({}),
-        compileRsiLinuxSourceBuild: () => ({}), prepareLinuxVerifierHandoverState: () => ({}) } })).message)
+        compileRsiLinuxSourceBuild: () => ({}), prepareLinuxVerifierStagingState: () => ({}) } })).message)
       .toMatch(/does not expose the reviewed createRsiPluginRevisionSetup seam/u)
     // A missing reviewed native-resources seam fails closed and names it.
     expect(refusalOf(() => freezeNativeRunnerStates(freezeInput(root, homePath, stageHome))).message)
@@ -1036,14 +1049,14 @@ test('native runner-state freeze seals the repository before compiling and then 
         return compiled
       },
       createRsiPluginRevisionSetup: () => ({ reviews: {}, regressions: {} }),
-      prepareLinuxVerifierHandoverState: (input: Record<string, unknown>) => {
+      prepareLinuxVerifierStagingState: (input: Record<string, unknown>) => {
         order.push(String(input.name))
         const seals: Record<string, unknown> = { 'creation-review-runner': reviewSeal,
           'creation-adoption-runner': adoptionSeal, 'revision-review-runner': revisionReviewSeal,
           'revision-regression-runner': revisionRegressionSeal }
         const grant = { principalDigest: 'a'.repeat(64), revision: 1, expiresAt: 2_000,
           maxRuns: 160, maxTotalDurationMs: 4_800_000 }
-        return { seal: seals[String(input.name)], grant }
+        return { mode: 'handover', seal: seals[String(input.name)], grant }
       },
     }
     const frozen = freezeNativeRunnerStates({ ...freezeInput(root, homePath, stageHome), revision: true,
@@ -1054,6 +1067,8 @@ test('native runner-state freeze seals the repository before compiling and then 
     expect(frozen.creationBuild).toBe(nativeCreation.family.creationBuild)
     expect(frozen.seals).toEqual({ review: reviewSeal, adoption: adoptionSeal,
       revisionReview: revisionReviewSeal, revisionRegression: revisionRegressionSeal })
+    expect(frozen.modes).toEqual({ review: 'handover', adoption: 'handover',
+      revisionReview: 'handover', revisionRegression: 'handover' })
     expect(Object.isFrozen(frozen) && Object.isFrozen(frozen.seals)
       && Object.isFrozen(frozen.verifierGrants)).toBe(true)
     // Without the revision flag the manifest keeps the deferred Docker-era
@@ -1063,13 +1078,53 @@ test('native runner-state freeze seals the repository before compiling and then 
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('a verifier role with no Docker-era history is sealed fresh, not handed over', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-native-fresh-')))
+  try {
+    const homePath = join(root, 'home'), stageHome = join(root, 'stage')
+    await mkdir(homePath, { mode: 0o700 }); await mkdir(stageHome, { mode: 0o700 })
+    const repositorySeal = nativeSeal(homePath, 'source-build-runner')
+    const reviewSeal = nativeSeal(homePath, 'creation-review-runner')
+    const adoptionSeal = nativeSeal(homePath, 'creation-adoption-runner')
+    const compiled = { schemaVersion: 1 }
+    const grant = { principalDigest: 'a'.repeat(64), revision: 1, expiresAt: 2_000, maxRuns: 1_024,
+      maxTotalDurationMs: 86_400_000 }
+    const api = {
+      prepareLinuxRepositoryHandoverState: () => repositorySeal,
+      compileRsiLinuxSourceBuild: () => compiled,
+      // The reviewed seam decides from the staged tree; the installer only
+      // records the mode and refuses to read a grant out of a fresh role.
+      prepareLinuxVerifierStagingState: (input: Record<string, unknown>) =>
+        input.name === 'creation-review-runner'
+          ? { mode: 'fresh', seal: reviewSeal }
+          : { mode: 'handover', seal: adoptionSeal, grant },
+    }
+    const frozen = freezeNativeRunnerStates({ ...freezeInput(root, homePath, stageHome), api })
+    expect(frozen.sourceBuild).toBe(compiled)
+    expect(frozen.modes).toEqual({ review: 'fresh', adoption: 'handover' })
+    expect(frozen.seals).toEqual({ review: reviewSeal, adoption: adoptionSeal })
+    expect(Object.keys(frozen.verifierGrants)).toEqual(['adoption'])
+    expect(frozen.verifierGrants.adoption).toBe(grant)
+    // A fresh role never claims a Docker-era grant and every role records its
+    // mode, so a seam that silently changes the path cannot pass unnoticed.
+    expect(refusalOf(() => freezeNativeRunnerStates({ ...freezeInput(root, homePath, stageHome),
+      api: { ...api, prepareLinuxVerifierStagingState: () =>
+        ({ mode: 'fresh', seal: reviewSeal, grant }) } })).message)
+      .toMatch(/the fresh creation-review-runner staging state carries a Docker-era owner grant/u)
+    expect(refusalOf(() => freezeNativeRunnerStates({ ...freezeInput(root, homePath, stageHome),
+      api: { ...api, prepareLinuxVerifierStagingState: () => ({ seal: reviewSeal }) } })).message)
+      .toMatch(/not sealed as a fresh native runner or a Docker-era handover/u)
+    expect(await readdir(stageHome)).toEqual([])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('native verifier grant migration rewrites the Docker-era grants with the frozen seals', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'owner-program-native-migrate-')))
   try {
     const homePath = join(root, 'home'), stageHome = join(root, 'stage')
     await mkdir(homePath, { mode: 0o700 }); await mkdir(stageHome, { mode: 0o700 })
     const oldDigest = 'a'.repeat(64), newDigest = 'b'.repeat(64)
-    const reviewSeal = nativeSeal(homePath, 'creation-review-runner')
+    const reviewSeal = await stagedNativeSeal(stageHome, homePath, 'creation-review-runner')
     const adoptionSeal = nativeSeal(homePath, 'creation-adoption-runner')
     const calls: Record<string, unknown>[] = []
     const api = {
@@ -1089,6 +1144,7 @@ test('native verifier grant migration rewrites the Docker-era grants with the fr
     capabilities: { fresh: true,
       runner: { stateSeal: adoptionSeal, expiresAt: 5_000, maxRuns: 1_024, maxTotalDurationMs: 86_400_000 } } }
     const frozen = { seals: { review: reviewSeal, adoption: adoptionSeal },
+      modes: { review: 'handover', adoption: 'handover' },
       verifierGrants: { review: { principalDigest: oldDigest }, adoption: { principalDigest: oldDigest } } }
     const migrate = (overrides: Record<string, unknown> = {}) => migrateNativeVerifierGrants({
       transactionId: 'tx-3', stageHome, homePath, resources: nativeResources(homePath), original,
@@ -1106,8 +1162,8 @@ test('native verifier grant migration rewrites the Docker-era grants with the fr
       maxTotalDurationMs: 4_800_000, now: 4_000 })
     expect(calls[1]).toMatchObject({ name: 'creation-adoption-runner', maxRuns: 1_024,
       newAuthorityDigest: newDigest, existingSeal: adoptionSeal })
-    expect(migrated).toMatchObject({ review: { seal: reviewSeal, jobsMigrated: 2, activeSettled: 1 },
-      adoption: { seal: adoptionSeal } })
+    expect(migrated).toMatchObject({ review: { seal: reviewSeal, mode: 'handover',
+      jobsMigrated: 2, activeSettled: 1 }, adoption: { seal: adoptionSeal } })
     // A manifest that already carries a revision migrates all four verifier
     // grants, so the native Home never keeps a Docker-era revision runner.
     const revisionReviewSeal = nativeSeal(homePath, 'revision-review-runner')
@@ -1127,6 +1183,7 @@ test('native verifier grant migration rewrites the Docker-era grants with the fr
     calls.length = 0
     const revisionFrozen = { seals: { ...frozen.seals, revisionReview: revisionReviewSeal,
       revisionRegression: revisionRegressionSeal },
+    modes: { ...frozen.modes, revisionReview: 'handover', revisionRegression: 'handover' },
     verifierGrants: { ...frozen.verifierGrants,
       revisionReview: { principalDigest: revisionDigest },
       revisionRegression: { principalDigest: revisionDigest } } }
@@ -1179,6 +1236,40 @@ test('native verifier grant migration rewrites the Docker-era grants with the fr
     expect(refusalOf(() => migrate({ original: { manifest: { controlPlane: {
       creationCapabilities: { fresh: false } } } } })).message)
       .toMatch(/staged owner creation authority is incomplete: the original manifest carries no review/u)
+    // A role the Docker-era Home never ran is staged fresh: its empty sealed
+    // ledger is already the state a fresh install publishes, so there is no
+    // Docker-era grant to rewrite and no job history to fence.
+    calls.length = 0
+    const freshFrozen = { seals: frozen.seals, modes: { review: 'fresh', adoption: 'handover' },
+      verifierGrants: { adoption: frozen.verifierGrants.adoption } }
+    const freshMigrated = migrate({ frozen: freshFrozen })
+    expect(calls.map(call => call.name)).toEqual(['creation-adoption-runner'])
+    expect(freshMigrated).toMatchObject({ review: { seal: reviewSeal, mode: 'fresh',
+      jobsMigrated: 0, activeSettled: 0 }, adoption: { mode: 'handover' } })
+    // The fresh path re-reads the staged seal, so a seal replaced after the
+    // freeze is refused instead of riding the frozen in-memory handle.
+    const stagedReviewSeal = join(stageHome, 'state', 'native-runner-states',
+      'creation-review-runner.json')
+    const sealedBytes = await readFile(stagedReviewSeal)
+    await writeFile(stagedReviewSeal, '{"replaced":true}', { mode: 0o600 })
+    expect(refusalOf(() => migrate({ frozen: freshFrozen })).message)
+      .toMatch(/the freshly prepared staged seal is not the frozen reference/u)
+    await rm(stagedReviewSeal)
+    expect(refusalOf(() => migrate({ frozen: freshFrozen })).message)
+      .toMatch(/the freshly prepared staged seal is missing from the staging copy/u)
+    await mkdir(join(stageHome, 'state', 'native-runner-states'), { recursive: true, mode: 0o700 })
+    await writeFile(stagedReviewSeal, sealedBytes, { mode: 0o600 })
+    // A fresh role must not claim a Docker-era grant, a handed-over role must
+    // keep one, and every role must record which path it took.
+    expect(refusalOf(() => migrate({ frozen: { ...freshFrozen,
+      verifierGrants: { ...freshFrozen.verifierGrants, review: { principalDigest: oldDigest } } } })).message)
+      .toMatch(/the freshly prepared staging state carries a Docker-era owner grant/u)
+    expect(refusalOf(() => migrate({ frozen: { seals: frozen.seals,
+      verifierGrants: frozen.verifierGrants } })).message)
+      .toMatch(/does not record whether the role was handed over or freshly prepared/u)
+    expect(refusalOf(() => migrate({ frozen: { seals: frozen.seals,
+      modes: { review: 'handover', adoption: 'fresh' } } })).message)
+      .toMatch(/the handed-over staging state carries no Docker-era owner grant/u)
     // A missing reviewed handover seam fails closed and names it.
     expect(refusalOf(() => migrate({ api: { creationAdoptionAuthorityDigest: api.creationAdoptionAuthorityDigest } }))
       .message).toMatch(/does not expose the reviewed handover seams/u)
@@ -1189,7 +1280,7 @@ test('the native handover seams stay ordered around the creation authority', asy
   const script = await readFile(new URL('../scripts/install/owner-program-update.mjs', import.meta.url), 'utf8')
   const repository = script.indexOf('api.prepareLinuxRepositoryHandoverState(location(')
   const compile = script.indexOf('api.compileRsiLinuxSourceBuild({')
-  const review = script.indexOf('api.prepareLinuxVerifierHandoverState({ name, ...location(name) })')
+  const review = script.indexOf('api.prepareLinuxVerifierStagingState({ name, ...location(name) })')
   expect(repository).toBeGreaterThan(-1)
   expect(repository).toBeLessThan(compile)
   expect(compile).toBeLessThan(review)

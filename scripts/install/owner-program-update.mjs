@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { chmod, mkdir, open, lstat, realpath, rename, readFile, readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { realpathSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -34,10 +34,10 @@ const fail = message => { throw new Error(`Owner program update: ${message}`) }
  *   carries the candidate families, so a fresh relocation cannot succeed.
  * - `freezeNativeRunnerStates` runs once the staged Home carries the relocated
  *   family: it publishes the repository and verification seals over the staged
- *   copy (`prepareLinuxRepositoryHandoverState`, `prepareLinuxVerifierHandoverState`),
+ *   copy (`prepareLinuxRepositoryHandoverState`, `prepareLinuxVerifierStagingState`),
  *   compiles the source-build grant from the fresh repository seal
- *   (`compileRsiLinuxSourceBuild`) and hands the creation seals and the
- *   Docker-era verifier grants back to the caller.
+ *   (`compileRsiLinuxSourceBuild`) and hands the creation seals, the verifier
+ *   staging modes and the Docker-era verifier grants back to the caller.
  * - `migrateNativeVerifierGrants` runs after `createRsiPluginCreationSetup` and
  *   `createRsiPluginRevisionSetup`, because each review authority digest embeds
  *   its runner state seal and can only be recomputed once that authority exists.
@@ -1026,11 +1026,15 @@ const nativeSealRoot = resources => join(resources.stateRoot, 'native-runner-sta
  * - `compileRsiLinuxSourceBuild` compiles the source-build grant from the fresh
  *   repository seal, the candidate repository/runtime family and the resolved
  *   source, returning the `RsiLinuxSourceBuildConfig` the manifest records.
- * - `prepareLinuxVerifierHandoverState` seals the staged Docker-era verifier
- *   ledgers and returns the grant each one carries, so the caller can prove the
- *   staged copy is the live Docker-era owner grant before the authority digest
- *   is recompiled. The revision pair is sealed only when `input.revision` is
- *   set, and then the revision setup seam must be installed too.
+ * - `prepareLinuxVerifierStagingState` seals one staged verifier role and
+ *   reports which path it took: `handover` when the role carries Docker-era
+ *   verifier history (it returns the staged owner grant so the caller can prove
+ *   the copy is live before recompiling), `fresh` when the Docker-era Home never
+ *   ran that role and the staged tree has no ledger at all. The branch is
+ *   decided inside the reviewed seam from the staged tree, so the installer
+ *   cannot request the weaker path for a role that has history. The revision
+ *   pair is sealed only when `input.revision` is set, and then the revision
+ *   setup seam must be installed too.
  *
  * The verifier grant rewrite is deliberately not here: each review authority
  * digest embeds its runner state seal, so it only exists after
@@ -1072,7 +1076,7 @@ export function freezeNativeRunnerStates(input) {
     fail(`cannot freeze linux-native runner state references for ${context}: the revision role flag is `
       + 'not a boolean')
   }
-  for (const name of ['prepareLinuxRepositoryHandoverState', 'prepareLinuxVerifierHandoverState',
+  for (const name of ['prepareLinuxRepositoryHandoverState', 'prepareLinuxVerifierStagingState',
     'compileRsiLinuxSourceBuild']) {
     if (typeof api?.[name] !== 'function') {
       fail(`cannot freeze linux-native runner state references for ${context}: the installed installer `
@@ -1095,23 +1099,34 @@ export function freezeNativeRunnerStates(input) {
   const sourceBuild = api.compileRsiLinuxSourceBuild({
     prepared, resources, source, owner, now, expiresAt, stateSeal: sourceBuildSeal,
   })
-  const verifierGrants = {}, seals = {}
+  const verifierGrants = {}, seals = {}, modes = {}
   for (const role of [...sealedRoles, ...(revision ? revisionRoles : [])]) {
     const [name] = nativeRunnerRoles[role]
-    const preparedRole = api.prepareLinuxVerifierHandoverState({ name, ...location(name) })
-    if (!preparedRole?.seal || typeof preparedRole.grant?.principalDigest !== 'string'
-      || !/^[a-f0-9]{64}$/u.test(preparedRole.grant.principalDigest)) {
+    const preparedRole = api.prepareLinuxVerifierStagingState({ name, ...location(name) })
+    if (!preparedRole?.seal || (preparedRole.mode !== 'handover' && preparedRole.mode !== 'fresh')) {
       fail(`cannot freeze linux-native runner state references for ${context}: the staged ${name} `
-        + 'state was not sealed with its Docker-era owner grant')
+        + 'state was not sealed as a fresh native runner or a Docker-era handover')
+    }
+    if (preparedRole.mode === 'handover') {
+      if (typeof preparedRole.grant?.principalDigest !== 'string'
+        || !/^[a-f0-9]{64}$/u.test(preparedRole.grant.principalDigest)) {
+        fail(`cannot freeze linux-native runner state references for ${context}: the staged ${name} `
+          + 'state was not sealed with its Docker-era owner grant')
+      }
+      verifierGrants[role] = preparedRole.grant
+    } else if (preparedRole.grant !== undefined) {
+      fail(`cannot freeze linux-native runner state references for ${context}: the fresh ${name} `
+        + 'staging state carries a Docker-era owner grant')
     }
     seals[role] = preparedRole.seal
-    verifierGrants[role] = preparedRole.grant
+    modes[role] = preparedRole.mode
   }
   return Object.freeze({
     sourceBuild,
     creationBuild,
     seals: Object.freeze(seals),
     verifierGrants: Object.freeze(verifierGrants),
+    modes: Object.freeze(modes),
   })
 }
 
@@ -1126,10 +1141,15 @@ export function freezeNativeRunnerStates(input) {
  * the primitive proves against the published seal; the rewritten seal is then
  * required to be the exact frozen reference.
  *
+ * A role the freeze staged as `fresh` has no Docker-era grant to rewrite and no
+ * history to fence: its empty sealed ledger is already the state a fresh install
+ * publishes, and the first native claim creates the grant itself. It still
+ * requires its seal to be the one the compiled authority binds.
+ *
  * The role table is derived from the compiled authorities rather than from the
- * frozen seals: a manifest that carries a revision must migrate all four
- * verifier ledgers even when one of them can no longer be compiled, which then
- * fails closed instead of silently dropping the role. */
+ * frozen seals: a manifest that carries a revision must cover all four verifier
+ * roles even when one of them can no longer be compiled, which then fails closed
+ * instead of silently dropping the role. */
 export function migrateNativeVerifierGrants(input) {
   const { transactionId, stageHome, homePath, resources, original, freshCreation, freshRevision,
     frozen, api, now } = input ?? {}
@@ -1179,6 +1199,11 @@ export function migrateNativeVerifierGrants(input) {
   for (const { role, group, oldDigest, nextDigest, runner } of rolePlans) {
     const [name] = nativeRunnerRoles[role]
     const seal = frozen?.seals?.[role], preparedGrant = frozen?.verifierGrants?.[role]
+    const mode = frozen?.modes?.[role]
+    if (mode !== 'handover' && mode !== 'fresh') {
+      fail(`cannot freeze the linux-native ${role} verifier staging mode for ${context}: the frozen `
+        + 'state does not record whether the role was handed over or freshly prepared')
+    }
     if (typeof oldDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(oldDigest)) {
       fail(`staged owner ${group} authority is incomplete: the original manifest carries no ${role} `
         + `verifier authority digest for ${context}`)
@@ -1187,24 +1212,55 @@ export function migrateNativeVerifierGrants(input) {
       fail(`staged owner ${group} authority is incomplete: the compiled ${role} verifier authority `
         + `digest is unavailable for ${context}`)
     }
-    if (!seal || !preparedGrant || !same(runner?.stateSeal, seal)) {
+    if (!seal || !same(runner?.stateSeal, seal)) {
       fail(`cannot migrate the linux-native ${role} verifier grant for ${context}: the frozen seal is `
         + `not the one the compiled ${group} authority binds; the installed ${group} setup may not `
         + 'accept the frozen runner state seals')
     }
-    if (preparedGrant.principalDigest !== oldDigest) {
-      fail(`cannot migrate the linux-native ${role} verifier grant for ${context}: the staged grant is `
-        + 'not the live Docker-era owner grant')
+    if (mode === 'handover') {
+      if (!preparedGrant) {
+        fail(`cannot migrate the linux-native ${role} verifier grant for ${context}: the handed-over `
+          + 'staging state carries no Docker-era owner grant')
+      }
+      if (preparedGrant.principalDigest !== oldDigest) {
+        fail(`cannot migrate the linux-native ${role} verifier grant for ${context}: the staged grant is `
+          + 'not the live Docker-era owner grant')
+      }
+    } else if (preparedGrant !== undefined) {
+      fail(`cannot migrate the linux-native ${role} verifier grant for ${context}: the freshly prepared `
+        + 'staging state carries a Docker-era owner grant')
     }
-    if (!Number.isSafeInteger(runner.expiresAt) || runner.expiresAt < 1
+    if (!runner || !Number.isSafeInteger(runner.expiresAt) || runner.expiresAt < 1
       || !Number.isSafeInteger(runner.maxRuns) || runner.maxRuns < 1
       || !Number.isSafeInteger(runner.maxTotalDurationMs) || runner.maxTotalDurationMs < 1) {
       fail(`cannot migrate the linux-native ${role} verifier grant for ${context}: the compiled runner `
         + 'terms are incomplete')
     }
-    plans.push(Object.freeze({ role, name, seal, oldDigest, nextDigest, runner }))
+    plans.push(Object.freeze({ role, name, seal, mode, oldDigest, nextDigest, runner }))
   }
-  for (const { role, name, seal, oldDigest, nextDigest, runner } of plans) {
+  for (const { role, name, seal, mode, oldDigest, nextDigest, runner } of plans) {
+    if (mode === 'fresh') {
+      // A verifier role this Home never ran under Docker: the fresh staging
+      // seam already published the empty v9 ledger and the seal the compiled
+      // authority binds, so there is no Docker-era grant to rewrite and no
+      // history to fence. The first native claim creates the grant itself via
+      // syncGrants, exactly as on a fresh install. The frozen record is only
+      // the in-memory handle, so re-read the staged seal: a fresh role must
+      // ship the same on-disk identity the handover re-validates, otherwise a
+      // seal deleted or replaced after freezing would survive into the cutover.
+      let stagedSeal
+      try { stagedSeal = readFileSync(physical(homePath, stageHome, join(sealRoot, `${name}.json`))) }
+      catch {
+        fail(`cannot migrate the linux-native ${role} verifier grant for ${context}: the freshly `
+          + 'prepared staged seal is missing from the staging copy')
+      }
+      if (createHash('sha256').update(stagedSeal).digest('hex') !== seal.sha256) {
+        fail(`cannot migrate the linux-native ${role} verifier grant for ${context}: the freshly `
+          + 'prepared staged seal is not the frozen reference')
+      }
+      migrated[role] = Object.freeze({ seal, mode, jobsMigrated: 0, activeSettled: 0 })
+      continue
+    }
     const result = api.migrateLinuxVerifierRunnerState({
       name,
       stageStateRoot: physical(homePath, stageHome, join(resources.stateRoot, name)),
@@ -1222,7 +1278,7 @@ export function migrateNativeVerifierGrants(input) {
     if (!same(result?.seal, seal)) {
       fail(`migrated ${role} verifier seal is not the frozen reference for ${context}`)
     }
-    migrated[role] = Object.freeze({ seal: result.seal, jobsMigrated: result.jobsMigrated,
+    migrated[role] = Object.freeze({ seal: result.seal, mode, jobsMigrated: result.jobsMigrated,
       activeSettled: result.activeSettled })
   }
   return Object.freeze(migrated)
