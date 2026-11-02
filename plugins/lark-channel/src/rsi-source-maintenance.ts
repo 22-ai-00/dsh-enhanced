@@ -1,6 +1,6 @@
 import { createHash, createPrivateKey, createPublicKey } from 'node:crypto'
 import { lstat, realpath, rename, rm } from 'node:fs/promises'
-import { isAbsolute, join, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { sourceMaintenanceDigest, verifySourceMaintenanceRecords,
   type SourceMaintenanceAnchor, type SourceMaintenanceRecord } from '@dsh-enhanced/plugin-control-plane'
@@ -13,6 +13,13 @@ const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const hash = (value: Buffer | string): string => createHash('sha256').update(value).digest('hex')
 const fail = (message: string): never => { throw new Error(`rsi source maintenance: ${message}`) }
+// Existing installer selection.sourceDigest protocol: lexical Object.keys.sort(),
+// with no undefined filtering. Do not substitute the control-plane signing encoder.
+function installerSnapshotCanonical(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(installerSnapshotCanonical).join(',')}]`
+  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${installerSnapshotCanonical((value as Record<string, unknown>)[key])}`).join(',')}}`
+}
 const inside = (root: string, path: string): boolean => path === root || path.startsWith(`${root}${sep}`)
 function canonical(path: string): boolean { return typeof path === 'string' && isAbsolute(path) && resolve(path) === path && !path.includes('\0') }
 function object(value: unknown, keys: readonly string[]): Record<string, unknown> {
@@ -208,13 +215,21 @@ function validateInput(input: RsiSourceMaintenanceInput): void {
 }
 
 /** Read a copied or live source through its physical path while all receipts retain logical Home paths. */
-async function readSourceState(input: RsiSourceMaintenanceInput, checkCohort: boolean): Promise<{
+async function readSourceState(input: RsiSourceMaintenanceInput, checkCohort: boolean, snapshotDigest?: string): Promise<{
   workspace: RsiSourceWorkspace; originalBootstrapDigest: string; records: readonly SourceMaintenanceRecord[]
   anchor: SourceMaintenanceAnchor
 }> {
   validateInput(input)
-  const physicalHome = await realpath(input.physicalHome)
   const signal = AbortSignal.any([input.signal ?? new AbortController().signal, AbortSignal.timeout(180_000)])
+  signal.throwIfAborted()
+  if (snapshotDigest !== undefined) {
+    if (!HASH.test(snapshotDigest) || input.logicalHome === input.physicalHome
+      || inside(input.logicalHome, input.physicalHome) || inside(input.physicalHome, input.logicalHome)) fail('invalid frozen snapshot binding')
+    await absentLogicalHome(input.logicalHome)
+    await io.directory(input.physicalHome, false)
+    if (await realpath(input.physicalHome) !== input.physicalHome) fail('snapshot physical Home is not canonical')
+  }
+  const physicalHome = await realpath(input.physicalHome)
   const saved = await original(input.logicalHome, physicalHome, input.profile)
   const sidecar = join(physicalHome, 'rsi-sources', input.profile, 'maintenance.json')
   let records: readonly SourceMaintenanceRecord[] = []
@@ -226,7 +241,9 @@ async function readSourceState(input: RsiSourceMaintenanceInput, checkCohort: bo
   }
   // Resolve the Host signing anchor on every read, including a live Home with no
   // sidecar, so maintenance producers can extend the chain without re-reading it.
-  const anchor = await trustedAnchor(input.logicalHome, physicalHome, input.profile, saved)
+  const anchor = snapshotDigest === undefined
+    ? await trustedAnchor(input.logicalHome, physicalHome, input.profile, saved)
+    : await authorityAnchor(input.logicalHome, physicalHome, input.profile, saved.workspace)
   if (hasSidecar) {
     const parsed: unknown = JSON.parse((await privateFile(sidecar, 4_194_304)).toString('utf8'))
     if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 256) fail('source maintenance chain is invalid')
@@ -239,8 +256,42 @@ async function readSourceState(input: RsiSourceMaintenanceInput, checkCohort: bo
       fail('source maintenance tip chain differs')
     }
   }
-  return { workspace: await repoState(saved, records, input.logicalHome, physicalHome, input.profile, signal, checkCohort),
+  const result = { workspace: await repoState(saved, records, input.logicalHome, physicalHome, input.profile, signal, checkCohort),
     originalBootstrapDigest: hash(saved.bytes), records, anchor }
+  if (snapshotDigest !== undefined) {
+    // Empty history still needs an actual matching cohort; repoState's ordinary
+    // bootstrap-only path intentionally preserves its existing read contract.
+    const cohort = await cohortDigest(input.logicalHome, physicalHome, input.profile)
+    if (cohort.sourceCommit !== result.workspace.sourceCommit || cohort.version !== result.workspace.version) fail('snapshot source/cohort identity differs')
+    if (hash(installerSnapshotCanonical({ anchor: result.anchor, records: result.records, workspace: result.workspace,
+      originalBootstrapDigest: result.originalBootstrapDigest })) !== snapshotDigest) fail('frozen source snapshot digest differs')
+    await io.directory(input.physicalHome, false)
+    signal.throwIfAborted()
+    await absentLogicalHome(input.logicalHome)
+  }
+  return result
+}
+
+async function absentLogicalHome(logicalHome: string): Promise<void> {
+  // lstat distinguishes a truly absent final entry from a dangling symlink.
+  // Do not treat inaccessible ancestors or any other I/O error as absence.
+  if (await realpath(dirname(logicalHome)) !== dirname(logicalHome)) fail('snapshot logical parent is not canonical')
+  try { await lstat(logicalHome) }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
+  fail('snapshot requires an absent logical Home')
+}
+
+export interface RsiSourceMaintenanceSnapshotInput extends RsiSourceMaintenanceInput {
+  expectedStateDigest: string
+}
+
+/** Read-only recovery of an already frozen source identity after the original
+ * Home was renamed away. Never substitutes a new Host key for the frozen anchor.
+ * Caller still owns the lifecycle lock and separately verifies manifest directory
+ * identity/runtime inodes: this API proves source identity, not directory identity. */
+export async function readRsiSourceMaintenanceSnapshot(input: RsiSourceMaintenanceSnapshotInput): ReturnType<typeof readSourceState> {
+  if (typeof input.expectedStateDigest !== 'string' || !HASH.test(input.expectedStateDigest)) fail('snapshot requires an explicit frozen state digest')
+  return readSourceState(input, true, input.expectedStateDigest)
 }
 
 export async function readRsiSourceMaintenance(input: RsiSourceMaintenanceInput): ReturnType<typeof readSourceState> {

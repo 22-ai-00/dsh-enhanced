@@ -219,7 +219,11 @@ node /reviewed/new-checkout/scripts/install/lifecycle-profile.mjs \
 
 已安装冻结源码/cohort、尚无 RSI owner、coordinator 或 control ledger 的 Linux systemd Home，可显式调用已经审核并构建的本地 checkout。此入口尚未接入普通 `dsh-rsi update`、远程 helper 下载或发布版本 pins；不要复制单个新版 `lib` 文件到正式 profile。先以 `dsh-rsi-setup --prepare-local-update` 在 Home 外制作候选；候选与执行维护的 reviewed checkout 是两份独立绑定的输入。
 
-维护事务先用 Home 外的私有 profile 和全新缓存，按原有效 pnpm 配置验证、预取并离线复演原依赖图，保留原 registry 包和可选依赖。随后复制预览 Home，复用正式安装的候选 roots、peer overrides 和 workspace 投影；不支持的资源迁移在停服前拒绝。该入口仍不能激活 native 候选，不能将包安装准备当作完整 Docker→native 升级。
+维护事务先用 Home 外的私有 profile 和全新缓存，按原有效 pnpm 配置验证、预取并离线复演原依赖图，保留原 registry 包和可选依赖。随后复制预览 Home，复用正式安装的候选 roots、peer overrides 和 workspace 投影；不支持的资源迁移在停服前拒绝。
+
+pre-owner 的 Docker→native 和 native→native 使用独立 v3 维护证明，只迁移基础 runtime、release 工具链/store/cache 与 cohort。它保留初始身份、授权资源、签名源码历史和配置，维护记录仍为 `host:null`；不创建 owner、runner 或额外预算。混合后端、native→Docker、非空权限状态及 owner 专用构建家族均拒绝。旧 Docker→Docker 的 v1/v2 路径保持原协议。
+
+原生运行时的文件内容与记录的目录身份都必须匹配。配置预览副本只比较已冻结内容，不能充当待激活运行时；正式停服阶段重新迁移并记录实际 inode，切换后仅接受同一目录的 rename。失败恢复也重验原 Home 身份，复制出来的新 inode 不能冒充旧运行时。原 Home 已改名而逻辑路径暂时缺失时，只能用事务中已冻结的源码摘要验证指定原备份的 Host 密钥、签名链、Git 与 cohort，再检查运行时身份；正常源码读取仍须与当前安装比较。阶段迁移失败会恢复副本内的旧资源；已开始删除备份时发生清理错误则保留候选并报错，不尝试用不完整备份覆盖它。原 Home 在切换前保持不变。
 
 候选联网准备只接触匿名最小 Home：原包元数据、投影后的 workspace、候选收据及 tarball，不复制运行配置、身份、凭据或对话状态。固定 pnpm 11.7.0 解析并预取最终图，清空私有验证标记和 node_modules 后，执行 frozen 安装；要求本轮 `started → done`、当前策略、原始锁字节与稳定文件身份一致。pnpm semantic hash 仅作为其观测身份，不能代替原始字节校验，也不能用旧 marker 或退出码零冒充本轮策略验证。
 

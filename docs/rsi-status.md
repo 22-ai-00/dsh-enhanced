@@ -16,16 +16,17 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 ## 当前交付
 
-pre-owner 源码维护新增最终候选准备：共用正式安装的 roots/peer/workspace 投影，在匿名临时 Home 解析、预取并重新校验候选依赖图；空 node_modules 副本实际断网调用原生 DSH 安装，首个服务操作前重核原 Home、外部准备产物、工具及缓存，停服后继续核对最终图和完整包清单。缓存 SQLite 使用在线 backup。native 候选资源激活仍不支持，会提前拒绝。
+pre-owner 源码维护接入原生基础资源迁移：Docker→native 和 native→native 使用独立 v3 证明，阶段内替换 runtime、release 工具链/store/cache 与 cohort；初始身份、授权资源与签名源码历史保留，维护记录仍为 `host:null`。不创建 owner/runner、不刷新额度。原生降级回 Docker、混合后端和 owner 专用资源拒绝。
 
-实现 `230d4807` 已提交到 dev，两端根检查均 EXIT 0、独立 PASS。源码、专项、真实 Linux pnpm/bubblewrap 新依赖与缺包/索引负例、真实 DSH 空 consumer 的断网安装和冷读取已获独立 PASS。新增 13 项入口用例已进入 Linux 完整安装器测试；实际 CLI 修复以显式 `plugin install` 初始化空依赖树，再执行 add 和 inventory 校验。原失败保留；合成包和服务替身不代表完整产品或活服务升级验收。
+配置预览只核对已冻结内容；正式停服阶段重新迁移并绑定实际 inode，切换/恢复重验同一目录身份，拒绝同内容复制品。阶段失败恢复原资源；备份清理开始后失败保留候选并报错。独立复核发现的目标祖先 symlink 外写问题已在 Linux 以同一负例完成修前 3 FAIL、修后无外部变化的验证。
+
+原有最终候选依赖准备与断网原生安装证明继续保留。当前专项：Linux 基础迁移 42 passed / 1 平台 skipped，资源事务 35 passed，安装辅助 201 passed；Mac 对应 8/38、29/6、185/16（passed/skipped）。资源事务和安装入口含明确替身边界，不代表完整活服务升级。入口首轮暴露的两项改名恢复失败已修复：仅指定原备份可用事务冻结摘要验证完整源码身份，普通 reader 仍核对活 Home。真实 Git/签名专项两端各 17 passed，Linux 恢复入口重跑 2 passed；入口其余 10 项已通过。精确提交的两端根检查待完成；下方完整检查仍为上一交付基线。
 
 ## 后续工程与延后验收
 
 1. 非空 review 历史 CAS/封存组件已有专项，但 installer、Host head、运行时消费者和非空 adoption 资格仍缺；旧 Docker 证书不能当作 Linux 资格。
-2. pre-owner native 候选资源激活仍缺；本次交付证明最终候选包的准备与断网安装。普通 native 资源已通过全新 consumer 断网安装，初始 prepare 仍联网；不能将两者混称。
-3. Router 跨信道协调、订阅直通与普通使用成长反馈尚未完整验收。持久任务与诊断不代表自主修改采用或长期收益。两端此前五次真实模型运行额度已用尽，失败与预算不重置。既有真实 Host 合成续办的摘要外召回前提 Mac PASS、Linux FAIL（标识已在 resume 中）；不证明 idle 自动完成或外部送达。
-4. 用户已明确延后飞书机器人实连与后续真实使用验收。正式连接门保留；完整临时双服务升级、就绪、回滚及活 Home 切换未验收。空业务采用 CAS 已实现，复制恢复、非空迁移及 native→native 尚不支持。
+2. Router 跨信道协调、订阅直通与普通使用成长反馈尚未完整验收。持久任务与诊断不代表自主修改采用或长期收益。两端此前五次真实模型运行额度已用尽，失败与预算不重置。既有真实 Host 合成续办的摘要外召回前提 Mac PASS、Linux FAIL（标识已在 resume 中）；不证明 idle 自动完成或外部送达。
+3. 用户已明确延后飞书机器人实连与后续真实使用验收。正式连接门保留；完整临时双服务升级、就绪、回滚及活 Home 切换未验收。owner 升级的空业务采用 CAS 已实现；其非空迁移、复制恢复及 native→native 尚不支持，不能以 pre-owner 迁移代替。
 
 远端同级 20 个及嵌套 8 个目标 worktree 已清理并独立 PASS，独有成果保全，归档候选未全部整合。未发布、未合入 main、未触碰活服务；全局 CLI 实际在 `~/.npm-global`。
 

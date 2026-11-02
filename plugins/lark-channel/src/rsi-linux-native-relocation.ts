@@ -487,22 +487,12 @@ async function releasePins(pins: ReleasePins, signal: AbortSignal | undefined): 
   }
 }
 
-async function authenticateSource(home: string, profile: string, peer: LinuxBehaviorPeer,
-  signal: AbortSignal | undefined): Promise<SourceState> {
-  const runtimePath = under(home, runtimeRelative(profile))
-  const repositoryPath = under(home, repositoryRuntimeRelative(profile))
-  const systemPath = under(home, systemRelative(profile))
-  const behaviorPath = under(home, behaviorRelative(profile))
-  const creationPath = under(home, creationRelative(profile))
-
-  await inventory(under(home, runtimeFamily(profile)), ['bootstrap.json', 'runtime'], 'source runtime family differs')
-  await inventory(under(home, repositoryFamily(profile)), ['bootstrap.json', 'runtime', 'system'],
-    'source repository family differs')
-  await inventory(under(home, behaviorFamily(profile)), ['behavior.json', 'runtime'], 'source behavior family differs')
-  await inventory(creationPath, ['bootstrap.json'], 'source creation family differs')
-
+async function authenticateBaseRuntime(home: string, profile: string, signal: AbortSignal | undefined, physicalHome = home): Promise<{
+  runtime: LinuxRuntime; runtimeReceipt: JsonObject; sourceCommit: string; lockSha256: string
+}> {
+  const runtimePath = under(physicalHome, runtimeRelative(profile))
   // The schema-3 bootstrap receipt binds the immutable Node/pnpm toolchain.
-  const runtimeReceipt = await readReceipt(join(under(home, runtimeFamily(profile)), 'bootstrap.json'), true)
+  const runtimeReceipt = await readReceipt(join(under(physicalHome, runtimeFamily(profile)), 'bootstrap.json'), true)
   exactKeys(runtimeReceipt, ['archives', 'backend', 'dshHome', 'lockSha256', 'manifestHashes', 'profile',
     'receiptDigest', 'runtime', 'schemaVersion', 'sourceCommit'], 'source runtime receipt differs')
   verifyReceiptDigest(runtimeReceipt, 'source runtime receipt digest differs')
@@ -512,7 +502,7 @@ async function authenticateSource(home: string, profile: string, peer: LinuxBeha
   if (!COMMIT.test(sourceCommit)) fail('source runtime receipt differs')
   const lockSha256 = hexField(runtimeReceipt, 'lockSha256', 'source runtime receipt differs')
   const runtime = validateRuntime(runtimeReceipt.runtime)
-  if (runtime.root.path !== runtimePath || runtime.sourceCommit !== sourceCommit || runtime.lockSha256 !== lockSha256) {
+  if (runtime.root.path !== under(home, runtimeRelative(profile)) || runtime.sourceCommit !== sourceCommit || runtime.lockSha256 !== lockSha256) {
     fail('source runtime receipt differs')
   }
   const manifests = object(runtimeReceipt.manifestHashes, 'source runtime receipt differs')
@@ -524,6 +514,47 @@ async function authenticateSource(home: string, profile: string, peer: LinuxBeha
   exactKeys(archives, ['node', 'pnpm', 'pnpmExe', 'pnpmNative'], 'source runtime receipt differs')
   for (const key of ['node', 'pnpm', 'pnpmExe', 'pnpmNative']) hexField(archives, key, 'source runtime receipt differs')
   await treeMeta(runtimePath, readRoot(runtime as unknown as JsonObject), signal)
+
+  return { runtime, runtimeReceipt, sourceCommit, lockSha256 }
+}
+
+async function authenticateReleaseSource(home: string, profile: string, runtime: LinuxRuntime,
+  sourceCommit: string, signal: AbortSignal | undefined, physicalHome = home): Promise<JsonObject> {
+  // The release build pins the fixed toolchain/store/cache trees that the
+  // native runner executes with; its receipt must describe this exact Home and
+  // the base runtime this Home was prepared from.
+  await inventory(under(physicalHome, releaseRelative(profile)), ['bootstrap.json', 'cache', 'store', 'toolchain'],
+    'source release family differs')
+  const releaseReceipt = await readReceipt(join(under(physicalHome, releaseRelative(profile)), 'bootstrap.json'), true)
+  exactKeys(releaseReceipt, ['backend', 'dshHome', 'profile', 'receiptDigest', 'releaseBuild', 'runtimeDigest',
+    'schemaVersion', 'sourceCommit'], 'source release receipt differs')
+  verifyReceiptDigest(releaseReceipt, 'source release receipt digest differs')
+  const baseRuntimeDigest = linuxRuntimeDigest(runtime)
+  if (releaseReceipt.schemaVersion !== 2 || releaseReceipt.backend !== 'linux-native'
+    || releaseReceipt.dshHome !== home || releaseReceipt.profile !== profile
+    || releaseReceipt.sourceCommit !== sourceCommit || releaseReceipt.runtimeDigest !== baseRuntimeDigest) {
+    fail('source release receipt differs')
+  }
+  const release = releaseLayout(releaseReceipt, home, profile)
+  await releasePins(relocate(release, home, physicalHome) as unknown as ReleasePins, signal)
+
+  return releaseReceipt
+}
+
+async function authenticateSource(home: string, profile: string, peer: LinuxBehaviorPeer,
+  signal: AbortSignal | undefined): Promise<SourceState> {
+  const repositoryPath = under(home, repositoryRuntimeRelative(profile))
+  const systemPath = under(home, systemRelative(profile))
+  const behaviorPath = under(home, behaviorRelative(profile))
+  const creationPath = under(home, creationRelative(profile))
+
+  await inventory(under(home, runtimeFamily(profile)), ['bootstrap.json', 'runtime'], 'source runtime family differs')
+  await inventory(under(home, repositoryFamily(profile)), ['bootstrap.json', 'runtime', 'system'],
+    'source repository family differs')
+  await inventory(under(home, behaviorFamily(profile)), ['behavior.json', 'runtime'], 'source behavior family differs')
+  await inventory(creationPath, ['bootstrap.json'], 'source creation family differs')
+
+  const { runtime, runtimeReceipt, sourceCommit, lockSha256 } = await authenticateBaseRuntime(home, profile, signal)
 
   // The schema-4 repository receipt binds the base runtime, system snapshot and
   // user namespace; only its path-bearing parts are relocated.
@@ -593,23 +624,7 @@ async function authenticateSource(home: string, profile: string, peer: LinuxBeha
     fail('source creation receipt differs')
   }
 
-  // The release build pins the fixed toolchain/store/cache trees that the
-  // native runner executes with; its receipt must describe this exact Home and
-  // the base runtime this Home was prepared from.
-  await inventory(under(home, releaseRelative(profile)), ['bootstrap.json', 'cache', 'store', 'toolchain'],
-    'source release family differs')
-  const releaseReceipt = await readReceipt(join(under(home, releaseRelative(profile)), 'bootstrap.json'), true)
-  exactKeys(releaseReceipt, ['backend', 'dshHome', 'profile', 'receiptDigest', 'releaseBuild', 'runtimeDigest',
-    'schemaVersion', 'sourceCommit'], 'source release receipt differs')
-  verifyReceiptDigest(releaseReceipt, 'source release receipt digest differs')
-  const baseRuntimeDigest = linuxRuntimeDigest(runtime)
-  if (releaseReceipt.schemaVersion !== 2 || releaseReceipt.backend !== 'linux-native'
-    || releaseReceipt.dshHome !== home || releaseReceipt.profile !== profile
-    || releaseReceipt.sourceCommit !== sourceCommit || releaseReceipt.runtimeDigest !== baseRuntimeDigest) {
-    fail('source release receipt differs')
-  }
-  const release = releaseLayout(releaseReceipt, home, profile)
-  await releasePins(release, signal)
+  const releaseReceipt = await authenticateReleaseSource(home, profile, runtime, sourceCommit, signal)
 
   return {
     runtime, runtimeReceipt, repository, repositoryReceipt, snapshot, userNamespace,
@@ -1374,4 +1389,282 @@ export async function openLinuxRsiNativeRelocatedFamilyAt(
   const family = await readRelocated(physicalHome, profile, peer, moved)
   await validateRelocatedReceipts(family, logicalHome, physicalHome, profile, moved, peer, digests)
   return relocatedFamily(family, logicalHome)
+}
+
+/** A resource-only proof; this neither establishes pre-owner eligibility nor
+ * reads, creates or migrates owner authority. The outer installer owns that gate. */
+type BaseElementName = 'runtime' | 'release-toolchain' | 'release-store' | 'release-cache'
+export interface LinuxRsiNativeBaseRelocationProof {
+  schemaVersion: 1
+  backend: 'linux-native'
+  purpose: 'pre-owner-base'
+  profile: string
+  sourceHome: string
+  physicalHome: string
+  logicalHome: string
+  elements: (Omit<LinuxRsiNativeRelocationElement, 'name'> & { name: BaseElementName })[]
+  digests: { runtime: string; release: string; relocation: string }
+}
+export interface LinuxRsiNativeRelocatedBase {
+  runtime: LinuxRsiBuildEnvironment
+  release: NativeRsiReleaseBuildEnvironment
+}
+const BASE_ELEMENTS: readonly BaseElementName[] = ['runtime', 'release-toolchain', 'release-store', 'release-cache']
+interface BaseState {
+  runtime: LinuxRuntime; runtimeReceipt: JsonObject; releaseReceipt: JsonObject
+  releaseTrees: (TreeMeta & { mode: number })[]
+}
+
+async function baseFileDigest(path: string, signal: AbortSignal | undefined): Promise<string> {
+  const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const before = await fd.stat()
+    if (!before.isFile() || before.nlink !== 1 || before.uid !== process.getuid?.()
+      || before.mode & 0o022 || before.size > MAX_BYTES) fail('unsafe base runtime file')
+    const hash = createHash('sha256')
+    for await (const chunk of createReadStream(path, { fd: fd.fd, autoClose: false, highWaterMark: CHUNK, signal })) {
+      checkAbort(signal); hash.update(chunk as Buffer)
+    }
+    if (stamp(await fd.stat()) !== stamp(before) || stamp(await lstat(path)) !== stamp(before)) fail('base runtime file changed')
+    return hash.digest('hex')
+  } finally { await fd.close() }
+}
+
+/** Validate bytes and package pins without executing the recorded toolchain. */
+async function baseRuntimePins(runtime: LinuxRuntime, logicalHome: string, physicalHome: string,
+  signal: AbortSignal | undefined): Promise<void> {
+  const physical = (path: string): string => rewrite(path, logicalHome, physicalHome)
+  for (const path of [runtime.nodePath, join(runtime.nativePnpmRoot, 'node')]) {
+    if (await pinnedExecutableDigest(physical(path), signal) !== runtime.nodeSha256) fail('source runtime Node pin differs')
+  }
+  if (await baseFileDigest(physical(join(runtime.root.path, 'pnpm-lock.yaml')), signal) !== runtime.lockSha256) fail('source runtime lock differs')
+  const native = await readReceipt(physical(join(runtime.nativePnpmRoot, 'package.json')), false)
+  if (native.name !== '@pnpm/exe' || native.version !== runtime.versions.pnpm) fail('source runtime native manifest differs')
+  for (const [key, name] of [['typescript', 'typescript'], ['cordis', '@deepseek-ai/cordis'],
+    ['tools', '@deepseek-ai/dsh-tools'], ['systemPrompt', '@deepseek-ai/dsh-system-prompt']] as const) {
+    const manifest = await readReceipt(physical(join(runtime.modulesPath, name, 'package.json')), false)
+    if (manifest.version !== runtime.versions[key]) fail('source runtime package differs')
+  }
+}
+
+async function baseRelativeLinks(root: string, signal: AbortSignal | undefined): Promise<void> {
+  let entries = 0
+  const visit = async (path: string): Promise<void> => {
+    checkAbort(signal)
+    if (++entries > MAX_ENTRIES) fail('base tree entry bound exceeded')
+    const info = await lstat(path)
+    if (info.isSymbolicLink()) {
+      const target = await readlink(path)
+      if (isAbsolute(target) || !within(resolve(dirname(path), target), root)
+        || !within(await realpath(path), root)) fail('base runtime link escaped root')
+    } else if (info.isDirectory()) {
+      for (const name of (await readdir(path)).sort()) await visit(join(path, name))
+      if (stamp(await lstat(path)) !== stamp(info)) fail('base runtime directory changed')
+    }
+  }
+  await visit(root)
+}
+
+async function authenticateBaseAt(logicalHome: string, physicalHome: string, profile: string,
+  signal?: AbortSignal): Promise<BaseState> {
+  checkAbort(signal)
+  await privateDirectory(under(physicalHome, runtimeFamily(profile)), 'unsafe base runtime family')
+  await privateDirectory(under(physicalHome, releaseRelative(profile)), 'unsafe base release family')
+  await inventory(under(physicalHome, runtimeFamily(profile)), ['bootstrap.json', 'runtime'], 'source runtime family differs')
+  const { runtime, runtimeReceipt, sourceCommit } = await authenticateBaseRuntime(logicalHome, profile, signal, physicalHome)
+  await baseRelativeLinks(under(physicalHome, runtimeRelative(profile)), signal)
+  await baseRuntimePins(runtime, logicalHome, physicalHome, signal)
+  const releaseReceipt = await authenticateReleaseSource(logicalHome, profile, runtime, sourceCommit, signal, physicalHome)
+  // Runtime hashing also rejects hardlinks, writable entries and escaping links
+  // in the release trees; schema-2 pins use a different inventory digest.
+  const releaseTrees: BaseState['releaseTrees'] = []
+  for (const name of ['toolchain', 'store', 'cache'] as const) {
+    const path = under(physicalHome, releaseTreeRelative(profile, name)), before = await lstat(path)
+    const sha256 = await hashTree(path, signal, 'unsafe release tree')
+    if (stamp(await lstat(path)) !== stamp(before)) fail('source release tree changed during inspection')
+    releaseTrees.push({ path, dev: before.dev, ino: before.ino, mode: before.mode, sha256 })
+  }
+  checkAbort(signal)
+  return { runtime, runtimeReceipt, releaseReceipt, releaseTrees }
+}
+
+function projectBase(state: BaseState): LinuxRsiNativeRelocatedBase {
+  const sourceCommit = stringField(state.runtimeReceipt, 'sourceCommit', 'invalid base receipt')
+  return {
+    runtime: { schemaVersion: 3, backend: 'linux-native', sourceCommit,
+      lockSha256: hexField(state.runtimeReceipt, 'lockSha256', 'invalid base receipt'), runtime: state.runtime },
+    release: { schemaVersion: 2, backend: 'linux-native', sourceCommit,
+      runtimeDigest: hexField(state.releaseReceipt, 'runtimeDigest', 'invalid base receipt'),
+      releaseBuild: object(state.releaseReceipt.releaseBuild, 'invalid base receipt') as unknown as RsiReleaseBuildConfig },
+  }
+}
+
+async function inspectBaseHome(home: string): Promise<void> {
+  const info = await lstat(home)
+  if (!canonical(home) || !info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.()
+    || info.mode & 0o022 || await realpath(home) !== home) fail('unsafe base Home')
+}
+
+/** Read existing receipts through their canonical logical Home spelling. Only
+ * same-inode moves are supported: ordinary copied runtime roots fail dev/ino.
+ * Release schema 2 carries content pins, not historical root inode fields. */
+export async function inspectLinuxRsiNativeBaseAt(input: {
+  logicalHome: string; physicalHome: string; profile: string; signal?: AbortSignal
+}): Promise<LinuxRsiNativeRelocatedBase> {
+  const { logicalHome, physicalHome, profile, signal } = input
+  if (!canonical(logicalHome) || !canonical(physicalHome) || !PROFILE.test(profile)
+    || logicalHome !== physicalHome && (within(logicalHome, physicalHome) || within(physicalHome, logicalHome))) fail('invalid base inspection identity')
+  if (process.platform !== 'linux') fail('Linux native base inspection requires Linux')
+  await inspectBaseHome(physicalHome)
+  return projectBase(await authenticateBaseAt(logicalHome, physicalHome, profile, signal))
+}
+
+function baseRelocationDigest(proof: LinuxRsiNativeBaseRelocationProof): string {
+  return digest({ schemaVersion: proof.schemaVersion, backend: proof.backend, purpose: proof.purpose,
+    profile: proof.profile, sourceHome: proof.sourceHome, physicalHome: proof.physicalHome, logicalHome: proof.logicalHome,
+    elements: proof.elements, digests: { runtime: proof.digests.runtime, release: proof.digests.release } })
+}
+
+function baseProofShape(proof: LinuxRsiNativeBaseRelocationProof): Map<ElementName, ElementMeta> {
+  const record = object(proof, 'invalid base relocation proof')
+  exactKeys(record, ['schemaVersion', 'backend', 'purpose', 'profile', 'sourceHome', 'physicalHome', 'logicalHome', 'elements', 'digests'], 'invalid base relocation proof')
+  if (record.schemaVersion !== 1 || record.backend !== 'linux-native' || record.purpose !== 'pre-owner-base') fail('invalid base relocation proof')
+  const identity = { sourceHome: stringField(record, 'sourceHome', 'invalid base relocation proof'),
+    physicalHome: stringField(record, 'physicalHome', 'invalid base relocation proof'),
+    logicalHome: stringField(record, 'logicalHome', 'invalid base relocation proof'),
+    profile: stringField(record, 'profile', 'invalid base relocation proof') }
+  pureIdentity(identity)
+  const list = record.elements
+  if (!Array.isArray(list) || list.length !== BASE_ELEMENTS.length) fail('invalid base relocation elements')
+  const elements = new Map<ElementName, ElementMeta>()
+  for (const item of list) {
+    const value = object(item, 'invalid base relocation element')
+    exactKeys(value, ['name', 'logicalPath', 'physicalPath', 'dev', 'ino', 'sha256', 'entries', 'bytes'], 'invalid base relocation element')
+    const name = stringField(value, 'name', 'invalid base relocation element') as BaseElementName
+    if (!BASE_ELEMENTS.includes(name) || elements.has(name)) fail('invalid base relocation element')
+    const logicalPath = stringField(value, 'logicalPath', 'invalid base relocation element')
+    const physicalPath = stringField(value, 'physicalPath', 'invalid base relocation element')
+    const suffix = relativeOf(name, identity.profile)
+    if (logicalPath !== under(identity.logicalHome, suffix) || physicalPath !== under(identity.physicalHome, suffix)) fail('base relocation element paths differ')
+    const entries = naturalField(value, 'entries', 'invalid base relocation element')
+    const bytes = naturalField(value, 'bytes', 'invalid base relocation element')
+    if (entries < 1 || entries > MAX_ENTRIES || bytes > MAX_BYTES) fail('invalid base relocation element')
+    elements.set(name, { logicalPath, physicalPath, entries, bytes,
+      dev: naturalField(value, 'dev', 'invalid base relocation element'), ino: naturalField(value, 'ino', 'invalid base relocation element'),
+      sha256: hexField(value, 'sha256', 'invalid base relocation element') })
+  }
+  const digests = object(record.digests, 'invalid base relocation digests')
+  exactKeys(digests, ['runtime', 'release', 'relocation'], 'invalid base relocation digests')
+  for (const key of ['runtime', 'release', 'relocation']) hexField(digests, key, 'invalid base relocation digests')
+  if (baseRelocationDigest(proof) !== digests.relocation) fail('base relocation proof digest differs')
+  return elements
+}
+
+async function openBase(proof: LinuxRsiNativeBaseRelocationProof, physicalHome: string,
+  elements: Map<ElementName, ElementMeta>): Promise<LinuxRsiNativeRelocatedBase> {
+  if (process.platform !== 'linux') fail('Linux native base relocation verification requires Linux')
+  await inspectBaseHome(physicalHome)
+  for (const name of BASE_ELEMENTS) {
+    const meta = elements.get(name) ?? fail('invalid base relocation elements')
+    const path = under(physicalHome, relativeOf(name, proof.profile))
+    const info = await lstat(path)
+    if (info.dev !== meta.dev || info.ino !== meta.ino
+      || await hashTree(path, undefined, 'relocated base tree differs') !== meta.sha256) fail('relocated base tree differs')
+  }
+  const state = await authenticateBaseAt(proof.logicalHome, physicalHome, proof.profile)
+  // Schema-2 receipts have content pins but no inode fields. Compare the actual
+  // post-authentication observations to the proof as well as the initial scan.
+  for (const tree of state.releaseTrees) {
+    const name = BASE_ELEMENTS.find(value => under(physicalHome, relativeOf(value, proof.profile)) === tree.path)
+    const meta = name && elements.get(name)
+    if (!meta || tree.dev !== meta.dev || tree.ino !== meta.ino || tree.sha256 !== meta.sha256) fail('relocated base tree changed during inspection')
+  }
+  if (state.runtimeReceipt.receiptDigest !== proof.digests.runtime || state.releaseReceipt.receiptDigest !== proof.digests.release) fail('relocated base receipt digest differs')
+  return projectBase(state)
+}
+
+export async function openLinuxRsiNativeRelocatedBase(proof: LinuxRsiNativeBaseRelocationProof): Promise<LinuxRsiNativeRelocatedBase> {
+  const elements = baseProofShape(proof)
+  return openBase(proof, proof.physicalHome, elements)
+}
+
+export async function openLinuxRsiNativeRelocatedBaseAt(proof: LinuxRsiNativeBaseRelocationProof,
+  physicalHome: string): Promise<LinuxRsiNativeRelocatedBase> {
+  const elements = baseProofShape(proof)
+  if (physicalHome !== proof.physicalHome && physicalHome !== proof.logicalHome) fail('base relocation proof does not describe this physical Home')
+  return openBase(proof, physicalHome, elements)
+}
+
+/** Read-only before any acquisition. Even an absent Home must have an
+ * existing canonical parent; recursive mkdir must never traverse an alias.
+ * The early non-Linux pass checks path traversal only, before the platform gate.
+ * Actual Linux acquisition additionally requires owner-private directories. */
+async function baseDestinationParents(physicalHome: string, strict: boolean): Promise<void> {
+  const directory = async (path: string): Promise<void> => {
+    const info = await lstat(path)
+    if (!info.isDirectory() || info.isSymbolicLink() || await realpath(path) !== path
+      || strict && (info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0)) fail('unsafe base destination parent')
+  }
+  if (!await exists(physicalHome)) { await directory(dirname(physicalHome)); return }
+  await directory(physicalHome)
+  // Check both parents before creating either parent or profile family.
+  for (const name of ['rsi-linux-runtimes', 'rsi-release-builds']) {
+    const path = join(physicalHome, name)
+    if (await exists(path)) await directory(path)
+  }
+}
+
+async function createBaseDirectory(path: string): Promise<void> {
+  // No recursive mkdir or chmod: EEXIST (including a concurrent symlink) fails
+  // without modifying an existing target. The outer caller owns the Home lock.
+  await mkdir(path, { mode: 0o700 })
+  await privateDirectory(path, 'unsafe base destination parent')
+}
+
+export async function relocateLinuxRsiNativeBase(input: LinuxRsiNativeRelocationInput): Promise<LinuxRsiNativeBaseRelocationProof> {
+  pureIdentity(input)
+  const { sourceHome, physicalHome, logicalHome, profile, signal } = input
+  await baseDestinationParents(physicalHome, false)
+  if (process.platform !== 'linux') fail('Linux native base relocation requires Linux')
+  await baseDestinationParents(physicalHome, true)
+  checkAbort(signal)
+  await privateDirectory(sourceHome, 'unsafe source Home')
+  if (input.existingLogicalHome === undefined) {
+    if (await exists(logicalHome)) fail('logical Home already exists')
+  } else await attestedLogicalHome(logicalHome)
+  if (await exists(physicalHome)) await privateDirectory(physicalHome, 'unsafe physical Home')
+  else await createBaseDirectory(physicalHome)
+  for (const path of [runtimeFamily(profile), releaseRelative(profile)]) {
+    if (await exists(under(physicalHome, path))) fail('base relocation target already exists')
+  }
+  const source = await authenticateBaseAt(sourceHome, sourceHome, profile, signal)
+  await baseDestinationParents(physicalHome, true)
+  for (const parent of ['rsi-linux-runtimes', 'rsi-release-builds']) {
+    const path = join(physicalHome, parent)
+    if (!await exists(path)) await createBaseDirectory(path)
+    else await privateDirectory(path, 'unsafe base destination parent')
+  }
+  await createBaseDirectory(under(physicalHome, runtimeFamily(profile)))
+  await createBaseDirectory(under(physicalHome, releaseRelative(profile)))
+  const runtimeCopy = await copyTree(source.runtime.root.path, under(physicalHome, runtimeRelative(profile)), signal, source.runtime.root.sha256)
+  const copies = new Map<BaseElementName, TreeCopy>([['runtime', runtimeCopy]])
+  for (const name of BASE_ELEMENTS.slice(1)) {
+    const path = relativeOf(name, profile)
+    copies.set(name, await copyTree(under(sourceHome, path), under(physicalHome, path), signal))
+  }
+  const runtimeReceipt = relocatedRuntimeReceipt(source.runtimeReceipt, sourceHome, logicalHome, runtimeCopy, under(logicalHome, runtimeRelative(profile)))
+  const runtime = validateRuntime(runtimeReceipt.runtime)
+  const releaseReceipt = relocatedReleaseReceipt(source.releaseReceipt, sourceHome, logicalHome, linuxRuntimeDigest(runtime))
+  const proof: LinuxRsiNativeBaseRelocationProof = { schemaVersion: 1, backend: 'linux-native', purpose: 'pre-owner-base',
+    profile, sourceHome, physicalHome, logicalHome,
+    elements: BASE_ELEMENTS.map(name => ({ ...element(name, under(logicalHome, relativeOf(name, profile)), copies.get(name)!), name })),
+    digests: { runtime: stringField(runtimeReceipt, 'receiptDigest', 'invalid base receipt'),
+      release: stringField(releaseReceipt, 'receiptDigest', 'invalid base receipt'), relocation: '' } }
+  proof.digests.relocation = baseRelocationDigest(proof)
+  await writeReceipt(join(under(physicalHome, runtimeFamily(profile)), 'bootstrap.json'), runtimeReceipt)
+  await writeReceipt(join(under(physicalHome, releaseRelative(profile)), 'bootstrap.json'), releaseReceipt)
+  await openLinuxRsiNativeRelocatedBase(proof)
+  if (!isDeepStrictEqual(await authenticateBaseAt(sourceHome, sourceHome, profile, signal), source)) fail('source base changed during relocation')
+  checkAbort(signal)
+  return proof
 }

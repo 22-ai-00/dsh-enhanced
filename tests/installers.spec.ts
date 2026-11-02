@@ -770,6 +770,7 @@ interface LifecycleSystemdFixtureOptions {
 }
 
 interface LifecycleRunOptions {
+  nativeResourceFailure?: 'stage' | 'after-stage' | 'after-packages'
   candidateFailure?: 'add' | 'fetch' | 'verify' | 'offline' | 'missing-started' | 'missing-done' | 'policy' | 'optional-resolution' | 'offline-optional-resolution' | 'offline-graph-drift' | 'final-graph-drift' | 'external-preparation'
   activationMarker?: string
   canonicalCleanupFails?: boolean
@@ -2050,7 +2051,7 @@ export async function verifyRsiLocalInstalledPackages(input) {
  const value = await readFile(join(input.profilePath,'node_modules/@dsh-enhanced/plugin-control-plane/lib/entry.js'),'utf8')
  if(value !== 'approved-package-bytes') throw new Error('installed package file differs')
 }
-export async function readRsiLocalUpdateLocked(input) { return {receiptDigest:createHash('sha256').update(await readFile(join(input.root,'receipt.json'))).digest('hex'),source:{root:${JSON.stringify(join(preparationRoot, 'source'))}},
+export async function readRsiLocalUpdateLocked(input) { return {receiptDigest:createHash('sha256').update(await readFile(join(input.root,'receipt.json'))).digest('hex'),source:{root:${JSON.stringify(join(preparationRoot, 'source'))}},build:{sourceBuild:{schemaVersion:1}},
  ...(${JSON.stringify(memoryExtension)} ? {schemaVersion:2,extension:'memory-learning'} : {})} }
 export async function stageRsiLocalUpdateResources(input) {
  await canonicalStage(input.stagePhysicalHome)
@@ -2213,6 +2214,127 @@ if(result.error)throw result.error;process.exitCode=result.status??1;
   await symlink(join(pnpmPackageRoot, 'bin', 'pnpm.cjs'), pnpmPath)
   return { ...f, moduleRoot, preparationRoot, cachePath, storeAlias, pnpmPackageRoot, candidateLock }
 }
+/** Real tiny runtime files and genuine base readers; no native kernel/workload
+ * acceptance is implied. Preparation, source and CLI remain explicit ports. */
+async function nativeEntryBaseSource(commit: string) {
+  const { fixture } = await import('../plugins/lark-channel/tests/fixtures/linux-native-home-fixture.js')
+  const { linuxRuntimeDigest } = await import('../plugins/assistant-isolation/lib/linux-runtime.js')
+  const f = await fixture()
+  temporaryRoots.push(dirname(f.sourceHome))
+  for (const name of ['rsi-authorities', 'rsi-linux-repository-runtimes', 'rsi-linux-creation-builds']) {
+    await rm(join(f.sourceHome, name), { recursive: true })
+  }
+  const rewrite = (value: unknown): unknown => typeof value === 'string'
+    ? value === 'unit' ? 'web' : value.replaceAll('/unit/', '/web/').replace(/\/unit$/u, '/web')
+    : Array.isArray(value) ? value.map(rewrite) : value !== null && typeof value === 'object'
+      ? Object.fromEntries(Object.entries(value).map(([key, child]) => [key, rewrite(child)])) : value
+  const seal = (value: Record<string, unknown>) => {
+    const content = { ...value }; delete content.receiptDigest
+    return { ...content, receiptDigest: createHash('sha256').update(JSON.stringify(content)).digest('hex') }
+  }
+  for (const name of ['rsi-linux-runtimes', 'rsi-release-builds']) await rename(join(f.sourceHome, name, 'unit'), join(f.sourceHome, name, 'web'))
+  const runtimePath = join(f.sourceHome, 'rsi-linux-runtimes/web/bootstrap.json')
+  const runtimeReceipt = rewrite(JSON.parse(await readFile(runtimePath, 'utf8'))) as Record<string, unknown>
+  const runtime = runtimeReceipt.runtime as Parameters<typeof linuxRuntimeDigest>[0]
+  runtime.sourceCommit = commit
+  runtimeReceipt.sourceCommit = commit
+  runtimeReceipt.manifestHashes = { 'pnpm-lock.yaml': createHash('sha256').update('lock').digest('hex') }
+  await writeFile(runtimePath, JSON.stringify(seal(runtimeReceipt)), { mode: 0o600 })
+  const releasePath = join(f.sourceHome, 'rsi-release-builds/web/bootstrap.json')
+  const release = rewrite(JSON.parse(await readFile(releasePath, 'utf8'))) as Record<string, unknown>
+  release.sourceCommit = commit; release.runtimeDigest = linuxRuntimeDigest(runtime)
+  await writeFile(releasePath, JSON.stringify(seal(release)), { mode: 0o600 })
+  return f.sourceHome
+}
+
+async function nativePreOwnerLifecycleFixture({ originalNative = false, memoryExtension = false }: { originalNative?: boolean; memoryExtension?: boolean } = {}) {
+  const f = await preOwnerLifecycleFixture({ baseServices: memoryExtension, memoryExtension })
+  const primitive = await import('../plugins/lark-channel/src/rsi-linux-native-relocation.js')
+  const seed = async (logicalHome: string, commit: string, existing: boolean) => {
+    const sourceHome = await nativeEntryBaseSource(commit)
+    const physicalHome = await mkdtemp(join(f.root, '.native-base-seed-'))
+    const proof = await primitive.relocateLinuxRsiNativeBase({ sourceHome, physicalHome, logicalHome, profile: 'web',
+      ...(existing ? { existingLogicalHome: logicalHome } : {}) })
+    if (!existing) await rename(physicalHome, logicalHome)
+    else {
+      await rm(join(logicalHome, 'rsi-builds/web'), { recursive: true })
+      await rm(join(logicalHome, 'rsi-release-builds/web'), { recursive: true })
+      for (const kind of ['rsi-linux-runtimes', 'rsi-release-builds']) {
+        await mkdir(join(logicalHome, kind), { recursive: true, mode: 0o700 })
+        await rename(join(physicalHome, kind, 'web'), join(logicalHome, kind, 'web'))
+      }
+    }
+    if (existing) await primitive.inspectLinuxRsiNativeBaseAt({ logicalHome, physicalHome: logicalHome, profile: 'web' })
+    else await primitive.openLinuxRsiNativeRelocatedBaseAt(proof, logicalHome)
+  }
+  await seed(join(f.preparationRoot, 'home'), '2'.repeat(40), false)
+  if (originalNative) await seed(f.dshHome, '1'.repeat(40), true)
+  const lib = join(f.moduleRoot, 'plugins/lark-channel/lib')
+  await cp(join(repoRoot, 'plugins/lark-channel/lib/rsi-linux-native-relocation.js'), join(lib, 'rsi-linux-native-relocation.js'))
+  // Closed, narrow facade over unchanged published primitive implementations.
+  const isolation = join(f.moduleRoot, 'node_modules/@dsh-enhanced/assistant-isolation')
+  await mkdir(join(isolation, 'lib'), { recursive: true })
+  for (const name of ['linux-runtime.js', 'linux-user-namespace.js']) await cp(join(repoRoot, 'plugins/assistant-isolation/lib', name), join(isolation, 'lib', name))
+  await writeFile(join(isolation, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/assistant-isolation', type: 'module', exports: './lib/index.js' }))
+  await writeFile(join(isolation, 'lib/index.js'), "export * from './linux-runtime.js'; export { validateLinuxUserNamespaceMapping } from './linux-user-namespace.js'\n")
+  const nativeLog = join(f.root, 'native-entry-resources.jsonl')
+  await writeFile(nativeLog, '')
+  const activationPath = join(lib, 'rsi-local-activation.js')
+  let activation = await readFile(activationPath, 'utf8')
+  activation = activation.replace('build:{sourceBuild:{schemaVersion:1}}', "build:{sourceBuild:{schemaVersion:3,backend:'linux-native'}}")
+    .replace('workspace: { revision }', "workspace: { revision, sourceCommit: await sourceCommit(input.physicalHome,input.profile), version:'0.1.0' }")
+    .replace('export async function produceRsiLocalSourceMaintenance(', 'async function originalProduceRsiLocalSourceMaintenance(')
+    .replace('export async function stageRsiLocalSinglePackages(', 'async function originalStageRsiLocalSinglePackages(')
+  activation += `
+async function sourceCommit(home,profile){try{return JSON.parse(await readFile(join(home,'rsi-linux-runtimes',profile,'bootstrap.json'),'utf8')).sourceCommit}catch(e){if(e.code!=='ENOENT')throw e;return '1'.repeat(40)}}
+// Source/Host signatures remain the declared tiny seam. Snapshot recovery
+// reads the physical backup and must still match the previously frozen state.
+const snapshotCanonical=value=>value===null||typeof value!=='object'?JSON.stringify(value):Array.isArray(value)?'['+value.map(snapshotCanonical).join(',')+']':'{'+Object.keys(value).sort().map(key=>JSON.stringify(key)+':'+snapshotCanonical(value[key])).join(',')+'}';
+export async function readRsiSourceMaintenanceSnapshot(input){
+ const state=await readRsiSourceMaintenance({...input,logicalHome:input.physicalHome});
+ const digest=createHash('sha256').update(snapshotCanonical(state)).digest('hex');
+ if(digest!==input.expectedStateDigest)throw new Error('fixture source snapshot differs from frozen state');
+ await appendFile(${JSON.stringify(nativeLog)},JSON.stringify({action:'source-snapshot',physicalHome:input.physicalHome,expectedStateDigest:input.expectedStateDigest,sourceDigest:digest})+'\\n');
+ return state;
+}
+async function drift(home,phase){if(process.env.LIFECYCLE_NATIVE_RESOURCE_FAILURE!==phase||!home.includes('.dsh-enhanced-transaction/staged-home'))return;
+ const path=join(home,'rsi-linux-runtimes/web/runtime/node_modules/index.js');await chmod(path,0o644);await writeFile(path,'tampered runtime bytes');await chmod(path,0o444);
+ await appendFile(${JSON.stringify(nativeLog)},JSON.stringify({action:'drift',phase,home})+'\\n')}
+export async function produceRsiLocalSourceMaintenance(input){const result=await originalProduceRsiLocalSourceMaintenance(input);await drift(input.stagePhysicalHome,'after-stage');return result}
+export async function stageRsiLocalSinglePackages(input){const result=await originalStageRsiLocalSinglePackages(input);await drift(input.dshHome,'after-packages');return result}
+`
+  activation = activation.replace("readFile, writeFile, lstat, realpath, mkdir }", "readFile, writeFile, lstat, realpath, mkdir, chmod, appendFile }")
+  await writeFile(activationPath, activation)
+  await writeFile(join(lib, 'rsi-linux-native-resources.js'), `
+import { appendFile, readFile, rm } from 'node:fs/promises';import { existsSync } from 'node:fs';import { join } from 'node:path';import { createHash } from 'node:crypto';
+import { relocateLinuxRsiNativeBase, openLinuxRsiNativeRelocatedBaseAt, inspectLinuxRsiNativeBaseAt as inspect } from './rsi-linux-native-relocation.js';
+const home=${JSON.stringify(f.dshHome)},log=${JSON.stringify(nativeLog)};
+const record=async value=>appendFile(log,JSON.stringify(value)+'\\n');
+export async function freezeLinuxRuntimeSource(){return {manifests:[{path:'pnpm-lock.yaml',bytes:Buffer.from('lock')}]}}
+export async function inspectLinuxRsiNativeBaseAt(input){await record({action:'inspect',...input});return inspect({...input,logicalHome:home})}
+export async function stageLinuxRsiPreOwnerNativeResources(input){
+ const originalBackend=existsSync(join(home,'rsi-linux-runtimes',input.profile))?'linux-native':'docker';
+ await record({action:'stage-request',physicalHome:input.stagePhysicalHome,transactionPresent:existsSync(home+'.dsh-enhanced-transaction')});
+ if(process.env.LIFECYCLE_NATIVE_RESOURCE_FAILURE==='stage')throw new Error('fixture candidate native staging failed');
+ for(const kind of ['rsi-builds','rsi-linux-runtimes','rsi-release-builds'])await rm(join(input.stagePhysicalHome,kind,input.profile),{recursive:true,force:true});
+ const relocation=await relocateLinuxRsiNativeBase({sourceHome:join(input.preparationRoot,'home'),physicalHome:input.stagePhysicalHome,logicalHome:home,profile:input.profile,existingLogicalHome:home});
+ const proof={schemaVersion:1,backend:'linux-native',purpose:'pre-owner-base',logicalHome:home,physicalHome:input.stagePhysicalHome,profile:input.profile,
+  preparationDigest:createHash('sha256').update(await readFile(join(input.preparationRoot,'receipt.json'))).digest('hex'),cohortDigest:'c'.repeat(64),originalBackend,relocation};
+ await record({action:'staged',proof,transactionPresent:existsSync(home+'.dsh-enhanced-transaction')});return {cohort:{},proof};
+}
+export async function verifyLinuxRsiPreOwnerNativeResources({proof,physicalHome}){
+ // The fake namespace changes logical path spellings in its JSON transport.
+ // Undo those aliases only; dev/ino, physical paths and the genuine seal are never rewritten.
+ const relocation=structuredClone(proof.relocation),alias=relocation.logicalHome;
+ relocation.logicalHome=home;for(const e of relocation.elements)if(e.logicalPath===alias||e.logicalPath.startsWith(alias+'/'))e.logicalPath=home+e.logicalPath.slice(alias.length);
+ await record({action:'verify',physicalHome,proofPhysicalHome:proof.physicalHome});await openLinuxRsiNativeRelocatedBaseAt(relocation,physicalHome);
+}
+`)
+  return { ...f, nativeLog, originalNative, primitive,
+    nativeEvents: async () => (await readFile(nativeLog, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>),
+  }
+}
+
 // Production preparation deliberately excludes arbitrary inherited variables.
 // The deterministic pnpm fixture reads its synthetic controls from its own
 // fixture file, independently of that restricted production environment.
@@ -2386,6 +2508,7 @@ export async function verifyScannerRetirementPersistence({plan,completion}){awai
 
 function lifecycleEnvironment(dshHome: string, fakeBin: string, options: LifecycleRunOptions = {}) {
   return {
+    LIFECYCLE_NATIVE_RESOURCE_FAILURE: options.nativeResourceFailure ?? '',
     LIFECYCLE_CANDIDATE_FAILURE: options.candidateFailure ?? '',
     LIFECYCLE_PREPARED_RECEIPT_PATH: join(dirname(dshHome), 'prepared-update', 'receipt.json'),
     PATH: `${fakeBin}:${process.env.PATH ?? ''}`, DSH_HOME: dshHome, NODE_ENV: 'test',
@@ -11408,6 +11531,125 @@ exit 7
   })
 })
 
+
+describe.skipIf(process.platform !== 'linux')('pre-owner native base entry', () => {
+  test.each([false, true])('upgrades originalNative=%s with real base identities and a distinct formal resource proof', async originalNative => {
+    const f = await nativePreOwnerLifecycleFixture({ originalNative })
+    const result = runPreOwnerLifecycle(f, 'local-service-upgrade')
+    expect(result.status, result.stderr).toBe(0)
+    const family = await f.primitive.inspectLinuxRsiNativeBaseAt({ logicalHome: f.dshHome, physicalHome: f.dshHome, profile: 'web' })
+    expect(family.runtime.sourceCommit).toBe('2'.repeat(40))
+    expect(existsSync(join(f.dshHome, 'rsi-builds/web'))).toBe(false)
+    const stages = (await f.nativeEvents()).filter(event => event.action === 'staged') as Array<{
+      action: string; transactionPresent: boolean; proof: { physicalHome: string; originalBackend: string;
+        relocation: { sourceHome: string; elements: Array<{ name: string; ino: number; dev: number }> } }
+    }>
+    const formal = stages.find(event => event.proof.physicalHome === f.dshHome + '.dsh-enhanced-transaction/staged-home')!
+    const preview = stages.find(event => event.proof.physicalHome.includes('.dsh-local-candidate-'))!
+    expect(formal).toBeDefined(); expect(preview).toBeDefined()
+    expect(preview.transactionPresent).toBe(false); expect(formal.transactionPresent).toBe(true)
+    expect(formal.proof.originalBackend).toBe(originalNative ? 'linux-native' : 'docker')
+    expect(formal.proof.relocation.sourceHome).toBe(join(f.preparationRoot, 'home'))
+    const actual = await lstat(join(f.dshHome, 'rsi-linux-runtimes/web/runtime'))
+    expect(formal.proof.relocation.elements.find(item => item.name === 'runtime')).toMatchObject({ ino: actual.ino, dev: actual.dev })
+    expect(preview.proof.relocation.elements.find(item => item.name === 'runtime')!.ino).not.toBe(actual.ino)
+    expect((await f.nativeEvents()).filter(event => event.action === 'inspect')
+      .some(event => String(event.physicalHome).includes('.dsh-local-source-preview-'))).toBe(false)
+    const calls = await readLifecycleSystemdLog(f.systemdLog)
+    expect(calls.some(call => call.includes('stop'))).toBe(true)
+    expect(calls.some(call => call.includes('start'))).toBe(true)
+    expect(await readFile(join(f.dshHome, 'sessions/owner-session.jsonl'), 'utf8')).toBe('durable-session')
+  }, 60000)
+
+  test.each(['mixed', 'original-inode', 'stage'] as const)('rejects native %s before service mutation', async fault => {
+    const f = await nativePreOwnerLifecycleFixture({ originalNative: true })
+    if (fault === 'mixed') await mkdir(join(f.dshHome, 'rsi-builds/web'), { recursive: true })
+    if (fault === 'original-inode') {
+      const path = join(f.dshHome, 'rsi-linux-runtimes/web/bootstrap.json')
+      const receipt = JSON.parse(await readFile(path, 'utf8'))
+      receipt.runtime.root.ino++
+      delete receipt.receiptDigest
+      receipt.receiptDigest = createHash('sha256').update(JSON.stringify(receipt)).digest('hex')
+      await writeFile(path, JSON.stringify(receipt))
+    }
+    const result = runPreOwnerLifecycle(f, 'local-service-upgrade', fault === 'stage' ? { nativeResourceFailure: 'stage' } : {})
+    expect(result.status, result.stderr).not.toBe(0)
+    expect(result.stderr).toMatch(fault === 'mixed' ? /exactly one build backend/u
+      : fault === 'original-inode' ? /identity differs/u : /candidate native staging failed/u)
+    expect((await readLifecycleSystemdLog(f.systemdLog)).some(call => call.some(arg => ['stop', 'start', 'mask', 'unmask'].includes(arg)))).toBe(false)
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
+    expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
+    expect(await readFile(join(f.dshHome, 'sessions/owner-session.jsonl'), 'utf8')).toBe('durable-session')
+  }, 60000)
+
+  test.each(['after-stage', 'after-packages'] as const)('refuses %s resource drift and restores the same original runtime inode', async nativeResourceFailure => {
+    const f = await nativePreOwnerLifecycleFixture({ originalNative: true })
+    const before = await lstat(join(f.dshHome, 'rsi-linux-runtimes/web/runtime'))
+    const result = runPreOwnerLifecycle(f, 'local-service-upgrade', { nativeResourceFailure })
+    expect(result.status, result.stderr).not.toBe(0)
+    expect(result.stderr).toMatch(/native|runtime|identity|digest/u)
+    expect((await f.nativeEvents()).some(event => event.action === 'drift' && event.phase === nativeResourceFailure)).toBe(true)
+    expect((await readLifecycleSystemdLog(f.systemdLog)).some(call => call.includes('stop'))).toBe(true)
+    const after = await lstat(join(f.dshHome, 'rsi-linux-runtimes/web/runtime'))
+    expect({ dev: after.dev, ino: after.ino }).toEqual({ dev: before.dev, ino: before.ino })
+    expect((await f.primitive.inspectLinuxRsiNativeBaseAt({ logicalHome: f.dshHome, physicalHome: f.dshHome, profile: 'web' })).runtime.sourceCommit).toBe('1'.repeat(40))
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
+  }, 60000)
+
+  test.each([false, true])('recovery authenticates the original inode rather than a copied backup (copy=%s)', async copy => {
+    const f = await nativePreOwnerLifecycleFixture({ originalNative: true })
+    const before = await lstat(join(f.dshHome, 'rsi-linux-runtimes/web/runtime'))
+    const first = runPreOwnerLifecycle(f, 'local-service-upgrade', { killLifecycleAfterOriginalRename: true })
+    expect(first.status).not.toBe(0); expect(existsSync(f.dshHome)).toBe(false)
+    const backup = f.dshHome + '.dsh-enhanced-transaction/original-home'
+    if (copy) {
+      const runtime = join(backup, 'rsi-linux-runtimes/web/runtime'), detached = join(f.root, 'detached-runtime')
+      await cp(runtime, detached, { recursive: true, verbatimSymlinks: true })
+      await rm(runtime, { recursive: true }); await rename(detached, runtime)
+      expect((await lstat(runtime)).ino).not.toBe(before.ino)
+    }
+    const previous = (await readLifecycleSystemdLog(f.systemdLog)).length
+    const result = runPreOwnerLifecycle(f, 'local-service-recover')
+    const snapshots = (await f.nativeEvents()).filter(event => event.action === 'source-snapshot')
+    expect(snapshots.length).toBeGreaterThan(0)
+    for (const snapshot of snapshots) {
+      expect(snapshot.physicalHome).toBe(backup)
+      expect(snapshot.sourceDigest).toBe(snapshot.expectedStateDigest)
+    }
+    if (copy) {
+      expect(result.status, result.stderr).not.toBe(0)
+      expect(result.stderr).toMatch(/identity differs/u)
+      expect((await readLifecycleSystemdLog(f.systemdLog)).slice(previous).some(call => call.includes('start'))).toBe(false)
+      expect(existsSync(f.dshHome)).toBe(false)
+    } else {
+      expect(result.status, result.stderr).toBe(0)
+      const after = await lstat(join(f.dshHome, 'rsi-linux-runtimes/web/runtime'))
+      expect({ dev: after.dev, ino: after.ino }).toEqual({ dev: before.dev, ino: before.ino })
+      await f.primitive.inspectLinuxRsiNativeBaseAt({ logicalHome: f.dshHome, physicalHome: f.dshHome, profile: 'web' })
+      expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
+    }
+  }, 90000)
+
+  test('native memory extension preserves existing finite configuration and business counter values', async () => {
+    const f = await nativePreOwnerLifecycleFixture({ originalNative: true, memoryExtension: true })
+    const configPath = join(f.dshHome, '.lifecycle-dump-config')
+    const rows = parse(await readFile(configPath, 'utf8')) as Array<{ id: string; config?: Record<string, unknown> }>
+    const assistant = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+    assistant.config = { assistantAutomations: { schedulerEnabled: false, maxModelCalls: 7, maxToolCalls: 3 } }
+    await writeFile(configPath, stringify(rows))
+    const counter = new DatabaseSync(f.databasePath)
+    try { counter.exec('CREATE TABLE finite_counter(maximum INTEGER,spent INTEGER); INSERT INTO finite_counter VALUES (2,1)') } finally { counter.close() }
+    const result = runPreOwnerLifecycle(f, 'local-service-upgrade')
+    expect(result.status, result.stderr).toBe(0)
+    const after = parse(await readFile(configPath, 'utf8')) as Array<{ id: string; config?: Record<string, unknown> }>
+    expect(after.find(row => row.id === assistant.id)).toEqual(assistant)
+    expect(after.at(-1)).toEqual(rsiMemoryLearningInitialRow)
+    const db = new DatabaseSync(f.databasePath, { readOnly: true })
+    try { expect(db.prepare('SELECT maximum,spent FROM finite_counter').all()).toEqual([{ maximum: 2, spent: 1 }]) } finally { db.close() }
+    // This is a fixture counter, not acceptance of a real Policy owner ledger.
+    expect((await f.primitive.inspectLinuxRsiNativeBaseAt({ logicalHome: f.dshHome, physicalHome: f.dshHome, profile: 'web' })).runtime.sourceCommit).toBe('2'.repeat(40))
+  }, 60000)
+})
 
 describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source transaction', () => {
   test('rejects external prepared receipt mutation after online candidate resolution without touching services', async () => {

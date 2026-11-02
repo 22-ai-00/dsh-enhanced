@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { closeSync, constants, createReadStream, fstatSync, lstatSync, openSync } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, open, opendir, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, writeFile } from 'node:fs/promises'
-import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { assertLifecycleLocalSourceReplayMetadata, assertLifecycleNpmMetadataSafe, classifyLifecycleScenario, lifecycleWorkspacePaths, prepareLifecycleNpmMetadata, readRsiCoordinatorReceipt, validateRsiCoordinatorPair } from './lifecycle-config.mjs'
@@ -6035,13 +6035,17 @@ async function installUpgradeIntoStage({ sandbox, current, stagedProfile, target
 function validLocalSourceManifest(manifest) {
   const proof = manifest?.localSourceMaintenance
   if (manifest?.version !== LOCAL_SOURCE_MANIFEST_VERSION) return proof === undefined
-  const extended = proof?.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v2'
+  const native = proof?.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v3'
+  const extended = proof?.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v2' || native && proof.extension !== undefined
   return manifest.operation === 'upgrade' && manifest.rsiCoordinator === undefined
     && proof !== null && typeof proof === 'object'
     && exactKeys(proof, ['protocol', 'installer', 'preparationRoot', 'preparationDigest', 'original', 'candidate', 'bwrapExecutable', 'driverDigest',
+      ...(native ? ['candidateBackend', 'nativeResources'] : []),
       ...(extended ? ['extension', 'expectedCandidateSemanticDigest'] : [])])
     && (extended ? proof.extension === 'memory-learning' && validDigest(proof.expectedCandidateSemanticDigest)
-      : proof.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v1')
+      : native || proof.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v1')
+    && (!native || proof.candidateBackend === 'linux-native' && ['docker', 'linux-native'].includes(proof.original?.backend)
+      && (proof.candidate === null ? proof.nativeResources === null : validLocalSourceNativeResources(proof, manifest)))
     && typeof proof.preparationRoot === 'string' && isAbsolute(proof.preparationRoot)
     && resolve(proof.preparationRoot) === proof.preparationRoot && !inside(manifest.homePath, proof.preparationRoot) && !inside(proof.preparationRoot, manifest.homePath)
     && validDigest(proof.preparationDigest) && validDigest(proof.driverDigest)
@@ -6052,13 +6056,43 @@ function validLocalSourceManifest(manifest) {
     && resolve(proof.installer.root) === proof.installer.root && !inside(manifest.homePath, proof.installer.root) && !inside(proof.installer.root, manifest.homePath)
     && typeof proof.installer.dev === 'string' && typeof proof.installer.ino === 'string'
     && validDigest(proof.installer.digest) && Number.isSafeInteger(proof.installer.entries) && proof.installer.entries > 0
-    && validLocalSourceSelection(proof.original)
+    && validLocalSourceSelection(proof.original, native ? proof.original.backend : undefined)
     && (proof.candidate === null ? ['preparing', 'prepared', 'failed', 'service-failed'].includes(manifest.state)
-      : validLocalSourceSelection(proof.candidate))
+      : validLocalSourceSelection(proof.candidate, native ? 'linux-native' : undefined))
 }
-function validLocalSourceSelection(value) {
+function validLocalSourceNativeResources(proof, manifest) {
+  if (typeof manifest.homePath !== 'string' || typeof manifest.profile !== 'string' || typeof proof.preparationRoot !== 'string') return false
+  const resources = proof.nativeResources, relocation = resources?.relocation
+  const kinds = ['runtime', 'release-toolchain', 'release-store', 'release-cache']
+  const physicalHome = join(`${manifest.homePath}${TRANSACTION_SUFFIX}`, 'staged-home')
+  return resources !== null && typeof resources === 'object'
+    && exactKeys(resources, ['schemaVersion', 'backend', 'purpose', 'logicalHome', 'physicalHome', 'profile',
+      'preparationDigest', 'cohortDigest', 'originalBackend', 'relocation'])
+    && resources.schemaVersion === 1 && resources.backend === 'linux-native' && resources.purpose === 'pre-owner-base'
+    && resources.logicalHome === manifest.homePath && resources.physicalHome === physicalHome && resources.profile === manifest.profile
+    && resources.preparationDigest === proof.preparationDigest && validDigest(resources.cohortDigest)
+    && resources.originalBackend === proof.original.backend
+    && relocation !== null && typeof relocation === 'object'
+    && exactKeys(relocation, ['schemaVersion', 'backend', 'purpose', 'profile', 'sourceHome', 'physicalHome', 'logicalHome', 'elements', 'digests'])
+    && relocation.schemaVersion === 1 && relocation.backend === 'linux-native' && relocation.purpose === 'pre-owner-base'
+    && relocation.profile === manifest.profile && relocation.logicalHome === manifest.homePath && relocation.physicalHome === physicalHome
+    && relocation.sourceHome === join(proof.preparationRoot, 'home')
+    && !inside(manifest.homePath, relocation.sourceHome) && !inside(relocation.sourceHome, manifest.homePath)
+    && exactKeys(relocation.digests, ['runtime', 'release', 'relocation']) && Object.values(relocation.digests).every(validDigest)
+    && Array.isArray(relocation.elements) && relocation.elements.length === kinds.length
+    && new Set(relocation.elements.map(item => item?.name)).size === kinds.length
+    && relocation.elements.every(item => item !== null && typeof item === 'object'
+      && exactKeys(item, ['name', 'logicalPath', 'physicalPath', 'dev', 'ino', 'sha256', 'entries', 'bytes'])
+      && kinds.includes(item.name) && validDigest(item.sha256)
+      && ['dev', 'ino', 'entries', 'bytes'].every(key => Number.isSafeInteger(item[key]) && item[key] >= 0)
+      && item.logicalPath === join(manifest.homePath, item.name === 'runtime' ? 'rsi-linux-runtimes' : 'rsi-release-builds',
+        manifest.profile, item.name === 'runtime' ? 'runtime' : item.name.slice('release-'.length))
+      && item.physicalPath === join(physicalHome, relative(manifest.homePath, item.logicalPath)))
+}
+function validLocalSourceSelection(value, backend) {
   return value !== null && typeof value === 'object'
-    && exactKeys(value, ['mode', 'sourceDigest', 'resources', 'metadata', 'configDigests', 'rawConfiguration'])
+    && exactKeys(value, ['mode', 'sourceDigest', 'resources', 'metadata', 'configDigests', 'rawConfiguration', ...(backend === undefined ? [] : ['backend'])])
+    && (backend === undefined || ['docker', 'linux-native'].includes(backend) && value.backend === backend)
     && value.mode === 'pre-owner' && validDigest(value.sourceDigest)
     && exactKeys(value.rawConfiguration, ['profiles', 'files'])
     && Array.isArray(value.rawConfiguration.profiles) && value.rawConfiguration.profiles.length > 0
@@ -6067,7 +6101,8 @@ function validLocalSourceSelection(value) {
     && exactKeys(value.rawConfiguration.files, ['cordis.yml', 'cordis.patch.yml', ...value.rawConfiguration.profiles.flatMap(profile => ['cordis.yml', 'cordis.patch.yml'].map(name => `profiles/${profile}/${name}`))])
     && Object.values(value.rawConfiguration.files).every(digest => digest === null || validDigest(digest))
     && isDeepStrictEqual(Object.keys(value.configDigests ?? {}).sort(), [...value.rawConfiguration.profiles].sort())
-    && exactKeys(value.resources, ['rsi-sources', 'rsi-local-cohorts', 'rsi-builds', 'rsi-release-builds', 'rsi-authorities', 'rsi-authority-runtimes'])
+    && exactKeys(value.resources, ['rsi-sources', 'rsi-local-cohorts', backend === 'linux-native' ? 'rsi-linux-runtimes' : 'rsi-builds',
+      'rsi-release-builds', 'rsi-authorities', 'rsi-authority-runtimes'])
     && Object.values(value.resources).every(validDigest)
     && exactKeys(value.metadata, ['package.json', 'cordis.patch.yml', 'pnpm-workspace.yaml', 'pnpm-lock.yaml'])
     && Object.values(value.metadata).every(validDigest)
@@ -6804,7 +6839,9 @@ async function localSourceSandbox(context, action, input, pnpmStore, packageCach
 }
 async function localSourcePhysicalProof(home, profile) {
   const resources = {}
-  for (const kind of ['rsi-sources', 'rsi-local-cohorts', 'rsi-builds', 'rsi-release-builds', 'rsi-authorities', 'rsi-authority-runtimes']) {
+  const helper = await localSourceHelper()
+  const backend = await helper.localSourceResourceBackend({ homePath: await realpath(home), profile })
+  for (const kind of helper.localSourceResourceKinds(backend)) {
     resources[kind] = await profileTreeDigest(join(home, kind, profile), '', 256 * 1024 * 1024)
   }
   const metadata = {}
@@ -6817,15 +6854,23 @@ async function localSourcePhysicalProof(home, profile) {
     if (!sameRegularFileIdentity(await lstat(path), identity(entry))) fail('local source metadata changed during read')
     metadata[name] = sha256(contents)
   }
-  return { resources, metadata, packages: await profileTreeDigest(join(home, 'profiles', profile, 'node_modules'), 'node_modules') }
+  return { backend, resources, metadata, packages: await profileTreeDigest(join(home, 'profiles', profile, 'node_modules'), 'node_modules') }
 }
-async function composeLocalSourceSnapshot({ homePath, physicalHome = homePath, profile, proof, dshExecutable, bwrapExecutable, selection }) {
+async function composeLocalSourceSnapshot({ homePath, physicalHome = homePath, profile, proof, dshExecutable, bwrapExecutable, selection, copiedOriginal = false }) {
   const helper = await localSourceHelper()
   // Raw gates precede any native CLI: dump-config may overwrite root YAML.
   const before = await helper.assertLocalSourceRawPreflight({ homePath, physicalHome, profile,
     installer: proof.installer, configurationOnly: physicalHome !== homePath })
   await assertNoMounts(physicalHome)
   await assertSnapshotTreeSafe(physicalHome, homePath, true)
+  const canonicalPhysicalHome = await realpath(physicalHome)
+  if (copiedOriginal && (proof.protocol !== 'dsh-enhanced/pre-owner-source-maintenance/v3' || selection !== 'original'
+    || canonicalPhysicalHome !== join(`${homePath}${TRANSACTION_SUFFIX}`, 'staged-home'))) fail('invalid copied original source snapshot')
+  // A freshly copied original stage retains the original receipt, but has new
+  // runtime inodes. Only this known, pre-mutation stage may compare contents;
+  // its still-live original is authenticated before and after composition.
+  const identityHome = copiedOriginal ? homePath : canonicalPhysicalHome
+  const nativeIdentity = await helper.assertLocalSourceNativeResources({ homePath, physicalHome: identityHome, profile, proof, selection })
   const originalFiles = await localSourcePhysicalProof(physicalHome, profile)
   const scratch = await mkdtemp(join(dirname(homePath), '.dsh-local-source-preview-'))
   const snapshotIdentity = identity(await existingIdentity(scratch))
@@ -6835,25 +6880,31 @@ async function composeLocalSourceSnapshot({ homePath, physicalHome = homePath, p
     if (!isDeepStrictEqual(originalFiles, await localSourcePhysicalProof(stageHome, profile))) fail('local source resource copy changed bytes')
     const result = await localSourceSandbox({ stageHome, homePath, profile, dshExecutable, bwrapExecutable },
       'configs', { proof, homePath, profile, dshPath: dshExecutable })
-    if (selection !== undefined) await localSourceSandbox({ stageHome, homePath, profile, dshExecutable, bwrapExecutable },
-      'verify', { proof, homePath, profile, dshPath: dshExecutable, selection, configs: result.configs })
+    if (selection !== undefined) {
+      const native = proof.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v3'
+      const verified = await localSourceSandbox({ stageHome, homePath, profile, dshExecutable, bwrapExecutable },
+        native ? 'verify-composition' : 'verify', { proof, homePath, profile, dshPath: dshExecutable, selection, configs: result.configs })
+      if (native && !isDeepStrictEqual(verified, { verified: true })) fail('native composition did not verify its frozen selection')
+    }
     if (!isDeepStrictEqual(originalFiles, await localSourcePhysicalProof(stageHome, profile))
       || !isDeepStrictEqual(originalFiles, await localSourcePhysicalProof(physicalHome, profile))) fail('local source resources changed during snapshot verification')
     const after = await helper.assertLocalSourceRawPreflight({ homePath, physicalHome, profile,
       installer: proof.installer, configurationOnly: physicalHome !== homePath })
     if (!isDeepStrictEqual(before, after) || !isDeepStrictEqual(before, result.rawConfiguration)) fail('local source raw configuration changed during snapshot composition')
+    if (!isDeepStrictEqual(nativeIdentity, await helper.assertLocalSourceNativeResources({ homePath,
+      physicalHome: identityHome, profile, proof, selection }))) fail('native source identity changed during snapshot composition')
     return result.configs
   } finally {
     if (!sameIdentity(await lstat(scratch), snapshotIdentity)) fail('local source preview directory ownership changed')
     await rm(scratch, { recursive: true })
   }
 }
-async function assertLocalSourceHome({ manifest, physicalHome, selection, dshExecutable, bwrapExecutable }) {
+async function assertLocalSourceHome({ manifest, physicalHome, selection, dshExecutable, bwrapExecutable, copiedOriginal }) {
   if (manifest.localSourceMaintenance === undefined) return
   const expected = manifest.localSourceMaintenance[selection]
   if (expected === null || expected === undefined) fail('local source transaction lacks selected identity')
   const configs = await composeLocalSourceSnapshot({ homePath: manifest.homePath, physicalHome, profile: manifest.profile,
-    proof: manifest.localSourceMaintenance, dshExecutable, bwrapExecutable, selection })
+    proof: manifest.localSourceMaintenance, dshExecutable, bwrapExecutable, selection, copiedOriginal })
   return configs
 }
 
@@ -7158,7 +7209,8 @@ async function performLifecycle({
     let archivedProfile
     if (operation === 'upgrade') {
       if (localSourceMaintenance !== undefined) {
-        await assertLocalSourceHome({ manifest, physicalHome: stageHome, selection: 'original', dshExecutable, bwrapExecutable })
+        await assertLocalSourceHome({ manifest, physicalHome: stageHome, selection: 'original', dshExecutable, bwrapExecutable,
+          copiedOriginal: manifest.localSourceMaintenance.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v3' })
         const helper = await localSourceHelper()
         // The fd path anchors the transaction, while source/resource APIs must
         // receive a canonical physical Home. Prove both names retain its inode.
@@ -7173,6 +7225,8 @@ async function performLifecycle({
         }
         await assertApiStage()
         const staged = await helper.prepareLocalSourceStage({ homePath, stageHome: canonicalStageHome, profile, proof: manifest.localSourceMaintenance })
+        const candidateMaintenance = manifest.localSourceMaintenance.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v3'
+          ? { ...manifest.localSourceMaintenance, nativeResources: staged.resources } : manifest.localSourceMaintenance
         await assertApiStage()
         const dsh = { path: dshExecutable, pin: { path: dshExecutable, sha256: sha256(await readFile(dshExecutable)), interpreter: null } }
         const alias = await helper.readLocalSourcePnpmStoreAlias({ profilePath: join(canonicalStageHome, 'profiles', profile), storePath: pnpmStore.storePath, installer: manifest.localSourceMaintenance.installer })
@@ -7180,14 +7234,14 @@ async function performLifecycle({
         const packageCaches = await prepareLocalSourcePackageCaches(physicalTransactionRoot, pnpmStore, localSourcePreparation,
           join(canonicalStageHome, 'profiles', profile))
         try {
-          await localSourceSandbox(sandbox, 'packages', { proof: manifest.localSourceMaintenance, homePath, profile, originalCohort: staged.originalCohort, dsh }, pnpmStore, packageCaches)
+          await localSourceSandbox(sandbox, 'packages', { proof: candidateMaintenance, homePath, profile, originalCohort: staged.originalCohort, dsh }, pnpmStore, packageCaches)
         } finally { await packageCaches.dispose() }
         await assertLocalSourceCandidateMetadata(localSourcePreparation, join(canonicalStageHome, 'profiles', profile), { native: true })
         await assertApiStage()
-        await helper.replaceLocalSourceAuthority({ homePath, stageHome: canonicalStageHome, profile, proof: manifest.localSourceMaintenance })
+        await helper.replaceLocalSourceAuthority({ homePath, stageHome: canonicalStageHome, profile, proof: candidateMaintenance })
         await assertApiStage()
-        const candidate = await localSourceSandbox(sandbox, 'verify', { proof: manifest.localSourceMaintenance, homePath, profile, dshPath: dshExecutable, selection: 'candidate' })
-        if (manifest.localSourceMaintenance.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v1') {
+        const candidate = await localSourceSandbox(sandbox, 'verify', { proof: candidateMaintenance, homePath, profile, dshPath: dshExecutable, selection: 'candidate' })
+        if (manifest.localSourceMaintenance.extension === undefined) {
           if (!isDeepStrictEqual(candidate.configDigests, manifest.localSourceMaintenance.original.configDigests)) fail('local source update changed effective configuration')
         } else {
           const originalDigests = manifest.localSourceMaintenance.original.configDigests
@@ -7196,7 +7250,7 @@ async function performLifecycle({
             fail('memory learner changed another effective profile')
           }
         }
-        manifest = await writeManifest(physicalTransactionRoot, { ...manifest, localSourceMaintenance: { ...manifest.localSourceMaintenance, candidate } }, 'prepared')
+        manifest = await writeManifest(physicalTransactionRoot, { ...manifest, localSourceMaintenance: { ...candidateMaintenance, candidate } }, 'prepared')
       } else await installUpgradeIntoStage({ sandbox, current, stagedProfile, targets, npmPreparation, pnpmStore, packageSymlinkWhitelist })
       if (rsiCoordinator !== undefined) {
         const coordinatorContext = { ...sandbox, profile: rsiCoordinator.profile, expectedScenario: 'supervised' }

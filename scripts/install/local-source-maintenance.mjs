@@ -54,6 +54,27 @@ export function readLocalCandidateSourceBuild(api, input) {
     : api.readRsiBuildEnvironment(input)
 }
 const resourceKinds = ['rsi-sources', 'rsi-local-cohorts', 'rsi-builds', 'rsi-release-builds', 'rsi-authorities', 'rsi-authority-runtimes']
+const nativeProtocol = 'dsh-enhanced/pre-owner-source-maintenance/v3'
+export const localSourceResourceKinds = backend => {
+  if (!['docker', 'linux-native'].includes(backend)) fail('unknown source resource backend')
+  return resourceKinds.map(kind => backend === 'linux-native' && kind === 'rsi-builds' ? 'rsi-linux-runtimes' : kind)
+}
+
+/** Layout discrimination is not runtime authentication. Callers selecting a
+ * real native Home must additionally inspect its recorded runtime identity. */
+export async function localSourceResourceBackend({ homePath, profile }) {
+  if (!exactPath(homePath) || !PROFILE.test(profile)) fail('invalid source resource Home')
+  await trustedDirectory(homePath)
+  const native = await optional(join(homePath, 'rsi-linux-runtimes', profile))
+  const docker = await optional(join(homePath, 'rsi-builds', profile))
+  if (!!native === !!docker) fail('source resources must contain exactly one build backend')
+  if (native) {
+    for (const kind of ['rsi-creation-builds', 'rsi-linux-repository-runtimes', 'rsi-linux-creation-builds']) {
+      if (await optional(join(homePath, kind, profile))) fail('pre-owner native resources contain an owner build family')
+    }
+  }
+  return native ? 'linux-native' : 'docker'
+}
 const ownerFields = new Set(['sourceJobs', 'sourceApprovals', 'sourceReleases', 'sourceReleaseExecution',
   'sourceAdoptions', 'sourceBuild', 'runtimeObserver', 'foregroundDeployments', 'taskObservations', 'adoptionCoordinator',
   'memoryReviews', 'automaticLearning'])
@@ -395,12 +416,13 @@ async function effectiveConfigs(home, dshPath) {
   }
   return result
 }
-async function treeDigest(root) {
+async function treeDigest(root, linkRoots = []) {
   const entries = []
   let size = 0
   const visit = async path => {
     const item = await lstat(path)
-    if (entries.length > 200_000 || item.uid !== process.getuid() || (item.mode & 0o022)) fail(`unsafe bound source resource: ${path}`)
+    if (entries.length > 200_000 || item.uid !== process.getuid()
+      || !item.isSymbolicLink() && (item.mode & 0o022)) fail(`unsafe bound source resource: ${path}`)
     if (item.isDirectory()) {
       entries.push([relative(root, path), 'directory', item.mode & 0o777])
       for (const name of (await readdir(path)).sort()) await visit(join(path, name))
@@ -408,10 +430,71 @@ async function treeDigest(root) {
       size += item.size
       if (size > 4_294_967_296) fail('bound source resource exceeds size limit')
       entries.push([relative(root, path), 'file', item.mode & 0o777, hash(await bytes(path))])
+    } else if (item.isSymbolicLink() && item.nlink === 1) {
+      const linkRoot = linkRoots.find(allowed => inside(allowed, path))
+      const target = await readlink(path)
+      if (!linkRoot || isAbsolute(target) || !inside(linkRoot, resolve(dirname(path), target))
+        || !inside(linkRoot, await realpath(path))) fail(`unsafe native resource link: ${path}`)
+      const after = await lstat(path)
+      if (!after.isSymbolicLink() || !isDeepStrictEqual(
+        [item.dev, item.ino, item.uid, item.mode, item.nlink, item.size, item.mtimeMs, item.ctimeMs],
+        [after.dev, after.ino, after.uid, after.mode, after.nlink, after.size, after.mtimeMs, after.ctimeMs])) fail(`native resource link changed: ${path}`)
+      entries.push([relative(root, path), 'link', target])
     } else fail(`bound source resource is not a physical file/directory: ${path}`)
   }
   await visit(root)
   return digest(entries)
+}
+
+/** Authenticate a real Home, including a renamed backup or staged candidate.
+ * This never accepts a copied runtime's new inode. Configuration-composition
+ * copies use a separate content-only operation and cannot produce this proof. */
+export async function assertLocalSourceNativeResources(input) {
+  const { homePath, profile, proof, selection: selected } = input
+  const signal = AbortSignal.any([input.signal ?? new AbortController().signal, AbortSignal.timeout(600_000)])
+  signal.throwIfAborted()
+  const physicalHome = input.physicalHome ?? homePath
+  const backend = await localSourceResourceBackend({ homePath: physicalHome, profile })
+  const expected = selected === undefined ? undefined : proof?.[selected]
+  if (proof?.protocol === nativeProtocol && expected && backend !== expected.backend) fail('selected source resource backend changed')
+  if (backend !== 'linux-native') return { backend }
+  const api = await load(proof?.installer ?? input.installer)
+  if (typeof api.inspectLinuxRsiNativeBaseAt !== 'function' || typeof api.freezeLinuxRuntimeSource !== 'function') {
+    fail('reviewed installer cannot authenticate pre-owner native resources')
+  }
+  await assertHomeOwnerAbsence(physicalHome, profile)
+  const sourceInput = { logicalHome: homePath, physicalHome, profile, signal }
+  // After the original rename, the live pathname is absent. Only the journal's
+  // original backup may authenticate against its already frozen source digest;
+  // ordinary stage reads still compare to the live installation's Host anchor.
+  const recoveringOriginal = proof?.protocol === nativeProtocol && selected === 'original' && expected
+    && physicalHome === join(`${homePath}.dsh-enhanced-transaction`, 'original-home') && !await optional(homePath)
+  if (recoveringOriginal && typeof api.readRsiSourceMaintenanceSnapshot !== 'function') {
+    fail('reviewed installer cannot authenticate the frozen original source snapshot')
+  }
+  const live = recoveringOriginal
+    ? await api.readRsiSourceMaintenanceSnapshot({ ...sourceInput, expectedStateDigest: expected.sourceDigest })
+    : await api.readRsiSourceMaintenance(sourceInput)
+  await assertPreOwnerAuthorityState(physicalHome, profile, live.records)
+  const family = await api.inspectLinuxRsiNativeBaseAt({ logicalHome: homePath, physicalHome, profile, signal })
+  const source = await api.freezeLinuxRuntimeSource({ kind: 'git-object',
+    repository: join(physicalHome, 'rsi-sources', profile, 'checkout'),
+    commit: live.workspace.sourceCommit, version: live.workspace.version, signal })
+  const receipt = JSON.parse((await bytes(join(physicalHome, 'rsi-linux-runtimes', profile, 'bootstrap.json'), 4_194_304)).toString('utf8'))
+  const manifests = Object.fromEntries(source.manifests.map(item => [item.path, hash(item.bytes)]))
+  if (family.runtime.sourceCommit !== live.workspace.sourceCommit || family.release.sourceCommit !== live.workspace.sourceCommit
+    || family.runtime.lockSha256 !== manifests['pnpm-lock.yaml'] || !isDeepStrictEqual(receipt.manifestHashes, manifests)) {
+    fail('native runtime resources do not match the authenticated source')
+  }
+  if (proof?.protocol === nativeProtocol && selected === 'candidate') {
+    if (!proof.nativeResources || typeof api.verifyLinuxRsiPreOwnerNativeResources !== 'function') fail('native candidate lacks its staged resource proof')
+    if (proof.nativeResources.logicalHome !== homePath || proof.nativeResources.profile !== profile
+      || proof.nativeResources.preparationDigest !== proof.preparationDigest
+      || proof.nativeResources.originalBackend !== proof.original.backend) fail('native candidate resource proof binding changed')
+    await api.verifyLinuxRsiPreOwnerNativeResources({ proof: proof.nativeResources, physicalHome, signal })
+  }
+  signal.throwIfAborted()
+  return { backend, family }
 }
 async function assertHomeOwnerAbsence(home, profile) {
   for (const kind of ['rsi-authorities', 'rsi-coordinators']) {
@@ -442,8 +525,14 @@ async function selection(input, api, verifyPackages = true) {
   await assertHomeOwnerAbsence(physicalHome, profile)
   const live = await api.readRsiSourceMaintenance({ logicalHome, physicalHome, profile })
   await assertPreOwnerAuthorityState(physicalHome, profile, live.records)
+  const backend = input.native === true ? await localSourceResourceBackend({ homePath: physicalHome, profile }) : 'docker'
   const resources = {}
-  for (const kind of resourceKinds) resources[kind] = await treeDigest(join(physicalHome, kind, profile))
+  for (const kind of localSourceResourceKinds(backend)) {
+    const root = join(physicalHome, kind, profile)
+    const linkRoots = backend !== 'linux-native' ? [] : kind === 'rsi-linux-runtimes' ? [join(root, 'runtime')]
+      : kind === 'rsi-release-builds' ? ['toolchain', 'store', 'cache'].map(name => join(root, name)) : []
+    resources[kind] = await treeDigest(root, linkRoots)
+  }
   const metadata = {}
   for (const name of ['package.json', 'cordis.patch.yml', 'pnpm-workspace.yaml', 'pnpm-lock.yaml']) {
     metadata[name] = hash(await bytes(join(physicalHome, 'profiles', profile, name), 16_777_216))
@@ -457,7 +546,7 @@ async function selection(input, api, verifyPackages = true) {
     const cohort = await api.readRsiLocalCohort({ dshHome: logicalHome, profile })
     await api.verifyRsiLocalInstalledPackages({ cohort, profilePath: join(logicalHome, 'profiles', profile), bundles: cohort.bundles })
   }
-  return { mode: 'pre-owner', sourceDigest: digest({ anchor: live.anchor, records: live.records,
+  return { mode: 'pre-owner', ...(input.native === true ? { backend } : {}), sourceDigest: digest({ anchor: live.anchor, records: live.records,
     workspace: live.workspace, originalBootstrapDigest: live.originalBootstrapDigest }), resources, metadata, configDigests, rawConfiguration }
 }
 
@@ -465,12 +554,19 @@ export async function preflightLocalSourceMaintenance(input) {
   const installer = input.installer ?? await bindLocalSourceInstaller(input.installerRoot)
   const api = await load(installer)
   const configs = input.configs ?? (await composeLocalSourceConfigs({ ...input, installer })).configs
-  const original = await selection({ ...input, configs, logicalHome: input.homePath, installer }, api)
   const preparation = await api.readRsiLocalUpdateLocked({ dshHome: input.homePath, profile: input.profile, root: input.preparationRoot })
+  const backend = localCandidateBuildBackend(preparation.build?.sourceBuild)
+  if (backend === 'unknown') fail('prepared candidate has no supported build backend')
+  const originalBackend = await localSourceResourceBackend(input)
+  if (originalBackend === 'linux-native' && backend !== 'linux-native') fail('native pre-owner resources cannot downgrade to Docker')
+  const native = backend === 'linux-native'
+  if (native) await assertLocalSourceNativeResources({ ...input, installer })
+  const original = await selection({ ...input, configs, logicalHome: input.homePath, installer, native }, api)
   const extension = preparation.extension
   if (extension !== undefined && extension !== 'memory-learning') fail('unsupported prepared root extension')
   const initialRow = extension ? await memoryLearnerInitialRow(installer) : undefined
-  return { protocol: extension ? 'dsh-enhanced/pre-owner-source-maintenance/v2' : 'dsh-enhanced/pre-owner-source-maintenance/v1',
+  return { protocol: native ? nativeProtocol : extension ? 'dsh-enhanced/pre-owner-source-maintenance/v2' : 'dsh-enhanced/pre-owner-source-maintenance/v1',
+    ...(native ? { candidateBackend: 'linux-native', nativeResources: null } : {}),
     ...(extension ? { extension, expectedCandidateSemanticDigest: expectedMemoryLearningSemanticDigest(
       configs[input.profile], api.yaml, initialRow) } : {}),
     installer, preparationRoot: input.preparationRoot, preparationDigest: preparation.receiptDigest, original, candidate: null }
@@ -480,6 +576,9 @@ async function preparedCandidate(input) {
   const preparation = await api.readRsiLocalUpdateLocked({ dshHome: input.homePath, profile: input.profile, root: input.proof.preparationRoot })
   if (preparation.receiptDigest !== input.proof.preparationDigest
     || preparation.extension !== input.proof.extension) fail('prepared candidate changed')
+  if (input.proof.protocol === nativeProtocol && localCandidateBuildBackend(preparation.build?.sourceBuild) !== 'linux-native') {
+    fail('prepared native candidate backend changed')
+  }
   await assertLocalSourceInstaller(input.proof.installer)
   return { api, preparation }
 }
@@ -495,8 +594,12 @@ export async function prepareLocalSourceStage(input) {
   const { api, preparation } = await preparedCandidate(input)
   const live = await api.readRsiSourceMaintenance({ logicalHome: input.homePath, physicalHome: input.homePath, profile: input.profile })
   const originalCohort = await api.readRsiLocalCohort({ dshHome: input.homePath, profile: input.profile })
-  const resource = await api.stageRsiLocalUpdateResources({ logicalHome: input.homePath, stagePhysicalHome: input.stageHome,
+  const native = input.proof.protocol === nativeProtocol
+  const stage = native ? api.stageLinuxRsiPreOwnerNativeResources : api.stageRsiLocalUpdateResources
+  if (typeof stage !== 'function') fail('reviewed installer cannot stage the selected pre-owner backend')
+  const resource = await stage({ logicalHome: input.homePath, stagePhysicalHome: input.stageHome,
     profile: input.profile, preparationRoot: input.proof.preparationRoot })
+  if (native && resource.proof.originalBackend !== input.proof.original.backend) fail('original native transition backend changed')
   const record = await api.produceRsiLocalSourceMaintenance({ logicalHome: input.homePath, profile: input.profile,
     preparation, stagePhysicalHome: input.stageHome, live, nextCohort: resource.cohort, maintenanceMode: 'pre-owner' })
   await api.applyRsiSourceMaintenanceInStage({ logicalHome: input.homePath, physicalHome: input.stageHome, profile: input.profile,
@@ -512,19 +615,35 @@ export async function replaceLocalSourceAuthority(input) {
 }
 export async function verifyLocalSourceSelection(input) {
   const api = await load(input.proof.installer)
+  if (input.proof.protocol === nativeProtocol) await assertLocalSourceNativeResources(input)
+  return verifySelectionContent(input, api)
+}
+async function verifySelectionContent(input, api) {
   const configs = input.configs ?? (await composeLocalSourceConfigs(input)).configs
-  const selected = await selection({ logicalHome: input.homePath, physicalHome: input.physicalHome, profile: input.profile, dshPath: input.dshPath, installer: input.proof.installer, configs }, api, input.physicalHome === undefined)
+  const selected = await selection({ logicalHome: input.homePath, physicalHome: input.physicalHome, profile: input.profile,
+    dshPath: input.dshPath, installer: input.proof.installer, configs, native: input.proof.protocol === nativeProtocol }, api, input.physicalHome === undefined)
   const expected = input.proof[input.selection]
   if (expected && !isDeepStrictEqual(selected, expected)) fail(`${input.selection} source/resource/config identity changed`)
   if (input.selection === 'candidate' && selected.resources['rsi-authorities'] !== input.proof.original.resources['rsi-authorities']) {
     fail('pre-owner authority resources changed during local source update')
   }
-  if (input.proof.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v2' && input.selection === 'candidate') {
+  if (input.proof.extension === 'memory-learning' && input.selection === 'candidate') {
     assertMemoryLearningCandidateConfigs({ configs, original: input.proof.original, targetProfile: input.profile,
       expectedCandidateSemanticDigest: input.proof.expectedCandidateSemanticDigest }, api.yaml,
     await memoryLearnerInitialRow(input.proof.installer))
   }
   return selected
+}
+
+/** A configuration-composition copy is not a runtime identity proof. It may
+ * only compare to an already frozen selection; it never returns a selection
+ * that the transaction could adopt as its candidate. */
+export async function verifyLocalSourceComposition(input) {
+  if (input.proof?.protocol !== nativeProtocol || !['original', 'candidate'].includes(input.selection)
+    || !input.proof[input.selection]) fail('composition requires a frozen native maintenance selection')
+  const api = await load(input.proof.installer)
+  await verifySelectionContent(input, api)
+  return { verified: true }
 }
 export async function localSourcePreviewOverlay(input) {
   const api = await load(input.proof.installer)
@@ -730,6 +849,7 @@ async function main() {
   else if (action === 'candidate-install') result = await installLocalSourceCandidatePackages(input)
   else if (action === 'configs') result = await composeLocalSourceConfigs(input)
   else if (action === 'verify') result = await verifyLocalSourceSelection(input)
+  else if (action === 'verify-composition') result = await verifyLocalSourceComposition(input)
   else if (action === 'preview-overlay') result = await localSourcePreviewOverlay(input)
   else if (action === 'assert-preview') result = await assertLocalSourcePreview(input)
   else fail('unknown sandbox operation')
