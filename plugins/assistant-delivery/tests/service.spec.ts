@@ -1808,68 +1808,93 @@ describe('assistant delivery Cordis service', () => {
   })
 
   test('scopes permission reply budget and Outbox idempotency by Inbox across accounts sharing an event id', async () => {
-    const { ctx, service } = await harness(true, { permissionReplyBudget: 2 })
-    const secondPrincipal = { ...principal, account: 'bot-2' }
-    const secondConversation = { ...conversation, account: 'bot-2', chat: 'oc_owner_bot_2' }
-    const challenge = service.issuePairing('test', principal)
-    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
-    service.registerInboundRuntime({
-      createSession: async ({ envelope: input }) => ({
-        sessionId: `delivery-session-${input.account}`,
-        workspace: '/work/alpha',
-        agentPreset: 'primary',
-        policyRef: 'owner-dm',
-      }),
-      process: async () => ({ outcome: 'processed' }),
-    })
-    const eventId = 'evt-shared-permission-budget'
-    const envelopes = [
-      { ...envelope, eventId, kind: 'command' as const, text: '/permissions' },
-      {
-        ...envelope,
-        account: secondPrincipal.account,
-        eventId,
-        principal: secondPrincipal,
-        conversation: secondConversation,
-        kind: 'command' as const,
-        text: '/permissions',
-      },
-    ]
-    const store = runtimeStoreFromService(service)
-    const internal = service as unknown as {
-      deliveryStore: { handoffOwner(input: typeof principal): unknown }
-      authorizePermissionReply(binding: ConversationBinding, input: InboundEnvelope): boolean
-      replyCommand(binding: ConversationBinding, input: {
-        idempotencyKey: string
-        text: string
-        replyToEventId: string
-      }): { intent: { idempotencyKey: string } }
-    }
-    const accepted: Awaited<ReturnType<typeof service.acceptInbound>>[] = []
-    const replies: { intent: { idempotencyKey: string } }[] = []
-    for (const [index, input] of envelopes.entries()) {
-      if (index === 1) internal.deliveryStore.handoffOwner(secondPrincipal)
-      accepted.push(await service.acceptInbound(input))
-      const binding = store.getActiveBinding(input.conversation)!
-      expect(internal.authorizePermissionReply(binding, input)).toBe(true)
-      replies.push(internal.replyCommand(binding, {
-        idempotencyKey: `inbound:${eventId}:reply`,
-        text: `permission reply ${index}`,
-        replyToEventId: eventId,
-      }))
-    }
+    // This case exhausts one fixed minute; real asynchronous timers remain active.
+    const now = Date.UTC(2026, 10, 2, 0, 0, 1)
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+    let context: Context | undefined
+    try {
+      const { ctx, service, root } = await harness(true, { permissionReplyBudget: 2 })
+      context = ctx
+      const secondPrincipal = { ...principal, account: 'bot-2' }
+      const secondConversation = { ...conversation, account: 'bot-2', chat: 'oc_owner_bot_2' }
+      const challenge = service.issuePairing('test', principal)
+      service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+      service.registerInboundRuntime({
+        createSession: async ({ envelope: input }) => ({
+          sessionId: `delivery-session-${input.account}`,
+          workspace: '/work/alpha',
+          agentPreset: 'primary',
+          policyRef: 'owner-dm',
+        }),
+        process: async () => ({ outcome: 'processed' }),
+      })
+      const eventId = 'evt-shared-permission-budget'
+      const envelopes = [
+        { ...envelope, eventId, kind: 'command' as const, text: '/permissions' },
+        {
+          ...envelope,
+          account: secondPrincipal.account,
+          eventId,
+          principal: secondPrincipal,
+          conversation: secondConversation,
+          kind: 'command' as const,
+          text: '/permissions',
+        },
+      ]
+      const store = runtimeStoreFromService(service)
+      const internal = service as unknown as {
+        deliveryStore: { handoffOwner(input: typeof principal): unknown }
+        authorizePermissionReply(binding: ConversationBinding, input: InboundEnvelope): boolean
+        replyCommand(binding: ConversationBinding, input: {
+          idempotencyKey: string
+          text: string
+          replyToEventId: string
+        }): { intent: { idempotencyKey: string } }
+      }
+      const accepted: Awaited<ReturnType<typeof service.acceptInbound>>[] = []
+      const replies: { intent: { idempotencyKey: string } }[] = []
+      for (const [index, input] of envelopes.entries()) {
+        if (index === 1) internal.deliveryStore.handoffOwner(secondPrincipal)
+        accepted.push(await service.acceptInbound(input))
+        const binding = store.getActiveBinding(input.conversation)!
+        expect(internal.authorizePermissionReply(binding, input)).toBe(true)
+        replies.push(internal.replyCommand(binding, {
+          idempotencyKey: `inbound:${eventId}:reply`,
+          text: `permission reply ${index}`,
+          replyToEventId: eventId,
+        }))
+      }
 
-    expect(replies.map(reply => reply.intent.idempotencyKey)).toEqual([
-      `inbound:${accepted[0]!.inboxId}:reply`,
-      `inbound:${accepted[1]!.inboxId}:reply`,
-    ])
-    const exhausted = {
-      ...envelopes[1]!,
-      eventId: 'evt-permission-budget-exhausted',
+      expect(replies.map(reply => reply.intent.idempotencyKey)).toEqual([
+        `inbound:${accepted[0]!.inboxId}:reply`,
+        `inbound:${accepted[1]!.inboxId}:reply`,
+      ])
+      const exhausted = {
+        ...envelopes[1]!,
+        eventId: 'evt-permission-budget-exhausted',
+      }
+      await service.acceptInbound(exhausted)
+      expect(internal.authorizePermissionReply(store.getActiveBinding(secondConversation)!, exhausted)).toBe(false)
+      const periods = () => {
+        const db = new DatabaseSync(join(root, 'policy.sqlite'), { readOnly: true })
+        try {
+          return db.prepare(`SELECT period_start, period_ms, limit_amount, reserved_amount, spent_amount
+            FROM budget_periods WHERE scope = 'global' AND metric = 'replies' ORDER BY period_start`).all()
+        } finally { db.close() }
+      }
+      expect(periods()).toEqual([expect.objectContaining({ period_ms: 60_000, limit_amount: 2,
+        reserved_amount: 0, spent_amount: 2 })])
+      clock.mockReturnValue(now + 60_000)
+      const renewed = { ...exhausted, eventId: 'evt-permission-budget-next-period' }
+      await service.acceptInbound(renewed)
+      expect(internal.authorizePermissionReply(store.getActiveBinding(secondConversation)!, renewed)).toBe(true)
+      expect(periods()).toEqual([
+        expect.objectContaining({ period_ms: 60_000, limit_amount: 2, reserved_amount: 0, spent_amount: 2 }),
+        expect.objectContaining({ period_ms: 60_000, limit_amount: 2, reserved_amount: 0, spent_amount: 1 }),
+      ])
+    } finally {
+      try { await context?.fiber.restart() } finally { clock.mockRestore() }
     }
-    await service.acceptInbound(exhausted)
-    expect(internal.authorizePermissionReply(store.getActiveBinding(secondConversation)!, exhausted)).toBe(false)
-    await ctx.fiber.restart()
   })
 
   test('scopes ordinary Agent replies by Inbox across accounts sharing an event id', async () => {
