@@ -15,6 +15,8 @@ import type {
   PeerPolicyService,
 } from './peers.js'
 import { settleOutcomes as runSettlement, type SettlementResult, type ThreadResolution } from './settlement.js'
+import { WorkItemOwnerRecall, type OwnerWorkItemExecution, type OwnerWorkItemListInput, type OwnerWorkItemRecallInput } from './owner-recall.js'
+export type { OwnerWorkItemExecution, OwnerWorkItemListInput, OwnerWorkItemRecallInput, OwnerWorkItemSummary } from './owner-recall.js'
 import { WorkItemStore } from './store.js'
 import {
   WorkItemSignalIntake,
@@ -210,9 +212,14 @@ export class AssistantWorkItemsService extends Service {
   private workItemsSchedulerLastWakeAt: number | null = null
   private workItemsSchedulerLastError: string | null = null
 
+  private readonly workItemsOwnerReads: WorkItemOwnerRecall
+
   constructor(ctx: Context, input: Config) {
     super(ctx, 'assistantWorkItems')
     this.workItemsConfig = Object.freeze(normalizeConfig(input, Date.now()))
+    this.workItemsOwnerReads = new WorkItemOwnerRecall({ config: this.workItemsConfig,
+      store: () => this.workItemsClosed ? undefined : this.workItemsComponents?.store,
+      delivery: () => this.workItemsDelivery(), policy: () => this.workItemsPolicy() })
     // The Evaluation outbox is service state, not ledger state: it exists even
     // for a disabled intake so `assistant-evaluation` can bind a generation,
     // and it never opens SQLite until an export pass actually runs.
@@ -348,8 +355,15 @@ export class AssistantWorkItemsService extends Service {
 
   get diagnosisEnabled(): boolean { return this.workItemsConfig.diagnosis !== undefined }
 
+  get ownerRecallEnabled(): boolean { return this.workItemsConfig.ownerRecall?.enabled === true }
+
+  /** Foreground-only historical reads, independent of occurrence/worker authority. */
+  listForOwner = (execution: OwnerWorkItemExecution, input: OwnerWorkItemListInput) => this.workItemsOwnerReads.list(execution, input)
+  recallForOwner = (execution: OwnerWorkItemExecution, input: OwnerWorkItemRecallInput) => this.workItemsOwnerReads.recall(execution, input)
+
   /** Bounded admission check; no work-item recovery, writes, dispatch or model. */
   preauthorizeTool(execution: ToolExecution): boolean {
+    if (execution.name === 'work_item_list' || execution.name === 'work_item_recall') return this.workItemsOwnerReads.preauthorize(execution)
     try {
       if (execution.signal.aborted) return false
       this.workItemsCheckToolExecution(execution, true)

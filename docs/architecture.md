@@ -78,6 +78,8 @@ Delivery schema 24 增加自然任务反馈日志：同一 owner 对原普通前
 Growth 的可选 `usageLearning` 使用 Evaluation canonical feed 与 Delivery owner 来源校验，把真实前台结果转成持久复盘意图；Delivery schema 23 的普通任务执行回执独立于验收契约，内置外部渠道运行时捕获实际模型并在资源释放后结束记录，已认证 owner 对具体回复的反馈即可进入 canonical 结果；它只保存消费游标和作业快照，不复制结果账本。Evaluation writer fence 内同步提交游标与意图，原生 Automations 拥有每分钟恢复扫描、一次性作业、执行准入和预算。模型在来源任务实际请求时固定并持久保存，后台恢复不重新读取用户当前模型选择。queued 可恢复，派发后的 unknown 不自动重放；纠正、撤回及 owner 换代在模型/工具边界阻止旧来源继续使用。启用源码轨时，可信失败在 Control Plane schema 16 自动形成带 owner/canonical 来源的私有 gap，自动复盘仅看到本次 gap；源码检查和计划提交持续重验来源，最终写入处于 Evaluation writer fence 内。有限源码审批、发布/独立审查和精确制品采用已接续同一原生作业。Control Plane schema 20 另在目标 Host 通过 Delivery 前台生命周期记录部署归因：共享认证 observer 的 Cordis 采样器，对照已应用 readiness 的签名观测，保存任务开始/完成时的精确运行实例；不改变 Delivery 学习来源摘要。schema 21 的可选 taskObservations 由原生 Automations 按当前 owner 反馈/独立验证结果形成有限任务批次，外部签名器只读持久批次并执行次数/期限/部署授权；最终 Evaluation writer fence 包裹 watch 与批次落账，回滚复用既有物理恢复链。任务组关联不证明工具调用或结果因果；目标 Host 自重启仍需外部协调器继续恢复。
 
 
+WorkItems 的可选 owner recall 将前台任务查询与后台执行权限分开：Delivery 证明当前活人 turn 和精确原生工具调用，Policy 独立授权读取，账本先按 owner lineage、route、workspace/preset 和 worker automation 过滤再分页。同一主人进入较新 Session 代次后可沿任务 ID 和报告 revision 召回历史；该读取不恢复 occurrence、续期或修改执行预算，也不以 worker 自报替代独立结果。现有 worker/diagnosis 合同和 `follows` 关闭语义保持独立。
+
 ## 离线隔离执行
 
 独立验证后创建的工具由 Control Plane 的私有采用账本保存证书、不可变制品和签名使用回执，再以 Cordis 子 Fiber 注册 Host 别名，实际候选代码仍在离线 runner 中执行。显式 `creationCapabilities.retention` 将首次采用的新鲜证书门与采用后的有限使用期分开：v2 回执冻结采用时间和截止，后续调用及重启依靠原账本证据、精确计划/作业摘要和当前 owner/canonical 来源复核；单个创建作业、计划和证书到期或工作树回收不续期，也不重置额度或重放 unknown；原使用授权截止仍是硬门。无此配置的 v1 回执保持原证书到期语义。细节见 [Control Plane](../plugins/plugin-control-plane/README.md)。

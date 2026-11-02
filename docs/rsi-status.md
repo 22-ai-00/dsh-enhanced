@@ -15,9 +15,9 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 ## 本轮交付
 
-`241e2c2e` 修复及时持久完成的 step 被旧执行截止误阻整体验收的问题。完成后的观察重读准确的成功/静止执行记录，保留当前身份、目标、依赖与撤权检查；原执行截止不变，整体验收继续受固定合同/派生期限及单调时钟约束。新观察门不授予后续执行，也不重置预算。原生 Goal 正反例各仅使用三次脚本模型响应、两次工具，独立复核 PASS。
+WorkItems 新增显式开启的主人前台 `work_item_list` / `work_item_recall`：当前认证主人通过 `/new` 后，仍可从持久账本找回历史任务及报告，沿任务 ID、报告修订号与 UTF-8 字节页继续读取。实际 Delivery 人类 turn/原生工具调用证明与独立 `inspect-work-items` 授权共同控制读取；SQL 在分页前过滤完整 owner lineage、route、workspace/preset 和 worker。
 
-`f689ceb6` 仅修复安装器测试夹具对 TMPDIR 的信任与 `/tmp` 隐藏挂载前提，生产 guard、断言、skip 与源码 timeout 不变。Linux 完整定向对照 28 passed，Mac 24 passed；四项 Linux 专用用例在 Mac 按原规则跳过。
+旧任务的过期、撤回和历史结论均保留；读取不重新准入、执行、结算或恢复旧预算。诊断原五工具合同、既有配置摘要和 schema 8 保持兼容。真实 Cordis/NativeWeb/AgentLoop/Delivery/Policy/Automations 集成使用有限本地脚本供应商，覆盖会话切换、报告分页、撤权、后台越界拒绝和账本不变；不代表真实模型收益或外部送达。WorkItems 整包 301 passed、Policy 预授权 50 passed；最终集成断言收紧后 3 passed，类型与零警告 lint 通过，源码及专项独立复核 PASS。本次精确提交的跨平台根检查完成后更新下表。
 
 ## 后续工程与延后验收
 

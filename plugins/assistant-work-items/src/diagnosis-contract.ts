@@ -49,7 +49,11 @@ export function diagnosisToolDigest(schemas: readonly { name: string }[]): strin
   return acceptanceDigest(sorted)
 }
 export function diagnosisConfigurationDigest(config: NormalizedConfig, schemas: readonly { name: string }[]): string {
-  return acceptanceDigest({ config, promptVersion: DIAGNOSIS_PROMPT_VERSION, prompt: DIAGNOSIS_PROMPT, schemas: [...schemas].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0) })
+  // Foreground historical reads confer no diagnosis execution authority. Keep
+  // the existing activation digest unchanged when that separate surface toggles.
+  const executionConfig = { ...config }
+  delete executionConfig.ownerRecall
+  return acceptanceDigest({ config: executionConfig, promptVersion: DIAGNOSIS_PROMPT_VERSION, prompt: DIAGNOSIS_PROMPT, schemas: [...schemas].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0) })
 }
 export interface DiagnosisActivation {
   readonly protocol: 'assistant-work-items/diagnosis-activation/v1'

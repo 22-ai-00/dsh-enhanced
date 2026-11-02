@@ -386,6 +386,22 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
       return { ...required, ...(nextOffset === null ? {} : { nextOffset }) }
     },
   }))
+  if (service.ownerRecallEnabled) {
+    register(defineTool({
+      name: 'work_item_list',
+      description: 'Find earlier or background tasks when the owner asks about them in a new conversation. Returns stable itemIds and a recent worker-report preview; use its revision with work_item_recall to read more. Read only: worker reports are separate from independent outcome, and this grants no execution or retry authority.',
+      parameters: { after: { type: 'string' }, limit: { type: 'integer' } },
+      output: { schema: { type: 'json' as const }, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: renderUntrustedJson('work_item_list', value) }] },
+      async execute(args, exec) { return JSON.parse(JSON.stringify(service.listForOwner({ ...exec, name: 'work_item_list', arguments: args }, args))) },
+    }))
+    register(defineTool({
+      name: 'work_item_recall',
+      description: 'Recall an earlier task by item_id from work_item_list. Without report_revision read the task brief; select a listed report revision to read its conclusion, then follow previousRevision/nextRevision for older/newer reports. Continue text pages using nextOffset as offset (UTF-8 byte offsets). Includes five recent report previews and independent outcome separately; reads no artifact files and grants no execution rights.',
+      parameters: { item_id: { type: 'string', required: true }, report_revision: { type: 'integer' }, offset: { type: 'integer' }, max_bytes: { type: 'integer' } },
+      output: { schema: { type: 'json' as const }, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: renderUntrustedJson('work_item_recall', value) }] },
+      async execute(args, exec) { return JSON.parse(JSON.stringify(service.recallForOwner({ ...exec, name: 'work_item_recall', arguments: args }, args))) },
+    }))
+  }
   // A Policy generation owns its exact-definition predicates independently of
   // the tools. Replacing/removing that optional peer disposes this child Fiber
   // and its registrations without retaining a stale capability.
@@ -400,7 +416,8 @@ export function registerWorkItemTools(ctx: Context, service: AssistantWorkItemsS
     for (const definition of definitions) {
       // No denialReason: legacy/unproven calls retain the ordinary approval
       // fallback. Their execution still rechecks the real mandate below it.
-      policy.registerPreauthorizedTool(policyCtx, definition, execution => service.preauthorizeTool(execution))
+      try { policy.registerPreauthorizedTool(policyCtx, definition, execution => service.preauthorizeTool(execution)) }
+      catch { policyCtx.logger.warn(`assistant-work-items: exact preauthorization unsupported for ${definition.name}; execution retains its authority checks`) }
     }
   })
 }

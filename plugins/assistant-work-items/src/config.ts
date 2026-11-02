@@ -18,6 +18,7 @@ export interface Config {
   sources?: SourcesConfig
   settlement?: SettlementConfig
   diagnosis?: DiagnosisConfig
+  ownerRecall?: { enabled?: boolean }
 }
 
 /** Independent finite diagnosis authority; enabled deployments must spell out every limit. */
@@ -122,6 +123,7 @@ export interface NormalizedConfig {
   readonly sources: NormalizedSources
   readonly settlement: NormalizedSettlement
   readonly diagnosis?: NormalizedDiagnosis
+  readonly ownerRecall?: Readonly<{ enabled: true }>
 }
 
 export interface NormalizedForegroundFailureSource {
@@ -182,7 +184,7 @@ const DELIVERY_KEYS = ['notifyOn'] as const
 const SETTLEMENT_KEYS = ['enabled', 'windowMs', 'sweepIntervalMs', 'maxSourcesPerSweep', 'maxPendingPerSweep', 'maxSettlementsPerSweep'] as const
 const SOURCES_KEYS = ['foregroundFailures'] as const
 const FOREGROUND_FAILURE_KEYS = ['enabled', 'kind', 'includeTimedOut', 'maxCandidatesPerSweep', 'maxAdmitsPerSweep', 'sweepIntervalMs'] as const
-const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis'] as const
+const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall'] as const
 const REPORT_STATUSES = ['progress', 'waiting', 'ready', 'blocked', 'failed'] as const
 const NOTIFY_STATUSES = ['ready', 'blocked', 'failed'] as const
 
@@ -252,6 +254,7 @@ export const ConfigSchema = Schema.object({
   delivery: deliverySchema,
   sources: sourcesSchema,
   settlement: settlementSchema,
+  ownerRecall: Schema.object({ enabled: Schema.boolean().default(false) }),
   diagnosis: Schema.object({
     enabled: Schema.boolean().default(false),
     budgetId: Schema.string(), budgetAmount: Schema.number().step(1),
@@ -490,6 +493,12 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   if (enabled && mode === 'active' && sources.foregroundFailures.enabled && !admission.allowedKinds.includes(sources.foregroundFailures.kind)) {
     fail('invalid-input', 'sources.foregroundFailures.kind must be one of admission.allowedKinds')
   }
+  const ownerRecall = value['ownerRecall'] === undefined ? {} : plainObject(value['ownerRecall'], 'ownerRecall')
+  rejectUnknown(ownerRecall, ['enabled'], 'ownerRecall')
+  if (ownerRecall['enabled'] !== undefined && typeof ownerRecall['enabled'] !== 'boolean') fail('invalid-input', 'ownerRecall.enabled must be a boolean')
+  if (ownerRecall['enabled'] === true && (!enabled || mode !== 'active' || scope === null || workerAutomationId === null)) {
+    fail('invalid-input', 'ownerRecall requires an enabled active worker and complete scope')
+  }
   return Object.freeze({
     enabled,
     mode,
@@ -504,6 +513,7 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     sources,
     settlement,
     ...(diagnosis === undefined ? {} : { diagnosis }),
+    ...(ownerRecall['enabled'] === true ? { ownerRecall: Object.freeze({ enabled: true as const }) } : {}),
   })
 }
 

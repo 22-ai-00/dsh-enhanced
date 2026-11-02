@@ -154,7 +154,7 @@ describe('trusted Host tool preauthorization', () => {
     } finally { await current.ctx.fiber.restart() }
   })
 
-  test.each(['work_item_claim', 'work_item_report', 'work_item_status', 'work_item_read_report'])('reserves %s to the actual WorkItems class Fiber and retains approval fallback', async name => {
+  test.each(['work_item_claim', 'work_item_report', 'work_item_status', 'work_item_read_report', 'work_item_list', 'work_item_recall'])('reserves %s to the actual WorkItems class Fiber and retains approval fallback', async name => {
     const current = await fixture()
     expect(current.ctx.assistantPolicy.workItemToolPreauthorizationVersion()).toBe(1)
     let executions = 0
@@ -175,38 +175,39 @@ describe('trusted Host tool preauthorization', () => {
     await current.ctx.fiber.restart()
   })
 
-  test.each(['deny', 'emergency-stop', 'budget'])('work-item preauthorization preserves the separate %s guard', async barrier => {
+  test.each(['work_item_claim', 'work_item_list', 'work_item_recall'].flatMap(name =>
+    ['deny', 'emergency-stop', 'budget'].map(barrier => ({ name, barrier }))))('$name preauthorization preserves the separate $barrier guard', async ({ name, barrier }) => {
     const current = await fixture(barrier === 'deny'
-      ? { rules: [{ id: 'deny-work-item', effect: 'deny', actions: ['execute'], resource: { kind: 'tool', id: 'work_item_claim' } }] }
+      ? { rules: [{ id: 'deny-work-item', effect: 'deny', actions: ['execute'], resource: { kind: 'tool', id: name } }] }
       : barrier === 'budget'
-        ? { rules: [{ id: 'budget-work-item', effect: 'allow', actions: ['execute'], resource: { kind: 'tool', id: 'work_item_claim' }, budget: { id: 'work-item-calls', amount: 1 } }], budgets: [{ id: 'work-item-calls', metric: 'calls', limit: 1, periodMs: 60_000, scope: 'subject' }] }
+        ? { rules: [{ id: 'budget-work-item', effect: 'allow', actions: ['execute'], resource: { kind: 'tool', id: name }, budget: { id: 'work-item-calls', amount: 1 } }], budgets: [{ id: 'work-item-calls', metric: 'calls', limit: 1, periodMs: 60_000, scope: 'subject' }] }
         : {})
     let executions = 0
-    const tool = definition('work_item_claim', () => { executions += 1 })
+    const tool = definition(name, () => { executions += 1 })
     current.ctx.tools.register(tool)
     current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'AssistantWorkItemsService'), tool, () => true)
-    if (barrier === 'budget') expect((await execute(current.ctx, current.owner, 'work_item_claim')).isError).toBe(false)
+    if (barrier === 'budget') expect((await execute(current.ctx, current.owner, name)).isError).toBe(false)
     if (barrier === 'emergency-stop') current.ctx.assistantPolicy.setEmergencyStop({ enabled: true, actor: 'owner', reason: 'test stop' })
-    expect((await execute(current.ctx, current.owner, 'work_item_claim')).isError).toBe(true)
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(true)
     expect(executions).toBe(barrier === 'budget' ? 1 : 0)
     expect(current.asks()).toBe(0)
     await current.ctx.fiber.restart()
   })
 
-  test('does not transfer a work-item grant to a scoped shadow and revokes it with its owning Fiber', async () => {
+  test.each(['work_item_status', 'work_item_list', 'work_item_recall'])('does not transfer %s to a scoped shadow and revokes it with its owning Fiber', async name => {
     const current = await fixture()
-    const trusted = definition('work_item_status', () => {})
-    const shadow = definition('work_item_status', () => {})
+    const trusted = definition(name, () => {})
+    const shadow = definition(name, () => {})
     current.ctx.tools.register(trusted)
     const caller = trustedActionsCaller(current.ctx, 'AssistantWorkItemsService')
     current.ctx.assistantPolicy.registerPreauthorizedTool(caller, trusted, () => true)
-    expect((await execute(current.ctx, current.owner, 'work_item_status')).isError).toBe(false)
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(false)
     await current.owner.ctx.inject(['tools'], scope => { scope.tools.register(shadow) })
-    expect(current.ctx.tools.get('work_item_status', current.owner)).toBe(shadow)
-    expect((await execute(current.ctx, current.owner, 'work_item_status')).isError).toBe(true)
+    expect(current.ctx.tools.get(name, current.owner)).toBe(shadow)
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(true)
     expect(current.asks()).toBe(1)
     await caller.fiber.dispose()
-    expect(current.ctx.assistantPolicy.isPreauthorizedTool({ name: 'work_item_status', agent: current.owner, arguments: { command: 'status' }, signal: new AbortController().signal } as never)).toBe(false)
+    expect(current.ctx.assistantPolicy.isPreauthorizedTool({ name, agent: current.owner, arguments: { command: 'status' }, signal: new AbortController().signal } as never)).toBe(false)
     await current.ctx.fiber.restart()
   })
 

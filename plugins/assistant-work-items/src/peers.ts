@@ -32,6 +32,10 @@ export interface PeerPolicyDecision {
 /** `assistant-policy` default-deny authorization surface. */
 export interface PeerPolicyService {
   authorize(request: PeerPolicyRequest, options?: { idempotencyKey?: string; auditDetails?: unknown }): PeerPolicyDecision
+  authorizeAgent?(agent: import('@deepseek-ai/dsh-agent').Agent | undefined, action: string,
+    resource: { kind: 'automation'; id: string }, options?: { idempotencyKey?: string }): PeerPolicyDecision
+  evaluateAgent?(agent: import('@deepseek-ai/dsh-agent').Agent | undefined, action: string,
+    resource: { kind: 'automation'; id: string }): PeerPolicyDecision
   /** Absent on older Policy peers: keep their ordinary approval path. */
   workItemToolPreauthorizationVersion?(): 1
   registerPreauthorizedTool?(
@@ -111,6 +115,9 @@ export interface PeerForegroundSourceScope {
 
 /** `assistant-delivery` surfaces used by this plugin. */
 export interface PeerDeliveryService {
+  validateOwnerAgentForRoute?(agent: import('@deepseek-ai/dsh-agent').Agent, authorityId: string): Readonly<PeerOwnerRouteReceipt> | undefined
+  inspectOwnerForegroundToolCall?(input: Readonly<{ agent: import('@deepseek-ai/dsh-agent').Agent; authorityId: string;
+    callId: string; toolName: string; argumentsJson: string }>): unknown
   validateOwnerRoute(input: {
     authorityId: string
     principalId: string

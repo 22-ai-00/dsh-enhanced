@@ -527,7 +527,7 @@ export class AssistantPolicyService extends Service {
       : definition.name === 'memory_manage' ? ['dsh-enhanced-personal-memory', 'PersonalMemoryService']
       : definition.name === 'wiki_upsert' ? ['dsh-enhanced-personal-wiki', 'PersonalWikiService']
       : definition.name === 'delivery_request_restart' ? ['dsh-enhanced-assistant-delivery', 'AssistantDeliveryService']
-      : ['work_item_claim', 'work_item_report', 'work_item_status', 'work_item_read_report'].includes(definition.name) ? 'AssistantWorkItemsService'
+      : ['work_item_claim', 'work_item_report', 'work_item_status', 'work_item_read_report', 'work_item_list', 'work_item_recall'].includes(definition.name) ? 'AssistantWorkItemsService'
       : ['skill_run', 'skill_status'].includes(definition.name) ? 'dsh-enhanced-assistant-skills' : undefined
     if (expectedCaller === undefined || !(Array.isArray(expectedCaller)
       ? expectedCaller.includes(caller.fiber.name) : caller.fiber.name === expectedCaller)) {

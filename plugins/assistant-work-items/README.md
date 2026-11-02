@@ -52,6 +52,36 @@ diagnosis:
 
 诊断模式拒绝公共 `admit(...)` 与 `registerSignalSource(...)`，不接受来源替换或影子同名来源。以下注册示例、通用 worker 手工准备与 lease 自动恢复说明仅适用于未启用 diagnosis 的通用模式。
 
+### 主人会话中的任务召回（显式启用）
+
+在完整的 active 配置中加入 `ownerRecall: { enabled: true }`，并让主人的前台 preset 包含 `work_item_list`、`work_item_recall`，即可在新会话中查找后台工作项及其已有结论。默认关闭；开启时仍须配置完整的 `scope` 和 `workerAutomationId`。这两个工具供当前已认证主人使用，后台 worker 继续通过自己的 occurrence 认领、读报告和汇报。
+
+该入口沿用已能正常对话的 Delivery owner route；原生对话的身份与回复授权仍需有效。前台读取另外需要独立的 Policy 授权，例如：
+
+```yaml
+rules:
+  - id: owner-work-item-recall
+    effect: allow
+    subject:
+      kind: agent
+      id: primary
+      workspace: /absolute/workspace
+      principal: <owner principal id>
+    actions: [inspect-work-items]
+    resource: { kind: automation, id: work-item-worker }
+    context: { initiators: [external] }
+```
+
+这里的 `external` 是 Delivery 消息入口的 Policy initiator；调用沿用真实入口绑定，不自行改写成 `foreground`。
+
+`work_item_list({limit?, after?})` 默认返回 10 项、最多 20 项；用返回的续页引用继续查找。每项包含稳定任务 ID、状态与有界报告摘要。`work_item_recall({item_id, report_revision?, offset?, max_bytes?})` 沿该 ID 读取任务：不指定 `report_revision` 时分页读取 brief，指定时读取该修订的报告。正文默认 4096 字节，范围 4–8192；`offset` 是 UTF-8 字节位置，续读使用返回的 `nextOffset`。最近报告的修订号支持从摘要继续找回正文；报告页返回相邻修订号，可继续读取最近五条之外的历史。它不读取 artifact 文件。
+
+每次读取由 Delivery 核对真实活跃 Agent、当前主人的人类 turn 以及这次原生工具调用，随后核对当前 owner lineage、workspace/preset、owner route 与 worker automation。SQL 在分页前按这些身份过滤；用户文本、任务 ID 或分页位置不能充当身份。相同主人通过 `/new` 进入较新的 Session 代次后，可以读原任务；owner 版本变化、代次倒退、同代 binding 不一致或当前读取授权失效时拒绝。
+
+这是一项历史读取权限：同一主人可查看已结束、过期或撤回任务，但读取不会恢复任务、重派 occurrence、追加报告、修改预算期限或重置 worker 额度。Policy 可以为读取另设预算；预检查与结果复核不扣费，实际读取按真实工具调用的幂等键授权，并保留 Policy 审计。原生工具的显式拒绝、紧急停止、调用预算与撤权仍生效。旧 Policy/Delivery 缺少身份或只读复核接口时，这项能力失败关闭。
+
+任务正文和报告均作为不可信材料展示；`ready` 仍是 worker 自报，独立 outcome 保留原状态。该入口提供跨会话任务召回，不自动关联不同 owner route，也不改变 `follows` 的关闭结算或 diagnosis 冻结的五工具合同。
+
 ### 一次性准备 worker automation
 
 在同一个 profile 里，先由可信 owner 前台 Agent 创建一条普通 Agent automation（`automation_create` 只提交 ID、名称、prompt、schedule 和 `allowed_tools`，workspace/preset/owner 从当前 Agent 派生），例如：
@@ -324,6 +354,7 @@ work_item_read_report:
 | --- | --- | --- |
 | `enabled` | `false` | 总开关；关闭时不创建任何目录、文件或数据库 |
 | `mode` | `observe` | `observe` 只记录观察行；`active` 才唤醒 worker、发通知 |
+| `ownerRecall.enabled` | `false` | 显式启用当前主人前台任务查询；要求 enabled active、完整 scope、worker automation 与独立 `inspect-work-items` 授权 |
 | `databasePath` | `$DSH_HOME/assistant-work-items/state.sqlite` | 私有账本绝对路径 |
 | `workRoot` | `$DSH_HOME/assistant-work-items/work` | 每项 scratch/artifact 根目录绝对路径 |
 | `intakeSourceId` | `work-items/v1` | 写入 automation 事件与 Policy background 主体标识 |

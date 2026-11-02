@@ -823,6 +823,34 @@ export class WorkItemStore {
     })
   }
 
+  /** SQL owner filtering precedes keyset pagination; no recovery or writes. */
+  listOwnerItems(owner: Readonly<{ principalId: string; principalRecordId: string; principalVersion: number;
+    workspace: string; preset: string; ownerRouteId: string; workerAutomationId: string; generation: number; bindingVersion: number }>,
+    after: Readonly<{ createdAt: number; id: string }> | undefined, limit: number, itemId?: string): readonly WorkItemRecord[] {
+    const rows = this.#statement(`SELECT ${ITEM_ALIASES} FROM work_item
+      WHERE principal_id=? AND principal_record_id=? AND principal_version=? AND workspace=? AND agent_preset=?
+        AND owner_route_id=? AND worker_automation_id=?
+        AND (owner_generation < ? OR (owner_generation=? AND binding_version=?))
+        AND (? IS NULL OR id=?)
+        AND (? IS NULL OR created_at < ? OR (created_at=? AND id>?))
+      ORDER BY created_at DESC, id ASC LIMIT ?`).all(owner.principalId, owner.principalRecordId, owner.principalVersion,
+      owner.workspace, owner.preset, owner.ownerRouteId, owner.workerAutomationId, owner.generation, owner.generation,
+      owner.bindingVersion, itemId ?? null, itemId ?? null, after?.createdAt ?? null, after?.createdAt ?? null,
+      after?.createdAt ?? null, after?.id ?? '', limit) as Row[]
+    return Object.freeze(rows.map(itemFromRow))
+  }
+
+  /** Exact UTF-8 body bytes after the caller has selected an owner-filtered item. */
+  ownerRecallText(itemId: string, revision?: number): string {
+    const row = revision === undefined
+      ? this.#statement('SELECT CAST(brief AS BLOB) AS body FROM work_item WHERE id=?').get(itemId)
+      : this.#statement('SELECT CAST(summary AS BLOB) AS body FROM work_item_report WHERE item_id=? AND revision=?').get(itemId, revision)
+    const bytes = (row as { body?: unknown } | undefined)?.body
+    if (!(bytes instanceof Uint8Array) || bytes.length > 65_536) fail('storage', 'owner recall body is unavailable or exceeds bounds')
+    try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) }
+    catch { return fail('storage', 'owner recall body is not valid UTF-8') }
+  }
+
   findItemById(itemId: string): WorkItemRecord | undefined {
     const row = this.#statement(`SELECT ${ITEM_ALIASES} FROM work_item WHERE id = ?`).get(itemId) as Row | undefined
     return row === undefined ? undefined : itemFromRow(row)
