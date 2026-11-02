@@ -460,9 +460,13 @@ export class GoalExecutionRuntime {
   }
 
   #assertRound(round: ActiveRound, terminal = false, consume = true): void {
+    if (Date.now() >= round.run.intent.admission.expiresAt) throw new Error('assistant-goals: step admission expired')
+    this.#assertRoundAuthority(round, terminal, consume)
+  }
+
+  #assertRoundAuthority(round: ActiveRound, terminal = false, consume = true): void {
     if (!this.#active || this.#sink !== round.registration || round.signal.aborted
-      || this.#revoked.has(round.agent)
-      || Date.now() >= round.run.intent.admission.expiresAt) throw new Error('assistant-goals: step admission expired')
+      || this.#revoked.has(round.agent)) throw new Error('assistant-goals: step admission expired')
     const { scope, record } = this.current(round.agent, consume)
     this.assertDependencies(record)
     const exactRevision = record.native.revision === round.run.intent.task.goal.nativeRevision
@@ -483,6 +487,23 @@ export class GoalExecutionRuntime {
       || record.native.sessionId !== round.run.intent.task.goal.sessionId
       || record.native.maxGoalRounds !== round.run.intent.admission.maxGoalRounds
       || !(exactRevision && record.native.phase === 'active' || terminalTransition || pausedForEventWait)) throw new Error('assistant-goals: goal definition or authority changed')
+  }
+
+  /** Observation of completed work cannot authorize another native step. Its
+   * original execution deadline is proved by the durable terminal record;
+   * whole-goal verification retains its own contract deadline and live fences. */
+  #assertSettledObservation(round: ActiveRound, settled: GoalExecutionRun): void {
+    const stored = this.#store?.get(round.run.intent.runId)
+    if (stored === undefined || !isDeepStrictEqual(stored, settled)
+      || !isDeepStrictEqual(stored.intent, round.run.intent)
+      || !isDeepStrictEqual(stored.acceptance, round.handle)
+      || stored.dispatchedAt === undefined || stored.dispatchedAt < stored.intent.admission.issuedAt
+      || stored.execution?.status !== 'succeeded' || stored.execution.quiescent !== true
+      || stored.execution.completedAt < stored.dispatchedAt
+      || stored.execution.completedAt >= stored.intent.admission.expiresAt) {
+      throw new Error('assistant-goals: timely settled step unavailable')
+    }
+    this.#assertRoundAuthority(round, true, false)
   }
 
   #cancel(round: ActiveRound): void {
@@ -548,7 +569,7 @@ export class GoalExecutionRuntime {
       }
       const saved = this.#store!.get(round.run.intent.runId)!
       if (this.#active && this.outcome !== undefined) {
-        await this.#bounded(this.outcome.settled(round.agent, saved, () => this.#assertRound(round, true)), new AbortController().signal)
+        await this.#bounded(this.outcome.settled(round.agent, saved, () => this.#assertSettledObservation(round, saved)), new AbortController().signal)
       }
     }
   }

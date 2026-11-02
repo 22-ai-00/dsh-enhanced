@@ -85,7 +85,7 @@ async function runtimeHarness(paths: { verifier: string; outcome: string }, curr
   assertDependencies: (record: GoalRecord) => void = parent => {
     if (parent.checkpoint.dependencies.length > 0) throw new Error('unexpected dependency')
   }, beforeResponse?: () => Promise<void>, acceptsPausedEventWaitSettlement: (record: GoalRecord, run: GoalExecutionRun, agent: Agent) => boolean = () => false,
-  acceptsHistoricalPausedEventWaitCompletion: (record: GoalRecord, wake: { sessionId: string; goalId: string; revision: number; roundsStarted: number; maxGoalRounds: number }, run: GoalExecutionRun) => boolean = () => false) {
+  acceptsHistoricalPausedEventWaitCompletion: (record: GoalRecord, wake: { sessionId: string; goalId: string; revision: number; roundsStarted: number; maxGoalRounds: number }, run: GoalExecutionRun) => boolean = () => false, now?: () => number) {
   const url = await proofServer(ready, beforeResponse)
   const authorityInput = { kind: 'readback' as const, id: 'target', urlTemplate: url, objectIdPointer: '/id', timeoutMs: 1_000, maxResponseBytes: 1_024, allowHttpLoopback: true }
   const [authority] = createVerifierAuthorities({ authorities: [authorityInput] }); if (authority === undefined) throw new Error('missing readback authority')
@@ -98,7 +98,7 @@ async function runtimeHarness(paths: { verifier: string; outcome: string }, curr
     id: 'whole-goal', version: 1, scope: { workspace: value.scope.workspace, preset: value.scope.preset }, owner: { principalRecordId: value.scope.principalRecordId, principalVersion: value.scope.principalVersion },
     taskKind: 'goal-outcome', objective: value.definition.objective, validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 },
     criteria: [{ id: 'target-ready', kind: 'target-readback', authority: { id: authority.id, digest: authority.digest }, objectId: 'proof', expected: [{ pointer: '/state/ready', value: true }] }],
-  }] })
+  }] }, now === undefined ? undefined : { now })
   return { ctx, runtime, verifier, bridge }
 }
 
@@ -421,3 +421,46 @@ describe('GoalOutcomeRuntime durable crash recovery', () => {
     expect(f.runtime.verifiedWakeCompletion(current, wake)).toBe(true)
   })
 })
+
+// Clock-contract regressions: real Verifier/readback HTTP/SQLite, controlled
+// wall and monotonic readings only; these are not Linux timing measurements.
+it.each(['within-derived', 'past-derived', 'past-contract', 'wall-backwards'] as const)(
+  'bounds the settled observation after the old step deadline: %s', async boundary => {
+    const root = await mkdtemp(join(tmpdir(), 'goal-observation-deadline-')); roots.push(root)
+    const current = record(root), agent = {} as Agent
+    let nativeRuns: readonly GoalExecutionRun[] = []
+    let atResponse = () => {}
+    const f = await runtimeHarness({ verifier: join(root, 'verifier.sqlite'), outcome: join(root, 'outcome.sqlite') },
+      () => current, () => nativeRuns, () => true, undefined, async () => { atResponse() }, undefined, undefined, () => Date.now())
+    const started = Date.now(), wall = vi.spyOn(Date, 'now').mockReturnValue(started)
+    const monotonic = vi.spyOn(performance, 'now').mockReturnValue(1_000)
+    const initial = run(current, started)
+    f.runtime.bind(current); f.runtime.prepare(agent, initial)
+    const assessment = f.runtime.inspectAssessments(current)[0]!
+    const deadline = Math.min(assessment.contract.expiresAt, initial.intent.admission.expiresAt + assessment.contract.bounds.maxDurationMs)
+    const durable = { ...initial, dispatchedAt: started, execution: { status: 'succeeded' as const, quiescent: true, completedAt: started + 1 } }
+    nativeRuns = [durable]
+    wall.mockReturnValue(initial.intent.admission.expiresAt + 1)
+    atResponse = () => {
+      if (boundary === 'past-derived') wall.mockReturnValue(deadline)
+      if (boundary === 'past-contract') wall.mockReturnValue(assessment.contract.expiresAt)
+      if (boundary === 'wall-backwards') {
+        monotonic.mockReturnValue(1_000 + assessment.contract.bounds.maxDurationMs + 1)
+        wall.mockReturnValue(started + 100)
+      }
+    }
+    // Production supplies the real execution closure separately covered in
+    // execution-host-abi; this test isolates the Outcome-owned second fence.
+    const failure = await f.runtime.settled(agent, durable, () => {}).then(() => undefined, error => error)
+    const inspected = await f.runtime.inspect(assessment.contract)
+    const accepted = f.verifier.inspectAcceptedTask(assessment.contract.id)
+    if (boundary === 'within-derived') {
+      expect(failure).toBeUndefined()
+      expect(inspected).toMatchObject({ status: 'succeeded', quiescent: true })
+      expect(accepted).toMatchObject({ receipt: { objectiveStatus: 'achieved' } })
+    } else {
+      expect(inspected).toMatchObject({ status: 'unknown', quiescent: false })
+      expect(accepted?.receipt?.objectiveStatus).not.toBe('achieved')
+    }
+  },
+)

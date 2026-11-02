@@ -1,10 +1,14 @@
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { GoalExecutionRuntime } from '../src/execution.ts'
 
 type Handler = (payload: any, next: () => Promise<any>) => Promise<any>
 
-function fixture() {
+function fixture(options: { outcome?: ConstructorParameters<typeof GoalExecutionRuntime>[4];
+  current?: () => void; flush?: () => Promise<boolean>; path?: string } = {}) {
   const handlers = new Map<string, Handler>()
   let dispose: (() => Promise<void>) | undefined
   const scope = { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: '/workspace', preset: 'primary' }
@@ -21,17 +25,17 @@ function fixture() {
   const verifier: any = { ownsTaskAcceptanceRegistration: () => true, tick: async () => undefined }
   const ctx: any = {
     logger: { warn: () => {} },
-    get: (name: string) => ({ goals: { get: () => native }, sessions: { flush: async () => true }, assistantVerifier: verifier })[name],
+    get: (name: string) => ({ goals: { get: () => native }, sessions: { flush: options.flush ?? (async () => true) }, assistantVerifier: verifier })[name],
     on: (name: string, handler: Handler) => { handlers.set(name, handler); return () => handlers.delete(name) },
     inject: (_names: unknown, callback: (value: any) => unknown) => callback({ tools: { guard: () => () => {} } }),
     effect: (callback: () => () => Promise<void>) => { dispose = callback() },
   }
-  const runtime = new GoalExecutionRuntime(ctx, ':memory:', 60_000, (_agent, consume = true) => { currentConsumes.push(consume); return { scope, record } })
+  const runtime = new GoalExecutionRuntime(ctx, options.path ?? ':memory:', 60_000, (_agent, consume = true) => { options.current?.(); currentConsumes.push(consume); return { scope, record } }, options.outcome)
   runtime.register({ protocol: 'assistant-verifier/host-producer/v1', generation: runtime.generation(), owner: verifier, requiresAcceptance: true,
     prepare: () => ({ contractId: 'contract', contractDigest: 'a'.repeat(64) }), completed: async () => {} })
   const source = { kind: 'goal' as const, goalId: 'native-goal', revision: 1, round: 1 }
   const message = (value = source) => ({ role: 'user', content: [], source: value })
-  return { agent, cancellations: () => cancellations, currentConsumes, dispose: async () => await dispose?.(), record, events: (value: any[]) => { events = value }, handlers, message, native, runtime, source }
+  return { agent, cancellations: () => cancellations, currentConsumes, dispose: async () => { const current = dispose; dispose = undefined; await current?.() }, record, events: (value: any[]) => { events = value }, handlers, message, native, runtime, source }
 }
 
 describe('native goal execution Host ABI admission', () => {
@@ -226,4 +230,76 @@ test('propagates a foreign downstream request failure without cancelling or revo
       .resolves.toEqual({ provider: 'fixture' })
     expect(f.runtime.budgetState(f.agent)).toBeUndefined()
   } finally { await f.dispose() }
+})
+
+
+async function settledFixture(late = false, lateFlush = false) {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'goal-settled-deadline-'))
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(1_000_000)
+  let observed: (() => void) | undefined
+  let saved: Parameters<NonNullable<ConstructorParameters<typeof GoalExecutionRuntime>[4]>['settled']>[1] | undefined
+  const signal = new AbortController()
+  let denied = false, flushes = 0
+  const f = fixture({ path: join(root, 'execution.sqlite'), current: () => {
+    if (denied) throw new Error('assistant-goals: policy denied')
+  }, flush: async () => {
+    if (++flushes > 1 && lateFlush) clock.mockReturnValue(1_060_000)
+    return true
+  }, outcome: {
+    prepare() {},
+    async settled(_agent, run, assertCurrent) { saved = run; observed = assertCurrent },
+  } })
+  try {
+    const input = f.message()
+    await f.handlers.get('agent/pre-step')!({ agent: f.agent, messages: [input], turn: 2, step: 1, signal: signal.signal }, async () => ({ kind: 'enter', messages: [input] }))
+    await f.handlers.get('agent/request')!({ agent: f.agent, turn: 2, step: 1, signal: signal.signal }, async () => ({ provider: 'fixture' }))
+    f.record.native.roundsStarted = 1; f.native.roundsStarted = 1
+    if (late) clock.mockReturnValue(1_060_000)
+    await f.handlers.get('session/event')!(f.agent.session, { seq: 3, type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } } as any)
+    await f.runtime.whenIdle()
+    if (saved === undefined || observed === undefined) throw new Error('actual settlement callback missing')
+    return { f, signal, saved, observed, clock, deny: () => { denied = true }, root,
+      close: async () => { clock.mockRestore(); await f.dispose(); await rm(root, { recursive: true, force: true }) } }
+  } catch (error) { clock.mockRestore(); await f.dispose(); await rm(root, { recursive: true, force: true }); throw error }
+}
+
+test('observes the exact timely durable step after its execution deadline without extending admission', async () => {
+  const h = await settledFixture()
+  try {
+    expect(h.saved.execution).toMatchObject({ status: 'succeeded', quiescent: true, completedAt: 1_000_000 })
+    expect(h.saved.intent.admission).toMatchObject({ issuedAt: 1_000_000, expiresAt: 1_060_000 })
+    h.clock.mockReturnValue(1_060_001)
+    h.f.currentConsumes.splice(0)
+    expect(h.observed).not.toThrow()
+    expect(h.observed).not.toThrow()
+    expect(h.f.currentConsumes).toEqual([false, false])
+    expect(h.f.runtime.list(h.saved.intent.scope, h.saved.intent.task.goal.id)[0]).toEqual(h.saved)
+    expect(h.f.runtime.roundTiming(h.f.agent, h.f.record)).toEqual({ maxDurationMs: 60_000 })
+    expect(h.f.runtime.budgetState(h.f.agent)).toBeUndefined()
+  } finally { await h.close() }
+})
+
+test.each(['native-end', 'checkpoint'] as const)('does not turn a late %s into a settled observation authority', async boundary => {
+  const h = await settledFixture(boundary === 'native-end', boundary === 'checkpoint')
+  try {
+    expect(h.saved.execution).toMatchObject({ status: 'unknown', quiescent: false })
+    h.clock.mockReturnValue(1_060_001)
+    expect(h.observed).toThrow()
+  } finally { await h.close() }
+})
+
+test.each(['owner', 'definition', 'revision', 'cancel', 'policy', 'dispose'] as const)('post-deadline observation still fences current %s', async change => {
+  const h = await settledFixture()
+  try {
+    expect(h.saved.execution).toMatchObject({ status: 'succeeded', quiescent: true })
+    h.clock.mockReturnValue(1_060_001)
+    expect(h.observed).not.toThrow()
+    if (change === 'owner') h.f.record.scope.principalVersion++
+    if (change === 'definition') h.f.record.definition = { ...h.f.record.definition, version: 2 }
+    if (change === 'revision') h.f.record.native.revision++
+    if (change === 'cancel') h.signal.abort()
+    if (change === 'policy') h.deny()
+    if (change === 'dispose') await h.f.dispose()
+    expect(h.observed).toThrow()
+  } finally { await h.close() }
 })

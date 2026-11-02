@@ -187,6 +187,7 @@ export class GoalOutcomeRuntime {
       check()
       if (this.#freshVerdict(assessment)) return true
       await verifier.tick()
+      check()
       if (this.#freshVerdict(assessment)) return true
       const remaining = Math.max(0, monotonicDeadline - performance.now())
       if (remaining > 0) await new Promise<void>(resolve => setTimeout(resolve, Math.min(25, remaining)))
@@ -203,9 +204,18 @@ export class GoalOutcomeRuntime {
     this.#handles.delete(run.intent.runId)
     const assessment = this.#store.getByContract(accepted.contractId)
     if (assessment === undefined) throw new Error('assistant-goals: assessment intent missing')
+    const deadline = Math.min(assessment.contract.expiresAt, run.intent.admission.expiresAt + assessment.contract.bounds.maxDurationMs)
+    // Capture once for this observation. Neither async grading nor a wall-clock
+    // rollback can renew the original derived verification window.
+    const monotonicDeadline = performance.now() + Math.max(0, deadline - Date.now())
+    const checkTime = () => {
+      if (Date.now() >= deadline || performance.now() >= monotonicDeadline) throw new Error('assistant-goals: whole-goal observation expired')
+    }
     const check = () => {
+      checkTime()
       assertCurrent()
       if (this.current(agent).native.roundsStarted !== run.intent.admission.round) throw new Error('assistant-goals: whole-goal assessment round changed')
+      checkTime()
     }
     let valid = run.execution?.status === 'succeeded' && run.execution.quiescent
     try {
