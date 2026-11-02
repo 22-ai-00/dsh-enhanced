@@ -3941,7 +3941,10 @@ describe('real native Delivery Agent runtime', () => {
         { id: 'web-reply', effect: 'allow', subject, actions: ['reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
         { id: 'web-goal', effect: 'allow', subject, actions: ['create', 'observe', 'inspect', 'snapshot'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['external'] } },
         { id: 'web-tool', effect: 'allow', subject, actions: ['execute'], resource: { kind: 'tool', id: 'goal_create' }, context: { initiators: ['external'] } },
-      ], presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false, leaseMs: 1_000,
+      ],
+      // Use the production lease duration: this tests idle checkpoint retention, not expiry.
+      // Idle cleanup still polls at 100 ms.
+      presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
     }, realPersistence(JsonlPersistence, root, new Map()))
     const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') }); operator.handoffOwner(webPrincipal)
     const native = await nativeGoalPlugins()
