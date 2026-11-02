@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, symlink } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -52,7 +52,7 @@ function policyState(path: string) {
 }
 
 async function fixture(options: { budget?: boolean; deny?: boolean; emergency?: boolean; exhausted?: boolean; v15?: boolean } = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'scanner-retirement-runtime-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'scanner-retirement-runtime-'))); roots.push(root)
   const databasePath = join(root, 'automations.sqlite'), policyPath = join(root, 'policy.sqlite')
   const writer = new AutomationStore({ path: databasePath })
   let operation: ScannerRetirementOperation
@@ -98,6 +98,15 @@ async function fixture(options: { budget?: boolean; deny?: boolean; emergency?: 
 }
 
 describe('stopped-stage retirement through formal Cordis services', () => {
+  test('rejects a database parent alias while accepting the canonical fixture', async () => {
+    const f = await fixture()
+    const alias = `${f.databasePath}.parent-alias`
+    await symlink(dirname(f.databasePath), alias, 'dir')
+    expect(() => inspectAutomationRetirementSnapshot(join(alias, 'automations.sqlite')))
+      .toThrow('database path must not traverse a symbolic link')
+    expect(inspectAutomationRetirementSnapshot(f.databasePath)).toEqual(f.before)
+  })
+
   test.each([false, true])('retains unknown tasks and history without enabling timers; v15=%s', async v15 => {
     const f = await fixture({ v15 })
     const original = structuredClone({ policy: f.input.policyConfig, automations: f.input.automationsConfig, operations: f.input.operations })

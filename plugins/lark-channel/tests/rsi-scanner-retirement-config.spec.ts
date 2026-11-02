@@ -121,7 +121,8 @@ describe('frozen target configuration scanner retirement derivation', () => {
   })
 
   test('accepts real supervised overlay plus compileRsiProfiles output with independent valid owner routes', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'rsi-retirement-overlay-'))); roots.push(root)
+    // Leave room for observer.sock under macOS's real default temporary directory.
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'rsi-'))); roots.push(root)
     const f = fixture(join(root, 'home')), profilePath = join(f.home, 'profiles', f.profile)
     const privateRoot = join(root, 'private'), decisionRoot = join(root, 'decisions')
     for (const path of [profilePath, privateRoot, decisionRoot]) await mkdir(path, { recursive: true, mode: 0o700 })
