@@ -1,3 +1,4 @@
+import { ownerFixture } from './fixtures/empty-owner-fixture.js'
 import { expect, test } from 'vitest'
 import { createHash, generateKeyPairSync } from 'node:crypto'
 import { chmod, link, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
@@ -15,7 +16,7 @@ import { bindLocalSourceInstaller } from '../scripts/install/local-source-mainte
 import { applyOwnerProgramAuthorityCas, assertOwnerProgramAuthorityPreserved, assertOwnerProgramOriginalComposition, assertOwnerProgramWindow,
   assertOwnerProgramBusinessDataCopied, assertOwnerProgramManifestPreserved, assertNativeStageRelocation,
   freezeNativeRunnerStates, migrateNativeVerifierGrants, validateNativeOwnerProgramRunnerStates,
-  prepareOwnerProgramCreation, stageOwnerProgramUpdate,
+  prepareOwnerProgramCreation, stageOwnerProgramUpdate, inspectOwnerProgramEmptyCreationStage,
   assertOwnerProgramRestartManifestPreserved, compileOwnerProgramRestartConfig, frozenRestartConfig,
   ownerProgramRestartRule,
   readOwnerProgramRestartConfig, validateOwnerProgramRestartConfig,
@@ -815,15 +816,35 @@ async function recordedSeams(root: string) {
   return lines.map(line => JSON.parse(line) as { seam: string, input: Record<string, unknown> })
 }
 
-test('prepareOwnerProgramCreation performs the reviewed Docker -> linux-native backend transition', async () => {
+async function emptyOwnerCreationEntry() {
   const source = candidateSource('b'.repeat(40))
   const build = candidateBuild('linux-native', source.sourceCommit)
   const creation = creationBuild('linux-native', source.sourceCommit)
   const installer = await ownerCreationInstaller({ source, build, creationBuild: creation })
+  const candidateHome = join(installer.root, 'candidate')
+  await mkdir(candidateHome, { mode: 0o700 })
+  const real = await ownerFixture()
+  const library = new URL('../plugins/plugin-control-plane/lib/', import.meta.url)
+  await writeFile(join(installer.root, 'node_modules/@dsh-enhanced/plugin-control-plane/index.js'),
+    `export * from ${JSON.stringify(new URL('index.js', library).href)};
+`
+    + `export { creationCapabilityPublicKey } from ${JSON.stringify(new URL('creation-capability-journal.js', library).href)};
+`
+    + `export { planEmptyAdoptionHandoff, applyEmptyAdoptionHandoff, verifyEmptyAdoptionHandoff } from ${JSON.stringify(new URL('creation-capability-empty-handoff.js', library).href)};
+`)
+  await writeFile(join(installer.root, 'node_modules/yaml/index.js'),
+    `module.exports = require(${JSON.stringify(new URL('../node_modules/yaml', import.meta.url).pathname)})`)
+  installer.binding = await bindLocalSourceInstaller(installer.root)
+  const base = ownerProgramUpdate(installer, candidateBuild('docker', 'a'.repeat(40)))
+  const ownerUpdate = { ...base, homePath: real.ownerUpdate.homePath,
+    original: { ...real.ownerUpdate.original, ...base.original } }
+
+  return { source, build, creation, installer, candidateHome, ownerUpdate, real }
+}
+
+test('prepareOwnerProgramCreation performs the reviewed Docker -> linux-native backend transition', async () => {
+  const { source, build, creation, installer, candidateHome, ownerUpdate } = await emptyOwnerCreationEntry()
   try {
-    const candidateHome = join(installer.root, 'candidate')
-    await mkdir(candidateHome, { mode: 0o700 })
-    const ownerUpdate = ownerProgramUpdate(installer, candidateBuild('docker', 'a'.repeat(40)))
     const result = await prepareOwnerProgramCreation({ ownerUpdate, candidateHome, source,
       sourceBuild: build })
     expect(result).toMatchObject({ schemaVersion: 1, backend: 'linux-native',
@@ -1356,4 +1377,48 @@ test('the native handover seams stay ordered around the creation authority', asy
   const names = script.match(/const names = \[([\s\S]*?)\]/u)?.[1] ?? ''
   expect([...names.matchAll(/'([a-z0-9-]+)'/gu)].map(match => match[1]))
     .toEqual(ownerInstallerModules)
+})
+
+
+test.each(['unknown','closed','rejected'])('refuses %s creation history before preparing candidate authority state', async status => {
+  const f = await emptyOwnerCreationEntry()
+  try {
+    const db = new DatabaseSync(f.real.path)
+    db.exec(`INSERT INTO adoptions(plan_id,status,certificate_json,certificate_digest,artifact,artifact_sha,reason) VALUES ('past','${status}','{}','${'a'.repeat(64)}',X'01','${'b'.repeat(64)}','retained')`); db.close()
+    const before = await readFile(f.real.path)
+    await expect(prepareOwnerProgramCreation({ ownerUpdate: f.ownerUpdate, candidateHome: f.candidateHome,
+      source: f.source, sourceBuild: f.build })).rejects.toThrow('adoption-history-present')
+    expect(await readdir(f.candidateHome)).toEqual([])
+    expect(await readFile(f.real.path)).toEqual(before)
+  } finally { await rm(f.installer.root, { recursive: true, force: true }) }
+})
+
+test('refuses a configured missing review store and native-to-native updates before candidate writes', async () => {
+  const f = await emptyOwnerCreationEntry()
+  try {
+    await rm(join(f.real.root, 'verifier.sqlite.creation-reviews'))
+    await expect(prepareOwnerProgramCreation({ ownerUpdate: f.ownerUpdate, candidateHome: f.candidateHome,
+      source: f.source, sourceBuild: f.build })).rejects.toThrow('review-database-missing')
+    expect(await readdir(f.candidateHome)).toEqual([])
+    f.ownerUpdate.original.build = candidateBuild('linux-native', 'a'.repeat(40))
+    await expect(prepareOwnerProgramCreation({ ownerUpdate: f.ownerUpdate, candidateHome: f.candidateHome,
+      source: f.source, sourceBuild: f.build })).rejects.toThrow('native updates require a separate lineage contract')
+    expect(await readdir(f.candidateHome)).toEqual([])
+  } finally { await rm(f.installer.root, { recursive: true, force: true }) }
+})
+
+
+test('the authenticated outer stage gate rechecks real copied history without creating any native resources', async () => {
+  const f = await emptyOwnerCreationEntry()
+  try {
+    const input = { ownerUpdate: f.ownerUpdate, physicalHome: f.real.stageHome, installer: f.installer.binding }
+    expect((await inspectOwnerProgramEmptyCreationStage(input)).status).toBe('empty')
+    expect(await readdir(f.candidateHome)).toEqual([])
+    await expect(inspectOwnerProgramEmptyCreationStage({ ...input, physicalHome: f.real.root })).rejects.toThrow('separate Docker-origin stage')
+    const path = join(f.real.stageHome, 'control-plane/creation-adoptions.sqlite')
+    const db = new DatabaseSync(path)
+    db.exec(`INSERT INTO adoptions(plan_id,status,certificate_json,certificate_digest,artifact,artifact_sha,reason) VALUES ('late','unknown','{}','${'a'.repeat(64)}',X'01','${'b'.repeat(64)}','retained')`); db.close()
+    await expect(inspectOwnerProgramEmptyCreationStage(input)).rejects.toThrow('adoption-history-present')
+    expect(await readdir(f.candidateHome)).toEqual([])
+  } finally { await rm(f.installer.root, { recursive: true, force: true }) }
 })

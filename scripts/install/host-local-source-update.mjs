@@ -368,6 +368,13 @@ export async function stageHostLocalSourceUpdate({ proof, homePath, stageHome })
   await privateHome(stageHome)
   if (stageHome === homePath || stageHome.startsWith(`${homePath}${sep}`)
     || homePath.startsWith(`${stageHome}${sep}`)) fail('stage Home overlaps the original')
+  let stoppedEmptyCreationHistory
+  if (programMode(proof) && candidateBackend(preparation) === 'linux-native') {
+    if (proof.candidateCreation?.backendTransition !== 'docker->linux-native') fail('unsupported native owner migration')
+    const { inspectOwnerProgramEmptyCreationStage } = await import('./owner-program-update.mjs')
+    stoppedEmptyCreationHistory = await inspectOwnerProgramEmptyCreationStage({ ownerUpdate: proof.ownerUpdate,
+      physicalHome: stageHome, installer: proof.installer })
+  }
   const resources = await stageCandidateResources(api, { logicalHome: homePath, stagePhysicalHome: stageHome,
     profile: proof.profile, preparationRoot: proof.preparationRoot, backend: candidateBackend(preparation),
     owner: ownerMode(proof) })
@@ -394,7 +401,8 @@ export async function stageHostLocalSourceUpdate({ proof, homePath, stageHome })
     profile: proof.profile })
   if (!same(staged.records, [...source.records, record]) || staged.workspace.sourceCommit !== proof.candidate.sourceCommit
     || staged.workspace.version !== proof.candidate.version || !same(staged.anchor, source.anchor)) fail('staged source chain differs')
-  const sourceProof = { ...proof, record, resources: resources.proof,
+  const sourceProof = { ...proof,
+    ...(stoppedEmptyCreationHistory ? { candidateCreation: { ...proof.candidateCreation, stoppedEmptyCreationHistory } } : {}), record, resources: resources.proof,
     // The native stage owns the proof the program-update materializer replays
     // against the same stopped stage Home; injecting it here is what lifts the
     // owner-program relocation gate without touching the captured original.
@@ -446,8 +454,10 @@ export async function finalizeHostLocalSourceUpdate({ proof, homePath, stageHome
   return finalized
 }
 
-export async function verifyHostLocalSourceUpdate({ proof, homePath, physicalHome, selection, checkLedger = false }) {
+export async function verifyHostLocalSourceUpdate({ proof, homePath, physicalHome, selection, checkLedger = false, stoppedEmptyAdoption = false }) {
   assertProtocol(proof)
+  if (typeof stoppedEmptyAdoption !== 'boolean') fail('invalid stopped empty handoff option')
+  if (stoppedEmptyAdoption && (!programMode(proof) || selection !== 'candidate')) fail('empty handoff acceptance requires a stopped program candidate')
   if (!['original', 'candidate'].includes(selection) || proof.homePath !== homePath) fail('source proof selection differs')
   await assertLocalSourceInstaller(proof.installer)
   const api = await loadLocalSourceInstaller(proof.installer, { ownerRepair: ownerMode(proof) })
@@ -485,7 +495,8 @@ export async function verifyHostLocalSourceUpdate({ proof, homePath, physicalHom
     || source.workspace.version !== proof.candidate.version) fail('candidate signed source chain differs')
   if (ownerMode(proof)) {
     await verifyOwner(proof, { record: proof.record, homePath, physicalHome, installer: proof.installer,
-      phase: proof.ownerRepairNext || proof.ownerUpdateNext ? 'after-finalize' : 'before-finalize', checkLedger })
+      phase: proof.ownerRepairNext || proof.ownerUpdateNext ? 'after-finalize' : 'before-finalize', checkLedger,
+      ...(programMode(proof) ? { stoppedEmptyAdoption } : {}) })
   } else {
     const inventory = await ownerInventory(physicalHome, proof.profile)
     if (inventory.authorityTree !== proof.original.ownerInventory.authorityTree

@@ -48,6 +48,27 @@ export interface RsiOwnerRepairOverlay {
   }
   issuedAt: number; authority: string; keyId: string; signature: string
 }
+export interface RsiOwnerEmptyAdoptionHandoff {
+  protocol: 'dsh-owner-empty-adoption-handoff/v1'
+  transactionId: string
+  logicalPath: string
+  planDigest: string
+  proofDigest: string
+  hostAnchor: string
+  fileIdentity: { dev: string; ino: string; uid: number; gid: number; mode: number; nlink: 1 }
+}
+function emptyAdoptionHandoffShape(value: unknown, resources: RsiAuthorityResources, transactionId: string): void {
+  const file = record(value) && record(value.fileIdentity) ? value.fileIdentity : undefined
+  if (!record(value) || !isDeepStrictEqual(Object.keys(value).sort(),
+    ['protocol','transactionId','logicalPath','planDigest','proofDigest','hostAnchor','fileIdentity'].sort())
+    || value.protocol !== 'dsh-owner-empty-adoption-handoff/v1' || value.transactionId !== transactionId
+    || value.logicalPath !== `${resources.stateRoot}/control-plane/creation-adoptions.sqlite`
+    || !['planDigest','proofDigest','hostAnchor'].every(key => typeof value[key] === 'string' && hex.test(value[key]))
+    || !record(file) || !isDeepStrictEqual(Object.keys(file).sort(), ['dev','ino','uid','gid','mode','nlink'].sort())
+    || !['dev','ino'].every(key => typeof file[key] === 'string' && /^(?:0|[1-9][0-9]*)$/u.test(file[key]))
+    || !['uid','gid','mode'].every(key => Number.isSafeInteger(file[key]) && Number(file[key]) >= 0)
+    || file.nlink !== 1) fail('empty adoption handoff metadata differs')
+}
 export interface RsiOwnerProgramUpdateOverlay extends Omit<RsiOwnerRepairOverlay, 'kind' | 'repair'> {
   kind: 'rsi-owner-program-update-overlay'
   update: {
@@ -55,6 +76,7 @@ export interface RsiOwnerProgramUpdateOverlay extends Omit<RsiOwnerRepairOverlay
     // Caller attests unchanged owner/grants/deadlines/budgets/config; this reader validates only digest shape.
     authorityDigest: string
     hostPlanDigest: string
+    emptyAdoptionHandoff?: RsiOwnerEmptyAdoptionHandoff
     before: RsiOwnerRepairOverlay['repair']['before']
     after: RsiOwnerRepairOverlay['repair']['after']
   }
@@ -159,7 +181,8 @@ function programUpdateOverlayShape(value: unknown, resources: RsiAuthorityResour
     || !isDeepStrictEqual(Object.keys(value.patches).sort(), [profile, value.result.coordinatorProfile].sort())
     || Object.values(value.patches).some(digest => !hex.test(String(digest)))
     || !record(value.update) || !isDeepStrictEqual(Object.keys(value.update).sort(),
-      ['sourceMaintenanceDigest', 'authorityDigest', 'hostPlanDigest', 'before', 'after'].sort())
+      ['sourceMaintenanceDigest', 'authorityDigest', 'hostPlanDigest', 'before', 'after',
+        ...(record(value.update) && Object.hasOwn(value.update, 'emptyAdoptionHandoff') ? ['emptyAdoptionHandoff'] : [])].sort())
     || !hex.test(String(value.update.sourceMaintenanceDigest))
     || !hex.test(String(value.update.authorityDigest))
     || !hex.test(String(value.update.hostPlanDigest))
@@ -177,6 +200,7 @@ function programUpdateOverlayShape(value: unknown, resources: RsiAuthorityResour
       ['creationReceiptDigest', 'journalDigest'].sort())
     || !hex.test(String(value.update.after.creationReceiptDigest)) || !hex.test(String(value.update.after.journalDigest))
     || typeof value.signature !== 'string' || value.signature.length > 256) fail('program update overlay shape or scope differs')
+  if (Object.hasOwn(value.update, 'emptyAdoptionHandoff')) emptyAdoptionHandoffShape(value.update.emptyAdoptionHandoff, resources, String(value.transactionId))
   const { signature, ...unsigned } = value
   const key = createPublicKey(resources.identities.host.publicKeyPem)
   if (key.asymmetricKeyType !== 'ed25519'

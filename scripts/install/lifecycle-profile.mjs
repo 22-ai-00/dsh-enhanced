@@ -8532,7 +8532,8 @@ async function continueHostUpdate({ manifest: initial, homePath, physicalHomePat
   if (migration.localSource) {
     const { verifyHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
     await verifyHostLocalSourceUpdate({ proof: sourceProof, homePath, physicalHome: homePath, selection: 'original' })
-    await verifyHostLocalSourceUpdate({ proof: sourceProof, homePath, physicalHome: stageHome, selection: 'candidate', checkLedger: ownerRepair })
+    await verifyHostLocalSourceUpdate({ proof: sourceProof, homePath, physicalHome: stageHome, selection: 'candidate', checkLedger: ownerRepair,
+      stoppedEmptyAdoption: sourceProof.protocol === OWNER_PROGRAM_PROTOCOL })
   } else await verifyRsiHostUpdate({ homePath, physicalHome: stageHome, hostPlan: plan, proof: rsiProof })
   if (JSON.stringify(await validateHostProfileUpdate({ preparation: migration.preparation,
     stagedHome: stageHome, authorizedPatchDigests: rsiProof.authorizedPatchDigests,
@@ -8565,7 +8566,8 @@ async function continueHostUpdate({ manifest: initial, homePath, physicalHomePat
   if (migration.localSource) {
     const { verifyHostLocalSourceUpdate } = await import('./host-local-source-update.mjs')
     const candidateHome = await canonicalJointCandidateHome(physicalHomePath, homePath)
-    await verifyHostLocalSourceUpdate({ proof: sourceProof, homePath, physicalHome: candidateHome, selection: 'candidate', checkLedger: ownerRepair })
+    await verifyHostLocalSourceUpdate({ proof: sourceProof, homePath, physicalHome: candidateHome, selection: 'candidate', checkLedger: ownerRepair,
+      stoppedEmptyAdoption: sourceProof.protocol === OWNER_PROGRAM_PROTOCOL })
   } else await verifyRsiHostUpdate({ homePath, physicalHome: physicalHomePath, hostPlan: plan, proof: rsiProof })
   await assertUnitUniverseStable(systemctlExecutable, manifest.unitUniverse, homePath, manifest.foreignOwnership)
   await acceptHostCandidate({ manifest, homePath, physicalHomePath, transactionRoot,

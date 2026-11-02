@@ -12,6 +12,8 @@ import { isDeepStrictEqual as same } from 'node:util'
 import { DatabaseSync } from 'node:sqlite'
 import { assertLocalSourceInstaller, localCandidateBuildBackend, nativeOriginalRefusal,
   readLocalCandidateSourceBuild } from './local-source-maintenance.mjs'
+import { inspectOwnerEmptyCreationHistory } from './owner-empty-creation-history.mjs'
+import { assertOwnerEmptyAdoptionMaintenanceApi, stageOwnerEmptyAdoptionHandoff, verifyOwnerEmptyAdoptionHandoff } from './owner-empty-adoption-handoff.mjs'
 import { composeOwnerRepairProfiles, ownerRepairPatchEquivalent,
   ownerRepairSnapshotEquivalent } from './owner-source-repair.mjs'
 
@@ -744,12 +746,27 @@ export async function captureOwnerProgramUpdate({ homePath, profile, installer, 
   return result
 }
 
+/** Authenticated stop/copy gate shared by the outer staging entry and finalizer. */
+export async function inspectOwnerProgramEmptyCreationStage({ ownerUpdate, physicalHome, installer = ownerUpdate?.installer }) {
+  assertOwner(ownerUpdate, ownerUpdate?.homePath, installer)
+  if (localCandidateBuildBackend(ownerUpdate.original?.build) !== 'docker'
+    || !exact(physicalHome) || physicalHome === ownerUpdate.homePath || inside(ownerUpdate.homePath, physicalHome)) {
+    fail('stopped empty creation inspection requires a separate Docker-origin stage')
+  }
+  const api = await apiFor(installer)
+  assertOwnerEmptyAdoptionMaintenanceApi(api)
+  const history = await inspectOwnerEmptyCreationHistory({ ownerUpdate, physicalHome, api })
+  if (history.adoption.sidecars.wal !== null || history.adoption.sidecars.shm !== null) {
+    fail('staged adoption sidecars require stopped-copy reconciliation before materialization')
+  }
+  return history
+}
+
 /** Prepare the creation Home for an owner program update. `sourceBuild` is the
  * candidate build receipt returned by the backend-agnostic reader: either the
  * Docker schema 1 `RsiBuildEnvironment` or the linux-native schema 3
- * `LinuxRsiBuildEnvironment`. Native candidates are refused until the native
- * owner-program activation path exists; Docker receipts keep their historical
- * equality checks unchanged.
+ * `LinuxRsiBuildEnvironment`. Native candidates require the authenticated empty
+ * Docker-origin handoff; Docker receipts retain their historical equality checks.
  * @param {{ownerUpdate: any, candidateHome: string, source: any,
  *   sourceBuild: any, installer?: any, signal?: AbortSignal}} input */
 export async function prepareOwnerProgramCreation({ ownerUpdate, candidateHome, source, sourceBuild,
@@ -780,7 +797,11 @@ export async function prepareOwnerProgramCreation({ ownerUpdate, candidateHome, 
     || actualSource.sourceCommit === ownerUpdate.original.source.workspace.sourceCommit) {
     fail('candidate source or build differs')
   }
+  let emptyCreationHistory
   if (actualBackend === 'linux-native') {
+    if (backendTransition !== 'docker->linux-native') fail('empty owner migration supports only Docker to Linux; native updates require a separate lineage contract')
+    assertOwnerEmptyAdoptionMaintenanceApi(api)
+    emptyCreationHistory = await inspectOwnerEmptyCreationHistory({ ownerUpdate, api })
     // The native creation build keeps its own capability state outside every
     // Docker receipt tree; the caller copies the resulting family into the
     // stage with the relocation seam instead of the Docker materializer.
@@ -795,7 +816,7 @@ export async function prepareOwnerProgramCreation({ ownerUpdate, candidateHome, 
     const receiptSha256 = hash(await bytes(join(candidateHome, 'rsi-linux-creation-builds', profile,
       'bootstrap.json'), 65_536))
     return { schemaVersion: 1, backend: 'linux-native', candidateHome, candidateSource: actualSource,
-      candidateBuild: actualBuild, creationBuild, receiptSha256,
+      candidateBuild: actualBuild, creationBuild, receiptSha256, emptyCreationHistory,
       ...(backendTransition ? { backendTransition } : {}) }
   }
   const creationBuild = await api.prepareRsiCreationBuildEnvironment({ dshHome: candidateHome,
@@ -1422,6 +1443,31 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
   // stage; a Docker candidate would silently drop that authority.
   const revision = original.manifest.pluginRevision !== undefined
   if (revision && !native) fail('owner profile revision requires the linux-native candidate backend')
+  let stageEmptyHistory
+  if (native) {
+    if (candidateCreation.backendTransition !== 'docker->linux-native'
+      || localCandidateBuildBackend(original.build) !== 'docker') fail('unsupported empty owner migration backend')
+    assertOwnerEmptyAdoptionMaintenanceApi(api)
+    stageEmptyHistory = await inspectOwnerEmptyCreationHistory({ ownerUpdate, physicalHome: stageHome, api })
+    if (!candidateCreation.stoppedEmptyCreationHistory
+      || candidateCreation.stoppedEmptyCreationHistory.digest !== stageEmptyHistory.digest) {
+      fail('stopped empty creation history changed before finalization')
+    }
+  }
+  const rebase = await rebaseFor(ownerUpdate, api, runtime)
+  const hostProfiles = api.rebaseRsiHostProfiles({ manifest: original.manifest,
+    targetPatch: original.patches[profile], coordinatorPatch: original.patches[coordinator], rebase })
+  const manifest = hostProfiles.manifest
+  const rebasedManifest = structuredClone(manifest)
+  const oldControlPlane = structuredClone(manifest.controlPlane)
+  const oldVerifier = patchConfig(api, hostProfiles.targetPatch, 'dsh-enhanced-assistant-verifier')
+  const previousRevision = original.manifest.pluginRevision
+  if (!same(oldVerifier.sourceReviews, manifest.sourceReviews)
+    || !same(oldVerifier.creationReviews, original.manifest.pluginCreation.reviews)
+    || (revision && (!same(oldVerifier.revisionReviews, previousRevision.reviews)
+      || !same(oldVerifier.revisionRegressions, previousRevision.regressions)))) {
+    fail('existing verifier review contract differs')
+  }
   const creation = native
     ? await api.materializeLinuxRsiNativeInStage({
       candidateHome: candidateCreation.candidateHome, stagePhysicalHome: stageHome,
@@ -1456,12 +1502,6 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
   const frozen = native ? freezeNativeRunnerStates({ profile, transactionId, stageHome, homePath,
     resources, source, owner: original.manifest.sourceReviews.owner, now: original.now,
     expiresAt: original.manifest.sourceReviews.expiresAt, revision, creation, api }) : undefined
-  const rebase = await rebaseFor(ownerUpdate, api, runtime)
-  const hostProfiles = api.rebaseRsiHostProfiles({ manifest: original.manifest,
-    targetPatch: original.patches[profile], coordinatorPatch: original.patches[coordinator], rebase })
-  const manifest = hostProfiles.manifest
-  const rebasedManifest = structuredClone(manifest)
-  const oldControlPlane = structuredClone(manifest.controlPlane)
   manifest.controlPlane.sourceBuild = structuredClone(native ? frozen.sourceBuild : build.sourceBuild)
   if (native) {
     manifest.linuxBuild = { schemaVersion: 1,
@@ -1516,14 +1556,6 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
   const preDigestControlPlane = structuredClone(manifest.controlPlane)
   let targetPatch = replacePatchConfig(api, hostProfiles.targetPatch,
     'dsh-enhanced-plugin-control-plane', oldControlPlane, manifest.controlPlane)
-  const oldVerifier = patchConfig(api, targetPatch, 'dsh-enhanced-assistant-verifier')
-  const previousRevision = original.manifest.pluginRevision
-  if (!same(oldVerifier.sourceReviews, manifest.sourceReviews)
-    || !same(oldVerifier.creationReviews, original.manifest.pluginCreation.reviews)
-    || (revision && (!same(oldVerifier.revisionReviews, previousRevision.reviews)
-      || !same(oldVerifier.revisionRegressions, previousRevision.regressions)))) {
-    fail('existing verifier review contract differs')
-  }
   targetPatch = replacePatchConfig(api, targetPatch, 'dsh-enhanced-assistant-verifier', oldVerifier,
     { ...oldVerifier, creationReviews: manifest.pluginCreation.reviews,
       ...(freshRevision ? { revisionReviews: manifest.pluginRevision.reviews,
@@ -1552,6 +1584,8 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
     fail('owner authority inventory changed')
   }
   assertOwnerProgramAuthorityPreserved(original.files, files, { rebase, rebaseValue: api.rebaseRsiHostValue })
+  const emptyAdoptionHandoff = native ? await stageOwnerEmptyAdoptionHandoff({ ownerUpdate, stageHome, transactionId,
+    manifest, candidateCreation, stageHistory: stageEmptyHistory, source, sourceBuild, api }) : undefined
   const oldTrustDigest = api.control.controlPlaneDigest(await api.control.loadTrustConfig(
     physical(homePath, stageHome, join(resources.configRoot, 'trust.json'))))
   const newTrustDigest = api.control.controlPlaneDigest(compiled.trust)
@@ -1589,6 +1623,7 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
       targetProfile: profile, coordinatorProfile: coordinator },
     update: { sourceMaintenanceDigest: api.control.sourceMaintenanceDigest(record),
       authorityDigest, hostPlanDigest: ownerUpdate.hostPlanDigest,
+      ...(emptyAdoptionHandoff ? { emptyAdoptionHandoff: emptyAdoptionHandoff.metadata } : {}),
       before: { files: original.fileDigests, patches: original.patchDigests,
         runtimeReceiptDigest: original.runtimeReceiptDigest,
         creationReceiptDigest: original.creationDigest, journalDigest: hash(original.journalSource) },
@@ -1606,9 +1641,10 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
     overlayDigest: api.rsiHostUpdateOverlayDigest(overlay), creationReceiptSha256: creation.receiptSha256,
     candidateReceiptSha256: creation.candidateReceiptSha256, journalDigest: hash(journalSource),
     recordDigest: api.control.sourceMaintenanceDigest(record), authorityDigest,
-    hostPlanDigest: ownerUpdate.hostPlanDigest, sourceHistoryDigest: before.sourceHistoryDigest }
+    hostPlanDigest: ownerUpdate.hostPlanDigest, sourceHistoryDigest: before.sourceHistoryDigest,
+    ...(emptyAdoptionHandoff ? { emptyAdoptionHandoff } : {}) }
   await verifyOwnerProgramUpdate({ ownerUpdate, ownerUpdateNext: next, homePath,
-    physicalHome: stageHome, installer, phase: 'after-finalize', record, checkLedger: true })
+    physicalHome: stageHome, installer, phase: 'after-finalize', record, checkLedger: true, stoppedEmptyAdoption: native })
   return next
 }
 
@@ -1628,7 +1664,8 @@ export function assertOwnerProgramOriginalComposition(composed, ownerUpdate, cur
 
 export async function verifyOwnerProgramUpdate({ ownerUpdate, ownerUpdateNext, homePath,
   physicalHome = homePath, installer = ownerUpdate?.installer, phase = 'original',
-  record, checkLedger = false }) {
+  record, checkLedger = false, stoppedEmptyAdoption = false }) {
+  if (typeof stoppedEmptyAdoption !== 'boolean' || stoppedEmptyAdoption && phase !== 'after-finalize') fail('empty handoff acceptance requires a stopped finalized candidate')
   assertOwner(ownerUpdate, homePath, installer)
   if (!['original', 'before-finalize', 'after-finalize'].includes(phase)
     || phase === 'before-finalize' && !record
@@ -1725,6 +1762,8 @@ export async function verifyOwnerProgramUpdate({ ownerUpdate, ownerUpdateNext, h
     || !same(files, original.files) || !same(patches, original.patches)) {
     fail('original owner proof changed')
   }
+  if (phase === 'after-finalize') await verifyOwnerEmptyAdoptionHandoff({ ownerUpdate, ownerUpdateNext, manifest,
+    metadata: chain.latest.update.emptyAdoptionHandoff, physicalHome, stoppedEmptyAdoption, api })
   const runtime = await api.readRsiAuthorityRuntimeReceipt({ logicalHome: homePath,
     physicalHome, profile: ownerUpdate.profile })
   if (phase === 'original' && !same(runtime, original.runtime)

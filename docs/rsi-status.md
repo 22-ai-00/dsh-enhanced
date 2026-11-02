@@ -16,7 +16,7 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 ## 当前交付与验证
 
-当前交付空业务采用账本的内部授权 CAS；安装器仍待接线。`25e6cea8` Mac 根检查通过；Linux `d91c2e37` 根检查因安装器回滚测试超时失败，原断言单独重跑通过，逐测试预算与相邻升级事务统一为 20 秒后仍需补根检查。能力专项不能代替根检查。
+当前交付空业务 owner Docker→Linux 安装器接线：已认证配置的只读历史检查、资源迁移前二查、签名迁移证明及启动前验收；完整临时 Home 升级仍待完成。`25e6cea8` Mac 根检查通过；Linux `d91c2e37` 根检查因回滚测试超时失败，`0f170381` 将该用例预算与相邻事务统一为 20 秒，原断言实际 Linux 通过，仍需补根检查。能力专项不能代替根检查。
 
 临时真实 Host `0.2.1-rc.2` 已在 Mac/Linux 运行正式 pairing、原生 sessions/automations 及五个真实插件；独立 Home、凭据只读、活服务未改。两端使用现有 `super-relay / auto_model/alwaysday1`，Mac 为 completions、Linux 为 responses，不能视为同 API 性能比较或供应商切换验收。
 
@@ -34,7 +34,7 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 全局 CLI 实际在 `~/.npm-global`，直接 `upgrade-program.mjs` 不做 CLI 自更新。活 Home、两个服务停启与原子切换尚未执行；应先完成以下缺口，再提交具体维护方案和授权范围：
 
-1. 当前实机优先接入空业务采用 CAS：完整旧授权与私有 stage 副本经 Host 核验，三业务表全空才允许同事务更新后端身份及不可变审计，owner/key/额度/期限/retention 不变。停服验收与重试重证空表；同 inode rename 可验，复制恢复及非空迁移不支持。组件尚未接安装器、外部签名 proof 或完整临时 Home 升级。
+1. 空业务采用 CAS 已接入安装器及签名 overlay。只读副本核对实际配置、完整旧授权与 schema；任何 review grant/verification 或 adoption/call/archive 历史、已配置但缺失的库都拒绝。资源迁移前和 finalizer 重查，实际维护时间不超五分钟及原期限，owner/key/额度/期限/retention 不变；两个启动前点验证同 inode 与空表，正常运行后允许新业务。仍须跑完整临时 Home 升级、就绪和回滚；复制恢复、非空迁移及 native→native 不支持。旧版真实临时准备已通过 Host/插件安装，但配置组合脚本漏保留默认项导致首次 prepare 失败，原始现场保留；修正后的真实升级未验收。
 2. 非空历史路径仍待接线：review v1 CAS 保持 used/maximum/history；v2 冻结三 lane 公开身份、最多 1,000 历史成员与 64 步精确证书封存，依赖外部可信 head。原始 TEXT、旧未知成员重新签名、审计漂移与删除历史负例已独立复核；installer、Host head、运行时消费者及非空 adoption 资格仍缺。同 digest copy-only 未支持；旧 Docker 证书不能冒认 Linux 执行资格。
 3. `ac3671fa` pnpm 应用文件 pin 专项及独立复核 PASS（Mac 44、Linux 41）：覆盖实际 native target 或标准 JS package、完整 dist/bin/包内 node_modules、实际 Node 可执行入口与选择；managed launcher 直接运行冻结 target，禁止 packageManager 自动换版本。Node 共享库（包括 libnode）及其他系统依赖仍属 host toolchain 信任边界，不是完整 Node runtime seal。
 4. pre-owner 离线预热当前绑定旧 profile metadata/lock；停服前最终候选依赖图、策略结果和真正断网安装证明待补齐，停服后原校验须保留。旧 scoped-token 候选被真实 pnpm 的 `(protected)` 输出证伪，不能恢复旧支持声明。
@@ -47,4 +47,5 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 - Linux `d91c2e37` 根检查 EXIT 1，回滚测试耗时 15,458ms 超出原 15 秒预算，其余 root 测试 1,334 passed / 5 skipped；日志 SHA-256 `98045a9ed069ce900dda2372b46b4a8d59473bb6c7eab5b007bfd53f0fbac641`。相同断言在干净 `25e6cea8` 用 `CI=1 VITEST_MAX_WORKERS=1 node node_modules/vitest/vitest.mjs run --dir tests tests/installers.spec.ts -t 'restores the original active service and preserves original source after staged package failure'` 单独通过（13,785ms，EXIT 0），证明该次旧服务/源码与 cache 清理断言完成；不抹去根失败，也未确定具体性能瓶颈。
 - v2 review 在 Mac Node 24.7/26.11、实际 Linux Node 22.23/24.7 各 100 项通过并独立复核；Mac verifier 整组 390 passed / 37 skipped。既往 WorkItems NUL 重放和 Delivery 跨预算窗口修复已被上述根检查覆盖，失败原始证据保留。
 - 空业务采用 CAS 专项在 Mac Node 24.7/26.11、实际 Linux Node 22.23/24.7 各 53 项通过；覆盖原始 TEXT、隐藏 schema 对象、完整身份/额度、同事务审计、更新后失败回滚和不同事务重试。Mac 集成相关组 110 passed / 61 skipped，类型、零警告 lint、构建及独立复核 PASS；日志 SHA-256 `9e20985ed5d31d3805bd2b71e55f0c82ab7e376915e7c0f4b9265423353d362c`；已被 Mac 根检查覆盖，Linux 根验收尚待完成。
+- 空历史检查在 Mac Node 24/26、实际 Linux Node 22/24 各 39 项通过，含独立发现并修复的异常 FD 清理；接线候选四端各 104 项通过。Mac 集成的准备/CAS/签名及恢复相关组 155 passed / 13 skipped，实际两个插件类型检查、零警告 lint、构建通过；完整根检查及真实升级仍待完成。Linux 初次专项缺少已提交组件的编译产物而失败，补构建后的日志分别为 `78fcabe4a7a0ea95ed7440719c8eba5a8a6f9f9504881623dfd56be069a4f47c`、`fee7e883ad9a39bf6aaa3f6941d5d9afcbed90e9c3aca9c93f3c6176b62f394d`，原失败保留。
 - 未发布、未合入 main、未执行 live 原生升级。冷安装/prepare、合成任务及条件跳过不替代普通使用与成长收益验收。

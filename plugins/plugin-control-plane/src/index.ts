@@ -11,7 +11,7 @@ export type { CreationCapabilityConfig, CreationCapabilityOwner, CreationCapabil
 export type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 export { inspectCreationCapabilityTaskAssociations } from './creation-capability-feedback.js'
 export type { CreationCapabilityFeedbackInput } from './creation-capability-feedback.js'
-export { creationCapabilityAuthorityDigest, validateCreationCapabilityConfig,
+export { creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig,
   verifyCreationCapabilityReceipt } from './creation-capability-journal.js'
 export * from './catalog.js'
 export * from './errors.js'
@@ -68,3 +68,7 @@ export type { LiveQualificationTerms, LiveQualificationBatch, LiveQualificationR
 export { validateSystemdHostAuthorityConfig } from './systemd-host-authority.js'
 export type { SystemdHostAuthorityConfig } from './systemd-host-authority.js'
 export * from './host-maintenance.js'
+
+// Fixed-purpose Host/installer maintenance; never mounted as a model tool.
+export { planEmptyAdoptionHandoff, applyEmptyAdoptionHandoff, verifyEmptyAdoptionHandoff } from './creation-capability-empty-handoff.js'
+export type { EmptyAdoptionScope, EmptyAdoptionPlan, EmptyAdoptionProof } from './creation-capability-empty-handoff.js'

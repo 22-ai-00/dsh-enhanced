@@ -178,7 +178,7 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 
 ## 当前限制
 
-- Linux 原生准备已接入 `--prepare-build`、本地更新候选构建和全新 `--install-owner` 配置事务。正式全新原生安装的实机就绪、原授权时限内完整 prepare、已有 owner 的 docker→linux-native 保权迁移及进程内热加载仍须分别验收；现有生产 Home 尚未迁移。旧 Docker owner 的安装重试保留原后台，不能用重复安装升级授权。原生更新候选的停机激活仍在旧镜像布局暂存处被拒绝，不搬迁 inode 固定的原生运行时。实施边界见[原生运行时](../../docs/dockerless-runtime.md)。
+- Linux 原生准备已接入 `--prepare-build`、本地更新候选构建和全新 `--install-owner` 配置事务。已有 Docker owner 的程序升级已接入空业务历史检查与停服采用授权 CAS：停服前、资源迁移前及 finalizer 重查，签名 overlay 绑定迁移计划、证明和文件身份，两个启动前验收点显式复核空表；后续正常就绪检查允许新的业务记录。配置启用但库缺失、非空 review/采用历史、sidecar、native→native 或授权不匹配会拒绝；不删库、不刷新额度和期限。完整临时 Home 升级、双服务就绪及回滚仍待实机验收，现有生产 Home 尚未迁移。旧 Docker owner 的安装重试保留原后端，不能用重复安装升级授权。实施边界见[原生运行时](../../docs/dockerless-runtime.md)。
 
 - v0.1 支持文本、受限图片描述符、文本/Markdown-card 出站、durable proposal、owner-DM 一次性工具审批、模型/权限卡片、reaction 和原生进度；模型不能提交任意 card JSON，也不能直接控制 reaction 或进度载荷。
 - 只有图片资源具备受限下载能力，且依赖 AttachmentStore 与模型图片能力；文件、音频、视频和 sticker 只进入 metadata quarantine。没有病毒扫描、附件上传或消息编辑。

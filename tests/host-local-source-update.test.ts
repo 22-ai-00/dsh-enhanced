@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({
   auxVerify: vi.fn(), auxMaterialize: vi.fn(), auxVerifyHome: vi.fn(),
   captureOwner: vi.fn(), captureSuccessor: vi.fn(), prepareCreation: vi.fn(), appendOwner: vi.fn(), stageOwner: vi.fn(), verifyOwner: vi.fn(),
   captureProgram: vi.fn(), prepareProgramCreation: vi.fn(), stageProgram: vi.fn(),
-  appendProgram: vi.fn(), verifyProgram: vi.fn(),
+  appendProgram: vi.fn(), verifyProgram: vi.fn(), inspectProgramEmpty: vi.fn(),
 }))
 const buildMocks = vi.hoisted(() => ({ docker: vi.fn(), native: vi.fn() }))
 vi.mock('../scripts/install/local-source-maintenance.mjs', async importOriginal => ({
@@ -19,6 +19,7 @@ vi.mock('../scripts/install/local-source-maintenance.mjs', async importOriginal 
 }))
 vi.mock('../scripts/install/owner-program-update.mjs', () => ({
   captureOwnerProgramUpdate: mocks.captureProgram,
+  inspectOwnerProgramEmptyCreationStage: mocks.inspectProgramEmpty,
   prepareOwnerProgramCreation: mocks.prepareProgramCreation,
   stageOwnerProgramUpdate: mocks.stageProgram,
   appendOwnerProgramSourceMaintenance: mocks.appendProgram,
@@ -473,10 +474,11 @@ test('an older installer without the backend-agnostic reader falls back to the D
 })
 
 async function nativeProgramProof(setup: Awaited<ReturnType<typeof fixture>>) {
+  mocks.inspectProgramEmpty.mockResolvedValue({ status: 'empty', digest: 'a'.repeat(64), physicalHome: setup.stageHome })
   setup.preparation.build = { sourceBuild: nativeCandidate, releaseBuild: nativeReleaseCandidate }
   const ownerUpdate = { homePath: setup.homePath, profile: setup.profile, homePlan: {}, members: [] }
   mocks.captureProgram.mockResolvedValue(ownerUpdate)
-  mocks.prepareProgramCreation.mockResolvedValue({ schemaVersion: 1, backend: 'linux-native',
+  mocks.prepareProgramCreation.mockResolvedValue({ schemaVersion: 1, backend: 'linux-native', backendTransition: 'docker->linux-native',
     candidateBuild: nativeCandidate, receiptSha256: '8'.repeat(64) })
   return prepareHostLocalSourceUpdate({ ...setup, ownerProgramUpdate: true })
 }
@@ -529,4 +531,60 @@ test('refuses a linux-native candidate outside the owner-led source update trans
     disposableHome: setup.disposableHome })).rejects.toThrow(/owner-led source update transaction/u)
   expect(setup.api.stageRsiLocalUpdateResources).not.toHaveBeenCalled()
   expect(setup.api.stageLinuxRsiNativeResources).not.toHaveBeenCalled()
+})
+
+
+test('forwards explicit stopped acceptance only for a finalized owner program candidate', async () => {
+  const setup = await fixture(), proof = await nativeProgramProof(setup)
+  const signed = await stageHostLocalSourceUpdate({ proof, homePath: setup.homePath, stageHome: setup.stageHome })
+  const finalized = { ...signed, ownerUpdateNext: { transactionId: 'tx-1' } }
+  mocks.verifyProgram.mockClear()
+  await verifyHostLocalSourceUpdate({ proof: finalized, homePath: setup.homePath,
+    physicalHome: setup.stageHome, selection: 'candidate', stoppedEmptyAdoption: true })
+  expect(mocks.verifyProgram).toHaveBeenLastCalledWith(expect.objectContaining({
+    phase: 'after-finalize', stoppedEmptyAdoption: true,
+  }))
+  await verifyHostLocalSourceUpdate({ proof: finalized, homePath: setup.homePath,
+    physicalHome: setup.stageHome, selection: 'candidate' })
+  expect(mocks.verifyProgram).toHaveBeenLastCalledWith(expect.objectContaining({ stoppedEmptyAdoption: false }))
+  await expect(verifyHostLocalSourceUpdate({ proof: finalized, homePath: setup.homePath,
+    physicalHome: setup.homePath, selection: 'original', stoppedEmptyAdoption: true }))
+    .rejects.toThrow('requires a stopped program candidate')
+})
+
+test('refuses stopped empty acceptance on repair or non-owner modes before contacting an installer', async () => {
+  for (const proof of [{ protocol: 'dsh-enhanced/host-owner-source-repair/v1', ownerRepair: {} },
+    { protocol: 'dsh-enhanced/host-local-source-update/v1' }]) {
+    mocks.assert.mockClear()
+    await expect(verifyHostLocalSourceUpdate({ proof, homePath: '/home/test', physicalHome: '/home/stage',
+      selection: 'candidate', stoppedEmptyAdoption: true })).rejects.toThrow('requires a stopped program candidate')
+    expect(mocks.assert).not.toHaveBeenCalled()
+  }
+})
+
+
+test('checks the stopped native owner stage before any relocation or source maintenance write', async () => {
+  const setup = await fixture(), proof = await nativeProgramProof(setup)
+  mocks.inspectProgramEmpty.mockRejectedValueOnce(new Error('late adoption-history-present'))
+  await expect(stageHostLocalSourceUpdate({ proof, homePath: setup.homePath, stageHome: setup.stageHome }))
+    .rejects.toThrow('late adoption-history-present')
+  expect(mocks.inspectProgramEmpty).toHaveBeenCalledWith({ ownerUpdate: proof.ownerUpdate,
+    physicalHome: setup.stageHome, installer: proof.installer })
+  expect(setup.api.stageLinuxRsiNativeResources).not.toHaveBeenCalled()
+  expect(setup.api.stageRsiLocalUpdateResources).not.toHaveBeenCalled()
+  expect(setup.api.produceRsiLocalSourceMaintenance).not.toHaveBeenCalled()
+  expect(setup.api.applyRsiSourceMaintenanceInStage).not.toHaveBeenCalled()
+  expect(mocks.appendProgram).not.toHaveBeenCalled()
+})
+
+test('disposable resource preparation is not a stopped-history proof; actual staging records a fresh gate before relocation', async () => {
+  const setup = await fixture(), proof = await nativeProgramProof(setup)
+  await stageResourcesForPreparation({ proof, homePath: setup.homePath, disposableHome: setup.disposableHome })
+  expect(mocks.inspectProgramEmpty).not.toHaveBeenCalled()
+  setup.api.stageLinuxRsiNativeResources.mockClear()
+  const stopped = { status: 'empty', digest: 'a'.repeat(64), physicalHome: setup.stageHome }
+  mocks.inspectProgramEmpty.mockResolvedValueOnce(stopped)
+  const staged = await stageHostLocalSourceUpdate({ proof, homePath: setup.homePath, stageHome: setup.stageHome })
+  expect(staged.candidateCreation.stoppedEmptyCreationHistory).toEqual(stopped)
+  expect(mocks.inspectProgramEmpty.mock.invocationCallOrder[0]).toBeLessThan(setup.api.stageLinuxRsiNativeResources.mock.invocationCallOrder[0]!)
 })
