@@ -16,7 +16,7 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 ## 当前交付与验证
 
-当前交付空业务采用账本的内部授权 CAS；安装器仍待接线。review 历史授权组件已在 `d91c2e37` 交付，Mac 根检查通过；Linux `40a405c6` 根检查通过后已快进到 `d91c2e37` 补验，远端源提交保持冻结。能力专项不能代替根检查。
+当前交付空业务采用账本的内部授权 CAS；安装器仍待接线。`25e6cea8` Mac 根检查通过；Linux `d91c2e37` 根检查因安装器回滚测试超时失败，原断言单独重跑通过，逐测试预算与相邻升级事务统一为 20 秒后仍需补根检查。能力专项不能代替根检查。
 
 临时真实 Host `0.2.1-rc.2` 已在 Mac/Linux 运行正式 pairing、原生 sessions/automations 及五个真实插件；独立 Home、凭据只读、活服务未改。两端使用现有 `super-relay / auto_model/alwaysday1`，Mac 为 completions、Linux 为 responses，不能视为同 API 性能比较或供应商切换验收。
 
@@ -43,7 +43,8 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 ## 最新检查
 
-- 两端根命令均为 `CI=1 VITEST_MAX_WORKERS=2 pnpm check`，EXIT 0；独立复核按各自 Git manifests 逐项确认 39 个测试组、38 包 dry-run pack、源提交稳定及无中止。Mac `d91c2e37`：9,241 passed / 1,872 skipped，655 文件通过 / 86 跳过，1047.34 秒，日志 SHA-256 `8722ae99e5087159c92ddd8fb92b209d833d5865775eb7509717fa2f5155bf98`。Linux `40a405c6`：10,749 passed / 301 skipped，708 文件通过 / 32 跳过，1919.79 秒，日志 SHA-256 `7b12b3e66b95ed254f3256d56e934bed718ae00664ac70a987ca0544ebf94e2b`。Linux 该结果不能认证后来新增的 v2 review 组件；`d91c2e37` Linux 根补验进行中。
+- 两端根命令均为 `CI=1 VITEST_MAX_WORKERS=2 pnpm check`。最新完整 PASS 经独立复核按各自 Git manifests 逐项确认 39 个测试组、38 包 dry-run pack、源提交稳定及无中止。Mac `25e6cea8`：9,294 passed / 1,872 skipped，656 文件通过 / 86 跳过，1133.86 秒，日志 SHA-256 `bf0b280034cf1ba3e92b071ce1b33101c3794cd822a5cb71e938f999359ae001`。Linux 最新完整 PASS 仍为 `40a405c6`：10,749 passed / 301 skipped，708 文件通过 / 32 跳过，1919.79 秒，日志 SHA-256 `7b12b3e66b95ed254f3256d56e934bed718ae00664ac70a987ca0544ebf94e2b`，不能认证后来新增的 review/空采用组件。
+- Linux `d91c2e37` 根检查 EXIT 1，回滚测试耗时 15,458ms 超出原 15 秒预算，其余 root 测试 1,334 passed / 5 skipped；日志 SHA-256 `98045a9ed069ce900dda2372b46b4a8d59473bb6c7eab5b007bfd53f0fbac641`。相同断言在干净 `25e6cea8` 用 `CI=1 VITEST_MAX_WORKERS=1 node node_modules/vitest/vitest.mjs run --dir tests tests/installers.spec.ts -t 'restores the original active service and preserves original source after staged package failure'` 单独通过（13,785ms，EXIT 0），证明该次旧服务/源码与 cache 清理断言完成；不抹去根失败，也未确定具体性能瓶颈。
 - v2 review 在 Mac Node 24.7/26.11、实际 Linux Node 22.23/24.7 各 100 项通过并独立复核；Mac verifier 整组 390 passed / 37 skipped。既往 WorkItems NUL 重放和 Delivery 跨预算窗口修复已被上述根检查覆盖，失败原始证据保留。
-- 空业务采用 CAS 专项在 Mac Node 24.7/26.11、实际 Linux Node 22.23/24.7 各 53 项通过；覆盖原始 TEXT、隐藏 schema 对象、完整身份/额度、同事务审计、更新后失败回滚和不同事务重试。Mac 集成相关组 110 passed / 61 skipped，类型、零警告 lint、构建及独立复核 PASS；日志 SHA-256 `9e20985ed5d31d3805bd2b71e55f0c82ab7e376915e7c0f4b9265423353d362c`。包含此组件的根验收尚待完成。
+- 空业务采用 CAS 专项在 Mac Node 24.7/26.11、实际 Linux Node 22.23/24.7 各 53 项通过；覆盖原始 TEXT、隐藏 schema 对象、完整身份/额度、同事务审计、更新后失败回滚和不同事务重试。Mac 集成相关组 110 passed / 61 skipped，类型、零警告 lint、构建及独立复核 PASS；日志 SHA-256 `9e20985ed5d31d3805bd2b71e55f0c82ab7e376915e7c0f4b9265423353d362c`；已被 Mac 根检查覆盖，Linux 根验收尚待完成。
 - 未发布、未合入 main、未执行 live 原生升级。冷安装/prepare、合成任务及条件跳过不替代普通使用与成长收益验收。

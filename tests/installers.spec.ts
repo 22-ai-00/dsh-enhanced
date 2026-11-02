@@ -11646,7 +11646,9 @@ snapshots:
     expect((await stat(f.dshHome)).mode & 0o777).toBe(0o755)
     expect(await readFile(join(f.dshHome,'rsi-sources/web/receipt.json'),'utf8')).toContain('old')
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
-  },15000)
+  // Includes the full staged package transaction and restoration, like the
+  // adjacent upgrade cases; measured Linux runs approach 15 seconds.
+  }, 20000)
   test('recovers a swapped candidate only after rechecking the frozen module/source identities', async () => {
     const f = await preOwnerLifecycleFixture()
     const first = runPreOwnerLifecycle(f,'local-service-upgrade',{systemdStartFailsProfile:'web'})
