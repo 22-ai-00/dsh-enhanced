@@ -136,7 +136,11 @@ Linux 创建验收要求 Control Plane 的双 UID 完整仓库构建。派发前
 
 离线维护内部 seam `CreationReviewStore.openExistingForMaintenance()` 只打开已存在的私有 canonical SQLite；`planGrantHandoff()` 冻结 transaction、installation、profile、三个 review lane 之一、文件 dev/ino、旧新 digest、maximum/used 、全库 grant/历史摘要及已有维护审计的数量和摘要。`applyGrantHandoff()` 仅 CAS 更新目标 grant 的 digest，同事务写不可变审计，不重置额度、不修改 claimed/unknown/rejected、历史证书或证据。精确重试只在完整 after snapshot 未变时幂等；新增验证或维护审计历史、计数不符、文件替换、未知 schema 或非零 SQLite user_version/application_id 均拒绝。普通运行时仍拒绝未经维护的 digest 变化。
 
-此 seam 尚未接入 installer，也不注册模型工具。调用方须在私有 stage 停止 writer，认证原 owner，并用 `configurationDigest` 绑定未扩大的 owner/key/publicKey/expiry/maximum 和冻结配置；store 不认证这些材料，不提供同 UID 恶意插件隔离。保留旧证书字节不意味着新 authority 可验证旧证书，也不证明跨 backend 采用或完整升级通过。
+内部 v2 `planGrantHandoffV2()` / `applyGrantHandoffV2()` 进一步保存三个 lane 各自的完整公开授权身份、Ed25519 公钥与指纹、owner、review/runner 有限额度和已验证配置的证据引用；除 authority digest 外的政策与额度不得变化。每步记录目标 grant 的全部既有 plan 成员及当时合法终态证书的精确封存，最多 1,000 个成员、64 步维护链，并有独立字节上限。后续新任务可以追加；旧 claimed/unknown/rejected 或未取得封存资格的旧成员，不能通过后续换签名获得历史成功资格。原成员必须保留，原终态封存逐项核验，used/maximum 和业务历史不被迁移改写。
+
+`resolveHistoricalCertificate()` 要求调用方提供数据库之外的可信当前 head、完整当前身份、installation/profile/lane/逻辑角色及当前文件身份；只有精确封存的记录可返回对应旧公开身份和证书。调用方仍须验签并执行原有当前 owner/source/backend 围栏，不能把证书自带的 authority 当作信任根。已有连接的方法使用同一只读事务，支持 live WAL；静态适配器仅支持停止 writer、checkpoint 后的文件。维护和历史读取先校验 SQLite 原始 TEXT 字节，拒绝 NUL、无效 UTF-8 或投影截断，审计文本必须为原始 canonical JSON。v1 的不透明配置摘要不能自动成为 v2 历史信任根。
+
+这些接口尚未接入 installer 或运行时消费者，也不注册模型工具。调用方须认证原 owner/配置来源和 stage 复制，持久化受信的外部 head；store 不替调用方完成这些授权，也不提供同 UID 恶意插件隔离。rename 后只能只读核验，不重放 apply；后续复制须由新授权身份与 head 绑定新文件，当前 v2 不支持同 digest 的 copy-only 恢复。保留旧证书不等于取得新 Linux 执行资格，也不证明采用收据连续性或完整升级通过。
 
 ## 已采用插件的新任务修订验收
 

@@ -5,6 +5,8 @@ import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 
+import { lineageFail, validateScope, validateRequest, same, type LineageScope, type ReviewPublicIdentity, type RowSeal, type TrustedHistoryRequest } from './review-authority-lineage.js'
+
 const SHA = /^[a-f0-9]{64}$/u
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u
 type State = 'discover-claimed' | 'contract-claimed' | 'contract-ready' | 'case-claimed' | 'cases-ready'
@@ -13,6 +15,7 @@ interface Row { plan: string; binding: string; authority: string; state: State; 
 interface Grant { authority: string; digest: string; maximum: number; used: number }
 interface Data<Certificate> { discovery?: unknown; contract?: unknown; cases?: Record<string, unknown>; certificate?: Certificate; reason?: string }
 const maintenance = Symbol('offline review grant maintenance')
+const readOnlyMaintenance = Symbol('readonly offline review history')
 const auditTable = 'creation_review_grant_handoffs'
 const auditSchema = `CREATE TABLE ${auditTable}(transaction_id TEXT PRIMARY KEY,proof TEXT NOT NULL) STRICT`
 const auditTriggers = ['UPDATE', 'DELETE'].map(action =>
@@ -44,6 +47,17 @@ export interface ReviewGrantHandoffPlan extends ReviewGrantHandoffScope {
   planDigest: string
 }
 export interface ReviewGrantHandoffProof { plan: ReviewGrantHandoffPlan; after: GrantSnapshot }
+export interface ReviewLineagePlan {
+  protocol: 'dsh-review-grant-handoff/v2'
+  scope: LineageScope
+  file: { path: string; dev: number; ino: number }
+  before: GrantSnapshot
+  auditBefore: { count: number; digest: string }
+  members: string[]
+  seals: RowSeal[]
+  planDigest: string
+}
+export interface ReviewLineageProof { plan: ReviewLineagePlan; after: GrantSnapshot }
 function validScope(scope: ReviewGrantHandoffScope): boolean {
   return [scope.transactionId, scope.installationId, scope.profileId, scope.authority].every(value => typeof value === 'string' && ID.test(value))
     && ['creation-reviews', 'revision-reviews', 'revision-regressions'].includes(scope.lane)
@@ -67,8 +81,8 @@ export class CreationReviewStore<Certificate = PluginCreationVerificationCertifi
   readonly #path: string
   readonly #identity: { dev: number; ino: number }
   #closed = false
-  constructor(path: string, mode?: typeof maintenance) {
-    this.#maintenance = mode === maintenance
+  constructor(path: string, mode?: typeof maintenance | typeof readOnlyMaintenance) {
+    this.#maintenance = mode === maintenance || mode === readOnlyMaintenance
     this.#path = path
     if (!isAbsolute(path) || resolve(path) !== path) fail('invalid path')
     const parent = dirname(path)
@@ -84,17 +98,19 @@ export class CreationReviewStore<Certificate = PluginCreationVerificationCertifi
     for (const suffix of ['-wal', '-shm', '-journal']) {
       try { privateFile(path + suffix) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     }
-    const fd = openSync(path, constants.O_RDWR | constants.O_NOFOLLOW)
+    const fd = openSync(path, (mode === readOnlyMaintenance ? constants.O_RDONLY : constants.O_RDWR) | constants.O_NOFOLLOW)
     try {
       const stat = fstatSync(fd)
       this.#identity = { dev: stat.dev, ino: stat.ino }
       if (this.#maintenance && stat.size < 100) fail('maintenance database empty')
-      this.#db = new DatabaseSync(this.#maintenance ? `${pathToFileURL(path).href}?mode=rw` : path)
+      this.#db = mode === readOnlyMaintenance
+        ? new DatabaseSync(`${pathToFileURL(path).href}?mode=ro&immutable=1`, { readOnly: true })
+        : new DatabaseSync(this.#maintenance ? `${pathToFileURL(path).href}?mode=rw` : path)
     } finally { closeSync(fd) }
     try {
       this.#checkFile()
       if (this.#maintenance) {
-        this.#db.exec('PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;')
+        if (mode !== readOnlyMaintenance) this.#db.exec('PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;')
         this.#maintenanceSchema()
       } else this.#db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
         CREATE TABLE IF NOT EXISTS grants(authority TEXT PRIMARY KEY,digest TEXT NOT NULL,maximum INTEGER NOT NULL,used INTEGER NOT NULL);
@@ -117,9 +133,31 @@ export class CreationReviewStore<Certificate = PluginCreationVerificationCertifi
       try { privateFile(this.#path + suffix) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     }
   }
-  #maintenanceSchema(): void {
-    if (!this.#maintenance || this.#closed) fail('requires existing-only maintenance')
+  #textIntegrity(): void {
+    // SQLite TEXT bindings can contain NUL/invalid UTF-8. Node 24's TEXT
+    // projection truncates at NUL, so never let that projection attest its own
+    // bytes. Check the independently returned BLOB before hashing/parsing/IDs.
+    const decoder = new TextDecoder('utf-8', { fatal: true })
+    const columns: Record<string, string[]> = {
+      sqlite_schema: ['type', 'name', 'tbl_name', 'sql'],
+      grants: ['authority', 'digest'], verifications: ['plan', 'binding', 'authority', 'state', 'data'],
+    }
+    if (this.#db.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(auditTable)) columns[auditTable] = ['transaction_id', 'proof']
+    for (const [table, names] of Object.entries(columns)) for (const column of names) {
+      const rows = this.#db.prepare(`SELECT ${column} AS text,CAST(${column} AS BLOB) AS bytes FROM ${table}`).iterate()
+      for (const row of rows) {
+        if (row.text === null && table === 'sqlite_schema' && column === 'sql') continue
+        if (typeof row.text !== 'string' || !(row.bytes instanceof Uint8Array) || row.bytes.includes(0)) lineageFail('unsafe SQLite TEXT bytes')
+        let decoded: string
+        try { decoded = decoder.decode(row.bytes) } catch { lineageFail('invalid SQLite UTF-8 bytes') }
+        if (decoded !== row.text || !Buffer.from(decoded, 'utf8').equals(Buffer.from(row.bytes))) lineageFail('SQLite TEXT projection changed bytes')
+      }
+    }
+  }
+  #maintenanceSchema(allowRuntime = false): void {
+    if (!allowRuntime && !this.#maintenance || this.#closed) fail('requires existing-only maintenance')
     this.#checkFile()
+    this.#textIntegrity()
     if (this.#db.prepare('PRAGMA user_version').get()?.user_version !== 0
       || this.#db.prepare('PRAGMA application_id').get()?.application_id !== 0) fail('maintenance metadata changed')
     const objects = this.#db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY name").all()
@@ -258,6 +296,190 @@ export class CreationReviewStore<Certificate = PluginCreationVerificationCertifi
       return Object.freeze(proof)
     })
   }
+  #lineageAudits(): ReviewLineageProof[] {
+    const exists = this.#db.prepare('SELECT name FROM sqlite_schema WHERE name=?').get(auditTable)
+    if (!exists) return []
+    const rows = this.#db.prepare(`SELECT proof FROM ${auditTable} LIMIT 65`).all()
+    if (rows.length > 64) lineageFail('chain limit')
+    return rows.map(row => {
+      if (typeof row.proof !== 'string' || Buffer.byteLength(row.proof) > 1_048_576) lineageFail('proof bound')
+      const proof = JSON.parse(row.proof) as ReviewLineageProof
+      if (canonicalGrowthJson(proof) !== row.proof) lineageFail('noncanonical audit proof')
+      this.#validateLineageProof(proof)
+      return proof
+    })
+  }
+  #validateLineageProof(proof: ReviewLineageProof): void {
+    if (!proof || Object.keys(proof).sort().join() !== 'after,plan' || !proof.plan
+      || proof.plan.protocol !== 'dsh-review-grant-handoff/v2') lineageFail('v1 is not a history root')
+    const p = proof.plan, { planDigest, ...body } = p
+    validateScope(p.scope)
+    if (Object.keys(p).sort().join() !== 'auditBefore,before,file,members,planDigest,protocol,scope,seals'
+      || hash(body) !== planDigest || !SHA.test(planDigest) || !p.file || !isAbsolute(p.file.path)
+      || !Number.isSafeInteger(p.file.dev) || !Number.isSafeInteger(p.file.ino)
+      || !p.auditBefore || !Number.isSafeInteger(p.auditBefore.count) || p.auditBefore.count < 0 || p.auditBefore.count >= 64 || !SHA.test(p.auditBefore.digest)
+      || !Array.isArray(p.members) || p.members.length > p.scope.oldIdentity.maximum
+      || p.members.some((id, i) => typeof id !== 'string' || !ID.test(id) || i > 0 && id <= p.members[i - 1]!)
+      || Buffer.byteLength(canonicalGrowthJson(p.members)) > 262_144
+      || !Array.isArray(p.seals) || p.seals.length > p.scope.oldIdentity.maximum || Buffer.byteLength(canonicalGrowthJson(p.seals)) > 262_144
+      || p.before.digest !== p.scope.oldIdentity.authority.authorityDigest || proof.after.digest !== p.scope.newIdentity.authority.authorityDigest
+      || p.before.maximum !== p.scope.oldIdentity.maximum || !Number.isSafeInteger(p.before.used) || p.before.used < 1 || p.before.used > p.before.maximum
+      || p.members.length !== p.before.used || p.seals.some(seal => !p.members.includes(seal.planId))
+      || p.seals.length > p.before.used || !SHA.test(p.before.historyDigest) || !SHA.test(p.before.grantsDigest)
+      || !SHA.test(proof.after.grantsDigest)
+      || !same({ ...p.before, digest: proof.after.digest, grantsDigest: proof.after.grantsDigest }, proof.after)) lineageFail('invalid v2 proof')
+    let previous = ''
+    for (const seal of p.seals) {
+      if (!seal || Object.keys(seal).sort().join() !== 'certificateDigest,planId,rowDigest' || !ID.test(seal.planId)
+        || seal.planId <= previous || !SHA.test(seal.rowDigest) || !SHA.test(seal.certificateDigest)) lineageFail('invalid seal')
+      previous = seal.planId
+    }
+  }
+  #lineageChain(audits: ReviewLineageProof[], headDigest: string, identity: ReviewPublicIdentity,
+    scope: Pick<LineageScope, 'installationId' | 'profileId' | 'lane' | 'logicalDatabaseScope'>): ReviewLineageProof[] {
+    const byDigest = new Map(audits.map(proof => [hash(proof), proof]))
+    const chain: ReviewLineageProof[] = [], seen = new Set<string>(), identities = new Set<string>()
+    let next: string | null = headDigest, current = identity
+    while (next !== null) {
+      if (chain.length >= 64 || seen.has(next)) lineageFail('chain cycle or bound')
+      const proof = byDigest.get(next)
+      if (!proof) lineageFail('broken chain')
+      const s = proof.plan.scope
+      if (!same(s.newIdentity, current) || ['installationId', 'profileId', 'lane', 'logicalDatabaseScope'].some(k => s[k as keyof typeof scope] !== scope[k as keyof typeof scope])) lineageFail('chain identity or scope')
+      if (identities.has(s.newIdentity.authority.authorityDigest)) lineageFail('authority ABA')
+      identities.add(s.newIdentity.authority.authorityDigest); seen.add(next); chain.push(proof)
+      current = s.oldIdentity; next = s.previousHeadDigest
+    }
+    if (identities.has(current.authority.authorityDigest)) lineageFail('authority ABA')
+    const earlierMembers = new Set<string>()
+    for (const proof of [...chain].reverse()) {
+      const members = new Set(proof.plan.members)
+      if ([...earlierMembers].some(member => !members.has(member))
+        || proof.plan.seals.some(seal => earlierMembers.has(seal.planId))) lineageFail('historical member eligibility changed')
+      for (const member of members) earlierMembers.add(member)
+    }
+    return chain
+  }
+  #terminalSeals(identity: ReviewPublicIdentity, excludedMembers = new Set<string>()): RowSeal[] {
+    const rows = this.#db.prepare("SELECT * FROM verifications WHERE authority=? AND state='certificate' ORDER BY plan COLLATE BINARY LIMIT 1001")
+      .all(identity.authority.authorityId) as unknown as Row[]
+    if (rows.length > identity.maximum) lineageFail('terminal bound')
+    const seals: RowSeal[] = []
+    for (const row of rows) {
+      if (excludedMembers.has(row.plan)) continue
+      const data = JSON.parse(row.data) as { certificate?: { authority?: unknown; plan?: { id?: unknown } } }
+      // Previous identities remain eligible only through their earlier seals.
+      if (!same(data.certificate?.authority, identity.authority)) continue
+      if (data.certificate?.plan?.id !== row.plan) lineageFail('certificate plan mismatch')
+      seals.push({ planId: row.plan, rowDigest: hash(row), certificateDigest: hash(data.certificate) })
+    }
+    if (Buffer.byteLength(canonicalGrowthJson(seals)) > 262_144) lineageFail('seal bytes bound')
+    return seals
+  }
+  #members(authority: string): string[] {
+    const rows = this.#db.prepare('SELECT plan FROM verifications WHERE authority=? ORDER BY plan COLLATE BINARY LIMIT 1001').all(authority)
+    if (rows.length > 1000) lineageFail('membership limit')
+    return rows.map(row => String(row.plan))
+  }
+  #priorMembers(audits: ReviewLineageProof[]): Set<string> { return new Set(audits.flatMap(proof => proof.plan.members)) }
+  #checkPrevious(scope: LineageScope, audits: ReviewLineageProof[]): void {
+    if (scope.previousHeadDigest === null) {
+      if (audits.length) lineageFail('existing history requires previous head')
+      return
+    }
+    const chain = this.#lineageChain(audits, scope.previousHeadDigest, scope.oldIdentity, scope)
+    const currentMembers = new Set(this.#members(scope.oldIdentity.authority.authorityId))
+    if (chain.some(proof => proof.plan.members.some(member => !currentMembers.has(member)))) lineageFail('historical membership removed')
+    if (chain.length !== audits.length || chain.some(p => p.plan.scope.oldIdentity.authority.authorityDigest === scope.newIdentity.authority.authorityDigest
+      || p.plan.scope.newIdentity.authority.authorityDigest === scope.newIdentity.authority.authorityDigest)) lineageFail('branch or authority ABA')
+    for (const proof of chain) for (const seal of proof.plan.seals) {
+      const row = this.#db.prepare('SELECT * FROM verifications WHERE plan=?').get(seal.planId) as Row | undefined
+      if (!row || row.state !== 'certificate' || hash(row) !== seal.rowDigest
+        || hash((JSON.parse(row.data) as { certificate: unknown }).certificate) !== seal.certificateDigest) lineageFail('inherited seal changed')
+    }
+  }
+  planGrantHandoffV2(scope: LineageScope): Readonly<ReviewLineagePlan> {
+    validateScope(scope)
+    return this.#transaction(() => {
+      const before = this.#snapshot(scope.oldIdentity.authority.authorityId)
+      if (before.digest !== scope.oldIdentity.authority.authorityDigest || before.maximum !== scope.oldIdentity.maximum) lineageFail('old grant identity')
+      const audits = this.#lineageAudits()
+      this.#checkPrevious(scope, audits)
+      const body = { protocol: 'dsh-review-grant-handoff/v2' as const, scope: structuredClone(scope),
+        file: { path: this.#path, ...this.#identity }, before, auditBefore: this.#auditSnapshot(), members: this.#members(scope.oldIdentity.authority.authorityId), seals: this.#terminalSeals(scope.oldIdentity, this.#priorMembers(audits)) }
+      return structuredClone({ ...body, planDigest: hash(body) })
+    })
+  }
+  applyGrantHandoffV2(plan: ReviewLineagePlan): Readonly<ReviewLineageProof> {
+    // Validate via a synthetic after snapshot before any database mutation.
+    const { planDigest: _, ...body } = plan
+    validateScope(plan.scope)
+    if (hash(body) !== plan.planDigest || !same(plan.file, { path: this.#path, ...this.#identity })) lineageFail('plan or file changed')
+    return this.#transaction(() => {
+      const current = this.#snapshot(plan.scope.oldIdentity.authority.authorityId), audits = this.#lineageAudits()
+      const prior = audits.find(p => p.plan.scope.transactionId === plan.scope.transactionId)
+      if (prior) {
+        if (!same(prior.plan, plan) || !same(prior.after, current) || !same(this.#auditSnapshot(plan.scope.transactionId), plan.auditBefore)
+          || this.#auditSnapshot().count !== plan.auditBefore.count + 1 || !same(this.#members(plan.scope.oldIdentity.authority.authorityId), plan.members)
+          || !same(this.#terminalSeals(plan.scope.oldIdentity, this.#priorMembers(audits.filter(p => p !== prior))), plan.seals)) lineageFail('retry drift')
+        return prior
+      }
+      this.#checkPrevious(plan.scope, audits)
+      if (audits.length >= 64 || !same(current, plan.before) || !same(this.#auditSnapshot(), plan.auditBefore)
+        || !same(this.#members(plan.scope.oldIdentity.authority.authorityId), plan.members)
+        || !same(this.#terminalSeals(plan.scope.oldIdentity, this.#priorMembers(audits)), plan.seals)) lineageFail('snapshot or seals changed')
+      const after = this.#snapshot(plan.scope.oldIdentity.authority.authorityId, plan.scope.newIdentity.authority.authorityDigest)
+      const proof = { plan, after }
+      this.#validateLineageProof(proof)
+      if (!this.#db.prepare('SELECT name FROM sqlite_schema WHERE name=?').get(auditTable)) this.#db.exec([auditSchema, ...auditTriggers].join(';'))
+      const changed = this.#db.prepare('UPDATE grants SET digest=? WHERE authority=? AND digest=? AND maximum=? AND used=?')
+        .run(after.digest, plan.scope.oldIdentity.authority.authorityId, current.digest, current.maximum, current.used)
+      if (changed.changes !== 1) lineageFail('CAS failed')
+      this.#db.prepare(`INSERT INTO ${auditTable}(transaction_id,proof) VALUES(?,?)`).run(plan.scope.transactionId, canonicalGrowthJson(proof))
+      if (!same(this.#snapshot(plan.scope.oldIdentity.authority.authorityId), after)) lineageFail('history changed')
+      return structuredClone(proof)
+    })
+  }
+  /** Same existing connection, one read transaction. Does not claim, migrate, or change quota. */
+  resolveHistoricalCertificate(request: TrustedHistoryRequest): Readonly<{ certificate: Certificate; identity: ReviewPublicIdentity }> {
+    validateRequest(request)
+    this.#checkFile()
+    if (!same(request.currentFileIdentity, this.#identity)) lineageFail('current file identity')
+    if (this.#closed) lineageFail('closed')
+    this.#db.exec('BEGIN')
+    try {
+      this.#maintenanceSchema(true)
+      const audits = this.#lineageAudits(), chain = this.#lineageChain(audits, request.headDigest, request.currentIdentity, request)
+      if (chain.length !== audits.length || !same(chain[0]?.plan.file, { path: chain[0]?.plan.file.path, ...request.currentFileIdentity })) lineageFail('current head file or branch')
+      const currentMembers = new Set(this.#members(request.currentIdentity.authority.authorityId))
+      if (chain.some(proof => proof.plan.members.some(member => !currentMembers.has(member)))) lineageFail('historical membership removed')
+      const grant = this.#db.prepare('SELECT * FROM grants WHERE authority=?').get(request.currentIdentity.authority.authorityId) as Grant | undefined
+      const count = Number(this.#db.prepare('SELECT COUNT(*) AS n FROM verifications WHERE authority=?').get(request.currentIdentity.authority.authorityId)?.n)
+      if (!grant || grant.digest !== request.currentIdentity.authority.authorityDigest || grant.maximum !== request.currentIdentity.maximum
+        || !Number.isSafeInteger(grant.used) || grant.used !== count || grant.used < chain[0]!.after.used || grant.used > grant.maximum) lineageFail('current grant changed')
+      const row = this.#db.prepare('SELECT * FROM verifications WHERE plan=?').get(request.planId) as Row | undefined
+      if (!row || row.state !== 'certificate' || row.authority !== grant.authority || Buffer.byteLength(row.data) > 262_144) lineageFail('exact terminal row required')
+      const data = JSON.parse(row.data) as { certificate: Certificate }
+      if (canonicalGrowthJson(data) !== row.data || !data.certificate || (data.certificate as { plan?: { id?: unknown } }).plan?.id !== row.plan) lineageFail('terminal data')
+      const rowDigest = hash(row), certificateDigest = hash(data.certificate)
+      const sealed = chain.find(proof => proof.plan.seals.some(seal => seal.planId === row.plan && seal.rowDigest === rowDigest && seal.certificateDigest === certificateDigest))
+      if (!sealed || !same((data.certificate as { authority?: unknown }).authority, sealed.plan.scope.oldIdentity.authority)) lineageFail('unsealed terminal row')
+      this.#checkFile()
+      this.#db.exec('COMMIT')
+      return structuredClone({ certificate: data.certificate, identity: sealed.plan.scope.oldIdentity })
+    } catch (error) { this.#db.exec('ROLLBACK'); throw error }
+  }
+  /** Offline checkpointed adapter only. Live runtime should use its already-open store method above. */
+  static resolveHistoricalCertificate<Certificate = PluginCreationVerificationCertificate>(path: string, request: TrustedHistoryRequest): Readonly<{ certificate: Certificate; identity: ReviewPublicIdentity }> {
+    validateRequest(request)
+    for (const suffix of ['-wal', '-journal']) {
+      try { if (lstatSync(path + suffix).size) lineageFail('offline checkpoint required') }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    }
+    const store = new CreationReviewStore<Certificate>(path, readOnlyMaintenance)
+    try { return store.resolveHistoricalCertificate(request) } finally { store.close() }
+  }
+
   close(): void { if (!this.#closed) { this.#closed = true; this.#db.close() } }
   #transaction<T>(callback: () => T): T {
     if (this.#closed) fail('closed')

@@ -16,7 +16,7 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 ## 当前交付与验证
 
-当前先修复 Linux 根全检暴露的预算测试时钟前提，再复验；同时独立复核 owner 升级的历史授权连续性候选。候选未接入安装器，能力专项不能代替根检查。
+当前交付 review 历史授权连续性的内部组件；安装器及采用能力仍待接线。Linux 正在对预算测试修复后的 `40a405c6` 重新全检，远端源提交保持冻结；能力专项不能代替根检查。
 
 临时真实 Host `0.2.1-rc.2` 已在 Mac/Linux 运行正式 pairing、原生 sessions/automations 及五个真实插件；独立 Home、凭据只读、活服务未改。两端使用现有 `super-relay / auto_model/alwaysday1`，Mac 为 completions、Linux 为 responses，不能视为同 API 性能比较或供应商切换验收。
 
@@ -32,7 +32,7 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 全局 CLI 实际在 `~/.npm-global`，直接 `upgrade-program.mjs` 不做 CLI 自更新。活 Home、两个服务停启与原子切换尚未执行；应先完成以下缺口，再提交具体维护方案和授权范围：
 
-1. `eaf835dc` 已实现 review store existing-only 离线 CAS：冻结文件、业务及维护审计，只变更 grant digest，保持 used/maximum/history，拒绝旧事务 ABA。三个 review lane 的 installer 接线、可信旧证书身份，以及 `creation-adoptions.sqlite` 的采用收据连续性仍待完成。旧 Docker 证书不能冒认 Linux 验收资格。
+1. review store 的 v1 离线 CAS 保持 used/maximum/history；新增 v2 内部组件冻结三个 lane 的完整公开身份、有限额度、历史成员与精确证书封存，依赖外部可信 head 回读旧身份。原始 SQLite TEXT 字节、旧未知成员重新签名、审计漂移和删除旧成员的负例经独立复核。最多 1,000 成员、64 步；尚未接入 installer、Host 签名 head、运行时消费者及 `creation-adoptions.sqlite`。同 digest 的 copy-only 恢复未支持；旧 Docker 证书不能冒认 Linux 执行资格。
 2. `ac3671fa` pnpm 应用文件 pin 专项及独立复核 PASS（Mac 44、Linux 41）：覆盖实际 native target 或标准 JS package、完整 dist/bin/包内 node_modules、实际 Node 可执行入口与选择；managed launcher 直接运行冻结 target，禁止 packageManager 自动换版本。Node 共享库（包括 libnode）及其他系统依赖仍属 host toolchain 信任边界，不是完整 Node runtime seal。
 3. pre-owner 离线预热当前绑定旧 profile metadata/lock；停服前最终候选依赖图、策略结果和真正断网安装证明待补齐，停服后原校验须保留。旧 scoped-token 候选被真实 pnpm 的 `(protected)` 输出证伪，不能恢复旧支持声明。
 
@@ -42,6 +42,7 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 - Mac `ee346ce2` 根 `CI=1 VITEST_MAX_WORKERS=2 pnpm check` EXIT 0：9,181 passed / 1,872 skipped，654 文件通过 / 86 条件跳过，39 组测试、38 包 dry-run pack，1142.86 秒。独立复核逐项确认预期测试组、包清单、稳定源提交及无中止记录；日志 SHA-256 `a8fee1e0fd8b965d443d29bc9042ddfd8e8fd34c68029a1a64d73a38ffcc27ca`。条件跳过不建立 Linux 行为证据。
 - `6dab65f2`：WorkItems 226 项、Policy 459 passed / 2 skipped；`eaf835dc`：review grant 62 项；`c2b21905`：WorkItems 239 项。相关类型、lint、构建和各自独立复核 PASS。
-- Linux `ee346ce2` 根 EXIT 1：已汇总 7,805 passed / 293 skipped / 1 failed，37 组完成、未打包；日志 SHA-256 `9c5b4d043a6822633a6767e152cc3df46e0391a1a752afd559631c693a8eda02`。WorkItems 244 项及原 Delivery 101 项分页用例（1.435 秒）通过；新的跨账号权限回复预算用例失败。两种 Node 均能通过跨越合法 60 秒预算窗口复现相同断言，旧根运行的已清理数据库无法回溯证明实际跨窗。测试现固定该用例的时钟，保留真实 timers、同窗拒绝与下窗放行断言；生产额度和 15 秒限制不变，Linux 整合复验待完成。
+- Linux `ee346ce2` 根 EXIT 1：已汇总 7,805 passed / 293 skipped / 1 failed，37 组完成、未打包；日志 SHA-256 `9c5b4d043a6822633a6767e152cc3df46e0391a1a752afd559631c693a8eda02`。WorkItems 244 项及原 Delivery 101 项分页用例（1.435 秒）通过；跨账号权限回复预算测试失败。两种 Node 均能通过跨越合法 60 秒窗口复现同一断言，但旧根数据库已清理，实际跨窗无法回溯证明。`40a405c6` 固定测试时钟，保留真实 timers、同窗拒绝与下窗放行；Mac Node 24/26、实际 Linux 各 83 项通过并独立复核，生产额度及 15 秒限制不变，根复验进行中。
 - `ee346ce2` 修复 Node 24.7 SQLite 的 NUL 报告键投影截断：重放在 SQL 中比较完整键及实际规范化报告，同键不同持久化内容拒绝；schema、旧键、owner/Policy/lease 和额度不变。Mac Node 24.7/26.11 和实际 Linux 各 244 项通过，类型、lint、构建及独立复核 PASS；上述 Mac 根检查已覆盖此修复，Linux 根仍受 Delivery 测试失败阻断。
+- v2 review 专项在 Mac Node 24.7/26.11、实际 Linux Node 22.23/24.7 各 100 项通过；包含原 v1 40 项、三类真实签名域、多次迁移、WAL、1000 成员及 64 步边界。独立复核 PASS；Mac verifier 整组按根检查既定 15 秒限制为 390 passed / 37 skipped，EXIT 0，日志 SHA-256 `c35c1ac3c7dfed6dc596e5c193ef248cbe49b60c9ebc943b861a50d3bd3fae70`。早先受限执行及遗漏根参数的失败记录保留；整合后的根检查尚待完成。
 - 未发布、未合入 main、未执行 live 原生升级。冷安装/prepare、合成任务及条件跳过不替代普通使用与成长收益验收。
