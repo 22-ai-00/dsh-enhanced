@@ -1,0 +1,152 @@
+import type { Context } from '@deepseek-ai/cordis'
+import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import type { AutomationRunnerInput, AutomationRunnerResult } from './coordinator.js'
+import { runHostNativeAgent } from './native-agent-execution.js'
+import type { HostAgentExecutionContract, HostAgentExecutionResult, HostAutomationExecutorInput } from './types.js'
+
+/** Codepoint order, independent of host locale. Includes the complete schema objects. */
+export function hostAgentToolSchemaDigest(schemas: readonly { name: string }[]): string {
+  const names = schemas.map(schema => schema.name)
+  if (names.some(name => typeof name !== 'string' || name.length === 0) || new Set(names).size !== names.length) throw new Error('assistant-automations: invalid tool schema names')
+  return acceptanceDigest([...schemas].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+}
+function contractSnapshot(value: HostAgentExecutionContract): Readonly<HostAgentExecutionContract> {
+  const contract = structuredClone(value)
+  const keys = ['provider','model','reasoningEffort','prompt','allowedTools','toolSchemaDigest','maxModelCalls','maxToolCalls','maxOutputTokens','timeoutMs']
+  if (Object.keys(contract).some(key => !keys.includes(key)) || typeof contract.provider !== 'string' || !contract.provider.trim()
+    || typeof contract.model !== 'string' || !contract.model.trim() || typeof contract.prompt !== 'string' || !contract.prompt.trim()
+    || Buffer.byteLength(contract.prompt) > 65536 || contract.reasoningEffort !== undefined && (typeof contract.reasoningEffort !== 'string' || !contract.reasoningEffort.trim())
+    || !Array.isArray(contract.allowedTools) || contract.allowedTools.some(name => typeof name !== 'string' || !name.trim())
+    || new Set(contract.allowedTools).size !== contract.allowedTools.length || !/^[a-f0-9]{64}$/u.test(contract.toolSchemaDigest)
+    || !Number.isSafeInteger(contract.maxModelCalls) || contract.maxModelCalls < 1 || contract.maxModelCalls > 100
+    || !Number.isSafeInteger(contract.maxToolCalls) || contract.maxToolCalls < 0 || contract.maxToolCalls > 1000
+    || !Number.isSafeInteger(contract.maxOutputTokens) || contract.maxOutputTokens < 1 || contract.maxOutputTokens > 131072
+    || !Number.isSafeInteger(contract.timeoutMs) || contract.timeoutMs < 1 || contract.timeoutMs > 3600000) throw new Error('assistant-automations: invalid Host Agent contract')
+  const { reasoningEffort, ...required } = contract
+  return Object.freeze({ ...required, ...(reasoningEffort === undefined ? {} : { reasoningEffort }), allowedTools: Object.freeze([...contract.allowedTools].sort()) })
+}
+interface Invocation {
+  readonly input: AutomationRunnerInput
+  readonly controller: AbortController
+  readonly signal: AbortSignal
+  active: boolean
+  consumed: boolean
+  pending?: Promise<AutomationRunnerResult>
+  drain?: Promise<void>
+  finished?: boolean
+  result?: AutomationRunnerResult
+}
+/** Internal capability owner. This object and its runner key never leave the service. */
+export class HostAgentExecutions {
+  readonly #key = Object.freeze({})
+  readonly #invocations = new WeakMap<object, Invocation>()
+  readonly #live = new Set<Invocation>()
+  #active = true
+  #accepting = true
+  constructor(private readonly ctx: Context, private readonly policy: AssistantPolicyService) {}
+  runnerKey(): object { return this.#key }
+  open(key: object, invocation: Readonly<HostAutomationExecutorInput>, input: AutomationRunnerInput, freshReservation: boolean): (() => Promise<AutomationRunnerResult | undefined>) | undefined {
+    if (key !== this.#key || !this.#active || !this.#accepting || !freshReservation || input.occurrence.dryRun || input.task.attemptCount !== 1
+      || input.automation.definition.retrySafety !== 'never' || input.automation.definition.maxRetries !== 0
+      || input.automation.definition.budgetId === undefined || input.signal.aborted || invocation.signal.aborted) return undefined
+    const controller = new AbortController()
+    const snapshot = JSON.parse(JSON.stringify({ automation: input.automation, occurrence: input.occurrence, task: input.task, sessionId: input.sessionId })) as Omit<AutomationRunnerInput, 'signal'>
+    const state: Invocation = { input: { ...snapshot, signal: input.signal }, controller, signal: AbortSignal.any([invocation.signal, controller.signal]), active: true, consumed: false }
+    this.#invocations.set(invocation, state); this.#live.add(state)
+    return async () => {
+      state.active = false
+      this.#invocations.delete(invocation)
+      state.controller.abort('host-executor-ended')
+      try {
+        if (state.pending) await drainInvocation(state)
+        if (state.consumed && !state.finished) throw new Error('assistant-automations: executor abandoned its Agent execution')
+        return state.result
+      } finally { this.#live.delete(state) }
+    }
+  }
+  run(invocation: HostAutomationExecutorInput, value: HostAgentExecutionContract): Promise<Readonly<HostAgentExecutionResult>> {
+    const execution = this.execute(invocation, value)
+    void execution.catch(() => {})
+    return execution
+  }
+  private async execute(invocation: HostAutomationExecutorInput, value: HostAgentExecutionContract): Promise<Readonly<HostAgentExecutionResult>> {
+    const state = this.#invocations.get(invocation)
+    if (!this.#active || !this.#accepting || !state?.active || state.consumed || state.signal.aborted) throw new Error('assistant-automations: exact live reserved Host invocation is required')
+    const contract = contractSnapshot(value)
+    if (contract.timeoutMs > state.input.automation.definition.timeoutMs) throw new Error('assistant-automations: Host Agent deadline exceeds occurrence contract')
+    const contractDigest = acceptanceDigest(contract)
+    const now = Date.now(), startedAt = state.input.task.updatedAt
+    const occurrenceDeadlineAt = startedAt + state.input.automation.definition.timeoutMs
+    if (!Number.isSafeInteger(startedAt) || startedAt > now || !Number.isSafeInteger(occurrenceDeadlineAt)) throw new Error('assistant-automations: Host occurrence start time is invalid')
+    const deadlineAt = Math.min(occurrenceDeadlineAt, now + contract.timeoutMs)
+    const deadline = new AbortController()
+    const signal = AbortSignal.any([state.signal, deadline.signal])
+    // Contract cloning can invoke getters which synchronously consume or revoke this invocation.
+    if (!this.#active || !this.#accepting || this.#invocations.get(invocation) !== state
+      || !state.active || state.consumed || state.signal.aborted) throw new Error('assistant-automations: exact live reserved Host invocation is required')
+    const check = () => {
+      if (Date.now() >= deadlineAt) deadline.abort('host-agent-deadline')
+      signal.throwIfAborted()
+      if (!this.#active || !this.#accepting || !state.active) throw new Error('assistant-automations: Host Agent invocation is no longer active')
+    }
+    check()
+    state.consumed = true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let removeAbort: (() => void) | undefined
+    try {
+      timer = setTimeout(() => deadline.abort('host-agent-deadline'), Math.max(0, deadlineAt - Date.now()))
+      timer.unref?.()
+      const pending = runHostNativeAgent(this.ctx, this.policy, state.input, contract, contractDigest, signal, Object.freeze({ deadlineAt, check }))
+      state.pending = pending
+      // Observe rejection even when a faulty executor drops its returned promise.
+      void pending.catch(() => {})
+      const cancelled = new Promise<never>((_, reject) => {
+        const abort = () => reject(new Error('assistant-automations: Host Agent interrupted'))
+        if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true })
+        removeAbort = () => signal.removeEventListener('abort', abort)
+      })
+      const result = await Promise.race([pending, cancelled])
+      check()
+      const snapshot = snapshotResult(result)
+      check()
+      state.result = snapshot
+      state.finished = true
+      return Object.freeze({ ...snapshot, contractDigest })
+    } finally { removeAbort?.(); clearTimeout(timer); if (signal.aborted) await drainInvocation(state) }
+  }
+  suspend(): void {
+    this.#accepting = false
+    for (const state of this.#live) { state.active = false; state.controller.abort('automations-stopped') }
+  }
+  resume(): void { if (this.#active) this.#accepting = true }
+  async drain(): Promise<void> { await Promise.all([...this.#live].map(async state => { if (state.pending) await drainInvocation(state) })) }
+  async dispose(): Promise<void> { this.#active = false; this.suspend(); await this.drain() }
+}
+function snapshotResult(result: AutomationRunnerResult): AutomationRunnerResult {
+  const descriptors = Object.getOwnPropertyDescriptors(result)
+  const allowed = new Set(['outcome','output','usage','sessionId','diagnostic','quiescent'])
+  if (Reflect.ownKeys(result).some(key => typeof key !== 'string' || !allowed.has(key))
+    || Object.values(descriptors).some(descriptor => !descriptor.enumerable || !Object.hasOwn(descriptor, 'value'))
+    || !['outcome','output','usage'].every(key => Object.hasOwn(descriptors, key))) throw new Error('assistant-automations: native receipt shape is invalid')
+  const body = Object.fromEntries(Object.entries(descriptors).filter(([key, descriptor]) => descriptor.value !== undefined || ['outcome','output','usage'].includes(key))
+    .map(([key, descriptor]) => [key, descriptor.value]))
+  const detached = JSON.parse(acceptanceCanonicalJson(body)) as AutomationRunnerResult
+  const freeze = (value: unknown): void => {
+    if (value === null || typeof value !== 'object') return
+    for (const item of Object.values(value)) freeze(item)
+    Object.freeze(value)
+  }
+  freeze(detached)
+  return detached
+}
+function drainInvocation(state: Invocation): Promise<void> {
+  // Do not cache empty success: consumption may not have started yet.
+  if (!state.pending) return Promise.resolve()
+  return state.drain ??= boundedDrain(state.pending)
+}
+async function boundedDrain(pending: Promise<unknown>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try { await Promise.race([pending.then(() => {}, () => {}), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('assistant-automations: Host Agent teardown unconfirmed')), 2000) })]) }
+  finally { if (timer) clearTimeout(timer) }
+}

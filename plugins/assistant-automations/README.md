@@ -198,3 +198,13 @@ Growth 的 canary 检查只接受 Evaluation 按 exact run 返回的 ready canon
 Promoted Growth automations retain their exact canary run identity. Owner correction or withdrawal rechecks canonical eligibility immediately, on restart, and before every coordinator dispatch tick (including timer/internal ticks). Unknown, conflicting, partial or failed canonical objectives pause the exact deployed definition by version/digest CAS and retain a durable rollback receipt; unrelated definitions remain untouched. A newer positive owner judgement does not revoke an already successful deployment. Activation with a lost acknowledgement is recovered from the exact active version before rollback. Failed rollback remains retryable and prevents dispatch of a still-unsafe exact deployment.
 
 准备运行使用 Host-only `modelOnly` 投影：仅允许空工具契约，解析预设身份但不装载该预设的工具与 persona；原生 Agent loop、选定 provider/model、Policy 和会话持久化照常使用。每份准备最多分派一次模型请求；失败保存稳定诊断，不保存异常原文，也不自动重试。
+
+## Host occurrence 的有界原生 Agent
+
+Host executor 可调用 `service.runAgentForHostExecution(invocation, contract)`。`invocation` 必须是正在执行的真实 HostRunner 交给注册 executor 的同一个冻结对象：生产模式、首次 attempt、`retrySafety: never`、`maxRetries: 0`，并且本次已获得新的 `automation-runs` 预算预留。即使普通 Host 部署允许无预算执行，该接口仍拒绝无预算、preview、恢复重放、结构复制、跨服务对象、已结束或取消的调用。契约验证通过后能力消费一次，之后不能更换契约再运行。
+
+契约包含 `provider`、`model`、可选 `reasoningEffort`、`prompt`、`allowedTools`、`toolSchemaDigest`、`maxModelCalls`、`maxToolCalls`、`maxOutputTokens`、`timeoutMs`。effort 缺省表示已经观察到的无 effort；适配器默认后来出现 effort 也会拒绝，不会自动改供应者。工具摘要使用导出的 `hostAgentToolSchemaDigest(schemas)`：按工具名 codepoint 排序，对完整 schema 使用 `acceptanceDigest`。名称必须唯一；实际工具集合须完全一致，不能新增未知工具或同名替换 schema。调用者不提供 preset 或 setup 回调；workspace、preset 元数据及 Session ID 来自真实 occurrence，运行时不挂载 preset。
+
+Automations 与普通 DshRunner 共享原生 Agent 执行代码及 DSH Loop。新路径在实际准备完成的请求处检查供应者、effort（包括无值）、精确工具 schema 和输出 token 配置；每次工具执行前再检查当前 schema 和取消信号。模型调用最多 100 次、工具最多 1000 次、每次请求最多 131072 个输出 token、最长 1 小时且不超过 occurrence 原期限；调用者通常应设更小值。请求强制输出 token 上限，并拒绝适配器报告的超额输出；额外以每输出 token 32 字节限制文本、推理与工具参数增量的缓冲量，这不是本地 tokenization 证明。契约的 canonical JSON 总量以及包含完整 output、usage、diagnostic 的返回收据各自还有 1 MiB 上限；契约超限在消费能力和创建定时器前拒绝，返回收据超限保守进入 unknown，不能把缓冲字节预算当作最终收据容量。Session 的 `plugin:assistant-automations/host-agent-contract` 记录冻结契约和摘要，权威 run 记录关联实际 Session 与使用量。
+
+Agent 生命周期由 Automations 持有。注册卸载、调用取消、executor 提前返回或服务停止会先撤销调用能力并中止 Agent，再共享同一次最多 2 秒的回收确认（API、registry 和服务停止不会重新开始计时）；迟到的创建/结果不能成为成功。不能确认回收时保留 unknown、可能副作用和禁止重试，不声明业务任务成功。HostRunner 仍是唯一预算结算者，内部原生执行不再预留第二份预算；结算结果不明确时不重复 finalize。该 API 只证明本次 Host occurrence 具有有界执行能力，不证明其输入继承某个原始用户任务的供应者或动作授权，消费者必须独立核对来源与 owner 授权。它不注册模型工具，也不新增网络、文件或命令权限；实际工具原有的 Policy、凭据与隔离边界继续生效。

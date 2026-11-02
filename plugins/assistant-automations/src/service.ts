@@ -1,3 +1,5 @@
+import { HostAgentExecutions } from './host-agent-execution.js'
+import type { HostAgentExecutionContract, HostAgentExecutionResult, HostAutomationExecutorInput } from './types.js'
 import { isAbsolute, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -391,7 +393,8 @@ export class AssistantAutomationsService extends Service implements
   private readonly policy: AssistantPolicyService
   private readonly preparationRunner: AutomationPreparationRunner
   private readonly coordinator: AutomationCoordinator
-  private readonly hostExecutors = new HostAutomationExecutorRegistry()
+  readonly #hostAgents: HostAgentExecutions
+  private readonly hostExecutors: HostAutomationExecutorRegistry
   private readonly schedulerWakeListeners = new Set<() => void>()
   private readonly hostShutdowns = new Set<() => Promise<void>>()
   private readonly config: Required<Config>
@@ -432,6 +435,8 @@ export class AssistantAutomationsService extends Service implements
     if (policy === undefined) throw new Error('assistant-automations: assistantPolicy service is required')
     this.config = config
     this.policy = policy
+    this.#hostAgents = new HostAgentExecutions(ctx, policy)
+    this.hostExecutors = new HostAutomationExecutorRegistry(this.#hostAgents)
     this.preparationRunner = new AutomationPreparationRunner(ctx, policy)
     const initialDelivery = ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
     this.approvalDelivery = initialDelivery
@@ -450,7 +455,7 @@ export class AssistantAutomationsService extends Service implements
       }),
       new HostAutomationRunner(this.hostExecutors, policy, {
         allowUnbudgetedExecution: config.allowUnbudgetedExecution,
-      }),
+      }, this.#hostAgents.runnerKey()),
     ))
     this.coordinator = new AutomationCoordinator({
       beforeTick: () => this.notifySchedulerWake(),
@@ -526,6 +531,7 @@ export class AssistantAutomationsService extends Service implements
     ctx.inject(['tools'], toolsCtx => registerAutomationTools(toolsCtx, this))
     ctx.effect(() => async () => {
       this.stopping = true
+      this.#hostAgents.suspend()
       this.schedulerWakeListeners.clear()
       try {
         const stopped = await Promise.allSettled([...this.hostShutdowns].map(stop => stop()))
@@ -536,7 +542,9 @@ export class AssistantAutomationsService extends Service implements
         this.acceptanceSink = undefined
         this.presentationSink?.dispose()
         this.coordinator.setEvaluationRecorder(undefined)
-        try { await this.coordinator.stop() } finally {
+        try {
+          try { await this.#hostAgents.dispose() } finally { await this.coordinator.stop() }
+        } finally {
           this.proposalStore.close()
           this.growthStore.close()
           this.store.close()
@@ -1963,6 +1971,12 @@ export class AssistantAutomationsService extends Service implements
     return this.store.validateQualityEvidence(receipt)
   }
 
+  /** Consume one exact, live, fresh-budget Host invocation; never a model tool. */
+  runAgentForHostExecution = (invocation: HostAutomationExecutorInput, contract: HostAgentExecutionContract): Promise<Readonly<HostAgentExecutionResult>> => {
+    this.assertActive()
+    return this.#hostAgents.run(invocation, contract)
+  }
+
   /** Process-local Host executor registration; never exposed as a model tool. */
   registerHostExecutor(executor: HostAutomationExecutor): () => void {
     this.assertActive()
@@ -2125,14 +2139,16 @@ export class AssistantAutomationsService extends Service implements
     })
   }
 
-  start(): void {
+  start = (): void => {
     this.assertActive()
+    this.#hostAgents.resume()
     this.coordinator.start()
   }
 
-  async stop(): Promise<void> {
+  stop = async (): Promise<void> => {
     this.assertActive()
-    await this.coordinator.stop()
+    this.#hostAgents.suspend()
+    try { await this.coordinator.stop() } finally { await this.#hostAgents.drain() }
   }
 
   async cancel(taskId: string): Promise<void> {

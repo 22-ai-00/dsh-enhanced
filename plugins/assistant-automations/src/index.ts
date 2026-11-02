@@ -46,3 +46,5 @@ export function apply(ctx: Context, config: import('./service.js').Config): void
 }
 
 export default AssistantAutomationsService
+
+export { hostAgentToolSchemaDigest } from './host-agent-execution.js'

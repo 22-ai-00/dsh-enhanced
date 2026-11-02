@@ -13,10 +13,13 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 - claim 的 `resume` 包含先前尝试、最多五条有界报告摘要和结算；`work_item_read_report` 按 UTF-8 字节分页召回当前工作项完整报告及相邻 revision。四个工具均受 exact-definition、owning-Fiber 和当前 owner/参数复核约束；预授权消除范围内的重复审批，实际 execute 再校验，deny/急停不被旁路。
 - active intake 复用原生 `onSchedulerWake`，每轮最多检查十个到期 waiting-resume；晚绑定、替换、关闭有生命周期保护，scheduler callback 不自动重投 unknown 派发，旧 peer 保留启动/claim 惰性恢复。真实调度组件证明到期入队，执行处于 maintenance pause，尚未证明 idle Host 的真实模型完成。
 - 终态报告进入真实 Delivery outbox 和 Evaluation；worker ready 不是独立成功证明，通知排队不是送达。`follows` 仅支持线程关闭结算，尚非事件订阅直通；Router 跨信道协调、普通任务成长反馈及长期收益待完成。
+- Delivery schema 28 持久记录可信终止观察，保留原有业务 unknown；当前 owner 可按来源摘要及 UTF-8 字节分页读取原输入，Native Web 记录实际 provider/model/effort。安装器/快照精确支持 schema 23–28，Web doctor 支持 24–28，均拒绝未审查版本；`fb36ac66` 双端完整根检查及独立复核 PASS。
 
 ## 当前交付与验证
 
-`2fe7fc92` 交付前台任务的可信终止观察：Delivery schema 28 原子保存完成、异常、超时、owner 取消或中断的固定事实；原有业务结果与未知副作用保持原语义，观察不授权重放。当前 owner 可按来源摘要及 UTF-8 字节分页读取原始输入；Native Web 记录实际请求的 provider/model/effort，供应商变化永久标记 inconsistent。安装器和只读快照消费者精确支持 schema 23–28；`fb36ac66` 补齐 Web owner doctor 的 24–28 检查，各自拒绝未审查版本。修复后的 Mac/Linux 完整根检查及独立复核均 PASS。
+当前交付是 Automations 拥有的有界原生 Agent 接口：真实生产 Host occurrence、首次 attempt、`never/0` 重试合同及新预算预留，才能使用同一个私有签发的 invocation 启动一次 Agent。复用既有 DSH Loop，冻结供应商、effort、工具 schema 和有限额度；原 occurrence 启动时间约束绝对期限。取消、卸载、提前返回及迟到创建均撤销能力，回收不明保持 unknown；外层唯一预算结算和真实 Session/使用量保留。接口不挂载 preset、不提供 caller setup，也不证明原用户任务来源或 owner 授权。
+
+Mac 插件全套 359 PASS / 27 skipped，25 文件通过，其中新增 44 项全部通过；完整 noEmit、构建及零警告 lint 均 EXIT 0，独立复核 PASS。已保留并修复真实复现的 Cordis 代理接线、unknown 落库/副作用、同步重入和阻塞后越过期限问题；测试回调断言另有失败 canary，防止产品错误隔离吞掉测试失败。修后双端根检查待完成，不能沿用旧源码根检查作为本接口验收。
 
 用户于 2026-11-02 明确延后飞书机器人实连和后续真实使用验收，当前先完成代码、单测及可离线核实项。依赖实连的临时双服务升级尚未验收；保留连接门，不以模拟连接替代。
 
@@ -26,7 +29,7 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 - Linux 两轮同样通过功能验收，126.75/75.11 秒，最终工件、预算 2/2、零审批及 Host 正常退出经独立复核。但等待报告重复了审计标识，512 字节 resume 已包含它，故“必须依赖摘要外召回”的前提 FAIL。已纠正父层初次检查遗漏，保留原始证据。
 - 固定通用 prompt 后才生成独立输入；本批生产模型运行总上限 Mac 3 次（含保留的原审批超时失败）、Linux 2 次，已用尽。失败及预算未重置。合成输入不证明 ordinary-use 学习；Outbox pending 不证明外部送达；到期后重启不证明 idle 自动唤醒。
 
-普通失败自动诊断尚未接通。下一交付先实现 Automations 拥有的有界原生 Agent 执行接口：真实 Host occurrence、一次预算、冻结供应商与工具契约、取消及卸载围栏；随后接入 WorkItems 来源适配、准入时冻结诊断计划及原输入召回，打通真实失败信号到诊断报告。原任务 unknown 不得解释为失败重放；缺失或 inconsistent 的模型记录不得回退到默认供应商。独立诊断预算须有明确授权，不冒认原任务剩余额度。
+普通失败自动诊断尚未接通。下一交付接入 WorkItems 来源适配、准入时冻结诊断计划及原输入召回，并消费上述接口，打通真实失败信号到诊断报告。原任务 unknown 不得解释为失败重放；缺失或 inconsistent 的模型记录不得回退到默认供应商。独立诊断预算须有明确授权，不冒认原任务剩余额度。
 
 ## 原生升级剩余工作
 
@@ -45,6 +48,8 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 远端同级 20 个 worktree 及 8 个嵌套验收 worktree 已清理，独立复核 PASS；完整 tar、patch、index、清单及独有成果保留。513 个改动文件全部在 archive，257 在审计时与 `dev@011595b7` 内容一致、126 已在 dev 历史；其余为合成证据、中间版本和上述待整合候选。“备份完成”不代表所有候选逻辑已合入。
 
 ## 最新检查
+
+当前接口专项：`docs/evidence/host-agent-execution-integration/mac-plugin-r3.json` 记录实际全插件命令、源码摘要、EXIT 0 与 17.52 秒耗时，日志 SHA `604d5a7849ce1977531af805046b4db84bd4a45bb439e6441282fd06d93cd339`。`host-agent-execution-tests/` 保留重入创建 2→1、1000ms 合同下真实阻塞 ≥1100ms 后模型请求 2→0，以及断言 canary 的红绿证据；均为真实组件加脚本模型，不是真实供应商调用。以下是最新完整根检查基线。
 
 精确源码提交 `fb36ac666cd1dc1285df50a7efbf07d816bc0598`、tree `241286b62d4026e47a2af7a8d30e6df6e6ea3620`；两端命令均为 `CI=1 VITEST_MAX_WORKERS=2 pnpm check`，pnpm 11.7.0。manifest、零警告 lint、构建、类型检查、测试及 dry-run pack 全部完成；child/runner 均 EXIT 0、源码稳定、无中断。
 

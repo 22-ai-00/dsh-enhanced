@@ -657,3 +657,26 @@ export interface AutomationProposalResult {
   replayed: boolean
   automation?: AutomationRecord
 }
+
+/** Host-only, finite native Agent contract. Absence of effort is an exact observed value. */
+export interface HostAgentExecutionContract {
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+  readonly prompt: string
+  readonly allowedTools: readonly string[]
+  readonly toolSchemaDigest: string
+  readonly maxModelCalls: number
+  readonly maxToolCalls: number
+  readonly maxOutputTokens: number
+  readonly timeoutMs: number
+}
+export interface HostAgentExecutionResult {
+  readonly outcome: AutomationRunStatus
+  readonly output: string
+  readonly usage: Readonly<Record<string, unknown>>
+  readonly sessionId?: string
+  readonly diagnostic?: AutomationExecutionDiagnostic
+  readonly quiescent?: boolean
+  readonly contractDigest: string
+}

@@ -1,3 +1,5 @@
+import type { HostAgentExecutions } from './host-agent-execution.js'
+import type { AutomationRunnerInput, AutomationRunnerResult } from './coordinator.js'
 import type {
   HostAutomationExecutionSpec,
   HostAutomationExecutor,
@@ -131,6 +133,8 @@ export function validateHostExecutorResult(value: HostAutomationExecutorResult):
 /** Process-local registry. Durable definitions store descriptors, never callbacks. */
 export class HostAutomationExecutorRegistry {
   private readonly registrations = new Map<string, Registration>()
+  readonly #agentOwner: HostAgentExecutions | undefined
+  constructor(agentOwner?: HostAgentExecutions) { this.#agentOwner = agentOwner }
 
   register(executor: HostAutomationExecutor): () => void {
     if (typeof executor !== 'object' || executor === null
@@ -161,9 +165,10 @@ export class HostAutomationExecutorRegistry {
 
   prove(spec: HostAutomationExecutionSpec): HostExecutorProof {
     const accepted: Registration[] = []
+    const candidate = Object.freeze({ ...spec, targetScope: Object.freeze({ ...spec.targetScope }) })
     for (const registration of this.registrations.values()) {
       try {
-        if (registration.executor.accepts(spec)) accepted.push(registration)
+        if (registration.executor.accepts(candidate)) accepted.push(registration)
       } catch {
         return Object.freeze({ available: false, reasonCode: 'host-executor-acceptance-failed' })
       }
@@ -197,6 +202,7 @@ export class HostAutomationExecutorRegistry {
   async execute(
     proof: HostExecutorProof,
     input: HostAutomationExecutorInput,
+    authorization?: { key: object; input: AutomationRunnerInput; freshReservation: boolean; onNativeResult: (result: AutomationRunnerResult) => void },
   ): Promise<Readonly<HostAutomationExecutorResult>> {
     if (!proof.available) {
       throw new HostExecutorRegistryError('stale-registration', 'Host executor availability was not proven')
@@ -208,23 +214,43 @@ export class HostAutomationExecutorRegistry {
       throw new HostExecutorRegistryError('stale-registration', 'Host executor registration is no longer exact')
     }
     const signal = AbortSignal.any([input.signal, registration.lifecycle.signal])
-    const execution = Promise.resolve().then(() => registration.executor.execute({ ...input, signal }))
+    const invocation = Object.freeze({ ...input, targetScope: Object.freeze({ ...input.targetScope }), signal })
+    const close = authorization === undefined ? undefined : this.#agentOwner?.open(authorization.key, invocation, authorization.input, authorization.freshReservation)
+    const execution = Promise.resolve().then(() => registration.executor.execute(close === undefined ? { ...input, signal } : invocation))
     const settled = execution.then(
       result => ({ kind: 'result' as const, result }),
       error => ({ kind: 'error' as const, error }),
     )
+    let removeUnloaded: (() => void) | undefined
     const unloaded = new Promise<{ kind: 'unloaded' }>(resolve => {
-      if (registration.lifecycle.signal.aborted) resolve({ kind: 'unloaded' })
-      else registration.lifecycle.signal.addEventListener(
-        'abort', () => resolve({ kind: 'unloaded' }), { once: true },
-      )
+      const abort = () => resolve({ kind: 'unloaded' })
+      if (registration.lifecycle.signal.aborted) abort()
+      else registration.lifecycle.signal.addEventListener('abort', abort, { once: true })
+      removeUnloaded = () => registration.lifecycle.signal.removeEventListener('abort', abort)
     })
-    const result = await Promise.race([settled, unloaded])
+    let removeCancel: (() => void) | undefined
+    const cancelled = new Promise<{ kind: 'unloaded' }>(resolve => {
+      if (close === undefined) return
+      const abort = () => resolve({ kind: 'unloaded' })
+      if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true })
+      removeCancel = () => signal.removeEventListener('abort', abort)
+    })
+    let result: Awaited<typeof settled> | { kind: 'unloaded' }
+    try { result = await Promise.race([settled, unloaded, cancelled]) }
+    finally {
+      removeCancel?.()
+      removeUnloaded?.()
+      const native = await close?.()
+      if (native !== undefined) authorization?.onNativeResult(native)
+    }
     void settled.then(() => {})
     if (result.kind === 'unloaded') {
       throw new HostExecutorRegistryError('stale-registration', 'Host executor unloaded during execution')
     }
-    if (result.kind === 'error') throw result.error
+    if (result.kind === 'error') {
+      if (close !== undefined) throw new Error('assistant-automations: Host Agent executor failed', { cause: result.error })
+      throw result.error
+    }
     return validateHostExecutorResult(result.result)
   }
 }
