@@ -467,6 +467,12 @@ Host-only `inspectCreatedCapabilitySource(planId)` 返回冻结的历史源码�
 
 Evaluation 纠正/撤回通知自动重验并卸载对应入口；到期、来源漂移也关闭该版本，其他 Host 插件保留。旧 v1 模式的源码 producer 暂缺时只暂停入口，恢复原来源后可重新挂同一凭证。v2 已采用版本不依赖过期的原 Growth producer；其历史验签时间固定为采用时刻，不可用于首次采用或新签收据。源计划可以按原规则从 `pending-approval` 过期并清理原制品；旧修改审批、PR、npm 发布和整 profile 采用门不变。Host-only `inspectCreatedCapability(planId)` 返回采用状态和别名。动态卸载是本能力的撤销路径，真实后续收益、版本替换回退和普通使用部署仍属完整目标的下一次验收。
 
+### 空业务采用账本的内部维护组件
+
+`creation-capability-empty-handoff` 提供尚未接入安装器的 plan/apply/verify 组件，仅供可信 Host 在停服阶段处理 Docker→Linux 的已有私有 stage 副本。完整旧配置、实际密钥和源副本须由调用方独立核验；`hostAnchor` 绑定已认证来源，plan 生成后另在库外冻结其 digest。组件只接受 schema 3、唯一匹配的旧 authority，以及 adoptions、calls、source_archives 三表全部为空；unknown、closed 等历史行也会拒绝。CAS 与不可变审计同事务提交，保留 owner、密钥、全部额度、期限和 retention，不删库或刷新授权。
+
+读取核对 SQLite 原始 TEXT 字节和完整 schema；计划冻结物理文件及内容，拒绝 sidecar、漂移和其他事务的重试。停服验收允许同 inode 的 cutover rename，拒绝复制后的新 inode；verify 必须在启动前再次确认空业务表，正常运行后不可把它当历史查询。普通 journal 构造与执行授权不变，后续合法使用仍走既有检查。本组件未导出为模型工具或启用运行时入口，不支持非空历史迁移、通用备份恢复或旧 Docker 证书的 Linux 执行资格；安装器接线、外部签名 proof 与完整升级仍待验收。
+
 ### 普通任务修复的有限审批
 
 可选 `sourceApprovals` 将持久 `sourceJobs` 的准备结果接到 owner 配置的有限签名器：
