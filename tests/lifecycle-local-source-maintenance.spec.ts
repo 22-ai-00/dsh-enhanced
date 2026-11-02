@@ -1,9 +1,10 @@
-import { cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import * as yaml from 'yaml'
 import { assertLocalSourceInstaller, assertLocalSourceRawPreflight, assertMemoryLearningCandidateConfigs, assertPreOwnerAuthorityState, assertPreOwnerEffectiveConfigs,
@@ -289,5 +290,164 @@ describe('pre-owner local source maintenance admission', () => {
     expect(lifecycleProfileTest.validLocalSourceManifest({ ...manifest, localSourceMaintenance: { ...manifest.localSourceMaintenance, extension: 'memory-learning' } })).toBe(false)
     expect(lifecycleProfileTest.validLocalSourceManifest({ ...extended, version: 3 })).toBe(false)
     expect(await readFile(join(root, 'plugins/lark-channel/lib/entry.js'), 'utf8')).toContain('version = 1')
+  })
+})
+
+
+// Native bytes below exercise integrity binding only; they are never executed.
+const reviewedManagedPnpmLauncher = "#!/bin/sh\nbasedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\n\ncase `uname` in\n    *CYGWIN*|*MINGW*|*MSYS*)\n        if command -v cygpath > /dev/null 2>&1; then\n            basedir=`cygpath -w \"$basedir\"`\n        fi\n    ;;\nesac\n\n\"$basedir/.tools/@pnpm+exe/11.7.0/node_modules/@pnpm/exe/pnpm\"   \"$@\"\nexit $?\n"
+async function pnpmRuntimeFixture(kind: 'managed' | 'node' = 'managed') {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pnpm-runtime-pin-')))
+  roots.push(root)
+  const packageRoot = kind === 'managed'
+    ? join(root, '.tools', '@pnpm+exe', '11.7.0', 'node_modules', '@pnpm', 'exe')
+    : join(root, 'node_modules', 'pnpm')
+  const dist = join(packageRoot, 'dist'), path = join(root, 'pnpm')
+  await mkdir(dist, { recursive: true, mode: 0o700 })
+  await writeFile(join(packageRoot, 'package.json'), JSON.stringify(kind === 'managed'
+    ? { name: '@pnpm/exe', version: '11.7.0' }
+    : { name: 'pnpm', version: '11.7.0', bin: { pnpm: 'bin/pnpm.cjs' } }), { mode: 0o600 })
+  await writeFile(join(dist, kind === 'managed' ? 'pnpm.mjs' : 'pnpm.cjs'), 'const pnpm = 1\n', { mode: 0o600 })
+  await writeFile(join(dist, 'worker.js'), 'const worker = 1\n', { mode: 0o600 })
+  let target: string
+  if (kind === 'managed') {
+    target = join(packageRoot, 'pnpm')
+    await writeFile(target, Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.from('native fixture 1')]), { mode: 0o700 })
+    await writeFile(path, reviewedManagedPnpmLauncher, { mode: 0o700 })
+  } else {
+    await mkdir(join(packageRoot, 'bin'), { mode: 0o700 })
+    target = join(packageRoot, 'bin', 'pnpm.cjs')
+    await writeFile(target, '#!/usr/bin/env node\nrequire("../dist/pnpm.cjs")\n', { mode: 0o700 })
+    await symlink(target, path)
+  }
+  return { root, path, target, packageRoot, dist }
+}
+
+describe.skipIf(process.platform === 'win32')('local source pnpm application runtime pin', () => {
+  test('binds the managed wrapper, native target and complete dist before revalidation', async () => {
+    const f = await pnpmRuntimeFixture()
+    const pin = await lifecycleProfileTest.pinLocalPnpmExecutable(f.path)
+    expect(pin.path).toBe(f.path)
+    expect(pin.commandPath).toBe(f.target)
+    expect(pin.selectionPath).toBe(f.path)
+    expect(pin.runtime).toMatchObject({ kind: 'managed-wrapper', target: { path: f.target }, trees: [{ path: f.dist, entries: 2 }] })
+    await expect(lifecycleProfileTest.assertLocalPnpmExecutable(pin)).resolves.toBeUndefined()
+    const wrapper = await readFile(f.path)
+    await writeFile(f.target, Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.from('native fixture 2')]))
+    expect(await readFile(f.path)).toEqual(wrapper)
+    await expect(lifecycleProfileTest.assertLocalPnpmExecutable(pin)).rejects.toThrow('runtime closure changed')
+  })
+
+  test('dispatches the pinned native target without executing PATH shadowed wrapper utilities', async () => {
+    const f = await pnpmRuntimeFixture()
+    // A real native executable proves dispatch; this is Node, not a pnpm execution claim.
+    const nodePath = await realpath(process.execPath)
+    await cp(nodePath, f.target)
+    await chmod(f.target, 0o700)
+    const evil = join(f.root, 'evil'), marker = join(f.root, 'utility-executed')
+    await mkdir(evil, { mode: 0o700 })
+    for (const name of ['dirname', 'sed', 'uname']) {
+      await writeFile(join(evil, name), `#!/bin/sh\necho executed >> '${marker}'\nexit 97\n`, { mode: 0o700 })
+    }
+    const pin = await lifecycleProfileTest.pinLocalPnpmExecutable(f.path)
+    await lifecycleProfileTest.assertLocalPnpmExecutable(pin)
+    const env = { ...process.env, PATH: `${dirname(pin.commandPath)}:${evil}`,
+      ...(process.platform === 'darwin' ? { DYLD_LIBRARY_PATH: join(dirname(nodePath), '..', 'lib') } : {}) }
+    for (const command of [pin.commandPath, 'pnpm']) {
+      const result = spawnSync(command, ['--version'], { env, encoding: 'utf8' })
+      expect({ status: result.status, error: result.error?.message, signal: result.signal, stderr: result.stderr }).toEqual({ status: 0, error: undefined, signal: null, stderr: '' })
+      expect(result.stdout.trim()).toBe(process.version)
+    }
+    expect(existsSync(marker)).toBe(false)
+    await lifecycleProfileTest.assertLocalPnpmExecutable(pin)
+  })
+
+  test.each(['changed', 'added', 'deleted', 'relative-symlink'] as const)('rejects %s dist content with an unchanged launcher', async mutation => {
+    const f = await pnpmRuntimeFixture()
+    const pin = await lifecycleProfileTest.pinLocalPnpmExecutable(f.path)
+    if (mutation === 'changed') await writeFile(join(f.dist, 'worker.js'), 'const worker = 2\n')
+    if (mutation === 'added') await writeFile(join(f.dist, 'later.js'), 'const added = true\n')
+    if (mutation === 'deleted') await rm(join(f.dist, 'worker.js'))
+    if (mutation === 'relative-symlink') {
+      await rm(join(f.dist, 'worker.js'))
+      await symlink('pnpm.mjs', join(f.dist, 'worker.js'))
+    }
+    expect(await readFile(f.path, 'utf8')).toBe(reviewedManagedPnpmLauncher)
+    await expect(lifecycleProfileTest.assertLocalPnpmExecutable(pin)).rejects.toThrow(/runtime closure changed|symlink/u)
+  })
+
+  test('rejects retargeting a relative managed-target symlink and unsafe target permissions', async () => {
+    const f = await pnpmRuntimeFixture(), other = await pnpmRuntimeFixture()
+    const pin = await lifecycleProfileTest.pinLocalPnpmExecutable(f.path)
+    await chmod(f.target, 0o777)
+    await expect(lifecycleProfileTest.assertLocalPnpmExecutable(pin)).rejects.toThrow('runtime file is unsafe')
+    await rm(f.target)
+    await symlink(relative(dirname(f.target), other.target), f.target)
+    await expect(lifecycleProfileTest.assertLocalPnpmExecutable(pin)).rejects.toThrow('runtime closure changed')
+  })
+
+  test('binds a standard pnpm JS package, actual Node selection and logical PATH command', async () => {
+    const f = await pnpmRuntimeFixture('node')
+    const pin = await lifecycleProfileTest.pinLocalPnpmExecutable(f.path)
+    expect(pin.path).toBe(f.target)
+    expect(pin.commandPath).toBe(f.path)
+    expect(pin.runtime).toMatchObject({ kind: 'node-package', interpreter: { executable: { path: expect.any(String), digest: expect.any(String) } } })
+    await expect(lifecycleProfileTest.assertLocalPnpmExecutable(pin)).resolves.toBeUndefined()
+    await writeFile(join(f.dist, 'pnpm.cjs'), 'const pnpm = 2\n')
+    await expect(lifecycleProfileTest.assertLocalPnpmExecutable(pin)).rejects.toThrow('runtime closure changed')
+  })
+
+  test('rejects Node drift and command-directory Node shadowing instead of choosing a different runtime', async () => {
+    const f = await pnpmRuntimeFixture('node')
+    const caller = join(f.root, 'caller')
+    await mkdir(caller)
+    const node = join(caller, 'node')
+    await writeFile(node, Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.from('node fixture 1')]), { mode: 0o700 })
+    const previous = process.env.PATH
+    process.env.PATH = `${caller}:${previous ?? '/usr/bin:/bin'}`
+    try {
+      const pin = await lifecycleProfileTest.pinLocalPnpmExecutable(f.path)
+      await writeFile(node, Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.from('node fixture 2')]))
+      await expect(lifecycleProfileTest.assertLocalPnpmExecutable(pin)).rejects.toThrow('runtime closure changed')
+      await symlink(node, join(f.root, 'node'))
+      // A matching logical alias still selects the exact pinned executable.
+      const matching = await lifecycleProfileTest.pinLocalPnpmExecutable(f.path)
+      await expect(lifecycleProfileTest.assertLocalPnpmExecutable(matching)).resolves.toBeUndefined()
+      await rm(join(f.root, 'node'))
+      await symlink(process.execPath, join(f.root, 'node'))
+      await expect(lifecycleProfileTest.pinLocalPnpmExecutable(f.path)).rejects.toThrow('Node selection differs')
+    } finally {
+      if (previous === undefined) delete process.env.PATH
+      else process.env.PATH = previous
+    }
+  })
+
+  test('rejects logical pnpm command retargeting even when both package loaders have the same bytes', async () => {
+    const f = await pnpmRuntimeFixture('node'), other = await pnpmRuntimeFixture('node')
+    const pin = await lifecycleProfileTest.pinLocalPnpmExecutable(f.path)
+    expect(await readFile(f.target)).toEqual(await readFile(other.target))
+    await rm(f.path)
+    await symlink(relative(dirname(f.path), other.target), f.path)
+    await expect(lifecycleProfileTest.assertLocalPnpmExecutable(pin)).rejects.toThrow('runtime closure changed')
+  })
+
+  test('keeps packageManager requirements strict while disabling runtime re-delegation', async () => {
+    const f = await pnpmRuntimeFixture()
+    const pin = await lifecycleProfileTest.pinLocalPnpmExecutable(f.path)
+    const check = (packageManager?: unknown) => lifecycleProfileTest.assertLocalPnpmPackageManager(JSON.stringify({ packageManager }), pin)
+    expect(() => check()).not.toThrow()
+    expect(() => check('pnpm@11.7.0')).not.toThrow()
+    expect(() => check(`pnpm@11.7.0+sha512.${'a'.repeat(64)}`)).not.toThrow()
+    for (const value of ['pnpm@11.8.0', 'npm@11.7.0', 'pnpm@^11', false]) expect(() => check(value)).toThrow('before service stop')
+    expect(lifecycleProfileTest.localSourceOriginalNpmEnvironment()).toMatchObject({
+      pnpm_config_pm_on_fail: 'error', pnpm_config_manage_package_manager_versions: 'false', pnpm_config_package_manager_strict: 'true', pnpm_config_package_manager_strict_version: 'true',
+    })
+  })
+
+  test('rejects an unknown forwarding wrapper without executing it', async () => {
+    const f = await pnpmRuntimeFixture(), marker = join(f.root, 'was-executed')
+    await writeFile(f.path, `#!/bin/sh\ntouch '${marker}'\nexec /bin/true "$@"\n`)
+    await expect(lifecycleProfileTest.pinLocalPnpmExecutable(f.path)).rejects.toThrow('unsupported local source pnpm launcher')
+    expect(existsSync(marker)).toBe(false)
   })
 })

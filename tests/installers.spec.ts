@@ -1936,9 +1936,8 @@ export async function createRuntimeResolution({ installAnchor, profile, home }) 
   await writeFile(join(f.profileDirectory, 'node_modules', '.modules.yaml'), stringify({ storeDir: storeAlias }), { mode: 0o600 })
   const pnpmPath = join(f.fakeBin, 'pnpm')
   await writeFile(pnpmPath, (await readFile(pnpmPath, 'utf8'))
-    .replace('#!/bin/bash\n', `#!/bin/bash\nsource '${join(f.root, 'pnpm-fixture-env.sh')}'\n`)
     .replaceAll('"@jsr:registry":"https://npm.jsr.io/"',
-      `"@jsr:registry":"https://npm.jsr.io/","cacheDir":${JSON.stringify(cachePath)},"ignoreScripts":true,"ignorePnpmfile":true,"trustLockfile":false`))
+      `"@jsr:registry":"https://npm.jsr.io/","cacheDir":${JSON.stringify(cachePath)},"ignoreScripts":true,"ignorePnpmfile":true,"trustLockfile":false,"pmOnFail":"error","managePackageManagerVersions":false,"packageManagerStrict":true,"packageManagerStrictVersion":true`))
   writePreOwnerPnpmFixtureEnvironment(f)
   await chmod(f.dshHome, 0o755)
   await mkdir(join(f.dshHome, 'profiles', 'node_modules'))
@@ -2082,7 +2081,24 @@ fi
   await writeFile(join(controlPackage, 'package.json'), '{"name":"@dsh-enhanced/plugin-control-plane","version":"0.1.0"}')
   await mkdir(join(controlPackage, 'lib'))
   await writeFile(join(controlPackage, 'lib/entry.js'), 'approved-package-bytes')
-  return { ...f, moduleRoot, preparationRoot, cachePath, storeAlias }
+  const pnpmPackageRoot = join(f.fakeBin, 'node_modules', 'pnpm')
+  await mkdir(join(pnpmPackageRoot, 'bin'), { recursive: true })
+  await mkdir(join(pnpmPackageRoot, 'dist'))
+  await writeFile(join(pnpmPackageRoot, 'package.json'), JSON.stringify({ name: 'pnpm', version: '11.7.0',
+    bin: { pnpm: 'bin/pnpm.cjs' } }), { mode: 0o600 })
+  await writeFile(join(pnpmPackageRoot, 'dist', 'fixture.sh'), await readFile(pnpmPath), { mode: 0o700 })
+  await writeFile(join(pnpmPackageRoot, 'dist', 'pnpm.cjs'), `const {readFileSync}=require('node:fs');
+const {spawnSync}=require('node:child_process');const {join}=require('node:path');
+const input=JSON.parse(readFileSync(${JSON.stringify(join(f.root, 'pnpm-fixture-env.json'))},'utf8'));
+if(process.argv.includes('config')&&(process.env.pnpm_config_pm_on_fail!=='error'||process.env.pnpm_config_manage_package_manager_versions!=='false'||process.env.pnpm_config_package_manager_strict!=='true'||process.env.pnpm_config_package_manager_strict_version!=='true'))throw new Error('fixture pnpm manager selection was not frozen');
+const controls=Object.fromEntries(Object.entries(input).filter(([key,value])=>/^LIFECYCLE_[A-Z0-9_]+$/.test(key)&&typeof value==='string'));
+const result=spawnSync('/bin/bash',[join(__dirname,'fixture.sh'),...process.argv.slice(2)],{stdio:'inherit',env:{...process.env,...controls}});
+if(result.error)throw result.error;process.exitCode=result.status??1;
+`, { mode: 0o600 })
+  await writeExecutable(join(pnpmPackageRoot, 'bin', 'pnpm.cjs'), '#!/usr/bin/env node\nrequire("../dist/pnpm.cjs")\n')
+  await rm(pnpmPath)
+  await symlink(join(pnpmPackageRoot, 'bin', 'pnpm.cjs'), pnpmPath)
+  return { ...f, moduleRoot, preparationRoot, cachePath, storeAlias, pnpmPackageRoot }
 }
 // Production preparation deliberately excludes arbitrary inherited variables.
 // The deterministic pnpm fixture reads its synthetic controls from its own
@@ -2090,8 +2106,8 @@ fi
 function writePreOwnerPnpmFixtureEnvironment(f: { root: string; dshHome: string; fakeBin: string }, options: LifecycleRunOptions = {}) {
   const environment = lifecycleEnvironment(f.dshHome, f.fakeBin, options)
   const controls = Object.entries(environment).filter(([key]) => /^LIFECYCLE_[A-Z0-9_]+$/u.test(key))
-  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
-  writeFileSync(join(f.root, 'pnpm-fixture-env.sh'), controls.map(([key, value]) => `export ${key}=${quote(String(value))}`).join('\n') + '\n', { mode: 0o600 })
+  writeFileSync(join(f.root, 'pnpm-fixture-env.json'), JSON.stringify(Object.fromEntries(
+    controls.map(([key, value]) => [key, String(value)]))), { mode: 0o600 })
 }
 function runPreOwnerLifecycle(f: Awaited<ReturnType<typeof preOwnerLifecycleFixture>>, operation: 'local-service-upgrade' | 'local-service-recover', options: LifecycleRunOptions = {}) {
   setLifecycleSystemdControls(join(f.root, 'systemd-state.json'), options)
@@ -11376,11 +11392,13 @@ snapshots:
       expect(await readdir(transaction)).toEqual([])
     } finally { await preparation.dispose() }
   })
+  // Full pnpm file revalidation measured 18–20s for complete Linux transactions.
+  // Keep 30s limits local to the affected success and recovery cases.
   test('allows unsupported platform optional skips during metadata warmup', async () => {
     const fixture = await preOwnerLifecycleFixture()
     const result = runPreOwnerLifecycle(fixture, 'local-service-upgrade', { metadataWarmupSkipReason: 'unsupported_platform' })
     expect(result.status, result.stderr).toBe(0)
-  }, 15000)
+  }, 30000)
   test.each([
     ['verification', { npmVerifyFails: true }],
     ['prefetch', { storeFails: true }],
@@ -11563,7 +11581,7 @@ snapshots:
     const commands = await readLifecycleSystemdLog(f.systemdLog)
     expect(commands.some(command => command.includes('stop'))).toBe(true)
     expect(commands.some(command => command.includes('start'))).toBe(true)
-  },15000)
+  }, 30000)
   test('applies the frozen learner-root extension through the stopped transaction and fresh service acceptance', async () => {
     // Only systemd, package installation and native config composition are fixture ports.
     const f = await preOwnerLifecycleFixture({ baseServices: true, memoryExtension: true })
@@ -11651,7 +11669,7 @@ snapshots:
     const added = (await readFile(f.systemdLog, 'utf8')).slice(before.length)
     expect(added).not.toContain('stop')
     expect(added).not.toContain('start')
-  }, 20000)
+  }, 30000)
   test('restores an original-renamed crash after proving the original snapshot', async () => {
     const f = await preOwnerLifecycleFixture()
     const first = runPreOwnerLifecycle(f, 'local-service-upgrade', { killLifecycleAfterOriginalRename: true })
@@ -11662,7 +11680,7 @@ snapshots:
     expect((await stat(f.dshHome)).mode & 0o777).toBe(0o755)
     expect(await readFile(join(f.dshHome, 'rsi-sources/web/receipt.json'), 'utf8')).toContain('old')
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
-  }, 20000)
+  }, 30000)
   test('refuses drifted reviewed installer code during recovery before any service operation', async () => {
     const f = await preOwnerLifecycleFixture()
     const first = runPreOwnerLifecycle(f,'local-service-upgrade',{systemdStartFailsProfile:'web'})
@@ -11675,5 +11693,5 @@ snapshots:
     const added = (await readFile(f.systemdLog,'utf8')).slice(before.length)
     expect(added).not.toContain('stop')
     expect(added).not.toContain('start')
-  },15000)
+  }, 30000)
 })

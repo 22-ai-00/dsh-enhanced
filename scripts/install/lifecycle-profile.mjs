@@ -2,9 +2,9 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { closeSync, constants, createReadStream, fstatSync, lstatSync, openSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, open, opendir, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, writeFile } from 'node:fs/promises'
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { assertLifecycleLocalSourceReplayMetadata, assertLifecycleNpmMetadataSafe, classifyLifecycleScenario, lifecycleWorkspacePaths, prepareLifecycleNpmMetadata, readRsiCoordinatorReceipt, validateRsiCoordinatorPair } from './lifecycle-config.mjs'
@@ -5483,15 +5483,18 @@ function assertExpectedScenario(expectedScenario, serviceAware, operation = 'upg
   }
 }
 
-async function resolvedPnpmStorePath(pnpmPath, homePath, profilePath) {
+async function resolvedPnpmStorePath(pnpmPath, homePath, profilePath, pnpmExecutable) {
+  if (pnpmExecutable !== undefined) await assertLocalPnpmExecutable(pnpmExecutable)
   let output
   try {
     output = await run(pnpmPath, ['store', 'path'], {
       cwd: profilePath, capture: true,
-      env: { ...process.env, NODE_OPTIONS: undefined, NODE_PATH: undefined, pnpm_config_ignore_pnpmfile: 'true', pnpm_config_ignore_scripts: 'true' },
+      env: { ...process.env, NODE_OPTIONS: undefined, NODE_PATH: undefined, pnpm_config_ignore_pnpmfile: 'true', pnpm_config_ignore_scripts: 'true',
+        ...(pnpmExecutable === undefined ? {} : localSourcePnpmManagerEnvironment()) },
     })
   }
   catch { fail('npm cohort 无法解析 pnpm store；尚未创建事务或修改 DSH_HOME。') }
+  if (pnpmExecutable !== undefined) await assertLocalPnpmExecutable(pnpmExecutable)
   const value = output.stdout.trim()
   if (!isAbsolute(value) || value.includes('\n') || value.includes('\r')) fail('npm cohort pnpm store path 无效；尚未创建事务或修改 DSH_HOME。')
   let canonical
@@ -5500,6 +5503,7 @@ async function resolvedPnpmStorePath(pnpmPath, homePath, profilePath) {
   if (!entry?.isDirectory() || entry.isSymbolicLink() || entry.uid !== currentUid()
     || isGroupOrOtherWritable(entry)) fail('npm cohort pnpm store 不是当前用户拥有的安全目录；尚未创建事务或修改 DSH_HOME。')
   if (inside(homePath, canonical) || inside(canonical, homePath)) fail('npm cohort pnpm store 不能位于 DSH_HOME 内或包含 DSH_HOME；尚未创建事务或修改 DSH_HOME。')
+  if (pnpmExecutable !== undefined) await assertLocalPnpmExecutable(pnpmExecutable)
   let selected
   try {
     selected = await run(pnpmPath, ['store', 'path'], {
@@ -5513,10 +5517,12 @@ async function resolvedPnpmStorePath(pnpmPath, homePath, profilePath) {
         pnpm_config_store_dir: canonical,
         pnpm_config_ignore_pnpmfile: 'true',
         pnpm_config_ignore_scripts: 'true',
+        ...(pnpmExecutable === undefined ? {} : localSourcePnpmManagerEnvironment()),
       },
     })
   }
   catch { fail('npm cohort 无法复核 pnpm store；尚未创建事务或修改 DSH_HOME。') }
+  if (pnpmExecutable !== undefined) await assertLocalPnpmExecutable(pnpmExecutable)
   const selectedPath = selected.stdout.trim()
   if (!isAbsolute(selectedPath) || selectedPath.includes('\n') || selectedPath.includes('\r') || await realpath(selectedPath).catch(() => '') !== canonical) {
     fail('npm cohort store-dir 未精确绑定已预取 store；尚未创建事务或修改 DSH_HOME。')
@@ -5583,31 +5589,42 @@ async function npmEffectiveConfig(pnpmPath, profilePath, environment) {
   return parseNpmEffectiveConfig(result.stdout)
 }
 
-async function assertNpmVerificationPolicy(pnpmPath, profilePath, environment) {
+async function assertNpmVerificationPolicy(pnpmPath, profilePath, environment, pnpmExecutable) {
+  await assertLocalPnpmExecutable(pnpmExecutable)
   const result = await run(pnpmPath, ['config', 'list', '--json'], { cwd: profilePath, env: environment, capture: true, timeoutMs: 30_000 })
+  await assertLocalPnpmExecutable(pnpmExecutable)
   let config
   try { config = JSON.parse(result.stdout) } catch { fail('local source cannot read effective pnpm verification policy') }
   if (!config || typeof config !== 'object' || Array.isArray(config)
-    || config.ignoreScripts !== true || config.ignorePnpmfile !== true || config.trustLockfile !== false) {
-    fail('local source pnpm verification policy changed: scripts, pnpmfile or lockfile trust')
+    || config.ignoreScripts !== true || config.ignorePnpmfile !== true || config.trustLockfile !== false
+    || (Number(pnpmExecutable.runtime.version.split('.')[0]) >= 11
+      ? config.pmOnFail !== 'error'
+      : config.managePackageManagerVersions !== false || config.packageManagerStrict !== true || config.packageManagerStrictVersion !== true)) {
+    fail('local source pnpm verification policy changed: scripts, pnpmfile, lockfile trust or package manager selection')
   }
   // pnpm masks these standard registry credentials in config output. They
   // cannot be used by the anonymous private prefetch and never enter its
   // configuration snapshot; every other effective setting remains bound.
   const authKey = key => /^(?:_authToken|_auth|_password|username|email|always-auth)$/u.test(key)
     || /^\/\/[^?#\s]+\/:(?:_authToken|_auth|_password|username|always-auth)$/u.test(key)
-  return Object.fromEntries(Object.entries(parseNpmEffectiveConfig(result.stdout)).filter(([key]) => !authKey(key)))
+  const fixedManager = new Set(['managePackageManagerVersions', 'packageManagerStrict', 'packageManagerStrictVersion', 'pmOnFail'])
+  return Object.fromEntries(Object.entries(parseNpmEffectiveConfig(result.stdout)).filter(([key]) => !authKey(key) && !fixedManager.has(key)))
+}
+
+function localSourcePnpmManagerEnvironment() {
+  return { pnpm_config_pm_on_fail: 'error', pnpm_config_manage_package_manager_versions: 'false', pnpm_config_package_manager_strict: 'true',
+    pnpm_config_package_manager_strict_version: 'true' }
 }
 
 function localSourceOriginalNpmEnvironment() {
-  return { ...process.env, NODE_OPTIONS: undefined, NODE_PATH: undefined,
+  return { ...process.env, NODE_OPTIONS: undefined, NODE_PATH: undefined, ...localSourcePnpmManagerEnvironment(),
     pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true', pnpm_config_trust_lockfile: 'false' }
 }
 
 function localSourcePrivateNpmEnvironment(cachePath, storePath) {
   const isolated = isolatedNpmEnvironment(cachePath, { storePath })
   return { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: process.env.LANG ?? 'C', LC_ALL: 'C', TMPDIR: '/tmp',
-    HOME: isolated.HOME, XDG_CONFIG_HOME: isolated.XDG_CONFIG_HOME,
+    ...localSourcePnpmManagerEnvironment(), HOME: isolated.HOME, XDG_CONFIG_HOME: isolated.XDG_CONFIG_HOME,
     pnpm_config_userconfig: isolated.pnpm_config_userconfig,
     pnpm_config_store_dir: isolated.pnpm_config_store_dir, pnpm_config_cache_dir: cachePath,
     pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true', pnpm_config_trust_lockfile: 'false' }
@@ -6161,31 +6178,201 @@ async function assertLocalSourcePreparation(preparation, currentProfilePath, che
     fail('local source old lockfile verification marker changed')
   }
   await assertLocalSourceLockMarker(marker, preparation.profilePath, preparation.original.lockfile, preparation.lockStats)
-  const raw = await assertNpmVerificationPolicy(preparation.pnpmPath, preparation.profilePath, preparation.environment)
+  const raw = await assertNpmVerificationPolicy(preparation.pnpmPath, preparation.profilePath, preparation.environment, preparation.pnpmExecutable)
   assertSameNpmConfig(raw, preparation.sourceConfig)
   assertSameNpmConfig(await assertNpmVerificationPolicy(preparation.pnpmPath, currentProfilePath,
-    localSourceOriginalNpmEnvironment()), preparation.sourceConfig)
+    localSourceOriginalNpmEnvironment(), preparation.pnpmExecutable), preparation.sourceConfig)
+}
+
+// This is the pnpm 11.7.0 managed Linux launcher reviewed for this path.
+// Its only executable target is relative to the launcher's own directory.
+const MANAGED_PNPM_LAUNCHER = `#!/bin/sh
+basedir=$(dirname "$(echo "$0" | sed -e 's,\\\\,/,g')")
+
+case \`uname\` in
+    *CYGWIN*|*MINGW*|*MSYS*)
+        if command -v cygpath > /dev/null 2>&1; then
+            basedir=\`cygpath -w "$basedir"\`
+        fi
+    ;;
+esac
+
+"$basedir/.tools/@pnpm+exe/11.7.0/node_modules/@pnpm/exe/pnpm"   "$@"
+exit $?
+`
+const MANAGED_PNPM_TARGET = '.tools/@pnpm+exe/11.7.0/node_modules/@pnpm/exe/pnpm'
+
+const PNPM_RUNTIME_FILE_MAX_BYTES = 256 * 1024 * 1024
+const PNPM_RUNTIME_TREE_MAX_BYTES = 128 * 1024 * 1024
+const PNPM_RUNTIME_TREE_MAX_ENTRIES = 20_000
+
+function safePnpmRuntimeEntry(entry, kind) {
+  return (kind === 'directory' ? entry.isDirectory() : entry.isFile()) && !entry.isSymbolicLink()
+    && [0, currentUid()].includes(entry.uid) && !isGroupOrOtherWritable(entry)
+}
+
+// Pins pnpm packaged code and the selected interpreter executable. Interpreter
+// shared libraries (including libnode), OS libraries/utilities and arbitrary
+// external imports remain separate host-toolchain trust dependencies. This is
+// not a complete Node runtime seal. No wrapper runs for discovery.
+async function pinLocalPnpmFile(path, maxBytes = PNPM_RUNTIME_FILE_MAX_BYTES, executable = false) {
+  if (!isAbsolute(path) || resolve(path) !== path || await realpath(path) !== path) fail('local source pnpm runtime path is not canonical')
+  const before = await lstat(path)
+  if (!safePnpmRuntimeEntry(before, 'file') || before.size > maxBytes
+    || executable && (before.mode & 0o111) === 0) fail('local source pnpm runtime file is unsafe')
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  try {
+    const opened = await handle.stat()
+    if (!sameNpmFileIdentity(opened, identity(before)) || opened.size !== before.size
+      || opened.mtimeMs !== before.mtimeMs || opened.ctimeMs !== before.ctimeMs) fail('local source pnpm runtime file changed before pinning')
+    const head = Buffer.alloc(Math.min(opened.size, 65_536))
+    let offset = 0
+    while (offset < head.length) {
+      const { bytesRead } = await handle.read(head, offset, head.length - offset, offset)
+      if (bytesRead === 0) fail('local source pnpm runtime file changed while pinning')
+      offset += bytesRead
+    }
+    const hash = createHash('sha256')
+    for await (const chunk of handle.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk)
+    const after = await handle.stat(), named = await lstat(path)
+    for (const actual of [after, named]) {
+      if (!sameNpmFileIdentity(actual, identity(opened)) || actual.size !== opened.size
+        || actual.mtimeMs !== opened.mtimeMs || actual.ctimeMs !== opened.ctimeMs) fail('local source pnpm runtime file changed while pinning')
+    }
+    if (await realpath(path) !== path) fail('local source pnpm runtime path changed while pinning')
+    return { pin: { path, identity: identity(opened), size: opened.size, digest: hash.digest('hex') }, head }
+  } finally { await handle.close() }
+}
+
+async function pinLocalPnpmDirectory(path) {
+  const entry = await lstat(path)
+  if (!safePnpmRuntimeEntry(entry, 'directory') || await realpath(path) !== path) fail('local source pnpm runtime directory is unsafe')
+  return identity(entry)
+}
+
+async function pinLocalPnpmTree(root) {
+  const records = []
+  let entries = 0, bytes = 0
+  const visit = async path => {
+    const before = await pinLocalPnpmDirectory(path)
+    records.push(['directory', path.slice(root.length), before])
+    const names = (await readdir(path)).sort()
+    for (const name of names) {
+      entries += 1
+      if (entries > PNPM_RUNTIME_TREE_MAX_ENTRIES) fail('local source pnpm runtime tree exceeds its entry bound')
+      const child = join(path, name), entry = await lstat(child)
+      if (entry.isSymbolicLink()) fail('local source pnpm runtime tree contains a symlink')
+      if (entry.isDirectory()) await visit(child)
+      else if (entry.isFile()) {
+        bytes += entry.size
+        if (bytes > PNPM_RUNTIME_TREE_MAX_BYTES) fail('local source pnpm runtime tree exceeds its byte bound')
+        const file = await pinLocalPnpmFile(child, 32 * 1024 * 1024)
+        records.push(['file', child.slice(root.length), file.pin])
+      } else fail('local source pnpm runtime tree contains an unsupported entry')
+    }
+    if (!isDeepStrictEqual(names, (await readdir(path)).sort())
+      || !isDeepStrictEqual(before, await pinLocalPnpmDirectory(path))) fail('local source pnpm runtime tree changed while pinning')
+  }
+  await visit(root)
+  return { path: root, entries, bytes, digest: sha256(canonicalJson(records)) }
+}
+
+function nativePnpmExecutable(head) {
+  return head.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))
+    || ['feedface', 'feedfacf', 'cefaedfe', 'cffaedfe', 'cafebabe', 'bebafeca', 'cafebabf', 'bfbafeca'].includes(head.subarray(0, 4).toString('hex'))
+}
+
+async function pinLocalPnpmNode(source, commandDirectory) {
+  const firstLine = source.split('\n', 1)[0]
+  let logicalPath, searchPath = null, env = null
+  if (firstLine === '#!/usr/bin/env node') {
+    searchPath = process.env.PATH ?? '/usr/bin:/bin'
+    const directories = searchPath.split(delimiter)
+    if (directories.some(path => !isAbsolute(path))) fail('local source pnpm Node PATH contains a relative or empty directory')
+    for (const directory of directories) {
+      const candidate = join(directory, 'node')
+      const canonical = await realpath(candidate).catch(() => undefined)
+      if (canonical === undefined) continue
+      const entry = await lstat(canonical)
+      if (entry.isFile() && (entry.mode & 0o111) !== 0) { logicalPath = candidate; break }
+    }
+    if (logicalPath === undefined) fail('local source pnpm Node interpreter is missing from PATH')
+    const prefixedNode = await realpath(join(commandDirectory, 'node')).catch(() => undefined)
+    if (prefixedNode !== undefined && prefixedNode !== await realpath(logicalPath)) fail('local source pnpm Node selection differs through its command directory')
+    env = (await pinLocalPnpmFile(await realpath('/usr/bin/env'), undefined, true)).pin
+  } else if (/^#!\/[^\r\n ]+\/node$/u.test(firstLine)) logicalPath = firstLine.slice(2)
+  if (logicalPath === undefined) fail('unsupported local source pnpm Node interpreter')
+  const node = await pinLocalPnpmFile(await realpath(logicalPath), undefined, true)
+  if (!nativePnpmExecutable(node.head)) fail('local source pnpm Node interpreter is not a native executable')
+  return { logicalPath, searchPath, executable: node.pin, env }
 }
 
 async function pinLocalPnpmExecutable(path) {
+  if (!isAbsolute(path) || resolve(path) !== path) fail('local source pnpm invocation path is not canonical absolute')
   const canonical = await realpath(path)
-  if (await realpath(join(dirname(canonical), 'pnpm')).catch(() => '') !== canonical) {
+  const launcher = await pinLocalPnpmFile(canonical, undefined, true)
+  const source = launcher.head.toString('utf8')
+  let kind, packageRoot, targetPath, interpreter = null
+  if (source === MANAGED_PNPM_LAUNCHER) {
+    kind = 'managed-wrapper'
+    targetPath = await realpath(join(dirname(canonical), MANAGED_PNPM_TARGET))
+    packageRoot = dirname(targetPath)
+    interpreter = (await pinLocalPnpmFile(await realpath('/bin/sh'), undefined, true)).pin
+  } else if (nativePnpmExecutable(launcher.head)) {
+    kind = 'managed-native'
+    targetPath = canonical
+    packageRoot = dirname(canonical)
+  } else if (source.startsWith('#!') && basename(dirname(canonical)) === 'bin'
+    && /(?:require\(['"]\.\.\/dist\/pnpm\.(?:cjs|mjs)['"]\)|import\(['"]\.\.\/dist\/pnpm\.mjs['"]\))/u.test(source)) {
+    kind = 'node-package'
+    targetPath = canonical
+    packageRoot = dirname(dirname(canonical))
+    interpreter = await pinLocalPnpmNode(source, dirname(path))
+  } else fail('unsupported local source pnpm launcher before service stop')
+  const selectionPath = path
+  const commandPath = kind === 'node-package' ? path : targetPath
+  if (basename(selectionPath) !== 'pnpm' || await realpath(join(dirname(selectionPath), 'pnpm')).catch(() => '') !== canonical) {
     fail('local source pinned pnpm executable must be the pnpm resolved from its PATH directory')
   }
-  const before = await lstat(canonical)
-  if (!before.isFile() || before.isSymbolicLink() || ![0, currentUid()].includes(before.uid)
-    || isGroupOrOtherWritable(before) || before.size > 256 * 1024 * 1024) fail('local source pnpm executable is unsafe')
-  const digest = createHash('sha256')
-  for await (const chunk of createReadStream(canonical)) digest.update(chunk)
-  const after = await lstat(canonical)
-  if (!sameNpmFileIdentity(after, identity(before)) || before.size !== after.size
-    || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) fail('local source pnpm executable changed while pinning')
-  return { path: canonical, identity: identity(before), size: before.size, digest: digest.digest('hex') }
+  const packageIdentity = await pinLocalPnpmDirectory(packageRoot)
+  const metadataFile = await pinLocalPnpmFile(join(packageRoot, 'package.json'), 65_536)
+  let metadata
+  try { metadata = JSON.parse(metadataFile.head.toString('utf8')) } catch { fail('local source pnpm package metadata is invalid') }
+  if (kind === 'node-package') {
+    const selected = typeof metadata.bin === 'string' ? metadata.bin : metadata.bin?.pnpm
+    if (metadata.name !== 'pnpm' || !EXACT_SEMVER.test(metadata.version)
+      || typeof selected !== 'string' || !inside(packageRoot, resolve(packageRoot, selected))
+      || resolve(packageRoot, selected) !== canonical) fail('unsupported local source pnpm Node package layout')
+  } else if (metadata.name !== '@pnpm/exe' || metadata.version !== '11.7.0'
+    || basename(targetPath) !== 'pnpm' || basename(packageRoot) !== 'exe'
+    || basename(dirname(packageRoot)) !== '@pnpm' || basename(dirname(dirname(packageRoot))) !== 'node_modules') {
+    fail('unsupported local source pnpm managed package layout')
+  }
+  const target = await pinLocalPnpmFile(targetPath, undefined, true)
+  if (kind !== 'node-package' && !nativePnpmExecutable(target.head)) fail('local source pnpm managed target is not a native executable')
+  const trees = [await pinLocalPnpmTree(join(packageRoot, 'dist'))]
+  if (kind === 'node-package') trees.push(await pinLocalPnpmTree(join(packageRoot, 'bin')))
+  if (await existingIdentity(join(packageRoot, 'node_modules')) !== undefined) trees.push(await pinLocalPnpmTree(join(packageRoot, 'node_modules')))
+  if (!isDeepStrictEqual(packageIdentity, await pinLocalPnpmDirectory(packageRoot))
+    || await realpath(path) !== canonical
+    || kind === 'managed-wrapper' && await realpath(join(dirname(canonical), MANAGED_PNPM_TARGET)) !== targetPath) fail('local source pnpm runtime paths changed while pinning')
+  return { ...launcher.pin, selectionPath, commandPath, runtime: { kind, version: metadata.version, packageRoot, packageIdentity, packageJson: metadataFile.pin, target: target.pin, interpreter, trees } }
 }
 
 async function assertLocalPnpmExecutable(expected) {
-  const actual = await pinLocalPnpmExecutable(expected.path)
-  if (!isDeepStrictEqual(actual, expected)) fail('local source pinned pnpm executable changed')
+  const actual = await pinLocalPnpmExecutable(expected.selectionPath)
+  if (!isDeepStrictEqual(actual, expected)) fail('local source pinned pnpm runtime closure changed')
+}
+
+function assertLocalPnpmPackageManager(source, pnpmExecutable) {
+  let manifest
+  try { manifest = JSON.parse(source) } catch { fail('local source package manifest is invalid') }
+  if (manifest.packageManager === undefined) return
+  const requested = typeof manifest.packageManager === 'string'
+    ? manifest.packageManager.replace(/\+sha(?:224|256|384|512)\.[a-f0-9]+$/u, '') : ''
+  if (requested !== `pnpm@${pnpmExecutable.runtime.version}`) {
+    fail('local source packageManager does not match pinned pnpm version before service stop')
+  }
 }
 
 async function localSourceLockStat(profilePath) {
@@ -6209,14 +6396,17 @@ async function assertLocalSourceLockMarker(marker, profilePath, lockfile, allowe
   return matched
 }
 
-async function prepareLocalSourceOfflineCache({ current, homePath, profile, pnpmPath, dshExecutable }) {
+async function prepareLocalSourceOfflineCache({ current, homePath, profile, pnpmPath, dshExecutable, pnpmExecutable: expectedPnpm }) {
   await assertProfileTreeIdentity(current)
-  const pnpmExecutable = await pinLocalPnpmExecutable(pnpmPath)
-  pnpmPath = pnpmExecutable.path
+  const pnpmExecutable = expectedPnpm ?? await pinLocalPnpmExecutable(pnpmPath)
+  if (await realpath(pnpmPath) !== pnpmExecutable.path) fail('local source pnpm selection changed before preparation')
+  await assertLocalPnpmExecutable(pnpmExecutable)
+  pnpmPath = pnpmExecutable.commandPath
   if (await existingIdentity(join(current.profilePath, '.npmrc')) !== undefined) fail('local source cannot isolate a profile .npmrc')
   const original = await readNpmMetadata(current.profilePath)
+  assertLocalPnpmPackageManager(original.packageJson.source, pnpmExecutable)
   if (original.lockfile === undefined || original.workspace === undefined) fail('local source requires a pinned old lockfile and workspace')
-  const sourceConfig = await assertNpmVerificationPolicy(pnpmPath, current.profilePath, localSourceOriginalNpmEnvironment())
+  const sourceConfig = await assertNpmVerificationPolicy(pnpmPath, current.profilePath, localSourceOriginalNpmEnvironment(), pnpmExecutable)
   const configuration = npmConfigurationSnapshot(sourceConfig)
   const rootPath = await mkdtemp('/tmp/dsh-enhanced-local-pnpm-')
   const rootIdentity = identity(await lstat(rootPath))
@@ -6249,7 +6439,7 @@ async function prepareLocalSourceOfflineCache({ current, homePath, profile, pnpm
       configFiles[name] = await readNpmMetadataFile(join(cachePath, name))
     }
     const environment = localSourcePrivateNpmEnvironment(cachePath, configuredStorePath)
-    assertSameNpmConfig(await assertNpmVerificationPolicy(pnpmPath, profilePath, environment), sourceConfig)
+    assertSameNpmConfig(await assertNpmVerificationPolicy(pnpmPath, profilePath, environment, pnpmExecutable), sourceConfig)
     if (await existingIdentity(join(cachePath, 'lockfile-verified.jsonl')) !== undefined) fail('local source old lockfile marker must be fresh')
     await assertLocalPnpmExecutable(pnpmExecutable)
     await run(pnpmPath, ['install', '--lockfile-only', '--frozen-lockfile'], { cwd: profilePath, env: environment, timeoutMs: 300_000 })
@@ -6308,7 +6498,9 @@ async function prepareLocalSourceOfflineCache({ current, homePath, profile, pnpm
       fail('local source original verification record changed during metadata warmup')
     }
     const privateMetadata = await readNpmMetadata(profilePath)
+    await assertLocalPnpmExecutable(pnpmExecutable)
     const storeOutput = await run(pnpmPath, ['store', 'path'], { cwd: profilePath, env: environment, capture: true, timeoutMs: 30_000 })
+    await assertLocalPnpmExecutable(pnpmExecutable)
     const selectedStorePath = storeOutput.stdout.trim()
     if (!isAbsolute(selectedStorePath) || selectedStorePath.includes('\n') || selectedStorePath.includes('\r')
       || !inside(configuredStorePath, selectedStorePath)) fail('local source private pnpm store path escapes its configured root')
@@ -6390,7 +6582,7 @@ async function prepareLocalSourcePackageCaches(transactionRoot, pnpmStore, prepa
     if (!sameIdentity(await lstat(pnpmStore.storePath), pnpmStore.identity)
       || await realpath(pnpmStore.localSource.alias.path) !== pnpmStore.storePath) fail('local package store changed while copying')
     await assertLocalSourcePreparation(preparation, stagedProfilePath, false)
-    return { dispose, pnpmPath: preparation.pnpmPath, roots: [
+    return { dispose, pnpmPath: preparation.pnpmExecutable.commandPath, pnpmExecutable: preparation.pnpmExecutable, roots: [
       { sourcePath: store, identity: identity(await lstat(store)), path: pnpmStore.storePath },
       ...(sandboxHiddenStorePath(pnpmStore.localSource.alias.path) && pnpmStore.localSource.alias.path !== pnpmStore.storePath
         ? [{ sourcePath: store, identity: identity(await lstat(store)), path: pnpmStore.localSource.alias.path }] : []),
@@ -6401,6 +6593,7 @@ async function prepareLocalSourcePackageCaches(transactionRoot, pnpmStore, prepa
 
 async function localSourceSandbox(context, action, input, pnpmStore, packageCaches) {
   if (packageCaches !== undefined && action !== 'packages') fail('writable local package caches are only allowed for package installation')
+  if (packageCaches !== undefined) await assertLocalPnpmExecutable(packageCaches.pnpmExecutable)
   if (input.proof.driverDigest !== await localSourceDriverDigest()) fail('local source lifecycle driver changed')
   const helper = await localSourceHelper()
   await helper.assertLocalSourceInstaller(input.proof.installer)
@@ -6416,6 +6609,7 @@ async function localSourceSandbox(context, action, input, pnpmStore, packageCach
         pnpm_config_ignore_pnpmfile: 'true', pnpm_config_package_import_method: 'copy',
         pnpm_config_trust_lockfile: 'false',
         ...(packageCaches === undefined ? {} : {
+          ...localSourcePnpmManagerEnvironment(),
           PATH: `${dirname(packageCaches.pnpmPath)}:${process.env.PATH ?? '/usr/bin:/bin'}`,
           HOME: '/run/dsh-enhanced-local-pnpm-cache/home',
           XDG_CONFIG_HOME: '/run/dsh-enhanced-local-pnpm-cache/config',
@@ -6425,6 +6619,7 @@ async function localSourceSandbox(context, action, input, pnpmStore, packageCach
         ...(packageCaches === undefined ? {} : { pnpm_config_store_dir: pnpmStore.localSource.alias.path,
           pnpm_config_cache_dir: '/run/dsh-enhanced-local-pnpm-cache', pnpm_config_frozen_store: 'false', pnpm_config_verify_store_integrity: 'true' }) },
     })
+    if (packageCaches !== undefined) await assertLocalPnpmExecutable(packageCaches.pnpmExecutable)
     return parseJsonOutput(result.stdout, 'pre-owner local source')
   } finally { await rm(inputPath, { force: true }) }
 }
@@ -8845,13 +9040,15 @@ async function main() {
       bwrapExecutable, driverDigest: snapshotProof.driverDigest }
     const current = await readProfile(homePath, profile)
     await precheckNpmMetadata(current, dshExecutable)
-    const pnpmStore = await resolvedPnpmStorePath(await realpath(pnpmPath), homePath, current.profilePath)
+    const pnpmExecutable = await pinLocalPnpmExecutable(pnpmPath)
+    assertLocalPnpmPackageManager((await readNpmMetadata(current.profilePath)).packageJson.source, pnpmExecutable)
+    const pnpmStore = await resolvedPnpmStorePath(pnpmExecutable.commandPath, homePath, current.profilePath, pnpmExecutable)
     const alias = await helper.readLocalSourcePnpmStoreAlias({ profilePath: current.profilePath, storePath: pnpmStore.storePath, installer })
-    const rawConfig = JSON.parse((await run(await realpath(pnpmPath), ['config', 'list', '--json'], {
-      cwd: current.profilePath, capture: true,
-      env: { ...process.env, NODE_OPTIONS: undefined, NODE_PATH: undefined, pnpm_config_ignore_pnpmfile: 'true', pnpm_config_ignore_scripts: 'true' },
-      timeoutMs: 30_000,
+    await assertLocalPnpmExecutable(pnpmExecutable)
+    const rawConfig = JSON.parse((await run(pnpmExecutable.commandPath, ['config', 'list', '--json'], {
+      cwd: current.profilePath, capture: true, env: localSourceOriginalNpmEnvironment(), timeoutMs: 30_000,
     })).stdout)
+    await assertLocalPnpmExecutable(pnpmExecutable)
     const cacheSetting = rawConfig.cacheDir ?? rawConfig['cache-dir']
       ?? join(process.env.XDG_CACHE_HOME ?? join(process.env.HOME ?? dirname(homePath), '.cache'), 'pnpm')
     if (typeof cacheSetting !== 'string' || !isAbsolute(cacheSetting) || resolve(cacheSetting) !== cacheSetting) fail('local pnpm cache path is invalid')
@@ -8862,7 +9059,7 @@ async function main() {
     assertExpectedDirectoryMetadata(cacheEntry, identity(cacheEntry), cachePath)
     pnpmStore.localSource = { alias, cachePath, cacheIdentity: identity(cacheEntry) }
     const localSourcePreparation = await prepareLocalSourceOfflineCache({ current, homePath, profile, dshExecutable,
-      pnpmPath: await realpath(pnpmPath) })
+      pnpmPath, pnpmExecutable })
     try {
       await performLifecycle({ operation: 'upgrade', homePath, profile, dshExecutable, bwrapExecutable,
         expectedScenario: scenario, targets: [], serviceContext, pnpmStore, localSourceMaintenance, localSourceConfigs,
@@ -9025,6 +9222,7 @@ export const lifecycleProfileTest = Object.freeze({
   validManifestTopLevel, validV3OperationShape, validV3ServiceAcceptance, writeManifest, loadManifest,
   validSupervisedCapabilityProof, assertHostRsiRuntimeSuccessor, hostSandboxRun, MANIFEST_MAX_BYTES,
   validLocalSourceManifest, validLocalSourceSelection, localSourcePhysicalProof, profileTreeDigest,
+  pinLocalPnpmExecutable, assertLocalPnpmExecutable, assertLocalPnpmPackageManager, localSourceOriginalNpmEnvironment,
   prepareLocalSourceOfflineCache, assertLocalSourcePreparation, prepareLocalSourcePackageCaches, sandboxArgs,
 })
 
