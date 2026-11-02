@@ -20,7 +20,7 @@ pre-owner 源码维护接入原生基础资源迁移：Docker→native 和 nativ
 
 配置预览只核对已冻结内容；正式停服阶段重新迁移并绑定实际 inode，切换/恢复重验同一目录身份，拒绝同内容复制品。阶段失败恢复原资源；备份清理开始后失败保留候选并报错。独立复核发现的目标祖先 symlink 外写问题已在 Linux 以同一负例完成修前 3 FAIL、修后无外部变化的验证。
 
-原有最终候选依赖准备与断网原生安装证明继续保留。当前专项：Linux 基础迁移 42 passed / 1 平台 skipped，资源事务 35 passed，安装辅助 201 passed；Mac 对应 8/38、29/6、185/16（passed/skipped）。资源事务和安装入口含明确替身边界，不代表完整活服务升级。入口首轮暴露的两项改名恢复失败已修复：仅指定原备份可用事务冻结摘要验证完整源码身份，普通 reader 仍核对活 Home。真实 Git/签名专项两端各 17 passed，Linux 恢复入口重跑 2 passed；入口其余 10 项已通过。精确提交的两端根检查待完成；下方完整检查仍为上一交付基线。
+原有最终候选依赖准备与断网原生安装证明继续保留。真实 Git/签名恢复专项两端各 17 passed；Linux 安装器完整组 501 passed / 1 skipped，已覆盖原目录改名后恢复与复制品拒绝。基础迁移、资源事务和整合均经独立复核；资源事务与安装入口仍含明确替身边界，不代表完整活服务升级。精确实现提交 `e92fe502` 的两端根检查见下。
 
 ## 后续工程与延后验收
 
@@ -32,13 +32,13 @@ pre-owner 源码维护接入原生基础资源迁移：Docker→native 和 nativ
 
 ## 最新完整检查
 
-命令 `CI=1 VITEST_MAX_WORKERS=2 pnpm_config_verify_deps_before_run=error pnpm check`，pnpm 11.7.0。两端均为精确实现提交 `230d4807`，tree `21626106bbbdfadd299046146bee3769c78506d2`。
+命令 `CI=1 VITEST_MAX_WORKERS=2 pnpm_config_verify_deps_before_run=error pnpm check`，pnpm 11.7.0。两端均为精确实现提交 `e92fe502`，tree `d714e1adf7474330bdae86023b89a25c5e8777fe`。
 
 | 环境与精确源码 | 结果 | 测试 passed / skipped | 文件 passed / skipped | 日志 SHA-256 |
 | --- | --- | --- | --- | --- |
-| Mac / Node 26.11.1 / `230d4807` | EXIT 0，独立 PASS，1106.98 秒 | 9,705 / 1,890 | 675 / 85 | `85fb834a9976d7730379ac1b5dd27d344d5b2382a860b9d2295fa07c9fd81ab0` |
-| Linux / Node 24.7.0 / `230d4807` | EXIT 0，独立 PASS，2313.72 秒 | 11,289 / 303 | 728 / 32 | `58553b5af33cb5cc00ab88eaa67a31eea6b67294197013399c4d5bc94a265541` |
+| Mac / Node 26.11.1 / `e92fe502` | EXIT 0，独立 PASS，1109.91 秒 | 9,754 / 1,916 | 678 / 85 | `072e0eaf03098707d5410aa4e7a4c4819a0b7710191c0ab5b76c9e5313f10a8e` |
+| Linux / Node 24.7.0 / `e92fe502` | EXIT 0，独立 PASS，2501.06 秒 | 11,363 / 304 | 731 / 32 | `aab3bcbbaa59cc80ad0dfb55af323204111df34bd75bff568c243b6294d40dcc` |
 
-两端均已独立核对 manifest、零警告 lint、38 包构建、38 个类型检查、39 个测试组及 38 个唯一 dry-run pack；Lark 包含本次变更的两个安装模块的 JS、类型声明及 map。Linux 安装器文件 491 passed / 1 skipped。Linux 使用 `TMPDIR=/data00/home/jiataorui/t`，两端各自检查前后的提交一致，且 tracked 工作树干净。本轮原始日志和复核见 `docs/evidence/verification-230d4807/`；实际候选包安装证据见 `docs/evidence/pre-owner-candidate-proof/`。
+两端均已独立核对 manifest、零警告 lint、38 包构建范围、38 个类型检查、39 个测试组及 38 个唯一 dry-run pack；类型检查和打包的包身份逐一匹配，Lark 三个相关模块的 12 个 JS、类型声明及 map 文件均已包含。Linux 安装器文件 501 passed / 1 skipped。Linux 使用 `TMPDIR=/data00/home/jiataorui/t`，两端各自检查前后的提交一致，且 tracked 工作树干净。原始日志和复核见 `docs/evidence/verification-e92fe502/`；修复前后专项见 `docs/evidence/pre-owner-native-resources/`。
 
 历史失败均保留原始证据；修复后的检查按实际源码单独记录。上述检查不代替跳过项、外部连接、活服务升级或长期普通使用验收。
