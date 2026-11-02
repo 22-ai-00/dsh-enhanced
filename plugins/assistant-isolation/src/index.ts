@@ -47,3 +47,5 @@ export type * from './types.js'
 export async function apply(ctx: Context, config: Config = {}): Promise<void> { await new AssistantIsolationService(ctx, config).ready }
 // Loader unwraps the default export; preserve the trusted plugin identity there.
 export default { name, Config, apply }
+
+export { validateLinuxCgroupRoots } from './linux-execution-contract.js'

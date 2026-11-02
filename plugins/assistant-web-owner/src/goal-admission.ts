@@ -263,7 +263,8 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
   const policy = map(personal.get('assistantPolicy', true))
   const principalId = `web/${input.profile}/local/operator`
   const profile = inspectAutonomyProfile(target.document.toString(), input.profile, input.dshHome)
-  if (profile.backend === 'linux-native') fail('native Goal independent verification is not supported yet; preserve an explicit Docker autonomy profile for Goal admission')
+  const nativeRoots = profile.backend === 'linux-native' ? profile.linux.cgroupRoots : undefined
+  if (nativeRoots?.mode === 'v2') fail('native Goal verification requires frozen cgroup v1 roots')
   const { binding, owner } = snapshot
   if (profile.grant.workspace !== input.workspace || profile.grant.agentPreset !== input.preset || binding.workspace !== input.workspace || binding.agentPreset !== input.preset
     || !isDeepStrictEqual(binding.principal, profile.principal) || owner.id !== profile.grant.principalRecordId || owner.version !== profile.grant.principalVersion
@@ -321,7 +322,10 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
     }
   }
   const authority = { kind: 'isolated-runner' as const, id: `${admissionId}-verify`, stateRoot: join(input.dshHome, 'assistant-goal-verification', input.profile, admissionId),
-    image: profile.image, dockerPath: profile.dockerPath, command: task.verification.command, expiresAt: profile.grant.expiresAt,
+    ...(profile.backend === 'linux-native'
+      ? { backend: 'linux-native' as const, runtime: profile.linux.runtime, cgroupRoots: nativeRoots! }
+      : { image: profile.image, dockerPath: profile.dockerPath }),
+    command: task.verification.command, expiresAt: profile.grant.expiresAt,
     maxRuns: task.verification.maxRuns, maxTotalDurationMs: task.verification.maxTotalDurationMs, maxDurationMs: task.verification.maxDurationMs,
     maxOutputBytes: task.verification.maxOutputBytes, testSets: [{ id: 'cases', cases: task.verification.cases }] }
   const remoteAuthority = repository?.outcome === undefined ? undefined : repositoryOutcomeAuthority(repository.outcome, {

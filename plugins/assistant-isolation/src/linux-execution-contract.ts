@@ -142,6 +142,18 @@ function directory(value: unknown, expected: string): asserts value is LinuxCgro
   object(value, ['path', 'dev', 'ino'])
   if (value.path !== expected || !natural(value.dev) || !positive(value.ino)) fail()
 }
+/** Pure static validation; no filesystem, cgroup creation or authority is acquired. */
+export function validateLinuxCgroupRoots(value: unknown): LinuxCgroupRoots {
+  const roots = value as LinuxCgroupRoots
+  if (!roots || !['v1', 'v2'].includes(roots.mode)) fail()
+  object(roots, roots.mode === 'v1' ? ['mode', ...controllers] : ['mode', 'unified'])
+  const entries = rootEntries(roots)
+  if (new Set(entries.map(([, root]) => root)).size !== entries.length) fail()
+  for (const [, root] of entries) if (!path(root) || !(roots.mode === 'v1'
+    ? /^\/sys\/fs\/cgroup\/[A-Za-z0-9_,]+\/dsh-native\/uid-[1-9][0-9]*$/u
+    : /^\/sys\/fs\/cgroup\/dsh-native\/uid-[1-9][0-9]*$/u).test(root)) fail()
+  return clone(roots)
+}
 export function validateLinuxExecutionContract(value: unknown): LinuxExecutionContract {
   object(value, ['schemaVersion', 'backend', 'runtimeDigest', 'profile', 'limits', 'keeperLimits', 'cgroupRoots', ...((value as Record<string, unknown> | null)?.schemaVersion === 3 ? ['implementationDigest', 'userNamespace', 'systemSnapshot'] : [])])
   if (![1, 2, 3].includes(value.schemaVersion as number) || value.backend !== 'linux-native' || !matches(value.runtimeDigest, HEX) || !['ordinary', 'repository'].includes(value.profile as string)) fail()
@@ -167,14 +179,7 @@ export function validateLinuxExecutionContract(value: unknown): LinuxExecutionCo
       || !matches(snapshot.root.sha256, HEX) || !matches(snapshot.manifestSha256, HEX)
       || !positive(snapshot.bytes) || snapshot.bytes > 640 * 1024 ** 2 || !positive(snapshot.entries) || snapshot.entries > 32768) fail()
   }
-  const roots = value.cgroupRoots as LinuxCgroupRoots
-  if (!roots || !['v1', 'v2'].includes(roots.mode)) fail()
-  object(roots, roots.mode === 'v1' ? ['mode', ...controllers] : ['mode', 'unified'])
-  const entries = rootEntries(roots)
-  if (new Set(entries.map(([, root]) => root)).size !== entries.length) fail()
-  for (const [, root] of entries) if (!path(root) || !(roots.mode === 'v1'
-    ? /^\/sys\/fs\/cgroup\/[A-Za-z0-9_,]+\/dsh-native\/uid-[1-9][0-9]*$/u
-    : /^\/sys\/fs\/cgroup\/dsh-native\/uid-[1-9][0-9]*$/u).test(root)) fail()
+  validateLinuxCgroupRoots(value.cgroupRoots)
   return clone(value as unknown as LinuxExecutionContract)
 }
 export function linuxExecutionContractDigest(value: LinuxExecutionContract): string { return digest(validateLinuxExecutionContract(value)) }

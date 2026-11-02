@@ -13,6 +13,7 @@ import type {
   TargetReadbackCriterion,
   TaskAcceptanceContract,
 } from '@dsh-enhanced/task-acceptance-contract'
+import { validateLinuxRuntime, validateLinuxCgroupRoots, type LinuxRuntime, type LinuxCgroupRoots } from '@dsh-enhanced/assistant-isolation/native-resources'
 import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
 
 const MAX_AUTHORITIES = 64
@@ -89,12 +90,10 @@ export interface IsolatedRunnerTestSetInput {
   readonly id: string
   readonly cases: readonly IsolatedRunnerTestCaseInput[]
 }
-export interface IsolatedRunnerAuthorityInput {
+export interface IsolatedRunnerAuthorityTerms {
   readonly kind: 'isolated-runner'
   readonly id: string
   readonly stateRoot: string
-  readonly image: string
-  readonly dockerPath: string
   readonly command: string
   readonly expiresAt: number
   readonly maxRuns: number
@@ -103,6 +102,18 @@ export interface IsolatedRunnerAuthorityInput {
   readonly maxOutputBytes: number
   readonly testSets: readonly IsolatedRunnerTestSetInput[]
 }
+
+export interface DockerIsolatedRunnerAuthorityInput extends IsolatedRunnerAuthorityTerms {
+  readonly backend?: 'docker'
+  readonly image: string
+  readonly dockerPath: string
+}
+export interface NativeIsolatedRunnerAuthorityInput extends IsolatedRunnerAuthorityTerms {
+  readonly backend: 'linux-native'
+  readonly runtime: LinuxRuntime
+  readonly cgroupRoots: Extract<LinuxCgroupRoots, { mode: 'v1' }>
+}
+export type IsolatedRunnerAuthorityInput = DockerIsolatedRunnerAuthorityInput | NativeIsolatedRunnerAuthorityInput
 
 export type VerifierAuthorityInput = RunnerAuthorityInput | DocumentAuthorityInput | ReadbackAuthorityInput | IsolatedRunnerAuthorityInput | RepositoryReadbackAuthorityInput | RepositoryCommitReadbackAuthorityInput
 export interface VerifierAuthoritiesConfig { readonly authorities: readonly VerifierAuthorityInput[] }
@@ -121,9 +132,8 @@ export interface ReadbackAuthority extends Omit<ReadbackAuthorityInput, 'allowHt
   readonly allowHttpLoopback: boolean
   readonly digest: string
 }
-export interface IsolatedRunnerAuthority extends IsolatedRunnerAuthorityInput {
-  readonly digest: string
-}
+export type IsolatedRunnerAuthority = (Omit<DockerIsolatedRunnerAuthorityInput, 'backend'> & { readonly backend?: never; readonly digest: string })
+  | (NativeIsolatedRunnerAuthorityInput & { readonly digest: string })
 export type VerifierAuthority = RunnerAuthority | DocumentAuthority | ReadbackAuthority | IsolatedRunnerAuthority | RepositoryOutcomeAuthority
 
 export interface IsolatedVerificationContext {
@@ -356,14 +366,47 @@ export function createVerifierAuthorities(config: unknown): readonly VerifierAut
       return freeze({ ...bare, digest: digest(bare) })
     }
     if (kind === 'isolated-runner') {
-      allowedKeys(item, ['kind', 'id', 'stateRoot', 'image', 'dockerPath', 'command', 'expiresAt', 'maxRuns', 'maxTotalDurationMs', 'maxDurationMs', 'maxOutputBytes', 'testSets'], [], `isolated runner authority ${id}`)
-      const image = string(item.image, 'isolated runner image')
-      if (!IMAGE.test(image)) fail('isolated runner image must be SHA-256 pinned')
+      const native = item.backend === 'linux-native'
+      if (item.backend !== undefined && item.backend !== 'docker' && !native) fail('unknown isolated runner backend')
+      allowedKeys(item, ['kind', 'id', 'stateRoot', 'command', 'expiresAt', 'maxRuns', 'maxTotalDurationMs', 'maxDurationMs', 'maxOutputBytes', 'testSets',
+        ...(native ? ['backend', 'runtime', 'cgroupRoots'] : ['image', 'dockerPath'])], native ? [] : ['backend'], `isolated runner authority ${id}`)
       const expiresAt = item.expiresAt
       if (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt) || expiresAt < 1) fail('isolated runner expiresAt must be an absolute timestamp')
       const maxTotalDurationMs = whole(item.maxTotalDurationMs, 'isolated runner maxTotalDurationMs', 86_400_000)
       const maxDurationMs = whole(item.maxDurationMs, 'isolated runner maxDurationMs', 300_000)
       if (maxDurationMs > maxTotalDurationMs) fail('isolated runner maxDurationMs must not exceed maxTotalDurationMs')
+      if (native) {
+        // Reject accessors/non-JSON data before shared validators read fields.
+        const runtimeInput = object(item.runtime, 'native runtime')
+        const rootInput = object(runtimeInput.root, 'native runtime root')
+        const versionsInput = object(runtimeInput.versions, 'native runtime versions')
+        const rootsInput = object(item.cgroupRoots, 'native cgroup roots')
+        if (Object.entries(runtimeInput).some(([key, value]) => !['root', 'versions'].includes(key)
+          && typeof value !== 'string' && typeof value !== 'number')
+          || Object.values(rootInput).some(value => typeof value !== 'string' && typeof value !== 'number')
+          || Object.values(versionsInput).some(value => typeof value !== 'string')
+          || Object.values(rootsInput).some(value => typeof value !== 'string')) fail('native authority contains unsupported values')
+        let runtime: LinuxRuntime, roots: LinuxCgroupRoots
+        try { runtime = validateLinuxRuntime(runtimeInput); roots = validateLinuxCgroupRoots(item.cgroupRoots) }
+        catch { return fail('invalid isolated native runtime or cgroup roots') }
+        if (roots.mode !== 'v1') fail('isolated native verification requires cgroup v1')
+        const stateRoot = canonicalDirectory(item.stateRoot, 'isolated runner stateRoot')
+        if (/[\p{Cc}\\]/u.test(stateRoot)) fail('isolated native stateRoot is unsafe')
+        if ([runtime.root.path, runtime.nodePath, runtime.pnpmPath, runtime.nativePnpmRoot, runtime.nativePnpmPath,
+          runtime.modulesPath, runtime.storePath, runtime.cachePath].some(path => /[\p{Cc}\\]/u.test(path))) fail('native runtime path is unsafe')
+        const paths = [stateRoot, runtime.root.path, roots.cpu, roots.memory, roots.pids, roots.freezer]
+        for (let left = 0; left < paths.length; left++) for (let right = left + 1; right < paths.length; right++) {
+          if (paths[left] === paths[right] || paths[left]!.startsWith(paths[right]! + '/')
+            || paths[right]!.startsWith(paths[left]! + '/')) fail('isolated native authority paths overlap')
+        }
+        const bare = { kind: 'isolated-runner' as const, id, backend: 'linux-native' as const, stateRoot, runtime,
+          cgroupRoots: roots, command: string(item.command, 'isolated runner command'), expiresAt,
+          maxRuns: whole(item.maxRuns, 'isolated runner maxRuns', 10_000), maxTotalDurationMs, maxDurationMs,
+          maxOutputBytes: whole(item.maxOutputBytes, 'isolated runner maxOutputBytes', 262_144), testSets: isolatedTestSets(item.testSets) }
+        return freeze({ ...bare, digest: digest(bare) })
+      }
+      const image = string(item.image, 'isolated runner image')
+      if (!IMAGE.test(image)) fail('isolated runner image must be SHA-256 pinned')
       const bare = { kind: 'isolated-runner' as const, id, stateRoot: canonicalDirectory(item.stateRoot, 'isolated runner stateRoot'), image,
         dockerPath: canonicalExecutable(item.dockerPath, 'isolated runner dockerPath'), command: string(item.command, 'isolated runner command'), expiresAt,
         maxRuns: whole(item.maxRuns, 'isolated runner maxRuns', 10_000), maxTotalDurationMs, maxDurationMs,

@@ -9,7 +9,8 @@ import { hashLinuxRuntimeTree, verifyLinuxRuntime, type LinuxRuntime } from './l
 import { copyLinuxRuntimeManifests, type FrozenLinuxRuntimeSource } from './linux-runtime-source.js'
 export { freezeLinuxRuntimeSource, type FrozenLinuxRuntimeSource, type LinuxRuntimeSourceInput } from './linux-runtime-source.js'
 export { probeLinuxIsolationRuntime, type LinuxIsolationProbeConfig } from './probe.js'
-export type { LinuxRuntime } from './linux-runtime.js'
+export { validateLinuxRuntime, type LinuxRuntime } from './linux-runtime.js'
+export { validateLinuxCgroupRoots } from './linux-execution-contract.js'
 export type { LinuxCgroupRoots } from './linux-cgroups.js'
 export { discoverLinuxCgroupRoots, parseLinuxV1ControllerMounts, RsiLinuxCgroupUnavailableError, type LinuxV1CgroupRoots } from './native-cgroup-roots.js'
 

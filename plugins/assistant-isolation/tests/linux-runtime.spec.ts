@@ -89,3 +89,27 @@ test.runIf(process.platform === 'linux')('runtime traversal stops on cancellatio
   await expect(pending).rejects.toBe(reason)
   await expect(hashLinuxRuntimeTree(runtime.root.path)).resolves.toBe(runtime.root.sha256)
 })
+
+test('shared cgroup validation is pure/detached and preserves v2 execution-contract digest', async () => {
+  const { validateLinuxCgroupRoots, validateLinuxExecutionContract, linuxExecutionContractDigest } = await import('../src/linux-execution-contract.js')
+  const { defaultLimits } = await import('../src/config.js')
+  const v1 = { mode: 'v1' as const, cpu: '/sys/fs/cgroup/cpu/dsh-native/uid-1000', memory: '/sys/fs/cgroup/memory/dsh-native/uid-1000',
+    pids: '/sys/fs/cgroup/pids/dsh-native/uid-1000', freezer: '/sys/fs/cgroup/freezer/dsh-native/uid-1000' }
+  const checked = validateLinuxCgroupRoots(v1)
+  v1.cpu = '/invalid'
+  expect(checked).toMatchObject({ cpu: '/sys/fs/cgroup/cpu/dsh-native/uid-1000' })
+  expect(Object.isFrozen(checked)).toBe(true)
+  const contract = { schemaVersion: 1 as const, backend: 'linux-native' as const, runtimeDigest: 'a'.repeat(64), profile: 'ordinary' as const,
+    limits: defaultLimits, keeperLimits: { memoryMiB: 128, pidsLimit: 64, cpus: 0.5 },
+    cgroupRoots: { mode: 'v2' as const, unified: '/sys/fs/cgroup/dsh-native/uid-1000' } }
+  expect(validateLinuxCgroupRoots(contract.cgroupRoots)).toEqual(contract.cgroupRoots)
+  expect(validateLinuxExecutionContract(contract)).toEqual(contract)
+  expect(linuxExecutionContractDigest(contract)).toBe('86e4807558fe4e861dfca30cc42ddbe80cb779ff407f6c74c62735183b47aec5')
+  const repository = { ...contract, schemaVersion: 2 as const, profile: 'repository' as const,
+    limits: { ...defaultLimits, tmpMiB: 64, tmpInodes: 128, inputMiB: 65 as const, inputInodes: 16 as const },
+    keeperLimits: { memoryMiB: 256, pidsLimit: 64, cpus: 0.5 } }
+  expect(validateLinuxExecutionContract(repository)).toEqual(repository)
+  expect(linuxExecutionContractDigest(repository)).toBe('27901e4a5348f6da7428b252e6dcae46faa594fbf6b9a9eb97372922f8c9473c')
+  for (const roots of [{ ...checked, extra: true }, { ...checked, cpu: checked.mode === 'v1' ? checked.memory : '' },
+    { mode: 'v2', unified: '/tmp/cgroup' }, { mode: 'future' }]) expect(() => validateLinuxCgroupRoots(roots)).toThrow()
+})

@@ -141,7 +141,7 @@ test('mixed source/image/backend options are rejected and explicit local HEAD is
 })
 
 
-test('native ordinary setup rejects Goal admission before composing an unsupported independent verifier', async () => {
+test('native ordinary setup rejects a mismatched Goal owner before composing independent verifier authority', async () => {
   const f = await fixture(); await configureWebOwner(f.input,f.effective)
   const source = await readFile(f.patchPath,'utf8'), delivery = new DeliveryStore({path:f.databasePath})
   const principal = {channel:'web',account:'web',tenant:'local',user:'operator'}
@@ -151,7 +151,7 @@ test('native ordinary setup rejects Goal admission before composing an unsupport
     executionBudget:{mode:'calls',modelCalls:3,toolCalls:3,durationMs:120000,maxOutputTokensPerCall:8192,routes:[{provider:'test-provider',model:'test-model'}]},
     verification:{artifactPath:'result.txt',command:'node verify.mjs',maxRuns:4,maxTotalDurationMs:100000,maxDurationMs:20000,maxOutputBytes:4096,cases:[{stdin:'one',expectedStdout:'one',expectedExitCode:0}]}})
   const before = rows(f.databasePath,'SELECT * FROM delivery_principals')
-  expect(() => prepareGoalAdmission(f.input,source,f.effective,task,{owner,binding})).toThrow(/native Goal independent verification is not supported yet/u)
+  expect(() => prepareGoalAdmission(f.input,source,f.effective,task,{owner:{...owner,version:owner.version+1},binding})).toThrow(/owner, scope or remaining grant deadline mismatch/u)
   expect(await readFile(f.patchPath,'utf8')).toBe(source)
   expect(rows(f.databasePath,'SELECT * FROM delivery_principals')).toEqual(before)
 })

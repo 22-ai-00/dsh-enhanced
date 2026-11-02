@@ -73,7 +73,7 @@ Delivery 保存 Web owner/binding、Inbox 文本、内容摘要、尝试与租�
 ./scripts/install/install-local.sh --scenario autonomy --isolation-backend linux-native \
   --isolation-source-repository /absolute/repository --workspace /absolute/workspace --yes --no-service
 
-# macOS 或需保留现有 Docker Goal 独立验收的 profile
+# macOS 或显式保留 Docker backend 的 profile
 ./scripts/install/install-local.sh --scenario autonomy --isolation-image sha256:<64位小写hex> \
   --workspace /absolute/workspace --yes --no-service
 ```
@@ -95,11 +95,15 @@ setup 在 profile 锁内先静态验证合并配置、受管 grant、backend 与
 
 Isolation、Actions、Keychain、Skills 与 Proactive 的可变状态路径均规范化到真实 `DSH_HOME` 内，Skills 的嵌套比较/留出 `stateRoot` 也受同一约束；已有祖先 symlink 逃逸拒绝。旧 Skills/Proactive published-default SQLite 或 sidecar 若已有数据，不静默切换位置，必须先停 Host 并显式离线迁移。setup 在失败前可能创建工作区/资源目录，owner 数据库与 patch 不能跨库原子提交。
 
-native 资源准备会使用固定官方 Git tag/官方工具链下载、Git/归档/Node/pnpm 子进程和 Home 内私有 staging；不调用 Lark 完整准备、不改 Control Plane、不启服务、不配置外部凭据。Docker 路径额外使用本机 Docker。未知清理状态的探测目录保留排查。**本片仅普通有限隔离执行；native Goal 的独立 isolated-runner 验收仍未接通，Goal admission 对 native profile 明确拒绝。**需要现有有限 Goal 能力时保留显式 Docker profile；不能将普通 native probe 通过称为完整去 Docker 或长期自治验收。具体安装前提见[安装说明](../../scripts/install/README.md)。
+native 资源准备会使用固定官方 Git tag/官方工具链下载、Git/归档/Node/pnpm 子进程和 Home 内私有 staging；不调用 Lark 完整准备、不改 Control Plane、不启服务、不配置外部凭据。Docker 路径额外使用本机 Docker。未知清理状态的探测目录保留排查。有限 Goal admission 可沿用持久 native descriptor 配置独立 `isolated-runner` 验收，见下节；普通 native probe 通过本身不证明 held-out 验收、完整去 Docker 或长期自治。具体安装前提见[安装说明](../../scripts/install/README.md)。
 
 ## 有限 Goal admission（实验性）
 
-在已完成 **Docker backend** 的 `autonomy` 安装后，可用一次离线 setup 把**一个已有、空闲的 Web owner Session**配置为固定 DeepSeek 路由、有限 Goals 预算、独立隔离验收条件和可选 wake route。先停止目标 Host；准备工作区之外、当前用户所有且权限为 `0600` 的 JSON 任务文件。不要把 API key 写进文件，`apiKeyEnv` 只是 credential reference。
+在已完成 `autonomy` 安装后（Docker 或 Linux native backend），可用一次离线 setup 把**一个已有、空闲的 Web owner Session**配置为固定 DeepSeek 路由、有限 Goals 预算、独立隔离验收条件和可选 wake route。先停止目标 Host；准备工作区之外、当前用户所有且权限为 `0600` 的 JSON 任务文件。不要把 API key 写进文件，`apiKeyEnv` 只是 credential reference。
+
+native admission 只复制该 profile 已持久化的 `runtime` 与 `cgroupRoots`，在原 `isolated-runner` authority 中明确设置 `backend: linux-native`，不混入 Docker image/dockerPath。它不重新 freeze/prepare、不发现 cgroup、不下载或迁移 backend；编译通过不表示真实 Linux 执行已成功。Docker authority 保留既有字段与规范化 digest，不自动写入 backend 默认字段。
+
+两条路径都沿用已有 owner/session/scope 围栏、grant 的原绝对 `expiresAt`、任务的有限验证次数/累计时限/单次时限/输出上限与私有测试用例。native descriptor 与 cgroup 值进入独立 authority digest；同 owner/任务重放保持相同配置，不续期、不重置原 Isolation 或 Verifier 用量。已配置 authority 后发生 runtime/cgroup/验证预算漂移会拒绝覆盖；owner/scope 不匹配、grant 过期或持久预算不可用也拒绝。实际验收仍通过既有 Goals 可信 producer、成功且 quiescent 的 accepted artifact 与 Verifier 私有 held-out 进程结果；模型报告、普通工具退出或 setup 成功都不能代替它。
 
 先用正式 setup 入口列出当前 owner 的真实空闲 Session；它只读取匹配当前 Web principal、workspace 和 preset 的 Delivery binding，绝不创建或伪造原生 Session。新 profile 需要先从原生 Web UI 打开一次，让 DSH 创建 Session。`--session-id` 可显式选择；省略时只有一个合法空闲 binding 才会自动选择，多个候选会原样列出并拒绝继续。
 
