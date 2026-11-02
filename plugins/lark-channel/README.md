@@ -191,3 +191,11 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 ## License
 
 MIT
+
+The Linux RSI bootstrap and cgroup modules are compatibility adapters over the
+non-activating `@dsh-enhanced/assistant-isolation/native-resources` subentry.
+RSI still verifies its own source-workspace receipt before/after shared preparation
+and re-reads the fixed Git manifest objects. Its public exports, schema-3 runtime
+receipt layout and private runtime cache paths remain compatible. Ordinary native
+resource callers do not need an RSI workspace or repairs repository. Cgroup
+discovery stays independent of base preparation and never creates delegation.

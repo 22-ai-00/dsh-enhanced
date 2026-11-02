@@ -12,7 +12,11 @@
       "default": "./lib/index.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./native-resources": {
+      "types": "./lib/native-resources.d.ts",
+      "default": "./lib/native-resources.js"
+    }
   },
   "files": [
     "lib",
@@ -99,7 +103,8 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
-    "@dsh-enhanced/task-acceptance-contract": "workspace:*"
+    "@dsh-enhanced/task-acceptance-contract": "workspace:*",
+    "yaml": "2.9.0"
   },
   "bin": {
     "dsh-isolation": "./lib/cli.js"

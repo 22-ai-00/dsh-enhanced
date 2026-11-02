@@ -82,7 +82,9 @@ Options:
   --scenario <name>         auto, core, web, autonomy, lark, supervised, or full (default: auto; Linux/macOS auto enables supervised learning)
   --workspace <absolute>    Web owner workspace (web/autonomy; default: current directory)
   --agent-preset <id>       Web owner Agent preset (web/autonomy; default: standard)
-  --isolation-image <id>    Immutable sha256 image for autonomy
+  --isolation-backend <id>  linux-native or docker (Linux without image defaults native)
+  --isolation-source-repository <absolute> Committed local HEAD for native runtime; otherwise official installed-version tag
+  --isolation-image <id>    Immutable sha256 image for Docker autonomy
   --isolation-max-runs <n>  Autonomy grant run limit (default: 20)
   --isolation-lease-minutes <n> Autonomy grant lease (default: 60)
   --isolation-runtime-minutes <n> Cumulative reserved runtime budget (default: 10)
@@ -2986,6 +2988,8 @@ dsh_enhanced_apply_web_owner() {
   local preset="$4"
   local dry_run="$5"
   local isolation_image="${6:-}"
+  local isolation_backend="${10:-}"
+  local isolation_source_repository="${11:-}"
   local isolation_max_runs="${7:-}"
   local isolation_lease_ms="${8:-}"
   local isolation_runtime_ms="${9:-}"
@@ -2995,7 +2999,10 @@ dsh_enhanced_apply_web_owner() {
     return $?
   fi
   local args=(--dsh-home "$dsh_home" --profile "$profile" --workspace "$workspace" --preset "$preset")
-  if [[ -n "$isolation_image" ]]; then args+=(--isolation-image "$isolation_image" --isolation-max-runs "$isolation_max_runs" --isolation-lease-ms "$isolation_lease_ms" --isolation-runtime-ms "$isolation_runtime_ms"); fi
+  if [[ "$isolation_backend" == 'linux-native' ]]; then
+    args+=(--isolation-backend linux-native --isolation-max-runs "$isolation_max_runs" --isolation-lease-ms "$isolation_lease_ms" --isolation-runtime-ms "$isolation_runtime_ms")
+    if [[ -n "$isolation_source_repository" ]]; then args+=(--isolation-source-repository "$isolation_source_repository"); fi
+  elif [[ -n "$isolation_image" ]]; then args+=(--isolation-image "$isolation_image" --isolation-max-runs "$isolation_max_runs" --isolation-lease-ms "$isolation_lease_ms" --isolation-runtime-ms "$isolation_runtime_ms"); fi
   dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-web-owner-setup "${args[@]}"
 }
 
@@ -3403,6 +3410,8 @@ dsh_enhanced_install() {
   local web_preset_explicit='0'
   local isolation_option_explicit='0'
   local isolation_image=''
+  local isolation_backend=''
+  local isolation_source_repository=''
   local isolation_max_runs='20'
   local isolation_lease_minutes='60'
   local isolation_runtime_minutes='10'
@@ -3450,6 +3459,12 @@ dsh_enhanced_install() {
         web_preset_explicit='1'
         shift 2
         ;;
+      --isolation-backend)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--isolation-backend 需要一个值。'; return $?; }
+        isolation_option_explicit=1; isolation_backend="$2"; shift 2 ;;
+      --isolation-source-repository)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--isolation-source-repository 需要一个值。'; return $?; }
+        isolation_option_explicit=1; isolation_source_repository="$2"; shift 2 ;;
       --isolation-image)
         [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--isolation-image 需要一个值。'; return $?; }
         isolation_option_explicit=1; isolation_image="$2"; shift 2 ;;
@@ -3889,7 +3904,19 @@ dsh_enhanced_install() {
     agent_tools_mode='preserve'
   fi
   if [[ "$scenario" == 'autonomy' && "$operation" == 'install' ]]; then
-    if [[ ! "$isolation_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then dsh_enhanced_fail 2 '--scenario autonomy 需要 --isolation-image sha256:<64位小写hex>。'; return $?; fi
+    if [[ -z "$isolation_backend" ]]; then
+      if [[ -z "$isolation_image" && "$install_platform" == 'Linux' ]]; then isolation_backend='linux-native'; else isolation_backend='docker'; fi
+    fi
+    case "$isolation_backend" in
+      linux-native)
+        if [[ "$install_platform" != 'Linux' || -n "$isolation_image" ]]; then dsh_enhanced_fail 2 'linux-native 只支持 Linux，且不能同时指定 --isolation-image。'; return $?; fi
+        if [[ -n "$isolation_source_repository" && "$isolation_source_repository" != /* ]]; then dsh_enhanced_fail 2 '--isolation-source-repository 必须是绝对路径。'; return $?; fi
+        ;;
+      docker)
+        if [[ -n "$isolation_source_repository" || ! "$isolation_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then dsh_enhanced_fail 2 'Docker autonomy 需要 --isolation-image sha256:<64位小写hex>，不能使用 native source repository。'; return $?; fi
+        ;;
+      *) dsh_enhanced_fail 2 '--isolation-backend 只能是 linux-native 或 docker。'; return $? ;;
+    esac
     local value_limit value maximum label
     for value_limit in "$isolation_max_runs:10000:--isolation-max-runs" "$isolation_lease_minutes:10080:--isolation-lease-minutes" "$isolation_runtime_minutes:1440:--isolation-runtime-minutes"; do
       IFS=: read -r value maximum label <<< "$value_limit"
@@ -4289,7 +4316,7 @@ NODE
   if [[ "$scenario" == 'web' || "$scenario" == 'autonomy' ]]; then
     printf '\nWeb owner 初始化：\n'
     if [[ "$scenario" == 'autonomy' ]]; then
-      dsh_enhanced_apply_web_owner "$profile" "$dsh_home" "$web_workspace" "$web_preset" "$dry_run" "$isolation_image" "$isolation_max_runs" "$((10#$isolation_lease_minutes * 60000))" "$((10#$isolation_runtime_minutes * 60000))" || return $?
+      dsh_enhanced_apply_web_owner "$profile" "$dsh_home" "$web_workspace" "$web_preset" "$dry_run" "$isolation_image" "$isolation_max_runs" "$((10#$isolation_lease_minutes * 60000))" "$((10#$isolation_runtime_minutes * 60000))" "$isolation_backend" "$isolation_source_repository" || return $?
     else
       dsh_enhanced_apply_web_owner "$profile" "$dsh_home" "$web_workspace" "$web_preset" "$dry_run" || return $?
     fi

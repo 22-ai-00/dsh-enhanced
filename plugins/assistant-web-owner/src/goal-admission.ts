@@ -263,6 +263,7 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
   const policy = map(personal.get('assistantPolicy', true))
   const principalId = `web/${input.profile}/local/operator`
   const profile = inspectAutonomyProfile(target.document.toString(), input.profile, input.dshHome)
+  if (profile.backend === 'linux-native') fail('native Goal independent verification is not supported yet; preserve an explicit Docker autonomy profile for Goal admission')
   const { binding, owner } = snapshot
   if (profile.grant.workspace !== input.workspace || profile.grant.agentPreset !== input.preset || binding.workspace !== input.workspace || binding.agentPreset !== input.preset
     || !isDeepStrictEqual(binding.principal, profile.principal) || owner.id !== profile.grant.principalRecordId || owner.version !== profile.grant.principalVersion

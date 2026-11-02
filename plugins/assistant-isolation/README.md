@@ -461,3 +461,51 @@ Host Verifier 可使用导出的 `IsolatedVerifierRunner` 在独立私有 stateR
 The read-only `isolation_grants` tool exposes usable grant IDs and remaining limits only for the current authenticated owner and workspace/preset. It applies live Policy, principal lineage, expiry and revocation checks; it cannot create or extend grants and returns no credentials or Host paths. When Policy allows discovery and at least one grant remains usable for that exact owner, the Host registers its exact tool definition for finite preauthorization so this read-only query skips the redundant native risk prompt. Revocation, expiry, owner/scope mismatch, Policy denial, tool replacement, or bundle unload removes that preauthorization. Use a returned ID with `isolation_run`.
 
 Native skill benchmark cells may expose `skill_run` and `skill_status` through the same preauthorization gate. Only the exact Skills definitions with a current, owner-bound isolation-only delegation can execute. This does not enable Host filesystem/shell tools or ordinary saved workflows in an isolated scope; every nested isolation job still needs its own finite grant. See [native skill reuse](../../docs/native-skill-reuse.md).
+
+## Non-activating native resources
+
+`@dsh-enhanced/assistant-isolation/native-resources` is a programmatic resource
+entry, with no Cordis plugin/default export. Importing it does not mount Isolation
+or create grants. `freezeLinuxRuntimeSource({kind:'git-object', repository, commit,
+version})` reads exact commit objects from an existing checkout or bare repository;
+`local-head` captures HEAD even when the working tree is dirty. Neither executes
+repository scripts nor creates an RSI workspace or repair branch. `official-tag`
+fetches only `refs/tags/v<exact-version>` from the fixed official GitHub repository
+into a private temporary bare object database and removes it afterwards. This
+requires HTTPS Git access; cancellation and each command are bounded.
+
+The resulting `{version,sourceCommit,manifests:[{path,bytes}]}` is a manifest byte
+snapshot, not an authenticity certificate. The trusted caller selects the source.
+Preparation copies and validates the root manifests, complete lockfile importer
+inventory, workspace manifests, exact cohort version/package manager and workspace
+links; caller-provided hashes are never accepted as evidence. Workspace YAML only
+permits the reviewed declarative `packages`, `catalog`, `linkWorkspacePackages`,
+`allowBuilds` and `minimumReleaseAgeExclude` fields with strict value shapes.
+Unknown pnpm settings, package-level `pnpm`/`devEngines`/`engines.runtime`, and
+lockfile configuration dependencies are rejected rather than stripped; normal
+`engines.node` constraints remain supported. No source code or
+package lifecycle script is executed. Arbitrary workspace patterns and nonregistry
+resolutions are unsupported.
+
+`prepareLinuxRuntime({dshHome,profile,source,signal?,nodeArchivePath?,
+pnpmArchivePath?,pnpmExeArchivePath?,pnpmNativeArchivePath?,revalidateSource?})`
+prepares pinned official Node/pnpm archives and the frozen dependency closure with
+scripts and pnpmfile hooks explicitly disabled. Cache archives are still checked against fixed SHA-256 values.
+The optional programmatic `revalidateSource` fence authenticates caller-specific
+provenance before/after preparation and retained-tree verification. It is trusted
+Host code, not a serialized config or model callback.
+
+`readLinuxRuntime({dshHome,profile,source,signal?,revalidateSource?})` only reopens
+and verifies an existing private runtime; it does not download, create, repair or
+rebuild it. Both return `PreparedLinuxRuntime` schema 3 and retain the prior RSI
+receipt location `rsi-linux-runtimes/<profile>`, exact receipt field order/digests,
+archive pins and whole-tree/inode validation. The path name is compatibility
+storage, not a requirement for an RSI source workspace.
+
+`discoverLinuxCgroupRoots({signal?})` independently reads existing delegated v1
+roots. It never prepares or grants a cgroup and is deliberately not a prerequisite
+of the base resource builder. `probeLinuxIsolationRuntime` is re-exported unchanged:
+calling it explicitly performs the existing finite isolation probe. Resources do
+not start Host services, configure owners/grants, renew budgets or run sudo. Linux
+x64/arm64 is required for prepare/read/discovery; importing and freezing manifests
+also work on macOS. Offline fixtures do not establish Linux live readiness.

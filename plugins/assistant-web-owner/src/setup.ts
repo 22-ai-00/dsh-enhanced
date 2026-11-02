@@ -4,7 +4,7 @@ import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, normalize } from 'node:path'
 import { isDeepStrictEqual, promisify } from 'node:util'
-import { autonomyDockerPath, prepareAutonomyProfile, validateAutonomyOptions, type AutonomySetupOptions } from './autonomy.js'
+import { autonomyDockerPath, preflightAutonomyProfile, prepareAutonomyProfile, validateAutonomyOptions, type AutonomySetupOptions, type AutonomyResolvedOptions } from './autonomy.js'
 import { ensurePrincipalLocally } from '@dsh-enhanced/assistant-delivery'
 import { isMap, isScalar, isSeq, parseDocument, type Document, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
 
@@ -161,13 +161,38 @@ export async function configureWebOwner(input: WebOwnerSetupInput, effectiveSour
     const before = await readPatch(path)
     const plan = prepareWebOwnerProfile(input, before, effectiveSource)
     await mkdir(input.workspace, { recursive: true })
+    let resolvedIsolation: AutonomyResolvedOptions | undefined
     if (input.isolation) {
-      const preflight = prepareAutonomyProfile({ ...input, isolation: input.isolation }, plan.patch, effectiveSource)
-      const { probeIsolationRuntime } = await import('@dsh-enhanced/assistant-isolation')
-      await probeIsolationRuntime(input.isolation.image, autonomyDockerPath(preflight))
+      const preflight = preflightAutonomyProfile({ ...input, isolation: input.isolation }, plan.patch, effectiveSource)
+      if (input.isolation.backend === 'linux-native') {
+        const resources = await import('@dsh-enhanced/assistant-isolation/native-resources')
+        const metadata = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { version?: unknown }
+        if (typeof metadata.version !== 'string' || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$/u.test(metadata.version)) fail('invalid installed package version')
+        const selected = input.isolation.source ?? { kind: 'official-tag' as const }
+        const source = await resources.freezeLinuxRuntimeSource({ ...selected, version: metadata.version })
+        const preparation = { dshHome: input.dshHome, profile: input.profile, source }
+        const parsed = parse(preflight, 'autonomy preflight')
+        const isolationRow = parsed.rows.items.find(item => isMap(item) && item.get('id') === 'dsh-enhanced-assistant-isolation') as YAMLMap
+        const hasExisting = map(isolationRow.get('config', true), 'Isolation config').has('linux')
+        if (!hasExisting) await resources.prepareLinuxRuntime(preparation)
+        const prepared = await resources.readLinuxRuntime(preparation)
+        const cgroupRoots = await resources.discoverLinuxCgroupRoots()
+        resolvedIsolation = { backend: 'linux-native', linux: { runtime: prepared.runtime, cgroupRoots },
+          maxRuns: input.isolation.maxRuns, leaseMs: input.isolation.leaseMs, maxTotalDurationMs: input.isolation.maxTotalDurationMs }
+        // Reject descriptor/source/root drift before any owner pairing or grant write.
+        const complete = prepareAutonomyProfile({ ...input, isolation: resolvedIsolation }, plan.patch, effectiveSource)
+        await resources.probeLinuxIsolationRuntime(resolvedIsolation.linux)
+        // Re-read the immutable receipt after the disposable probe.
+        if (!isDeepStrictEqual((await resources.readLinuxRuntime(preparation)).runtime, prepared.runtime)) fail('Linux runtime changed during setup probe')
+        plan.patch = complete
+      } else {
+        resolvedIsolation = input.isolation
+        const { probeIsolationRuntime } = await import('@dsh-enhanced/assistant-isolation')
+        await probeIsolationRuntime(input.isolation.image, autonomyDockerPath(preflight))
+      }
     }
     const owner = ensurePrincipalLocally({ databasePath: plan.databasePath, principal: plan.principal })
-    if (input.isolation) plan.patch = prepareAutonomyProfile({ ...input, isolation: input.isolation }, plan.patch, effectiveSource, owner)
+    if (resolvedIsolation) plan.patch = prepareAutonomyProfile({ ...input, isolation: resolvedIsolation }, plan.patch, effectiveSource, owner)
     if (plan.patch === before) return path
     await writeFile(temporary, plan.patch, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
     if (await readPatch(path) !== before) fail('profile changed during setup; retry with its latest configuration')
@@ -178,11 +203,12 @@ export async function configureWebOwner(input: WebOwnerSetupInput, effectiveSour
 
 export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
-    process.stdout.write('Usage: dsh-web-owner-setup --profile <name> --workspace <absolute-path> [--preset standard] [--dsh-home <absolute-path>] [--isolation-image sha256:<id> --isolation-max-runs 20 --isolation-lease-ms 3600000 --isolation-runtime-ms 600000]\nGoal setup: use --list-goal-sessions to show real idle owner Sessions, or --goal-admission <private-absolute-task.json> [--session-id <existing-idle-session>]. Without --session-id, setup selects the sole matching idle Session and otherwise prints candidates.\nRepair setup: --repair-admission <private-absolute-json> installs preconfigured finite repair profiles after checking the current owner scope, owner route, Goals execution budget, exact model routes, Skills holdouts and Verifier profiles. It creates no Goal, Session, credential, grant, or unlimited authority.\nInitializes one local Web owner without replacing existing owner authority. Stop the target Host before setup; configuration changes require restart.\n')
+    process.stdout.write('Usage: dsh-web-owner-setup --profile <name> --workspace <absolute-path> [--preset standard] [--dsh-home <absolute-path>] [--isolation-backend linux-native|docker] [--isolation-source-repository <absolute-committed-repository>] [--isolation-image sha256:<id> --isolation-max-runs 20 --isolation-lease-ms 3600000 --isolation-runtime-ms 600000]\nGoal setup: use --list-goal-sessions to show real idle owner Sessions, or --goal-admission <private-absolute-task.json> [--session-id <existing-idle-session>]. Without --session-id, setup selects the sole matching idle Session and otherwise prints candidates.\nRepair setup: --repair-admission <private-absolute-json> installs preconfigured finite repair profiles after checking the current owner scope, owner route, Goals execution budget, exact model routes, Skills holdouts and Verifier profiles. It creates no Goal, Session, credential, grant, or unlimited authority.\nInitializes one local Web owner without replacing existing owner authority. Stop the target Host before setup; configuration changes require restart.\n')
     return
   }
   const input: WebOwnerSetupInput = { dshHome: process.env.DSH_HOME ?? join(homedir(), '.dsh'), profile: 'web', workspace: '', preset: 'standard' }
-  const isolation: AutonomySetupOptions = { image: '', maxRuns: 20, leaseMs: 3_600_000, maxTotalDurationMs: 600_000 }
+  const limits = { maxRuns: 20, leaseMs: 3_600_000, maxTotalDurationMs: 600_000 }
+  let isolationBackend: string | undefined; let isolationImage: string | undefined; let isolationRepository: string | undefined
   let isolated = false
   let goalAdmission: string | undefined; let repairAdmission: string | undefined; let sessionId: string | undefined; let listGoalSessions = false
   const numeric = { '--isolation-max-runs': 'maxRuns', '--isolation-lease-ms': 'leaseMs', '--isolation-runtime-ms': 'maxTotalDurationMs' } as const
@@ -190,19 +216,31 @@ export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<vo
   for (let index = 0; index < argv.length; index++) {
     const option = argv[index]!
     if (option === '--list-goal-sessions') { listGoalSessions = true; continue }
-    if (!(option in fields) && !['--isolation-image', '--goal-admission', '--repair-admission', '--session-id'].includes(option) && !(option in numeric)) fail(`unknown option ${option}`)
+    if (!(option in fields) && !['--isolation-image', '--isolation-backend', '--isolation-source-repository', '--goal-admission', '--repair-admission', '--session-id'].includes(option) && !(option in numeric)) fail(`unknown option ${option}`)
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) fail(`${option} requires a value`)
     if (option === '--goal-admission') goalAdmission = value
     else if (option === '--repair-admission') repairAdmission = value
     else if (option === '--session-id') sessionId = value
-    else if (option === '--isolation-image') { isolation.image = value; isolated = true }
+    else if (option === '--isolation-image') { isolationImage = value; isolated = true }
+    else if (option === '--isolation-backend') { isolationBackend = value; isolated = true }
+    else if (option === '--isolation-source-repository') { isolationRepository = value; isolated = true }
     else if (option in numeric) {
       if (!/^[1-9][0-9]*$/.test(value)) fail(`${option} requires a positive integer`)
-      isolation[numeric[option as keyof typeof numeric]] = Number(value); isolated = true
+      limits[numeric[option as keyof typeof numeric]] = Number(value); isolated = true
     } else input[fields[option as keyof typeof fields]] = value
   }
-  if (isolated) input.isolation = isolation
+  if (isolated) {
+    const backend = isolationBackend ?? (isolationImage === undefined && process.platform === 'linux' ? 'linux-native' : 'docker')
+    if (backend !== 'linux-native' && backend !== 'docker') fail('invalid isolation backend')
+    if (backend === 'linux-native') {
+      if (isolationImage !== undefined) fail('Linux native cannot use an isolation image')
+      input.isolation = { ...limits, backend, ...(isolationRepository === undefined ? {} : { source: { kind: 'local-head' as const, repository: isolationRepository } }) }
+    } else {
+      if (isolationRepository !== undefined) fail('Docker cannot use a Linux source repository')
+      input.isolation = { ...limits, ...(isolationBackend === undefined ? {} : { backend }), image: isolationImage ?? '' }
+    }
+  }
   validate(input)
   if (listGoalSessions && (goalAdmission !== undefined || repairAdmission !== undefined || sessionId !== undefined || isolated)) fail('--list-goal-sessions cannot be combined with setup, goal admission, repair admission, or isolation options')
   if (sessionId !== undefined && goalAdmission === undefined) fail('--session-id requires --goal-admission')

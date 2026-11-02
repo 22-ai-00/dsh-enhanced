@@ -6,13 +6,15 @@ import { isAbsolute, join, normalize } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { isDeepStrictEqual, promisify } from 'node:util'
 import { isMap, isScalar, isSeq, parseDocument, type YAMLMap, type YAMLSeq } from 'yaml'
+import { literalAutonomyLinux, validateAutonomyLinuxPaths, type AutonomyLinuxConfig } from './autonomy.js'
 import type { IsolationGrant } from '@dsh-enhanced/assistant-isolation'
 
-export interface AutonomyDoctorProfile {
-  image: string; dockerPath: string; stateRoot: string; databasePath: string
+interface AutonomyDoctorBase {
+  stateRoot: string; databasePath: string
   grant: IsolationGrant
   principal: { channel: 'web'; account: string; tenant: string; user: string }
 }
+export type AutonomyDoctorProfile = AutonomyDoctorBase & ({ backend?: 'docker'; image: string; dockerPath: string; linux?: never } | { backend: 'linux-native'; linux: AutonomyLinuxConfig; image?: never; dockerPath?: never })
 function fail(message: string): never { throw new Error(`autonomy doctor: ${message}`) }
 function literal(node: unknown, label: string): unknown {
   if (isScalar(node) && (node.tag === undefined || node.tag === 'tag:yaml.org,2002:str')) return node.value
@@ -69,14 +71,23 @@ export function inspectAutonomyProfile(source: string, profile: string, dshHome:
     || grant.workspace !== workspace || grant.agentPreset !== preset
     || typeof grant.principalRecordId !== 'string' || grant.principalRecordId.length === 0
     || !['revision', 'principalVersion', 'expiresAt', 'maxRuns', 'maxTotalDurationMs'].every(key => Number.isSafeInteger(grant[key]) && (grant[key] as number) > 0)) fail('invalid managed grant or owner scope')
+  const stateRoot = path(isolation.get('stateRoot', true), 'Isolation stateRoot')
+  const common: AutonomyDoctorBase = { stateRoot,
+    databasePath: path(delivery.get('databasePath', true), 'Delivery databasePath', dshHome),
+    grant: { ...grant } as unknown as IsolationGrant, principal: { channel: 'web', account: profile, tenant: 'local', user: 'operator' } }
+  const backend = isolation.has('backend') ? literal(isolation.get('backend', true), 'Isolation backend') : 'docker'
+  if (backend === 'linux-native') {
+    if (isolation.has('image') || isolation.has('dockerPath') || isolation.has('socketPath')) fail('mixed native and Docker configuration')
+    const linux = literalAutonomyLinux(isolation.get('linux', true))
+    validateAutonomyLinuxPaths(linux, stateRoot, dshHome)
+    return { ...common, backend, linux }
+  }
+  if (backend !== 'docker' || isolation.has('linux')) fail('invalid isolation backend')
   const image = literal(isolation.get('image', true), 'Isolation image')
   if (typeof image !== 'string' || !/^sha256:[0-9a-f]{64}$/u.test(image)) fail('immutable local isolation image required')
-  return {
-    image, dockerPath: isolation.has('dockerPath') ? path(isolation.get('dockerPath', true), 'Docker path') : '/usr/bin/docker',
-    stateRoot: path(isolation.get('stateRoot', true), 'Isolation stateRoot'),
-    databasePath: path(delivery.get('databasePath', true), 'Delivery databasePath', dshHome),
-    grant: { ...grant } as unknown as IsolationGrant, principal: { channel: 'web', account: profile, tenant: 'local', user: 'operator' },
-  }
+  return { ...common, image, dockerPath: isolation.has('dockerPath') ? path(isolation.get('dockerPath', true), 'Docker path') : '/usr/bin/docker',
+    ...(isolation.has('backend') ? { backend: 'docker' as const } : {}) }
+
 }
 
 /** A read-only snapshot, never pairing, migration, or an authorization for future execution. */
@@ -100,9 +111,22 @@ export function inspectAutonomyOwner(profile: AutonomyDoctorProfile): { status: 
   } catch { return { status: 'unavailable' } } finally { database?.close() }
 }
 
+/** Verify only the persisted backend descriptor; never fetch, prepare or renew. */
+export async function probeAutonomyProfileRuntime(profile: AutonomyDoctorProfile): Promise<void> {
+  if (profile.backend === 'linux-native') {
+    const { verifyLinuxRuntime } = await import('@dsh-enhanced/assistant-isolation')
+    const { probeLinuxIsolationRuntime } = await import('@dsh-enhanced/assistant-isolation/native-resources')
+    await verifyLinuxRuntime(profile.linux.runtime)
+    await probeLinuxIsolationRuntime(profile.linux)
+  } else {
+    const { probeIsolationRuntime } = await import('@dsh-enhanced/assistant-isolation')
+    await probeIsolationRuntime(profile.image, profile.dockerPath)
+  }
+}
+
 export async function runAutonomyDoctor(argv = process.argv.slice(2)): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
-    process.stdout.write('Usage: dsh-autonomy-doctor [--profile web] [--dsh-home <absolute-path>]\nChecks the installed finite isolation grant, paired owner and a temporary Docker probe. Does not activate a Host, renew grants, or test model/Goal/Actions readiness.\n')
+    process.stdout.write('Usage: dsh-autonomy-doctor [--profile web] [--dsh-home <absolute-path>]\nChecks the installed finite isolation grant, paired owner and a temporary backend-specific probe. Does not activate a Host, renew grants, or test model/Goal/Actions readiness.\n')
     return
   }
   let profile = 'web'; let dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
@@ -124,7 +148,7 @@ export async function runAutonomyDoctor(argv = process.argv.slice(2)): Promise<v
   // Report persisted state before dispatching a disposable, separately bounded probe.
   process.stdout.write(`${JSON.stringify({ scope: 'finite-isolation', owner, grant, modelAndGoals: 'not-checked', externalActions: 'not-checked' })}\n`)
   if (owner.status !== 'matched' || grant.status !== 'available') fail('owner or persisted grant checks failed; no authority was renewed')
-  await probeIsolationRuntime(parsed.image, parsed.dockerPath)
+  await probeAutonomyProfileRuntime(parsed)
   if (!isDeepStrictEqual(inspectAutonomyProfile(await dump(), profile, dshHome), parsed)
     || inspectAutonomyOwner(parsed).status !== 'matched'
     || inspectIsolationGrant({ stateRoot: parsed.stateRoot, grant: parsed.grant }).status !== 'available') fail('configuration or authority changed during probe; retry diagnostics')

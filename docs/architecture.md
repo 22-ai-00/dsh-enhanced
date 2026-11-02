@@ -92,6 +92,10 @@ Control Plane 的 Host-only 任务关联查询从既有采用/调用账本读取
 
 `assistant-isolation` 作为独立 bundle 接入原生 ToolRuntime，Host 仍拥有 AgentLoop、Delivery owner、Policy 与 SQLite 授权/结果账本。显式 `linux-native` 配置使用固定工具链、namespace/seccomp、双 cgroup 及受控 keeper：持久 intent 先于准入，私有收据与真实资源消失共同决定静止；旧后端记录保留原身份、预算和恢复规则。省略 backend 继续使用 Docker：离线任意 shell 代码进入容器，由 detached supervisor 管理；每任务使用有字节/inode 硬限制的独立 tmpfs volume，Host 输入经受限复制进入卷，不向容器暴露 Host bind mount、真实项目、Host 状态、Docker socket 或凭据。独立 keeper 持续挂载工作卷，执行容器删除后才由固定 BusyBox 命令导出已验证类型/链接/字节限制的文本产物，最后删除 keeper 与卷。Host 工具路由在配置的 workspace/preset 内拒绝改走通用代码工具，容器内也没有动作或出网代理。
 
+Isolation 的 `./native-resources` 是不挂载服务的公共子入口，由 Web 安装器和 Lark RSI 适配器复用。调用方冻结已安装版本的官方 tag 或显式本地已提交 HEAD，只读取 Git 中的 manifests/lockfile；制备函数下载校验固定工具链并准备私有依赖闭包，读接口只复核既有 schema 3 收据、路径和文件身份。它不创建 owner、grant、RSI 修复仓库、协调器或服务。cgroup 发现与工具链制备独立，原 RSI 构建准备不会新增运行阶段的 cgroup 前提；适配器仍在准备前后核对原 RSI 来源收据。
+
+普通 Web autonomy 在 Linux 无显式镜像时选用 native，写入明确的 backend/runtime/cgroup 配置；直接使用 Isolation 省略 backend 的兼容语义仍是 Docker。setup 在配对 owner 前完成资源和固定任务探测，重试只读验证已有 runtime，不延长 grant 或重置预算；doctor 使用既有描述符诊断，不准备资源。Docker 与 native 不能通过重复 setup 隐式互换。普通 Goal 的 `isolated-runner` 独立验收目前仍限 Docker，native Goal admission 明确拒绝；此限制与已有 RSI 专用原生验收分开记录。
+
 Grant 绑定 owner lineage、范围、期限和次数/预留时长；请求摘要包含镜像与限制，Session 幂等键禁止未知结果重放。单 Controller 的持久 lease/fence 串行化预算与恢复，外部 CLI 先持久撤销再尝试终止容器。包同时发布 `lib/` 与 Node supervisor 的 `runtime/`，前者相对解析后者，不依赖源码目录。可回滚安装不等于回滚已发生的外部动作。
 
 此切片的 Host/容器边界不能替代后续独立动作与凭据 broker、审计保留、生产 bootstrap 或外部补偿。可信 Host 插件仍处于现有 Host 信任域，不能据此声称全部第三方插件已经隔离。

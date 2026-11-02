@@ -63,15 +63,43 @@ Delivery 保存 Web owner/binding、Inbox 文本、内容摘要、尝试与租�
 
 ## 有限离线执行安装
 
-仓库安装器 `--scenario autonomy` 调用本包 setup 的可选 `--isolation-image`、`--isolation-max-runs`、`--isolation-lease-ms`、`--isolation-runtime-ms`。普通 Web setup 不加载 Isolation；显式选择时需安装匹配版本的 Isolation、Actions 和 Keychain。
+仓库安装器 `--scenario autonomy` 接通同一套有界 Web owner setup。Linux 未指定镜像时默认选择 `linux-native`；显式 `--isolation-image sha256:<id>` 继续使用 Docker，macOS 保持 Docker 路径。也可显式指定 `--isolation-backend linux-native|docker`；native 与 image、Docker 与 native source repository 的混合参数会拒绝。普通 Web setup 不加载 Isolation；显式选择 autonomy 时需安装匹配版本的 Isolation、Actions 和 Keychain。
 
-该路径先验证最终合并配置，再使用实际配置的 Docker executable 和生产 supervisor 做固定任务探测，成功后初始化本机 owner 并原子写入有限 grant。重复执行不延长 grant、不重置账本、不替换或复活 owner；冲突配置拒绝并要求明确迁移。Isolation、Actions、Keychain、Skills 与 Proactive 的可变状态路径均规范化到真实 `DSH_HOME` 内，Skills 的嵌套比较/留出 `stateRoot` 也受同一约束；已有祖先 symlink 逃逸会拒绝。旧 Skills/Proactive published-default SQLite 或 sidecar 若已有数据，不会静默切换位置，必须先停 Host 并显式离线迁移。setup 在失败前可能创建工作区目录，owner 数据库与 patch 也不能跨库原子提交。
+```sh
+# Linux：固定当前安装包版本的官方 tag，准备独立工具链后执行真实 native probe
+./scripts/install/install-local.sh --scenario autonomy --workspace /absolute/workspace --yes --no-service
 
-此选项额外使用本机 Docker、子进程和私有临时 staging；不拉取镜像或配置外部凭据。未知清理状态的探测目录保留以供排查。具体参数、前置条件和未完成的自治能力见[安装说明](../../scripts/install/README.md)。
+# 本地开发：只使用此仓库的 committed HEAD，不包含未提交的工作区修改
+./scripts/install/install-local.sh --scenario autonomy --isolation-backend linux-native \
+  --isolation-source-repository /absolute/repository --workspace /absolute/workspace --yes --no-service
+
+# macOS 或需保留现有 Docker Goal 独立验收的 profile
+./scripts/install/install-local.sh --scenario autonomy --isolation-image sha256:<64位小写hex> \
+  --workspace /absolute/workspace --yes --no-service
+```
+
+| 参数 | 默认值 | 边界 |
+| --- | --- | --- |
+| `--isolation-backend` | Linux 无 image 为 `linux-native`；其余为 `docker` | native 需要非 root Linux、受支持的 user namespace、cgroup v1 当前用户委派及原生探测通过；不自动安装系统前提 |
+| `--isolation-source-repository` | 无 | native 可选的规范绝对仓库路径；冻结 committed HEAD，版本固定取本安装包 package.json；省略时只读取固定官方同版本 tag |
+| `--isolation-image` | 无 | Docker 必填的 immutable sha256 镜像；本入口不拉取或构建镜像 |
+| `--isolation-max-runs` | `20` | 有限 grant 最大次数（1–10000） |
+| `--isolation-lease-minutes` | `60` | grant 原始期限（1–10080 分钟）；setup CLI 对应 `--isolation-lease-ms` |
+| `--isolation-runtime-minutes` | `10` | 累计保留运行时预算（1–1440 分钟）；setup CLI 对应 `--isolation-runtime-ms` |
+
+`dsh-web-owner-setup` 同样接受 backend/source/image 选择；native 的程序化输入为 `isolation: { backend: 'linux-native', source?: { kind: 'official-tag' } | { kind: 'local-head', repository }, maxRuns, leaseMs, maxTotalDurationMs }`。纯 profile materializer 接受的是已解析 `linux: { runtime, cgroupRoots }`，不解析 Git、不下载、不配对、不产生授权。
+
+setup 在 profile 锁内先静态验证合并配置、受管 grant、backend 与路径，再冻结来源、准备/读取工具链、发现 cgroup 根并执行真实 native probe；这些资源失败发生在 owner 配对与 grant/patch 写入之前。runtime 位于真实 `DSH_HOME/rsi-linux-runtimes/<profile>/runtime`，不得与 Isolation stateRoot 重叠；其 source/lock/tree/收据身份由共享资源 API 核对。Docker 继续用配置中的 Docker executable 和生产 supervisor 探测。二者通过后才初始化 owner 并原子写入有限 grant。相同配置重放只读取已有 native 收据，不重新构建、不延长 grant、不重置持久用量、不更换 revision，也不替换或复活 owner；source/descriptor/backend/grant 漂移拒绝并要求明确迁移。
+
+`dsh-autonomy-doctor` 根据持久 backend 描述选择探测：native 校验既有 runtime 并 probe，Docker 运行既有镜像 probe。它不调用 freeze/prepare、不下载、不配对、不写授权或续期，不激活第二个 Host；通过仅是当前资源、owner 与有限 grant 的诊断快照，不证明模型、Goal 独立验收或外部 Actions 已配置。
+
+Isolation、Actions、Keychain、Skills 与 Proactive 的可变状态路径均规范化到真实 `DSH_HOME` 内，Skills 的嵌套比较/留出 `stateRoot` 也受同一约束；已有祖先 symlink 逃逸拒绝。旧 Skills/Proactive published-default SQLite 或 sidecar 若已有数据，不静默切换位置，必须先停 Host 并显式离线迁移。setup 在失败前可能创建工作区/资源目录，owner 数据库与 patch 不能跨库原子提交。
+
+native 资源准备会使用固定官方 Git tag/官方工具链下载、Git/归档/Node/pnpm 子进程和 Home 内私有 staging；不调用 Lark 完整准备、不改 Control Plane、不启服务、不配置外部凭据。Docker 路径额外使用本机 Docker。未知清理状态的探测目录保留排查。**本片仅普通有限隔离执行；native Goal 的独立 isolated-runner 验收仍未接通，Goal admission 对 native profile 明确拒绝。**需要现有有限 Goal 能力时保留显式 Docker profile；不能将普通 native probe 通过称为完整去 Docker 或长期自治验收。具体安装前提见[安装说明](../../scripts/install/README.md)。
 
 ## 有限 Goal admission（实验性）
 
-在已完成 `autonomy` 安装后，可用一次离线 setup 把**一个已有、空闲的 Web owner Session**配置为固定 DeepSeek 路由、有限 Goals 预算、独立隔离验收条件和可选 wake route。先停止目标 Host；准备工作区之外、当前用户所有且权限为 `0600` 的 JSON 任务文件。不要把 API key 写进文件，`apiKeyEnv` 只是 credential reference。
+在已完成 **Docker backend** 的 `autonomy` 安装后，可用一次离线 setup 把**一个已有、空闲的 Web owner Session**配置为固定 DeepSeek 路由、有限 Goals 预算、独立隔离验收条件和可选 wake route。先停止目标 Host；准备工作区之外、当前用户所有且权限为 `0600` 的 JSON 任务文件。不要把 API key 写进文件，`apiKeyEnv` 只是 credential reference。
 
 先用正式 setup 入口列出当前 owner 的真实空闲 Session；它只读取匹配当前 Web principal、workspace 和 preset 的 Delivery binding，绝不创建或伪造原生 Session。新 profile 需要先从原生 Web UI 打开一次，让 DSH 创建 Session。`--session-id` 可显式选择；省略时只有一个合法空闲 binding 才会自动选择，多个候选会原样列出并拒绝继续。
 
@@ -196,7 +224,7 @@ v2 任务可增加 `repositoryDelivery`，继续使用同一个 `--goal-admissio
 
 该精确 Session 仅用于核验 owner 和可选 wake route；生成的 profiles 绑定 owner、scope 和 objective。setup 只写入并复核本地配置、已有 owner snapshot 与持久 grant；它不发 DeepSeek 请求、不创建 Goal、不证明凭据可用、网络连通、模型质量、隔离验收成功或完整 WP17/长期自治已经完成。grant 已过期、撤销、耗尽，owner/version 改变，或 Session 有 pending/dispatched/unknown lease 时必须先按正常运维流程处理，不能靠重跑此命令续权。
 
-发布文件同时包含 `dsh-autonomy-doctor --profile web`。此 CLI 读取有效 profile 和当前 Delivery owner、Isolation grant/累计预算快照，再运行独立的固定 Docker 探测，最后复核配置/授权没有失效；不会开启第二个 Host、配对 owner、迁移数据库、续期 grant 或重置预算。使用 SQLite 只读连接，不读取凭据/业务产物，也不请求模型。缺失或不支持的 schema、owner 版本改变、撤销、过期、耗尽和配置不一致都失败。当前支持已审查的 Delivery schema 24–28、Isolation schema 6 和安装器的单一受管 grant；要求匹配本批源码的 Isolation diagnostics API，缺失该 API 时明确要求升级，不回退到忽略持久授权的探测。安装或升级时应使用同一套件版本的 Web owner 与 Isolation，以保持此诊断接口一致。
+发布文件同时包含 `dsh-autonomy-doctor --profile web`。此 CLI 读取有效 profile 和当前 Delivery owner、Isolation grant/累计预算快照，再按持久 backend 运行独立的固定 Docker 或 native runtime 探测，最后复核配置/授权没有失效；不会开启第二个 Host、配对 owner、迁移数据库、续期 grant 或重置预算。使用 SQLite 只读连接，不读取凭据/业务产物，也不请求模型。缺失或不支持的 schema、owner 版本改变、撤销、过期、耗尽和配置不一致都失败。当前支持已审查的 Delivery schema 24–28、Isolation schema 7/8/9 和安装器的单一受管 grant；要求匹配本批源码的 Isolation diagnostics API，缺失该 API 时明确要求升级，不回退到忽略持久授权的探测。安装或升级时应使用同一套件版本的 Web owner 与 Isolation，以保持此诊断接口一致。
 
 结果只说明有限隔离检查，不能替代动态 Policy、实时资源准入、模型硬预算、Goal 验收或外部 Actions 检查。该 CLI 的临时探测使用现有 Isolation 资源边界和清理规则；未知清理保留证据，不消耗业务 grant。
 

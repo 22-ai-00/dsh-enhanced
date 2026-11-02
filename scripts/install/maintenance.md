@@ -377,7 +377,11 @@ Linux 上的 Lark 与 supervised setup 还要求 `/usr/bin/flock` 和安全的 r
 
 `supervised` 在此基础上额外安装 Evaluation、Evolution、Growth Experiments、Heartbeat、Goals、Skills、Verifier、Growth Driver、Memory Learning、Recovery 与 Health；Goals 必须与 Recovery 同场景安装，因为 Recovery 的运行时 Cordis 注入要求 `assistantGoals`。Memory 已由 Personal Assistant 内嵌提供，Memory Learning 安装后默认禁用，直到 owner 配置组合三份有限授权和调度预算。普通使用自迭代由下述 `dsh-rsi-setup --install-owner` 成对配置，不要求先激活固定 Recovery runbook，也不因该 runbook 的全局健康门阻止 owner 配置。固定 `supervised-growth/v2` runbook 与 adoption analyst 仍可通过[独立激活器](../../plugins/lark-channel/docs/supervised-growth.md)显式启用，保留原有严格健康检查。新安装发现本机 TraeX 可执行文件时，会把 provider 纳入同一安装集并启用当前 profile 的 route，升级不会自动追加。
 
-新安装 `supervised` 时还会自动调用 `dsh-rsi-setup --prepare-build --optional-build`，在 `$DSH_HOME/rsi-sources/<profile>` 创建私有源码工作树和本地 bare 发布仓库。npm 来源固定为本次安装版本的官方 Git tag，本地来源只取已提交 HEAD；重装保留已推进的修复基准。需要 Git，npm 来源还需要 GitHub 连接；准备失败会停止安装并显示原因，`--dry-run` 只展示命令。符合当前完整仓库检查条件（Linux x64、Docker Server `29.4.1/linux/amd64`）时，还会自动构建并保存不可变的离线镜像配置；前置条件不可用时明确记录构建未就绪并继续普通安装，实际构建失败会停止。重装复用已核对的镜像；不会把缺失的已登记镜像静默换掉。Linux 上该步骤还会自动复制私有授权工具与固定 Node，生成独立签名身份、私有本地 registry/catalog 和状态目录；缺少 Docker 时仍保留这些资源。重复执行保留身份和发布进展，拒绝固定资源漂移。
+新安装 `supervised` 时还会自动调用 `dsh-rsi-setup --prepare-build --optional-build`，在 `$DSH_HOME/rsi-sources/<profile>` 创建私有源码工作树和本地 bare 发布仓库。npm 来源固定为本次安装版本的官方 Git tag，本地来源只取已提交 HEAD；重装保留已推进的修复基准。需要 Git，npm 来源还需要 GitHub 连接；准备失败会停止安装并显示原因，`--dry-run` 只展示命令。
+
+Linux 默认从固定官方归档和冻结 manifests/lockfile 准备 schema 3 原生工具链、离线依赖及发布资源，无需 Docker CLI、daemon、socket 或镜像。工具链准备检查 user/mount/pid namespace、bubblewrap 和有界 tmpfs；owner 安装及实际运行另外要求委派给当前非 root 用户的四个 cgroup v1 控制器。完整仓库执行还需受信任的 subordinate UID/GID 映射与 `newuidmap`/`newgidmap`，creation 构建需系统编译器。安装器不会自动提权或补建 cgroup 委派，不满足前提时报未就绪。Linux x64/cgroup v1 已有实机证据，cgroup v2 不支持，arm64 尚未实机验收。
+
+Linux 同时准备私有授权工具、签名身份、registry/catalog 和状态目录。重复执行核对原收据、来源及 runtime 身份，保留授权与发布进展；旧 Docker 部署须走独立迁移，不能靠重装或覆盖 runtime 描述符切换。底层 `dsh-rsi-setup --prepare-build --docker-path <absolute>` 保留旧镜像准备入口，不代表新 owner 安装会自动接纳旧 backend。
 
 macOS 的 supervised 使用原生 launchd Host、私有固定 Node 与系统沙箱，无需 Docker。安装时从官方归档及冻结 lockfile 准备运行依赖，重试核对摘要；候选在禁止联网、禁止子进程、只读工作区中接受固定 TypeScript 编译和独立留出行为检查。原生授权限制次数、累计时长和输出，不提供容器的内存、CPU、磁盘硬配额。Apple Silicon 已有实机证据，Intel Mac 仍需独立实机验证。安装失败恢复本次尝试前的配置与服务，重复执行不续期、不重置额度。具体边界见[原生 macOS 学习](../../plugins/lark-channel/docs/rsi-setup.md#原生-macos-学习)。
 
@@ -391,20 +395,26 @@ macOS 的 supervised 使用原生 launchd Host、私有固定 Node 与系统沙�
 
 `autonomy` 是显式选择的实验性离线执行入口，安装 Web 场景以及 Isolation、Actions、Keychain、Evaluation、Verifier、Event Triggers、Proactive 和 Skills。后面三者没有匹配授权时保持静默：不会自动创建任务、续期或发起网络请求。基本 RSI 首版包含有限 repair admission 与同一任务族的两轮改进验收；完整自治规划仍在推进，使用边界见两轮验收记录。
 
+Linux 新安装默认使用 native；源码安装可显式固定当前仓库的已提交 HEAD：
+
 ```sh
 ./scripts/install/install-local.sh --scenario autonomy --workspace "$PWD" \
-  --isolation-image sha256:<已存在的本机镜像ID> \
+  --isolation-backend linux-native --isolation-source-repository "$PWD" \
   --isolation-max-runs 20 --isolation-lease-minutes 60 \
   --isolation-runtime-minutes 10 --yes
 ```
 
-安装前需准备非 root Linux Host、可访问的本机 Docker 和兼容 Isolation 的固定镜像（要求见 [Isolation 文档](../../plugins/assistant-isolation/README.md)）。安装器不拉取镜像、不安装或重启 Docker。setup 使用最终配置的 Docker 路径，通过生产 supervisor 实际执行非 root、只读根目录、隔离工作卷与 artifact 导出探测，成功后才初始化 owner 并写入 grant。失败会给出运行时原因；清理状态未知时保留私有 probe 证据目录，需要先排查其中记录的资源。探测只证明该固定任务的执行链路，不证明任意自定义任务或完整自治。
+省略 source repository 时只取已安装包版本的官方 tag，缺失不会换用其他版本。native 要求非 root Linux、bubblewrap、namespace/tmpfs 支持及已委派的 cgroup v1；资源准备只读取固定 Git manifests/lockfile，下载校验官方工具链并准备离线依赖，不创建 RSI owner、协调器或服务。setup 在创建 Web owner/grant 前使用真实原生执行器探测非 root、只读根目录及 artifact 导出，之后重新核对 runtime 收据。缺少 cgroup 委派时拒绝，不自动提权。
 
-首次 grant 精确绑定本机 Web owner 版本、workspace 和 preset，默认 20 次、60 分钟期限、10 分钟累计预留执行时长；次数最多 10000、期限最多 7 天、累计时长最多 1 天。单次任务仍受 Isolation 的独立限制。重复 setup 保留原过期时间、撤销记录和已使用预算，即使过期也不自动续权；修改原绑定、镜像或预算需显式迁移。profile 私有 Isolation/Actions 状态和 Keychain 路径与其他 profile 分开，已有合法自定义路径保留。
+显式 Docker 路径继续支持现有安装：传 `--isolation-backend docker --isolation-image sha256:<已存在的本机镜像ID>`，不要同时指定 native source repository。macOS 的实验性 autonomy 保留这一 Docker 路径。安装器不拉取镜像、不安装或重启 Docker；使用最终配置的 Docker 路径和生产 supervisor 完成相同范围的固定任务探测。两种 backend 清理状态未知时均保留私有 probe 证据目录；探测通过不证明任意自定义任务或完整自治。
 
-autonomy 安装在 Host 激活检查后还会执行有限隔离诊断；已撤销、过期或耗尽的旧 grant 会使这一步失败，重复安装不会恢复它。日常复查使用 `./scripts/install/doctor.sh --profile web --require-isolation`。它读取已组合配置、Delivery owner 和 Isolation 的持久账本，报告累计次数/预留时长、剩余额度及 unknown 作业，再用同一镜像和 Docker 路径做临时探测；探测后重新核对配置及授权。该命令不启动第二个 Host，不配对、迁移账本、续期或消费业务 grant，可在已有 Host 运行时诊断。
+当前 native autonomy 支持普通有限隔离执行，普通 Goal admission 的独立 `isolated-runner` 验收仍仅支持 Docker，native profile 会明确拒绝该配置。RSI 专用 native review runner 是另一条路径，不能代替普通 Goal 验收；需要现有 Goal 能力时继续使用显式 Docker profile。
 
-诊断当前只支持 installer-managed Web owner 与单一 `autonomy-<profile>` grant、Delivery schema 20 和 Isolation schema 6；缺失、旧版或不一致的状态明确失败，需先按正常升级/迁移流程处理。通过表示该时刻的有限隔离检查通过，仍不能证明后续动态 Policy、实际资源准入、模型计量、Goal 独立验收或外部 Actions 可用；这些能力在结果中明确未检查。不要通过删除账本或重跑 setup 绕过已消耗的授权。
+首次 grant 精确绑定本机 Web owner 版本、workspace 和 preset，默认 20 次、60 分钟期限、10 分钟累计预留执行时长；次数最多 10000、期限最多 7 天、累计时长最多 1 天。单次任务仍受 Isolation 的独立限制。重复 setup 保留原过期时间、撤销记录和已使用预算，即使过期也不自动续权；修改原绑定、backend、镜像、native runtime 描述符或预算需显式迁移。profile 私有 Isolation/Actions 状态和 Keychain 路径与其他 profile 分开，已有合法自定义路径保留。
+
+autonomy 安装在 Host 激活检查后还会执行有限隔离诊断；已撤销、过期或耗尽的旧 grant 会使这一步失败，重复安装不会恢复它。日常复查使用 `./scripts/install/doctor.sh --profile web --require-isolation`。它读取已组合配置、Delivery owner 和 Isolation 的持久账本，报告累计次数/预留时长、剩余额度及 unknown 作业，再用已配置 backend 的固定镜像或 native runtime/cgroup 描述符做临时探测；探测后重新核对配置及授权。native doctor 不联网准备工具链或修复资源。该命令不启动第二个 Host，不配对、迁移账本、续期或消费业务 grant，可在已有 Host 运行时诊断。
+
+诊断当前只支持 installer-managed Web owner 与单一 `autonomy-<profile>` grant、Delivery schema 24–28 和 Isolation schema 7–9；缺失、旧版或不一致的状态明确失败，需先按正常升级/迁移流程处理。通过表示该时刻的有限隔离检查通过，仍不能证明后续动态 Policy、实际资源准入、模型计量、Goal 独立验收或外部 Actions 可用；这些能力在结果中明确未检查。不要通过删除账本或重跑 setup 绕过已消耗的授权。
 
 在该受管作用域中，模型只能调用受支持的隔离、目标上下文/检查点和获准的有限 Actions 工具，不能退回宿主 shell。Actions 默认无 grant，Keychain 不创建凭据。模型配置沿用安装器的独立引导；GitHub 目标/凭据、独立目标验收、后台唤醒以及完整自治生命周期仍需后续配置与验证。不要通过删除账本重置授权。
 
@@ -487,7 +497,7 @@ API Key 推荐在 [Web 模型设置](../../docs/models.md)中保存，使用当�
 ./scripts/install/doctor.sh --preflight --port 3080
 ```
 
-`doctor.sh` 参数：`--preflight` 切换为安装前预检（只查 Web 端口，默认 postflight 会组合 profile 并对未启用 Lark 的 profile 做一次前台激活）；`--port <1..65535>` 指定预检端口（默认取 `DSH_ENHANCED_WEB_PORT`，再缺省 `3080`）；`--require-service` 验证受管常驻服务与 Linux 注销后存活；`--require-isolation` 检查有限隔离授权、配对 owner 与临时 Docker 探测（不另起 Host、不续授权）。`--require-isolation` 不得与 `--preflight` 或 `--require-service` 同用，违反时以退出码 2 拒绝。
+`doctor.sh` 参数：`--preflight` 切换为安装前预检（只查 Web 端口，默认 postflight 会组合 profile 并对未启用 Lark 的 profile 做一次前台激活）；`--port <1..65535>` 指定预检端口（默认取 `DSH_ENHANCED_WEB_PORT`，再缺省 `3080`）；`--require-service` 验证受管常驻服务与 Linux 注销后存活；`--require-isolation` 检查有限隔离授权、配对 owner 与对应 backend 的临时隔离探测（不另起 Host、不续授权）。`--require-isolation` 不得与 `--preflight` 或 `--require-service` 同用，违反时以退出码 2 拒绝。
 
 `--require-service` 在 Linux 同时验证 systemd user unit、稳定性窗口和 lingering；若检测到循环崩溃会停止该 unit 并输出 journal，若未启用 lingering，注销会停止 user service，按 doctor 提示运行 `sudo loginctl enable-linger "$(id -u)"`。未带 `--require-service` 的 doctor 会避免对已启用 Lark 的 profile 启动第二个 Host；macOS LaunchAgent 与 Windows 当前用户计划任务只能在用户登录会话中运行；Windows 的任务会在失败后重启，但不宣称注销后继续运行。
 

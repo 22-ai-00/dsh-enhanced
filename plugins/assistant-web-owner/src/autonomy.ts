@@ -1,11 +1,23 @@
+import type { LinuxRuntime, LinuxCgroupRoots } from '@dsh-enhanced/assistant-isolation'
+import { isDeepStrictEqual } from 'node:util'
 import { createHash } from 'node:crypto'
 import { lstatSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
 import { isAlias, isMap, isScalar, isSeq, parseDocument, type Document, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
 
-export interface AutonomySetupOptions { image: string; maxRuns: number; leaseMs: number; maxTotalDurationMs: number }
-export interface AutonomyProfileInput { dshHome: string; profile: string; workspace: string; preset: string; isolation: AutonomySetupOptions }
+export interface FiniteAutonomyTerms { maxRuns: number; leaseMs: number; maxTotalDurationMs: number }
+export type AutonomySetupOptions = FiniteAutonomyTerms & (
+  { backend?: 'docker'; image: string; source?: never } |
+  { backend: 'linux-native'; image?: never; source?: { kind: 'official-tag' } | { kind: 'local-head'; repository: string } }
+)
+export type AutonomyLinuxConfig = { runtime: LinuxRuntime; cgroupRoots: LinuxCgroupRoots }
+export type AutonomyResolvedOptions = FiniteAutonomyTerms & (
+  { backend?: 'docker'; image: string } | { backend: 'linux-native'; linux: AutonomyLinuxConfig }
+)
+export interface AutonomyProfileInput { dshHome: string; profile: string; workspace: string; preset: string; isolation: AutonomyResolvedOptions }
+export type AutonomyPreflightInput = Omit<AutonomyProfileInput, 'isolation'> & { isolation: AutonomySetupOptions }
+
 
 const requiredBundles = ['assistant-isolation', 'assistant-actions', 'credentials-keychain'] as const
 const stateBundles = ['assistant-skills', 'assistant-proactive'] as const
@@ -99,14 +111,49 @@ function canonicalizeNestedStateRoots(document: Document, node: Node | null, dsh
 function options(input: AutonomyProfileInput): void {
   if (!profileKey.test(input.profile) || !presetKey.test(input.preset)) fail('invalid profile or preset')
   for (const value of [input.dshHome, input.workspace]) if (!isAbsolute(value) || value.includes('\0') || normalize(value) !== value) fail('home and workspace must be canonical absolute paths')
-  validateAutonomyOptions(input.isolation)
+  validateFiniteTerms(input.isolation)
 }
 
-export function validateAutonomyOptions(value: AutonomySetupOptions): void {
-  if (value === null || typeof value !== 'object' || Object.keys(value).sort().join(',') !== 'image,leaseMs,maxRuns,maxTotalDurationMs') fail('invalid autonomy options')
-  if (!imagePattern.test(value.image)) fail('image must be an immutable sha256 digest')
+function validateFiniteTerms(value: FiniteAutonomyTerms): void {
   const positive = (number: number, maximum: number, label: string, minimum = 1) => { if (!Number.isSafeInteger(number) || number < minimum || number > maximum) fail(`invalid ${label}`) }
   positive(value.maxRuns, 10_000, 'maxRuns'); positive(value.leaseMs, 7 * 24 * 60 * 60 * 1000, 'leaseMs'); positive(value.maxTotalDurationMs, 24 * 60 * 60 * 1000, 'maxTotalDurationMs', 60_000)
+}
+export function validateAutonomyOptions(value: AutonomySetupOptions): void {
+  if (value === null || typeof value !== 'object') fail('invalid autonomy options')
+  const allowed = value.backend === 'linux-native' ? ['backend', 'source', 'maxRuns', 'leaseMs', 'maxTotalDurationMs'] : ['backend', 'image', 'maxRuns', 'leaseMs', 'maxTotalDurationMs']
+  if (Object.keys(value).some(key => !allowed.includes(key))) fail('mixed or invalid autonomy options')
+  validateFiniteTerms(value)
+  if (value.backend === 'linux-native') {
+    if (value.source !== undefined) {
+      const source = value.source
+      if (!source || typeof source !== 'object' || (source.kind !== 'official-tag' && source.kind !== 'local-head')
+        || Object.keys(source).sort().join(',') !== (source.kind === 'local-head' ? 'kind,repository' : 'kind')) fail('invalid Linux source')
+      if (source.kind === 'local-head' && (typeof source.repository !== 'string' || !isAbsolute(source.repository)
+        || normalize(source.repository) !== source.repository || /[\p{Cc}*]/u.test(source.repository))) fail('Linux source repository must be a canonical absolute path')
+    }
+  } else if (value.backend !== undefined && value.backend !== 'docker' || !imagePattern.test(value.image ?? '')) fail('image must be an immutable sha256 digest')
+}
+/** Reject tagged/aliased native descriptors rather than evaluating arbitrary YAML. */
+export function literalAutonomyLinux(value: unknown): AutonomyLinuxConfig {
+  const decode = (node: unknown): unknown => {
+    if (isAlias(node)) fail('Linux descriptor must not use aliases')
+    if (isScalar(node) && (node.tag === undefined || node.tag === 'tag:yaml.org,2002:str')) return node.value
+    if (isMap(node)) return Object.fromEntries(node.items.map(pair => [scalar(pair.key, 'Linux descriptor key'), decode(pair.value)]))
+    fail('Linux descriptor must contain only literal mappings and scalars')
+  }
+  const result = decode(value) as AutonomyLinuxConfig
+  if (!result || typeof result !== 'object' || Object.keys(result).sort().join() !== 'cgroupRoots,runtime'
+    || !result.runtime || !result.cgroupRoots || typeof result.runtime.root?.path !== 'string') fail('invalid Linux descriptor')
+  return result
+}
+export function validateAutonomyLinuxPaths(linux: AutonomyLinuxConfig, stateRoot: string, home: string): void {
+  const root = linux.runtime.root.path
+  if (!isAbsolute(root) || normalize(root) !== root || /[\p{Cc}*]/u.test(root) || root === '/') fail('invalid Linux runtime root')
+  const canonical = canonicalPath(root, 'Linux runtime root', true)
+  if (canonical !== root) fail('Linux runtime root must be realpath canonical')
+  const within = relative(canonicalPath(home, 'DSH_HOME'), canonical)
+  if (within === '..' || within.startsWith(`..${sep}`) || isAbsolute(within)) fail('Linux runtime must be within DSH_HOME')
+  if (root === stateRoot || root.startsWith(stateRoot + sep) || stateRoot.startsWith(root + sep)) fail('Isolation state overlaps Linux runtime')
 }
 
 /** Read the exact literal Docker executable from a materialized autonomy profile. */
@@ -117,8 +164,20 @@ export function autonomyDockerPath(source: string): string {
 }
 
 /** Pure YAML materialization; it neither creates credentials nor grants external repository authority. */
+export function preflightAutonomyProfile(input: AutonomyPreflightInput, source: string, effectiveSource: string): string {
+  validateAutonomyOptions(input.isolation)
+  return materializeAutonomyProfile(input as AutonomyProfileInput, source, effectiveSource, undefined, Date.now(), true)
+}
 export function prepareAutonomyProfile(input: AutonomyProfileInput, source: string, effectiveSource: string, owner?: { id: string; version: number }, now = Date.now()): string {
+  return materializeAutonomyProfile(input, source, effectiveSource, owner, now, false)
+}
+function materializeAutonomyProfile(input: AutonomyProfileInput, source: string, effectiveSource: string, owner: { id: string; version: number } | undefined, now: number, preflight: boolean): string {
   options(input)
+  if (!preflight) {
+    const allowed = input.isolation.backend === 'linux-native' ? ['backend','linux','maxRuns','leaseMs','maxTotalDurationMs'] : ['backend','image','maxRuns','leaseMs','maxTotalDurationMs']
+    if (Object.keys(input.isolation).some(key => !allowed.includes(key)) || input.isolation.backend !== undefined && !['docker','linux-native'].includes(input.isolation.backend)) fail('invalid resolved autonomy options')
+    if (input.isolation.backend === 'linux-native' && (!input.isolation.linux || Object.keys(input.isolation.linux).sort().join() !== 'cgroupRoots,runtime')) fail('invalid resolved Linux descriptor')
+  }
   if (owner !== undefined && (typeof owner.id !== 'string' || owner.id.length === 0 || !Number.isSafeInteger(owner.version) || owner.version < 1)) fail('invalid owner')
   if (!Number.isSafeInteger(now) || now < 0 || now > Number.MAX_SAFE_INTEGER - input.isolation.leaseMs) fail('invalid clock')
   const target = parse(source, 'profile patch'); const effective = parse(effectiveSource, 'effective profile')
@@ -167,14 +226,42 @@ export function prepareAutonomyProfile(input: AutonomyProfileInput, source: stri
   }
   const skills = configs.get('assistant-skills')
   if (skills) canonicalizeNestedStateRoots(target.document, skills, canonicalHome, 'Skills')
-  if (isolation.has('dockerPath')) path(isolation.get('dockerPath', true), 'Isolation dockerPath')
-  const image = isolation.has('image') ? scalar(isolation.get('image', true), 'Isolation image') : undefined
-  if (image !== undefined && image !== input.isolation.image) fail('existing isolation image differs; explicit migration is required')
-  isolation.set('image', target.document.createNode(input.isolation.image))
+  const requestedBackend = input.isolation.backend ?? 'docker'
+  const configuredBackend = isolation.has('backend') ? scalar(isolation.get('backend', true), 'Isolation backend') : isolation.has('linux') ? 'linux-native' : undefined
+  const oldImage = isolation.has('image') ? scalar(isolation.get('image', true), 'Isolation image') : undefined
+  if (configuredBackend !== undefined && configuredBackend !== requestedBackend
+    || requestedBackend === 'linux-native' && (oldImage !== undefined && oldImage !== '' || isolation.has('dockerPath') || isolation.has('socketPath'))) fail('existing isolation backend differs; explicit migration is required')
+  if (requestedBackend === 'docker') {
+    if (isolation.has('linux')) fail('existing Linux isolation requires explicit migration')
+    if (isolation.has('dockerPath')) path(isolation.get('dockerPath', true), 'Isolation dockerPath')
+    const image = (input.isolation as Extract<AutonomyResolvedOptions, { image: string }>).image
+    if (!imagePattern.test(image)) fail('image must be an immutable sha256 digest')
+    if (oldImage !== undefined && oldImage !== image) fail('existing isolation image differs; explicit migration is required')
+    isolation.set('image', target.document.createNode(image))
+    if (input.isolation.backend !== undefined) isolation.set('backend', target.document.createNode('docker'))
+  } else {
+    const existing = isolation.has('linux') ? literalAutonomyLinux(isolation.get('linux', true)) : undefined
+    if (preflight) {
+      const plannedRoot = join(canonicalHome, 'rsi-linux-runtimes', input.profile, 'runtime')
+      const state = scalar(isolation.get('stateRoot', true), 'Isolation stateRoot')
+      if (plannedRoot === state || plannedRoot.startsWith(state + sep) || state.startsWith(plannedRoot + sep)) fail('Isolation state overlaps Linux runtime')
+    }
+    if (existing) validateAutonomyLinuxPaths(existing, scalar(isolation.get('stateRoot', true), 'Isolation stateRoot'), canonicalHome)
+    const resolved = input.isolation.backend === 'linux-native' && 'linux' in input.isolation ? input.isolation.linux : undefined
+    if (!preflight && !resolved) fail('resolved Linux runtime and cgroup roots are required')
+    if (resolved) {
+      validateAutonomyLinuxPaths(resolved, scalar(isolation.get('stateRoot', true), 'Isolation stateRoot'), canonicalHome)
+      if (existing && !isDeepStrictEqual(existing, resolved)) fail('existing Linux descriptor differs; explicit migration is required')
+      isolation.set('linux', target.document.createNode(resolved))
+    }
+    isolation.set('backend', target.document.createNode('linux-native'))
+    isolation.delete('image'); isolation.delete('dockerPath'); isolation.delete('socketPath')
+  }
   if (!actions.has('grants')) actions.set('grants', target.document.createNode([]))
   else sequence(actions.get('grants', true), 'Actions grants')
   let grants: YAMLSeq
   if (!isolation.has('grants')) { grants = target.document.createNode([]) as YAMLSeq; isolation.set('grants', grants) } else grants = sequence(isolation.get('grants', true), 'Isolation grants')
+  if (requestedBackend === 'linux-native' && !isolation.has('linux') && grants.items.length > 0) fail('existing isolation grants without a native descriptor require explicit migration')
   const id = `autonomy-${input.profile}`; const principalDigest = createHash('sha256').update(`web/${input.profile}/local/operator`).digest('hex')
   const baseGrant = { id, revision: 1, principalDigest, workspace: input.workspace, agentPreset: input.preset, maxRuns: input.isolation.maxRuns, maxTotalDurationMs: input.isolation.maxTotalDurationMs }
   const validateManaged = (current: YAMLMap, checkOwner: boolean): void => {

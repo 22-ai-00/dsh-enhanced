@@ -5,10 +5,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parseDocument } from 'yaml'
-import { autonomyDockerPath, prepareAutonomyProfile as prepareProfile, validateAutonomyOptions, type AutonomyProfileInput } from '../src/autonomy.ts'
+import { autonomyDockerPath, prepareAutonomyProfile as prepareProfile, validateAutonomyOptions, type AutonomyProfileInput, type FiniteAutonomyTerms } from '../src/autonomy.ts'
 
 // /var is an OS symlink on macOS; use a virtual home beneath canonical /.
-const input: AutonomyProfileInput = {
+const input: AutonomyProfileInput & { isolation: FiniteAutonomyTerms & { image: string; backend?: 'docker' } } = {
   dshHome: '/dsh-autonomy-fixture/home', profile: 'web', workspace: '/srv/workspace', preset: 'standard',
   isolation: { image: `sha256:${'a'.repeat(64)}`, maxRuns: 3, leaseMs: 60_000, maxTotalDurationMs: 120_000 },
 }

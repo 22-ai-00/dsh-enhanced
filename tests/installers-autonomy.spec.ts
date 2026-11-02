@@ -17,7 +17,7 @@ async function home(): Promise<string> {
   await writeFile(join(fakeBin, 'dsh'), '#!/bin/bash\nexit 1\n', { mode: 0o755 })
   return value
 }
-function run(args: string[], dshHome: string) { return spawnSync('/bin/bash', [installer, ...args], { cwd: root, encoding: 'utf8', env: { ...process.env, DSH_HOME: dshHome } }) }
+function run(args: string[], dshHome: string, environment: Record<string, string> = {}) { return spawnSync('/bin/bash', [installer, ...args], { cwd: root, encoding: 'utf8', env: { ...process.env, DSH_HOME: dshHome, ...environment } }) }
 const image = `sha256:${'a'.repeat(64)}`
 
 describe('autonomy installer scenario', () => {
@@ -39,12 +39,43 @@ describe('autonomy installer scenario', () => {
   it('rejects autonomy-only parameters, unsafe limits, lark, and agent tool changes', async () => {
     const dshHome = await home()
     expect(run(['--dry-run', '--scenario', 'web', '--isolation-max-runs', '20'], dshHome).status).toBe(2)
-    expect(run(['--dry-run', '--scenario', 'autonomy'], dshHome).status).toBe(2)
+    expect(run(['--dry-run', '--scenario', 'autonomy'], dshHome, { DSH_ENHANCED_PLATFORM_OVERRIDE: 'Darwin' }).status).toBe(2)
     expect(run(['--dry-run', '--scenario', 'core', '--isolation-image', image], dshHome).status).toBe(2)
     expect(run(['--dry-run', '--scenario', 'autonomy', '--isolation-image', 'latest'], dshHome).status).toBe(2)
     expect(run(['--dry-run', '--scenario', 'autonomy', '--isolation-image', image, '--isolation-max-runs', '999999999999'], dshHome).status).toBe(2)
     expect(run(['--dry-run', '--scenario', 'autonomy', '--isolation-image', image, '--lark', 'configure'], dshHome).status).toBe(2)
     expect(run(['--dry-run', '--scenario', 'autonomy', '--isolation-image', image, '--agent-tools', 'allow'], dshHome).status).toBe(2)
+  })
+
+  it('defaults Linux autonomy to native without Docker and preserves explicit image compatibility', async () => {
+    const dshHome = await home(), workspace = join(dshHome, 'workspace')
+    const env = { DSH_ENHANCED_PLATFORM_OVERRIDE: 'Linux' }
+    const result = run(['--dry-run', '--scenario', 'autonomy', '--workspace', workspace, '--yes'], dshHome, env)
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('dsh-web-owner-setup')
+    expect(result.stdout).toContain('--isolation-backend linux-native --isolation-max-runs 20 --isolation-lease-ms 3600000 --isolation-runtime-ms 600000')
+    expect(result.stdout).not.toContain('--isolation-image')
+    expect(result.stdout).not.toMatch(/docker (?:build|run|inspect|info)/u)
+    expect(result.stdout).not.toContain('dsh-lark-setup')
+    const local = run(['--dry-run', '--scenario', 'autonomy', '--isolation-source-repository', root, '--yes'], dshHome, env)
+    expect(local.status, local.stderr).toBe(0)
+    expect(local.stdout).toContain(`--isolation-source-repository ${root}`)
+    const docker = run(['--dry-run', '--scenario', 'autonomy', '--isolation-image', image, '--yes'], dshHome, env)
+    expect(docker.status, docker.stderr).toBe(0)
+    expect(docker.stdout).toContain(`--isolation-image ${image}`)
+    expect(docker.stdout).not.toContain('--isolation-backend linux-native')
+  })
+
+  it('rejects mixed backend/source/image and native on macOS before installation', async () => {
+    const dshHome = await home(), env = { DSH_ENHANCED_PLATFORM_OVERRIDE: 'Linux' }
+    for (const args of [
+      ['--isolation-backend', 'linux-native', '--isolation-image', image],
+      ['--isolation-backend', 'docker', '--isolation-source-repository', root, '--isolation-image', image],
+      ['--isolation-backend', 'linux-native', '--isolation-source-repository', 'relative'],
+      ['--isolation-backend', 'other'],
+    ]) expect(run(['--dry-run', '--scenario', 'autonomy', ...args], dshHome, env).status).toBe(2)
+    expect(run(['--dry-run', '--scenario', 'autonomy', '--isolation-backend', 'linux-native'], dshHome,
+      { DSH_ENHANCED_PLATFORM_OVERRIDE: 'Darwin' }).status).toBe(2)
   })
 
   it('runs installed isolation diagnostics without a second Host and propagates failed checks', async () => {

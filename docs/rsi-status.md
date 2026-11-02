@@ -17,13 +17,15 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 ## 当前交付
 
-普通终止信号 → 授权只读诊断 → 持久报告的接线已实现。Mac 专项：真实组件集成 9/9、WorkItems 核心/通用 268、Automations 全插件 387 passed / 27 skipped、Delivery 来源 16/16；noEmit、构建、零警告 lint 均 EXIT 0。集成使用脚本模型，真实 Cordis、Agent Loop、Policy、SQLite/JSONL 与 Delivery outbox；验证 idle 自动准入、撤权、supplier 继承、成功 waiting 重启续办和报告后失败不重跑。通知只证明入队，不证明外部送达。
+普通 Linux autonomy 的安装、Web setup/doctor 已接通原生资源入口，等待实机与根检查。Isolation 发布不挂载服务的 `native-resources` 子入口，Lark RSI 保留原 schema 3 收据与来源复核；工具链准备和 cgroup 发现分开。setup 在配对前准备并探测，已有 native 配置只读复核；不续授权、不重置额度，不隐式切换 backend。doctor 不联网准备资源。
 
-撤权后使用量丢失、部分成本误投影、Node 24 NUL/BOM 账本读取及默认 disabled 配置挂载问题均有修前失败与修后通过证据，位于 `work-item-diagnosis-{core,activation-tests,automations,usage,integration}/`。当前新源码的最终独立复核与两端根检查尚待收齐；下表仍是上一交付的完整检查，不能替代本次验收。
+代码与 Mac 专项已独立 PASS：资源 28 passed / 5 skipped，Lark 6 passed / 12 skipped，Web owner 全组 92 passed，安装器参数 5 passed；build/noEmit/零警告 lint 均 EXIT 0。资源准备原有 pnpm 配置钩子、目录及工具版本穿透问题有 18 项修前失败和修后通过；源配置实行已审查字段准入，fetch/install 禁止 pnpmfile。真实 pnpm 离线对照确认原参数执行钩子、修正参数不执行。打包子入口导入无激活副作用；该探针复用现有依赖，不是全新 registry 安装证明。
 
-## 下一交付
+Web 资源专项明确使用 mocks；Linux 的真实准备、旧收据跨入口、取消清理、native probe 和业务额度保持尚待执行。验收 harness 使用新建私有 Home、一个本地脚本模型任务，原五次真实模型额度不变。本片尚未通过 Mac/Linux 根检查，下表只覆盖上一诊断交付。
 
-完成本片精确源码的 Mac/Linux 根检查并更新证据；通过后接通原生隔离的普通安装入口、配置与 doctor，复用非激活资源准备 API。诊断报告尚不等于自主修改/采用或长期普通使用收益；跨信道 Router、订阅直通与成长反馈仍按独立能力逐项推进。
+## 下一验收
+
+先在 Linux 临时 Home 验证真实资源与普通隔离执行、重复 setup 保留已用额度，再做精确新源码两端根检查。随后补齐普通 Goal 独立隔离验收的 native 路径；当前 native Goal admission 明确拒绝，显式 Docker 路径保留原能力。诊断报告、固定脚本模型与一次执行均不代表自主修改采用或长期普通使用收益；跨信道 Router、订阅直通与成长反馈仍待逐项推进。
 
 ## 原生改造与延后验收
 
@@ -31,7 +33,7 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 仍须完成的工程缺口：
 
-1. 实验性 autonomy 新安装/Web setup/doctor 仍要求 Docker；supervised native prepare 只配置 CP 构建/验收 runner，没有配置普通 `assistantIsolation`。需公开非激活资源接口并接通 native 配置、准备和探测，不能借资源准备启动服务或扩展 owner 授权。
+1. 普通 autonomy native 安装接线已实现，实机与根检查待收齐；普通 Goal 的 `isolated-runner` authority/执行器仍仅 Docker。须补 native 独立验收后才能声称该路径能力等价。
 2. 空业务采用 CAS 已接入安装器/签名 overlay，保留 owner、key、额度、期限与历史；完整临时双服务升级、就绪和回滚未验收。旧临时准备失败现场保留，修正版因正式机器人前提而延后。复制恢复、非空迁移及 native→native 尚不支持。
 3. 非空 review 历史 CAS/封存组件已有专项及独立复核，installer、Host head、运行时消费者和非空 adoption 资格仍缺；旧 Docker 证书不能当作 Linux 执行资格。
 4. pre-owner 最终候选依赖图、策略结果及真正断网安装证明待补齐。pnpm 应用闭包 pin 已双端专项验证，Node 共享库等系统依赖仍属 host toolchain 信任边界。
@@ -42,13 +44,13 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 ## 最新完整检查
 
-精确源码 `db076203582df71daad5a7048519e6e3ea8f8adc`，tree `7ca3cb4bc8bd6efc9a91f56f30281a99a5063827`；两端命令均为 `CI=1 VITEST_MAX_WORKERS=2 pnpm check`，pnpm 11.7.0。manifest、零警告 lint、构建、类型检查、测试及 dry-run pack 全部完成；child/runner 均 EXIT 0、源码稳定、无中断。
+上一诊断交付：两端命令 `CI=1 VITEST_MAX_WORKERS=2 pnpm check`，pnpm 11.7.0；manifest、零警告 lint、构建、类型检查、测试及 dry-run pack 全部完成，child/runner EXIT 0，源码稳定。
 
-| 环境 | 测试 passed / skipped | 文件 passed / skipped | 耗时 | 日志 SHA-256 |
+| 环境与精确源码 | 测试 passed / skipped | 文件 passed / skipped | 耗时 | 日志 SHA-256 |
 | --- | --- | --- | --- | --- |
-| Mac / Node 26.11.1 | 9,448 / 1,873 | 660 / 86 | 1046.32 秒 | `b400f79c30b10b776112838bf4894578ae38c81992e9d35edfda7554c6f2531f` |
-| Linux / Node 24.7.0 | 11,017 / 301 | 714 / 32 | 1944.65 秒 | `241db88bc41e292a24b338ef34ad2c1040afe19df376e12d76bc6190e6fff71a` |
+| Mac / Node 26.11.1 / `ac3ec0db` | 9,510 / 1,873 | 665 / 86 | 1085.51 秒 | `e027adb79ab3495d624f2ca71b4c00c853bc158a411768c4acfec8a27147e11c` |
+| Linux / Node 24.7.0 / `4f7609ce` | 11,079 / 301 | 719 / 32 | 1935.67 秒 | `603f01d98d3f73c4a11f52addf8a909d97ec590505942a13654f9a44b5009b8c` |
 
-每端完成 39 个测试组、38 个包和 38 个类型检查。两端均按精确 Git manifests 独立逐项核对 PASS。原始日志、退出码、命令及复核位于 `docs/evidence/verification-db076203/`。Automations 根组 Mac 为 359 passed / 27 skipped、25 文件通过；Linux 为 379 passed / 7 skipped、24 文件通过 / 1 跳过，原始日志明确新增文件 44 项通过。Mac dot reporter 未逐项列出新增用例，专项 verbose 日志保留全部通过行。
+每端 39 个测试组、38 个包和 38 个类型检查。Mac tree `3eacc8b124165e2a35c3a040d49d2b2f6e7a645b`，Linux tree `dad13a29928dadae8ad329284c2d7ac9091f9586`。两提交生产代码一致，唯一差异是 Delivery 跨页用例的两行说明及 30 秒单项 deadline；该调整另经 Mac service 全组 83/83 与独立复核。两端原始日志、退出码及各自独立核对见 `docs/evidence/verification-{ac3ec0db,4f7609ce}/`。
 
-这些结果不替代跳过项、外部连接、活服务升级或长期普通使用验收；修前失败和中断证据保留，未被新结果覆盖。
+诊断真实组件集成另有 9/9 与 39 个冷 SQLite 文件独立回读证据；使用脚本模型，真实 Cordis、Agent Loop、Policy 与 Delivery outbox，只证明通知入队。原 Linux 超时失败、原 Mac 中断及本片资源修前失败全部保留，不被新结果覆盖。这些结果不代替跳过项、外部连接、活服务升级或长期普通使用验收。

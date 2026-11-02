@@ -107,10 +107,15 @@ test.runIf(process.platform === 'linux')('base reader reopens exact retained ide
   const input = { ...ctx.input, nodeArchivePath: '/missing/node.tgz', pnpmArchivePath: '/missing/pnpm.tgz',
     pnpmExeArchivePath: '/missing/exe.tgz', pnpmNativeArchivePath: '/missing/native.tgz' }
   expect(await readLinuxRsiRuntime(input)).toEqual(ctx.environment)
+  const { freezeLinuxRuntimeSource, readLinuxRuntime } = await import('@dsh-enhanced/assistant-isolation/native-resources')
+  const frozen = await freezeLinuxRuntimeSource({ kind: 'git-object', repository: ctx.input.source.repository,
+    commit: ctx.input.source.sourceCommit, version: ctx.input.source.version })
+  expect(await readLinuxRuntime({ dshHome: ctx.input.dshHome, profile: ctx.input.profile, source: frozen }))
+    .toEqual(ctx.environment)
   expect(await readLinuxRsiRuntime(input)).toEqual(ctx.environment)
   expect(await retainedIdentity(ctx.family)).toEqual(before)
-  expect(vi.mocked(spawnSync).mock.calls.length).toBeGreaterThan(0)
-  expect(vi.mocked(spawnSync).mock.calls.every(([file]) => file === '/usr/bin/git')).toBe(true)
+  // Source-object reads are cancellable async Git calls; no preparation doctor runs.
+  expect(vi.mocked(spawnSync).mock.calls).toEqual([])
 })
 
 test.runIf(process.platform === 'linux')('base reader rejects damaged receipt and runtime bytes without repairing them', async () => {
@@ -314,3 +319,48 @@ test.runIf(process.platform === 'linux' && Object.values(archives).every(Boolean
       process.stdout.write('Observed a real preparation fetch process; abort reaped it and removed the incomplete stage within 5s.\n')
     } finally { controller.abort(); await pending }
   }, 60_000)
+
+// The compatibility facade preserves public Error identity and the ordinary
+// Mac platform refusal without preparing a source workspace.
+test.runIf(process.platform !== 'linux')('RSI adapter retains the shared platform error identity', async () => {
+  const { LinuxRsiRuntimeUnavailableError } = await import('@dsh-enhanced/assistant-isolation/native-resources')
+  for (const operation of [prepareLinuxRsiRuntime, readLinuxRsiRuntime]) {
+    await expect(operation({ dshHome: '/never-created', profile: 'adapter', source: {} as never }))
+      .rejects.toBeInstanceOf(LinuxRsiRuntimeUnavailableError)
+  }
+})
+
+test.runIf(process.platform === 'linux')('RSI revalidates authenticated source after retained verification, independently of manifest memory', async () => {
+  const ctx = await retainedFixture()
+  const sourceReceipt = join(ctx.input.dshHome, 'rsi-sources', ctx.input.profile, 'bootstrap.json')
+  // The shared reader also accepts a trusted provenance fence. Mutating the
+  // authenticated source receipt on its second invocation must fail closed.
+  const { freezeLinuxRuntimeSource, readLinuxRuntime } = await import('@dsh-enhanced/assistant-isolation/native-resources')
+  const source = await freezeLinuxRuntimeSource({ kind: 'git-object', repository: ctx.input.source.repository,
+    commit: ctx.input.source.sourceCommit, version: ctx.input.source.version })
+  let calls = 0
+  await expect(readLinuxRuntime({ dshHome: ctx.input.dshHome, profile: ctx.input.profile, source,
+    revalidateSource: async () => {
+      calls++
+      if (calls === 2) await writeFile(sourceReceipt, '{}')
+      // Independently reopen RSI authority via the facade; only use it when
+      // changed, avoiding recursion on the ordinary first fence.
+      if (calls === 2) await readLinuxRsiRuntime(ctx.input)
+    } })).rejects.toThrow()
+  expect(calls).toBe(2)
+})
+
+test.runIf(process.platform === 'linux')('ordinary retained reader snapshots caller manifest buffers before the async provenance fence', async () => {
+  const ctx = await retainedFixture()
+  const { freezeLinuxRuntimeSource, readLinuxRuntime } = await import('@dsh-enhanced/assistant-isolation/native-resources')
+  const source = await freezeLinuxRuntimeSource({ kind: 'git-object', repository: ctx.input.source.repository,
+    commit: ctx.input.source.sourceCommit, version: ctx.input.source.version })
+  let calls = 0
+  expect(await readLinuxRuntime({ dshHome: ctx.input.dshHome, profile: ctx.input.profile, source,
+    revalidateSource: async () => {
+      if (++calls !== 1) return
+      for (const manifest of source.manifests) manifest.bytes.fill(0)
+      source.sourceCommit = 'b'.repeat(40); source.version = '99.0.0'
+    } })).toEqual(ctx.environment)
+  expect(calls).toBe(2)
+})
