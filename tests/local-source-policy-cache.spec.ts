@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, cp, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -10,7 +10,7 @@ const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 async function fixture(mode = '') {
-  const root = await mkdtemp(join(tmpdir(), 'local-source-policy-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'local-source-policy-')))
   roots.push(root)
   const homePath = join(root, 'home'), profilesPath = join(homePath, 'profiles')
   const profilePath = join(profilesPath, 'web'), cohortPath = join(homePath, 'rsi-local-cohorts', 'web')
@@ -24,11 +24,15 @@ async function fixture(mode = '') {
   })) await writeFile(join(profilePath, name), source, { mode: 0o600 })
   const pnpmPath = join(root, 'pnpm')
   await writeFile(join(root, 'scenario'), mode, { mode: 0o600 })
-  await writeFile(pnpmPath, `#!${process.execPath}
-const fs = require('node:fs')
+  const packageRoot = join(root, 'node_modules', 'pnpm')
+  await mkdir(join(packageRoot, 'bin'), { recursive: true, mode: 0o700 })
+  await mkdir(join(packageRoot, 'dist'), { mode: 0o700 })
+  await writeFile(join(packageRoot, 'package.json'), JSON.stringify({ name: 'pnpm', version: '11.7.0',
+    bin: { pnpm: 'bin/pnpm.cjs' } }), { mode: 0o600 })
+  await writeFile(join(packageRoot, 'dist', 'pnpm.cjs'), `const fs = require('node:fs')
 const path = require('node:path')
 const args = process.argv.slice(2)
-const mode = fs.readFileSync(path.join(__dirname, 'scenario'), 'utf8')
+const mode = fs.readFileSync(${JSON.stringify(join(root, 'scenario'))}, 'utf8')
 if (args.join(' ') === 'store path') {
   const store = path.join(process.env.pnpm_config_store_dir, 'v11')
   fs.mkdirSync(store, { recursive: true, mode: 0o700 })
@@ -48,12 +52,17 @@ const receiptFor = lock => {
     policy: { tarballUrlBinding: true, resolutionShapeCheck: true, dependencyAliasCheck: true } }
 }
 if (args.join(' ') === 'config list --json') {
+  if (process.env.pnpm_config_pm_on_fail !== 'error'
+    || process.env.pnpm_config_manage_package_manager_versions !== 'false'
+    || process.env.pnpm_config_package_manager_strict !== 'true'
+    || process.env.pnpm_config_package_manager_strict_version !== 'true') throw new Error('fixture manager policy was not frozen')
   const privateRun = process.env.HOME.includes('verified-cache')
   process.stdout.write(JSON.stringify({ registry: privateRun && mode === 'config-drift' ? 'https://drift.invalid/' : 'https://registry.npmjs.org/',
     minimumReleaseAge: privateRun && mode === 'age-drift' ? 10 : 20,
     ...(mode === 'source-auth' && !privateRun ? { '//registry.npmjs.org/:_authToken': '(protected)' } : {}),
     ignoreScripts: mode === 'weak-policy' && privateRun ? false : true,
-    ignorePnpmfile: true, trustLockfile: false }))
+    ignorePnpmfile: true, trustLockfile: false, pmOnFail: 'error',
+    managePackageManagerVersions: false, packageManagerStrict: true, packageManagerStrictVersion: true }))
   process.exit(0)
 }
 const lock = path.join(process.cwd(), 'pnpm-lock.yaml')
@@ -102,7 +111,10 @@ if (args.join(' ') === 'fetch --frozen-lockfile') {
 process.stderr.write('unexpected pnpm invocation: ' + args.join(' '))
 process.exit(2)
 `, { mode: 0o700 })
-  await chmod(pnpmPath, 0o700)
+  const launcher = join(packageRoot, 'bin', 'pnpm.cjs')
+  await writeFile(launcher, `#!${process.execPath}\nrequire('../dist/pnpm.cjs')\n`, { mode: 0o700 })
+  await chmod(launcher, 0o700)
+  await symlink(launcher, pnpmPath)
   const current = { profilesPath, profilesStat: await lstat(profilesPath), profilePath, profileStat: await lstat(profilePath) }
   const originalResources = { 'rsi-local-cohorts': await lifecycleProfileTest.profileTreeDigest(cohortPath, '', 256 * 1024 * 1024) }
   return { homePath, profilePath, pnpmPath, current, originalResources }
@@ -119,7 +131,7 @@ describe.skipIf(process.platform !== 'linux')('pre-stop local source offline pol
       await expect(lifecycleProfileTest.assertLocalSourcePreparation(preparation, f.profilePath)).rejects.toThrow('marker changed')
       await writeFile(join(preparation.cachePath, 'lockfile-verified.jsonl'), preparation.marker.source)
       await writeFile(f.pnpmPath, (await readFile(f.pnpmPath, 'utf8')) + '\n')
-      await expect(lifecycleProfileTest.assertLocalSourcePreparation(preparation, f.profilePath)).rejects.toThrow('pinned pnpm executable changed')
+      await expect(lifecycleProfileTest.assertLocalSourcePreparation(preparation, f.profilePath)).rejects.toThrow('pinned pnpm runtime closure changed')
     } finally { await preparation.dispose() }
   })
 

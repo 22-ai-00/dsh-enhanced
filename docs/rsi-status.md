@@ -40,8 +40,8 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 ## 最新检查
 
-- Linux `011595b7` 根 `CI=1 VITEST_MAX_WORKERS=2 pnpm check` EXIT 0：10,655 passed / 301 skipped，706 文件通过 / 32 条件跳过，38 包 dry-run pack，1795.40 秒。日志 SHA-256 `ca741791f946d07b5f477bc3aa49746dca5bcdfb5d31060f476a145c0e01ff9d`。此旧基线不含后续能力。
+- Mac `d6e1cdc2` 根 `CI=1 VITEST_MAX_WORKERS=2 pnpm check` EXIT 0：9,176 passed / 1,872 skipped，654 文件通过 / 86 条件跳过，39 组测试、38 包 dry-run pack，1244.65 秒。源提交稳定、无中止记录；日志 SHA-256 `4b1d6d793d1697d1b7f1693f38cef325cff35601e9c01baec4c75fe74d541cdc`。条件跳过不建立 Linux 行为证据。
 - `6dab65f2`：WorkItems 226 项、Policy 459 passed / 2 skipped；`eaf835dc`：review grant 62 项；`c2b21905`：WorkItems 239 项。相关类型、lint、构建和各自独立复核 PASS。
-- Mac Lark scanner retirement 的路径别名/socket 长度夹具问题已修复：79 项专项及独立复核 PASS，随后完整 Lark 组 1,126 passed / 314 条件跳过；默认 TMPDIR 和生产路径限制不变。
-- `37a51cce` Linux 根检查捕获本轮 pnpm 重构误删 `createReadStream` 导入，影响既有 Host 收据验证。已恢复导入，并只为该脚本启用 Node 环境的 `no-undef`；lint 负例和全仓 lint 通过，正式 Linux checkout 的 Host/rollback 31 项通过。两端旧根检查均已中止，不能把中止后 pnpm 返回 0 视为通过；最终全检还要求 39 组测试、38 包及无中止记录。
+- `d6e1cdc2` Linux 根 EXIT 1：根测试 1,321 passed / 5 skipped / 14 failed，失败均为 `local-source-policy-cache` 旧自定义 pnpm launcher 被新 pin 拒绝，未进入递归插件测试及打包；Host 收据导入回归已修复，Host/rollback 31 项通过。失败日志 SHA-256 `fa04c2dcf86f4dcdb72aca787a96e8a5722e59b53c8235e65342760218a2e46f`。
+- Linux-only 夹具改为真实支持的 pnpm package/bin/dist 布局，保留全部 14 个策略场景及漂移负例，新增固定 manager 配置检查。候选 Linux 14 项 EXIT 0、45.67 秒，独立复核 PASS；生产代码未改。集成后 Linux 根全检待完成。
 - 未发布、未合入 main、未执行 live 原生升级。冷安装/prepare、合成任务及条件跳过不替代普通使用与成长收益验收。
