@@ -1,5 +1,11 @@
 # 兼容性基线
 
+## 前台终止观察与原任务读取（Delivery schema 28）
+
+schema 28 仅在普通 foreground execution 增加可空的不可变 Host 终止观察，owner/principal/binding 身份及原成功/unknown 判定不变。旧行不回填，旧 source digest 保持；新观察纳入来源摘要。升级后旧 writer 不得打开新库；同批 operator snapshot、安装器及 owner 修复读取方明确支持 23–28，并继续拒绝未审查版本。
+
+同批 Delivery 新增 owner 受控的原任务 UTF-8 分页读取，成功来源 reader 的 Outbox/模型/静止约束不变。Native Web 补齐实际 request/header 的供应商冻结。消费者必须检测新接口并尊重缺失观察/模型及 unknown，不能把升级当作原任务可重试或自主修复已经接通的证明；没有新增 Agent Loop、timer 或 DSH/Cordis 依赖。
+
 ## 撤销 owner 的后台扫描（Automations schema 16）
 
 Automations v16 在原库中新增不可删除的 system-owned 扫描退休标记；迁移保留旧定义、任务、unknown 和运行历史。退休只暂停精确匹配的扫描定义并清空下次执行时间，旧 reconcile 回执、resume 和调度准入均不能重新激活该身份。安装生命周期继续接受历史 v15 快照，并明确接受 v16；未知版本仍拒绝，不能用回退数据库版本恢复已退休扫描。

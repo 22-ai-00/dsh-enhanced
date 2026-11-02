@@ -73,6 +73,7 @@ import {
   type OwnerGoalOutcomeFeedbackProof,
 } from './goal-wake-types.js'
 import type { AcceptanceContract, AcceptanceHandle, ForegroundExecution, TaskAcceptanceRegistration } from './acceptance.js'
+import type { ForegroundTerminationObservation } from './foreground-termination.js'
 import { isSynchronousForegroundObservationHandle, validForegroundObservationRegistration,
   type ForegroundTaskIdentity, type ForegroundTaskObservationRegistration,
   type ForegroundToolCallAttestation } from './foreground-observation.js'
@@ -146,6 +147,7 @@ import type {
   OwnerForegroundTaskSourceCursor,
   OwnerForegroundTaskSourcePage,
   OwnerForegroundTaskSourceContent,
+  OwnerForegroundTaskInput,
   OwnerForegroundTaskSourceRef,
   OwnerApprovalForPreferenceInput,
   OwnerApprovalForPreferenceResult,
@@ -2234,7 +2236,7 @@ export class AssistantDeliveryService extends Service {
     } catch (error) { this.context.logger.warn(`assistant-delivery: foreground observer begin failed: ${String(error)}`) }
   }
 
-  private completeForegroundTaskExecution(inboxId: string, input: { status: ForegroundExecution['status']; quiescent: boolean }): void {
+  private completeForegroundTaskExecution(inboxId: string, input: { status: ForegroundExecution['status']; quiescent: boolean; termination?: Readonly<ForegroundTerminationObservation> }): void {
     this.deliveryStore.finishForegroundTaskExecution({ inboxId, ...input, completedAt: Date.now() })
     const sink = this.foregroundObserver; const observed = sink?.handles.get(inboxId)
     if (sink === undefined || observed === undefined) return
@@ -2465,6 +2467,7 @@ export class AssistantDeliveryService extends Service {
       complete: (handle, input) => this.completeForegroundTaskAcceptance(handle, input),
       beginExecution: (binding, envelope) => this.beginForegroundTaskExecution(binding, envelope),
       completeExecution: (inboxId, input) => this.completeForegroundTaskExecution(inboxId, input),
+      recordExecutionModelSelection: (inboxId, input) => this.deliveryStore.recordForegroundExecutionModelSelection({ inboxId, ...input }),
       claimed: (agent, envelope, turn) => this.capturePreferenceTurn(agent,
         { kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId: envelope.eventId }, turn),
       notifications: binding => this.deliveryStore.listOutbox({ bindingId: binding.id, limit: 50 }).filter(record => record.status === 'accepted'
@@ -5119,6 +5122,15 @@ export class AssistantDeliveryService extends Service {
     this.assertActive()
     this.validateOwnerRoute(input)
     return this.deliveryStore.readOwnerForegroundTaskSource(input, this.ownerRoutes.get(input.authorityId)!)
+  }
+
+  /** Host-only bounded original input, independent of successful reply evidence. */
+  readOwnerForegroundTaskInput(input: OwnerForegroundTaskSourceScope & {
+    inboxId: string; expectedSourceDigest: string; offset?: number; maxBytes?: number
+  }): Readonly<OwnerForegroundTaskInput> | undefined {
+    this.assertActive()
+    this.validateOwnerRoute(input)
+    return this.deliveryStore.readOwnerForegroundTaskInput(input, this.ownerRoutes.get(input.authorityId)!)
   }
 
   /** Hold Delivery's owner/source writer fence across synchronous downstream adoption. */

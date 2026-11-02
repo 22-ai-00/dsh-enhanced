@@ -4,6 +4,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { AcceptanceHandle } from './acceptance.js'
+import type { ForegroundTerminationObservation } from './foreground-termination.js'
+import { observeNativeTermination, type NativeTerminationCause } from './native-termination.js'
 import { externalPrincipalId, canonicalPrincipal } from './canonical.js'
 import type { DeliveryStore } from './store.js'
 import { DeliverySessionLeases, SessionLeaseUnavailable, type SessionExecutionLease, type CompatibleAgentSetup } from './session-lease-runtime.js'
@@ -33,7 +35,8 @@ interface OwnerPort {
   prepare(binding: ConversationBinding, envelope: InboundEnvelope): AcceptanceHandle | undefined
   complete(handle: AcceptanceHandle, input: { status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; quiescent: boolean }): Promise<void>
   beginExecution(binding: ConversationBinding, envelope: InboundEnvelope): string | undefined
-  completeExecution(inboxId: string, input: { status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; quiescent: boolean }): void
+  completeExecution(inboxId: string, input: { status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; quiescent: boolean; termination?: Readonly<ForegroundTerminationObservation> }): void
+  recordExecutionModelSelection(inboxId: string, input: { provider: string; model: string; reasoningEffort?: string }): void
   claimed(agent: Agent, envelope: InboundEnvelope, turn: number): void
   released(): void
   notifications(binding: ConversationBinding): ReadonlyArray<{ id: string; text: string; createdAt: number }>
@@ -42,7 +45,10 @@ interface Execution {
   handle: AgentHandle
   lease: SessionExecutionLease
   closing?: Promise<void>
+  removeModelObservation?: () => void
+  terminationCause?: NativeTerminationCause
   deadlineAt: number
+  deadlineSignal: AbortSignal
   input?: {
     inboxId: string
     fencingToken: number
@@ -90,7 +96,10 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
       for (const [id, entry] of this.#entries) {
         if (entry.closing !== undefined) continue
         try {
-          if (Date.now() >= entry.deadlineAt) throw new SessionLeaseUnavailable('denied')
+          if (entry.deadlineSignal.aborted || Date.now() >= entry.deadlineAt) {
+            entry.terminationCause = 'execution-timeout'
+            throw new SessionLeaseUnavailable('denied')
+          }
           this.assertSession(id)
           entry.lease.assertAgent(entry.handle.agent)
           if (entry.input !== undefined && !store.renewInboxClaim({ inboxId: entry.input.inboxId,
@@ -99,7 +108,10 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
           }
           if (entry.input?.admitting !== true && entry.handle.agent.status === 'idle' && !(entry.handle.agent.inbox.nextTurn.length > 0 || entry.handle.agent.inbox.nextStep.length > 0)
             && !this.#awaitingNativeGoal(entry.handle.agent)) void this.#close(id, entry)
-        } catch { entry.lease.cancel(); void this.#close(id, entry) }
+        } catch {
+          entry.terminationCause ??= 'lease-or-authority-lost'
+          entry.lease.cancel(); void this.#close(id, entry)
+        }
       }
     }, Math.max(1, Math.min(100, Math.floor(port.leaseMs / 3))))
     this.#timer.unref?.()
@@ -152,9 +164,11 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
     }
     const conversation = { channel: 'web', account: this.#config.principal.account,
       tenant: this.#config.principal.tenant, kind: 'dm' as const, chat: sessionId }
+    const deadlineAt = Date.now() + this.#config.maxExecutionMs!
+    const deadlineSignal = AbortSignal.timeout(this.#config.maxExecutionMs!)
     const lease = this.leases.open({ kind: 'construction', sessionId, conversation,
       principal: this.#config.principal, workspace: this.#config.workspace, agentPreset: this.#config.preset, generation: 1 },
-    AbortSignal.any([this.#controller.signal, AbortSignal.timeout(this.#config.maxExecutionMs!)]))
+    AbortSignal.any([this.#controller.signal, deadlineSignal]))
     let handle: AgentHandle | undefined
     try {
       lease.dispatch()
@@ -163,7 +177,7 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
       this.#assertOwner()
       this.store.createBinding({ conversation, principal: this.#config.principal, workspace: this.#config.workspace,
           agentPreset: this.#config.preset, sessionId, policyRef: this.port.policyRef, expectedGeneration: 1, constructionLease: lease.token })
-      return this.#track(sessionId, lease, handle)
+      return this.#track(sessionId, lease, handle, deadlineAt, deadlineSignal)
     } catch (error) {
       lease.cancel(); lease.close()
       if (handle !== undefined) void handle.dispose().catch(() => {})
@@ -172,13 +186,15 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
   }
   async resume(options: ResumeAgentOptions): Promise<AgentHandle> {
     const binding = this.#binding(String(options.resumeSessionId))
-    const lease = this.leases.open({ kind: 'bound', binding }, AbortSignal.any([this.#controller.signal, AbortSignal.timeout(this.#config.maxExecutionMs!)]))
+    const deadlineAt = Date.now() + this.#config.maxExecutionMs!
+    const deadlineSignal = AbortSignal.timeout(this.#config.maxExecutionMs!)
+    const lease = this.leases.open({ kind: 'bound', binding }, AbortSignal.any([this.#controller.signal, deadlineSignal]))
     let handle: AgentHandle | undefined
     try {
       lease.dispatch()
       handle = await this.leases.resume(this.ownerCtx, { ...options, setup: this.#setup(options.setup) })
       this.#binding(binding.sessionId)
-      return this.#track(binding.sessionId, lease, handle)
+      return this.#track(binding.sessionId, lease, handle, deadlineAt, deadlineSignal)
     } catch (error) {
       lease.cancel(); lease.close()
       if (handle !== undefined) void handle.dispose().catch(() => {})
@@ -196,9 +212,16 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
       return { commit: () => { this.#assertOwner(); prepared?.commit?.(); this.#assertOwner() } }
     }
   }
-  #track(id: string, lease: SessionExecutionLease, handle: AgentHandle): AgentHandle {
-    const entry: Execution = { lease, handle, deadlineAt: Date.now() + this.#config.maxExecutionMs! }
+  #track(id: string, lease: SessionExecutionLease, handle: AgentHandle, deadlineAt: number, deadlineSignal: AbortSignal): AgentHandle {
+    const entry: Execution = { lease, handle, deadlineAt, deadlineSignal }
     this.#entries.set(id, entry)
+    // The native header is emitted after adapter defaults resolve the actual
+    // paid route. Never substitute the current UI/preset selection for it.
+    entry.removeModelObservation = this.ownerCtx.on('session/event', (session, event) => {
+      if (session !== handle.agent.session || event.type !== 'request/header') return
+      const inboxId = entry.input?.executionInboxId
+      if (inboxId !== undefined) this.port.recordExecutionModelSelection(inboxId, event.data.header.config)
+    })
     return { agent: handle.agent, dispose: () => this.#close(id, entry) }
   }
   async prompt<T>(input: { sessionId: string; requestId: string; text: string; content: readonly unknown[] },
@@ -247,7 +270,10 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
       entry.lease.assertAgent(entry.handle.agent)
       return result
     } catch (error) {
-      if (entry.input !== undefined) { entry.lease.cancel(); await this.#close(input.sessionId, entry) }
+      if (entry.input !== undefined) {
+        entry.terminationCause ??= entry.deadlineSignal.aborted ? 'execution-timeout' : 'runtime-error'
+        entry.lease.cancel(); await this.#close(input.sessionId, entry)
+      }
       else {
         if (acceptance !== undefined) await this.port.complete(acceptance, { status: 'failed', quiescent: true })
         this.store.finishInbox({ ...claim, outcome: 'dead_letter', failureCode: 'native-input-rejected' })
@@ -259,9 +285,12 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
     return entry.closing ??= this.#drain(id, entry).catch(() => {
       // A Store or sink outage retains its fenced claim for recovery, never replay.
       entry.lease.cancel(); entry.lease.close()
-    })
+    }).finally(() => entry.removeModelObservation?.())
   }
   async #drain(id: string, entry: Execution): Promise<void> {
+    // Reuse the exact deadline that fenced construction; slow create/flush
+    // must not turn its earlier timeout into an apparent lease revocation.
+    if (entry.deadlineSignal.aborted) entry.terminationCause ??= 'execution-timeout'
     if (entry.input?.turn !== undefined) {
       const terminal = entry.handle.agent.session.snapshotEvents().findLast(event =>
         event.type === 'turn/end' && event.data.turn === entry.input!.turn)
@@ -279,7 +308,13 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
     entry.input?.permit.dispose()
     if (entry.input !== undefined) {
       const status = !quiescent ? 'unknown' : succeeded ? 'succeeded' : entry.input.completed === false ? 'failed' : 'cancelled'
-      if (entry.input.executionInboxId !== undefined) this.port.completeExecution(entry.input.executionInboxId, { status, quiescent })
+      const terminal = entry.input.turn === undefined ? undefined : entry.handle.agent.session.snapshotEvents().findLast(event =>
+        event.type === 'turn/end' && event.data.turn === entry.input!.turn)
+      if (entry.input.executionInboxId !== undefined) this.port.completeExecution(entry.input.executionInboxId, { status, quiescent,
+        termination: observeNativeTermination({ producer: 'native-web',
+          reason: terminal?.type === 'turn/end' ? terminal.data.reason : undefined,
+          cause: entry.terminationCause, handleDisposed: quiescent, completed: status === 'succeeded' }),
+      })
       if (entry.input.acceptance !== undefined) await this.port.complete(entry.input.acceptance, { status, quiescent })
       this.store.finishInbox({ inboxId: entry.input.inboxId, ownerId: this.#ownerId, fencingToken: entry.input.fencingToken,
         outcome: succeeded && quiescent ? 'processed' : 'dead_letter',
@@ -295,7 +330,10 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
     this.#disposed = true
     clearInterval(this.#timer)
     this.#controller.abort()
-    try { await Promise.all([...this.#entries].map(([id, entry]) => this.#close(id, entry))) }
+    try { await Promise.all([...this.#entries].map(([id, entry]) => {
+      entry.terminationCause ??= 'host-disposed'
+      return this.#close(id, entry)
+    })) }
     finally { this.port.released() }
   }
 }

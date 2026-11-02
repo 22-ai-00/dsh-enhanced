@@ -1,3 +1,4 @@
+import type { ForegroundTerminationObservation } from './foreground-termination.js'
 import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
@@ -35,6 +36,7 @@ export interface OwnerForegroundTaskSource {
   readonly scope: Readonly<{ workspace: string; preset: string }>
   readonly binding: Readonly<{ id: string; version: number; generation: number; sessionId: string }>
   readonly execution: Readonly<ForegroundExecution>
+  readonly termination?: Readonly<ForegroundTerminationObservation>
 }
 
 export interface OwnerForegroundTaskSourcePage {
@@ -58,6 +60,15 @@ export interface OwnerForegroundTaskSourceContent {
   readonly contentDigest: string
   readonly input: Readonly<OwnerForegroundTaskSourceText>
   readonly reply: Readonly<OwnerForegroundTaskSourceText & { outboxId: string; intentDigest: string }>
+}
+
+/** Owner-fenced original-input page, independent of a successful answer or model route. */
+export interface OwnerForegroundTaskInput {
+  readonly source: Readonly<OwnerForegroundTaskSource>
+  readonly sourceDigest: string
+  readonly contentDigest: string
+  readonly input: Readonly<{ text: string; fullTextDigest: string; fullBytes: number; returnedBytes: number;
+    offset: number; nextOffset?: number }>
 }
 
 /** An exact completed source to recheck under one owner-bound writer fence. */

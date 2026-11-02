@@ -87,7 +87,7 @@ const schemaKey = (entry: AutomationRetirementSchemaEntry): string => JSON.strin
 /** Reconstruct the exact scope insertion order passed by each production scanner runtime. */
 function ownerEvidence(proof: RevokedOwnerRouteSnapshot): (owner: ScannerRetirementTarget['owner']) => string {
   if (proof.protocol !== 'assistant-delivery/revoked-owner-route-snapshot/v1'
-    || ![23, 24, 25, 26, 27].includes(proof.schemaVersion)
+    || ![23, 24, 25, 26, 27, 28].includes(proof.schemaVersion)
     || !integer(proof.frozenPrincipalVersion, 1) || !digestPattern.test(proof.snapshotDigest)) reject('invalid-proof')
   const authority = proof.authority
   const authorityHash = ownerRouteAuthorityHash(authority)

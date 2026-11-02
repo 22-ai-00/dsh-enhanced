@@ -110,7 +110,9 @@ test('owner repair retains exact binding and main database identity across SQLit
   expect(ownerRepairSnapshotEquivalent({ ...afterCheckpoint, schemaVersion: 27 },
     { ...original, schemaVersion: 27 })).toBe(true)
   expect(ownerRepairSnapshotEquivalent({ ...afterCheckpoint, schemaVersion: 28 },
-    { ...original, schemaVersion: 28 })).toBe(false)
+    { ...original, schemaVersion: 28 })).toBe(true)
+  expect(ownerRepairSnapshotEquivalent({ ...afterCheckpoint, schemaVersion: 29 },
+    { ...original, schemaVersion: 29 })).toBe(false)
   expect(ownerRepairSnapshotEquivalent({ ...afterCheckpoint, schemaVersion: 27 }, original)).toBe(false)
   const differences = [
     { ...afterCheckpoint, protocol: 'forged' },

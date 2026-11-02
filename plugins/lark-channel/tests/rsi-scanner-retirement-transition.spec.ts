@@ -189,6 +189,14 @@ describe('pure exact scanner retirement transition verification', () => {
     expect(inspectAutomationRetirementSnapshot(input.path)).toEqual(input.after)
   })
 
+  test.each([23, 24, 25, 26, 27, 28] as const)('accepts reviewed Delivery owner proof schema %s', async schemaVersion => {
+    const input = clone(await fixture())
+    input.ownerProof.schemaVersion = schemaVersion
+    const { snapshotDigest: _snapshotDigest, ...unsigned } = input.ownerProof
+    input.ownerProof.snapshotDigest = createHash('sha256').update(canonicalJson(unsigned)).digest('hex')
+    expect(() => verifyScannerRetirementTransition(input)).not.toThrow()
+  })
+
   test('does not generate fresh operations from an already retired or changed definition', async () => {
     const input = await fixture()
     expect(() => prepareScannerRetirementOperations({ ...input, before: input.after })).toThrow()
@@ -430,7 +438,11 @@ describe('pure exact scanner retirement transition verification', () => {
 
   const proofChanges: Array<[string, (input: Mutable<ScannerRetirementTransitionInput>) => void]> = [
     ['wrong proof protocol', input => { Object.assign(input.ownerProof, { protocol: 'wrong' }) }],
-    ['future Delivery schema', input => { Object.assign(input.ownerProof, { schemaVersion: 28 }) }],
+    ['future Delivery schema', input => {
+      Object.assign(input.ownerProof, { schemaVersion: 29 })
+      const { snapshotDigest: _snapshotDigest, ...unsigned } = input.ownerProof
+      input.ownerProof.snapshotDigest = createHash('sha256').update(canonicalJson(unsigned)).digest('hex')
+    }],
     ['wrong authority', input => { input.ownerProof.authority.id = 'different-route' }],
     ['wrong route workspace', input => { input.ownerProof.authority.workspace = '/work/other' }],
     ['noncanonical authority', input => { input.ownerProof.authority.policyRef = ' owner-dm ' }],

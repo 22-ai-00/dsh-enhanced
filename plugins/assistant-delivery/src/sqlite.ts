@@ -1,8 +1,9 @@
+import { foregroundTerminationKinds } from './foreground-termination.js'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 27
+export const deliverySchemaVersion = 28
 
 /** Provider progress is a presentation journal, keyed to the authoritative Inbox. */
 const progressSchema = `
@@ -172,6 +173,7 @@ const foregroundExecutionSchema = `
     model_id TEXT,
     model_reasoning_effort TEXT,
     completion_sequence INTEGER CHECK(completion_sequence BETWEEN 1 AND 9007199254740991),
+    termination_json TEXT CHECK(termination_json IS NULL OR (json_valid(termination_json) AND length(CAST(termination_json AS BLOB)) <= 1024)),
     CHECK((status = 'pending' AND completed_at IS NULL AND execution_ref IS NULL)
       OR (status != 'pending' AND completed_at IS NOT NULL AND completed_at >= dispatched_at AND execution_ref IS NOT NULL AND execution_ref = inbox_id)),
     CHECK(quiescent = 0 OR status = 'succeeded'),
@@ -182,6 +184,38 @@ const foregroundExecutionSchema = `
   CREATE INDEX IF NOT EXISTS delivery_foreground_execution_owner
     ON delivery_foreground_executions(principal_record_id, principal_version, workspace, preset, binding_id);
 `
+
+const terminationValid = `NEW.termination_json IS NULL OR (
+  NEW.status != 'pending' AND json_valid(NEW.termination_json)
+  AND length(CAST(NEW.termination_json AS BLOB)) <= 1024
+  AND instr(CAST(NEW.termination_json AS BLOB), X'00') = 0
+  AND (SELECT COUNT(*) FROM json_each(NEW.termination_json)) = 7
+  AND NOT EXISTS (SELECT 1 FROM json_each(NEW.termination_json) WHERE key NOT IN ('protocol','producer','kind','causeCode','handleDisposed','effects','replay'))
+  AND json_extract(NEW.termination_json,'$.protocol') = 'assistant-delivery/foreground-termination/v1'
+  AND json_extract(NEW.termination_json,'$.producer') IN ('delivery-agent','native-web')
+  AND json_type(NEW.termination_json,'$.handleDisposed') IN ('true','false')
+  AND json_extract(NEW.termination_json,'$.effects') = 'unknown'
+  AND json_extract(NEW.termination_json,'$.replay') = 'forbidden'
+  AND (${Object.entries(foregroundTerminationKinds).map(([cause, kind]) => `(json_extract(NEW.termination_json,'$.causeCode') = '${cause}' AND json_extract(NEW.termination_json,'$.kind') = '${kind}')`).join(' OR ')})
+  AND ((json_extract(NEW.termination_json,'$.kind') = 'completed' AND NEW.status = 'succeeded' AND NEW.quiescent = 1 AND json_type(NEW.termination_json,'$.handleDisposed') = 'true')
+    OR (json_extract(NEW.termination_json,'$.kind') != 'completed' AND NEW.status != 'succeeded'))
+)`
+const foregroundTerminationTriggers = [
+  `CREATE TRIGGER delivery_foreground_termination_insert BEFORE INSERT ON delivery_foreground_executions
+   WHEN COALESCE((${terminationValid}), 0) = 0 BEGIN SELECT RAISE(ABORT, 'foreground termination is invalid'); END`,
+  `CREATE TRIGGER delivery_foreground_termination_update BEFORE UPDATE OF termination_json,status,quiescent ON delivery_foreground_executions
+   WHEN COALESCE((${terminationValid}), 0) = 0 BEGIN SELECT RAISE(ABORT, 'foreground termination is invalid'); END`,
+  `CREATE TRIGGER delivery_foreground_termination_immutable BEFORE UPDATE ON delivery_foreground_executions
+   WHEN OLD.status != 'pending' AND NEW.termination_json IS NOT OLD.termination_json
+   BEGIN SELECT RAISE(ABORT, 'foreground termination is immutable'); END`,
+]
+function assertForegroundTerminationSchema(database: DatabaseSync): void {
+  if (!hasTable(database, 'delivery_foreground_executions')) return
+  if (!hasColumn(database, 'delivery_foreground_executions', 'termination_json')
+    || foregroundTerminationTriggers.some(sql => !database.prepare("SELECT 1 FROM sqlite_schema WHERE type='trigger' AND sql=?").get(sql))) {
+    throw new DeliveryDatabaseError('schema-too-new', 'delivery foreground termination schema differs')
+  }
+}
 
 /** Database-owned order, independent of admission order and wall-clock time. */
 const foregroundCompletionSchema = `
@@ -1324,6 +1358,19 @@ function migrateObserved(database: DatabaseSync): void {
     database.exec(`${progressSchema} PRAGMA user_version = 27;`)
     version = 27
   }
+  if (version === 27) {
+    if (hasTable(database, 'delivery_foreground_executions')) {
+      if (!hasColumn(database, 'delivery_foreground_executions', 'termination_json')) database.exec(
+        'ALTER TABLE delivery_foreground_executions ADD COLUMN termination_json TEXT CHECK(termination_json IS NULL OR (json_valid(termination_json) AND length(CAST(termination_json AS BLOB)) <= 1024))')
+      for (const statement of foregroundTerminationTriggers) {
+        const name = /^CREATE TRIGGER (\w+)/u.exec(statement.trim())?.[1]
+        const existing = database.prepare('SELECT sql FROM sqlite_schema WHERE type = ? AND name = ?').get('trigger', name ?? '') as { sql: string } | undefined
+        if (existing && existing.sql !== statement.trim()) throw new Error('invalid foreground termination schema')
+        if (!existing) database.exec(statement)
+      }
+    }
+    database.exec('PRAGMA user_version = 28;'); version = 28
+  }
   if (version === deliverySchemaVersion) return
   database.exec(`
     ${deliveryInstanceSchema}
@@ -1538,6 +1585,7 @@ function migrateObserved(database: DatabaseSync): void {
     ${taskAcceptanceExecutionSchema}
     ${foregroundExecutionSchema}
     ${foregroundCompletionSchema}
+    ${foregroundTerminationTriggers.join(';')};
     ${sessionLeaseSchema}
     ${goalOutcomeTargetSchema}
 
@@ -1546,7 +1594,7 @@ function migrateObserved(database: DatabaseSync): void {
     ${restartInboxFenceSchema}
     ${restartOutboxFenceSchema}
     ${progressSchema}
-    PRAGMA user_version = 27;
+    PRAGMA user_version = 28;
   `)
 }
 
@@ -1558,6 +1606,7 @@ function migrate(database: DatabaseSync): void {
     assertApprovalOutboxRouteSchema(database)
     assertSessionLeaseSchema(database)
     assertGoalOutcomeTargetSchema(database)
+    assertForegroundTerminationSchema(database)
     database.exec('COMMIT')
   } catch (error) {
     try { database.exec('ROLLBACK') } catch {}

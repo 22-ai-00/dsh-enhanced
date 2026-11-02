@@ -1,3 +1,4 @@
+import { normalizeForegroundTerminationObservation, type ForegroundTerminationObservation } from './foreground-termination.js'
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 import type { DatabaseSync, StatementSync } from 'node:sqlite'
@@ -99,6 +100,7 @@ import type {
   OwnerForegroundTaskSourceCursor,
   OwnerForegroundTaskSourcePage,
   OwnerForegroundTaskSourceContent,
+  OwnerForegroundTaskInput,
   OwnerForegroundTaskSourceRef,
   OwnerForegroundTaskSourceText,
   OutboxRecord,
@@ -113,6 +115,16 @@ interface ForegroundSourceRow {
   status: ForegroundExecution['status']; quiescent: number; completed_at: number; execution_ref: string
   model_selection_state: ForegroundExecution['modelSelectionState']; model_provider: string | null
   model_id: string | null; model_reasoning_effort: string | null; completion_sequence: number
+  termination_bytes: Uint8Array | null
+}
+
+function foregroundTerminationFromBytes(value: Uint8Array | null): Readonly<ForegroundTerminationObservation> | undefined {
+  if (value === null) return undefined
+  if (!(value instanceof Uint8Array) || value.length > 1024) throw new Error('invalid termination bytes')
+  const raw = new TextDecoder('utf-8', { fatal: true }).decode(value)
+  const normalized = normalizeForegroundTerminationObservation(JSON.parse(raw))
+  if (JSON.stringify(normalized) !== raw || !Buffer.from(raw).equals(value)) throw new Error('noncanonical termination bytes')
+  return normalized
 }
 
 interface ProgressRow {
@@ -4685,6 +4697,7 @@ export class DeliveryStore {
     status: ForegroundExecution['status']
     quiescent: boolean
     completedAt: number
+    termination?: Readonly<ForegroundTerminationObservation>
   }): void {
     this.assertOpen()
     if (typeof input.quiescent !== 'boolean'
@@ -4692,15 +4705,26 @@ export class DeliveryStore {
       || !Number.isSafeInteger(input.completedAt) || input.completedAt < 0) {
       throw new DeliveryStoreError('invalid-binding', 'foreground execution completion is invalid')
     }
+    let termination: Readonly<ForegroundTerminationObservation> | undefined
+    if (input.termination !== undefined) {
+      try { termination = normalizeForegroundTerminationObservation(input.termination) }
+      catch { throw new DeliveryStoreError('invalid-binding', 'foreground termination observation is invalid') }
+      if (termination.kind === 'completed'
+        ? input.status !== 'succeeded' || !input.quiescent || !termination.handleDisposed
+        : input.status === 'succeeded') throw new DeliveryStoreError('invalid-binding', 'foreground termination contradicts completion')
+    }
+    const terminationJson = termination === undefined ? null : JSON.stringify(termination)
     const status = input.quiescent && input.status === 'succeeded' ? 'succeeded' : 'unknown'
     const quiescent = status === 'succeeded' ? 1 : 0
     const changed = this.database.prepare(`UPDATE delivery_foreground_executions
-      SET status = ?, quiescent = ?, completed_at = ?, execution_ref = inbox_id
-      WHERE inbox_id = ? AND status = 'pending' AND dispatched_at <= ?`).run(status, quiescent, input.completedAt, input.inboxId, input.completedAt)
+      SET status = ?, quiescent = ?, completed_at = ?, execution_ref = inbox_id, termination_json = ?
+      WHERE inbox_id = ? AND status = 'pending' AND dispatched_at <= ?`).run(status, quiescent, input.completedAt, terminationJson, input.inboxId, input.completedAt)
     if (changed.changes !== 1) {
-      const current = this.database.prepare('SELECT status, quiescent, completed_at FROM delivery_foreground_executions WHERE inbox_id = ?')
-        .get(input.inboxId) as { status: string; quiescent: number; completed_at: number } | undefined
-      if (current?.status === status && current.quiescent === quiescent && current.completed_at === input.completedAt) return
+      const current = this.database.prepare('SELECT status, quiescent, completed_at, CAST(termination_json AS BLOB) AS termination_bytes FROM delivery_foreground_executions WHERE inbox_id = ?')
+        .get(input.inboxId) as { status: string; quiescent: number; completed_at: number; termination_bytes: Uint8Array | null } | undefined
+      if (current?.status === status && current.quiescent === quiescent && current.completed_at === input.completedAt
+        && (terminationJson === null ? current.termination_bytes === null
+          : current.termination_bytes instanceof Uint8Array && Buffer.from(terminationJson).equals(current.termination_bytes))) return
       throw new DeliveryStoreError('conflict', 'foreground execution is absent or its completion changed')
     }
   }
@@ -4764,7 +4788,8 @@ export class DeliveryStore {
 
   private foregroundSource(row: ForegroundSourceRow, input: OwnerForegroundTaskSourceScope,
     fence: ReturnType<DeliveryStore['foregroundSourceFence']>): Readonly<OwnerForegroundTaskSource> | undefined {
-    const inbox = this.getInbox(row.inbox_id)
+    let inbox: InboxRecord | undefined
+    try { inbox = this.getInbox(row.inbox_id) } catch { return undefined }
     const binding = this.getBinding(row.binding_id)
     if (!inbox || !binding || inbox.bindingId !== row.binding_id
       || row.workspace !== input.workspace || row.preset !== input.agentPreset
@@ -4778,11 +4803,25 @@ export class DeliveryStore {
       || row.completed_at === null || row.execution_ref !== inbox.id
       || !Number.isSafeInteger(row.completion_sequence) || row.completion_sequence < 1) return undefined
     try {
-      const envelope = canonicalEnvelope(inbox.envelope, this.maxTextBytes)
-      if (digest(JSON.stringify(envelope)) !== inbox.envelopeHash
+      const raw = this.database.prepare(`SELECT CAST(envelope_json AS BLOB) AS envelope_bytes,
+        CAST(envelope_hash AS BLOB) AS hash_bytes FROM inbox_messages WHERE id = ?`).get(row.inbox_id) as
+        { envelope_bytes: Uint8Array; hash_bytes: Uint8Array } | undefined
+      if (!raw || !(raw.envelope_bytes instanceof Uint8Array) || !(raw.hash_bytes instanceof Uint8Array)) return undefined
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(raw.envelope_bytes)
+      const envelope = canonicalEnvelope(JSON.parse(text) as InboundEnvelope, this.maxTextBytes)
+      const canonical = JSON.stringify(envelope), envelopeHash = digest(canonical)
+      if (!Buffer.from(canonical).equals(raw.envelope_bytes) || !Buffer.from(envelopeHash).equals(raw.hash_bytes)
+        || envelopeHash !== inbox.envelopeHash
         || envelope.kind !== 'text' || parseDeliveryCommand({ ...envelope, kind: 'command' }) !== undefined
         || JSON.stringify(envelope.principal) !== JSON.stringify(binding.principal)
         || JSON.stringify(envelope.conversation) !== JSON.stringify(binding.conversation)) return undefined
+    } catch { return undefined }
+    let termination: Readonly<ForegroundTerminationObservation> | undefined
+    try {
+      termination = foregroundTerminationFromBytes(row.termination_bytes)
+      if (termination !== undefined && (termination.kind === 'completed'
+        ? row.status !== 'succeeded' || row.quiescent !== 1 || !termination.handleDisposed
+        : row.status === 'succeeded')) return undefined
     } catch { return undefined }
     const execution: Readonly<ForegroundExecution> = Object.freeze({ dispatchedAt: row.dispatched_at,
       status: row.status, quiescent: row.quiescent === 1, completedAt: row.completed_at,
@@ -4797,7 +4836,8 @@ export class DeliveryStore {
       owner: Object.freeze({ principalRecordId: row.principal_record_id, principalVersion: row.principal_version }),
       scope: Object.freeze({ workspace: row.workspace, preset: row.preset }),
       binding: Object.freeze({ id: row.binding_id, version: row.binding_version,
-        generation: row.binding_generation, sessionId: binding.sessionId }), execution }
+        generation: row.binding_generation, sessionId: binding.sessionId }), execution,
+      ...(termination === undefined ? {} : { termination }) }
     return Object.freeze({ ...content, sourceDigest: digest(acceptanceCanonicalJson({ ...content, envelopeHash: inbox.envelopeHash })) })
   }
 
@@ -4820,7 +4860,7 @@ export class DeliveryStore {
         || !Number.isSafeInteger(after.sequence) || after.sequence < 0 || after.sequence > watermark)) {
         throw new DeliveryStoreError('invalid-binding', 'foreground source cursor is not bound to this owner and watermark')
       }
-      const rows = this.database.prepare(`SELECT * FROM delivery_foreground_executions
+      const rows = this.database.prepare(`SELECT *, CAST(termination_json AS BLOB) AS termination_bytes FROM delivery_foreground_executions
         WHERE principal_record_id = ? AND principal_version = ? AND workspace = ? AND preset = ?
           AND status != 'pending' AND completion_sequence > ? AND completion_sequence <= ?
         ORDER BY completion_sequence LIMIT ?`).all(input.expectedOwner.principalRecordId,
@@ -4848,7 +4888,7 @@ export class DeliveryStore {
     }
     const inspect = () => {
       const fence = this.foregroundSourceFence(input, authority)
-      const row = this.database.prepare(`SELECT * FROM delivery_foreground_executions
+      const row = this.database.prepare(`SELECT *, CAST(termination_json AS BLOB) AS termination_bytes FROM delivery_foreground_executions
         WHERE inbox_id = ? AND status != 'pending'`).get(input.inboxId) as unknown as ForegroundSourceRow | undefined
       return row === undefined ? undefined : this.foregroundSource(row, input, fence)
     }
@@ -4870,6 +4910,37 @@ export class DeliveryStore {
     }
     // A source fence already holds this connection's writer transaction. Reuse
     // its owner check and snapshot without starting a nested BEGIN.
+    return this.writerTransactionActive ? read() : this.transaction(read)
+  }
+
+  /** Original canonical input for new Host-observed terminal executions; never a replay grant. */
+  readOwnerForegroundTaskInput(input: OwnerForegroundTaskSourceScope & {
+    inboxId: string; expectedSourceDigest: string; offset?: number; maxBytes?: number
+  }, authority: OwnerRouteAuthority): Readonly<OwnerForegroundTaskInput> | undefined {
+    this.assertOpen()
+    const offset = input.offset ?? 0, limit = input.maxBytes ?? 4096
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 4 || limit > 8192) {
+      throw new DeliveryStoreError('invalid-binding', 'foreground input byte page is invalid')
+    }
+    const read = () => {
+      const fence = this.foregroundSourceFence(input, authority)
+      const row = this.database.prepare(`SELECT *, CAST(termination_json AS BLOB) AS termination_bytes FROM delivery_foreground_executions
+        WHERE inbox_id = ? AND status != 'pending'`).get(input.inboxId) as unknown as ForegroundSourceRow | undefined
+      const source = row === undefined ? undefined : this.foregroundSource(row, input, fence)
+      if (!source?.termination || source.sourceDigest !== input.expectedSourceDigest) return undefined
+      const bytes = Buffer.from(this.getInbox(source.inboxId)!.envelope.text, 'utf8')
+      if (offset > bytes.length || offset < bytes.length && (bytes[offset]! & 0xc0) === 0x80) {
+        throw new DeliveryStoreError('invalid-binding', 'foreground input offset is not a UTF-8 boundary')
+      }
+      let end = Math.min(bytes.length, offset + limit)
+      while (end > offset && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--
+      const fullTextDigest = createHash('sha256').update(bytes).digest('hex')
+      const contentDigest = digest(acceptanceCanonicalJson({ protocol: 'assistant-delivery/owner-foreground-input/v1',
+        sourceDigest: source.sourceDigest, inputDigest: fullTextDigest }))
+      return Object.freeze({ source, sourceDigest: source.sourceDigest, contentDigest,
+        input: Object.freeze({ text: bytes.subarray(offset, end).toString('utf8'), fullTextDigest,
+          fullBytes: bytes.length, returnedBytes: end - offset, offset, ...(end < bytes.length ? { nextOffset: end } : {}) }) })
+    }
     return this.writerTransactionActive ? read() : this.transaction(read)
   }
 
@@ -4941,7 +5012,7 @@ export class DeliveryStore {
     inboxId: string; expectedSourceDigest: string
   }, fence: ReturnType<DeliveryStore['foregroundSourceFence']>, inputLimit: number,
   replyLimit: number): Readonly<OwnerForegroundTaskSourceContent> | undefined {
-    const row = this.database.prepare(`SELECT * FROM delivery_foreground_executions
+    const row = this.database.prepare(`SELECT *, CAST(termination_json AS BLOB) AS termination_bytes FROM delivery_foreground_executions
       WHERE inbox_id = ? AND status != 'pending'`).get(input.inboxId) as unknown as ForegroundSourceRow | undefined
     const source = row === undefined ? undefined : this.foregroundSource(row, input, fence)
     if (!source || source.sourceDigest !== input.expectedSourceDigest || source.execution.status !== 'succeeded'

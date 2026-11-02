@@ -2,7 +2,7 @@
 
 把外部信号沉淀为**有界、可恢复、可审计**的工作项账本，并用一次原生 automation occurrence 驱动 agent 认领、汇报和 owner 通知。本插件不创建第二套 agent loop、timer、outbox、预算系统、设置面板或 session store：调度复用 `assistant-automations` 的稳定 occurrence，执行复用原生 DSH Agent run，通知复用 `assistant-delivery.enqueueBackground()`，授权复用 `assistant-policy` 的默认拒绝。
 
-账本提供认领与汇报工具 `work_item_claim`、`work_item_report`，状态查询 `work_item_status`，以及只读报告召回 `work_item_read_report`。在账本之上有一个默认关闭的**自动准入**切片：它从已认证的 in-tree 只读来源拉取真实信号并以相同闸门入账，因此普通使用（owner 自己发起的请求失败后，worker 被下一次 claim 唤醒）就会产生自驱工作项，无需 operator 手工调用 `admit(...)`，也无需新定时器。
+账本提供认领与汇报工具 `work_item_claim`、`work_item_report`，状态查询 `work_item_status`，以及只读报告召回 `work_item_read_report`。默认关闭的**自动准入**接口可扫描已注册只读来源，并按统一闸门入账；不需要为每条信号手工调用 `admit(...)`，也不新增定时器。内置前台失败来源尚未完成生产接线：适配器目前只识别 failed/timed-out/cancelled，而 Delivery 保守记录非成功 execution 为 unknown。Delivery 新增的独立终止观察和原输入读取仍待接入冻结供应商、有限预算及工具权限的 worker 执行合同；当前不能把启用 `foregroundFailures` 当作普通失败会自动修复的保证。
 
 终态报告只记录 worker 自己的结论；账本另有一条 append-only 的**结果结算**（outcome settlement）修订链，用 `assistant-delivery` 已认证的 execution 记录独立验证 `ready` 是否真的对应成功执行，并在证据窗内保持 `pending`、到期保持 `unverified`，绝不把 `ready` 当作目标达成。GitHub、邮件、IM、任务日历等**仓库外**来源属于独立插件的职责：它们实现一个只读 `WorkItemSignalSource`，用 `registerSignalSource(...)` 注册进来，就走与本内置来源完全相同的扫描、provenance、去重、冷却与已结项围栏，而不是另开写路径。
 

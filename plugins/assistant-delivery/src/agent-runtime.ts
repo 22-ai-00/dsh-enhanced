@@ -52,6 +52,8 @@ import type {
 } from './coordinator.js'
 import { externalPrincipalId } from './canonical.js'
 import type { AcceptanceHandle } from './acceptance.js'
+import type { ForegroundTerminationObservation } from './foreground-termination.js'
+import { observeNativeTermination, type NativeTerminationCause } from './native-termination.js'
 import {
   feedbackSignalInput,
   feedbackUsage,
@@ -146,7 +148,7 @@ interface DshDeliveryRuntimeOptions {
   recordForegroundTaskModelSelection(handle: AcceptanceHandle, input: { provider: string; model: string; reasoningEffort?: string }): void
   beginForegroundTaskExecution(binding: Readonly<ConversationBinding>, envelope: Readonly<InboundEnvelope>): string | undefined
   recordForegroundExecutionModelSelection(inboxId: string, input: { provider: string; model: string; reasoningEffort?: string }): void
-  completeForegroundTaskExecution(inboxId: string, input: { status: 'succeeded' | 'unknown'; quiescent: boolean }): void
+  completeForegroundTaskExecution(inboxId: string, input: { status: 'succeeded' | 'unknown'; quiescent: boolean; termination?: Readonly<ForegroundTerminationObservation> }): void
   permissionPickerTtlMs: number
   getModelSelection(conversation: ConversationRef): ConversationModelSelection | undefined
   /** Atomically remove a stale explicit effort without overwriting a newer model choice. */
@@ -3976,6 +3978,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     let dispatched = false
     let acceptance: AcceptanceHandle | undefined
     let foregroundExecution: string | undefined
+    let foregroundTurn: number | undefined
+    let terminationCause: NativeTerminationCause | undefined
     let removeAcceptanceRequest: (() => void) | undefined
     let acceptanceSucceeded = false
     let completionPending = false
@@ -4138,7 +4142,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId: envelope.eventId,
         trust: 'untrusted',
       } }) : createRestartContinuation({ continuationId: restartContinuation.id, text: restartContinuationText })
-      let deliveryTurn = await this.followupTurn(agent, message, undefined, undefined, restartContinuation === undefined ? undefined
+      let deliveryTurn = await this.followupTurn(agent, message, turn => { foregroundTurn = turn }, undefined, restartContinuation === undefined ? undefined
         : () => admitRestartContinuation(agent, message, { signal,
           authorize: () => {
             this.sessionLeases.assert(String(agent.session.id))
@@ -4150,6 +4154,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
             restart!.onContinuationAdmitted(restartContinuation, String(agent.session.id))
           },
         }), signal)
+      foregroundTurn = deliveryTurn
       if (restartRun?.requested() !== undefined) {
         await this.waitForAgentIdle(agent, signal)
         restartCheckpoint = await restartRun.checkpoint()
@@ -4188,6 +4193,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         const automaticToolViolation = deliveryTurn !== undefined
           && automaticCompletionToolViolations.has(deliveryTurn)
         if (cancelled !== undefined || (output.stopped && !automaticToolViolation)) {
+          terminationCause = cancelled === 'new' ? 'owner-new-session' : 'owner-stop'
           publishProgress({ kind: 'failed', code: cancelled === 'new' ? 'new-session' : 'user-stopped' })
           return { outcome: 'processed' }
         }
@@ -4237,7 +4243,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
               signal,
               deliveryTurn,
               checkAuthorization,
-              turn => automaticCompletionTurns.set(turn, nextKind),
+              turn => { foregroundTurn = turn; automaticCompletionTurns.set(turn, nextKind) },
             )
           } catch (error) {
             if (error instanceof AutomaticCompletionAuthorizationError) {
@@ -4249,6 +4255,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
             signal.throwIfAborted()
             const cancellation = this.activeSessionControls.get(binding.sessionId)?.command
             if (cancellation !== undefined) {
+              terminationCause = cancellation === 'new' ? 'owner-new-session' : 'owner-stop'
               publishProgress({ kind: 'failed', code: cancellation === 'new' ? 'new-session' : 'user-stopped' })
               return { outcome: 'processed' }
             }
@@ -4368,6 +4375,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       return { outcome: 'processed' }
     } catch (error) {
       if (causedByUserCancellation(error)) {
+        terminationCause = this.activeSessionControls.get(binding.sessionId)?.command === 'new' ? 'owner-new-session' : 'owner-stop'
         if (handle !== undefined && !await sessions.flush(handle.agent.session)) {
           return { outcome: 'not-processed', failureCode: 'session-flush-failed', retryable: false }
         }
@@ -4377,6 +4385,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       }
       if (dispatched) {
         const timedOut = signal.reason instanceof AgentTaskTimeoutError
+        terminationCause = timedOut ? 'execution-timeout' : 'runtime-error'
         publishProgress({ kind: 'failed', ...(timedOut
           ? { code: 'agent-task-timeout' } : {}) })
         // Preserve an exact durable diagnosis so the existing interruption
@@ -4444,8 +4453,17 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           && (goalContinuation?.isQuiescent() ?? true)
         if (foregroundExecution !== undefined && restartCheckpoint === undefined) {
           try {
+            const command = this.activeSessionControls.get(binding.sessionId)?.command
+            if (command !== undefined) terminationCause = command === 'new' ? 'owner-new-session' : 'owner-stop'
+            else if (signal.reason instanceof AgentTaskTimeoutError) terminationCause = 'execution-timeout'
+            else if (signal.aborted) terminationCause = 'execution-aborted'
+            const terminal = foregroundTurn === undefined ? undefined : handle?.agent.session.snapshotEvents().findLast(event =>
+              event.type === 'turn/end' && event.data.turn === foregroundTurn)
             this.options.completeForegroundTaskExecution(foregroundExecution, {
               status: acceptanceSucceeded ? 'succeeded' : 'unknown', quiescent: acceptanceSucceeded,
+              termination: observeNativeTermination({ producer: 'delivery-agent',
+                reason: terminal?.type === 'turn/end' ? terminal.data.reason : undefined,
+                cause: terminationCause, handleDisposed: disposed, completed: acceptanceSucceeded }),
             })
           } catch (error) {
             acceptanceSucceeded = false

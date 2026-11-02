@@ -16,7 +16,7 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 ## 当前交付与验证
 
-`a587b19d` 已交付空业务 owner Docker→Linux 安装器接线：已认证配置的只读历史检查、资源迁移前二查、签名迁移证明及启动前验收。`7b90d8dc` 修正原生 Goal 检查点测试中无关的短租约设置；同一提交的 Mac/Linux 根检查均已完整通过。真实连接、安装升级与长期成长效果仍按下述边界单独验收。
+本次交付前台任务的可信终止观察：Delivery schema 28 原子保存完成、异常、超时、owner 取消或中断的固定事实；原有业务结果与未知副作用保持原语义，观察不授权重放。当前 owner 可按来源摘要及 UTF-8 字节分页读取原始输入；Native Web 记录实际请求的 provider/model/effort，供应商变化永久标记 inconsistent。安装器和只读快照消费者精确支持 schema 23–28，拒绝未知新 schema。此能力仍须完成下面列出的新根检查。
 
 用户于 2026-11-02 明确延后飞书机器人实连和后续真实使用验收，当前先完成代码、单测及可离线核实项。依赖实连的临时双服务升级尚未验收；保留连接门，不以模拟连接替代。
 
@@ -26,7 +26,7 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 - Linux 两轮同样通过功能验收，126.75/75.11 秒，最终工件、预算 2/2、零审批及 Host 正常退出经独立复核。但等待报告重复了审计标识，512 字节 resume 已包含它，故“必须依赖摘要外召回”的前提 FAIL。已纠正父层初次检查遗漏，保留原始证据。
 - 固定通用 prompt 后才生成独立输入；本批生产模型运行总上限 Mac 3 次（含保留的原审批超时失败）、Linux 2 次，已用尽。失败及预算未重置。合成输入不证明 ordinary-use 学习；Outbox pending 不证明外部送达；到期后重启不证明 idle 自动唤醒。
 
-真实组件探针及独立复核确认前台失败入口不兼容：Delivery 将所有非成功终态归为 `unknown,false`，WorkItems 适配器仅识别 failed/timed-out/cancelled；真实授权 feed 有记录但不生成工作项，现有成功专用 reader 也不提供失败原任务正文。后续须保存可信终止观察、受控读取原输入并落实诊断权限及供应商/预算边界；不得将 unknown 当作失败重放。该探针使用真实 Service/Store 与合成终态写入，不是普通任务 E2E。
+普通失败自动诊断尚未接通：新终止观察和原输入 reader 已补齐来源基础，但 WorkItems 适配、准入时冻结原供应商/独立诊断预算/只读工具契约，以及 Automations 拥有的原生 Agent 执行接口仍待实现。原任务 unknown 不得解释为失败重放；缺失或 inconsistent 的模型记录不得回退到默认供应商。下一交付应在这一边界内打通真实失败信号到有界诊断报告。
 
 ## 原生升级剩余工作
 
@@ -44,6 +44,8 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 远端同级 20 个 worktree 及 8 个嵌套验收 worktree 已清理，独立复核 PASS；完整 tar、patch、index、清单及独有成果保留。513 个改动文件全部在 archive，257 在审计时与 `dev@011595b7` 内容一致、126 已在 dev 历史；其余为合成证据、中间版本和上述待整合候选。“备份完成”不代表所有候选逻辑已合入。
 
 ## 最新检查
+
+本次定向验证：Store/source-feed/foreground-execution 在 Mac Node 24.7.0 和 26.11.1 各 53 PASS，快照 69 PASS / 3 skipped，Lark schema 消费者 93 PASS，安装器纯契约 3 PASS。真实原生 Agent 的模拟模型回归覆盖两种入口和延迟创建后的同一 deadline；复核发现的原始 Inbox 字节校验与 deadline 分类问题已修正并保留红绿证据。最终 Delivery 构建、完整 noEmit 类型检查和变更生产文件零警告 lint 均 EXIT 0；原始材料在 `docs/evidence/foreground-termination-{store,producers,compat,integration}/`。最新完整根检查仍是以下基线，本次源码的 Mac/Linux 根检查及 Linux schema 28 生命周期实例待完成。
 
 精确源码提交 `7b90d8dce9b4af4753dd78c5e284612332760ef0`、tree `de3c16d2a6ba32cb4e38f3ec8fb18f1258cae34b`；两端命令均为 `CI=1 VITEST_MAX_WORKERS=2 pnpm check`，pnpm 11.7.0。manifest、零警告 lint、构建、类型检查、测试及 dry-run pack 全部完成；child/runner 均 EXIT 0、源码稳定、无中断。
 

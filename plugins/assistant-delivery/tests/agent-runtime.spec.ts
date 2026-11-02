@@ -72,6 +72,7 @@ import { deliveryProgressFromSessionEvent, modelPickerOperationId } from '../src
 import { AssistantDeliveryService } from '../src/service.ts'
 import type { DeliveryGoalWakeInput, OwnerGoalOutcomeFeedbackLocator, OwnerGoalOutcomeFeedbackProof } from '../src/goal-wake-types.ts'
 import { DeliveryStore } from '../src/store.ts'
+import { externalPrincipalId } from '../src/canonical.ts'
 import { DELIVERY_PREFERENCE_PROJECTION_PROTOCOL } from '../src/types.ts'
 import type { ForegroundToolCallAttestation } from '../src/foreground-observation.ts'
 import type {
@@ -79,7 +80,7 @@ import type {
   DeliveryPreferenceEvent, DeliveryPreferenceFeedback, InboundEnvelope, ModelRouteRef, OutboundFormat,
   DeliveryLearningControlListener, DeliveryLearningControlRequest, DeliveryPreferenceFeedbackListener,
   DeliveryLearningScopeStatus, DeliveryPreferenceRegistration,
-  OutboundIntent, OutboxRecord,
+  OutboundIntent, OutboxRecord, OwnerRouteAuthority,
 } from '../src/types.ts'
 
 const roots: string[] = []
@@ -446,6 +447,14 @@ function imageRef(id = 'delivery-image'): ImageAttachmentRef {
 
 function message(eventId: string, text: string, kind: 'command' | 'text' = 'text'): InboundEnvelope {
   return { channel: 'lark', account: 'bot-1', eventId, occurredAt: Date.now(), principal, conversation, kind, text }
+}
+
+function foregroundSourceQuery(service: AssistantDeliveryService, authority: OwnerRouteAuthority, inboxId: string) {
+  const route = { authorityId: authority.id, principalId: externalPrincipalId(authority.principal),
+    workspace: authority.workspace, agentPreset: authority.agentPreset }
+  const receipt = service.validateOwnerRoute(route)
+  return { ...route, inboxId, expectedOwner: { authorityHash: receipt.authorityHash,
+    principalRecordId: receipt.principalRecordId, principalVersion: receipt.principalVersion } }
 }
 
 function replyProviderMessageId(service: AssistantDeliveryService, eventId: string): string {
@@ -3488,6 +3497,69 @@ describe('real native Delivery Agent runtime', () => {
     } finally { await fixture.ctx.fiber.restart() }
   })
 
+  test.each(['success', 'error', 'timeout', 'cancel'] as const)('persists the real Delivery foreground termination observation (%s)', async mode => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-termination-')); roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const authority: OwnerRouteAuthority = { id: 'termination-owner', conversation, principal,
+      workspace: root, agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }
+    const options = { ownerRoutes: [authority], ...(mode === 'timeout' ? { taskTimeoutMs: 1_000 } : {}) }
+    const fixture = await runtimeHarness(root, saved, undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, options)
+    let closed = false
+    try {
+      const pairing = fixture.service.issuePairing('test', principal)
+      fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+      let markStarted!: () => void
+      const started = new Promise<void>(resolve => { markStarted = resolve })
+      if (mode !== 'success') vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (request) {
+        fixture.llm.requests.push(request)
+        markStarted()
+        if (mode === 'error') throw new Error('private-provider-error-must-not-be-projected')
+        const signal = request.signal
+        if (signal === undefined) throw new Error('termination fixture requires a native request cancellation signal')
+        await new Promise<void>(resolve => {
+          if (signal.aborted) resolve()
+          else signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+        signal.throwIfAborted()
+        yield* [] as StreamChunk[]
+      })
+      const text = `Owner original input 🧪 ${mode}`
+      const accepted = await fixture.service.acceptInbound(message(`termination-${mode}`, text))
+      if (mode === 'cancel') {
+        const running = fixture.service.tick()
+        await started
+        await fixture.service.acceptInbound(message('termination-stop', '/stop', 'command'))
+        await running
+      }
+      await drive(fixture.service)
+      const query = foregroundSourceQuery(fixture.service, authority, accepted.inboxId!)
+      const source = fixture.service.inspectOwnerForegroundTaskSource(query)!
+      expect(source).toBeDefined()
+      expect(source.termination).toEqual({ protocol: 'assistant-delivery/foreground-termination/v1', producer: 'delivery-agent',
+        kind: mode === 'success' ? 'completed' : mode === 'error' ? 'error' : mode === 'cancel' ? 'owner-cancelled' : 'timeout',
+        causeCode: mode === 'success' ? 'turn-completed' : mode === 'error' ? 'turn-error' : mode === 'cancel' ? 'owner-stop' : 'execution-timeout',
+        // Cancellation races owned teardown; the immutable observation does not claim its later completion.
+        handleDisposed: mode === 'success' || mode === 'error', effects: 'unknown', replay: 'forbidden' })
+      expect(source.execution).toMatchObject({ status: mode === 'success' ? 'succeeded' : 'unknown',
+        quiescent: mode === 'success', modelSelectionState: 'frozen',
+        modelSelection: { provider: 'mock', model: 'delivery-model', reasoningEffort: 'low' } })
+      expect(JSON.stringify(source)).not.toContain('private-provider-error')
+      const read = { ...query, expectedSourceDigest: source.sourceDigest }
+      expect(fixture.service.readOwnerForegroundTaskInput(read)?.input.text).toBe(text)
+      if (mode !== 'success') expect(fixture.service.readOwnerForegroundTaskSource(read)).toBeUndefined()
+      expect(fixture.llm.requests).toHaveLength(1)
+      if (mode === 'error') {
+        await fixture.ctx.fiber.restart(); closed = true
+        const reopened = await runtimeHarness(root, saved, undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, options)
+        try {
+          expect(reopened.service.inspectOwnerForegroundTaskSource(query)).toEqual(source)
+          expect(reopened.service.readOwnerForegroundTaskInput(read)?.input.text).toBe(text)
+          expect(reopened.llm.requests).toHaveLength(0)
+        } finally { await reopened.ctx.fiber.restart() }
+      }
+    } finally { if (!closed) await fixture.ctx.fiber.restart() }
+  })
+
   test('refuses owner feedback for an ordinary foreground execution that settled unknown', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-ordinary-foreground-unknown-'))
     roots.push(root)
@@ -3505,8 +3577,12 @@ describe('real native Delivery Agent runtime', () => {
       // boundary, and keep the real Store transition and database triggers.
       const store = (fixture.service as unknown as { deliveryStore: DeliveryStore }).deliveryStore
       const finish = store.finishForegroundTaskExecution.bind(store)
-      const completion = vi.spyOn(store, 'finishForegroundTaskExecution').mockImplementation(input =>
-        finish(input.inboxId === task.inboxId ? { ...input, status: 'unknown', quiescent: false } : input))
+      const completion = vi.spyOn(store, 'finishForegroundTaskExecution').mockImplementation(input => {
+        if (input.inboxId !== task.inboxId) return finish(input)
+        // A legacy completion caller has no independent Host termination observation.
+        const { termination: _termination, ...legacy } = input
+        return finish({ ...legacy, status: 'unknown', quiescent: false })
+      })
       try {
         await drive(fixture.service)
         expect(completion).toHaveBeenCalledTimes(1)
@@ -4147,6 +4223,191 @@ describe('real native Delivery Agent runtime', () => {
       expect(snapshots[2]).toBe(afterChange)
       await vi.waitFor(() => expect(fixture.ctx.agents.get(handle.agent.id)).toBeUndefined(), { timeout: 5_000 })
     } finally { await fiber.dispose(); memories.close(); operator.close(); await fixture.ctx.fiber.restart() }
+  })
+
+  test.each(['success', 'error', 'cancel', 'timeout', 'rerouted'] as const)('persists the real native Web termination and resolved model (%s)', async mode => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-termination-')); roots.push(root)
+    const sessionId = `native-termination-${mode}`
+    const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
+    const webConversation = { channel: 'web', account: 'browser', tenant: 'local', kind: 'dm' as const, chat: sessionId }
+    const authority: OwnerRouteAuthority = { id: 'native-termination-owner', conversation: webConversation, principal: webPrincipal,
+      workspace: root, agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      ownerRoutes: [authority],
+      policyRules: [
+        { id: 'web-ingest', effect: 'allow', subject: { kind: 'external', id: 'web/browser/local/owner' },
+          actions: ['ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+        { id: 'web-probe', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: 'web/browser/local/owner' },
+          actions: ['execute'], resource: { kind: 'tool', id: 'native_termination_probe' }, context: { initiators: ['external'] } },
+      ], presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
+    })
+    // Native Web mounts the configured native Agent directly, so this fixture
+    // publishes its probe in the same Host tool plane as the production tools.
+    fixture.ctx.tools.register(defineTool({ name: 'native_termination_probe', description: 'Native termination route fixture',
+      parameters: {}, output: { schema: { type: 'object', additionalProperties: false,
+        properties: { mounted: { type: 'boolean', required: true } } },
+      render: (_args, output) => [{ type: 'text', text: JSON.stringify(output) }] },
+      async execute() { return await fixture.presetExecute() },
+    }))
+    const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') }); operator.handoffOwner(webPrincipal)
+    let access: ReturnType<AssistantDeliveryService['bindNativeWebOwner']> | undefined
+    const fiber = fixture.ctx.plugin({ inject: ['assistantDelivery', 'agents', 'sessions', 'llm'], apply(ctx: Context) {
+      access = ctx.assistantDelivery.bindNativeWebOwner(ctx, { principal: webPrincipal, workspace: root, preset: 'primary',
+        maxExecutionMs: mode === 'timeout' ? 3_000 : 10_000 })
+    } })
+    let markStarted!: () => void
+    const started = new Promise<void>(resolve => { markStarted = resolve })
+    if (mode === 'rerouted') {
+      let requests = 0
+      fixture.ctx.on('agent/request', async (_payload, next) => {
+        const config = await next()
+        return ++requests === 2 ? { ...config, provider: 'alternate', model: 'precise' } : config
+      })
+    }
+    if (mode !== 'success') vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (request) {
+      fixture.llm.requests.push(request); markStarted()
+      if (mode === 'error') throw new Error('private-native-provider-error-must-not-be-projected')
+      if (mode === 'rerouted') {
+        const id = ToolCallId('native-termination-probe')
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield { type: 'tool-call-delta', index: 0, id, name: 'native_termination_probe', argumentsDelta: '{}' }
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'native_termination_probe', arguments: '{}' } }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      const signal = request.signal
+      if (signal === undefined) throw new Error('native termination fixture requires a request cancellation signal')
+      await new Promise<void>(resolve => {
+        if (signal.aborted) resolve()
+        else signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+      signal.throwIfAborted()
+      yield* [] as StreamChunk[]
+    })
+    try {
+      await fiber
+      const handle = await access!.create({ sessionId: sessionId as SessionId, meta: { cwd: root, agentPreset: 'primary' },
+        agentOptions: { provider: 'mock', model: 'delivery-model' } })
+      const text = `Native owner original input 🧪 ${mode}`
+      const content = [{ type: 'text' as const, text }]
+      const requestId = `native-termination-request-${mode}`
+      await access!.prompt({ sessionId, requestId, text, content }, async () => {
+        handle.agent.followup(createUserMessage({ content, source: { kind: 'user', rpcId: requestId as never } }))
+        return { accepted: true }
+      }, new AbortController().signal)
+      if (mode === 'cancel') { await started; handle.agent.cancel({ kind: 'user' }) }
+      const succeeded = mode === 'success' || mode === 'rerouted'
+      await vi.waitFor(() => {
+        expect(operator.getInboxByProviderEvent('web', 'browser', requestId)?.status).toBe(succeeded ? 'processed' : 'dead_letter')
+        expect(fixture.ctx.agents.get(handle.agent.id)).toBeUndefined()
+      }, { timeout: mode === 'timeout' ? 5_000 : 3_000 })
+      const inboxId = operator.getInboxByProviderEvent('web', 'browser', requestId)!.id
+      const query = foregroundSourceQuery(fixture.service, authority, inboxId)
+      const source = fixture.service.inspectOwnerForegroundTaskSource(query)!
+      expect(source).toBeDefined()
+      expect(source.termination).toEqual({ protocol: 'assistant-delivery/foreground-termination/v1', producer: 'native-web',
+        kind: succeeded ? 'completed' : mode === 'error' ? 'error' : mode === 'cancel' ? 'owner-cancelled' : 'timeout',
+        causeCode: succeeded ? 'turn-completed' : mode === 'error' ? 'turn-error' : mode === 'cancel' ? 'turn-user-aborted' : 'execution-timeout',
+        handleDisposed: true, effects: 'unknown', replay: 'forbidden' })
+      expect(source.execution).toMatchObject({ status: succeeded ? 'succeeded' : 'unknown', quiescent: succeeded,
+        modelSelectionState: mode === 'rerouted' ? 'inconsistent' : 'frozen' })
+      expect(fixture.llm.requests).toEqual([expect.objectContaining({ provider: 'mock', model: 'delivery-model', reasoningEffort: 'low' })])
+      if (mode === 'rerouted') {
+        expect(fixture.alternate.requests).toEqual([expect.objectContaining({ provider: 'alternate', model: 'precise', reasoningEffort: 'high' })])
+        expect(source.execution.modelSelection).toBeUndefined()
+        expect(fixture.presetExecute).toHaveBeenCalledTimes(1)
+      } else expect(source.execution.modelSelection).toEqual({ provider: 'mock', model: 'delivery-model', reasoningEffort: 'low' })
+      expect(JSON.stringify(source)).not.toContain('private-native-provider-error')
+      const read = { ...query, expectedSourceDigest: source.sourceDigest }
+      expect(fixture.service.readOwnerForegroundTaskInput(read)?.input.text).toBe(text)
+      if (!succeeded) expect(fixture.service.readOwnerForegroundTaskSource(read)).toBeUndefined()
+      await fixture.service.tick(); await fixture.service.whenIdle()
+      expect(fixture.llm.requests).toHaveLength(1)
+    } finally { await fiber.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
+  })
+
+  test.each(['request', 'invoke'] as const)('preserves the original native Web deadline across delayed creation flush (%s)', async mode => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-initial-deadline-')); roots.push(root)
+    const sessionId = 'native-initial-deadline'
+    const budgetMs = 3_000
+    const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
+    const webConversation = { channel: 'web', account: 'browser', tenant: 'local', kind: 'dm' as const, chat: sessionId }
+    const authority: OwnerRouteAuthority = { id: 'native-initial-deadline-owner', conversation: webConversation, principal: webPrincipal,
+      workspace: root, agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      ownerRoutes: [authority], policyRules: [{ id: 'web-ingest', effect: 'allow',
+        subject: { kind: 'external', id: 'web/browser/local/owner' }, actions: ['ingest'],
+        resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } }],
+    })
+    const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') }); operator.handoffOwner(webPrincipal)
+    const nativeTimeout = AbortSignal.timeout
+    let originalDeadline: AbortSignal | undefined
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+      const signal = nativeTimeout(ms)
+      if (ms === budgetMs && originalDeadline === undefined) originalDeadline = signal
+      return signal
+    })
+    let access: ReturnType<AssistantDeliveryService['bindNativeWebOwner']> | undefined
+    const fiber = fixture.ctx.plugin({ inject: ['assistantDelivery', 'agents', 'sessions', 'llm'], apply(ctx: Context) {
+      access = ctx.assistantDelivery.bindNativeWebOwner(ctx, { principal: webPrincipal, workspace: root, preset: 'primary', maxExecutionMs: budgetMs })
+    } })
+    let markFlush!: () => void; let releaseFlush!: () => void; let held = false
+    const enteredFlush = new Promise<void>(resolve => { markFlush = resolve })
+    const flushGate = new Promise<void>(resolve => { releaseFlush = resolve })
+    const originalFlush = fixture.ctx.sessions.flush.bind(fixture.ctx.sessions)
+    const flush = vi.spyOn(fixture.ctx.sessions, 'flush').mockImplementation(async session => {
+      if (String(session.id) === sessionId && !held) { held = true; markFlush(); await flushGate }
+      return await originalFlush(session)
+    })
+    let markRequest!: () => void
+    const requestStarted = new Promise<void>(resolve => { markRequest = resolve })
+    vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (request) {
+      fixture.llm.requests.push(request); markRequest()
+      const signal = request.signal
+      if (signal === undefined) throw new Error('initial deadline fixture requires the native request signal')
+      await new Promise<void>(resolve => {
+        if (signal.aborted) resolve()
+        else signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+      signal.throwIfAborted()
+      yield* [] as StreamChunk[]
+    })
+    let creating: Promise<AgentHandle> | undefined
+    try {
+      await fiber
+      creating = access!.create({ sessionId: sessionId as SessionId, meta: { cwd: root, agentPreset: 'primary' },
+        agentOptions: { provider: 'mock', model: 'delivery-model' } })
+      await Promise.race([enteredFlush, creating.then(() => { throw new Error('create completed before its durable flush gate') })])
+      // Consume a substantial real part of the original budget while create
+      // still owns the construction lease. The remaining budget must not reset.
+      await new Promise(resolve => setTimeout(resolve, 1_200))
+      releaseFlush()
+      const handle = await creating
+      expect(originalDeadline).toBeDefined()
+      const text = 'Retain my original deadline after the initial durable flush.'
+      const content = [{ type: 'text' as const, text }]
+      const prompting = access!.prompt({ sessionId, requestId: 'initial-deadline-request', text, content }, async () => {
+        if (mode === 'invoke') {
+          await new Promise<void>((_resolve, reject) => {
+            const expire = (): void => reject(new Error('invoke crossed original execution deadline'))
+            if (originalDeadline!.aborted) expire()
+            else originalDeadline!.addEventListener('abort', expire, { once: true })
+          })
+        }
+        handle.agent.followup(createUserMessage({ content, source: { kind: 'user', rpcId: 'initial-deadline-request' as never } }))
+        return { accepted: true }
+      }, new AbortController().signal)
+      if (mode === 'invoke') await expect(prompting).rejects.toThrow('invoke crossed original execution deadline')
+      else { await prompting; await requestStarted }
+      await vi.waitFor(() => expect(operator.getInboxByProviderEvent('web', 'browser', 'initial-deadline-request')?.status)
+        .toBe('dead_letter'), { timeout: 3_000 })
+      const inboxId = operator.getInboxByProviderEvent('web', 'browser', 'initial-deadline-request')!.id
+      const source = fixture.service.inspectOwnerForegroundTaskSource(foregroundSourceQuery(fixture.service, authority, inboxId))!
+      expect(source.termination).toMatchObject({ producer: 'native-web', kind: 'timeout', causeCode: 'execution-timeout',
+        handleDisposed: true, effects: 'unknown', replay: 'forbidden' })
+      expect(source.execution).toMatchObject({ status: 'unknown', quiescent: false })
+      expect(fixture.llm.requests).toHaveLength(mode === 'invoke' ? 0 : 1)
+    } finally { releaseFlush(); flush.mockRestore(); timeout.mockRestore(); await creating?.catch(() => {}); await fiber.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
   })
 
   test.each(['revoke', 'timeout', 'unload', 'forged-user'] as const)('native Web owner drains an active input on %s without replay', async reason => {
@@ -10606,6 +10867,14 @@ describe('real native Delivery Agent runtime', () => {
       expect(runtimeStore(fixture.service).getInbox(accepted.inboxId!)).toMatchObject({ status: 'dead_letter', failureCode: 'agent-task-timeout' })
       expect(fixture.progresses.at(-1)?.update).toEqual({ kind: 'failed', code: 'agent-task-timeout' })
       expect(fixture.llm.requests).toHaveLength(1)
+      const observed = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      try {
+        const row = observed.prepare('SELECT status, quiescent, termination_json FROM delivery_foreground_executions WHERE inbox_id = ?')
+          .get(accepted.inboxId!) as { status: string; quiescent: number; termination_json: string }
+        expect(row).toMatchObject({ status: 'unknown', quiescent: 0 })
+        expect(JSON.parse(row.termination_json)).toMatchObject({ producer: 'delivery-agent', kind: 'timeout',
+          causeCode: 'execution-timeout', handleDisposed: false, effects: 'unknown', replay: 'forbidden' })
+      } finally { observed.close() }
       // Finishing presentation does not claim the underlying operation stopped.
       expect(secondHost.claimSessionLease({ kind: 'bound', binding }, 'second-host', 1_000)).toMatchObject({ kind: 'unknown' })
       const late = await retainedAgent!.ctx.tools.execute({ callId: ToolCallId('late-after-deadline'),
