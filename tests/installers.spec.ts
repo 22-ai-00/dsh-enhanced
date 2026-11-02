@@ -770,6 +770,7 @@ interface LifecycleSystemdFixtureOptions {
 }
 
 interface LifecycleRunOptions {
+  candidateFailure?: 'add' | 'fetch' | 'verify' | 'offline' | 'missing-started' | 'missing-done' | 'policy' | 'optional-resolution' | 'offline-optional-resolution' | 'offline-graph-drift' | 'final-graph-drift' | 'external-preparation'
   activationMarker?: string
   canonicalCleanupFails?: boolean
   crashDuringCleanup?: boolean
@@ -868,7 +869,7 @@ async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
   await writeFile(fixtureInstallerLibrary, await readFile(installerLibrary))
   await writeFile(join(fixtureInstallDirectory, 'lifecycle-config.mjs'),
     await readFile(join(installDirectory, 'lifecycle-config.mjs')))
-  for (const helper of ['host-lifecycle.mjs', 'host-profile-update.mjs', 'host-rsi-update.mjs', 'local-source-maintenance.mjs', 'local-source-preview.mjs']) {
+  for (const helper of ['host-lifecycle.mjs', 'host-profile-update.mjs', 'host-rsi-update.mjs', 'local-source-maintenance.mjs', 'local-source-preview.mjs', 'local-source-candidate-policy.mjs', 'local-source-cache-copy.mjs']) {
     await writeFile(join(fixtureInstallDirectory, helper), await readFile(join(installDirectory, helper)))
   }
   const lifecycleSource = await readFile(join(installDirectory, 'lifecycle-profile.mjs'), 'utf8')
@@ -1910,6 +1911,7 @@ process.exit(result.status ?? 99)
 // are covered by lark-channel's source-maintenance and local-package suites.
 async function preOwnerLifecycleFixture({ baseServices = false, memoryExtension = false, temporaryParent }: { baseServices?: boolean; memoryExtension?: boolean; temporaryParent?: string } = {}) {
   const f = await lifecycleFixture({ ...(temporaryParent === undefined ? {} : { temporaryParent }), systemd: { units: [{ profile: 'web', active: true }] }, ...(baseServices ? { readiness: 'host' as const } : {}) })
+  const candidateLock = "lockfileVersion: '9.0'\nimporters:\n  .: {}\npackages:\n  fixture-native@1.0.0:\n    resolution: {integrity: sha512-fixture}\nsnapshots:\n  fixture-native@1.0.0: {}\n"
   const bootRoot = join(f.root, 'fake-host', 'node_modules', '@deepseek-ai', 'dsh-app-boot')
   await rm(bootRoot)
   await mkdir(join(bootRoot, 'lib'), { recursive: true })
@@ -1945,6 +1947,50 @@ export async function createRuntimeResolution({ installAnchor, profile, home }) 
   await writeFile(pnpmPath, (await readFile(pnpmPath, 'utf8'))
     .replaceAll('"@jsr:registry":"https://npm.jsr.io/"',
       `"@jsr:registry":"https://npm.jsr.io/","cacheDir":${JSON.stringify(cachePath)},"ignoreScripts":true,"ignorePnpmfile":true,"trustLockfile":false,"pmOnFail":"error","managePackageManagerVersions":false,"packageManagerStrict":true,"packageManagerStrictVersion":true`))
+  // Candidate-only command support; the shared legacy pnpm fixture stays intact.
+  const candidatePnpm = `
+if [[ "$directory" == *'/.dsh-local-candidate-'* ]]; then
+  if [[ "\${arguments[0]:-}" == 'add' ]]; then
+    [[ " \${arguments[*]} " == *' --lockfile-only --force --ignore-scripts --reporter=ndjson '* ]] || exit 87
+    printf 'candidate-add\\t%s\\toffline=%s\\t%s\\n' "$transaction_state" "\${pnpm_config_offline:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
+    [[ "\${LIFECYCLE_CANDIDATE_FAILURE:-}" != 'add' ]] || { echo 'candidate add failed' >&2; exit 88; }
+    node - "$directory" <<'NODE'
+const fs=require('node:fs'),path=require('node:path');
+fs.writeFileSync(path.join(process.argv[2],'pnpm-lock.yaml'),${JSON.stringify(candidateLock)});
+if(process.env.LIFECYCLE_CANDIDATE_FAILURE==='external-preparation')fs.appendFileSync(process.env.LIFECYCLE_PREPARED_RECEIPT_PATH,'external mutation');
+NODE
+    if [[ "\${LIFECYCLE_CANDIDATE_FAILURE:-}" == 'optional-resolution' ]]; then printf '{"name":"pnpm:skipped-optional-dependency","reason":"resolution_failure"}\\n'; fi
+    exit 0
+  fi
+  if [[ "\${arguments[0]:-}" == 'fetch' ]]; then
+    printf 'candidate-fetch\\t%s\\toffline=%s\\t%s\\n' "$transaction_state" "\${pnpm_config_offline:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
+    [[ "\${LIFECYCLE_CANDIDATE_FAILURE:-}" != 'fetch' ]] || { echo 'candidate fetch failed' >&2; exit 89; }
+    exit 0
+  fi
+  if [[ "\${arguments[0]:-}" == 'install' ]]; then
+    if [[ " \${arguments[*]} " == *' --offline '* ]]; then
+      printf 'candidate-offline-verify\\t%s\\toffline=%s\\t%s\\n' "$transaction_state" "\${pnpm_config_offline:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
+      if [[ "\${LIFECYCLE_CANDIDATE_FAILURE:-}" == 'offline-optional-resolution' ]]; then printf '{"name":"pnpm:skipped-optional-dependency","reason":"resolution_failure"}\\n'; fi
+      if [[ "\${LIFECYCLE_CANDIDATE_FAILURE:-}" == 'offline-graph-drift' ]]; then printf 'drifted: true\\n' >> "$directory/pnpm-lock.yaml"; fi
+      exit 0
+    fi
+    printf 'candidate-verify\\t%s\\toffline=%s\\t%s\\n' "$transaction_state" "\${pnpm_config_offline:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
+    [[ ! -e "\${pnpm_config_cache_dir:?}/lockfile-verified.jsonl" ]] || { echo 'candidate verification reused a warm receipt' >&2; exit 86; }
+    [[ "\${LIFECYCLE_CANDIDATE_FAILURE:-}" != 'verify' ]] || { echo 'candidate verify failed' >&2; exit 90; }
+    node - "$directory/pnpm-lock.yaml" <<'NODE'
+const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+const p=process.argv[2],s=fs.statSync(p,{bigint:true}),logical=path.join(process.env.LIFECYCLE_ORIGINAL_HOME,'profiles','web','pnpm-lock.yaml');
+const policy={tarballUrlBinding:true,minimumReleaseAge:0,minimumReleaseAgeExclude:[],trustPolicy:null,trustPolicyExclude:[],trustPolicyIgnoreAfter:null,resolutionShapeCheck:true,dependencyAliasCheck:true};
+if(process.env.LIFECYCLE_CANDIDATE_FAILURE==='policy')delete policy.dependencyAliasCheck;
+fs.writeFileSync(path.join(process.env.pnpm_config_cache_dir,'lockfile-verified.jsonl'),JSON.stringify({lockfile:{path:logical,size:Number(s.size),inode:String(s.ino),mtimeNs:String(s.mtimeNs),hash:crypto.createHash('sha256').update(fs.readFileSync(p)).digest('base64')},policy})+'\\n');
+for(const status of ['started','done'])if(process.env.LIFECYCLE_CANDIDATE_FAILURE!=='missing-'+status)console.log(JSON.stringify({name:'pnpm:lockfile-verification',level:'debug',status,entries:1,lockfilePath:logical,...(status==='done'?{elapsedMs:1}:{})}));
+NODE
+    exit 0
+  fi
+fi
+`
+  const candidateAddHead = 'if [[ "${arguments[0]:-}" == \'add\''
+  await writeFile(pnpmPath, (await readFile(pnpmPath, 'utf8')).replace(candidateAddHead, candidatePnpm + '\n' + candidateAddHead))
   writePreOwnerPnpmFixtureEnvironment(f)
   await chmod(f.dshHome, 0o755)
   await mkdir(join(f.dshHome, 'profiles', 'node_modules'))
@@ -1958,6 +2004,7 @@ export async function createRuntimeResolution({ installAnchor, profile, home }) 
   await writeFile(join(moduleRoot, 'pnpm-lock.yaml'), 'fixture-lock', { mode: 0o600 })
   const preparationRoot = join(f.root, 'prepared-update')
   await mkdir(preparationRoot)
+  await writeFile(join(preparationRoot, 'receipt.json'), '{"revision":"prepared"}\n', { mode: 0o600 })
   for (const kind of ['rsi-sources', 'rsi-local-cohorts', 'rsi-builds', 'rsi-release-builds', 'rsi-authority-runtimes']) {
     await mkdir(join(f.dshHome, kind, 'web'), { recursive: true, mode: 0o700 })
     await writeFile(join(f.dshHome, kind, 'web', 'receipt.json'), '{"revision":"old"}', { mode: 0o600 })
@@ -1969,7 +2016,9 @@ export async function createRuntimeResolution({ installAnchor, profile, home }) 
   await writeFile(join(preOwnerAuthority, 'bootstrap.json'), '{"revision":"old"}', { mode: 0o600 })
   await writeFile(join(preOwnerAuthority, 'catalog.json'), '{"schemaVersion":1,"entries":[]}', { mode: 0o600 })
   const source = `
-import { readFile, writeFile, lstat, realpath } from 'node:fs/promises'
+import { readFile, writeFile, lstat, realpath, mkdir } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 const kinds = ['rsi-sources','rsi-local-cohorts','rsi-builds','rsi-release-builds','rsi-authorities','rsi-authority-runtimes']
 async function canonicalStage(path) {
@@ -1985,12 +2034,23 @@ export async function assertRsiPreOwnerInstallation(input) {
  try { await lstat(join(input.physicalHome,'owner-residue')); throw new Error('owner/coordinator rejected') }
  catch(error) { if(error.code !== 'ENOENT') throw error }
 }
-export async function readRsiLocalCohort(input) { return { sourceRepository:${JSON.stringify(join(f.root, 'upstream'))}, bundles:['personal-assistant'] } }
+export async function readRsiLocalCohort(input) { return { sourceRepository:${JSON.stringify(join(f.root, 'upstream'))}, bundles:['personal-assistant'], receiptDigest:'c'.repeat(64),allowBuilds:{}, packages:[{name:'@dsh-enhanced/personal-assistant',bundle:true,tarball:join(input.dshHome,'rsi-local-cohorts',input.profile,'personal-assistant.tgz')}] } }
+export function rsiLocalDependencyOverrides() { return {} }
+export async function rsiLocalPeerOverrides() { return {} }
+export function mergeRsiLocalOverrides(source) { return source }
+export async function planRsiLocalProfilePackages(input) { return {workspace:'nodeLinker: isolated\\noverrides: {}\\n',bundles:input.bundles,tarballs:input.candidate.packages.map(p=>p.tarball)} }
+export async function installRsiLocalProfile(input) {
+ const profile=join(input.dshHome,'profiles',input.profile);
+ try { await lstat(join(profile,'node_modules'));throw new Error('candidate native install reused node_modules') }catch(e){if(e.code!=='ENOENT')throw e}
+ const r=spawnSync(input.dsh.path,['plugin','--profile',input.profile,'add',...input.cohort.packages.map(p=>p.tarball)],{env:{...process.env,DSH_HOME:input.dshHome},encoding:'utf8'});
+ if(r.status!==0)throw new Error('candidate offline native failed: '+r.stderr);
+ await mkdir(join(profile,'node_modules'));
+}
 export async function verifyRsiLocalInstalledPackages(input) {
  const value = await readFile(join(input.profilePath,'node_modules/@dsh-enhanced/plugin-control-plane/lib/entry.js'),'utf8')
  if(value !== 'approved-package-bytes') throw new Error('installed package file differs')
 }
-export async function readRsiLocalUpdateLocked() { return {receiptDigest:'b'.repeat(64),source:{root:${JSON.stringify(join(preparationRoot, 'source'))}},
+export async function readRsiLocalUpdateLocked(input) { return {receiptDigest:createHash('sha256').update(await readFile(join(input.root,'receipt.json'))).digest('hex'),source:{root:${JSON.stringify(join(preparationRoot, 'source'))}},
  ...(${JSON.stringify(memoryExtension)} ? {schemaVersion:2,extension:'memory-learning'} : {})} }
 export async function stageRsiLocalUpdateResources(input) {
  await canonicalStage(input.stagePhysicalHome)
@@ -2008,7 +2068,9 @@ export async function stageRsiLocalSinglePackages(input) {
  if(process.env.LIFECYCLE_PACKAGE_FAILS === '1') throw new Error('fixture package failure')
  ${memoryExtension ? `await writeFile(join(input.dshHome,'.lifecycle-dump-config'),
    (await readFile(join(input.dshHome,'.lifecycle-dump-config'),'utf8')) + ${JSON.stringify(stringify([rsiMemoryLearningInitialRow]))})` : ''}
- await writeFile(join(input.dshHome,'profiles',input.profile,'pnpm-lock.yaml'),'candidate-lock')
+ await writeFile(join(input.dshHome,'profiles',input.profile,'pnpm-lock.yaml'),${JSON.stringify(candidateLock)})
+ await writeFile(join(input.dshHome,'profiles',input.profile,'pnpm-workspace.yaml'),'nodeLinker: isolated\\noverrides: {}\\n')
+ if(process.env.LIFECYCLE_CANDIDATE_FAILURE==='final-graph-drift')await writeFile(join(input.dshHome,'profiles',input.profile,'pnpm-lock.yaml'),'drifted: true\\n')
  await writeFile(join(input.dshHome,'profiles',input.profile,'upgraded'),'upgraded\\n')
  return {schemaVersion:1,profile:input.profile,cohortDigest:'c'.repeat(64),files:{}}
 }
@@ -2021,8 +2083,10 @@ export async function replaceRsiAuthorityRuntimeInStage(input, source) {
 export function buildSupervisedGrowthPreviewOverlay() { return '[]\\n' }
 export function assertSupervisedGrowthPreviewDerivation() { return {externalProviderExemptions:['larkChannel']} }
 `
-  for (const name of ['rsi-local-update','rsi-local-resources','rsi-source-maintenance','rsi-local-activation','rsi-local-pair-install','rsi-local-roots-extension','rsi-local-cohort','rsi-authority-runtime','supervised-growth-profile']) {
+  await writeFile(join(f.dshHome,'rsi-local-cohorts/web/personal-assistant.tgz'),'fixture candidate tarball',{mode:0o600})
+  for (const name of ['rsi-local-update','rsi-local-resources','rsi-source-maintenance','rsi-local-activation','rsi-local-pair-install','rsi-local-install','rsi-local-roots-extension','rsi-local-cohort','rsi-local-profile-update','rsi-authority-runtime','supervised-growth-profile']) {
     await writeFile(join(moduleRoot, 'plugins/lark-channel/lib', `${name}.js`), name === 'rsi-local-activation' ? source
+      : name === 'rsi-local-profile-update' ? 'export function assertRsiLocalProfileRoots({source}) { if(!JSON.parse(source).dsh)throw new Error("fixture profile roots missing") }\n'
       : name === 'rsi-local-roots-extension' ? `export const rsiMemoryLearningInitialRow = ${JSON.stringify(rsiMemoryLearningInitialRow)}\n`
         : 'export {}\n', { mode: 0o600 })
   }
@@ -2030,8 +2094,37 @@ export function assertSupervisedGrowthPreviewDerivation() { return {externalProv
   // does. The production helper has no environment-controlled test seam.
   const bwrapPath = join(f.fakeBin, 'bwrap')
   const bwrapSource = await readFile(bwrapPath, 'utf8')
+  const candidateNamespace = `
+if (!validatorFd && args.includes('--clearenv')) {
+ const fs=require('node:fs'),path=require('node:path');
+ if(controls.LIFECYCLE_BWRAP_LOG)fs.appendFileSync(controls.LIFECYCLE_BWRAP_LOG,JSON.stringify(args)+'\\n');
+ if(separator<0||!args.includes('--unshare-all')||!stageHome||Object.keys(writableBindings).length!==2)throw new Error('candidate namespace mounts missing');
+ const cache=writableBindings['/run/dsh-enhanced-local-pnpm-cache'],storeEntry=Object.entries(writableBindings).find(([target])=>target==='/run/dsh-enhanced-local-pnpm-store'||target.startsWith('/run/dsh-enhanced-local-pnpm-store/'));
+ const store=storeEntry?.[1],storeTarget=storeEntry?.[0];
+ if(!cache||!store)throw new Error('candidate private package caches missing');
+ const remapString=v=>{for(const [from,to]of [[logicalHome,stageHome],['/run/dsh-enhanced-local-pnpm-cache',cache],[storeTarget,store]])if(v===from||v.startsWith(from+'/'))return to+v.slice(from.length);return v};
+ for(const [k,v]of Object.entries(environment))environment[k]=remapString(v);
+ if(storeTarget!=='/run/dsh-enhanced-local-pnpm-store'&&environment.pnpm_config_store_dir==='/run/dsh-enhanced-local-pnpm-store')environment.pnpm_config_store_dir=path.resolve(store,...path.relative('/run/dsh-enhanced-local-pnpm-store',storeTarget).split('/').map(()=>'..'));
+ Object.assign(environment,controls);
+ const command=args.slice(separator+1).map(remapString);
+ const homeNames=fs.readdirSync(stageHome).sort();
+ if(homeNames.some(n=>!['profiles','rsi-local-cohorts','.candidate-install.json'].includes(n)))throw new Error('candidate anonymous Home leaked runtime state');
+ const profile=path.join(stageHome,'profiles','web');
+ if(fs.readFileSync(path.join(profile,'cordis.patch.yml'),'utf8')!=='[]\\n')throw new Error('candidate copied live patch');
+ if(command.includes('candidate-install')){
+   if(args.includes('--share-net'))throw new Error('candidate native install retained network');
+   const input=command.at(-1),remap=v=>typeof v==='string'?remapString(v):Array.isArray(v)?v.map(remap):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).map(([k,x])=>[k,remap(x)])):v;
+   fs.writeFileSync(input,JSON.stringify(remap(JSON.parse(fs.readFileSync(input,'utf8')))));
+ } else if(!command.includes('config')&&!command.includes('--offline')&&!args.includes('--share-net'))throw new Error('candidate online phase has no network flag');
+ const transactionState=fs.existsSync(controls.LIFECYCLE_ORIGINAL_HOME+'.dsh-enhanced-transaction')?'present':'absent';
+ fs.appendFileSync(controls.LIFECYCLE_OPERATION_LOG,'candidate-sandbox\\t'+transactionState+'\\toffline='+environment.pnpm_config_offline+'\\t'+command.join(' ')+'\\n');
+ const result=spawnSync(command[0],command.slice(1),{cwd:profile,env:environment,encoding:'buffer',stdio:['ignore','pipe','pipe',3,4,5,6,7]});
+ if(result.stdout)process.stdout.write(result.stdout);if(result.stderr)process.stderr.write(result.stderr);if(result.error)throw result.error;process.exit(result.status??99);
+}
+`
   await writeFile(bwrapPath, bwrapSource.replace('const readonlyBindings = {}', 'const readonlyBindings = {}\nconst writableBindings = {}')
     .replace("if (args[index] === '--bind-fd') { stageHome", "if (args[index] === '--bind-fd' && args[index + 1] !== '3') { writableBindings[args[index + 2]] = realpathSync('/proc/self/fd/' + args[index + 1]); index += 2; continue }\n  if (args[index] === '--bind-fd') { stageHome")
+    .replace("if (controls.LIFECYCLE_BWRAP_LOG)", candidateNamespace + "\nif (controls.LIFECYCLE_BWRAP_LOG)")
     .replace('Object.assign(environment, controls)', `for(const [key,value] of Object.entries(environment)) {
  const destination = Object.keys(writableBindings).find(path => value === path || (() => { try { return realpathSync(value) === path } catch { return false } })())
  if(destination) environment[key] = writableBindings[destination]
@@ -2047,13 +2140,26 @@ if (command.includes(${JSON.stringify(join(f.fixtureInstallDirectory, 'local-sou
  fs.writeFileSync(inputPath, JSON.stringify(remap(JSON.parse(fs.readFileSync(inputPath,'utf8')))))
 }
 const result = spawnSync(command[0], command.slice(1), {`))
+  await writeFile(bwrapPath, (await readFile(bwrapPath, 'utf8')).replace('if (result.stdout) process.stdout.write(result.stdout)', `if (result.stdout && command.includes('candidate-plan')) {
+ const restore=value=>typeof value==='string'&&(value===stageHome||value.startsWith(stageHome+'/'))?logicalHome+value.slice(stageHome.length):Array.isArray(value)?value.map(restore):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,restore(v)])):value;
+ process.stdout.write(JSON.stringify(restore(JSON.parse(result.stdout.toString('utf8'))))+'\\n');
+} else if (result.stdout) process.stdout.write(result.stdout)`))
   await mkdir(join(f.dshHome, 'assistant-delivery'), { recursive: true })
   await writeFile(join(f.dshHome, 'assistant-delivery', 'preview-queue.json'), '{"attempts":0,"pending":["owner-job"]}', { mode: 0o600 })
   // Model the pinned native prepareProfile write even for --dump-config.
   const nativePath = join(f.fakeBin, 'dsh')
   const activationHead = `if [[ " $* " == *' --host 127.0.0.1 --no-open --port 0 '* ]]; then`
   const nativeSource = (await readFile(nativePath, 'utf8')).replace(activationHead, activationHead + `\n  printf 'preview-claimed-job' > "$DSH_HOME/assistant-delivery/preview-queue.json"\n  printf 'preview-session-write' > "$DSH_HOME/sessions/owner-session.jsonl"`)
-  const dumpSource = nativeSource.replace('  if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE"',
+  const candidateNative = `
+  if [[ "$DSH_HOME" == *'/.dsh-local-candidate-'* ]]; then
+    printf 'candidate-native\\t%s\\toffline=%s\\t%s\\n' "$transaction_state" "\${pnpm_config_offline:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
+    [[ "\${pnpm_config_offline:-}" == 'true' ]] || exit 84
+    [[ ! -e "$DSH_HOME/profiles/web/node_modules" ]] || exit 85
+    [[ "\${LIFECYCLE_CANDIDATE_FAILURE:-}" != 'offline' ]] || { echo 'candidate native install failed' >&2; exit 83; }
+    exit 0
+  fi
+`
+  const dumpSource = nativeSource.replace("  if [[ \"$LIFECYCLE_PACKAGE_FAILS\" == '1' ]]", candidateNative + "\n  if [[ \"$LIFECYCLE_PACKAGE_FAILS\" == '1' ]]").replace('  if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE"',
     `  printf '[]\\n' > "$DSH_HOME/profiles/$requested_profile/cordis.yml"\n${baseServices || memoryExtension ? '  if [[ "$requested_profile" == \'web\' ]]; then cat "$DSH_HOME/.lifecycle-dump-config"; exit 0; fi\n' : ''}  if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE"`)
   // Keep the shared v3 fake unchanged. This pre-owner fake composes CLI patches
   // by row id and replaces each supplied config as a whole native patch value.
@@ -2105,7 +2211,7 @@ if(result.error)throw result.error;process.exitCode=result.status??1;
   await writeExecutable(join(pnpmPackageRoot, 'bin', 'pnpm.cjs'), '#!/usr/bin/env node\nrequire("../dist/pnpm.cjs")\n')
   await rm(pnpmPath)
   await symlink(join(pnpmPackageRoot, 'bin', 'pnpm.cjs'), pnpmPath)
-  return { ...f, moduleRoot, preparationRoot, cachePath, storeAlias, pnpmPackageRoot }
+  return { ...f, moduleRoot, preparationRoot, cachePath, storeAlias, pnpmPackageRoot, candidateLock }
 }
 // Production preparation deliberately excludes arbitrary inherited variables.
 // The deterministic pnpm fixture reads its synthetic controls from its own
@@ -2280,6 +2386,8 @@ export async function verifyScannerRetirementPersistence({plan,completion}){awai
 
 function lifecycleEnvironment(dshHome: string, fakeBin: string, options: LifecycleRunOptions = {}) {
   return {
+    LIFECYCLE_CANDIDATE_FAILURE: options.candidateFailure ?? '',
+    LIFECYCLE_PREPARED_RECEIPT_PATH: join(dirname(dshHome), 'prepared-update', 'receipt.json'),
     PATH: `${fakeBin}:${process.env.PATH ?? ''}`, DSH_HOME: dshHome, NODE_ENV: 'test',
     DSH_ENHANCED_TEST_SERVICE_TOOLS: '1',
     DSH_ENHANCED_TEST_SUPERVISED_OPERATOR_LOG: join(dirname(dshHome), 'supervised-operator.log'),
@@ -11302,6 +11410,86 @@ exit 7
 
 
 describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source transaction', () => {
+  test('rejects external prepared receipt mutation after online candidate resolution without touching services', async () => {
+    const f = await preOwnerLifecycleFixture()
+    const before = await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')
+    const result = runPreOwnerLifecycle(f, 'local-service-upgrade', { candidateFailure: 'external-preparation' })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('prepared candidate changed')
+    const commands = await readLifecycleSystemdLog(f.systemdLog)
+    expect(commands.some(command => command.some(argument => ['mask', 'unmask', 'start', 'stop'].includes(argument)))).toBe(false)
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
+    expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toBe(before)
+    expect(await readFile(join(f.dshHome, 'sessions/owner-session.jsonl'), 'utf8')).toBe('durable-session')
+    expect(await readFile(join(f.preparationRoot, 'receipt.json'), 'utf8')).toContain('external mutation')
+    expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
+  }, 45000)
+
+  test.each(['add', 'fetch', 'verify', 'offline', 'missing-started', 'missing-done', 'policy', 'optional-resolution', 'offline-optional-resolution', 'offline-graph-drift'] as const)(
+    'rejects final candidate %s before stopping the original service', async candidateFailure => {
+      const f = await preOwnerLifecycleFixture()
+      const names = ['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', 'cordis.patch.yml']
+      const before = await Promise.all(names.map(name => readFile(join(f.profileDirectory, name), 'utf8')))
+      const result = runPreOwnerLifecycle(f, 'local-service-upgrade', { candidateFailure })
+      expect(result.status, result.stderr).not.toBe(0)
+      expect(result.stderr).toContain('final candidate failed before service stop')
+      expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command.includes('stop'))).toBe(false)
+      expect(await Promise.all(names.map(name => readFile(join(f.profileDirectory, name), 'utf8')))).toEqual(before)
+      expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
+      expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
+      expect((await readdir(f.root)).some(name => name.startsWith('.dsh-local-candidate-'))).toBe(false)
+      const operations = await readFile(f.operationLog, 'utf8')
+      expect(operations).toContain('pnpm-metadata-warmup\tabsent\t')
+      expect(operations).toContain('candidate-add\tabsent\toffline=false')
+    }, 30000)
+
+  test('proves anonymous candidate preparation and native offline replay before the original packages transaction', async () => {
+    const f = await preOwnerLifecycleFixture()
+    const result = runPreOwnerLifecycle(f, 'local-service-upgrade')
+    expect(result.status, result.stderr).toBe(0)
+    const operations = await readFile(f.operationLog, 'utf8')
+    expect(operations).toContain('candidate-add\tabsent\toffline=false')
+    expect(operations).toContain('candidate-fetch\tabsent\toffline=false')
+    expect(operations).toContain('candidate-verify\tabsent\toffline=false')
+    expect(operations).toContain('candidate-native\tabsent\toffline=true')
+    expect(operations).toContain('candidate-offline-verify\tabsent\toffline=true')
+    const invocations = (await readFile(f.bwrapLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[])
+    const isolated = invocations.filter(args => args.includes('/run/dsh-enhanced-local-pnpm-cache') && !args.includes('--ro-bind-data'))
+    expect(isolated.length).toBeGreaterThanOrEqual(5)
+    for (const args of isolated) expect(args.filter(value => value === '--bind-fd')).toHaveLength(3)
+    expect(isolated.some(args => args.includes('--share-net') && args.includes('--lockfile-only'))).toBe(true)
+    const native = isolated.find(args => args.includes('candidate-install'))!
+    expect(native).toBeDefined()
+    expect(native).not.toContain('--share-net')
+    const packageIndex = invocations.findIndex(args => args.includes('packages'))
+    expect(packageIndex).toBeGreaterThanOrEqual(0)
+    const candidateIndices = invocations.flatMap((args, index) => isolated.includes(args) ? [index] : [])
+    expect(candidateIndices.every(index => index < packageIndex)).toBe(true)
+    const onlineAdd = invocations.findIndex(args => isolated.includes(args) && args.includes('add') && args.includes('--share-net'))
+    const onlineFetch = invocations.findIndex(args => isolated.includes(args) && args.includes('fetch') && args.includes('--share-net'))
+    const onlineVerify = invocations.findIndex(args => isolated.includes(args) && args.includes('install') && args.includes('--share-net'))
+    const nativeInstall = invocations.indexOf(native)
+    const offlineVerify = invocations.findIndex(args => isolated.includes(args) && args.includes('install') && args.includes('--offline'))
+    expect(onlineAdd).toBeGreaterThanOrEqual(0)
+    expect(onlineFetch).toBeGreaterThan(onlineAdd)
+    expect(onlineVerify).toBeGreaterThan(onlineFetch)
+    expect(nativeInstall).toBeGreaterThan(onlineVerify)
+    expect(offlineVerify).toBeGreaterThan(nativeInstall)
+    expect(offlineVerify).toBeLessThan(packageIndex)
+    expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toBe(f.candidateLock)
+    expect(await readFile(join(f.dshHome, 'sessions/owner-session.jsonl'), 'utf8')).toBe('durable-session')
+  }, 45000)
+
+  test('restores the original service when post-stop packages differ from the proven candidate graph', async () => {
+    const f = await preOwnerLifecycleFixture()
+    const before = await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')
+    const result = runPreOwnerLifecycle(f, 'local-service-upgrade', { candidateFailure: 'final-graph-drift' })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('final candidate dependency graph changed')
+    expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command.includes('stop'))).toBe(true)
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
+    expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toBe(before)
+  }, 45000)
   test.each([
     ['warmup command', { metadataWarmupFails: true }],
     ['missing full metadata', { metadataWarmupMissingMirror: true }],
@@ -11402,13 +11590,13 @@ snapshots:
       expect(await readdir(transaction)).toEqual([])
     } finally { await preparation.dispose() }
   })
-  // Full pnpm file revalidation measured 18–20s for complete Linux transactions.
-  // Keep 30s limits local to the affected success and recovery cases.
+  // Final candidate resolution and offline replay add a second preparation phase.
+  // Complete Linux transactions measured 28s; keep 45s/60s limits local here.
   test('allows unsupported platform optional skips during metadata warmup', async () => {
     const fixture = await preOwnerLifecycleFixture()
     const result = runPreOwnerLifecycle(fixture, 'local-service-upgrade', { metadataWarmupSkipReason: 'unsupported_platform' })
     expect(result.status, result.stderr).toBe(0)
-  }, 30000)
+  }, 45000)
   test.each([
     ['verification', { npmVerifyFails: true }],
     ['prefetch', { storeFails: true }],
@@ -11470,7 +11658,7 @@ snapshots:
       expect(await readdir(transaction)).toEqual([])
       await rm(join(cachePath, 'other.db-wal'))
       await symlink(join(storePath, 'content'), join(cachePath, 'escape'))
-      await expect(lifecycleProfileTest.prepareLocalSourcePackageCaches(transaction, pnpmStore, preparation, f.profileDirectory)).rejects.toThrow('link escapes its private copy')
+      await expect(lifecycleProfileTest.prepareLocalSourcePackageCaches(transaction, pnpmStore, preparation, f.profileDirectory)).rejects.toThrow('cache symlink escapes its boundary')
       expect(await readdir(transaction)).toEqual([])
       expect(await readFile(join(pnpmStore.storePath, 'original-store'), 'utf8')).toBe('original store')
       expect(await readFile(join(f.cachePath, 'original-cache'), 'utf8')).toBe('original cache')
@@ -11569,7 +11757,7 @@ snapshots:
     expect(await readFile(join(f.dshHome,'rsi-sources/web/receipt.json'),'utf8')).toContain('new')
     expect(await readFile(join(f.dshHome,'rsi-authority-runtimes/web/receipt.json'),'utf8')).toContain('new')
     expect(JSON.parse(await readFile(join(f.dshHome, 'rsi-authority-runtimes/web/receipt.json'), 'utf8')).logicalSource).toBe(join(f.dshHome, 'profiles/web/node_modules/@dsh-enhanced/plugin-control-plane'))
-    expect(await readFile(join(f.profileDirectory,'pnpm-lock.yaml'),'utf8')).toBe('candidate-lock')
+    expect(await readFile(join(f.profileDirectory,'pnpm-lock.yaml'),'utf8')).toBe(f.candidateLock)
     expect(await readFile(join(f.dshHome,'sessions/owner-session.jsonl'),'utf8')).toBe('durable-session')
     expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
     expect(await readFile(join(f.root, 'pnpm-store', 'original-store'), 'utf8')).toBe('original store')
@@ -11592,7 +11780,7 @@ snapshots:
     const commands = await readLifecycleSystemdLog(f.systemdLog)
     expect(commands.some(command => command.includes('stop'))).toBe(true)
     expect(commands.some(command => command.includes('start'))).toBe(true)
-  }, 30000)
+  }, 45000)
   test('applies the frozen learner-root extension through the stopped transaction and fresh service acceptance', async () => {
     // Only systemd, package installation and native config composition are fixture ports.
     const f = await preOwnerLifecycleFixture({ baseServices: true, memoryExtension: true })
@@ -11603,7 +11791,7 @@ snapshots:
     expect(rows.slice(0, -1)).toEqual(parse(original))
     expect(rows.at(-1)).toEqual(rsiMemoryLearningInitialRow)
     expect(await readFile(join(f.dshHome, 'rsi-sources/web/receipt.json'), 'utf8')).toContain('new')
-    expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toBe('candidate-lock')
+    expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toBe(f.candidateLock)
     expect(await readFile(join(f.dshHome, 'sessions/owner-session.jsonl'), 'utf8')).toBe('durable-session')
     expect(await readFile(join(f.dshHome, 'assistant-delivery/preview-queue.json'), 'utf8')).toBe('{"attempts":0,"pending":["owner-job"]}')
     const database = new DatabaseSync(join(f.dshHome, 'assistant-goals', 'web.sqlite'))
@@ -11613,7 +11801,7 @@ snapshots:
     expect(accepted.activeState).toBe('active')
     expect(accepted.invocationId).toMatch(/^fresh-web-/u)
     expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
-  }, 20000)
+  }, 45000)
   test('accepts a pre-owner profile with baseline Recovery and Control Plane services', async () => {
     const f = await preOwnerLifecycleFixture({ baseServices: true })
     const config = await readFile(join(f.dshHome, '.lifecycle-dump-config'), 'utf8')
@@ -11630,7 +11818,7 @@ snapshots:
     expect(accepted.invocationId).toMatch(/^fresh-web-/u)
     expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
     expect(await readFile(f.supervisedOperatorLog, 'utf8')).toBe('')
-  }, 20000)
+  }, 45000)
   test('discards activation writes to Delivery, sessions and business databases before deployment', async () => {
     const f = await preOwnerLifecycleFixture()
     const result = runPreOwnerLifecycle(f, 'local-service-upgrade')
@@ -11644,7 +11832,7 @@ snapshots:
     } finally { database.close() }
     expect(await readFile(f.dshLog, 'utf8')).toContain('--host\t127.0.0.1\t--no-open\t--port\t0')
     expect((await readdir(f.root)).filter(name => name.startsWith('.dsh-local-source-activation-'))).toEqual([])
-  }, 20000)
+  }, 45000)
   test('restores the original active service and preserves original source after staged package failure', async () => {
     const f = await preOwnerLifecycleFixture()
     const result = runPreOwnerLifecycle(f,'local-service-upgrade',{packageFails:true})
@@ -11659,7 +11847,7 @@ snapshots:
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
   // Includes the full staged package transaction and restoration, like the
   // adjacent upgrade cases; measured Linux runs approach 15 seconds.
-  }, 20000)
+  }, 45000)
   test('recovers a swapped candidate only after rechecking the frozen module/source identities', async () => {
     const f = await preOwnerLifecycleFixture()
     const first = runPreOwnerLifecycle(f,'local-service-upgrade',{systemdStartFailsProfile:'web'})
@@ -11669,7 +11857,7 @@ snapshots:
     expect(recovery.status,recovery.stderr).toBe(0)
     expect(await readFile(join(f.dshHome,'rsi-sources/web/receipt.json'),'utf8')).toContain('new')
     expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
-  },30000)
+  }, 60000)
   test('refuses installed package byte drift during recovery before service operations', async () => {
     const f = await preOwnerLifecycleFixture()
     const first = runPreOwnerLifecycle(f, 'local-service-upgrade', { systemdStartFailsProfile: 'web' })
@@ -11682,7 +11870,7 @@ snapshots:
     const added = (await readFile(f.systemdLog, 'utf8')).slice(before.length)
     expect(added).not.toContain('stop')
     expect(added).not.toContain('start')
-  }, 30000)
+  }, 60000)
   test('restores an original-renamed crash after proving the original snapshot', async () => {
     const f = await preOwnerLifecycleFixture()
     const first = runPreOwnerLifecycle(f, 'local-service-upgrade', { killLifecycleAfterOriginalRename: true })
@@ -11693,7 +11881,7 @@ snapshots:
     expect((await stat(f.dshHome)).mode & 0o777).toBe(0o755)
     expect(await readFile(join(f.dshHome, 'rsi-sources/web/receipt.json'), 'utf8')).toContain('old')
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
-  }, 30000)
+  }, 45000)
   test('refuses drifted reviewed installer code during recovery before any service operation', async () => {
     const f = await preOwnerLifecycleFixture()
     const first = runPreOwnerLifecycle(f,'local-service-upgrade',{systemdStartFailsProfile:'web'})
@@ -11706,5 +11894,5 @@ snapshots:
     const added = (await readFile(f.systemdLog,'utf8')).slice(before.length)
     expect(added).not.toContain('stop')
     expect(added).not.toContain('start')
-  }, 30000)
+  }, 60000)
 })

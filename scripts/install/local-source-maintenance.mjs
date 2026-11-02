@@ -21,7 +21,7 @@ const exactPath = path => typeof path === 'string' && isAbsolute(path) && resolv
 const fail = message => { throw new Error(`Local source maintenance: ${message}`) }
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const modules = ['rsi-local-update', 'rsi-local-update-build', 'rsi-local-resources', 'rsi-source-maintenance',
-  'rsi-local-activation', 'rsi-local-pair-install', 'rsi-local-cohort', 'rsi-authority-runtime',
+  'rsi-local-activation', 'rsi-local-pair-install', 'rsi-local-install', 'rsi-local-cohort', 'rsi-authority-runtime',
   'rsi-linux-native-resources', 'rsi-plugin-revision', 'supervised-growth-profile']
 /** Modules whose absence only fails closed on the path that needs them. The
  * backend-agnostic candidate-build reader and the linux-native resource staging
@@ -475,11 +475,24 @@ export async function preflightLocalSourceMaintenance(input) {
       configs[input.profile], api.yaml, initialRow) } : {}),
     installer, preparationRoot: input.preparationRoot, preparationDigest: preparation.receiptDigest, original, candidate: null }
 }
-export async function prepareLocalSourceStage(input) {
+async function preparedCandidate(input) {
   const api = await load(input.proof.installer)
   const preparation = await api.readRsiLocalUpdateLocked({ dshHome: input.homePath, profile: input.profile, root: input.proof.preparationRoot })
   if (preparation.receiptDigest !== input.proof.preparationDigest
     || preparation.extension !== input.proof.extension) fail('prepared candidate changed')
+  await assertLocalSourceInstaller(input.proof.installer)
+  return { api, preparation }
+}
+
+/** Revalidate the external preparation immediately before the caller's stop
+ * boundary. The reviewed reader checks its complete source/archive identities;
+ * this adds no authority and does not stage or install anything. */
+export async function assertLocalSourcePreparedCandidate(input) {
+  return (await preparedCandidate(input)).preparation
+}
+
+export async function prepareLocalSourceStage(input) {
+  const { api, preparation } = await preparedCandidate(input)
   const live = await api.readRsiSourceMaintenance({ logicalHome: input.homePath, physicalHome: input.homePath, profile: input.profile })
   const originalCohort = await api.readRsiLocalCohort({ dshHome: input.homePath, profile: input.profile })
   const resource = await api.stageRsiLocalUpdateResources({ logicalHome: input.homePath, stagePhysicalHome: input.stageHome,
@@ -577,6 +590,132 @@ export async function healLocalSourceProfileModuleFallback({ homePath, profile, 
   await healProfilesModuleFallback({ installAnchor: dshManifestPath, profile: loaded, home: homePath })
 }
 
+async function candidateContext(input) {
+  if (!exactPath(input.homePath) || !PROFILE.test(input.profile)) fail('invalid candidate profile identity')
+  await trustedDirectory(input.homePath)
+  const profilePath = join(input.homePath, 'profiles', input.profile)
+  await trustedDirectory(profilePath)
+  const installer = input.proof?.installer ?? input.installer
+  const api = await load(installer)
+  const projection = await import(pathToFileURL(join(installer.root, 'plugins/lark-channel/lib/rsi-local-profile-update.js')).href)
+  const cohort = await api.readRsiLocalCohort({ dshHome: input.homePath, profile: input.profile })
+  const workspacePath = join(profilePath, 'pnpm-workspace.yaml')
+  if (await realpath(workspacePath) !== workspacePath) fail('candidate workspace is not physical')
+  const workspace = (await bytes(workspacePath, 2_097_152)).toString('utf8')
+  return { installer, api, projection, cohort, profilePath, workspace }
+}
+
+/** Read-only plan using the old installed manifests inside the caller's mapped
+ * disposable preview. Does not grant permission to stop or mutate a live Home. */
+export async function planLocalSourceCandidatePackages(input) {
+  const { installer, api, projection, cohort, profilePath, workspace } = await candidateContext(input)
+  const manifestPath = join(profilePath, 'package.json')
+  if (await realpath(manifestPath) !== manifestPath) fail('candidate profile manifest is not physical')
+  const manifest = await bytes(manifestPath, 2_097_152)
+  // Stage uses original cohort roots, not the Host's external base bundle. The
+  // shared assertion checks native dsh.profile.bundles and dependency locators.
+  const bundles = [...input.originalCohort.bundles]
+  projection.assertRsiLocalProfileRoots({ source: manifest.toString('utf8'), cohort: input.originalCohort, bundles })
+  const plan = await api.planRsiLocalProfilePackages({ source: workspace, original: input.originalCohort,
+    candidate: cohort, bundles, originalProfilePath: profilePath,
+    ...(input.proof?.extension !== undefined ? { rootExtension: input.proof.extension } : {}) })
+  if (!isDeepStrictEqual(await api.readRsiLocalCohort({ dshHome: input.homePath, profile: input.profile }), cohort)
+    || !(await bytes(manifestPath, 2_097_152)).equals(manifest)
+    || (await bytes(join(profilePath, 'pnpm-workspace.yaml'), 2_097_152)).toString('utf8') !== workspace) fail('candidate planning input changed')
+  await assertLocalSourceInstaller(installer)
+  return { ...plan, cohort }
+}
+
+function candidateYaml(source, yaml) {
+  if (typeof source !== 'string' || Buffer.byteLength(source) > 2_097_152) fail('invalid candidate YAML source')
+  const document = yaml.parseDocument(source, { uniqueKeys: true })
+  if (document.errors.length || document.warnings.length || !yaml.isMap(document.contents)) fail('candidate YAML must be a strict mapping')
+  yaml.visit(document, {
+    Alias() { fail('candidate YAML aliases are forbidden') },
+    Map(_key, node) {
+      for (const pair of node.items) if (!yaml.isScalar(pair.key) || typeof pair.key.value !== 'string') fail('candidate YAML keys must be strings')
+    },
+  })
+  const result = document.toJS({ maxAliasCount: 0 })
+  const check = value => {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean'
+      || typeof value === 'number' && Number.isFinite(value)) return
+    if (Array.isArray(value)) { for (const item of value) check(item); return }
+    if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) fail('candidate YAML is not plain JSON data')
+    for (const [key, item] of Object.entries(value)) {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') fail('candidate YAML contains unsafe keys')
+      check(item)
+    }
+  }
+  check(result)
+  return result
+}
+
+/** Uses only the parser from the already byte-bound installer. */
+export async function parseLocalSourceCandidateYaml({ installer, source }) {
+  const api = await load(installer)
+  const result = candidateYaml(source, api.yaml)
+  await assertLocalSourceInstaller(installer)
+  return result
+}
+
+/** Native package-only installation into a fresh disposable profile. The caller
+ * owns its namespace, network/cache policy and lifecycle lock. No Host starts. */
+export async function installLocalSourceCandidatePackages(input) {
+  const { installer, api, projection, cohort, profilePath, workspace } = await candidateContext(input)
+  const plan = input.plan
+  if (!plan || !isDeepStrictEqual(Object.keys(plan).sort(), ['bundles', 'cohort', 'tarballs', 'workspace'])
+    || !isDeepStrictEqual(plan.cohort, cohort) || plan.workspace !== workspace
+    || !Array.isArray(plan.bundles) || !plan.bundles.length || new Set(plan.bundles).size !== plan.bundles.length
+    || !isDeepStrictEqual(plan.bundles, cohort.bundles)) fail('candidate package plan changed')
+  const tarballs = plan.bundles.map(slug => {
+    const item = cohort.packages.find(pkg => pkg.name === `@dsh-enhanced/${slug}` && pkg.bundle)
+    if (!item) fail('candidate bundle is outside cohort')
+    return item.tarball
+  })
+  if (!isDeepStrictEqual(plan.tarballs, tarballs)) fail('candidate tarball plan changed')
+  const parsed = candidateYaml(workspace, api.yaml)
+  const peers = await api.rsiLocalPeerOverrides({ cohort, bundles: plan.bundles })
+  const expected = { ...api.rsiLocalDependencyOverrides(cohort, plan.bundles), ...peers }
+  if (parsed.nodeLinker !== 'isolated'
+    || !parsed.overrides || typeof parsed.overrides !== 'object' || Array.isArray(parsed.overrides)) fail('candidate workspace policy changed')
+  for (const [key, value] of Object.entries(expected)) if (parsed.overrides[key] !== value) fail('candidate workspace override changed')
+  for (const key of Object.keys(parsed.overrides)) if (key.includes('@dsh-enhanced/') && !Object.hasOwn(expected, key)) fail('candidate workspace has unexpected internal override')
+  if (api.mergeRsiLocalOverrides(workspace, expected, cohort.allowBuilds) !== workspace) fail('candidate workspace projection changed')
+  const manifestPath = join(profilePath, 'package.json')
+  if (await realpath(manifestPath) !== manifestPath) fail('candidate profile manifest is not physical')
+  const manifest = await bytes(manifestPath, 2_097_152)
+  let validationSource = manifest.toString('utf8')
+  const warm = JSON.parse(validationSource)
+  const mounted = warm?.dsh?.profile?.bundles
+  if (input.proof?.extension === 'memory-learning' && plan.bundles.includes('assistant-memory-learning')
+    && Array.isArray(mounted) && !mounted.includes(learnerName)) {
+    // Validation-only detached view: pnpm warmup has added the dependency, but
+    // only the real DSH plugin add may write the new mounted bundle metadata.
+    // The shared full-root check still verifies every locator and other root.
+    mounted.push(learnerName)
+    validationSource = JSON.stringify(warm)
+  }
+  projection.assertRsiLocalProfileRoots({ source: validationSource, cohort, bundles: plan.bundles })
+  const modulesPath = join(profilePath, 'node_modules')
+  if (await optional(modulesPath)) fail('candidate profile already has node_modules')
+  await assertLocalSourceInstaller(installer)
+  input.signal?.throwIfAborted()
+  // Recheck immediately before the native installer, after the asynchronous
+  // binding validation. Its own inventory/pin/workspace checks remain intact.
+  if (await optional(modulesPath) || (await bytes(join(profilePath, 'pnpm-workspace.yaml'), 2_097_152)).toString('utf8') !== workspace
+    || !isDeepStrictEqual(await api.readRsiLocalCohort({ dshHome: input.homePath, profile: input.profile }), cohort)
+    || !(await bytes(manifestPath, 2_097_152)).equals(manifest)) fail('candidate install input changed')
+  await api.installRsiLocalProfile({ dshHome: input.homePath, profile: input.profile, cohort,
+    bundles: [...plan.bundles], dsh: input.dsh, signal: input.signal ?? AbortSignal.timeout(600_000), initializeFromManifest: true })
+  if (await realpath(manifestPath) !== manifestPath) fail('candidate profile manifest is not physical')
+  // Never use the warmup view as completion evidence. The real CLI must have
+  // persisted the complete candidate mount list itself.
+  projection.assertRsiLocalProfileRoots({ source: (await bytes(manifestPath, 2_097_152)).toString('utf8'), cohort, bundles: plan.bundles })
+  await assertLocalSourceInstaller(installer)
+  return { cohortDigest: cohort.receiptDigest, bundles: [...plan.bundles], tarballs }
+}
+
 async function main() {
   const [action, inputPath] = process.argv.slice(2)
   const input = JSON.parse((await bytes(inputPath, 20_971_520)).toString('utf8'))
@@ -587,7 +726,9 @@ async function main() {
       originalCohort: input.originalCohort, dsh: input.dsh, rootExtension: input.proof.extension,
       signal: AbortSignal.timeout(600_000) })
     await healLocalSourceProfileModuleFallback(input)
-  } else if (action === 'configs') result = await composeLocalSourceConfigs(input)
+  } else if (action === 'candidate-plan') result = await planLocalSourceCandidatePackages(input)
+  else if (action === 'candidate-install') result = await installLocalSourceCandidatePackages(input)
+  else if (action === 'configs') result = await composeLocalSourceConfigs(input)
   else if (action === 'verify') result = await verifyLocalSourceSelection(input)
   else if (action === 'preview-overlay') result = await localSourcePreviewOverlay(input)
   else if (action === 'assert-preview') result = await assertLocalSourcePreview(input)

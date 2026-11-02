@@ -6088,6 +6088,12 @@ async function localSourceDriverDigest() {
 async function localSourceHelper() {
   return import('./local-source-maintenance.mjs')
 }
+async function copyLocalSourcePackageCache(input) {
+  // Checkout-only helpers must not expand the pinned registry installer's
+  // downloadable asset closure for unrelated lifecycle operations.
+  const helper = await import('./local-source-cache-copy.mjs')
+  return helper.copyLocalSourcePackageCache(input)
+}
 async function assertLocalSourceCacheTree(root, boundary = root) {
   for (const name of await readdir(root)) {
     const path = join(root, name), entry = await lstat(path)
@@ -6518,6 +6524,203 @@ async function prepareLocalSourceOfflineCache({ current, homePath, profile, pnpm
   } catch (error) { await dispose(); throw new Error(`local source old lockfile preparation failed before service stop: ${error.message}`, { cause: error }) }
 }
 
+// This runner is only used with the anonymous candidate Home assembled below.
+// Ordinary lifecycle sandboxes keep their unconditional network namespace.
+async function runLocalSourceCandidate({ homePath, stageHome, profile, proof, bwrapExecutable, preparation, caches }, command, online = false) {
+  const cacheMount = '/run/dsh-enhanced-local-pnpm-cache'
+  // preparation.storePath is pnpm's resolved v11 directory, not its parent.
+  // Keep that suffix or pnpm silently nests a second store, which the stopped
+  // installation (bound to the original v11 path) would never read.
+  if (basename(preparation.storePath) !== 'v11') fail('local candidate requires the resolved pnpm v11 store')
+  const storeMount = '/run/dsh-enhanced-local-pnpm-store/v11'
+  const helper = await localSourceHelper()
+  await helper.assertLocalSourceInstaller(proof.installer)
+  if (proof.driverDigest !== await localSourceDriverDigest()) fail('local candidate driver changed')
+  await assertLocalPnpmExecutable(preparation.pnpmExecutable)
+  const handles = []
+  try {
+    const mounts = [[stageHome, homePath], [caches.cachePath, cacheMount], [caches.storePath, storeMount]]
+    const args = ['--unshare-all', ...(online ? ['--share-net'] : []), '--die-with-parent', '--new-session',
+      '--ro-bind', '/', '/', '--tmpfs', '/tmp', '--tmpfs', '/run', '--proc', '/proc', '--dev', '/dev']
+    for (const [path, target] of mounts) {
+      await assertOwnedPrivateDirectory(path)
+      const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+      handles.push({ handle, path, expected: identity(await handle.stat()) })
+      if (!sameIdentity(await lstat(path), handles.at(-1).expected)) fail('local candidate mount changed')
+      args.push('--dir', dirname(target), '--bind-fd', String(handles.length + 2), target)
+    }
+    for (const path of new Set([proof.installer.root, dirname(SCRIPT_PATH)])) {
+      const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+      handles.push({ handle, path, expected: identity(await handle.stat()) })
+      args.push('--dir', dirname(path), '--ro-bind-fd', String(handles.length + 2), path)
+    }
+    const environment = { ...localSourcePrivateNpmEnvironment(cacheMount, storeMount),
+      PATH: `${dirname(preparation.pnpmPath)}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      DSH_HOME: homePath, CI: 'true', pnpm_config_offline: String(!online),
+      pnpm_config_package_import_method: 'copy', pnpm_config_verify_store_integrity: 'true' }
+    args.push('--chdir', join(homePath, 'profiles', profile), '--clearenv')
+    for (const [name, value] of Object.entries(environment)) args.push('--setenv', name, value)
+    args.push('--', ...command)
+    const result = await run(bwrapExecutable, args, { capture: true, rejectTruncated: true, timeoutMs: 600_000,
+      passFds: handles.map(({ handle }) => handle.fd) })
+    await assertLocalPnpmExecutable(preparation.pnpmExecutable)
+    await helper.assertLocalSourceInstaller(proof.installer)
+    return result
+  } finally {
+    for (const { handle, path, expected } of handles) {
+      await handle.close()
+      await assertCriticalDirectory(path, expected)
+    }
+  }
+}
+
+async function assertLocalSourceCandidateMetadata(preparation, profilePath, { native = false } = {}) {
+  const candidate = preparation.candidate
+  if (candidate === undefined) fail('local source upgrade lacks a final candidate proof')
+  const actual = await readNpmMetadata(profilePath)
+  if (!actual.lockfile || !actual.workspace || actual.workspace.source !== candidate.plan.workspace) fail('local source final candidate workspace changed')
+  const helper = await localSourceHelper()
+  const graph = await helper.parseLocalSourceCandidateYaml({ installer: candidate.proof.installer, source: actual.lockfile.source })
+  if (!isDeepStrictEqual(graph, candidate.graph)) fail('local source final candidate dependency graph changed')
+  const expectedPackage = native ? candidate.nativeMetadata.packageJson.source : candidate.metadata.packageJson.source
+  if (!isDeepStrictEqual(JSON.parse(actual.packageJson.source), JSON.parse(expectedPackage))) fail('local source final candidate manifest changed')
+}
+
+async function assertLocalSourceCandidatePreparation(preparation) {
+  const candidate = preparation.candidate
+  if (candidate === undefined) fail('local source upgrade lacks pre-stop candidate dependency verification')
+  await assertCriticalDirectory(candidate.root, candidate.rootIdentity)
+  await assertLocalPnpmExecutable(preparation.pnpmExecutable)
+  const helper = await localSourceHelper()
+  await helper.assertLocalSourceInstaller(candidate.proof.installer)
+  await helper.assertLocalSourcePreparedCandidate({ homePath: candidate.homePath, profile: candidate.profile, proof: candidate.proof })
+  if (candidate.proof.driverDigest !== await localSourceDriverDigest()) fail('local candidate driver changed after proof')
+  if (await realpath(candidate.dsh.path) !== candidate.dsh.path || sha256(await readFile(candidate.dsh.path)) !== candidate.dsh.pin.sha256) {
+    fail('local candidate DSH executable changed after offline proof')
+  }
+  await assertNpmMetadata(candidate.profilePath, candidate.metadata, true)
+  if (await profileTreeDigest(candidate.caches.cachePath, '', PROFILE_TREE_MAX_FILE_BYTES, true) !== candidate.cacheDigest
+    || await profileTreeDigest(candidate.caches.storePath, '', PROFILE_TREE_MAX_FILE_BYTES, true) !== candidate.storeDigest) {
+    fail('local source final candidate cache changed after offline proof')
+  }
+  if (await profileTreeDigest(candidate.cohortPath, '', 256 * 1024 * 1024) !== candidate.cohortDigest) fail('local source final candidate cohort changed')
+  await assertLocalSourceCandidateMetadata(preparation, candidate.profilePath)
+}
+
+async function prepareLocalSourceCandidate({ homePath, profile, proof, dshExecutable, bwrapExecutable, preparation }) {
+  const { verifyLocalSourceCandidatePolicy } = await import('./local-source-candidate-policy.mjs')
+  const helper = await localSourceHelper()
+  await assertLocalSourcePreparation(preparation, join(homePath, 'profiles', profile))
+  await assertSnapshotTreeSafe(homePath, homePath, true)
+  const originalFiles = await localSourcePhysicalProof(homePath, profile)
+  const root = await mkdtemp(join(dirname(homePath), '.dsh-local-candidate-'))
+  const rootIdentity = identity(await lstat(root)), preview = join(root, 'preview')
+  const dispose = async () => { await assertCriticalDirectory(root, rootIdentity); await rm(root, { recursive: true }) }
+  try {
+    await copyHome(homePath, preview)
+    await chmod(preview, 0o700)
+    if (!isDeepStrictEqual(originalFiles, await localSourcePhysicalProof(preview, profile))) fail('local candidate preview copy changed')
+    // Unsupported resource transitions fail here, before service inventory or stop.
+    const staged = await helper.prepareLocalSourceStage({ homePath, stageHome: preview, profile, proof })
+    const plan = await localSourceSandbox({ stageHome: preview, homePath, profile, dshExecutable, bwrapExecutable },
+      'candidate-plan', { homePath, profile, proof, originalCohort: staged.originalCohort })
+    const cohortPath = join(preview, 'rsi-local-cohorts', profile)
+    const cohortDigest = await profileTreeDigest(cohortPath, '', 256 * 1024 * 1024)
+    const makeHome = async (name, metadata) => {
+      const stageHome = join(root, name), profilePath = join(stageHome, 'profiles', profile)
+      await mkdir(profilePath, { recursive: true, mode: 0o700 })
+      await writeNpmMetadata(profilePath, metadata)
+      // No runtime, credentials, conversation state or active configuration is
+      // copied into a process that has network access.
+      await writeFile(join(profilePath, 'cordis.patch.yml'), '[]\n', { mode: 0o600, flag: 'wx' })
+      const target = join(stageHome, 'rsi-local-cohorts', profile)
+      await mkdir(target, { recursive: true, mode: 0o700 })
+      await run('/bin/cp', ['-a', '--no-preserve=links', '--reflink=auto', '--', `${cohortPath}${sep}.`, target], { timeoutMs: 300_000 })
+      if (await profileTreeDigest(target, '', 256 * 1024 * 1024) !== cohortDigest) fail('local candidate artifacts changed during copy')
+      return { stageHome, profilePath }
+    }
+    const warm = await makeHome('metadata', { ...npmMetadataSources(preparation.original), workspace: plan.workspace })
+    const cacheRoot = join(root, 'verified-packages')
+    await mkdir(cacheRoot, { mode: 0o700 })
+    const caches = await copyLocalSourcePackageCache({ storePath: preparation.storePath, cachePath: preparation.cachePath, rootPath: cacheRoot })
+    const context = { ...warm, homePath, profile, proof, bwrapExecutable, preparation, caches }
+    const configCommand = [preparation.pnpmPath, 'config', 'list', '--json']
+    const effectiveConfig = async () => {
+      const source = (await runLocalSourceCandidate(context, configCommand)).stdout
+      const raw = JSON.parse(source)
+      if (raw.ignoreScripts !== true || raw.ignorePnpmfile !== true || raw.trustLockfile !== false || raw.pmOnFail !== 'error') fail('local candidate pnpm policy changed')
+      return { ...parseNpmEffectiveConfig(source), ignoreScripts: true, ignorePnpmfile: true, trustLockfile: false }
+    }
+    const policy = await effectiveConfig()
+    // Only workspace projection may change the effective old policy. The shared
+    // planner validates that projection; the private global config is byte-bound.
+    for (const [name, expected] of Object.entries(preparation.configFiles)) {
+      if ((await readNpmMetadataFile(join(caches.cachePath, name))).digest !== expected.digest) fail('local candidate anonymous pnpm configuration changed')
+    }
+    const warmup = await runLocalSourceCandidate(context, [preparation.pnpmPath, 'add', '--lockfile-only', '--force', '--ignore-scripts', '--reporter=ndjson', ...plan.tarballs], true)
+    assertLocalSourceWarmupOutput(warmup)
+    let metadata = await readNpmMetadata(warm.profilePath)
+    if (!metadata.lockfile || metadata.workspace?.source !== plan.workspace) fail('local candidate resolver changed its workspace')
+    const fetched = await runLocalSourceCandidate(context, [preparation.pnpmPath, 'fetch', '--frozen-lockfile', '--reporter=ndjson'], true)
+    assertLocalSourceWarmupOutput(fetched)
+    await assertNpmMetadata(warm.profilePath, metadata)
+    metadata = await readNpmMetadata(warm.profilePath)
+    assertSameNpmConfig(await effectiveConfig(), policy)
+    // In this private cache removal cannot touch the original preparation.
+    // A writing resolver's marker is not evidence of fresh final verification.
+    const markerPath = join(caches.cachePath, 'lockfile-verified.jsonl')
+    // pnpm's frozen --lockfile-only path rewrites the wanted lock atomically.
+    // Fresh materialization validates it without that rewrite, and also cannot
+    // hide behind modules imported by fetch.
+    await rm(join(warm.profilePath, 'node_modules'), { recursive: true, force: true })
+    await rm(markerPath, { force: true })
+    if (await existingIdentity(markerPath) !== undefined) fail('local candidate verification cache is not fresh')
+    const beforeStat = await localSourceLockStat(warm.profilePath)
+    const verified = await runLocalSourceCandidate(context,
+      [preparation.pnpmPath, 'install', '--frozen-lockfile', '--ignore-scripts', '--reporter=ndjson'], true)
+    assertLocalSourceWarmupOutput(verified)
+    await assertNpmMetadata(warm.profilePath, metadata, true)
+    const finalStat = await localSourceLockStat(warm.profilePath)
+    if (!isDeepStrictEqual(beforeStat, finalStat)) fail('local candidate lockfile changed during fresh verification')
+    assertSameNpmConfig(await effectiveConfig(), policy)
+    const markerSource = await existingIdentity(markerPath) === undefined ? undefined : (await readNpmMetadataFile(markerPath)).source
+    const graph = await helper.parseLocalSourceCandidateYaml({ installer: proof.installer, source: metadata.lockfile.source })
+    const policyProof = verifyLocalSourceCandidatePolicy({ output: verified.stdout, lockfileSource: metadata.lockfile.source,
+      markerSource, lockfilePath: join(homePath, 'profiles', profile, 'pnpm-lock.yaml'), lockStats: [beforeStat, finalStat],
+      effectivePolicy: policy, parseYaml: source => { if (source !== metadata.lockfile.source) fail('unexpected candidate graph source'); return graph },
+      exitCode: 0, outputTruncated: false, pnpmVersion: preparation.pnpmExecutable.runtime.version, verifierConfigured: true })
+    const replay = await makeHome('offline-replay', npmMetadataSources(metadata))
+    const replayCacheRoot = join(root, 'replay-packages')
+    await mkdir(replayCacheRoot, { mode: 0o700 })
+    const replayCaches = await copyLocalSourcePackageCache({ ...caches, rootPath: replayCacheRoot })
+    const dsh = { path: dshExecutable, pin: { path: dshExecutable, sha256: sha256(await readFile(dshExecutable)), interpreter: null } }
+    const inputName = '.candidate-install.json'
+    await writeFile(join(replay.stageHome, inputName), JSON.stringify({ homePath, profile, proof, plan, dsh }), { flag: 'wx', mode: 0o600 })
+    await runLocalSourceCandidate({ ...context, ...replay, caches: replayCaches }, [process.execPath,
+      join(dirname(SCRIPT_PATH), 'local-source-maintenance.mjs'), 'candidate-install', join(homePath, inputName)])
+    // The native CLI suppresses pnpm progress. A forced offline replay also
+    // exposes optional-resolution failures that a successful CLI can conceal.
+    const offline = await runLocalSourceCandidate({ ...context, ...replay, caches: replayCaches },
+      [preparation.pnpmPath, 'install', '--offline', '--frozen-lockfile', '--force', '--ignore-scripts', '--reporter=ndjson'])
+    assertLocalSourceWarmupOutput(offline)
+    const nativeMetadata = await readNpmMetadata(replay.profilePath)
+    if (nativeMetadata.workspace?.source !== plan.workspace || !nativeMetadata.lockfile
+      || !isDeepStrictEqual(await helper.parseLocalSourceCandidateYaml({ installer: proof.installer, source: nativeMetadata.lockfile.source }), graph)) {
+      fail('local candidate native offline installation changed the verified dependency graph')
+    }
+    await assertLocalSourceCacheTree(caches.storePath)
+    await assertLocalSourceCacheTree(caches.cachePath)
+    preparation.candidate = { root, rootIdentity, homePath, profile, dsh, proof, plan, profilePath: warm.profilePath, metadata, nativeMetadata,
+      cohortPath, cohortDigest, graph, policyProof, caches,
+      cacheDigest: await profileTreeDigest(caches.cachePath, '', PROFILE_TREE_MAX_FILE_BYTES, true),
+      storeDigest: await profileTreeDigest(caches.storePath, '', PROFILE_TREE_MAX_FILE_BYTES, true), dispose }
+    await assertLocalSourceCandidatePreparation(preparation)
+    await assertLocalSourcePreparation(preparation, join(homePath, 'profiles', profile))
+    if (!isDeepStrictEqual(originalFiles, await localSourcePhysicalProof(homePath, profile))) fail('live Home changed during candidate preflight')
+    return preparation.candidate
+  } catch (error) { delete preparation.candidate; await dispose(); throw new Error(`local source final candidate failed before service stop: ${error.message}`, { cause: error }) }
+}
+
 async function prepareLocalSourcePackageCaches(transactionRoot, pnpmStore, preparation, stagedProfilePath) {
   if (preparation === undefined) fail('local source offline package cache lacks pre-stop verification')
   await assertLocalSourcePreparation(preparation, stagedProfilePath, false)
@@ -6534,50 +6737,26 @@ async function prepareLocalSourcePackageCaches(transactionRoot, pnpmStore, prepa
     await rm(root, { recursive: true })
   }
   try {
-    const store = join(root, 'store'), cache = join(root, 'cache')
-    for (const [source, destination] of [[preparation.storePath, store], [preparation.cachePath, cache]]) {
-      await mkdir(destination, { mode: 0o700 })
-      await run('/bin/cp', ['-a', '--no-preserve=links', '--reflink=auto', '--', `${source}${sep}.`, destination], { timeoutMs: 300_000 })
-      await chmod(destination, 0o700)
-    }
-    // pnpm 11 keeps its index and project registrations under store/v11.
-    // Strip registrations at both historical and versioned locations: they
-    // contain links to workspaces outside this disposable cache.
-    const versionDirectories = (await readdir(store)).filter(name => /^v[0-9]+$/u.test(name))
-    for (const directory of ['', ...versionDirectories]) {
-      const sourceDirectory = join(preparation.storePath, directory)
-      const copyDirectory = join(store, directory)
-      await assertOwnedPrivateDirectory(sourceDirectory)
-      await assertOwnedPrivateDirectory(copyDirectory)
-      await rm(join(copyDirectory, 'projects'), { recursive: true, force: true })
-    }
-    await rm(join(cache, 'dlx'), { recursive: true, force: true })
-    // cp is not a SQLite snapshot. Replace the copied pnpm index (including
-    // active-WAL contents) with the native online backup, then discard sidecars.
-    for (const directory of ['', ...versionDirectories]) {
-      const indexPath = join(preparation.storePath, directory, 'index.db')
-      if (await existingIdentity(indexPath) === undefined) continue
-      const entry = await lstat(indexPath)
-      if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== currentUid() || isGroupOrOtherWritable(entry)) fail('local pnpm SQLite index is unsafe')
-      const { DatabaseSync, backup } = await import('node:sqlite')
-      const database = new DatabaseSync(indexPath, { readOnly: true, timeout: 5_000 })
-      const copyDirectory = join(store, directory)
-      const target = join(copyDirectory, 'index.backup.db'), deadline = Date.now() + 60_000
-      try {
-        await backup(database, target, { rate: 1_024, progress: () => { if (Date.now() > deadline) fail('local pnpm SQLite snapshot exceeded its bound') } })
-        if (!sameNpmFileIdentity(await lstat(indexPath), identity(entry))) fail('local pnpm SQLite index identity changed during backup')
-      } finally { database.close() }
-      for (const suffix of ['', '-wal', '-shm', '-journal']) await rm(join(copyDirectory, `index.db${suffix}`), { force: true })
-      await rename(target, join(copyDirectory, 'index.db'))
-    }
+    const selected = preparation.candidate?.caches ?? preparation
+    if (preparation.candidate) await assertLocalSourceCandidatePreparation(preparation)
+    const { storePath: store, cachePath: cache } = await copyLocalSourcePackageCache({
+      storePath: selected.storePath, cachePath: selected.cachePath, rootPath: root })
     await assertLocalSourceCacheTree(store)
     await assertLocalSourceCacheTree(cache)
     const copiedMarker = await readNpmMetadataFile(join(cache, 'lockfile-verified.jsonl'))
-    if (copiedMarker.digest !== preparation.marker.digest) fail('local source copied verification marker changed')
-    await assertLocalSourceLockMarker(copiedMarker, preparation.profilePath, preparation.original.lockfile, preparation.lockStats)
-    if (await localSourceRegistryMetadataDigest(cache, store) !== preparation.registryMetadataDigest
-      || await localSourceRegistryMetadataDigest(preparation.cachePath, preparation.storePath) !== preparation.registryMetadataDigest) {
-      fail('local source copied registry metadata mirror changed')
+    if (preparation.candidate) {
+      if (copiedMarker.digest !== (await readNpmMetadataFile(join(selected.cachePath, 'lockfile-verified.jsonl'))).digest
+        || await localSourceRegistryMetadataDigest(cache, store) !== await localSourceRegistryMetadataDigest(selected.cachePath, selected.storePath)) {
+        fail('local source final candidate cache mirror changed')
+      }
+      await assertLocalSourceCandidatePreparation(preparation)
+    } else {
+      if (copiedMarker.digest !== preparation.marker.digest) fail('local source copied verification marker changed')
+      await assertLocalSourceLockMarker(copiedMarker, preparation.profilePath, preparation.original.lockfile, preparation.lockStats)
+      if (await localSourceRegistryMetadataDigest(cache, store) !== preparation.registryMetadataDigest
+        || await localSourceRegistryMetadataDigest(preparation.cachePath, preparation.storePath) !== preparation.registryMetadataDigest) {
+        fail('local source copied registry metadata mirror changed')
+      }
     }
     if (!sameIdentity(await lstat(pnpmStore.storePath), pnpmStore.identity)
       || await realpath(pnpmStore.localSource.alias.path) !== pnpmStore.storePath) fail('local package store changed while copying')
@@ -6724,6 +6903,7 @@ async function performLifecycle({
   if (localSourceMaintenance !== undefined) {
     if (localSourcePreparation === undefined) fail('local source upgrade lacks pre-stop old lockfile verification')
     await assertLocalSourcePreparation(localSourcePreparation, current.profilePath)
+    await assertLocalSourceCandidatePreparation(localSourcePreparation)
   }
   if (npmPreparation !== undefined) {
     await assertNpmMetadata(current.profilePath, npmPreparation.original, true)
@@ -6844,6 +7024,14 @@ async function performLifecycle({
       }, 'preparing')
       serviceMasks = await prepareBoundMasks(physicalTransactionRoot, services.map(service => service.unit), 'managed')
       serviceStartBarriers = await prepareServiceStartBarriers(physicalTransactionRoot, services)
+      if (localSourceMaintenance !== undefined) {
+        // Keep this gate in the preparation-only catch: the later stop catch
+        // may restore/restart services and must never handle a preflight error.
+        await assertLocalSourcePreparation(localSourcePreparation, current.profilePath)
+        await assertLocalSourceHome({ manifest: { homePath, profile, localSourceMaintenance }, physicalHome: homePath,
+          selection: 'original', dshExecutable, bwrapExecutable })
+        await assertLocalSourceCandidatePreparation(localSourcePreparation)
+      }
     }
   } catch (error) {
     await rm(physicalTransactionRoot, { recursive: true, force: true }).catch(() => {})
@@ -6994,6 +7182,7 @@ async function performLifecycle({
         try {
           await localSourceSandbox(sandbox, 'packages', { proof: manifest.localSourceMaintenance, homePath, profile, originalCohort: staged.originalCohort, dsh }, pnpmStore, packageCaches)
         } finally { await packageCaches.dispose() }
+        await assertLocalSourceCandidateMetadata(localSourcePreparation, join(canonicalStageHome, 'profiles', profile), { native: true })
         await assertApiStage()
         await helper.replaceLocalSourceAuthority({ homePath, stageHome: canonicalStageHome, profile, proof: manifest.localSourceMaintenance })
         await assertApiStage()
@@ -9063,10 +9252,14 @@ async function main() {
     const localSourcePreparation = await prepareLocalSourceOfflineCache({ current, homePath, profile, dshExecutable,
       pnpmPath, pnpmExecutable })
     try {
+      await prepareLocalSourceCandidate({ homePath, profile, proof: localSourceMaintenance, dshExecutable, bwrapExecutable,
+        preparation: localSourcePreparation })
       await performLifecycle({ operation: 'upgrade', homePath, profile, dshExecutable, bwrapExecutable,
         expectedScenario: scenario, targets: [], serviceContext, pnpmStore, localSourceMaintenance, localSourceConfigs,
         localSourcePreparation, skipRecovery: true, transactionPrechecked: true })
-    } finally { await localSourcePreparation.dispose() }
+    } finally {
+      try { await localSourcePreparation.candidate?.dispose() } finally { await localSourcePreparation.dispose() }
+    }
     return
   }
   if (operation === 'host-update' || operation === 'host-recover' || operation === 'host-local-update' || operation === 'host-owner-repair'
@@ -9226,6 +9419,7 @@ export const lifecycleProfileTest = Object.freeze({
   validLocalSourceManifest, validLocalSourceSelection, localSourcePhysicalProof, profileTreeDigest,
   pinLocalPnpmExecutable, assertLocalPnpmExecutable, assertLocalPnpmPackageManager, localSourceOriginalNpmEnvironment,
   prepareLocalSourceOfflineCache, assertLocalSourcePreparation, prepareLocalSourcePackageCaches, sandboxArgs,
+  prepareLocalSourceCandidate, runLocalSourceCandidate, assertLocalSourceCandidateMetadata, localSourceDriverDigest, localSourceLockStat,
 })
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === SCRIPT_PATH) {

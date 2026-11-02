@@ -9,7 +9,7 @@ import { rsiCoordinatorProfile } from '../src/rsi-install.js'
 import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages, rsiLocalPeerOverrides, type RsiLocalCohort } from '../src/rsi-local-cohort.js'
 import { verifyRsiLocalInstalledPackagesFresh } from '../lib/rsi-local-cohort.js'
 import { installRsiLocalProfile, mergeRsiLocalOverrides, rsiLocalDependencyOverrides, type RsiLocalProfilePorts } from '../src/rsi-local-install.js'
-import { stageRsiLocalPairPackages, stageRsiLocalSinglePackages } from '../src/rsi-local-pair-install.js'
+import { planRsiLocalProfilePackages, stageRsiLocalPairPackages, stageRsiLocalSinglePackages } from '../src/rsi-local-pair-install.js'
 import { prepareRsiSourceWorkspace } from '../src/rsi-source.js'
 import { localCohortFixture } from './fixtures/rsi-local-cohort.js'
 
@@ -428,4 +428,53 @@ test('rejects a changed original peer pin before either profile is written', asy
   await expect(stageRsiLocalPairPackages(f.input, f.ports)).rejects.toThrow('override changed')
   expect(f.install).not.toHaveBeenCalled()
   expect(await snapshot(f.home)).toEqual(before)
+})
+
+
+test('read-only profile plans match both installed projections without touching the Home', async () => {
+  const f = await fixture(false, true), before = await snapshot(f.home)
+  const plans = new Map<string, Awaited<ReturnType<typeof planRsiLocalProfilePackages>>>()
+  for (const name of f.pair) {
+    const root = join(f.home, 'profiles', name), bundles = name === f.profile ? f.original.bundles : coordinatorBundles
+    const plan = await planRsiLocalProfilePackages({ source: await readFile(join(root, 'pnpm-workspace.yaml'), 'utf8'),
+      original: f.original, candidate: f.candidate, bundles, originalProfilePath: root })
+    expect(plan.bundles).toEqual(bundles)
+    expect(plan.tarballs).toEqual(bundles.map(slug => f.candidate.packages.find(pkg => pkg.name === `@dsh-enhanced/${slug}`)!.tarball))
+    plans.set(name, plan)
+  }
+  expect(f.command).not.toHaveBeenCalled()
+  expect(await snapshot(f.home)).toEqual(before)
+  await stageRsiLocalPairPackages(f.input, f.ports)
+  for (const [name, plan] of plans) expect(await readFile(join(f.home, 'profiles', name, 'pnpm-workspace.yaml'), 'utf8')).toBe(plan.workspace)
+})
+
+test('read-only learner plan is the exact single-profile extension used by installation', async () => {
+  const f = await fixture(false, true, true)
+  await rm(f.receiptPath); await rm(join(f.home, 'profiles', f.coordinator), { recursive: true })
+  const root = join(f.home, 'profiles', f.profile), before = await snapshot(f.home)
+  const plan = await planRsiLocalProfilePackages({ source: await readFile(join(root, 'pnpm-workspace.yaml'), 'utf8'),
+    original: f.original, candidate: f.candidate, bundles: f.original.bundles, originalProfilePath: root, rootExtension: 'memory-learning' })
+  expect(plan.bundles).toEqual(f.candidate.bundles)
+  expect(plan.tarballs).toHaveLength(f.original.bundles.length + 1)
+  expect(f.command).not.toHaveBeenCalled()
+  expect(await snapshot(f.home)).toEqual(before)
+  await stageRsiLocalSinglePackages({ ...f.input, rootExtension: 'memory-learning' }, f.ports)
+  expect(await readFile(join(root, 'pnpm-workspace.yaml'), 'utf8')).toBe(plan.workspace)
+})
+
+test('read-only planner rejects installed manifest and old peer-pin drift without mutation', async () => {
+  const f = await fixture(false, true), root = join(f.home, 'profiles', f.profile)
+  const source = await readFile(join(root, 'pnpm-workspace.yaml'), 'utf8')
+  const input = { source, original: f.original, candidate: f.candidate, bundles: f.original.bundles, originalProfilePath: root }
+  const document = parseDocument(source)
+  document.setIn(['overrides', '@dsh-enhanced/optional-plugin@0.1.48>@dsh-enhanced/shared-lib'], 'file:/foreign/drift.tgz')
+  const before = await snapshot(f.home)
+  await expect(planRsiLocalProfilePackages({ ...input, source: document.toString() })).rejects.toThrow('override changed')
+  expect(await snapshot(f.home)).toEqual(before)
+  const manifest = join(root, 'node_modules', '@dsh-enhanced', 'target', 'package.json')
+  await writeFile(manifest, (await readFile(manifest, 'utf8')) + ' ')
+  const drifted = await snapshot(f.home)
+  await expect(planRsiLocalProfilePackages(input)).rejects.toThrow('installed package file differs')
+  expect(await snapshot(f.home)).toEqual(drifted)
+  expect(f.command).not.toHaveBeenCalled()
 })

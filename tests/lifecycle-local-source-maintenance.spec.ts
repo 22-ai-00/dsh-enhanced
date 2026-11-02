@@ -136,7 +136,7 @@ describe('pre-owner local source maintenance admission', () => {
     await writeFile(join(root, 'package.json'), '{"type":"module"}', { mode: 0o600 })
     await writeFile(join(root, 'plugins/lark-channel/package.json'), '{"type":"module"}', { mode: 0o600 })
     for (const name of ['rsi-local-update', 'rsi-local-resources', 'rsi-source-maintenance', 'rsi-local-activation',
-      'rsi-local-pair-install', 'rsi-local-roots-extension', 'rsi-local-cohort', 'rsi-authority-runtime', 'supervised-growth-profile']) {
+      'rsi-local-pair-install', 'rsi-local-install', 'rsi-local-roots-extension', 'rsi-local-cohort', 'rsi-authority-runtime', 'supervised-growth-profile']) {
       await writeFile(join(root, 'plugins/lark-channel/lib', `${name}.js`), name === 'rsi-local-pair-install'
         ? 'export async function stageRsiLocalSinglePackages(input) { return { extension: input.rootExtension ?? null } }\n'
         : 'export {}\n', { mode: 0o600 })
@@ -170,7 +170,7 @@ describe('pre-owner local source maintenance admission', () => {
     await writeFile(join(root, 'package.json'), '{"type":"module"}', { mode: 0o600 })
     await writeFile(join(root, 'plugins/lark-channel/package.json'), '{"type":"module"}', { mode: 0o600 })
     for (const name of ['rsi-local-update', 'rsi-local-resources', 'rsi-source-maintenance', 'rsi-local-activation',
-      'rsi-local-pair-install', 'rsi-local-roots-extension', 'rsi-local-cohort', 'rsi-authority-runtime', 'supervised-growth-profile']) {
+      'rsi-local-pair-install', 'rsi-local-install', 'rsi-local-roots-extension', 'rsi-local-cohort', 'rsi-authority-runtime', 'supervised-growth-profile']) {
       await writeFile(join(root, 'plugins/lark-channel/lib', `${name}.js`), name === 'rsi-local-pair-install'
         ? 'export async function stageRsiLocalSinglePackages() { return { staged: true } }\n' : 'export {}\n', { mode: 0o600 })
     }

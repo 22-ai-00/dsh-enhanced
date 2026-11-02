@@ -89,6 +89,8 @@ export interface RsiLocalProfileInput {
   bundles: readonly string[]
   dsh: Pick<InstalledRsiDsh, 'path' | 'pin'>
   signal: AbortSignal
+  /** Fresh disposable consumer only: native install resolves existing mounts before list can inspect them. */
+  initializeFromManifest?: true
 }
 export interface RsiLocalProfilePorts {
   command: typeof io.command
@@ -136,12 +138,40 @@ export async function installRsiLocalProfile(input: RsiLocalProfileInput, ports 
       {...process.env,DSH_HOME:input.dshHome,CI:'true',pnpm_config_force:String(force),
         pnpm_config_loglevel:'error',pnpm_config_package_import_method:'copy'},input.signal,300_000,2_097_152)
   }
-  await run(['list']) // Native profile initialization; never starts a Host.
   const profilePath = join(input.dshHome,'profiles',input.profile)
+  let initializedWorkspace: Buffer | undefined
+  if (input.initializeFromManifest !== undefined) {
+    if (input.initializeFromManifest !== true) fail('invalid manifest initialization mode')
+    await io.directory(profilePath, false)
+    const manifestPath = join(profilePath, 'package.json'), workspacePath = join(profilePath, 'pnpm-workspace.yaml')
+    if (await realpath(manifestPath) !== manifestPath || await realpath(workspacePath) !== workspacePath) fail('initial profile metadata is not physical')
+    const manifestBytes = await io.readStable(manifestPath, 1_048_576)
+    const manifest = JSON.parse(manifestBytes.toString('utf8'))
+    const mounted = manifest?.dsh?.profile?.bundles
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) || !Array.isArray(mounted)
+      || mounted.some((name: unknown) => typeof name !== 'string' || !name || name.includes('\0'))
+      || new Set(mounted).size !== mounted.length) fail('initial profile manifest lacks native bundle metadata')
+    const assertEmpty = async (): Promise<void> => {
+      try { await lstat(join(profilePath, 'node_modules')); fail('manifest initialization requires absent node_modules') }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    }
+    await assertEmpty()
+    initializedWorkspace = await io.readStable(workspacePath, 1_048_576)
+    const peers = await rsiLocalPeerOverrides({ cohort, bundles: input.bundles })
+    const overrides = { ...rsiLocalDependencyOverrides(cohort, input.bundles), ...peers }
+    assertLocalOverrideIdentity(initializedWorkspace.toString('utf8'), cohort, peers)
+    if (mergeRsiLocalOverrides(initializedWorkspace.toString('utf8'), overrides, cohort.allowBuilds) !== initializedWorkspace.toString('utf8')) fail('manifest initialization requires the frozen workspace projection')
+    if (!(await io.readStable(manifestPath, 1_048_576)).equals(manifestBytes)
+      || !(await io.readStable(workspacePath, 1_048_576)).equals(initializedWorkspace)) fail('manifest initialization metadata changed')
+    await assertEmpty()
+    await run(['install']) // Native CLI reconciles existing roots after packages exist; no Host starts.
+  } else await run(['list']) // Historical initialization for all existing callers.
+
   await io.directory(profilePath,false)
   const workspace = join(profilePath,'pnpm-workspace.yaml')
   if (await realpath(workspace) !== workspace) fail('profile workspace file is not physical')
   const before = await io.readStable(workspace,1_048_576)
+  if (initializedWorkspace && !before.equals(initializedWorkspace)) fail('native initialization changed the frozen workspace')
   const peers = await rsiLocalPeerOverrides({ cohort, bundles: input.bundles })
   assertLocalOverrideIdentity(before.toString('utf8'), cohort, peers)
   const overrides = { ...rsiLocalDependencyOverrides(cohort, input.bundles), ...peers }

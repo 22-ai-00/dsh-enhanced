@@ -108,6 +108,27 @@ function assertExpectedLearnerManifest(before: Buffer, after: Buffer, candidate:
   if (!isDeepStrictEqual(actual, expected)) fail('owner manifest changed beyond the memory learner root')
 }
 
+/** Read-only projection of one profile's existing peer pins and candidate roots.
+ * The caller authenticates the cohorts and separately verifies their complete
+ * inventories. This does not install, write metadata or establish Home authority. */
+export async function planRsiLocalProfilePackages(input: {
+  source: string; original: RsiLocalCohort; candidate: RsiLocalCohort
+  bundles: readonly string[]; originalProfilePath: string; rootExtension?: RsiLocalRootExtension
+}): Promise<{ workspace: string; bundles: string[]; tarballs: string[] }> {
+  const { original, candidate, bundles } = input
+  const nextBundles = input.rootExtension ? rsiLocalUpdateBundles(original.bundles, input.rootExtension) : [...bundles]
+  const workspace = rebaseRsiLocalProfileWorkspace({ source: input.source, original, candidate, bundles,
+    ...(input.rootExtension ? { rootExtension: input.rootExtension } : {}),
+    originalPeers: await rsiLocalPeerOverrides({ cohort: original, bundles, profilePath: input.originalProfilePath }),
+    candidatePeers: await rsiLocalPeerOverrides({ cohort: candidate, bundles: nextBundles }) })
+  const tarballs = nextBundles.map(slug => {
+    const item = candidate.packages.find(value => value.name === `@dsh-enhanced/${slug}` && value.bundle)
+    if (!item) fail(`bundle ${slug} is absent from the frozen cohort`)
+    return item.tarball
+  })
+  return { workspace, bundles: nextBundles, tarballs }
+}
+
 async function stageRsiLocalPackages(input: RsiLocalPackageInput,
   dependencies: RsiLocalPairPackagePorts, paired: boolean): Promise<RsiLocalSinglePackageProof> {
   const { dshHome, profile, originalCohort, signal } = input
@@ -147,13 +168,10 @@ async function stageRsiLocalPackages(input: RsiLocalPackageInput,
     const workspace = await read('pnpm-workspace.yaml')
     assertRsiLocalProfileRoots({ source: manifest.toString('utf8'), cohort: originalCohort, bundles })
     if (input.rootExtension) assertNoLearnerPatchReference(patch.toString('utf8'))
-    const nextBundles = input.rootExtension ? targetBundles : [...bundles]
-    const nextWorkspace = rebaseRsiLocalProfileWorkspace({ source: workspace.toString('utf8'), original: originalCohort, candidate, bundles,
-      ...(input.rootExtension ? { rootExtension: input.rootExtension } : {}),
-      originalPeers: await rsiLocalPeerOverrides({ cohort: originalCohort, bundles, profilePath: root }),
-      candidatePeers: await rsiLocalPeerOverrides({ cohort: candidate, bundles: nextBundles }) })
+    const plan = await planRsiLocalProfilePackages({ source: workspace.toString('utf8'), original: originalCohort, candidate,
+      bundles, originalProfilePath: root, ...(input.rootExtension ? { rootExtension: input.rootExtension } : {}) })
     await dependencies.verify({ cohort: originalCohort, profilePath: root, bundles: [...bundles] }, signal)
-    snapshots.push({ name, root, bundles: nextBundles, manifest, patch, workspace, nextWorkspace })
+    snapshots.push({ name, root, bundles: plan.bundles, manifest, patch, workspace, nextWorkspace: plan.workspace })
   }
   // All old package inventories and both configurations must pass before the
   // first write or package-manager invocation.

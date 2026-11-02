@@ -276,3 +276,46 @@ test('native pnpm peer overrides preserve one module identity and do not install
     expect(await readFile(join(cohort.root, 'receipt.json'), 'utf8')).toBe(before)
   } finally { await rm(f.root, { recursive: true, force: true }) }
 }, 40_000)
+
+test('explicit fresh manifest initialization uses native install before add and refuses occupied consumers', async () => {
+  const f = await localCohortFixture()
+  try {
+    const cohort = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source, bundles: ['target'] }, f.ports)
+    const profilePath = join(f.home, 'profiles', f.profile), workspacePath = join(profilePath, 'pnpm-workspace.yaml')
+    await mkdir(profilePath, { recursive: true, mode: 0o700 })
+    const manifest = JSON.stringify({ private: true, dsh: { profile: { bundles: ['@dsh-enhanced/target'] } } })
+    await writeFile(join(profilePath, 'package.json'), manifest, { mode: 0o600 })
+    let workspace = mergeRsiLocalOverrides('packages: [.]\n', {
+      ...rsiLocalDependencyOverrides(cohort, ['target']), ...await rsiLocalPeerOverrides({ cohort, bundles: ['target'] }),
+    }, cohort.allowBuilds)
+    // Match the already rendered candidate projection, including YAML's long-path wrapping.
+    workspace = mergeRsiLocalOverrides(workspace, { ...rsiLocalDependencyOverrides(cohort, ['target']), ...await rsiLocalPeerOverrides({ cohort, bundles: ['target'] }) }, cohort.allowBuilds)
+    await writeFile(workspacePath, workspace, { mode: 0o600 })
+    const path = join(f.root, 'dsh.js'), executable = '#!/usr/bin/env node\n'
+    await writeFile(path, executable, { mode: 0o700 })
+    const command = vi.fn<RsiLocalProfilePorts['command']>(async (_path, args) => {
+      expect(['install', 'add']).toContain(args[3])
+      if (args[3] === 'install') {
+        expect(await readFile(join(profilePath, 'package.json'), 'utf8')).toBe(manifest)
+        await installFixture(f, cohort, ['target', 'shared-lib', 'optional-plugin'], `home/profiles/${f.profile}`)
+        await writeFile(join(profilePath, 'package.json'), manifest)
+      }
+      return ''
+    })
+    const input = { dshHome: f.home, profile: f.profile, cohort, bundles: ['target'], initializeFromManifest: true as const,
+      dsh: { path, pin: { path, sha256: createHash('sha256').update(executable).digest('hex') } }, signal: new AbortController().signal }
+    await installRsiLocalProfile(input, { command, verify: verifyRsiLocalInstalledPackages })
+    expect(command.mock.calls.map(call => call[1][3])).toEqual(['install', 'add'])
+    command.mockClear()
+    await expect(installRsiLocalProfile(input, { command, verify: verifyRsiLocalInstalledPackages })).rejects.toThrow('absent node_modules')
+    expect(command).not.toHaveBeenCalled()
+    await rm(join(profilePath, 'node_modules'), { recursive: true })
+    await symlink(join(f.root, 'missing'), join(profilePath, 'node_modules'))
+    await expect(installRsiLocalProfile(input, { command, verify: verifyRsiLocalInstalledPackages })).rejects.toThrow('absent node_modules')
+    expect(command).not.toHaveBeenCalled()
+    await rm(join(profilePath, 'node_modules'))
+    await writeFile(workspacePath, 'packages: [.]\n')
+    await expect(installRsiLocalProfile(input, { command, verify: verifyRsiLocalInstalledPackages })).rejects.toThrow('frozen workspace projection')
+    expect(command).not.toHaveBeenCalled()
+  } finally { await rm(f.root, { recursive: true, force: true }) }
+}, 30_000)

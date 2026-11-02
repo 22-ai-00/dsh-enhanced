@@ -219,9 +219,15 @@ node /reviewed/new-checkout/scripts/install/lifecycle-profile.mjs \
 
 已安装冻结源码/cohort、尚无 RSI owner、coordinator 或 control ledger 的 Linux systemd Home，可显式调用已经审核并构建的本地 checkout。此入口尚未接入普通 `dsh-rsi update`、远程 helper 下载或发布版本 pins；不要复制单个新版 `lib` 文件到正式 profile。先以 `dsh-rsi-setup --prepare-local-update` 在 Home 外制作候选；候选与执行维护的 reviewed checkout 是两份独立绑定的输入。
 
-维护事务在停服前另用 Home 外的私有 profile 和全新缓存，按原有效 pnpm 配置验证原锁文件并预取依赖。随后在一次性同级 profile 中，以原直接依赖执行完整原生 `add --force --ignore-scripts` 在线安装，补齐完整 registry 元数据、依赖包及 pnpm 在安装时短暂获取但不保留在最终锁图中的 peer 包。仅锁解析及 fetch 不足以覆盖这些临时请求。再以另一份原元数据、没有预热 node_modules 的 profile 做完整离线安装复演。在线与离线结果图必须一致，并保留原 registry 包和可选依赖；原生 `file:` peer 上下文可以重算。预热与复演的整个 profile 均丢弃，不把其 manifest、锁或 node_modules 复制到 Home 或正式副本。两份安装都禁用安装脚本与 pnpmfile，不启动 Host。可选依赖解析失败、未知跳过原因、损坏或截断的验证输出，即使 pnpm 退出 0 也会拒绝准备，不把不支持其他平台误作失败。
+维护事务先用 Home 外的私有 profile 和全新缓存，按原有效 pnpm 配置验证、预取并离线复演原依赖图，保留原 registry 包和可选依赖。随后复制预览 Home，复用正式安装的候选 roots、peer overrides 和 workspace 投影；不支持的资源迁移在停服前拒绝。该入口仍不能激活 native 候选，不能将包安装准备当作完整 Docker→native 升级。
 
-预热后重新核对原锁的原始字节及本次供应链收据，原 manifest、workspace、lock 文件必须保持不变；无软链的 registry 镜像摘要、pnpm 程序、配置及文件身份随准备绑定，并在缓存复制后复核，不能直接复用全局验证标记。准备失败时原服务继续运行。停服后的原生 DSH 安装使用已核对缓存的独立副本，仍无网络、禁用安装脚本和 pnpmfile，并保留供应链策略检查；缺失或漂移的证明不能靠放宽策略继续安装。此准备覆盖原依赖图，不表示新增候选 registry 依赖已经可离线安装。
+候选联网准备只接触匿名最小 Home：原包元数据、投影后的 workspace、候选收据及 tarball，不复制运行配置、身份、凭据或对话状态。固定 pnpm 11.7.0 解析并预取最终图，清空私有验证标记和 node_modules 后，执行 frozen 安装；要求本轮 `started → done`、当前策略、原始锁字节与稳定文件身份一致。pnpm semantic hash 仅作为其观测身份，不能代替原始字节校验，也不能用旧 marker 或退出码零冒充本轮策略验证。
+
+另一份空 node_modules 的最小 Home 使用独立缓存副本，在真实断网的 bubblewrap 中调用原生 DSH `plugin install/add`，由 CLI 物化既有清单、写入 bundle 元数据并核验实际包清单；额外的强制离线 pnpm 安装检查可选依赖失败及最终图。这个显式临时安装模式保留其他调用者原有的 `list` 初始化方式。安装脚本与 pnpmfile 始终关闭，不启动 Host。未知跳过原因、缺包、图变化或损坏/截断的验证输出都会拒绝；不支持当前平台的可选包跳过单独处理。缓存 SQLite index 使用在线 backup，包括未 checkpoint 的 WAL，不能靠普通文件复制证明完整性。
+
+`offline` 参数不能代替内核禁网：pnpm 11.7 的供应链验证器在策略元数据缺失时仍可能尝试 registry 请求。本路径以独立网络 namespace 阻止请求；缺失策略元数据会在有限超时内拒绝安装，不改成信任旧锁或关闭供应链验证。
+
+准备结束及首次服务操作前重核原 Home、外部准备收据与制品、固定 pnpm/DSH、配置及候选缓存；失败保留原服务。预览、解析和复演的 Home 不作为状态切换源。停服后重新复制 Home，执行原有原生安装与资源/配置验收，并对照已验证的最终 manifest、workspace 与锁图；缺失或漂移仍拒绝切换。此包安装证明不代替真实服务就绪、外部连接或长期使用验收。
 
 私有准备不复制全局 registry 认证字段；registry 与供应链策略等非认证配置仍须精确一致，依赖以匿名方式读取，需要凭据而无法预取时在停服前拒绝。传入的 pnpm 程序按文件身份和字节摘要绑定，包安装的 PATH 优先使用其目录；若使用 wrapper，其后续加载文件仍属于外部受信运行环境。本机部署验证使用 pnpm 的独立原生程序。
 
