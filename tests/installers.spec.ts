@@ -548,8 +548,8 @@ function runRestart(args: readonly string[], dshHome: string, platform?: string)
   })
 }
 
-async function temporaryDshHome(): Promise<string> {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-enhanced-installer-')))
+async function temporaryDshHome(parent = tmpdir()): Promise<string> {
+  const root = await realpath(await mkdtemp(join(parent, 'dsh-enhanced-installer-')))
   temporaryRoots.push(root)
   return root
 }
@@ -3515,7 +3515,8 @@ describe('one-click installers', () => {
   })
 
   test.skipIf(!realBwrapUsable)('real bwrap mounts a /tmp staged home by fd at the logical DSH_HOME after /tmp isolation', async () => {
-    const root = await temporaryDshHome()
+    // The regression specifically hides /tmp, regardless of the host TMPDIR.
+    const root = await temporaryDshHome('/tmp')
     const logicalHome = join(root, 'logical-home')
     const stagedHome = join(root, 'staged-home')
     await mkdir(stagedHome)
@@ -3547,7 +3548,8 @@ describe('one-click installers', () => {
   })
 
   test.skipIf(!realBwrapUsable)('real bwrap executes a /tmp validator through ro-bind-data after /tmp is hidden', async () => {
-    const root = await temporaryDshHome()
+    // The regression specifically hides /tmp, regardless of the host TMPDIR.
+    const root = await temporaryDshHome('/tmp')
     const validatorPath = join(root, 'validator.mjs')
     await writeFile(validatorPath, [
       "import { readFileSync } from 'node:fs'",
