@@ -597,7 +597,10 @@ interface RemoteBootstrapFixture {
 async function remoteBootstrapFixture(
   replacements: Partial<RemoteBootstrapFixture['assets']> = {},
 ): Promise<RemoteBootstrapFixture> {
-  const root = await realpath(await temporaryDshHome())
+  // Bootstrap intentionally validates every real TMPDIR ancestor. Keep this
+  // small trust fixture under Linux's root-owned system tmp, independently
+  // of a capacity-oriented TMPDIR whose ancestors may belong to another UID.
+  const root = await realpath(await temporaryDshHome(process.platform === 'linux' ? '/tmp' : tmpdir()))
   const assetDirectory = join(root, 'release-assets')
   const fakeBin = join(root, 'bin')
   const temporaryDirectory = join(root, 'tmp')
@@ -734,6 +737,8 @@ function runRemoteNpmBootstrap(
 }
 
 interface LifecycleFixtureOptions {
+  /** Opt in only when the test requires /tmp namespace store remounts. */
+  temporaryParent?: string
   readiness?: 'web' | 'host' | 'invalid-host'
   activationFails?: boolean
   effectiveScenario?: 'autonomy' | 'lark' | 'supervised' | 'web'
@@ -851,7 +856,7 @@ interface LifecycleRunOptions {
 }
 
 async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
-  const root = await temporaryDshHome()
+  const root = await temporaryDshHome(options.temporaryParent)
   const dshHome = join(root, 'home')
   const profileDirectory = join(dshHome, 'profiles', 'web')
   const fakeBin = join(root, 'bin')
@@ -1903,8 +1908,8 @@ process.exit(result.status ?? 99)
 // The outer transaction is real; only trusted installer capability APIs and
 // systemd/bwrap are deterministic fixtures. Real signed-source/package contracts
 // are covered by lark-channel's source-maintenance and local-package suites.
-async function preOwnerLifecycleFixture({ baseServices = false, memoryExtension = false }: { baseServices?: boolean; memoryExtension?: boolean } = {}) {
-  const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] }, ...(baseServices ? { readiness: 'host' as const } : {}) })
+async function preOwnerLifecycleFixture({ baseServices = false, memoryExtension = false, temporaryParent }: { baseServices?: boolean; memoryExtension?: boolean; temporaryParent?: string } = {}) {
+  const f = await lifecycleFixture({ ...(temporaryParent === undefined ? {} : { temporaryParent }), systemd: { units: [{ profile: 'web', active: true }] }, ...(baseServices ? { readiness: 'host' as const } : {}) })
   const bootRoot = join(f.root, 'fake-host', 'node_modules', '@deepseek-ai', 'dsh-app-boot')
   await rm(bootRoot)
   await mkdir(join(bootRoot, 'lib'), { recursive: true })
@@ -3685,6 +3690,7 @@ describe('one-click installers', () => {
 
   test('npm upgrade uses an isolated metadata preparation directory and a fd-bound frozen offline store', async () => {
     const f = await lifecycleFixture({
+      temporaryParent: '/tmp', // This case exercises the hidden-/tmp store/cache fd mount contract.
       requirePnpmStore: true, requirePnpmFrozenStore: true, requirePnpmStoreFd: true, requirePnpmProfileCwd: true,
     })
     const result = runInstaller(npmInstaller, [
@@ -11555,7 +11561,8 @@ snapshots:
     expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command.includes('stop'))).toBe(false)
   })
   test('updates the frozen source and runtime through the existing service transaction', async () => {
-    const f = await preOwnerLifecycleFixture()
+    // The four-fd assertion includes both canonical and alias stores hidden by /tmp.
+    const f = await preOwnerLifecycleFixture({ temporaryParent: '/tmp' })
     const result = runPreOwnerLifecycle(f,'local-service-upgrade')
     expect(result.status,result.stderr).toBe(0)
     expect((await stat(f.dshHome)).mode & 0o777).toBe(0o700)
