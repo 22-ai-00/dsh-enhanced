@@ -16,7 +16,7 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 ## 当前交付与验证
 
-`2fe7fc92` 交付前台任务的可信终止观察：Delivery schema 28 原子保存完成、异常、超时、owner 取消或中断的固定事实；原有业务结果与未知副作用保持原语义，观察不授权重放。当前 owner 可按来源摘要及 UTF-8 字节分页读取原始输入；Native Web 记录实际请求的 provider/model/effort，供应商变化永久标记 inconsistent。安装器和只读快照消费者精确支持 schema 23–28；本次补齐 Web owner doctor 的 24–28 检查，各自拒绝未审查版本。修复后的完整根检查待完成。
+`2fe7fc92` 交付前台任务的可信终止观察：Delivery schema 28 原子保存完成、异常、超时、owner 取消或中断的固定事实；原有业务结果与未知副作用保持原语义，观察不授权重放。当前 owner 可按来源摘要及 UTF-8 字节分页读取原始输入；Native Web 记录实际请求的 provider/model/effort，供应商变化永久标记 inconsistent。安装器和只读快照消费者精确支持 schema 23–28；`fb36ac66` 补齐 Web owner doctor 的 24–28 检查，各自拒绝未审查版本。修复后的 Mac/Linux 完整根检查及独立复核均 PASS。
 
 用户于 2026-11-02 明确延后飞书机器人实连和后续真实使用验收，当前先完成代码、单测及可离线核实项。依赖实连的临时双服务升级尚未验收；保留连接门，不以模拟连接替代。
 
@@ -26,7 +26,7 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 - Linux 两轮同样通过功能验收，126.75/75.11 秒，最终工件、预算 2/2、零审批及 Host 正常退出经独立复核。但等待报告重复了审计标识，512 字节 resume 已包含它，故“必须依赖摘要外召回”的前提 FAIL。已纠正父层初次检查遗漏，保留原始证据。
 - 固定通用 prompt 后才生成独立输入；本批生产模型运行总上限 Mac 3 次（含保留的原审批超时失败）、Linux 2 次，已用尽。失败及预算未重置。合成输入不证明 ordinary-use 学习；Outbox pending 不证明外部送达；到期后重启不证明 idle 自动唤醒。
 
-普通失败自动诊断尚未接通：新终止观察和原输入 reader 已补齐来源基础，但 WorkItems 适配、准入时冻结原供应商/独立诊断预算/只读工具契约，以及 Automations 拥有的原生 Agent 执行接口仍待实现。原任务 unknown 不得解释为失败重放；缺失或 inconsistent 的模型记录不得回退到默认供应商。下一交付应在这一边界内打通真实失败信号到有界诊断报告。
+普通失败自动诊断尚未接通。下一交付先实现 Automations 拥有的有界原生 Agent 执行接口：真实 Host occurrence、一次预算、冻结供应商与工具契约、取消及卸载围栏；随后接入 WorkItems 来源适配、准入时冻结诊断计划及原输入召回，打通真实失败信号到诊断报告。原任务 unknown 不得解释为失败重放；缺失或 inconsistent 的模型记录不得回退到默认供应商。独立诊断预算须有明确授权，不冒认原任务剩余额度。
 
 ## 原生升级剩余工作
 
@@ -40,23 +40,21 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 2. 非空历史路径仍待接线：review v1 CAS 保持 used/maximum/history；v2 冻结三 lane 公开身份、最多 1,000 历史成员与 64 步精确证书封存，依赖外部可信 head。原始 TEXT、旧未知成员重新签名、审计漂移与删除历史负例已独立复核；installer、Host head、运行时消费者及非空 adoption 资格仍缺。同 digest copy-only 未支持；旧 Docker 证书不能冒认 Linux 执行资格。
 3. `ac3671fa` pnpm 应用文件 pin 专项及独立复核 PASS（Mac 44、Linux 41）：覆盖实际 native target 或标准 JS package、完整 dist/bin/包内 node_modules、实际 Node 可执行入口与选择；managed launcher 直接运行冻结 target，禁止 packageManager 自动换版本。Node 共享库（包括 libnode）及其他系统依赖仍属 host toolchain 信任边界，不是完整 Node runtime seal。
 4. pre-owner 离线预热当前绑定旧 profile metadata/lock；停服前最终候选依赖图、策略结果和真正断网安装证明待补齐，停服后原校验须保留。旧 scoped-token 候选被真实 pnpm 的 `(protected)` 输出证伪，不能恢复旧支持声明。
+5. 实验性 `--scenario autonomy` 的新安装、Web setup 和 doctor 入口仍要求 Docker image/probe；现有 supervised native prepare 只配置 CP 构建/验收 runner，没有配置 `assistantIsolation`。原生隔离已有 runtime/cgroup 探测，但纯资源准备目前为 Lark 私有入口；需公开非激活资源接口并接通 native 配置、准备和探测链。仅修 doctor 不能完成去 Docker 安装，也不能借资源准备启动服务或扩展 owner 授权。
 
 远端同级 20 个 worktree 及 8 个嵌套验收 worktree 已清理，独立复核 PASS；完整 tar、patch、index、清单及独有成果保留。513 个改动文件全部在 archive，257 在审计时与 `dev@011595b7` 内容一致、126 已在 dev 历史；其余为合成证据、中间版本和上述待整合候选。“备份完成”不代表所有候选逻辑已合入。
 
 ## 最新检查
 
-来源基础的定向验证：Store/source-feed/foreground-execution 在 Mac Node 24.7.0 和 26.11.1 各 53 PASS，快照 69 PASS / 3 skipped，Lark schema 消费者 93 PASS，安装器纯契约 3 PASS。真实原生 Agent 的模拟模型回归覆盖两种入口和延迟创建后的同一 deadline；复核发现的原始 Inbox 字节校验与 deadline 分类问题已修正并保留红绿证据。Delivery 构建、完整 noEmit 类型检查和变更生产文件零警告 lint 均 EXIT 0；原始材料在 `docs/evidence/foreground-termination-{store,producers,compat,integration}/`。
-
-`2fe7fc92` Mac 根检查 FAIL：Web doctor 漏接 schema 28，两个 owner 读取测试得到 unavailable；331.01 秒，EXIT 1，日志 SHA `0b5ce06c459fc8b1ab0ce63de73f92e641c3ab3eb576f29f1e4bdd0261802b1e`。Linux 同提交在确认该兼容问题后主动中止，479.16 秒、EXIT 130，不视为 PASS 或测试 FAIL。两端源码稳定、原始结果及中止原因保留在 `docs/evidence/verification-2fe7fc92/`。修复只补充已审查的 Web doctor 版本及只读回归；Mac 完整 Web owner 80 项、构建、类型检查和 lint 均 EXIT 0，证据在 `docs/evidence/foreground-termination-doctor/`。修后双端根检查和 Linux schema 28 生命周期实例待完成。最新完整通过仍为以下基线。
-
-精确源码提交 `7b90d8dce9b4af4753dd78c5e284612332760ef0`、tree `de3c16d2a6ba32cb4e38f3ec8fb18f1258cae34b`；两端命令均为 `CI=1 VITEST_MAX_WORKERS=2 pnpm check`，pnpm 11.7.0。manifest、零警告 lint、构建、类型检查、测试及 dry-run pack 全部完成；child/runner 均 EXIT 0、源码稳定、无中断。
+精确源码提交 `fb36ac666cd1dc1285df50a7efbf07d816bc0598`、tree `241286b62d4026e47a2af7a8d30e6df6e6ea3620`；两端命令均为 `CI=1 VITEST_MAX_WORKERS=2 pnpm check`，pnpm 11.7.0。manifest、零警告 lint、构建、类型检查、测试及 dry-run pack 全部完成；child/runner 均 EXIT 0、源码稳定、无中断。
 
 | 环境 | 测试 passed / skipped | 文件 passed / skipped | 耗时 | 日志 SHA-256 |
 | --- | --- | --- | --- | --- |
-| Mac / Node 26.11.1 | 9,354 / 1,872 | 658 / 86 | 1153.58 秒 | `08821168632d02021e5b9415355ceb720a6bef2bf564cb35b2be11e90645b6d6` |
-| Linux / Node 24.7.0 | 10,922 / 301 | 712 / 32 | 1924.47 秒 | `4b1f1b4ea8978417d8d278382465dc43915a399c1a6f77fcda7dfc2aa93d0022` |
+| Mac / Node 26.11.1 | 9,404 / 1,873 | 659 / 86 | 1085.01 秒 | `ab0ada489d5fe4afa21408fabbcfab8c9d2ae392f0695397a488b4937cfd5f30` |
+| Linux / Node 24.7.0 | 10,973 / 301 | 713 / 32 | 1932.18 秒 | `54b0b0765a7b3ad573e9c2e6ec69b8153865a98e4b8a8f2b8a03aa008e459a6a` |
 
-- 每端均有 39 个测试组、38 个包及 38 个类型检查完成记录；两端已按精确 Git manifests 独立逐项核对，结论均为 PASS。原始日志、结果与复核记录位于 `docs/evidence/verification-7b90d8dc/`。
-- 检查点测试恢复生产默认 30 秒租约，5 秒等待、250ms 检查点阻塞及全部原生 Goal/数据库断言不变；生产代码未改。定向负例证明 1.1 秒事件循环停顿足以使旧 1 秒 fixture 合法丢失租约，默认租约下完成原断言，无 Goal 对照仍主动释放；这不追认此前根检查的具体负载原因。Linux 本次完整 Delivery 组 1,023 项全部通过，原 `a587b19d` 失败日志保留。
+- 每端均有 39 个测试组、38 个包及 38 个类型检查完成记录；两端已按精确 Git manifests 独立逐项核对，结论均为 PASS。原始日志、结果与复核记录位于 `docs/evidence/verification-fb36ac66/`。Linux Delivery 组 1,067 项全部通过；schema 28 临时服务升级生命周期用例实际通过（2563ms），不等于活服务升级验收。
+- `2fe7fc92` Mac 根检查因 doctor 漏接 schema 28 而 FAIL（EXIT 1）；Linux 在确认同源兼容问题后主动中止（EXIT 130），不视为 PASS 或测试 FAIL。原始结果与原因保留在 `docs/evidence/verification-2fe7fc92/`。修复的 Web owner 80 项及只读数据库/配置不变检查独立 PASS，见 `docs/evidence/foreground-termination-doctor/`。
+- 来源基础专项覆盖 Mac Node 24/26 各 53 项、快照 69 项、Lark 消费者 93 项及原生 Agent 模拟模型回归；复核发现的 Inbox 原始字节校验与同一 deadline 问题已修正，红绿证据位于 `docs/evidence/foreground-termination-{store,producers,compat,integration}/`。
 - 非根基线专项另覆盖 Mac Node 24/26 与 Linux Node 22/24：v2 review 各 100 项、空业务采用 CAS 各 53 项、空历史检查各 39 项、安装接线各 104 项通过并独立复核。它们不等于四种环境都完成根检查。
 - 未发布、未合入 main、未执行 live 原生升级。平台或外部前提导致的跳过、冷安装/prepare 与合成任务，不替代真实连接、普通使用和成长收益验收。
