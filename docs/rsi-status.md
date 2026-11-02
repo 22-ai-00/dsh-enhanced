@@ -42,5 +42,6 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 - Linux `011595b7` 根 `CI=1 VITEST_MAX_WORKERS=2 pnpm check` EXIT 0：10,655 passed / 301 skipped，706 文件通过 / 32 条件跳过，38 包 dry-run pack，1795.40 秒。日志 SHA-256 `ca741791f946d07b5f477bc3aa49746dca5bcdfb5d31060f476a145c0e01ff9d`。此旧基线不含后续能力。
 - `6dab65f2`：WorkItems 226 项、Policy 459 passed / 2 skipped；`eaf835dc`：review grant 62 项；`c2b21905`：WorkItems 239 项。相关类型、lint、构建和各自独立复核 PASS。
-- Mac `71b45c8e` 根检查 EXIT 1：Lark scanner retirement 的路径别名导致 11 项失败、socket 路径过长导致 1 项失败。两夹具已修复，79 项专项及独立复核 PASS；默认 TMPDIR、生产 symlink 拒绝及 100 字节 socket 上限均未放宽。此前 installer/ledger/supervisor 夹具修复也已覆盖。Linux 同基线检查主动中止并保留日志；两端将从同一修复提交重新全检。
+- Mac Lark scanner retirement 的路径别名/socket 长度夹具问题已修复：79 项专项及独立复核 PASS，随后完整 Lark 组 1,126 passed / 314 条件跳过；默认 TMPDIR 和生产路径限制不变。
+- `37a51cce` Linux 根检查捕获本轮 pnpm 重构误删 `createReadStream` 导入，影响既有 Host 收据验证。已恢复导入，并只为该脚本启用 Node 环境的 `no-undef`；lint 负例和全仓 lint 通过，正式 Linux checkout 的 Host/rollback 31 项通过。两端旧根检查均已中止，不能把中止后 pnpm 返回 0 视为通过；最终全检还要求 39 组测试、38 包及无中止记录。
 - 未发布、未合入 main、未执行 live 原生升级。冷安装/prepare、合成任务及条件跳过不替代普通使用与成长收益验收。

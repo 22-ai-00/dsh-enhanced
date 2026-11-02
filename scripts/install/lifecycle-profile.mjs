@@ -2,7 +2,7 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { closeSync, constants, fstatSync, lstatSync, openSync } from 'node:fs'
+import { closeSync, constants, createReadStream, fstatSync, lstatSync, openSync } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, open, opendir, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, writeFile } from 'node:fs/promises'
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'

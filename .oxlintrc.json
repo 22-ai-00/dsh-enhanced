@@ -1,0 +1,10 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "overrides": [
+    {
+      "files": ["scripts/install/lifecycle-profile.mjs"],
+      "env": { "node": true },
+      "rules": { "no-undef": "error" }
+    }
+  ]
+}
