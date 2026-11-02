@@ -1,9 +1,10 @@
+import { types } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { AutomationRunnerInput, AutomationRunnerResult } from './coordinator.js'
 import { runHostNativeAgent } from './native-agent-execution.js'
-import type { HostAgentExecutionContract, HostAgentExecutionResult, HostAutomationExecutorInput } from './types.js'
+import type { HostAgentAuthorizationFence, HostAgentExecutionContract, HostAgentExecutionResult, HostAutomationExecutorInput } from './types.js'
 
 /** Codepoint order, independent of host locale. Includes the complete schema objects. */
 export function hostAgentToolSchemaDigest(schemas: readonly { name: string }[]): string {
@@ -26,6 +27,15 @@ function contractSnapshot(value: HostAgentExecutionContract): Readonly<HostAgent
   const { reasoningEffort, ...required } = contract
   return Object.freeze({ ...required, ...(reasoningEffort === undefined ? {} : { reasoningEffort }), allowedTools: Object.freeze([...contract.allowedTools].sort()) })
 }
+function authorizationSnapshot(value: HostAgentAuthorizationFence): Readonly<HostAgentAuthorizationFence> {
+  if (value === null || typeof value !== 'object' || types.isProxy(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new Error('assistant-automations: invalid authorization fence')
+  const descriptors = Object.getOwnPropertyDescriptors(value)
+  if (Reflect.ownKeys(value).length !== 2 || !['signal','assertCurrent'].every(key => descriptors[key]?.enumerable && Object.hasOwn(descriptors[key]!, 'value'))) throw new Error('assistant-automations: authorization fence requires own data fields')
+  const signal: unknown = descriptors.signal!.value, callback: unknown = descriptors.assertCurrent!.value
+  if (typeof callback !== 'function' || types.isProxy(callback) || types.isAsyncFunction(callback)) throw new Error('assistant-automations: authorization fence must be synchronous')
+  try { Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')!.get!.call(signal) } catch { throw new Error('assistant-automations: authorization fence signal is invalid') }
+  return Object.freeze({ signal: signal as AbortSignal, assertCurrent: callback as () => void })
+}
 interface Invocation {
   readonly input: AutomationRunnerInput
   readonly controller: AbortController
@@ -36,6 +46,8 @@ interface Invocation {
   drain?: Promise<void>
   finished?: boolean
   result?: AutomationRunnerResult
+  observed?: AutomationRunnerResult
+  readObservation?: () => AutomationRunnerResult
 }
 /** Internal capability owner. This object and its runner key never leave the service. */
 export class HostAgentExecutions {
@@ -46,7 +58,7 @@ export class HostAgentExecutions {
   #accepting = true
   constructor(private readonly ctx: Context, private readonly policy: AssistantPolicyService) {}
   runnerKey(): object { return this.#key }
-  open(key: object, invocation: Readonly<HostAutomationExecutorInput>, input: AutomationRunnerInput, freshReservation: boolean): (() => Promise<AutomationRunnerResult | undefined>) | undefined {
+  open(key: object, invocation: Readonly<HostAutomationExecutorInput>, input: AutomationRunnerInput, freshReservation: boolean, publish: (result: AutomationRunnerResult) => void): (() => Promise<AutomationRunnerResult | undefined>) | undefined {
     if (key !== this.#key || !this.#active || !this.#accepting || !freshReservation || input.occurrence.dryRun || input.task.attemptCount !== 1
       || input.automation.definition.retrySafety !== 'never' || input.automation.definition.maxRetries !== 0
       || input.automation.definition.budgetId === undefined || input.signal.aborted || invocation.signal.aborted) return undefined
@@ -55,6 +67,7 @@ export class HostAgentExecutions {
     const state: Invocation = { input: { ...snapshot, signal: input.signal }, controller, signal: AbortSignal.any([invocation.signal, controller.signal]), active: true, consumed: false }
     this.#invocations.set(invocation, state); this.#live.add(state)
     return async () => {
+      observeInvocation(state)
       state.active = false
       this.#invocations.delete(invocation)
       state.controller.abort('host-executor-ended')
@@ -62,17 +75,23 @@ export class HostAgentExecutions {
         if (state.pending) await drainInvocation(state)
         if (state.consumed && !state.finished) throw new Error('assistant-automations: executor abandoned its Agent execution')
         return state.result
-      } finally { this.#live.delete(state) }
+      } finally {
+        observeInvocation(state)
+        const receipt = state.result ?? state.observed
+        if (receipt !== undefined) publish(receipt)
+        this.#live.delete(state)
+      }
     }
   }
-  run(invocation: HostAutomationExecutorInput, value: HostAgentExecutionContract): Promise<Readonly<HostAgentExecutionResult>> {
-    const execution = this.execute(invocation, value)
+  run(invocation: HostAutomationExecutorInput, value: HostAgentExecutionContract, authorization?: HostAgentAuthorizationFence): Promise<Readonly<HostAgentExecutionResult>> {
+    const execution = this.execute(invocation, value, authorization)
     void execution.catch(() => {})
     return execution
   }
-  private async execute(invocation: HostAutomationExecutorInput, value: HostAgentExecutionContract): Promise<Readonly<HostAgentExecutionResult>> {
+  private async execute(invocation: HostAutomationExecutorInput, value: HostAgentExecutionContract, authorization?: HostAgentAuthorizationFence): Promise<Readonly<HostAgentExecutionResult>> {
     const state = this.#invocations.get(invocation)
     if (!this.#active || !this.#accepting || !state?.active || state.consumed || state.signal.aborted) throw new Error('assistant-automations: exact live reserved Host invocation is required')
+    const fence = authorization === undefined ? undefined : authorizationSnapshot(authorization)
     const contract = contractSnapshot(value)
     if (contract.timeoutMs > state.input.automation.definition.timeoutMs) throw new Error('assistant-automations: Host Agent deadline exceeds occurrence contract')
     const contractDigest = acceptanceDigest(contract)
@@ -81,23 +100,40 @@ export class HostAgentExecutions {
     if (!Number.isSafeInteger(startedAt) || startedAt > now || !Number.isSafeInteger(occurrenceDeadlineAt)) throw new Error('assistant-automations: Host occurrence start time is invalid')
     const deadlineAt = Math.min(occurrenceDeadlineAt, now + contract.timeoutMs)
     const deadline = new AbortController()
-    const signal = AbortSignal.any([state.signal, deadline.signal])
+    const signal = AbortSignal.any([state.signal, deadline.signal, ...(fence === undefined ? [] : [fence.signal])])
     // Contract cloning can invoke getters which synchronously consume or revoke this invocation.
     if (!this.#active || !this.#accepting || this.#invocations.get(invocation) !== state
       || !state.active || state.consumed || state.signal.aborted) throw new Error('assistant-automations: exact live reserved Host invocation is required')
     const check = () => {
       if (Date.now() >= deadlineAt) deadline.abort('host-agent-deadline')
       signal.throwIfAborted()
-      if (!this.#active || !this.#accepting || !state.active) throw new Error('assistant-automations: Host Agent invocation is no longer active')
+      if (!this.#active || !this.#accepting || this.#invocations.get(invocation) !== state || !state.active) throw new Error('assistant-automations: Host Agent invocation is no longer active')
     }
     check()
     state.consumed = true
+    const authorize = fence === undefined ? undefined : () => {
+      try {
+        check()
+        const result: unknown = fence.assertCurrent()
+        // Best-effort rejection observation for ordinary built-in Promises, not hostile constructor/species objects.
+        if (types.isPromise(result)) void Promise.prototype.then.call(result, () => {}, () => {})
+        if (result !== undefined) throw new Error('assistant-automations: authorization fence must return synchronously without a value')
+        check()
+      } catch (error) {
+        state.active = false
+        this.#invocations.delete(invocation)
+        state.controller.abort('host-agent-authorization-revoked')
+        throw error
+      }
+    }
     let timer: ReturnType<typeof setTimeout> | undefined
     let removeAbort: (() => void) | undefined
     try {
+      authorize?.()
       timer = setTimeout(() => deadline.abort('host-agent-deadline'), Math.max(0, deadlineAt - Date.now()))
       timer.unref?.()
-      const pending = runHostNativeAgent(this.ctx, this.policy, state.input, contract, contractDigest, signal, Object.freeze({ deadlineAt, check }))
+      const pending = runHostNativeAgent(this.ctx, this.policy, state.input, contract, contractDigest, signal, Object.freeze({ deadlineAt, check, ...(authorize === undefined ? {} : { authorize }),
+        observe: (read: () => AutomationRunnerResult) => { if (state.active && !signal.aborted) state.readObservation = read } }))
       state.pending = pending
       // Observe rejection even when a faulty executor drops its returned promise.
       void pending.catch(() => {})
@@ -107,6 +143,7 @@ export class HostAgentExecutions {
         removeAbort = () => signal.removeEventListener('abort', abort)
       })
       const result = await Promise.race([pending, cancelled])
+      authorize?.()
       check()
       const snapshot = snapshotResult(result)
       check()
@@ -122,6 +159,21 @@ export class HostAgentExecutions {
   resume(): void { if (this.#active) this.#accepting = true }
   async drain(): Promise<void> { await Promise.all([...this.#live].map(async state => { if (state.pending) await drainInvocation(state) })) }
   async dispose(): Promise<void> { this.#active = false; this.suspend(); await this.drain() }
+}
+/** Audit-only lower bound, sampled even when authorization or teardown is no longer confirmed. */
+function observeInvocation(state: Invocation): void {
+  try {
+    const observation = state.readObservation?.()
+    if (!observation || observation.sessionId !== state.input.sessionId) return
+    const usage: Record<string, unknown> = { observedPartial: true }
+    for (const [key, value] of Object.entries(observation.usage)) {
+      if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) continue
+      const prior = state.observed?.usage[key]
+      usage[key] = typeof prior === 'number' ? Math.max(prior, value) : value
+    }
+    state.observed = snapshotResult({ outcome: 'unknown', output: '', sessionId: observation.sessionId,
+      usage, quiescent: false })
+  } catch { /* Retain any prior observation; missing audit data never authorizes success. */ }
 }
 function snapshotResult(result: AutomationRunnerResult): AutomationRunnerResult {
   const descriptors = Object.getOwnPropertyDescriptors(result)

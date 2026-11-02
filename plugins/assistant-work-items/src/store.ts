@@ -1,6 +1,8 @@
 import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { canonicalDiagnosis, diagnosisPlanMatchesItem, MAX_DIAGNOSIS_EVENT_BYTES, parseDiagnosisPlan, strictDiagnosisJson, type WorkItemDiagnosisPlan } from './diagnosis-contract.js'
 import {
   deriveReportOutcome,
   deriveRetryExhaustedOutcome,
@@ -777,10 +779,10 @@ export class WorkItemStore {
     }
   }
 
-  #appendEvent(itemId: string, kind: string, actor: string, detail: unknown, now: number): void {
+  #appendEvent(itemId: string, kind: string, actor: string, detail: unknown, now: number, canonical = false): void {
     const next = this.#statement('SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM work_item_event WHERE item_id = ?').get(itemId) as Row
     this.#statement('INSERT INTO work_item_event(item_id, sequence, kind, actor, detail, recorded_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(itemId, Number(next['next']), kind, actor, detail === undefined ? null : JSON.stringify(detail), now)
+      .run(itemId, Number(next['next']), kind, actor, detail === undefined ? null : canonical ? canonicalDiagnosis(detail) : JSON.stringify(detail), now)
   }
 
   #requireItem(itemId: string): WorkItemRecord {
@@ -854,6 +856,101 @@ export class WorkItemStore {
     this.#statement(
       'INSERT INTO work_item_schema_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
     ).run(key, value)
+  }
+
+  /** Full SQLite bytes; TEXT projection is insufficient for authority-bearing JSON. */
+  readCanonicalMeta(key: string): unknown {
+    const row = this.#statement('SELECT CAST(value AS BLOB) AS bytes FROM work_item_schema_meta WHERE key = ?').get(key) as Row | undefined
+    if (row === undefined) return undefined
+    return strictDiagnosisJson(this.#diagnosisBytes(row['bytes']))
+  }
+
+  #diagnosisBytes(value: unknown): string {
+    if (!(value instanceof Uint8Array) || value.byteLength > MAX_DIAGNOSIS_EVENT_BYTES) fail('storage', 'diagnosis byte representation is invalid')
+    try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(value) } catch { fail('storage', 'diagnosis bytes are not valid UTF-8') }
+  }
+
+  /** Only the exact first admitted event may confer a diagnostic plan. Never scan later events for one. */
+  readDiagnosisPlan(itemId: string): Readonly<WorkItemDiagnosisPlan> | undefined {
+    const item = this.#requireItem(itemId)
+    const first = this.#statement('SELECT sequence,kind,actor,recorded_at,CAST(detail AS BLOB) AS bytes FROM work_item_event WHERE item_id = ? ORDER BY sequence ASC LIMIT 1').get(itemId) as Row | undefined
+    if (!first || first['bytes'] === null) return undefined
+    const bytes = this.#diagnosisBytes(first['bytes'])
+    let detail: unknown
+    try { detail = JSON.parse(bytes) } catch { fail('storage', 'diagnosis admission JSON is invalid') }
+    if (!detail || typeof detail !== 'object' || Array.isArray(detail) || !Object.hasOwn(detail, 'diagnosisPlan')) return undefined
+    if (first['sequence'] !== 1 || first['kind'] !== 'admitted' || first['actor'] !== 'admission'
+      || first['recorded_at'] !== item.createdAt || item.observed) fail('storage', 'diagnosis requires the original admitted event')
+    if (!this.#statement("SELECT 1 FROM work_item_event WHERE item_id=? AND sequence=1 AND kind='admitted' AND actor='admission'").get(itemId)) fail('storage', 'diagnosis original actor or kind differs')
+    const originals = this.#statement("SELECT sequence FROM work_item_event WHERE item_id = ? AND kind IN ('admitted','observed') LIMIT 2").all(itemId)
+    if (originals.length !== 1 || acceptanceCanonicalJson(detail) !== bytes) fail('storage', 'diagnosis admission event is not unique and canonical')
+    const fields = detail as Record<string, unknown>
+    if (Object.keys(fields).sort().join(',') !== 'dedupBucket,diagnosisPlan,kind,provenance'
+      || fields['kind'] !== item.kind || fields['dedupBucket'] !== item.dedupBucket) fail('storage', 'diagnosis admission fields differ')
+    const plan = parseDiagnosisPlan(fields['diagnosisPlan'])
+    if (!diagnosisPlanMatchesItem(plan, item)) fail('storage', 'diagnosis plan belongs to another admission')
+    // Bound equality uses complete SQLite strings, including any hidden NUL suffix.
+    if (!this.#statement(`SELECT 1 FROM work_item WHERE id=? AND external_id=? AND origin_binding_id=? AND source_id=?
+      AND kind=? AND worker_automation_id=? AND workspace=? AND agent_preset=? AND principal_id=? AND principal_record_id=?
+      AND owner_route_id=? AND authority_basis=? AND work_dir=? AND dedup_key=?`)
+      .get(itemId, plan.item.externalId, plan.item.originBindingId, plan.item.sourceId, plan.item.kind, plan.item.workerAutomationId,
+        plan.item.scope.workspace, plan.item.scope.preset, plan.item.scope.principalId, plan.item.owner.principalRecordId,
+        plan.item.scope.ownerRouteId, JSON.stringify(item.authority), plan.item.workDir, plan.item.dedupKey)) fail('storage', 'diagnosis item text differs from its sealed plan')
+    return plan
+  }
+
+  diagnosisInterventionPending(itemId: string): boolean {
+    return this.#statement(`SELECT 1 FROM work_item_event AS e WHERE e.item_id=?
+      AND e.kind IN ('diagnosis-unknown','diagnosis-refused') AND e.actor='diagnosis-runtime'
+      AND e.sequence > COALESCE((SELECT MAX(c.sequence) FROM work_item_event AS c WHERE c.item_id=e.item_id
+        AND c.kind='diagnosis-intervention-cleared' AND c.actor='explicit-withdraw'),0) LIMIT 1`).get(itemId) !== undefined
+  }
+
+  diagnosisInterventionItems(limit = 100): readonly WorkItemRecord[] {
+    return Object.freeze((this.#statement(`SELECT ${ITEM_ALIASES} FROM work_item WHERE EXISTS (
+      SELECT 1 FROM work_item_event AS e WHERE e.item_id=work_item.id
+      AND e.kind IN ('diagnosis-unknown','diagnosis-refused') AND e.actor='diagnosis-runtime'
+      AND e.sequence > COALESCE((SELECT MAX(c.sequence) FROM work_item_event AS c WHERE c.item_id=e.item_id
+        AND c.kind='diagnosis-intervention-cleared' AND c.actor='explicit-withdraw'),0))
+      ORDER BY created_at ASC,id ASC LIMIT ?`).all(limit) as Row[]).map(itemFromRow))
+  }
+
+  diagnosisExplicitlyDisposed(itemId: string): boolean {
+    return this.#statement(`SELECT 1 FROM work_item_event AS e WHERE e.item_id=?
+      AND e.kind='diagnosis-intervention-cleared' AND e.actor='explicit-withdraw'
+      AND e.sequence > COALESCE((SELECT MAX(previous.sequence) FROM work_item_event AS previous
+        WHERE previous.item_id=e.item_id AND previous.kind IN ('reported','diagnosis-unknown','diagnosis-refused')),0) LIMIT 1`).get(itemId) !== undefined
+  }
+
+  clearDiagnosisIntervention(itemId: string): void {
+    this.#requireItem(itemId)
+    if (this.diagnosisExplicitlyDisposed(itemId)) return
+    this.appendEvent(itemId, 'diagnosis-intervention-cleared', 'explicit-withdraw', { reduction: 'no-further-diagnostic-work' })
+  }
+
+  /** Locate a real report, then prove its released/completed claim using complete NUL-delimited bytes. */
+  diagnosisReportOccurrence(itemId: string, revision: number): Readonly<{ itemId: string; revision: number; status: string; occurrenceId: string }> {
+    const row = this.#statement("SELECT status,CAST(idempotency_key AS BLOB) AS bytes FROM work_item_report WHERE item_id=? AND revision=? AND status IN ('waiting','ready','blocked','failed')")
+      .get(itemId, revision) as Row | undefined
+    if (!row) fail('storage', 'diagnosis report is unavailable')
+    const key = this.#diagnosisBytes(row['bytes']), separator = key.lastIndexOf('\0'), tail = key.slice(separator + 1)
+    if (!/^[1-9][0-9]*$/u.test(tail) || !Number.isSafeInteger(Number(tail)) || !key.endsWith(`\0${itemId}\0${tail}`)) fail('storage', 'diagnosis report claim binding is invalid')
+    const claim = this.#statement(`SELECT CAST(run_id AS BLOB) AS run_bytes,CAST(occurrence_id AS BLOB) AS occurrence_bytes
+      FROM work_item_claim WHERE claim_id=? AND item_id=? AND state IN ('released','completed') AND run_id=occurrence_id`)
+      .get(Number(tail), itemId) as Row | undefined
+    if (!claim || !this.#statement('SELECT 1 FROM work_item_report WHERE item_id=? AND revision=? AND idempotency_key=?').get(itemId, revision, key)) fail('storage', 'diagnosis report is not bound to its completed claim')
+    const runId = this.#diagnosisBytes(claim['run_bytes']), occurrenceId = this.#diagnosisBytes(claim['occurrence_bytes'])
+    if (runId !== occurrenceId || !this.#statement('SELECT 1 FROM work_item_claim WHERE claim_id=? AND item_id=? AND run_id=? AND occurrence_id=?')
+      .get(Number(tail), itemId, runId, occurrenceId)) fail('storage', 'diagnosis report occurrence bytes differ')
+    return Object.freeze({ itemId, revision, status: String(row['status']), occurrenceId })
+  }
+
+  /** Row order is database-owned; wall-clock jumps cannot choose a different last report. */
+  latestWorkerDiagnosisReport(workerId?: string): Readonly<{ itemId: string; revision: number; status: string; occurrenceId: string }> | undefined {
+    const row = this.#statement(`SELECT report.item_id,report.revision FROM work_item_report AS report
+      JOIN work_item AS item ON item.id=report.item_id WHERE (? IS NULL OR item.worker_automation_id=?)
+      AND report.status IN ('waiting','ready','blocked','failed') ORDER BY report.rowid DESC LIMIT 1`).get(workerId ?? null, workerId ?? null) as Row | undefined
+    return row ? this.diagnosisReportOccurrence(String(row['item_id']), Number(row['revision'])) : undefined
   }
 
   /** Drop one durable key/value row when its cursor no longer applies. */
@@ -1174,7 +1271,10 @@ export class WorkItemStore {
     event: { kind: string; actor: string; detail?: unknown },
     dispatch: WorkItemDispatchRecord,
     follows: readonly WorkItemFollowInput[] = [],
+    diagnosisPlan?: WorkItemDiagnosisPlan,
   ): void {
+    if (diagnosisPlan && (event.kind !== 'admitted' || event.actor !== 'admission' || record.observed
+      || !diagnosisPlanMatchesItem(parseDiagnosisPlan(diagnosisPlan), record))) fail('storage', 'diagnosis admission event does not match its item')
     this.#transaction(() => {
       this.#statement(INSERT_ITEM).run(
         record.id, record.dedupKey, record.dedupBucket, record.sourceId, record.kind, record.externalId,
@@ -1186,7 +1286,8 @@ export class WorkItemStore {
         record.workDir, record.lastReportStatus, record.observed ? 1 : 0, record.createdAt, record.updatedAt,
         record.authority === null ? null : JSON.stringify(record.authority), null,
       )
-      this.#appendEvent(record.id, event.kind, event.actor, event.detail, record.createdAt)
+      const detail = diagnosisPlan === undefined ? event.detail : { ...(event.detail as Record<string, unknown>), diagnosisPlan }
+      this.#appendEvent(record.id, event.kind, event.actor, detail, record.createdAt, diagnosisPlan !== undefined)
       this.#statement(`
         INSERT INTO work_item_dispatch(item_id, automation_id, event_id, occurred_at, generation, wake_attempts, state, occurrence_id, reason, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1950,8 +2051,8 @@ export class WorkItemStore {
    * claim row (and a new attempt), instead of replaying a dead lease forever.
    * A competing run loses with `claim-conflict`.
    */
-  claim(input: { itemId: string; runId: string; occurrenceId: string; leaseMs: number }): ClaimResult {
-    this.reclaimExpired()
+  claim(input: { itemId: string; runId: string; occurrenceId: string; leaseMs: number; reclaimExpired?: boolean }): ClaimResult {
+    if (input.reclaimExpired !== false) this.reclaimExpired()
     const outcome = this.#transaction(() => {
       const item = this.#requireItem(input.itemId)
       if (item.observed) fail('invalid-state', 'observed items cannot be claimed')

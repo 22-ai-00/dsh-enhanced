@@ -18,6 +18,7 @@ import type {
   WorkItemWithdrawResult,
 } from './types.ts'
 import { OPEN_STATES, WorkItemError } from './types.ts'
+import type { WorkItemDiagnosisPlan } from './diagnosis-contract.js'
 import type { WorkItemWorkspace } from './workspace.ts'
 
 const KIND = /^[a-z][a-z0-9-]{0,63}$/
@@ -141,7 +142,8 @@ export interface AdmissionDependencies {
   readonly ledger: WorkItemLedger
   readonly workspace: WorkItemWorkspace
   readonly policy: PeerPolicyService | undefined
-  readonly delivery: PeerDeliveryService | undefined
+  readonly delivery: PeerDeliveryService | undefined | (() => PeerDeliveryService | undefined)
+  readonly diagnosisPlanFor?: (input: WorkItemAdmitInput) => ((item: WorkItemRecord) => Readonly<WorkItemDiagnosisPlan>) | undefined
   /**
    * Look up the registered thread source for one ref kind.
    *
@@ -191,6 +193,8 @@ export class WorkItemAdmission {
   admit(input: WorkItemAdmitInput): WorkItemAdmitResult {
     const config = this.#config
     if (!config.enabled) fail('disabled', 'the work-item intake is disabled')
+    const planBuilder = config.diagnosis && isActive(config) ? this.#deps.diagnosisPlanFor?.(input) : undefined
+    if (config.diagnosis && isActive(config) && !planBuilder) fail('invalid-input', 'diagnosis worker admits only its private canonical source')
     const now = this.#now()
     const normalized = this.#normalize(input)
     const follows = this.#followInputs(normalized.follows)
@@ -198,7 +202,7 @@ export class WorkItemAdmission {
     const active = isActive(config)
 
     // Lazy recovery keeps the open-item count honest without a timer.
-    this.#deps.ledger.recover()
+    if (!config.diagnosis) this.#deps.ledger.recover()
 
     const dedupKey = dedupKeyFor(config.intakeSourceId, normalized.kind, normalized.externalId)
     const dedupBucket = dedupBucketFor(now, config.admission.dedupWindowMs)
@@ -294,6 +298,7 @@ export class WorkItemAdmission {
       },
       dispatch,
       follows,
+      planBuilder?.(item),
     )
     return Object.freeze({ item, created: true, dispatch })
   }
@@ -381,7 +386,7 @@ export class WorkItemAdmission {
     const scope = this.#config.scope
     if (scope === null) fail('owner-route-unavailable', 'no owner scope is configured')
     if (scope.expiresAt <= now) fail('owner-route-expired', 'the configured owner scope expired')
-    const delivery = this.#deps.delivery
+    const delivery = typeof this.#deps.delivery === 'function' ? this.#deps.delivery() : this.#deps.delivery
     if (delivery === undefined) fail('owner-route-unavailable', 'assistantDelivery is required to validate the owner route')
     let receipt: Readonly<PeerOwnerRouteReceipt>
     try {

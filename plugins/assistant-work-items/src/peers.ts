@@ -9,6 +9,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition, ToolExecution } from '@deepseek-ai/dsh-tools'
+import type { AutomationRecord, HostAutomationDefinition, HostAutomationExecutor, HostAutomationExecutorInput, HostAgentExecutionContract, HostAgentExecutionResult, HostAgentAuthorizationFence } from '@dsh-enhanced/assistant-automations'
+export type { HostAutomationExecutorInput, HostAgentExecutionContract, HostAgentExecutionResult } from '@dsh-enhanced/assistant-automations'
 
 export type PeerPolicyEffect = 'allow' | 'deny'
 export type PeerPolicyInitiator = 'background' | 'external' | 'foreground'
@@ -75,6 +77,8 @@ export interface PeerOwnerForegroundExecution {
   readonly quiescent: boolean
   readonly completedAt: number
   readonly executionRef: string
+  readonly modelSelectionState?: 'missing' | 'frozen' | 'inconsistent'
+  readonly modelSelection?: Readonly<{ provider: string; model: string; reasoningEffort?: string }>
 }
 
 export interface PeerOwnerForegroundTaskSource {
@@ -88,6 +92,9 @@ export interface PeerOwnerForegroundTaskSource {
   readonly scope: Readonly<{ workspace: string; preset: string }>
   readonly binding: Readonly<{ id: string; version: number; generation: number; sessionId: string }>
   readonly execution: Readonly<PeerOwnerForegroundExecution>
+  readonly owner?: Readonly<{ principalRecordId: string; principalVersion: number }>
+  readonly termination?: Readonly<{ protocol: 'assistant-delivery/foreground-termination/v1'; producer: string; kind: string;
+    causeCode: string; handleDisposed: boolean; effects: 'unknown'; replay: 'forbidden' }>
 }
 
 export interface PeerOwnerForegroundTaskSourcePage {
@@ -95,6 +102,11 @@ export interface PeerOwnerForegroundTaskSourcePage {
   readonly nextCursor: unknown
   readonly watermark: number
   readonly hasMore: boolean
+}
+
+export interface PeerForegroundSourceScope {
+  authorityId: string; principalId: string; workspace: string; agentPreset: string
+  expectedOwner: Readonly<{ authorityHash: string; principalRecordId: string; principalVersion: number }>
 }
 
 /** `assistant-delivery` surfaces used by this plugin. */
@@ -126,6 +138,11 @@ export interface PeerDeliveryService {
     after?: unknown
     limit?: number
   }): Readonly<PeerOwnerForegroundTaskSourcePage>
+  inspectOwnerForegroundTaskSource?(input: PeerForegroundSourceScope & { inboxId: string }): Readonly<PeerOwnerForegroundTaskSource> | undefined
+  readOwnerForegroundTaskInput?(input: PeerForegroundSourceScope & { inboxId: string; expectedSourceDigest: string; offset?: number; maxBytes?: number }): Readonly<{
+    source: PeerOwnerForegroundTaskSource; sourceDigest: string; contentDigest: string;
+    input: { text: string; fullTextDigest: string; fullBytes: number; returnedBytes: number; offset: number; nextOffset?: number }
+  }> | undefined
   enqueueBackground(input: {
     sourceId: string
     workspace: string
@@ -139,6 +156,12 @@ export interface PeerDeliveryService {
 
 /** `assistant-automations` external-event intake. */
 export interface PeerAutomationsService {
+  hostAgentAuthorizationVersion?(): 1
+  runAgentForHostExecution?(input: HostAutomationExecutorInput, contract: HostAgentExecutionContract, authorization?: HostAgentAuthorizationFence): Promise<Readonly<HostAgentExecutionResult>>
+  registerHostExecutor?(executor: HostAutomationExecutor): () => void
+  reconcileSystem?(input: { owner: string; automationId: string; idempotencyKey: string; definition: HostAutomationDefinition; desiredStatus: 'active' }): AutomationRecord
+  inspectSystemOwned?(input: { owner: string; automationId: string }): { owner: string; automationId: string; automationStatus: string; definitionHash: string; definitionVersion: number; latestTerminalRuns?: { production?: { occurrenceId?: string; status: string; executionMode: string; diagnostic: { budgetSettlementState: string }; immutableContext: { state: 'unknown' } | { state: 'verified'; definitionHash: string; definitionVersion: number; scope: { workspace: string; agentPreset: string } } } } }
+  inspectSystemOwnedActivation?(input: { owner: string; automationId: string }): Readonly<{ definitionHash: string; activationNonce: string; ownerRouteId: string }> | undefined
   /** Native scheduler lifecycle notification; absent on older peers. */
   onSchedulerWake?(listener: () => void): () => void
   ingestExternal(input: {

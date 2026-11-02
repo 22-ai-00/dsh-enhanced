@@ -49,7 +49,8 @@
     }
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "catalog:"
+    "@deepseek-ai/schemastery": "catalog:",
+    "@dsh-enhanced/task-acceptance-contract": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -85,7 +86,13 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "catalog:",
+    "@deepseek-ai/cordis-plugin-loader": "catalog:",
     "@deepseek-ai/dsh-agent": "catalog:",
+    "@deepseek-ai/dsh-agent-loop": "catalog:",
+    "@deepseek-ai/dsh-agent-loop-testkit": "catalog:",
+    "@deepseek-ai/dsh-llm": "catalog:",
+    "@deepseek-ai/dsh-session": "catalog:",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
     "@dsh-enhanced/assistant-automations": "workspace:*",
     "@dsh-enhanced/assistant-delivery": "workspace:*",

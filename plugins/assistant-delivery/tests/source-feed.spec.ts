@@ -294,6 +294,28 @@ describe('durable owner foreground completion feed', () => {
     expect(f.store.listOwnerForegroundTaskSources(f.scope, authority)).toMatchObject({ items: [], watermark: 4, hasMore: false })
   })
 
+  test('advances across an empty filtered page and a filtered tail without losing the next ordinary source', async () => {
+    const f = await fixture()
+    const control = dispatch(f.store, f.binding, 'filtered-first', { text: '/model', kind: 'command' })
+    complete(f.store, control.record.id); processed(f.store, control)
+    const ordinary = dispatch(f.store, f.binding, 'ordinary-middle')
+    complete(f.store, ordinary.record.id); processed(f.store, ordinary)
+    const tail = dispatch(f.store, f.binding, 'filtered-tail', { text: '/permission auto', kind: 'command' })
+    complete(f.store, tail.record.id); processed(f.store, tail)
+
+    const first = f.store.listOwnerForegroundTaskSources({ ...f.scope, limit: 1 }, authority)
+    expect(first).toMatchObject({ items: [], hasMore: true, watermark: 3, nextCursor: { sequence: 1 } })
+    const remaining = f.store.listOwnerForegroundTaskSources({ ...f.scope, after: first.nextCursor, limit: 2 }, authority)
+    expect(remaining.items.map(source => source.inboxId)).toEqual([ordinary.record.id])
+    expect(remaining).toMatchObject({ hasMore: false, nextCursor: { sequence: 3 } })
+
+    const later = dispatch(f.store, f.binding, 'ordinary-after-filtered-tail')
+    complete(f.store, later.record.id)
+    const next = f.store.listOwnerForegroundTaskSources({ ...f.scope, after: remaining.nextCursor, limit: 1 }, authority)
+    expect(next.items.map(source => source.inboxId)).toEqual([later.record.id])
+    expect(next).toMatchObject({ hasMore: false, nextCursor: { sequence: 4 } })
+  })
+
   test('backfills v24 terminal receipts deterministically and orders old already-open writer completions atomically', async () => {
     const f = await fixture()
     const first = dispatch(f.store, f.binding, 'history-first')

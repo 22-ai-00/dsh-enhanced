@@ -431,6 +431,8 @@ export type AutomationCircuitExecutionDecision =
  */
 export interface SystemOwnedAutomationTerminalRunProjection {
   runId: string
+  /** Present on current Hosts; consumers requiring exact continuation must reject absence. */
+  occurrenceId?: string
   status: AutomationRunStatus
   executionMode: AutomationExecutionMode
   diagnostic: AutomationExecutionDiagnostic
@@ -679,4 +681,10 @@ export interface HostAgentExecutionResult {
   readonly diagnostic?: AutomationExecutionDiagnostic
   readonly quiescent?: boolean
   readonly contractDigest: string
+}
+
+/** Nonpersistent synchronous owner/source authorization for one Host Agent invocation. */
+export interface HostAgentAuthorizationFence {
+  readonly signal: AbortSignal
+  readonly assertCurrent: () => void
 }

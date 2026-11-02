@@ -17,6 +17,29 @@ export interface Config {
   delivery?: DeliveryConfig
   sources?: SourcesConfig
   settlement?: SettlementConfig
+  diagnosis?: DiagnosisConfig
+}
+
+/** Independent finite diagnosis authority; enabled deployments must spell out every limit. */
+export interface DiagnosisConfig {
+  enabled?: boolean
+  budgetId?: string
+  budgetAmount?: number
+  maxModelCalls?: number
+  maxToolCalls?: number
+  maxOutputTokens?: number
+  timeoutMs?: number
+  expiresAt?: number
+}
+export interface NormalizedDiagnosis {
+  readonly enabled: true
+  readonly budgetId: string
+  readonly budgetAmount: number
+  readonly maxModelCalls: number
+  readonly maxToolCalls: number
+  readonly maxOutputTokens: number
+  readonly timeoutMs: number
+  readonly expiresAt: number
 }
 
 export interface ScopeConfig {
@@ -98,6 +121,7 @@ export interface NormalizedConfig {
   readonly notifyOn: readonly WorkItemReportStatus[]
   readonly sources: NormalizedSources
   readonly settlement: NormalizedSettlement
+  readonly diagnosis?: NormalizedDiagnosis
 }
 
 export interface NormalizedForegroundFailureSource {
@@ -158,7 +182,7 @@ const DELIVERY_KEYS = ['notifyOn'] as const
 const SETTLEMENT_KEYS = ['enabled', 'windowMs', 'sweepIntervalMs', 'maxSourcesPerSweep', 'maxPendingPerSweep', 'maxSettlementsPerSweep'] as const
 const SOURCES_KEYS = ['foregroundFailures'] as const
 const FOREGROUND_FAILURE_KEYS = ['enabled', 'kind', 'includeTimedOut', 'maxCandidatesPerSweep', 'maxAdmitsPerSweep', 'sweepIntervalMs'] as const
-const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement'] as const
+const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis'] as const
 const REPORT_STATUSES = ['progress', 'waiting', 'ready', 'blocked', 'failed'] as const
 const NOTIFY_STATUSES = ['ready', 'blocked', 'failed'] as const
 
@@ -221,12 +245,19 @@ export const ConfigSchema = Schema.object({
   workRoot: Schema.string().required(),
   intakeSourceId: Schema.string().default('work-items/v1'),
   workerAutomationId: Schema.string(),
-  scope: scopeSchema,
+  // Object schemas default to {}; the union preserves an absent optional scope.
+  scope: Schema.union([Schema.const(undefined), scopeSchema]),
   admission: admissionSchema,
   limits: limitsSchema,
   delivery: deliverySchema,
   sources: sourcesSchema,
   settlement: settlementSchema,
+  diagnosis: Schema.object({
+    enabled: Schema.boolean().default(false),
+    budgetId: Schema.string(), budgetAmount: Schema.number().step(1),
+    maxModelCalls: Schema.number().step(1), maxToolCalls: Schema.number().step(1),
+    maxOutputTokens: Schema.number().step(1), timeoutMs: Schema.number().step(1), expiresAt: Schema.number().step(1),
+  }),
 }) as Schema<Config>
 
 function fail(code: WorkItemErrorCode, message: string): never {
@@ -396,6 +427,23 @@ function normalizeSettlement(raw: SettlementConfig | undefined): NormalizedSettl
   })
 }
 
+function normalizeDiagnosis(raw: DiagnosisConfig | undefined, scope: WorkItemScope | null, now: number): NormalizedDiagnosis | undefined {
+  if (raw === undefined) return undefined
+  const value = plainObject(raw, 'diagnosis')
+  rejectUnknown(value, ['enabled', 'budgetId', 'budgetAmount', 'maxModelCalls', 'maxToolCalls', 'maxOutputTokens', 'timeoutMs', 'expiresAt'], 'diagnosis')
+  if (value['enabled'] === undefined || value['enabled'] === false) return undefined
+  if (value['enabled'] !== true) fail('invalid-input', 'diagnosis.enabled must be a boolean')
+  if (scope === null) fail('invalid-input', 'diagnosis requires an explicit owner scope')
+  const expiresAt = integer(value['expiresAt'], 'diagnosis.expiresAt', 1, Number.MAX_SAFE_INTEGER)
+  if (expiresAt <= now || expiresAt > scope.expiresAt) fail('invalid-input', 'diagnosis expiry must be future and no later than the owner scope')
+  return Object.freeze({ enabled: true, budgetId: text(value['budgetId'], 'diagnosis.budgetId', 200),
+    budgetAmount: integer(value['budgetAmount'], 'diagnosis.budgetAmount', 1, 10_000_000),
+    maxModelCalls: integer(value['maxModelCalls'], 'diagnosis.maxModelCalls', 1, 100),
+    maxToolCalls: integer(value['maxToolCalls'], 'diagnosis.maxToolCalls', 1, 1000),
+    maxOutputTokens: integer(value['maxOutputTokens'], 'diagnosis.maxOutputTokens', 1, 131072),
+    timeoutMs: integer(value['timeoutMs'], 'diagnosis.timeoutMs', 1000, 300000), expiresAt })
+}
+
 /** True when at least one automatic signal source is armed. */
 export function anySourceEnabled(config: NormalizedConfig): boolean {
   return config.sources.foregroundFailures.enabled
@@ -434,6 +482,8 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   const notifyOn = normalizeDelivery(value['delivery'] as DeliveryConfig | undefined)
   const sources = normalizeSources(value['sources'] as SourcesConfig | undefined)
   const settlement = normalizeSettlement(value['settlement'] as SettlementConfig | undefined)
+  const diagnosis = normalizeDiagnosis(value['diagnosis'] as DiagnosisConfig | undefined, scope, now)
+  if (diagnosis && (!enabled || mode !== 'active' || !sources.foregroundFailures.enabled)) fail('invalid-input', 'diagnosis requires active enabled intake and foreground failure source')
   if (enabled && mode === 'active' && (workerAutomationId === null || scope === null)) {
     fail('invalid-input', "an active work-item deployment requires workerAutomationId and scope")
   }
@@ -453,6 +503,7 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     notifyOn,
     sources,
     settlement,
+    ...(diagnosis === undefined ? {} : { diagnosis }),
   })
 }
 

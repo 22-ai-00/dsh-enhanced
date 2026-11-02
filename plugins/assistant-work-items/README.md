@@ -2,7 +2,7 @@
 
 把外部信号沉淀为**有界、可恢复、可审计**的工作项账本，并用一次原生 automation occurrence 驱动 agent 认领、汇报和 owner 通知。本插件不创建第二套 agent loop、timer、outbox、预算系统、设置面板或 session store：调度复用 `assistant-automations` 的稳定 occurrence，执行复用原生 DSH Agent run，通知复用 `assistant-delivery.enqueueBackground()`，授权复用 `assistant-policy` 的默认拒绝。
 
-账本提供认领与汇报工具 `work_item_claim`、`work_item_report`，状态查询 `work_item_status`，以及只读报告召回 `work_item_read_report`。默认关闭的**自动准入**接口可扫描已注册只读来源，并按统一闸门入账；不需要为每条信号手工调用 `admit(...)`，也不新增定时器。内置前台失败来源尚未完成生产接线：适配器目前只识别 failed/timed-out/cancelled，而 Delivery 保守记录非成功 execution 为 unknown。Delivery 新增的独立终止观察和原输入读取仍待接入冻结供应商、有限预算及工具权限的 worker 执行合同；当前不能把启用 `foregroundFailures` 当作普通失败会自动修复的保证。
+账本提供认领与汇报工具 `work_item_claim`、`work_item_report`，状态查询 `work_item_status`，以及只读报告召回 `work_item_read_report`。可选的 `diagnosis` 模式将当前 owner 的真实前台终止观察接入固定 Host worker：原请求仍保留 unknown 的外部效果，仅用新预算读取原输入、写诊断报告。它不重放原请求，也不把诊断报告当作原目标完成或修复成功。通用来源注册与通用 worker 模式继续保留。
 
 终态报告只记录 worker 自己的结论；账本另有一条 append-only 的**结果结算**（outcome settlement）修订链，用 `assistant-delivery` 已认证的 execution 记录独立验证 `ready` 是否真的对应成功执行，并在证据窗内保持 `pending`、到期保持 `unverified`，绝不把 `ready` 当作目标达成。GitHub、邮件、IM、任务日历等**仓库外**来源属于独立插件的职责：它们实现一个只读 `WorkItemSignalSource`，用 `registerSignalSource(...)` 注册进来，就走与本内置来源完全相同的扫描、provenance、去重、冷却与已结项围栏，而不是另开写路径。
 
@@ -19,6 +19,38 @@ dsh --profile web --dump-config
 ```
 
 Patch 默认 `enabled: false`、`mode: observe`，安装后不创建目录、不打开数据库、不调用模型、不发消息。启用 active 模式必须同时显式给出 `workerAutomationId`、`scope`（完整 owner 五元组）和至少一个 `admission.allowedKinds`，否则配置校验失败关闭。
+
+### 只读前台失败诊断（显式启用）
+
+`diagnosis` 默认关闭，只能在 `enabled: true`、`mode: active`、完整 `scope` 和 `sources.foregroundFailures.enabled: true` 下启用。在下面通用配置中加入：
+
+```yaml
+diagnosis:
+  enabled: true
+  budgetId: owner-diagnosis-budget
+  budgetAmount: 1
+  maxModelCalls: 5
+  maxToolCalls: 4
+  maxOutputTokens: 1024
+  timeoutMs: 30000
+  expiresAt: 1893456000000  # 必须在未来，且不晚于 scope.expiresAt
+```
+
+启用时所有额度字段都必填；这是 owner 独立批准的诊断额度，绝不推断原任务还剩多少预算。每次运行从同一 Policy 预算主体扣除 `budgetAmount`，重启不重置累计消耗。工具、prompt 版本、独立预算、owner、来源摘要、原 binding、供应商/model/实际 effort（包括未指定）均在首次准入时冻结；完整 canonical plan 与摘要和原 admitted 事件同事务保存。旧记录、重复信号、observe 记录或扩展来源不能事后补签计划。
+
+此模式自动注册一个 system-owned、仅 external 触发的 Host definition，**不要按下一节手工创建同 ID 通用 automation**。首次创建需要 Policy 允许 background `assistant-work-items-diagnosis` 对该 automation `reconcile`；准入主体仍为 `intakeSourceId`（默认 `work-items/v1`）的 `admit`，外部事件需要该主体的 `ingest`，Host 执行需要 background `workerAutomationId` 的 `execute`，资源均为固定 automation。原生 worker 工具规则应精确包含 `scope.preset`、workspace 和 owner principal，通知继续按下文向原 conversation binding 授权 `send`。以上规则均须显式批准，不由本插件自动放开。
+
+首次激活保存 intent/receipt；后续挂载只检查相同 definition/hash/version、nonce、owner 和配置，发现 paused、deleted、missing、配置或授权漂移即停，不自动 unpause、重新安装、换 nonce 或延长有效期。需要支持 `hostAgentAuthorizationVersion() === 1` 的 Automations；旧 peer 不能忽略执行 fence。每次模型与工具动作前重新核对当前注入、owner/source 和阶段权限，卸载立即撤销私有 executor 并 abort。模型可在 claim 前启动、在本人报告后给出有界最终摘要；只有本人活动 claim 可读取原输入。
+
+诊断工具平面固定为 `work_item_claim`、`work_item_status`、`work_item_read_report`、`work_item_read_source`、`work_item_report`。新增 `work_item_read_source({offset?, max_bytes?})` 只读该 claim 的原输入，返回 UTF-8 有界正文、摘要、总字节和续读 offset；没有 item/inbox/路径选择器，内容标记为不可信。没有 Bash、文件读写、网络或任意执行工具。模型供应商配置变化（包括默认 effort 改变）不能静默换模型继续运行。
+
+无需先手工唤醒 worker：已有原生 scheduler wake 会先处理可证明的 waiting 恢复，再按 `sweepIntervalMs`、候选页限额做一次非强制内置扫描；不新增 timer，也不扫描扩展来源。只接收当前 owner/binding 的真实 `error` 或启用的 `configured-timeout` 终止观察，且必须 `handleDisposed: true`。没有可信 termination 或供应商快照时保持不准入。`owner-cancelled` 只减少工作；终止观察不可改写，因此不能代表对旧 error 的任意后续纠正，可信 Host 仍可显式调用 `withdraw(...)` 减权。
+
+本片诊断**串行**：任何 open item、尚在最终摘要的 live run 或待处置 unknown 都占用唯一诊断槽；未消费候选保留 cursor，避免 queue-one 合并丢掉任务。其他通用 worker 可继续承担独立任务。报告 ready/waiting 之后仍可能发生模型错误、卸载或进程崩溃；报告本身不证明外层 Host 已完成。waiting 只在完整报告 key 对齐原 released claim、同一 production occurrence 的外层 succeeded、已验证 scope/hash/version 且预算 finalized 后恢复。缺字段、不同 occurrence、未知结算或更晚不匹配 run 均停驻。
+
+已开始/未知的运行不按过期 lease 自动 reclaim、不清零预算、不伪造 blocked 报告。unknown（包括 ready 后未知）跨重启保留，并在 health 的 `interventionRequired` 可见；需要可信 Host 显式 `withdraw(...)` 释放槽。该动作仅记录减权，不改写旧报告、原任务效果或 outcome。激活失败、peer 缺失时，没有可核对外层成功的已有报告/已发送 dispatch 也保守显示待核对。已有诊断历史的数据库不能通过关闭 diagnosis 切换成 active 通用模式重放；observe 可读，disabled 保持零打开。
+
+诊断模式拒绝公共 `admit(...)` 与 `registerSignalSource(...)`，不接受来源替换或影子同名来源。以下注册示例、通用 worker 手工准备与 lease 自动恢复说明仅适用于未启用 diagnosis 的通用模式。
 
 ### 一次性准备 worker automation
 
@@ -154,7 +186,7 @@ worker preset 需要与 definition 的 `agentPreset` 一致；`subject.id` 写�
 
 ## 工具
 
-四条工具都要求调用者是配置中的 worker automation 的 exact production occurrence；工具调用落到前台会话或非 production 运行会被拒绝。调用方 Agent 的 workspace 与 preset 还必须与 `scope` 一致；claim 与 read_report 会复核 `scope.expiresAt`，过期即失败关闭。
+通用模式的四条工具都要求调用者是配置中的 worker automation 的 exact production occurrence；工具调用落到前台会话或非 production 运行会被拒绝。调用方 Agent 的 workspace 与 preset 还必须与 `scope` 一致；claim 与 read_report 会复核 `scope.expiresAt`，过期即失败关闭。
 
 - `work_item_claim`：按 occurrence 找到唯一绑定的工作项，用 CAS 取得 claim，返回 `itemId`、kind、title、brief、`workDir`、attempt 等。claim 没有独立续租动作：`progress` 报告会顺延租约；同一 run 的重复认领只在租约仍有效时幂等重放，租约过期则生成新的 claim 行与新的 attempt（受 `maxAttempts` 约束）。
 - `work_item_report`：在活动 claim 下追加一条 append-only 报告修订（`progress` / `waiting` / `ready` / `blocked` / `failed`），可带 artifact 绝对路径；idempotency key 由 `status+summary+artifacts` 的 SHA-256 再按 item 与 claim 行限定，同一 claim 的重试返回已存修订而不重复写入，不同 claim 的同样文本则视为新修订。对已过期 claim 的报告会以 `claim-expired` 失败关闭。`waiting` 报告释放 claim 并按 `limits.waitingResumeMs` 安排一次**有界**恢复（受 `maxAttempts` 约束，见“生命周期与可靠性”）。终态报告会触发一次 owner 通知，通知失败只记录在报告行上，不删除报告证据。
@@ -201,6 +233,8 @@ work_item_read_report:
 
 ## 生命周期与可靠性
 
+以下自动来源、租约回收、授权恢复和未知 dispatch 重试描述通用模式；diagnosis 使用前节的串行准入、禁止未知重放和精确外层成功证明，不继承通用自动重试。
+
 ```
 外部信号 --admit--> 私有 SQLite 工作项账本
   ├─ observe: 只写 observed/dropped 行，绝不唤醒、绝不通知
@@ -222,7 +256,7 @@ work_item_read_report:
 - 唤醒身份按**代次**限定：`work_item_dispatch` 保存 `generation`、`event_id`、`occurred_at`，代次 0 就是准入事件（`event_id` = 工作项 ID、`occurred_at` = 准入时间）；每次重新武装都把 `generation + 1`、`event_id` 改写为确定性的 `工作项 ID#代次` 并写入新的 `occurred_at`。`wake()` 只使用 dispatch 行持久化的身份，绝不从工作项 ID 重新构造，因此重新武装一定对应 automation 侧的新 occurrence，而同一代次的重复唤醒仍解析到同一个 occurrence。
 - 租约到期不靠 timer 回收：admit/claim/status/list/health 以及启动恢复时惰性调用 `reclaimExpired()`；到期 claim 被显式置为 `expired` 并记事件，工作项回到 `queued`，dispatch 行在同一事务里进入下一个代次并回到 `pending`，由后续普通 worker 流量中的有界 `wakePending()` 扫到（`occurred_at <= now` 才唤醒，绝不提前）；超过 `maxAttempts` 的项标记 `blocked`。
 - `waiting` 报告会释放 claim 并**安排一次延迟恢复**：dispatch 行进入下一个代次、`reason = waiting-resume`、到期时间为报告时间 + `limits.waitingResumeMs`；只有 `attempt < maxAttempts`、未进入终态且未被观察时才安排，每次 waiting 报告最多一代。active intake 会通过 owning Fiber 的嵌套 injection 订阅原生 Automations `onSchedulerWake`，在已有 scheduler tick 到期时入队新 occurrence，无需用户再调用 claim；执行仍由原生 scheduler 负责，成功认领后才增加 attempt。
-- 原生唤醒每次先从部分 due 索引按 `(occurred_at, item_id)` 取最多 **10 个候选**，再逐项检查仍为 pending waiting-resume、item waiting 且最后报告 waiting、未观察、无活动 lease/claim、有剩余尝试、现代准入 mandate 和有效的精确 owner/scope；沿用 `dispatch.wake` 的原准入授权、稳定事件身份与 Automations ingest Policy。回调不调用全量租约回收、来源扫描、结算、tick/start、模型或预算 reserve。schema 8 只新增 dispatch due 与 active-claim 两个部分索引；历史行不改写，公平游标存于既有 meta 表，经过拒绝或失效项也会推进并轮转，避免后续项饥饿。
+- 原生唤醒每次先从部分 due 索引按 `(occurred_at, item_id)` 取最多 **10 个候选**，再逐项检查仍为 pending waiting-resume、item waiting 且最后报告 waiting、未观察、无活动 lease/claim、有剩余尝试、现代准入 mandate 和有效的精确 owner/scope；沿用 `dispatch.wake` 的原准入授权、稳定事件身份与 Automations ingest Policy。通用模式的回调不调用全量租约回收、来源扫描、结算、tick/start、模型或预算 reserve；diagnosis 模式会在 waiting 恢复之后追加前节所述的有界内置来源扫描，执行和预算仍由原生 Host 路径负责。schema 8 只新增 dispatch due 与 active-claim 两个部分索引；历史行不改写，公平游标存于既有 meta 表，经过拒绝或失效项也会推进并轮转，避免后续项饥饿。
 - Automations peer 按调用时解析，晚加载或替换后由新 owning injection 重新订阅；旧代次 callback 被撤销，close 先停监听再关账本，同步重入会被隔离。disabled/observe 不订阅，也不因 tick 打开账本。旧 peer 缺 `onSchedulerWake` 时会 warn 并保留启动/claim 惰性恢复路径。要在空闲 Host 自动续办，仍须启用原生 Automations `schedulerEnabled`；`health().schedulerWake.subscribed` 只证明监听已安装，不证明调度器、duty 或任务执行已获授权。
 - 崩溃恢复：`ingestExternal` 已成功但 dispatch 行仍未记账时，该行保持 `pending` 且身份不变，下一次有界恢复用**同一代次身份**重新唤醒，automation store 以相同 `(automationId, eventId, occurredAt)` 幂等返回既有 occurrence，绝不重复运行、绝不重复报告。
 - 唤醒记账诚实：peer 抛出的错误若表示「不知道是否已经提交」（非 `policy-denied`/`policy`、非去重冲突），dispatch 行记为 `state='failed'`、`reason='unknown_after_send'`，`health().dispatchUnknown` 因此只统计仍然**开放且未被观察**的 item 上真实存在的这种行：item 一旦被撤回、终结或观察，就不再计入，也不会再被恢复扫描。这样的行在同一代次身份下最多被惰性恢复重试 **1 次**（`wake_attempts` 持久计数）；重试成功则转为 `dispatched`，再次失败则保持 `failed`/`unknown_after_send`，把无法消除的缺口留给 owner，而不是无限重试或假装成功。持久身份冲突（`idempotency-conflict`）是确定性错误，记为独立原因 `idempotency-conflict` 并抛 typed `WorkItemError`（`dispatch-failed`）；没有 occurrence 查询接口时无法自动收敛，因此不静默吞掉。
@@ -293,7 +327,7 @@ work_item_read_report:
 | `databasePath` | `$DSH_HOME/assistant-work-items/state.sqlite` | 私有账本绝对路径 |
 | `workRoot` | `$DSH_HOME/assistant-work-items/work` | 每项 scratch/artifact 根目录绝对路径 |
 | `intakeSourceId` | `work-items/v1` | 写入 automation 事件与 Policy background 主体标识 |
-| `workerAutomationId` | 无 | 已存在的 worker automation id；active 模式必填 |
+| `workerAutomationId` | 无 | active 模式必填；通用模式需预先存在，diagnosis 模式首次激活按此 ID 建立固定 system-owned Host worker |
 | `scope.workspace` / `scope.preset` / `scope.principalId` / `scope.ownerRouteId` | 无 | owner 五元组；active 模式必填，过期后 fail closed |
 | `scope.expiresAt` | 无 | epoch 毫秒，必须晚于配置加载时间 |
 | `admission.allowedKinds` | `[]` | 允许准入的 kind；active 模式至少一项 |
@@ -310,10 +344,18 @@ work_item_read_report:
 | `delivery.notifyOn` | `[ready, blocked, failed]` | 触发 owner 通知的终态报告状态 |
 | `sources.foregroundFailures.enabled` | `false` | 是否武装内置的 owner foreground 失败来源；关闭时扫描是 no-op |
 | `sources.foregroundFailures.kind` | `foreground-repair` | 该来源准入的工作项 kind；active 模式必须在 `admission.allowedKinds` 内 |
-| `sources.foregroundFailures.includeTimedOut` | `true` | 是否把 `timed-out` 的 owner 请求也当作待修复信号 |
+| `sources.foregroundFailures.includeTimedOut` | `true` | 通用模式接收 `timed-out`；diagnosis 模式允许已 disposed 的 `configured-timeout` 诊断候选 |
 | `sources.foregroundFailures.maxCandidatesPerSweep` | `10` | 单次扫描最多读取的候选数（1–100） |
 | `sources.foregroundFailures.maxAdmitsPerSweep` | `2` | 单次扫描最多准入数量（1–10） |
 | `sources.foregroundFailures.sweepIntervalMs` | `3600000` | 两次自动扫描的最小间隔（60 秒–1 天，持久化门控） |
+| `diagnosis.enabled` | `false` | 显式启用只读诊断；要求 enabled active、完整 scope 和启用的内置前台失败来源 |
+| `diagnosis.budgetId` | 无 | 启用时必填；独立批准的累计 Policy 预算 ID，最多 200 字节 |
+| `diagnosis.budgetAmount` | 无 | 启用时必填；每次诊断 reserve 数量（整数 1–10000000），不推断原任务剩余额度 |
+| `diagnosis.maxModelCalls` | 无 | 启用时必填；每次执行模型调用上限（整数 1–100） |
+| `diagnosis.maxToolCalls` | 无 | 启用时必填；每次执行工具调用上限（整数 1–1000） |
+| `diagnosis.maxOutputTokens` | 无 | 启用时必填；每次执行输出 token 上限（整数 1–131072） |
+| `diagnosis.timeoutMs` | 无 | 启用时必填；固定 Host 执行时限（整数 1000–300000 毫秒） |
+| `diagnosis.expiresAt` | 无 | 启用时必填；未来的安全整数 epoch 毫秒，不晚于 scope.expiresAt；重启不续期 |
 | `settlement.enabled` | `true` | 是否在终态报告后维护独立结果证据窗 |
 | `settlement.windowMs` | `604800000` | 证据窗长度（1 小时–9 天） |
 | `settlement.sweepIntervalMs` | `600000` | 两次结算扫描的最小间隔（60 秒–1 天，持久化门控，无新 timer） |
@@ -325,29 +367,29 @@ work_item_read_report:
 
 ## 权限与数据
 
-权限边界只有本地文件系统（显式 `databasePath` 与 `workRoot`）；跨插件调用只有只读的 `assistant-delivery` owner route/execution 查询，以及受 Policy 约束的 automation dispatch 与终态通知。
+本插件直接文件权限限于显式 `databasePath` 与 `workRoot`。通用模式跨插件复用 Delivery owner route/execution 查询、受 Policy 约束的 automation dispatch 和终态通知，以及可选 Evaluation 证据 registration。diagnosis 模式还会注册私有 Host executor、首次 reconcile 固定 system-owned definition，并通过 Automations 的带授权 fence 原生 Agent 执行入口运行诊断；每一步受前节的 owner、Policy、冻结合同和有限预算约束。
 
 - 文件系统：只读写显式 `databasePath` 和 `workRoot`；目录 `0700`，数据库文件 `0600`，拒绝 leaf symlink。artifact 只能落在工作项自己的 scratch 目录内。
 - 网络：插件自身不发网络请求。模型/工具调用发生在 `assistant-automations` 创建的原生 Agent run 内，其 provider 与工具权限由宿主和 Policy 决定。
 - 子进程、凭据、浏览器：无。
 - 安装脚本：包内没有 postinstall 或其他生命周期脚本；`prepublishOnly` 只要求用 pnpm 发布。
 - 消息投递：只有 active 模式的终态报告才会经 `assistant-delivery` 入队；observe 模式从不调用 Delivery 的写接口。Delivery 会在入队和发送前重查 owner route、binding 版本/代次、有效期和 background `send` Policy。
-- 跨插件只读：自动来源使用 `assistant-delivery` 的 `validateOwnerRoute` + `listOwnerForegroundTaskSources`（owner 认证、游标分页、host 公开、只读，不触发任何发送或写操作）。`assistant-delivery` 缺失或版本过旧（无该 API）时，来源退化为 no-op 或 `degraded: 'unsupported'`，插件激活与 claim 都不会抛错。
+- 跨插件读取：通用自动来源使用 `assistant-delivery` 的 `validateOwnerRoute` + `listOwnerForegroundTaskSources`（owner 认证、游标分页、host 公开、只读，不触发任何发送或写操作）。`assistant-delivery` 缺失或版本过旧（无该 API）时，来源退化为 no-op 或 `degraded: 'unsupported'`，通用来源扫描按此方式降级。diagnosis 模式必须具备现代 Delivery 的逐条 inspect/有界原输入读取及带 fence 的 Automations 能力；缺失、过旧或授权失效时不激活/不执行，health 显示 unavailable 或待处置，工具动作可失败关闭，不承诺 claim 成功。
 - 结果结算：只读取本地账本和 `assistant-delivery` 的只读 `listOwnerForegroundTaskSources`；不新增网络、子进程、凭据或写接口，结算失败/缺依赖时降级而不是重试外部写入。可选 `assistant-evaluation` 只通过进程内 registration 追加 trusted 证据，同样不发网络请求。
-- 数据保留：账本保存外部 ID、标题、brief、owner 身份、报告正文和 artifact 路径，可能包含私人信息；备份时按 SQLite（含 WAL）一致性方式复制。删除 scratch 目录不影响账本，但会丢失完整 artifact。
+- 数据保留：账本保存外部 ID、标题、brief、owner 身份、报告正文和 artifact 路径；diagnosis 还保存冻结供应商、owner/source/binding、完整工具 schema、预算和激活合同。活动 claim 可将有界原输入读入原生 Agent 上下文/会话记录，报告也可能包含原文片段，均可能包含私人信息；备份时按 SQLite（含 WAL）一致性方式复制。删除 scratch 目录不影响账本，但会丢失完整 artifact。
 
 ## 限制
 
 - 单独使用 observe 模式没有产品价值：它只积累观察行，不唤醒、不通知。observe 仍要求 `assistant-delivery` 可用，因为准入要先校验 owner route；没有 Delivery 时准入记录不会写入（失败关闭），这是当前实现的已知限制。
 - 尚未**随包发布**仓库外真实来源（GitHub、邮件、IM、任务日历等）：插件提供了 `registerSignalSource(...)` 扩展点，但具体来源适配器仍待独立插件实现；内置来源只是 `assistant-delivery` 已认证的 owner foreground 记录，仍属于 in-tree 证据。
-- 内置来源的 title/brief 由 delivery 行的**元数据**派生（inbox、binding、版本/代次、完成时间），不读取 owner 原文；因此 brief 不是完整任务复述，worker 只能依据 brief、provenance 和自身可用工具定位上下文。
+- 通用内置来源的 title/brief 由 Delivery 行的**元数据**派生（inbox、binding、版本/代次、完成时间），不读取 owner 原文；通用 worker 依据 brief、provenance 和自身可用工具定位上下文。diagnosis 的 brief 同样不复述原文，但本人活动 claim 可通过固定 `work_item_read_source` 逐页读取原请求；每次读取重验当前 owner、来源摘要和授权，原文仍是不可信数据。
 - canonical key 以**单次 execution**（inbox + binding 版本/代次 + executionRef，不含 `disposition`）为单位，不是「同一意图第 N 次重复」；同一 execution 的状态修订（失败→撤回）共享同一身份，因此撤回能定位并退役已准入的项。owner 同一意图重试失败会产生新的工作项（cooldown 与 `maxOpenItems` 限制总量）。
 - 已准入信号的 `disposition` 若被修正为成功（`succeeded`，即不再产生候选），不会自动关闭旧工作项；只有 `cancelled` 撤回会传播到在途项。撤回报告已经交给 delivery 的终态报告无法撤回，worker 只能从后续工具调用看到 `dropped`。observe 模式不会新建在途项，但若切换前遗留的在途项仍在，撤回仍会把它退役（内部账本变化，不唤醒、不通知）。
 - 升级注意：本版本把 `disposition` 从 canonical key 移除。升级前已准入的旧工作项仍带旧 key，之后的撤回对它们会解析为 `absent`，只能等其自然结项；新信号不受影响。
 - 观察期记录会占用去重窗口：同一 signal 从 observe 切到 active 后，窗口内仍视为已准入；需要时等待窗口过期或换 `externalId`。
 - 工作项终态只是运维证据，不代表任务质量。`ready` 仅是 worker 自报，结果结算也只给出 `unknown/observed/unverified`；导出到 Evaluation 的是同一份证据，不证明修复质量，也不构成采用依据。
 - `stats().openItems` 与 `health().openItems` 只统计 `queued/claimed/working/waiting`，不含仍需人处理的 `ready/blocked` 终态项。
-- 精确定时仍属于 `assistant-automations`；本插件不自带 schedule、timer 或 retry daemon。
+- 精确定时仍属于 `assistant-automations`；本插件不增加 timer 或 retry daemon。diagnosis 只注册 external schedule 的固定 Host definition，扫描借用既有原生 scheduler wake。
 
 ## 兼容性
 

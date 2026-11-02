@@ -1,6 +1,6 @@
 # @dsh-enhanced/assistant-automations
 
-面向个人助理的单机、冷启动可恢复调度器。它把 automation 定义、稳定 occurrence、task、attempt、run 和 duty lease 写入 SQLite；进程重启后从账本继续，而不是把内存 timer 当作事实源。普通 Agent automation 每次执行创建一个新的 DSH `0.2.0-rc.2` Agent，固定 workspace、preset 身份、provider/model、输出预算、工具白名单和工具调用上限；system-owned Host automation 则只调用进程内注册、版本和 catalog digest 精确匹配的固定执行器，不创建 Agent 或模型 turn。
+面向个人助理的单机、冷启动可恢复调度器。它把 automation 定义、稳定 occurrence、task、attempt、run 和 duty lease 写入 SQLite；进程重启后从账本继续，而不是把内存 timer 当作事实源。普通 Agent automation 每次执行创建一个新的 DSH `0.2.0-rc.2` Agent，固定 workspace、preset 身份、provider/model、输出预算、工具白名单和工具调用上限；system-owned Host automation 调用进程内注册、版本和 catalog digest 精确匹配的固定执行器；执行器只有取得下述新预算与私有 invocation 能力后，才可启动一次有界原生 Agent。
 
 执行前会先解析并挂载 automation 固定的 Agent preset，再在该 Agent 的最终工具平面上校验 immutable allowlist；preset 只提供 scoped tool 时也能被正确发现，preset 额外暴露未批准工具则整次 setup fail closed。通过校验的最终 tool schemas 会与 provider/model 无关地交给 Agent Loop；模型只供应生成，不决定工具可见性或授权，也没有部署侧 provider 能力名单。协议元数据缺失、`native` 和 `bridge` 都会放行；只有 adapter 主动声明 `toolCalls: none` 且最终 scope 非空时，才会在 provider 执行前因未实现统一 DSH tool-call 协议失败关闭。每次工具执行仍受 automation 白名单、调用上限、Policy、sandbox、审批和预算约束。
 
@@ -208,3 +208,15 @@ Host executor 可调用 `service.runAgentForHostExecution(invocation, contract)`
 Automations 与普通 DshRunner 共享原生 Agent 执行代码及 DSH Loop。新路径在实际准备完成的请求处检查供应者、effort（包括无值）、精确工具 schema 和输出 token 配置；每次工具执行前再检查当前 schema 和取消信号。模型调用最多 100 次、工具最多 1000 次、每次请求最多 131072 个输出 token、最长 1 小时且不超过 occurrence 原期限；调用者通常应设更小值。请求强制输出 token 上限，并拒绝适配器报告的超额输出；额外以每输出 token 32 字节限制文本、推理与工具参数增量的缓冲量，这不是本地 tokenization 证明。契约的 canonical JSON 总量以及包含完整 output、usage、diagnostic 的返回收据各自还有 1 MiB 上限；契约超限在消费能力和创建定时器前拒绝，返回收据超限保守进入 unknown，不能把缓冲字节预算当作最终收据容量。Session 的 `plugin:assistant-automations/host-agent-contract` 记录冻结契约和摘要，权威 run 记录关联实际 Session 与使用量。
 
 Agent 生命周期由 Automations 持有。注册卸载、调用取消、executor 提前返回或服务停止会先撤销调用能力并中止 Agent，再共享同一次最多 2 秒的回收确认（API、registry 和服务停止不会重新开始计时）；迟到的创建/结果不能成为成功。不能确认回收时保留 unknown、可能副作用和禁止重试，不声明业务任务成功。HostRunner 仍是唯一预算结算者，内部原生执行不再预留第二份预算；结算结果不明确时不重复 finalize。该 API 只证明本次 Host occurrence 具有有界执行能力，不证明其输入继承某个原始用户任务的供应者或动作授权，消费者必须独立核对来源与 owner 授权。它不注册模型工具，也不新增网络、文件或命令权限；实际工具原有的 Policy、凭据与隔离边界继续生效。
+
+撤权、卸载或回收不明时，内部收据仍保留实际 Session 已记录的模型使用量与已发生工具调用，并带 `usage.observedPartial: true`。这是观察到的下界，不是完整账单；不读取调用方异常里的 usage/session，也不接受迟到结果改写已结算 run。Evaluation 的固定指标协议无法标记部分成本，因此省略这类 run 的 token/tool 指标，原始 run 收据保留数字与标识；外层真实 latency/retries 仍可投影。
+
+### 非持久同步授权围栏与 external-only 调度
+
+`hostAgentAuthorizationVersion()` 返回 `1` 表示支持 `runAgentForHostExecution(invocation, contract, authorization?)` 的第三参数。需要当前 owner/source 授权的消费者必须先核对此版本，再提供 `{ signal, assertCurrent }`：信号和同步函数必须为自有数据字段，不接受 getter 或 async 函数。`assertCurrent` 必须同步返回 `undefined`；返回 Promise/thenable 拒绝，普通未篡改内建 Promise 的拒绝尽力吸收，任意 thenable 的回调不执行；不支持自定义 Promise 子类、constructor 或 `@@species`。围栏在该 invocation 消费之后执行，不能重入启动第二个 Agent，也不能安装工具、更换 supplier 或获得 setup 权限。
+
+围栏的信号与原 occurrence、注册生命周期及期限信号合并。在异步 Agent 创建完成后的首次 prompt、每次本 Agent 的实际模型派发、工具 guard 与最终结果接受前重新检查；stream 每个 chunk 只保留取消/期限检查，不逐 chunk 查询消费者数据库。回调抛错或返回异步值会撤销并中止本次调用，之后的模型/工具请求拒绝；已经派发的请求仍计费，未知结果不重试。无第三参数时保留旧 Host API 行为。围栏不证明跨数据库原子性；工具 execute 仍须在自身审批等待后独立重核授权。
+
+Host definition 可以选择精确的 `schedule: { kind: 'external' }`。它没有日历 next/previous/due 时间，create/reconcile/resume/restart 都不产生 `nextRunAt`，只能由现有认证 `ingestExternal` 创建事件 occurrence。普通 Agent definition 和模型创建/更新入口拒绝此调度；manual/run-now、system dry-run 及日历/canary occurrence 拒绝，不消耗运行预算。暂停后的重启保持暂停，不自动恢复执行权限；显式授权 resume 仍没有日历任务。该扩展不迁移数据库、不新增 timer，也不改变既有 at/every/cron 的序列化语义。
+
+Host Agent 的 Policy initiator 同时绑定 occurrence 已冻结的 `principal`，供工具规则核对实际 owner。`inspectSystemOwned` 的生产与预览 run 投影分别返回 `occurrenceId`；续办消费者须将它与原报告对应的 claim 核对，再检查持久 run 状态、不可变执行上下文和预算结算。仅有 waiting 报告不足以证明上一次执行已经安全结束；旧 Host 缺少该字段时不能据此自动续办。

@@ -18,6 +18,7 @@ import {
   AssistantAutomationsService,
 } from '../src/service.ts'
 import type { HostAutomationDefinition } from '../src/types.ts'
+import { AutomationStore } from '../src/store.ts'
 
 const contexts: Context[] = []
 const roots: string[] = []
@@ -133,6 +134,38 @@ async function runProduction(
 }
 
 describe('Automations to Evaluation private capability', () => {
+  test.each([true, false])('keeps observed partial usage in the run without publishing it as complete metrics (partial=%s)', async observedPartial => {
+    const root = await mkdtemp(join(tmpdir(), 'automation-partial-usage-'))
+    roots.push(root)
+    const store = new AutomationStore({ path: join(root, 'automations.sqlite'), now: () => 1_000 })
+    try {
+      const automationId = 'partial-usage'
+      store.reconcileSystemOwned({ owner, automationId, idempotencyKey: 'create',
+        definition: hostDefinition('2035-01-01T00:00:00.000Z', automationId) })
+      store.createManual({ automationId, requestId: 'run', dryRun: false })
+      const duty = store.acquireDuty({ ownerId: 'duty', now: 1_000, leaseMs: 10_000 })
+      const task = store.claimNextTask({ ownerId: duty.ownerId, fencingToken: duty.fencingToken,
+        now: 1_100, leaseMs: 1_000, hostAvailability: [{ automationId,
+          definitionHash: store.getDefinitionHash(automationId)!, stage: 'claim', available: true,
+          reasonCode: 'host-executor-available' }] })!
+      store.startTask({ taskId: task.id, ownerId: duty.ownerId, fencingToken: duty.fencingToken,
+        now: 1_101, leaseMs: 1_000, sessionId: 'actual-session' })
+      const usage = { inputTokens: 10, outputTokens: 4, toolCalls: 1, ...(observedPartial ? { observedPartial: true } : {}) }
+      store.completeTask({ taskId: task.id, ownerId: duty.ownerId, fencingToken: duty.fencingToken,
+        now: 1_200, outcome: 'unknown', sessionId: 'actual-session', outputPreview: 'execution unconfirmed', usage })
+
+      expect(store.listRuns({ automationId, limit: 10 })).toEqual([
+        expect.objectContaining({ status: 'unknown', sessionId: 'actual-session', usage }),
+      ])
+      const evaluations = store.listPendingEvaluations(10)
+      expect(evaluations).toHaveLength(1)
+      expect(evaluations[0]!.payload).toMatchObject({ executionStatus: 'unknown', objectiveStatus: 'unknown' })
+      expect(evaluations[0]!.payload.metrics).toEqual(observedPartial
+        ? { latencyMs: 99 }
+        : { latencyMs: 99, inputTokens: 10, outputTokens: 4, toolCalls: 1 })
+    } finally { store.close() }
+  })
+
   test('writes a real production terminal outbox through Cordis as trusted evidence', async () => {
     const fixture = await baseHarness()
     const evaluation = await installEvaluation(fixture)

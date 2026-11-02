@@ -9,23 +9,21 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 ## 已有能力与边界
 
 - Linux 原生隔离、完整源码 prepare、工具创建/修订、独立验收与 owner 升级事务已有实现。Linux x64/cgroup v1 已实测；cgroup v2 拒绝、arm64 未验收。完整 live Docker→native 升级尚未通过。
-- 可选 WorkItems 默认关闭、observe 模式；schema 8 持久记录准入授权、派发、认领、报告与有界续办。原生 scheduler 已接到期 waiting-resume，尚未扫描空闲 Host 的新失败来源。没有新增 Agent Loop。
-- 四个工作项工具支持 claim/report/status/read_report。新 occurrence 可从有界 `resume` 找回先前尝试与报告，并按 UTF-8 字节分页召回摘要外正文；授权和实际执行均检查 exact production occurrence、owning Fiber、当前 owner 与原准入 mandate。
+- 可选 WorkItems 默认关闭、observe 模式；schema 8 持久记录准入授权、派发、认领、报告与有界续办。显式 diagnosis 配置可让原生 scheduler 在空闲时扫描已认证的终止来源，冻结原任务实际 supplier/effort、授权与独立有限预算，派发只读诊断；缺失或不一致的来源拒绝。没有新增 Agent Loop、表或 timer。
+- 通用工作项保留 claim/report/status/read_report；诊断模式增加有界 read_source，原操作不自动重放。新 occurrence 通过 `resume` 找回旧尝试与报告；waiting 只在原报告对应的同一 production occurrence 确认 succeeded、预算 finalized 后续办。未知或报告后失败跨重启停驻，health 显示 interventionRequired；可信 Host 可显式减权释放该工作槽。
 - Delivery schema 28 将可信终止观察与业务结果分开，非成功业务结果仍为 unknown。原输入可按 owner/sourceDigest 分页读取，Native Web 冻结实际 provider/model/effort。安装器支持已审查 schema 23–28，Web doctor 为 24–28，未知版本拒绝。
-- Automations `runAgentForHostExecution` 已交付：真实生产 Host invocation、首次 attempt、never/0 重试合同与新预算预留，最多启动一次有界原生 Agent。复用原有 Loop，冻结供应商（包括 effort 缺省）、工具 schema、额度和绝对期限；私有执行收据保留真实 Session/使用量，唯一外层预算结算，取消或回收不明保持 unknown。接口本身不证明原用户任务来源或 owner 授权。
+- Automations `runAgentForHostExecution` 已交付：真实生产 Host invocation、首次 attempt、never/0 重试合同与新预算预留，最多启动一次有界原生 Agent。复用原有 Loop，冻结供应商（包括 effort 缺省）、工具 schema、额度和绝对期限；私有执行收据保留真实 Session/使用量，唯一外层预算结算；撤权/回收不明保留 unknown 与已观察用量下界，Evaluation 不将下界当完整成本。同步授权围栏在首次 prompt、实际模型请求、工具与结果接受前复核；Host-only external 调度无日历空跑。接口自身不证明来源，WorkItems 诊断消费者负责重核 owner/source/mandate。
 - 终态报告接入真实 Delivery outbox 和 Evaluation；worker ready 不等于独立成功，通知入队不等于送达。`follows` 仅支持线程关闭结算；Router 跨信道协调、订阅直通、普通使用成长反馈与长期收益尚未完整验收。
 
 ## 当前交付
 
-`dev@db076203` 的 Automations 接口专项已独立 PASS：Mac 全插件 359 passed / 27 skipped，其中新增 44 项全部通过；noEmit、构建和零警告 lint 均 EXIT 0。真实复现并修复了 Cordis 代理接线、unknown 落库/副作用、同步重入和阻塞后越过期限问题，红绿证据与断言失败 canary 保留在 `host-agent-execution{,-tests,-integration}/`。
+普通终止信号 → 授权只读诊断 → 持久报告的接线已实现。Mac 专项：真实组件集成 9/9、WorkItems 核心/通用 268、Automations 全插件 387 passed / 27 skipped、Delivery 来源 16/16；noEmit、构建、零警告 lint 均 EXIT 0。集成使用脚本模型，真实 Cordis、Agent Loop、Policy、SQLite/JSONL 与 Delivery outbox；验证 idle 自动准入、撤权、supplier 继承、成功 waiting 重启续办和报告后失败不重跑。通知只证明入队，不证明外部送达。
 
-同一源码的 Mac/Linux 完整根检查均 EXIT 0，且均经独立核验 PASS；具体证据见下表。
+撤权后使用量丢失、部分成本误投影、Node 24 NUL/BOM 账本读取及默认 disabled 配置挂载问题均有修前失败与修后通过证据，位于 `work-item-diagnosis-{core,activation-tests,automations,usage,integration}/`。当前新源码的最终独立复核与两端根检查尚待收齐；下表仍是上一交付的完整检查，不能替代本次验收。
 
 ## 下一交付
 
-接通普通终止信号到有限只读诊断报告：WorkItems 来源适配、准入时冻结诊断计划、原输入召回及固定 Host executor，空闲准入复用原生 scheduler。模型必须继承原任务实际供应商；缺失/inconsistent 记录不得回退默认。诊断使用明确授权的独立有限预算，不冒认原任务剩余额度，不重放 unknown 原操作。
-
-当前接口还缺诊断消费者的持续授权围栏：必须在异步创建完成后的首次 prompt、每次真实模型请求及工具动作前复核 owner/source/mandate；不能只在调用 API 前检查一次。需要同步 Host-only 检查，不开放 caller setup，不另建 Loop。当前 schedule 只有 at/every/cron；下一片将增加 Host-only external 调度，避免固定 worker 空跑消耗预算。上述接线设计已独立复核，尚未实现。
+完成本片精确源码的 Mac/Linux 根检查并更新证据；通过后接通原生隔离的普通安装入口、配置与 doctor，复用非激活资源准备 API。诊断报告尚不等于自主修改/采用或长期普通使用收益；跨信道 Router、订阅直通与成长反馈仍按独立能力逐项推进。
 
 ## 原生改造与延后验收
 

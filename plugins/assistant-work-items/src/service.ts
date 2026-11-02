@@ -25,6 +25,7 @@ import { registerWorkItemTools, workItemReportKey } from './tools.js'
 import type {
   WorkItemAdmitInput,
   WorkItemAdmitResult,
+  WorkItemWithdrawResult,
   WorkItemAuthorityHealth,
   WorkItemClaimRecord,
   WorkItemEvaluationHealth,
@@ -43,6 +44,8 @@ import type {
 } from './types.js'
 import { WorkItemError } from './types.js'
 import { WorkItemWorkspace } from './workspace.js'
+import { WorkItemDiagnosis, persistedDiagnosisIntervention, type DiagnosisSourcePage } from './diagnosis.js'
+import type { WorkItemDiagnosisPlan } from './diagnosis-contract.js'
 
 function fail(code: ConstructorParameters<typeof WorkItemError>[0], message: string, detail?: string): never {
   throw new WorkItemError(code, message, detail)
@@ -151,6 +154,10 @@ interface Components {
   readonly signals: WorkItemSignalIntake
 }
 
+// Neither the runtime nor the plan-mint closure is published on a Cordis service receiver.
+const diagnosisRuntimes = new WeakMap<object, WorkItemDiagnosis>()
+const diagnosisAdmissions = new WeakMap<Components, (input: WorkItemAdmitInput, builder: (item: WorkItemRecord) => Readonly<WorkItemDiagnosisPlan>) => WorkItemAdmitResult>()
+
 export interface WorkItemReportInput {
   readonly status: WorkItemReportStatus
   readonly summary: string
@@ -195,6 +202,9 @@ export class AssistantWorkItemsService extends Service {
   private workItemsFollowDegraded: WorkItemFollowDegradedReason | null = null
   private workItemsComponents: Components | undefined
   private workItemsClosed = false
+  private readonly workItemsDiagnosisKey = Object.freeze({})
+  private workItemsDiagnosisError: string | null = null
+  private workItemsHasDiagnosisHistory = false
   private readonly workItemsSchedulerUnsubscribers = new Set<() => void>()
   private workItemsSchedulerWaking = false
   private workItemsSchedulerLastWakeAt: number | null = null
@@ -246,6 +256,40 @@ export class AssistantWorkItemsService extends Service {
         wakeCtx.effect(() => remove, 'assistant-work-items.scheduler-wake')
       })
     }
+    if (isActive(this.workItemsConfig) && this.workItemsConfig.diagnosis) {
+      ctx.inject(['assistantAutomations', 'assistantDelivery', 'tools'], diagnosisCtx => {
+        if (this.workItemsClosed) return
+        const components = this.workItemsOpen()
+        const mint = diagnosisAdmissions.get(components)
+        if (!mint) fail('storage', 'private diagnosis admission is unavailable')
+        const runtime = new WorkItemDiagnosis(diagnosisCtx, this.workItemsConfig, components.store,
+          components.admission, components.dispatch, {
+            admit: mint,
+            assertOwner: item => {
+              const receipt = this.workItemsAssertOwnerRoute(item)
+              if (receipt.principalVersion !== item.owner.principalVersion || receipt.bindingVersion !== item.owner.bindingVersion
+                || receipt.generation !== item.owner.generation) fail('owner-route-invalid', 'diagnosis owner generation changed')
+              return receipt
+            },
+            assertMandate: item => {
+              const decision = components.authority.check(item)
+              if (decision.kind !== 'allow') fail('authority-revoked', 'diagnosis admission mandate is unavailable')
+            },
+          })
+        diagnosisRuntimes.set(this.workItemsDiagnosisKey, runtime)
+        try { runtime.start(); this.workItemsDiagnosisError = null }
+        catch (error) {
+          runtime.close()
+          if (diagnosisRuntimes.get(this.workItemsDiagnosisKey) === runtime) diagnosisRuntimes.delete(this.workItemsDiagnosisKey)
+          this.workItemsDiagnosisError = 'diagnosis-activation-unavailable'
+          diagnosisCtx.logger.warn(`assistant-work-items: diagnosis activation unavailable: ${describe(error)}`)
+        }
+        diagnosisCtx.effect(() => () => {
+          runtime.close()
+          if (diagnosisRuntimes.get(this.workItemsDiagnosisKey) === runtime) diagnosisRuntimes.delete(this.workItemsDiagnosisKey)
+        }, 'assistant-work-items.diagnosis')
+      })
+    }
   }
 
   /** One native wake may admit at most ten already-due waiting occurrences. */
@@ -285,6 +329,7 @@ export class AssistantWorkItemsService extends Service {
           this.ctx.logger.warn(`assistant-work-items: waiting resume wake failed: ${describe(error)}`)
         }
       }
+      if (this.workItemsConfig.diagnosis) diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.sweep(false)
     } catch (error) {
       this.workItemsSchedulerLastError = error instanceof WorkItemError ? error.code : 'scheduler-wake-failed'
       this.ctx.logger.warn(`assistant-work-items: waiting resume scan failed: ${describe(error)}`)
@@ -300,6 +345,8 @@ export class AssistantWorkItemsService extends Service {
   get mode(): 'observe' | 'active' {
     return this.workItemsConfig.mode
   }
+
+  get diagnosisEnabled(): boolean { return this.workItemsConfig.diagnosis !== undefined }
 
   /** Bounded admission check; no work-item recovery, writes, dispatch or model. */
   preauthorizeTool(execution: ToolExecution): boolean {
@@ -346,15 +393,28 @@ export class AssistantWorkItemsService extends Service {
     if (authority.kind === 'unavailable') fail('authority-unavailable', 'admission mandate could not be revalidated', authority.detail)
     if (requireModernMandate && authority.kind !== 'allow') fail('authority-unavailable', 'legacy work items require the ordinary approval path')
 
+    if (config.diagnosis) {
+      const runtime = diagnosisRuntimes.get(this.workItemsDiagnosisKey)
+      if (!runtime) fail('missing-dependency', 'diagnosis runtime is unavailable')
+      runtime.assertTool(occurrenceId, execution.name)
+    }
     const active = components.store.activeClaim(item.id)
     if (active !== undefined && active.runId !== occurrenceId && active.leasedUntil > Date.now()) fail('claim-conflict', 'another occurrence owns this work item')
     const allowed = execution.name === 'work_item_report' ? ['status', 'summary', 'artifacts']
       : execution.name === 'work_item_read_report' ? ['revision', 'offset', 'max_bytes']
+        : execution.name === 'work_item_read_source' ? ['offset', 'max_bytes']
         : execution.name === 'work_item_claim' || execution.name === 'work_item_status' ? [] : undefined
     if (allowed === undefined) fail('invalid-input', 'unknown work-item tool')
     const args = workItemToolArguments(execution.arguments, allowed)
 
     if (execution.name === 'work_item_status') return
+    if (execution.name === 'work_item_read_source') {
+      if (!config.diagnosis) fail('disabled', 'source recall requires diagnosis mode')
+      const offset = args.offset ?? 0, maximum = args.max_bytes ?? 4096
+      if (!Number.isSafeInteger(offset) || Number(offset) < 0 || !Number.isSafeInteger(maximum)
+        || Number(maximum) < 4 || Number(maximum) > 8192) fail('invalid-input', 'source byte window is invalid')
+      return
+    }
     if (execution.name === 'work_item_read_report') {
       this.workItemsReadReportPage(components, item, {
         revision: args.revision as number,
@@ -404,6 +464,7 @@ export class AssistantWorkItemsService extends Service {
    */
   admit(input: WorkItemAdmitInput): WorkItemAdmitResult {
     const components = this.workItemsAvailable()
+    if (this.workItemsConfig.diagnosis) fail('invalid-input', 'diagnosis worker accepts only its private builtin source')
     const result = components.admission.admit(input)
     if (result.created && isActive(this.workItemsConfig)) {
       try {
@@ -430,12 +491,28 @@ export class AssistantWorkItemsService extends Service {
    * `sweepIntervalMs`) so ordinary use keeps producing work without a timer or
    * developer orchestration. A sweep failure never fails the claim.
    */
+  /** Explicit Host-only reduction of a canonical work signal; never a model tool or a plan mint. */
+  withdraw(input: WorkItemAdmitInput): WorkItemWithdrawResult {
+    const result = this.workItemsAvailable().admission.withdraw(input)
+    if (this.workItemsConfig.diagnosis) {
+      const components = this.workItemsOpen()
+      for (const item of result.items) if (components.store.readDiagnosisPlan(item.id)) components.store.clearDiagnosisIntervention(item.id)
+      diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.retire(result.items.map(item => item.id))
+    }
+    return result
+  }
+
   claim(agent: Agent | undefined): WorkItemClaimView {
     const components = this.workItemsRequired()
     this.workItemsSweepQuietly(components)
     this.workItemsSettleQuietly(components)
     const occurrenceId = this.workItemsOccurrenceId(agent)
-    components.ledger.recover()
+    if (this.workItemsConfig.diagnosis) {
+      const runtime = diagnosisRuntimes.get(this.workItemsDiagnosisKey)
+      if (!runtime) fail('missing-dependency', 'diagnosis runtime is unavailable')
+      runtime.assertTool(occurrenceId, 'work_item_claim')
+    }
+    if (!this.workItemsConfig.diagnosis) components.ledger.recover()
     // Lease-expiry and waiting resume are generic recovery work, so ordinary
     // worker traffic is the lazy sweep that re-dispatches them. This is
     // best-effort: a recovery failure never blocks the caller's own claim.
@@ -483,7 +560,12 @@ export class AssistantWorkItemsService extends Service {
   async report(agent: Agent | undefined, input: WorkItemReportInput): Promise<WorkItemReportView> {
     const components = this.workItemsRequired()
     const occurrenceId = this.workItemsOccurrenceId(agent)
-    components.ledger.recover()
+    if (this.workItemsConfig.diagnosis) {
+      const runtime = diagnosisRuntimes.get(this.workItemsDiagnosisKey)
+      if (!runtime) fail('missing-dependency', 'diagnosis runtime is unavailable')
+      runtime.assertTool(occurrenceId, 'work_item_report')
+    }
+    if (!this.workItemsConfig.diagnosis) components.ledger.recover()
     const item = components.store.findItemByOccurrence(occurrenceId)
     if (item === undefined) fail('not-found', 'no work item is bound to this automation occurrence')
     const result = components.ledger.report({
@@ -494,6 +576,7 @@ export class AssistantWorkItemsService extends Service {
       artifactPaths: input.artifactPaths ?? [],
       idempotencyKey: input.idempotencyKey,
     })
+    if (!result.replayed) diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.reported(occurrenceId, result.report.status, result.report.revision)
     let notified = false
     if (!result.replayed) {
       try {
@@ -533,6 +616,7 @@ export class AssistantWorkItemsService extends Service {
    * intake is disabled or already disposed, and never admits retroactively.
    */
   registerSignalSource(registration: WorkItemSignalRegistration): () => void {
+    if (this.workItemsConfig.diagnosis) fail('invalid-input', 'diagnosis has an exclusive private builtin source; extension registration is unavailable')
     const components = this.workItemsAvailable()
     const dispose = components.signals.register(registration)
     return () => {
@@ -611,6 +695,7 @@ export class AssistantWorkItemsService extends Service {
   sweepSignals(force = true): WorkItemSignalSweepReport {
     if (!this.workItemsConfig.enabled || this.workItemsClosed) return Object.freeze({ sources: [] })
     try {
+      if (this.workItemsConfig.diagnosis) return diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.sweep(force) ?? Object.freeze({ sources: [] })
       return this.workItemsOpen().signals.sweep(force)
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: signal sweep unavailable: ${describe(error)}`)
@@ -687,7 +772,12 @@ export class AssistantWorkItemsService extends Service {
   status(agent: Agent | undefined): WorkItemStatusView {
     const components = this.workItemsRequired()
     const occurrenceId = this.workItemsOccurrenceId(agent)
-    components.ledger.recover()
+    if (this.workItemsConfig.diagnosis) {
+      const runtime = diagnosisRuntimes.get(this.workItemsDiagnosisKey)
+      if (!runtime) fail('missing-dependency', 'diagnosis runtime is unavailable')
+      runtime.assertTool(occurrenceId, 'work_item_status')
+    }
+    if (!this.workItemsConfig.diagnosis) components.ledger.recover()
     const item = components.store.findItemByOccurrence(occurrenceId)
     if (item === undefined) fail('not-found', 'no work item is bound to this automation occurrence')
     return Object.freeze({
@@ -706,6 +796,11 @@ export class AssistantWorkItemsService extends Service {
   readReport(agent: Agent | undefined, input: { revision: number; offset?: number; maxBytes?: number }): WorkItemReportPage {
     const components = this.workItemsRequired()
     const occurrenceId = this.workItemsOccurrenceId(agent)
+    if (this.workItemsConfig.diagnosis) {
+      const runtime = diagnosisRuntimes.get(this.workItemsDiagnosisKey)
+      if (!runtime) fail('missing-dependency', 'diagnosis runtime is unavailable')
+      runtime.assertTool(occurrenceId, 'work_item_read_report')
+    }
     const item = components.store.findItemByOccurrence(occurrenceId)
     if (item === undefined) fail('not-found', 'no work item is bound to this automation occurrence')
     const receipt = this.workItemsAssertOwnerRoute(item)
@@ -719,6 +814,13 @@ export class AssistantWorkItemsService extends Service {
     if (authority.kind === 'unavailable') fail('authority-unavailable', 'admission mandate could not be revalidated', authority.detail)
 
     return this.workItemsReadReportPage(components, item, input)
+  }
+
+  readSource(agent: Agent | undefined, input: { offset?: number; maxBytes?: number }): DiagnosisSourcePage {
+    this.workItemsRequired()
+    const runtime = diagnosisRuntimes.get(this.workItemsDiagnosisKey)
+    if (!runtime || !this.workItemsConfig.diagnosis) fail('missing-dependency', 'diagnosis source runtime is unavailable')
+    return runtime.readSource(this.workItemsOccurrenceId(agent), input)
   }
 
   /** Pure SELECT/UTF-8 projection shared by preflight and the read tool. */
@@ -753,7 +855,7 @@ export class AssistantWorkItemsService extends Service {
   }
 
   /** Bounded health projection; never creates the ledger when disabled. */
-  health(): WorkItemHealth & { readonly schedulerWake: WorkItemSchedulerWakeHealth } {
+  health(): WorkItemHealth & { readonly schedulerWake: WorkItemSchedulerWakeHealth; readonly diagnosis?: Readonly<{ enabled: true; ready: boolean; running: number; lastError: string | null; interventionRequired: boolean }> } {
     const config = this.workItemsConfig
     const empty: WorkItemHealth = Object.freeze({
       enabled: config.enabled,
@@ -782,18 +884,22 @@ export class AssistantWorkItemsService extends Service {
         degraded: this.workItemsEvaluation.degraded,
       }),
     })
+    const diagnosis = config.diagnosis || this.workItemsHasDiagnosisHistory ? { diagnosis: diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.health()
+      ?? { enabled: true as const, ready: false, running: 0, lastError: this.workItemsDiagnosisError ?? (this.workItemsHasDiagnosisHistory ? 'diagnosis-disabled-with-history' : 'diagnosis-runtime-unavailable'),
+        interventionRequired: this.workItemsComponents ? persistedDiagnosisIntervention(this.workItemsComponents.store, true) : true } } : {}
     const schedulerWake = Object.freeze({ subscribed: this.workItemsSchedulerUnsubscribers.size > 0,
       lastWakeAt: this.workItemsSchedulerLastWakeAt, lastError: this.workItemsSchedulerLastError })
-    if (!config.enabled || this.workItemsClosed) return Object.freeze({ ...empty, schedulerWake })
+    if (!config.enabled || this.workItemsClosed) return Object.freeze({ ...empty, schedulerWake, ...diagnosis })
     let components: Components
     try {
       components = this.workItemsOpen()
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: ledger unavailable: ${describe(error)}`)
-      return Object.freeze({ ...empty, schedulerWake })
+      return Object.freeze({ ...empty, schedulerWake, ...diagnosis })
     }
     return Object.freeze({
       schedulerWake,
+      ...diagnosis,
       enabled: true,
       mode: config.mode,
       openItems: components.store.countOpenItems(),
@@ -819,6 +925,8 @@ export class AssistantWorkItemsService extends Service {
   close(): void {
     if (this.workItemsClosed) return
     this.workItemsClosed = true
+    diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.close()
+    diagnosisRuntimes.delete(this.workItemsDiagnosisKey)
     for (const unregister of this.workItemsSchedulerUnsubscribers) {
       try { unregister() } catch (error) { this.ctx.logger.warn(`assistant-work-items: scheduler wake removal failed: ${describe(error)}`) }
     }
@@ -882,7 +990,8 @@ export class AssistantWorkItemsService extends Service {
   private workItemsSweepQuietly(components: Components): void {
     if (!components.signals.armed()) return
     try {
-      components.signals.sweep()
+      if (this.workItemsConfig.diagnosis) diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.sweep(false)
+      else components.signals.sweep()
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: signal sweep failed: ${describe(error)}`)
     }
@@ -891,7 +1000,8 @@ export class AssistantWorkItemsService extends Service {
   /** Best-effort bounded re-dispatch sweep behind ordinary claim activity. */
   private workItemsWakeQuietly(components: Components): void {
     try {
-      components.dispatch.wakePending()
+      if (this.workItemsConfig.diagnosis) diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.wakePending()
+      else components.dispatch.wakePending()
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: dispatch recovery failed: ${describe(error)}`)
     }
@@ -1013,16 +1123,24 @@ export class AssistantWorkItemsService extends Service {
     const workspace = new WorkItemWorkspace(config.workRoot)
     workspace.prepare()
     const store = new WorkItemStore(config.databasePath)
-    const ledger = new WorkItemLedger({ store, workspace, limits: config.limits })
+    let diagnosisHistory: boolean
+    try {
+      diagnosisHistory = store.readCanonicalMeta('diagnosis.activation/v1') !== undefined
+      if (diagnosisHistory && !config.diagnosis && isActive(config)) fail('invalid-state', 'a diagnosis ledger cannot be silently activated as a generic worker')
+    } catch (error) { store.close(); throw error }
+    this.workItemsHasDiagnosisHistory = diagnosisHistory
+    const ledger = new WorkItemLedger({ store, workspace, limits: config.limits, ...(config.diagnosis || diagnosisHistory ? { diagnosis: true } : {}) })
     // Admission and dispatch both take the same ledger and the same resolved
     // peers, so one construction order keeps a single writer per durable file.
+    const builders = new WeakMap<WorkItemAdmitInput, (item: WorkItemRecord) => Readonly<WorkItemDiagnosisPlan>>()
     const admission = new WorkItemAdmission({
       config,
       store,
       ledger,
       workspace,
       policy: this.workItemsPolicy(),
-      delivery: this.workItemsDelivery(),
+      delivery: () => this.workItemsDelivery(),
+      diagnosisPlanFor: input => builders.get(input),
       threadSource: kind => {
         const registration = this.workItemsThreadSources.get(kind)
         return registration === undefined
@@ -1038,7 +1156,8 @@ export class AssistantWorkItemsService extends Service {
       store,
       ledger,
       automations: () => this.workItemsAutomations(),
-      delivery: this.workItemsDelivery(),
+      delivery: () => this.workItemsDelivery(),
+      validateWake: item => !config.diagnosis || diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.validateWake(item) === true,
       authority,
     })
     // Signal sources are optional peers resolved lazily on every sweep, so a
@@ -1054,11 +1173,16 @@ export class AssistantWorkItemsService extends Service {
     })
     const installed: Components = { workspace, store, ledger, admission, authority, dispatch, signals }
     this.workItemsComponents = installed
+    diagnosisAdmissions.set(installed, (input, builder) => {
+      if (!config.diagnosis || !isActive(config) || this.workItemsClosed) fail('disabled', 'private diagnosis admission is unavailable')
+      builders.set(input, builder)
+      try { return admission.admit(input) } finally { builders.delete(input) }
+    })
     try {
       // Bounded startup reconcile: lease reclaim is lazy forever, so a host that
       // was down catches up on the first touch instead of on a timer.
-      installed.ledger.recover()
-      if (isActive(config)) {
+      if (!config.diagnosis && !diagnosisHistory) installed.ledger.recover()
+      if (isActive(config) && !config.diagnosis) {
         try {
           installed.dispatch.wakePending()
         } catch (error) {

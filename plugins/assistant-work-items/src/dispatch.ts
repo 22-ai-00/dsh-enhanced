@@ -21,7 +21,8 @@ export interface DispatchDependencies {
   readonly store: WorkItemStore
   readonly ledger: WorkItemLedger
   readonly automations: PeerAutomationsService | undefined | (() => PeerAutomationsService | undefined)
-  readonly delivery: PeerDeliveryService | undefined
+  readonly delivery: PeerDeliveryService | undefined | (() => PeerDeliveryService | undefined)
+  readonly validateWake?: (item: WorkItemRecord) => boolean
   /** Admission-mandate revalidation gate; unset means single-authority mode. */
   readonly authority?: WorkItemAuthority
   readonly now?: () => number
@@ -64,6 +65,7 @@ export class WorkItemDispatch {
   wake(item: WorkItemRecord): boolean {
     const config = this.#deps.config
     if (!isActive(config)) return false
+    if (this.#deps.validateWake && !this.#deps.validateWake(item)) return false
     const automations = typeof this.#deps.automations === 'function' ? this.#deps.automations() : this.#deps.automations
     if (automations === undefined) fail('missing-dependency', 'assistantAutomations is required to wake the worker')
     const dispatch = this.#deps.store.getDispatch(item.id)
@@ -211,7 +213,7 @@ export class WorkItemDispatch {
     const config = this.#deps.config
     if (!isActive(config)) return false
     if (!this.shouldNotify(report)) return false
-    const delivery = this.#deps.delivery
+    const delivery = typeof this.#deps.delivery === 'function' ? this.#deps.delivery() : this.#deps.delivery
     if (delivery === undefined) fail('missing-dependency', 'assistantDelivery is required to notify the owner')
     const notification = this.notification(item, report)
     this.#deps.ledger.recordDelivery(item.id, report.revision, 'pending', null)

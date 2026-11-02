@@ -17,7 +17,7 @@ import { hostAgentToolSchemaDigest } from '../src/host-agent-execution.ts'
 import { HostAutomationExecutorRegistry } from '../src/host-executors.ts'
 import { AutomationRunnerFailureError } from '../src/coordinator.ts'
 import { AssistantAutomationsService } from '../src/service.ts'
-import type { HostAgentExecutionContract, HostAgentExecutionResult,
+import type { HostAgentAuthorizationFence, HostAgentExecutionContract, HostAgentExecutionResult,
   HostAutomationDefinition, HostAutomationExecutionSpec, HostAutomationExecutorInput, HostAutomationExecutorResult } from '../src/types.ts'
 
 const roots: string[] = []
@@ -163,8 +163,8 @@ async function harness(options: { budget?: 'none' | 'wrong-metric'; retry?: bool
   const invocations: HostAutomationExecutorInput[] = [], nativeResults: HostAgentExecutionResult[] = [], apiErrors: unknown[] = []
   const callbackAssertions: Error[] = []
   const assertCallbackAssertions = () => { if (callbackAssertions.length > 0) throw callbackAssertions[0] }
-  const invoke = async (invocation: HostAutomationExecutorInput, value = contract()) => {
-    try { const result = await service.runAgentForHostExecution(invocation, value); nativeResults.push(result); return result }
+  const invoke = async (invocation: HostAutomationExecutorInput, value = contract(), authorization?: HostAgentAuthorizationFence) => {
+    try { const result = await service.runAgentForHostExecution(invocation, value, authorization); nativeResults.push(result); return result }
     catch (error) { apiErrors.push(error); throw error }
   }
   let execute = async (invocation: HostAutomationExecutorInput): Promise<HostAutomationExecutorResult> => hostResult(await invoke(invocation))
@@ -687,4 +687,176 @@ describe('authorized Host invocation to one bounded native Agent', () => {
     expect(JSON.parse(f.history()[0]!.diagnostic_json as string)).toMatchObject({ failureClass: 'none', budgetSettlementState: 'finalized' })
     expect(f.reserve).toHaveBeenCalledTimes(1); expect(f.finalize).toHaveBeenCalledTimes(1)
   })
+})
+
+
+describe('Host Agent synchronous authorization fence', () => {
+  test('advertises version 1 and checks a synchronous owner before model/tool boundaries', async () => {
+    const f = await harness(), controller = new AbortController(), check = vi.fn(() => {})
+    expect(f.service.hostAgentAuthorizationVersion()).toBe(1)
+    f.execute(async input => hostResult(await f.invoke(input, f.contract(), { signal: controller.signal, assertCurrent: check })))
+    await f.run()
+    expect(f.adapter.requests).toHaveLength(2); expect(f.probe).toHaveBeenCalledTimes(1)
+    expect(check.mock.calls.length).toBeGreaterThanOrEqual(5)
+    expect(f.reserve).toHaveBeenCalledTimes(1); expect(f.finalize).toHaveBeenCalledTimes(1)
+  })
+
+  test('rechecks authorization after deferred create before the first paid request', async () => {
+    const f = await harness(), entered = gate(), release = gate(), controller = new AbortController()
+    const original = f.ctx.agents.create.bind(f.ctx.agents)
+    vi.spyOn(f.ctx.agents, 'create').mockImplementation(async options => { const handle = await original(options); entered.resolve(); await release.promise; return handle })
+    let current = true
+    f.execute(async input => hostResult(await f.invoke(input, f.contract(), { signal: controller.signal, assertCurrent: () => { if (!current) throw new Error('owner revoked') } })))
+    f.queue(); const running = f.drive(); await entered.promise; current = false; release.resolve(); await running
+    expect(f.adapter.requests).toHaveLength(0); expect(f.probe).not.toHaveBeenCalled()
+    expect(f.history()[0]).toMatchObject({ status: 'unknown' }); expect(f.finalize).toHaveBeenCalledTimes(1)
+  })
+
+  test('fences the second model request after a real first tool step changes owner authority', async () => {
+    const f = await harness(), controller = new AbortController(); let current = true
+    f.probe.mockImplementation(async () => { current = false; return { observed: true } })
+    f.execute(async input => hostResult(await f.invoke(input, f.contract(), { signal: controller.signal, assertCurrent: () => { if (!current) throw new Error('owner revoked') } })))
+    await f.run()
+    expect(f.adapter.requests).toHaveLength(1); expect(f.probe).toHaveBeenCalledTimes(1)
+    expect(f.history()[0]).toMatchObject({ status: 'unknown' }); expect(f.finalize).toHaveBeenCalledTimes(1)
+  })
+
+  test.each(['async','promise','thenable','getter'] as const)('rejects %s authorization without a paid request or thenable callbacks', async kind => {
+    const f = await harness(), controller = new AbortController(); let getterReads = 0, thenReads = 0
+    const callback = kind === 'async' ? async () => { throw new Error('async rejected') }
+      : kind === 'promise' ? () => Promise.reject(new Error('native rejected promise'))
+        // eslint-disable-next-line unicorn/no-thenable -- Deliberately verifies that untrusted thenable getters are never invoked.
+        : () => ({ get then() { thenReads++; throw new Error('must not read then') } })
+    const fence = kind === 'getter' ? Object.defineProperty({ signal: controller.signal }, 'assertCurrent', { enumerable: true, get() { getterReads++; return () => {} } })
+      : { signal: controller.signal, assertCurrent: callback }
+    f.execute(async input => hostResult(await f.invoke(input, f.contract(), fence as HostAgentAuthorizationFence)))
+    await f.run()
+    expect(f.adapter.requests).toHaveLength(0); expect(f.agents).toHaveLength(0)
+    expect(getterReads).toBe(0); expect(thenReads).toBe(0)
+    expect(f.finalize).toHaveBeenCalledTimes(1)
+  })
+
+  test('consumes before callback reentrancy and checks revocation after the callback', async () => {
+    const f = await harness(), controller = new AbortController(); let nested: Promise<unknown> | undefined
+    f.execute(async input => hostResult(await f.invoke(input, f.contract(), { signal: controller.signal, assertCurrent: () => {
+      nested = f.service.runAgentForHostExecution(input, f.contract())
+      void nested.catch(() => {})
+      controller.abort('owner revoked')
+    } })))
+    await f.run()
+    await expect(nested).rejects.toThrow(/exact live/u)
+    expect(f.agents).toHaveLength(0); expect(f.adapter.requests).toHaveLength(0)
+    expect(f.finalize).toHaveBeenCalledTimes(1)
+  })
+})
+
+test('a synchronous authorization callback cannot consume a second native Agent', async () => {
+  const f = await harness(), controller = new AbortController(); let nested: Promise<unknown> | undefined
+  f.execute(async input => hostResult(await f.invoke(input, f.contract(), { signal: controller.signal, assertCurrent: () => {
+    if (!nested) { nested = f.service.runAgentForHostExecution(input, f.contract()); void nested.catch(() => {}) }
+  } })))
+  await f.run(); await expect(nested).rejects.toThrow(/exact live/u)
+  expect(f.agents).toHaveLength(1); expect(f.adapter.requests).toHaveLength(2)
+  expect(f.finalize).toHaveBeenCalledTimes(1)
+})
+
+test('authorization changing after model tool-call output prevents the actual tool body', async () => {
+  const f = await harness(), controller = new AbortController(); let current = true
+  f.adapter.script = async function* () { yield* toolCalls(['probe']); current = false }
+  f.execute(async input => hostResult(await f.invoke(input, f.contract(), { signal: controller.signal, assertCurrent: () => { if (!current) throw new Error('owner revoked before tool') } })))
+  await f.run()
+  expect(f.adapter.requests).toHaveLength(1); expect(f.probe).not.toHaveBeenCalled()
+  expect(f.history()[0]).toMatchObject({ status: 'unknown' }); expect(f.finalize).toHaveBeenCalledTimes(1)
+})
+
+test('owned authorization signal abort during deferred create prevents any model request', async () => {
+  const f = await harness(), entered = gate(), release = gate(), controller = new AbortController()
+  const original = f.ctx.agents.create.bind(f.ctx.agents)
+  vi.spyOn(f.ctx.agents, 'create').mockImplementation(async options => { const handle = await original(options); entered.resolve(); await release.promise; return handle })
+  f.execute(async input => hostResult(await f.invoke(input, f.contract(), { signal: controller.signal, assertCurrent: () => {} })))
+  f.queue(); const running = f.drive(); await entered.promise; controller.abort('owner revoked'); release.resolve(); await running
+  expect(f.adapter.requests).toHaveLength(0); expect(f.probe).not.toHaveBeenCalled(); expect(f.finalize).toHaveBeenCalledTimes(1)
+})
+
+test('authorization callback unloading its executor and returning void is rechecked before create', async () => {
+  const f = await harness(), controller = new AbortController(); let calls = 0
+  f.execute(async input => hostResult(await f.invoke(input, f.contract(), { signal: controller.signal, assertCurrent: () => { calls++; f.unregister() } })))
+  await f.run()
+  expect(calls).toBe(1); expect(f.agents).toHaveLength(0); expect(f.adapter.requests).toHaveLength(0)
+  expect(f.finalize).toHaveBeenCalledTimes(1)
+})
+
+test.each(['propagate','succeeded','forged-throw'] as const)('retains observed paid native usage when authorization is revoked (%s)', async terminal => {
+  const f = await harness(), authorization = new AbortController(); let current = true
+  f.adapter.script = async function* () {
+    for await (const chunk of toolCalls(['probe'])) yield chunk.type === 'usage' ? { type: 'usage', usage: { inputTokens: 10, outputTokens: 4 } } : chunk
+  }
+  f.probe.mockImplementation(async () => { current = false; return { observed: true } })
+  f.execute(async input => {
+    try { return hostResult(await f.invoke(input, f.contract(), { signal: authorization.signal, assertCurrent: () => { if (!current) throw new Error('owner revoked after paid claim') } })) }
+    catch (error) {
+      if (terminal === 'succeeded') return hostSuccess()
+      if (terminal === 'forged-throw') throw Object.assign(new Error('caller cannot supply usage'), { usage: { inputTokens: 999, outputTokens: 999, toolCalls: 999 }, sessionId: 'forged-session' })
+      throw error
+    }
+  })
+  await f.run()
+  expect(f.adapter.requests).toHaveLength(1); expect(f.probe).toHaveBeenCalledTimes(1)
+  const agent = f.agents[0]!
+  expect(agent.session.snapshotEvents().some(event => event.type === 'assistant/message' && event.data.usage?.inputTokens === 10 && event.data.usage?.outputTokens === 4)).toBe(true)
+  expect(f.history()[0]).toMatchObject({ status: 'unknown', session_id: agent.session.id, evidence_status: 'suppressed' })
+  expect(JSON.parse(f.history()[0]!.usage_json as string)).toMatchObject({ inputTokens: 10, outputTokens: 4, toolCalls: 1 })
+  expect(JSON.parse(f.history()[0]!.diagnostic_json as string)).toMatchObject({ sideEffectState: 'unknown', retryability: 'unsafe', budgetSettlementState: 'finalized' })
+  expect(f.reserve).toHaveBeenCalledTimes(1); expect(f.finalize).toHaveBeenCalledTimes(1)
+})
+
+test('retains observed paid usage across executor unload without accepting a late success', async () => {
+  const f = await harness()
+  f.adapter.script = async function* () {
+    for await (const chunk of toolCalls(['probe'])) yield chunk.type === 'usage' ? { type: 'usage', usage: { inputTokens: 10, outputTokens: 4 } } : chunk
+  }
+  f.probe.mockImplementation(async () => { f.unregister(); return { observed: true } })
+  f.execute(async input => { try { await f.invoke(input) } catch { /* Unload is uncertain even if this Host returns success. */ } return hostSuccess() })
+  await f.run()
+  expect(f.adapter.requests).toHaveLength(1); expect(f.probe).toHaveBeenCalledTimes(1)
+  expect(f.history()[0]).toMatchObject({ status: 'unknown', session_id: f.agents[0]!.session.id })
+  expect(JSON.parse(f.history()[0]!.usage_json as string)).toMatchObject({ inputTokens: 10, outputTokens: 4, toolCalls: 1, observedPartial: true })
+  expect(f.reserve).toHaveBeenCalledTimes(1); expect(f.finalize).toHaveBeenCalledTimes(1)
+})
+
+test('keeps partial paid usage when teardown is unconfirmed and ignores later disposal completion', async () => {
+  const f = await harness(), release = gate(), authorization = new AbortController(); let current = true
+  const create = f.ctx.agents.create.bind(f.ctx.agents), handles: AgentHandle[] = []
+  vi.spyOn(f.ctx.agents, 'create').mockImplementation(async options => {
+    const handle = await create(options); handles.push(handle)
+    return { agent: handle.agent, async dispose() { await release.promise; await handle.dispose() } }
+  })
+  f.adapter.script = async function* () {
+    for await (const chunk of toolCalls(['probe'])) yield chunk.type === 'usage' ? { type: 'usage', usage: { inputTokens: 10, outputTokens: 4 } } : chunk
+  }
+  f.probe.mockImplementation(async () => { current = false; return { observed: true } })
+  f.execute(async input => {
+    try { await f.invoke(input, f.contract(), { signal: authorization.signal, assertCurrent: () => { if (!current) throw new Error('owner revoked') } }) }
+    catch { /* The partial audit receipt must not turn teardown uncertainty into success. */ }
+    return hostSuccess()
+  })
+  try {
+    await f.run()
+    const before = structuredClone(f.history()[0])
+    expect(before).toMatchObject({ status: 'unknown', session_id: f.agents[0]!.session.id })
+    expect(JSON.parse(before!.usage_json as string)).toMatchObject({ inputTokens: 10, outputTokens: 4, toolCalls: 1, observedPartial: true })
+    expect(f.nativeResults).toHaveLength(0); expect(f.finalize).toHaveBeenCalledTimes(1)
+    release.resolve(); await Promise.all(handles.map(handle => handle.dispose())); await new Promise<void>(resolve => setImmediate(resolve))
+    expect(f.history()[0]).toEqual(before); expect(f.finalize).toHaveBeenCalledTimes(1)
+  } finally { release.resolve(); await Promise.all(handles.map(handle => handle.dispose())) }
+})
+
+test('does not accept caller-supplied error usage without an internally observed Agent', async () => {
+  const f = await harness()
+  f.execute(async () => { throw Object.assign(new Error('forged usage'), { usage: { inputTokens: 999, outputTokens: 999, toolCalls: 999 }, sessionId: 'forged-session' }) })
+  await f.run()
+  expect(f.agents).toHaveLength(0); expect(f.adapter.requests).toHaveLength(0)
+  expect(f.history()[0]?.status).toBe('unknown'); expect(f.history()[0]?.session_id).not.toBe('forged-session')
+  expect(JSON.parse(f.history()[0]!.usage_json as string)).toEqual({})
+  expect(f.reserve).toHaveBeenCalledTimes(1); expect(f.finalize).toHaveBeenCalledTimes(1)
 })

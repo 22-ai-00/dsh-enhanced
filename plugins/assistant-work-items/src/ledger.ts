@@ -63,16 +63,19 @@ export class WorkItemLedger {
   readonly #workspace: WorkItemWorkspace
   readonly #limits: NormalizedLimits
   readonly #now: () => number
+  readonly #diagnosis: boolean
 
   constructor(options: {
     store: WorkItemStore
     workspace: WorkItemWorkspace
     limits: NormalizedLimits
+    diagnosis?: boolean
     now?: () => number
   }) {
     this.#store = options.store
     this.#workspace = options.workspace
     this.#limits = options.limits
+    this.#diagnosis = options.diagnosis ?? false
     this.#now = options.now ?? (() => Date.now())
   }
 
@@ -104,7 +107,7 @@ export class WorkItemLedger {
       if (!this.#workspace.contains(item.workDir)) fail('storage', 'stored work directory escapes workRoot')
       this.#workspace.ensureDirectory(item.id)
     }
-    return this.#store.claim({ itemId: item.id, runId: request.runId, occurrenceId: request.occurrenceId, leaseMs: this.#limits.leaseMs })
+    return this.#store.claim({ itemId: item.id, runId: request.runId, occurrenceId: request.occurrenceId, leaseMs: this.#limits.leaseMs, ...(this.#diagnosis ? { reclaimExpired: false } : {}) })
   }
 
   /**
@@ -167,6 +170,7 @@ export class WorkItemLedger {
 
   /** Lazy lease recovery, invoked on startup and every admission/claim. */
   recover(): ReclaimResult {
+    if (this.#diagnosis) return Object.freeze({ requeued: Object.freeze([]), blocked: Object.freeze([]) })
     return this.#store.reclaimExpired()
   }
 

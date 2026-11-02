@@ -474,16 +474,17 @@ describe('assistant automations Cordis service', () => {
     expect(projection).toMatchObject({
       owner: 'assistant-heartbeat', automationId: 'heartbeat-health', definitionVersion: 2,
       latestTerminalRun: {
+        occurrenceId: task.occurrenceId,
         status: 'succeeded', immutableContext: {
           state: 'verified', definitionHash: oldHash, definitionVersion: 1,
           scope: { workspace: '/work/old', agentPreset: 'old-preset' },
         },
       },
       latestTerminalRuns: {
-        production: { executionMode: 'production', immutableContext: { scope: {
+        production: { occurrenceId: task.occurrenceId, executionMode: 'production', immutableContext: { scope: {
           workspace: '/work/old', agentPreset: 'old-preset',
         } } },
-        preview: { executionMode: 'preview', immutableContext: { scope: {
+        preview: { occurrenceId: previewTask.occurrenceId, executionMode: 'preview', immutableContext: { scope: {
           workspace: '/work/new', agentPreset: 'new-preset',
         } } },
       },

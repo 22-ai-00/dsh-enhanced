@@ -278,7 +278,7 @@ class NativeAgentExecution implements AutomationRunner {
     private readonly ctx: Context,
     private readonly policy: AssistantPolicyService,
     options: DshAutomationRunnerOptions = {},
-    private readonly hostContract?: Readonly<{ contract: Readonly<HostAgentExecutionContract>; digest: string; deadline: Readonly<{ deadlineAt: number; check: () => void }> }>,
+    private readonly hostContract?: Readonly<{ contract: Readonly<HostAgentExecutionContract>; digest: string; deadline: Readonly<{ deadlineAt: number; check: () => void; authorize?: () => void; observe: (read: () => AutomationRunnerResult) => void }> }>,
   ) {
     this.allowUnbudgetedExecution = options.allowUnbudgetedExecution ?? false
     this.prepareAcceptance = options.prepareAcceptance
@@ -437,6 +437,7 @@ class NativeAgentExecution implements AutomationRunner {
               throw new Error('assistant-automations: immutable model-call budget exhausted')
             }
             beforePrompt?.()
+            strict?.deadline.authorize?.()
             modelCalls += 1
             if (!strict) { yield* next(); return }
             let outputBytes = 0
@@ -454,7 +455,9 @@ class NativeAgentExecution implements AutomationRunner {
             }
             strict?.deadline.check()
           })
-          const unbindInitiator = this.policy.bindInitiator(agent, 'background')
+          // Host tools must retain the principal frozen in the authorized
+          // occurrence. Ordinary DshRunner keeps its historical initiator.
+          const unbindInitiator = this.policy.bindInitiator(agent, 'background', strict ? definition.principal : undefined)
           agentCtx.effect(() => unbindInitiator, 'assistant-automations.background-initiator')
           const delivery = this.ctx.get('assistantDelivery') as
             | Pick<AssistantDeliveryService, 'bindAgentApprovalRoute'>
@@ -509,7 +512,7 @@ class NativeAgentExecution implements AutomationRunner {
           )
           agentCtx.tools.guard((execution) => {
             if (strict && execution.agent !== agent) return undefined
-            if (strict) { strict.deadline.check(); if (hostAgentToolSchemaDigest(agentCtx.tools.schemas(agent)) !== strict.contract.toolSchemaDigest) return 'assistant-automations: Host tool schemas drifted' }
+            if (strict) { strict.deadline.authorize?.(); strict.deadline.check(); if (hostAgentToolSchemaDigest(agentCtx.tools.schemas(agent)) !== strict.contract.toolSchemaDigest) return 'assistant-automations: Host tool schemas drifted' }
             if (!allowed.has(execution.name)) return 'assistant-automations: tool is outside the immutable allowlist'
             if (toolCalls >= definition.maxToolCalls) {
               return 'assistant-automations: immutable tool-call budget exhausted'
@@ -523,6 +526,21 @@ class NativeAgentExecution implements AutomationRunner {
       if (this.hostContract && input.signal.aborted) { await handle.dispose(); handle = undefined; throw new Error('assistant-automations: late Host Agent creation rejected') }
       sideEffectState = 'possible'
       const agent = handle.agent
+      this.hostContract?.deadline.observe(() => {
+        // Only committed native assistant-message usage is counted: this is an observed lower bound, never a total bill.
+        const usage: Record<string, unknown> = { toolCalls }
+        for (const event of agent.session.snapshotEvents()) {
+          if (event.type !== 'assistant/message' || event.data.usage === undefined) continue
+          for (const field of usageFields) {
+            const amount = event.data.usage[field]
+            if (amount !== undefined && Number.isSafeInteger(amount) && amount >= 0) {
+              const sum = Number(usage[field] ?? 0) + amount
+              if (Number.isSafeInteger(sum)) usage[field] = sum
+            }
+          }
+        }
+        return { outcome: 'unknown', output: '', usage, sessionId: agent.session.id, quiescent: false }
+      })
       const evolution = this.ctx.get('assistantEvolution' as never) as
         | AutomationGuidanceInjector
         | undefined
@@ -570,6 +588,7 @@ class NativeAgentExecution implements AutomationRunner {
       input.signal.addEventListener('abort', abort, { once: true })
       removeAbort = () => input.signal.removeEventListener('abort', abort)
       this.beforePrompt?.()
+      this.hostContract?.deadline.authorize?.()
       this.hostContract?.deadline.check()
       phase = 'prompt-submission'
       promptSubmissionState = 'unknown'
@@ -717,7 +736,7 @@ export class DshAutomationRunner extends NativeAgentExecution {
 
 /** Internal Host path: outer HostRunner alone reserves and settles the occurrence. */
 export function runHostNativeAgent(ctx: Context, policy: AssistantPolicyService, input: AutomationRunnerInput,
-  contract: Readonly<HostAgentExecutionContract>, contractDigest: string, signal: AbortSignal, deadline: Readonly<{ deadlineAt: number; check: () => void }>): Promise<AutomationRunnerResult> {
+  contract: Readonly<HostAgentExecutionContract>, contractDigest: string, signal: AbortSignal, deadline: Readonly<{ deadlineAt: number; check: () => void; authorize?: () => void; observe: (read: () => AutomationRunnerResult) => void }>): Promise<AutomationRunnerResult> {
   if (!isHostAutomationDefinition(input.automation.definition) || acceptanceDigest(contract) !== contractDigest) throw new Error('assistant-automations: invalid Host native execution')
   const { execution: _execution, budgetId: _budgetId, budgetAmount: _budgetAmount, ...control } = input.automation.definition
   const definition = { ...control, provider: contract.provider, model: contract.model, prompt: contract.prompt,
@@ -805,6 +824,7 @@ export class HostAutomationRunner implements AutomationRunner {
     let replayedFinalizedRecoveryBudget = false
     let executionStarted = false
     let settlementAttempted = false
+    let nativeResult: AutomationRunnerResult | undefined
     try {
       if (budgetId === undefined && !this.allowUnbudgetedExecution) {
         throw new AutomationRunnerFailureError(
@@ -918,7 +938,6 @@ export class HostAutomationRunner implements AutomationRunner {
         )
       }
       executionStarted = true
-      let nativeResult: AutomationRunnerResult | undefined
       let hostResult = await this.registry.execute(exactProof, {
         occurrenceId: input.occurrence.id,
         automationId: input.automation.id,
@@ -997,6 +1016,12 @@ export class HostAutomationRunner implements AutomationRunner {
         retryability: sideEffectState === 'none' ? 'safe' : 'unsafe',
         budgetSettlementState,
       })
+      if (nativeResult !== undefined) {
+        return { outcome: 'unknown', output: 'Host execution remains unknown; native usage is an observed lower bound',
+          usage: Object.freeze({ ...nativeResult.usage, observedPartial: true }),
+          ...(nativeResult.sessionId === undefined ? {} : { sessionId: nativeResult.sessionId }),
+          quiescent: false, diagnostic: receipt }
+      }
       if (sideEffectState !== 'none') {
         throw new AutomationRunnerAmbiguousError(
           'assistant-automations: Host execution may have produced external effects',

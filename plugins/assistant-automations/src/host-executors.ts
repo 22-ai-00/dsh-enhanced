@@ -215,7 +215,7 @@ export class HostAutomationExecutorRegistry {
     }
     const signal = AbortSignal.any([input.signal, registration.lifecycle.signal])
     const invocation = Object.freeze({ ...input, targetScope: Object.freeze({ ...input.targetScope }), signal })
-    const close = authorization === undefined ? undefined : this.#agentOwner?.open(authorization.key, invocation, authorization.input, authorization.freshReservation)
+    const close = authorization === undefined ? undefined : this.#agentOwner?.open(authorization.key, invocation, authorization.input, authorization.freshReservation, authorization.onNativeResult)
     const execution = Promise.resolve().then(() => registration.executor.execute(close === undefined ? { ...input, signal } : invocation))
     const settled = execution.then(
       result => ({ kind: 'result' as const, result }),
@@ -240,8 +240,7 @@ export class HostAutomationExecutorRegistry {
     finally {
       removeCancel?.()
       removeUnloaded?.()
-      const native = await close?.()
-      if (native !== undefined) authorization?.onNativeResult(native)
+      await close?.()
     }
     void settled.then(() => {})
     if (result.kind === 'unloaded') {

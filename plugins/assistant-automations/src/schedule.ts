@@ -1,4 +1,5 @@
 export type AutomationSchedule =
+  | { kind: 'external' }
   | { kind: 'at'; at: string }
   | { kind: 'every'; anchorAt: string; intervalMs: number }
   | { kind: 'cron'; expression: string; timezone: string }
@@ -53,6 +54,10 @@ export function validateSchedule(value: unknown): AutomationSchedule {
     throw new ScheduleError('invalid-schedule', 'schedule must be an object')
   }
   const input = value as Record<string, unknown>
+  if (input['kind'] === 'external') {
+    if (Reflect.ownKeys(input).length !== 1 || !Object.getOwnPropertyDescriptor(input, 'kind')?.enumerable || !Object.hasOwn(Object.getOwnPropertyDescriptor(input, 'kind')!, 'value')) throw new ScheduleError('invalid-schedule', 'external schedule contains an unknown field')
+    return Object.freeze({ kind: 'external' })
+  }
   if (input['kind'] === 'at') {
     if (Object.keys(input).some(key => key !== 'at' && key !== 'kind')) {
       throw new ScheduleError('invalid-schedule', 'at schedule contains an unknown field')
@@ -87,7 +92,7 @@ export function validateSchedule(value: unknown): AutomationSchedule {
       timezone: timezone(input['timezone']),
     })
   }
-  throw new ScheduleError('invalid-schedule', 'schedule kind must be at, every, or cron')
+  throw new ScheduleError('invalid-schedule', 'schedule kind must be at, every, cron, or external')
 }
 
 function integer(value: string, minimum: number, maximum: number): number {
@@ -200,6 +205,7 @@ const DAY_SKIP_MARGIN_MINUTES = 60
 export function nextOccurrence(schedule: AutomationSchedule, after: number): number | undefined {
   if (!Number.isSafeInteger(after)) throw new ScheduleError('invalid-schedule', 'after must be a safe millisecond instant')
   switch (schedule.kind) {
+    case 'external': return undefined
     case 'at': {
       const instant = Date.parse(schedule.at)
       return instant > after ? instant : undefined
@@ -238,6 +244,7 @@ export function previousOccurrence(schedule: AutomationSchedule, atOrBefore: num
     throw new ScheduleError('invalid-schedule', 'atOrBefore must be a safe millisecond instant')
   }
   switch (schedule.kind) {
+    case 'external': return undefined
     case 'at': {
       const instant = Date.parse(schedule.at)
       return instant <= atOrBefore ? instant : undefined

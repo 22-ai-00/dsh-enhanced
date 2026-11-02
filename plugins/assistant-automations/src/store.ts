@@ -446,6 +446,7 @@ export function normalizeAutomationDefinition(
     principal: text(input['principal'], 'principal', 500),
     ...(budgetId === undefined ? {} : { budgetId, budgetAmount: budgetAmount! }),
   }
+  if (!host && control.schedule.kind === 'external') throw new AutomationStoreError('invalid-definition', 'external schedules require a Host definition')
   if (host) {
     const rawExecution = input['execution'] as Record<string, unknown>
     const executionAllowed = new Set([
@@ -1225,9 +1226,13 @@ function buildTerminalEvaluation(input: {
   // silently turning a dry-run into learning truth when Evaluation is added
   // later or after a restart.
   if (input.executionMode !== 'production') return undefined
-  const inputTokens = nonNegativeUsageMetric(input.usage, 'inputTokens')
-  const outputTokens = nonNegativeUsageMetric(input.usage, 'outputTokens')
-  const toolCalls = nonNegativeUsageMetric(input.usage, 'toolCalls')
+  // Interrupted native executions retain observed lower bounds in the run
+  // receipt. Evaluation's fixed metrics protocol has no partial qualifier,
+  // so publishing those counters here would misstate complete task costs.
+  const completeUsage = input.usage.observedPartial === true ? {} : input.usage
+  const inputTokens = nonNegativeUsageMetric(completeUsage, 'inputTokens')
+  const outputTokens = nonNegativeUsageMetric(completeUsage, 'outputTokens')
+  const toolCalls = nonNegativeUsageMetric(completeUsage, 'toolCalls')
   const latencyMs = input.startedAt === null ? undefined : Math.max(0, input.occurredAt - input.startedAt)
   const retries = Math.max(0, input.attemptNumber - 1)
   const metrics = Object.freeze({
@@ -2042,6 +2047,7 @@ export class AutomationStore {
           : Object.freeze({ state: 'unknown' as const })
         return Object.freeze({
           runId: latest.id,
+          occurrenceId: latest.occurrenceId,
           status: latest.status,
           executionMode,
           diagnostic: latest.diagnostic,
@@ -2525,6 +2531,7 @@ export class AutomationStore {
     return this.transaction(() => {
       const automation = this.get(input.automationId)
       if (automation === undefined) throw new AutomationStoreError('not-found', 'automation was not found')
+      if (automation.definition.schedule.kind === 'external') throw new AutomationStoreError('invalid-state', 'external schedules cannot run manually')
       if (automation.status !== 'active') throw new AutomationStoreError('invalid-state', 'automation is not active')
       const occurrenceId = stableOccurrenceId(automation.id, 'manual', requestId)
       const existing = this.database.prepare('SELECT * FROM automation_occurrences WHERE id = ?')
@@ -3933,11 +3940,12 @@ export class AutomationStore {
       ? Object.freeze({ ...storedAutomation, status: 'active' as const, nextRunAt: undefined })
       : storedAutomation
     if (isHostAutomationDefinition(automation.definition)) {
-      const occurrence = this.database.prepare('SELECT dry_run FROM automation_occurrences WHERE id = ?')
-        .get(row.occurrence_id) as Pick<OccurrenceRow, 'dry_run'> | undefined
+      const occurrence = this.database.prepare('SELECT dry_run, trigger_kind FROM automation_occurrences WHERE id = ?')
+        .get(row.occurrence_id) as Pick<OccurrenceRow, 'dry_run' | 'trigger_kind'> | undefined
       if (occurrence === undefined || (occurrence.dry_run !== 0 && occurrence.dry_run !== 1)) {
         throw new AutomationStoreError('invalid-state', 'Host task has no exact execution mode')
       }
+      if (automation.definition.schedule.kind === 'external' && occurrence.trigger_kind !== 'external') return undefined
       const preview = occurrence.dry_run === 1
       const definitionHash = hash(automation.definition)
       const availability = this.exactHostAvailability(
@@ -4248,6 +4256,7 @@ export class AutomationStore {
     externalEvent?: ExternalEventEnvelope
     externalEventDigest?: string
   }): { value: AutomationOccurrence; created: boolean } {
+    if (input.triggerKind !== 'external' && this.get(input.automationId)?.definition.schedule.kind === 'external') throw new AutomationStoreError('invalid-state', 'external schedules require an external event')
     const id = stableOccurrenceId(input.automationId, input.triggerKind, input.triggerKey)
     const existing = this.database.prepare('SELECT * FROM automation_occurrences WHERE id = ?').get(id) as OccurrenceRow | undefined
     if (existing !== undefined) return { value: occurrence(existing), created: false }

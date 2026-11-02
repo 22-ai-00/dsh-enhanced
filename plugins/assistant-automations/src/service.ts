@@ -1,5 +1,5 @@
 import { HostAgentExecutions } from './host-agent-execution.js'
-import type { HostAgentExecutionContract, HostAgentExecutionResult, HostAutomationExecutorInput } from './types.js'
+import type { HostAgentAuthorizationFence, HostAgentExecutionContract, HostAgentExecutionResult, HostAutomationExecutorInput } from './types.js'
 import { isAbsolute, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -1707,6 +1707,7 @@ export class AssistantAutomationsService extends Service implements
     if (this.store.getDefinitionHash(input.automationId) !== input.definitionHash) {
       throw new AssistantAutomationsError('invalid-input', 'system dry-run definition hash is stale')
     }
+    if (current.definition.schedule.kind === 'external') throw new AssistantAutomationsError('invalid-input', 'external schedules cannot run dry')
     const decision = this.policy.authorize({
       subject: {
         kind: 'background', id: input.owner,
@@ -1971,10 +1972,12 @@ export class AssistantAutomationsService extends Service implements
     return this.store.validateQualityEvidence(receipt)
   }
 
+  hostAgentAuthorizationVersion = (): 1 => { this.assertActive(); return 1 }
+
   /** Consume one exact, live, fresh-budget Host invocation; never a model tool. */
-  runAgentForHostExecution = (invocation: HostAutomationExecutorInput, contract: HostAgentExecutionContract): Promise<Readonly<HostAgentExecutionResult>> => {
+  runAgentForHostExecution = (invocation: HostAutomationExecutorInput, contract: HostAgentExecutionContract, authorization?: HostAgentAuthorizationFence): Promise<Readonly<HostAgentExecutionResult>> => {
     this.assertActive()
-    return this.#hostAgents.run(invocation, contract)
+    return this.#hostAgents.run(invocation, contract, authorization)
   }
 
   /** Process-local Host executor registration; never exposed as a model tool. */
