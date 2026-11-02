@@ -17,7 +17,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 WorkItems 新增显式开启的主人前台 `work_item_list` / `work_item_recall`：当前认证主人通过 `/new` 后，仍可从持久账本找回历史任务及报告，沿任务 ID、报告修订号与 UTF-8 字节页继续读取。实际 Delivery 人类 turn/原生工具调用证明与独立 `inspect-work-items` 授权共同控制读取；SQL 在分页前过滤完整 owner lineage、route、workspace/preset 和 worker。
 
-旧任务的过期、撤回和历史结论均保留；读取不重新准入、执行、结算或恢复旧预算。诊断原五工具合同、既有配置摘要和 schema 8 保持兼容。真实 Cordis/NativeWeb/AgentLoop/Delivery/Policy/Automations 集成使用有限本地脚本供应商，覆盖会话切换、报告分页、撤权、后台越界拒绝和账本不变；不代表真实模型收益或外部送达。WorkItems 整包 301 passed、Policy 预授权 50 passed；最终集成断言收紧后 3 passed，类型与零警告 lint 通过，源码及专项独立复核 PASS。本次精确提交的跨平台根检查完成后更新下表。
+旧任务的过期、撤回和历史结论均保留；读取不重新准入、执行、结算或恢复旧预算。诊断原五工具合同、既有配置摘要和 schema 8 保持兼容。真实 Cordis/NativeWeb/AgentLoop/Delivery/Policy/Automations 集成使用有限本地脚本供应商，覆盖会话切换、报告分页、撤权、后台越界拒绝和账本不变；不代表真实模型收益或外部送达。WorkItems 整包 301 passed、Policy 预授权 50 passed；最终集成断言收紧后 3 passed，类型与零警告 lint 通过，源码及专项独立复核 PASS。能力提交 `0fee5bcc` 的 Mac/Linux 完整根检查均已通过独立复核，见下表。
 
 ## 后续工程与延后验收
 
@@ -30,13 +30,13 @@ WorkItems 新增显式开启的主人前台 `work_item_list` / `work_item_recall
 
 ## 最新完整检查
 
-命令 `CI=1 VITEST_MAX_WORKERS=2 pnpm check`，pnpm 11.7.0。后续仅测试夹具修正不改变 `241e2c2e` 的生产代码；Mac 额外完成修后专项，不将旧全根结果改标为新提交。
+命令 `CI=1 VITEST_MAX_WORKERS=2 pnpm check`，pnpm 11.7.0。两端均验证精确能力提交 `0fee5bcc`；后续状态文档提交不改产品代码。
 
 | 环境与精确源码 | 结果 | 测试 passed / skipped | 文件 passed / skipped | 日志 SHA-256 |
 | --- | --- | --- | --- | --- |
-| Mac / Node 26.11.1 / `241e2c2e` | EXIT 0，独立 PASS，1049.28 秒 | 9,578 / 1,875 | 668 / 85 | `80cfa1e7e8d5200b2655f6994e3643ad644b00a7e098e0393a870e624a9d4b45` |
-| Linux / Node 24.7.0 / `f689ceb6` | EXIT 0，独立 PASS，2063.51 秒 | 11,147 / 303 | 721 / 32 | `25f8cc949804bd9f148c6ed8ef2f353ba7e5417158c1897b7751c8b93657e019` |
+| Mac / Node 26.11.1 / `0fee5bcc` | EXIT 0，独立 PASS，1041.36 秒 | 9,612 / 1,875 | 671 / 85 | `f8fb63117daa3a92a84668ead4c452a4444b8d256d171cabcbe495c14f072b9b` |
+| Linux / Node 24.7.0 / `0fee5bcc` | EXIT 0，独立 PASS，1865.63 秒 | 11,181 / 303 | 724 / 32 | `7150c10af2bdb64b51d4e2e46b5f36f5868b27bd3e748d6f6fd8047c87e6d9c3` |
 
-两端均已独立核对 manifest、零警告 lint、38 包构建、38 个类型检查、39 个测试组及 38 个唯一 dry-run pack。Linux 使用 `TMPDIR=/data00/home/jiataorui/t`，两端各自检查前后的提交一致，且 tracked 工作树干净。原始日志和独立复核见 `docs/evidence/verification-*/`；原生 Goal 的冷证据见 `docs/evidence/native-goal-live/`。
+两端均已独立核对 manifest、零警告 lint、38 包构建、38 个类型检查、39 个测试组及 38 个唯一 dry-run pack；WorkItems 包含新增召回模块的 JS、类型声明及 map。Linux 使用 `TMPDIR=/data00/home/jiataorui/t`，两端各自检查前后的提交一致，且 tracked 工作树干净。本轮原始日志和独立复核见 `docs/evidence/verification-0fee5bcc/`；原生 Goal 的冷证据见 `docs/evidence/native-goal-live/`。
 
 此前 ENOSPC、TMPDIR 夹具失败和 Goal 截止失败均保留原始证据；专项通过不覆盖旧失败。上述检查不代替跳过项、外部连接、活服务升级或长期普通使用验收。
