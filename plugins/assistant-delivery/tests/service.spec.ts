@@ -495,6 +495,8 @@ describe('assistant delivery Cordis service', () => {
     await ctx.fiber.restart()
   })
 
+  // Keep 101 real SQLite turns to cross the 100-row scan page; allow their
+  // durable writes more time when the full workspace suite runs concurrently.
   test('advances its durable admission cursor past a full page of interrupted turns', async () => {
     const { ctx, service, root } = await harness()
     const challenge = service.issuePairing('test', principal)
@@ -528,7 +530,7 @@ describe('assistant delivery Cordis service', () => {
     await service.tick()
     expect(count()).toBe(101)
     await ctx.fiber.restart()
-  })
+  }, 30_000)
 
   test.each(['dispatch-ambiguous', 'agent-task-timeout'] as const)(
     'does not queue a %s notice after reply policy is removed', async failureCode => {
