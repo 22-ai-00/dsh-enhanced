@@ -161,6 +161,8 @@ worker preset 需要与 definition 的 `agentPreset` 一致；`subject.id` 写�
 - `work_item_status`：查询当前 occurrence 绑定的工作项、活动 claim 和报告列表；沿用既有租约恢复，不回显数据库路径、principal 或 Host 内部路径。
 - `work_item_read_report`：只读召回当前 occurrence 所属工作项的指定报告正文与 artifact 引用，支持 UTF-8 字节分页及相邻 revision 导航；不接受 item ID 或任意文件路径。
 
+报告重放在 SQLite 内精确比较完整幂等键、item、状态和实际持久化内容：摘要沿用去除首尾空白及 UTF-8 字节上限，保留截断标记，artifact 沿用路径规范化与去重。同键但持久化内容不同会拒绝；相同规范化报告的重放不增加修订、额度或通知。预授权与实际写入使用同一比较规则，既有键和账本 schema 保持不变。
+
 `work_item_report` 的 `summary` 有字节上限（默认 16 KiB），超长会被截断并标记 `truncated`；artifact 路径必须是绝对路径，且位于该工作项的 scratch 目录或 `scope.workspace` 之内，相对路径与 `..` 逃逸一律拒绝。校验会逐级 realpath 每个已存在的路径组件，任何逃出根目录的符号链接都会失败关闭；scratch 目录仍应由部署者保持私有。
 
 ### 断点续办简报（resume）

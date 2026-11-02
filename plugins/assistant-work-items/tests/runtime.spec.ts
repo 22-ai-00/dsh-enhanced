@@ -28,6 +28,7 @@ import { WorkItemStore } from '../src/store.ts'
 import type { WorkItemAdmitInput, WorkItemRecord, WorkItemReportRecord } from '../src/types.ts'
 import { WorkItemError } from '../src/types.ts'
 import { WorkItemWorkspace } from '../src/workspace.ts'
+import { workItemReportKey } from '../src/tools.ts'
 import { harness as fixturesHarness } from './fixtures.ts'
 
 const WORKER = 'work-items-worker'
@@ -1645,6 +1646,111 @@ describe('durable work-item tool preauthorization', () => {
     expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_read_report', { revision: 1, offset: 1_000 }))).toBe(false)
     expect(snapshot(fixture.root)).toEqual(before)
     expect(await reportTool.execute(ready, { agent })).toMatchObject({ replayed: true })
+  })
+
+  test('authorizes only the exact scoped replay when SQLite TEXT projection truncates at NUL', async () => {
+    const fixture = await serviceHarness()
+    const admitted = fixture.service.admit(signal())
+    const agent = workerAgent('occ-1')
+    const claimed = fixture.service.claim(agent)
+    const ready = { status: 'ready' as const, summary: 'Exact persisted replay.' }
+    const reportTool = fixture.tools.registered.find(tool => tool.name === 'work_item_report')!
+    await reportTool.execute(ready, { agent })
+    const store = (fixture.service as unknown as { workItemsComponents: { store: WorkItemStore } }).workItemsComponents.store
+    const claim = store.findClaimByRun('occ-1')!
+    const prefix = `work-item-report:${workItemReportKey(ready.status, ready.summary, [])}`
+    const fullKey = `${prefix}\0${admitted.item.id}\0${String(claim.claimId)}`
+    const original = store.reports.bind(store)
+    // Node 24.7.0 preserves the SQLite bytes, but SELECT TEXT exposes only the
+    // prefix. Keep that failure deterministic even on newer Node runtimes.
+    vi.spyOn(store, 'reports').mockImplementation(itemId => Object.freeze(original(itemId).map(report =>
+      Object.freeze({ ...report, idempotencyKey: report.idempotencyKey.split('\0')[0]! }))))
+    const raw = new DatabaseSync(fixture.config.databasePath, { readOnly: true })
+    try {
+      expect(raw.prepare('SELECT hex(idempotency_key) AS stored FROM work_item_report WHERE item_id = ?').get(admitted.item.id))
+        .toMatchObject({ stored: Buffer.from(fullKey).toString('hex').toUpperCase() })
+      expect(raw.prepare('SELECT 1 AS found FROM work_item_report WHERE item_id = ? AND idempotency_key = ?').get(admitted.item.id, fullKey)).toMatchObject({ found: 1 })
+    } finally { raw.close() }
+    const replayInput = { itemId: admitted.item.id, idempotencyKey: fullKey, status: ready.status,
+      summary: ready.summary, truncated: false, artifactPaths: [] }
+    expect(store.reportReplayState(replayInput)).toBe('match')
+    expect(store.reportReplayState({ ...replayInput, idempotencyKey: prefix })).toBe('absent')
+    expect(store.reportReplayState({ ...replayInput, idempotencyKey: `${prefix}\0another-item\0${String(claim.claimId)}` })).toBe('absent')
+    expect(store.reportReplayState({ ...replayInput, idempotencyKey: `${prefix}\0${admitted.item.id}\0${String(claim.claimId + 1)}` })).toBe('absent')
+    expect(store.reportReplayState({ ...replayInput, itemId: 'another-item' })).toBe('conflict')
+    const before = snapshot(fixture.root)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_report', ready))).toBe(true)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_report', { ...ready, status: 'failed' }))).toBe(false)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_report', { ...ready, summary: `${ready.summary} changed` }))).toBe(false)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_report', { ...ready, artifacts: [join(claimed.workDir, 'different-artifact')] }))).toBe(false)
+    expect(await reportTool.execute(ready, { agent })).toMatchObject({ replayed: true, revision: 1 })
+    fixture.policy.setAllow(false)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_report', ready))).toBe(false)
+    fixture.policy.setAllow(true)
+    vi.spyOn(fixture.delivery, 'validateOwnerRoute').mockImplementation(input => ({ ...receipt(input), generation: 99 }))
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_report', ready))).toBe(false)
+    expect(snapshot(fixture.root)).toEqual(before)
+  })
+
+  test.each(['progress', 'ready'] as const)('rejects delimiter-colliding %s reports with different persisted payloads before any write', async status => {
+    const fixture = await serviceHarness()
+    fixture.service.admit(signal())
+    const agent = workerAgent('occ-1')
+    const claimed = fixture.service.claim(agent)
+    const a = join(claimed.workDir, 'artifact-a')
+    const b = join(claimed.workDir, 'artifact-b')
+    const first = { status, summary: `x\0${a}`, artifacts: [b] }
+    const collision = { status, summary: 'x', artifacts: [a, b] }
+    const key = workItemReportKey(first.status, first.summary, first.artifacts)
+    expect(workItemReportKey(collision.status, collision.summary, collision.artifacts)).toBe(key)
+    const reportTool = fixture.tools.registered.find(tool => tool.name === 'work_item_report')!
+    await reportTool.execute(first, { agent })
+    const before = snapshot(fixture.root)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_report', first))).toBe(true)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_report', collision))).toBe(false)
+    await expect(reportTool.execute(collision, { agent })).rejects.toMatchObject({ code: 'claim-conflict' })
+    // Host API callers still reach the same store guard, including on an active
+    // progress claim where a preflight could otherwise treat it as a new report.
+    await expect(fixture.service.report(agent, { status, summary: collision.summary, artifactPaths: collision.artifacts,
+      idempotencyKey: `work-item-report:${key}` })).rejects.toMatchObject({ code: 'claim-conflict' })
+    expect(await reportTool.execute(first, { agent })).toMatchObject({ replayed: true, revision: 1 })
+    expect(snapshot(fixture.root)).toEqual(before)
+  })
+
+  test('replays using the same trim, UTF-8 bound and canonical artifact normalization as persistence', async () => {
+    const fixture = await serviceHarness({ extra: { limits: { maxReportBytes: 256 } } })
+    fixture.service.admit(signal())
+    const agent = workerAgent('occ-1')
+    const claimed = fixture.service.claim(agent)
+    const rawArtifact = `${claimed.workDir}/./artifact`
+    const args = { status: 'ready', summary: ` \n${'é'.repeat(200)}\n\t `, artifacts: [rawArtifact, rawArtifact] }
+    const reportTool = fixture.tools.registered.find(tool => tool.name === 'work_item_report')!
+    expect(await reportTool.execute(args, { agent })).toMatchObject({ truncated: true, artifactPaths: [join(claimed.workDir, 'artifact')] })
+    const before = snapshot(fixture.root)
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_report', args))).toBe(true)
+    expect(await reportTool.execute(args, { agent })).toMatchObject({ replayed: true, revision: 1 })
+    expect(snapshot(fixture.root)).toEqual(before)
+  })
+
+  test('allows a same-key replay of an identical normalized stored report without claiming raw-argument uniqueness', async () => {
+    const fixture = await serviceHarness({ extra: { limits: { maxReportBytes: 256 } } })
+    fixture.service.admit(signal())
+    const agent = workerAgent('occ-1')
+    const claimed = fixture.service.claim(agent)
+    const artifact = join(claimed.workDir, 'artifact')
+    const base = 'x'.repeat(300)
+    const first = { status: 'ready' as const, summary: `${base}\0${artifact}`, artifacts: [artifact] }
+    const equivalent = { status: 'ready' as const, summary: base, artifacts: [artifact, artifact] }
+    expect(workItemReportKey(first.status, first.summary, first.artifacts))
+      .toBe(workItemReportKey(equivalent.status, equivalent.summary, equivalent.artifacts))
+    const reportTool = fixture.tools.registered.find(tool => tool.name === 'work_item_report')!
+    await reportTool.execute(first, { agent })
+    const before = snapshot(fixture.root)
+    const enqueued = fixture.delivery.enqueues.length
+    expect(fixture.service.preauthorizeTool(execution(agent, 'work_item_report', equivalent))).toBe(true)
+    expect(await reportTool.execute(equivalent, { agent })).toMatchObject({ replayed: true, revision: 1, notified: false })
+    expect(fixture.delivery.enqueues).toHaveLength(enqueued)
+    expect(snapshot(fixture.root)).toEqual(before)
   })
 
   test('rejects accessors, hidden fields, symbols and sparse artifact arrays without invoking getters', async () => {

@@ -7,7 +7,7 @@ import { WorkItemAuthority } from './authority.js'
 import { ConfigSchema, isActive, normalizeConfig, text, type Config, type NormalizedConfig } from './config.js'
 import { WorkItemDispatch } from './dispatch.js'
 import { WorkItemEvaluationExporter, type WorkItemEvaluationRegistration } from './evaluation.js'
-import { WorkItemLedger } from './ledger.js'
+import { normalizeWorkItemReportSummary, WorkItemLedger } from './ledger.js'
 import type {
   PeerAutomationsService,
   PeerDeliveryService,
@@ -379,12 +379,16 @@ export class AssistantWorkItemsService extends Service {
       || typeof args.summary !== 'string' || args.summary.trim().length === 0) fail('invalid-input', 'work-item report requires a valid status and non-empty summary')
     const artifacts = args.artifacts ?? []
     if (!Array.isArray(artifacts) || artifacts.some(path => typeof path !== 'string')) fail('invalid-input', 'work-item report artifacts must be string paths')
-    components.workspace.validateArtifacts(item, artifacts)
+    const normalizedArtifacts = components.workspace.validateArtifacts(item, artifacts)
     if (claim === undefined || claim.itemId !== item.id) fail('claim-conflict', 'claim this item before reporting')
     const reportCount = components.store.reportCount(item.id)
     if (reportCount > 100) fail('storage', 'work item exceeds the bounded report history')
     const key = `work-item-report:${workItemReportKey(args.status as WorkItemReportStatus, args.summary, artifacts)}\0${item.id}\0${String(claim.claimId)}`
-    if (components.store.reports(item.id).some(report => report.idempotencyKey === key)) return
+    const summary = normalizeWorkItemReportSummary(args.summary, config.limits.maxReportBytes)
+    const replay = components.store.reportReplayState({ itemId: item.id, idempotencyKey: key,
+      status: args.status as WorkItemReportStatus, ...summary, artifactPaths: normalizedArtifacts })
+    if (replay === 'match') return
+    if (replay === 'conflict') fail('claim-conflict', 'idempotency key already belongs to a different persisted report')
     if (claim.state !== 'active' || claim.leasedUntil <= now || item.leaseRunId !== occurrenceId
       || item.leaseUntil === null || item.leaseUntil <= now) fail('claim-expired', 'report requires the current active claim')
     if (!['claimed', 'working'].includes(item.state)) fail('invalid-state', 'work item is not reportable')

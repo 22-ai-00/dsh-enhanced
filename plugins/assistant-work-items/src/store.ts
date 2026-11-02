@@ -2009,6 +2009,20 @@ export class WorkItemStore {
     return Object.freeze((this.#statement('SELECT * FROM work_item_report WHERE item_id = ? ORDER BY revision ASC').all(itemId) as Row[]).map(reportFromRow))
   }
 
+  /**
+   * Compare the existing scoped key and normalized persisted payload in SQLite.
+   * Node 24.7.0 TEXT projections truncate at NUL; bound SQL comparisons retain
+   * every byte. The existing key format alone also has delimiter collisions.
+   */
+  reportReplayState(input: Pick<WorkItemReportRecord, 'itemId' | 'idempotencyKey' | 'status' | 'summary' | 'truncated' | 'artifactPaths'>): 'absent' | 'match' | 'conflict' {
+    const row = this.#statement(`
+      SELECT CASE WHEN item_id = ? AND status = ? AND summary = ? AND truncated = ? AND artifact_paths = ?
+        THEN 1 ELSE 0 END AS matches
+      FROM work_item_report WHERE idempotency_key = ? LIMIT 1
+    `).get(input.itemId, input.status, input.summary, input.truncated ? 1 : 0, JSON.stringify(input.artifactPaths), input.idempotencyKey) as Row | undefined
+    return row === undefined ? 'absent' : Number(row['matches']) === 1 ? 'match' : 'conflict'
+  }
+
   /** Exact report and adjacent references, using the existing item/revision key. */
   reportByRevision(itemId: string, revision: number): Readonly<{
     report: WorkItemReportRecord
@@ -2056,8 +2070,11 @@ export class WorkItemStore {
         fail('claim-conflict', 'report requires a claim for this item')
       }
       const idempotencyKey = `${input.idempotencyKey}\0${item.id}\0${String(claim.claimId)}`
-      const duplicate = this.#statement('SELECT * FROM work_item_report WHERE idempotency_key = ?').get(idempotencyKey) as Row | undefined
-      if (duplicate !== undefined) {
+      const replay = this.reportReplayState({ ...input, idempotencyKey })
+      if (replay === 'conflict') fail('claim-conflict', 'idempotency key already belongs to a different persisted report')
+      if (replay === 'match') {
+        const duplicate = this.#statement('SELECT * FROM work_item_report WHERE idempotency_key = ?').get(idempotencyKey) as Row | undefined
+        if (duplicate === undefined) fail('storage', 'matched report disappeared before replay')
         const report = reportFromRow(duplicate)
         if (report.itemId !== item.id) fail('claim-conflict', 'idempotency key already belongs to another item')
         return Object.freeze({ item, report, replayed: true })

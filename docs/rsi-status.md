@@ -42,6 +42,6 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 - Mac `d6e1cdc2` 根 `CI=1 VITEST_MAX_WORKERS=2 pnpm check` EXIT 0：9,176 passed / 1,872 skipped，654 文件通过 / 86 条件跳过，39 组测试、38 包 dry-run pack，1244.65 秒。源提交稳定、无中止记录；日志 SHA-256 `4b1d6d793d1697d1b7f1693f38cef325cff35601e9c01baec4c75fe74d541cdc`。条件跳过不建立 Linux 行为证据。
 - `6dab65f2`：WorkItems 226 项、Policy 459 passed / 2 skipped；`eaf835dc`：review grant 62 项；`c2b21905`：WorkItems 239 项。相关类型、lint、构建和各自独立复核 PASS。
-- `d6e1cdc2` Linux 根 EXIT 1：根测试 1,321 passed / 5 skipped / 14 failed，失败均为 `local-source-policy-cache` 旧自定义 pnpm launcher 被新 pin 拒绝，未进入递归插件测试及打包；Host 收据导入回归已修复，Host/rollback 31 项通过。失败日志 SHA-256 `fa04c2dcf86f4dcdb72aca787a96e8a5722e59b53c8235e65342760218a2e46f`。
-- Linux-only 夹具改为真实支持的 pnpm package/bin/dist 布局，保留全部 14 个策略场景及漂移负例，新增固定 manager 配置检查。候选 Linux 14 项 EXIT 0、45.67 秒，独立复核 PASS；生产代码未改。集成后 Linux 根全检待完成。
+- `8bd630fc` Linux 根 EXIT 1：已修复的 pnpm 14 项及根测试 1,335 passed / 5 skipped 全部通过；插件阶段 WorkItems 终态报告重放失败，Delivery 的 101 项分页用例超时。全程已汇总 5,258 passed / 67 skipped / 1 failed，其他插件未完成、未打包；日志 SHA-256 `550cc38bfb0a57cff7f611c31a50a70746f4da98185c9f0f00871e586e46ea63`。Delivery 原用例在 Linux 单独 1.4 秒通过、Mac 服务组 83 项通过，保留原 15 秒限制，完整并发复验待完成。
+- 已定位 Node 24.7 SQLite 的 NUL 文本投影截断：报告键持久字节完整，旧 JS 比较却丢失后缀。重放改用 SQL 精确比较完整键及实际规范化报告，同键不同持久化内容拒绝；schema、旧键、owner/Policy/lease 和额度不变。Mac Node 24.7/26.11 两组各 244 项通过，类型、lint、构建及独立复核 PASS；修复后 Linux 专项和两端根全检待完成。
 - 未发布、未合入 main、未执行 live 原生升级。冷安装/prepare、合成任务及条件跳过不替代普通使用与成长收益验收。

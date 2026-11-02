@@ -42,6 +42,14 @@ function fail(code: ConstructorParameters<typeof WorkItemError>[0], message: str
   throw new WorkItemError(code, message, detail)
 }
 
+/** The exact summary representation persisted by report and checked on replay. */
+export function normalizeWorkItemReportSummary(value: string, maxBytes: number): Readonly<{ summary: string; truncated: boolean }> {
+  const summary = value.trim()
+  if (summary.length === 0) fail('invalid-input', 'report summary must not be empty')
+  const bounded = truncateUtf8(summary, maxBytes)
+  return Object.freeze({ summary: bounded.value, truncated: bounded.truncated })
+}
+
 /**
  * Lifecycle orchestration on top of the durable store.
  *
@@ -136,15 +144,13 @@ export class WorkItemLedger {
     if (item === undefined) fail('not-found', 'work item does not exist')
     const claim = this.#store.findClaimByRun(request.runId)
     if (claim === undefined) fail('claim-conflict', 'claim this item before reporting')
-    const summary = request.summary.trim()
-    if (summary.length === 0) fail('invalid-input', 'report summary must not be empty')
-    const bounded = truncateUtf8(summary, this.#limits.maxReportBytes)
+    const bounded = normalizeWorkItemReportSummary(request.summary, this.#limits.maxReportBytes)
     const artifacts = this.#workspace.validateArtifacts(item, request.artifactPaths)
     return this.#store.report({
       itemId: item.id,
       runId: request.runId,
       status: request.status,
-      summary: bounded.value,
+      summary: bounded.summary,
       truncated: bounded.truncated,
       artifactPaths: artifacts,
       idempotencyKey: request.idempotencyKey,
