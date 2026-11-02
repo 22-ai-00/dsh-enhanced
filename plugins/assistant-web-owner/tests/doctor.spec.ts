@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -9,6 +9,11 @@ import { parseDocument, stringify } from 'yaml'
 import { inspectAutonomyOwner, inspectAutonomyProfile } from '../src/doctor.js'
 
 const roots: string[] = []
+function databaseFingerprint(path: string) {
+  const metadata = statSync(path, { bigint: true })
+  return { device: metadata.dev, inode: metadata.ino, size: metadata.size, mtimeNs: metadata.mtimeNs,
+    digest: createHash('sha256').update(readFileSync(path)).digest('hex') }
+}
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 function fixture() {
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'autonomy-doctor-'))); roots.push(home)
@@ -27,28 +32,33 @@ function fixture() {
 }
 
 describe('autonomy doctor profile and persisted owner checks', () => {
-  it('reads a matched live owner without changing identity, database or configured grant', () => {
+  it('reads a real Delivery schema 28 owner without changing identity, database or configured grant', () => {
     const { home, source, databasePath, grant } = fixture()
-    const before = readFileSync(databasePath)
+    const schema = new DatabaseSync(databasePath, { readOnly: true })
+    try { expect(schema.prepare('PRAGMA user_version').get()?.user_version).toBe(28) } finally { schema.close() }
+    const before = databaseFingerprint(databasePath)
     const profile = inspectAutonomyProfile(source, 'web', home)
     expect(profile.grant).toEqual(grant)
     expect(profile.dockerPath).toBe('/usr/bin/docker')
     expect(inspectAutonomyOwner(profile)).toEqual({ status: 'matched' })
-    expect(readFileSync(databasePath)).toEqual(before)
+    expect(profile.grant).toEqual(grant)
+    expect(databaseFingerprint(databasePath)).toEqual(before)
     expect(existsSync(profile.stateRoot)).toBe(false)
   })
 
-  it('accepts reviewed Delivery v24 through v27 owner snapshots without changing either database', () => {
+  it('accepts reviewed Delivery v24 through v28 owner snapshots without changing either database', () => {
     const { home, source, databasePath } = fixture()
     const profile = inspectAutonomyProfile(source, 'web', home)
-    for (const version of [24, 25, 26, 27]) {
+    const configured = structuredClone(profile)
+    for (const version of [24, 25, 26, 27, 28]) {
       const db = new DatabaseSync(databasePath)
       try { db.exec(`PRAGMA user_version=${version}`) } finally { db.close() }
-      const before = readFileSync(databasePath)
+      const before = databaseFingerprint(databasePath)
       expect(inspectAutonomyOwner(profile)).toEqual({ status: 'matched' })
       expect(inspectAutonomyOwner({ ...profile, grant: { ...profile.grant, principalRecordId: 'foreign' } }))
         .toEqual({ status: 'mismatch' })
-      expect(readFileSync(databasePath)).toEqual(before)
+      expect(databaseFingerprint(databasePath)).toEqual(before)
+      expect(profile).toEqual(configured)
       const check = new DatabaseSync(databasePath, { readOnly: true })
       try { expect(check.prepare('PRAGMA user_version').get()?.user_version).toBe(version) } finally { check.close() }
     }
@@ -60,9 +70,11 @@ describe('autonomy doctor profile and persisted owner checks', () => {
     const db = new DatabaseSync(databasePath)
     try {
       expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(deliverySchemaVersion)
-      for (const version of [23, deliverySchemaVersion + 1]) {
+      for (const version of [23, 29]) {
         db.exec(`PRAGMA user_version=${version}`)
+        const before = databaseFingerprint(databasePath)
         expect(inspectAutonomyOwner(profile)).toEqual({ status: 'unavailable' })
+        expect(databaseFingerprint(databasePath)).toEqual(before)
         expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(version)
       }
     } finally { db.close() }

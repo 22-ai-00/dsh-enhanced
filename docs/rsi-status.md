@@ -16,7 +16,7 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 ## 当前交付与验证
 
-本次交付前台任务的可信终止观察：Delivery schema 28 原子保存完成、异常、超时、owner 取消或中断的固定事实；原有业务结果与未知副作用保持原语义，观察不授权重放。当前 owner 可按来源摘要及 UTF-8 字节分页读取原始输入；Native Web 记录实际请求的 provider/model/effort，供应商变化永久标记 inconsistent。安装器和只读快照消费者精确支持 schema 23–28，拒绝未知新 schema。此能力仍须完成下面列出的新根检查。
+`2fe7fc92` 交付前台任务的可信终止观察：Delivery schema 28 原子保存完成、异常、超时、owner 取消或中断的固定事实；原有业务结果与未知副作用保持原语义，观察不授权重放。当前 owner 可按来源摘要及 UTF-8 字节分页读取原始输入；Native Web 记录实际请求的 provider/model/effort，供应商变化永久标记 inconsistent。安装器和只读快照消费者精确支持 schema 23–28；本次补齐 Web owner doctor 的 24–28 检查，各自拒绝未审查版本。修复后的完整根检查待完成。
 
 用户于 2026-11-02 明确延后飞书机器人实连和后续真实使用验收，当前先完成代码、单测及可离线核实项。依赖实连的临时双服务升级尚未验收；保留连接门，不以模拟连接替代。
 
@@ -45,7 +45,9 @@ Linux 去除 Docker 依赖且保留能力；用持久任务、原生 Agent、独
 
 ## 最新检查
 
-本次定向验证：Store/source-feed/foreground-execution 在 Mac Node 24.7.0 和 26.11.1 各 53 PASS，快照 69 PASS / 3 skipped，Lark schema 消费者 93 PASS，安装器纯契约 3 PASS。真实原生 Agent 的模拟模型回归覆盖两种入口和延迟创建后的同一 deadline；复核发现的原始 Inbox 字节校验与 deadline 分类问题已修正并保留红绿证据。最终 Delivery 构建、完整 noEmit 类型检查和变更生产文件零警告 lint 均 EXIT 0；原始材料在 `docs/evidence/foreground-termination-{store,producers,compat,integration}/`。最新完整根检查仍是以下基线，本次源码的 Mac/Linux 根检查及 Linux schema 28 生命周期实例待完成。
+来源基础的定向验证：Store/source-feed/foreground-execution 在 Mac Node 24.7.0 和 26.11.1 各 53 PASS，快照 69 PASS / 3 skipped，Lark schema 消费者 93 PASS，安装器纯契约 3 PASS。真实原生 Agent 的模拟模型回归覆盖两种入口和延迟创建后的同一 deadline；复核发现的原始 Inbox 字节校验与 deadline 分类问题已修正并保留红绿证据。Delivery 构建、完整 noEmit 类型检查和变更生产文件零警告 lint 均 EXIT 0；原始材料在 `docs/evidence/foreground-termination-{store,producers,compat,integration}/`。
+
+`2fe7fc92` Mac 根检查 FAIL：Web doctor 漏接 schema 28，两个 owner 读取测试得到 unavailable；331.01 秒，EXIT 1，日志 SHA `0b5ce06c459fc8b1ab0ce63de73f92e641c3ab3eb576f29f1e4bdd0261802b1e`。Linux 同提交在确认该兼容问题后主动中止，479.16 秒、EXIT 130，不视为 PASS 或测试 FAIL。两端源码稳定、原始结果及中止原因保留在 `docs/evidence/verification-2fe7fc92/`。修复只补充已审查的 Web doctor 版本及只读回归；Mac 完整 Web owner 80 项、构建、类型检查和 lint 均 EXIT 0，证据在 `docs/evidence/foreground-termination-doctor/`。修后双端根检查和 Linux schema 28 生命周期实例待完成。最新完整通过仍为以下基线。
 
 精确源码提交 `7b90d8dce9b4af4753dd78c5e284612332760ef0`、tree `de3c16d2a6ba32cb4e38f3ec8fb18f1258cae34b`；两端命令均为 `CI=1 VITEST_MAX_WORKERS=2 pnpm check`，pnpm 11.7.0。manifest、零警告 lint、构建、类型检查、测试及 dry-run pack 全部完成；child/runner 均 EXIT 0、源码稳定、无中断。
 
