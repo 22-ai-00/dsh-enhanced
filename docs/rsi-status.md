@@ -18,15 +18,21 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 ## 当前交付：后台反馈驱动工程成长
 
-尚未提交交付。完整、可验证的原始主人任务沿父链进入既有工程 Growth，执行候选创建、独立验收、有限采用及后续调用；空白、附件或历史来源不完整时拒绝，不用 worker 简报或结果短句替代工程目标。后台作者使用精确预授权；前台工具调用保留原审批边界。没有新增 Agent Loop 或 timer。
+实现已提交并推送 `dev`（`d8c9fdd2`，双端精确提交根检查通过）。完整、可验证的原始主人任务沿父链进入既有工程 Growth，执行候选创建、独立验收、有限采用及后续调用；空白、附件或历史来源不完整时拒绝，不用 worker 简报或结果短句替代工程目标。后台作者使用精确预授权；前台工具调用保留原审批边界。没有新增 Agent Loop 或 timer。
 
 相关组件专项、manifest 和零警告 lint 已通过。Mac 已分别通过并独立复核四个真实原生场景：创建→独立验收→采用→新会话调用，错误候选拒绝，更正/撤回，以及采用提交后丢 ACK 的组件重挂恢复。恢复沿用原身份、授权、证书与额度，没有重复作者或审查；不代表未知采用事务或全进程恢复。供应商均为本地脚本，Mac 编译打包不等于候选自测。
 
-**当前待验收：** Linux 正常创建→独立验收→采用→新会话调用、错误候选拒绝、更正撤回及丢 ACK 冷恢复四个原生场景已通过并独立复核。丢 ACK 场景在组件重挂后恢复原 alias，只发生一次主人调用（`allowed-once`），未再付费生成作者或审查，adoption 仍为同一 `plan_id`。该场景曾因预算快照断言接连失败（`ack-r1`、`ack-r2`）；现改为在 automations 空闲后取一致快照，新增预留只能是绑定当前扫描定义 digest、`amount=actual_amount=1` 的 finalized 结算，既有预留的不可变字段逐字段不变（仅允许仓内 `reserved` 行首次结算为 `finalized`/`released`），保留失败尝试。原始 Policy 预留行未纳入归档，预算归属由该次通过运行的测试断言及复核代码证明。新后台任务的 Host 期限修复、读取取消竞态修复均已独立通过，旧 v1 定义不迁移。Linux 采用场景的测试总时限按实测多阶段耗时设为 600 秒，Mac 保持 300 秒；生产各阶段限额及根默认超时不变。本轮双端根检查仍待执行。证据入口：`docs/evidence/work-item-engineering-growth/integration-current-checkpoint.json`。
+**当前待验收：** Linux 正常创建→独立验收→采用→新会话调用、错误候选拒绝、更正撤回及丢 ACK 冷恢复四个原生场景已通过并独立复核。丢 ACK 场景在组件重挂后恢复原 alias，只发生一次主人调用（`allowed-once`），未再付费生成作者或审查，adoption 仍为同一 `plan_id`。该场景曾因预算快照断言接连失败（`ack-r1`、`ack-r2`）；现改为在 automations 空闲后取一致快照，新增预留只能是绑定当前扫描定义 digest、`amount=actual_amount=1` 的 finalized 结算，既有预留的不可变字段逐字段不变（仅允许仓内 `reserved` 行首次结算为 `finalized`/`released`），保留失败尝试。原始 Policy 预留行未纳入归档，预算归属由该次通过运行的测试断言及复核代码证明。新后台任务的 Host 期限修复、读取取消竞态修复均已独立通过，旧 v1 定义不迁移。Linux 采用场景的测试总时限按实测多阶段耗时设为 600 秒，Mac 保持 300 秒；生产各阶段限额及根默认超时不变。双端根检查已在精确提交 `d8c9fdd2` 通过（见下节）。另有一个新控制台插件切片 `9e004c50` 已推送，其精确提交根检查待跑。证据入口：`docs/evidence/work-item-engineering-growth/integration-current-checkpoint.json`。
+
+## 当前开发：左侧栏控制台插件
+
+新切片 `9e004c50` 在 `dev`：`@dsh-enhanced/owner-console` 是独立可安装 bundle，左侧栏出现「控制台」入口，主面板一页三卡（飞书远程接入状态、TraeX 入口开关、依赖自检），全部只读，经严格 `typert` 读接口返回；不发起模型调用、不写配置、不读凭据、不改其它插件。设计沿用 Superagent 原型的注意力预算：一页、一次一个问题、只显示需要人处理的事。
+
+尚未完成（下一轮继续）：飞书一键配置与直接 appId/appSecret 两种对接、TraeX 启停、本项目插件安装/开关/配置管理、缺失依赖的一键安装；这些动作必须逐项经 Policy 审批并保持一次性。`9e004c50` 仍需双端精确提交根检查。
 
 ## 待办与延后验收
 
-1. 提交 `dev` 后，对精确提交跑双端完整检查（含上述四个 Linux 原生场景）。Linux 大测试、缓存和证据使用 `/data00`，启动前核对实际文件系统；旧系统盘测试数据已校验归档迁出，运行服务未变。
+1. 对新控制台插件切片 `9e004c50` 跑双端精确提交完整检查；此前工程成长切片 `d8c9fdd2` 已双端通过。Linux 大测试、缓存和证据使用 `/data00`，启动前核对实际文件系统；旧系统盘测试数据已校验归档迁出，运行服务未变。
 2. 非空 review 历史 CAS/封存已有组件专项；installer、Host head、运行时消费者及非空 adoption 迁移资格仍缺。旧 Docker 证书不能作为 Linux 资格；owner 升级的空业务采用 CAS 不代表非空迁移、复制恢复或 native→native 已支持。
 3. Router 跨信道协调、订阅直通和长期普通使用收益尚未完整验收。现有持久任务不代表完整自主工程成长；两端此前五次真实模型运行额度已用尽，不重置失败或预算。
 4. 用户已延后飞书机器人实连和后续真实使用验收；正式连接门保留。完整临时双服务升级、就绪、回滚及活 Home 切换未验收，暂不操作活服务。
@@ -35,13 +41,13 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 ## 最新完整检查
 
-以下结果仅覆盖此前经验学习交付：精确实现 `9d515afc890224ca52dd3e1c4737f1d4979b7b24`，tree `37690b629f1aab1800df06daf6bfc3b6cfe67b11`，不覆盖当前未提交工程成长切片。
+以下结果覆盖工程成长切片：精确实现 `d8c9fdd2e07284ab6fcd89b5dbc5d369211a9f3d`，tree `eef5361d0647dd8095eec368f2786aa89d4dd061`。
 
-命令 `CI=1 VITEST_MAX_WORKERS=2 pnpm_config_verify_deps_before_run=error pnpm check`，pnpm 11.7.0；先核对并清理 38 包生成目录，保留根脚本默认 15 秒测试超时。
+命令 `CI=1 VITEST_MAX_WORKERS=2 pnpm_config_verify_deps_before_run=error pnpm check`，pnpm 11.7.0；先核对并清理 38 包生成目录，保留根脚本默认 15 秒测试超时。Linux 调用前另需 CI 的 `DSH_TEST_PNPM_ROOT`（原生 `@pnpm/exe@11.7.0`）与指向已有 store 的 `pnpm_config_store_dir`，否则 release/lifecycle 两组 Linux 专用测试因缺少测试运行时失败。
 
 | 环境 | 结果 | 测试 passed / skipped | 文件 passed / skipped | 日志 SHA-256 |
 | --- | --- | --- | --- | --- |
-| Mac / Node 26.11.1 | EXIT 0，独立 PASS，1245.73 秒 | 10,089 / 1,920 | 696 / 85 | `54e1ab2438506da56cdd4f4253361b1a071b26e563c4f726bf26e300ed426da4` |
-| Linux / Node 24.7.0 | EXIT 0，独立 PASS，2392.43 秒 | 11,702 / 304 | 749 / 32 | `387bb6924db95919d35d385d9f1e0befea3d8e455765c912f19d1905a3b728f1` |
+| Mac / Node 26.11.1 | EXIT 0，独立 PASS，1081.58 秒 | 10,286 / 1,925 | 702 / 85 | `3029392783e7959812a75b8a03ac2f6f576e66e422f520c4a57b9977768a54bd` |
+| Linux / Node 22.23.2（attempt r2） | EXIT 0，独立 PASS，2412.67 秒 | 11,899 / 309 | 755 / 32 | `9abc8f72ade4375626365982197d617e7050a626b0d31a79057327c0b767d1cf` |
 
-两端覆盖 manifest、零警告 lint、38 包构建和类型检查、39 测试组及 38 个唯一 dry-run pack；修改涉及的公开产物逐项核对入包，源码前后同一提交且工作树干净。Linux `TMPDIR=/data00/home/jiataorui/t`。准确命令与独立复核见 `docs/evidence/verification-9d515afc/`；Mac 原始日志在本地，Linux 原始日志留在远端同路径。跳过项、真实模型/Bot、活服务升级和长期收益不计为已验收。
+两端覆盖 manifest、零警告 lint、38 包构建和类型检查、39 测试组及 38 个唯一 dry-run pack；修改涉及的公开产物逐项核对入包，源码前后同一提交且工作树干净。Linux `TMPDIR=/data00/home/jiataorui/t`。准确命令与结果见 `docs/evidence/verification-d8c9fdd2/`；Mac 原始日志在本地，Linux 原始日志留在远端同路径。Linux attempt 1 的失败原因是缺少测试运行时环境而非产品缺陷，已保留。跳过项、真实模型/Bot、活服务升级和长期收益不计为已验收。
