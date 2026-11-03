@@ -2748,9 +2748,9 @@ export class AutomationStore {
   }
 
   inspectAcceptedExecution(contract: AcceptanceContract): AcceptedExecution | null {
-    const row = this.database.prepare(`SELECT acceptance.*, run.* FROM automation_task_acceptance acceptance
+    const row = this.database.prepare(`SELECT acceptance.*, run.*, acceptance.quiescent AS accepted_quiescent FROM automation_task_acceptance acceptance
       LEFT JOIN automation_runs run ON run.task_id = acceptance.task_id
-      WHERE acceptance.contract_id = ?`).get(contract.id) as (AcceptanceRow & Partial<RunRow>) | undefined
+      WHERE acceptance.contract_id = ?`).get(contract.id) as (AcceptanceRow & Partial<RunRow> & { accepted_quiescent: number }) | undefined
     if (row === undefined || row.contract_digest !== contract.digest || row.workspace !== contract.scope.workspace
       || row.preset !== contract.scope.preset || row.principal_record_id !== contract.owner.principalRecordId
       || row.principal_version !== contract.owner.principalVersion || contract.task.kind !== 'automation-run'
@@ -2761,7 +2761,7 @@ export class AutomationStore {
       || snapshot.definition.workspace !== row.workspace || snapshot.definition.agentPreset !== row.preset
       || this.getRunExecutionMode(row.id) !== 'production') return null
     const status = row.status === 'timed_out' ? 'timed-out' : row.status
-    const quiescent = row.quiescent === 1
+    const quiescent = row.accepted_quiescent === 1
     return Object.freeze({ contractId: row.contract_id, contractDigest: row.contract_digest,
       dispatchedAt: row.dispatched_at, status, quiescent, completedAt: row.created_at, executionRef: row.id })
   }
