@@ -243,10 +243,12 @@ function applyChange(manager: PluginManagerService, result: ChangeResultLike): O
       : result.application === 'overridden' ? '被更高优先级的覆盖项接管' : ''
     : `${result.error.code}${result.error.diagnostic === undefined ? '' : `：${result.error.diagnostic}`}`
   const warnings = (result.warnings ?? []).length === 0 ? '' : `；警告：${(result.warnings ?? []).join('；')}`
+  const builds = (result.pendingBuilds ?? []).length === 0 ? ''
+    : `；需要在设置页批准构建脚本：${(result.pendingBuilds ?? []).join('、')}`
   return Object.freeze({
     applied: result.application === 'applied',
     entry: result.target,
-    note: `${result.changed ? '已变更' : '无变化'}（${result.application}）${reason === '' ? '' : `；${reason}`}${warnings}`,
+    note: `${result.changed ? '已变更' : '无变化'}（${result.application}）${reason === '' ? '' : `；${reason}`}${warnings}${builds}`,
   })
 }
 

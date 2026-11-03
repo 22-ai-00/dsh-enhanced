@@ -50,6 +50,7 @@ export interface ChangeResultLike {
   readonly enabled?: boolean
   readonly error?: Readonly<{ code: string, diagnostic?: string }>
   readonly warnings?: readonly string[]
+  readonly pendingBuilds?: readonly string[]
 }
 export interface PluginManagerService {
   listBundles(): Promise<readonly BundleInfoLike[]>

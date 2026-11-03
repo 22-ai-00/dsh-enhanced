@@ -26,6 +26,13 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { workItemTextDigest, type WorkItemCreationReadiness } from '../src/work-item-source.ts'
 import { UsageStore } from '../src/usage-store.ts'
 
+/** Fake Date fixed mid-minute so ticking a few seconds never crosses the
+ * automations minute boundary and claims an extra usage-scan occurrence. */
+function fakeClock(): void {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date(Date.UTC(2026, 0, 1, 0, 0, 30)))
+}
+
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { vi.useRealTimers(); for (const dispose of cleanup.splice(0).reverse()) await dispose() })
 async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missing?: boolean; budget?: boolean; maxPending?: number; scanBudgetLimit?: number; toolPolicy?: 'allow' | 'deny' } = {}) {
@@ -228,7 +235,7 @@ test('recovers only the exact policy bound before generation and never retrofits
   f.setCreationAuthority(undefined)
   expect(recovered.inspectSourceGrowthRun({ runId, intentDigest })).toBeUndefined()
   f.setCreationAuthority(authority)
-  vi.useFakeTimers({ toFake: ['Date'] })
+  fakeClock()
   vi.setSystemTime(authority.expiresAt + 1)
   expect(recovered.inspectSourceGrowthRun({ runId, intentDigest })).toBeUndefined()
   vi.useRealTimers()
@@ -382,7 +389,7 @@ test('source run inspection rejects correction, expiry, changed configuration, a
   await second.close()
   const third = f.create()
   expect(third.inspectSourceGrowthRun({ runId, intentDigest })).toBeDefined()
-  vi.useFakeTimers({ toFake: ['Date'] })
+  fakeClock()
   vi.setSystemTime(expiresAt + 1)
   expect(third.inspectSourceGrowthRun({ runId, intentDigest })).toBeUndefined()
   vi.useRealTimers()
@@ -463,7 +470,7 @@ test('backpressure leaves unconsumed heads discoverable after the first job fini
 })
 
 test('the native periodic scan discovers later cross-process feedback without a local notification', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] })
+  fakeClock()
   // Keep the review tick away from the next cron minute, which can otherwise
   // occupy the native runner's single admission slot depending on wall time.
   vi.setSystemTime(new Date('2026-09-20T00:00:10Z'))
@@ -503,7 +510,7 @@ test.each([
 })
 
 test('native discovery stops at its budget without spending the review allocation', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] })
+  fakeClock()
   vi.setSystemTime(new Date('2026-09-20T00:00:10Z'))
   const f = await fixture({ scanBudgetLimit: 1 }); const runtime = f.create()
   const reserve = vi.spyOn(f.policy, 'reserve')
@@ -575,7 +582,7 @@ test('temporary owner inspection failure preserves queued work and native recove
 
 
 test('startup temporary owner unavailability recovers through the native scan without restarting', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-09-29T12:00:10Z'))
+  fakeClock(); vi.setSystemTime(new Date('2026-09-29T12:00:10Z'))
   const f = await fixture()
   const inspection = vi.spyOn(f.delivery, 'inspectOwnerRouteState').mockReturnValue({ status: 'unavailable', reason: 'missing-binding' } as never)
   const runtime = f.create()
@@ -595,7 +602,7 @@ test('startup temporary owner unavailability recovers through the native scan wi
 
 
 test('startup retirement read outage establishes a fresh Usage cron and recovers on its native tick', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-09-29T12:00:10Z'))
+  fakeClock(); vi.setSystemTime(new Date('2026-09-29T12:00:10Z'))
   const f = await fixture()
   const inspection = vi.spyOn(f.automations, 'inspectSystemOwnedRetirement')
     .mockImplementation(() => { throw new Error('temporary retirement read unavailable') })
@@ -613,7 +620,7 @@ test('startup retirement read outage establishes a fresh Usage cron and recovers
 
 
 test('native scheduler wake silently restores fresh Usage registration after both startup APIs recover', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-09-29T12:00:10Z'))
+  fakeClock(); vi.setSystemTime(new Date('2026-09-29T12:00:10Z'))
   const f = await fixture()
   const inspection = vi.spyOn(f.automations, 'inspectSystemOwnedRetirement')
     .mockImplementation(() => { throw new Error('SQLITE_BUSY retirement inspection') })
@@ -730,7 +737,7 @@ async function workItemFixture(options: { missing?: boolean; ready?: boolean; ma
 }
 
 test('work item locator survives reader absence and restart; source stays typed, original supplier and current child objective are frozen once', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture({ missing: true })
+  fakeClock(); const f = await workItemFixture({ missing: true })
   const first = f.create(); expect(first.health().counts).toEqual({}); await first.close()
   const ledger = new UsageStore(join(f.root, 'usage.sqlite'))
   const saved = ledger.pendingWorkItems(acceptanceDigest(f.config.scope))[0]!
@@ -742,7 +749,7 @@ test('work item locator survives reader absence and restart; source stays typed,
 })
 
 test('old or unavailable peer leaves same locator with zero paid native runs, reservations or author calls', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture({ ready: false }), runtime = f.create()
+  fakeClock(); const f = await workItemFixture({ ready: false }), runtime = f.create()
   const ledger = new UsageStore(join(f.root, 'usage.sqlite')), id = ledger.pendingWorkItems(acceptanceDigest(f.config.scope))[0]!.id; ledger.close()
   await f.tick(); runtime.scan(); expect(f.review).not.toHaveBeenCalled()
   const db = new DatabaseSync(join(f.root, 'policy.sqlite')); expect(db.prepare('SELECT * FROM budget_reservations').all()).toEqual([]); db.close()
@@ -750,13 +757,13 @@ test('old or unavailable peer leaves same locator with zero paid native runs, re
 })
 
 test('withdrawal after full freeze blocks a work item author before claim', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture(), runtime = f.create()
+  fakeClock(); const f = await workItemFixture(), runtime = f.create()
   expect(runtime.health().counts).toEqual({ queued: 1 }); f.withdraw(); await f.tick()
   expect(f.review).not.toHaveBeenCalled()
 })
 
 test('producer v2 holds an actual UsageStore writer, freezes binding, rejects thenables and keeps last allowance valid', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture(), runtime = f.create(); await f.tick()
+  fakeClock(); const f = await workItemFixture(), runtime = f.create(); await f.tick()
   const input = f.review.mock.calls[0]![0], binding = runtime.inspectAnySourceGrowthRun({ runId: input.id, intentDigest: input.intentDigest })!
   expect(binding.protocol).toBe('assistant-growth/source-run/v2')
   f.setReadiness({ ...f.readiness()!, remaining: { sourceSubmissions: 0, creates: 0, verifications: 0, adoptions: 0 }, available: false })
@@ -773,7 +780,7 @@ test('producer v2 holds an actual UsageStore writer, freezes binding, rejects th
 })
 
 test('unknown work item author never supplies new producer authority or replays its paid occurrence', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture()
+  fakeClock(); const f = await workItemFixture()
   f.review.mockImplementation(async input => { input.bindSourceRun({ ...actualSourceRun(input), creationAcceptance: f.pins.creationAcceptance }); return 'unknown' })
   const first = f.create(); await f.tick()
   const input = f.review.mock.calls[0]![0], request = { runId: input.id, intentDigest: input.intentDigest }
@@ -787,7 +794,7 @@ test('unknown work item author never supplies new producer authority or replays 
 
 
 test('producer UsageStore frame rejects same-instance mutations, rolls back throw/thenable and clears guard', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture(), runtime = f.create(); await f.tick()
+  fakeClock(); const f = await workItemFixture(), runtime = f.create(); await f.tick()
   const input = f.review.mock.calls[0]![0], request = { runId: input.id, intentDigest: input.intentDigest }
   const store = new UsageStore(join(f.root, 'usage.sqlite')), before = store.get(input.id)
   for (const mutate of [() => store.interrupt(acceptanceDigest(f.config.scope)), () => store.settle(input.id, 'superseded', 'bad'), () => store.close()]) {
@@ -806,7 +813,7 @@ test('producer UsageStore frame rejects same-instance mutations, rolls back thro
 
 
 for (const loseReadyBeforeModel of [false, true, 'withdraw-in-final-probe'] as const) test(`native work item author pins creation-only tools and rechecks before first LLM (${loseReadyBeforeModel})`, async () => {
-  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture()
+  fakeClock(); const f = await workItemFixture()
   await mountAgentLoopTestDependencies(f.ctx, { workingDirectory: true })
   class Adapter extends LlmAdapter {
     requests: GenerateOptions[] = []
@@ -868,7 +875,7 @@ for (const loseReadyBeforeModel of [false, true, 'withdraw-in-final-probe'] as c
 
 
 test('producer writer consumes rejected native Promise before rejecting synchronous callback and releasing writer', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture(); f.create(); await f.tick()
+  fakeClock(); const f = await workItemFixture(); f.create(); await f.tick()
   const input = f.review.mock.calls[0]![0], request = { runId: input.id, intentDigest: input.intentDigest }
   const store = new UsageStore(join(f.root, 'usage.sqlite')), before = store.get(input.id)
   const unhandled: unknown[] = [], capture = (error: unknown) => { unhandled.push(error) }
@@ -888,7 +895,7 @@ test('producer writer consumes rejected native Promise before rejecting synchron
 })
 
 for (const mode of ['allowed-last-slot', 'policy-deny', 'withdraw', 'expired', 'schema-drift', 'wrong-agent', 'global-same-name', 'closed', 'cancelled', 'missing-binding', 'wrong-session-binding', 'wrong-occurrence-binding', 'policy-replaced-in-source-check'] as const) test(`real Policy WorkItem preauthorization without approval channel: ${mode}`, async () => {
-  vi.useFakeTimers({ toFake: ['Date'] })
+  fakeClock()
   const f = await workItemFixture({ maxToolCalls: 2, toolPolicy: mode === 'policy-deny' ? 'deny' : 'allow' })
   await mountAgentLoopTestDependencies(f.ctx, { workingDirectory: true })
   let bodies = 0, globalBodies = 0, count = 0
@@ -980,7 +987,7 @@ for (const mode of ['allowed-last-slot', 'policy-deny', 'withdraw', 'expired', '
 })
 
 test('missing Policy WorkItem capability keeps the same locator with zero paid author runs', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture({ toolPolicy: 'allow' })
+  fakeClock(); const f = await workItemFixture({ toolPolicy: 'allow' })
   Object.defineProperty(f.policy, 'workItemGrowthToolPreauthorizationVersion', { value: undefined })
   const runtime = f.create(); await f.tick(); expect(f.review).not.toHaveBeenCalled()
   const db = new DatabaseSync(join(f.root, 'policy.sqlite')); expect(db.prepare('SELECT * FROM budget_reservations').all()).toEqual([]); db.close()
@@ -988,7 +995,7 @@ test('missing Policy WorkItem capability keeps the same locator with zero paid a
 })
 
 test('published default Growth plugin preauthorizes its real native WorkItem tool call without an approval channel', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture({ toolPolicy: 'allow' })
+  fakeClock(); const f = await workItemFixture({ toolPolicy: 'allow' })
   await mountAgentLoopTestDependencies(f.ctx, { workingDirectory: true })
   let requests = 0, successfulTools = 0
   class Adapter extends LlmAdapter {

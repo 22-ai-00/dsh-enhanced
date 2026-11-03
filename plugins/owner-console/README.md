@@ -5,8 +5,10 @@ DeepSeek Harness 左侧栏的单一入口「控制台」。设计沿用
 注意力是预算，只在被请求或书面规则允许时行动；只说需要人行动的话；一次一个问题；概念和设置尽量少；
 面板只展示需要人处理的事。
 
-当前切片：只读状态 + 主人点击的一次性配置写入。写入只经 Host `settings` 服务合并到指定条目，
-不发起模型调用、不创建 Bot、不接受明文 secret、不改动未列出的插件。
+当前切片：只读状态 + 主人点击的一次性配置与管理动作。配置写入只经 Host `settings` 服务合并到
+指定条目；bundle/条目管理与安装只经 Host `pluginManager`。两类动作都由主人点击触发，
+不发起模型调用、不创建 Bot、不接受明文 secret、不改动未列出的插件。安装会把 pnpm 子进程和
+registry 网络调用委托给 DSH 自身的 plugin manager，不在本插件里实现网络或进程逻辑。
 
 ## 安装
 
@@ -55,7 +57,8 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 - TraeX 卡片只切换 `traex-acp-provider` 条目的 `enabled`（可选覆盖 `command`），不启动进程。
 - **Bundle 层**：列出本 profile 里 `@dsh-enhanced/*` bundle 的版本、是否安装、是否启用、是否可移除，
   一键启用/停用；停用只摘除该 bundle 的 patch 层，已安装依赖保留。
-- **已加载条目**：列出本项目插件的 Loader 条目（entryId、模块名、fiber 阶段），可单独启用/禁用。
+- **已加载条目**：列出模块属于 `@dsh-enhanced/*` 的 Loader 条目（entryId、模块名、fiber 阶段），
+  可单独启用/禁用；按模块归属而不是 bundle row 归属判断，第三方模块行不在此面板管理。
 - **安装**：只接受 `@dsh-enhanced/<name>` 形式的包名，走 DSH 自身的 `pluginManager.installBundle`
   （与 `dsh plugin` 相同的 pnpm 路径），会一并安装该包声明的依赖并默认激活；本地路径和 git 地址
   不在此面板处理，避免面板变成任意代码源入口。安装/启用后如返回 `restart-required`，按提示重启 profile。
@@ -81,7 +84,9 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 
 ## 权限与数据边界
 
-- 无文件系统写入、无网络、无子进程、无凭据读取。
+- 本插件自身不直接读写文件、不直接联网、不直接起子进程、不读取凭据；需要落盘的动作都委托给
+  Host 的 `settings`（配置）与 `pluginManager`（bundle/条目管理与 pnpm 安装），由后者执行。
+- 安装动作因此会经由 Host 启动 pnpm 并访问 registry（与 `dsh plugin` 相同）；只在主人点击时发生。
 - 配置写入只经 Host `settings.mutate`，且限定到单个已安装条目；bundle/entry 管理只经 Host
   `pluginManager` 且限定 `@dsh-enhanced/*`；授权来源是主人自己在面板上的点击，不是模型工具调用，
   也不存在后台自动写配置。
@@ -93,6 +98,8 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 
 - 一键模式只做 Host 环境变量探测，不代为执行 lark-cli；终端向导由 owner 自己运行。
 - 插件管理不提供卸载；安装只接受 `@dsh-enhanced/*` 包名（不支持任意本地/git 源）。
+- 面板会列出 `owner-console` 自己的 bundle/entry：禁用它会隐藏这个入口，需用 `dsh plugin` 或 CLI
+  重新启用（与 DSH 原生插件页语义一致）。
 - 停用 bundle 只摘除 patch 层，依赖与包文件保留；彻底移除仍用 `dsh plugin remove`。
 - 面板显示的是 Host 侧真实注册状态，但「已加载」不等于飞书已通过认证或长连接在线。
 - 不校验 app secret；secret 的写入通道留给 keychain 切片。

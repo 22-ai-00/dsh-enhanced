@@ -72,6 +72,7 @@ export function OwnerConsoleIcon() {
 export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }>) {
   const [status, setStatus] = useState<OwnerConsoleStatus>()
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
   const [appId, setAppId] = useState('')
   const [secretEnv, setSecretEnv] = useState('LARK_APP_SECRET')
@@ -100,13 +101,14 @@ export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }
   useEffect(() => { void refresh().catch(() => undefined) }, [])
 
   const run = async (action: () => Promise<RemoteResult<OwnerConsoleWriteResult>>) => {
-    setBusy(true); setError('')
+    setBusy(true); setError(''); setNotice('')
     try {
       const result = await action()
       if (!mounted.current) return
-      if (!result.ok) setError('Host 拒绝了这次操作，请检查输入。')
-      else if (!result.value.applied) setError(result.value.note)
-      else { setError(result.value.note); await refresh() }
+      if (!result.ok) { setError('Host 拒绝了这次操作，请检查输入。'); return }
+      // A persisted change can still need a profile restart; refresh the rows and
+      // show the Host note as information, not as a failed action.
+      setError(''); setNotice(result.value.note); await refresh()
     } catch (cause) {
       if (mounted.current) setError(cause instanceof Error ? cause.message : '操作失败')
     } finally {
@@ -194,6 +196,7 @@ export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }
     el('h2', { style: { margin: 0, fontSize: 18 } }, '控制台'),
     el('p', { style: { margin: 0, fontSize: 13, color: muted } }, '只显示需要你处理的事。'),
     error === '' ? null : el('p', { role: 'alert', style: { margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-danger)' } }, error),
+    notice === '' ? null : el('p', { role: 'status', style: { margin: 0, fontSize: 12, color: muted } }, notice),
     card('远程接入（飞书）', feishuRows, feishuActions),
     card('TraeX', traexRows),
     card('本项目插件管理', bundles))
