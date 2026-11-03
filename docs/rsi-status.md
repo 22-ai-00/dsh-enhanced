@@ -26,11 +26,17 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 ## 当前开发：左侧栏控制台插件
 
-新切片 `9e004c50` 在 `dev`：`@dsh-enhanced/owner-console` 是独立可安装 bundle，左侧栏出现「控制台」入口，主面板一页三卡（飞书远程接入状态、TraeX 入口开关、依赖自检），全部只读，经严格 `typert` 读接口返回；不发起模型调用、不写配置、不读凭据、不改其它插件。设计沿用 Superagent 原型的注意力预算：一页、一次一个问题、只显示需要人处理的事。
+`@dsh-enhanced/owner-console` 已提交 `dev`，精确提交 `da5f8d42` 通过双端根检查。左侧栏「控制台」入口 + 一页面板，设计沿用 Superagent 原型的注意力预算（一页、只显示需要人处理的事）。当前能力：
 
-评审发现并已修复两处阻塞：Web client 的嵌套 inject 返回了对象而不是 disposer（会导致入口根本注册不上）、Host 未声明 `@deepseek-ai/schemastery` 运行依赖；另修正严格 service 查找、目录表位置并补上 client 注册/释放与 provider 状态测试。当前精确提交 `94b86b61` 已通过双端根检查。
+- **飞书两种对接方式**：直接配置（appId + 恰好一个 secret 引用：环境变量名或 keychain handle；secret 明文不接受）与一键配置（从 Host 环境 `LARK_APP_ID`/`FEISHU_APP_ID` 或插件配置的 appId 探测，否则提示运行 `dsh-lark-setup` 向导）。写入用 `settings.mutate` 的显式 set/unset + `secretSource` 判别字段，解决 bundle 层默认 `credentialHandle` 无法被 unset 清掉的继承问题；account/tenant 留空时沿用现值，不静默改身份。
+- **TraeX**：只切换 `traex-acp-provider` 条目的 enabled/command。
+- **本项目插件管理**：列出声明了 live 字段的本项目条目，按 JSON 合并写入（≤16 KiB）。
+- **写入即生效**：volatile 写入只更新 fiber 引用，面板写入后对目标条目执行 `fiber.update(持久化 raw config, true)` 重启一次，apex 会以新纯配置重建连接/provider；无法解析/重载时如实提示重启。
+- **只读安全边界**：读取严格查找 service、投影不返回 secret 明文、业务拒绝以 `applied:false + note` 返回并在面板显示、client 卸载后不再 setState。
 
-尚未完成（下一轮继续）：飞书一键配置与直接 appId/appSecret 两种对接、TraeX 启停、本项目插件安装/开关/配置管理、缺失依赖的一键安装；这些动作必须逐项经 Policy 审批、一次一步。
+实现要点：`lark-channel`/`traex-acp-provider` 只在 owner 可编辑字段上标记 `.volatile()`，并在 schema 边界接受 volatile 引用、输出纯值；`lark-channel` 用 `secretSource` 在 callable 与 `~standard` 两条验证路径上屏蔽未选引用，并让非法配置 fail-soft（记录后保持 disabled，不炸 Loader 树）。该切片经过四轮独立 harness 复核：真实 Cordis Loader + 真实 `dsh-settings`/`config-editor` 下逐项验证 describe/mutate/重启/双模式切换，最终 APPROVE。
+
+尚未完成：lark-cli 向导的自动化（当前只探测环境并给出命令）、插件安装/卸载与启用开关（只做配置合并）、真实飞书长连接验收（按用户要求延后，未连活 Bot）。远端真实使用验收仍由正式连接门保留。
 
 ## 待办与延后验收
 
@@ -53,5 +59,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 | `d8c9fdd2`（38 包） | Linux / Node 22.23.2（attempt r2） | EXIT 0，独立 PASS，2412.67 秒 | 11,899 / 309 | 755 / 32 | `9abc8f72ade4375626365982197d617e7050a626b0d31a79057327c0b767d1cf` |
 | `94b86b61`（39 包，含控制台） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1087.85 秒 | 10,291 / 1,925 | 704 / 85 | `bb5a38c946f2b485ccad93355f0f2d28d6e5a228ddafd53769e7da6cea2a24d3` |
 | `94b86b61`（39 包，含控制台） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2404.48 秒 | 11,904 / 309 | 757 / 32 | `dea2dd242f9e0685b15170f9185e62e04ed49341d79d8d07a5b0efa906f7783c` |
+| `da5f8d42`（39 包，控制台配置切片） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1088.69 秒 | 10,298 / 1,925 | 704 / 85 | `f970b4bb04f1909035adb407decd082055443bf3a89124bb2378dfeb7aec4ee3` |
+| `da5f8d42`（39 包，控制台配置切片） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2447.74 秒 | 11,911 / 309 | 757 / 32 | `7de6f6499152e3b0993c5333117aa67c98234cabefb7db2d0e9cd48da8f41c4a` |
 
-两端覆盖 manifest、零警告 lint、包构建和类型检查、测试组及唯一 dry-run pack（38 包时 39 测试组；39 包时 40 测试组）；修改涉及的公开产物逐项核对入包，源码前后同一提交且工作树干净。Linux `TMPDIR=/data00/home/jiataorui/t`。准确命令与结果见 `docs/evidence/verification-d8c9fdd2/` 与 `docs/evidence/verification-94b86b61/`；Mac 原始日志在本地，Linux 原始日志留在远端同路径。Linux attempt 1 的失败原因是缺少测试运行时环境而非产品缺陷，已保留。跳过项、真实模型/Bot、活服务升级和长期收益不计为已验收。
+两端覆盖 manifest、零警告 lint、包构建和类型检查、测试组及唯一 dry-run pack（38 包时 39 测试组；39 包时 40 测试组）；修改涉及的公开产物逐项核对入包，源码前后同一提交且工作树干净。Linux `TMPDIR=/data00/home/jiataorui/t`。准确命令与结果见 `docs/evidence/verification-d8c9fdd2/`、`docs/evidence/verification-94b86b61/` 与 `docs/evidence/verification-da5f8d42/`；Mac 原始日志在本地，Linux 原始日志留在远端同路径。Linux attempt 1 的失败原因是缺少测试运行时环境而非产品缺陷，已保留。跳过项、真实模型/Bot、活服务升级和长期收益不计为已验收。
