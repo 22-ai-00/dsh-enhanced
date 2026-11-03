@@ -78,3 +78,17 @@ describe('lark-channel bundle contract', () => {
       .toThrow(/credential|secret/i)
   })
 })
+
+describe('explicit secret source', () => {
+  test('masks the inherited reference the owner did not choose', () => {
+    const base = { account: 'owner', tenant: 'tenant', appId: 'cli_0123456789abcdef', enabled: true,
+      credentialHandle: 'lark-app-secret', appSecretEnv: 'LARK_APP_SECRET' }
+    const env = Config({ ...base, secretSource: 'env' })
+    expect(env.appSecretEnv).toBe('LARK_APP_SECRET')
+    expect(env.credentialHandle).toBeUndefined()
+    const handle = Config({ ...base, secretSource: 'handle' })
+    expect(handle.credentialHandle).toBe('lark-app-secret')
+    expect(handle.appSecretEnv).toBeUndefined()
+    expect(() => Config(base)).toThrow(/not both/u)
+  })
+})

@@ -21,7 +21,7 @@ function fakeSettings(entries: Entry[]) {
   return { service: { describe: descriptors, mutate } satisfies SettingsService, entries, mutate }
 }
 
-type FakeLoader = { entries: Map<string, { disposed: number, refreshed: number }> }
+type FakeLoader = { entries: Map<string, { updated: unknown[], refreshed: number }> }
 
 async function mount(settings?: SettingsService, loader?: FakeLoader) {
   const ctx = new Context()
@@ -29,11 +29,11 @@ async function mount(settings?: SettingsService, loader?: FakeLoader) {
   if (settings !== undefined) ctx.provide('settings' as never, settings as never)
   if (loader !== undefined) {
     ctx.provide('loader' as never, {
-      resolve: (id: string) => {
-        const state = loader.entries.get(id) ?? { disposed: 0, refreshed: 0 }
-        loader.entries.set(id, state)
-        return { fiber: { dispose: () => { state.disposed += 1 } }, refresh: async () => { state.refreshed += 1 } }
-      },
+      entries: () => [...loader.entries].map(([id, state]) => ({
+        id: `include:${id}`, options: { id, config: { enabled: true } },
+        fiber: { update: (config: unknown) => { state.updated.push(config) } },
+        refresh: async () => { state.refreshed += 1 },
+      })),
     } as never)
   }
   apply(ctx, Config(defaults))
@@ -102,6 +102,7 @@ describe('dsh-enhanced-owner-console', () => {
         { op: 'set', path: ['account'], value: 'owner-acct' },
         { op: 'set', path: ['tenant'], value: 'owner-tenant' },
         { op: 'set', path: ['appSecretEnv'], value: 'LARK_APP_SECRET' },
+        { op: 'set', path: ['secretSource'], value: 'env' },
         { op: 'unset', path: ['credentialHandle'] },
       ], 3)
       const envMissing = await console.configureFeishu('app', 'cli_0123456789abcdef', 'MISSING_SECRET', '', '', '')
@@ -122,11 +123,11 @@ describe('dsh-enhanced-owner-console', () => {
     const traex = fakeSettings([{ ns: 'dsh-enhanced-traex-acp-provider', value: {} }])
     const { ctx, console } = await mount(traex.service)
     try {
-      const loader: FakeLoader = { entries: new Map() }
+      const loader: FakeLoader = { entries: new Map([['dsh-enhanced-traex-acp-provider', { updated: [], refreshed: 0 }]]) }
       const mounted = await mount(traex.service, loader)
       try {
         await expect(mounted.console.configureTraex(true, 'traex')).resolves.toMatchObject({ applied: true })
-        expect(loader.entries.get('dsh-enhanced-traex-acp-provider')).toEqual({ disposed: 1, refreshed: 1 })
+        expect(loader.entries.get('dsh-enhanced-traex-acp-provider')).toEqual({ updated: [{ enabled: true }], refreshed: 0 })
       } finally {
         await mounted.ctx.fiber.dispose()
       }

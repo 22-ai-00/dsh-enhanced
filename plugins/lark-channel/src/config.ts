@@ -7,6 +7,8 @@ export interface Config {
   appId: string
   appSecretEnv?: string
   credentialHandle?: string
+  /** Explicit secret-reference selector so a two-mode switch never leaves both refs active. */
+  secretSource?: 'env' | 'handle'
   credentialPurpose?: string
   credentialLeaseMs?: number
   domain?: 'feishu' | 'lark'
@@ -31,6 +33,7 @@ const schema = Schema.object({
   appId: Schema.string().pattern(/^cli_[0-9a-fA-F]{16}$/).required().volatile(),
   appSecretEnv: Schema.string().pattern(/^[A-Z_][A-Z0-9_]*$/).volatile(),
   credentialHandle: Schema.string().pattern(/^[A-Za-z0-9][A-Za-z0-9._@/-]{0,127}$/).volatile(),
+  secretSource: Schema.union(['env', 'handle'] as const).volatile(),
   credentialPurpose: Schema.string().pattern(/^[A-Za-z0-9][A-Za-z0-9._@/-]{0,127}$/).default('connect'),
   credentialLeaseMs: Schema.number().step(1).min(1_000).max(86_400_000).default(86_400_000),
   domain: Schema.union(['feishu', 'lark'] as const).default('feishu'),
@@ -66,6 +69,7 @@ const fields = new Set([
   'requireMentionInGroups',
   'showProgress',
   'staleAfterMs',
+  'secretSource',
   'statusReactions',
   'tenant',
   'userQuestionTtlMs',
@@ -95,6 +99,11 @@ export const Config = new Proxy(schema, {
       if (unknown !== undefined) throw new Error(`lark-channel: unknown configuration field: ${unknown}`)
     }
     const parsed = plain(Reflect.apply(target, thisArg, [input]) as Config)
+    // The bundle row ships a default credentialHandle, so a plain unset of the
+    // inherited value is not possible. An explicit selector masks the other
+    // reference before the single-reference invariant is checked.
+    if (parsed.secretSource === 'env') delete parsed.credentialHandle
+    else if (parsed.secretSource === 'handle') delete parsed.appSecretEnv
     if (parsed.appSecretEnv !== undefined && parsed.credentialHandle !== undefined) {
       throw new Error('lark-channel: configure credentialHandle or appSecretEnv, not both')
     }

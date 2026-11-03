@@ -29,8 +29,13 @@ export const isAppId = (value: unknown): value is string => typeof value === 'st
 export const isEnvName = (value: unknown): value is string => typeof value === 'string' && ENV_NAME.test(value)
 export const isSecretRef = (value: unknown): value is string => typeof value === 'string' && SECRET_REF.test(value)
 
-export interface LoaderEntry { readonly fiber?: { dispose(): void }, refresh(): Promise<void> }
-export interface LoaderService { resolve(id: string): LoaderEntry }
+export interface LoaderEntry {
+  readonly id: string
+  readonly options: { readonly id: string, readonly config?: unknown }
+  readonly fiber?: { update(config: unknown, noSave?: boolean): void }
+  refresh(): Promise<void>
+}
+export interface LoaderService { entries(): Iterable<LoaderEntry> }
 
 export function findEntry(descriptors: readonly SettingsDescriptor[], match: (ns: string) => boolean): SettingsDescriptor | undefined {
   return descriptors.find(entry => match(entry.ns))

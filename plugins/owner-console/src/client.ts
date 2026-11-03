@@ -89,7 +89,10 @@ export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }
     }
   }
   const mounted = useRef(true)
-  useEffect(() => () => { mounted.current = false }, [])
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
   useEffect(() => { void refresh().catch(() => undefined) }, [])
 
   const run = async (action: () => Promise<RemoteResult<OwnerConsoleWriteResult>>) => {
@@ -124,9 +127,9 @@ export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }
       field('tenant', tenant, setTenant, '保留当前 owner')),
     el('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
       el('button', { style: buttonStyle, disabled: busy,
-        onClick: () => void run(() => remote.configureFeishu('app', appId, secretEnv, '', account, tenant)) }, '应用配置'),
+        onClick: () => void run(() => remote.configureFeishu('app', appId, secretEnv, secretHandle, account, tenant)) }, '应用配置'),
       el('button', { style: buttonStyle, disabled: busy,
-        onClick: () => void run(() => remote.configureFeishu('lark-cli', '', secretEnv, '', account, tenant)) }, '一键配置（从 Host 环境探测 appId）'),
+        onClick: () => void run(() => remote.configureFeishu('lark-cli', '', secretEnv, secretHandle, account, tenant)) }, '一键配置（从 Host 环境探测 appId）'),
       el('button', { style: { ...buttonStyle, color: muted },
         onClick: () => copyText(status?.feishu.setupCommand ?? 'dsh-lark-setup') }, '复制向导命令')),
     el('p', { style: { margin: 0, fontSize: 12, color: muted } },

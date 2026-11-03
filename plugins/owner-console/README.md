@@ -39,9 +39,11 @@ dsh --profile web --dump-config
 写入要求 secret 引用二选一；同时给两个或都不给会被拒绝。写入前会检查那个环境变量在该
 Host 进程中确实存在，keychain handle 模式要求 `credentials-keychain` 已加载。
 account/tenant 留空时沿用条目里当前值（不会用默认值覆盖身份）；两者都为空才拒绝。
-写入通过 Host `settings.mutate` 的 set/unset 操作完成，以便安全地在两种引用之间切换；
-写入后会重启该条目一次（dispose + refresh），因为只有重启才会让插件按新的纯配置重建
-连接/provider。自动重载失败时如实提示「已保存，但需要重启 profile 后生效」。
+写入通过 Host `settings.mutate` 的 set/unset 操作完成，并显式写 `secretSource`（`env` 或
+`handle`）：bundle 层默认带 `credentialHandle`，单靠 unset 无法清掉继承值，因此两种方式互切
+由这个选择器裁决，另一个引用会被屏蔽。写入后对目标条目执行一次带新配置的重启
+（`fiber.update(rawConfig, true)`），让插件按新的纯配置重建连接/provider；不能解析条目或重载
+失败时如实提示「已保存，但需要重启 profile 后生效」。
 
 只有声明了 `.volatile()` 的配置字段才能被 settings 服务读取/改写（改完由本插件重启条目）：`lark-channel` 暴露
 enabled/account/tenant/appId/appSecretEnv/credentialHandle，`traex-acp-provider` 暴露

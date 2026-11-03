@@ -37,16 +37,20 @@ export class OwnerConsoleService extends TypertRemoteService {
   }
 
   /** Volatile edits update the running fiber references but never re-run apply.
-   * A one-step write therefore restarts just this entry so the connector or
-   * provider picks up its new plain configuration; failure stays non-fatal. */
-  private async reload(entry: string): Promise<string> {
+   * A one-step write therefore restarts just this entry with its persisted raw
+   * config, so the connector or provider rebuilds from the new plain values. */
+  private async reload(entryId: string): Promise<string> {
     const loader = this.host.get('loader' as never) as LoaderService | undefined
     if (loader === undefined) return '；已保存，但 loader 不可用，重启 profile 后生效'
     try {
-      const target = loader.resolve(entry)
-      target.fiber?.dispose()
-      await target.refresh()
-      return '；条目已重载'
+      const entry = [...loader.entries()].find(candidate => candidate.options.id === entryId || candidate.id === entryId)
+      if (entry === undefined) return '；已保存，但未找到该 profile 条目，重启 profile 后生效'
+      if (entry.fiber === undefined) {
+        await entry.refresh()
+        return '；条目已重新加载'
+      }
+      entry.fiber.update(entry.options.config, true)
+      return '；条目已重新加载'
     } catch {
       return '；已保存，但自动重载失败，请重启 profile 后生效'
     }
@@ -61,7 +65,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     return Object.freeze({
       feishu: Object.freeze({
         ...(lark === undefined ? {} : { entry: lark.ns }),
-        mode: typeof larkValue['credentialHandle'] === 'string' ? 'app' : 'lark-cli',
+        mode: larkValue['secretSource'] === 'handle' || (larkValue['secretSource'] === undefined && typeof larkValue['credentialHandle'] === 'string') ? 'app' : 'lark-cli',
         enabled: larkValue['enabled'] === true,
         appIdConfigured: isAppId(larkValue['appId']),
         connected: this.host.get('larkChannel' as never) !== undefined,
@@ -131,6 +135,7 @@ export class OwnerConsoleService extends TypertRemoteService {
       { op: 'set', path: ['account'], value: resolvedAccount },
       { op: 'set', path: ['tenant'], value: resolvedTenant },
       envName === '' ? { op: 'unset', path: ['appSecretEnv'] } : { op: 'set', path: ['appSecretEnv'], value: envName },
+      { op: 'set', path: ['secretSource'], value: handle === '' ? 'env' : 'handle' },
       handle === '' ? { op: 'unset', path: ['credentialHandle'] } : { op: 'set', path: ['credentialHandle'], value: handle },
     ], lark.revision)
     const reloaded = await this.reload(lark.ns)
