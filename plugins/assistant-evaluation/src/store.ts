@@ -62,6 +62,8 @@ export interface EvaluationStoreOptions {
 }
 
 interface OutcomeRow {
+  /** SQLite rowid: append order. Breaks `recorded_at` ties deterministically. */
+  seq?: number
   id: string
   idempotency_key: string
   payload_hash: string
@@ -470,6 +472,9 @@ function taskSubject(
 
 function newer(left: OutcomeRow, right: OutcomeRow): number {
   if (left.recorded_at !== right.recorded_at) return left.recorded_at - right.recorded_at
+  // Two trusted facts can share one millisecond. Random UUIDs do not encode order,
+  // so the durable append sequence decides which fact is the current revision.
+  if (left.seq !== undefined && right.seq !== undefined && left.seq !== right.seq) return left.seq - right.seq
   return left.id === right.id ? 0 : left.id > right.id ? 1 : -1
 }
 
@@ -694,7 +699,7 @@ export class EvaluationStore {
           AND outcome.task_subject_ref = ? AND outcome.trust = 'trusted'
           AND outcome.source_kind = 'evaluator' AND outcome.source_id = 'assistant-verifier'
           AND outcome.evaluator_id = 'assistant-verifier' AND outcome.evaluator_version = '1'
-        ORDER BY outcome.recorded_at DESC, outcome.id DESC LIMIT 1
+        ORDER BY outcome.recorded_at DESC, outcome.rowid DESC LIMIT 1
       `).get(subject.key, subjectRef) as unknown as OutcomeRow | undefined
       if (row === undefined) {
         const metric = normalized.metrics
@@ -1101,7 +1106,7 @@ export class EvaluationStore {
       FROM evaluation_self_assessments assessment
       JOIN evaluation_outcomes outcome ON outcome.id = assessment.outcome_id
       WHERE assessment.scope_key = ? AND assessment.outcome_id IN (${placeholders})
-      ORDER BY assessment.occurred_at DESC, assessment.id DESC
+      ORDER BY assessment.occurred_at DESC, assessment.rowid DESC
     `).all(scopeKey, ...outcomeIds) as unknown as SelfAssessmentRow[]
     const latest = new Map<string, StoredSelfAssessment>()
     for (const row of rows) {
@@ -1159,7 +1164,7 @@ export class EvaluationStore {
       JOIN evaluation_projection_outbox outbox ON outbox.evaluation_id = audit.id
       WHERE task.scope_key = ? AND task.task_subject_kind = 'foreground-turn'
         AND task.task_subject_ref = ? AND audit.trust = 'trusted'
-      ORDER BY audit.recorded_at DESC, audit.id DESC LIMIT 1`)
+      ORDER BY audit.recorded_at DESC, audit.rowid DESC LIMIT 1`)
       .get(scopeKey, inboxId) as { evaluation_id: string } | undefined
     if (row === undefined) return undefined
     return this.getTaskLearningProjection(scopeInput, row.evaluation_id)
@@ -1174,7 +1179,7 @@ export class EvaluationStore {
       JOIN evaluation_outcomes audit ON audit.task_subject_key = task.task_subject_key AND audit.scope_key = task.scope_key
       JOIN evaluation_projection_outbox outbox ON outbox.evaluation_id = audit.id
       WHERE task.scope_key = ? AND task.task_subject_kind = 'work-item' AND task.task_subject_ref = ? AND audit.trust = 'trusted'
-      ORDER BY audit.recorded_at DESC, audit.id DESC LIMIT 1`).get(scopeKey, itemId) as { evaluation_id: string } | undefined
+      ORDER BY audit.recorded_at DESC, audit.rowid DESC LIMIT 1`).get(scopeKey, itemId) as { evaluation_id: string } | undefined
     return row === undefined ? undefined : this.getTaskLearningProjection(scopeInput, row.evaluation_id)
   }
 
@@ -1281,7 +1286,7 @@ export class EvaluationStore {
           SELECT outbox.evaluation_id FROM evaluation_projection_outbox outbox
           JOIN evaluation_outcomes audit ON audit.id = outbox.evaluation_id
           WHERE audit.task_subject_key = projection.subject_key AND audit.trust = 'trusted'
-          ORDER BY audit.recorded_at DESC, audit.id DESC LIMIT 1
+          ORDER BY audit.recorded_at DESC, audit.rowid DESC LIMIT 1
         ) AS trigger_outcome_id
         FROM evaluation_task_projection_feed_heads head
         JOIN evaluation_task_projections projection ON projection.subject_key = head.subject_key
@@ -1741,8 +1746,8 @@ export class EvaluationStore {
       throw new EvaluationStoreError('not-found', 'task projection subject was not found')
     }
     const rows = this.#database.prepare(`
-      SELECT * FROM evaluation_outcomes WHERE task_subject_key = ?
-      ORDER BY recorded_at, id
+      SELECT rowid AS seq, * FROM evaluation_outcomes WHERE task_subject_key = ?
+      ORDER BY recorded_at, rowid
     `).all(subjectKey) as unknown as OutcomeRow[]
     if (rows.length === 0) return { learningVersionChanged: false }
 

@@ -316,6 +316,30 @@ describe('evaluation store', () => {
     store.close()
   })
 
+  test('breaks recorded_at ties by durable append order instead of random outcome ids', () => {
+    // Two trusted facts may land in the same millisecond. The canonical revision
+    // must follow the append order, never the random UUID that SQLite sorted second.
+    const store = new EvaluationStore({ path: ':memory:', now: () => 7_000 })
+    const first = store.append(envelope({
+      idempotencyKey: 'tie-first', objectiveStatus: 'achieved',
+      evidence: [{ kind: 'automation-run', ref: 'tie-run', digest: 'sha256:tie' }],
+    }))
+    const second = store.append(envelope({
+      idempotencyKey: 'tie-second', objectiveStatus: 'not-achieved',
+      evidence: [{ kind: 'automation-run', ref: 'tie-run', digest: 'sha256:tie' }],
+    }))
+    for (const trigger of [first, second]) {
+      const receipt = store.getTaskLearningProjection(trigger.scope, trigger.id)!
+      expect(receipt.projection).toMatchObject({ subjectKind: 'automation-run', subjectRef: 'tie-run', evidenceOutcomeId: second.id })
+      expect(receipt.objective?.status).toBe('not-achieved')
+    }
+    expect(store.queryTasks({ scope: first.scope, limit: 10 })).toEqual([
+      expect.objectContaining({ objectiveStatus: 'not-achieved',
+        projection: expect.objectContaining({ subjectKind: 'automation-run', subjectRef: 'tie-run' }) }),
+    ])
+    store.close()
+  })
+
   test('isolates exact scopes and enforces query filters and hard limits', () => {
     const store = new EvaluationStore({ path: ':memory:', maxQueryLimit: 2 })
     store.append(envelope())
