@@ -24,6 +24,25 @@ export interface ForegroundToolCallAttestation {
   }
 }
 
+/** A byte-bounded page of the persisted human input, never model tool arguments. */
+export interface ForegroundToolInputPage {
+  text: string
+  fullTextDigest: string
+  fullBytes: number
+  returnedBytes: number
+  offset: number
+  nextOffset?: number
+}
+
+export interface OwnerForegroundToolInput {
+  protocol: 'assistant-delivery/foreground-tool-input/v1'
+  attestation: Readonly<ForegroundToolCallAttestation>
+  sourceDigest: string
+  modelSelectionState: 'missing' | 'frozen' | 'inconsistent'
+  modelSelection?: Readonly<{ provider: string; model: string; reasoningEffort?: string }>
+  input: Readonly<ForegroundToolInputPage>
+}
+
 export interface ForegroundTaskObservationRegistration {
   protocol: 'plugin-control-plane/foreground-observer/v1'
   generation: string

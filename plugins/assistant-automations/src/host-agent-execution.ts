@@ -40,6 +40,7 @@ interface Invocation {
   readonly input: AutomationRunnerInput
   readonly controller: AbortController
   readonly signal: AbortSignal
+  readonly markObjectiveUnverified?: () => void
   active: boolean
   consumed: boolean
   pending?: Promise<AutomationRunnerResult>
@@ -64,7 +65,8 @@ export class HostAgentExecutions {
       || input.automation.definition.budgetId === undefined || input.signal.aborted || invocation.signal.aborted) return undefined
     const controller = new AbortController()
     const snapshot = JSON.parse(JSON.stringify({ automation: input.automation, occurrence: input.occurrence, task: input.task, sessionId: input.sessionId })) as Omit<AutomationRunnerInput, 'signal'>
-    const state: Invocation = { input: { ...snapshot, signal: input.signal }, controller, signal: AbortSignal.any([invocation.signal, controller.signal]), active: true, consumed: false }
+    const state: Invocation = { input: { ...snapshot, signal: input.signal }, controller, signal: AbortSignal.any([invocation.signal, controller.signal]), active: true, consumed: false,
+      ...(input.markObjectiveUnverified === undefined ? {} : { markObjectiveUnverified: input.markObjectiveUnverified }) }
     this.#invocations.set(invocation, state); this.#live.add(state)
     return async () => {
       observeInvocation(state)
@@ -111,6 +113,9 @@ export class HostAgentExecutions {
     }
     check()
     state.consumed = true
+    // Publish the monotonic reduction before any await/create/model call. The
+    // coordinator can commit an abort result before this invocation drains.
+    state.markObjectiveUnverified?.()
     const authorize = fence === undefined ? undefined : () => {
       try {
         check()

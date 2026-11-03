@@ -19,6 +19,7 @@ import type {
 } from './types.ts'
 import { OPEN_STATES, WorkItemError } from './types.ts'
 import type { WorkItemDiagnosisPlan } from './diagnosis-contract.js'
+import { continuationSourceKey, type WorkItemContinuationAdmission } from './continuation-record.js'
 import type { WorkItemWorkspace } from './workspace.ts'
 
 const KIND = /^[a-z][a-z0-9-]{0,63}$/
@@ -143,6 +144,7 @@ export interface AdmissionDependencies {
   readonly workspace: WorkItemWorkspace
   readonly policy: PeerPolicyService | undefined
   readonly delivery: PeerDeliveryService | undefined | (() => PeerDeliveryService | undefined)
+  readonly continuationFor?: (input: WorkItemAdmitInput) => WorkItemContinuationAdmission | undefined
   readonly diagnosisPlanFor?: (input: WorkItemAdmitInput) => ((item: WorkItemRecord) => Readonly<WorkItemDiagnosisPlan>) | undefined
   /**
    * Look up the registered thread source for one ref kind.
@@ -193,13 +195,30 @@ export class WorkItemAdmission {
   admit(input: WorkItemAdmitInput): WorkItemAdmitResult {
     const config = this.#config
     if (!config.enabled) fail('disabled', 'the work-item intake is disabled')
+    const continuation = isActive(config) ? this.#deps.continuationFor?.(input) : undefined
+    if (input.kind === 'owner-continuation' && !continuation) fail('invalid-input','owner-continuation requires a private continuation mint')
     const planBuilder = config.diagnosis && isActive(config) ? this.#deps.diagnosisPlanFor?.(input) : undefined
-    if (config.diagnosis && isActive(config) && !planBuilder) fail('invalid-input', 'diagnosis worker admits only its private canonical source')
+    if (continuation && planBuilder) fail('invalid-input','continuation and diagnosis plans are exclusive')
+    if (config.diagnosis && isActive(config) && !planBuilder && !continuation) fail('invalid-input', 'diagnosis worker admits only its private canonical source')
     const now = this.#now()
     const normalized = this.#normalize(input)
     const follows = this.#followInputs(normalized.follows)
     const receipt = this.#validateOwnerRoute(now)
     const active = isActive(config)
+    if (continuation) {
+      if (continuation.sourceKey !== continuationSourceKey(continuation.parentItemId,continuation.sourceDigest)) fail('invalid-input','continuation source key differs')
+      const prior = this.#deps.store.findContinuationBySourceKey(continuation.sourceKey)
+      if (prior) {
+        const item = this.#deps.store.findItemById(prior.itemId), scope = config.scope
+        if (!item || !scope || item.scope.principalId !== scope.principalId || item.scope.ownerRouteId !== scope.ownerRouteId
+          || item.scope.workspace !== scope.workspace || item.scope.preset !== scope.preset || item.owner.principalRecordId !== receipt.principalRecordId
+          || item.owner.principalVersion !== receipt.principalVersion || receipt.generation < item.owner.generation
+          || receipt.generation === item.owner.generation && receipt.bindingVersion !== item.owner.bindingVersion) fail('identity-mismatch','continuation replay owner differs')
+        const dispatch = this.#deps.store.getDispatch(item.id)
+        if (!dispatch) fail('storage','continuation is missing its dispatch row')
+        return Object.freeze({item,created:false,reason:'duplicate',dispatch})
+      }
+    }
 
     // Lazy recovery keeps the open-item count honest without a timer.
     if (!config.diagnosis) this.#deps.ledger.recover()
@@ -289,7 +308,10 @@ export class WorkItemAdmission {
     const detail: Record<string, unknown> = { kind: normalized.kind, dedupBucket }
     if (normalized.provenance !== null) detail['provenance'] = normalized.provenance
     if (!active) detail['wouldReject'] = wouldReject
-    this.#deps.store.admitItem(
+    const continuationRecord = continuation?.create(item)
+    if (continuation && !continuationRecord) fail('invalid-input','continuation builder did not freeze a record')
+    if (continuationRecord && (continuationRecord.sourceKey !== continuation!.sourceKey || continuationRecord.sourceDigest !== continuation!.sourceDigest || continuationRecord.parentItemId !== continuation!.parentItemId)) fail('invalid-input','continuation builder changed its source identity')
+    const persisted = this.#deps.store.admitItem(
       item,
       {
         kind: active ? 'admitted' : 'observed',
@@ -299,7 +321,13 @@ export class WorkItemAdmission {
       dispatch,
       follows,
       planBuilder?.(item),
+      continuationRecord,
     )
+    if (persisted.id !== item.id) {
+      const existingDispatch = this.#deps.store.getDispatch(persisted.id)
+      if (!existingDispatch) fail('storage','continuation is missing its dispatch row')
+      return Object.freeze({item:persisted,created:false,reason:'duplicate',dispatch:existingDispatch})
+    }
     return Object.freeze({ item, created: true, dispatch })
   }
 

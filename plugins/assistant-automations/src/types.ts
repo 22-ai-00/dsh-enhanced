@@ -688,3 +688,26 @@ export interface HostAgentAuthorizationFence {
   readonly signal: AbortSignal
   readonly assertCurrent: () => void
 }
+
+
+/** Host-only proof for one exact production occurrence; contains no task body. */
+export interface ProductionOccurrenceTerminalProjection {
+  protocol: 'assistant-automations/production-occurrence/v1'
+  automationId: string
+  occurrenceId: string
+  taskId: string
+  attemptId: string
+  runId: string
+  executionMode: 'production'
+  status: Exclude<AutomationRunStatus, 'unknown'>
+  completedAt: number
+  quiescent: true
+  budgetSettlementState: AutomationBudgetSettlementState
+  immutableContext: {
+    state: 'verified'
+    definitionHash: string
+    definitionVersion: number
+    scope: { workspace: string; agentPreset: string }
+    owner?: string
+  }
+}

@@ -19,6 +19,17 @@ export interface Config {
   settlement?: SettlementConfig
   diagnosis?: DiagnosisConfig
   ownerRecall?: { enabled?: boolean }
+  ownerContinuation?: OwnerContinuationConfig
+}
+
+/** A separately authorized Host worker; it never changes the diagnosis worker. */
+export interface OwnerContinuationConfig extends DiagnosisConfig {
+  automationId?: string
+  allowedTools?: string[]
+}
+export interface NormalizedOwnerContinuation extends NormalizedDiagnosis {
+  readonly automationId: string
+  readonly allowedTools: readonly string[]
 }
 
 /** Independent finite diagnosis authority; enabled deployments must spell out every limit. */
@@ -124,6 +135,7 @@ export interface NormalizedConfig {
   readonly settlement: NormalizedSettlement
   readonly diagnosis?: NormalizedDiagnosis
   readonly ownerRecall?: Readonly<{ enabled: true }>
+  readonly ownerContinuation?: NormalizedOwnerContinuation
 }
 
 export interface NormalizedForegroundFailureSource {
@@ -184,7 +196,7 @@ const DELIVERY_KEYS = ['notifyOn'] as const
 const SETTLEMENT_KEYS = ['enabled', 'windowMs', 'sweepIntervalMs', 'maxSourcesPerSweep', 'maxPendingPerSweep', 'maxSettlementsPerSweep'] as const
 const SOURCES_KEYS = ['foregroundFailures'] as const
 const FOREGROUND_FAILURE_KEYS = ['enabled', 'kind', 'includeTimedOut', 'maxCandidatesPerSweep', 'maxAdmitsPerSweep', 'sweepIntervalMs'] as const
-const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall'] as const
+const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerContinuation'] as const
 const REPORT_STATUSES = ['progress', 'waiting', 'ready', 'blocked', 'failed'] as const
 const NOTIFY_STATUSES = ['ready', 'blocked', 'failed'] as const
 
@@ -255,6 +267,12 @@ export const ConfigSchema = Schema.object({
   sources: sourcesSchema,
   settlement: settlementSchema,
   ownerRecall: Schema.object({ enabled: Schema.boolean().default(false) }),
+  ownerContinuation: Schema.object({
+    enabled: Schema.boolean().default(false), automationId: Schema.string(), allowedTools: Schema.array(Schema.string()),
+    budgetId: Schema.string(), budgetAmount: Schema.number().step(1),
+    maxModelCalls: Schema.number().step(1), maxToolCalls: Schema.number().step(1),
+    maxOutputTokens: Schema.number().step(1), timeoutMs: Schema.number().step(1), expiresAt: Schema.number().step(1),
+  }),
   diagnosis: Schema.object({
     enabled: Schema.boolean().default(false),
     budgetId: Schema.string(), budgetAmount: Schema.number().step(1),
@@ -499,6 +517,11 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   if (ownerRecall['enabled'] === true && (!enabled || mode !== 'active' || scope === null || workerAutomationId === null)) {
     fail('invalid-input', 'ownerRecall requires an enabled active worker and complete scope')
   }
+  const ownerContinuation = normalizeOwnerContinuation(value['ownerContinuation'], scope, workerAutomationId, now)
+  if (ownerContinuation && !admission.allowedKinds.includes('owner-continuation')) fail('invalid-input', 'ownerContinuation requires owner-continuation in admission.allowedKinds')
+  if (ownerContinuation && (!enabled || mode !== 'active' || ownerRecall['enabled'] !== true)) {
+    fail('invalid-input', 'ownerContinuation requires active intake and ownerRecall')
+  }
   return Object.freeze({
     enabled,
     mode,
@@ -514,7 +537,29 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     settlement,
     ...(diagnosis === undefined ? {} : { diagnosis }),
     ...(ownerRecall['enabled'] === true ? { ownerRecall: Object.freeze({ enabled: true as const }) } : {}),
+    ...(ownerContinuation === undefined ? {} : { ownerContinuation }),
   })
+}
+
+function normalizeOwnerContinuation(raw: unknown, scope: WorkItemScope | null, workerId: string | null, now: number): NormalizedOwnerContinuation | undefined {
+  if (raw === undefined) return undefined
+  const value = plainObject(raw, 'ownerContinuation')
+  const { automationId, allowedTools, ...limits } = value
+  const budget = normalizeDiagnosis(limits as DiagnosisConfig, scope, now)
+  if (!budget) {
+    if (automationId !== undefined || allowedTools !== undefined && (!Array.isArray(allowedTools) || allowedTools.length !== 0)) fail('invalid-input', 'disabled ownerContinuation cannot carry execution settings')
+    return undefined
+  }
+  const id = text(automationId, 'ownerContinuation.automationId', 128)
+  if (!AUTOMATION_ID.test(id) || id === workerId) fail('invalid-input', 'ownerContinuation requires a distinct automationId')
+  if (!Array.isArray(allowedTools) || allowedTools.length < 3 || allowedTools.length > 64) fail('invalid-input', 'ownerContinuation requires a bounded explicit tool list')
+  const tools = allowedTools.map(value => text(value, 'ownerContinuation.allowedTools', 128))
+  if (new Set(tools).size !== tools.length || tools.some(name => !/^[A-Za-z][A-Za-z0-9_-]*$/u.test(name)
+    || ['work_item_continue', 'work_item_list', 'work_item_recall', 'work_item_read_source'].includes(name))
+    || ['work_item_claim', 'work_item_report', 'work_item_read_context'].some(name => !tools.includes(name))) {
+    fail('invalid-input', 'continuation tools require claim/report/context and cannot include foreground or diagnosis capabilities')
+  }
+  return Object.freeze({ ...budget, automationId: id, allowedTools: Object.freeze(tools.sort()) })
 }
 
 /** True only when external admission and dispatch may happen. */

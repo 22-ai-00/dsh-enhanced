@@ -46,6 +46,7 @@ import type {
   OverlapPolicy,
   RetrySafety,
   SystemOwnedAutomationHealthProjection,
+  ProductionOccurrenceTerminalProjection,
   SystemOwnedAutomationIdentityProjection,
   SystemOwnedAutomationPauseReceipt,
   SystemOwnedAutomationRetirementReceipt,
@@ -150,6 +151,7 @@ interface RunRow {
   execution_mode: AutomationExecutionMode | 'unknown'
   definition_hash: string | null
   diagnostic_json: string
+  quiescent: number | null
   delivery_status: string | null
   delivery_ref: string | null
   evidence_status: AutomationEvidenceStatus
@@ -1217,6 +1219,7 @@ function buildTerminalEvaluation(input: {
   executionMode: AutomationExecutionMode | 'unknown'
   occurredAt: number
   usage: Readonly<Record<string, unknown>>
+  unverifiedObjective?: true
   startedAt: number | null
   attemptNumber: number
   deliveryStatus: AutomationEvaluationOutcome['deliveryStatus']
@@ -1244,6 +1247,7 @@ function buildTerminalEvaluation(input: {
   })
   const situation = automationSituation(input.automation.id)
   const fixedHostObjective = input.executionMode === 'production'
+    && input.unverifiedObjective !== true
     && isHostAutomationDefinition(input.automation.definition)
     && (input.outcome === 'succeeded' || input.outcome === 'failed' || input.outcome === 'timed_out')
   const objectiveStatus: AutomationEvaluationOutcome['objectiveStatus'] = !fixedHostObjective
@@ -2002,6 +2006,78 @@ export class AutomationStore {
           input.expectedVersion + 1, input.reason, input.evidenceDigest, retiredAt)
       return Object.freeze({ ...this.inspectSystemOwnedRetirement({ owner, automationId })!, replayed: false })
     })
+  }
+
+  /** Exact durable tuple, never a latest-run guess. Corrupt/legacy state fails closed. */
+  inspectProductionOccurrence(input: {
+    automationId: string; occurrenceId: string; workspace: string; agentPreset: string
+  }): ProductionOccurrenceTerminalProjection | undefined {
+    try {
+      const automationId = text(input.automationId, 'automationId', 500)
+      const occurrenceId = text(input.occurrenceId, 'occurrenceId', 500)
+      const workspace = text(input.workspace, 'workspace', 4_096)
+      const agentPreset = text(input.agentPreset, 'agentPreset', 500)
+      if (automationId !== input.automationId || occurrenceId !== input.occurrenceId || workspace !== input.workspace || agentPreset !== input.agentPreset
+        || [automationId, occurrenceId, workspace, agentPreset].some(value => [...value].some(character => character.charCodeAt(0) < 32))) return undefined
+      return this.transaction(() => {
+        const row = this.database.prepare(`SELECT r.*, CAST(r.id AS BLOB) AS raw_run_id, CAST(r.task_id AS BLOB) AS raw_task_id, CAST(r.attempt_id AS BLOB) AS raw_attempt_id,
+          CAST(r.definition_hash AS BLOB) AS raw_definition_hash, CAST(r.diagnostic_json AS BLOB) AS raw_diagnostic,
+          CAST(a.automation_snapshot_json AS BLOB) AS raw_snapshot,
+          CAST(a.automation_snapshot_hash AS BLOB) AS raw_snapshot_hash,
+          a.attempt_number AS actual_attempt, a.finished_at AS actual_finished,
+          a.status AS attempt_status, t.status AS task_status, t.lease_until AS actual_lease,
+          t.attempt_count AS actual_attempt_count, o.status AS occurrence_status
+          FROM automation_runs r JOIN automation_tasks t ON t.id = r.task_id AND t.occurrence_id = r.occurrence_id AND t.automation_id = r.automation_id
+          JOIN automation_attempts a ON a.id = r.attempt_id AND a.task_id = t.id
+          JOIN automation_occurrences o ON o.id = r.occurrence_id AND o.automation_id = r.automation_id
+          WHERE r.automation_id = ? AND r.occurrence_id = ? AND r.execution_mode = 'production'
+            AND o.dry_run = 0 AND r.quiescent = 1
+            AND r.status IN ('succeeded', 'failed', 'timed_out', 'cancelled')
+            AND t.status = r.status AND a.status = r.status AND o.status = r.status`).get(automationId, occurrenceId) as (RunRow & {
+            raw_run_id: Uint8Array; raw_task_id: Uint8Array; raw_attempt_id: Uint8Array; raw_definition_hash: Uint8Array; raw_diagnostic: Uint8Array; raw_snapshot: Uint8Array; raw_snapshot_hash: Uint8Array
+            actual_attempt: number; actual_finished: number | null; actual_attempt_count: number; actual_lease: number | null
+            attempt_status: string; task_status: string; occurrence_status: string
+          }) | undefined
+        if (!row || row.status === 'unknown' || !['succeeded', 'failed', 'timed_out', 'cancelled'].includes(row.status)
+          || row.attempt_status !== row.status || row.task_status !== row.status || row.occurrence_status !== row.status
+          || row.actual_lease !== null || row.actual_finished !== row.created_at || row.actual_attempt !== row.actual_attempt_count
+          || !Number.isSafeInteger(row.created_at) || row.created_at < 0
+          || !Number.isSafeInteger(row.actual_attempt) || row.actual_attempt < 1) return undefined
+        const active = this.database.prepare(`SELECT 1 FROM automation_tasks t
+          LEFT JOIN automation_attempts a ON a.task_id = t.id
+          WHERE t.automation_id = ? AND t.occurrence_id = ?
+            AND (t.status IN ('claimed', 'running') OR t.lease_until IS NOT NULL OR a.status IN ('claimed', 'running')) LIMIT 1`)
+          .get(automationId, occurrenceId)
+        if (active) return undefined
+        const decode = (value: Uint8Array, maximum: number): string => {
+          if (!(value instanceof Uint8Array) || value.byteLength > maximum) throw new Error('invalid occurrence bytes')
+          return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(value)
+        }
+        const runId = decode(row.raw_run_id, 1_000), taskId = decode(row.raw_task_id, 1_000), attemptId = decode(row.raw_attempt_id, 1_000)
+        if ([runId, taskId, attemptId].some(value => !value || [...value].some(character => character.charCodeAt(0) < 32))) return undefined
+        const snapshotJson = decode(row.raw_snapshot, 16 * 1024 * 1024)
+        const snapshotHash = decode(row.raw_snapshot_hash, 64), definitionHash = decode(row.raw_definition_hash, 64)
+        if (!/^[a-f0-9]{64}$/u.test(snapshotHash) || !/^[a-f0-9]{64}$/u.test(definitionHash)) return undefined
+        const parsedSnapshot: unknown = JSON.parse(snapshotJson)
+        if (JSON.stringify(parsedSnapshot) !== snapshotJson) return undefined
+        const snapshot = decodeAutomationSnapshot(snapshotHash, snapshotJson, automationId)
+        if (!snapshot || JSON.stringify(snapshot) !== snapshotJson || hash(snapshot.definition) !== definitionHash
+          || snapshot.definition.workspace !== workspace || snapshot.definition.agentPreset !== agentPreset) return undefined
+        if (snapshot.owner !== undefined && (text(snapshot.owner, 'owner', 500) !== snapshot.owner
+          || [...snapshot.owner].some(character => character.charCodeAt(0) < 32))) return undefined
+        const rawDiagnostic = decode(row.raw_diagnostic, 4_096), parsedDiagnostic: unknown = JSON.parse(rawDiagnostic)
+        if (JSON.stringify(parsedDiagnostic) !== rawDiagnostic) return undefined
+        const diagnostic = executionDiagnostic(parsedDiagnostic, 'invalid-state')
+        assertDiagnosticOutcome(row.status, diagnostic, snapshot.definition)
+        if (!['not-required', 'not-reserved', 'released', 'finalized'].includes(diagnostic.budgetSettlementState)) return undefined
+        return Object.freeze({ protocol: 'assistant-automations/production-occurrence/v1' as const,
+          automationId, occurrenceId, taskId, attemptId, runId,
+          executionMode: 'production' as const, status: row.status, completedAt: row.created_at,
+          quiescent: true as const, budgetSettlementState: diagnostic.budgetSettlementState,
+          immutableContext: Object.freeze({ state: 'verified' as const, definitionHash, definitionVersion: snapshot.version,
+            scope: Object.freeze({ workspace, agentPreset }), ...(snapshot.owner === undefined ? {} : { owner: snapshot.owner }) }) })
+      })
+    } catch { return undefined }
   }
 
   inspectSystemOwned(input: {
@@ -3197,8 +3273,14 @@ export class AutomationStore {
     usage: Readonly<Record<string, unknown>>
     diagnostic?: AutomationExecutionDiagnostic
     evidenceAttribution?: AutomationEvidenceAttribution
+    /** Observed only by the actual runner; omission preserves historical unknown. */
+    quiescent?: boolean
+    unverifiedObjective?: true
   }): AutomationRun {
     if (!Number.isSafeInteger(input.now)) throw new AutomationStoreError('invalid-definition', 'now must be a safe integer')
+    if (input.unverifiedObjective !== undefined && input.unverifiedObjective !== true) throw new AutomationStoreError('invalid-definition', 'unverifiedObjective is a reduction-only marker')
+    if (input.quiescent !== undefined && typeof input.quiescent !== 'boolean') throw new AutomationStoreError('invalid-definition', 'quiescent must be an observed boolean')
+    const quiescent = input.quiescent === undefined ? null : input.quiescent ? 1 : 0
     const preview = typeof input.outputPreview === 'string' && Buffer.byteLength(input.outputPreview, 'utf8') <= 8_192
       ? input.outputPreview
       : (() => { throw new AutomationStoreError('invalid-definition', 'outputPreview exceeds 8192 bytes') })()
@@ -3245,6 +3327,7 @@ export class AutomationStore {
           && existing.output_preview === preview
           && existing.usage_json === usageJson
           && existing.diagnostic_json === diagnosticJson
+          && existing.quiescent === quiescent
         if (!exact) throw new AutomationStoreError('idempotency-conflict', 'task completion was replayed with different output')
         return run(existing)
       }
@@ -3291,6 +3374,7 @@ export class AutomationStore {
         executionMode,
         occurredAt: input.now,
         usage: input.usage,
+        ...(input.unverifiedObjective === true ? { unverifiedObjective: true as const } : {}),
         startedAt: attempt.started_at,
         attemptNumber: attempt.attempt_number,
         deliveryStatus: runDeliveryStatus === 'pending' ? 'unknown' : 'not-required',
@@ -3302,14 +3386,14 @@ export class AutomationStore {
       this.database.prepare(`
         INSERT INTO automation_runs(
           id, occurrence_id, automation_id, task_id, attempt_id, status, session_id, artifact_ref,
-          output_preview, usage_json, execution_mode, definition_hash, diagnostic_json,
+          output_preview, usage_json, execution_mode, definition_hash, diagnostic_json, quiescent,
           delivery_status, delivery_ref, evidence_status, evidence_json,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
       `).run(
         runId, row.occurrence_id, row.automation_id, row.id, attempt.id, input.outcome,
         input.sessionId ?? null, input.artifactRef ?? null, preview, usageJson,
-        executionMode, definitionHash, diagnosticJson, runDeliveryStatus,
+        executionMode, definitionHash, diagnosticJson, quiescent, runDeliveryStatus,
         evidence.status, evidence.json, input.now, input.now,
       )
       if (evaluationJson !== undefined) {

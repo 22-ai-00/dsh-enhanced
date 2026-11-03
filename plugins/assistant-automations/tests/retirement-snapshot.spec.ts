@@ -30,7 +30,7 @@ function definition(name: string) {
   }
 }
 
-async function fixture(version: 15 | 16 = 16, retired = false) {
+async function fixture(version: 15 | 16 | 17 = 17, retired = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'automations-retirement-proof-')))
   roots.push(root)
   const path = join(root, 'state', 'automations.sqlite')
@@ -48,6 +48,9 @@ async function fixture(version: 15 | 16 = 16, retired = false) {
   store.close()
   mutate(path, database => {
     database.exec('PRAGMA journal_mode=DELETE')
+    if (version < 17) {
+      database.exec('DROP TRIGGER automation_run_quiescence_immutable; ALTER TABLE automation_runs DROP COLUMN quiescent; PRAGMA user_version=16')
+    }
     if (version === 15) {
       for (const name of triggers) database.exec(`DROP TRIGGER ${name}`)
       database.exec('DROP TABLE automation_system_retirements; PRAGMA user_version=15')
@@ -88,7 +91,26 @@ function history(path: string, name: string) {
 }
 
 describe('privileged Automations retirement snapshot', () => {
-  test.each([15, 16] as const)('reads real schema v%i without changing bytes, inode, mode or sidecars', async version => {
+  test('rejects a historical v16 database labeled v17 without the quiescence migration', async () => {
+    const f = await fixture(16)
+    mutate(f.path, database => database.exec('PRAGMA user_version=17'))
+    expectCode(() => inspectAutomationRetirementSnapshot(f.path), 'schema-unsupported')
+  })
+
+  test.each([
+    'DROP TRIGGER automation_run_quiescence_immutable',
+    `DROP TRIGGER automation_run_quiescence_immutable;
+     CREATE TRIGGER automation_run_quiescence_immutable BEFORE UPDATE OF quiescent ON automation_runs BEGIN SELECT 1; END`,
+    `DROP TRIGGER automation_run_quiescence_immutable;
+     ALTER TABLE automation_runs DROP COLUMN quiescent;
+     ALTER TABLE automation_runs ADD COLUMN quiescent INTEGER NOT NULL DEFAULT 1 CHECK(quiescent IN (0, 1))`,
+  ])('rejects changed v17 quiescence provenance protection: %s', async sql => {
+    const f = await fixture()
+    mutate(f.path, database => database.exec(sql))
+    expectCode(() => inspectAutomationRetirementSnapshot(f.path), 'schema-unsupported')
+  })
+
+  test.each([15, 16, 17] as const)('reads real schema v%i without changing bytes, inode, mode or sidecars', async version => {
     const f = await fixture(version)
     const before = fingerprint(f.path)
     const proof = inspectAutomationRetirementSnapshot(f.path)
@@ -100,20 +122,61 @@ describe('privileged Automations retirement snapshot', () => {
     expect(proof.records[0]?.createIdempotencyKeyDigest).toMatch(/^[a-f0-9]{64}$/u)
     expect(proof.retirements).toEqual([])
     expect(proof.historyTables).toHaveLength(15)
-    expect(proof.schemaEntries.filter(entry => entry.type === 'trigger')).toHaveLength(version === 15 ? 0 : 4)
-    expect(proof.schemaEntries.some(entry => entry.name === 'automation_system_retirements')).toBe(version === 16)
+    for (const table of proof.historyTables) {
+      if (version === 17 && table.name === 'automation_runs') {
+        expect(table.legacyDigest).toMatch(/^[a-f0-9]{64}$/u)
+        expect(table.nonNullQuiescentCount).toBe(0)
+      } else {
+        expect(table).not.toHaveProperty('legacyDigest')
+        expect(table).not.toHaveProperty('nonNullQuiescentCount')
+      }
+    }
+    expect(proof.schemaEntries.filter(entry => entry.type === 'trigger')).toHaveLength(version === 15 ? 0 : version === 16 ? 4 : 5)
+    expect(proof.schemaEntries.some(entry => entry.name === 'automation_system_retirements')).toBe(version >= 16)
     expect(proof.inFlightCount).toBe(0)
     expect(Object.isFrozen(proof)).toBe(true)
     expect(Object.isFrozen(proof.records[0]?.definition)).toBe(true)
     expect(Object.isFrozen(proof.schemaEntries[0])).toBe(true)
     expect(inspectAutomationRetirementSnapshot(f.path)).toEqual(proof)
     expect(fingerprint(f.path)).toEqual(before)
-    if (version === 15) expectCode(() => inspectAutomationsOperatorSnapshot(f.path), 'schema-unsupported')
+    if (version < 17) expectCode(() => inspectAutomationsOperatorSnapshot(f.path), 'schema-unsupported')
     else {
       const ordinary = inspectAutomationsOperatorSnapshot(f.path)
       expect(ordinary.records[0]).not.toHaveProperty('definition')
       expect(ordinary).not.toHaveProperty('retirements')
     }
+  })
+
+  test('binds v17 full run observations while preserving the exact v16 typed history projection', async () => {
+    const f = await fixture(16)
+    mutate(f.path, database => {
+      database.exec(`INSERT INTO automation_attempts(id,task_id,attempt_number,owner_id,fencing_token,status,
+        automation_snapshot_hash,automation_snapshot_json,created_at,updated_at)
+        VALUES ('attempt','task',1,'owner',1,'unknown','${'a'.repeat(64)}','{}',1,1);
+        INSERT INTO automation_runs(id,occurrence_id,automation_id,task_id,attempt_id,status,output_preview,
+        usage_json,execution_mode,diagnostic_json,evidence_status,created_at,updated_at)
+        VALUES ('run','occurrence','scanner-a','task','attempt','unknown','','{}','unknown','{}','suppressed',1,1)`)
+    })
+    const old = history(f.path, 'automation_runs')
+    new AutomationStore({ path: f.path }).close()
+    const migrated = history(f.path, 'automation_runs')
+    expect(migrated).toMatchObject({ rowCount: 1, legacyDigest: old.digest, nonNullQuiescentCount: 0 })
+    expect(migrated.digest).not.toBe(old.digest)
+    const digests = new Set([migrated.digest])
+    for (const quiescent of [0, 1]) {
+      mutate(f.path, database => {
+        // New INSERTs may carry a real observation. Existing NULL rows cannot
+        // be updated by the production schema, so replace only this test row.
+        database.exec(`DELETE FROM automation_runs;
+          INSERT INTO automation_runs(id,occurrence_id,automation_id,task_id,attempt_id,status,output_preview,
+          usage_json,execution_mode,diagnostic_json,evidence_status,created_at,updated_at,quiescent)
+          VALUES ('run','occurrence','scanner-a','task','attempt','unknown','','{}','unknown','{}','suppressed',1,1,${quiescent})`)
+      })
+      const observed = history(f.path, 'automation_runs')
+      expect(observed).toMatchObject({ rowCount: 1, legacyDigest: old.digest, nonNullQuiescentCount: 1 })
+      digests.add(observed.digest)
+    }
+    expect(digests.size).toBe(3)
   })
 
   test('returns every exact bound retirement receipt and preserves immutable definition digests', async () => {
@@ -331,7 +394,7 @@ describe('privileged Automations retirement snapshot', () => {
   })
 
   test.each([
-    'PRAGMA user_version=17',
+    'PRAGMA user_version=18',
     'CREATE TABLE unexpected_history(id TEXT) STRICT',
     'CREATE VIEW unexpected_view AS SELECT id FROM automation_tasks',
     'CREATE INDEX unexpected_index ON automation_tasks(status)',
@@ -343,7 +406,7 @@ describe('privileged Automations retirement snapshot', () => {
   })
 
   test('rejects a v16 schema falsely labeled v15, tampered retirement table and corrupt definitions', async () => {
-    const f = await fixture()
+    const f = await fixture(16)
     mutate(f.path, database => database.exec('PRAGMA user_version=15'))
     expectCode(() => inspectAutomationRetirementSnapshot(f.path), 'schema-unsupported')
     mutate(f.path, database => database.exec('PRAGMA user_version=16; ALTER TABLE automation_system_retirements ADD COLUMN unexpected TEXT'))

@@ -2,6 +2,7 @@ import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync } from 
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { continuationUtf8, validateContinuationInput, type WorkItemContinuationInput, type WorkItemContinuationRecord } from './continuation-record.js'
 import { canonicalDiagnosis, diagnosisPlanMatchesItem, MAX_DIAGNOSIS_EVENT_BYTES, parseDiagnosisPlan, strictDiagnosisJson, type WorkItemDiagnosisPlan } from './diagnosis-contract.js'
 import {
   deriveReportOutcome,
@@ -50,8 +51,27 @@ import type {
 } from './types.ts'
 import { CLAIMABLE_STATES, OPEN_STATES, TERMINAL_REPORT_STATUSES, WorkItemError } from './types.ts'
 
-const SCHEMA_VERSION = 8
-const WORK_ITEM_TABLE_NAMES = ['work_item', 'work_item_claim', 'work_item_dispatch', 'work_item_event', 'work_item_follow', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta']
+const SCHEMA_VERSION = 9
+const WORK_ITEM_TABLE_NAMES = ['work_item', 'work_item_claim', 'work_item_continuation', 'work_item_dispatch', 'work_item_event', 'work_item_follow', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta']
+const CONTINUATION_TABLE = `CREATE TABLE work_item_continuation (
+  item_id TEXT PRIMARY KEY REFERENCES work_item(id) ON DELETE RESTRICT,
+  parent_item_id TEXT NOT NULL REFERENCES work_item(id) ON DELETE RESTRICT,
+  root_item_id TEXT NOT NULL REFERENCES work_item(id) ON DELETE RESTRICT,
+  source_key TEXT NOT NULL UNIQUE, source_digest TEXT NOT NULL,
+  input_text BLOB NOT NULL, input_sha256 TEXT NOT NULL,
+  parent_report_revision INTEGER, parent_outcome_revision INTEGER,
+  plan_json BLOB NOT NULL, plan_digest TEXT NOT NULL, created_at INTEGER NOT NULL,
+  FOREIGN KEY(parent_item_id,parent_report_revision) REFERENCES work_item_report(item_id,revision),
+  FOREIGN KEY(parent_item_id,parent_outcome_revision) REFERENCES work_item_outcome(item_id,revision)
+) STRICT, WITHOUT ROWID`
+const CONTINUATION_TRIGGERS = [
+  ['work_item_continuation_no_update', `CREATE TRIGGER work_item_continuation_no_update BEFORE UPDATE ON work_item_continuation BEGIN SELECT RAISE(ABORT, 'continuation is append-only'); END`],
+  ['work_item_continuation_no_delete', `CREATE TRIGGER work_item_continuation_no_delete BEFORE DELETE ON work_item_continuation BEGIN SELECT RAISE(ABORT, 'continuation is append-only'); END`],
+] as const
+const CONTINUATION_SCHEMA = `${CONTINUATION_TABLE};\n${CONTINUATION_TRIGGERS.map(([,sql]) => sql+';').join('\n')}`
+/** Only TEXT fields represented in continuationItemBasis; body/display text is excluded. */
+const CONTINUATION_ITEM_TEXT_COLUMNS = ['id','dedup_key','source_id','kind','external_id','origin_binding_id','workspace','agent_preset',
+  'principal_id','principal_record_id','owner_route_id','worker_automation_id','authority_basis','work_dir'] as const
 const WAITING_RESUME_CURSOR = 'scheduler.waiting-resume.cursor'
 const WAITING_RESUME_DUE_INDEX = `CREATE INDEX work_item_dispatch_waiting_due_idx
   ON work_item_dispatch(occurred_at, item_id) WHERE state = 'pending' AND reason = 'waiting-resume'`
@@ -261,6 +281,7 @@ function validateSchema(database: DatabaseSync): void {
   // Reject unowned objects before migrations can fire a trigger or update a
   // foreign schema. `_` is literal here: sqliteXshadow is an application name.
   if (version !== 0 && objects.some(row => String(row['type']) !== 'index'
+    && !(String(row['type']) === 'trigger' && version === 9 && CONTINUATION_TRIGGERS.some(([name]) => name === row['name']))
     && (String(row['type']) !== 'table' || !WORK_ITEM_TABLE_NAMES.includes(String(row['name']))))) {
     fail('storage', 'work-item database contains an unexpected schema object')
   }
@@ -332,8 +353,9 @@ function validateSchema(database: DatabaseSync): void {
       CREATE TABLE work_item_schema_meta (
         key TEXT PRIMARY KEY, value TEXT NOT NULL
       ) STRICT, WITHOUT ROWID;
-      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '8');
-      PRAGMA user_version = 8;
+      ${CONTINUATION_SCHEMA};
+      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '9');
+      PRAGMA user_version = 9;
       COMMIT;
     `)
     return
@@ -447,10 +469,19 @@ function validateSchema(database: DatabaseSync): void {
       PRAGMA user_version = 8;
       COMMIT;`)
   }
+  if (version >= 1 && version <= 8) {
+    database.exec(`BEGIN IMMEDIATE; ${CONTINUATION_SCHEMA};
+      UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version';
+      PRAGMA user_version = 9; COMMIT;`)
+  }
   if (!Number.isSafeInteger(version) || version < 1 || version > SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
   const expected = JSON.stringify(WORK_ITEM_TABLE_NAMES)
   const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*' ORDER BY name").all() as Row[]).map(row => String(row['name']))
   if (JSON.stringify(tables) !== expected) fail('storage', 'work-item database schema is not the expected shape')
+  for (const [name, sql] of [['work_item_continuation',CONTINUATION_TABLE],...CONTINUATION_TRIGGERS]) {
+    const row = database.prepare('SELECT sql FROM sqlite_schema WHERE name=?').get(name!) as Row | undefined
+    if (typeof row?.['sql'] !== 'string' || row['sql'].replace(/\s+/gu,' ').trim() !== sql!.replace(/\s+/gu,' ').trim()) fail('storage','continuation schema differs')
+  }
   for (const [name, sql] of [['work_item_dispatch_waiting_due_idx', WAITING_RESUME_DUE_INDEX], ['work_item_claim_active_item_idx', ACTIVE_CLAIM_ITEM_INDEX]]) {
     const row = database.prepare('SELECT sql FROM sqlite_schema WHERE type = ? AND name = ?').get('index', name!) as Row | undefined
     if (typeof row?.['sql'] !== 'string' || row['sql'].replace(/\s+/gu, ' ').trim() !== sql!.replace(/\s+/gu, ' ').trim()) {
@@ -825,16 +856,16 @@ export class WorkItemStore {
 
   /** SQL owner filtering precedes keyset pagination; no recovery or writes. */
   listOwnerItems(owner: Readonly<{ principalId: string; principalRecordId: string; principalVersion: number;
-    workspace: string; preset: string; ownerRouteId: string; workerAutomationId: string; generation: number; bindingVersion: number }>,
+    workspace: string; preset: string; ownerRouteId: string; workerAutomationId: string; continuationAutomationId?: string; generation: number; bindingVersion: number }>,
     after: Readonly<{ createdAt: number; id: string }> | undefined, limit: number, itemId?: string): readonly WorkItemRecord[] {
     const rows = this.#statement(`SELECT ${ITEM_ALIASES} FROM work_item
       WHERE principal_id=? AND principal_record_id=? AND principal_version=? AND workspace=? AND agent_preset=?
-        AND owner_route_id=? AND worker_automation_id=?
+        AND owner_route_id=? AND (worker_automation_id=? OR (? IS NOT NULL AND worker_automation_id=?))
         AND (owner_generation < ? OR (owner_generation=? AND binding_version=?))
         AND (? IS NULL OR id=?)
         AND (? IS NULL OR created_at < ? OR (created_at=? AND id>?))
       ORDER BY created_at DESC, id ASC LIMIT ?`).all(owner.principalId, owner.principalRecordId, owner.principalVersion,
-      owner.workspace, owner.preset, owner.ownerRouteId, owner.workerAutomationId, owner.generation, owner.generation,
+      owner.workspace, owner.preset, owner.ownerRouteId, owner.workerAutomationId, owner.continuationAutomationId ?? null, owner.continuationAutomationId ?? null, owner.generation, owner.generation,
       owner.bindingVersion, itemId ?? null, itemId ?? null, after?.createdAt ?? null, after?.createdAt ?? null,
       after?.createdAt ?? null, after?.id ?? '', limit) as Row[]
     return Object.freeze(rows.map(itemFromRow))
@@ -1290,6 +1321,100 @@ export class WorkItemStore {
     return Object.freeze({ at: Number(row['recorded_at']), reason })
   }
 
+  #continuationRow(row: Row): Readonly<WorkItemContinuationRecord> {
+    const text = (name: string) => continuationUtf8(row[name])
+    const record = validateContinuationInput({itemId:text('itemId'),parentItemId:text('parentItemId'),rootItemId:text('rootItemId'),sourceKey:text('sourceKey'),sourceDigest:text('sourceDigest'),
+      inputText:text('inputText'),inputSha256:text('inputSha256'),parentReportRevision:optNumber(row['parentReportRevision']),parentOutcomeRevision:optNumber(row['parentOutcomeRevision']),
+      planJson:text('planJson'),planDigest:text('planDigest'),createdAt:Number(row['createdAt'])})
+    this.#assertContinuationItemText(record.itemId)
+    return record
+  }
+  #assertContinuationItemText(itemId: string): void {
+    const row = this.#statement(`SELECT ${CONTINUATION_ITEM_TEXT_COLUMNS.join(',')} FROM work_item WHERE id=?`).get(itemId) as Row | undefined
+    if (!row) fail('storage','continuation item is unavailable')
+    // Node 24 can truncate TEXT at NUL. Compare full SQLite bytes with the
+    // projected strings before the controller compares its frozen item basis.
+    // Bind authority JSON as stored, preserving legitimate whitespace/key order.
+    const same = this.#statement(`SELECT 1 FROM work_item WHERE id=? AND ${CONTINUATION_ITEM_TEXT_COLUMNS
+      .map(column => `CAST(${column} AS BLOB) IS CAST(? AS BLOB)`).join(' AND ')}`)
+      .get(itemId,...CONTINUATION_ITEM_TEXT_COLUMNS.map(column => row[column] === null ? null : String(row[column])))
+    if (!same) fail('storage','continuation item text differs from its complete SQLite bytes')
+  }
+  #continuationSelect(): string {
+    return `SELECT CAST(item_id AS BLOB) AS itemId,CAST(parent_item_id AS BLOB) AS parentItemId,CAST(root_item_id AS BLOB) AS rootItemId,
+      CAST(source_key AS BLOB) AS sourceKey,CAST(source_digest AS BLOB) AS sourceDigest,input_text AS inputText,CAST(input_sha256 AS BLOB) AS inputSha256,
+      parent_report_revision AS parentReportRevision,parent_outcome_revision AS parentOutcomeRevision,plan_json AS planJson,CAST(plan_digest AS BLOB) AS planDigest,created_at AS createdAt FROM work_item_continuation`
+  }
+  getContinuation(itemId: string): Readonly<WorkItemContinuationRecord> | undefined {
+    const row = this.#statement(this.#continuationSelect()+' WHERE item_id=?').get(itemId) as Row | undefined
+    return row ? this.#continuationRow(row) : undefined
+  }
+  findContinuationBySourceKey(key: string): Readonly<WorkItemContinuationRecord> | undefined {
+    const row = this.#statement(this.#continuationSelect()+' WHERE source_key=?').get(key) as Row | undefined
+    return row ? this.#continuationRow(row) : undefined
+  }
+  /** Most recently admitted dispatched child, by immutable dispatch rowid; no wall-clock ordering. */
+  latestContinuationDispatch(automationId: string): Readonly<{item: WorkItemRecord; dispatch: WorkItemDispatchRecord; continuation: WorkItemContinuationRecord}> | undefined {
+    const row = this.#statement(`SELECT CAST(d.item_id AS BLOB) AS bytes FROM work_item_dispatch d JOIN work_item_continuation c ON c.item_id=d.item_id
+      WHERE d.automation_id=? AND d.state='dispatched' ORDER BY d.rowid DESC LIMIT 1`).get(automationId) as Row | undefined
+    if (!row) return undefined
+    return this.#continuationDispatch(continuationUtf8(row['bytes']))
+  }
+  continuationDispatchUncertain(automationId: string): boolean {
+    return !!this.#statement(`SELECT 1 FROM work_item_dispatch d JOIN work_item_continuation c ON c.item_id=d.item_id
+      WHERE d.automation_id=? AND d.state='failed' AND d.reason='unknown_after_send' LIMIT 1`).get(automationId)
+  }
+  listPendingContinuations(automationId: string, limit = 10, after?: Readonly<{createdAt: number; id: string}>): readonly Readonly<{item: WorkItemRecord; dispatch: WorkItemDispatchRecord; continuation: WorkItemContinuationRecord}>[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || after !== undefined && (!Number.isSafeInteger(after.createdAt) || after.createdAt < 0 || typeof after.id !== 'string' || !after.id || /[\p{Cc}]/u.test(after.id))) fail('invalid-input','invalid continuation pending limit or cursor')
+    const rows = this.#statement(`SELECT CAST(d.item_id AS BLOB) AS bytes FROM work_item_dispatch d JOIN work_item_continuation c ON c.item_id=d.item_id JOIN work_item i ON i.id=c.item_id
+      WHERE d.automation_id=? AND d.state='pending' AND (? IS NULL OR i.created_at>? OR (i.created_at=? AND i.id>?))
+      ORDER BY i.created_at ASC,i.id ASC LIMIT ?`).all(automationId,after?.createdAt ?? null,after?.createdAt ?? null,after?.createdAt ?? null,after?.id ?? '',limit) as Row[]
+    return Object.freeze(rows.map(row => this.#continuationDispatch(continuationUtf8(row['bytes']))))
+  }
+  #continuationDispatch(itemId: string): Readonly<{item: WorkItemRecord; dispatch: WorkItemDispatchRecord; continuation: WorkItemContinuationRecord}> {
+    const item = this.#requireItem(itemId), dispatch = this.getDispatch(itemId), continuation = this.getContinuation(itemId)
+    if (!dispatch || !continuation) fail('storage','continuation dispatch is unavailable')
+    return Object.freeze({item,dispatch,continuation})
+  }
+  #assertContinuationParent(child: WorkItemRecord, frozen: WorkItemContinuationRecord): void {
+    const parent = this.#requireItem(frozen.parentItemId)
+    if (OPEN_STATES.includes(parent.state) || parent.observed || child.owner.workspace !== child.scope.workspace || child.owner.agentPreset !== child.scope.preset) fail('storage','continuation parent is not terminal or owner scope differs')
+    const matches = (id: string) => this.#statement(`SELECT 1 FROM work_item WHERE id=? AND principal_id=? AND principal_record_id=? AND principal_version=?
+      AND workspace=? AND agent_preset=? AND owner_route_id=? AND owner_generation<=?`).get(id,child.scope.principalId,child.owner.principalRecordId,child.owner.principalVersion,child.scope.workspace,child.scope.preset,child.scope.ownerRouteId,child.owner.generation)
+    if (!matches(frozen.parentItemId) || !matches(frozen.rootItemId)
+      || parent.owner.generation === child.owner.generation && !this.#statement('SELECT 1 FROM work_item WHERE id=? AND binding_version=? AND origin_binding_id=?')
+        .get(parent.id,child.owner.bindingVersion,child.originBindingId)) fail('storage','continuation owner or generation differs')
+    const inherited = this.getContinuation(parent.id)
+    if (frozen.rootItemId !== (inherited?.rootItemId ?? parent.id)) fail('storage','continuation root differs from parent chain')
+    for (const [table,cutoff] of [['work_item_report',frozen.parentReportRevision],['work_item_outcome',frozen.parentOutcomeRevision]] as const) {
+      if (cutoff === null ? this.#statement(`SELECT 1 FROM ${table} WHERE item_id=? LIMIT 1`).get(parent.id)
+        : !this.#statement(`SELECT 1 FROM ${table} WHERE item_id=? AND revision=?`).get(parent.id,cutoff)) fail('storage','continuation history cutoff is unavailable')
+    }
+  }
+  #continuationHistory(itemId: string, afterRevision: number, limit: number): WorkItemContinuationRecord {
+    if (!Number.isSafeInteger(afterRevision) || afterRevision < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('invalid-input','invalid continuation history page')
+    return this.getContinuation(itemId) ?? fail('not-found','continuation is unavailable')
+  }
+  continuationParentBrief(itemId: string): string {
+    const record = this.getContinuation(itemId) ?? fail('not-found','continuation is unavailable')
+    const row = this.#statement('SELECT CAST(brief AS BLOB) AS bytes FROM work_item WHERE id=?').get(record.parentItemId) as Row | undefined
+    if (!row) fail('storage','continuation parent is unavailable')
+    return continuationUtf8(row['bytes'])
+  }
+  continuationParentReports(itemId: string, afterRevision = 0, limit = 25): readonly WorkItemReportRecord[] {
+    const record = this.#continuationHistory(itemId,afterRevision,limit)
+    if (record.parentReportRevision === null) return Object.freeze([])
+    const rows = this.#statement(`SELECT *,CAST(summary AS BLOB) AS summary_bytes,CAST(idempotency_key AS BLOB) AS key_bytes FROM work_item_report
+      WHERE item_id=? AND revision>? AND revision<=? ORDER BY revision ASC LIMIT ?`).all(record.parentItemId,afterRevision,record.parentReportRevision,limit) as Row[]
+    return Object.freeze(rows.map(row => Object.freeze({...reportFromRow(row),summary:continuationUtf8(row['summary_bytes']),idempotencyKey:continuationUtf8(row['key_bytes'])})))
+  }
+  continuationParentOutcomes(itemId: string, afterRevision = 0, limit = 25): readonly WorkItemOutcomeRecord[] {
+    const record = this.#continuationHistory(itemId,afterRevision,limit)
+    if (record.parentOutcomeRevision === null) return Object.freeze([])
+    return Object.freeze((this.#statement(`SELECT * FROM work_item_outcome WHERE item_id=? AND revision>? AND revision<=? ORDER BY revision ASC LIMIT ?`)
+      .all(record.parentItemId,afterRevision,record.parentOutcomeRevision,limit) as Row[]).map(outcomeFromRow))
+  }
+
   /**
    * Insert one admitted item, its lifecycle event and its single dispatch row
    * in one transaction. A crash between these writes is impossible.
@@ -1300,10 +1425,22 @@ export class WorkItemStore {
     dispatch: WorkItemDispatchRecord,
     follows: readonly WorkItemFollowInput[] = [],
     diagnosisPlan?: WorkItemDiagnosisPlan,
-  ): void {
+    continuation?: WorkItemContinuationInput,
+  ): WorkItemRecord {
+    if (continuation && diagnosisPlan) fail('storage','continuation and diagnosis plans are exclusive')
+    if (continuation && (event.kind !== 'admitted' || event.actor !== 'admission' || record.observed || record.state !== 'queued' || record.attempt !== 0 || continuation.itemId !== record.id || continuation.createdAt !== record.createdAt)) fail('storage','continuation admission differs')
     if (diagnosisPlan && (event.kind !== 'admitted' || event.actor !== 'admission' || record.observed
       || !diagnosisPlanMatchesItem(parseDiagnosisPlan(diagnosisPlan), record))) fail('storage', 'diagnosis admission event does not match its item')
-    this.#transaction(() => {
+    return this.#transaction(() => {
+      const frozen = continuation === undefined ? undefined : validateContinuationInput(continuation)
+      if (frozen) {
+        this.#assertContinuationParent(record,frozen)
+        const prior = this.findContinuationBySourceKey(frozen.sourceKey)
+        if (prior) {
+          if (prior.parentItemId !== frozen.parentItemId || prior.sourceDigest !== frozen.sourceDigest || prior.inputSha256 !== frozen.inputSha256 || prior.inputText !== frozen.inputText) fail('storage','continuation source collision')
+          return this.#requireItem(prior.itemId)
+        }
+      }
       this.#statement(INSERT_ITEM).run(
         record.id, record.dedupKey, record.dedupBucket, record.sourceId, record.kind, record.externalId,
         record.title, record.brief, record.briefTruncated ? 1 : 0, record.originBindingId, record.acceptanceRef,
@@ -1320,6 +1457,10 @@ export class WorkItemStore {
         INSERT INTO work_item_dispatch(item_id, automation_id, event_id, occurred_at, generation, wake_attempts, state, occurrence_id, reason, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(dispatch.itemId, dispatch.automationId, dispatch.eventId, dispatch.occurredAt, dispatch.generation, dispatch.wakeAttempts, dispatch.state, dispatch.occurrenceId, dispatch.reason, dispatch.createdAt, dispatch.updatedAt)
+      if (frozen) this.#statement(`INSERT INTO work_item_continuation
+        (item_id,parent_item_id,root_item_id,source_key,source_digest,input_text,input_sha256,parent_report_revision,parent_outcome_revision,plan_json,plan_digest,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(frozen.itemId,frozen.parentItemId,frozen.rootItemId,frozen.sourceKey,frozen.sourceDigest,
+          Buffer.from(frozen.inputText,'utf8'),frozen.inputSha256,frozen.parentReportRevision,frozen.parentOutcomeRevision,Buffer.from(frozen.planJson,'utf8'),frozen.planDigest,frozen.createdAt)
       // Follows are inserted in the same transaction as the item, so a crash can
       // never leave an admitted item whose bounded wait is unbounded by accident.
       follows.forEach((follow, position) => {
@@ -1328,6 +1469,7 @@ export class WorkItemStore {
           VALUES (?, ?, ?, ?, 'open', NULL, NULL, ?, ?, ?, NULL)
         `).run(record.id, position, follow.kind, follow.ref, follow.source, follow.sourceGeneration, record.createdAt)
       })
+      return record
     })
   }
 
@@ -2016,6 +2158,7 @@ export class WorkItemStore {
     const rows = this.#statement(`
       SELECT ${ITEM_ALIASES} FROM work_item
       WHERE state IN ('claimed', 'working') AND lease_until IS NOT NULL AND lease_until <= ?
+        AND NOT EXISTS (SELECT 1 FROM work_item_continuation c WHERE c.item_id=work_item.id)
       ORDER BY lease_until ASC
     `).all(now) as Row[]
     const requeued: string[] = []
@@ -2024,6 +2167,7 @@ export class WorkItemStore {
       const item = itemFromRow(row)
       const tryReclaim = (): 'requeued' | 'blocked' | 'skipped' => this.#transaction(() => {
         const current = this.#requireItem(item.id)
+        if (this.getContinuation(current.id)) return 'skipped'
         if (current.leaseUntil === null || current.leaseUntil > now) return 'skipped'
         if (current.state !== 'claimed' && current.state !== 'working') return 'skipped'
         const exhausted = current.attempt >= current.maxAttempts
@@ -2090,6 +2234,7 @@ export class WorkItemStore {
       if (existing !== undefined && existing.state === 'active' && existing.leasedUntil > now) {
         return { exhausted: false as const, result: Object.freeze({ item, claim: existing, replayed: true }) }
       }
+      if (item.attempt > 0 && this.getContinuation(item.id)) fail('claim-conflict','continuation is a one-shot and cannot reclaim a prior attempt')
       if (existing !== undefined && existing.state === 'active') {
         // Retire the dead lease before a new row is appended, so the item never
         // carries two active claims.

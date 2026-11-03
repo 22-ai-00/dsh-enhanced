@@ -56,7 +56,7 @@ export interface AutomationOperatorRecord {
 
 export interface AutomationsOperatorSnapshot {
   readonly protocol: typeof automationsOperatorSnapshotProtocol
-  readonly schemaVersion: 16
+  readonly schemaVersion: 17
   readonly database: AutomationOperatorFileIdentity
   readonly sidecars: Readonly<{
     wal: AutomationOperatorFileIdentity | null
@@ -96,6 +96,9 @@ export interface AutomationRetirementHistoryTable {
   readonly name: string
   readonly rowCount: number
   readonly digest: string
+  /** Only schema 17 automation_runs: exact historical column projection. */
+  readonly legacyDigest?: string
+  readonly nonNullQuiescentCount?: number
 }
 
 export interface AutomationRetirementSchemaEntry {
@@ -108,7 +111,7 @@ export interface AutomationRetirementSchemaEntry {
 
 export interface AutomationRetirementSnapshot {
   readonly protocol: typeof automationRetirementSnapshotProtocol
-  readonly schemaVersion: 15 | 16
+  readonly schemaVersion: 15 | 16 | 17
   readonly database: AutomationOperatorFileIdentity
   readonly sidecars: AutomationsOperatorSnapshot['sidecars']
   readonly storageDigest: string
@@ -866,17 +869,25 @@ const retirementAdditions: Readonly<Record<string, string>> = {
   "automation_retirements_no_update": "CREATE TRIGGER automation_retirements_no_update BEFORE UPDATE ON automation_system_retirements\n    BEGIN SELECT RAISE(ABORT, 'system retirement is immutable'); END"
 }
 
+const quiescenceAddition = {
+  automation_run_quiescence_immutable: `CREATE TRIGGER automation_run_quiescence_immutable
+    BEFORE UPDATE OF quiescent ON automation_runs WHEN NEW.quiescent IS NOT OLD.quiescent
+    BEGIN SELECT RAISE(ABORT, 'run quiescence observation is immutable'); END`,
+}
+
 function normalizedSchemaSql(sql: string): string {
   // Whitespace normalization must never rewrite string or quoted identifier bytes.
   return sql.replace(/'(?:''|[^'])*'|"(?:""|[^"])*"|\s+/gu,
     token => /^\s/u.test(token) ? ' ' : token).trim()
 }
 
-function inspectRetirementSchema(database: DatabaseSync, version: 15 | 16): readonly AutomationRetirementSchemaEntry[] {
+function inspectRetirementSchema(database: DatabaseSync, version: 15 | 16 | 17): readonly AutomationRetirementSchemaEntry[] {
   const raw = database.prepare(`SELECT type, name, tbl_name AS "table", sql
     FROM sqlite_schema ORDER BY type COLLATE BINARY, name COLLATE BINARY`).all()
   const entries: AutomationRetirementSchemaEntry[] = []
-  const expectedTables = Object.keys(retirementColumns).filter(name => version === 16 || name !== 'automation_system_retirements')
+  const expectedTables = Object.keys(retirementColumns).filter(name => version >= 16 || name !== 'automation_system_retirements')
+  const additions: Readonly<Record<string, string>> = version === 17
+    ? { ...retirementAdditions, ...quiescenceAddition } : retirementAdditions
   const seenTables = new Set<string>(); const seenIndexes = new Set<string>(); const seenAdditions = new Set<string>()
   for (const row of raw) {
     if ((row.type !== 'table' && row.type !== 'index' && row.type !== 'trigger')
@@ -890,9 +901,19 @@ function inspectRetirementSchema(database: DatabaseSync, version: 15 | 16): read
         fail('schema-unsupported', 'unreviewed table')
       }
       const columns = database.prepare(`PRAGMA table_xinfo("${entry.name}")`).all()
+      const expectedColumns = version === 17 && entry.name === 'automation_runs'
+        ? `${retirementColumns[entry.name]} quiescent:INTEGER`.split(' ').sort().join(' ')
+        : retirementColumns[entry.name]
       if (columns.some(column => column.hidden !== 0)
-        || columns.map(column => `${column.name}:${column.type}`).sort().join(' ') !== retirementColumns[entry.name]) {
+        || columns.map(column => `${column.name}:${column.type}`).sort().join(' ') !== expectedColumns) {
         fail('schema-unsupported', 'unreviewed table columns')
+      }
+      if (version === 17 && entry.name === 'automation_runs') {
+        const quiescent = columns.find(column => column.name === 'quiescent')
+        if (quiescent?.notnull !== 0 || quiescent.dflt_value !== null || quiescent.pk !== 0
+          || !/\bquiescent INTEGER CHECK\s*\(quiescent IN\s*\(0, 1\)\)/u.test(normalizedSchemaSql(entry.sql))) {
+          fail('schema-unsupported', 'run quiescence observation schema changed')
+        }
       }
       seenTables.add(entry.name)
     } else if (entry.type === 'index') {
@@ -903,9 +924,9 @@ function inspectRetirementSchema(database: DatabaseSync, version: 15 | 16): read
       } else if (retirementIndexes[entry.name] !== entry.table) fail('schema-unsupported', 'unreviewed index')
       else seenIndexes.add(entry.name)
     }
-    const addition = retirementAdditions[entry.name]
+    const addition = additions[entry.name]
     if (entry.type === 'trigger' || addition !== undefined) {
-      if (version !== 16 || addition === undefined || entry.sql === null
+      if (version < 16 || addition === undefined || entry.sql === null
         || normalizedSchemaSql(entry.sql) !== normalizedSchemaSql(addition)) {
         fail('schema-unsupported', 'retirement schema protection is missing or changed')
       }
@@ -916,7 +937,7 @@ function inspectRetirementSchema(database: DatabaseSync, version: 15 | 16): read
   const tableKinds = database.prepare('PRAGMA table_list').all().filter(row => row.schema === 'main' && row.name !== 'sqlite_schema')
   if (expectedTables.some(name => !seenTables.has(name))
     || Object.keys(retirementIndexes).some(name => !seenIndexes.has(name))
-    || (version === 16 && Object.keys(retirementAdditions).some(name => !seenAdditions.has(name)))
+    || (version >= 16 && Object.keys(additions).some(name => !seenAdditions.has(name)))
     || tableKinds.length !== expectedTables.length
     || tableKinds.some(row => row.type !== 'table' || row.strict !== 1)) {
     fail('schema-unsupported', 'reviewed schema is incomplete')
@@ -947,10 +968,9 @@ function typedProjection(columns: readonly string[]): string {
     CASE WHEN typeof("${column}") = 'text' THEN CAST("${column}" AS BLOB) ELSE "${column}" END AS "v${index}"`).join(', ')
 }
 
-function inspectHistoryTable(database: DatabaseSync, name: string): AutomationRetirementHistoryTable {
+function inspectHistoryTable(database: DatabaseSync, name: string, columns: readonly string[]): AutomationRetirementHistoryTable {
   // Sort columns independently of migration-era physical column order. Every
   // actual column is included; inspectRetirementSchema validated the full set.
-  const columns = retirementColumns[name]!.split(' ').map(column => column.split(':')[0]!)
   const statement = database.prepare(`SELECT ${typedProjection(columns)} FROM "${name}"`)
   statement.setReadBigInts(true)
   const rows: string[] = []
@@ -1053,11 +1073,19 @@ function inspectRetirements(database: DatabaseSync, records: readonly InternalAu
   }))
 }
 
-function retirementContents(database: DatabaseSync, version: 15 | 16, records: readonly InternalAutomationOperatorRecord[]) {
+function retirementContents(database: DatabaseSync, version: 15 | 16 | 17, records: readonly InternalAutomationOperatorRecord[]) {
   const schemaEntries = inspectRetirementSchema(database, version)
   const schemaDigest = sha256(JSON.stringify({ protocol: 'assistant-automations/retirement-schema/v1', schemaEntries }))
   const historyTables = Object.keys(retirementColumns).filter(name => name !== 'automation_definitions'
-    && name !== 'automation_system_retirements').sort().map(name => inspectHistoryTable(database, name))
+    && name !== 'automation_system_retirements').sort().map(name => {
+      const columns = retirementColumns[name]!.split(' ').map(column => column.split(':')[0]!)
+      const legacy = inspectHistoryTable(database, name, columns)
+      if (version !== 17 || name !== 'automation_runs') return legacy
+      const count = database.prepare('SELECT COUNT(*) AS count FROM automation_runs WHERE quiescent IS NOT NULL').get()?.count
+      if (!safeInteger(count)) fail('database-corrupt', 'invalid run quiescence observation count')
+      return freeze({ ...inspectHistoryTable(database, name, [...columns, 'quiescent'].sort()),
+        legacyDigest: legacy.digest, nonNullQuiescentCount: count })
+    })
   return freeze({
     records: inspectRetirementDefinitions(database, records),
     retirements: version === 15 ? [] : inspectRetirements(database, records),
@@ -1189,8 +1217,8 @@ function readSnapshot(databasePath: string, retirement = false): OperatorReadRes
     const queryOnly = (database.prepare('PRAGMA query_only').get() as { query_only?: unknown }).query_only
     if (queryOnly !== 1) fail('database-unavailable', 'read-only guard was not enabled')
     const version = (database.prepare('PRAGMA user_version').get() as { user_version?: unknown }).user_version
-    if (version !== automationSchemaVersion && !(retirement && version === 15)) {
-      fail('schema-unsupported', retirement ? 'expected schema 15 or 16' : `expected schema ${automationSchemaVersion}`)
+    if (version !== automationSchemaVersion && !(retirement && (version === 15 || version === 16))) {
+      fail('schema-unsupported', retirement ? 'expected schema 15, 16 or 17' : `expected schema ${automationSchemaVersion}`)
     }
     const check = database.prepare('PRAGMA quick_check').all() as unknown as Array<{ quick_check?: unknown }>
     if (check.length !== 1 || check[0]?.quick_check !== 'ok') fail('database-corrupt', 'SQLite quick_check failed')
@@ -1218,7 +1246,7 @@ function readSnapshot(databasePath: string, retirement = false): OperatorReadRes
     const foreignKeys = database.prepare('PRAGMA foreign_key_check').all()
     if (foreignKeys.length !== 0) fail('database-corrupt', 'foreign-key integrity check failed')
     const records = freeze(internalRecords.map(publicRecord))
-    const proof = retirement ? retirementContents(database, version as 15 | 16, internalRecords) : undefined
+    const proof = retirement ? retirementContents(database, version as 15 | 16 | 17, internalRecords) : undefined
     // History scans can lazily open SQLite resources as well.
     if (inodeBindSupported) assertConnectionBound(bound, selfDescriptors())
     database.exec('ROLLBACK'); transaction = false
@@ -1232,14 +1260,14 @@ function readSnapshot(databasePath: string, retirement = false): OperatorReadRes
     }))
     const inventoryDigest = sha256(JSON.stringify({
       protocol: automationsOperatorSnapshotProtocol,
-      schemaVersion: 16 as const,
+      schemaVersion: 17 as const,
       storageDigest,
       inFlightCount: inFlight.count,
       records,
     }))
     const snapshot = freeze({
       protocol: automationsOperatorSnapshotProtocol,
-      schemaVersion: 16 as const,
+      schemaVersion: 17 as const,
       database: identity(source),
       sidecars: freeze({ wal: wal === null ? null : identity(wal), shm: shm === null ? null : identity(shm) }),
       storageDigest,
@@ -1250,7 +1278,7 @@ function readSnapshot(databasePath: string, retirement = false): OperatorReadRes
     if (proof !== undefined) {
       const semantic = {
         protocol: automationRetirementSnapshotProtocol,
-        schemaVersion: version as 15 | 16,
+        schemaVersion: version as 15 | 16 | 17,
         storageDigest,
         inFlightCount: inFlight.count,
         ...proof,

@@ -76,7 +76,7 @@ import type { AcceptanceContract, AcceptanceHandle, ForegroundExecution, TaskAcc
 import type { ForegroundTerminationObservation } from './foreground-termination.js'
 import { isSynchronousForegroundObservationHandle, validForegroundObservationRegistration,
   type ForegroundTaskIdentity, type ForegroundTaskObservationRegistration,
-  type ForegroundToolCallAttestation } from './foreground-observation.js'
+  type ForegroundToolCallAttestation, type OwnerForegroundToolInput } from './foreground-observation.js'
 import { InboundImageMaterializer } from './inbound-images.js'
 import { registerDeliveryTools } from './tools.js'
 import {
@@ -2531,6 +2531,25 @@ export class AssistantDeliveryService extends Service {
       sessionId: task.sessionId, scope: task.scope, owner: task.owner, binding: task.binding }) === undefined) return undefined
     return Object.freeze({ protocol: 'assistant-delivery/foreground-tool-call/v1' as const, task,
       turn: turn.turn, call })
+  }
+
+  /** Read-only pages of this exact live owner's persisted human input. Callers
+   * cannot select an Inbox, path, owner, or replacement text through this API. */
+  readOwnerForegroundToolInput(input: Readonly<{
+    agent: Agent; authorityId: string; callId: string; toolName: string; argumentsJson: string
+    offset?: number; maxBytes?: number
+  }>): Readonly<OwnerForegroundToolInput> | undefined {
+    if (!input || typeof input !== 'object' || Reflect.ownKeys(input).some(key => typeof key !== 'string'
+      || !['agent', 'authorityId', 'callId', 'toolName', 'argumentsJson', 'offset', 'maxBytes'].includes(key))) return undefined
+    const attestation = this.inspectOwnerForegroundToolCall(input)
+    if (attestation === undefined) return undefined
+    const page = this.deliveryStore.readPendingForegroundToolInput({ task: attestation.task,
+      ...(input.offset === undefined ? {} : { offset: input.offset }), ...(input.maxBytes === undefined ? {} : { maxBytes: input.maxBytes }) })
+    if (page === undefined) return undefined
+    const current = this.inspectOwnerForegroundToolCall(input)
+    if (current === undefined || acceptanceCanonicalJson(current) !== acceptanceCanonicalJson(attestation)) return undefined
+    return Object.freeze({ protocol: 'assistant-delivery/foreground-tool-input/v1' as const,
+      attestation, ...page })
   }
 
   /** Host-only, read-only source proof for an owner's live memory or wiki tool call. */

@@ -2,7 +2,13 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const automationSchemaVersion = 16
+export const automationSchemaVersion = 17
+
+const quiescenceTriggerV17 = `
+  CREATE TRIGGER IF NOT EXISTS automation_run_quiescence_immutable
+  BEFORE UPDATE OF quiescent ON automation_runs WHEN NEW.quiescent IS NOT OLD.quiescent
+  BEGIN SELECT RAISE(ABORT, 'run quiescence observation is immutable'); END;
+`
 
 const retirementTablesV16 = `
   CREATE TABLE IF NOT EXISTS automation_system_retirements (
@@ -325,6 +331,7 @@ function migrate(database: DatabaseSync): void {
       execution_mode TEXT NOT NULL CHECK (execution_mode IN ('production', 'preview', 'unknown')),
       definition_hash TEXT,
       diagnostic_json TEXT NOT NULL CHECK (json_valid(diagnostic_json)),
+      quiescent INTEGER CHECK(quiescent IN (0, 1)),
       delivery_status TEXT,
       delivery_ref TEXT,
       evidence_status TEXT NOT NULL CHECK (evidence_status IN ('pending', 'recorded', 'suppressed')),
@@ -429,7 +436,8 @@ function migrate(database: DatabaseSync): void {
     ) STRICT;
     ${retirementTablesV16}
     ${retirementActivationTriggersV16}
-    PRAGMA user_version = 16;
+    ${quiescenceTriggerV17}
+    PRAGMA user_version = 17;
     COMMIT;
     `)
     return
@@ -815,6 +823,13 @@ function migrate(database: DatabaseSync): void {
     const hasDefinitions = database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'automation_definitions'").get() !== undefined
     database.exec(`BEGIN IMMEDIATE; ${retirementTablesV16}
       ${hasDefinitions ? retirementActivationTriggersV16 : ''} PRAGMA user_version = 16; COMMIT;`)
+    version = 16
+  }
+  if (version === 16) {
+    const hasRuns = database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'automation_runs'").get() !== undefined
+    database.exec(`BEGIN IMMEDIATE;
+      ${hasRuns ? 'ALTER TABLE automation_runs ADD COLUMN quiescent INTEGER CHECK(quiescent IN (0, 1));' + quiescenceTriggerV17 : ''}
+      PRAGMA user_version = 17; COMMIT;`)
   }
 }
 

@@ -23,6 +23,8 @@ export interface AutomationRunnerInput {
   task: AutomationTask
   sessionId: string
   signal: AbortSignal
+  /** Internal reduction only; latch before any native Agent effect, even if abort wins the result race. */
+  markObjectiveUnverified?: () => void
 }
 
 export interface AutomationRunnerResult {
@@ -34,6 +36,8 @@ export interface AutomationRunnerResult {
   diagnostic?: AutomationExecutionDiagnostic
   /** Only the runner can attest that its own Agent/resources were joined. */
   quiescent?: boolean
+  /** Native model completion cannot establish an independently verified objective. */
+  unverifiedObjective?: true
 }
 
 export interface AutomationRunner {
@@ -480,6 +484,7 @@ export class AutomationCoordinator {
       heartbeat.unref?.()
 
       let result: AutomationRunnerResult
+      let unverifiedObjective = false
       try {
         const admission = this.store.acquireCircuitExecutionForTask({
           taskId: started.id,
@@ -509,6 +514,7 @@ export class AutomationCoordinator {
             task: started,
             sessionId: freshSessionId,
             signal: controller.signal,
+            markObjectiveUnverified: () => { unverifiedObjective = true },
           }))
           // The runner owns Agent flush/disposal. It may violate cancellation,
           // so its late settlement is deliberately detached from terminal I/O.
@@ -629,6 +635,8 @@ export class AutomationCoordinator {
         fencingToken: fence,
         now: this.now(),
         outcome,
+        ...(unverifiedObjective || result.unverifiedObjective === true ? { unverifiedObjective: true as const } : {}),
+        ...(result.quiescent === undefined ? {} : { quiescent: result.quiescent }),
         sessionId: result.sessionId ?? freshSessionId,
         ...(artifactRef === undefined ? {} : { artifactRef }),
         outputPreview: artifactRef === undefined ? 'artifact persistence failed' : outputPreview,

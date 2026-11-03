@@ -91,6 +91,7 @@ import type {
   OverlapPolicy,
   RetrySafety,
   SystemOwnedAutomationHealthProjection,
+  ProductionOccurrenceTerminalProjection,
   SystemOwnedAutomationIdentityProjection,
   SystemOwnedAutomationPauseReceipt,
   SystemOwnedAutomationRetirementReceipt,
@@ -1868,6 +1869,14 @@ export class AssistantAutomationsService extends Service implements
   }): SystemOwnedAutomationHealthProjection {
     this.assertActive()
     return this.store.inspectSystemOwned(input)
+  }
+
+  /** Host-only exact production terminal proof. Never exposed as a model tool. */
+  inspectProductionOccurrence = (input: {
+    automationId: string; occurrenceId: string; workspace: string; agentPreset: string
+  }): ProductionOccurrenceTerminalProjection | undefined => {
+    this.assertActive()
+    return this.store.inspectProductionOccurrence(input)
   }
 
   /** Host-only binding metadata for exact restart reconciliation; no prompt or task content. */

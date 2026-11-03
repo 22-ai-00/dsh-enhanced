@@ -62,7 +62,7 @@ import {
   type OwnerGoalOutcomeFeedbackProof,
 } from './goal-wake-types.js'
 import type { AcceptanceContract, AcceptedExecution, ForegroundExecution } from './acceptance.js'
-import type { ForegroundTaskIdentity } from './foreground-observation.js'
+import type { ForegroundTaskIdentity, OwnerForegroundToolInput } from './foreground-observation.js'
 import { openDeliveryDatabase } from './sqlite.js'
 import type { SessionLease, SessionLeaseClaim, SessionLeaseTarget } from './session-lease-types.js'
 import {
@@ -4645,6 +4645,47 @@ export class DeliveryStore {
       inboxId: input.inboxId, sessionId: input.sessionId,
       scope: Object.freeze({ ...input.scope }), owner: Object.freeze({ ...input.owner }),
       binding: Object.freeze({ ...input.binding }), dispatchedAt: row.dispatched_at })
+  }
+
+  /** Internal Host read: the service supplies an actual unsettled-call task proof.
+   * This pending lane does not weaken the separate terminal source reader. */
+  readPendingForegroundToolInput(input: Readonly<{ task: ForegroundTaskIdentity; offset?: number; maxBytes?: number }>):
+  Readonly<Omit<OwnerForegroundToolInput, 'protocol' | 'attestation'>> | undefined {
+    this.assertOpen()
+    const offset = input.offset ?? 0, limit = input.maxBytes ?? 4096
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 4 || limit > 8192) {
+      throw new DeliveryStoreError('invalid-binding', 'foreground tool input byte page is invalid')
+    }
+    const read = () => {
+      const task = this.inspectPendingForegroundToolTask(input.task)
+      if (task === undefined || acceptanceCanonicalJson(task) !== acceptanceCanonicalJson(input.task)) return undefined
+      const inbox = this.getInbox(task.inboxId)
+      if (inbox === undefined || inbox.status !== 'claimed' || inbox.bindingId !== task.binding.id) return undefined
+      const model = this.database.prepare(`SELECT model_selection_state, model_provider, model_id, model_reasoning_effort
+        FROM delivery_foreground_executions WHERE inbox_id = ? AND status = 'pending'`).get(task.inboxId) as {
+        model_selection_state: 'missing' | 'frozen' | 'inconsistent'; model_provider: string | null; model_id: string | null; model_reasoning_effort: string | null
+      } | undefined
+      if (model === undefined || !['missing', 'frozen', 'inconsistent'].includes(model.model_selection_state)
+        || model.model_selection_state === 'frozen' && (!model.model_provider || !model.model_id)) return undefined
+      const modelSelectionState = model.model_selection_state
+      const modelSelection = modelSelectionState === 'frozen' ? Object.freeze({ provider: model.model_provider!, model: model.model_id!,
+        ...(model.model_reasoning_effort === null ? {} : { reasoningEffort: model.model_reasoning_effort }) }) : undefined
+      const bytes = Buffer.from(inbox.envelope.text, 'utf8')
+      if (offset > bytes.length || offset < bytes.length && (bytes[offset]! & 0xc0) === 0x80) {
+        throw new DeliveryStoreError('invalid-binding', 'foreground tool input offset is not a UTF-8 boundary')
+      }
+      let end = Math.min(bytes.length, offset + limit)
+      while (end > offset && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--
+      const fullTextDigest = createHash('sha256').update(bytes).digest('hex')
+      // Native call identity and page window are intentionally absent. Multiple
+      // actual calls in the same claimed human task share one canonical source.
+      const sourceDigest = digest(acceptanceCanonicalJson({ protocol: 'assistant-delivery/foreground-tool-input-source/v1',
+        task, source: { envelopeHash: inbox.envelopeHash, envelope: inbox.envelope }, fullTextDigest, modelSelectionState,
+        ...(modelSelection === undefined ? {} : { modelSelection }) }))
+      return Object.freeze({ sourceDigest, modelSelectionState, ...(modelSelection === undefined ? {} : { modelSelection }), input: Object.freeze({ text: bytes.subarray(offset, end).toString('utf8'),
+        fullTextDigest, fullBytes: bytes.length, returnedBytes: end - offset, offset, ...(end < bytes.length ? { nextOffset: end } : {}) }) })
+    }
+    return this.writerTransactionActive ? read() : this.transaction(read)
   }
 
   /** Immutable pre-prompt receipt for an authenticated owner foreground turn. */

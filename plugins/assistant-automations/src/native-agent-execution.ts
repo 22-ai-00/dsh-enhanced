@@ -967,6 +967,7 @@ export class HostAutomationRunner implements AutomationRunner {
         outcome: hostResult.outcome,
         output: `Host execution terminal code: ${hostResult.failureCode}`,
         usage: nativeResult?.usage ?? {},
+        ...(nativeResult === undefined ? {} : { unverifiedObjective: true as const }),
         ...(nativeResult?.sessionId === undefined ? {} : { sessionId: nativeResult.sessionId }),
         ...(nativeResult?.quiescent === undefined ? {} : { quiescent: nativeResult.quiescent }),
         diagnostic: Object.freeze({
@@ -1017,7 +1018,7 @@ export class HostAutomationRunner implements AutomationRunner {
         budgetSettlementState,
       })
       if (nativeResult !== undefined) {
-        return { outcome: 'unknown', output: 'Host execution remains unknown; native usage is an observed lower bound',
+        return { outcome: 'unknown', unverifiedObjective: true, output: 'Host execution remains unknown; native usage is an observed lower bound',
           usage: Object.freeze({ ...nativeResult.usage, observedPartial: true }),
           ...(nativeResult.sessionId === undefined ? {} : { sessionId: nativeResult.sessionId }),
           quiescent: false, diagnostic: receipt }

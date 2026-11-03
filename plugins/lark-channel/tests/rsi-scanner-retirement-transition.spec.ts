@@ -101,8 +101,8 @@ function retire(store: AutomationStoreFixture, target: { owner: string; automati
     definitionHash: hash(record.definition), expectedVersion: record.version, reason: 'owner-revoked', evidenceDigest })
 }
 
-async function fixture(options: { version?: 15 | 16; oldMarker?: 'paused' | 'deleted' | 'missing'; paused?: boolean;
-  wrongEvidence?: boolean; beforeOnly?: boolean; memoryEvidence?: 'four-fields' | 'observed-version' } = {}) {
+async function fixture(options: { version?: 15 | 16 | 17; oldMarker?: 'paused' | 'deleted' | 'missing'; paused?: boolean;
+  wrongEvidence?: boolean; beforeOnly?: boolean; afterVersion?: 16; memoryEvidence?: 'four-fields' | 'observed-version' } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rsi-retirement-transition-'))); roots.push(root)
   const { AutomationStore, DeliveryStore } = await stores()
   const deliveryPath = join(root, 'delivery', 'state.sqlite')
@@ -133,6 +133,7 @@ async function fixture(options: { version?: 15 | 16; oldMarker?: 'paused' | 'del
     if (options.oldMarker === 'missing') {
       database.exec("DELETE FROM automation_system_reconciles WHERE automation_id='historical-scanner'; DELETE FROM automation_definitions WHERE id='historical-scanner'")
     }
+    if (options.version !== undefined && options.version < 17) database.exec('DROP TRIGGER automation_run_quiescence_immutable; ALTER TABLE automation_runs DROP COLUMN quiescent; PRAGMA user_version=16')
     if (options.version === 15) database.exec(`DROP TRIGGER automation_retirements_no_update;
       DROP TRIGGER automation_retirements_no_delete; DROP TRIGGER automation_retired_no_activate_insert;
       DROP TRIGGER automation_retired_no_activate_update; DROP TABLE automation_system_retirements; PRAGMA user_version=15`)
@@ -140,10 +141,17 @@ async function fixture(options: { version?: 15 | 16; oldMarker?: 'paused' | 'del
       VALUES ('occurrence','ordinary-owner-task','manual','manual',?,'unknown',0,?,?)`).run(now, now, now)
     database.prepare(`INSERT INTO automation_tasks(id,occurrence_id,automation_id,status,cancel_requested,attempt_count,created_at,updated_at)
       VALUES ('unknown-task','occurrence','ordinary-owner-task','unknown',0,0,?,?)`).run(now, now)
+    database.prepare(`INSERT INTO automation_attempts(id,task_id,attempt_number,owner_id,fencing_token,status,
+      automation_snapshot_hash,automation_snapshot_json,created_at,updated_at)
+      VALUES ('old-attempt','unknown-task',1,'historical-worker',1,'unknown',?,'{}',?,?)`).run('a'.repeat(64), now, now)
+    database.prepare(`INSERT INTO automation_runs(id,occurrence_id,automation_id,task_id,attempt_id,status,output_preview,usage_json,
+      execution_mode,diagnostic_json,evidence_status,created_at,updated_at)
+      VALUES ('historical-run','occurrence','ordinary-owner-task','unknown-task','old-attempt','unknown','historical output','{}',
+      'unknown','{}','suppressed',?,?)`).run(now, now)
   })
   const before = inspectAutomationRetirementSnapshot(path)
   if (!options.beforeOnly) {
-    // Constructor performs the real v15->v16 migration when needed, then the
+    // Constructor performs the real v15/v16->v17 migration when needed, then the
     // official writer commits exactly the intended four retirement CAS changes.
     const writer = new AutomationStore({ path, now: () => now + 1_000 })
     try {
@@ -160,6 +168,7 @@ async function fixture(options: { version?: 15 | 16; oldMarker?: 'paused' | 'del
     }
     finally { writer.close() }
   }
+  if (options.afterVersion === 16) mutate(path, database => database.exec('DROP TRIGGER automation_run_quiescence_immutable; ALTER TABLE automation_runs DROP COLUMN quiescent; PRAGMA user_version=16'))
   const after = inspectAutomationRetirementSnapshot(path)
   return { path, deliveryPath, before, after, ownerProof, targets: scannerTargets }
 }
@@ -205,7 +214,7 @@ describe('pure exact scanner retirement transition verification', () => {
     expect(() => prepareScannerRetirementOperations(changed)).toThrow()
   })
 
-  test.each([15, 16] as const)('accepts formal SQLite schema %i -> 16 retirement and returns a frozen bounded receipt', async version => {
+  test.each([15, 16, 17] as const)('accepts formal SQLite schema %i -> 17 retirement and returns a frozen bounded receipt', async version => {
     const input = await fixture({ version })
     const serialized = JSON.stringify(input)
     const receipt = verifyScannerRetirementTransition(input)
@@ -224,7 +233,52 @@ describe('pure exact scanner retirement transition verification', () => {
     expect(JSON.stringify(receipt)).not.toMatch(/private task|prompt|PAIR1234|unknown-task/u)
     expect(JSON.stringify(input)).toBe(serialized)
     expect(inspectAutomationRetirementSnapshot(input.path)).toEqual(input.after)
+    const oldRuns = input.before.historyTables.find(table => table.name === 'automation_runs')!
+    expect(input.after.historyTables.find(table => table.name === 'automation_runs')).toMatchObject({
+      legacyDigest: oldRuns.legacyDigest ?? oldRuns.digest, rowCount: 1, nonNullQuiescentCount: 0 })
+    expect(input.after.historyTables.filter(table => table.name !== 'automation_runs')).toEqual(input.before.historyTables.filter(table => table.name !== 'automation_runs'))
+  })
+
+  test.each([15, 16] as const)('preserves historical schema %i -> 16 transition evidence', async version => {
+    const input = await fixture({ version, afterVersion: 16 })
+    expect(verifyScannerRetirementTransition(input).targets).toHaveLength(4)
     expect(input.after.historyTables).toEqual(input.before.historyTables)
+  })
+
+  test.each([{ version: 16, value: 0 }, { version: 16, value: 1 }, { version: 17, value: 0 }, { version: 17, value: 1 }] as const)(
+    'rejects retroactively supplied historical quiescent=$value from schema $version', async ({ version, value }) => {
+    const input = await fixture({ version })
+    mutate(input.path, database => {
+      const trigger = database.prepare("SELECT sql FROM sqlite_schema WHERE name='automation_run_quiescence_immutable'").get() as { sql: string }
+      database.exec('DROP TRIGGER automation_run_quiescence_immutable')
+      database.prepare('UPDATE automation_runs SET quiescent=?').run(value)
+      database.exec(trigger.sql)
+    })
+    expectRejected({ ...input, after: inspectAutomationRetirementSnapshot(input.path) }, 'history-changed')
+  })
+
+  test.each(['legacyDigest', 'nonNullQuiescentCount', 'missing', 'extra'] as const)('rejects migration projection tampering: %s', async mode => {
+    const input = clone(await fixture({ version: 16 }))
+    const runs = input.after.historyTables.find(table => table.name === 'automation_runs')!
+    if (mode === 'legacyDigest') runs.legacyDigest = 'f'.repeat(64)
+    if (mode === 'nonNullQuiescentCount') runs.nonNullQuiescentCount = 1
+    if (mode === 'missing') delete runs.legacyDigest
+    if (mode === 'extra') Object.assign(runs, { ignored: true })
+    expectRejected(input, 'history-changed')
+  })
+
+  test.each(['quiescence SQL', 'other column', 'extra object'] as const)('rejects schema17 migration tampering: %s', async mode => {
+    const input = clone(await fixture({ version: 16 }))
+    if (mode === 'quiescence SQL') input.after.schemaEntries.find(entry => entry.name === 'automation_run_quiescence_immutable')!.sql += ' changed'
+    if (mode === 'other column') input.after.schemaEntries.find(entry => entry.name === 'automation_runs')!.sql += ', forged TEXT'
+    if (mode === 'extra object') input.after.schemaEntries.push({ type: 'table', name: 'forged', table: 'forged', sql: 'CREATE TABLE forged(x TEXT)' })
+    expectRejected(input, 'schema-changed')
+  })
+
+  test('rejects changed old run values during migration', async () => {
+    const input = await fixture({ version: 16 })
+    mutate(input.path, database => database.exec("UPDATE automation_runs SET output_preview='forged output'"))
+    expectRejected({ ...input, after: inspectAutomationRetirementSnapshot(input.path) }, 'history-changed')
   })
 
   test('accepts production MemoryLearningRuntime.start retirement with its frozen expectedOwner scope', async () => {
@@ -458,7 +512,7 @@ describe('pure exact scanner retirement transition verification', () => {
     ['bad proof digest', input => { input.ownerProof.snapshotDigest = 'f'.repeat(64) }],
     ['before inflight', input => { input.before.inFlightCount = 1 }],
     ['after inflight', input => { input.after.inFlightCount = 1 }],
-    ['future Automations before schema', input => { Object.assign(input.before, { schemaVersion: 17 }) }],
+    ['future Automations before schema', input => { Object.assign(input.before, { schemaVersion: 18 }) }],
     ['old Automations after schema', input => { Object.assign(input.after, { schemaVersion: 15 }) }],
   ]
   test.each(proofChanges)('rejects owner/snapshot boundary: %s', async (_name, tamper) => {

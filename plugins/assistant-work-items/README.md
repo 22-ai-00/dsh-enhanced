@@ -348,12 +348,42 @@ work_item_read_report:
 - 零/缺失计数直接省略（不写 `0`），值域是无符号安全整数；这些指标不新增表或列。`workItemEvaluationClaims` 增加可选的第四个 `execution` 参数：drain 路径传入上面的只读计数包，直调三参数形式继续使用 live 记录回退，行为与旧版本一致（`{ latencyMs, retries? }`）。
 - 刻意**不采集 provider token/成本指标**：本插件与 `assistant-automations` 之间没有 run-usage 契约，无法区分「本工作项消耗」与「同一 run 的其他开销」，复制过去的数字会把成本重复计入 Evaluation；需要成本归因时应由拥有 provider 账本的 producer 自己投影。执行指标只回答「做过多少事、等多久、重试几次」，不回答 objective 是否达成。
 
+## 主人续办旧任务
+
+显式配置 `ownerContinuation` 后，前台可先通过 `work_item_list` / `work_item_recall` 找回旧项，再调用 `work_item_continue({ item_id })`。新指令直接取自 Delivery 保存的当前真实人类消息，工具不接受模型改写的正文。它需要独立 `continue-work-items` Policy 授权；该授权的 automation 资源必须是下面的 continuation ID。原有后台 admit、Automations reconcile/执行预算和 Delivery send 授权也必须分别成立。
+
+```yaml
+ownerRecall: { enabled: true }
+admission:
+  allowedKinds: [foreground-repair, owner-continuation]
+ownerContinuation:
+  enabled: true
+  automationId: work-item-continuation  # 必须不同于 workerAutomationId
+  allowedTools: [work_item_claim, work_item_read_context, work_item_report]
+  budgetId: owner-continuation-runs
+  budgetAmount: 1
+  maxModelCalls: 8
+  maxToolCalls: 12
+  maxOutputTokens: 2048
+  timeoutMs: 120000
+  expiresAt: 1893456000000  # 必须在 scope 有效期内
+```
+
+这三个工具是必需项；执行文件、网络等工作需要在 `allowedTools` 中另外显式列出相应 Host 工具，并保留其原有 Policy。不得加入主人查询/续办工具或只读 diagnosis 的 `work_item_read_source`。continuation 使用独立 system-owned Host definition，不扩大 diagnosis 的固定五工具能力。
+
+父项必须已有终态报告，且 Automations 能证明该报告所绑定的精确 production occurrence 已完成、静止且预算已结算（或原执行明确无需预算）。旧版本没有静止证明的历史、仍运行的任务及 unknown 均不能据此重放。续办追加一个独立子项，保留父项和根项引用、报告/结果修订上界，冻结当前消息实际使用的 provider/model/effort、工具 schema、预算和原期限；不延长旧授权、不将 ready 当作独立成功。同一父项和真实输入来源重复调用只得到同一个子项。
+
+worker 仍由原生 Automations/AgentLoop 执行。认领后，`work_item_read_context` 默认分页读取当前主人原文；`parent-brief`、`parent-report`、`parent-outcome` 按冻结上界读取历史，正文最多 8192 UTF-8 字节一页并附续读引用。输入全文最多 256 KiB，按原字节持久保存。`/new` 后同一 owner lineage 可以查找并续办历史，运行中的精确 binding/generation 变化则停止原执行。
+
+每个子项最多执行一次；`waiting` 不产生自动重试。未知派发或未确认的执行占槽等待处置。新的待派发项使用已有 scheduler wake 有界检查，前一 occurrence 真正停止后才继续。报告后原生最终工具 guard 拒绝更多工具效果，仍可生成简短结束语。暂停、删除或更改已建立的 worker/配置不会自动重新启用。这里不实现运行中追加指令、跨信道身份合并或消息 Thread 订阅；它也不证明自主成长或外部通知实际送达。
+
 ## 配置
 
 | 字段 | 默认值 | 含义 |
 | --- | --- | --- |
 | `enabled` | `false` | 总开关；关闭时不创建任何目录、文件或数据库 |
 | `mode` | `observe` | `observe` 只记录观察行；`active` 才唤醒 worker、发通知 |
+| `ownerContinuation` | 关闭 | 单独启用、独立 automation ID、显式工具范围与有限执行预算；见主人续办旧任务 |
 | `ownerRecall.enabled` | `false` | 显式启用当前主人前台任务查询；要求 enabled active、完整 scope、worker automation 与独立 `inspect-work-items` 授权 |
 | `databasePath` | `$DSH_HOME/assistant-work-items/state.sqlite` | 私有账本绝对路径 |
 | `workRoot` | `$DSH_HOME/assistant-work-items/work` | 每项 scratch/artifact 根目录绝对路径 |
@@ -402,12 +432,12 @@ work_item_read_report:
 
 - 文件系统：只读写显式 `databasePath` 和 `workRoot`；目录 `0700`，数据库文件 `0600`，拒绝 leaf symlink。artifact 只能落在工作项自己的 scratch 目录内。
 - 网络：插件自身不发网络请求。模型/工具调用发生在 `assistant-automations` 创建的原生 Agent run 内，其 provider 与工具权限由宿主和 Policy 决定。
-- 子进程、凭据、浏览器：无。
+- 子进程、凭据、浏览器：插件自身不直接使用；continuation 显式允许的 Host 工具可能使用，仍受这些工具的声明与 Policy 约束。
 - 安装脚本：包内没有 postinstall 或其他生命周期脚本；`prepublishOnly` 只要求用 pnpm 发布。
 - 消息投递：只有 active 模式的终态报告才会经 `assistant-delivery` 入队；observe 模式从不调用 Delivery 的写接口。Delivery 会在入队和发送前重查 owner route、binding 版本/代次、有效期和 background `send` Policy。
 - 跨插件读取：通用自动来源使用 `assistant-delivery` 的 `validateOwnerRoute` + `listOwnerForegroundTaskSources`（owner 认证、游标分页、host 公开、只读，不触发任何发送或写操作）。`assistant-delivery` 缺失或版本过旧（无该 API）时，来源退化为 no-op 或 `degraded: 'unsupported'`，通用来源扫描按此方式降级。diagnosis 模式必须具备现代 Delivery 的逐条 inspect/有界原输入读取及带 fence 的 Automations 能力；缺失、过旧或授权失效时不激活/不执行，health 显示 unavailable 或待处置，工具动作可失败关闭，不承诺 claim 成功。
 - 结果结算：只读取本地账本和 `assistant-delivery` 的只读 `listOwnerForegroundTaskSources`；不新增网络、子进程、凭据或写接口，结算失败/缺依赖时降级而不是重试外部写入。可选 `assistant-evaluation` 只通过进程内 registration 追加 trusted 证据，同样不发网络请求。
-- 数据保留：账本保存外部 ID、标题、brief、owner 身份、报告正文和 artifact 路径；diagnosis 还保存冻结供应商、owner/source/binding、完整工具 schema、预算和激活合同。活动 claim 可将有界原输入读入原生 Agent 上下文/会话记录，报告也可能包含原文片段，均可能包含私人信息；备份时按 SQLite（含 WAL）一致性方式复制。删除 scratch 目录不影响账本，但会丢失完整 artifact。
+- 数据保留：continuation schema 9 另外保存当前人类输入全文、父/根引用和不可变执行计划；原文可能包含敏感信息。账本保存外部 ID、标题、brief、owner 身份、报告正文和 artifact 路径；diagnosis 还保存冻结供应商、owner/source/binding、完整工具 schema、预算和激活合同。活动 claim 可将有界原输入读入原生 Agent 上下文/会话记录，报告也可能包含原文片段，均可能包含私人信息；备份时按 SQLite（含 WAL）一致性方式复制。删除 scratch 目录不影响账本，但会丢失完整 artifact。
 
 ## 限制
 

@@ -90,6 +90,8 @@ terminal run 还会在同一 SQLite 事务中写入不可变、有限大小的**
 
 Host runbook 可调用非模型 seam `inspectSystemOwned({ owner, automationId })`。它先校验 exact system owner，只返回 current definition hash/version、按 production/preview 分栏的最新 terminal status/typed diagnostic（兼容别名 `latestTerminalRun` 只指 production）、经过 run hash + immutable claim snapshot 证明的历史 workspace/preset，以及当前 circuit/incident 的 content-free 状态；不返回 prompt、输出、artifact/session、usage 或 probe capability，也绝不拿当前 definition 猜历史 scope。
 
+Host-only `inspectProductionOccurrence({ automationId, occurrenceId, workspace, agentPreset })` 查询一个精确 production occurrence。schema 17 在真实协调器完成事务中保存 runner 的可空 `quiescent`；旧行保持 NULL，不补造静止证明。只有完整终态、真实静止、无活动 task/attempt/lease、不可变历史 scope/definition 与安全预算状态同时成立，才返回不含任务正文的证明；unknown、preview、历史 NULL、损坏关联均返回 undefined。调用方仍须验证本任务绑定、owner 和所需预算状态。此接口不重试任务，也不把 worker 的 ready 报告当作客观成功。
+
 Host 消费者可用 `onSchedulerWake(listener: () => void): () => void` 把同步、有限的初始化重试挂到现有 scheduler tick。注册通过调用方 Cordis use-site effect 拥有，可幂等注销；consumer 卸载或 Automations 关闭后不会再调用。每次手动、自动或内部原生 tick 在数据库调度、materialize/claim 前通知当前每份注册一次，单个异常不阻塞其他监听者或调度。它不增加 timer、执行任务、预算或授权；消费者仅应在初始化未完成时重新检查持久退休/授权并 reconcile，完成后 no-op，业务扫描继续使用既有 cron 与预算门。`schedulerEnabled: false` 时没有自动唤醒；Host 可显式调用已有 `tick()`。
 
 Host 可通过 `retireSystemOwned({ owner, operationId, automationId, definitionHash, expectedVersion, reason: 'owner-revoked', evidenceDigest })` 永久退休精确现存的 active/paused 定义。它沿用 background Policy `reconcile` 授权；可信 Host 调用方负责把精确 Delivery 撤权证据与扫描身份摘要成 64 位十六进制 `evidenceDigest`，接口不会新建定义、恢复 owner、转移 grant 或预留预算。schema v16 在同一事务中 CAS 暂停、清空 next-run、递增版本并追加独立永久标记；原定义内容与 occurrence/task/run/unknown 历史保持不变。`inspectSystemOwnedRetirement({ owner, automationId })` 只返回身份、版本、原因与摘要回执。退休后同 owner/id 的旧 reconcile 缓存、nonce/definition/key 变化、resume、重启和身份切回均不能激活，已排队任务不能获得新 claim。删除定义不会删除标记；幂等退休重放重新检查真实 paused/hash/version/next-run，状态已变化时拒绝旧成功回执。普通 `pauseSystemOwned` 仍是可恢复暂停。新 owner 配合新 automationId 可单独授权使用；不能重解释旧授权、额度或 unknown。
@@ -218,5 +220,7 @@ Agent 生命周期由 Automations 持有。注册卸载、调用取消、executo
 围栏的信号与原 occurrence、注册生命周期及期限信号合并。在异步 Agent 创建完成后的首次 prompt、每次本 Agent 的实际模型派发、工具 guard 与最终结果接受前重新检查；stream 每个 chunk 只保留取消/期限检查，不逐 chunk 查询消费者数据库。回调抛错或返回异步值会撤销并中止本次调用，之后的模型/工具请求拒绝；已经派发的请求仍计费，未知结果不重试。无第三参数时保留旧 Host API 行为。围栏不证明跨数据库原子性；工具 execute 仍须在自身审批等待后独立重核授权。
 
 Host definition 可以选择精确的 `schedule: { kind: 'external' }`。它没有日历 next/previous/due 时间，create/reconcile/resume/restart 都不产生 `nextRunAt`，只能由现有认证 `ingestExternal` 创建事件 occurrence。普通 Agent definition 和模型创建/更新入口拒绝此调度；manual/run-now、system dry-run 及日历/canary occurrence 拒绝，不消耗运行预算。暂停后的重启保持暂停，不自动恢复执行权限；显式授权 resume 仍没有日历任务。该扩展不迁移数据库、不新增 timer，也不改变既有 at/every/cron 的序列化语义。
+
+实际消费这一原生 Agent 能力时，协调器在任何异步等待前单调记录“业务目标未经独立验证”。即使 Host executor 随后正常返回 succeeded，Evaluation 的 `objectiveStatus` 仍为 unknown；超时抢先结束或缺少最终原生回执也不会丢失该减权标记。未使用 Agent 的确定性 Host runbook 保留既有固定目标语义。它不改写历史 outbox，也不能用工具退出码或模型终态报告把 unknown 提升为 achieved。
 
 Host Agent 的 Policy initiator 同时绑定 occurrence 已冻结的 `principal`，供工具规则核对实际 owner。`inspectSystemOwned` 的生产与预览 run 投影分别返回 `occurrenceId`；续办消费者须将它与原报告对应的 claim 核对，再检查持久 run 状态、不可变执行上下文和预算结算。仅有 waiting 报告不足以证明上一次执行已经安全结束；旧 Host 缺少该字段时不能据此自动续办。

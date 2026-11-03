@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { normalizeConfig } from '../src/config.ts'
+import { normalizeConfig, ConfigSchema } from '../src/config.ts'
 const base = { databasePath: '/private/owner-recall/state.sqlite', workRoot: '/private/owner-recall/work' }
 const active = { ...base, enabled: true, mode: 'active' as const, workerAutomationId: 'worker',
   scope: { workspace: '/workspace', preset: 'primary', principalId: 'owner', ownerRouteId: 'route', expiresAt: 2_000 },
@@ -37,4 +37,31 @@ test('legacy diagnosis digest stays fixed and every diagnosis execution setting 
     expect(diagnosisConfigurationDigest(normalizeConfig({ ...raw, diagnosis: { ...raw.diagnosis, [key]: changed } }, 1_000), []))
       .not.toBe(original)
   }
+})
+
+const continuation = { enabled: true, automationId: 'continuation-worker',
+  allowedTools: ['work_item_claim', 'work_item_report', 'work_item_read_context'],
+  budgetId: 'continuation-budget', budgetAmount: 1, maxModelCalls: 2, maxToolCalls: 5,
+  maxOutputTokens: 64, timeoutMs: 1000, expiresAt: 1500 }
+const resumable = { ...active, ownerRecall: { enabled: true }, admission: { allowedKinds: ['repair', 'owner-continuation'] } }
+test('continuation stays disabled through real Standard-Schema defaults and validates explicit finite authority', () => {
+  expect(normalizeConfig(ConfigSchema(base), 1000)).not.toHaveProperty('ownerContinuation')
+  expect(normalizeConfig({ ...resumable, ownerContinuation: continuation }, 1000).ownerContinuation).toEqual({
+    ...continuation, allowedTools: [...continuation.allowedTools].sort() })
+  for (const override of [{ enabled: false }, { mode: 'observe' }, { ownerRecall: { enabled: false } },
+    { admission: { allowedKinds: ['repair'] } }]) {
+    expect(() => normalizeConfig({ ...resumable, ownerContinuation: continuation, ...override } as never, 1000)).toThrow()
+  }
+  for (const override of [{ automationId: 'worker' }, { budgetAmount: 0 }, { maxModelCalls: 0 }, { expiresAt: 999 },
+    { expiresAt: 2001 }, { allowedTools: ['work_item_claim', 'work_item_report'] },
+    { allowedTools: [...continuation.allowedTools, 'work_item_continue'] },
+    { allowedTools: [...continuation.allowedTools, 'work_item_read_source'] },
+    { allowedTools: [...continuation.allowedTools, 'work_item_claim'] }, { unknown: true }]) {
+    expect(() => normalizeConfig({ ...resumable, ownerContinuation: { ...continuation, ...override } } as never, 1000)).toThrow()
+  }
+})
+test('separate continuation settings do not rewrite the existing diagnosis execution configuration', async () => {
+  const { diagnosisConfigurationDigest } = await import('../src/diagnosis-contract.ts')
+  expect(diagnosisConfigurationDigest(normalizeConfig({ ...resumable, ownerContinuation: continuation }, 1000), []))
+    .toBe(diagnosisConfigurationDigest(normalizeConfig(resumable, 1000), []))
 })

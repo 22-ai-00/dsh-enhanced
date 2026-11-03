@@ -48,6 +48,10 @@ import { WorkItemError } from './types.js'
 import { WorkItemWorkspace } from './workspace.js'
 import { WorkItemDiagnosis, persistedDiagnosisIntervention, type DiagnosisSourcePage } from './diagnosis.js'
 import type { WorkItemDiagnosisPlan } from './diagnosis-contract.js'
+import { WorkItemContinuation } from './continuation.js'
+import type { WorkItemContinuationAdmission } from './continuation-record.js'
+import { WorkItemOwnerAccess } from './owner-access.js'
+import { WorkItemOwnerContinuation } from './owner-continuation.js'
 
 function fail(code: ConstructorParameters<typeof WorkItemError>[0], message: string, detail?: string): never {
   throw new WorkItemError(code, message, detail)
@@ -157,6 +161,9 @@ interface Components {
 }
 
 // Neither the runtime nor the plan-mint closure is published on a Cordis service receiver.
+const continuationRuntimes = new WeakMap<object, WorkItemContinuation>()
+const continuationAdmissions = new WeakMap<Components, (input: WorkItemAdmitInput, continuation: WorkItemContinuationAdmission) => WorkItemAdmitResult>()
+const continuationDispatches = new WeakMap<Components, WorkItemDispatch>()
 const diagnosisRuntimes = new WeakMap<object, WorkItemDiagnosis>()
 const diagnosisAdmissions = new WeakMap<Components, (input: WorkItemAdmitInput, builder: (item: WorkItemRecord) => Readonly<WorkItemDiagnosisPlan>) => WorkItemAdmitResult>()
 
@@ -205,6 +212,7 @@ export class AssistantWorkItemsService extends Service {
   private workItemsComponents: Components | undefined
   private workItemsClosed = false
   private readonly workItemsDiagnosisKey = Object.freeze({})
+  private readonly workItemsContinuationKey = Object.freeze({})
   private workItemsDiagnosisError: string | null = null
   private workItemsHasDiagnosisHistory = false
   private readonly workItemsSchedulerUnsubscribers = new Set<() => void>()
@@ -213,13 +221,23 @@ export class AssistantWorkItemsService extends Service {
   private workItemsSchedulerLastError: string | null = null
 
   private readonly workItemsOwnerReads: WorkItemOwnerRecall
+  private readonly workItemsOwnerContinuations: WorkItemOwnerContinuation
 
   constructor(ctx: Context, input: Config) {
     super(ctx, 'assistantWorkItems')
     this.workItemsConfig = Object.freeze(normalizeConfig(input, Date.now()))
-    this.workItemsOwnerReads = new WorkItemOwnerRecall({ config: this.workItemsConfig,
+    const ownerDependencies = { config: this.workItemsConfig,
       store: () => this.workItemsClosed ? undefined : this.workItemsComponents?.store,
-      delivery: () => this.workItemsDelivery(), policy: () => this.workItemsPolicy() })
+      delivery: () => this.workItemsDelivery(), policy: () => this.workItemsPolicy() }
+    const access = new WorkItemOwnerAccess(ownerDependencies)
+    this.workItemsOwnerReads = new WorkItemOwnerRecall({ ...ownerDependencies, access })
+    this.workItemsOwnerContinuations = new WorkItemOwnerContinuation({ ...ownerDependencies, access,
+      runtime: () => continuationRuntimes.get(this.workItemsContinuationKey),
+      admit: (input, continuation) => {
+        const components = this.workItemsRequired(), mint = continuationAdmissions.get(components)
+        if (!mint) fail('disabled', 'owner continuation admission is unavailable')
+        return mint(input, continuation)
+      } })
     // The Evaluation outbox is service state, not ledger state: it exists even
     // for a disabled intake so `assistant-evaluation` can bind a generation,
     // and it never opens SQLite until an export pass actually runs.
@@ -234,7 +252,25 @@ export class AssistantWorkItemsService extends Service {
       warn: message => this.ctx.logger.warn(message),
     })
     ctx.effect(() => () => this.close(), 'assistant-work-items.store')
-    ctx.inject(['tools'], toolsCtx => registerWorkItemTools(toolsCtx, this))
+    ctx.inject(['tools'], toolsCtx => {
+      registerWorkItemTools(toolsCtx, this)
+      if (this.workItemsConfig.ownerContinuation) {
+        // The pinned native guard runs after extensible approval listeners and
+        // cannot be overridden by a later allow. Cover every tool at native
+        // dispatch preparation; the exclusive report tool is a scheduling barrier.
+        toolsCtx.tools.guard(execution => {
+          const context = execution.agent?.ctx.get('assistantAutomationExecution' as never) as { automationId?: unknown } | undefined
+          if (context?.automationId !== this.workItemsConfig.ownerContinuation!.automationId) return undefined
+          try {
+            const occurrenceId = this.workItemsOccurrenceId(execution.agent)
+            const runtime = continuationRuntimes.get(this.workItemsContinuationKey)
+            if (!runtime) return 'continuation invocation is unavailable'
+            runtime.assertTool(occurrenceId, execution.name)
+            return undefined
+          } catch { return 'continuation tool authority or execution phase changed' }
+        })
+      }
+    })
     // The disabled default must not create a directory, lock a file or open a
     // database, so persistence starts only for an explicitly enabled intake.
     if (this.workItemsConfig.enabled) this.workItemsOpen()
@@ -297,6 +333,36 @@ export class AssistantWorkItemsService extends Service {
         }, 'assistant-work-items.diagnosis')
       })
     }
+    if (isActive(this.workItemsConfig) && this.workItemsConfig.ownerContinuation) {
+      ctx.inject(['assistantAutomations', 'assistantDelivery', 'tools'], continuationCtx => {
+        if (this.workItemsClosed) return
+        const components = this.workItemsOpen(), dispatch = continuationDispatches.get(components)
+        if (!dispatch) fail('storage', 'continuation dispatch is unavailable')
+        const runtime = new WorkItemContinuation(continuationCtx, this.workItemsConfig, components.store, {
+          assertOwner: item => {
+            const receipt = this.workItemsAssertOwnerRoute(item)
+            if (receipt.principalVersion !== item.owner.principalVersion || receipt.bindingVersion !== item.owner.bindingVersion
+              || receipt.generation !== item.owner.generation) fail('owner-route-invalid', 'continuation owner generation changed')
+            return receipt
+          },
+          assertMandate: item => {
+            if (components.authority.check(item).kind !== 'allow') fail('authority-revoked', 'continuation admission mandate is unavailable')
+          },
+          wake: item => dispatch.wake(item),
+        })
+        continuationRuntimes.set(this.workItemsContinuationKey, runtime)
+        try { runtime.start() }
+        catch (error) {
+          runtime.close()
+          if (continuationRuntimes.get(this.workItemsContinuationKey) === runtime) continuationRuntimes.delete(this.workItemsContinuationKey)
+          continuationCtx.logger.warn(`assistant-work-items: continuation activation unavailable: ${describe(error)}`)
+        }
+        continuationCtx.effect(() => () => {
+          runtime.close()
+          if (continuationRuntimes.get(this.workItemsContinuationKey) === runtime) continuationRuntimes.delete(this.workItemsContinuationKey)
+        }, 'assistant-work-items.continuation')
+      })
+    }
   }
 
   /** One native wake may admit at most ten already-due waiting occurrences. */
@@ -337,6 +403,7 @@ export class AssistantWorkItemsService extends Service {
         }
       }
       if (this.workItemsConfig.diagnosis) diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.sweep(false)
+      continuationRuntimes.get(this.workItemsContinuationKey)?.wakePending()
     } catch (error) {
       this.workItemsSchedulerLastError = error instanceof WorkItemError ? error.code : 'scheduler-wake-failed'
       this.ctx.logger.warn(`assistant-work-items: waiting resume scan failed: ${describe(error)}`)
@@ -355,14 +422,19 @@ export class AssistantWorkItemsService extends Service {
 
   get diagnosisEnabled(): boolean { return this.workItemsConfig.diagnosis !== undefined }
 
+  get ownerContinuationEnabled(): boolean { return this.workItemsConfig.ownerContinuation !== undefined }
+
   get ownerRecallEnabled(): boolean { return this.workItemsConfig.ownerRecall?.enabled === true }
 
   /** Foreground-only historical reads, independent of occurrence/worker authority. */
   listForOwner = (execution: OwnerWorkItemExecution, input: OwnerWorkItemListInput) => this.workItemsOwnerReads.list(execution, input)
   recallForOwner = (execution: OwnerWorkItemExecution, input: OwnerWorkItemRecallInput) => this.workItemsOwnerReads.recall(execution, input)
 
+  continueForOwner = (execution: OwnerWorkItemExecution, input: { item_id: string }) => this.workItemsOwnerContinuations.continue(execution, input)
+
   /** Bounded admission check; no work-item recovery, writes, dispatch or model. */
   preauthorizeTool(execution: ToolExecution): boolean {
+    if (execution.name === 'work_item_continue') return this.workItemsOwnerContinuations.preauthorize(execution)
     if (execution.name === 'work_item_list' || execution.name === 'work_item_recall') return this.workItemsOwnerReads.preauthorize(execution)
     try {
       if (execution.signal.aborted) return false
@@ -407,20 +479,25 @@ export class AssistantWorkItemsService extends Service {
     if (authority.kind === 'unavailable') fail('authority-unavailable', 'admission mandate could not be revalidated', authority.detail)
     if (requireModernMandate && authority.kind !== 'allow') fail('authority-unavailable', 'legacy work items require the ordinary approval path')
 
-    if (config.diagnosis) {
-      const runtime = diagnosisRuntimes.get(this.workItemsDiagnosisKey)
-      if (!runtime) fail('missing-dependency', 'diagnosis runtime is unavailable')
-      runtime.assertTool(occurrenceId, execution.name)
-    }
+    this.workItemsAssertRuntime(components, occurrenceId, execution.name)
     const active = components.store.activeClaim(item.id)
     if (active !== undefined && active.runId !== occurrenceId && active.leasedUntil > Date.now()) fail('claim-conflict', 'another occurrence owns this work item')
     const allowed = execution.name === 'work_item_report' ? ['status', 'summary', 'artifacts']
       : execution.name === 'work_item_read_report' ? ['revision', 'offset', 'max_bytes']
+        : execution.name === 'work_item_read_context' ? ['kind', 'revision', 'offset', 'max_bytes']
         : execution.name === 'work_item_read_source' ? ['offset', 'max_bytes']
         : execution.name === 'work_item_claim' || execution.name === 'work_item_status' ? [] : undefined
     if (allowed === undefined) fail('invalid-input', 'unknown work-item tool')
     const args = workItemToolArguments(execution.arguments, allowed)
 
+    if (execution.name === 'work_item_read_context') {
+      if (!['input', 'parent-brief', 'parent-report', 'parent-outcome'].includes(String(args.kind ?? 'input'))) fail('invalid-input', 'invalid continuation context kind')
+      this.readContext(execution.agent, { kind: (args.kind ?? 'input') as 'input' | 'parent-brief' | 'parent-report' | 'parent-outcome',
+        ...(args.revision === undefined ? {} : { revision: args.revision as number }),
+        ...(args.offset === undefined ? {} : { offset: args.offset as number }),
+        ...(args.max_bytes === undefined ? {} : { maxBytes: args.max_bytes as number }) })
+      return
+    }
     if (execution.name === 'work_item_status') return
     if (execution.name === 'work_item_read_source') {
       if (!config.diagnosis) fail('disabled', 'source recall requires diagnosis mode')
@@ -451,6 +528,7 @@ export class AssistantWorkItemsService extends Service {
     }
     if (typeof args.status !== 'string' || !['progress', 'waiting', 'ready', 'blocked', 'failed'].includes(args.status)
       || typeof args.summary !== 'string' || args.summary.trim().length === 0) fail('invalid-input', 'work-item report requires a valid status and non-empty summary')
+    if (args.status === 'waiting' && components.store.getContinuation(item.id)) fail('invalid-input', 'continuation attempts cannot schedule waiting retries')
     const artifacts = args.artifacts ?? []
     if (!Array.isArray(artifacts) || artifacts.some(path => typeof path !== 'string')) fail('invalid-input', 'work-item report artifacts must be string paths')
     const normalizedArtifacts = components.workspace.validateArtifacts(item, artifacts)
@@ -513,6 +591,7 @@ export class AssistantWorkItemsService extends Service {
       for (const item of result.items) if (components.store.readDiagnosisPlan(item.id)) components.store.clearDiagnosisIntervention(item.id)
       diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.retire(result.items.map(item => item.id))
     }
+    continuationRuntimes.get(this.workItemsContinuationKey)?.retire(result.items.map(item => item.id))
     return result
   }
 
@@ -521,11 +600,7 @@ export class AssistantWorkItemsService extends Service {
     this.workItemsSweepQuietly(components)
     this.workItemsSettleQuietly(components)
     const occurrenceId = this.workItemsOccurrenceId(agent)
-    if (this.workItemsConfig.diagnosis) {
-      const runtime = diagnosisRuntimes.get(this.workItemsDiagnosisKey)
-      if (!runtime) fail('missing-dependency', 'diagnosis runtime is unavailable')
-      runtime.assertTool(occurrenceId, 'work_item_claim')
-    }
+    this.workItemsAssertRuntime(components, occurrenceId, 'work_item_claim')
     if (!this.workItemsConfig.diagnosis) components.ledger.recover()
     // Lease-expiry and waiting resume are generic recovery work, so ordinary
     // worker traffic is the lazy sweep that re-dispatches them. This is
@@ -574,14 +649,11 @@ export class AssistantWorkItemsService extends Service {
   async report(agent: Agent | undefined, input: WorkItemReportInput): Promise<WorkItemReportView> {
     const components = this.workItemsRequired()
     const occurrenceId = this.workItemsOccurrenceId(agent)
-    if (this.workItemsConfig.diagnosis) {
-      const runtime = diagnosisRuntimes.get(this.workItemsDiagnosisKey)
-      if (!runtime) fail('missing-dependency', 'diagnosis runtime is unavailable')
-      runtime.assertTool(occurrenceId, 'work_item_report')
-    }
+    this.workItemsAssertRuntime(components, occurrenceId, 'work_item_report')
     if (!this.workItemsConfig.diagnosis) components.ledger.recover()
     const item = components.store.findItemByOccurrence(occurrenceId)
     if (item === undefined) fail('not-found', 'no work item is bound to this automation occurrence')
+    if (input.status === 'waiting' && components.store.getContinuation(item.id)) fail('invalid-input', 'continuation attempts cannot schedule waiting retries')
     const result = components.ledger.report({
       itemId: item.id,
       runId: occurrenceId,
@@ -590,7 +662,10 @@ export class AssistantWorkItemsService extends Service {
       artifactPaths: input.artifactPaths ?? [],
       idempotencyKey: input.idempotencyKey,
     })
-    if (!result.replayed) diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.reported(occurrenceId, result.report.status, result.report.revision)
+    if (!result.replayed) {
+      if (components.store.getContinuation(item.id)) continuationRuntimes.get(this.workItemsContinuationKey)?.reported(occurrenceId, result.report.status, result.report.revision)
+      else diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.reported(occurrenceId, result.report.status, result.report.revision)
+    }
     let notified = false
     if (!result.replayed) {
       try {
@@ -786,11 +861,7 @@ export class AssistantWorkItemsService extends Service {
   status(agent: Agent | undefined): WorkItemStatusView {
     const components = this.workItemsRequired()
     const occurrenceId = this.workItemsOccurrenceId(agent)
-    if (this.workItemsConfig.diagnosis) {
-      const runtime = diagnosisRuntimes.get(this.workItemsDiagnosisKey)
-      if (!runtime) fail('missing-dependency', 'diagnosis runtime is unavailable')
-      runtime.assertTool(occurrenceId, 'work_item_status')
-    }
+    this.workItemsAssertRuntime(components, occurrenceId, 'work_item_status')
     if (!this.workItemsConfig.diagnosis) components.ledger.recover()
     const item = components.store.findItemByOccurrence(occurrenceId)
     if (item === undefined) fail('not-found', 'no work item is bound to this automation occurrence')
@@ -810,11 +881,7 @@ export class AssistantWorkItemsService extends Service {
   readReport(agent: Agent | undefined, input: { revision: number; offset?: number; maxBytes?: number }): WorkItemReportPage {
     const components = this.workItemsRequired()
     const occurrenceId = this.workItemsOccurrenceId(agent)
-    if (this.workItemsConfig.diagnosis) {
-      const runtime = diagnosisRuntimes.get(this.workItemsDiagnosisKey)
-      if (!runtime) fail('missing-dependency', 'diagnosis runtime is unavailable')
-      runtime.assertTool(occurrenceId, 'work_item_read_report')
-    }
+    this.workItemsAssertRuntime(components, occurrenceId, 'work_item_read_report')
     const item = components.store.findItemByOccurrence(occurrenceId)
     if (item === undefined) fail('not-found', 'no work item is bound to this automation occurrence')
     const receipt = this.workItemsAssertOwnerRoute(item)
@@ -828,6 +895,26 @@ export class AssistantWorkItemsService extends Service {
     if (authority.kind === 'unavailable') fail('authority-unavailable', 'admission mandate could not be revalidated', authority.detail)
 
     return this.workItemsReadReportPage(components, item, input)
+  }
+
+  readContext(agent: Agent | undefined, input: { kind: 'input' | 'parent-brief' | 'parent-report' | 'parent-outcome'; revision?: number; offset?: number; maxBytes?: number }) {
+    this.workItemsRequired()
+    const runtime = continuationRuntimes.get(this.workItemsContinuationKey)
+    if (!runtime) fail('missing-dependency', 'continuation context runtime is unavailable')
+    return runtime.readContext(this.workItemsOccurrenceId(agent), input)
+  }
+
+  private workItemsAssertRuntime(components: Components, occurrenceId: string, name: string): void {
+    const item = components.store.findItemByOccurrence(occurrenceId)
+    if (item && components.store.getContinuation(item.id)) {
+      const runtime = continuationRuntimes.get(this.workItemsContinuationKey)
+      if (!runtime) fail('missing-dependency', 'continuation runtime is unavailable')
+      runtime.assertTool(occurrenceId, name)
+    } else if (this.workItemsConfig.diagnosis) {
+      const runtime = diagnosisRuntimes.get(this.workItemsDiagnosisKey)
+      if (!runtime) fail('missing-dependency', 'diagnosis runtime is unavailable')
+      runtime.assertTool(occurrenceId, name)
+    } else if (name === 'work_item_read_context') fail('invalid-state', 'continuation context requires its own invocation')
   }
 
   readSource(agent: Agent | undefined, input: { offset?: number; maxBytes?: number }): DiagnosisSourcePage {
@@ -869,7 +956,7 @@ export class AssistantWorkItemsService extends Service {
   }
 
   /** Bounded health projection; never creates the ledger when disabled. */
-  health(): WorkItemHealth & { readonly schedulerWake: WorkItemSchedulerWakeHealth; readonly diagnosis?: Readonly<{ enabled: true; ready: boolean; running: number; lastError: string | null; interventionRequired: boolean }> } {
+  health(): WorkItemHealth & { readonly schedulerWake: WorkItemSchedulerWakeHealth; readonly diagnosis?: Readonly<{ enabled: true; ready: boolean; running: number; lastError: string | null; interventionRequired: boolean }>; readonly ownerContinuation?: ReturnType<WorkItemContinuation['health']> } {
     const config = this.workItemsConfig
     const empty: WorkItemHealth = Object.freeze({
       enabled: config.enabled,
@@ -901,19 +988,22 @@ export class AssistantWorkItemsService extends Service {
     const diagnosis = config.diagnosis || this.workItemsHasDiagnosisHistory ? { diagnosis: diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.health()
       ?? { enabled: true as const, ready: false, running: 0, lastError: this.workItemsDiagnosisError ?? (this.workItemsHasDiagnosisHistory ? 'diagnosis-disabled-with-history' : 'diagnosis-runtime-unavailable'),
         interventionRequired: this.workItemsComponents ? persistedDiagnosisIntervention(this.workItemsComponents.store, true) : true } } : {}
+    const continuation = config.ownerContinuation ? { ownerContinuation: continuationRuntimes.get(this.workItemsContinuationKey)?.health()
+      ?? { enabled: true as const, ready: false, running: 0, interventionRequired: true, lastError: 'continuation-activation-unavailable' } } : {}
     const schedulerWake = Object.freeze({ subscribed: this.workItemsSchedulerUnsubscribers.size > 0,
       lastWakeAt: this.workItemsSchedulerLastWakeAt, lastError: this.workItemsSchedulerLastError })
-    if (!config.enabled || this.workItemsClosed) return Object.freeze({ ...empty, schedulerWake, ...diagnosis })
+    if (!config.enabled || this.workItemsClosed) return Object.freeze({ ...empty, schedulerWake, ...diagnosis, ...continuation })
     let components: Components
     try {
       components = this.workItemsOpen()
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: ledger unavailable: ${describe(error)}`)
-      return Object.freeze({ ...empty, schedulerWake, ...diagnosis })
+      return Object.freeze({ ...empty, schedulerWake, ...diagnosis, ...continuation })
     }
     return Object.freeze({
       schedulerWake,
       ...diagnosis,
+      ...continuation,
       enabled: true,
       mode: config.mode,
       openItems: components.store.countOpenItems(),
@@ -941,6 +1031,8 @@ export class AssistantWorkItemsService extends Service {
     this.workItemsClosed = true
     diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.close()
     diagnosisRuntimes.delete(this.workItemsDiagnosisKey)
+    continuationRuntimes.get(this.workItemsContinuationKey)?.close()
+    continuationRuntimes.delete(this.workItemsContinuationKey)
     for (const unregister of this.workItemsSchedulerUnsubscribers) {
       try { unregister() } catch (error) { this.ctx.logger.warn(`assistant-work-items: scheduler wake removal failed: ${describe(error)}`) }
     }
@@ -1016,6 +1108,7 @@ export class AssistantWorkItemsService extends Service {
     try {
       if (this.workItemsConfig.diagnosis) diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.wakePending()
       else components.dispatch.wakePending()
+      continuationRuntimes.get(this.workItemsContinuationKey)?.wakePending()
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: dispatch recovery failed: ${describe(error)}`)
     }
@@ -1192,6 +1285,24 @@ export class AssistantWorkItemsService extends Service {
       builders.set(input, builder)
       try { return admission.admit(input) } finally { builders.delete(input) }
     })
+    if (config.ownerContinuation) {
+      const { diagnosis: _diagnosis, ...sharedConfig } = config
+      const continuationConfig: NormalizedConfig = Object.freeze({ ...sharedConfig,
+        workerAutomationId: config.ownerContinuation.automationId,
+        limits: Object.freeze({ ...config.limits, maxAttempts: 1 }) })
+      const continuationBuilders = new WeakMap<WorkItemAdmitInput, WorkItemContinuationAdmission>()
+      const continuationAdmission = new WorkItemAdmission({ config: continuationConfig, store, ledger, workspace,
+        policy: this.workItemsPolicy(), delivery: () => this.workItemsDelivery(),
+        continuationFor: input => continuationBuilders.get(input) })
+      continuationAdmissions.set(installed, (input, continuation) => {
+        if (this.workItemsClosed || !isActive(config)) fail('disabled', 'continuation admission is unavailable')
+        continuationBuilders.set(input, continuation)
+        try { return continuationAdmission.admit(input) } finally { continuationBuilders.delete(input) }
+      })
+      continuationDispatches.set(installed, new WorkItemDispatch({ config: continuationConfig, store, ledger,
+        automations: () => this.workItemsAutomations(), delivery: () => this.workItemsDelivery(), authority,
+        validateWake: item => continuationRuntimes.get(this.workItemsContinuationKey)?.validateWake(item) === true }))
+    }
     try {
       // Bounded startup reconcile: lease reclaim is lazy forever, so a host that
       // was down catches up on the first touch instead of on a timer.
@@ -1228,8 +1339,14 @@ export class AssistantWorkItemsService extends Service {
     }
     const automationId = text(installed.automationId, 'automationId', 500)
     const occurrenceId = text(installed.occurrenceId, 'occurrenceId', 500)
-    if (automationId !== this.workItemsConfig.workerAutomationId) {
+    if (automationId !== this.workItemsConfig.workerAutomationId && automationId !== this.workItemsConfig.ownerContinuation?.automationId) {
       fail('identity-mismatch', 'this automation is not the configured work-item worker')
+    }
+    if (automationId === this.workItemsConfig.ownerContinuation?.automationId) {
+      const item = this.workItemsComponents?.store.findItemByOccurrence(occurrenceId)
+      if (!item || item.workerAutomationId !== automationId || !this.workItemsComponents?.store.getContinuation(item.id)) {
+        fail('identity-mismatch', 'continuation occurrence does not own its persisted item')
+      }
     }
     return occurrenceId
   }
@@ -1264,7 +1381,8 @@ export class AssistantWorkItemsService extends Service {
     if (receipt.principalRecordId !== item.owner.principalRecordId) {
       fail('owner-route-invalid', 'owner principal changed since admission')
     }
-    if (config.workerAutomationId !== item.workerAutomationId) {
+    if (config.workerAutomationId !== item.workerAutomationId
+      && (config.ownerContinuation?.automationId !== item.workerAutomationId || !this.workItemsComponents?.store.getContinuation(item.id))) {
       fail('identity-mismatch', 'item was dispatched to a different worker automation')
     }
     return receipt

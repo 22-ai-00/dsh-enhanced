@@ -64,7 +64,7 @@ export class WorkItemDispatch {
    */
   wake(item: WorkItemRecord): boolean {
     const config = this.#deps.config
-    if (!isActive(config)) return false
+    if (!isActive(config) || item.workerAutomationId !== config.workerAutomationId) return false
     if (this.#deps.validateWake && !this.#deps.validateWake(item)) return false
     const automations = typeof this.#deps.automations === 'function' ? this.#deps.automations() : this.#deps.automations
     if (automations === undefined) fail('missing-dependency', 'assistantAutomations is required to wake the worker')
@@ -155,7 +155,9 @@ export class WorkItemDispatch {
     // is a host/programming error and must surface instead of sweeping silently.
     const attempt = (itemId: string, retryUnknown: boolean): void => {
       const item = this.#deps.store.findItemById(itemId)
-      if (item === undefined || item.observed || !OPEN_STATES.includes(item.state)) return
+      if (item === undefined || item.observed || !OPEN_STATES.includes(item.state)
+        || item.workerAutomationId !== this.#deps.config.workerAutomationId
+        || this.#deps.store.getContinuation(item.id) !== undefined) return
       try {
         if (retryUnknown) this.#deps.store.retryUnknownDispatch(item.id)
         if (this.wake(item)) woken.push(item)

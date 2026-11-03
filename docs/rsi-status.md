@@ -8,19 +8,19 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 ## 已有能力与边界
 
-- Linux 原生隔离、源码 prepare、工具创建/修订、独立验收与 owner 升级事务已有实现。普通 autonomy 的安装、Web setup/doctor 已接通 native 资源；重复 setup 保留 owner、原期限与已用额度。Linux x64/cgroup v1 已实测；cgroup v2 拒绝、arm64 未验收。完整 live Docker→native 升级尚未验收。
+- Linux 原生隔离、源码 prepare、工具创建/修订、独立验收与 owner 升级事务已有实现。普通 autonomy 的安装、Web setup/doctor 已接通 native 资源；重复 setup 保留 owner、原期限与已用额度。Linux x64/cgroup v1 已实测；cgroup v2 拒绝、arm64 未验收。pre-owner Docker→native/native→native 基础资源迁移已有双端根检查；保持原身份、额度与签名历史，并核对实际目录身份。完整 live Docker→native 升级尚未验收。
 - 普通 native Goal 已打通真实 Cordis/Loader/NativeWeb/AgentLoop → 原生回合 → 自动绑定产物 → LinuxVerifierRunner → step/outcome v4 收据。正确产物得到 complete/achieved；退出码为零的错误产物得到 blocked/not-achieved。两场景的冷 SQLite、Session、产物、幂等键与实际资源清理已独立 PASS。这是固定脚本供应商集成证据，不证明真实模型或任意任务能力。
-- WorkItems 默认关闭、observe 模式；schema 8 保存准入、派发、认领、报告与有界 resume。显式 diagnosis 冻结认证来源的实际 supplier/effort、授权和独立有限预算，由原生 scheduler 派发只读诊断。waiting 仅在同一 occurrence 的真实成功与预算结算后继续；未知与后续失败保留停驻，可信 Host 可显式减权释放工作槽。原操作不会自动重放。
+- WorkItems 默认关闭、observe 模式；schema 9 保存准入、派发、认领、报告与有界 resume。显式 diagnosis 冻结认证来源的实际 supplier/effort、授权和独立有限预算，由原生 scheduler 派发只读诊断。waiting 仅在同一 occurrence 的真实成功与预算结算后继续；未知与后续失败保留停驻，可信 Host 可显式减权释放工作槽。原操作不会自动重放。
 - 主人前台召回已交付：显式开启的 `work_item_list` / `work_item_recall` 通过真实 Delivery 人类 turn 与独立 `inspect-work-items` 授权，按 owner lineage 在分页前过滤，支持新会话历史任务与报告分页读取；不恢复旧执行、授权或预算。
 - Delivery schema 28 区分可信终止观察和业务结果，非成功业务结果仍为 unknown；原输入按 owner/sourceDigest 分页召回。Automations Host 接口支持一次有界原生 Agent，冻结模型、工具、期限与额度；WorkItems 消费者负责重核来源与 owner。终态报告接入真实 outbox/Evaluation，ready 不代表独立成功，入队不代表送达。没有增加另一套 Agent Loop。
 
 ## 当前交付
 
-pre-owner 源码维护接入原生基础资源迁移：Docker→native 和 native→native 使用独立 v3 证明，阶段内替换 runtime、release 工具链/store/cache 与 cohort；初始身份、授权资源与签名源码历史保留，维护记录仍为 `host:null`。不创建 owner/runner、不刷新额度。原生降级回 Docker、混合后端和 owner 专用资源拒绝。
+主人续办已结束的历史任务：`work_item_continue` 绑定 Delivery 保存的当前真实人类输入，通过独立 Policy 授权，创建带父/根引用的独立子项。新的 supplier/effort、工具 schema、有限预算和原期限一并冻结，原生 Host worker 用 `work_item_read_context` 分页读取新指令与冻结的旧报告。普通 `/new` 可以找回同一主人历史；运行中精确 binding/generation 变化会停止旧执行。
 
-配置预览只核对已冻结内容；正式停服阶段重新迁移并绑定实际 inode，切换/恢复重验同一目录身份，拒绝同内容复制品。阶段失败恢复原资源；备份清理开始后失败保留候选并报错。独立复核发现的目标祖先 symlink 外写问题已在 Linux 以同一负例完成修前 3 FAIL、修后无外部变化的验证。
+Automations schema 17 在真实完成事务中记录 quiescence，历史 NULL 不回填；父任务必须有精确 production 静止证明。实际消费原生 Agent 的 Host 结果不会自动升级为目标达成；独立业务结果仍为 unknown。子项只执行一次，未知派发占槽、不重放；同一来源重复续办幂等，待办沿持久游标有界轮转，终态报告后最终工具 guard 禁止继续工具效果。WorkItems 整包 342 passed / 23 files，类型检查、零警告 lint 和独立复核通过；原生脚本供应商覆盖 7 个续办场景。两端根检查待运行；以下最新完整基线仍属于此前实现，不覆盖本节新增实现。
 
-原有最终候选依赖准备与断网原生安装证明继续保留。真实 Git/签名恢复专项两端各 17 passed；Linux 安装器完整组 501 passed / 1 skipped，已覆盖原目录改名后恢复与复制品拒绝。基础迁移、资源事务和整合均经独立复核；资源事务与安装入口仍含明确替身边界，不代表完整活服务升级。精确实现提交 `e92fe502` 的两端根检查见下。
+这一切片不实现运行中追加指令、Thread 订阅直通或跨信道身份合并，不证明长期自主成长。工程验证使用脚本模型和真实原生服务；飞书实连与普通使用验收按用户要求延后。
 
 ## 后续工程与延后验收
 

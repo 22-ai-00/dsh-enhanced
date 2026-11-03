@@ -53,6 +53,7 @@ export function diagnosisConfigurationDigest(config: NormalizedConfig, schemas: 
   // the existing activation digest unchanged when that separate surface toggles.
   const executionConfig = { ...config }
   delete executionConfig.ownerRecall
+  delete executionConfig.ownerContinuation
   return acceptanceDigest({ config: executionConfig, promptVersion: DIAGNOSIS_PROMPT_VERSION, prompt: DIAGNOSIS_PROMPT, schemas: [...schemas].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0) })
 }
 export interface DiagnosisActivation {

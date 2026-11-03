@@ -349,3 +349,23 @@ describe('Automations to Evaluation private capability', () => {
     })).toThrowError(expect.objectContaining<Partial<AssistantAutomationsError>>({ code: 'runtime-conflict' }))
   })
 })
+
+test.each(['succeeded', 'failed', 'timed_out'] as const)('an unverified native %s result cannot be promoted by Host terminal status', async outcome => {
+  const root = await mkdtemp(join(tmpdir(), 'automation-unverified-objective-')); roots.push(root)
+  const store = new AutomationStore({ path: join(root, 'automations.sqlite'), now: () => 1_000 })
+  try {
+    const automationId = 'unverified-objective'
+    store.reconcileSystemOwned({ owner, automationId, idempotencyKey: 'create', definition: hostDefinition('2035-01-01T00:00:00.000Z', automationId) })
+    store.createManual({ automationId, requestId: 'run', dryRun: false })
+    const duty = store.acquireDuty({ ownerId: 'duty', now: 1_000, leaseMs: 10_000 })
+    const task = store.claimNextTask({ ownerId: duty.ownerId, fencingToken: duty.fencingToken, now: 1_100, leaseMs: 1_000,
+      hostAvailability: [{ automationId, definitionHash: store.getDefinitionHash(automationId)!, stage: 'claim', available: true, reasonCode: 'host-executor-available' }] })!
+    store.startTask({ taskId: task.id, ownerId: duty.ownerId, fencingToken: duty.fencingToken, now: 1_101, leaseMs: 1_000, sessionId: 'native-session' })
+    const completion = { taskId: task.id, ownerId: duty.ownerId, fencingToken: duty.fencingToken, now: 1_200, outcome, sessionId: 'native-session', outputPreview: 'model self-report', usage: {} }
+    store.completeTask({ ...completion, unverifiedObjective: true })
+    expect(store.listPendingEvaluations(10)[0]!.payload).toMatchObject({ objectiveStatus: 'unknown', evaluator: { version: 'terminal-v1' } })
+    // A later replay without the reduction cannot rewrite the durable outbox.
+    store.completeTask(completion)
+    expect(store.listPendingEvaluations(10)[0]!.payload).toHaveProperty('objectiveStatus', 'unknown')
+  } finally { store.close() }
+})

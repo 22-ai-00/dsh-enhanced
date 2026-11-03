@@ -1,5 +1,12 @@
 # 兼容性基线
 
+## 主人续办与精确生产终态（WorkItems 9 / Automations 17）
+
+WorkItems schema 9 新增不可变 continuation 记录，保存真实输入字节、父/根引用、历史上界和冻结执行合同；原工作项及历史保留。Automations schema 17 只为 run 增加可空、不可改写的 quiescence；历史 NULL 不回填。旧 writer 不得写入新库。退休快照及安装消费者保留 15/16，并明确接受 17；跨版本比较同时核对旧列投影摘要和新增非空值数量为零，同版本比较全部历史摘要，拒绝用补写 0/1伪造历史。
+
+可选 continuation 须同批部署新的 WorkItems、Automations 精确 occurrence 读取、Delivery 当前人类输入读取和 Policy 精确工具注册。缺少能力时拒绝激活；Delivery schema 28 和 DSH/Cordis 依赖不变。实际消费原生 Agent 的 Host 执行新增仅减权的目标判定，新的 Evaluation outbox 保持 objective unknown，包括超时竞争；原确定性 Host 与旧 outbox 不重解释。工具最终授权使用已锁定 Host 的 `ToolRuntime.guard`，从调用方 Cordis fiber 注册；原 diagnosis 工具 schema 不扩权。实际连接、长期使用及跨信道路由验收见[当前状态](rsi-status.md)。
+
+
 ## 前台终止观察与原任务读取（Delivery schema 28）
 
 schema 28 仅在普通 foreground execution 增加可空的不可变 Host 终止观察，owner/principal/binding 身份及原成功/unknown 判定不变。旧行不回填，旧 source digest 保持；新观察纳入来源摘要。升级后旧 writer 不得打开新库；同批 operator snapshot、安装器及 owner 修复读取方明确支持 23–28，Web owner doctor 支持 24–28，各自继续拒绝未审查版本。

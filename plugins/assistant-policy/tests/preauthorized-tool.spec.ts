@@ -154,7 +154,7 @@ describe('trusted Host tool preauthorization', () => {
     } finally { await current.ctx.fiber.restart() }
   })
 
-  test.each(['work_item_claim', 'work_item_report', 'work_item_status', 'work_item_read_report', 'work_item_list', 'work_item_recall'])('reserves %s to the actual WorkItems class Fiber and retains approval fallback', async name => {
+  test.each(['work_item_claim', 'work_item_report', 'work_item_status', 'work_item_read_report', 'work_item_list', 'work_item_recall', 'work_item_read_source', 'work_item_continue', 'work_item_read_context'])('reserves %s to the actual WorkItems class Fiber and retains approval fallback', async name => {
     const current = await fixture()
     expect(current.ctx.assistantPolicy.workItemToolPreauthorizationVersion()).toBe(1)
     let executions = 0
@@ -175,7 +175,7 @@ describe('trusted Host tool preauthorization', () => {
     await current.ctx.fiber.restart()
   })
 
-  test.each(['work_item_claim', 'work_item_list', 'work_item_recall'].flatMap(name =>
+  test.each(['work_item_claim', 'work_item_list', 'work_item_recall', 'work_item_read_source', 'work_item_continue', 'work_item_read_context'].flatMap(name =>
     ['deny', 'emergency-stop', 'budget'].map(barrier => ({ name, barrier }))))('$name preauthorization preserves the separate $barrier guard', async ({ name, barrier }) => {
     const current = await fixture(barrier === 'deny'
       ? { rules: [{ id: 'deny-work-item', effect: 'deny', actions: ['execute'], resource: { kind: 'tool', id: name } }] }
@@ -194,7 +194,7 @@ describe('trusted Host tool preauthorization', () => {
     await current.ctx.fiber.restart()
   })
 
-  test.each(['work_item_status', 'work_item_list', 'work_item_recall'])('does not transfer %s to a scoped shadow and revokes it with its owning Fiber', async name => {
+  test.each(['work_item_status', 'work_item_list', 'work_item_recall', 'work_item_read_source', 'work_item_continue', 'work_item_read_context'])('does not transfer %s to a scoped shadow and revokes it with its owning Fiber', async name => {
     const current = await fixture()
     const trusted = definition(name, () => {})
     const shadow = definition(name, () => {})

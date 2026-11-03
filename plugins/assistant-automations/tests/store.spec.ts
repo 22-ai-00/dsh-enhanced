@@ -48,7 +48,7 @@ describe('automation SQLite store', () => {
     expect((await stat(join(fixture.root, 'state'))).mode & 0o777).toBe(0o700)
     expect((await stat(fixture.path)).mode & 0o777).toBe(0o600)
     const database = new DatabaseSync(fixture.path, { readOnly: true })
-    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 16 })
+    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 17 })
     expect(database.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
     expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all())
       .toEqual(expect.arrayContaining([
@@ -73,7 +73,7 @@ describe('automation SQLite store', () => {
     temporaryRoots.push(root)
     const path = join(root, 'future.sqlite')
     const database = new DatabaseSync(path)
-    database.exec('PRAGMA user_version = 99')
+    database.exec('PRAGMA user_version = 18')
     database.close()
     await chmod(path, 0o600)
     expect(() => new AutomationStore({ path }))
@@ -114,7 +114,7 @@ describe('automation SQLite store', () => {
     await chmod(path, 0o600)
 
     const migrated = openAutomationDatabase(path)
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 16 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 17 })
     expect(migrated.prepare(`
       SELECT id, lifecycle_generation, presentation_revision, alert_status, alert_ref
       FROM automation_incidents ORDER BY id
@@ -165,7 +165,7 @@ describe('automation SQLite store', () => {
     await chmod(path, 0o600)
 
     const migrated = openAutomationDatabase(path)
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 16 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 17 })
     const rows = migrated.prepare(`
       SELECT status, attempt_count, last_error_code FROM automation_evaluation_outbox ORDER BY id
     `).all()
@@ -220,7 +220,7 @@ describe('automation SQLite store', () => {
         delivery_status: 'pending', delivery_ref: null, failure_class: 'unknown',
       },
     ])
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 16 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 17 })
     migrated.close()
   })
 
@@ -268,7 +268,7 @@ describe('automation SQLite store', () => {
     `).get()).toEqual({
       state: 'open', probe_token: null, probe_lease_until: null, probe_task_id: null, version: 7,
     })
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 16 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 17 })
     expect(migrated.prepare(`
       SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'automation_incidents'
     `).get()).toEqual({ name: 'automation_incidents' })
@@ -656,7 +656,9 @@ describe('automation SQLite store', () => {
     fixture.store.close()
     // A real v15 upgrade, rather than merely testing a newly-created schema.
     const legacy = new DatabaseSync(fixture.path)
-    legacy.exec(`DROP TRIGGER automation_retired_no_activate_insert;
+    legacy.exec(`DROP TRIGGER automation_run_quiescence_immutable;
+      ALTER TABLE automation_runs DROP COLUMN quiescent;
+      DROP TRIGGER automation_retired_no_activate_insert;
       DROP TRIGGER automation_retired_no_activate_update;
       DROP TRIGGER automation_retirements_no_update;
       DROP TRIGGER automation_retirements_no_delete;

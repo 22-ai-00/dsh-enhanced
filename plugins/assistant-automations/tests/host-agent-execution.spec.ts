@@ -221,6 +221,8 @@ describe('authorized Host invocation to one bounded native Agent', () => {
       contractDigest: f.nativeResults[0]!.contractDigest, automationId: f.automationId, occurrenceId: occurrence.id })
     expect(f.reserve).toHaveBeenCalledTimes(1); expect(f.finalize).toHaveBeenCalledTimes(1); expect(f.release).not.toHaveBeenCalled()
     expect(f.history()[0]).toMatchObject({ status: 'succeeded', execution_mode: 'production' })
+    const objective = JSON.parse(rows(join(f.root, 'automations.sqlite'), "SELECT payload_json FROM automation_evaluation_outbox WHERE observation_kind='terminal'")[0]!.payload_json as string)
+    expect(objective).toMatchObject({ executionStatus: 'succeeded', objectiveStatus: 'unknown', evaluator: { version: 'terminal-v1' } })
     expect(rows(join(f.root, 'policy.sqlite'), 'SELECT status, amount, actual_amount FROM budget_reservations'))
       .toEqual([{ status: 'finalized', amount: 1, actual_amount: 1 }])
   })
@@ -859,4 +861,44 @@ test('does not accept caller-supplied error usage without an internally observed
   expect(f.history()[0]?.status).toBe('unknown'); expect(f.history()[0]?.session_id).not.toBe('forged-session')
   expect(JSON.parse(f.history()[0]!.usage_json as string)).toEqual({})
   expect(f.reserve).toHaveBeenCalledTimes(1); expect(f.finalize).toHaveBeenCalledTimes(1)
+})
+
+function terminalEvaluation(f: Awaited<ReturnType<typeof harness>>) {
+  return JSON.parse(rows(join(f.root, 'automations.sqlite'), "SELECT payload_json FROM automation_evaluation_outbox WHERE observation_kind='terminal'")[0]!.payload_json as string)
+}
+
+test('a deterministic Host that never consumes native execution retains its fixed objective contract', async () => {
+  const f = await harness(); f.execute(async () => hostSuccess()); await f.run()
+  expect(f.adapter.requests).toHaveLength(0); expect(f.agents).toHaveLength(0)
+  expect(terminalEvaluation(f)).toMatchObject({ executionStatus: 'succeeded', objectiveStatus: 'achieved', evaluator: { version: 'host-runbook-v1' } })
+})
+
+test('a real native tool failure followed by a normal model report never proves a Host objective', async () => {
+  const f = await harness(); f.probe.mockRejectedValueOnce(new Error('fixture tool failed'))
+  await f.run()
+  expect(f.probe).toHaveBeenCalledTimes(1); expect(f.adapter.requests).toHaveLength(2)
+  expect(f.history()[0]).toHaveProperty('status', 'succeeded')
+  expect(terminalEvaluation(f)).toMatchObject({ executionStatus: 'succeeded', objectiveStatus: 'unknown', evaluator: { version: 'terminal-v1' } })
+})
+
+test('native consumption reduction survives coordinator deadline winning before teardown returns', async () => {
+  const f = await harness(), started = gate(), release = gate(), disposeGate = gate()
+  f.service.reconcileSystem({ owner: f.owner, automationId: f.automationId, idempotencyKey: 'short-outer-deadline', definition: { ...f.definition, timeoutMs: 1_000 } })
+  f.adapter.script = request => heldText(request, started, release)
+  const create = f.ctx.agents.create.bind(f.ctx.agents), handles: AgentHandle[] = []
+  vi.spyOn(f.ctx.agents, 'create').mockImplementation(async options => {
+    const handle = await create(options); handles.push(handle)
+    return { agent: handle.agent, async dispose() { await disposeGate.promise; await handle.dispose() } }
+  })
+  f.execute(async invocation => hostResult(await f.invoke(invocation, f.contract({ timeoutMs: 1_000 }))))
+  const running = f.run()
+  try {
+    await started.promise; await running
+    expect(f.adapter.requests).toHaveLength(1)
+    expect(f.history()[0]).toHaveProperty('status', 'timed_out')
+    expect(terminalEvaluation(f)).toMatchObject({ executionStatus: 'timed-out', objectiveStatus: 'unknown', evaluator: { version: 'terminal-v1' } })
+  } finally { release.resolve(); disposeGate.resolve(); await running; await Promise.all(handles.map(handle => handle.dispose())) }
+  await vi.waitFor(() => expect(f.finalize).toHaveBeenCalledTimes(1))
+  expect(f.reserve).toHaveBeenCalledTimes(1)
+  expect(terminalEvaluation(f)).toHaveProperty('objectiveStatus', 'unknown')
 })

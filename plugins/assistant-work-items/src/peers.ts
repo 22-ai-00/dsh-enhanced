@@ -9,7 +9,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition, ToolExecution } from '@deepseek-ai/dsh-tools'
-import type { AutomationRecord, HostAutomationDefinition, HostAutomationExecutor, HostAutomationExecutorInput, HostAgentExecutionContract, HostAgentExecutionResult, HostAgentAuthorizationFence } from '@dsh-enhanced/assistant-automations'
+import type { AutomationRecord, HostAutomationDefinition, HostAutomationExecutor, HostAutomationExecutorInput, HostAgentExecutionContract, HostAgentExecutionResult, HostAgentAuthorizationFence, ProductionOccurrenceTerminalProjection } from '@dsh-enhanced/assistant-automations'
 export type { HostAutomationExecutorInput, HostAgentExecutionContract, HostAgentExecutionResult } from '@dsh-enhanced/assistant-automations'
 
 export type PeerPolicyEffect = 'allow' | 'deny'
@@ -113,11 +113,30 @@ export interface PeerForegroundSourceScope {
   expectedOwner: Readonly<{ authorityHash: string; principalRecordId: string; principalVersion: number }>
 }
 
+/** One page of the current authenticated human turn, tied to its real tool call. */
+export interface PeerOwnerForegroundToolInput {
+  readonly protocol: 'assistant-delivery/foreground-tool-input/v1'
+  readonly attestation: Readonly<{
+    protocol: 'assistant-delivery/foreground-tool-call/v1'
+    task: { protocol: 'assistant-delivery/foreground-task/v1'; inboxId: string; sessionId: string;
+      scope: { workspace: string; preset: string }; owner: { principalRecordId: string; principalVersion: number };
+      binding: { id: string; version: number; generation: number }; dispatchedAt: number }
+    turn: number
+    call: { id: string; toolName: string; eventSeq: number; eventDigest: string; argumentsDigest: string }
+  }>
+  readonly sourceDigest: string
+  readonly modelSelectionState: 'missing' | 'frozen' | 'inconsistent'
+  readonly modelSelection?: Readonly<{ provider: string; model: string; reasoningEffort?: string }>
+  readonly input: Readonly<{ text: string; fullTextDigest: string; fullBytes: number; returnedBytes: number; offset: number; nextOffset?: number }>
+}
+
 /** `assistant-delivery` surfaces used by this plugin. */
 export interface PeerDeliveryService {
   validateOwnerAgentForRoute?(agent: import('@deepseek-ai/dsh-agent').Agent, authorityId: string): Readonly<PeerOwnerRouteReceipt> | undefined
   inspectOwnerForegroundToolCall?(input: Readonly<{ agent: import('@deepseek-ai/dsh-agent').Agent; authorityId: string;
     callId: string; toolName: string; argumentsJson: string }>): unknown
+  readOwnerForegroundToolInput?(input: Readonly<{ agent: import('@deepseek-ai/dsh-agent').Agent; authorityId: string;
+    callId: string; toolName: string; argumentsJson: string; offset?: number; maxBytes?: number }>): Readonly<PeerOwnerForegroundToolInput> | undefined
   validateOwnerRoute(input: {
     authorityId: string
     principalId: string
@@ -163,6 +182,7 @@ export interface PeerDeliveryService {
 
 /** `assistant-automations` external-event intake. */
 export interface PeerAutomationsService {
+  inspectProductionOccurrence?(input: { automationId: string; occurrenceId: string; workspace: string; agentPreset: string }): ProductionOccurrenceTerminalProjection | undefined
   hostAgentAuthorizationVersion?(): 1
   runAgentForHostExecution?(input: HostAutomationExecutorInput, contract: HostAgentExecutionContract, authorization?: HostAgentAuthorizationFence): Promise<Readonly<HostAgentExecutionResult>>
   registerHostExecutor?(executor: HostAutomationExecutor): () => void
