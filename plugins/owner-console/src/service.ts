@@ -3,7 +3,7 @@ import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { OwnerConsoleConfig } from './index.js'
 import {
   boundedConfig, configFacts, findEntry, isAppId, isEntryId, isEnvName, isProjectBundle, isSecretRef,
-  type SettingsDescriptor, type SettingsService,
+  type SettingsDescriptor, type SettingsPathOp, type SettingsService,
 } from './settings.js'
 import type { OwnerConsoleStatus, OwnerConsoleWriteResult } from './typert.js'
 
@@ -12,8 +12,11 @@ const DEPENDENCIES = ['assistantPolicy', 'assistantDelivery', 'assistantSkills']
 const LARK = /(^|[-_/])lark(-channel)?($|[-_/])/u
 const TRAEX = /traex/iu
 const APP_ID_ENV = ['LARK_APP_ID', 'FEISHU_APP_ID'] as const
+const ACCOUNT = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
 
-/** Read-only status plus owner-clicked, one-step writes through the Host settings service. */
+/** Read-only status plus owner-clicked, one-step writes through the Host settings service.
+ * Only `.volatile()` config fields are editable by that service; every write addresses one
+ * entry, uses CAS on its revision, and returns a business reason instead of throwing. */
 export class OwnerConsoleService extends TypertRemoteService {
   private readonly host: Context
 
@@ -59,65 +62,102 @@ export class OwnerConsoleService extends TypertRemoteService {
       bundles: Object.freeze(entries.filter(entry => isProjectBundle(entry.ns)).map(entry => Object.freeze({
         entry: entry.ns,
         enabled: configFacts(entry.value)['enabled'] === true,
-        config: Object.freeze(configFacts(entry.value)),
       }))),
     })
   }
 
-  /** Feishu: one owner click writes only the lark-channel entry; no plaintext secret is accepted. */
+  /** Feishu: one owner click, two ways to pair the bot. No plaintext secret is ever accepted. */
   async configureFeishu(mode: 'lark-cli' | 'app', appId: string, appSecretEnv: string,
     credentialHandle: string, account: string, tenant: string): Promise<OwnerConsoleWriteResult> {
-    if (mode !== 'lark-cli' && mode !== 'app') throw new Error('unsupported Feishu mode')
+    if (mode !== 'lark-cli' && mode !== 'app') {
+      return refuse('', 'unsupported Feishu mode')
+    }
     const settings = this.settings()
-    const descriptors = this.descriptors()
-    const lark = findEntry(descriptors, ns => LARK.test(ns))
-    if (lark === undefined) throw new Error('lark-channel is not installed in this profile')
-    const discovered = mode === 'lark-cli' && appId === ''
+    const lark = findEntry(this.descriptors(), ns => LARK.test(ns))
+    if (lark === undefined) {
+      return refuse('', 'lark-channel 未安装，或它没有声明任何可实时修改的配置字段')
+    }
+    const current = configFacts(lark.value)
+    const discovered = appId.trim() === '' && mode === 'lark-cli'
       ? APP_ID_ENV.map(name => process.env[name]).find(value => isAppId(value))
       : undefined
-    const resolvedAppId = appId === '' ? discovered : appId
+    const resolvedAppId = appId.trim() === '' ? discovered : appId.trim()
     if (!isAppId(resolvedAppId)) {
-      throw new Error(mode === 'lark-cli'
+      return refuse(lark.ns, mode === 'lark-cli'
         ? '一键模式需要 Host 环境中的 LARK_APP_ID 或 FEISHU_APP_ID；否则请填写 appId'
-        : 'appId must look like cli_0123456789abcdef')
+        : 'appId 必须形如 cli_0123456789abcdef')
     }
-    const hasEnv = appSecretEnv !== ''
-    const hasHandle = credentialHandle !== ''
-    if (hasEnv === hasHandle) throw new Error('provide exactly one secret reference: appSecretEnv or credentialHandle')
-    if (hasEnv && !isEnvName(appSecretEnv)) throw new Error('appSecretEnv must be an environment variable name')
-    if (hasHandle && !isSecretRef(credentialHandle)) throw new Error('credentialHandle is invalid')
-    const owner = account === '' ? 'feishu' : account
-    const tenantValue = tenant === '' ? 'feishu' : tenant
-    for (const value of [owner, tenantValue]) {
-      if (!/^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u.test(value)) throw new Error('account and tenant must be simple identifiers')
+    const envName = appSecretEnv.trim()
+    const handle = credentialHandle.trim()
+    if ((envName === '') === (handle === '')) {
+      return refuse(lark.ns, 'secret 引用必须二选一：环境变量名或 keychain handle')
     }
-    await settings.update(lark.ns, {
-      enabled: true, appId: resolvedAppId, account: owner, tenant: tenantValue,
-      ...(hasEnv ? { appSecretEnv } : {}), ...(hasHandle ? { credentialHandle } : {}),
-    }, lark.revision)
+    if (envName !== '' && !isEnvName(envName)) return refuse(lark.ns, 'appSecretEnv 必须是环境变量名')
+    if (handle !== '' && !isSecretRef(handle)) return refuse(lark.ns, 'credentialHandle 格式无效')
+    if (envName !== '' && process.env[envName] === undefined) {
+      return refuse(lark.ns, `Host 进程中不存在环境变量 ${envName}；请先设置它，或改用 keychain handle`)
+    }
+    if (handle !== '' && this.host.get('credentialsKeychain' as never) === undefined) {
+      return refuse(lark.ns, 'credentials-keychain 未加载；无法引用 keychain secret')
+    }
+    const resolvedAccount = account.trim() === '' ? current['account'] : account.trim()
+    const resolvedTenant = tenant.trim() === '' ? current['tenant'] : tenant.trim()
+    if (typeof resolvedAccount !== 'string' || !ACCOUNT.test(resolvedAccount)) {
+      return refuse(lark.ns, 'account 缺失或格式无效；请填写当前 owner 的 account，避免更换身份')
+    }
+    if (typeof resolvedTenant !== 'string' || !ACCOUNT.test(resolvedTenant)) {
+      return refuse(lark.ns, 'tenant 缺失或格式无效；请填写当前 owner 的 tenant，避免更换身份')
+    }
+    await settings.mutate(lark.ns, [
+      { op: 'set', path: ['enabled'], value: true },
+      { op: 'set', path: ['appId'], value: resolvedAppId },
+      { op: 'set', path: ['account'], value: resolvedAccount },
+      { op: 'set', path: ['tenant'], value: resolvedTenant },
+      envName === '' ? { op: 'unset', path: ['appSecretEnv'] } : { op: 'set', path: ['appSecretEnv'], value: envName },
+      handle === '' ? { op: 'unset', path: ['credentialHandle'] } : { op: 'set', path: ['credentialHandle'], value: handle },
+    ], lark.revision)
     return Object.freeze({ applied: true, entry: lark.ns,
-      note: hasHandle ? 'secret stays in the credentials keychain' : 'secret stays in the named environment variable' })
+      note: handle === '' ? `secret 来自环境变量 ${envName}` : 'secret 保留在 credentials keychain' })
   }
 
   /** TraeX: one owner click toggles the local provider row; command is optional. */
   async configureTraex(enabled: boolean, command: string): Promise<OwnerConsoleWriteResult> {
     const settings = this.settings()
     const traex = findEntry(this.descriptors(), ns => TRAEX.test(ns))
-    if (traex === undefined) throw new Error('traex-acp-provider is not installed in this profile')
-    if (command !== '' && (command.length > 1_024 || /[\r\n]/u.test(command))) throw new Error('command must be one bounded line')
-    await settings.update(traex.ns, { enabled, ...(command === '' ? {} : { command }) }, traex.revision)
-    return Object.freeze({ applied: true, entry: traex.ns, note: enabled ? 'TraeX row enabled' : 'TraeX row disabled' })
+    if (traex === undefined) return refuse('', 'traex-acp-provider 未安装，或它没有声明可实时修改的配置字段')
+    const value = command.trim()
+    if (value !== '' && (value.length > 1_024 || /[\r\n]/u.test(value))) {
+      return refuse(traex.ns, 'command 必须是单行且不超过 1024 字符')
+    }
+    const ops: SettingsPathOp[] = [{ op: 'set', path: ['enabled'], value: enabled }]
+    if (value !== '') ops.push({ op: 'set', path: ['command'], value })
+    await settings.mutate(traex.ns, ops, traex.revision)
+    return Object.freeze({ applied: true, entry: traex.ns, note: enabled ? 'TraeX 行已启用' : 'TraeX 行已停用' })
   }
 
-  /** Project bundles only: merge one JSON object into the named entry's configuration. */
+  /** Project bundles only: merge one bounded JSON object into fields the entry exposes live. */
   async configureBundle(entry: string, config: Readonly<Record<string, unknown>>): Promise<OwnerConsoleWriteResult> {
     const settings = this.settings()
-    if (!isEntryId(entry) || !isProjectBundle(entry)) throw new Error('only this project\'s dsh-enhanced bundles can be configured here')
+    if (!isEntryId(entry) || !isProjectBundle(entry)) {
+      return refuse('', '只允许修改本项目的 dsh-enhanced 条目')
+    }
     const target = findEntry(this.descriptors(), ns => ns === entry)
-    if (target === undefined) throw new Error('the named profile entry is not installed')
-    const patch = boundedConfig(config)
-    await settings.update(entry, patch, target.revision)
-    return Object.freeze({ applied: true, entry, note: 'configuration merged; the running entry reloads through settings' })
+    if (target === undefined) {
+      return refuse(entry, '该条目未安装，或它没有声明可实时修改的配置字段')
+    }
+    let patch: Readonly<Record<string, unknown>>
+    try {
+      patch = boundedConfig(config)
+    } catch (cause) {
+      return refuse(entry, cause instanceof Error ? cause.message : '配置无效')
+    }
+    const ops: SettingsPathOp[] = Object.entries(patch).map(([key, value]) => ({ op: 'set', path: [key], value }))
+    if (ops.length === 0) return refuse(entry, '配置为空，没有可写入的字段')
+    await settings.mutate(entry, ops, target.revision)
+    return Object.freeze({ applied: true, entry, note: '已合并写入；运行中的条目通过 settings 实时重载' })
   }
 }
 
+function refuse(entry: string, note: string): OwnerConsoleWriteResult {
+  return Object.freeze({ applied: false, entry, note })
+}

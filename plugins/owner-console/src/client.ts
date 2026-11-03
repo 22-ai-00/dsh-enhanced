@@ -72,6 +72,7 @@ export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }
   const [busy, setBusy] = useState(false)
   const [appId, setAppId] = useState('')
   const [secretEnv, setSecretEnv] = useState('LARK_APP_SECRET')
+  const [secretHandle, setSecretHandle] = useState('')
   const [account, setAccount] = useState('')
   const [tenant, setTenant] = useState('')
   const [traexCommand, setTraexCommand] = useState('')
@@ -82,18 +83,24 @@ export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }
     try {
       const result = await remote.status()
       if (result.ok) setStatus(result.value)
+      else setError('Host 没有返回状态；请确认 settings 服务已加载。')
     } catch {
       setError('暂时无法读取状态，稍后重试。')
     }
   }
-  useEffect(() => { void refresh() }, [])
+  useEffect(() => {
+    let disposed = false
+    void refresh().then(() => { if (disposed) setStatus((current) => current) })
+    return () => { disposed = true }
+  }, [])
 
   const run = async (action: () => Promise<RemoteResult<OwnerConsoleWriteResult>>) => {
     setBusy(true); setError('')
     try {
       const result = await action()
       if (!result.ok) setError('Host 拒绝了这次操作，请检查输入。')
-      else await refresh()
+      else if (!result.value.applied) setError(result.value.note)
+      else { setError(''); await refresh() }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '操作失败')
     } finally {
@@ -113,8 +120,9 @@ export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }
     el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 } },
       field('appId（直接模式）', appId, setAppId, 'cli_0123456789abcdef'),
       field('secret 环境变量名', secretEnv, setSecretEnv, 'LARK_APP_SECRET'),
-      field('account', account, setAccount, 'feishu'),
-      field('tenant', tenant, setTenant, 'feishu')),
+      field('或 keychain handle', secretHandle, setSecretHandle, 'lark-app-secret'),
+      field('account', account, setAccount, '保留当前 owner'),
+      field('tenant', tenant, setTenant, '保留当前 owner')),
     el('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
       el('button', { style: buttonStyle, disabled: busy,
         onClick: () => void run(() => remote.configureFeishu('app', appId, secretEnv, '', account, tenant)) }, '应用配置'),

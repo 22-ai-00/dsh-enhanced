@@ -46,9 +46,18 @@ export interface TraexAcpProviderConfig {
 const modelId = Schema.string().min(1).pattern(/\S/)
 const command = Schema.string().min(1).pattern(/\S/)
 
-export const Config: Schema<TraexAcpProviderConfig> = Schema.object({
-  enabled: Schema.boolean().default(false),
-  command: command.default('traex'),
+/** Volatile schema fields validate as stable references; this provider consumes plain values. */
+function unwrapConfig(config: TraexAcpProviderConfig): TraexAcpProviderConfig {
+  const record = config as unknown as Record<string, unknown>
+  return Object.fromEntries(Object.entries(record).map(([key, value]) => {
+    const getter = value !== null && typeof value === 'object' ? (value as { get?: unknown }).get : undefined
+    return [key, typeof getter === 'function' ? (value as { get(): unknown }).get() : value]
+  })) as unknown as TraexAcpProviderConfig
+}
+
+const schema = Schema.object({
+  enabled: Schema.boolean().default(false).volatile(),
+  command: command.default('traex').volatile(),
   cwd: Schema.string().min(1).default('.'),
   models: Schema.array(modelId).min(1).default(['default']),
   timeoutMs: Schema.natural().min(1_000).max(60 * 60_000).default(10 * 60_000),
@@ -63,7 +72,23 @@ export const Config: Schema<TraexAcpProviderConfig> = Schema.object({
   maxPromptBytes: Schema.natural().min(1_024).max(64 * 1024 * 1024).default(4 * 1024 * 1024),
   extraEnvNames: Schema.array(Schema.string().pattern(/^[A-Za-z_][A-Za-z0-9_]*$/)).default([]),
   logDiagnostics: Schema.boolean().default(false),
-}) as Schema<TraexAcpProviderConfig>
+})
+
+/** A live settings update hands back stable references for volatile fields; accept both. */
+function unwrap(value: unknown): unknown {
+  const getter = value !== null && typeof value === 'object' ? (value as { get?: unknown }).get : undefined
+  return typeof getter === 'function' ? (value as { get(): unknown }).get() : value
+}
+
+export const Config = new Proxy(schema, {
+  apply(target, thisArg, argumentsList: [unknown?]) {
+    const raw = argumentsList[0]
+    const input = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+      ? Object.fromEntries(Object.entries(raw).map(([key, value]) => [key, unwrap(value)]))
+      : raw
+    return unwrapConfig(Reflect.apply(target, thisArg, [input]) as TraexAcpProviderConfig)
+  },
+}) as unknown as Schema<TraexAcpProviderConfig>
 
 export function normalizeConfig(input?: TraexAcpProviderConfig): TraexAcpProviderConfig {
   const config = Config(input)

@@ -4,11 +4,7 @@ import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry'
 const codec = <T>(typeSymbol: string, create: () => z.ZodType<T>) => ({ mode: 'strict' as const, typeSymbol, create })
 
 const dependency = z.object({ name: z.string().min(1), available: z.boolean() }).readonly()
-const bundle = z.object({
-  entry: z.string().min(1),
-  enabled: z.boolean(),
-  config: z.record(z.string(), z.unknown()).readonly(),
-}).readonly()
+const bundle = z.object({ entry: z.string().min(1), enabled: z.boolean() }).readonly()
 export const OwnerConsoleStatusSchema = z.object({
   feishu: z.object({
     entry: z.string().min(1).optional(),

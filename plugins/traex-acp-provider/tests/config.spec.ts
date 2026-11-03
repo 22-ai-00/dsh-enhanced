@@ -30,3 +30,13 @@ describe('configuration', () => {
     expect(() => normalizeConfig(config)).toThrow(/duplicate model id/)
   })
 })
+
+describe('live-editable provider fields', () => {
+  it('exposes only enabled and command to the Host settings service', () => {
+    const schema = Config as unknown as { dict: Record<string, { meta?: { volatile?: boolean } }> }
+    expect(schema.dict['enabled']?.meta?.volatile).toBe(true)
+    expect(schema.dict['command']?.meta?.volatile).toBe(true)
+    expect(schema.dict['cwd']?.meta?.volatile).toBeFalsy()
+    expect(normalizeConfig({ enabled: true, command: 'traex-next' } as never)).toMatchObject({ enabled: true, command: 'traex-next' })
+  })
+})

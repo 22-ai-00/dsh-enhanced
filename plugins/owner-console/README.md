@@ -36,13 +36,21 @@ dsh --profile web --dump-config
    探测到的 appId 写入同一份配置；否则回退为「复制向导命令」，在终端执行
    `dsh-lark-setup --profile <profile>` 完成官方向导后再回来启用。
 
-写入要求 secret 引用二选一；同时给两个或都不给会被拒绝。account/tenant 缺省为 `feishu`。
+写入要求 secret 引用二选一；同时给两个或都不给会被拒绝。写入前会检查那个环境变量在该
+Host 进程中确实存在，keychain handle 模式要求 `credentials-keychain` 已加载。
+account/tenant 留空时沿用条目里当前值（不会用默认值覆盖身份）；两者都为空才拒绝。
+写入通过 Host `settings.mutate` 的 set/unset 操作完成，以便安全地在两种引用之间切换。
+
+只有声明了 `.volatile()` 的配置字段才能这样实时改写：`lark-channel` 暴露
+enabled/account/tenant/appId/appSecretEnv/credentialHandle，`traex-acp-provider` 暴露
+enabled/command。没有 live 字段的条目不会出现在面板里。
 
 ### TraeX 与本项目插件
 
 - TraeX 卡片只切换 `traex-acp-provider` 条目的 `enabled`（可选覆盖 `command`），不启动进程。
-- 插件管理只允许 `dsh-enhanced-*` 条目；输入一段 JSON 对象后合并写入（≤16 KiB），
-  不重置其它字段，也不提供安装/卸载。
+- 插件管理只列出本项目里声明了 live 字段的 `dsh-enhanced-*` 条目；输入一段 JSON 对象后
+  按键执行 set 操作一次性写入（≤16 KiB），不重置其它字段，也不提供安装/卸载。
+- 面板收到 Host 的业务拒绝会原样显示原因（例如环境变量不存在、身份字段缺失），不静默失败。
 
 ## 配置
 
@@ -69,7 +77,7 @@ dsh --profile web --dump-config
 
 ## 限制
 
-- 一键模式依赖 Host 环境变量探测；没有环境变量时必须手填 appId。
+- 一键模式只做 Host 环境变量探测，不代为执行 lark-cli；终端向导由 owner 自己运行。
 - 插件管理不提供安装/卸载/启用切换（启用状态由各插件自己的 schema 决定），只提供配置合并。
 - 面板显示的是 Host 侧真实注册状态，但「已加载」不等于飞书已通过认证或长连接在线。
 - 不校验 app secret；secret 的写入通道留给 keychain 切片。

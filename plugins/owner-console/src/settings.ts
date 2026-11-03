@@ -9,9 +9,13 @@ export interface SettingsDescriptor {
   readonly applies: 'live'
   readonly secrets?: readonly SettingsSecret[]
 }
+export type SettingsPathOp =
+  | Readonly<{ op: 'set', path: readonly string[], value: unknown }>
+  | Readonly<{ op: 'unset', path: readonly string[] }>
+
 export interface SettingsService {
   describe(options?: Readonly<{ redactSecrets?: boolean }>): readonly SettingsDescriptor[]
-  update(ns: string, patch: Readonly<Record<string, unknown>>, expectedRevision?: number): Promise<void>
+  mutate(ns: string, ops: readonly SettingsPathOp[], expectedRevision?: number): Promise<void>
 }
 
 const ENTRY = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,127}$/u

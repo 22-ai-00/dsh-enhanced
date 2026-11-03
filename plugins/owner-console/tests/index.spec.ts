@@ -14,11 +14,11 @@ const defaults = { feishuMode: 'lark-cli' as const, feishuAppId: '', enableTraex
 type Entry = { ns: string, value: Record<string, unknown> }
 
 function fakeSettings(entries: Entry[]) {
-  const update = vi.fn(async () => undefined)
+  const mutate = vi.fn(async () => undefined)
   const descriptors = (): readonly SettingsDescriptor[] => entries.map(entry => ({
     ns: entry.ns, schema: {}, value: entry.value, revision: 3, applies: 'live',
   }))
-  return { service: { describe: descriptors, update } satisfies SettingsService, entries, update }
+  return { service: { describe: descriptors, mutate } satisfies SettingsService, entries, mutate }
 }
 
 async function mount(settings?: SettingsService) {
@@ -77,22 +77,32 @@ describe('dsh-enhanced-owner-console', () => {
     }
   })
 
-  it('writes exactly one lark-channel entry with a secret reference, never plaintext', async () => {
-    const lark = fakeSettings([{ ns: 'dsh-enhanced-lark-channel', value: {} }])
+  it('writes one lark-channel entry with exactly one secret reference and preserves identity', async () => {
+    const lark = fakeSettings([{ ns: 'dsh-enhanced-lark-channel', value: { account: 'owner-acct', tenant: 'owner-tenant', credentialHandle: 'old-handle' } }])
     const { ctx, console } = await mount(lark.service)
     try {
+      vi.stubEnv('LARK_APP_SECRET', 'present')
+      vi.stubEnv('A', 'present')
       await expect(console.configureFeishu('app', 'cli_0123456789abcdef', 'LARK_APP_SECRET', '', '', ''))
         .resolves.toMatchObject({ applied: true, entry: 'dsh-enhanced-lark-channel' })
-      expect(lark.update).toHaveBeenCalledWith('dsh-enhanced-lark-channel', {
-        enabled: true, appId: 'cli_0123456789abcdef', account: 'feishu', tenant: 'feishu', appSecretEnv: 'LARK_APP_SECRET',
-      }, 3)
-      await expect(console.configureFeishu('app', 'cli_0123456789abcdef', '', '', '', ''))
-        .rejects.toThrow(/exactly one secret reference/u)
-      await expect(console.configureFeishu('app', 'cli_0123456789abcdef', 'A', 'handle', '', ''))
-        .rejects.toThrow(/exactly one secret reference/u)
-      await expect(console.configureFeishu('app', 'nope', 'A', '', '', '')).rejects.toThrow(/appId/u)
-      await expect(console.configureFeishu('lark-cli', '', 'A', '', '', '')).rejects.toThrow(/一键模式/u)
+      expect(lark.mutate).toHaveBeenCalledWith('dsh-enhanced-lark-channel', [
+        { op: 'set', path: ['enabled'], value: true },
+        { op: 'set', path: ['appId'], value: 'cli_0123456789abcdef' },
+        { op: 'set', path: ['account'], value: 'owner-acct' },
+        { op: 'set', path: ['tenant'], value: 'owner-tenant' },
+        { op: 'set', path: ['appSecretEnv'], value: 'LARK_APP_SECRET' },
+        { op: 'unset', path: ['credentialHandle'] },
+      ], 3)
+      const envMissing = await console.configureFeishu('app', 'cli_0123456789abcdef', 'MISSING_SECRET', '', '', '')
+      expect(envMissing.applied).toBe(false)
+      expect(envMissing.note).toContain('MISSING_SECRET')
+      const both = await console.configureFeishu('app', 'cli_0123456789abcdef', 'A', 'handle', '', '')
+      expect(both).toMatchObject({ applied: false })
+      expect(both.note).toMatch(/二选一/u)
+      expect((await console.configureFeishu('app', 'nope', 'A', '', '', '')).note).toMatch(/appId/u)
+      expect((await console.configureFeishu('lark-cli', '', 'A', '', '', '')).note).toMatch(/LARK_APP_ID/u)
     } finally {
+      vi.unstubAllEnvs()
       await ctx.fiber.dispose()
     }
   })
@@ -102,9 +112,12 @@ describe('dsh-enhanced-owner-console', () => {
     const { ctx, console } = await mount(traex.service)
     try {
       await expect(console.configureTraex(true, 'traex')).resolves.toMatchObject({ applied: true })
-      expect(traex.update).toHaveBeenCalledWith('dsh-enhanced-traex-acp-provider', { enabled: true, command: 'traex' }, 3)
+      expect(traex.mutate).toHaveBeenCalledWith('dsh-enhanced-traex-acp-provider', [
+        { op: 'set', path: ['enabled'], value: true },
+        { op: 'set', path: ['command'], value: 'traex' },
+      ], 3)
       await expect(console.configureTraex(false, '')).resolves.toMatchObject({ applied: true })
-      await expect(console.configureTraex(true, 'a\nb')).rejects.toThrow(/one bounded line/u)
+      expect((await console.configureTraex(true, 'a\nb')).applied).toBe(false)
     } finally {
       await ctx.fiber.dispose()
     }
@@ -119,11 +132,12 @@ describe('dsh-enhanced-owner-console', () => {
     try {
       await expect(console.configureBundle('dsh-enhanced-other', { enabled: false }))
         .resolves.toMatchObject({ applied: true, entry: 'dsh-enhanced-other' })
-      expect(bundles.update).toHaveBeenCalledWith('dsh-enhanced-other', { enabled: false }, 3)
-      await expect(console.configureBundle('personal-assistant', { enabled: false })).rejects.toThrow(/dsh-enhanced/u)
-      await expect(console.configureBundle('dsh-enhanced-missing', {})).rejects.toThrow(/not installed/u)
-      await expect(console.configureBundle('dsh-enhanced-other', [] as never)).rejects.toThrow(/JSON object/u)
-      await expect(console.configureBundle('dsh-enhanced-other', { blob: 'x'.repeat(20_000) })).rejects.toThrow(/too large/u)
+      expect(bundles.mutate).toHaveBeenCalledWith('dsh-enhanced-other', [{ op: 'set', path: ['enabled'], value: false }], 3)
+      expect((await console.configureBundle('personal-assistant', { enabled: false })).applied).toBe(false)
+      expect((await console.configureBundle('dsh-enhanced-missing', {})).applied).toBe(false)
+      expect((await console.configureBundle('dsh-enhanced-other', [] as never)).applied).toBe(false)
+      expect((await console.configureBundle('dsh-enhanced-other', { blob: 'x'.repeat(20_000) })).applied).toBe(false)
+      expect((await console.configureBundle('dsh-enhanced-other', {})).applied).toBe(false)
     } finally {
       await ctx.fiber.dispose()
     }

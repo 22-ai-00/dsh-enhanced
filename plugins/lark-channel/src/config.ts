@@ -25,12 +25,12 @@ export interface Config {
 }
 
 const schema = Schema.object({
-  enabled: Schema.boolean().default(false),
-  account: Schema.string().min(1).pattern(/^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/).required(),
-  tenant: Schema.string().min(1).pattern(/^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/).required(),
-  appId: Schema.string().pattern(/^cli_[0-9a-fA-F]{16}$/).required(),
-  appSecretEnv: Schema.string().pattern(/^[A-Z_][A-Z0-9_]*$/),
-  credentialHandle: Schema.string().pattern(/^[A-Za-z0-9][A-Za-z0-9._@/-]{0,127}$/),
+  enabled: Schema.boolean().default(false).volatile(),
+  account: Schema.string().min(1).pattern(/^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/).required().volatile(),
+  tenant: Schema.string().min(1).pattern(/^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/).required().volatile(),
+  appId: Schema.string().pattern(/^cli_[0-9a-fA-F]{16}$/).required().volatile(),
+  appSecretEnv: Schema.string().pattern(/^[A-Z_][A-Z0-9_]*$/).volatile(),
+  credentialHandle: Schema.string().pattern(/^[A-Za-z0-9][A-Za-z0-9._@/-]{0,127}$/).volatile(),
   credentialPurpose: Schema.string().pattern(/^[A-Za-z0-9][A-Za-z0-9._@/-]{0,127}$/).default('connect'),
   credentialLeaseMs: Schema.number().step(1).min(1_000).max(86_400_000).default(86_400_000),
   domain: Schema.union(['feishu', 'lark'] as const).default('feishu'),
@@ -46,7 +46,7 @@ const schema = Schema.object({
   userQuestionTtlMs: Schema.number().step(1).min(60_000).max(7 * 24 * 60 * 60 * 1_000)
     .default(24 * 60 * 60 * 1_000),
   allowedCalendarIds: Schema.array(Schema.string().min(1).max(512)).default([]),
-}) as Schema<Config>
+}) as unknown as Schema<Config>
 
 const fields = new Set([
   'account',
@@ -71,14 +71,30 @@ const fields = new Set([
   'userQuestionTtlMs',
 ])
 
+/** Volatile schema fields validate as stable references; this plugin consumes plain values. */
+function unwrap(value: unknown): unknown {
+  const getter = value !== null && typeof value === 'object' ? (value as { get?: unknown }).get : undefined
+  return typeof getter === 'function' ? (value as { get(): unknown }).get() : value
+}
+
+function plain(parsed: Config): Config {
+  const record = parsed as unknown as Record<string, unknown>
+  return Object.fromEntries(Object.entries(record).map(([key, value]) => [key, unwrap(value)])) as unknown as Config
+}
+
 export const Config = new Proxy(schema, {
   apply(target, thisArg, argumentsList: [unknown]) {
-    const input = argumentsList[0]
+    // A live settings update hands back stable references for volatile fields;
+    // accept both those references and plain values.
+    const raw = argumentsList[0]
+    const input = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+      ? Object.fromEntries(Object.entries(raw).map(([key, value]) => [key, unwrap(value)]))
+      : raw
     if (input !== null && typeof input === 'object' && !Array.isArray(input)) {
       const unknown = Object.keys(input).find(field => !fields.has(field))
       if (unknown !== undefined) throw new Error(`lark-channel: unknown configuration field: ${unknown}`)
     }
-    const parsed = Reflect.apply(target, thisArg, argumentsList) as Config
+    const parsed = plain(Reflect.apply(target, thisArg, [input]) as Config)
     if (parsed.appSecretEnv !== undefined && parsed.credentialHandle !== undefined) {
       throw new Error('lark-channel: configure credentialHandle or appSecretEnv, not both')
     }
@@ -91,4 +107,4 @@ export const Config = new Proxy(schema, {
     }
     return parsed
   },
-}) as Schema<Config>
+}) as unknown as Schema<Config>

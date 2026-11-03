@@ -37,6 +37,20 @@ describe('dsh-enhanced-lark-channel entrypoint', () => {
     expect(manifest.devDependencies).not.toHaveProperty('@dsh-enhanced/traex-acp-provider')
   })
 
+  test('marks only the owner-editable fields as live settings and still returns plain values', () => {
+    const schema = Config as unknown as { dict: Record<string, { meta?: { volatile?: boolean } }> }
+    for (const field of ['enabled', 'account', 'tenant', 'appId', 'appSecretEnv', 'credentialHandle']) {
+      expect(schema.dict[field]?.meta?.volatile, field).toBe(true)
+    }
+    for (const field of ['domain', 'requestTimeoutMs', 'maxTextBytes']) {
+      expect(schema.dict[field]?.meta?.volatile, field).toBeFalsy()
+    }
+    const parsed = Config({ account: 'owner', tenant: 'tenant', appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET' })
+    expect(typeof parsed.enabled).toBe('boolean')
+    expect(parsed.appId).toBe('cli_0123456789abcdef')
+    expect(parsed.appSecretEnv).toBe('LARK_APP_SECRET')
+  })
+
   test('declares credentialHandle as a conditional Cordis dependency', () => {
     const injectOptional = vi.fn()
     apply({ inject: injectOptional } as unknown as Context, {
