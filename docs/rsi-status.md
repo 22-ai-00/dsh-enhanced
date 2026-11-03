@@ -20,7 +20,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 WorkItems 保留 schema 9 和原 v1 前台续办计划；新的 v2 回复计划继承执行父项已冻结的 provider/model/effort，使用显式续办工具与有限预算。先持久创建子项，再由 Delivery ACK 并推进回复序列，ACK 前不能派发。重复消息、冷恢复、取消及未知派发不会回到前台重复执行；取消不是执行已静止或外部效果已撤销的证明。每次工具调用重核来源，最终调度边界同时检查当前授权、生命周期和持久状态。
 
-本次工程验证使用真实 Delivery / Automations / AgentLoop 与本地脚本供应商。新的原生集成 6 例已通过，覆盖顺序上下文、默认模型切换、Delivery 与 WorkItems 冷重挂、ACK 前后恢复、pending/routed 取消和 ACK 前取消后的容量释放。WorkItems 整包 365 passed / 25 files；Delivery 整包限定检查为 1,092 passed / 6 skipped，使用 `--testTimeout=15000`。两部分源码、专项证据及 schema 消费者均已独立 PASS。首轮 `6b6ade61` 根检查发现一个仍拒绝 schema 29 的旧边界断言，两端已中断并保留日志；修正后相关两文件 14 passed / 2 skipped，独立 PASS。两端默认根检查待重新执行，不能以这些专项替代完整验收。下方完整根检查表仍是此前 `95975505` 基线。
+本次工程验证使用真实 Delivery / Automations / AgentLoop 与本地脚本供应商。新的原生集成 6 例在两端完整检查中实际通过，覆盖顺序上下文、默认模型切换、Delivery 与 WorkItems 冷重挂、ACK 前后恢复、pending/routed 取消和 ACK 前取消后的容量释放。实现与 schema 消费者已独立复核，精确提交 `595d14b0` 的 Mac、Linux 根检查均 EXIT 0、独立 PASS，完整计数见下表。
 
 这一入口默认关闭，只支持可证明冻结 supplier 的 diagnosis / continuation 报告；不支持的普通消息仍走前台。它不实现运行中指令插入、任意跨信道路由或完整 Thread 订阅，不证明真实模型、外部 Bot、完整 Host 进程重启或长期自主成长。原 v1 `work_item_continue` 仍可从真实人类 turn 创建手动分支，已有前台召回与分页上下文能力保持独立。
 
@@ -34,15 +34,15 @@ WorkItems 保留 schema 9 和原 v1 前台续办计划；新的 v2 回复计划�
 
 ## 最新完整检查
 
-命令 `CI=1 VITEST_MAX_WORKERS=2 pnpm_config_verify_deps_before_run=error pnpm check`，pnpm 11.7.0。两端验证精确实现提交 `95975505`，tree `3a5aa836d6d8f868bf51ad9697cbbdd093a1cfe7`。
+命令 `CI=1 VITEST_MAX_WORKERS=2 pnpm_config_verify_deps_before_run=error pnpm check`，pnpm 11.7.0。两端验证精确实现提交 `595d14b0502bbab182ff38ed0031e014cd408291`，tree `b213995a0a991c1299c9b9749c67bcf002baf9dc`。根脚本原有的 15 秒测试超时保持不变。
 
 | 环境与精确源码 | 结果 | 测试 passed / skipped | 文件 passed / skipped | 日志 SHA-256 |
 | --- | --- | --- | --- | --- |
-| Mac / Node 26.11.1 / `95975505` | EXIT 0，独立 PASS，1044.57 秒 | 9,867 / 1,918 | 684 / 85 | `6b8d698f355b0b2d2e61974bd8ac961b3db6feff62269fb9a17a688077b0ac0c` |
-| Linux / Node 24.7.0 / `95975505` | EXIT 0，独立 PASS，2376.00 秒 | 11,478 / 304 | 737 / 32 | `901332c62239a46f01a04f75a1ff33dd7c4f4d8cafb941dfc2e0f22369a45181` |
+| Mac / Node 26.11.1 / `595d14b0` | EXIT 0，独立 PASS，1197.98 秒 | 9,915 / 1,919 | 687 / 85 | `23e9842b743971d406cd36d68197f09392606d432dca27d6c1e8b0a9ab22f9b3` |
+| Linux / Node 24.7.0 / `595d14b0` | EXIT 0，独立 PASS，2388.08 秒 | 11,527 / 304 | 740 / 32 | `3ce1c24c554af6ee6ca635b3a136eb7032e7f4d662e937e717e60b3a488b30a8` |
 
-两端均独立核对 manifest、零警告 lint、38 包构建范围、38 个类型检查、39 个测试组及 38 个唯一 dry-run pack；新 WorkItems 5 模块的 20 个 JS、类型声明及 map 文件和相关 Delivery / Automations 产物均在包内。Linux 续办集成 7 例、namespace 8 例实际通过，无跳过；安装器 501 passed / 1 skipped。Linux 使用 `TMPDIR=/data00/home/jiataorui/t`。检查前后均为同一提交且工作树干净；源码未在验证期间变更。
+两端均独立核对 manifest、零警告 lint、38 包构建范围、38 个类型检查、39 个测试组及 38 个唯一 dry-run pack；新增 WorkItems 2 模块的 8 个及 Delivery 3 模块的 12 个 JS、类型声明和 map 文件各入包一次，原续办产物仍齐全。Linux 报告回复集成 6 例、原续办集成 7 例、namespace 8 例实际通过，无跳过；安装器 502 passed / 1 skipped。Linux 使用 `TMPDIR=/data00/home/jiataorui/t`。检查前后均为同一提交且工作树干净；源码未在验证期间变更。
 
-原始日志、源码身份与独立复核见 `docs/evidence/verification-95975505/`，专项见 `docs/evidence/work-item-continuation/`。前两轮 Mac 根失败和 Linux 主动中断记录分别保留在 `verification-90a46b72/` 与 `verification-27cfd549/`，不算通过；已修复验收记录与运行记录的 quiescence 列名碰撞，并修正真实旧库迁移夹具。
+原始日志、源码身份与独立复核见 `docs/evidence/verification-595d14b0/`，专项见 `docs/evidence/work-item-reply-continuation/`。此前 `6b6ade61` 因旧测试仍拒绝 schema 29 而中断，两端日志保留在 `verification-6b6ade61/`，不算通过；修正的边界测试已纳入本次完整检查。
 
 这些工程检查不代替跳过项、飞书实连、活服务升级或长期普通使用验收。按用户要求，实连及真实使用验收延后；本轮未发布、未合入 main。
