@@ -1151,7 +1151,15 @@ describe('release version workflow', () => {
       + ' && pnpm --filter @dsh-enhanced/assistant-growth-experiments run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-heartbeat run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-recovery run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-goals run build',
+      + ' && pnpm --filter @dsh-enhanced/assistant-goals run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-skills run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-super-relay-budget run build'
+      + ' && pnpm --filter @dsh-enhanced/plugin-control-plane run build'
+      + ' && pnpm --filter @dsh-enhanced/personal-memory run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-memory-learning run build'
+      + ' && pnpm --filter @dsh-enhanced/credentials-keychain run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-actions run build'
+      + ' && pnpm --filter @dsh-enhanced/event-triggers run build',
     )
     expect(manifest.scripts.test).toBe('pnpm run build && pnpm run test:built')
     expect(manifest.scripts['test:root']).toBe('vitest run --testTimeout=15000 --dir tests')
