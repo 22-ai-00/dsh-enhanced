@@ -4,7 +4,19 @@ import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry'
 const codec = <T>(typeSymbol: string, create: () => z.ZodType<T>) => ({ mode: 'strict' as const, typeSymbol, create })
 
 const dependency = z.object({ name: z.string().min(1), available: z.boolean() }).readonly()
-const bundle = z.object({ entry: z.string().min(1), enabled: z.boolean() }).readonly()
+const bundle = z.object({
+  name: z.string().min(1),
+  version: z.string().optional(),
+  enabled: z.boolean(),
+  installed: z.boolean(),
+  removable: z.boolean(),
+}).readonly()
+const plugin = z.object({
+  entryId: z.string().min(1),
+  moduleName: z.string().min(1),
+  enabled: z.boolean(),
+  fiberPhase: z.enum(['pending', 'loading', 'active', 'failed', 'unloading']).nullable(),
+}).readonly()
 export const OwnerConsoleStatusSchema = z.object({
   feishu: z.object({
     entry: z.string().min(1).optional(),
@@ -17,6 +29,7 @@ export const OwnerConsoleStatusSchema = z.object({
   traex: z.object({ entry: z.string().min(1).optional(), enabled: z.boolean(), command: z.string() }).readonly(),
   dependencies: z.array(dependency).readonly(),
   bundles: z.array(bundle).readonly(),
+  plugins: z.array(plugin).readonly(),
 }).readonly()
 export type OwnerConsoleStatus = Readonly<z.infer<typeof OwnerConsoleStatusSchema>>
 
@@ -72,6 +85,38 @@ export const TYPERT = {
       ],
       result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 62, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/setBundleEnabled',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'setBundleEnabled',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'name', wire: 'name', source: 'json', codec: codec('owner-console#bundleName', () => z.string().max(200)) },
+        { name: 'enabled', wire: 'enabled', source: 'json', codec: codec('owner-console#enabled', () => z.boolean()) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 74, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/setPluginEnabled',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'setPluginEnabled',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'entryId', wire: 'entryId', source: 'json', codec: codec('owner-console#entryId', () => z.string().max(200)) },
+        { name: 'enabled', wire: 'enabled', source: 'json', codec: codec('owner-console#enabled', () => z.boolean()) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 84, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/installProjectBundle',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'installProjectBundle',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'spec', wire: 'spec', source: 'json', codec: codec('owner-console#spec', () => z.string().max(300)) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 93, column: 3 },
     },
   ],
   model: { services: [], events: [], objects: [] },

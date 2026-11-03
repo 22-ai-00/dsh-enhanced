@@ -23,10 +23,11 @@ function fakeSettings(entries: Entry[]) {
 
 type FakeLoader = { entries: Map<string, { updated: unknown[], refreshed: number }> }
 
-async function mount(settings?: SettingsService, loader?: FakeLoader) {
+async function mount(settings?: SettingsService, loader?: FakeLoader, manager?: unknown) {
   const ctx = new Context()
   await ctx.plugin(TypertRegistry)
   if (settings !== undefined) ctx.provide('settings' as never, settings as never)
+  if (manager !== undefined) ctx.provide('pluginManager' as never, manager as never)
   if (loader !== undefined) {
     ctx.provide('loader' as never, {
       entries: () => [...loader.entries].map(([id, state]) => ({
@@ -51,7 +52,7 @@ describe('dsh-enhanced-owner-console', () => {
   it('reports absent entries, strict providers and no fabricated connection', async () => {
     const { ctx, console } = await mount()
     try {
-      const status = console.status()
+      const status = await console.status()
       expect(status.feishu).toEqual({
         mode: 'lark-cli', enabled: false, appIdConfigured: false, connected: false,
         setupCommand: expect.stringContaining('dsh-lark-setup --profile'),
@@ -77,11 +78,11 @@ describe('dsh-enhanced-owner-console', () => {
     ])
     const { ctx, console } = await mount(lark.service)
     try {
-      const status = console.status()
+      const status = await console.status()
       expect(status.feishu).toMatchObject({ entry: 'dsh-enhanced-lark-channel', enabled: true, appIdConfigured: true })
       expect(status.traex).toEqual({ entry: 'dsh-enhanced-traex-acp-provider', enabled: false, command: 'traex' })
-      expect(status.bundles.map(item => item.entry))
-        .toEqual(['dsh-enhanced-lark-channel', 'dsh-enhanced-traex-acp-provider', 'dsh-enhanced-other'])
+      expect(status.bundles).toEqual([])
+      expect(status.plugins).toEqual([])
       expect(JSON.stringify(status)).not.toContain('LARK_APP_SECRET')
     } finally {
       await ctx.fiber.dispose()
@@ -93,7 +94,7 @@ describe('dsh-enhanced-owner-console', () => {
       value: { enabled: true, appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET', secretSource: 'env', credentialHandle: 'inherited-handle' } }])
     const mounted = await mount(envMode.service)
     try {
-      expect(mounted.console.status().feishu).toMatchObject({ mode: 'lark-cli' })
+      expect((await mounted.console.status()).feishu).toMatchObject({ mode: 'lark-cli' })
     } finally {
       await mounted.ctx.fiber.dispose()
     }
@@ -101,7 +102,7 @@ describe('dsh-enhanced-owner-console', () => {
       value: { enabled: true, appId: 'cli_0123456789abcdef', credentialHandle: 'owner-handle', secretSource: 'handle' } }])
     const second = await mount(handleMode.service)
     try {
-      expect(second.console.status().feishu).toMatchObject({ mode: 'app' })
+      expect((await second.console.status()).feishu).toMatchObject({ mode: 'app' })
     } finally {
       await second.ctx.fiber.dispose()
     }
@@ -177,6 +178,42 @@ describe('dsh-enhanced-owner-console', () => {
       expect((await console.configureBundle('dsh-enhanced-other', [] as never)).applied).toBe(false)
       expect((await console.configureBundle('dsh-enhanced-other', { blob: 'x'.repeat(20_000) })).applied).toBe(false)
       expect((await console.configureBundle('dsh-enhanced-other', {})).applied).toBe(false)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('lists and toggles only this project\'s bundles and loaded entries', async () => {
+    const manager = {
+      listBundles: vi.fn(async () => [
+        { name: '@dsh-enhanced/lark-channel', version: '0.1.65', enabled: true, installed: true, removable: true, optional: false },
+        { name: '@dsh-enhanced/traex-acp-provider', version: '0.1.65', enabled: false, installed: true, removable: true, optional: false },
+        { name: 'other-package', enabled: true, installed: true, removable: true, optional: false },
+      ]),
+      listPlugins: vi.fn(async () => [
+        { entryId: 'lark-entry', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active' as const },
+        { entryId: 'foreign-entry', moduleName: '@deepseek-ai/dsh-base', enabled: true, fiberPhase: 'active' as const },
+      ]),
+      setBundleEnabled: vi.fn(async (name: string) => ({ changed: true, application: 'applied' as const, target: name, enabled: true })),
+      setPluginEnabled: vi.fn(async (entryId: string) => ({ changed: true, application: 'restart-required' as const, target: entryId, enabled: false })),
+      installBundle: vi.fn(async (spec: string) => ({ changed: true, application: 'applied' as const, target: spec, enabled: true })),
+    }
+    const { ctx, console } = await mount(undefined, undefined, manager)
+    try {
+      const status = await console.status()
+      expect(status.bundles.map(item => item.name))
+        .toEqual(['@dsh-enhanced/lark-channel', '@dsh-enhanced/traex-acp-provider'])
+      expect(status.plugins).toEqual([{ entryId: 'lark-entry', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active' }])
+      expect(status.bundles[0]).toMatchObject({ enabled: true, installed: true, removable: true })
+      await expect(console.setBundleEnabled('@dsh-enhanced/lark-channel', false)).resolves.toMatchObject({ applied: true })
+      expect((await console.setBundleEnabled('other-package', false)).applied).toBe(false)
+      const toggled = await console.setPluginEnabled('lark-entry', false)
+      expect(toggled.applied).toBe(false)
+      expect(toggled.note).toMatch(/restart-required|重启/u)
+      expect((await console.setPluginEnabled('foreign-entry', false)).applied).toBe(false)
+      await expect(console.installProjectBundle('@dsh-enhanced/hello')).resolves.toMatchObject({ applied: true })
+      expect(manager.installBundle).toHaveBeenCalledWith('@dsh-enhanced/hello', { enabled: true, saveExact: true })
+      expect((await console.installProjectBundle('./local-path')).applied).toBe(false)
     } finally {
       await ctx.fiber.dispose()
     }

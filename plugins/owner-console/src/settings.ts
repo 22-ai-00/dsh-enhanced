@@ -29,6 +29,39 @@ export const isAppId = (value: unknown): value is string => typeof value === 'st
 export const isEnvName = (value: unknown): value is string => typeof value === 'string' && ENV_NAME.test(value)
 export const isSecretRef = (value: unknown): value is string => typeof value === 'string' && SECRET_REF.test(value)
 
+export interface BundleInfoLike {
+  readonly name: string
+  readonly version?: string
+  readonly enabled: boolean
+  readonly installed: boolean
+  readonly removable: boolean
+  readonly optional: boolean
+}
+export interface PluginInfoLike {
+  readonly entryId: string
+  readonly moduleName: string
+  readonly enabled: boolean
+  readonly fiberPhase: 'pending' | 'loading' | 'active' | 'failed' | 'unloading' | null
+}
+export interface ChangeResultLike {
+  readonly changed: boolean
+  readonly application: 'applied' | 'restart-required' | 'overridden' | 'failed' | 'cancelled'
+  readonly target: string
+  readonly enabled?: boolean
+  readonly error?: Readonly<{ code: string, diagnostic?: string }>
+  readonly warnings?: readonly string[]
+}
+export interface PluginManagerService {
+  listBundles(): Promise<readonly BundleInfoLike[]>
+  listPlugins(): Promise<readonly PluginInfoLike[]>
+  setBundleEnabled(name: string, enabled: boolean): Promise<ChangeResultLike>
+  setPluginEnabled(entryId: string, enabled: boolean): Promise<ChangeResultLike>
+  installBundle(spec: string, options?: Readonly<{ enabled?: boolean, saveExact?: boolean }>): Promise<ChangeResultLike>
+}
+
+export const PROJECT_PACKAGE = /^@dsh-enhanced\/[a-z0-9][a-z0-9-]*$/u
+export const isProjectPackage = (value: unknown): value is string => typeof value === 'string' && PROJECT_PACKAGE.test(value)
+
 export interface LoaderEntry {
   readonly id: string
   readonly options: { readonly id: string, readonly config?: unknown }

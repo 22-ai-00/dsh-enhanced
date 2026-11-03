@@ -2,8 +2,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { OwnerConsoleConfig } from './index.js'
 import {
-  boundedConfig, configFacts, findEntry, isAppId, isEntryId, isEnvName, isProjectBundle, isSecretRef,
-  type LoaderService, type SettingsDescriptor, type SettingsPathOp, type SettingsService,
+  boundedConfig, configFacts, findEntry, isAppId, isEntryId, isEnvName, isProjectBundle, isProjectPackage, isSecretRef,
+  type BundleInfoLike, type ChangeResultLike, type LoaderService, type PluginInfoLike, type PluginManagerService,
+  type SettingsDescriptor, type SettingsPathOp, type SettingsService,
 } from './settings.js'
 import type { OwnerConsoleStatus, OwnerConsoleWriteResult } from './typert.js'
 
@@ -56,8 +57,25 @@ export class OwnerConsoleService extends TypertRemoteService {
     }
   }
 
-  status(): OwnerConsoleStatus {
+  private manager(): PluginManagerService {
+    const manager = this.host.get('pluginManager' as never) as PluginManagerService | undefined
+    if (manager === undefined) throw new Error('Host plugin manager is unavailable; this console cannot manage bundles')
+    return manager
+  }
+
+  private async inventory(): Promise<Readonly<{ bundles: readonly BundleInfoLike[], plugins: readonly PluginInfoLike[] }>> {
+    const manager = this.host.get('pluginManager' as never) as PluginManagerService | undefined
+    if (manager === undefined) return Object.freeze({ bundles: [], plugins: [] })
+    const [bundles, plugins] = await Promise.all([manager.listBundles(), manager.listPlugins()])
+    return Object.freeze({
+      bundles: Object.freeze(bundles.filter(bundle => isProjectPackage(bundle.name))),
+      plugins: Object.freeze(plugins.filter(plugin => isProjectPackage(plugin.moduleName))),
+    })
+  }
+
+  async status(): Promise<OwnerConsoleStatus> {
     const entries = this.descriptors()
+    const inventory = await this.inventory()
     const lark = findEntry(entries, ns => LARK.test(ns))
     const traex = findEntry(entries, ns => TRAEX.test(ns))
     const larkValue = configFacts(lark?.value)
@@ -79,11 +97,45 @@ export class OwnerConsoleService extends TypertRemoteService {
       dependencies: Object.freeze(DEPENDENCIES.map(name => Object.freeze({
         name, available: this.host.get(name as never) !== undefined,
       }))),
-      bundles: Object.freeze(entries.filter(entry => isProjectBundle(entry.ns)).map(entry => Object.freeze({
-        entry: entry.ns,
-        enabled: configFacts(entry.value)['enabled'] === true,
+      bundles: Object.freeze(inventory.bundles.map(bundle => Object.freeze({
+        name: bundle.name,
+        ...(bundle.version === undefined ? {} : { version: bundle.version }),
+        enabled: bundle.enabled,
+        installed: bundle.installed,
+        removable: bundle.removable,
+      }))),
+      plugins: Object.freeze(inventory.plugins.map(plugin => Object.freeze({
+        entryId: plugin.entryId,
+        moduleName: plugin.moduleName,
+        enabled: plugin.enabled,
+        fiberPhase: plugin.fiberPhase,
       }))),
     })
+  }
+
+  /** Select or remove one installed project bundle layer; dependencies stay installed. */
+  async setBundleEnabled(name: string, enabled: boolean): Promise<OwnerConsoleWriteResult> {
+    if (!isProjectPackage(name)) return refuse('', '只允许管理本项目的 @dsh-enhanced/* bundle')
+    return applyChange(this.manager(), await this.manager().setBundleEnabled(name, enabled))
+  }
+
+  /** Enable or disable one loaded entry of a project bundle. */
+  async setPluginEnabled(entryId: string, enabled: boolean): Promise<OwnerConsoleWriteResult> {
+    const manager = this.manager()
+    if (entryId.trim() === '') return refuse('', 'entryId 不能为空')
+    const inventory = await this.inventory()
+    const entry = inventory.plugins.find(plugin => plugin.entryId === entryId)
+    if (entry === undefined) return refuse(entryId, '该条目不属于本项目的插件，或尚未安装')
+    return applyChange(manager, await manager.setPluginEnabled(entryId, enabled))
+  }
+
+  /** Install one project bundle with its declared dependencies, then activate it. */
+  async installProjectBundle(spec: string): Promise<OwnerConsoleWriteResult> {
+    const trimmed = spec.trim()
+    if (!isProjectPackage(trimmed)) {
+      return refuse('', '只允许安装本项目的 @dsh-enhanced/<name> 包；本地路径和 git 地址不在此面板处理')
+    }
+    return applyChange(this.manager(), await this.manager().installBundle(trimmed, { enabled: true, saveExact: true }))
   }
 
   /** Feishu: one owner click, two ways to pair the bot. No plaintext secret is ever accepted. */
@@ -181,6 +233,21 @@ export class OwnerConsoleService extends TypertRemoteService {
     const reloaded = await this.reload(entry)
     return Object.freeze({ applied: true, entry, note: '已合并写入' + reloaded })
   }
+}
+
+function applyChange(manager: PluginManagerService, result: ChangeResultLike): OwnerConsoleWriteResult {
+  void manager
+  const reason = result.error === undefined
+    ? result.application === 'restart-required'
+      ? '需要重启 profile 后生效'
+      : result.application === 'overridden' ? '被更高优先级的覆盖项接管' : ''
+    : `${result.error.code}${result.error.diagnostic === undefined ? '' : `：${result.error.diagnostic}`}`
+  const warnings = (result.warnings ?? []).length === 0 ? '' : `；警告：${(result.warnings ?? []).join('；')}`
+  return Object.freeze({
+    applied: result.application === 'applied',
+    entry: result.target,
+    note: `${result.changed ? '已变更' : '无变化'}（${result.application}）${reason === '' ? '' : `；${reason}`}${warnings}`,
+  })
 }
 
 function refuse(entry: string, note: string): OwnerConsoleWriteResult {

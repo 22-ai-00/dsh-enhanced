@@ -13,6 +13,9 @@ type ConsoleRemote = Readonly<{
     credentialHandle: string, account: string, tenant: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
   configureTraex(enabled: boolean, command: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
   configureBundle(entry: string, config: Readonly<Record<string, unknown>>): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  setBundleEnabled(name: string, enabled: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  setPluginEnabled(entryId: string, enabled: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  installProjectBundle(spec: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
 }>
 type SlotRuntime = {
   readonly remote: Readonly<{ ownerConsole: ConsoleRemote }>
@@ -78,6 +81,7 @@ export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }
   const [traexCommand, setTraexCommand] = useState('')
   const [bundleEntry, setBundleEntry] = useState('')
   const [bundleJson, setBundleJson] = useState('{}')
+  const [installSpec, setInstallSpec] = useState('@dsh-enhanced/')
 
   const refresh = async () => {
     try {
@@ -149,20 +153,42 @@ export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }
   const bundleRows = pending
     ? el('p', { style: { margin: 0, color: muted } }, '…')
     : status.bundles.length === 0
-      ? el('p', { style: { margin: 0, color: muted } }, '本 profile 中没有本项目的插件条目。')
-      : el('div', { style: gridStyle }, ...status.bundles.map(item => row(item.entry, item.enabled ? '已启用' : '未启用')))
+      ? el('p', { style: { margin: 0, color: muted } }, '本 profile 中没有本项目的 bundle。')
+      : el('div', { style: gridStyle }, ...status.bundles.map(bundle => el('div', {
+        style: { display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' } },
+        el('span', {}, `${bundle.name}${bundle.version === undefined ? '' : ` @${bundle.version}`}${bundle.installed ? '' : '（未安装）'}`),
+        el('button', { style: buttonStyle, disabled: busy,
+          onClick: () => void run(() => remote.setBundleEnabled(bundle.name, !bundle.enabled)) },
+        bundle.enabled ? '停用' : '启用'))))
+  const pluginRows = pending || status.plugins.length === 0
+    ? el('p', { style: { margin: 0, color: muted } }, pending ? '…' : '没有已加载的本项目插件条目。')
+    : el('div', { style: gridStyle }, ...status.plugins.map(plugin => el('div', {
+      style: { display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' } },
+      el('span', { style: { fontSize: 12 } }, `${plugin.moduleName} · ${plugin.entryId} · ${plugin.fiberPhase ?? 'null'}`),
+      el('button', { style: buttonStyle, disabled: busy,
+        onClick: () => void run(() => remote.setPluginEnabled(plugin.entryId, !plugin.enabled)) },
+      plugin.enabled ? '禁用' : '启用'))))
   const bundles = el('div', { style: gridStyle },
+    el('h4', { style: { margin: 0, fontSize: 13 } }, 'Bundle 层'),
     bundleRows,
-    el('p', { style: { margin: 0, fontSize: 12, color: muted } }, '只允许修改本项目的 dsh-enhanced 条目；合并写入，不重置其它字段。'),
-    field('entry', bundleEntry, setBundleEntry, status?.bundles[0]?.entry ?? 'dsh-enhanced-...'),
-    el('textarea', { value: bundleJson, rows: 5, style: { ...inputStyle, fontFamily: 'monospace', resize: 'vertical' },
-      onChange: (event: { target: { value: string } }) => setBundleJson(event.target.value) }),
-    el('button', { style: buttonStyle, disabled: busy, onClick: () => {
-      try {
-        const parsed = JSON.parse(bundleJson) as Readonly<Record<string, unknown>>
-        void run(() => remote.configureBundle(bundleEntry, parsed))
-      } catch { setError('配置必须是 JSON 对象') }
-    } }, '应用配置'))
+    el('h4', { style: { margin: '6px 0 0', fontSize: 13 } }, '已加载条目'),
+    pluginRows,
+    el('div', { style: { display: 'flex', gap: 8, alignItems: 'end' } },
+      field('安装本项目 bundle（含依赖）', installSpec, setInstallSpec, '@dsh-enhanced/plugin-name'),
+      el('button', { style: buttonStyle, disabled: busy,
+        onClick: () => void run(() => remote.installProjectBundle(installSpec)) }, '安装')),
+    el('p', { style: { margin: 0, fontSize: 12, color: muted } }, '安装使用 DSH 自身的 pnpm 路径，会一并安装该包声明的依赖；安装/启用后如提示需要重启 profile，请依提示操作。'),
+    el('details', { style: { marginTop: 6 } },
+      el('summary', { style: { fontSize: 12, color: muted } }, '高级：合并配置（只对声明了 live 字段的条目生效）'),
+      field('entry', bundleEntry, setBundleEntry, 'dsh-enhanced-...'),
+      el('textarea', { value: bundleJson, rows: 4, style: { ...inputStyle, fontFamily: 'monospace', resize: 'vertical', marginTop: 6 },
+        onChange: (event: { target: { value: string } }) => setBundleJson(event.target.value) }),
+      el('button', { style: { ...buttonStyle, marginTop: 6 }, disabled: busy, onClick: () => {
+        try {
+          const parsed = JSON.parse(bundleJson) as Readonly<Record<string, unknown>>
+          void run(() => remote.configureBundle(bundleEntry, parsed))
+        } catch { setError('配置必须是 JSON 对象') }
+      } }, '应用配置')))
 
   return el('section', { 'aria-label': '主人控制台', style: panelStyle },
     el('h2', { style: { margin: 0, fontSize: 18 } }, '控制台'),

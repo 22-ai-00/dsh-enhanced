@@ -15,13 +15,14 @@ dsh plugin --profile web add @dsh-enhanced/owner-console
 dsh --profile web --dump-config
 ```
 
-安装后左侧栏出现「控制台」入口，主面板显示三张卡片：
+安装由 DSH 的 pnpm 路径完成，本包声明的运行依赖（`@deepseek-ai/schemastery`、`zod`）随包安装；
+Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏出现「控制台」入口，面板包含：
 
 | 卡片 | 内容 | 数据来源 |
 | --- | --- | --- |
 | 远程接入（飞书） | 接入方式、`lark-channel` 条目、连接是否加载、appId 是否配置；两种对接：直接填写 appId + secret 引用，或从 Host 环境一键探测 appId | `settings.describe` + `larkChannel` service |
 | TraeX | `traex-acp-provider` 条目、是否启用、命令 | `settings.describe` |
-| 本项目插件管理 | 本 profile 中 `dsh-enhanced-*` 条目的启用状态，可对单个条目合并一段 JSON 配置 | `settings.describe` / `settings.update` |
+| 本项目插件管理 | 本项目的 bundle 层（启用/停用）、已加载条目（启用/禁用/阶段）、安装 `@dsh-enhanced/*`（含依赖），以及对 live 字段的合并配置 | `pluginManager` + `settings.describe` / `settings.mutate` |
 | 依赖自检 | `assistant-policy`、`assistant-delivery`、`assistant-skills` 是否可用 | Cordis service 注册表（严格查找） |
 
 读取与写入都经 `typert` 的严格 invocation 返回；面板不缓存或上报任何内容。
@@ -52,9 +53,14 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 ### TraeX 与本项目插件
 
 - TraeX 卡片只切换 `traex-acp-provider` 条目的 `enabled`（可选覆盖 `command`），不启动进程。
-- 插件管理只列出本项目里声明了 live 字段的 `dsh-enhanced-*` 条目；输入一段 JSON 对象后
-  按键执行 set 操作一次性写入（≤16 KiB），不重置其它字段，也不提供安装/卸载。
-- 面板收到 Host 的业务拒绝会原样显示原因（例如环境变量不存在、身份字段缺失），不静默失败。
+- **Bundle 层**：列出本 profile 里 `@dsh-enhanced/*` bundle 的版本、是否安装、是否启用、是否可移除，
+  一键启用/停用；停用只摘除该 bundle 的 patch 层，已安装依赖保留。
+- **已加载条目**：列出本项目插件的 Loader 条目（entryId、模块名、fiber 阶段），可单独启用/禁用。
+- **安装**：只接受 `@dsh-enhanced/<name>` 形式的包名，走 DSH 自身的 `pluginManager.installBundle`
+  （与 `dsh plugin` 相同的 pnpm 路径），会一并安装该包声明的依赖并默认激活；本地路径和 git 地址
+  不在此面板处理，避免面板变成任意代码源入口。安装/启用后如返回 `restart-required`，按提示重启 profile。
+- **高级**：对声明了 live 字段的条目仍可合并一段 JSON 配置（≤16 KiB），不重置其它字段。
+- 面板收到 Host 的业务拒绝会原样显示原因（例如环境变量不存在、身份字段缺失、需要重启），不静默失败。
 - 「方式」按条目里实际存在的 secret 引用显示（环境变量 = lark-cli 向导；keychain = 直接配置），
   不再只反映本插件自己的偏好字段。
 
@@ -76,14 +82,17 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 ## 权限与数据边界
 
 - 无文件系统写入、无网络、无子进程、无凭据读取。
-- 配置写入只经 Host `settings.update`，且限定到单个已安装条目；授权来源是主人自己在面板上的点击，
-  不是模型工具调用，也不存在后台自动写配置。
+- 配置写入只经 Host `settings.mutate`，且限定到单个已安装条目；bundle/entry 管理只经 Host
+  `pluginManager` 且限定 `@dsh-enhanced/*`；授权来源是主人自己在面板上的点击，不是模型工具调用，
+  也不存在后台自动写配置。
 - 不读取会话内容、报告或记忆；client bundle 只依赖宿主提供的 `react` 与 `remote`/`slots`。
-- 不安装依赖、不卸载插件、不改动未列出的条目；secret 明文不接受、不存储、不回显。
+- 安装仅由主人点击触发，走 DSH 官方安装路径；不提供卸载，不改动未列出的条目；
+  secret 明文不接受、不存储、不回显。
 
 ## 限制
 
 - 一键模式只做 Host 环境变量探测，不代为执行 lark-cli；终端向导由 owner 自己运行。
-- 插件管理不提供安装/卸载/启用切换（启用状态由各插件自己的 schema 决定），只提供配置合并。
+- 插件管理不提供卸载；安装只接受 `@dsh-enhanced/*` 包名（不支持任意本地/git 源）。
+- 停用 bundle 只摘除 patch 层，依赖与包文件保留；彻底移除仍用 `dsh plugin remove`。
 - 面板显示的是 Host 侧真实注册状态，但「已加载」不等于飞书已通过认证或长连接在线。
 - 不校验 app secret；secret 的写入通道留给 keychain 切片。
