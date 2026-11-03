@@ -18,7 +18,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 主人续办已结束的历史任务：`work_item_continue` 绑定 Delivery 保存的当前真实人类输入，通过独立 Policy 授权，创建带父/根引用的独立子项。新的 supplier/effort、工具 schema、有限预算和原期限一并冻结，原生 Host worker 用 `work_item_read_context` 分页读取新指令与冻结的旧报告。普通 `/new` 可以找回同一主人历史；运行中精确 binding/generation 变化会停止旧执行。
 
-Automations schema 17 在真实完成事务中记录 quiescence，历史 NULL 不回填；父任务必须有精确 production 静止证明。实际消费原生 Agent 的 Host 结果不会自动升级为目标达成；独立业务结果仍为 unknown。子项只执行一次，未知派发占槽、不重放；同一来源重复续办幂等，待办沿持久游标有界轮转，终态报告后最终工具 guard 禁止继续工具效果。WorkItems 整包 342 passed / 23 files，类型检查、零警告 lint 和独立复核通过；原生脚本供应商覆盖 7 个续办场景。两端根检查待运行；以下最新完整基线仍属于此前实现，不覆盖本节新增实现。
+Automations schema 17 在真实完成事务中记录 quiescence，历史 NULL 不回填；父任务必须有精确 production 静止证明。实际消费原生 Agent 的 Host 结果不会自动升级为目标达成；独立业务结果仍为 unknown。子项只执行一次，未知派发占槽、不重放；同一来源重复续办幂等，待办沿持久游标有界轮转，终态报告后最终工具 guard 禁止继续工具效果。WorkItems 整包 342 passed / 23 files；真实原生服务配合脚本供应商覆盖 7 个续办场景，包括新会话召回、供应商改变和 WorkItems SQLite 冷重开。两端完整根检查与独立复核结果见下表。该集成不等于完整 Host 进程重启或真实模型验收。
 
 这一切片不实现运行中追加指令、Thread 订阅直通或跨信道身份合并，不证明长期自主成长。工程验证使用脚本模型和真实原生服务；飞书实连与普通使用验收按用户要求延后。
 
@@ -32,13 +32,15 @@ Automations schema 17 在真实完成事务中记录 quiescence，历史 NULL �
 
 ## 最新完整检查
 
-命令 `CI=1 VITEST_MAX_WORKERS=2 pnpm_config_verify_deps_before_run=error pnpm check`，pnpm 11.7.0。两端均为精确实现提交 `e92fe502`，tree `d714e1adf7474330bdae86023b89a25c5e8777fe`。
+命令 `CI=1 VITEST_MAX_WORKERS=2 pnpm_config_verify_deps_before_run=error pnpm check`，pnpm 11.7.0。两端验证精确实现提交 `95975505`，tree `3a5aa836d6d8f868bf51ad9697cbbdd093a1cfe7`。
 
 | 环境与精确源码 | 结果 | 测试 passed / skipped | 文件 passed / skipped | 日志 SHA-256 |
 | --- | --- | --- | --- | --- |
-| Mac / Node 26.11.1 / `e92fe502` | EXIT 0，独立 PASS，1109.91 秒 | 9,754 / 1,916 | 678 / 85 | `072e0eaf03098707d5410aa4e7a4c4819a0b7710191c0ab5b76c9e5313f10a8e` |
-| Linux / Node 24.7.0 / `e92fe502` | EXIT 0，独立 PASS，2501.06 秒 | 11,363 / 304 | 731 / 32 | `aab3bcbbaa59cc80ad0dfb55af323204111df34bd75bff568c243b6294d40dcc` |
+| Mac / Node 26.11.1 / `95975505` | EXIT 0，独立 PASS，1044.57 秒 | 9,867 / 1,918 | 684 / 85 | `6b8d698f355b0b2d2e61974bd8ac961b3db6feff62269fb9a17a688077b0ac0c` |
+| Linux / Node 24.7.0 / `95975505` | EXIT 0，独立 PASS，2376.00 秒 | 11,478 / 304 | 737 / 32 | `901332c62239a46f01a04f75a1ff33dd7c4f4d8cafb941dfc2e0f22369a45181` |
 
-两端均已独立核对 manifest、零警告 lint、38 包构建范围、38 个类型检查、39 个测试组及 38 个唯一 dry-run pack；类型检查和打包的包身份逐一匹配，Lark 三个相关模块的 12 个 JS、类型声明及 map 文件均已包含。Linux 安装器文件 501 passed / 1 skipped。Linux 使用 `TMPDIR=/data00/home/jiataorui/t`，两端各自检查前后的提交一致，且 tracked 工作树干净。原始日志和复核见 `docs/evidence/verification-e92fe502/`；修复前后专项见 `docs/evidence/pre-owner-native-resources/`。
+两端均独立核对 manifest、零警告 lint、38 包构建范围、38 个类型检查、39 个测试组及 38 个唯一 dry-run pack；新 WorkItems 5 模块的 20 个 JS、类型声明及 map 文件和相关 Delivery / Automations 产物均在包内。Linux 续办集成 7 例、namespace 8 例实际通过，无跳过；安装器 501 passed / 1 skipped。Linux 使用 `TMPDIR=/data00/home/jiataorui/t`。检查前后均为同一提交且工作树干净；源码未在验证期间变更。
 
-历史失败均保留原始证据；修复后的检查按实际源码单独记录。上述检查不代替跳过项、外部连接、活服务升级或长期普通使用验收。
+原始日志、源码身份与独立复核见 `docs/evidence/verification-95975505/`，专项见 `docs/evidence/work-item-continuation/`。前两轮 Mac 根失败和 Linux 主动中断记录分别保留在 `verification-90a46b72/` 与 `verification-27cfd549/`，不算通过；已修复验收记录与运行记录的 quiescence 列名碰撞，并修正真实旧库迁移夹具。
+
+这些工程检查不代替跳过项、飞书实连、活服务升级或长期普通使用验收。按用户要求，实连及真实使用验收延后；本轮未发布、未合入 main。
