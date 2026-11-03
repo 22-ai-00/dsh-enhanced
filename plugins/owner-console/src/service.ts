@@ -246,7 +246,9 @@ function applyChange(manager: PluginManagerService, result: ChangeResultLike): O
   const builds = (result.pendingBuilds ?? []).length === 0 ? ''
     : `；需要在设置页批准构建脚本：${(result.pendingBuilds ?? []).join('、')}`
   return Object.freeze({
-    applied: result.application === 'applied',
+    // A persisted change that only needs a profile restart is still applied;
+    // failed/cancelled results and validation refusals stay not applied.
+    applied: result.application === 'applied' || result.application === 'restart-required',
     entry: result.target,
     note: `${result.changed ? '已变更' : '无变化'}（${result.application}）${reason === '' ? '' : `；${reason}`}${warnings}${builds}`,
   })

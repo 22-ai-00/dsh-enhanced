@@ -208,7 +208,7 @@ describe('dsh-enhanced-owner-console', () => {
       await expect(console.setBundleEnabled('@dsh-enhanced/lark-channel', false)).resolves.toMatchObject({ applied: true })
       expect((await console.setBundleEnabled('other-package', false)).applied).toBe(false)
       const toggled = await console.setPluginEnabled('lark-entry', false)
-      expect(toggled.applied).toBe(false)
+      expect(toggled.applied).toBe(true)
       expect(toggled.note).toMatch(/restart-required|重启/u)
       expect((await console.setPluginEnabled('foreign-entry', false)).applied).toBe(false)
       await expect(console.installProjectBundle('@dsh-enhanced/hello')).resolves.toMatchObject({ applied: true })

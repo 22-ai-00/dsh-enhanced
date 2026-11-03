@@ -106,6 +106,7 @@ export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }
       const result = await action()
       if (!mounted.current) return
       if (!result.ok) { setError('Host 拒绝了这次操作，请检查输入。'); return }
+      if (!result.value.applied) { setError(result.value.note); return }
       // A persisted change can still need a profile restart; refresh the rows and
       // show the Host note as information, not as a failed action.
       setError(''); setNotice(result.value.note); await refresh()
