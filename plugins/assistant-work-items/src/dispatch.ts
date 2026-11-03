@@ -23,6 +23,9 @@ export interface DispatchDependencies {
   readonly automations: PeerAutomationsService | undefined | (() => PeerAutomationsService | undefined)
   readonly delivery: PeerDeliveryService | undefined | (() => PeerDeliveryService | undefined)
   readonly validateWake?: (item: WorkItemRecord) => boolean
+  /** Pure, consumer-owned lifecycle fence; implementations must call no peer. */
+  readonly validateWakeLocal?: (item: WorkItemRecord) => boolean
+  readonly replyReportEligible?: (item: WorkItemRecord, report: WorkItemReportRecord, notification: WorkItemNotification) => boolean
   /** Admission-mandate revalidation gate; unset means single-authority mode. */
   readonly authority?: WorkItemAuthority
   readonly now?: () => number
@@ -75,6 +78,17 @@ export class WorkItemDispatch {
     // cancelled work to a live automation before the guarded mark throws.
     if (dispatch.state !== 'pending') return false
     if (!this.#revalidate(item)) return false
+    // Policy callbacks can synchronously cancel a reply or dispose its
+    // producer. Re-read the durable row and source fence after that callback,
+    // immediately before crossing the external occurrence boundary.
+    if (this.#deps.validateWake) {
+      const currentItem = this.#deps.store.findItemById(item.id), currentDispatch = this.#deps.store.getDispatch(item.id)
+      if (!currentItem || !currentDispatch || currentDispatch.state !== 'pending'
+        || currentDispatch.generation !== dispatch.generation || currentDispatch.eventId !== dispatch.eventId
+        || currentDispatch.occurredAt !== dispatch.occurredAt || !this.#deps.validateWake(currentItem)
+        || this.#deps.validateWakeLocal && !this.#deps.validateWakeLocal(currentItem)
+        || !this.#deps.store.isWakeSnapshotCurrent(currentItem, currentDispatch)) return false
+    }
     try {
       const occurrence = automations.ingestExternal({
         sourceId: config.intakeSourceId,
@@ -220,14 +234,22 @@ export class WorkItemDispatch {
     const notification = this.notification(item, report)
     this.#deps.ledger.recordDelivery(item.id, report.revision, 'pending', null)
     try {
-      const outbox = await delivery.enqueueBackground({
+      const input = {
         sourceId: config.intakeSourceId,
         workspace: item.scope.workspace,
         bindingId: item.originBindingId,
         idempotencyKey: notification.idempotencyKey,
         text: notification.text,
-        format: 'markdown',
-      })
+        format: 'markdown' as const,
+      }
+      const typed = config.ownerReplyContinuation && delivery.workItemReplyProtocolVersion?.() === 1
+        && typeof delivery.enqueueWorkItemReport === 'function'
+        && this.#deps.replyReportEligible?.(item, report, notification) === true
+      // Eligibility is decided locally before the enqueue. Never fall back
+      // after an ambiguous typed enqueue, which could duplicate a real send.
+      const outbox = await (typed
+        ? delivery.enqueueWorkItemReport!({ ...input, itemId: item.id, reportRevision: report.revision })
+        : delivery.enqueueBackground(input))
       this.#deps.ledger.recordDelivery(item.id, report.revision, 'sent', outbox.id)
       return true
     } catch (error) {

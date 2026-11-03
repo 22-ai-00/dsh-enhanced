@@ -444,11 +444,12 @@ describe('side-effect-free active Lark owner snapshot', () => {
     expect(inspectActiveLarkOwnerBindingsLocally(larkQuery(inactiveOwner.path)).bindings).toEqual([])
   })
 
-  test('reads the real schema 28 result of migrating a schema 26 owner database', async () => {
+  test('reads the real schema 29 result of migrating a schema 26 owner database', async () => {
     const fixture = await larkSeeded()
     fixture.store.close()
     const legacy = new DatabaseSync(fixture.path)
-    try { legacy.exec(`DROP TABLE delivery_progress;
+    try { legacy.exec(`DROP TABLE delivery_work_item_replies; DROP TABLE delivery_work_item_reply_streams; DROP TABLE delivery_work_item_reports;
+      DROP TABLE delivery_progress;
       DROP TRIGGER delivery_foreground_termination_insert;
       DROP TRIGGER delivery_foreground_termination_update;
       DROP TRIGGER delivery_foreground_termination_immutable;
@@ -459,14 +460,14 @@ describe('side-effect-free active Lark owner snapshot', () => {
     migrated.close()
     const verified = new DatabaseSync(fixture.path, { readOnly: true })
     try {
-      expect(verified.prepare('PRAGMA user_version').get()).toEqual({ user_version: 28 })
+      expect(verified.prepare('PRAGMA user_version').get()).toEqual({ user_version: 29 })
       expect(verified.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name='delivery_progress'").get())
         .toEqual({ name: 'delivery_progress' })
     } finally { verified.close() }
     const paths = [fixture.path, `${fixture.path}-wal`, `${fixture.path}-shm`, `${fixture.path}-journal`]
     const before = await Promise.all(paths.map(fingerprint))
     const snapshot = inspectActiveLarkOwnerBindingsLocally(larkQuery(fixture.path))
-    expect(snapshot.schemaVersion).toBe(28)
+    expect(snapshot.schemaVersion).toBe(29)
     expect(snapshot.bindings).toHaveLength(1)
     expect(snapshot.bindings[0]?.id).toBe(fixture.binding.id)
     expect(await Promise.all(paths.map(fingerprint))).toEqual(before)

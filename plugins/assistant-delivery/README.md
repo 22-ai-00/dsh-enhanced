@@ -35,7 +35,7 @@ Host-only `validateOwnerAgentForRoute(agent, authorityId)` 为有限动态工具
 
 Host-only `inspectOwnerForegroundToolCall({ agent, authorityId, callId, toolName, argumentsJson })` 另核对当前认领的具体 Inbox、尚未结束的原生 turn、pending 前台执行记录及唯一未结算的 `tool/call` 事件。工具名和实际参数须与事件一致；返回内容无关的 task/owner/binding、turn、调用事件与参数摘要，不返回任务正文或参数。同 Session、开放 turn 或 owner 身份本身不足以产生证明；Host 直接调用、PTC 子调用、旧或重复事件保持未归因。此只读接口不迁移数据库，不授予执行权限，也不证明任务成功；消费者须保留后续 canonical 反馈与独立验收边界。
 
-`readOwnerForegroundToolInput` 使用同一真实当前调用证明，按 UTF-8 字节分页读取已经持久保存的人类输入，并返回实际记录的供应商冻结状态。每页最多 8192 字节；sourceDigest 绑定 task、原 envelope、全文和 model state，不随调用 ID、模型工具参数或页窗口变化。缺失/不一致 supplier 由执行消费者拒绝。它不接受任意 Inbox、来源或路径选择器，不读取模型生成的替代正文，不新建任务、发送消息或授予执行权限；调用前后 owner/native-call 变化会使读取失效。Delivery schema 仍为 28。
+`readOwnerForegroundToolInput` 使用同一真实当前调用证明，按 UTF-8 字节分页读取已经持久保存的人类输入，并返回实际记录的供应商冻结状态。每页最多 8192 字节；sourceDigest 绑定 task、原 envelope、全文和 model state，不随调用 ID、模型工具参数或页窗口变化。缺失/不一致 supplier 由执行消费者拒绝。它不接受任意 Inbox、来源或路径选择器，不读取模型生成的替代正文，不新建任务、发送消息或授予执行权限；调用前后 owner/native-call 变化会使读取失效。Delivery 当前 schema 为 29。
 
 
 Host-only `inspectOwnerRequestedChange(execution, { sourceId })` 限定当前认证 owner 主 Agent 的未结 `memory_manage` 或 `wiki_upsert` 原生调用。它复核已认领的原 Inbox、当前 turn、实际工具名与参数（最多 64 KiB）、owner lineage 和 binding 代次，返回 `prepareAgentApproval` 的精确 route、Inbox 原始正文及只含身份与摘要的 SHA256 receipt。空正文、附件单独输入、PTC、历史或已结算调用均无证明。正文可能包含引用文字；哪些内容构成 owner 指令仍须由 Policy 隔离审查。原生 Web 输入在派发时登记同一前台执行记录并在 drain 时结算，失败或取消不留待结记录。该只读接口不要求 RSI `ownerRoutes` 配置、不注册 Agent 工具，也不授权写入。
@@ -148,7 +148,7 @@ Host-only `inspectOwnerRouteState({ authorityId, principalId, workspace, agentPr
 
 离线安装器可调用导出的 `inspectRevokedOwnerRouteLocally({ databasePath, authority, principalRecordId, frozenPrincipalVersion })`，用受信任且冻结的完整 `OwnerRouteAuthority` 配置核对精确 durable principal 行。它只接受 canonical principal 与 authority 一致、role 为 owner、status 为 revoked、`linked_to_id` 为空且观察版本不低于冻结版本的记录，不要求仍有 active binding。缺失、active、linked、错误行或版本、非 canonical 身份和数据库不可用均抛出带稳定 code 的 `ActiveLarkOwnerBindingsSnapshotError`，不把缺失当成撤权，也不泄漏正文或异常内容。authority 来自受控安装配置，不接受模型输入；此 API 仅观察撤权，不授予写入或执行权限。
 
-返回深度冻结的 `assistant-delivery/revoked-owner-route-snapshot/v1` 快照，包含完整 canonical authority、冻结版本、现有 `OwnerRouteStateInspection` 的 revoked 成员、schema 版本、database/WAL/SHM 文件身份及 storage/snapshot SHA-256 摘要。仅支持已审查的 schema 23–28，未来版本拒绝；摘要用于一致性核对，不是签名。读取与 `inspectActiveLarkOwnerBindingsLocally()` 共用私有目录/文件、fd/inode、SQLite quick_check/foreign-key 及漂移保护；WAL 只在私有临时副本中读取，不迁移、checkpoint、chmod 或修改原数据库，不新建 binding 或修改配置。
+返回深度冻结的 `assistant-delivery/revoked-owner-route-snapshot/v1` 快照，包含完整 canonical authority、冻结版本、现有 `OwnerRouteStateInspection` 的 revoked 成员、schema 版本、database/WAL/SHM 文件身份及 storage/snapshot SHA-256 摘要。仅支持已审查的 schema 23–29，未来版本拒绝；摘要用于一致性核对，不是签名。读取与 `inspectActiveLarkOwnerBindingsLocally()` 共用私有目录/文件、fd/inode、SQLite quick_check/foreign-key 及漂移保护；WAL 只在私有临时副本中读取，不迁移、checkpoint、chmod 或修改原数据库，不新建 binding 或修改配置。
 
 schema v28 为新的普通前台完成记录增加独立、不可变的 `termination`：只保存 Host 确认的终止分类、固定原因码和句柄收尾结果，不保存异常正文。它与业务结果分开：非成功执行仍为 `unknown,false`，`effects: unknown`、`replay: forbidden`，不会因为错误、超时或句柄已释放而授权重放。明确的用户停止单独记录为 owner-cancelled；缺失或未识别的事实保持 unknown。历史行不补猜测，新终态观察与 completion 在同一次写入中保存，之后不能增改。
 
@@ -495,3 +495,12 @@ Host 编排可从 `@dsh-enhanced/assistant-delivery/types` 读取无服务初始
 `enqueueOwnerNotification` 为可信 Host 插件提供限定主人路由、原会话、身份版本和有效期的提醒入队接口。普通 `enqueueBackground` 不能写入保留的 `dsh.native-notice*` 元数据。投递前重查当前主人、绑定版本与代次、路由、期限及背景 `send` Policy；过期、撤权或换代的队列不会发送。
 
 原生 Web 使用本地适配器将通知标为可读取，并由 `assistant-web-owner` 的会话输入区展示。通知不写入 Session 历史，不触发模型，也不表示目标已完成；`accepted` 不表示用户已阅读。读取沿用固定 Web 主人能力，并再次核验上述边界；不另设消息 `read` Policy。其他渠道复用已有适配器。对于已发生但结果未知的外部发送，重启恢复仅通过适配器查询结果；查到过去已发送不表示再次发送，也不会为重发授予权限。
+
+
+## WorkItems 报告回复交接
+
+schema 29 保存 typed WorkItems 报告 sidecar、不可变回复原文、独占 Inbox 交接与 stream head。仅当前 WorkItems 自有注册校验通过的真实报告可经 `enqueueWorkItemReport` 建立关联；普通 metadata 不授予报告身份。功能默认关闭，开启条件和权限见[回复报告后自动继续（显式启用）](../assistant-work-items/README.md#回复报告后自动继续显式启用)。
+
+同一会话的 owner 纯文本回复须匹配唯一、已 accepted/delivered/read 的 provider 消息，并通过当前 owner、binding、scope 和外部 `continue-work-items-from-reply` Policy 检查。交接在一笔事务中保存原文来源并将 Inbox 标为 processed；此状态仅表示独占交接，不代表任务成功。已交接输入在 peer 卸载、重启或失败后不会转回前台；原文含敏感输入时也会持续保存在本机私有 Delivery 数据库中。
+
+父项选择冻结当前 stream head；只有校验 WorkItems 的持久 child 记录并 ACK 后才推进 head，ACK 后仍可读取原文与摘要。后续回复保留原报告目标与实际执行父项的区别。`/stop`、`/new`、`/clear` 先持久取消较早来源，再通知已关联 child；取消不撤销已经开始的工具。相同 owner 会话的新代次可回复旧报告，旧来源不会因此恢复授权。未知发送、通用或未验证报告、命令和附件保留普通处理路径。

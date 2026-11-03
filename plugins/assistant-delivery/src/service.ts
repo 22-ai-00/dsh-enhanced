@@ -1,3 +1,4 @@
+import { workItemReplyCanonical, type WorkItemReportTarget, type WorkItemReplySource, type WorkItemReplyConsumerRegistration, type WorkItemReplyReadInput, type WorkItemReplyListInput } from './work-item-replies.js'
 import { chmodSync, mkdirSync, readFileSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -1106,6 +1107,7 @@ export class AssistantDeliveryService extends Service {
   private readonly preferenceProducerGeneration = `assistant-delivery-preference:${randomUUID()}`
   private readonly acceptanceProducerGeneration = `assistant-delivery-acceptance:${randomUUID()}`
   private acceptanceSink: Readonly<{ token: symbol; registration: TaskAcceptanceRegistration }> | undefined
+  private workItemReplyConsumer: WorkItemReplyConsumerRegistration | undefined
   private foregroundObserver: Readonly<{ token: symbol; generation: string; registration: ForegroundTaskObservationRegistration; handles: Map<string, { task: ForegroundTaskIdentity; handle: unknown }> }> | undefined
   /** Once a live verifier required acceptance, loss of that verifier must not silently bypass it. */
   private acceptanceRequired = false
@@ -1398,6 +1400,7 @@ export class AssistantDeliveryService extends Service {
       this.preferenceFeedbackSink = undefined
       this.acceptanceSink = undefined
       this.foregroundObserver = undefined
+      this.workItemReplyConsumer = undefined
       this.evaluationSink = undefined
       this.workflowTraceSink = undefined
       this.automationPresentationBinding?.dispose()
@@ -4592,6 +4595,7 @@ export class AssistantDeliveryService extends Service {
           beforeInboxId: record.id,
           failureCode: 'new-session-before-dispatch',
         })
+        this.notifyWorkItemReplyCancellation(fence.replyChildItemIds ?? [])
         this.restartStore?.cancelForBinding(binding.id)
         await this.runtime?.cancelActive?.(binding, 'new')
         await this.inbound.cancelUndispatchedClaims(fence.claimedInboxIds, 'new')
@@ -4630,6 +4634,7 @@ export class AssistantDeliveryService extends Service {
         })
         // Holding the transition while the live turn drains prevents a later
         // message from overtaking the durable stop acknowledgement.
+        this.notifyWorkItemReplyCancellation(fence.replyChildItemIds ?? [])
         this.restartStore?.cancelForBinding(binding.id)
         await this.runtime?.cancelActive?.(binding, 'stop')
         await this.inbound.cancelUndispatchedClaims(fence.claimedInboxIds, 'stop')
@@ -4657,9 +4662,162 @@ export class AssistantDeliveryService extends Service {
         const failed = this.deliveryStore.getInbox(record.id)!
         return { duplicate: accepted.duplicate, inboxId: failed.id, status: failed.status }
       }
+      if (this.admitWorkItemReply(record, binding)) {
+        const handedOff = this.deliveryStore.getInbox(record.id)!
+        this.notifyWorkItemReplyPending()
+        return { duplicate: accepted.duplicate, inboxId: handedOff.id, status: handedOff.status }
+      }
       record = this.deliveryStore.queueInbox(record.id, binding.id)
       return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
     })
+  }
+
+  workItemReplyProtocolVersion(): 1 { return 1 }
+
+  private currentWorkItemReplyConsumer(): WorkItemReplyConsumerRegistration | undefined {
+    const registration = this.workItemReplyConsumer
+    const peer = this.context.get('assistantWorkItems' as never, false) as unknown as {
+      ownsWorkItemReplyRegistration?(value: WorkItemReplyConsumerRegistration): boolean
+    } | undefined
+    return this.active && registration !== undefined && peer?.ownsWorkItemReplyRegistration?.(registration) === true ? registration : undefined
+  }
+
+  registerWorkItemReplyConsumer(registration: WorkItemReplyConsumerRegistration): () => void {
+    this.assertActive()
+    if (!registration || registration.protocol !== 1 || typeof registration.sourceId !== 'string' || !registration.sourceId
+      || typeof registration.continuationAutomationId !== 'string' || !registration.continuationAutomationId
+      || ['inspectReport','inspectChild','onPending','onCancelled'].some(key => typeof registration[key as keyof WorkItemReplyConsumerRegistration] !== 'function')) {
+      throw new AssistantDeliveryError('runtime-conflict', 'invalid work item reply consumer')
+    }
+    if (this.workItemReplyConsumer !== undefined) throw new AssistantDeliveryError('runtime-conflict', 'work item reply consumer already registered')
+    this.workItemReplyConsumer = registration
+    if (this.currentWorkItemReplyConsumer() !== registration) {
+      this.workItemReplyConsumer = undefined
+      throw new AssistantDeliveryError('runtime-conflict', 'work item reply consumer lacks current producer ownership')
+    }
+    let live = true
+    // Registered callbacks run synchronously and only receive committed state.
+    // The consumer schedules its own bounded drain; Delivery owns no extra loop.
+    this.notifyWorkItemReplyPending()
+    return () => { if (live) { live = false; if (this.workItemReplyConsumer === registration) this.workItemReplyConsumer = undefined } }
+  }
+
+  private notifyWorkItemReplyPending(): void {
+    try { this.currentWorkItemReplyConsumer()?.onPending() }
+    catch (error) { this.context.logger.warn(`assistant-delivery: work item reply wake failed: ${String(error)}`) }
+  }
+  private notifyWorkItemReplyCancellation(childIds: readonly string[]): void {
+    if (childIds.length === 0) return
+    try { this.currentWorkItemReplyConsumer()?.onCancelled(Object.freeze([...childIds])) }
+    catch (error) { this.context.logger.warn(`assistant-delivery: work item reply cancellation failed: ${String(error)}`) }
+  }
+  private inspectWorkItemReport(input: { sourceId: string; itemId: string; reportRevision: number; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain' }, historical = false): WorkItemReportTarget {
+    const registration = this.currentWorkItemReplyConsumer()
+    const binding = this.deliveryStore.getBinding(input.bindingId)
+    const owner = binding === undefined ? undefined : this.ownerLineageForBinding(binding)
+    if (!registration || input.sourceId !== registration.sourceId || !binding || (!historical && binding.status !== 'active') || !owner) throw new Error('work item report producer or owner unavailable')
+    const target = registration.inspectReport({ itemId: input.itemId, reportRevision: input.reportRevision,
+      bindingId: binding.id, idempotencyKey: input.idempotencyKey, text: input.text, format: input.format ?? 'plain' })
+    if (!target || this.currentWorkItemReplyConsumer() !== registration || target.protocol !== 'assistant-delivery/work-item-report/v1'
+      || target.itemId !== input.itemId || target.reportRevision !== input.reportRevision || !Number.isSafeInteger(target.reportRevision) || target.reportRevision < 1
+      || typeof target.streamId !== 'string' || !target.streamId || !/^[a-f0-9]{64}$/u.test(target.reportDigest)
+      || target.sourceId !== registration.sourceId || target.scope.workspace !== binding.workspace || target.scope.preset !== binding.agentPreset
+      || workItemReplyCanonical(target.owner) !== workItemReplyCanonical(owner)) throw new Error('work item report target is not eligible')
+    return structuredClone(target)
+  }
+  enqueueWorkItemReport(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string,string>>; itemId: string; reportRevision: number }): OutboxRecord {
+    this.assertActive()
+    if (containsReservedLearningMetadata(input.metadata) || Object.keys(input.metadata ?? {}).some(key => key.startsWith('dsh.native-notice'))) {
+      throw new AssistantDeliveryError('runtime-conflict', 'reserved metadata requires its typed delivery interface')
+    }
+    const target = this.inspectWorkItemReport(input)
+    if (input.workspace !== target.scope.workspace) throw new Error('work item report scope changed')
+    return this.enqueueBackgroundAuthorized(input, target)
+  }
+  private workItemReplyPermission(binding: ConversationBinding, registration: WorkItemReplyConsumerRegistration): boolean {
+    return this.policy.evaluate({ subject: { kind: 'external', id: externalPrincipalId(binding.principal), workspace: binding.workspace, principal: externalPrincipalId(binding.principal) },
+      action: 'continue-work-items-from-reply', resource: { kind: 'automation', id: registration.continuationAutomationId },
+      context: { initiator: 'external' } }).effect === 'allow'
+  }
+  private admitWorkItemReply(inbox: InboxRecord, binding: ConversationBinding): boolean {
+    const registration = this.currentWorkItemReplyConsumer()
+    const envelope = inbox.envelope
+    if (!registration || envelope.kind !== 'text' || envelope.text.trim().startsWith('/') || !envelope.text
+      || (envelope.attachments?.length ?? 0) > 0 || !envelope.metadata?.replyToProviderMessageId) return false
+    const report = this.deliveryStore.workItemReplies.replyReport(envelope.channel,envelope.account,envelope.metadata.replyToProviderMessageId)
+    const outbox = report?.outbox
+    if (!report || !outbox || !['accepted','delivered','read'].includes(outbox.status) || workItemReplyCanonical(outbox.intent.target.principal) !== workItemReplyCanonical(binding.principal)
+      || workItemReplyCanonical(outbox.intent.target.conversation) !== workItemReplyCanonical(envelope.conversation)) return false
+    try {
+      const target = this.inspectWorkItemReport({ sourceId: registration.sourceId, itemId: report.target.itemId,
+        reportRevision: report.target.reportRevision, bindingId: outbox.intent.bindingId, idempotencyKey: outbox.intent.idempotencyKey,
+        text: outbox.intent.text, format: outbox.intent.format === 'markdown' ? 'markdown' : 'plain' }, true)
+      if (workItemReplyCanonical(target) !== workItemReplyCanonical(report.target) || !this.workItemReplyPermission(binding,registration)) return false
+    } catch { return false }
+    // From here a failed durable handoff is an error, never ordinary fallback.
+    this.deliveryStore.workItemReplies.admit(inbox.id,binding,report)
+    return true
+  }
+  private workItemReplyFence(source: WorkItemReplySource): WorkItemReplyConsumerRegistration {
+    const registration = this.currentWorkItemReplyConsumer()
+    const fresh = this.deliveryStore.workItemReplies.read({ id: source.id, expectedSourceDigest: source.sourceDigest })
+    if (workItemReplyCanonical(fresh) !== workItemReplyCanonical(source)) throw new Error('work item reply source state changed')
+    const binding = this.deliveryStore.getBinding(source.binding.id)
+    const inbox = this.deliveryStore.getInbox(source.id)
+    const report = this.deliveryStore.workItemReplies.report(source.target.outboxId)
+    if (!registration || !binding || binding.status !== 'active' || binding.version !== source.binding.version || binding.generation !== source.binding.generation
+      || !inbox || inbox.status !== 'processed' || inbox.bindingId !== binding.id || !report
+      || inbox.envelope.text !== source.inputText || workItemReplyCanonical(inbox.admissionCursor) !== workItemReplyCanonical(source.admissionCursor)
+      || workItemReplyCanonical(this.ownerLineageForBinding(binding)) !== workItemReplyCanonical(source.owner)
+      || externalPrincipalId(binding.principal) !== source.principalId || binding.workspace !== source.scope.workspace || binding.agentPreset !== source.scope.preset
+      || !['accepted','delivered','read'].includes(report.outbox.status) || report.outbox.providerMessageId !== source.target.providerMessageId
+      || this.deliveryStore.workItemReplies.replyReport(binding.conversation.channel,binding.conversation.account,source.target.providerMessageId)?.outbox.id !== source.target.outboxId
+      || workItemReplyCanonical(report.outbox.intent.target.conversation) !== workItemReplyCanonical(inbox.envelope.conversation)
+      || !this.workItemReplyPermission(binding,registration)) throw new Error('work item reply owner, producer or policy unavailable')
+    return registration
+  }
+  private validateWorkItemReply(source: WorkItemReplySource): void {
+    const registration = this.workItemReplyFence(source)
+    const report = this.deliveryStore.workItemReplies.report(source.target.outboxId)!
+    const target = this.inspectWorkItemReport({ sourceId: registration.sourceId, itemId: source.target.itemId,
+      reportRevision: source.target.reportRevision, bindingId: report.outbox.intent.bindingId, idempotencyKey: report.outbox.intent.idempotencyKey,
+      text: report.outbox.intent.text, format: report.outbox.intent.format === 'markdown' ? 'markdown' : 'plain' }, true)
+    if (workItemReplyCanonical(target) !== workItemReplyCanonical(report.target)
+      || this.workItemReplyFence(source) !== registration) throw new Error('work item reply report changed')
+  }
+  listPendingWorkItemReplies(input: WorkItemReplyListInput): { items: readonly WorkItemReplySource[]; hasMore: boolean; nextAfterSequence: number | null } {
+    this.assertActive()
+    if (!this.currentWorkItemReplyConsumer()) throw new Error('work item reply producer unavailable')
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100 || (input.afterSequence !== undefined && (!Number.isSafeInteger(input.afterSequence) || input.afterSequence < 0))) throw new Error('invalid work item reply scan')
+    const raw = this.deliveryStore.workItemReplies.pending(input)
+    const hasMore = raw.length > input.limit
+    const page = raw.slice(0,input.limit)
+    const eligible = page.filter(source => {
+      try { this.validateWorkItemReply(source); return true } catch { return false }
+    })
+    return Object.freeze({ items: Object.freeze(eligible), hasMore, nextAfterSequence: hasMore ? page.at(-1)!.admissionCursor.sequence : null })
+  }
+  readWorkItemReply(input: WorkItemReplyReadInput): WorkItemReplySource {
+    this.assertActive()
+    const source = this.deliveryStore.workItemReplies.read(input)
+    this.validateWorkItemReply(source)
+    return source
+  }
+  selectWorkItemReplyParent(input: WorkItemReplyReadInput): WorkItemReplySource {
+    this.assertActive()
+    return this.deliveryStore.workItemReplies.select(input,source => this.validateWorkItemReply(source))
+  }
+  acknowledgeWorkItemReply(input: WorkItemReplyReadInput & { childItemId: string; childPlanDigest: string }): WorkItemReplySource {
+    this.assertActive()
+    const source = this.deliveryStore.workItemReplies.acknowledge(input,source => {
+      this.validateWorkItemReply(source)
+      const registration = this.currentWorkItemReplyConsumer()
+      if (!source.executionParentItemId || !registration || registration.inspectChild({ replyId: source.id, sourceDigest: source.sourceDigest,
+        parentItemId: source.executionParentItemId, childItemId: input.childItemId, childPlanDigest: input.childPlanDigest }) !== true
+        || this.workItemReplyFence(source) !== registration) throw new Error('work item reply child is not durably verified')
+    })
+    this.notifyWorkItemReplyPending()
+    return source
   }
 
   enqueueBackground(input: {
@@ -4681,7 +4839,7 @@ export class AssistantDeliveryService extends Service {
     return this.enqueueBackgroundAuthorized(input)
   }
 
-  private enqueueBackgroundAuthorized(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string, string>> }): OutboxRecord {
+  private enqueueBackgroundAuthorized(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string, string>> }, reportTarget?: WorkItemReportTarget): OutboxRecord {
     const binding = this.deliveryStore.getBinding(input.bindingId)
     if (binding === undefined || binding.status !== 'active' || !this.hasActivePrincipal(binding)) {
       throw new AssistantDeliveryError('missing-binding', 'delivery binding does not exist or is revoked')
@@ -4697,10 +4855,11 @@ export class AssistantDeliveryService extends Service {
     if (!this.hasActivePrincipal(binding)) {
       throw new AssistantDeliveryError('missing-binding', 'delivery binding principal is no longer active')
     }
-    return this.deliveryStore.enqueue({ idempotencyKey: input.idempotencyKey, bindingId: binding.id,
+    const enqueue = () => this.deliveryStore.enqueue({ idempotencyKey: input.idempotencyKey, bindingId: binding.id,
       target: { conversation: binding.conversation, principal: binding.principal }, text: input.text,
       format: input.format ?? 'plain',
       ...(input.metadata === undefined ? {} : { metadata: input.metadata }) })
+    return reportTarget === undefined ? enqueue() : this.deliveryStore.workItemReplies.enqueueReport(reportTarget, binding, enqueue)
   }
 
   #notificationGuard(record: Readonly<OutboxRecord>): Extract<import('./types.js').AdapterSendResult, { outcome: 'not-sent' }> | undefined {

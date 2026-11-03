@@ -52,6 +52,8 @@ import { WorkItemContinuation } from './continuation.js'
 import type { WorkItemContinuationAdmission } from './continuation-record.js'
 import { WorkItemOwnerAccess } from './owner-access.js'
 import { WorkItemOwnerContinuation } from './owner-continuation.js'
+import { WorkItemOwnerReplies } from './owner-replies.js'
+import type { WorkItemReplyConsumerRegistration } from './peers.js'
 
 function fail(code: ConstructorParameters<typeof WorkItemError>[0], message: string, detail?: string): never {
   throw new WorkItemError(code, message, detail)
@@ -164,6 +166,7 @@ interface Components {
 const continuationRuntimes = new WeakMap<object, WorkItemContinuation>()
 const continuationAdmissions = new WeakMap<Components, (input: WorkItemAdmitInput, continuation: WorkItemContinuationAdmission) => WorkItemAdmitResult>()
 const continuationDispatches = new WeakMap<Components, WorkItemDispatch>()
+const replyConsumers = new WeakMap<object, WorkItemOwnerReplies>()
 const diagnosisRuntimes = new WeakMap<object, WorkItemDiagnosis>()
 const diagnosisAdmissions = new WeakMap<Components, (input: WorkItemAdmitInput, builder: (item: WorkItemRecord) => Readonly<WorkItemDiagnosisPlan>) => WorkItemAdmitResult>()
 
@@ -213,6 +216,7 @@ export class AssistantWorkItemsService extends Service {
   private workItemsClosed = false
   private readonly workItemsDiagnosisKey = Object.freeze({})
   private readonly workItemsContinuationKey = Object.freeze({})
+  private readonly workItemsReplyKey = Object.freeze({})
   private workItemsDiagnosisError: string | null = null
   private workItemsHasDiagnosisHistory = false
   private readonly workItemsSchedulerUnsubscribers = new Set<() => void>()
@@ -349,15 +353,39 @@ export class AssistantWorkItemsService extends Service {
             if (components.authority.check(item).kind !== 'allow') fail('authority-revoked', 'continuation admission mandate is unavailable')
           },
           wake: item => dispatch.wake(item),
+          isReplyConsumerCurrent: () => !this.workItemsClosed && replyConsumers.get(this.workItemsReplyKey)?.isCurrent() === true,
         })
         continuationRuntimes.set(this.workItemsContinuationKey, runtime)
+        let replies: WorkItemOwnerReplies | undefined
         try { runtime.start() }
         catch (error) {
           runtime.close()
           if (continuationRuntimes.get(this.workItemsContinuationKey) === runtime) continuationRuntimes.delete(this.workItemsContinuationKey)
           continuationCtx.logger.warn(`assistant-work-items: continuation activation unavailable: ${describe(error)}`)
         }
+        if (this.workItemsConfig.ownerReplyContinuation && continuationRuntimes.get(this.workItemsContinuationKey) === runtime) {
+          replies = new WorkItemOwnerReplies({ config: this.workItemsConfig, store: components.store,
+            delivery: () => continuationCtx.get('assistantDelivery' as never) as PeerDeliveryService | undefined,
+            runtime: () => continuationRuntimes.get(this.workItemsContinuationKey),
+            admit: (input, continuation) => {
+              const mint = continuationAdmissions.get(components)
+              if (!mint || this.workItemsClosed) fail('disabled', 'reply continuation admission unavailable')
+              return mint(input, continuation)
+            }, notification: (item, report) => components.dispatch.notification(item, report),
+            retire: ids => {
+              for (const id of ids) {
+                const item = components.store.findItemById(id)
+                if (item && components.store.getContinuation(id)) components.store.withdrawByDedupKey(item.dedupKey)
+              }
+              runtime.retire(ids)
+            } })
+          replyConsumers.set(this.workItemsReplyKey, replies)
+          try { replies.start() }
+          catch (error) { replies.close(); continuationCtx.logger.warn(`assistant-work-items: reply continuation unavailable: ${describe(error)}`) }
+        }
         continuationCtx.effect(() => () => {
+          replies?.close()
+          if (replyConsumers.get(this.workItemsReplyKey) === replies) replyConsumers.delete(this.workItemsReplyKey)
           runtime.close()
           if (continuationRuntimes.get(this.workItemsContinuationKey) === runtime) continuationRuntimes.delete(this.workItemsContinuationKey)
         }, 'assistant-work-items.continuation')
@@ -403,6 +431,7 @@ export class AssistantWorkItemsService extends Service {
         }
       }
       if (this.workItemsConfig.diagnosis) diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.sweep(false)
+      replyConsumers.get(this.workItemsReplyKey)?.drain()
       continuationRuntimes.get(this.workItemsContinuationKey)?.wakePending()
     } catch (error) {
       this.workItemsSchedulerLastError = error instanceof WorkItemError ? error.code : 'scheduler-wake-failed'
@@ -423,6 +452,8 @@ export class AssistantWorkItemsService extends Service {
   get diagnosisEnabled(): boolean { return this.workItemsConfig.diagnosis !== undefined }
 
   get ownerContinuationEnabled(): boolean { return this.workItemsConfig.ownerContinuation !== undefined }
+  ownsWorkItemReplyRegistration = (registration: WorkItemReplyConsumerRegistration): boolean =>
+    !this.workItemsClosed && replyConsumers.get(this.workItemsReplyKey)?.owns(registration) === true
 
   get ownerRecallEnabled(): boolean { return this.workItemsConfig.ownerRecall?.enabled === true }
 
@@ -956,7 +987,7 @@ export class AssistantWorkItemsService extends Service {
   }
 
   /** Bounded health projection; never creates the ledger when disabled. */
-  health(): WorkItemHealth & { readonly schedulerWake: WorkItemSchedulerWakeHealth; readonly diagnosis?: Readonly<{ enabled: true; ready: boolean; running: number; lastError: string | null; interventionRequired: boolean }>; readonly ownerContinuation?: ReturnType<WorkItemContinuation['health']> } {
+  health(): WorkItemHealth & { readonly schedulerWake: WorkItemSchedulerWakeHealth; readonly diagnosis?: Readonly<{ enabled: true; ready: boolean; running: number; lastError: string | null; interventionRequired: boolean }>; readonly ownerContinuation?: ReturnType<WorkItemContinuation['health']>; readonly ownerReplyContinuation?: ReturnType<WorkItemOwnerReplies['health']> } {
     const config = this.workItemsConfig
     const empty: WorkItemHealth = Object.freeze({
       enabled: config.enabled,
@@ -990,20 +1021,23 @@ export class AssistantWorkItemsService extends Service {
         interventionRequired: this.workItemsComponents ? persistedDiagnosisIntervention(this.workItemsComponents.store, true) : true } } : {}
     const continuation = config.ownerContinuation ? { ownerContinuation: continuationRuntimes.get(this.workItemsContinuationKey)?.health()
       ?? { enabled: true as const, ready: false, running: 0, interventionRequired: true, lastError: 'continuation-activation-unavailable' } } : {}
+    const replies = config.ownerReplyContinuation ? { ownerReplyContinuation: replyConsumers.get(this.workItemsReplyKey)?.health()
+      ?? { enabled: true as const, registered: false, draining: false, lastError: 'reply-consumer-unavailable' } } : {}
     const schedulerWake = Object.freeze({ subscribed: this.workItemsSchedulerUnsubscribers.size > 0,
       lastWakeAt: this.workItemsSchedulerLastWakeAt, lastError: this.workItemsSchedulerLastError })
-    if (!config.enabled || this.workItemsClosed) return Object.freeze({ ...empty, schedulerWake, ...diagnosis, ...continuation })
+    if (!config.enabled || this.workItemsClosed) return Object.freeze({ ...empty, schedulerWake, ...diagnosis, ...continuation, ...replies })
     let components: Components
     try {
       components = this.workItemsOpen()
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: ledger unavailable: ${describe(error)}`)
-      return Object.freeze({ ...empty, schedulerWake, ...diagnosis, ...continuation })
+      return Object.freeze({ ...empty, schedulerWake, ...diagnosis, ...continuation, ...replies })
     }
     return Object.freeze({
       schedulerWake,
       ...diagnosis,
       ...continuation,
+      ...replies,
       enabled: true,
       mode: config.mode,
       openItems: components.store.countOpenItems(),
@@ -1029,6 +1063,8 @@ export class AssistantWorkItemsService extends Service {
   close(): void {
     if (this.workItemsClosed) return
     this.workItemsClosed = true
+    replyConsumers.get(this.workItemsReplyKey)?.close()
+    replyConsumers.delete(this.workItemsReplyKey)
     diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.close()
     diagnosisRuntimes.delete(this.workItemsDiagnosisKey)
     continuationRuntimes.get(this.workItemsContinuationKey)?.close()
@@ -1108,6 +1144,7 @@ export class AssistantWorkItemsService extends Service {
     try {
       if (this.workItemsConfig.diagnosis) diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.wakePending()
       else components.dispatch.wakePending()
+      replyConsumers.get(this.workItemsReplyKey)?.drain()
       continuationRuntimes.get(this.workItemsContinuationKey)?.wakePending()
     } catch (error) {
       this.ctx.logger.warn(`assistant-work-items: dispatch recovery failed: ${describe(error)}`)
@@ -1265,6 +1302,8 @@ export class AssistantWorkItemsService extends Service {
       automations: () => this.workItemsAutomations(),
       delivery: () => this.workItemsDelivery(),
       validateWake: item => !config.diagnosis || diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.validateWake(item) === true,
+      validateWakeLocal: () => !this.workItemsClosed && (!config.diagnosis || diagnosisRuntimes.get(this.workItemsDiagnosisKey)?.isWakeCurrent() === true),
+      replyReportEligible: (item, report, notification) => replyConsumers.get(this.workItemsReplyKey)?.canEnqueue(item, report, notification) === true,
       authority,
     })
     // Signal sources are optional peers resolved lazily on every sweep, so a
@@ -1301,7 +1340,8 @@ export class AssistantWorkItemsService extends Service {
       })
       continuationDispatches.set(installed, new WorkItemDispatch({ config: continuationConfig, store, ledger,
         automations: () => this.workItemsAutomations(), delivery: () => this.workItemsDelivery(), authority,
-        validateWake: item => continuationRuntimes.get(this.workItemsContinuationKey)?.validateWake(item) === true }))
+        validateWake: item => continuationRuntimes.get(this.workItemsContinuationKey)?.validateWake(item) === true,
+        validateWakeLocal: item => !this.workItemsClosed && continuationRuntimes.get(this.workItemsContinuationKey)?.isWakeCurrent(item) === true }))
     }
     try {
       // Bounded startup reconcile: lease reclaim is lazy forever, so a host that

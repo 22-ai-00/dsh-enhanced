@@ -1,3 +1,4 @@
+import { removeEmptyWorkItemReplySchema } from './helpers/work-item-reply-schema.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -799,6 +800,7 @@ describe('durable outbox', () => {
     f.store.close()
 
     const legacy = new DatabaseSync(f.databasePath)
+    removeEmptyWorkItemReplySchema(legacy)
     legacy.exec(`
       DROP TABLE IF EXISTS delivery_preference_projection_outbox;
       DROP TABLE IF EXISTS trusted_delivery_evaluation_outbox;
@@ -861,6 +863,7 @@ describe('durable outbox', () => {
     f.store.close()
 
     const downgrade = new DatabaseSync(f.databasePath)
+    removeEmptyWorkItemReplySchema(downgrade)
     downgrade.exec(`
       DROP TABLE IF EXISTS delivery_preference_projection_outbox;
       DROP TABLE IF EXISTS trusted_delivery_evaluation_outbox;

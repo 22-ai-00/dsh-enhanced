@@ -32,10 +32,10 @@ function fixture() {
 }
 
 describe('autonomy doctor profile and persisted owner checks', () => {
-  it('reads a real Delivery schema 28 owner without changing identity, database or configured grant', () => {
+  it('reads a real Delivery schema 29 owner without changing identity, database or configured grant', () => {
     const { home, source, databasePath, grant } = fixture()
     const schema = new DatabaseSync(databasePath, { readOnly: true })
-    try { expect(schema.prepare('PRAGMA user_version').get()?.user_version).toBe(28) } finally { schema.close() }
+    try { expect(schema.prepare('PRAGMA user_version').get()?.user_version).toBe(29) } finally { schema.close() }
     const before = databaseFingerprint(databasePath)
     const profile = inspectAutonomyProfile(source, 'web', home)
     expect(profile.grant).toEqual(grant)
@@ -46,22 +46,48 @@ describe('autonomy doctor profile and persisted owner checks', () => {
     expect(existsSync(profile.stateRoot)).toBe(false)
   })
 
-  it('accepts reviewed Delivery v24 through v28 owner snapshots without changing either database', () => {
+  it('accepts reviewed Delivery v24 through v29 owner snapshots without changing either database', () => {
     const { home, source, databasePath } = fixture()
     const profile = inspectAutonomyProfile(source, 'web', home)
     const configured = structuredClone(profile)
-    for (const version of [24, 25, 26, 27, 28]) {
-      const db = new DatabaseSync(databasePath)
-      try { db.exec(`PRAGMA user_version=${version}`) } finally { db.close() }
-      const before = databaseFingerprint(databasePath)
-      expect(inspectAutonomyOwner(profile)).toEqual({ status: 'matched' })
-      expect(inspectAutonomyOwner({ ...profile, grant: { ...profile.grant, principalRecordId: 'foreign' } }))
+    for (const version of [24, 25, 26, 27, 28, 29]) {
+      // These are minimal read-only version-gate fixtures, never migration inputs.
+      // Keep the real current Delivery database untouched rather than relabelling it.
+      const path = join(home, `owner-v${version}.sqlite`)
+      const original = new DatabaseSync(databasePath, { readOnly: true })
+      const db = new DatabaseSync(path)
+      try {
+        const ddl = original.prepare("SELECT sql FROM sqlite_schema WHERE name='delivery_principals'").get()!.sql as string
+        const row = original.prepare('SELECT * FROM delivery_principals').get()!
+        db.exec(ddl)
+        db.prepare(`INSERT INTO delivery_principals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          row.id!, row.key_hash!, row.principal_json!, row.role!, row.status!, row.linked_to_id!, row.created_at!, row.updated_at!, row.version!)
+        db.exec(`PRAGMA user_version=${version}`)
+      } finally { db.close(); original.close() }
+      const snapshot = { ...profile, databasePath: path }
+      const before = databaseFingerprint(path)
+      expect(inspectAutonomyOwner(snapshot)).toEqual({ status: 'matched' })
+      expect(inspectAutonomyOwner({ ...snapshot, grant: { ...profile.grant, principalRecordId: 'foreign' } }))
         .toEqual({ status: 'mismatch' })
-      expect(databaseFingerprint(databasePath)).toEqual(before)
+      expect(databaseFingerprint(path)).toEqual(before)
       expect(profile).toEqual(configured)
-      const check = new DatabaseSync(databasePath, { readOnly: true })
+      const check = new DatabaseSync(path, { readOnly: true })
       try { expect(check.prepare('PRAGMA user_version').get()?.user_version).toBe(version) } finally { check.close() }
     }
+  })
+
+  it('does not use reply stream state as persisted owner authority', () => {
+    const { home, source, databasePath } = fixture()
+    const profile = inspectAutonomyProfile(source, 'web', home)
+    const db = new DatabaseSync(databasePath)
+    try {
+      db.prepare('INSERT INTO delivery_work_item_reply_streams VALUES (?, ?, ?)').run('a'.repeat(64), 'foreign-item', 99)
+      const before = databaseFingerprint(databasePath)
+      expect(inspectAutonomyOwner(profile)).toEqual({ status: 'matched' })
+      expect(databaseFingerprint(databasePath)).toEqual(before)
+      db.prepare("UPDATE delivery_principals SET status='revoked'").run()
+      expect(inspectAutonomyOwner(profile)).toEqual({ status: 'mismatch' })
+    } finally { db.close() }
   })
 
   it('rejects unreviewed older and future Delivery schemas without migrating them', () => {
@@ -70,7 +96,7 @@ describe('autonomy doctor profile and persisted owner checks', () => {
     const db = new DatabaseSync(databasePath)
     try {
       expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(deliverySchemaVersion)
-      for (const version of [23, 29]) {
+      for (const version of [23, 30]) {
         db.exec(`PRAGMA user_version=${version}`)
         const before = databaseFingerprint(databasePath)
         expect(inspectAutonomyOwner(profile)).toEqual({ status: 'unavailable' })

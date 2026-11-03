@@ -1,3 +1,4 @@
+import { removeEmptyWorkItemReplySchema } from './helpers/work-item-reply-schema.js'
 import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -327,7 +328,8 @@ describe('durable owner foreground completion feed', () => {
     f.store.close()
     const old = new DatabaseSync(f.path)
     try {
-      old.exec(`DROP TRIGGER delivery_foreground_identity_immutable;
+      removeEmptyWorkItemReplySchema(old)
+    old.exec(`DROP TRIGGER delivery_foreground_identity_immutable;
         DROP TRIGGER delivery_foreground_terminal_immutable;
         DROP TRIGGER delivery_foreground_terminal_delete_immutable;
         DROP TRIGGER delivery_foreground_completion_after_update;

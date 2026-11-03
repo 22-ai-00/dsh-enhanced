@@ -1,3 +1,4 @@
+import { removeEmptyWorkItemReplySchema } from './helpers/work-item-reply-schema.js'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -654,6 +655,7 @@ describe('stable owner route authority', () => {
     await dispose(first)
 
     const raw = new DatabaseSync(join(root, 'delivery.sqlite'))
+    removeEmptyWorkItemReplySchema(raw)
     raw.exec(`
       DROP TABLE IF EXISTS delivery_preference_projection_outbox;
       DROP TABLE IF EXISTS trusted_delivery_evaluation_outbox;

@@ -375,7 +375,33 @@ ownerContinuation:
 
 worker 仍由原生 Automations/AgentLoop 执行。认领后，`work_item_read_context` 默认分页读取当前主人原文；`parent-brief`、`parent-report`、`parent-outcome` 按冻结上界读取历史，正文最多 8192 UTF-8 字节一页并附续读引用。输入全文最多 256 KiB，按原字节持久保存。`/new` 后同一 owner lineage 可以查找并续办历史，运行中的精确 binding/generation 变化则停止原执行。
 
-每个子项最多执行一次；`waiting` 不产生自动重试。未知派发或未确认的执行占槽等待处置。新的待派发项使用已有 scheduler wake 有界检查，前一 occurrence 真正停止后才继续。报告后原生最终工具 guard 拒绝更多工具效果，仍可生成简短结束语。暂停、删除或更改已建立的 worker/配置不会自动重新启用。这里不实现运行中追加指令、跨信道身份合并或消息 Thread 订阅；它也不证明自主成长或外部通知实际送达。
+每个子项最多执行一次；`waiting` 不产生自动重试。未知派发或未确认的执行占槽等待处置。新的待派发项使用已有 scheduler wake 有界检查，前一 occurrence 真正停止后才继续。报告后原生最终工具 guard 拒绝更多工具效果，仍可生成简短结束语。暂停、删除或更改已建立的 worker/配置不会自动重新启用。
+
+### 回复报告后自动继续（显式启用）
+
+在上述完整配置中另加 `ownerReplyContinuation: true`，主人可以直接回复已经发到渠道的工作项终态报告。Delivery 必须具有 `workItemReplyProtocolVersion() === 1` 的接口，并单独允许真实外部主人的 `continue-work-items-from-reply` 操作：
+
+```yaml
+- id: owner-report-reply
+  effect: allow
+  subject:
+    kind: external
+    id: lark/my-account/my-tenant/my-owner
+    workspace: /absolute/workspace
+  actions: [continue-work-items-from-reply]
+  resource: { kind: automation, id: work-item-continuation }
+  context: { initiators: [external] }
+```
+
+将主体和路径替换为现有 owner scope；原有后台准入、预算、执行和发送授权仍须成立。开关默认关闭，不能代替 `ownerContinuation` 的工具和有限预算配置。开启后，符合条件的纯文本回复都作为续办指令，包括简短回复；这里不做语义分类。命令、附件、普通消息及不支持的报告仍走原有入口。
+
+只有当前同一 owner 对真实 provider 已接受的报告进行精确消息回复，才会持久转交后台。模型给出的 item ID、普通消息 metadata 或尚未确认的发送不能建立这条关系。转交后不再启动普通前台执行；父执行尚未静止时，回复保留在队列。连续回复同一报告会依次接上前一个子项的报告；手动调用 `work_item_continue` 产生的分支有自己的回复序列。
+
+这一入口没有前台模型调用，因此后续 worker 继承执行父项已冻结的 provider/model/effort，并冻结本次续办的显式工具范围、预算和期限。仅支持有冻结计划及精确执行证明的 diagnosis 或 continuation 父项；不会从当前 preset 推测旧模型。ACK 前不会派发子项，重复消息及重启恢复不会创建第二份执行；未知派发仍停驻。`/stop`、`/new`、`/clear` 和授权变化会阻止旧来源继续产生工具作用，不撤销已经发生的外部效果。
+
+Delivery schema 29 保存真实报告关联、回复原文与回复序列；WorkItems schema 9 用 v2 计划保存来源和继承关系。备份时须一致保留两份账本；不能只复制其中一个库来恢复续办。既有 v1 前台续办计划保持原协议。已有 continuation 配置不变时，单独开关回复入口不重建 worker；若同时更改准入种类、工具或预算，则仍受原有激活合同约束。
+
+此入口覆盖同一渠道的报告回复，不实现运行中指令插入、任意跨信道身份合并、多对多 Thread 订阅或长期自主成长。Provider 接受报告不等于用户已读或任务已独立验收。
 
 ## 配置
 
@@ -384,6 +410,7 @@ worker 仍由原生 Automations/AgentLoop 执行。认领后，`work_item_read_c
 | `enabled` | `false` | 总开关；关闭时不创建任何目录、文件或数据库 |
 | `mode` | `observe` | `observe` 只记录观察行；`active` 才唤醒 worker、发通知 |
 | `ownerContinuation` | 关闭 | 单独启用、独立 automation ID、显式工具范围与有限执行预算；见主人续办旧任务 |
+| `ownerReplyContinuation` | `false` | 将已授权主人的真实报告回复持久转交续办；要求已启用 ownerContinuation 和独立外部 Policy 授权 |
 | `ownerRecall.enabled` | `false` | 显式启用当前主人前台任务查询；要求 enabled active、完整 scope、worker automation 与独立 `inspect-work-items` 授权 |
 | `databasePath` | `$DSH_HOME/assistant-work-items/state.sqlite` | 私有账本绝对路径 |
 | `workRoot` | `$DSH_HOME/assistant-work-items/work` | 每项 scratch/artifact 根目录绝对路径 |

@@ -1983,6 +1983,22 @@ export class WorkItemStore {
     return row === undefined ? undefined : dispatchFromRow(row)
   }
 
+  /** Final synchronous wake fence. This method calls no peer or user callback;
+   * full SQLite text equality also closes Node 24's hidden-NUL projection gap. */
+  isWakeSnapshotCurrent(item: WorkItemRecord, dispatch: WorkItemDispatchRecord): boolean {
+    if (this.closed || dispatch.itemId !== item.id || dispatch.state !== 'pending') return false
+    const currentItem = this.findItemById(item.id), currentDispatch = this.getDispatch(item.id)
+    if (!currentItem || !currentDispatch || currentItem.observed || !['queued', 'waiting'].includes(currentItem.state)
+      || acceptanceCanonicalJson(currentItem) !== acceptanceCanonicalJson(item)
+      || acceptanceCanonicalJson(currentDispatch) !== acceptanceCanonicalJson(dispatch)) return false
+    this.#assertContinuationItemText(item.id)
+    return this.#statement(`SELECT 1 FROM work_item_dispatch WHERE item_id=?
+      AND CAST(item_id AS BLOB) IS CAST(? AS BLOB) AND CAST(automation_id AS BLOB) IS CAST(? AS BLOB)
+      AND CAST(event_id AS BLOB) IS CAST(? AS BLOB) AND CAST(state AS BLOB) IS CAST(? AS BLOB)
+      AND CAST(occurrence_id AS BLOB) IS CAST(? AS BLOB) AND CAST(reason AS BLOB) IS CAST(? AS BLOB)`)
+      .get(item.id, dispatch.itemId, dispatch.automationId, dispatch.eventId, dispatch.state, dispatch.occurrenceId, dispatch.reason) !== undefined
+  }
+
   /**
    * Pending dispatches whose due time has arrived.
    *

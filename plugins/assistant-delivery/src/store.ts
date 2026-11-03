@@ -1,3 +1,4 @@
+import { WorkItemRepliesStore } from './work-item-replies-store.js'
 import { normalizeForegroundTerminationObservation, type ForegroundTerminationObservation } from './foreground-termination.js'
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
 import { isAbsolute } from 'node:path'
@@ -2140,6 +2141,7 @@ export type NaturalObjectiveIntent = Readonly<{
 }>
 
 export class DeliveryStore {
+  readonly workItemReplies: WorkItemRepliesStore
   private readonly database: DatabaseSync
   /** Scan position only; every candidate is authorized again before a provider retry. */
   private readonly progressRecoveryCursors = new Map<string, {
@@ -2157,6 +2159,8 @@ export class DeliveryStore {
     this.now = options.now ?? Date.now
     this.codeGenerator = options.codeGenerator ?? (() => randomBytes(5).toString('hex').toUpperCase())
     this.maxTextBytes = options.maxTextBytes ?? 65_536
+    this.workItemReplies = new WorkItemRepliesStore(this.database, operation => this.transaction(operation),
+      id => this.getInbox(id), id => this.getBinding(id), id => this.getOutbox(id), binding => this.getPrincipal(binding.principal))
     const instance = this.database.prepare(`
       SELECT instance_id FROM delivery_instance WHERE singleton = 1
     `).get() as { instance_id: string } | undefined
@@ -3458,6 +3462,7 @@ export class DeliveryStore {
     dispatching: number
     claimedInboxIds: string[]
     dispatchingInboxIds: string[]
+    replyChildItemIds?: string[]
   } {
     this.assertOpen()
     const bindingId = validateBindingText(input.bindingId, 'bindingId', 256)
@@ -3556,11 +3561,13 @@ export class DeliveryStore {
       if (!Number.isSafeInteger(cancelledCount)) {
         throw new DeliveryStoreError('conflict', 'inbox cancellation count is outside the safe integer range')
       }
+      const replyChildItemIds = this.workItemReplies.cancelBefore(bindingId, boundaryRow.admission_sequence)
       return {
         cancelled: cancelledCount,
         dispatching: dispatchingRows.length,
         claimedInboxIds: claimedRows.map(row => row.id),
         dispatchingInboxIds: dispatchingRows.map(row => row.id),
+        ...(replyChildItemIds.length === 0 ? {} : { replyChildItemIds }),
       }
     })
   }

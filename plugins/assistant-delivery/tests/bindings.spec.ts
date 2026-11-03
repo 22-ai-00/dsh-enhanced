@@ -1,3 +1,4 @@
+import { removeEmptyWorkItemReplySchema } from './helpers/work-item-reply-schema.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -185,7 +186,8 @@ describe('conversation bindings', () => {
     store.close()
     const database = new DatabaseSync(path)
     try {
-      database.exec(`ALTER TABLE delivery_task_acceptance_executions DROP COLUMN model_reasoning_effort;
+      removeEmptyWorkItemReplySchema(database)
+    database.exec(`ALTER TABLE delivery_task_acceptance_executions DROP COLUMN model_reasoning_effort;
         ALTER TABLE delivery_task_acceptance_executions DROP COLUMN model_id;
         ALTER TABLE delivery_task_acceptance_executions DROP COLUMN model_provider;
         ALTER TABLE delivery_task_acceptance_executions DROP COLUMN model_selection_state;

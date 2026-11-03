@@ -1,3 +1,4 @@
+import { removeEmptyWorkItemReplySchema } from './helpers/work-item-reply-schema.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -124,7 +125,8 @@ describe('ordinary foreground execution receipts', () => {
     store.close()
     const database = new DatabaseSync(path)
     try {
-      database.exec('DROP TABLE delivery_foreground_executions; PRAGMA user_version = 22;')
+      removeEmptyWorkItemReplySchema(database)
+    database.exec('DROP TABLE delivery_foreground_executions; PRAGMA user_version = 22;')
     } finally { database.close() }
     const migrated = new DeliveryStore({ path })
     expect(migrated.inspectForegroundExecutionForOwner({ inboxId: inbox.id, scope: { workspace: '/work/foreground', preset: 'primary' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, bindingId: binding.id, bindingVersion: binding.version, bindingGeneration: binding.generation })).toBeNull()

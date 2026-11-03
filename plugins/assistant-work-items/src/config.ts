@@ -20,6 +20,7 @@ export interface Config {
   diagnosis?: DiagnosisConfig
   ownerRecall?: { enabled?: boolean }
   ownerContinuation?: OwnerContinuationConfig
+  ownerReplyContinuation?: boolean
 }
 
 /** A separately authorized Host worker; it never changes the diagnosis worker. */
@@ -136,6 +137,7 @@ export interface NormalizedConfig {
   readonly diagnosis?: NormalizedDiagnosis
   readonly ownerRecall?: Readonly<{ enabled: true }>
   readonly ownerContinuation?: NormalizedOwnerContinuation
+  readonly ownerReplyContinuation?: true
 }
 
 export interface NormalizedForegroundFailureSource {
@@ -196,7 +198,7 @@ const DELIVERY_KEYS = ['notifyOn'] as const
 const SETTLEMENT_KEYS = ['enabled', 'windowMs', 'sweepIntervalMs', 'maxSourcesPerSweep', 'maxPendingPerSweep', 'maxSettlementsPerSweep'] as const
 const SOURCES_KEYS = ['foregroundFailures'] as const
 const FOREGROUND_FAILURE_KEYS = ['enabled', 'kind', 'includeTimedOut', 'maxCandidatesPerSweep', 'maxAdmitsPerSweep', 'sweepIntervalMs'] as const
-const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerContinuation'] as const
+const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerContinuation', 'ownerReplyContinuation'] as const
 const REPORT_STATUSES = ['progress', 'waiting', 'ready', 'blocked', 'failed'] as const
 const NOTIFY_STATUSES = ['ready', 'blocked', 'failed'] as const
 
@@ -266,6 +268,7 @@ export const ConfigSchema = Schema.object({
   delivery: deliverySchema,
   sources: sourcesSchema,
   settlement: settlementSchema,
+  ownerReplyContinuation: Schema.boolean().default(false),
   ownerRecall: Schema.object({ enabled: Schema.boolean().default(false) }),
   ownerContinuation: Schema.object({
     enabled: Schema.boolean().default(false), automationId: Schema.string(), allowedTools: Schema.array(Schema.string()),
@@ -522,6 +525,9 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   if (ownerContinuation && (!enabled || mode !== 'active' || ownerRecall['enabled'] !== true)) {
     fail('invalid-input', 'ownerContinuation requires active intake and ownerRecall')
   }
+  const ownerReplyContinuation = value['ownerReplyContinuation']
+  if (ownerReplyContinuation !== undefined && typeof ownerReplyContinuation !== 'boolean') fail('invalid-input', 'ownerReplyContinuation must be a boolean')
+  if (ownerReplyContinuation === true && !ownerContinuation) fail('invalid-input', 'ownerReplyContinuation requires active ownerContinuation authorization')
   return Object.freeze({
     enabled,
     mode,
@@ -538,6 +544,7 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     ...(diagnosis === undefined ? {} : { diagnosis }),
     ...(ownerRecall['enabled'] === true ? { ownerRecall: Object.freeze({ enabled: true as const }) } : {}),
     ...(ownerContinuation === undefined ? {} : { ownerContinuation }),
+    ...(ownerReplyContinuation === true ? { ownerReplyContinuation: true as const } : {}),
   })
 }
 

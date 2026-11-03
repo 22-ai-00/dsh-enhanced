@@ -205,6 +205,10 @@ export class WorkItemDiagnosis {
             && this.outerSucceeded(this.store.diagnosisReportOccurrence(item.id, this.store.reports(item.id).at(-1)!.revision)))
     } catch { return false }
   }
+  /** Consumer lifetime only; safe after the last peer authorization callback. */
+  isWakeCurrent(): boolean {
+    return !this.#closed && !this.#controller.signal.aborted && !this.store.closed && this.#activation?.stage === 'established'
+  }
   wakePending(): void {
     for (const dispatch of this.store.listOpenDispatches(10)) {
       const item = this.store.findItemById(dispatch.itemId)

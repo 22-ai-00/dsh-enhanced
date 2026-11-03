@@ -1,3 +1,4 @@
+import { removeEmptyWorkItemReplySchema } from './helpers/work-item-reply-schema.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -263,6 +264,7 @@ describe('durable progress journal', () => {
     const { intent, inbox } = f.admit('evt-old')
     f.store.close()
     const raw = new DatabaseSync(f.path)
+    removeEmptyWorkItemReplySchema(raw)
     raw.exec('DROP TABLE delivery_progress; PRAGMA user_version = 26;')
     raw.close()
     const reopened = f.open()

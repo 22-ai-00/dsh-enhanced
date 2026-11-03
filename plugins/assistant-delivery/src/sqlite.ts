@@ -1,9 +1,10 @@
+import { workItemRepliesSchema } from './work-item-replies-schema.js'
 import { foregroundTerminationKinds } from './foreground-termination.js'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 28
+export const deliverySchemaVersion = 29
 
 /** Provider progress is a presentation journal, keyed to the authoritative Inbox. */
 const progressSchema = `
@@ -1371,6 +1372,9 @@ function migrateObserved(database: DatabaseSync): void {
     }
     database.exec('PRAGMA user_version = 28;'); version = 28
   }
+  if (version === 28) {
+    database.exec(`${workItemRepliesSchema} PRAGMA user_version = 29;`); version = 29
+  }
   if (version === deliverySchemaVersion) return
   database.exec(`
     ${deliveryInstanceSchema}
@@ -1594,8 +1598,22 @@ function migrateObserved(database: DatabaseSync): void {
     ${restartInboxFenceSchema}
     ${restartOutboxFenceSchema}
     ${progressSchema}
-    PRAGMA user_version = 28;
+    ${workItemRepliesSchema}
+    PRAGMA user_version = 29;
   `)
+}
+
+/** Verify exact authority tables/triggers on reopening; version labels alone confer no authority. */
+function assertWorkItemRepliesSchema(database: DatabaseSync): void {
+  const expected = new DatabaseSync(':memory:')
+  try {
+    expected.exec(workItemRepliesSchema)
+    const query = `SELECT type,name,tbl_name,sql FROM sqlite_schema
+      WHERE tbl_name IN ('delivery_work_item_reports','delivery_work_item_reply_streams','delivery_work_item_replies') ORDER BY type,name`
+    if (JSON.stringify(database.prepare(query).all()) !== JSON.stringify(expected.prepare(query).all())) {
+      throw new Error('invalid work item reply authority schema')
+    }
+  } finally { expected.close() }
 }
 
 /** Serialize the complete forward migration chain across every Host process. */
@@ -1607,6 +1625,7 @@ function migrate(database: DatabaseSync): void {
     assertSessionLeaseSchema(database)
     assertGoalOutcomeTargetSchema(database)
     assertForegroundTerminationSchema(database)
+    assertWorkItemRepliesSchema(database)
     database.exec('COMMIT')
   } catch (error) {
     try { database.exec('ROLLBACK') } catch {}

@@ -1,3 +1,4 @@
+import { removeEmptyWorkItemReplySchema } from './helpers/work-item-reply-schema.js'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
@@ -143,6 +144,7 @@ describe('delivery SQLite boundary', () => {
     roots.push(root)
     const path = join(root, 'delivery.sqlite')
     const previous = openDeliveryDatabase(path)
+    removeEmptyWorkItemReplySchema(previous)
     previous.exec('DROP TABLE delivery_natural_objective_intents; PRAGMA user_version = 23;')
     previous.close()
     const migrated = openDeliveryDatabase(path)
@@ -162,6 +164,7 @@ describe('delivery SQLite boundary', () => {
     roots.push(root)
     const path = join(root, 'delivery.sqlite')
     const raw = openDeliveryDatabase(path)
+    removeEmptyWorkItemReplySchema(raw)
     raw.exec('DROP TABLE delivery_goal_outcome_targets; PRAGMA user_version = 19;')
     raw.close()
 
@@ -272,6 +275,7 @@ describe('delivery SQLite boundary', () => {
       ) VALUES (?, 'lark', 'bot', ?, ?, ?, 'received', 0, 10, 10)
     `).run('inbox-old-2', 'event-old-2', 'b'.repeat(64), JSON.stringify({ legacy: 2 }))
     raw.exec('DROP TABLE delivery_owner_objective_commands')
+    removeEmptyWorkItemReplySchema(raw)
     raw.exec('PRAGMA user_version = 12')
     raw.close()
 
@@ -340,6 +344,7 @@ describe('delivery SQLite boundary', () => {
     roots.push(root)
     const path = join(root, 'delivery.sqlite')
     const raw = openDeliveryDatabase(path)
+    removeEmptyWorkItemReplySchema(raw)
     raw.exec(`
       DROP INDEX approval_outbox_route_binding;
       DROP TABLE approval_outbox_routes;
@@ -549,6 +554,7 @@ describe('delivery SQLite boundary', () => {
     const start = join(root, 'start')
     openDeliveryDatabase(path).close()
     const raw = new DatabaseSync(path)
+    removeEmptyWorkItemReplySchema(raw)
     raw.exec(`
       DROP TRIGGER IF EXISTS delivery_inbox_admission_after_insert;
       DROP TABLE IF EXISTS delivery_inbox_admissions;

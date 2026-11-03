@@ -3,17 +3,19 @@ import type { Context } from '@deepseek-ai/cordis'
 import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { HostAutomationExecutorInput, HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
 import type { NormalizedConfig } from './config.js'
-import type { PeerAutomationsService, PeerDeliveryService, PeerOwnerRouteReceipt, PeerPolicyService } from './peers.js'
+import type { PeerAutomationsService, PeerDeliveryService, PeerOwnerRouteReceipt, PeerPolicyService, WorkItemReplySource } from './peers.js'
 import type { WorkItemStore } from './store.js'
 import { OPEN_STATES, type WorkItemRecord, type WorkItemReportStatus } from './types.js'
 import { continuationDigest, continuationSourceKey, type WorkItemContinuationAdmission } from './continuation-record.js'
 import {
   CONTINUATION_EXECUTOR, CONTINUATION_OWNER, CONTINUATION_PROMPT_VERSION, continuationCanonical,
   continuationConfigurationDigest, continuationDefinition, continuationDefinitionHash, continuationFail,
-  continuationItemBasis, continuationOwnerLineage, continuationSchemas, createContinuationPlan, parseContinuationActivation, parseContinuationPlan,
+  continuationItemBasis, continuationOwnerLineage, continuationSchemas, createContinuationPlan, parseContinuationActivation,
   type ContinuationActivation, type ContinuationParent, type ContinuationProductionProof, type ContinuationSource,
-  type WorkItemContinuationPlan,
 } from './continuation-contract.js'
+import { DIAGNOSIS_OWNER } from './diagnosis-contract.js'
+import { createReplyContinuationPlan, immutableReply, isReplyContinuationPlan, parseStoredContinuationPlan,
+  type ReplySupplierEvidence, type StoredContinuationPlan } from './reply-contract.js'
 
 const ACTIVATION_KEY='continuation.activation/v1'
 const PENDING_CURSOR_KEY='continuation.pending-cursor/v1'
@@ -21,6 +23,8 @@ export interface ContinuationHooks {
   readonly assertOwner:(item:WorkItemRecord)=>Readonly<PeerOwnerRouteReceipt>
   readonly assertMandate:(item:WorkItemRecord)=>void
   readonly wake:(item:WorkItemRecord)=>boolean
+  /** Pure local registration/lifecycle check, never a Delivery call. */
+  readonly isReplyConsumerCurrent?:()=>boolean
 }
 export interface ContinuationContextInput {
   readonly kind?:'input'|'parent-brief'|'parent-report'|'parent-outcome'
@@ -29,7 +33,7 @@ export interface ContinuationContextInput {
   readonly maxBytes?:number
 }
 interface Run {
-  readonly input:HostAutomationExecutorInput; readonly itemId:string; readonly plan:WorkItemContinuationPlan
+  readonly input:HostAutomationExecutorInput; readonly itemId:string; readonly plan:StoredContinuationPlan
   readonly controller:AbortController
   phase:'before-claim'|'claimed'|'reported'
   reportRevision?:number; reportStatus?:WorkItemReportStatus
@@ -144,7 +148,7 @@ export class WorkItemContinuation {
       || proof.immutableContext.state!=='verified' || proof.immutableContext.scope.workspace!==input.workspace
       || proof.immutableContext.scope.agentPreset!==input.agentPreset) continuationFail('exact production termination unproven')
     if(continuation) {
-      const plan=parseContinuationPlan(continuation.planJson)
+      const plan=parseStoredContinuationPlan(continuation.planJson)
       if(acceptanceCanonicalJson(plan.item)!==acceptanceCanonicalJson(continuationItemBasis(item))
         || plan.source.digest!==continuation.sourceDigest || plan.source.inputSha256!==continuation.inputSha256
         || plan.source.inputBytes!==continuation.inputBytes || plan.parent.itemId!==continuation.parentItemId
@@ -190,10 +194,91 @@ export class WorkItemContinuation {
         parentOutcomeRevision:parent.outcomeRevision,planJson,planDigest:continuationDigest(planJson),createdAt:item.createdAt})
     }})
   }
-  private currentPlan(item:WorkItemRecord):Readonly<WorkItemContinuationPlan> {
+  private replySource(id:string,sourceDigest:string):Readonly<WorkItemReplySource> {
+    if(!this.config.ownerReplyContinuation) continuationFail('report reply continuation disabled')
+    const delivery=this.context.get('assistantDelivery' as never) as PeerDeliveryService|undefined
+    if(delivery?.workItemReplyProtocolVersion?.()!==1 || !delivery.readWorkItemReply) continuationFail('reply source peer unavailable')
+    const source=delivery.readWorkItemReply({id,expectedSourceDigest:sourceDigest}),owner=this.owner(),scope=this.config.scope!
+    immutableReply(source)
+    if(source.id!==id || source.sourceDigest!==sourceDigest || source.state==='cancelled'
+      || source.scope.workspace!==scope.workspace || source.scope.preset!==scope.preset || source.principalId!==scope.principalId
+      || source.owner.principalRecordId!==owner.principalRecordId || source.owner.principalVersion!==owner.principalVersion
+      || source.binding.generation!==owner.generation || source.binding.version!==owner.bindingVersion) continuationFail('reply source authority changed')
+    return source
+  }
+  private parentSupplier(parent:ContinuationParent):Readonly<{modelSelection:ContinuationSource['modelSelection'];evidence:ReplySupplierEvidence}> {
+    const item=this.store.findItemById(parent.itemId)
+    if(!item) continuationFail('supplier parent missing')
+    const continuation=this.store.getContinuation(item.id)
+    let model:ContinuationSource['modelSelection'],kind:ReplySupplierEvidence['kind'],planDigest:string
+    if(continuation) {
+      const plan=parseStoredContinuationPlan(continuation.planJson)
+      // proof() binds this exact immutable production to the sealed plan.
+      const production=this.proof(item,parent.production.occurrenceId)
+      if(acceptanceCanonicalJson(production)!==acceptanceCanonicalJson(parent.production)) continuationFail('supplier production changed')
+      model={provider:plan.contract.provider,model:plan.contract.model,
+        ...(Object.hasOwn(plan.contract,'reasoningEffort')?{reasoningEffort:plan.contract.reasoningEffort!}:{})}
+      if(acceptanceCanonicalJson(model)!==acceptanceCanonicalJson(plan.source.modelSelection)) continuationFail('supplier contract differs from source')
+      kind='continuation-plan';planDigest=continuation.planDigest
+    } else {
+      const plan=this.store.readDiagnosisPlan(item.id)
+      if(!plan || plan.worker.owner!==DIAGNOSIS_OWNER || plan.worker.automationId!==item.workerAutomationId
+        || parent.production.budgetSettlementState!=='finalized'
+        || parent.production.immutableContext.owner!==DIAGNOSIS_OWNER
+        || parent.production.immutableContext.definitionHash!==plan.worker.definitionHash
+        || parent.production.immutableContext.definitionVersion!==plan.worker.definitionVersion) continuationFail('parent has no proven frozen diagnosis supplier')
+      model={provider:plan.contract.provider,model:plan.contract.model,
+        ...(Object.hasOwn(plan.contract,'reasoningEffort')?{reasoningEffort:plan.contract.reasoningEffort!}:{})}
+      kind='diagnosis-plan';planDigest=continuationDigest(acceptanceCanonicalJson(plan))
+    }
+    return Object.freeze({modelSelection:Object.freeze(model),evidence:Object.freeze({kind,itemId:item.id,planDigest,production:parent.production})})
+  }
+  /** Local-only producer inspection. Delivery calls this while checking a
+   * sidecar, so it must never re-enter Delivery or depend on terminal proof. */
+  inspectReportStream(item:WorkItemRecord):Readonly<{streamId:string;planDigest:string}>|undefined {
+    if(!this.config.ownerReplyContinuation || this.#closed || this.store.closed || item.observed) return undefined
+    const scope=this.config.scope
+    if(!scope || item.scope.workspace!==scope.workspace || item.scope.preset!==scope.preset
+      || item.scope.principalId!==scope.principalId || item.scope.ownerRouteId!==scope.ownerRouteId
+      || ![this.config.workerAutomationId,this.config.ownerContinuation!.automationId].includes(item.workerAutomationId)) return undefined
+    const continuation=this.store.getContinuation(item.id)
+    if(continuation) {
+      const plan=parseStoredContinuationPlan(continuation.planJson)
+      if(acceptanceCanonicalJson(plan.item)!==acceptanceCanonicalJson(continuationItemBasis(item))) return undefined
+      return Object.freeze({streamId:isReplyContinuationPlan(plan)?plan.source.origin.reply.target.streamId:item.id,planDigest:continuation.planDigest})
+    }
+    const plan=this.store.readDiagnosisPlan(item.id)
+    if(!plan || plan.worker.owner!==DIAGNOSIS_OWNER || plan.worker.automationId!==item.workerAutomationId) return undefined
+    return Object.freeze({streamId:item.id,planDigest:continuationDigest(acceptanceCanonicalJson(plan))})
+  }
+  /** Admission only: the caller must durably ACK this child before any wake. */
+  prepareReply(id:string,sourceDigest:string,assertCurrent:()=>void):WorkItemContinuationAdmission {
+    assertCurrent()
+    const activation=this.assertActivation(),source=this.replySource(id,sourceDigest)
+    if(!source.executionParentItemId || source.state!=='pending') continuationFail('reply has no frozen parent selection')
+    const parent=this.parent(source.executionParentItemId),supplier=this.parentSupplier(parent)
+    const frozenSource=JSON.parse(acceptanceCanonicalJson(source)) as WorkItemReplySource
+    const sourceKey=continuationSourceKey(parent.itemId,sourceDigest)
+    assertCurrent()
+    return Object.freeze({parentItemId:parent.itemId,sourceDigest,sourceKey,create:(item:WorkItemRecord)=>{
+      assertCurrent()
+      const current=this.replySource(id,sourceDigest),currentParent=this.parent(parent.itemId),currentSupplier=this.parentSupplier(currentParent)
+      if(acceptanceCanonicalJson(immutableReply(current))!==acceptanceCanonicalJson(immutableReply(frozenSource))
+        || current.executionParentItemId!==parent.itemId || current.state!=='pending'
+        || acceptanceCanonicalJson(currentParent)!==acceptanceCanonicalJson(parent)
+        || acceptanceCanonicalJson(currentSupplier)!==acceptanceCanonicalJson(supplier)) continuationFail('reply changed before admission')
+      const plan=createReplyContinuationPlan(item,current,parent,supplier,this.config,this.assertActivation(activation),this.schemas())
+      const planJson=continuationCanonical(plan)
+      assertCurrent()
+      return Object.freeze({itemId:item.id,parentItemId:parent.itemId,rootItemId:parent.rootItemId,sourceKey,sourceDigest,
+        inputText:current.inputText,inputSha256:current.inputSha256,parentReportRevision:parent.reportRevision,
+        parentOutcomeRevision:parent.outcomeRevision,planJson,planDigest:continuationDigest(planJson),createdAt:item.createdAt})
+    }})
+  }
+  private currentPlan(item:WorkItemRecord):Readonly<StoredContinuationPlan> {
     const record=this.store.getContinuation(item.id)
     if(!record) continuationFail('frozen record unavailable')
-    const plan=parseContinuationPlan(record.planJson),activation=this.assertActivation()
+    const plan=parseStoredContinuationPlan(record.planJson),activation=this.assertActivation()
     this.hooks.assertOwner(item);this.hooks.assertMandate(item)
     if(plan.parent.itemId!==record.parentItemId || plan.parent.rootItemId!==record.rootItemId
       || plan.parent.reportRevision!==record.parentReportRevision || plan.parent.outcomeRevision!==record.parentOutcomeRevision
@@ -201,7 +286,13 @@ export class WorkItemContinuation {
       || Date.now()>=plan.authorization.expiresAt) continuationFail('frozen record association changed')
     const parent=this.store.findItemById(record.parentItemId)
     if(!parent || acceptanceCanonicalJson(this.proof(parent,plan.parent.production.occurrenceId))!==acceptanceCanonicalJson(plan.parent.production)) continuationFail('parent proof changed')
-    const expected=createContinuationPlan(item,{sourceDigest:record.sourceDigest,inputText:record.inputText,modelSelection:plan.source.modelSelection},plan.parent,this.config,activation,this.schemas())
+    const expected=isReplyContinuationPlan(plan)?(()=>{
+      const source=this.replySource(plan.source.origin.reply.id,record.sourceDigest)
+      if(source.state!=='routed' || source.child?.itemId!==item.id || source.child.planDigest!==record.planDigest
+        || source.executionParentItemId!==record.parentItemId
+        || acceptanceCanonicalJson(immutableReply(source))!==acceptanceCanonicalJson(plan.source.origin.reply)) continuationFail('reply child is not durably acknowledged')
+      return createReplyContinuationPlan(item,source,plan.parent,this.parentSupplier(plan.parent),this.config,activation,this.schemas())
+    })():createContinuationPlan(item,{sourceDigest:record.sourceDigest,inputText:record.inputText,modelSelection:plan.source.modelSelection},plan.parent,this.config,activation,this.schemas())
     if(record.planJson!==continuationCanonical(expected)) continuationFail('frozen execution contract changed')
     return plan
   }
@@ -212,7 +303,7 @@ export class WorkItemContinuation {
     if(!last) return true
     if(!last.dispatch.occurrenceId) return false
     try {
-      const proof=this.proof(last.item,last.dispatch.occurrenceId),plan=parseContinuationPlan(last.continuation.planJson)
+      const proof=this.proof(last.item,last.dispatch.occurrenceId),plan=parseStoredContinuationPlan(last.continuation.planJson)
       return proof.immutableContext.definitionHash===plan.activation.definitionHash
         && proof.immutableContext.definitionVersion===plan.activation.definitionVersion
         && proof.immutableContext.owner===CONTINUATION_OWNER
@@ -224,8 +315,19 @@ export class WorkItemContinuation {
       const dispatch=this.store.getDispatch(item.id)
       if(!dispatch || dispatch.state!=='pending' || dispatch.generation!==0 || dispatch.automationId!==this.config.ownerContinuation!.automationId) return false
       this.currentPlan(item)
-      return true
+      return this.isWakeCurrent(item)
     } catch {return false}
+  }
+  /** No peer calls: closes disposal during the final foreign wake check. */
+  isWakeCurrent(item:WorkItemRecord):boolean {
+    const scope=this.config.scope,settings=this.config.ownerContinuation
+    if(this.#closed || this.#controller.signal.aborted || this.store.closed || this.#activation?.stage!=='established'
+      || this.#runs.size>0 || !scope || !settings || Date.now()>=Math.min(scope.expiresAt,settings.expiresAt)) return false
+    const record=this.store.getContinuation(item.id)
+    if(!record) return false
+    const plan=parseStoredContinuationPlan(record.planJson)
+    if(isReplyContinuationPlan(plan) && this.hooks.isReplyConsumerCurrent?.()!==true) return false
+    return !this.#closed && !this.#controller.signal.aborted && !this.store.closed
   }
   wakePending():void {
     if(this.#closed || this.#waking) return
@@ -249,12 +351,26 @@ export class WorkItemContinuation {
       let sent=false
       for(const {item} of page) {
         after={createdAt:item.createdAt,id:item.id}
+        this.retireCancelledReply(item)
         if(this.validateWake(item) && this.hooks.wake(item)) {sent=true;break}
       }
       // Each native wake examines at most ten rows. A durable keyset cursor
       // reaches live rows behind stale owner generations and survives restarts.
       this.store.setMeta(PENDING_CURSOR_KEY,continuationCanonical({automationId,after:sent||page.length===10?after!:null}))
     } catch {this.#lastError='continuation-wake-unavailable'} finally {this.#waking=false}
+  }
+  private retireCancelledReply(item:WorkItemRecord):void {
+    const record=this.store.getContinuation(item.id)
+    if(!record) return
+    const plan=parseStoredContinuationPlan(record.planJson)
+    if(!isReplyContinuationPlan(plan)) return
+    try {this.replySource(plan.source.origin.reply.id,record.sourceDigest)} catch(error) {
+      if(!(error && typeof error==='object' && 'code' in error && error.code==='work-item-reply-cancelled')) return
+      // A durable source cancellation only reduces local authority. It is not
+      // proof that any already-dispatched occurrence or effect has stopped.
+      const retired=this.store.withdrawByDedupKey(item.dedupKey,{sourceId:'owner-report-reply',externalId:item.externalId,observedAt:Date.now()})
+      this.retire(retired.items.map(row=>row.id))
+    }
   }
   private assertRun(run:Run):WorkItemRecord {
     if(this.#closed || this.#controller.signal.aborted || run.input.signal.aborted || run.controller.signal.aborted

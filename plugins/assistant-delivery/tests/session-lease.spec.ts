@@ -1,3 +1,4 @@
+import { removeEmptyWorkItemReplySchema } from './helpers/work-item-reply-schema.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -64,7 +65,8 @@ describe('session leases', () => {
 
   test('migrates a v18 database without disturbing existing data', async () => {
     const f = await fixture(); f.store.close()
-    const database = new DatabaseSync(f.path); database.exec('DROP TABLE delivery_session_leases; PRAGMA user_version = 18;'); database.close()
+    const database = new DatabaseSync(f.path); removeEmptyWorkItemReplySchema(database)
+    database.exec('DROP TABLE delivery_session_leases; PRAGMA user_version = 18;'); database.close()
     const reopened = new DeliveryStore({ path: f.path })
     expect(reopened.getBinding(f.binding.id)?.sessionId).toBe('session-a')
     const inspected = new DatabaseSync(f.path)

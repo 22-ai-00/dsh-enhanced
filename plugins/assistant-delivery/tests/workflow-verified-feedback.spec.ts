@@ -1,3 +1,4 @@
+import { removeEmptyWorkItemReplySchema } from './helpers/work-item-reply-schema.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
@@ -407,7 +408,8 @@ test('legacy foreground feedback does not transfer authority to a later principa
     sourceInboxId: source.inboxId, sourceOutboxId: source.outboxId, objectiveStatus: 'achieved' })
   fixture.store.close()
   const db = new DatabaseSync(path)
-  db.exec('DROP TABLE delivery_owner_objective_commands; PRAGMA user_version = 16')
+  removeEmptyWorkItemReplySchema(db)
+    db.exec('DROP TABLE delivery_owner_objective_commands; PRAGMA user_version = 16')
   db.close()
   const store = new DeliveryStore({ path, now: () => 1000 })
   const owner = store.getPrincipal(fixture.principal)!

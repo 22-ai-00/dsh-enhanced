@@ -123,11 +123,11 @@ test('migrates real schema27 rows without guessing observations or changing the 
   expect(sourceDigest).toBe(hash(acceptanceCanonicalJson({ ...body, envelopeHash: f.inbox.envelopeHash })))
   expect(before).not.toHaveProperty('termination'); f.store.close(); stores.delete(f.store)
   sql(f.path, db => { for (const trigger of ['insert','update','immutable']) db.exec(`DROP TRIGGER delivery_foreground_termination_${trigger}`)
-    db.exec('ALTER TABLE delivery_foreground_executions DROP COLUMN termination_json; PRAGMA user_version=27') })
+    db.exec('DROP TABLE delivery_work_item_replies; DROP TABLE delivery_work_item_reply_streams; DROP TABLE delivery_work_item_reports; ALTER TABLE delivery_foreground_executions DROP COLUMN termination_json; PRAGMA user_version=27') })
   const reopened = new DeliveryStore({ path: f.path }); stores.add(reopened)
   expect(reopened.inspectOwnerForegroundTaskSource({ ...f.scope, inboxId: f.inboxId }, authority)).toEqual(before)
   expect(reopened.readOwnerForegroundTaskInput({ ...f.scope, inboxId: f.inboxId, expectedSourceDigest: sourceDigest }, authority)).toBeUndefined()
-  sql(f.path, db => { expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(28); expect(db.prepare('SELECT termination_json FROM delivery_foreground_executions').get()?.termination_json).toBeNull() })
+  sql(f.path, db => { expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(29); expect(db.prepare('SELECT termination_json FROM delivery_foreground_executions').get()?.termination_json).toBeNull() })
 })
 
 test('permits observed completion input without relaxing the successful content reader contract', async () => {

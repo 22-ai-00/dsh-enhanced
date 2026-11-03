@@ -100,10 +100,11 @@ export function inspectAutonomyOwner(profile: AutonomyDoctorProfile): { status: 
     // Deliberately pinned rather than imported: each Delivery schema must be
     // reviewed before this self-contained read-only gate accepts it. v25 adds
     // foreground completion sequencing, v26 restart fences, v27 progress
-    // handles and v28 foreground termination. Principal authority is unchanged from v24.
+    // handles, v28 foreground termination and v29 report/reply sidecars.
+    // Principal authority is unchanged from v24; reply state is not an owner receipt.
     // Unknown versions fail closed.
     const schemaVersion = (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
-    if (![24, 25, 26, 27, 28].includes(schemaVersion)) return { status: 'unavailable' }
+    if (![24, 25, 26, 27, 28, 29].includes(schemaVersion)) return { status: 'unavailable' }
     const row = database.prepare('SELECT principal_json, role, status, version, linked_to_id FROM delivery_principals WHERE id = ?').get(profile.grant.principalRecordId)
     if (!row || row.role !== 'owner' || row.status !== 'active' || row.version !== profile.grant.principalVersion || row.linked_to_id !== null
       || typeof row.principal_json !== 'string' || !isDeepStrictEqual(JSON.parse(row.principal_json), profile.principal)) return { status: 'mismatch' }
