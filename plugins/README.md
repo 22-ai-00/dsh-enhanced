@@ -66,6 +66,8 @@
 |---|---|---|---|
 | [hello](hello) | `@dsh-enhanced/hello` | 示例 | 最小可安装 bundle，用于验证仓库契约和开发链路。 |
 
+| [owner-console](owner-console) | `@dsh-enhanced/owner-console` | 实验性 | 左侧栏主人控制台：一页纸展示飞书远程接入状态、TraeX 入口与依赖自检；只读、只显示需要人处理的事，不发起模型调用。 |
+
 <!-- plugin-catalog:end -->
 
 状态建议使用“实验性 / Beta / 稳定 / 已弃用”。新增、重命名、弃用或移除插件时必须同步维护此表。
