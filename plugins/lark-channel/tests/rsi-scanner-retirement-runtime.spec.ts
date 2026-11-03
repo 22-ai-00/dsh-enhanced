@@ -69,7 +69,9 @@ async function fixture(options: { budget?: boolean; deny?: boolean; emergency?: 
       VALUES ('occurrence','ordinary-task','manual','manual',?,'unknown',0,?,?)`).run(now, now, now)
     db.prepare(`INSERT INTO automation_tasks(id,occurrence_id,automation_id,status,cancel_requested,attempt_count,created_at,updated_at)
       VALUES ('unknown-task','occurrence','ordinary-task','unknown',0,0,?,?)`).run(now, now)
-    if (options.v15) db.exec(`DROP TRIGGER automation_retirements_no_update; DROP TRIGGER automation_retirements_no_delete;
+    if (options.v15) db.exec(`DROP TRIGGER automation_run_quiescence_immutable;
+      ALTER TABLE automation_runs DROP COLUMN quiescent;
+      DROP TRIGGER automation_retirements_no_update; DROP TRIGGER automation_retirements_no_delete;
       DROP TRIGGER automation_retired_no_activate_insert; DROP TRIGGER automation_retired_no_activate_update;
       DROP TABLE automation_system_retirements; PRAGMA user_version=15`)
   }, true)
@@ -120,7 +122,14 @@ describe('stopped-stage retirement through formal Cordis services', () => {
     expect(Object.isFrozen(first[0])).toBe(true)
     expect(intervals).not.toHaveBeenCalled()
     const after = inspectAutomationRetirementSnapshot(f.databasePath)
-    expect(after.historyTables).toEqual(f.before.historyTables)
+    expect(after.schemaVersion).toBe(17)
+    const preservedHistory = after.historyTables.map(table => {
+      if (!v15 || table.name !== 'automation_runs') return table
+      const { legacyDigest, nonNullQuiescentCount, ...legacyRun } = table
+      expect(nonNullQuiescentCount).toBe(0)
+      return { ...legacyRun, digest: legacyDigest }
+    })
+    expect(preservedHistory).toEqual(f.before.historyTables)
     expect(after.records.find(row => row.id === 'ordinary-task')).toEqual(f.before.records.find(row => row.id === 'ordinary-task'))
     expect(after.records.find(row => row.id === automationId)).toMatchObject({ status: 'paused', version: 2 })
     expect(after.retirements).toHaveLength(1)
