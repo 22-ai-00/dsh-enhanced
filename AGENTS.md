@@ -10,6 +10,8 @@ This pnpm monorepo contains independently publishable DSH bundles in `plugins/*`
 
 Read [current status](docs/rsi-status.md) for the current boundary and next delivery. Load only the guide and plugin README relevant to the task; do not preload the documentation tree, completed work, historical probes, or research notes.
 
+For an ongoing uncommitted delivery, read `docs/evidence/handover/CURRENT.md` if present and verify its source snapshot before editing. Dated handovers are historical; do not reuse their old agent or process state.
+
 Keep one active delivery in context. Completed work is a capability boundary, not an active checklist; retrieve its implementation and verification from Git only when needed. Treat uncommitted implementation as unfinished until integration and review pass.
 
 | Change | Required reference |
@@ -19,6 +21,13 @@ Keep one active delivery in context. Completed work is a capability boundary, no
 | DSH/Cordis dependency or new upstream API | [Compatibility](docs/compatibility.md); keep baseline and affected packages consistent. |
 | Lifecycle, injection, config, effects, isolation, Loader or HMR | [Cordis runtime contracts](docs/cordis-runtime-contracts.md) and `/home/jiataorui/work/github/cordis`; verify executable behavior against this lockfile's installed fork and Loader/Include versions. |
 | Acceptance or release | Relevant rows of [acceptance contract](docs/rsi-acceptance.md) and [release guide](docs/releasing.md). |
+
+## Implementation discipline
+
+- Trace the production flow and affected callers, types, configuration, exports and stored state before changing a contract; review connected code beyond the diff.
+- Reuse repository APIs and types, then platform features and installed dependencies. Add abstractions, adapters or options only for a demonstrated requirement.
+- Check real schemas, published plugin entry points and changed protocol boundaries with a small probe before an expensive integration run. Fix the shared cause once and retain a focused regression for behavior defects.
+- Prefer the smallest complete, readable change. Preserve trust-boundary checks, lifecycle cleanup and required acceptance; justify findings with a concrete failure and user impact.
 
 ## Self-iteration principles
 
@@ -47,5 +56,7 @@ Deliver capability-sized commits. After relevant checks and independent review, 
 Run root `pnpm check` before final delivery/publication: manifest validation, zero lint warnings, typechecking, tests, clean build and every package's dry-run pack. Inspect pack file lists when boundaries or `files` change. Capability checks do not replace full verification; skipped external tests do not establish live behavior. Keep development checks focused on changed behavior and concrete risks, not repeated live-model scenarios.
 
 Scope changes to the requested capability/shared contract. Keep generated `lib/`, coverage, tarballs and caches untracked; raw JSON, logs and runtime evidence belong in ignored `docs/evidence/` or CI artifacts. Commit concise commands, results and limitations.
+
+On the Linux validation host, keep build/test workspaces, caches and evidence on `/data00`. Set `TMPDIR=/data00/home/jiataorui/t` for large runs and verify its filesystem before starting; avoid bulk writes to system `/tmp` and preserve live resources when cleaning retired test data.
 
 Keep [current status](docs/rsi-status.md) short: goal, capability boundaries, active blockers, next acceptance and latest verification only. Replace superseded entries; remove completed implementation/test/deployment narratives instead of creating another history ledger. Update maintained guides and incoming links when behavior changes; use Git for history and dated research only for rationale.

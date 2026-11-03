@@ -10,9 +10,11 @@ import { CreationReviewRuntime, type CreationReviewConfig } from '../src/creatio
 vi.mock('../src/creation-review.ts', async original => {
   const actual = await original<typeof import('../src/creation-review.ts')>()
   return { ...actual, CreationReviewRuntime: vi.fn(function (this: {
-    inspect: () => unknown; run: () => Promise<unknown>; close: () => Promise<void>
+    inspect: () => unknown; inspectWorkItemCreationReviewReadiness: () => unknown; run: () => Promise<unknown>; close: () => Promise<void>
   }) {
     this.inspect = vi.fn(() => ({ authority: { authorityId: 'grant' }, available: true }))
+    this.inspectWorkItemCreationReviewReadiness = vi.fn(() => ({ protocol: 'assistant-growth/work-item-review-readiness/v1',
+      workItemFailures: true, remainingVerifications: 1, available: true }))
     this.run = vi.fn(async () => ({ status: 'unknown', reason: 'case-observation-unknown' }))
     this.close = vi.fn(async () => {})
   }) }
@@ -36,9 +38,10 @@ test('late binds the private Control Plane and native peers, then drains each ve
     runner: { stateRoot, image: 'sha256:' + 'b'.repeat(64), dockerPath: await realpath(process.execPath), expiresAt,
       maxRuns: 3, maxTotalDurationMs: 30_000, maxDurationMs: 10_000, maxOutputBytes: 65_536 },
     policy: 'Review the owner task.', maxInputBytes: 8192, maxOutputTokens: 512, maxDurationMs: 20_000,
-    maxCases: 2, receiptTtlMs: 10_000 }
+    maxCases: 2, receiptTtlMs: 10_000, workItemFailures: true }
   const service = new AssistantVerifierService(ctx, { databasePath: join(root, 'state.sqlite'), tickIntervalMs: 0, creationReviews })
   const request = { protocol: 'assistant-growth/creation-verification-request/v1' as const, planId: 'plan-1' }
+  expect(service.inspectWorkItemCreationReviewReadiness()).toBeUndefined()
   expect(service.inspectCreationAcceptanceAuthority({ owner })).toBeUndefined()
   expect(await service.verifyPluginCreation(request)).toEqual({ status: 'unknown', reason: 'verification-unavailable' })
   const provider = ctx.plugin({ name: 'creation-review-peers', apply(peer: Context) {
@@ -48,12 +51,14 @@ test('late binds the private Control Plane and native peers, then drains each ve
   } })
   await provider; await new Promise(resolve => setImmediate(resolve))
   expect(CreationReviewRuntime).toHaveBeenCalledTimes(1)
+  expect(service.inspectWorkItemCreationReviewReadiness()).toMatchObject({ workItemFailures: true, available: true })
   expect(service.inspectCreationAcceptanceAuthority({ owner })).toMatchObject({ available: true })
   expect(await service.verifyPluginCreation(request)).toEqual({ status: 'unknown', reason: 'case-observation-unknown' })
   const runtime = vi.mocked(CreationReviewRuntime).mock.instances[0]!
   expect(runtime.run).toHaveBeenCalledWith(request, undefined)
   await provider.dispose(); await new Promise(resolve => setImmediate(resolve))
   expect(runtime.close).toHaveBeenCalledOnce()
+  expect(service.inspectWorkItemCreationReviewReadiness()).toBeUndefined()
   expect(service.inspectCreationAcceptanceAuthority({ owner })).toBeUndefined()
   expect(service.trustedVerificationProducerGeneration()).toEqual(expect.any(String))
 })

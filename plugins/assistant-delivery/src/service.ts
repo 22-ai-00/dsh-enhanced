@@ -1,3 +1,7 @@
+import { engineeringContextData, validateWorkItemEngineeringMaterial, frameWorkItemEngineeringContext, pageWorkItemEngineeringContext,
+  type WorkItemEngineeringMaterial, type EngineeringRootInput, type OwnerWorkItemEngineeringContextLocator,
+  type OwnerWorkItemEngineeringContextExpectation, type OwnerWorkItemEngineeringContextReadInput, type OwnerWorkItemEngineeringContextPage,
+  type OwnerWorkItemEngineeringContext, type OwnerWorkItemEngineeringContextSource } from './work-item-engineering-context.js'
 import type { WorkItemFeedbackIntent, WorkItemFeedbackSource, WorkItemFeedbackSelection, OwnerWorkItemLearningTask, OwnerLearningSourceExpectation, OwnerLearningSourceSnapshot, OwnerWorkItemLearningTaskFenceInput } from './work-item-feedback.js'
 import type { TrustedWorkItemOwnerFeedbackProof } from '@dsh-enhanced/assistant-evaluation'
 import { workItemReplyCanonical, workItemReplyDigest, type WorkItemReportTarget, type WorkItemReplySource, type WorkItemReplyConsumerRegistration, type WorkItemReplyReadInput, type WorkItemReplyListInput } from './work-item-replies.js'
@@ -5783,6 +5787,114 @@ export class AssistantDeliveryService extends Service {
     const learningTask:Readonly<OwnerWorkItemLearningTask>=Object.freeze({protocol:'assistant-delivery/owner-work-item-learning/v1',owner,canonical,judgement:'owner-feedback',
       ownerRevision:{version:revision.version,action:revision.action,operationId:revision.operationId},proofIdentity,sourceDigest,presentation,presentationDigest:workItemReplyDigest(presentation)})
     return {task:learningTask,intent,resolved,evaluation,revision}
+  }
+
+  /** Host-only complete historical objective; old feedback and Memory identities are not reinterpreted. */
+  inspectOwnerWorkItemEngineeringContext(input:OwnerWorkItemEngineeringContextLocator):Readonly<OwnerWorkItemEngineeringContext>|undefined {
+    try{return this.withOwnerWorkItemEngineeringContextSource(input,undefined,({task,manifest})=>Object.freeze({task,manifest}))}catch{return undefined}
+  }
+
+  /** Every page, including the last, revalidates the entire exact source frame. */
+  readOwnerWorkItemEngineeringContext(input:OwnerWorkItemEngineeringContextReadInput):Readonly<OwnerWorkItemEngineeringContextPage>|undefined {
+    try{
+      const read=engineeringContextData(input)
+      return this.withOwnerWorkItemEngineeringContextSource(read,read,source=>pageWorkItemEngineeringContext(source,source.material,read))
+    }catch{return undefined}
+  }
+
+  withOwnerWorkItemEngineeringContextFence<T>(input:OwnerWorkItemEngineeringContextExpectation,callback:(source:Readonly<OwnerWorkItemEngineeringContextSource>)=>T):T {
+    if(typeof callback!=='function')throw new AssistantDeliveryError('runtime-conflict','engineering context callback is required')
+    return this.withOwnerWorkItemEngineeringContextSource(input,input,({task,manifest,objective})=>callback(Object.freeze({task,manifest,objective})))
+  }
+
+  private withOwnerWorkItemEngineeringContextSource<T>(input:OwnerWorkItemEngineeringContextLocator,expectation:OwnerWorkItemEngineeringContextExpectation|undefined,
+    callback:(source:Readonly<OwnerWorkItemEngineeringContextSource>&{material:Readonly<WorkItemEngineeringMaterial>})=>T):T {
+    this.assertActive()
+    input=engineeringContextData(input)
+    const expected=expectation===undefined?undefined:engineeringContextData(expectation)
+    const unavailable=():never=>{throw new AssistantDeliveryError('runtime-conflict','work item engineering context is unavailable or changed')}
+    const state=this.ownerWorkItemLearningTaskState(input)
+    if(!state || state.task.proofIdentity.itemId!==input.itemId)return unavailable()
+    const task=learningSourceData(state.task),proof=learningSourceData(state.resolved.proof),revision=learningSourceData(state.revision)
+    const evaluation=state.evaluation,evaluationIdentity=workItemPeerIdentity(evaluation)
+    const peer=this.context.get('assistantWorkItems' as never,false) as unknown as {
+      issueOwnerWorkItemEngineeringTarget?(feedbackCapability:unknown):unknown
+      resolveOwnerWorkItemEngineeringTarget?(capability:unknown):Readonly<WorkItemEngineeringMaterial>|undefined
+      withOwnerWorkItemEngineeringTargetsFence?<R>(capabilities:readonly unknown[],callback:(materials:readonly (Readonly<WorkItemEngineeringMaterial>|undefined)[])=>R):R
+    }|undefined
+    const peerIdentity=workItemPeerIdentity(peer)
+    if(!peer?.issueOwnerWorkItemEngineeringTarget || !peer.resolveOwnerWorkItemEngineeringTarget || !peer.withOwnerWorkItemEngineeringTargetsFence
+      || peerIdentity!==state.resolved.peerIdentity)return unavailable()
+    // Discover the sealed root before acquiring Delivery. The final producer frame rechecks this exact opaque capability.
+    const capability=peer.issueOwnerWorkItemEngineeringTarget(state.resolved.capability)
+    if(capability===undefined)return unavailable()
+    const material=validateWorkItemEngineeringMaterial(peer.resolveOwnerWorkItemEngineeringTarget(capability))
+    if(material.itemId!==input.itemId || material.feedbackProofDigest!==proof.proofDigest)return unavailable()
+    const root=material.nodes[0]!.input as EngineeringRootInput
+    return this.deliveryStore.withOwnerLearningSourceFence(input,this.ownerRoutes.get(input.authorityId)!,()=>{
+      const rootText=()=>{
+        const owner=this.validateOwnerRoute(input)
+        const source=this.deliveryStore.inspectOwnerForegroundTaskSource({...input,inboxId:root.inboxId},this.ownerRoutes.get(input.authorityId)!)
+        const inbox=this.deliveryStore.getInbox(root.inboxId)
+        if(!source || !inbox || inbox.envelope.kind!=='text' || !inbox.envelope.text.trim() || (inbox.envelope.attachments?.length??0)>0 || source.sourceDigest!==root.sourceDigest || source.execution.executionRef!==root.executionRef
+          || source.completionSequence!==root.completionSequence || source.binding.id!==root.binding.id || source.binding.version!==root.binding.version
+          || source.binding.generation!==root.binding.generation || owner.generation<root.binding.generation
+          || source.owner.principalRecordId!==owner.principalRecordId || source.owner.principalVersion!==owner.principalVersion)return unavailable()
+        return inbox.envelope.text
+      }
+      const ownerInputs=()=>{
+        const text=rootText(),owner=this.validateOwnerRoute(input)
+        let previous=root.binding
+        for(const [index,node] of material.nodes.entries()){
+          if(index===0)continue
+          if(node.planProtocol!=='assistant-work-items/owner-continuation-plan/v2' || node.input.kind!=='continuation' || !node.input.replyId || !node.parent)return unavailable()
+          const source=this.deliveryStore.workItemReplies.inspectHistoricalSource({id:node.input.replyId,expectedSourceDigest:node.input.sourceDigest})
+          const inbox=source===undefined?undefined:this.deliveryStore.getInbox(source.id),binding=source===undefined?undefined:this.deliveryStore.getBinding(source.binding.id)
+          const body=material.continuationInputs[index-1]!
+          if(!source || !inbox || !binding || !source.child || source.child.itemId!==node.itemId || source.child.planDigest!==node.planDigest
+            || source.executionParentItemId!==node.parent.itemId || source.inputSha256!==node.input.inputSha256 || source.inputBytes!==node.input.inputBytes
+            || source.inputText!==body.text || inbox.envelope.kind!=='text' || !inbox.envelope.text.trim() || (inbox.envelope.attachments?.length??0)>0
+            || source.owner.principalRecordId!==owner.principalRecordId || source.owner.principalVersion!==owner.principalVersion || source.principalId!==input.principalId
+            || source.scope.workspace!==input.workspace || source.scope.preset!==input.agentPreset || source.binding.generation>owner.generation
+            || source.binding.generation<previous.generation || (source.binding.generation===previous.generation && (source.binding.id!==previous.id || source.binding.version!==previous.version))
+            || binding.generation!==source.binding.generation || !(binding.status==='active' && binding.version===source.binding.version || binding.status==='revoked' && binding.version===source.binding.version+1)
+            || externalPrincipalId(binding.principal)!==input.principalId || binding.workspace!==input.workspace || binding.agentPreset!==input.agentPreset
+            || workItemReplyCanonical(inbox.envelope.principal)!==workItemReplyCanonical(binding.principal) || workItemReplyCanonical(inbox.envelope.conversation)!==workItemReplyCanonical(binding.conversation))return unavailable()
+          previous=source.binding
+        }
+        return text
+      }
+      const initial=frameWorkItemEngineeringContext(material,ownerInputs())
+      const scope=evaluation.canonicalHostScope({workspace:input.workspace,preset:input.agentPreset})
+      const {scopeWatermark}=evaluation.listTrustedTaskLearningProjections({scope,limit:1})
+      const result=evaluation.withTrustedCanonicalScopeWriterFence({scope,scopeWatermark},()=>peer.withOwnerWorkItemEngineeringTargetsFence!([capability],materials=>{
+        if(!Array.isArray(materials) || materials.length!==1)return unavailable()
+        const currentMaterial=validateWorkItemEngineeringMaterial(materials[0])
+        if(workItemReplyCanonical(currentMaterial)!==workItemReplyCanonical(material))return unavailable()
+        // No owns, issue, resolve or other opaque producer callbacks below this point.
+        const owner=this.validateOwnerRoute(input)
+        if(!this.active || owner.authorityHash!==input.expectedOwner.authorityHash || owner.principalRecordId!==input.expectedOwner.principalRecordId
+          || owner.principalVersion!==input.expectedOwner.principalVersion || workItemPeerIdentity(this.context.get('assistantWorkItems' as never,false))!==peerIdentity
+          || workItemPeerIdentity(this.context.get('assistantEvaluation' as never,false))!==evaluationIdentity)return unavailable()
+        this.workItemFeedbackFence(state.intent,true,state.resolved.registration)
+        const canonical=evaluation.getTrustedWorkItemLearningProjection({scope,itemId:input.itemId})
+        const currentRevision=evaluation.inspectTrustedTaskOwnerRevision({scope,outcomeId:input.outcomeId,principalRecordId:owner.principalRecordId,principalVersion:owner.principalVersion})
+        if(!canonical?.objective || canonical.projection.subjectKind!=='work-item' || canonical.projection.subjectRef!==input.itemId
+          || canonical.objective.outcomeId!==input.outcomeId || workItemReplyCanonical(canonical.projection)!==workItemReplyCanonical(task.canonical.projection)
+          || workItemReplyCanonical(canonical.objective)!==workItemReplyCanonical(task.canonical.objective)
+          || workItemReplyCanonical(canonical.execution)!==workItemReplyCanonical(task.canonical.execution)
+          || workItemReplyCanonical(currentRevision)!==workItemReplyCanonical(revision))return unavailable()
+        const frame=frameWorkItemEngineeringContext(currentMaterial,ownerInputs())
+        if(frame.manifest.manifestDigest!==initial.manifest.manifestDigest || currentMaterial.feedbackProofDigest!==proof.proofDigest)return unavailable()
+        if(expected && (task.sourceDigest!==expected.expectedSourceDigest || task.presentationDigest!==expected.expectedContentDigest
+          || canonical.projection.version!==expected.canonical.version || canonical.projection.digest!==expected.canonical.digest
+          || canonical.objective.status!==expected.canonical.objectiveStatus || frame.manifest.manifestDigest!==expected.expectedManifestDigest
+          || frame.manifest.objective.fullTextDigest!==expected.expectedObjectiveDigest))return unavailable()
+        return callback(Object.freeze({task:Object.freeze({...task,owner,canonical}),manifest:frame.manifest,objective:frame.objective,material:currentMaterial}))
+      }))
+      if(!result.matched)return unavailable()
+      return result.value
+    })
   }
 
   inspectOwnerForegroundLearningTask(input: {

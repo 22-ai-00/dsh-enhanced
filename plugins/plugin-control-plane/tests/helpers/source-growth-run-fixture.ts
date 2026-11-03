@@ -1,10 +1,11 @@
 import type { SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
-import type { OwnerTaskFailureReference } from '../../src/owner-task-gap-types.js'
+import type { AnyOwnerTaskFailureReference } from '../../src/owner-task-gap-types.js'
 import { controlPlaneDigest } from '../../src/store.js'
 
-export function sourceGrowthRunFixture(reference: OwnerTaskFailureReference, now: number,
+export function sourceGrowthRunFixture(reference: AnyOwnerTaskFailureReference, now: number,
   model: SourceGrowthRunBinding['model'] = { provider: 'growth-provider', model: 'growth-override' },
   modelOrigin: SourceGrowthRunBinding['modelOrigin'] = 'explicit-growth-override'): SourceGrowthRunBinding {
+  if (reference.schemaVersion !== 1) throw new Error('legacy fixture requires foreground reference')
   return {
     protocol: 'assistant-growth/source-run/v1', runId: 'usage-source-create', intentDigest: '1'.repeat(64),
     configDigest: '2'.repeat(64), ownerDigest: controlPlaneDigest(reference.owner),

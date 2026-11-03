@@ -5,7 +5,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { canonicalGrowthJson, SourceGrowthRunUnavailableError,
+import { anySourceGrowthRunDigest, canonicalGrowthJson, SourceGrowthRunUnavailableError, type WorkItemSourceGrowthRunBinding,
   verifyPluginCreationVerificationCertificate, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { nativeMacRuntimeDigest, type NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/plugin-behavior-runner'
@@ -916,4 +916,134 @@ test('revoking plan A does not abort a pending native call on plan B; global clo
     expect(ctx.tools.get(aliasB)).toBeUndefined()
     expect(closeCount).toBe(1)
   } finally { await runtime.close(); await handle.dispose() }
+})
+
+function workItemBinding(config: CreationCapabilityConfig, authorityDigest: string): WorkItemSourceGrowthRunBinding {
+  const acceptance = { protocol: 'assistant-growth/creation-acceptance-authority/v1' as const, authorityId: 'creation-acceptance', keyId: 'key', authorityDigest: 'a'.repeat(64), namePrefix: 'assistant-', expiresAt: config.expiresAt }
+  return { protocol: 'assistant-growth/source-run/v2', mode: 'create', runId: 'work-item-growth', intentDigest: 'b'.repeat(64), configDigest: 'c'.repeat(64), ownerDigest: 'd'.repeat(64),
+    source: { protocol: 'assistant-growth/work-item-source/v1', itemId: 'item-one', outcomeId: 'owner-failure',
+      projection: { subjectKind: 'work-item', subjectRef: 'item-one', version: 2, digest: 'e'.repeat(64), disposition: 'upsert', evidenceOutcomeId: 'owner-failure' },
+      objectiveStatus: 'not-achieved', sourceDigest: 'f'.repeat(64), presentationDigest: '1'.repeat(64),
+      context: { protocol: 'assistant-delivery/work-item-engineering-context/v1', manifestDigest: '2'.repeat(64), objectiveDigest: '3'.repeat(64), objectiveBytes: 123 } },
+    model: { provider: 'source-supplier', model: 'observed-model' }, modelOrigin: 'inherited-owner-task', creationAcceptance: acceptance,
+    authorities: { protocol: 'assistant-growth/work-item-authorities/v1', sourceJobs: { authorityId: 'source-jobs', authorityDigest: '4'.repeat(64), expiresAt: config.expiresAt },
+      creationGrant: { id: 'creation-grant', digest: '5'.repeat(64), expiresAt: config.expiresAt }, creationAcceptance: acceptance,
+      adoption: { authorityId: config.authorityId, authorityDigest, expiresAt: config.expiresAt } },
+    budget: { budgetId: 'source-budget', amount: 1, maxModelCalls: 3, maxToolCalls: 12, maxOutputTokens: 2048, maxDurationMs: 30_000, maxPlansPerWake: 1 },
+    native: { owner: 'assistant-growth-usage', automationId: 'work-item-growth', definitionHash: '7'.repeat(64), occurrenceId: 'occ-one' },
+    sessionId: 'author-session', toolContractDigest: '8'.repeat(64), executionContractDigest: '9'.repeat(64), createdAt: Date.now() - 1000, generationDeadlineAt: Date.now() + 1000, expiresAt: config.expiresAt }
+}
+
+function workItemFixture() {
+  const f = fixture()
+  f.config.workItemFailures = true
+  const binding = workItemBinding(f.config, f.journal.authorityDigest)
+  f.certificate.source.growthRunDigest = anySourceGrowthRunDigest(binding)
+  const { signature: _signature, ...unsigned } = f.certificate
+  f.certificate.signature = sign(null, Buffer.from(canonicalGrowthJson(unsigned)), verifier.privateKey).toString('base64url')
+  const inspect = f.ports.inspect
+  f.ports.inspect = id => ({ ...inspect(id), sourceRun: binding })
+  const fence = f.ports.withCurrent
+  f.ports.withCurrent = (record, callback) => fence(record, () => callback(binding))
+  vi.spyOn(execution, 'verifyCreationCapabilityExecution').mockImplementation(async (_certificate, _runner, signal) => signal.throwIfAborted())
+  return { ...f, binding }
+}
+
+test('work-item adoption readiness is read-only, lifecycle-bound and reports exhausted live quota', async () => {
+  const f = workItemFixture(), runtime = f.runtime()
+  const claim = vi.spyOn(f.journal, 'claim'), recover = vi.spyOn(f.journal, 'recoverClaims')
+  expect(runtime.inspectWorkItemAdoptionReadiness()).toBeUndefined()
+  expect(f.counts().discoveries).toBe(0); expect(recover).not.toHaveBeenCalled()
+  await runtime.start()
+  recover.mockClear()
+  const before = f.counts()
+  expect(runtime.inspectWorkItemAdoptionReadiness()).toMatchObject({ workItemFailures: true,
+    remainingAdoptions: 2, available: true, authority: { authorityDigest: f.journal.authorityDigest } })
+  expect(runtime.inspectWorkItemAdoptionReadiness()).toEqual(runtime.inspectWorkItemAdoptionReadiness())
+  expect(f.counts()).toEqual(before); expect(claim).not.toHaveBeenCalled(); expect(recover).not.toHaveBeenCalled()
+  f.config.maxAdoptions = 1
+  f.journal.claim({ certificate: f.certificate, artifact: f.artifact })
+  expect(runtime.inspectWorkItemAdoptionReadiness()).toMatchObject({ remainingAdoptions: 0, available: false })
+  f.config.workItemFailures = false
+  expect(runtime.inspectWorkItemAdoptionReadiness()).toBeUndefined()
+  f.config.workItemFailures = true; f.config.expiresAt = Date.now() - 1
+  expect(runtime.inspectWorkItemAdoptionReadiness()).toBeUndefined()
+  await runtime.close()
+  expect(runtime.inspectWorkItemAdoptionReadiness()).toBeUndefined()
+})
+
+test.each(['absent-flag', 'false-flag', 'wrong-pin', 'wrong-id', 'wrong-expiry'] as const)('work-item %s cannot claim a backend-v1 certificate', async mismatch => {
+  const f = workItemFixture()
+  if (mismatch === 'absent-flag') delete f.config.workItemFailures
+  if (mismatch === 'false-flag') f.config.workItemFailures = false
+  if (mismatch === 'wrong-pin') f.binding.authorities.adoption.authorityDigest = 'a'.repeat(64)
+  if (mismatch === 'wrong-id') f.binding.authorities.adoption.authorityId = 'different-adoption'
+  if (mismatch === 'wrong-expiry') f.binding.authorities.adoption.expiresAt++
+  f.certificate.source.growthRunDigest = anySourceGrowthRunDigest(f.binding)
+  const runtime = f.runtime(); await runtime.start()
+  expect(runtime.eligible('plan-1')).toBe(false)
+  await expect(runtime.adopt('plan-1', new AbortController().signal)).rejects.toThrow('not eligible')
+  expect(f.journal.list()).toHaveLength(0); expect(f.counts().discoveries).toBe(0)
+  await runtime.close()
+})
+
+test.each(['claim', 'authorize', 'activate', 'call'] as const)('work-item final %s fence independently refuses missing binding', async boundary => {
+  const f = workItemFixture()
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  let failing = boundary === 'claim'
+  let authorizedFences = 0, callFences = 0
+  const claim = vi.spyOn(f.journal, 'claim'), authorize = vi.spyOn(f.journal, 'authorize')
+  const activate = vi.spyOn(f.journal, 'activate'), claimCall = vi.spyOn(f.journal, 'claimCall')
+  const fence = f.ports.withCurrent
+  f.ports.withCurrent = (record, callback) => {
+    if (record.status === 'authorized') authorizedFences++
+    if (failing && boundary === 'call') callFences++
+    if ((boundary === 'authorize' && record.status === 'claimed' && f.counts().discoveries > 0)
+      || (boundary === 'activate' && record.status === 'authorized' && authorizedFences === 3)
+      || (boundary === 'call' ? callFences === 2 : failing)) return callback()
+    return fence(record, callback)
+  }
+  const runtime = f.runtime(); await runtime.start()
+  if (boundary === 'call') {
+    await runtime.adopt('plan-1', new AbortController().signal)
+    const alias = f.journal.inspect('plan-1')!.tools![0]!.name
+    failing = true
+    await expect(f.ctx.tools.get(alias)!.execute({ query: 'hello' }, {
+      callId: 'call-v2', agent: { session: { id: 'session-v2' } }, signal: new AbortController().signal,
+    } as unknown as ToolRunContext)).rejects.toThrow('work item source authority missing')
+    expect(f.calls.size).toBe(0); expect(claimCall).not.toHaveBeenCalled(); expect(f.counts().invokes).toBe(0)
+  } else {
+    await expect(runtime.adopt('plan-1', new AbortController().signal)).rejects.toThrow('work item source authority missing')
+    expect(f.journal.inspect('plan-1')?.status).toBe(boundary === 'claim' ? undefined : 'unknown')
+    if (boundary === 'claim') expect(claim).not.toHaveBeenCalled()
+    if (boundary === 'authorize') expect(authorize).not.toHaveBeenCalled()
+    if (boundary === 'activate') { expect(authorize).toHaveBeenCalledTimes(1); expect(activate).not.toHaveBeenCalled() }
+  }
+  await runtime.close()
+})
+
+test('retained work-item source uses frozen history without the producer and keeps adoption quota consumed', async () => {
+  const f = workItemFixture()
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  f.config.maxAdoptions = 1
+  const first = f.runtime(); await first.start(); await first.adopt('plan-1', new AbortController().signal)
+  const record = f.journal.inspect('plan-1')!, alias = record.tools![0]!.name
+  record.receipt!.protocol = 'dsh-created-capability-adoption/v2'
+  await first.close()
+  f.certificate.expiresAt = Date.now() - 1
+  f.ports.inspect = vi.fn(() => { throw new Error('expired producer must not be inspected') })
+  f.ports.recheck = vi.fn(async () => { throw new Error('expired producer must not be consulted') })
+  f.ports.inspectRetained = () => ({ certificate: f.certificate, artifact: f.artifact, owner: f.config.owner, sourceRun: f.binding })
+  f.ports.recheckRetained = async () => {}
+  const restored = f.runtime(); await restored.start()
+  expect(restored.inspectWorkItemAdoptionReadiness()).toMatchObject({ remainingAdoptions: 0, available: false })
+  await expect(f.ctx.tools.get(alias)!.execute({ query: 'retained' }, {
+    callId: 'retained-v2', agent: { session: { id: 'session-v2' } }, signal: new AbortController().signal,
+  } as unknown as ToolRunContext)).resolves.toMatchObject({ value: { answer: 'ok' } })
+  expect(f.ports.inspect).not.toHaveBeenCalled(); expect(f.ports.recheck).not.toHaveBeenCalled()
+  f.config.workItemFailures = false
+  await restored.reconcile()
+  expect(f.ctx.tools.get(alias)).toBeUndefined()
+  expect(f.journal.list()).toHaveLength(1)
+  await restored.close()
 })

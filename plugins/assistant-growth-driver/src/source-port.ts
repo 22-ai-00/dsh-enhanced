@@ -9,8 +9,10 @@
  * @dsh-enhanced/plugin-control-plane (an optional peer): every field here is a
  * structural subset, so the driver still builds and loads without that package.
  */
+import type { OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
+import type { WorkItemCreationReadiness } from './work-item-source.js'
 import type { CreationAcceptanceAuthorityRef, RevisionAcceptanceAuthorityRef, RevisionRegressionAcceptanceAuthorityRef,
-  SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+  AnySourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 
 /**
  * Local mirror of the control-plane protected-plugin denylist
@@ -112,6 +114,8 @@ export interface GrowthSourceRevisionTarget {
 }
 
 export interface GrowthSourcePlanePort {
+  inspectWorkItemCreationReadiness?(input: { owner: OwnerForegroundLearningTask['owner'] }): WorkItemCreationReadiness | undefined
+
   /** Optional read-only repository inventory; the Host owns the repository and baseline. */
   inspectSourceTargets?(input: {
     repository: string
@@ -192,7 +196,7 @@ export interface GrowthSourcePlanePort {
     ttlMs: number
     owner: GrowthSourceJobOwner
     /** Host-attested native Usage run; never a model tool parameter. */
-    growthRun?: SourceGrowthRunBinding
+    growthRun?: AnySourceGrowthRunBinding
     signal: AbortSignal
     assertCurrent: () => void
   }): Promise<SourceJobProjection>

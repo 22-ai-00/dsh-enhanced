@@ -12,11 +12,11 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { isSourceOwnerContinuation, pluginCreationVerificationSigningPayload, sourceGrowthRunDigest, SourceGrowthRunUnavailableError,
+import { isSourceOwnerContinuation, pluginCreationVerificationSigningPayload, anySourceGrowthRunDigest as sourceGrowthRunDigest, SourceGrowthRunUnavailableError,
   verifyPluginRevisionVerificationCertificate, verifyPluginRevisionRegressionCertificate,
   pluginRevisionVerificationSigningPayload, pluginRevisionRegressionSigningPayload, type PluginRevisionRegressionCertificate, type RevisionRegressionAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type PluginRevisionVerificationCertificate,
-  type SourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
-import type { ForegroundToolCallAttestation, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
+  type WorkItemSourceGrowthRunBinding, growthObjectDigest, validateWorkItemSourceGrowthRunBinding, type SourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import type { ForegroundToolCallAttestation, OwnerForegroundLearningTask, OwnerWorkItemLearningTask } from '@dsh-enhanced/assistant-delivery'
 import { linuxRuntimeDigest, type LinuxRepositoryRunnerConfig, type LinuxRepositoryRunnerResult, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -70,7 +70,7 @@ const baselineRepository = fileURLToPath(new URL('../../..', import.meta.url)).r
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); vi.resetAllMocks() })
 
-async function fixture(withVerification = false, withAdoption = false, withRetention = false, withRevision = false, withRegression = false, withLinux = false) {
+async function fixture(withVerification = false, withAdoption = false, withRetention = false, withRevision = false, withRegression = false, withLinux = false, withWorkItems = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-created-service-')))
   const { repository } = await createSourceCreationFixture(baselineRepository, join(root, 'source'))
   const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: repository, encoding: 'utf8' }).trim()
@@ -219,6 +219,13 @@ async function fixture(withVerification = false, withAdoption = false, withReten
     await chmod(remote, 0o700)
     config.sourceJobs!.baseline = { ref: 'refs/dsh-source/fixture', remote, targetBranch: 'dev', initialCommit: git('rev-parse', 'HEAD') }
   }
+  if (withWorkItems) {
+    config.sourceJobs!.allowedModes = ['create']
+    config.sourceJobs!.maxSubmissions = 1
+    config.sourceJobs!.creation!.maxCreates = 1
+    config.sourceJobs!.creation!.workItemFailures = true
+    if (config.creationCapabilities) config.creationCapabilities.workItemFailures = true
+  }
   const service = new PluginControlPlaneService(ctx, config)
   await vi.waitFor(() => expect(service.canEnqueueSource()).toBe(true))
   const store = new ControlPlaneStore({ path: join(statePath, 'control.sqlite') })
@@ -340,13 +347,13 @@ function installCandidateRunner(f: Awaited<ReturnType<typeof fixture>>): void {
   })
 }
 
-async function startCapabilityHost(f: Awaited<ReturnType<typeof fixture>>) {
+async function startCapabilityHost(f: Awaited<ReturnType<typeof fixture>>, verifierExtras: Record<string, unknown> = {}) {
   const context = new Context()
   cleanup.push(async () => context.fiber.dispose())
   await mountAgentLoopTestDependencies(context, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
   context.provide('assistantDelivery' as never, f.deliveryPorts)
   context.provide('assistantEvaluation' as never, f.evaluationPorts)
-  context.provide('assistantVerifier' as never, { verifyPluginCreation: f.verification })
+  context.provide('assistantVerifier' as never, { verifyPluginCreation: f.verification, ...verifierExtras })
   new AssistantPolicyService(context, { databasePath: join(f.root, 'policy.sqlite'),
     budgets: [{ id: 'source-budget', metric: 'automation-runs', limit: 3, periodMs: 60_000, scope: 'global' }], rules: [
       { id: 'reconcile', effect: 'allow', subject: { kind: 'background', id: 'plugin-control-plane-source', workspace: f.root, principal: 'owner' }, actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
@@ -1053,6 +1060,7 @@ it('runs an ordinary owner failure through native scheduling into a checked new-
   expect(candidate.artifact).toEqual(f.checked.packArtifact)
   expect(candidate.job.id).toBe(job.id)
   expect(candidate.plan.creation?.growthRun).toEqual(f.growthRun)
+  if (candidate.protocol !== 'dsh-prepared-creation/v1') throw new Error('legacy fixture requires v1 handoff')
   expect(candidate.source.source.modelSelection).toEqual(f.source.source.modelSelection)
   expect(candidate.reference.projection).toEqual(f.source.canonical.projection)
   expect(JSON.parse(await readFile(join(plan.worktree, 'plugins', plan.name, 'package.json'), 'utf8')).version).toBe('0.1.0')
@@ -1879,3 +1887,273 @@ it('configured regression authority expiry closes the pre-author revision lane i
   expect(f.store.listSourceJobs()).toHaveLength(1)
   expect(f.regressionVerification).not.toHaveBeenCalled()
 }, 60_000)
+
+
+it('uses actual work-item grant pins and the producer writer frame without reverse peer reads', async () => {
+  const f = await fixture(true, true, true, false, false, false, true)
+  await f.unregisterGrowthRun()
+  const objective = 'original owner engineering objective'
+  const task = { protocol: 'assistant-delivery/owner-work-item-learning/v1', owner: { ...f.owner }, judgement: 'owner-feedback',
+    sourceDigest: '4'.repeat(64), presentationDigest: '5'.repeat(64), canonical: { ...f.source.canonical,
+      projection: { ...f.source.canonical.projection, subjectKind: 'work-item', subjectRef: 'wi-repair' } },
+    proofIdentity: { itemId: 'wi-repair', proofDigest: '6'.repeat(64), supplier: f.growthRun.model } } as unknown as OwnerWorkItemLearningTask
+  const unsigned = { protocol: 'assistant-delivery/work-item-engineering-context/v1' as const, itemId: 'wi-repair', rootItemId: 'wi-repair',
+    feedbackProofDigest: task.proofIdentity.proofDigest, materialDigest: '7'.repeat(64), nodes: [], reports: [],
+    objective: { protocol: 'work-item-owner-objective/v1' as const, fullTextDigest: createHash('sha256').update(objective).digest('hex'), fullBytes: Buffer.byteLength(objective) } }
+  const source = { task, manifest: { ...unsigned, manifestDigest: growthObjectDigest(unsigned) }, objective }
+  let producerHeld = false
+  const noReverse = () => { if (producerHeld) throw new Error('reverse source read under producer frame') }
+  const currentSource = () => ({ ...source, task: { ...source.task, owner: { ...f.owner } } })
+  Object.assign(f.deliveryPorts, { inspectOwnerWorkItemEngineeringContext: () => { noReverse(); return currentSource() },
+    withOwnerWorkItemEngineeringContextFence: (_input: unknown, callback: (source: unknown) => unknown) => { noReverse(); return callback(currentSource()) } })
+  // Usage froze the old owner before a legitimate new foreground session.
+  f.owner.generation += 1; f.owner.bindingVersion += 1
+  const verifier = f.ctx.get('assistantVerifier' as never) as unknown as Record<string, unknown>
+  verifier.inspectWorkItemCreationReviewReadiness = () => { noReverse(); return { protocol: 'assistant-growth/work-item-review-readiness/v1',
+    sourceProtocol: unsigned.protocol, runProtocol: 'assistant-growth/source-run/v2', workItemFailures: true,
+    authority: f.authority, publicKey: f.publicKey, remainingVerifications: 1, available: true } }
+  const gap = f.service.recordOwnerWorkItemFailureGap(source)
+  const before = f.store.health()
+  const readiness = f.service.inspectWorkItemCreationReadiness({ owner: f.owner })
+  expect(readiness?.available).toBe(true)
+  expect(readiness?.pins.sourceJobs.authorityDigest).toBe(controlPlaneDigest({ config: normalizeControlPlaneConfig(f.config).sourceJobs, build: normalizeControlPlaneConfig(f.config).sourceBuild }))
+  expect(f.service.inspectWorkItemCreationReadiness({ owner: { ...f.owner, principalRecordId: 'wrong-person' } })).toBeUndefined()
+  expect(f.store.health()).toEqual(before)
+  if (!readiness) throw new Error('expected actual active readiness')
+  const run: WorkItemSourceGrowthRunBinding = { ...f.growthRun, protocol: 'assistant-growth/source-run/v2', mode: 'create',
+    ownerDigest: controlPlaneDigest(task.owner), creationAcceptance: f.authority, authorities: readiness.pins,
+    source: { protocol: 'assistant-growth/work-item-source/v1', itemId: 'wi-repair', outcomeId: source.task.canonical.triggerOutcomeId,
+      projection: { ...source.task.canonical.projection, subjectKind: 'work-item', disposition: 'upsert' }, objectiveStatus: 'not-achieved',
+      sourceDigest: task.sourceDigest, presentationDigest: task.presentationDigest,
+      context: { protocol: unsigned.protocol, manifestDigest: source.manifest.manifestDigest, objectiveDigest: unsigned.objective.fullTextDigest, objectiveBytes: unsigned.objective.fullBytes } } }
+  validateWorkItemSourceGrowthRunBinding(run)
+  const inspect = vi.fn(() => { throw new Error('v2 may not use producer.inspect') })
+  let writes = 0
+  const producer = { protocol: 'assistant-growth-source-run-producer/v2' as const, inspect,
+    withWorkItemRunFence: <T>(_input: unknown, callback: (run: WorkItemSourceGrowthRunBinding) => T): T => { noReverse(); producerHeld = true; try { writes++; return callback(structuredClone(run)) } finally { producerHeld = false } } }
+  let unregister = f.service.registerSourceGrowthRunProducer(producer)
+  cleanup.push(async () => unregister())
+  const request = { ...f.request, gapId: gap.id, growthRun: run, idempotencyKey: 'work-item-create' }
+  const queued = await f.service.enqueueSourceJob(request)
+  expect(queued.status).toBe('queued')
+  expect(writes).toBeGreaterThan(0)
+  expect(inspect).not.toHaveBeenCalled()
+  // This exact operation consumed the final upstream slots.
+  const exhausted = f.service.inspectWorkItemCreationReadiness({ owner: f.owner })
+  expect(exhausted?.available).toBe(false)
+  expect(exhausted?.remaining.creates).toBe(0)
+  expect(exhausted?.pins).toEqual(readiness.pins)
+  expect((await f.service.enqueueSourceJob(request)).id).toBe(queued.id)
+  const queuedIntent = f.store.getSourceJob(queued.id)!.intentDigest
+  const beforeUnavailable = f.service.inspectWorkItemCreationReadiness({owner:f.owner})!.remaining
+  await unregister()
+  expect(f.service.inspectSourceJob({id:queued.id,owner:request.owner}).status).toBe('queued')
+  expect(f.store.getSourceJob(queued.id)!.intentDigest).toBe(queuedIntent)
+  unregister = f.service.registerSourceGrowthRunProducer(producer)
+  expect(f.service.inspectSourceJob({id:queued.id,owner:request.owner}).status).toBe('queued')
+  expect(f.service.inspectWorkItemCreationReadiness({owner:f.owner})!.remaining).toEqual(beforeUnavailable)
+  f.verification.mockImplementation(async input => ({ status: 'verified', certificate: signedAdoptionCertificate(f, input.planId) }))
+  installCandidateRunner(f)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const stored = f.store.getSourceJob(queued.id)!
+  expect(stored.status).toBe('prepared')
+  const prepared = f.service.inspectPreparedCreation(stored.planId!)
+  expect(prepared.protocol).toBe('dsh-prepared-creation/v2')
+  if (prepared.protocol !== 'dsh-prepared-creation/v2') throw new Error('expected work item handoff')
+  expect(prepared.source.objective).toBe(objective)
+  expect(prepared.reference.schemaVersion).toBe(2)
+  expect(prepared.plan.creation?.growthRun).toEqual(run)
+  expect(f.service.withPreparedCreationFence({ planId: prepared.plan.id, planDigest: prepared.plan.digest,
+    artifactSha256: prepared.plan.preparedEvidence!.pack.sha256, growthRunDigest: sourceGrowthRunDigest(run),
+    referenceDigest: controlPlaneDigest(prepared.reference) }, actual => sourceGrowthRunDigest(actual!))).toBe(sourceGrowthRunDigest(run))
+  expect(inspect).not.toHaveBeenCalled()
+  const adopted = f.service.inspectCreatedCapability(prepared.plan.id)!
+  expect(adopted.status).toBe('active')
+  await unregister()
+  f.advance(901_000)
+  expect(f.service.inspectWorkItemCreationReadiness({ owner: f.owner })).toBeUndefined()
+  expect(() => f.service.inspectPreparedCreation(prepared.plan.id)).toThrow()
+  const alias = adopted.aliases[0]!, execute = (id: string) => f.ctx.tools.get(alias)!.execute({ query: 'retained' }, {
+    callId: id, agent: { session: { id: 'retained-owner' }, owner: f.owner }, signal: new AbortController().signal,
+  } as unknown as ToolRunContext)
+  await expect(execute('retained-after-author-expiry')).resolves.toMatchObject({ value: { answer: 'ok' } })
+  expect(inspect).not.toHaveBeenCalled()
+  // A component policy-epoch drift must reject even a retained duplicate call.
+  const liveConfig = Reflect.get(f.service, 'config') as {sourceJobs:{creation:{maxCreates:number}}}
+  const originalMaxCreates = liveConfig.sourceJobs.creation.maxCreates
+  liveConfig.sourceJobs.creation.maxCreates += 1
+  await expect(execute('retained-after-author-expiry')).rejects.toThrow()
+  liveConfig.sourceJobs.creation.maxCreates = originalMaxCreates
+  await expect(execute('retained-after-author-expiry')).resolves.toMatchObject({ value: { answer: 'ok' } })
+  f.advance(1_200_000)
+  await expect(execute('retained-after-author-expiry')).rejects.toThrow()
+})
+
+
+it('recovers an active current WorkItem adoption when its producer becomes ready before CP startup is published', async () => {
+  const f = await fixture(true, true, false, false, false, false, true)
+  await f.unregisterGrowthRun()
+  const objective = 'original owner engineering objective'
+  const task = { protocol: 'assistant-delivery/owner-work-item-learning/v1', owner: { ...f.owner }, judgement: 'owner-feedback',
+    sourceDigest: '4'.repeat(64), presentationDigest: '5'.repeat(64), canonical: { ...f.source.canonical,
+      projection: { ...f.source.canonical.projection, subjectKind: 'work-item', subjectRef: 'wi-repair' } },
+    proofIdentity: { itemId: 'wi-repair', proofDigest: '6'.repeat(64), supplier: f.growthRun.model } } as unknown as OwnerWorkItemLearningTask
+  const unsigned = { protocol: 'assistant-delivery/work-item-engineering-context/v1' as const, itemId: 'wi-repair', rootItemId: 'wi-repair',
+    feedbackProofDigest: task.proofIdentity.proofDigest, materialDigest: '7'.repeat(64), nodes: [], reports: [],
+    objective: { protocol: 'work-item-owner-objective/v1' as const, fullTextDigest: createHash('sha256').update(objective).digest('hex'), fullBytes: Buffer.byteLength(objective) } }
+  const source = { task, manifest: { ...unsigned, manifestDigest: growthObjectDigest(unsigned) }, objective }
+  let producerHeld = false
+  const noReverse = () => { if (producerHeld) throw new Error('reverse source read under producer frame') }
+  const currentSource = () => ({ ...source, task: { ...source.task, owner: { ...f.owner } } })
+  Object.assign(f.deliveryPorts, { inspectOwnerWorkItemEngineeringContext: () => { noReverse(); return currentSource() },
+    withOwnerWorkItemEngineeringContextFence: (_input: unknown, callback: (source: unknown) => unknown) => { noReverse(); return callback(currentSource()) } })
+  // Usage froze the old owner before a legitimate new foreground session.
+  f.owner.generation += 1; f.owner.bindingVersion += 1
+  const verifier = f.ctx.get('assistantVerifier' as never) as unknown as Record<string, unknown>
+  verifier.inspectWorkItemCreationReviewReadiness = () => { noReverse(); return { protocol: 'assistant-growth/work-item-review-readiness/v1',
+    sourceProtocol: unsigned.protocol, runProtocol: 'assistant-growth/source-run/v2', workItemFailures: true,
+    authority: f.authority, publicKey: f.publicKey, remainingVerifications: 1, available: true } }
+  const gap = f.service.recordOwnerWorkItemFailureGap(source)
+  const before = f.store.health()
+  const readiness = f.service.inspectWorkItemCreationReadiness({ owner: f.owner })
+  expect(readiness?.available).toBe(true)
+  expect(readiness?.pins.sourceJobs.authorityDigest).toBe(controlPlaneDigest({ config: normalizeControlPlaneConfig(f.config).sourceJobs, build: normalizeControlPlaneConfig(f.config).sourceBuild }))
+  expect(f.service.inspectWorkItemCreationReadiness({ owner: { ...f.owner, principalRecordId: 'wrong-person' } })).toBeUndefined()
+  expect(f.store.health()).toEqual(before)
+  if (!readiness) throw new Error('expected actual active readiness')
+  const run: WorkItemSourceGrowthRunBinding = { ...f.growthRun, protocol: 'assistant-growth/source-run/v2', mode: 'create',
+    ownerDigest: controlPlaneDigest(task.owner), creationAcceptance: f.authority, authorities: readiness.pins,
+    source: { protocol: 'assistant-growth/work-item-source/v1', itemId: 'wi-repair', outcomeId: source.task.canonical.triggerOutcomeId,
+      projection: { ...source.task.canonical.projection, subjectKind: 'work-item', disposition: 'upsert' }, objectiveStatus: 'not-achieved',
+      sourceDigest: task.sourceDigest, presentationDigest: task.presentationDigest,
+      context: { protocol: unsigned.protocol, manifestDigest: source.manifest.manifestDigest, objectiveDigest: unsigned.objective.fullTextDigest, objectiveBytes: unsigned.objective.fullBytes } } }
+  validateWorkItemSourceGrowthRunBinding(run)
+  const inspect = vi.fn(() => { throw new Error('v2 may not use producer.inspect') })
+  let writes = 0
+  const producer = { protocol: 'assistant-growth-source-run-producer/v2' as const, inspect,
+    withWorkItemRunFence: <T>(_input: unknown, callback: (run: WorkItemSourceGrowthRunBinding) => T): T => { noReverse(); producerHeld = true; try { writes++; return callback(structuredClone(run)) } finally { producerHeld = false } } }
+  let unregister = f.service.registerSourceGrowthRunProducer(producer)
+  cleanup.push(async () => unregister())
+  const request = { ...f.request, gapId: gap.id, growthRun: run, idempotencyKey: 'work-item-create' }
+  const queued = await f.service.enqueueSourceJob(request)
+  expect(writes).toBeGreaterThan(0)
+  f.verification.mockImplementation(async input => ({ status: 'verified', certificate: signedAdoptionCertificate(f, input.planId) }))
+  installCandidateRunner(f)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const originalJob = f.store.getSourceJob(queued.id)!, planId = originalJob.planId!
+  const adopted = f.service.inspectCreatedCapability(planId)!
+  expect(adopted.status).toBe('active')
+  const alias = adopted.aliases[0]!, quota = f.service.inspectWorkItemCreationReadiness({owner:f.owner})!.remaining
+  const initialRunnerCalls = runnerRun.mock.calls.length
+  await unregister(); await f.ctx.fiber.dispose()
+  let release!: () => void, entered!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve }), startupEntered = new Promise<void>(resolve => { entered = resolve })
+  const originalStart = CreationCapabilityRuntime.prototype.start
+  const start = vi.spyOn(CreationCapabilityRuntime.prototype, 'start').mockImplementation(function (this: CreationCapabilityRuntime) {
+    return originalStart.call(this).then(async () => { entered(); await gate })
+  })
+  let restored: Awaited<ReturnType<typeof startCapabilityHost>> | undefined
+  try {
+    restored = await startCapabilityHost(f, { inspectWorkItemCreationReviewReadiness: () => {
+      if (restored?.service.inspectWorkItemPreparedCreationProtocol() !== 'dsh-prepared-creation/v2') return undefined
+      return { protocol: 'assistant-growth/work-item-review-readiness/v1', sourceProtocol: unsigned.protocol,
+        runProtocol: 'assistant-growth/source-run/v2', workItemFailures: true, authority: f.authority,
+        publicKey: f.publicKey, remainingVerifications: 1, available: true }
+    } })
+    await startupEntered
+    expect(restored.service.canEnqueueSource()).toBe(false)
+    expect(restored.context.tools.get(alias)).toBeUndefined()
+    const unregisterCold = restored.service.registerSourceGrowthRunProducer(producer)
+    cleanup.push(async () => unregisterCold())
+    // Mirror Growth's registration + binding-ready nudge, both arriving before
+    // the asynchronous CP source/adoption startup barrier is released.
+    restored.service.reconcileSourceGrowthRuns()
+    release()
+    await vi.waitFor(() => expect(restored!.service.canEnqueueSource()).toBe(true))
+    await vi.waitFor(() => expect(restored!.context.tools.get(alias)).toBeDefined(), { timeout: 1000 })
+    expect(restored.service.inspectCreatedCapability(planId)).toEqual(adopted)
+    expect(restored.service.inspectWorkItemCreationReadiness({owner:f.owner})!.remaining).toEqual(quota)
+    expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: originalJob.status, intentDigest: originalJob.intentDigest })
+    expect(f.verification).toHaveBeenCalledOnce()
+    expect(build.runDockerPreparedChecks).toHaveBeenCalledOnce()
+    expect(runnerRun).toHaveBeenCalledTimes(initialRunnerCalls)
+    expect(inspect).not.toHaveBeenCalled()
+    await expect(restored.context.tools.get(alias)!.execute({query:'after-cold-reopen'}, {callId:'cold-current-call',
+      agent:{session:{id:'same-owner-cold'},owner:f.owner},signal:new AbortController().signal} as unknown as ToolRunContext)).resolves.toMatchObject({value:{answer:'ok'}})
+    expect(f.verification).toHaveBeenCalledOnce()
+  } finally { release(); start.mockRestore() }
+})
+
+
+it('restores an explicitly retained WorkItem capability from signed history without its current Growth producer', async () => {
+  const f = await fixture(true, true, true, false, false, false, true)
+  await f.unregisterGrowthRun()
+  const objective = 'original owner engineering objective'
+  const task = { protocol: 'assistant-delivery/owner-work-item-learning/v1', owner: { ...f.owner }, judgement: 'owner-feedback',
+    sourceDigest: '4'.repeat(64), presentationDigest: '5'.repeat(64), canonical: { ...f.source.canonical,
+      projection: { ...f.source.canonical.projection, subjectKind: 'work-item', subjectRef: 'wi-repair' } },
+    proofIdentity: { itemId: 'wi-repair', proofDigest: '6'.repeat(64), supplier: f.growthRun.model } } as unknown as OwnerWorkItemLearningTask
+  const unsigned = { protocol: 'assistant-delivery/work-item-engineering-context/v1' as const, itemId: 'wi-repair', rootItemId: 'wi-repair',
+    feedbackProofDigest: task.proofIdentity.proofDigest, materialDigest: '7'.repeat(64), nodes: [], reports: [],
+    objective: { protocol: 'work-item-owner-objective/v1' as const, fullTextDigest: createHash('sha256').update(objective).digest('hex'), fullBytes: Buffer.byteLength(objective) } }
+  const source = { task, manifest: { ...unsigned, manifestDigest: growthObjectDigest(unsigned) }, objective }
+  let producerHeld = false
+  const noReverse = () => { if (producerHeld) throw new Error('reverse source read under producer frame') }
+  const currentSource = () => ({ ...source, task: { ...source.task, owner: { ...f.owner } } })
+  Object.assign(f.deliveryPorts, { inspectOwnerWorkItemEngineeringContext: () => { noReverse(); return currentSource() },
+    withOwnerWorkItemEngineeringContextFence: (_input: unknown, callback: (source: unknown) => unknown) => { noReverse(); return callback(currentSource()) } })
+  // Usage froze the old owner before a legitimate new foreground session.
+  f.owner.generation += 1; f.owner.bindingVersion += 1
+  const verifier = f.ctx.get('assistantVerifier' as never) as unknown as Record<string, unknown>
+  verifier.inspectWorkItemCreationReviewReadiness = () => { noReverse(); return { protocol: 'assistant-growth/work-item-review-readiness/v1',
+    sourceProtocol: unsigned.protocol, runProtocol: 'assistant-growth/source-run/v2', workItemFailures: true,
+    authority: f.authority, publicKey: f.publicKey, remainingVerifications: 1, available: true } }
+  const gap = f.service.recordOwnerWorkItemFailureGap(source)
+  const before = f.store.health()
+  const readiness = f.service.inspectWorkItemCreationReadiness({ owner: f.owner })
+  expect(readiness?.available).toBe(true)
+  expect(readiness?.pins.sourceJobs.authorityDigest).toBe(controlPlaneDigest({ config: normalizeControlPlaneConfig(f.config).sourceJobs, build: normalizeControlPlaneConfig(f.config).sourceBuild }))
+  expect(f.service.inspectWorkItemCreationReadiness({ owner: { ...f.owner, principalRecordId: 'wrong-person' } })).toBeUndefined()
+  expect(f.store.health()).toEqual(before)
+  if (!readiness) throw new Error('expected actual active readiness')
+  const run: WorkItemSourceGrowthRunBinding = { ...f.growthRun, protocol: 'assistant-growth/source-run/v2', mode: 'create',
+    ownerDigest: controlPlaneDigest(task.owner), creationAcceptance: f.authority, authorities: readiness.pins,
+    source: { protocol: 'assistant-growth/work-item-source/v1', itemId: 'wi-repair', outcomeId: source.task.canonical.triggerOutcomeId,
+      projection: { ...source.task.canonical.projection, subjectKind: 'work-item', disposition: 'upsert' }, objectiveStatus: 'not-achieved',
+      sourceDigest: task.sourceDigest, presentationDigest: task.presentationDigest,
+      context: { protocol: unsigned.protocol, manifestDigest: source.manifest.manifestDigest, objectiveDigest: unsigned.objective.fullTextDigest, objectiveBytes: unsigned.objective.fullBytes } } }
+  validateWorkItemSourceGrowthRunBinding(run)
+  const inspect = vi.fn(() => { throw new Error('v2 may not use producer.inspect') })
+  let writes = 0
+  const producer = { protocol: 'assistant-growth-source-run-producer/v2' as const, inspect,
+    withWorkItemRunFence: <T>(_input: unknown, callback: (run: WorkItemSourceGrowthRunBinding) => T): T => { noReverse(); producerHeld = true; try { writes++; return callback(structuredClone(run)) } finally { producerHeld = false } } }
+  let unregister = f.service.registerSourceGrowthRunProducer(producer)
+  cleanup.push(async () => unregister())
+  const request = { ...f.request, gapId: gap.id, growthRun: run, idempotencyKey: 'work-item-create' }
+  const queued = await f.service.enqueueSourceJob(request)
+  expect(writes).toBeGreaterThan(0)
+  f.verification.mockImplementation(async input => ({ status: 'verified', certificate: signedAdoptionCertificate(f, input.planId) }))
+  installCandidateRunner(f)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const originalJob = f.store.getSourceJob(queued.id)!, planId = originalJob.planId!
+  const adopted = f.service.inspectCreatedCapability(planId)!
+  expect(adopted.status).toBe('active')
+  const alias = adopted.aliases[0]!, initialRunnerCalls = runnerRun.mock.calls.length
+  await unregister(); await f.ctx.fiber.dispose()
+  f.advance(901_000)
+  const restored = await startCapabilityHost(f)
+  await vi.waitFor(() => expect(restored.context.tools.get(alias)).toBeDefined())
+  expect(restored.service.canEnqueueSource()).toBe(false)
+  expect(restored.service.inspectCreatedCapability(planId)).toEqual(adopted)
+  expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: originalJob.status, intentDigest: originalJob.intentDigest })
+  expect(f.verification).toHaveBeenCalledOnce()
+  expect(build.runDockerPreparedChecks).toHaveBeenCalledOnce()
+  expect(runnerRun).toHaveBeenCalledTimes(initialRunnerCalls)
+  expect(inspect).not.toHaveBeenCalled()
+  await expect(restored.context.tools.get(alias)!.execute({query:'after-retained-reopen'}, {callId:'cold-retained-call',
+    agent:{session:{id:'same-owner-retained'},owner:f.owner},signal:new AbortController().signal} as unknown as ToolRunContext)).resolves.toMatchObject({value:{answer:'ok'}})
+  expect(f.verification).toHaveBeenCalledOnce()
+  f.advance(1_200_000)
+  await expect(restored.context.tools.get(alias)!.execute({query:'after-retained-reopen'}, {callId:'cold-retained-call',
+    agent:{session:{id:'same-owner-retained'},owner:f.owner},signal:new AbortController().signal} as unknown as ToolRunContext)).rejects.toThrow()
+})

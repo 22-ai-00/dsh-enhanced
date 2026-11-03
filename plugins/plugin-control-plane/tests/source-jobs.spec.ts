@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { automationDefinitionDigest, type HostAutomationExecutor, type SystemAutomationReconcileInput } from '@dsh-enhanced/assistant-automations'
-import { isSourceOwnerContinuation } from '@dsh-enhanced/assistant-growth-contract'
+import { isSourceOwnerContinuation, validateAnySourceGrowthRunBinding, type AnySourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { approvalSigningPayload, Ed25519ApprovalAuthority } from '../src/approval.ts'
 import { Ed25519SourceReleaseAuthorizationAuthority, sourceReleaseAuthorizationSigningPayload } from '../src/release.ts'
@@ -32,21 +32,44 @@ const evidence = () => ({ schemaVersion: 1 as const, kind: 'dsh-source-prepared-
  * The real revision enqueue, certificates and native definition are exercised
  * in source-create-service.spec.ts; these tests inspect the dispatched signals. */
 function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: number; revision?: boolean; regression?: boolean;
-  sourceBuild?: sourceBuild.SourceBuildConfig } = {}) {
+  sourceBuild?: sourceBuild.SourceBuildConfig; create?: boolean; creationReview?: boolean; workItem?: boolean } = {}) {
   const now = Date.now(), expiry = now + (options.remainingMs ?? 10_800_000)
   const config: SourceJobsConfig = { authorityId: 'revision-timeouts', expiresAt: expiry, maxSubmissions: 1,
-    repository: '/repository', allowedModes: ['revise-created'], ownerRouteId: OWNER.ownerRouteId,
+    repository: '/repository', allowedModes: [options.create ? 'create' : 'revise-created'], ownerRouteId: OWNER.ownerRouteId,
     principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId: 'revision-runs', budgetAmount: 1,
-    revision: { id: 'revision-timeouts', expiresAt: expiry, maxRevisions: 1, namePrefix: 'agent-' } }
+    revision: { id: 'revision-timeouts', expiresAt: expiry, maxRevisions: 1, namePrefix: 'agent-' },
+    ...(options.create ? { creation: { id: 'creation-timeouts', expiresAt: expiry, maxCreates: 1, namePrefix: 'agent-', ...(options.workItem ? { workItemFailures: true } : {}) } } : {}) }
   const settings = options.sourceBuild ?? linuxSourceConfig()
   const reference = { schemaVersion: 1 as const, owner: receipt(), outcomeId: 'revision-timeouts',
     projection: { subjectKind: 'foreground-turn' as const, subjectRef: 'revision-inbox', version: 1, digest: hex('projection'), disposition: 'upsert' as const },
     sourceDigest: hex('source') }
   const growthRun = sourceGrowthRunFixture(reference, now)
+  if (options.create) growthRun.creationAcceptance = { protocol: 'assistant-growth/creation-acceptance-authority/v1',
+    authorityId: 'creation-reviewer', keyId: 'creation-key', authorityDigest: hex('creation-reviewer'), namePrefix: 'agent-', expiresAt: expiry }
   growthRun.revisionAcceptance = { protocol: 'assistant-growth/revision-acceptance-authority/v1', authorityId: 'reviewer',
     keyId: 'reviewer-key', authorityDigest: hex('reviewer'), namePrefix: 'agent-', expiresAt: expiry }
   growthRun.revisionRegressionAcceptance = { protocol: 'assistant-growth/revision-regression-acceptance-authority/v1', authorityId: 'regression',
     keyId: 'regression-key', authorityDigest: hex('regression'), namePrefix: 'agent-', expiresAt: expiry }
+  const sourceRun: AnySourceGrowthRunBinding = options.workItem ? (() => {
+    const { protocol: _protocol, source: _source, revisionAcceptance: _revision, revisionRegressionAcceptance: _regression, ...base } = growthRun
+    const creationAcceptance = growthRun.creationAcceptance!
+    return { ...base, protocol: 'assistant-growth/source-run/v2', mode: 'create', creationAcceptance,
+      source: { protocol: 'assistant-growth/work-item-source/v1', itemId: 'work-item', outcomeId: reference.outcomeId,
+        projection: { subjectKind: 'work-item', subjectRef: 'work-item', version: 1, digest: hex('projection'), disposition: 'upsert' },
+        objectiveStatus: 'not-achieved', sourceDigest: hex('source'), presentationDigest: hex('presentation'),
+        context: { protocol: 'assistant-delivery/work-item-engineering-context/v1', manifestDigest: hex('manifest'), objectiveDigest: hex('objective'), objectiveBytes: 12 } },
+      authorities: { protocol: 'assistant-growth/work-item-authorities/v1',
+        sourceJobs: { authorityId: config.authorityId, authorityDigest: controlPlaneDigest({ config, build: settings }), expiresAt: expiry },
+        creationGrant: { id: config.creation!.id, digest: controlPlaneDigest(config.creation), expiresAt: expiry },
+        creationAcceptance, adoption: { authorityId: 'adoption', authorityDigest: hex('adoption'), expiresAt: expiry } } }
+  })() : growthRun
+  if (options.workItem) validateAnySourceGrowthRunBinding(sourceRun)
+  const durableReference = sourceRun.protocol === 'assistant-growth/source-run/v2' ? {
+    schemaVersion: 2 as const, sourceProtocol: 'assistant-delivery/work-item-engineering-context/v1' as const,
+    owner: reference.owner, outcomeId: sourceRun.source.outcomeId, projection: sourceRun.source.projection,
+    sourceDigest: sourceRun.source.sourceDigest, presentationDigest: sourceRun.source.presentationDigest,
+    context: { manifestDigest: sourceRun.source.context.manifestDigest, objectiveDigest: sourceRun.source.context.objectiveDigest,
+      objectiveBytes: sourceRun.source.context.objectiveBytes } } : reference
   const parent = { planId: 'parent', certificateDigest: hex('certificate'), artifactSha256: hex('artifact'),
     sourceArchiveDigest: hex('archive'), sourceDigest: hex('parent-source') }
   const trust = { dshHome: '/dsh', executor: { environmentAllowlist: [] } }
@@ -54,18 +77,20 @@ function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: num
   let job: SourceJobRecord = { id: 'revision-job', automationId: 'revision-job', idempotencyKey: 'revision-job', revision: 1,
     status: options.prepared ? 'prepared' : 'queued', createdAt: now, updatedAt: now, expiresAt: expiry,
     ...(options.prepared ? { planId: 'revision-plan' } : {}), intentDigest: hex('intent'),
-    intent: { mode: 'revise-created', authority: { id: config.authorityId, digest: controlPlaneDigest({ config, build: settings }), expiresAt: expiry, maxSubmissions: 1 },
+    intent: { mode: options.create ? 'create' : 'revise-created', authority: { id: config.authorityId, digest: controlPlaneDigest({ config, build: settings }), expiresAt: expiry, maxSubmissions: 1 },
       owner: reference.owner, ownerDigest: controlPlaneDigest(reference.owner), trustDigest: controlPlaneDigest(trust),
       repository: config.repository, name: 'agent-timeouts', gapId: 'revision-gap', gapRevision: 1, gapDigest: controlPlaneDigest(gap),
       baseCommit: 'a'.repeat(40), files: [], ttlMs: 10_800_000, worktree: '/worktree', build: settings,
-      revision: { grant: config.revision!, generatorDigest: hex('generator'), parent, growthRun } } }
+      ...(options.create ? { creation: { grant: config.creation!, generatorDigest: hex('generator'), growthRun: sourceRun } }
+        : { revision: { grant: config.revision!, generatorDigest: hex('generator'), parent, growthRun } }) } }
   let revisionStatus: 'verified' | undefined = options.revision === false ? 'verified' : undefined
+  let creationStatus: 'verified' | undefined
   let regressionStatus: 'verified' | undefined
   const store = { interruptSourceJobs: () => {}, listSourceJobs: () => [job], getSourceJob: () => job,
-    getSourceJobByAutomation: () => job, getOwnerTaskFailureReference: () => reference, getGap: () => gap,
+    getSourceJobByAutomation: () => job, getOwnerTaskFailureReference: () => durableReference, getGap: () => gap,
     listPreparedSourceApprovalJobs: () => job.status === 'prepared' ? [job] : [],
-    getSourcePlan: () => ({ id: 'revision-plan', mode: 'prepared-revise', status: 'pending-approval', expiresAt: expiry,
-      sourceRevision: job.intent.revision }), getRevisionVerificationStatus: () => revisionStatus,
+    getSourcePlan: () => ({ id: 'revision-plan', mode: options.create ? 'prepared-create' : 'prepared-revise', status: 'pending-approval', expiresAt: expiry,
+      sourceRevision: job.intent.revision, creation: job.intent.creation }), getCreationVerificationStatus: () => creationStatus, getRevisionVerificationStatus: () => revisionStatus,
     getRevisionRegressionStatus: () => regressionStatus,
     bindSourceJobDefinition: (input: { definitionHash: string }) => (job = { ...job, revision: job.revision + 1, definitionHash: input.definitionHash }),
     claimSourceJob: (input: { occurrenceId: string }) => (job = { ...job, revision: job.revision + 1, status: 'running', occurrenceId: input.occurrenceId }),
@@ -87,15 +112,19 @@ function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: num
   const signals: AbortSignal[] = []
   const review = vi.fn(async (_job: SourceJobRecord, signal: AbortSignal) => { signals.push(signal); revisionStatus = 'verified' })
   const regression = vi.fn(async (_job: SourceJobRecord, signal: AbortSignal) => { signals.push(signal); regressionStatus = 'verified' })
+  const creationReview = vi.fn(async (_job: SourceJobRecord, signal: AbortSignal) => { signals.push(signal); creationStatus = 'verified' })
+  const adoption = vi.fn(async (_job: SourceJobRecord, signal: AbortSignal) => { signal.throwIfAborted(); signals.push(signal) })
   const prepare = vi.fn(async (_job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>) => {
     await assertCurrent(); signals.push(signal); job = { ...job, status: 'prepared', planId: 'revision-plan' }
     return store.getSourcePlan() as PluginSourcePlan
   })
   const runtime = new SourceJobRuntime({ config, build: settings, statePath: '/state', store: store as unknown as ControlPlaneStore,
     ports: { automations: automations as never, delivery: { validateOwnerRoute: receipt } }, trust: async () => trust as never,
-    withGapSourceFence: (_gap, _owner, callback) => callback(), assertGrowthRun: () => {},
+    withGapSourceFence: (_gap, _owner, callback) => callback(),
+    withWorkItemGrowthRunFence: (_run, _gap, _owner, _generation, callback) => callback(), assertGrowthRun: () => {},
     inspectRevisionParent: () => ({ name: job.intent.name, parent, source: {} as never, certificate: {} as never }),
-    prepare, verifyPreparedCreation: async () => {}, ...(options.revision === false ? {} : { verifyPreparedRevision: review }),
+    prepare, ...(options.creationReview === false ? {} : { verifyPreparedCreation: creationReview }),
+    ...(options.create ? { creationAdoptionEligible: () => true, adoptVerifiedCreation: adoption } : {}), ...(options.revision === false ? {} : { verifyPreparedRevision: review }),
     ...(options.regression === false ? {} : { verifyPreparedRevisionRegression: regression }) })
   runtime.start()
   const execute = (continuation = false, signal = new AbortController().signal) => {
@@ -106,12 +135,12 @@ function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: num
       executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
       ownerRouteId: OWNER.ownerRouteId, activationNonce: registration.activationNonce, catalogDigest: executor.descriptor.catalogDigest, signal })
   }
-  return { runtime, execute, review, regression, prepare, signals, reconciles, config, get job() { return job } }
+  return { runtime, execute, review, regression, creationReview, adoption, prepare, signals, reconciles, config, get job() { return job } }
 }
 
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture(options: { preflightGeneration?: object; typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean; releases?: boolean; execution?: boolean; adoption?: boolean; creation?: boolean; allowedModes?: readonly ('create' | 'modify' | 'revise-created')[]; sourceBuild?: sourceBuild.SourceBuildConfig; inspectNativeQuiescence?: (key: string) => Promise<'quiescent' | 'unknown'>; preparedEvidence?: SourcePreparedEvidence } = {}) {
+async function fixture(options: { preflightGeneration?: object; typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean; releases?: boolean; execution?: boolean; adoption?: boolean; creation?: boolean; workItemFailures?: boolean; allowedModes?: readonly ('create' | 'modify' | 'revise-created')[]; sourceBuild?: sourceBuild.SourceBuildConfig; inspectNativeQuiescence?: (key: string) => Promise<'quiescent' | 'unknown'>; preparedEvidence?: SourcePreparedEvidence } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-source-jobs-runtime-'))); roots.push(root)
   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true })
   await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export const committed = true\n')
@@ -176,7 +205,7 @@ async function fixture(options: { preflightGeneration?: object; typed?: boolean;
   })
   const config = { authorityId: 'source-authority', expiresAt: Date.now() + 60_000, maxSubmissions: 2, repository: sourceRepository,
     ...(options.allowedModes ? { allowedModes: options.allowedModes } : {}),
-    ...(options.creation ? { creation: { id: 'source-runtime-create', expiresAt: Date.now() + 30_000, maxCreates: 1, namePrefix: 'agent-' } } : {}),
+    ...(options.creation ? { creation: { id: 'source-runtime-create', expiresAt: Date.now() + 30_000, maxCreates: 1, namePrefix: 'agent-', ...(options.workItemFailures ? { workItemFailures: true } : {}) } } : {}),
     ownerRouteId: OWNER.ownerRouteId, principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId: 'source-runs', budgetAmount: 1 }
   const delivery = { validateOwnerRoute: vi.fn(receipt) }
   const approvePrepared = vi.fn(async (job: SourceJobRecord, _signal: AbortSignal) => {
@@ -215,6 +244,52 @@ async function fixture(options: { preflightGeneration?: object; typed?: boolean;
 }
 
 describe('durable source-job runtime', () => {
+  it('gives Linux work-item v2 create the same outer Host allowance as its already bounded inline creation review', async () => {
+    const f = revisionTimeoutFixture({ create: true, workItem: true }), timeout = vi.spyOn(AbortSignal, 'timeout')
+    const frozen = structuredClone({ config: f.config, intent: f.job.intent, expiresAt: f.job.expiresAt })
+    try {
+      const definition = f.reconciles.find(input => input.automationId === f.job.id)!.definition
+      expect(definition.timeoutMs).toBe(1_980_000)
+      expect(definition).toMatchObject({ retrySafety: 'never', maxRetries: 0, overlap: 'skip' })
+      expect(await f.execute()).toMatchObject({ outcome: 'succeeded' })
+      expect(timeout).toHaveBeenCalledWith(definition.timeoutMs)
+      expect(f.prepare).toHaveBeenCalledOnce(); expect(f.creationReview).toHaveBeenCalledOnce(); expect(f.adoption).toHaveBeenCalledOnce()
+      expect(f.signals.every(signal => signal === f.signals[0])).toBe(true)
+      expect({ config: f.config, intent: f.job.intent, expiresAt: f.job.expiresAt }).toEqual(frozen)
+    } finally { await f.runtime.close() }
+  })
+
+  it.each(['deadline', 'caller'] as const)('still aborts create on %s before adoption without extending source expiry', async cause => {
+    const f = revisionTimeoutFixture({ create: true, workItem: true, remainingMs: 30_000 }), deadline = new AbortController(), caller = new AbortController()
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal)
+    f.creationReview.mockImplementationOnce(async (_job, signal) => new Promise<void>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+    }))
+    try {
+      const pending = f.execute(false, caller.signal)
+      await vi.waitFor(() => expect(f.creationReview).toHaveBeenCalledOnce())
+      expect(timeout.mock.calls[0]![0]).toBeLessThanOrEqual(30_000)
+      ;(cause === 'deadline' ? deadline : caller).abort(new Error('frozen source or caller deadline'))
+      expect(await pending).toMatchObject({ outcome: 'unknown', retryability: 'unsafe' })
+      expect(f.adoption).not.toHaveBeenCalled(); expect(f.job.status).toBe('prepared')
+    } finally { await f.runtime.close() }
+  })
+
+  it('keeps the legacy Linux v1 create definition and hash unchanged', async () => {
+    const f = revisionTimeoutFixture({ create: true })
+    try {
+      const definition = f.reconciles.find(input => input.automationId === f.job.id)!.definition
+      expect(definition.timeoutMs).toBe(180_000)
+      expect(f.job.definitionHash).toBe(automationDefinitionDigest({ ...definition, timeoutMs: 180_000 }))
+    } finally { await f.runtime.close() }
+  })
+
+  it('does not add Linux create time without the creation verifier hook', async () => {
+    const f = revisionTimeoutFixture({ create: true, workItem: true, creationReview: false })
+    try { expect(f.reconciles.find(input => input.automationId === f.job.id)!.definition.timeoutMs).toBe(180_000) }
+    finally { await f.runtime.close() }
+  })
+
   it('passes the complete Linux revision occurrence window through both sequential reviews', async () => {
     const f = revisionTimeoutFixture(), frozen = structuredClone({ config: f.config, intent: f.job.intent, expiresAt: f.job.expiresAt })
     const timeout = vi.spyOn(AbortSignal, 'timeout')
@@ -276,7 +351,7 @@ describe('durable source-job runtime', () => {
     } finally { await f.runtime.close() }
   })
 
-  it.each(['Docker', 'macOS'] as const)('retains the legacy %s occurrence definition when Linux review hooks are present', async backend => {
+  it.each([['Docker', false], ['macOS', false], ['Docker', true], ['macOS', true]] as const)('retains the legacy %s occurrence definition (create=%s) when Linux review hooks are present', async (backend, create) => {
     const settings: sourceBuild.SourceBuildConfig = backend === 'Docker' ? build : {
       backend: 'macos-seatbelt', stateRoot: '/approved/state', authorityDigest: hex('mac-authority'),
       expiresAt: Date.now() + 60_000, maxRuns: 2, maxTotalDurationMs: 120_000, timeoutMs: 60_000, outputBytes: 4096,
@@ -286,7 +361,7 @@ describe('durable source-job runtime', () => {
           { path: '/approved/modules', dev: 3, ino: 4, sha256: hex('modules-root') }],
         versions: { node: 'v24.22.0', typescript: '6.0.3', cordis: '1', tools: '1', systemPrompt: '1' } },
     }
-    const f = revisionTimeoutFixture({ sourceBuild: settings }), timeout = vi.spyOn(AbortSignal, 'timeout')
+    const f = revisionTimeoutFixture({ sourceBuild: settings, create, workItem: create }), timeout = vi.spyOn(AbortSignal, 'timeout')
     try {
       expect(f.reconciles.find(input => input.automationId === f.job.id)?.definition.timeoutMs).toBe(180_000)
       expect(await f.execute()).toMatchObject({ outcome: 'succeeded' })
@@ -1001,4 +1076,18 @@ describe('Linux original-call negative proof fencing', () => {
       expect(f.prepare).not.toHaveBeenCalled()
     } finally { await f.runtime.close(); f.store.close() }
   })
+})
+
+it.each([undefined, ['modify']] as const)('work-item readiness inherits ordinary allowedModes %j without consuming authority', async allowedModes => {
+  const f = await fixture({ creation: true, workItemFailures: true, ...(allowedModes === undefined ? {} : { allowedModes }) })
+  try {
+    const before = f.store.health(), registrations = f.automations.registerHostExecutor.mock.calls.length, reconciles = f.reconciles.length
+    const ready = f.runtime.inspectWorkItemReadiness(receipt())
+    if (allowedModes === undefined) expect(ready).toMatchObject({ authority: { id: f.config.authorityId }, creation: { workItemFailures: true }, remaining: { sourceSubmissions: 2, creates: 1 } })
+    else expect(ready).toBeUndefined()
+    expect(f.store.health()).toEqual(before)
+    expect(f.automations.registerHostExecutor).toHaveBeenCalledTimes(registrations)
+    expect(f.reconciles).toHaveLength(reconciles)
+    expect(f.prepare).not.toHaveBeenCalled()
+  } finally { await f.runtime.close(); f.store.close() }
 })

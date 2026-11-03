@@ -555,3 +555,140 @@ describe('trusted Host tool preauthorization', () => {
     await current.ctx.fiber.restart()
   })
 })
+
+describe('work-item Growth create-only preauthorization', () => {
+  const names = ['plugin_source_gaps', 'plugin_source_read', 'plugin_source_create', 'plugin_source_job_status'] as const
+  const fiberName = 'dsh-enhanced-assistant-growth-driver'
+
+  test('advertises its exact active capability and refuses a disposed Policy generation', async () => {
+    const current = await fixture(), policy = current.ctx.assistantPolicy
+    expect(policy.workItemGrowthToolPreauthorizationVersion()).toBe(1)
+    await current.ctx.fiber.dispose()
+    expect(() => policy.workItemGrowthToolPreauthorizationVersion()).toThrow()
+  })
+
+  test.each(names)('allows only the owning Growth Fiber and live exact %s definition', async name => {
+    const current = await fixture()
+    let executions = 0, mode: 'allow' | 'deny' | 'throw' = 'allow'
+    const tool = definition(name, () => { executions += 1 })
+    current.ctx.tools.register(tool)
+    const caller = trustedActionsCaller(current.ctx, fiberName)
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(current.ctx, tool, () => true)).toThrow(/reserved/)
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'plugin-control-plane'), tool, () => true)).toThrow(/reserved/)
+    const remove = current.ctx.assistantPolicy.registerPreauthorizedTool(caller, tool, () => {
+      if (mode === 'throw') throw new Error('frozen Growth source is unavailable')
+      return mode === 'allow'
+    }, { denialReason: 'The frozen work-item Growth run no longer permits this call.' })
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(false)
+    expect(current.asks()).toBe(0)
+    for (const rejected of ['deny', 'throw'] as const) {
+      mode = rejected
+      const result = await execute(current.ctx, current.owner, name)
+      expect(result.isError).toBe(true)
+      expect(JSON.stringify(result)).toContain('The frozen work-item Growth run no longer permits this call.')
+      expect(current.asks()).toBe(0)
+    }
+    expect(executions).toBe(1)
+    remove()
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(true)
+    expect(current.asks()).toBe(1)
+    await current.ctx.fiber.restart()
+  })
+
+  test('does not expand Growth preauthorization to author aliases, preparation, targets or revisions', async () => {
+    const current = await fixture(), caller = trustedActionsCaller(current.ctx, fiberName)
+    for (const name of ['growth_create', 'growth_plugin_source_create', 'plugin_source_prepare', 'plugin_source_targets', 'plugin_source_revise', 'plugin_source_approve', 'plugin_source_release']) {
+      expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(caller, definition(name, () => {}), () => true)).toThrow(/reserved/)
+    }
+    await current.ctx.fiber.restart()
+  })
+
+  test('rejects forged definitions and scoped shadows, and removes the exact registration on owner disposal', async () => {
+    const current = await fixture(), name = 'plugin_source_create'
+    let executions = 0
+    const actual = definition(name, () => { executions += 1 }), forged = definition(name, () => { executions += 1 }), shadow = definition(name, () => { executions += 1 })
+    current.ctx.tools.register(actual)
+    const caller = trustedActionsCaller(current.ctx, fiberName)
+    current.ctx.assistantPolicy.registerPreauthorizedTool(caller, forged, () => true)
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(true)
+    expect(current.asks()).toBe(1)
+    current.ctx.assistantPolicy.registerPreauthorizedTool(caller, actual, () => true)
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(false)
+    await current.owner.ctx.inject(['tools'], scope => { scope.tools.register(shadow) })
+    expect(current.ctx.tools.get(name, current.owner)).toBe(shadow)
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(true)
+    expect(current.asks()).toBe(2)
+    await caller.fiber.dispose()
+    expect((await execute(current.ctx, createAgent(current.ctx), name)).isError).toBe(true)
+    expect(current.asks()).toBe(3)
+    expect(executions).toBe(1)
+    await current.ctx.fiber.restart()
+  })
+
+  test.each(names.flatMap(name => ['deny', 'emergency-stop', 'budget'].map(barrier => ({ name, barrier }))))('$name keeps the independent $barrier guard', async ({ name, barrier }) => {
+    const current = await fixture(barrier === 'deny'
+      ? { rules: [{ id: 'deny-growth-tool', effect: 'deny', actions: ['execute'], resource: { kind: 'tool', id: name } }] }
+      : barrier === 'budget'
+        ? { rules: [{ id: 'budget-growth-tool', effect: 'allow', actions: ['execute'], resource: { kind: 'tool', id: name }, budget: { id: 'growth-tool-calls', amount: 1 } }], budgets: [{ id: 'growth-tool-calls', metric: 'calls', limit: 1, periodMs: 60_000, scope: 'subject' }] }
+        : {})
+    let executions = 0
+    const tool = definition(name, () => { executions += 1 })
+    current.ctx.tools.register(tool)
+    current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, fiberName), tool, () => true)
+    if (barrier === 'budget') expect((await execute(current.ctx, current.owner, name)).isError).toBe(false)
+    if (barrier === 'emergency-stop') current.ctx.assistantPolicy.setEmergencyStop({ enabled: true, actor: 'owner', reason: 'test stop' })
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(true)
+    expect(executions).toBe(barrier === 'budget' ? 1 : 0)
+    expect(current.asks()).toBe(0)
+    await current.ctx.fiber.restart()
+  })
+})
+
+describe('preauthorized tool effect disposal', () => {
+  const names = ['plugin_source_gaps', 'plugin_source_read', 'plugin_source_create', 'plugin_source_job_status'] as const
+
+  test('returns both Growth runs to the actual Fiber effect baseline and revokes an active final run on disposal', async () => {
+    const current = await fixture(), caller = trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-growth-driver')
+    const baseline = caller.fiber.getEffects().length, counts: Array<{ during: number; after: number }> = []
+    let executions = 0
+    const definitions = names.map(name => definition(name, () => { executions += 1 }))
+    for (const tool of definitions) current.ctx.tools.register(tool)
+    try {
+      for (let run = 0; run < 2; run++) {
+        const remove = definitions.map(tool => current.ctx.assistantPolicy.registerPreauthorizedTool(caller, tool, execution => execution.agent === current.owner,
+          { denialReason: 'This finite Growth run has ended.' }))
+        const during = caller.fiber.getEffects().length
+        for (const name of names) expect((await execute(current.ctx, current.owner, name)).isError).toBe(false)
+        for (const dispose of remove) { expect(typeof dispose).toBe('function'); dispose(); dispose() }
+        counts.push({ during, after: caller.fiber.getEffects().length })
+        expect((await execute(current.ctx, current.owner, 'plugin_source_create')).isError).toBe(true)
+      }
+      console.info(JSON.stringify({ proof: 'growth-preauthorization-effect-baseline', baseline, counts }))
+      expect(counts).toEqual([{ during: baseline + 4, after: baseline }, { during: baseline + 4, after: baseline }])
+      expect(executions).toBe(8)
+      expect(current.asks()).toBe(2)
+      const remove = definitions.map(tool => current.ctx.assistantPolicy.registerPreauthorizedTool(caller, tool, () => true))
+      expect(caller.fiber.getEffects()).toHaveLength(baseline + 4)
+      await caller.fiber.dispose()
+      expect(caller.fiber.getEffects()).toHaveLength(0)
+      for (const dispose of remove) dispose()
+      expect((await execute(current.ctx, current.owner, 'plugin_source_create')).isError).toBe(true)
+      expect(current.asks()).toBe(3)
+      expect(executions).toBe(8)
+    } finally { await current.ctx.fiber.dispose() }
+  })
+
+  test('removes the grant if its caller effect cannot be registered', async () => {
+    const current = await fixture(), caller = trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-growth-driver')
+    let executions = 0
+    const tool = definition('plugin_source_create', () => { executions += 1 })
+    current.ctx.tools.register(tool)
+    try {
+      await caller.fiber.dispose()
+      expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(caller, tool, () => true)).toThrow()
+      expect((await execute(current.ctx, current.owner, tool.name)).isError).toBe(true)
+      expect(current.asks()).toBe(1)
+      expect(executions).toBe(0)
+    } finally { await current.ctx.fiber.dispose() }
+  })
+})

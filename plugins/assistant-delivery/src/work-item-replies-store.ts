@@ -95,6 +95,32 @@ export class WorkItemRepliesStore {
       ...(row.execution_parent_item_id === null ? {} : { executionParentItemId: row.execution_parent_item_id }),
       ...(row.child_item_id === null ? {} : { child: Object.freeze({ itemId: row.child_item_id, planDigest: row.child_plan_digest! }) }) })
   }
+  /** Historical engineering evidence only; never restores a cancelled route or execution permission. */
+  inspectHistoricalSource(input:WorkItemReplyReadInput):WorkItemReplySource|undefined {
+    const row=this.row(input.id)
+    if(!row || row.source_digest!==input.expectedSourceDigest || !row.execution_parent_item_id || !row.child_item_id || !row.child_plan_digest
+      || !['routed','cancelled'].includes(row.state))return undefined
+    const raw=this.database.prepare('SELECT CAST(source_json AS BLOB) AS bytes FROM delivery_work_item_replies WHERE inbox_id=?').get(input.id) as {bytes:Uint8Array}|undefined
+    if(!raw || !(raw.bytes instanceof Uint8Array))fail()
+    const text=new TextDecoder('utf-8',{fatal:true}).decode(raw.bytes)
+    if(!Buffer.from(text).equals(raw.bytes))fail()
+    const source=JSON.parse(text) as ImmutableSource
+    const fields=['protocol','id','admissionCursor','inputText','inputSha256','inputBytes','scope','principalId','owner','binding','target']
+    if(!source || Object.keys(source).sort().join()!==fields.sort().join() || source.protocol!=='assistant-delivery/work-item-reply/v1'
+      || workItemReplyCanonical(source)!==text || workItemReplyDigest(source)!==row.source_digest || source.id!==row.inbox_id
+      || source.admissionCursor?.sequence!==row.admission_sequence || typeof source.inputText!=='string'
+      || Buffer.from(source.inputText).toString('utf8')!==source.inputText || Buffer.byteLength(source.inputText)!==source.inputBytes
+      || createHash('sha256').update(source.inputText).digest('hex')!==source.inputSha256 || !/^[a-f0-9]{64}$/u.test(row.child_plan_digest))fail()
+    const inbox=this.getInbox(source.id)
+    const envelope=this.database.prepare('SELECT CAST(envelope_json AS BLOB) AS bytes FROM inbox_messages WHERE id=?').get(source.id) as {bytes:Uint8Array}|undefined
+    if(!inbox || !envelope || !(envelope.bytes instanceof Uint8Array))fail()
+    const envelopeText=new TextDecoder('utf-8',{fatal:true}).decode(envelope.bytes)
+    if(!Buffer.from(envelopeText).equals(envelope.bytes) || JSON.stringify(inbox.envelope)!==envelopeText
+      || createHash('sha256').update(envelopeText).digest('hex')!==inbox.envelopeHash || !same(inbox.admissionCursor,source.admissionCursor)
+      || inbox.bindingId!==source.binding.id || inbox.envelope.text!==source.inputText)fail()
+    return Object.freeze({...source,sourceDigest:row.source_digest,state:row.state,executionParentItemId:row.execution_parent_item_id,
+      child:Object.freeze({itemId:row.child_item_id,planDigest:row.child_plan_digest})})
+  }
   pending(input: import('./work-item-replies.js').WorkItemReplyListInput): WorkItemReplySource[] {
     return (this.database.prepare(`SELECT r.inbox_id,r.source_digest FROM delivery_work_item_replies r
       WHERE r.state='pending' AND r.admission_sequence>?

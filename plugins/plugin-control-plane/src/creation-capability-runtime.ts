@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { JsonSchemaNode, ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { canonicalGrowthJson, SourceGrowthRunUnavailableError } from '@dsh-enhanced/assistant-growth-contract'
+import { anySourceGrowthRunDigest, canonicalGrowthJson, SourceGrowthRunUnavailableError, validateAnySourceGrowthRunBinding, type AnySourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { creationCapabilityExecutionMatches, verifyCreationCapabilityExecution } from './creation-capability-execution.js'
 import type { CreationCapabilityCallEvidence, CreationCapabilityConfig, CreationCapabilityJournalPort, CreationCapabilityObservation,
   CreationCapabilityPorts, CreationCapabilityRecord, CreationCapabilityRunner, CreationCapabilityTool } from './creation-capability-types.js'
@@ -111,6 +111,7 @@ export class CreationCapabilityRuntime {
   private readonly cancellations = new Map<AbortController, string>()
   private readonly operations = new Set<AbortController>()
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly workItemPlans = new Set<string>()
   private admission = false
   private closed = false
   private started = false
@@ -130,6 +131,51 @@ export class CreationCapabilityRuntime {
     const result = this.serial.then(work)
     this.serial = result.catch(() => {})
     return result
+  }
+
+  inspectWorkItemAdoptionReadiness(): {
+    protocol: 'assistant-growth/work-item-adoption-readiness/v1'
+    sourceProtocol: 'assistant-delivery/work-item-engineering-context/v1'
+    runProtocol: 'assistant-growth/source-run/v2'
+    workItemFailures: true
+    authority: { authorityId: string; authorityDigest: string; expiresAt: number }
+    remainingAdoptions: number
+    available: boolean
+  } | undefined {
+    if (this.config.workItemFailures !== true || !this.started || this.closed || !this.admission
+      || Date.now() >= this.config.expiresAt || Date.now() >= this.config.runner.expiresAt) return undefined
+    const remainingAdoptions = Math.max(0, this.config.maxAdoptions - this.journal.list().length)
+    return { protocol: 'assistant-growth/work-item-adoption-readiness/v1',
+      sourceProtocol: 'assistant-delivery/work-item-engineering-context/v1', runProtocol: 'assistant-growth/source-run/v2',
+      workItemFailures: true, authority: { authorityId: this.config.authorityId,
+        authorityDigest: this.journal.authorityDigest, expiresAt: this.config.expiresAt },
+      remainingAdoptions, available: remainingAdoptions > 0 }
+  }
+
+  private sourceAuthority(record: Pick<CreationCapabilityRecord, 'planId' | 'certificate'>,
+    sourceRun?: AnySourceGrowthRunBinding): void {
+    if (sourceRun === undefined) {
+      if (this.workItemPlans.has(record.planId)) fail('work item source authority missing')
+      return
+    }
+    validateAnySourceGrowthRunBinding(sourceRun)
+    if (anySourceGrowthRunDigest(sourceRun) !== record.certificate.source.growthRunDigest) fail('source run changed')
+    if (sourceRun.protocol !== 'assistant-growth/source-run/v2') {
+      if (this.workItemPlans.has(record.planId)) fail('work item source protocol changed')
+      return
+    }
+    const pin = sourceRun.authorities.adoption
+    if (this.config.workItemFailures !== true || pin.authorityId !== this.config.authorityId
+      || pin.authorityDigest !== this.journal.authorityDigest || pin.expiresAt !== this.config.expiresAt)
+      fail('work item adoption authority mismatch')
+    this.workItemPlans.add(record.planId)
+  }
+
+  private withCurrent<T>(record: CreationCapabilityRecord, callback: () => T): T {
+    return this.ports.withCurrent(record, sourceRun => {
+      this.sourceAuthority(record, sourceRun)
+      return callback()
+    })
   }
 
   private live(record: CreationCapabilityRecord): void {
@@ -152,7 +198,8 @@ export class CreationCapabilityRuntime {
     await verifyCreationCapabilityExecution(record.certificate, this.config.runner, signal)
     signal.throwIfAborted()
     const current = retained ? this.ports.inspectRetained!(record) : this.ports.inspect(record.planId)
-    this.ports.withCurrent(record, () => {
+    this.sourceAuthority(record, current.sourceRun)
+    this.withCurrent(record, () => {
       if (!sameCertificate(current.certificate, record.certificate)
         || sha(current.artifact) !== record.certificate.plan.artifactSha256
         || current.artifact.length !== record.certificate.plan.artifactBytes) fail('source or artifact changed')
@@ -196,6 +243,7 @@ export class CreationCapabilityRuntime {
         || this.journal.list().length >= this.config.maxAdoptions
         || Date.now() >= this.config.expiresAt || Date.now() >= this.config.runner.expiresAt) return false
       const current = this.ports.inspect(planId)
+      this.sourceAuthority({ planId, certificate: current.certificate }, current.sourceRun)
       return current.certificate.plan.id === planId && current.certificate.expiresAt > Date.now()
         && sameExecution({ planId, status: 'claimed', certificate: current.certificate, artifact: current.artifact }, this.config)
         && current.certificate.plan.name.startsWith(this.config.namePrefix)
@@ -231,7 +279,7 @@ export class CreationCapabilityRuntime {
         || sha(current.artifact) !== sha(latestBeforeClaim.artifact)) fail('source changed during source capture')
       const claimRecord: CreationCapabilityRecord = { planId, status: 'claimed',
         certificate: current.certificate, artifact: current.artifact }
-      const claimed = this.ports.withCurrent(claimRecord, () => this.journal.claim({
+      const claimed = this.withCurrent(claimRecord, () => this.journal.claim({
         certificate: current.certificate, artifact: current.artifact, ...(source ? { source } : {}) }))
       if (!claimed.created) fail('plan already claimed')
       const record = claimed.record
@@ -249,7 +297,7 @@ export class CreationCapabilityRuntime {
           || Date.now() >= this.config.runner.expiresAt || Date.now() >= record.certificate.expiresAt
           || !sameExecution(record, this.config)) fail('authority or verification expired before authorization')
         const latest = this.ports.inspect(planId)
-        this.ports.withCurrent(record, () => {
+        this.withCurrent(record, () => {
           if (!sameCertificate(latest.certificate, record.certificate)
             || sha(latest.artifact) !== record.certificate.plan.artifactSha256) fail('source changed before authorization')
           this.journal.authorize(planId, tools)
@@ -258,7 +306,7 @@ export class CreationCapabilityRuntime {
         await this.checked(authorized, activeSignal, true)
         await this.mount(authorized, activeSignal)
         await this.checked(authorized, activeSignal, true)
-        this.ports.withCurrent(authorized, () => this.journal.activate(planId))
+        this.withCurrent(authorized, () => this.journal.activate(planId))
       } catch (error) {
         try { await this.unmount(planId) }
         finally { this.journal.settle(planId, 'unknown', 'adoption-unsettled') }
@@ -353,7 +401,7 @@ export class CreationCapabilityRuntime {
     if (exec.signal.aborted) cancel()
     try {
       await this.checked(record, controller.signal)
-      const call = this.ports.withCurrent(record, () => {
+      const call = this.withCurrent(record, () => {
         this.ports.assertCaller(record, exec)
         controller.signal.throwIfAborted()
         const foreground = this.ports.inspectCall?.(record, exec, tool.name, encoded)
@@ -367,7 +415,7 @@ export class CreationCapabilityRuntime {
         fail('call already claimed or unknown')
       }
       try {
-        this.ports.withCurrent(record, () => {
+        this.withCurrent(record, () => {
           this.ports.assertCaller(record, exec)
           controller.signal.throwIfAborted()
         })
@@ -387,7 +435,7 @@ export class CreationCapabilityRuntime {
         const value = { value: JSON.parse(json(raw.value, this.config.runner.maxOutputBytes)), content }
         json(value, this.config.runner.maxOutputBytes)
         await this.checked(record, controller.signal)
-        this.ports.withCurrent(record, () => {
+        this.withCurrent(record, () => {
           this.ports.assertCaller(record, exec)
           controller.signal.throwIfAborted()
           this.journal.settleCall({ planId, key, status: 'completed', result: value,
@@ -417,7 +465,7 @@ export class CreationCapabilityRuntime {
         if (!this.mounted.has(record.planId)) {
           await this.mount(record, controller.signal)
           await this.checked(record, controller.signal)
-          if (record.status === 'authorized') this.ports.withCurrent(record, () => this.journal.activate(record.planId))
+          if (record.status === 'authorized') this.withCurrent(record, () => this.journal.activate(record.planId))
         }
       } catch (error) {
         for (const [cancellation, planId] of this.cancellations) if (planId === record.planId) cancellation.abort()

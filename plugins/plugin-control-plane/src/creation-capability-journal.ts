@@ -143,7 +143,8 @@ export function verifyCreationCapabilityReceipt(value: unknown, authorityDigest:
 /** Read-only preflight; it never creates a signing key or ledger. */
 export function validateCreationCapabilityConfig(value: unknown): asserts value is CreationCapabilityConfig {
   const v = obj(value, ['authorityId','keyId','keyPath','owner','namePrefix','expiresAt','maxAdoptions','maxTools',
-    'maxCallsPerAdoption','maxCallRecords','maxInputBytes','runner', ...(Object.hasOwn(value as object, 'retention') ? ['retention'] : [])])
+    'maxCallsPerAdoption','maxCallRecords','maxInputBytes','runner', ...(Object.hasOwn(value as object, 'workItemFailures') ? ['workItemFailures'] : []), ...(Object.hasOwn(value as object, 'retention') ? ['retention'] : [])])
+  if (Object.hasOwn(v, 'workItemFailures') && typeof v.workItemFailures !== 'boolean') fail()
   str(v.authorityId); str(v.keyId); const keyPath = path(v.keyPath)
   const owner = obj(v.owner, ['authorityId','authorityHash','principalId','principalRecordId','principalVersion','workspace','agentPreset'])
   str(owner.authorityId); str(owner.authorityHash, SHA, 64)
@@ -186,6 +187,14 @@ export function validateCreationCapabilityConfig(value: unknown): asserts value 
   json(value)
 }
 
+function canonicalCapabilityConfig(config: CreationCapabilityConfig): CreationCapabilityConfig {
+  const flag = Object.getOwnPropertyDescriptor(config, 'workItemFailures')
+  if (flag && (!flag.enumerable || !('value' in flag) || typeof flag.value !== 'boolean')) fail()
+  const copy = structuredClone(config)
+  if (copy.workItemFailures === false) delete copy.workItemFailures
+  return copy
+}
+
 /** Stable public identity for preflight comparison with the independent verifier key. */
 export function creationCapabilityPublicKey(config: CreationCapabilityConfig): string {
   validateCreationCapabilityConfig(config)
@@ -198,7 +207,7 @@ export function creationCapabilityPublicKey(config: CreationCapabilityConfig): s
  * journal uses, so a missing, non-canonical or non-private key fails closed.
  */
 export function creationCapabilityAuthorityDigest(input: { path: string; config: CreationCapabilityConfig }): string {
-  return digest({ semantics: SEMANTICS, path: path(input.path), config: structuredClone(input.config),
+  return digest({ semantics: SEMANTICS, path: path(input.path), config: canonicalCapabilityConfig(input.config),
     keyFingerprint: sha(keyBytes(input.config.keyPath)) })
 }
 
@@ -219,7 +228,7 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
   private readonly config: CreationCapabilityConfig
   constructor(input: { path: string; config: CreationCapabilityConfig }) {
     validateCreationCapabilityConfig(input.config)
-    this.config = structuredClone(input.config)
+    this.config = canonicalCapabilityConfig(input.config)
     this.path = path(input.path)
     if (!this.path.endsWith('/creation-adoptions.sqlite') || this.path === this.config.keyPath) fail()
     this.key = createPrivateKey(keyBytes(this.config.keyPath))

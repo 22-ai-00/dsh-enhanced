@@ -5,7 +5,7 @@ import { lstat, mkdir, open, readdir, realpath, writeFile } from 'node:fs/promis
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mkdtemp, rm } from 'node:fs/promises'
-import type { SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import type { AnySourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { ControlPlaneCliError } from './errors.js'
 import { awaitSourceSignal, type SourceInspection } from './source-context.js'
 import { changedSourcePaths, linkedWorktrees, runLocalBuffer, runLocalCommand, writeCreatedPluginFiles,
@@ -26,6 +26,7 @@ const RESERVED_OUTPUTS = ['package.json', 'cordis.patch.yml', 'LICENSE', 'tsconf
 
 export interface SourceCreationGrant {
   id: string
+  workItemFailures?: boolean
   expiresAt: number
   maxCreates: number
   namePrefix: string
@@ -35,7 +36,7 @@ export interface SourceCreationBinding {
   grant: SourceCreationGrant
   generatorDigest: string
   /** Host-frozen ordinary-use run; absent on historical and manual creations. */
-  growthRun?: SourceGrowthRunBinding
+  growthRun?: AnySourceGrowthRunBinding
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -44,7 +45,8 @@ function record(value: unknown): value is Record<string, unknown> {
 
 /** Shape validation remains valid for historical, already-expired grants. */
 export function validateSourceCreationGrant(value: unknown): asserts value is SourceCreationGrant {
-  if (!record(value) || Object.keys(value).sort().join(',') !== 'expiresAt,id,maxCreates,namePrefix'
+  if (!record(value) || Object.keys(value).sort().join(',') !== ['expiresAt','id','maxCreates','namePrefix',...(Object.hasOwn(value,'workItemFailures')?['workItemFailures']:[])].sort().join(',')
+    || Object.hasOwn(value,'workItemFailures')&&typeof value['workItemFailures']!=='boolean'
     || typeof value.id !== 'string' || !GRANT_ID.test(value.id) || value.id.normalize('NFC') !== value.id
     || typeof value.expiresAt !== 'number' || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= 0
     || typeof value.maxCreates !== 'number' || !Number.isSafeInteger(value.maxCreates) || value.maxCreates < 1 || value.maxCreates > 1_000
@@ -52,6 +54,12 @@ export function validateSourceCreationGrant(value: unknown): asserts value is So
     || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-$/u.test(value.namePrefix)) {
     throw new ControlPlaneCliError('INVALID_ARGUMENT', 'source creation grant is invalid')
   }
+}
+
+export function normalizeSourceCreationGrant(value:SourceCreationGrant):SourceCreationGrant {
+  validateSourceCreationGrant(value)
+  const result=structuredClone(value);if(result.workItemFailures!==true)delete result.workItemFailures
+  return result
 }
 
 /** Candidate authority is limited to runtime source, documentation, and tests. */

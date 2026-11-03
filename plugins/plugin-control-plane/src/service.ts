@@ -1,6 +1,6 @@
 import { cleanedLinuxSourcePreflight, consumeCleanedLinuxSourcePreflight, consumeLinuxSourceNotStarted } from './linux-source-preflight.js'
 import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type AdoptionCoordinatorConfig } from './adoption-coordinator.js'
-import { CreationCapabilityJournal, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
+import { CreationCapabilityJournal, creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
 import { CreationCapabilityRuntime } from './creation-capability-runtime.js'
 import { inspectCreationCapabilityTaskAssociations } from './creation-capability-feedback.js'
 import { captureCreationCapabilitySource } from './creation-capability-source.js'
@@ -12,19 +12,20 @@ import { createHash, createPublicKey, randomBytes } from 'node:crypto'
 import type { AssistantDeliveryService, ForegroundTaskObservationRegistration, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { isSourceOwnerContinuation, sourceGrowthRunDigest, validateCreationAcceptanceAuthorityRef, verifyPluginCreationVerificationCertificate,
+import { isSourceOwnerContinuation, anySourceGrowthRunDigest as sourceGrowthRunDigest, validateAnySourceGrowthRunBinding as validateSourceGrowthRunBinding, validateWorkItemGrowthAuthorityPins, validateCreationAcceptanceAuthorityRef, verifyPluginCreationVerificationCertificate,
   validateRevisionAcceptanceAuthorityRef, verifyPluginRevisionVerificationCertificate, type RevisionAcceptanceAuthorityRef,
   validateRevisionRegressionAcceptanceAuthorityRef, verifyPluginRevisionRegressionCertificate,
   type RevisionRegressionAcceptanceAuthorityRef, type PluginRevisionRegressionCertificate, type PluginRevisionRegressionRequest, type PluginRevisionRegressionResult,
   type PluginRevisionVerificationCertificate, type PluginRevisionVerificationRequest, type PluginRevisionVerificationResult,
-  validateSourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate,
+  type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate,
   type PluginCreationVerificationRequest, type PluginCreationVerificationResult,
-  type SourceGrowthRunBinding, type SourceGrowthRunProducer } from '@dsh-enhanced/assistant-growth-contract'
+  type AnySourceGrowthRunBinding as SourceGrowthRunBinding, type AnySourceGrowthRunProducer as SourceGrowthRunProducer, type WorkItemSourceGrowthRunBinding, type WorkItemGrowthAuthorityPins } from '@dsh-enhanced/assistant-growth-contract'
 import { TaskObservationRuntime, validateTaskObservationConfig } from './task-observation-runtime.js'
 import { LiveQualificationRuntime, validateLiveQualificationConfig, type LiveQualificationConfig } from './live-qualification-runtime.js'
 import type { TaskObservationConfig } from './task-observation-types.js'
 import { rollbackPluginWatch } from './cli.js'
 import type { AssistantVerifierService } from '@dsh-enhanced/assistant-verifier'
+import { assertWorkItemRunReference, inertCreationData, WORK_ITEM_ENGINEERING_PROTOCOL, type WorkItemEngineeringSource } from './work-item-creation-contract.js'
 import { OwnerTaskFailureGaps } from './owner-task-gaps.js'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
@@ -61,7 +62,7 @@ import { resolveSourceBaseline } from './source-baseline.js'
 import { inheritedEnvironment, loadTrustConfig, resolveTrustKey } from './trust.js'
 import type { CapabilityGapInput, PluginActivationPlan, PluginControlPlaneHealth, PluginSourcePlan, StoredCapabilityGap } from './types.js'
 import { registerPluginControlTools } from './tools.js'
-import { SourceGrowthRunUnavailableError, SourceJobRuntime, validateSourceJobsConfig, type EnqueueSourceJobInput, type SourceJobCaller, type SourceJobPorts } from './source-jobs.js'
+import { SourceGrowthRunUnavailableError, SourceJobRuntime, normalizeSourceJobsConfig, type EnqueueSourceJobInput, type SourceJobCaller, type SourceJobPorts } from './source-jobs.js'
 import type { SourceJobOwnerReceipt, SourceJobProjection, SourceJobRecord, SourceJobsConfig } from './source-job-types.js'
 import { installRuntimeObserver, validateRuntimeObserverConfig, type RuntimeObserverConfig } from './runtime-observer.js'
 import { installReplayEndpoint, validateReplayEndpointConfig, type ReplayEndpointConfig } from './replay-endpoint.js'
@@ -235,7 +236,7 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
     }
   }
   if (config.sourceJobs !== undefined) {
-    validateSourceJobsConfig(config.sourceJobs, config.sourceBuild)
+    config.sourceJobs=normalizeSourceJobsConfig(config.sourceJobs, config.sourceBuild)
     if (realpathSync(config.sourceJobs.repository) !== config.sourceJobs.repository) throw new Error('plugin-control-plane: sourceJobs.repository must be canonical')
   }
   if (config.creationVerifications !== undefined) {
@@ -288,6 +289,7 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
   }
   if (config.creationCapabilities !== undefined) {
     validateCreationCapabilityConfig(config.creationCapabilities)
+    if(config.creationCapabilities.workItemFailures===false){config.creationCapabilities={...config.creationCapabilities};delete config.creationCapabilities.workItemFailures}
     const capability = config.creationCapabilities
     const verification = config.creationVerifications
     const jobs = config.sourceJobs
@@ -336,6 +338,7 @@ export class PluginControlPlaneService extends Service {
   private creationCapabilityReconcileRequested = false
   private growthRunProducer: SourceGrowthRunProducer | undefined
   private growthProviderDraining = false
+  private workItemCreationFrame:{gapId:string;run:Readonly<WorkItemSourceGrowthRunBinding>;source:WorkItemEngineeringSource}|undefined
 
   constructor(ctx: Context, input: Config) {
     super(ctx, 'pluginControlPlane')
@@ -593,7 +596,7 @@ export class PluginControlPlaneService extends Service {
                 if (Object.keys(owner).some(key => prepared.reference.owner[key as keyof typeof owner] !== owner[key as keyof typeof owner])) {
                   throw new Error('created capability owner differs from the finite grant')
                 }
-                return { certificate, artifact: prepared.artifact, owner }
+                return { certificate, artifact: prepared.artifact, owner,...(prepared.protocol==='dsh-prepared-creation/v2'?{sourceRun:prepared.plan.creation!.growthRun!}:{}) }
               },
               recheck: async (planId, signal) => {
                 await this.inspectPreparedCreationReviewContext(planId, signal)
@@ -621,7 +624,7 @@ export class PluginControlPlaneService extends Service {
                 return source
               },
               inspectRetained: record => this.withRetainedCreatedCapabilityCurrent(record, () => ({
-                certificate: record.certificate, artifact: record.artifact, owner: config.owner })),
+                certificate: record.certificate, artifact: record.artifact, owner: config.owner,...(this.store.getRetainedPreparedCreation(record.planId).plan.creation?.growthRun?.protocol==='assistant-growth/source-run/v2'?{sourceRun:this.store.getRetainedPreparedCreation(record.planId).plan.creation!.growthRun!}:{}) })),
               recheckRetained: async (record, signal) => {
                 signal.throwIfAborted()
                 this.withRetainedCreatedCapabilityCurrent(record, () => undefined)
@@ -700,6 +703,7 @@ export class PluginControlPlaneService extends Service {
             },
             delivery: { validateOwnerRoute: request => current('delivery').validateOwnerRoute(request) },
           }, withGapSourceFence: (gapId, owner, callback) => this.taskGaps.withCurrent(gapId, owner, callback),
+          withWorkItemGrowthRunFence:(run,gapId,owner,generation,callback)=>this.withWorkItemGrowthFrame(run,gapId,owner,generation,callback),
           assertGrowthRun: (run, gapId, owner, generation) => this.assertSourceGrowthRun(run, gapId, owner, generation),
           ...(this.config.revisionVerifications ? { inspectRevisionParent: this.inspectRevisionParent,
             verifyPreparedRevision: (job: SourceJobRecord, signal: AbortSignal) => this.verifyPreparedRevision(job, signal,
@@ -766,6 +770,10 @@ export class PluginControlPlaneService extends Service {
           runtime.start()
           this.abort.signal.throwIfAborted()
           this.sourceRuntime = runtime
+          // Producer/binding readiness can arrive while capabilities.start() is
+          // awaiting its source checks, before these runtime fields are public.
+          // Reconcile once after publication so that notification is not lost.
+          this.reconcileCreatedCapabilities()
           return close
         } catch (error) {
           await close()
@@ -812,6 +820,10 @@ export class PluginControlPlaneService extends Service {
   }
 
   /** Host only: reread the exact source; no caller text or ratings are admitted. */
+  recordOwnerWorkItemFailureGap = (source:Omit<WorkItemEngineeringSource,'protocol'>):StoredCapabilityGap=>{
+    this.abort.signal.throwIfAborted();return this.taskGaps.recordWorkItem(source)
+  }
+
   recordOwnerTaskFailureGap = (source: OwnerForegroundLearningTask): StoredCapabilityGap => {
     this.abort.signal.throwIfAborted()
     return this.taskGaps.record(source)
@@ -1002,7 +1014,8 @@ export class PluginControlPlaneService extends Service {
   /** Host-only durable Usage reader; the caller's binding is always an expectation. */
   registerSourceGrowthRunProducer = (producer: SourceGrowthRunProducer): (() => Promise<void>) => {
     this.abort.signal.throwIfAborted()
-    if (producer?.protocol !== 'assistant-growth-source-run-producer/v1' || typeof producer.inspect !== 'function'
+    if (!['assistant-growth-source-run-producer/v1','assistant-growth-source-run-producer/v2'].includes(producer?.protocol) || typeof producer.inspect !== 'function'
+      || producer.protocol==='assistant-growth-source-run-producer/v2'&&typeof producer.withWorkItemRunFence!=='function'
       || this.growthRunProducer !== undefined || this.growthProviderDraining) throw new Error('plugin-control-plane: source growth run producer is invalid or already registered')
     this.growthRunProducer = producer
     try { this.sourceRuntime?.reconcileQueued(); this.reconcileCreatedCapabilities() }
@@ -1163,7 +1176,7 @@ export class PluginControlPlaneService extends Service {
         !== ownerGrant[key as keyof typeof ownerGrant])) throw new Error('created capability association source changed')
   }
 
-  private withCreatedCapabilityCurrent<T>(record: CreationCapabilityRecord, callback: () => T): T {
+  private withCreatedCapabilityCurrent<T>(record: CreationCapabilityRecord, callback: (sourceRun?:SourceGrowthRunBinding) => T): T {
     this.abort.signal.throwIfAborted()
     if (record.status === 'active' && record.receipt?.protocol === 'dsh-created-capability-adoption/v2') {
       return this.withRetainedCreatedCapabilityCurrent(record, callback)
@@ -1178,7 +1191,7 @@ export class PluginControlPlaneService extends Service {
   }
 
   /** Historical signed evidence and immutable job are checked under the current canonical owner writer fence. */
-  private withRetainedCreatedCapabilityCurrent<T>(record: CreationCapabilityRecord, callback: () => T): T {
+  private withRetainedCreatedCapabilityCurrent<T>(record: CreationCapabilityRecord, callback: (sourceRun?:SourceGrowthRunBinding) => T): T {
     this.abort.signal.throwIfAborted()
     const receipt = record.receipt
     const config = this.config.creationVerifications
@@ -1219,17 +1232,97 @@ export class PluginControlPlaneService extends Service {
             !== ownerGrant[key as keyof typeof ownerGrant])) {
         throw new Error('created capability retained source binding changed')
       }
+      if (growth.protocol === 'assistant-growth/source-run/v2') {
+        if (reference.schemaVersion !== 2 || growth.ownerDigest !== controlPlaneDigest(reference.owner)) throw new Error('retained work item reference changed')
+        assertWorkItemRunReference(growth, reference)
+        this.assertWorkItemPinsLocal(growth, 'retained')
+        return callback(growth)
+      }
       return callback()
+    })
+  }
+
+  inspectWorkItemPreparedCreationProtocol=(): 'dsh-prepared-creation/v2'|undefined=>{
+    return !this.abort.signal.aborted&&this.config.sourceJobs?.creation?.workItemFailures===true&&this.sourceRuntime?.available()?'dsh-prepared-creation/v2':undefined
+  }
+
+  inspectWorkItemCreationReadiness=(input:{owner:SourceJobOwnerReceipt})=>{
+    try{
+      this.abort.signal.throwIfAborted()
+      const owner=inertCreationData(input).owner,config=this.config,source=this.sourceRuntime?.inspectWorkItemReadiness(owner)
+      if(!source||!config.sourceJobs||!config.sourceBuild||config.sourceJobs.creation?.workItemFailures!==true||config.creationCapabilities?.workItemFailures!==true||!config.creationVerifications)return undefined
+      const delivery=this.ctx.get('assistantDelivery' as never,false) as AssistantDeliveryService|undefined
+      const verifier=this.ctx.get('assistantVerifier' as never,false) as unknown as {inspectWorkItemCreationReviewReadiness?:()=>{protocol:string;sourceProtocol:string;runProtocol:string;workItemFailures:true;authority:CreationAcceptanceAuthorityRef;publicKey:string;remainingVerifications:number;available:boolean}}|undefined
+      if(typeof delivery?.withOwnerWorkItemEngineeringContextFence!=='function'||typeof verifier?.inspectWorkItemCreationReviewReadiness!=='function'||typeof this.creationCapabilityRuntime?.inspectWorkItemAdoptionReadiness!=='function')return undefined
+      const actual=delivery.validateOwnerRoute({authorityId:owner.authorityId,principalId:owner.principalId,workspace:owner.workspace,agentPreset:owner.agentPreset})
+      if(!isSourceOwnerContinuation(actual,owner)||Object.entries(config.creationCapabilities.owner).some(([key,value])=>actual[key as keyof typeof actual]!==value))return undefined
+      const review=verifier.inspectWorkItemCreationReviewReadiness(),adoption=this.creationCapabilityRuntime.inspectWorkItemAdoptionReadiness()
+      if(!review||!adoption||review.protocol!=='assistant-growth/work-item-review-readiness/v1'||adoption.protocol!=='assistant-growth/work-item-adoption-readiness/v1'
+        ||review.sourceProtocol!==WORK_ITEM_ENGINEERING_PROTOCOL||adoption.sourceProtocol!==WORK_ITEM_ENGINEERING_PROTOCOL||review.runProtocol!=='assistant-growth/source-run/v2'||adoption.runProtocol!=='assistant-growth/source-run/v2'
+        ||review.workItemFailures!==true||adoption.workItemFailures!==true||controlPlaneDigest(review.authority)!==controlPlaneDigest(config.creationVerifications.authority)
+        ||!createPublicKey(review.publicKey).export({type:'spki',format:'der'}).equals(createPublicKey(config.creationVerifications.publicKey).export({type:'spki',format:'der'}))
+        ||adoption.authority.authorityDigest!==creationCapabilityAuthorityDigest({path:join(config.statePath,'creation-adoptions.sqlite'),config:config.creationCapabilities})
+        ||adoption.authority.authorityId!==config.creationCapabilities.authorityId||adoption.authority.expiresAt!==config.creationCapabilities.expiresAt)return undefined
+      const pins:WorkItemGrowthAuthorityPins={protocol:'assistant-growth/work-item-authorities/v1',sourceJobs:{authorityId:source.authority.id,authorityDigest:source.authority.digest,expiresAt:source.authority.expiresAt},
+        creationGrant:{id:source.creation.id,digest:controlPlaneDigest(source.creation),expiresAt:source.creation.expiresAt},creationAcceptance:structuredClone(review.authority),adoption:structuredClone(adoption.authority)}
+      validateWorkItemGrowthAuthorityPins(pins)
+      if(source.authority.digest!==controlPlaneDigest({config:config.sourceJobs,build:config.sourceBuild})||[pins.sourceJobs.expiresAt,pins.creationGrant.expiresAt,pins.creationAcceptance.expiresAt,pins.adoption.expiresAt].some(expiry=>Date.now()>=expiry))return undefined
+      const remaining={...source.remaining,verifications:review.remainingVerifications,adoptions:adoption.remainingAdoptions}
+      if(Object.values(remaining).some(count=>!Number.isSafeInteger(count)||count<0))return undefined
+      return {protocol:'assistant-growth/work-item-creation-readiness/v1' as const,sourceProtocol:WORK_ITEM_ENGINEERING_PROTOCOL,runProtocol:'assistant-growth/source-run/v2' as const,workItemFailures:true as const,pins,remaining,available:Object.values(remaining).every(count=>count>0)&&review.available&&adoption.available}
+    }catch{return undefined}
+  }
+
+  private assertWorkItemPinsLocal(run:WorkItemSourceGrowthRunBinding, phase: 'current' | 'retained' = 'current'):void{
+    const jobs=this.config.sourceJobs,verification=this.config.creationVerifications,adoption=this.config.creationCapabilities
+    if(!jobs||!this.config.sourceBuild||jobs.creation?.workItemFailures!==true||!verification||adoption?.workItemFailures!==true
+      ||run.authorities.sourceJobs.authorityId!==jobs.authorityId||run.authorities.sourceJobs.authorityDigest!==controlPlaneDigest({config:jobs,build:this.config.sourceBuild})||run.authorities.sourceJobs.expiresAt!==jobs.expiresAt
+      ||run.authorities.creationGrant.id!==jobs.creation.id||run.authorities.creationGrant.digest!==controlPlaneDigest(jobs.creation)||run.authorities.creationGrant.expiresAt!==jobs.creation.expiresAt
+      ||controlPlaneDigest(run.creationAcceptance)!==controlPlaneDigest(verification.authority)||controlPlaneDigest(run.authorities.creationAcceptance)!==controlPlaneDigest(verification.authority)
+      ||run.authorities.adoption.authorityId!==adoption.authorityId||run.authorities.adoption.authorityDigest!==creationCapabilityAuthorityDigest({path:join(this.config.statePath,'creation-adoptions.sqlite'),config:adoption})||run.authorities.adoption.expiresAt!==adoption.expiresAt
+      || (phase === 'current' ? [run.authorities.sourceJobs.expiresAt, run.authorities.creationGrant.expiresAt, run.authorities.creationAcceptance.expiresAt, run.authorities.adoption.expiresAt] : [run.authorities.adoption.expiresAt]).some(expiry => Date.now() >= expiry))throw new Error('work item creation authority pins changed or expired')
+  }
+
+  private assertWorkItemRunLocal(run:WorkItemSourceGrowthRunBinding,gapId:string,owner:SourceJobOwnerReceipt,generation:boolean):void{
+    const reference=this.store.getOwnerTaskFailureReference(gapId)
+    if(!reference||reference.schemaVersion!==2||run.ownerDigest!==controlPlaneDigest(reference.owner)||!isSourceOwnerContinuation(owner,reference.owner))throw new Error('work item creation owner reference changed')
+    assertWorkItemRunReference(run,reference);this.assertWorkItemPinsLocal(run)
+    if(Date.now()>=run.expiresAt||generation&&Date.now()>=run.generationDeadlineAt)throw new Error('work item source run expired')
+    if(run.modelOrigin==='inherited-owner-task'&&this.workItemCreationFrame&&controlPlaneDigest(this.workItemCreationFrame.source.task.proofIdentity.supplier)!==controlPlaneDigest(run.model))throw new Error('work item source supplier changed')
+  }
+
+  private withWorkItemGrowthFrame<T>(run:WorkItemSourceGrowthRunBinding,gapId:string,owner:SourceJobOwnerReceipt,generation:boolean,callback:()=>T):T{
+    this.abort.signal.throwIfAborted()
+    if(this.workItemCreationFrame){
+      if(this.workItemCreationFrame.gapId!==gapId||sourceGrowthRunDigest(this.workItemCreationFrame.run)!==sourceGrowthRunDigest(run))throw new Error('work item growth frame reentry')
+      this.assertWorkItemRunLocal(run,gapId,owner,generation);return callback()
+    }
+    const producer = this.growthRunProducer
+    if (!producer || producer.protocol !== 'assistant-growth-source-run-producer/v2') throw new SourceGrowthRunUnavailableError('work item growth producer unavailable')
+    const readiness = this.inspectWorkItemCreationReadiness({owner})
+    if (!readiness) throw new SourceGrowthRunUnavailableError('work item growth peers unavailable')
+    if (controlPlaneDigest(readiness.pins) !== controlPlaneDigest(run.authorities)) throw new Error('work item growth authority pins changed')
+    const source = this.taskGaps.engineeringSnapshot(gapId,owner)
+    return producer.withWorkItemRunFence({runId:run.runId,intentDigest:run.intentDigest,expectedGrowthRunDigest:sourceGrowthRunDigest(run)},actual=>{
+      if(this.growthRunProducer!==producer||sourceGrowthRunDigest(actual)!==sourceGrowthRunDigest(run)||this.workItemCreationFrame)throw new Error('work item producer changed its true binding')
+      this.workItemCreationFrame={gapId,run:actual,source}
+      try{return this.store.withOwnerTaskFailureGapAdmission(gapId,()=>{this.assertWorkItemRunLocal(actual,gapId,owner,generation);return callback()})}
+      finally{this.workItemCreationFrame=undefined}
     })
   }
 
   private assertSourceGrowthRun(expected: SourceGrowthRunBinding, gapId: string, owner: SourceJobOwnerReceipt, generation: boolean): void {
     validateSourceGrowthRunBinding(expected)
+    if(expected.protocol==='assistant-growth/source-run/v2'){
+      if(this.workItemCreationFrame){this.assertWorkItemRunLocal(expected,gapId,owner,generation);return}
+      return this.withWorkItemGrowthFrame(expected,gapId,owner,generation,()=>{})
+    }
     const producer = this.growthRunProducer
     if (!producer) throw new SourceGrowthRunUnavailableError('source growth run producer unavailable')
     const actual = producer.inspect({ runId: expected.runId, intentDigest: expected.intentDigest })
     if (!actual) throw new Error('source growth run is absent or no longer current')
     validateSourceGrowthRunBinding(actual)
+    if(actual.protocol!=='assistant-growth/source-run/v1')throw new Error('foreground source cannot use a work item run')
     if (sourceGrowthRunDigest(actual) !== sourceGrowthRunDigest(expected)
       || expected.ownerDigest !== controlPlaneDigest(owner)) throw new Error('source growth run immutable binding changed')
     const policy = this.config.creationVerifications?.authority
@@ -1247,7 +1340,7 @@ export class PluginControlPlaneService extends Service {
       throw new Error('source growth run creation acceptance policy changed or was not pinned before authoring')
     }
     const reference = this.store.getOwnerTaskFailureReference(gapId)
-    if (!reference || expected.source.outcomeId !== reference.outcomeId
+    if (!reference || reference.schemaVersion!==1 || expected.source.outcomeId !== reference.outcomeId
       || expected.source.sourceDigest !== reference.sourceDigest
       || controlPlaneDigest(expected.source.projection) !== controlPlaneDigest(reference.projection)
       || expected.ownerDigest !== controlPlaneDigest(reference.owner)) throw new Error('source growth run task reference changed')
@@ -1270,6 +1363,10 @@ export class PluginControlPlaneService extends Service {
     if (!reference || plan.mode !== 'prepared-create' || plan.status !== 'pending-approval'
       || Date.now() >= plan.expiresAt || !plan.creation || Date.now() >= plan.creation.grant.expiresAt) {
       throw new Error('prepared creation package is unavailable for independent verification')
+    }
+    if(reference.schemaVersion===2){
+      const run=plan.creation.growthRun;if(run?.protocol!=='assistant-growth/source-run/v2')throw new Error('work item prepared creation run unavailable')
+      return this.withWorkItemGrowthFrame(run,plan.gapId,reference.owner,false,()=>({protocol:'dsh-prepared-creation/v2' as const,plan:structuredClone(this.store.getSourcePlan(plan.id)),job:structuredClone(this.store.getPreparedSourceJob(plan.id)),reference:structuredClone(reference),source:structuredClone(this.workItemCreationFrame!.source),artifact:this.store.readPreparedSourceArtifact(plan.id)}))
     }
     return this.taskGaps.withCurrent(plan.gapId, reference.owner, () => {
       this.abort.signal.throwIfAborted()
@@ -1296,13 +1393,21 @@ export class PluginControlPlaneService extends Service {
 
   /** Synchronous Evaluation writer fence for an exact independently reviewed creation. */
   withPreparedCreationFence = <T>(input: { planId: string; planDigest: string; artifactSha256: string;
-    growthRunDigest: string; referenceDigest: string }, callback: () => T): T => {
+    growthRunDigest: string; referenceDigest: string }, callback: (sourceRun?:SourceGrowthRunBinding) => T): T => {
     this.abort.signal.throwIfAborted()
     const policy = this.inspectSourceCreationAcceptanceAuthority()
     if (!policy) throw new Error('creation verification authority unavailable')
     const plan = this.store.getSourcePlan(input.planId)
     const reference = this.store.getOwnerTaskFailureReference(plan.gapId)
     if (!reference) throw new Error('creation verification source unavailable')
+    if(reference.schemaVersion===2){
+      const run=plan.creation?.growthRun;if(run?.protocol!=='assistant-growth/source-run/v2')throw new Error('work item verification run unavailable')
+      return this.withWorkItemGrowthFrame(run,plan.gapId,reference.owner,false,()=>{
+        const current=this.store.getSourcePlan(input.planId),job=this.store.getPreparedSourceJob(input.planId)
+        if(current.digest!==input.planDigest||current.preparedEvidence?.pack.sha256!==input.artifactSha256||controlPlaneDigest(reference)!==input.referenceDigest||sourceGrowthRunDigest(run)!==input.growthRunDigest||!job.intent.creation?.growthRun||sourceGrowthRunDigest(job.intent.creation.growthRun)!==input.growthRunDigest||createHash('sha256').update(this.store.readPreparedSourceArtifact(input.planId)).digest('hex')!==input.artifactSha256)throw new Error('work item prepared verification exact binding changed')
+        return callback(run)
+      })
+    }
     return this.taskGaps.withCurrent(plan.gapId, reference.owner, () => {
       this.abort.signal.throwIfAborted()
       const current = this.store.getSourcePlan(input.planId)
@@ -2191,7 +2296,14 @@ export class PluginControlPlaneService extends Service {
       }
       // The worktree survives success: the owner recomputes its digests on this
       // exact directory during `source verify-prepared`.
-      return this.taskGaps.withCurrent(input.gapId, gapOwner, () => this.store.createSourcePlan({ gapId: input.gapId, repository, worktree: isolated.worktree, baseCommit,
+      const commitSource = <T>(callback: () => T): T => {
+        if (creation?.growthRun?.protocol === 'assistant-growth/source-run/v2') {
+          if (!gapOwner || !('receiptVersion' in gapOwner)) throw new Error('work item creation owner unavailable')
+          return this.withWorkItemGrowthFrame(creation.growthRun, input.gapId, gapOwner, false, callback)
+        }
+        return this.taskGaps.withCurrent(input.gapId, gapOwner, callback)
+      }
+      return commitSource(() => this.store.createSourcePlan({ gapId: input.gapId, repository, worktree: isolated.worktree, baseCommit,
         name, generatorDigest: generated?.generatorDigest ?? MODIFY_GENERATOR_DIGEST,
         scope: generated?.scope ?? [`plugins/${name}`], mode: creating ? 'prepared-create' : revising ? 'prepared-revise' : 'modify', ttlMs,
         ...(creation === undefined ? {} : { creation }), ...(revision === undefined ? {} : { revision }),

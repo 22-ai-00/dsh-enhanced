@@ -148,7 +148,30 @@ Linux 创建验收要求 Control Plane 的双 UID 完整仓库构建。派发前
 
 ## 已采用插件的新任务修订验收
 
-`revisionReviews` 是可选、独立的 Host 配置，字段及限制与上表 `creationReviews` 相同；须单独配置修订 authority、Ed25519 密钥引用、政策和有限额度，密钥文件可与创建验收共用，但两种用途不能互相代用。用 `compileRevisionReviewConfig(config)` 取得 `{ authority, publicKey }`，仅将这两个公开字段交给 Control Plane 的 `revisionVerifications`；还须配置其独立的 `sourceJobs.revision` 授权和保留的已采用父版本源码。`revisionReviews` 缺省时不启用本轨，不借用创建验收引用或额度。修订 authority 使用 `assistant-growth/revision-acceptance-authority/v1` 和独立政策摘要，私有账本位于 `databasePath + '.revision-reviews'`；失败与 unknown 派发也占用修订额度，未知结果不自动重放。
+创建审查可单独配置 `creationReviews.workItemFailures: true`，接受后台 WorkItem 的工程来源。
+省略或 `false` 完全保留旧配置与授权摘要；true 进入独立政策摘要，同库旧授权不因修改开关
+重置已用额度。它不扩展 `revisionReviews` 或 `revisionRegressions`，这两项会明确拒绝 true。
+
+Host-only `inspectWorkItemCreationReviewReadiness()` 只读当前已挂载 reviewer、原持久额度与
+配套 CP 的新协议声明，返回 `assistant-growth/work-item-review-readiness/v1`、工程 context/run
+协议、`workItemFailures: true`、准确 authority/publicKey、remainingVerifications 和 available。
+缺少开关、当前依赖或新协议时返回 undefined；完整支持但余量为零时可返回 available:false。
+它不打开 runner、不建 claim、不起模型；已认领或已签名的同一请求不因本次耗尽最后额度而
+失效，也不据此重派未知调用。CP 的总探针另负责核对 owner 和创建、审查、采用三份授权。
+
+WorkItem 使用独立的 `dsh-prepared-creation/v2` handoff 和 source-run v2；旧前台 v1 保持原形状。
+Verifier 核对 root→当前项的完整、确定编码的真实主人输入链及 manifest/全文摘要，完整 UTF-8
+framing 最多 16 KiB，不用 worker 简报代替目标、不摘要父约束或伪造 Inbox。主人失败反馈及
+worker 报告与目标分开；报告只是背景，不是验收 oracle，主人 testimony 也不等于独立技术成功。
+首次 claim、隔离执行、两个原生模型回合与证书落账/返回前都核对当前来源及精确三阶段授权 pins。
+最终围栏沿 Delivery → Evaluation → WorkItems → UsageStore → CP → 独立审查账本；持锁后
+不反向调用来源 reader。候选冻结后才独立生成私有 held-out cases，模型不能改写验收规则。
+
+证书继续使用既有后端 v1/v2/v3，签名的 growthRunDigest 覆盖完整 v2 来源/context/授权 pins，
+referenceDigest 覆盖新的工作项引用；后端版本本身不授权新的来源。旧 grant 或缺失配套 peer
+不能降级到前台分支。有限采用和调用仍由 CP 另核独立 grant、真实结果与当前来源。
+
+`revisionReviews` 是可选、独立的 Host 配置，字段及限制与上表 `creationReviews` 相同（创建专用的 `workItemFailures` 除外）；须单独配置修订 authority、Ed25519 密钥引用、政策和有限额度，密钥文件可与创建验收共用，但两种用途不能互相代用。用 `compileRevisionReviewConfig(config)` 取得 `{ authority, publicKey }`，仅将这两个公开字段交给 Control Plane 的 `revisionVerifications`；还须配置其独立的 `sourceJobs.revision` 授权和保留的已采用父版本源码。`revisionReviews` 缺省时不启用本轨，不借用创建验收引用或额度。修订 authority 使用 `assistant-growth/revision-acceptance-authority/v1` 和独立政策摘要，私有账本位于 `databasePath + '.revision-reviews'`；失败与 unknown 派发也占用修订额度，未知结果不自动重放。
 
 新的普通认证失败任务经 Growth 冻结 `revisionAcceptance`、原任务模型及预算，并选择同 owner 已采用父版本后，Control Plane 原生 SourceJobs 才能调用 Host-only `verifyPluginRevision({ protocol: 'assistant-growth/revision-verification-request/v1', planId })`。它不注册为模型工具。Host 重新核对当前 owner/任务、父版本签名归档、精确源码基线、父绑定及封存制品；任务纠正、撤回、授权或 provider 变化会使旧验收失效。父绑定含 `planId`、`certificateDigest`、`artifactSha256`、`sourceArchiveDigest`、`sourceDigest`，并同时进入持久 claim、最终 fence 和凭证。
 

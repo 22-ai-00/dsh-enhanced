@@ -19,6 +19,8 @@ dsh-rsi restart --profile web         # 重启已注册的常驻服务
 
 首次 `supervised` 安装需要在交互式终端完成飞书 owner 配对和模型配置；未完成配对时，`--yes` 不会跳过 onboarding。新会话默认 Full access，可访问任意文件和网络，不逐次审批；按需收紧权限见[安装指南](../../scripts/install/README.md)。完整安装参数用 `dsh-rsi install --help` 查看。若只需轻量场景，可运行 `dsh-rsi install --scenario core --yes`；本地 checkout 用 `dsh-rsi install --local <checkout目录>`。
 
+Linux native 安装及运行要求已委派给当前用户的 cgroup v1 控制器；当前拒绝 cgroup v2，不会自动委派或提权。完整准备条件见[安装指南](../../scripts/install/README.md)。
+
 ## 常用命令
 
 | 命令 | 用途 |
@@ -45,7 +47,7 @@ dsh-rsi reinstall                       # 备份、删除、重新安装并重�
 
 `update --all` 先升级 CLI，再更新已安装程序；它不是对所有 Home 通用的升级路径。从 CLI `0.1.57` 起，**原安装为 Docker 后端且满足下述条件的 Linux 冻结 owner/cohort Home** 可用上面的 `update --all --yes`：从 Home 原来绑定的官方源码仓库拉取干净的 `dev` 或 `main` 分支，若绑定仓库是 detached HEAD，则仅当它位于本机记录的 `origin/dev` 或 `origin/main` 历史上时按该分支快进、更新后仍保持 detached（两者历史都包含 HEAD 时优先 `dev`；本机连 `origin/dev`、`origin/main` 的跟踪引用都没有，或浅历史无法判定时同样先拒绝），否则在写操作前拒绝；把私有 Host 从 `0.2.0-rc.2` 或 `0.2.1-rc.2` 更新到 `0.2.1-rc.2`，同时更新冻结插件，并在事务中停启已注册服务。要求原 owner 授权有效、target/coordinator 双服务均活动，且无已采用的源码 activation 或未结 activation；原 owner 绑定、授权期限和已用额度、权限、凭据、模型、Session、Goal 及历史保留，不重新配对、续期或扩权。已过期授权会在预检中被拒绝，需先按原授权流程处理。
 
-owner 的 Docker→native 切换还要求 source/creation/revision review 库中的 grants 与 verifications 全空，以及 creation-adoptions 库中的 adoptions、calls、source_archives 全空；不存在的已配置审查库不算空库。任何状态的历史行都不能忽略。原安装已是 native 的 owner Home 会在预检中拒绝；非空创建历史迁移尚未实现，完整 live Docker→native 服务切换仍未验收，不能把这一命令理解为通用保权升级。不要删库或重装以满足前提。
+owner 的 Docker→native 切换还要求 已配置的 creation-review、revision-review 及 revision-regression 库中的 grants、verifications 均空，以及 creation-adoptions 库中的 adoptions、calls、source_archives 全空；不存在的已配置审查库不算空库。任何状态的历史行都不能忽略。已建立 owner 的 native→native 程序升级会在预检中拒绝；非空创建历史迁移尚未实现，完整 live Docker→native 服务切换仍未验收，不能把这一命令理解为通用保权升级。不要删库或重装以满足前提。
 
 尚无 owner 的 pre-owner Home 另有 checkout 内的 v3 维护入口，支持 Docker→native 和 native→native 的基础运行时、发布资源与 cohort 更新；它不授予 owner 权限，也不代表 native owner 程序升级已支持。适用条件见[pre-owner 维护](../../scripts/install/maintenance.md#checkout-内的-pre-owner-冻结源码维护)。
 

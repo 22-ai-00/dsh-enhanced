@@ -169,3 +169,9 @@ DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件
 The optional foreground `work_item_list` and `work_item_recall` tools instead require Delivery proof of the current owner and exact live human-turn tool call, plus the separate `inspect-work-items` permission for the configured worker automation. Their preauthorization and final fences use read-only `evaluateAgent`; actual reads charge `authorizeAgent` with a stable call-bound idempotency key. This permission can read same-owner historical tasks across Session generations, including expired or withdrawn tasks, but cannot claim, resume or renew their execution authority. Background workers cannot use it to inspect other tasks.
 
 For native skill benchmark cells, `delegatedSkillToolPreauthorizationVersion() === 1` allows only the actual Skills Fiber to register its exact `skill_run` and `skill_status` definitions. Their predicate requires a live owner-bound delegated arm whose steps are all `isolation_run`; ordinary skills, different versions, revoked mounts and foreign scopes do not gain this authorization. Native Policy, call budgets and each nested tool check remain active. See [native skill reuse](../../docs/native-skill-reuse.md).
+
+### WorkItem Growth 的有限 create-only 预授权
+
+`workItemGrowthToolPreauthorizationVersion()` 仅在当前 Policy generation 活跃时返回 `1`。`registerPreauthorizedTool` 允许 `dsh-enhanced-assistant-growth-driver` Fiber 为四个精确工具定义注册实时 predicate：`plugin_source_gaps`、`plugin_source_read`、`plugin_source_create`、`plugin_source_job_status`。不接受同名伪造定义、其他 Fiber、`growth_*` 别名、prepare、targets 或 revise 工具；注册随拥有它的 Cordis effect 释放；返回的 disposer 会同时撤销 grant 并移除 Fiber 上的 effect，重复调用仍幂等，常驻 Growth Fiber 的连续 run 不累积捕获旧 Agent/definition 的注册。
+
+Growth 调用方仍须独立核验显式启用的 WorkItem v2 run、真实来源、owner、工具 realm、期限和有限额度。Policy 不由工具名称推定这些授权，也不授予通用 create 权限。带 `denialReason` 的 predicate 拒绝或抛错会直接拒绝，不能转人工审批延长冻结授权；普通独立 Policy deny、预算、紧急停止和工具 guard 始终保留。本入口不修改 Approval 配置、不生成额外批准票据，也不扩大候选工具范围。

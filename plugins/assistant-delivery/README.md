@@ -42,6 +42,10 @@ Host-only `inspectOwnerRequestedChange(execution, { sourceId })` 限定当前认
 
 Host-only `withOwnerWorkItemLearningTaskFence` 对准确的 `itemId`、owner lineage、来源/展示摘要和当前 canonical 版本作严格单项复核；暂不可读或变化时抛错。`withOwnerLearningSourcesFence` 支持至多 1000 个有序、无重复的前台与后台来源，在同一次 Delivery → Evaluation → WorkItems 来源事务中完成所有外部来源回调，再核对整组当前来源，供下游同步写入 Memory 或审查账本。返回快照按输入对齐；暂缺来源只隐藏，只有当前 owner revision 明确 `withdraw` 才证明主人撤回，普通冲突或 retraction 不代表撤回。回调仅允许终端账本的本地同步操作，不能再进入 Delivery/Evaluation 来源事务、调用模型或 producer resolver；Promise/thenable 拒绝。旧前台 source API 与摘要字节保持不变，后台来源不伪造 Inbox，brief/report 是任务上下文，实际反馈才是主人 testimony。这些 fence 不授予采纳权限，也不消耗或续期执行额度。
 
+Host-only 工程来源使用独立 `assistant-delivery/work-item-engineering-context/v1`：`inspectOwnerWorkItemEngineeringContext` 返回完整来源 manifest，`readOwnerWorkItemEngineeringContext` 按精确 manifest/objective digest 分页，`withOwnerWorkItemEngineeringContextFence` 在 Delivery → Evaluation → WorkItems 工程来源锁内交给同步终端账本。工程目标按 canonical JSON 封装根任务与全部可核对的主人续办原文，含 framing 最多 16384 UTF-8 字节；不 trim、NFC 归一化、截断或以简报、报告、结果短句替代主人任务。每层输入必须非空白、无附件；当前只接受封存 diagnosis 根和有真实 reply/Inbox/child 关联的 v2 reply 子链，最多 32 个 parent links。缺少原始定位和附件证明的历史 v1 child 在此新接口 abstain，旧 v1 执行及 Memory 来源不变。
+
+父报告仅按每个 child 计划封存的准确 cutoff 读取，单份最多 65536 字节、总计 262144 字节；不取 latest，也不进入工程目标。每页包含末页都重验完整 frame、当前 owner/canonical/Policy/producer 与原始 UTF-8 边界。同 owner `/new` 可以读取已经绑定准确完成子项、后来被标 cancelled 的 reply 历史；新增历史 getter 不恢复执行、route、ACK、授权或额度。缺段、附件、空白、超界、反馈更正/撤回或协议缺失均不退回旧 reader 伪造来源。旧 feedback proof、sourceDigest、Memory 请求及 reader 字节保持原样；本接口不启动模型、loop、timer 或新 schema。
+
 ## 配置
 
 | 字段 | 默认值 | 含义 |

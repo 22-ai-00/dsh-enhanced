@@ -529,3 +529,43 @@ describe('durable owner foreground completion feed', () => {
     expect(() => service.inspectOwnerForegroundTaskSource({ ...f.scope, inboxId: inbox.record.id })).toThrow()
   })
 })
+
+// Source-fenced aliases revalidate their real foreground Agent on this same connection.
+test.each(['foreground-source', 'engineering-source'] as const)('reads the current owner attestation inside %s writer exclusion without opening another transaction', async kind => {
+  const f = await fixture()
+  const admitted = dispatch(f.store, f.binding, `owner-attestation-${kind}`)
+  complete(f.store, admitted.record.id); reply(f.store, f.binding, admitted.record.id, `owner-attestation-${kind}`)
+  const source = sourceInput(f, admitted.record.id)
+  const input = { sessionId: f.binding.sessionId, workspace: f.binding.workspace, preset: f.binding.agentPreset }
+  const expected = f.store.getPreferencePrincipalForSession(input)
+  expect(expected).toMatchObject({ binding: { id: f.binding.id }, principal: { id: f.owner.id, version: f.owner.version, role: 'owner', status: 'active' } })
+  const other = open(f.path)
+  ;(other as unknown as { database: DatabaseSync }).database.exec('PRAGMA busy_timeout = 0')
+  const read = () => {
+    expect(f.store.getPreferencePrincipalForSession(input)).toEqual(expected)
+    expect(f.store.getPreferencePrincipalForSession({ ...input, sessionId: 'unregistered-session' })).toBeUndefined()
+    expect(f.store.getPreferencePrincipalForSession({ ...input, workspace: '/work/another-owner' })).toBeUndefined()
+    expect(f.store.getPreferencePrincipalForSession({ ...input, preset: 'another-preset' })).toBeUndefined()
+    expect(() => other.revokePrincipal(f.owner.id, f.owner.version)).toThrow(/locked/u)
+    return f.store.getPreferencePrincipalForSession(input)
+  }
+  const value = kind === 'foreground-source'
+    ? f.store.withOwnerForegroundTaskSourceFence(source, authority, read)
+    : f.store.withOwnerLearningSourceFence(f.scope, authority, read)
+  expect(value).toEqual(expected)
+  other.revokePrincipal(f.owner.id, f.owner.version)
+  expect(f.store.getPreferencePrincipalForSession(input)).toBeUndefined()
+})
+
+test('an owner-attestation read does not release a source writer or leak its transaction after consumer rollback', async () => {
+  const f = await fixture()
+  const input = { sessionId: f.binding.sessionId, workspace: f.binding.workspace, preset: f.binding.agentPreset }
+  const expected = f.store.getPreferencePrincipalForSession(input)
+  const marker = new Error('terminal alias consumer failed')
+  expect(() => f.store.withOwnerLearningSourceFence(f.scope, authority, () => {
+    expect(f.store.getPreferencePrincipalForSession(input)).toEqual(expected)
+    throw marker
+  })).toThrow(marker)
+  expect(f.store.getPreferencePrincipalForSession(input)).toEqual(expected)
+  expect(f.store.withOwnerLearningSourceFence(f.scope, authority, () => f.store.getPreferencePrincipalForSession(input))).toEqual(expected)
+})

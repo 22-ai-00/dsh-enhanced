@@ -754,3 +754,15 @@ Host 在冻结批次、签名前后与最终落账时重读来源；最终 Evalu
 扫描器在启动、原生派发及来源复核前先检查 Automations 的持久退休标记与 Delivery 的当前 owner 状态。仅准确 owner 被持久撤销时，以原定义摘要及版本退休自身扫描 cron；旧任务、unknown、请求、grant 与已用预算原样保留，不再做旧来源失效或自动回退扫描。退休标记跨重启和身份切回保留，相同扫描 ID 不会自动复活。新 owner 必须使用显式配置的新代次，不能转移旧授权。
 
 缺失 binding、临时数据库/连接故障不触发永久退休；扫描器保留原生 executor、事件或 cron 恢复入口。退休查询暂不可用时，仅尝试由 Automations 的事务与数据库退休栅栏准入原扫描 cron；明确退休、明确撤销或退休被 Policy 拒绝时不激活。若注册也暂时失败，未完成初始化的实例由现有原生 scheduler wake 重试初始化；成功后只沿原 cron 和预算扫描，不增加业务扫描频率。恢复初始化不派发业务工作或消耗新的学习 admission。Policy 拒绝退休时同样阻止新工作，并报告失败；不把拒绝当退休成功。卸载仍独立取消及有界等待本扫描器拥有的执行，不关闭普通聊天或整个插件。
+
+### 后台 WorkItem 失败的工程候选
+
+`sourceJobs.creation.workItemFailures: true` 显式允许 Host 从真实 owner 的后台结果反馈准备新插件；修订和 foreground 的既有授权不扩大。独立 creation review 与 `creationCapabilities.workItemFailures` 也须显式开启。缺省或 `false` 从规范配置中消去，原 grant/digest 保持不变；新开启的授权不能复用已存在的旧 grant 重置额度。
+
+Host 通过 `recordOwnerWorkItemFailureGap({task,manifest,objective})` 提供预期，控制面重新进入 Delivery → Evaluation → WorkItems 的同步来源围栏，绑定当前 `not-achieved` canonical revision 和完整、有界的原始任务上下文。私有 schema 2 引用只保存 owner、来源/表现/manifest/objective 摘要和字节数，不把正文发布到公共 gap。合法 `/new` 继续沿原冻结 owner 引用；同一来源重试返回同一 gap。新 prepared handoff 为 `dsh-prepared-creation/v2`，不把后台任务伪装成 Inbox。
+
+`inspectWorkItemCreationReadiness({owner})` 只读组合当前 SourceJobs、Verifier 和 adoption 的真实有限授权与剩余额度，返回精确 authority pins。缺失、停用、旧协议或 owner 不符返回不可用；支持完整但额度耗尽返回 `available:false`。只有新作者准入要求所有余额为正；已冻结 run 后续阶段与重放由本阶段原子账本判断，不因该 run 已消费上游最后一份额度而失效。探针不创建 runner、journal、claim 或模型调用。
+
+当前 run 的最终写入顺序为 Growth 的 Delivery → Evaluation → WorkItems → UsageStore 围栏，再进入控制面真实 SQLite writer 和 review/adoption journal；持锁 callback 只核本地冻结记录，不能反向重入 producer/Delivery。嵌套控制面写入使用 savepoint，异常和 thenable 拒绝会回滚并清理 writer。启用 retention（采用回执 v2）时，能力恢复/调用直接核原签名历史与当前来源围栏，不依赖仍在线的 Growth producer，不延长原授权；无 retention 的采用回执 v1 仍须复核当前 producer。证书 backend 版本不代表来源授权。
+
+Linux 后台 `source-run/v2` 创建任务的 Host 总期限包含执行器已有的创建审查窗口，避免构建结束后提前取消独立审查和采用。原来源到期时间、各阶段预算、累计额度和取消规则不变；旧 v1 及非 Linux 的 Host 定义与恢复行为保持原样。

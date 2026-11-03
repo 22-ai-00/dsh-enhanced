@@ -1,5 +1,5 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import type { AnySourceGrowthRunBinding, PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import type { LinuxCgroupRoots, LinuxRunnerStateSeal, NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 import type { LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
@@ -10,6 +10,8 @@ export type CreationCapabilityOwner = Pick<SourceJobOwnerReceipt, 'authorityId' 
 
 /** Separate owner authority for adoption and ordinary use; never a verifier policy. */
 export interface CreationCapabilityConfig {
+  /** Explicit new authority for work-item engineering sources; false canonicalizes to absent. */
+  workItemFailures?: boolean
   authorityId: string
   keyId: string
   keyPath: string
@@ -115,14 +117,15 @@ export interface CreationCapabilityRunner {
 
 /** The integration owns current authenticated task/owner fences, not model parameters. */
 export interface CreationCapabilityPorts {
-  inspect(planId: string): { certificate: PluginCreationVerificationCertificate; artifact: Buffer; owner: CreationCapabilityOwner }
+  inspect(planId: string): { certificate: PluginCreationVerificationCertificate; artifact: Buffer; owner: CreationCapabilityOwner; sourceRun?: AnySourceGrowthRunBinding }
   recheck(planId: string, signal: AbortSignal): Promise<void>
   /** Capture checked staged source before first claim; legacy ports may have no archive. */
   captureSource?(planId: string, signal: AbortSignal): Promise<CreationCapabilitySourceSnapshot>
   /** Historical evidence read for a v2 receipt; must recheck the current owner and frozen source. */
-  inspectRetained?(record: CreationCapabilityRecord): { certificate: PluginCreationVerificationCertificate; artifact: Buffer; owner: CreationCapabilityOwner }
+  inspectRetained?(record: CreationCapabilityRecord): { certificate: PluginCreationVerificationCertificate; artifact: Buffer; owner: CreationCapabilityOwner; sourceRun?: AnySourceGrowthRunBinding }
   recheckRetained?(record: CreationCapabilityRecord, signal: AbortSignal): Promise<void>
-  withCurrent<T>(record: CreationCapabilityRecord, callback: () => T): T
+  /** The trusted source fence supplies the actual v2 run; legacy v1 ports call back without it. */
+  withCurrent<T>(record: CreationCapabilityRecord, callback: (sourceRun?: AnySourceGrowthRunBinding) => T): T
   assertCaller(record: CreationCapabilityRecord, execution: ToolRunContext): void
   /** Optional authenticated Host attribution; absence never implies a foreground task. */
   inspectCall?(record: CreationCapabilityRecord, execution: ToolRunContext, toolAlias: string,

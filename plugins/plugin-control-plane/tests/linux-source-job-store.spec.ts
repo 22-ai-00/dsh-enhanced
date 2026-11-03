@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
-import { pluginCreationVerificationSigningPayload, sourceGrowthRunDigest,
+import { pluginCreationVerificationSigningPayload, anySourceGrowthRunDigest as sourceGrowthRunDigest,
   type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from '../src/store.ts'
 import type { SourceBuildConfig } from '../src/source-build.ts'

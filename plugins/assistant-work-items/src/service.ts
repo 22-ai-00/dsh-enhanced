@@ -1,3 +1,4 @@
+import { WorkItemEngineeringTargets, type WorkItemEngineeringMaterial } from './engineering-context.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -168,6 +169,7 @@ const continuationRuntimes = new WeakMap<object, WorkItemContinuation>()
 const continuationAdmissions = new WeakMap<Components, (input: WorkItemAdmitInput, continuation: WorkItemContinuationAdmission) => WorkItemAdmitResult>()
 const continuationDispatches = new WeakMap<Components, WorkItemDispatch>()
 const replyConsumers = new WeakMap<object, WorkItemOwnerReplies>()
+const engineeringReaders = new WeakMap<object, WorkItemEngineeringTargets>()
 const feedbackReaders = new WeakMap<object, WorkItemOwnerFeedbackTargets>()
 const diagnosisRuntimes = new WeakMap<object, WorkItemDiagnosis>()
 const diagnosisAdmissions = new WeakMap<Components, (input: WorkItemAdmitInput, builder: (item: WorkItemRecord) => Readonly<WorkItemDiagnosisPlan>) => WorkItemAdmitResult>()
@@ -379,6 +381,7 @@ export class AssistantWorkItemsService extends Service {
         if (this.workItemsClosed) return
         const components = this.workItemsOpen()
         let reader: WorkItemOwnerFeedbackTargets | undefined
+        let engineering: WorkItemEngineeringTargets | undefined
         if (this.workItemsConfig.ownerReportFeedback) {
           const current: WorkItemOwnerFeedbackTargets = new WorkItemOwnerFeedbackTargets({ config: this.workItemsConfig,
             store: () => this.workItemsClosed ? undefined : components.store,
@@ -387,6 +390,12 @@ export class AssistantWorkItemsService extends Service {
             current: (): boolean => !this.workItemsClosed && feedbackReaders.get(this.workItemsFeedbackKey) === current })
           reader = current
           feedbackReaders.set(this.workItemsFeedbackKey, current)
+          const source: WorkItemEngineeringTargets = new WorkItemEngineeringTargets({ config: this.workItemsConfig,
+            store: () => this.workItemsClosed ? undefined : components.store,
+            feedback: () => feedbackReaders.get(this.workItemsFeedbackKey),
+            current: () => !this.workItemsClosed && engineeringReaders.get(this.workItemsFeedbackKey) === source })
+          engineering = source
+          engineeringReaders.set(this.workItemsFeedbackKey, source)
         }
         const replies = new WorkItemOwnerReplies({ config: this.workItemsConfig, store: components.store,
           delivery: () => reportCtx.get('assistantDelivery' as never) as PeerDeliveryService | undefined,
@@ -408,6 +417,8 @@ export class AssistantWorkItemsService extends Service {
         try { replies.start() }
         catch (error) { replies.close(); reportCtx.logger.warn(`assistant-work-items: report consumer unavailable: ${describe(error)}`) }
         reportCtx.effect(() => () => {
+          engineering?.close()
+          if (engineeringReaders.get(this.workItemsFeedbackKey) === engineering) engineeringReaders.delete(this.workItemsFeedbackKey)
           reader?.close()
           if (feedbackReaders.get(this.workItemsFeedbackKey) === reader) feedbackReaders.delete(this.workItemsFeedbackKey)
           replies.close()
@@ -485,6 +496,16 @@ export class AssistantWorkItemsService extends Service {
   withOwnerWorkItemFeedbackTargetsFence = <T>(capabilities: readonly unknown[], callback: (proofs: readonly (Readonly<OwnerWorkItemFeedbackProof> | undefined)[]) => T): T => {
     const reader = feedbackReaders.get(this.workItemsFeedbackKey)
     if (this.workItemsClosed || !reader) fail('missing-dependency', 'work-item feedback source fence is unavailable')
+    return reader.withTargetsFence(capabilities, callback)
+  }
+
+  issueOwnerWorkItemEngineeringTarget = (feedbackCapability: unknown): unknown | undefined =>
+    engineeringReaders.get(this.workItemsFeedbackKey)?.issue(feedbackCapability)
+  resolveOwnerWorkItemEngineeringTarget = (capability: unknown): Readonly<WorkItemEngineeringMaterial> | undefined =>
+    engineeringReaders.get(this.workItemsFeedbackKey)?.resolve(capability)
+  withOwnerWorkItemEngineeringTargetsFence = <T>(capabilities: readonly unknown[], callback: (materials: readonly (Readonly<WorkItemEngineeringMaterial> | undefined)[]) => T): T => {
+    const reader = engineeringReaders.get(this.workItemsFeedbackKey)
+    if (this.workItemsClosed || !reader) fail('missing-dependency', 'work-item engineering source fence is unavailable')
     return reader.withTargetsFence(capabilities, callback)
   }
 
@@ -1100,6 +1121,8 @@ export class AssistantWorkItemsService extends Service {
   close(): void {
     if (this.workItemsClosed) return
     this.workItemsClosed = true
+    engineeringReaders.get(this.workItemsFeedbackKey)?.close()
+    engineeringReaders.delete(this.workItemsFeedbackKey)
     feedbackReaders.get(this.workItemsFeedbackKey)?.close()
     feedbackReaders.delete(this.workItemsFeedbackKey)
     replyConsumers.get(this.workItemsReplyKey)?.close()

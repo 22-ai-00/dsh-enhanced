@@ -44,16 +44,16 @@ CPU、内存（含 swap）、PID 数使用实际内核 cgroup 限额，配置后
 | 安装状态 | 当前维护边界 |
 | --- | --- |
 | 尚无 owner 的 pre-owner Home | v3 维护证明支持 Docker→native、native→native，仅更新基础 runtime、release 工具链/store/cache 与 cohort；不创建 owner、runner 或预算，拒绝混合后端、native→Docker、非空权限状态及 owner 专用构建家族。 |
-| 已有 owner 的 Home | 程序升级只接纳受支持的 Docker 原安装；已是 native 的原安装明确拒绝。Docker→native 还须创建审查的 grants/verifications 与采用的 adoptions/calls/source_archives 全空；非空迁移尚未实现。 |
+| 已有 owner 的 Home | 程序升级只接纳受支持的 Docker 原安装；已是 native 的原安装明确拒绝。Docker→native 还须已配置的 creation-review、revision-review 及 revision-regression 库的 grants/verifications 与采用的 adoptions/calls/source_archives 全空；非空迁移尚未实现。 |
 
 owner 的空业务迁移在停服前和 stage 变更前复核原身份与空历史，使用原 key、有限额度、期限与签名链完成移交；切换前仍核验资源身份及实际静止，失败保留事务和回退证据，不自动重放 unknown 或重建授权。完整 live 服务切换仍未验收。临时 Home、副本、单个 runner 或包安装成功，都不能替代 owner 身份、持久预算、双服务就绪与回滚的完整验收。操作入口与恢复条件见[维护说明](../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)。
 
-## 验收顺序
+## 验收条件
 
-1. 实机证明资源和 namespace 原语，包括正常执行、文件/网络边界、硬字节/inode/内存/CPU/PID 限额、超时和故障清理。
-2. 接入普通执行与 Verifier 账本，验证重启恢复、撤销、unknown、幂等和历史迁移。
-3. 接入整仓源码检查、创建/修订、独立行为验证、发布/采用/回退，保留原来的检查范围。
-4. 完成无 Docker 安装和已有 owner 迁移，在没有可用 Docker CLI/socket 的环境验证真实完整路径。
+1. 在受支持的 delegated cgroup v1 实机上验证资源和 namespace 边界，包括正常执行、文件/网络边界、硬字节/inode/内存/CPU/PID 限额、超时和故障清理。
+2. 验证已接入的普通执行与 Verifier 账本：重启恢复、撤销、unknown、幂等和受支持的历史迁移。
+3. 验证整仓源码检查、创建/修订、独立行为验证、发布/采用/回退，保留原来的检查范围，不能以单包成功替代。
+4. 在没有可用 Docker CLI/socket 的环境验证安装及上表支持的迁移路径；已有 owner 的空业务 Docker→native 完整 live 切换仍待验收，非空迁移与 native owner 升级不在当前支持范围。
 5. 独立审查、根目录 `pnpm check`、公开包安装及实机部署验证通过后发布。普通任务的长期收益继续单独观察，不与本次去依赖验收混同。
 
 ## 当前实机发现

@@ -261,6 +261,12 @@ export class AssistantVerifierService extends Service<Config> {
     return this.#creationReviewer?.inspect(input)
   }
 
+  /** Pure, current WorkItem creation reviewer capability; never allocates a runner or claim. */
+  inspectWorkItemCreationReviewReadiness = () => {
+    if (!this.#active) return undefined
+    return this.#creationReviewer?.inspectWorkItemCreationReviewReadiness()
+  }
+
   /** Private Host continuation only. Source, artifact and owner are re-read through Control Plane. */
   verifyPluginCreation = (request: PluginCreationVerificationRequest, signal?: AbortSignal): Promise<PluginCreationVerificationResult> => {
     this.#assertActive()

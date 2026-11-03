@@ -8,9 +8,14 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { LlmAdapter, ReasoningEffortId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { sourceGrowthEvidenceDigest, sourceGrowthRunDigest, verifyPluginCreationVerificationCertificate,
-  type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+  anySourceGrowthRunDigest, isSourceOwnerContinuation, type SourceOwnerReceipt,
+  type WorkItemSourceGrowthRunBinding, type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
 import { afterEach, expect, test, vi } from 'vitest'
-import { CreationReviewRuntime, compileCreationReviewConfig, type CreationReviewConfig } from '../src/creation-review.ts'
+import { CreationReviewRuntime, compileCreationReviewConfig, type CreationReviewConfig, type PreparedCreationSnapshot, type WorkItemPreparedCreationSource } from '../src/creation-review.ts'
+import { CreationReviewStore } from '../src/creation-review-store.ts'
+import { compileRevisionReviewConfig } from '../src/revision-review.ts'
+import { compileRevisionRegressionReviewConfig } from '../src/revision-regression-review.ts'
 
 const observer = vi.hoisted(() => ({ run: vi.fn(), close: vi.fn(async () => {}) }))
 vi.mock('@dsh-enhanced/assistant-isolation', () => ({
@@ -78,7 +83,7 @@ async function fixture() {
     policy: 'Verify arithmetic specified by the owner, including negative operands.',
     maxInputBytes: 65_536, maxOutputTokens: 1024, maxDurationMs: 60_000, maxCases: 3, receiptTtlMs: 30_000 }
   const compiled = compileCreationReviewConfig(config)
-  const fullOwner = { ...owner, receiptVersion: 2, bindingVersion: 1, generation: 1 }
+  const fullOwner = { ...owner, receiptVersion: 2 as const, bindingVersion: 1, generation: 1 }
   const reference = { schemaVersion: 1, owner: fullOwner, outcomeId: 'outcome',
     projection: { subjectKind: 'foreground-turn' as const, subjectRef: 'task', version: 1,
       digest: 'b'.repeat(64), disposition: 'upsert' as const }, sourceDigest: 'c'.repeat(64) }
@@ -252,4 +257,226 @@ test('request validation, changed authority, and crash before model completion c
   changed.growthRun.creationAcceptance = { ...changed.compiled.authority, authorityDigest: '0'.repeat(64) }
   expect((await changed.runtime.run(changed.request)).status).toBe('unknown')
   expect(changed.adapter.requests).toHaveLength(0)
+})
+
+
+async function workItemFixture(enabled = true, maxVerifications = 1) {
+  const f = await fixture()
+  await f.runtime.close()
+  const config = { ...f.config, maxVerifications, ...(enabled ? { workItemFailures: true } : {}) }
+  const compiled = compileCreationReviewConfig(config), expiresAt = config.expiresAt
+  const creationGrant = { id: 'owner-create', namePrefix: config.namePrefix, maxCreates: 1, expiresAt, workItemFailures: true }
+  const sourceJobs = { authorityId: 'source-jobs', authorityDigest: '7'.repeat(64), expiresAt }
+  const authorities = { protocol: 'assistant-growth/work-item-authorities/v1' as const, sourceJobs,
+    creationGrant: { id: creationGrant.id, digest: sourceGrowthEvidenceDigest(creationGrant), expiresAt },
+    creationAcceptance: compiled.authority, adoption: { authorityId: 'owner-adopt', authorityDigest: '8'.repeat(64), expiresAt } }
+  const rootText = 'Create owner_sum that adds two integers.', childText = 'Also support signed negative operands correctly.'
+  const rootInput = { kind: 'foreground', inboxId: 'root-inbox', sourceDigest: 'c'.repeat(64), executionRef: 'execution:1',
+    completionSequence: 1, binding: { id: 'binding:1', version: 1, generation: 1 } }
+  const childInput = { kind: 'continuation', sourceDigest: 'b'.repeat(64), inputSha256: createHash('sha256').update(childText).digest('hex'), inputBytes: Buffer.byteLength(childText) }
+  const nodes = [{ itemId: 'root-item', input: rootInput }, { itemId: 'child-item', input: childInput }]
+  const objective = acceptanceCanonicalJson({ protocol: 'work-item-owner-objective/v1', inputs: [
+    { itemId: 'root-item', source: rootInput, text: rootText }, { itemId: 'child-item', source: childInput, text: childText }] })
+  const objectiveDigest = createHash('sha256').update(objective).digest('hex')
+  const context = { manifestDigest: 'a'.repeat(64), objectiveDigest, objectiveBytes: Buffer.byteLength(objective) }
+  const projection = { subjectKind: 'work-item' as const, subjectRef: 'child-item', version: 2, digest: 'b'.repeat(64), disposition: 'upsert' as const }
+  const reference = { schemaVersion: 2 as const, sourceProtocol: 'assistant-delivery/work-item-engineering-context/v1' as const,
+    owner: f.reference.owner, outcomeId: 'work-item-outcome', projection, sourceDigest: 'c'.repeat(64), presentationDigest: '9'.repeat(64), context }
+  const growthRun: WorkItemSourceGrowthRunBinding = { ...f.growthRun, protocol: 'assistant-growth/source-run/v2', mode: 'create',
+    source: { protocol: 'assistant-growth/work-item-source/v1', itemId: 'child-item', outcomeId: reference.outcomeId,
+      projection, sourceDigest: reference.sourceDigest, presentationDigest: reference.presentationDigest,
+      objectiveStatus: 'not-achieved', context: { protocol: reference.sourceProtocol, ...context } },
+    authorities, creationAcceptance: compiled.authority }
+  const task = { protocol: 'assistant-delivery/owner-work-item-learning/v1', owner: reference.owner, judgement: 'owner-feedback',
+    canonical: { projection, objective: { outcomeId: reference.outcomeId, status: 'not-achieved' } },
+    proofIdentity: { itemId: 'child-item', proofDigest: 'b'.repeat(64), supplier: growthRun.model,
+      production: { executionStatus: 'failed', quiescent: true, budgetSettlementState: 'finalized' } },
+    sourceDigest: reference.sourceDigest, presentationDigest: reference.presentationDigest,
+    presentation: { brief: { text: 'MACHINE_BRIEF_NOT_OWNER_OBJECTIVE', truncated: false, redacted: false },
+      report: { text: 'MACHINE_REPORT_NOT_ACCEPTANCE_ORACLE', truncated: false, redacted: false },
+      feedback: { inboxId: 'feedback:1', text: 'Negative operands still fail.', truncated: false, redacted: false } } }
+  const source: WorkItemPreparedCreationSource = { protocol: reference.sourceProtocol,
+    task: task as unknown as WorkItemPreparedCreationSource['task'], objective,
+    manifest: { protocol: reference.sourceProtocol, itemId: 'child-item', rootItemId: 'root-item', feedbackProofDigest: 'b'.repeat(64),
+      materialDigest: 'd'.repeat(64), nodes, objective: { protocol: 'work-item-owner-objective/v1', fullTextDigest: objectiveDigest,
+        fullBytes: Buffer.byteLength(objective) }, reports: [], manifestDigest: context.manifestDigest } }
+  const plan = { ...f.plan, creation: { grant: creationGrant, growthRun } }
+  const snapshot: PreparedCreationSnapshot = { protocol: 'dsh-prepared-creation/v2', plan,
+    job: { intent: { creation: { growthRun }, authority: { id: sourceJobs.authorityId, digest: sourceJobs.authorityDigest, expiresAt } } },
+    reference, source, artifact: Buffer.from('private fixture package bytes') }
+  f.cp.inspectPreparedCreation.mockImplementation(() => snapshot as unknown as ReturnType<typeof f.cp.inspectPreparedCreation>)
+  let current = true
+  f.cp.withPreparedCreationFence = <T>(input: Parameters<typeof f.cp.withPreparedCreationFence>[0], callback: () => T): T => {
+    if (!current || input.planId !== plan.id || input.planDigest !== plan.digest
+      || input.growthRunDigest !== anySourceGrowthRunDigest(growthRun) || input.referenceDigest !== sourceGrowthEvidenceDigest(reference)) throw new Error('current work-item source changed')
+    return callback()
+  }
+  const protocol = vi.fn((): 'dsh-prepared-creation/v2' | undefined => 'dsh-prepared-creation/v2')
+  let runtime!: CreationReviewRuntime
+  const currentOwner: SourceOwnerReceipt = { ...reference.owner }
+  const readiness = vi.fn((input: { owner: SourceOwnerReceipt }) => {
+    // The real CP SourceJobRuntime uses this exact shared validator, not a seven-field config comparison.
+    if (!isSourceOwnerContinuation(currentOwner, input.owner)) return undefined
+    return { protocol: 'assistant-growth/work-item-creation-readiness/v1',
+      sourceProtocol: reference.sourceProtocol, runProtocol: 'assistant-growth/source-run/v2', workItemFailures: true,
+      pins: structuredClone(authorities), available: runtime.inspectWorkItemCreationReviewReadiness()?.available === true }
+  })
+  Object.assign(f.cp, { inspectWorkItemPreparedCreationProtocol: protocol, inspectWorkItemCreationReadiness: readiness })
+  runtime = new CreationReviewRuntime(f.ctx, config, join(f.root, 'verifier.sqlite')); runtimes.push(runtime)
+  return { ...f, runtime, config, compiled, growthRun, snapshot, source, task, reference, authorities, readiness, protocol,
+    currentOwner, invalidate: () => { current = false }, restore: () => { current = true },
+    reopen: () => { runtime = new CreationReviewRuntime(f.ctx, config, join(f.root, 'verifier.sqlite')); runtimes.push(runtime); return runtime } }
+}
+
+test('work-item creation preserves backend certificate versions while signing the full v2 source and owner input chain', async () => {
+  const f = await workItemFixture()
+  const available = f.runtime.inspectWorkItemCreationReviewReadiness()
+  expect(available).toMatchObject({ protocol: 'assistant-growth/work-item-review-readiness/v1', workItemFailures: true,
+    available: true, remainingVerifications: 1, authority: f.compiled.authority })
+  expect(observer.run).not.toHaveBeenCalled(); expect(f.adapter.requests).toHaveLength(0)
+  const result = await f.runtime.run(f.request)
+  expect(result.status).toBe('verified')
+  if (result.status !== 'verified') throw new Error('expected certificate')
+  expect(result.certificate.protocol).toBe('assistant-growth/creation-verification/v1')
+  expect(result.certificate.source.growthRunDigest).toBe(anySourceGrowthRunDigest(f.growthRun))
+  expect(result.certificate.source.referenceDigest).toBe(sourceGrowthEvidenceDigest(f.reference))
+  expect(verifyPluginCreationVerificationCertificate(result.certificate, f.compiled.authority, f.compiled.publicKey)).toBe(true)
+  expect(f.adapter.requests).toHaveLength(2)
+  expect(f.adapter.requests.every(call => call.provider === 'supplier' && call.model === 'task-model' && call.reasoningEffort === 'high' && (call.tools?.length ?? 0) === 0)).toBe(true)
+  expect(JSON.stringify(f.adapter.requests[0]!.messages)).toContain('Also support signed negative operands correctly.')
+  expect(JSON.stringify(f.adapter.requests[0]!.messages)).toContain('never desired behavior or an acceptance oracle')
+  expect(JSON.stringify(f.adapter.requests[0]!.messages)).toContain('later authenticated owner corrections override conflicting earlier directions')
+  expect(f.runtime.inspectWorkItemCreationReviewReadiness()).toMatchObject({ remainingVerifications: 0, available: false })
+  const calls = observer.run.mock.calls.length
+  expect(await f.runtime.run(f.request)).toEqual(result)
+  expect(observer.run).toHaveBeenCalledTimes(calls); expect(f.adapter.requests).toHaveLength(2)
+})
+
+test('legacy grant and old CP declaration reject work-item creation before observer or native calls', async () => {
+  const legacy = await workItemFixture(false)
+  expect(legacy.runtime.inspectWorkItemCreationReviewReadiness()).toBeUndefined()
+  expect(await legacy.runtime.run(legacy.request)).toMatchObject({ status: 'unknown', reason: 'stale-source' })
+  expect(observer.run).not.toHaveBeenCalled(); expect(legacy.adapter.requests).toHaveLength(0)
+  const missing = await workItemFixture()
+  missing.protocol.mockReturnValue(undefined)
+  expect(missing.runtime.inspectWorkItemCreationReviewReadiness()).toBeUndefined()
+  expect(await missing.runtime.run(missing.request)).toMatchObject({ status: 'unknown', reason: 'stale-source' })
+  expect(observer.run).not.toHaveBeenCalled(); expect(missing.adapter.requests).toHaveLength(0)
+})
+
+test.each(['snapshot-protocol', 'fake-inbox', 'context', 'objective', 'nonblank', 'owner', 'grant', 'source-jobs', 'adoption', 'supplier'] as const)(
+  'work-item %s mismatch refuses all paid review activity', async mode => {
+    const f = await workItemFixture()
+    if (mode === 'snapshot-protocol') Reflect.set(f.snapshot, 'protocol', 'dsh-prepared-creation/v1')
+    if (mode === 'fake-inbox') Reflect.set(f.reference.projection, 'subjectKind', 'foreground-turn')
+    if (mode === 'context') f.source.manifest.manifestDigest = '0'.repeat(64)
+    if (mode === 'objective') f.source.objective = 'WORKER_BRIEF_INSTEAD_OF_OWNER_CHAIN'
+    if (mode === 'nonblank') {
+      f.source.objective = acceptanceCanonicalJson({ protocol: 'work-item-owner-objective/v1', inputs: f.source.manifest.nodes.map(node => ({itemId:node.itemId,source:node.input,text:'   '})) })
+      const digest = createHash('sha256').update(f.source.objective).digest('hex'), bytes = Buffer.byteLength(f.source.objective)
+      f.source.manifest.objective.fullTextDigest=digest;f.source.manifest.objective.fullBytes=bytes
+      f.growthRun.source.context.objectiveDigest=digest;f.growthRun.source.context.objectiveBytes=bytes
+      f.reference.context.objectiveDigest=digest;f.reference.context.objectiveBytes=bytes
+    }
+    if (mode === 'owner') f.source.task = { ...f.source.task, owner: { ...f.source.task.owner, principalVersion: 2 } }
+    if (mode === 'grant') f.snapshot.plan.creation!.grant.workItemFailures = false
+    if (mode === 'source-jobs') f.snapshot.job.intent.authority!.digest = '0'.repeat(64)
+    if (mode === 'adoption') f.readiness.mockImplementation(() => ({ protocol: 'assistant-growth/work-item-creation-readiness/v1',
+      sourceProtocol: f.reference.sourceProtocol, runProtocol: 'assistant-growth/source-run/v2', workItemFailures: true,
+      pins: { ...f.authorities, adoption: { ...f.authorities.adoption, authorityDigest: '0'.repeat(64) } }, available: true }))
+    if (mode === 'supplier') f.source.task = { ...f.source.task, proofIdentity: { ...f.source.task.proofIdentity,
+      supplier: { provider: 'replacement', model: 'other' } } }
+    expect(await f.runtime.run(f.request)).toMatchObject({ status: 'unknown', reason: 'stale-source' })
+    expect(observer.run).not.toHaveBeenCalled(); expect(f.adapter.requests).toHaveLength(0)
+  })
+
+test('source correction after a native contract call cannot finish or replay verification', async () => {
+  const f = await workItemFixture()
+  f.adapter.afterCall = () => f.invalidate()
+  expect(await f.runtime.run(f.request)).toMatchObject({ status: 'unknown', reason: 'verification-unknown' })
+  expect(f.adapter.requests).toHaveLength(1)
+  const observed = observer.run.mock.calls.length
+  f.restore(); await f.runtime.close()
+  const recovered = f.reopen()
+  expect((await recovered.run(f.request)).status).toBe('unknown')
+  expect(recovered.inspectWorkItemCreationReviewReadiness()).toMatchObject({ remainingVerifications: 0, available: false })
+  expect(observer.run).toHaveBeenCalledTimes(observed); expect(f.adapter.requests).toHaveLength(1)
+})
+
+test('work-item flag false preserves legacy authority bytes while true cannot reset an existing grant', async () => {
+  const f = await workItemFixture()
+  const old = { ...f.config }; delete old.workItemFailures
+  expect(() => compileCreationReviewConfig({ ...old, workItemFailures: 'true' as unknown as boolean })).toThrow('workItemFailures')
+  expect(compileCreationReviewConfig({ ...old, workItemFailures: false }).authority).toEqual(compileCreationReviewConfig(old).authority)
+  expect(compileCreationReviewConfig(f.config).authority.authorityDigest).not.toBe(compileCreationReviewConfig(old).authority.authorityDigest)
+  const store = new CreationReviewStore(join(f.root, 'verifier.sqlite.creation-reviews'))
+  try { store.claim('legacy-plan', 'e'.repeat(64), old.authorityId, compileCreationReviewConfig(old).authority.authorityDigest, old.maxVerifications) }
+  finally { store.close() }
+  expect(f.runtime.inspectWorkItemCreationReviewReadiness()).toBeUndefined()
+  expect((await f.runtime.run(f.request)).status).toBe('unknown')
+  expect(observer.run).not.toHaveBeenCalled(); expect(f.adapter.requests).toHaveLength(0)
+})
+
+test('revision and paired regression reject the creation-only opt-in; false keeps their legacy authority', async () => {
+  const f = await fixture()
+  expect(() => compileRevisionReviewConfig({ ...f.config, workItemFailures: true })).toThrow('work-item revision')
+  expect(compileRevisionReviewConfig({ ...f.config, workItemFailures: false }).authority).toEqual(compileRevisionReviewConfig(f.config).authority)
+  const { policy: _policy, maxInputBytes: _input, maxOutputTokens: _output, ...regression } = f.config
+  regression.runner = { ...regression.runner, maxRuns: regression.maxVerifications * (2 + 2 * regression.maxCases) }
+  expect(() => compileRevisionRegressionReviewConfig({ ...regression, workItemFailures: true })).toThrow('work-item revision regression')
+  expect(compileRevisionRegressionReviewConfig({ ...regression, workItemFailures: false }).authority).toEqual(compileRevisionRegressionReviewConfig(regression).authority)
+})
+
+
+test('a candidate which consumed its last creation/submission quota can still receive its separately authorized first review', async () => {
+  const f = await workItemFixture()
+  f.readiness.mockImplementation(() => ({ protocol: 'assistant-growth/work-item-creation-readiness/v1',
+    sourceProtocol: f.reference.sourceProtocol, runProtocol: 'assistant-growth/source-run/v2', workItemFailures: true,
+    pins: structuredClone(f.authorities), remaining: { sourceSubmissions: 0, creates: 0, verifications: 1, adoptions: 1 }, available: false }))
+  Object.assign(f.snapshot.job.intent.authority!, { maxSubmissions: 1 })
+  expect(f.snapshot.plan.creation!.grant.maxCreates).toBe(1)
+  expect((await f.runtime.run(f.request)).status).toBe('verified')
+  expect(f.runtime.inspectWorkItemCreationReviewReadiness()).toMatchObject({ remainingVerifications: 0, available: false })
+  expect(observer.run).toHaveBeenCalledTimes(3); expect(f.adapter.requests).toHaveLength(2)
+  await f.runtime.close()
+  expect(f.runtime.inspectWorkItemCreationReviewReadiness()).toBeUndefined()
+})
+
+test.each([1, 2])('changed live authority pins after model call %s cannot produce a signed certificate or replay paid work', async at => {
+  const f = await workItemFixture()
+  f.adapter.afterCall = index => {
+    if (index !== at) return
+    f.readiness.mockImplementation(() => ({ protocol: 'assistant-growth/work-item-creation-readiness/v1',
+      sourceProtocol: f.reference.sourceProtocol, runProtocol: 'assistant-growth/source-run/v2', workItemFailures: true,
+      pins: { ...f.authorities, adoption: { ...f.authorities.adoption, authorityDigest: '0'.repeat(64) } }, available: true }))
+  }
+  expect(await f.runtime.run(f.request)).toMatchObject({ status: 'unknown', reason: 'verification-unknown' })
+  expect(f.adapter.requests).toHaveLength(at)
+  const calls = observer.run.mock.calls.length
+  expect((await f.runtime.run(f.request)).status).toBe('unknown')
+  expect(observer.run).toHaveBeenCalledTimes(calls); expect(f.adapter.requests).toHaveLength(at)
+})
+
+
+test('creation readiness receives an actual complete receipt and accepts a same-owner new Session', async () => {
+  const f = await workItemFixture()
+  expect(f.readiness({ owner: f.config.owner as SourceOwnerReceipt })).toBeUndefined()
+  Object.assign(f.currentOwner, { generation: 2, bindingVersion: 2 })
+  f.source.task = { ...f.source.task, owner: { ...f.currentOwner } }
+  f.readiness.mockClear()
+  expect((await f.runtime.run(f.request)).status).toBe('verified')
+  expect(f.readiness).toHaveBeenCalledWith({ owner: expect.objectContaining({ receiptVersion: 2, generation: 2, bindingVersion: 2,
+    principalRecordId: f.config.owner.principalRecordId, principalVersion: f.config.owner.principalVersion }) })
+  expect(f.readiness.mock.calls.every(([input]) => isSourceOwnerContinuation(f.currentOwner, input.owner))).toBe(true)
+})
+
+test.each(['receiptVersion', 'bindingVersion', 'generation'] as const)('an incomplete prepared owner receipt cannot borrow configuration identity: %s', async key => {
+  const f = await workItemFixture()
+  const owner = { ...f.source.task.owner }
+  Reflect.deleteProperty(owner, key)
+  f.source.task = { ...f.source.task, owner }
+  expect((await f.runtime.run(f.request)).status).toBe('unknown')
+  expect(f.readiness).not.toHaveBeenCalled()
+  expect(observer.run).not.toHaveBeenCalled(); expect(f.adapter.requests).toHaveLength(0)
+  expect(f.runtime.inspectWorkItemCreationReviewReadiness()).toMatchObject({ remainingVerifications: 1 })
 })

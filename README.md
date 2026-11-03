@@ -9,7 +9,7 @@
 准备好 [Node.js 24 LTS](https://nodejs.org/en/download)、飞书账号，以及一个可用模型（已登录的 TraeX 或模型服务的 API Key）。也支持 Node.js 22.19 及以上的 22.x，以及 24 以上版本。
 
 - **macOS**：原生运行，无需 Docker；已在 Apple Silicon Mac 验证，Intel Mac 尚未实机验收。
-- **Linux**：新安装的默认学习场景采用原生隔离，需要 bubblewrap、systemd 用户服务与已委派的 cgroup v1 资源；旧部署不会自动迁移。详见[安装准备](scripts/install/README.md)。
+- **Linux**：新安装的默认学习场景采用原生隔离，需要 bubblewrap、systemd 用户服务与已委派给当前用户的 cgroup v1 资源；当前拒绝 cgroup v2，旧部署不会自动迁移。详见[安装准备](scripts/install/README.md)。
 
 暂不接飞书、只想先体验聊天，可直接看[只用本机 Web](scripts/install/README.md#只用本机-web)。
 
@@ -53,7 +53,7 @@ dsh-rsi web-url --profile web
 | 查看最近日志 | `dsh-rsi logs --profile web --lines 100` |
 | 重启服务 | `dsh-rsi restart --profile web` |
 
-浏览器关闭后，默认安装的服务仍会在后台运行。只升级命令本身用 `dsh-rsi update`。对于 Linux 冻结 owner/cohort，`dsh-rsi update --all --yes` 仅接纳原安装为 Docker 后端且满足严格前提的 Home；切到 native 时，创建审查与采用业务记录必须为空。原生 owner 的原地程序升级和非空创建历史迁移尚不支持；尚未建立 owner 的 Home 有独立维护入口。旧 CLI 须先单独运行一次 `dsh-rsi update`。普通安装的升级路径、恢复和 macOS 限制见 [CLI 帮助](packages/dsh-rsi-cli/README.md#升级与重装)。`reinstall` 会删除旧配置和历史后重新安装，请勿当作普通升级使用。
+浏览器关闭后，默认安装的服务仍会在后台运行。只升级命令本身用 `dsh-rsi update`。对于 Linux 冻结 owner/cohort，`dsh-rsi update --all --yes` 仅接纳原安装为 Docker 后端且满足严格前提的 Home；切到 native 时，创建/修订审查、修订回归与采用业务记录必须为空。原生 owner 的原地程序升级和非空创建历史迁移尚不支持；尚未建立 owner 的 Home 有独立维护入口。旧 CLI 须先单独运行一次 `dsh-rsi update`。普通安装的升级路径、恢复和 macOS 限制见 [CLI 帮助](packages/dsh-rsi-cli/README.md#升级与重装)。`reinstall` 会删除旧配置和历史后重新安装，请勿当作普通升级使用。
 
 ## 按需阅读
 
@@ -68,7 +68,7 @@ dsh-rsi web-url --profile web
 
 ## 参与开发
 
-开发需要 Node.js（版本范围同上）和 pnpm 11.7.0。开发、提交与推送只使用 `dev`；仅在发布验证通过后合入 `main`，不创建其他分支。克隆仓库后：
+开发需要 Node.js（版本范围同上）和 pnpm 11.7.0。本地和远端只保留 `dev`、`main`；开发、版本准备、提交与推送使用 `dev`，仅在发布验证通过后合入 `main`。克隆仓库后：
 
 ```sh
 pnpm install

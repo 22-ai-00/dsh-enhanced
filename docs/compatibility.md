@@ -347,6 +347,14 @@ Feedback input is exclusive only after current owner, exact accepted report and 
 
 Work-item canonical results retain their feed records, but their Evolution projection outbox state is explicitly `not-required`. They do not enter Evolution's existing learning contract or cause repeated recovery attempts. Exact Recovery replay treats this state as a no-op, never as `quality-projected`; supported foreground and automation projections keep their existing behavior.
 
+### Work-item engineering creation (integration in progress)
+
+This opt-in requires matching Delivery/WorkItems engineering-context APIs, Growth producer v2, Control Plane prepared-creation v2, Verifier/adoption readiness APIs and Policy's `workItemGrowthToolPreauthorizationVersion() === 1`. Policy preauthorization is tied to exact live tool definitions and the bound native author run; it does not change interactive approval settings or authorize foreground creation. Missing capabilities stop admission before author generation; a shared package version alone is insufficient. The DSH/Cordis baseline is unchanged. See [current status](rsi-status.md) for verification boundaries.
+
+Growth migrates its private usage database from schema 2 to 3, adding an independent WorkItem cursor and pending-source locators. Existing foreground jobs, serialized source runs, cursors and unknown outcomes retain their bytes and budgets. The new source-run v2 and owner-failure reference v2 bind the complete engineering manifest and original objective; they cannot masquerade as an Inbox source. Foreground v1 and Memory feedback proofs remain unchanged. Backend-specific creation certificate versions do not imply permission to consume this new source.
+
+`workItemFailures` is separately explicit in Growth usage learning, source creation, creation review and adoption. Absent/false preserves old normalized authorization digests; enabling it requires the matching authorized configuration and exact frozen pins, never a silent upgrade of an existing grant or a quota reset. Revision review and regression review reject this flag. New engineering readers abstain on incomplete, blank or attachment-bearing input and on historical v1 continuation chains without full original-input provenance; existing continuation execution remains available under its own contract.
+
 ### Live Loader runtime observer
 
 Control Plane's optional `runtimeObserver` consumes the installed Cordis/Loader

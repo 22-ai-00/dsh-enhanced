@@ -3,21 +3,32 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
-import { SourceGrowthRunUnavailableError, type CreationAcceptanceAuthorityRef,
+import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { LlmAdapter, ReasoningEffortId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { runGrowthAgent } from '../src/growth-agent.ts'
+import { mintGrowthAuthority } from '../src/deposit.ts'
+import type { GrowthSourcePlanePort } from '../src/source-port.ts'
+import { anySourceGrowthRunDigest, SourceGrowthRunUnavailableError, type WorkItemGrowthAuthorityPins, type CreationAcceptanceAuthorityRef,
   type RevisionAcceptanceAuthorityRef, type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assistant-evaluation'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import type { OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
+import { AssistantPolicyService, setApprovalReviewer, getApprovalReviewer } from '@dsh-enhanced/assistant-policy'
+import type { OwnerForegroundLearningTask, OwnerWorkItemEngineeringContextSource } from '@dsh-enhanced/assistant-delivery'
 import { afterEach, expect, test, vi } from 'vitest'
+import GrowthPlugin from '../src/index.ts'
 import { normalizeConfig } from '../src/config.ts'
-import { UsageLearningRuntime, type UsageReviewInput, type UsageReviewResult } from '../src/usage-runtime.ts'
+import { UsageLearningRuntime, type UsageReviewInput, type WorkItemUsageReviewInput, type UsageReviewResult } from '../src/usage-runtime.ts'
+import { defineTool, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { workItemTextDigest, type WorkItemCreationReadiness } from '../src/work-item-source.ts'
 import { UsageStore } from '../src/usage-store.ts'
 
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { vi.useRealTimers(); for (const dispose of cleanup.splice(0).reverse()) await dispose() })
-async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missing?: boolean; budget?: boolean; maxPending?: number; scanBudgetLimit?: number } = {}) {
+async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missing?: boolean; budget?: boolean; maxPending?: number; scanBudgetLimit?: number; toolPolicy?: 'allow' | 'deny' } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'growth-usage-'))
   const ctx = new Context()
   const scope = { workspace: root, preset: 'primary', principalId: 'owner', ownerRouteId: 'owner-route' }
@@ -32,6 +43,7 @@ async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missi
       actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
     { id: 'usage-execute', effect: 'allow', subject: { kind: 'background', id: '*', workspace: root, principal: 'owner' },
       actions: ['execute'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
+    ...(options.toolPolicy ? ['plugin_source_gaps', 'plugin_source_read', 'plugin_source_create', 'plugin_source_job_status'].map((id, index) => ({ id: `growth-tool-${index}`, effect: options.toolPolicy!, subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: 'owner' }, actions: ['execute'], resource: { kind: 'tool' as const, id }, context: { initiators: ['background' as const] } })) : []),
   ] })
   const automations = new AssistantAutomationsService(ctx, { databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0 })
   const evaluation = new AssistantEvaluationService(ctx, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
@@ -90,7 +102,7 @@ async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missi
     setRevisionRegressionAuthority: (value: RevisionRegressionAcceptanceAuthorityRef | undefined) => { currentRevisionRegressionAuthority = value } }
 }
 
-function actualSourceRun(input: UsageReviewInput) {
+function actualSourceRun(input: Pick<UsageReviewInput, 'model' | 'expiresAt'>) {
   const createdAt = Date.now()
   return { model: input.model, sessionId: 'growth-real-setup-session',
     toolContractDigest: 'a'.repeat(64), executionContractDigest: 'b'.repeat(64),
@@ -410,7 +422,7 @@ test('schema 1 migration preserves legacy intent bytes and never invents a sourc
   expect(store.get('legacy')).toMatchObject({ digest: legacyDigest, sourceRun: null })
   store.close()
   const migrated = new DatabaseSync(path)
-  expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(2)
+  expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(3)
   expect(migrated.prepare('SELECT intent_json,digest,source_run_json FROM usage_jobs WHERE id=?').get('legacy'))
     .toEqual({ intent_json: legacyJson, digest: legacyDigest, source_run_json: null })
   migrated.close()
@@ -643,4 +655,380 @@ test('Usage close unregisters recovery before closing its store while Automation
   expect(restored).not.toHaveBeenCalled()
   expect(f.automations.listSystemOwned({ owner: 'assistant-growth-usage' })).toEqual([])
   expect(f.review).not.toHaveBeenCalled()
+})
+
+/** Source/CP contracts are fixtures here; native scheduling, persistence and budget are real. */
+async function workItemFixture(options: { missing?: boolean; ready?: boolean; maxPending?: number; maxToolCalls?: number; toolPolicy?: 'allow' | 'deny' } = {}) {
+  const f = await fixture({ ...(options.maxPending === undefined ? {} : { maxPending: options.maxPending }), ...(options.toolPolicy ? { toolPolicy: options.toolPolicy } : {}) })
+  let growthCtx!: Context
+  const growthFork = f.ctx.plugin({ name: 'dsh-enhanced-assistant-growth-driver', apply(ctx: Context) { growthCtx = ctx } }); await growthFork
+  const until = Date.now() + 100_000, sourceOccurredAt = Date.now() - 100, workerCompletedAt = Date.now() - 200
+  const acceptance: CreationAcceptanceAuthorityRef = { protocol: 'assistant-growth/creation-acceptance-authority/v1', authorityId: 'wi-review',
+    authorityDigest: 'c'.repeat(64), keyId: 'wi-key', namePrefix: 'created-', expiresAt: until }
+  const pins: WorkItemGrowthAuthorityPins = { protocol: 'assistant-growth/work-item-authorities/v1',
+    sourceJobs: { authorityId: 'source', authorityDigest: 'a'.repeat(64), expiresAt: until },
+    creationGrant: { id: 'create', digest: 'b'.repeat(64), expiresAt: until }, creationAcceptance: acceptance,
+    adoption: { authorityId: 'adopt', authorityDigest: 'd'.repeat(64), expiresAt: until } }
+  let missing = options.missing ?? false, version = 1, withdrawn = false, unrelatedWatermark = 0
+  const config = normalizeConfig({ enabled: true, ...(options.maxToolCalls === undefined ? {} : { maxToolCalls: options.maxToolCalls }), scope: f.config.scope!, budgetId: 'growth-budget', budgetAmount: 1,
+    usageLearning: { enabled: true, databasePath: join(f.root, 'usage.sqlite'), scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1,
+      maxPending: options.maxPending ?? 16, workItemFailures: true, workItemAuthorities: pins },
+    pluginSourceProposals: { enabled: true, allowCreation: true, preparationMode: 'durable', repository: f.root } })
+  const canonical = () => ({ triggerOutcomeId: 'unrelated-trigger', scope: { workspace: f.root, preset: 'primary' }, scopeKey: 'wi-scope',
+    scopeWatermark: version + unrelatedWatermark, situation: 'work-item:child', projection: { subjectKind: 'work-item' as const, subjectRef: 'child', version,
+      digest: acceptanceDigest(['canonical', version]), disposition: withdrawn ? 'retract' as const : 'upsert' as const },
+    objective: { outcomeId: `owner-objective-${version}`, status: withdrawn ? 'unknown' as const : 'not-achieved' as const,
+      occurredAt: sourceOccurredAt, source: { kind: 'user-feedback' as const, id: 'assistant-delivery/typed-owner-feedback' },
+      evidence: [], evaluator: { id: 'assistant-delivery-owner-feedback', version: '2' } } })
+  const rootInput = { kind: 'foreground' as const, inboxId: 'actual-owner-inbox', sourceDigest: 'e'.repeat(64), executionRef: 'root-run',
+    completionSequence: 1, binding: { id: 'original-binding', version: 1, generation: 1 } }
+  const childInput = { kind: 'continuation' as const, sourceDigest: 'f'.repeat(64), inputSha256: workItemTextDigest('Use the child requirement.原样'), inputBytes: Buffer.byteLength('Use the child requirement.原样') }
+  const objective = acceptanceCanonicalJson({ protocol: 'work-item-owner-objective/v1', inputs: [
+    { itemId: 'root', source: rootInput, text: 'Root task original.' }, { itemId: 'child', source: childInput, text: 'Use the child requirement.原样' }] })
+  const source = (): OwnerWorkItemEngineeringContextSource => ({ task: { protocol: 'assistant-delivery/owner-work-item-learning/v1', owner: { ...f.owner },
+    canonical: canonical(), judgement: 'owner-feedback', ownerRevision: { version, action: 'initial', operationId: 'owner-feedback' },
+    proofIdentity: { protocol: 'assistant-work-items/owner-report-feedback/v1', itemId: 'child', reportRevision: 1, reportDigest: 'a'.repeat(64),
+      sourceId: 'source', itemKind: 'reply', scope: { workspace: f.root, preset: 'primary' }, owner: { ownerRouteId: f.owner.authorityId, principalId: f.owner.principalId,
+        principalRecordId: f.owner.principalRecordId, principalVersion: f.owner.principalVersion }, originBindingId: 'original-binding',
+      production: { automationId: 'worker', occurrenceId: 'worker-occurrence', runId: 'worker-run', definitionHash: 'b'.repeat(64), definitionVersion: 1,
+        executionStatus: 'succeeded', completedAt: workerCompletedAt, quiescent: true, budgetSettlementState: 'finalized' },
+      supplier: { provider: 'original-worker', model: 'original-model' }, planDigest: 'c'.repeat(64), proofDigest: 'd'.repeat(64) },
+    sourceDigest: 'e'.repeat(64), presentationDigest: 'f'.repeat(64), presentation: { brief: { text: 'Worker generated brief.', truncated: false, redacted: false },
+      report: { text: 'Untrusted worker report.', truncated: false, redacted: false }, feedback: { inboxId: 'feedback', text: 'The child requirement failed.', truncated: false, redacted: false } } },
+    manifest: { protocol: 'assistant-delivery/work-item-engineering-context/v1', itemId: 'child', rootItemId: 'root', feedbackProofDigest: 'd'.repeat(64),
+      materialDigest: 'a'.repeat(64), manifestDigest: 'b'.repeat(64), objective: { protocol: 'work-item-owner-objective/v1', fullTextDigest: workItemTextDigest(objective), fullBytes: Buffer.byteLength(objective) },
+      nodes: [{ itemId: 'root', planProtocol: 'assistant-work-items/foreground-diagnosis-plan/v1', planDigest: 'a'.repeat(64), input: rootInput, parent: null },
+        { itemId: 'child', planProtocol: 'assistant-work-items/owner-continuation-plan/v1', planDigest: 'b'.repeat(64), input: childInput,
+          parent: { itemId: 'root', rootItemId: 'root', report: null, outcomeRevision: 1, productionDigest: 'c'.repeat(64) } }], reports: [] }, objective })
+  vi.spyOn(f.evaluation, 'listTrustedTaskLearningProjections').mockImplementation(({ after }) => ({
+    items: (after?.watermark ?? 0) < version ? [{ watermark: version, receipt: canonical() }] : [], nextCursor: { scopeKey: 'wi-scope', watermark: version }, scopeWatermark: version, hasMore: false }))
+  vi.spyOn(f.evaluation, 'getTrustedWorkItemLearningProjection').mockImplementation(() => canonical())
+  vi.spyOn(f.evaluation, 'withTrustedCanonicalTaskWriterFence').mockImplementation((_input, callback) => ({ matched: true, value: callback() }))
+  const delivery = { ...f.delivery,
+    inspectOwnerWorkItemEngineeringContext: () => missing ? undefined : source(),
+    readOwnerWorkItemEngineeringContext: () => missing ? undefined : { manifestDigest: source().manifest.manifestDigest,
+      fullTextDigest: workItemTextDigest(objective), fullBytes: Buffer.byteLength(objective), text: objective, offset: 0, returnedBytes: Buffer.byteLength(objective) },
+    withOwnerWorkItemEngineeringContextFence: <T,>(_input: unknown, callback: (value: OwnerWorkItemEngineeringContextSource) => T) => callback(source()),
+  }
+  let readiness: WorkItemCreationReadiness | undefined = options.ready === false ? undefined : { protocol: 'assistant-growth/work-item-creation-readiness/v1',
+    sourceProtocol: 'assistant-delivery/work-item-engineering-context/v1', runProtocol: 'assistant-growth/source-run/v2', workItemFailures: true, pins,
+    remaining: { sourceSubmissions: 1, creates: 1, verifications: 1, adoptions: 1 }, available: true }
+  let readinessHook: (() => void) | undefined
+  const review = vi.fn<(input: WorkItemUsageReviewInput) => Promise<UsageReviewResult>>(async input => {
+    input.assertCurrent(); input.assertFirstModelAdmission(); input.bindSourceRun({ ...actualSourceRun(input), creationAcceptance: acceptance }); return 'reviewed'
+  })
+  const create = () => {
+    const runtime = new UsageLearningRuntime(config, { evaluation: f.evaluation, automations: f.automations, delivery, review: f.review,
+      inspectWorkItemToolPreauthorization: () => f.policy.workItemGrowthToolPreauthorizationVersion?.() === 1 && typeof f.policy.registerPreauthorizedTool === 'function',
+      reviewWorkItem: review, inspectWorkItemCreationReadiness: () => { const result = readiness; readinessHook?.(); return result } })
+    cleanup.push(() => runtime.close()); runtime.start(); return runtime
+  }
+  const tick = async () => { vi.setSystemTime(Date.now() + 1500); for (let i = 0; i < 3; i++) { await f.automations.tick(); await f.automations.whenIdle() } }
+  return { ...f, growthCtx, growthFork, config, pins, review, create, tick, source, delivery, setMissing: (value: boolean) => { missing = value },
+    setReadiness: (value: WorkItemCreationReadiness | undefined) => { readiness = value }, setReadinessHook: (hook: (() => void) | undefined) => { readinessHook = hook }, readiness: () => readiness,
+    withdraw: () => { withdrawn = true; version++ }, correct: () => { version++ }, unrelatedChange: () => { unrelatedWatermark++ } }
+}
+
+test('work item locator survives reader absence and restart; source stays typed, original supplier and current child objective are frozen once', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture({ missing: true })
+  const first = f.create(); expect(first.health().counts).toEqual({}); await first.close()
+  const ledger = new UsageStore(join(f.root, 'usage.sqlite'))
+  const saved = ledger.pendingWorkItems(acceptanceDigest(f.config.scope))[0]!
+  expect(saved.locator.canonical.outcomeId).toBe('owner-objective-1'); expect(saved.locator).not.toHaveProperty('inboxId'); ledger.close()
+  f.setMissing(false); const restarted = f.create(); await f.tick()
+  expect(f.review).toHaveBeenCalledOnce(); expect(f.review.mock.calls[0]![0].source.objective).toContain('Use the child requirement.')
+  expect(f.review.mock.calls[0]![0].model).toEqual({ provider: 'original-worker', model: 'original-model' })
+  expect(restarted.health().counts).toEqual({ reviewed: 1 }); restarted.scan(); await f.tick(); expect(f.review).toHaveBeenCalledOnce()
+})
+
+test('old or unavailable peer leaves same locator with zero paid native runs, reservations or author calls', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture({ ready: false }), runtime = f.create()
+  const ledger = new UsageStore(join(f.root, 'usage.sqlite')), id = ledger.pendingWorkItems(acceptanceDigest(f.config.scope))[0]!.id; ledger.close()
+  await f.tick(); runtime.scan(); expect(f.review).not.toHaveBeenCalled()
+  const db = new DatabaseSync(join(f.root, 'policy.sqlite')); expect(db.prepare('SELECT * FROM budget_reservations').all()).toEqual([]); db.close()
+  const reopened = new UsageStore(join(f.root, 'usage.sqlite')); expect(reopened.pendingWorkItems(acceptanceDigest(f.config.scope))[0]!.id).toBe(id); reopened.close()
+})
+
+test('withdrawal after full freeze blocks a work item author before claim', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture(), runtime = f.create()
+  expect(runtime.health().counts).toEqual({ queued: 1 }); f.withdraw(); await f.tick()
+  expect(f.review).not.toHaveBeenCalled()
+})
+
+test('producer v2 holds an actual UsageStore writer, freezes binding, rejects thenables and keeps last allowance valid', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture(), runtime = f.create(); await f.tick()
+  const input = f.review.mock.calls[0]![0], binding = runtime.inspectAnySourceGrowthRun({ runId: input.id, intentDigest: input.intentDigest })!
+  expect(binding.protocol).toBe('assistant-growth/source-run/v2')
+  f.setReadiness({ ...f.readiness()!, remaining: { sourceSubmissions: 0, creates: 0, verifications: 0, adoptions: 0 }, available: false })
+  const request = { runId: input.id, intentDigest: input.intentDigest, expectedGrowthRunDigest: anySourceGrowthRunDigest(binding) }
+  expect(runtime.withWorkItemRunFence(request, value => { expect(Object.isFrozen(value.source.context)).toBe(true);
+    const contender = new DatabaseSync(join(f.root, 'usage.sqlite')); contender.exec('PRAGMA busy_timeout=1')
+    try { expect(() => contender.exec('BEGIN IMMEDIATE')).toThrow(/locked/) } finally { contender.close() }
+    return value.runId })).toBe(input.id)
+  expect(() => runtime.withWorkItemRunFence(request, () => Promise.resolve('bad'))).toThrow(/synchronous/)
+  expect(() => runtime.withWorkItemRunFence({ ...request, expectedGrowthRunDigest: '0'.repeat(64) }, () => 'bad')).toThrow(/binding changed/)
+  f.owner.generation++; f.owner.bindingVersion++; f.unrelatedChange()
+  expect(runtime.inspectAnySourceGrowthRun(request)?.runId).toBe(input.id)
+  f.withdraw(); expect(runtime.inspectAnySourceGrowthRun(request)).toBeUndefined()
+})
+
+test('unknown work item author never supplies new producer authority or replays its paid occurrence', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture()
+  f.review.mockImplementation(async input => { input.bindSourceRun({ ...actualSourceRun(input), creationAcceptance: f.pins.creationAcceptance }); return 'unknown' })
+  const first = f.create(); await f.tick()
+  const input = f.review.mock.calls[0]![0], request = { runId: input.id, intentDigest: input.intentDigest }
+  expect(first.health().counts).toEqual({ unknown: 1 }); expect(first.inspectAnySourceGrowthRun(request)).toBeUndefined()
+  expect(() => first.withWorkItemRunFence({ ...request, expectedGrowthRunDigest: 'a'.repeat(64) }, () => 'bad')).toThrow()
+  const db = new DatabaseSync(join(f.root, 'policy.sqlite')), reservations = db.prepare('SELECT * FROM budget_reservations ORDER BY id').all(); db.close()
+  await first.close(); const restarted = f.create(); await f.tick()
+  expect(restarted.health().counts).toEqual({ unknown: 1 }); expect(f.review).toHaveBeenCalledOnce()
+  const after = new DatabaseSync(join(f.root, 'policy.sqlite')); expect(after.prepare('SELECT * FROM budget_reservations ORDER BY id').all()).toEqual(reservations); after.close()
+})
+
+
+test('producer UsageStore frame rejects same-instance mutations, rolls back throw/thenable and clears guard', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture(), runtime = f.create(); await f.tick()
+  const input = f.review.mock.calls[0]![0], request = { runId: input.id, intentDigest: input.intentDigest }
+  const store = new UsageStore(join(f.root, 'usage.sqlite')), before = store.get(input.id)
+  for (const mutate of [() => store.interrupt(acceptanceDigest(f.config.scope)), () => store.settle(input.id, 'superseded', 'bad'), () => store.close()]) {
+    expect(() => store.withWorkItemRunWriter(request, mutate)).toThrow(/forbidden/)
+    expect(store.get(input.id)).toEqual(before)
+  }
+  expect(() => store.withWorkItemRunWriter(request, () => { throw new Error('consumer failed') })).toThrow(/consumer failed/)
+  expect(() => store.withWorkItemRunWriter(request, () => Promise.resolve('bad'))).toThrow(/synchronous/)
+  let proxyReads = 0
+  expect(() => store.withWorkItemRunWriter(request, () => new Proxy({}, { has: () => { proxyReads++; return false } }))).toThrow(/synchronous/)
+  expect(proxyReads).toBe(0)
+  expect(store.withWorkItemRunWriter(request, job => job.id)).toBe(input.id)
+  store.interrupt(acceptanceDigest(f.config.scope)); expect(store.get(input.id)).toEqual(before); store.close()
+  expect(runtime.health().counts).toEqual({ reviewed: 1 })
+})
+
+
+for (const loseReadyBeforeModel of [false, true, 'withdraw-in-final-probe'] as const) test(`native work item author pins creation-only tools and rechecks before first LLM (${loseReadyBeforeModel})`, async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture()
+  await mountAgentLoopTestDependencies(f.ctx, { workingDirectory: true })
+  class Adapter extends LlmAdapter {
+    requests: GenerateOptions[] = []
+    override async resolveModel(provider: string, model: string) { return { provider, id: model, name: model } }
+    override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+      this.requests.push(options)
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'No bounded candidate is justified.' } }
+      yield { type: 'usage', usage: { inputTokens: 20, outputTokens: 10 } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  const adapter = new Adapter(); f.ctx.llm.registerAdapter(['original-worker'], adapter); await f.ctx.plugin(AgentLoop, { agents: [] })
+  const plane: GrowthSourcePlanePort = { listOpenGaps: () => [],
+    // Real Control Plane exposes target discovery even when this source is creation-only.
+    inspectSourceTargets: async () => ({ baseCommit: 'a'.repeat(40), plugins: [] }), inspectSource: async () => { throw new Error('not used') },
+    inspectCreateSource: async () => { throw new Error('not used') }, getSourceCreationNamespace: () => ({ namePrefix: 'created-' }),
+    inspectSourceCreationAcceptanceAuthority: () => f.pins.creationAcceptance,
+    prepareModifySourcePlan: async () => { throw new Error('modification forbidden') }, enqueueSourceJob: async () => { throw new Error('no candidate') },
+    inspectSourceJob: () => { throw new Error('not used') } }
+  let authorFailure: unknown
+  f.review.mockImplementation(async input => {
+    try {
+    const authority = mintGrowthAuthority({ validateOwnerRoute: f.delivery.validateOwnerRoute, commitOwnerAnchoredWorkflowTrace: async () => { throw new Error('not used') } }, f.config.scope!, input.expiresAt, true)
+    const result = await runGrowthAgent(f.growthCtx, { wakeId: input.id, authority, config: f.config, model: { provider: input.model.provider, model: input.model.model, ...(input.model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(input.model.reasoningEffort) }) },
+      goals: { inspectOwnerGoals: () => [], inspectOwnerVerifiedWorkflowSource: () => { throw new Error('not used') } },
+      skills: { inspectOwnerActiveSkills: () => [], inspectOwnerSkillCandidates: () => [], stageOwnerVerifiedSuccessCandidate: async () => { throw new Error('skill write forbidden') } },
+      sourcePlane: plane, feedback: input.source, signal: input.signal, generationDeadlineAt: input.expiresAt,
+      onSourceExecution: actual => { const binding = input.bindSourceRun(actual); if (loseReadyBeforeModel === true) f.setReadiness(undefined); return binding },
+      workItemAuthorization: { runId: input.id, intentDigest: input.intentDigest, definitionHash: input.definitionHash, occurrenceId: input.occurrenceId, assertCurrent: input.assertCurrent },
+      assertFirstModelAdmission: () => {
+        let probes = 0
+        if (loseReadyBeforeModel === 'withdraw-in-final-probe') f.setReadinessHook(() => { if (++probes === 2) f.withdraw() })
+        try { input.assertFirstModelAdmission() } finally { f.setReadinessHook(undefined) }
+      } })
+    return result.outcome === 'succeeded' ? 'reviewed' : 'unknown'
+    } catch (error) { authorFailure = String(error); throw error }
+  })
+  const effectBaseline = f.growthCtx.fiber.getEffects().length
+  const runtime = f.create(); await f.tick()
+  if (loseReadyBeforeModel) { expect(adapter.requests).toHaveLength(0); expect(runtime.health().counts).toEqual({ unknown: 1 }) }
+  else {
+    expect(authorFailure).toBeUndefined()
+    expect(adapter.requests).toHaveLength(1)
+    expect(adapter.requests[0]!.tools?.map(tool => tool.name).sort()).toEqual(['plugin_source_create', 'plugin_source_gaps', 'plugin_source_job_status', 'plugin_source_read'])
+    const messages = JSON.stringify(adapter.requests[0]!.messages)
+    expect(messages).toContain('Use the child requirement.')
+    expect(messages).toContain('Untrusted worker report.')
+    expect(runtime.health().counts).toEqual({ reviewed: 1 })
+    const preauthorizationEffects = () => f.growthCtx.fiber.getEffects().filter(effect => ['assistant-policy.preauthorized-tool', 'assistant-growth-driver.work-item-preauthorization'].includes(effect.label))
+    expect(preauthorizationEffects()).toHaveLength(0)
+    expect(f.growthCtx.fiber.getEffects()).toHaveLength(effectBaseline)
+    f.correct(); runtime.scan(); await f.tick()
+    expect(adapter.requests).toHaveLength(2)
+    expect(preauthorizationEffects()).toHaveLength(0)
+    expect(f.growthCtx.fiber.getEffects()).toHaveLength(effectBaseline)
+  }
+})
+
+
+test('producer writer consumes rejected native Promise before rejecting synchronous callback and releasing writer', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture(); f.create(); await f.tick()
+  const input = f.review.mock.calls[0]![0], request = { runId: input.id, intentDigest: input.intentDigest }
+  const store = new UsageStore(join(f.root, 'usage.sqlite')), before = store.get(input.id)
+  const unhandled: unknown[] = [], capture = (error: unknown) => { unhandled.push(error) }
+  process.on('unhandledRejection', capture)
+  try {
+    let thenReads = 0
+    const rejected = Promise.reject(new Error('work-item-native-promise-rejected'))
+    // oxlint-disable-next-line unicorn/no-thenable -- Verify that the synchrony guard never reads this custom getter.
+    Object.defineProperty(rejected, 'then', { get: () => { thenReads++; throw new Error('custom then getter must not run') } })
+    expect(() => store.withWorkItemRunWriter(request, () => rejected)).toThrow(/synchronous/)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(unhandled).toEqual([])
+    expect(thenReads).toBe(0)
+    expect(store.get(input.id)).toEqual(before)
+    expect(store.withWorkItemRunWriter(request, job => job.id)).toBe(input.id)
+  } finally { process.off('unhandledRejection', capture); store.close() }
+})
+
+for (const mode of ['allowed-last-slot', 'policy-deny', 'withdraw', 'expired', 'schema-drift', 'wrong-agent', 'global-same-name', 'closed', 'cancelled', 'missing-binding', 'wrong-session-binding', 'wrong-occurrence-binding', 'policy-replaced-in-source-check'] as const) test(`real Policy WorkItem preauthorization without approval channel: ${mode}`, async () => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  const f = await workItemFixture({ maxToolCalls: 2, toolPolicy: mode === 'policy-deny' ? 'deny' : 'allow' })
+  await mountAgentLoopTestDependencies(f.ctx, { workingDirectory: true })
+  let bodies = 0, globalBodies = 0, count = 0
+  let closeTask: Promise<void> | undefined
+  const results: ToolExecutionResult[] = [], authorization: boolean[] = [], afterGuardAuthorization: boolean[] = []
+  let replacePolicyDuringCheck = false, replacements = 0
+  f.ctx.on('tools/pre-execute', async (execution, next) => { authorization.push(f.policy.isPreauthorizedTool(execution)); return next() })
+  f.ctx.on('tools/execute', async (execution, next) => { afterGuardAuthorization.push(f.policy.isPreauthorizedTool(execution)); return next() })
+  const plane: GrowthSourcePlanePort = { listOpenGaps: () => { bodies++; return [] }, inspectSource: async () => { throw new Error('not used') },
+    inspectSourceTargets: async () => ({ baseCommit: 'a'.repeat(40), plugins: [] }), inspectCreateSource: async () => { throw new Error('not used') },
+    getSourceCreationNamespace: () => ({ namePrefix: 'created-' }), inspectSourceCreationAcceptanceAuthority: () => f.pins.creationAcceptance,
+    prepareModifySourcePlan: async () => { throw new Error('not allowed') }, enqueueSourceJob: async () => { throw new Error('not used') },
+    inspectSourceJob: input => { bodies++; return { id: input.id, name: 'created-tool', gapId: 'gap', baseCommit: 'a'.repeat(40), status: 'queued', createdAt: 1, expiresAt: 2 } } }
+  class Adapter extends LlmAdapter {
+    requests = 0
+    override async resolveModel(provider: string, model: string) { return { provider, id: model, name: model } }
+    override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+      this.requests++
+      const agent = f.ctx.agents.get(SessionId(options.sessionId!))!
+      if (!agent) throw new Error('real author Agent missing')
+      agent.session.append('approval/policy', { policy: 'ask' }); setApprovalReviewer(agent.session, 'user')
+      expect(getApprovalReviewer(agent.session)).toBe('user')
+      const invoke = (name: string, target = agent, signal = new AbortController().signal) => f.ctx.tools.execute({
+        name, arguments: name === 'plugin_source_job_status' ? { id: 'existing-job' } : {}, agent: target,
+        callId: ToolCallId(`preauthorized-${++count}`), signal })
+      if (mode === 'policy-replaced-in-source-check') replacePolicyDuringCheck = true
+      if (mode === 'withdraw') f.withdraw()
+      if (mode === 'expired') vi.setSystemTime(Date.now() + 200_000)
+      if (mode === 'schema-drift') Object.defineProperty(agent.ctx.tools.get('plugin_source_gaps', agent)!, 'description', { value: 'changed after binding' })
+      if (mode === 'closed') { closeTask = f.growthFork.dispose(); await Promise.resolve() }
+      if (mode === 'wrong-agent' || mode === 'global-same-name') {
+        const foreign = await f.ctx.agents.create({ sessionId: SessionId('foreign-work-item-author'), meta: { cwd: f.root, agentPreset: 'primary' }, agentOptions: { provider: 'original-worker', model: 'original-model' } })
+        try {
+          foreign.agent.session.append('approval/policy', { policy: 'ask' }); setApprovalReviewer(foreign.agent.session, 'user')
+          if (mode === 'wrong-agent') foreign.agent.ctx.tools.register(agent.ctx.tools.get('plugin_source_gaps', agent)!)
+          else f.ctx.tools.register(defineTool({ name: 'plugin_source_gaps', description: 'same name, different global definition', parameters: {},
+            output: { schema: { type: 'string' }, render: () => [{ type: 'text', text: 'global' }] }, execute: async () => { globalBodies++; return 'global' } }))
+          results.push(await invoke('plugin_source_gaps', foreign.agent))
+        } finally { await foreign.dispose() }
+      } else {
+        const controller = new AbortController(); if (mode === 'cancelled') controller.abort()
+        results.push(await invoke('plugin_source_gaps', agent, controller.signal))
+      }
+      if (mode === 'allowed-last-slot') {
+        f.setReadiness({ ...f.readiness()!, remaining: { sourceSubmissions: 0, creates: 0, verifications: 0, adoptions: 0 }, available: false })
+        results.push(await invoke('plugin_source_job_status'))
+        results.push(await invoke('plugin_source_gaps'))
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Bounded author completed.' } }
+      yield { type: 'usage', usage: { inputTokens: 20, outputTokens: 10 } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  const adapter = new Adapter(); f.ctx.llm.registerAdapter(['original-worker'], adapter); await f.ctx.plugin(AgentLoop, { agents: [] })
+  f.review.mockImplementation(async input => {
+    const authority = mintGrowthAuthority({ validateOwnerRoute: f.delivery.validateOwnerRoute, commitOwnerAnchoredWorkflowTrace: async () => { throw new Error('not used') } }, f.config.scope!, input.expiresAt, true)
+    const result = await runGrowthAgent(f.growthCtx, { wakeId: input.id, authority, config: f.config, model: { provider: input.model.provider, model: input.model.model },
+      goals: { inspectOwnerGoals: () => [], inspectOwnerVerifiedWorkflowSource: () => { throw new Error('not used') } },
+      skills: { inspectOwnerActiveSkills: () => [], inspectOwnerSkillCandidates: () => [], stageOwnerVerifiedSuccessCandidate: async () => { throw new Error('not used') } },
+      sourcePlane: plane, feedback: input.source, signal: input.signal, generationDeadlineAt: input.expiresAt,
+      workItemAuthorization: { runId: input.id, intentDigest: input.intentDigest, definitionHash: input.definitionHash, occurrenceId: input.occurrenceId, assertCurrent: () => {
+        input.assertCurrent()
+        if (replacePolicyDuringCheck) { replacePolicyDuringCheck = false; replacements++; f.growthCtx.provide('assistantPolicy', undefined as never) }
+      } },
+      assertFirstModelAdmission: input.assertFirstModelAdmission,
+      onSourceExecution: actual => {
+        const binding = input.bindSourceRun(actual)
+        if (mode === 'missing-binding') return undefined
+        if (mode === 'wrong-session-binding') return { ...binding, sessionId: 'another-session' }
+        if (mode === 'wrong-occurrence-binding') return { ...binding, native: { ...binding.native, occurrenceId: 'another-occurrence' } }
+        return binding
+      } })
+    return result.outcome === 'succeeded' ? 'reviewed' : 'unknown'
+  })
+  f.create(); await f.tick(); await closeTask
+  if (mode === 'missing-binding' || mode === 'wrong-session-binding' || mode === 'wrong-occurrence-binding') { expect(adapter.requests).toBe(0); expect(bodies).toBe(0); return }
+  expect(adapter.requests).toBe(1)
+  if (mode === 'allowed-last-slot') {
+    expect(results.map(result => result.isError === true), JSON.stringify(results)).toEqual([false, false, true])
+    expect(bodies).toBe(2); expect(authorization.filter(Boolean)).toHaveLength(2)
+    expect(afterGuardAuthorization).toEqual([true, true])
+  } else {
+    expect(results).toHaveLength(1); expect(results[0]!.isError).toBe(true); expect(bodies).toBe(0)
+    if (mode === 'policy-deny') expect(authorization).toContain(true)
+  }
+  if (mode === 'policy-replaced-in-source-check') expect(replacements).toBe(1)
+  expect(globalBodies).toBe(0)
+})
+
+test('missing Policy WorkItem capability keeps the same locator with zero paid author runs', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture({ toolPolicy: 'allow' })
+  Object.defineProperty(f.policy, 'workItemGrowthToolPreauthorizationVersion', { value: undefined })
+  const runtime = f.create(); await f.tick(); expect(f.review).not.toHaveBeenCalled()
+  const db = new DatabaseSync(join(f.root, 'policy.sqlite')); expect(db.prepare('SELECT * FROM budget_reservations').all()).toEqual([]); db.close()
+  expect(runtime.health().counts).toEqual({})
+})
+
+test('published default Growth plugin preauthorizes its real native WorkItem tool call without an approval channel', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture({ toolPolicy: 'allow' })
+  await mountAgentLoopTestDependencies(f.ctx, { workingDirectory: true })
+  let requests = 0, successfulTools = 0
+  class Adapter extends LlmAdapter {
+    override async resolveModel(provider: string, model: string) { return { provider, id: model, name: model } }
+    override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+      const agent = f.ctx.agents.get(SessionId(options.sessionId!))!
+      agent.session.append('approval/policy', { policy: 'ask' }); setApprovalReviewer(agent.session, 'user')
+      if (requests++ === 0) {
+        const id = ToolCallId('actual-default-growth-gap')
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield { type: 'tool-call-delta', index: 0, id, name: 'plugin_source_gaps', argumentsDelta: '{}' }
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'plugin_source_gaps', arguments: '{}' } }
+        yield { type: 'usage', usage: { inputTokens: 20, outputTokens: 10 } }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'No candidate justified.' } }
+      yield { type: 'usage', usage: { inputTokens: 20, outputTokens: 10 } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  f.ctx.llm.registerAdapter(['original-worker'], new Adapter()); await f.ctx.plugin(AgentLoop, { agents: [] })
+  f.ctx.on('tools/post-execute', async (execution, result, next) => { if (execution.name === 'plugin_source_gaps' && !result.isError) successfulTools++; return next() })
+  f.ctx.provide('assistantGoals' as never, { inspectOwnerGoals: () => [], inspectOwnerVerifiedWorkflowSource: () => { throw new Error('not used') } } as never)
+  f.ctx.provide('assistantSkills' as never, { inspectOwnerActiveSkills: () => [], inspectOwnerSkillCandidates: () => [], stageOwnerVerifiedSuccessCandidate: async () => { throw new Error('not used') } } as never)
+  f.ctx.provide('assistantDelivery', f.delivery as never)
+  f.ctx.provide('pluginControlPlane' as never, {
+    canEnqueueSource: () => true, gaps: () => [], registerSourceGrowthRunProducer: () => () => {}, reconcileSourceGrowthRuns: () => {},
+    inspectWorkItemCreationReadiness: () => f.readiness(), recordOwnerWorkItemFailureGap: () => ({ id: 'gap', capability: 'new-tool', context: 'authenticated failure', status: 'open', createdAt: 1 }),
+    inspectSourceTargets: async () => ({ baseCommit: 'a'.repeat(40), plugins: [] }), inspectSource: async () => { throw new Error('not used') },
+    inspectCreateSource: async () => { throw new Error('not used') }, getSourceCreationNamespace: () => ({ namePrefix: 'created-' }), inspectSourceCreationAcceptanceAuthority: () => f.pins.creationAcceptance,
+    prepareModifySourcePlan: async () => { throw new Error('not used') }, enqueueSourceJob: async () => { throw new Error('not used') }, inspectSourceJob: () => { throw new Error('not used') },
+  } as never)
+  const fork = f.ctx.plugin(GrowthPlugin, { enabled: true, scope: f.config.scope!, budgetId: 'growth-budget', budgetAmount: 1,
+    usageLearning: { enabled: true, databasePath: join(f.root, 'usage.sqlite'), scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, workItemFailures: true, workItemAuthorities: f.pins },
+    pluginSourceProposals: { enabled: true, allowCreation: true, preparationMode: 'durable', repository: f.root } })
+  cleanup.push(async () => { await fork.dispose() }); await fork; await fork.await()
+  expect(fork.name).toBe('dsh-enhanced-assistant-growth-driver')
+  await f.tick()
+  expect(requests).toBe(2); expect(successfulTools).toBe(1)
+  const ledger = new UsageStore(join(f.root, 'usage.sqlite'))
+  try { expect(ledger.counts(acceptanceDigest(f.config.scope))).toEqual({ reviewed: 1 }) } finally { ledger.close() }
 })

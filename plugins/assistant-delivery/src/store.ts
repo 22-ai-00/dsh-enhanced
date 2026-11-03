@@ -2806,7 +2806,7 @@ export class DeliveryStore {
     this.assertOpen()
     if (typeof input.sessionId !== 'string' || typeof input.workspace !== 'string'
       || typeof input.preset !== 'string') return undefined
-    return this.transaction(() => {
+    const read = () => {
       const binding = this.getBindingBySession(input.sessionId)
       const principal = binding === undefined ? undefined : this.getBindingPrincipal(binding.id)
       if (binding?.status !== 'active' || binding.sessionId !== input.sessionId
@@ -2814,7 +2814,9 @@ export class DeliveryStore {
         || principal?.status !== 'active' || principal.role !== 'owner'
         || JSON.stringify(principal.principal) !== JSON.stringify(binding.principal)) return undefined
       return Object.freeze({ binding, principal })
-    })
+    }
+    // A source writer fence already owns this connection's snapshot and lock.
+    return this.writerTransactionActive ? read() : this.transaction(read)
   }
 
   getModelSelection(input: ConversationRef): ConversationModelSelection | undefined {

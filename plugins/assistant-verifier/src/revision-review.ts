@@ -38,6 +38,7 @@ export interface RevisionReviewAuthorityInspection {
 }
 
 export function validateRevisionReviewConfig(input: RevisionReviewConfig): RevisionReviewConfig {
+  if (Object.getOwnPropertyDescriptor(input, 'workItemFailures')?.value === true) throw new Error('work-item revision review is not supported')
   validateCreationBehaviorDeploymentConfig(Object.getOwnPropertyDescriptor(input, 'runner')?.value)
   return compileCreationReviewConfig(input).config
 }
@@ -45,6 +46,7 @@ export function validateRevisionReviewConfig(input: RevisionReviewConfig): Revis
 export function compileRevisionReviewConfig(input: RevisionReviewConfig): {
   config: RevisionReviewConfig; authority: RevisionAcceptanceAuthorityRef; publicKey: string; privateKey: KeyObject
 } {
+  if (Object.getOwnPropertyDescriptor(input, 'workItemFailures')?.value === true) throw new Error('work-item revision review is not supported')
   validateCreationBehaviorDeploymentConfig(Object.getOwnPropertyDescriptor(input, 'runner')?.value)
   const checked = compileCreationReviewConfig(input)
   const authorityDigest = growthObjectDigest({ purpose: REVISION_PURPOSE,

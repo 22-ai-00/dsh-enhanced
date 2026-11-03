@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { createReadStream } from 'node:fs'
 import { constants } from 'node:fs'
 import { lstat, open, readFile, readdir, realpath } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -76,6 +75,8 @@ export async function hashLinuxRuntimeTree(root: string, signal?: AbortSignal): 
   if (!base.isDirectory() || base.isSymbolicLink() || base.uid !== process.getuid?.()) throw new Error('unsafe Linux runtime root')
   let count = 0, bytes = 0
   const hash = createHash('sha256')
+  // Traversal is sequential, so one bounded buffer suffices for the whole tree.
+  const buffer = Buffer.allocUnsafe(64 * 1024)
   const visit = async (path: string): Promise<void> => {
     signal?.throwIfAborted()
     if (++count > MAX_ENTRIES) throw new Error('Linux runtime entry limit')
@@ -100,9 +101,15 @@ export async function hashLinuxRuntimeTree(root: string, signal?: AbortSignal): 
         const opened = await descriptor.stat()
         if (!opened.isFile() || opened.dev !== item.dev || opened.ino !== item.ino || opened.size !== item.size) throw new Error('Linux runtime file changed')
         const fileHash = createHash('sha256')
-        for await (const chunk of createReadStream(path, { fd: descriptor.fd, autoClose: false, signal })) {
+        // Keep the FileHandle as the sole descriptor owner. A signal can abort
+        // during the metadata awaits above; constructing a ReadStream with that
+        // already-aborted signal can emit an unhandled error before iteration.
+        while (true) {
           signal?.throwIfAborted()
-          fileHash.update(chunk as Buffer)
+          const { bytesRead } = await descriptor.read(buffer, 0, buffer.length, null)
+          signal?.throwIfAborted()
+          if (bytesRead === 0) break
+          fileHash.update(buffer.subarray(0, bytesRead))
         }
         const after = await descriptor.stat()
         if (after.dev !== item.dev || after.ino !== item.ino || after.size !== item.size || after.mtimeMs !== item.mtimeMs) throw new Error('Linux runtime file changed')

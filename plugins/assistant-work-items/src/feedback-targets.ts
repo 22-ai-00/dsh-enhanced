@@ -153,8 +153,12 @@ interface ReadResult {readonly proof:OwnerWorkItemFeedbackProof;readonly fingerp
 export class WorkItemOwnerFeedbackTargets {
   #closed=false
   #capabilities=new WeakMap<object,CapabilityRecord>()
+  #engineeringFrameOwner:Readonly<PeerOwnerRouteReceipt>|undefined
   constructor(private readonly dependencies:WorkItemFeedbackTargetDependencies) {}
   private current():boolean {return!this.#closed&&this.dependencies.current()}
+  /** Local-only metadata for an engineering callback already inside this
+   * reader's writer frame. It never mints authority outside that frame. */
+  engineeringFrameOwner():Readonly<PeerOwnerRouteReceipt>|undefined {return this.current()?this.#engineeringFrameOwner:undefined}
   inspectReport(input:Parameters<WorkItemReplyConsumerRegistration['inspectReport']>[0],notification:(item:WorkItemRecord,report:WorkItemReportRecord)=>WorkItemNotification):WorkItemReportTarget|undefined {
     try {
       const {config}=this.dependencies,store=this.dependencies.store()
@@ -308,9 +312,12 @@ export class WorkItemOwnerFeedbackTargets {
         } catch {return undefined}
       })
       // No producer, owner or lifecycle callback is invoked after this pass.
-      return callback(Object.freeze(proofs))
+      const previousOwner=this.#engineeringFrameOwner
+      this.#engineeringFrameOwner=owner===undefined?undefined:freeze(owner)
+      try {return callback(Object.freeze(proofs))}
+      finally {this.#engineeringFrameOwner=this.#closed?undefined:previousOwner}
     })
   }
   available():boolean {return this.current()&&this.dependencies.config.ownerReportFeedback===true&&this.dependencies.store()?.closed===false}
-  close():void {this.#closed=true;this.#capabilities=new WeakMap()}
+  close():void {this.#closed=true;this.#capabilities=new WeakMap();this.#engineeringFrameOwner=undefined}
 }

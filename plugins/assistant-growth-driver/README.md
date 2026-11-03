@@ -1,6 +1,6 @@
 # @dsh-enhanced/assistant-growth-driver
 
-默认关闭的有界后台成长驱动。可通过 `usageLearning` 让真实前台任务结果自动触发持久成长作业，或由 Host 显式唤醒。Agent 回顾 owner 的已验收成功、沉淀 pending 技能候选；启用源码轨后可准备已有 gap 对应的插件修改提案。在配套 Control Plane、有限授权和独立验收配置齐备时，工具创建轨已接通持久构建、独立行为验收和受限动态采用。技能候选仍须另经独立验证与重复成功门；修改、修订和持续观察各有自己的授权与验收条件，不能由一次 `reviewed` 推定完成。`reviewed` 仅表示本次成长复盘结束，不代表完整长期成长闭环已验收。
+默认关闭的有界后台成长驱动。可通过 `usageLearning` 让真实前台任务结果自动触发持久成长作业，另经显式 `workItemFailures` 授权消费后台失败反馈，或由 Host 显式唤醒。Agent 回顾 owner 的已验收成功、沉淀 pending 技能候选；启用源码轨后可准备已有 gap 对应的插件修改提案。在配套 Control Plane、有限授权和独立验收配置齐备时，工具创建轨已接通持久构建、独立行为验收和受限动态采用。技能候选仍须另经独立验证与重复成功门；修改、修订和持续观察各有自己的授权与验收条件，不能由一次 `reviewed` 推定完成。`reviewed` 仅表示本次成长复盘结束，不代表完整长期成长闭环已验收。
 
 有源码接口且普通认证反馈的 objective 为 `not-achieved` 时，本轮先查看当前 owner 的任务缺口与任务证据，再按相关性读取目标清单、源码或已授权的创建模板。文件清单只供发现路径，替换前仍须读取正文；证据不足时可以不提案。成功、周期唤醒和缺少源码接口的反馈仍用通用成功工作流；技能候选始终经过独立验证与重复成功门。新运行将实际发送的完整提示（含脱敏反馈数据）绑定到执行摘要；旧来源绑定不补写，也不自动重放 unknown。
 
@@ -61,10 +61,12 @@ dsh --profile web --dump-config
 | `pluginSourceProposals.allowRevision` | `false` | 仅在 `pluginSourceProposals.enabled: true`、`preparationMode: durable` 且 `usageLearning.enabled: true` 时可显式开启已采用插件的修订候选；另需 Control Plane 的独立有限修订授权和验收引用。`allowCreation` 不会开启此轨。 |
 | `pluginSourceProposals.maxPlansPerWake` | `1` | 每轮源码提案尝试上限（1–5）；inline 的 prepared 与 durable 的 queued 都占用此预算，失败也占一次。 |
 | `pluginSourceProposals.isolatedBuildTimeoutMs` | `180000` | 仅 `inline` 使用的构建时间上限（60000–240000ms）；控制面可进一步收窄，单轮 authority 到期仍会取消。`durable` 使用控制面 `sourceBuild.timeoutMs`。 |
-| `pluginSourceProposals.offline` | `true` | 源码提案必须离线构建；`false` 配置会拒绝。镜像须预先准备依赖。 |
+| `pluginSourceProposals.offline` | `true` | 源码提案必须离线构建；`false` 配置会拒绝。所选隔离后端须预先准备运行时和依赖。 |
 | `pluginSourceProposals.planTtlMs` | `86400000` | 待批 worktree 保留期限（15 分钟–24 小时）。 |
 | `workflowOwnerAnchored.lookbackMs` | `86400000` | 只枚举该回看窗口内更新过的 owner goal（1 分钟–7 天）。 |
 | `usageLearning.enabled` | `false` | 真实任务触发开关；要求主开关、owner scope、预算及 Evaluation/Automations 服务。 |
+| `usageLearning.workItemFailures` | `false` | 严格可选布尔值；缺失/false 在授权摘要中省略，true 要求 usageLearning、durable source、allowCreation 与显式 workItemAuthorities。只允许后台新工具创建；前台 modify/revise 开关不改变。 |
+| `usageLearning.workItemAuthorities` | 无 | 后台开关开启时必填的准确四份 pins：sourceJobs（authorityId/authorityDigest/expiresAt）、creationGrant（id/digest/expiresAt）、creationAcceptance（完整独立验收引用）、adoption（authorityId/authorityDigest/expiresAt），外层 protocol 为 `assistant-growth/work-item-authorities/v1`。从已授权当前 CP 免费 readiness 获取并由 owner 显式冻结，不自动补签或扩大旧 grant。 |
 | `usageLearning.databasePath` | 无 | 开启时必填的私有 SQLite 绝对路径，保存游标、冻结来源与作业状态。 |
 | `usageLearning.maxPending` | `16` | 同时 queued/running 上限（1–100）；满时保留未消费游标，释放容量后继续。 |
 | `usageLearning.lookbackMs` | `86400000` | 来源结果最大年龄与排队 TTL（1 分钟–7 天）。 |
@@ -133,7 +135,7 @@ rules:
 
 源码审阅与技能沉淀分别执行：启用本能力后，即使没有历史完成目标，也会检查已登记的开放 gap。重复、独立验收成功仍是技能候选的必要条件；源码候选按 gap、读取版本、权限和隔离检查规则准入。
 
-另行安装同批 `plugin-control-plane`，按其 README 配置 owner trust 和隔离构建镜像，再给 driver 增加：
+另行安装同批 `plugin-control-plane`，按其 README 配置 owner trust 和隔离构建后端，再给 driver 增加：
 
 ```yaml
 pluginSourceProposals:
@@ -158,7 +160,7 @@ Agent 先通过 `plugin_source_gaps` 发现 owner 配置的控制面账本中已
 
 Host 在本轮内按 gap 与插件保存首次读取的 commit，后续读取和准备均绑定该 commit；HEAD 变化即拒绝旧上下文。同一文件在同一 commit 的再次读取若内容漂移也会拒绝。完整替换既有文件前必须读取原内容；精确编辑只能作用于已读的既有文件，可在已有目录中增加源码或测试文件。模型不能指定 commit，也不能只凭文件清单覆盖未读文件。服务提供者更换后读上下文与待执行动作一并失效；未提供源码读取接口的旧版 control-plane 保持四工具基础模式。
 
-Control Plane 拥有 worktree、源码快照、容器构建和 SQLite 写入。`inline` 成功时仅返回待审批 plan id 与检查摘要；`durable` 成功时只返回 content-free job id/status，Host 接受队列后继续以它自己的 durable authority 运行，即使模型 wake 随后到期也不会伪造为 prepared。`plugin_source_job_status` 只在 durable 模式出现，并用当前 Growth authority 的 owner scope 查询 job。owner 仍需通过控制面的签名审批、源码复核和发布流程处理。模型看不到 worktree 路径或构建日志。检查失败、owner route 漂移、provider 移除、插件卸载或本轮到期均终止尚未被 Host 接受的操作。`health().run.sourceProposals` 分别提供 `queued`、`prepared` / `rejected` 数量；可选 provider 更换后下一轮重新绑定，旧轮次不会跨代继续写入。
+Control Plane 拥有 worktree、源码快照、隔离构建和 SQLite 写入。`inline` 成功时仅返回待审批 plan id 与检查摘要；`durable` 成功时只返回 content-free job id/status，Host 接受队列后继续以它自己的 durable authority 运行，即使模型 wake 随后到期也不会伪造为 prepared。`plugin_source_job_status` 只在 durable 模式出现，并用当前 Growth authority 的 owner scope 查询 job。owner 仍需通过控制面的签名审批、源码复核和发布流程处理。模型看不到 worktree 路径或构建日志。检查失败、owner route 漂移、provider 移除、插件卸载或本轮到期均终止尚未被 Host 接受的操作。`health().run.sourceProposals` 分别提供 `queued`、`prepared` / `rejected` 数量；可选 provider 更换后下一轮重新绑定，旧轮次不会跨代继续写入。
 
 ### 新插件候选
 
@@ -214,13 +216,42 @@ usageLearning:
 
 源码检查、最终计划提交及 durable job 的排队、恢复和执行都重新核对来源。完整原执行 owner receipt 固定后，同主人 `/new` 可在原授权窗口内继续；身份或授权变化、纠正或撤回会拒绝旧来源继续产出计划，历史引用保留。Driver 负责候选生成；后续有限审批、发布、独立审查、采用与真实任务观察由另行配置的 [Control Plane](../plugin-control-plane/README.md) 接续。组件已接线，可安装部署与独立行为验收尚未贯通，不能据此宣称生产自迭代已完成。
 
+### 后台失败的工程来源
+
+后台分支使用 schema3 的独立 WorkItem 游标与持久定位表；旧前台游标、意图 JSON、摘要、source-run 和 unknown 保留。仅当前认证 not-achieved 可登记，同 item/canonical 修订只接纳一次。先原子保存定位与游标，再完整读取工程上下文；reader 或 peer 临时缺失保留同定位及原到期时间，不返还或重置 Policy/Automations 额度。
+
+工程 objective 是 Delivery 逐段核对的根→当前 child 原样主人输入及有版本 JSON framing，总 UTF-8 不超过16KiB；不得改用 worker brief、根目标摘要或 owner 反馈。背景报告与反馈分栏作为不可信材料，封存 manifest 绑定精确父链及报告版本。完整来源、原 supplier（或显式固定覆盖）、有限预算与 pins 在 Delivery → Evaluation → WorkItems → UsageStore writer frame 内冻结后才进入原生作业；缺失 reasoning effort 保持缺失。同 owner 新 Session 不改写冻结 owner/source-run 摘要。
+
+CP 免费 readiness 必须明确返回工程来源协议、source-run v2、后台能力及完全相同且未过期的 pins。schedule/activate、claim 和首次 LLM 前要求正余额与 available；缺方法、旧协议或摘要不符时不启动付费作者。既有 run 不因自己的末次额度消耗而失效；后续授权仍核对当前活 peer、原 pins、来源及各独立账本。后台作者只看到 gaps/read/job-status/create 工具，不进入技能写、modify/revise 或通用成功轨。候选仍需独立真实构建、held-out 验收及采用，不把主人 testimony 或工具成功当证书。
+
+后台四个 source 工具还要求当前 Policy 的 WorkItem Growth 预授权能力。仅实际发布的 `dsh-enhanced-assistant-growth-driver` plugin Fiber 可注册本 Agent realm 的准确工具定义；注册初始不可用，真实持久化 v2 source-run 返回并匹配 session、occurrence、来源、工具摘要及预算后才启用。每次执行重核当前 owner/source、Policy、期限和工具次数，关闭或取消立即撤销；此许可仅跳过这四个工具的逐次审批，不绕过 Policy 的 execute 规则、预算或急停。前台 v1 仍保留既有审批流程，后续普通任务调用新工具也沿用其真实前台权限/审批通道。
+
+source-run v2 producer 将持久 binding 深冻结后，在真实 UsageStore writer frame 内交给同步 CP consumer；禁止 thenable、同实例写方法重入及上游回读。running/reviewed 才可提供通用 producer 授权；unknown 保留原作业且不重派、不重扣，不能借其创建新作业或签新采用授权。旧 v1 协议与校验保留。本轮包内 fixture 不证明真实跨包工程创建/采用/后续工具调用链，完整组合与长期真实收益仍需独立验收。
+
+### 显式 native 验收入口
+
+Node 24+，在仓库根目录显式准备资源；替换绝对仓库路径与已验证提交（Linux 两项均必填）。准备可能下载依赖，不会由普通根检查自动执行：
+
+```sh
+node --experimental-strip-types plugins/assistant-growth-driver/tests/work-item-engineering.native.ts --prepare-macos /absolute/repository 876f4b66760cca67d619e8848e414e58edb8698a
+node --experimental-strip-types plugins/assistant-growth-driver/tests/work-item-engineering.native.ts --prepare-linux /absolute/repository 876f4b66760cca67d619e8848e414e58edb8698a
+```
+
+保存输出的 `resourcePath` 后，从 `plugins/assistant-growth-driver` 目录运行：
+
+```sh
+CI=1 VITEST_MAX_WORKERS=1 DSH_WORK_ITEM_ENGINEERING_RESOURCES=/absolute/native-resources.json node ../../node_modules/vitest/vitest.mjs run --dir tests tests/work-item-engineering.integration.spec.ts
+```
+
+Linux 需要预先存在的 delegated cgroups/user namespace helpers；准备命令不更改主机设置。未配置资源时跳过 native 项，跳过不是验收。helper 的静态/无命令检查不证明完整链路；完整 native 创建、验收、采用与后续真实任务调用仍按独立结果核验。
+
 ## 权限与数据
 
 - 网络：经本轮冻结的 DSH 模型 adapter 发出请求，目标及凭据由该供应配置决定；没有模型之外的网络工具。
-- 文件系统：启用 `usageLearning` 后写私有 SQLite（文件权限 `0600`），保存冻结任务正文、owner 与模型，未自动清理历史。正文最多 4096 字符，经 owner 校验后作为不可信数据交给获授权的成长模型；Automations 定义与公开 health 不含正文。skill candidate 由 Skills 入库，源码提案经 Control Plane 写入其私有 worktree 和 SQLite。
-- 子进程：源码轨开启时委托 Control Plane 调用 Git 与隔离容器构建；构建权属于 owner 配置的 Control Plane，见其权限说明。driver 无浏览器能力。
+- 文件系统：启用 `usageLearning` 后写私有 SQLite（文件权限 `0600`），保存冻结任务正文、owner 与模型，未自动清理历史。前台正文最多 4096 字符；后台完整 objective 最多16KiB，另有封存背景报告（单条64KiB、合计256KiB）和有界反馈。均经 owner 校验后作为不可信数据交给获授权的成长模型；Automations 定义与公开 health 不含正文。skill candidate 由 Skills 入库，源码提案经 Control Plane 写入其私有 worktree 和 SQLite。
+- 子进程：源码轨开启时委托 Control Plane 调用 Git 与实际隔离 runner（按 CP 配置支持 native 等后端）构建；构建权属于 owner 配置的 Control Plane，见其权限说明。driver 无浏览器能力。
 - 凭据：只读解析一次凭据引用（存在性检查），不持久化、不回显、不入日志。
-- 审批/策略：每次沉淀与每个工具调用都在 service 边界经 `assistant-policy`；空规则默认拒绝。产物仅 pending，零 activate/install。
+- 审批/策略：每次沉淀与每个工具调用都在 service 边界经 `assistant-policy`；空规则默认拒绝。driver 只产候选；独立 CP 另获创建审查与采用授权后可有限 adopt，driver 不直接 activate/install。
 
 ## 明确不做（边界）
 

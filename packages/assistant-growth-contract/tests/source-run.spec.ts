@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { expect, test } from 'vitest'
-import { sourceGrowthEvidenceDigest, sourceGrowthRunDigest, validateSourceGrowthRunBinding,
+import { sourceGrowthEvidenceDigest, sourceGrowthRunDigest, validateSourceGrowthRunBinding, anySourceGrowthRunDigest,
   type SourceGrowthRunBinding } from '../src/source-run.js'
 
 function binding(): SourceGrowthRunBinding {
@@ -94,4 +94,11 @@ test('rejects cycles and objects that can synthesize an evidence value', () => {
   expect(() => sourceGrowthEvidenceDigest(cyclic)).toThrow()
   expect(() => sourceGrowthEvidenceDigest(new Date())).toThrow()
   expect(() => sourceGrowthEvidenceDigest(JSON.parse('{"__proto__":{"approved":true}}'))).toThrow()
+})
+
+
+test('historical v1 fixture retains its exact pre-v2 digest golden', () => {
+  expect(sourceGrowthRunDigest(binding())).toBe('37a5026106b8c21aa45bfed3e5e1b4bca3a3dcb61682ddb3f92a0e5f1f6384e5')
+  expect(anySourceGrowthRunDigest(binding())).toBe(sourceGrowthRunDigest(binding()))
+  expect(sourceGrowthRunDigest({ ...binding(), creationAcceptance })).toBe('915e33c5caf47c0b3b0bbc8e8a266e6c508bdc28c7c10a303413c118e79d6bf3')
 })

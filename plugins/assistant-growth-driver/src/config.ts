@@ -1,5 +1,6 @@
 import { isAbsolute, resolve } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
+import { validateWorkItemGrowthAuthorityPins, type WorkItemGrowthAuthorityPins } from '@dsh-enhanced/assistant-growth-contract'
 
 /**
  * The growth driver is opt-in and fail-closed: it never runs until `enabled`
@@ -89,6 +90,8 @@ export interface AssistantGrowthDriverConfig {
   /** One-time opt-in to durable reviews driven by actual trusted foreground results. */
   usageLearning?: {
     enabled?: boolean; databasePath?: string; maxPending?: number; lookbackMs?: number
+    workItemFailures?: boolean
+    workItemAuthorities?: WorkItemGrowthAuthorityPins
     /** Native discovery scans need their own explicit automation-runs allocation. */
     scanBudgetId?: string; scanBudgetAmount?: number
   }
@@ -124,7 +127,7 @@ export interface NormalizedGrowthDriverConfig extends Required<Omit<AssistantGro
   readonly workflowOwnerAnchored: NormalizedWorkflowOwnerAnchoredConfig
   readonly pluginSourceProposals: NormalizedPluginSourceProposalsConfig
   readonly usageLearning: Readonly<{ enabled: boolean; databasePath: string | null; maxPending: number; lookbackMs: number;
-    scanBudgetId: string | null; scanBudgetAmount: number | null }>
+    scanBudgetId: string | null; scanBudgetAmount: number | null; workItemFailures?: true; workItemAuthorities?: WorkItemGrowthAuthorityPins }>
 }
 
 const fields = new Set([
@@ -216,7 +219,7 @@ const schema = Schema.object({
   scope: scopeSchema,
   workflowOwnerAnchored: workflowOwnerAnchoredSchema,
   pluginSourceProposals: pluginSourceProposalsSchema,
-  usageLearning: Schema.object({ enabled: Schema.boolean().default(false), databasePath: boundedText(4096),
+  usageLearning: Schema.object({ workItemFailures: Schema.boolean(), workItemAuthorities: Schema.any(), enabled: Schema.boolean().default(false), databasePath: boundedText(4096),
     scanBudgetId: boundedText(128),
     scanBudgetAmount: Schema.natural().min(1).max(10_000_000),
     maxPending: Schema.natural().min(1).max(100).default(16),
@@ -234,8 +237,16 @@ export const Config = new Proxy(schema, {
 }) as Schema<AssistantGrowthDriverConfig>
 
 export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<NormalizedGrowthDriverConfig> {
+  if (input?.usageLearning && Object.hasOwn(input.usageLearning, 'workItemFailures')
+    && typeof input.usageLearning.workItemFailures !== 'boolean') throw new Error('assistant-growth-driver: workItemFailures must be a boolean')
   const config = Config(input) as AssistantGrowthDriverConfig
   if (config.apiKeyEnv !== undefined && !/^[A-Z_][A-Z0-9_]*$/u.test(config.apiKeyEnv)) throw new Error('assistant-growth-driver: invalid apiKeyEnv')
+  const pins = config.usageLearning?.workItemAuthorities
+  if (pins !== undefined) validateWorkItemGrowthAuthorityPins(pins)
+  if (pins !== undefined && config.usageLearning?.workItemFailures !== true) throw new Error('assistant-growth-driver: workItemAuthorities require workItemFailures')
+  const frozenPins = pins === undefined ? undefined : Object.freeze({ ...pins,
+    sourceJobs: Object.freeze({ ...pins.sourceJobs }), creationGrant: Object.freeze({ ...pins.creationGrant }),
+    creationAcceptance: Object.freeze({ ...pins.creationAcceptance }), adoption: Object.freeze({ ...pins.adoption }) })
   const normalized: NormalizedGrowthDriverConfig = Object.freeze({
     enabled: config.enabled ?? false,
     intervalMs: config.intervalMs ?? 0,
@@ -270,7 +281,7 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
       offline: config.pluginSourceProposals?.offline ?? true,
       planTtlMs: config.pluginSourceProposals?.planTtlMs ?? 86_400_000,
     }),
-    usageLearning: Object.freeze({ enabled: config.usageLearning?.enabled ?? false,
+    usageLearning: Object.freeze({ ...(config.usageLearning?.workItemFailures === true ? { workItemFailures: true as const, workItemAuthorities: frozenPins! } : {}), enabled: config.usageLearning?.enabled ?? false,
       scanBudgetId: config.usageLearning?.scanBudgetId ?? null,
       scanBudgetAmount: config.usageLearning?.scanBudgetAmount ?? null,
       databasePath: config.usageLearning?.databasePath ?? null, maxPending: config.usageLearning?.maxPending ?? 16,
@@ -328,6 +339,11 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
   }
   if ((normalized.budgetId === null) !== (normalized.budgetAmount === null)) {
     throw new Error('assistant-growth-driver: budgetId and budgetAmount must be configured together')
+  }
+  if (normalized.usageLearning.workItemFailures && (!normalized.usageLearning.enabled
+    || !normalized.pluginSourceProposals.enabled || normalized.pluginSourceProposals.preparationMode !== 'durable'
+    || !normalized.pluginSourceProposals.allowCreation || frozenPins === undefined)) {
+    throw new Error('assistant-growth-driver: work item failures require durable creation, usage learning and explicit authorities')
   }
   if (normalized.usageLearning.enabled) {
     const path = normalized.usageLearning.databasePath

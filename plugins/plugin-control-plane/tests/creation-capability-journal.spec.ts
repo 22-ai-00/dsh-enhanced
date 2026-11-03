@@ -903,3 +903,24 @@ test('unattributed calls stay unattributed and a crashed foreground claim remain
     expect(reopened.inspect('one')?.status).toBe('closed')
   } finally { reopened.close() }
 })
+
+
+test('work-item false preserves the old canonical authority and usage; true cannot upgrade that journal', () => {
+  const f = fixture(1)
+  const oldDigest = creationCapabilityAuthorityDigest({ path: f.path, config: f.config })
+  const disabled = { ...f.config, workItemFailures: false }
+  const enabled = { ...f.config, workItemFailures: true }
+  expect(creationCapabilityAuthorityDigest({ path: f.path, config: disabled })).toBe(oldDigest)
+  expect(creationCapabilityAuthorityDigest({ path: f.path, config: enabled })).not.toBe(oldDigest)
+  for (const flag of [undefined, null, 0, 1, 'true'])
+    expect(() => validateCreationCapabilityConfig({ ...f.config, workItemFailures: flag })).toThrow()
+  const first = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  first.claim({ certificate: f.certificate('one'), artifact: f.artifact }); first.close()
+  const reopened = new CreationCapabilityJournal({ path: f.path, config: disabled })
+  expect(reopened.list()).toHaveLength(1)
+  expect(() => reopened.claim({ certificate: f.certificate('two'), artifact: f.artifact })).toThrow()
+  reopened.close()
+  expect(() => new CreationCapabilityJournal({ path: f.path, config: enabled })).toThrow()
+  const unchanged = new CreationCapabilityJournal({ path: f.path, config: f.config })
+  expect(unchanged.list()).toHaveLength(1); unchanged.close()
+})

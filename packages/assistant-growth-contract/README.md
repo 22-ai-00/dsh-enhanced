@@ -57,3 +57,14 @@ canonical 任务结果，替换/删除必须指定记录版本；模型不能设
 system/user 正文外，仅允许当前 DSH AgentLoop 的必需 `working-directory:current`
 runtime-context 快照，正文和来源都必须指向冻结的 workspace；其他上下文或额外消息拒绝。
 调用方仍负责冻结供应商、模型、工具表、请求字节和输出额度的校验。
+
+
+## 工作项工程来源
+
+既有 `SourceGrowthRunBinding` / producer v1 继续只处理 foreground-turn，原可选字段、校验与摘要不变。后台工作项使用独立 `WorkItemSourceGrowthRunBinding`（`assistant-growth/source-run/v2`），只允许 create：来源绑定明确的 not-achieved owner 结果、工作项当前 canonical 版本、真实来源/展示摘要及有界 engineering context manifest；不能携带 fake inbox 或 revision 字段。主人反馈是改进线索，不是候选技术正确或已采用的证明。
+
+v2 必须同时冻结 sourceJobs、creationGrant、creationAcceptance 和 adoption 四份 authority pins。creationAcceptance 两处值必须完全一致；所有期限严格晚于 createdAt，generationDeadlineAt 不得晚于任何 pin 到期时间。来源窗口可以更长，但不续期任何 grant；构建、独立验收与采用仍分别重验自己的原授权。sourceJobs authorityDigest 由 Control Plane 的 `controlPlaneDigest({config,build})` 提供，本库仅绑定该值，不另算配置或签发授权。
+
+联合消费者使用 `validateAnySourceGrowthRunBinding` / `anySourceGrowthRunDigest` 按协议分派；v2消费者可用 `validateWorkItemSourceGrowthRunBinding`，pins 可用 `validateWorkItemGrowthAuthorityPins` / `workItemGrowthAuthorityPinsDigest`。新联合入口及v2只接受有界纯数据，拒绝额外字段、accessor、proxy 和 thenable；形状验证不认证实际 producer、owner、来源或预算。
+
+`SourceGrowthRunProducerV2` 的 `inspect` 返回v1/v2联合；必需的 `withWorkItemRunFence` 仅接纳v2，并在真实 Delivery → Evaluation → WorkItems → UsageStore 来源frame内向同步callback提供深冻结binding。消费者在frame内只做下游本地写入，不反向 inspect/source 读取；thenable结果必须由producer拒绝。此接口只描述合同，实际锁、撤权、unknown不重放与有限预算仍由各Host消费者实现。库不启动模型、进程、服务或后台循环。

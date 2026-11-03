@@ -130,9 +130,9 @@ dsh-rsi update --all --yes
 
 若当前 CLI 是 `0.1.55` 等旧版，先单独运行 `dsh-rsi update`，确认新进程为 `0.1.57` 或更新版本；旧版 `--all` 不会自动以新 CLI 进程识别冻结 owner。此后 CLI 先升级自身，再识别 Home 中唯一的冻结 target/coordinator 与原 `sourceRepository`；只接受绑定仓库的官方 GitHub origin、干净的 `dev` / `main` 分支（若绑定 checkout 为 detached HEAD，则 HEAD 必须位于本机记录的 `origin/dev` 或 `origin/main` 历史上，更新后仍保持 detached；两者都包含时优先 `dev`，本机连 `origin/dev`、`origin/main` 的跟踪引用都没有或浅历史无法判定则拒绝），并执行 `git fetch`、仅快进合并、锁文件安装和构建。冻结包还会在 Home 外的隔离环境中离线构建和打包，可能耗时较长；这一步失败时不会切换 Home。候选目前要求私有 Host 从受支持的 `0.2.0-rc.2` / `0.2.1-rc.2` 到 `0.2.1-rc.2`，同时更新冻结插件。要求原 owner 授权有效、target 与 coordinator 受管服务均活动、没有已采用的源码或未结 activation；额外参数会被拒绝。事务自动停启这对服务，保留原 owner 绑定、模型配置、权限、凭据引用、授权原期限与累计已用额度、Session、Goal 和历史；不重做 onboarding，不重置额度，也不自动续期或扩权。已过期授权会在升级预检中被拒绝，需先按原授权流程处理。
 
-当前 owner 程序升级在读取原构建时明确拒绝已是 `linux-native` 的安装。Docker→native 还要求创建业务为空：已配置的 source/creation/revision review 库必须真实存在且 grants、verifications 均为零；creation-adoptions 库的 adoptions、calls、source_archives 均为零，unknown、closed、rejected 等历史也不能跳过。停服前和 stage 物化前分别复核，移交保留原 key、额度、期限和不可变证明。非空创建历史迁移尚未实现；完整 live Docker→native 切换仍未验收。拒绝时保留原库，不删除历史、不重建授权，也不改用 reinstall 冒充保权迁移。
+本节 owner 程序升级在读取原构建时明确拒绝 native→native；原安装已是 `linux-native` 时不能沿此入口更新。Docker→native 还要求创建业务为空：已配置的 creation-review、revision-review 及 revision-regression 库必须真实存在且 grants、verifications 均为零；creation-adoptions 库的 adoptions、calls、source_archives 均为零，unknown、closed、rejected 等历史也不能跳过。停服前和 stage 物化前分别复核，移交保留原 key、额度、期限和不可变证明。非空创建历史迁移尚未实现；完整 live Docker→native 切换仍未验收。拒绝时保留原库，不删除历史、不重建授权，也不改用 reinstall 冒充保权迁移。
 
-这与[pre-owner v3 维护](#checkout-内的-pre-owner-冻结源码维护)不同：后者仅支持尚无 owner 的 Docker→native / native→native 基础资源与 cohort 维护，不开放 native owner 程序升级。
+这与[pre-owner v3 维护](#checkout-内的-pre-owner-冻结源码维护)不同：后者仅支持尚无 owner 的 Docker→native / native→native 基础资源与 cohort 维护，不开放 native owner 程序升级。两条入口的资格与证明不同，不能用预备 Home 的维护成功代替已授权 Home 的迁移验收。
 
 若有普通待恢复的程序升级事务，CLI 先用**原安装器**恢复，本次不拉取新源码；恢复后再次执行同一升级命令。若报错指出事务已绑定独立审核的签名 readiness 修复安装器，须从**该许可绑定的独立审核 checkout** 显式运行 `node scripts/install/upgrade-program.mjs --dsh-home <绝对Home路径> --profile <原target> --recover-readiness`；不要修改原安装器或删除事务。`--dry-run` 仅显示计划。拒绝或失败时保留报错及事务现场；不要删除账本或改用 `reinstall` 冒充保留数据的升级。当前发布与实机验收状态见 [RSI 状态](../../docs/rsi-status.md)。macOS 冻结 owner/source Home 仍不支持普通原地升级。
 

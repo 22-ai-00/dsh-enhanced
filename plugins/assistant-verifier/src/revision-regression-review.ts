@@ -30,15 +30,19 @@ export interface RevisionRegressionReviewAuthorityInspection {
 }
 
 function legacyConfig(input: RevisionRegressionReviewConfig): CreationReviewConfig {
+  if (Object.getOwnPropertyDescriptor(input, 'workItemFailures')?.value === true) throw new Error('work-item revision regression is not supported')
   if (!input || typeof input !== 'object' || Array.isArray(input)
     || Object.getPrototypeOf(input) !== Object.prototype
     || Reflect.ownKeys(input).some(key => typeof key !== 'string')
     || Object.keys(input).sort().join(',') !== ['authorityId', 'owner', 'namePrefix', 'keyId', 'keyPath',
-      'expiresAt', 'maxVerifications', 'runner', 'maxDurationMs', 'maxCases', 'receiptTtlMs'].sort().join(',')
+      'expiresAt', 'maxVerifications', 'runner', 'maxDurationMs', 'maxCases', 'receiptTtlMs',
+      ...(Object.hasOwn(input, 'workItemFailures') ? ['workItemFailures'] : [])].sort().join(',')
     || Object.values(Object.getOwnPropertyDescriptors(input)).some(field => !field.enumerable || !('value' in field))) {
     throw new Error('revision regression review invalid config')
   }
-  return { ...input, policy: RULES, maxInputBytes: 4096, maxOutputTokens: 2 }
+  if (Object.hasOwn(input, 'workItemFailures') && input.workItemFailures !== false) throw new Error('revision regression review invalid workItemFailures')
+  const { workItemFailures: _workItemFailures, ...legacy } = input
+  return { ...legacy, policy: RULES, maxInputBytes: 4096, maxOutputTokens: 2 }
 }
 
 export function validateRevisionRegressionReviewConfig(input: RevisionRegressionReviewConfig): RevisionRegressionReviewConfig {

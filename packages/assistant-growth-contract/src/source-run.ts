@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { types as utilTypes } from 'node:util'
 import { assertExactGrowthKeys, isGrowthRecord } from './canonical.js'
 import { validateCreationAcceptanceAuthorityRef, type CreationAcceptanceAuthorityRef } from './creation-verification.js'
 import { validateRevisionAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef } from './revision-verification.js'
@@ -170,5 +171,161 @@ export function sourceGrowthEvidenceDigest(value: unknown): string {
 
 export function sourceGrowthRunDigest(binding: SourceGrowthRunBinding): string {
   validateSourceGrowthRunBinding(binding)
+  return sourceGrowthEvidenceDigest(binding)
+}
+
+
+/** Explicit, separately configured engineering authorities. Values are pins, not grants issued by this library. */
+export interface WorkItemGrowthAuthorityPins {
+  protocol: 'assistant-growth/work-item-authorities/v1'
+  sourceJobs: { authorityId: string; authorityDigest: string; expiresAt: number }
+  creationGrant: { id: string; digest: string; expiresAt: number }
+  creationAcceptance: CreationAcceptanceAuthorityRef
+  adoption: { authorityId: string; authorityDigest: string; expiresAt: number }
+}
+
+/** Work item engineering provenance never masquerades as a foreground Inbox. */
+export interface WorkItemSourceGrowthRunBinding extends Omit<SourceGrowthRunBinding,
+  'protocol' | 'source' | 'creationAcceptance' | 'revisionAcceptance' | 'revisionRegressionAcceptance'> {
+  protocol: 'assistant-growth/source-run/v2'
+  mode: 'create'
+  creationAcceptance: CreationAcceptanceAuthorityRef
+  authorities: WorkItemGrowthAuthorityPins
+  source: {
+    protocol: 'assistant-growth/work-item-source/v1'
+    itemId: string
+    outcomeId: string
+    projection: { subjectKind: 'work-item'; subjectRef: string; version: number; digest: string; disposition: 'upsert'; evidenceOutcomeId?: string }
+    objectiveStatus: 'not-achieved'
+    sourceDigest: string
+    presentationDigest: string
+    context: { protocol: 'assistant-delivery/work-item-engineering-context/v1'; manifestDigest: string; objectiveDigest: string; objectiveBytes: number }
+  }
+}
+export type AnySourceGrowthRunBinding = SourceGrowthRunBinding | WorkItemSourceGrowthRunBinding
+export interface SourceGrowthRunProducerV2 {
+  protocol: 'assistant-growth-source-run-producer/v2'
+  inspect(input: SourceGrowthRunRequest): AnySourceGrowthRunBinding | undefined
+  /**
+   * Only v2: hold the producer's Delivery → Evaluation → WorkItems → UsageStore
+   * frame through this synchronous callback with a deep-frozen current binding.
+   * Reject thenable results; downstream callbacks perform only local writes and
+   * must not inspect/re-enter an upstream producer while this frame is held.
+   */
+  withWorkItemRunFence<T>(input: SourceGrowthRunRequest & { expectedGrowthRunDigest: string },
+    callback: (binding: Readonly<WorkItemSourceGrowthRunBinding>) => T): T
+}
+export type AnySourceGrowthRunProducer = SourceGrowthRunProducer | SourceGrowthRunProducerV2
+
+/** New protocol accepts only bounded ordinary own data, before reading any value. */
+function workItemData(value: unknown): void {
+  const seen = new Set<object>()
+  let nodes = 0
+  const visit = (item: unknown, depth: number): void => {
+    if (++nodes > 32_768 || depth > 64) invalid('work item data size')
+    if (item === null || typeof item === 'boolean' || typeof item === 'number' && Number.isFinite(item)
+      && (!Number.isInteger(item) || Number.isSafeInteger(item))) return
+    if (typeof item === 'string') {
+      if (!item.isWellFormed() || Buffer.byteLength(item) > 1_048_576) invalid('work item text')
+      return
+    }
+    if (typeof item !== 'object' || utilTypes.isProxy(item) || seen.has(item) || !isGrowthRecord(item)) invalid('work item data')
+    seen.add(item)
+    try {
+      const descriptors = Object.getOwnPropertyDescriptors(item)
+      if (Reflect.ownKeys(item).some(key => typeof key !== 'string')
+        || Object.values(descriptors).some(field => !field.enumerable || !('value' in field))) invalid('work item own data')
+      for (const field of Object.values(descriptors)) visit(field.value, depth + 1)
+    } finally { seen.delete(item) }
+  }
+  visit(value, 0)
+}
+
+function workItemExpiry(value: unknown): void {
+  integer(value, 'authority expiry')
+  if (value > 8_640_000_000_000_000) invalid('authority expiry')
+}
+
+export function validateWorkItemGrowthAuthorityPins(value: unknown): asserts value is WorkItemGrowthAuthorityPins {
+  workItemData(value)
+  const pins = record(value, ['protocol', 'sourceJobs', 'creationGrant', 'creationAcceptance', 'adoption'], 'work item authorities')
+  if (pins.protocol !== 'assistant-growth/work-item-authorities/v1') invalid('work item authorities protocol')
+  for (const name of ['sourceJobs', 'adoption']) {
+    const pin = record(pins[name], ['authorityId', 'authorityDigest', 'expiresAt'], name)
+    text(pin.authorityId, name + ' authorityId'); hash(pin.authorityDigest, name + ' authorityDigest'); workItemExpiry(pin.expiresAt)
+  }
+  const creation = record(pins.creationGrant, ['id', 'digest', 'expiresAt'], 'creation grant')
+  text(creation.id, 'creation grant id'); hash(creation.digest, 'creation grant digest'); workItemExpiry(creation.expiresAt)
+  validateCreationAcceptanceAuthorityRef(pins.creationAcceptance)
+}
+
+export function workItemGrowthAuthorityPinsDigest(value: WorkItemGrowthAuthorityPins): string {
+  validateWorkItemGrowthAuthorityPins(value)
+  return sourceGrowthEvidenceDigest(value)
+}
+
+export function validateWorkItemSourceGrowthRunBinding(value: unknown): asserts value is WorkItemSourceGrowthRunBinding {
+  workItemData(value)
+  const binding = record(value, ['protocol', 'mode', 'runId', 'intentDigest', 'configDigest', 'ownerDigest', 'source', 'model',
+    'modelOrigin', 'creationAcceptance', 'authorities', 'budget', 'native', 'sessionId', 'toolContractDigest',
+    'executionContractDigest', 'createdAt', 'generationDeadlineAt', 'expiresAt'], 'work item binding')
+  if (binding.protocol !== 'assistant-growth/source-run/v2' || binding.mode !== 'create') invalid('work item protocol or mode')
+  for (const key of ['runId', 'sessionId']) text(binding[key], key)
+  for (const key of ['intentDigest', 'configDigest', 'ownerDigest', 'toolContractDigest', 'executionContractDigest']) hash(binding[key], key)
+  const source = record(binding.source, ['protocol', 'itemId', 'outcomeId', 'projection', 'objectiveStatus', 'sourceDigest', 'presentationDigest', 'context'], 'work item source')
+  if (source.protocol !== 'assistant-growth/work-item-source/v1' || source.objectiveStatus !== 'not-achieved') invalid('work item source protocol or objective')
+  text(source.itemId, 'work item id'); text(source.outcomeId, 'outcomeId')
+  hash(source.sourceDigest, 'sourceDigest'); hash(source.presentationDigest, 'presentationDigest')
+  if (!isGrowthRecord(source.projection)) invalid('work item projection')
+  const projection = record(source.projection, ['subjectKind', 'subjectRef', 'version', 'digest', 'disposition',
+    ...(Object.hasOwn(source.projection, 'evidenceOutcomeId') ? ['evidenceOutcomeId'] : [])], 'work item projection')
+  if (projection.subjectKind !== 'work-item' || projection.subjectRef !== source.itemId || projection.disposition !== 'upsert') invalid('work item projection identity')
+  integer(projection.version, 'projection version'); hash(projection.digest, 'projection digest')
+  if (Object.hasOwn(projection, 'evidenceOutcomeId')) text(projection.evidenceOutcomeId, 'evidenceOutcomeId')
+  const context = record(source.context, ['protocol', 'manifestDigest', 'objectiveDigest', 'objectiveBytes'], 'work item context')
+  if (context.protocol !== 'assistant-delivery/work-item-engineering-context/v1') invalid('work item context protocol')
+  hash(context.manifestDigest, 'context manifestDigest'); hash(context.objectiveDigest, 'context objectiveDigest')
+  integer(context.objectiveBytes, 'context objectiveBytes')
+  if (context.objectiveBytes > 16_384) invalid('context objectiveBytes')
+  if (!isGrowthRecord(binding.model)) invalid('model')
+  const model = record(binding.model, ['provider', 'model', ...(Object.hasOwn(binding.model, 'reasoningEffort') ? ['reasoningEffort'] : [])], 'model')
+  text(model.provider, 'provider'); text(model.model, 'model')
+  if (Object.hasOwn(model, 'reasoningEffort')) text(model.reasoningEffort, 'reasoningEffort')
+  if (binding.modelOrigin !== 'explicit-growth-override' && binding.modelOrigin !== 'inherited-owner-task') invalid('model origin')
+  const budget = record(binding.budget, ['budgetId', 'amount', 'maxModelCalls', 'maxToolCalls', 'maxOutputTokens', 'maxDurationMs', 'maxPlansPerWake'], 'budget')
+  text(budget.budgetId, 'budgetId')
+  for (const key of ['amount', 'maxModelCalls', 'maxToolCalls', 'maxOutputTokens', 'maxDurationMs', 'maxPlansPerWake']) integer(budget[key], key)
+  const native = record(binding.native, ['owner', 'automationId', 'definitionHash', 'occurrenceId'], 'native')
+  if (native.owner !== 'assistant-growth-usage' || native.automationId !== binding.runId) invalid('native owner or identity')
+  text(native.occurrenceId, 'occurrenceId'); hash(native.definitionHash, 'definitionHash')
+  for (const key of ['createdAt', 'generationDeadlineAt', 'expiresAt']) {
+    integer(binding[key], key, 0)
+    if (Number(binding[key]) > 8_640_000_000_000_000) invalid(key)
+  }
+  if (Number(binding.createdAt) >= Number(binding.generationDeadlineAt) || Number(binding.generationDeadlineAt) > Number(binding.expiresAt)
+    || Number(binding.generationDeadlineAt) - Number(binding.createdAt) > Number(budget.maxDurationMs)) invalid('deadline')
+  validateCreationAcceptanceAuthorityRef(binding.creationAcceptance)
+  validateWorkItemGrowthAuthorityPins(binding.authorities)
+  if (sourceGrowthEvidenceDigest(binding.creationAcceptance) !== sourceGrowthEvidenceDigest(binding.authorities.creationAcceptance)) invalid('creation acceptance authority mismatch')
+  for (const authority of [binding.authorities.sourceJobs, binding.authorities.creationGrant, binding.authorities.creationAcceptance, binding.authorities.adoption]) {
+    if (authority.expiresAt <= Number(binding.createdAt) || Number(binding.generationDeadlineAt) > authority.expiresAt) invalid('work item authority expiry')
+  }
+}
+
+/** Explicit protocol dispatch; existing foreground-only consumers remain foreground-only. */
+export function validateAnySourceGrowthRunBinding(value: unknown): asserts value is AnySourceGrowthRunBinding {
+  workItemData(value)
+  if (value !== null && typeof value === 'object' && !utilTypes.isProxy(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, 'protocol')
+    if (descriptor && descriptor.enumerable && 'value' in descriptor) {
+      if (descriptor.value === 'assistant-growth/source-run/v1') return validateSourceGrowthRunBinding(value)
+      if (descriptor.value === 'assistant-growth/source-run/v2') return validateWorkItemSourceGrowthRunBinding(value)
+    }
+  }
+  invalid('binding protocol')
+}
+
+export function anySourceGrowthRunDigest(binding: AnySourceGrowthRunBinding): string {
+  validateAnySourceGrowthRunBinding(binding)
   return sourceGrowthEvidenceDigest(binding)
 }

@@ -1,4 +1,6 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
+import { renameSync, writeFileSync } from 'node:fs'
+import { chmod, link, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
@@ -112,4 +114,98 @@ test('shared cgroup validation is pure/detached and preserves v2 execution-contr
   expect(linuxExecutionContractDigest(repository)).toBe('27901e4a5348f6da7428b252e6dcae46faa594fbf6b9a9eb97372922f8c9473c')
   for (const roots of [{ ...checked, extra: true }, { ...checked, cpu: checked.mode === 'v1' ? checked.memory : '' },
     { mode: 'v2', unified: '/tmp/cgroup' }, { mode: 'future' }]) expect(() => validateLinuxCgroupRoots(roots)).toThrow()
+})
+
+
+// Run cancellation in a separate real Node process: an uncaught ReadStream
+// error must fail this test rather than be absorbed by the Vitest process.
+test.each(['completed', 'metadata-window', 'chunk-window'] as const)('runtime hash %s cancellation owns no late abort listeners or descriptors', async mode => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-hash-stream-')))
+  directories.push(root)
+  await writeFile(join(root, 'data'), Buffer.alloc(1024 * 1024, 7), { mode: 0o600 })
+  const source = new URL('../src/linux-runtime.ts', import.meta.url).href
+  const script = String.raw`
+    import { hashLinuxRuntimeTree } from ${JSON.stringify(source)};
+    import { getEventListeners } from 'node:events';
+    import { readdirSync, readFileSync } from 'node:fs';
+    import { createHash } from 'node:crypto';
+    const mode = ${JSON.stringify(mode)}, root = process.argv[1];
+    const digest = value => createHash('sha256').update(value).digest('hex');
+    const bytes = readFileSync(root + '/data');
+    const expected = digest(JSON.stringify(['dir', '', 0o700]) + '\n' + JSON.stringify(['file', 'data', 0o600, bytes.length, digest(bytes)]) + '\n');
+    if (await hashLinuxRuntimeTree(root) !== expected) throw new Error('complete bytes/metadata digest changed');
+    const descriptors = () => process.platform === 'linux' ? readdirSync('/proc/self/fd').length : null;
+    const before = descriptors(), rounds = [];
+    for (let round = 0; round < 8; round++) {
+      const controller = new AbortController(), signal = controller.signal, reason = new Error('owner disposed');
+      const baseline = getEventListeners(signal, 'abort').length;
+      let checks = 0, outcome = 'resolved';
+      const check = signal.throwIfAborted.bind(signal);
+      signal.throwIfAborted = () => {
+        checks++;
+        // Initial/root/file checks are followed by real lstat/open/stat awaits.
+        // This schedules cancellation during those awaits, before stream construction.
+        if (mode === 'metadata-window' && checks === 3) queueMicrotask(() => controller.abort(reason));
+        // Both implementations have read bytes by this check in this one-file tree.
+        if (mode === 'chunk-window' && checks === 5) controller.abort(reason);
+        check();
+      };
+      try { const actual = await hashLinuxRuntimeTree(root, signal); if (actual !== expected) throw new Error('hash mismatch'); }
+      catch (error) { if (error !== reason) throw error; outcome = 'owner-rejection'; }
+      if (outcome !== (mode === 'completed' ? 'resolved' : 'owner-rejection')) throw new Error('cancellation did not reject');
+      if (getEventListeners(signal, 'abort').length !== baseline) throw new Error('abort listener retained after hash');
+      controller.abort(reason);
+      await new Promise(resolve => setImmediate(resolve));
+      if (await hashLinuxRuntimeTree(root) !== expected) throw new Error('runtime not reusable after cancellation');
+      rounds.push({ outcome, abortListeners: getEventListeners(signal, 'abort').length });
+    }
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const after = descriptors();
+    if (after !== before) throw new Error('file descriptor count changed: ' + before + ' -> ' + after);
+    console.log(JSON.stringify({ node: process.version, mode, before, after, rounds }));
+  `
+  const result = spawnSync(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script, root], { encoding: 'utf8', timeout: 5000 })
+  expect(result.status, JSON.stringify({ stdout: result.stdout, stderr: result.stderr, error: result.error?.message })).toBe(0)
+  const receipt = JSON.parse(result.stdout.trim()) as { rounds: {outcome: string; abortListeners: number}[]; before: number | null; after: number | null }
+  expect(receipt.rounds).toHaveLength(8)
+  expect(receipt.rounds.every(round => round.abortListeners === 0)).toBe(true)
+  expect(receipt.after).toBe(receipt.before)
+})
+
+
+test('portable runtime hashing retains full bytes, writable-file, escaping-link and hardlink checks', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-hash-guards-')))
+  directories.push(root)
+  await writeFile(join(root, 'data'), 'original bytes', { mode: 0o600 })
+  const original = await hashLinuxRuntimeTree(root)
+  await writeFile(join(root, 'data'), 'modified bytes')
+  expect(await hashLinuxRuntimeTree(root)).not.toBe(original)
+  await chmod(join(root, 'data'), 0o666)
+  await expect(hashLinuxRuntimeTree(root)).rejects.toThrow('file bound')
+  await chmod(join(root, 'data'), 0o600)
+  const outside = await realpath(await mkdtemp(join(tmpdir(), 'runtime-hash-outside-')))
+  directories.push(outside)
+  await writeFile(join(outside, 'external'), 'not trusted', { mode: 0o600 })
+  await symlink(join(outside, 'external'), join(root, 'outside'))
+  await expect(hashLinuxRuntimeTree(root)).rejects.toThrow('link escaped root')
+  await rm(join(root, 'outside'))
+  await link(join(root, 'data'), join(root, 'linked'))
+  await expect(hashLinuxRuntimeTree(root)).rejects.toThrow('special or linked file')
+})
+
+test('portable runtime hashing still rejects a replaced named inode while reading its owned descriptor', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-hash-inode-')))
+  directories.push(root)
+  await writeFile(join(root, 'data'), Buffer.alloc(4096, 1), { mode: 0o600 })
+  const controller = new AbortController(), check = controller.signal.throwIfAborted.bind(controller.signal)
+  let checks = 0
+  controller.signal.throwIfAborted = () => {
+    if (++checks === 4) {
+      renameSync(join(root, 'data'), join(root, 'moved'))
+      writeFileSync(join(root, 'data'), Buffer.alloc(4096, 2), { mode: 0o600 })
+    }
+    check()
+  }
+  await expect(hashLinuxRuntimeTree(root, controller.signal)).rejects.toThrow('path changed')
+  expect(checks).toBeGreaterThanOrEqual(4)
 })

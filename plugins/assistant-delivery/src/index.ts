@@ -56,3 +56,5 @@ export type { WorkItemReportTarget, WorkItemReplySource, WorkItemReplyConsumerRe
 export { WorkItemReplyCancelledError } from './work-item-replies.js'
 
 export type { OwnerWorkItemLearningTask, OwnerLearningSourceExpectation, OwnerLearningSourceSnapshot, OwnerWorkItemLearningSourceExpectation, OwnerWorkItemLearningTaskFenceInput } from './work-item-feedback.js'
+
+export type { EngineeringReportRef, EngineeringNode, EngineeringRootInput, EngineeringContinuationInput, WorkItemEngineeringMaterial, OwnerWorkItemEngineeringManifest, OwnerWorkItemEngineeringContextLocator, OwnerWorkItemEngineeringContextExpectation, OwnerWorkItemEngineeringContextReadInput, OwnerWorkItemEngineeringContextPage, OwnerWorkItemEngineeringContext, OwnerWorkItemEngineeringContextSource } from './work-item-engineering-context.js'

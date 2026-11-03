@@ -20,3 +20,5 @@ export function apply(ctx: Context, config: Config): void {
 }
 
 export default AssistantWorkItemsService
+
+export type { EngineeringReportRef, EngineeringNode, WorkItemEngineeringMaterial } from './engineering-context.js'

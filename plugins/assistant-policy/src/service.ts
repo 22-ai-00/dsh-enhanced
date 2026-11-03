@@ -506,6 +506,8 @@ export class AssistantPolicyService extends Service {
   delegatedSkillToolPreauthorizationVersion = (): 1 => { this.assertActive(); return 1 }
   /** Exact work-item tools may reuse their durable occurrence/owner mandate. */
   workItemToolPreauthorizationVersion = (): 1 => { this.assertActive(); return 1 }
+  /** Exact create-only source tools may reuse a frozen, owner-bound WorkItem Growth run. */
+  workItemGrowthToolPreauthorizationVersion = (): 1 => { this.assertActive(); return 1 }
 
   /**
    * Register one trusted Host-owned, finite authorization predicate for an
@@ -528,10 +530,11 @@ export class AssistantPolicyService extends Service {
       : definition.name === 'wiki_upsert' ? ['dsh-enhanced-personal-wiki', 'PersonalWikiService']
       : definition.name === 'delivery_request_restart' ? ['dsh-enhanced-assistant-delivery', 'AssistantDeliveryService']
       : ['work_item_claim', 'work_item_report', 'work_item_status', 'work_item_read_report', 'work_item_list', 'work_item_recall', 'work_item_read_source', 'work_item_continue', 'work_item_read_context'].includes(definition.name) ? 'AssistantWorkItemsService'
+      : ['plugin_source_gaps', 'plugin_source_read', 'plugin_source_create', 'plugin_source_job_status'].includes(definition.name) ? 'dsh-enhanced-assistant-growth-driver'
       : ['skill_run', 'skill_status'].includes(definition.name) ? 'dsh-enhanced-assistant-skills' : undefined
     if (expectedCaller === undefined || !(Array.isArray(expectedCaller)
       ? expectedCaller.includes(caller.fiber.name) : caller.fiber.name === expectedCaller)) {
-      throw new Error('assistant-policy: preauthorization is reserved for the exact owning assistant-actions, assistant-isolation, assistant-goals, assistant-proactive, assistant-skills, AssistantWorkItemsService, PersonalMemoryService or PersonalWikiService Fiber and tool')
+      throw new Error('assistant-policy: preauthorization is reserved for the exact owning assistant-actions, assistant-isolation, assistant-goals, assistant-proactive, assistant-skills, assistant-growth-driver, AssistantWorkItemsService, PersonalMemoryService or PersonalWikiService Fiber and tool')
     }
     if (options !== undefined && (typeof options.denialReason !== 'string' || options.denialReason.trim().length === 0 || options.denialReason.length > 512)) {
       throw new Error('assistant-policy: invalid preauthorization denial reason')
@@ -545,12 +548,13 @@ export class AssistantPolicyService extends Service {
       this.preauthorizedTools.delete(entry)
     }
     try {
-      caller.effect(() => remove, 'assistant-policy.preauthorized-tool')
+      // Return Cordis' owned wrapper: invoking only `remove` would revoke the
+      // grant but retain its capturing effect on a long-lived caller Fiber.
+      return caller.effect(() => remove, 'assistant-policy.preauthorized-tool')
     } catch (error) {
       remove()
       throw error
     }
-    return remove
   }
 
   /**

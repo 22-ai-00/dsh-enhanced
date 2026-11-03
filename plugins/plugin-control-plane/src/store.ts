@@ -2,6 +2,7 @@ import { validateLiveQualificationTerms, assertLiveQualificationBatch, parseLive
 import { createHash, randomUUID } from 'node:crypto'
 import { createPublicKey, verify } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
+import { types as utilTypes } from 'node:util'
 import { realpathSync } from 'node:fs'
 import type { DatabaseSync } from 'node:sqlite'
 import { basename, isAbsolute, posix, resolve, win32 } from 'node:path'
@@ -16,12 +17,12 @@ import { validateSourceBaselineConfig, verifySourceBaselineHistory } from './sou
 import { validateScopedPluginFiles } from './source-workspace.js'
 import { validateCreationCapabilitySource, type CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import { validateSourceRevisionBinding, type SourceRevisionBinding } from './source-revision.js'
-import { validateSourceCreationFiles, validateSourceCreationGrant, type SourceCreationBinding } from './source-creation.js'
-import { sourceGrowthRunDigest, validatePluginRevisionRegressionCertificate, validatePluginRevisionVerificationCertificate, validatePluginCreationVerificationCertificate, validateSourceGrowthRunBinding,
+import { validateSourceCreationFiles, validateSourceCreationGrant, normalizeSourceCreationGrant, type SourceCreationBinding } from './source-creation.js'
+import { anySourceGrowthRunDigest as sourceGrowthRunDigest, isSourceOwnerContinuation, validateAnySourceGrowthRunBinding, validatePluginRevisionRegressionCertificate, validatePluginRevisionVerificationCertificate, validatePluginCreationVerificationCertificate,
   type PluginCreationVerificationCertificate, type PluginRevisionRegressionCertificate, type PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { validateAdoptionHandoffTerms, type AdoptionHandoffRecord, type AdoptionHandoffTerms } from './adoption-handoff.js'
 import type { SourceJobCompletion, SourceJobIntent, SourceJobRecord, SourceJobStatus } from './source-job-types.js'
-import type { OwnerTaskFailureReference } from './owner-task-gap-types.js'
+import type { AnyOwnerTaskFailureReference as OwnerTaskFailureReference } from './owner-task-gap-types.js'
 import { assertForegroundDeployment, assertForegroundTask, type ForegroundDeploymentRecord } from './foreground-deployment.js'
 import { assertTaskObservationBatch, getTaskObservationRecord, readTaskObservationContext } from './task-observation-store.js'
 import type { TaskObservationBatch, TaskObservationRecord } from './task-observation-types.js'
@@ -286,11 +287,12 @@ function creationBindingFromStored(value: unknown): SourceCreationBinding {
   }
   let growthRun: SourceCreationBinding['growthRun']
   if (Object.hasOwn(binding, 'growthRun')) {
-    try { validateSourceGrowthRunBinding(binding['growthRun']) }
+    try { validateAnySourceGrowthRunBinding(binding['growthRun']) }
     catch { throw new ControlPlaneStoreError('invalid-input', 'source creation growth run is invalid') }
     growthRun = structuredClone(binding['growthRun'])
   }
-  return Object.freeze({ grant: Object.freeze(structuredClone(binding['grant'])), generatorDigest: binding['generatorDigest'],
+  if (growthRun?.protocol === 'assistant-growth/source-run/v2' && binding['grant'].workItemFailures !== true) throw new ControlPlaneStoreError('invalid-input', 'work item creation grant must explicitly permit work item failures')
+  return Object.freeze({ grant: Object.freeze(normalizeSourceCreationGrant(binding['grant'])), generatorDigest: binding['generatorDigest'],
     ...(growthRun === undefined ? {} : { growthRun: Object.freeze(growthRun) }) })
 }
 
@@ -1501,6 +1503,20 @@ function ownerTaskFailureReferenceFromStored(value: unknown, errorCode: 'invalid
   try {
     const reference = errorCode === 'invalid-input' ? exactInputRecord(value, 'owner task failure reference') : objectRecord(value, 'owner task failure reference')
     const keys = errorCode === 'invalid-input' ? exactInputKeys : exactKeys
+    if(reference['schemaVersion']===2){
+      keys(reference,['schemaVersion','sourceProtocol','owner','outcomeId','projection','sourceDigest','presentationDigest','context'],'work item failure reference')
+      const projection=errorCode==='invalid-input'?exactInputRecord(reference['projection'],'work item projection'):objectRecord(reference['projection'],'work item projection')
+      const context=errorCode==='invalid-input'?exactInputRecord(reference['context'],'work item context'):objectRecord(reference['context'],'work item context')
+      keys(context,['manifestDigest','objectiveDigest','objectiveBytes'],'work item context')
+      if(reference['sourceProtocol']!=='assistant-delivery/work-item-engineering-context/v1'||projection['subjectKind']!=='work-item'
+        ||typeof reference['presentationDigest']!=='string'||!DIGEST.test(reference['presentationDigest'])
+        ||typeof context['manifestDigest']!=='string'||!DIGEST.test(context['manifestDigest'])||typeof context['objectiveDigest']!=='string'||!DIGEST.test(context['objectiveDigest'])
+        ||!Number.isSafeInteger(context['objectiveBytes'])||Number(context['objectiveBytes'])<1||Number(context['objectiveBytes'])>16384)throw new ControlPlaneStoreError(errorCode,'work item failure reference is invalid')
+      const legacy=ownerTaskFailureReferenceFromStored({schemaVersion:1,owner:reference['owner'],outcomeId:reference['outcomeId'],projection:{...projection,subjectKind:'foreground-turn'},sourceDigest:reference['sourceDigest']},errorCode)
+      return Object.freeze({schemaVersion:2,sourceProtocol:'assistant-delivery/work-item-engineering-context/v1',owner:legacy.owner,outcomeId:legacy.outcomeId,
+        projection:Object.freeze({...legacy.projection,subjectKind:'work-item'}),sourceDigest:legacy.sourceDigest,presentationDigest:reference['presentationDigest'],
+        context:Object.freeze({manifestDigest:context['manifestDigest'],objectiveDigest:context['objectiveDigest'],objectiveBytes:Number(context['objectiveBytes'])})})
+    }
     keys(reference, ['schemaVersion', 'owner', 'outcomeId', 'projection', 'sourceDigest'], 'owner task failure reference')
     const owner = errorCode === 'invalid-input' ? exactInputRecord(reference['owner'], 'owner task failure owner') : objectRecord(reference['owner'], 'owner task failure owner')
     keys(owner, ['receiptVersion', 'authorityId', 'authorityHash', 'principalId', 'principalRecordId', 'principalVersion',
@@ -1992,6 +2008,9 @@ export class ControlPlaneStore {
   readonly #database: DatabaseSync
   readonly #now: () => number
   #ownerTaskFailureGapAdmission: string | undefined
+  #workItemWriter=false
+  #workItemSavepoints:string[]=[]
+  #workItemSavepointSequence=0
   #foregroundDeploymentAdmission: string | undefined
   #liveQualificationAdmission: string | undefined
   readonly #withLiveQualificationFence: ControlPlaneStoreOptions['withLiveQualificationFence']
@@ -2060,13 +2079,37 @@ export class ControlPlaneStore {
     const reference = ownerTaskFailureReferenceFromStored(referenceInput)
     const referenceDigest = controlPlaneDigest(reference)
     const idempotencyKey = `owner-task-failure:${referenceDigest}`
-    const normalized = { idempotencyKey, capability: 'foreground-task-repair',
-      context: 'Owner-verified foreground task failure. Private source reference retained.',
+    const normalized = { idempotencyKey, capability: reference.schemaVersion===2?'work-item-task-repair':'foreground-task-repair',
+      context: reference.schemaVersion===2?'Owner-verified background work-item failure. Private engineering reference retained.':'Owner-verified foreground task failure. Private source reference retained.',
       expectedValue: 0, frequency: 1, estimatedCost: 1, risk: 1 }
     const inputDigest = controlPlaneDigest(normalized)
     const now = this.#now(); const id = `gap-${randomUUID()}`
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
+      if (reference.schemaVersion === 2) {
+        // /new changes only a route generation. Preserve the first frozen owner
+        // bytes for the same authenticated source rather than minting another gap.
+        const stable = (value: OwnerTaskFailureReference): string => {
+          const { bindingVersion: _bindingVersion, generation: _generation, ...owner } = value.owner
+          return controlPlaneDigest({ ...value, owner })
+        }
+        const candidates = this.#database.prepare(`SELECT gap_id FROM owner_task_failure_gaps
+          WHERE json_extract(reference_json, '$.schemaVersion') = 2
+            AND json_extract(reference_json, '$.sourceDigest') = ?
+            AND json_extract(reference_json, '$.outcomeId') = ?
+            AND json_extract(reference_json, '$.projection.subjectRef') = ? LIMIT 1001`)
+          .all(reference.sourceDigest, reference.outcomeId, reference.projection.subjectRef) as unknown as { gap_id: string }[]
+        if (candidates.length > 1000) throw new ControlPlaneStoreError('conflict', 'work item failure historical lookup exceeds bound')
+        const matches = candidates.filter(row => { const prior = this.getOwnerTaskFailureReference(row.gap_id); return prior?.schemaVersion === 2 && stable(prior) === stable(reference) })
+        if (matches.length > 1) throw new ControlPlaneStoreError('conflict', 'work item failure source has ambiguous historical gaps')
+        if (matches[0]) {
+          const original = this.getOwnerTaskFailureReference(matches[0].gap_id)!
+          if (!isSourceOwnerContinuation(reference.owner, original.owner)) throw new ControlPlaneStoreError('conflict', 'work item failure owner generation regressed')
+          const gap = this.getGap(matches[0].gap_id)
+          this.#commitMutation()
+          return gap
+        }
+      }
       const prior = this.#database.prepare('SELECT * FROM capability_gaps WHERE idempotency_key = ?').get(idempotencyKey) as unknown as GapRow | undefined
       if (prior !== undefined) {
         if (prior.input_digest !== inputDigest) throw new ControlPlaneStoreError('conflict', 'owner task failure gap idempotency is corrupt')
@@ -2074,7 +2117,7 @@ export class ControlPlaneStore {
         if (stored === undefined || controlPlaneDigest(stored) !== referenceDigest) {
           throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap sidecar is corrupt')
         }
-        this.#database.exec('COMMIT')
+        this.#commitMutation()
         return gapFromRow(prior)
       }
       this.#database.prepare(`INSERT INTO capability_gaps (id, idempotency_key, input_digest, capability, context,
@@ -2084,9 +2127,45 @@ export class ControlPlaneStore {
       this.#database.prepare(`INSERT INTO owner_task_failure_gaps (gap_id, reference_json, reference_digest)
         VALUES (?, ?, ?)`).run(id, JSON.stringify(reference), referenceDigest)
       const gap = this.getGap(id)
-      this.#database.exec('COMMIT')
+      this.#commitMutation()
       return gap
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    } catch (error) { this.#rollbackMutation(); throw error }
+  }
+
+  #assertWorkItemSynchronous(result: unknown): void {
+    const refuse = (): never => { throw new ControlPlaneStoreError('invalid-input', 'owner task failure gap admission must be synchronous') }
+    if (result === null || (typeof result !== 'object' && typeof result !== 'function')) return
+    if (utilTypes.isProxy(result)) refuse()
+    if (utilTypes.isPromise(result)) {
+      // Best effort only for ordinary native Promises. Do not execute an own
+      // constructor or subclass species while refusing an asynchronous callback.
+      if (Object.getPrototypeOf(result) === Promise.prototype && !Object.hasOwn(result, 'constructor')) {
+        try { void Promise.prototype.then.call(result, undefined, () => undefined) } catch { /* synchronous refusal remains authoritative */ }
+      }
+      refuse()
+    }
+    let prototype: object | null = result
+    for (let depth = 0; prototype !== null && depth < 64; depth++) {
+      if (utilTypes.isProxy(prototype) || Object.getOwnPropertyDescriptor(prototype, 'then')) refuse()
+      prototype = Object.getPrototypeOf(prototype) as object | null
+    }
+    if (prototype !== null) refuse()
+  }
+
+  #beginMutation():void{
+    if(!this.#workItemWriter){this.#database.exec('BEGIN IMMEDIATE');return}
+    const name=`cp_work_item_${++this.#workItemSavepointSequence}`
+    this.#database.exec(`SAVEPOINT ${name}`);this.#workItemSavepoints.push(name)
+  }
+  #commitMutation():void{
+    if(!this.#workItemWriter){this.#database.exec('COMMIT');return}
+    const name=this.#workItemSavepoints.pop();if(!name)throw new ControlPlaneStoreError('invalid-state','work item nested writer is unbalanced')
+    this.#database.exec(`RELEASE SAVEPOINT ${name}`)
+  }
+  #rollbackMutation():void{
+    if(!this.#workItemWriter){this.#database.exec('ROLLBACK');return}
+    const name=this.#workItemSavepoints.pop()
+    if(name){this.#database.exec(`ROLLBACK TO SAVEPOINT ${name}`);this.#database.exec(`RELEASE SAVEPOINT ${name}`)}
   }
 
   getOwnerTaskFailureReference(gapId: string): OwnerTaskFailureReference | undefined {
@@ -2098,17 +2177,27 @@ export class ControlPlaneStore {
     if (typeof gapId !== 'string' || !KEY.test(gapId) || typeof callback !== 'function') {
       throw new ControlPlaneStoreError('invalid-input', 'owner task failure gap admission is invalid')
     }
-    if (callback.constructor.name === 'AsyncFunction') throw new ControlPlaneStoreError('invalid-input', 'owner task failure gap admission must be synchronous')
     if (this.#ownerTaskFailureGapAdmission !== undefined) throw new ControlPlaneStoreError('conflict', 'owner task failure gap admission is already active')
-    if (this.getOwnerTaskFailureReference(gapId) === undefined) throw new ControlPlaneStoreError('not-found', 'owner task failure gap is absent')
+    const reference=this.getOwnerTaskFailureReference(gapId)
+    if (reference === undefined) throw new ControlPlaneStoreError('not-found', 'owner task failure gap is absent')
+    const workItem=reference.schemaVersion===2
+    if (workItem ? utilTypes.isProxy(callback) || utilTypes.isAsyncFunction(callback) : callback.constructor.name === 'AsyncFunction') throw new ControlPlaneStoreError('invalid-input', 'owner task failure gap admission must be synchronous')
+    if(workItem){
+      if(this.#database.isTransaction)throw new ControlPlaneStoreError('conflict','work item writer must be entered before CP mutation')
+      this.#database.exec('BEGIN IMMEDIATE');this.#workItemWriter=true
+    }
     this.#ownerTaskFailureGapAdmission = gapId
     try {
+      if(workItem&&controlPlaneDigest(this.getOwnerTaskFailureReference(gapId))!==controlPlaneDigest(reference))throw new ControlPlaneStoreError('conflict','work item reference changed at writer boundary')
       const result = callback()
-      if (typeof (result as { then?: unknown } | null)?.then === 'function') {
+      if (workItem) this.#assertWorkItemSynchronous(result)
+      else if (typeof (result as { then?: unknown } | null)?.then === 'function') {
         throw new ControlPlaneStoreError('invalid-input', 'owner task failure gap admission must be synchronous')
       }
+      if(workItem){if(this.#workItemSavepoints.length)throw new ControlPlaneStoreError('invalid-state','work item nested writer was not retired');this.#database.exec('COMMIT')}
       return result
-    } finally { this.#ownerTaskFailureGapAdmission = undefined }
+    } catch(error){if(workItem&&this.#database.isTransaction)this.#database.exec('ROLLBACK');throw error}
+    finally { this.#ownerTaskFailureGapAdmission = undefined;if(workItem){this.#workItemWriter=false;this.#workItemSavepoints=[]} }
   }
 
   #assertOwnerTaskFailureGapAdmission(gapId: string): void {
@@ -2158,12 +2247,12 @@ export class ControlPlaneStore {
   #withActivationWrite<T>(planId: string, callback: () => T, recovery = false): T {
     return this.#withActivationSource(planId, () => {
       const own = !this.#database.isTransaction
-      if (own) this.#database.exec('BEGIN IMMEDIATE')
+      if (own) this.#beginMutation()
       try {
         const result = this.#withActivationSource(planId, callback, recovery)
-        if (own) this.#database.exec('COMMIT')
+        if (own) this.#commitMutation()
         return result
-      } catch (error) { if (own) this.#database.exec('ROLLBACK'); throw error }
+      } catch (error) { if (own) this.#rollbackMutation(); throw error }
     }, recovery)
   }
 
@@ -2226,10 +2315,10 @@ export class ControlPlaneStore {
       target: input.target, executor: input.executor,
       createdAt: now, expiresAt }
     const planDigest = controlPlaneDigest(immutable)
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const raced = this.#activationPlanReceiptByKey(idempotencyKey, 'create-activation-plan', inputDigest)
-      if (raced !== undefined) { this.#database.exec('COMMIT'); return raced }
+      if (raced !== undefined) { this.#commitMutation(); return raced }
       const currentGap = this.getGap(gap.id)
       if (currentGap.revision !== gap.revision || currentGap.inputDigest !== gap.inputDigest || currentGap.roi !== gap.roi
         || currentGap.status !== 'open' || currentGap.candidateId !== gap.candidateId) {
@@ -2252,8 +2341,8 @@ export class ControlPlaneStore {
           .run(source.plan.id, plan.id, JSON.stringify(binding), controlPlaneDigest(binding), now)
       }
       const receipt = { idempotencyKey, operation: 'create-activation-plan', inputDigest, result: plan, createdAt: now }
-      this.#insertReceipt(receipt); this.#database.exec('COMMIT'); return receipt
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#insertReceipt(receipt); this.#commitMutation(); return receipt
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   getPlan(id: string): PluginActivationPlan {
@@ -2287,7 +2376,7 @@ export class ControlPlaneStore {
     if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) throw new ControlPlaneStoreError('invalid-input', 'adoption handoff revision is invalid')
     if (this.#adoptionCoordinatorId !== undefined) throw new ControlPlaneStoreError('invalid-state', 'adoption coordinator cannot prepare a target handoff')
     return this.#withActivationSource(input.planId, () => {
-      this.#database.exec('BEGIN IMMEDIATE')
+      this.#beginMutation()
       try {
         this.assertOwnerActivationSource(input.planId)
         const plan = this.getPlan(input.planId), terms = plan.dossier.handoff
@@ -2304,15 +2393,15 @@ export class ControlPlaneStore {
           if (prior.planDigest !== plan.digest || prior.coordinatorId !== terms.coordinatorId) {
             throw new ControlPlaneStoreError('invalid-state', 'stored adoption handoff is corrupt')
           }
-          this.#database.exec('COMMIT'); return prior
+          this.#commitMutation(); return prior
         }
         const now = this.#now(), expiresAt = Math.min(now + terms.maximumWindowMs, plan.expiresAt, plan.approval.expiresAt)
         if (expiresAt <= now) throw new ControlPlaneStoreError('expired', 'adoption handoff expired before preparation')
         this.#database.prepare('INSERT INTO adoption_handoffs (plan_id,plan_digest,coordinator_id,created_at,expires_at,revoked_at) VALUES (?,?,?,?,?,NULL)')
           .run(plan.id, plan.digest, terms.coordinatorId, now, expiresAt)
         const handoff = this.getAdoptionHandoff(plan.id)!
-        this.#database.exec('COMMIT'); return handoff
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+        this.#commitMutation(); return handoff
+      } catch (error) { this.#rollbackMutation(); throw error }
     })
   }
   revokeAdoptionHandoff(planId: string): void {
@@ -2344,6 +2433,14 @@ export class ControlPlaneStore {
   }
   assertAdoptionHandoff(planId: string): void { this.#assertAdoptionHandoff(planId, this.#adoptionCoordinatorId) }
 
+  inspectSourceJobQuota(input:{authority:{id:string;digest:string;expiresAt:number;maxSubmissions:number};creation:import('./source-creation.js').SourceCreationGrant}):{sourceSubmissions:number;creates:number}{
+    const a=input.authority,c=input.creation
+    const row=this.#database.prepare('SELECT * FROM source_job_authorities WHERE authority_id=?').get(a.id) as {authority_digest:string;expires_at:number;max_submissions:number;submissions:number}|undefined
+    const grant=this.#database.prepare('SELECT * FROM source_creation_grants WHERE grant_id=?').get(c.id) as {grant_digest:string;expires_at:number;max_creates:number;creates:number}|undefined
+    if(row&&(row.authority_digest!==a.digest||row.expires_at!==a.expiresAt||row.max_submissions!==a.maxSubmissions)||grant&&(grant.grant_digest!==controlPlaneDigest(c)||grant.expires_at!==c.expiresAt||grant.max_creates!==c.maxCreates))throw new ControlPlaneStoreError('conflict','source job quota authority changed')
+    return {sourceSubmissions:Math.max(0,a.maxSubmissions-(row?.submissions??0)),creates:Math.max(0,c.maxCreates-(grant?.creates??0))}
+  }
+
   enqueueSourceJob(input: { id: string; automationId: string; idempotencyKey: string; intent: SourceJobIntent }): SourceJobRecord {
     if (!/^source-job-[a-f0-9]{64}$/u.test(input.id) || input.automationId !== input.id) {
       throw new ControlPlaneStoreError('invalid-input', 'source job identity is invalid')
@@ -2365,7 +2462,7 @@ export class ControlPlaneStore {
     if (intent.revision !== undefined && (this.getOwnerTaskFailureReference(intent.gapId) === undefined || now >= intent.revision.grant.expiresAt)) throw new ControlPlaneStoreError('expired', 'revision grant or owner task is unavailable')
     const growthRun = intent.creation?.growthRun ?? intent.revision?.growthRun
     if (growthRun !== undefined && (now >= growthRun.generationDeadlineAt || now >= growthRun.expiresAt)) throw new ControlPlaneStoreError('expired', 'source growth generation window is expired')
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const prior = this.#database.prepare('SELECT * FROM source_jobs WHERE authority_id = ? AND idempotency_key = ?')
         .get(intent.authority.id, idempotencyKey) as unknown as SourceJobRow | undefined
@@ -2374,7 +2471,7 @@ export class ControlPlaneStore {
         if (record.intentDigest !== intentDigest || record.id !== input.id || record.automationId !== input.automationId) {
           throw new ControlPlaneStoreError('conflict', 'source job idempotency key was reused with different input')
         }
-        this.#database.exec('COMMIT'); return record
+        this.#commitMutation(); return record
       }
       if (intent.baseline !== undefined) {
         const rows = this.#database.prepare(`SELECT * FROM source_jobs WHERE json_extract(intent_json, '$.repository') = ?
@@ -2444,8 +2541,8 @@ export class ControlPlaneStore {
         idempotencyKey, JSON.stringify(intent), intentDigest, now, intent.authority.expiresAt, now)
       const record = this.getSourceJob(input.id)
       if (record === undefined) throw new ControlPlaneStoreError('invalid-state', 'inserted source job could not be read')
-      this.#database.exec('COMMIT'); return record
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#commitMutation(); return record
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   getSourceJob(id: string): SourceJobRecord | undefined {
@@ -2651,7 +2748,7 @@ export class ControlPlaneStore {
       ? { ...immutable, mode, ...(creation === undefined ? {} : { creation }), ...(revision === undefined ? {} : { sourceRevision: revision }), sourceCheck: { treeDigest: input.prepared!.treeDigest, patchDigest: input.prepared!.patchDigest,
         checkedAt: input.prepared!.checkedAt }, preparedEvidence }
       : immutable)
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const currentGap = this.getGap(gap.id)
       if (currentGap.revision !== gap.revision || currentGap.inputDigest !== gap.inputDigest || currentGap.status !== 'open'
@@ -2725,8 +2822,8 @@ export class ControlPlaneStore {
         if (Number(prepared.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source job completion lost its prepared CAS')
       }
       const plan = this.getSourcePlan(id); const receipt = { idempotencyKey: key, operation: 'create-source-plan', inputDigest, result: plan, createdAt: now }
-      this.#insertReceipt(receipt); this.#database.exec('COMMIT'); return receipt
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#insertReceipt(receipt); this.#commitMutation(); return receipt
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   getSourcePlan(id: string): PluginSourcePlan {
@@ -2871,7 +2968,7 @@ export class ControlPlaneStore {
     }
     this.readPreparedSourceArtifact(plan.id)
     const serialized = JSON.stringify(certificate), certificateDigest = controlPlaneDigest(certificate)
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const previous = this.#database.prepare('SELECT status,certificate_digest FROM source_creation_verifications WHERE plan_id=?')
         .get(plan.id) as { status: string; certificate_digest: string | null } | undefined
@@ -2879,8 +2976,8 @@ export class ControlPlaneStore {
       else if (previous?.status !== 'claimed') throw new ControlPlaneStoreError('conflict', 'creation verification was not claimed or already settled')
       else this.#database.prepare(`UPDATE source_creation_verifications SET status='verified',certificate_json=?,certificate_digest=?,updated_at=?
         WHERE plan_id=? AND status='claimed'`).run(serialized, certificateDigest, this.#now(), plan.id)
-      this.#database.exec('COMMIT')
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#commitMutation()
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   getCreationVerification(planId: string): PluginCreationVerificationCertificate | undefined {
@@ -2930,7 +3027,7 @@ export class ControlPlaneStore {
     if (!pinned || this.#now() >= pinned.expiresAt) {
       throw new ControlPlaneStoreError('invalid-state', 'creation verification requires a current pre-author policy binding')
     }
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const count = this.#database.prepare('SELECT count(*) AS n FROM source_creation_verifications').get() as { n: number }
       if (count.n >= 256) throw new ControlPlaneStoreError('conflict', 'creation verification record limit reached')
@@ -2938,8 +3035,8 @@ export class ControlPlaneStore {
       this.#database.prepare(`INSERT INTO source_creation_verifications
         (plan_id,status,certificate_json,certificate_digest,reason,created_at,updated_at) VALUES (?,'claimed',NULL,NULL,NULL,?,?)`)
         .run(planId, now, now)
-      this.#database.exec('COMMIT')
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#commitMutation()
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   settleCreationVerification(planId: string, status: 'unknown' | 'rejected', reason: string): void {
@@ -2980,7 +3077,7 @@ export class ControlPlaneStore {
     const sourceJson = JSON.stringify(source)
     if (Buffer.byteLength(sourceJson) > 2_097_152) throw new ControlPlaneStoreError('invalid-input', 'revision source archive exceeds bound')
     const serialized = JSON.stringify(certificate), certificateDigest = controlPlaneDigest(certificate)
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const previous = this.#database.prepare('SELECT status,certificate_digest FROM source_revision_verifications WHERE plan_id=?')
         .get(plan.id) as { status: string; certificate_digest: string | null } | undefined
@@ -2991,8 +3088,8 @@ export class ControlPlaneStore {
       const oldSource = this.#database.prepare('SELECT source_json FROM source_revision_sources WHERE plan_id=?').get(plan.id) as { source_json: string } | undefined
       if (oldSource && oldSource.source_json !== sourceJson) throw new ControlPlaneStoreError('conflict', 'revision source archive changed')
       if (!oldSource) this.#database.prepare('INSERT INTO source_revision_sources VALUES(?,?)').run(plan.id, sourceJson)
-      this.#database.exec('COMMIT')
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#commitMutation()
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   getRevisionVerification(planId: string): PluginRevisionVerificationCertificate | undefined {
@@ -3050,7 +3147,7 @@ export class ControlPlaneStore {
     if (!pinned || this.#now() >= pinned.expiresAt) {
       throw new ControlPlaneStoreError('invalid-state', 'revision verification requires a current pre-author policy binding')
     }
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const count = this.#database.prepare('SELECT count(*) AS n FROM source_revision_verifications').get() as { n: number }
       if (count.n >= 256) throw new ControlPlaneStoreError('conflict', 'revision verification record limit reached')
@@ -3058,8 +3155,8 @@ export class ControlPlaneStore {
       this.#database.prepare(`INSERT INTO source_revision_verifications
         (plan_id,status,certificate_json,certificate_digest,reason,created_at,updated_at) VALUES (?,'claimed',NULL,NULL,NULL,?,?)`)
         .run(planId, now, now)
-      this.#database.exec('COMMIT')
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#commitMutation()
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   settleRevisionVerification(planId: string, status: 'unknown' | 'rejected', reason: string): void {
@@ -3111,7 +3208,7 @@ export class ControlPlaneStore {
     }
     this.readPreparedSourceArtifact(plan.id)
     const serialized = JSON.stringify(certificate), digest = controlPlaneDigest(certificate)
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const old = this.#database.prepare('SELECT status,certificate_digest FROM source_revision_regressions WHERE plan_id=?')
         .get(plan.id) as { status: string; certificate_digest: string | null } | undefined
@@ -3119,8 +3216,8 @@ export class ControlPlaneStore {
       else if (old?.status !== 'claimed') throw new ControlPlaneStoreError('conflict', 'regression was not claimed or is settled')
       else this.#database.prepare(`UPDATE source_revision_regressions SET status='verified',certificate_json=?,certificate_digest=?,updated_at=?
         WHERE plan_id=? AND status='claimed'`).run(serialized, digest, this.#now(), plan.id)
-      this.#database.exec('COMMIT')
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#commitMutation()
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   getRevisionRegression(planId: string): PluginRevisionRegressionCertificate | undefined {
@@ -3169,7 +3266,7 @@ export class ControlPlaneStore {
     if (!pinned || this.#now() >= pinned.expiresAt) {
       throw new ControlPlaneStoreError('invalid-state', 'revision regression requires a current pre-author policy binding')
     }
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const count = this.#database.prepare('SELECT count(*) AS n FROM source_revision_regressions').get() as { n: number }
       if (count.n >= 256) throw new ControlPlaneStoreError('conflict', 'revision regression record limit reached')
@@ -3177,8 +3274,8 @@ export class ControlPlaneStore {
       this.#database.prepare(`INSERT INTO source_revision_regressions
         (plan_id,status,certificate_json,certificate_digest,reason,created_at,updated_at) VALUES (?,'claimed',NULL,NULL,NULL,?,?)`)
         .run(planId, now, now)
-      this.#database.exec('COMMIT')
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#commitMutation()
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   settleRevisionRegression(planId: string, status: 'unknown' | 'rejected', reason: string): void {
@@ -3205,7 +3302,7 @@ export class ControlPlaneStore {
   /** Reclaim only orphaned bytes or bytes referenced solely by expired plans. */
   deleteExpiredPreparedSourceArtifacts(now: number): number {
     if (!Number.isSafeInteger(now) || now < 0) throw new ControlPlaneStoreError('invalid-input', 'artifact expiry time is invalid')
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const references = this.#database.prepare('SELECT plan_id, pack_sha256 FROM source_prepared_artifact_refs')
         .all() as Array<{ plan_id: string; pack_sha256: string }>
@@ -3227,9 +3324,9 @@ export class ControlPlaneStore {
           .run(artifact.pack_sha256)
         deleted += Number(result.changes)
       }
-      this.#database.exec('COMMIT')
+      this.#commitMutation()
       return deleted
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   /** Durable, structurally bound applied merge history; receipt signatures are checked by the baseline resolver. */
@@ -3480,7 +3577,7 @@ export class ControlPlaneStore {
       if (receipt?.result.status !== 'expired') throw new ControlPlaneStoreError('invalid-state', 'expired source receipt is missing')
       return receipt.result
     }
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const retired = this.#database.prepare(`UPDATE source_plans SET status = 'expired', revision = revision + 1, updated_at = ?
         WHERE id = ? AND revision = ? AND ((mode = 'modify' AND status IN ('pending-approval', 'approved'))
@@ -3496,9 +3593,9 @@ export class ControlPlaneStore {
       const result = this.getSourcePlan(plan.id)
       this.#insertReceipt({ idempotencyKey: `source-expired:${plan.id}`, operation: 'source-expired',
         inputDigest: expiryDigest, result, createdAt: input.now })
-      this.#database.exec('COMMIT')
+      this.#commitMutation()
       return result
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   async approve(input: { withSourceFence?: <T>(callback: () => T) => T; planId: string; expectedRevision: number; receipt: ApprovalReceipt; resolveAuthority: (receipt: ApprovalReceipt) => ApprovalAuthority; idempotencyKey: string }): Promise<OperationReceipt<PluginActivationPlan>> {
@@ -3550,7 +3647,7 @@ export class ControlPlaneStore {
       if (plan.status !== 'pending-approval') throw new ControlPlaneStoreError('invalid-state', 'plan is not pending approval')
       if (this.#now() > plan.expiresAt || this.#now() > verified.expiresAt || verified.decision !== 'approved') throw new ControlPlaneStoreError(verified.decision === 'approved' ? 'expired' : 'invalid-state', 'plan approval is not currently applicable')
       const table = kind === 'activation' ? 'activation_plans' : 'source_plans'; const now = this.#now()
-      this.#database.exec('BEGIN IMMEDIATE')
+      this.#beginMutation()
       try {
         const statement = this.#database.prepare(`UPDATE ${table} SET status = 'approved', revision = revision + 1, approval_json = ?,
           ${kind === 'activation' ? 'approval_receipt_json = ?,' : ''} updated_at = ?
@@ -3561,8 +3658,8 @@ export class ControlPlaneStore {
         if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'plan changed while approval was being applied')
         const output = kind === 'activation' ? this.getPlan(plan.id) : this.getSourcePlan(plan.id)
         const receipt = { idempotencyKey: input.idempotencyKey, operation: 'approve-plan', inputDigest, result: output, createdAt: now }
-        this.#insertReceipt(receipt); this.#database.exec('COMMIT'); return receipt
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+        this.#insertReceipt(receipt); this.#commitMutation(); return receipt
+      } catch (error) { this.#rollbackMutation(); throw error }
     })
   }
 
@@ -3571,7 +3668,7 @@ export class ControlPlaneStore {
     const now = this.#now(); positiveInteger(input.leaseMs, 'leaseMs')
     if (input.leaseMs < 5_000 || input.leaseMs > 300_000) throw new ControlPlaneStoreError('invalid-input', 'leaseMs is invalid')
     this.assertOwnerActivationSource(input.planId)
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const row = this.#database.prepare('SELECT * FROM activation_plans WHERE id = ?').get(input.planId) as unknown as ActivationRow | undefined
       if (row === undefined) throw new ControlPlaneStoreError('not-found', 'activation plan not found')
@@ -3602,9 +3699,9 @@ export class ControlPlaneStore {
         activation_fence = activation_fence + ?, activation_lease_until = ?, updated_at = ? WHERE id = ? AND revision = ?`).run(
         status, activationId, plan.status === 'commit-pending' && plan.dossier.liveQualification ? 0 : 1, now + input.leaseMs, now, plan.id, input.expectedRevision)
       if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'activation plan changed while being claimed')
-      const claimed = this.getPlan(plan.id); this.#database.exec('COMMIT'); return claimed
+      const claimed = this.getPlan(plan.id); this.#commitMutation(); return claimed
       })
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   heartbeatActivation(input: { planId: string; expectedRevision: number; fence: number; leaseMs: number }): PluginActivationPlan {
@@ -3622,7 +3719,7 @@ export class ControlPlaneStore {
     baselineFiles: readonly { path: string; sha256: string | null }[] }): PluginActivationPlan {
     return this.#withActivationSource(input.planId, () => {
       const now = this.#now()
-      this.#database.exec('BEGIN IMMEDIATE')
+      this.#beginMutation()
       try {
         this.assertOwnerActivationSource(input.planId)
         const row = this.#database.prepare('SELECT * FROM activation_plans WHERE id = ?').get(input.planId) as unknown as ActivationRow | undefined
@@ -3644,9 +3741,9 @@ export class ControlPlaneStore {
             input.existed ? 1 : 0, baseline, now, plan.id, plan.revision, input.fence)
         }
         const result = this.getPlan(plan.id)
-        this.#database.exec('COMMIT')
+        this.#commitMutation()
         return result
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      } catch (error) { this.#rollbackMutation(); throw error }
     })
   }
 
@@ -3660,7 +3757,7 @@ export class ControlPlaneStore {
     baselineFiles: readonly { path: string; sha256: string | null }[] }): PluginActivationPlan {
     return this.#withActivationSource(input.planId, () => {
       const now = this.#now()
-      this.#database.exec('BEGIN IMMEDIATE')
+      this.#beginMutation()
       try {
         this.assertOwnerActivationSource(input.planId)
         const row = this.#database.prepare('SELECT * FROM activation_plans WHERE id = ?').get(input.planId) as unknown as ActivationRow | undefined
@@ -3694,9 +3791,9 @@ export class ControlPlaneStore {
             successful_order, recorded_at, succeeded_at) VALUES (?, ?, ?, NULL, ?, NULL)`).run(plan.id, baseline, sequence.next_exposure_order, now)
         }
         const output = this.getPlan(plan.id)
-        this.#database.exec('COMMIT')
+        this.#commitMutation()
         return output
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      } catch (error) { this.#rollbackMutation(); throw error }
     })
   }
 
@@ -3713,7 +3810,7 @@ export class ControlPlaneStore {
   /** Move a signed closed deployment watch into the existing physical rollback lifecycle. */
   beginPostActivationRollback(input: { planId: string; expectedRevision: number }): PluginActivationPlan {
     const now = this.#now()
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const row = this.#database.prepare('SELECT * FROM activation_plans WHERE id = ?').get(input.planId) as unknown as ActivationRow | undefined
       if (row === undefined) throw new ControlPlaneStoreError('not-found', 'activation plan not found')
@@ -3722,7 +3819,7 @@ export class ControlPlaneStore {
       // A restart or retry must retain the original rollback identity and never
       // manufacture another rollback from a now-closed watch.
       if ((plan.status === 'rollback-pending' || plan.status === 'rolled-back') && this.#hasPostActivationRollbackProvenance(plan)) {
-        this.#database.exec('COMMIT')
+        this.#commitMutation()
         return plan
       }
       if (plan.status !== 'activated' || plan.activation === undefined) {
@@ -3758,9 +3855,9 @@ export class ControlPlaneStore {
         failureCode, now, plan.id, plan.revision, plan.activation.id, plan.activation.fence)
       if (Number(updated.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'post-activation rollback lost its activation CAS')
       const output = this.getPlan(plan.id)
-      this.#database.exec('COMMIT')
+      this.#commitMutation()
       return output
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   /** Backups safe to delete only after `currentPlanId` is terminally promoted. */
@@ -3878,7 +3975,7 @@ export class ControlPlaneStore {
   async withActivationFileSystemGuard<T>(input: { planId: string; expectedRevision: number; fence: number;
     status: PlanStatus; leaseMs: number }, action: () => Promise<T>): Promise<T> {
     positiveInteger(input.leaseMs, 'leaseMs')
-    try { this.#database.exec('BEGIN IMMEDIATE') } catch { throw new ControlPlaneStoreError('conflict', 'activation filesystem mutex is held') }
+    try { this.#beginMutation() } catch { throw new ControlPlaneStoreError('conflict', 'activation filesystem mutex is held') }
     try {
       const assertOwner = (requireLiveLease: boolean): ActivationRow => {
         const row = this.#database.prepare('SELECT * FROM activation_plans WHERE id = ?').get(input.planId) as unknown as ActivationRow | undefined
@@ -3899,20 +3996,20 @@ export class ControlPlaneStore {
       const finished = this.#now()
       this.#database.prepare('UPDATE activation_plans SET activation_lease_until = ?, updated_at = ? WHERE id = ?').run(
         finished + input.leaseMs, finished, input.planId)
-      this.#database.exec('COMMIT')
+      this.#commitMutation()
       return result
       })
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   /** Serialize lock-file lifecycle operations even after a plan became terminal. */
   async withExclusiveWrite<T>(action: () => Promise<T>): Promise<T> {
-    try { this.#database.exec('BEGIN IMMEDIATE') } catch { throw new ControlPlaneStoreError('conflict', 'control-plane mutex is held') }
+    try { this.#beginMutation() } catch { throw new ControlPlaneStoreError('conflict', 'control-plane mutex is held') }
     try {
       const result = await action()
-      this.#database.exec('COMMIT')
+      this.#commitMutation()
       return result
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   assertActivationFence(input: { planId: string; expectedRevision: number; fence: number; statuses: readonly PlanStatus[] }): PluginActivationPlan {
@@ -4051,7 +4148,7 @@ export class ControlPlaneStore {
   }
 
   claimRuntimeEpoch(operationId: string, coordinatorId: string): RuntimeEpochRecord {
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const record = this.getRuntimeEpoch(operationId)
       if (!['pending','claimed'].includes(record.status) || this.#now() >= record.request.requestedAt + record.request.receiptTtlMs) {
@@ -4062,13 +4159,13 @@ export class ControlPlaneStore {
       if (context.handoff.coordinatorId !== coordinatorId || (this.#adoptionCoordinatorId !== undefined && this.#adoptionCoordinatorId !== coordinatorId)) {
         throw new ControlPlaneStoreError('conflict', 'runtime epoch coordinator changed')
       }
-      this.#database.exec('COMMIT'); return { ...record, status: 'claimed' }
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#commitMutation(); return { ...record, status: 'claimed' }
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   applyRuntimeEpoch(receiptInput: RuntimeEpochReceipt, trust: PluginControlTrustConfig): RuntimeEpochRecord {
     const receipt = parseRuntimeEpochReceipt(receiptInput)
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const context = readOwnerRuntimeEpochContext(this.#database, receipt.operationId)
       if (this.#now() >= context.request.requestedAt + context.request.receiptTtlMs) throw new ControlPlaneStoreError('expired', 'runtime epoch request expired before application')
@@ -4080,15 +4177,15 @@ export class ControlPlaneStore {
       this.#database.prepare("UPDATE deployment_runtime_epochs SET status='applied',receipt_json=? WHERE operation_id=? AND status='claimed'")
         .run(JSON.stringify(receipt), receipt.operationId)
       const result = this.getRuntimeEpoch(receipt.operationId)
-      this.#database.exec('COMMIT'); return result
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#commitMutation(); return result
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   prepareHostAttestationOperation(input: { planId: string; expectedRevision: number; expectedFence: number;
     issuer: HostAttestationRequest['issuer']; requirements: HostAttestationRequirements; receiptTtlMs: number }): HostAttestationOperation {
     return this.#withActivationSource(input.planId, () => {
       const now = this.#now()
-      this.#database.exec('BEGIN IMMEDIATE')
+      this.#beginMutation()
       try {
         this.assertOwnerActivationSource(input.planId)
         const plan = this.getPlan(input.planId); const expected = expectedAttestation[plan.status]
@@ -4136,7 +4233,7 @@ export class ControlPlaneStore {
             throw new ControlPlaneStoreError('invalid-state', 'legacy Host attestation operation requires reconciliation before upgrade')
           }
           if (prior.bindingDigest !== bindingDigest) throw new ControlPlaneStoreError('conflict', 'durable Host operation payload changed for the same phase')
-          this.#database.exec('COMMIT')
+          this.#commitMutation()
           return prior
         }
         this.#database.prepare(`INSERT INTO host_attestation_operations (plan_id, phase, operation_id, binding_digest,
@@ -4144,9 +4241,9 @@ export class ControlPlaneStore {
           VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, NULL, NULL)`).run(plan.id, expected.phase, operationId,
           bindingDigest, controlPlaneDigest(request), JSON.stringify(request), now)
         const operation = this.getHostAttestationOperation(operationId)
-        this.#database.exec('COMMIT')
+        this.#commitMutation()
         return operation
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      } catch (error) { this.#rollbackMutation(); throw error }
     })
   }
 
@@ -4190,7 +4287,7 @@ export class ControlPlaneStore {
     }
     if (operation.phase === 'rollback' && input.receipt.outcome !== 'passed') throw new ControlPlaneStoreError('conflict', 'failed physical rollback receipt cannot settle recovery')
     const commit = (): HostAttestationReceipt => {
-      this.#database.exec('BEGIN IMMEDIATE')
+      this.#beginMutation()
       try {
         if (input.requireCurrentSource) this.assertOwnerActivationSource(plan.id)
         const current = this.getPlan(plan.id), currentOperation = this.getHostAttestationOperation(operation.operationId)
@@ -4203,7 +4300,7 @@ export class ControlPlaneStore {
           if (controlPlaneDigest(currentOperation.receipt) !== controlPlaneDigest(input.receipt)) {
             throw new ControlPlaneStoreError('conflict', 'Host attestation receipt changed after completion')
           }
-          this.#database.exec('COMMIT'); return currentOperation.receipt
+          this.#commitMutation(); return currentOperation.receipt
         }
         const dispatch = this.getHostAttestationDispatchStatus(operation.operationId)
         if (dispatch === 'completed') throw new ControlPlaneStoreError('conflict', 'Host attestation dispatch completed without its receipt')
@@ -4214,8 +4311,8 @@ export class ControlPlaneStore {
           const completed = this.#database.prepare("UPDATE host_attestation_dispatches SET status='completed',completed_at=? WHERE operation_id=? AND status='claimed'").run(now, operation.operationId)
           if (Number(completed.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'Host attestation dispatch completion lost its claim')
         }
-        this.#database.exec('COMMIT'); return input.receipt
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+        this.#commitMutation(); return input.receipt
+      } catch (error) { this.#rollbackMutation(); throw error }
     }
     return input.requireCurrentSource ? this.#withActivationSource(plan.id, commit) : commit()
   }
@@ -4262,7 +4359,7 @@ export class ControlPlaneStore {
   }
   putLiveQualification(batch: LiveQualificationBatch): void {
     assertLiveQualificationBatch(batch)
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const plan = this.getPlan(batch.planId)
       if (plan.status !== 'awaiting-live-tasks' || this.#now() >= batch.deadlineAt || this.#now() >= batch.expiresAt) throw new ControlPlaneStoreError('expired', 'live qualification admission ended')
@@ -4272,8 +4369,8 @@ export class ControlPlaneStore {
       } else this.#database.prepare(`INSERT INTO live_qualification_batches
         (id,lane,plan_id,batch_json,batch_digest,state,created_at) VALUES (?,?,?,?,?,'pending',?)`).run(batch.id,batch.lane,batch.planId,JSON.stringify(batch),controlPlaneDigest(batch),this.#now())
       readLiveQualificationContext(this.#database, batch.id)
-      this.#database.exec('COMMIT')
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#commitMutation()
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
   staleLiveQualification(id: string): void {
     this.#database.prepare("UPDATE live_qualification_batches SET state='stale' WHERE id=? AND state IN ('pending','signed')").run(id)
@@ -4283,12 +4380,12 @@ export class ControlPlaneStore {
     if (!record) throw new ControlPlaneStoreError('not-found', 'live qualification batch absent')
     const receipt = verifyLiveQualificationReceipt(input.receipt, record.batch, input.publicKeyPem, this.#now())
     return input.withSourceFence(() => {
-      this.#database.exec('BEGIN IMMEDIATE')
+      this.#beginMutation()
       try {
         const current = this.getLiveQualification(record.batch.id)!
         if (current.state === 'applied') {
           if (controlPlaneDigest(current.receipt) !== controlPlaneDigest(receipt)) throw new ControlPlaneStoreError('conflict', 'qualification receipt changed')
-          this.#database.exec('COMMIT'); return this.getPlan(record.batch.planId)
+          this.#commitMutation(); return this.getPlan(record.batch.planId)
         }
         this.assertCurrentLiveQualification(record.batch.id)
         const plan = this.getPlan(record.batch.planId)
@@ -4300,22 +4397,22 @@ export class ControlPlaneStore {
         if (Number(updated.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'qualification lost plan CAS')
         this.#database.prepare("UPDATE live_qualification_batches SET state='applied',receipt_json=?,receipt_digest=? WHERE id=? AND state IN ('pending','signed')")
           .run(JSON.stringify(receipt),controlPlaneDigest(receipt),record.batch.id)
-        this.#database.exec('COMMIT'); return this.getPlan(plan.id)
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+        this.#commitMutation(); return this.getPlan(plan.id)
+      } catch (error) { this.#rollbackMutation(); throw error }
     })
   }
 
   /** Negative-only Host seam. The signed terms permit conservative removal of unconfirmable qualification. */
   invalidateLiveQualification(input: { planId: string; batchId: string; reason: string }): PluginActivationPlan {
     const reason = bounded(input.reason, 'qualification invalidation reason', 160)
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const plan = this.getPlan(input.planId), record = this.getLiveQualification(input.batchId)
       if (!record || record.batch.planId !== plan.id || record.state !== 'applied' || record.receipt?.disposition !== 'qualified'
         || record.batch.planDigest !== plan.digest || record.batch.activationId !== plan.activation?.id || !plan.dossier.liveQualification) {
         throw new ControlPlaneStoreError('conflict', 'qualification invalidation lacks exact accepted evidence')
       }
-      if (plan.status === 'rollback-pending' || plan.status === 'rolled-back') { this.#database.exec('COMMIT'); return plan }
+      if (plan.status === 'rollback-pending' || plan.status === 'rolled-back') { this.#commitMutation(); return plan }
       if (!['commit-pending', 'activated'].includes(plan.status) || record.batch.fence !== plan.activation!.fence) throw new ControlPlaneStoreError('conflict', 'qualification invalidation no longer targets current deployment')
       this.assertNoClaimedHostAttestation(plan.id)
       if (plan.status === 'activated') {
@@ -4336,8 +4433,8 @@ export class ControlPlaneStore {
       this.#database.prepare(`UPDATE activation_plans SET status='rollback-pending',revision=revision+1,
         activation_lease_until=NULL,rollback_profile_restored=0,failure_code='live-qualification-invalidated',updated_at=?
         WHERE id=? AND revision=? AND activation_fence=?`).run(now,plan.id,plan.revision,plan.activation!.fence)
-      this.#database.exec('COMMIT'); return this.getPlan(plan.id)
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#commitMutation(); return this.getPlan(plan.id)
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   #assertLiveQualificationCommit(planId: string): void {
@@ -4353,7 +4450,7 @@ export class ControlPlaneStore {
   withForegroundDeployment<T>(task: ForegroundDeploymentRecord['task'], profilePath: string,
     callback: (plan: PluginActivationPlan, operation: HostAttestationOperation) => T): T {
     assertForegroundTask(task)
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const active = this.#database.prepare(`SELECT id FROM activation_plans WHERE target_path = ? AND status IN (
         'staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks', 'awaiting-effect-blocked-replay', 'awaiting-shadow',
@@ -4394,9 +4491,9 @@ export class ControlPlaneStore {
       this.#foregroundDeploymentAdmission = plan.id
       const result = callback(plan, hostOperationFromRow(row))
       if (result && (typeof result === 'object' || typeof result === 'function') && 'then' in result) throw new ControlPlaneStoreError('invalid-input', 'foreground capture must be synchronous')
-      this.#database.exec('COMMIT')
+      this.#commitMutation()
       return result
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    } catch (error) { this.#rollbackMutation(); throw error }
     finally { this.#foregroundDeploymentAdmission = undefined }
   }
 
@@ -4451,19 +4548,19 @@ export class ControlPlaneStore {
 
   putTaskObservation(batch: TaskObservationBatch): TaskObservationRecord {
     assertTaskObservationBatch(batch)
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       if (batch.createdAt > this.#now() || batch.expiresAt <= this.#now()) throw new ControlPlaneStoreError('expired', 'task observation is outside its validity interval')
       const prior = this.getTaskObservation(batch.id)
       if (prior) {
         if (prior.batch.digest !== batch.digest) throw new ControlPlaneStoreError('conflict', 'task observation identity reused')
-        this.#database.exec('COMMIT'); return prior
+        this.#commitMutation(); return prior
       }
       const encoded = JSON.stringify(batch)
       this.#database.prepare('INSERT INTO task_observation_batches (id,lane,plan_id,batch_json,batch_digest,state,created_at) VALUES (?,?,?,?,?,?,?)').run(batch.id,batch.lane,batch.planId,encoded,controlPlaneDigest(batch),'pending',batch.createdAt)
       readTaskObservationContext(this.#database, batch.id)
-      this.#database.exec('COMMIT'); return Object.freeze({ batch, state: 'pending' })
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#commitMutation(); return Object.freeze({ batch, state: 'pending' })
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   getTaskObservation(id: string): TaskObservationRecord | undefined { return getTaskObservationRecord(this.#database, id) }
@@ -4618,17 +4715,17 @@ export class ControlPlaneStore {
     const claim = (): { operation: HostAttestationOperation; plan: PluginActivationPlan; request: HostAttestationRequest } => {
       const candidate = this.getHostAttestationOperation(input.operationId)
       return this.#withActivationSource(candidate.planId, () => {
-        this.#database.exec('BEGIN IMMEDIATE')
+        this.#beginMutation()
         try {
         this.assertOwnerActivationSource(candidate.planId)
           const operation = this.getHostAttestationOperation(input.operationId), plan = this.getPlan(operation.planId), expected = expectedAttestation[plan.status]
           if (plan.revision !== input.expectedRevision || plan.activation?.fence !== input.expectedFence || expected?.phase !== operation.phase || operation.requestDigest !== controlPlaneDigest(operation.request)) throw new ControlPlaneStoreError('conflict', 'Host attestation operation lost its plan revision/fence/phase')
           const request = this.#assertHostAttestationChain(operation, plan)
-          if (operation.receipt) { this.#database.exec('COMMIT'); return { operation, plan, request } }
+          if (operation.receipt) { this.#commitMutation(); return { operation, plan, request } }
           if (this.getHostAttestationDispatchStatus(operation.operationId) !== undefined) throw new ControlPlaneStoreError('conflict', 'Host attestation outcome is unknown; receipt reconciliation is required')
           this.#database.prepare("INSERT INTO host_attestation_dispatches (operation_id,status,claimed_at,completed_at) VALUES (?,'claimed',?,NULL)").run(operation.operationId, this.#now())
-          this.#database.exec('COMMIT'); return { operation, plan, request }
-        } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+          this.#commitMutation(); return { operation, plan, request }
+        } catch (error) { this.#rollbackMutation(); throw error }
       })
     }
     const { operation, plan, request } = claim()
@@ -4683,7 +4780,7 @@ export class ControlPlaneStore {
         const current = this.getPlan(input.planId)
         if (current.dossier.handoff !== undefined) this.#assertAdoptionHandoff(input.planId)
       }
-      const now = this.#now(); this.#database.exec('BEGIN IMMEDIATE')
+      const now = this.#now(); this.#beginMutation()
       try {
         this.#withActivationSource(input.planId, () => {}, input.to === 'rollback-pending' || input.to === 'rolled-back')
         const result = this.#database.prepare(`UPDATE activation_plans SET status = ?, revision = revision + 1,
@@ -4701,8 +4798,8 @@ export class ControlPlaneStore {
           if (input.to === 'activated') this.#database.prepare(`UPDATE capability_gaps SET status = 'closed', revision = revision + 1, updated_at = ? WHERE id = ?`).run(now, plan.gapId)
           this.#finishActivation(plan, input.fence, now)
         }
-        this.#database.exec('COMMIT'); return plan
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+        this.#commitMutation(); return plan
+      } catch (error) { this.#rollbackMutation(); throw error }
     }, input.to === 'rollback-pending' || input.to === 'rolled-back')
   }
 
@@ -4741,7 +4838,7 @@ export class ControlPlaneStore {
     }
     const now = this.#now(); const nextStatus: PlanStatus = verified.outcome === 'passed' ? (verified.phase === 'readiness' && plan.dossier.liveQualification ? 'awaiting-live-tasks' : expected.next) : 'rollback-pending'
     return this.#withActivationSource(input.planId, () => {
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
         this.#withActivationSource(input.planId, () => {}, recovery)
       const lockedOperation = this.getHostAttestationOperation(input.receipt.operationId)
@@ -4767,8 +4864,8 @@ export class ControlPlaneStore {
       const output = this.getPlan(plan.id)
       if (nextStatus === 'rolled-back') this.#finishActivation(output, input.expectedFence, now)
       const operationReceipt = { idempotencyKey: input.idempotencyKey, operation: 'host-attestation', inputDigest, result: output, createdAt: now }
-      this.#insertReceipt(operationReceipt); this.#database.exec('COMMIT'); return operationReceipt
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#insertReceipt(operationReceipt); this.#commitMutation(); return operationReceipt
+    } catch (error) { this.#rollbackMutation(); throw error }
     }, recovery)
   }
 
@@ -4828,7 +4925,7 @@ export class ControlPlaneStore {
       }
     }
     const commit = (): OperationReceipt<ActivationWatch> => {
-      this.#database.exec('BEGIN IMMEDIATE')
+      this.#beginMutation()
       try {
         if (input.taskObservationId !== undefined) {
           const context = readTaskObservationContext(this.#database, input.taskObservationId)
@@ -4861,8 +4958,8 @@ export class ControlPlaneStore {
           if (changed.changes !== 1) throw new ControlPlaneStoreError('conflict', 'task observation apply lost its fence')
         }
         const operationReceipt = { idempotencyKey: key, operation: 'post-activation-observation' as const, inputDigest, result: output, createdAt: now }
-        this.#insertReceipt(operationReceipt); this.#database.exec('COMMIT'); return operationReceipt
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+        this.#insertReceipt(operationReceipt); this.#commitMutation(); return operationReceipt
+      } catch (error) { this.#rollbackMutation(); throw error }
     }
     if (input.taskObservationId !== undefined && input.withSourceFence === undefined) {
       throw new ControlPlaneStoreError('conflict', 'task observation apply requires the current source fence')
@@ -4888,7 +4985,7 @@ export class ControlPlaneStore {
     }
     const verified = await input.resolveAuthority(input.receipt).verify(input.receipt, plan, watch.exact)
     const now = this.#now()
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const current = this.#database.prepare('SELECT * FROM activation_watch WHERE plan_id = ?').get(plan.id) as unknown as WatchRow
       if (current.state === 'closed-retracted') throw new ControlPlaneStoreError('conflict', 'activation retracted while the decision was verified')
@@ -4904,8 +5001,8 @@ export class ControlPlaneStore {
       this.#reopenGapAfterActivation(plan, now)
       const output = this.getActivationWatch(plan.id)
       const operationReceipt = { idempotencyKey: key, operation: 'activation-retraction' as const, inputDigest, result: output, createdAt: now }
-      this.#insertReceipt(operationReceipt); this.#database.exec('COMMIT'); return operationReceipt
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#insertReceipt(operationReceipt); this.#commitMutation(); return operationReceipt
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   #insertWatchEvidence(observationId: string, planId: string, disposition: 'regressed' | 'healthy' | 'retracted',
@@ -4990,7 +5087,7 @@ export class ControlPlaneStore {
     if (!input.succeeded && (input.checkedTreeDigest !== undefined || input.checkedPatchDigest !== undefined)) {
       throw new ControlPlaneStoreError('invalid-input', 'failed source checks cannot carry successful check evidence')
     }
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const result = this.#database.prepare(`UPDATE source_plans SET status = ?, revision = revision + 1,
         checked_tree_digest = ?, checked_patch_digest = ?, checked_at = ?, updated_at = ?
@@ -5004,8 +5101,8 @@ export class ControlPlaneStore {
       }
       const digest = controlPlaneDigest({ planId: output.id, planDigest: output.digest, status, sourceCheck: output.sourceCheck })
       this.#insertReceipt({ idempotencyKey: `source-checks:${output.id}`, operation: 'source-local-checks', inputDigest: digest, result: output, createdAt: now })
-      this.#database.exec('COMMIT'); return output
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#commitMutation(); return output
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   /**
@@ -5034,7 +5131,7 @@ export class ControlPlaneStore {
     }
     const commit = (): OperationReceipt<PluginSourcePlan> => {
       this.#assertOwnerTaskFailureGapAdmission(plan.gapId)
-      this.#database.exec('BEGIN IMMEDIATE')
+      this.#beginMutation()
       try {
         const result = this.#database.prepare(`UPDATE source_plans SET status = 'ready-for-human-review', revision = revision + 1, updated_at = ?
           WHERE id = ? AND revision = ? AND status = 'approved' AND mode = 'modify'
@@ -5047,9 +5144,9 @@ export class ControlPlaneStore {
         const receipt = { idempotencyKey: `source-verify-prepared:${output.id}:${output.revision}`,
           operation: 'source-verify-prepared', inputDigest, result: output, createdAt: now }
         this.#insertReceipt(receipt)
-        this.#database.exec('COMMIT')
+        this.#commitMutation()
         return receipt
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      } catch (error) { this.#rollbackMutation(); throw error }
     }
     return input.withSourceFence ? input.withSourceFence(commit) : commit()
   }
@@ -5104,7 +5201,7 @@ export class ControlPlaneStore {
       lineageDigest = controlPlaneDigest({ history: prehistory, maintenance: premaintenance, trust: input.trust, baseline: prebaseline })
     }
     return withCurrentSource(plan.gapId, () => {
-      this.#database.exec('BEGIN IMMEDIATE')
+      this.#beginMutation()
       try {
         const linkedRows = this.#database.prepare('SELECT * FROM source_jobs WHERE plan_id = ? LIMIT 2')
           .all(plan.id) as unknown as SourceJobRow[]
@@ -5155,9 +5252,9 @@ export class ControlPlaneStore {
         const output = this.getSourcePlan(plan.id)
         const operationReceipt = { idempotencyKey: key, operation: 'start-source-release', inputDigest, result: output, createdAt: now }
         this.#insertReceipt(operationReceipt)
-        this.#database.exec('COMMIT')
+        this.#commitMutation()
         return operationReceipt
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      } catch (error) { this.#rollbackMutation(); throw error }
     })
   }
 
@@ -5178,7 +5275,7 @@ export class ControlPlaneStore {
     await reverifySourceReleaseAuthorization(plan.releaseAuthorization, plan, input.resolveAuthorizationAuthority)
     return withCurrentSource(plan.gapId, () => {
       const now = this.#now()
-      this.#database.exec('BEGIN IMMEDIATE')
+      this.#beginMutation()
       try {
         const current = this.getSourcePlan(plan.id); const currentExpected = expectedSourceRelease(current.status)
         if (current.revision !== input.expectedRevision || current.release?.fence !== input.expectedFence
@@ -5198,7 +5295,7 @@ export class ControlPlaneStore {
           if (prior.bindingDigest !== controlPlaneDigest(releaseRequestBinding(expectedRequest))) {
             throw new ControlPlaneStoreError('conflict', 'durable release operation payload changed for the same phase/fence')
           }
-          this.#database.exec('COMMIT'); return prior
+          this.#commitMutation(); return prior
         }
         const operationId = `release-operation-${randomUUID()}`
         const request = this.#sourceReleaseRequest(current, expected.phase, operationId, attempt, now, input, previous)
@@ -5208,8 +5305,8 @@ export class ControlPlaneStore {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, NULL, NULL)`).run(current.id, expected.phase,
           current.release.id, current.release.fence, attempt, operationId, bindingDigest, controlPlaneDigest(request), JSON.stringify(request), now)
         const operation = this.getSourceReleaseOperation(operationId)
-        this.#database.exec('COMMIT'); return operation
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+        this.#commitMutation(); return operation
+      } catch (error) { this.#rollbackMutation(); throw error }
     })
   }
 
@@ -5279,11 +5376,11 @@ export class ControlPlaneStore {
     withCurrentSource(plan.gapId, () => {})
     await reverifySourceReleaseAuthorization(operation.request.authorization, plan, input.resolveAuthorizationAuthority)
     const claimed = withCurrentSource(plan.gapId, () => {
-      this.#database.exec('BEGIN IMMEDIATE')
+      this.#beginMutation()
       try {
         const current = this.getSourcePlan(plan.id); const currentOperation = this.getSourceReleaseOperation(operation.operationId)
         assertCurrent(current, currentOperation)
-        if (currentOperation.receipt !== undefined) { this.#database.exec('COMMIT'); return false }
+        if (currentOperation.receipt !== undefined) { this.#commitMutation(); return false }
         const dispatch = this.#database.prepare('SELECT * FROM source_release_dispatches WHERE operation_id = ?').get(operation.operationId) as unknown as SourceReleaseDispatchRow | undefined
         if (dispatch !== undefined) {
           this.getSourceReleaseDispatchStatus(operation.operationId)
@@ -5291,14 +5388,14 @@ export class ControlPlaneStore {
         }
         this.#database.prepare(`INSERT INTO source_release_dispatches (operation_id, status, claimed_at, completed_at)
           VALUES (?, 'claimed', ?, NULL)`).run(operation.operationId, this.#now())
-        this.#database.exec('COMMIT'); return true
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+        this.#commitMutation(); return true
+      } catch (error) { this.#rollbackMutation(); throw error }
     })
     if (!claimed) return this.getSourceReleaseOperation(operation.operationId).receipt!
     const receipt = await input.execute(operation.request)
     await input.resolveAuthority(receipt).verify(receipt, plan, operation.request)
     return withCurrentSource(plan.gapId, () => {
-      this.#database.exec('BEGIN IMMEDIATE')
+      this.#beginMutation()
       try {
         const current = this.getSourcePlan(plan.id); const currentOperation = this.getSourceReleaseOperation(operation.operationId)
         assertCurrent(current, currentOperation)
@@ -5313,8 +5410,8 @@ export class ControlPlaneStore {
         const completed = this.#database.prepare(`UPDATE source_release_dispatches SET status = 'completed', completed_at = ?
           WHERE operation_id = ? AND status = 'claimed'`).run(now, operation.operationId)
         if (Number(completed.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source release completion lost its dispatch claim')
-        this.#database.exec('COMMIT'); return receipt
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+        this.#commitMutation(); return receipt
+      } catch (error) { this.#rollbackMutation(); throw error }
     })
   }
 
@@ -5348,13 +5445,13 @@ export class ControlPlaneStore {
     await reverifySourceReleaseAuthorization(operation.request.authorization, plan, input.resolveAuthorizationAuthority)
     await input.resolveAuthority(input.receipt).verify(input.receipt, plan, operation.request)
     return withCurrentSource(plan.gapId, () => {
-      this.#database.exec('BEGIN IMMEDIATE')
+      this.#beginMutation()
       try {
         const current = this.getSourcePlan(plan.id), currentOperation = this.getSourceReleaseOperation(operation.operationId)
         assertCurrent(current, currentOperation)
         if (currentOperation.receipt !== undefined) {
           if (controlPlaneDigest(currentOperation.receipt) !== controlPlaneDigest(input.receipt)) throw new ControlPlaneStoreError('conflict', 'source release receipt differs from completed operation')
-          this.#database.exec('COMMIT'); return currentOperation.receipt
+          this.#commitMutation(); return currentOperation.receipt
         }
         const dispatch = this.#database.prepare('SELECT * FROM source_release_dispatches WHERE operation_id = ?').get(operation.operationId) as unknown as SourceReleaseDispatchRow | undefined
         if (dispatch !== undefined && dispatch.status !== 'claimed') throw new ControlPlaneStoreError('conflict', 'source release receipt has no unresolved dispatch claim')
@@ -5368,8 +5465,8 @@ export class ControlPlaneStore {
             WHERE operation_id = ? AND status = 'claimed'`).run(now, operation.operationId)
           if (Number(completed.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source release receipt lost its dispatch claim')
         }
-        this.#database.exec('COMMIT'); return input.receipt
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+        this.#commitMutation(); return input.receipt
+      } catch (error) { this.#rollbackMutation(); throw error }
     })
   }
 
@@ -5426,7 +5523,7 @@ export class ControlPlaneStore {
     }
     const now = this.#now()
     return withCurrentSource(plan.gapId, () => {
-      this.#database.exec('BEGIN IMMEDIATE')
+      this.#beginMutation()
       try {
       const current = this.getSourcePlan(plan.id)
       const currentExpected = expectedSourceRelease(current.status)
@@ -5464,15 +5561,15 @@ export class ControlPlaneStore {
       }
       const operationReceipt = { idempotencyKey: key, operation: 'source-release', inputDigest, result: output, createdAt: now }
       this.#insertReceipt(operationReceipt)
-      this.#database.exec('COMMIT')
+      this.#commitMutation()
       return operationReceipt
-      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      } catch (error) { this.#rollbackMutation(); throw error }
     })
   }
 
   async prepareSourcePublishReconciliation(input: PrepareSourcePublishReconciliationInput): Promise<SourcePublishReconciliationOperation> {
     const now = this.#now()
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       const plan = this.getSourcePlan(input.planId)
       if (plan.status !== 'publish-ambiguous' || plan.revision !== input.expectedRevision || plan.release?.fence !== input.expectedFence) {
@@ -5510,15 +5607,15 @@ export class ControlPlaneStore {
       if (reusable && priorRow !== undefined) {
         const prior = sourcePublishReconciliationFromRow(priorRow)
         if (prior.bindingDigest !== bindingDigest) throw new ControlPlaneStoreError('conflict', 'durable publish reconciliation payload changed')
-        this.#database.exec('COMMIT'); return prior
+        this.#commitMutation(); return prior
       }
       this.#database.prepare(`INSERT INTO source_publish_reconciliations (plan_id, release_id, release_fence, attempt, operation_id,
         binding_digest, request_digest, request_json, status, receipt_digest, receipt_json, created_at, completed_at, applied_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, NULL, NULL)`).run(plan.id, plan.release.id, plan.release.fence,
         attempt, operationId, bindingDigest, controlPlaneDigest(parsed), JSON.stringify(parsed), now)
       const operation = this.getSourcePublishReconciliationOperation(operationId)
-      this.#database.exec('COMMIT'); return operation
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#commitMutation(); return operation
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   getSourcePublishReconciliationOperation(operationId: string): SourcePublishReconciliationOperation {
@@ -5531,12 +5628,12 @@ export class ControlPlaneStore {
     execute: (request: SourcePublishReconciliationRequest) => Promise<SourcePublishReconciliationReceipt>;
     resolveAuthority: (receipt: SourcePublishReconciliationReceipt) => SourcePublishReconciliationAuthority;
     resolveAuthorizationAuthority: (authorization: SourceReleaseAuthorization) => SourceReleaseAuthorizationAuthority }): Promise<SourcePublishReconciliationReceipt> {
-    try { this.#database.exec('BEGIN IMMEDIATE') } catch { throw new ControlPlaneStoreError('conflict', 'publish reconciliation single-flight is held') }
+    try { this.#beginMutation() } catch { throw new ControlPlaneStoreError('conflict', 'publish reconciliation single-flight is held') }
     try {
       const operation = this.getSourcePublishReconciliationOperation(input.operationId); const plan = this.getSourcePlan(operation.planId)
       if (plan.status !== 'publish-ambiguous' || plan.revision !== input.expectedRevision || plan.release?.fence !== input.expectedFence
         || operation.fence !== input.expectedFence) throw new ControlPlaneStoreError('conflict', 'publish reconciliation lost its revision/fence')
-      if (operation.receipt !== undefined) { this.#database.exec('COMMIT'); return operation.receipt }
+      if (operation.receipt !== undefined) { this.#commitMutation(); return operation.receipt }
       await reverifySourceReleaseAuthorization(operation.request.authorization, plan, input.resolveAuthorizationAuthority)
       const receipt = await input.execute(operation.request)
       await input.resolveAuthority(receipt).verify(receipt, plan, operation.request)
@@ -5544,8 +5641,8 @@ export class ControlPlaneStore {
         receipt_digest = ?, receipt_json = ?, completed_at = ? WHERE operation_id = ? AND status = 'pending' AND request_digest = ?`).run(
         controlPlaneDigest(receipt), JSON.stringify(receipt), now, operation.operationId, operation.requestDigest)
       if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'publish reconciliation completion lost single-flight')
-      this.#database.exec('COMMIT'); return receipt
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      this.#commitMutation(); return receipt
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   async reconcileSourcePublish(input: { planId: string; expectedRevision: number; expectedFence: number;
@@ -5577,7 +5674,7 @@ export class ControlPlaneStore {
     }
     const verified = await input.resolveAuthority(input.receipt).verify(input.receipt, plan, operation.request)
     const outcome = verified.evidence.outcome; const now = this.#now()
-    this.#database.exec('BEGIN IMMEDIATE')
+    this.#beginMutation()
     try {
       let nextStatus: SourcePlanStatus = 'publish-ambiguous'; let nextFence = input.expectedFence
       let failurePhase: SourceReleasePhase | null = 'publish'; let failureCode: string | null = 'publish-ambiguous'
@@ -5599,9 +5696,9 @@ export class ControlPlaneStore {
       const output = this.getSourcePlan(plan.id)
       const operationReceipt = { idempotencyKey: input.idempotencyKey, operation: 'reconcile-source-publish', inputDigest, result: output, createdAt: now }
       this.#insertReceipt(operationReceipt)
-      this.#database.exec('COMMIT')
+      this.#commitMutation()
       return operationReceipt
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    } catch (error) { this.#rollbackMutation(); throw error }
   }
 
   #assertReconciliationEnvironment(input: PrepareSourcePublishReconciliationInput): void {
