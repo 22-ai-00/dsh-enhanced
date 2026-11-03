@@ -251,6 +251,13 @@ export class WorkItemContinuation {
     if(!plan || plan.worker.owner!==DIAGNOSIS_OWNER || plan.worker.automationId!==item.workerAutomationId) return undefined
     return Object.freeze({streamId:item.id,planDigest:continuationDigest(acceptanceCanonicalJson(plan))})
   }
+  /** Pure local continuation eligibility; feedback metadata must not extend
+   * the original execution scope or its deadline. */
+  canAcceptReportReply():boolean {
+    const scope=this.config.scope,settings=this.config.ownerContinuation
+    return!this.#closed&&!this.#controller.signal.aborted&&!this.store.closed&&this.#activation?.stage==='established'
+      &&this.config.ownerReplyContinuation===true&&!!scope&&!!settings&&Date.now()<Math.min(scope.expiresAt,settings.expiresAt)
+  }
   /** Admission only: the caller must durably ACK this child before any wake. */
   prepareReply(id:string,sourceDigest:string,assertCurrent:()=>void):WorkItemContinuationAdmission {
     assertCurrent()

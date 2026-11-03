@@ -88,7 +88,7 @@ export interface StoredOutcome extends OutcomeEnvelope {
 
 export interface EvaluationTaskProjection {
   /** Stable scope-bound task identity. Automation outcomes share the exact run reference. */
-  subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
+  subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'work-item' | 'outcome'
   subjectRef: string
   /** Conflicting trusted owner judgements are quarantined instead of resolved by arrival order. */
   status: 'ready' | 'objective-conflict'
@@ -171,7 +171,7 @@ export interface TrustedTaskLearningProjectionReceipt {
   execution?: Readonly<TrustedTaskExecutionComponent>
   objective?: Readonly<TrustedTaskObjectiveComponent>
   projection: Readonly<{
-    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
+    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'work-item' | 'outcome'
     subjectRef: string
     version: number
     digest: string
@@ -191,7 +191,7 @@ export interface TrustedTaskLearningProjectionFeedPage {
 
 /** Exact current task identity frozen into an Evolution evidence window. */
 export interface EvaluationLearningEvidenceTuple {
-  subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
+  subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'work-item' | 'outcome'
   subjectRef: string
   version: number
   digest: string
@@ -204,7 +204,7 @@ export interface EvaluationLearningEvidenceTuple {
  * be invalidated under the same Evaluation writer lock.
  */
 export interface EvaluationCanonicalLearningEvidenceTuple {
-  subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
+  subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'work-item' | 'outcome'
   subjectRef: string
   version: number
   digest: string
@@ -408,6 +408,28 @@ export interface TrustedGoalOutcomeOwnerProof {
   proofDigest: string
 }
 
+/** Current WorkItems-generation proof for an exact durable terminal report. */
+export interface TrustedWorkItemOwnerFeedbackProof {
+  protocol: 'assistant-work-items/owner-report-feedback/v1'
+  itemId: string
+  reportRevision: number
+  reportDigest: string
+  sourceId: string
+  itemKind: string
+  scope: Readonly<EvaluationScope>
+  owner: Readonly<{ ownerRouteId: string; principalId: string; principalRecordId: string; principalVersion: number }>
+  originBindingId: string
+  production: Readonly<{
+    automationId: string; occurrenceId: string; runId: string; definitionHash: string; definitionVersion: number
+    executionStatus: Exclude<ExecutionStatus, 'unknown'>; completedAt: number; quiescent: true; budgetSettlementState: 'finalized'
+  }>
+  supplier: Readonly<{ provider: string; model: string; reasoningEffort?: string }>
+  planDigest: string
+  task: Readonly<{ brief: string; briefTruncated: boolean }>
+  report: Readonly<{ status: 'ready' | 'blocked' | 'failed'; text: string; truncated: boolean; recordedAt: number }>
+  proofDigest: string
+}
+
 interface TrustedDeliveryEvaluationClaimsBase {
   scope: Readonly<EvaluationScope>
   situation: string
@@ -431,12 +453,21 @@ export type TrustedDeliveryEvaluationClaims = TrustedDeliveryEvaluationClaimsBas
     /** Defaults to `runId` for legacy Automation feedback. */
     subjectRef?: string
     goalOutcomeCapability?: never
+    workItemOutcomeCapability?: never
   }>
   | Readonly<{
     subjectKind: 'goal-outcome'
     subjectRef: string
     /** Opaque process-local capability minted by the current Goals generation. */
     goalOutcomeCapability: unknown
+    workItemOutcomeCapability?: never
+  }>
+  | Readonly<{
+    subjectKind: 'work-item'
+    subjectRef: string
+    /** Opaque process-local capability minted by the current WorkItems generation. */
+    workItemOutcomeCapability: unknown
+    goalOutcomeCapability?: never
   }>
 )
 
@@ -566,7 +597,8 @@ export interface EvaluationProjectionOutboxEntry {
 export interface EvaluationProjectionState {
   evaluationId: string
   scope: Readonly<EvaluationScope>
-  status: 'pending' | 'recorded'
+  /** not-required means this subject is unsupported by the optional Evolution sink. */
+  status: 'pending' | 'recorded' | 'not-required'
   attemptCount: number
   nextAttemptAt: number
   lastFailureCode?: string

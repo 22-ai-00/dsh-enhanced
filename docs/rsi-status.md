@@ -12,17 +12,18 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 - 普通 native Goal 已打通真实 Cordis/Loader/NativeWeb/AgentLoop → 原生回合 → 自动绑定产物 → LinuxVerifierRunner → step/outcome v4 收据。正确产物得到 complete/achieved；退出码为零的错误产物得到 blocked/not-achieved。两场景的冷 SQLite、Session、产物、幂等键与实际资源清理已独立 PASS。这是固定脚本供应商集成证据，不证明真实模型或任意任务能力。
 - WorkItems 默认关闭、observe 模式；schema 9 保存准入、派发、认领、报告与有界 resume。显式 diagnosis 冻结认证来源的实际 supplier/effort、授权和独立有限预算，由原生 scheduler 派发只读诊断。waiting 仅在同一 occurrence 的真实成功与预算结算后继续；未知与后续失败保留停驻，可信 Host 可显式减权释放工作槽。原操作不会自动重放。
 - 主人前台召回已交付：显式开启的 `work_item_list` / `work_item_recall` 通过真实 Delivery 人类 turn 与独立 `inspect-work-items` 授权，按 owner lineage 在分页前过滤，支持新会话历史任务与报告分页读取；不恢复旧执行、授权或预算。
-- Delivery schema 29 在保留可信终止观察的基础上增加工作项报告回复来源；终止观察仍与业务结果分开，非成功业务结果仍为 unknown；原输入按 owner/sourceDigest 分页召回。Automations Host 接口支持一次有界原生 Agent，冻结模型、工具、期限与额度；WorkItems 消费者负责重核来源与 owner。终态报告接入真实 outbox/Evaluation，ready 不代表独立成功，入队不代表送达。没有增加另一套 Agent Loop。
+- Delivery 保留可信终止观察和工作项报告回复来源；终止观察仍与业务结果分开，非成功业务结果仍为 unknown；原输入按 owner/sourceDigest 分页召回。Automations Host 接口支持一次有界原生 Agent，冻结模型、工具、期限与额度；WorkItems 消费者负责重核来源与 owner。终态报告接入真实 outbox/Evaluation，ready 不代表独立成功，入队不代表送达。没有增加另一套 Agent Loop。
+- 显式 `ownerReplyContinuation` 已交付：主人回复真实报告后，Delivery 持久转交原生续办 worker；子项继承父项冻结 supplier，等待精确 occurrence 静止，再接上前一子项结论。先保存子项、再 ACK，ACK 前不派发；重复消息、取消、冷恢复和未知派发不回到前台重复执行。同一 owner 新会话可回复旧报告，原 v1 前台续办与分页召回仍独立。精确代码 `595d14b0` 已通过双端根检查。
 
 ## 当前交付
 
-显式开启 `ownerReplyContinuation` 后，主人对真实 provider 已接受的工作项报告进行纯文本回复，会被持久转交原生续办 worker。Delivery 用报告 sidecar、当前 owner 和独立外部 Policy 核对来源，在同一事务中保存回复并排除普通前台执行。回复等待父任务精确 production occurrence 静止；连续回复原报告时，后一子项接上前一子项的结论。同一 owner 新建会话后可以回复历史报告；不推断跨渠道身份。
+后台报告的主人结果反馈正在集成。默认关闭的 `ownerReportFeedback` 与回复续办独立：对准确报告回复完整的结果短句，或显式 `/feedback` 查询、更正、撤回时，Delivery 核对当前 owner、真实 provider 接受记录及独立 `feedback-work-items` Policy，持久保存反馈，不启动模型或续办任务。包含额外执行指令的自然回复仍走原有路径。
 
-WorkItems 保留 schema 9 和原 v1 前台续办计划；新的 v2 回复计划继承执行父项已冻结的 provider/model/effort，使用显式续办工具与有限预算。先持久创建子项，再由 Delivery ACK 并推进回复序列，ACK 前不能派发。重复消息、冷恢复、取消及未知派发不会回到前台重复执行；取消不是执行已静止或外部效果已撤销的证明。每次工具调用重核来源，最终调度边界同时检查当前授权、生命周期和持久状态。
+Delivery schema 30 保存独占反馈来源、原报告目标、稳定操作 ID 与冻结 CAS；Evaluation schema 13 按原 `itemId` 维护一份当前 owner 结果。WorkItems 仍为 schema 9，使用进程内 capability 重核准确报告、冻结 supplier、实际静止及预算结算；报告元数据可在执行结束前入队，结果反馈必须等待静止。历史读取不续期执行授权，同一 owner 新会话可评价旧报告。丢 ACK 后对账同一操作，更正与撤回保留历史；取消不是外部效果已撤销的证明。
 
-本次工程验证使用真实 Delivery / Automations / AgentLoop 与本地脚本供应商。新的原生集成 6 例在两端完整检查中实际通过，覆盖顺序上下文、默认模型切换、Delivery 与 WorkItems 冷重挂、ACK 前后恢复、pending/routed 取消和 ACK 前取消后的容量释放。实现与 schema 消费者已独立复核，精确提交 `595d14b0` 的 Mac、Linux 根检查均 EXIT 0、独立 PASS，完整计数见下表。
+源事务最后重核当前授权再写结果；同毫秒的报告按报告版本取值，矛盾证据不能进入学习。新主体的 Evolution 投影显式为 `not-required`，Recovery 按 no-op 处理，避免无效重试。独立 Host reader 返回有界展示和完整来源摘要；主人评价是 testimony，不是独立 verifier 成功。已有 worker settlement 仍为 unknown，历史数据不重解释。
 
-这一入口默认关闭，只支持可证明冻结 supplier 的 diagnosis / continuation 报告；不支持的普通消息仍走前台。它不实现运行中指令插入、任意跨信道路由或完整 Thread 订阅，不证明真实模型、外部 Bot、完整 Host 进程重启或长期自主成长。原 v1 `work_item_continue` 仍可从真实人类 turn 创建手动分支，已有前台召回与分页上下文能力保持独立。
+本轮专项检查：WorkItems 385 passed / 27 files；Delivery 1118 passed / 6 skipped；Evaluation 355 passed / 36 skipped；最终组件组合 13 passed / 2 files，均 EXIT 0。源码、真实旧库迁移、最终 writer 边界与组合证据已独立复核；实现进入 `dev` 集成，当前代码的双端根检查仍待完成。原始命令、输出与摘要见 `docs/evidence/work-item-owner-feedback/`。这次交付只补齐后台任务结果及可信来源；Growth/Memory 消费这类结果、候选产生、独立验证与有限采用仍待后续接线，不声称自主成长闭环完成。
 
 ## 后续工程与延后验收
 
@@ -32,7 +33,9 @@ WorkItems 保留 schema 9 和原 v1 前台续办计划；新的 v2 回复计划�
 
 远端同级 20 个及嵌套 8 个目标 worktree 已清理并独立 PASS，独有成果保全，归档候选未全部整合。未发布、未合入 main、未触碰活服务；全局 CLI 实际在 `~/.npm-global`。
 
-## 最新完整检查
+## 最近完成的完整检查
+
+以下是上一轮 `595d14b0` 的结果，不覆盖本轮报告反馈改动；本轮完整检查完成后替换。
 
 命令 `CI=1 VITEST_MAX_WORKERS=2 pnpm_config_verify_deps_before_run=error pnpm check`，pnpm 11.7.0。两端验证精确实现提交 `595d14b0502bbab182ff38ed0031e014cd408291`，tree `b213995a0a991c1299c9b9749c67bcf002baf9dc`。根脚本原有的 15 秒测试超时保持不变。
 

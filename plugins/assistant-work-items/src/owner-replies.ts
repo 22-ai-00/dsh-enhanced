@@ -1,10 +1,11 @@
 import { symbols } from '@deepseek-ai/cordis'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
 import type { NormalizedConfig } from './config.js'
 import { truncateUtf8 } from './config.js'
 import type { WorkItemContinuation } from './continuation.js'
 import { continuationSourceKey, type WorkItemContinuationAdmission } from './continuation-record.js'
 import { immutableReply, isReplyContinuationPlan, parseStoredContinuationPlan } from './reply-contract.js'
+import { workItemReportDigest } from './feedback-targets.js'
 import type { PeerDeliveryService, WorkItemReplyConsumerRegistration, WorkItemReplySource, WorkItemReportTarget } from './peers.js'
 import type { WorkItemStore } from './store.js'
 import { WorkItemError, type WorkItemAdmitInput, type WorkItemAdmitResult, type WorkItemNotification, type WorkItemRecord, type WorkItemReportRecord } from './types.js'
@@ -20,6 +21,8 @@ export interface WorkItemOwnerReplyDependencies {
   readonly admit:(input:WorkItemAdmitInput,continuation:WorkItemContinuationAdmission)=>WorkItemAdmitResult
   readonly notification:(item:WorkItemRecord,report:WorkItemReportRecord)=>WorkItemNotification
   readonly retire:(items:readonly string[])=>void
+  /** Owned, local-only historical metadata reader; never calls Delivery. */
+  readonly inspectFeedbackReport?:WorkItemReplyConsumerRegistration['inspectReport']
 }
 /** The transport owns the queue and stream head; this adapter only drains it
  * into the existing admission/Host pipeline. No alternate session or timer. */
@@ -34,6 +37,8 @@ export class WorkItemOwnerReplies {
   constructor(private readonly dependencies:WorkItemOwnerReplyDependencies) {
     const config=dependencies.config
     const registration:WorkItemReplyConsumerRegistration={protocol:1,sourceId:config.intakeSourceId,continuationAutomationId:config.ownerContinuation?.automationId??'',
+      ...(config.ownerReportFeedback?{continuationEnabled:config.ownerReplyContinuation===true,feedbackEnabled:true,
+        canContinueReport:input=>this.canContinueReport(input)}:{}),
       inspectReport:input=>this.inspectReport(input),inspectChild:input=>this.inspectChild(input),
       onPending:()=>this.drain(),onCancelled:ids=>{if(this.#active && !this.#closed) this.dependencies.retire(ids)}}
     this.#registration=Object.freeze(registration)
@@ -51,7 +56,7 @@ export class WorkItemOwnerReplies {
   }
   start():void {
     const {config}=this.dependencies,peer=this.dependencies.delivery()
-    if(this.#closed || this.#active || !config.ownerReplyContinuation || !config.ownerContinuation || !peer
+    if(this.#closed || this.#active || !(config.ownerReplyContinuation||config.ownerReportFeedback) || !config.ownerContinuation || !peer
       || peer.workItemReplyProtocolVersion?.()!==1 || !peer.registerWorkItemReplyConsumer) fail('explicit reply capability unavailable')
     this.#peerIdentity=identity(peer);this.#active=true
     try {
@@ -68,6 +73,10 @@ export class WorkItemOwnerReplies {
   private inspectReport(input:Parameters<WorkItemReplyConsumerRegistration['inspectReport']>[0]):WorkItemReportTarget|undefined {
     try {
       const {config,store}=this.dependencies,runtime=this.dependencies.runtime()
+      if(config.ownerReportFeedback) {
+        if(!this.owns(this.#registration)||store.closed)return undefined
+        return this.dependencies.inspectFeedbackReport?.(input)
+      }
       if(!this.owns(this.#registration) || store.closed || !runtime || !config.scope
         || Date.now()>=Math.min(config.scope.expiresAt,config.ownerContinuation!.expiresAt)) return undefined
       const item=store.findItemById(input.itemId),report=store.reportByRevision(input.itemId,input.reportRevision)?.report
@@ -78,12 +87,16 @@ export class WorkItemOwnerReplies {
       const stream=runtime.inspectReportStream(item)
       if(!stream) return undefined
       // Exclude mutable delivery bookkeeping from the report's stable identity.
-      const reportDigest=acceptanceDigest({itemId:item.id,revision:report.revision,status:report.status,summary:fullSummary,
-        truncated:report.truncated,artifactPaths:report.artifactPaths,deliveryKey:report.deliveryKey,recordedAt:report.recordedAt,planDigest:stream.planDigest})
+      const reportDigest=workItemReportDigest(item,report,fullSummary,stream.planDigest)
       return Object.freeze({protocol:'assistant-delivery/work-item-report/v1',itemId:item.id,reportRevision:report.revision,
         streamId:stream.streamId,reportDigest,sourceId:config.intakeSourceId,scope:{workspace:item.scope.workspace,preset:item.scope.preset},
         owner:{principalRecordId:item.owner.principalRecordId,principalVersion:item.owner.principalVersion}})
     } catch {return undefined}
+  }
+  private canContinueReport(input:Parameters<WorkItemReplyConsumerRegistration['inspectReport']>[0]):boolean {
+    const runtime=this.dependencies.runtime()
+    if(!this.owns(this.#registration)||!this.dependencies.config.ownerReplyContinuation||!runtime?.canAcceptReportReply())return false
+    return this.inspectReport(input)!==undefined&&this.owns(this.#registration)&&runtime.canAcceptReportReply()
   }
   canEnqueue(item:WorkItemRecord,report:WorkItemReportRecord,notification:WorkItemNotification):boolean {
     try {
@@ -95,7 +108,7 @@ export class WorkItemOwnerReplies {
   private inspectChild(input:Parameters<WorkItemReplyConsumerRegistration['inspectChild']>[0]):boolean {
     try {
       const {config,store}=this.dependencies
-      if(!this.owns(this.#registration) || store.closed) return false
+      if(!this.owns(this.#registration) || store.closed || !config.ownerReplyContinuation) return false
       const record=store.getContinuation(input.childItemId),item=store.findItemById(input.childItemId)
       if(!record || !item || item.workerAutomationId!==config.ownerContinuation?.automationId
         || record.planDigest!==input.childPlanDigest || record.parentItemId!==input.parentItemId || record.sourceDigest!==input.sourceDigest) return false
@@ -106,7 +119,7 @@ export class WorkItemOwnerReplies {
     } catch {return false}
   }
   drain():void {
-    if(!this.#active || this.#closed || this.#draining) return
+    if(!this.#active || this.#closed || this.#draining || !this.dependencies.config.ownerReplyContinuation) return
     this.#draining=true
     try {
       const {config,store}=this.dependencies,scope=config.scope,runtime=this.dependencies.runtime(),peer=this.peer()

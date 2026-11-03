@@ -63,11 +63,18 @@ import type {
   StoredRule,
   SupervisedGrowthAnalystProposalInput,
   SupervisedGrowthAnalystReview,
+  TaskLearningSubjectKind,
 } from './types.js'
 import {
   legacyEvolutionScope,
   SUPERVISED_GROWTH_ANALYST_CONTRACT_VERSION,
 } from './types.js'
+
+// Refined only after the runtime receipt allowlist below; new Evaluation
+// subjects do not automatically gain behavioural learning authority.
+type SupportedTaskLearningReceipt = TrustedTaskLearningProjectionReceipt & {
+  projection: TrustedTaskLearningProjectionReceipt['projection'] & { subjectKind: TaskLearningSubjectKind }
+}
 
 export interface Config {
   databasePath: string
@@ -1667,7 +1674,7 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
   private trustedTaskLearningReceipt(
     scope: EvolutionHostScope,
     evaluationId: string,
-  ): TrustedTaskLearningProjectionReceipt {
+  ): SupportedTaskLearningReceipt {
     const evaluation = this.context.get('assistantEvaluation') as TrustedEvaluationLedger | undefined
     if (evaluation === undefined || typeof evaluation.getTrustedTaskLearningProjection !== 'function') {
       throw new AssistantEvolutionError('forbidden', 'authoritative assistantEvaluation lookup is unavailable')
@@ -1724,12 +1731,12 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
         'an upsert task revision requires one exact binary objective component',
       )
     }
-    return receipt
+    return receipt as SupportedTaskLearningReceipt
   }
 
   private applyTrustedTaskLearningReceipt(
     scope: EvolutionHostScope,
-    receipt: TrustedTaskLearningProjectionReceipt,
+    receipt: SupportedTaskLearningReceipt,
   ) {
     const scopeKey = canonicalEvolutionScope(scope.workspace, scope.preset)
     if (receipt.projection.disposition === 'retract') {

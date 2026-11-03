@@ -231,7 +231,11 @@ export class WorkItemDispatch {
     if (!this.shouldNotify(report)) return false
     const delivery = typeof this.#deps.delivery === 'function' ? this.#deps.delivery() : this.#deps.delivery
     if (delivery === undefined) fail('missing-dependency', 'assistantDelivery is required to notify the owner')
-    const notification = this.notification(item, report)
+    // Feedback evidence binds the complete immutable bytes. Node 24's ordinary
+    // TEXT projection may hide a NUL suffix; use the bounded byte reader when
+    // this explicit metadata capability is enabled, without changing legacy sends.
+    const completeReport = config.ownerReportFeedback ? this.#deps.store.feedbackReportByRevision(item.id, report.revision) ?? report : report
+    const notification = this.notification(item, completeReport)
     this.#deps.ledger.recordDelivery(item.id, report.revision, 'pending', null)
     try {
       const input = {
@@ -242,9 +246,9 @@ export class WorkItemDispatch {
         text: notification.text,
         format: 'markdown' as const,
       }
-      const typed = config.ownerReplyContinuation && delivery.workItemReplyProtocolVersion?.() === 1
+      const typed = (config.ownerReplyContinuation || config.ownerReportFeedback) && delivery.workItemReplyProtocolVersion?.() === 1
         && typeof delivery.enqueueWorkItemReport === 'function'
-        && this.#deps.replyReportEligible?.(item, report, notification) === true
+        && this.#deps.replyReportEligible?.(item, completeReport, notification) === true
       // Eligibility is decided locally before the enqueue. Never fall back
       // after an ambiguous typed enqueue, which could duplicate a real send.
       const outbox = await (typed

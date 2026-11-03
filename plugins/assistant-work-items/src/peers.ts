@@ -37,7 +37,10 @@ export interface WorkItemReplySource {
 }
 export interface WorkItemReplyConsumerRegistration {
   readonly protocol:1;readonly sourceId:string;readonly continuationAutomationId:string
+  readonly continuationEnabled?:boolean
+  readonly feedbackEnabled?:boolean
   readonly inspectReport:(input:{itemId:string;reportRevision:number;bindingId:string;idempotencyKey:string;text:string;format:'plain'|'markdown'})=>WorkItemReportTarget|undefined
+  readonly canContinueReport?:(input:{itemId:string;reportRevision:number;bindingId:string;idempotencyKey:string;text:string;format:'plain'|'markdown'})=>boolean
   readonly inspectChild:(input:{replyId:string;sourceDigest:string;parentItemId:string;childItemId:string;childPlanDigest:string})=>boolean
   readonly onPending:()=>void
   readonly onCancelled:(childItemIds:readonly string[])=>void

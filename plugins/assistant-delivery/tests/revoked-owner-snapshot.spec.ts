@@ -92,7 +92,7 @@ describe('side-effect-free revoked owner route snapshot', () => {
     const paths = storagePaths(fixture.path)
     const before = await Promise.all(paths.map(fingerprint))
     const snapshot = inspectRevokedOwnerRouteLocally(fixture.query)
-    expect(snapshot).toMatchObject({ protocol: revokedOwnerRouteSnapshotProtocol, schemaVersion: 29,
+    expect(snapshot).toMatchObject({ protocol: revokedOwnerRouteSnapshotProtocol, schemaVersion: 30,
       authority: canonicalOwnerRouteAuthority(authority), frozenPrincipalVersion: 1,
       state: { status: 'revoked', authorityId: authority.id, authorityHash: ownerRouteAuthorityHash(authority),
         principalId: externalPrincipalId(principal), principalRecordId: fixture.query.principalRecordId, principalVersion: 2 },
@@ -204,7 +204,7 @@ describe('side-effect-free revoked owner route snapshot', () => {
     expectCode(() => inspectRevokedOwnerRouteLocally(fixture.query), 'database-corrupt')
   })
 
-  test.each([23, 24, 25, 26, 27, 28, 29])('reads reviewed owner table schema %s without changing bytes', async version => {
+  test.each([23, 24, 25, 26, 27, 28, 29, 30])('reads reviewed owner table schema %s without changing bytes', async version => {
     const fixture = await seeded()
     mutate(fixture.path, `PRAGMA user_version=${version}`)
     const before = await Promise.all(storagePaths(fixture.path).map(fingerprint))
@@ -212,7 +212,7 @@ describe('side-effect-free revoked owner route snapshot', () => {
     expect(await Promise.all(storagePaths(fixture.path).map(fingerprint))).toEqual(before)
   })
 
-  test.each([22, 30])('rejects unreviewed schema %s', async version => {
+  test.each([22, 31])('rejects unreviewed schema %s', async version => {
     const fixture = await seeded()
     mutate(fixture.path, `PRAGMA user_version=${version}`)
     expectCode(() => inspectRevokedOwnerRouteLocally(fixture.query), 'schema-unsupported')

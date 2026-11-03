@@ -80,7 +80,11 @@ Growth 的可选 `usageLearning` 使用 Evaluation canonical feed 与 Delivery o
 
 WorkItems 的可选 owner recall 将前台任务查询与后台执行权限分开：Delivery 证明当前活人 turn 和精确原生工具调用，Policy 独立授权读取，账本先按 owner lineage、route、workspace/preset 和 worker automation 过滤再分页。同一主人进入较新 Session 代次后可沿任务 ID 和报告 revision 召回历史；该读取不恢复 occurrence、续期或修改执行预算，也不以 worker 自报替代独立结果。现有 worker/diagnosis 合同和 `follows` 关闭语义保持独立。
 
-WorkItems 的显式 owner continuation 用新子项连接已静止的父任务，复用 Automations Host executor 和原生 AgentLoop。前台 `work_item_continue` 的 v1 计划冻结当前真实输入及实际 supplier；可选 `ownerReplyContinuation` 的 v2 计划则由 Delivery 真实报告回复建立来源，继承执行父项的冻结 supplier，不虚构前台调用。Delivery schema 29 在同一事务中保存独占转交与回复原文，并维护回复序列：下一条回复等待上一子项静止，再读取其报告。WorkItems 先持久创建子项，Delivery 验证后 ACK 并推进序列，运行时只有来源仍有效且 ACK 精确绑定该子项时才能派发和调用工具。取消、重启和未知派发不允许消息再次进入普通前台；该机制不等同于任意跨信道身份合并或完整 Thread 订阅。
+WorkItems 的显式 owner continuation 用新子项连接已静止的父任务，复用 Automations Host executor 和原生 AgentLoop。前台 `work_item_continue` 的 v1 计划冻结当前真实输入及实际 supplier；可选 `ownerReplyContinuation` 的 v2 计划则由 Delivery 真实报告回复建立来源，继承执行父项的冻结 supplier，不虚构前台调用。Delivery 在 schema 29 引入同一事务保存独占转交与回复原文的机制，并维护回复序列：下一条回复等待上一子项静止，再读取其报告。WorkItems 先持久创建子项，Delivery 验证后 ACK 并推进序列，运行时只有来源仍有效且 ACK 精确绑定该子项时才能派发和调用工具。取消、重启和未知派发不允许消息再次进入普通前台；该机制不等同于任意跨信道身份合并或完整 Thread 订阅。
+
+可选 `ownerReportFeedback` 将报告结果评价与任务续办分开。Delivery schema 30 在真实 typed 报告回复上先识别明确结果反馈，独立核对当前 owner 与反馈 Policy，再持久保存独占入站、原报告目标和结果版本前置条件。Evaluation schema 13 以原 `itemId` 维护 `work-item` 当前结果；report revision、production occurrence 和模型快照属于证据，不增加同一任务的票数。WorkItems 的进程内 capability 只证明准确历史报告和实际执行终止，目标成功或失败由主人单独声明；原 worker settlement 仍只能记录 unknown。更正、撤回、冷恢复均沿 Evaluation 的现有版本与 writer fence 处理。历史报告读取不续期执行授权，已接受的反馈也不会转回前台或生成续办任务。
+
+后台结果的 Host 来源读取保持独立协议：完整证据在服务端复核，展示文本有界并过滤常见凭据形状。该入口不伪装普通前台任务，也不因形成可信 owner 结果就自动取得成长或采用资格；现有 Growth/Memory 的前台来源限制须由后续明确接线扩展。
 
 ## 离线隔离执行
 

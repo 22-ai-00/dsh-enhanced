@@ -335,6 +335,16 @@ Schema 23→24 adds a natural-feedback journal without synthesizing votes from o
 
 The Web Owner read-only doctor is reviewed against schema 24. The Lark owner snapshot reader accepts the identical owner tables at schemas 23 and 24 and reports the actual version without migrating the file; this lets staged upgrade preparation inspect the old database before the new Host starts. Service lifecycle transactions accept both versions of that unchanged snapshot protocol, retaining prior-version evidence during upgrade/recovery; this does not allow arbitrary newer schemas. Natural replies do not become replay-safe slash commands. Evaluation absence must not block ordinary conversation, and feedback recovery must never redispatch the model. Unknown foreground execution remains ineligible. Automation, whole-goal and native Web feedback retain their existing entry points.
 
+### Work-item owner report feedback (Delivery schema 30 / Evaluation schema 13)
+
+The optional `ownerReportFeedback` surface requires matching WorkItems, Delivery and Evaluation Host APIs. It uses typed report sidecars and a current process-local WorkItems capability to bind an owner judgement to the original item and exact terminal report. Its external `feedback-work-items` Policy permission is separate from continuation execution. Report feedback may read expired execution grants without renewing them; continuation admission still checks its original deadlines. The existing DSH/Cordis/Loader baseline and v1/v2 execution contracts remain unchanged.
+
+Delivery 29→30 adds a durable feedback queue without reinterpreting old Inbox rows or reply streams. Evaluation 12→13 adds the `work-item` canonical subject while retaining existing projection versions, feed positions and owner revisions. Historical generic work-item settlements remain audit outcomes with unknown objective; migration never converts worker claims into owner votes. Runtime readers must recognize the new exact schemas; older binaries must reject them rather than modify their files. The unchanged owner snapshot protocol remains readable at prior supported Delivery versions.
+
+Feedback input is exclusive only after current owner, exact accepted report and Policy checks. Natural interception is limited to whole result statements; replies containing additional instructions retain their ordinary continuation path. Recovery resumes the frozen ledger operation, not a model invocation. The Host learning-source reader returns a distinct work-item protocol and separates private full-source identity from bounded presentation. Existing foreground learning consumers do not automatically accept this new subject, and owner testimony does not constitute independent verifier success or permission to adopt a capability.
+
+Work-item canonical results retain their feed records, but their Evolution projection outbox state is explicitly `not-required`. They do not enter Evolution's existing learning contract or cause repeated recovery attempts. Exact Recovery replay treats this state as a no-op, never as `quality-projected`; supported foreground and automation projections keep their existing behavior.
+
 ### Live Loader runtime observer
 
 Control Plane's optional `runtimeObserver` consumes the installed Cordis 4.0.2

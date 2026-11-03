@@ -10,7 +10,7 @@ import {
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const evaluationSchemaVersion = 12
+export const evaluationSchemaVersion = 13
 
 export type EvaluationDatabaseErrorCode = 'invalid-path' | 'unsafe-file' | 'schema-too-new'
 
@@ -73,7 +73,7 @@ const selfAssessmentSchema = `
 const projectionOutboxSchema = `
   CREATE TABLE evaluation_projection_outbox (
     evaluation_id TEXT PRIMARY KEY,
-    status TEXT NOT NULL CHECK (status IN ('pending', 'recorded')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'recorded', 'not-required')),
     attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
     next_attempt_at INTEGER NOT NULL,
     last_failure_at INTEGER,
@@ -210,7 +210,7 @@ const taskProjectionSchema = `
   CREATE TABLE evaluation_task_projections (
     subject_key TEXT PRIMARY KEY,
     scope_key TEXT NOT NULL,
-    subject_kind TEXT NOT NULL CHECK (subject_kind IN ('automation-run', 'foreground-turn', 'goal-step', 'goal-outcome', 'outcome')),
+    subject_kind TEXT NOT NULL CHECK (subject_kind IN ('automation-run', 'foreground-turn', 'goal-step', 'goal-outcome', 'work-item', 'outcome')),
     subject_ref TEXT NOT NULL,
     primary_outcome_id TEXT,
     execution_outcome_id TEXT,
@@ -627,6 +627,30 @@ function migrate(database: DatabaseSync): void {
         );
         UPDATE evaluation_schema_meta SET value = '12' WHERE key = 'schema-version';
         PRAGMA user_version = 12;
+      `)
+    }
+    if (schemaVersion(database) === 12) {
+      // Preserve feed heads and every semantic revision verbatim while widening
+      // the projection identity. Historical settlement evidence is not re-keyed.
+      database.exec(`
+        CREATE TEMP TABLE evaluation_v12_feed AS SELECT * FROM evaluation_task_projection_feed_heads;
+        DROP TABLE evaluation_task_projection_feed_heads;
+        DROP VIEW evaluation_task_projection_view;
+        ALTER TABLE evaluation_task_projections RENAME TO evaluation_task_projections_v12;
+        DROP INDEX evaluation_task_projections_scope_time;
+        ${taskProjectionSchema.replace('CREATE INDEX evaluation_outcomes_task_subject\n    ON evaluation_outcomes(task_subject_key, recorded_at, id);', '')}
+        INSERT INTO evaluation_task_projections SELECT * FROM evaluation_task_projections_v12;
+        DROP TABLE evaluation_task_projections_v12;
+        ${taskProjectionFeedSchema}
+        INSERT INTO evaluation_task_projection_feed_heads SELECT * FROM evaluation_v12_feed;
+        DROP TABLE evaluation_v12_feed;
+        CREATE TEMP TABLE evaluation_v12_outbox AS SELECT * FROM evaluation_projection_outbox;
+        DROP TABLE evaluation_projection_outbox;
+        ${projectionOutboxSchema}
+        INSERT INTO evaluation_projection_outbox SELECT * FROM evaluation_v12_outbox;
+        DROP TABLE evaluation_v12_outbox;
+        UPDATE evaluation_schema_meta SET value = '13' WHERE key = 'schema-version';
+        PRAGMA user_version = 13;
       `)
     }
     if (schemaVersion(database) !== evaluationSchemaVersion) {

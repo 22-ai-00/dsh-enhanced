@@ -1,10 +1,11 @@
+import { workItemFeedbackSchema } from './work-item-feedback-schema.js'
 import { workItemRepliesSchema } from './work-item-replies-schema.js'
 import { foregroundTerminationKinds } from './foreground-termination.js'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 29
+export const deliverySchemaVersion = 30
 
 /** Provider progress is a presentation journal, keyed to the authoritative Inbox. */
 const progressSchema = `
@@ -1375,6 +1376,7 @@ function migrateObserved(database: DatabaseSync): void {
   if (version === 28) {
     database.exec(`${workItemRepliesSchema} PRAGMA user_version = 29;`); version = 29
   }
+  if (version === 29) { database.exec(`${workItemFeedbackSchema} PRAGMA user_version = 30;`); version = 30 }
   if (version === deliverySchemaVersion) return
   database.exec(`
     ${deliveryInstanceSchema}
@@ -1599,7 +1601,8 @@ function migrateObserved(database: DatabaseSync): void {
     ${restartOutboxFenceSchema}
     ${progressSchema}
     ${workItemRepliesSchema}
-    PRAGMA user_version = 29;
+    ${workItemFeedbackSchema}
+    PRAGMA user_version = 30;
   `)
 }
 
@@ -1607,9 +1610,9 @@ function migrateObserved(database: DatabaseSync): void {
 function assertWorkItemRepliesSchema(database: DatabaseSync): void {
   const expected = new DatabaseSync(':memory:')
   try {
-    expected.exec(workItemRepliesSchema)
+    expected.exec(workItemRepliesSchema + workItemFeedbackSchema)
     const query = `SELECT type,name,tbl_name,sql FROM sqlite_schema
-      WHERE tbl_name IN ('delivery_work_item_reports','delivery_work_item_reply_streams','delivery_work_item_replies') ORDER BY type,name`
+      WHERE tbl_name IN ('delivery_work_item_reports','delivery_work_item_reply_streams','delivery_work_item_replies','delivery_work_item_feedback') ORDER BY type,name`
     if (JSON.stringify(database.prepare(query).all()) !== JSON.stringify(expected.prepare(query).all())) {
       throw new Error('invalid work item reply authority schema')
     }

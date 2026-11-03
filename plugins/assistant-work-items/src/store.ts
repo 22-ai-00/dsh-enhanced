@@ -2333,6 +2333,21 @@ export class WorkItemStore {
     })
   }
 
+  /** Feedback evidence keeps immutable report TEXT bytes intact on Node 24.
+   * This reads exactly the requested revision and performs no state changes. */
+  feedbackReportByRevision(itemId: string, revision: number): WorkItemReportRecord | undefined {
+    const row = this.#statement(`SELECT *, CAST(summary AS BLOB) AS summary_bytes,
+      CAST(idempotency_key AS BLOB) AS key_bytes, CAST(delivery_key AS BLOB) AS delivery_key_bytes,
+      CAST(artifact_paths AS BLOB) AS artifact_bytes FROM work_item_report WHERE item_id=? AND revision=?
+      AND length(CAST(summary AS BLOB))<=65536 AND length(CAST(idempotency_key AS BLOB))<=4096
+      AND length(CAST(delivery_key AS BLOB))<=4096 AND length(CAST(artifact_paths AS BLOB))<=131072`).get(itemId, revision) as Row | undefined
+    if (!row) return undefined
+    const report = reportFromRow(row), artifacts: unknown = JSON.parse(continuationUtf8(row['artifact_bytes']))
+    if (!Array.isArray(artifacts) || artifacts.length>20 || artifacts.some(path => typeof path!=='string')) fail('storage','feedback artifact references invalid')
+    return Object.freeze({...report,summary:continuationUtf8(row['summary_bytes']),idempotencyKey:continuationUtf8(row['key_bytes']),
+      deliveryKey:continuationUtf8(row['delivery_key_bytes']),artifactPaths:Object.freeze(artifacts as string[])})
+  }
+
   /**
    * Append one report revision under the active claim, then apply the state
    * transition for that status.

@@ -156,10 +156,15 @@ function ownerObjective(input: {
 }
 
 function projectionInput(receipt: TrustedTaskLearningProjectionReceipt): TaskLearningProjectionInput {
+  const subjectKind = receipt.projection.subjectKind
+  if (subjectKind !== 'automation-run' && subjectKind !== 'foreground-turn'
+    && subjectKind !== 'goal-step' && subjectKind !== 'goal-outcome' && subjectKind !== 'outcome') {
+    throw new Error('test fixture is not a supported Evolution learning subject')
+  }
   const common = {
     scopeKey: receipt.scopeKey,
     scopeWatermark: receipt.scopeWatermark,
-    subjectKind: receipt.projection.subjectKind,
+    subjectKind,
     subjectRef: receipt.projection.subjectRef,
     version: receipt.projection.version,
     digest: receipt.projection.digest,

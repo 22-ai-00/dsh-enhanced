@@ -21,6 +21,7 @@ export interface Config {
   ownerRecall?: { enabled?: boolean }
   ownerContinuation?: OwnerContinuationConfig
   ownerReplyContinuation?: boolean
+  ownerReportFeedback?: boolean
 }
 
 /** A separately authorized Host worker; it never changes the diagnosis worker. */
@@ -138,6 +139,7 @@ export interface NormalizedConfig {
   readonly ownerRecall?: Readonly<{ enabled: true }>
   readonly ownerContinuation?: NormalizedOwnerContinuation
   readonly ownerReplyContinuation?: true
+  readonly ownerReportFeedback?: true
 }
 
 export interface NormalizedForegroundFailureSource {
@@ -198,7 +200,7 @@ const DELIVERY_KEYS = ['notifyOn'] as const
 const SETTLEMENT_KEYS = ['enabled', 'windowMs', 'sweepIntervalMs', 'maxSourcesPerSweep', 'maxPendingPerSweep', 'maxSettlementsPerSweep'] as const
 const SOURCES_KEYS = ['foregroundFailures'] as const
 const FOREGROUND_FAILURE_KEYS = ['enabled', 'kind', 'includeTimedOut', 'maxCandidatesPerSweep', 'maxAdmitsPerSweep', 'sweepIntervalMs'] as const
-const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerContinuation', 'ownerReplyContinuation'] as const
+const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerContinuation', 'ownerReplyContinuation', 'ownerReportFeedback'] as const
 const REPORT_STATUSES = ['progress', 'waiting', 'ready', 'blocked', 'failed'] as const
 const NOTIFY_STATUSES = ['ready', 'blocked', 'failed'] as const
 
@@ -269,6 +271,7 @@ export const ConfigSchema = Schema.object({
   sources: sourcesSchema,
   settlement: settlementSchema,
   ownerReplyContinuation: Schema.boolean().default(false),
+  ownerReportFeedback: Schema.boolean().default(false),
   ownerRecall: Schema.object({ enabled: Schema.boolean().default(false) }),
   ownerContinuation: Schema.object({
     enabled: Schema.boolean().default(false), automationId: Schema.string(), allowedTools: Schema.array(Schema.string()),
@@ -346,7 +349,7 @@ function integer(value: unknown, field: string, minimum: number, maximum: number
   return value
 }
 
-function normalizeScope(raw: ScopeConfig | undefined, now: number): WorkItemScope | null {
+function normalizeScope(raw: ScopeConfig | undefined, now: number, historicalFeedback = false): WorkItemScope | null {
   if (raw === undefined) return null
   const scope = plainObject(raw, 'scope')
   rejectUnknown(scope, SCOPE_KEYS, 'scope')
@@ -358,7 +361,7 @@ function normalizeScope(raw: ScopeConfig | undefined, now: number): WorkItemScop
     expiresAt: integer(scope['expiresAt'], 'scope.expiresAt', 1, Number.MAX_SAFE_INTEGER),
   }
   if (!PRESET.test(normalized.preset)) fail('invalid-input', 'scope.preset has an invalid shape')
-  if (normalized.expiresAt <= now) fail('invalid-input', 'scope.expiresAt must be in the future')
+  if (!historicalFeedback && normalized.expiresAt <= now) fail('invalid-input', 'scope.expiresAt must be in the future')
   return Object.freeze(normalized)
 }
 
@@ -451,7 +454,7 @@ function normalizeSettlement(raw: SettlementConfig | undefined): NormalizedSettl
   })
 }
 
-function normalizeDiagnosis(raw: DiagnosisConfig | undefined, scope: WorkItemScope | null, now: number): NormalizedDiagnosis | undefined {
+function normalizeDiagnosis(raw: DiagnosisConfig | undefined, scope: WorkItemScope | null, now: number, historicalFeedback = false): NormalizedDiagnosis | undefined {
   if (raw === undefined) return undefined
   const value = plainObject(raw, 'diagnosis')
   rejectUnknown(value, ['enabled', 'budgetId', 'budgetAmount', 'maxModelCalls', 'maxToolCalls', 'maxOutputTokens', 'timeoutMs', 'expiresAt'], 'diagnosis')
@@ -459,7 +462,7 @@ function normalizeDiagnosis(raw: DiagnosisConfig | undefined, scope: WorkItemSco
   if (value['enabled'] !== true) fail('invalid-input', 'diagnosis.enabled must be a boolean')
   if (scope === null) fail('invalid-input', 'diagnosis requires an explicit owner scope')
   const expiresAt = integer(value['expiresAt'], 'diagnosis.expiresAt', 1, Number.MAX_SAFE_INTEGER)
-  if (expiresAt <= now || expiresAt > scope.expiresAt) fail('invalid-input', 'diagnosis expiry must be future and no later than the owner scope')
+  if ((!historicalFeedback && expiresAt <= now) || expiresAt > scope.expiresAt) fail('invalid-input', 'diagnosis expiry must be future and no later than the owner scope')
   return Object.freeze({ enabled: true, budgetId: text(value['budgetId'], 'diagnosis.budgetId', 200),
     budgetAmount: integer(value['budgetAmount'], 'diagnosis.budgetAmount', 1, 10_000_000),
     maxModelCalls: integer(value['maxModelCalls'], 'diagnosis.maxModelCalls', 1, 100),
@@ -485,6 +488,8 @@ export function anySourceEnabled(config: NormalizedConfig): boolean {
 export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig {
   const value = plainObject(raw, 'config')
   rejectUnknown(value, TOP_LEVEL_KEYS, 'config')
+  const ownerReportFeedback = value['ownerReportFeedback']
+  if (ownerReportFeedback !== undefined && typeof ownerReportFeedback !== 'boolean') fail('invalid-input', 'ownerReportFeedback must be a boolean')
   const enabled = value['enabled'] ?? false
   if (typeof enabled !== 'boolean') fail('invalid-input', 'enabled must be a boolean')
   const mode = value['mode'] ?? 'observe'
@@ -500,13 +505,13 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   if (workerAutomationId !== null && !AUTOMATION_ID.test(workerAutomationId)) {
     fail('invalid-input', 'workerAutomationId has an invalid shape')
   }
-  const scope = normalizeScope(value['scope'] as ScopeConfig | undefined, now)
+  const scope = normalizeScope(value['scope'] as ScopeConfig | undefined, now, ownerReportFeedback === true)
   const admission = normalizeAdmission(value['admission'] as AdmissionConfig | undefined, mode)
   const limits = normalizeLimits(value['limits'] as LimitsConfig | undefined)
   const notifyOn = normalizeDelivery(value['delivery'] as DeliveryConfig | undefined)
   const sources = normalizeSources(value['sources'] as SourcesConfig | undefined)
   const settlement = normalizeSettlement(value['settlement'] as SettlementConfig | undefined)
-  const diagnosis = normalizeDiagnosis(value['diagnosis'] as DiagnosisConfig | undefined, scope, now)
+  const diagnosis = normalizeDiagnosis(value['diagnosis'] as DiagnosisConfig | undefined, scope, now, ownerReportFeedback === true)
   if (diagnosis && (!enabled || mode !== 'active' || !sources.foregroundFailures.enabled)) fail('invalid-input', 'diagnosis requires active enabled intake and foreground failure source')
   if (enabled && mode === 'active' && (workerAutomationId === null || scope === null)) {
     fail('invalid-input', "an active work-item deployment requires workerAutomationId and scope")
@@ -520,11 +525,12 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   if (ownerRecall['enabled'] === true && (!enabled || mode !== 'active' || scope === null || workerAutomationId === null)) {
     fail('invalid-input', 'ownerRecall requires an enabled active worker and complete scope')
   }
-  const ownerContinuation = normalizeOwnerContinuation(value['ownerContinuation'], scope, workerAutomationId, now)
+  const ownerContinuation = normalizeOwnerContinuation(value['ownerContinuation'], scope, workerAutomationId, now, ownerReportFeedback === true)
   if (ownerContinuation && !admission.allowedKinds.includes('owner-continuation')) fail('invalid-input', 'ownerContinuation requires owner-continuation in admission.allowedKinds')
   if (ownerContinuation && (!enabled || mode !== 'active' || ownerRecall['enabled'] !== true)) {
     fail('invalid-input', 'ownerContinuation requires active intake and ownerRecall')
   }
+  if (ownerReportFeedback === true && !ownerContinuation) fail('invalid-input', 'ownerReportFeedback requires configured ownerContinuation')
   const ownerReplyContinuation = value['ownerReplyContinuation']
   if (ownerReplyContinuation !== undefined && typeof ownerReplyContinuation !== 'boolean') fail('invalid-input', 'ownerReplyContinuation must be a boolean')
   if (ownerReplyContinuation === true && !ownerContinuation) fail('invalid-input', 'ownerReplyContinuation requires active ownerContinuation authorization')
@@ -545,14 +551,15 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     ...(ownerRecall['enabled'] === true ? { ownerRecall: Object.freeze({ enabled: true as const }) } : {}),
     ...(ownerContinuation === undefined ? {} : { ownerContinuation }),
     ...(ownerReplyContinuation === true ? { ownerReplyContinuation: true as const } : {}),
+    ...(ownerReportFeedback === true ? { ownerReportFeedback: true as const } : {}),
   })
 }
 
-function normalizeOwnerContinuation(raw: unknown, scope: WorkItemScope | null, workerId: string | null, now: number): NormalizedOwnerContinuation | undefined {
+function normalizeOwnerContinuation(raw: unknown, scope: WorkItemScope | null, workerId: string | null, now: number, historicalFeedback = false): NormalizedOwnerContinuation | undefined {
   if (raw === undefined) return undefined
   const value = plainObject(raw, 'ownerContinuation')
   const { automationId, allowedTools, ...limits } = value
-  const budget = normalizeDiagnosis(limits as DiagnosisConfig, scope, now)
+  const budget = normalizeDiagnosis(limits as DiagnosisConfig, scope, now, historicalFeedback)
   if (!budget) {
     if (automationId !== undefined || allowedTools !== undefined && (!Array.isArray(allowedTools) || allowedTools.length !== 0)) fail('invalid-input', 'disabled ownerContinuation cannot carry execution settings')
     return undefined

@@ -10,6 +10,7 @@ import {
   evaluationLearningProjectionDigest,
 } from './store.js'
 import { registerEvaluationTools } from './tools.js'
+import { validateWorkItemOwnerFeedbackProof } from './work-item-owner-proof.js'
 import type {
   EvaluationHealth,
   EvaluationCanonicalLearningEvidenceTuple,
@@ -35,6 +36,7 @@ import type {
   TrustedDeliveryEvaluationClaims,
   TrustedDeliveryEvaluationRegistration,
   TrustedGoalOutcomeOwnerProof,
+  TrustedWorkItemOwnerFeedbackProof,
   TrustedEvaluationRegistrationOwner,
   TrustedVerifierEvaluationRegistration,
   TrustedWorkItemEvaluationClaims,
@@ -242,7 +244,7 @@ interface TrustedEvaluationProjector {
     evaluationId: string
   }): Readonly<{
     triggerOutcomeId: string
-    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
+    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'work-item' | 'outcome'
     subjectRef: string
     version: number
     digest: string
@@ -251,7 +253,7 @@ interface TrustedEvaluationProjector {
     status: 'applied' | 'replayed'
   }> | Promise<Readonly<{
     triggerOutcomeId: string
-    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
+    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'work-item' | 'outcome'
     subjectRef: string
     version: number
     digest: string
@@ -273,6 +275,13 @@ export interface TrustedDeliveryEvaluationProducer {
   registerTrustedDeliveryEvaluationSink(
     registration: Readonly<TrustedDeliveryEvaluationRegistration>,
   ): () => void
+  /** New work-item owner writes require the current Delivery source/Policy fence. */
+  withOwnerWorkItemFeedbackWriterFence?<T>(
+    registration: Readonly<TrustedDeliveryEvaluationRegistration>,
+    claims: Readonly<TrustedDeliveryEvaluationClaims>,
+    proofDigest: string,
+    callback: () => T,
+  ): T
 }
 
 interface TrustedVerifierEvaluationProducer {
@@ -599,7 +608,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     operationId: string
   }): Promise<Readonly<{
     evaluationId: string
-    status: 'deferred' | 'recorded'
+    status: 'deferred' | 'recorded' | 'not-required'
     attemptCount: number
   }>> {
     this.assertActive()
@@ -610,8 +619,8 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     if (state === undefined) {
       throw new AssistantEvaluationError('not-found', 'exact Evaluation projection was not found')
     }
-    if (state.status === 'recorded') {
-      return Object.freeze({ evaluationId, status: 'recorded' as const, attemptCount: state.attemptCount })
+    if (state.status !== 'pending') {
+      return Object.freeze({ evaluationId, status: state.status, attemptCount: state.attemptCount })
     }
     const active = this.activeProjections.get(evaluationId)
     if (active !== undefined) await active
@@ -631,7 +640,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     }
     return Object.freeze({
       evaluationId,
-      status: state.status === 'recorded' ? 'recorded' as const : 'deferred' as const,
+      status: state.status === 'pending' ? 'deferred' as const : state.status,
       attemptCount: state.attemptCount,
     })
   }
@@ -741,6 +750,15 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       hostIdentifier(input.inboxId, 'inboxId', 1_000))
   }
 
+  /** Host-only exact current owner result for one durable work item. */
+  getTrustedWorkItemLearningProjection(input: {
+    scope: EvaluationHostScope; itemId: string
+  }): TrustedTaskLearningProjectionReceipt | undefined {
+    this.assertActive()
+    return this.store.getWorkItemLearningProjection(exactEvaluationHostScope(input.scope),
+      hostIdentifier(input.itemId, 'itemId', 1_000))
+  }
+
   /** Host-only exact canonical whole-goal proof, addressed by assessment id. */
   getTrustedGoalOutcomeLearningProjection(input: {
     scope: EvaluationHostScope
@@ -781,6 +799,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
           && projection.subjectKind !== 'foreground-turn'
           && projection.subjectKind !== 'goal-step'
           && projection.subjectKind !== 'goal-outcome'
+          && projection.subjectKind !== 'work-item'
           && projection.subjectKind !== 'outcome')
         || !exactHostIdentifier(projection.subjectRef, 'projection.subjectRef', 1_000)
         || !Number.isSafeInteger(projection.version) || (projection.version as number) < 1
@@ -1159,7 +1178,22 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     if (current?.generation === generation) return current.dispose
 
     const capabilities = new WeakMap<object, Readonly<TrustedDeliveryEvaluationClaims>>()
+    const workItemProofs = new WeakMap<object, string>()
     let registered = true
+    // A WorkItems resolver is foreign code and can synchronously withdraw
+    // this Delivery capability. Check generation first, then our own fields
+    // after that last producer callback, directly before local mutation.
+    const assertWorkItemDeliveryLocal = () => {
+      this.assertActive()
+      if (!registered || this.deliveryBinding?.producer !== producer || this.deliveryBinding.generation !== generation
+        || !this.activeDeliveryRegistrations.has(registration)) {
+        throw new AssistantEvaluationError('forbidden', 'stale delivery Evaluation producer capability')
+      }
+    }
+    const assertWorkItemDeliveryCurrent = () => {
+      this.assertCurrentProducer(producer, generation, registered, 'delivery')
+      assertWorkItemDeliveryLocal()
+    }
     const registration: TrustedDeliveryEvaluationRegistration = Object.freeze({
       protocol: TRUSTED_EVALUATION_PRODUCER_PROTOCOL,
       producer: 'assistant-delivery' as const,
@@ -1169,14 +1203,22 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       issueCapability: (claims: TrustedDeliveryEvaluationClaims): unknown => {
         this.assertCurrentProducer(producer, generation, registered, 'delivery')
         const normalized = this.deliveryClaims(claims)
+        let workItemProofDigest: string | undefined
         if (normalized.subjectKind === 'goal-outcome') {
           const { proof, verifierOutcome } = this.resolveGoalOutcomeOwnerProof(normalized)
           if (this.store.adoptTrustedGoalOutcomeOwnerBaseline(normalized, proof, verifierOutcome)) {
             this.notifyTrustedTaskChange()
           }
+        } else if (normalized.subjectKind === 'work-item') {
+          if (typeof producer.withOwnerWorkItemFeedbackWriterFence !== 'function') {
+            throw new AssistantEvaluationError('forbidden', 'Delivery work-item feedback writer fence is unavailable')
+          }
+          workItemProofDigest = this.resolveWorkItemOwnerProof(normalized).proofDigest
+          assertWorkItemDeliveryCurrent()
         } else this.store.adoptLegacyOwnerFeedback(normalized)
         const capability = Object.freeze(Object.create(null) as object)
         capabilities.set(capability, normalized)
+        if (workItemProofDigest !== undefined) workItemProofs.set(capability, workItemProofDigest)
         return capability
       },
       inspect: (capabilityReceipt: unknown) => {
@@ -1185,6 +1227,11 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
         const claims = capabilities.get(capabilityReceipt)
         if (claims?.ownerCommand === undefined) throw new AssistantEvaluationError('forbidden', 'missing owner lineage')
         if (claims.subjectKind === 'goal-outcome') this.resolveGoalOutcomeOwnerProof(claims)
+        if (claims.subjectKind === 'work-item'
+          && this.resolveWorkItemOwnerProof(claims).proofDigest !== workItemProofs.get(capabilityReceipt)) {
+          throw new AssistantEvaluationError('forbidden', 'work-item proof changed since owner capability issue')
+        }
+        if (claims.subjectKind === 'work-item') assertWorkItemDeliveryCurrent()
         return this.store.ownerObjectiveState(claims.scope, claims.subjectKind ?? 'automation-run',
           claims.subjectRef ?? claims.runId, claims.ownerCommand.principalRecordId, claims.ownerCommand.principalVersion)
       },
@@ -1207,6 +1254,57 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
           throw new AssistantEvaluationError('forbidden', 'delivery Evaluation capability identity changed')
         }
         if (claims.subjectKind === 'goal-outcome') this.resolveGoalOutcomeOwnerProof(claims)
+        if (claims.subjectKind === 'work-item') {
+          const proof = this.resolveWorkItemOwnerProof(claims)
+          assertWorkItemDeliveryCurrent()
+          if (proof.proofDigest !== workItemProofs.get(input.capabilityReceipt)) throw new AssistantEvaluationError('forbidden', 'work-item proof changed since owner capability issue')
+          // Production termination is its own trusted fact. It is persisted
+          // with objective unknown before the separately authenticated owner vote.
+          this.store.append({
+            scope: claims.scope, situation: claims.situation,
+            executionStatus: proof.production.executionStatus, objectiveStatus: 'unknown', deliveryStatus: 'unknown',
+            source: { kind: 'system', id: 'assistant-work-items-owner-proof' }, trust: 'trusted',
+            evidence: [
+              { kind: 'work-item-owner-result', ref: proof.itemId },
+              { kind: 'work-item-report', ref: `${proof.itemId}#${String(proof.reportRevision)}`, digest: proof.reportDigest },
+              { kind: 'work-item-production-proof', ref: proof.production.runId, digest: proof.proofDigest },
+            ], metrics: {}, occurredAt: proof.production.completedAt,
+            idempotencyKey: `work-item-owner-proof:${acceptanceDigest([proof.itemId, proof.proofDigest])}`,
+            evaluator: { id: 'assistant-work-items-owner-proof', version: '1' },
+          })
+          // The native producer can run callbacks. Re-prove it after durable
+          // baseline creation and directly before the owner mutation.
+          const finalProof = this.resolveWorkItemOwnerProof(claims)
+          assertWorkItemDeliveryCurrent()
+          if (acceptanceDigest(finalProof) !== acceptanceDigest(proof)) throw new AssistantEvaluationError('forbidden', 'work-item proof changed before owner append')
+          if (typeof producer.withOwnerWorkItemFeedbackWriterFence !== 'function') {
+            throw new AssistantEvaluationError('forbidden', 'Delivery work-item feedback writer fence is unavailable')
+          }
+          const outcome = producer.withOwnerWorkItemFeedbackWriterFence(registration, claims, finalProof.proofDigest, () => {
+            // This callback runs while Delivery owns its source writer lock.
+            // No producer calls or notifications may re-enter after its final
+            // owner/source/Policy check and before this local owner mutation.
+            assertWorkItemDeliveryLocal()
+            return this.store.append({
+              scope: claims.scope, situation: claims.situation,
+              executionStatus: proof.production.executionStatus, objectiveStatus: claims.objectiveStatus,
+              deliveryStatus: 'delivered', source: { kind: 'user-feedback', id: 'assistant-delivery/typed-owner-feedback' }, trust: 'trusted',
+              evidence: [
+                { kind: 'work-item-owner-result', ref: proof.itemId },
+                { kind: 'work-item-report', ref: `${proof.itemId}#${String(proof.reportRevision)}`, digest: proof.reportDigest },
+                { kind: 'delivery-outbox', ref: claims.outboxId },
+                { kind: 'work-item-production-proof', ref: proof.production.runId, digest: proof.proofDigest },
+              ], metrics: {}, occurredAt: claims.occurredAt, idempotencyKey: claims.idempotencyKey,
+              evaluator: { id: 'assistant-delivery-owner-feedback', version: '2' },
+            }, claims.ownerCommand)
+          })
+          // Delivery has now committed its recorded source acknowledgement.
+          // A lost cross-database acknowledgement remains a durable unknown;
+          // it must recover the same operation instead of replaying a new vote.
+          assertWorkItemDeliveryLocal()
+          this.notifyTrustedTaskChange()
+          return outcome
+        }
         return this.appendTrusted({
           scope: claims.scope,
           situation: claims.situation,
@@ -1537,7 +1635,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     const subjectKind = input.subjectKind ?? 'automation-run'
     const subjectRef = input.subjectRef ?? input.runId
     if ((input.subjectKind !== undefined && input.subjectKind !== 'automation-run'
-      && input.subjectKind !== 'foreground-turn' && input.subjectKind !== 'goal-outcome')
+      && input.subjectKind !== 'foreground-turn' && input.subjectKind !== 'goal-outcome' && input.subjectKind !== 'work-item')
       || (input.subjectRef !== undefined && input.subjectRef.trim() === '')) {
       throw new AssistantEvaluationError('forbidden', 'delivery Evaluation subject is invalid')
     }
@@ -1555,7 +1653,16 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       || typeof input.goalOutcomeCapability !== 'object' || input.goalOutcomeCapability === null)) {
       throw new AssistantEvaluationError('forbidden', 'goal outcome owner capability is invalid')
     }
+    if (subjectKind === 'work-item' && (input.subjectRef === undefined || command === undefined
+      || typeof input.workItemOutcomeCapability !== 'object' || input.workItemOutcomeCapability === null)) {
+      throw new AssistantEvaluationError('forbidden', 'work-item owner capability is invalid')
+    }
+    if ((subjectKind !== 'work-item' && Object.hasOwn(input, 'workItemOutcomeCapability'))
+      || (subjectKind !== 'goal-outcome' && Object.hasOwn(input, 'goalOutcomeCapability'))) {
+      throw new AssistantEvaluationError('forbidden', 'owner capability does not match subject')
+    }
     return Object.freeze({
+      ...(subjectKind === 'work-item' ? { workItemOutcomeCapability: input.workItemOutcomeCapability } : {}),
       ...(subjectKind === 'goal-outcome'
         ? { goalOutcomeCapability: input.goalOutcomeCapability } : {}),
       ...(input.initialIdempotencyKey === undefined ? {} : { initialIdempotencyKey: hostIdentifier(input.initialIdempotencyKey, 'initial feedback key', 200) }),
@@ -1576,6 +1683,41 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       occurredAt: input.occurredAt,
       idempotencyKey: hostIdentifier(input.idempotencyKey, 'idempotencyKey', 200),
     }) as Readonly<TrustedDeliveryEvaluationClaims>
+  }
+
+  private resolveWorkItemOwnerProof(claims: Readonly<TrustedDeliveryEvaluationClaims>): Readonly<TrustedWorkItemOwnerFeedbackProof> {
+    this.assertActive()
+    const producer = this.ctx.get('assistantWorkItems' as never, false) as unknown
+    const binding = this.workItemsBinding
+    if (claims.subjectKind !== 'work-item' || !isTrustedWorkItemEvaluationProducer(producer)
+      || !binding || serviceIdentity(producer) !== serviceIdentity(binding.producer)
+      || producer.trustedWorkItemProducerGeneration() !== binding.generation
+      || typeof (producer as { resolveOwnerWorkItemFeedbackTarget?: unknown }).resolveOwnerWorkItemFeedbackTarget !== 'function') {
+      throw new AssistantEvaluationError('forbidden', 'current WorkItems owner capability resolver is unavailable')
+    }
+    let proof: Readonly<TrustedWorkItemOwnerFeedbackProof>
+    try {
+      const value = (producer as TrustedWorkItemEvaluationProducer & {
+        resolveOwnerWorkItemFeedbackTarget(capability: unknown): unknown
+      }).resolveOwnerWorkItemFeedbackTarget(claims.workItemOutcomeCapability)
+      proof = validateWorkItemOwnerFeedbackProof(value, this.now())
+    } catch {
+      throw new AssistantEvaluationError('forbidden', 'WorkItems owner capability is stale or invalid')
+    }
+    const currentGeneration = producer.trustedWorkItemProducerGeneration()
+    const current = this.ctx.get('assistantWorkItems' as never, false) as unknown
+    this.assertActive()
+    if (currentGeneration !== binding.generation || !current || typeof current !== 'object' || this.workItemsBinding !== binding
+      || serviceIdentity(current) !== serviceIdentity(producer)
+      || claims.subjectRef !== proof.itemId || claims.runId !== proof.production.runId
+      || claims.scope.workspace !== proof.scope.workspace || claims.scope.preset !== proof.scope.preset
+      || claims.situation !== `work-item:${proof.itemKind}` || claims.principalId !== proof.owner.principalId
+      || !claims.ownerCommand || claims.ownerCommand.principalRecordId !== proof.owner.principalRecordId
+      || claims.ownerCommand.principalVersion !== proof.owner.principalVersion
+      || claims.occurredAt < proof.report.recordedAt || claims.occurredAt > this.now()) {
+      throw new AssistantEvaluationError('forbidden', 'WorkItems proof does not match current Delivery claims')
+    }
+    return proof
   }
 
   private resolveGoalOutcomeOwnerProof(

@@ -55,7 +55,7 @@ export interface RecoveryEvaluationProjectionPort {
     scope: ReturnType<typeof canonicalEvaluationHostScope>
     evaluationId: string
     operationId: string
-  }): Promise<{ evaluationId: string; status: 'deferred' | 'recorded'; attemptCount: number }>
+  }): Promise<{ evaluationId: string; status: 'deferred' | 'recorded' | 'not-required'; attemptCount: number }>
 }
 
 export interface RecoveryRuntimePorts {
@@ -757,11 +757,18 @@ export class HostRecoveryRunbookPort implements RecoveryRunbookPort {
       })
       if (result.evaluationId !== action.evaluationId
         || !Number.isSafeInteger(result.attemptCount) || result.attemptCount < 0
-        || (result.status !== 'recorded' && result.status !== 'deferred')) {
+        || (result.status !== 'recorded' && result.status !== 'deferred' && result.status !== 'not-required')) {
         throw new RecoveryPortError('projection-receipt-invalid', 'possible')
       }
       if (result.status === 'deferred') {
         throw new RecoveryPortError('projection-deferred', 'possible')
+      }
+      if (result.status === 'not-required') {
+        return Object.freeze({
+          status: 'noop',
+          resultCode: 'projection-not-required',
+          afterDigest: digest(result),
+        })
       }
       return Object.freeze({
         status: 'succeeded',

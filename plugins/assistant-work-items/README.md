@@ -403,6 +403,32 @@ Delivery schema 29 保存真实报告关联、回复原文与回复序列；Work
 
 此入口覆盖同一渠道的报告回复，不实现运行中指令插入、任意跨信道身份合并、多对多 Thread 订阅或长期自主成长。Provider 接受报告不等于用户已读或任务已独立验收。
 
+### 主人评价报告结果（显式启用）
+
+`ownerReportFeedback: true` 将已认证主人对真实工作项报告的明确结果反馈写入 Evaluation 的 `work-item` 主人评价。默认关闭；要求已有 `ownerContinuation` 配置来核对封存计划，但不要求 `ownerReplyContinuation`。它使用独立的外部 Policy 操作 `feedback-work-items`，资源为配置中的 continuation automation；录入评价不认领、续办任务，也不消耗新的 worker 执行额度。
+
+```yaml
+- id: owner-work-item-feedback
+  effect: allow
+  subject:
+    kind: external
+    id: lark/my-account/my-tenant/my-owner
+    workspace: /absolute/workspace
+  actions: [feedback-work-items]
+  resource: { kind: automation, id: work-item-continuation }
+  context: { initiators: [external] }
+```
+
+Delivery 在普通续办前识别既有的完整自然语言结果短句及其标点，以及 `/feedback achieved|partial|not-achieved`、`/feedback status`、`/feedback correct <version> <previous-status> <achieved|partial|not-achieved>`、`/feedback withdraw <version> <previous-status>` 指令，并按原有 CAS 规则保存、纠正或撤回同一工作项的一个当前评价。“还是不行，继续修复”含有附加指令，保留普通续办或前台处理，不截取其中的评价词。实际发送报告的 provider 消息关联、当前 owner、scope 和独立授权均须成立；普通 metadata 不构成证据。评价始终指向所回复报告的原工作项、修订与摘要，即使回复序列已有后续子项，也不会转评当前 stream head。已经接收的评价意图不会在重启或重试时变成前台请求或续办。
+
+报告可以先发送；只有其精确 native production occurrence 真正终止、静止且预算 finalized 后，才可生成结果证明。证明保留实际执行状态，包括 failed、timed-out、cancelled，不能因为主人回复或报告 ready 就改成 succeeded。缺少证明时 Delivery 保留待处理评价。主人的成功评价仍是主人证词，不能充当独立验收、能力采用或长期成长收益。
+
+Host 只读接口 `issueOwnerWorkItemFeedbackTarget({itemId, reportRevision, reportDigest})` 返回不可序列化的进程内 capability；`resolveOwnerWorkItemFeedbackTarget(capability)` 重新核对当前 owner、服务代次、完整报告/brief 字节、封存 supplier 和真实执行证明。错误或已被取代的报告修订、错误摘要、旧服务 capability、owner 更换与不确定预算均拒绝；不会悄悄读取另一条最新报告。相同主人新会话可以评价旧报告。task/report 内容仍是不可信材料，不是执行指令。
+
+这条历史读取与新执行授权分离。显式开启反馈后，冷启动可保留已经过期的 scope、diagnosis、continuation 原期限来读取已有结果；不会延长期限、重置预算、重新 reconcile worker 或放行旧执行。当前 Delivery owner route 与反馈 Policy 仍须有效。两个入口同开时，当前执行资格独立控制普通续办；过期后的明确评价仍可记录，普通回复不会因此取得过期执行权限。既有 v1/v2 计划和激活摘要保持兼容。
+
+WorkItems 仍使用 schema 9；Delivery schema 30 保存独占评价意图，Evaluation schema 13 保存新的 canonical 工作项主人结果。原有 settlement 行继续作为 objective unknown 的审计材料，不回填为主人评价。备份与恢复须一致保留相关账本；这一切片不自动触发 Growth、创建/采用候选或调用模型。
+
 ## 配置
 
 | 字段 | 默认值 | 含义 |
@@ -411,13 +437,14 @@ Delivery schema 29 保存真实报告关联、回复原文与回复序列；Work
 | `mode` | `observe` | `observe` 只记录观察行；`active` 才唤醒 worker、发通知 |
 | `ownerContinuation` | 关闭 | 单独启用、独立 automation ID、显式工具范围与有限执行预算；见主人续办旧任务 |
 | `ownerReplyContinuation` | `false` | 将已授权主人的真实报告回复持久转交续办；要求已启用 ownerContinuation 和独立外部 Policy 授权 |
+| `ownerReportFeedback` | `false` | 认证报告结果反馈；要求 ownerContinuation，独立 `feedback-work-items` 授权，不要求回复续办，不取得新执行额度 |
 | `ownerRecall.enabled` | `false` | 显式启用当前主人前台任务查询；要求 enabled active、完整 scope、worker automation 与独立 `inspect-work-items` 授权 |
 | `databasePath` | `$DSH_HOME/assistant-work-items/state.sqlite` | 私有账本绝对路径 |
 | `workRoot` | `$DSH_HOME/assistant-work-items/work` | 每项 scratch/artifact 根目录绝对路径 |
 | `intakeSourceId` | `work-items/v1` | 写入 automation 事件与 Policy background 主体标识 |
 | `workerAutomationId` | 无 | active 模式必填；通用模式需预先存在，diagnosis 模式首次激活按此 ID 建立固定 system-owned Host worker |
 | `scope.workspace` / `scope.preset` / `scope.principalId` / `scope.ownerRouteId` | 无 | owner 五元组；active 模式必填，过期后 fail closed |
-| `scope.expiresAt` | 无 | epoch 毫秒，必须晚于配置加载时间 |
+| `scope.expiresAt` | 无 | epoch 毫秒；执行要求未来，显式 ownerReportFeedback 可保留过期原值读取历史，不放行执行 |
 | `admission.allowedKinds` | `[]` | 允许准入的 kind；active 模式至少一项 |
 | `admission.maxOpenItems` | `8` | 未结工作项上限（1–100） |
 | `admission.maxAdmitsPerHour` | `4` | 每小时准入上限（1–100） |

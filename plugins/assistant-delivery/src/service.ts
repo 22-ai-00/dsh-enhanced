@@ -1,8 +1,10 @@
-import { workItemReplyCanonical, type WorkItemReportTarget, type WorkItemReplySource, type WorkItemReplyConsumerRegistration, type WorkItemReplyReadInput, type WorkItemReplyListInput } from './work-item-replies.js'
+import type { WorkItemFeedbackIntent, WorkItemFeedbackSource, WorkItemFeedbackSelection, OwnerWorkItemLearningTask } from './work-item-feedback.js'
+import type { TrustedWorkItemOwnerFeedbackProof } from '@dsh-enhanced/assistant-evaluation'
+import { workItemReplyCanonical, workItemReplyDigest, type WorkItemReportTarget, type WorkItemReplySource, type WorkItemReplyConsumerRegistration, type WorkItemReplyReadInput, type WorkItemReplyListInput } from './work-item-replies.js'
 import { chmodSync, mkdirSync, readFileSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Context, Service, symbols } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition, ToolExecution } from '@deepseek-ai/dsh-tools'
@@ -102,6 +104,7 @@ import {
   feedbackSignalInput,
   parseFeedbackCommand,
   parseNaturalObjectiveFeedback,
+  objectiveStateMessage,
   classifyNaturalPreferenceDirective,
   observedResponseLanguage,
   type FeedbackSignalSelection,
@@ -428,6 +431,11 @@ function validateLearningControlReceipt(
         : receipt.rolledBackVersion !== undefined))) {
     throw new Error('learning rollback receipt is invalid')
   }
+}
+
+function workItemPeerIdentity(value:unknown):unknown {
+  if(value===null || (typeof value!=='object' && typeof value!=='function'))return value
+  try {return Reflect.get(value,symbols.original) ?? value}catch{return value}
 }
 
 function containsReservedLearningMetadata(metadata: Readonly<Record<string, string>> | undefined): boolean {
@@ -1116,6 +1124,9 @@ export class AssistantDeliveryService extends Service {
   private modelSelectionFlight: Promise<void> | undefined
   private presentationFlight: Promise<void> | undefined
   private workflowTraceFlight: Promise<void> | undefined
+  private workItemFeedbackFlight: Promise<void> | undefined
+  private workItemFeedbackCursor = 0
+  private workItemFeedbackAckCursor = 0
   private naturalObjectiveFlight: Promise<void> | undefined
   private preferenceProjectionFlight: Promise<void> | undefined
   private inboundAdmissionRecoveryFlight: Promise<void> | undefined
@@ -2763,6 +2774,7 @@ export class AssistantDeliveryService extends Service {
     const token = Symbol('assistant-delivery.trusted-evaluation')
     this.evaluationSink = Object.freeze({ token, registration })
     void this.drainNaturalObjectiveIntents()
+    void this.drainWorkItemFeedback().catch(() => { /* durable feedback retries */ })
     let active = true
     return () => {
       if (!active) return
@@ -4662,13 +4674,233 @@ export class AssistantDeliveryService extends Service {
         const failed = this.deliveryStore.getInbox(record.id)!
         return { duplicate: accepted.duplicate, inboxId: failed.id, status: failed.status }
       }
-      if (this.admitWorkItemReply(record, binding)) {
+      const feedback = this.admitOwnerWorkItemFeedback(record,binding)
+      if (feedback === 'handled') {
+        void this.drainWorkItemFeedback().catch(() => { /* durable intent retries on maintenance */ })
+        return { duplicate: accepted.duplicate, inboxId: record.id, status: 'processed' }
+      }
+      if (feedback !== 'ordinary' && this.admitWorkItemReply(record, binding)) {
         const handedOff = this.deliveryStore.getInbox(record.id)!
         this.notifyWorkItemReplyPending()
         return { duplicate: accepted.duplicate, inboxId: handedOff.id, status: handedOff.status }
       }
       record = this.deliveryStore.queueInbox(record.id, binding.id)
       return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
+    })
+  }
+
+  private parseWorkItemFeedback(envelope: InboundEnvelope): WorkItemFeedbackSelection | undefined {
+    if ((envelope.attachments?.length ?? 0) !== 0) return undefined
+    if (envelope.kind === 'text') {
+      const text=envelope.text.trim()
+      if(!/^(?:问题解决了|已经解决了|现在解决了|还是不行|还没解决|问题还没解决|撤回刚才的任务反馈|撤回我刚才的任务反馈)[。.!！]?$/u.test(text))return undefined
+      const value = parseNaturalObjectiveFeedback(text)
+      return value === undefined ? undefined : { kind:'natural',value }
+    }
+    const command = parseDeliveryCommand(envelope)
+    if (command?.name !== 'feedback') return undefined
+    const parsed = parseFeedbackCommand(command.rawInput)
+    return ['objective','objective-status','objective-revision'].includes(parsed.kind)
+      ? {kind:'explicit',command:parsed as import('./feedback-command.js').ObjectiveCommand} : undefined
+  }
+  private workItemFeedbackPermission(binding: ConversationBinding, registration: WorkItemReplyConsumerRegistration): boolean {
+    return this.policy.evaluate({ subject:{kind:'external',id:externalPrincipalId(binding.principal),workspace:binding.workspace,principal:externalPrincipalId(binding.principal)},
+      action:'feedback-work-items',resource:{kind:'automation',id:registration.continuationAutomationId},context:{initiator:'external'} }).effect === 'allow'
+  }
+  private admitOwnerWorkItemFeedback(inbox: InboxRecord,binding: ConversationBinding): 'handled'|'ordinary'|'none' {
+    const registration=this.currentWorkItemReplyConsumer(), selection=this.parseWorkItemFeedback(inbox.envelope)
+    if (!registration || registration.feedbackEnabled !== true || !selection || !inbox.envelope.metadata?.replyToProviderMessageId) return 'none'
+    const report=this.deliveryStore.workItemReplies.replyReport(inbox.channel,inbox.account,inbox.envelope.metadata.replyToProviderMessageId)
+    if (!report || !['accepted','delivered','read'].includes(report.outbox.status) || !report.outbox.providerMessageId
+      || workItemReplyCanonical(report.outbox.intent.target.conversation)!==workItemReplyCanonical(inbox.envelope.conversation)
+      || workItemReplyCanonical(report.outbox.intent.target.principal)!==workItemReplyCanonical(binding.principal)) return 'none'
+    let target:WorkItemReportTarget
+    try {target=this.inspectWorkItemReport({sourceId:registration.sourceId,itemId:report.target.itemId,reportRevision:report.target.reportRevision,
+      bindingId:report.outbox.intent.bindingId,idempotencyKey:report.outbox.intent.idempotencyKey,text:report.outbox.intent.text,
+      format:report.outbox.intent.format==='markdown'?'markdown':'plain'},true)}catch{return 'none'}
+    if(workItemReplyCanonical(target)!==workItemReplyCanonical(report.target))return 'none'
+    // A recognized result must not be converted into execution when its separate feedback permission is absent.
+    if(!this.workItemFeedbackPermission(binding,registration))return 'ordinary'
+    const source:WorkItemFeedbackSource={protocol:'assistant-delivery/work-item-feedback/v1',inboxId:inbox.id,envelopeHash:inbox.envelopeHash,
+      inputText:inbox.envelope.text,inputSha256:createHash('sha256').update(inbox.envelope.text).digest('hex'),admissionCursor:inbox.admissionCursor,occurredAt:inbox.receivedAt,
+      owner:target.owner,principalId:externalPrincipalId(binding.principal),binding:{id:binding.id,version:binding.version,generation:binding.generation},scope:target.scope,
+      target:{outboxId:report.outbox.id,providerMessageId:report.outbox.providerMessageId,itemId:target.itemId,reportRevision:target.reportRevision,reportDigest:target.reportDigest,streamId:target.streamId},selection,
+      operationId:`owner-work-item-feedback:${createHash('sha256').update(JSON.stringify([inbox.id,inbox.envelopeHash])).digest('hex')}`}
+    this.deliveryStore.workItemFeedback.admit(source,()=>{
+      const current=this.currentWorkItemReplyConsumer(), owner=this.ownerLineageForBinding(binding), active=this.deliveryStore.getBinding(binding.id)
+      if(current!==registration || current?.feedbackEnabled!==true || workItemReplyCanonical(owner)!==workItemReplyCanonical(source.owner)
+        || workItemReplyCanonical(active)!==workItemReplyCanonical(binding) || !this.workItemFeedbackPermission(binding,registration))throw new Error('feedback admission authority changed')
+    })
+    return 'handled'
+  }
+  /** Passing an explicit registration makes this the callback-free final local authority check. */
+  private workItemFeedbackFence(intent: WorkItemFeedbackIntent, recorded=false, expectedRegistration?:WorkItemReplyConsumerRegistration): WorkItemReplyConsumerRegistration {
+    const registration=expectedRegistration ?? this.currentWorkItemReplyConsumer(), source=intent.source
+    const current=this.deliveryStore.workItemFeedback.get(source.inboxId)
+    const inbox=this.deliveryStore.getInbox(source.inboxId), original=this.deliveryStore.getBinding(source.binding.id)
+    const binding=recorded && original ? this.deliveryStore.getActiveBinding(original.conversation) : original
+    if(!this.active || !registration || this.workItemReplyConsumer!==registration || registration.feedbackEnabled!==true || !current || current.state==='cancelled' || (current.state==='conflict' && !recorded)
+      || current.state!==intent.state || current.sourceDigest!==intent.sourceDigest || !inbox || inbox.status!=='processed' || inbox.bindingId!==source.binding.id
+      || inbox.envelopeHash!==source.envelopeHash || inbox.envelope.text!==source.inputText || !binding || binding.status!=='active'
+      || (!recorded && (binding.id!==source.binding.id || binding.version!==source.binding.version || binding.generation!==source.binding.generation))
+      || workItemReplyCanonical(this.ownerLineageForBinding(binding))!==workItemReplyCanonical(source.owner)
+      || binding.workspace!==source.scope.workspace || binding.agentPreset!==source.scope.preset
+      || !this.workItemFeedbackPermission(binding,registration))throw new Error('work item feedback authority changed')
+    return registration
+  }
+  private workItemFeedbackProof(intent: WorkItemFeedbackIntent, recorded=false): { capability:unknown;proof:Readonly<TrustedWorkItemOwnerFeedbackProof>;registration:WorkItemReplyConsumerRegistration;peerIdentity:unknown }|undefined {
+    const registration=this.workItemFeedbackFence(intent,recorded), source=intent.source
+    const report=this.deliveryStore.workItemReplies.replyReport(this.deliveryStore.getInbox(source.inboxId)!.channel,this.deliveryStore.getInbox(source.inboxId)!.account,source.target.providerMessageId)
+    if(!report || report.outbox.id!==source.target.outboxId || !['accepted','delivered','read'].includes(report.outbox.status))throw new Error('work item feedback report changed')
+    const target=this.inspectWorkItemReport({sourceId:registration.sourceId,itemId:source.target.itemId,reportRevision:source.target.reportRevision,
+      bindingId:report.outbox.intent.bindingId,idempotencyKey:report.outbox.intent.idempotencyKey,text:report.outbox.intent.text,format:report.outbox.intent.format==='markdown'?'markdown':'plain'},true)
+    if(workItemReplyCanonical(target)!==workItemReplyCanonical(report.target))throw new Error('work item feedback target changed')
+    this.workItemFeedbackFence(intent,recorded)
+    const peer=this.context.get('assistantWorkItems' as never,false) as unknown as {issueOwnerWorkItemFeedbackTarget?(input:{itemId:string;reportRevision:number;reportDigest:string}):unknown;resolveOwnerWorkItemFeedbackTarget?(capability:unknown):Readonly<TrustedWorkItemOwnerFeedbackProof>|undefined}|undefined
+    if(!peer?.issueOwnerWorkItemFeedbackTarget || !peer.resolveOwnerWorkItemFeedbackTarget)return undefined
+    const capability=peer.issueOwnerWorkItemFeedbackTarget({itemId:source.target.itemId,reportRevision:source.target.reportRevision,reportDigest:source.target.reportDigest})
+    this.workItemFeedbackFence(intent,recorded)
+    if(capability===undefined)return undefined
+    const proof=peer.resolveOwnerWorkItemFeedbackTarget(capability)
+    if(workItemPeerIdentity(this.context.get('assistantWorkItems' as never,false))!==workItemPeerIdentity(peer) || this.workItemFeedbackFence(intent,recorded,registration)!==registration)return undefined
+    if(!proof)return undefined
+    if(proof.protocol!=='assistant-work-items/owner-report-feedback/v1' || proof.itemId!==source.target.itemId || proof.reportRevision!==source.target.reportRevision
+      || proof.reportDigest!==source.target.reportDigest || proof.sourceId!==registration.sourceId || proof.scope.workspace!==source.scope.workspace || proof.scope.preset!==source.scope.preset
+      || proof.owner.principalRecordId!==source.owner.principalRecordId || proof.owner.principalVersion!==source.owner.principalVersion || proof.owner.principalId!==source.principalId
+      || proof.originBindingId!==report.binding.id || proof.production.quiescent!==true || proof.production.budgetSettlementState!=='finalized'
+      || !/^[a-f0-9]{64}$/u.test(proof.proofDigest))throw new Error('work item feedback proof mismatch')
+    const {proofDigest:observedDigest,...unsignedProof}=proof
+    if(workItemReplyDigest(unsignedProof)!==observedDigest)throw new Error('noncanonical work item feedback proof')
+    if(intent.proofDigest!==undefined && intent.proofDigest!==proof.proofDigest)throw new Error('frozen work item feedback proof changed')
+    return {capability,proof,registration,peerIdentity:workItemPeerIdentity(peer)}
+  }
+  private drainWorkItemFeedback():Promise<void>{
+    if(this.workItemFeedbackFlight)return this.workItemFeedbackFlight
+    const flight=this.runWorkItemFeedback().finally(()=>{if(this.workItemFeedbackFlight===flight)this.workItemFeedbackFlight=undefined})
+    this.workItemFeedbackFlight=flight;return flight
+  }
+  private async runWorkItemFeedback():Promise<void>{
+    if(!this.active || this.currentWorkItemReplyConsumer()?.feedbackEnabled!==true)return
+    this.drainWorkItemFeedbackAcks()
+    if(!this.evaluationSink)return
+    const page=this.deliveryStore.workItemFeedback.pending(this.workItemFeedbackCursor,100)
+    this.workItemFeedbackCursor=page.length===100?page.at(-1)!.source.admissionCursor.sequence:0
+    for(let intent of page){
+      if(!this.active)return
+      try{
+        const resolved=this.workItemFeedbackProof(intent);if(!resolved)continue
+        const {proof,capability}=resolved
+        const sink:DeliveryEvaluationSinkRegistration|undefined=this.evaluationSink
+        if(!sink || sink.registration.ownerRevisionProtocol!=='owner-objective-revision/v2' || !sink.registration.inspect)continue
+        const source=intent.source,initialKey=`work-item-owner-initial:${workItemReplyDigest([source.scope,source.target.itemId,source.owner])}`
+        const claimsFor=(command:import('./feedback-command.js').ObjectiveCommand):TrustedDeliveryEvaluationClaims=>({scope:source.scope,situation:`work-item:${proof.itemKind}`,
+          subjectKind:'work-item',subjectRef:source.target.itemId,runId:proof.production.runId,outboxId:source.target.outboxId,chatId:this.deliveryStore.getInbox(source.inboxId)!.envelope.conversation.chat,
+          principalId:source.principalId,bindingId:source.binding.id,workItemOutcomeCapability:capability,
+          objectiveStatus:command.kind==='objective-status'?'achieved':command.objectiveStatus,
+          ownerCommand:{...source.owner,operationId:source.operationId,action:command.kind==='objective-revision'?command.action:'initial',...(command.kind==='objective-revision'?{expectedVersion:command.expectedVersion,previousStatus:command.previousStatus}:{})},
+          occurredAt:source.occurredAt,initialIdempotencyKey:initialKey,idempotencyKey:command.kind==='objective-revision'?source.operationId:initialKey})
+        const inspectClaims=claimsFor({kind:'objective-status'}),inspectCapability=sink.registration.issueCapability(inspectClaims)
+        if(this.evaluationSink?.token!==sink.token)continue
+        this.workItemFeedbackFence(intent)
+        const current=sink.registration.inspect(inspectCapability)
+        this.workItemFeedbackFence(intent)
+        if(this.evaluationSink?.token!==sink.token)continue
+        const evaluation=this.context.get('assistantEvaluation' as never,false) as AssistantEvaluationService|undefined
+        const projection=evaluation?.getTrustedWorkItemLearningProjection({scope:evaluation.canonicalHostScope(source.scope),itemId:source.target.itemId})
+        this.workItemFeedbackFence(intent)
+        if(intent.state==='pending'){
+          const selection=source.selection
+          let command:import('./feedback-command.js').ObjectiveCommand
+          if(selection.kind==='explicit')command=selection.command
+          else if(selection.value==='withdraw' && (!current || current.objectiveStatus==='unknown')){
+            this.deliveryStore.workItemFeedback.settle(source.inboxId,'conflict',undefined,()=>{this.workItemFeedbackFence(intent)});continue
+          }else if(current && selection.value===current.objectiveStatus)command={kind:'objective-status'}
+          else command=current?{kind:'objective-revision',action:selection.value==='withdraw'?'withdraw':'correct',expectedVersion:current.version,previousStatus:current.objectiveStatus,objectiveStatus:selection.value==='withdraw'?'unknown':selection.value}
+            :{kind:'objective',objectiveStatus:selection.value as import('./feedback-command.js').ObjectiveFeedbackStatus}
+          intent=this.deliveryStore.workItemFeedback.freeze(source.inboxId,command,proof.proofDigest,()=>{this.workItemFeedbackFence(intent)})
+        }
+        if(intent.state!=='frozen' || !intent.command)continue
+        const command=intent.command
+        if(command.kind==='objective-status'){
+          this.deliveryStore.workItemFeedback.settle(source.inboxId,'recorded',{version:current?.version??0,objectiveStatus:current?.objectiveStatus??'unknown',...(projection?.objective?.outcomeId?{outcomeId:projection.objective.outcomeId}:{})},()=>{this.workItemFeedbackFence(intent)});continue
+        }
+        const claims=claimsFor(command),receipt=sink.registration.issueCapability(claims)
+        this.workItemFeedbackFence(intent)
+        if(this.evaluationSink?.token!==sink.token)continue
+        const outcome=sink.registration.append({capabilityReceipt:receipt,runId:claims.runId,outboxId:claims.outboxId,chatId:claims.chatId,principalId:claims.principalId,bindingId:claims.bindingId,idempotencyKey:claims.idempotencyKey})
+        const settled=this.deliveryStore.workItemFeedback.get(source.inboxId)
+        if(this.evaluationSink?.token!==sink.token || !outcome.ownerFeedbackState || settled?.state!=='recorded'
+          || settled.canonical?.outcomeId!==outcome.id)continue
+        this.workItemFeedbackFence(settled)
+      }catch(error){
+        if(typeof error==='object' && error!==null && 'code' in error && ['version-conflict','idempotency-conflict'].includes(String(error.code))){
+          this.deliveryStore.workItemFeedback.settle(intent.source.inboxId,'conflict',undefined,()=>{this.workItemFeedbackFence(intent)})
+        }
+        // Dependency absence and unknown append outcomes remain durable; no foreground or worker replay.
+      }
+    }
+    if(this.active)this.drainWorkItemFeedbackAcks()
+  }
+
+  private drainWorkItemFeedbackAcks():void{
+    const page=this.deliveryStore.workItemFeedback.pendingAcknowledgements(this.workItemFeedbackAckCursor,100)
+    this.workItemFeedbackAckCursor=page.length===100?page.at(-1)!.source.admissionCursor.sequence:0
+    for(const intent of page){
+      try{
+        const registration=this.workItemFeedbackFence(intent,true)
+        const original=this.deliveryStore.getBinding(intent.source.binding.id)!,binding=this.deliveryStore.getActiveBinding(original.conversation)!
+        const text=intent.state==='conflict'?'任务反馈版本已变化，本次更改未生效。请回复原报告发送 /feedback status 查看当前版本。'
+          :intent.canonical?.version===0?'查询时该工作项暂无已记录反馈。':objectiveStateMessage(intent.canonical!).replace('当前任务反馈：',intent.command?.kind==='objective-status'?'查询时的任务反馈：':'本次已记录任务反馈：')
+        this.enqueueBackgroundAuthorized({sourceId:registration.sourceId,workspace:binding.workspace,bindingId:binding.id,
+          idempotencyKey:`feedback:${intent.source.inboxId}:ack`,text,format:'plain'})
+      }catch{/* Recording is independent of send authority; only an absent Outbox is retried. */}
+    }
+  }
+
+  withOwnerWorkItemFeedbackWriterFence<T>(registration:Readonly<TrustedDeliveryEvaluationRegistration>,claims:Readonly<TrustedDeliveryEvaluationClaims>,proofDigest:string,callback:()=>T):T{
+    this.assertActive()
+    const sink=this.evaluationSink
+    if(!sink || sink.registration!==registration || !registrationOwnedByEvaluation(registration)
+      || claims.subjectKind!=='work-item' || !claims.ownerCommand)throw new Error('work item owner writer registration is not current')
+    const consumer=this.currentWorkItemReplyConsumer()
+    const peer=this.context.get('assistantWorkItems' as never,false) as unknown as {resolveOwnerWorkItemFeedbackTarget?(capability:unknown):Readonly<TrustedWorkItemOwnerFeedbackProof>|undefined}|undefined
+    const peerIdentity=workItemPeerIdentity(peer)
+    if(!consumer || consumer.feedbackEnabled!==true || typeof peer?.resolveOwnerWorkItemFeedbackTarget!=='function')throw new Error('work item feedback producer is not current')
+    return this.deliveryStore.workItemFeedback.withOwnerWriterFence(claims.ownerCommand.operationId,intent=>{
+      const source=intent.source,command=intent.command
+      const initialKey=`work-item-owner-initial:${workItemReplyDigest([source.scope,source.target.itemId,source.owner])}`
+      if(claims.initialIdempotencyKey!==initialKey || claims.idempotencyKey!==(command?.kind==='objective-revision'?source.operationId:initialKey))throw new Error('owner feedback operation identity changed')
+      if(!command || command.kind==='objective-status' || intent.proofDigest!==proofDigest || source.operationId!==claims.ownerCommand!.operationId
+        || workItemReplyCanonical(source.scope)!==workItemReplyCanonical(claims.scope) || source.target.itemId!==claims.subjectRef
+        || source.target.outboxId!==claims.outboxId || source.binding.id!==claims.bindingId || source.principalId!==claims.principalId
+        || claims.chatId!==this.deliveryStore.getInbox(source.inboxId)!.envelope.conversation.chat || claims.occurredAt!==source.occurredAt
+        || claims.objectiveStatus!==command.objectiveStatus
+        || workItemReplyCanonical(claims.ownerCommand)!==workItemReplyCanonical({...source.owner,operationId:source.operationId,
+          action:command.kind==='objective-revision'?command.action:'initial',...(command.kind==='objective-revision'?{expectedVersion:command.expectedVersion,previousStatus:command.previousStatus}:{})}))throw new Error('frozen work item feedback claims changed')
+      // Complete every ownership callback before one final bounded production
+      // resolve. No producer callback runs between that proof and the write.
+      if(this.currentWorkItemReplyConsumer()!==consumer || this.evaluationSink?.token!==sink.token)throw new Error('feedback writer generation changed')
+      const finalProof=peer!.resolveOwnerWorkItemFeedbackTarget!(claims.workItemOutcomeCapability)
+      if(!finalProof || finalProof.proofDigest!==proofDigest || workItemPeerIdentity(this.context.get('assistantWorkItems' as never,false))!==peerIdentity
+        || this.evaluationSink?.token!==sink.token)throw new Error('production proof changed after writer ownership callbacks')
+      const {proofDigest:finalDigest,...finalUnsigned}=finalProof
+      if(workItemReplyDigest(finalUnsigned)!==finalDigest)throw new Error('final production proof digest changed')
+      this.workItemFeedbackFence(intent,false,consumer)
+      return callback()
+    },(intent,result)=>{
+      const value=result as Partial<import('@dsh-enhanced/assistant-evaluation').StoredOutcome>
+      const command=intent.command!
+      if(!value || typeof value!=='object' || !value.id || !value.ownerFeedbackState || command.kind==='objective-status'
+        || value.ownerFeedbackState.objectiveStatus!==claims.objectiveStatus
+        || value.ownerFeedbackState.version!==(command.kind==='objective-revision'?command.expectedVersion+1:1)
+        || value.objectiveStatus!==claims.objectiveStatus || value.idempotencyKey!==claims.idempotencyKey
+        || workItemReplyCanonical(value.scope)!==workItemReplyCanonical(claims.scope)
+        || value.source?.kind!=='user-feedback' || value.source.id!=='assistant-delivery/typed-owner-feedback'
+        || !value.evidence?.some(ref=>ref.kind==='work-item-owner-result' && ref.ref===intent.source.target.itemId)
+        || !value.evidence?.some(ref=>ref.kind==='work-item-production-proof' && ref.ref===claims.runId && ref.digest===proofDigest))throw new Error('canonical work item feedback result changed')
+      if(this.evaluationSink?.token!==sink.token)throw new Error('feedback writer registration changed before ACK')
+      this.workItemFeedbackFence(intent,false,consumer)
+      return {...value.ownerFeedbackState,outcomeId:value.id}
     })
   }
 
@@ -4699,6 +4931,7 @@ export class AssistantDeliveryService extends Service {
     // Registered callbacks run synchronously and only receive committed state.
     // The consumer schedules its own bounded drain; Delivery owns no extra loop.
     this.notifyWorkItemReplyPending()
+    void this.drainWorkItemFeedback().catch(() => { /* durable feedback retries */ })
     return () => { if (live) { live = false; if (this.workItemReplyConsumer === registration) this.workItemReplyConsumer = undefined } }
   }
 
@@ -4742,7 +4975,7 @@ export class AssistantDeliveryService extends Service {
   private admitWorkItemReply(inbox: InboxRecord, binding: ConversationBinding): boolean {
     const registration = this.currentWorkItemReplyConsumer()
     const envelope = inbox.envelope
-    if (!registration || envelope.kind !== 'text' || envelope.text.trim().startsWith('/') || !envelope.text
+    if (!registration || registration.continuationEnabled === false || envelope.kind !== 'text' || envelope.text.trim().startsWith('/') || !envelope.text
       || (envelope.attachments?.length ?? 0) > 0 || !envelope.metadata?.replyToProviderMessageId) return false
     const report = this.deliveryStore.workItemReplies.replyReport(envelope.channel,envelope.account,envelope.metadata.replyToProviderMessageId)
     const outbox = report?.outbox
@@ -4752,7 +4985,10 @@ export class AssistantDeliveryService extends Service {
       const target = this.inspectWorkItemReport({ sourceId: registration.sourceId, itemId: report.target.itemId,
         reportRevision: report.target.reportRevision, bindingId: outbox.intent.bindingId, idempotencyKey: outbox.intent.idempotencyKey,
         text: outbox.intent.text, format: outbox.intent.format === 'markdown' ? 'markdown' : 'plain' }, true)
-      if (workItemReplyCanonical(target) !== workItemReplyCanonical(report.target) || !this.workItemReplyPermission(binding,registration)) return false
+      if (workItemReplyCanonical(target) !== workItemReplyCanonical(report.target)) return false
+      if (registration.canContinueReport?.({ itemId:target.itemId,reportRevision:target.reportRevision,bindingId:outbox.intent.bindingId,
+        idempotencyKey:outbox.intent.idempotencyKey,text:outbox.intent.text,format:outbox.intent.format==='markdown'?'markdown':'plain' }) === false) return false
+      if (this.currentWorkItemReplyConsumer()!==registration || !this.workItemReplyPermission(binding,registration)) return false
     } catch { return false }
     // From here a failed durable handoff is an error, never ordinary fallback.
     this.deliveryStore.workItemReplies.admit(inbox.id,binding,report)
@@ -4765,7 +5001,7 @@ export class AssistantDeliveryService extends Service {
     const binding = this.deliveryStore.getBinding(source.binding.id)
     const inbox = this.deliveryStore.getInbox(source.id)
     const report = this.deliveryStore.workItemReplies.report(source.target.outboxId)
-    if (!registration || !binding || binding.status !== 'active' || binding.version !== source.binding.version || binding.generation !== source.binding.generation
+    if (!registration || registration.continuationEnabled === false || !binding || binding.status !== 'active' || binding.version !== source.binding.version || binding.generation !== source.binding.generation
       || !inbox || inbox.status !== 'processed' || inbox.bindingId !== binding.id || !report
       || inbox.envelope.text !== source.inputText || workItemReplyCanonical(inbox.admissionCursor) !== workItemReplyCanonical(source.admissionCursor)
       || workItemReplyCanonical(this.ownerLineageForBinding(binding)) !== workItemReplyCanonical(source.owner)
@@ -4782,8 +5018,10 @@ export class AssistantDeliveryService extends Service {
     const target = this.inspectWorkItemReport({ sourceId: registration.sourceId, itemId: source.target.itemId,
       reportRevision: source.target.reportRevision, bindingId: report.outbox.intent.bindingId, idempotencyKey: report.outbox.intent.idempotencyKey,
       text: report.outbox.intent.text, format: report.outbox.intent.format === 'markdown' ? 'markdown' : 'plain' }, true)
-    if (workItemReplyCanonical(target) !== workItemReplyCanonical(report.target)
-      || this.workItemReplyFence(source) !== registration) throw new Error('work item reply report changed')
+    if (workItemReplyCanonical(target) !== workItemReplyCanonical(report.target)) throw new Error('work item reply report changed')
+    if (registration.canContinueReport?.({itemId:target.itemId,reportRevision:target.reportRevision,bindingId:report.outbox.intent.bindingId,
+      idempotencyKey:report.outbox.intent.idempotencyKey,text:report.outbox.intent.text,format:report.outbox.intent.format==='markdown'?'markdown':'plain'})===false) throw new Error('report continuation authority expired')
+    if (this.workItemReplyFence(source) !== registration) throw new Error('work item reply authority changed')
   }
   listPendingWorkItemReplies(input: WorkItemReplyListInput): { items: readonly WorkItemReplySource[]; hasMore: boolean; nextAfterSequence: number | null } {
     this.assertActive()
@@ -5371,6 +5609,48 @@ export class AssistantDeliveryService extends Service {
    * Evaluation's workspace/preset scope alone does not establish ownership.
    * Historical Sessions remain eligible after /new, but not after owner ABA.
    */
+  inspectOwnerWorkItemLearningTask(input:{authorityId:string;principalId:string;workspace:string;agentPreset:string;outcomeId:string}):Readonly<OwnerWorkItemLearningTask>|undefined{
+    this.assertActive()
+    const owner=this.validateOwnerRoute(input)
+    const evaluation=this.context.get('assistantEvaluation' as never,false) as AssistantEvaluationService|undefined
+    if(!evaluation || typeof evaluation.getTrustedWorkItemLearningProjection!=='function')return undefined
+    const scope=evaluation.canonicalHostScope({workspace:input.workspace,preset:input.agentPreset})
+    const canonical=evaluation.getTrustedTaskLearningProjection({scope,outcomeId:input.outcomeId})
+    if(!canonical || canonical.projection.subjectKind!=='work-item' || canonical.projection.disposition!=='upsert' || !canonical.objective
+      || canonical.objective.outcomeId!==input.outcomeId || canonical.objective.source.kind!=='user-feedback' || canonical.objective.source.id!=='assistant-delivery/typed-owner-feedback' || canonical.objective.status==='unknown')return undefined
+    const revision=evaluation.inspectTrustedTaskOwnerRevision({scope,outcomeId:input.outcomeId,principalRecordId:owner.principalRecordId,principalVersion:owner.principalVersion})
+    if(!revision || revision.action==='withdraw' || !revision.operationId || revision.outcomeId!==canonical.objective.outcomeId || revision.objectiveStatus!==canonical.objective.status)return undefined
+    const intent=this.deliveryStore.workItemFeedback.findOutcome(revision.outcomeId,revision.operationId)
+    if(!intent || intent.source.target.itemId!==canonical.projection.subjectRef || intent.source.owner.principalRecordId!==owner.principalRecordId || intent.source.owner.principalVersion!==owner.principalVersion)return undefined
+    let resolved:ReturnType<AssistantDeliveryService['workItemFeedbackProof']>
+    try{resolved=this.workItemFeedbackProof(intent,true)}catch{return undefined}
+    if(!resolved)return undefined
+    const proof=resolved.proof
+    if(proof.owner.ownerRouteId!==owner.authorityId || proof.owner.principalId!==owner.principalId || !canonical.execution
+      || canonical.execution.status!==proof.production.executionStatus
+      || !canonical.execution.evidence.some(ref=>ref.kind==='work-item-production-proof' && ref.ref===proof.production.runId && ref.digest===proof.proofDigest)
+      || !canonical.objective.evidence.some(ref=>ref.kind==='work-item-report' && ref.ref===`${proof.itemId}#${proof.reportRevision}` && ref.digest===proof.reportDigest)
+      || !canonical.objective.evidence.some(ref=>ref.kind==='delivery-outbox' && ref.ref===intent.source.target.outboxId))return undefined
+    const {task,report,...proofIdentity}=proof
+    const brief=redactOwnerLearningReply(task.brief,4096),visibleReport=redactOwnerLearningReply(report.text,4096),feedback=redactOwnerLearningReply(intent.source.inputText,4096)
+    const presentation={brief:{...brief,truncated:brief.truncated||task.briefTruncated},report:{...visibleReport,truncated:visibleReport.truncated||report.truncated},feedback:{inboxId:intent.source.inboxId,...feedback}}
+    // Current route/session is an authorization check, never part of immutable historical source identity.
+    const sourceDigest=workItemReplyDigest({protocol:'assistant-delivery/owner-work-item-learning-source/v1',sourceDigest:intent.sourceDigest,proofDigest:proof.proofDigest,
+      projection:canonical.projection,ownerRevision:{version:revision.version,action:revision.action,operationId:revision.operationId}})
+    try{
+      const final=this.workItemFeedbackProof(intent,true),current=evaluation.getTrustedTaskLearningProjection({scope,outcomeId:input.outcomeId})
+      const currentRevision=evaluation.inspectTrustedTaskOwnerRevision({scope,outcomeId:input.outcomeId,principalRecordId:owner.principalRecordId,principalVersion:owner.principalVersion})
+      if(!final || final.proof.proofDigest!==proof.proofDigest || workItemReplyCanonical(current)!==workItemReplyCanonical(canonical)
+        || workItemReplyCanonical(currentRevision)!==workItemReplyCanonical(revision) || workItemReplyCanonical(this.validateOwnerRoute(input))!==workItemReplyCanonical(owner))return undefined
+      if(final.registration!==resolved.registration || final.peerIdentity!==resolved.peerIdentity
+        || workItemPeerIdentity(this.context.get('assistantWorkItems' as never,false))!==final.peerIdentity
+        || workItemPeerIdentity(this.context.get('assistantEvaluation' as never,false))!==workItemPeerIdentity(evaluation))return undefined
+      this.workItemFeedbackFence(intent,true,final.registration)
+    }catch{return undefined}
+    return Object.freeze({protocol:'assistant-delivery/owner-work-item-learning/v1',owner,canonical,judgement:'owner-feedback',
+      ownerRevision:{version:revision.version,action:revision.action,operationId:revision.operationId},proofIdentity,sourceDigest,presentation,presentationDigest:workItemReplyDigest(presentation)})
+  }
+
   inspectOwnerForegroundLearningTask(input: {
     authorityId: string
     principalId: string
@@ -6048,6 +6328,7 @@ export class AssistantDeliveryService extends Service {
     await this.drainDeliveryPresentations()
     await this.drainPreferenceProjections()
     await this.drainNaturalObjectiveIntents()
+    await this.drainWorkItemFeedback()
     await this.drainWorkflowTraces()
   }
 
@@ -6060,6 +6341,7 @@ export class AssistantDeliveryService extends Service {
       this.presentationFlight,
       this.preferenceProjectionFlight,
       this.naturalObjectiveFlight,
+      this.workItemFeedbackFlight,
       this.workflowTraceFlight,
       this.inboundAdmissionRecoveryFlight,
       this.interruptedInboxNoticeFlight,
@@ -6367,6 +6649,7 @@ export class AssistantDeliveryService extends Service {
       this.presentationFlight,
       this.preferenceProjectionFlight,
       this.naturalObjectiveFlight,
+      this.workItemFeedbackFlight,
       this.workflowTraceFlight,
       this.restartFlight,
     ])

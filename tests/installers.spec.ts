@@ -215,16 +215,16 @@ describe('supervised lifecycle v3 invariants', () => {
     }
   })
 
-  test('accepts reviewed Delivery schema 23 through 29 compact proofs and rejects schema 30 in every phase', () => {
+  test('accepts reviewed Delivery schema 23 through 30 compact proofs and rejects schema 31 in every phase', () => {
     const locations = ['source', 'previewAcceptance', 'postSwapAcceptance'] as const
-    for (const schemaVersion of [23, 24, 25, 26, 27, 28, 29]) {
+    for (const schemaVersion of [23, 24, 25, 26, 27, 28, 29, 30]) {
       const accepted = structuredClone(supervisedManifestFixture('post-swap-accepted'))
       for (const location of locations) accepted[location].deliveryProof.schemaVersion = schemaVersion
       expect(lifecycleProfileTest.validSupervisedLifecycle(accepted), `reviewed schema ${schemaVersion}`).toBe(true)
       for (const location of locations) {
         const rejected = structuredClone(accepted)
-        rejected[location].deliveryProof.schemaVersion = 30
-        expect(lifecycleProfileTest.validSupervisedLifecycle(rejected), `${location} schema 30`).toBe(false)
+        rejected[location].deliveryProof.schemaVersion = 31
+        expect(lifecycleProfileTest.validSupervisedLifecycle(rejected), `${location} schema 31`).toBe(false)
       }
     }
   })
@@ -854,7 +854,7 @@ interface LifecycleRunOptions {
   supervisedMockFailure?: 'active' | 'host-exit' | 'post-swap' | 'preview'
   supervisedProofDrift?: boolean
   supervisedUnmanagedAutomationDrift?: boolean
-  deliverySnapshotSchema?: 23 | 24 | 25 | 26 | 27 | 28 | 29
+  deliverySnapshotSchema?: 23 | 24 | 25 | 26 | 27 | 28 | 29 | 30
 }
 
 async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
@@ -4760,7 +4760,7 @@ describe('one-click installers', () => {
     await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
-  test.each([23, 24, 25, 26, 27, 28, 29] as const)('supervised service upgrade completes preview, swap, active acceptance, and cleanup with Delivery schema %s', async deliverySnapshotSchema => {
+  test.each([23, 24, 25, 26, 27, 28, 29, 30] as const)('supervised service upgrade completes preview, swap, active acceptance, and cleanup with Delivery schema %s', async deliverySnapshotSchema => {
     const f = await lifecycleFixture({ effectiveScenario: 'supervised', deliverySnapshotSchema, systemd: { units: [{ profile: 'web', active: true }] } })
     const result = runServiceLifecycle(
       ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' },

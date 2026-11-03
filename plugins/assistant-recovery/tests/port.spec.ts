@@ -282,6 +282,29 @@ describe('HostRecoveryRunbookPort', () => {
     }))
   })
 
+  it('records an inapplicable exact projection as a no-op without claiming quality was projected', async () => {
+    const reconcileProjection = vi.fn(async () => ({
+      evaluationId: 'work-item-result-7', status: 'not-required' as const, attemptCount: 0,
+    }))
+    const current = runtime({ evaluation: {
+      health: vi.fn(() => ({ ready: true } as never)),
+      peekPendingProjection: vi.fn(() => undefined),
+      reconcileProjection,
+    } })
+    const adapter = port(current)
+    const action = { kind: 'project-evaluation' as const, evaluationId: 'work-item-result-7' }
+    const result = await adapter.execute(
+      context(), 'ledger-reconcile', action,
+      'recovery:4:occurrence-1:ledger-reconcile', new AbortController().signal,
+    )
+    expect(result).toMatchObject({ status: 'noop', resultCode: 'projection-not-required' })
+    expect(reconcileProjection).toHaveBeenCalledTimes(1)
+    expect(reconcileProjection).toHaveBeenCalledWith(expect.objectContaining({
+      evaluationId: action.evaluationId,
+      operationId: 'recovery:4:occurrence-1:ledger-reconcile',
+    }))
+  })
+
   it('treats a deferred exact projection as a possible-effect failure', async () => {
     const current = runtime({
       evaluation: {

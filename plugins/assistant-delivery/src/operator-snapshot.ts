@@ -207,7 +207,7 @@ export interface ActiveLarkOwnerBinding extends Readonly<ConversationBinding> {
 
 export interface ActiveLarkOwnerBindingsSnapshot {
   readonly protocol: typeof activeLarkOwnerBindingsSnapshotProtocol
-  readonly schemaVersion: 23 | 24 | 25 | 26 | 27 | 28 | 29
+  readonly schemaVersion: 23 | 24 | 25 | 26 | 27 | 28 | 29 | 30
   readonly scope: Readonly<Omit<ActiveLarkOwnerBindingsQuery, 'databasePath'>>
   readonly database: DeliveryOperatorFileIdentity
   readonly sidecars: Readonly<{
@@ -817,8 +817,8 @@ function operatorInspectDatabase<T>(databasePath: string, inspect: (database: Da
     // v24 adds natural feedback, v25 foreground completion ordering, v26
     // restart fences, v27 progress handles, v28 foreground termination, and v29 WorkItems reply sidecars.
     // The owner tables read here are unchanged in these six reviewed schemas. Do not accept future versions.
-    if (version !== 23 && version !== 24 && version !== 25 && version !== 26 && version !== 27 && version !== 28 && version !== 29) {
-      operatorFail('schema-unsupported', 'expected schema 23, 24, 25, 26, 27, 28 or 29')
+    if (version !== 23 && version !== 24 && version !== 25 && version !== 26 && version !== 27 && version !== 28 && version !== 29 && version !== 30) {
+      operatorFail('schema-unsupported', 'expected schema 23, 24, 25, 26, 27, 28, 29 or 30')
     }
     const quick = database.prepare('PRAGMA quick_check').all() as unknown as Array<{ quick_check?: unknown }>
     if (quick.length !== 1 || quick[0]?.quick_check !== 'ok') operatorFail('database-corrupt', 'SQLite quick_check failed')

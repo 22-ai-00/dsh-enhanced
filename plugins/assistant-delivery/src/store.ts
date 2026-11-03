@@ -1,3 +1,4 @@
+import { WorkItemFeedbackStore } from './work-item-feedback-store.js'
 import { WorkItemRepliesStore } from './work-item-replies-store.js'
 import { normalizeForegroundTerminationObservation, type ForegroundTerminationObservation } from './foreground-termination.js'
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
@@ -2142,6 +2143,7 @@ export type NaturalObjectiveIntent = Readonly<{
 
 export class DeliveryStore {
   readonly workItemReplies: WorkItemRepliesStore
+  readonly workItemFeedback: WorkItemFeedbackStore
   private readonly database: DatabaseSync
   /** Scan position only; every candidate is authorized again before a provider retry. */
   private readonly progressRecoveryCursors = new Map<string, {
@@ -2161,6 +2163,7 @@ export class DeliveryStore {
     this.maxTextBytes = options.maxTextBytes ?? 65_536
     this.workItemReplies = new WorkItemRepliesStore(this.database, operation => this.transaction(operation),
       id => this.getInbox(id), id => this.getBinding(id), id => this.getOutbox(id), binding => this.getPrincipal(binding.principal))
+    this.workItemFeedback = new WorkItemFeedbackStore(this.database, operation => this.transaction(operation), id => this.getInbox(id))
     const instance = this.database.prepare(`
       SELECT instance_id FROM delivery_instance WHERE singleton = 1
     `).get() as { instance_id: string } | undefined
@@ -3561,6 +3564,7 @@ export class DeliveryStore {
       if (!Number.isSafeInteger(cancelledCount)) {
         throw new DeliveryStoreError('conflict', 'inbox cancellation count is outside the safe integer range')
       }
+      this.workItemFeedback.cancelBefore(bindingId,boundaryRow.admission_sequence)
       const replyChildItemIds = this.workItemReplies.cancelBefore(bindingId, boundaryRow.admission_sequence)
       return {
         cancelled: cancelledCount,

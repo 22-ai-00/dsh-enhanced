@@ -46,7 +46,8 @@ Automation definition 和 Recovery ledger，任一漂移都会在执行前拒绝
 1. 通过 Delivery Host receipt v2 精确重验 live owner route、workspace、preset、principal 以及
    durable principal row id/version，随后校验 Automation definition、Policy 与所需 Host service admission；
 2. 从 Evaluation 的只读 Host outbox 精确选择一个 `evaluationId`，把该 ID 先写入 Recovery
-   intent，再用 step idempotency key 投影到 Evolution；不会在 execute/replay 时重新选择“下一条”；
+   intent，再用 step idempotency key 投影到 Evolution；不会在 execute/replay 时重新选择“下一条”。
+   Evaluation 明确返回 `not-required` 时记为 `projection-not-required` 的 noop，不宣称质量已投影，也不按失败重试；
 3. 先通过 Preference 的只读 Host owner-fence seam 固定当前 owner generation 与 Delivery
    principal row lineage，再持久化 action；执行前重验 live route，每轮最多清理一个已过
    retention 的 Preference evidence；

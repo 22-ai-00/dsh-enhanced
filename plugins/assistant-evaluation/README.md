@@ -89,6 +89,14 @@ projection 保存选中的 execution/objective/delivery component id，原始两
 
 scope、situation、producer/evaluator id、证据引用和指标属于本地评测元数据，可能仍有隐私含义；调用方不应把原始 prompt、secret、消息正文或绝对产物路径放入这些字段。
 
+## 工作项报告的主人结果反馈
+
+WorkItems 的普通结算仍只能记录 `objectiveStatus: unknown`。显式启用其独立报告反馈入口后，Delivery 对真实报告回复建立当前 owner 来源，Evaluation 再通过当前 WorkItems 代次的 opaque capability 独立读取精确报告、冻结供应和已静止且预算结算的真实 production 证明。`ready`、退出码或 provider accepted 都不自动形成目标成功；`achieved` / `not-achieved` 是主人对这条报告的判断。
+
+该路径使用 `work-item` / 原 `itemId` 作为唯一 canonical 主体；报告 revision、digest 和原生 run 是证据，不增加学习票数，也不沿续办 stream 改评后来的子项。执行状态来自独立 proof，按持久 report revision 选择；同 revision 的矛盾 proof 保持不可学习。主人判断走既有 initial / correct / withdraw CAS 和持久 operation 幂等链。`getTrustedWorkItemLearningProjection({ scope, itemId })` 返回当前有版本与 digest 的投影，撤回返回 `retract`；`getTrustedTaskLearningProjection`、owner revision reader 和 writer fence 同样支持这个主体。模型自评不能创建该可信结果。新的结果写入还要求当前 Delivery 提供源 writer fence：最后一次 WorkItems 读取后重核当前反馈授权和冻结来源，在同一源锁内写入 owner 判断并结算来源。通知在源事务提交后发送；跨库失去回执时保留原操作身份恢复，不声称可原子回滚两个数据库。
+
+schema 13 扩展任务投影的主体身份约束及投影 outbox 的状态约束，保留既有 outcome、owner 命令、projection、投影 outbox、scope watermark 和 feed head 的值。旧 `work-item` settlement 仍是独立 outcome audit，不追认或合并为新结果。Growth / Memory 消费者可以继续拒绝尚未支持的新主体；这一来源不自行触发模型、采用插件或授予执行预算。当前 Evolution 不支持该新主体，因此其投递 outbox 诚实保存为 `not-required`，不会伪造 applied/recorded、指数重试或消耗恢复预算；canonical feed、来源 reader 和 canonical writer fence 仍可使用。要求已经投递 Evolution 的旧 learning writer fence 则明确拒绝 `work-item` 证据。
+
 ## 限制
 
 - 账本保存“谁以什么证据做了什么判断”，并不把模型自评提升为 ground truth。

@@ -82,13 +82,13 @@ interface OutcomeRow {
   evaluator_id: string
   evaluator_version: string
   task_subject_key: string | null
-  task_subject_kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome' | null
+  task_subject_kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'work-item' | 'outcome' | null
   task_subject_ref: string | null
 }
 
 interface ProjectedOutcomeRow extends OutcomeRow {
   task_subject_key: string
-  task_subject_kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
+  task_subject_kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'work-item' | 'outcome'
   task_subject_ref: string
   task_objective_conflicted: 0 | 1
   task_primary_outcome_id: string
@@ -125,7 +125,7 @@ interface SelfAssessmentRow {
 
 interface ProjectionOutboxRow {
   evaluation_id: string
-  status: 'pending' | 'recorded'
+  status: 'pending' | 'recorded' | 'not-required'
   attempt_count: number
   next_attempt_at: number
   last_failure_at: number | null
@@ -383,7 +383,7 @@ export function evaluationLearningProjectionDigest(input: {
     evaluator: Readonly<{ id: string; version: string }>
   }>
   projection: Readonly<{
-    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
+    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'work-item' | 'outcome'
     subjectRef: string
     disposition: 'upsert' | 'retract'
     evidenceOutcomeId?: string
@@ -422,7 +422,7 @@ export function evaluationLearningProjectionDigest(input: {
 
 interface TaskSubject {
   key: string
-  kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
+  kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'work-item' | 'outcome'
   ref: string
 }
 
@@ -430,7 +430,20 @@ function taskSubject(
   scopeKey: string,
   outcomeId: string,
   references: readonly EvaluationEvidenceRef[],
+  authority?: Pick<OutcomeEnvelope, 'trust' | 'source' | 'evaluator'>,
 ): TaskSubject {
+  if (authority?.trust === 'trusted' && (
+    authority.source.kind === 'system' && authority.source.id === 'assistant-work-items-owner-proof'
+      && authority.evaluator.id === 'assistant-work-items-owner-proof' && authority.evaluator.version === '1'
+    || authority.source.kind === 'user-feedback' && authority.source.id === 'assistant-delivery/typed-owner-feedback'
+      && authority.evaluator.id === 'assistant-delivery-owner-feedback' && authority.evaluator.version === '2'
+  )) {
+    const targets = references.filter(item => item.kind === 'work-item-owner-result')
+    if (targets.length === 1 && !references.some(item => ['automation-run','foreground-turn','goal-step','goal-outcome'].includes(item.kind))) {
+      const ref = targets[0]!.ref
+      return Object.freeze({ key: JSON.stringify([scopeKey, 'work-item', ref]), kind: 'work-item', ref })
+    }
+  }
   const typed: Array<{ kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome'; ref: string }> = references.flatMap(reference => (
     reference.kind === 'automation-run' || reference.kind === 'foreground-turn' || reference.kind === 'goal-step' || reference.kind === 'goal-outcome'
       ? [{ kind: reference.kind, ref: reference.ref }]
@@ -493,7 +506,7 @@ function isAuthenticatedOwnerFeedback(row: OutcomeRow): boolean {
     && row.evaluator_id === 'assistant-delivery-owner-feedback'
     && row.evaluator_version === '2'
     && (containsEvidence(row, 'automation-run') || containsEvidence(row, 'foreground-turn')
-      || containsEvidence(row, 'goal-outcome'))
+      || containsEvidence(row, 'goal-outcome') || containsEvidence(row, 'work-item-owner-result'))
     && containsEvidence(row, 'delivery-outbox')
 }
 
@@ -505,6 +518,39 @@ function isTrustedVerifierReceipt(row: OutcomeRow): boolean {
     && row.evaluator_version === '1'
     && containsEvidence(row, 'acceptance-contract')
     && containsEvidence(row, 'verification-receipt')
+}
+
+function workItemProductionIdentity(evidence: readonly EvaluationEvidenceRef[]): string | undefined {
+  const matches = evidence.filter(item => item.kind === 'work-item-production-proof')
+  return matches.length === 1 && matches[0]!.digest !== undefined
+    ? JSON.stringify([matches[0]!.ref, matches[0]!.digest]) : undefined
+}
+
+function isAuthoritativeWorkItemTerminal(row: OutcomeRow): boolean {
+  return row.trust === 'trusted' && row.source_kind === 'system'
+    && row.source_id === 'assistant-work-items-owner-proof'
+    && row.evaluator_id === 'assistant-work-items-owner-proof' && row.evaluator_version === '1'
+    && containsEvidence(row, 'work-item-owner-result') && containsEvidence(row, 'work-item-production-proof')
+    && row.execution_status !== 'unknown' && row.objective_status === 'unknown'
+}
+
+function latestWorkItemTerminal(rows: readonly OutcomeRow[]): OutcomeRow | undefined {
+  const revision = (row: OutcomeRow) => {
+    const reports = (JSON.parse(row.evidence_json) as EvaluationEvidenceRef[]).filter(item => item.kind === 'work-item-report')
+    if (reports.length !== 1) return 0
+    const value = Number(reports[0]!.ref.slice(reports[0]!.ref.lastIndexOf('#') + 1))
+    return Number.isSafeInteger(value) && value > 0 ? value : 0
+  }
+  const candidates = rows.filter(isAuthoritativeWorkItemTerminal).filter(row => revision(row) > 0)
+    .sort((left, right) => revision(left) - revision(right) || newer(left, right))
+  const latest = candidates.at(-1)
+  if (latest === undefined) return undefined
+  // Report order is ledger authority. Millisecond timestamps and random audit
+  // ids cannot make an older report win, and conflicting proof for one report
+  // cannot be silently resolved into a learning-eligible execution.
+  const identities = new Set(candidates.filter(row => revision(row) === revision(latest))
+    .map(row => workItemProductionIdentity(JSON.parse(row.evidence_json) as EvaluationEvidenceRef[])))
+  return identities.size === 1 && !identities.has(undefined) ? latest : undefined
 }
 
 function isAuthoritativeForegroundTerminal(row: OutcomeRow): boolean {
@@ -619,7 +665,7 @@ export class EvaluationStore {
     const payloadHash = digest(normalized)
     const recordedAt = timestamp(this.#now(), 'recordedAt')
     const outcomeId = `outcome-${randomUUID()}`
-    const verifierSubject = taskSubject(normalized.scopeKey, outcomeId, normalized.evidence)
+    const verifierSubject = taskSubject(normalized.scopeKey, outcomeId, normalized.evidence, normalized)
     const exactEvidence = (entries: readonly EvaluationEvidenceRef[], kind: string, ref: string, digestValue?: string) => entries.some(item => (
       item.kind === kind && item.ref === ref
       && (digestValue === undefined || item.digest === digestValue)
@@ -739,15 +785,18 @@ export class EvaluationStore {
   }
 
   ownerObjectiveState(scope: EvaluationScope, runId: string, principalRecordId: string, principalVersion: number): OwnerObjectiveState | undefined
-  ownerObjectiveState(scope: EvaluationScope, subjectKind: 'automation-run' | 'foreground-turn' | 'goal-outcome', subjectRef: string, principalRecordId: string, principalVersion: number): OwnerObjectiveState | undefined
-  ownerObjectiveState(scope: EvaluationScope, subjectKindOrRef: 'automation-run' | 'foreground-turn' | 'goal-outcome' | string, subjectRefOrPrincipal: string, principalRecordIdOrVersion: string | number, principalVersion?: number): OwnerObjectiveState | undefined {
+  ownerObjectiveState(scope: EvaluationScope, subjectKind: 'automation-run' | 'foreground-turn' | 'goal-outcome' | 'work-item', subjectRef: string, principalRecordId: string, principalVersion: number): OwnerObjectiveState | undefined
+  ownerObjectiveState(scope: EvaluationScope, subjectKindOrRef: 'automation-run' | 'foreground-turn' | 'goal-outcome' | 'work-item' | string, subjectRefOrPrincipal: string, principalRecordIdOrVersion: string | number, principalVersion?: number): OwnerObjectiveState | undefined {
     // Arity, not the opaque legacy run id, selects the generic overload.
     const generic = principalVersion !== undefined
     const subjectKind = generic ? subjectKindOrRef : 'automation-run'
     const subjectRef = generic ? subjectRefOrPrincipal : subjectKindOrRef
     const principalRecordId = generic ? principalRecordIdOrVersion as string : subjectRefOrPrincipal
     const version = generic ? principalVersion! : principalRecordIdOrVersion as number
-    const subject = taskSubject(canonicalEvaluationScope(scope).scopeKey, '', [{ kind: subjectKind, ref: subjectRef }])
+    const scopeKey = canonicalEvaluationScope(scope).scopeKey
+    const subject = subjectKind === 'work-item'
+      ? { key: JSON.stringify([scopeKey, 'work-item', subjectRef]) }
+      : taskSubject(scopeKey, '', [{ kind: subjectKind, ref: subjectRef }])
     const row = this.#database.prepare(`
       SELECT revision.version, outcome.objective_status
       FROM evaluation_owner_revisions revision JOIN evaluation_outcomes outcome ON outcome.id = revision.outcome_id
@@ -766,13 +815,13 @@ export class EvaluationStore {
     const normalized = this.#normalize(input)
     const payloadHash = digest(normalized)
     const id = `outcome-${randomUUID()}`
-    const subject = taskSubject(normalized.scopeKey, id, normalized.evidence)
+    const subject = taskSubject(normalized.scopeKey, id, normalized.evidence, normalized)
     const recordedAt = timestamp(this.#now(), 'recordedAt')
     const metric = normalized.metrics
     let committed = false
     this.#database.exec('BEGIN IMMEDIATE')
     try {
-      let previous: { outcome_id: string; version: number; objective_status: ObjectiveStatus } | undefined
+      let previous: { outcome_id: string; version: number; objective_status: ObjectiveStatus; evidence_json: string } | undefined
       const commandHash = digest({ input: normalized, ownerCommand: ownerCommand ?? null })
       if (ownerCommand !== undefined) {
         const replay = this.#database.prepare(`SELECT * FROM evaluation_owner_commands WHERE operation_id = ?`)
@@ -785,7 +834,7 @@ export class EvaluationStore {
           return this.ownerCommandResult(result)
         }
         previous = this.#database.prepare(`
-          SELECT revision.outcome_id, revision.version, outcome.objective_status
+          SELECT revision.outcome_id, revision.version, outcome.objective_status, outcome.evidence_json
           FROM evaluation_owner_revisions revision JOIN evaluation_outcomes outcome ON outcome.id = revision.outcome_id
           WHERE revision.subject_key = ? AND revision.lineage = ? ORDER BY revision.version DESC LIMIT 1
         `).get(subject.key, JSON.stringify([ownerCommand.principalRecordId, ownerCommand.principalVersion])) as typeof previous
@@ -797,9 +846,12 @@ export class EvaluationStore {
           committed = true
           throw new EvaluationStoreError('version-conflict', 'owner judgement changed; inspect current feedback and retry')
         }
+        const sameWorkItemProof = subject.kind !== 'work-item' || previous === undefined
+          || workItemProductionIdentity(JSON.parse(previous.evidence_json) as EvaluationEvidenceRef[])
+            === workItemProductionIdentity(normalized.evidence)
         if (previous !== undefined && (ownerCommand.action === 'initial'
-          || previous.objective_status === normalized.objectiveStatus)) {
-          if (previous.objective_status !== normalized.objectiveStatus) {
+          || previous.objective_status === normalized.objectiveStatus && sameWorkItemProof)) {
+          if (previous.objective_status !== normalized.objectiveStatus || !sameWorkItemProof) {
             this.#database.prepare(`INSERT INTO evaluation_owner_commands VALUES (?, ?, NULL, 'idempotency-conflict')`)
               .run(ownerCommand.operationId, commandHash)
             this.#database.exec('COMMIT')
@@ -873,9 +925,10 @@ export class EvaluationStore {
           INSERT INTO evaluation_projection_outbox(
             evaluation_id, status, attempt_count, next_attempt_at,
             last_failure_at, last_failure_code, created_at, updated_at)
-          VALUES (?, 'pending', 0, ?, NULL, NULL, ?, ?)
+          VALUES (?, ?, 0, ?, NULL, NULL, ?, ?)
           ON CONFLICT(evaluation_id) DO NOTHING
-        `).run(winner.id, winner.recorded_at, winner.recorded_at, winner.recorded_at)
+        `).run(winner.id, winnerSubject.kind === 'work-item' ? 'not-required' : 'pending',
+          winner.recorded_at, winner.recorded_at, winner.recorded_at)
         this.#advanceScopeWatermark(winner.scope_key, winner.recorded_at, winnerSubject.key)
       }
       this.#database.exec('COMMIT')
@@ -1112,6 +1165,19 @@ export class EvaluationStore {
     return this.getTaskLearningProjection(scopeInput, row.evaluation_id)
   }
 
+  /** Exact work-item owner-result projection; historical system settlements stay audit-only. */
+  getWorkItemLearningProjection(scopeInput: EvaluationScope, itemIdInput: string): TrustedTaskLearningProjectionReceipt | undefined {
+    const { scopeKey } = canonicalEvaluationScope(scopeInput)
+    const itemId = boundedText(itemIdInput, 'itemId', 1_000)
+    const row = this.#database.prepare(`SELECT outbox.evaluation_id
+      FROM evaluation_task_projection_view task
+      JOIN evaluation_outcomes audit ON audit.task_subject_key = task.task_subject_key AND audit.scope_key = task.scope_key
+      JOIN evaluation_projection_outbox outbox ON outbox.evaluation_id = audit.id
+      WHERE task.scope_key = ? AND task.task_subject_kind = 'work-item' AND task.task_subject_ref = ? AND audit.trust = 'trusted'
+      ORDER BY audit.recorded_at DESC, audit.id DESC LIMIT 1`).get(scopeKey, itemId) as { evaluation_id: string } | undefined
+    return row === undefined ? undefined : this.getTaskLearningProjection(scopeInput, row.evaluation_id)
+  }
+
   /** Exact whole-goal lookup by the verifier assessment identity. */
   getGoalOutcomeLearningProjection(
     scopeInput: EvaluationScope,
@@ -1274,6 +1340,9 @@ export class EvaluationStore {
   ): EvaluationLearningWriterFenceResult<T> {
     const { scopeKey } = canonicalEvaluationScope(scopeInput)
     const fence = this.#normalizeLearningWriterFence(fenceInput, false)
+    if (options.requireProjectionDelivery !== false && fence.evidence.some(item => item.subjectKind === 'work-item')) {
+      throw new EvaluationStoreError('invalid-input', 'work-item evidence is not supported by the Evolution writer fence')
+    }
     return this.#withLearningWriterFence(scopeKey, fence, callback, options)
   }
 
@@ -1613,7 +1682,7 @@ export class EvaluationStore {
         if (!refreshed.learningVersionChanged) continue
         const current = this.#database.prepare(`
           SELECT projection.scope_key, projection.primary_outcome_id, projection.updated_at,
-            outcome.trust
+            projection.subject_kind, outcome.trust
           FROM evaluation_task_projections projection
           JOIN evaluation_outcomes outcome ON outcome.id = projection.primary_outcome_id
           WHERE projection.subject_key = ?
@@ -1621,6 +1690,7 @@ export class EvaluationStore {
           scope_key: string
           primary_outcome_id: string
           updated_at: number
+          subject_kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'work-item' | 'outcome'
           trust: OutcomeTrust
         }
         if (current.trust !== 'trusted') continue
@@ -1628,20 +1698,27 @@ export class EvaluationStore {
           INSERT INTO evaluation_projection_outbox(
             evaluation_id, status, attempt_count, next_attempt_at,
             last_failure_at, last_failure_code, created_at, updated_at)
-          VALUES (?, 'pending', 0, ?, NULL, NULL, ?, ?)
+          VALUES (?, ?, 0, ?, NULL, NULL, ?, ?)
           ON CONFLICT(evaluation_id) DO UPDATE SET
-            status = 'pending', attempt_count = 0,
+            status = excluded.status, attempt_count = 0,
             next_attempt_at = excluded.next_attempt_at,
             last_failure_at = NULL, last_failure_code = NULL,
             updated_at = excluded.updated_at
         `).run(
           current.primary_outcome_id,
+          current.subject_kind === 'work-item' ? 'not-required' : 'pending',
           current.updated_at,
           current.updated_at,
           current.updated_at,
         )
         this.#advanceScopeWatermark(current.scope_key, current.updated_at, subjectKey)
       }
+      // An unsupported optional consumer must never become retry work. This
+      // also settles pending rows from an interrupted pre-release Host without
+      // inventing an Evolution applied receipt or rewriting canonical evidence.
+      this.#database.prepare(`UPDATE evaluation_projection_outbox SET status = 'not-required'
+        WHERE status = 'pending' AND EXISTS (SELECT 1 FROM evaluation_outcomes outcome
+          WHERE outcome.id = evaluation_projection_outbox.evaluation_id AND outcome.task_subject_kind = 'work-item')`).run()
       this.#database.exec('COMMIT')
     } catch (error) {
       this.#database.exec('ROLLBACK')
@@ -1654,7 +1731,7 @@ export class EvaluationStore {
       SELECT subject_kind, subject_ref, learning_version, learning_digest, learning_disposition
       FROM evaluation_task_projections WHERE subject_key = ?
     `).get(subjectKey) as {
-      subject_kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
+      subject_kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'work-item' | 'outcome'
       subject_ref: string
       learning_version: number
       learning_digest: string | null
@@ -1683,7 +1760,9 @@ export class EvaluationStore {
       const terminals = rows.filter(row => isAuthoritativeAutomationTerminal(row))
       execution = projection.subject_kind === 'automation-run'
         ? latest(terminals)
-        : latest(rows.filter(row => isAuthoritativeForegroundTerminal(row)))
+        : projection.subject_kind === 'work-item'
+          ? latestWorkItemTerminal(rows)
+          : latest(rows.filter(row => isAuthoritativeForegroundTerminal(row)))
 
       const superseded = new Set((this.#database.prepare(`
         SELECT previous_outcome_id FROM evaluation_owner_revisions WHERE subject_key = ? AND previous_outcome_id IS NOT NULL
@@ -1715,7 +1794,7 @@ export class EvaluationStore {
 
       const rankedPrimary = rows.map(row => ({
         row,
-        rank: isAuthoritativeAutomationTerminal(row) || isAuthoritativeForegroundTerminal(row)
+        rank: isAuthoritativeAutomationTerminal(row) || isAuthoritativeForegroundTerminal(row) || isAuthoritativeWorkItemTerminal(row)
           ? 4
           : isAuthenticatedOwnerFeedback(row)
             ? 3
@@ -1729,11 +1808,17 @@ export class EvaluationStore {
     const objectiveSituationMismatch = objective !== undefined && objective.situation !== primary.situation
     const hostRunbook = execution !== undefined && isAuthoritativeAutomationTerminal(execution)
       && /^host-runbook-v[1-9][0-9]*$/u.test(execution.evaluator_version)
+    const workItemProofIdentity = execution === undefined ? undefined
+      : workItemProductionIdentity(JSON.parse(execution.evidence_json) as EvaluationEvidenceRef[])
+    const workItemProofMatches = projection.subject_kind !== 'work-item' || objective !== undefined
+      && workItemProofIdentity !== undefined
+      && workItemProofIdentity === workItemProductionIdentity(JSON.parse(objective.evidence_json) as EvaluationEvidenceRef[])
     const learningDisposition = !objectiveConflicted
+      && workItemProofMatches
       && !objectiveSituationMismatch
       && objective?.trust === 'trusted'
       && (objectiveStatus === 'achieved' || objectiveStatus === 'not-achieved')
-      && (projection.subject_kind !== 'automation-run' || execution !== undefined)
+      && (!['automation-run', 'work-item'].includes(projection.subject_kind) || execution !== undefined)
       && !hostRunbook
       ? 'upsert' as const
       : 'retract' as const
@@ -1823,7 +1908,7 @@ export class EvaluationStore {
     const entries = input.evidence.map((raw, index) => {
       if (typeof raw !== 'object' || raw === null || Array.isArray(raw)
         || (raw.disposition !== 'upsert' && (!allowRetract || raw.disposition !== 'retract'))
-        || (raw.subjectKind !== 'automation-run' && raw.subjectKind !== 'foreground-turn' && raw.subjectKind !== 'goal-step' && raw.subjectKind !== 'goal-outcome' && raw.subjectKind !== 'outcome')
+        || (raw.subjectKind !== 'automation-run' && raw.subjectKind !== 'foreground-turn' && raw.subjectKind !== 'goal-step' && raw.subjectKind !== 'goal-outcome' && raw.subjectKind !== 'work-item' && raw.subjectKind !== 'outcome')
         || !Number.isSafeInteger(raw.version) || raw.version < 1
         || raw.version > 1_000_000_000
         || typeof raw.digest !== 'string' || !/^[a-f\d]{64}$/u.test(raw.digest)) {
