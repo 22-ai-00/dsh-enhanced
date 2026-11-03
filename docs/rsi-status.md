@@ -20,7 +20,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 WorkItems 保留 schema 9 和原 v1 前台续办计划；新的 v2 回复计划继承执行父项已冻结的 provider/model/effort，使用显式续办工具与有限预算。先持久创建子项，再由 Delivery ACK 并推进回复序列，ACK 前不能派发。重复消息、冷恢复、取消及未知派发不会回到前台重复执行；取消不是执行已静止或外部效果已撤销的证明。每次工具调用重核来源，最终调度边界同时检查当前授权、生命周期和持久状态。
 
-本次工程验证使用真实 Delivery / Automations / AgentLoop 与本地脚本供应商。新的原生集成 6 例已通过，覆盖顺序上下文、默认模型切换、Delivery 与 WorkItems 冷重挂、ACK 前后恢复、pending/routed 取消和 ACK 前取消后的容量释放。WorkItems 整包 365 passed / 25 files；Delivery 整包限定检查为 1,092 passed / 6 skipped，使用 `--testTimeout=15000`。两部分源码、专项证据及 schema 消费者均已独立 PASS。两端根检查仍待执行，不能以这些专项替代完整验收。下方完整根检查表仍是此前 `95975505` 基线。
+本次工程验证使用真实 Delivery / Automations / AgentLoop 与本地脚本供应商。新的原生集成 6 例已通过，覆盖顺序上下文、默认模型切换、Delivery 与 WorkItems 冷重挂、ACK 前后恢复、pending/routed 取消和 ACK 前取消后的容量释放。WorkItems 整包 365 passed / 25 files；Delivery 整包限定检查为 1,092 passed / 6 skipped，使用 `--testTimeout=15000`。两部分源码、专项证据及 schema 消费者均已独立 PASS。首轮 `6b6ade61` 根检查发现一个仍拒绝 schema 29 的旧边界断言，两端已中断并保留日志；修正后相关两文件 14 passed / 2 skipped，独立 PASS。两端默认根检查待重新执行，不能以这些专项替代完整验收。下方完整根检查表仍是此前 `95975505` 基线。
 
 这一入口默认关闭，只支持可证明冻结 supplier 的 diagnosis / continuation 报告；不支持的普通消息仍走前台。它不实现运行中指令插入、任意跨信道路由或完整 Thread 订阅，不证明真实模型、外部 Bot、完整 Host 进程重启或长期自主成长。原 v1 `work_item_continue` 仍可从真实人类 turn 创建手动分支，已有前台召回与分页上下文能力保持独立。
 
