@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { jsx } from 'react/jsx-runtime'
 import { TYPERT_REMOTE } from './typert.js'
 import type { OwnerConsoleStatus, OwnerConsoleWriteResult } from './typert.js'
@@ -88,23 +88,22 @@ export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }
       setError('暂时无法读取状态，稍后重试。')
     }
   }
-  useEffect(() => {
-    let disposed = false
-    void refresh().then(() => { if (disposed) setStatus((current) => current) })
-    return () => { disposed = true }
-  }, [])
+  const mounted = useRef(true)
+  useEffect(() => () => { mounted.current = false }, [])
+  useEffect(() => { void refresh().catch(() => undefined) }, [])
 
   const run = async (action: () => Promise<RemoteResult<OwnerConsoleWriteResult>>) => {
     setBusy(true); setError('')
     try {
       const result = await action()
+      if (!mounted.current) return
       if (!result.ok) setError('Host 拒绝了这次操作，请检查输入。')
       else if (!result.value.applied) setError(result.value.note)
-      else { setError(''); await refresh() }
+      else { setError(result.value.note); await refresh() }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '操作失败')
+      if (mounted.current) setError(cause instanceof Error ? cause.message : '操作失败')
     } finally {
-      setBusy(false)
+      if (mounted.current) setBusy(false)
     }
   }
 
@@ -112,7 +111,7 @@ export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }
   const feishuRows = pending
     ? el('p', { style: { margin: 0, color: muted } }, '…')
     : el('div', { style: gridStyle },
-      row('方式', status.feishu.mode === 'lark-cli' ? 'lark-cli 一键' : '直接填写'),
+      row('方式', status.feishu.mode === 'lark-cli' ? '环境变量 secret（lark-cli 向导）' : 'keychain secret（直接配置）'),
       row('入口', status.feishu.entry ?? '未安装 lark-channel'),
       row('连接', status.feishu.connected ? '已加载' : '未连接'),
       row('appId', status.feishu.appIdConfigured ? '已配置' : '未配置'))

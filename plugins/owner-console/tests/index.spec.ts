@@ -21,10 +21,21 @@ function fakeSettings(entries: Entry[]) {
   return { service: { describe: descriptors, mutate } satisfies SettingsService, entries, mutate }
 }
 
-async function mount(settings?: SettingsService) {
+type FakeLoader = { entries: Map<string, { disposed: number, refreshed: number }> }
+
+async function mount(settings?: SettingsService, loader?: FakeLoader) {
   const ctx = new Context()
   await ctx.plugin(TypertRegistry)
   if (settings !== undefined) ctx.provide('settings' as never, settings as never)
+  if (loader !== undefined) {
+    ctx.provide('loader' as never, {
+      resolve: (id: string) => {
+        const state = loader.entries.get(id) ?? { disposed: 0, refreshed: 0 }
+        loader.entries.set(id, state)
+        return { fiber: { dispose: () => { state.disposed += 1 } }, refresh: async () => { state.refreshed += 1 } }
+      },
+    } as never)
+  }
   apply(ctx, Config(defaults))
   return { ctx, console: ctx.get('ownerConsole' as never) as unknown as OwnerConsoleService }
 }
@@ -111,6 +122,14 @@ describe('dsh-enhanced-owner-console', () => {
     const traex = fakeSettings([{ ns: 'dsh-enhanced-traex-acp-provider', value: {} }])
     const { ctx, console } = await mount(traex.service)
     try {
+      const loader: FakeLoader = { entries: new Map() }
+      const mounted = await mount(traex.service, loader)
+      try {
+        await expect(mounted.console.configureTraex(true, 'traex')).resolves.toMatchObject({ applied: true })
+        expect(loader.entries.get('dsh-enhanced-traex-acp-provider')).toEqual({ disposed: 1, refreshed: 1 })
+      } finally {
+        await mounted.ctx.fiber.dispose()
+      }
       await expect(console.configureTraex(true, 'traex')).resolves.toMatchObject({ applied: true })
       expect(traex.mutate).toHaveBeenCalledWith('dsh-enhanced-traex-acp-provider', [
         { op: 'set', path: ['enabled'], value: true },

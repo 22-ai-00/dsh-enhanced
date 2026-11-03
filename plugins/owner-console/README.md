@@ -39,9 +39,11 @@ dsh --profile web --dump-config
 写入要求 secret 引用二选一；同时给两个或都不给会被拒绝。写入前会检查那个环境变量在该
 Host 进程中确实存在，keychain handle 模式要求 `credentials-keychain` 已加载。
 account/tenant 留空时沿用条目里当前值（不会用默认值覆盖身份）；两者都为空才拒绝。
-写入通过 Host `settings.mutate` 的 set/unset 操作完成，以便安全地在两种引用之间切换。
+写入通过 Host `settings.mutate` 的 set/unset 操作完成，以便安全地在两种引用之间切换；
+写入后会重启该条目一次（dispose + refresh），因为只有重启才会让插件按新的纯配置重建
+连接/provider。自动重载失败时如实提示「已保存，但需要重启 profile 后生效」。
 
-只有声明了 `.volatile()` 的配置字段才能这样实时改写：`lark-channel` 暴露
+只有声明了 `.volatile()` 的配置字段才能被 settings 服务读取/改写（改完由本插件重启条目）：`lark-channel` 暴露
 enabled/account/tenant/appId/appSecretEnv/credentialHandle，`traex-acp-provider` 暴露
 enabled/command。没有 live 字段的条目不会出现在面板里。
 
@@ -51,6 +53,8 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 - 插件管理只列出本项目里声明了 live 字段的 `dsh-enhanced-*` 条目；输入一段 JSON 对象后
   按键执行 set 操作一次性写入（≤16 KiB），不重置其它字段，也不提供安装/卸载。
 - 面板收到 Host 的业务拒绝会原样显示原因（例如环境变量不存在、身份字段缺失），不静默失败。
+- 「方式」按条目里实际存在的 secret 引用显示（环境变量 = lark-cli 向导；keychain = 直接配置），
+  不再只反映本插件自己的偏好字段。
 
 ## 配置
 

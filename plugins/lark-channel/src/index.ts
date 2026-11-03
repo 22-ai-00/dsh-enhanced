@@ -73,7 +73,15 @@ export async function verifyScannerRetirementPersistence(input: Parameters<typeo
 export type { ScannerRetirementPlan, ScannerRetirementCompletion, ScannerRetirementCapture } from './rsi-scanner-retirement-stage.js'
 
 export function apply(ctx: Context, config: import('./config.js').Config): void {
-  const normalized = Config(config)
+  let normalized: import('./config.js').Config
+  try {
+    normalized = Config(config)
+  } catch (error) {
+    // A rejected configuration must stay recoverable: never brick the loader tree,
+    // just leave the connector disabled until the owner fixes the entry.
+    ctx.logger.error(`dsh-enhanced-lark-channel: configuration rejected; connector stays disabled: ${error instanceof Error ? error.message : String(error)}`)
+    return
+  }
   if (normalized.enabled && normalized.credentialHandle !== undefined) {
     ctx.inject(['credentialsKeychain'], (credentialsCtx) => {
       new LarkChannelService(credentialsCtx, normalized)

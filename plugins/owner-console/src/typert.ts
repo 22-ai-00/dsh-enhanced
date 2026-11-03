@@ -20,7 +20,7 @@ export const OwnerConsoleStatusSchema = z.object({
 }).readonly()
 export type OwnerConsoleStatus = Readonly<z.infer<typeof OwnerConsoleStatusSchema>>
 
-export const WRITE_RESULT = z.object({ applied: z.boolean(), entry: z.string().min(1), note: z.string() }).readonly()
+export const WRITE_RESULT = z.object({ applied: z.boolean(), entry: z.string(), note: z.string() }).readonly()
 export type OwnerConsoleWriteResult = Readonly<z.infer<typeof WRITE_RESULT>>
 
 /** Strict Host and client descriptors: one read plus owner-clicked one-step writes. */

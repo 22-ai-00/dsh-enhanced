@@ -3,7 +3,7 @@ import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { OwnerConsoleConfig } from './index.js'
 import {
   boundedConfig, configFacts, findEntry, isAppId, isEntryId, isEnvName, isProjectBundle, isSecretRef,
-  type SettingsDescriptor, type SettingsPathOp, type SettingsService,
+  type LoaderService, type SettingsDescriptor, type SettingsPathOp, type SettingsService,
 } from './settings.js'
 import type { OwnerConsoleStatus, OwnerConsoleWriteResult } from './typert.js'
 
@@ -36,6 +36,22 @@ export class OwnerConsoleService extends TypertRemoteService {
     return settings?.describe({ redactSecrets: true }) ?? []
   }
 
+  /** Volatile edits update the running fiber references but never re-run apply.
+   * A one-step write therefore restarts just this entry so the connector or
+   * provider picks up its new plain configuration; failure stays non-fatal. */
+  private async reload(entry: string): Promise<string> {
+    const loader = this.host.get('loader' as never) as LoaderService | undefined
+    if (loader === undefined) return '；已保存，但 loader 不可用，重启 profile 后生效'
+    try {
+      const target = loader.resolve(entry)
+      target.fiber?.dispose()
+      await target.refresh()
+      return '；条目已重载'
+    } catch {
+      return '；已保存，但自动重载失败，请重启 profile 后生效'
+    }
+  }
+
   status(): OwnerConsoleStatus {
     const entries = this.descriptors()
     const lark = findEntry(entries, ns => LARK.test(ns))
@@ -45,7 +61,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     return Object.freeze({
       feishu: Object.freeze({
         ...(lark === undefined ? {} : { entry: lark.ns }),
-        mode: this.config.feishuMode,
+        mode: typeof larkValue['credentialHandle'] === 'string' ? 'app' : 'lark-cli',
         enabled: larkValue['enabled'] === true,
         appIdConfigured: isAppId(larkValue['appId']),
         connected: this.host.get('larkChannel' as never) !== undefined,
@@ -78,8 +94,9 @@ export class OwnerConsoleService extends TypertRemoteService {
       return refuse('', 'lark-channel 未安装，或它没有声明任何可实时修改的配置字段')
     }
     const current = configFacts(lark.value)
+    const configured = isAppId(this.config.feishuAppId) ? this.config.feishuAppId : undefined
     const discovered = appId.trim() === '' && mode === 'lark-cli'
-      ? APP_ID_ENV.map(name => process.env[name]).find(value => isAppId(value))
+      ? APP_ID_ENV.map(name => process.env[name]).find(value => isAppId(value)) ?? configured
       : undefined
     const resolvedAppId = appId.trim() === '' ? discovered : appId.trim()
     if (!isAppId(resolvedAppId)) {
@@ -116,8 +133,9 @@ export class OwnerConsoleService extends TypertRemoteService {
       envName === '' ? { op: 'unset', path: ['appSecretEnv'] } : { op: 'set', path: ['appSecretEnv'], value: envName },
       handle === '' ? { op: 'unset', path: ['credentialHandle'] } : { op: 'set', path: ['credentialHandle'], value: handle },
     ], lark.revision)
+    const reloaded = await this.reload(lark.ns)
     return Object.freeze({ applied: true, entry: lark.ns,
-      note: handle === '' ? `secret 来自环境变量 ${envName}` : 'secret 保留在 credentials keychain' })
+      note: (handle === '' ? `secret 来自环境变量 ${envName}` : 'secret 保留在 credentials keychain') + reloaded })
   }
 
   /** TraeX: one owner click toggles the local provider row; command is optional. */
@@ -132,7 +150,8 @@ export class OwnerConsoleService extends TypertRemoteService {
     const ops: SettingsPathOp[] = [{ op: 'set', path: ['enabled'], value: enabled }]
     if (value !== '') ops.push({ op: 'set', path: ['command'], value })
     await settings.mutate(traex.ns, ops, traex.revision)
-    return Object.freeze({ applied: true, entry: traex.ns, note: enabled ? 'TraeX 行已启用' : 'TraeX 行已停用' })
+    const reloaded = await this.reload(traex.ns)
+    return Object.freeze({ applied: true, entry: traex.ns, note: (enabled ? 'TraeX 行已启用' : 'TraeX 行已停用') + reloaded })
   }
 
   /** Project bundles only: merge one bounded JSON object into fields the entry exposes live. */
@@ -154,7 +173,8 @@ export class OwnerConsoleService extends TypertRemoteService {
     const ops: SettingsPathOp[] = Object.entries(patch).map(([key, value]) => ({ op: 'set', path: [key], value }))
     if (ops.length === 0) return refuse(entry, '配置为空，没有可写入的字段')
     await settings.mutate(entry, ops, target.revision)
-    return Object.freeze({ applied: true, entry, note: '已合并写入；运行中的条目通过 settings 实时重载' })
+    const reloaded = await this.reload(entry)
+    return Object.freeze({ applied: true, entry, note: '已合并写入' + reloaded })
   }
 }
 
