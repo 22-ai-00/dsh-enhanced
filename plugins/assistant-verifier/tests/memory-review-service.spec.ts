@@ -53,3 +53,17 @@ test('waits for authenticated source services and drains each reviewer when its 
   expect(() => service.reviewMemoryLearning(request)).toThrow('unavailable')
   expect(service.trustedVerificationProducerGeneration()).toEqual(expect.any(String))
 })
+
+test('a configured work-item extension never reports available while native services are unmounted', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'memory-review-work-item-service-'))), ctx = new Context()
+  cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
+  const memoryReviews: MemoryReviewConfig = { authorityId: 'review', expiresAt: Date.now() + 60_000, maxReviews: 1,
+    owner: { authorityId: 'route', authorityHash: 'b'.repeat(64), principalId: 'lark/app/tenant/owner',
+      principalRecordId: 'record', principalVersion: 1, workspace: root, agentPreset: 'main' },
+    policy: 'Preserve bounded experiences.', maxInputBytes: 8192, maxOutputTokens: 512, timeoutMs: 1000, workItemExperiences: true }
+  const service = new AssistantVerifierService(ctx, { databasePath: join(root, 'state.sqlite'), tickIntervalMs: 0, memoryReviews })
+  expect(service.inspectMemoryLearningReviewAvailability({ owner: memoryReviews.owner })).toMatchObject({
+    available: false, remainingReviews: 0 })
+  expect(service.inspectMemoryLearningReviewAvailability({ owner: memoryReviews.owner })).not.toHaveProperty('workItemExperiences')
+  expect(MemoryReviewRuntime).not.toHaveBeenCalled()
+})

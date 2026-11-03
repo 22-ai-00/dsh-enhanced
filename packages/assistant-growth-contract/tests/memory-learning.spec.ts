@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
-  memoryLearningRequestDigest, validateMemoryLearningProposal, validateMemoryLearningReviewRequest,
-  type MemoryLearningReviewRequest,
+  memoryLearningRequestDigest, validateMemoryLearningProposal, validateMemoryLearningReviewRequest, hasWorkItemLearningFeedbackText,
+  type MemoryLearningReviewRequest, type ForegroundMemoryLearningReviewRequest, type WorkItemMemoryLearningReviewRequest,
 } from '../src/memory-learning.js'
 
-function request(): MemoryLearningReviewRequest {
+function request(): ForegroundMemoryLearningReviewRequest {
   return {
     protocol: 'memory-learning-review/v1', operationId: 'learning:1', extractionSessionId: 'extract:1',
     owner: { authorityId: 'owner:1', authorityHash: 'a'.repeat(64), principalId: 'lark/app/tenant/owner',
@@ -17,6 +17,12 @@ function request(): MemoryLearningReviewRequest {
 }
 
 describe('ordinary memory learning wire boundary', () => {
+  it('preserves the pre-work-item v1 wire bytes and digest', () => {
+    const original = request()
+    expect(JSON.stringify(validateMemoryLearningReviewRequest(original))).toBe(JSON.stringify(original))
+    // Captured from the previously built v1 contract before compiling this change.
+    expect(memoryLearningRequestDigest(original)).toBe('8ff7c29ff6c6122812b4a33fe88a1b1fb1bf937c72bcc50b29bb9098a8641636')
+  })
   it('binds the owner lineage, original source, exact candidate and extraction session independently of key order', () => {
     const original = request(), digest = memoryLearningRequestDigest(original)
     expect(memoryLearningRequestDigest(Object.fromEntries(Object.entries(original).reverse()) as MemoryLearningReviewRequest)).toBe(digest)
@@ -94,5 +100,86 @@ describe('ordinary memory learning wire boundary', () => {
     expect(() => validateMemoryLearningProposal({ mutation: { op: 'add', entry: {
       kind: 'fact', content: 'fact', knowledge: { applicability: hiddenList },
     } }, evidenceQuote: 'original' })).toThrow()
+  })
+})
+
+function workItemRequest(): WorkItemMemoryLearningReviewRequest {
+  return {
+    ...request(), protocol: 'memory-learning-review/v2',
+    source: { protocol: 'memory-learning-source/work-item/v1', itemId: 'work-item:1',
+      sourceDigest: 'b'.repeat(64), contentDigest: 'c'.repeat(64),
+      canonical: { outcomeId: 'outcome:owner-feedback', version: 2, digest: 'd'.repeat(64), objectiveStatus: 'not-achieved' } },
+    mutation: { op: 'add', entry: { kind: 'experience', content: 'This reported attempt did not satisfy the owner.' } },
+    evidenceQuote: '还是不行',
+  }
+}
+
+describe('background memory learning wire boundary', () => {
+  it('accepts visible testimony in a redacted source but not a placeholder as testimony', () => {
+    for (const quote of ['[REDACTED]', '[REDACTED PRIVATE KEY]', '“[REDACTED]”，[REDACTED PRIVATE KEY]。', '🔒\u200b']) {
+      expect(hasWorkItemLearningFeedbackText(quote)).toBe(false)
+      expect(() => validateMemoryLearningReviewRequest({ ...workItemRequest(), evidenceQuote: quote })).toThrow('work-item feedback quotation')
+    }
+    for (const quote of ['仍未解决，[REDACTED] 的配置失败', 'Visible failure after [REDACTED PRIVATE KEY]', '2 retries failed']) {
+      expect(hasWorkItemLearningFeedbackText(quote)).toBe(true)
+      expect(validateMemoryLearningReviewRequest({ ...workItemRequest(), evidenceQuote: quote }).evidenceQuote).toBe(quote)
+    }
+  })
+  it('keeps the background task locator separate and binds the exact feedback revision and presentation', () => {
+    const original = workItemRequest(), before = memoryLearningRequestDigest(original)
+    expect(validateMemoryLearningReviewRequest(original)).toEqual(original)
+    expect(original.source).not.toHaveProperty('inboxId')
+    for (const change of [
+      (r: WorkItemMemoryLearningReviewRequest) => { r.source.itemId = 'work-item:2' },
+      (r: WorkItemMemoryLearningReviewRequest) => { r.source.sourceDigest = 'e'.repeat(64) },
+      (r: WorkItemMemoryLearningReviewRequest) => { r.source.contentDigest = 'f'.repeat(64) },
+      (r: WorkItemMemoryLearningReviewRequest) => { r.source.canonical.version++ },
+      (r: WorkItemMemoryLearningReviewRequest) => { r.source.canonical.outcomeId = 'outcome:correction' },
+      (r: WorkItemMemoryLearningReviewRequest) => { r.source.canonical.objectiveStatus = 'achieved' },
+    ]) {
+      const copy = structuredClone(original); change(copy)
+      expect(memoryLearningRequestDigest(copy)).not.toBe(before)
+    }
+  })
+
+  it('rejects cross-protocol sources and a forged foreground Inbox on a background source', () => {
+    const original = workItemRequest()
+    for (const forged of [
+      { ...original, source: request().source },
+      { ...original, source: { ...original.source, inboxId: 'inbox:1' } },
+      { ...request(), source: original.source },
+      { ...original, source: { ...original.source, protocol: 'memory-learning-source/work-item/v2' } },
+    ]) expect(() => validateMemoryLearningReviewRequest(forged)).toThrow()
+  })
+
+  it('requires an explicit current objective even for removal, never a worker settlement alone', () => {
+    const original = workItemRequest()
+    const { canonical: _canonical, ...withoutCanonical } = original.source
+    for (const mutation of [original.mutation, { op: 'remove', id: 'memory:1', expectedVersion: 1 }]) {
+      expect(() => validateMemoryLearningReviewRequest({ ...original, mutation, source: withoutCanonical })).toThrow()
+      expect(() => validateMemoryLearningReviewRequest({ ...original, mutation, source: { ...original.source,
+        canonical: { ...original.source.canonical, objectiveStatus: 'unknown' } } })).toThrow('objective status')
+    }
+  })
+
+  it('does not turn a worker brief or report into an owner fact by adding or replacing a memory', () => {
+    const original = workItemRequest()
+    for (const mutation of [
+      { op: 'add', entry: { kind: 'fact', content: 'The worker claimed this was true.' } },
+      { op: 'replace', id: 'memory:1', expectedVersion: 1, entry: { kind: 'fact', content: 'The worker claimed this was true.' } },
+    ]) expect(() => validateMemoryLearningReviewRequest({ ...original, mutation })).toThrow('work-item experience only')
+    // Actual target kind and current owner are independently re-read by each consumer.
+    expect(validateMemoryLearningReviewRequest({ ...original, mutation: { op: 'remove', id: 'memory:1', expectedVersion: 2 } }).mutation.op).toBe('remove')
+  })
+
+  it('rejects hidden fields and canonical getters before executing producer-controlled code', () => {
+    let invoked = false
+    const accessor = workItemRequest()
+    Object.defineProperty(accessor.source.canonical, 'version', { enumerable: true, get: () => { invoked = true; return 2 } })
+    expect(() => validateMemoryLearningReviewRequest(accessor)).toThrow()
+    expect(invoked).toBe(false)
+    const hidden = workItemRequest()
+    Object.defineProperty(hidden.source, 'inboxId', { value: 'forged', enumerable: false })
+    expect(() => validateMemoryLearningReviewRequest(hidden)).toThrow()
   })
 })

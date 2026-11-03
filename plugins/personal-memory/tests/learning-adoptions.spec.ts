@@ -4,10 +4,10 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, test, vi } from 'vitest'
 import { growthObjectDigest, memoryLearningRequestDigest,
-  type MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
+  type WorkItemMemoryLearningReviewRequest, type MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
 import { MemoryStore, MemoryStoreError, memoryPrincipalDigest } from '../src/store.ts'
 import type { MemoryLearningAdoptionGrant, MemoryLearningReviewReceipt } from '../src/learning-adoptions.ts'
-import { validateMemoryLearningAdoptionGrant, validateLearningReviewReceipt } from '../src/learning-adoptions.ts'
+import { validateMemoryLearningAdoptionGrant, validateLearningReviewReceipt, learningGrantDigest } from '../src/learning-adoptions.ts'
 import type { MemoryAgentContext, MemoryEntryInput } from '../src/types.ts'
 
 const roots: string[] = []
@@ -298,4 +298,52 @@ test('strict grant and review validators reject accessors, array holes, forged a
   const inheritedModel = { ...valid, model: { provider: '@owner/provider', model: 'model@2026.09' } }
   const { receiptDigest: _previousDigest, ...modelBody } = inheritedModel
   expect(validateLearningReviewReceipt({ ...inheritedModel, receiptDigest: growthObjectDigest(modelBody) }, source, grant())).toBeDefined()
+})
+
+
+test('work item experience grants are explicit and false preserves legacy grant identity', () => {
+  const base = grant()
+  expect(validateMemoryLearningAdoptionGrant({ ...base, workItemExperiences: false })).toEqual(base)
+  expect(learningGrantDigest({ ...base, workItemExperiences: false })).toBe(learningGrantDigest(base))
+  expect(growthObjectDigest(validateMemoryLearningAdoptionGrant({ ...base, workItemExperiences: false }))).toBe(growthObjectDigest(base))
+  expect(() => validateMemoryLearningAdoptionGrant({ ...base, workItemExperiences: 'true' } as never)).toThrow()
+  expect(() => validateMemoryLearningAdoptionGrant({ ...base, workItemExperiences: true, kinds: ['fact'] })).toThrow(/requires experience/)
+  const store = new MemoryStore({ path: path(), now: () => 100_000 })
+  store.registerLearningGrant(base)
+  expect(() => store.registerLearningGrant({ ...base, workItemExperiences: true })).toThrow(/changed/)
+  store.close()
+})
+
+function workItemRequest(operationId: string, mutation?: MemoryLearningReviewRequest['mutation']): WorkItemMemoryLearningReviewRequest {
+  return { protocol: 'memory-learning-review/v2', operationId, extractionSessionId: 'extract-work-item', owner,
+    source: { protocol: 'memory-learning-source/work-item/v1', itemId: 'item-one', sourceDigest: 'c'.repeat(64), contentDigest: 'd'.repeat(64),
+      canonical: { outcomeId: 'owner-result', version: 1, digest: 'e'.repeat(64), objectiveStatus: 'achieved' } },
+    mutation: mutation ?? { op: 'add', entry: { kind: 'experience', content: 'Prefer bounded retries for the export task.' } },
+    evidenceQuote: 'The export succeeded with bounded retries.' }
+}
+
+test('work item adoption cannot use a legacy grant and keeps its typed provenance and finite quota', () => {
+  const store = new MemoryStore({ path: path(), now: () => 100_000 })
+  const legacy = grant(); store.registerLearningGrant(legacy)
+  expect(() => commit(store, workItemRequest('legacy-refused'), legacy)).toThrow(/not authorized/)
+  expect(store.inspectLearningAdoptionAvailability(legacy)).toMatchObject({ remainingMutations: legacy.maxMutations })
+  const explicit = grant({ authorityId: 'work-item-grant', workItemExperiences: true, maxMutations: 1 })
+  store.registerLearningGrant(explicit)
+  const adopted = commit(store, workItemRequest('work-item-once'), explicit)
+  expect(adopted.record.provenance).toMatchObject({ uri: 'delivery:work-item:item-one', observedAt: 90_000 })
+  expect(store.inspectLearningAdoptionAvailability(explicit)).toMatchObject({ workItemExperiences: true, remainingMutations: 0 })
+  expect(commit(store, workItemRequest('work-item-once'), explicit)).toEqual(adopted)
+  expect(() => commit(store, workItemRequest('work-item-twice'), explicit)).toThrow(/quota/)
+  store.close()
+})
+
+test.each(['replace', 'remove'] as const)('work item %s cannot target an existing managed fact', op => {
+  const store = new MemoryStore({ path: path(), now: () => 100_000 })
+  const explicit = grant({ workItemExperiences: true }); store.registerLearningGrant(explicit)
+  const fact = commit(store, request('old-fact'), explicit).record
+  const mutation = op === 'remove' ? { op, id: fact.id, expectedVersion: fact.version } : {
+    op, id: fact.id, expectedVersion: fact.version, entry: { kind: 'experience' as const, content: 'Replace the fact as an experience.' } }
+  expect(() => commit(store, workItemRequest(`fact-${op}`, mutation), explicit)).toThrow(/must be an experience/)
+  expect(store.inspectLearningAdoptionAvailability(explicit)).toMatchObject({ remainingMutations: explicit.maxMutations - 1 })
+  store.close()
 })

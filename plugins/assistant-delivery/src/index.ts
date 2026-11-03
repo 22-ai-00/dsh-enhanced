@@ -55,4 +55,4 @@ export type { NativeWebOwnerAccess, NativeWebOwnerConfig } from './native-web-ow
 export type { WorkItemReportTarget, WorkItemReplySource, WorkItemReplyConsumerRegistration, WorkItemReplyReadInput, WorkItemReplyListInput } from './work-item-replies.js'
 export { WorkItemReplyCancelledError } from './work-item-replies.js'
 
-export type { OwnerWorkItemLearningTask } from './work-item-feedback.js'
+export type { OwnerWorkItemLearningTask, OwnerLearningSourceExpectation, OwnerLearningSourceSnapshot, OwnerWorkItemLearningSourceExpectation, OwnerWorkItemLearningTaskFenceInput } from './work-item-feedback.js'

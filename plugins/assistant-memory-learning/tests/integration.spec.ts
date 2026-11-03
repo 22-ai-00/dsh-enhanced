@@ -95,7 +95,7 @@ async function fixture(options: { verdict?: 'approved' | 'rejected' | 'unknown';
     reviewAuthorityId: reviewConfig.authorityId, reviewAuthorityDigest: growthObjectDigest(reviewConfig),
     adoptionAuthorityId: adoptionGrant.authorityId, adoptionGrantDigest: growthObjectDigest(adoptionGrant) }
   const extract = vi.fn(async ({ job }: { job: LearningJob }) => ({
-    proposal: job.intent.kind === 'fact' && !job.snapshot?.ownerStatement.includes('Atlas uses pnpm') ? null
+    proposal: job.intent.kind === 'fact' && !job.snapshot?.ownerStatement?.includes('Atlas uses pnpm') ? null
       : { mutation: { op: 'add' as const, entry: { kind: job.intent.kind, content: job.intent.kind === 'fact'
         ? 'Atlas uses pnpm for this workspace.' : 'When dependency updates fail, inspect the pnpm lockfile.' } },
       evidenceQuote: job.intent.kind === 'fact' ? 'Atlas uses pnpm' : 'dependency updates fail' },

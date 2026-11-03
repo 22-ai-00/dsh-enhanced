@@ -84,7 +84,9 @@ WorkItems 的显式 owner continuation 用新子项连接已静止的父任务�
 
 可选 `ownerReportFeedback` 将报告结果评价与任务续办分开。Delivery schema 30 在真实 typed 报告回复上先识别明确结果反馈，独立核对当前 owner 与反馈 Policy，再持久保存独占入站、原报告目标和结果版本前置条件。Evaluation schema 13 以原 `itemId` 维护 `work-item` 当前结果；report revision、production occurrence 和模型快照属于证据，不增加同一任务的票数。WorkItems 的进程内 capability 只证明准确历史报告和实际执行终止，目标成功或失败由主人单独声明；原 worker settlement 仍只能记录 unknown。更正、撤回、冷恢复均沿 Evaluation 的现有版本与 writer fence 处理。历史报告读取不续期执行授权，已接受的反馈也不会转回前台或生成续办任务。
 
-后台结果的 Host 来源读取保持独立协议：完整证据在服务端复核，展示文本有界并过滤常见凭据形状。该入口不伪装普通前台任务，也不因形成可信 owner 结果就自动取得成长或采用资格；现有 Growth/Memory 的前台来源限制须由后续明确接线扩展。
+后台结果的 Host 来源读取保持独立协议：完整证据在服务端复核，展示文本有界并过滤常见凭据形状。Memory 学习、独立审查与采用三份授权都显式启用 `workItemExperiences` 后，学习器通过独立 canonical 游标保存后台结果意图，使用 v2 来源协议提取经验。任务简报和 worker 报告仅作背景，引文必须来自当前认证主人反馈；截断材料拒绝，脱敏材料仅使用可见文本。事实学习仍限前台来源，工程 Growth 尚不消费这一后台主体。
+
+后台经验提交遵循 Delivery → Evaluation → WorkItems 来源锁 → Memory（或独立审查账本）的顺序。混合来源批量检查先完成外部来源读取，再在锁内整组复核，避免后一来源的回调改变前一来源后仍写入。后续检索重核当前来源，更正、撤回或暂不可用会隐藏不再有效的自动经验；只有准确的主人撤回才能确认永久失效。已保存请求的未知操作继续查询原采用/审查回执，来源变化不允许重做提取、审查或返还额度。这条链复用原生 Automations/Agent，不增加循环；经验可召回不等于后续任务质量已经改善。
 
 ## 离线隔离执行
 

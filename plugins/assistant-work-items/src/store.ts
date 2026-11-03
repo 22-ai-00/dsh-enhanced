@@ -794,6 +794,26 @@ export class WorkItemStore {
     return statement
   }
 
+  /** Keep report/plan sources writer-fenced through a synchronous Host commit.
+   * Delivery and Evaluation own their outer locks; this method never acquires
+   * either peer or starts any execution. */
+  withFeedbackSourceFence<T>(work: () => T): T {
+    if (this.#closed) fail('storage', 'work-item feedback source store is closed')
+    if (typeof work !== 'function') fail('invalid-input', 'feedback source fence requires a callback')
+    return this.#transaction(() => {
+      const result = work()
+      if ((typeof result === 'object' || typeof result === 'function') && result !== null && 'then' in result) {
+        // Reject async callbacks without evaluating an untrusted then getter.
+        // Attach a handler only when the return value has the native Promise
+        // brand, so a rejected Promise cannot escape as an unhandled rejection.
+        try { Promise.prototype.then.call(result, undefined, () => undefined) } catch { /* Not a native Promise. */ }
+        fail('invalid-input', 'feedback source fence callback must be synchronous')
+      }
+      if (this.#closed) fail('storage', 'work-item feedback source store closed during the callback')
+      return result
+    })
+  }
+
   #transaction<T>(work: () => T): T {
     this.#database.exec('BEGIN IMMEDIATE')
     try {

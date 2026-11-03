@@ -9,6 +9,7 @@ import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { growthObjectDigest, memoryLearningRequestDigest, type MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
 import { afterEach, expect, test, vi } from 'vitest'
 import { MemoryLearningRuntime, type LearningPorts } from '../src/runtime.ts'
+import { validateLearningConfig } from '../src/config.ts'
 import { LearningStore } from '../src/store.ts'
 import type { LearningConfig } from '../src/types.ts'
 
@@ -142,7 +143,7 @@ async function fixture(options: { maxPending?: number; maxExtractions?: number; 
     lookupMemoryLearningReview: vi.fn((request: MemoryLearningReviewRequest) => reviews.get(request.operationId)) }
   const extract = vi.fn<LearningPorts['extract']>(async ({ job, assertCurrent }) => {
     assertCurrent()
-    const quote = job.intent.kind === 'experience' ? job.snapshot!.ownerFeedback! : job.snapshot!.ownerStatement
+    const quote = job.intent.kind === 'experience' ? job.snapshot!.ownerFeedback! : job.snapshot!.ownerStatement!
     return { proposal: { mutation: { op: 'add' as const, entry: { kind: job.intent.kind, content: quote } },
       evidenceQuote: quote }, reason: 'candidate', sessionId: `memory-extract-${job.digest}`, outputDigest: 'd'.repeat(64) }
   })
@@ -475,4 +476,181 @@ test('startup retirement inspection outage preserves an unknown request, paused 
   expect(f.verifier.reviewMemoryLearning).toHaveBeenCalledTimes(calls.review)
   expect(f.verifier.lookupMemoryLearningReview).toHaveBeenCalledTimes(calls.lookup)
   inspection.mockRestore()
+})
+
+async function workItemFixture(options: { reviewFlag?: boolean; adoptionFlag?: boolean; readerMissing?: boolean; feedback?: string; redacted?: boolean } = {}) {
+  const f = await fixture()
+  f.config.workItemExperiences = true
+  let withdrawn = false, missing = options.readerMissing === true, version = 1
+  const canonical = () => ({ triggerOutcomeId: 'unrelated-trigger',
+    projection: { subjectKind: 'work-item', subjectRef: 'background-one', disposition: withdrawn ? 'remove' : 'upsert',
+      version, digest: String(version).repeat(64) },
+    objective: { outcomeId: 'current-objective', status: 'not-achieved', occurredAt: Date.now() - 100 } })
+  let briefRedacted = options.redacted ?? false, reportRedacted = false
+  const task = () => ({ protocol: 'assistant-delivery/owner-work-item-learning/v1', owner: f.owner,
+    canonical: canonical(), judgement: 'owner-feedback', ownerRevision: { version, action: 'initial', operationId: 'feedback' },
+    proofIdentity: { itemId: 'background-one', supplier: { provider: 'original-background', model: 'frozen-original' } },
+    sourceDigest: '1'.repeat(64), presentationDigest: growthObjectDigest([version, 'presentation']),
+    presentation: { brief: { text: 'Worker brief claims a fact.', truncated: false, redacted: briefRedacted },
+      report: { text: 'Worker claims successful completion.', truncated: false, redacted: reportRedacted },
+      feedback: { inboxId: 'feedback', text: options.feedback ?? 'The task failed because its lockfile was stale.', truncated: false, redacted: options.redacted ?? false } } })
+  vi.spyOn(f.evaluation, 'listTrustedTaskLearningProjections').mockImplementation(({ after }) => ({
+    items: (after?.watermark ?? 0) < version ? [{ watermark: version, receipt: canonical() }] : [],
+    nextCursor: { scopeKey: 'workitem-scope', watermark: version }, scopeWatermark: version, hasMore: false,
+  }) as never)
+  vi.spyOn(f.evaluation, 'withTrustedCanonicalScopeWriterFence').mockImplementation((_input, callback) => ({ matched: true, value: callback() }) as never)
+  vi.spyOn(f.evaluation, 'getTrustedWorkItemLearningProjection').mockImplementation(() => canonical() as never)
+  f.delivery.inspectOwnerWorkItemLearningTask = vi.fn(() => missing ? undefined : task() as never)
+  f.delivery.withOwnerWorkItemLearningTaskFence = (_input, callback) => callback(task() as never)
+  const reviewAvailability = f.verifier.inspectMemoryLearningReviewAvailability
+  vi.spyOn(f.verifier, 'inspectMemoryLearningReviewAvailability').mockImplementation(() => ({ ...reviewAvailability(),
+    ...(options.reviewFlag === false ? {} : { workItemExperiences: true as const }) }))
+  const adoptionAvailability = f.memory.inspectLearningAdoptionAvailability
+  vi.spyOn(f.memory, 'inspectLearningAdoptionAvailability').mockImplementation(() => ({ ...adoptionAvailability(),
+    ...(options.adoptionFlag === false ? {} : { workItemExperiences: true as const }) }))
+  return { ...f, setMissing: (value: boolean) => { missing = value }, withdraw: () => { withdrawn = true; version++ },
+    correct: () => { version++ }, swapFlags: () => { [briefRedacted, reportRedacted] = [reportRedacted, briefRedacted] } }
+}
+
+test('background canonical locator survives absent reader and cold restart, uses current objective and original supplier once', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture({ readerMissing: true })
+  const first = f.create(); expect(first.health().counts.pending).toBe(1)
+  expect(f.extract).not.toHaveBeenCalled(); await first.close()
+  f.setMissing(false)
+  const restarted = f.create(); expect(restarted.health().counts.queued).toBe(1)
+  await f.tick()
+  expect(f.extract).toHaveBeenCalledOnce()
+  const job = f.extract.mock.calls[0]![0].job
+  expect(job.intent).toMatchObject({ sourceKind: 'work-item', canonical: { outcomeId: 'current-objective' } })
+  expect(job.intent).not.toHaveProperty('inboxId')
+  expect(job.snapshot).toMatchObject({ sourceKind: 'work-item', model: { provider: 'original-background', model: 'frozen-original' } })
+  expect(job.snapshot).not.toHaveProperty('ownerStatement')
+  expect(job.snapshot!.model).not.toHaveProperty('reasoningEffort')
+  expect(f.verifier.reviewMemoryLearning.mock.calls[0]![0].protocol).toBe('memory-learning-review/v2')
+  restarted.scan(); await f.tick(); expect(f.extract).toHaveBeenCalledOnce()
+})
+
+for (const flag of ['reviewFlag', 'adoptionFlag'] as const) test(`background ${flag} absence prevents any paid extraction`, async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture({ [flag]: false })
+  const runtime = f.create(); await f.tick()
+  expect(f.extract).not.toHaveBeenCalled(); expect(runtime.health().remainingExtractions).toBe(f.config.maxExtractions)
+})
+
+test('withdrawal after snapshot freezes supersedes before spend', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture()
+  const runtime = f.create(); expect(runtime.health().counts.queued).toBe(1)
+  f.withdraw(); await f.tick()
+  expect(f.extract).not.toHaveBeenCalled(); expect(runtime.health().remainingExtractions).toBe(f.config.maxExtractions)
+})
+
+test('work-item worker report cannot be laundered into an owner quotation', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture()
+  f.extract.mockImplementation(async ({ job }) => ({ proposal: { mutation: { op: 'add', entry: { kind: 'experience', content: 'Worker claims success.' } },
+    evidenceQuote: job.snapshot!.workerReport! }, reason: 'candidate', sessionId: 'extract', outputDigest: 'a'.repeat(64) }))
+  const runtime = f.create(); await f.tick()
+  expect(f.extract).toHaveBeenCalledOnce(); expect(f.verifier.reviewMemoryLearning).not.toHaveBeenCalled()
+  expect(f.memory.adoptReviewedLearning).not.toHaveBeenCalled(); expect(runtime.health().remainingExtractions).toBe(f.config.maxExtractions - 1)
+})
+
+
+test('work-item false preserves legacy config digest and only strict true expands frozen authority', async () => {
+  const f = await fixture()
+  const legacy = validateLearningConfig(f.config)
+  expect(validateLearningConfig({ ...f.config, workItemExperiences: false })).toEqual(legacy)
+  expect(growthObjectDigest(validateLearningConfig({ ...f.config, workItemExperiences: false }))).toBe(growthObjectDigest(legacy))
+  expect(validateLearningConfig({ ...f.config, workItemExperiences: true }).workItemExperiences).toBe(true)
+  for (const flag of ['true', 1, null, undefined]) expect(() => validateLearningConfig({ ...f.config, workItemExperiences: flag })).toThrow()
+  const runtime = f.create(); await runtime.close()
+  f.config.workItemExperiences = true
+  expect(() => f.create()).toThrow(/immutable grant/)
+})
+
+test('work-item correction during paid extraction blocks review and adoption without refund or retry', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture()
+  f.extract.mockImplementation(async ({ job, assertCurrent }) => {
+    f.correct(); assertCurrent()
+    return { proposal: null, reason: 'unreachable', sessionId: `extract-${job.id}`, outputDigest: 'a'.repeat(64) }
+  })
+  f.create(); await f.tick()
+  expect(f.verifier.reviewMemoryLearning).not.toHaveBeenCalled()
+  expect(f.memory.adoptReviewedLearning).not.toHaveBeenCalled()
+  // The original paid attempt stays in the ledger. The corrected canonical
+  // revision is a distinct intent; no operation id may be extracted twice.
+  const ids = f.extract.mock.calls.map(([input]) => input.job.id)
+  expect(new Set(ids).size).toBe(ids.length)
+  const ledger = new LearningStore(f.config.databasePath, { authorityId: f.config.authorityId,
+    configDigest: growthObjectDigest(f.config), maxExtractions: f.config.maxExtractions })
+  expect(ledger.availability().remainingExtractions).toBeLessThan(f.config.maxExtractions)
+  ledger.close()
+})
+
+
+for (const feedback of ['[REDACTED]', '[REDACTED PRIVATE KEY] ! —', '[REDACTED] [REDACTED PRIVATE KEY]']) test(`pure marker feedback rejects before spend: ${feedback}`, async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture({ feedback, redacted: true })
+  const runtime = f.create(); await f.tick()
+  expect(f.extract).not.toHaveBeenCalled(); expect(runtime.health().remainingExtractions).toBe(f.config.maxExtractions)
+})
+
+test('redacted feedback with visible text remains eligible and preserves each presentation flag', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture({ feedback: 'The [REDACTED] task failed.', redacted: true })
+  f.create(); await f.tick()
+  expect(f.extract).toHaveBeenCalledOnce()
+  expect(f.extract.mock.calls[0]![0].job.snapshot).toMatchObject({ presentationFlags: { brief: { redacted: true, truncated: false },
+    report: { redacted: false, truncated: false }, feedback: { redacted: true, truncated: false } } })
+  expect(f.memory.adoptReviewedLearning).toHaveBeenCalledOnce()
+})
+
+test('swapping presentation flag metadata after freeze prevents any paid call', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture({ redacted: true })
+  const runtime = f.create(); expect(runtime.health().counts.queued).toBe(1)
+  f.swapFlags(); await f.tick()
+  expect(f.extract).not.toHaveBeenCalled(); expect(runtime.health().remainingExtractions).toBe(f.config.maxExtractions)
+})
+
+test('lost adoption ACK remains reconcilable through transient lookup failure and canonical withdrawal', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] }); const f = await workItemFixture()
+  let unavailable = true
+  const lookup = f.memory.lookupLearningAdoption.getMockImplementation()!
+  f.memory.lookupLearningAdoption.mockImplementation(input => {
+    if (unavailable) throw new Error('temporary lookup outage')
+    return lookup(input)
+  })
+  const adopt = f.memory.adoptReviewedLearning.getMockImplementation()!
+  f.memory.adoptReviewedLearning.mockImplementation(input => { adopt(input); throw new Error('lost adoption ACK') })
+  const runtime = f.create(); await f.tick()
+  expect(runtime.health().counts.unknown).toBe(1)
+  f.withdraw(); runtime.scan()
+  expect(runtime.health().counts.unknown).toBe(1)
+  expect(f.extract).toHaveBeenCalledOnce(); expect(f.memory.adoptReviewedLearning).toHaveBeenCalledOnce()
+  unavailable = false; runtime.scan()
+  expect(runtime.health().counts.unknown).toBe(0); expect(runtime.health().counts.adopted).toBe(1)
+  expect(f.extract).toHaveBeenCalledOnce(); expect(f.verifier.reviewMemoryLearning).toHaveBeenCalledOnce()
+  expect(f.memory.adoptReviewedLearning).toHaveBeenCalledOnce()
+})
+
+for (const background of [false, true]) test(`persisted unknown request stays reconcilable after source withdrawal (${background ? 'work-item' : 'foreground'})`, async () => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  const f = background ? await workItemFixture() : await fixture({ maxExtractions: 1 })
+  if (!background) f.addSource('original')
+  let outage = true
+  const lookup = f.memory.lookupLearningAdoption.getMockImplementation()!
+  f.memory.lookupLearningAdoption.mockImplementation(input => {
+    if (outage) throw new Error('temporary lookup outage')
+    return lookup(input)
+  })
+  f.verifier.reviewMemoryLearning.mockImplementationOnce(async request => {
+    f.reviews.set(request.operationId, f.receipt(request, 'approved'))
+    throw new Error('review ACK lost')
+  })
+  const runtime = f.create(); await f.tick()
+  const request = f.verifier.reviewMemoryLearning.mock.calls[0]![0]
+  expect(runtime.health().counts.unknown).toBe(1)
+  if ('withdraw' in f && typeof f.withdraw === 'function') f.withdraw()
+  else { f.appendCanonical('original'); f.appendCanonical('original', 'unknown', 'withdraw') }
+  outage = false; runtime.scan()
+  expect(runtime.health().counts.unknown).toBe(1)
+  expect(f.memory.adoptReviewedLearning).not.toHaveBeenCalled()
+  f.adoption.set(request.operationId, 'f'.repeat(64)); runtime.scan()
+  expect(runtime.health().counts.unknown).toBe(0); expect(runtime.health().counts.adopted).toBe(1)
+  expect(f.extract).toHaveBeenCalledOnce(); expect(f.verifier.reviewMemoryLearning).toHaveBeenCalledOnce()
 })

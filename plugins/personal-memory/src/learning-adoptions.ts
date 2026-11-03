@@ -15,6 +15,7 @@ export interface MemoryLearningAdoptionGrant {
   maxRecordTtlMs: number
   kinds: readonly ('fact' | 'experience')[]
   operations: readonly ('add' | 'replace' | 'remove')[]
+  workItemExperiences?: boolean
 }
 
 export interface MemoryLearningReviewReceipt {
@@ -90,6 +91,7 @@ export type MemoryLearningAdoptionAvailability = Readonly<{
   remainingMutations: number
   remainingContentBytes: number
   available: boolean
+  workItemExperiences?: true
 }>
 
 export interface MemoryLearningSourceInvalidation {
@@ -132,7 +134,7 @@ function choices<T extends string>(value: unknown, allowed: readonly T[]): void 
 }
 export function validateLearningGrant(value: unknown): Readonly<MemoryLearningAdoptionGrant> {
   const grant = exact(value, ['authorityId', 'owner', 'reviewAuthorityId', 'reviewAuthorityDigest',
-    'expiresAt', 'maxMutations', 'maxTotalContentBytes', 'maxRecordTtlMs', 'kinds', 'operations'])
+    'expiresAt', 'maxMutations', 'maxTotalContentBytes', 'maxRecordTtlMs', 'kinds', 'operations'], ['workItemExperiences'])
   id(grant.authorityId); id(grant.reviewAuthorityId); digest(grant.reviewAuthorityDigest)
   validateMemoryLearningOwner(grant.owner)
   integer(grant.expiresAt, 1, Number.MAX_SAFE_INTEGER)
@@ -140,7 +142,11 @@ export function validateLearningGrant(value: unknown): Readonly<MemoryLearningAd
   integer(grant.maxTotalContentBytes, 1, 16_384_000)
   integer(grant.maxRecordTtlMs, 1, 365 * 24 * 60 * 60 * 1_000)
   choices(grant.kinds, ['fact', 'experience']); choices(grant.operations, ['add', 'replace', 'remove'])
-  return Object.freeze(structuredClone(value) as MemoryLearningAdoptionGrant)
+  if (Object.hasOwn(grant, 'workItemExperiences') && typeof grant.workItemExperiences !== 'boolean') fail('invalid work item experience choice')
+  if (grant.workItemExperiences === true && !(grant.kinds as readonly string[]).includes('experience')) fail('work item learning requires experience kind')
+  const normalized = structuredClone(value) as MemoryLearningAdoptionGrant
+  if (normalized.workItemExperiences !== true) delete normalized.workItemExperiences
+  return Object.freeze(normalized)
 }
 export const validateMemoryLearningAdoptionGrant = validateLearningGrant
 
@@ -167,7 +173,7 @@ export function validateLearningRequest(value: unknown): MemoryLearningReviewReq
   return validateMemoryLearningReviewRequest(value)
 }
 
-export function learningGrantDigest(grant: MemoryLearningAdoptionGrant): string { return growthObjectDigest(grant) }
+export function learningGrantDigest(grant: MemoryLearningAdoptionGrant): string { return growthObjectDigest(validateLearningGrant(grant)) }
 export function learningRecordDigest(record: MemoryRecord): string { return growthObjectDigest(record) }
 export function learningResultDigest(result: Omit<MemoryLearningAdoptionResult, 'receiptDigest'>): string {
   return growthObjectDigest(result)

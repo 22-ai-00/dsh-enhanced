@@ -643,6 +643,7 @@ export class MemoryStore {
     const remainingContentBytes = Math.max(0, grant.maxTotalContentBytes - row.used_content_bytes)
     return Object.freeze({ authorityId: grant.authorityId, grantDigest, expiresAt: grant.expiresAt,
       remainingMutations, remainingContentBytes,
+      ...(grant.workItemExperiences === true ? { workItemExperiences: true as const } : {}),
       available: this.#now() < grant.expiresAt && remainingMutations > 0
         && (remainingContentBytes > 0 || grant.operations.includes('remove')) })
   }
@@ -663,6 +664,9 @@ export class MemoryStore {
     const request = validateLearningRequest(input.request)
     const requestDigest = memoryLearningRequestDigest(request)
     const review = validateLearningReviewReceipt(input.reviewReceipt, request, grant)
+    if (request.protocol === 'memory-learning-review/v2' && grant.workItemExperiences !== true) {
+      throw new MemoryStoreError('invalid-entry', 'work item experience adoption is not authorized')
+    }
     if (growthObjectDigest(request.owner) !== growthObjectDigest(grant.owner)
       || !grant.operations.includes(request.mutation.op)
       || (request.mutation.op !== 'remove' && !grant.kinds.includes(request.mutation.entry.kind))
@@ -691,6 +695,9 @@ export class MemoryStore {
         const target = this.inspectLearningTarget({ owner: request.owner, id: request.mutation.id,
           expectedVersion: request.mutation.expectedVersion })
         if (target === undefined) throw new MemoryStoreError('version-conflict', 'learning target is no longer managed')
+        if (request.protocol === 'memory-learning-review/v2' && target.kind !== 'experience') {
+          throw new MemoryStoreError('invalid-entry', 'work item learning target must be an experience')
+        }
       }
       const operationKey = growthObjectDigest([grant.authorityId, request.operationId])
       const idempotencyKey = `memory-learning:${operationKey}`
@@ -701,7 +708,7 @@ export class MemoryStore {
         : { kind: request.mutation.entry.kind, content: request.mutation.entry.content,
             sensitivity: 'private', trust: 'agent-observed', confidence: 0.5,
             provenance: { source: 'assistant-memory-learning', observedAt: input.sourceObservedAt,
-              uri: `delivery:foreground:${request.source.inboxId}` },
+              uri: request.protocol === 'memory-learning-review/v1' ? `delivery:foreground:${request.source.inboxId}` : `delivery:work-item:${request.source.itemId}` },
             expiresAt: now + grant.maxRecordTtlMs,
             ...(request.mutation.entry.knowledge === undefined ? {} : { knowledge: request.mutation.entry.knowledge }) } satisfies MemoryEntryInput
       const mutation: ApprovedMemoryMutation = request.mutation.op === 'remove'

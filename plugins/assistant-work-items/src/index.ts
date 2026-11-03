@@ -8,6 +8,7 @@ export { AssistantWorkItemsService, version }
 export * from './authority.js'
 export * from './config.js'
 export * from './evaluation.js'
+export type { OwnerWorkItemFeedbackProof, OwnerWorkItemFeedbackSelector } from './feedback-targets.js'
 export * from './outcome.js'
 export * from './service.js'
 export * from './settlement.js'

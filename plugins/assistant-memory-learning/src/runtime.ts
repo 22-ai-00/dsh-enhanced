@@ -1,31 +1,34 @@
 import { ScannerOwnerGuard, ScannerOwnerUnavailable } from './scanner-owner-runtime.js'
 import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutorInput, HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
-import type { AssistantDeliveryService, OwnerForegroundTaskSource, OwnerForegroundTaskSourceContent, OwnerForegroundTaskSourceCursor, OwnerForegroundTaskSourceScope } from '@dsh-enhanced/assistant-delivery'
+import type { AssistantDeliveryService, OwnerForegroundTaskSource, OwnerForegroundTaskSourceContent, OwnerForegroundTaskSourceCursor, OwnerForegroundTaskSourceScope, OwnerWorkItemLearningTask } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { MemoryReviewReceipt } from '@dsh-enhanced/assistant-verifier'
-import { growthObjectDigest, memoryLearningRequestDigest, validateMemoryLearningReviewRequest, type MemoryLearningProposal, type MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
+import { hasWorkItemLearningFeedbackText, growthObjectDigest, memoryLearningRequestDigest, validateMemoryLearningReviewRequest, type MemoryLearningProposal, type MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
 import { validateLearningConfig, validateLearningModel } from './config.js'
 import { LearningStore } from './store.js'
-import type { LearningConfig, LearningJob, LearningSnapshot } from './types.js'
+import type { LearningConfig, LearningJob, LearningSnapshot, WorkItemPresentationFlags } from './types.js'
 
 const OWNER = 'assistant-memory-learning'
 const EXECUTOR = 'assistant-memory-learning-v1'
 const CATALOG = growthObjectDigest({ executor: EXECUTOR, contract: 1 })
+type WorkItemFenceInput = OwnerForegroundTaskSourceScope & { itemId: string; outcomeId: string; expectedSourceDigest: string; expectedContentDigest: string; canonical: { version: number; digest: string; objectiveStatus: 'achieved' | 'not-achieved' } }
 type Delivery = Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'inspectOwnerRouteState' | 'listOwnerForegroundTaskSources' | 'withOwnerForegroundTaskSourcesFence' | 'inspectOwnerForegroundLearningTask'> & {
+  inspectOwnerWorkItemLearningTask?: AssistantDeliveryService['inspectOwnerWorkItemLearningTask']
+  withOwnerWorkItemLearningTaskFence?<T>(input: WorkItemFenceInput, callback: (task: Readonly<OwnerWorkItemLearningTask>) => T): T
   inspectOwnerForegroundTaskSource(input: OwnerForegroundTaskSourceScope & { inboxId: string }): Readonly<OwnerForegroundTaskSource> | undefined
 }
-type Evaluation = Pick<AssistantEvaluationService, 'canonicalHostScope' | 'listTrustedTaskLearningProjections' | 'withTrustedCanonicalScopeWriterFence' | 'getTrustedForegroundLearningProjection' | 'inspectTrustedTaskOwnerRevision'>
+type Evaluation = Pick<AssistantEvaluationService, 'canonicalHostScope' | 'listTrustedTaskLearningProjections' | 'withTrustedCanonicalScopeWriterFence' | 'getTrustedForegroundLearningProjection' | 'inspectTrustedTaskOwnerRevision' | 'getTrustedWorkItemLearningProjection'>
 type Automations = Pick<AssistantAutomationsService, 'inspectSystemOwnedRetirement' | 'retireSystemOwned' | 'onSchedulerWake' | 'registerHostExecutor' | 'reconcileSystem' | 'inspectSystemOwnedActivation' | 'inspectSystemOwned'>
 type Target = LearningSnapshot['targets'][number]
 interface Memory {
   listLearningTargets(input: { owner: LearningConfig['owner']; limit?: number }): readonly Target[]
-  inspectLearningAdoptionAvailability(input: { owner: LearningConfig['owner'] }): Readonly<{ authorityId: string; grantDigest: string; expiresAt: number; remainingMutations: number; remainingContentBytes: number; available: boolean }>
+  inspectLearningAdoptionAvailability(input: { owner: LearningConfig['owner'] }): Readonly<{ authorityId: string; grantDigest: string; expiresAt: number; remainingMutations: number; remainingContentBytes: number; available: boolean; workItemExperiences?: true }>
   lookupLearningAdoption(input: { request: MemoryLearningReviewRequest }): Readonly<{ receiptDigest: string }> | undefined
   adoptReviewedLearning(input: { request: MemoryLearningReviewRequest }): Readonly<{ receiptDigest: string }>
 }
 interface Verifier {
-  inspectMemoryLearningReviewAvailability(input: { owner: LearningConfig['owner'] }): Readonly<{ authorityId: string; authorityDigest: string; expiresAt: number; remainingReviews: number; available: boolean }> | undefined
+  inspectMemoryLearningReviewAvailability(input: { owner: LearningConfig['owner'] }): Readonly<{ authorityId: string; authorityDigest: string; expiresAt: number; remainingReviews: number; available: boolean; workItemExperiences?: true }> | undefined
   reviewMemoryLearning(request: MemoryLearningReviewRequest, signal?: AbortSignal): Promise<MemoryReviewReceipt>
   lookupMemoryLearningReview(request: MemoryLearningReviewRequest): Readonly<MemoryReviewReceipt> | undefined
 }
@@ -42,11 +45,16 @@ export interface LearningPorts {
 }
 class SourcePending extends Error {}
 class SourceObsolete extends Error {}
+const presentationFlags = (task: Readonly<OwnerWorkItemLearningTask>): WorkItemPresentationFlags => ({
+  brief: { truncated: task.presentation.brief.truncated, redacted: task.presentation.brief.redacted },
+  report: { truncated: task.presentation.report.truncated, redacted: task.presentation.report.redacted },
+  feedback: { truncated: task.presentation.feedback.truncated, redacted: task.presentation.feedback.redacted },
+})
 const same = (a: unknown, b: unknown): boolean => growthObjectDigest(a) === growthObjectDigest(b)
 const reasonText = (value: unknown): string => Array.from(String(value).normalize('NFC').replaceAll('\0', '').trim())
   .slice(0, 120).join('') || 'learning-incomplete'
 
-/** Two durable source cursors. Native Automations owns every timer and dispatch. */
+/** Three durable source cursors (work items require explicit opt-in). Native Automations owns every timer and dispatch. */
 export class MemoryLearningRuntime {
   private readonly config: LearningConfig
   private readonly store: LearningStore
@@ -174,12 +182,13 @@ export class MemoryLearningRuntime {
     const decision = consume ? this.ports.policy.authorize(input, idempotencyKey === undefined ? {} : { idempotencyKey }) : this.ports.policy.evaluate(input)
     if (decision.effect !== 'allow') throw new Error('memory learning extraction policy denied')
   }
-  private available(): boolean {
+  private available(workItem = false, claimed = false): boolean {
     this.owner(); this.policy()
     const review = this.ports.verifier.inspectMemoryLearningReviewAvailability({ owner: this.config.owner })
     const memory = this.ports.memory.inspectLearningAdoptionAvailability({ owner: this.config.owner })
-    return Date.now() < this.config.expiresAt && this.store.availability().available && review?.available === true
+    return Date.now() < this.config.expiresAt && (claimed || this.store.availability().available) && review?.available === true
       && review.authorityId === this.config.reviewAuthorityId && review.authorityDigest === this.config.reviewAuthorityDigest
+      && (!workItem || review.workItemExperiences === true && memory.workItemExperiences === true)
       && memory.available && memory.authorityId === this.config.adoptionAuthorityId && memory.grantDigest === this.config.adoptionGrantDigest
   }
   private evaluationFence<T>(callback: () => T): T {
@@ -190,11 +199,50 @@ export class MemoryLearningRuntime {
     if (!result.matched) throw new SourcePending('canonical scope changed during read')
     return result.value
   }
+  private withWorkItemSource<T>(job: LearningJob, callback: (task: Readonly<OwnerWorkItemLearningTask>) => T): T {
+    this.abort.signal.throwIfAborted(); this.owner(); this.policy()
+    const intent = job.intent
+    if (intent.sourceKind !== 'work-item' || !this.config.workItemExperiences
+      || intent.configDigest !== this.configDigest || !same(intent.owner, this.config.owner)
+      || Date.now() >= Math.min(intent.expiresAt, this.config.expiresAt)) throw new SourceObsolete('work-item learning authority expired')
+    const owner = this.config.owner
+    const scope = this.ports.evaluation.canonicalHostScope({ workspace: owner.workspace, preset: owner.agentPreset })
+    const current = this.ports.evaluation.getTrustedWorkItemLearningProjection({ scope, itemId: intent.itemId })
+    const expected = intent.canonical
+    if (!current || current.projection.disposition !== 'upsert' || current.objective?.outcomeId !== expected.outcomeId
+      || current.projection.version !== expected.version || current.projection.digest !== expected.digest
+      || current.objective.status !== expected.objectiveStatus) throw new SourceObsolete('work-item canonical result changed')
+    const task = this.ports.delivery.inspectOwnerWorkItemLearningTask?.({ ...this.scope(), outcomeId: expected.outcomeId })
+    if (!task || !this.ports.delivery.withOwnerWorkItemLearningTaskFence) throw new SourcePending('work-item reader temporarily unavailable')
+    const check = (value: Readonly<OwnerWorkItemLearningTask>): T => {
+      if (value.proofIdentity.itemId !== intent.itemId || value.canonical.objective?.outcomeId !== expected.outcomeId
+        || value.canonical.projection.version !== expected.version || value.canonical.projection.digest !== expected.digest
+        || value.canonical.objective.status !== expected.objectiveStatus
+        || value.owner.authorityHash !== owner.authorityHash || value.owner.principalRecordId !== owner.principalRecordId
+        || value.owner.principalVersion !== owner.principalVersion) throw new SourceObsolete('work-item source changed')
+      if (Object.values(value.presentation).some(part => part.truncated)) throw new SourceObsolete('work-item presentation exceeds text boundary')
+      if (!hasWorkItemLearningFeedbackText(value.presentation.feedback.text)) throw new SourceObsolete('work-item owner feedback has no visible text')
+      if (job.snapshot && (job.snapshot.sourceKind !== 'work-item'
+        || value.sourceDigest !== job.snapshot.source.sourceDigest || value.presentationDigest !== job.snapshot.source.contentDigest
+        || value.presentation.brief.text !== job.snapshot.taskBrief || value.presentation.report.text !== job.snapshot.workerReport
+        || value.presentation.feedback.text !== job.snapshot.ownerFeedback
+        || !same(presentationFlags(value), job.snapshot.presentationFlags)
+        || !same(this.config.model ?? value.proofIdentity.supplier, job.snapshot.model))) throw new SourceObsolete('frozen work-item source changed')
+      return callback(value)
+    }
+    return this.ports.delivery.withOwnerWorkItemLearningTaskFence({ ...this.scope(), itemId: intent.itemId,
+      outcomeId: expected.outcomeId, expectedSourceDigest: task.sourceDigest, expectedContentDigest: task.presentationDigest,
+      canonical: { version: expected.version, digest: expected.digest, objectiveStatus: expected.objectiveStatus } }, check)
+  }
+  private withCurrentSource<T>(job: LearningJob, callback: () => T): T {
+    return job.intent.sourceKind === 'work-item' ? this.withWorkItemSource(job, callback) : this.withSource(job, callback)
+  }
   private withSource<T>(job: LearningJob, callback: (content: Readonly<OwnerForegroundTaskSourceContent>, feedback?: string) => T): T {
+    if (job.intent.sourceKind === 'work-item') throw new Error('foreground source required')
     this.abort.signal.throwIfAborted(); this.owner(); this.policy()
     if (job.intent.configDigest !== this.configDigest || !same(job.intent.owner, this.config.owner)
       || Date.now() >= Math.min(job.intent.expiresAt, this.config.expiresAt)) throw new SourceObsolete('learning authority or source window expired')
-    const metadata = this.ports.delivery.inspectOwnerForegroundTaskSource({ ...this.scope(), inboxId: job.intent.inboxId })
+    const metadata = this.ports.delivery.inspectOwnerForegroundTaskSource({ ...this.scope(), inboxId: job.intent.inboxId! })
     if (!metadata) throw new SourcePending('completed source unavailable')
     if (job.intent.expectedSourceDigest && metadata.sourceDigest !== job.intent.expectedSourceDigest
       || job.snapshot && metadata.sourceDigest !== job.snapshot.source.sourceDigest
@@ -205,7 +253,7 @@ export class MemoryLearningRuntime {
       this.evaluationFence(() => {
         const owner = this.config.owner
         const scope = this.ports.evaluation.canonicalHostScope({ workspace: owner.workspace, preset: owner.agentPreset })
-        const canonical = this.ports.evaluation.getTrustedForegroundLearningProjection({ scope, inboxId: job.intent.inboxId })
+        const canonical = this.ports.evaluation.getTrustedForegroundLearningProjection({ scope, inboxId: job.intent.inboxId! })
         const revision = canonical && this.ports.evaluation.inspectTrustedTaskOwnerRevision({ scope, outcomeId: canonical.triggerOutcomeId,
           principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion })
         if (revision?.action === 'withdraw') throw new SourceObsolete('owner withdrew learning source')
@@ -294,6 +342,31 @@ export class MemoryLearningRuntime {
         }
         if (!page.hasMore) break
       }
+      if (this.config.workItemExperiences) {
+        stopped = false
+        for (let pageNumber = 0; pageNumber < 10 && !stopped; pageNumber++) {
+          const after = this.store.cursor(this.lane, 'evaluation-work-items') as Readonly<{ scopeKey: string; watermark: number }> | undefined
+          const page = this.ports.evaluation.listTrustedTaskLearningProjections({ scope, ...(after ? { after } : {}), limit: 100 })
+          for (const item of page.items) {
+            const canonical = item.receipt, now = Date.now(), at = canonical.objective?.occurredAt ?? 0
+            const workItem = canonical.projection.subjectKind === 'work-item'
+            const status = canonical.objective?.status
+            const eligible = workItem && canonical.projection.disposition === 'upsert' && (status === 'achieved' || status === 'not-achieved')
+              && at <= now && now - at <= this.config.lookbackMs
+            const subject = workItem ? `work-item:${canonical.projection.subjectRef}` : 'cursor:work-items'
+            const intent = eligible ? { configDigest: this.configDigest, owner, kind: 'experience' as const,
+              sourceKind: 'work-item' as const, itemId: canonical.projection.subjectRef, subject,
+              canonical: { outcomeId: canonical.objective!.outcomeId, version: canonical.projection.version,
+                digest: canonical.projection.digest, objectiveStatus: status }, createdAt: now,
+              expiresAt: Math.min(this.config.expiresAt, now + this.config.lookbackMs) } : undefined
+            const result = this.ports.evaluation.withTrustedCanonicalScopeWriterFence({ scope, scopeWatermark: page.scopeWatermark }, () =>
+              this.store.stage({ lane: this.lane, feed: 'evaluation-work-items', cursor: { scopeKey: page.nextCursor.scopeKey, watermark: item.watermark },
+                sequence: item.watermark, subject, ...(intent ? { intent } : {}), maxPending: this.config.maxPending, supersede: workItem }))
+            if (!result.matched || !result.value) { stopped = true; break }
+          }
+          if (!page.hasMore) break
+        }
+      }
       for (const pending of this.store.pending(this.lane)) {
         if (pending.state !== 'pending' && pending.state !== 'queued') continue
         try {
@@ -301,7 +374,16 @@ export class MemoryLearningRuntime {
           if (job.state === 'pending') {
             // Each API owns its own producer locks; do not nest target discovery.
             const targets = this.ports.memory.listLearningTargets({ owner, limit: 20 })
-            job = this.withSource(job, (content, feedback) => this.store.freeze(job.id, {
+            if (job.intent.sourceKind === 'work-item') {
+              if (!this.available(true)) continue
+              job = this.withWorkItemSource(job, task => this.store.freeze(job.id, {
+                sourceKind: 'work-item', presentationFlags: presentationFlags(task), model: validateLearningModel(this.config.model ?? task.proofIdentity.supplier),
+                source: { protocol: 'memory-learning-source/work-item/v1', itemId: task.proofIdentity.itemId,
+                  sourceDigest: task.sourceDigest, contentDigest: task.presentationDigest, canonical: job.intent.canonical! },
+                taskBrief: task.presentation.brief.text, workerReport: task.presentation.report.text,
+                ownerFeedback: task.presentation.feedback.text, targets: targets.filter(target => target.kind === 'experience'),
+              }))
+            } else job = this.withSource(job, (content, feedback) => this.store.freeze(job.id, {
               model: validateLearningModel(this.config.model ?? content.source.execution.modelSelection),
               source: { inboxId: content.source.inboxId, sourceDigest: content.sourceDigest, contentDigest: content.contentDigest,
                 ...(job.intent.canonical ? { canonical: job.intent.canonical } : {}) },
@@ -309,7 +391,8 @@ export class MemoryLearningRuntime {
               ...(feedback === undefined ? {} : { ownerFeedback: feedback }), targets,
             }))
           }
-          this.withSource(job, () => this.schedule(job))
+          if (job.intent.sourceKind === 'work-item') { this.withCurrentSource(job, () => undefined); this.schedule(job) }
+          else this.withCurrentSource(job, () => this.schedule(job))
         } catch (error) {
           if (error instanceof ScannerOwnerUnavailable) throw error
           if (error instanceof SourceObsolete) this.store.settle(pending.id, 'superseded', reasonText(error.message))
@@ -366,19 +449,19 @@ export class MemoryLearningRuntime {
       this.owner()
       const prior = this.ports.memory.lookupLearningAdoption({ request: job.request! })
       if (prior) { this.store.settle(job.id, 'adopted', 'reconciled-original-adoption', prior.receiptDigest); return }
-      this.withSource(job, () => undefined)
       const review = this.ports.verifier.lookupMemoryLearningReview(job.request!)
       if (!review || !this.reviewMatches(job, review) || review.status === 'unknown') return
       if (review.status === 'rejected') this.store.settle(job.id, 'rejected', reasonText(review.reason), review.receiptDigest)
       else {
         // Lookup completed outside producer locks. Memory owns its adoption locks.
-        this.withSource(job, () => undefined)
+        this.withCurrentSource(job, () => undefined)
         const adopted = this.ports.memory.adoptReviewedLearning({ request: job.request! })
         this.store.settle(job.id, 'adopted', 'reconciled-approved-adoption', adopted.receiptDigest)
       }
-    } catch (error) {
-      if (error instanceof SourceObsolete) this.store.settle(job.id, 'superseded', reasonText(error.message))
-      // Temporary absence retains the same request; paid calls are not replayed.
+    } catch {
+      // A canonical change cannot prove that the original operation did not
+      // commit. Keep every saved unknown request queryable until an original
+      // receipt or explicit terminal review settles it; never replay paid calls.
     }
   }
   private async execute(input: HostAutomationExecutorInput): Promise<HostAutomationExecutorResult> {
@@ -402,8 +485,8 @@ export class MemoryLearningRuntime {
       }
       const queued = this.store.get(input.automationId)
       if (!queued || queued.state !== 'queued' || !queued.snapshot || queued.digest !== input.activationNonce
-        || queued.definitionHash !== input.definitionHash || !this.available()) throw new Error('learning job is not admissible')
-      this.withSource(queued, () => { claimed = this.store.claim(queued.id, input.definitionHash, input.occurrenceId) })
+        || queued.definitionHash !== input.definitionHash || !this.available(queued.intent.sourceKind === 'work-item')) throw new Error('learning job is not admissible')
+      this.withCurrentSource(queued, () => { claimed = this.store.claim(queued.id, input.definitionHash, input.occurrenceId) })
       const job = claimed!
       const signal = AbortSignal.any([input.signal, this.abort.signal, AbortSignal.timeout(Math.max(1,
         Math.min(this.config.timeoutMs + 310_000, job.intent.expiresAt - Date.now(), this.config.expiresAt - Date.now())))])
@@ -411,10 +494,11 @@ export class MemoryLearningRuntime {
         signal.throwIfAborted()
         const current = this.store.get(job.id)
         if (!current || current.state !== 'running' || current.occurrenceId !== input.occurrenceId) throw new Error('learning claim superseded')
-        this.withSource(job, () => undefined)
+        this.withCurrentSource(job, () => undefined)
       }
       assertCurrent(); this.policy(true, `memory-extract:${this.config.authorityId}:${job.id}`)
       const extractionSignal = AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)])
+      if (job.intent.sourceKind === 'work-item' && !this.available(true, true)) throw new Error('work-item learning capabilities unavailable before extraction')
       const extraction = await this.ports.extract({ config: this.config, job, signal: extractionSignal, assertCurrent })
       assertCurrent()
       if (!extraction.proposal) {
@@ -422,12 +506,14 @@ export class MemoryLearningRuntime {
         return result('succeeded')
       }
       const proposal = extraction.proposal
-      const quoteSources = [job.snapshot!.ownerStatement, job.snapshot!.ownerFeedback ?? '']
+      const quoteSources = job.snapshot!.sourceKind === 'work-item' ? [job.snapshot!.ownerFeedback]
+        : [job.snapshot!.ownerStatement, job.snapshot!.ownerFeedback ?? '']
+      if (job.snapshot!.sourceKind === 'work-item' && !hasWorkItemLearningFeedbackText(proposal.evidenceQuote)) throw new Error('work-item quotation has no visible text')
       if (!quoteSources.some(text => text.includes(proposal.evidenceQuote))) throw new Error('learning quotation is not an owner source')
       if (proposal.mutation.op !== 'remove' && proposal.mutation.entry.kind !== job.intent.kind) throw new Error('learning kind changed')
       const mutation = proposal.mutation
-      if (mutation.op !== 'add' && !job.snapshot!.targets.some(target => target.id === mutation.id && target.version === mutation.expectedVersion)) throw new Error('learning target not in frozen managed set')
-      const request = validateMemoryLearningReviewRequest({ protocol: 'memory-learning-review/v1',
+      if (mutation.op !== 'add' && !job.snapshot!.targets.some(target => target.id === mutation.id && target.version === mutation.expectedVersion && target.kind === job.intent.kind)) throw new Error('learning target not in frozen managed set')
+      const request = validateMemoryLearningReviewRequest({ protocol: job.intent.sourceKind === 'work-item' ? 'memory-learning-review/v2' : 'memory-learning-review/v1',
         operationId: job.id, extractionSessionId: extraction.sessionId,
         owner, source: job.snapshot!.source, ...proposal })
       const saved = this.store.saveRequest(job.id, input.occurrenceId, request)

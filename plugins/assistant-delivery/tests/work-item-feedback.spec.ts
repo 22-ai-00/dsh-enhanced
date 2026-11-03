@@ -34,7 +34,7 @@ async function fixture(options:{root?:string;feedback?:boolean;continuation?:boo
  const ownerRow=store.getPrincipal(principal)!,owner={principalRecordId:ownerRow.id,principalVersion:ownerRow.version}
  const reports=new Map<string,{target:WorkItemReportTarget;bindingId:string;text:string;key:string;createdAt:number}>()
  sql(path,db=>{for(const row of db.prepare('SELECT outbox_id,target_json FROM delivery_work_item_reports').all() as {outbox_id:string;target_json:string}[]){const target=JSON.parse(row.target_json) as WorkItemReportTarget,outbox=store.getOutbox(row.outbox_id)!;reports.set(target.itemId,{target,bindingId:outbox.intent.bindingId,text:outbox.intent.text,key:outbox.intent.idempotencyKey,createdAt:outbox.createdAt})}})
- let ready=true,current=true,resolverHook:(()=>void)|undefined,ownsHook:(()=>void)|undefined
+ let ready=true,current=true,resolverHook:(()=>void)|undefined,ownsHook:(()=>void)|undefined,batchHook:((itemId:string)=>void)|undefined
  const capabilities=new WeakMap<object,TrustedWorkItemOwnerFeedbackProof>()
  const registration:WorkItemReplyConsumerRegistration={protocol:1,sourceId,continuationAutomationId:automationId,feedbackEnabled:options.feedback!==false,continuationEnabled:options.continuation??false,
   inspectReport:vi.fn(input=>{const r=reports.get(input.itemId);return r&&r.bindingId===input.bindingId&&r.key===input.idempotencyKey&&r.text===input.text&&r.target.reportRevision===input.reportRevision?r.target:undefined}),
@@ -48,7 +48,11 @@ async function fixture(options:{root?:string;feedback?:boolean;continuation?:boo
     production:{automationId,occurrenceId:`occ-${input.itemId}`,runId:`run-${input.itemId}`,definitionHash:'a'.repeat(64),definitionVersion:1,executionStatus:'failed' as const,completedAt:r.createdAt,quiescent:true as const,budgetSettlementState:'finalized' as const},
     supplier:{provider:'scripted',model:'frozen-model'},planDigest:'b'.repeat(64),task:{brief:'Original task brief token=secret-value',briefTruncated:false},report:{status:'blocked' as const,text:r.text,truncated:false,recordedAt:r.createdAt}}
    const capability={};capabilities.set(capability,{...unsigned,proofDigest:workItemReplyDigest(unsigned)});return capability
-  },resolveOwnerWorkItemFeedbackTarget:(capability:unknown)=>{resolverHook?.();return ready&&current&&capability&&typeof capability==='object'?capabilities.get(capability):undefined}}
+  },resolveOwnerWorkItemFeedbackTarget:(capability:unknown)=>{resolverHook?.();return ready&&current&&capability&&typeof capability==='object'?capabilities.get(capability):undefined},
+  withOwnerWorkItemFeedbackTargetsFence:<T>(caps:readonly unknown[],callback:(proofs:readonly (Readonly<TrustedWorkItemOwnerFeedbackProof>|undefined)[])=>T):T=>{
+   const proofs=caps.map(cap=>{const proof=cap&&typeof cap==='object'?capabilities.get(cap):undefined;if(proof)batchHook?.(proof.itemId);resolverHook?.();return proof})
+   return callback(proofs.map(proof=>ready&&current&&proof&&reports.get(proof.itemId)?.target.reportDigest===proof.reportDigest?proof:undefined))
+  }}
  class WorkItemsPeerService extends Service { constructor(context:Context){super(context,'assistantWorkItems' as never);Object.assign(this,peer)} }
  await ctx.plugin(WorkItemsPeerService)
  service.registerWorkItemReplyConsumer(registration)
@@ -62,7 +66,7 @@ async function fixture(options:{root?:string;feedback?:boolean;continuation?:boo
  function envelope(eventId:string,text:string,providerMessageId='provider-1'){return{channel:'lark',account:'feedback',eventId,occurredAt:Date.now(),principal,conversation,kind:text.startsWith('/')?'command' as const:'text' as const,text,metadata:{replyToProviderMessageId:providerMessageId}}}
  const canonical=(itemId='P')=>evaluation.getTrustedWorkItemLearningProjection({scope:evaluation.canonicalHostScope(scope),itemId})
  const learning=(outcomeId:string)=>service.inspectOwnerWorkItemLearningTask({authorityId:authority.id,principalId:'lark/feedback/tenant/owner',workspace:scope.workspace,agentPreset:scope.preset,outcomeId})
- return{ctx,root,path,service,store,evaluation,binding,owner,registration,peer,reports,report,envelope,send,canonical,learning,ready:(value:boolean)=>{ready=value},current:(value:boolean)=>{current=value},resolverHook:(value:(()=>void)|undefined)=>{resolverHook=value},ownsHook:(value:(()=>void)|undefined)=>{ownsHook=value}}
+ return{ctx,root,path,service,store,evaluation,binding,owner,registration,peer,reports,report,envelope,send,canonical,learning,batchHook:(hook:((itemId:string)=>void)|undefined)=>{batchHook=hook},ready:(value:boolean)=>{ready=value},current:(value:boolean)=>{current=value},resolverHook:(value:(()=>void)|undefined)=>{resolverHook=value},ownsHook:(value:(()=>void)|undefined)=>{ownsHook=value}}
 }
 
 describe('owner work-item result feedback through real Delivery and Evaluation',()=>{
@@ -195,4 +199,116 @@ test('preserves genuine populated schema29 reports, reply input, ACK and stream 
   for(const[name,rows]of Object.entries(before.tables))expect(db.prepare(`SELECT * FROM "${name}"`).all()).toEqual(rows)
   expect(db.prepare('SELECT source_digest,source_json,execution_parent_item_id,child_item_id,child_plan_digest,state FROM delivery_work_item_replies').get()).toEqual(before.source)
   expect(db.prepare('SELECT * FROM delivery_work_item_reply_streams').get()).toEqual(before.head);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_feedback').get()?.n).toBe(0)})
+})
+
+
+describe('work-item Memory source fences',()=>{
+ const scopeInput=(task:NonNullable<ReturnType<AssistantDeliveryService['inspectOwnerWorkItemLearningTask']>>)=>({authorityId:task.owner.authorityId,principalId:task.owner.principalId,
+  workspace:task.owner.workspace,agentPreset:task.owner.agentPreset,expectedOwner:{authorityHash:task.owner.authorityHash,principalRecordId:task.owner.principalRecordId,principalVersion:task.owner.principalVersion}})
+ const expectation=(task:NonNullable<ReturnType<AssistantDeliveryService['inspectOwnerWorkItemLearningTask']>>)=>({kind:'work-item' as const,itemId:task.proofIdentity.itemId,
+  outcomeId:task.canonical.objective!.outcomeId,expectedSourceDigest:task.sourceDigest,expectedContentDigest:task.presentationDigest,
+  canonical:{version:task.canonical.projection.version,digest:task.canonical.projection.digest,objectiveStatus:task.canonical.objective!.status as 'achieved'|'not-achieved'}})
+ async function recorded(f:Awaited<ReturnType<typeof fixture>>,itemId='P'){
+  let report=await f.report(itemId)
+  for(let attempt=0;report.providerMessageId===undefined&&attempt<3;attempt++){await f.service.tick();await f.service.whenIdle();report=f.store.getOutbox(report.id)!}
+  expect(report.providerMessageId).toBeDefined()
+  await f.service.acceptInbound(f.envelope(`result-${itemId}`,'还是不行',report.providerMessageId!));await f.service.whenIdle()
+  return f.learning(f.canonical(itemId)!.objective!.outcomeId)!
+ }
+ test('strict exact single wrapper holds native locks, preserves identity, and rejects stale source or thenable',async()=>{
+  const f=await fixture(),task=await recorded(f),input={...scopeInput(task),...expectation(task)},callback=vi.fn(value=>value)
+  expect(f.service.withOwnerWorkItemLearningTaskFence(input,callback)).toEqual(task);expect(callback).toHaveBeenCalledOnce();expect(Object.isFrozen(callback.mock.results[0]!.value.proofIdentity.production)).toBe(true)
+  expect(()=>f.service.withOwnerWorkItemLearningTaskFence({...input,expectedContentDigest:'c'.repeat(64)},callback)).toThrow(/unavailable or changed/)
+  expect(callback).toHaveBeenCalledOnce()
+  expect(()=>f.service.withOwnerWorkItemLearningTaskFence(input,()=>Promise.resolve('async'))).toThrow(/synchronous/)
+  expect(f.service.withOwnerWorkItemLearningTaskFence(input,()=>17)).toBe(17)
+ })
+ test('mixed real foreground fact preserves legacy content bytes and needs no invented canonical result',async()=>{
+  const f=await fixture(),task=await recorded(f),base=scopeInput(task)
+  const admitted=f.store.claimNativeInbox({envelope:{...f.envelope('foreground-fact','owner fact'),metadata:{}},binding:f.binding,ownerLineage:f.owner,ownerId:'fact-worker',leaseMs:60000})
+  const inboxId=admitted.record.id
+  f.store.bindForegroundTaskExecution({inboxId,scope,owner:f.owner,binding:f.binding,dispatchedAt:Date.now()})
+  f.store.recordForegroundExecutionModelSelection({inboxId,provider:'scripted',model:'fact-model'})
+  f.store.finishForegroundTaskExecution({inboxId,status:'succeeded',quiescent:true,completedAt:Date.now()})
+  f.store.enqueue({idempotencyKey:`inbound:${inboxId}:reply`,bindingId:f.binding.id,target:{principal,conversation},text:'actual foreground reply',replyToEventId:'foreground-fact'})
+  const source=f.service.inspectOwnerForegroundTaskSource({...base,inboxId})!,legacy=f.service.withOwnerForegroundTaskSourceFence({...base,inboxId,expectedSourceDigest:source.sourceDigest},value=>value)
+  const snapshots=f.service.withOwnerLearningSourcesFence({...base,sources:[{kind:'foreground',inboxId,expectedSourceDigest:source.sourceDigest},expectation(task)]},value=>value)
+  const foreground=snapshots[0]!
+  if(foreground.kind!=='foreground')throw new Error('wrong index')
+  expect(foreground.content).toEqual(legacy);expect(JSON.stringify(foreground.content)).toBe(JSON.stringify(legacy));expect(foreground.currentCanonical).toBeUndefined();expect(foreground.task).toBeUndefined()
+  expect(snapshots[1]!.kind==='work-item'&&snapshots[1]!.task?.sourceDigest).toBe(task.sourceDigest)
+ })
+ test('holds Delivery and canonical SQLite writer locks together through the terminal ledger callback',async()=>{
+  const f=await fixture(),task=await recorded(f)
+  const locked=(path:string)=>sql(path,db=>{db.exec('PRAGMA busy_timeout=0');try{expect(()=>db.exec('BEGIN IMMEDIATE')).toThrow(/locked/)}finally{if(db.isTransaction)db.exec('ROLLBACK')}})
+  f.batchHook(()=>{locked(f.path);locked(join(f.root,'evaluation.sqlite'))})
+  expect(f.service.withOwnerWorkItemLearningTaskFence({...scopeInput(task),...expectation(task)},()=>{locked(f.path);locked(join(f.root,'evaluation.sqlite'));return 'terminal'})).toBe('terminal')
+ })
+ test('wrong item/outcome combinations cannot borrow another item owner withdrawal',async()=>{
+  const f=await fixture(),a=await recorded(f,'P'),b=await recorded(f,'Q')
+  await f.service.acceptInbound(f.envelope('withdraw-only-P','/feedback withdraw 1 not-achieved'));await f.service.whenIdle()
+  const snapshots=f.service.withOwnerLearningSourcesFence({...scopeInput(a),sources:[{...expectation(a),itemId:'Q'}, {...expectation(b),itemId:'missing-item'}]},value=>value)
+  expect(snapshots[0]!.kind==='work-item'&&snapshots[0]!.task).toBeUndefined()
+  expect(snapshots[0]!.kind==='work-item'&&snapshots[0]!.ownerRevision?.action).toBe('initial')
+  expect(snapshots[1]!.kind==='work-item'&&snapshots[1]!.ownerRevision).toBeUndefined()
+ })
+ test('ordinary conflicting proof retraction does not manufacture an owner withdrawal',async()=>{
+  const f=await fixture(),task=await recorded(f)
+  f.reports.get('P')!.createdAt++
+  await f.service.acceptInbound(f.envelope('conflicting-proof','问题解决了'));await f.service.whenIdle()
+  const snapshots=f.service.withOwnerLearningSourcesFence({...scopeInput(task),sources:[expectation(task)]},value=>value),snapshot=snapshots[0]!
+  expect(snapshot.kind).toBe('work-item')
+  if(snapshot.kind==='work-item'){expect(snapshot.currentCanonical?.projection.disposition).toBe('retract');expect(snapshot.task).toBeUndefined();expect(snapshot.ownerRevision?.action).not.toBe('withdraw')}
+ })
+ test('later B resolver invalidating A report hides A without blocking B',async()=>{
+  const f=await fixture(),a=await recorded(f,'P'),b=await recorded(f,'Q');let hit=false
+  f.batchHook(itemId=>{if(itemId==='Q'){hit=true;f.reports.delete('P')}})
+  const snapshots=f.service.withOwnerLearningSourcesFence({...scopeInput(a),sources:[expectation(a),expectation(b)]},value=>value)
+  expect(hit).toBe(true);expect(snapshots[0]).toMatchObject({kind:'work-item',itemId:'P'});expect(snapshots[0]!.kind==='work-item'&&snapshots[0]!.task).toBeUndefined()
+  expect(snapshots[1]!.kind==='work-item'&&snapshots[1]!.task?.proofIdentity.itemId).toBe('Q')
+ })
+ test('later B resolver invalidating current producer hides all cached proofs',async()=>{
+  const f=await fixture(),a=await recorded(f,'P'),b=await recorded(f,'Q');let hit=false
+  f.batchHook(itemId=>{if(itemId==='Q'){hit=true;f.current(false)}})
+  const snapshots=f.service.withOwnerLearningSourcesFence({...scopeInput(a),sources:[expectation(a),expectation(b)]},value=>value)
+  expect(hit).toBe(true);expect(snapshots.every(value=>value.kind==='work-item'&&value.task===undefined)).toBe(true)
+ })
+ test('later B actual canonical withdrawal cannot cross the held Evaluation writer fence',async()=>{
+  const f=await fixture(),a=await recorded(f,'P'),b=await recorded(f,'Q'),hostScope=f.evaluation.canonicalHostScope(scope)
+  const old=f.evaluation.getTrustedOutcome({scope:hostScope,outcomeId:a.canonical.objective!.outcomeId})!,evalStore=(f.evaluation as unknown as{store:{append(input:OutcomeEnvelope,command:OwnerObjectiveCommand):StoredOutcome}}).store
+  let attempted=false
+  f.batchHook(itemId=>{if(itemId!=='Q')return;attempted=true
+   evalStore.append({scope,situation:old.situation,executionStatus:old.executionStatus,objectiveStatus:'unknown',deliveryStatus:old.deliveryStatus,source:old.source,trust:'trusted',evidence:old.evidence,metrics:{},occurredAt:old.occurredAt+1,idempotencyKey:'batch-withdraw-A',evaluator:old.evaluator},
+    {...f.owner,operationId:'batch-withdraw-A',action:'withdraw',expectedVersion:1,previousStatus:'not-achieved'})
+  })
+  const terminal=vi.fn()
+  expect(()=>f.service.withOwnerLearningSourcesFence({...scopeInput(a),sources:[expectation(a),expectation(b)]},terminal)).toThrow(/transaction/)
+  expect(attempted).toBe(true);expect(terminal).not.toHaveBeenCalled();expect(f.canonical('P')?.objective?.status).toBe('not-achieved')
+  f.batchHook(undefined);expect(f.service.withOwnerWorkItemLearningTaskFence({...scopeInput(a),...expectation(a)},()=>true)).toBe(true)
+ })
+ test('real emergency stop from the last batch resolver blocks source use before terminal callback',async()=>{
+  const f=await fixture(),task=await recorded(f);let hit=false
+  f.batchHook(()=>{hit=true;f.ctx.assistantPolicy.setEmergencyStop({enabled:true,actor:'owner',reason:'final batch resolve'})})
+  const terminal=vi.fn()
+  expect(()=>f.service.withOwnerWorkItemLearningTaskFence({...scopeInput(task),...expectation(task)},terminal)).toThrow(/unavailable or changed/)
+  expect(hit).toBe(true);expect(terminal).not.toHaveBeenCalled();expect(f.ctx.assistantPolicy.getEmergencyStop().enabled).toBe(true)
+ })
+ test('mixed missing foreground and withdrawn work item remain distinguishable without forged inbox identities',async()=>{
+  const f=await fixture(),task=await recorded(f);await f.service.acceptInbound(f.envelope('withdraw-memory','/feedback withdraw 1 not-achieved'));await f.service.whenIdle()
+  const snapshots=f.service.withOwnerLearningSourcesFence({...scopeInput(task),sources:[{kind:'foreground',inboxId:'not-a-real-inbox',expectedSourceDigest:'a'.repeat(64)},expectation(task)]},value=>value)
+  expect(snapshots[0]).toEqual({kind:'foreground',inboxId:'not-a-real-inbox',content:undefined,currentCanonical:undefined,ownerRevision:undefined,task:undefined})
+  expect(snapshots[1]!.kind==='work-item'&&snapshots[1]!.task).toBeUndefined();expect(snapshots[1]!.kind==='work-item'&&snapshots[1]!.currentCanonical?.objective?.status).toBe('unknown');expect(snapshots[1]!.kind==='work-item'&&snapshots[1]!.ownerRevision?.action).toBe('withdraw')
+ })
+ test('same owner new Session preserves work-item source and accepts a fresh scope watermark',async()=>{
+  const f=await fixture(),task=await recorded(f);await recorded(f,'unrelated');await f.service.acceptInbound(f.envelope('memory-new-session','/new'));await f.service.whenIdle()
+  const current=f.learning(task.canonical.objective!.outcomeId)!;expect(current.sourceDigest).toBe(task.sourceDigest);expect(current.presentationDigest).toBe(task.presentationDigest)
+  expect(f.service.withOwnerWorkItemLearningTaskFence({...scopeInput(current),...expectation(task)},value=>value.sourceDigest)).toBe(task.sourceDigest)
+ })
+ test('rejects repeated identities, oversize batches and accessors without invoking them',async()=>{
+  const f=await fixture(),task=await recorded(f),source=expectation(task),base=scopeInput(task),callback=vi.fn()
+  expect(()=>f.service.withOwnerLearningSourcesFence({...base,sources:[source,source]},callback)).toThrow(/unique/)
+  expect(()=>f.service.withOwnerLearningSourcesFence({...base,sources:Array.from({length:1001},()=>source)},callback)).toThrow(/batch/)
+  let reads=0;const accessor={...source};Object.defineProperty(accessor,'itemId',{enumerable:true,get:()=>{reads++;return 'P'}})
+  expect(()=>f.service.withOwnerLearningSourcesFence({...base,sources:[accessor]},callback)).toThrow(/accessors/);expect(reads).toBe(0);expect(callback).not.toHaveBeenCalled()
+ })
 })

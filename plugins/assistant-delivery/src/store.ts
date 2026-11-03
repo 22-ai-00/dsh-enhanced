@@ -5039,6 +5039,18 @@ export class DeliveryStore {
     })
   }
 
+  /** Internal Host composition seam. Keeps one Delivery transaction across mixed source locks. */
+  withOwnerLearningSourceFence<T>(input:OwnerForegroundTaskSourceScope,authority:OwnerRouteAuthority,callback:()=>T):T {
+    this.assertOpen()
+    if(typeof callback!=='function')throw new DeliveryStoreError('invalid-binding','learning source callback is invalid')
+    return this.transaction(()=>{
+      this.foregroundSourceFence(input,authority)
+      const result=callback()
+      this.assertForegroundSourceSyncResult(result)
+      return result
+    })
+  }
+
   private assertForegroundSourceSyncResult<T>(result: T): void {
     if (result !== null && (typeof result === 'object' || typeof result === 'function') && 'then' in result) {
       // The native method consumes a real rejected Promise without invoking an

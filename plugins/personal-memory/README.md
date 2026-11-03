@@ -70,7 +70,13 @@ dsh --profile web --dump-config
 
 采用要求同批 Delivery、Evaluation 和 Verifier 服务，以及 Policy 对背景主体 `assistant-memory-learning`、精确 workspace/principal、动作 `adopt`、资源 `memory:learning:<采用授权ID>` 的 allow 规则。审查另按 Verifier 的 `review` 规则和独立预算授权。可选 peers 不会自动挂载这些服务；服务缺失或卸载时新采用拒绝，人工记忆照常按原 Policy 工作。调用方只提供共享合同中的 request，不能提交批准布尔值、替代回执、namespace、trust、provenance 或额度。
 
-Host 先向真实 Verifier 查询已持久化的独立批准，再在 Delivery → Evaluation → Memory 的锁序下重新核对来源原文摘要、owner 和 canonical 结果。事实可以来自明确的 owner 原话，无需任务成功标签；经验必须绑定已判断的原任务结果，不能以正常回复代替结果。记忆固定为当前 agent/workspace 下的 `agent-observed`、`private`，不升级为 `user-confirmed`；TTL、来源时间和原 inbox 引用由 Host 写入。记录、检索索引、审计、累计额度及完整采用回执在同一 Memory 事务中提交。
+Host 先向真实 Verifier 查询已持久化的独立批准，再在 Delivery → Evaluation → Memory 的锁序下重新核对来源原文摘要、owner 和 canonical 结果。事实可以来自明确的 owner 原话，无需任务成功标签；经验必须绑定已判断的原任务结果，不能以正常回复代替结果。记忆固定为当前 agent/workspace 下的 `agent-observed`、`private`，不升级为 `user-confirmed`；TTL、来源时间和带来源类型的引用由 Host 写入。记录、检索索引、审计、累计额度及完整采用回执在同一 Memory 事务中提交。
+
+后台工作项经验使用独立的 `memory-learning-review/v2` typed source，不把 itemId 当作前台 inboxId。采用授权和 Verifier 审查授权必须分别显式开启 `workItemExperiences: true`，学习生产者也须显式开启；采用授权的 `kinds` 必须包含 experience。省略或 false 保持旧授权规范化字节和摘要，不能在原 authority ID 上静默扩权或恢复已用额度。新 availability 仅在明确授权且 mixed source fence 可用时附加 `workItemExperiences: true`；旧 peer 缺字段时生产者不得为该来源付费。
+
+v2 只写 experience；replace/remove 还需重读精确受管 experience 目标。可引用的证据只来自主人反馈的可见原文，brief 与 worker report 仅作不可信背景，不充当 owner 原话；截断材料拒绝，脱敏占位保留，纯占位或标点不能当作证言。来源冻结真实 production completedAt 与 typed provenance，独立审查回执继续绑定完整 request、授权及 supplier，不从当前默认模型补猜。
+
+含工作项的检索使用一次 Delivery → Evaluation → WorkItems → Memory 批量来源栅栏，foreground 与 work-item 使用不同索引键；最终 Memory callback 不重新调用生产者。缺新 API 或暂失来源时隐藏自动记录而保留人工记忆；更正隐藏原 exact version，只有同一工作项当前 canonical 与明确 owner withdrawal 对齐时才持久失效，不退还额度。纯前台 v1 继续使用原来源与旧 peer 接口，Memory schema 保持 7。
 
 重复 operation 只返回原始持久回执，不返回之后手动编辑的内容，也不再次消费额度；同 operation 的不同 request 拒绝。历史回执只证明过去提交，不证明记录仍可见。回执查询仍要求当前 owner 和 Policy；临时失去访问资格时不会重新执行该操作，恢复后可继续对账。replace/remove 只允许 ID、版本、完整记录摘要均匹配的自动版本；手动修改后的版本永久退出原自动管理链，即使恢复相同正文也不能被旧候选接管。
 

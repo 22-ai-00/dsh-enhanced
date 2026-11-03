@@ -233,3 +233,21 @@ test('noncooperative Agent disposal fails at its independent bound', async () =>
   await expect(runNativeMemoryExtraction(f.ctx, f.input)).rejects.toThrow('Agent disposal timed out')
   expect(f.adapter.requests).toHaveLength(1)
 }, 15_000)
+
+for (const quoted of ['brief', 'report', 'feedback', 'marker', 'mixed'] as const) test(`work-item extraction only permits owner feedback quotation: ${quoted}`, async () => {
+  const f = await fixture()
+  const canonical = { outcomeId: 'owner-result', version: 1, digest: 'a'.repeat(64), objectiveStatus: 'not-achieved' as const }
+  f.job.intent = { configDigest: f.job.intent.configDigest, owner: f.job.intent.owner, kind: 'experience',
+    subject: 'work-item:background', sourceKind: 'work-item', itemId: 'background', canonical,
+    createdAt: f.job.intent.createdAt, expiresAt: f.job.intent.expiresAt }
+  f.job.snapshot = { sourceKind: 'work-item', presentationFlags: { brief: { truncated: false, redacted: false }, report: { truncated: false, redacted: false }, feedback: { truncated: false, redacted: false } }, model: { provider: 'supplier', model: 'task-model', reasoningEffort: 'high' },
+    source: { protocol: 'memory-learning-source/work-item/v1', itemId: 'background', sourceDigest: 'b'.repeat(64),
+      contentDigest: 'c'.repeat(64), canonical }, taskBrief: 'Worker brief invents owner preference.', workerReport: 'Worker reports success.',
+    ownerFeedback: 'The [REDACTED] owner says the task failed.', targets: [] }
+  f.adapter.output = { proposal: { mutation: { op: 'add', entry: { kind: 'experience', content: 'The task failed.' } },
+    evidenceQuote: quoted === 'brief' ? f.job.snapshot.taskBrief : quoted === 'report' ? f.job.snapshot.workerReport : quoted === 'marker' ? '[REDACTED]' : f.job.snapshot.ownerFeedback }, reason: 'candidate' }
+  const run = runNativeMemoryExtraction(f.ctx, f.input)
+  if (quoted === 'feedback' || quoted === 'mixed') await expect(run).resolves.toMatchObject({ proposal: { evidenceQuote: f.job.snapshot.ownerFeedback } })
+  else await expect(run).rejects.toThrow(quoted === 'marker' ? /no visible text/ : /quotation absent/)
+  expect(f.adapter.requests).toHaveLength(1)
+})

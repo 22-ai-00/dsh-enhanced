@@ -20,7 +20,8 @@
 - [当前状态](rsi-status.md)：唯一进展入口；目标是在普通使用中完成反馈、改进、独立验证、采用和后续观察。
 - [双 Host 安装](../plugins/lark-channel/docs/rsi-setup.md)、[有限试用采用](bounded-live-adoption.md)：当前主线部署与采用合同。
 - [Linux 原生运行时](dockerless-runtime.md)：无 Docker 安装、cgroup v1 要求，以及 pre-owner 维护与已有 owner 迁移的不同边界。
-- [持久后台任务](../plugins/assistant-work-items/README.md)：默认关闭；显式授权后支持诊断、断点召回、报告回复续办与主人结果反馈。后台结果驱动 Memory/Growth 仍待接线，不能视为已完成成长闭环。
+- [持久后台任务](../plugins/assistant-work-items/README.md)：默认关闭；显式授权后支持诊断、断点召回、报告回复续办与主人结果反馈。
+- [自动记忆学习](../plugins/assistant-memory-learning/README.md)：前台事实/经验，以及另行授权的后台结果经验；独立审查、有限采用与来源撤回。后台工程 Growth 和后续真实任务收益仍待验收。
 - [完整验收合同](rsi-acceptance.md)：涉及具体能力或发布审查时查阅，保留完整成功条件与限定验收边界。
 - [持续成长设计](continuous-personal-assistant-growth.md)：产品目标、反馈信任和自治边界；偏好学习不替代工具/插件自迭代。
 

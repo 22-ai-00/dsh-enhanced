@@ -11,7 +11,7 @@ import SystemPrompt, { renderContextSnapshot } from '@deepseek-ai/dsh-system-pro
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { AssistantDeliveryService, externalPrincipalId, ownerRouteAuthorityHash } from '@dsh-enhanced/assistant-delivery'
 import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assistant-evaluation'
-import { growthObjectDigest, memoryLearningRequestDigest, type MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
+import { growthObjectDigest, memoryLearningRequestDigest, type ForegroundMemoryLearningReviewRequest, type MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
 import { afterEach, expect, test, vi } from 'vitest'
 import { DeliveryStore } from '../../assistant-delivery/lib/store.js'
 import { MemoryReviewRuntime, type MemoryReviewConfig } from '../../assistant-verifier/lib/memory-review.js'
@@ -150,7 +150,7 @@ async function fixture() {
   }
   function request(sourceRef: ReturnType<typeof source>, operationId: string,
     mutation: MemoryLearningReviewRequest['mutation'] = { op: 'add',
-      entry: { kind: 'fact', content: 'This pnpm project uses a lockfile.' } }): MemoryLearningReviewRequest {
+      entry: { kind: 'fact', content: 'This pnpm project uses a lockfile.' } }): ForegroundMemoryLearningReviewRequest {
     return { protocol: 'memory-learning-review/v1', operationId, extractionSessionId: 'extraction:1',
       owner, source: { inboxId: sourceRef.inboxId, sourceDigest: sourceRef.sourceDigest,
         contentDigest: sourceRef.contentDigest }, mutation, evidenceQuote: 'This pnpm project uses a lockfile.' }

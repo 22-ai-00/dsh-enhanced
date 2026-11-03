@@ -1,8 +1,9 @@
-import type { WorkItemFeedbackIntent, WorkItemFeedbackSource, WorkItemFeedbackSelection, OwnerWorkItemLearningTask } from './work-item-feedback.js'
+import type { WorkItemFeedbackIntent, WorkItemFeedbackSource, WorkItemFeedbackSelection, OwnerWorkItemLearningTask, OwnerLearningSourceExpectation, OwnerLearningSourceSnapshot, OwnerWorkItemLearningTaskFenceInput } from './work-item-feedback.js'
 import type { TrustedWorkItemOwnerFeedbackProof } from '@dsh-enhanced/assistant-evaluation'
 import { workItemReplyCanonical, workItemReplyDigest, type WorkItemReportTarget, type WorkItemReplySource, type WorkItemReplyConsumerRegistration, type WorkItemReplyReadInput, type WorkItemReplyListInput } from './work-item-replies.js'
 import { chmodSync, mkdirSync, readFileSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
+import { isProxy } from 'node:util/types'
 import { createHash, randomUUID } from 'node:crypto'
 import { Context, Service, symbols } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -1067,6 +1068,31 @@ function exactToolApprovalCall(
   if (exact === undefined || settled || exact.name !== toolName
     || Buffer.byteLength(exact.arguments) > toolApprovalArgumentBytes) return undefined
   return exact
+}
+
+/** Reject peer/caller accessors before any source locks or final local comparisons. */
+function learningSourceData<T>(value:T):T {
+  const ancestors=new Set<object>()
+  let nodes=0
+  const visit=(part:unknown,depth:number):void=>{
+    if(part===undefined || part===null || typeof part==='string' || typeof part==='boolean' || typeof part==='number' && Number.isFinite(part))return
+    if(!part || typeof part!=='object' || isProxy(part) || depth>24 || ancestors.has(part) || ++nodes>100_000)throw new AssistantDeliveryError('runtime-conflict','invalid learning source data')
+    const array=Array.isArray(part),prototype=Object.getPrototypeOf(part)
+    if(prototype!==(array?Array.prototype:Object.prototype) && prototype!==null)throw new AssistantDeliveryError('runtime-conflict','invalid learning source prototype')
+    ancestors.add(part)
+    for(const key of Reflect.ownKeys(part)){
+      const descriptor=Object.getOwnPropertyDescriptor(part,key)!
+      if(array && key==='length')continue
+      if(typeof key!=='string' || !descriptor.enumerable || !Object.hasOwn(descriptor,'value'))throw new AssistantDeliveryError('runtime-conflict','learning source accessors are not accepted')
+      visit(descriptor.value,depth+1)
+    }
+    ancestors.delete(part)
+  }
+  visit(value,0)
+  const freeze=(part:unknown):void=>{if(part && typeof part==='object'){for(const child of Object.values(part))freeze(child);Object.freeze(part)}}
+  const copy=structuredClone(value)
+  freeze(copy)
+  return copy
 }
 
 export class AssistantDeliveryService extends Service {
@@ -5567,6 +5593,109 @@ export class AssistantDeliveryService extends Service {
     return this.deliveryStore.withOwnerForegroundTaskSourcesFence(input, this.ownerRoutes.get(input.authorityId)!, callback)
   }
 
+  /** One Delivery → Evaluation → WorkItems source fence; callback must be local and synchronous. */
+  withOwnerLearningSourcesFence<T>(input:OwnerForegroundTaskSourceScope & {sources:readonly OwnerLearningSourceExpectation[]}, callback:(sources:readonly OwnerLearningSourceSnapshot[])=>T):T {
+    this.assertActive()
+    input=learningSourceData(input)
+    if(typeof callback!=='function' || !Array.isArray(input.sources) || input.sources.length>1_000)throw new AssistantDeliveryError('runtime-conflict','invalid learning source batch')
+    // Snapshot caller data before any peer callbacks. Never retain live accessors or mutable expectations.
+    const sources=input.sources
+    const keys=new Set<string>(),hex=/^[a-f0-9]{64}$/u
+    for(const source of sources){
+      if(!source || !['foreground','work-item'].includes(source.kind) || !hex.test(source.expectedSourceDigest))throw new AssistantDeliveryError('runtime-conflict','invalid learning source expectation')
+      const id=source.kind==='foreground'?source.inboxId:source.itemId,key=`${source.kind}:${id}`
+      if(typeof id!=='string' || !id || keys.has(key))throw new AssistantDeliveryError('runtime-conflict','learning source identities must be unique')
+      keys.add(key)
+      if(source.kind==='work-item' && (typeof source.outcomeId!=='string' || !source.outcomeId || !hex.test(source.expectedContentDigest)
+        || !source.canonical || !Number.isSafeInteger(source.canonical.version) || source.canonical.version<1 || !hex.test(source.canonical.digest)
+        || !['achieved','not-achieved'].includes(source.canonical.objectiveStatus)))throw new AssistantDeliveryError('runtime-conflict','invalid work item learning expectation')
+    }
+    this.validateOwnerRoute(input)
+    const evaluation=this.context.get('assistantEvaluation' as never,false) as AssistantEvaluationService|undefined
+    if(!evaluation?.withTrustedCanonicalScopeWriterFence)throw new AssistantDeliveryError('runtime-conflict','canonical source fence is unavailable')
+    const evaluationIdentity=workItemPeerIdentity(evaluation)
+    return this.deliveryStore.withOwnerLearningSourceFence(input,this.ownerRoutes.get(input.authorityId)!,()=>{
+      const feedbackRegistration=sources.some(source=>source.kind==='work-item')?this.currentWorkItemReplyConsumer():undefined
+      const prepared=sources.map(source=>{
+        if(source.kind!=='work-item')return undefined
+        const state=this.ownerWorkItemLearningTaskState({...input,outcomeId:source.outcomeId})
+        return state?{...state,task:learningSourceData(state.task),revision:learningSourceData(state.revision),resolved:{...state.resolved,proof:learningSourceData(state.resolved.proof)}}:undefined
+      })
+      const peer=this.context.get('assistantWorkItems' as never,false) as unknown as {withOwnerWorkItemFeedbackTargetsFence?<R>(capabilities:readonly unknown[],callback:(proofs:readonly (Readonly<TrustedWorkItemOwnerFeedbackProof>|undefined)[])=>R):R}|undefined
+      const peerIdentity=workItemPeerIdentity(peer)
+      const scope=evaluation.canonicalHostScope({workspace:input.workspace,preset:input.agentPreset})
+      const {scopeWatermark}=evaluation.listTrustedTaskLearningProjections({scope,limit:1})
+      const fenced=evaluation.withTrustedCanonicalScopeWriterFence({scope,scopeWatermark},()=>{
+        const active=prepared.flatMap((state,index)=>state?[{state,index}]:[])
+        const finish=(proofs:readonly (Readonly<TrustedWorkItemOwnerFeedbackProof>|undefined)[])=>{
+          proofs=learningSourceData(proofs)
+          if(!Array.isArray(proofs) || proofs.length!==active.length)throw new AssistantDeliveryError('runtime-conflict','work item proof batch is misaligned')
+          if(!this.active || workItemPeerIdentity(this.context.get('assistantEvaluation' as never,false))!==evaluationIdentity
+            || workItemPeerIdentity(this.context.get('assistantWorkItems' as never,false))!==peerIdentity)throw new AssistantDeliveryError('runtime-conflict','learning source provider changed')
+          const owner=this.validateOwnerRoute(input)
+          if(owner.authorityHash!==input.expectedOwner.authorityHash || owner.principalRecordId!==input.expectedOwner.principalRecordId
+            || owner.principalVersion!==input.expectedOwner.principalVersion)throw new AssistantDeliveryError('runtime-conflict','learning source owner changed')
+          const available=new Map<number,Readonly<OwnerWorkItemLearningTask>>()
+          for(const [offset,{state,index}] of active.entries()){
+            const proof=proofs[offset],expectation=sources[index]!
+            if(expectation.kind!=='work-item' || !proof || workItemReplyCanonical(proof)!==workItemReplyCanonical(state.resolved.proof))continue
+            const current=evaluation.getTrustedWorkItemLearningProjection({scope,itemId:expectation.itemId})
+            const revision=evaluation.inspectTrustedTaskOwnerRevision({scope,outcomeId:expectation.outcomeId,principalRecordId:owner.principalRecordId,principalVersion:owner.principalVersion})
+            if(state.resolved.peerIdentity!==peerIdentity || workItemReplyCanonical(current)!==workItemReplyCanonical(state.task.canonical)
+              || workItemReplyCanonical(revision)!==workItemReplyCanonical(state.revision) || state.task.proofIdentity.itemId!==expectation.itemId
+              || state.task.sourceDigest!==expectation.expectedSourceDigest || state.task.presentationDigest!==expectation.expectedContentDigest
+              || !current?.objective || current.objective.outcomeId!==expectation.outcomeId || current.projection.version!==expectation.canonical.version
+              || current.projection.digest!==expectation.canonical.digest || current.objective.status!==expectation.canonical.objectiveStatus)continue
+            try{this.workItemFeedbackFence(state.intent,true,state.resolved.registration)}catch{continue}
+            available.set(index,Object.freeze({...state.task,owner}))
+          }
+          // Every foreign owns/resolve callback has finished. Only native local source/canonical/Policy reads remain.
+          const snapshots=Object.freeze(sources.map((source,index):OwnerLearningSourceSnapshot=>{
+            if(source.kind==='work-item'){
+              let currentCanonical=evaluation.getTrustedWorkItemLearningProjection({scope,itemId:source.itemId})
+              const outcomeId=currentCanonical?.objective?.outcomeId
+              let ownerRevision=outcomeId===undefined?undefined:evaluation.inspectTrustedTaskOwnerRevision({scope,outcomeId,principalRecordId:owner.principalRecordId,principalVersion:owner.principalVersion})
+              const intent=ownerRevision?.operationId===undefined?undefined:this.deliveryStore.workItemFeedback.findOutcome(ownerRevision.outcomeId,ownerRevision.operationId)
+              let authorized=false
+              if(feedbackRegistration && currentCanonical?.projection.subjectKind==='work-item' && currentCanonical.projection.subjectRef===source.itemId
+                && intent && intent.source.target.itemId===source.itemId && intent.source.owner.principalRecordId===owner.principalRecordId
+                && intent.source.owner.principalVersion===owner.principalVersion){
+                try{this.workItemFeedbackFence(intent,true,feedbackRegistration);authorized=true}catch{ /* Temporarily unavailable sources do not expose another owner's canonical state. */ }
+              }
+              if(!authorized){currentCanonical=undefined;ownerRevision=undefined}
+              return Object.freeze({kind:'work-item',itemId:source.itemId,task:authorized?available.get(index):undefined,currentCanonical,ownerRevision})
+            }
+            const content=this.deliveryStore.readOwnerForegroundTaskSource({...input,...source},this.ownerRoutes.get(input.authorityId)!)
+            const ownedSource=this.deliveryStore.inspectOwnerForegroundTaskSource({...input,inboxId:source.inboxId},this.ownerRoutes.get(input.authorityId)!)
+            const currentCanonical=ownedSource===undefined?undefined:evaluation.getTrustedForegroundLearningProjection({scope,inboxId:source.inboxId})
+            const outcomeId=currentCanonical?.objective?.outcomeId ?? currentCanonical?.execution?.outcomeId
+            const ownerRevision=outcomeId===undefined?undefined:evaluation.inspectTrustedTaskOwnerRevision({scope,outcomeId,principalRecordId:owner.principalRecordId,principalVersion:owner.principalVersion})
+            const task=outcomeId===undefined?undefined:this.inspectOwnerForegroundLearningTask({...input,outcomeId})
+            return Object.freeze({kind:'foreground',inboxId:source.inboxId,content,currentCanonical,ownerRevision,task})
+          }))
+          return callback(snapshots)
+        }
+        if(!active.length)return finish([])
+        if(!peer?.withOwnerWorkItemFeedbackTargetsFence)throw new AssistantDeliveryError('runtime-conflict','work item batch source fence is unavailable')
+        return peer.withOwnerWorkItemFeedbackTargetsFence(active.map(({state})=>state.resolved.capability),finish)
+      })
+      if(!fenced.matched)throw new AssistantDeliveryError('runtime-conflict','canonical source scope changed')
+      return fenced.value
+    })
+  }
+
+  /** Strict single-source wrapper: unavailable or changed sources never invoke the callback. */
+  withOwnerWorkItemLearningTaskFence<T>(input:OwnerWorkItemLearningTaskFenceInput,callback:(task:Readonly<OwnerWorkItemLearningTask>)=>T):T {
+    input=learningSourceData(input)
+    if(typeof callback!=='function')throw new AssistantDeliveryError('runtime-conflict','invalid learning source callback')
+    return this.withOwnerLearningSourcesFence({...input,sources:[{kind:'work-item',itemId:input.itemId,outcomeId:input.outcomeId,
+      expectedSourceDigest:input.expectedSourceDigest,expectedContentDigest:input.expectedContentDigest,canonical:input.canonical}]},sources=>{
+      const source=sources[0]
+      if(!source || source.kind!=='work-item' || !source.task)throw new AssistantDeliveryError('runtime-conflict','work item learning source is unavailable or changed')
+      return callback(source.task)
+    })
+  }
+
   /** Host-only snapshot of the model selected for this owner's external conversation. */
   inspectOwnerModelSelection(input: {
     authorityId: string
@@ -5605,11 +5734,15 @@ export class AssistantDeliveryService extends Service {
   }
 
   /**
-   * Resolve one canonical foreground result against its actual owner lineage.
+   * Resolve one canonical work-item result against its actual owner lineage.
    * Evaluation's workspace/preset scope alone does not establish ownership.
    * Historical Sessions remain eligible after /new, but not after owner ABA.
    */
   inspectOwnerWorkItemLearningTask(input:{authorityId:string;principalId:string;workspace:string;agentPreset:string;outcomeId:string}):Readonly<OwnerWorkItemLearningTask>|undefined{
+    return this.ownerWorkItemLearningTaskState(input)?.task
+  }
+
+  private ownerWorkItemLearningTaskState(input:{authorityId:string;principalId:string;workspace:string;agentPreset:string;outcomeId:string}){
     this.assertActive()
     const owner=this.validateOwnerRoute(input)
     const evaluation=this.context.get('assistantEvaluation' as never,false) as AssistantEvaluationService|undefined
@@ -5647,8 +5780,9 @@ export class AssistantDeliveryService extends Service {
         || workItemPeerIdentity(this.context.get('assistantEvaluation' as never,false))!==workItemPeerIdentity(evaluation))return undefined
       this.workItemFeedbackFence(intent,true,final.registration)
     }catch{return undefined}
-    return Object.freeze({protocol:'assistant-delivery/owner-work-item-learning/v1',owner,canonical,judgement:'owner-feedback',
+    const learningTask:Readonly<OwnerWorkItemLearningTask>=Object.freeze({protocol:'assistant-delivery/owner-work-item-learning/v1',owner,canonical,judgement:'owner-feedback',
       ownerRevision:{version:revision.version,action:revision.action,operationId:revision.operationId},proofIdentity,sourceDigest,presentation,presentationDigest:workItemReplyDigest(presentation)})
+    return {task:learningTask,intent,resolved,evaluation,revision}
   }
 
   inspectOwnerForegroundLearningTask(input: {

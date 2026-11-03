@@ -29,7 +29,7 @@ export function validateLearningModel(value: unknown): LearningModel {
 export function validateLearningConfig(value: unknown): LearningConfig {
   const input = exact(value, ['databasePath', 'authorityId', 'owner', 'expiresAt', 'maxExtractions', 'maxPending', 'lookbackMs',
     'policy', 'maxInputBytes', 'maxOutputTokens', 'timeoutMs', 'budgetId', 'budgetAmount', 'scanBudgetId', 'scanBudgetAmount',
-    'reviewAuthorityId', 'reviewAuthorityDigest', 'adoptionAuthorityId', 'adoptionGrantDigest'], ['model'])
+    'reviewAuthorityId', 'reviewAuthorityDigest', 'adoptionAuthorityId', 'adoptionGrantDigest'], ['model', 'workItemExperiences'])
   id(input.authorityId); id(input.budgetId); id(input.scanBudgetId); id(input.reviewAuthorityId); id(input.adoptionAuthorityId)
   for (const key of ['reviewAuthorityDigest', 'adoptionGrantDigest']) if (typeof input[key] !== 'string' || !/^[a-f0-9]{64}$/u.test(input[key] as string)) throw new Error('Invalid memory learning grant digest')
   text(input.databasePath, 4096)
@@ -41,7 +41,10 @@ export function validateLearningConfig(value: unknown): LearningConfig {
   for (const key of ['budgetAmount', 'scanBudgetAmount']) bound(input[key], 1, 10_000_000)
   text(input.policy, 8192)
   if (Object.hasOwn(input, 'model')) validateLearningModel(input.model)
-  return structuredClone(input) as unknown as LearningConfig
+  if (Object.hasOwn(input, 'workItemExperiences') && typeof input.workItemExperiences !== 'boolean') throw new Error('Invalid workItemExperiences flag')
+  const normalized = structuredClone(input)
+  if (normalized.workItemExperiences !== true) delete normalized.workItemExperiences
+  return normalized as unknown as LearningConfig
 }
 export const Config: Schema<LearningConfig> = Schema.transform(Schema.any(), (value, options) => {
   try { return validateLearningConfig(value) }

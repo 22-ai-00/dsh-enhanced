@@ -40,6 +40,8 @@ Host-only `inspectOwnerForegroundToolCall({ agent, authorityId, callId, toolName
 
 Host-only `inspectOwnerRequestedChange(execution, { sourceId })` 限定当前认证 owner 主 Agent 的未结 `memory_manage` 或 `wiki_upsert` 原生调用。它复核已认领的原 Inbox、当前 turn、实际工具名与参数（最多 64 KiB）、owner lineage 和 binding 代次，返回 `prepareAgentApproval` 的精确 route、Inbox 原始正文及只含身份与摘要的 SHA256 receipt。空正文、附件单独输入、PTC、历史或已结算调用均无证明。正文可能包含引用文字；哪些内容构成 owner 指令仍须由 Policy 隔离审查。原生 Web 输入在派发时登记同一前台执行记录并在 drain 时结算，失败或取消不留待结记录。该只读接口不要求 RSI `ownerRoutes` 配置、不注册 Agent 工具，也不授权写入。
 
+Host-only `withOwnerWorkItemLearningTaskFence` 对准确的 `itemId`、owner lineage、来源/展示摘要和当前 canonical 版本作严格单项复核；暂不可读或变化时抛错。`withOwnerLearningSourcesFence` 支持至多 1000 个有序、无重复的前台与后台来源，在同一次 Delivery → Evaluation → WorkItems 来源事务中完成所有外部来源回调，再核对整组当前来源，供下游同步写入 Memory 或审查账本。返回快照按输入对齐；暂缺来源只隐藏，只有当前 owner revision 明确 `withdraw` 才证明主人撤回，普通冲突或 retraction 不代表撤回。回调仅允许终端账本的本地同步操作，不能再进入 Delivery/Evaluation 来源事务、调用模型或 producer resolver；Promise/thenable 拒绝。旧前台 source API 与摘要字节保持不变，后台来源不伪造 Inbox，brief/report 是任务上下文，实际反馈才是主人 testimony。这些 fence 不授予采纳权限，也不消耗或续期执行额度。
+
 ## 配置
 
 | 字段 | 默认值 | 含义 |

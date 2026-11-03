@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, test } from 'vitest'
+import { canonicalGrowthJson, growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
 import { LearningStore } from '../src/store.ts'
 import type { LearningCursor, LearningIntent, LearningSnapshot } from '../src/types.ts'
 
@@ -15,13 +16,13 @@ const owner = { authorityId: grant.authorityId, authorityHash: 'b'.repeat(64), p
 const delivery = (sequence: number): LearningCursor => ({ protocol: 'assistant-delivery/owner-foreground-source-cursor/v1',
   epoch: 'epoch-one', scopeKey: 'owner-scope', sequence })
 const evaluation = (watermark: number): LearningCursor => ({ scopeKey: 'owner-scope', watermark })
-function intent(kind: 'fact' | 'experience' = 'fact', version = 1, subject = 'task-one'): LearningIntent {
+function intent(kind: 'fact' | 'experience' = 'fact', version = 1, subject = 'task-one'): Extract<LearningIntent, { inboxId: string }> {
   return { configDigest: grant.configDigest, owner, kind, subject, inboxId: 'inbox-one',
     expectedSourceDigest: 'c'.repeat(64), createdAt: 1, expiresAt: 100_000,
     ...(kind === 'experience' ? { canonical: { outcomeId: 'outcome-one', version, digest: version.toString().repeat(64),
       objectiveStatus: 'not-achieved' as const } } : {}) }
 }
-function snapshot(item: LearningIntent): LearningSnapshot {
+function snapshot(item: Extract<LearningIntent, { inboxId: string }>): Extract<LearningSnapshot, { ownerStatement: string }> {
   return { model: { provider: 'fixture', model: 'fixed' }, source: { inboxId: item.inboxId,
     sourceDigest: item.expectedSourceDigest!, contentDigest: 'd'.repeat(64), ...(item.canonical ? { canonical: item.canonical } : {}) },
   ownerStatement: 'Owner states a fact.', assistantReply: 'Assistant answer.', targets: [] }
@@ -118,4 +119,59 @@ test('pins grant and rejects damaged digest and unsafe database paths', () => {
   expect(() => new LearningStore(database, grant)).toThrow(/private/)
   const exposed = path(); chmodSync(join(exposed, '..'), 0o755)
   expect(() => new LearningStore(exposed, grant)).toThrow(/parent/)
+})
+
+test('migrates a populated schema1 database without rewriting jobs, grant, digests or consumption', () => {
+  const database = path(), old = new DatabaseSync(database)
+  old.exec(`CREATE TABLE grant_record (authority_id TEXT PRIMARY KEY, config_digest TEXT NOT NULL, max_extractions INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0) STRICT;
+    CREATE TABLE cursors (lane TEXT NOT NULL, feed TEXT NOT NULL, cursor_json TEXT NOT NULL, sequence INTEGER NOT NULL, PRIMARY KEY(lane,feed)) STRICT, WITHOUT ROWID;
+    CREATE TABLE jobs (id TEXT PRIMARY KEY, lane TEXT NOT NULL, subject TEXT NOT NULL, intent_json TEXT NOT NULL, digest TEXT NOT NULL,
+      state TEXT NOT NULL, snapshot_json TEXT, definition_hash TEXT, occurrence_id TEXT, request_json TEXT, result_digest TEXT, reason TEXT) STRICT;
+    CREATE INDEX jobs_lane_state ON jobs(lane,state); PRAGMA user_version=1;`)
+  old.prepare('INSERT INTO grant_record VALUES(?,?,?,?)').run(grant.authorityId, grant.configDigest, grant.maxExtractions, 1)
+  old.prepare('INSERT INTO cursors VALUES(?,?,?,?)').run('owner-one', 'evaluation', JSON.stringify(evaluation(90)), 90)
+  const originalIntent = intent()
+  const originalId = `memory-learning:${growthObjectDigest({ authorityId: grant.authorityId, kind: originalIntent.kind,
+    subject: originalIntent.subject, revision: originalIntent.expectedSourceDigest })}`
+  old.prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(originalId, 'owner-one', originalIntent.subject, canonicalGrowthJson(originalIntent), growthObjectDigest(originalIntent), 'pending', null, null, null, null, null, null)
+  const originalRow = old.prepare('SELECT * FROM jobs').get()
+  old.close(); chmodSync(database, 0o600)
+  const populated = new LearningStore(database, grant)
+  const before = populated.pending('owner-one')[0]!
+  populated.close()
+  const reopened = new LearningStore(database, grant)
+  expect(reopened.get(before.id)).toEqual(before)
+  expect(reopened.cursor('owner-one', 'evaluation')).toEqual(evaluation(90))
+  expect(reopened.availability().remainingExtractions).toBe(1)
+  expect(reopened.cursor('owner-one', 'evaluation-work-items')).toBeUndefined()
+  reopened.close()
+  const inspect = new DatabaseSync(database)
+  expect(inspect.prepare('SELECT * FROM jobs').get()).toEqual(originalRow)
+  expect(inspect.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 }); inspect.close()
+  expect(() => new LearningStore(database, { ...grant, configDigest: 'f'.repeat(64) })).toThrow(/immutable grant/)
+})
+
+test('work-item locator persists before reader availability, with independent cursor and bounded queue', () => {
+  const database = path(), store = new LearningStore(database, grant)
+  store.stage({ lane: 'owner-one', feed: 'evaluation', cursor: evaluation(90), sequence: 90, subject: 'cursor:old', maxPending: 1 })
+  const item: LearningIntent = { configDigest: grant.configDigest, owner, kind: 'experience', sourceKind: 'work-item',
+    itemId: 'background-one', subject: 'work-item:background-one', canonical: { outcomeId: 'objective-current', version: 1,
+      digest: 'b'.repeat(64), objectiveStatus: 'not-achieved' }, createdAt: 1, expiresAt: 100_000 }
+  const append = (sequence: number, input: LearningIntent) => store.stage({ lane: 'owner-one', feed: 'evaluation-work-items',
+    cursor: evaluation(sequence), sequence, subject: input.subject, intent: input, maxPending: 1, supersede: true })
+  expect(append(1, item)).toBe(true); expect(append(1, item)).toBe(true)
+  expect(store.pending('owner-one')).toHaveLength(1)
+  expect(store.pending('owner-one')[0]!.intent).not.toHaveProperty('inboxId')
+  expect(append(2, { ...item, itemId: 'background-two', subject: 'work-item:background-two' })).toBe(false)
+  expect(store.cursor('owner-one', 'evaluation-work-items')).toEqual(evaluation(1))
+  const job = store.pending('owner-one')[0]!
+  const frozen: LearningSnapshot = { sourceKind: 'work-item', presentationFlags: { brief: { truncated: false, redacted: false }, report: { truncated: false, redacted: false }, feedback: { truncated: false, redacted: false } }, model: { provider: 'original', model: 'fixed' },
+    source: { protocol: 'memory-learning-source/work-item/v1', itemId: 'background-one', sourceDigest: 'd'.repeat(64),
+      contentDigest: 'e'.repeat(64), canonical: item.canonical! }, taskBrief: 'Untrusted worker context.',
+    workerReport: 'Worker claims success.', ownerFeedback: 'The objective was not achieved.', targets: [] }
+  store.freeze(job.id, frozen); store.close()
+  const restarted = new LearningStore(database, grant)
+  expect(restarted.get(job.id)!.snapshot).toEqual(frozen)
+  expect(restarted.get(job.id)!.snapshot!.model).not.toHaveProperty('reasoningEffort')
+  restarted.close()
 })

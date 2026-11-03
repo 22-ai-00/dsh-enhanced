@@ -53,7 +53,7 @@ import type { WorkItemContinuationAdmission } from './continuation-record.js'
 import { WorkItemOwnerAccess } from './owner-access.js'
 import { WorkItemOwnerContinuation } from './owner-continuation.js'
 import { WorkItemOwnerReplies } from './owner-replies.js'
-import { WorkItemOwnerFeedbackTargets, type OwnerWorkItemFeedbackSelector } from './feedback-targets.js'
+import { WorkItemOwnerFeedbackTargets, type OwnerWorkItemFeedbackProof, type OwnerWorkItemFeedbackSelector } from './feedback-targets.js'
 import type { WorkItemReplyConsumerRegistration } from './peers.js'
 
 function fail(code: ConstructorParameters<typeof WorkItemError>[0], message: string, detail?: string): never {
@@ -482,6 +482,11 @@ export class AssistantWorkItemsService extends Service {
     feedbackReaders.get(this.workItemsFeedbackKey)?.issue(input)
   resolveOwnerWorkItemFeedbackTarget = (capability: unknown) =>
     feedbackReaders.get(this.workItemsFeedbackKey)?.resolve(capability)
+  withOwnerWorkItemFeedbackTargetsFence = <T>(capabilities: readonly unknown[], callback: (proofs: readonly (Readonly<OwnerWorkItemFeedbackProof> | undefined)[]) => T): T => {
+    const reader = feedbackReaders.get(this.workItemsFeedbackKey)
+    if (this.workItemsClosed || !reader) fail('missing-dependency', 'work-item feedback source fence is unavailable')
+    return reader.withTargetsFence(capabilities, callback)
+  }
 
   get ownerRecallEnabled(): boolean { return this.workItemsConfig.ownerRecall?.enabled === true }
 

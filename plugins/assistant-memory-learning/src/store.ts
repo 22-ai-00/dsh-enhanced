@@ -8,7 +8,7 @@ import {
 import type { MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
 import type { LearningCursor, LearningIntent, LearningJob, LearningSnapshot, LearningState } from './types.js'
 
-type Feed = 'delivery' | 'evaluation'
+type Feed = 'delivery' | 'evaluation' | 'evaluation-work-items'
 type Grant = Readonly<{ authorityId: string; configDigest: string; maxExtractions: number }>
 type JobRow = { id: string; lane: string; subject: string; intent_json: string; digest: string; state: LearningState;
   snapshot_json: string | null; definition_hash: string | null; occurrence_id: string | null;
@@ -56,15 +56,17 @@ function parse(value: string, label: string): unknown {
   try { return JSON.parse(value) } catch { return fail('corrupt', `${label} is invalid JSON`) }
 }
 function safeIntent(input: LearningIntent, grant: Grant): LearningIntent {
-  const raw = fields(input, ['configDigest', 'owner', 'kind', 'subject', 'inboxId', 'createdAt', 'expiresAt'],
+  const workItem = input.sourceKind === 'work-item'
+  const raw = fields(input, ['configDigest', 'owner', 'kind', 'subject', 'createdAt', 'expiresAt', ...(workItem ? ['sourceKind', 'itemId', 'canonical'] : ['inboxId'])],
     ['expectedSourceDigest', 'canonical'])
+  if (workItem && (raw.kind !== 'experience' || raw.subject !== `work-item:${raw.itemId}`)) fail('invalid-input', 'work-item experience identity is invalid')
   digest(raw.configDigest, 'configDigest')
   if (raw.configDigest !== grant.configDigest) fail('conflict', 'intent config digest differs from grant')
   try { validateMemoryLearningOwner(raw.owner) } catch { return fail('invalid-input', 'owner is invalid') }
   // Extraction authority and Delivery owner route are independently configured.
   // The immutable config digest fixes the complete owner, not equality of ids.
   if (raw.kind !== 'fact' && raw.kind !== 'experience') fail('invalid-input', 'kind is invalid')
-  identifier(raw.subject, 'subject'); identifier(raw.inboxId, 'inboxId')
+  identifier(raw.subject, 'subject'); identifier(workItem ? raw.itemId : raw.inboxId, 'source id')
   integer(raw.createdAt, 'createdAt'); integer(raw.expiresAt, 'expiresAt', 1)
   if (raw.expiresAt <= raw.createdAt) fail('invalid-input', 'intent is already expired')
   if (Object.hasOwn(raw, 'expectedSourceDigest')) digest(raw.expectedSourceDigest, 'expectedSourceDigest')
@@ -91,11 +93,21 @@ function safeCursor(feed: Feed, value: LearningCursor, sequence: number): Learni
   return JSON.parse(canonical(value)) as LearningCursor
 }
 function safeSnapshot(input: LearningSnapshot, intent: LearningIntent): LearningSnapshot {
-  const raw = fields(input, ['model', 'source', 'ownerStatement', 'assistantReply', 'targets'], ['ownerFeedback'])
+  const workItem = intent.sourceKind === 'work-item'
+  const raw = fields(input, ['model', 'source', 'targets', ...(workItem ? ['sourceKind', 'taskBrief', 'workerReport', 'ownerFeedback', 'presentationFlags'] : ['ownerStatement', 'assistantReply'])], ['ownerFeedback'])
+  if (workItem) {
+    const flags = fields(raw.presentationFlags, ['brief', 'report', 'feedback'])
+    for (const name of ['brief', 'report', 'feedback']) {
+      const part = fields(flags[name], ['truncated', 'redacted'])
+      if (part.truncated !== false || typeof part.redacted !== 'boolean') fail('invalid-input', 'work-item presentation flags are invalid')
+    }
+  }
+  if (workItem && raw.sourceKind !== 'work-item') fail('invalid-input', 'work-item snapshot kind is invalid')
   const model = fields(raw.model, ['provider', 'model'], ['reasoningEffort'])
   for (const key of Object.keys(model)) normalizedText(model[key], `model ${key}`, 256)
-  const source = fields(raw.source, ['inboxId', 'sourceDigest', 'contentDigest'], ['canonical'])
-  identifier(source.inboxId, 'source inboxId'); digest(source.sourceDigest, 'sourceDigest'); digest(source.contentDigest, 'contentDigest')
+  const source = fields(raw.source, ['sourceDigest', 'contentDigest', ...(workItem ? ['protocol', 'itemId', 'canonical'] : ['inboxId'])], ['canonical'])
+  if (workItem && (source.protocol !== 'memory-learning-source/work-item/v1' || source.itemId !== intent.itemId)) fail('conflict', 'work-item source differs')
+  identifier(workItem ? source.itemId : source.inboxId, 'source id'); digest(source.sourceDigest, 'sourceDigest'); digest(source.contentDigest, 'contentDigest')
   if (source.inboxId !== intent.inboxId || (intent.expectedSourceDigest !== undefined && source.sourceDigest !== intent.expectedSourceDigest))
     fail('conflict', 'snapshot source differs from intent')
   if (Object.hasOwn(source, 'canonical')) {
@@ -104,12 +116,14 @@ function safeSnapshot(input: LearningSnapshot, intent: LearningIntent): Learning
     if (outcome.objectiveStatus !== 'achieved' && outcome.objectiveStatus !== 'not-achieved') fail('invalid-input', 'objective status is invalid')
   }
   if (canonical(source.canonical ?? null) !== canonical(intent.canonical ?? null)) fail('conflict', 'snapshot canonical revision differs from intent')
-  sourceText(raw.ownerStatement, 'ownerStatement'); sourceText(raw.assistantReply, 'assistantReply')
+  if (workItem) { sourceText(raw.taskBrief, 'taskBrief'); sourceText(raw.workerReport, 'workerReport') }
+  else { sourceText(raw.ownerStatement, 'ownerStatement'); sourceText(raw.assistantReply, 'assistantReply') }
   if (Object.hasOwn(raw, 'ownerFeedback')) sourceText(raw.ownerFeedback, 'ownerFeedback')
   if (!Array.isArray(raw.targets) || raw.targets.length > 100) fail('invalid-input', 'targets are invalid')
   for (const target of raw.targets) {
     const item = fields(target, ['id', 'version', 'kind', 'content'], ['knowledge'])
     identifier(item.id, 'target id'); integer(item.version, 'target version', 1)
+    if (workItem && item.kind !== 'experience') fail('invalid-input', 'work-item target must be experience')
     if (item.kind !== 'fact' && item.kind !== 'experience') fail('invalid-input', 'target kind is invalid')
     normalizedText(item.content, 'target content', 4096)
     if (Object.hasOwn(item, 'knowledge')) canonical(item.knowledge)
@@ -172,8 +186,11 @@ export class LearningStore {
         `)
         this.#db.prepare('INSERT INTO grant_record(authority_id,config_digest,max_extractions,consumed) VALUES(?,?,?,0)')
           .run(this.#grant.authorityId, this.#grant.configDigest, this.#grant.maxExtractions)
-        this.#db.exec('PRAGMA user_version=1; COMMIT;')
-      } else if (version !== 1) fail('corrupt', 'unsupported schema version')
+        this.#db.exec('PRAGMA user_version=2; COMMIT;')
+      } else if (version === 1) {
+        this.#checkGrant()
+        this.#db.exec('BEGIN IMMEDIATE; PRAGMA user_version=2; COMMIT;')
+      } else if (version !== 2) fail('corrupt', 'unsupported schema version')
       this.#checkGrant()
       const integrity = this.#db.prepare('PRAGMA quick_check').get() as { quick_check: string }
       if (integrity.quick_check !== 'ok') fail('corrupt', 'database integrity check failed')
@@ -234,7 +251,7 @@ export class LearningStore {
   }
   #id(intent: LearningIntent): string {
     return `memory-learning:${growthObjectDigest({ authorityId: this.#grant.authorityId, kind: intent.kind,
-      subject: intent.subject, revision: intent.canonical ?? intent.expectedSourceDigest ?? intent.inboxId })}`
+      ...(intent.sourceKind === 'work-item' ? { sourceKind: 'work-item' } : {}), subject: intent.subject, revision: intent.canonical ?? intent.expectedSourceDigest ?? intent.inboxId })}`
   }
   #read(id: string): (LearningJob & { lane: string }) | undefined {
     const row = this.#db.prepare('SELECT * FROM jobs WHERE id=?').get(id) as JobRow | undefined
@@ -242,7 +259,7 @@ export class LearningStore {
   }
   cursor(lane: string, feed: Feed): LearningCursor | undefined {
     this.#checkGrant(); identifier(lane, 'lane')
-    if (feed !== 'delivery' && feed !== 'evaluation') fail('invalid-input', 'feed is invalid')
+    if (feed !== 'delivery' && feed !== 'evaluation' && feed !== 'evaluation-work-items') fail('invalid-input', 'feed is invalid')
     const row = this.#db.prepare('SELECT cursor_json,sequence FROM cursors WHERE lane=? AND feed=?').get(lane, feed) as CursorRow | undefined
     if (!row) return undefined
     try { return safeCursor(feed, parse(row.cursor_json, 'cursor') as LearningCursor, row.sequence) }
@@ -251,7 +268,7 @@ export class LearningStore {
   stage(input: { lane: string; feed: Feed; cursor: LearningCursor; sequence: number; subject: string;
     intent?: LearningIntent; maxPending: number; supersede?: boolean }): boolean {
     identifier(input.lane, 'lane'); identifier(input.subject, 'subject')
-    if (input.feed !== 'delivery' && input.feed !== 'evaluation') fail('invalid-input', 'feed is invalid')
+    if (input.feed !== 'delivery' && input.feed !== 'evaluation' && input.feed !== 'evaluation-work-items') fail('invalid-input', 'feed is invalid')
     const cursor = safeCursor(input.feed, input.cursor, input.sequence)
     integer(input.maxPending, 'maxPending', 1)
     if (input.maxPending > 1000) fail('invalid-input', 'maxPending exceeds bound')
@@ -274,13 +291,15 @@ export class LearningStore {
       const superseded = input.supersede
         ? active.filter(item => {
           const previousJob = this.#read(item.id)!
-          return previousJob.id !== proposedId && previousJob.intent.kind === 'experience' && previousJob.intent.subject === input.subject
+          return previousJob.id !== proposedId && !(previousJob.state === 'unknown' && previousJob.request !== null)
+            && previousJob.intent.kind === 'experience' && previousJob.intent.subject === input.subject
+            && (input.feed === 'evaluation-work-items' ? previousJob.intent.sourceKind === 'work-item' : previousJob.intent.sourceKind === undefined)
         }) : []
       if (intent) {
         const id = this.#id(intent)
         const existing = this.#read(id)
         if (existing && (existing.lane !== input.lane || canonical(existing.intent.owner) !== canonical(intent.owner)
-          || existing.intent.configDigest !== intent.configDigest || existing.intent.inboxId !== intent.inboxId
+          || existing.intent.configDigest !== intent.configDigest || existing.intent.inboxId !== intent.inboxId || existing.intent.itemId !== intent.itemId
           || existing.intent.kind !== intent.kind || canonical(existing.intent.canonical ?? null) !== canonical(intent.canonical ?? null)
           || existing.intent.expectedSourceDigest !== intent.expectedSourceDigest)) fail('conflict', 'job identity collision')
         if (!existing) {

@@ -226,11 +226,29 @@ tokens、每次 5 分钟；配置更改不能给原授权续期或补额度。Po
 subject `assistant-memory-learning`（绑定 workspace/principal），action `review`、memory resource
 `learning:<authorityId>`；可通过该规则的持久预算进一步限制调用。未配置时没有默认审查权限。
 
+`workItemExperiences: true` 是独立的显式授权扩展，允许共享合同 v2 的 WorkItem 经验来源；
+省略或 `false` 完全保留旧配置摘要和 v1 行为。启用值参与授权摘要，不能修改既有授权后
+重置审查额度；需要当前配套 Delivery 来源检查与同步 fence 接口。可用性探针仅在配置启用
+且当前 Delivery 具备这两个接口时附带 `workItemExperiences: true`；缺少新接口不改变旧前台
+审查的可用性，未挂载运行服务则仍返回 `available: false`，不宣告 WorkItem 支持。
+
+v2 由 Verifier 独立读取准确 WorkItem、当前 owner 评价和实际静止/预算结算 proof，匹配完整
+来源摘要与展示摘要，继承原任务冻结的 supplier（或显式审查模型覆盖）。任务简报及 worker
+报告作为机器产生的不可信材料，不能充当 owner 陈述；引用只允许来自认证的 owner 反馈。
+每片展示的截断/脱敏标志随审查输入冻结；截断来源拒绝审查，脱敏来源可依据可见材料审查，
+但不能推测遮蔽片段。仅由脱敏占位符组成的引用在付费前拒绝。
+仅允许经验，替换或删除也必须独立读取准确版本、受管且 kind 为 experience 的目标。主人
+评价是 testimony，不是独立技术成功；反馈更正、撤回、来源或目标变化会阻止旧批准落盘。
+最终 v2 fence 按 Delivery → Evaluation → WorkItems 持有来源锁，再进入 review ledger；
+本包只在该来源锁范围内核对本地授权、目标和冻结指纹并写审查账本，不重入来源读取。
+旧 v1 原文与审查语义不变。
+
 原生审查使用新会话、固定规则和零工具，每次至多一次模型调用。它只判断候选是否受来源支持，
 不证明事实在现实中为真或后续任务得到改善，也不直接写入 Memory。完整原文被截断时拒绝审查。
 `.memory-reviews` 私有 SQLite 使用独立授权和持久 claim；重复调用/重启只回读既有结果，unknown
-不重派。来源、owner、canonical 状态与目标版本在结束后重验，批准落盘使用
-Delivery → Evaluation → review ledger 同步 writer fence；卸载会先取消并等待在途审查。
+不重派。来源、owner、canonical 状态与目标版本在结束后重验：v1 批准落盘保留
+Delivery → Evaluation → review ledger 同步 writer fence，v2 使用上述包含 WorkItems 的锁序。
+卸载会先取消并等待在途审查。
 
 普通任务的自动发现、提取与调度见独立 [assistant-memory-learning](../assistant-memory-learning/README.md)；
 有限采用与下一任务召回由 [Memory](../personal-memory/README.md) 负责。批准回执不能替代采用时的当前来源与权限检查。新增数据权限仅为读取这些

@@ -8,7 +8,7 @@ import { DIAGNOSIS_OWNER } from './diagnosis-contract.js'
 import { isReplyContinuationPlan, parseStoredContinuationPlan } from './reply-contract.js'
 import type { PeerAutomationsService, PeerDeliveryService, PeerOwnerRouteReceipt, WorkItemReplyConsumerRegistration, WorkItemReportTarget } from './peers.js'
 import type { WorkItemStore } from './store.js'
-import { OPEN_STATES, type WorkItemNotification, type WorkItemRecord, type WorkItemReportRecord } from './types.js'
+import { OPEN_STATES, WorkItemError, type WorkItemNotification, type WorkItemRecord, type WorkItemReportRecord } from './types.js'
 
 export type OwnerWorkItemFeedbackSelector=Readonly<{itemId:string;reportRevision:number;reportDigest:string}>
 /** Structural SDK surface; the implementation checks this against Evaluation's
@@ -239,6 +239,77 @@ export class WorkItemOwnerFeedbackTargets {
         ||result.deliveryIdentity!==issued.deliveryIdentity||result.automationsIdentity!==issued.automationsIdentity)return undefined
       return result.proof
     } catch{return undefined}
+  }
+  /** A group is validated as one source frame, rather than trusting A's cached
+   * result after a later B producer callback. The last phase reads only this
+   * owned ledger, configuration and local service identities. */
+  withTargetsFence<T>(capabilities:readonly unknown[],callback:(proofs:readonly (Readonly<OwnerWorkItemFeedbackProof>|undefined)[])=>T):T {
+    if(!Array.isArray(capabilities)||typeof callback!=='function')throw new WorkItemError('invalid-input','feedback target fence arguments are invalid')
+    const descriptors=Object.getOwnPropertyDescriptors(capabilities) as unknown as Record<PropertyKey,PropertyDescriptor>
+    const length=descriptors.length?.value as unknown
+    if(!Number.isSafeInteger(length)||Number(length)<0||Number(length)>1000
+      ||Reflect.ownKeys(descriptors).some(key=>typeof key!=='string'||key!=='length'&&!/^(?:0|[1-9][0-9]*)$/u.test(key))) {
+      throw new WorkItemError('invalid-input','feedback target fence requires at most 1000 dense capabilities')
+    }
+    const input:unknown[]=[]
+    for(let index=0;index<Number(length);index++) {
+      const descriptor=descriptors[String(index)]
+      if(!descriptor||!descriptor.enumerable||!Object.hasOwn(descriptor,'value'))throw new WorkItemError('invalid-input','feedback target fence capabilities must be data values')
+      input.push(descriptor.value)
+    }
+    const config=this.dependencies.config,configurationDigest=acceptanceDigest(config),store=this.dependencies.store()
+    if(!this.current()||!config.ownerReportFeedback||!store||store.closed)throw new WorkItemError('missing-dependency','feedback target source fence is unavailable')
+    return store.withFeedbackSourceFence(()=>{
+      const ownership=this.#capabilities
+      const entries=input.map(capability=>{
+        if(!capability||typeof capability!=='object')return undefined
+        const issued=ownership.get(capability)
+        return issued?{capability,issued}:undefined
+      })
+      const reads=new Map<object,Readonly<ReadResult>|undefined>()
+      for(const entry of entries) {
+        if(!entry||reads.has(entry.capability))continue
+        try { reads.set(entry.capability,this.read(entry.issued.selector)) } catch { reads.set(entry.capability,undefined) }
+      }
+      // One final owner read belongs to the foreign-read phase. A later
+      // source's callback may have changed the shared route after A was read;
+      // never keep A's cached authority hash as the group authority.
+      const ownerDelivery=this.dependencies.delivery(),scope=config.scope
+      const ownerDeliveryIdentity=ownerDelivery?peerIdentity(ownerDelivery):undefined
+      let owner:Readonly<PeerOwnerRouteReceipt>|undefined
+      try {
+        if(ownerDelivery&&scope)owner=inert(ownerDelivery.validateOwnerRoute({authorityId:scope.ownerRouteId,
+          principalId:scope.principalId,workspace:scope.workspace,agentPreset:scope.preset}))
+      } catch {owner=undefined}
+      // These dependency accessors are owned ctx-local lookups, not producer
+      // methods. Capture all identities before the final local source pass.
+      const currentConfig=this.dependencies.config,currentStore=this.dependencies.store()
+      const delivery=this.dependencies.delivery(),automations=this.dependencies.automations()
+      const deliveryIdentity=delivery?peerIdentity(delivery):undefined,automationsIdentity=automations?peerIdentity(automations):undefined
+      const currentConfigurationDigest=acceptanceDigest(currentConfig),active=this.current()
+      if(!active||this.#capabilities!==ownership||currentStore!==store||store.closed||!delivery||!automations) {
+        throw new WorkItemError('missing-dependency','feedback target source owner or store is no longer current')
+      }
+      const configurationCurrent=currentConfig===config&&currentConfigurationDigest===configurationDigest
+      const proofs=entries.map(entry=>{
+        if(!entry||!configurationCurrent||this.#capabilities.get(entry.capability)!==entry.issued)return undefined
+        const result=reads.get(entry.capability),issued=entry.issued
+        if(!result||result.proof.proofDigest!==issued.proofDigest||result.fingerprint!==issued.fingerprint
+          ||result.authorityHash!==issued.authorityHash||result.deliveryIdentity!==issued.deliveryIdentity
+          ||result.automationsIdentity!==issued.automationsIdentity||deliveryIdentity!==issued.deliveryIdentity
+          ||automationsIdentity!==issued.automationsIdentity||ownerDeliveryIdentity!==deliveryIdentity
+          ||!owner||owner.receiptVersion!==2||owner.authorityHash!==issued.authorityHash
+          ||owner.authorityId!==result.proof.owner.ownerRouteId||owner.principalId!==result.proof.owner.principalId
+          ||owner.principalRecordId!==result.proof.owner.principalRecordId||owner.principalVersion!==result.proof.owner.principalVersion
+          ||owner.workspace!==result.proof.scope.workspace||owner.agentPreset!==result.proof.scope.preset)return undefined
+        try {
+          const final=sealedReport(store,config,issued.selector.itemId,issued.selector.reportRevision)
+          return final&&final.fingerprint===issued.fingerprint&&final.reportDigest===issued.selector.reportDigest?result.proof:undefined
+        } catch {return undefined}
+      })
+      // No producer, owner or lifecycle callback is invoked after this pass.
+      return callback(Object.freeze(proofs))
+    })
   }
   available():boolean {return this.current()&&this.dependencies.config.ownerReportFeedback===true&&this.dependencies.store()?.closed===false}
   close():void {this.#closed=true;this.#capabilities=new WeakMap()}

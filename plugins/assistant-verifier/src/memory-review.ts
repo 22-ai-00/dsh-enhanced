@@ -1,15 +1,15 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { AssistantDeliveryService, OwnerForegroundTaskSourceContent } from '@dsh-enhanced/assistant-delivery'
+import type { AssistantDeliveryService, OwnerForegroundTaskSourceContent, OwnerWorkItemLearningTask, OwnerWorkItemLearningTaskFenceInput } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import {
-  memoryLearningRequestDigest, validateMemoryLearningOwner, validateMemoryLearningReviewRequest,
-  type MemoryLearningOwner, type MemoryLearningReviewRequest,
+  memoryLearningRequestDigest, validateMemoryLearningOwner, validateMemoryLearningReviewRequest, hasWorkItemLearningFeedbackText,
+  type MemoryLearningOwner, type MemoryLearningReviewRequest, type ForegroundMemoryLearningReviewRequest, type WorkItemMemoryLearningReviewRequest,
 } from '@dsh-enhanced/assistant-growth-contract'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { SourceReviewStore } from './source-review-store.js'
 import type { SourceReviewModelSelection } from './source-review.js'
-import type { MemoryReviewSourceText, MemoryReviewTarget } from './memory-review-native.js'
+import type { MemoryReviewSourceText, ForegroundMemoryReviewSourceText, MemoryReviewTarget } from './memory-review-native.js'
 
 export interface MemoryReviewConfig {
   authorityId: string
@@ -21,6 +21,7 @@ export interface MemoryReviewConfig {
   maxOutputTokens: number
   timeoutMs: number
   model?: SourceReviewModelSelection
+  workItemExperiences?: boolean
 }
 
 export interface MemoryReviewReceipt {
@@ -43,6 +44,7 @@ export interface MemoryReviewAvailability {
   readonly expiresAt: number
   readonly remainingReviews: number
   readonly available: boolean
+  readonly workItemExperiences?: true
 }
 
 /** Structural Host-only reader prevents a reverse package dependency on Memory. */
@@ -68,7 +70,8 @@ function bound(value: unknown, min: number, max: number): void {
 }
 
 export function validateMemoryReviewConfig(input: MemoryReviewConfig): MemoryReviewConfig {
-  exact(input, ['authorityId', 'owner', 'expiresAt', 'maxReviews', 'policy', 'maxInputBytes', 'maxOutputTokens', 'timeoutMs'], ['model'])
+  exact(input, ['authorityId', 'owner', 'expiresAt', 'maxReviews', 'policy', 'maxInputBytes', 'maxOutputTokens', 'timeoutMs'], ['model', 'workItemExperiences'])
+  if (Object.hasOwn(input, 'workItemExperiences') && typeof input.workItemExperiences !== 'boolean') throw new Error('memory review invalid workItemExperiences')
   id(input.authorityId); validateMemoryLearningOwner(input.owner)
   bound(input.expiresAt, 1, Number.MAX_SAFE_INTEGER); bound(input.maxReviews, 1, 10_000)
   bound(input.maxInputBytes, 4096, 131_072); bound(input.maxOutputTokens, 1, 8192); bound(input.timeoutMs, 1000, 300_000)
@@ -81,7 +84,9 @@ export function validateMemoryReviewConfig(input: MemoryReviewConfig): MemoryRev
       || !model.model.isWellFormed() || Buffer.byteLength(model.model) > 256) throw new Error('memory review invalid model')
     if (Object.hasOwn(model, 'reasoningEffort')) id(model.reasoningEffort)
   }
-  return structuredClone(input)
+  const normalized = structuredClone(input)
+  if (normalized.workItemExperiences !== true) delete normalized.workItemExperiences
+  return normalized
 }
 
 /** Review authority is separately configured; callers cannot provide decisions or source text. */
@@ -99,8 +104,10 @@ export class MemoryReviewRuntime {
 
   inspectAvailability(input: { owner: MemoryLearningOwner }): MemoryReviewAvailability {
     const authorityDigest = acceptanceDigest(this.#config)
+    let workItemExperiences = false
     const unavailable = (): MemoryReviewAvailability => Object.freeze({ authorityId: this.#config.authorityId,
-      authorityDigest, expiresAt: this.#config.expiresAt, remainingReviews: 0, available: false })
+      authorityDigest, expiresAt: this.#config.expiresAt, remainingReviews: 0, available: false,
+      ...(workItemExperiences ? { workItemExperiences: true as const } : {}) })
     this.#controller.signal.throwIfAborted()
     const owner = validateMemoryLearningOwner(input.owner)
     if (acceptanceDigest(owner) !== acceptanceDigest(this.#config.owner) || Date.now() >= this.#config.expiresAt) return unavailable()
@@ -110,6 +117,9 @@ export class MemoryReviewRuntime {
       const policy = this.ctx.get('assistantPolicy') as AssistantPolicyService | undefined
       if (typeof delivery?.validateOwnerRoute !== 'function' || typeof evaluation?.canonicalHostScope !== 'function'
         || typeof policy?.evaluate !== 'function') return unavailable()
+      workItemExperiences = this.#config.workItemExperiences === true
+        && typeof delivery.inspectOwnerWorkItemLearningTask === 'function'
+        && typeof delivery.withOwnerWorkItemLearningTaskFence === 'function'
       const current = delivery.validateOwnerRoute({ authorityId: owner.authorityId, principalId: owner.principalId,
         workspace: owner.workspace, agentPreset: owner.agentPreset })
       if (['authorityId', 'authorityHash', 'principalId', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset']
@@ -122,7 +132,8 @@ export class MemoryReviewRuntime {
       const remainingReviews = this.#store.remaining({ authorityId: this.#config.authorityId,
         authorityDigest, maxReviews: this.#config.maxReviews })
       return Object.freeze({ authorityId: this.#config.authorityId, authorityDigest,
-        expiresAt: this.#config.expiresAt, remainingReviews, available: remainingReviews > 0 })
+        expiresAt: this.#config.expiresAt, remainingReviews, available: remainingReviews > 0,
+        ...(workItemExperiences ? { workItemExperiences: true as const } : {}) })
     } catch { return unavailable() }
   }
 
@@ -137,7 +148,7 @@ export class MemoryReviewRuntime {
     if (decision.effect !== 'allow') throw new Error('memory review policy denied')
   }
 
-  #sourceInput(request: MemoryLearningReviewRequest) {
+  #sourceInput(request: ForegroundMemoryLearningReviewRequest) {
     const { owner } = request
     return { authorityId: owner.authorityId, principalId: owner.principalId, workspace: owner.workspace,
       agentPreset: owner.agentPreset, expectedOwner: { authorityHash: owner.authorityHash,
@@ -156,7 +167,7 @@ export class MemoryReviewRuntime {
     return { delivery, evaluation }
   }
 
-  #current(request: MemoryLearningReviewRequest, includeTarget: boolean, fencedContent?: Readonly<OwnerForegroundTaskSourceContent>): {
+  #currentForeground(request: ForegroundMemoryLearningReviewRequest, includeTarget: boolean, fencedContent?: Readonly<OwnerForegroundTaskSourceContent>): {
     source: MemoryReviewSourceText; model: SourceReviewModelSelection; target?: MemoryReviewTarget
   } {
     this.#controller.signal.throwIfAborted()
@@ -171,7 +182,7 @@ export class MemoryReviewRuntime {
       || content.input.truncated || content.reply.truncated || !content.source.execution.modelSelection) {
       throw new Error('memory review original source unavailable or incomplete')
     }
-    const source: MemoryReviewSourceText = { ownerStatement: content.input.text, assistantReply: content.reply.text }
+    const source: ForegroundMemoryReviewSourceText = { ownerStatement: content.input.text, assistantReply: content.reply.text }
     const scope = evaluation.canonicalHostScope({ workspace: owner.workspace, preset: owner.agentPreset })
     const current = evaluation.getTrustedForegroundLearningProjection({ scope, inboxId: request.source.inboxId })
     // A missing objective is normal for owner statements. Only an explicit
@@ -208,14 +219,104 @@ export class MemoryReviewRuntime {
       ...(target === undefined ? {} : { target }) }
   }
 
+  #assertGrant(request: MemoryLearningReviewRequest): void {
+    this.#controller.signal.throwIfAborted()
+    if (Date.now() >= this.#config.expiresAt || acceptanceDigest(request.owner) !== acceptanceDigest(this.#config.owner)) {
+      throw new Error('memory review grant expired or owner changed')
+    }
+    if (request.protocol === 'memory-learning-review/v2' && this.#config.workItemExperiences !== true) {
+      throw new Error('memory review work-item experiences are not authorized')
+    }
+  }
+
+  #workItemSource(request: WorkItemMemoryLearningReviewRequest, task: Readonly<OwnerWorkItemLearningTask> | undefined): {
+    source: MemoryReviewSourceText; model: SourceReviewModelSelection
+  } {
+    this.#assertGrant(request)
+    const expected = request.source.canonical, owner = request.owner
+    if (!task || task.protocol !== 'assistant-delivery/owner-work-item-learning/v1'
+      || task.judgement !== 'owner-feedback' || task.sourceDigest !== request.source.sourceDigest
+      || task.presentationDigest !== request.source.contentDigest
+      || task.proofIdentity.itemId !== request.source.itemId
+      || task.proofIdentity.production.quiescent !== true || task.proofIdentity.production.budgetSettlementState !== 'finalized'
+      || !['succeeded', 'failed', 'timed-out', 'cancelled'].includes(task.proofIdentity.production.executionStatus)
+      || ['authorityId', 'authorityHash', 'principalId', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset']
+        .some(key => task.owner[key as keyof typeof task.owner] !== owner[key as keyof MemoryLearningOwner])
+      || task.canonical.projection.subjectKind !== 'work-item' || task.canonical.projection.subjectRef !== request.source.itemId
+      || task.canonical.projection.disposition !== 'upsert' || task.canonical.projection.version !== expected.version
+      || task.canonical.projection.digest !== expected.digest || task.canonical.objective?.outcomeId !== expected.outcomeId
+      || task.canonical.objective.status !== expected.objectiveStatus
+      || Object.values(task.presentation).some(text => text.truncated)) {
+      throw new Error('memory review work-item source or outcome changed')
+    }
+    if (request.mutation.op !== 'remove' && request.mutation.entry.kind !== 'experience') {
+      throw new Error('memory review work-item experience only')
+    }
+    if (!hasWorkItemLearningFeedbackText(task.presentation.feedback.text)) throw new Error('memory review owner feedback has no visible evidence')
+    if (!task.presentation.feedback.text.includes(request.evidenceQuote)) throw new Error('memory review quotation absent from owner feedback')
+    if (!hasWorkItemLearningFeedbackText(request.evidenceQuote)) {
+      throw new Error('memory review quotation has no visible owner evidence')
+    }
+    const supplier = this.#config.model ?? task.proofIdentity.supplier
+    if (!supplier?.provider || !supplier.model) throw new Error('memory review work-item supplier unavailable')
+    return { source: { protocol: 'memory-learning-source/work-item/v1', taskBrief: task.presentation.brief.text,
+      workerReport: task.presentation.report.text, ownerFeedback: task.presentation.feedback.text, objectiveStatus: expected.objectiveStatus,
+      presentationFlags: { taskBrief: { truncated: task.presentation.brief.truncated, redacted: task.presentation.brief.redacted },
+        workerReport: { truncated: task.presentation.report.truncated, redacted: task.presentation.report.redacted },
+        ownerFeedback: { truncated: task.presentation.feedback.truncated, redacted: task.presentation.feedback.redacted } } },
+    model: structuredClone(supplier) }
+  }
+
+  #current(request: MemoryLearningReviewRequest, includeTarget: boolean, fencedTask?: Readonly<OwnerWorkItemLearningTask>): {
+    source: MemoryReviewSourceText; model: SourceReviewModelSelection; target?: MemoryReviewTarget
+  } {
+    if (request.protocol === 'memory-learning-review/v1') return this.#currentForeground(request, includeTarget)
+    this.#assertGrant(request)
+    this.#policy(request, false)
+    const delivery = this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
+    if (typeof delivery?.inspectOwnerWorkItemLearningTask !== 'function') throw new Error('memory review work-item source services unavailable')
+    const owner = request.owner
+    const current = this.#workItemSource(request, fencedTask ?? delivery.inspectOwnerWorkItemLearningTask({ authorityId: owner.authorityId,
+      principalId: owner.principalId, workspace: owner.workspace, agentPreset: owner.agentPreset, outcomeId: request.source.canonical.outcomeId }))
+    let target: MemoryReviewTarget | undefined
+    if (request.mutation.op !== 'add') {
+      const memory = this.ctx.get('personalMemory' as never, false) as unknown as TargetReader | undefined
+      target = memory?.inspectLearningTarget({ owner, id: request.mutation.id, expectedVersion: request.mutation.expectedVersion })
+      if (!target || target.managed !== true || target.kind !== 'experience'
+        || target.id !== request.mutation.id || target.version !== request.mutation.expectedVersion) {
+        throw new Error('memory review target is not the exact managed experience version')
+      }
+    }
+    this.#assertGrant(request)
+    return { ...current, ...(target === undefined ? {} : { target: structuredClone(target) }) }
+  }
+
   /** No await or nested Delivery reader: locks are held in producer-to-consumer order. */
   #withCurrentFence<T>(request: MemoryLearningReviewRequest, fingerprint: string, includeTarget: boolean, callback: () => T): T {
+    if (request.protocol === 'memory-learning-review/v2') {
+      const delivery = this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
+      if (typeof delivery?.withOwnerWorkItemLearningTaskFence !== 'function') throw new Error('memory review work-item fence unavailable')
+      const { owner } = request, canonical = request.source.canonical
+      const input: OwnerWorkItemLearningTaskFenceInput = { authorityId: owner.authorityId, principalId: owner.principalId,
+        workspace: owner.workspace, agentPreset: owner.agentPreset, expectedOwner: { authorityHash: owner.authorityHash,
+          principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion },
+        itemId: request.source.itemId, outcomeId: canonical.outcomeId, expectedSourceDigest: request.source.sourceDigest,
+        expectedContentDigest: request.source.contentDigest,
+        canonical: { version: canonical.version, digest: canonical.digest, objectiveStatus: canonical.objectiveStatus } }
+      // Delivery already owns both source locks. Core Policy and exact Memory target reads
+      // are synchronous/local; never reopen Delivery/Evaluation or call a producer here.
+      return delivery.withOwnerWorkItemLearningTaskFence(input, task => {
+        if (acceptanceDigest(this.#current(request, includeTarget, task)) !== fingerprint) throw new Error('memory review source or target changed')
+        this.#assertGrant(request)
+        return callback()
+      })
+    }
     const { delivery, evaluation } = this.#sourceServices()
     return delivery.withOwnerForegroundTaskSourceFence(this.#sourceInput(request), content => {
       const scope = evaluation.canonicalHostScope({ workspace: request.owner.workspace, preset: request.owner.agentPreset })
       const { scopeWatermark } = evaluation.listTrustedTaskLearningProjections({ scope, limit: 1 })
       const result = evaluation.withTrustedCanonicalScopeWriterFence({ scope, scopeWatermark }, () => {
-        if (acceptanceDigest(this.#current(request, includeTarget, content)) !== fingerprint) throw new Error('memory review source or target changed')
+        if (acceptanceDigest(this.#currentForeground(request, includeTarget, content)) !== fingerprint) throw new Error('memory review source or target changed')
         return callback()
       })
       if (!result.matched) throw new Error('memory review canonical scope changed')
@@ -271,6 +372,7 @@ export class MemoryReviewRuntime {
       const old = this.#store.inspect(binding)
       if (old) return old
       this.#policy(request, true)
+      signal.throwIfAborted(); this.#assertGrant(request)
       return this.#store.claim(binding)
     })
     if (claim.state !== 'claimed') return this.#receipt(request, initial.model, claim.state, claim.result)

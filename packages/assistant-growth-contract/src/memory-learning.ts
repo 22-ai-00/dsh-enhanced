@@ -25,6 +25,17 @@ export interface MemoryLearningSource {
   }
 }
 
+/** Background evidence has its own locator; a worker report is never an owner Inbox. */
+export interface WorkItemMemoryLearningSource {
+  protocol: 'memory-learning-source/work-item/v1'
+  itemId: string
+  /** Binds the complete Host-validated proof and current owner feedback. */
+  sourceDigest: string
+  /** Binds the bounded presentation actually used for extraction and review. */
+  contentDigest: string
+  canonical: NonNullable<MemoryLearningSource['canonical']>
+}
+
 export interface MemoryLearningEntry {
   kind: 'fact' | 'experience'
   content: string
@@ -47,12 +58,28 @@ export interface MemoryLearningProposal {
   evidenceQuote: string
 }
 
-export interface MemoryLearningReviewRequest extends MemoryLearningProposal {
+export interface ForegroundMemoryLearningReviewRequest extends MemoryLearningProposal {
   protocol: 'memory-learning-review/v1'
   operationId: string
   extractionSessionId: string
   owner: MemoryLearningOwner
   source: MemoryLearningSource
+}
+
+export interface WorkItemMemoryLearningReviewRequest extends MemoryLearningProposal {
+  protocol: 'memory-learning-review/v2'
+  operationId: string
+  extractionSessionId: string
+  owner: MemoryLearningOwner
+  source: WorkItemMemoryLearningSource
+}
+
+/** v1 wire bytes and authority remain unchanged; v2 requires explicit consumer consent. */
+export type MemoryLearningReviewRequest = ForegroundMemoryLearningReviewRequest | WorkItemMemoryLearningReviewRequest
+
+/** A redaction placeholder is not owner testimony. Visible text around it can be. */
+export function hasWorkItemLearningFeedbackText(value: string): boolean {
+  return typeof value === 'string' && /[\p{L}\p{N}]/u.test(value.replace(/\[REDACTED(?: PRIVATE KEY)?\]/gu, ''))
 }
 
 export class MemoryLearningContractError extends Error {
@@ -157,11 +184,20 @@ export function validateMemoryLearningProposal(value: unknown): MemoryLearningPr
 export function validateMemoryLearningReviewRequest(value: unknown): MemoryLearningReviewRequest {
   proposal(value, ['protocol', 'operationId', 'extractionSessionId', 'owner', 'source'])
   const request = value as MemoryLearningReviewRequest
-  if (request.protocol !== 'memory-learning-review/v1') fail('protocol')
+  if (request.protocol !== 'memory-learning-review/v1' && request.protocol !== 'memory-learning-review/v2') fail('protocol')
   identifier(request.operationId); identifier(request.extractionSessionId)
   validateMemoryLearningOwner(request.owner)
-  const source = object(request.source, ['inboxId', 'sourceDigest', 'contentDigest'], ['canonical'])
-  identifier(source.inboxId); digest(source.sourceDigest); digest(source.contentDigest)
+  const source = request.protocol === 'memory-learning-review/v1'
+    ? object(request.source, ['inboxId', 'sourceDigest', 'contentDigest'], ['canonical'])
+    : object(request.source, ['protocol', 'itemId', 'sourceDigest', 'contentDigest', 'canonical'])
+  if (request.protocol === 'memory-learning-review/v1') identifier(source.inboxId)
+  else {
+    if (source.protocol !== 'memory-learning-source/work-item/v1') fail('work-item source protocol')
+    identifier(source.itemId)
+    if (request.mutation.op !== 'remove' && request.mutation.entry.kind !== 'experience') fail('work-item experience only')
+    if (!hasWorkItemLearningFeedbackText(request.evidenceQuote)) fail('work-item feedback quotation')
+  }
+  digest(source.sourceDigest); digest(source.contentDigest)
   if (Object.hasOwn(source, 'canonical')) {
     const canonical = object(source.canonical, ['outcomeId', 'version', 'digest', 'objectiveStatus'])
     identifier(canonical.outcomeId); positive(canonical.version); digest(canonical.digest)

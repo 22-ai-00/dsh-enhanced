@@ -39,7 +39,9 @@ Delivery v26 只新增与 Inbox claim 同库的持久维护栅栏，owner snapsh
 
 ## 普通任务自动记忆学习
 
-`assistant-memory-learning` 新 bundle 使用独立私有 schema 1 意图/游标/提取额度库，依赖同批 Delivery 精确来源元数据查询、Verifier 审查额度探针和 Memory 当前受管目标/采用额度探针。Delivery schema 25、Memory schema 7、Verifier 的既有审查库结构不变；旧 peers 缺少能力时拒绝激活。初始 owner/grants/有限预算配置完成后复用原生 Automations 和 Agent；DSH/Cordis ABI 未升级。生产 owner 部署和新鲜就绪已验收，后续真实任务收益及完整普通使用闭环仍待验收。
+`assistant-memory-learning` 使用独立私有意图、游标与提取额度库，依赖同批 Delivery 精确来源元数据查询、Verifier 审查额度探针和 Memory 当前受管目标/采用额度探针。当前 schema 2 从 schema 1 迁移时保留原行、请求 JSON、摘要、额度和未知操作，新增独立的后台 canonical 游标及带主体类型的意图身份；旧 writer 不得继续写新库。前台 v1 请求及默认授权摘要不变。Memory 仍为 schema 7，Verifier 的记忆审查库结构不变；DSH/Cordis ABI 未升级。
+
+后台经验要求学习、审查、采用三份授权分别显式设置 `workItemExperiences: true`，并使用同批 Delivery schema 30、Evaluation schema 13、WorkItems schema 9 的准确来源与批量 fence 接口。省略或 `false` 规范化为原配置，旧 grant 不自动扩权；学习器的原库授权不可变，启用新能力须使用新授权与新库并保留原库和消耗。v2 来源不伪造前台 Inbox，只允许 experience；采用 grant 的 kinds 必须包含 experience。缺少明确能力探针、准确授权摘要或新来源接口时，在付费提取前拒绝；旧前台功能保留。初始 owner/grants/有限预算配置完成后复用原生 Automations 和 Agent。此前前台学习的生产就绪证据不覆盖新后台能力，后续真实任务收益及完整普通使用闭环仍待验收。
 
 当前 pinned Host `0.2.1-rc.2` 的 WorkingDirectory 会追加必需的 `runtime-context` 用户消息。提取器与 Verifier 的记忆、源码、创建/修订审查通过同批共享合同核验其精确来源、唯一工作目录 section 与冻结 owner workspace；原两消息输入仍兼容。新增消息计入既有输入限额，其他额外内容保持拒绝。此修复不变更依赖版本、数据库、授权、模型或预算；历史失败/unknown 不自动重放。回归测试挂载 pinned 真实 WorkingDirectory 与原生 AgentLoop。
 
@@ -341,7 +343,7 @@ The optional `ownerReportFeedback` surface requires matching WorkItems, Delivery
 
 Delivery 29→30 adds a durable feedback queue without reinterpreting old Inbox rows or reply streams. Evaluation 12→13 adds the `work-item` canonical subject while retaining existing projection versions, feed positions and owner revisions. Historical generic work-item settlements remain audit outcomes with unknown objective; migration never converts worker claims into owner votes. Runtime readers must recognize the new exact schemas; older binaries must reject them rather than modify their files. The unchanged owner snapshot protocol remains readable at prior supported Delivery versions.
 
-Feedback input is exclusive only after current owner, exact accepted report and Policy checks. Natural interception is limited to whole result statements; replies containing additional instructions retain their ordinary continuation path. Recovery resumes the frozen ledger operation, not a model invocation. The Host learning-source reader returns a distinct work-item protocol and separates private full-source identity from bounded presentation. Existing foreground learning consumers do not automatically accept this new subject, and owner testimony does not constitute independent verifier success or permission to adopt a capability.
+Feedback input is exclusive only after current owner, exact accepted report and Policy checks. Natural interception is limited to whole result statements; replies containing additional instructions retain their ordinary continuation path. Recovery resumes the frozen ledger operation, not a model invocation. The Host learning-source reader returns a distinct work-item protocol and separates private full-source identity from bounded presentation. Memory learning can consume this subject only with the three explicit grants and v2 source contract described above; foreground v1 consumers and engineering Growth do not automatically accept it. Owner testimony does not constitute independent technical verifier success or permission to adopt a capability.
 
 Work-item canonical results retain their feed records, but their Evolution projection outbox state is explicitly `not-required`. They do not enter Evolution's existing learning contract or cause repeated recovery attempts. Exact Recovery replay treats this state as a no-op, never as `quality-projected`; supported foreground and automation projections keep their existing behavior.
 

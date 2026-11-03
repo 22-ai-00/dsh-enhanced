@@ -1,5 +1,6 @@
 import type { TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
-import type { OwnerRouteValidationReceipt } from './types.js'
+import type { OwnerForegroundTaskSourceContent, OwnerForegroundTaskSourceScope, OwnerRouteValidationReceipt } from './types.js'
+import type { OwnerForegroundLearningTask } from './service.js'
 import type { WorkItemReplySource } from './work-item-replies.js'
 import type { ObjectiveCommand, ObjectiveFeedbackStatus } from './feedback-command.js'
 
@@ -61,3 +62,16 @@ export interface OwnerWorkItemLearningTask {
   }>
   readonly presentationDigest:string
 }
+
+/** Exact immutable expectations; foreground v1 identities remain unchanged. */
+export type OwnerWorkItemLearningSourceExpectation = Readonly<{
+  kind:'work-item';itemId:string;outcomeId:string;expectedSourceDigest:string;expectedContentDigest:string
+  canonical:Readonly<{version:number;digest:string;objectiveStatus:'achieved'|'not-achieved'}>
+}>
+export type OwnerLearningSourceExpectation = Readonly<{kind:'foreground';inboxId:string;expectedSourceDigest:string}> | OwnerWorkItemLearningSourceExpectation
+export type OwnerLearningSourceSnapshot = Readonly<{kind:'foreground';inboxId:string;content?:Readonly<OwnerForegroundTaskSourceContent>|undefined;
+  currentCanonical?:TrustedTaskLearningProjectionReceipt|undefined;task?:Readonly<OwnerForegroundLearningTask>|undefined;
+  ownerRevision?:Readonly<{outcomeId:string;version:number;action:'initial'|'correct'|'withdraw';objectiveStatus:string;operationId?:string}>|undefined}> |
+  Readonly<{kind:'work-item';itemId:string;task?:Readonly<OwnerWorkItemLearningTask>|undefined;currentCanonical?:TrustedTaskLearningProjectionReceipt|undefined;
+  ownerRevision?:Readonly<{outcomeId:string;version:number;action:'initial'|'correct'|'withdraw';objectiveStatus:string;operationId?:string}>|undefined}>
+export type OwnerWorkItemLearningTaskFenceInput = OwnerForegroundTaskSourceScope & Omit<OwnerWorkItemLearningSourceExpectation,'kind'>

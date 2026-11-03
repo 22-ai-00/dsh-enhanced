@@ -425,6 +425,10 @@ Delivery 在普通续办前识别既有的完整自然语言结果短句及其�
 
 Host 只读接口 `issueOwnerWorkItemFeedbackTarget({itemId, reportRevision, reportDigest})` 返回不可序列化的进程内 capability；`resolveOwnerWorkItemFeedbackTarget(capability)` 重新核对当前 owner、服务代次、完整报告/brief 字节、封存 supplier 和真实执行证明。错误或已被取代的报告修订、错误摘要、旧服务 capability、owner 更换与不确定预算均拒绝；不会悄悄读取另一条最新报告。相同主人新会话可以评价旧报告。task/report 内容仍是不可信材料，不是执行指令。
 
+Host 批量来源接口 `withOwnerWorkItemFeedbackTargetsFence(capabilities, callback)` 接受最多 1000 个 capability，在 WorkItems 的 SQLite writer 事务内完成所有 owner/production 读取，再一次性重核整个组的 capability 归属、当前配置及服务、peer 身份和封存报告/计划。后面的来源回调不能使已经读过的 A 被缓存洗白。结果按输入位置返回深冻结的 proof 或 `undefined`；伪造、其他 reader 和已失效的 capability 不取得来源，相同 capability 对象只读取一次并保留重复位置，不同 capability 即使指向同一报告也各自校验。关闭或失去当前来源资源时整体拒绝。
+
+该锁持有到同步 callback 结束；Promise/thenable 会被拒绝并回滚本地事务。组合使用的锁顺序是 Delivery → Evaluation → WorkItems → 可信终端账本，callback 只做既定同步核心读写，不反向获取上游锁或再调用来源 producer。它不启动 Agent、创建 timer、续执行授权或消耗模型/worker 额度，原有单条 issue/resolve 与历史 proof 字节保持不变。
+
 这条历史读取与新执行授权分离。显式开启反馈后，冷启动可保留已经过期的 scope、diagnosis、continuation 原期限来读取已有结果；不会延长期限、重置预算、重新 reconcile worker 或放行旧执行。当前 Delivery owner route 与反馈 Policy 仍须有效。两个入口同开时，当前执行资格独立控制普通续办；过期后的明确评价仍可记录，普通回复不会因此取得过期执行权限。既有 v1/v2 计划和激活摘要保持兼容。
 
 WorkItems 仍使用 schema 9；Delivery schema 30 保存独占评价意图，Evaluation schema 13 保存新的 canonical 工作项主人结果。原有 settlement 行继续作为 objective unknown 的审计材料，不回填为主人评价。备份与恢复须一致保留相关账本；这一切片不自动触发 Growth、创建/采用候选或调用模型。
