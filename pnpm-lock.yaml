@@ -2156,6 +2156,9 @@ importers:
 
   plugins/owner-console:
     dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: 'catalog:'
+        version: 3.18.5
       zod:
         specifier: 'catalog:'
         version: 4.4.3

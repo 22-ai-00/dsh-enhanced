@@ -3,7 +3,7 @@ import { build } from 'esbuild'
 
 /** Wraps the browser bundle in the module-loader contract the Web shell expects. */
 const bundled = (await build({
-  entryPoints: [new URL('../src/client.tsx', import.meta.url).pathname],
+  entryPoints: [new URL('../src/client.ts', import.meta.url).pathname],
   bundle: true,
   format: 'cjs',
   platform: 'browser',

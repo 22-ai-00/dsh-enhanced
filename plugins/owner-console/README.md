@@ -20,9 +20,9 @@ dsh --profile web --dump-config
 | --- | --- | --- |
 | 远程接入（飞书） | 接入方式（`lark-cli` 向导或直接填写）、连接是否加载、appId 是否配置 | 本插件配置 + 已安装的 `lark-channel` service |
 | TraeX | 入口是否启用 | 本插件配置 |
-| 依赖自检 | `assistant-policy`、`assistant-delivery`、`assistant-skills`、`lark-channel` 是否可用 | Cordis service 注册表 |
+| 依赖自检 | `assistant-policy`、`assistant-delivery`、`assistant-skills` 是否可用 | Cordis service 注册表（严格查找） |
 
-所有读取经 `typert` 的只读 invocation 返回；面板不会缓存或上报任何内容。
+所有读取经 `typert` 的只读 invocation 返回；面板不会缓存或上报任何内容。「已加载/可用」只表示提供该 service 的 fiber 当前处于活动状态，不等于飞书已完成认证或长连接在线。
 
 ## 配置
 

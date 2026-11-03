@@ -11,8 +11,8 @@ type ConsoleRemote = Readonly<{ status(): Promise<RemoteResult> }>
 type SlotRuntime = {
   readonly remote: Readonly<{ ownerConsole: ConsoleRemote }>
   readonly slots: {
-    inject(name: string, factory: () => unknown): { dispose(): Promise<void> }
-    register(options: unknown, component: unknown): { dispose(): Promise<void> }
+    inject(name: string, factory: () => unknown): () => void
+    register(options: unknown, component: unknown): () => void
   }
 }
 type ClientContext = {
@@ -101,7 +101,8 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
         { name: 'sidebar.panellist', id: 'owner-console', order: 30, label: () => '控制台' }, OwnerConsoleIcon))
       const main = runtime.slots.inject('main', () => runtime.slots.register(
         { name: 'main', key: 'owner-console' }, panel))
-      return { dispose: async () => { await main.dispose(); await sidebar.dispose() } }
+      // Cordis effects accept a function: dispose the slot registrations in reverse order.
+      return () => { main(); sidebar() }
     })
     return async () => {
       await injection.dispose()

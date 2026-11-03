@@ -34,6 +34,7 @@
 | [assistant-delivery](assistant-delivery) | `@dsh-enhanced/assistant-delivery` | 实验性 | 不含厂商 SDK 的持久消息核心：配对、会话绑定、inbox/outbox、receipt、重试与未知发送对账。 |
 | [assistant-web-owner](assistant-web-owner) | `@dsh-enhanced/assistant-web-owner` | 实验性 | 原生 Web 的固定 owner、可信文本回合与 Session 生命周期接入。 |
 | [lark-channel](lark-channel) | `@dsh-enhanced/lark-channel` | 实验性 | 飞书/Lark 长连接薄适配器：持久化后应答、`Get`/`DONE` 状态、脱敏执行进度、模型/审批卡片、安全 onboarding 与 launchd/systemd/Windows Task 常驻。 |
+| [owner-console](owner-console) | `@dsh-enhanced/owner-console` | 实验性 | 左侧栏主人控制台：一页展示飞书远程接入状态、TraeX 入口与依赖自检；只读，不发起模型调用，也不改其它插件。 |
 | [assistant-heartbeat](assistant-heartbeat) | `@dsh-enhanced/assistant-heartbeat` | 实验性 | 复用 Automations 的 active-hours 主动巡检、scratch CAS、busy coalescing 与成本硬界限。 |
 | [event-triggers](event-triggers) | `@dsh-enhanced/event-triggers` | 实验性 | 持久化 file、HTTPS/JSON、GitHub 仓库状态与 HMAC webhook 事件，支持有限 owner 授权观察与目标等待来源。 |
 | [assistant-proactive](assistant-proactive) | `@dsh-enhanced/assistant-proactive` | 实验性 | 已授权目标事件的收益筛选、静默记录、合并、冷却和持久预算；实际执行仍经 Goals 验收。 |
@@ -65,8 +66,6 @@
 | 插件 | 包 | 状态 | 说明 |
 |---|---|---|---|
 | [hello](hello) | `@dsh-enhanced/hello` | 示例 | 最小可安装 bundle，用于验证仓库契约和开发链路。 |
-
-| [owner-console](owner-console) | `@dsh-enhanced/owner-console` | 实验性 | 左侧栏主人控制台：一页纸展示飞书远程接入状态、TraeX 入口与依赖自检；只读、只显示需要人处理的事，不发起模型调用。 |
 
 <!-- plugin-catalog:end -->
 

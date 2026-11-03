@@ -32,11 +32,33 @@ describe('dsh-enhanced-owner-console', () => {
       expect(status.feishu).toEqual({ mode: 'lark-cli', connected: false, appIdConfigured: false })
       expect(status.traex).toEqual({ enabled: false })
       expect(status.dependencies.map(item => item.name))
-        .toEqual(['assistantPolicy', 'assistantDelivery', 'assistantSkills', 'larkChannel'])
+        .toEqual(['assistantPolicy', 'assistantDelivery', 'assistantSkills'])
       expect(status.dependencies.every(item => item.available === false)).toBe(true)
       expect(Object.isFrozen(status)).toBe(true)
+      expect(ctx.get('ownerConsole' as never)).toBeDefined()
     } finally {
       await ctx.fiber.dispose()
     }
+    expect(ctx.get('ownerConsole' as never)).toBeUndefined()
+  })
+
+  it('reports only active providers and never treats a stale registration as connected', async () => {
+    const ctx = new Context()
+    try {
+      await ctx.plugin(TypertRegistry)
+      ctx.provide('larkChannel' as never, {} as never)
+      apply(ctx, Config({ ...defaults, feishuMode: 'app', feishuAppId: 'cli_owner' }))
+      const console = ctx.get('ownerConsole' as never) as unknown as OwnerConsoleService
+      const status = console.status()
+      expect(status.feishu).toEqual({ mode: 'app', connected: true, appIdConfigured: true })
+      expect(status.dependencies.every(item => item.available === false)).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the dependency hints out of the identity checks', () => {
+    expect(Config({ feishuMode: 'app', feishuAppId: 'x', enableTraex: true }))
+      .toMatchObject({ enableTraex: true })
   })
 })

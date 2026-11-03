@@ -93,6 +93,7 @@
     "react": "^18.2.0"
   },
   "dependencies": {
+    "@deepseek-ai/schemastery": "catalog:",
     "zod": "catalog:"
   }
 }
