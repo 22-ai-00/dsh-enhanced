@@ -1,6 +1,6 @@
 # Assistant Memory Learning
 
-普通任务驱动的持久事实与经验学习。一次 owner 配置与有限授权后，原生 Automations 发现已完成的普通对话，原生 Agent 提取候选，独立 Verifier 重读来源审查，Personal Memory 在授权范围内采用。后续任务沿 Memory 的动态检索与 System Prompt seam 使用已采用记录。无需逐条调用捕获或批准工具。
+普通前台任务驱动的持久事实与经验学习。一次 owner 配置与有限授权后，原生 Automations 发现已完成的前台对话，原生 Agent 提取候选，独立 Verifier 重读来源审查，Personal Memory 在授权范围内采用。后续任务沿 Memory 的动态检索与 System Prompt seam 使用已采用记录。无需逐条调用捕获或批准工具。
 
 验证基线为仓库固定的 DSH `0.2.1-rc.2`、Cordis `4.0.5` 与同批 Delivery、Evaluation、Automations、Policy、Verifier、Memory。安装本包不会启用其他 bundle。发布 patch 默认禁用，必须先配置下述 owner/grants 和预算，再启用该稳定行。
 
@@ -38,7 +38,7 @@ Policy 最少需要这些准确 owner/workspace、`initiators: ['background']` �
 
 ## 来源、独立审查与恢复
 
-两个持久游标分别读取 Delivery completion feed 和 Evaluation canonical feed。先在同一 SQLite 事务落意图再推进游标；完成元数据先于 reply Outbox 时保留 pending，由原生周期扫描补读。后到的真实 objective、纠正、撤回不会因 completion 已消费而漏掉。Evaluation staging 不持有 Delivery 锁；执行与采用维持 Delivery → Evaluation → Memory 的来源检查顺序。
+两个持久游标分别读取 Delivery 的 owner foreground completion feed 和 Evaluation canonical feed。事实来源限定为真实前台完成记录；经验入口只接受 `subjectKind: foreground-turn` 的当前可信结果。WorkItem 报告的主人结果反馈虽已进入 Evaluation，但尚未驱动本包的经验提取、候选审查或采用，不能据此声称后台任务成长闭环已接通。先在同一 SQLite 事务落意图再推进游标；完成元数据先于 reply Outbox 时保留 pending，由原生周期扫描补读。后到的真实 objective、纠正、撤回不会因 completion 已消费而漏掉。Evaluation staging 不持有 Delivery 锁；执行与采用维持 Delivery → Evaluation → Memory 的来源检查顺序。
 
 事实只提取明确 owner 陈述；经验必须绑定当前可信 objective，不能把回复成功当任务成功。严格模型输出只含 mutation/quotation；命名空间、信任、TTL、provenance、authority 不可由候选修改。replace/remove 只指向 Host 提供的准确受管 id/version；人工改写后不能再自动接管。每个模型边界、送审前、采用前都检查来源和 owner。审查 session 与提取 session 独立且都零工具，Verifier 自己读取原始 Inbox/Outbox 与 canonical 结果，Memory 从实际 reviewer 账本查回执后才采用。
 

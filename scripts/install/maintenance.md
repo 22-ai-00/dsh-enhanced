@@ -121,7 +121,7 @@ node -e 'const fs=require("node:fs"),p=require("node:path"),os=require("node:os"
 
 从 `0.1.63` 起，Host 和本地程序升级会在停服前从 Home 的父目录解析持久 pnpm store，核对目录归属、权限和身份，再绑定到事务。隔离安装仍使用临时 store 和复制导入；安装完成后仅将新生成的 `.modules.yaml` 的 `storeDir` 改为已验证的持久路径，并在切换和恢复检查中复核路径身份及元数据摘要，避免事务清理后 pnpm 重建旧事务目录。无需安装的 fallback profile 保持原样。此修复通过正常升级生效，不应直接修改生产安装元数据；既有未完成事务仍使用其原安装器恢复。
 
-从 CLI `0.1.57` 起，对支持的现有 Linux owner/cohort Home，可运行：
+从 CLI `0.1.57` 起，对原安装为 Docker 后端、满足本节条件的 Linux owner/cohort Home，可运行：
 
 ```sh
 dsh-rsi update --all --dry-run --yes
@@ -129,6 +129,10 @@ dsh-rsi update --all --yes
 ```
 
 若当前 CLI 是 `0.1.55` 等旧版，先单独运行 `dsh-rsi update`，确认新进程为 `0.1.57` 或更新版本；旧版 `--all` 不会自动以新 CLI 进程识别冻结 owner。此后 CLI 先升级自身，再识别 Home 中唯一的冻结 target/coordinator 与原 `sourceRepository`；只接受绑定仓库的官方 GitHub origin、干净的 `dev` / `main` 分支（若绑定 checkout 为 detached HEAD，则 HEAD 必须位于本机记录的 `origin/dev` 或 `origin/main` 历史上，更新后仍保持 detached；两者都包含时优先 `dev`，本机连 `origin/dev`、`origin/main` 的跟踪引用都没有或浅历史无法判定则拒绝），并执行 `git fetch`、仅快进合并、锁文件安装和构建。冻结包还会在 Home 外的隔离环境中离线构建和打包，可能耗时较长；这一步失败时不会切换 Home。候选目前要求私有 Host 从受支持的 `0.2.0-rc.2` / `0.2.1-rc.2` 到 `0.2.1-rc.2`，同时更新冻结插件。要求原 owner 授权有效、target 与 coordinator 受管服务均活动、没有已采用的源码或未结 activation；额外参数会被拒绝。事务自动停启这对服务，保留原 owner 绑定、模型配置、权限、凭据引用、授权原期限与累计已用额度、Session、Goal 和历史；不重做 onboarding，不重置额度，也不自动续期或扩权。已过期授权会在升级预检中被拒绝，需先按原授权流程处理。
+
+当前 owner 程序升级在读取原构建时明确拒绝已是 `linux-native` 的安装。Docker→native 还要求创建业务为空：已配置的 source/creation/revision review 库必须真实存在且 grants、verifications 均为零；creation-adoptions 库的 adoptions、calls、source_archives 均为零，unknown、closed、rejected 等历史也不能跳过。停服前和 stage 物化前分别复核，移交保留原 key、额度、期限和不可变证明。非空创建历史迁移尚未实现；完整 live Docker→native 切换仍未验收。拒绝时保留原库，不删除历史、不重建授权，也不改用 reinstall 冒充保权迁移。
+
+这与[pre-owner v3 维护](#checkout-内的-pre-owner-冻结源码维护)不同：后者仅支持尚无 owner 的 Docker→native / native→native 基础资源与 cohort 维护，不开放 native owner 程序升级。
 
 若有普通待恢复的程序升级事务，CLI 先用**原安装器**恢复，本次不拉取新源码；恢复后再次执行同一升级命令。若报错指出事务已绑定独立审核的签名 readiness 修复安装器，须从**该许可绑定的独立审核 checkout** 显式运行 `node scripts/install/upgrade-program.mjs --dsh-home <绝对Home路径> --profile <原target> --recover-readiness`；不要修改原安装器或删除事务。`--dry-run` 仅显示计划。拒绝或失败时保留报错及事务现场；不要删除账本或改用 `reinstall` 冒充保留数据的升级。当前发布与实机验收状态见 [RSI 状态](../../docs/rsi-status.md)。macOS 冻结 owner/source Home 仍不支持普通原地升级。
 
@@ -418,7 +422,7 @@ Linux 新安装默认使用 native；源码安装可显式固定当前仓库的�
 
 显式 Docker 路径继续支持现有安装：传 `--isolation-backend docker --isolation-image sha256:<已存在的本机镜像ID>`，不要同时指定 native source repository。macOS 的实验性 autonomy 保留这一 Docker 路径。安装器不拉取镜像、不安装或重启 Docker；使用最终配置的 Docker 路径和生产 supervisor 完成相同范围的固定任务探测。两种 backend 清理状态未知时均保留私有 probe 证据目录；探测通过不证明任意自定义任务或完整自治。
 
-当前 native autonomy 支持普通有限隔离执行，普通 Goal admission 的独立 `isolated-runner` 验收仍仅支持 Docker，native profile 会明确拒绝该配置。RSI 专用 native review runner 是另一条路径，不能代替普通 Goal 验收；需要现有 Goal 能力时继续使用显式 Docker profile。
+普通 Goal admission 的独立 `isolated-runner` 验收支持已配置的 Docker 或 Linux native 后端。native 复用持久 runtime 与 cgroup v1 描述符，不另行准备或续权；cgroup v2 明确拒绝。RSI 专用 review runner 与普通 Goal 验收保持各自授权边界。固定供应商的真实 native Goal 验收范围见[当前状态](../../docs/rsi-status.md)，不据此宣称任意任务或真实模型均已验收。
 
 首次 grant 精确绑定本机 Web owner 版本、workspace 和 preset，默认 20 次、60 分钟期限、10 分钟累计预留执行时长；次数最多 10000、期限最多 7 天、累计时长最多 1 天。单次任务仍受 Isolation 的独立限制。重复 setup 保留原过期时间、撤销记录和已使用预算，即使过期也不自动续权；修改原绑定、backend、镜像、native runtime 描述符或预算需显式迁移。profile 私有 Isolation/Actions 状态和 Keychain 路径与其他 profile 分开，已有合法自定义路径保留。
 

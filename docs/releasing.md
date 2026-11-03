@@ -10,6 +10,8 @@
 
 Linux 原生隔离测试另使用固定的 Node `22.23.2`：CI 与 Release 的 Linux job 先将该版本安装到只读 namespace 可见的 `/usr/bin/node`，再按 `.node-version` 切回工作区 Node，并分别校验两个版本。不能用工作区 Node 替代隔离运行时基线。跨平台测试继续验证可移植的源码准备契约；非 Linux Host 验证 Linux 专用执行入口在派发前拒绝。
 
+开发与发布准备（包括版本变更和失败修复）都在 `dev` 提交并推送；独立复核和完整检查通过后，才在发布时合入 `main`。本地与远端只保留 `dev`、`main`，不新建 feature 或 release 分支。标签仍只从下述验证过的精确 `origin/main` 提交创建。
+
 ## 版本账本
 
 仓库级版本记录在 [`release-manifest.json`](../release-manifest.json)。查看当前版本、待发布版本和下一个默认版本：
@@ -76,7 +78,7 @@ pnpm release:record
 
 若发版中途出现暂时性失败，`pending` 会保留。请在 GitHub Actions 中 rerun 原 run，或手动运行 Release workflow 并输入同一个现有 tag；不要为重试创建或移动标签。
 
-若失败原因必须修改源码，旧标签就不能再满足“标签等于当前 `origin/main`”的发布门。先确认旧 workflow 已停止，并检查该版本是否发生部分发布；修复合入 `main` 前，用显式更高版本替换 `pending`，例如：
+若失败原因必须修改源码，旧标签就不能再满足“标签等于当前 `origin/main`”的发布门。先确认旧 workflow 已停止，并检查该版本是否发生部分发布；在 `dev` 修复并完成验证，再合入 `main`；合入前用显式更高版本替换 `pending`，例如：
 
 ```sh
 pnpm release:supersede 0.1.9

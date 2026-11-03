@@ -44,4 +44,4 @@ meta-bundle 不引入一套独立于上游 Host 的 OS capability、网络 API�
 
 ## 兼容性
 
-当前适配 DeepSeek Harness `0.2.0-rc.2`；完整宿主安装需按[兼容性文档](../../docs/compatibility.md)验证。
+宿主、Cordis 及同批组件的唯一兼容基线见[兼容性文档](../../docs/compatibility.md)；完整宿主安装须按该基线验证。本包仍只组合上述四个核心包，不额外启用其他业务 bundle。

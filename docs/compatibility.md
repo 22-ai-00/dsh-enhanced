@@ -27,7 +27,7 @@ Delivery v26 只新增与 Inbox claim 同库的持久维护栅栏，owner snapsh
 
 ## Linux 既有 owner 的程序升级
 
-`dsh-rsi update --all --yes` 为冻结源码的 Linux 安装提供专用程序升级事务：沿安装收据绑定的官方 `dev` / `main` 分支快进源码，在 Home 外准备依赖，再成对停服、复制 Home、更新程序和私有 Host，最后检查本次启动的目标与协调器。它保留原 owner 绑定、模型配置、凭据引用、授权原期限、累计已用额度和业务历史；不重新 onboarding，不重置额度或自动续期。当前入口仅接受未发生源码采用的安装及 `0.2.0-rc.2` / `0.2.1-rc.2` 原 Host，候选固定为 `0.2.1-rc.2`。它不扩展 Mac 冻结 Home 或 `0.1 → 0.2` 迁移范围。
+`dsh-rsi update --all --yes` 为受支持的冻结源码 Linux owner 安装提供专用程序升级事务：沿安装收据绑定的官方 `dev` / `main` 分支快进源码，在 Home 外准备依赖，再成对停服、复制 Home、更新程序和私有 Host，最后检查本次启动的目标与协调器。它保留原 owner 绑定、模型配置、凭据引用、授权原期限、累计已用额度和业务历史；不重新 onboarding，不重置额度或自动续期。当前入口仅接受原安装为 Docker 后端、未发生源码采用且无未结 activation 的安装及 `0.2.0-rc.2` / `0.2.1-rc.2` 原 Host，候选固定为 `0.2.1-rc.2`。Docker→native 另要求创建 review 与 adoption 业务历史为空；已是 native 的 owner 安装拒绝，完整 live 切换尚未验收。详细前提及独立的 pre-owner 维护入口见[维护说明](../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)。它不扩展 Mac 冻结 Home 或 `0.1 → 0.2` 迁移范围。
 
 升级追加独立签名的 `rsi-owner-program-update-overlay` 和源码维护记录，保留原 bootstrap 与此前 repair 链。后续 reader 必须支持两种 owner overlay，并核对最近记录的 creation / journal 摘要。候选启动前失败可恢复原 Home；候选已启动后只继续核验当前 Home，不能用旧副本覆盖可能新增的业务记录。未完成事务优先恢复，不先拉取或重建其已固定的安装器。操作说明见 [CLI 指南](../packages/dsh-rsi-cli/README.md#升级与重装)，实际验收状态见 [当前状态](rsi-status.md)。
 
@@ -162,7 +162,7 @@ DSH `0.1.5` 的 Agent factory 将尚未发布的 Agent 作为 `setup(ctx, agent)
 
 Goals 的自动技能提取桥使用可选 Host peer `dsh-session-query@0.1.2-rc.1` 的 `observeSession(..., { projectionMode: 'none' })`，读取完成会话后释放 observation，不创建执行 Agent。缺少服务时返回 `unavailable`；Skills 在服务就绪后重新核验待处理授权。`verified-workflow-source/v1` 可附带只作来源记录、永不重放的 `failedObservations`，成功步骤语义不变。新 owner bridge 的多回合来源以可选 `segments` 保留连续执行记录，v1 顶层仍指向最终验收回合；既有手动单回合 API 不返回该字段。自动提取需成套升级 Goals 与 Skills；`skill_capture(start_native_rounds: true)` 仅在登记成功后使用原生 `concludeTurn()` 交接，默认仍允许同一 owner 回合组合授权。升级验证包括冷会话读取、授权撤销、失败观察隔离和真实目标交接后重启复用。
 
-仓库当前对齐以下上游发布状态：
+以下记录接口约束和升级回归点；标注旧版本的条目保留接口引入或迁移背景，不代表当前安装版本。当前 DSH/Cordis 版本以本节基线、[依赖目录](../pnpm-workspace.yaml)及锁文件为准：
 
 - DeepSeek Harness 运行时与 npm 测试依赖：`0.2.1-rc.2`。Session 保持通过公开 `snapshotEvents()` 读取；模型请求允许无持久身份的 RequestUserInput，不能把该输入伪装为认证用户事件。
 - `@deepseek-ai/dsh-user-questions@0.1.2-rc.1` 定义 `ctx.userQuestions.ask()` 与 `user-questions/request` answerer waterfall。带 `agent` 的请求只会派发到 exact live runtime root 的 Agent scope；随产品交付的 Web Host 通过 Remote Events 在该 scope 贡献 answerer。没有 answerer 接受请求时以 `NO_PROVIDER` 失败，不会无限等待。
@@ -184,7 +184,7 @@ Goals 的自动技能提取桥使用可选 Host peer `dsh-session-query@0.1.2-rc
 - Goals 的可选 `backgroundWake` 还依赖当前 `assistant-automations` Host executor/reconcile API 与 Delivery 的受限原 Session 恢复入口。它只支持 owner 当前人类回合建立的单次 `at` wake，固定原生 GoalId/revision 和 owner record/version；paused→Goals definition binding→active、dispatch CAS 和 unknown 不重放是跨包协议，不是跨库原子事务。Cordis contextual service 读取可能返回不同 proxy，兼容实现不能依赖对象 `===`；DSH runtime context snapshot 以 user/message 形式存在也不构成新的外部输入。升级相关包时须重跑 paused publication、dispatch 前 scheduler unknown、撤权、lease expiry 和 teardown 边界。跨日生产运行与业务目标整体验收尚未作为完成项声明。
 - Goals 可选 `eventWaits` 声明 EventTriggers `>=0.1.24 <0.2.0` optional Host peer，运行时检查 `sourceSnapshot` / `firstEventAfter` / `subscribeSourceChanges`；不静态导入或自动激活 EventTriggers。`dsh-event-source/v1` 快照绑定来源配置、目标和单调高水位，EventTriggers schema v4 从 v3 添加 outbox 序号，Goals 独立 event-waits schema v1 保存 matched→固定 wake 的恢复身份。升级时重跑来源迁移、重复事件、失效授权和原 Session 恢复场景；不能并行运行使用旧 schema 的 writer。 Delivery 另须提供 `goalWakeResultVersion() === 1`：只为显式请求输出的 wake 返回本次 exact native turn 的完整可见文本；`enqueueScheduledGoalResult` 使用进程内 capability 与入队时精确 owner/binding fence，不接调用者自报正文。
 - 官方 ACP 行为复查基线：`@deepseek-ai/dsh-acp@0.1.0-rc.5`（上游源码提交 `47f943859bef60e4160492346772ded9b24f765a`）
-- Cordis 运行时 ABI：`@deepseek-ai/cordis@4.0.2`、`@deepseek-ai/cordis-plugin-loader@1.0.3`、`@deepseek-ai/cordis-plugin-include@1.0.7`，以 [pnpm-workspace.yaml](../pnpm-workspace.yaml) 和当前安装产物为准。`/home/jiataorui/work/github/cordis` 是理解 DSH“万物皆插件”的架构来源，但其 checkout 版本不能替代本仓锁定运行时的可执行证据；任何 Cordis/Loader/Include 升级都必须按 [AGENTS.md](../AGENTS.md) 的运行时契约重新验收。
+- Cordis 运行时 ABI 使用本节锁定的 Cordis/Loader/Include 基线，并核对 [pnpm-workspace.yaml](../pnpm-workspace.yaml)、锁文件和当前安装产物。`/home/jiataorui/work/github/cordis` 是理解 DSH“万物皆插件”的架构来源，但其 checkout 版本不能替代本仓锁定运行时的可执行证据；任何 Cordis/Loader/Include 升级都必须按 [AGENTS.md](../AGENTS.md) 的运行时契约重新验收。
 - Node.js：`^22.19.0 || >=24.0.0`
 - pnpm：`11.7.0`
 - `0.1.4` 配置迁移：`assistant-delivery` 与 `assistant-automations` 已废弃 `toolCapableProviders`、`unknownRouteToolCalls`。旧键会被配置解析器保留但运行时忽略，升级时应删除；工具与 skill catalog 只由 Agent/preset 决定，模型 route 不是能力授权边界。同一 Agent/preset 在所有 route 获得相同 Host 工具、执行器和 Policy；route 缺少协议元数据以及声明 `native`/`bridge` 均准入，只有 adapter 明确声明 `toolCalls: none` 且最终工具非空时因协议未实现而失败。
@@ -278,13 +278,13 @@ Actions external broker wire 固定为 `assistant-actions/github-broker/v1`，�
 
 Actions embedded ledger schema v3 为新 commit 行保存精确 path binding，并为显式 `grant.rollback` authority 增加独立、有限 action/byte budget 的 compensation 记录。`allowRollback` 不单独授予凭据：Keychain/Policy 还必须允许 purpose `github.compensate`。v1/v2 原动作可无重放迁移，但因没有可信 preimage 不可追溯补偿；降级前须停止 writer 并保留 v3 数据库。preimage 在**收到补偿请求时**从 forward receipt 的不可变 parent commit（`expectedHeadOid`）读取：先经 Git Data API（`git/commits/{oid}` 与递归 `git/trees/{tree_sha}`）建立 blob 索引，再读 Contents API，present blob OID 与 exact 404 absent 均须与不可变 tree 一致；tree 不可得、truncated、OID 不符、Contents/blob 与 tree 矛盾或超过有界文件/数量/总量上限一律 fail-closed 不发补偿，避免只有 Metadata 权限的 fine-grained token 或 >100 MiB blob 把存活文件误判为 absent 而删除。完整内容仅保存在私有 ledger；公开 forward receipt 只有 action id/version、request digest 和 commit OID，补偿请求不能提供或替换 paths/preimage。升级 GitHub API、ledger 或 service wire 时必须重跑 tree-confirmed exact 404、tree/contents 矛盾、redirect/truncation/encoding 拒绝、receipt/grant/owner binding、独立预算、capturing 占位清理、prepared/dispatched 重启翻 unknown、lost-ACK no-replay 和 one-forward-one-compensation 回归。补偿仍调用普通 `createCommitOnBranch` 并把 forward commit 作为 expected head；不允许 force push、reset、history rewrite 或 `updateRef`，也不宣称撤销 PR、CI、review/comment、消息/通知、webhook、deployment 或 release 等外部副作用。external v1 不实现补偿并 fail closed。当前真实 GitHub account/token 行为未经授权验证，本地 transport/integration 不能替代生产远端验收。
 
-有限自治安装沿用 DSH `0.1.2-rc.1`、Cordis `4.0.2` 与 Loader `1.0.3`。Loader 会先解包 ESM 的 default；Isolation/Actions 的 default 必须保留 `{ name, Config, apply }`（Actions 还包含 `inject`），不能用无相同插件名的 Service class 取代，否则 exact preauthorization 注册失败并回滚工具注册。命名 Service 导出继续供程序调用。Isolation 的公开预授权方法采用实例绑定以兼容 Cordis trace proxy。
+有限自治安装使用[当前 Host 基线](#host-基线)，不另行固定旧版 DSH 或 Cordis。Loader 会先解包 ESM 的 default；Isolation/Actions 的 default 必须保留 `{ name, Config, apply }`（Actions 还包含 `inject`），不能用无相同插件名的 Service class 取代，否则 exact preauthorization 注册失败并回滚工具注册。命名 Service 导出继续供程序调用。Isolation 的公开预授权方法采用实例绑定以兼容 Cordis trace proxy。
 
-Web owner 仅在显式 autonomy setup 时动态加载可选 Isolation peer 的 `probeIsolationRuntime`；需要安装同仓匹配构建，普通 Web 无此运行时依赖。probe 使用合并后经验证的 literal Docker path。升级需跑 `pnpm test:autonomy` 的实际安装/default-export/原生工具链路；仅调用 named `apply` 的组件测试不能替代 Loader 路径验收。独立本机镜像、Docker 与非 root Linux 前置条件仍适用。
+Web owner 在显式 autonomy setup 时按后端动态加载同仓匹配的可选 Isolation peer，普通 Web 无此运行时依赖。Linux native 分支准备或核验持久 runtime、发现已委派的 cgroup 资源，再执行原生 probe；重复配置保留既有描述符和授权。Docker 分支才调用 `probeIsolationRuntime`，使用已验证的 literal Docker path 和本机固定镜像。doctor 只核验并探测已保存的后端，不准备资源或续权。升级需跑实际安装/default-export/原生工具链路；`pnpm test:autonomy` 的 Docker 场景仍需其镜像与非 root Linux 环境，仅调用 named `apply` 的组件测试不能替代 Loader 路径验收。native 的 cgroup v1 等前提见[运行时指南](dockerless-runtime.md)。
 
 `assistant-deepseek-budget` 对齐 `dsh-llm`、可选 `dsh-credentials@0.1.2-rc.1` 和当前 Goals Host meter API。通过自己的 `LlmAdapter` 注册固定路由，使用 `credentials.resolve(credentialRef(...))` 取得当前服务提供的凭据；不复用上游 `deepseek-official` 的可变 endpoint 配置。现有原生预算在 adapter dispatch 前预留，重试若形成新的原生请求必须重新经过预算。DeepSeek 协议契约具有固定到期时间，升级时须重新核对官方上下文/输出/usage 语义、禁重定向、工具回放、失效取消与实际安装验收。
 
-Web owner 的 Goal admission CLI 要求同批 Delivery 只读 snapshot API、Isolation 持久 grant diagnostics 与 Goals/Verifier/DeepSeek API，升级时须作为完整 autonomy bundle 集合安装。旧 Delivery 缺少 snapshot API 时通过 feature detection 在写入前明确要求升级，不因 named import 失败而隐藏原因；正式发布仍须按统一版本策略同步首发版本与 peer 下界。快照只接受 Delivery schema 20、私有本地数据库、精确 canonical Web dm binding、当前 owner/version 和已释放或不存在的 Session lease；不迁移旧 schema。DSH `0.1.2-rc.1` 会保留 Session/settings 模型选择，CLI 改默认路由后仍须通过原生模型选择器选择目标路由。升级需复核 CLI 二次字节幂等、撤权拒绝及真实浏览器在进程重启后恢复 Session/后台唤醒的行为。
+Web owner 的 Goal admission CLI 要求同批 Delivery 只读 snapshot API、Isolation 持久 grant diagnostics 与 Goals/Verifier/DeepSeek API，升级时须作为完整 autonomy bundle 集合安装。旧 Delivery 缺少 snapshot API 时通过 feature detection 在写入前明确要求升级，不因 named import 失败而隐藏原因；正式发布仍须按统一版本策略同步首发版本与 peer 下界。Goal admission 的 Web owner 只读快照仅接受同批 Delivery 的当前 schema、私有本地数据库、精确 canonical Web dm binding、当前 owner/version 和已释放或不存在的 Session lease；不迁移旧 schema。这与 operator 通用 snapshot、doctor 各自的兼容范围不同。DSH `0.1.2-rc.1` 会保留 Session/settings 模型选择，CLI 改默认路由后仍须通过原生模型选择器选择目标路由。升级需复核 CLI 二次字节幂等、撤权拒绝及真实浏览器在进程重启后恢复 Session/后台唤醒的行为。
 
 
 策略 benchmark owner 的可选 Host 接口使用 `dsh-session-persistence-jsonl` / `dsh-session-persistence@0.1.2-rc.1` 的 `ensureMaterialized`：普通 flush 不保证空会话头已落盘，Delivery 初次创建后 dispose/resume 前必须显式 materialize。依赖作为 Evaluation optional peers，普通 bundle 不自动激活。Delivery 增加不加载服务的 `./types` 子路径，Evaluation owner 动态载入同仓 Delivery 服务并使用该类型接口，避免 Evaluation → Delivery → Evaluation 服务声明构建环。根 bootstrap 在 Policy 后先生成 Delivery 的无服务类型入口，再构建 Evaluation 和完整 Delivery，支持两包 lib 均为空的构建；升级必须验证实际 JSONL 创建/恢复、临时 owner 和策略父子预算对账。
@@ -347,8 +347,9 @@ Work-item canonical results retain their feed records, but their Evolution proje
 
 ### Live Loader runtime observer
 
-Control Plane's optional `runtimeObserver` consumes the installed Cordis 4.0.2
-and Loader 1.0.3 `resolve`, entry/Fiber fields and reflection realm/store APIs.
+Control Plane's optional `runtimeObserver` consumes the installed Cordis/Loader
+versions in the [current Host baseline](#host-基线), using `resolve`, entry/Fiber
+fields and reflection realm/store APIs.
 Loader is an optional Host peer, late-bound through owned injection; missing
 Loader keeps observation unavailable without disabling ordinary Control Plane.
 No upstream version changes. `Fiber.uid` can survive config restart, so the

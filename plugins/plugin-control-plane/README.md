@@ -259,11 +259,11 @@ Host 可在调用源码检查时单独请求 `capturePack`，从同一次已核�
 
 ### Linux 原生完整源码准备
 
-显式配置 `sourceBuild.backend: linux-native` 使用 `assistant-isolation` 的固定工具链、namespace/seccomp 与独立 worker/keeper cgroup，不调用 Docker。必须同时配置持久 `sourceJobs`；构建器与持久任务格式支持修改、创建及修订，并保留原有 owner、scope、基线、版本策略和次数预算。修改准备、创建准备、已有工具的修订 v2 及配对回归均已接通；修改计划的源码审批、发布与源码发布采用在同一 linux-native 边界接通（见下节）。运行时需要已经验证的 cgroup v1 委派；无 Docker 安装默认值和已有 owner 的保权自动迁移尚未接通。
+显式配置 `sourceBuild.backend: linux-native` 使用 `assistant-isolation` 的固定工具链、namespace/seccomp 与独立 worker/keeper cgroup，不调用 Docker。必须同时配置持久 `sourceJobs`；构建器与持久任务格式支持修改、创建及修订，并保留原有 owner、scope、基线、版本策略和次数预算。修改准备、创建准备、已有工具的修订 v2 及配对回归均已接通；修改计划的源码审批、发布与源码发布采用在同一 linux-native 边界接通（见下节）。运行时需要已经验证的 cgroup v1 委派；Linux 全新安装默认使用这条原生链路，重复安装读取既有后端与回执，不把重跑安装当作迁移。已有 owner 的升级与迁移须遵守各自独立合同和验收边界。
 
 原生配置固定 `runtime`、`cgroupRoots`、私有 `stateRoot`、`authorityDigest`、`expiresAt`、`maxRuns` 和 `maxTotalDurationMs`。另需明确 `timeoutMs`、`outputBytes`、`memoryMiB`、`cpus`、`pidsLimit`、`workspaceMiB`、`temporaryMiB`、`workspaceInodes` 与 `temporaryInodes`；最大允许 30 分钟、16 GiB 内存、16 CPU、1024 PID、8 GiB workspace 和 4 GiB 临时目录。每次请求取调用方与配置 timeout 的较小值，不能扩大授权。
 
-完整系统工具环境可同时配置 `userNamespace` 与 `systemSnapshot`，选择 repository 执行合同 schema 3。前者绑定当前 Host owner、系统已分配的 subordinate UID/GID 和映射 helper 摘要；后者固定只读系统工具及库的内容与目录身份。运行时、快照和私有状态目录必须互不重叠，不能只提供其中一个字段。Lark 安装库的 `prepareLinuxRsiRepositoryRuntime` 在独立目录准备该环境及官方 Node 附带的 npm/npx，保留原 runtime 和源码回执；目前尚未接到安装默认流程。
+完整系统工具环境可同时配置 `userNamespace` 与 `systemSnapshot`，选择 repository 执行合同 schema 3。前者绑定当前 Host owner、系统已分配的 subordinate UID/GID 和映射 helper 摘要；后者固定只读系统工具及库的内容与目录身份。运行时、快照和私有状态目录必须互不重叠，不能只提供其中一个字段。Lark 安装库的 `prepareLinuxRsiRepositoryRuntime` 在独立目录准备该环境及官方 Node 附带的 npm/npx，保留原 runtime 和源码回执；Linux 全新安装的默认原生流程已调用该准备入口，重复安装则读取、核验既有回执。
 
 完整检查仍执行精确归档复核、全新 `pnpm install --offline --frozen-lockfile --ignore-scripts`、根 `pnpm check`、输入复核和包内容验证。固定的 Node、原生 pnpm、store/cache 来自只读 runtime；缓存复制到有界 workspace，pnpm 11 使用明确的 `pnpm_config_store_dir`。两遍归档必须匹配长度及 SHA-256，最多 64 MiB；存在有效 `export-subst` 的输入拒绝归档。Git 索引准备与归档子进程受同一取消信号控制。
 
@@ -273,7 +273,7 @@ Host 可在调用源码检查时单独请求 `capturePack`，从同一次已核�
 
 Linux 创建准备可接通独立 `creationVerifications`，必须同时配置双 UID 的 `userNamespace` 与 `systemSnapshot`。Host 私有 `inspectPreparedCreationLinuxBuild` 只读原任务的成功收据、真实包和资源消失证明，并核对当前 owner、信任配置、固定运行时与完整构建 evidence；缺证、未知结果或漂移均拒绝，不重派构建。v3 证书在写入及读回时再次绑定 schema 3 构建证据、基底和不可变计划，不能用旧 Docker/macOS 证书替代。普通 schema 2 原生准备与历史读取保持兼容，但不能据此取得新的 v3 签名。
 
-Linux 创建证书可接下述有限动态采用，构建和采用后端必须一致。linux-native 边界现已接通对已有插件的修改链：修订 v2 与配对回归 v2，以及修改计划的源码审批、发布与源码发布采用均消费同一份 schema 3 仓库准备 evidence，不再要求任何 Docker 命令证据；schema 2 macOS 单进程证据永远不能支撑全仓修改。尚未接通的是无 Docker 全新安装默认值、docker→linux-native 保权迁移与进程内热加载；配置后端不支持的组合（如 macOS 全仓修改、linux-native 缺持久 sourceJobs 或双 UID、跨采用链缺上游环节）仍会明确拒绝启动。动态工具采用不改变源码计划的 `pending-approval`，不能据此替换需要完整自迭代链的生产部署。
+Linux 创建证书可接下述有限动态采用，构建和采用后端必须一致。linux-native 边界现已接通对已有插件的修改链：修订 v2 与配对回归 v2，以及修改计划的源码审批、发布与源码发布采用均消费同一份 schema 3 仓库准备 evidence，不再要求任何 Docker 命令证据；schema 2 macOS 单进程证据永远不能支撑全仓修改。无 Docker 全新安装默认链路及 pre-owner 基础资源迁移已接通；完整活 Home 的 Docker→native 升级仍未验收，不能由 pre-owner 迁移证据替代，进程内代码热加载也不在此链路内；配置后端不支持的组合（如 macOS 全仓修改、linux-native 缺持久 sourceJobs 或双 UID、跨采用链缺上游环节）仍会明确拒绝启动。动态工具采用不改变源码计划的 `pending-approval`，不能据此替换需要完整自迭代链的生产部署。
 
 ### 持久源码检查任务（Docker 可选，Linux 原生必需）
 

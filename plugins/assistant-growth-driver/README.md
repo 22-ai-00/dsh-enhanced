@@ -1,6 +1,6 @@
 # @dsh-enhanced/assistant-growth-driver
 
-默认关闭的有界后台成长驱动。可通过 `usageLearning` 让真实前台任务结果自动触发持久成长作业，或由 Host 显式唤醒。Agent 回顾 owner 的已验收成功、沉淀 pending 技能候选；启用源码轨后可准备已有 gap 对应的插件修改提案。当前自动入口已接通，修复后的有限采用与持续观察需另配 Control Plane；可安装部署与独立行为验收仍未贯通，`reviewed` 仅表示本次成长复盘结束。
+默认关闭的有界后台成长驱动。可通过 `usageLearning` 让真实前台任务结果自动触发持久成长作业，或由 Host 显式唤醒。Agent 回顾 owner 的已验收成功、沉淀 pending 技能候选；启用源码轨后可准备已有 gap 对应的插件修改提案。在配套 Control Plane、有限授权和独立验收配置齐备时，工具创建轨已接通持久构建、独立行为验收和受限动态采用。技能候选仍须另经独立验证与重复成功门；修改、修订和持续观察各有自己的授权与验收条件，不能由一次 `reviewed` 推定完成。`reviewed` 仅表示本次成长复盘结束，不代表完整长期成长闭环已验收。
 
 有源码接口且普通认证反馈的 objective 为 `not-achieved` 时，本轮先查看当前 owner 的任务缺口与任务证据，再按相关性读取目标清单、源码或已授权的创建模板。文件清单只供发现路径，替换前仍须读取正文；证据不足时可以不提案。成功、周期唤醒和缺少源码接口的反馈仍用通用成功工作流；技能候选始终经过独立验证与重复成功门。新运行将实际发送的完整提示（含脱敏反馈数据）绑定到执行摘要；旧来源绑定不补写，也不自动重放 unknown。
 
@@ -19,7 +19,7 @@ dsh plugin --profile web add @dsh-enhanced/assistant-growth-driver
 dsh --profile web --dump-config
 ```
 
-包内 `cordis.patch.yml` 只注册插件、不带任何 `enabled` 配置，因此**安装后处于休眠状态**：无 timer、不起 Agent、零写入。第一期不随任何生产 profile 默认启用。
+单独添加本包时，包内 `cordis.patch.yml` 只注册插件、不带任何 `enabled` 配置，因此**处于休眠状态**：无 timer、不起 Agent、零写入。安装器在取得 owner 授权并完成资源准备后生成的原生 RSI 组合会显式启用本包及 `usageLearning`，固定 owner scope、期限和有限预算，并设置 `intervalMs: 0` 复用原生调度。该组合允许工具创建提案，不默认开放修改或修订；这与单独添加本包的休眠默认值不同。
 
 ## 工作机制
 
