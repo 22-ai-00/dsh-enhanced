@@ -90,5 +90,10 @@ describe('explicit secret source', () => {
     expect(handle.credentialHandle).toBe('lark-app-secret')
     expect(handle.appSecretEnv).toBeUndefined()
     expect(() => Config(base)).toThrow(/not both/u)
+    const standard = (Config as unknown as { '~standard': { validate(input: unknown): { issues?: unknown, value?: Record<string, unknown> } } })['~standard']
+    const validated = standard.validate({ ...base, secretSource: 'env' })
+    expect(validated.issues).toBeUndefined()
+    expect(validated.value?.['appSecretEnv']).toBe('LARK_APP_SECRET')
+    expect(validated.value?.['credentialHandle']).toBeUndefined()
   })
 })

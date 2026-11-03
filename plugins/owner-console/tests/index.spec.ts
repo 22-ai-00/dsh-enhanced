@@ -88,6 +88,25 @@ describe('dsh-enhanced-owner-console', () => {
     }
   })
 
+  it('derives the pairing mode from the secret-source discriminator', async () => {
+    const envMode = fakeSettings([{ ns: 'dsh-enhanced-lark-channel',
+      value: { enabled: true, appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET', secretSource: 'env', credentialHandle: 'inherited-handle' } }])
+    const mounted = await mount(envMode.service)
+    try {
+      expect(mounted.console.status().feishu).toMatchObject({ mode: 'lark-cli' })
+    } finally {
+      await mounted.ctx.fiber.dispose()
+    }
+    const handleMode = fakeSettings([{ ns: 'dsh-enhanced-lark-channel',
+      value: { enabled: true, appId: 'cli_0123456789abcdef', credentialHandle: 'owner-handle', secretSource: 'handle' } }])
+    const second = await mount(handleMode.service)
+    try {
+      expect(second.console.status().feishu).toMatchObject({ mode: 'app' })
+    } finally {
+      await second.ctx.fiber.dispose()
+    }
+  })
+
   it('writes one lark-channel entry with exactly one secret reference and preserves identity', async () => {
     const lark = fakeSettings([{ ns: 'dsh-enhanced-lark-channel', value: { account: 'owner-acct', tenant: 'owner-tenant', credentialHandle: 'old-handle' } }])
     const { ctx, console } = await mount(lark.service)

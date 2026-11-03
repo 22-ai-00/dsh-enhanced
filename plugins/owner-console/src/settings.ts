@@ -46,7 +46,8 @@ export const isProjectBundle = (ns: string): boolean => ns.startsWith('dsh-enhan
 /** Projects are owner-facing facts; never expose redacted secret values. */
 export function configFacts(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([key]) => !/secret/iu.test(key)))
+    ? Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => key === 'secretSource' || !/secret/iu.test(key)))
     : {}
 }
 

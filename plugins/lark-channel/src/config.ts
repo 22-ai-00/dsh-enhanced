@@ -75,6 +75,12 @@ const fields = new Set([
   'userQuestionTtlMs',
 ])
 
+function maskReferences(config: Config): Config {
+  if (config.secretSource === 'env') delete config.credentialHandle
+  else if (config.secretSource === 'handle') delete config.appSecretEnv
+  return config
+}
+
 /** Volatile schema fields validate as stable references; this plugin consumes plain values. */
 function unwrap(value: unknown): unknown {
   const getter = value !== null && typeof value === 'object' ? (value as { get?: unknown }).get : undefined
@@ -86,7 +92,22 @@ function plain(parsed: Config): Config {
   return Object.fromEntries(Object.entries(record).map(([key, value]) => [key, unwrap(value)])) as unknown as Config
 }
 
+const standard = (schema as unknown as { '~standard': Record<string, unknown> })['~standard']
+const maskedStandard = {
+  ...standard,
+  validate: (value: unknown) => {
+    const result = (standard['validate'] as (input: unknown) => unknown)(value) as
+      { issues?: unknown, value?: unknown }
+    if (result.issues !== undefined || result.value === undefined) return result
+    return { ...result, value: maskReferences(plain(result.value as Config)) }
+  },
+}
+
 export const Config = new Proxy(schema, {
+  get(target, property, receiver) {
+    if (property === '~standard') return maskedStandard
+    return Reflect.get(target, property, receiver)
+  },
   apply(target, thisArg, argumentsList: [unknown]) {
     // A live settings update hands back stable references for volatile fields;
     // accept both those references and plain values.
@@ -102,8 +123,7 @@ export const Config = new Proxy(schema, {
     // The bundle row ships a default credentialHandle, so a plain unset of the
     // inherited value is not possible. An explicit selector masks the other
     // reference before the single-reference invariant is checked.
-    if (parsed.secretSource === 'env') delete parsed.credentialHandle
-    else if (parsed.secretSource === 'handle') delete parsed.appSecretEnv
+    maskReferences(parsed)
     if (parsed.appSecretEnv !== undefined && parsed.credentialHandle !== undefined) {
       throw new Error('lark-channel: configure credentialHandle or appSecretEnv, not both')
     }
