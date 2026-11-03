@@ -22,7 +22,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 相关组件专项、manifest 和零警告 lint 已通过。Mac 已分别通过并独立复核四个真实原生场景：创建→独立验收→采用→新会话调用，错误候选拒绝，更正/撤回，以及采用提交后丢 ACK 的组件重挂恢复。恢复沿用原身份、授权、证书与额度，没有重复作者或审查；不代表未知采用事务或全进程恢复。供应商均为本地脚本，Mac 编译打包不等于候选自测。
 
-**当前待验收：** Linux 正常创建→独立验收→采用→新会话调用、错误候选拒绝、更正撤回及丢 ACK 冷恢复四个原生场景已通过并独立复核。丢 ACK 场景在组件重挂后恢复原 alias，只发生一次主人调用（`allowed-once`），未再付费生成作者或审查，adoption 仍为同一 `plan_id`。该场景曾因预算快照断言接连失败（`ack-r1`、`ack-r2`）；现改为在 automations 空闲后取一致快照，新增预留只能是绑定当前扫描定义 digest、`amount=actual_amount=1` 的 finalized 结算，既有预留逐字段不变，保留失败尝试。新后台任务的 Host 期限修复、读取取消竞态修复均已独立通过，旧 v1 定义不迁移。Linux 采用场景的测试总时限按实测多阶段耗时设为 600 秒，Mac 保持 300 秒；生产各阶段限额及根默认超时不变。本轮双端根检查仍待执行。证据入口：`docs/evidence/work-item-engineering-growth/integration-current-checkpoint.json`。
+**当前待验收：** Linux 正常创建→独立验收→采用→新会话调用、错误候选拒绝、更正撤回及丢 ACK 冷恢复四个原生场景已通过并独立复核。丢 ACK 场景在组件重挂后恢复原 alias，只发生一次主人调用（`allowed-once`），未再付费生成作者或审查，adoption 仍为同一 `plan_id`。该场景曾因预算快照断言接连失败（`ack-r1`、`ack-r2`）；现改为在 automations 空闲后取一致快照，新增预留只能是绑定当前扫描定义 digest、`amount=actual_amount=1` 的 finalized 结算，既有预留的不可变字段逐字段不变（仅允许仓内 `reserved` 行首次结算为 `finalized`/`released`），保留失败尝试。原始 Policy 预留行未纳入归档，预算归属由该次通过运行的测试断言及复核代码证明。新后台任务的 Host 期限修复、读取取消竞态修复均已独立通过，旧 v1 定义不迁移。Linux 采用场景的测试总时限按实测多阶段耗时设为 600 秒，Mac 保持 300 秒；生产各阶段限额及根默认超时不变。本轮双端根检查仍待执行。证据入口：`docs/evidence/work-item-engineering-growth/integration-current-checkpoint.json`。
 
 ## 待办与延后验收
 
