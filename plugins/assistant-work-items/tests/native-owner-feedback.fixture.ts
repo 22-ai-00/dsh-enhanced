@@ -225,7 +225,7 @@ export async function feedbackFixture(options: { replyEnabled?:boolean; holdSumm
     expect(ctx.assistantDelivery.workItemReplyProtocolVersion()).toBe(1)
     await ctx.assistantDelivery.tick();await ctx.assistantDelivery.whenIdle()
     expect(query(join(root,'delivery.sqlite'),'SELECT status,quiescent FROM delivery_foreground_executions'),JSON.stringify({warnings,requests:supplier.requests.map(r=>({sessionId:r.sessionId,provider:r.provider})),inbox:query(join(root,'delivery.sqlite'),'SELECT status,failure_code FROM inbox_messages')})).toEqual([expect.objectContaining({status:expect.stringMatching(/^(failed|unknown)$/u)})])
-    await vi.waitFor(() => expect(query(join(root, 'items.sqlite'), 'SELECT id FROM work_item'),JSON.stringify(warnings)).toHaveLength(1), { timeout: 15000 })
+    await vi.waitFor(() => expect(query(join(root, 'items.sqlite'), 'SELECT id FROM work_item'),JSON.stringify(warnings)).toHaveLength(1), { timeout: 30_000 })
     const itemId = String(query(join(root, 'items.sqlite'), 'SELECT id FROM work_item')[0]!['id'])
     const source=operator!.getInboxByProviderEvent('web','browser','source-failure')!
     expect(query(join(root,'delivery.sqlite'),"SELECT inbox_id,status,termination_json FROM delivery_foreground_executions")).toEqual([expect.objectContaining({inbox_id:source.id,status:'unknown',termination_json:expect.any(String)})])

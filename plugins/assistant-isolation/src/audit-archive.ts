@@ -405,12 +405,28 @@ function beginArchiveControl(directory: SecureDirectory, sourceStateRootDigest: 
 
 function validateLedgerFile(state: SecureDirectory): { path: string; descriptor: number } {
   const path = join(state.path, 'ledger.sqlite')
+  let descriptor: number | undefined
   try {
-    const inspected = inspectPrivateFile(path, 'isolation ledger')
-    return { path, descriptor: inspected.descriptor }
+    // The source ledger is append-only while a live writer holds it, so its size
+    // may grow between stat and open. Identity (device/inode/owner/mode/link
+    // count) must still be stable: a replacement remains invalid-source.
+    const before = lstatSync(path, { bigint: true })
+    const owner = BigInt(process.getuid?.() ?? -1)
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.uid !== owner
+      || (before.mode & 0o7777n) !== 0o600n) fail('invalid-source', 'isolation ledger must be one private owned regular file')
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const opened = fstatSync(descriptor, { bigint: true })
+    const after = lstatSync(path, { bigint: true })
+    if (!opened.isFile() || opened.nlink !== 1n || opened.uid !== owner || (opened.mode & 0o7777n) !== 0o600n
+      || !after.isFile() || after.isSymbolicLink() || after.nlink !== 1n || after.uid !== owner
+      || (after.mode & 0o7777n) !== 0o600n || !sameInode(before, opened) || !sameInode(opened, after)) {
+      fail('invalid-source', 'isolation ledger changed while being opened')
+    }
+    return { path, descriptor }
   } catch (error) {
+    if (descriptor !== undefined) closeSync(descriptor)
     if (error instanceof IsolationAuditArchiveError) fail('invalid-source', error.message)
-    throw error
+    fail('invalid-source', 'isolation ledger is unavailable')
   }
 }
 function validateLedgerSnapshot(database: DatabaseSync): number {
