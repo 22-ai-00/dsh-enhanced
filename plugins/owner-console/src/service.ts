@@ -80,16 +80,19 @@ export class OwnerConsoleService extends TypertRemoteService {
     const traex = findEntry(entries, ns => TRAEX.test(ns))
     const larkValue = configFacts(lark?.value)
     const traexValue = configFacts(traex?.value)
+    const installed = (name: string) => inventory.bundles.some(bundle => bundle.name === name && bundle.installed)
     return Object.freeze({
       feishu: Object.freeze({
         ...(lark === undefined ? {} : { entry: lark.ns }),
         mode: larkValue['secretSource'] === 'handle' || (larkValue['secretSource'] === undefined && typeof larkValue['credentialHandle'] === 'string') ? 'handle' : 'env',
+        installed: installed('@dsh-enhanced/lark-channel'),
         enabled: larkValue['enabled'] === true,
         appIdConfigured: isAppId(larkValue['appId']),
         connected: this.host.get('larkChannel' as never) !== undefined,
       }),
       traex: Object.freeze({
         ...(traex === undefined ? {} : { entry: traex.ns }),
+        installed: installed('@dsh-enhanced/traex-acp-provider'),
         enabled: traexValue['enabled'] === true,
         command: typeof traexValue['command'] === 'string' ? traexValue['command'] : '',
       }),

@@ -126,14 +126,29 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
   }
 
   const pending = status === undefined
+  const larkReady = status !== undefined && status.feishu.entry !== undefined
   const feishuRows = pending
     ? el('p', { style: { margin: 0, color: muted } }, '…')
     : el('div', { style: gridStyle },
       row('方式', status.feishu.mode === 'env' ? '环境变量 secret' : 'keychain secret'),
-      row('入口', status.feishu.entry ?? '未安装 lark-channel'),
+      row('入口', status.feishu.entry ?? (status.feishu.installed ? 'lark-channel 已安装但未启用' : '未安装 lark-channel')),
       row('连接', status.feishu.connected ? '已加载' : '未连接'),
       row('appId', status.feishu.appIdConfigured ? '已配置' : '未配置'))
-  const feishuActions = el('div', { style: { ...gridStyle, marginTop: 10 } },
+  const installLark = status !== undefined && !status.feishu.installed
+    ? el('button', { style: buttonStyle, disabled: busy,
+      onClick: () => void run(() => remote.installProjectBundle('@dsh-enhanced/lark-channel')) },
+    '安装 lark-channel（含依赖）')
+    : null
+  const enableLark = status !== undefined && status.feishu.installed && status.feishu.entry === undefined
+    ? el('button', { style: buttonStyle, disabled: busy,
+      onClick: () => void run(() => remote.setBundleEnabled('@dsh-enhanced/lark-channel', true)) },
+    '启用 lark-channel')
+    : null
+  const feishuActions = !larkReady && !installLark && !enableLark
+    ? null
+    : el('div', { style: { ...gridStyle, marginTop: 10 } },
+      installLark, enableLark,
+      ...(larkReady ? [
     el('div', { style: { display: 'flex', gap: 12, fontSize: 13 }, role: 'radiogroup', 'aria-label': 'secret 引用方式' },
       el('label', {}, el('input', { type: 'radio', name: 'secret-source', checked: secretSource === 'env',
         onChange: () => setSecretSource('env') }), ' 环境变量'),
@@ -158,18 +173,27 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
           void run(() => remote.configureFeishu('', refs.appSecretEnv, refs.credentialHandle, account, tenant, true))
         } }, '一键配置（从 Host 环境探测 appId）')),
     el('p', { style: { margin: 0, fontSize: 12, color: muted } },
-      '这里配置的是 lark-channel 通道；secret 只接受环境变量名或 keychain handle，明文不入配置。'))
+      '这里配置的是 lark-channel 通道；secret 只接受环境变量名或 keychain handle，明文不入配置。')] : []))
 
+  const traexReady = status !== undefined && status.traex.entry !== undefined
   const traexRows = el('div', { style: gridStyle },
-    row('入口', status?.traex.entry ?? '未安装 traex-acp-provider'),
+    row('入口', status?.traex.entry ?? (status?.traex.installed ? 'traex-acp-provider 已安装但未启用' : '未安装 traex-acp-provider')),
     row('状态', status?.traex.enabled === true ? '已启用' : '未启用'),
     row('命令', status === undefined || status.traex.command === '' ? '（默认）' : status.traex.command),
-    el('div', { style: { display: 'flex', gap: 8, alignItems: 'end' } },
-      field('command（可选）', traexCommand, setTraexCommand, 'traex'),
-      el('button', { style: buttonStyle, disabled: busy,
-        onClick: () => void run(() => remote.configureTraex(true, traexCommand)) }, '启用'),
-      el('button', { style: buttonStyle, disabled: busy,
-        onClick: () => void run(() => remote.configureTraex(false, '')) }, '停用')))
+    traexReady
+      ? el('div', { style: { display: 'flex', gap: 8, alignItems: 'end' } },
+        field('command（可选）', traexCommand, setTraexCommand, 'traex'),
+        el('button', { style: buttonStyle, disabled: busy,
+          onClick: () => void run(() => remote.configureTraex(true, traexCommand)) }, '启用'),
+        el('button', { style: buttonStyle, disabled: busy,
+          onClick: () => void run(() => remote.configureTraex(false, '')) }, '停用'))
+      : status !== undefined && !status.traex.installed
+        ? el('button', { style: buttonStyle, disabled: busy,
+          onClick: () => void run(() => remote.installProjectBundle('@dsh-enhanced/traex-acp-provider')) },
+        '安装 traex-acp-provider（含依赖）')
+        : el('button', { style: buttonStyle, disabled: busy,
+          onClick: () => void run(() => remote.setBundleEnabled('@dsh-enhanced/traex-acp-provider', true)) },
+        '启用 traex-acp-provider'))
 
   const bundleRows = pending
     ? el('p', { style: { margin: 0, color: muted } }, '…')

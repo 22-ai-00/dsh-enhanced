@@ -49,6 +49,10 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 条目让通道按新配置重建；`restart-required` 视为已持久化并提示重启，校验拒绝保持红色告警。
 secret 明文永不进入配置、日志或本插件。
 
+卡片会按实际状态给出下一步：未安装时显示「安装 lark-channel（含依赖）」（走 Host pluginManager 的
+pnpm 安装），已安装但未启用时显示「启用 lark-channel」，只有条目处于活动状态才显示配置表单。
+TraeX 卡片同理（安装/启用 traex-acp-provider）。
+
 只有声明了 `.volatile()` 的配置字段才能这样实时改写：`lark-channel` 暴露
 enabled/account/tenant/appId/appSecretEnv/credentialHandle/secretSource，`traex-acp-provider` 暴露
 enabled/command。没有 live 字段的条目不会出现在面板里。

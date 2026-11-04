@@ -72,8 +72,8 @@ describe('dsh-enhanced-owner-console', () => {
     const { ctx, console } = await mount()
     try {
       const status = await console.status()
-      expect(status.feishu).toEqual({ mode: 'env', enabled: false, appIdConfigured: false, connected: false })
-      expect(status.traex).toEqual({ enabled: false, command: '' })
+      expect(status.feishu).toEqual({ mode: 'env', installed: false, enabled: false, appIdConfigured: false, connected: false })
+      expect(status.traex).toEqual({ installed: false, enabled: false, command: '' })
       expect(status.dependencies.map(item => item.name)).toEqual(['assistantPolicy', 'assistantDelivery', 'assistantSkills'])
       expect(status.dependencies.every(item => item.available === false)).toBe(true)
       expect(status.bundles).toEqual([])
@@ -96,7 +96,7 @@ describe('dsh-enhanced-owner-console', () => {
     try {
       const status = await console.status()
       expect(status.feishu).toMatchObject({ entry: 'dsh-enhanced-lark-channel', enabled: true, appIdConfigured: true })
-      expect(status.traex).toEqual({ entry: 'dsh-enhanced-traex-acp-provider', enabled: false, command: 'traex' })
+      expect(status.traex).toEqual({ entry: 'dsh-enhanced-traex-acp-provider', installed: false, enabled: false, command: 'traex' })
       expect(status.bundles).toEqual([])
       expect(status.plugins).toEqual([])
       expect(JSON.stringify(status)).not.toContain('LARK_APP_SECRET')
@@ -233,6 +233,8 @@ describe('dsh-enhanced-owner-console', () => {
       expect(status.bundles.map(item => item.name))
         .toEqual(['@dsh-enhanced/lark-channel', '@dsh-enhanced/traex-acp-provider'])
       expect(status.plugins).toEqual([{ entryId: 'lark-entry', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active' }])
+      expect(status.feishu.installed).toBe(true)
+      expect(status.traex.installed).toBe(true)
       expect(status.bundles[0]).toMatchObject({ enabled: true, installed: true, removable: true })
       await expect(console.setBundleEnabled('@dsh-enhanced/lark-channel', false)).resolves.toMatchObject({ applied: true })
       expect((await console.setBundleEnabled('other-package', false)).applied).toBe(false)

@@ -21,11 +21,12 @@ export const OwnerConsoleStatusSchema = z.object({
   feishu: z.object({
     entry: z.string().min(1).optional(),
     mode: z.enum(['env', 'handle']),
+    installed: z.boolean(),
     enabled: z.boolean(),
     appIdConfigured: z.boolean(),
     connected: z.boolean(),
   }).readonly(),
-  traex: z.object({ entry: z.string().min(1).optional(), enabled: z.boolean(), command: z.string() }).readonly(),
+  traex: z.object({ entry: z.string().min(1).optional(), installed: z.boolean(), enabled: z.boolean(), command: z.string() }).readonly(),
   dependencies: z.array(dependency).readonly(),
   bundles: z.array(bundle).readonly(),
   plugins: z.array(plugin).readonly(),
