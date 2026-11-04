@@ -18,7 +18,8 @@ dsh --profile web --dump-config
 ```
 
 安装由 DSH 的 pnpm 路径完成，本包声明的运行依赖（`@deepseek-ai/schemastery`、`zod`）随包安装；
-Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏出现「控制台」入口，面板包含：
+Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏出现「控制台」入口：
+顶部「开始对话」直接进入当前工作区的智能体会话，「打开插件页」跳到 DSH 原生插件页；下面是配置卡片：
 
 | 卡片 | 内容 | 数据来源 |
 | --- | --- | --- |
@@ -100,6 +101,8 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 - 插件管理不提供卸载；安装只接受 `@dsh-enhanced/*` 包名（不支持任意本地/git 源）。
 - 面板会列出 `owner-console` 自己的 bundle/entry：禁用它会隐藏这个入口，需用 `dsh plugin` 或 CLI
   重新启用（与 DSH 原生插件页语义一致）。
+- 「开始对话 / 打开插件页」调用 DSH 客户端 `uiWorkspace.startSession()` 与 `layout.selectPanel()`；
+  它们依赖原生 Web 外壳，只在真实页面可用，未在自动化浏览器中验收。
 - 停用 bundle 只摘除 patch 层，依赖与包文件保留；彻底移除仍用 `dsh plugin remove`。
 - 面板显示的是 Host 侧真实注册状态，但「已加载」不等于飞书已通过认证或长连接在线。
 - 不校验 app secret；secret 的写入通道留给 keychain 切片。

@@ -17,7 +17,11 @@ type ConsoleRemote = Readonly<{
   setPluginEnabled(entryId: string, enabled: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
   installProjectBundle(spec: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
 }>
-type SlotRuntime = {
+type NavigationRuntime = {
+  readonly layout: Readonly<{ selectPanel(panelId: string): void }>
+  readonly uiWorkspace: Readonly<{ startSession(): void }>
+}
+type SlotRuntime = NavigationRuntime & {
   readonly remote: Readonly<{ ownerConsole: ConsoleRemote }>
   readonly slots: {
     inject(name: string, factory: () => unknown): () => void
@@ -69,7 +73,10 @@ export function OwnerConsoleIcon() {
   }, '控')
 }
 
-export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }>) {
+export function OwnerConsolePanel({ remote, navigation }: Readonly<{
+  remote: ConsoleRemote
+  navigation: Readonly<{ openConversation(): void, openPlugins(): void }>
+}>) {
   const [status, setStatus] = useState<OwnerConsoleStatus>()
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -195,7 +202,10 @@ export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }
 
   return el('section', { 'aria-label': '主人控制台', style: panelStyle },
     el('h2', { style: { margin: 0, fontSize: 18 } }, '控制台'),
-    el('p', { style: { margin: 0, fontSize: 13, color: muted } }, '只显示需要你处理的事。'),
+    el('p', { style: { margin: 0, fontSize: 13, color: muted } }, '只显示需要你处理的事；需要直接对话时从这里进入。'),
+    el('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+      el('button', { style: buttonStyle, onClick: () => navigation.openConversation() }, '开始对话'),
+      el('button', { style: { ...buttonStyle, color: muted }, onClick: () => navigation.openPlugins() }, '打开插件页')),
     error === '' ? null : el('p', { role: 'alert', style: { margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-danger)' } }, error),
     notice === '' ? null : el('p', { role: 'status', style: { margin: 0, fontSize: 12, color: muted } }, notice),
     card('远程接入（飞书）', feishuRows, feishuActions),
@@ -206,9 +216,13 @@ export function OwnerConsolePanel({ remote }: Readonly<{ remote: ConsoleRemote }
 export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
   const unmount = await ctx.remote.$mount(TYPERT_REMOTE)
   try {
-    const injection = ctx.inject(['remote.ownerConsole', 'slots'], runtime => {
+    const injection = ctx.inject(['remote.ownerConsole', 'slots', 'layout', 'uiWorkspace'], runtime => {
       const remote = runtime.remote.ownerConsole
-      const panel = () => jsx(OwnerConsolePanel, { remote })
+      const navigation = {
+        openConversation: () => runtime.uiWorkspace.startSession(),
+        openPlugins: () => runtime.layout.selectPanel('plugins'),
+      }
+      const panel = () => jsx(OwnerConsolePanel, { remote, navigation })
       const sidebar = runtime.slots.inject('sidebar.panellist', () => runtime.slots.register(
         { name: 'sidebar.panellist', id: 'owner-console', order: 30, label: () => '控制台' }, OwnerConsoleIcon))
       const main = runtime.slots.inject('main', () => runtime.slots.register(
