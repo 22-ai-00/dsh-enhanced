@@ -110,8 +110,8 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 - 面板会列出 `owner-console` 自己的 bundle/entry：禁用它会隐藏这个入口，需用 `dsh plugin` 或 CLI
   重新启用（与 DSH 原生插件页语义一致）。
 - 「开始对话 / 打开插件页」调用 DSH 客户端 `uiWorkspace.startSession()` 与 `layout.selectPanel()`；
-  两个服务在点击时惰性解析，缺少它们时入口与状态页仍注册，按钮只是无操作；依赖原生 Web 外壳，
-  未在自动化浏览器中验收。
+  两个服务在点击时惰性解析，缺少它们时入口与状态页仍注册。已在真实无头 Chrome 中验收：
+  入口出现、面板渲染、插件页显示已安装行、开始对话进入 composer（证据同下）。
 - 停用 bundle 只摘除 patch 层，依赖与包文件保留；彻底移除仍用 `dsh plugin remove`。
 - 面板显示的是 Host 侧真实注册状态，但「已加载」不等于飞书已通过认证或长连接在线。
 - 不校验 app secret；secret 的写入通道留给 keychain 切片。
