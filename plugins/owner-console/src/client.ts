@@ -42,6 +42,24 @@ export function feishuSecretRefs(source: 'env' | 'handle', env: string,
   return source === 'env' ? { appSecretEnv: env, credentialHandle: '' } : { appSecretEnv: '', credentialHandle: handle }
 }
 
+const LARK_CONNECTION_LABELS: Readonly<Record<OwnerConsoleStatus['feishu']['connection'], string>> = {
+  absent: '未加载',
+  unknown: '已加载，状态未知',
+  connected: '已连接',
+  'connected-with-gap': '已连接（期间有断档）',
+  connecting: '连接中',
+  disabled: '已停用',
+  disconnected: '未连接',
+  reconnecting: '重连中',
+}
+
+/** Read-only label for `larkChannel.health()`; the error code is shown as its stable identifier. */
+export function larkConnectionLabel(connection: OwnerConsoleStatus['feishu']['connection'],
+  lastErrorCode?: string): string {
+  const label = LARK_CONNECTION_LABELS[connection]
+  return lastErrorCode === undefined ? label : `${label}（最近错误：${lastErrorCode}）`
+}
+
 const OWN_PACKAGE = '@dsh-enhanced/owner-console'
 const muted = 'var(--dsw-alias-label-primary-dimmed)'
 const panelStyle = { padding: '24px', maxWidth: 760, margin: '0 auto', display: 'grid', gap: 16 }
@@ -132,7 +150,7 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
     : el('div', { style: gridStyle },
       row('方式', status.feishu.mode === 'env' ? '环境变量 secret' : 'keychain secret'),
       row('入口', status.feishu.entry ?? (status.feishu.installed ? 'lark-channel 已安装但未启用' : '未安装 lark-channel')),
-      row('连接', status.feishu.connected ? '已加载' : '未连接'),
+      row('连接', larkConnectionLabel(status.feishu.connection, status.feishu.lastErrorCode)),
       row('appId', status.feishu.appIdConfigured ? '已配置' : '未配置'))
   const installLark = status !== undefined && !status.feishu.installed && status.feishu.entry === undefined
     ? el('button', { style: buttonStyle, disabled: busy,

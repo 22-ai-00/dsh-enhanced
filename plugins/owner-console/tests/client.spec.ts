@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { TYPERT_REMOTE } from '../src/typert.ts'
-import { apply, feishuSecretRefs } from '../src/client.ts'
+import { apply, feishuSecretRefs, larkConnectionLabel } from '../src/client.ts'
 
 type Registration = Readonly<{ options: Record<string, unknown>, component: unknown }>
 
@@ -43,6 +43,13 @@ describe('owner console client', () => {
       .toEqual({ appSecretEnv: 'LARK_APP_SECRET', credentialHandle: '' })
     expect(feishuSecretRefs('handle', 'ignored-env', 'typed-handle'))
       .toEqual({ appSecretEnv: '', credentialHandle: 'typed-handle' })
+  })
+
+  it('labels the lark-channel health snapshot without inventing a connection', () => {
+    expect(larkConnectionLabel('absent')).toBe('未加载')
+    expect(larkConnectionLabel('unknown')).toBe('已加载，状态未知')
+    expect(larkConnectionLabel('connected')).toBe('已连接')
+    expect(larkConnectionLabel('reconnecting', 'rate_limited')).toBe('重连中（最近错误：rate_limited）')
   })
 
   it('registers the sidebar entry and the keyed main panel, then disposes both', async () => {

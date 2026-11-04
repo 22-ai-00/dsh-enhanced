@@ -6,7 +6,7 @@ import {
   type BundleInfoLike, type ChangeResultLike, type LoaderService, type PluginInfoLike, type PluginManagerService,
   type SettingsDescriptor, type SettingsPathOp, type SettingsService,
 } from './settings.js'
-import type { OwnerConsoleStatus, OwnerConsoleWriteResult } from './typert.js'
+import { LARK_CONNECTIONS, LARK_ERROR_CODES, type OwnerConsoleStatus, type OwnerConsoleWriteResult } from './typert.js'
 
 /** Companions worth surfacing; a missing one is a setup hint, never a hard failure. */
 const DEPENDENCIES = ['assistantPolicy', 'assistantDelivery', 'assistantSkills'] as const
@@ -83,6 +83,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     const traexValue = configFacts(traex?.value)
     const installed = (name: string) => inventory.bundles.some(bundle =>
       bundle.name === name && bundle.installed && bundle.error === undefined)
+    const larkHealth = readLarkHealth(this.host.get('larkChannel' as never))
     return Object.freeze({
       feishu: Object.freeze({
         ...(lark === undefined ? {} : { entry: lark.ns }),
@@ -90,7 +91,7 @@ export class OwnerConsoleService extends TypertRemoteService {
         installed: installed('@dsh-enhanced/lark-channel'),
         enabled: larkValue['enabled'] === true,
         appIdConfigured: isAppId(larkValue['appId']),
-        connected: this.host.get('larkChannel' as never) !== undefined,
+        ...larkHealth,
       }),
       traex: Object.freeze({
         ...(traex === undefined ? {} : { entry: traex.ns }),
@@ -263,4 +264,33 @@ function applyChange(manager: PluginManagerService, result: ChangeResultLike): O
 
 function refuse(entry: string, note: string): OwnerConsoleWriteResult {
   return Object.freeze({ applied: false, entry, note })
+}
+
+type LarkHealthFacts = Pick<OwnerConsoleStatus['feishu'], 'connected' | 'connection' | 'lastErrorCode'>
+const includes = <T extends string>(values: readonly T[], value: unknown): value is T =>
+  typeof value === 'string' && (values as readonly string[]).includes(value)
+
+/** Read-only: `larkChannel.health()` is a synchronous snapshot with no I/O. Only the
+ * enumerated state and error code pass through; anything else becomes `unknown`. */
+function readLarkHealth(provider: unknown): LarkHealthFacts {
+  if (provider === undefined || provider === null) return { connected: false, connection: 'absent' }
+  let state: unknown
+  let code: unknown
+  try {
+    const read = (provider as { health?: unknown }).health
+    const health = typeof read === 'function' ? read.call(provider) as { state?: unknown, lastErrorCode?: unknown } | null : undefined
+    state = health?.state
+    code = health?.lastErrorCode
+  } catch {
+    // An inactive or failing provider is reported, never thrown into the panel.
+    state = undefined
+  }
+  if (!includes(LARK_CONNECTIONS, state) || state === 'absent' || state === 'unknown') {
+    return { connected: false, connection: 'unknown' }
+  }
+  return {
+    connected: state === 'connected' || state === 'connected-with-gap',
+    connection: state,
+    ...(includes(LARK_ERROR_CODES, code) ? { lastErrorCode: code } : {}),
+  }
 }

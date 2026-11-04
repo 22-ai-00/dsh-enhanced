@@ -23,13 +23,16 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 
 | 卡片 | 内容 | 数据来源 |
 | --- | --- | --- |
-| 远程接入（飞书） | 接入方式、`lark-channel` 条目、连接是否加载、appId 是否配置；两种对接：直接填写 appId + secret 引用，或从 Host 环境一键探测 appId | `settings.describe` + `larkChannel` service |
+| 远程接入（飞书） | 接入方式、`lark-channel` 条目、连接状态（`larkChannel.health()` 快照）、appId 是否配置；两种对接：直接填写 appId + secret 引用，或从 Host 环境一键探测 appId | `settings.describe` + `larkChannel.health()` |
 | TraeX | `traex-acp-provider` 条目、是否启用、命令 | `settings.describe` |
 | 本项目插件管理 | 本项目的 bundle 层（启用/停用）、已加载条目（启用/禁用/阶段）、安装 `@dsh-enhanced/*`（含依赖），以及对 live 字段的合并配置 | `pluginManager` + `settings.describe` / `settings.mutate` |
 | 依赖自检 | `assistant-policy`、`assistant-delivery`、`assistant-skills` 是否可用 | Cordis service 注册表（严格查找） |
 
 读取与写入都经 `typert` 的严格 invocation 返回；面板不缓存或上报任何内容。
-「已加载/可用」只表示提供该 service 的 fiber 当前处于活动状态，不等于飞书已完成认证或长连接在线。
+依赖自检的「可用」只表示提供该 service 的 fiber 当前处于活动状态。飞书「连接」行读取
+`larkChannel.health()` 的同步快照（无 I/O）：只透传枚举内的连接状态（已连接 / 已连接但期间有断档 /
+连接中 / 重连中 / 未连接 / 已停用）与枚举内的最近错误码；没有该 service 显示「未加载」，service
+存在但 health 抛错、缺失或返回未知值显示「已加载，状态未知」，不会推断为已连接。
 
 ### 飞书两种对接方式（配置的是 lark-channel 通道）
 
@@ -127,5 +130,6 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
   两个服务在点击时惰性解析，缺少它们时入口与状态页仍注册。已在真实无头 Chrome 中验收：
   入口出现、面板渲染、插件页显示已安装行、开始对话进入 composer（证据同下）。
 - 停用 bundle 只摘除 patch 层，依赖与包文件保留；彻底移除仍用 `dsh plugin remove`。
-- 面板显示的是 Host 侧真实注册状态，但「已加载」不等于飞书已通过认证或长连接在线。
+- 连接状态是 `lark-channel` 自己报告的快照，面板不主动探测飞书；「已连接」来自通道的长连接状态，
+  没有用真实飞书 Bot 验收过（按用户要求延后）。
 - 不校验 app secret；secret 的写入通道留给 keychain 切片。

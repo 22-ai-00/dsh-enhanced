@@ -24,10 +24,11 @@ function fakeSettings(entries: Entry[]) {
 
 type FakeLoader = { entries: Map<string, { updated: unknown[], refreshed: number }> }
 
-async function mount(settings?: SettingsService, loader?: FakeLoader, manager?: unknown) {
+async function mount(settings?: SettingsService, loader?: FakeLoader, manager?: unknown, lark?: unknown) {
   const ctx = new Context()
   await ctx.plugin(TypertRegistry)
   if (settings !== undefined) ctx.provide('settings' as never, settings as never)
+  if (lark !== undefined) ctx.provide('larkChannel' as never, lark as never)
   // The handle mode requires the keychain provider; the fixture only checks that
   // the reference path is reachable, not the provider's own behaviour.
   ctx.provide('credentialsKeychain' as never, {} as never)
@@ -72,7 +73,7 @@ describe('dsh-enhanced-owner-console', () => {
     const { ctx, console } = await mount()
     try {
       const status = await console.status()
-      expect(status.feishu).toEqual({ mode: 'env', installed: false, enabled: false, appIdConfigured: false, connected: false })
+      expect(status.feishu).toEqual({ mode: 'env', installed: false, enabled: false, appIdConfigured: false, connected: false, connection: 'absent' })
       expect(status.traex).toEqual({ installed: false, enabled: false, command: '' })
       expect(status.dependencies.map(item => item.name)).toEqual(['assistantPolicy', 'assistantDelivery', 'assistantSkills'])
       expect(status.dependencies.every(item => item.available === false)).toBe(true)
@@ -269,6 +270,45 @@ describe('dsh-enhanced-owner-console', () => {
       expect(status.bundles).toEqual([])
     } finally {
       await ctx.fiber.dispose()
+    }
+  })
+
+  it('reports the lark-channel health snapshot instead of mere service presence', async () => {
+    const cases: ReadonlyArray<readonly [unknown, Record<string, unknown>]> = [
+      [{ state: 'connected', gapGeneration: 0 }, { connected: true, connection: 'connected' }],
+      [{ state: 'connected-with-gap', gapGeneration: 2 }, { connected: true, connection: 'connected-with-gap' }],
+      [{ state: 'reconnecting', gapGeneration: 1, lastErrorCode: 'rate_limited' },
+        { connected: false, connection: 'reconnecting', lastErrorCode: 'rate_limited' }],
+      [{ state: 'disabled', gapGeneration: 0 }, { connected: false, connection: 'disabled' }],
+      // Unknown states and error codes are dropped rather than passed to the panel.
+      [{ state: 'online', gapGeneration: 0 }, { connected: false, connection: 'unknown' }],
+      [{ state: 'absent', gapGeneration: 0 }, { connected: false, connection: 'unknown' }],
+      [{ state: 'disconnected', gapGeneration: 0, lastErrorCode: 'token=secret' }, { connected: false, connection: 'disconnected' }],
+      [null, { connected: false, connection: 'unknown' }],
+    ]
+    for (const [health, expected] of cases) {
+      const probe = vi.fn(() => health)
+      const { ctx, console } = await mount(undefined, undefined, undefined, { health: probe })
+      try {
+        const feishu = (await console.status()).feishu
+        expect(feishu).toMatchObject(expected)
+        if (!('lastErrorCode' in expected)) expect(feishu).not.toHaveProperty('lastErrorCode')
+        expect(probe).toHaveBeenCalledOnce()
+        expect(JSON.stringify(feishu)).not.toContain('secret')
+      } finally {
+        await ctx.fiber.dispose()
+      }
+    }
+  })
+
+  it('reports an inactive or health-less lark-channel as loaded with unknown state', async () => {
+    for (const provider of [{ health: () => { throw new Error('inactive') } }, {}]) {
+      const { ctx, console } = await mount(undefined, undefined, undefined, provider)
+      try {
+        expect((await console.status()).feishu).toMatchObject({ connected: false, connection: 'unknown' })
+      } finally {
+        await ctx.fiber.dispose()
+      }
     }
   })
 

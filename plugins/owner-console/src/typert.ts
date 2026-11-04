@@ -17,6 +17,11 @@ const plugin = z.object({
   enabled: z.boolean(),
   fiberPhase: z.enum(['pending', 'loading', 'active', 'failed', 'unloading']).nullable(),
 }).readonly()
+/** `absent`: no larkChannel service; `unknown`: it exists but gave no valid health. */
+export const LARK_CONNECTIONS = ['absent', 'unknown', 'connected', 'connected-with-gap', 'connecting',
+  'disabled', 'disconnected', 'reconnecting'] as const
+export const LARK_ERROR_CODES = ['format_error', 'not_connected', 'permission_denied', 'rate_limited',
+  'send_timeout', 'ssrf_blocked', 'target_revoked', 'unknown', 'upload_failed'] as const
 export const OwnerConsoleStatusSchema = z.object({
   feishu: z.object({
     entry: z.string().min(1).optional(),
@@ -25,6 +30,8 @@ export const OwnerConsoleStatusSchema = z.object({
     enabled: z.boolean(),
     appIdConfigured: z.boolean(),
     connected: z.boolean(),
+    connection: z.enum(LARK_CONNECTIONS),
+    lastErrorCode: z.enum(LARK_ERROR_CODES).optional(),
   }).readonly(),
   traex: z.object({ entry: z.string().min(1).optional(), installed: z.boolean(), enabled: z.boolean(), command: z.string() }).readonly(),
   dependencies: z.array(dependency).readonly(),
