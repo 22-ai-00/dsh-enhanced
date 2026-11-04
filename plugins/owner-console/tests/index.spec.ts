@@ -265,6 +265,8 @@ describe('dsh-enhanced-owner-console', () => {
       const status = await console.status()
       expect(status.feishu.installed).toBe(false)
       expect(status.traex.installed).toBe(false)
+      // A not-bundle dependency must not appear as a manageable bundle row.
+      expect(status.bundles).toEqual([])
     } finally {
       await ctx.fiber.dispose()
     }

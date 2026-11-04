@@ -68,7 +68,8 @@ export class OwnerConsoleService extends TypertRemoteService {
     if (manager === undefined) return Object.freeze({ bundles: [], plugins: [] })
     const [bundles, plugins] = await Promise.all([manager.listBundles(), manager.listPlugins()])
     return Object.freeze({
-      bundles: Object.freeze(bundles.filter(bundle => isProjectPackage(bundle.name))),
+      // A dependency row without a bundle patch (`not-bundle`) is not manageable here.
+      bundles: Object.freeze(bundles.filter(bundle => isProjectPackage(bundle.name) && bundle.error === undefined)),
       plugins: Object.freeze(plugins.filter(plugin => isProjectPackage(plugin.moduleName))),
     })
   }

@@ -60,7 +60,8 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 ### TraeX 与本项目插件
 
 - TraeX 卡片只切换 `traex-acp-provider` 条目的 `enabled`（可选覆盖 `command`），不启动进程。
-- **Bundle 层**：列出本 profile 里 `@dsh-enhanced/*` bundle 的版本、是否安装、是否启用、是否可移除，
+- **Bundle 层**：列出本 profile 里 `@dsh-enhanced/*` bundle 的版本、是否安装、是否启用、是否可移除
+  （`not-bundle` 依赖行不显示，避免给出会被 Host 拒绝的启停按钮），
   一键启用/停用；停用只摘除该 bundle 的 patch 层，已安装依赖保留。每行另有「移除」（仅对可移除且非本面板自身的
   bundle 显示，并需浏览器确认；移除后可用面板安装入口或 `dsh plugin add` 重新添加；依赖是否留在
   profile 中由 DSH 的 pluginManager/pnpm 决定）。
