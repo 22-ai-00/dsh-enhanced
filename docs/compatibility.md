@@ -484,3 +484,8 @@ The native cron freezes distinct current task revisions, requests a finite owner
 Schema 23 adds target-created, non-renewable adoption handoffs; existing plans receive no delegated authority. Optional `dossier.handoff` terms are included in the immutable activation digest and must exactly match the source adoption signer's `grant.handoff`. Existing schema-4 plans without terms retain their digest. Older strict readers do not understand the new dossier field; stop old writers and upgrade both Hosts and the signer together. Schema-22 binaries reject this database.
 
 A dedicated coordinator connection accepts only a live, exact source-linked handoff for forward deployment, stopping before target-owned final commit. Target continuation checks live owner feedback before commit; rollback retains the existing activation fence and unknown-dispatch reconciliation. `probePluginPlan({ deferCommit: true })` leaves successful health at `commit-pending`, while normal callers retain automatic commit. The coordinator reuses native Automations rather than a separate scheduler. It must run outside the restarted target unit, with matching protected ledger/trust; shared UID file access and the bounded offline exposure window are documented in the [plugin guide](../plugins/plugin-control-plane/README.md#已发布-owner-修复的有限采用). Installer wiring and independent behavioral attestations remain release gates.
+
+live Harness app（`0.2.1-rc.5`）高于当前基线，按本文件策略默认拒绝；owner 可对精确 package/runtime
+使用 `dsh plugin allow-version … --accept-risk` 显式豁免。已在临时 `0.2.1-rc.5` 运行时上用该方式安装
+`@dsh-enhanced/owner-console` 并验证左侧栏入口、面板与 typert 状态（证据在忽略的
+`docs/evidence/owner-console/browser-smoke/`）；这不改变仓库精确基线，也不推广到其它插件。

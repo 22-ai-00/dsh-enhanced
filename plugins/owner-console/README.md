@@ -106,6 +106,11 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 - 一键模式只做 Host 环境变量探测，既不执行也不依赖 lark-cli；需要向导时由 owner 用系统已装的
   lark-cli skill 或其他方式自行提供 appId/secret 环境变量。
 - 插件管理支持移除本项目 bundle（仅 `removable` 且非自身，且必须由浏览器确认；无确认通道时不执行）；
+- **真实 Web GUI 已验证**：临时 profile + pinned DSH `0.2.1-rc.2` 下左侧栏入口、面板全部卡片、
+  原生插件页已安装行、「打开插件页 / 开始对话」均通过（证据 `docs/evidence/owner-console/browser-smoke/`）。
+  live Harness app 是 `0.2.1-rc.5`，仓库 peer 约定精确 `0.2.1-rc.2`，安装需 owner 显式
+  `dsh plugin allow-version … --accept-risk`；该路径下同样验证了入口、面板与 typert 状态，
+  但登录态与真实飞书/模型连接仍未验收。
   安装只接受 `@dsh-enhanced/*` 包名（不支持任意本地/git 源）。
 - 面板会列出 `owner-console` 自己的 bundle/entry：禁用它会隐藏这个入口，需用 `dsh plugin` 或 CLI
   重新启用（与 DSH 原生插件页语义一致）。
