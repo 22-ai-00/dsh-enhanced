@@ -691,7 +691,11 @@ describe('Codex direct credential store', () => {
         const filename = (await readdir(parent))
           .find(candidate => candidate.startsWith('.auth.json.dsh-') && candidate.endsWith('.tmp'))
         if (filename !== undefined) {
+          // The race must replace the credential document, not its mode: some
+          // environments apply a permissive umask to a freshly written file.
+          await chmod(racedFile, 0o600)
           await rename(racedFile, authFile)
+          await chmod(authFile, 0o600)
           return
         }
         await new Promise<void>(resolve => setImmediate(resolve))
