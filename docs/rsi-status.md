@@ -47,7 +47,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 不依赖它，也不管理其路径或安装。面板用单选决定 secret 引用方式，提交时只发送选中的那一个引用；
 项目 bundle 可启用/停用/移除（移除仅对 removable 且非自身、且需浏览器确认）。
 飞书/TraeX 卡片按实际状态给出下一步：未安装→一键安装（走 Host pluginManager/pnpm，含依赖）；
-已安装未启用→启用；活动条目才显示配置表单；not-bundle 依赖行不算已安装。
+已安装未启用→启用；活动条目才显示配置表单；not-bundle 依赖行既不算已安装，也不显示在管理列表。
 typert 参数顺序与 Host 方法签名对齐并有回归断言；Web client 构建产物通过 `__ModuleLoader__` 契约测试。
 
 该切片经过多轮独立 harness 复核（真实 Cordis Loader/Include、`dsh-settings`、`config-editor`、
@@ -63,9 +63,6 @@ WorkItems 原生 fixture 用等待代替显式信号 sweep 导致准入超时。
 `docs/evidence/owner-console/browser-smoke/`（含截图与复现脚本）。限制：未验证登录态与真实飞书/模型连接。仓库 peer 约定仍是精确 `0.2.1-rc.2`（由兼容性测试强制），
 live Harness app 的 `0.2.1-rc.5` 需要 owner 显式风险豁免；已在该版本线的临时运行时上通过
 `allow-version --accept-risk` 安装并验证入口、面板与 typert 状态（同证据目录 `console-panel-rc5-exempt.png`）。
-
-下一轮小改进（复核提出）：管理列表 `status.bundles` 仍可能混入 not-bundle 依赖行，
-应同样按 `error` 过滤或禁用其启用/停用按钮。
 
 尚未完成：从面板选择任意 registry 源（出于安全只允许本项目包名）、真实飞书长连接验收
 （按用户要求延后，未连活 Bot）。lark-cli 不在本插件范围内，其安装/配置由 owner 自行通过 skill 完成。
@@ -104,5 +101,7 @@ live Harness app 的 `0.2.1-rc.5` 需要 owner 显式风险豁免；已在该版
 | `cea6beb1`（39 包，单选 secret 与移除门控） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2428.17 秒 | 11,915 / 309 | 758 / 32 | `7c7b7114c8403f80d8846e95bb9ba33715a5e5c1a7351d9b00326cf32c1fc261` |
 | `c0f077e2`（39 包，上下文安装/启用） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1193.99 秒 | 10,303 / 1,925 | 705 / 85 | `98ce55cdf7a38087fca05a7c6fda6dfc95f70850ee558e551fd1ac706de3aab2` |
 | `c0f077e2`（39 包，上下文安装/启用） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2426.75 秒 | 11,916 / 309 | 758 / 32 | `6a07d54d5fbc6de384159ad2f6b9f01bb0767b18a79c2a40b9a5a9d26a45661c` |
+| `44ec103c`（39 包，管理列表过滤） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1162.50 秒 | 10,303 / 1,925 | 705 / 85 | `a9b63a4ba875696a99d525b214e8c41994ad8a03dc6639b6739a6a08228b10e2` |
+| `44ec103c`（39 包，管理列表过滤） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2451.14 秒 | 11,916 / 309 | 758 / 32 | `43b68d44d2350c37e3361aeb0fc892615cc28db1197ffcd54011b8ee1b093801` |
 
-两端覆盖 manifest、零警告 lint、包构建和类型检查、测试组及唯一 dry-run pack（38 包时 39 测试组；39 包时 40 测试组）；修改涉及的公开产物逐项核对入包，源码前后同一提交且工作树干净。Linux `TMPDIR=/data00/home/jiataorui/t`。准确命令与结果见 `docs/evidence/verification-d8c9fdd2/`、`docs/evidence/verification-94b86b61/` 、`docs/evidence/verification-da5f8d42/` 、`docs/evidence/verification-124a52a1/` 、`docs/evidence/verification-2c295a40/` 、`docs/evidence/verification-4b78dc68/` 、`docs/evidence/verification-cea6beb1/` 与 `docs/evidence/verification-c0f077e2/`；Mac 原始日志在本地，Linux 原始日志留在远端同路径。Linux attempt 1 的失败原因是缺少测试运行时环境而非产品缺陷，已保留。跳过项、真实模型/Bot、活服务升级和长期收益不计为已验收。
+两端覆盖 manifest、零警告 lint、包构建和类型检查、测试组及唯一 dry-run pack（38 包时 39 测试组；39 包时 40 测试组）；修改涉及的公开产物逐项核对入包，源码前后同一提交且工作树干净。Linux `TMPDIR=/data00/home/jiataorui/t`。准确命令与结果见 `docs/evidence/verification-d8c9fdd2/`、`docs/evidence/verification-94b86b61/` 、`docs/evidence/verification-da5f8d42/` 、`docs/evidence/verification-124a52a1/` 、`docs/evidence/verification-2c295a40/` 、`docs/evidence/verification-4b78dc68/` 、`docs/evidence/verification-cea6beb1/` 、`docs/evidence/verification-c0f077e2/` 与 `docs/evidence/verification-44ec103c/`；Mac 原始日志在本地，Linux 原始日志留在远端同路径。Linux attempt 1 的失败原因是缺少测试运行时环境而非产品缺陷，已保留。跳过项、真实模型/Bot、活服务升级和长期收益不计为已验收。
