@@ -114,8 +114,9 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 - **真实 Web GUI 已验证**：临时 profile + pinned DSH `0.2.1-rc.2` 下左侧栏入口、面板全部卡片、
   原生插件页已安装行、「打开插件页 / 开始对话」均通过（证据 `docs/evidence/owner-console/browser-smoke/`）。
   live Harness app 是 `0.2.1-rc.5`，仓库 peer 约定精确 `0.2.1-rc.2`，安装需 owner 显式
-  `dsh plugin allow-version … --accept-risk`；该路径下同样验证了入口、面板与 typert 状态，
-  但登录态与真实飞书/模型连接仍未验收。
+  `dsh plugin allow-version … --accept-risk`；该路径下同样验证了入口、面板与 typert 状态。
+  飞书/TraeX 三态卡片（未安装→安装、已安装未启用→启用、活动→配置）也在真实 GUI 中复验：
+  启用动作返回 restart-required 并提示重启。登录态与真实飞书/模型连接仍未验收。
   安装只接受 `@dsh-enhanced/*` 包名（不支持任意本地/git 源）。
 - 面板会列出 `owner-console` 自己的 bundle/entry：禁用它会隐藏这个入口，需用 `dsh plugin` 或 CLI
   重新启用（与 DSH 原生插件页语义一致）。

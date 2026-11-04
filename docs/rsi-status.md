@@ -63,6 +63,8 @@ WorkItems 原生 fixture 用等待代替显式信号 sweep 导致准入超时。
 `docs/evidence/owner-console/browser-smoke/`（含截图与复现脚本）。限制：未验证登录态与真实飞书/模型连接。仓库 peer 约定仍是精确 `0.2.1-rc.2`（由兼容性测试强制），
 live Harness app 的 `0.2.1-rc.5` 需要 owner 显式风险豁免；已在该版本线的临时运行时上通过
 `allow-version --accept-risk` 安装并验证入口、面板与 typert 状态（同证据目录 `console-panel-rc5-exempt.png`）。
+飞书/TraeX 三态卡片也在真实 GUI 中复验：未安装→「安装 lark-channel（含依赖）」、已安装未启用→
+「启用 lark-channel」、点击启用后得到 restart-required 提示；活动态→配置表单（见 `setup-states.md`）。
 
 尚未完成：从面板选择任意 registry 源（出于安全只允许本项目包名）、真实飞书长连接验收
 （按用户要求延后，未连活 Bot）。lark-cli 不在本插件范围内，其安装/配置由 owner 自行通过 skill 完成。
