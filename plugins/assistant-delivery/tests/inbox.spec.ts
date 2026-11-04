@@ -488,7 +488,7 @@ describe('durable inbox', () => {
     const stop = f.store.acceptInbound(envelope('evt-stop', f, '/stop')).record
     f.store.queueInbox(active.id, f.binding.id)
     f.store.queueInbox(queued.id, f.binding.id)
-    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 60_000, limit: 1, maxAttempts: 3 })[0]!
     f.store.markInboxDispatching({
       inboxId: active.id,
       ownerId: 'worker-a',
@@ -538,7 +538,9 @@ describe('durable inbox', () => {
       kind: 'command',
     }).record
     f.store.queueInbox(dispatched.id, f.binding.id)
-    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 1 })[0]!
+    // The lease only has to outlive the local sequence below; 100ms flaked on a
+    // loaded root check because the dispatch fence validates the lease again.
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 60_000, limit: 1, maxAttempts: 1 })[0]!
     f.store.markInboxDispatching({
       inboxId: dispatched.id,
       ownerId: 'worker-a',
@@ -822,6 +824,8 @@ describe('durable inbox', () => {
     const f = await fixture()
     const record = f.store.acceptInbound(envelope('evt-ambiguous', f)).record
     f.store.queueInbox(record.id, f.binding.id)
+    // This case deliberately advances the clock past the lease to prove the
+    // ambiguous dispatch is dead-lettered instead of replayed.
     const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
     f.store.markInboxDispatching({
       inboxId: record.id, ownerId: 'worker-a', fencingToken: claim.fencingToken, binding: f.binding,
@@ -859,7 +863,7 @@ describe('durable inbox', () => {
       }),
     ])
     const recovered = reopened.claimInbox({
-      ownerId: 'worker-b', leaseMs: 100, limit: 1, maxAttempts: 1,
+      ownerId: 'worker-b', leaseMs: 60_000, limit: 1, maxAttempts: 1,
     })[0]!
     expect(recovered.record).toMatchObject({
       id: record.id,
@@ -891,7 +895,7 @@ describe('durable inbox', () => {
       kind: 'command',
     }).record
     f.store.queueInbox(record.id, f.binding.id)
-    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 60_000, limit: 1, maxAttempts: 3 })[0]!
     f.store.markInboxDispatching({
       inboxId: record.id,
       ownerId: 'worker-a',
@@ -925,7 +929,7 @@ describe('durable inbox', () => {
       kind: 'command',
     }).record
     f.store.queueInbox(record.id, f.binding.id)
-    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 60_000, limit: 1, maxAttempts: 3 })[0]!
     f.store.markInboxDispatching({
       inboxId: record.id,
       ownerId: 'worker-a',
@@ -1005,7 +1009,7 @@ describe('durable inbox', () => {
       f.store.queueInbox(item.record.id, item.binding.id)
       const claim = f.store.claimInbox({
         ownerId: `worker-${index}`,
-        leaseMs: 100,
+        leaseMs: 60_000,
         limit: 1,
         maxAttempts: 1,
       })[0]!

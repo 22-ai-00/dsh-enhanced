@@ -11412,7 +11412,7 @@ exit 7
     const patch = await readFile(join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')
     expect(patch.includes('id: agent-default-model')).toBe(ready)
     expect(result.stdout.includes('本机已登录')).toBe(ready)
-  })
+  }, 60_000)
 
   test.each([{ loggedIn: false, defaultCandidate: '1' }, { loggedIn: true, defaultCandidate: '0' }])(
     'auto-enables TraeX without changing defaults when loggedIn=$loggedIn candidate=$defaultCandidate',

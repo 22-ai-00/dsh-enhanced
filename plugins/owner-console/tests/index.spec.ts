@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Config, apply, name, version } from '../src/index.ts'
 import type { OwnerConsoleService } from '../src/service.ts'
 import type { SettingsDescriptor, SettingsService } from '../src/settings.ts'
+import { TYPERT } from '../src/typert.ts'
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
   version: string
@@ -50,6 +51,20 @@ describe('dsh-enhanced-owner-console', () => {
     expect(version).toBe(manifest.version)
     expect(Config({} as never)).toEqual(defaults)
     expect(() => Config({ feishuAppId: 5 } as never)).toThrow()
+  })
+
+  it('keeps every remote wire order equal to its Host method parameter order', () => {
+    // Typert dispatch is positional: parameters.map(p => named[p.wire]) is applied
+    // to the service method, so the declared order must match the implementation.
+    const wires = (id: string) => TYPERT.invocations.find(invocation => invocation.id === id)!
+      .parameters.map(parameter => parameter.wire)
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/configureFeishu'))
+      .toEqual(['appId', 'appSecretEnv', 'credentialHandle', 'account', 'tenant', 'discoverAppId'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/configureTraex')).toEqual(['enabled', 'command'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/configureBundle')).toEqual(['entry', 'config'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/setBundleEnabled')).toEqual(['name', 'enabled'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/setPluginEnabled')).toEqual(['entryId', 'enabled'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/installProjectBundle')).toEqual(['spec'])
   })
 
   it('reports absent entries, strict providers and no fabricated connection', async () => {
