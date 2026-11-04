@@ -26,7 +26,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 ## 当前开发：左侧栏控制台插件
 
-`@dsh-enhanced/owner-console` 已在 `dev` 上迭代到精确提交 `44ec103c`（双端根检查通过），功能闭环，剩余验收受 live 环境限制。左侧栏「控制台」入口 + 一页面板，设计沿用 Superagent 原型的注意力预算（一页、只显示需要人处理的事）。当前能力：
+`@dsh-enhanced/owner-console` 已在 `dev` 上迭代到精确提交 `f984d8c7`（双端根检查通过），功能闭环，剩余验收受 live 环境限制。左侧栏「控制台」入口 + 一页面板，设计沿用 Superagent 原型的注意力预算（一页、只显示需要人处理的事）。当前能力：
 
 - **左侧栏即用**：面板顶部「开始对话」直接进入当前工作区的智能体会话（`uiWorkspace.startSession()`），
   「打开插件页」跳到 DSH 原生插件页（`layout.selectPanel('plugins')`）；两个客户端服务在点击时惰性解析，
@@ -44,6 +44,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 - **只读安全边界**：读取严格查找 service、投影不返回 secret 明文、业务拒绝以 `applied:false + note` 返回并在面板显示、client 卸载后不再 setState。
 - **按状态给下一步**：飞书/TraeX 未安装→一键安装（pluginManager/pnpm，含依赖）、已安装未启用→启用、活动条目→配置表单；`not-bundle` 依赖行既不算已安装也不进管理列表。
 - **管理动作**：本项目 bundle 可启用/停用/移除（移除仅对 `removable` 且非自身、需浏览器确认）；安装只接受 `@dsh-enhanced/<name>`。
+- **飞书连接状态**：「连接」行读取 `larkChannel.health()` 同步快照，只透传 lark-channel 枚举内的连接状态与错误码；无 service 显示「未加载」，health 抛错/缺失/未知值显示「已加载，状态未知」，不推断为已连接。未用真实 Bot 验收。
 
 实现要点：`lark-channel`/`traex-acp-provider` 只在 owner 可编辑字段上标记 `.volatile()`，并在 schema 边界接受 volatile 引用、输出纯值；`lark-channel` 用 `secretSource` 在 callable 与 `~standard` 两条验证路径上屏蔽未选引用，并让非法配置 fail-soft（记录后保持 disabled，不炸 Loader 树）。飞书面板配置的是 `lark-channel` 通道；lark-cli 只是可随时安装的独立 skill，本插件既不调用它、
 不依赖它，也不管理其路径或安装。面板用单选决定 secret 引用方式，提交时只发送选中的那一个引用；
@@ -77,7 +78,7 @@ live Harness app 的 `0.2.1-rc.5` 需要 owner 显式风险豁免；已在该版
 
 ## 待办与延后验收
 
-1. 控制台插件各切片（`94b86b61`、`da5f8d42`、`124a52a1`、`2c295a40`、`4b78dc68`、`cea6beb1`、`c0f077e2`、`44ec103c`）均已双端通过精确根检查，并完成真实 Web GUI 冒烟（含三态卡片与本地打包产物安装）。下一验收受 live 环境限制：真实飞书长连接、登录态与远端使用需 owner 在活 Host 上显式授权（当前按用户要求延后）。
+1. 控制台插件各切片（`94b86b61`、`da5f8d42`、`124a52a1`、`2c295a40`、`4b78dc68`、`cea6beb1`、`c0f077e2`、`44ec103c`、`f984d8c7`）均已双端通过精确根检查，并完成真实 Web GUI 冒烟（含三态卡片与本地打包产物安装）。下一验收受 live 环境限制：真实飞书长连接、登录态与远端使用需 owner 在活 Host 上显式授权（当前按用户要求延后）。
 2. 非空 review 历史 CAS/封存已有组件专项；installer、Host head、运行时消费者及非空 adoption 迁移资格仍缺。旧 Docker 证书不能作为 Linux 资格；owner 升级的空业务采用 CAS 不代表非空迁移、复制恢复或 native→native 已支持。
 3. Router 跨信道协调、订阅直通和长期普通使用收益尚未完整验收。现有持久任务不代表完整自主工程成长；两端此前五次真实模型运行额度已用尽，不重置失败或预算。
 4. 用户已延后飞书机器人实连和后续真实使用验收；正式连接门保留。完整临时双服务升级、就绪、回滚及活 Home 切换未验收，暂不操作活服务。
@@ -90,11 +91,11 @@ live Harness app 的 `0.2.1-rc.5` 需要 owner 显式风险豁免；已在该版
 
 | 精确提交 | 环境 | 结果 | 测试 passed / skipped | 文件 passed / skipped | 日志 SHA-256 |
 | --- | --- | --- | --- | --- | --- |
+| `f984d8c7`（39 包，飞书连接状态快照） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1264.73 秒 | 10,306 / 1,925 | 705 / 85 | `9ec0f5cc3adbb8a24f398e65babc29364e177f7002f49ea98ad48cc371f63236` |
+| `f984d8c7`（39 包，飞书连接状态快照） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2451.88 秒 | 11,919 / 309 | 758 / 32 | `2f263485608f8ba57f14f7fe58f55128b759e29ed99bdba30b5082b36751c67f` |
 | `44ec103c`（39 包，管理列表过滤） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1162.50 秒 | 10,303 / 1,925 | 705 / 85 | `a9b63a4ba875696a99d525b214e8c41994ad8a03dc6639b6739a6a08228b10e2` |
 | `44ec103c`（39 包，管理列表过滤） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2451.14 秒 | 11,916 / 309 | 758 / 32 | `43b68d44d2350c37e3361aeb0fc892615cc28db1197ffcd54011b8ee1b093801` |
 | `c0f077e2`（39 包，上下文安装/启用） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1193.99 秒 | 10,303 / 1,925 | 705 / 85 | `98ce55cdf7a38087fca05a7c6fda6dfc95f70850ee558e551fd1ac706de3aab2` |
 | `c0f077e2`（39 包，上下文安装/启用） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2426.75 秒 | 11,916 / 309 | 758 / 32 | `6a07d54d5fbc6de384159ad2f6b9f01bb0767b18a79c2a40b9a5a9d26a45661c` |
-| `cea6beb1`（39 包，单选 secret 与移除门控） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1178.01 秒 | 10,302 / 1,925 | 705 / 85 | `aed769ac988176f7983ac1842d3d49cd5f18c880da64d7a8b1645e7aaebdaed6` |
-| `cea6beb1`（39 包，单选 secret 与移除门控） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2428.17 秒 | 11,915 / 309 | 758 / 32 | `7c7b7114c8403f80d8846e95bb9ba33715a5e5c1a7351d9b00326cf32c1fc261` |
 
 两端覆盖 manifest、零警告 lint、包构建与类型检查、测试组及唯一 dry-run pack（39 包 / 40 测试组）；源码前后同一提交且工作树干净。Linux 用 `TMPDIR=/data00/home/jiataorui/t`；准确命令与结果见对应 `docs/evidence/verification-<sha8>/`。成长切片 `d8c9fdd2` 的双端结果与早期控制台切片日志也保留在 `docs/evidence/`。Linux attempt 1 的失败是缺少测试运行时环境，已保留。跳过项、真实模型/Bot、活服务升级与长期收益不计为已验收。
