@@ -55,7 +55,14 @@ typert 参数顺序与 Host 方法签名对齐并有回归断言；Web client �
 假时钟跨分钟边界会多认领一次 usage-scan、isolation 归档 CLI 对实时写入源账本的大小断言过严、
 WorkItems 原生 fixture 用等待代替显式信号 sweep 导致准入超时。三处修复后各自连跑 3~15 次稳定。
 
-尚未完成：插件卸载与从面板选择任意 registry 源（出于安全只允许本项目包名）、真实飞书长连接验收
+**真实 Web GUI 冒烟已通过：** 用临时 `DSH_HOME` + pinned `@deepseek-ai/dsh@0.2.1-rc.2` 安装本插件并启动
+`dsh web`，无头 Chrome 实测左侧栏「控制台」入口、面板全部卡片与字段、原生插件页「已安装插件」行、
+以及「打开插件页」「开始对话」两个快捷入口；无页面 JS 错误。证据在
+`docs/evidence/owner-console/browser-smoke/`（含截图与复现脚本）。限制：临时 profile 无 API Key/飞书凭据，
+未验证登录态与真实飞书连接；live Harness app 是 `0.2.1-rc.5`，而仓库 peer 基线为 `0.2.1-rc.2`，
+向 live profile 安装需要 `dsh plugin allow-version` 风险豁免或发布时整体对齐基线。
+
+尚未完成：从面板选择任意 registry 源（出于安全只允许本项目包名）、真实飞书长连接验收
 （按用户要求延后，未连活 Bot）。lark-cli 不在本插件范围内，其安装/配置由 owner 自行通过 skill 完成。
 远端真实使用验收仍由正式连接门保留。
 
