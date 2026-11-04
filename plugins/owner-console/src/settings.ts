@@ -36,6 +36,8 @@ export interface BundleInfoLike {
   readonly installed: boolean
   readonly removable: boolean
   readonly optional: boolean
+  /** `error.code === 'not-bundle'` marks a dependency row without a bundle patch. */
+  readonly error?: Readonly<{ code?: string }>
 }
 export interface PluginInfoLike {
   readonly entryId: string

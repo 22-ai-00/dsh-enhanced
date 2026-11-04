@@ -80,7 +80,8 @@ export class OwnerConsoleService extends TypertRemoteService {
     const traex = findEntry(entries, ns => TRAEX.test(ns))
     const larkValue = configFacts(lark?.value)
     const traexValue = configFacts(traex?.value)
-    const installed = (name: string) => inventory.bundles.some(bundle => bundle.name === name && bundle.installed)
+    const installed = (name: string) => inventory.bundles.some(bundle =>
+      bundle.name === name && bundle.installed && bundle.error === undefined)
     return Object.freeze({
       feishu: Object.freeze({
         ...(lark === undefined ? {} : { entry: lark.ns }),

@@ -253,6 +253,23 @@ describe('dsh-enhanced-owner-console', () => {
     }
   })
 
+  it('does not count a non-bundle dependency row as installed', async () => {
+    const manager = {
+      listBundles: vi.fn(async () => [
+        { name: '@dsh-enhanced/lark-channel', enabled: true, installed: true, removable: false, optional: false, error: { code: 'not-bundle' } },
+      ]),
+      listPlugins: vi.fn(async () => []),
+    }
+    const { ctx, console } = await mount(undefined, undefined, manager)
+    try {
+      const status = await console.status()
+      expect(status.feishu.installed).toBe(false)
+      expect(status.traex.installed).toBe(false)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('refuses to write when the Host settings service is absent', async () => {
     const { ctx, console } = await mount()
     try {

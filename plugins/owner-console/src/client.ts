@@ -134,7 +134,7 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
       row('入口', status.feishu.entry ?? (status.feishu.installed ? 'lark-channel 已安装但未启用' : '未安装 lark-channel')),
       row('连接', status.feishu.connected ? '已加载' : '未连接'),
       row('appId', status.feishu.appIdConfigured ? '已配置' : '未配置'))
-  const installLark = status !== undefined && !status.feishu.installed
+  const installLark = status !== undefined && !status.feishu.installed && status.feishu.entry === undefined
     ? el('button', { style: buttonStyle, disabled: busy,
       onClick: () => void run(() => remote.installProjectBundle('@dsh-enhanced/lark-channel')) },
     '安装 lark-channel（含依赖）')
@@ -187,13 +187,15 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
           onClick: () => void run(() => remote.configureTraex(true, traexCommand)) }, '启用'),
         el('button', { style: buttonStyle, disabled: busy,
           onClick: () => void run(() => remote.configureTraex(false, '')) }, '停用'))
-      : status !== undefined && !status.traex.installed
-        ? el('button', { style: buttonStyle, disabled: busy,
-          onClick: () => void run(() => remote.installProjectBundle('@dsh-enhanced/traex-acp-provider')) },
-        '安装 traex-acp-provider（含依赖）')
-        : el('button', { style: buttonStyle, disabled: busy,
-          onClick: () => void run(() => remote.setBundleEnabled('@dsh-enhanced/traex-acp-provider', true)) },
-        '启用 traex-acp-provider'))
+      : status === undefined
+        ? el('p', { style: { margin: 0, color: muted } }, '…')
+        : !status.traex.installed
+          ? el('button', { style: buttonStyle, disabled: busy,
+            onClick: () => void run(() => remote.installProjectBundle('@dsh-enhanced/traex-acp-provider')) },
+          '安装 traex-acp-provider（含依赖）')
+          : el('button', { style: buttonStyle, disabled: busy,
+            onClick: () => void run(() => remote.setBundleEnabled('@dsh-enhanced/traex-acp-provider', true)) },
+          '启用 traex-acp-provider'))
 
   const bundleRows = pending
     ? el('p', { style: { margin: 0, color: muted } }, '…')
