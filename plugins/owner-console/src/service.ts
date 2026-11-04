@@ -138,11 +138,8 @@ export class OwnerConsoleService extends TypertRemoteService {
   }
 
   /** Feishu: one owner click, two ways to pair the bot. No plaintext secret is ever accepted. */
-  async configureFeishu(mode: 'env' | 'handle', appId: string, appSecretEnv: string,
-    credentialHandle: string, account: string, tenant: string): Promise<OwnerConsoleWriteResult> {
-    if (mode !== 'env' && mode !== 'handle') {
-      return refuse('', 'unsupported Feishu secret source')
-    }
+  async configureFeishu(appId: string, appSecretEnv: string, credentialHandle: string,
+    account: string, tenant: string, discoverAppId: boolean): Promise<OwnerConsoleWriteResult> {
     const settings = this.settings()
     const lark = findEntry(this.descriptors(), ns => LARK.test(ns))
     if (lark === undefined) {
@@ -150,12 +147,12 @@ export class OwnerConsoleService extends TypertRemoteService {
     }
     const current = configFacts(lark.value)
     const configured = isAppId(this.config.feishuAppId) ? this.config.feishuAppId : undefined
-    const discovered = appId.trim() === '' && mode === 'env'
+    const discovered = appId.trim() === '' && discoverAppId
       ? APP_ID_ENV.map(name => process.env[name]).find(value => isAppId(value)) ?? configured
       : undefined
     const resolvedAppId = appId.trim() === '' ? discovered : appId.trim()
     if (!isAppId(resolvedAppId)) {
-      return refuse(lark.ns, mode === 'env'
+      return refuse(lark.ns, discoverAppId
         ? '一键模式需要 Host 环境中的 LARK_APP_ID 或 FEISHU_APP_ID；否则请填写 appId'
         : 'appId 必须形如 cli_0123456789abcdef')
     }

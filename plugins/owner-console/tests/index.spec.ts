@@ -27,6 +27,9 @@ async function mount(settings?: SettingsService, loader?: FakeLoader, manager?: 
   const ctx = new Context()
   await ctx.plugin(TypertRegistry)
   if (settings !== undefined) ctx.provide('settings' as never, settings as never)
+  // The handle mode requires the keychain provider; the fixture only checks that
+  // the reference path is reachable, not the provider's own behaviour.
+  ctx.provide('credentialsKeychain' as never, {} as never)
   if (manager !== undefined) ctx.provide('pluginManager' as never, manager as never)
   if (loader !== undefined) {
     ctx.provide('loader' as never, {
@@ -111,7 +114,7 @@ describe('dsh-enhanced-owner-console', () => {
     try {
       vi.stubEnv('LARK_APP_SECRET', 'present')
       vi.stubEnv('A', 'present')
-      await expect(console.configureFeishu('handle', 'cli_0123456789abcdef', 'LARK_APP_SECRET', '', '', ''))
+      await expect(console.configureFeishu('cli_0123456789abcdef', 'LARK_APP_SECRET', '', '', '', false))
         .resolves.toMatchObject({ applied: true, entry: 'dsh-enhanced-lark-channel' })
       expect(lark.mutate).toHaveBeenCalledWith('dsh-enhanced-lark-channel', [
         { op: 'set', path: ['enabled'], value: true },
@@ -122,14 +125,26 @@ describe('dsh-enhanced-owner-console', () => {
         { op: 'set', path: ['secretSource'], value: 'env' },
         { op: 'unset', path: ['credentialHandle'] },
       ], 3)
-      const envMissing = await console.configureFeishu('handle', 'cli_0123456789abcdef', 'MISSING_SECRET', '', '', '')
+      // The secret source is derived from the reference the owner actually filled.
+      await expect(console.configureFeishu('cli_0123456789abcdef', '', 'owner-handle', '', '', false))
+        .resolves.toMatchObject({ applied: true })
+      expect(lark.mutate).toHaveBeenLastCalledWith('dsh-enhanced-lark-channel', [
+        { op: 'set', path: ['enabled'], value: true },
+        { op: 'set', path: ['appId'], value: 'cli_0123456789abcdef' },
+        { op: 'set', path: ['account'], value: 'owner-acct' },
+        { op: 'set', path: ['tenant'], value: 'owner-tenant' },
+        { op: 'unset', path: ['appSecretEnv'] },
+        { op: 'set', path: ['secretSource'], value: 'handle' },
+        { op: 'set', path: ['credentialHandle'], value: 'owner-handle' },
+      ], 3)
+      const envMissing = await console.configureFeishu('cli_0123456789abcdef', 'MISSING_SECRET', '', '', '', false)
       expect(envMissing.applied).toBe(false)
       expect(envMissing.note).toContain('MISSING_SECRET')
-      const both = await console.configureFeishu('handle', 'cli_0123456789abcdef', 'A', 'handle', '', '')
+      const both = await console.configureFeishu('cli_0123456789abcdef', 'A', 'handle', '', '', false)
       expect(both).toMatchObject({ applied: false })
       expect(both.note).toMatch(/二选一/u)
-      expect((await console.configureFeishu('handle', 'nope', 'A', '', '', '')).note).toMatch(/appId/u)
-      expect((await console.configureFeishu('env', '', 'A', '', '', '')).note).toMatch(/LARK_APP_ID/u)
+      expect((await console.configureFeishu('nope', 'A', '', '', '', false)).note).toMatch(/appId/u)
+      expect((await console.configureFeishu('', 'A', '', '', '', true)).note).toMatch(/LARK_APP_ID/u)
     } finally {
       vi.unstubAllEnvs()
       await ctx.fiber.dispose()

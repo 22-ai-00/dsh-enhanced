@@ -9,8 +9,8 @@ export const inject = ['remote', 'slots']
 type RemoteResult<T> = Readonly<{ ok: true, value: T }> | Readonly<{ ok: false }>
 type ConsoleRemote = Readonly<{
   status(): Promise<RemoteResult<OwnerConsoleStatus>>
-  configureFeishu(mode: 'env' | 'handle', appId: string, appSecretEnv: string,
-    credentialHandle: string, account: string, tenant: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  configureFeishu(appId: string, appSecretEnv: string, credentialHandle: string,
+    account: string, tenant: string, discoverAppId: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
   configureTraex(enabled: boolean, command: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
   configureBundle(entry: string, config: Readonly<Record<string, unknown>>): Promise<RemoteResult<OwnerConsoleWriteResult>>
   setBundleEnabled(name: string, enabled: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
@@ -133,9 +133,9 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
       field('tenant', tenant, setTenant, '保留当前 owner')),
     el('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
       el('button', { style: buttonStyle, disabled: busy,
-        onClick: () => void run(() => remote.configureFeishu('handle', appId, secretEnv, secretHandle, account, tenant)) }, '应用配置'),
+        onClick: () => void run(() => remote.configureFeishu(appId, secretEnv, secretHandle, account, tenant, false)) }, '应用配置'),
       el('button', { style: buttonStyle, disabled: busy,
-        onClick: () => void run(() => remote.configureFeishu('env', '', secretEnv, secretHandle, account, tenant)) }, '一键配置（从 Host 环境探测 appId）')),
+        onClick: () => void run(() => remote.configureFeishu('', secretEnv, secretHandle, account, tenant, true)) }, '一键配置（从 Host 环境探测 appId）')),
     el('p', { style: { margin: 0, fontSize: 12, color: muted } },
       '这里配置的是 lark-channel 通道；secret 只接受环境变量名或 keychain handle，明文不入配置。'))
 

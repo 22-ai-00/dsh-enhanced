@@ -31,7 +31,10 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 - **左侧栏即用**：面板顶部「开始对话」直接进入当前工作区的智能体会话（`uiWorkspace.startSession()`），
   「打开插件页」跳到 DSH 原生插件页（`layout.selectPanel('plugins')`）；两个客户端服务在点击时惰性解析，
   缺失时入口与状态页仍注册、按钮无操作。
-- **飞书两种对接方式**：直接配置（appId + 恰好一个 secret 引用：环境变量名或 keychain handle；secret 明文不接受）与一键配置（从 Host 环境 `LARK_APP_ID`/`FEISHU_APP_ID` 或插件配置的 appId 探测，否则提示运行 `dsh-lark-setup` 向导）。lark-cli 不单独指定路径：使用系统默认安装（`PATH`）的版本，由 DSH setup 流程探测，面板不做路径选择。写入用 `settings.mutate` 的显式 set/unset + `secretSource` 判别字段，解决 bundle 层默认 `credentialHandle` 无法被 unset 清掉的继承问题；account/tenant 留空时沿用现值，不静默改身份。
+- **飞书两种对接方式（配置 `lark-channel` 通道，不是 lark-cli）**：直接配置（appId + 恰好一个 secret
+  引用：环境变量名或 keychain handle；secret 明文不接受）与一键配置（从 Host 进程环境
+  `LARK_APP_ID`/`FEISHU_APP_ID` 或插件配置的默认 appId 探测）。lark-cli 只是可随时安装的独立 skill，
+  不是本插件依赖；本插件既不调用它、不探测它的路径，也不管理它的安装，通道配置与它无关。写入用 `settings.mutate` 的显式 set/unset + `secretSource` 判别字段，解决 bundle 层默认 `credentialHandle` 无法被 unset 清掉的继承问题；account/tenant 留空时沿用现值，不静默改身份。
 - **TraeX**：只切换 `traex-acp-provider` 条目的 enabled/command。
 - **本项目插件管理（pluginManager）**：列出本项目 bundle 层（版本/安装/启用/可移除）与已加载条目
   （entryId/模块名/fiber 阶段），一键启用/停用；安装只接受 `@dsh-enhanced/<name>` 包名，走 DSH 自己的
@@ -47,9 +50,9 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 假时钟跨分钟边界会多认领一次 usage-scan、isolation 归档 CLI 对实时写入源账本的大小断言过严、
 WorkItems 原生 fixture 用等待代替显式信号 sweep 导致准入超时。三处修复后各自连跑 3~15 次稳定。
 
-尚未完成：lark-cli 向导的自动化（当前只探测环境并给出命令）、插件卸载与从面板选择任意 registry 源
-（出于安全只允许本项目包名）、真实飞书长连接验收（按用户要求延后，未连活 Bot）。远端真实使用验收仍由
-正式连接门保留。
+尚未完成：插件卸载与从面板选择任意 registry 源（出于安全只允许本项目包名）、真实飞书长连接验收
+（按用户要求延后，未连活 Bot）。lark-cli 不在本插件范围内，其安装/配置由 owner 自行通过 skill 完成。
+远端真实使用验收仍由正式连接门保留。
 
 ## 待办与延后验收
 

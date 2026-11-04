@@ -53,7 +53,7 @@ export const TYPERT = {
       service: 'ownerConsole', namespace: 'ownerConsole', method: 'configureFeishu',
       invocation: { kind: 'direct' },
       parameters: [
-        { name: 'mode', wire: 'mode', source: 'json', codec: codec('owner-console#mode', () => z.enum(['env', 'handle'])) },
+        { name: 'discoverAppId', wire: 'discoverAppId', source: 'json', codec: codec('owner-console#discoverAppId', () => z.boolean()) },
         { name: 'appId', wire: 'appId', source: 'json', codec: codec('owner-console#appId', () => z.string().max(64)) },
         { name: 'appSecretEnv', wire: 'appSecretEnv', source: 'json', codec: codec('owner-console#appSecretEnv', () => z.string().max(128)) },
         { name: 'credentialHandle', wire: 'credentialHandle', source: 'json', codec: codec('owner-console#credentialHandle', () => z.string().max(128)) },
