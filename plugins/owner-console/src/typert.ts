@@ -108,6 +108,16 @@ export const TYPERT = {
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 84, column: 3 },
     },
     {
+      id: '@dsh-enhanced/owner-console#ownerConsole/removeProjectBundle',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'removeProjectBundle',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'name', wire: 'name', source: 'json', codec: codec('owner-console#bundleName', () => z.string().max(200)) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 102, column: 3 },
+    },
+    {
       id: '@dsh-enhanced/owner-console#ownerConsole/installProjectBundle',
       service: 'ownerConsole', namespace: 'ownerConsole', method: 'installProjectBundle',
       invocation: { kind: 'direct' },

@@ -30,7 +30,7 @@ function clientContext() {
         remote: { ownerConsole: {
           status: vi.fn(async () => ({ ok: false as const })),
           configureFeishu: vi.fn(), configureTraex: vi.fn(), configureBundle: vi.fn(),
-          setBundleEnabled: vi.fn(), setPluginEnabled: vi.fn(), installProjectBundle: vi.fn(),
+          setBundleEnabled: vi.fn(), setPluginEnabled: vi.fn(), installProjectBundle: vi.fn(), removeProjectBundle: vi.fn(),
         } },
         slots: {
           inject: (name: string, factory: () => unknown) => {

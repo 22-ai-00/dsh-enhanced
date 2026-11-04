@@ -58,6 +58,7 @@ export interface PluginManagerService {
   setBundleEnabled(name: string, enabled: boolean): Promise<ChangeResultLike>
   setPluginEnabled(entryId: string, enabled: boolean): Promise<ChangeResultLike>
   installBundle(spec: string, options?: Readonly<{ enabled?: boolean, saveExact?: boolean }>): Promise<ChangeResultLike>
+  removeBundle(name: string): Promise<ChangeResultLike>
 }
 
 export const PROJECT_PACKAGE = /^@dsh-enhanced\/[a-z0-9][a-z0-9-]*$/u

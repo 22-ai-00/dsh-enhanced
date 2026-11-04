@@ -16,6 +16,7 @@ type ConsoleRemote = Readonly<{
   setBundleEnabled(name: string, enabled: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
   setPluginEnabled(entryId: string, enabled: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
   installProjectBundle(spec: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  removeProjectBundle(name: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
 }>
 type SlotRuntime = {
   readonly remote: Readonly<{ ownerConsole: ConsoleRemote }>
@@ -74,6 +75,7 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
   const [appId, setAppId] = useState('')
+  const [secretSource, setSecretSource] = useState<'env' | 'handle'>('env')
   const [secretEnv, setSecretEnv] = useState('LARK_APP_SECRET')
   const [secretHandle, setSecretHandle] = useState('')
   const [account, setAccount] = useState('')
@@ -125,10 +127,16 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
       row('连接', status.feishu.connected ? '已加载' : '未连接'),
       row('appId', status.feishu.appIdConfigured ? '已配置' : '未配置'))
   const feishuActions = el('div', { style: { ...gridStyle, marginTop: 10 } },
+    el('div', { style: { display: 'flex', gap: 12, fontSize: 13 }, role: 'radiogroup', 'aria-label': 'secret 引用方式' },
+      el('label', {}, el('input', { type: 'radio', name: 'secret-source', checked: secretSource === 'env',
+        onChange: () => setSecretSource('env') }), ' 环境变量'),
+      el('label', {}, el('input', { type: 'radio', name: 'secret-source', checked: secretSource === 'handle',
+        onChange: () => setSecretSource('handle') }), ' keychain handle')),
     el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 } },
-      field('appId（直接模式）', appId, setAppId, 'cli_0123456789abcdef'),
-      field('secret 环境变量名', secretEnv, setSecretEnv, 'LARK_APP_SECRET'),
-      field('或 keychain handle', secretHandle, setSecretHandle, 'lark-app-secret'),
+      field('appId', appId, setAppId, 'cli_0123456789abcdef'),
+      secretSource === 'env'
+        ? field('secret 环境变量名', secretEnv, setSecretEnv, 'LARK_APP_SECRET')
+        : field('keychain handle', secretHandle, setSecretHandle, 'lark-app-secret'),
       field('account', account, setAccount, '保留当前 owner'),
       field('tenant', tenant, setTenant, '保留当前 owner')),
     el('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
@@ -159,7 +167,14 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
         el('span', {}, `${bundle.name}${bundle.version === undefined ? '' : ` @${bundle.version}`}${bundle.installed ? '' : '（未安装）'}`),
         el('button', { style: buttonStyle, disabled: busy,
           onClick: () => void run(() => remote.setBundleEnabled(bundle.name, !bundle.enabled)) },
-        bundle.enabled ? '停用' : '启用'))))
+        bundle.enabled ? '停用' : '启用'),
+        el('button', { style: { ...buttonStyle, color: 'var(--dsw-alias-label-danger)' }, disabled: busy,
+          onClick: () => {
+            const ask = (globalThis as unknown as { confirm?: (message: string) => boolean }).confirm
+            if (ask === undefined || ask(`移除 ${bundle.name}？依赖会保留，可用 dsh plugin add 重新安装。`)) {
+              void run(() => remote.removeProjectBundle(bundle.name))
+            }
+          } }, '移除'))))
   const pluginRows = pending || status.plugins.length === 0
     ? el('p', { style: { margin: 0, color: muted } }, pending ? '…' : '没有已加载的本项目插件条目。')
     : el('div', { style: gridStyle }, ...status.plugins.map(plugin => el('div', {

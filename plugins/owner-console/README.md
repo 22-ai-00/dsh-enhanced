@@ -37,7 +37,7 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 独立 skill，不属于本插件的依赖，也不是必选项；系统里可能已经有它，但本插件既不调用、不探测它的路径，
 也不管理它的安装。
 
-1. **直接配置**：填写 `appId`（`cli_` + 16 位十六进制）和一个 secret 引用，点「应用配置」。secret 引用二选一：
+1. **直接配置**：填写 `appId`（`cli_` + 16 位十六进制），先选 secret 引用方式（单选），点「应用配置」：
    - 环境变量名：secret 留在 Host 进程环境里；
    - keychain handle：secret 由 `credentials-keychain` 持有。
    可选 account/tenant 留空时沿用条目现值，不静默改身份。
@@ -57,7 +57,8 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 
 - TraeX 卡片只切换 `traex-acp-provider` 条目的 `enabled`（可选覆盖 `command`），不启动进程。
 - **Bundle 层**：列出本 profile 里 `@dsh-enhanced/*` bundle 的版本、是否安装、是否启用、是否可移除，
-  一键启用/停用；停用只摘除该 bundle 的 patch 层，已安装依赖保留。
+  一键启用/停用；停用只摘除该 bundle 的 patch 层，已安装依赖保留。每行另有「移除」（会二次确认；
+  移除 bundle 层但保留已安装依赖，重新安装用 `dsh plugin add` 或面板的安装入口）。
 - **已加载条目**：列出模块属于 `@dsh-enhanced/*` 的 Loader 条目（entryId、模块名、fiber 阶段），
   可单独启用/禁用；按模块归属而不是 bundle row 归属判断，第三方模块行不在此面板管理。
 - **安装**：只接受 `@dsh-enhanced/<name>` 形式的包名，走 DSH 自身的 `pluginManager.installBundle`
@@ -103,7 +104,7 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 
 - 一键模式只做 Host 环境变量探测，既不执行也不依赖 lark-cli；需要向导时由 owner 用系统已装的
   lark-cli skill 或其他方式自行提供 appId/secret 环境变量。
-- 插件管理不提供卸载；安装只接受 `@dsh-enhanced/*` 包名（不支持任意本地/git 源）。
+- 插件管理支持移除本项目 bundle（二次确认）；安装只接受 `@dsh-enhanced/*` 包名（不支持任意本地/git 源）。
 - 面板会列出 `owner-console` 自己的 bundle/entry：禁用它会隐藏这个入口，需用 `dsh plugin` 或 CLI
   重新启用（与 DSH 原生插件页语义一致）。
 - 「开始对话 / 打开插件页」调用 DSH 客户端 `uiWorkspace.startSession()` 与 `layout.selectPanel()`；

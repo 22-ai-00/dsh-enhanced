@@ -128,6 +128,12 @@ export class OwnerConsoleService extends TypertRemoteService {
     return applyChange(manager, await manager.setPluginEnabled(entryId, enabled))
   }
 
+  /** Remove one project bundle layer after the owner confirms the destructive step. */
+  async removeProjectBundle(name: string): Promise<OwnerConsoleWriteResult> {
+    if (!isProjectPackage(name)) return refuse('', '只允许移除本项目的 @dsh-enhanced/* bundle')
+    return applyChange(this.manager(), await this.manager().removeBundle(name))
+  }
+
   /** Install one project bundle with its declared dependencies, then activate it. */
   async installProjectBundle(spec: string): Promise<OwnerConsoleWriteResult> {
     const trimmed = spec.trim()

@@ -65,6 +65,7 @@ describe('dsh-enhanced-owner-console', () => {
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/setBundleEnabled')).toEqual(['name', 'enabled'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/setPluginEnabled')).toEqual(['entryId', 'enabled'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/installProjectBundle')).toEqual(['spec'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/removeProjectBundle')).toEqual(['name'])
   })
 
   it('reports absent entries, strict providers and no fabricated connection', async () => {
@@ -224,6 +225,7 @@ describe('dsh-enhanced-owner-console', () => {
       setBundleEnabled: vi.fn(async (name: string) => ({ changed: true, application: 'applied' as const, target: name, enabled: true })),
       setPluginEnabled: vi.fn(async (entryId: string) => ({ changed: true, application: 'restart-required' as const, target: entryId, enabled: false })),
       installBundle: vi.fn(async (spec: string) => ({ changed: true, application: 'applied' as const, target: spec, enabled: true })),
+      removeBundle: vi.fn(async (name: string) => ({ changed: true, application: 'applied' as const, target: name, enabled: false })),
     }
     const { ctx, console } = await mount(undefined, undefined, manager)
     try {
@@ -241,6 +243,9 @@ describe('dsh-enhanced-owner-console', () => {
       await expect(console.installProjectBundle('@dsh-enhanced/hello')).resolves.toMatchObject({ applied: true })
       expect(manager.installBundle).toHaveBeenCalledWith('@dsh-enhanced/hello', { enabled: true, saveExact: true })
       expect((await console.installProjectBundle('./local-path')).applied).toBe(false)
+      await expect(console.removeProjectBundle('@dsh-enhanced/lark-channel')).resolves.toMatchObject({ applied: true, entry: '@dsh-enhanced/lark-channel' })
+      expect(manager.removeBundle).toHaveBeenCalledWith('@dsh-enhanced/lark-channel')
+      expect((await console.removeProjectBundle('other-package')).applied).toBe(false)
     } finally {
       await ctx.fiber.dispose()
     }
