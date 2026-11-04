@@ -30,13 +30,22 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 - **飞书两种对接方式**：直接配置（appId + 恰好一个 secret 引用：环境变量名或 keychain handle；secret 明文不接受）与一键配置（从 Host 环境 `LARK_APP_ID`/`FEISHU_APP_ID` 或插件配置的 appId 探测，否则提示运行 `dsh-lark-setup` 向导）。写入用 `settings.mutate` 的显式 set/unset + `secretSource` 判别字段，解决 bundle 层默认 `credentialHandle` 无法被 unset 清掉的继承问题；account/tenant 留空时沿用现值，不静默改身份。
 - **TraeX**：只切换 `traex-acp-provider` 条目的 enabled/command。
-- **本项目插件管理**：列出声明了 live 字段的本项目条目，按 JSON 合并写入（≤16 KiB）。
+- **本项目插件管理（pluginManager）**：列出本项目 bundle 层（版本/安装/启用/可移除）与已加载条目
+  （entryId/模块名/fiber 阶段），一键启用/停用；安装只接受 `@dsh-enhanced/<name>` 包名，走 DSH 自己的
+  pnpm 路径并一并安装声明依赖；拒绝本地路径、git 地址与他人 scope。`restart-required` 视为已持久化并提示
+  重启，校验拒绝保持红色告警。高级入口仍可对 live 字段合并 JSON 配置（≤16 KiB）。
 - **写入即生效**：volatile 写入只更新 fiber 引用，面板写入后对目标条目执行 `fiber.update(持久化 raw config, true)` 重启一次，apex 会以新纯配置重建连接/provider；无法解析/重载时如实提示重启。
 - **只读安全边界**：读取严格查找 service、投影不返回 secret 明文、业务拒绝以 `applied:false + note` 返回并在面板显示、client 卸载后不再 setState。
 
-实现要点：`lark-channel`/`traex-acp-provider` 只在 owner 可编辑字段上标记 `.volatile()`，并在 schema 边界接受 volatile 引用、输出纯值；`lark-channel` 用 `secretSource` 在 callable 与 `~standard` 两条验证路径上屏蔽未选引用，并让非法配置 fail-soft（记录后保持 disabled，不炸 Loader 树）。该切片经过四轮独立 harness 复核：真实 Cordis Loader + 真实 `dsh-settings`/`config-editor` 下逐项验证 describe/mutate/重启/双模式切换，最终 APPROVE。
+实现要点：`lark-channel`/`traex-acp-provider` 只在 owner 可编辑字段上标记 `.volatile()`，并在 schema 边界接受 volatile 引用、输出纯值；`lark-channel` 用 `secretSource` 在 callable 与 `~standard` 两条验证路径上屏蔽未选引用，并让非法配置 fail-soft（记录后保持 disabled，不炸 Loader 树）。该切片经过多轮独立 harness 复核（真实 Cordis Loader/Include、`dsh-settings`、`config-editor`、
+`plugin-manager`）：逐项验证 describe/mutate/重启/双模式切换、bundle 与条目启停、安装转发与拒绝边界，
+并修正了页面把 `restart-required` 当成失败的问题。复核还暴露并修复了两个与根检查稳定性相关的问题：
+`usage-runtime` 假时钟跨分钟边界会多认领一次 usage-scan，以及 isolation 归档 CLI 在实时写入时就源账本
+大小做了过严断言。两处修复后各自连跑 10+ 次稳定。
 
-尚未完成：lark-cli 向导的自动化（当前只探测环境并给出命令）、插件安装/卸载与启用开关（只做配置合并）、真实飞书长连接验收（按用户要求延后，未连活 Bot）。远端真实使用验收仍由正式连接门保留。
+尚未完成：lark-cli 向导的自动化（当前只探测环境并给出命令）、插件卸载与从面板选择任意 registry 源
+（出于安全只允许本项目包名）、真实飞书长连接验收（按用户要求延后，未连活 Bot）。远端真实使用验收仍由
+正式连接门保留。
 
 ## 待办与延后验收
 
@@ -61,5 +70,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 | `94b86b61`（39 包，含控制台） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2404.48 秒 | 11,904 / 309 | 757 / 32 | `dea2dd242f9e0685b15170f9185e62e04ed49341d79d8d07a5b0efa906f7783c` |
 | `da5f8d42`（39 包，控制台配置切片） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1088.69 秒 | 10,298 / 1,925 | 704 / 85 | `f970b4bb04f1909035adb407decd082055443bf3a89124bb2378dfeb7aec4ee3` |
 | `da5f8d42`（39 包，控制台配置切片） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2447.74 秒 | 11,911 / 309 | 757 / 32 | `7de6f6499152e3b0993c5333117aa67c98234cabefb7db2d0e9cd48da8f41c4a` |
+| `124a52a1`（39 包，管理与稳定性切片） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1078.29 秒 | 10,299 / 1,925 | 704 / 85 | `1cb290d3fe62ba3130cb787c18bbaa1cd88198c4d5a64f2a5291baa9fb6d8acc` |
+| `124a52a1`（39 包，管理与稳定性切片） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2402.39 秒 | 11,912 / 309 | 757 / 32 | `db64489406a869403ee5528a1ecc683abe4c18e23e4537459f7805510c8e90b0` |
 
-两端覆盖 manifest、零警告 lint、包构建和类型检查、测试组及唯一 dry-run pack（38 包时 39 测试组；39 包时 40 测试组）；修改涉及的公开产物逐项核对入包，源码前后同一提交且工作树干净。Linux `TMPDIR=/data00/home/jiataorui/t`。准确命令与结果见 `docs/evidence/verification-d8c9fdd2/`、`docs/evidence/verification-94b86b61/` 与 `docs/evidence/verification-da5f8d42/`；Mac 原始日志在本地，Linux 原始日志留在远端同路径。Linux attempt 1 的失败原因是缺少测试运行时环境而非产品缺陷，已保留。跳过项、真实模型/Bot、活服务升级和长期收益不计为已验收。
+两端覆盖 manifest、零警告 lint、包构建和类型检查、测试组及唯一 dry-run pack（38 包时 39 测试组；39 包时 40 测试组）；修改涉及的公开产物逐项核对入包，源码前后同一提交且工作树干净。Linux `TMPDIR=/data00/home/jiataorui/t`。准确命令与结果见 `docs/evidence/verification-d8c9fdd2/`、`docs/evidence/verification-94b86b61/` 、`docs/evidence/verification-da5f8d42/` 与 `docs/evidence/verification-124a52a1/`；Mac 原始日志在本地，Linux 原始日志留在远端同路径。Linux attempt 1 的失败原因是缺少测试运行时环境而非产品缺陷，已保留。跳过项、真实模型/Bot、活服务升级和长期收益不计为已验收。
