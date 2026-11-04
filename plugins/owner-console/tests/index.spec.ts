@@ -9,7 +9,7 @@ import type { SettingsDescriptor, SettingsService } from '../src/settings.ts'
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
   version: string
 }
-const defaults = { feishuMode: 'lark-cli' as const, feishuAppId: '', enableTraex: false }
+const defaults = { feishuAppId: '' }
 
 type Entry = { ns: string, value: Record<string, unknown> }
 
@@ -46,17 +46,14 @@ describe('dsh-enhanced-owner-console', () => {
     expect(name).toBe('dsh-enhanced-owner-console')
     expect(version).toBe(manifest.version)
     expect(Config({} as never)).toEqual(defaults)
-    expect(() => Config({ feishuMode: 'webhook' } as never)).toThrow()
+    expect(() => Config({ feishuAppId: 5 } as never)).toThrow()
   })
 
   it('reports absent entries, strict providers and no fabricated connection', async () => {
     const { ctx, console } = await mount()
     try {
       const status = await console.status()
-      expect(status.feishu).toEqual({
-        mode: 'lark-cli', enabled: false, appIdConfigured: false, connected: false,
-        setupCommand: expect.stringContaining('dsh-lark-setup --profile'),
-      })
+      expect(status.feishu).toEqual({ mode: 'env', enabled: false, appIdConfigured: false, connected: false })
       expect(status.traex).toEqual({ enabled: false, command: '' })
       expect(status.dependencies.map(item => item.name)).toEqual(['assistantPolicy', 'assistantDelivery', 'assistantSkills'])
       expect(status.dependencies.every(item => item.available === false)).toBe(true)
@@ -94,7 +91,7 @@ describe('dsh-enhanced-owner-console', () => {
       value: { enabled: true, appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET', secretSource: 'env', credentialHandle: 'inherited-handle' } }])
     const mounted = await mount(envMode.service)
     try {
-      expect((await mounted.console.status()).feishu).toMatchObject({ mode: 'lark-cli' })
+      expect((await mounted.console.status()).feishu).toMatchObject({ mode: 'env' })
     } finally {
       await mounted.ctx.fiber.dispose()
     }
@@ -102,7 +99,7 @@ describe('dsh-enhanced-owner-console', () => {
       value: { enabled: true, appId: 'cli_0123456789abcdef', credentialHandle: 'owner-handle', secretSource: 'handle' } }])
     const second = await mount(handleMode.service)
     try {
-      expect((await second.console.status()).feishu).toMatchObject({ mode: 'app' })
+      expect((await second.console.status()).feishu).toMatchObject({ mode: 'handle' })
     } finally {
       await second.ctx.fiber.dispose()
     }
@@ -114,7 +111,7 @@ describe('dsh-enhanced-owner-console', () => {
     try {
       vi.stubEnv('LARK_APP_SECRET', 'present')
       vi.stubEnv('A', 'present')
-      await expect(console.configureFeishu('app', 'cli_0123456789abcdef', 'LARK_APP_SECRET', '', '', ''))
+      await expect(console.configureFeishu('handle', 'cli_0123456789abcdef', 'LARK_APP_SECRET', '', '', ''))
         .resolves.toMatchObject({ applied: true, entry: 'dsh-enhanced-lark-channel' })
       expect(lark.mutate).toHaveBeenCalledWith('dsh-enhanced-lark-channel', [
         { op: 'set', path: ['enabled'], value: true },
@@ -125,14 +122,14 @@ describe('dsh-enhanced-owner-console', () => {
         { op: 'set', path: ['secretSource'], value: 'env' },
         { op: 'unset', path: ['credentialHandle'] },
       ], 3)
-      const envMissing = await console.configureFeishu('app', 'cli_0123456789abcdef', 'MISSING_SECRET', '', '', '')
+      const envMissing = await console.configureFeishu('handle', 'cli_0123456789abcdef', 'MISSING_SECRET', '', '', '')
       expect(envMissing.applied).toBe(false)
       expect(envMissing.note).toContain('MISSING_SECRET')
-      const both = await console.configureFeishu('app', 'cli_0123456789abcdef', 'A', 'handle', '', '')
+      const both = await console.configureFeishu('handle', 'cli_0123456789abcdef', 'A', 'handle', '', '')
       expect(both).toMatchObject({ applied: false })
       expect(both.note).toMatch(/二选一/u)
-      expect((await console.configureFeishu('app', 'nope', 'A', '', '', '')).note).toMatch(/appId/u)
-      expect((await console.configureFeishu('lark-cli', '', 'A', '', '', '')).note).toMatch(/LARK_APP_ID/u)
+      expect((await console.configureFeishu('handle', 'nope', 'A', '', '', '')).note).toMatch(/appId/u)
+      expect((await console.configureFeishu('env', '', 'A', '', '', '')).note).toMatch(/LARK_APP_ID/u)
     } finally {
       vi.unstubAllEnvs()
       await ctx.fiber.dispose()

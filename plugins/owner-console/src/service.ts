@@ -83,11 +83,10 @@ export class OwnerConsoleService extends TypertRemoteService {
     return Object.freeze({
       feishu: Object.freeze({
         ...(lark === undefined ? {} : { entry: lark.ns }),
-        mode: larkValue['secretSource'] === 'handle' || (larkValue['secretSource'] === undefined && typeof larkValue['credentialHandle'] === 'string') ? 'app' : 'lark-cli',
+        mode: larkValue['secretSource'] === 'handle' || (larkValue['secretSource'] === undefined && typeof larkValue['credentialHandle'] === 'string') ? 'handle' : 'env',
         enabled: larkValue['enabled'] === true,
         appIdConfigured: isAppId(larkValue['appId']),
         connected: this.host.get('larkChannel' as never) !== undefined,
-        setupCommand: `dsh-lark-setup --profile ${process.env['DSH_PROFILE'] ?? 'web'}`,
       }),
       traex: Object.freeze({
         ...(traex === undefined ? {} : { entry: traex.ns }),
@@ -139,10 +138,10 @@ export class OwnerConsoleService extends TypertRemoteService {
   }
 
   /** Feishu: one owner click, two ways to pair the bot. No plaintext secret is ever accepted. */
-  async configureFeishu(mode: 'lark-cli' | 'app', appId: string, appSecretEnv: string,
+  async configureFeishu(mode: 'env' | 'handle', appId: string, appSecretEnv: string,
     credentialHandle: string, account: string, tenant: string): Promise<OwnerConsoleWriteResult> {
-    if (mode !== 'lark-cli' && mode !== 'app') {
-      return refuse('', 'unsupported Feishu mode')
+    if (mode !== 'env' && mode !== 'handle') {
+      return refuse('', 'unsupported Feishu secret source')
     }
     const settings = this.settings()
     const lark = findEntry(this.descriptors(), ns => LARK.test(ns))
@@ -151,12 +150,12 @@ export class OwnerConsoleService extends TypertRemoteService {
     }
     const current = configFacts(lark.value)
     const configured = isAppId(this.config.feishuAppId) ? this.config.feishuAppId : undefined
-    const discovered = appId.trim() === '' && mode === 'lark-cli'
+    const discovered = appId.trim() === '' && mode === 'env'
       ? APP_ID_ENV.map(name => process.env[name]).find(value => isAppId(value)) ?? configured
       : undefined
     const resolvedAppId = appId.trim() === '' ? discovered : appId.trim()
     if (!isAppId(resolvedAppId)) {
-      return refuse(lark.ns, mode === 'lark-cli'
+      return refuse(lark.ns, mode === 'env'
         ? '一键模式需要 Host 环境中的 LARK_APP_ID 或 FEISHU_APP_ID；否则请填写 appId'
         : 'appId 必须形如 cli_0123456789abcdef')
     }

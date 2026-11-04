@@ -20,11 +20,10 @@ const plugin = z.object({
 export const OwnerConsoleStatusSchema = z.object({
   feishu: z.object({
     entry: z.string().min(1).optional(),
-    mode: z.enum(['lark-cli', 'app']),
+    mode: z.enum(['env', 'handle']),
     enabled: z.boolean(),
     appIdConfigured: z.boolean(),
     connected: z.boolean(),
-    setupCommand: z.string().min(1),
   }).readonly(),
   traex: z.object({ entry: z.string().min(1).optional(), enabled: z.boolean(), command: z.string() }).readonly(),
   dependencies: z.array(dependency).readonly(),
@@ -54,7 +53,7 @@ export const TYPERT = {
       service: 'ownerConsole', namespace: 'ownerConsole', method: 'configureFeishu',
       invocation: { kind: 'direct' },
       parameters: [
-        { name: 'mode', wire: 'mode', source: 'json', codec: codec('owner-console#mode', () => z.enum(['lark-cli', 'app'])) },
+        { name: 'mode', wire: 'mode', source: 'json', codec: codec('owner-console#mode', () => z.enum(['env', 'handle'])) },
         { name: 'appId', wire: 'appId', source: 'json', codec: codec('owner-console#appId', () => z.string().max(64)) },
         { name: 'appSecretEnv', wire: 'appSecretEnv', source: 'json', codec: codec('owner-console#appSecretEnv', () => z.string().max(128)) },
         { name: 'credentialHandle', wire: 'credentialHandle', source: 'json', codec: codec('owner-console#credentialHandle', () => z.string().max(128)) },

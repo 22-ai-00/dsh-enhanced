@@ -31,29 +31,26 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 读取与写入都经 `typert` 的严格 invocation 返回；面板不缓存或上报任何内容。
 「已加载/可用」只表示提供该 service 的 fiber 当前处于活动状态，不等于飞书已完成认证或长连接在线。
 
-### 飞书两种对接方式
+### 飞书两种对接方式（配置的是 lark-channel 通道）
 
-1. **直接配置**：填写 `appId`（`cli_` + 16 位十六进制）和一个 secret 引用（环境变量名或
-   keychain handle）、可选 account/tenant，点「应用配置」。面板只写 `lark-channel` 条目，
-   secret 明文永不进入配置、日志或本插件。
-2. **一键配置**：Host 进程环境里已有 `LARK_APP_ID` 或 `FEISHU_APP_ID` 时，点「一键配置」即用
-   探测到的 appId 写入同一份配置；否则回退为「复制向导命令」，在终端执行
-   `dsh-lark-setup --profile <profile>` 完成官方向导后再回来启用。
+面板配置的对象是 **`lark-channel` 通道条目**，不是 lark-cli。lark-cli 只是一个可随时安装/配置的
+独立 skill，不属于本插件的依赖，也不是必选项；系统里可能已经有它，但本插件既不调用、不探测它的路径，
+也不管理它的安装。
 
-本插件不提供 lark-cli 路径选择：向导和 channel 都使用系统默认安装（`PATH` 中）的 lark-cli，
-由 DSH 自己的 setup 流程负责探测；面板只做环境探测和配置写入。
+1. **直接配置**：填写 `appId`（`cli_` + 16 位十六进制）和一个 secret 引用，点「应用配置」。secret 引用二选一：
+   - 环境变量名：secret 留在 Host 进程环境里；
+   - keychain handle：secret 由 `credentials-keychain` 持有。
+   可选 account/tenant 留空时沿用条目现值，不静默改身份。
+2. **一键配置**：Host 进程环境里已有 `LARK_APP_ID` 或 `FEISHU_APP_ID`（或本插件配置的默认 appId）时，
+   点一个按钮即用探测到的 appId 写入同一份通道配置。环境变量可以由任何方式提供（shell、launchd、
+   或你自己安装的 lark-cli skill），本插件只读取环境，不执行外部 CLI。
 
-写入要求 secret 引用二选一；同时给两个或都不给会被拒绝。写入前会检查那个环境变量在该
-Host 进程中确实存在，keychain handle 模式要求 `credentials-keychain` 已加载。
-account/tenant 留空时沿用条目里当前值（不会用默认值覆盖身份）；两者都为空才拒绝。
-写入通过 Host `settings.mutate` 的 set/unset 操作完成，并显式写 `secretSource`（`env` 或
-`handle`）：bundle 层默认带 `credentialHandle`，单靠 unset 无法清掉继承值，因此两种方式互切
-由这个选择器裁决，另一个引用会被屏蔽。写入后对目标条目执行一次带新配置的重启
-（`fiber.update(rawConfig, true)`），让插件按新的纯配置重建连接/provider；不能解析条目或重载
-失败时如实提示「已保存，但需要重启 profile 后生效」。
+写入通过 Host `settings.mutate` 的显式 set/unset + `secretSource` 判别字段完成，并重启 `lark-channel`
+条目让通道按新配置重建；`restart-required` 视为已持久化并提示重启，校验拒绝保持红色告警。
+secret 明文永不进入配置、日志或本插件。
 
-只有声明了 `.volatile()` 的配置字段才能被 settings 服务读取/改写（改完由本插件重启条目）：`lark-channel` 暴露
-enabled/account/tenant/appId/appSecretEnv/credentialHandle，`traex-acp-provider` 暴露
+只有声明了 `.volatile()` 的配置字段才能这样实时改写：`lark-channel` 暴露
+enabled/account/tenant/appId/appSecretEnv/credentialHandle/secretSource，`traex-acp-provider` 暴露
 enabled/command。没有 live 字段的条目不会出现在面板里。
 
 ### TraeX 与本项目插件
@@ -79,9 +76,7 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 - id: dsh-enhanced-owner-console
   name: '@dsh-enhanced/owner-console'
   config:
-    feishuMode: lark-cli   # lark-cli | app
-    feishuAppId: ''        # 直接模式的 app id；app secret 不进入配置
-    enableTraex: false
+    feishuAppId: ''        # 可选：一键探测的默认 appId；app secret 不进入配置
 ```
 
 配置为同步 Standard-Schema 校验，非法值在加载时被拒绝。
@@ -98,9 +93,16 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 - 安装仅由主人点击触发，走 DSH 官方安装路径；不提供卸载，不改动未列出的条目；
   secret 明文不接受、不存储、不回显。
 
+## 测试
+
+`tests/client-bundle.spec.ts` 用 Web 外壳的 `__ModuleLoader__` 契约加载实际构建产物
+`lib/client.js`，以真实 `react`/`react/jsx-runtime` 执行 factory，断言 sidebar/main 两个注册与释放；
+因此该测试依赖先运行 `pnpm --dir plugins/owner-console build`（根检查与 `pnpm check` 均先构建）。
+
 ## 限制
 
-- 一键模式只做 Host 环境变量探测，不代为执行 lark-cli；终端向导由 owner 自己运行。
+- 一键模式只做 Host 环境变量探测，既不执行也不依赖 lark-cli；需要向导时由 owner 用系统已装的
+  lark-cli skill 或其他方式自行提供 appId/secret 环境变量。
 - 插件管理不提供卸载；安装只接受 `@dsh-enhanced/*` 包名（不支持任意本地/git 源）。
 - 面板会列出 `owner-console` 自己的 bundle/entry：禁用它会隐藏这个入口，需用 `dsh plugin` 或 CLI
   重新启用（与 DSH 原生插件页语义一致）。

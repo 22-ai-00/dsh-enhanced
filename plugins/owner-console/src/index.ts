@@ -11,21 +11,15 @@ export { version }
 export const inject = ['typert']
 
 export interface OwnerConsoleConfig {
-  /** Remote entry: guided `lark-cli` setup, or a directly supplied app id. */
-  readonly feishuMode: 'lark-cli' | 'app'
-  /** Feishu app id for the direct mode; the secret stays in the keychain. */
+  /** Optional default Feishu app id used only as a fallback when the panel cannot
+   * discover one from the Host environment; the panel always configures the
+   * lark-channel connector entry, never a lark-cli binary. */
   readonly feishuAppId: string
-  /** Enable the local TraeX ACP route card. */
-  readonly enableTraex: boolean
 }
 
 export const Config: Schema<OwnerConsoleConfig> = Schema.object({
-  feishuMode: Schema.union(['lark-cli', 'app']).default('lark-cli')
-    .description('飞书接入方式：向导式 lark-cli，或直接填写 appId。'),
   feishuAppId: Schema.string().default('')
-    .description('直接模式下可选的飞书 appId；appSecret 不进入配置。'),
-  enableTraex: Schema.boolean().default(false)
-    .description('在控制台展示本机 TraeX 路由入口。'),
+    .description('可选的默认飞书 appId；仅作为一键探测的回退值。appSecret 不进入配置。'),
 })
 
 export function apply(ctx: Context, input: OwnerConsoleConfig): void {

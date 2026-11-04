@@ -9,7 +9,7 @@ export const inject = ['remote', 'slots']
 type RemoteResult<T> = Readonly<{ ok: true, value: T }> | Readonly<{ ok: false }>
 type ConsoleRemote = Readonly<{
   status(): Promise<RemoteResult<OwnerConsoleStatus>>
-  configureFeishu(mode: 'lark-cli' | 'app', appId: string, appSecretEnv: string,
+  configureFeishu(mode: 'env' | 'handle', appId: string, appSecretEnv: string,
     credentialHandle: string, account: string, tenant: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
   configureTraex(enabled: boolean, command: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
   configureBundle(entry: string, config: Readonly<Record<string, unknown>>): Promise<RemoteResult<OwnerConsoleWriteResult>>
@@ -56,11 +56,6 @@ function field(label: string, value: string, onChange: (next: string) => void, p
     el('span', {}, label),
     el('input', { value, placeholder, style: inputStyle,
       onChange: (event: { target: { value: string } }) => onChange(event.target.value) }))
-}
-
-function copyText(text: string): void {
-  const clipboard = (globalThis as unknown as { navigator?: { clipboard?: { writeText(value: string): Promise<void> } } }).navigator?.clipboard
-  void clipboard?.writeText(text).catch(() => undefined)
 }
 
 export function OwnerConsoleIcon() {
@@ -125,7 +120,7 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
   const feishuRows = pending
     ? el('p', { style: { margin: 0, color: muted } }, '…')
     : el('div', { style: gridStyle },
-      row('方式', status.feishu.mode === 'lark-cli' ? '环境变量 secret（lark-cli 向导）' : 'keychain secret（直接配置）'),
+      row('方式', status.feishu.mode === 'env' ? '环境变量 secret' : 'keychain secret'),
       row('入口', status.feishu.entry ?? '未安装 lark-channel'),
       row('连接', status.feishu.connected ? '已加载' : '未连接'),
       row('appId', status.feishu.appIdConfigured ? '已配置' : '未配置'))
@@ -138,13 +133,11 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
       field('tenant', tenant, setTenant, '保留当前 owner')),
     el('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
       el('button', { style: buttonStyle, disabled: busy,
-        onClick: () => void run(() => remote.configureFeishu('app', appId, secretEnv, secretHandle, account, tenant)) }, '应用配置'),
+        onClick: () => void run(() => remote.configureFeishu('handle', appId, secretEnv, secretHandle, account, tenant)) }, '应用配置'),
       el('button', { style: buttonStyle, disabled: busy,
-        onClick: () => void run(() => remote.configureFeishu('lark-cli', '', secretEnv, secretHandle, account, tenant)) }, '一键配置（从 Host 环境探测 appId）'),
-      el('button', { style: { ...buttonStyle, color: muted },
-        onClick: () => copyText(status?.feishu.setupCommand ?? 'dsh-lark-setup') }, '复制向导命令')),
+        onClick: () => void run(() => remote.configureFeishu('env', '', secretEnv, secretHandle, account, tenant)) }, '一键配置（从 Host 环境探测 appId）')),
     el('p', { style: { margin: 0, fontSize: 12, color: muted } },
-      `lark-cli 向导：${status?.feishu.setupCommand ?? 'dsh-lark-setup --profile web'}`))
+      '这里配置的是 lark-channel 通道；secret 只接受环境变量名或 keychain handle，明文不入配置。'))
 
   const traexRows = el('div', { style: gridStyle },
     row('入口', status?.traex.entry ?? '未安装 traex-acp-provider'),
