@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { TYPERT_REMOTE } from '../src/typert.ts'
-import { apply } from '../src/client.ts'
+import { apply, feishuSecretRefs } from '../src/client.ts'
 
 type Registration = Readonly<{ options: Record<string, unknown>, component: unknown }>
 
@@ -38,6 +38,13 @@ function fakeContext(registrations: Registration[], disposed: string[]) {
 }
 
 describe('owner console client', () => {
+  it('submits exactly the secret reference the owner picked', () => {
+    expect(feishuSecretRefs('env', 'LARK_APP_SECRET', 'typed-handle'))
+      .toEqual({ appSecretEnv: 'LARK_APP_SECRET', credentialHandle: '' })
+    expect(feishuSecretRefs('handle', 'ignored-env', 'typed-handle'))
+      .toEqual({ appSecretEnv: '', credentialHandle: 'typed-handle' })
+  })
+
   it('registers the sidebar entry and the keyed main panel, then disposes both', async () => {
     const registrations: Registration[] = [], disposed: string[] = []
     const { ctx, unmount } = fakeContext(registrations, disposed)

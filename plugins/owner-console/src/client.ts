@@ -36,6 +36,13 @@ const el = (tag: string, props: Props, ...children: readonly unknown[]) => child
   ? jsx(tag as never, props as never)
   : jsx(tag as never, { ...props, children: children.length === 1 ? children[0] : children } as never)
 
+/** Only the reference the owner picked is submitted; the other stays empty. */
+export function feishuSecretRefs(source: 'env' | 'handle', env: string,
+  handle: string): Readonly<{ appSecretEnv: string, credentialHandle: string }> {
+  return source === 'env' ? { appSecretEnv: env, credentialHandle: '' } : { appSecretEnv: '', credentialHandle: handle }
+}
+
+const OWN_PACKAGE = '@dsh-enhanced/owner-console'
 const muted = 'var(--dsw-alias-label-primary-dimmed)'
 const panelStyle = { padding: '24px', maxWidth: 760, margin: '0 auto', display: 'grid', gap: 16 }
 const cardStyle = { border: '1px solid var(--dsw-alias-border-secondary)', borderRadius: 8, padding: 16 }
@@ -141,9 +148,15 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
       field('tenant', tenant, setTenant, '保留当前 owner')),
     el('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
       el('button', { style: buttonStyle, disabled: busy,
-        onClick: () => void run(() => remote.configureFeishu(appId, secretEnv, secretHandle, account, tenant, false)) }, '应用配置'),
+        onClick: () => {
+          const refs = feishuSecretRefs(secretSource, secretEnv, secretHandle)
+          void run(() => remote.configureFeishu(appId, refs.appSecretEnv, refs.credentialHandle, account, tenant, false))
+        } }, '应用配置'),
       el('button', { style: buttonStyle, disabled: busy,
-        onClick: () => void run(() => remote.configureFeishu('', secretEnv, secretHandle, account, tenant, true)) }, '一键配置（从 Host 环境探测 appId）')),
+        onClick: () => {
+          const refs = feishuSecretRefs(secretSource, secretEnv, secretHandle)
+          void run(() => remote.configureFeishu('', refs.appSecretEnv, refs.credentialHandle, account, tenant, true))
+        } }, '一键配置（从 Host 环境探测 appId）')),
     el('p', { style: { margin: 0, fontSize: 12, color: muted } },
       '这里配置的是 lark-channel 通道；secret 只接受环境变量名或 keychain handle，明文不入配置。'))
 
@@ -168,13 +181,16 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
         el('button', { style: buttonStyle, disabled: busy,
           onClick: () => void run(() => remote.setBundleEnabled(bundle.name, !bundle.enabled)) },
         bundle.enabled ? '停用' : '启用'),
-        el('button', { style: { ...buttonStyle, color: 'var(--dsw-alias-label-danger)' }, disabled: busy,
-          onClick: () => {
-            const ask = (globalThis as unknown as { confirm?: (message: string) => boolean }).confirm
-            if (ask === undefined || ask(`移除 ${bundle.name}？依赖会保留，可用 dsh plugin add 重新安装。`)) {
-              void run(() => remote.removeProjectBundle(bundle.name))
-            }
-          } }, '移除'))))
+        bundle.removable && bundle.name !== OWN_PACKAGE
+          ? el('button', { style: { ...buttonStyle, color: 'var(--dsw-alias-label-danger)' }, disabled: busy,
+            onClick: () => {
+              const ask = (globalThis as unknown as { confirm?: (message: string) => boolean }).confirm
+              // Without a confirmation channel the panel never performs the destructive step.
+              if (ask !== undefined && ask(`移除 ${bundle.name}？重新安装可用面板的安装入口。`)) {
+                void run(() => remote.removeProjectBundle(bundle.name))
+              }
+            } }, '移除')
+          : null)))
   const pluginRows = pending || status.plugins.length === 0
     ? el('p', { style: { margin: 0, color: muted } }, pending ? '…' : '没有已加载的本项目插件条目。')
     : el('div', { style: gridStyle }, ...status.plugins.map(plugin => el('div', {
