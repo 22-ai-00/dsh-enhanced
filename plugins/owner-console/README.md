@@ -40,6 +40,9 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
    探测到的 appId 写入同一份配置；否则回退为「复制向导命令」，在终端执行
    `dsh-lark-setup --profile <profile>` 完成官方向导后再回来启用。
 
+本插件不提供 lark-cli 路径选择：向导和 channel 都使用系统默认安装（`PATH` 中）的 lark-cli，
+由 DSH 自己的 setup 流程负责探测；面板只做环境探测和配置写入。
+
 写入要求 secret 引用二选一；同时给两个或都不给会被拒绝。写入前会检查那个环境变量在该
 Host 进程中确实存在，keychain handle 模式要求 `credentials-keychain` 已加载。
 account/tenant 留空时沿用条目里当前值（不会用默认值覆盖身份）；两者都为空才拒绝。
@@ -102,7 +105,8 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 - 面板会列出 `owner-console` 自己的 bundle/entry：禁用它会隐藏这个入口，需用 `dsh plugin` 或 CLI
   重新启用（与 DSH 原生插件页语义一致）。
 - 「开始对话 / 打开插件页」调用 DSH 客户端 `uiWorkspace.startSession()` 与 `layout.selectPanel()`；
-  它们依赖原生 Web 外壳，只在真实页面可用，未在自动化浏览器中验收。
+  两个服务在点击时惰性解析，缺少它们时入口与状态页仍注册，按钮只是无操作；依赖原生 Web 外壳，
+  未在自动化浏览器中验收。
 - 停用 bundle 只摘除 patch 层，依赖与包文件保留；彻底移除仍用 `dsh plugin remove`。
 - 面板显示的是 Host 侧真实注册状态，但「已加载」不等于飞书已通过认证或长连接在线。
 - 不校验 app secret；secret 的写入通道留给 keychain 切片。

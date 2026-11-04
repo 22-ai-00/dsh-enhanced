@@ -17,11 +17,7 @@ type ConsoleRemote = Readonly<{
   setPluginEnabled(entryId: string, enabled: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
   installProjectBundle(spec: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
 }>
-type NavigationRuntime = {
-  readonly layout: Readonly<{ selectPanel(panelId: string): void }>
-  readonly uiWorkspace: Readonly<{ startSession(): void }>
-}
-type SlotRuntime = NavigationRuntime & {
+type SlotRuntime = {
   readonly remote: Readonly<{ ownerConsole: ConsoleRemote }>
   readonly slots: {
     inject(name: string, factory: () => unknown): () => void
@@ -30,6 +26,7 @@ type SlotRuntime = NavigationRuntime & {
 }
 type ClientContext = {
   readonly remote: { readonly $mount: (value: unknown) => Promise<() => Promise<void>> }
+  readonly get: <T>(name: string) => T | undefined
   inject(dependencies: readonly string[], callback: (runtime: SlotRuntime) => unknown): { dispose(): Promise<void> }
 }
 
@@ -216,11 +213,22 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
 export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
   const unmount = await ctx.remote.$mount(TYPERT_REMOTE)
   try {
-    const injection = ctx.inject(['remote.ownerConsole', 'slots', 'layout', 'uiWorkspace'], runtime => {
+    // Core registration depends only on the remote namespace and the slot registry;
+    // navigation services are resolved lazily so an embedding without them still
+    // gets the sidebar entry and status page.
+    const injection = ctx.inject(['remote.ownerConsole', 'slots'], runtime => {
       const remote = runtime.remote.ownerConsole
       const navigation = {
-        openConversation: () => runtime.uiWorkspace.startSession(),
-        openPlugins: () => runtime.layout.selectPanel('plugins'),
+        openConversation: () => {
+          try {
+            ctx.get<{ startSession(): void }>('uiWorkspace')?.startSession()
+          } catch { /* native shell only; a missing workspace is not an error here */ }
+        },
+        openPlugins: () => {
+          try {
+            ctx.get<{ selectPanel(panelId: string): void }>('layout')?.selectPanel('plugins')
+          } catch { /* the native plugins page may not be registered in an embedding */ }
+        },
       }
       const panel = () => jsx(OwnerConsolePanel, { remote, navigation })
       const sidebar = runtime.slots.inject('sidebar.panellist', () => runtime.slots.register(

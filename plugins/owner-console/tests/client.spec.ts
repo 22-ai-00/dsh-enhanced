@@ -9,12 +9,14 @@ function fakeContext(registrations: Registration[], disposed: string[]) {
   return {
     ctx: {
       remote: { $mount: vi.fn(async (descriptor: unknown) => { expect(descriptor).toBe(TYPERT_REMOTE); return unmount }) },
+      get: (name: string) => name === 'layout'
+        ? { selectPanel: vi.fn() }
+        : name === 'uiWorkspace' ? { startSession: vi.fn() } : undefined,
       inject: (dependencies: readonly string[], callback: (runtime: never) => unknown) => {
-        expect(dependencies).toEqual(['remote.ownerConsole', 'slots', 'layout', 'uiWorkspace'])
+        expect(dependencies).toEqual(['remote.ownerConsole', 'slots'])
         const runtime = {
           remote: { ownerConsole: { status: vi.fn(async () => ({ ok: false as const })) } },
-          layout: { selectPanel: vi.fn() },
-          uiWorkspace: { startSession: vi.fn() },
+
           slots: {
             // Mirrors the renderer: inject and register both return callable disposers.
             inject: (name: string, factory: () => unknown) => {
