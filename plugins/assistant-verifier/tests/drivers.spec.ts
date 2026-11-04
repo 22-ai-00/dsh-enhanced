@@ -116,7 +116,7 @@ describe('independent verifier drivers', () => {
     const workspace = await directory(); const artifact = join(workspace, 'result.txt'); const program = join(workspace, 'escape.mjs'); const marker = join(workspace, 'descendant.pid')
     try {
       await writeFile(artifact, 'artifact')
-      await writeFile(program, `import { spawn } from 'node:child_process'; import { writeFile } from 'node:fs/promises'; const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: ['ignore', 'inherit', 'ignore'] }); await writeFile(${JSON.stringify(marker)}, String(child.pid)); child.unref(); process.exit(0)`)
+      await writeFile(program, `import { spawn } from 'node:child_process'; import { writeFile } from 'node:fs/promises'; const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], { detached: true, stdio: ['ignore', 'inherit', 'ignore'] }); await writeFile(${JSON.stringify(marker)}, String(child.pid)); child.unref(); process.exit(0)`)
       const [runner] = createVerifierAuthorities({ authorities: [{ kind: 'runner', id: 'runner', executable: realpathSync(process.execPath), fixedArgs: [program], timeoutMs: 50, maxOutputBytes: 1_024 }] })
       if (runner === undefined) throw new Error('missing runner')
       const criterion = { id: 'escape', kind: 'process-behavior' as const, authority: ref(runner), artifactPath: 'result.txt', stdin: '', expectedStdout: '', expectedExitCode: 0 }
