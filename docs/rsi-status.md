@@ -43,7 +43,11 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 - **写入即生效**：volatile 写入只更新 fiber 引用，面板写入后对目标条目执行 `fiber.update(持久化 raw config, true)` 重启一次，apex 会以新纯配置重建连接/provider；无法解析/重载时如实提示重启。
 - **只读安全边界**：读取严格查找 service、投影不返回 secret 明文、业务拒绝以 `applied:false + note` 返回并在面板显示、client 卸载后不再 setState。
 
-实现要点：`lark-channel`/`traex-acp-provider` 只在 owner 可编辑字段上标记 `.volatile()`，并在 schema 边界接受 volatile 引用、输出纯值；`lark-channel` 用 `secretSource` 在 callable 与 `~standard` 两条验证路径上屏蔽未选引用，并让非法配置 fail-soft（记录后保持 disabled，不炸 Loader 树）。该切片经过多轮独立 harness 复核（真实 Cordis Loader/Include、`dsh-settings`、`config-editor`、
+实现要点：`lark-channel`/`traex-acp-provider` 只在 owner 可编辑字段上标记 `.volatile()`，并在 schema 边界接受 volatile 引用、输出纯值；`lark-channel` 用 `secretSource` 在 callable 与 `~standard` 两条验证路径上屏蔽未选引用，并让非法配置 fail-soft（记录后保持 disabled，不炸 Loader 树）。飞书面板配置的是 `lark-channel` 通道；lark-cli 只是可随时安装的独立 skill，本插件既不调用它、
+不依赖它，也不管理其路径或安装。两条 secret 路径（环境变量 / keychain handle）由实际填写的引用决定，
+typert 参数顺序与 Host 方法签名对齐并有回归断言；Web client 构建产物通过 `__ModuleLoader__` 契约测试。
+
+该切片经过多轮独立 harness 复核（真实 Cordis Loader/Include、`dsh-settings`、`config-editor`、
 `plugin-manager`）：逐项验证 describe/mutate/重启/双模式切换、bundle 与条目启停、安装转发与拒绝边界，
 并修正了页面把 `restart-required` 当成失败的问题；导航快捷入口再经一次静态复核（APPROVE，确认
 `layout`/`uiWorkspace` 服务与入口 id）。复核和根检查还暴露并修复了三个稳定性缺陷：`usage-runtime`
@@ -81,5 +85,7 @@ WorkItems 原生 fixture 用等待代替显式信号 sweep 导致准入超时。
 | `124a52a1`（39 包，管理与稳定性切片） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2402.39 秒 | 11,912 / 309 | 757 / 32 | `db64489406a869403ee5528a1ecc683abe4c18e23e4537459f7805510c8e90b0` |
 | `2c295a40`（39 包，侧栏对话入口切片） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1192.69 秒 | 10,299 / 1,925 | 704 / 85 | `f22f854e017dc819cc09d152820759f2ffa32ca36c3286756066039da7be5838` |
 | `2c295a40`（39 包，侧栏对话入口切片） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2398.93 秒 | 11,912 / 309 | 757 / 32 | `6f6d7497f4e44185f153ed211e283f4241e041d370965369018e9d332beefea5` |
+| `4b78dc68`（39 包，通道语义与 RPC 对齐） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1248.46 秒 | 10,301 / 1,925 | 705 / 85 | `b82051454ba494b547b6fa48754e9a366cf0bc4d143dd6965fd55156294f2bb7` |
+| `4b78dc68`（39 包，通道语义与 RPC 对齐） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2412.75 秒 | 11,914 / 309 | 758 / 32 | `17d5b7e25bc80b7e17039cbec74745feecca54386986867aaf1aab496e7232c9` |
 
-两端覆盖 manifest、零警告 lint、包构建和类型检查、测试组及唯一 dry-run pack（38 包时 39 测试组；39 包时 40 测试组）；修改涉及的公开产物逐项核对入包，源码前后同一提交且工作树干净。Linux `TMPDIR=/data00/home/jiataorui/t`。准确命令与结果见 `docs/evidence/verification-d8c9fdd2/`、`docs/evidence/verification-94b86b61/` 、`docs/evidence/verification-da5f8d42/` 、`docs/evidence/verification-124a52a1/` 与 `docs/evidence/verification-2c295a40/`；Mac 原始日志在本地，Linux 原始日志留在远端同路径。Linux attempt 1 的失败原因是缺少测试运行时环境而非产品缺陷，已保留。跳过项、真实模型/Bot、活服务升级和长期收益不计为已验收。
+两端覆盖 manifest、零警告 lint、包构建和类型检查、测试组及唯一 dry-run pack（38 包时 39 测试组；39 包时 40 测试组）；修改涉及的公开产物逐项核对入包，源码前后同一提交且工作树干净。Linux `TMPDIR=/data00/home/jiataorui/t`。准确命令与结果见 `docs/evidence/verification-d8c9fdd2/`、`docs/evidence/verification-94b86b61/` 、`docs/evidence/verification-da5f8d42/` 、`docs/evidence/verification-124a52a1/` 、`docs/evidence/verification-2c295a40/` 与 `docs/evidence/verification-4b78dc68/`；Mac 原始日志在本地，Linux 原始日志留在远端同路径。Linux attempt 1 的失败原因是缺少测试运行时环境而非产品缺陷，已保留。跳过项、真实模型/Bot、活服务升级和长期收益不计为已验收。
