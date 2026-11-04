@@ -28,7 +28,10 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 `@dsh-enhanced/owner-console` 已提交 `dev`，精确提交 `da5f8d42` 通过双端根检查。左侧栏「控制台」入口 + 一页面板，设计沿用 Superagent 原型的注意力预算（一页、只显示需要人处理的事）。当前能力：
 
-- **飞书两种对接方式**：直接配置（appId + 恰好一个 secret 引用：环境变量名或 keychain handle；secret 明文不接受）与一键配置（从 Host 环境 `LARK_APP_ID`/`FEISHU_APP_ID` 或插件配置的 appId 探测，否则提示运行 `dsh-lark-setup` 向导）。写入用 `settings.mutate` 的显式 set/unset + `secretSource` 判别字段，解决 bundle 层默认 `credentialHandle` 无法被 unset 清掉的继承问题；account/tenant 留空时沿用现值，不静默改身份。
+- **左侧栏即用**：面板顶部「开始对话」直接进入当前工作区的智能体会话（`uiWorkspace.startSession()`），
+  「打开插件页」跳到 DSH 原生插件页（`layout.selectPanel('plugins')`）；两个客户端服务在点击时惰性解析，
+  缺失时入口与状态页仍注册、按钮无操作。
+- **飞书两种对接方式**：直接配置（appId + 恰好一个 secret 引用：环境变量名或 keychain handle；secret 明文不接受）与一键配置（从 Host 环境 `LARK_APP_ID`/`FEISHU_APP_ID` 或插件配置的 appId 探测，否则提示运行 `dsh-lark-setup` 向导）。lark-cli 不单独指定路径：使用系统默认安装（`PATH`）的版本，由 DSH setup 流程探测，面板不做路径选择。写入用 `settings.mutate` 的显式 set/unset + `secretSource` 判别字段，解决 bundle 层默认 `credentialHandle` 无法被 unset 清掉的继承问题；account/tenant 留空时沿用现值，不静默改身份。
 - **TraeX**：只切换 `traex-acp-provider` 条目的 enabled/command。
 - **本项目插件管理（pluginManager）**：列出本项目 bundle 层（版本/安装/启用/可移除）与已加载条目
   （entryId/模块名/fiber 阶段），一键启用/停用；安装只接受 `@dsh-enhanced/<name>` 包名，走 DSH 自己的
@@ -39,9 +42,10 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 实现要点：`lark-channel`/`traex-acp-provider` 只在 owner 可编辑字段上标记 `.volatile()`，并在 schema 边界接受 volatile 引用、输出纯值；`lark-channel` 用 `secretSource` 在 callable 与 `~standard` 两条验证路径上屏蔽未选引用，并让非法配置 fail-soft（记录后保持 disabled，不炸 Loader 树）。该切片经过多轮独立 harness 复核（真实 Cordis Loader/Include、`dsh-settings`、`config-editor`、
 `plugin-manager`）：逐项验证 describe/mutate/重启/双模式切换、bundle 与条目启停、安装转发与拒绝边界，
-并修正了页面把 `restart-required` 当成失败的问题。复核还暴露并修复了两个与根检查稳定性相关的问题：
-`usage-runtime` 假时钟跨分钟边界会多认领一次 usage-scan，以及 isolation 归档 CLI 在实时写入时就源账本
-大小做了过严断言。两处修复后各自连跑 10+ 次稳定。
+并修正了页面把 `restart-required` 当成失败的问题；导航快捷入口再经一次静态复核（APPROVE，确认
+`layout`/`uiWorkspace` 服务与入口 id）。复核和根检查还暴露并修复了三个稳定性缺陷：`usage-runtime`
+假时钟跨分钟边界会多认领一次 usage-scan、isolation 归档 CLI 对实时写入源账本的大小断言过严、
+WorkItems 原生 fixture 用等待代替显式信号 sweep 导致准入超时。三处修复后各自连跑 3~15 次稳定。
 
 尚未完成：lark-cli 向导的自动化（当前只探测环境并给出命令）、插件卸载与从面板选择任意 registry 源
 （出于安全只允许本项目包名）、真实飞书长连接验收（按用户要求延后，未连活 Bot）。远端真实使用验收仍由
@@ -72,5 +76,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 | `da5f8d42`（39 包，控制台配置切片） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2447.74 秒 | 11,911 / 309 | 757 / 32 | `7de6f6499152e3b0993c5333117aa67c98234cabefb7db2d0e9cd48da8f41c4a` |
 | `124a52a1`（39 包，管理与稳定性切片） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1078.29 秒 | 10,299 / 1,925 | 704 / 85 | `1cb290d3fe62ba3130cb787c18bbaa1cd88198c4d5a64f2a5291baa9fb6d8acc` |
 | `124a52a1`（39 包，管理与稳定性切片） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2402.39 秒 | 11,912 / 309 | 757 / 32 | `db64489406a869403ee5528a1ecc683abe4c18e23e4537459f7805510c8e90b0` |
+| `2c295a40`（39 包，侧栏对话入口切片） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1192.69 秒 | 10,299 / 1,925 | 704 / 85 | `f22f854e017dc819cc09d152820759f2ffa32ca36c3286756066039da7be5838` |
+| `2c295a40`（39 包，侧栏对话入口切片） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2398.93 秒 | 11,912 / 309 | 757 / 32 | `6f6d7497f4e44185f153ed211e283f4241e041d370965369018e9d332beefea5` |
 
-两端覆盖 manifest、零警告 lint、包构建和类型检查、测试组及唯一 dry-run pack（38 包时 39 测试组；39 包时 40 测试组）；修改涉及的公开产物逐项核对入包，源码前后同一提交且工作树干净。Linux `TMPDIR=/data00/home/jiataorui/t`。准确命令与结果见 `docs/evidence/verification-d8c9fdd2/`、`docs/evidence/verification-94b86b61/` 、`docs/evidence/verification-da5f8d42/` 与 `docs/evidence/verification-124a52a1/`；Mac 原始日志在本地，Linux 原始日志留在远端同路径。Linux attempt 1 的失败原因是缺少测试运行时环境而非产品缺陷，已保留。跳过项、真实模型/Bot、活服务升级和长期收益不计为已验收。
+两端覆盖 manifest、零警告 lint、包构建和类型检查、测试组及唯一 dry-run pack（38 包时 39 测试组；39 包时 40 测试组）；修改涉及的公开产物逐项核对入包，源码前后同一提交且工作树干净。Linux `TMPDIR=/data00/home/jiataorui/t`。准确命令与结果见 `docs/evidence/verification-d8c9fdd2/`、`docs/evidence/verification-94b86b61/` 、`docs/evidence/verification-da5f8d42/` 、`docs/evidence/verification-124a52a1/` 与 `docs/evidence/verification-2c295a40/`；Mac 原始日志在本地，Linux 原始日志留在远端同路径。Linux attempt 1 的失败原因是缺少测试运行时环境而非产品缺陷，已保留。跳过项、真实模型/Bot、活服务升级和长期收益不计为已验收。
