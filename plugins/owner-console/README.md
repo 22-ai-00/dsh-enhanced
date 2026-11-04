@@ -117,7 +117,10 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
   `dsh plugin allow-version … --accept-risk`；该路径下同样验证了入口、面板与 typert 状态。
   飞书/TraeX 三态卡片（未安装→安装、已安装未启用→启用、活动→配置）也在真实 GUI 中复验：
   启用动作返回 restart-required 并提示重启。登录态与真实飞书/模型连接仍未验收。
-  安装只接受 `@dsh-enhanced/*` 包名（不支持任意本地/git 源）。
+  本地 `pnpm pack` 产物（非 workspace 链接）经 `dsh plugin add <tgz>` 安装也已验证：随包依赖
+  `@deepseek-ai/schemastery` / `zod` 由 pnpm 一并装入，入口、面板与插件页已安装行正常；
+  从 registry 发布后安装尚未验证。
+  面板安装只接受 `@dsh-enhanced/*` 包名（不支持任意本地/git 源）。
 - 面板会列出 `owner-console` 自己的 bundle/entry：禁用它会隐藏这个入口，需用 `dsh plugin` 或 CLI
   重新启用（与 DSH 原生插件页语义一致）。
 - 「开始对话 / 打开插件页」调用 DSH 客户端 `uiWorkspace.startSession()` 与 `layout.selectPanel()`；

@@ -67,6 +67,9 @@ live Harness app 的 `0.2.1-rc.5` 需要 owner 显式风险豁免；已在该版
 `allow-version --accept-risk` 安装并验证入口、面板与 typert 状态（同证据目录 `console-panel-rc5-exempt.png`）。
 飞书/TraeX 三态卡片也在真实 GUI 中复验：未安装→「安装 lark-channel（含依赖）」、已安装未启用→
 「启用 lark-channel」、点击启用后得到 restart-required 提示；活动态→配置表单（见 `setup-states.md`）。
+本地打包产物（`pnpm pack` tarball，与全新构建逐文件一致，非 workspace 链接）经 `dsh plugin add` 安装同样通过：
+随包依赖 `schemastery`/`zod` 由 pnpm 装入，入口、面板与原生插件页已安装行正常（见 `tarball-install.md`）；
+从 registry 发布后安装未验证。
 
 尚未完成：从面板选择任意 registry 源（出于安全只允许本项目包名）、真实飞书长连接验收
 （按用户要求延后，未连活 Bot）。lark-cli 不在本插件范围内，其安装/配置由 owner 自行通过 skill 完成。
@@ -74,7 +77,7 @@ live Harness app 的 `0.2.1-rc.5` 需要 owner 显式风险豁免；已在该版
 
 ## 待办与延后验收
 
-1. 控制台插件各切片（`94b86b61`、`da5f8d42`、`124a52a1`、`2c295a40`、`4b78dc68`、`cea6beb1`、`c0f077e2`、`44ec103c`）均已双端通过精确根检查，并完成真实 Web GUI 冒烟（含三态卡片）。下一验收受 live 环境限制：真实飞书长连接、登录态与远端使用需 owner 在活 Host 上显式授权（当前按用户要求延后）。
+1. 控制台插件各切片（`94b86b61`、`da5f8d42`、`124a52a1`、`2c295a40`、`4b78dc68`、`cea6beb1`、`c0f077e2`、`44ec103c`）均已双端通过精确根检查，并完成真实 Web GUI 冒烟（含三态卡片与本地打包产物安装）。下一验收受 live 环境限制：真实飞书长连接、登录态与远端使用需 owner 在活 Host 上显式授权（当前按用户要求延后）。
 2. 非空 review 历史 CAS/封存已有组件专项；installer、Host head、运行时消费者及非空 adoption 迁移资格仍缺。旧 Docker 证书不能作为 Linux 资格；owner 升级的空业务采用 CAS 不代表非空迁移、复制恢复或 native→native 已支持。
 3. Router 跨信道协调、订阅直通和长期普通使用收益尚未完整验收。现有持久任务不代表完整自主工程成长；两端此前五次真实模型运行额度已用尽，不重置失败或预算。
 4. 用户已延后飞书机器人实连和后续真实使用验收；正式连接门保留。完整临时双服务升级、就绪、回滚及活 Home 切换未验收，暂不操作活服务。
