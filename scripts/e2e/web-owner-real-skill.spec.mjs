@@ -10,7 +10,7 @@ import { promisify } from 'node:util'
 import { parseDocument, isMap, isSeq } from 'yaml'
 import { objective, criteria, setConfig, contracts, jobs } from './web-owner-real-helpers.mjs'
 import { allowedSkillExperimentTool } from './web-owner-real-skill-guard.mjs'
-import { readSessionAudit } from './web-owner-real-audit.mjs'
+import { readSessionAudit, sessionArtifactPath } from './web-owner-real-audit.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
 import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
@@ -37,8 +37,7 @@ function appendPolicy(doc, rules) {
 function eventsFor(audit, name) { return audit.events.filter(event => event.type === 'tool/call' && event.data.name === name) }
 function modelCalls(path) { return readFile(path, 'utf8').catch(() => '').then(text => text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line))) }
 async function sessionEvents(home, workspace, sessionId) {
-  const project = `--${workspace.slice(1).replaceAll('/', '-')}--`
-  const { stdout } = await exec('zstd', ['-q', '-dc', join(home, 'sessions', project, sessionId, 'session.jsonl.zstd')], { encoding: 'utf8', timeout: 10_000, maxBuffer: 32 * 1024 * 1024 })
+  const { stdout } = await exec('zstd', ['-q', '-dc', '--', await sessionArtifactPath(home, workspace, sessionId)], { encoding: 'utf8', timeout: 10_000, maxBuffer: 32 * 1024 * 1024 })
   return stdout.split('\n').filter(Boolean).map(line => JSON.parse(line))
 }
 async function selectOriginalSession(page) {

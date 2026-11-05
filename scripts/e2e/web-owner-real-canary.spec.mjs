@@ -16,24 +16,14 @@ import { contracts, jobs, setConfig } from './web-owner-real-helpers.mjs'
 import { selectRestoredSession } from './repo-session-navigation.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
 import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { sessionArtifactPath } from './web-owner-real-audit.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const task = templateRenderCanaryTask
 const exec = promisify(execFile)
 
-function projectKey(cwd) {
-  let readable = '', separatorRun = false
-  for (let index = 0; index < cwd.length; index += 1) {
-    const code = cwd.charCodeAt(index), value = cwd[index]
-    if (value === '/' || value === '\\' || value === ':') { if (!separatorRun) readable += '-'; separatorRun = true; continue }
-    separatorRun = false
-    readable += /^[A-Za-z0-9._-]$/u.test(value) ? value : `~${code.toString(16).toUpperCase().padStart(4, '0')}`
-  }
-  return `--${(readable.replace(/^-+/u, '') || 'root').slice(0, 251)}--`
-}
-
 async function sessionEvents(home, workspace, sessionId) {
-  const path = join(home, 'sessions', projectKey(workspace), sessionId.startsWith('session-') ? sessionId : `session-${sessionId}`, 'session.jsonl.zstd')
+  const path = await sessionArtifactPath(home, workspace, sessionId)
   const info = await lstat(path)
   if (!info.isFile() || info.size > 32 * 1024 * 1024) throw new Error('canary Session artifact is not a bounded regular file')
   const { stdout } = await exec('zstd', ['-q', '-dc', '--', path], { encoding: 'utf8', timeout: 10_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true })

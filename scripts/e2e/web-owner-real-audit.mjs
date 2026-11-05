@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { lstat } from 'node:fs/promises'
+import { lstat, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
@@ -7,17 +7,39 @@ import { promisify } from 'node:util'
 const exec = promisify(execFile)
 const objective = 'Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.'
 
-function projectKey(cwd) {
+/** Readable project directory key; mirrors dsh-session-persistence-jsonl projectKey ('~' is escaped). */
+export function projectKey(cwd) {
   if (typeof cwd !== 'string' || cwd.length === 0) throw new Error('workspace must be a non-empty path')
   let readable = ''; let separatorRun = false
   for (let index = 0; index < cwd.length; index += 1) {
     const code = cwd.charCodeAt(index); const value = cwd[index]
     if (value === '/' || value === '\\' || value === ':') { if (!separatorRun) readable += '-'; separatorRun = true; continue }
     separatorRun = false
-    readable += /^[A-Za-z0-9._-]$/u.test(value) ? value : `~${code.toString(16).toUpperCase().padStart(4, '0')}`
+    readable += value !== '~' && /^[A-Za-z0-9._-]$/u.test(value) ? value : `~${code.toString(16).toUpperCase().padStart(4, '0')}`
   }
-  return `--${(readable.replace(/^-+/, '') || 'root').slice(0, 251)}--`
+  return `--${(readable.replace(/^-+/u, '') || 'root').slice(0, 251)}--`
 }
+
+const GENERATION = /^session(?:\.v([1-9][0-9]*))?\.jsonl\.zstd$/u
+/**
+ * Resolve the current Session format generation artifact. Older Hosts write
+ * `session.jsonl.zstd`; newer ones write `session.vN.jsonl.zstd` and may keep
+ * older immutable generations beside it, so the highest canonical N wins.
+ */
+export async function sessionArtifactPath(home, workspace, sessionId) {
+  if (typeof home !== 'string' || typeof sessionId !== 'string' || !/^[A-Za-z0-9-]+$/u.test(sessionId)) throw new Error('home and sessionId are invalid')
+  const directory = join(home, 'sessions', projectKey(workspace), sessionId.startsWith('session-') ? sessionId : `session-${sessionId}`)
+  let best
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const match = entry.isFile() ? GENERATION.exec(entry.name) : null
+    if (match === null) continue
+    const version = match[1] === undefined ? 0 : Number(match[1])
+    if (Number.isSafeInteger(version) && (best === undefined || version > best.version)) best = { version, name: entry.name }
+  }
+  if (best === undefined) throw new Error('Session directory has no committed generation artifact')
+  return join(directory, best.name)
+}
+
 function compact(event) {
   const data = event.data && typeof event.data === 'object' && !Array.isArray(event.data) ? event.data : {}
   if (event.type === 'tool/call') {
@@ -47,8 +69,7 @@ function compact(event) {
 
 /** Read the bounded synthetic Web test session: selected tool metadata and assistant replies. */
 export async function readSessionAudit(home, workspace, sessionId) {
-  if (typeof home !== 'string' || typeof sessionId !== 'string' || !/^[A-Za-z0-9-]+$/u.test(sessionId)) throw new Error('home and sessionId are invalid')
-  const path = join(home, 'sessions', projectKey(workspace), sessionId.startsWith('session-') ? sessionId : `session-${sessionId}`, 'session.jsonl.zstd')
+  const path = await sessionArtifactPath(home, workspace, sessionId)
   const stat = await lstat(path)
   if (!stat.isFile() || stat.size > 32 * 1024 * 1024) throw new Error('session artifact is not a bounded regular file')
   const { stdout } = await exec('zstd', ['-q', '-dc', '--', path], { encoding: 'utf8', timeout: 10_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true })
