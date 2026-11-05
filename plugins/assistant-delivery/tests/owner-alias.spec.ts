@@ -7,6 +7,7 @@ import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, test } from 'vitest'
 import { AssistantDeliveryService } from '../src/service.ts'
 import { DeliveryStore } from '../src/store.ts'
@@ -68,7 +69,7 @@ async function fixture() {
   const ownerSide = await agentFor(ownerConversation, owner, 'owner-session')
   const aliasSide = await agentFor(aliasConversation, alias, 'alias-session')
   const link = () => store.linkPrincipal({ owner, linked: alias, expectedLinkedVersion: store.getPrincipal(alias)!.version })
-  return { ctx, service, store, pair, candidate, ownerSide, aliasSide, link }
+  return { ctx, service, store, pair, candidate, ownerSide, aliasSide, link, databasePath: join(root, 'delivery.sqlite') }
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>
@@ -215,6 +216,39 @@ test('revoking the owner detaches its links: reactivating the same owner record 
   const otherOwnerLinks = f.store.getPrincipal(owner)!
   f.store.revokePrincipal(aliasRow.id, aliasRow.version)
   expect(f.store.getPrincipal(alias)).toMatchObject({ status: 'revoked', linkedToId: otherOwnerLinks.id })
+})
+
+test('opening the store detaches legacy links rooted in a revoked owner, idempotently', async () => {
+  const f = await fixture()
+  f.link()
+  const bystander = f.pair(other)
+  f.store.linkPrincipal({ owner, linked: other, expectedLinkedVersion: bystander.version })
+  const root = f.store.getPrincipal(owner)!
+  // Simulate a pre-change revoke: the owner row is revoked but its links were left in place.
+  const raw = new DatabaseSync(f.databasePath)
+  raw.prepare("UPDATE delivery_principals SET status = 'revoked', version = version + 1 WHERE id = ?").run(root.id)
+  raw.close()
+  const aliasBefore = f.store.getPrincipal(alias)!, otherBefore = f.store.getPrincipal(other)!
+  f.store.revokePrincipal(otherBefore.id, otherBefore.version)
+  expect(aliasBefore).toMatchObject({ status: 'active', linkedToId: root.id })
+
+  const reopened = new DeliveryStore({ path: f.databasePath })
+  const detached = reopened.getPrincipal(alias)!
+  expect(detached).toMatchObject({ role: 'linked', status: 'active', version: aliasBefore.version + 1 })
+  expect(detached.linkedToId).toBeUndefined()
+  // Revoked linked rows are not touched.
+  expect(reopened.getPrincipal(other)).toMatchObject({ status: 'revoked', linkedToId: root.id, version: otherBefore.version + 1 })
+  reopened.close()
+  const again = new DeliveryStore({ path: f.databasePath })
+  expect(again.getPrincipal(alias)).toEqual(detached)
+  again.close()
+
+  // A link rooted in the current active owner survives a reopen unchanged.
+  const healthy = await fixture()
+  const linked = healthy.link()
+  const healthyReopened = new DeliveryStore({ path: healthy.databasePath })
+  expect(healthyReopened.getPrincipal(alias)).toEqual(linked)
+  healthyReopened.close()
 })
 
 test('an alias binding in another workspace or a rotated alias binding is not an alias route', async () => {

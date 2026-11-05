@@ -2218,6 +2218,26 @@ export class DeliveryStore {
       this.closed = true
       throw new DeliveryStoreError('conflict', 'workflow trace source authority is missing or stale')
     }
+    this.detachLinksOfInactiveOwners(now)
+  }
+
+  /**
+   * Idempotent startup repair for links written before revoking an owner
+   * detached them: an active linked principal whose root is not the active
+   * owner yields no alias receipt today, but a later reactivation of that
+   * owner record would silently restore it. Detach exactly those rows, as
+   * `revokePrincipal` now does. No schema change; a no-op once clean. Links
+   * whose owner was already revoked and reactivated before this repair are
+   * indistinguishable from fresh links and are not touched.
+   */
+  private detachLinksOfInactiveOwners(now: number): void {
+    this.transaction(() => {
+      this.database.prepare(`
+        UPDATE delivery_principals SET linked_to_id = NULL, updated_at = ?, version = version + 1
+        WHERE role = 'linked' AND status = 'active' AND linked_to_id IS NOT NULL
+          AND linked_to_id NOT IN (SELECT id FROM delivery_principals WHERE role = 'owner' AND status = 'active')
+      `).run(now)
+    })
   }
 
   instanceId(): string {
@@ -6622,25 +6642,32 @@ export class DeliveryStore {
     expectedLinkedVersion: number
   }): DeliveryPrincipal {
     this.assertOpen()
-    const owner = this.getPrincipal(input.owner)
-    const linked = this.getPrincipal(input.linked)
-    if (owner?.status !== 'active' || owner.role !== 'owner') {
-      throw new DeliveryStoreError('unauthorized-principal', 'principal link requires an active owner')
-    }
-    if (linked?.status !== 'active' || linked.id === owner.id) {
-      throw new DeliveryStoreError('unauthorized-principal', 'linked principal must be a distinct active principal')
-    }
-    if (linked.version !== input.expectedLinkedVersion) {
-      throw new DeliveryStoreError('version-conflict', 'linked principal version changed')
-    }
-    if (linked.linkedToId === owner.id) return linked
     const now = this.now()
-    const changed = this.database.prepare(`
-      UPDATE delivery_principals SET role = 'linked', linked_to_id = ?, updated_at = ?, version = version + 1
-      WHERE id = ? AND version = ? AND status = 'active'
-    `).run(owner.id, now, linked.id, input.expectedLinkedVersion)
-    if (changed.changes !== 1) throw new DeliveryStoreError('version-conflict', 'linked principal version changed')
-    return this.getPrincipal(input.linked)!
+    // One writer transaction: a concurrent owner revoke (possibly from another
+    // process on the same database) must either detach this link or make the
+    // link fail, never leave a link rooted in a revoked owner that a later
+    // reactivation of the same record would silently restore.
+    return this.transaction(() => {
+      const owner = this.getPrincipal(input.owner)
+      const linked = this.getPrincipal(input.linked)
+      if (owner?.status !== 'active' || owner.role !== 'owner') {
+        throw new DeliveryStoreError('unauthorized-principal', 'principal link requires an active owner')
+      }
+      if (linked?.status !== 'active' || linked.id === owner.id) {
+        throw new DeliveryStoreError('unauthorized-principal', 'linked principal must be a distinct active principal')
+      }
+      if (linked.version !== input.expectedLinkedVersion) {
+        throw new DeliveryStoreError('version-conflict', 'linked principal version changed')
+      }
+      if (linked.linkedToId === owner.id) return linked
+      const changed = this.database.prepare(`
+        UPDATE delivery_principals SET role = 'linked', linked_to_id = ?, updated_at = ?, version = version + 1
+        WHERE id = ? AND version = ? AND status = 'active'
+          AND EXISTS (SELECT 1 FROM delivery_principals WHERE id = ? AND role = 'owner' AND status = 'active')
+      `).run(owner.id, now, linked.id, input.expectedLinkedVersion, owner.id)
+      if (changed.changes !== 1) throw new DeliveryStoreError('version-conflict', 'linked principal version changed')
+      return this.getPrincipal(input.linked)!
+    })
   }
 
   resolveInbox(input: {

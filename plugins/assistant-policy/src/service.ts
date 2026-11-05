@@ -1222,15 +1222,16 @@ export class AssistantPolicyService extends Service {
       resource,
       context: { initiator: authority?.initiator ?? 'foreground' },
     }
-    let decision: PolicyDecision
-    if (!validPartitionPrincipal(options.principal) || authority?.principal !== options.principal) {
+    // Evaluate first so every rule/emergency-stop denial carries exactly the
+    // reason `authorizeAgent` would return; only an otherwise-allowed request
+    // can fail on the partition principal. Nothing is charged on any denial.
+    let decision = this.evaluate(request)
+    if (decision.effect === 'allow'
+      && (!validPartitionPrincipal(options.principal) || authority?.principal !== options.principal)) {
       decision = denial('budget-principal-mismatch')
-    } else {
-      decision = this.evaluate(request)
-      if (decision.effect === 'allow' && decision.budget !== undefined) {
-        decision = this.consumeAuthorizationBudget(request.subject, decision, options.idempotencyKey, options.principal)
-        if (decision.effect === 'allow') decision = { ...decision, budgetPrincipal: options.principal }
-      }
+    } else if (decision.effect === 'allow' && decision.budget !== undefined) {
+      decision = this.consumeAuthorizationBudget(request.subject, decision, options.idempotencyKey, options.principal)
+      if (decision.effect === 'allow') decision = { ...decision, budgetPrincipal: options.principal }
     }
     this.ledger.appendAudit({
       actor: `${request.subject.kind}:${request.subject.id}`,

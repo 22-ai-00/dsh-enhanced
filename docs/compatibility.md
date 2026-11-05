@@ -6,6 +6,14 @@ WorkItems schema 10 只新增只追加的 `work_item_intake` 表、其内容摘�
 
 该账本默认关闭：只有 `enabled: true` 且显式 `intakeLedger.enabled: true` 时，Host-only `recordIntake` 才写入；observe 模式可用，不准入工作项、不唤醒 worker、不调用 Delivery 或模型。强度分级中名单同时限定寄址与线程跟进，非白名单跟进为 ignore/filtered（`follow-up-not-allowlisted`）。行只保存来源、事件 ID、决策/原因码、强度、布尔信号、可选的调用方 SHA-256 内容摘要与元数据摘要，不保存正文、标题或发送者身份。现有调用方、`admit` 与配置语义不变；当前没有入站插件调用该接口，lark-channel 的 mention gate 保持原样。
 
+## 别名 link 激活期与按 principal 预算（无 schema 变更）
+
+Delivery、Policy、WorkItems 均无 schema 变更，但别名只读访问的升级行为有两处收紧，须同批部署三者：
+
+- 跨渠道别名读取（`ownerRecall.linkedAliases`）现在要求 Policy 提供 `authorizeAgentForPrincipal`，且命中的 `inspect-work-items` 规则必须带 `budget`。升级前只配了无预算 `inspect-work-items` 规则的部署，升级后别名读取会被拒绝（`linked alias read requires a budgeted Policy rule`）；旧 Policy 与新 WorkItems 混用时拒绝为 `linked alias reads require per-principal Policy budgets`。精确 owner 读取不受影响，仍可使用无预算规则。恢复别名读取只需给该规则加 `budget` 并声明对应 budget。
+- 别名预算按 principal 独立分区（`principal-partition/v1:[baseScope, principal]`），沿用同一 budgetId 的 limit/period，不再消耗主人额度。不另设跨分区总上限：总量由 owner 显式名单限定为至多 `(1 + 名单长度) × limit`（≤ 9 份），升级后旧的共享计数不迁移，别名分区从零开始。需要更紧总量时，可为别名单独写带 `principal` 的规则和更小的 budget。
+- Delivery `revokePrincipal` 撤销 owner 时同事务解除所有仍 active 的 linked 别名（`linked_to_id` 置空、版本 +1），重新激活同一 owner record 不再恢复别名，须重新 link；`linkPrincipal` 改为单个写事务并在 UPDATE 中复核 owner 仍 active，并发撤销不会留下指向已撤销 owner 的 link。打开 Delivery 库时做一次幂等清理：解除 active linked 行中根不是当前 active owner 的 link（这类行升级前也无回执，仅防止日后重新激活时恢复）。升级前已经历撤销又重新激活、现指向 active owner 的 link 与新 link 无法区分，不会被清理；如需切断须另行撤销别名。已撤销的 linked 行不改动，之后以新的配对码重新配对时仍按原规则在根 owner active 时恢复 link（别名读取仍需 owner 名单）。
+
 ## 主人续办与精确生产终态（WorkItems 9 / Automations 17）
 
 WorkItems schema 9 新增不可变 continuation 记录，保存真实输入字节、父/根引用、历史上界和冻结执行合同；原工作项及历史保留。Automations schema 17 只为 run 增加可空、不可改写的 quiescence；历史 NULL 不回填。旧 writer 不得写入新库。退休快照及安装消费者保留 15/16，并明确接受 17；跨版本比较同时核对旧列投影摘要和新增非空值数量为零，同版本比较全部历史摘要，拒绝用补写 0/1伪造历史。
