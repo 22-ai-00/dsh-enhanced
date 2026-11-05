@@ -15,7 +15,7 @@ import { topologyRepairTask } from './real-repair-topology-fixture.mjs'
 import { contracts, jobs, setConfig } from './web-owner-real-helpers.mjs'
 import { selectRestoredSession } from './repo-session-navigation.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
-import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { acceptFirstRunNotice, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 import { sessionArtifactPath } from './web-owner-real-audit.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
@@ -139,7 +139,7 @@ test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workf
     observePage(activePage, http, transport, streams, frames)
     await activePage.goto(host.url).catch(() => { throw new Error('canary browser authentication failed (URL redacted)') })
     await expect(activePage).toHaveURL(`${new URL(host.url).origin}/`)
-    if (starts === 1) await activePage.getByRole('dialog', { name: firstRunNoticeName }).getByRole('button', { name: 'Continue', exact: true }).click()
+    if (starts === 1 || fresh) await acceptFirstRunNotice(activePage, { required: starts === 1 })
   }
   const createSession = async () => {
     const previous = new Set(query(deliveryPath, 'SELECT session_id FROM conversation_bindings').map(item => item.session_id))

@@ -9,6 +9,17 @@ const root = fileURLToPath(new URL('../../', import.meta.url))
 // First-run notice title differs by pinned DSH Host: 'Preview Notice' (0.2.x) and 'Internal Testing Notice' (older).
 export const firstRunNoticeName = /^(Preview Notice|Internal Testing Notice)$/
 /**
+ * Accept the first-run notice in a browser context. The first context must show
+ * it; DSH 0.2.x keeps the acknowledgement per browser context, so a fresh
+ * context after a Host restart shows it again while older Hosts may not.
+ */
+export async function acceptFirstRunNotice(page, { required = true } = {}) {
+  const notice = page.getByRole('dialog', { name: firstRunNoticeName })
+  if (!required && !await notice.waitFor({ state: 'visible', timeout: 10_000 }).then(() => true, () => false)) return
+  await notice.getByRole('button', { name: 'Continue', exact: true }).click()
+  await expect(notice).toBeHidden()
+}
+/**
  * Fill the composer and wait until Send is enabled and stays enabled. A late
  * settings/session re-render can clear a draft typed right after session
  * creation, so refill until the draft survives a short settle window.

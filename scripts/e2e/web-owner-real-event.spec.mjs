@@ -10,7 +10,7 @@ import { objective, criteria, setConfig, contracts, jobs, waitForVerifiedGoal } 
 import { isEventExperimentToolAllowed } from './web-owner-real-guard.mjs'
 import { readSessionAudit } from './web-owner-real-audit.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
-import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { acceptFirstRunNotice, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const sourceAutomationId = 'web-owner-real-event-source'
@@ -88,8 +88,7 @@ test('real configured route wakes one browser-owned verified goal from a durable
     try { await activePage.goto(host.url) } catch { throw new Error('Browser launch authentication failed (URL redacted)') }
     await expect(activePage).toHaveURL(`${new URL(host.url).origin}/`)
     authenticated = true
-    if (hostStarts === 1) await activePage.getByRole('dialog', { name: firstRunNoticeName })
-      .getByRole('button', { name: 'Continue', exact: true }).click()
+    if (hostStarts === 1 || fresh) await acceptFirstRunNotice(activePage, { required: hostStarts === 1 })
   }
   const prompt = async value => {
     const composer = activePage.getByLabel(/Describe what you want to build|Message or run a task/)
