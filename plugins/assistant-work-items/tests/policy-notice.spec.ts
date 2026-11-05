@@ -4,7 +4,7 @@ import { MALFORMED_AUTHORITY_REASON, MANDATE_RULE_CHANGED_REASON, WorkItemAuthor
 import { normalizeFollowUp, normalizePolicyChange, noticePolicyChange } from '../src/policy-notice.ts'
 import { WorkItemStore } from '../src/store.ts'
 import type { WorkItemExecuteDecision, WorkItemRecord } from '../src/types.ts'
-import { claim, harness, report, type Harness } from './fixtures.ts'
+import { admitted, claim, harness, report, type Harness } from './fixtures.ts'
 
 const RULE = 'inferred-review-admit'
 
@@ -58,6 +58,8 @@ describe('policy-change notices (WP21 slice 2)', () => {
     const fixture = await harness()
     allowBy(fixture, RULE)
     const queued = admit(fixture, 'decision-queued')
+    // Notices follow admission order; same-millisecond items tie on random ids.
+    fixture.advance(1)
     const claimed = admit(fixture, 'decision-claimed')
     claim(fixture, claimed.id)
     const ended = admit(fixture, 'decision-ended')
@@ -65,6 +67,8 @@ describe('policy-change notices (WP21 slice 2)', () => {
     report(fixture, ended.id, 'ready')
     const before = [queued, claimed].map(item => liveShape(fixture.store.findItemById(item.id)))
     const authorizeCalls = fixture.policy.requests.length
+    // Admission itself compares the named rule via evaluate first (slice 1).
+    const evaluateCalls = fixture.policy.evaluations.length
 
     allowBy(fixture, 'broad-allow')
     const result = noticePolicyChange(fixture.store, fixture.authority, change('policy-v2'))
@@ -81,7 +85,7 @@ describe('policy-change notices (WP21 slice 2)', () => {
     // No cancel, park, lease change or Policy side effect.
     expect([queued, claimed].map(item => liveShape(fixture.store.findItemById(item.id)))).toEqual(before)
     expect(fixture.policy.requests.length).toBe(authorizeCalls)
-    expect(fixture.policy.evaluations.length).toBe(2)
+    expect(fixture.policy.evaluations.length - evaluateCalls).toBe(2)
 
     const replay = noticePolicyChange(fixture.store, fixture.authority, change('policy-v2'))
     expect(replay).toMatchObject({ outcome: 'noticed', notified: [], alreadyNotified: [queued.id, claimed.id] })
@@ -153,6 +157,69 @@ describe('policy-change notices (WP21 slice 2)', () => {
     allowBy(fixture, 'broad-allow')
     const retried = noticePolicyChange(fixture.store, fixture.authority, change('v2'))
     expect(retried).toMatchObject({ outcome: 'noticed', notified: [{ itemId: item.id }], alreadyNotified: [malformed.id] })
+  })
+
+  test('a mandate that does not name its item is malformed for notices exactly as at dispatch', async () => {
+    const fixture = await harness()
+    allowBy(fixture, RULE)
+    const item = admit(fixture, 'decision-own')
+    const donor = admit(fixture, 'decision-donor')
+    // A well-formed basis copied from another item: usable alone, but not this item's.
+    tamper(fixture, 'UPDATE work_item SET authority_basis = (SELECT authority_basis FROM work_item WHERE id = ?) WHERE id = ?', donor.id, item.id)
+    const moved = fixture.store.findItemById(item.id)!
+    expect(fixture.authority.check(moved)).toMatchObject({ kind: 'revoked', reasonCode: MALFORMED_AUTHORITY_REASON })
+    const result = noticePolicyChange(fixture.store, fixture.authority, change('v2'))
+    expect(result).toMatchObject({ outcome: 'noticed', unaffected: 1, notified: [{ itemId: item.id, reasonCode: MALFORMED_AUTHORITY_REASON }] })
+  })
+
+  test('a pass larger than one page reports what remains and continues by cursor', async () => {
+    const fixture = await harness()
+    allowBy(fixture, RULE)
+    const items = ['decision-p1', 'decision-p2', 'decision-p3'].map(id => { fixture.advance(1); return admit(fixture, id) })
+    allowBy(fixture, 'broad-allow')
+    const first = noticePolicyChange(fixture.store, fixture.authority, change('v2'), 2)
+    expect(first).toMatchObject({ outcome: 'noticed', remaining: 1 })
+    if (first.outcome !== 'noticed') return
+    expect(first.notified.map(notice => notice.itemId)).toEqual([items[0]!.id, items[1]!.id])
+    expect(first.next).toEqual({ createdAt: items[1]!.createdAt, id: items[1]!.id })
+    // The cursor round-trips through the strict v1 input.
+    const rest = noticePolicyChange(fixture.store, fixture.authority,
+      normalizePolicyChange({ protocol: 'work-items/policy-change/v1', policyVersion: 'v2', after: first.next }), 2)
+    expect(rest).toMatchObject({ outcome: 'noticed', remaining: 0, next: null, notified: [{ itemId: items[2]!.id }] })
+    expect(() => normalizePolicyChange({ protocol: 'work-items/policy-change/v1', policyVersion: 'v2', after: { createdAt: -1, id: 'x' } }))
+      .toThrow(expect.objectContaining({ code: 'invalid-input' }))
+    expect(() => normalizePolicyChange({ protocol: 'work-items/policy-change/v1', policyVersion: 'v2', after: { createdAt: 1, id: 'x', more: 1 } }))
+      .toThrow(expect.objectContaining({ code: 'invalid-input' }))
+  })
+
+  test('a missing Policy writes nothing even when every live basis is judged locally', async () => {
+    const fixture = await harness()
+    allowBy(fixture, RULE)
+    const malformed = admit(fixture, 'decision-only-local')
+    tamper(fixture, 'UPDATE work_item SET authority_basis = ? WHERE id = ?',
+      JSON.stringify({ ...malformed.authority!, protocol: 'other/v1' }), malformed.id)
+    const none = new WorkItemAuthority({ policy: () => undefined })
+    expect(noticePolicyChange(fixture.store, none, change('v2'))).toEqual({ outcome: 'unavailable', detail: 'missing-policy' })
+    expect(fixture.store.policyNotices(malformed.id)).toEqual([])
+  })
+
+  test('a failing batch write records no notice at all and the retry writes them once', async () => {
+    const fixture = await harness()
+    allowBy(fixture, RULE)
+    const one = admit(fixture, 'decision-batch-1')
+    fixture.advance(1)
+    const two = admit(fixture, 'decision-batch-2')
+    allowBy(fixture, 'broad-allow')
+    const db = new DatabaseSync(fixture.config.databasePath)
+    try {
+      db.exec(`CREATE TRIGGER fail_second BEFORE INSERT ON work_item_event
+        WHEN NEW.kind = 'policy-change-noticed' AND NEW.item_id = '${two.id}' BEGIN SELECT RAISE(ABORT, 'disk full'); END`)
+    } finally { db.close() }
+    expect(() => noticePolicyChange(fixture.store, fixture.authority, change('v2'))).toThrow()
+    expect(fixture.store.policyNotices(one.id)).toEqual([])
+    tamper(fixture, 'DROP TRIGGER fail_second')
+    const retried = noticePolicyChange(fixture.store, fixture.authority, change('v2'))
+    expect(retried).toMatchObject({ outcome: 'noticed', notified: [{ itemId: one.id }, { itemId: two.id }] })
   })
 
   test('policy change input is strict', () => {
@@ -228,6 +295,8 @@ describe('follow-up ownership (WP21 slice 2)', () => {
     const first = admit(fixture, 'decision-a')
     const second = admit(fixture, 'decision-b')
     fixture.store.ownFollowUp(followUp(first.id, 'msg-a'))
+    // Release order follows ownership time; item ids alone are not ordered.
+    fixture.advance(1)
     fixture.store.ownFollowUp(followUp(second.id, 'msg-b'))
     for (const item of [first, second]) { claim(fixture, item.id); report(fixture, item.id, 'failed') }
 
@@ -247,6 +316,31 @@ describe('follow-up ownership (WP21 slice 2)', () => {
       reopened.close()
     }
     expect(fixture.store.releaseEndedFollowUps()).toEqual([])
+  })
+
+  test('the same message id on another work thread is a different follow-up; observed items own nothing', async () => {
+    const fixture = await harness()
+    const here = await admitted(fixture, { originBindingId: 'binding-origin-1' })
+    const there = await admitted(fixture, { originBindingId: 'binding-origin-2' })
+    expect(fixture.store.ownFollowUp(followUp(here.id, 'msg-shared'))).toMatchObject({ outcome: 'owned' })
+    expect(fixture.store.ownFollowUp(followUp(there.id, 'msg-shared', { bindingId: 'binding-origin-2' })))
+      .toMatchObject({ outcome: 'owned', followUp: { itemId: there.id, bindingId: 'binding-origin-2' } })
+
+    const shadow = await harness({ mode: 'observe' })
+    const observed = await admitted(shadow)
+    expect(observed.observed).toBe(true)
+    expect(shadow.store.ownFollowUp(followUp(observed.id, 'msg-shadow'))).toMatchObject({ outcome: 'item-ended' })
+    expect(shadow.store.followUps(observed.id)).toEqual([])
+  })
+
+  test('a withdrawn item releases its unprocessed follow-ups like any other end', async () => {
+    const fixture = await harness()
+    const item = await admitted(fixture)
+    fixture.store.ownFollowUp(followUp(item.id, 'msg-withdrawn'))
+    expect(fixture.store.withdrawByDedupKey(item.dedupKey).outcome).toBe('withdrawn')
+    expect(fixture.store.releaseEndedFollowUps()).toEqual([
+      expect.objectContaining({ messageId: 'msg-withdrawn', state: 'released', releasedFrom: 'dropped' }),
+    ])
   })
 
   test('follow-up input is strict', () => {

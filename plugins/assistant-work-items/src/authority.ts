@@ -152,6 +152,13 @@ function compare(basis: WorkItemAuthorityBasis, decision: PeerPolicyDecision):
   return Object.freeze({ kind: 'allow' })
 }
 
+/** Locally checkable integrity of a stored basis for this exact item. */
+function basisHolds(item: WorkItemRecord, basis: WorkItemAuthorityBasis): boolean {
+  // A mandate belongs to exactly the item its decision id names.
+  return basisIsUsable(basis)
+    && (basis.mandate === undefined || item.externalId === decisionExternalId(basis.mandate.decisionId))
+}
+
 /**
  * Re-run the admission decision before an item is ever claimed or woken.
  *
@@ -171,11 +178,7 @@ export class WorkItemAuthority {
   check(item: WorkItemRecord): AuthorityCheck {
     const basis = item.authority
     if (basis === null) return Object.freeze({ kind: 'legacy' })
-    if (!basisIsUsable(basis)
-      // A mandate belongs to exactly the item its decision id names.
-      || basis.mandate !== undefined && item.externalId !== decisionExternalId(basis.mandate.decisionId)) {
-      return Object.freeze({ kind: 'revoked', reasonCode: MALFORMED_AUTHORITY_REASON })
-    }
+    if (!basisHolds(item, basis)) return Object.freeze({ kind: 'revoked', reasonCode: MALFORMED_AUTHORITY_REASON })
     const policy = this.#policy()
     if (policy === undefined) return Object.freeze({ kind: 'unavailable', detail: 'missing-policy' })
     const decided = decide(() => policy.authorize(requestOf(basis), { idempotencyKey: basis.idempotencyKey }))
@@ -195,10 +198,23 @@ export class WorkItemAuthority {
    * re-verification; only a budget charge that `authorize` would add at claim
    * time is outside what a notice can predict.
    */
+  /**
+   * Whether {@link assess} can consult Policy at all; `null` when it can.
+   * Checked before any notice is written so a peer that cannot evaluate
+   * leaves the ledger untouched even for locally-judged malformed bases.
+   */
+  assessUnavailable(): 'missing-policy' | 'missing-evaluate' | null {
+    const policy = this.#policy()
+    if (policy === undefined) return 'missing-policy'
+    return typeof policy.evaluate === 'function' ? null : 'missing-evaluate'
+  }
+
   assess(item: WorkItemRecord): AuthorityAssessment {
     const basis = item.authority
     if (basis === null) return Object.freeze({ kind: 'legacy' })
-    if (!basisIsUsable(basis)) {
+    // Same local judgment as dispatch re-verification, so a notice never
+    // reports as intact a basis that `check` would park as malformed.
+    if (!basisHolds(item, basis)) {
       return Object.freeze({ kind: 'affected', reasonCode: MALFORMED_AUTHORITY_REASON, currentRuleId: null })
     }
     const policy = this.#policy()

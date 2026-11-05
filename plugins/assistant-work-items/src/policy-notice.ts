@@ -16,9 +16,9 @@ import type {
   WorkItemPolicyChangeResult,
   WorkItemPolicyNotice,
 } from './types.js'
-import { OPEN_STATES, WorkItemError } from './types.js'
+import { WorkItemError } from './types.js'
 
-/** Upper bound on live items one notice pass reads; open items are capacity-bounded far below this. */
+/** Upper bound on live items one notice call assesses; larger ledgers continue via `next`. */
 export const MAX_POLICY_NOTICE_ITEMS = 1000
 const MAX_TOKEN = 256
 
@@ -42,9 +42,18 @@ function exactKeys(value: unknown, keys: readonly string[], what: string): Recor
 }
 
 export function normalizePolicyChange(value: unknown): WorkItemPolicyChange {
-  const record = exactKeys(value, ['protocol', 'policyVersion'], 'policy change')
+  const record = exactKeys(value, ['protocol', 'policyVersion', 'after'], 'policy change')
   if (record['protocol'] !== 'work-items/policy-change/v1') invalid('policy change protocol is not work-items/policy-change/v1')
-  return Object.freeze({ protocol: 'work-items/policy-change/v1', policyVersion: token(record['policyVersion'], 'policyVersion') })
+  const policyVersion = token(record['policyVersion'], 'policyVersion')
+  if (record['after'] === undefined) return Object.freeze({ protocol: 'work-items/policy-change/v1', policyVersion })
+  const after = exactKeys(record['after'], ['createdAt', 'id'], 'policy change cursor')
+  const createdAt = after['createdAt']
+  if (typeof createdAt !== 'number' || !Number.isSafeInteger(createdAt) || createdAt < 0) invalid('cursor createdAt must be a non-negative integer')
+  return Object.freeze({
+    protocol: 'work-items/policy-change/v1',
+    policyVersion,
+    after: Object.freeze({ createdAt, id: token(after['id'], 'cursor id') }),
+  })
 }
 
 export function normalizeFollowUp(value: unknown): WorkItemFollowUpInput {
@@ -67,43 +76,54 @@ export function normalizeFollowUp(value: unknown): WorkItemFollowUpInput {
  * the ledger, so replaying the same version writes nothing new. Items Policy
  * cannot answer for are reported and retried by the next call with the same
  * version. No item state, lease or dispatch is touched.
+ *
+ * One call assesses at most {@link MAX_POLICY_NOTICE_ITEMS} live items in
+ * admission order; it never truncates silently: `remaining` counts the live
+ * items after the page and `next` continues the pass.
  */
 export function noticePolicyChange(
   store: WorkItemStore,
   authority: WorkItemAuthority,
   change: WorkItemPolicyChange,
+  pageSize: number = MAX_POLICY_NOTICE_ITEMS,
 ): WorkItemPolicyChangeResult {
-  const items = store.listItems({ states: OPEN_STATES, limit: MAX_POLICY_NOTICE_ITEMS })
+  // A peer that cannot evaluate at all leaves the ledger untouched, including
+  // locally-judged malformed bases that need no Policy call.
+  const missing = authority.assessUnavailable()
+  if (missing !== null) return Object.freeze({ outcome: 'unavailable', detail: missing })
+  const limit = Math.max(1, Math.min(Math.trunc(pageSize), MAX_POLICY_NOTICE_ITEMS))
+  const page = store.listLiveItemsPage({ ...(change.after === undefined ? {} : { after: change.after }), limit })
   const notified: WorkItemPolicyNotice[] = []
   const alreadyNotified: string[] = []
   const unavailable: string[] = []
   let unaffected = 0
   let legacy = 0
-  // Oldest first so the notice order is stable for the same ledger. Assess
-  // everything before writing, so a peer that cannot evaluate at all leaves
-  // the ledger untouched (malformed bases are judged locally and would
-  // otherwise be written first).
-  const assessed = [...items].reverse().map(item => ({ item, assessment: authority.assess(item) }))
-  for (const { assessment } of assessed) {
-    if (assessment.kind === 'unavailable' && (assessment.detail === 'missing-policy' || assessment.detail === 'missing-evaluate')) {
-      return Object.freeze({ outcome: 'unavailable', detail: assessment.detail })
-    }
-  }
-  for (const { item, assessment } of assessed) {
+  // Assess everything first (evaluate is side-effect free), then write every
+  // affected notice in one transaction.
+  const affected: Array<Readonly<{ itemId: string; notice: Omit<WorkItemPolicyNotice, 'itemId' | 'recordedAt' | 'policyVersion'> }>> = []
+  for (const item of page.items) {
+    const assessment = authority.assess(item)
     if (assessment.kind === 'unavailable') { unavailable.push(item.id); continue }
     if (assessment.kind === 'legacy') { legacy += 1; continue }
     if (assessment.kind === 'allow') { unaffected += 1; continue }
     const basis = item.authority
-    const recorded = store.recordPolicyNotice(item.id, {
-      policyVersion: change.policyVersion,
-      reasonCode: assessment.reasonCode,
-      frozenRuleId: basis?.mandate?.ruleId ?? basis?.ruleId ?? null,
-      currentRuleId: assessment.currentRuleId,
-      decisionId: basis?.mandate?.decisionId ?? null,
-    })
-    if (recorded === undefined) alreadyNotified.push(item.id)
-    else notified.push(recorded)
+    affected.push(Object.freeze({
+      itemId: item.id,
+      notice: Object.freeze({
+        reasonCode: assessment.reasonCode,
+        frozenRuleId: basis?.mandate?.ruleId ?? basis?.ruleId ?? null,
+        currentRuleId: assessment.currentRuleId,
+        decisionId: basis?.mandate?.decisionId ?? null,
+      }),
+    }))
   }
+  const recorded = store.recordPolicyNotices(change.policyVersion, affected)
+  recorded.forEach((notice, index) => {
+    if (notice === undefined) alreadyNotified.push(affected[index]!.itemId)
+    else notified.push(notice)
+  })
+  const last = page.items.at(-1)
+  const next = page.remaining > 0 && last !== undefined ? Object.freeze({ createdAt: last.createdAt, id: last.id }) : null
   return Object.freeze({
     outcome: 'noticed',
     policyVersion: change.policyVersion,
@@ -112,5 +132,7 @@ export function noticePolicyChange(
     unaffected,
     legacy,
     unavailable: Object.freeze(unavailable),
+    next,
+    remaining: page.remaining,
   })
 }

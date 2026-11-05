@@ -2124,27 +2124,53 @@ export class WorkItemStore {
   }
 
   /**
-   * Record one Policy-change notice for a live item, at most once per
-   * (item, policyVersion). The notice is an append-only event: it changes no
-   * state, lease or dispatch, so a Policy change never cancels work. Returns
-   * `undefined` when this version was already noticed for the item.
+   * Record Policy-change notices for live items in one transaction, at most
+   * once per (item, policyVersion). A notice is an append-only event: it
+   * changes no state, lease or dispatch, so a Policy change never cancels
+   * work. All or nothing: a failure writes none of the batch, and a retry with
+   * the same version re-derives it. Each entry yields the written notice, or
+   * `undefined` when the item already had one for this version or is no
+   * longer live work.
    */
-  recordPolicyNotice(itemId: string, notice: Omit<WorkItemPolicyNotice, 'itemId' | 'recordedAt'>): WorkItemPolicyNotice | undefined {
+  recordPolicyNotices(policyVersion: string, entries: ReadonlyArray<Readonly<{
+    itemId: string; notice: Omit<WorkItemPolicyNotice, 'itemId' | 'recordedAt' | 'policyVersion'>
+  }>>): ReadonlyArray<WorkItemPolicyNotice | undefined> {
+    if (entries.length === 0) return Object.freeze([])
     const now = this.#now()
-    return this.#transaction(() => {
+    return this.#transaction(() => Object.freeze(entries.map(({ itemId, notice }) => {
       const item = this.#requireItem(itemId)
-      if (!OPEN_STATES.includes(item.state)) return undefined
+      if (item.observed || !OPEN_STATES.includes(item.state)) return undefined
+      // Scoped by the (item_id, sequence) primary key prefix: one item's events only.
       const prior = this.#statement(`SELECT 1 AS present FROM work_item_event
-        WHERE item_id = ? AND kind = '${POLICY_NOTICE_EVENT}' AND json_extract(detail, '$.policyVersion') = ?`).get(itemId, notice.policyVersion)
+        WHERE item_id = ? AND kind = '${POLICY_NOTICE_EVENT}' AND json_extract(detail, '$.policyVersion') = ?`).get(itemId, policyVersion)
       if (prior !== undefined) return undefined
       this.#appendEvent(itemId, POLICY_NOTICE_EVENT, 'host', {
-        policyVersion: notice.policyVersion,
+        policyVersion,
         reasonCode: notice.reasonCode,
         frozenRuleId: notice.frozenRuleId,
         currentRuleId: notice.currentRuleId,
         decisionId: notice.decisionId,
       }, now)
-      return Object.freeze({ itemId, ...notice, recordedAt: now })
+      return Object.freeze({ itemId, policyVersion, ...notice, recordedAt: now })
+    })))
+  }
+
+  /**
+   * Live (open, non-observed) items in admission order after `after`, for a
+   * bounded notice pass; also how many live items lie beyond the page.
+   */
+  listLiveItemsPage(options: { after?: Readonly<{ createdAt: number; id: string }>; limit: number }): Readonly<{
+    items: readonly WorkItemRecord[]; remaining: number
+  }> {
+    const after = options.after
+    const where = `observed = 0 AND state IN (${OPEN_STATE_PLACEHOLDERS})${after === undefined ? '' : ' AND (created_at, id) > (?, ?)'}`
+    const parameters: Array<string | number> = [...OPEN_STATES, ...(after === undefined ? [] : [after.createdAt, after.id])]
+    const rows = this.#statement(`SELECT ${ITEM_ALIASES} FROM work_item WHERE ${where} ORDER BY created_at, id LIMIT ?`)
+      .all(...parameters, options.limit) as Row[]
+    const total = this.#statement(`SELECT COUNT(*) AS count FROM work_item WHERE ${where}`).get(...parameters) as Row
+    return Object.freeze({
+      items: Object.freeze(rows.map(itemFromRow)),
+      remaining: Math.max(0, Number(total['count']) - rows.length),
     })
   }
 
@@ -2182,8 +2208,13 @@ export class WorkItemStore {
     return this.#transaction(() => {
       const item = this.#requireItem(input.itemId)
       if (input.bindingId !== item.originBindingId) fail('identity-mismatch', 'follow-up is not on this item\'s work thread')
-      const owners = this.#statement(`SELECT item_id, detail FROM work_item_event
-        WHERE kind = '${FOLLOW_UP_OWNED_EVENT}' AND json_extract(detail, '$.messageId') = ?`).all(input.messageId) as Row[]
+      // A follow-up's identity is (work thread, message id). Only items whose
+      // origin binding is this thread can own it, so the lookup walks those
+      // items' events by primary-key prefix instead of the whole event table.
+      const owners = this.#statement(`SELECT e.item_id AS item_id, e.detail AS detail
+        FROM work_item w JOIN work_item_event e ON e.item_id = w.id
+        WHERE w.origin_binding_id = ? AND e.kind = '${FOLLOW_UP_OWNED_EVENT}'
+          AND json_extract(e.detail, '$.messageId') = ?`).all(input.bindingId, input.messageId) as Row[]
       for (const row of owners) {
         const detail = eventDetail(row['detail'])
         if (String(row['item_id']) !== item.id || detail?.['sourceDigest'] !== input.sourceDigest) {
@@ -2193,7 +2224,10 @@ export class WorkItemStore {
         if (followUp === undefined) fail('storage', 'owned follow-up could not be read back')
         return Object.freeze({ outcome: 'already-owned' as const, followUp })
       }
-      if (!OPEN_STATES.includes(item.state)) return Object.freeze({ outcome: 'item-ended' as const, itemId: item.id, state: item.state })
+      // Observed (shadow) items never run, so they never own a follow-up.
+      if (item.observed || !OPEN_STATES.includes(item.state)) {
+        return Object.freeze({ outcome: 'item-ended' as const, itemId: item.id, state: item.state })
+      }
       this.#appendEvent(item.id, FOLLOW_UP_OWNED_EVENT, 'host', {
         messageId: input.messageId, bindingId: input.bindingId, sourceDigest: input.sourceDigest,
       }, now)

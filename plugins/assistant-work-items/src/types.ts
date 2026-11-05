@@ -201,6 +201,14 @@ export type WorkItemDecisionAdmitResult =
 export interface WorkItemPolicyChange {
   readonly protocol: 'work-items/policy-change/v1'
   readonly policyVersion: string
+  /** Continue a pass that returned `next`; omitted to start from the oldest live item. */
+  readonly after?: WorkItemPolicyNoticeCursor
+}
+
+/** Position of the last live item one notice pass assessed (admission order). */
+export interface WorkItemPolicyNoticeCursor {
+  readonly createdAt: number
+  readonly id: string
 }
 
 /** Durable per-item notice that a Policy change affects its frozen basis. Never cancels. */
@@ -231,6 +239,9 @@ export type WorkItemPolicyChangeResult =
     legacy: number
     /** Items Policy could not answer for now; a later call with the same version retries them. */
     unavailable: readonly string[]
+    /** Live items after this page; pass `next` as `after` to assess them. `null` when the pass is complete. */
+    next: WorkItemPolicyNoticeCursor | null
+    remaining: number
   }>
   /** The Policy peer is missing or cannot evaluate side-effect free; nothing was written. */
   | Readonly<{ outcome: 'unavailable'; detail: string }>
