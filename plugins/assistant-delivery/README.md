@@ -525,7 +525,7 @@ schema 30 为显式启用 `ownerReportFeedback` 的 WorkItems 保存独占反馈
 
 Host-only `inspectOwnerWorkItemLearningTask` 使用独立 `assistant-delivery/owner-work-item-learning/v1` 协议，重验当前主人、报告生产者、全量 WorkItems proof 与 canonical owner 修订。返回去正文的 `proofIdentity`，其 proofDigest 绑定内部原文；`presentation` 的 brief/report/feedback 独立限长与常见凭据过滤，presentationDigest 不冒充原文摘要。sourceDigest 绑定持久来源及修订，不绑定读取时的新 Session 代次；同主人 `/new` 后仍可召回已记录反馈，撤回、更正、换主人或失效证明会拒绝旧来源。它不冒充前台来源，不授予学习、采用或修复执行权限；Growth 后续消费仍是另一项能力。
 
-## 注意力合同（WP19 第 1 阶段：只审计）
+## 注意力合同（WP19 第 1 阶段：审计）
 
 schema 31 新增只追加的 `delivery_attention_audit`，按 outbox id 去重，重投保留首次判定。审计尽力而为：入队提交后另起事务写审计行，审计失败不影响入队与发送，因此可能存在没有审计行的 Outbox（缺口检测见下）。覆盖 `enqueueBackground`、`enqueueBackgroundRoute`、`enqueueOwnerNotification`（含内部 ACK 等走同一后台通道的发送）与 typed 结果通道 `enqueueAutomationResult`、`enqueueWorkItemReport`、定时 Goal 结果。前三者可传可选 `attention` 信封：`result`；`attention` 须绑定 `workItemId` 与恰好一个结构化 `question`（id、prompt、可选 2–8 个 choices）；`answer` 须引用本 binding 已问过的 `questionId`，且只能用一次。同一工作项已有未答问题时，再问另一问题记为不是当前问题。问题首次被接受时记录其 `workItemId`：同一 question id 换到其他工作项再问记 `attention-question-reused`；answer 声明的 `workItemId` 与问题所属工作项不同记 `answer-work-item-mismatch`（均为 would-reject），未声明时审计行沿用问题的工作项。typed 通道记为 `lane` 来源的 `result`；未声明的旧调用方按 `result` 记录并标 `missing-purpose`。
 
@@ -533,7 +533,7 @@ schema 31 新增只追加的 `delivery_attention_audit`，按 outbox id 去重�
 
 字数 = `Intl.Segmenter('und', { granularity: 'word' })` 的 isWordLike 片段数，加上非单词片段中除空白、标点与 ASCII 之外的字素数（如 emoji、图形符号，每个计 1），CJK 按 ICU 切分，链接文字与 URL 一并计入。硬上限：result 400、attention 120、answer 200（`attentionWordCaps`）；另按非空白字素数设第二道上限：result 2400、attention 720、answer 1200（`attentionGraphemeCaps`，约 6 倍字数上限），以覆盖一段数千字符不断开的 token（只算 1 个词）等情况。任一超限判为 `would-attach`（`over-word-cap` / `over-grapheme-cap`）。切分依赖运行中 Node.js 自带的 ICU 数据，Node/ICU 升级可能改变同一文本的计数；已记录的判定不重算。原因码见 `attentionAuditReasons`；其中 `text-exposes-estimate`、`text-exposes-identifier` 只记录现有提醒外露估值或 id，本阶段不改文本。
 
-本阶段不改变任何发送：判定为 `would-reject` 或 `would-attach` 的消息照常入队、原文发送。`inspectAttentionAudit({ afterSequence?, limit? })` 按序分页只读返回判定（默认 100、最多 500），不含正文，并附两项缺口指标：`processLocalWriteFailures` 是本进程启动以来的审计写入失败数，重启清零；`unauditedOutbox` 每次由持久数据查询得出，统计首条审计行之后创建、带审计通道持久标记（owner 通知、owner route、Automation 结果、Goal 结果、WorkItem 报告）却没有审计行的 Outbox。普通 `enqueueBackground` 行没有持久通道标记，不计入 `unauditedOutbox`，只能由进程内计数发现；首条审计行之前的缺口也无法发现。审计表无保留期与清理，任何未来的保留策略都需新 schema。回复与审批通道不在本阶段范围。
+本阶段不改变任何发送（强制见第 3 阶段）：判定为 `would-reject` 或 `would-attach` 的消息照常入队、原文发送。`inspectAttentionAudit({ afterSequence?, limit? })` 按序分页只读返回判定（默认 100、最多 500），不含正文，并附两项缺口指标：`processLocalWriteFailures` 是本进程启动以来的审计写入失败数，重启清零；`unauditedOutbox` 每次由持久数据查询得出，统计首条审计行之后创建、带审计通道持久标记（owner 通知、owner route、Automation 结果、Goal 结果、WorkItem 报告）却没有审计行的 Outbox。普通 `enqueueBackground` 行没有持久通道标记，不计入 `unauditedOutbox`，只能由进程内计数发现；首条审计行之前的缺口也无法发现。审计表无保留期与清理，任何未来的保留策略都需新 schema。回复与审批通道不在本阶段范围。
 
 ### 第 2b 阶段：超长转附件与拒绝拆条（opt-in，默认关闭）
 
@@ -543,6 +543,16 @@ schema 31 新增只追加的 `delivery_attention_audit`，按 outbox id 去重�
 - 通道适配器须声明 `capabilities.textAttachments: true`；未声明时超长通知在入队时以 `policy-denied` 拒绝，不入队、不拆条；无适配器时为 `runtime-unavailable`。Coordinator 另有兜底：带附件的 Outbox 遇到不支持附件的适配器直接 `dead`（`attachment-unsupported`），绝不只发摘要。仓库内现有适配器（飞书、web）均未声明该能力。
 - 拒绝拆条：同一 binding、同一通道、同一来源在 `attentionSplitWindowMs`（5 分钟）内已审计的内联正文，与本条合计超过本条目的上限时，以 `policy-denied`（`attention split evasion`）拒绝；单条不受影响，补救方式是发一条（超长则自动转附件）。窗口按审计行持久化的 `recorded_at` 与 Delivery Store 时钟比较，重启不会重置。判断依赖尽力而为的审计行，审计写入失败的通知不计入（可由 `processLocalWriteFailures` 发现）。关闭开关后，新通知按第 1 阶段原样入队，已转换的幂等键重放仍返回原记录。
 - Store 校验附件：仅 `plain` intent，键集固定，名称 `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`，正文非空且不超过 `maxTextBytes`，`sha256` 与正文一致。附件存于 `intent_json`，不改 schema（仍为 31）。审计按附件原文计词，因此转换后的行仍记 `would-attach`。
+
+### 第 3 阶段：目的强制（opt-in，默认关闭）
+
+配置 `attentionEnforce: true` 后，`enqueueBackground`、`enqueueBackgroundRoute`、`enqueueOwnerNotification` 与 WorkItem 报告在入队前按第 1 阶段判定强制；默认关闭时行为与第 2b 阶段完全一致。typed Automation/Goal 结果通道、前台进度、回复与审批通道不受影响。
+
+- 目的缺失（`missing-purpose`）或任一 would-reject 原因（`invalid-envelope`、`attention-missing-work-item`、`attention-question-*`、`answer-*`）直接拒绝：抛 `AttentionRejectedError`（`code: 'policy-denied'`，`reasons` 为结构化原因码），不入队、不写 Outbox。`text-exposes-*` 仍只审计。
+- 超出字数或字素上限：`attentionAttachOverCap` 开时走第 2b 附件路径；关时以 `over-word-cap` / `over-grapheme-cap` 拒绝。开启附件但适配器不支持时原因为 `attachment-unsupported`，拆条为 `split-evasion`（错误信息与第 2b 相同）。仅开强制不增加拆条检查。
+- 已存在 Outbox 的幂等键重放在任何检查之前返回原记录，切换开关或重启都不改变已入队的键；被拒绝的键不进入问答账本，重试按同一持久账本重新判定。Host 自己发出的结果 ACK 与 Goal 完成提醒在强制开启时声明 `result`。
+- 被拒绝的通知没有 Outbox 行，而 v31 审计表以 `outbox_id` 为主键并外键到 Outbox、`verdict` 为封闭集合，容纳不了 `rejected`；为不改 schema（仍为 31），拒绝记录在进程内有界日志（最近 1000 条，同键同原因的重试只记一次），`inspectAttentionRejections({ afterSequence?, limit? })` 只读分页（默认 100、最多 500），不含正文，返回 `durable: false` 与 `evicted`，Host 重启清零。
+- 开启前须确认调用方都已声明目的：仓库内仍有未声明的旧调用方，开启后它们的通知会被拒绝。
 
 ### 通知结果事实（WP22 切片 1，只读）
 

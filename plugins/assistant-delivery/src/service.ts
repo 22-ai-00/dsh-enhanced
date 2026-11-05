@@ -89,6 +89,8 @@ import { InboundImageMaterializer } from './inbound-images.js'
 import { assessAttention, assessAttentionSplit, attentionOverCap, attentionSplitWindowMs, convertOverCapAttention, NOTIFICATION_OUTCOME_FACTS_PROTOCOL,
   type AttentionAuditEntry, type AttentionEnvelope, type AttentionLane, type AttentionPurpose, type NotificationOutcomeFact } from './attention.js'
 import { ProgressAttentionAudit, type ProgressAttentionAuditPage } from './progress-attention.js'
+import { AttentionRejectionLog, attentionEnforcementReasons, type AttentionRejectionEntry, type AttentionRejectionPage,
+  type AttentionRejectionReason } from './attention-enforcement.js'
 import { registerDeliveryTools } from './tools.js'
 import {
   bindingMatchesOwnerRoute,
@@ -506,6 +508,12 @@ export interface Config {
    * notices that together exceed the cap is rejected as split evasion.
    */
   attentionAttachOverCap?: boolean
+  /**
+   * WP19 stage 3 opt-in (default off): background/owner notices whose purpose
+   * is missing or fails the Host checks are rejected before they are queued,
+   * as are over-cap notices unless `attentionAttachOverCap` attaches them.
+   */
+  attentionEnforce?: boolean
 }
 
 export interface DeliveryInboundRuntime extends InboundMessageProcessor {
@@ -536,6 +544,16 @@ export class AssistantDeliveryError extends Error {
   constructor(readonly code: AssistantDeliveryErrorCode, message: string) {
     super(message)
     this.name = 'AssistantDeliveryError'
+  }
+}
+
+/** WP19 stage 3 rejection: `policy-denied` with structured reason codes; nothing was queued. */
+export class AttentionRejectedError extends AssistantDeliveryError {
+  readonly reasons: readonly AttentionRejectionReason[]
+  constructor(readonly rejection: Readonly<AttentionRejectionEntry>, message = `attention rejected: ${rejection.reasons.join(', ')}`) {
+    super('policy-denied', message)
+    this.name = 'AttentionRejectedError'
+    this.reasons = rejection.reasons
   }
 }
 
@@ -693,6 +711,7 @@ const configSchema = Schema.object({
   toolApprovalTtlMs: Schema.number().step(1).min(1_000).max(300_000).default(300_000),
   toolApprovalPreparationTimeoutMs: Schema.number().step(1).min(100).max(30_000).default(10_000),
   attentionAttachOverCap: Schema.boolean().default(false),
+  attentionEnforce: Schema.boolean().default(false),
   ownerRoutes: Schema.array(Schema.object({
     id: Schema.string().min(1).required(),
     conversation: Schema.object({
@@ -1188,6 +1207,8 @@ export class AssistantDeliveryService extends Service {
   /** WP19 stage 2c: process-local progress attention audit (no Delivery schema change). */
   private readonly progressAttentionAudit = new ProgressAttentionAudit()
   private progressAttentionAuditFailures = 0
+  /** WP19 stage 3: process-local rejection log (rejected notices have no Outbox row). */
+  private readonly attentionRejections = new AttentionRejectionLog()
   private naturalObjectiveFlight: Promise<void> | undefined
   private preferenceProjectionFlight: Promise<void> | undefined
   private inboundAdmissionRecoveryFlight: Promise<void> | undefined
@@ -2158,6 +2179,8 @@ export class AssistantDeliveryService extends Service {
         principalVersion: locator.principalVersion, workspace: locator.workspace, preset: locator.preset },
       sessionId: locator.sessionId, idempotencyKey, text: goalWakeCompletionNotice,
       expiresAt: Math.min(input.deadlineAt, proof.receipt.validUntil),
+      // Host-authored result notice: under stage 3 enforcement the Host declares its purpose; off, it is audited as before.
+      ...(this.config.attentionEnforce === true ? { attention: { purpose: 'result' as const } } : {}),
     })
   }
 
@@ -4926,7 +4949,9 @@ export class AssistantDeliveryService extends Service {
         const text=intent.state==='conflict'?'任务反馈版本已变化，本次更改未生效。请回复原报告发送 /feedback status 查看当前版本。'
           :intent.canonical?.version===0?'查询时该工作项暂无已记录反馈。':objectiveStateMessage(intent.canonical!).replace('当前任务反馈：',intent.command?.kind==='objective-status'?'查询时的任务反馈：':'本次已记录任务反馈：')
         this.enqueueBackgroundAuthorized({sourceId:registration.sourceId,workspace:binding.workspace,bindingId:binding.id,
-          idempotencyKey:`feedback:${intent.source.inboxId}:ack`,text,format:'plain'})
+          idempotencyKey:`feedback:${intent.source.inboxId}:ack`,text,format:'plain'},undefined,
+        // Host-authored result ACK: under stage 3 enforcement the Host declares its purpose; off, it is audited as before.
+        this.config.attentionEnforce===true?{lane:'background',lanePurpose:{purpose:'result'}}:{lane:'background'})
       }catch{/* Recording is independent of send authority; only an absent Outbox is retried. */}
     }
   }
@@ -5357,6 +5382,10 @@ export class AssistantDeliveryService extends Service {
    * source, binding and lane, exceeds the cap of its purpose. Deterministic for
    * one (input, audited history, clock). Off: the input is returned unchanged,
    * except that a replay of an already converted key keeps its stored form.
+   * WP19 stage 3, only when `attentionEnforce` is on: a new notice with a
+   * missing or failed purpose, or over cap without the attachment path, is
+   * rejected with `AttentionRejectedError` and nothing is queued. Replays
+   * return above before any check, so an existing key stays idempotent.
    */
   private prepareAttentionDelivery(input: Readonly<{
     lane: AttentionLane; envelope?: unknown; lanePurpose?: Readonly<{ purpose: AttentionPurpose; workItemId?: string }>
@@ -5373,29 +5402,45 @@ export class AssistantDeliveryService extends Service {
       return stored !== undefined && stored.text === input.text && stored.mediaType === (input.format === 'markdown' ? 'text/markdown' : 'text/plain')
         ? { text: winner.intent.text, format: 'plain', attachment: stored } : unchanged
     }
-    if (this.config.attentionAttachOverCap !== true) return unchanged
+    const attach = this.config.attentionAttachOverCap === true
+    const enforce = this.config.attentionEnforce === true
+    if (!attach && !enforce) return unchanged
     const binding = typeof input.binding === 'function' ? input.binding() : input.binding
     // No active binding: the store rejects the enqueue with its usual error.
     if (binding === undefined) return unchanged
-    const purpose = assessAttention({ text: input.text, ...(input.envelope === undefined ? {} : { envelope: input.envelope }),
+    const assessment = assessAttention({ text: input.text, ...(input.envelope === undefined ? {} : { envelope: input.envelope }),
       ...(input.lanePurpose === undefined ? {} : { lanePurpose: input.lanePurpose }),
-      ledger: this.deliveryStore.attentionAudit.ledger(binding.id) }).purpose
+      ledger: this.deliveryStore.attentionAudit.ledger(binding.id) })
+    const purpose = assessment.purpose
+    // Stage 3: every rejection is recorded before it is thrown; without enforcement the stage 2b errors stay as they were.
+    const reject = (reasons: readonly AttentionRejectionReason[], message?: string): never => {
+      if (!enforce) throw new AssistantDeliveryError('policy-denied', message!)
+      throw new AttentionRejectedError(this.attentionRejections.record({ bindingId: binding.id, lane: input.lane, sourceId: input.sourceId,
+        idempotencyKey: input.idempotencyKey, assessment, reasons }), message)
+    }
+    if (enforce) {
+      const reasons = attentionEnforcementReasons(assessment, attach)
+      if (reasons.length > 0) reject(reasons)
+    }
     let delivered: { text: string; format: 'markdown' | 'plain'; attachment?: NonNullable<OutboundIntent['attachment']> } = unchanged
-    if (attentionOverCap(input.text, purpose)) {
+    if (attach && attentionOverCap(input.text, purpose)) {
       const adapter = this.registry.get(binding.conversation.channel, binding.conversation.account)
       if (adapter === undefined) {
         throw new AssistantDeliveryError('runtime-unavailable', 'over-cap notice needs its channel adapter to attach the full text')
       }
       if (adapter.capabilities.textAttachments !== true) {
-        throw new AssistantDeliveryError('policy-denied', 'over-cap notice cannot be attached: the channel does not accept text attachments')
+        reject([...assessment.reasons.filter(reason => reason === 'over-word-cap' || reason === 'over-grapheme-cap'), 'attachment-unsupported'],
+          'over-cap notice cannot be attached: the channel does not accept text attachments')
       }
       delivered = convertOverCapAttention({ text: input.text, format: input.format,
         digest: text => createHash('sha256').update(text).digest('hex') })
     }
+    // Split evasion is a stage 2b check; enforcement alone does not add it.
+    if (!attach) return delivered
     const split = assessAttentionSplit({ text: delivered.text, purpose, priorInlineTexts: this.deliveryStore.attentionAudit.recentInlineTexts({
       bindingId: binding.id, lane: input.lane, sourceId: input.sourceId, windowMs: attentionSplitWindowMs }) })
     if (split.split) {
-      throw new AssistantDeliveryError('policy-denied',
+      reject(['split-evasion'],
         `attention split evasion: ${split.priorNotices} recent notice(s) from this source plus this one exceed the ${purpose} cap; send one notice`)
     }
     return delivered
@@ -5468,6 +5513,21 @@ export class AssistantDeliveryService extends Service {
     }
     return Object.freeze({ ...this.progressAttentionAudit.list(afterSequence, limit),
       processLocalWriteFailures: this.progressAttentionAuditFailures })
+  }
+
+  /**
+   * Read-only WP19 stage-3 rejection page in append order; never exposes
+   * message text. Entries are process-local (`durable: false`), bounded, and
+   * reset on Host restart. Empty while `attentionEnforce` is off.
+   */
+  inspectAttentionRejections(input: Readonly<{ afterSequence?: number; limit?: number }> = {}): AttentionRejectionPage {
+    this.assertActive()
+    const afterSequence = input.afterSequence ?? 0
+    const limit = input.limit ?? 100
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new AssistantDeliveryError('runtime-conflict', 'invalid attention rejection scan')
+    }
+    return this.attentionRejections.list(afterSequence, limit)
   }
 
   private enqueueBackgroundAuthorized(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string, string>> }, reportTarget?: WorkItemReportTarget,
