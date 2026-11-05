@@ -198,7 +198,7 @@ describe('pure exact scanner retirement transition verification', () => {
     expect(inspectAutomationRetirementSnapshot(input.path)).toEqual(input.after)
   })
 
-  test.each([23, 24, 25, 26, 27, 28, 29, 30] as const)('accepts reviewed Delivery owner proof schema %s', async schemaVersion => {
+  test.each([23, 24, 25, 26, 27, 28, 29, 30, 31] as const)('accepts reviewed Delivery owner proof schema %s', async schemaVersion => {
     const input = clone(await fixture())
     input.ownerProof.schemaVersion = schemaVersion
     const { snapshotDigest: _snapshotDigest, ...unsigned } = input.ownerProof
@@ -493,7 +493,7 @@ describe('pure exact scanner retirement transition verification', () => {
   const proofChanges: Array<[string, (input: Mutable<ScannerRetirementTransitionInput>) => void]> = [
     ['wrong proof protocol', input => { Object.assign(input.ownerProof, { protocol: 'wrong' }) }],
     ['future Delivery schema', input => {
-      Object.assign(input.ownerProof, { schemaVersion: 31 })
+      Object.assign(input.ownerProof, { schemaVersion: 32 })
       const { snapshotDigest: _snapshotDigest, ...unsigned } = input.ownerProof
       input.ownerProof.snapshotDigest = createHash('sha256').update(canonicalJson(unsigned)).digest('hex')
     }],

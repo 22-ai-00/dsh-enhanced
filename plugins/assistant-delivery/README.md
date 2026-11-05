@@ -37,7 +37,7 @@ Host-only `inspectOwnerForegroundToolCall({ agent, authorityId, callId, toolName
 
 Host-only `inspectOwnerAliasRoute(agent, authorityId)` 与 `inspectOwnerAliasForegroundToolCall({ agent, authorityId, callId, toolName, argumentsJson })` 为跨渠道只读查询提供 linked 别名证明。只有 role 为 `linked`、`linked_to_id` 精确指向当前 active owner、自身 active 且通过当前 active binding（同一 workspace/preset、非 owner route binding、Session 一致）调用的 principal 才有回执；`linked_to_id` 为空、指向他人、owner 交接/撤销、别名撤销（当前“解除关联”即 `revokePrincipal`，会同时撤销其 binding）或 binding 轮换均无回执。回执协议为 `assistant-delivery/owner-alias-receipt/v1`，不含 `receiptVersion`，同时携带别名身份与根 owner 的 principal record/version、binding version/generation，因此 owner 重新配对（版本递增）会改变回执；调用证明协议为 `assistant-delivery/owner-alias-foreground-tool-call/v1`，要求别名在 link 之后认领的 Inbox、未结束 turn 与唯一未结算的原生 `tool/call`；turn 在认领时固定别名 principal record/version 与 `linked_to_id`，证明时须与回执中的别名版本及当前根 owner 一致，因此认领时尚指向其他根、随后在 turn 中途重新 link（版本递增，binding 版本不变）的 turn 不产生证明。两者每次调用都重读两遍并要求一致。别名回执不是 v2 owner receipt：`validateOwnerRoute`、`validateOwnerAgentForRoute`、`inspectOwnerForegroundToolCall`、偏好 turn、审批准备及原生 Web owner（`role !== 'owner'` 检查未改）对别名一律拒绝。此 API 无 schema 迁移；link 仅按 owner record id 生根、不冻结 link 时的 owner 版本；撤销 owner 不会撤销指向它的 link（撤销期间无回执），以同一 record 重新激活后原有别名的只读访问随之恢复（沿用现有 Delivery 语义，如需切断须另行撤销别名）。原生 Web 认领不登记别名 turn，Web owner 以别名身份加入属后续工作。
 
-`readOwnerForegroundToolInput` 使用同一真实当前调用证明，按 UTF-8 字节分页读取已经持久保存的人类输入，并返回实际记录的供应商冻结状态。每页最多 8192 字节；sourceDigest 绑定 task、原 envelope、全文和 model state，不随调用 ID、模型工具参数或页窗口变化。缺失/不一致 supplier 由执行消费者拒绝。它不接受任意 Inbox、来源或路径选择器，不读取模型生成的替代正文，不新建任务、发送消息或授予执行权限；调用前后 owner/native-call 变化会使读取失效。Delivery 当前 schema 为 30。
+`readOwnerForegroundToolInput` 使用同一真实当前调用证明，按 UTF-8 字节分页读取已经持久保存的人类输入，并返回实际记录的供应商冻结状态。每页最多 8192 字节；sourceDigest 绑定 task、原 envelope、全文和 model state，不随调用 ID、模型工具参数或页窗口变化。缺失/不一致 supplier 由执行消费者拒绝。它不接受任意 Inbox、来源或路径选择器，不读取模型生成的替代正文，不新建任务、发送消息或授予执行权限；调用前后 owner/native-call 变化会使读取失效。Delivery 当前 schema 为 31。
 
 
 Host-only `inspectOwnerRequestedChange(execution, { sourceId })` 限定当前认证 owner 主 Agent 的未结 `memory_manage` 或 `wiki_upsert` 原生调用。它复核已认领的原 Inbox、当前 turn、实际工具名与参数（最多 64 KiB）、owner lineage 和 binding 代次，返回 `prepareAgentApproval` 的精确 route、Inbox 原始正文及只含身份与摘要的 SHA256 receipt。空正文、附件单独输入、PTC、历史或已结算调用均无证明。正文可能包含引用文字；哪些内容构成 owner 指令仍须由 Policy 隔离审查。原生 Web 输入在派发时登记同一前台执行记录并在 drain 时结算，失败或取消不留待结记录。该只读接口不要求 RSI `ownerRoutes` 配置、不注册 Agent 工具，也不授权写入。
@@ -521,3 +521,11 @@ schema 30 为显式启用 `ownerReportFeedback` 的 WorkItems 保存独占反馈
 生产终态、静止及预算结算证明尚未就绪时，反馈持久等待，不伪造成功、不派新 worker。结果是主人证言，不是独立 verifier 验收；更正和撤回使用冻结版本 CAS，重投、冷恢复或丢失 ACK 不增加票数。`/stop`、`/new`、`/clear` 持久取消较早未完成意图。实际状态通过既有 background send 权限发送稳定 ACK；没有票的 `status` 明确返回暂无反馈，不造 revision。发送拒绝或 unknown 不回滚已记录结果、不盲目重发。
 
 Host-only `inspectOwnerWorkItemLearningTask` 使用独立 `assistant-delivery/owner-work-item-learning/v1` 协议，重验当前主人、报告生产者、全量 WorkItems proof 与 canonical owner 修订。返回去正文的 `proofIdentity`，其 proofDigest 绑定内部原文；`presentation` 的 brief/report/feedback 独立限长与常见凭据过滤，presentationDigest 不冒充原文摘要。sourceDigest 绑定持久来源及修订，不绑定读取时的新 Session 代次；同主人 `/new` 后仍可召回已记录反馈，撤回、更正、换主人或失效证明会拒绝旧来源。它不冒充前台来源，不授予学习、采用或修复执行权限；Growth 后续消费仍是另一项能力。
+
+## 注意力合同（WP19 第 1 阶段：只审计）
+
+schema 31 新增只追加的 `delivery_attention_audit`，每条 Outbox 一行，按 outbox id 去重，重投保留首次判定。覆盖 `enqueueBackground`、`enqueueBackgroundRoute`、`enqueueOwnerNotification`（含内部 ACK 等走同一后台通道的发送）与 typed 结果通道 `enqueueAutomationResult`、`enqueueWorkItemReport`、定时 Goal 结果。前三者可传可选 `attention` 信封：`result`；`attention` 须绑定 `workItemId` 与恰好一个结构化 `question`（id、prompt、可选 2–8 个 choices）；`answer` 须引用本 binding 已问过的 `questionId`，且只能用一次。同一工作项已有未答问题时，再问另一问题记为不是当前问题。typed 通道记为 `lane` 来源的 `result`；未声明的旧调用方按 `result` 记录并标 `missing-purpose`。
+
+字数用 `Intl.Segmenter('und', { granularity: 'word' })` 统计 isWordLike 片段，CJK 按 ICU 切分，链接文字与 URL 一并计入。硬上限：result 400、attention 120、answer 200（`attentionWordCaps`）；超限判为 `would-attach`。原因码见 `attentionAuditReasons`；其中 `text-exposes-estimate`、`text-exposes-identifier` 只记录现有提醒外露估值或 id，本阶段不改文本。
+
+本阶段不改变任何发送：判定为 `would-reject` 或 `would-attach` 的消息照常入队、原文发送；审计写入失败只计入 `writeFailures`，不影响入队。`inspectAttentionAudit({ afterSequence?, limit? })` 按序分页只读返回判定（默认 100、最多 500），不含正文。前台进度、回复与审批通道不在本阶段范围。

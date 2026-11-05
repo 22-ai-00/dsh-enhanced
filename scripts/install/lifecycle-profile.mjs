@@ -1336,8 +1336,8 @@ function validCompactOperatorProof(proof) {
   const expected = {
     // v24 adds natural feedback, v25 foreground completion ordering, v26
     // restart fences, v27 progress handles, v28 foreground termination and v29
-    // report/reply sidecars and v30 owner feedback; owner identity is unchanged.
-    'assistant-delivery/active-lark-owner-bindings-snapshot/v1': [23, 24, 25, 26, 27, 28, 29, 30],
+    // report/reply sidecars, v30 owner feedback and v31 attention audit; owner identity is unchanged.
+    'assistant-delivery/active-lark-owner-bindings-snapshot/v1': [23, 24, 25, 26, 27, 28, 29, 30, 31],
     'assistant-recovery/operator-snapshot/v1': [5],
     // v16 adds durable scanner retirement; compact identity/digest fields remain
     // unchanged. Keep v15 proofs for recovery of existing lifecycle journals.

@@ -128,7 +128,7 @@ test('migrates real schema27 rows without guessing observations or changing the 
   const reopened = new DeliveryStore({ path: f.path }); stores.add(reopened)
   expect(reopened.inspectOwnerForegroundTaskSource({ ...f.scope, inboxId: f.inboxId }, authority)).toEqual(before)
   expect(reopened.readOwnerForegroundTaskInput({ ...f.scope, inboxId: f.inboxId, expectedSourceDigest: sourceDigest }, authority)).toBeUndefined()
-  sql(f.path, db => { expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(30); expect(db.prepare('SELECT termination_json FROM delivery_foreground_executions').get()?.termination_json).toBeNull() })
+  sql(f.path, db => { expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(31); expect(db.prepare('SELECT termination_json FROM delivery_foreground_executions').get()?.termination_json).toBeNull() })
 })
 
 test('permits observed completion input without relaxing the successful content reader contract', async () => {

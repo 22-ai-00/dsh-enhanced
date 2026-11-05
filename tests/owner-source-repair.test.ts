@@ -116,7 +116,9 @@ test('owner repair retains exact binding and main database identity across SQLit
   expect(ownerRepairSnapshotEquivalent({ ...afterCheckpoint, schemaVersion: 30 },
     { ...original, schemaVersion: 30 })).toBe(true)
   expect(ownerRepairSnapshotEquivalent({ ...afterCheckpoint, schemaVersion: 31 },
-    { ...original, schemaVersion: 31 })).toBe(false)
+    { ...original, schemaVersion: 31 })).toBe(true)
+  expect(ownerRepairSnapshotEquivalent({ ...afterCheckpoint, schemaVersion: 32 },
+    { ...original, schemaVersion: 32 })).toBe(false)
   expect(ownerRepairSnapshotEquivalent({ ...afterCheckpoint, schemaVersion: 30,
     bindings: [{ ...original.bindings[0], version: 2 }] }, { ...original, schemaVersion: 30 })).toBe(false)
   expect(ownerRepairSnapshotEquivalent({ ...afterCheckpoint, schemaVersion: 29 },

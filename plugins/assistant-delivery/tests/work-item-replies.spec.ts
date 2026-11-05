@@ -188,11 +188,11 @@ describe('durable exclusive owner report replies',()=>{
   })
 })
 
-test('migrates a genuine v28 database to v30 without changing old schema or data',async()=>{
+test('migrates a genuine v28 database to v31 without changing old schema or data',async()=>{
   const root=await mkdtemp(join(tmpdir(),'delivery-genuine-v28-'));roots.push(root);const path=join(root,'state.sqlite')
   const schema=await readFile(new URL('./fixtures/delivery-v28-schema.sql',import.meta.url),'utf8')
   const old=sql(path,db=>{db.exec(schema);db.prepare('INSERT INTO delivery_principals(id,key_hash,principal_json,role,status,created_at,updated_at,version) VALUES(?,?,?,\'owner\',\'active\',1,1,1)').run('principal_legacy','a'.repeat(64),JSON.stringify(principal));expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(28);return {schema:db.prepare('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name').all(),rows:db.prepare('SELECT * FROM delivery_principals').all()}})
   const store=new DeliveryStore({path});store.close()
-  sql(path,db=>{expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(30);expect(db.prepare('SELECT * FROM delivery_principals').all()).toEqual(old.rows);const names=new Set(old.schema.map(row=>row.name));expect(db.prepare('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name').all().filter(row=>names.has(row.name))).toEqual(old.schema);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(0)})
+  sql(path,db=>{expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(31);expect(db.prepare('SELECT * FROM delivery_principals').all()).toEqual(old.rows);const names=new Set(old.schema.map(row=>row.name));expect(db.prepare('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name').all().filter(row=>names.has(row.name))).toEqual(old.schema);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(0)})
   const reopened=new DeliveryStore({path});reopened.close()
 })

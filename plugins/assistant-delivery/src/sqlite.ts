@@ -1,11 +1,12 @@
 import { workItemFeedbackSchema } from './work-item-feedback-schema.js'
+import { attentionAuditSchema } from './attention-audit-store.js'
 import { workItemRepliesSchema } from './work-item-replies-schema.js'
 import { foregroundTerminationKinds } from './foreground-termination.js'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 30
+export const deliverySchemaVersion = 31
 
 /** Provider progress is a presentation journal, keyed to the authoritative Inbox. */
 const progressSchema = `
@@ -1377,6 +1378,7 @@ function migrateObserved(database: DatabaseSync): void {
     database.exec(`${workItemRepliesSchema} PRAGMA user_version = 29;`); version = 29
   }
   if (version === 29) { database.exec(`${workItemFeedbackSchema} PRAGMA user_version = 30;`); version = 30 }
+  if (version === 30) { database.exec(`${attentionAuditSchema} PRAGMA user_version = 31;`); version = 31 }
   if (version === deliverySchemaVersion) return
   database.exec(`
     ${deliveryInstanceSchema}
@@ -1602,7 +1604,8 @@ function migrateObserved(database: DatabaseSync): void {
     ${progressSchema}
     ${workItemRepliesSchema}
     ${workItemFeedbackSchema}
-    PRAGMA user_version = 30;
+    ${attentionAuditSchema}
+    PRAGMA user_version = 31;
   `)
 }
 
@@ -1619,6 +1622,17 @@ function assertWorkItemRepliesSchema(database: DatabaseSync): void {
   } finally { expected.close() }
 }
 
+function assertAttentionAuditSchema(database: DatabaseSync): void {
+  const expected = new DatabaseSync(':memory:')
+  try {
+    expected.exec('CREATE TABLE outbox_messages (id TEXT PRIMARY KEY);' + attentionAuditSchema)
+    const query = `SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE tbl_name='delivery_attention_audit' ORDER BY type,name`
+    if (JSON.stringify(database.prepare(query).all()) !== JSON.stringify(expected.prepare(query).all())) {
+      throw new Error('invalid attention audit schema')
+    }
+  } finally { expected.close() }
+}
+
 /** Serialize the complete forward migration chain across every Host process. */
 function migrate(database: DatabaseSync): void {
   database.exec('BEGIN IMMEDIATE')
@@ -1629,6 +1643,7 @@ function migrate(database: DatabaseSync): void {
     assertGoalOutcomeTargetSchema(database)
     assertForegroundTerminationSchema(database)
     assertWorkItemRepliesSchema(database)
+    assertAttentionAuditSchema(database)
     database.exec('COMMIT')
   } catch (error) {
     try { database.exec('ROLLBACK') } catch {}

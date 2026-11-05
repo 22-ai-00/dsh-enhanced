@@ -86,6 +86,7 @@ import { isSynchronousForegroundObservationHandle, validForegroundObservationReg
   type ForegroundTaskIdentity, type ForegroundTaskObservationRegistration,
   type ForegroundToolCallAttestation, type OwnerForegroundToolInput } from './foreground-observation.js'
 import { InboundImageMaterializer } from './inbound-images.js'
+import { assessAttention, type AttentionAuditEntry, type AttentionEnvelope, type AttentionLane, type AttentionPurpose } from './attention.js'
 import { registerDeliveryTools } from './tools.js'
 import {
   bindingMatchesOwnerRoute,
@@ -1165,6 +1166,8 @@ export class AssistantDeliveryService extends Service {
   private workItemFeedbackFlight: Promise<void> | undefined
   private workItemFeedbackCursor = 0
   private workItemFeedbackAckCursor = 0
+  /** WP19 stage 1: audit writes never affect delivery; failures are only counted. */
+  private attentionAuditWriteFailures = 0
   private naturalObjectiveFlight: Promise<void> | undefined
   private preferenceProjectionFlight: Promise<void> | undefined
   private inboundAdmissionRecoveryFlight: Promise<void> | undefined
@@ -2093,7 +2096,7 @@ export class AssistantDeliveryService extends Service {
       throw new AssistantDeliveryError('runtime-conflict', 'scheduled goal result exceeds the delivery text limit')
     }
     const situation = goalDefinitionSituation(proof.goal.definitionDigest)
-    return this.deliveryStore.enqueueGoalOutcomeTarget({
+    return this.auditAttention('scheduled-goal-result', 'assistant-goals-wake/v1', { lanePurpose: { purpose: 'result' } }, this.deliveryStore.enqueueGoalOutcomeTarget({
       locator, proof,
       intent: {
         idempotencyKey: `goal-outcome:${proof.proofDigest}:${finalBinding.id}`,
@@ -2109,7 +2112,7 @@ export class AssistantDeliveryService extends Service {
           'dsh.learning.proofDigest': proof.proofDigest,
         }),
       },
-    })
+    }))
   }
 
   /** A textless terminal Web wake may notify its original owner, never impersonate a reply. */
@@ -5008,7 +5011,7 @@ export class AssistantDeliveryService extends Service {
     }
     const target = this.inspectWorkItemReport(input)
     if (input.workspace !== target.scope.workspace) throw new Error('work item report scope changed')
-    return this.enqueueBackgroundAuthorized(input, target)
+    return this.enqueueBackgroundAuthorized(input, target, { lane: 'work-item-report', lanePurpose: { purpose: 'result', workItemId: input.itemId } })
   }
   private workItemReplyPermission(binding: ConversationBinding, registration: WorkItemReplyConsumerRegistration): boolean {
     return this.policy.evaluate({ subject: { kind: 'external', id: externalPrincipalId(binding.principal), workspace: binding.workspace, principal: externalPrincipalId(binding.principal) },
@@ -5109,6 +5112,8 @@ export class AssistantDeliveryService extends Service {
     text: string
     format?: 'markdown' | 'plain'
     metadata?: Readonly<Record<string, string>>
+    /** WP19 stage 1: audited only; omission records `missing-purpose`. */
+    attention?: AttentionEnvelope
   }): OutboxRecord {
     this.assertActive()
     if (containsReservedLearningMetadata(input.metadata) || Object.keys(input.metadata ?? {}).some(key => key.startsWith('dsh.native-notice'))) {
@@ -5117,10 +5122,39 @@ export class AssistantDeliveryService extends Service {
         'reserved metadata requires its typed delivery interface',
       )
     }
-    return this.enqueueBackgroundAuthorized(input)
+    return this.enqueueBackgroundAuthorized(input, undefined, { lane: 'background', envelope: input.attention })
   }
 
-  private enqueueBackgroundAuthorized(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string, string>> }, reportTarget?: WorkItemReportTarget): OutboxRecord {
+  /**
+   * Record the WP19 stage-1 verdict for one queued Outbox record. Audit only:
+   * the record is returned unchanged and any audit failure is swallowed.
+   */
+  private auditAttention(lane: AttentionLane, sourceId: string, audit: Readonly<{ envelope?: unknown; lanePurpose?: Readonly<{ purpose: AttentionPurpose; workItemId?: string }> }>, record: OutboxRecord): OutboxRecord {
+    try {
+      this.deliveryStore.attentionAudit.record({ outboxId: record.id, bindingId: record.intent.bindingId, lane, sourceId },
+        ledger => assessAttention({ text: record.intent.text, ...(audit.envelope === undefined ? {} : { envelope: audit.envelope }),
+          ...(audit.lanePurpose === undefined ? {} : { lanePurpose: audit.lanePurpose }), ledger }))
+    } catch { this.attentionAuditWriteFailures += 1 }
+    return record
+  }
+
+  /** Read-only WP19 stage-1 audit page in append order; never exposes message text. */
+  inspectAttentionAudit(input: Readonly<{ afterSequence?: number; limit?: number }> = {}): Readonly<{
+    entries: readonly AttentionAuditEntry[]; hasMore: boolean; nextAfterSequence: number | null; writeFailures: number
+  }> {
+    this.assertActive()
+    const afterSequence = input.afterSequence ?? 0
+    const limit = input.limit ?? 100
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new AssistantDeliveryError('runtime-conflict', 'invalid attention audit scan')
+    }
+    const page = this.deliveryStore.attentionAudit.list(afterSequence, limit)
+    return Object.freeze({ entries: page.entries, hasMore: page.hasMore,
+      nextAfterSequence: page.hasMore ? page.entries.at(-1)!.sequence : null, writeFailures: this.attentionAuditWriteFailures })
+  }
+
+  private enqueueBackgroundAuthorized(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string, string>> }, reportTarget?: WorkItemReportTarget,
+    audit: Readonly<{ lane: AttentionLane; envelope?: unknown; lanePurpose?: Readonly<{ purpose: AttentionPurpose; workItemId?: string }> }> = { lane: 'background' }): OutboxRecord {
     const binding = this.deliveryStore.getBinding(input.bindingId)
     if (binding === undefined || binding.status !== 'active' || !this.hasActivePrincipal(binding)) {
       throw new AssistantDeliveryError('missing-binding', 'delivery binding does not exist or is revoked')
@@ -5140,7 +5174,8 @@ export class AssistantDeliveryService extends Service {
       target: { conversation: binding.conversation, principal: binding.principal }, text: input.text,
       format: input.format ?? 'plain',
       ...(input.metadata === undefined ? {} : { metadata: input.metadata }) })
-    return reportTarget === undefined ? enqueue() : this.deliveryStore.workItemReplies.enqueueReport(reportTarget, binding, enqueue)
+    return this.auditAttention(audit.lane, input.sourceId, audit,
+      reportTarget === undefined ? enqueue() : this.deliveryStore.workItemReplies.enqueueReport(reportTarget, binding, enqueue))
   }
 
   #notificationGuard(record: Readonly<OutboxRecord>): Extract<import('./types.js').AdapterSendResult, { outcome: 'not-sent' }> | undefined {
@@ -5277,7 +5312,7 @@ export class AssistantDeliveryService extends Service {
   #notificationProviderId(intent: Readonly<OutboundIntent>): string { return `native-notice:${createHash('sha256').update(intent.idempotencyKey).update('\u0000').update(intent.bindingId).update('\u0000').update(intent.text).digest('hex')}` }
 
   /** Queue a typed owner notice. Accepted means queued; it never asserts user read. */
-  enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }; sessionId: string; idempotencyKey: string; text: string; expiresAt: number }): OutboxRecord {
+  enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention?: AttentionEnvelope }): OutboxRecord {
     this.assertActive()
     if (!Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || typeof input.text !== 'string' || input.text.length === 0 || input.text.length > 16_384) throw new AssistantDeliveryError('policy-denied', 'owner notification is invalid or expired')
     const resolved = this.resolveOwnerRoute(input.ownerRouteId)
@@ -5287,7 +5322,7 @@ export class AssistantDeliveryService extends Service {
     return this.enqueueBackgroundAuthorized({ sourceId: input.sourceId, workspace: binding.workspace, bindingId: binding.id, idempotencyKey: input.idempotencyKey, text: input.text, format: 'plain', metadata: {
       'dsh.native-notice': 'v1', 'dsh.native-notice.sourceId': input.sourceId, 'dsh.native-notice.ownerRouteId': input.ownerRouteId, 'dsh.native-notice.expiresAt': String(input.expiresAt), 'dsh.native-notice.ownerRecordId': owner.id,
       'dsh.native-notice.ownerVersion': String(owner.version), 'dsh.native-notice.bindingVersion': String(binding.version), 'dsh.native-notice.bindingGeneration': String(binding.generation), 'dsh.native-notice.sessionId': binding.sessionId,
-    } })
+    } }, undefined, { lane: 'owner-notification', envelope: input.attention })
   }
 
   /**
@@ -5350,7 +5385,7 @@ export class AssistantDeliveryService extends Service {
     if (Buffer.byteLength(text, 'utf8') > this.config.maxTextBytes) {
       throw new AssistantDeliveryError('runtime-conflict', 'Automation result exceeds the delivery text limit')
     }
-    return this.deliveryStore.enqueue({
+    return this.auditAttention('automation-result', proof.automationId, { lanePurpose: { purpose: 'result' } }, this.deliveryStore.enqueue({
       idempotencyKey: `automation:${proof.occurrenceId}:${binding.id}`,
       bindingId: binding.id,
       target: { conversation: binding.conversation, principal: binding.principal },
@@ -5367,7 +5402,7 @@ export class AssistantDeliveryService extends Service {
         'dsh.learning.outputDigest': proof.outputDigest,
         'dsh.learning.proofDigest': proof.proofDigest,
       }),
-    })
+    }))
   }
 
   /** Resolve the current generation of one exact Host-owned owner route. */
@@ -6182,6 +6217,8 @@ export class AssistantDeliveryService extends Service {
     idempotencyKey: string
     text: string
     format?: 'markdown' | 'plain'
+    /** WP19 stage 1: audited only; omission records `missing-purpose`. */
+    attention?: AttentionEnvelope
   }): OutboxRecord {
     this.assertActive()
     const sourceId = canonicalBackgroundSourceId(input.sourceId)
@@ -6195,14 +6232,14 @@ export class AssistantDeliveryService extends Service {
     const decision = authorizeOwnerRoute(this.policy, authority, sourceId, idempotencyKey)
     if (decision.effect !== 'allow') throw policyDenied(decision)
     try {
-      return this.deliveryStore.enqueueOwnerRoute({
+      return this.auditAttention('background-route', sourceId, { envelope: input.attention }, this.deliveryStore.enqueueOwnerRoute({
         authority,
         sourceId,
         sourceHash: createHash('sha256').update(sourceId).digest('hex'),
         idempotencyKey,
         text: input.text,
         format: input.format ?? 'plain',
-      })
+      }))
     } catch (error) {
       if (error instanceof DeliveryStoreError && error.code === 'invalid-binding') {
         throw new AssistantDeliveryError('missing-binding', 'owner route changed during enqueue')

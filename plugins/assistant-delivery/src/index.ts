@@ -54,6 +54,8 @@ export type { NativeWebOwnerAccess, NativeWebOwnerConfig } from './native-web-ow
 
 export type { WorkItemReportTarget, WorkItemReplySource, WorkItemReplyConsumerRegistration, WorkItemReplyReadInput, WorkItemReplyListInput } from './work-item-replies.js'
 export { WorkItemReplyCancelledError } from './work-item-replies.js'
+export { assessAttention, attentionAuditReasons, attentionWordCaps, countAttentionWords, defaultAttentionPurpose } from './attention.js'
+export type { AttentionAssessment, AttentionAuditEntry, AttentionAuditReason, AttentionEnvelope, AttentionLane, AttentionLedgerView, AttentionPurpose, AttentionPurposeSource, AttentionQuestion, AttentionVerdict } from './attention.js'
 
 export type { OwnerWorkItemLearningTask, OwnerLearningSourceExpectation, OwnerLearningSourceSnapshot, OwnerWorkItemLearningSourceExpectation, OwnerWorkItemLearningTaskFenceInput } from './work-item-feedback.js'
 

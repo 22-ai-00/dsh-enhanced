@@ -32,10 +32,10 @@ function fixture() {
 }
 
 describe('autonomy doctor profile and persisted owner checks', () => {
-  it('reads a real Delivery schema 30 owner without changing identity, database or configured grant', () => {
+  it('reads a real Delivery schema 31 owner without changing identity, database or configured grant', () => {
     const { home, source, databasePath, grant } = fixture()
     const schema = new DatabaseSync(databasePath, { readOnly: true })
-    try { expect(schema.prepare('PRAGMA user_version').get()?.user_version).toBe(30) } finally { schema.close() }
+    try { expect(schema.prepare('PRAGMA user_version').get()?.user_version).toBe(31) } finally { schema.close() }
     const before = databaseFingerprint(databasePath)
     const profile = inspectAutonomyProfile(source, 'web', home)
     expect(profile.grant).toEqual(grant)
@@ -46,11 +46,11 @@ describe('autonomy doctor profile and persisted owner checks', () => {
     expect(existsSync(profile.stateRoot)).toBe(false)
   })
 
-  it('accepts reviewed Delivery v24 through v30 owner snapshots without changing either database', () => {
+  it('accepts reviewed Delivery v24 through v31 owner snapshots without changing either database', () => {
     const { home, source, databasePath } = fixture()
     const profile = inspectAutonomyProfile(source, 'web', home)
     const configured = structuredClone(profile)
-    for (const version of [24, 25, 26, 27, 28, 29, 30]) {
+    for (const version of [24, 25, 26, 27, 28, 29, 30, 31]) {
       // These are minimal read-only version-gate fixtures, never migration inputs.
       // Keep the real current Delivery database untouched rather than relabelling it.
       const path = join(home, `owner-v${version}.sqlite`)
@@ -96,7 +96,7 @@ describe('autonomy doctor profile and persisted owner checks', () => {
     const db = new DatabaseSync(databasePath)
     try {
       expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(deliverySchemaVersion)
-      for (const version of [23, 31]) {
+      for (const version of [23, 32]) {
         db.exec(`PRAGMA user_version=${version}`)
         const before = databaseFingerprint(databasePath)
         expect(inspectAutonomyOwner(profile)).toEqual({ status: 'unavailable' })
