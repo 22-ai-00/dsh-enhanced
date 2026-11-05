@@ -292,6 +292,19 @@ test('readSealedAdoptionHandoffDigest returns null for a wholly dropped audit an
   expect(() => readSealedAdoptionHandoffDigest({ physicalPath: 'relative/creation-adoptions.sqlite' })).toThrow('invalid path')
 })
 
+test('a stopped stage with a lone -wal, a lone -shm or a hot -journal is refused without creating sidecars', () => {
+  const f = staged(), plan = planSealedAdoptionHandoff(f.scope), proof = apply(plan)
+  const sealed = readFileSync(f.physicalPath), all = ['-wal', '-shm', '-journal']
+  for (const present of [['-wal'], ['-shm'], ['-journal'], ['-wal', '-shm', '-journal']]) {
+    for (const suffix of present) writeFileSync(f.physicalPath + suffix, '', { mode: 0o600 })
+    expect(() => readSealedAdoptionHandoffDigest({ physicalPath: f.physicalPath })).toThrow('journal sidecars are incomplete')
+    for (const suffix of all) expect(existsSync(f.physicalPath + suffix)).toBe(present.includes(suffix))
+    for (const suffix of present) rmSync(f.physicalPath + suffix)
+  }
+  expect(readFileSync(f.physicalPath)).toEqual(sealed)
+  expect(readSealedAdoptionHandoffDigest({ physicalPath: f.physicalPath })).toBe(proof.digest)
+})
+
 test('a failure mid archive write never leaves a partial final archive and the plan retries once', () => {
   const f = staged(), plan = planSealedAdoptionHandoff(f.scope)
   const original = fs.writeSync, fault = new Error('injected crash during archive write')

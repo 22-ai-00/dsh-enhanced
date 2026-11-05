@@ -405,7 +405,11 @@ function readJournal<T>(file: string, action: (db: DatabaseSync) => T): T {
   absolute(file)
   if (basename(file) !== 'creation-adoptions.sqlite') fail('invalid physical journal')
   directory(dirname(file)); identity(file)
-  const live = ['-wal', '-shm', '-journal'].some(suffix => present(file + suffix))
+  const wal = present(file + '-wal'), shm = present(file + '-shm'), hot = present(file + '-journal')
+  // A live WAL journal always has both sidecars. A lone -wal would make the read-only open create -shm in
+  // a stopped stage, a lone -shm is stale, and a hot rollback journal cannot be recovered read-only.
+  if (hot || wal !== shm) fail('journal sidecars are incomplete; stop the Host cleanly or checkpoint the stopped database, then retry')
+  const live = wal
   const locator = pathToFileURL(file)
   locator.searchParams.set('mode', 'ro')
   if (!live) locator.searchParams.set('immutable', '1')
