@@ -36,6 +36,36 @@ export {
   normalizeNotificationOutcomeFact,
   notificationOutcomeDigest,
 } from './notification-outcomes.js'
+export {
+  ATTENTION_TUNING_PROTOCOL,
+  AttentionTuningLedger,
+  attentionRegressed,
+  attentionTuningBounds,
+  attentionTuningOrder,
+  clampAttentionTuning,
+  defaultAttentionTuningParameters,
+  isAttentionLoosening,
+  normalizeAttentionCohort,
+  normalizeAttentionTuningParameters,
+  proposeAttentionTuning,
+  withinAttentionTuningBounds,
+} from './attention-tuning.js'
+export type {
+  AttentionCohort,
+  AttentionCohortStats,
+  AttentionTuningChange,
+  AttentionTuningCurrent,
+  AttentionTuningEvent,
+  AttentionTuningParameter,
+  AttentionTuningParameters,
+  AttentionTuningPolicy,
+  AttentionTuningProposal,
+  AttentionTuningRequestRejection,
+  AttentionTuningRequestResult,
+  AttentionTuningStatus,
+  AttentionTuningTickAction,
+  AttentionTuningVersion,
+} from './attention-tuning.js'
 export * from './types.js'
 
 export function apply(ctx: Context, config: ConfigType): void {

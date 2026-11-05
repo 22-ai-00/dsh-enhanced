@@ -10,12 +10,14 @@ import { join } from 'node:path'
 import { OpportunityEngine, validateProfile } from './engine.js'
 import type { OpportunityInput, OpportunityProfile, OpportunityScope } from './types.js'
 import { reminderText, reminderExpiresAt } from './reminder.js'
+import { attentionOverlay, proactiveAttentionCohort, tuneProfile, type AttentionOverlay } from './attention-tuning.js'
 import { PreparationRuntime } from './preparation.js'
 import { PreparationStore } from './preparation-store.js'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-assistant-proactive'
-export { version, OpportunityEngine, validateProfile }
+export { version, OpportunityEngine, validateProfile, attentionOverlay, tuneProfile, proactiveAttentionCohort }
+export type { AttentionOverlay }
 export type * from './types.js'
 /** `attention` is ignored by Delivery releases before the WP19 audit; it never changes how the notice is sent. */
 interface NotificationPort { enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: OpportunityScope; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention?: { purpose: 'result' } }): unknown }
@@ -104,12 +106,13 @@ export class AssistantProactiveService extends Service {
   }
   evaluate = (input: OpportunityInput) => {
     this.assertProfile(input.profileId)
-    const evaluation = this.#engine.evaluate(input)
+    const overlay = this.#configuredProfileMode(input.profileId) === 'remind' ? this.#attentionOverlay(input.scope) : undefined
+    const evaluation = this.#engine.evaluate(input, overlay)
     const decision = evaluation.decision
     if (evaluation.disposition === 'consume' && decision.mode === 'remind' && decision.state === 'decided') {
       const delivery = this.#notificationPort()
       if (!delivery) throw new Error('assistant-proactive: reminder delivery service unavailable')
-      const profile = this.#engine.profileSnapshot(decision.scope, decision.goalId, decision.profileId)
+      const profile = tuneProfile(this.#engine.profileSnapshot(decision.scope, decision.goalId, decision.profileId), overlay)
       const expiresAt = reminderExpiresAt(decision, profile)
       // An informational notice: no WorkItem or structured question exists, so `attention` would not apply.
       if (Date.now() < expiresAt) {
@@ -126,6 +129,19 @@ export class AssistantProactiveService extends Service {
       }
     }
     return evaluation
+  }
+  #configuredProfileMode(profileId: string): OpportunityProfile['mode'] | undefined { return this.#profiles.get(profileId)?.mode }
+  /**
+   * WP22: the current verified attention version for proactive reminders, read
+   * structurally from Evaluation. Absent service, switch off, errors, version 0
+   * or malformed values all mean no overlay (identical untuned behavior).
+   */
+  #attentionOverlay(scope: OpportunityScope): AttentionOverlay | undefined {
+    const evaluation = this.ctx.get('assistantEvaluation' as never) as unknown as { currentAttentionTuning?: (input: unknown) => unknown } | undefined
+    if (typeof evaluation?.currentAttentionTuning !== 'function') return undefined
+    try {
+      return attentionOverlay(evaluation.currentAttentionTuning({ scope: { workspace: scope.workspace, preset: scope.preset }, cohort: { ...proactiveAttentionCohort } }))
+    } catch { return undefined }
   }
   #notificationPort(): NotificationPort | undefined {
     const delivery = this.ctx.get('assistantDelivery') as unknown as Partial<NotificationPort> | undefined

@@ -73,6 +73,8 @@ profiles:
 
 静默时段按 IANA 时区计算，支持跨午夜。合并等待和静默结束依靠 Goals 的周期核对；重启后继续读取原记录。事件内容不提供权限，也不作为新的目标指令。提醒投递有效期不晚于目标等待期限或下一个静默时段开始；未及时发送的提醒会失效，不跨静默时段补发。发送前及 Web 读取时重查原主人、绑定代次、路由和当前发送权限。Web 接受表示通知已可供读取，不表示用户已阅读。
 
+`remind` 策略可选读取 Evaluation 的注意力版本（WP22 切片 2）：每次评估时按目标 scope 的 workspace/preset 与 cohort `owner-notification` / `assistant-proactive/v1` 调用 `currentAttentionTuning`，只接受界内、非默认、带 digest 的版本，并仅在本次评估叠加到冻结策略上（不写回冻结快照）：提高 `interruptionCost` 与 `minimumUtility`、在已配置静默时段两侧延长（未配置静默时段则不变）、或以 `attention-muted` 静默消费提醒。决定记录 `attentionTuning: { version, digest }`；提醒文本与有效期使用叠加后的估值和静默时段。Evaluation 缺席、开关关闭、返回版本 0、抛错或格式不符时不叠加，行为与未调参完全一致。`prepare` 与 `execute` 策略不受影响。
+
 ## 权限与数据
 
 - 文件系统：保存配置数据库及 SQLite WAL/SHM；其中含主人身份范围、目标文本、事件标识、判断、反馈，以及按目标与来源记录的最后一次提醒内容摘要及是否已交给 Delivery（`proactive_reminders`，旧库启动时自动增建，不改动既有表）。另保存 `databasePath + '.preparations'` 及 WAL/SHM，其中含准备请求、模型草稿、有限 usage、独立 Session ID、状态和原因。数据库要求私有普通文件及不可由组/其他用户写入的父目录；不读取事件正文或业务文件。

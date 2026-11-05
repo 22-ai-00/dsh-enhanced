@@ -82,6 +82,14 @@ projection 保存选中的 execution/objective/delivery component id，原始两
 | `notificationObservationHorizonMs` | 30 天 | 已知通知自通知时间起在此期间内被重查，以吸收迟到回复、更正与撤回；有效值至少为响应窗口的两倍。超出观察期的通知不再被扫描（按 `occurred_at` 范围索引）。 |
 | `notificationSyncBatchSize` | `100` | 每次同步新摄入与重查的条数上限（最大 500）。 |
 | `notificationSyncIntervalMs` | 60 秒 | 定时器驱动的通知同步最小间隔（projection tick 更频繁，同步按此节流；`0` 表示每个 tick）。 |
+| `attentionTuningAutoAdopt` | `false` | WP22 切片 2：按 cohort 有界自动采用收紧类注意力参数并在回归时回退；要求 `notificationOutcomesEnabled`。 |
+| `attentionTuningCohorts` | `[{ lane: owner-notification, sourceId: assistant-proactive/v1 }]` | 可调 cohort（`lane` + `sourceId`），最多 16 个。 |
+| `attentionTuningMinSample` | `20` | 提议与回归判断所需的最少已判定通知数（最小 5）。 |
+| `attentionTuningNegativeRatePpm` | `600000` | 负向率（rejected + expired-unhandled）达到此值时收紧一步。 |
+| `attentionTuningMuteRatePpm` | `900000` | 其余参数已到上界后，负向率还须达到此值才停用该 cohort；须 ≥ 收紧阈值。 |
+| `attentionTuningRegressionMarginPpm` | `100000` | 观察期负向率高于采用依据负向率加此余量时回退。 |
+| `attentionTuningObservationMs` | 7 天 | 采用后的观察期，持久化，重启后继续。 |
+| `attentionTuningEvaluationWindowMs` | 7 天 | 提议所用证据的回看窗口（且不早于上一次版本变化）。 |
 
 ## 权限与数据边界
 
@@ -107,6 +115,16 @@ schema 13 扩展任务投影的主体身份约束及投影 outbox 的状态约�
 schema 14 新增与任务投影分离的 `evaluation_notification_outcome_*` 表：以 Delivery Outbox id 为通知主键，每次分类变化追加不可改、不可删的 revision 并推进该 scope 独立的通知 watermark；digest 不变只刷新检查时间。分类器 `notification-outcome` v1 确定性、无模型调用，优先级：owner/工作项判断 `not-achieved`→`rejected`、`achieved`→`accepted`；回复或 `partial`→`reacted`；传输 `dead`→`failed`；已发出且超过响应窗口→`expired-unhandled`（含 `expiry: { at, responseWindowMs }`），否则 `delivered`；未发出→`pending`。撤回（`unknown`）不计入判断。响应窗口只写入 `expired-unhandled` 记录，改配置只对到期判定实际改变的通知形成新 revision。格式错误或 scope 与已记录 head 冲突的事实计入 `invalid` 并跳过，不阻塞游标。head 必须与其 revision 的 digest、结果、watermark、scope 与通知时间一致，通知 watermark 与同步游标只进不退、不可删（触发器保证）。回复条数与任何正文不入库。
 
 启用后每个 projection tick 先从持久游标摄入新审计行，再按最久未查顺序重查观察期内的已知通知；格式错误的事实计入 `invalid` 并跳过，不阻塞游标。Delivery 缺席时为零结果。读接口：`inspectNotificationOutcome({ scope, notificationId })`（当前 + 全部 revision）、`notificationOutcomeFeed({ scope, after?, limit? })`（按 watermark 可续读的当前 head）、`notificationOutcomeSummary({ scope, fromNotifiedAt?, toNotifiedAt? })`（按 outcome 与 attention verdict 计数）。本切片不写 Evolution、不改任何参数、不触发 Growth。
+
+## 注意力参数有界收紧与回退（WP22 切片 2）
+
+schema 15 新增 `evaluation_attention_tuning_versions`（不可改、不可删，按 scope + cohort 递增版本，记录精确父版本与父 digest、参数、依据统计与 scope watermark、变化项、来源 `auto`/`request`、sha256 digest）、`_heads`（当前生效版本、`idle`/`observing` 状态与持久观察窗口）和 `_events`（`adopted`/`rolled-back`/`settled`/`request-rejected` 只追加审计）。cohort 是 Evaluation scope 内的 Delivery `lane` + `sourceId`；只统计通知结果账本当前 head。
+
+参数与固定界限：`interruptionCostDelta` 0–100 步长 10、`minimumUtilityDelta` 0–100 步长 10、`quietExtensionMinutes` 0–120 步长 30（在既有静默时段两侧各延长，总长不超过 1439 分钟）、`muted`。默认全零，即不改变消费者行为。纯函数提议器确定性、只收紧：已判定数不足 `attentionTuningMinSample` 为 no-op；负向率达到阈值时按固定顺序（打扰成本→阈值→静默→停用）对第一个未到上界的参数前进一步，`muted` 另需停用阈值。
+
+`reconcileAttentionTuning()` 在通知同步之后运行（同一节流与错误边界），每个 cohort 在一个 `BEGIN IMMEDIATE` 事务内：空闲时提议并采用一步（幂等键绑定父版本、父 digest、scope watermark 与变化），进入观察；观察中若当前版本 digest 校验失败，或观察期内样本足够且负向率高于依据率加余量，则回退到精确父版本（含版本 0 默认值）；正向或持平证据从不触发回退，观察期满记为 `settled`。被回退版本的证据不复用，须重新累积样本。`currentAttentionTuning({ scope, cohort })` 返回经 digest 校验的当前版本，校验失败时沿父链回落到最近可校验版本或默认值；开关关闭时返回 `undefined`。
+
+`requestAttentionTuning({ scope, cohort, parameters })` 是 Host 内部入口（不注册工具）：任何放宽（含与收紧混合）一律拒绝为 `loosening-requires-holdout` 并记录事件；越界、无变化、多于一步、开关关闭或观察中同样被拒绝并记录。合规的单步收紧以 `request` 来源采用并进入同样的观察与回退。`attentionTuningStatus({ scope, cohort })` 只读返回当前版本、全部版本和事件。本切片不实现放宽、留出重放或 owner 结构化问题，不写 Evolution，不触发 Growth。
 
 ## 限制
 

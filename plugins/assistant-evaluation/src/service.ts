@@ -11,6 +11,16 @@ import {
   evaluationLearningProjectionDigest,
 } from './store.js'
 import { registerEvaluationTools } from './tools.js'
+import {
+  normalizeAttentionCohort,
+  type AttentionCohort,
+  type AttentionTuningCurrent,
+  type AttentionTuningParameters,
+  type AttentionTuningPolicy,
+  type AttentionTuningRequestResult,
+  type AttentionTuningStatus,
+  type AttentionTuningTickAction,
+} from './attention-tuning.js'
 import { validateWorkItemOwnerFeedbackProof } from './work-item-owner-proof.js'
 import type {
   EvaluationHealth,
@@ -88,6 +98,28 @@ export interface Config {
   notificationSyncBatchSize?: number
   /** Minimum gap between timer-driven notification syncs (the projection tick runs more often). */
   notificationSyncIntervalMs?: number
+  /**
+   * WP22 slice 2: bounded, tighten-only automatic adoption of attention
+   * parameters per notification cohort, with exact-parent rollback on a rising
+   * negative rate. Off by default; when off, no version is created, no monitor
+   * runs and `currentAttentionTuning` returns undefined (no consumer overlay).
+   * Requires `notificationOutcomesEnabled`.
+   */
+  attentionTuningAutoAdopt?: boolean
+  /** Cohorts (`lane`, `sourceId`) eligible for tuning. Defaults to proactive reminders. */
+  attentionTuningCohorts?: { lane: string; sourceId: string }[]
+  /** Minimum decided notifications before any proposal or regression judgement. */
+  attentionTuningMinSample?: number
+  /** Negative (rejected + expired-unhandled) rate, in ppm, that triggers one tightening step. */
+  attentionTuningNegativeRatePpm?: number
+  /** Negative rate, in ppm, additionally required before muting a cohort. */
+  attentionTuningMuteRatePpm?: number
+  /** Rise over the basis negative rate, in ppm, that rolls an observed version back. */
+  attentionTuningRegressionMarginPpm?: number
+  /** Observation window after an adoption, persisted across restarts. */
+  attentionTuningObservationMs?: number
+  /** Look-back for the evidence a proposal is computed from. */
+  attentionTuningEvaluationWindowMs?: number
 }
 
 export const ASSISTANT_EVALUATION_SKILL = `# Personal assistant self-evaluation
@@ -126,6 +158,17 @@ const configSchema = Schema.object({
   notificationObservationHorizonMs: Schema.number().step(1).min(60_000).max(31_536_000_000).default(2_592_000_000),
   notificationSyncBatchSize: Schema.number().step(1).min(1).max(500).default(100),
   notificationSyncIntervalMs: Schema.number().step(1).min(0).max(86_400_000).default(60_000),
+  attentionTuningAutoAdopt: Schema.boolean().default(false),
+  attentionTuningCohorts: Schema.array(Schema.object({
+    lane: Schema.string().required(),
+    sourceId: Schema.string().required(),
+  })).default([{ lane: 'owner-notification', sourceId: 'assistant-proactive/v1' }]),
+  attentionTuningMinSample: Schema.number().step(1).min(5).max(10_000).default(20),
+  attentionTuningNegativeRatePpm: Schema.number().step(1).min(100_000).max(1_000_000).default(600_000),
+  attentionTuningMuteRatePpm: Schema.number().step(1).min(100_000).max(1_000_000).default(900_000),
+  attentionTuningRegressionMarginPpm: Schema.number().step(1).min(0).max(1_000_000).default(100_000),
+  attentionTuningObservationMs: Schema.number().step(1).min(60_000).max(31_536_000_000).default(604_800_000),
+  attentionTuningEvaluationWindowMs: Schema.number().step(1).min(60_000).max(31_536_000_000).default(604_800_000),
 }) as Schema<Config>
 
 export type AssistantEvaluationErrorCode =
@@ -429,6 +472,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   private projectionTimer: ReturnType<typeof setInterval> | undefined
   private notificationFacts: NotificationOutcomeFactSource | undefined
   private lastNotificationSyncAt = Number.NEGATIVE_INFINITY
+  private readonly attentionCohorts: readonly AttentionCohort[]
   private active = true
 
   constructor(ctx: Context, input: Config, options: { now?: () => number } = {}) {
@@ -447,6 +491,16 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     if (this.config.projectionRetryBaseMs > this.config.projectionRetryMaxMs) {
       throw new Error('assistant-evaluation: projectionRetryBaseMs must not exceed projectionRetryMaxMs')
     }
+    if (this.config.attentionTuningAutoAdopt && !this.config.notificationOutcomesEnabled) {
+      throw new Error('assistant-evaluation: attentionTuningAutoAdopt requires notificationOutcomesEnabled')
+    }
+    if (this.config.attentionTuningMuteRatePpm < this.config.attentionTuningNegativeRatePpm) {
+      throw new Error('assistant-evaluation: attentionTuningMuteRatePpm must not be below attentionTuningNegativeRatePpm')
+    }
+    if (this.config.attentionTuningCohorts.length > 16) {
+      throw new Error('assistant-evaluation: at most 16 attention tuning cohorts')
+    }
+    this.attentionCohorts = Object.freeze(this.config.attentionTuningCohorts.map(cohort => normalizeAttentionCohort(cohort)))
     this.now = options.now ?? Date.now
     this.store = new EvaluationStore({
       path: this.config.databasePath,
@@ -559,6 +613,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
         if (this.config.notificationOutcomesEnabled && now - this.lastNotificationSyncAt >= this.config.notificationSyncIntervalMs) {
           this.lastNotificationSyncAt = now
           try { this.reconcileNotificationOutcomes() } catch { /* isolated from projection; retried on a later tick */ }
+          try { this.reconcileAttentionTuning() } catch { /* retried on a later sync */ }
         }
         void this.reconcileProjections().catch(() => {})
       }, this.config.projectionIntervalMs)
@@ -1125,6 +1180,79 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       throw new AssistantEvaluationError('invalid-input', 'notification outcome summary window is invalid')
     }
     return this.store.notifications.summary(input.scope, from, to)
+  }
+
+  #attentionPolicy(): AttentionTuningPolicy {
+    return Object.freeze({
+      minSample: this.config.attentionTuningMinSample,
+      negativeRatePpm: this.config.attentionTuningNegativeRatePpm,
+      muteRatePpm: this.config.attentionTuningMuteRatePpm,
+      regressionMarginPpm: this.config.attentionTuningRegressionMarginPpm,
+    })
+  }
+
+  #attentionCohort(input: unknown): AttentionCohort {
+    let cohort: AttentionCohort
+    try {
+      cohort = normalizeAttentionCohort(input)
+    } catch {
+      throw new AssistantEvaluationError('invalid-input', 'attention cohort is invalid')
+    }
+    if (!this.attentionCohorts.some(item => item.lane === cohort.lane && item.sourceId === cohort.sourceId)) {
+      throw new AssistantEvaluationError('not-found', 'attention cohort is not configured')
+    }
+    return cohort
+  }
+
+  /**
+   * WP22 slice 2 deterministic tuning tick: for every configured cohort and
+   * every scope that has notifications in it, monitor an observing version
+   * (exact-parent rollback on regression) or adopt one bounded tightening
+   * step. Zero work when `attentionTuningAutoAdopt` is off.
+   */
+  reconcileAttentionTuning(): readonly Readonly<{ scopeKey: string; cohort: AttentionCohort; result: AttentionTuningTickAction }>[] {
+    this.assertActive()
+    if (!this.config.attentionTuningAutoAdopt) return Object.freeze([])
+    const policy = this.#attentionPolicy()
+    const options = { observationMs: this.config.attentionTuningObservationMs, evaluationWindowMs: this.config.attentionTuningEvaluationWindowMs }
+    const results: { scopeKey: string; cohort: AttentionCohort; result: AttentionTuningTickAction }[] = []
+    for (const cohort of this.attentionCohorts) {
+      for (const scope of this.store.attention.scopes(cohort)) {
+        let scopeKey: string
+        try { scopeKey = canonicalEvaluationScope(scope).scopeKey } catch { continue }
+        results.push({ scopeKey, cohort, result: this.store.attention.tick(scope, cohort, policy, options) })
+      }
+    }
+    return Object.freeze(results)
+  }
+
+  /**
+   * Verified active attention parameters for a consumer, or undefined when
+   * auto-adoption is off (consumers then apply no overlay at all).
+   */
+  currentAttentionTuning(input: { scope: EvaluationScope; cohort: AttentionCohort }): AttentionTuningCurrent | undefined {
+    this.assertActive()
+    if (!this.config.attentionTuningAutoAdopt) return undefined
+    return this.store.attention.current(input.scope, this.#attentionCohort(input.cohort))
+  }
+
+  /** Versions, durable observation state and recent events for one cohort. */
+  attentionTuningStatus(input: { scope: EvaluationScope; cohort: AttentionCohort }): AttentionTuningStatus {
+    this.assertActive()
+    return this.store.attention.status(input.scope, this.#attentionCohort(input.cohort))
+  }
+
+  /**
+   * Host-internal explicit request. Loosening is never adopted in this slice:
+   * it is rejected as `loosening-requires-holdout` and recorded.
+   */
+  requestAttentionTuning(input: { scope: EvaluationScope; cohort: AttentionCohort; parameters: AttentionTuningParameters }): AttentionTuningRequestResult {
+    this.assertActive()
+    return this.store.attention.request(input.scope, this.#attentionCohort(input.cohort), input.parameters, {
+      enabled: this.config.attentionTuningAutoAdopt,
+      observationMs: this.config.attentionTuningObservationMs,
+      evaluationWindowMs: this.config.attentionTuningEvaluationWindowMs,
+    })
   }
 
   limits(): EvaluationLimits {

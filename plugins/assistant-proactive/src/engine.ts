@@ -3,6 +3,7 @@ import { dirname, isAbsolute } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { reminderContentDigest, type ReminderContent } from './reminder.js'
+import { attentionOverlay, tuneProfile, type AttentionOverlay } from './attention-tuning.js'
 import type { OpportunityDecision, OpportunityEvaluation, OpportunityInput, OpportunityProfile, OpportunityScope } from './types.js'
 
 const max = 1_000_000_000
@@ -84,6 +85,7 @@ export class OpportunityEngine {
   readonly #db: DatabaseSync
   readonly #profiles = new Map<string, Readonly<OpportunityProfile>>()
   readonly #now: () => number
+  #overlay: AttentionOverlay | undefined
   constructor(path: string, profiles: readonly OpportunityProfile[], options: { now?: () => number } = {}) {
     if (!Array.isArray(profiles)) fail('assistant-proactive: profiles must be an array')
     for (const item of profiles) { const profile = validateProfile(item); if (this.#profiles.has(profile.id)) fail('assistant-proactive: duplicate profile'); this.#profiles.set(profile.id, profile) }
@@ -100,13 +102,18 @@ export class OpportunityEngine {
     if (!(this.#db.prepare('PRAGMA table_info(proactive_reminders)').all() as Array<{ name: string }>).some(column => column.name === 'queued'))
       this.#db.exec('ALTER TABLE proactive_reminders ADD COLUMN queued INTEGER NOT NULL DEFAULT 0 CHECK(queued IN (0, 1))')
   }
-  evaluate(input: OpportunityInput): OpportunityEvaluation {
+  /**
+   * `overlay` is an optional verified tighten-only Evaluation attention version.
+   * It is applied to the frozen goal profile for this evaluation only and is
+   * never persisted into the profile snapshot.
+   */
+  evaluate(input: OpportunityInput, overlay?: unknown): OpportunityEvaluation {
     this.#db.exec('BEGIN IMMEDIATE')
-    try { const value = this.#evaluate(input); this.#db.exec('COMMIT'); return value } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+    try { this.#overlay = attentionOverlay(overlay); const value = this.#evaluate(input); this.#db.exec('COMMIT'); return value } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error } finally { this.#overlay = undefined }
   }
   #evaluate(input: OpportunityInput): OpportunityEvaluation {
     validateInput(input); const now = this.#now(); if (!integer(now, Number.MAX_SAFE_INTEGER)) fail('assistant-proactive: invalid clock')
-    const scope = scopeKey(input.scope); const profile = this.#profile(scope, input.goalId, input.profileId)
+    const scope = scopeKey(input.scope); const profile = tuneProfile(this.#profile(scope, input.goalId, input.profileId), this.#overlay)
     const existing = this.#event(scope, input)
     if (existing) {
       if (!this.#sameIdentity(existing, input)) fail('assistant-proactive: event identity conflict')
@@ -126,6 +133,7 @@ export class OpportunityEngine {
     if (latest?.state === 'pending' && this.#sameIdentity(latest, input)) return this.#mature(scope, latest, input, profile, now)
     const counts = this.#counts(scope, input.goalId)
     if (counts.ledger >= profile.maxDecisionsPerGoal || profile.mode === 'execute' && counts.executions >= profile.maxExecutionsPerGoal || profile.mode === 'remind' && counts.reminders >= profile.maxRemindersPerGoal) return this.#budgetProjection(input, profile, now)
+    if (this.#muted(profile)) return this.#save(scope, input, profile, 'consume', 'suppress', 'attention-muted', now, now)
     if (quiet(now, profile)) return this.#save(scope, input, profile, 'defer', 'suppress', 'quiet-hours', now, quietEndsAt(now, profile))
     if (utility(profile) < profile.minimumUtility) return this.#save(scope, input, profile, 'consume', 'suppress', 'below-threshold', now, now)
     if (latest && now < latest.updatedAt + profile.cooldownMs) return this.#save(scope, input, profile, 'consume', 'suppress', 'cooldown', now, now)
@@ -172,6 +180,15 @@ export class OpportunityEngine {
     this.#db.prepare('DELETE FROM proactive_reminders WHERE scope_json = ? AND goal_id = ? AND source_id = ? AND decision_id = ? AND queued = 0').run(scopeKey(decision.scope), decision.goalId, decision.sourceId, decision.id)
   }
   close(): void { this.#db.close() }
+  #muted(profile: Readonly<OpportunityProfile>): boolean { return profile.mode === 'remind' && this.#overlay?.parameters.muted === true }
+  /** Records which attention version shaped a decision; absent when no overlay applied. */
+  #attention(profile: Readonly<OpportunityProfile>): Pick<OpportunityDecision, 'attentionTuning'> {
+    return this.#overlay && profile.mode === 'remind' ? { attentionTuning: freeze({ version: this.#overlay.version, digest: this.#overlay.digest }) } : {}
+  }
+  #tag(existing: OpportunityDecision, profile: Readonly<OpportunityProfile>): OpportunityDecision {
+    const { attentionTuning: _previous, ...rest } = existing
+    return { ...rest, ...this.#attention(profile) }
+  }
   #profile(scope: string, goalId: string, profileId: string): Readonly<OpportunityProfile> {
     const row = this.#db.prepare('SELECT profile_json FROM proactive_profiles WHERE scope_json = ? AND goal_id = ? AND profile_id = ?').get(scope, goalId, profileId) as { profile_json: string } | undefined
     if (row) return validateProfile(JSON.parse(row.profile_json) as OpportunityProfile)
@@ -199,28 +216,32 @@ export class OpportunityEngine {
     if (now >= input.expiresAt) return this.#terminal(existing, 'consume', 'suppress', 'expired', now)
     const rejected = this.#latestRejected(scope, input.goalId, profile.id)
     if (rejected && rejected.id !== existing.id && now < rejected.updatedAt + profile.rejectionCooldownMs) return this.#terminal(existing, 'consume', 'suppress', 'rejected-cooldown', now)
+    if (this.#muted(profile)) {
+      const muted = freeze({ ...this.#tag(existing, profile), state: 'decided' as const, mode: 'suppress' as const, reason: 'attention-muted' as const, updatedAt: now })
+      this.#put(muted); return freeze({ disposition: 'consume', decision: muted })
+    }
     if (quiet(now, profile)) {
-      const delayed = freeze({ ...existing, reason: 'quiet-hours' as const, updatedAt: now, eligibleAt: quietEndsAt(now, profile) })
+      const delayed = freeze({ ...this.#tag(existing, profile), reason: 'quiet-hours' as const, updatedAt: now, eligibleAt: quietEndsAt(now, profile) })
       this.#put(delayed); return freeze({ disposition: 'defer', decision: delayed })
     }
     if (utility(profile) < profile.minimumUtility) {
-      const suppressed = freeze({ ...existing, state: 'decided' as const, mode: 'suppress' as const, reason: 'below-threshold' as const, updatedAt: now })
+      const suppressed = freeze({ ...this.#tag(existing, profile), state: 'decided' as const, mode: 'suppress' as const, reason: 'below-threshold' as const, updatedAt: now })
       this.#put(suppressed); return freeze({ disposition: 'consume', decision: suppressed })
     }
     const counts = this.#counts(scope, input.goalId)
     const budget = counts.ledger > profile.maxDecisionsPerGoal || profile.mode === 'execute' && counts.executions >= profile.maxExecutionsPerGoal || profile.mode === 'remind' && counts.reminders >= profile.maxRemindersPerGoal
     // Compare the content of the latest coalesced observation, i.e. what this decision will actually report.
-    const observed: OpportunityDecision = { ...existing, ...(input.event.sequence > existing.eventSequence ? { eventId: input.event.id, eventSequence: input.event.sequence, eventDigest: input.event.digest, eventObservationDigest: input.event.observationDigest, observations: existing.observations + 1 } : {}) }
+    const observed: OpportunityDecision = { ...this.#tag(existing, profile), ...(input.event.sequence > existing.eventSequence ? { eventId: input.event.id, eventSequence: input.event.sequence, eventDigest: input.event.digest, eventObservationDigest: input.event.observationDigest, observations: existing.observations + 1 } : {}) }
     const unchanged = !budget && profile.mode === 'remind' && this.#unchangedReminder(scope, observed)
     const mode = budget || unchanged ? 'suppress' as const : profile.mode
     const reason = budget ? 'budget' as const : unchanged ? 'unchanged' as const : profile.mode === 'execute' ? 'execution' as const : profile.mode === 'remind' ? 'reminder' as const : 'prepared' as const
-    const next = freeze({ ...observed, mode, state: 'decided' as const, reason, updatedAt: now })
+    const next = freeze({ ...observed, mode, state: 'decided' as const, reason, utility: utility(profile), updatedAt: now })
     this.#put(next); this.#link(scope, input, next.id); if (mode === 'remind') this.#remember(scope, next)
     return freeze({ disposition: mode === 'execute' ? 'execute' : 'consume', decision: next })
   }
   #save(scope: string, input: OpportunityInput, profile: OpportunityProfile, disposition: OpportunityEvaluation['disposition'], mode: OpportunityDecision['mode'], reason: OpportunityDecision['reason'], now: number, eligibleAt: number): OpportunityEvaluation {
     if (this.#counts(scope, input.goalId).ledger >= profile.maxDecisionsPerGoal) return this.#budgetProjection(input, profile, now)
-    const decision = freeze({ id: `opportunity-${randomUUID()}`, waitId: input.waitId, profileId: profile.id, scope: input.scope, goalId: input.goalId, sessionId: input.sessionId, ownerRouteId: input.ownerRouteId, sourceId: input.sourceId, eventId: input.event.id, eventSequence: input.event.sequence, eventDigest: input.event.digest, eventObservationDigest: input.event.observationDigest, sourceDigest: input.sourceDigest, objective: input.objective, definitionDigest: input.definitionDigest, nativeGoalId: input.nativeGoalId, nativeRevision: input.nativeRevision, mode, state: eligibleAt > now ? 'pending' as const : 'decided' as const, reason, utility: utility(profile), firstObservedAt: now, updatedAt: now, eligibleAt, expiresAt: input.expiresAt, observations: 1 })
+    const decision = freeze({ id: `opportunity-${randomUUID()}`, waitId: input.waitId, profileId: profile.id, scope: input.scope, goalId: input.goalId, sessionId: input.sessionId, ownerRouteId: input.ownerRouteId, sourceId: input.sourceId, eventId: input.event.id, eventSequence: input.event.sequence, eventDigest: input.event.digest, eventObservationDigest: input.event.observationDigest, sourceDigest: input.sourceDigest, objective: input.objective, definitionDigest: input.definitionDigest, nativeGoalId: input.nativeGoalId, nativeRevision: input.nativeRevision, mode, state: eligibleAt > now ? 'pending' as const : 'decided' as const, reason, utility: utility(profile), firstObservedAt: now, updatedAt: now, eligibleAt, expiresAt: input.expiresAt, observations: 1, ...this.#attention(profile) })
     this.#put(decision); this.#link(scope, input, decision.id); if (mode === 'remind') this.#remember(scope, decision); return freeze({ disposition, decision })
   }
   /**

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { AttentionTuningLedger } from './attention-tuning.js'
 import { NotificationOutcomeLedger } from './notification-outcomes.js'
 import { isAbsolute, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
@@ -576,11 +577,14 @@ export class EvaluationStore {
   readonly #defaultSummaryWindowMs: number
   /** WP22 read-only per-notification outcome canon. */
   readonly notifications: NotificationOutcomeLedger
+  /** WP22 slice 2 tighten-only attention tuning versions over the notification canon. */
+  readonly attention: AttentionTuningLedger
 
   constructor(options: EvaluationStoreOptions) {
     this.#database = openEvaluationDatabase(options.path)
     this.#now = options.now ?? Date.now
     this.notifications = new NotificationOutcomeLedger(this.#database, this.#now)
+    this.attention = new AttentionTuningLedger(this.#database, this.#now)
     this.#maxQueryLimit = options.maxQueryLimit ?? 100
     this.#maxSituationBytes = options.maxSituationBytes ?? 200
     this.#maxMetricsBytes = options.maxMetricsBytes ?? 4_096

@@ -10,7 +10,7 @@ import {
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const evaluationSchemaVersion = 14
+export const evaluationSchemaVersion = 15
 
 export type EvaluationDatabaseErrorCode = 'invalid-path' | 'unsafe-file' | 'schema-too-new'
 
@@ -376,6 +376,77 @@ const notificationOutcomeSchema = `
   CREATE TRIGGER evaluation_notification_sync_cursor_no_delete
     BEFORE DELETE ON evaluation_notification_sync_cursor
     BEGIN SELECT RAISE(ABORT, 'notification sync cursor is durable'); END;
+`
+
+/**
+ * WP22 slice 2 attention-tuning canon. Each version is immutable, names its
+ * exact parent (0 = built-in default) and carries the basis outcome summary
+ * plus scope notification watermark it was derived from. The head names the
+ * active version and a durable observation window; events are append-only.
+ */
+const attentionTuningSchema = `
+  CREATE TABLE evaluation_attention_tuning_versions (
+    scope_key TEXT NOT NULL,
+    lane TEXT NOT NULL CHECK (length(lane) BETWEEN 1 AND 64),
+    source_id TEXT NOT NULL CHECK (length(source_id) BETWEEN 1 AND 256),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    parent_version INTEGER NOT NULL CHECK (parent_version >= 0 AND parent_version < version),
+    parameters_json TEXT NOT NULL CHECK (json_valid(parameters_json)),
+    basis_json TEXT NOT NULL CHECK (json_valid(basis_json)),
+    change_json TEXT NOT NULL CHECK (json_valid(change_json)),
+    origin TEXT NOT NULL CHECK (origin IN ('auto','request')),
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    idempotency_key TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL CHECK (created_at >= 0),
+    PRIMARY KEY (scope_key, lane, source_id, version)
+  ) STRICT;
+  CREATE TRIGGER evaluation_attention_tuning_versions_immutable
+    BEFORE UPDATE ON evaluation_attention_tuning_versions
+    BEGIN SELECT RAISE(ABORT, 'attention tuning versions are immutable'); END;
+  CREATE TRIGGER evaluation_attention_tuning_versions_no_delete
+    BEFORE DELETE ON evaluation_attention_tuning_versions
+    BEGIN SELECT RAISE(ABORT, 'attention tuning versions are durable'); END;
+  CREATE TABLE evaluation_attention_tuning_heads (
+    scope_key TEXT NOT NULL,
+    lane TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    workspace TEXT NOT NULL,
+    preset TEXT NOT NULL,
+    active_version INTEGER NOT NULL CHECK (active_version >= 0),
+    latest_version INTEGER NOT NULL CHECK (latest_version >= active_version),
+    state TEXT NOT NULL CHECK (state IN ('idle','observing')),
+    observing_version INTEGER,
+    observe_from INTEGER,
+    observe_until INTEGER,
+    changed_at INTEGER NOT NULL CHECK (changed_at >= 0),
+    CHECK ((state = 'idle' AND observing_version IS NULL AND observe_from IS NULL AND observe_until IS NULL)
+      OR (state = 'observing' AND observing_version = active_version AND observe_from IS NOT NULL AND observe_until > observe_from)),
+    PRIMARY KEY (scope_key, lane, source_id)
+  ) STRICT;
+  CREATE TRIGGER evaluation_attention_tuning_heads_no_delete
+    BEFORE DELETE ON evaluation_attention_tuning_heads
+    BEGIN SELECT RAISE(ABORT, 'attention tuning heads are durable'); END;
+  CREATE TABLE evaluation_attention_tuning_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope_key TEXT NOT NULL,
+    lane TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('adopted','rolled-back','settled','request-rejected')),
+    from_version INTEGER NOT NULL CHECK (from_version >= 0),
+    to_version INTEGER NOT NULL CHECK (to_version >= 0),
+    reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 64),
+    detail_json TEXT NOT NULL CHECK (json_valid(detail_json)),
+    idempotency_key TEXT UNIQUE,
+    occurred_at INTEGER NOT NULL CHECK (occurred_at >= 0)
+  ) STRICT;
+  CREATE INDEX evaluation_attention_tuning_events_cohort
+    ON evaluation_attention_tuning_events(scope_key, lane, source_id, sequence);
+  CREATE TRIGGER evaluation_attention_tuning_events_immutable
+    BEFORE UPDATE ON evaluation_attention_tuning_events
+    BEGIN SELECT RAISE(ABORT, 'attention tuning events are immutable'); END;
+  CREATE TRIGGER evaluation_attention_tuning_events_no_delete
+    BEFORE DELETE ON evaluation_attention_tuning_events
+    BEGIN SELECT RAISE(ABORT, 'attention tuning events are durable'); END;
 `
 
 function migrate(database: DatabaseSync): void {
@@ -752,6 +823,13 @@ function migrate(database: DatabaseSync): void {
         ${notificationOutcomeSchema}
         UPDATE evaluation_schema_meta SET value = '14' WHERE key = 'schema-version';
         PRAGMA user_version = 14;
+      `)
+    }
+    if (schemaVersion(database) === 14) {
+      database.exec(`
+        ${attentionTuningSchema}
+        UPDATE evaluation_schema_meta SET value = '15' WHERE key = 'schema-version';
+        PRAGMA user_version = 15;
       `)
     }
     if (schemaVersion(database) !== evaluationSchemaVersion) {

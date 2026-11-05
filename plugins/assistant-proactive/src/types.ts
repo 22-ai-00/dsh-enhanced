@@ -27,7 +27,7 @@ export interface OpportunityInput {
   event: { id: string; sequence: number; digest: string; occurredAt: number; observationDigest?: string }
   expiresAt: number
 }
-export type OpportunityReason = 'cancelled' | 'coalescing' | 'quiet-hours' | 'cooldown' | 'rejected-cooldown' | 'below-threshold' | 'budget' | 'expired' | 'prepared' | 'reminder' | 'unchanged' | 'execution'
+export type OpportunityReason = 'cancelled' | 'coalescing' | 'quiet-hours' | 'cooldown' | 'rejected-cooldown' | 'below-threshold' | 'budget' | 'expired' | 'prepared' | 'reminder' | 'unchanged' | 'execution' | 'attention-muted'
 export interface OpportunityDecision {
   id: string; waitId: string; profileId: string; scope: OpportunityScope; goalId: string; sessionId: string; ownerRouteId: string
   sourceId: string; eventId: string; eventSequence: number; eventDigest: string; sourceDigest: string
@@ -38,6 +38,8 @@ export interface OpportunityDecision {
   state: 'pending' | 'decided' | 'closed'; reason: OpportunityReason; utility: number
   firstObservedAt: number; updatedAt: number; eligibleAt: number; expiresAt: number; observations: number
   feedback?: 'accepted' | 'rejected'
+  /** Evaluation attention version (WP22) applied to this decision; absent when untuned. */
+  attentionTuning?: { version: number; digest: string }
 }
 export interface OpportunityEvaluation {
   /** consume advances this wait's source cursor; execute still goes through the original GoalWake authority. */

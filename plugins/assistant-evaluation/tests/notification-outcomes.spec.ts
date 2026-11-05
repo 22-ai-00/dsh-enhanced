@@ -96,7 +96,7 @@ describe('notification outcome ledger', () => {
     source.put(fact('n2', 2, { transport: { status: 'dead' } }))
     expect(evaluation.reconcileNotificationOutcomes()).toEqual({ ingested: 2, refreshed: 2, revised: 2, invalid: 0 })
     expect(evaluation.reconcileNotificationOutcomes()).toEqual({ ingested: 0, refreshed: 2, revised: 0, invalid: 0 })
-    expect(evaluation.health()).toMatchObject({ schemaVersion: 14, notificationOutcomes: 2, notificationOutcomeRevisions: 2 })
+    expect(evaluation.health()).toMatchObject({ schemaVersion: 15, notificationOutcomes: 2, notificationOutcomeRevisions: 2 })
 
     source.put(fact('n1', 1, { reaction: { firstAt: 1_900, count: 1 } }))
     clock.now = 3_000
@@ -298,7 +298,8 @@ describe('notification outcome ledger', () => {
     const first = setup({ path })
     await first.ctx.fiber.restart(); contexts.splice(contexts.indexOf(first.ctx), 1)
     const legacy = new DatabaseSync(path)
-    for (const table of ['evaluation_notification_outcome_heads', 'evaluation_notification_outcome_revisions',
+    for (const table of ['evaluation_attention_tuning_events', 'evaluation_attention_tuning_heads', 'evaluation_attention_tuning_versions',
+      'evaluation_notification_outcome_heads', 'evaluation_notification_outcome_revisions',
       'evaluation_notification_watermarks', 'evaluation_notification_sync_cursor']) legacy.exec(`DROP TABLE ${table}`)
     legacy.exec("UPDATE evaluation_schema_meta SET value='13' WHERE key='schema-version'; PRAGMA user_version = 13")
     const tables = (legacy.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'evaluation_schema_meta' ORDER BY name").all() as { name: string }[]).map(row => row.name)
@@ -306,12 +307,12 @@ describe('notification outcome ledger', () => {
     const before = snapshot(legacy)
     legacy.close()
     const current = setup({ path })
-    expect(current.evaluation.health()).toMatchObject({ schemaVersion: 14, notificationOutcomes: 0 })
+    expect(current.evaluation.health()).toMatchObject({ schemaVersion: 15, notificationOutcomes: 0 })
     current.source.put(fact('n1', 1))
     expect(current.evaluation.reconcileNotificationOutcomes().revised).toBe(1)
     await current.ctx.fiber.restart(); contexts.splice(contexts.indexOf(current.ctx), 1)
     const migrated = new DatabaseSync(path, { readOnly: true })
-    expect(migrated.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 14 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 15 })
     expect(snapshot(migrated)).toEqual(before)
     expect(() => migrated.prepare('SELECT 1').get()).not.toThrow()
     migrated.close()
