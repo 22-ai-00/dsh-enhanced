@@ -93,6 +93,8 @@ import type {
   InboundEnvelope,
   InboxRecord,
   OutboundIntent,
+  OutboundFormat,
+  OutboundTextAttachment,
   ModelPickerIntent,
   ModelPickerState,
   ModelRouteRef,
@@ -1739,7 +1741,7 @@ Record<string, string> | undefined {
 function canonicalIntent(input: OutboundIntent, binding: ConversationBinding, maxTextBytes: number): OutboundIntent {
   const allowed = [
     'idempotencyKey', 'bindingId', 'target', 'text', 'format', 'approval', 'modelPicker', 'permissionPicker',
-    'replyToEventId', 'metadata',
+    'replyToEventId', 'metadata', 'attachment',
   ]
   if (input === null || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !allowed.includes(key))) {
     throw new DeliveryStoreError('invalid-intent', 'outbound intent shape is invalid')
@@ -1816,12 +1818,28 @@ function canonicalIntent(input: OutboundIntent, binding: ConversationBinding, ma
     }
   }
   const metadata = canonicalMetadata(input.metadata, 'intent')
+  const attachment = canonicalTextAttachment(input.attachment, format, maxTextBytes)
   return { idempotencyKey, bindingId, target, text: input.text, format,
     ...(approval === undefined ? {} : { approval }),
     ...(modelPicker === undefined ? {} : { modelPicker }),
     ...(permissionPicker === undefined ? {} : { permissionPicker }),
     ...(replyToEventId === undefined ? {} : { replyToEventId }),
-    ...(metadata === undefined ? {} : { metadata }) }
+    ...(metadata === undefined ? {} : { metadata }),
+    ...(attachment === undefined ? {} : { attachment }) }
+}
+
+/** WP19 stage 2b text attachment: plain intents only, digest-bound, within the text byte budget. */
+function canonicalTextAttachment(input: OutboundTextAttachment | undefined, format: OutboundFormat, maxTextBytes: number): OutboundTextAttachment | undefined {
+  if (input === undefined) return undefined
+  if (format !== 'plain' || input === null || typeof input !== 'object' || Array.isArray(input)
+    || Object.keys(input).length !== 5 || Object.keys(input).some(key => !['kind', 'name', 'mediaType', 'text', 'sha256'].includes(key))
+    || input.kind !== 'text' || typeof input.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(input.name)
+    || (input.mediaType !== 'text/plain' && input.mediaType !== 'text/markdown')
+    || typeof input.text !== 'string' || input.text.length === 0 || Buffer.byteLength(input.text, 'utf8') > maxTextBytes
+    || typeof input.sha256 !== 'string' || input.sha256 !== digest(input.text)) {
+    throw new DeliveryStoreError('invalid-intent', 'outbound text attachment is invalid')
+  }
+  return { kind: 'text', name: input.name, mediaType: input.mediaType, text: input.text, sha256: input.sha256 }
 }
 
 const ownerRouteReceiptKeys = [
@@ -5501,6 +5519,7 @@ export class DeliveryStore {
     idempotencyKey: string
     text: string
     format?: 'markdown' | 'plain'
+    attachment?: OutboundTextAttachment
   }): OutboxRecord {
     this.assertOpen()
     const authority = canonicalOwnerRouteAuthority(input.authority)
@@ -5571,6 +5590,7 @@ export class DeliveryStore {
         text: input.text,
         format: input.format ?? 'plain',
         metadata: receiptMetadata,
+        ...(input.attachment === undefined ? {} : { attachment: input.attachment }),
       }, binding, this.maxTextBytes)
       if (winner !== undefined) {
         if (winner.intentHash !== digest(JSON.stringify(expected))) {

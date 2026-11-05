@@ -96,6 +96,20 @@ export class AttentionAuditStore {
         OR EXISTS(SELECT 1 FROM delivery_work_item_reports r WHERE r.outbox_id=o.id))`).get() as { count: number }).count
   }
 
+  /**
+   * WP19 stage 2b split-evasion input: inline bodies (Outbox text, never the
+   * attachment) of audited notices from one source on one binding and lane,
+   * recorded at or after `since`, in audit order. Notices that were never
+   * audited (best-effort audit write failed) are not visible here.
+   */
+  recentInlineTexts(input: Readonly<{ bindingId: string; lane: AttentionLane; sourceId: string; since: number }>): readonly string[] {
+    return (this.database.prepare(`SELECT json_extract(o.intent_json,'$.text') AS text FROM delivery_attention_audit a
+      JOIN outbox_messages o ON o.id=a.outbox_id
+      WHERE a.binding_id=? AND a.lane=? AND a.source_id=? AND a.recorded_at>=? ORDER BY a.audit_sequence`)
+      .all(input.bindingId, input.lane, input.sourceId, input.since) as { text: unknown }[])
+      .map(row => typeof row.text === 'string' ? row.text : '')
+  }
+
   /** Assess against the committed ledger and append in one writer transaction; an existing row wins. */
   record(input: Readonly<{ outboxId: string; bindingId: string; lane: AttentionLane; sourceId: string }>,
     assess: (ledger: AttentionLedgerView) => AttentionAssessment): AttentionAuditEntry {

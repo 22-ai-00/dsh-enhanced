@@ -1,8 +1,12 @@
 /**
- * WP19 attention contract, stage 1 (audit only). Delivery evaluates every
- * background/owner notification against a Host-side envelope and records the
- * verdict, but never changes whether or how the message is sent.
+ * WP19 attention contract. Stage 1 (always on, audit only): Delivery evaluates
+ * every background/owner notification against a Host-side envelope and
+ * records the verdict. Stage 2b (opt-in `attentionAttachOverCap`, default off):
+ * over-cap notices become a short body plus a text attachment and split bursts
+ * are rejected; see `convertOverCapAttention` and `assessAttentionSplit`.
  */
+import type { OutboundTextAttachment } from './types.js'
+
 export type AttentionPurpose = 'result' | 'attention' | 'answer'
 
 /** Exactly one structured question per attention notice. */
@@ -54,7 +58,7 @@ const rejectReasons: ReadonlySet<AttentionAuditReason> = new Set([
 /**
  * Hard word caps per purpose. A result may carry a short summary; attention is
  * one question with its minimum context; an answer settles one question.
- * Over-cap text would move to an attachment once enforcement starts.
+ * With stage 2b enabled, over-cap text moves to an attachment.
  */
 export const attentionWordCaps: Readonly<Record<AttentionPurpose, number>> = Object.freeze({
   result: 400,
@@ -234,6 +238,103 @@ export function assessAttention(input: Readonly<{
     ...(answersQuestionId === undefined ? {} : { answersQuestionId }),
     wordCount, wordCap, verdict, reasons: Object.freeze(ordered),
   }
+}
+
+/**
+ * WP19 stage 2b (opt-in, Delivery config `attentionAttachOverCap`): an
+ * over-cap background/owner notification is sent as a short inline body plus
+ * one text attachment carrying the full original text, never as several
+ * messages. Everything below is pure and deterministic.
+ */
+/** Inline body budget for a converted notice, before the fixed attachment notice. */
+export const attentionAttachmentSummaryWords = 60
+export const attentionAttachmentSummaryGraphemes = 360
+
+/**
+ * Bodies that are cut keep URLs and Markdown links whole: a link is either
+ * entirely inline (and counted) or entirely left to the attachment.
+ */
+const atomicLinkPattern = /\[[^\]\n]*\]\([^)\s]*\)|\b[A-Za-z][A-Za-z0-9+.-]*:\/\/\S+/gu
+
+function overCap(measure: AttentionTextMeasure, purpose: AttentionPurpose): boolean {
+  return measure.words + measure.symbols > attentionWordCaps[purpose] || measure.graphemes > attentionGraphemeCaps[purpose]
+}
+
+/** True when the text exceeds the word or grapheme cap of its purpose. */
+export function attentionOverCap(text: string, purpose: AttentionPurpose): boolean {
+  return overCap(measureAttentionText(text), purpose)
+}
+
+function* attentionUnits(text: string): Generator<string> {
+  let offset = 0
+  for (const match of text.matchAll(atomicLinkPattern)) {
+    if (match.index > offset) for (const segment of wordSegmenter.segment(text.slice(offset, match.index))) yield segment.segment
+    yield match[0]
+    offset = match.index + match[0].length
+  }
+  if (offset < text.length) for (const segment of wordSegmenter.segment(text.slice(offset))) yield segment.segment
+}
+
+/** Longest prefix of whole units within the summary budget; links are atomic. */
+function attentionSummaryPrefix(text: string): string {
+  let prefix = ''
+  let words = 0
+  let graphemes = 0
+  for (const unit of attentionUnits(text)) {
+    const measure = measureAttentionText(unit)
+    if (words + measure.words + measure.symbols > attentionAttachmentSummaryWords
+      || graphemes + measure.graphemes > attentionAttachmentSummaryGraphemes) return prefix.trimEnd()
+    prefix += unit
+    words += measure.words + measure.symbols
+    graphemes += measure.graphemes
+  }
+  return prefix.trimEnd()
+}
+
+/**
+ * Convert one over-cap notice to a short plain body plus a text attachment.
+ * The attachment name derives from the content digest only, so a replay of the
+ * same notice converts byte-identically. Callers decide whether to convert.
+ */
+export function convertOverCapAttention(input: Readonly<{ text: string; format: 'markdown' | 'plain'; digest: (text: string) => string }>): {
+  text: string; format: 'plain'; attachment: OutboundTextAttachment
+} {
+  const sha256 = input.digest(input.text)
+  const markdown = input.format === 'markdown'
+  const name = `notice-${sha256.slice(0, 12)}.${markdown ? 'md' : 'txt'}`
+  const prefix = attentionSummaryPrefix(input.text)
+  const measure = measureAttentionText(input.text)
+  const notice = `（全文较长，共 ${measure.words + measure.symbols} 词，已转为附件 ${name}）`
+  return {
+    text: prefix.length === 0 ? notice : `${prefix}…\n\n${notice}`,
+    format: 'plain',
+    attachment: Object.freeze({ kind: 'text', name, mediaType: markdown ? 'text/markdown' : 'text/plain', text: input.text, sha256 }),
+  }
+}
+
+/**
+ * Split-evasion window. Inline notices queued by the same source on the same
+ * binding and lane within this window are measured together; when their sum
+ * exceeds the cap of the new notice's purpose the new notice is rejected. The
+ * remedy is one notice, which the over-cap path converts to an attachment.
+ */
+export const attentionSplitWindowMs = 300_000
+
+export type AttentionSplitVerdict = Readonly<{ split: false } | { split: true; words: number; graphemes: number; priorNotices: number }>
+
+/** Pure: `priorInlineTexts` are the inline bodies already queued in the window, current excluded. */
+export function assessAttentionSplit(input: Readonly<{ text: string; purpose: AttentionPurpose; priorInlineTexts: readonly string[] }>): AttentionSplitVerdict {
+  if (input.priorInlineTexts.length === 0) return { split: false }
+  let words = 0
+  let graphemes = 0
+  for (const text of [...input.priorInlineTexts, input.text]) {
+    const measure = measureAttentionText(text)
+    words += measure.words + measure.symbols
+    graphemes += measure.graphemes
+  }
+  return words > attentionWordCaps[input.purpose] || graphemes > attentionGraphemeCaps[input.purpose]
+    ? { split: true, words, graphemes, priorNotices: input.priorInlineTexts.length }
+    : { split: false }
 }
 
 /** One durable audit row; `sequence` is the read cursor. */

@@ -361,6 +361,11 @@ export class DeliveryCoordinator {
       this.finish(record, fencingToken, { outcome: 'not-sent', failureCode: 'unsupported-format', retryable: false })
       return
     }
+    // WP19 stage 2b: the inline body of a converted notice is only a summary; never send it without its attachment.
+    if (record.intent.attachment !== undefined && adapter.capabilities.textAttachments !== true) {
+      this.finish(record, fencingToken, { outcome: 'not-sent', failureCode: 'attachment-unsupported', retryable: false })
+      return
+    }
     if (mode === 'reconcile') {
       if (!adapter.capabilities.reconcileUnknownSend || adapter.reconcileUnknownSend === undefined) {
         this.finish(record, fencingToken, { outcome: 'unknown', failureCode: 'reconcile-unsupported' })

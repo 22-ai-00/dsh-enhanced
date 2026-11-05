@@ -531,3 +531,12 @@ schema 31 新增只追加的 `delivery_attention_audit`，按 outbox id 去重�
 字数 = `Intl.Segmenter('und', { granularity: 'word' })` 的 isWordLike 片段数，加上非单词片段中除空白、标点与 ASCII 之外的字素数（如 emoji、图形符号，每个计 1），CJK 按 ICU 切分，链接文字与 URL 一并计入。硬上限：result 400、attention 120、answer 200（`attentionWordCaps`）；另按非空白字素数设第二道上限：result 2400、attention 720、answer 1200（`attentionGraphemeCaps`，约 6 倍字数上限），以覆盖一段数千字符不断开的 token（只算 1 个词）等情况。任一超限判为 `would-attach`（`over-word-cap` / `over-grapheme-cap`）。切分依赖运行中 Node.js 自带的 ICU 数据，Node/ICU 升级可能改变同一文本的计数；已记录的判定不重算。原因码见 `attentionAuditReasons`；其中 `text-exposes-estimate`、`text-exposes-identifier` 只记录现有提醒外露估值或 id，本阶段不改文本。
 
 本阶段不改变任何发送：判定为 `would-reject` 或 `would-attach` 的消息照常入队、原文发送。`inspectAttentionAudit({ afterSequence?, limit? })` 按序分页只读返回判定（默认 100、最多 500），不含正文，并附两项缺口指标：`processLocalWriteFailures` 是本进程启动以来的审计写入失败数，重启清零；`unauditedOutbox` 每次由持久数据查询得出，统计首条审计行之后创建、带审计通道持久标记（owner 通知、owner route、Automation 结果、Goal 结果、WorkItem 报告）却没有审计行的 Outbox。普通 `enqueueBackground` 行没有持久通道标记，不计入 `unauditedOutbox`，只能由进程内计数发现；首条审计行之前的缺口也无法发现。审计表无保留期与清理，任何未来的保留策略都需新 schema。前台进度、回复与审批通道不在本阶段范围。
+
+### 第 2b 阶段：超长转附件与拒绝拆条（opt-in，默认关闭）
+
+配置 `attentionAttachOverCap: true` 后，`enqueueBackground`、`enqueueBackgroundRoute`、`enqueueOwnerNotification`（及走同一后台通道的 WorkItem 报告）在入队前处理；默认关闭时行为与第 1 阶段完全一致。typed Automation/Goal 结果通道不转换，只审计。
+
+- 超出所属目的字数或字素上限的通知改为一条消息：短正文（最多 60 词、360 非空白字素的整单元前缀，URL 与 Markdown 链接整体保留或整体移出，绝不截断）加固定说明 `（全文较长，共 N 词，已转为附件 notice-<sha256 前 12 位>.txt|md）`，format 为 `plain`；原文完整放入 `intent.attachment`（`kind: 'text'`、`mediaType` 随原 format、`sha256` 绑定原文）。转换为纯函数 `convertOverCapAttention`，同一原文逐字节相同；同一幂等键重放返回原记录。链接文字与 URL 计入上限。
+- 通道适配器须声明 `capabilities.textAttachments: true`；未声明时超长通知在入队时以 `policy-denied` 拒绝，不入队、不拆条；无适配器时为 `runtime-unavailable`。Coordinator 另有兜底：带附件的 Outbox 遇到不支持附件的适配器直接 `dead`（`attachment-unsupported`），绝不只发摘要。仓库内现有适配器（飞书、web）均未声明该能力。
+- 拒绝拆条：同一 binding、同一通道、同一来源在 `attentionSplitWindowMs`（5 分钟）内已审计的内联正文，与本条合计超过本条目的上限时，以 `policy-denied`（`attention split evasion`）拒绝；单条不受影响，补救方式是发一条（超长则自动转附件）。判断依赖尽力而为的审计行，审计写入失败的通知不计入。
+- Store 校验附件：仅 `plain` intent，键集固定，名称 `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`，正文非空且不超过 `maxTextBytes`，`sha256` 与正文一致。附件存于 `intent_json`，不改 schema（仍为 31）。审计按附件原文计词，因此转换后的行仍记 `would-attach`。

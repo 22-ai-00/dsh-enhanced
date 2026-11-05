@@ -583,6 +583,21 @@ export interface OutboundIntent {
   permissionPicker?: PermissionPickerIntent
   replyToEventId?: string
   metadata?: Readonly<Record<string, string>>
+  /**
+   * WP19 stage 2b: the full text of an over-cap notice. Only on `plain`
+   * intents; the coordinator never sends it to an adapter that does not
+   * declare `capabilities.textAttachments`.
+   */
+  attachment?: OutboundTextAttachment
+}
+
+/** One UTF-8 text attachment; `sha256` is the hex digest of `text`. */
+export interface OutboundTextAttachment {
+  kind: 'text'
+  name: string
+  mediaType: 'text/plain' | 'text/markdown'
+  text: string
+  sha256: string
 }
 
 export type OutboundFormat = 'approval' | 'markdown' | 'model-picker' | 'permission-picker' | 'plain'
@@ -976,6 +991,8 @@ export interface DeliveryAdapter {
     inboundImages?: boolean
     toolApprovals?: boolean
     userQuestions?: boolean
+    /** Sends `OutboundIntent.attachment` as one file alongside the inline text (WP19 stage 2b). */
+    textAttachments?: boolean
   }>
   start(context: DeliveryAdapterContext): Promise<void | (() => void | Promise<void>)>
   readInboundImage?(
