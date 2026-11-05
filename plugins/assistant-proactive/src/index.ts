@@ -110,7 +110,7 @@ export class AssistantProactiveService extends Service {
       if (!delivery) throw new Error('assistant-proactive: reminder delivery service unavailable')
       const profile = this.#engine.profileSnapshot(decision.scope, decision.goalId, decision.profileId)
       const expiresAt = reminderExpiresAt(decision, profile)
-      if (Date.now() < expiresAt) delivery.enqueueOwnerNotification({ sourceId: 'assistant-proactive/v1', ownerRouteId: decision.ownerRouteId, scope: decision.scope, sessionId: decision.sessionId, idempotencyKey: `proactive-reminder:${decision.id}`, text: reminderText(decision, profile), expiresAt })
+      if (Date.now() < expiresAt) delivery.enqueueOwnerNotification({ sourceId: 'assistant-proactive/v1', ownerRouteId: decision.ownerRouteId, scope: decision.scope, sessionId: decision.sessionId, idempotencyKey: `proactive-reminder:${decision.id}`, text: reminderText(decision), expiresAt })
     }
     if (evaluation.disposition === 'consume' && decision.mode === 'prepare' && decision.state === 'decided') {
       const profile = this.#engine.profileSnapshot(decision.scope, decision.goalId, decision.profileId)

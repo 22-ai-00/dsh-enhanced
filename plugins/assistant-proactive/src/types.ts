@@ -23,7 +23,7 @@ export interface OpportunityInput {
   event: { id: string; sequence: number; digest: string; occurredAt: number }
   expiresAt: number
 }
-export type OpportunityReason = 'cancelled' | 'coalescing' | 'quiet-hours' | 'cooldown' | 'rejected-cooldown' | 'below-threshold' | 'budget' | 'expired' | 'prepared' | 'reminder' | 'execution'
+export type OpportunityReason = 'cancelled' | 'coalescing' | 'quiet-hours' | 'cooldown' | 'rejected-cooldown' | 'below-threshold' | 'budget' | 'expired' | 'prepared' | 'reminder' | 'unchanged' | 'execution'
 export interface OpportunityDecision {
   id: string; waitId: string; profileId: string; scope: OpportunityScope; goalId: string; sessionId: string; ownerRouteId: string
   sourceId: string; eventId: string; eventSequence: number; eventDigest: string; sourceDigest: string

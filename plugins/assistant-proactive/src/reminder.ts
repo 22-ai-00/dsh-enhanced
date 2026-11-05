@@ -1,9 +1,33 @@
+import { createHash } from 'node:crypto'
 import type { OpportunityDecision, OpportunityProfile } from './types.js'
 
-/** Plain text only. The event supplies identifiers, never new instructions or authority. */
-export function reminderText(decision: Readonly<OpportunityDecision>, profile: Readonly<OpportunityProfile>): string {
-  const objective = decision.objective.length > 500 ? `${decision.objective.slice(0, 500)}…` : decision.objective
-  return `主动提醒：目标有新的相关事件\n\n目标：${objective}\n来源：${decision.sourceId}\n事件：${decision.eventId}\n\n配置估值：预期收益 ${profile.expectedBenefit}，成功系数 ${profile.successPpm / 10_000}%，执行成本 ${profile.executionCost}，打扰成本 ${profile.interruptionCost}，潜在损失 ${profile.possibleLoss}；净收益分值 ${decision.utility}。这些是配置估计，未经实际效果验证。\n\n目标仍在等待。本次仅提醒，未执行目标任务。可查看 proactive_status，并用 proactive_feedback 接受或拒绝这条机会。\n机会：${decision.id}`
+const graphemes = new Intl.Segmenter('und', { granularity: 'grapheme' })
+const objectiveLimit = 200
+
+function excerpt(value: string): string {
+  const parts: string[] = []
+  for (const part of graphemes.segment(value.replace(/\s+/gu, ' ').trim())) {
+    if (parts.length === objectiveLimit) return `${parts.join('')}…`
+    parts.push(part.segment)
+  }
+  return parts.join('')
+}
+
+/**
+ * Owner-facing plain text. It carries only the owner's own objective plus fixed wording: no operator
+ * estimates, utility, source/event/decision identifiers or event content. Those stay in `proactive_status`.
+ */
+export function reminderText(decision: Readonly<Pick<OpportunityDecision, 'objective'>>): string {
+  return `主动提醒：目标有新的相关事件\n\n目标：${excerpt(decision.objective)}\n\n目标仍在等待。本次仅提醒，未执行目标任务。如需反馈，可在对话中让助手查看主动提醒，再接受或拒绝。`
+}
+
+/**
+ * Durable dedupe key for one goal source. It changes only when the text the owner would see, the goal
+ * revision/definition or the configured source changes; a new event on an unchanged source does not.
+ */
+export function reminderContentDigest(decision: Readonly<Pick<OpportunityDecision, 'objective' | 'definitionDigest' | 'nativeGoalId' | 'nativeRevision' | 'sourceId' | 'sourceDigest'>>): string {
+  return createHash('sha256').update(JSON.stringify(['assistant-proactive/reminder/v1', decision.sourceId, decision.sourceDigest,
+    decision.nativeGoalId, decision.nativeRevision, decision.definitionDigest, reminderText(decision)])).digest('hex')
 }
 
 /** A queued reminder expires at the next quiet interval; it cannot arrive during a later silent period. */

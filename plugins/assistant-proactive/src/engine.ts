@@ -2,6 +2,7 @@ import { closeSync, constants, lstatSync, mkdirSync, openSync, chmodSync } from 
 import { dirname, isAbsolute } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
+import { reminderContentDigest } from './reminder.js'
 import type { OpportunityDecision, OpportunityEvaluation, OpportunityInput, OpportunityProfile, OpportunityScope } from './types.js'
 
 const max = 1_000_000_000
@@ -88,7 +89,8 @@ export class OpportunityEngine {
       CREATE TABLE IF NOT EXISTS proactive_profiles(scope_json TEXT NOT NULL, goal_id TEXT NOT NULL, profile_id TEXT NOT NULL, profile_json TEXT NOT NULL, PRIMARY KEY(scope_json, goal_id, profile_id)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS proactive_decisions(id TEXT PRIMARY KEY, scope_json TEXT NOT NULL, goal_id TEXT NOT NULL, profile_id TEXT NOT NULL, payload_json TEXT NOT NULL) STRICT;
       CREATE TABLE IF NOT EXISTS proactive_events(scope_json TEXT NOT NULL, goal_id TEXT NOT NULL, profile_id TEXT NOT NULL, source_id TEXT NOT NULL, event_sequence INTEGER NOT NULL, event_digest TEXT NOT NULL, decision_id TEXT NOT NULL REFERENCES proactive_decisions(id), PRIMARY KEY(scope_json, goal_id, profile_id, source_id, event_sequence, event_digest)) STRICT, WITHOUT ROWID;
-      CREATE INDEX IF NOT EXISTS proactive_decisions_goal ON proactive_decisions(scope_json, goal_id, profile_id);`)
+      CREATE INDEX IF NOT EXISTS proactive_decisions_goal ON proactive_decisions(scope_json, goal_id, profile_id);
+      CREATE TABLE IF NOT EXISTS proactive_reminders(scope_json TEXT NOT NULL, goal_id TEXT NOT NULL, source_id TEXT NOT NULL, content_digest TEXT NOT NULL, decision_id TEXT NOT NULL REFERENCES proactive_decisions(id), PRIMARY KEY(scope_json, goal_id, source_id)) STRICT, WITHOUT ROWID;`)
   }
   evaluate(input: OpportunityInput): OpportunityEvaluation {
     this.#db.exec('BEGIN IMMEDIATE')
@@ -120,6 +122,7 @@ export class OpportunityEngine {
     if (utility(profile) < profile.minimumUtility) return this.#save(scope, input, profile, 'consume', 'suppress', 'below-threshold', now, now)
     if (latest && now < latest.updatedAt + profile.cooldownMs) return this.#save(scope, input, profile, 'consume', 'suppress', 'cooldown', now, now)
     if (profile.mergeWindowMs > 0) return this.#save(scope, input, profile, 'defer', 'suppress', 'coalescing', now, now + profile.mergeWindowMs)
+    if (profile.mode === 'remind' && this.#unchangedReminder(scope, input)) return this.#save(scope, input, profile, 'consume', 'suppress', 'unchanged', now, now)
     return this.#save(scope, input, profile, profile.mode === 'execute' ? 'execute' : 'consume', profile.mode, profile.mode === 'execute' ? 'execution' : profile.mode === 'remind' ? 'reminder' : 'prepared', now, now)
   }
   feedback(id: string, scopeInput: OpportunityScope, feedback: 'accepted' | 'rejected'): OpportunityDecision {
@@ -187,16 +190,29 @@ export class OpportunityEngine {
     }
     const counts = this.#counts(scope, input.goalId)
     const budget = counts.ledger > profile.maxDecisionsPerGoal || profile.mode === 'execute' && counts.executions >= profile.maxExecutionsPerGoal || profile.mode === 'remind' && counts.reminders >= profile.maxRemindersPerGoal
-    const mode = budget ? 'suppress' as const : profile.mode
-    const reason = budget ? 'budget' as const : profile.mode === 'execute' ? 'execution' as const : profile.mode === 'remind' ? 'reminder' as const : 'prepared' as const
+    const unchanged = !budget && profile.mode === 'remind' && this.#unchangedReminder(scope, existing)
+    const mode = budget || unchanged ? 'suppress' as const : profile.mode
+    const reason = budget ? 'budget' as const : unchanged ? 'unchanged' as const : profile.mode === 'execute' ? 'execution' as const : profile.mode === 'remind' ? 'reminder' as const : 'prepared' as const
     const next = freeze({ ...existing, ...(input.event.sequence > existing.eventSequence ? { eventId: input.event.id, eventSequence: input.event.sequence, eventDigest: input.event.digest, observations: existing.observations + 1 } : {}), mode, state: 'decided' as const, reason, updatedAt: now })
-    this.#put(next); this.#link(scope, input, next.id)
+    this.#put(next); this.#link(scope, input, next.id); if (mode === 'remind') this.#remember(scope, next)
     return freeze({ disposition: mode === 'execute' ? 'execute' : 'consume', decision: next })
   }
   #save(scope: string, input: OpportunityInput, profile: OpportunityProfile, disposition: OpportunityEvaluation['disposition'], mode: OpportunityDecision['mode'], reason: OpportunityDecision['reason'], now: number, eligibleAt: number): OpportunityEvaluation {
     if (this.#counts(scope, input.goalId).ledger >= profile.maxDecisionsPerGoal) return this.#budgetProjection(input, profile, now)
     const decision = freeze({ id: `opportunity-${randomUUID()}`, waitId: input.waitId, profileId: profile.id, scope: input.scope, goalId: input.goalId, sessionId: input.sessionId, ownerRouteId: input.ownerRouteId, sourceId: input.sourceId, eventId: input.event.id, eventSequence: input.event.sequence, eventDigest: input.event.digest, sourceDigest: input.sourceDigest, objective: input.objective, definitionDigest: input.definitionDigest, nativeGoalId: input.nativeGoalId, nativeRevision: input.nativeRevision, mode, state: eligibleAt > now ? 'pending' as const : 'decided' as const, reason, utility: utility(profile), firstObservedAt: now, updatedAt: now, eligibleAt, expiresAt: input.expiresAt, observations: 1 })
-    this.#put(decision); this.#link(scope, input, decision.id); return freeze({ disposition, decision })
+    this.#put(decision); this.#link(scope, input, decision.id); if (mode === 'remind') this.#remember(scope, decision); return freeze({ disposition, decision })
+  }
+  /**
+   * One reminder per goal source until what the owner would read changes or the owner answers it. Durable in
+   * the same transaction as the decision, so a restart neither forgets nor re-sends an unchanged reminder.
+   */
+  #unchangedReminder(scope: string, value: Pick<OpportunityDecision, 'goalId' | 'sourceId' | 'objective' | 'definitionDigest' | 'nativeGoalId' | 'nativeRevision' | 'sourceDigest'>): boolean {
+    const row = this.#db.prepare('SELECT content_digest, decision_id FROM proactive_reminders WHERE scope_json = ? AND goal_id = ? AND source_id = ?').get(scope, value.goalId, value.sourceId) as { content_digest: string; decision_id: string } | undefined
+    if (!row || row.content_digest !== reminderContentDigest(value)) return false
+    return this.#decision(row.decision_id)?.feedback === undefined
+  }
+  #remember(scope: string, decision: OpportunityDecision): void {
+    this.#db.prepare('INSERT INTO proactive_reminders VALUES (?, ?, ?, ?, ?) ON CONFLICT(scope_json, goal_id, source_id) DO UPDATE SET content_digest = excluded.content_digest, decision_id = excluded.decision_id').run(scope, decision.goalId, decision.sourceId, reminderContentDigest(decision), decision.id)
   }
   #put(decision: OpportunityDecision): void { this.#db.prepare('INSERT INTO proactive_decisions(id, scope_json, goal_id, profile_id, payload_json) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json').run(decision.id, scopeKey(decision.scope), decision.goalId, decision.profileId, JSON.stringify(decision)) }
   #link(scope: string, input: OpportunityInput, id: string): void { this.#db.prepare('INSERT OR IGNORE INTO proactive_events VALUES (?, ?, ?, ?, ?, ?, ?)').run(scope, input.goalId, input.profileId, input.sourceId, input.event.sequence, input.event.digest, id) }
