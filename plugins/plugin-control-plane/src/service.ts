@@ -2,7 +2,8 @@ import { cleanedLinuxSourcePreflight, consumeCleanedLinuxSourcePreflight, consum
 import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type AdoptionCoordinatorConfig } from './adoption-coordinator.js'
 import { CreationCapabilityJournal, creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
 import { CreationCapabilityRuntime } from './creation-capability-runtime.js'
-import { inspectCreationCapabilityTaskAssociations } from './creation-capability-feedback.js'
+import { inspectCreationCapabilityOrdinaryUseReport, inspectCreationCapabilityTaskAssociations,
+  type CreationCapabilityFeedbackInput } from './creation-capability-feedback.js'
 import { captureCreationCapabilitySource } from './creation-capability-source.js'
 import type { CreationCapabilityConfig, CreationCapabilityRecord } from './creation-capability-types.js'
 import { lstat, readFile, realpath } from 'node:fs/promises'
@@ -1123,23 +1124,37 @@ export class PluginControlPlaneService extends Service {
 
   /** Host-only current association of exact adopted call versions with authenticated task heads. */
   inspectCreatedCapabilityTaskAssociations = (planId: string) => {
+    const input = this.createdCapabilityFeedbackInput(planId)
+    if (!input) return []
+    try { return inspectCreationCapabilityTaskAssociations(input()) } catch { return [] }
+  }
+
+  /** Host-only descriptive ordinary-use counts over the same fenced associations; never causal or adoption evidence. */
+  inspectCreatedCapabilityOrdinaryUseReport = (planId: string) => {
+    const input = this.createdCapabilityFeedbackInput(planId)
+    if (!input) return undefined
+    try { return inspectCreationCapabilityOrdinaryUseReport(input()) } catch { return undefined }
+  }
+
+  /** The historical read is deferred so callers keep it inside their own failure boundary. */
+  private createdCapabilityFeedbackInput(planId: string): (() => CreationCapabilityFeedbackInput) | undefined {
     this.abort.signal.throwIfAborted()
     const snapshot = this.creationCapabilityRuntime?.inspectAssociationEvidence(planId)
-    if (!snapshot || !this.config.creationCapabilities) return []
+    if (!snapshot || !this.config.creationCapabilities) return undefined
     const owner = this.config.creationCapabilities.owner
     const evaluation = this.ctx.get('assistantEvaluation' as never, false) as AssistantEvaluationService | undefined
     const delivery = this.ctx.get('assistantDelivery' as never, false) as AssistantDeliveryService | undefined
-    if (!evaluation || !delivery) return []
-    try {
+    if (!evaluation || !delivery) return undefined
+    return () => {
       const historical = this.store.getRetainedPreparedCreation(planId)
-      return inspectCreationCapabilityTaskAssociations({ ...snapshot, owner, evaluation, delivery,
+      return { ...snapshot, owner, evaluation, delivery,
         triggerInboxId: historical.reference.projection.subjectRef,
         readSourceCurrent: () => {
           this.assertCreatedCapabilityAssociationSource(snapshot.record)
           const current = this.taskGaps.inspectCurrent(historical.plan.gapId, historical.reference.owner)
           return { projection: current.canonical.projection, scopeWatermark: current.canonical.scopeWatermark }
-        } })
-    } catch { return [] }
+        } }
+    }
   }
 
   /** Exact historical certificate and source check without nesting an Evaluation writer fence. */

@@ -186,6 +186,56 @@ export interface CreationCapabilityTaskAssociation {
   }
 }
 
+/** Frozen task model only; a frozen state without a complete selection is reported as inconsistent. */
+export type CreationCapabilityOrdinaryUseModel =
+  | { state: 'frozen'; provider: string; model: string; reasoningEffort?: string }
+  | { state: 'missing' | 'inconsistent' }
+
+export interface CreationCapabilityOrdinaryUseQuality {
+  status: 'measured' | 'insufficient'
+  samples: number
+  achieved: number
+  notAchieved: number
+}
+
+/** Nearest-rank p50 and max are present only when measured. */
+export interface CreationCapabilityOrdinaryUseLatency {
+  status: 'measured' | 'insufficient' | 'unmeasured'
+  samples: number
+  p50Ms?: number
+  maxMs?: number
+}
+
+export interface CreationCapabilityOrdinaryUseMeasures {
+  quality: CreationCapabilityOrdinaryUseQuality
+  callLatency: CreationCapabilityOrdinaryUseLatency
+  taskLatency: CreationCapabilityOrdinaryUseLatency
+}
+
+export interface CreationCapabilityOrdinaryUseStratum extends CreationCapabilityOrdinaryUseMeasures {
+  model: CreationCapabilityOrdinaryUseModel
+}
+
+/** Content-free descriptive counts over current associations; never causal, adoption or promotion evidence. */
+export interface CreationCapabilityOrdinaryUseReport {
+  protocol: 'dsh-created-capability-ordinary-use-report/v1'
+  causal: false
+  planId: string
+  receiptDigest: string
+  artifactSha256: string
+  schemaDigest: string
+  adoptionStatus: CreationCapabilityRecord['status']
+  withinSignedUseWindow: boolean
+  minimumSamples: number
+  associationsDigest: string
+  /** Candidate Inboxes without a current certified judgement; an unfenced upper bound. */
+  unknown: { inboxes: number }
+  overall: CreationCapabilityOrdinaryUseMeasures
+  strata: readonly CreationCapabilityOrdinaryUseStratum[]
+  regressions: { status: 'unmeasured' }
+  cost: { status: 'unmeasured' }
+}
+
 export interface CreationCapabilityCall {
   key: string
   status: 'claimed' | 'completed' | 'unknown'

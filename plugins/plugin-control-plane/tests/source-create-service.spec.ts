@@ -745,6 +745,14 @@ it.each(['correction', 'withdrawal'] as const)(
         judgement: 'independent-verifier', status: 'achieved' } }])
     expect(association).toHaveLength(1)
     expect(JSON.stringify(association)).not.toMatch(/later ordinary task succeeded|hello-again|answer/)
+    const ordinaryUse = f.service.inspectCreatedCapabilityOrdinaryUseReport(planId)
+    expect(ordinaryUse).toMatchObject({ protocol: 'dsh-created-capability-ordinary-use-report/v1', causal: false, planId,
+      minimumSamples: 5, associationsDigest: controlPlaneDigest(association), unknown: { inboxes: 0 },
+      overall: { quality: { status: 'insufficient', samples: 1, achieved: 1, notAchieved: 0 },
+        callLatency: { status: 'insufficient', samples: 1 }, taskLatency: { status: 'unmeasured', samples: 0 } },
+      strata: [{ model: { state: 'frozen', provider: 'supplier', model: 'task-model', reasoningEffort: 'high' } }],
+      regressions: { status: 'unmeasured' }, cost: { status: 'unmeasured' } })
+    expect(JSON.stringify(ordinaryUse)).not.toMatch(/later ordinary task succeeded|hello-again|answer|subsequent-inbox/)
     expect(adoption()).toEqual({ ...adoptedBefore, calls: 2 })
     expect(runnerRun).toHaveBeenCalledTimes(3)
     f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
@@ -757,6 +765,7 @@ it.each(['correction', 'withdrawal'] as const)(
       : { ...f.source, canonical: { ...f.source.canonical,
         projection: { ...f.source.canonical.projection, disposition: 'retract' } } })
     expect(f.service.inspectCreatedCapabilityTaskAssociations(planId)).toEqual([])
+    expect(f.service.inspectCreatedCapabilityOrdinaryUseReport(planId)).toBeUndefined()
     await expect(tool.execute({ query: 'after-change' }, { ...valid, callId: 'changed-call' } as ToolRunContext)).rejects.toThrow()
     const reconcile = vi.spyOn(CreationCapabilityRuntime.prototype, 'reconcile')
     f.notifyTaskChange()

@@ -7,9 +7,11 @@ export { PluginControlPlaneService, normalizeControlPlaneConfig, version }
 export { Config } from './service.js'
 export type { NormalizedControlPlaneConfig } from './service.js'
 export type { CreationCapabilityConfig, CreationCapabilityOwner, CreationCapabilityReceipt,
-  CreationCapabilitySourceArchive, CreationCapabilityTaskAssociation } from './creation-capability-types.js'
+  CreationCapabilitySourceArchive, CreationCapabilityTaskAssociation, CreationCapabilityOrdinaryUseReport,
+  CreationCapabilityOrdinaryUseStratum, CreationCapabilityOrdinaryUseMeasures, CreationCapabilityOrdinaryUseModel,
+  CreationCapabilityOrdinaryUseQuality, CreationCapabilityOrdinaryUseLatency } from './creation-capability-types.js'
 export type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
-export { inspectCreationCapabilityTaskAssociations } from './creation-capability-feedback.js'
+export { inspectCreationCapabilityOrdinaryUseReport, inspectCreationCapabilityTaskAssociations } from './creation-capability-feedback.js'
 export type { CreationCapabilityFeedbackInput } from './creation-capability-feedback.js'
 export { creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig,
   verifyCreationCapabilityReceipt } from './creation-capability-journal.js'
