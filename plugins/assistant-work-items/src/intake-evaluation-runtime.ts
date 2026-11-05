@@ -51,6 +51,8 @@ export interface WorkItemIntakeEvaluationHealth extends IntakeEvaluationInspecti
   readonly heldTexts: number
   /** Inferred rows not queued because the text bound was full of unsettled work. */
   readonly skipped: number
+  /** Settled decisions whose store write failed and awaits a backed-off retry. */
+  readonly unpersisted: number
   readonly persisted: Readonly<{ decided: number; unavailable: number }>
   readonly lastError: string | null
 }
@@ -62,11 +64,24 @@ interface HeldText {
   readonly digest: string
 }
 
+/** A settled decision whose store write failed, with its retry backoff. */
+interface UnpersistedDecision {
+  readonly decision: IntakeEvaluationDecision
+  /** Consecutive failed writes. */
+  readonly failures: number
+  /** First refresh (by `#refreshes`) that retries the write. */
+  readonly retryAt: number
+  /** Last failure message; a repeat of it is not logged again. */
+  readonly message: string
+}
+
 const MAX_RULES = 16
 export const MAX_HELD_INTAKE_TEXTS = 256
 /** Same bound Delivery applies to the transient inbound text, in UTF-16 code units. */
 export const MAX_INTAKE_SOURCE_TEXT = 65_536
 const MAX_HELD_TEXTS = MAX_HELD_INTAKE_TEXTS
+/** Failed writes back off exponentially in refreshes: 1, 2, 4, … capped at this many. */
+const MAX_PERSIST_RETRY_INTERVAL = 64
 const POLICY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
 const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex')
 
@@ -109,8 +124,10 @@ export class WorkItemIntakeEvaluationRuntime {
   readonly #texts = new Map<string, HeldText>()
   /** Held texts already queued under the current Policy version (cleared when it moves). */
   readonly #enqueued = new Set<string>()
-  /** Decisions settled in the queue whose store write failed; retried on every refresh. */
-  readonly #unpersisted = new Map<string, IntakeEvaluationDecision>()
+  /** Decisions settled in the queue whose store write failed; retried on a refresh backoff. */
+  readonly #unpersisted = new Map<string, UnpersistedDecision>()
+  /** Refreshes with a readable Policy; the clock for write-retry backoff. */
+  #refreshes = 0
   #registration: WorkItemIntakeEvaluatorRegistration | undefined
   #queue: InferredIntakeEvaluationQueue | undefined
   #version: string | undefined
@@ -203,9 +220,18 @@ export class WorkItemIntakeEvaluationRuntime {
       this.#refresh()
       // Snapshot the texts this run may persist, so an unregister mid-run does not drop its results.
       const texts = new Map(this.#texts)
-      const persisted = (await queue.runDue()).flatMap(decision => this.#persist(decision, texts))
+      const decisions = await queue.runDue()
+      const persisted = decisions.flatMap(decision => this.#persist(decision, texts))
       // A Policy change during the run left entries awaiting re-match; queue them now for the next run.
       if (this.#queue === queue) this.#refresh()
+      else {
+        // Unregistered or replaced mid-run: no refresh of this queue will retry these writes,
+        // so drop the ones this run left behind instead of holding their quotes indefinitely.
+        for (const decision of decisions) {
+          const key = keyOf(decision)
+          if (this.#unpersisted.get(key)?.decision === decision) this.#unpersisted.delete(key)
+        }
+      }
       return Object.freeze(persisted)
     } catch (error) {
       this.#fail(error)
@@ -224,6 +250,7 @@ export class WorkItemIntakeEvaluationRuntime {
       policyVersion: this.#registration === undefined ? null : readPolicy(this.#registration)?.version ?? null,
       heldTexts: this.#texts.size,
       skipped: this.#skipped,
+      unpersisted: this.#unpersisted.size,
       persisted: Object.freeze(persisted),
       lastError: this.#lastError,
     })
@@ -249,7 +276,8 @@ export class WorkItemIntakeEvaluationRuntime {
     const policy = readPolicy(registration)
     if (policy === undefined) { this.#lastError = 'policy-unavailable'; return }
     if (this.#lastError === 'policy-unavailable') this.#lastError = null
-    for (const decision of this.#unpersisted.values()) this.#persist(decision)
+    const refresh = ++this.#refreshes
+    for (const entry of this.#unpersisted.values()) if (entry.retryAt <= refresh) this.#persist(entry.decision)
     if (policy.version !== this.#version) { this.#version = policy.version; this.#enqueued.clear() }
     for (const [id, held] of this.#texts) {
       if (!this.#enqueued.has(id) && this.#enqueue(held, policy)) this.#enqueued.add(id)
@@ -281,7 +309,7 @@ export class WorkItemIntakeEvaluationRuntime {
   }
 
   #persist(decision: IntakeEvaluationDecision, texts: ReadonlyMap<string, HeldText> = this.#texts): WorkItemIntakeEvaluationRecord[] {
-    const key = `${decision.candidateId}\0${decision.ruleId}\0${decision.policyVersion}`
+    const key = keyOf(decision)
     const held = texts.get(decision.candidateId)
     const store = this.#store()
     if (held === undefined || store === undefined) { this.#unpersisted.delete(key); this.#lastError = 'persist-unavailable'; return [] }
@@ -300,9 +328,18 @@ export class WorkItemIntakeEvaluationRuntime {
       return [record]
     } catch (error) {
       // A transient failure (e.g. SQLITE_BUSY) is retried; a row that exists after all is final.
-      if (store.getIntakeEvaluation(held.source, held.sourceEventId, decision.ruleId, decision.policyVersion) === undefined) this.#unpersisted.set(key, decision)
-      else this.#unpersisted.delete(key)
-      this.#fail(error)
+      // An unreadable check counts as not written, so it never escapes into the caller's run.
+      let written = false
+      try { written = store.getIntakeEvaluation(held.source, held.sourceEventId, decision.ruleId, decision.policyVersion) !== undefined } catch { /* not written */ }
+      const prior = this.#unpersisted.get(key)
+      const message = messageOf(error)
+      if (written) this.#unpersisted.delete(key)
+      else {
+        const failures = (prior?.failures ?? 0) + 1
+        const retryAt = this.#refreshes + Math.min(2 ** (failures - 1), MAX_PERSIST_RETRY_INTERVAL)
+        this.#unpersisted.set(key, Object.freeze({ decision, failures, retryAt, message }))
+      }
+      this.#fail(error, prior?.message === message)
       return []
     }
   }
@@ -325,11 +362,15 @@ export class WorkItemIntakeEvaluationRuntime {
     return false
   }
 
-  #fail(error: unknown): void {
+  /** `repeated` suppresses the log line for a retry that failed with the same message as before. */
+  #fail(error: unknown, repeated = false): void {
     this.#lastError = error instanceof WorkItemError ? error.code : 'evaluation-failed'
-    this.#log(`assistant-work-items: intake evaluation failed: ${error instanceof Error ? error.message : String(error)}`)
+    if (!repeated) this.#log(`assistant-work-items: intake evaluation failed: ${messageOf(error)}`)
   }
 }
+
+const keyOf = (decision: IntakeEvaluationDecision) => `${decision.candidateId}\0${decision.ruleId}\0${decision.policyVersion}`
+const messageOf = (error: unknown) => error instanceof Error ? error.message : String(error)
 
 /** Rebuild a persisted result as a queue prior; quote spans are re-read from the held text. */
 function priorOf(candidateId: string, record: WorkItemIntakeEvaluationRecord, text: string): IntakeEvaluationDecision {

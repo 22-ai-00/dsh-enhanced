@@ -83,11 +83,12 @@ async function direct(config: Partial<NormalizedIntakeEvaluation> = {}) {
   const { databasePath } = await paths()
   let now = 1_700_000_000_000
   const timers: Array<{ ms: number; fire: () => void; live: boolean }> = []
+  const logs: string[] = []
   const store = new WorkItemStore(databasePath, { now: () => now })
   closers.push(() => store.close())
   const runtime = new WorkItemIntakeEvaluationRuntime({
     config: { enabled: true, timeoutMs: 1_000, maxConsecutiveFailures: 3, maxPerRun: 5, maxCallsPerHour: 20, ...config },
-    store: () => store, log: () => {}, now: () => now,
+    store: () => store, log: message => { logs.push(message) }, now: () => now,
     setTimer: (ms, fire) => { const timer = { ms, fire, live: true }; timers.push(timer); return () => { timer.live = false } },
   })
   closers.push(() => runtime.close())
@@ -95,7 +96,7 @@ async function direct(config: Partial<NormalizedIntakeEvaluation> = {}) {
   const recordText = (eventId: string, text: string) =>
     store.recordIntake(classifyIntake(input({ sourceEventId: eventId, contentDigest: sha256(text) }))).record
   const fireTimers = () => { for (const timer of timers.splice(0)) if (timer.live) timer.fire() }
-  return { databasePath, store, runtime, record, recordText, fireTimers, advance: (ms: number) => { now += ms } }
+  return { databasePath, store, runtime, logs, record, recordText, fireTimers, advance: (ms: number) => { now += ms } }
 }
 
 describe('inferred intake evaluation', () => {
@@ -335,6 +336,81 @@ describe('inferred intake evaluation', () => {
     f.runtime.observe(f.recordText('om_257', 'message 257'), 'message 257')
     expect(f.runtime.health()).toMatchObject({ heldTexts: 256, skipped: 1 })
     expect(s.calls).toHaveLength(1)
+  })
+
+  test('an unreadable post-failure check counts as unwritten and does not drop the rest of the run', async () => {
+    const f = await direct()
+    const s = supplier(() => ({ level: 'digest', quotes: ['build is red'] }))
+    f.runtime.register(s.registration)
+    // Hold the text while nothing can run, so one explicit run settles both rules together.
+    s.state.policy = { version: 'bad version', rules: [] }
+    f.runtime.observe(f.record(), TEXT)
+    s.state.policy = { version: 'v1', rules: [{ ruleId: 'triage', ceiling: 'notify' }, { ruleId: 'escalate', ceiling: 'notify' }] }
+    const write = f.store.recordIntakeEvaluation.bind(f.store)
+    const read = f.store.getIntakeEvaluation.bind(f.store)
+    let writeFails = true, readFails = false
+    vi.spyOn(f.store, 'recordIntakeEvaluation').mockImplementation(value => {
+      if (writeFails && value.ruleId === 'triage') { writeFails = false; readFails = true; throw new Error('SQLITE_BUSY') }
+      return write(value)
+    })
+    // Only the check right after the failed write throws.
+    vi.spyOn(f.store, 'getIntakeEvaluation').mockImplementation((...args) => {
+      if (readFails) { readFails = false; throw new Error('SQLITE_IOERR') }
+      return read(...args)
+    })
+    expect(await f.runtime.run()).toEqual([expect.objectContaining({ ruleId: 'escalate', level: 'digest' })])
+    expect(s.calls).toHaveLength(2)
+    // Treated as not written: the run's closing refresh retried and landed it.
+    expect(f.store.listIntakeEvaluations('lark-channel', 'om_1').map(record => record.ruleId).sort()).toEqual(['escalate', 'triage'])
+    expect(f.runtime.health()).toMatchObject({ unpersisted: 0, persisted: { decided: 2, unavailable: 0 } })
+  })
+
+  test('a persistently failing write backs off exponentially and logs a repeated error once', async () => {
+    const f = await direct()
+    const s = supplier(() => ({ level: 'digest', quotes: ['build is red'] }))
+    f.runtime.register(s.registration)
+    s.state.policy = { version: 'bad version', rules: [] }
+    f.runtime.observe(f.record(), TEXT)
+    s.state.policy = { version: 'v1', rules: [{ ruleId: 'triage', ceiling: 'notify' }] }
+    let failure: string | undefined = 'SQLITE_FULL'
+    const write = f.store.recordIntakeEvaluation.bind(f.store)
+    const spy = vi.spyOn(f.store, 'recordIntakeEvaluation').mockImplementation(value => {
+      if (failure !== undefined) throw new Error(failure)
+      return write(value)
+    })
+    // 20 runs are 40 refreshes; retries land on refreshes 1, 2, 4, 8, 16 and 32 only.
+    for (let i = 0; i < 20; i++) await f.runtime.run()
+    expect(spy).toHaveBeenCalledTimes(6)
+    expect(f.logs.filter(line => line.includes('SQLITE_FULL'))).toHaveLength(1)
+    expect(f.runtime.health()).toMatchObject({ unpersisted: 1, lastError: 'evaluation-failed' })
+    expect(s.calls).toHaveLength(1)
+
+    // A different error is logged again; once the store recovers the write lands within the capped interval.
+    failure = 'SQLITE_IOERR'
+    let runs = 0
+    while (spy.mock.calls.length === 6 && runs++ < 64) await f.runtime.run()
+    expect(f.logs.filter(line => line.includes('SQLITE_IOERR'))).toHaveLength(1)
+    failure = undefined
+    runs = 0
+    while (f.runtime.health().unpersisted > 0 && runs++ < 64) await f.runtime.run()
+    expect(f.store.listIntakeEvaluations('lark-channel', 'om_1')).toEqual([expect.objectContaining({ status: 'decided', level: 'digest' })])
+    expect(f.runtime.health()).toMatchObject({ unpersisted: 0 })
+  })
+
+  test('a write that fails after unregistering mid-run is dropped, not held', async () => {
+    const f = await direct()
+    let release: (value: unknown) => void = () => {}
+    const s = supplier(() => new Promise(resolve => { release = resolve }))
+    const unregister = f.runtime.register(s.registration)
+    f.runtime.observe(f.record(), TEXT)
+    await vi.waitFor(() => expect(s.calls).toHaveLength(1))
+    const spy = vi.spyOn(f.store, 'recordIntakeEvaluation').mockImplementation(() => { throw new Error('SQLITE_BUSY') })
+    unregister()
+    release({ level: 'digest', quotes: ['build is red'] })
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(1))
+    await flush()
+    // No refresh of the dropped queue will retry it, so its quotes are not kept in memory.
+    expect(f.runtime.health()).toMatchObject({ registered: false, heldTexts: 0, unpersisted: 0, lastError: 'evaluation-failed' })
   })
 
   test('unregistering during a run still persists that run\'s results', async () => {
