@@ -7,6 +7,7 @@ import { canonicalGrowthJson, validatePluginCreationVerificationCertificate,
 import { validateNativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 import { creationCapabilityExecutionMatches, validateLinuxCreationCapabilityRunner } from './creation-capability-execution.js'
 import { validateCreationCapabilitySource, type CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
+import { sealedAdoptionInheritedUsage, sealedAdoptionPlanIds } from './creation-capability-sealed-audit.js'
 import type { CreationCapabilityCall, CreationCapabilityCallEvidence, CreationCapabilityConfig,
   CreationCapabilityForegroundCallWitness, CreationCapabilityJournalPort,
   CreationCapabilityReceipt, CreationCapabilityRecord, CreationCapabilitySourceArchive, CreationCapabilityTool } from './creation-capability-types.js'
@@ -226,6 +227,9 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
   private readonly identity: { dev: number; ino: number }
   private readonly path: string
   private readonly config: CreationCapabilityConfig
+  /** Usage sealed away by a Docker→Linux handoff; counted against the same grant, never refunded. */
+  private inherited = { adoptions: 0, calls: 0 }
+  private sealedPlans: ReadonlySet<string> = new Set()
   constructor(input: { path: string; config: CreationCapabilityConfig }) {
     validateCreationCapabilityConfig(input.config)
     this.config = canonicalCapabilityConfig(input.config)
@@ -286,6 +290,12 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
         } else if (count !== 0) fail()
         else this.db.prepare('INSERT INTO authority VALUES (?,?,?,?,?)').run(this.config.authorityId, this.authorityDigest,
           this.config.keyId, this.publicKey, json(this.config))
+        // Absent audit: inherited stays zero. Present: exact schema, canonical self-digested proof bound to
+        // this authority, or the constructor fails closed.
+        this.inherited = sealedAdoptionInheritedUsage(this.db, this.authorityDigest) ?? this.inherited
+        // The audit accepts up to its own structural cap; the grant is the real bound.
+        if (this.inherited.adoptions > this.config.maxAdoptions || this.inherited.calls > this.config.maxCallRecords) fail()
+        this.sealedPlans = sealedAdoptionPlanIds(this.db, this.authorityDigest)
         this.db.exec('COMMIT; PRAGMA journal_mode=WAL')
       } catch (e) { try { this.db.exec('ROLLBACK') } catch {} throw e }
       if (this.db.prepare('PRAGMA foreign_key_check').all().length) fail()
@@ -366,10 +376,16 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
   list(): readonly CreationCapabilityRecord[] {
     this.checkFiles()
     const rows = this.db.prepare('SELECT * FROM adoptions ORDER BY plan_id').all() as unknown as AdoptionRow[]
-    if (rows.length > this.config.maxAdoptions) fail()
-    if ((this.db.prepare('SELECT COUNT(*) AS n FROM calls').get() as { n: number }).n > this.config.maxCallRecords) fail()
+    const usage = this.usage()
+    if (usage.adoptions > this.config.maxAdoptions || usage.calls > this.config.maxCallRecords) fail()
     for (const row of rows) this.checkCalls(row.plan_id)
     return rows.map(row => this.decode(row))
+  }
+  /** Live rows plus usage inherited from a sealed handoff; every grant limit counts this total. */
+  usage(): { adoptions: number; calls: number } {
+    this.checkFiles()
+    const count = (table: string) => (this.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n
+    return { adoptions: count('adoptions') + this.inherited.adoptions, calls: count('calls') + this.inherited.calls }
   }
   private checkCalls(planId: string): void {
     const rows = this.db.prepare('SELECT * FROM calls WHERE plan_id=?').all(planId) as unknown as CallRow[]
@@ -431,6 +447,8 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
         Buffer.from(SOURCE_ARCHIVE_DOMAIN + json(body, SOURCE_ARCHIVE_LIMIT)), this.key).toString('base64url') }, SOURCE_ARCHIVE_LIMIT)
     }
     return this.transaction(() => {
+      // A sealed Docker-era plan id never returns under the next authority; re-adoption needs a new plan id.
+      if (this.sealedPlans.has(certificate.plan.id)) fail()
       const prior = this.row(certificate.plan.id)
       if (prior) {
         const record = this.decode(prior)
@@ -443,7 +461,7 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
         }
         return { created: false, record }
       }
-      if ((this.db.prepare('SELECT COUNT(*) AS n FROM adoptions').get() as { n: number }).n >= this.config.maxAdoptions) fail()
+      if (this.usage().adoptions >= this.config.maxAdoptions) fail()
       this.db.prepare("INSERT INTO adoptions(plan_id,status,certificate_json,certificate_digest,artifact,artifact_sha) VALUES (?,'claimed',?,?,?,?)")
         .run(certificate.plan.id, certificateJson, sha(certificateJson), bytes, sha(bytes))
       if (archiveJson !== undefined) this.db.prepare('INSERT INTO source_archives VALUES (?,?)').run(certificate.plan.id, archiveJson)
@@ -559,7 +577,7 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
       }
       const now = Date.now()
       if (record.status !== 'active' || !record.receipt || now >= record.receipt.expiresAt) fail()
-      const global = (this.db.prepare('SELECT COUNT(*) AS n FROM calls').get() as { n: number }).n
+      const global = this.usage().calls
       const local = (this.db.prepare('SELECT COUNT(*) AS n FROM calls WHERE plan_id=?').get(input.planId) as { n: number }).n
       if (global >= this.config.maxCallRecords || local >= this.config.maxCallsPerAdoption) fail()
       this.db.prepare("INSERT INTO calls(plan_id,call_key,arguments_digest,status,tool_alias,foreground_json,claimed_at) VALUES (?,?,?,'claimed',?,?,?)")

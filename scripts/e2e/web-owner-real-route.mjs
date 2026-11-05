@@ -1,7 +1,7 @@
-import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, resolve } from 'node:path'
-import { isMap, parseDocument, stringify } from 'yaml'
+import { isMap, isScalar, isSeq, parseDocument, stringify, visit } from 'yaml'
 
 const CODEX_PROVIDER = 'codex-subscription'
 const CODEX_MODEL = 'gpt-5.6-terra'
@@ -14,8 +14,17 @@ const ROUTE_FIELDS = new Set([
   'apiKeyEnv', 'displayName', 'api', 'baseURL', 'models', 'defaultContextWindow', 'defaultMaxTokens',
   'defaultInput', 'reasoning', 'thinkingBudgets', 'cacheRetention', 'transport', 'timeoutMs',
   'websocketConnectTimeoutMs', 'streamIdleTimeoutMs', 'maxRequestImageBytes', 'requestImagePixelBudget',
-  'requestImageMaxBytes', 'retryPolicy', 'compat',
+  'requestImageMaxBytes', 'retryPolicy', 'compat', 'headers',
 ])
+const PROFILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
+const PI_AI_ENTRY = 'llm-pi-ai'
+const PI_AI_PACKAGE = '@deepseek-ai/dsh-llm-pi-ai'
+// Only public routing tags such as `x-source`; anything credential-shaped stays in apiKeyEnv.
+const HEADER_NAME = /^x-[a-z0-9-]{1,40}$/u
+const HEADER_VALUE = /^[\x20-\x7E]{1,128}$/u
+const SENSITIVE_HEADER_NAME = /key|token|secret|auth|cookie|passw/u
+const CREDENTIAL_VALUE = /^\s*(?:at-|sk-|bearer\b|basic\b)/iu
+const MAX_HEADERS = 8
 const MODEL_FIELDS = new Set(['id', 'name', 'contextWindow', 'maxTokens', 'input', 'reasoningEfforts', 'compat'])
 
 function fail(message) {
@@ -52,9 +61,60 @@ function routeFromSettings(settings, provider) {
   return plain(route)
 }
 
+function hasSettingsRoute(settings, provider) {
+  const providers = settings?.[PI_AI_ENTRY]?.providers
+  return providers !== null && typeof providers === 'object' && !Array.isArray(providers) && Object.hasOwn(providers, provider)
+}
+
+function scalarValue(node) { return isScalar(node) ? node.value : undefined }
+
+/** Reads one provider from the single llm-pi-ai row of a profile patch. The selected row must be plain YAML. */
+async function routeFromProfile(sourceHome, profile, provider) {
+  if (typeof profile !== 'string' || !PROFILE_NAME.test(profile)) fail('invalid DSH_WEB_REAL_SOURCE_PROFILE')
+  let text
+  try { text = await readFile(resolve(sourceHome, 'profiles', profile, 'cordis.patch.yml'), 'utf8') } catch { sourceError() }
+  let document
+  try { document = parseDocument(text) } catch { sourceError() }
+  if (document.errors.length || !isSeq(document.contents)) sourceError()
+  // Loader never loads a disabled row, so it can neither be selected nor make the lookup ambiguous.
+  const matches = document.contents.items.filter(entry => {
+    if (!isMap(entry) || (entry.has('disabled') && scalarValue(entry.get('disabled', true)) !== false)) return false
+    const providers = entry.getIn(['config', 'providers'], true)
+    return isMap(providers) && providers.has(provider)
+  })
+  if (matches.length !== 1) sourceError()
+  const [entry] = matches
+  if (scalarValue(entry.get('id', true)) !== PI_AI_ENTRY && scalarValue(entry.get('name', true)) !== PI_AI_PACKAGE) sourceError()
+  // Other rows may carry !!js; the copied row may not carry any explicit tag or alias.
+  let unsafe = false
+  visit(entry, { Node(_key, node) { if (node.tag !== undefined) unsafe = true }, Alias() { unsafe = true } })
+  if (unsafe) fail('profile gateway route is not plain YAML data')
+  const route = entry.getIn(['config', 'providers', provider], true)
+  if (!isMap(route)) sourceError()
+  try { return plain(route.toJS(document)) } catch { sourceError() }
+}
+
+/** Public routing headers only; failures never echo names or values. */
+function vetHeaders(headers) {
+  if (headers === null || typeof headers !== 'object' || Array.isArray(headers)) fail('gateway route headers are unsupported or sensitive')
+  const entries = Object.entries(headers)
+  if (entries.length === 0 || entries.length > MAX_HEADERS) fail('gateway route headers are unsupported or sensitive')
+  const vetted = {}
+  for (const [rawName, value] of entries) {
+    const name = rawName.toLowerCase()
+    if (!HEADER_NAME.test(name) || SENSITIVE_HEADER_NAME.test(name) || Object.hasOwn(vetted, name)
+      || typeof value !== 'string' || !HEADER_VALUE.test(value) || CREDENTIAL_VALUE.test(value)) {
+      fail('gateway route headers are unsupported or sensitive')
+    }
+    vetted[name] = value
+  }
+  return vetted
+}
+
 function validateRoute(provider, route) {
   if (!ROUTE_ID.test(provider)) fail('invalid provider route')
   if (Object.keys(route).some(field => !ROUTE_FIELDS.has(field))) fail('gateway route contains unsupported or sensitive fields')
+  if (Object.hasOwn(route, 'headers')) route.headers = vetHeaders(route.headers)
   if (typeof route.apiKeyEnv !== 'string' || !ENV_NAME.test(route.apiKeyEnv)) fail('invalid apiKeyEnv reference')
   if (typeof route.api !== 'string' || !PROTOCOLS.has(route.api)) fail('unsupported gateway api')
   if (typeof route.baseURL !== 'string') fail('invalid gateway baseURL')
@@ -160,8 +220,20 @@ export async function prepareRealRoute({ env = { ...process.env }, home, workspa
   const targetHome = resolve(home)
   const [canonicalSource, canonicalTarget] = await Promise.all([canonicalHome(sourceHome), canonicalHome(targetHome)])
   if (canonicalSource === canonicalTarget) fail('source and target DSH homes must differ')
-  const settings = await readYaml(resolve(sourceHome, 'settings.yaml'))
-  const route = routeFromSettings(settings, provider)
+  const profile = env.DSH_WEB_REAL_SOURCE_PROFILE
+  let route
+  if (profile === undefined || profile === '') {
+    route = routeFromSettings(await readYaml(resolve(sourceHome, 'settings.yaml')), provider)
+  } else {
+    // settings.yaml stays the first choice; the profile patch is read only when it has no such route.
+    // A missing settings.yaml falls through; an unreadable or malformed one still fails closed.
+    const settingsPath = resolve(sourceHome, 'settings.yaml')
+    let present = true
+    try { await access(settingsPath) } catch (error) { if (error?.code === 'ENOENT') present = false; else sourceError() }
+    const settings = present ? await readYaml(settingsPath) : undefined
+    route = hasSettingsRoute(settings, provider) ? routeFromSettings(settings, provider)
+      : await routeFromProfile(sourceHome, profile, provider)
+  }
   validateRoute(provider, route)
   const model = selectModel(route, requestedModel)
   if (env[route.apiKeyEnv] === undefined) {
@@ -182,6 +254,7 @@ export async function prepareRealRoute({ env = { ...process.env }, home, workspa
     model,
     bundles: [],
     configurePatch(patch) { appendDefaultModel(patch, provider, model) },
-    proof: { provider, model, api: route.api },
+    // Header values are public routing tags but still never logged; names are enough for evidence.
+    proof: { provider, model, api: route.api, ...(route.headers ? { headerNames: Object.keys(route.headers).sort() } : {}) },
   }
 }

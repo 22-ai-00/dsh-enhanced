@@ -106,6 +106,30 @@ function sealedAdoptionHandoffShape(value: unknown, resources: RsiAuthorityResou
     || !['adoptions','calls'].every(key => Number.isSafeInteger(usage[key]) && Number(usage[key]) >= 0))
     fail('sealed adoption handoff metadata differs')
 }
+const REVIEW_LANES = ['creation-reviews', 'revision-reviews', 'revision-regressions'] as const
+/** Signed summary of the installer's review-lane v2 grant handoffs. Grant counts are omitted on
+ * purpose: they keep growing after cutover; `digest` is the installer result digest that binds them. */
+export interface RsiOwnerReviewGrantHandoffs {
+  protocol: 'dsh-owner-review-grant-handoffs/v1'
+  transactionId: string
+  digest: string
+  lanes: Array<{ lane: typeof REVIEW_LANES[number]; status: 'empty' | 'handed-off'; headDigest: string | null }>
+}
+function reviewGrantHandoffsShape(value: unknown, transactionId: string): void {
+  const lanes = record(value) && Array.isArray(value.lanes) ? value.lanes as unknown[] : undefined
+  if (!record(value) || !isDeepStrictEqual(Object.keys(value).sort(), ['digest','lanes','protocol','transactionId'])
+    || value.protocol !== 'dsh-owner-review-grant-handoffs/v1' || value.transactionId !== transactionId
+    || typeof value.digest !== 'string' || !hex.test(value.digest)
+    || !lanes || lanes.length < 1 || lanes.length > REVIEW_LANES.length
+    || lanes.some(lane => !record(lane) || !isDeepStrictEqual(Object.keys(lane).sort(), ['headDigest','lane','status'])
+      || !REVIEW_LANES.includes(lane.lane as typeof REVIEW_LANES[number])
+      || !(lane.status === 'empty' && lane.headDigest === null
+        || lane.status === 'handed-off' && typeof lane.headDigest === 'string' && hex.test(lane.headDigest)))
+    // Configured lanes only, each once, in the fixed lane order; present only when some lane handed off.
+    || lanes.some((lane, index) => index > 0 && REVIEW_LANES.indexOf((lane as { lane: typeof REVIEW_LANES[number] }).lane)
+      <= REVIEW_LANES.indexOf((lanes[index - 1] as { lane: typeof REVIEW_LANES[number] }).lane))
+    || !lanes.some(lane => (lane as { status: string }).status === 'handed-off')) fail('review grant handoffs metadata differs')
+}
 export interface RsiOwnerProgramUpdateOverlay extends Omit<RsiOwnerRepairOverlay, 'kind' | 'repair'> {
   kind: 'rsi-owner-program-update-overlay'
   update: {
@@ -116,6 +140,8 @@ export interface RsiOwnerProgramUpdateOverlay extends Omit<RsiOwnerRepairOverlay
     emptyAdoptionHandoff?: RsiOwnerEmptyAdoptionHandoff
     // Mutually exclusive with emptyAdoptionHandoff.
     sealedAdoptionHandoff?: RsiOwnerSealedAdoptionHandoff
+    // Present iff some configured review lane carried history across the handoff.
+    reviewGrantHandoffs?: RsiOwnerReviewGrantHandoffs
     before: RsiOwnerRepairOverlay['repair']['before']
     after: RsiOwnerRepairOverlay['repair']['after']
   }
@@ -222,7 +248,8 @@ function programUpdateOverlayShape(value: unknown, resources: RsiAuthorityResour
     || !record(value.update) || !isDeepStrictEqual(Object.keys(value.update).sort(),
       ['sourceMaintenanceDigest', 'authorityDigest', 'hostPlanDigest', 'before', 'after',
         ...(record(value.update) && Object.hasOwn(value.update, 'emptyAdoptionHandoff') ? ['emptyAdoptionHandoff'] : []),
-        ...(record(value.update) && Object.hasOwn(value.update, 'sealedAdoptionHandoff') ? ['sealedAdoptionHandoff'] : [])].sort())
+        ...(record(value.update) && Object.hasOwn(value.update, 'sealedAdoptionHandoff') ? ['sealedAdoptionHandoff'] : []),
+        ...(record(value.update) && Object.hasOwn(value.update, 'reviewGrantHandoffs') ? ['reviewGrantHandoffs'] : [])].sort())
     || Object.hasOwn(value.update, 'emptyAdoptionHandoff') && Object.hasOwn(value.update, 'sealedAdoptionHandoff')
     || !hex.test(String(value.update.sourceMaintenanceDigest))
     || !hex.test(String(value.update.authorityDigest))
@@ -243,6 +270,7 @@ function programUpdateOverlayShape(value: unknown, resources: RsiAuthorityResour
     || typeof value.signature !== 'string' || value.signature.length > 256) fail('program update overlay shape or scope differs')
   if (Object.hasOwn(value.update, 'emptyAdoptionHandoff')) emptyAdoptionHandoffShape(value.update.emptyAdoptionHandoff, resources, String(value.transactionId))
   if (Object.hasOwn(value.update, 'sealedAdoptionHandoff')) sealedAdoptionHandoffShape(value.update.sealedAdoptionHandoff, resources, String(value.transactionId))
+  if (Object.hasOwn(value.update, 'reviewGrantHandoffs')) reviewGrantHandoffsShape(value.update.reviewGrantHandoffs, String(value.transactionId))
   const { signature, ...unsigned } = value
   const key = createPublicKey(resources.identities.host.publicKeyPem)
   if (key.asymmetricKeyType !== 'ed25519'

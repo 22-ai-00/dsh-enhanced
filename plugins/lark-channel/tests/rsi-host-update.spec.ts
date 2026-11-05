@@ -413,6 +413,38 @@ describe('bounded RSI Host update projections', () => {
       ...sealed, archiveFileIdentity: { ...sealed.archiveFileIdentity, ino: '44' } } } }]))
       .toThrow('program update overlay signature')
     expect(() => read([{ ...update, update: emptyUpdate }])).toThrow('program update overlay signature')
+
+    // Review-lane handoff summary: exact keys, LANES order, headDigest null iff empty, at least one handed off.
+    const reviews = { protocol: 'dsh-owner-review-grant-handoffs/v1' as const, transactionId: 'update', digest: newSha,
+      lanes: [{ lane: 'creation-reviews' as const, status: 'handed-off' as const, headDigest: oldSha },
+        { lane: 'revision-reviews' as const, status: 'empty' as const, headDigest: null }] }
+    const signReviews = (value: unknown) => signRsiOwnerProgramUpdateOverlay({ ...input,
+      update: { ...input.update, reviewGrantHandoffs: value as typeof reviews } }, privateKey, resources, bootstrapSource, [])
+    const withReviews = signReviews(reviews)
+    expect(read([withReviews]).latest).toEqual(withReviews)
+    const lane = reviews.lanes[0]!, empty2 = reviews.lanes[1]!
+    for (const bad of [
+      { ...reviews, extra: 1 }, { ...reviews, protocol: 'other' }, { ...reviews, transactionId: 'other' },
+      { ...reviews, digest: 'A'.repeat(64) }, { ...reviews, digest: undefined }, { ...reviews, lanes: [] }, { ...reviews, lanes: {} },
+      { ...reviews, lanes: [lane, empty2, empty2, empty2] },
+      { ...reviews, lanes: [empty2, lane] },
+      { ...reviews, lanes: [lane, lane] },
+      { ...reviews, lanes: [{ ...lane, lane: 'source-reviews' }] },
+      { ...reviews, lanes: [{ ...lane, headDigest: null }] },
+      { ...reviews, lanes: [{ ...lane, headDigest: 'a'.repeat(63) }] },
+      { ...reviews, lanes: [lane, { ...empty2, headDigest: oldSha }] },
+      { ...reviews, lanes: [{ ...lane, status: 'sealed' }] },
+      { ...reviews, lanes: [{ ...lane, grants: [] }] },
+      { ...reviews, lanes: [empty2] },
+      null,
+    ]) expect(() => signReviews(bad)).toThrow('review grant handoffs metadata differs')
+    // The signature covers the summary; review handoffs compose with the sealed adoption handoff.
+    expect(() => read([{ ...withReviews, update: { ...withReviews.update, reviewGrantHandoffs: { ...reviews, digest: oldSha } } }]))
+      .toThrow('program update overlay signature')
+    expect(() => read([{ ...withReviews, update: { ...withReviews.update, reviewGrantHandoffs: { ...reviews,
+      lanes: [{ ...lane, headDigest: newSha }, empty2] } } }])).toThrow('program update overlay signature')
+    const { reviewGrantHandoffs: _reviews, ...withoutReviews } = withReviews.update
+    expect(() => read([{ ...withReviews, update: withoutReviews }])).toThrow('program update overlay signature')
   })
 
 })

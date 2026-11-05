@@ -473,6 +473,8 @@ Evaluation 纠正/撤回通知自动重验并卸载对应入口；到期、来�
 
 读取核对 SQLite 原始 TEXT 字节和完整 schema；计划冻结物理文件及内容，拒绝 sidecar、漂移和其他事务的重试。停服验收允许同 inode 的 cutover rename，拒绝复制后的新 inode；verify 必须在启动前再次确认空业务表，正常运行后不可把它当历史查询。普通 journal 构造与执行授权不变，后续合法使用仍走既有检查。安装器在停服前及资源迁移前检查真实配置指向的 review/采用历史，并将 plan/proof/文件身份绑定到签名 overlay；正常就绪检查不要求后续业务永远为空。这些维护函数不是模型工具，不支持非空历史迁移、native→native、通用备份恢复或旧 Docker 证书的 Linux 执行资格；完整临时 Home 升级及活 Home 验收仍待完成。
 
+非空历史改用 `planSealedAdoptionHandoff`、`applySealedAdoptionHandoff`、`verifySealedAdoptionHandoff`（协议 `dsh-sealed-creation-adoption-handoff/v1`），保留空 handoff 的全部前置检查。plan 逐行记录原始 TEXT 事实与 rowsDigest；`active` 行须是 Docker v1 证书且收据在旧 authority 下验签，列入 `pendingReverification`，由下一 authority 独立重验后才可复用。claimed/authorized/unknown 采用和 claimed/unknown 调用无法再对账，统一按 `unknown` 封存并保留原状态，不进入待重验、不重放、不退额度。空历史、超出 maxAdoptions/maxCallRecords 或收据/证书不符时拒绝。apply 先把计划快照的原始字节写入 `<journal 目录>/creation-adoptions.sealed/<旧 authorityDigest>.sqlite`（目录 0700、文件 0400、O_EXCL；重试只接受相同字节），再在同一 `BEGIN IMMEDIATE` 事务里清空三张业务表、CAS authority，并写入不可变审计表 `creation_sealed_adoption_handoff`；live 文件保持原 inode。删除的行在 VACUUM 前仍留在 SQLite 空闲页，归档文件才是保留的历史记录。`CreationCapabilityJournal` 读取并校验该审计证明（篡改或缺触发器时构造失败），`usage()` 返回 live 行数加继承用量，领取采用和调用时的额度检查及就绪剩余额度都按此合计；无审计表的 journal 行为不变。安装器尚未接入该组件。
+
 ### 普通任务修复的有限审批
 
 可选 `sourceApprovals` 将持久 `sourceJobs` 的准备结果接到 owner 配置的有限签名器：

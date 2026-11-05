@@ -1,91 +1,19 @@
-import { createHash, createPublicKey } from 'node:crypto'
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs'
-import { basename, dirname, isAbsolute, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
-import { DatabaseSync } from 'node:sqlite'
-import { canonicalGrowthJson } from '@dsh-enhanced/assistant-growth-contract'
-import { creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
+import type { DatabaseSync } from 'node:sqlite'
+import { encode, freeze, handoffPrimitives, hash, type AdoptionAuthorityIdentity, type FileIdentity,
+  type FileSnapshot } from './creation-capability-handoff-common.js'
 import type { CreationCapabilityConfig } from './creation-capability-types.js'
 
 const PROTOCOL = 'dsh-empty-creation-adoption-handoff/v1' as const
-const APP = 0x44534341
-// Exact schema3 produced by the reviewed CreationCapabilityJournal constructor.
-const SCHEMA = 'f91ee0ecdbb43d7a4305075d70f13bfa492f7d46c1ff3d3f59e1ca1a155f23a8'
 const AUDIT = 'creation_empty_authority_handoff'
 const AUDIT_SQL = `CREATE TABLE ${AUDIT} (singleton INTEGER PRIMARY KEY CHECK(singleton=1), proof_json TEXT NOT NULL, proof_digest TEXT NOT NULL CHECK(length(proof_digest)=64)) STRICT`
 const NO_UPDATE = `CREATE TRIGGER creation_empty_handoff_no_update BEFORE UPDATE ON ${AUDIT} BEGIN SELECT RAISE(ABORT,'immutable empty authority handoff'); END`
 const NO_DELETE = `CREATE TRIGGER creation_empty_handoff_no_delete BEFORE DELETE ON ${AUDIT} BEGIN SELECT RAISE(ABORT,'immutable empty authority handoff'); END`
-const sha = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex')
-const encode = (value: unknown) => canonicalGrowthJson(value)
-const hash = (value: unknown) => sha(encode(value))
 function fail(message: string): never { throw new Error(`empty adoption authority handoff: ${message}`) }
-function freeze<T>(value: T): Readonly<T> {
-  if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value) }
-  return value
-}
-interface FileIdentity { dev: string; ino: string; uid: number; gid: number; mode: number; nlink: number }
-function identity(file: string): FileIdentity {
-  const stat = lstatSync(file)
-  if (realpathSync(file) !== file || !stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.()
-    || (stat.mode & 0o077) !== 0) fail('unsafe file')
-  return { dev: String(stat.dev), ino: String(stat.ino), uid: stat.uid, gid: stat.gid, mode: stat.mode, nlink: stat.nlink }
-}
-function directory(file: string) {
-  const stat = lstatSync(file)
-  if (realpathSync(file) !== file || !stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) fail('unsafe directory')
-}
-function absolute(file: string) {
-  if (typeof file !== 'string' || !isAbsolute(file) || resolve(file) !== file || file.normalize('NFC') !== file || /[\p{Cc}]/u.test(file)) fail('invalid path')
-}
-function noSidecars(file: string) {
-  for (const suffix of ['-wal', '-shm', '-journal']) {
-    try { lstatSync(file + suffix) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error }
-    fail('sidecar requires stopped checkpointed database')
-  }
-}
-function bytes(file: string, max: number) {
-  const expected = identity(file), fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-  try {
-    const before = fstatSync(fd, { bigint: true })
-    if (String(before.dev) !== expected.dev || String(before.ino) !== expected.ino || before.size > BigInt(max)) fail('file changed or too large')
-    const value = readFileSync(fd), after = fstatSync(fd, { bigint: true })
-    if (value.length !== Number(before.size) || before.size !== after.size || before.mtimeNs !== after.mtimeNs
-      || before.ctimeNs !== after.ctimeNs || encode(identity(file)) !== encode(expected)) fail('file changed while reading')
-    return { identity: expected, bytes: value.length, digest: sha(value) }
-  } finally { closeSync(fd) }
-}
-export interface EmptyAdoptionIdentity {
-  logicalPath: string
-  config: CreationCapabilityConfig
-  authorityDigest: string
-  publicKey: string
-  keyFingerprint: string
-}
-function publicIdentity(logicalPath: string, config: CreationCapabilityConfig): EmptyAdoptionIdentity {
-  absolute(logicalPath)
-  if (basename(logicalPath) !== 'creation-adoptions.sqlite') fail('invalid logical journal')
-  validateCreationCapabilityConfig(config)
-  const key = bytes(config.keyPath, 32768)
-  const result = { logicalPath, config: structuredClone(config),
-    authorityDigest: creationCapabilityAuthorityDigest({ path: logicalPath, config }),
-    publicKey: creationCapabilityPublicKey(config), keyFingerprint: '' }
-  result.keyFingerprint = sha(createPublicKey(result.publicKey).export({ type: 'spki', format: 'der' }))
-  if (encode(key) !== encode(bytes(config.keyPath, 32768))) fail('key changed')
-  return result
-}
-function identities(logicalPath: string, oldConfig: CreationCapabilityConfig, nextConfig: CreationCapabilityConfig) {
-  const oldIdentity = publicIdentity(logicalPath, oldConfig), nextIdentity = publicIdentity(logicalPath, nextConfig)
-  const stable = (config: CreationCapabilityConfig) => {
-    const { runner, ...grant } = config
-    const { backend: _backend, runtime: _runtime, cgroupRoots: _cgroups, stateSeal: _seal,
-      image: _image, dockerPath: _docker, socketPath: _socket, ...budget } = runner as unknown as Record<string, unknown>
-    return { grant, runner: budget }
-  }
-  if (encode(stable(oldConfig)) !== encode(stable(nextConfig)) || oldIdentity.publicKey !== nextIdentity.publicKey
-    || oldIdentity.keyFingerprint !== nextIdentity.keyFingerprint || oldIdentity.authorityDigest === nextIdentity.authorityDigest) fail('stable grant changed or unchanged authority')
-  if ('backend' in oldConfig.runner || !('backend' in nextConfig.runner) || nextConfig.runner.backend !== 'linux-native') fail('only reviewed Docker to Linux handoff is supported')
-  return { oldIdentity, nextIdentity }
-}
+const common = handoffPrimitives(fail)
+const { identity, bytes, identities, textRows, authority, empty, openExisting, exact } = common
+const AUDIT_SCHEMA = { table: AUDIT, statements: [AUDIT_SQL, NO_UPDATE, NO_DELETE] }
+const schema = (db: DatabaseSync, audited: boolean) => common.schema(db, AUDIT_SCHEMA, audited)
+export type EmptyAdoptionIdentity = AdoptionAuthorityIdentity
 /** Trusted stopped-Host caller must independently verify the source copy and old/next configuration,
  * and bind that provenance in hostAnchor. Freeze the generated plan digest separately. This API does not
  * attest that an arbitrary empty clone originated from a particular live Home. */
@@ -106,7 +34,7 @@ export interface EmptyAdoptionPlan {
   physicalPath: string
   oldIdentity: EmptyAdoptionIdentity
   nextIdentity: EmptyAdoptionIdentity
-  snapshot: ReturnType<typeof bytes>
+  snapshot: FileSnapshot
   createdAt: number
   expiresAt: number
   digest: string
@@ -117,62 +45,6 @@ export interface EmptyAdoptionProof {
   fileIdentity: FileIdentity
   emptyBusiness: { adoptions: 0; calls: 0; sourceArchives: 0 }
   digest: string
-}
-function textRows(db: DatabaseSync, table: string, columns: readonly string[], order = ''): Record<string, string>[] {
-  const rows = db.prepare(`SELECT ${columns.map(column => `CAST(${column} AS BLOB) AS ${column}`).join(',')} FROM ${table} ${order}`).all()
-  return rows.map(row => Object.fromEntries(columns.map(column => {
-    const raw = row[column]
-    if (!(raw instanceof Uint8Array)) fail('non-text bytes')
-    let decoded: string
-    try { decoded = new TextDecoder('utf-8', { fatal: true }).decode(raw) } catch { fail('invalid UTF-8 text') }
-    if (decoded.includes('\0') || !Buffer.from(decoded, 'utf8').equals(raw)) fail('noncanonical text bytes')
-    return [column, decoded]
-  })))
-}
-function schema(db: DatabaseSync, audited: boolean) {
-  if (db.prepare('PRAGMA application_id').get()?.application_id !== APP || db.prepare('PRAGMA user_version').get()?.user_version !== 3) fail('schema version mismatch')
-  const objects = textRows(db, 'sqlite_schema', ['type', 'name', 'tbl_name', 'sql'], 'ORDER BY type,name')
-  const base = objects.filter(row => row.tbl_name !== AUDIT)
-  if (sha(JSON.stringify(base)) !== SCHEMA) fail('schema bytes mismatch')
-  const audit = objects.filter(row => row.tbl_name === AUDIT)
-  if (audited ? audit.length !== 3 || [AUDIT_SQL, NO_UPDATE, NO_DELETE].some(sql => !audit.some(row => row.sql === sql)) : audit.length !== 0) fail('unexpected audit schema')
-  if (db.prepare('PRAGMA quick_check').get()?.quick_check !== 'ok' || db.prepare('PRAGMA foreign_key_check').all().length) fail('database integrity mismatch')
-}
-function authority(db: DatabaseSync, expected: EmptyAdoptionIdentity) {
-  const rows = textRows(db, 'authority', ['authority_id', 'authority_digest', 'key_id', 'public_key', 'config_json'])
-  if (rows.length !== 1 || encode(rows[0]) !== encode({ authority_id: expected.config.authorityId,
-    authority_digest: expected.authorityDigest, key_id: expected.config.keyId, public_key: expected.publicKey,
-    config_json: encode(expected.config) })) fail('authority singleton mismatch')
-}
-function empty(db: DatabaseSync) {
-  for (const table of ['adoptions', 'calls', 'source_archives']) if (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n !== 0) fail('nonempty business journal is unsupported')
-}
-function openExisting<T>(file: string, action: (db: DatabaseSync) => T, write = false): T {
-  absolute(file); if (basename(file) !== 'creation-adoptions.sqlite') fail('invalid physical journal')
-  directory(dirname(file)); noSidecars(file)
-  const expected = identity(file)
-  // Keep the original descriptor alive and recheck the named inode before any SQL.
-  const fd = openSync(file, (write ? constants.O_RDWR : constants.O_RDONLY) | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-  let db: DatabaseSync | undefined
-  try {
-    const held = fstatSync(fd)
-    if (String(held.dev) !== expected.dev || String(held.ino) !== expected.ino) fail('opened identity mismatch')
-    const locator = pathToFileURL(file)
-    locator.searchParams.set('mode', write ? 'rw' : 'ro')
-    // immutable is safe only after the stopped-file/no-sidecar checks; rehash the plan snapshot.
-    if (!write) locator.searchParams.set('immutable', '1')
-    db = new DatabaseSync(locator, { readOnly: !write })
-    if (encode(identity(file)) !== encode(expected)) fail('named identity changed')
-    db.exec('PRAGMA busy_timeout=0; PRAGMA foreign_keys=ON')
-    return action(db)
-  } finally { db?.close(); closeSync(fd) }
-}
-function exact(value: unknown, keys: readonly string[]) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype
-    || Reflect.ownKeys(value).length !== keys.length) fail('unexpected fields')
-  const descriptors = Object.getOwnPropertyDescriptors(value)
-  if (Object.keys(descriptors).sort().join('\0') !== [...keys].sort().join('\0')
-    || !Object.values(descriptors).every(descriptor => descriptor.enumerable && 'value' in descriptor)) fail('unexpected fields')
 }
 function planBody(plan: EmptyAdoptionPlan) { const { digest: _digest, ...body } = plan; return body }
 function validatePlan(plan: EmptyAdoptionPlan) {

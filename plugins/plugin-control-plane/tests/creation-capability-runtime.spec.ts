@@ -69,6 +69,7 @@ function fixture() {
   const calls = new Map<string, { status: 'claimed' | 'completed' | 'unknown'; result?: unknown }>()
   const journal: CreationCapabilityJournalPort = {
     authorityDigest: 'b'.repeat(64), publicKey: verifierPublicKey, inspect: () => record, list: () => record ? [record] : [],
+    usage: () => ({ adoptions: record ? 1 : 0, calls: calls.size }),
     claim: ({ certificate: cert, artifact: bytes }) => {
       if (record) return { created: false, record }
       record = { planId: 'plan-1', status: 'claimed', certificate: cert, artifact: bytes }
@@ -809,6 +810,7 @@ test('revoking plan A does not abort a pending native call on plan B; global clo
   const journal: CreationCapabilityJournalPort = {
     authorityDigest: 'b'.repeat(64), publicKey: verifierPublicKey,
     inspect: planId => records.get(planId), list: () => [...records.values()],
+    usage: () => ({ adoptions: records.size, calls: [...calls.values()].reduce((n, local) => n + local.size, 0) }),
     claim: ({ certificate, artifact }) => {
       const existing = records.get(certificate.plan.id)
       if (existing) return { created: false, record: existing }

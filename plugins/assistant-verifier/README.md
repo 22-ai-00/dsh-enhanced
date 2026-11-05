@@ -142,6 +142,8 @@ Linux 创建验收要求 Control Plane 的双 UID 完整仓库构建。派发前
 
 内部 v2 `planGrantHandoffV2()` / `applyGrantHandoffV2()` 进一步保存三个 lane 各自的完整公开授权身份、Ed25519 公钥与指纹、owner、review/runner 有限额度和已验证配置的证据引用；除 authority digest 外的政策与额度不得变化。每步记录目标 grant 的全部既有 plan 成员及当时合法终态证书的精确封存，最多 1,000 个成员、64 步维护链，并有独立字节上限。后续新任务可以追加；旧 claimed/unknown/rejected 或未取得封存资格的旧成员，不能通过后续换签名获得历史成功资格。原成员必须保留，原终态封存逐项核验，used/maximum 和业务历史不被迁移改写。
 
+安装器使用包子路径 `@dsh-enhanced/assistant-verifier/review-maintenance`：它导出 `reviewPublicIdentity(lane, config)`（由三个 lane 各自的 `compile*ReviewConfig` 推导 v2 公开身份，会读取 `config.keyPath` 指向的私钥以得到公钥）以及上述 `CreationReviewStore` 和 `lineageHash`；插件主入口不导出这些维护接口。
+
 `resolveHistoricalCertificate()` 要求调用方提供数据库之外的可信当前 head、完整当前身份、installation/profile/lane/逻辑角色及当前文件身份；只有精确封存的记录可返回对应旧公开身份和证书。调用方仍须验签并执行原有当前 owner/source/backend 围栏，不能把证书自带的 authority 当作信任根。已有连接的方法使用同一只读事务，支持 live WAL；静态适配器仅支持停止 writer、checkpoint 后的文件。维护和历史读取先校验 SQLite 原始 TEXT 字节，拒绝 NUL、无效 UTF-8 或投影截断，审计文本必须为原始 canonical JSON。v1 的不透明配置摘要不能自动成为 v2 历史信任根。
 
 这些接口尚未接入 installer 或运行时消费者，也不注册模型工具。调用方须认证原 owner/配置来源和 stage 复制，持久化受信的外部 head；store 不替调用方完成这些授权，也不提供同 UID 恶意插件隔离。rename 后只能只读核验，不重放 apply；后续复制须由新授权身份与 head 绑定新文件，当前 v2 不支持同 digest 的 copy-only 恢复。保留旧证书不等于取得新 Linux 执行资格，也不证明采用收据连续性或完整升级通过。

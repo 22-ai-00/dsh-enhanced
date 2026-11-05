@@ -8,9 +8,10 @@ import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from 
 import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
 import { CreationCapabilityJournal } from '../../plugins/plugin-control-plane/src/creation-capability-journal.js'
 import { CreationReviewStore } from '../../plugins/assistant-verifier/src/creation-review-store.js'
+import { compileCreationReviewConfig, type CreationReviewConfig } from '../../plugins/assistant-verifier/src/creation-review.js'
 import type { CreationCapabilityConfig } from '../../plugins/plugin-control-plane/src/creation-capability-types.js'
 import * as control from '../../plugins/plugin-control-plane/src/index.js'
-import { inspectOwnerEmptyCreationHistory } from '../../scripts/install/owner-empty-creation-history.mjs'
+import { inspectOwnerCreationHistory, inspectOwnerEmptyCreationHistory } from '../../scripts/install/owner-empty-creation-history.mjs'
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 const d = (letter: string) => letter.repeat(64)
@@ -87,34 +88,52 @@ function linuxFixture(maxAdoptions = 2, maxCalls = 3) {
 
 
 export const api = { control, yaml }
-export async function ownerFixture() {
+/** Optional Docker-era business written through the real journal before inspection. */
+export type OwnerHistorySeed = (f: ReturnType<typeof linuxFixture>) => void
+/** Opt-in full creation-review configs (Docker-era old, linux-native next) and review-lane seeding. */
+export interface OwnerFixtureOptions {
+  reviews?: (f: ReturnType<typeof linuxFixture>) => { old: CreationReviewConfig; next: CreationReviewConfig }
+  reviewSeed?: (path: string, f: ReturnType<typeof linuxFixture>) => void
+}
+export async function ownerFixture(seed?: OwnerHistorySeed, options: OwnerFixtureOptions = {}) {
   const f = linuxFixture()
   new CreationCapabilityJournal({ path: f.path, config: f.oldConfig }).close()
+  seed?.(f)
+  // Seeded homes are classified with the v2 inspector; unseeded homes keep the exact v1 empty gate.
+  const inspect = seed || options.reviewSeed ? inspectOwnerCreationHistory : inspectOwnerEmptyCreationHistory
+  const reviewConfigs = options.reviews?.(f)
   const verifierPath = join(f.root, 'verifier.sqlite')
   new CreationReviewStore(verifierPath + '.creation-reviews').close()
+  options.reviewSeed?.(verifierPath + '.creation-reviews', f)
   const resources = { installationId: 'installation-1', stateRoot: f.root, configRoot: join(f.root, 'config') }
-  const manifest = { pluginCreation: { capabilities: f.oldConfig, reviews: { runner: f.oldConfig.runner } },
+  const manifest = { pluginCreation: { capabilities: f.oldConfig, reviews: reviewConfigs?.old ?? { runner: f.oldConfig.runner } },
     sourceReviews: { authorityId: 'source' }, controlPlane: { statePath: join(f.root, 'control-plane'), creationCapabilities: f.oldConfig,
-      sourceBuild: { schemaVersion: 1, sourceCommit: 'a'.repeat(40) } } }
+      sourceBuild: { schemaVersion: 1, sourceCommit: 'a'.repeat(40) },
+      ...(reviewConfigs ? { creationVerifications: { authority: compileCreationReviewConfig(reviewConfigs.old).authority } } : {}) } }
   const ownerUpdate = { protocol: 'dsh-enhanced/host-owner-program-update/v1', homePath: f.root, profile: 'assistant',
     hostPlanDigest: d('e'), original: { build: { schemaVersion: 1 }, resources, receiptSource: 'owner-bootstrap',
+      ...(reviewConfigs ? { source: { workspace: { sourceCommit: 'a'.repeat(40) } } } : {}),
       fileDigests: { [join(resources.configRoot, 'manifest.json')]: d('a') }, patchDigests: { assistant: d('b'), coordinator: d('c') },
       manifest, effective: { targetEffective: yaml.stringify([
         { id: 'dsh-enhanced-assistant-verifier', config: { databasePath: verifierPath,
           sourceReviews: manifest.sourceReviews, creationReviews: manifest.pluginCreation.reviews } },
         { id: 'dsh-enhanced-plugin-control-plane', config: manifest.controlPlane },
       ]) } } }
-  const emptyCreationHistory = await inspectOwnerEmptyCreationHistory({ ownerUpdate, api })
+  const emptyCreationHistory = await inspect({ ownerUpdate, api })
   const stageHome = mkdtempSync(join(realpathSync(tmpdir()), 'empty-owner-stage-')); roots.push(stageHome); chmodSync(stageHome, 0o700)
   cpSync(f.root, stageHome, { recursive: true })
   // Node24's recursive cp creates this child as 0755 on this Mac; keep the intended private fixture.
   chmodSync(join(stageHome, 'control-plane'), 0o700)
-  const stageHistory = await inspectOwnerEmptyCreationHistory({ ownerUpdate, physicalHome: stageHome, api })
+  const stageHistory = await inspect({ ownerUpdate, physicalHome: stageHome, api })
   const nextManifest = structuredClone(manifest)
   nextManifest.controlPlane.creationCapabilities = f.config
   nextManifest.controlPlane.sourceBuild = { schemaVersion: 3, sourceCommit: 'b'.repeat(40), backend: 'linux-native' } as typeof nextManifest.controlPlane.sourceBuild
   nextManifest.pluginCreation.capabilities = f.config
+  if (reviewConfigs) {
+    nextManifest.pluginCreation.reviews = reviewConfigs.next
+    Object.assign(nextManifest.controlPlane, { creationVerifications: { authority: compileCreationReviewConfig(reviewConfigs.next).authority } })
+  }
   return { ...f, ownerUpdate, stageHome, stageHistory, nextManifest,
-    candidateCreation: { backendTransition: 'docker->linux-native', backend: 'linux-native', receiptSha256: d('b'), emptyCreationHistory },
+    candidateCreation: { backendTransition: 'docker->linux-native', backend: 'linux-native', receiptSha256: d('b'), ...(seed ? { creationHistory: emptyCreationHistory } : { emptyCreationHistory }) },
     source: { sourceCommit: 'b'.repeat(40) }, sourceBuild: { schemaVersion: 3, backend: 'linux-native', sourceCommit: 'b'.repeat(40) } }
 }

@@ -144,7 +144,7 @@ export class CreationCapabilityRuntime {
   } | undefined {
     if (this.config.workItemFailures !== true || !this.started || this.closed || !this.admission
       || Date.now() >= this.config.expiresAt || Date.now() >= this.config.runner.expiresAt) return undefined
-    const remainingAdoptions = Math.max(0, this.config.maxAdoptions - this.journal.list().length)
+    const remainingAdoptions = Math.max(0, this.config.maxAdoptions - this.journal.usage().adoptions)
     return { protocol: 'assistant-growth/work-item-adoption-readiness/v1',
       sourceProtocol: 'assistant-delivery/work-item-engineering-context/v1', runProtocol: 'assistant-growth/source-run/v2',
       workItemFailures: true, authority: { authorityId: this.config.authorityId,
@@ -240,7 +240,7 @@ export class CreationCapabilityRuntime {
   eligible(planId: string): boolean {
     try {
       if (!this.admission || this.closed || this.journal.inspect(planId)
-        || this.journal.list().length >= this.config.maxAdoptions
+        || this.journal.usage().adoptions >= this.config.maxAdoptions
         || Date.now() >= this.config.expiresAt || Date.now() >= this.config.runner.expiresAt) return false
       const current = this.ports.inspect(planId)
       this.sourceAuthority({ planId, certificate: current.certificate }, current.sourceRun)

@@ -202,6 +202,17 @@ function assertUnitProperties(value) {
     || Object.values(value).some(item => typeof item !== 'string')) fail('candidate unit properties are incomplete')
 }
 
+/** A sealed creation-adoption handoff is only re-checked by the owner program-update verifiers. A Host
+ * overlay appended after it would end that check, so a dropped sealed audit could refund inherited usage
+ * unnoticed. Refuse until this path carries the sealed proof digest forward itself. */
+export function assertNoSealedAdoptionChain(records) {
+  if (!Array.isArray(records)) fail('owner overlay chain is invalid')
+  if (records.some(record => record?.kind === 'rsi-owner-program-update-overlay'
+    && record.update?.sealedAdoptionHandoff !== undefined)) {
+    fail('owner Home with a sealed creation-adoption handoff requires a sealed-aware Host update')
+  }
+}
+
 async function ownerConfiguration(installation, homePath, physicalHome, modules, inspection = {}) {
   const readSource = inspection.sourceAt ?? sourceAt
   const readBound = inspection.boundSourceAt ?? boundSourceAt
@@ -217,6 +228,7 @@ async function ownerConfiguration(installation, homePath, physicalHome, modules,
   const overlay = modules.hostUpdate.readRsiHostUpdateOverlayChain({ source: overlaySource,
     resources: installation.resources, dshHome: homePath, profile: installation.targetProfile, bootstrapSource })
   const effective = overlay.latest ?? receipt
+  assertNoSealedAdoptionChain(overlay.records)
   const ownerUpdate = overlay.records.findLast(record => ['rsi-owner-repair-overlay', 'rsi-owner-program-update-overlay'].includes(record.kind))
   const ownerAfter = ownerUpdate?.kind === 'rsi-owner-repair-overlay' ? ownerUpdate.repair.after : ownerUpdate?.update.after
   // The creation receipt a program-update overlay digests comes from the

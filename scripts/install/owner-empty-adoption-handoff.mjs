@@ -21,8 +21,16 @@ export function assertOwnerEmptyAdoptionMaintenanceApi(api) {
     if (typeof api?.control?.[name] !== 'function') fail(`reviewed maintenance API unavailable: ${name}`)
   }
 }
-function checkHistory(owner, history, physicalHome, stopped = false) {
-  if (history?.protocol !== 'dsh-owner-empty-creation-history/v1' || history.status !== 'empty'
+/** v1: everything empty. v2 (only with reviewLanes): adoption empty, review lanes carried by the
+ * review grant handoff bound in the same stage; every sealable lane must be in `reviewLanes`. */
+function checkHistory(owner, history, physicalHome, stopped = false, reviewLanes) {
+  const v2 = reviewLanes !== undefined
+  if (v2 && (history?.protocol !== 'dsh-owner-creation-history/v2' || history.status !== 'sealable'
+    || !Array.isArray(history.reviews) || !Array.isArray(reviewLanes) || reviewLanes.length === 0
+    || !same(history.reviews.filter(item => item.status === 'sealable').map(item => item.lane), reviewLanes))) {
+    fail('review history is not covered by the bound review grant handoff')
+  }
+  if (!v2 && (history?.protocol !== 'dsh-owner-empty-creation-history/v1' || history.status !== 'empty')
     || history.logicalHome !== owner.homePath || history.physicalHome !== physicalHome
     || history.installationId !== owner.original.resources.installationId || history.profile !== owner.profile
     || history.adoption?.status !== 'empty' || !SHA.test(history.digest)
@@ -32,12 +40,12 @@ function checkHistory(owner, history, physicalHome, stopped = false) {
     || stopped && (history.adoption.sidecars?.wal !== null || history.adoption.sidecars?.shm !== null)) fail('stopped empty history is not bound')
 }
 export async function stageOwnerEmptyAdoptionHandoff({ ownerUpdate, stageHome, transactionId, manifest,
-  candidateCreation, stageHistory, source, sourceBuild, api }) {
+  candidateCreation, stageHistory, source, sourceBuild, api, reviewHandoffLanes }) {
   assertOwnerEmptyAdoptionMaintenanceApi(api)
   if (ownerUpdate.original.build?.backend === 'linux-native' || sourceBuild?.backend !== 'linux-native'
     || candidateCreation?.backendTransition !== 'docker->linux-native') fail('unsupported backend transition')
-  checkHistory(ownerUpdate, candidateCreation.emptyCreationHistory, ownerUpdate.homePath)
-  checkHistory(ownerUpdate, stageHistory, stageHome, true)
+  checkHistory(ownerUpdate, candidateCreation.emptyCreationHistory, ownerUpdate.homePath, false, reviewHandoffLanes)
+  checkHistory(ownerUpdate, stageHistory, stageHome, true, reviewHandoffLanes)
   if (candidateCreation.emptyCreationHistory.adoption.authorityDigest !== stageHistory.adoption.authorityDigest
     || !same(candidateCreation.emptyCreationHistory.reviews.map(item => [item.lane, item.status, item.logicalPath]),
       stageHistory.reviews.map(item => [item.lane, item.status, item.logicalPath]))) fail('source history scope changed')

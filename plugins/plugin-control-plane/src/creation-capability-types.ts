@@ -211,6 +211,8 @@ export interface CreationCapabilityJournalPort {
   readonly publicKey: string
   inspect(planId: string): CreationCapabilityRecord | undefined
   list(): readonly CreationCapabilityRecord[]
+  /** Live rows plus usage inherited from a sealed adoption handoff; grant limits count this total. */
+  usage(): { adoptions: number; calls: number }
   claim(input: { certificate: PluginCreationVerificationCertificate; artifact: Buffer;
     source?: CreationCapabilitySourceSnapshot }): { created: boolean; record: CreationCapabilityRecord }
   /** Lazy historical read; legacy rows have no archive and are never inferred or backfilled. */

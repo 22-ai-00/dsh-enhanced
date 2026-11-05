@@ -6,14 +6,17 @@ import { chmod, mkdir, open, lstat, realpath, rename, readFile, readdir } from '
 import { homedir } from 'node:os'
 import { readFileSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual as same } from 'node:util'
 import { DatabaseSync } from 'node:sqlite'
 import { assertLocalSourceInstaller, localCandidateBuildBackend, nativeOriginalRefusal,
   readLocalCandidateSourceBuild } from './local-source-maintenance.mjs'
-import { inspectOwnerEmptyCreationHistory } from './owner-empty-creation-history.mjs'
+import { inspectOwnerCreationHistory, inspectOwnerEmptyCreationHistory } from './owner-empty-creation-history.mjs'
+import { assertOwnerSealedAdoptionMaintenanceApi, stageOwnerSealedAdoptionHandoff, verifyOwnerSealedAdoptionHandoff } from './owner-sealed-adoption-handoff.mjs'
 import { assertOwnerEmptyAdoptionMaintenanceApi, stageOwnerEmptyAdoptionHandoff, verifyOwnerEmptyAdoptionHandoff } from './owner-empty-adoption-handoff.mjs'
+import { assertOwnerReviewGrantHandoffApi, preflightOwnerReviewGrantHandoffs, stageOwnerReviewGrantHandoffs,
+  verifyOwnerReviewGrantHandoffs } from './owner-review-grant-handoff.mjs'
 import { composeOwnerRepairProfiles, ownerRepairPatchEquivalent,
   ownerRepairSnapshotEquivalent } from './owner-source-repair.mjs'
 
@@ -135,7 +138,20 @@ async function apiFor(installer) {
     .resolve('@dsh-enhanced/plugin-control-plane'))
   if (!inside(installer.root, controlPath) || !inside(installer.root,
     await realpath(req.resolve('yaml/package.json')))) fail('reviewed installer dependency escaped')
-  return { ...api, control: await import(pathToFileURL(controlPath).href), yaml: req('yaml') }
+  return { ...api, control: await import(pathToFileURL(controlPath).href), yaml: req('yaml'),
+    ...await reviewMaintenance(installer) }
+}
+/** The verifier's offline review-lane surface postdates older installers; its absence is tolerated
+ * here and refused only when some review lane actually carries history. */
+async function reviewMaintenance(installer) {
+  const lark = createRequire(join(installer.root, 'plugins', 'lark-channel', 'package.json'))
+  let path
+  try { path = await realpath(lark.resolve('@dsh-enhanced/assistant-verifier/review-maintenance')) } catch (error) {
+    if (['MODULE_NOT_FOUND', 'ERR_PACKAGE_PATH_NOT_EXPORTED', 'ENOENT'].includes(error?.code)) return {}
+    throw error
+  }
+  if (!inside(installer.root, path)) fail('reviewed installer dependency escaped')
+  return { verifier: await import(pathToFileURL(path).href) }
 }
 async function ledger(api, home, physicalHome, profile, repository, records) {
   const path = join(physicalHome, 'rsi-authorities', profile, 'state', 'control-plane', 'control.sqlite')
@@ -746,6 +762,92 @@ export async function captureOwnerProgramUpdate({ homePath, profile, installer, 
   return result
 }
 
+/** Empty history keeps the exact v1 gate and protocol. Otherwise the adoption handoff is chosen from
+ * the adoption journal alone (empty → empty seam with a v2 history, sealable → sealed seam) and each
+ * sealable review lane is carried in place by the review grant handoff bound in the same stage. */
+async function inspectOwnerCreationHistoryForHandoff({ ownerUpdate, physicalHome, api }) {
+  const history = await inspectOwnerCreationHistory({ ownerUpdate, physicalHome, api })
+  if (history.status === 'empty') return { kind: 'empty', history: await inspectOwnerEmptyCreationHistory({ ownerUpdate, physicalHome, api }) }
+  if (history.adoption.status === 'empty') return { kind: 'empty', history }
+  assertOwnerSealedAdoptionMaintenanceApi(api)
+  return { kind: 'sealed', history }
+}
+
+const reviewLaneSources = {
+  'creation-reviews': [m => m.pluginCreation?.reviews, m => m.controlPlane?.creationVerifications?.authority],
+  'revision-reviews': [m => m.pluginRevision?.reviews, m => m.controlPlane?.revisionVerifications?.authority],
+  'revision-regressions': [m => m.pluginRevision?.regressions, m => m.controlPlane?.revisionRegressions?.authority],
+}
+const sourceCommit = value => typeof value === 'string' && /^[a-f0-9]{40}$/u.test(value) ? { sourceCommit: value }
+  : fail('review-configuration-evidence-invalid')
+
+/** Public review identities for every configured lane of a stopped stage. Each lane's signing key is
+ * read from `physicalHome` (the stopped stage), never from the live Home. The identities must carry the
+ * same old/next authority digests the native verifier grant migration rewrites.
+ * `logicalDatabaseScope` and `configurationEvidence` are the installer's chosen semantics for a future
+ * historical-certificate resolver: scope `verifier/<lane>`; evidence = digest of the lane config without
+ * runner and keyPath, digest of the old (original) / current (candidate) source commit, and the lane's
+ * authority digest. Known limitation: after cutover, pre-handoff certificates still fail the current-
+ * authority checks (creation-review readRetainedCases; control-plane service) until a runtime consumer of
+ * resolveHistoricalCertificate exists. This migrates lanes without refunding or refusing; it does not
+ * make old certificates readable as history yet. */
+export function ownerProgramReviewLanes({ ownerUpdate, manifest, history, homePath, physicalHome, source, api }) {
+  const original = ownerUpdate.original, digestOf = value => api.control.controlPlaneDigest(value)
+  const configured = (history?.reviews ?? []).filter(item => item.status !== 'disabled')
+  const sealable = configured.filter(item => item.status === 'sealable').map(item => item.lane)
+  if (sealable.length === 0) return { lanes: [], sealable }
+  if (typeof api?.verifier?.reviewPublicIdentity !== 'function') fail('review-maintenance-api-unavailable')
+  const oldSource = sourceCommit(original.source?.workspace?.sourceCommit), nextSource = sourceCommit(source?.sourceCommit)
+  const lanes = configured.map(item => {
+    const [configOf, authorityOf] = reviewLaneSources[item.lane] ?? fail('review-lane-unknown')
+    const side = (value, sourceValue, expectedDigest) => {
+      if (!value || typeof value.keyPath !== 'string') fail('review-identity-invalid')
+      let identity
+      try { identity = api.verifier.reviewPublicIdentity(item.lane, { ...value, keyPath: physical(homePath, physicalHome, value.keyPath) }) }
+      catch (error) { throw Object.assign(new Error(`Owner program update: review-identity-invalid (${item.lane})`, { cause: error }), { code: 'review-identity-invalid' }) }
+      if (identity.authority.authorityDigest !== expectedDigest) fail(`review-authority-digest-mismatch: ${item.lane}`)
+      const { runner: _runner, keyPath: _keyPath, ...terms } = value
+      return { identity, evidence: { configurationDigest: digestOf(terms), sourceDigest: digestOf(sourceValue),
+        verificationDigest: identity.authority.authorityDigest } }
+    }
+    const old = side(configOf(original.manifest), oldSource, authorityOf(original.manifest)?.authorityDigest)
+    const next = side(configOf(manifest), nextSource, authorityOf(manifest)?.authorityDigest)
+    if (!inside(homePath, item.logicalPath)) fail('review-lane-path-invalid')
+    return { lane: item.lane, logicalPath: item.logicalPath, physicalPath: physical(homePath, physicalHome, item.logicalPath),
+      logicalDatabaseScope: `verifier/${item.lane}`, oldIdentity: old.identity, nextIdentity: next.identity,
+      configurationEvidence: { old: old.evidence, current: next.evidence } }
+  })
+  return { lanes, sealable }
+}
+const seamLane = ({ logicalPath: _logicalPath, ...entry }) => entry
+export function ownerProgramReviewHandoffMetadata(result) {
+  return { protocol: result.protocol, transactionId: result.transactionId, digest: result.digest,
+    lanes: result.lanes.map(({ lane, status, headDigest }) => ({ lane, status, headDigest })) }
+}
+
+/** Signed field equals the carried result; identities rebind to the original and current authorities.
+ * Stopped acceptance re-reads every staged lane; post-cutover acceptance never re-reads grants, which
+ * legitimately keep counting new business. */
+export async function verifyOwnerProgramReviewHandoffs({ ownerUpdate, ownerUpdateNext, manifest, signed,
+  homePath, physicalHome, stopped, api }) {
+  const carried = ownerUpdateNext?.reviewGrantHandoffs
+  if (!signed && !carried) return
+  if (!signed || !carried || !Array.isArray(carried.lanes) || !carried.result
+    || !same(signed, ownerProgramReviewHandoffMetadata(carried.result))
+    || signed.transactionId !== ownerUpdateNext.transactionId
+    || carried.lanes.length !== carried.result.lanes.length) fail('signed review grant handoff differs')
+  for (const entry of carried.lanes) {
+    const [, authorityOf] = reviewLaneSources[entry?.lane] ?? fail('signed review grant handoff differs')
+    if (entry.oldIdentity?.authority?.authorityDigest !== authorityOf(ownerUpdate.original.manifest)?.authorityDigest
+      || entry.nextIdentity?.authority?.authorityDigest !== authorityOf(manifest)?.authorityDigest
+      || entry.logicalDatabaseScope !== `verifier/${entry.lane}` || !inside(homePath, entry.logicalPath)) fail('signed review grant handoff differs')
+  }
+  if (!stopped) return
+  assertOwnerReviewGrantHandoffApi(api)
+  await verifyOwnerReviewGrantHandoffs({ result: carried.result, api, lanes: carried.lanes
+    .map(entry => seamLane({ ...entry, physicalPath: physical(homePath, physicalHome, entry.logicalPath) })) })
+}
+
 /** Authenticated stop/copy gate shared by the outer staging entry and finalizer. */
 export async function inspectOwnerProgramEmptyCreationStage({ ownerUpdate, physicalHome, installer = ownerUpdate?.installer }) {
   assertOwner(ownerUpdate, ownerUpdate?.homePath, installer)
@@ -755,7 +857,7 @@ export async function inspectOwnerProgramEmptyCreationStage({ ownerUpdate, physi
   }
   const api = await apiFor(installer)
   assertOwnerEmptyAdoptionMaintenanceApi(api)
-  const history = await inspectOwnerEmptyCreationHistory({ ownerUpdate, physicalHome, api })
+  const { history } = await inspectOwnerCreationHistoryForHandoff({ ownerUpdate, physicalHome, api })
   if (history.adoption.sidecars.wal !== null || history.adoption.sidecars.shm !== null) {
     fail('staged adoption sidecars require stopped-copy reconciliation before materialization')
   }
@@ -797,11 +899,12 @@ export async function prepareOwnerProgramCreation({ ownerUpdate, candidateHome, 
     || actualSource.sourceCommit === ownerUpdate.original.source.workspace.sourceCommit) {
     fail('candidate source or build differs')
   }
-  let emptyCreationHistory
+  let historyRecord
   if (actualBackend === 'linux-native') {
     if (backendTransition !== 'docker->linux-native') fail('empty owner migration supports only Docker to Linux; native updates require a separate lineage contract')
     assertOwnerEmptyAdoptionMaintenanceApi(api)
-    emptyCreationHistory = await inspectOwnerEmptyCreationHistory({ ownerUpdate, api })
+    const inspected = await inspectOwnerCreationHistoryForHandoff({ ownerUpdate, physicalHome: ownerUpdate.homePath, api })
+    historyRecord = inspected.kind === 'empty' ? { emptyCreationHistory: inspected.history } : { creationHistory: inspected.history }
     // The native creation build keeps its own capability state outside every
     // Docker receipt tree; the caller copies the resulting family into the
     // stage with the relocation seam instead of the Docker materializer.
@@ -816,7 +919,7 @@ export async function prepareOwnerProgramCreation({ ownerUpdate, candidateHome, 
     const receiptSha256 = hash(await bytes(join(candidateHome, 'rsi-linux-creation-builds', profile,
       'bootstrap.json'), 65_536))
     return { schemaVersion: 1, backend: 'linux-native', candidateHome, candidateSource: actualSource,
-      candidateBuild: actualBuild, creationBuild, receiptSha256, emptyCreationHistory,
+      candidateBuild: actualBuild, creationBuild, receiptSha256, ...historyRecord,
       ...(backendTransition ? { backendTransition } : {}) }
   }
   const creationBuild = await api.prepareRsiCreationBuildEnvironment({ dshHome: candidateHome,
@@ -1448,7 +1551,11 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
     if (candidateCreation.backendTransition !== 'docker->linux-native'
       || localCandidateBuildBackend(original.build) !== 'docker') fail('unsupported empty owner migration backend')
     assertOwnerEmptyAdoptionMaintenanceApi(api)
-    stageEmptyHistory = await inspectOwnerEmptyCreationHistory({ ownerUpdate, physicalHome: stageHome, api })
+    const inspected = await inspectOwnerCreationHistoryForHandoff({ ownerUpdate, physicalHome: stageHome, api })
+    // Exactly one of the two protocols, and it must match what the owner saw before the stop.
+    if ((inspected.kind === 'sealed') !== (candidateCreation.creationHistory !== undefined)
+      || (inspected.kind === 'empty') !== (candidateCreation.emptyCreationHistory !== undefined)) fail('creation history kind changed before finalization')
+    stageEmptyHistory = inspected.history
     if (!candidateCreation.stoppedEmptyCreationHistory
       || candidateCreation.stoppedEmptyCreationHistory.digest !== stageEmptyHistory.digest) {
       fail('stopped empty creation history changed before finalization')
@@ -1541,6 +1648,21 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
   // grants can only be rewritten from the Docker-era owner authority to the
   // compiled one now that the creation authority exists. The Docker path keeps
   // its single creation seam.
+  // Every review refusal (identity, runner projection, prior chain, grant range) runs before the
+  // verifier grant migration, any adoption handoff or any review lane write. Native materialization and
+  // the runner-state freeze have already written the discardable staged-home; a refusal discards it.
+  const { lanes: reviewLanes, sealable: sealableReviewLanes } = native ? ownerProgramReviewLanes({ ownerUpdate,
+    manifest, history: stageEmptyHistory, homePath, physicalHome: stageHome, source, api }) : { lanes: [], sealable: [] }
+  const reviewEntries = reviewLanes.map(seamLane)
+  if (reviewLanes.length) {
+    // The handoff mutates staged lanes in place; only the transaction's own discardable stage may carry it.
+    if (basename(stageHome) !== 'staged-home') fail('review grant handoff requires the transaction staged-home')
+    assertOwnerReviewGrantHandoffApi(api)
+    const preflight = preflightOwnerReviewGrantHandoffs({ lanes: reviewEntries, api, transactionId, now: Date.now() })
+    if (!same(preflight.filter(item => item.status === 'sealable').map(item => item.lane), sealableReviewLanes)) {
+      fail('review lane history changed before the handoff')
+    }
+  }
   if (native) {
     migrateNativeVerifierGrants({ transactionId, stageHome, homePath, resources,
       original, freshCreation, freshRevision, frozen, api, now: original.now })
@@ -1584,8 +1706,17 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
     fail('owner authority inventory changed')
   }
   assertOwnerProgramAuthorityPreserved(original.files, files, { rebase, rebaseValue: api.rebaseRsiHostValue })
-  const emptyAdoptionHandoff = native ? await stageOwnerEmptyAdoptionHandoff({ ownerUpdate, stageHome, transactionId,
-    manifest, candidateCreation, stageHistory: stageEmptyHistory, source, sourceBuild, api }) : undefined
+  const sealing = native && candidateCreation.creationHistory !== undefined
+  const handoffInput = { ownerUpdate, stageHome, transactionId, manifest, candidateCreation, stageHistory: stageEmptyHistory, source, sourceBuild, api }
+  const emptyAdoptionHandoff = native && !sealing ? await stageOwnerEmptyAdoptionHandoff({ ...handoffInput,
+    ...(reviewLanes.length ? { reviewHandoffLanes: sealableReviewLanes } : {}) }) : undefined
+  const sealedAdoptionHandoff = sealing ? await stageOwnerSealedAdoptionHandoff(handoffInput) : undefined
+  const reviewGrantHandoffs = reviewLanes.length ? { lanes: reviewLanes, result: await stageOwnerReviewGrantHandoffs({
+    lanes: reviewEntries, api, transactionId, installationId: resources.installationId, profileId: profile, now: Date.now() }) } : undefined
+  if (reviewGrantHandoffs && (!same(reviewGrantHandoffs.result.lanes.map(item => item.lane), reviewLanes.map(item => item.lane))
+    || !same(reviewGrantHandoffs.result.lanes.filter(item => item.status === 'handed-off').map(item => item.lane), sealableReviewLanes))) {
+    fail('review grant handoff dropped a sealable lane')
+  }
   const oldTrustDigest = api.control.controlPlaneDigest(await api.control.loadTrustConfig(
     physical(homePath, stageHome, join(resources.configRoot, 'trust.json'))))
   const newTrustDigest = api.control.controlPlaneDigest(compiled.trust)
@@ -1624,6 +1755,8 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
     update: { sourceMaintenanceDigest: api.control.sourceMaintenanceDigest(record),
       authorityDigest, hostPlanDigest: ownerUpdate.hostPlanDigest,
       ...(emptyAdoptionHandoff ? { emptyAdoptionHandoff: emptyAdoptionHandoff.metadata } : {}),
+      ...(sealedAdoptionHandoff ? { sealedAdoptionHandoff: sealedAdoptionHandoff.metadata } : {}),
+      ...(reviewGrantHandoffs ? { reviewGrantHandoffs: ownerProgramReviewHandoffMetadata(reviewGrantHandoffs.result) } : {}),
       before: { files: original.fileDigests, patches: original.patchDigests,
         runtimeReceiptDigest: original.runtimeReceiptDigest,
         creationReceiptDigest: original.creationDigest, journalDigest: hash(original.journalSource) },
@@ -1642,7 +1775,8 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
     candidateReceiptSha256: creation.candidateReceiptSha256, journalDigest: hash(journalSource),
     recordDigest: api.control.sourceMaintenanceDigest(record), authorityDigest,
     hostPlanDigest: ownerUpdate.hostPlanDigest, sourceHistoryDigest: before.sourceHistoryDigest,
-    ...(emptyAdoptionHandoff ? { emptyAdoptionHandoff } : {}) }
+    ...(emptyAdoptionHandoff ? { emptyAdoptionHandoff } : {}), ...(sealedAdoptionHandoff ? { sealedAdoptionHandoff } : {}),
+    ...(reviewGrantHandoffs ? { reviewGrantHandoffs } : {}) }
   await verifyOwnerProgramUpdate({ ownerUpdate, ownerUpdateNext: next, homePath,
     physicalHome: stageHome, installer, phase: 'after-finalize', record, checkLedger: true, stoppedEmptyAdoption: native })
   return next
@@ -1762,8 +1896,22 @@ export async function verifyOwnerProgramUpdate({ ownerUpdate, ownerUpdateNext, h
     || !same(files, original.files) || !same(patches, original.patches)) {
     fail('original owner proof changed')
   }
-  if (phase === 'after-finalize') await verifyOwnerEmptyAdoptionHandoff({ ownerUpdate, ownerUpdateNext, manifest,
-    metadata: chain.latest.update.emptyAdoptionHandoff, physicalHome, stoppedEmptyAdoption, api })
+  if (phase === 'after-finalize') {
+    const update = chain.latest.update
+    // A stopped Docker→native candidate carries exactly one of the two handoffs, never both or neither.
+    if (update.emptyAdoptionHandoff && update.sealedAdoptionHandoff
+      || stoppedEmptyAdoption && manifest.controlPlane?.sourceBuild?.backend === 'linux-native'
+        && !update.emptyAdoptionHandoff && !update.sealedAdoptionHandoff) fail('signed adoption handoff missing or ambiguous')
+    if (update.sealedAdoptionHandoff || ownerUpdateNext?.sealedAdoptionHandoff) {
+      await verifyOwnerSealedAdoptionHandoff({ ownerUpdate, ownerUpdateNext, manifest,
+        metadata: update.sealedAdoptionHandoff, physicalHome, stoppedSealedAdoption: stoppedEmptyAdoption, api })
+    } else {
+      await verifyOwnerEmptyAdoptionHandoff({ ownerUpdate, ownerUpdateNext, manifest,
+        metadata: update.emptyAdoptionHandoff, physicalHome, stoppedEmptyAdoption, api })
+    }
+    await verifyOwnerProgramReviewHandoffs({ ownerUpdate, ownerUpdateNext, manifest, signed: update.reviewGrantHandoffs,
+      homePath, physicalHome, stopped: stoppedEmptyAdoption, api })
+  }
   const runtime = await api.readRsiAuthorityRuntimeReceipt({ logicalHome: homePath,
     physicalHome, profile: ownerUpdate.profile })
   if (phase === 'original' && !same(runtime, original.runtime)

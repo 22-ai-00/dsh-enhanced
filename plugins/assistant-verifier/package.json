@@ -24,6 +24,10 @@
     "./linux-behavior-runtime": {
       "types": "./lib/linux-behavior-runtime.d.ts",
       "default": "./lib/linux-behavior-runtime.js"
+    },
+    "./review-maintenance": {
+      "types": "./lib/review-maintenance.d.ts",
+      "default": "./lib/review-maintenance.js"
     }
   },
   "files": [

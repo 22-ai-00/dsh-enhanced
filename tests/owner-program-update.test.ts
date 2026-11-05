@@ -1380,16 +1380,40 @@ test('the native handover seams stay ordered around the creation authority', asy
 })
 
 
-test.each(['unknown','closed','rejected'])('refuses %s creation history before preparing candidate authority state', async status => {
+test.each(['unknown','closed','rejected'])('classifies %s creation history as sealable without touching the source journal', async status => {
   const f = await emptyOwnerCreationEntry()
   try {
     const db = new DatabaseSync(f.real.path)
     db.exec(`INSERT INTO adoptions(plan_id,status,certificate_json,certificate_digest,artifact,artifact_sha,reason) VALUES ('past','${status}','{}','${'a'.repeat(64)}',X'01','${'b'.repeat(64)}','retained')`); db.close()
     const before = await readFile(f.real.path)
-    await expect(prepareOwnerProgramCreation({ ownerUpdate: f.ownerUpdate, candidateHome: f.candidateHome,
-      source: f.source, sourceBuild: f.build })).rejects.toThrow('adoption-history-present')
-    expect(await readdir(f.candidateHome)).toEqual([])
+    const prepared = await prepareOwnerProgramCreation({ ownerUpdate: f.ownerUpdate, candidateHome: f.candidateHome,
+      source: f.source, sourceBuild: f.build })
+    // Business history is sealed later by the stopped stage; the empty v1 record must not be produced.
+    expect(prepared.emptyCreationHistory).toBeUndefined()
+    expect(prepared.creationHistory).toMatchObject({ protocol: 'dsh-owner-creation-history/v2', status: 'sealable',
+      adoption: { status: 'sealable', counts: { adoptions: 1 } } })
+    expect(prepared.creationHistory.adoption.byStatus[status]).toBe(1)
     expect(await readFile(f.real.path)).toEqual(before)
+  } finally { await rm(f.installer.root, { recursive: true, force: true }) }
+})
+
+test('non-empty review history with an empty adoption journal is classified for the review handoff, not refused', async () => {
+  const f = await emptyOwnerCreationEntry()
+  try {
+    const review = join(f.real.root, 'verifier.sqlite.creation-reviews')
+    const db = new DatabaseSync(review)
+    db.exec("INSERT INTO verifications VALUES('old','binding','creation-review','unknown','{}')"); db.close()
+    const before = await readFile(review)
+    const result = await prepareOwnerProgramCreation({ ownerUpdate: f.ownerUpdate, candidateHome: f.candidateHome,
+      source: f.source, sourceBuild: f.build })
+    // The adoption journal alone picks the adoption seam; the review lane is reported for the review handoff.
+    expect(result.creationHistory).toBeUndefined()
+    expect(result.emptyCreationHistory).toMatchObject({ protocol: 'dsh-owner-creation-history/v2', status: 'sealable',
+      adoption: { status: 'empty' } })
+    expect(result.emptyCreationHistory.reviews.find((item: { lane: string }) => item.lane === 'creation-reviews'))
+      .toMatchObject({ status: 'sealable' })
+    // Preparation only classifies: the live review lane is never written.
+    expect(await readFile(review)).toEqual(before)
   } finally { await rm(f.installer.root, { recursive: true, force: true }) }
 })
 
@@ -1418,7 +1442,8 @@ test('the authenticated outer stage gate rechecks real copied history without cr
     const path = join(f.real.stageHome, 'control-plane/creation-adoptions.sqlite')
     const db = new DatabaseSync(path)
     db.exec(`INSERT INTO adoptions(plan_id,status,certificate_json,certificate_digest,artifact,artifact_sha,reason) VALUES ('late','unknown','{}','${'a'.repeat(64)}',X'01','${'b'.repeat(64)}','retained')`); db.close()
-    await expect(inspectOwnerProgramEmptyCreationStage(input)).rejects.toThrow('adoption-history-present')
+    // A late stopped-stage adoption is classified for sealing, never silently treated as empty.
+    expect((await inspectOwnerProgramEmptyCreationStage(input)).status).toBe('sealable')
     expect(await readdir(f.candidateHome)).toEqual([])
   } finally { await rm(f.installer.root, { recursive: true, force: true }) }
 })
