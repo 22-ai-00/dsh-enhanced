@@ -1,5 +1,11 @@
 # 兼容性基线
 
+## 统一 intake 账本（WorkItems 10）
+
+WorkItems schema 10 只新增只追加的 `work_item_intake` 表、其内容摘要索引与禁止 UPDATE/DELETE 的触发器；schema 1–9 的库在打开时同一事务内升级，原工作项、事件、报告、续办与历史行不改写，新表起始为空。旧 writer 不得打开新库；打开时同时校验新表、索引与触发器的精确形状，漂移或外来对象失败关闭。
+
+该账本默认关闭：只有 `enabled: true` 且显式 `intakeLedger.enabled: true` 时，Host-only `recordIntake` 才写入；observe 模式可用，不准入工作项、不唤醒 worker、不调用 Delivery 或模型。行只保存来源、事件 ID、决策/原因码、强度、布尔信号、可选的调用方 SHA-256 内容摘要与元数据摘要，不保存正文、标题或发送者身份。现有调用方、`admit` 与配置语义不变；当前没有入站插件调用该接口，lark-channel 的 mention gate 保持原样。
+
 ## 主人续办与精确生产终态（WorkItems 9 / Automations 17）
 
 WorkItems schema 9 新增不可变 continuation 记录，保存真实输入字节、父/根引用、历史上界和冻结执行合同；原工作项及历史保留。Automations schema 17 只为 run 增加可空、不可改写的 quiescence；历史 NULL 不回填。旧 writer 不得写入新库。退休快照及安装消费者保留 15/16，并明确接受 17；跨版本比较同时核对旧列投影摘要和新增非空值数量为零，同版本比较全部历史摘要，拒绝用补写 0/1伪造历史。

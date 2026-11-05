@@ -1,6 +1,8 @@
 import { WorkItemEngineeringTargets, type WorkItemEngineeringMaterial } from './engineering-context.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
+import type { WorkItemIntakeInput, WorkItemIntakeResult } from './intake.js'
+import { classifyIntake, intakeSourcePolicy } from './intake.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { WorkItemAdmission } from './admission.js'
@@ -668,6 +670,21 @@ export class AssistantWorkItemsService extends Service {
    * `sweepIntervalMs`) so ordinary use keeps producing work without a timer or
    * developer orchestration. A sweep failure never fails the claim.
    */
+  /**
+   * Record one inbound item's deterministic intake decision (WP20 slice 1).
+   *
+   * Host-only and metadata-only: the input carries normalized booleans and an
+   * optional content digest, never a body. It works in observe mode, writes
+   * only the intake ledger, and never admits, wakes or delivers anything. A
+   * replay of the same `(source, sourceEventId)` returns the original row.
+   */
+  recordIntake(input: WorkItemIntakeInput): WorkItemIntakeResult {
+    const ledger = this.workItemsConfig.intakeLedger
+    if (!this.workItemsConfig.enabled || ledger === undefined) fail('disabled', 'the work-item intake ledger is disabled')
+    const candidate = classifyIntake(input, intakeSourcePolicy(ledger.sources, String((input as { source?: unknown } | null)?.source)))
+    return this.workItemsAvailable().store.recordIntake(candidate)
+  }
+
   /** Explicit Host-only reduction of a canonical work signal; never a model tool or a plan mint. */
   withdraw(input: WorkItemAdmitInput): WorkItemWithdrawResult {
     const result = this.workItemsAvailable().admission.withdraw(input)

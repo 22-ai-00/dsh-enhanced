@@ -2,6 +2,8 @@ import { isAbsolute, resolve } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 import type { WorkItemErrorCode, WorkItemReportStatus, WorkItemScope } from './types.ts'
 import { WorkItemError } from './types.ts'
+import type { WorkItemIntakeSourcePolicy } from './intake.ts'
+import { INTAKE_SOURCE_ID } from './intake.ts'
 
 /** Raw operator configuration. Every field is optional except the two paths. */
 export interface Config {
@@ -22,6 +24,17 @@ export interface Config {
   ownerContinuation?: OwnerContinuationConfig
   ownerReplyContinuation?: boolean
   ownerReportFeedback?: boolean
+  intakeLedger?: IntakeLedgerConfig
+}
+
+/**
+ * Deterministic intake ledger (WP20 slice 1). Off by default; when enabled the
+ * Host may record per-event metadata decisions. Each source opt-in admits
+ * unaddressed group messages or unsubscribed events as metadata-only rows.
+ */
+export interface IntakeLedgerConfig {
+  enabled?: boolean
+  sources?: Record<string, { unaddressedGroupMessages?: boolean; unsubscribedEvents?: boolean }>
 }
 
 /** A separately authorized Host worker; it never changes the diagnosis worker. */
@@ -140,6 +153,13 @@ export interface NormalizedConfig {
   readonly ownerContinuation?: NormalizedOwnerContinuation
   readonly ownerReplyContinuation?: true
   readonly ownerReportFeedback?: true
+  /** Present only when the intake ledger is enabled. */
+  readonly intakeLedger?: NormalizedIntakeLedger
+}
+
+export interface NormalizedIntakeLedger {
+  readonly enabled: true
+  readonly sources: Readonly<Record<string, WorkItemIntakeSourcePolicy>>
 }
 
 export interface NormalizedForegroundFailureSource {
@@ -200,7 +220,10 @@ const DELIVERY_KEYS = ['notifyOn'] as const
 const SETTLEMENT_KEYS = ['enabled', 'windowMs', 'sweepIntervalMs', 'maxSourcesPerSweep', 'maxPendingPerSweep', 'maxSettlementsPerSweep'] as const
 const SOURCES_KEYS = ['foregroundFailures'] as const
 const FOREGROUND_FAILURE_KEYS = ['enabled', 'kind', 'includeTimedOut', 'maxCandidatesPerSweep', 'maxAdmitsPerSweep', 'sweepIntervalMs'] as const
-const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerContinuation', 'ownerReplyContinuation', 'ownerReportFeedback'] as const
+const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerContinuation', 'ownerReplyContinuation', 'ownerReportFeedback', 'intakeLedger'] as const
+const INTAKE_LEDGER_KEYS = ['enabled', 'sources'] as const
+const INTAKE_SOURCE_KEYS = ['unaddressedGroupMessages', 'unsubscribedEvents'] as const
+const MAX_INTAKE_SOURCES = 32
 const REPORT_STATUSES = ['progress', 'waiting', 'ready', 'blocked', 'failed'] as const
 const NOTIFY_STATUSES = ['ready', 'blocked', 'failed'] as const
 
@@ -272,6 +295,13 @@ export const ConfigSchema = Schema.object({
   settlement: settlementSchema,
   ownerReplyContinuation: Schema.boolean().default(false),
   ownerReportFeedback: Schema.boolean().default(false),
+  intakeLedger: Schema.object({
+    enabled: Schema.boolean().default(false),
+    sources: Schema.dict(Schema.object({
+      unaddressedGroupMessages: Schema.boolean().default(false),
+      unsubscribedEvents: Schema.boolean().default(false),
+    })),
+  }),
   ownerRecall: Schema.object({ enabled: Schema.boolean().default(false) }),
   ownerContinuation: Schema.object({
     enabled: Schema.boolean().default(false), automationId: Schema.string(), allowedTools: Schema.array(Schema.string()),
@@ -534,6 +564,7 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   const ownerReplyContinuation = value['ownerReplyContinuation']
   if (ownerReplyContinuation !== undefined && typeof ownerReplyContinuation !== 'boolean') fail('invalid-input', 'ownerReplyContinuation must be a boolean')
   if (ownerReplyContinuation === true && !ownerContinuation) fail('invalid-input', 'ownerReplyContinuation requires active ownerContinuation authorization')
+  const intakeLedger = normalizeIntakeLedger(value['intakeLedger'])
   return Object.freeze({
     enabled,
     mode,
@@ -552,7 +583,35 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     ...(ownerContinuation === undefined ? {} : { ownerContinuation }),
     ...(ownerReplyContinuation === true ? { ownerReplyContinuation: true as const } : {}),
     ...(ownerReportFeedback === true ? { ownerReportFeedback: true as const } : {}),
+    ...(intakeLedger === undefined ? {} : { intakeLedger }),
   })
+}
+
+/** Absent or disabled ledgers normalize to `undefined`; opt-ins default off. */
+function normalizeIntakeLedger(raw: unknown): NormalizedIntakeLedger | undefined {
+  if (raw === undefined) return undefined
+  const value = plainObject(raw, 'intakeLedger')
+  rejectUnknown(value, INTAKE_LEDGER_KEYS, 'intakeLedger')
+  const enabled = value['enabled'] ?? false
+  if (typeof enabled !== 'boolean') fail('invalid-input', 'intakeLedger.enabled must be a boolean')
+  const rawSources = value['sources'] === undefined ? {} : plainObject(value['sources'], 'intakeLedger.sources')
+  const ids = Object.keys(rawSources)
+  if (ids.length > MAX_INTAKE_SOURCES) fail('invalid-input', `intakeLedger.sources accepts at most ${MAX_INTAKE_SOURCES} sources`)
+  const sources: Record<string, WorkItemIntakeSourcePolicy> = Object.create(null) as Record<string, WorkItemIntakeSourcePolicy>
+  for (const id of ids.sort()) {
+    if (!INTAKE_SOURCE_ID.test(id)) fail('invalid-input', 'intakeLedger.sources keys must be lowercase source ids')
+    const entry = plainObject(rawSources[id], `intakeLedger.sources.${id}`)
+    rejectUnknown(entry, INTAKE_SOURCE_KEYS, `intakeLedger.sources.${id}`)
+    const policy: Record<string, boolean> = {}
+    for (const key of INTAKE_SOURCE_KEYS) {
+      const flag = entry[key] ?? false
+      if (typeof flag !== 'boolean') fail('invalid-input', `intakeLedger.sources.${id}.${key} must be a boolean`)
+      policy[key] = flag
+    }
+    sources[id] = Object.freeze(policy as unknown as WorkItemIntakeSourcePolicy)
+  }
+  if (!enabled) return undefined
+  return Object.freeze({ enabled: true as const, sources: Object.freeze(sources) })
 }
 
 function normalizeOwnerContinuation(raw: unknown, scope: WorkItemScope | null, workerId: string | null, now: number, historicalFeedback = false): NormalizedOwnerContinuation | undefined {

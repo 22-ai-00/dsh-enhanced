@@ -50,9 +50,10 @@ import type {
   WorkItemThreadOutcome,
 } from './types.ts'
 import { CLAIMABLE_STATES, OPEN_STATES, TERMINAL_REPORT_STATUSES, WorkItemError } from './types.ts'
+import type { WorkItemIntakeCandidate, WorkItemIntakeRecord, WorkItemIntakeResult, WorkItemIntakeSignals } from './intake.ts'
 
-const SCHEMA_VERSION = 9
-const WORK_ITEM_TABLE_NAMES = ['work_item', 'work_item_claim', 'work_item_continuation', 'work_item_dispatch', 'work_item_event', 'work_item_follow', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta']
+const SCHEMA_VERSION = 10
+const WORK_ITEM_TABLE_NAMES = ['work_item', 'work_item_claim', 'work_item_continuation', 'work_item_dispatch', 'work_item_event', 'work_item_follow', 'work_item_intake', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta']
 const CONTINUATION_TABLE = `CREATE TABLE work_item_continuation (
   item_id TEXT PRIMARY KEY REFERENCES work_item(id) ON DELETE RESTRICT,
   parent_item_id TEXT NOT NULL REFERENCES work_item(id) ON DELETE RESTRICT,
@@ -69,6 +70,31 @@ const CONTINUATION_TRIGGERS = [
   ['work_item_continuation_no_delete', `CREATE TRIGGER work_item_continuation_no_delete BEFORE DELETE ON work_item_continuation BEGIN SELECT RAISE(ABORT, 'continuation is append-only'); END`],
 ] as const
 const CONTINUATION_SCHEMA = `${CONTINUATION_TABLE};\n${CONTINUATION_TRIGGERS.map(([,sql]) => sql+';').join('\n')}`
+/**
+ * Deterministic intake ledger (schema 10). One append-only row per
+ * `(source, source_event_id)`: decision, reason, Host-computed strength and
+ * normalized boolean signals. No body, title or sender identity column exists;
+ * content is represented at most by a caller-computed SHA-256 digest.
+ */
+const INTAKE_TABLE = `CREATE TABLE work_item_intake (
+  source TEXT NOT NULL, source_event_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('message', 'event')),
+  decision TEXT NOT NULL CHECK(decision IN ('stored', 'duplicate', 'filtered')),
+  reason TEXT NOT NULL,
+  strength TEXT NOT NULL CHECK(strength IN ('explicit', 'inferred', 'ignore')),
+  strength_reason TEXT NOT NULL,
+  signals TEXT NOT NULL,
+  content_digest TEXT, metadata_digest TEXT NOT NULL,
+  occurred_at INTEGER NOT NULL, recorded_at INTEGER NOT NULL,
+  PRIMARY KEY(source, source_event_id)
+) STRICT, WITHOUT ROWID`
+const INTAKE_CONTENT_INDEX = `CREATE INDEX work_item_intake_content_idx
+  ON work_item_intake(source, content_digest) WHERE decision = 'stored' AND content_digest IS NOT NULL`
+const INTAKE_TRIGGERS = [
+  ['work_item_intake_no_update', `CREATE TRIGGER work_item_intake_no_update BEFORE UPDATE ON work_item_intake BEGIN SELECT RAISE(ABORT, 'intake is append-only'); END`],
+  ['work_item_intake_no_delete', `CREATE TRIGGER work_item_intake_no_delete BEFORE DELETE ON work_item_intake BEGIN SELECT RAISE(ABORT, 'intake is append-only'); END`],
+] as const
+const INTAKE_SCHEMA = `${INTAKE_TABLE};\n${INTAKE_CONTENT_INDEX};\n${INTAKE_TRIGGERS.map(([,sql]) => sql+';').join('\n')}`
 /** Only TEXT fields represented in continuationItemBasis; body/display text is excluded. */
 const CONTINUATION_ITEM_TEXT_COLUMNS = ['id','dedup_key','source_id','kind','external_id','origin_binding_id','workspace','agent_preset',
   'principal_id','principal_record_id','owner_route_id','worker_automation_id','authority_basis','work_dir'] as const
@@ -281,7 +307,8 @@ function validateSchema(database: DatabaseSync): void {
   // Reject unowned objects before migrations can fire a trigger or update a
   // foreign schema. `_` is literal here: sqliteXshadow is an application name.
   if (version !== 0 && objects.some(row => String(row['type']) !== 'index'
-    && !(String(row['type']) === 'trigger' && version === 9 && CONTINUATION_TRIGGERS.some(([name]) => name === row['name']))
+    && !(String(row['type']) === 'trigger' && version >= 9 && CONTINUATION_TRIGGERS.some(([name]) => name === row['name']))
+    && !(String(row['type']) === 'trigger' && version >= 10 && INTAKE_TRIGGERS.some(([name]) => name === row['name']))
     && (String(row['type']) !== 'table' || !WORK_ITEM_TABLE_NAMES.includes(String(row['name']))))) {
     fail('storage', 'work-item database contains an unexpected schema object')
   }
@@ -354,8 +381,9 @@ function validateSchema(database: DatabaseSync): void {
         key TEXT PRIMARY KEY, value TEXT NOT NULL
       ) STRICT, WITHOUT ROWID;
       ${CONTINUATION_SCHEMA};
-      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '9');
-      PRAGMA user_version = 9;
+      ${INTAKE_SCHEMA};
+      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '10');
+      PRAGMA user_version = 10;
       COMMIT;
     `)
     return
@@ -474,6 +502,12 @@ function validateSchema(database: DatabaseSync): void {
       UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version';
       PRAGMA user_version = 9; COMMIT;`)
   }
+  if (version >= 1 && version <= 9) {
+    // Additive only: the intake ledger starts empty and no existing row moves.
+    database.exec(`BEGIN IMMEDIATE; ${INTAKE_SCHEMA};
+      UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version';
+      PRAGMA user_version = 10; COMMIT;`)
+  }
   if (!Number.isSafeInteger(version) || version < 1 || version > SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
   const expected = JSON.stringify(WORK_ITEM_TABLE_NAMES)
   const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*' ORDER BY name").all() as Row[]).map(row => String(row['name']))
@@ -482,12 +516,34 @@ function validateSchema(database: DatabaseSync): void {
     const row = database.prepare('SELECT sql FROM sqlite_schema WHERE name=?').get(name!) as Row | undefined
     if (typeof row?.['sql'] !== 'string' || row['sql'].replace(/\s+/gu,' ').trim() !== sql!.replace(/\s+/gu,' ').trim()) fail('storage','continuation schema differs')
   }
+  for (const [name, sql] of [['work_item_intake', INTAKE_TABLE], ['work_item_intake_content_idx', INTAKE_CONTENT_INDEX], ...INTAKE_TRIGGERS]) {
+    const row = database.prepare('SELECT sql FROM sqlite_schema WHERE name = ?').get(name!) as Row | undefined
+    if (typeof row?.['sql'] !== 'string' || row['sql'].replace(/\s+/gu, ' ').trim() !== sql!.replace(/\s+/gu, ' ').trim()) fail('storage', 'intake schema differs')
+  }
   for (const [name, sql] of [['work_item_dispatch_waiting_due_idx', WAITING_RESUME_DUE_INDEX], ['work_item_claim_active_item_idx', ACTIVE_CLAIM_ITEM_INDEX]]) {
     const row = database.prepare('SELECT sql FROM sqlite_schema WHERE type = ? AND name = ?').get('index', name!) as Row | undefined
     if (typeof row?.['sql'] !== 'string' || row['sql'].replace(/\s+/gu, ' ').trim() !== sql!.replace(/\s+/gu, ' ').trim()) {
       fail('storage', 'work-item scheduler indexes do not match the expected shape')
     }
   }
+}
+
+function intakeFromRow(row: Row): WorkItemIntakeRecord {
+  const signals = JSON.parse(String(row['signals'])) as WorkItemIntakeSignals
+  return Object.freeze({
+    source: String(row['source']),
+    sourceEventId: String(row['source_event_id']),
+    kind: String(row['kind']) as WorkItemIntakeRecord['kind'],
+    decision: String(row['decision']) as WorkItemIntakeRecord['decision'],
+    reason: String(row['reason']) as WorkItemIntakeRecord['reason'],
+    strength: String(row['strength']) as WorkItemIntakeRecord['strength'],
+    strengthReason: String(row['strength_reason']) as WorkItemIntakeRecord['strengthReason'],
+    signals: Object.freeze({ ...signals }),
+    contentDigest: optString(row['content_digest']),
+    metadataDigest: String(row['metadata_digest']),
+    occurredAt: Number(row['occurred_at']),
+    recordedAt: Number(row['recorded_at']),
+  })
 }
 
 function optString(value: unknown): string | null {
@@ -872,6 +928,51 @@ export class WorkItemStore {
       authorityLegacy: this.countAuthorityLegacy(),
       authorityParked: this.countAuthorityParked(),
     })
+  }
+
+  /**
+   * Record one classified intake candidate exactly once.
+   *
+   * A replay of the same `(source, sourceEventId)` returns the original row
+   * unchanged, with no second write. A new event whose content digest matches
+   * an earlier `stored` row of the same source is recorded as `duplicate`.
+   * This method writes only the intake table; it admits and dispatches nothing.
+   */
+  recordIntake(candidate: WorkItemIntakeCandidate): WorkItemIntakeResult {
+    if (this.#closed) fail('storage', 'work-item store is closed')
+    return this.#transaction(() => {
+      const existing = this.getIntake(candidate.source, candidate.sourceEventId)
+      if (existing !== undefined) {
+        return Object.freeze({ record: existing, replayed: true,
+          ...(existing.metadataDigest === candidate.metadataDigest ? {} : { metadataChanged: true as const }) })
+      }
+      let decision: WorkItemIntakeRecord['decision'] = candidate.decision
+      let reason: WorkItemIntakeRecord['reason'] = candidate.reason
+      if (decision === 'stored' && candidate.contentDigest !== null) {
+        const prior = this.#statement(`SELECT 1 AS hit FROM work_item_intake
+          WHERE source = ? AND content_digest = ? AND decision = 'stored' LIMIT 1`).get(candidate.source, candidate.contentDigest) as Row | undefined
+        if (prior !== undefined) [decision, reason] = ['duplicate', 'duplicate-content']
+      }
+      this.#statement(`INSERT INTO work_item_intake(source, source_event_id, kind, decision, reason, strength, strength_reason,
+          signals, content_digest, metadata_digest, occurred_at, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(candidate.source, candidate.sourceEventId, candidate.kind, decision, reason, candidate.strength, candidate.strengthReason,
+          JSON.stringify(candidate.signals), candidate.contentDigest, candidate.metadataDigest, candidate.occurredAt, this.#now())
+      return Object.freeze({ record: this.getIntake(candidate.source, candidate.sourceEventId)!, replayed: false })
+    })
+  }
+
+  getIntake(source: string, sourceEventId: string): WorkItemIntakeRecord | undefined {
+    const row = this.#statement('SELECT * FROM work_item_intake WHERE source = ? AND source_event_id = ?').get(source, sourceEventId) as Row | undefined
+    return row === undefined ? undefined : intakeFromRow(row)
+  }
+
+  /** Bounded decision counts for health; reads only the intake table. */
+  countIntake(): Readonly<Record<WorkItemIntakeRecord['decision'], number>> {
+    const counts = { stored: 0, duplicate: 0, filtered: 0 }
+    for (const row of this.#statement('SELECT decision, COUNT(*) AS count FROM work_item_intake GROUP BY decision').all() as Row[]) {
+      counts[String(row['decision']) as keyof typeof counts] = Number(row['count'])
+    }
+    return Object.freeze(counts)
   }
 
   /** SQL owner filtering precedes keyset pagination; no recovery or writes. */

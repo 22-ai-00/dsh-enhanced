@@ -233,7 +233,7 @@ worker preset 需要与 definition 的 `agentPreset` 一致；`subject.id` 写�
 
 `work_item_claim` 的返回值里带一个**只读、有界**的 `resume` 对象，让新 occurrence 在没有上一次模型记忆的情况下继续：`resumed` / `priorAttempts`、最近 5 次**先前** attempt（attempt 号、可得的 run id、开始时间、结束方式 `expired` / `reclaimed` / `attempt-exhausted` / `reported` / `settled`、以及终态报告的状态）、最近 5 条先前报告（revision、status、summary、`summaryTruncated`、记录时间；按时间从旧到新排列）与真实的 `reportsTotal`、最近一条已结算结果（revision、`settledBy`、execution/objective/evidence 状态、结算时间），以及 `truncated` 表示上游历史是否被上述上限截断。
 
-- 简报只从本插件的 append-only 本地账本派生：`work_item_event` 与 `work_item_report` 按 `(item_id, …)` 主键前缀做有界扫描（`LIMIT`），不引入新表或 timer，也不调用模型或 peer。当前 schema 为 8，新增内容仅服务于下述有界续办索引。
+- 简报只从本插件的 append-only 本地账本派生：`work_item_event` 与 `work_item_report` 按 `(item_id, …)` 主键前缀做有界扫描（`LIMIT`），不引入新表或 timer，也不调用模型或 peer。该功能引入时 schema 为 8，新增内容仅服务于下述有界续办索引；当前 schema 为 10。
 - 报告 summary 在简报里最多保留 512 UTF-8 字节，超长按 UTF-8 边界截断并置 `summaryTruncated`；当前 attempt 自身不计入 `attempts`/`priorAttempts`。
 - 简报是派生展示，不改变 claim/report/结算语义；它不含数据库路径、delivery id 或 evidence blob。首次认领与旧账本行可能得到空简报（`resumed: false`），重放同一 claim 会重新计算并返回一致的简报，不会追加新的 claim/attempt/事件。
 
@@ -433,7 +433,33 @@ Host 批量来源接口 `withOwnerWorkItemFeedbackTargetsFence(capabilities, cal
 
 这条历史读取与新执行授权分离。显式开启反馈后，冷启动可保留已经过期的 scope、diagnosis、continuation 原期限来读取已有结果；不会延长期限、重置预算、重新 reconcile worker 或放行旧执行。当前 Delivery owner route 与反馈 Policy 仍须有效。两个入口同开时，当前执行资格独立控制普通续办；过期后的明确评价仍可记录，普通回复不会因此取得过期执行权限。既有 v1/v2 计划和激活摘要保持兼容。
 
-WorkItems 仍使用 schema 9；Delivery schema 30 保存独占评价意图，Evaluation schema 13 保存新的 canonical 工作项主人结果。原有 settlement 行继续作为 objective unknown 的审计材料，不回填为主人评价。备份与恢复须一致保留相关账本；这一切片不自动触发 Growth、创建/采用候选或调用模型。
+这一切片引入时 WorkItems 使用 schema 9（现为 schema 10，见下节 intake 账本）；Delivery schema 30 保存独占评价意图，Evaluation schema 13 保存新的 canonical 工作项主人结果。原有 settlement 行继续作为 objective unknown 的审计材料，不回填为主人评价。备份与恢复须一致保留相关账本；这一切片不自动触发 Growth、创建/采用候选或调用模型。
+
+## 确定性 intake 账本（显式启用）
+
+WP20 第 1 阶段：Host 为每条入站条目按 `(source, sourceEventId)` 记录一次确定性决策，供后续评估切片使用。它只是审计账本，不准入工作项、不派发、不通知，也不调用模型。
+
+```ts
+const { record, replayed } = ctx.assistantWorkItems.recordIntake({
+  source: 'lark-channel',          // 小写来源 ID
+  sourceEventId: 'om_xxx',         // 来源内稳定事件 ID（≤256 字节）
+  kind: 'message',                 // 'message' | 'event'
+  senderAllowlisted: true,
+  addressed: false,                // @提及、私聊或命令
+  threadFollowUp: false,           // 已跟踪工作线程上的跟进
+  senderIsBot: false,
+  groupMessage: true,              // 仅 message
+  // subscribed: false,            // 仅 event，默认 true
+  contentDigest: '<sha256 hex>',   // 可选，Host 自行计算
+  occurredAt: Date.now(),
+})
+```
+
+- 强度：白名单且寄址，或已跟踪线程的跟进 → `explicit`；白名单未寄址 → `inferred`；其他 → `ignore`。bot 发送者最高 `inferred`（原因码 `bot-capped`）。
+- 决策：`ignore` 为 `filtered`（`strength-ignore`）；未寄址且非跟进的群消息为 `filtered`（`unaddressed-group-disabled`），未订阅事件为 `filtered`（`unsubscribed-event-disabled`），除非 owner 在 `intakeLedger.sources.<source>` 中开启对应项；同一来源中内容摘要已有 `stored` 行的新事件为 `duplicate`（`duplicate-content`）；其余为 `stored`，只记元数据。
+- 重放：同一 `(source, sourceEventId)` 返回原记录与 `replayed: true`，不写第二行，重启后同样成立；元数据不同时额外返回 `metadataChanged: true`，原决策不变。
+- 数据：输入字段封闭，`text`/`body` 等任何额外字段会被拒绝；行只含布尔信号、原因码、强度和摘要，SQL 触发器禁止改写或删除。
+- 要求 `enabled: true` 且 `intakeLedger.enabled: true`，否则返回 `disabled`。当前没有入站插件调用该接口。
 
 ## 配置
 
@@ -444,6 +470,9 @@ WorkItems 仍使用 schema 9；Delivery schema 30 保存独占评价意图，Eva
 | `ownerContinuation` | 关闭 | 单独启用、独立 automation ID、显式工具范围与有限执行预算；见主人续办旧任务 |
 | `ownerReplyContinuation` | `false` | 将已授权主人的真实报告回复持久转交续办；要求已启用 ownerContinuation 和独立外部 Policy 授权 |
 | `ownerReportFeedback` | `false` | 认证报告结果反馈；要求 ownerContinuation，独立 `feedback-work-items` 授权，不要求回复续办，不取得新执行额度 |
+| `intakeLedger.enabled` | `false` | 显式启用确定性 intake 账本；仅 Host 调用 `recordIntake`，observe 可用，无外部副作用 |
+| `intakeLedger.sources.<id>.unaddressedGroupMessages` | `false` | 该来源未寄址群消息以元数据进入账本（否则 filtered）；最多 32 个来源 |
+| `intakeLedger.sources.<id>.unsubscribedEvents` | `false` | 该来源未订阅事件以元数据进入账本（否则 filtered） |
 | `ownerRecall.enabled` | `false` | 显式启用当前主人前台任务查询；要求 enabled active、完整 scope、worker automation 与独立 `inspect-work-items` 授权 |
 | `databasePath` | `$DSH_HOME/assistant-work-items/state.sqlite` | 私有账本绝对路径 |
 | `workRoot` | `$DSH_HOME/assistant-work-items/work` | 每项 scratch/artifact 根目录绝对路径 |
