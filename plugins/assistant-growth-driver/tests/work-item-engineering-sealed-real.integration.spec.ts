@@ -3,7 +3,7 @@
 // Real model calls happen only for Growth (author + creation verifier); every other turn is scripted.
 // Never runs in root checks: requires DSH_SEALED_REAL_LIVE=1, linux and a prepared engineering resource.
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -101,7 +101,8 @@ describe.skipIf(!live)('sealed Docker-era tool re-adopts under a new plan with a
     const calls: Array<{ provider: string; model: string; maxTokens?: number; toolNames: string[]; requestDigest: string; at: number }> = []
     const f = await workItemEngineeringFixture({ replyEnabled: true,
       sealedSeed: async input => sealDockerHistory(input as typeof input & { capabilities: CreationCapabilityConfig }, seal),
-      realGrowthRoute: { provider: PROVIDER, model: MODEL, maxOutputTokens: 4096 } })
+      // 8192 is the fixture's ordinary author cap: attempt 1 at 4096 ran out while writing the source file.
+      realGrowthRoute: { provider: PROVIDER, model: MODEL, maxOutputTokens: 8192 } })
     const { route, config, secret } = await realRoute(f.workspace)
     if (!secret) throw new Error('real route credential reference is unavailable in the process environment')
     const installed = createRequire(dshPackage())
@@ -147,6 +148,12 @@ describe.skipIf(!live)('sealed Docker-era tool re-adopts under a new plan with a
         await f.ctx.assistantAutomations.tick(); await f.ctx.assistantAutomations.whenIdle()
         const jobs = query(join(f.root, 'control-plane/control.sqlite'), 'SELECT id FROM source_jobs')
         if (jobs.length > 1) throw new Error('more than one real source job')
+        if (jobs.length === 0 && existsSync(join(f.root, 'engineering-usage.sqlite'))) {
+          // A Growth run that settles without submitting source can never adopt; stop instead of waiting.
+          const settled = query(join(f.root, 'engineering-usage.sqlite'),
+            "SELECT state, reason FROM usage_jobs WHERE state IN ('reviewed','failed','unknown','superseded')")
+          if (settled.length) throw new Error('real Growth run settled without a source job: ' + String(settled[0]!.reason))
+        }
         if (jobs.length === 1) {
           const job = f.ctx.pluginControlPlane.inspectSourceJob({ id: String(jobs[0]!.id), owner: caller })
           if (['failed', 'unknown'].includes(job.status)) throw new Error('real source job did not prepare: ' + job.status)
