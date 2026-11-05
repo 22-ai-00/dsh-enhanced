@@ -5,7 +5,10 @@ import { controlPlaneDigest } from './store.js'
 import type { CreationCapabilityAttributionArm, CreationCapabilityAttributionDelta, CreationCapabilityAttributionStratum,
   CreationCapabilityAvailabilityAttribution, CreationCapabilityCallEvidence, CreationCapabilityOrdinaryUseLatency, CreationCapabilityOrdinaryUseMeasures,
   CreationCapabilityOrdinaryUseModel, CreationCapabilityOrdinaryUseReport, CreationCapabilityOrdinaryUseStratum,
-  CreationCapabilityOwner, CreationCapabilityRecord, CreationCapabilityTaskAssociation } from './creation-capability-types.js'
+  CreationCapabilityOrdinaryUseQuality, CreationCapabilityOrdinaryUseTrend, CreationCapabilityOwner, CreationCapabilityRecord,
+  CreationCapabilityTaskAssociation, CreationCapabilityTrendCell, CreationCapabilityTrendDifferenceInDifferences,
+  CreationCapabilityTrendFlag, CreationCapabilityTrendParallelCheck, CreationCapabilityTrendStratum,
+  CreationCapabilityTrendWindow } from './creation-capability-types.js'
 
 type Evaluation = Pick<AssistantEvaluationService, 'canonicalHostScope' | 'getTrustedForegroundLearningProjection'
   | 'withTrustedCanonicalTaskWriterFence'>
@@ -295,6 +298,25 @@ interface AttributionRow {
 
 type Excluded = CreationCapabilityAvailabilityAttribution['population']['excluded']
 
+/** Every current canonical head of the scope under one unchanged scope watermark; throws when it moves or overflows. */
+function scanScope(evaluation: AttributionEvaluation, scope: ReturnType<Evaluation['canonicalHostScope']>,
+  maxScannedHeads: number): { heads: TrustedTaskLearningProjectionReceipt[]; scopeWatermark: number } {
+  const heads: TrustedTaskLearningProjectionReceipt[] = []
+  let after: { scopeKey: string; watermark: number } | undefined
+  let scopeWatermark: number | undefined
+  for (;;) {
+    const page = evaluation.listTrustedTaskLearningProjections({ scope, ...(after ? { after } : {}), limit: 100 })
+    if (scopeWatermark !== undefined && page.scopeWatermark !== scopeWatermark) {
+      throw new Error('created capability attribution scope changed during scan')
+    }
+    scopeWatermark = page.scopeWatermark
+    heads.push(...page.items.map(item => item.receipt))
+    if (heads.length > maxScannedHeads) throw new Error('created capability attribution scope is too large')
+    if (!page.hasMore) return { heads, scopeWatermark: page.scopeWatermark }
+    after = page.nextCursor
+  }
+}
+
 function arm(rows: readonly AttributionRow[], minimumSamples: number): CreationCapabilityAttributionArm {
   const achieved = rows.filter(row => row.status === 'achieved').length
   return { quality: { status: rows.length < minimumSamples ? 'insufficient' : 'measured', samples: rows.length,
@@ -339,22 +361,7 @@ CreationCapabilityAvailabilityAttribution | undefined {
   const grouped = eligibleCalls(input, receipt, receiptDigest, now)
   if (!grouped) return undefined
   const scope = evaluation.canonicalHostScope({ workspace: owner.workspace, preset: owner.agentPreset })
-  const scan = (): { heads: TrustedTaskLearningProjectionReceipt[]; scopeWatermark: number } => {
-    const heads: TrustedTaskLearningProjectionReceipt[] = []
-    let after: { scopeKey: string; watermark: number } | undefined
-    let scopeWatermark: number | undefined
-    for (;;) {
-      const page = evaluation.listTrustedTaskLearningProjections({ scope, ...(after ? { after } : {}), limit: 100 })
-      if (scopeWatermark !== undefined && page.scopeWatermark !== scopeWatermark) {
-        throw new Error('created capability attribution scope changed during scan')
-      }
-      scopeWatermark = page.scopeWatermark
-      heads.push(...page.items.map(item => item.receipt))
-      if (heads.length > maxScannedHeads) throw new Error('created capability attribution scope is too large')
-      if (!page.hasMore) return { heads, scopeWatermark: page.scopeWatermark }
-      after = page.nextCursor
-    }
-  }
+  const scan = () => scanScope(evaluation, scope, maxScannedHeads)
   const read = (heads: readonly TrustedTaskLearningProjectionReceipt[]) => {
     const original = input.readSourceCurrent()
     if (original.projection.subjectKind !== 'foreground-turn'
@@ -434,4 +441,211 @@ CreationCapabilityAvailabilityAttribution | undefined {
     exposure: { afterTasks: afterRows.length, exposedTasks: afterRows.filter(row => row.exposed).length },
     concurrentAdoptions: { status: concurrent === 0 ? 'none' : 'flagged', count: concurrent },
     strata, direction, regressions: { status: 'unmeasured' }, cost: { status: 'unmeasured' } })
+}
+
+export const TREND_DEFAULT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+export const TREND_WINDOW_MS_BOUNDS = { min: 60 * 60 * 1000, max: 90 * 24 * 60 * 60 * 1000 } as const
+export const TREND_DEFAULT_PRE_WINDOWS = 4
+export const TREND_DEFAULT_MAX_POST_WINDOWS = 12
+export const TREND_WINDOW_COUNT_MAX = 52
+export const TREND_DEFAULT_PARALLEL_TREND_THRESHOLD = 0.2
+
+/** Fixed, machine-readable statement of what the estimate assumes; it is never a causal claim. */
+export const TREND_ASSUMPTIONS: readonly string[] = Object.freeze([
+  'parallel-trends: without this adoption the treated and control session cohorts would change achieved rate equally',
+  'session-cohort: a session is treated when a counted after-window task in it has an exact call of this adoption; membership is chosen after adoption, so selection on post-adoption use is not removed',
+  'no-spillover: control sessions are assumed unaffected although the capability is available to them',
+  'independent-tasks: the 95% interval is an Agresti-Caffo adjusted Wald interval over independent task outcomes',
+])
+
+export interface CreationCapabilityTrendInput extends CreationCapabilityAttributionInput {
+  /** Window length, default 7 days, bounded to [1 hour, 90 days]. */
+  windowMs?: number
+  /** Windows before adoption, default 4, bounded to [2, 52]. */
+  preWindows?: number
+  /** Cap on windows after adoption, default 12, bounded to [1, 52]; later tasks are outside every window. */
+  maxPostWindows?: number
+  /** Absolute pre-adoption gap drift above which the parallel-trend assumption is flagged, in (0, 1]. */
+  parallelTrendThreshold?: number
+}
+
+interface TrendRow {
+  index: number
+  inboxId: string
+  sessionId: string
+  model: CreationCapabilityOrdinaryUseModel
+  status: 'achieved' | 'not-achieved'
+  projection: { version: number; digest: string }
+  outcomeId: string
+  sourceDigest: string
+  calls: number
+}
+
+const quality = (rows: readonly TrendRow[], minimumSamples: number): CreationCapabilityOrdinaryUseQuality => {
+  const achieved = rows.filter(row => row.status === 'achieved').length
+  return { status: rows.length < minimumSamples ? 'insufficient' : 'measured', samples: rows.length,
+    achieved, notAchieved: rows.length - achieved }
+}
+
+const rate = (cell: CreationCapabilityOrdinaryUseQuality) => cell.achieved / cell.samples
+
+function differenceInDifferences(cells: readonly CreationCapabilityOrdinaryUseQuality[]):
+CreationCapabilityTrendDifferenceInDifferences {
+  if (cells.some(cell => cell.status !== 'measured')) return { status: 'insufficient' }
+  const [t0, t1, c0, c1] = cells as [CreationCapabilityOrdinaryUseQuality, CreationCapabilityOrdinaryUseQuality,
+    CreationCapabilityOrdinaryUseQuality, CreationCapabilityOrdinaryUseQuality]
+  const estimate = (rate(t1) - rate(t0)) - (rate(c1) - rate(c0))
+  // Agresti-Caffo: one added success and failure per cell keeps the variance positive at 0% and 100%.
+  const standardError = Math.sqrt(cells.reduce((sum, cell) => {
+    const p = (cell.achieved + 1) / (cell.samples + 2)
+    return sum + p * (1 - p) / (cell.samples + 2)
+  }, 0))
+  return { status: 'estimated', estimate, standardError, interval95: {
+    low: Math.max(-2, estimate - 1.96 * standardError), high: Math.min(2, estimate + 1.96 * standardError) } }
+}
+
+function parallelTrend(cells: readonly CreationCapabilityTrendCell[], threshold: number): CreationCapabilityTrendParallelCheck {
+  const tested = cells.filter(cell => cell.index < 0 && cell.treated.status === 'measured' && cell.control.status === 'measured')
+  if (tested.length < 2) return { status: 'untestable', testedWindows: tested.length }
+  const gap = (cell: CreationCapabilityTrendCell) => rate(cell.treated) - rate(cell.control)
+  const gapChange = gap(tested[tested.length - 1]!) - gap(tested[0]!)
+  return { status: Math.abs(gapChange) > threshold ? 'parallel-trend-suspect' : 'not-flagged',
+    testedWindows: tested.length, gapChange }
+}
+
+function boundedInteger(name: string, value: number, min: number, max: number): number {
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new TypeError(`created capability ordinary-use trend ${name} must be an integer in [${min}, ${max}]`)
+  }
+  return value
+}
+
+/**
+ * Longitudinal ordinary-use series of one adoption in fixed windows around adoption, by frozen task model, with a
+ * same-scope session-cohort control and a pooled difference-in-differences estimate. Every certified current owner
+ * foreground task counts once by its latest revision (corrections replace, withdrawals retract). Read once, then
+ * reread under an unchanged Evaluation scope watermark. Undefined for a missing receipt, an oversized scope, a changed
+ * source, scope or fence, or a throw. Pure read; observational, never causal.
+ */
+export function inspectCreationCapabilityOrdinaryUseTrend(input: CreationCapabilityTrendInput):
+CreationCapabilityOrdinaryUseTrend | undefined {
+  const minimumSamples = boundedInteger('minimumSamples', input.minimumSamples ?? DEFAULT_MINIMUM_SAMPLES, 1, Number.MAX_SAFE_INTEGER)
+  const maxScannedHeads = boundedInteger('maxScannedHeads', input.maxScannedHeads ?? DEFAULT_MAX_SCANNED_HEADS, 1, Number.MAX_SAFE_INTEGER)
+  const windowMs = boundedInteger('windowMs', input.windowMs ?? TREND_DEFAULT_WINDOW_MS,
+    TREND_WINDOW_MS_BOUNDS.min, TREND_WINDOW_MS_BOUNDS.max)
+  const preWindows = boundedInteger('preWindows', input.preWindows ?? TREND_DEFAULT_PRE_WINDOWS, 2, TREND_WINDOW_COUNT_MAX)
+  const maxPostWindows = boundedInteger('maxPostWindows', input.maxPostWindows ?? TREND_DEFAULT_MAX_POST_WINDOWS,
+    1, TREND_WINDOW_COUNT_MAX)
+  const threshold = input.parallelTrendThreshold ?? TREND_DEFAULT_PARALLEL_TREND_THRESHOLD
+  if (!Number.isFinite(threshold) || threshold <= 0 || threshold > 1) {
+    throw new TypeError('created capability ordinary-use trend parallelTrendThreshold must be in (0, 1]')
+  }
+  const { record, owner, evaluation } = input
+  const receipt = record.receipt
+  if (!receipt || receipt.planId !== record.planId || input.triggerInboxId.length === 0) return undefined
+  const now = input.now ?? Date.now()
+  const receiptDigest = controlPlaneDigest(receipt)
+  const observedUntil = Math.max(receipt.adoptedAt, Math.min(now, receipt.expiresAt))
+  const postWindows = Math.min(maxPostWindows, Math.ceil((observedUntil - receipt.adoptedAt) / windowMs))
+  const windows: CreationCapabilityTrendWindow[] = []
+  for (let index = -preWindows; index < postWindows; index++) {
+    const endInclusive = receipt.adoptedAt + (index + 1) * windowMs
+    windows.push({ index, startExclusive: endInclusive - windowMs, endInclusive, complete: endInclusive <= observedUntil || index < 0 })
+  }
+  const first = windows[0]!.startExclusive
+  const last = windows[windows.length - 1]!.endInclusive
+  // A dispatch exactly at adoption precedes it, matching the strict call admission rule.
+  const windowOf = (at: number): number | undefined => at <= first || at > last ? undefined
+    : Math.ceil((at - receipt.adoptedAt) / windowMs) - 1
+  const grouped = eligibleCalls(input, receipt, receiptDigest, now)
+  if (!grouped) return undefined
+  const scope = evaluation.canonicalHostScope({ workspace: owner.workspace, preset: owner.agentPreset })
+  const read = (heads: readonly TrustedTaskLearningProjectionReceipt[]) => {
+    const original = input.readSourceCurrent()
+    if (original.projection.subjectKind !== 'foreground-turn'
+      || original.projection.subjectRef !== input.triggerInboxId || original.projection.disposition !== 'upsert') {
+      throw new Error('created capability original task is no longer current')
+    }
+    const excluded: Excluded = { nonForeground: 0, trigger: 0, retracted: 0, unverified: 0, outsideWindow: 0 }
+    const rows: TrendRow[] = []
+    for (const head of heads) {
+      const inboxId = head.projection.subjectRef
+      if (head.projection.subjectKind !== 'foreground-turn') { excluded.nonForeground++; continue }
+      if (inboxId === input.triggerInboxId) { excluded.trigger++; continue }
+      if (head.projection.disposition !== 'upsert') { excluded.retracted++; continue }
+      const source = certifiedTask(input, head, inboxId)
+      const originalSource = source && originalTaskSource(input, source, inboxId)
+      const dispatchedAt = (originalSource?.execution as { dispatchedAt?: number } | undefined)?.dispatchedAt
+      if (!source || !originalSource || !Number.isSafeInteger(dispatchedAt)) { excluded.unverified++; continue }
+      const index = windowOf(dispatchedAt!)
+      if (index === undefined) { excluded.outsideWindow++; continue }
+      const group = grouped.get(inboxId)
+      const calls = index >= 0 && group && group.sessionId === originalSource.binding.sessionId
+        ? group.calls.filter(call => sameBinding(call, originalSource.binding)).length : 0
+      rows.push({ index, inboxId, sessionId: originalSource.binding.sessionId, model: taskModel(source.source),
+        status: source.canonical.objective!.status as 'achieved' | 'not-achieved',
+        projection: { version: head.projection.version, digest: head.projection.digest },
+        outcomeId: head.triggerOutcomeId,
+        sourceDigest: controlPlaneDigest({ protocol: source.protocol, source: source.source,
+          judgement: source.judgement, ownerRevision: source.ownerRevision }), calls })
+    }
+    rows.sort((a, b) => a.inboxId < b.inboxId ? -1 : a.inboxId > b.inboxId ? 1 : 0)
+    return { original, rows, excluded }
+  }
+  let result: { heads: TrustedTaskLearningProjectionReceipt[]; scopeWatermark: number; read: ReturnType<typeof read> }
+  try {
+    const scanned = scanScope(evaluation, scope, maxScannedHeads)
+    const before = read(scanned.heads)
+    const fenced = evaluation.withTrustedCanonicalScopeWriterFence({ scope, scopeWatermark: scanned.scopeWatermark }, () => {
+      const during = read(scanned.heads)
+      if (!same(during, before)) throw new Error('created capability ordinary-use trend source changed')
+      return during
+    })
+    if (!fenced.matched) return undefined
+    result = { ...scanned, read: fenced.value }
+  } catch { return undefined }
+  const { rows, excluded } = result.read
+  const treatedSessions = new Set(rows.filter(row => row.calls > 0).map(row => row.sessionId))
+  const controlSessions = new Set(rows.filter(row => !treatedSessions.has(row.sessionId)).map(row => row.sessionId))
+  const buckets = new Map<string, { model: CreationCapabilityOrdinaryUseModel; rows: TrendRow[] }>()
+  for (const row of rows) {
+    const key = modelKey(row.model)
+    const bucket = buckets.get(key)
+    if (bucket) bucket.rows.push(row)
+    else buckets.set(key, { model: row.model, rows: [row] })
+  }
+  const strata: CreationCapabilityTrendStratum[] = [...buckets].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([, bucket]) => {
+      const treated = bucket.rows.filter(row => treatedSessions.has(row.sessionId))
+      const control = bucket.rows.filter(row => !treatedSessions.has(row.sessionId))
+      const cells = windows.map(({ index }): CreationCapabilityTrendCell => {
+        const inWindow = bucket.rows.filter(row => row.index === index)
+        return { index, treated: quality(treated.filter(row => row.index === index), minimumSamples),
+          control: quality(control.filter(row => row.index === index), minimumSamples),
+          calls: inWindow.reduce((sum, row) => sum + row.calls, 0),
+          exposedTasks: inWindow.filter(row => row.calls > 0).length }
+      })
+      const pooled = (rows: readonly TrendRow[], after: boolean) =>
+        quality(rows.filter(row => (row.index >= 0) === after), minimumSamples)
+      return { model: bucket.model, cells,
+        differenceInDifferences: differenceInDifferences([pooled(treated, false), pooled(treated, true),
+          pooled(control, false), pooled(control, true)]),
+        parallelTrend: parallelTrend(cells, threshold) }
+    })
+  const concurrent = (input.otherAdoptedAt ?? []).filter(at => Number.isFinite(at) && at > first && at <= last).length
+  const flags: CreationCapabilityTrendFlag[] = []
+  if (strata.some(stratum => stratum.parallelTrend.status === 'parallel-trend-suspect')) flags.push('parallel-trend-suspect')
+  if (controlSessions.size === 0) flags.push('no-control-cohort')
+  if (concurrent > 0) flags.push('concurrent-adoptions')
+  if (windows.some(window => !window.complete)) flags.push('partial-window')
+  return deepFreeze({ protocol: 'dsh-created-capability-ordinary-use-trend/v1', causal: false,
+    design: 'session-cohort-difference-in-differences-model-stratified', planId: record.planId, receiptDigest,
+    artifactSha256: receipt.artifactSha256, schemaDigest: receipt.schemaDigest, adoptionStatus: record.status,
+    withinSignedUseWindow: now >= receipt.adoptedAt && now < receipt.expiresAt, minimumSamples, windowMs,
+    parallelTrendThreshold: threshold, scopeWatermark: result.scopeWatermark,
+    rowsDigest: controlPlaneDigest(rows.map(({ sessionId: _sessionId, ...row }) => row)), windows,
+    population: { scanned: result.heads.length, counted: rows.length, excluded },
+    cohorts: { treatedSessions: treatedSessions.size, controlSessions: controlSessions.size },
+    concurrentAdoptions: { status: concurrent === 0 ? 'none' : 'flagged', count: concurrent },
+    strata, flags, assumptions: [...TREND_ASSUMPTIONS], regressions: { status: 'unmeasured' }, cost: { status: 'unmeasured' } })
 }

@@ -288,6 +288,82 @@ export interface CreationCapabilityAvailabilityAttribution {
   cost: { status: 'unmeasured' }
 }
 
+/** One fixed-length window by task dispatch time, `(startExclusive, endInclusive]`; negative indices precede adoption. */
+export interface CreationCapabilityTrendWindow {
+  index: number
+  startExclusive: number
+  endInclusive: number
+  /** False only for the latest after window when it extends past `min(now, expiresAt)`. */
+  complete: boolean
+}
+
+export interface CreationCapabilityTrendCell {
+  index: number
+  /** Current latest-revision judgements of tasks in sessions that used this adoption in a counted after window. */
+  treated: CreationCapabilityOrdinaryUseQuality
+  /** Same-scope certified foreground tasks in sessions that never used it in a counted after window. */
+  control: CreationCapabilityOrdinaryUseQuality
+  /** Exact calls of this adoption on counted tasks of the window; zero before adoption by construction. */
+  calls: number
+  exposedTasks: number
+}
+
+/**
+ * Pooled after-minus-before treated change minus the same control change. The interval is an Agresti-Caffo adjusted
+ * Wald 95% interval assuming independent tasks; insufficient when any of the four pooled cells is below minimumSamples.
+ */
+export type CreationCapabilityTrendDifferenceInDifferences =
+  | { status: 'estimated'; estimate: number; standardError: number; interval95: { low: number; high: number } }
+  | { status: 'insufficient' }
+
+/** Drift of the treated-minus-control gap between the earliest and latest pre-adoption windows measured in both cohorts. */
+export type CreationCapabilityTrendParallelCheck =
+  | { status: 'not-flagged' | 'parallel-trend-suspect'; testedWindows: number; gapChange: number }
+  | { status: 'untestable'; testedWindows: number }
+
+export interface CreationCapabilityTrendStratum {
+  model: CreationCapabilityOrdinaryUseModel
+  cells: readonly CreationCapabilityTrendCell[]
+  differenceInDifferences: CreationCapabilityTrendDifferenceInDifferences
+  parallelTrend: CreationCapabilityTrendParallelCheck
+}
+
+export type CreationCapabilityTrendFlag = 'parallel-trend-suspect' | 'no-control-cohort' | 'concurrent-adoptions' | 'partial-window'
+
+/**
+ * Longitudinal ordinary-use series of one adoption with a same-scope session-cohort control and a
+ * difference-in-differences estimate per frozen task model. Observational; never adoption or promotion evidence.
+ */
+export interface CreationCapabilityOrdinaryUseTrend {
+  protocol: 'dsh-created-capability-ordinary-use-trend/v1'
+  causal: false
+  design: 'session-cohort-difference-in-differences-model-stratified'
+  planId: string
+  receiptDigest: string
+  artifactSha256: string
+  schemaDigest: string
+  adoptionStatus: CreationCapabilityRecord['status']
+  withinSignedUseWindow: boolean
+  minimumSamples: number
+  windowMs: number
+  parallelTrendThreshold: number
+  scopeWatermark: number
+  rowsDigest: string
+  windows: readonly CreationCapabilityTrendWindow[]
+  population: {
+    scanned: number
+    counted: number
+    excluded: { nonForeground: number; trigger: number; retracted: number; unverified: number; outsideWindow: number }
+  }
+  cohorts: { treatedSessions: number; controlSessions: number }
+  concurrentAdoptions: { status: 'none' | 'flagged'; count: number }
+  strata: readonly CreationCapabilityTrendStratum[]
+  flags: readonly CreationCapabilityTrendFlag[]
+  assumptions: readonly string[]
+  regressions: { status: 'unmeasured' }
+  cost: { status: 'unmeasured' }
+}
+
 export interface CreationCapabilityCall {
   key: string
   status: 'claimed' | 'completed' | 'unknown'

@@ -15,7 +15,8 @@ import type { DeliveryStore } from '../../assistant-delivery/lib/store.js'
 import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { afterEach, expect, test, vi } from 'vitest'
-import { inspectCreationCapabilityAvailabilityAttribution, inspectCreationCapabilityTaskAssociations } from '../src/creation-capability-feedback.ts'
+import { inspectCreationCapabilityAvailabilityAttribution, inspectCreationCapabilityOrdinaryUseTrend,
+  inspectCreationCapabilityTaskAssociations } from '../src/creation-capability-feedback.ts'
 import type { CreationCapabilityCallEvidence, CreationCapabilityRecord } from '../src/creation-capability-types.ts'
 import { controlPlaneDigest } from '../src/store.ts'
 
@@ -220,5 +221,40 @@ test('attributes real certified owner tasks before and after adoption, following
   const withdrawn = read()!
   expect(withdrawn).toMatchObject({ direction: 'unchanged', population: { counted: 2, excluded: { retracted: 1 } },
     exposure: { afterTasks: 1, exposedTasks: 1 } })
+  expect(withdrawn.scopeWatermark).toBeGreaterThan(first.scopeWatermark)
+})
+
+test('trends real certified owner tasks in fixed windows, following correction and withdrawal under the scope fence', async () => {
+  const f = await fixture()
+  const original = await f.task('trend-original')
+  await f.feedback(original, 'trend-original-feedback', 'not-achieved')
+  const before = await f.task('trend-before')
+  await f.feedback(before, 'trend-before-feedback', 'not-achieved')
+  await new Promise(resolve => setTimeout(resolve, 5))
+  const adoptedAt = Date.now()
+  await new Promise(resolve => setTimeout(resolve, 5))
+  const receipt = { ...f.record.receipt!, adoptedAt }
+  const record = { ...f.record, receipt }
+  const exposed = await f.task('trend-exposed')
+  await f.feedback(exposed, 'trend-exposed-feedback', 'achieved')
+  const calls = [{ ...exposed.call, receiptDigest: controlPlaneDigest(receipt) }]
+  const fence = vi.spyOn(f.evaluation, 'withTrustedCanonicalScopeWriterFence')
+  const read = () => inspectCreationCapabilityOrdinaryUseTrend({ ...feedbackInput(f, original.inboxId, calls),
+    record, now: adoptedAt + 30_000, minimumSamples: 1, windowMs: 60 * 60 * 1000 })
+  const first = read()!
+  expect(first).toMatchObject({ causal: false, cohorts: { treatedSessions: 1, controlSessions: 0 },
+    flags: ['no-control-cohort', 'partial-window'],
+    population: { counted: 2, excluded: { trigger: 1, retracted: 0, unverified: 0, outsideWindow: 0 } } })
+  expect(fence).toHaveBeenCalledWith(expect.objectContaining({ scopeWatermark: first.scopeWatermark }), expect.any(Function))
+  const cell = (trend: typeof first, index: number) => trend.strata[0]!.cells.find(item => item.index === index)!
+  expect(cell(first, -1).treated).toMatchObject({ samples: 1, achieved: 0 })
+  expect(cell(first, 0)).toMatchObject({ treated: { samples: 1, achieved: 1 }, calls: 1, exposedTasks: 1 })
+  expect(first.strata[0]!.differenceInDifferences).toEqual({ status: 'insufficient' })
+  expect(JSON.stringify(first)).not.toMatch(/private|trend-|same-owner-session/)
+  await f.feedback(exposed, 'trend-exposed-correction', 'correct 1 achieved not-achieved')
+  expect(cell(read()!, 0).treated).toMatchObject({ samples: 1, achieved: 0 })
+  await f.feedback(before, 'trend-before-withdrawal', 'withdraw 1 not-achieved')
+  const withdrawn = read()!
+  expect(withdrawn.population).toMatchObject({ counted: 1, excluded: { retracted: 1 } })
   expect(withdrawn.scopeWatermark).toBeGreaterThan(first.scopeWatermark)
 })

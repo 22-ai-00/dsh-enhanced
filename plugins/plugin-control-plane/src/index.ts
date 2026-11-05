@@ -10,11 +10,15 @@ export type { CreationCapabilityConfig, CreationCapabilityOwner, CreationCapabil
   CreationCapabilitySourceArchive, CreationCapabilityTaskAssociation, CreationCapabilityOrdinaryUseReport,
   CreationCapabilityOrdinaryUseStratum, CreationCapabilityOrdinaryUseMeasures, CreationCapabilityOrdinaryUseModel,
   CreationCapabilityOrdinaryUseQuality, CreationCapabilityOrdinaryUseLatency, CreationCapabilityAvailabilityAttribution,
-  CreationCapabilityAttributionStratum, CreationCapabilityAttributionArm, CreationCapabilityAttributionDelta } from './creation-capability-types.js'
+  CreationCapabilityAttributionStratum, CreationCapabilityAttributionArm, CreationCapabilityAttributionDelta, CreationCapabilityOrdinaryUseTrend,
+  CreationCapabilityTrendWindow, CreationCapabilityTrendCell, CreationCapabilityTrendStratum,
+  CreationCapabilityTrendDifferenceInDifferences, CreationCapabilityTrendParallelCheck,
+  CreationCapabilityTrendFlag } from './creation-capability-types.js'
 export type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 export { inspectCreationCapabilityAvailabilityAttribution, inspectCreationCapabilityOrdinaryUseReport,
-  inspectCreationCapabilityTaskAssociations } from './creation-capability-feedback.js'
-export type { CreationCapabilityAttributionInput, CreationCapabilityFeedbackInput } from './creation-capability-feedback.js'
+  inspectCreationCapabilityOrdinaryUseTrend, inspectCreationCapabilityTaskAssociations } from './creation-capability-feedback.js'
+export type { CreationCapabilityAttributionInput, CreationCapabilityFeedbackInput,
+  CreationCapabilityTrendInput } from './creation-capability-feedback.js'
 export { creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig,
   verifyCreationCapabilityReceipt } from './creation-capability-journal.js'
 export * from './catalog.js'

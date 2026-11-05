@@ -4,7 +4,7 @@ import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type Ado
 import { CreationCapabilityJournal, creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
 import { CreationCapabilityRuntime } from './creation-capability-runtime.js'
 import { inspectCreationCapabilityAvailabilityAttribution, inspectCreationCapabilityOrdinaryUseReport,
-  inspectCreationCapabilityTaskAssociations,
+  inspectCreationCapabilityOrdinaryUseTrend, inspectCreationCapabilityTaskAssociations,
   type CreationCapabilityFeedbackInput } from './creation-capability-feedback.js'
 import { captureCreationCapabilitySource } from './creation-capability-source.js'
 import type { CreationCapabilityConfig, CreationCapabilityRecord } from './creation-capability-types.js'
@@ -1148,6 +1148,23 @@ export class PluginControlPlaneService extends Service {
       return inspectCreationCapabilityAvailabilityAttribution({ ...input(),
         otherAdoptedAt: this.creationCapabilityRuntime?.inspectOtherAdoptionTimes(planId) ?? [],
         ...(options.windowMs === undefined ? {} : { windowMs: options.windowMs }) })
+    } catch { return undefined }
+  }
+
+  /**
+   * Host-only longitudinal ordinary-use series of one adoption in fixed windows with a same-scope session-cohort
+   * control and a model-stratified difference-in-differences estimate; observational, never causal. Pure read.
+   */
+  inspectCreatedCapabilityOrdinaryUseTrend = (planId: string,
+    options: { windowMs?: number; preWindows?: number; maxPostWindows?: number } = {}) => {
+    const input = this.createdCapabilityFeedbackInput(planId)
+    if (!input) return undefined
+    try {
+      return inspectCreationCapabilityOrdinaryUseTrend({ ...input(),
+        otherAdoptedAt: this.creationCapabilityRuntime?.inspectOtherAdoptionTimes(planId) ?? [],
+        ...(options.windowMs === undefined ? {} : { windowMs: options.windowMs }),
+        ...(options.preWindows === undefined ? {} : { preWindows: options.preWindows }),
+        ...(options.maxPostWindows === undefined ? {} : { maxPostWindows: options.maxPostWindows }) })
     } catch { return undefined }
   }
 

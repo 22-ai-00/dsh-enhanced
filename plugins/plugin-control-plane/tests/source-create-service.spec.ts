@@ -765,6 +765,11 @@ it.each(['correction', 'withdrawal'] as const)(
       protocol: 'dsh-created-capability-availability-attribution/v1', causal: false, planId,
       population: { scanned: 2, counted: 0, excluded: { trigger: 1, unverified: 1 } },
       concurrentAdoptions: { status: 'none', count: 0 }, direction: 'insufficient' })
+    expect(f.service.inspectCreatedCapabilityOrdinaryUseTrend(planId)).toMatchObject({
+      protocol: 'dsh-created-capability-ordinary-use-trend/v1', causal: false, planId, windowMs: 7 * 24 * 60 * 60 * 1000,
+      population: { scanned: 2, counted: 0, excluded: { trigger: 1, unverified: 1 } },
+      cohorts: { treatedSessions: 0, controlSessions: 0 }, strata: [], flags: ['no-control-cohort', 'partial-window'] })
+    expect(f.service.inspectCreatedCapabilityOrdinaryUseTrend(planId, { windowMs: 0 })).toBeUndefined()
     expect(adoption()).toEqual({ ...adoptedBefore, calls: 2 })
     expect(runnerRun).toHaveBeenCalledTimes(3)
     f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
@@ -779,6 +784,7 @@ it.each(['correction', 'withdrawal'] as const)(
     expect(f.service.inspectCreatedCapabilityTaskAssociations(planId)).toEqual([])
     expect(f.service.inspectCreatedCapabilityOrdinaryUseReport(planId)).toBeUndefined()
     expect(f.service.inspectCreatedCapabilityAvailabilityAttribution(planId)).toBeUndefined()
+    expect(f.service.inspectCreatedCapabilityOrdinaryUseTrend(planId)).toBeUndefined()
     await expect(tool.execute({ query: 'after-change' }, { ...valid, callId: 'changed-call' } as ToolRunContext)).rejects.toThrow()
     const reconcile = vi.spyOn(CreationCapabilityRuntime.prototype, 'reconcile')
     f.notifyTaskChange()
