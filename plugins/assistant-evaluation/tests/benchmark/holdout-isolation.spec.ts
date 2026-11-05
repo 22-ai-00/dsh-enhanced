@@ -5,6 +5,8 @@ import { familiesDevelopmentCases } from '../../src/benchmark/families-corpus.ts
 import {
   assertCandidateGenerationInput, assertHoldoutIsolation, holdoutIsolationOverlaps, publicDevelopmentManifests,
 } from '../../src/benchmark/holdout-isolation.ts'
+import { runBenchmark } from '../../src/benchmark/runner.ts'
+import { BenchmarkStore } from '../../src/benchmark/store.ts'
 import type { BenchmarkCase, BenchmarkPlan } from '../../src/benchmark/types.ts'
 
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -56,6 +58,18 @@ describe('holdout isolation', () => {
     const extra = [{ suite: 'strategy-x', dataset: { id: 'strategy-x', version: '1', digest: digest('sx'), split: 'development' as const }, cases: [privateCase] }]
     expect(() => assertHoldoutIsolation(plan(), extra)).toThrow('strategy-x:acceptance-digest, strategy-x:case-id, strategy-x:input-digest')
     expect(() => holdoutIsolationOverlaps(plan(), [{ ...extra[0]!, dataset: { ...extra[0]!.dataset, split: 'holdout' } }])).toThrow('public manifest must be a development split')
+  })
+
+  it('enforces isolation at the shared runBenchmark entry before any plan or cell is recorded', async () => {
+    const research = developmentCases()[0]!
+    const leaked = plan({ id: 'leaked-holdout' }, [{ ...privateCase, inputDigest: research.inputDigest }])
+    const store = new BenchmarkStore(':memory:'); let executed = 0
+    try {
+      await expect(runBenchmark(store, leaked, { async execute() { executed++; throw new Error('must not run') } }))
+        .rejects.toThrow('holdout overlaps public development data (research-v1:input-digest)')
+      expect(executed).toBe(0)
+      expect(() => store.plan('leaked-holdout')).toThrow()
+    } finally { store.close() }
   })
 
   it('rejects non-holdout plans for isolation and holdout plans for candidate generation', () => {

@@ -67,13 +67,13 @@ Host adapter 负责创建干净且等价的执行环境、载入确切变体、�
 
 ## 任务族、消融与分布统计
 
-`families-v1`（数据集 `dsh-task-families` v1，development）补齐 8 个任务族：代码、研究、跨日、主动性、注入、撤销、目标变化与重复操作，共 9 道公开合成题。判定沿用 research-v1 的纯函数 `{answer, citations}` 精确匹配（judgeSchema `families-development-response-v1`），无模型、工具、时钟或网络依赖。它们是任务族的提示层代理（例如跨日只是书面交接），不是真实多日会话，也不是 holdout。`research-v1` 的数据集摘要、题目、提示与判定保持字节不变。
+`families-v1`（数据集 `dsh-task-families` v1，development）补齐 8 个任务族：代码、研究、跨日、主动性、注入、撤销、目标变化与重复操作，共 9 道公开合成题。每题至少含一份无关资料，因此“引用全部资料”不能通过；任一固定输出至多通过一题。判定沿用 research-v1 的纯函数 `{answer, citations}` 精确匹配（judgeSchema `families-development-response-v1`），无模型、工具、时钟或网络依赖。它们是任务族的提示层代理（例如跨日只是书面交接），不是真实多日会话，也不是 holdout。`research-v1` 的数据集摘要、题目、提示与判定保持字节不变。
 
-原生变体新增可选 `review: boolean`，开启时在同一 persona section 末尾追加冻结的复核指引（`nativeReviewGuidance`），`features.review` 随之为 true。可加 `role: "ablation"` 变体：必须恰有一个 candidate，persona 与 candidate 相同，只关闭一个能力开关（复核或在 memory 套件中关闭 review 保留 memory）。只要任一变体开启 review，全计划的 prompt 摘要改为 `{persona, complete, review: 指引摘要}`，使 ablation 与 candidate 的 versions 相同；未使用 review 的旧配置摘要不变。报告中 ablation 的参照臂是 candidate。复核指引只是提示，不是独立校验器。
+原生变体新增可选 `review: boolean`，开启时在同一 persona section 末尾追加冻结的复核指引（`nativeReviewGuidance`），`features.review` 随之为 true。可加 `role: "ablation"` 变体：必须恰有一个 candidate，persona 与 candidate 相同，只关闭一个能力开关（复核或在 memory 套件中关闭 review 保留 memory）。变体自身开启 review 时（或作为 ablation 而其唯一 candidate 开启 review 时），该变体的 prompt 摘要改为 `{persona, complete, review: 指引摘要}`，使关闭复核的 ablation 与 candidate 的 versions 相同；其余变体（含 baseline）的摘要与旧配置逐字节相同，不受同计划其他变体影响，旧计划与已存结果的摘要仍可对上。报告中 ablation 的参照臂是 candidate。复核指引只是提示，不是独立校验器。
 
-报告在 schemaVersion 1 上增加 `distributionVersion: 1` 字段（加法变更，无存储或计划 schema 迁移）：每个指标增加 min/p10/p90/max；每个变体增加 `byDomain` 与 `taskSuccess`（每题跨重复成功率分布，含 mixed 即重复间不一致的题数，有未知或缺失重复的题不计入）；每组比较增加 `byDomain` 胜负与 `metricDeltas`（变体减参照的配对差，仅统计双方均有测量的配对，不论判定是否已知）。
+报告在 schemaVersion 1 上增加 `distributionVersion: 1` 字段（加法变更，无存储或计划 schema 迁移）：每个指标增加 min/p10/p90/max；每个变体增加 `byDomain` 与 `taskSuccess`（每题跨重复成功率分布，含 mixed 即重复间不一致的题数，有未知或缺失重复的题不计入）；每组比较增加 `byDomain` 胜负与 `metricDeltas`（变体减参照的配对差，只统计双方判定已知且均有测量的配对；任一方判定为 unknown 的配对不进入差值，单独计入 `unknownVerdictPairs`，其余计入 `missing`）。分位数为最近秩法，单样本时各分位等于该值，空样本全部为 null。
 
-`./benchmark` 导出留出隔离检查：`assertHoldoutIsolation(plan, additional?)` 要求 holdout split，且与 research-v1、families-v1、memory-v1、memory-v2 公开清单在数据集 id/摘要、题目 id、输入摘要和验收摘要上都不重叠；strategy 套件依赖较重，需由调用方经 `additional` 传入。`runIndependentHoldout()` 启动前会执行该检查。`assertCandidateGenerationInput(plan)` 拒绝任何非 development 计划，供生成候选的代码调用。这是清单级检查，只能发现已发布题目或判定的复用，不能发现改写后的泄漏。
+`./benchmark` 导出留出隔离检查：`assertHoldoutIsolation(plan, additional?)` 要求 holdout split，且与 research-v1、families-v1、memory-v1、memory-v2 公开清单在数据集 id/摘要、题目 id、输入摘要和验收摘要上都不重叠；strategy 套件依赖较重，需由调用方经 `additional` 传入。所有执行入口共用的 `runBenchmark()` 对任何 holdout 计划在建账前执行该检查（覆盖 `runIndependentHoldout()` 与原生 skill 前瞻留出），`runIndependentHoldout()` 另在打开 authority 前提前检查。`assertCandidateGenerationInput(plan)` 拒绝任何非 development 计划；本包目前没有从 benchmark 数据生成候选的代码，该守卫尚无调用方，将来的生成入口必须接入。这是清单级检查，只能发现已发布题目或判定的复用，不能发现改写后的泄漏。
 
 
 ## Memory 的真实检索对照

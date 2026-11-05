@@ -45,8 +45,8 @@ function distribution(values: readonly number[], missing: number): MetricSummary
   }
 }
 
-function pairedDelta(values: readonly number[], missing: number): BenchmarkPairedDelta {
-  return { pairs: values.length, missing, mean: mean(values), p10: nearestRank(values, 0.10), median: median(values), p90: nearestRank(values, 0.90) }
+function pairedDelta(values: readonly number[], unknownVerdictPairs: number, missing: number): BenchmarkPairedDelta {
+  return { pairs: values.length, unknownVerdictPairs, missing, mean: mean(values), p10: nearestRank(values, 0.10), median: median(values), p90: nearestRank(values, 0.90) }
 }
 
 /** Domains in canonical `benchmarkDomains` order, restricted to those present in the plan. */
@@ -181,7 +181,10 @@ export function benchmarkReport(input: BenchmarkPlan, inputResults: readonly Ben
       const baselineResult = lookup(task.id, reference.id, repeat)
       const variantResult = lookup(task.id, variant.id, repeat)
       if (baselineResult === undefined || variantResult === undefined) { missingPairs++; domain.missingPairs++; continue }
-      for (const key of benchmarkMetricKeys) {
+      const verdictKnown = baselineResult.verdict !== 'unknown' && variantResult.verdict !== 'unknown'
+      // Unknown-verdict pairs never enter metric deltas: their partial or interrupted measurements
+      // are not comparable with judged pairs. They are counted separately, never as missing.
+      if (verdictKnown) for (const key of benchmarkMetricKeys) {
         const left = variantResult.metrics[key]; const right = baselineResult.metrics[key]
         if (left !== null && right !== null) metricValues.get(key)!.push(left - right)
       }
@@ -197,7 +200,7 @@ export function benchmarkReport(input: BenchmarkPlan, inputResults: readonly Ben
     const totalPairs = plan.cases.length * plan.repeats
     const metricDeltas = Object.fromEntries(benchmarkMetricKeys.map(key => {
       const values = metricValues.get(key)!
-      return [key, pairedDelta(values, totalPairs - values.length)]
+      return [key, pairedDelta(values, unknownPairs, totalPairs - unknownPairs - values.length)]
     })) as BenchmarkReport['comparisons'][number]['metricDeltas']
     const caseMeans = [...byCase.values()].map(values => values.reduce((sum, value) => sum + value, 0) / values.length)
     return {

@@ -19,7 +19,7 @@ describe('public task-family development corpus (families-v1)', () => {
   })
 
   it('pins the dataset digest so fixture edits require a new version', () => {
-    expect(familiesDevelopmentDataset.digest).toMatchInlineSnapshot(`"bb6ad3ada8a4b3acd302e19d274da390afe7e5c05144b6ff1d5381ca9e236e1e"`)
+    expect(familiesDevelopmentDataset.digest).toMatchInlineSnapshot(`"c634d5f74f7d921e75bd890fdc45790e9fa461cc8dfbec78dc51b822e1f6c501"`)
   })
 
   it('prompts include all sources and never serialize the oracle', () => {
@@ -47,5 +47,20 @@ describe('public task-family development corpus (families-v1)', () => {
     expect(judge('goal-change-latest-sort-key', 'cost', ['goal-v1', 'goal-v2', 'goal-rule'])).toBe('not-achieved')
     expect(judge('injection-tool-call-bait', '已清空', [])).toBe('not-achieved')
     expect(judgeFamiliesDevelopmentResponse('cross-day-handoff-next-batch', '5').verdict).toBe('not-achieved')
+  })
+
+  it('cannot be passed by a fixed response or by citing every source', () => {
+    // Every task carries at least one irrelevant source, so "cite everything" never matches.
+    for (const task of familiesDevelopmentCorpus) {
+      expect(task.sources.some(item => !task.acceptance.citations.includes(item.id))).toBe(true)
+      const citeAll = JSON.stringify({ answer: task.acceptance.answer, citations: task.sources.map(item => item.id) })
+      expect(judgeFamiliesDevelopmentResponse(task.id, citeAll).verdict).toBe('not-achieved')
+    }
+    // Any single fixed response (including another task's exact oracle) passes at most one task.
+    for (const fixed of familiesDevelopmentCorpus) {
+      const output = JSON.stringify(fixed.acceptance)
+      const passed = familiesDevelopmentCorpus.filter(task => judgeFamiliesDevelopmentResponse(task.id, output).verdict === 'achieved')
+      expect(passed.map(task => task.id)).toEqual([fixed.id])
+    }
   })
 })

@@ -22,8 +22,9 @@ const plan: BenchmarkPlan = {
   budget: { durationMs: 1_000, inputTokens: 1_000, outputTokens: 1_000, costUsdMicros: 1_000, toolCalls: 10 },
   repeats: 2, seed: 7,
 }
-const result = (caseId: string, variantId: string, repeat: number, verdict: 'achieved' | 'not-achieved', latencyMs: number): BenchmarkResult => ({
+const result = (caseId: string, variantId: string, repeat: number, verdict: 'achieved' | 'not-achieved' | 'unknown', latencyMs: number): BenchmarkResult => ({
   cell: benchmarkSchedule(plan).find(cell => cell.caseId === caseId && cell.variantId === variantId && cell.repeat === repeat)!,
+  // A completed cell may still carry an unknown verdict (judge could not decide) with full measurements.
   status: 'completed', verdict, evidenceDigest: digest('e'), reason: 'verified', startedAt: 10, completedAt: 20,
   metrics: { inputTokens: 1, outputTokens: 1, costUsdMicros: 0, toolCalls: 0, rework: null, interventions: null, latencyMs },
 })
@@ -61,8 +62,24 @@ describe('benchmarkReport distribution fields', () => {
     expect(comparison.byDomain.map(item => item.domain)).toEqual(['code', 'research'])
     expect(comparison.byDomain[0]).toMatchObject({ wins: 1, losses: 0, ties: 1 })
     expect(comparison.byDomain[1]).toMatchObject({ wins: 1, losses: 0 })
-    expect(comparison.metricDeltas.latencyMs).toEqual({ pairs: 3, missing: 1, mean: -5, p10: -5, median: -5, p90: -5 })
-    expect(comparison.metricDeltas.rework).toEqual({ pairs: 0, missing: 4, mean: null, p10: null, median: null, p90: null })
+    expect(comparison.metricDeltas.latencyMs).toEqual({ pairs: 3, unknownVerdictPairs: 0, missing: 1, mean: -5, p10: -5, median: -5, p90: -5 })
+    expect(comparison.metricDeltas.rework).toEqual({ pairs: 0, unknownVerdictPairs: 0, missing: 4, mean: null, p10: null, median: null, p90: null })
     expect(report.promotionAuthorized).toBe(false)
+  })
+
+  it('keeps measured unknown-verdict pairs out of metric deltas and counts them separately', () => {
+    // The last candidate cell completed with full measurements but an unknown verdict.
+    const report = benchmarkReport(plan, [...results, result('case-b', 'candidate', 1, 'unknown', 1_000)])
+    const comparison = report.comparisons[0]!
+    expect(comparison.unknownPairs).toBe(1)
+    expect(comparison.metricDeltas.latencyMs).toEqual({ pairs: 3, unknownVerdictPairs: 1, missing: 0, mean: -5, p10: -5, median: -5, p90: -5 })
+    expect(comparison.metricDeltas.rework).toEqual({ pairs: 0, unknownVerdictPairs: 1, missing: 3, mean: null, p10: null, median: null, p90: null })
+  })
+
+  it('handles single-value and empty samples without inventing quantiles', () => {
+    const single = benchmarkReport(plan, [result('case-a', 'baseline', 0, 'achieved', 7)])
+    expect(single.variants[0]!.metrics.latencyMs).toEqual({ measured: 1, missing: 3, mean: 7, median: 7, p95: 7, min: 7, p10: 7, p90: 7, max: 7 })
+    expect(single.variants[1]!.taskSuccess).toEqual({ tasks: 2, summarized: 0, allAchieved: 0, noneAchieved: 0, mixed: 0, min: null, median: null, max: null })
+    expect(single.comparisons[0]!.metricDeltas.latencyMs).toEqual({ pairs: 0, unknownVerdictPairs: 0, missing: 4, mean: null, p10: null, median: null, p90: null })
   })
 })

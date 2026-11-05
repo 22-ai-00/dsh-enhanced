@@ -1,4 +1,5 @@
 import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { assertHoldoutIsolation } from './holdout-isolation.js'
 import {
   benchmarkAssert, benchmarkHash, benchmarkObject, benchmarkSchedule, benchmarkSnapshot,
   parseBenchmarkMetrics, parseBenchmarkPlan,
@@ -51,6 +52,9 @@ export async function runBenchmark(
   store: BenchmarkStore, input: BenchmarkPlan, executor: BenchmarkExecutor, signal?: AbortSignal,
 ): Promise<readonly BenchmarkResult[]> {
   const plan = parseBenchmarkPlan(input)
+  // Every holdout execution path (independent holdout, prospective skill holdout, direct callers)
+  // shares this entry: reject reuse of published development tasks before any cell is recorded.
+  if (plan.dataset.split === 'holdout') assertHoldoutIsolation(plan)
   store.create(plan)
   for (const cell of benchmarkSchedule(plan)) {
     if (signal?.aborted) break

@@ -139,9 +139,15 @@ export interface BenchmarkDomainComparison {
   unknownPairs: number
 }
 
-/** Paired variant-minus-reference metric differences over pairs where both values were measured. */
+/**
+ * Paired variant-minus-reference metric differences over pairs where both verdicts are known and
+ * both values were measured. `pairs + unknownVerdictPairs + missing` equals cases × repeats.
+ */
 export interface BenchmarkPairedDelta {
   pairs: number
+  /** Recorded pairs excluded because either side has an unknown verdict (same as the comparison's unknownPairs). */
+  unknownVerdictPairs: number
+  /** Pairs with a missing result, or a known-verdict pair where either value was not measured. */
   missing: number
   mean: number | null
   p10: number | null

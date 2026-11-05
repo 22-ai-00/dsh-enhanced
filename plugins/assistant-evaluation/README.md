@@ -120,7 +120,7 @@ schema 13 扩展任务投影的主体身份约束及投影 outbox 的状态约�
 
 **当前完成范围：** 冻结协议、持久账本、有界协调器、统计计算、原生 AgentLoop 执行器及 `dsh-benchmark` 命令。默认 `research-v1` 保留 8 道公开研究/注入开发题；`memory-v2` 增加 6 道公开记忆开发题。`strategy-v1` 增加 4 道公开合成 shell 开发题：整数汇总、接触区间合并、按频次/字典序词频和依赖拓扑排序。`families-v1` 增加 9 道公开合成题，覆盖代码、研究、跨日、主动性、注入、撤销、目标变化与重复操作 8 个任务族（提示层代理，纯函数判定）。它们是开发语料，不是 holdout，也没有真实模型收益证据。
 
-原生变体可设 `review: true` 追加冻结复核指引，并用 `role: "ablation"`（persona 与唯一 candidate 相同、只关闭一个开关）做消融；报告以 candidate 为消融参照臂。报告（`distributionVersion: 1`，加法字段）另含 min/p10/p90/max、分族结果、每题跨重复成功率分布与配对指标差。`assertHoldoutIsolation()` 检查留出计划与公开开发清单不重叠（`runIndependentHoldout()` 启动前执行），`assertCandidateGenerationInput()` 拒绝把非 development 计划用于候选生成；二者均为清单级检查。
+原生变体可设 `review: true` 追加冻结复核指引，并用 `role: "ablation"`（persona 与唯一 candidate 相同、只关闭一个开关）做消融；报告以 candidate 为消融参照臂。报告（`distributionVersion: 1`，加法字段）另含 min/p10/p90/max、分族结果、每题跨重复成功率分布与配对指标差。`assertHoldoutIsolation()` 检查留出计划与公开开发清单不重叠，由所有执行入口共用的 `runBenchmark()` 对任何 holdout 计划强制执行（`runIndependentHoldout()` 还会在打开 authority 前提前检查）；`assertCandidateGenerationInput()` 拒绝把非 development 计划用于候选生成，但本包内尚无候选生成代码调用它，需由将来的生成入口接入。二者均为清单级检查。
 
 ### 独立留出 provider Host SDK（实验性）
 

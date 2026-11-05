@@ -36,6 +36,13 @@ describe('native families-v1 suite with a review ablation', () => {
     const plan = nativeBenchmarkPlan(input)
     expect(plan.variants.map(item => item.versions.prompt)).toEqual([acceptanceDigest({ persona: 'Answer JSON.', complete: true }), acceptanceDigest({ persona: 'Answer JSON carefully.', complete: true })])
     expect(nativeSystemText('p', false)).toBe('p')
+    // A review-enabled sibling never changes the baseline's (or another review-free variant's) prompt digest.
+    const reviewPlan = nativeBenchmarkPlan(config())
+    expect(reviewPlan.variants[0]!.versions.prompt).toBe(acceptanceDigest({ persona: 'Answer JSON.', complete: true }))
+    const mixed = config(); mixed.variants = [mixed.variants[0]!, { id: 'plain', role: 'candidate', persona: 'Answer JSON carefully.' }, { id: 'reviewed', role: 'candidate', persona: 'Answer JSON carefully.', review: true }]
+    const mixedPlan = nativeBenchmarkPlan(mixed)
+    expect(mixedPlan.variants[1]!.versions.prompt).toBe(plan.variants[1]!.versions.prompt)
+    expect(mixedPlan.variants[2]!.versions.prompt).toBe(reviewPlan.variants[1]!.versions.prompt)
     expect(nativeSystemText('', true)).toBe(nativeReviewGuidance)
   })
 
