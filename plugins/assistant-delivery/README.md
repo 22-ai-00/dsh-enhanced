@@ -546,13 +546,18 @@ schema 31 新增只追加的 `delivery_attention_audit`，按 outbox id 去重�
 
 ### 第 3 阶段：目的强制（opt-in，默认关闭）
 
-配置 `attentionEnforce: true` 后，`enqueueBackground`、`enqueueBackgroundRoute`、`enqueueOwnerNotification` 与 WorkItem 报告在入队前按第 1 阶段判定强制；默认关闭时行为与第 2b 阶段完全一致。typed Automation/Goal 结果通道、前台进度、回复与审批通道不受影响。
+配置 `attentionEnforce: true` 后，`enqueueBackground`、`enqueueBackgroundRoute`、`enqueueOwnerNotification` 在入队前按第 1 阶段判定强制；WorkItem 只有 typed 报告通道（`enqueueWorkItemReport`）由通道声明 `result`，因此只受上限约束（仅上限），走 `enqueueBackground` 的非 typed 报告按普通后台通知强制。判定与拒绝发生在 Policy 授权之前，被拒绝的通知不写 Policy 审计行、不扣预算。默认关闭时行为与错误文案与第 2b 阶段完全一致。typed Automation/Goal 结果通道、前台进度、回复与审批通道不受影响。
 
 - 目的缺失（`missing-purpose`）或任一 would-reject 原因（`invalid-envelope`、`attention-missing-work-item`、`attention-question-*`、`answer-*`）直接拒绝：抛 `AttentionRejectedError`（`code: 'policy-denied'`，`reasons` 为结构化原因码），不入队、不写 Outbox。`text-exposes-*` 仍只审计。
 - 超出字数或字素上限：`attentionAttachOverCap` 开时走第 2b 附件路径；关时以 `over-word-cap` / `over-grapheme-cap` 拒绝。开启附件但适配器不支持时原因为 `attachment-unsupported`，拆条为 `split-evasion`（错误信息与第 2b 相同）。仅开强制不增加拆条检查。
 - 已存在 Outbox 的幂等键重放在任何检查之前返回原记录，切换开关或重启都不改变已入队的键；被拒绝的键不进入问答账本，重试按同一持久账本重新判定。Host 自己发出的结果 ACK 与 Goal 完成提醒在强制开启时声明 `result`。
+- 「一次有效问题」与「当前唯一问题」的强制依据是尽力而为的 v31 审计行：审计写入失败的通知不进入账本，会留下缺口（之后的重复或第二个问题可能不被拒绝），可通过 `inspectAttentionAudit` 的 `processLocalWriteFailures` 发现。
 - 被拒绝的通知没有 Outbox 行，而 v31 审计表以 `outbox_id` 为主键并外键到 Outbox、`verdict` 为封闭集合，容纳不了 `rejected`；为不改 schema（仍为 31），拒绝记录在进程内有界日志（最近 1000 条，同键同原因的重试只记一次），`inspectAttentionRejections({ afterSequence?, limit? })` 只读分页（默认 100、最多 500），不含正文，返回 `durable: false` 与 `evicted`，Host 重启清零。
-- 开启前须确认调用方都已声明目的：仓库内仍有未声明的旧调用方，开启后它们的通知会被拒绝。
+- 开启前须确认调用方都已声明目的。仓库内仍有以下未声明目的的调用方，开启后它们的通知以 `missing-purpose` 被拒绝：
+  - `assistant-work-items/src/dispatch.ts`（约 256 行）非 typed 报告路径 `enqueueBackground`：被拒后 WorkItems 将该报告修订记为 `failed`（`policy-denied`）；
+  - `assistant-actions/src/service.ts`（约 833 行）已验证投递后的 `enqueueOwnerNotification`；
+  - `assistant-automations/src/coordinator.ts`（约 882 行）incident 告警 `enqueueBackground`，以及 `assistant-automations/src/service.ts`（约 688/694 行）转发 `enqueueBackground` / `enqueueBackgroundRoute` 的 dispatcher（调用方未带 `attention` 时同样被拒）；
+  - `assistant-skills/src/repair-feedback.ts`（约 135 行）修复反馈 `enqueueOwnerNotification`（被拒后返回 `delivery-rejected`）。
 
 ### 通知结果事实（WP22 切片 1，只读）
 

@@ -31,7 +31,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-async function fixture(options: Readonly<{ root?: string; enforce?: boolean; attach?: boolean; textAttachments?: boolean }> = {}) {
+async function fixture(options: Readonly<{ root?: string; enforce?: boolean; attach?: boolean; textAttachments?: boolean; budget?: number }> = {}) {
   const root = options.root ?? await mkdtemp(join(tmpdir(), 'assistant-delivery-enforce-'))
   if (options.root === undefined) roots.push(root)
   const ctx = new Context()
@@ -41,8 +41,9 @@ async function fixture(options: Readonly<{ root?: string; enforce?: boolean; att
     rules: [
       { id: 'notice-send', effect: 'allow', subject: { kind: 'background', id: '*', workspace: '/work/alpha',
         principal: 'lark/bot-1/tenant-a/ou_owner' }, actions: ['send'], resource: { kind: 'message', id: '*' },
-      context: { initiators: ['background'] } },
+      context: { initiators: ['background'] }, ...(options.budget === undefined ? {} : { budget: { id: 'notice-sends', amount: 1 } }) },
     ],
+    ...(options.budget === undefined ? {} : { budgets: [{ id: 'notice-sends', metric: 'sends', limit: options.budget, periodMs: 3_600_000, scope: 'global' as const }] }),
   })
   await ctx.plugin(AssistantDeliveryService, {
     databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'), schedulerEnabled: false,
@@ -94,7 +95,7 @@ async function fixture(options: Readonly<{ root?: string; enforce?: boolean; att
     try { fn() } catch (error) { if (error instanceof AttentionRejectedError) return error; throw error }
     throw new Error('expected an attention rejection')
   }
-  return { root, ctx, service, store, send, binding, background, notify, route, report, rejection }
+  return { root, ctx, service, store, policy: ctx.assistantPolicy, send, binding, background, notify, route, report, rejection }
 }
 
 describe('enforcement reasons (pure)', () => {
@@ -218,6 +219,31 @@ describe('purpose enforcement (service, opt-in)', () => {
     expect(f.store.attentionAudit.get(report.id)).toMatchObject({ lane: 'work-item-report', purposeSource: 'lane', workItemId: 'wi-1', verdict: 'would-accept' })
     expect(f.rejection(() => f.report('wi-2', words(attentionWordCaps.result + 1))).rejection)
       .toMatchObject({ lane: 'work-item-report', purposeSource: 'lane', workItemId: 'wi-2', reasons: ['over-word-cap'] })
+  })
+
+  test.each(['background', 'route'] as const)('on: a %s rejection happens before Policy authorization (no audit row, no budget spent)', async lane => {
+    const f = await fixture({ enforce: true, budget: 1 })
+    const send = lane === 'background'
+      ? (key: string, attention?: AttentionEnvelope) => f.background(key, 'Heads up', attention)
+      : (key: string, attention?: AttentionEnvelope) => f.route(key, 'Heads up', attention)
+    const audit = () => f.policy.queryAudit({ limit: 100 }).filter(event => event.action === 'send')
+    const before = audit().length
+    expect(f.rejection(() => send('legacy')).reasons).toEqual(['missing-purpose'])
+    expect(f.rejection(() => send('invalid', { purpose: 'progress' } as unknown as AttentionEnvelope)).reasons).toEqual(['invalid-envelope'])
+    expect(audit()).toHaveLength(before)
+    // The single budget unit is still available for the first accepted send, and only then exhausted.
+    expect(send('declared', { purpose: 'result' }).intent.text).toBe('Heads up')
+    expect(audit()).toHaveLength(before + 1)
+    expect(() => send('declared-2', { purpose: 'result' })).toThrowError(expect.objectContaining({ code: 'policy-denied' }))
+    expect(f.store.getOutboxByIdempotencyKey('declared-2')).toBeUndefined()
+  })
+
+  test('off: a legacy send authorizes exactly as before (one audit row, one budget unit)', async () => {
+    const f = await fixture({ budget: 1 })
+    const before = f.policy.queryAudit({ limit: 100 }).filter(event => event.action === 'send').length
+    expect(f.background('legacy', 'Heads up').intent.text).toBe('Heads up')
+    expect(f.policy.queryAudit({ limit: 100 }).filter(event => event.action === 'send')).toHaveLength(before + 1)
+    expect(() => f.background('legacy-2', 'Heads up')).toThrowError(expect.objectContaining({ code: 'policy-denied' }))
   })
 
   test('a retry of a rejected key is decided again and logged once', async () => {

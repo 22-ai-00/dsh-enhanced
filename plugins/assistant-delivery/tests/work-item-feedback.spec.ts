@@ -18,7 +18,7 @@ const authority={id:'owner-route',conversation,principal,workspace:scope.workspa
 const sql=<T>(path:string,fn:(db:DatabaseSync)=>T):T=>{const db=new DatabaseSync(path);try{return fn(db)}finally{db.close()}}
 afterEach(async()=>{for(const ctx of contexts.splice(0))await ctx.fiber.dispose();for(const path of roots.splice(0))await rm(path,{recursive:true,force:true})})
 function currentTestStack():string{const old=Error.stackTraceLimit;try{Error.stackTraceLimit=50;return new Error().stack??''}finally{Error.stackTraceLimit=old}}
-async function fixture(options:{root?:string;feedback?:boolean;continuation?:boolean;allowFeedback?:boolean;allowSend?:boolean;unknownAck?:boolean}={}){
+async function fixture(options:{root?:string;feedback?:boolean;continuation?:boolean;allowFeedback?:boolean;allowSend?:boolean;unknownAck?:boolean;enforce?:boolean}={}){
  const root=options.root??await mkdtemp(join(tmpdir(),'delivery-work-item-feedback-'));if(!options.root)roots.push(root)
  const ctx=new Context();contexts.push(ctx);const path=join(root,'delivery.sqlite')
  await ctx.plugin(AssistantPolicyService,{databasePath:join(root,'policy.sqlite'),rules:[
@@ -27,7 +27,7 @@ async function fixture(options:{root?:string;feedback?:boolean;continuation?:boo
   ...(options.allowFeedback===false?[]:[{id:'feedback',effect:'allow' as const,subject:{kind:'external' as const,id:'lark/feedback/tenant/owner',workspace:scope.workspace,principal:'lark/feedback/tenant/owner'},actions:['feedback-work-items'],resource:{kind:'automation' as const,id:automationId},context:{initiators:['external' as const]}}]),
   ...(options.continuation?[{id:'continue',effect:'allow' as const,subject:{kind:'external' as const,id:'lark/feedback/tenant/owner'},actions:['continue-work-items-from-reply'],resource:{kind:'automation' as const,id:automationId},context:{initiators:['external' as const]}}]:[]),
  ]})
- await ctx.plugin(AssistantDeliveryService,{databasePath:path,spoolPath:join(root,'spool'),schedulerEnabled:false,ownerRoutes:[authority]})
+ await ctx.plugin(AssistantDeliveryService,{databasePath:path,spoolPath:join(root,'spool'),schedulerEnabled:false,ownerRoutes:[authority],...(options.enforce===undefined?{}:{attentionEnforce:options.enforce})})
  const service=ctx.assistantDelivery,store=(service as unknown as {deliveryStore:DeliveryStore}).deliveryStore
  if(!store.getPrincipal(principal)){const pair=store.issuePairing(principal,{ttlMs:60000,maxAttempts:3});store.confirmPairing({challengeId:pair.challenge.id,principal,code:pair.code})}
  const binding=store.getActiveBinding(conversation)??store.createBinding({conversation,principal,workspace:scope.workspace,agentPreset:scope.preset,sessionId:'session-1',policyRef:'owner'})
@@ -99,6 +99,13 @@ describe('owner work-item result feedback through real Delivery and Evaluation',
   const f=await fixture();await f.report();const status=await f.service.acceptInbound(f.envelope('status','/feedback status'));await f.settle();const intent=f.store.workItemFeedback.get(status.inboxId)!
   expect(intent).toMatchObject({state:'recorded',canonical:{version:0,objectiveStatus:'unknown'}});expect(f.canonical()?.objective).toBeUndefined()
   const ack=f.store.getOutboxByIdempotencyKey(`feedback:${status.inboxId}:ack`)!;expect(ack.intent.text).toContain('暂无已记录反馈');await f.service.tick();await f.settle();expect(f.store.getOutbox(ack.id)?.status).toBe('accepted')
+ })
+ test.each([false,true])('Host result ACK is queued and audited with its purpose source (attentionEnforce %s)',async enforce=>{
+  const f=await fixture({enforce});await f.report();const status=await f.service.acceptInbound(f.envelope('status','/feedback status'));await f.settle()
+  const ack=f.store.getOutboxByIdempotencyKey(`feedback:${status.inboxId}:ack`)!;expect(ack).toBeDefined()
+  // WP19 stage 3: on, the Host declares `result` through the lane; off, it stays an undeclared legacy send.
+  expect(f.store.attentionAudit.get(ack.id)).toMatchObject(enforce?{lane:'background',purposeSource:'lane',purpose:'result',reasons:[]}:{lane:'background',purposeSource:'default',reasons:['missing-purpose']})
+  expect(f.service.inspectAttentionRejections().entries).toEqual([])
  })
  test('recovers canonical append after lost local ACK and cold reopening without another vote or source rewrite',async()=>{
   const f=await fixture();await f.report();sql(f.path,db=>db.exec("CREATE TRIGGER test_lost_feedback_ack BEFORE UPDATE OF state ON delivery_work_item_feedback WHEN NEW.state='recorded' BEGIN SELECT RAISE(ABORT,'lost local ACK'); END"))

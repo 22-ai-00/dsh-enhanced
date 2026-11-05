@@ -274,6 +274,7 @@ interface PermissionHarnessOptions {
   goalContinuationTimeoutMs?: number
   taskTimeoutMs?: number
   allowPresetProbeExecution?: boolean
+  attentionEnforce?: boolean
 }
 
 const testPermissionPresets = {
@@ -725,6 +726,7 @@ async function runtimeHarness(
     ...(permissions?.taskTimeoutMs === undefined ? {} : { agentTaskTimeoutMs: permissions.taskTimeoutMs }),
     ...(permissions?.leaseMs === undefined ? {} : { leaseMs: permissions.leaseMs }),
     ...(permissions?.maxTextBytes === undefined ? {} : { maxTextBytes: permissions.maxTextBytes }),
+    ...(permissions?.attentionEnforce === undefined ? {} : { attentionEnforce: permissions.attentionEnforce }),
     ...(permissions?.maxAutoContinuationTurns === undefined
       ? {}
       : { agentMaxAutoContinuationTurns: permissions.maxAutoContinuationTurns }),
@@ -1283,13 +1285,14 @@ describe('real native Delivery Agent runtime', () => {
     } finally { await access?.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
   })
 
-  test('publishes one exact Web owner notice when a verified completed wake has no final text', async () => {
+  test.each([false, true])('publishes one exact Web owner notice when a verified completed wake has no final text (attentionEnforce %s)', async enforce => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-goal-wake-notice-')); roots.push(root)
     const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
     const webConversation = { channel: 'web', account: 'browser', tenant: 'local', kind: 'dm' as const, chat: 'owner-chat' }
     const ownerId = 'web/browser/local/owner'
     const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
       ownerRoutes: [{ id: 'goal-owner', conversation: webConversation, principal: webPrincipal, workspace: root, agentPreset: 'primary', policyRef: 'web-owner', minimumGeneration: 1 }],
+      attentionEnforce: enforce,
       policyRules: [{ id: 'goal-wake', effect: 'allow', subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace: root, principal: ownerId }, actions: ['wake'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['background'] } },
         { id: 'goal-send', effect: 'allow', subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace: root, principal: ownerId }, actions: ['send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } }],
     })
@@ -1346,6 +1349,11 @@ describe('real native Delivery Agent runtime', () => {
       expect(first.intent).toMatchObject({ idempotencyKey: `goal-wake-completion-notice:${proof.proofDigest}:${binding.id}`,
         text: '目标已通过独立验收并完成。', format: 'plain', metadata: { 'dsh.native-notice': 'v1', 'dsh.native-notice.expiresAt': String(Math.min(wake.deadlineAt, proof.receipt.validUntil)) } })
       expect(first.intent.metadata?.['dsh.native-notice.sourceId']).toBe('assistant-goals-wake/v1')
+      // WP19 stage 3: on, the Host declares `result`; off, the notice is audited as an undeclared legacy send.
+      expect(store.attentionAudit.get(first.id)).toMatchObject(enforce
+        ? { lane: 'owner-notification', purposeSource: 'declared', purpose: 'result', reasons: [] }
+        : { lane: 'owner-notification', purposeSource: 'default', reasons: ['missing-purpose'] })
+      expect(fixture.service.inspectAttentionRejections().entries).toEqual([])
       await disposeGoals(); disposeGoals = undefined
       await drive(fixture.service)
       expect(store.getOutbox(first.id)).toMatchObject({ status: 'accepted' })

@@ -5556,6 +5556,11 @@ export class AssistantDeliveryService extends Service {
     if (binding.workspace !== input.workspace) {
       throw new AssistantDeliveryError('missing-binding', 'delivery workspace does not match the active binding')
     }
+    const prepare = () => this.prepareAttentionDelivery({ ...audit, sourceId: input.sourceId, binding,
+      idempotencyKey: input.idempotencyKey, text: input.text, format: input.format ?? 'plain' })
+    // Stage 3: the attention verdict is pure over the audited ledger, so an enforced
+    // rejection happens before Policy writes its allow row or spends budget.
+    const early = this.config.attentionEnforce === true ? prepare() : undefined
     const decision = this.policy.authorize({ subject: { kind: 'background', id: input.sourceId,
       workspace: input.workspace, principal: externalPrincipalId(binding.principal) }, action: 'send',
     resource: { kind: 'message', id: binding.id }, context: { initiator: 'background' } },
@@ -5564,8 +5569,7 @@ export class AssistantDeliveryService extends Service {
     if (!this.hasActivePrincipal(binding)) {
       throw new AssistantDeliveryError('missing-binding', 'delivery binding principal is no longer active')
     }
-    const delivered = this.prepareAttentionDelivery({ ...audit, sourceId: input.sourceId, binding,
-      idempotencyKey: input.idempotencyKey, text: input.text, format: input.format ?? 'plain' })
+    const delivered = early ?? prepare()
     const enqueue = () => this.deliveryStore.enqueue({ idempotencyKey: input.idempotencyKey, bindingId: binding.id,
       target: { conversation: binding.conversation, principal: binding.principal }, ...delivered,
       ...(input.metadata === undefined ? {} : { metadata: input.metadata }) })
@@ -6625,11 +6629,14 @@ export class AssistantDeliveryService extends Service {
     }
     const resolved = this.resolveOwnerRoute(input.authorityId)
     const authority = this.ownerRoutes.get(resolved.authorityId)!
-    const decision = authorizeOwnerRoute(this.policy, authority, sourceId, idempotencyKey)
-    if (decision.effect !== 'allow') throw policyDenied(decision)
-    const delivered = this.prepareAttentionDelivery({ lane: 'background-route', envelope: input.attention, sourceId,
+    const prepare = () => this.prepareAttentionDelivery({ lane: 'background-route', envelope: input.attention, sourceId,
       binding: () => this.deliveryStore.getActiveBinding(authority.conversation),
       idempotencyKey, text: input.text, format: input.format ?? 'plain' })
+    // Stage 3: reject before Policy writes its allow row or spends budget (see enqueueBackgroundAuthorized).
+    const early = this.config.attentionEnforce === true ? prepare() : undefined
+    const decision = authorizeOwnerRoute(this.policy, authority, sourceId, idempotencyKey)
+    if (decision.effect !== 'allow') throw policyDenied(decision)
+    const delivered = early ?? prepare()
     try {
       return this.auditAttention('background-route', sourceId, { envelope: input.attention }, this.deliveryStore.enqueueOwnerRoute({
         authority,
