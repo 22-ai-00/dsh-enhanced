@@ -17,6 +17,7 @@ import { creationCapabilitySourceDigest, type CreationCapabilitySourceSnapshot }
 import { planSealedAdoptionHandoff, applySealedAdoptionHandoff } from '../../plugin-control-plane/lib/creation-capability-sealed-handoff.js'
 import type { CreationCapabilityConfig } from '../../plugin-control-plane/lib/creation-capability-types.js'
 import { query, workItemEngineeringFixture } from './work-item-engineering.fixture.ts'
+import { normalizeConfig } from '../src/index.ts'
 // @ts-expect-error untyped e2e helper module
 import { prepareRealRoute } from '../../../scripts/e2e/web-owner-real-route.mjs'
 
@@ -98,15 +99,29 @@ function sealDockerHistory(input: { root: string; statePath: string; capabilitie
     inheritedUsage: plan.inheritedUsage, sealedAt: Date.now() })
 }
 
+/**
+ * Real-route author budget (this scenario only; config defaults stay 8192 / 120 s / 5 calls).
+ * Attempt 1 at 4096 ran out writing the source file; attempt 2 was cut off by the 120 s Growth limit (300 s is the
+ * config maximum); attempt 9 at 8192 ended max-tokens on reasoning before plugin_source_create, so one author call
+ * now gets 16384 (provider accepts max_tokens 32767).
+ */
+const SEALED_REAL_AUTHOR_BUDGET = { maxOutputTokens: 16_384, maxDurationMs: 300_000, maxModelCalls: 10, maxToolCalls: 10 } as const
+
+test('the sealed real scenario pins a 16384 per-call author budget inside config bounds without changing defaults', () => {
+  expect(SEALED_REAL_AUTHOR_BUDGET).toEqual({ maxOutputTokens: 16_384, maxDurationMs: 300_000, maxModelCalls: 10, maxToolCalls: 10 })
+  expect(MAX_REAL_CALLS).toBeLessThanOrEqual(14)
+  const normalized = normalizeConfig({ ...SEALED_REAL_AUTHOR_BUDGET }) as Record<string, unknown>
+  expect(normalized).toMatchObject(SEALED_REAL_AUTHOR_BUDGET)
+  expect(normalizeConfig({})).toMatchObject({ maxOutputTokens: 8192 })
+})
+
 describe.skipIf(!live)('sealed Docker-era tool re-adopts under a new plan with a real model', () => {
   test('real Growth re-creates the tool, the new owner calls it once and the sealed id stays refused', async () => {
     const started = Date.now(), evidence: Record<string, unknown> = {}, seal: Record<string, unknown> = {}
     const calls: Array<{ provider: string; model: string; maxTokens?: number; toolNames: string[]; requestDigest: string; at: number }> = []
     const f = await workItemEngineeringFixture({ replyEnabled: true,
       sealedSeed: async input => sealDockerHistory(input as typeof input & { capabilities: CreationCapabilityConfig }, seal),
-      // 8192 is the fixture's ordinary author cap: attempt 1 at 4096 ran out while writing the source file.
-      // Attempt 2 was cut off by the 120 s Growth limit while the author wrote source; 300 s is the config maximum.
-      realGrowthRoute: { provider: PROVIDER, model: MODEL, maxOutputTokens: 8192, maxDurationMs: 300_000, maxModelCalls: 10, maxToolCalls: 10 } })
+      realGrowthRoute: { provider: PROVIDER, model: MODEL, ...SEALED_REAL_AUTHOR_BUDGET } })
     const { route, config, secret } = await realRoute(f.workspace)
     if (!secret) throw new Error('real route credential reference is unavailable in the process environment')
     const installed = createRequire(dshPackage())
