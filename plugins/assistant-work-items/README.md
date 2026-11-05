@@ -455,10 +455,10 @@ const { record, replayed } = ctx.assistantWorkItems.recordIntake({
 })
 ```
 
-- 强度：白名单且寄址，或已跟踪线程的跟进 → `explicit`；白名单未寄址 → `inferred`；其他 → `ignore`。bot 发送者最高 `inferred`（原因码 `bot-capped`）。
-- 决策：`ignore` 为 `filtered`（`strength-ignore`）；未寄址且非跟进的群消息为 `filtered`（`unaddressed-group-disabled`），未订阅事件为 `filtered`（`unsubscribed-event-disabled`），除非 owner 在 `intakeLedger.sources.<source>` 中开启对应项；同一来源中内容摘要已有 `stored` 行的新事件为 `duplicate`（`duplicate-content`）；其余为 `stored`，只记元数据。
+- 强度：名单同时限定寄址与跟进——白名单且寄址，或白名单在已跟踪线程上的跟进 → `explicit`；白名单未寄址 → `inferred`；非白名单的跟进 → `ignore`（`follow-up-not-allowlisted`）；其他 → `ignore`（`not-allowlisted`）。bot 发送者最高 `inferred`（原因码 `bot-capped`）。
+- 决策：`ignore` 为 `filtered`（`strength-ignore`）；既未寄址、也不是白名单跟进的群消息为 `filtered`（`unaddressed-group-disabled`），未订阅事件为 `filtered`（`unsubscribed-event-disabled`），除非 owner 在 `intakeLedger.sources.<source>` 中开启对应项；同一来源中内容摘要已有强度不低于本条的 `stored` 行的新事件为 `duplicate`（`duplicate-content`），更强的重发（如补 @ 后再发）不会被较弱的原行压掉；其余为 `stored`，只记元数据。
 - 重放：同一 `(source, sourceEventId)` 返回原记录与 `replayed: true`，不写第二行，重启后同样成立；元数据不同时额外返回 `metadataChanged: true`，原决策不变。
-- 数据：输入字段封闭，`text`/`body` 等任何额外字段会被拒绝；行只含布尔信号、原因码、强度和摘要，SQL 触发器禁止改写或删除。
+- 数据：输入字段封闭，`text`/`body` 等任何额外字段会被拒绝；行只含来源事件 ID、布尔信号、原因码、强度和摘要，SQL 触发器禁止改写或删除。`contentDigest` 是无盐 SHA-256，短文本可被猜测还原，按敏感数据对待。
 - 要求 `enabled: true` 且 `intakeLedger.enabled: true`，否则返回 `disabled`。当前没有入站插件调用该接口。
 
 ## 配置

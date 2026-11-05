@@ -312,6 +312,11 @@ function validateSchema(database: DatabaseSync): void {
     && (String(row['type']) !== 'table' || !WORK_ITEM_TABLE_NAMES.includes(String(row['name']))))) {
     fail('storage', 'work-item database contains an unexpected schema object')
   }
+  // Below 10 no intake object may exist yet; a pre-created one is drift, not
+  // something the additive upgrade may adopt or trip over mid-transaction.
+  if (version >= 1 && version < 10 && objects.some(row => String(row['name']).startsWith('work_item_intake'))) {
+    fail('storage', 'work-item database contains an intake object before schema 10')
+  }
   if (version === 0) {
     if (objects.length !== 0) fail('storage', 'new work-item database is not empty')
     database.exec(`
@@ -935,7 +940,9 @@ export class WorkItemStore {
    *
    * A replay of the same `(source, sourceEventId)` returns the original row
    * unchanged, with no second write. A new event whose content digest matches
-   * an earlier `stored` row of the same source is recorded as `duplicate`.
+   * an earlier `stored` row of the same source and at least the same strength
+   * is recorded as `duplicate`; a stronger repeat (for example the same text
+   * re-posted with a mention) is never suppressed by a weaker original.
    * This method writes only the intake table; it admits and dispatches nothing.
    */
   recordIntake(candidate: WorkItemIntakeCandidate): WorkItemIntakeResult {
@@ -950,7 +957,8 @@ export class WorkItemStore {
       let reason: WorkItemIntakeRecord['reason'] = candidate.reason
       if (decision === 'stored' && candidate.contentDigest !== null) {
         const prior = this.#statement(`SELECT 1 AS hit FROM work_item_intake
-          WHERE source = ? AND content_digest = ? AND decision = 'stored' LIMIT 1`).get(candidate.source, candidate.contentDigest) as Row | undefined
+          WHERE source = ? AND content_digest = ? AND decision = 'stored'
+            AND (strength = 'explicit' OR strength = ?) LIMIT 1`).get(candidate.source, candidate.contentDigest, candidate.strength) as Row | undefined
         if (prior !== undefined) [decision, reason] = ['duplicate', 'duplicate-content']
       }
       this.#statement(`INSERT INTO work_item_intake(source, source_event_id, kind, decision, reason, strength, strength_reason,
@@ -966,7 +974,7 @@ export class WorkItemStore {
     return row === undefined ? undefined : intakeFromRow(row)
   }
 
-  /** Bounded decision counts for health; reads only the intake table. */
+  /** Decision counts over the intake table; read-only. */
   countIntake(): Readonly<Record<WorkItemIntakeRecord['decision'], number>> {
     const counts = { stored: 0, duplicate: 0, filtered: 0 }
     for (const row of this.#statement('SELECT decision, COUNT(*) AS count FROM work_item_intake GROUP BY decision').all() as Row[]) {

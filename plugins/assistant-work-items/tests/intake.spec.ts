@@ -71,14 +71,16 @@ describe('intake strength grading', () => {
     [true, true, false, false, 'explicit', 'allowlisted-addressed'],
     [true, true, true, false, 'explicit', 'allowlisted-addressed'],
     [true, false, true, false, 'explicit', 'thread-follow-up'],
-    [false, false, true, false, 'explicit', 'thread-follow-up'],
-    [false, true, true, false, 'explicit', 'thread-follow-up'],
+    // The allowlist scopes follow-ups too: a non-allowlisted follow-up is ignored.
+    [false, false, true, false, 'ignore', 'follow-up-not-allowlisted'],
+    [false, true, true, false, 'ignore', 'follow-up-not-allowlisted'],
     [true, false, false, false, 'inferred', 'allowlisted-unaddressed'],
     [false, true, false, false, 'ignore', 'not-allowlisted'],
     [false, false, false, false, 'ignore', 'not-allowlisted'],
     // A bot is capped at inferred, never raised from ignore.
     [true, true, false, true, 'inferred', 'bot-capped'],
-    [false, false, true, true, 'inferred', 'bot-capped'],
+    [true, false, true, true, 'inferred', 'bot-capped'],
+    [false, false, true, true, 'ignore', 'follow-up-not-allowlisted'],
     [true, false, false, true, 'inferred', 'allowlisted-unaddressed'],
     [false, true, false, true, 'ignore', 'not-allowlisted'],
     [false, false, false, true, 'ignore', 'not-allowlisted'],
@@ -98,6 +100,22 @@ describe('intake strength grading', () => {
     expect(classifyIntake(input())).toMatchObject({ decision: 'stored', reason: 'strength-explicit', strength: 'explicit' })
     expect(classifyIntake(input({ addressed: false }))).toMatchObject({ decision: 'stored', reason: 'strength-inferred', strength: 'inferred' })
     expect(classifyIntake(input({ senderAllowlisted: false }))).toMatchObject({ decision: 'filtered', reason: 'strength-ignore', strength: 'ignore', strengthReason: 'not-allowlisted' })
+  })
+
+  test('only an allowlisted follow-up is explicit; any other follow-up is filtered with a reason code', () => {
+    const followUp = { addressed: false, threadFollowUp: true }
+    expect(classifyIntake(input(followUp))).toMatchObject({ decision: 'stored', reason: 'strength-explicit', strength: 'explicit', strengthReason: 'thread-follow-up' })
+    expect(classifyIntake(input({ ...followUp, senderAllowlisted: false })))
+      .toMatchObject({ decision: 'filtered', reason: 'strength-ignore', strength: 'ignore', strengthReason: 'follow-up-not-allowlisted' })
+    expect(classifyIntake(input({ ...followUp, senderAllowlisted: false, senderIsBot: true })))
+      .toMatchObject({ decision: 'filtered', strength: 'ignore', strengthReason: 'follow-up-not-allowlisted' })
+    // In a group, a non-allowlisted follow-up is just an unaddressed message.
+    const off = { unaddressedGroupMessages: false, unsubscribedEvents: false }
+    const on = { unaddressedGroupMessages: true, unsubscribedEvents: false }
+    expect(classifyIntake(input({ ...followUp, senderAllowlisted: false, groupMessage: true }), off))
+      .toMatchObject({ decision: 'filtered', reason: 'unaddressed-group-disabled', strengthReason: 'follow-up-not-allowlisted' })
+    expect(classifyIntake(input({ ...followUp, senderAllowlisted: false, groupMessage: true }), on))
+      .toMatchObject({ decision: 'filtered', reason: 'strength-ignore', strengthReason: 'follow-up-not-allowlisted' })
   })
 })
 
@@ -222,6 +240,17 @@ describe('durable intake ledger', () => {
     expect(service.recordIntake(input({ sourceEventId: 'd', contentDigest: other })).record.decision).toBe('stored')
   })
 
+  test('a stronger repeat is never suppressed by a weaker stored original', async () => {
+    const config = await observeConfig()
+    const service = open(config)
+    const digest = createHash('sha256').update('reposted with a mention').digest('hex')
+    expect(service.recordIntake(input({ sourceEventId: 'weak', addressed: false, contentDigest: digest })).record).toMatchObject({ decision: 'stored', strength: 'inferred' })
+    expect(service.recordIntake(input({ sourceEventId: 'strong', contentDigest: digest })).record).toMatchObject({ decision: 'stored', strength: 'explicit' })
+    // Equal or weaker repeats of a stored original are duplicates.
+    expect(service.recordIntake(input({ sourceEventId: 'again', contentDigest: digest })).record).toMatchObject({ decision: 'duplicate', reason: 'duplicate-content' })
+    expect(service.recordIntake(input({ sourceEventId: 'weaker', addressed: false, contentDigest: digest })).record).toMatchObject({ decision: 'duplicate', strength: 'inferred' })
+  })
+
   test('stores only metadata and digests, never a body', async () => {
     const config = await observeConfig({ enabled: true, sources: { 'lark-channel': { unaddressedGroupMessages: true } } })
     const service = open(config)
@@ -293,5 +322,26 @@ describe('schema 10 migration', () => {
     again.exec("CREATE TRIGGER work_item_intake_no_update AFTER UPDATE ON work_item_schema_meta BEGIN SELECT 1; END")
     again.close()
     expect(() => new WorkItemStore(config.databasePath)).toThrow(/unexpected schema object/)
+  })
+
+  test('a pre-created intake table or index below schema 10 fails closed without migrating', async () => {
+    const config = await observeConfig()
+    open(config).recordIntake(input())
+    services.splice(0).forEach(service => service.close())
+    const db = new DatabaseSync(config.databasePath)
+    // The exact current shape, planted under schema 9, is still drift.
+    db.exec("DROP TRIGGER work_item_intake_no_update; DROP TRIGGER work_item_intake_no_delete; UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version'; PRAGMA user_version = 9;")
+    db.close()
+    expect(() => new WorkItemStore(config.databasePath)).toThrow(/intake object before schema 10/)
+    const again = new DatabaseSync(config.databasePath)
+    again.exec('DROP TABLE work_item_intake; CREATE INDEX work_item_intake_content_idx ON work_item(source_id)')
+    again.close()
+    expect(() => new WorkItemStore(config.databasePath)).toThrow(/intake object before schema 10/)
+    const check = new DatabaseSync(config.databasePath)
+    try {
+      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 9 })
+    } finally {
+      check.close()
+    }
   })
 })

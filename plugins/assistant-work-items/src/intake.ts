@@ -20,6 +20,7 @@ export type WorkItemIntakeStrengthReason =
   | 'allowlisted-unaddressed'
   | 'bot-capped'
   | 'not-allowlisted'
+  | 'follow-up-not-allowlisted'
 export type WorkItemIntakeReason =
   | 'strength-explicit'
   | 'strength-inferred'
@@ -45,7 +46,10 @@ export interface WorkItemIntakeInput {
   readonly senderAllowlisted: boolean
   /** The item addresses the assistant (mention, direct message, command). */
   readonly addressed: boolean
-  /** The item follows up on a thread the ledger already tracks as work. */
+  /**
+   * The item follows up on a thread the ledger already tracks as work. Only an
+   * allowlisted sender's follow-up is explicit; any other follow-up is ignored.
+   */
   readonly threadFollowUp: boolean
   readonly senderIsBot: boolean
   /** Messages only: posted in a group conversation. Defaults to `false`. */
@@ -138,17 +142,20 @@ function flag(value: unknown, field: string, fallback?: boolean): boolean {
 /**
  * Grade one item's strength from normalized metadata.
  *
- * Allowlisted and addressed, or a follow-up on a tracked work thread, is
- * `explicit`; allowlisted but unaddressed is `inferred`; anything else is
- * `ignore`. A bot sender is never stronger than `inferred`.
+ * The allowlist scopes both explicit paths: an allowlisted sender that
+ * addresses the assistant, or follows up on a tracked work thread, is
+ * `explicit`; allowlisted but otherwise unaddressed is `inferred`; anything
+ * else, including a non-allowlisted follow-up, is `ignore`. A bot sender is
+ * never stronger than `inferred`.
  */
 export function gradeIntakeStrength(signals: Pick<WorkItemIntakeSignals, 'senderAllowlisted' | 'addressed' | 'threadFollowUp' | 'senderIsBot'>):
   { readonly strength: WorkItemIntakeStrength; readonly reason: WorkItemIntakeStrengthReason } {
   let strength: WorkItemIntakeStrength
   let reason: WorkItemIntakeStrengthReason
   if (signals.senderAllowlisted && signals.addressed) [strength, reason] = ['explicit', 'allowlisted-addressed']
-  else if (signals.threadFollowUp) [strength, reason] = ['explicit', 'thread-follow-up']
+  else if (signals.senderAllowlisted && signals.threadFollowUp) [strength, reason] = ['explicit', 'thread-follow-up']
   else if (signals.senderAllowlisted) [strength, reason] = ['inferred', 'allowlisted-unaddressed']
+  else if (signals.threadFollowUp) [strength, reason] = ['ignore', 'follow-up-not-allowlisted']
   else [strength, reason] = ['ignore', 'not-allowlisted']
   if (signals.senderIsBot && strength === 'explicit') [strength, reason] = ['inferred', 'bot-capped']
   return Object.freeze({ strength, reason })
@@ -163,9 +170,10 @@ function metadataDigest(fields: Record<string, unknown>): string {
 /**
  * Validate one input and compute its grade and pre-dedup decision.
  *
- * Source opt-in filters run first: an unaddressed group message or an
- * unsubscribed event is `filtered` unless the owner enabled that source. An
- * `ignore` grade is then `filtered`; everything else is `stored` (metadata only).
+ * An `ignore` grade is `filtered`. Source opt-in filters then apply: a group
+ * message that is neither addressed nor an allowlisted follow-up, or an
+ * unsubscribed event, is `filtered` unless the owner enabled that source.
+ * Everything else is `stored` (metadata only).
  */
 export function classifyIntake(raw: WorkItemIntakeInput, policy: WorkItemIntakeSourcePolicy = DISABLED_POLICY): WorkItemIntakeCandidate {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) fail('invalid-input', 'intake input must be an object')
@@ -202,7 +210,9 @@ export function classifyIntake(raw: WorkItemIntakeInput, policy: WorkItemIntakeS
   const grade = gradeIntakeStrength(signals)
   let decision: 'stored' | 'filtered' = grade.strength === 'ignore' ? 'filtered' : 'stored'
   let reason: WorkItemIntakeReason = grade.strength === 'explicit' ? 'strength-explicit' : grade.strength === 'inferred' ? 'strength-inferred' : 'strength-ignore'
-  if (kind === 'message' && signals.groupMessage && !signals.addressed && !signals.threadFollowUp && !policy.unaddressedGroupMessages) {
+  // A follow-up counts as addressed only for an allowlisted sender.
+  const directed = signals.addressed || (signals.threadFollowUp && signals.senderAllowlisted)
+  if (kind === 'message' && signals.groupMessage && !directed && !policy.unaddressedGroupMessages) {
     [decision, reason] = ['filtered', 'unaddressed-group-disabled']
   } else if (kind === 'event' && !signals.subscribed && !policy.unsubscribedEvents) {
     [decision, reason] = ['filtered', 'unsubscribed-event-disabled']

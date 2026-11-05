@@ -660,17 +660,6 @@ export class AssistantWorkItemsService extends Service {
   }
 
   /**
-   * Claim the item bound to the calling automation occurrence.
-   *
-   * Identity comes exclusively from the frozen, production automation
-   * execution context installed by `assistant-automations`; a foreground
-   * session, a preview run and another automation all fail closed.
-   *
-   * An armed signal source is swept here (bounded by the persisted
-   * `sweepIntervalMs`) so ordinary use keeps producing work without a timer or
-   * developer orchestration. A sweep failure never fails the claim.
-   */
-  /**
    * Record one inbound item's deterministic intake decision (WP20 slice 1).
    *
    * Host-only and metadata-only: the input carries normalized booleans and an
@@ -697,6 +686,17 @@ export class AssistantWorkItemsService extends Service {
     return result
   }
 
+  /**
+   * Claim the item bound to the calling automation occurrence.
+   *
+   * Identity comes exclusively from the frozen, production automation
+   * execution context installed by `assistant-automations`; a foreground
+   * session, a preview run and another automation all fail closed.
+   *
+   * An armed signal source is swept here (bounded by the persisted
+   * `sweepIntervalMs`) so ordinary use keeps producing work without a timer or
+   * developer orchestration. A sweep failure never fails the claim.
+   */
   claim(agent: Agent | undefined): WorkItemClaimView {
     const components = this.workItemsRequired()
     this.workItemsSweepQuietly(components)
