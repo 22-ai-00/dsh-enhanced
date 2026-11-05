@@ -1911,6 +1911,10 @@ it('configured regression authority expiry closes the pre-author revision lane i
 }, 60_000)
 
 
+// WorkItem cases run real Git preparation, adoption and cold remounts; under
+// heavy host load one case measured up to ~60s.
+const WORK_ITEM_ADOPTION_TIMEOUT_MS = 120_000
+
 it('uses actual work-item grant pins and the producer writer frame without reverse peer reads', async () => {
   const f = await fixture(true, true, true, false, false, false, true)
   await f.unregisterGrowthRun()
@@ -2009,7 +2013,7 @@ it('uses actual work-item grant pins and the producer writer frame without rever
   await expect(execute('retained-after-author-expiry')).resolves.toMatchObject({ value: { answer: 'ok' } })
   f.advance(1_200_000)
   await expect(execute('retained-after-author-expiry')).rejects.toThrow()
-})
+}, WORK_ITEM_ADOPTION_TIMEOUT_MS)
 
 
 it('recovers an active current WorkItem adoption when its producer becomes ready before CP startup is published', async () => {
@@ -2091,8 +2095,10 @@ it('recovers an active current WorkItem adoption when its producer becomes ready
     // the asynchronous CP source/adoption startup barrier is released.
     restored.service.reconcileSourceGrowthRuns()
     release()
-    await vi.waitFor(() => expect(restored!.service.canEnqueueSource()).toBe(true))
-    await vi.waitFor(() => expect(restored!.context.tools.get(alias)).toBeDefined(), { timeout: 1000 })
+    // Publication and the post-publication remount run real source checks; wait
+    // for the conditions (no further nudge is sent) instead of a 1s window.
+    await vi.waitFor(() => expect(restored!.service.canEnqueueSource()).toBe(true), { timeout: 30_000 })
+    await vi.waitFor(() => expect(restored!.context.tools.get(alias)).toBeDefined(), { timeout: 30_000 })
     expect(restored.service.inspectCreatedCapability(planId)).toEqual(adopted)
     expect(restored.service.inspectWorkItemCreationReadiness({owner:f.owner})!.remaining).toEqual(quota)
     expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: originalJob.status, intentDigest: originalJob.intentDigest })
@@ -2104,7 +2110,7 @@ it('recovers an active current WorkItem adoption when its producer becomes ready
       agent:{session:{id:'same-owner-cold'},owner:f.owner},signal:new AbortController().signal} as unknown as ToolRunContext)).resolves.toMatchObject({value:{answer:'ok'}})
     expect(f.verification).toHaveBeenCalledOnce()
   } finally { release(); start.mockRestore() }
-})
+}, WORK_ITEM_ADOPTION_TIMEOUT_MS)
 
 
 it('restores an explicitly retained WorkItem capability from signed history without its current Growth producer', async () => {
@@ -2164,7 +2170,8 @@ it('restores an explicitly retained WorkItem capability from signed history with
   await unregister(); await f.ctx.fiber.dispose()
   f.advance(901_000)
   const restored = await startCapabilityHost(f)
-  await vi.waitFor(() => expect(restored.context.tools.get(alias)).toBeDefined())
+  // Cold restore runs real source checks before mounting; wait for the mount.
+  await vi.waitFor(() => expect(restored.context.tools.get(alias)).toBeDefined(), { timeout: 30_000 })
   expect(restored.service.canEnqueueSource()).toBe(false)
   expect(restored.service.inspectCreatedCapability(planId)).toEqual(adopted)
   expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: originalJob.status, intentDigest: originalJob.intentDigest })
@@ -2178,4 +2185,4 @@ it('restores an explicitly retained WorkItem capability from signed history with
   f.advance(1_200_000)
   await expect(restored.context.tools.get(alias)!.execute({query:'after-retained-reopen'}, {callId:'cold-retained-call',
     agent:{session:{id:'same-owner-retained'},owner:f.owner},signal:new AbortController().signal} as unknown as ToolRunContext)).rejects.toThrow()
-})
+}, WORK_ITEM_ADOPTION_TIMEOUT_MS)
