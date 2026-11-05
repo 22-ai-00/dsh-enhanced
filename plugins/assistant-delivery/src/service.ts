@@ -88,6 +88,7 @@ import { isSynchronousForegroundObservationHandle, validForegroundObservationReg
 import { InboundImageMaterializer } from './inbound-images.js'
 import { assessAttention, assessAttentionSplit, attentionOverCap, attentionSplitWindowMs, convertOverCapAttention, NOTIFICATION_OUTCOME_FACTS_PROTOCOL,
   type AttentionAuditEntry, type AttentionEnvelope, type AttentionLane, type AttentionPurpose, type NotificationOutcomeFact } from './attention.js'
+import { ProgressAttentionAudit, type ProgressAttentionAuditPage } from './progress-attention.js'
 import { registerDeliveryTools } from './tools.js'
 import {
   bindingMatchesOwnerRoute,
@@ -1176,6 +1177,9 @@ export class AssistantDeliveryService extends Service {
   private workItemFeedbackAckCursor = 0
   /** WP19 stage 1: audit writes never affect delivery; failures are counted in this process only (reset on restart). */
   private attentionAuditWriteFailures = 0
+  /** WP19 stage 2c: process-local progress attention audit (no Delivery schema change). */
+  private readonly progressAttentionAudit = new ProgressAttentionAudit()
+  private progressAttentionAuditFailures = 0
   private naturalObjectiveFlight: Promise<void> | undefined
   private preferenceProjectionFlight: Promise<void> | undefined
   private inboundAdmissionRecoveryFlight: Promise<void> | undefined
@@ -1392,13 +1396,17 @@ export class AssistantDeliveryService extends Service {
         authorizePermissionReply: (binding, envelope) => this.authorizePermissionReply(binding, envelope),
         beginModelCommand: conversation => this.deliveryStore.beginModelCommand(conversation),
         commitModelCommand: input => this.deliveryStore.commitModelCommand(input),
-        progress: async (binding, eventId, update) => {
+        progress: async (binding, eventId, update, origin) => {
+          // WP19 stage 2c: audit only; the send path below is unchanged.
+          try { this.progressAttentionAudit.record({ bindingId: binding.id, eventId, origin, update }) }
+          catch { this.progressAttentionAuditFailures += 1 }
           const adapter = this.registry.get(binding.conversation.channel, binding.conversation.account)
           await adapter?.progress?.({
             bindingId: binding.id,
             target: { conversation: binding.conversation, principal: binding.principal },
             eventId,
             update,
+            origin,
           })
         },
         replyCommand: (binding, eventId, reply, idempotencyKey) => { this.replyCommand(binding, {
@@ -5246,6 +5254,24 @@ export class AssistantDeliveryService extends Service {
     const facts = this.deliveryStore.attentionAudit.outcomeFactsFor(page.entries.map(entry => entry.outboxId))
     return Object.freeze({ protocol: NOTIFICATION_OUTCOME_FACTS_PROTOCOL, facts, hasMore: page.hasMore,
       nextAfterSequence: page.entries.length === 0 ? null : page.entries.at(-1)!.sequence })
+  }
+
+  /**
+   * Read-only WP19 stage-2c progress audit page in append order; never exposes
+   * progress text. Entries are process-local (`durable: false`), bounded, and
+   * reset on Host restart; `processLocalWriteFailures` counts failed records.
+   */
+  inspectProgressAttentionAudit(input: Readonly<{ afterSequence?: number; limit?: number }> = {}): Readonly<ProgressAttentionAuditPage & {
+    processLocalWriteFailures: number
+  }> {
+    this.assertActive()
+    const afterSequence = input.afterSequence ?? 0
+    const limit = input.limit ?? 100
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new AssistantDeliveryError('runtime-conflict', 'invalid progress attention audit scan')
+    }
+    return Object.freeze({ ...this.progressAttentionAudit.list(afterSequence, limit),
+      processLocalWriteFailures: this.progressAttentionAuditFailures })
   }
 
   private enqueueBackgroundAuthorized(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string, string>> }, reportTarget?: WorkItemReportTarget,

@@ -56,6 +56,8 @@ export type { WorkItemReportTarget, WorkItemReplySource, WorkItemReplyConsumerRe
 export { WorkItemReplyCancelledError } from './work-item-replies.js'
 export { assessAttention, assessAttentionSplit, attentionAttachmentSummaryGraphemes, attentionAttachmentSummaryWords, attentionAuditReasons, attentionGraphemeCaps, attentionOverCap, attentionSplitWindowMs, attentionWordCaps, convertOverCapAttention, countAttentionWords, defaultAttentionPurpose, measureAttentionText, NOTIFICATION_OUTCOME_FACTS_PROTOCOL } from './attention.js'
 export type { AttentionAssessment, AttentionAuditEntry, AttentionAuditReason, AttentionEnvelope, AttentionLane, AttentionLedgerView, AttentionPurpose, AttentionPurposeSource, AttentionQuestion, AttentionSplitVerdict, AttentionTextMeasure, AttentionVerdict, NotificationOutcomeFact } from './attention.js'
+export { ProgressAttentionAudit, progressAttentionText } from './progress-attention.js'
+export type { ProgressAttentionAuditEntry, ProgressAttentionAuditPage } from './progress-attention.js'
 
 export type { OwnerWorkItemLearningTask, OwnerLearningSourceExpectation, OwnerLearningSourceSnapshot, OwnerWorkItemLearningSourceExpectation, OwnerWorkItemLearningTaskFenceInput } from './work-item-feedback.js'
 

@@ -15,6 +15,8 @@ export interface Config {
   requireMentionInGroups?: boolean
   showProgress?: boolean
   progressDetails?: 'off' | 'direct'
+  /** WP19 stage 2c: render background progress (native Goal rounds). Default false. */
+  showBackgroundProgress?: boolean
   statusReactions?: boolean
   maxTextBytes?: number
   staleAfterMs?: number
@@ -40,6 +42,7 @@ const schema = Schema.object({
   requireMentionInGroups: Schema.boolean().default(true),
   showProgress: Schema.boolean().default(true),
   progressDetails: Schema.union(['off', 'direct'] as const).default('direct'),
+  showBackgroundProgress: Schema.boolean().default(false),
   statusReactions: Schema.boolean().default(true),
   maxTextBytes: Schema.number().step(1).min(1).max(1024 * 1024).default(65_536),
   staleAfterMs: Schema.number().step(1).min(1_000).max(86_400_000).default(300_000),
@@ -67,6 +70,7 @@ const fields = new Set([
   'maxTextBytes',
   'progressDetails',
   'requireMentionInGroups',
+  'showBackgroundProgress',
   'showProgress',
   'staleAfterMs',
   'secretSource',

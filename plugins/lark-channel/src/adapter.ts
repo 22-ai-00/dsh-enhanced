@@ -87,6 +87,8 @@ export interface LarkAdapterOptions {
   onDisconnected?(): void
   showProgress?: boolean
   progressDetails?: 'off' | 'direct'
+  /** WP19 stage 2c: opt in to rendering non-terminal background progress. Default false. */
+  showBackgroundProgress?: boolean
   /** SHA-256 of the exact app identity and secret, never the secret itself. */
   progressCredentialFingerprint?: string
   statusReactions?: boolean
@@ -579,6 +581,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       options.showProgress ?? true,
       options.progressDetails ?? 'direct',
       error => this.recordPresentationFailure(error),
+      options.showBackgroundProgress ?? false,
     )
   }
 

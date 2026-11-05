@@ -1820,6 +1820,29 @@ describe('real native Delivery Agent runtime', () => {
     expect(f.sends[0]).toMatchObject({ text: first + remainder, format: 'markdown' })
     expect(f.progresses.at(-1)?.update).toEqual({ kind: 'completed' })
     expect(f.progresses.filter(value => value.update.kind === 'completed')).toHaveLength(1)
+    // WP19 stage 2c: automatic completion turns belong to the owner's request.
+    expect(f.progresses.some(value => value.update.kind === 'step' && value.update.text === '正在自动补全回答…')).toBe(true)
+    expect(f.progresses.every(value => value.origin === 'foreground')).toBe(true)
+    await f.ctx.fiber.restart()
+  })
+
+  test('a progress attention audit failure is counted and never blocks progress or the reply (WP19 stage 2c)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-progress-audit-'))
+    roots.push(root)
+    const f = await runtimeHarness(root, new Map(), undefined, ['plain', 'markdown', 'model-picker'])
+    const audit = (f.service as unknown as { progressAttentionAudit: { record(): unknown } }).progressAttentionAudit
+    vi.spyOn(audit, 'record').mockImplementation(() => { throw new Error('audit unavailable') })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await f.service.acceptInbound(message('evt-progress-audit-fails', 'first'))
+    await drive(f.service)
+    expect(f.sends.map(value => value.text)).toEqual(['reply-1'])
+    expect(f.progresses.at(0)?.update).toEqual({ kind: 'started' })
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'completed' })
+    const page = f.service.inspectProgressAttentionAudit()
+    expect(page).toMatchObject({ entries: [], durable: false, processLocalWriteFailures: f.progresses.length })
+    expect(() => f.service.inspectProgressAttentionAudit({ limit: 0 })).toThrow(/invalid progress attention audit scan/u)
+    expect(() => f.service.inspectProgressAttentionAudit({ afterSequence: -1 })).toThrow(/invalid progress attention audit scan/u)
     await f.ctx.fiber.restart()
   })
 
@@ -10507,6 +10530,26 @@ describe('real native Delivery Agent runtime', () => {
     // No empty-retry notice was ever sent and the process never failed.
     expect(fixture.sends).toHaveLength(0)
     expect(fixture.progresses.some(value => value.update.kind === 'failed')).toBe(false)
+    // WP19 stage 2c: the owner's claimed turn (its goal_create call) and
+    // Delivery's lifecycle updates are foreground; the driver-spliced native
+    // goal round is background, so a channel can keep it off the owner card.
+    expect(fixture.progresses[0]).toMatchObject({ origin: 'foreground', update: { kind: 'started' } })
+    expect(fixture.progresses.at(-1)).toMatchObject({ origin: 'foreground', update: { kind: 'completed' } })
+    expect(fixture.progresses.find(value => value.update.kind === 'tool-started'))
+      .toMatchObject({ origin: 'foreground', update: { toolName: 'goal_create' } })
+    const goalRoundStep = fixture.progresses.findLast(value => value.update.kind === 'step')
+    expect(goalRoundStep?.origin).toBe('background')
+    expect(fixture.progresses.filter(value => value.update.kind === 'step')
+      .some(value => value.origin === 'foreground')).toBe(true)
+    // Every published progress update is audited in publication order, with
+    // its origin, and the audit never carries progress text.
+    const progressAudit = fixture.service.inspectProgressAttentionAudit({ limit: 500 })
+    expect(progressAudit).toMatchObject({ durable: false, hasMore: false, processLocalWriteFailures: 0 })
+    expect(progressAudit.entries.map(entry => [entry.origin, entry.updateKind]))
+      .toEqual(fixture.progresses.map(value => [value.origin, value.update.kind]))
+    expect(progressAudit.entries.every(entry => entry.purpose === 'result' && entry.purposeSource === 'lane'
+      && entry.verdict === 'would-accept')).toBe(true)
+    expect(JSON.stringify(progressAudit)).not.toContain('goal_create')
     // The native goal ran exactly its one armed round, then disarmed via the
     // driver round-limit block rather than being left active.
     expect(terminalGoal).toMatchObject({

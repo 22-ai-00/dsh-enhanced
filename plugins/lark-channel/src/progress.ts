@@ -214,6 +214,11 @@ export class LarkProgressPresenter {
     private readonly enabled: boolean,
     private readonly details: 'off' | 'direct',
     private readonly onFailure: (error: unknown) => void,
+    /**
+     * WP19 stage 2c opt-in. When false (default) non-terminal `background`
+     * updates, such as native Goal continuation rounds, are not rendered.
+     */
+    private readonly showBackground = false,
   ) {}
 
   bindJournal(journal: DeliveryProgressJournal | undefined, credentialFingerprint: string | undefined): void {
@@ -263,6 +268,10 @@ export class LarkProgressPresenter {
     if (!this.enabled || this.closed) return
     const terminal = intent.update.kind === 'completed' || intent.update.kind === 'failed'
       || intent.update.kind === 'paused'
+    // Background work never opens an owner-visible card, and is hidden by
+    // default. Terminals always pass so an existing foreground card still closes.
+    if (intent.origin === 'background'
+      && (intent.update.kind === 'started' || (!terminal && !this.showBackground))) return
     if (terminal && this.journal !== undefined && this.credentialFingerprint !== undefined) {
       try {
         // This durable write precedes the provider queue. A slow earlier step cannot strand the

@@ -93,6 +93,7 @@ import type {
   ConversationBinding,
   ConversationModelSelection,
   ConversationRef,
+  DeliveryProgressOrigin,
   DeliveryProgressUpdate,
   DeliveryLearningControlAction,
   DeliveryLearningControlReceipt,
@@ -225,6 +226,8 @@ interface DshDeliveryRuntimeOptions {
     binding: Readonly<ConversationBinding>,
     eventId: string,
     update: DeliveryProgressUpdate,
+    /** WP19 stage 2c: `background` for session turns other than the claimed foreground turns. */
+    origin: DeliveryProgressOrigin,
   ): Promise<void>
   replyCommand(
     binding: Readonly<ConversationBinding>,
@@ -4001,13 +4004,24 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         })])
       } finally { if (timeout !== undefined) clearTimeout(timeout) }
     }
-    const publishProgress = (update: DeliveryProgressUpdate): void => {
+    // WP19 stage 2c: only turns that claimed this inbound message (or one of its
+    // automatic completion notices) are foreground. Native Goal continuation
+    // rounds keep this listener attached until the fence settles, and a turn
+    // that was already running before the claim also reaches it; both are
+    // background. Events without `data.turn` inherit the latest opened turn.
+    const foregroundTurns = new Set<number>()
+    let currentSessionTurn: number | undefined
+    const claimForegroundTurn = (turn: number): void => {
+      foregroundTurn = turn
+      foregroundTurns.add(turn)
+    }
+    const publishProgress = (update: DeliveryProgressUpdate, origin: DeliveryProgressOrigin = 'foreground'): void => {
       const terminal = update.kind === 'completed' || update.kind === 'failed' || update.kind === 'paused'
       if ((!progressOpen && !terminal) || progressTerminal) return
       if (terminal) progressTerminal = true
       const publish = async (): Promise<void> => {
         if ((!terminal && progressTerminal) || checkAuthorization() !== 'authorized') return
-        await this.options.progress(binding, envelope.eventId, update)
+        await this.options.progress(binding, envelope.eventId, update, origin)
       }
       // Terminal journaling must not wait behind a slow provider's step updates.
       // The adapter preserves provider ordering after staging the durable result.
@@ -4064,6 +4078,11 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       const automaticCompletionToolViolations = new Set<number>()
       removeProgress = this.ctx.on('session/event', (session, event) => {
         if (session !== agent.session) return
+        const eventTurn = 'turn' in event.data && typeof event.data.turn === 'number' ? event.data.turn : undefined
+        if (event.type === 'turn/start' || event.type === 'step/start') currentSessionTurn = eventTurn
+        const progressTurn = eventTurn ?? currentSessionTurn
+        const progressOrigin: DeliveryProgressOrigin = progressTurn !== undefined && foregroundTurns.has(progressTurn)
+          ? 'foreground' : 'background'
         if (event.type === 'step/start') {
           const automaticKind = automaticCompletionTurns.get(event.data.turn)
           if (automaticKind !== undefined) {
@@ -4086,7 +4105,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         }
         if (event.type === 'tool/result' && automaticCompletionTurns.has(event.data.turn)) return
         const update = deliveryProgressFromSessionEvent(event)
-        if (update !== undefined) publishProgress(update)
+        if (update !== undefined) publishProgress(update, progressOrigin)
       })
       publishProgress({ kind: 'started' })
       const abort = () => {
@@ -4142,7 +4161,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId: envelope.eventId,
         trust: 'untrusted',
       } }) : createRestartContinuation({ continuationId: restartContinuation.id, text: restartContinuationText })
-      let deliveryTurn = await this.followupTurn(agent, message, turn => { foregroundTurn = turn }, undefined, restartContinuation === undefined ? undefined
+      let deliveryTurn = await this.followupTurn(agent, message, claimForegroundTurn, undefined, restartContinuation === undefined ? undefined
         : () => admitRestartContinuation(agent, message, { signal,
           authorize: () => {
             this.sessionLeases.assert(String(agent.session.id))
@@ -4154,7 +4173,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
             restart!.onContinuationAdmitted(restartContinuation, String(agent.session.id))
           },
         }), signal)
-      foregroundTurn = deliveryTurn
+      if (deliveryTurn !== undefined) claimForegroundTurn(deliveryTurn)
+      else foregroundTurn = deliveryTurn
       if (restartRun?.requested() !== undefined) {
         await this.waitForAgentIdle(agent, signal)
         restartCheckpoint = await restartRun.checkpoint()
@@ -4243,7 +4263,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
               signal,
               deliveryTurn,
               checkAuthorization,
-              turn => { foregroundTurn = turn; automaticCompletionTurns.set(turn, nextKind) },
+              turn => { claimForegroundTurn(turn); automaticCompletionTurns.set(turn, nextKind) },
             )
           } catch (error) {
             if (error instanceof AutomaticCompletionAuthorizationError) {

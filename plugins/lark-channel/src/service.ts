@@ -217,6 +217,7 @@ export class LarkChannelService extends Service {
         .update(JSON.stringify([config.appId, config.domain, appSecret])).digest('hex'),
       showProgress: config.showProgress,
       progressDetails: config.progressDetails,
+      showBackgroundProgress: config.showBackgroundProgress,
       statusReactions: config.statusReactions,
       userQuestionTtlMs: config.userQuestionTtlMs,
       settleApproval: value => delivery.settleApproval(value),

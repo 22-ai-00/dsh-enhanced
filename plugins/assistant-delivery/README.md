@@ -530,7 +530,7 @@ schema 31 新增只追加的 `delivery_attention_audit`，按 outbox id 去重�
 
 字数 = `Intl.Segmenter('und', { granularity: 'word' })` 的 isWordLike 片段数，加上非单词片段中除空白、标点与 ASCII 之外的字素数（如 emoji、图形符号，每个计 1），CJK 按 ICU 切分，链接文字与 URL 一并计入。硬上限：result 400、attention 120、answer 200（`attentionWordCaps`）；另按非空白字素数设第二道上限：result 2400、attention 720、answer 1200（`attentionGraphemeCaps`，约 6 倍字数上限），以覆盖一段数千字符不断开的 token（只算 1 个词）等情况。任一超限判为 `would-attach`（`over-word-cap` / `over-grapheme-cap`）。切分依赖运行中 Node.js 自带的 ICU 数据，Node/ICU 升级可能改变同一文本的计数；已记录的判定不重算。原因码见 `attentionAuditReasons`；其中 `text-exposes-estimate`、`text-exposes-identifier` 只记录现有提醒外露估值或 id，本阶段不改文本。
 
-本阶段不改变任何发送：判定为 `would-reject` 或 `would-attach` 的消息照常入队、原文发送。`inspectAttentionAudit({ afterSequence?, limit? })` 按序分页只读返回判定（默认 100、最多 500），不含正文，并附两项缺口指标：`processLocalWriteFailures` 是本进程启动以来的审计写入失败数，重启清零；`unauditedOutbox` 每次由持久数据查询得出，统计首条审计行之后创建、带审计通道持久标记（owner 通知、owner route、Automation 结果、Goal 结果、WorkItem 报告）却没有审计行的 Outbox。普通 `enqueueBackground` 行没有持久通道标记，不计入 `unauditedOutbox`，只能由进程内计数发现；首条审计行之前的缺口也无法发现。审计表无保留期与清理，任何未来的保留策略都需新 schema。前台进度、回复与审批通道不在本阶段范围。
+本阶段不改变任何发送：判定为 `would-reject` 或 `would-attach` 的消息照常入队、原文发送。`inspectAttentionAudit({ afterSequence?, limit? })` 按序分页只读返回判定（默认 100、最多 500），不含正文，并附两项缺口指标：`processLocalWriteFailures` 是本进程启动以来的审计写入失败数，重启清零；`unauditedOutbox` 每次由持久数据查询得出，统计首条审计行之后创建、带审计通道持久标记（owner 通知、owner route、Automation 结果、Goal 结果、WorkItem 报告）却没有审计行的 Outbox。普通 `enqueueBackground` 行没有持久通道标记，不计入 `unauditedOutbox`，只能由进程内计数发现；首条审计行之前的缺口也无法发现。审计表无保留期与清理，任何未来的保留策略都需新 schema。回复与审批通道不在本阶段范围。
 
 ### 第 2b 阶段：超长转附件与拒绝拆条（opt-in，默认关闭）
 
@@ -544,3 +544,12 @@ schema 31 新增只追加的 `delivery_attention_audit`，按 outbox id 去重�
 ### 通知结果事实（WP22 切片 1，只读）
 
 `inspectNotificationOutcomeFacts({ afterSequence?, limit? })` 按审计序号分页（默认 100、最多 500），`inspectNotificationOutcomeFacts({ outboxIds })` 按 id 精确查（最多 500，不可与分页参数混用，未知或未审计 id 省略）。每条事实只含审计判定、binding 的 workspace/preset、传输状态（首次 accepted 时间取 attempt，其次 receipt，最后 `updated_at`；delivered/read 取 receipt，否则状态回退）、以 `replyToProviderMessageId` 精确引用该消息的入站回复首次时间与条数（同一会话、同一 principal，含新会话命令轮换后的新 binding），以及最新已记录的工作项反馈，或无错误的 owner 目标命令（无命令时取旧版已验证任务回执作为版本 1，与 Delivery 自身目标状态一致）。回复与工作项反馈的 JSON 查找每次调用整批一次。不返回消息或回复正文，不写库，不改 schema。
+
+
+### 进度来源与进度审计（WP19 第 2c 阶段）
+
+`DeliveryProgressIntent` 新增可选 `origin: 'foreground' | 'background'`，缺省视为 foreground。认领本条入站消息的轮次、其自动补全轮次，以及 Delivery 自己发出的 `started` 与终态为 foreground；入站处理期间同一 Session 上其他轮次（主要是原生 Goal 续跑轮次，以及认领前已在运行的轮次）为 background。不带 `turn` 的事件（审批、todo）归属最近打开的轮次。adapter 应默认隐藏非终态 background 进度，且不得为 background 的 `started` 新开进度面板；终态始终送达，以便关闭已有前台面板。
+
+每条进度在交给 adapter 前审计一次，按 `lane` 来源的 `result` 计：字数与字素按一次运行（binding + eventId + origin）累计，超过 `attentionWordCaps.result` / `attentionGraphemeCaps.result` 记 `would-attach`，拆成多条气泡不能规避；估值与 id 外露原因码在本次运行内保持。计量文本取 adapter 可能展示的上界（步骤、待办、工具名与参数、结果预览、错误码），与通道详情模式无关。`inspectProgressAttentionAudit({ afterSequence?, limit? })` 只读分页（默认 100、最多 500），不含正文，返回 `durable: false`、环形淘汰数 `evicted` 与 `processLocalWriteFailures`。审计只记录，不改变进度发送。
+
+v31 `delivery_attention_audit` 以 `outbox_id` 为主键并外键到 Outbox，`lane` 为封闭集合，进度不是 Outbox 行，因此未复用该表、未改 schema：进度审计只保存在本进程内（最近 1000 条、最多 256 个未结束运行），Host 重启清零。

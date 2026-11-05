@@ -38,6 +38,13 @@ describe('lark-channel bundle contract', () => {
       appSecretEnv: 'LARK_APP_SECRET', progressDetails: 'all' } as never)).toThrow()
   })
 
+  test('hides background progress unless explicitly opted in (WP19 stage 2c)', () => {
+    const base = { account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET' }
+    expect(Config(base)).toMatchObject({ showBackgroundProgress: false })
+    expect(Config({ ...base, showBackgroundProgress: true })).toMatchObject({ showBackgroundProgress: true })
+    expect(() => Config({ ...base, showBackgroundProgress: 'yes' } as never)).toThrow()
+  })
+
   test('bounds the image resource request timeout independently from the websocket handshake', () => {
     expect(Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
       appSecretEnv: 'LARK_APP_SECRET', imageDownloadTimeoutMs: 45_000 }))

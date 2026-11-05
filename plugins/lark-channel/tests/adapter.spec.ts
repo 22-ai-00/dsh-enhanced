@@ -486,6 +486,49 @@ describe('Lark delivery adapter', () => {
     })
   })
 
+  test('hides background progress by default but still closes the foreground card (WP19 stage 2c)', async () => {
+    const f = fixture()
+    await f.adapter.start(f.context)
+    const common = { bindingId: 'binding-1', eventId: 'om_in', target: intent().target }
+    // A background-origin start never opens a card.
+    await f.adapter.progress?.({ ...common, origin: 'background', update: { kind: 'started' } })
+    expect(f.transport.createProgress).not.toHaveBeenCalled()
+    await f.adapter.progress?.({ ...common, origin: 'foreground', update: { kind: 'started' } })
+    await f.adapter.progress?.({ ...common, origin: 'foreground', update: { kind: 'step', text: '前台步骤' } })
+    await f.adapter.progress?.({ ...common, origin: 'background', update: { kind: 'step', text: '后台目标轮次' } })
+    await f.adapter.progress?.({ ...common, origin: 'background', update: {
+      kind: 'tool-started', callId: 'goal-call', toolName: 'goal.secret_tool', argumentsPreview: '{}',
+    } })
+    await f.adapter.progress?.({ ...common, origin: 'background', update: { kind: 'todos', todos: [
+      { content: '后台待办', status: 'pending' },
+    ] } })
+    await f.adapter.progress?.({ ...common, update: { kind: 'completed' } })
+
+    expect(f.transport.createProgress).toHaveBeenCalledOnce()
+    const serialized = JSON.stringify(f.transport.writeProgress.mock.calls)
+    expect(serialized).toContain('前台步骤')
+    expect(serialized).toContain('RUN_FINISHED')
+    expect(serialized).not.toContain('后台目标轮次')
+    expect(serialized).not.toContain('goal.secret_tool')
+    expect(serialized).not.toContain('后台待办')
+  })
+
+  test('renders background progress only when explicitly opted in (WP19 stage 2c)', async () => {
+    const f = fixture({ showBackgroundProgress: true })
+    await f.adapter.start(f.context)
+    const common = { bindingId: 'binding-1', eventId: 'om_in', target: intent().target }
+    await f.adapter.progress?.({ ...common, origin: 'background', update: { kind: 'started' } })
+    expect(f.transport.createProgress).not.toHaveBeenCalled()
+    await f.adapter.progress?.({ ...common, update: { kind: 'started' } })
+    await f.adapter.progress?.({ ...common, origin: 'background', update: { kind: 'step', text: '后台目标轮次' } })
+    await f.adapter.progress?.({ ...common, update: { kind: 'completed' } })
+
+    expect(f.transport.createProgress).toHaveBeenCalledOnce()
+    const serialized = JSON.stringify(f.transport.writeProgress.mock.calls)
+    expect(serialized).toContain('后台目标轮次')
+    expect(serialized).toContain('RUN_FINISHED')
+  })
+
   test('bounds disposal while a recovered progress update never returns', async () => {
     const f = fixture({ progressCredentialFingerprint: 'a'.repeat(64) })
     const record = { bindingId: 'binding-1', eventId: 'om_in', target: intent().target,

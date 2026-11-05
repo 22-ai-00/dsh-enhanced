@@ -8,6 +8,7 @@
 config:
   showProgress: true
   progressDetails: direct
+  showBackgroundProgress: false
   statusReactions: true
 ```
 
@@ -18,6 +19,8 @@ config:
 | `showProgress: true`, `progressDetails: direct`（默认） | 上述状态，以及限长、常见凭据已脱敏的工具参数与结果 | 仍仅显示状态，不发送参数或结果 |
 
 `progressDetails` 只接受 `off` 或 `direct`，不存在允许群聊详情的模式。群聊即使由 owner 直接 @ 机器人，也始终是 status-only。
+
+Delivery 为每条进度标注 `origin`（WP19 第 2c 阶段）：认领本条消息的轮次及其自动补全轮次为 foreground，同一 Session 上的其他轮次（主要是原生 Goal 续跑轮次）为 background。`showBackgroundProgress: false`（默认）时 adapter 丢弃非终态 background 进度；任何设置下都不会为 background 的开始事件新建进度消息，终态始终送达以关闭前台进度。设为 `true` 时 background 步骤、工具与待办追加到已存在的前台进度，仍受上表受众与 `progressDetails` 约束。进度注意力审计由 Delivery 完成（`inspectProgressAttentionAudit`），只记录，不改变本插件的展示。
 
 `assistant/chunk` 的流式 `reasoning-delta` 与 `assistant/message` 的已组装 reasoning 块都不会越过 Delivery 的进度边界；DSH 将它们定义为 thinking content，不保证是可公开摘要。provider 原始错误消息、系统提示和完整工具对象同样不会进入进度。`step/start` 会产生中性的阶段文案，避免面板为空。
 

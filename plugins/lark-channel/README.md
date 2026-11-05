@@ -13,7 +13,7 @@ revision 投递一条内容无关的状态更新；两种路径的重试、fence
 
 模型回答被输出上限截断、返回空正文或超过 Delivery 的 `maxTextBytes` 时，Delivery 默认会在后台自动续写、重新生成或压缩，并在恢复完成后只向飞书发送一条完整答复；正常情况不需要用户再回复“继续”。模型恢复次数耗尽或安全调度边界不可用时才展示明确的未完成提示，也不再要求用户发送“继续”这类协议词；持久化无法确认时则不投递结果，任何情况都不会把半句标成“任务已完成”。Delivery 与本插件的 `maxTextBytes` 默认都为 `65536`，手工覆盖时应保持一致。
 
-默认进度策略为 `progressDetails: direct`：经 Delivery 授权的私聊可显示限长、常见凭据已脱敏的工具参数和结果；默认向导只授权 owner。群聊只显示工具名、状态、步骤与待办。`progressDetails: off` 可在所有会话隐藏参数和结果。任何 reasoning/thinking 内容都不外发；飞书 `message_cot` 不可用时只降级展示，不影响任务或最终回复。
+默认进度策略为 `progressDetails: direct`：经 Delivery 授权的私聊可显示限长、常见凭据已脱敏的工具参数和结果；默认向导只授权 owner。群聊只显示工具名、状态、步骤与待办。`progressDetails: off` 可在所有会话隐藏参数和结果。任何 reasoning/thinking 内容都不外发；飞书 `message_cot` 不可用时只降级展示，不影响任务或最终回复。后台进度（如原生 Goal 续跑轮次）默认不展示、也不新开进度消息，`showBackgroundProgress: true` 才追加到当前前台进度；终态始终关闭前台进度。
 
 已创建的进度消息句柄由 Delivery 私有 SQLite 账本保存；终态在飞书更新前落盘。连接重建或进程重启后，只有原 Inbox 已确认结束、原绑定代次与应用凭证仍一致时才更新同一条进度消息；活动任务不会被误关。终态更新失败按间隔重试，最多八次，不会因此重新运行任务或再建进度消息。创建请求的网络结果未知时保留无句柄状态，不盲目重建；升级前没有保存句柄的历史气泡无法原位恢复。账本只保存句柄、绑定与目标摘要、终态及重试状态，不保存工具参数或思考正文。
 
@@ -91,6 +91,7 @@ config:
   requireMentionInGroups: true
   showProgress: true
   progressDetails: direct
+  showBackgroundProgress: false
   statusReactions: true
   imageDownloadTimeoutMs: 30000
   userQuestionTtlMs: 86400000

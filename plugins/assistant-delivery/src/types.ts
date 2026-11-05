@@ -940,12 +940,29 @@ export interface DeliveryProgressTodo {
   status: 'pending' | 'in_progress' | 'completed'
 }
 
+/**
+ * Which execution produced a progress update (WP19 stage 2c).
+ *
+ * `foreground` is the owner's claimed inbound turn (and its automatic answer
+ * completion turns) plus Delivery's own lifecycle updates (`started` and the
+ * terminal). `background` is any other turn observed while the inbound run is
+ * attached to the session, chiefly native Goal continuation rounds and turns
+ * that were already running before the inbound message was claimed.
+ */
+export type DeliveryProgressOrigin = 'foreground' | 'background'
+
 /** One presentation-only progress update, correlated to a durable inbound message and binding. */
 export interface DeliveryProgressIntent {
   bindingId: string
   target: DeliveryTarget
   eventId: string
   update: DeliveryProgressUpdate
+  /**
+   * Absent means `foreground` (pre-2c callers). Adapters should hide
+   * non-terminal `background` updates from the owner unless explicitly opted in,
+   * and must not open a new progress surface for one.
+   */
+  origin?: DeliveryProgressOrigin
 }
 
 /** Opaque provider handle and minimal state needed to close an existing progress surface. */

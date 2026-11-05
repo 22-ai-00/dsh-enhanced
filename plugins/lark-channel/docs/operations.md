@@ -124,5 +124,5 @@ Web 会话可调用 `assistant_health`。正常长连接状态为 `larkChannel.s
 - **权限卡不显示或点击失效：**卡片仅用于 active owner 私聊，并绑定原 chat/card、binding/session、权限状态和 15 分钟默认 TTL。群聊、过期、`/new` 后旧卡或已经文字切档都会失效；重新发送 `/permissions`。
 - **最终回复正常但没有 `Get` / `DONE`：**旧应用通常缺少 `im:message.reactions:write_only`。重跑一键向导，选择当前 App ID，确认权限增量并发布新版本。reaction 失败不会阻断回答。
 - **文字能回复但图片不能处理：**确认应用已有 `im:resource` 且发布新版本，profile 安装了 AttachmentStore，当前 route 声明图片输入。可用 `dsh-lark-setup --profile web --create-app --app-id <App ID>` 增量补权限。路径型 key、重定向、超限、MIME/magic 不一致或非 PNG/JPEG/GIF/WebP 会按预期 fail closed。
-- **看不到进度但能回答：**确认 `showProgress: true`。`message_cot` 是可降级能力；检查 `assistant_health` 的 `larkChannel.lastErrorCode` 和 Host 错误日志。私聊详情还要求 `progressDetails: direct`；群聊始终只显示状态。
+- **看不到进度但能回答：**确认 `showProgress: true`。`message_cot` 是可降级能力；检查 `assistant_health` 的 `larkChannel.lastErrorCode` 和 Host 错误日志。私聊详情还要求 `progressDetails: direct`；群聊始终只显示状态。原生 Goal 续跑等后台轮次的进度默认不显示，需要时设 `showBackgroundProgress: true`。
 - **模型卡片下拉不联动或确认后无回复：**确认订阅 `card.action.trigger` 且回调走长连接；用一键向导锁定当前应用并增量补齐回调，发布、重启后重新发送 `/model`，不要继续使用升级前旧卡。实时目录变化或 effort 不受支持时，机器人会要求重新打开。
