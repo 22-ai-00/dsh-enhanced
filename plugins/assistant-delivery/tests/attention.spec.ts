@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
-  AssistantDeliveryService, assessAttention, attentionWordCaps, countAttentionWords, deliverySchemaVersion,
+  AssistantDeliveryService, assessAttention, attentionGraphemeCaps, attentionWordCaps, countAttentionWords, deliverySchemaVersion, measureAttentionText,
   type AttentionEnvelope, type AttentionLedgerView, type OwnerRouteAuthority,
 } from '../src/index.ts'
 import { DeliveryStore } from '../src/store.ts'
@@ -19,7 +19,7 @@ const authority: OwnerRouteAuthority = {
   id: 'attention-owner', conversation, principal, workspace: '/work/alpha', agentPreset: 'primary',
   policyRef: 'owner-dm', minimumGeneration: 1,
 }
-const emptyLedger: AttentionLedgerView = { questionAsked: () => false, questionAnswered: () => false, openQuestions: () => [] }
+const emptyLedger: AttentionLedgerView = { questionAsked: () => false, questionAnswered: () => false, openQuestions: () => [], questionWorkItem: () => undefined }
 
 afterEach(async () => {
   await Promise.all([...contexts].map(async ctx => { await ctx.fiber.restart(); contexts.delete(ctx) }))
@@ -83,6 +83,34 @@ describe('attention word counting', () => {
     expect(countAttentionWords('—— ！？ ...')).toBe(0)
   })
 
+  test('emoji and pictographs count as words; punctuation and ASCII URL syntax do not', () => {
+    expect(measureAttentionText('done 👍🏽 ★ → ok')).toEqual({ words: 2, symbols: 3, graphemes: 9 })
+    expect(countAttentionWords('😀'.repeat(attentionWordCaps.result + 1))).toBe(attentionWordCaps.result + 1)
+    expect(countAttentionWords('👨‍👩‍👧‍👦')).toBe(1)
+    expect(countAttentionWords('a=b+c/d')).toBe(4)
+  })
+
+  test('an emoji wall is over cap rather than zero words', () => {
+    const wall = '🔥'.repeat(attentionWordCaps.attention + 1)
+    expect(assessAttention({ text: wall, envelope: { purpose: 'attention', workItemId: 'wi-1', question: { id: 'q-1', prompt: 'ok?' } }, ledger: emptyLedger }))
+      .toMatchObject({ wordCount: attentionWordCaps.attention + 1, verdict: 'would-attach', reasons: ['over-word-cap'] })
+    const spaced = Array.from({ length: attentionWordCaps.result + 1 }, () => '🎉').join(' ')
+    expect(assessAttention({ text: spaced, lanePurpose: { purpose: 'result' }, ledger: emptyLedger }))
+      .toMatchObject({ verdict: 'would-attach', reasons: ['over-word-cap'] })
+  })
+
+  test('a long unbroken token is caught by the grapheme cap', () => {
+    const token = Buffer.from(Array.from({ length: 3750 }, (_, i) => i % 251)).toString('base64').replace(/[+/=]/gu, 'A')
+    expect(token.length).toBe(5000)
+    expect(countAttentionWords(token)).toBe(1)
+    expect(assessAttention({ text: `payload ${token}`, lanePurpose: { purpose: 'result' }, ledger: emptyLedger }))
+      .toMatchObject({ wordCount: 2, verdict: 'would-attach', reasons: ['over-grapheme-cap'] })
+    const atCap = 'x'.repeat(attentionGraphemeCaps.answer)
+    const ledger: AttentionLedgerView = { ...emptyLedger, questionAsked: () => true }
+    expect(assessAttention({ text: atCap, envelope: { purpose: 'answer', questionId: 'q-1' }, ledger })).toMatchObject({ verdict: 'would-accept', reasons: [] })
+    expect(assessAttention({ text: `${atCap}x`, envelope: { purpose: 'answer', questionId: 'q-1' }, ledger })).toMatchObject({ verdict: 'would-attach', reasons: ['over-grapheme-cap'] })
+  })
+
   test('is deterministic and independent of call order', () => {
     const text = '请确认是否发布 v2.1？详情见 https://example.com/release/notes'
     const counts = Array.from({ length: 5 }, () => countAttentionWords(text))
@@ -135,6 +163,18 @@ describe('attention purpose validation', () => {
       .toEqual(['answer-already-used'])
   })
 
+  test('answers and repeated question ids are tied to the question work item', () => {
+    const ledger: AttentionLedgerView = { ...emptyLedger, questionAsked: id => id === 'q-1', questionWorkItem: id => id === 'q-1' ? 'wi-1' : undefined }
+    expect(assessAttention({ text: 'x', envelope: { purpose: 'answer', questionId: 'q-1' }, ledger }))
+      .toMatchObject({ workItemId: 'wi-1', answersQuestionId: 'q-1', verdict: 'would-accept', reasons: [] })
+    expect(assessAttention({ text: 'x', envelope: { purpose: 'answer', questionId: 'q-1', workItemId: 'wi-1' }, ledger }).reasons).toEqual([])
+    expect(assessAttention({ text: 'x', envelope: { purpose: 'answer', questionId: 'q-1', workItemId: 'wi-2' }, ledger }))
+      .toMatchObject({ workItemId: 'wi-2', verdict: 'would-reject', reasons: ['answer-work-item-mismatch'] })
+    expect(assessAttention({ text: 'x', envelope: { purpose: 'attention', workItemId: 'wi-2', question: { id: 'q-1', prompt: 'again?' } }, ledger }))
+      .toMatchObject({ verdict: 'would-reject', reasons: ['attention-question-reused'] })
+    expect(assessAttention({ text: 'x', envelope: { purpose: 'attention', workItemId: 'wi-1', question: { id: 'q-1', prompt: 'again?' } }, ledger }).reasons).toEqual([])
+  })
+
   test('over-cap text would become an attachment; exposure is audit-only', () => {
     const long = Array.from({ length: attentionWordCaps.attention + 1 }, (_, i) => `w${i}`).join(' ')
     expect(assessAttention({ text: long, envelope: { purpose: 'attention', workItemId: 'wi-1', question: { id: 'q-1', prompt: 'ok?' } }, ledger: emptyLedger }))
@@ -154,7 +194,7 @@ describe('attention audit through the delivery service', () => {
     expect(f.send).toHaveBeenCalledTimes(2)
     expect(f.send.mock.calls.map(call => (call as unknown as [{ text: string }])[0].text)).toEqual(['Build finished.', 'Build finished.'])
     const audit = f.service.inspectAttentionAudit()
-    expect(audit).toMatchObject({ hasMore: false, nextAfterSequence: null, writeFailures: 0 })
+    expect(audit).toMatchObject({ hasMore: false, nextAfterSequence: null, processLocalWriteFailures: 0, unauditedOutbox: 0 })
     expect(audit.entries).toEqual([
       expect.objectContaining({ sequence: 1, outboxId: legacy.id, bindingId: f.binding.id, lane: 'background', sourceId: 'proactive-engine',
         purpose: 'result', purposeSource: 'default', wordCount: 2, verdict: 'would-accept', reasons: ['missing-purpose'] }),
@@ -180,7 +220,28 @@ describe('attention audit through the delivery service', () => {
     await f.drain()
     expect(f.send).toHaveBeenCalledOnce()
     expect(f.store.getOutbox(queued.id)).toMatchObject({ status: 'accepted' })
-    expect(f.service.inspectAttentionAudit()).toMatchObject({ entries: [], writeFailures: 1 })
+    expect(f.service.inspectAttentionAudit()).toMatchObject({ entries: [], processLocalWriteFailures: 1, unauditedOutbox: 0 })
+  })
+
+  test('an unaudited owner notification is detectable from durable rows, not only the process counter', async () => {
+    const f = await fixture()
+    const owner = f.store.getPrincipal(principal)!
+    const expiresAt = Date.now() + 60_000
+    const notify = (idempotencyKey: string) => f.service.enqueueOwnerNotification({ sourceId: 'proactive-engine', ownerRouteId: authority.id,
+      scope: { principalId: 'lark/bot-1/tenant-a/ou_owner', principalRecordId: owner.id, principalVersion: owner.version,
+        workspace: '/work/alpha', preset: 'primary' }, sessionId: 'session-1', idempotencyKey, text: 'Done.', expiresAt })
+    notify('n-1')
+    const record = vi.spyOn(f.store.attentionAudit, 'record').mockImplementation(() => { throw new Error('disk full') })
+    const missed = notify('n-2')
+    f.background('plain-missed', 'no lane marker')
+    record.mockRestore()
+    expect(f.service.inspectAttentionAudit()).toMatchObject({ processLocalWriteFailures: 2, unauditedOutbox: 1 })
+    expect(f.store.attentionAudit.get(missed.id)).toBeUndefined()
+    // A replay of the same record audits it late and closes the gap.
+    expect(notify('n-2').id).toBe(missed.id)
+    expect(f.service.inspectAttentionAudit()).toMatchObject({ unauditedOutbox: 0 })
+    await f.drain()
+    expect(f.send).toHaveBeenCalledTimes(3)
   })
 
   test('tracks one current question per work item and single-use answers per binding', async () => {
@@ -205,6 +266,20 @@ describe('attention audit through the delivery service', () => {
     ])
     await f.drain()
     expect(f.send).toHaveBeenCalledTimes(7)
+  })
+
+  test('answers and reused question ids are checked against the asked work item', async () => {
+    const f = await fixture()
+    f.background('a1', 'Ship it?', { purpose: 'attention', workItemId: 'wi-1', question: { id: 'q-1', prompt: 'Ship it?' } })
+    f.background('a2', 'Ship it?', { purpose: 'attention', workItemId: 'wi-2', question: { id: 'q-1', prompt: 'Ship it?' } })
+    f.background('r1', 'yes', { purpose: 'answer', questionId: 'q-1', workItemId: 'wi-2' })
+    f.background('r2', 'yes', { purpose: 'answer', questionId: 'q-1' })
+    expect(f.service.inspectAttentionAudit().entries.map(entry => [entry.workItemId, entry.verdict, entry.reasons])).toEqual([
+      ['wi-1', 'would-accept', []],
+      ['wi-2', 'would-reject', ['attention-question-reused']],
+      ['wi-2', 'would-reject', ['answer-work-item-mismatch']],
+      ['wi-1', 'would-accept', []],
+    ])
   })
 
   test('owner notifications and owner routes are audited; reminder exposure is recorded only', async () => {

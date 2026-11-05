@@ -13,7 +13,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 - Linux 原生隔离、源码 prepare、工具创建/修订、独立验收及 owner 升级事务已有实现。普通 autonomy 安装、Web setup/doctor 已接通 native 资源；重复 setup 保留身份、原期限和已用额度。Linux x64/cgroup v1 已实测；cgroup v2 拒绝，arm64 未验收。pre-owner 资源迁移已有双端根检查，不能代替 live owner 升级。
 - 原生 Goal 已贯通真实 Cordis/Loader/NativeWeb/AgentLoop、产物绑定及独立 Linux 验收。正确产物得到 achieved，退出码为零的错误产物被拒绝；冷账本和资源清理已独立核验。供应商为本地脚本，不证明真实模型或任意任务能力。
 - WorkItems 默认关闭、observe 模式；持久准入、认领、报告和有界 resume 已实现。显式 diagnosis 使用冻结 supplier、权限和有限预算执行只读诊断；只在准确 occurrence 成功且结算后续办，unknown 不自动重放。主人前台 `work_item_list` / `work_item_recall` 按 owner lineage 过滤并支持跨会话分页召回，不恢复旧授权或额度。
-- 显式 `ownerReplyContinuation` 接通真实报告回复、持久子项与原生续办；先保存子项再 ACK，ACK 前不派发。显式 `ownerReportFeedback` 将准确 owner 结果回复接入 Evaluation，更正、撤回及丢 ACK 按原操作对账。Delivery schema 30、Evaluation schema 13、WorkItems schema 9；报告入队不代表外部送达，owner testimony 不等于独立技术成功。
+- 显式 `ownerReplyContinuation` 接通真实报告回复、持久子项与原生续办；先保存子项再 ACK，ACK 前不派发。显式 `ownerReportFeedback` 将准确 owner 结果回复接入 Evaluation，更正、撤回及丢 ACK 按原操作对账。Delivery schema 31（新增只追加的注意力审计表）、Evaluation schema 13、WorkItems schema 9；报告入队不代表外部送达，owner testimony 不等于独立技术成功。
 - 后台反馈 → 持久经验 → 后续召回已交付至 `dev`（实现 `9d515afc`）。学习、独立审查、有限采用三份授权须分别启用 `workItemExperiences`；默认及前台 v1 不变。认证主人原文提供经验引文，worker 报告只作背景；更正、撤回或来源不可用时隐藏失效经验，unknown 不重复付费或返还额度。真实组件和新会话 Memory.search 已贯通；组件重挂不等于全进程重启，Host 调用不证明模型自主召回。
 
 ## 当前交付：后台反馈驱动工程成长

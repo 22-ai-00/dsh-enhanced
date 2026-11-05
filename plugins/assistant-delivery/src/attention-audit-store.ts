@@ -72,7 +72,28 @@ export class AttentionAuditStore {
         AND NOT EXISTS(SELECT 1 FROM delivery_attention_audit a WHERE a.binding_id=q.binding_id AND a.answers_question_id=q.question_id
           AND a.purpose='answer' AND a.verdict!='would-reject') ORDER BY q.question_id`).all(bindingId, workItemId) as { id: string }[])
         .map(row => row.id),
+      questionWorkItem: questionId => (this.database.prepare(`SELECT work_item_id FROM delivery_attention_audit WHERE binding_id=? AND question_id=?
+        AND purpose='attention' AND verdict!='would-reject' AND work_item_id IS NOT NULL ORDER BY audit_sequence LIMIT 1`)
+        .get(bindingId, questionId) as { work_item_id: string } | undefined)?.work_item_id,
     }
+  }
+
+  /**
+   * Durable gap detector, derived by query (no extra state): Outbox rows that
+   * carry a durable marker of an audited lane, were created at or after the
+   * first audit row, and have no audit row. Plain `enqueueBackground` rows
+   * carry no lane marker and are not counted here. Gaps before the first
+   * successful audit write are not detectable.
+   */
+  unauditedOutboxCount(): number {
+    return (this.database.prepare(`SELECT count(*) AS count FROM outbox_messages o
+      WHERE o.created_at >= (SELECT min(recorded_at) FROM delivery_attention_audit)
+      AND NOT EXISTS(SELECT 1 FROM delivery_attention_audit a WHERE a.outbox_id=o.id)
+      AND (json_extract(o.intent_json,'$.metadata."dsh.native-notice"')='v1'
+        OR json_extract(o.intent_json,'$.metadata."dsh.route.authority"') IS NOT NULL
+        OR json_extract(o.intent_json,'$.metadata."dsh.learning.kind"') IN ('automation-run','goal-outcome')
+        OR EXISTS(SELECT 1 FROM delivery_goal_outcome_targets g WHERE g.outbox_id=o.id)
+        OR EXISTS(SELECT 1 FROM delivery_work_item_reports r WHERE r.outbox_id=o.id))`).get() as { count: number }).count
   }
 
   /** Assess against the committed ledger and append in one writer transaction; an existing row wins. */

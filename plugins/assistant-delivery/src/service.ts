@@ -1166,7 +1166,7 @@ export class AssistantDeliveryService extends Service {
   private workItemFeedbackFlight: Promise<void> | undefined
   private workItemFeedbackCursor = 0
   private workItemFeedbackAckCursor = 0
-  /** WP19 stage 1: audit writes never affect delivery; failures are only counted. */
+  /** WP19 stage 1: audit writes never affect delivery; failures are counted in this process only (reset on restart). */
   private attentionAuditWriteFailures = 0
   private naturalObjectiveFlight: Promise<void> | undefined
   private preferenceProjectionFlight: Promise<void> | undefined
@@ -5138,9 +5138,15 @@ export class AssistantDeliveryService extends Service {
     return record
   }
 
-  /** Read-only WP19 stage-1 audit page in append order; never exposes message text. */
+  /**
+   * Read-only WP19 stage-1 audit page in append order; never exposes message text.
+   * `processLocalWriteFailures` counts failed audit writes since this Host started;
+   * `unauditedOutbox` is derived from durable rows on every call (see
+   * `AttentionAuditStore.unauditedOutboxCount` for which lanes it can see).
+   */
   inspectAttentionAudit(input: Readonly<{ afterSequence?: number; limit?: number }> = {}): Readonly<{
-    entries: readonly AttentionAuditEntry[]; hasMore: boolean; nextAfterSequence: number | null; writeFailures: number
+    entries: readonly AttentionAuditEntry[]; hasMore: boolean; nextAfterSequence: number | null
+    processLocalWriteFailures: number; unauditedOutbox: number
   }> {
     this.assertActive()
     const afterSequence = input.afterSequence ?? 0
@@ -5150,7 +5156,8 @@ export class AssistantDeliveryService extends Service {
     }
     const page = this.deliveryStore.attentionAudit.list(afterSequence, limit)
     return Object.freeze({ entries: page.entries, hasMore: page.hasMore,
-      nextAfterSequence: page.hasMore ? page.entries.at(-1)!.sequence : null, writeFailures: this.attentionAuditWriteFailures })
+      nextAfterSequence: page.hasMore ? page.entries.at(-1)!.sequence : null,
+      processLocalWriteFailures: this.attentionAuditWriteFailures, unauditedOutbox: this.deliveryStore.attentionAudit.unauditedOutboxCount() })
   }
 
   private enqueueBackgroundAuthorized(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string, string>> }, reportTarget?: WorkItemReportTarget,

@@ -36,7 +36,10 @@ export const attentionAuditReasons = [
   'answer-missing-question',
   'answer-unknown-question',
   'answer-already-used',
+  'answer-work-item-mismatch',
+  'attention-question-reused',
   'over-word-cap',
+  'over-grapheme-cap',
   'text-exposes-estimate',
   'text-exposes-identifier',
 ] as const
@@ -45,6 +48,7 @@ export type AttentionAuditReason = typeof attentionAuditReasons[number]
 const rejectReasons: ReadonlySet<AttentionAuditReason> = new Set([
   'invalid-envelope', 'attention-missing-work-item', 'attention-question-invalid', 'attention-question-not-current',
   'attention-question-already-answered', 'answer-missing-question', 'answer-unknown-question', 'answer-already-used',
+  'answer-work-item-mismatch', 'attention-question-reused',
 ])
 
 /**
@@ -58,18 +62,55 @@ export const attentionWordCaps: Readonly<Record<AttentionPurpose, number>> = Obj
   answer: 200,
 })
 
+/**
+ * Secondary length guard: non-whitespace graphemes, about six per capped word.
+ * It catches content the word segmenter undercounts, such as one unbroken
+ * multi-kilobyte token (one word-like segment) or long emoji runs.
+ */
+export const attentionGraphemeCaps: Readonly<Record<AttentionPurpose, number>> = Object.freeze({
+  result: 2400,
+  attention: 720,
+  answer: 1200,
+})
+
 /** Legacy callers that declare nothing are audited as `result`, the least restrictive purpose. */
 export const defaultAttentionPurpose: AttentionPurpose = 'result'
 
 // Fixed locale keeps counts independent of Host locale. CJK runs use ICU
 // dictionary segmentation; link text and URLs are part of the raw text, so a
 // URL counts by its word-like parts and cannot be used to hide length.
+// Segmentation follows the ICU data of the running Node.js, so counts may
+// shift across Node/ICU upgrades; recorded verdicts are never recomputed.
 const wordSegmenter = new Intl.Segmenter('und', { granularity: 'word' })
+const graphemeSegmenter = new Intl.Segmenter('und', { granularity: 'grapheme' })
+/** Whitespace, punctuation and ASCII separators (URL/code syntax) are not counted as symbols. */
+const uncountedGrapheme = /^(?:\s|\p{P}|\p{ASCII})+$/u
 
+export interface AttentionTextMeasure {
+  /** `isWordLike` word segments. */
+  words: number
+  /** Non-word graphemes other than whitespace, punctuation and ASCII, e.g. emoji or pictographs. */
+  symbols: number
+  /** All non-whitespace graphemes. */
+  graphemes: number
+}
+
+export function measureAttentionText(text: string): AttentionTextMeasure {
+  let words = 0
+  let symbols = 0
+  for (const segment of wordSegmenter.segment(text)) {
+    if (segment.isWordLike === true) { words += 1; continue }
+    for (const grapheme of graphemeSegmenter.segment(segment.segment)) if (!uncountedGrapheme.test(grapheme.segment)) symbols += 1
+  }
+  let graphemes = 0
+  for (const grapheme of graphemeSegmenter.segment(text)) if (!/^\s+$/u.test(grapheme.segment)) graphemes += 1
+  return { words, symbols, graphemes }
+}
+
+/** Audited word count: word-like segments plus symbol graphemes, so an emoji wall cannot count as zero. */
 export function countAttentionWords(text: string): number {
-  let count = 0
-  for (const segment of wordSegmenter.segment(text)) if (segment.isWordLike === true) count += 1
-  return count
+  const measure = measureAttentionText(text)
+  return measure.words + measure.symbols
 }
 
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
@@ -99,6 +140,8 @@ export interface AttentionLedgerView {
   questionAnswered(questionId: string): boolean
   /** Accepted, still unanswered question ids open for this work item on this binding. */
   openQuestions(workItemId: string): readonly string[]
+  /** Work item of the first accepted attention notice that asked this question on this binding. */
+  questionWorkItem(questionId: string): string | undefined
 }
 
 export interface AttentionAssessment {
@@ -151,6 +194,8 @@ export function assessAttention(input: Readonly<{
       else questionId = envelope.question.id
       if (questionId !== undefined) {
         if (input.ledger.questionAnswered(questionId)) reasons.add('attention-question-already-answered')
+        const askedFor = input.ledger.questionWorkItem(questionId)
+        if (askedFor !== undefined && askedFor !== workItemId) reasons.add('attention-question-reused')
         if (workItemId !== undefined && input.ledger.openQuestions(workItemId).some(open => open !== questionId)) {
           reasons.add('attention-question-not-current')
         }
@@ -160,18 +205,28 @@ export function assessAttention(input: Readonly<{
       else {
         answersQuestionId = envelope.questionId
         if (!input.ledger.questionAsked(answersQuestionId)) reasons.add('answer-unknown-question')
-        else if (input.ledger.questionAnswered(answersQuestionId)) reasons.add('answer-already-used')
+        else {
+          if (input.ledger.questionAnswered(answersQuestionId)) reasons.add('answer-already-used')
+          // An answer belongs to its question's work item; an undeclared item is taken from the question.
+          const askedFor = input.ledger.questionWorkItem(answersQuestionId)
+          if (askedFor !== undefined) {
+            if (workItemId === undefined) workItemId = askedFor
+            else if (workItemId !== askedFor) reasons.add('answer-work-item-mismatch')
+          }
+        }
       }
     }
   }
-  const wordCount = countAttentionWords(input.text)
+  const measure = measureAttentionText(input.text)
+  const wordCount = measure.words + measure.symbols
   const wordCap = attentionWordCaps[purpose]
   if (wordCount > wordCap) reasons.add('over-word-cap')
+  if (measure.graphemes > attentionGraphemeCaps[purpose]) reasons.add('over-grapheme-cap')
   if (estimatePattern.test(input.text)) reasons.add('text-exposes-estimate')
   if (exposedIdPattern.test(input.text)) reasons.add('text-exposes-identifier')
   const ordered = attentionAuditReasons.filter(reason => reasons.has(reason))
   const verdict: AttentionVerdict = ordered.some(reason => rejectReasons.has(reason)) ? 'would-reject'
-    : reasons.has('over-word-cap') ? 'would-attach' : 'would-accept'
+    : reasons.has('over-word-cap') || reasons.has('over-grapheme-cap') ? 'would-attach' : 'would-accept'
   return {
     purpose, purposeSource,
     ...(workItemId === undefined ? {} : { workItemId }),
