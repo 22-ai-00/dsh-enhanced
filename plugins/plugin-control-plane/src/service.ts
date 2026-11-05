@@ -2,7 +2,8 @@ import { cleanedLinuxSourcePreflight, consumeCleanedLinuxSourcePreflight, consum
 import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type AdoptionCoordinatorConfig } from './adoption-coordinator.js'
 import { CreationCapabilityJournal, creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
 import { CreationCapabilityRuntime } from './creation-capability-runtime.js'
-import { inspectCreationCapabilityOrdinaryUseReport, inspectCreationCapabilityTaskAssociations,
+import { inspectCreationCapabilityAvailabilityAttribution, inspectCreationCapabilityOrdinaryUseReport,
+  inspectCreationCapabilityTaskAssociations,
   type CreationCapabilityFeedbackInput } from './creation-capability-feedback.js'
 import { captureCreationCapabilitySource } from './creation-capability-source.js'
 import type { CreationCapabilityConfig, CreationCapabilityRecord } from './creation-capability-types.js'
@@ -1136,8 +1137,20 @@ export class PluginControlPlaneService extends Service {
     try { return inspectCreationCapabilityOrdinaryUseReport(input()) } catch { return undefined }
   }
 
+  /** Host-only observational before/after attribution of one adoption over the owner's certified tasks; never causal. */
+  inspectCreatedCapabilityAvailabilityAttribution = (planId: string, options: { windowMs?: number } = {}) => {
+    const input = this.createdCapabilityFeedbackInput(planId)
+    if (!input) return undefined
+    try {
+      return inspectCreationCapabilityAvailabilityAttribution({ ...input(),
+        otherAdoptedAt: this.creationCapabilityRuntime?.inspectOtherAdoptionTimes(planId) ?? [],
+        ...(options.windowMs === undefined ? {} : { windowMs: options.windowMs }) })
+    } catch { return undefined }
+  }
+
   /** The historical read is deferred so callers keep it inside their own failure boundary. */
-  private createdCapabilityFeedbackInput(planId: string): (() => CreationCapabilityFeedbackInput) | undefined {
+  private createdCapabilityFeedbackInput(planId: string):
+  (() => CreationCapabilityFeedbackInput & { evaluation: AssistantEvaluationService }) | undefined {
     this.abort.signal.throwIfAborted()
     const snapshot = this.creationCapabilityRuntime?.inspectAssociationEvidence(planId)
     if (!snapshot || !this.config.creationCapabilities) return undefined

@@ -500,6 +500,12 @@ export class CreationCapabilityRuntime {
     return record?.receipt ? { record, calls: this.inspectCallEvidence(planId) } : undefined
   }
 
+  /** Adoption times of every other receipt in this journal; a concurrent-change flag only, never evidence. */
+  inspectOtherAdoptionTimes(planId: string): readonly number[] {
+    return this.journal.list().flatMap(record => record.planId !== planId && record.receipt
+      ? [record.receipt.adoptedAt] : [])
+  }
+
   /** Historical data only; callers must check the current authenticated owner. */
   inspectSourceEvidence(planId: string) {
     const record = this.journal.inspect(planId)

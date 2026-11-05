@@ -9,10 +9,12 @@ export type { NormalizedControlPlaneConfig } from './service.js'
 export type { CreationCapabilityConfig, CreationCapabilityOwner, CreationCapabilityReceipt,
   CreationCapabilitySourceArchive, CreationCapabilityTaskAssociation, CreationCapabilityOrdinaryUseReport,
   CreationCapabilityOrdinaryUseStratum, CreationCapabilityOrdinaryUseMeasures, CreationCapabilityOrdinaryUseModel,
-  CreationCapabilityOrdinaryUseQuality, CreationCapabilityOrdinaryUseLatency } from './creation-capability-types.js'
+  CreationCapabilityOrdinaryUseQuality, CreationCapabilityOrdinaryUseLatency, CreationCapabilityAvailabilityAttribution,
+  CreationCapabilityAttributionStratum, CreationCapabilityAttributionArm, CreationCapabilityAttributionDelta } from './creation-capability-types.js'
 export type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
-export { inspectCreationCapabilityOrdinaryUseReport, inspectCreationCapabilityTaskAssociations } from './creation-capability-feedback.js'
-export type { CreationCapabilityFeedbackInput } from './creation-capability-feedback.js'
+export { inspectCreationCapabilityAvailabilityAttribution, inspectCreationCapabilityOrdinaryUseReport,
+  inspectCreationCapabilityTaskAssociations } from './creation-capability-feedback.js'
+export type { CreationCapabilityAttributionInput, CreationCapabilityFeedbackInput } from './creation-capability-feedback.js'
 export { creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig,
   verifyCreationCapabilityReceipt } from './creation-capability-journal.js'
 export * from './catalog.js'

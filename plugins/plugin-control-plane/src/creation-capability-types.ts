@@ -236,6 +236,58 @@ export interface CreationCapabilityOrdinaryUseReport {
   cost: { status: 'unmeasured' }
 }
 
+/** Exact achieved-rate difference after minus before, as an unreduced fraction; never pooled across models. */
+export type CreationCapabilityAttributionDelta =
+  | { status: 'paired'; numerator: number; denominator: number; sign: -1 | 0 | 1 }
+  | { status: 'insufficient' }
+
+export interface CreationCapabilityAttributionArm {
+  quality: CreationCapabilityOrdinaryUseQuality
+  taskLatency: CreationCapabilityOrdinaryUseLatency
+}
+
+export interface CreationCapabilityAttributionStratum {
+  model: CreationCapabilityOrdinaryUseModel
+  before: CreationCapabilityAttributionArm
+  after: CreationCapabilityAttributionArm
+  achievedRateDelta: CreationCapabilityAttributionDelta
+}
+
+/**
+ * Observational intention-to-treat attribution: every certified current owner foreground task in equal windows
+ * before and after adoption, stratified by frozen task model. Not randomized and never adoption or promotion evidence.
+ */
+export interface CreationCapabilityAvailabilityAttribution {
+  protocol: 'dsh-created-capability-availability-attribution/v1'
+  causal: false
+  design: 'adoption-before-after-itt-model-stratified'
+  planId: string
+  receiptDigest: string
+  artifactSha256: string
+  schemaDigest: string
+  adoptionStatus: CreationCapabilityRecord['status']
+  withinSignedUseWindow: boolean
+  minimumSamples: number
+  /** Before is [adoptedAt - windowMs, adoptedAt], after is (adoptedAt, adoptedAt + windowMs], by task dispatch time. */
+  windowMs: number
+  scopeWatermark: number
+  rowsDigest: string
+  population: {
+    scanned: number
+    counted: number
+    excluded: { nonForeground: number; trigger: number; retracted: number; unverified: number; outsideWindow: number }
+  }
+  /** After-window tasks with a current exact call of this adoption; intention-to-treat counts every after task. */
+  exposure: { afterTasks: number; exposedTasks: number }
+  /** Other adoptions in the same journal whose adoption time falls inside either window. */
+  concurrentAdoptions: { status: 'none' | 'flagged'; count: number }
+  strata: readonly CreationCapabilityAttributionStratum[]
+  /** Sign agreement over paired strata only; mixed when any paired stratum disagrees. */
+  direction: 'improved' | 'regressed' | 'unchanged' | 'mixed' | 'insufficient'
+  regressions: { status: 'unmeasured' }
+  cost: { status: 'unmeasured' }
+}
+
 export interface CreationCapabilityCall {
   key: string
   status: 'claimed' | 'completed' | 'unknown'

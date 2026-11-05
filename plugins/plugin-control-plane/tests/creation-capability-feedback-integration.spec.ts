@@ -15,7 +15,7 @@ import type { DeliveryStore } from '../../assistant-delivery/lib/store.js'
 import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { afterEach, expect, test, vi } from 'vitest'
-import { inspectCreationCapabilityTaskAssociations } from '../src/creation-capability-feedback.ts'
+import { inspectCreationCapabilityAvailabilityAttribution, inspectCreationCapabilityTaskAssociations } from '../src/creation-capability-feedback.ts'
 import type { CreationCapabilityCallEvidence, CreationCapabilityRecord } from '../src/creation-capability-types.ts'
 import { controlPlaneDigest } from '../src/store.ts'
 
@@ -115,8 +115,8 @@ async function fixture() {
   return { ctx, evaluation, delivery, store, principal, scope, owner, record, task, feedback }
 }
 
-function inspect(f: Awaited<ReturnType<typeof fixture>>, originalInboxId: string, calls: readonly CreationCapabilityCallEvidence[]) {
-  return inspectCreationCapabilityTaskAssociations({ record: f.record, calls, triggerInboxId: originalInboxId,
+function feedbackInput(f: Awaited<ReturnType<typeof fixture>>, originalInboxId: string, calls: readonly CreationCapabilityCallEvidence[]) {
+  return { record: f.record, calls, triggerInboxId: originalInboxId,
     owner: f.owner, evaluation: f.evaluation, delivery: f.delivery, readSourceCurrent: () => {
       const source = f.evaluation.getTrustedForegroundLearningProjection({ scope: f.scope, inboxId: originalInboxId })!
       const authenticated = f.delivery.inspectOwnerForegroundLearningTask({ authorityId: f.owner.authorityId,
@@ -124,7 +124,11 @@ function inspect(f: Awaited<ReturnType<typeof fixture>>, originalInboxId: string
       if (!authenticated || authenticated.canonical.objective?.status !== 'not-achieved'
         || authenticated.canonical.projection.disposition !== 'upsert') throw new Error('original source changed')
       return { scopeWatermark: source.scopeWatermark, projection: source.projection }
-    } })
+    } }
+}
+
+function inspect(f: Awaited<ReturnType<typeof fixture>>, originalInboxId: string, calls: readonly CreationCapabilityCallEvidence[]) {
+  return inspectCreationCapabilityTaskAssociations(feedbackInput(f, originalInboxId, calls))
 }
 
 test('associates real authenticated task feedback, changes the current revision, and removes withdrawn results', async () => {
@@ -182,4 +186,39 @@ test('rejects real owner ABA between the first read and the canonical writer fen
   })
   expect(inspect(f, original.inboxId, [later.call])).toEqual([])
   expect(later.call.status).toBe('completed')
+})
+
+test('attributes real certified owner tasks before and after adoption, following correction and withdrawal', async () => {
+  const f = await fixture()
+  const original = await f.task('attr-original')
+  await f.feedback(original, 'attr-original-feedback', 'not-achieved')
+  const before = await f.task('attr-before')
+  await f.feedback(before, 'attr-before-feedback', 'not-achieved')
+  await new Promise(resolve => setTimeout(resolve, 5))
+  const adoptedAt = Date.now()
+  await new Promise(resolve => setTimeout(resolve, 5))
+  const receipt = { ...f.record.receipt!, adoptedAt }
+  const record = { ...f.record, receipt }
+  const exposed = await f.task('attr-exposed')
+  await f.feedback(exposed, 'attr-exposed-feedback', 'achieved')
+  const unexposed = await f.task('attr-unexposed')
+  await f.feedback(unexposed, 'attr-unexposed-feedback', 'achieved')
+  const calls = [{ ...exposed.call, receiptDigest: controlPlaneDigest(receipt) }]
+  const read = () => inspectCreationCapabilityAvailabilityAttribution({ ...feedbackInput(f, original.inboxId, calls),
+    record, now: adoptedAt + 30_000, minimumSamples: 1 })
+  const first = read()!
+  expect(first).toMatchObject({ causal: false, windowMs: 30_000, direction: 'improved',
+    population: { counted: 3, excluded: { trigger: 1, retracted: 0, unverified: 0, outsideWindow: 0 } },
+    exposure: { afterTasks: 2, exposedTasks: 1 } })
+  expect(first.strata).toHaveLength(1)
+  expect(first.strata[0]).toMatchObject({ before: { quality: { samples: 1, achieved: 0 } },
+    after: { quality: { samples: 2, achieved: 2 } }, achievedRateDelta: { numerator: 2, denominator: 2, sign: 1 } })
+  expect(JSON.stringify(first)).not.toMatch(/private|attr-/)
+  await f.feedback(exposed, 'attr-exposed-correction', 'correct 1 achieved not-achieved')
+  expect(read()!.strata[0]!.achievedRateDelta).toEqual({ status: 'paired', numerator: 1, denominator: 2, sign: 1 })
+  await f.feedback(unexposed, 'attr-unexposed-withdrawal', 'withdraw 1 achieved')
+  const withdrawn = read()!
+  expect(withdrawn).toMatchObject({ direction: 'unchanged', population: { counted: 2, excluded: { retracted: 1 } },
+    exposure: { afterTasks: 1, exposedTasks: 1 } })
+  expect(withdrawn.scopeWatermark).toBeGreaterThan(first.scopeWatermark)
 })

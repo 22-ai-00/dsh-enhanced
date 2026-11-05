@@ -148,6 +148,13 @@ async function fixture(withVerification = false, withAdoption = false, withReten
       try { fenceDb.exec('BEGIN IMMEDIATE'); const value = callback(); fenceDb.exec('COMMIT'); return { matched: true, value } }
       finally { fenceDb.close(); evaluationWriterHeld = false }
     },
+    listTrustedTaskLearningProjections: () => {
+      const heads = [activeSource, ...(laterSource ? [laterSource] : [])].map(item => structuredClone(item.canonical))
+      return { items: heads.map((receipt, index) => ({ watermark: index + 1, receipt })),
+        nextCursor: { scopeKey: 'scope', watermark: heads.length }, scopeWatermark: activeSource.canonical.scopeWatermark, hasMore: false }
+    },
+    withTrustedCanonicalScopeWriterFence: (input: { scopeWatermark: number }, callback: () => unknown) =>
+      input.scopeWatermark === activeSource.canonical.scopeWatermark ? { matched: true, value: callback() } : { matched: false },
     onTrustedTaskChange: (listener: () => void) => { taskChangeListeners.add(listener); return () => { taskChangeListeners.delete(listener) } } }
   ctx.provide('assistantDelivery' as never, deliveryPorts)
   ctx.provide('assistantEvaluation' as never, evaluationPorts)
@@ -753,6 +760,11 @@ it.each(['correction', 'withdrawal'] as const)(
       strata: [{ model: { state: 'frozen', provider: 'supplier', model: 'task-model', reasoningEffort: 'high' } }],
       regressions: { status: 'unmeasured' }, cost: { status: 'unmeasured' } })
     expect(JSON.stringify(ordinaryUse)).not.toMatch(/later ordinary task succeeded|hello-again|answer|subsequent-inbox/)
+    // The fixture source has no execution record, so the later task cannot be placed in a window.
+    expect(f.service.inspectCreatedCapabilityAvailabilityAttribution(planId)).toMatchObject({
+      protocol: 'dsh-created-capability-availability-attribution/v1', causal: false, planId,
+      population: { scanned: 2, counted: 0, excluded: { trigger: 1, unverified: 1 } },
+      concurrentAdoptions: { status: 'none', count: 0 }, direction: 'insufficient' })
     expect(adoption()).toEqual({ ...adoptedBefore, calls: 2 })
     expect(runnerRun).toHaveBeenCalledTimes(3)
     f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
@@ -766,6 +778,7 @@ it.each(['correction', 'withdrawal'] as const)(
         projection: { ...f.source.canonical.projection, disposition: 'retract' } } })
     expect(f.service.inspectCreatedCapabilityTaskAssociations(planId)).toEqual([])
     expect(f.service.inspectCreatedCapabilityOrdinaryUseReport(planId)).toBeUndefined()
+    expect(f.service.inspectCreatedCapabilityAvailabilityAttribution(planId)).toBeUndefined()
     await expect(tool.execute({ query: 'after-change' }, { ...valid, callId: 'changed-call' } as ToolRunContext)).rejects.toThrow()
     const reconcile = vi.spyOn(CreationCapabilityRuntime.prototype, 'reconcile')
     f.notifyTaskChange()
