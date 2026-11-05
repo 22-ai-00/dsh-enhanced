@@ -83,7 +83,7 @@ async function fixtureDump(home: string, profile: string): Promise<YAMLSeq> {
       if (target === undefined) continue
       if (entry.has('disabled')) target.set('disabled', entry.get('disabled'))
       const config = entry.get('config', true)
-      if (config !== undefined) target.set('config', (config as YAMLMap).clone())
+      if (isMap(config)) target.set('config', config.clone())
     }
   }
   return rows
