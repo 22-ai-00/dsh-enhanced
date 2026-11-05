@@ -543,4 +543,4 @@ schema 31 新增只追加的 `delivery_attention_audit`，按 outbox id 去重�
 
 ### 通知结果事实（WP22 切片 1，只读）
 
-`inspectNotificationOutcomeFacts({ afterSequence?, limit? })` 按审计序号分页（默认 100、最多 500），`inspectNotificationOutcomeFacts({ outboxIds })` 按 id 精确查（最多 500，不可与分页参数混用，未知或未审计 id 省略）。每条事实只含审计判定、binding 的 workspace/preset、传输状态（首次 accepted 时间取 attempt，其次 receipt，最后 `updated_at`；delivered/read 取 receipt，否则状态回退）、以 `replyToProviderMessageId` 精确引用该消息的入站回复首次时间与条数，以及最新已记录的工作项反馈或无错误的 owner 目标命令（版本、目标状态）。不返回消息或回复正文，不写库，不改 schema。
+`inspectNotificationOutcomeFacts({ afterSequence?, limit? })` 按审计序号分页（默认 100、最多 500），`inspectNotificationOutcomeFacts({ outboxIds })` 按 id 精确查（最多 500，不可与分页参数混用，未知或未审计 id 省略）。每条事实只含审计判定、binding 的 workspace/preset、传输状态（首次 accepted 时间取 attempt，其次 receipt，最后 `updated_at`；delivered/read 取 receipt，否则状态回退）、以 `replyToProviderMessageId` 精确引用该消息的入站回复首次时间与条数（同一会话、同一 principal，含新会话命令轮换后的新 binding），以及最新已记录的工作项反馈，或无错误的 owner 目标命令（无命令时取旧版已验证任务回执作为版本 1，与 Delivery 自身目标状态一致）。回复与工作项反馈的 JSON 查找每次调用整批一次。不返回消息或回复正文，不写库，不改 schema。

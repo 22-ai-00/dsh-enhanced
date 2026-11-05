@@ -116,18 +116,21 @@ export function classifyNotificationOutcome(fact: NotificationOutcomeFactInput, 
   const sentTimes = [fact.transport.acceptedAt, fact.transport.deliveredAt, fact.transport.readAt].filter(value => value !== undefined)
   const sentAt = sentTimes.length === 0 ? undefined : Math.min(...sentTimes)
   let outcome: NotificationOutcome
-  let expiredAt: number | undefined
+  let expiry: { at: number; responseWindowMs: number } | undefined
   if (judgement?.objectiveStatus === 'not-achieved') outcome = 'rejected'
   else if (judgement?.objectiveStatus === 'achieved') outcome = 'accepted'
   else if (fact.reaction !== undefined || judgement?.objectiveStatus === 'partial') outcome = 'reacted'
   else if (fact.transport.status === 'dead') outcome = 'failed'
   else if (sentAt !== undefined) {
-    if (now >= sentAt + responseWindowMs) { outcome = 'expired-unhandled'; expiredAt = sentAt + responseWindowMs }
+    if (now >= sentAt + responseWindowMs) {
+      outcome = 'expired-unhandled'
+      expiry = { at: sentAt + responseWindowMs, responseWindowMs }
+    }
     else outcome = 'delivered'
   } else outcome = 'pending'
   return {
     protocol: NOTIFICATION_OUTCOME_RECORD_PROTOCOL,
-    classifier: { id: 'notification-outcome', version: 1, responseWindowMs },
+    classifier: { id: 'notification-outcome', version: 1 },
     notificationId: fact.outboxId,
     scope: { workspace: fact.scope.workspace, preset: fact.scope.preset },
     bindingId: fact.bindingId,
@@ -145,7 +148,7 @@ export function classifyNotificationOutcome(fact: NotificationOutcomeFactInput, 
     transport: { ...fact.transport },
     ...(fact.reaction === undefined ? {} : { reaction: { firstAt: fact.reaction.firstAt } }),
     ...(judgement === undefined ? {} : { judgement }),
-    ...(expiredAt === undefined ? {} : { expiredAt }),
+    ...(expiry === undefined ? {} : { expiry }),
   }
 }
 

@@ -79,9 +79,15 @@ export interface Config {
   notificationOutcomesEnabled?: boolean
   /** A sent notification with no reaction becomes `expired-unhandled` after this window. */
   notificationResponseWindowMs?: number
-  /** Known notifications are re-checked for late reactions/corrections for this long. */
+  /**
+   * Known notifications are re-checked for late reactions/corrections for this
+   * long, measured from notification time. The effective horizon is at least
+   * twice the response window so a delivered notification can always expire.
+   */
   notificationObservationHorizonMs?: number
   notificationSyncBatchSize?: number
+  /** Minimum gap between timer-driven notification syncs (the projection tick runs more often). */
+  notificationSyncIntervalMs?: number
 }
 
 export const ASSISTANT_EVALUATION_SKILL = `# Personal assistant self-evaluation
@@ -119,6 +125,7 @@ const configSchema = Schema.object({
   notificationResponseWindowMs: Schema.number().step(1).min(60_000).max(2_592_000_000).default(86_400_000),
   notificationObservationHorizonMs: Schema.number().step(1).min(60_000).max(31_536_000_000).default(2_592_000_000),
   notificationSyncBatchSize: Schema.number().step(1).min(1).max(500).default(100),
+  notificationSyncIntervalMs: Schema.number().step(1).min(0).max(86_400_000).default(60_000),
 }) as Schema<Config>
 
 export type AssistantEvaluationErrorCode =
@@ -421,6 +428,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   private readonly activeProjections = new Map<string, Promise<void>>()
   private projectionTimer: ReturnType<typeof setInterval> | undefined
   private notificationFacts: NotificationOutcomeFactSource | undefined
+  private lastNotificationSyncAt = Number.NEGATIVE_INFINITY
   private active = true
 
   constructor(ctx: Context, input: Config, options: { now?: () => number } = {}) {
@@ -547,7 +555,11 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     })
     if (this.config.projectionIntervalMs > 0) {
       this.projectionTimer = setInterval(() => {
-        try { this.reconcileNotificationOutcomes() } catch { /* retried on the next tick */ }
+        const now = this.now()
+        if (this.config.notificationOutcomesEnabled && now - this.lastNotificationSyncAt >= this.config.notificationSyncIntervalMs) {
+          this.lastNotificationSyncAt = now
+          try { this.reconcileNotificationOutcomes() } catch { /* isolated from projection; retried on a later tick */ }
+        }
         void this.reconcileProjections().catch(() => {})
       }, this.config.projectionIntervalMs)
       this.projectionTimer.unref?.()
@@ -1054,23 +1066,35 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
         if (ledger.apply(fact, window).revised) revised += 1
         return true
       } catch (error) {
-        if (error instanceof EvaluationStoreError && error.code === 'invalid-input') { invalid += 1; return false }
+        // A malformed fact or a fact whose scope disagrees with its recorded
+        // head is counted and skipped so one bad row never stalls the cursor.
+        if (error instanceof EvaluationStoreError && (error.code === 'invalid-input' || error.code === 'version-conflict')) {
+          invalid += 1
+          return false
+        }
         throw error
       }
     }
     const page = source.inspectNotificationOutcomeFacts({ afterSequence: ledger.syncCursor(), limit })
     for (const fact of page.facts) if (apply(fact)) ingested += 1
     if (page.nextAfterSequence !== null) ledger.advanceSyncCursor(page.nextAfterSequence)
-    const due = ledger.dueForRefresh(this.now() - this.config.notificationObservationHorizonMs, limit)
+    // The horizon is measured from notification time while expiry is measured
+    // from send time, so a horizon near the response window would stop
+    // re-checking a delivered notification before it could expire. Keep at
+    // least one extra window of slack for send latency.
+    const horizon = Math.max(this.config.notificationObservationHorizonMs, 2 * window)
+    const due = ledger.dueForRefresh(this.now() - horizon, limit)
     if (due.length > 0) {
       const facts = source.inspectNotificationOutcomeFacts({ outboxIds: due }).facts
-      const seen = new Set<string>()
+      const applied = new Set<string>()
       for (const fact of facts) {
-        const id = (fact as { outboxId?: unknown }).outboxId
-        if (typeof id === 'string') seen.add(id)
-        if (apply(fact)) refreshed += 1
+        if (!apply(fact)) continue
+        refreshed += 1
+        applied.add((fact as { outboxId: string }).outboxId)
       }
-      for (const id of due) if (!seen.has(id)) ledger.touch(id)
+      // Missing or rejected facts still rotate to the back of the re-check
+      // order so they cannot starve the rest of the horizon.
+      for (const id of due) if (!applied.has(id)) ledger.touch(id)
     }
     return Object.freeze({ ingested, refreshed, revised, invalid })
   }

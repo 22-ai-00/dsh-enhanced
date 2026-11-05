@@ -45,14 +45,15 @@ class FactSource {
   }
 }
 
-function setup(options: { path?: string; enabled?: boolean; source?: FactSource; clock?: { now: number } } = {}) {
+function setup(options: { path?: string; enabled?: boolean; source?: FactSource; clock?: { now: number }; windowMs?: number; horizonMs?: number } = {}) {
   const ctx = new Context(); contexts.push(ctx)
   const source = options.source ?? new FactSource()
   const clock = options.clock ?? { now: 2_000 }
   ctx.provide('assistantDelivery' as never, source as never)
   const evaluation = new AssistantEvaluationService(ctx, {
     databasePath: options.path ?? ':memory:', projectionIntervalMs: 0,
-    notificationOutcomesEnabled: options.enabled ?? true, notificationResponseWindowMs: hour,
+    notificationOutcomesEnabled: options.enabled ?? true, notificationResponseWindowMs: options.windowMs ?? hour,
+    ...(options.horizonMs === undefined ? {} : { notificationObservationHorizonMs: options.horizonMs }),
   }, { now: () => clock.now })
   return { ctx, source, clock, evaluation }
 }
@@ -63,7 +64,7 @@ describe('notification outcome classifier', () => {
     const at = (overrides: Record<string, unknown>, now = 2_000) =>
       classifyNotificationOutcome(normalizeNotificationOutcomeFact(fact('n', 1, overrides)), now, hour).outcome
     expect(classifyNotificationOutcome(base, 2_000, hour).outcome).toBe('delivered')
-    expect(classifyNotificationOutcome(base, 1_100 + hour, hour)).toMatchObject({ outcome: 'expired-unhandled', expiredAt: 1_100 + hour })
+    expect(classifyNotificationOutcome(base, 1_100 + hour, hour)).toMatchObject({ outcome: 'expired-unhandled', expiry: { at: 1_100 + hour, responseWindowMs: hour } })
     expect(at({ transport: { status: 'pending' } }, 10 * hour)).toBe('pending')
     expect(at({ transport: { status: 'dead' } }, 10 * hour)).toBe('failed')
     expect(at({ reaction: { firstAt: 1_500, count: 2 } }, 10 * hour)).toBe('reacted')
@@ -126,7 +127,7 @@ describe('notification outcome ledger', () => {
     clock.now = 1_100 + hour
     evaluation.reconcileNotificationOutcomes()
     expect(evaluation.inspectNotificationOutcome({ scope, notificationId: 'n1' })!.head.record).toMatchObject({
-      outcome: 'expired-unhandled', expiredAt: 1_100 + hour })
+      outcome: 'expired-unhandled', expiry: { at: 1_100 + hour, responseWindowMs: hour } })
     source.put(fact('n1', 1, { reaction: { firstAt: 2 * hour, count: 1 } }))
     clock.now = 3 * hour
     evaluation.reconcileNotificationOutcomes()
@@ -197,6 +198,98 @@ describe('notification outcome ledger', () => {
     ctx.provide('assistantDelivery' as never, source as never)
     const evaluation = new AssistantEvaluationService(ctx, { databasePath: ':memory:', projectionIntervalMs: 5, notificationOutcomesEnabled: true })
     await expect.poll(() => evaluation.health().notificationOutcomes, { timeout: 2_000 }).toBe(1)
+  })
+
+  test('a response-window change only revises notifications whose expiry classification changes', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-eval-notify-window-')); directories.push(directory)
+    const path = join(directory, 'evaluation.sqlite')
+    const clock = { now: 1_100 + 2 * hour }
+    const first = setup({ path, clock })
+    first.source.put(fact('reacted', 1, { reaction: { firstAt: 1_500, count: 1 } }))
+    first.source.put(fact('accepted', 2, { judgement: { source: 'owner-objective', version: 1, objectiveStatus: 'achieved' } }))
+    first.source.put(fact('pending', 3, { transport: { status: 'pending' } }))
+    first.source.put(fact('expired', 4))
+    expect(first.evaluation.reconcileNotificationOutcomes().revised).toBe(4)
+    expect(first.evaluation.inspectNotificationOutcome({ scope, notificationId: 'reacted' })!.head.record).not.toHaveProperty('classifier.responseWindowMs')
+    await first.ctx.fiber.restart(); contexts.splice(contexts.indexOf(first.ctx), 1)
+
+    const second = setup({ path, clock, source: first.source, windowMs: 3 * hour })
+    expect(second.evaluation.reconcileNotificationOutcomes()).toMatchObject({ refreshed: 4, revised: 1 })
+    expect(second.evaluation.inspectNotificationOutcome({ scope, notificationId: 'expired' })!.revisions.map(item => item.record.outcome))
+      .toEqual(['expired-unhandled', 'delivered'])
+    clock.now = 1_100 + 3 * hour
+    expect(second.evaluation.reconcileNotificationOutcomes().revised).toBe(1)
+    expect(second.evaluation.inspectNotificationOutcome({ scope, notificationId: 'expired' })!.head.record)
+      .toMatchObject({ outcome: 'expired-unhandled', expiry: { at: 1_100 + 3 * hour, responseWindowMs: 3 * hour } })
+  })
+
+  test('a scope-conflicting fact is counted and skipped without stalling the cursor or the re-check rotation', () => {
+    const { source, evaluation } = setup()
+    source.put(fact('n1', 1))
+    source.put(fact('n2', 2))
+    evaluation.reconcileNotificationOutcomes()
+    source.put(fact('n1', 1, { scope: { workspace: '/work/other', preset: 'primary' } }))
+    source.put(fact('n3', 3))
+    expect(evaluation.reconcileNotificationOutcomes()).toMatchObject({ ingested: 1, invalid: 1 })
+    expect(evaluation.inspectNotificationOutcome({ scope, notificationId: 'n1' })!.head.version).toBe(1)
+    expect(evaluation.inspectNotificationOutcome({ scope, notificationId: 'n3' })).toBeDefined()
+  })
+
+  test('the observation horizon never ends before the response window', () => {
+    const clock = { now: 2_000 }
+    const { source, evaluation } = setup({ clock, windowMs: 3 * hour, horizonMs: hour })
+    source.put(fact('n1', 1))
+    evaluation.reconcileNotificationOutcomes()
+    clock.now = 1_100 + 3 * hour
+    expect(evaluation.reconcileNotificationOutcomes().revised).toBe(1)
+    expect(evaluation.inspectNotificationOutcome({ scope, notificationId: 'n1' })!.head.record.outcome).toBe('expired-unhandled')
+  })
+
+  test('timer-driven sync is throttled independently of the projection tick', async () => {
+    const ctx = new Context(); contexts.push(ctx)
+    const source = new FactSource()
+    source.put(fact('n1', 1))
+    ctx.provide('assistantDelivery' as never, source as never)
+    const clock = { now: 10_000 }
+    const evaluation = new AssistantEvaluationService(ctx, { databasePath: ':memory:', projectionIntervalMs: 5,
+      notificationOutcomesEnabled: true, notificationSyncIntervalMs: hour }, { now: () => clock.now })
+    await expect.poll(() => evaluation.health().notificationOutcomes, { timeout: 2_000 }).toBe(1)
+    const calls = source.calls.length
+    source.put(fact('n2', 2))
+    await new Promise(resolve => setTimeout(resolve, 60))
+    expect(source.calls.length).toBe(calls)
+    clock.now += hour
+    await expect.poll(() => evaluation.health().notificationOutcomes, { timeout: 2_000 }).toBe(2)
+  })
+
+  test('heads must mirror their revision, identities are immutable and the re-check scan is horizon-bounded', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-eval-notify-integrity-')); directories.push(directory)
+    const path = join(directory, 'evaluation.sqlite')
+    const first = setup({ path })
+    first.source.put(fact('n1', 1))
+    first.evaluation.reconcileNotificationOutcomes()
+    await first.ctx.fiber.restart(); contexts.splice(contexts.indexOf(first.ctx), 1)
+    const db = new DatabaseSync(path)
+    try {
+      for (const statement of [
+        "UPDATE evaluation_notification_outcome_heads SET outcome='accepted'",
+        "UPDATE evaluation_notification_outcome_heads SET digest='" + 'f'.repeat(64) + "'",
+        'UPDATE evaluation_notification_outcome_heads SET occurred_at=occurred_at+1',
+        "UPDATE evaluation_notification_outcome_heads SET scope_key='x'",
+        'UPDATE evaluation_notification_outcome_heads SET version=version+1',
+        `INSERT INTO evaluation_notification_outcome_heads VALUES ('n9','k',1,'${'a'.repeat(64)}','delivered',0,9,0)`,
+        'UPDATE evaluation_notification_watermarks SET watermark=watermark-1',
+        'DELETE FROM evaluation_notification_watermarks',
+        'UPDATE evaluation_notification_sync_cursor SET after_sequence=0',
+        'DELETE FROM evaluation_notification_sync_cursor',
+        'DELETE FROM evaluation_notification_outcome_revisions',
+      ]) expect(() => db.exec(statement), statement).toThrow()
+      expect(() => db.exec('UPDATE evaluation_notification_outcome_heads SET last_checked_at=last_checked_at+1')).not.toThrow()
+      const plan = (db.prepare(`EXPLAIN QUERY PLAN SELECT notification_id FROM evaluation_notification_outcome_heads
+        WHERE occurred_at >= ? ORDER BY last_checked_at, notification_id LIMIT ?`).all(0, 10) as { detail: string }[])
+        .map(row => row.detail).join('\n')
+      expect(plan).toMatch(/evaluation_notification_outcome_heads_due \(occurred_at>\?\)/)
+    } finally { db.close() }
   })
 
   test('migrates a schema-13 database without touching existing rows', async () => {

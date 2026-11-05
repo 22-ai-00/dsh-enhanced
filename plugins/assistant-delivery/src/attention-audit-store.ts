@@ -135,17 +135,48 @@ export class AttentionAuditStore {
     return { entries: Object.freeze(rows.slice(0, limit).map(entry)), hasMore: rows.length > limit }
   }
 
-  /** Current facts for exact notifications; unknown or unaudited ids are omitted. */
+  /**
+   * Current facts for exact notifications; unknown or unaudited ids are omitted.
+   * The unindexed JSON lookups (reply reactions, work-item feedback) run once
+   * per call over the whole batch rather than once per notification.
+   */
   outcomeFactsFor(outboxIds: readonly string[]): readonly NotificationOutcomeFact[] {
-    return Object.freeze(outboxIds.map(id => this.get(id)).filter(item => item !== undefined)
-      .map(item => this.fact(item)).filter(item => item !== undefined))
+    const audits = outboxIds.map(id => this.get(id)).filter(item => item !== undefined)
+    if (audits.length === 0) return Object.freeze([])
+    const ids = JSON.stringify(audits.map(audit => audit.outboxId))
+    // A reply counts when it answers the provider message in the same
+    // conversation from the same principal, including after a new-session
+    // command moved the conversation to a newer binding generation.
+    const reactions = new Map((this.database.prepare(`WITH target AS (
+        SELECT o.id AS outbox_id, o.channel, o.account, o.provider_message_id, b.conversation_hash, b.principal_id
+        FROM json_each(?) j JOIN outbox_messages o ON o.id=j.value JOIN conversation_bindings b ON b.id=o.binding_id
+        WHERE o.provider_message_id IS NOT NULL)
+      SELECT t.outbox_id, min(i.received_at) AS first_at, count(*) AS count
+      FROM inbox_messages i
+      JOIN conversation_bindings ib ON ib.id=i.binding_id
+      JOIN target t ON t.channel=i.channel AND t.account=i.account
+        AND t.provider_message_id=json_extract(i.envelope_json,'$.metadata.replyToProviderMessageId')
+        AND ib.conversation_hash=t.conversation_hash AND ib.principal_id=t.principal_id
+      GROUP BY t.outbox_id`).all(ids) as { outbox_id: string; first_at: number; count: number }[])
+      .map(row => [row.outbox_id, row] as const))
+    const feedback = new Map<string, { version: number; status: string }>()
+    for (const row of this.database.prepare(`SELECT json_extract(source_json,'$.target.outboxId') AS outbox_id,
+        json_extract(canonical_json,'$.version') AS version, json_extract(canonical_json,'$.objectiveStatus') AS status
+      FROM delivery_work_item_feedback WHERE state='recorded'
+        AND json_extract(source_json,'$.target.outboxId') IN (SELECT value FROM json_each(?))
+      ORDER BY version DESC, admission_sequence DESC`).all(ids) as { outbox_id: string; version: number; status: string }[]) {
+      if (!feedback.has(row.outbox_id)) feedback.set(row.outbox_id, row)
+    }
+    return Object.freeze(audits.map(audit => this.fact(audit, reactions.get(audit.outboxId), feedback.get(audit.outboxId)))
+      .filter(item => item !== undefined))
   }
 
-  private fact(audit: AttentionAuditEntry): NotificationOutcomeFact | undefined {
-    const outbox = this.database.prepare(`SELECT o.status, o.channel, o.account, o.provider_message_id, o.binding_id, o.updated_at,
+  private fact(audit: AttentionAuditEntry, reaction: { first_at: number; count: number } | undefined,
+    feedback: { version: number; status: string } | undefined): NotificationOutcomeFact | undefined {
+    const outbox = this.database.prepare(`SELECT o.status, o.channel, o.account, o.provider_message_id, o.updated_at,
       b.workspace, b.agent_preset FROM outbox_messages o JOIN conversation_bindings b ON b.id=o.binding_id WHERE o.id=?`)
       .get(audit.outboxId) as { status: NotificationOutcomeFact['transport']['status']; channel: string; account: string
-        provider_message_id: string | null; binding_id: string; updated_at: number; workspace: string; agent_preset: string } | undefined
+        provider_message_id: string | null; updated_at: number; workspace: string; agent_preset: string } | undefined
     if (outbox === undefined) return undefined
     const accepted = (this.database.prepare(`SELECT min(finished_at) AS at FROM outbox_attempts
       WHERE outbox_id=? AND status IN ('accepted','reconciled') AND finished_at IS NOT NULL`).get(audit.outboxId) as { at: number | null }).at
@@ -156,17 +187,13 @@ export class AttentionAuditStore {
     const acceptedAt = accepted ?? receipt('accepted') ?? (sent ? outbox.updated_at : undefined)
     const deliveredAt = receipt('delivered') ?? (outbox.status === 'delivered' || outbox.status === 'read' ? outbox.updated_at : undefined)
     const readAt = receipt('read') ?? (outbox.status === 'read' ? outbox.updated_at : undefined)
-    const reaction = outbox.provider_message_id === null ? undefined : this.database.prepare(`SELECT min(received_at) AS first_at, count(*) AS count
-      FROM inbox_messages WHERE binding_id=? AND channel=? AND account=?
-      AND json_extract(envelope_json,'$.metadata.replyToProviderMessageId')=?`)
-      .get(outbox.binding_id, outbox.channel, outbox.account, outbox.provider_message_id) as { first_at: number | null; count: number }
-    const feedback = this.database.prepare(`SELECT json_extract(canonical_json,'$.version') AS version,
-      json_extract(canonical_json,'$.objectiveStatus') AS status FROM delivery_work_item_feedback
-      WHERE state='recorded' AND json_extract(source_json,'$.target.outboxId')=? ORDER BY version DESC, admission_sequence DESC LIMIT 1`)
-      .get(audit.outboxId) as { version: number; status: string } | undefined
-    const owner = feedback !== undefined ? undefined : this.database.prepare(`SELECT version, objective_status AS status
+    // Same precedence as Delivery's own objective state: the newest accepted
+    // owner command, else the legacy first verified-task receipt as version 1.
+    const owner = feedback !== undefined ? undefined : (this.database.prepare(`SELECT version, objective_status AS status
       FROM delivery_owner_objective_commands WHERE source_outbox_id=? AND json_extract(result_json,'$.error') IS NULL
-      ORDER BY version DESC LIMIT 1`).get(audit.outboxId) as { version: number; status: string } | undefined
+      ORDER BY version DESC LIMIT 1`).get(audit.outboxId) as { version: number; status: string } | undefined)
+      ?? (this.database.prepare(`SELECT 1 AS version, objective_status AS status FROM workflow_verified_task_feedback
+        WHERE source_outbox_id=?`).get(audit.outboxId) as { version: number; status: string } | undefined)
     const judged = feedback ?? owner
     const objectiveStatus = (status: string) => status === 'achieved' || status === 'partial' || status === 'not-achieved' ? status : 'unknown'
     return Object.freeze({
@@ -181,7 +208,7 @@ export class AttentionAuditStore {
         ...(acceptedAt === undefined ? {} : { acceptedAt }),
         ...(deliveredAt === undefined ? {} : { deliveredAt }),
         ...(readAt === undefined ? {} : { readAt }) }),
-      ...(reaction === undefined || reaction.first_at === null ? {} : { reaction: Object.freeze({ firstAt: reaction.first_at, count: reaction.count }) }),
+      ...(reaction === undefined || outbox.provider_message_id === null ? {} : { reaction: Object.freeze({ firstAt: reaction.first_at, count: reaction.count }) }),
       ...(judged === undefined || !Number.isSafeInteger(judged.version) ? {} : { judgement: Object.freeze({
         source: feedback !== undefined ? 'work-item-feedback' as const : 'owner-objective' as const,
         version: judged.version, objectiveStatus: objectiveStatus(judged.status) }) }),

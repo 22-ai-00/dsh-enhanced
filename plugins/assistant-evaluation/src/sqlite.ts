@@ -321,13 +321,34 @@ const notificationOutcomeSchema = `
     UNIQUE (scope_key, watermark),
     FOREIGN KEY (notification_id, version) REFERENCES evaluation_notification_outcome_revisions(notification_id, version)
   ) STRICT;
-  CREATE INDEX evaluation_notification_outcome_heads_check
-    ON evaluation_notification_outcome_heads(last_checked_at, notification_id);
+  -- Re-check scans range over occurred_at so heads older than the observation
+  -- horizon are never visited again; the scan is bounded by in-horizon heads.
+  CREATE INDEX evaluation_notification_outcome_heads_due
+    ON evaluation_notification_outcome_heads(occurred_at, last_checked_at);
   CREATE INDEX evaluation_notification_outcome_heads_scope_time
     ON evaluation_notification_outcome_heads(scope_key, occurred_at);
+  CREATE TRIGGER evaluation_notification_outcome_heads_insert_matches_revision
+    BEFORE INSERT ON evaluation_notification_outcome_heads
+    WHEN NOT EXISTS (SELECT 1 FROM evaluation_notification_outcome_revisions r
+      WHERE r.notification_id = NEW.notification_id AND r.version = NEW.version AND r.scope_key = NEW.scope_key
+        AND r.digest = NEW.digest AND r.outcome = NEW.outcome AND r.watermark = NEW.watermark
+        AND json_extract(r.record_json, '$.notifiedAt') = NEW.occurred_at)
+    BEGIN SELECT RAISE(ABORT, 'notification outcome head must match its revision'); END;
+  CREATE TRIGGER evaluation_notification_outcome_heads_update_matches_revision
+    BEFORE UPDATE ON evaluation_notification_outcome_heads
+    WHEN NOT EXISTS (SELECT 1 FROM evaluation_notification_outcome_revisions r
+      WHERE r.notification_id = NEW.notification_id AND r.version = NEW.version AND r.scope_key = NEW.scope_key
+        AND r.digest = NEW.digest AND r.outcome = NEW.outcome AND r.watermark = NEW.watermark
+        AND json_extract(r.record_json, '$.notifiedAt') = NEW.occurred_at)
+    BEGIN SELECT RAISE(ABORT, 'notification outcome head must match its revision'); END;
+  CREATE TRIGGER evaluation_notification_outcome_heads_identity_immutable
+    BEFORE UPDATE OF notification_id, scope_key, occurred_at ON evaluation_notification_outcome_heads
+    WHEN NEW.notification_id IS NOT OLD.notification_id OR NEW.scope_key IS NOT OLD.scope_key
+      OR NEW.occurred_at IS NOT OLD.occurred_at
+    BEGIN SELECT RAISE(ABORT, 'notification outcome head identity is immutable'); END;
   CREATE TRIGGER evaluation_notification_outcome_heads_monotonic
-    BEFORE UPDATE OF version, watermark, scope_key ON evaluation_notification_outcome_heads
-    WHEN NEW.version <= OLD.version OR NEW.watermark <= OLD.watermark OR NEW.scope_key IS NOT OLD.scope_key
+    BEFORE UPDATE OF version, watermark ON evaluation_notification_outcome_heads
+    WHEN NEW.version <= OLD.version OR NEW.watermark <= OLD.watermark
     BEGIN SELECT RAISE(ABORT, 'notification outcome head must advance'); END;
   CREATE TRIGGER evaluation_notification_outcome_heads_no_delete
     BEFORE DELETE ON evaluation_notification_outcome_heads
@@ -336,11 +357,25 @@ const notificationOutcomeSchema = `
     scope_key TEXT PRIMARY KEY,
     watermark INTEGER NOT NULL CHECK (watermark >= 1)
   ) STRICT;
+  CREATE TRIGGER evaluation_notification_watermarks_monotonic
+    BEFORE UPDATE ON evaluation_notification_watermarks
+    WHEN NEW.scope_key IS NOT OLD.scope_key OR NEW.watermark <= OLD.watermark
+    BEGIN SELECT RAISE(ABORT, 'notification watermark must advance'); END;
+  CREATE TRIGGER evaluation_notification_watermarks_no_delete
+    BEFORE DELETE ON evaluation_notification_watermarks
+    BEGIN SELECT RAISE(ABORT, 'notification watermarks are durable'); END;
   CREATE TABLE evaluation_notification_sync_cursor (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     after_sequence INTEGER NOT NULL CHECK (after_sequence >= 0),
     updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
   ) STRICT;
+  CREATE TRIGGER evaluation_notification_sync_cursor_monotonic
+    BEFORE UPDATE ON evaluation_notification_sync_cursor
+    WHEN NEW.after_sequence < OLD.after_sequence
+    BEGIN SELECT RAISE(ABORT, 'notification sync cursor must not regress'); END;
+  CREATE TRIGGER evaluation_notification_sync_cursor_no_delete
+    BEFORE DELETE ON evaluation_notification_sync_cursor
+    BEGIN SELECT RAISE(ABORT, 'notification sync cursor is durable'); END;
 `
 
 function migrate(database: DatabaseSync): void {

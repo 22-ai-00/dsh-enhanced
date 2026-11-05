@@ -106,6 +106,29 @@ describe('notification outcome facts (WP22 read adapter)', () => {
     expect(Object.isFrozen(one)).toBe(true)
   })
 
+  test('counts replies across a new-session binding and falls back to the legacy verified-task judgement', async () => {
+    const f = await fixture()
+    const first = f.background('n-1', 'Build finished.')
+    const second = f.background('n-2', 'Deploy finished.')
+    await f.drain()
+    await f.reply('reply-1', 'provider-1')
+    const rotated = f.store.rotateBinding({ bindingId: f.binding.id, expectedVersion: f.binding.version, sessionId: 'session-2' })
+    expect(rotated.id).not.toBe(f.binding.id)
+    await f.reply('reply-2', 'provider-1')
+    await f.reply('reply-3', 'provider-2')
+    f.database.exec('PRAGMA foreign_keys = OFF')
+    f.database.prepare(`INSERT INTO workflow_verified_task_feedback(source_outbox_id, source_inbox_id, feedback_inbox_id, binding_id,
+      binding_version, binding_generation, principal_record_id, objective_status, task_ref, task_evidence_digest, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(first.id, 'inbox-src', 'inbox-fb', f.binding.id, 1, 1, 'principal', 'achieved',
+      'a'.repeat(64), 'b'.repeat(64), 1)
+    f.database.exec('PRAGMA foreign_keys = ON')
+    const facts = f.service.inspectNotificationOutcomeFacts({ outboxIds: [first.id, second.id] }).facts
+    expect(facts[0]).toMatchObject({ outboxId: first.id, bindingId: f.binding.id, reaction: { count: 2 },
+      judgement: { source: 'owner-objective', version: 1, objectiveStatus: 'achieved' } })
+    expect(facts[1]).toMatchObject({ outboxId: second.id, reaction: { count: 1 } })
+    expect(facts[1]).not.toHaveProperty('judgement')
+  })
+
   test('rejects malformed input', async () => {
     const f = await fixture()
     for (const input of [

@@ -682,7 +682,7 @@ export interface NotificationOutcomeFactInput {
 /** Canonical content of one notification-outcome revision; its SHA-256 is the revision digest. */
 export interface NotificationOutcomeRecord {
   protocol: typeof NOTIFICATION_OUTCOME_RECORD_PROTOCOL
-  classifier: Readonly<{ id: 'notification-outcome'; version: 1; responseWindowMs: number }>
+  classifier: Readonly<{ id: 'notification-outcome'; version: 1 }>
   notificationId: string
   scope: Readonly<EvaluationScope>
   bindingId: string
@@ -700,8 +700,13 @@ export interface NotificationOutcomeRecord {
   transport: Readonly<{ status: string; acceptedAt?: number; deliveredAt?: number; readAt?: number }>
   reaction?: Readonly<{ firstAt: number }>
   judgement?: Readonly<{ source: 'owner-objective' | 'work-item-feedback'; version: number; objectiveStatus: Exclude<ObjectiveStatus, 'unknown'> }>
-  /** Set only for `expired-unhandled`: the deterministic expiry boundary. */
-  expiredAt?: number
+  /**
+   * Set only for `expired-unhandled`: the deterministic expiry boundary and the
+   * response window that produced it. The window is deliberately absent from
+   * every other record, so a window change only revises notifications whose
+   * expiry classification actually changes.
+   */
+  expiry?: Readonly<{ at: number; responseWindowMs: number }>
 }
 
 export interface StoredNotificationOutcome {

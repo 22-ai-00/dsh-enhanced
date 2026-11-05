@@ -79,8 +79,9 @@ projection 保存选中的 execution/objective/delivery component id，原始两
 | `maxSummaryWindowMs` | 365 天 | 单次汇总允许的最大窗口。 |
 | `notificationOutcomesEnabled` | `false` | WP22：在既有 projection tick 上同步 Delivery 通知结果事实。 |
 | `notificationResponseWindowMs` | 1 天 | 已发出且无反应的通知超过此窗口记为 `expired-unhandled`。 |
-| `notificationObservationHorizonMs` | 30 天 | 已知通知在此期间内被重查，以吸收迟到回复、更正与撤回。 |
-| `notificationSyncBatchSize` | `100` | 每次 tick 新摄入与重查的条数上限（最大 500）。 |
+| `notificationObservationHorizonMs` | 30 天 | 已知通知自通知时间起在此期间内被重查，以吸收迟到回复、更正与撤回；有效值至少为响应窗口的两倍。超出观察期的通知不再被扫描（按 `occurred_at` 范围索引）。 |
+| `notificationSyncBatchSize` | `100` | 每次同步新摄入与重查的条数上限（最大 500）。 |
+| `notificationSyncIntervalMs` | 60 秒 | 定时器驱动的通知同步最小间隔（projection tick 更频繁，同步按此节流；`0` 表示每个 tick）。 |
 
 ## 权限与数据边界
 
@@ -103,7 +104,7 @@ schema 13 扩展任务投影的主体身份约束及投影 outbox 的状态约�
 
 ## 通知结果账本（WP22 切片 1，只读）
 
-schema 14 新增与任务投影分离的 `evaluation_notification_outcome_*` 表：以 Delivery Outbox id 为通知主键，每次分类变化追加不可改、不可删的 revision 并推进该 scope 独立的通知 watermark；digest 不变只刷新检查时间。分类器 `notification-outcome` v1 确定性、无模型调用，优先级：owner/工作项判断 `not-achieved`→`rejected`、`achieved`→`accepted`；回复或 `partial`→`reacted`；传输 `dead`→`failed`；已发出且超过响应窗口→`expired-unhandled`（含 `expiredAt`），否则 `delivered`；未发出→`pending`。撤回（`unknown`）不计入判断。响应窗口写入记录，改配置会形成新 revision。回复条数与任何正文不入库。
+schema 14 新增与任务投影分离的 `evaluation_notification_outcome_*` 表：以 Delivery Outbox id 为通知主键，每次分类变化追加不可改、不可删的 revision 并推进该 scope 独立的通知 watermark；digest 不变只刷新检查时间。分类器 `notification-outcome` v1 确定性、无模型调用，优先级：owner/工作项判断 `not-achieved`→`rejected`、`achieved`→`accepted`；回复或 `partial`→`reacted`；传输 `dead`→`failed`；已发出且超过响应窗口→`expired-unhandled`（含 `expiry: { at, responseWindowMs }`），否则 `delivered`；未发出→`pending`。撤回（`unknown`）不计入判断。响应窗口只写入 `expired-unhandled` 记录，改配置只对到期判定实际改变的通知形成新 revision。格式错误或 scope 与已记录 head 冲突的事实计入 `invalid` 并跳过，不阻塞游标。head 必须与其 revision 的 digest、结果、watermark、scope 与通知时间一致，通知 watermark 与同步游标只进不退、不可删（触发器保证）。回复条数与任何正文不入库。
 
 启用后每个 projection tick 先从持久游标摄入新审计行，再按最久未查顺序重查观察期内的已知通知；格式错误的事实计入 `invalid` 并跳过，不阻塞游标。Delivery 缺席时为零结果。读接口：`inspectNotificationOutcome({ scope, notificationId })`（当前 + 全部 revision）、`notificationOutcomeFeed({ scope, after?, limit? })`（按 watermark 可续读的当前 head）、`notificationOutcomeSummary({ scope, fromNotifiedAt?, toNotifiedAt? })`（按 outcome 与 attention verdict 计数）。本切片不写 Evolution、不改任何参数、不触发 Growth。
 
