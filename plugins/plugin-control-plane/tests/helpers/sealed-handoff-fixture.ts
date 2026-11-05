@@ -78,30 +78,36 @@ export function linuxFixture(maxAdoptions = 8, maxCalls = 8) {
       } }
     return { ...body, signature: sign(null, Buffer.from(canonicalGrowthJson(body)), verifier.privateKey).toString('base64url') }
   }
-  function archived(planId: string) {
-    const name = `generated-${planId}`, baseCommit = '1'.repeat(40), content = 'export const answer = 42\n'
-    const file = `plugins/${name}/src/index.ts`, bytes = Buffer.from(content)
-    const oid = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')
+  function archived(planId: string, extra: ExtraFile[] = []) {
+    const name = `generated-${planId}`, baseCommit = '1'.repeat(40)
+    const blob = (path: string, content: string, mode: '100644' | '100755' = '100644') => {
+      const bytes = Buffer.from(content)
+      return { path: `plugins/${name}/${path}`, mode, bytes: bytes.length, sha256: sha(bytes), content,
+        oid: createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex') }
+    }
+    const files = [blob('src/index.ts', 'export const answer = 42\n'), ...extra.map(file => blob(file.path, file.content, file.mode))]
+      .sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)))
     const scope = [`plugins/${name}`, 'plugins/README.md', 'pnpm-lock.yaml'].sort()
     const entries = [{ path: 'plugins/README.md', mode: '100644' as const, oid: '2'.repeat(40) },
-      { path: file, mode: '100644' as const, oid }, { path: 'pnpm-lock.yaml', mode: '100644' as const, oid: '3'.repeat(40) }]
+      ...files.map(({ path, mode, oid }) => ({ path, mode, oid })), { path: 'pnpm-lock.yaml', mode: '100644' as const, oid: '3'.repeat(40) }]
     const treeDigest = createHash('sha256').update(`dsh-source-tree-v2\0${baseCommit}\0${JSON.stringify(scope)}\0`)
       .update(entries.map(entry => `${entry.mode} ${entry.oid} 0\t${entry.path}\0`).join('')).digest('hex')
     const payload: Omit<CreationCapabilitySourceSnapshot, 'digest'> = { protocol: 'dsh-created-capability-source/v1',
-      baseCommit, scope, treeDigest, patchDigest: d('e'), entries,
-      files: [{ path: file, mode: '100644', oid, bytes: bytes.length, sha256: sha(bytes), content }] }
+      baseCommit, scope, treeDigest, patchDigest: d('e'), entries, files }
     return { source: { ...payload, digest: creationCapabilitySourceDigest(payload) }, certificate: legacy(planId, treeDigest) }
   }
   return { root, path, artifact, oldConfig, config, legacy, certificate, archived, verifier }
 }
 export type Fixture = ReturnType<typeof linuxFixture>
+/** Extra archived plugin file; mode defaults to 100644. */
+export type ExtraFile = { path: string; content: string; mode?: '100644' | '100755' }
 
 /** Settled history through the real Docker journal API: active (2 completed calls, signed source),
  * closed (1 completed call), rejected. */
-export function seedSettled(f: Fixture) {
+export function seedSettled(f: Fixture, extra: ExtraFile[] = []) {
   const journal = new CreationCapabilityJournal({ path: f.path, config: f.oldConfig })
   try {
-    const { source, certificate } = f.archived('active')
+    const { source, certificate } = f.archived('active', extra)
     journal.claim({ certificate, artifact: f.artifact, source }); journal.authorize('active', tools); journal.activate('active')
     for (const key of ['one', 'two']) {
       journal.claimCall({ planId: 'active', key, argumentsDigest: d('a') })

@@ -1,11 +1,13 @@
-import { randomBytes } from 'node:crypto'
-import { chmodSync, closeSync, constants, fchmodSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync,
+import { createPublicKey, randomBytes, verify } from 'node:crypto'
+import { chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync,
   unlinkSync, writeSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
-import { validatePluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
-import { verifyCreationCapabilityReceipt } from './creation-capability-journal.js'
+import { validatePluginCreationVerificationCertificate, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { SOURCE_ARCHIVE_DOMAIN, SOURCE_ARCHIVE_LIMIT, verifyCreationCapabilityReceipt } from './creation-capability-journal.js'
+import { validateCreationCapabilitySource } from './creation-capability-source.js'
+import { RESERVED_OUTPUTS, validateSourceCreationFiles } from './source-creation.js'
 import { encode, freeze, handoffPrimitives, hash, sha, type AdoptionAuthorityIdentity, type FileIdentity,
   type FileSnapshot } from './creation-capability-handoff-common.js'
 import { SEALED_ADOPTION_AUDIT, SEALED_ADOPTION_AUDIT_STATEMENTS, SEALED_ADOPTION_HANDOFF_PROTOCOL as PROTOCOL,
@@ -385,11 +387,24 @@ export function applySealedAdoptionHandoff(plan: SealedAdoptionPlan,
  * result with its signed proof digest and refuses on any difference. */
 export function readSealedAdoptionHandoffDigest(input: { physicalPath: string }): string | null {
   const file = input?.physicalPath
+  return readJournal(file, db => {
+    const audit = readSealedAdoptionAudit(db)
+    if (!audit) return null
+    const rows = db.prepare('SELECT CAST(authority_digest AS BLOB) AS authority_digest FROM authority').all()
+    if (rows.length !== 1) fail('authority singleton mismatch')
+    const authorityDigest = text(rows[0]!.authority_digest)
+    // Same checks as the journal constructor: authority binding, inherited usage and sealed plan ids.
+    sealedAdoptionInheritedUsage(db, authorityDigest); sealedAdoptionPlanIds(db, authorityDigest)
+    return audit.proof.digest as string
+  })
+}
+/** Read-only snapshot of a stopped or live journal. A stopped journal (no sidecars) is opened immutable so
+ * the read never creates -wal/-shm in a stage; a live Host's existing WAL sidecars need the ordinary
+ * read-only open to see committed frames. */
+function readJournal<T>(file: string, action: (db: DatabaseSync) => T): T {
   absolute(file)
   if (basename(file) !== 'creation-adoptions.sqlite') fail('invalid physical journal')
   directory(dirname(file)); identity(file)
-  // A stopped journal (no sidecars) is opened immutable so the read never creates -wal/-shm in a stage;
-  // a live Host's existing WAL sidecars need the ordinary read-only open to see committed frames.
   const live = ['-wal', '-shm', '-journal'].some(suffix => present(file + suffix))
   const locator = pathToFileURL(file)
   locator.searchParams.set('mode', 'ro')
@@ -397,16 +412,7 @@ export function readSealedAdoptionHandoffDigest(input: { physicalPath: string })
   const db = new DatabaseSync(locator, { readOnly: true })
   try {
     db.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=1000; BEGIN')
-    try {
-      const audit = readSealedAdoptionAudit(db)
-      if (!audit) return null
-      const rows = db.prepare('SELECT CAST(authority_digest AS BLOB) AS authority_digest FROM authority').all()
-      if (rows.length !== 1) fail('authority singleton mismatch')
-      const authorityDigest = text(rows[0]!.authority_digest)
-      // Same checks as the journal constructor: authority binding, inherited usage and sealed plan ids.
-      sealedAdoptionInheritedUsage(db, authorityDigest); sealedAdoptionPlanIds(db, authorityDigest)
-      return audit.proof.digest as string
-    } finally { db.exec('ROLLBACK') }
+    try { return action(db) } finally { db.exec('ROLLBACK') }
   } finally { db.close() }
 }
 
@@ -426,5 +432,119 @@ export function verifySealedAdoptionHandoff(input: { physicalPath: string; archi
       sameArchive(input.archivePhysicalPath, proof)
       return freeze(proof)
     } finally { db.exec('ROLLBACK') }
+  })
+}
+
+/** Provenance of one sealed Docker-era tool's archived source, re-rooted relative to `plugins/<name>/`. */
+export interface SealedReverificationSource {
+  planId: string
+  name: string
+  /** Candidate-authority files only (README.md, src/**, tests/**); Host-generated metadata is omitted. */
+  files: { path: string; content: string }[]
+  /** sha256 of the stored source-archive JSON, equal to the sealed history row's sourceArchiveDigest. */
+  archiveRowDigest: string
+  filesDigest: string
+  oldAuthorityDigest: string
+}
+const SOURCE_ARCHIVE_KEYS = ['protocol','authorityId','authorityDigest','keyId','planId','certificateDigest','artifactSha256','source','signature']
+
+/** Immutable read of the exact 0400 archive the proof names. The binding is sameArchive() (dev/ino, mode,
+ * bytes and digest) before and after the read; SQLite reopens by path, so the held O_NOFOLLOW fd only refuses
+ * a symlink at open time and is not itself the binding. */
+function readArchive<T>(file: string, proof: SealedAdoptionProof, action: (db: DatabaseSync) => T): T {
+  sameArchive(file, proof)
+  for (const suffix of ['-wal', '-shm', '-journal']) if (present(file + suffix)) fail('archive sidecar')
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  let db: DatabaseSync | undefined
+  try {
+    const held = fstatSync(fd)
+    if (String(held.dev) !== proof.archive.fileIdentity.dev || String(held.ino) !== proof.archive.fileIdentity.ino) fail('archive identity mismatch')
+    const locator = pathToFileURL(file)
+    locator.searchParams.set('mode', 'ro'); locator.searchParams.set('immutable', '1')
+    db = new DatabaseSync(locator, { readOnly: true })
+    db.exec('PRAGMA query_only=ON')
+    const result = action(db)
+    sameArchive(file, proof)
+    return result
+  } finally { db?.close(); closeSync(fd) }
+}
+
+/** Read-only provenance reader for re-verifying one sealed `pendingReverification` tool. It binds the live
+ * or stopped journal's immutable proof to the caller's signed proof digest, reads the exact sealed 0400
+ * archive under the OLD authority and returns only candidate source files. It grants nothing: no
+ * certificate, artifact, receipt or tools leave this function, and re-verification itself is the caller's. */
+export function readSealedReverificationSource(input: { physicalPath: string; expectedProofDigest: string;
+  planId: string }): Readonly<SealedReverificationSource> {
+  const file = input?.physicalPath, planId = input?.planId
+  if (typeof input?.expectedProofDigest !== 'string' || !SHA.test(input.expectedProofDigest)) fail('invalid expected proof digest')
+  if (typeof planId !== 'string' || !ID.test(planId)) fail('invalid plan id')
+  const proof = readJournal(file, db => {
+    schema(db, true)
+    const audit = readSealedAdoptionAudit(db)
+    if (!audit) fail('missing immutable proof')
+    const stored = audit.proof as unknown as SealedAdoptionProof
+    if (stored.digest !== input.expectedProofDigest) fail('external proof anchor mismatch')
+    exact(stored, SEALED_PROOF_KEYS)
+    exact(stored.fileIdentity, FILE_KEYS)
+    exact(stored.archive, ['logicalPath','fileIdentity','bytes','digest','mode'])
+    exact(stored.archive.fileIdentity, FILE_KEYS)
+    validatePlan(stored.plan)
+    if (stored.archive.logicalPath !== stored.plan.archive.logicalPath || stored.archive.bytes !== stored.plan.snapshot.bytes
+      || stored.archive.digest !== stored.plan.snapshot.digest || stored.archive.mode !== 0o400) fail('proof mismatch')
+    authority(db, stored.plan.nextIdentity)
+    if (encode(sealedAdoptionInheritedUsage(db, stored.plan.nextIdentity.authorityDigest)) !== encode(stored.plan.inheritedUsage)) fail('proof mismatch')
+    if (encode(identity(file)) !== encode(stored.fileIdentity)) fail('journal file identity mismatch')
+    return structuredClone(stored)
+  })
+  const pending = proof.plan.pendingReverification.find(row => row?.planId === planId)
+  if (!pending) fail('plan is not pending reverification')
+  const row = proof.plan.history.rows.find(row => row?.planId === planId)
+  if (!row || row.status !== 'active' || row.originalStatus !== 'active') fail('sealed row is not active')
+  if (row.sourceArchiveDigest === null) fail('no archived source')
+  if (typeof row.sourceArchiveDigest !== 'string' || !SHA.test(row.sourceArchiveDigest)) fail('invalid sealed row')
+  const old = proof.plan.oldIdentity
+  return readArchive(join(dirname(file), SEALED_DIRECTORY, `${old.authorityDigest}.sqlite`), proof, db => {
+    schema(db, false); authority(db, old)
+    const adoptions = db.prepare(`SELECT CAST(status AS BLOB) AS status, CAST(certificate_json AS BLOB) AS certificate_json,
+      CAST(certificate_digest AS BLOB) AS certificate_digest, CAST(artifact_sha AS BLOB) AS artifact_sha FROM adoptions WHERE plan_id=?`).all(planId)
+    if (adoptions.length !== 1) fail('archived adoption mismatch')
+    const adoption = adoptions[0]!, certificateJson = text(adoption.certificate_json)
+    if (text(adoption.status) !== 'active' || sha(certificateJson) !== pending.certificateDigest
+      || text(adoption.certificate_digest) !== pending.certificateDigest || text(adoption.artifact_sha) !== pending.artifactSha256) fail('archived adoption mismatch')
+    const certificate = canonical(certificateJson, 'certificate') as unknown as PluginCreationVerificationCertificate
+    try { validatePluginCreationVerificationCertificate(certificate) } catch { fail('archived certificate is invalid') }
+    const sources = db.prepare('SELECT CAST(archive_json AS BLOB) AS archive_json FROM source_archives WHERE plan_id=?').all(planId)
+    if (sources.length !== 1) fail('no archived source')
+    const raw = text(sources[0]!.archive_json)
+    if (Buffer.byteLength(raw) > SOURCE_ARCHIVE_LIMIT) fail('archived source too large')
+    const archiveRowDigest = sha(raw)
+    if (archiveRowDigest !== row.sourceArchiveDigest) fail('archived source digest mismatch')
+    const item = canonical(raw, 'source archive')
+    exact(item, SOURCE_ARCHIVE_KEYS)
+    if (item.protocol !== 'dsh-created-capability-source-archive/v1' || item.authorityId !== old.config.authorityId
+      || item.authorityDigest !== old.authorityDigest || item.keyId !== old.config.keyId || item.planId !== planId
+      || item.certificateDigest !== pending.certificateDigest || item.artifactSha256 !== pending.artifactSha256
+      || certificate.plan.id !== planId || certificate.plan.artifactSha256 !== pending.artifactSha256) fail('archived source authority mismatch')
+    const signature = item.signature
+    const { signature: _signature, ...body } = item
+    if (typeof signature !== 'string' || !/^[A-Za-z0-9_-]{86}$/u.test(signature)
+      || Buffer.from(signature, 'base64url').toString('base64url') !== signature
+      || !verify(null, Buffer.from(SOURCE_ARCHIVE_DOMAIN + encode(body)), createPublicKey(old.publicKey),
+        Buffer.from(signature, 'base64url'))) fail('archived source signature mismatch')
+    try { validateCreationCapabilitySource(item.source, certificate) } catch { fail('archived source is invalid') }
+    const name = certificate.plan.name, root = `plugins/${name}/`, files: { path: string; content: string }[] = []
+    for (const entry of item.source.files) {
+      if (typeof entry?.path !== 'string' || typeof entry.content !== 'string' || !entry.path.startsWith(root)) fail('archived source file outside the plugin')
+      // Same order as source-revision parentFiles: a replayed file carries no mode, so only 100644 is admissible.
+      if (entry.mode !== '100644') fail('archived source file mode')
+      const path = entry.path.slice(root.length)
+      // Host-generated metadata is regenerated by the source job, never taken from the archive.
+      if ((RESERVED_OUTPUTS as readonly string[]).includes(path)) continue
+      try { validateSourceCreationFiles([{ path, content: entry.content }]) } catch { fail(`archived source file outside candidate authority: ${JSON.stringify(path)}`) }
+      files.push({ path, content: entry.content })
+    }
+    if (!files.length) fail('archived source has no candidate files')
+    try { validateSourceCreationFiles(files) } catch { fail('archived source exceeds candidate bounds') }
+    return freeze({ planId, name, files, archiveRowDigest, filesDigest: hash(files), oldAuthorityDigest: old.authorityDigest })
   })
 }

@@ -21,7 +21,8 @@ const MAX_OUTPUT_BYTES = 8_192
 const CREATE_SCOPE = (name: string): readonly string[] => Object.freeze([`plugins/${name}`, 'plugins/README.md', 'pnpm-lock.yaml'])
 const HOST_INPUTS = ['scripts/create-plugin.mjs', 'LICENSE', 'plugins/README.md', 'package.json',
   'pnpm-workspace.yaml', 'pnpm-lock.yaml', 'tsconfig.base.json'] as const
-const RESERVED_OUTPUTS = ['package.json', 'cordis.patch.yml', 'LICENSE', 'tsconfig.json',
+/** Host-generated plugin metadata outside candidate authority. */
+export const RESERVED_OUTPUTS = ['package.json', 'cordis.patch.yml', 'LICENSE', 'tsconfig.json',
   'tsconfig.build.json', 'src/version.ts'] as const
 
 export interface SourceCreationGrant {

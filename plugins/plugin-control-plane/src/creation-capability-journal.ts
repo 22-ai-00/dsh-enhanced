@@ -16,8 +16,8 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u
 const SHA = /^[a-f0-9]{64}$/u
 const APP_ID = 0x44534341
 const SEMANTICS = 'dsh-created-capability-journal/v1:reserve-before-dispatch:unknown-no-retry:finite-owner-grant'
-const SOURCE_ARCHIVE_LIMIT = 2 * 1024 * 1024
-const SOURCE_ARCHIVE_DOMAIN = 'dsh-created-capability-source-archive-v1\0'
+export const SOURCE_ARCHIVE_LIMIT = 2 * 1024 * 1024
+export const SOURCE_ARCHIVE_DOMAIN = 'dsh-created-capability-source-archive-v1\0'
 function fail(): never { throw new Error('creation capability journal rejected input or state') }
 function obj(value: unknown, expected: readonly string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype
