@@ -25,6 +25,9 @@ import type {
   WorkItemEvaluationState,
   WorkItemFollowRecord,
   WorkItemFollowState,
+  WorkItemFollowUpOwnResult,
+  WorkItemFollowUpRecord,
+  WorkItemPolicyNotice,
   WorkItemExecutionStatus,
   WorkItemObjectiveStatus,
   WorkItemOutcomeEvidence,
@@ -49,7 +52,7 @@ import type {
   WorkItemThreadClosure,
   WorkItemThreadOutcome,
 } from './types.ts'
-import { CLAIMABLE_STATES, OPEN_STATES, TERMINAL_REPORT_STATUSES, WorkItemError } from './types.ts'
+import { CLAIMABLE_STATES, OPEN_STATES, TERMINAL_REPORT_STATUSES, TERMINAL_STATES, WorkItemError } from './types.ts'
 import type { WorkItemIntakeCandidate, WorkItemIntakeRecord, WorkItemIntakeResult, WorkItemIntakeSignals } from './intake.ts'
 
 const SCHEMA_VERSION = 10
@@ -225,6 +228,19 @@ const REPORTABLE_STATES: readonly WorkItemState[] = ['claimed', 'working', 'wait
 const DEFERRED_REPORT_STATUSES: readonly WorkItemDeferredReportStatus[] = ['ready', 'blocked', 'failed']
 
 /** One validated follow, already resolved to its registered source at admission. */
+/** Append-only event kinds for WP21 notices and follow-up ownership (no schema change). */
+export const POLICY_NOTICE_EVENT = 'policy-change-noticed'
+export const FOLLOW_UP_OWNED_EVENT = 'follow-up-owned'
+export const FOLLOW_UP_PROCESSED_EVENT = 'follow-up-processed'
+export const FOLLOW_UP_RELEASED_EVENT = 'follow-up-released'
+
+/** Position of one released follow-up in release order. */
+export interface WorkItemFollowUpCursor {
+  readonly recordedAt: number
+  readonly itemId: string
+  readonly sequence: number
+}
+
 export interface WorkItemFollowInput {
   readonly kind: string
   readonly ref: string
@@ -2105,6 +2121,208 @@ export class WorkItemStore {
       detail: optString(row['detail']),
       recordedAt: Number(row['recorded_at']),
     })))
+  }
+
+  /**
+   * Record one Policy-change notice for a live item, at most once per
+   * (item, policyVersion). The notice is an append-only event: it changes no
+   * state, lease or dispatch, so a Policy change never cancels work. Returns
+   * `undefined` when this version was already noticed for the item.
+   */
+  recordPolicyNotice(itemId: string, notice: Omit<WorkItemPolicyNotice, 'itemId' | 'recordedAt'>): WorkItemPolicyNotice | undefined {
+    const now = this.#now()
+    return this.#transaction(() => {
+      const item = this.#requireItem(itemId)
+      if (!OPEN_STATES.includes(item.state)) return undefined
+      const prior = this.#statement(`SELECT 1 AS present FROM work_item_event
+        WHERE item_id = ? AND kind = '${POLICY_NOTICE_EVENT}' AND json_extract(detail, '$.policyVersion') = ?`).get(itemId, notice.policyVersion)
+      if (prior !== undefined) return undefined
+      this.#appendEvent(itemId, POLICY_NOTICE_EVENT, 'host', {
+        policyVersion: notice.policyVersion,
+        reasonCode: notice.reasonCode,
+        frozenRuleId: notice.frozenRuleId,
+        currentRuleId: notice.currentRuleId,
+        decisionId: notice.decisionId,
+      }, now)
+      return Object.freeze({ itemId, ...notice, recordedAt: now })
+    })
+  }
+
+  /** Every Policy-change notice recorded for one item, oldest first. */
+  policyNotices(itemId: string): readonly WorkItemPolicyNotice[] {
+    const rows = this.#statement(`SELECT detail, recorded_at FROM work_item_event
+      WHERE item_id = ? AND kind = '${POLICY_NOTICE_EVENT}' ORDER BY sequence`).all(itemId) as Row[]
+    const notices: WorkItemPolicyNotice[] = []
+    for (const row of rows) {
+      const detail = eventDetail(row['detail'])
+      if (detail === null || typeof detail['policyVersion'] !== 'string' || typeof detail['reasonCode'] !== 'string') continue
+      notices.push(Object.freeze({
+        itemId,
+        policyVersion: detail['policyVersion'],
+        reasonCode: detail['reasonCode'],
+        frozenRuleId: typeof detail['frozenRuleId'] === 'string' ? detail['frozenRuleId'] : null,
+        currentRuleId: typeof detail['currentRuleId'] === 'string' ? detail['currentRuleId'] : null,
+        decisionId: typeof detail['decisionId'] === 'string' ? detail['decisionId'] : null,
+        recordedAt: Number(row['recorded_at']),
+      }))
+    }
+    return Object.freeze(notices)
+  }
+
+  /**
+   * Hand one human follow-up on the item's work thread to that item.
+   *
+   * The message id is owned by at most one item for its whole life; the same
+   * (item, message, digest) is idempotent, anything else under the same id is
+   * an identity mismatch. An item that already ended takes nothing: the
+   * message stays with judgment and no row is written.
+   */
+  ownFollowUp(input: { itemId: string; bindingId: string; messageId: string; sourceDigest: string }): WorkItemFollowUpOwnResult {
+    const now = this.#now()
+    return this.#transaction(() => {
+      const item = this.#requireItem(input.itemId)
+      if (input.bindingId !== item.originBindingId) fail('identity-mismatch', 'follow-up is not on this item\'s work thread')
+      const owners = this.#statement(`SELECT item_id, detail FROM work_item_event
+        WHERE kind = '${FOLLOW_UP_OWNED_EVENT}' AND json_extract(detail, '$.messageId') = ?`).all(input.messageId) as Row[]
+      for (const row of owners) {
+        const detail = eventDetail(row['detail'])
+        if (String(row['item_id']) !== item.id || detail?.['sourceDigest'] !== input.sourceDigest) {
+          fail('identity-mismatch', 'follow-up message is already owned under a different identity')
+        }
+        const followUp = this.#followUps(item).find(record => record.messageId === input.messageId)
+        if (followUp === undefined) fail('storage', 'owned follow-up could not be read back')
+        return Object.freeze({ outcome: 'already-owned' as const, followUp })
+      }
+      if (!OPEN_STATES.includes(item.state)) return Object.freeze({ outcome: 'item-ended' as const, itemId: item.id, state: item.state })
+      this.#appendEvent(item.id, FOLLOW_UP_OWNED_EVENT, 'host', {
+        messageId: input.messageId, bindingId: input.bindingId, sourceDigest: input.sourceDigest,
+      }, now)
+      const followUp = this.#followUps(item).find(record => record.messageId === input.messageId)
+      if (followUp === undefined) fail('storage', 'owned follow-up could not be read back')
+      return Object.freeze({ outcome: 'owned' as const, followUp })
+    })
+  }
+
+  /**
+   * Mark one owned follow-up processed by its live item. Idempotent; once the
+   * item ended an unprocessed follow-up belongs to judgment and cannot be
+   * claimed as processed any more, whether or not the release sweep ran.
+   */
+  markFollowUpProcessed(itemId: string, messageId: string): WorkItemFollowUpRecord {
+    const now = this.#now()
+    return this.#transaction(() => {
+      const item = this.#requireItem(itemId)
+      const current = this.#followUps(item).find(record => record.messageId === messageId)
+      if (current === undefined) fail('not-found', 'follow-up is not owned by this item')
+      if (current.state === 'processed') return current
+      if (current.state === 'released' || !OPEN_STATES.includes(item.state)) {
+        fail('invalid-state', 'follow-up was released to judgment when the item ended')
+      }
+      this.#appendEvent(item.id, FOLLOW_UP_PROCESSED_EVENT, 'host', { messageId }, now)
+      const processed = this.#followUps(item).find(record => record.messageId === messageId)
+      if (processed === undefined) fail('storage', 'processed follow-up could not be read back')
+      return processed
+    })
+  }
+
+  /** Follow-ups owned by one item, in the order they were handed over. */
+  followUps(itemId: string): readonly WorkItemFollowUpRecord[] {
+    return this.#followUps(this.#requireItem(itemId))
+  }
+
+  /**
+   * Materialize the release of every unprocessed follow-up whose item ended.
+   *
+   * Derived from durable state only (terminal item, owned, neither processed
+   * nor released), so it is restart-safe and covers every terminal path
+   * without hooking each one; a second sweep releases nothing new.
+   */
+  releaseEndedFollowUps(limit = 100): readonly WorkItemFollowUpRecord[] {
+    const bounded = Math.max(1, Math.min(Math.trunc(limit), 1000))
+    const now = this.#now()
+    return this.#transaction(() => {
+      const rows = this.#statement(`SELECT e.item_id AS item_id, json_extract(e.detail, '$.messageId') AS message_id
+        FROM work_item_event e JOIN work_item w ON w.id = e.item_id
+        WHERE e.kind = '${FOLLOW_UP_OWNED_EVENT}' AND w.state IN (${TERMINAL_STATES.map(() => '?').join(', ')})
+          AND NOT EXISTS (SELECT 1 FROM work_item_event s WHERE s.item_id = e.item_id
+            AND s.kind IN ('${FOLLOW_UP_PROCESSED_EVENT}', '${FOLLOW_UP_RELEASED_EVENT}')
+            AND json_extract(s.detail, '$.messageId') = json_extract(e.detail, '$.messageId'))
+        ORDER BY e.recorded_at, e.item_id, e.sequence LIMIT ?`).all(...TERMINAL_STATES, bounded) as Row[]
+      const released: WorkItemFollowUpRecord[] = []
+      for (const row of rows) {
+        const item = this.#requireItem(String(row['item_id']))
+        const messageId = String(row['message_id'])
+        this.#appendEvent(item.id, FOLLOW_UP_RELEASED_EVENT, 'host', { messageId, releasedFrom: item.state }, now)
+        const record = this.#followUps(item).find(candidate => candidate.messageId === messageId)
+        if (record === undefined || record.state !== 'released') fail('storage', 'released follow-up could not be read back')
+        released.push(record)
+      }
+      return Object.freeze(released)
+    })
+  }
+
+  /**
+   * Released follow-ups in release order, for judgment to (re)read after a
+   * restart. `after` is the cursor of the last record already seen.
+   */
+  listReleasedFollowUps(options: { limit?: number; after?: WorkItemFollowUpCursor } = {}): Readonly<{
+    items: readonly WorkItemFollowUpRecord[]; next: WorkItemFollowUpCursor | null
+  }> {
+    const limit = Math.max(1, Math.min(Math.trunc(options.limit ?? 100), 1000))
+    const after = options.after
+    const rows = (after === undefined
+      ? this.#statement(`SELECT item_id, sequence, recorded_at, json_extract(detail, '$.messageId') AS message_id FROM work_item_event
+          WHERE kind = '${FOLLOW_UP_RELEASED_EVENT}' ORDER BY recorded_at, item_id, sequence LIMIT ?`).all(limit + 1)
+      : this.#statement(`SELECT item_id, sequence, recorded_at, json_extract(detail, '$.messageId') AS message_id FROM work_item_event
+          WHERE kind = '${FOLLOW_UP_RELEASED_EVENT}' AND (recorded_at, item_id, sequence) > (?, ?, ?)
+          ORDER BY recorded_at, item_id, sequence LIMIT ?`).all(after.recordedAt, after.itemId, after.sequence, limit + 1)) as Row[]
+    const page = rows.slice(0, limit)
+    const items: WorkItemFollowUpRecord[] = []
+    for (const row of page) {
+      const record = this.#followUps(this.#requireItem(String(row['item_id'])))
+        .find(candidate => candidate.messageId === String(row['message_id']))
+      if (record !== undefined) items.push(record)
+    }
+    const last = page.at(-1)
+    const next = rows.length > limit && last !== undefined
+      ? Object.freeze({ recordedAt: Number(last['recorded_at']), itemId: String(last['item_id']), sequence: Number(last['sequence']) })
+      : null
+    return Object.freeze({ items: Object.freeze(items), next })
+  }
+
+  /** Fold one item's follow-up events into per-message records. */
+  #followUps(item: WorkItemRecord): readonly WorkItemFollowUpRecord[] {
+    const rows = this.#statement(`SELECT kind, detail, recorded_at FROM work_item_event
+      WHERE item_id = ? AND kind IN ('${FOLLOW_UP_OWNED_EVENT}', '${FOLLOW_UP_PROCESSED_EVENT}', '${FOLLOW_UP_RELEASED_EVENT}')
+      ORDER BY sequence`).all(item.id) as Row[]
+    const records = new Map<string, WorkItemFollowUpRecord>()
+    for (const row of rows) {
+      const detail = eventDetail(row['detail'])
+      const messageId = detail?.['messageId']
+      if (detail === null || typeof messageId !== 'string') continue
+      const at = Number(row['recorded_at'])
+      const kind = String(row['kind'])
+      const current = records.get(messageId)
+      if (kind === FOLLOW_UP_OWNED_EVENT) {
+        if (current !== undefined || typeof detail['bindingId'] !== 'string' || typeof detail['sourceDigest'] !== 'string') continue
+        records.set(messageId, Object.freeze({
+          itemId: item.id, messageId, bindingId: detail['bindingId'], sourceDigest: detail['sourceDigest'],
+          state: 'owned', ownedAt: at, settledAt: null, releasedFrom: null,
+        }))
+        continue
+      }
+      if (current === undefined || current.state !== 'owned') continue
+      const releasedFrom = kind === FOLLOW_UP_RELEASED_EVENT && TERMINAL_STATES.includes(detail['releasedFrom'] as WorkItemState)
+        ? detail['releasedFrom'] as WorkItemState
+        : null
+      records.set(messageId, Object.freeze({
+        ...current,
+        state: kind === FOLLOW_UP_PROCESSED_EVENT ? 'processed' : 'released',
+        settledAt: at,
+        releasedFrom,
+      }))
+    }
+    return Object.freeze([...records.values()])
   }
 
   getDispatch(itemId: string): WorkItemDispatchRecord | undefined {

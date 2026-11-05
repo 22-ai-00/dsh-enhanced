@@ -330,7 +330,17 @@ host-only `admitDecision(decision)`（service 与 `WorkItemAdmission` 同名方�
 - 命名规则须由 Policy 以**同一** `ruleId` allow，否则 `policy-rule-mismatch`（不写入）；deny 仍为 `source-rejected`。规则先用无副作用的 `evaluate` 比对，不一致时不调用 `authorize`，不扣该规则授权预算、不写审计；仅缺少 `evaluate` 的旧 Policy 对端退回到 `authorize` 后比对，此时每个（decision、dedup 窗口）至多扣一次。
 - 冻结：mandate（`work-items/mandate/v1`：decisionId、origin、mode、ruleId?、budgetRemaining、digest）存入既有 `authority_basis` JSON，`admitted` 事件 detail 记 `mandate: { decisionId, origin, digest }`。**无 schema 变更。**
 - 派发复核：带 ruleId 的 mandate 在 claim/wake 前要求 Policy 仍由同一规则 allow，否则 park 为 `waiting`（`mandate-rule-changed`），不取消；畸形、不可能通过闸门或 decisionId 与工作项 externalId 不符的已存 mandate 视为 `malformed-basis`。
-- 未覆盖：`budgetRemaining` 是决策方上报的事实，不是 Host 持有的预算；Policy 变更主动通知活工作项、人类跟进归属、独立 verifier 绑定、observe 决策记录均未实现。
+- 未覆盖：`budgetRemaining` 是决策方上报的事实，不是 Host 持有的预算；独立 verifier 绑定、observe 决策记录未实现（Policy 变更通知与跟进归属见下节）。
+
+### Policy 变更通知与跟进归属（WP21 第 2 片）
+
+两者均为确定性、无模型调用的 host-only 接口，只追加 `work_item_event` 行（`policy-change-noticed`、`follow-up-owned`、`follow-up-processed`、`follow-up-released`），**无 schema 变更**；幂等靠在同一事务内按 `json_extract(detail, …)` 查重。
+
+- `noticePolicyChange({ protocol: 'work-items/policy-change/v1', policyVersion })`：`policyVersion` 是宿主给的不透明令牌（配置摘要、修订号）。对所有活工作项（queued/claimed/working/waiting，非 observed，单次最多 1000）用 Policy `evaluate` 重算准入（无审计、不扣预算），与 `check()` 同一比较：deny（记其 reasonCode）、命名规则改变（`mandate-rule-changed`）、已存依据畸形（`malformed-basis`）即"受影响"，每个 (item, policyVersion) 记一条通知（frozenRuleId、currentRuleId、decisionId）。**不取消、不 park、不 wake、不改租约**；派发复核仍是唯一 park 门。重放同一版本（含重启后）只返回 `alreadyNotified`。返回 `notified/alreadyNotified/unaffected/legacy/unavailable`；单项 evaluate 抛错列入 `unavailable`，下次同版本重试；缺 Policy 或 Policy 无 `evaluate` 时整体 `{ outcome: 'unavailable' }` 且不写任何行。`policyNotices(itemId)` 读回。
+- `ownFollowUp({ protocol: 'work-items/follow-up/v1', itemId, bindingId, messageId, sourceDigest })`：工作线程（`bindingId` 必须等于 `originBindingId`）上的人类跟进归该活工作项；不存消息正文。同 (item, messageId, digest) 幂等（`already-owned`），messageId 被别的项或别的 digest 占用为 `identity-mismatch`；项已结束返回 `item-ended`，不写入，消息留给判断。
+- `markFollowUpProcessed(itemId, messageId)`：仅活项可标记；项一结束，未处理的跟进即属于判断，再标记为 `invalid-state`（无论释放扫描是否已跑）。
+- `releaseFollowUps(limit?)`：把已结束项（任一终态路径）上未处理的跟进物化为 `released`（记 `releasedFrom`）并返回新释放的列表；只由持久状态推导，重启安全，二次调用为空。不发送任何消息。`listReleasedFollowUps({ limit, after })` 按释放顺序分页重读；`followUps(itemId)` 读单项。
+- 未覆盖：没有 intake/Delivery 调用方（宿主需在 Policy 配置变化时调用 `noticePolicyChange`、在观测到工作线程消息时调用 `ownFollowUp`）；通知不预测 claim 时 `authorize` 的预算扣减；释放是惰性扫描而非终态钩子；`json_extract` 查重无索引（活项受 `maxOpenItems` 约束）。
 
 ## 结果证据与结算（`ready` 只是报告）
 

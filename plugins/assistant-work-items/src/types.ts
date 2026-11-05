@@ -192,6 +192,85 @@ export type WorkItemDecisionAdmitResult =
   | Readonly<{ outcome: 'replayed'; item: WorkItemRecord; dispatch: WorkItemDispatchRecord; mandate: WorkItemMandateBasis }>
   | Readonly<{ outcome: 'refused'; reasonCode: WorkItemDecisionRefusal }>
 
+/**
+ * Host-supplied notice that the Policy peer now runs under a new version.
+ *
+ * `policyVersion` is opaque to this plugin (a config digest, a revision
+ * counter); it only names the change so each affected item is notified once.
+ */
+export interface WorkItemPolicyChange {
+  readonly protocol: 'work-items/policy-change/v1'
+  readonly policyVersion: string
+}
+
+/** Durable per-item notice that a Policy change affects its frozen basis. Never cancels. */
+export interface WorkItemPolicyNotice {
+  readonly itemId: string
+  readonly policyVersion: string
+  /** `mandate-rule-changed`, `malformed-basis`, or the Policy deny reason. */
+  readonly reasonCode: string
+  /** Rule the item's mandate (or basis) was admitted under; `null` when none was named. */
+  readonly frozenRuleId: string | null
+  /** Rule the current Policy decided by; `null` on deny or an unnamed allow. */
+  readonly currentRuleId: string | null
+  readonly decisionId: string | null
+  readonly recordedAt: number
+}
+
+export type WorkItemPolicyChangeResult =
+  | Readonly<{
+    outcome: 'noticed'
+    policyVersion: string
+    /** Notices written by this call. */
+    notified: readonly WorkItemPolicyNotice[]
+    /** Items already notified for this version (restart / replay). */
+    alreadyNotified: readonly string[]
+    /** Live items whose basis still holds under the new Policy. */
+    unaffected: number
+    /** Live pre-v7 items without a basis; nothing to compare against. */
+    legacy: number
+    /** Items Policy could not answer for now; a later call with the same version retries them. */
+    unavailable: readonly string[]
+  }>
+  /** The Policy peer is missing or cannot evaluate side-effect free; nothing was written. */
+  | Readonly<{ outcome: 'unavailable'; detail: string }>
+
+/**
+ * One human follow-up message on an item's work thread, handed over by the
+ * host that observed it. The message text stays with its producer; the item
+ * owns only its identity.
+ */
+export interface WorkItemFollowUpInput {
+  readonly protocol: 'work-items/follow-up/v1'
+  readonly itemId: string
+  /** Work thread binding; must equal the item's `originBindingId`. */
+  readonly bindingId: string
+  readonly messageId: string
+  /** Producer digest of the message; part of the follow-up identity. */
+  readonly sourceDigest: string
+}
+
+/** `owned` while the item is live; `processed` by the item; `released` back to judgment after the item ended. */
+export type WorkItemFollowUpState = 'owned' | 'processed' | 'released'
+
+export interface WorkItemFollowUpRecord {
+  readonly itemId: string
+  readonly messageId: string
+  readonly bindingId: string
+  readonly sourceDigest: string
+  readonly state: WorkItemFollowUpState
+  readonly ownedAt: number
+  /** When it was processed or released; `null` while owned. */
+  readonly settledAt: number | null
+  /** Terminal item state a released follow-up was released from. */
+  readonly releasedFrom: WorkItemState | null
+}
+
+export type WorkItemFollowUpOwnResult =
+  | Readonly<{ outcome: 'owned' | 'already-owned'; followUp: WorkItemFollowUpRecord }>
+  /** The item already ended: nothing is written and the message stays with judgment. */
+  | Readonly<{ outcome: 'item-ended'; itemId: string; state: WorkItemState }>
+
 /** One durable work item. */
 export interface WorkItemRecord {
   readonly id: string

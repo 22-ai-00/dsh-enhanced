@@ -20,7 +20,8 @@ import type {
 import { settleOutcomes as runSettlement, type SettlementResult, type ThreadResolution } from './settlement.js'
 import { WorkItemOwnerRecall, type OwnerWorkItemExecution, type OwnerWorkItemListInput, type OwnerWorkItemRecallInput } from './owner-recall.js'
 export type { OwnerWorkItemExecution, OwnerWorkItemListInput, OwnerWorkItemRecallInput, OwnerWorkItemSummary } from './owner-recall.js'
-import { WorkItemStore } from './store.js'
+import { WorkItemStore, type WorkItemFollowUpCursor } from './store.js'
+import { normalizeFollowUp, normalizePolicyChange, noticePolicyChange } from './policy-notice.js'
 import {
   WorkItemSignalIntake,
   type WorkItemSignalRegistration,
@@ -32,6 +33,10 @@ import type {
   WorkItemDecisionAdmitResult,
   WorkItemExecuteDecision,
   WorkItemAdmitResult,
+  WorkItemFollowUpOwnResult,
+  WorkItemFollowUpRecord,
+  WorkItemPolicyChangeResult,
+  WorkItemPolicyNotice,
   WorkItemWithdrawResult,
   WorkItemAuthorityHealth,
   WorkItemClaimRecord,
@@ -679,6 +684,62 @@ export class AssistantWorkItemsService extends Service {
     }
     const dispatch = components.store.getDispatch(result.item.id)
     return dispatch === undefined ? result : Object.freeze({ ...result, dispatch })
+  }
+
+  /**
+   * Host-only (WP21): the Policy peer now runs under `policyVersion`.
+   *
+   * Never cancels, parks or wakes work. Each live item whose frozen mandate
+   * basis the current Policy no longer upholds gets one durable notice per
+   * version; replaying the same version (for example after a restart) writes
+   * nothing new. Uses Policy `evaluate`, so no audit row or budget is spent.
+   */
+  noticePolicyChange(change: unknown): WorkItemPolicyChangeResult {
+    const normalized = normalizePolicyChange(change)
+    const components = this.workItemsAvailable()
+    return noticePolicyChange(components.store, components.authority, normalized)
+  }
+
+  /** Host-only: every Policy-change notice recorded for one item. */
+  policyNotices(itemId: string): readonly WorkItemPolicyNotice[] {
+    const components = this.workItemsAvailable()
+    if (components.store.findItemById(itemId) === undefined) fail('not-found', 'work item does not exist')
+    return components.store.policyNotices(itemId)
+  }
+
+  /**
+   * Host-only (WP21): a human follow-up on an item's work thread is owned by
+   * that item while it is live. An ended item takes nothing (`item-ended`).
+   */
+  ownFollowUp(input: unknown): WorkItemFollowUpOwnResult {
+    const normalized = normalizeFollowUp(input)
+    return this.workItemsAvailable().store.ownFollowUp(normalized)
+  }
+
+  /** Host-only: the live item processed one of its owned follow-ups. */
+  markFollowUpProcessed(itemId: string, messageId: string): WorkItemFollowUpRecord {
+    return this.workItemsAvailable().store.markFollowUpProcessed(itemId, messageId)
+  }
+
+  /** Host-only: follow-ups owned by one item. */
+  followUps(itemId: string): readonly WorkItemFollowUpRecord[] {
+    return this.workItemsAvailable().store.followUps(itemId)
+  }
+
+  /**
+   * Host-only: release every unprocessed follow-up of an ended item back to
+   * judgment and return the newly released ones. No message is sent; the
+   * caller decides what judgment does with them.
+   */
+  releaseFollowUps(limit?: number): readonly WorkItemFollowUpRecord[] {
+    return this.workItemsAvailable().store.releaseEndedFollowUps(limit)
+  }
+
+  /** Host-only: released follow-ups in release order (restart-safe re-read). */
+  listReleasedFollowUps(options: { limit?: number; after?: WorkItemFollowUpCursor } = {}): Readonly<{
+    items: readonly WorkItemFollowUpRecord[]; next: WorkItemFollowUpCursor | null
+  }> {
+    return this.workItemsAvailable().store.listReleasedFollowUps(options)
   }
 
   /**

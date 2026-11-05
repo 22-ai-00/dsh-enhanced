@@ -108,6 +108,50 @@ export function buildAuthorityBasis(input: {
   })
 }
 
+/** Outcome of the side-effect-free {@link WorkItemAuthority.assess}. */
+export type AuthorityAssessment =
+  | Readonly<{ kind: 'allow' }>
+  | Readonly<{ kind: 'legacy' }>
+  | Readonly<{ kind: 'affected'; reasonCode: string; currentRuleId: string | null }>
+  | Readonly<{ kind: 'unavailable'; detail: string }>
+
+/** Run one Policy call; a thrown or malformed answer proves nothing about the mandate. */
+function decide(call: () => PeerPolicyDecision):
+  Readonly<{ kind: 'decided'; decision: PeerPolicyDecision }> | Readonly<{ kind: 'unavailable'; detail: string }> {
+  let decision: PeerPolicyDecision
+  try {
+    decision = call()
+  } catch (error) {
+    // A thrown peer call (including an idempotency conflict with another
+    // caller) proves nothing about the mandate, so it cannot revoke it.
+    return Object.freeze({ kind: 'unavailable', detail: describe(error) })
+  }
+  if (decision === null || typeof decision !== 'object'
+    || (decision.effect !== 'allow' && decision.effect !== 'deny')
+    || typeof decision.reasonCode !== 'string') {
+    return Object.freeze({ kind: 'unavailable', detail: 'malformed-decision' })
+  }
+  return Object.freeze({ kind: 'decided', decision })
+}
+
+/** Compare a well-formed decision with the frozen basis it re-verifies. */
+function compare(basis: WorkItemAuthorityBasis, decision: PeerPolicyDecision):
+  Readonly<{ kind: 'allow' }> | Readonly<{ kind: 'revoked'; reasonCode: string; currentRuleId: string | null }> {
+  const currentRuleId = typeof decision.ruleId === 'string' ? decision.ruleId : null
+  if (decision.effect !== 'allow') {
+    const reasonCode = decision.reasonCode.length === 0 ? 'default-deny' : decision.reasonCode
+    return Object.freeze({ kind: 'revoked', reasonCode, currentRuleId: null })
+  }
+  // A mandate admitted under a named rule (always so for inferred work) is
+  // re-verified against that rule, not against whatever now allows: a broader
+  // rule added later must not silently widen what the decision relied on.
+  const ruleId = basis.mandate?.ruleId
+  if (ruleId !== undefined && decision.ruleId !== ruleId) {
+    return Object.freeze({ kind: 'revoked', reasonCode: MANDATE_RULE_CHANGED_REASON, currentRuleId })
+  }
+  return Object.freeze({ kind: 'allow' })
+}
+
 /**
  * Re-run the admission decision before an item is ever claimed or woken.
  *
@@ -134,30 +178,37 @@ export class WorkItemAuthority {
     }
     const policy = this.#policy()
     if (policy === undefined) return Object.freeze({ kind: 'unavailable', detail: 'missing-policy' })
-    let decision: PeerPolicyDecision
-    try {
-      decision = policy.authorize(requestOf(basis), { idempotencyKey: basis.idempotencyKey })
-    } catch (error) {
-      // A thrown peer call (including an idempotency conflict with another
-      // caller) proves nothing about the mandate, so it cannot revoke it.
-      return Object.freeze({ kind: 'unavailable', detail: describe(error) })
+    const decided = decide(() => policy.authorize(requestOf(basis), { idempotencyKey: basis.idempotencyKey }))
+    if (decided.kind === 'unavailable') return decided
+    const verdict = compare(basis, decided.decision)
+    return verdict.kind === 'allow'
+      ? Object.freeze({ kind: 'allow' })
+      : Object.freeze({ kind: 'revoked', reasonCode: verdict.reasonCode })
+  }
+
+  /**
+   * Side-effect-free counterpart of {@link check} for Policy-change notices.
+   *
+   * Uses `evaluate` (no audit row, no budget reservation) so computing which
+   * live items a new Policy version affects never consumes or records
+   * anything at the Policy peer. Same rule comparison as dispatch
+   * re-verification; only a budget charge that `authorize` would add at claim
+   * time is outside what a notice can predict.
+   */
+  assess(item: WorkItemRecord): AuthorityAssessment {
+    const basis = item.authority
+    if (basis === null) return Object.freeze({ kind: 'legacy' })
+    if (!basisIsUsable(basis)) {
+      return Object.freeze({ kind: 'affected', reasonCode: MALFORMED_AUTHORITY_REASON, currentRuleId: null })
     }
-    if (decision === null || typeof decision !== 'object'
-      || (decision.effect !== 'allow' && decision.effect !== 'deny')
-      || typeof decision.reasonCode !== 'string') {
-      return Object.freeze({ kind: 'unavailable', detail: 'malformed-decision' })
-    }
-    if (decision.effect !== 'allow') {
-      const reasonCode = decision.reasonCode.length === 0 ? 'default-deny' : decision.reasonCode
-      return Object.freeze({ kind: 'revoked', reasonCode })
-    }
-    // A mandate admitted under a named rule (always so for inferred work) is
-    // re-verified against that rule, not against whatever now allows: a broader
-    // rule added later must not silently widen what the decision relied on.
-    const ruleId = basis.mandate?.ruleId
-    if (ruleId !== undefined && decision.ruleId !== ruleId) {
-      return Object.freeze({ kind: 'revoked', reasonCode: MANDATE_RULE_CHANGED_REASON })
-    }
-    return Object.freeze({ kind: 'allow' })
+    const policy = this.#policy()
+    if (policy === undefined) return Object.freeze({ kind: 'unavailable', detail: 'missing-policy' })
+    const evaluate = policy.evaluate
+    if (typeof evaluate !== 'function') return Object.freeze({ kind: 'unavailable', detail: 'missing-evaluate' })
+    const decided = decide(() => evaluate.call(policy, requestOf(basis)))
+    if (decided.kind === 'unavailable') return decided
+    const verdict = compare(basis, decided.decision)
+    if (verdict.kind === 'allow') return Object.freeze({ kind: 'allow' })
+    return Object.freeze({ kind: 'affected', reasonCode: verdict.reasonCode, currentRuleId: verdict.currentRuleId })
   }
 }

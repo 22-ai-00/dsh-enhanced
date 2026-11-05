@@ -94,6 +94,10 @@ function createPolicy() {
       if (failure !== null) throw failure
       return decision
     },
+    evaluate() {
+      if (failure !== null) throw failure
+      return decision
+    },
   }
   return {
     service,
@@ -175,6 +179,7 @@ class FakePolicyPeer extends Service {
   authorize(request: PeerPolicyRequest, options?: { idempotencyKey?: string; auditDetails?: unknown }) {
     return this.spy.service.authorize(request, options)
   }
+  evaluate(request: PeerPolicyRequest) { return this.spy.service.evaluate!(request) }
   setAllow(value: boolean) { this.spy.setAllow(value) }
   setDecision(value: PeerPolicyDecision) { this.spy.setDecision(value) }
   setFailure(value: Error | null) { this.spy.setFailure(value) }
@@ -1001,6 +1006,32 @@ describe('work-item admission authority revalidation', () => {
     expect(fixture.service.admitDecision({ ...decision, decisionId: 'svc-decision-2', origin: 'inferred' }))
       .toEqual({ outcome: 'refused', reasonCode: 'inferred-requires-rule' })
     expect(fixture.automations?.calls).toHaveLength(1)
+  })
+
+  test('a Policy change notifies a live item without cancelling it; its follow-ups release when it ends', async () => {
+    const fixture = await serviceHarness()
+    const admitted = fixture.service.admit(signal())
+    const itemId = admitted.item.id
+    expect(fixture.service.ownFollowUp({
+      protocol: 'work-items/follow-up/v1', itemId, bindingId: admitted.item.originBindingId, messageId: 'human-1', sourceDigest: 'sha256:h1',
+    })).toMatchObject({ outcome: 'owned' })
+    const authorizeCalls = fixture.policy.calls.length
+    fixture.policy.setAllow(false)
+    const noticed = fixture.service.noticePolicyChange({ protocol: 'work-items/policy-change/v1', policyVersion: 'cfg-2' })
+    expect(noticed).toMatchObject({ outcome: 'noticed', notified: [{ itemId, reasonCode: 'default-deny' }] })
+    expect(fixture.service.noticePolicyChange({ protocol: 'work-items/policy-change/v1', policyVersion: 'cfg-2' }))
+      .toMatchObject({ outcome: 'noticed', notified: [], alreadyNotified: [itemId] })
+    expect(fixture.policy.calls.length).toBe(authorizeCalls)
+    expect(fixture.service.policyNotices(itemId)).toHaveLength(1)
+    expect(readStore(fixture).findItemById(itemId)?.state).toBe(admitted.item.state)
+    expect(errorCode(() => fixture.service.noticePolicyChange({ protocol: 'work-items/policy-change/v1' }))).toBe('invalid-input')
+
+    fixture.policy.setAllow(true)
+    fixture.service.claim(workerAgent('occ-1'))
+    await fixture.service.report(workerAgent('occ-1'), { status: 'failed', summary: 'could not finish', idempotencyKey: 'r-1' })
+    expect(fixture.service.releaseFollowUps()).toEqual([expect.objectContaining({ itemId, messageId: 'human-1', state: 'released', releasedFrom: 'failed' })])
+    expect(fixture.service.releaseFollowUps()).toEqual([])
+    expect(fixture.service.listReleasedFollowUps().items.map(record => record.messageId)).toEqual(['human-1'])
   })
 
   test('a later allow resumes the same item unchanged, without re-admission', async () => {
