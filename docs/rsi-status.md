@@ -93,11 +93,11 @@ live Harness app 的 `0.2.1-rc.5` 需要 owner 显式风险豁免；已在该版
 
 | 精确提交 | 环境 | 结果 | 测试 passed / skipped | 文件 passed / skipped | 日志 SHA-256 |
 | --- | --- | --- | --- | --- | --- |
+| `7f6db83a`（39 包，vitest 失败诊断 `bee2272c` + 修复指引 `5021c2ea` + plugin-setup TS2352 修复 `f785654d` + writer-fence worker 补 WP22 账本模块） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1109.02 秒（attempt r2；attempt 1 因集成克隆缺被忽略的 node v24 固件失败） | 10,785 / 1,928 | 742 / 85 | `afda690690eddabe82cfa3d6ec5557f701f4121461d5831fc569628a0b704958` |
+| `7f6db83a`（39 包，vitest 失败诊断 `bee2272c` + 修复指引 `5021c2ea` + plugin-setup TS2352 修复 `f785654d` + writer-fence worker 补 WP22 账本模块） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2423.02 秒 | 12,399 / 311 | 795 / 32 | `115f3d63013701a9a2651cc4ced99c942212e678eb0fe76ede3348ca428b36f4` |
 | `1b8f4b0a`（39 包，只读 linked owner alias a1 + 普通使用非因果报告 b1） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1136.81 秒（attempt r2；attempt 1 因 pnpm 依赖校验失败） | 10,476 / 1,927 | 718 / 86 | `aab20668b83d73564178abd6314091e3a5ce4d4ff9f7d8acf1b20e3b16dd4622` |
 | `1b8f4b0a`（39 包，只读 linked owner alias a1 + 普通使用非因果报告 b1） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2441.26 秒 | 12,089 / 311 | 771 / 33 | `10d7a1cc331d87e48fc1458c999557455bdc79274f281eef98f275b0adc66219` |
 | `5644ebc4`（39 包，封存读取拒绝不完整 journal sidecar） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1176.95 秒 | 10,459 / 1,927 | 716 / 86 | `c92a246f5761de89f5f85fd48bb503d813a60fc2992997aa7dc9251dc2ba04ac` |
 | `5644ebc4`（39 包，封存读取拒绝不完整 journal sidecar） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2440.78 秒 | 12,072 / 311 | 769 / 33 | `43a83c863d7a04471cd0f29fe2580c0d60efe4c8d1d36a9790145df731a92149` |
-| `827dc60a`（39 包，历史证书读取器 `c2e2a5c2` + 父版本重验决定 `8187fbe0` + 封存源码只读读取器 S1） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1350.09 秒 | 10,458 / 1,927 | 716 / 86 | `ced79bb80cf4723f7f9f0b0e4fdfd6d8aec7a45eb07695df6cff2228619f233b` |
-| `827dc60a`（39 包，历史证书读取器 `c2e2a5c2` + 父版本重验决定 `8187fbe0` + 封存源码只读读取器 S1） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2421.85 秒 | 12,071 / 311 | 769 / 33 | `4ba0edf5bb657c121a491f9e9edf76c7d8508c31872d4973e4d0e521331d7b99` |
 
 两端覆盖 manifest、零警告 lint、包构建与类型检查、测试组及唯一 dry-run pack（39 包 / 40 测试组）；源码前后同一提交且工作树干净。Linux 用 `TMPDIR=/data00/home/jiataorui/t`；准确命令与结果见对应 `docs/evidence/verification-<sha8>/`。成长切片 `d8c9fdd2` 的双端结果与早期控制台切片日志也保留在 `docs/evidence/`。Linux attempt 1 的失败是缺少测试运行时环境，已保留。跳过项、真实模型/Bot、活服务升级与长期收益不计为已验收。
