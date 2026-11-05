@@ -29,6 +29,8 @@ import {
 import { registerWorkItemTools, workItemReportKey } from './tools.js'
 import type {
   WorkItemAdmitInput,
+  WorkItemDecisionAdmitResult,
+  WorkItemExecuteDecision,
   WorkItemAdmitResult,
   WorkItemWithdrawResult,
   WorkItemAuthorityHealth,
@@ -657,6 +659,26 @@ export class AssistantWorkItemsService extends Service {
       if (dispatch !== undefined) return Object.freeze({ ...result, dispatch })
     }
     return result
+  }
+
+  /**
+   * Admit one execute decision under a frozen mandate (Host-only, never a tool).
+   *
+   * Same wake semantics as `admit(...)`. A replayed decision id returns its one
+   * existing item; a refusal is a value, not an error, and writes nothing.
+   */
+  admitDecision(decision: WorkItemExecuteDecision): WorkItemDecisionAdmitResult {
+    const components = this.workItemsAvailable()
+    if (this.workItemsConfig.diagnosis) fail('invalid-input', 'diagnosis worker accepts only its private builtin source')
+    const result = components.admission.admitDecision(decision)
+    if (result.outcome !== 'admitted') return result
+    try {
+      components.dispatch.wake(result.item)
+    } catch (error) {
+      this.ctx.logger.warn(`assistant-work-items: worker wake failed: ${describe(error)}`)
+    }
+    const dispatch = components.store.getDispatch(result.item.id)
+    return dispatch === undefined ? result : Object.freeze({ ...result, dispatch })
   }
 
   /**

@@ -126,7 +126,71 @@ export interface WorkItemAuthorityBasis {
   readonly ruleId?: string
   readonly idempotencyKey: string
   readonly checkedAt: number
+  /**
+   * Present only on items admitted through `admitDecision(...)`. Frozen with
+   * the basis in the same JSON column; grants nothing on its own.
+   */
+  readonly mandate?: WorkItemMandateBasis
 }
+
+/** Where an execute decision came from. */
+export type WorkItemDecisionOrigin = 'explicit' | 'inferred'
+
+/** Mode the deciding intake ran in when it produced the decision. */
+export type WorkItemDecisionMode = 'observe' | 'auto'
+
+/**
+ * Narrow, producer-agnostic execute decision handed to `admitDecision(...)`.
+ *
+ * Deliberately independent of any intake ledger shape: the producer maps its
+ * own decision into this record. `decisionId` is the replay identity; the same
+ * id always resolves to the same work item.
+ */
+export interface WorkItemExecuteDecision {
+  readonly protocol: 'work-items/execute-decision/v1'
+  readonly decisionId: string
+  readonly verdict: 'execute'
+  readonly origin: WorkItemDecisionOrigin
+  readonly mode: WorkItemDecisionMode
+  /** Policy rule the decision claims to rely on; required for `inferred`. */
+  readonly policyRuleId?: string
+  /** Remaining budget units the producer reported at decision time. */
+  readonly budgetRemaining: number
+  /** The admitted scope of work. Frozen into the item; nothing outside it is admitted. */
+  readonly mandate: Readonly<{
+    kind: string
+    title: string
+    brief: string
+    originBindingId: string
+    /** TaskAcceptanceContract reference the work is accepted against. */
+    acceptanceRef: string
+  }>
+}
+
+/** Frozen record of the decision an item was admitted for. */
+export interface WorkItemMandateBasis {
+  readonly protocol: 'work-items/mandate/v1'
+  readonly decisionId: string
+  readonly origin: WorkItemDecisionOrigin
+  readonly mode: WorkItemDecisionMode
+  readonly ruleId?: string
+  readonly budgetRemaining: number
+  /** sha256 over the decision identity (id, origin, rule, mandate fields); excludes mode and budget. */
+  readonly digest: string
+}
+
+/** Deterministic reasons an execute decision is refused before any durable write. */
+export type WorkItemDecisionRefusal =
+  | 'inferred-requires-auto'
+  | 'inferred-requires-rule'
+  | 'budget-exhausted'
+  | 'policy-rule-mismatch'
+
+export type WorkItemDecisionAdmitResult =
+  | Readonly<{ outcome: 'admitted'; item: WorkItemRecord; dispatch: WorkItemDispatchRecord; mandate: WorkItemMandateBasis }>
+  /** The decision id already owns an item (any state); no second item is opened. */
+  | Readonly<{ outcome: 'replayed'; item: WorkItemRecord; dispatch: WorkItemDispatchRecord; mandate: WorkItemMandateBasis }>
+  | Readonly<{ outcome: 'refused'; reasonCode: WorkItemDecisionRefusal }>
 
 /** One durable work item. */
 export interface WorkItemRecord {

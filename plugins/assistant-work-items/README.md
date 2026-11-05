@@ -305,6 +305,18 @@ work_item_read_report:
 - 不可读/畸形的已存 basis 视为 `revoked`（`malformed-basis`），绝不按 legacy 放行；`null` basis 只对应升级前的旧行（schema v7 之前），按既有 legacy 语义保持可认领。observe 模式、`following-thread` 等待和既有 `waiting-resume` 路径不受影响。
 - 不带 basis 的内部构造（测试或旧行）按 legacy 处理；生产服务总是装配复核器。`health().authority` 暴露 `legacy`/`parked` 计数与最近一次拒绝的时间和原因，`stats()` 暴露 `authorityLegacy`/`authorityParked`；不暴露 basis 内容。
 
+### execute 决策准入（冻结 Mandate，WP21 第 1 片）
+
+host-only `admitDecision(decision)`（service 与 `WorkItemAdmission` 同名方法）把一条 `work-items/execute-decision/v1` 决策准入为工作项。确定性、无模型调用、不依赖 intake 实现；输入只接受 `{ protocol, decisionId, verdict: 'execute', origin: 'explicit'|'inferred', mode: 'observe'|'auto', policyRuleId?, budgetRemaining, mandate: { kind, title, brief, originBindingId, acceptanceRef } }`，未知字段、畸形 id/预算一律 `invalid-input`。
+
+- 身份：`externalId = decision:<decisionId>`；mandate 摘要 `digest` = sha256(协议、decisionId、origin、ruleId、规范化后的 kind/title/brief/originBindingId/acceptanceRef)，mode 与预算是准入时事实，不进身份。
+- 重放不开第二项：同一 decisionId 跨所有 dedup 窗口、任何状态（含已结项）都回到原工作项（`outcome: 'replayed'`，不再 wake）；同 id 不同 digest 为 `identity-mismatch`，不写入。
+- inferred 闸门（在 Policy 调用与任何写入之前）：须 `mode: 'auto'`（否则 `inferred-requires-auto`）、命名 `policyRuleId`（`inferred-requires-rule`）、`budgetRemaining >= 1`（`budget-exhausted`）；返回 `{ outcome: 'refused', reasonCode }`。explicit 不受 mode/预算约束，但仍过 kind allowlist、绑定校验与 Policy。
+- 命名规则须由 Policy 以**同一** `ruleId` allow，否则 `policy-rule-mismatch`（不写入）；deny 仍为 `source-rejected`。
+- 冻结：mandate（`work-items/mandate/v1`：decisionId、origin、mode、ruleId?、budgetRemaining、digest）存入既有 `authority_basis` JSON，`admitted` 事件 detail 记 `mandate: { decisionId, origin, digest }`。**无 schema 变更。**
+- 派发复核：带 ruleId 的 mandate 在 claim/wake 前要求 Policy 仍由同一规则 allow，否则 park 为 `waiting`（`mandate-rule-changed`），不取消；畸形或不可能通过闸门的已存 mandate 视为 `malformed-basis`。
+- 未覆盖：`budgetRemaining` 是决策方上报的事实，不是 Host 持有的预算；Policy 变更主动通知活工作项、人类跟进归属、独立 verifier 绑定、observe 决策记录均未实现。
+
 ## 结果证据与结算（`ready` 只是报告）
 
 - 终态与客观结果分离：`ready` 只表示 worker 自报完成（`trust: agent-self-report`）；`objectiveStatus` 目前只能从独立证据推导为 `unknown`，不会出现 `achieved`/`partial`。

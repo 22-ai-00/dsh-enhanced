@@ -5,10 +5,14 @@ import { buildAuthorityBasis } from './authority.ts'
 import type { WorkItemLedger } from './ledger.ts'
 import type { PeerDeliveryService, PeerOwnerRouteReceipt, PeerPolicyService } from './peers.ts'
 import type { WorkItemFollowInput, WorkItemStore } from './store.ts'
+import { buildMandateBasis, decisionRefusal, mandateDigest, normalizeExecuteDecision, type NormalizedExecuteDecision } from './mandate.ts'
 import type {
   WorkItemAdmitInput,
   WorkItemAdmitResult,
   WorkItemAuthorityBasis,
+  WorkItemDecisionAdmitResult,
+  WorkItemDecisionRefusal,
+  WorkItemMandateBasis,
   WorkItemDispatchRecord,
   WorkItemOwnerEvidence,
   WorkItemProvenance,
@@ -193,6 +197,37 @@ export class WorkItemAdmission {
    * already admitted inside the dedup window.
    */
   admit(input: WorkItemAdmitInput): WorkItemAdmitResult {
+    return this.#admit(input, undefined) as WorkItemAdmitResult
+  }
+
+  /**
+   * Admit one execute decision under a frozen mandate.
+   *
+   * Order: shape → active-only → owner route → decision replay (any state, any
+   * dedup window; a different mandate under the same id is `identity-mismatch`)
+   * → inferred gate (auto mode, named Policy rule, remaining budget ≥ 1) →
+   * ordinary kind/cooldown/rate/capacity gates → Policy `admit`, whose allowing
+   * rule must equal the named rule. Every refusal happens before any durable
+   * write; the mandate is persisted inside the item's authority basis.
+   */
+  admitDecision(value: unknown): WorkItemDecisionAdmitResult {
+    const config = this.#config
+    if (!config.enabled) fail('disabled', 'the work-item intake is disabled')
+    const decision = normalizeExecuteDecision(value)
+    if (!isActive(config)) fail('observe-mode', 'execute decisions are admitted only in active mode')
+    const result = this.#admit(decision.input, decision)
+    if (typeof result === 'string') return Object.freeze({ outcome: 'refused', reasonCode: result })
+    const mandate = result.item.authority?.mandate
+    if (mandate === undefined) fail('storage', 'decision item is missing its frozen mandate')
+    return Object.freeze({
+      outcome: result.created ? 'admitted' : 'replayed',
+      item: result.item,
+      dispatch: result.dispatch,
+      mandate,
+    })
+  }
+
+  #admit(input: WorkItemAdmitInput, decision: NormalizedExecuteDecision | undefined): WorkItemAdmitResult | WorkItemDecisionRefusal {
     const config = this.#config
     if (!config.enabled) fail('disabled', 'the work-item intake is disabled')
     const continuation = isActive(config) ? this.#deps.continuationFor?.(input) : undefined
@@ -225,6 +260,25 @@ export class WorkItemAdmission {
 
     const dedupKey = dedupKeyFor(config.intakeSourceId, normalized.kind, normalized.externalId)
     const dedupBucket = dedupBucketFor(now, config.admission.dedupWindowMs)
+    let mandate: WorkItemMandateBasis | undefined
+    if (decision !== undefined) {
+      const digest = mandateDigest(decision, normalized)
+      // A decision id names exactly one item for its whole life: an open item
+      // in an older window or a settled one both answer the replay; neither
+      // the dedup window nor settlement may open a second item.
+      const prior = this.#deps.store.findLatestItemByDedupKey(dedupKey)
+      if (prior !== undefined) {
+        if (prior.authority?.mandate?.digest !== digest) {
+          fail('identity-mismatch', 'decision id already admitted a different mandate')
+        }
+        const dispatch = this.#deps.store.getDispatch(prior.id)
+        if (dispatch === undefined) fail('storage', 'admitted item is missing its dispatch row')
+        return Object.freeze({ item: prior, created: false, reason: 'duplicate', dispatch })
+      }
+      const refusal = decisionRefusal(decision)
+      if (refusal !== undefined) return refusal
+      mandate = buildMandateBasis(decision, digest)
+    }
     const existing = this.#deps.store.findItemByDedup(dedupKey, dedupBucket)
     if (existing !== undefined) {
       const dispatch = this.#deps.store.getDispatch(existing.id)
@@ -246,7 +300,8 @@ export class WorkItemAdmission {
     if (active) {
       const rejection = wouldReject[0]
       if (rejection !== undefined) fail(rejectionCode(rejection), rejectionMessage(rejection))
-      authority = this.#authorize(active, receipt, normalized.kind, dedupKey, dedupBucket, now)
+      authority = this.#authorize(active, receipt, normalized.kind, dedupKey, dedupBucket, now, mandate)
+      if (mandate?.ruleId !== undefined && authority?.ruleId !== mandate.ruleId) return 'policy-rule-mismatch'
     }
 
     const id = this.#newId()
@@ -308,6 +363,7 @@ export class WorkItemAdmission {
     const detail: Record<string, unknown> = { kind: normalized.kind, dedupBucket }
     if (normalized.provenance !== null) detail['provenance'] = normalized.provenance
     if (!active) detail['wouldReject'] = wouldReject
+    if (mandate !== undefined) detail['mandate'] = { decisionId: mandate.decisionId, origin: mandate.origin, digest: mandate.digest }
     const continuationRecord = continuation?.create(item)
     if (continuation && !continuationRecord) fail('invalid-input','continuation builder did not freeze a record')
     if (continuationRecord && (continuationRecord.sourceKey !== continuation!.sourceKey || continuationRecord.sourceDigest !== continuation!.sourceDigest || continuationRecord.parentItemId !== continuation!.parentItemId)) fail('invalid-input','continuation builder changed its source identity')
@@ -382,6 +438,7 @@ export class WorkItemAdmission {
     dedupKey: string,
     dedupBucket: number,
     now: number,
+    mandate?: WorkItemMandateBasis,
   ): WorkItemAuthorityBasis | null {
     if (!active) return null
     const policy = this.#deps.policy
@@ -406,7 +463,7 @@ export class WorkItemAdmission {
     if (decision.effect !== 'allow') {
       fail('source-rejected', `policy denied admission (${decision.reasonCode})`, kind)
     }
-    return buildAuthorityBasis({ request, decision, sourceId, automationId, idempotencyKey, checkedAt: now })
+    return buildAuthorityBasis({ request, decision, sourceId, automationId, idempotencyKey, checkedAt: now, ...(mandate === undefined ? {} : { mandate }) })
   }
 
   /** Re-anchor the configured owner scope against the live delivery route. */

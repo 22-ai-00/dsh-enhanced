@@ -1,10 +1,13 @@
 import type { PeerPolicyDecision, PeerPolicyRequest, PeerPolicyService } from './peers.ts'
-import type { WorkItemAuthorityBasis, WorkItemRecord } from './types.ts'
+import type { WorkItemAuthorityBasis, WorkItemMandateBasis, WorkItemRecord } from './types.ts'
+import { mandateIsUsable } from './mandate.ts'
 
 /** Literal marker for the persisted basis; anything else is malformed. */
 const AUTHORITY_PROTOCOL = 'work-items/authority/v1'
 /** Synthetic reason for a stored basis this host cannot trust structurally. */
 export const MALFORMED_AUTHORITY_REASON = 'malformed-basis'
+/** A decision-admitted item whose named Policy rule no longer is the one allowing it. */
+export const MANDATE_RULE_CHANGED_REASON = 'mandate-rule-changed'
 
 /**
  * Outcome of re-validating one item's admission decision.
@@ -65,6 +68,9 @@ function basisIsUsable(basis: WorkItemAuthorityBasis): boolean {
     && Number.isSafeInteger(basis.checkedAt)
     && basis.checkedAt > 0
     && (basis.ruleId === undefined || text(basis.ruleId))
+    && (basis.mandate === undefined || mandateIsUsable(basis.mandate)
+      // A decision that named a rule is only valid under the exact rule Policy allowed it by.
+      && (basis.mandate.ruleId === undefined || basis.mandate.ruleId === basis.ruleId))
 }
 
 /**
@@ -81,6 +87,7 @@ export function buildAuthorityBasis(input: {
   readonly automationId: string
   readonly idempotencyKey: string
   readonly checkedAt: number
+  readonly mandate?: WorkItemMandateBasis
 }): WorkItemAuthorityBasis {
   const ruleId = input.decision.ruleId
   return Object.freeze({
@@ -97,6 +104,7 @@ export function buildAuthorityBasis(input: {
     ...(ruleId === undefined ? {} : { ruleId }),
     idempotencyKey: input.idempotencyKey,
     checkedAt: input.checkedAt,
+    ...(input.mandate === undefined ? {} : { mandate: input.mandate }),
   })
 }
 
@@ -138,6 +146,13 @@ export class WorkItemAuthority {
     if (decision.effect !== 'allow') {
       const reasonCode = decision.reasonCode.length === 0 ? 'default-deny' : decision.reasonCode
       return Object.freeze({ kind: 'revoked', reasonCode })
+    }
+    // A mandate admitted under a named rule (always so for inferred work) is
+    // re-verified against that rule, not against whatever now allows: a broader
+    // rule added later must not silently widen what the decision relied on.
+    const ruleId = basis.mandate?.ruleId
+    if (ruleId !== undefined && decision.ruleId !== ruleId) {
+      return Object.freeze({ kind: 'revoked', reasonCode: MANDATE_RULE_CHANGED_REASON })
     }
     return Object.freeze({ kind: 'allow' })
   }

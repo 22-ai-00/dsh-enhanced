@@ -6,6 +6,7 @@ import { version } from './version.js'
 export const name = 'dsh-enhanced-assistant-work-items'
 export { AssistantWorkItemsService, version }
 export * from './authority.js'
+export { decisionExternalId } from './mandate.js'
 export * from './config.js'
 export * from './evaluation.js'
 export * from './intake.js'

@@ -984,6 +984,25 @@ describe('work-item admission authority revalidation', () => {
     expect(fixture.automations?.calls).toHaveLength(1)
   })
 
+  test('an execute decision admits and wakes once; its replay neither re-admits nor re-wakes', async () => {
+    const fixture = await serviceHarness()
+    const decision = {
+      protocol: 'work-items/execute-decision/v1', decisionId: 'svc-decision-1', verdict: 'execute',
+      origin: 'explicit', mode: 'auto', budgetRemaining: 1,
+      mandate: { kind: 'review', title: 'Review', brief: 'Review the change.', originBindingId: 'binding-origin-1', acceptanceRef: 'tac:review/v1' },
+    } as const
+    const first = fixture.service.admitDecision(decision)
+    expect(first).toMatchObject({ outcome: 'admitted', dispatch: { state: 'dispatched' } })
+    expect(fixture.automations?.calls).toHaveLength(1)
+    const replay = fixture.service.admitDecision(decision)
+    expect(replay.outcome).toBe('replayed')
+    expect(replay.outcome !== 'refused' && first.outcome !== 'refused' && replay.item.id === first.item.id).toBe(true)
+    expect(fixture.automations?.calls).toHaveLength(1)
+    expect(fixture.service.admitDecision({ ...decision, decisionId: 'svc-decision-2', origin: 'inferred' }))
+      .toEqual({ outcome: 'refused', reasonCode: 'inferred-requires-rule' })
+    expect(fixture.automations?.calls).toHaveLength(1)
+  })
+
   test('a later allow resumes the same item unchanged, without re-admission', async () => {
     const fixture = await serviceHarness()
     const admitted = fixture.service.admit(signal())
