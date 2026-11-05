@@ -44,7 +44,9 @@ export async function revealToolCall(page, name) {
   await expect(async () => {
     const bottom = page.getByRole('button', { name: 'Back to bottom', exact: true })
     if (await bottom.isVisible()) await bottom.click()
-    for (const disclosure of await collapsed.all()) await disclosure.click()
+    // A click re-renders the transcript, so a later index can go stale or
+    // disabled; bound each click and let toPass re-query instead of hanging.
+    for (const disclosure of await collapsed.all()) await disclosure.click({ timeout: 2_000 }).catch(() => {})
     await expect(target).toBeVisible({ timeout: 2_000 })
   }).toPass({ timeout: 45_000 })
   return target

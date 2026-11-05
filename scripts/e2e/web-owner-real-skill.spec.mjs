@@ -239,7 +239,9 @@ test(comparisonMode ? 'real browser compares a skill candidate with paired isola
     expect(JSON.stringify(loadResult?.data?.message?.content)).toContain('verified-summary')
     expect(sourceOutcome.task.goal.id).toBe(firstId); expect(replayOutcome.task.goal.id).toBe(secondId)
     expect(sourceReceiptDigest).not.toBe(replayReceiptDigest)
-    expect(JSON.parse(storedRun.run_json)).toMatchObject({ goalId: secondId, skillName: 'verified-summary', version: candidateMode ? 2 : 1, invocationId: candidateMode ? 'trial-1' : 'reuse-1', inputs: {}, state: 'succeeded', steps: [{ state: 'succeeded' }] })
+    expect(JSON.parse(storedRun.run_json)).toMatchObject({ goalId: secondId, skillName: 'verified-summary', version: candidateMode ? 2 : 1, invocationId: candidateMode ? 'trial-1' : 'reuse-1', inputs: {}, state: 'succeeded' })
+    // The saved write step is preceded by its file observation (b7b4b160).
+    expect(JSON.parse(storedRun.run_json).steps.map(step => step.state)).toEqual(['succeeded', 'succeeded'])
     const assemblies = (await modelCalls(modelLog)).filter(row => row.event === 'assembly')
     const guardedExecutions = (await modelCalls(modelLog)).filter(row => row.event === 'tool-execute')
     expect(assemblies.some(row => row.phase === 'native-load' && row.availableToolNames.includes('skill'))).toBe(true)
