@@ -113,6 +113,9 @@ Options:
   --customize               Interactive: show every itemized menu (scenario, model, Lark, route check)
   --owner-wait-seconds <n>  Supervised first install: wait up to n seconds (default 600; 0 disables)
                             for the owner's first Lark DM before owner learning setup
+  --plugin-preset <name>    Install: apply a dsh-plugin-setup preset (e.g. recommended) as the
+                            last configuration step; `skip` never applies one. Guided installs
+                            offer `recommended` (default yes); other runs skip unless set
   --dry-run                 Print the complete plan without changing the machine
   -h, --help                Show this help
 EOF
@@ -1428,12 +1431,13 @@ dsh_enhanced_restart_resident_service() {
   local profile="$1"
   local dry_run="$2"
   local dsh_home="${3:-${DSH_HOME:-$HOME/.dsh}}"
+  local reason="${4:-新模型配置}"
   local platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}"
   case "$platform" in
     Darwin|darwin)
       local target="gui/$(id -u)/ai.deepseek.dsh.profile.$profile"
       if [[ "$dry_run" == '1' ]]; then
-        printf '常驻服务：将重启以加载新模型配置。\n'
+        printf '常驻服务：将重启以加载%s。\n' "$reason"
         dsh_enhanced_print_command launchctl kickstart -k "$target"
         return 0
       fi
@@ -1442,25 +1446,25 @@ dsh_enhanced_restart_resident_service() {
     Linux|linux)
       local target="dsh-profile-$profile.service"
       if [[ "$dry_run" == '1' ]]; then
-        printf '常驻服务：将重启以加载新模型配置。\n'
+        printf '常驻服务：将重启以加载%s。\n' "$reason"
         dsh_enhanced_print_command systemctl --user restart "$target"
         return 0
       fi
       if command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$target" >/dev/null 2>&1; then
-        printf '常驻服务：重启以加载新模型配置。\n'
+        printf '常驻服务：重启以加载%s。\n' "$reason"
         systemctl --user restart "$target" || printf '常驻服务：重启失败；请手动运行 systemctl --user restart %s。\n' "$target"
       fi
       ;;
     MINGW*|MSYS*|CYGWIN*|Windows_NT|windows|win32)
       local target="DSH profile $profile"
       if [[ "$dry_run" == '1' ]]; then
-        printf '常驻服务：将重启以加载新模型配置。\n'
+        printf '常驻服务：将重启以加载%s。\n' "$reason"
         dsh_enhanced_print_command schtasks.exe /End /TN "$target"
         dsh_enhanced_print_command schtasks.exe /Run /TN "$target"
         return 0
       fi
       if schtasks.exe /Query /TN "$target" >/dev/null 2>&1; then
-        printf '常驻服务：重启以加载新模型配置。\n'
+        printf '常驻服务：重启以加载%s。\n' "$reason"
         schtasks.exe /End /TN "$target" >/dev/null 2>&1 || true
         schtasks.exe /Run /TN "$target" >/dev/null 2>&1 || printf '常驻服务：重启失败；请手动重启计划任务。\n'
       fi
@@ -1649,6 +1653,18 @@ dsh_enhanced_guided_model_provider() {
   else
     printf 'deepseek-official'
   fi
+}
+
+# Guided onboarding: offer the recommended plugin preset (default yes).
+dsh_enhanced_confirm_plugin_preset() {
+  [[ -t 0 && -t 1 ]] || return 1
+  printf '\n启用推荐的插件功能？（work-items observe 与 intake 账本、Delivery 超额附加、Evaluation 通知结果、事件轮询；可用 dsh-plugin-setup 随时调整）[Y/n]：' >&2
+  local answer
+  IFS= read -r answer || return 1
+  case "$answer" in
+    ''|y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # One-question guided onboarding: accept every recommended default (scenario,
@@ -3564,6 +3580,7 @@ dsh_enhanced_install() {
   local onboarding_mode='auto' model_key_hint='0'
   local guided='0'
   local owner_wait_seconds='600'
+  local plugin_preset='auto'
   local dry_run='0'
   local add_ons=()
 
@@ -3730,6 +3747,15 @@ dsh_enhanced_install() {
           return $?
         fi
         owner_wait_seconds="$2"
+        shift 2
+        ;;
+      --plugin-preset)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--plugin-preset 需要一个值。'; return $?; }
+        if [[ ! "$2" =~ ^[a-z][a-z0-9-]*$ ]]; then
+          dsh_enhanced_fail 2 '--plugin-preset 只能是预设名（如 recommended）或 skip。'
+          return $?
+        fi
+        plugin_preset="$2"
         shift 2
         ;;
       --dry-run)
@@ -4656,6 +4682,33 @@ NODE
       "$model_provider" || return $?
   fi
 
+  # Optional plugin preset: the last configuration write, before the final
+  # dump-config and postflight doctor verify the composed profile. Guided runs
+  # offer `recommended` (default yes); an explicit --plugin-preset is honored
+  # in any mode; everything else keeps package defaults.
+  local plugin_preset_explicit='1'
+  if [[ "$plugin_preset" == 'auto' ]]; then
+    plugin_preset_explicit='0'
+    plugin_preset='skip'
+    if [[ "$operation" == 'install' && "$guided" == '1' ]]; then
+      if dsh_enhanced_confirm_plugin_preset; then plugin_preset='recommended'; fi
+    fi
+  fi
+  if [[ "$operation" == 'install' && "$plugin_preset" != 'skip' ]]; then
+    printf '\n'
+    local plugin_preset_status=0
+    dsh_enhanced_apply_plugin_preset "$profile" "$dsh_home" "$dry_run" "$plugin_preset" || plugin_preset_status=$?
+    if [[ "$plugin_preset_status" -ne 0 ]]; then
+      if [[ "$plugin_preset_explicit" == '1' ]]; then
+        return "$plugin_preset_status"
+      fi
+      printf '插件预设：未应用（退出码 %s），其余安装不受影响；可稍后运行 dsh-plugin-setup preset %s。\n' \
+        "$plugin_preset_status" "$plugin_preset"
+    elif [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
+      dsh_enhanced_restart_resident_service "$profile" "$dry_run" "$dsh_home" '插件预设' || return $?
+    fi
+  fi
+
   printf '\n最终 profile 自检：\n'
   if [[ "$dry_run" == '1' ]]; then
     dsh_enhanced_print_command dsh --profile "$profile" --dump-config
@@ -4720,6 +4773,10 @@ NODE
     printf '下一步（模型）：若默认模型为 DeepSeek 官方，尚未存储 DEEPSEEK_API_KEY。export DEEPSEEK_API_KEY 后运行（Key 只从环境读取，写入 0600 的 .credentials.yaml）：\n'
     dsh_enhanced_print_command "$dsh_home/profiles/$profile/node_modules/.bin/dsh-model-setup" \
       --dsh-home "$dsh_home" --profile "$profile" --provider deepseek-official --store-key
+  fi
+  if [[ "$operation" == 'install' ]]; then
+    printf '调整插件：%s（list / enable <插件> / preset recommended；改动后重启该 profile 生效）\n' \
+      "$dsh_home/profiles/$profile/node_modules/.bin/dsh-plugin-setup"
   fi
   if [[ "$lark_mode" != 'skip' && ( "$scenario" == 'lark' || "$scenario" == 'supervised' || "$scenario" == 'full' ) ]]; then
     printf '下一步（使用）：在飞书/Lark 私聊 Bot 即可开始；只有已绑定的 owner 可以操作和授权。\n'

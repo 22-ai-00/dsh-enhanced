@@ -20,7 +20,7 @@ dsh-rsi install
 
 默认 `supervised` 包含飞书常驻助理、持久学习、有限授权下的能力改进。安装器解析并固定兼容的 DSH Host 和同批插件版本；遇到未知 Host 版本会拒绝安装。第一次安装请按终端向导完成飞书应用、本人绑定、模型和授权步骤。
 
-交互式首装先问一次“按推荐配置一路继续 / 逐项自定义”。直接回车即采用推荐项：DeepSeek 官方默认模型 `deepseek-v4-flash`（缺少 Key 时只隐藏输入一次，存入 `$DSH_HOME/.credentials.yaml`，权限 `0600`）、连接飞书、在 Key 已存储时验证模型 route；随后提示你给机器人发一条私聊（如 `/model`），安装器自动等待首次 owner 会话（默认最长 600 秒，`--owner-wait-seconds <n>` 调整，`0` 关闭），不必再手动续跑。显式参数始终优先；`--guided` / `--customize` 可跳过这个问题。已有模型或飞书配置会保留。
+交互式首装先问一次“按推荐配置一路继续 / 逐项自定义”。直接回车即采用推荐项：DeepSeek 官方默认模型 `deepseek-v4-flash`（缺少 Key 时只隐藏输入一次，存入 `$DSH_HOME/.credentials.yaml`，权限 `0600`）、连接飞书、在 Key 已存储时验证模型 route；随后提示你给机器人发一条私聊（如 `/model`），安装器自动等待首次 owner 会话（默认最长 600 秒，`--owner-wait-seconds <n>` 调整，`0` 关闭），不必再手动续跑。最后询问是否启用推荐插件功能（默认是，即 `dsh-plugin-setup preset recommended`）；非引导安装可显式加 `--plugin-preset recommended`，默认不改插件配置。显式参数始终优先；`--guided` / `--customize` 可跳过这个问题。已有模型或飞书配置会保留。
 
 `--yes` 跳过场景菜单；若环境中已有 `DEEPSEEK_API_KEY`（或 `DSH_ENHANCED_MODEL_API_KEY`）且尚未存储 Key，会自动配置上述默认模型并把 Key 写入 `.credentials.yaml`。`--yes` **不能跳过首次本人绑定**（飞书应用确认和 `DSH-CONNECT` 短语仍需本人完成，之后只有已绑定的 owner 能操作和授权），也不能确认已有 active/paused Automation；后者需要显式 `--ack-existing-automations`。
 
@@ -77,7 +77,7 @@ $bin preset recommended --yes
 dsh-rsi restart --profile web         # 改动重启后生效
 ```
 
-CLI 先读取原生有效配置，单项修改时自动保留整行其它配置，写入后核对生效，失败则恢复原文件。它拒绝写入秘密值、修改 Policy/Control Plane 与 owner 授权项，飞书凭据仍用 `dsh-lark-setup`。默认值不变；`recommended` 只是显式打开 work-items 与 intake 账本（observe）、Delivery `attentionAttachOverCap`、Evaluation 通知结果和 event-triggers 轮询。安装脚本可调用 `dsh_enhanced_apply_plugin_preset`。完整说明见 [assistant-policy](../../plugins/assistant-policy/README.md#插件配置-clidsh-plugin-setup)。
+CLI 先读取原生有效配置，单项修改时自动保留整行其它配置，写入后核对生效，失败则恢复原文件。它拒绝写入秘密值、修改 Policy/Control Plane 与 owner 授权项，飞书凭据仍用 `dsh-lark-setup`。默认值不变；`recommended` 只是显式打开 work-items 与 intake 账本（observe）、Delivery `attentionAttachOverCap`、Evaluation 通知结果和 event-triggers 轮询。安装器的 `--plugin-preset <name>` 与引导式首装的最后一问都调用 `dsh_enhanced_apply_plugin_preset`，写入后自动重启已注册的常驻服务。完整说明见 [assistant-policy](../../plugins/assistant-policy/README.md#插件配置-clidsh-plugin-setup)。
 
 ## 场景与参数入口
 

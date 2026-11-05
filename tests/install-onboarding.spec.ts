@@ -124,6 +124,32 @@ describe('guided onboarding installer dry-run', () => {
     expect(disabled.stdout).not.toContain('--wait-owner-dm')
   })
 
+  test('plugin preset is opt-in outside the guided prompt and runs before the final self-check', async () => {
+    const home = await temporaryHome()
+    const defaults = installer(['--dry-run', '--yes', '--lark', 'skip'], home)
+    expect(defaults.status, defaults.stderr).toBe(0)
+    expect(defaults.stdout).not.toContain('dsh-plugin-setup preset')
+    expect(defaults.stdout).toContain('调整插件：')
+
+    const applied = installer(['--dry-run', '--yes', '--scenario', 'supervised', '--lark', 'configure', '--plugin-preset', 'recommended'], home)
+    expect(applied.status, applied.stderr).toBe(0)
+    expect(applied.stdout).toMatch(/dsh-plugin-setup preset recommended --yes --dsh-home \S+ --profile web/)
+    expect(applied.stdout).toContain('常驻服务：将重启以加载插件预设。')
+    expect(applied.stdout.indexOf('dsh-plugin-setup preset')).toBeLessThan(applied.stdout.indexOf('最终 profile 自检'))
+
+    const skipped = installer(['--dry-run', '--yes', '--lark', 'skip', '--plugin-preset', 'skip'], home)
+    expect(skipped.status, skipped.stderr).toBe(0)
+    expect(skipped.stdout).not.toContain('dsh-plugin-setup preset')
+
+    const invalid = installer(['--dry-run', '--plugin-preset', 'Bad!'], home)
+    expect(invalid.status).toBe(2)
+    expect(invalid.stderr).toContain('--plugin-preset 只能是预设名')
+  })
+
+  test('plugin preset confirmation declines without a terminal', () => {
+    expect(library('dsh_enhanced_confirm_plugin_preset', {}, '\n').status).toBe(1)
+  })
+
   test('rejects an out-of-range owner wait', async () => {
     const home = await temporaryHome()
     for (const value of ['9999', '-1', 'abc', '01']) {
