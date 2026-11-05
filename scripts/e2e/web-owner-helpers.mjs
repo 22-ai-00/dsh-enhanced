@@ -1,9 +1,11 @@
 import { expect } from '@playwright/test'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
+import { readFile } from 'node:fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
+import { parseDocument } from 'yaml'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 // First-run notice title differs by pinned DSH Host: 'Preview Notice' (0.2.x) and 'Internal Testing Notice' (older).
@@ -18,6 +20,15 @@ export async function acceptFirstRunNotice(page, { required = true } = {}) {
   if (!required && !await notice.waitFor({ state: 'visible', timeout: 10_000 }).then(() => true, () => false)) return
   await notice.getByRole('button', { name: 'Continue', exact: true }).click()
   await expect(notice).toBeHidden()
+}
+/**
+ * Read the Web profile patch. DSH 0.2.x moves $DSH_HOME/settings.yaml (the
+ * real model route) into this patch on the first Host start, so a document
+ * parsed before a Host ran is stale: writing it back would drop the route.
+ * Re-read after every Host stop before editing the patch again.
+ */
+export async function readProfilePatch(path) {
+  return parseDocument(await readFile(path, 'utf8'))
 }
 /**
  * Fill the composer and wait until Send is enabled and stays enabled. A late

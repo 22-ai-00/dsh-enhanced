@@ -15,7 +15,7 @@ import { assertPublicCanaryStatus, canaryPolicy, createProspectiveCanaryAuthorit
 import { contracts, jobs, setConfig } from './web-owner-real-helpers.mjs'
 import { selectRestoredSession } from './repo-session-navigation.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
-import { acceptFirstRunNotice, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { acceptFirstRunNotice, observePage, query, readProfilePatch, run, sanitize, startHost } from './web-owner-helpers.mjs'
 import { sessionArtifactPath } from './web-owner-real-audit.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
@@ -167,6 +167,7 @@ test('real TraeX grows template-render from failure, promotes it, and rolls it b
     await host.stop()
     await writeFile(testInfo.outputPath(`host-${starts}.log`), host.log(), { mode: 0o600 })
     host = undefined
+    if (patchPath) patch = await readProfilePatch(patchPath)
   }
   const open = async fresh => {
     host = await startHost(env); starts++

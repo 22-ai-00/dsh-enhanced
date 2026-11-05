@@ -10,7 +10,7 @@ import { objective, criteria, setConfig, contracts, jobs, waitForVerifiedGoal } 
 import { isEventExperimentToolAllowed } from './web-owner-real-guard.mjs'
 import { readSessionAudit } from './web-owner-real-audit.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
-import { acceptFirstRunNotice, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { acceptFirstRunNotice, observePage, query, readProfilePatch, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const sourceAutomationId = 'web-owner-real-event-source'
@@ -109,7 +109,7 @@ test('real configured route wakes one browser-owned verified goal from a durable
     ].map(name => resolve(root, 'plugins', name))], env)
     await writeFile(testInfo.outputPath('install.log'), sanitize(installed), { mode: 0o600 })
     await run(join(home, 'profiles/web/node_modules/.bin/dsh-web-owner-setup'), ['--profile', 'web', '--workspace', workspace], env)
-    const patchPath = join(home, 'profiles/web/cordis.patch.yml'), patch = parseDocument(await readFile(patchPath, 'utf8'))
+    const patchPath = join(home, 'profiles/web/cordis.patch.yml'); let patch = parseDocument(await readFile(patchPath, 'utf8'))
     const owner = query(deliveryPath, "SELECT id, version, principal_json FROM delivery_principals WHERE role = 'owner' AND status = 'active'")[0]
     if (!owner) throw new Error('setup did not create Web owner')
     const principal = JSON.parse(owner.principal_json)
@@ -192,6 +192,7 @@ test('real configured route wakes one browser-owned verified goal from a durable
     if (!binding) throw new Error('real browser bootstrap did not persist an owner binding')
     const sessionId = binding.session_id
     await stop()
+    patch = await readProfilePatch(patchPath)
 
     // Arm the exact persisted owner route only after the genuine binding exists.
     env.DSH_WEB_REAL_BOOTSTRAP = '0'

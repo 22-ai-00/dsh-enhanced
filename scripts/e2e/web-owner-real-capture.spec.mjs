@@ -10,7 +10,7 @@ import { objective, criteria, setConfig, contracts, jobs } from './web-owner-rea
 import { selectRestoredSession } from './repo-session-navigation.mjs'
 import { readSessionAudit } from './web-owner-real-audit.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
-import { acceptFirstRunNotice, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { acceptFirstRunNotice, observePage, query, readProfilePatch, run, sanitize, startHost } from './web-owner-helpers.mjs'
 import { fileObservationSteps, instantiate } from '../../plugins/assistant-skills/lib/definition.js'
 import { canaryPolicy, createProspectiveCanaryAuthority } from './real-canary-helpers.mjs'
 
@@ -177,7 +177,7 @@ test('ordinary owner request captures an accepted workflow and reuses it after r
     const [runner] = createVerifierAuthorities({ authorities: [authority] })
     const profile = taskKind => ({ id: `capture-${taskKind}`, version: 1, scope: { workspace, preset: 'standard' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind, objective, validityMs: 600000,
       bounds: { maxDurationMs: 15000, maxEvidenceBytes: 16384 }, criteria: (taskKind === 'goal-step' ? criteria.slice(0, 1) : criteria).map(entry => ({ id: entry.id, kind: 'process-behavior', authority: { id: runner.id, digest: runner.digest }, artifactPath: 'summarize.mjs', stdin: entry.stdin, expectedStdout: entry.expectedStdout, expectedExitCode: 0 })) })
-    const patchPath = join(home, 'profiles/web/cordis.patch.yml'), patch = parseDocument(await readFile(patchPath, 'utf8'))
+    const patchPath = join(home, 'profiles/web/cordis.patch.yml'); let patch = parseDocument(await readFile(patchPath, 'utf8'))
     setConfig(patch, 'dsh-enhanced-assistant-goals', '@dsh-enhanced/assistant-goals', { databasePath: goalsPath, preauthorizedCreateMaxRounds: 3, verifyNativeRounds: true, verifyGoalOutcome: true, stepMaxDurationMs: 120000, executionBudget: { mode: 'calls', modelCalls: 8, toolCalls: 12, durationMs: 300000, maxOutputTokensPerCall: 4096, routes: [{ provider: route.provider, model: route.provider === 'codex-subscription' ? 'default' : route.model }] } })
     setConfig(patch, 'dsh-enhanced-assistant-skills', '@dsh-enhanced/assistant-skills', { databasePath: skillsPath, allowedTools: ['read', 'write', 'edit', 'glob', 'grep', 'todo_write', 'get_goal'], maxDurationMs: 60000 })
     setConfig(patch, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier', { databasePath: verifierPath, tickIntervalMs: 500, requireAcceptance: false, authorities: [authority], profiles: [profile('goal-step'), profile('goal-outcome')] })
@@ -200,6 +200,7 @@ test('ordinary owner request captures an accepted workflow and reuses it after r
     const binding = query(deliveryPath, 'SELECT * FROM conversation_bindings ORDER BY created_at DESC LIMIT 1')[0]
     sessionId = binding.session_id
     await stop()
+    patch = await readProfilePatch(patchPath)
     setConfig(patch, 'dsh-enhanced-assistant-delivery', '@dsh-enhanced/assistant-delivery', { ownerRoutes: [{ id: 'capture-owner', conversation: JSON.parse(binding.conversation_json), principal: JSON.parse(binding.principal_json), workspace, agentPreset: 'standard', policyRef: binding.policy_ref, minimumGeneration: binding.generation }] })
     await writeFile(patchPath, String(patch), { mode: 0o600 })
     await open()
@@ -251,6 +252,7 @@ test('ordinary owner request captures an accepted workflow and reuses it after r
       const improvement = newCaptures()[0], candidate2 = JSON.parse(query(skillsPath, 'SELECT candidate_json FROM skill_candidates WHERE id = ?', improvement.candidateId)[0].candidate_json)
       expect(candidate2).toMatchObject({ state: 'pending', parentVersion: 1 })
       await stop()
+      patch = await readProfilePatch(patchPath)
       const canaryAuthority = await createProspectiveCanaryAuthority({ root: temp, home, workspace })
       const canaryProfile = canaryAuthority.profile(owner, sourceArtifact)
       setConfig(patch, 'dsh-enhanced-assistant-skills', '@dsh-enhanced/assistant-skills', { databasePath: skillsPath, allowedTools: ['read', 'write', 'edit', 'glob', 'grep', 'todo_write', 'get_goal'], maxDurationMs: 60000, externalHoldouts: [canaryProfile] })
