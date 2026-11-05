@@ -692,6 +692,21 @@ test('trial handoff concludes only for a current owner fresh Goal and later exec
   expect(oldSource.isError).toBe(true); expect(oldSource.concludesTurn).not.toBe(true)
 })
 
+test('a successful trial concludes its native round and names skill_activate as the only next step', async () => {
+  const f = await fixture(); const candidate = result(await f.candidate())
+  const success = await f.trial(candidate.id, 'trial-goal', 'concluded-trial')
+  expect(success).toMatchObject({ isError: false, concludesTurn: true })
+  const value = JSON.parse((success.value as { context: string }).context)
+  expect(value).toMatchObject({ state: 'succeeded', candidateId: candidate.id, acceptance: 'requires-fresh-goal-verification' })
+  expect(value.next).toContain('skill_activate'); expect(value.next).toContain(value.id); expect(value.next).toMatch(/no other tool/iu)
+  // A failed trial does not conclude the round and carries no activation step.
+  const failed = await f.trial('missing-candidate', 'trial-goal', 'failed-trial')
+  expect(failed.isError).toBe(true); expect(failed.concludesTurn).not.toBe(true)
+  // A successful replay keeps its existing result shape.
+  const g = await fixture(); result(await g.save()); const replay = result(await g.run()) as { next?: unknown }
+  expect(replay.next).toBeUndefined()
+})
+
 test('owner-preauthorized capture remains pending before achievement, then atomically creates one pending candidate after a cold Host source read', async () => {
   const f = await fixture()
   const capture = result(await f.execute('skill_capture', { owner_route_id: 'owner-route', goal_id: 'source-goal', name: 'captured-write', description: 'Captured successful writer.', parent_version: 0, expires_at: Date.now() + 60000 }))
