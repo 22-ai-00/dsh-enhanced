@@ -298,13 +298,16 @@ work_item_read_report:
 
 `InferredIntakeEvaluationQueue`（`src/intake-evaluation.ts`）是 WP20 inferred 候选模型评估的纯内存合同：唯一外部调用是注入的 `evaluator`，不读写账本、不投递、不准入工作项，决策只作为返回值交给调用方（intake 账本）持久化与执行。尚未接入运行时，无 schema 变更。
 
-- 逐 `(candidateId, ruleId)` 在每个 Policy 版本下只评估一次；同键再入队返回 `duplicate`，原文摘要或上限不同返回 `conflict`。调用方可用 `enqueue(candidate, prior)` 回填已持久化决策，避免重启后重复评估；回填的引文与等级同样复核。
+- 与 intake 账本强度分级的组合：只有 `strength: 'inferred'` 的候选入队（否则 `invalid-candidate`）；`explicit` 由确定性 gate 直接处理、不调模型，`ignore` 已被过滤。
+- 候选携带 Host 匹配规则与计算 `ceiling` 时的 `policyVersion`，不等于当前版本时入队返回 `stale-policy`。
+- 逐 `(candidateId, ruleId)` 在每个 Policy 版本下只评估一次；同键再入队返回 `duplicate`，原文、摘要或上限不同返回 `conflict`。`ceiling` 为 `ignore` 时直接落定 `ceiling-ignore`，不耗预算。
+- 调用方可用 `enqueue(candidate, prior)` 回填已持久化决策，避免重启后重复评估。回填不做认证（调用方账本是信任根），但须与候选自洽：键、摘要、上限、Policy 版本一致，等级合法且不高于上限，引文逐条复核，状态/原因码一致；派生字段（`wouldAccept`、`effect`）按复核后的字段重算。结果报告 `prior: 'adopted' | 'rejected'`，被拒时照常评估。
 - 等级 `ignore < digest < notify < accept`，Host 给出 `ceiling`，模型只能降级；高于上限时钳到上限并记 `upgrade-clamped`。
-- `sourceDigest` 必须是 `sourceText` 的 SHA-256，否则不调用模型直接 `ignore`/`source-unauthenticated`。每条引文必须是认证原文的**精确子串**（不做任何规范化），否则 `ignore`/`quote-not-in-source`；非 ignore 无引文为 `quote-missing`，输出形状不符为 `malformed-output`，引文条数/长度越界为 `quote-bound-exceeded`。降级时不保留任何模型引文。
-- 预算：滑动窗口 `budget.maxCalls`/`windowMs`（超时与失败也计入），每轮 `maxPerRun`，队列上限 `maxPending`；预算耗尽时剩余项保持排队。
-- 超时（`timeoutMs`，同时 abort 传给 evaluator 的 signal）或抛错按 `backoffBaseMs·2^(n-1)` 退避、上限 `backoffMaxMs` 重排；连续 `maxConsecutiveFailures` 次失败落为 `unavailable`（等级 ignore、无效果）。一次成功清零计数。
-- 调用期间 Policy 版本变化的结果丢弃并按新版本重排；旧版本上已落定的决策在下一轮 `runDue` 开始时重排，`decision()` 只返回当前版本决策。
-- observe 模式下 `effect` 恒为 `none`，仅记录 `wouldAccept`；auto 模式下已决定且非 ignore 才为 `apply`。
+- `sourceDigest` 必须是 `sourceText` 的 SHA-256，否则不调用模型直接 `ignore`/`source-unauthenticated`，且不占用该键（随后的真实原文仍可入队）。每条引文必须是认证原文的**精确子串**（UTF-16 比较，不做任何规范化，NFC/NFD 不互认），否则 `ignore`/`quote-not-in-source`；非 ignore 无引文为 `quote-missing`；输出形状不符、稀疏数组、含孤立代理项或仅空白的引文为 `malformed-output`；引文条数/长度（UTF-16 码元）越界为 `quote-bound-exceeded`。模型输出每个字段只读一次。降级时不保留任何模型引文。
+- 预算：滑动窗口 `budget.maxCalls`/`windowMs`（在派发时计数，超时与失败也计入；超时后迟到的结果直接丢弃），每轮 `maxPerRun`；`maxPending` 只限制当前版本尚未落定的项，`maxRetained` 限制总保留量，满时先淘汰最早的已落定或过时项。预算耗尽时剩余项保持排队。
+- 超时（`timeoutMs`，上限 2^31−1 ms，同时 abort 传给 evaluator 的 signal）或抛错按 `backoffBaseMs·2^(n-1)` 退避、上限 `backoffMaxMs` 重排；连续 `maxConsecutiveFailures` 次失败落为 `unavailable`（等级 ignore、无效果）。Host 回调抛错时条目回到排队，不会卡在 in-flight。
+- 调用期间 Policy 版本变化的结果丢弃；旧版本上的条目（已落定或排队）不再评估、`decision()` 不返回，计入 `inspect().awaitingRematch`，等待 Host 按新版本重新匹配后再入队替换——这样新版本的规则与上限不会被旧值顶替。
+- observe 模式下 `effect` 恒为 `none`，仅记录 `wouldAccept`；auto 模式下已决定且非 ignore 才为 `apply`。`decision()` 按当前模式投影：切回 observe 后查到的决策 `effect` 为 `none`。
 
 ### 准入授权的复核（依次 claim / wake 之前）
 
