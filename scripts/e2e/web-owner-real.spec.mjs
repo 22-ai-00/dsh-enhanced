@@ -29,6 +29,9 @@ test('real configured route completes a browser-owned verified native goal acros
     const installed = await run('dsh', ['plugin', '--profile', 'web', 'add', ...['personal-assistant', 'plugin-control-plane', 'assistant-delivery', 'assistant-goals', 'assistant-web-owner', 'assistant-verifier', 'assistant-evaluation', ...route.bundles].map(name => resolve(root, 'plugins', name))], env)
     await writeFile(testInfo.outputPath('install.log'), sanitize(installed), { mode: 0o600 })
     await run(join(home, 'profiles/web/node_modules/.bin/dsh-web-owner-setup'), ['--profile', 'web', '--workspace', workspace], env)
+    // Fresh installs default to full access; this proof audits the human-reviewed
+    // workspace-write path (ask + Allow once), so select it explicitly.
+    await run(join(home, 'profiles/web/node_modules/.bin/dsh-permission-setup'), ['--dsh-home', home, '--preset', 'workspace-write'], env)
     const deliveryPath = join(home, 'assistant-delivery/state.sqlite'), goalsPath = join(home, 'assistant-goals/web.sqlite'), verifierPath = join(home, 'assistant-verifier/verification.sqlite')
     const owner = query(deliveryPath, "SELECT id, version, principal_json FROM delivery_principals WHERE role = 'owner' AND status = 'active'")[0]
     if (!owner) throw new Error('setup did not create the Web owner principal')
