@@ -882,6 +882,8 @@ const toolApprovalIdentityBytes = 512
 const linkedReportMetadataPrefix = 'dsh.linked-report'
 /** Bounded owner-ordered linked fallback list for one report route. */
 const maxLinkedReportFallback = 8
+/** Reserved idempotency-key prefix of a Host-routed linked report. */
+const linkedReportKeyPrefix = 'linked-report:'
 
 function inspectUnsettledNativeCall(
   events: readonly SessionEvent[], turn: number, callId: string,
@@ -5139,7 +5141,8 @@ export class AssistantDeliveryService extends Service {
   }
   enqueueWorkItemReport(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string,string>>; itemId: string; reportRevision: number }): OutboxRecord {
     this.assertActive()
-    if (containsReservedLearningMetadata(input.metadata) || Object.keys(input.metadata ?? {}).some(key => key.startsWith('dsh.native-notice') || key.startsWith(linkedReportMetadataPrefix))) {
+    if (containsReservedLearningMetadata(input.metadata) || Object.keys(input.metadata ?? {}).some(key => key.startsWith('dsh.native-notice') || key.startsWith(linkedReportMetadataPrefix))
+      || (typeof input.idempotencyKey === 'string' && input.idempotencyKey.startsWith(linkedReportKeyPrefix))) {
       throw new AssistantDeliveryError('runtime-conflict', 'reserved metadata requires its typed delivery interface')
     }
     const target = this.inspectWorkItemReport(input)
@@ -5167,6 +5170,7 @@ export class AssistantDeliveryService extends Service {
   routeWorkItemReport(input: Readonly<{ sourceId: string; workspace: string; originBindingId: string; idempotencyKey: string; text: string
     format?: 'markdown' | 'plain'; itemId: string; reportRevision: number; linkedFallback: readonly string[] }>): Readonly<{ route: 'origin' } | { route: 'linked'; outbox: OutboxRecord }> {
     this.assertActive()
+    const sourceId = canonicalBackgroundSourceId(input.sourceId)
     if (!Array.isArray(input.linkedFallback) || input.linkedFallback.length > maxLinkedReportFallback
       || input.linkedFallback.some(id => typeof id !== 'string' || id.length === 0 || id.length > 256)
       || typeof input.idempotencyKey !== 'string' || input.idempotencyKey.length === 0
@@ -5174,13 +5178,13 @@ export class AssistantDeliveryService extends Service {
       || !Number.isSafeInteger(input.reportRevision) || input.reportRevision < 1) {
       throw new AssistantDeliveryError('runtime-conflict', 'linked report route input is invalid')
     }
-    const linkedKey = `linked-report:${createHash('sha256').update(input.idempotencyKey).digest('hex')}`
+    const linkedKey = `${linkedReportKeyPrefix}${createHash('sha256').update(input.idempotencyKey).digest('hex')}`
     // Never send one report twice: a committed destination is final.
     if (this.deliveryStore.getOutboxByIdempotencyKey(input.idempotencyKey) !== undefined) return Object.freeze({ route: 'origin' as const })
     const replay = this.deliveryStore.getOutboxByIdempotencyKey(linkedKey)
     if (replay !== undefined) {
       const metadata = replay.intent.metadata
-      if (metadata?.[linkedReportMetadataPrefix] !== 'v1' || metadata[`${linkedReportMetadataPrefix}.sourceId`] !== input.sourceId
+      if (metadata?.[linkedReportMetadataPrefix] !== 'v1' || metadata[`${linkedReportMetadataPrefix}.sourceId`] !== sourceId
         || metadata[`${linkedReportMetadataPrefix}.originBindingId`] !== input.originBindingId
         || metadata[`${linkedReportMetadataPrefix}.itemId`] !== input.itemId
         || metadata[`${linkedReportMetadataPrefix}.reportRevision`] !== String(input.reportRevision)) {
@@ -5193,6 +5197,13 @@ export class AssistantDeliveryService extends Service {
       throw new AssistantDeliveryError('missing-binding', 'report origin binding does not exist')
     }
     if (origin.status === 'active' && this.hasActivePrincipal(origin)) return Object.freeze({ route: 'origin' as const })
+    // A `/new` rotation revokes the origin and inserts a successor in the same
+    // conversation for the same principal. That origin is still available: keep
+    // the origin path (and its existing failure semantics) rather than reroute.
+    const successor = origin.status === 'active' ? undefined : this.deliveryStore.getActiveBinding(origin.conversation)
+    if (successor !== undefined && successor.id !== origin.id && successor.workspace === origin.workspace
+      && successor.agentPreset === origin.agentPreset && JSON.stringify(successor.principal) === JSON.stringify(origin.principal)
+      && this.hasActivePrincipal(successor)) return Object.freeze({ route: 'origin' as const })
     const owner = this.deliveryStore.getPrincipal(origin.principal)
     if (owner?.status !== 'active' || owner.role !== 'owner' || JSON.stringify(owner.principal) !== JSON.stringify(origin.principal)) {
       throw new AssistantDeliveryError('missing-binding', 'report origin owner is no longer active')
@@ -5209,11 +5220,11 @@ export class AssistantDeliveryService extends Service {
       const alias = this.deliveryStore.getPrincipal(binding.principal)
       if (binding.id === origin.id || alias?.status !== 'active' || alias.role !== 'linked' || alias.linkedToId !== owner.id
         || alias.id === owner.id || JSON.stringify(alias.principal) !== JSON.stringify(binding.principal)) continue
-      if (!this.linkedReportSendAllowed(input.sourceId, binding)) continue
-      const outbox = this.enqueueBackgroundAuthorized({ sourceId: input.sourceId, workspace: binding.workspace, bindingId: binding.id,
+      if (!this.linkedReportSendAllowed(sourceId, binding)) continue
+      const outbox = this.enqueueBackgroundAuthorized({ sourceId, workspace: binding.workspace, bindingId: binding.id,
         idempotencyKey: linkedKey, text: input.text, format: input.format ?? 'plain', metadata: {
           [linkedReportMetadataPrefix]: 'v1',
-          [`${linkedReportMetadataPrefix}.sourceId`]: input.sourceId,
+          [`${linkedReportMetadataPrefix}.sourceId`]: sourceId,
           [`${linkedReportMetadataPrefix}.itemId`]: input.itemId,
           [`${linkedReportMetadataPrefix}.reportRevision`]: String(input.reportRevision),
           [`${linkedReportMetadataPrefix}.originBindingId`]: origin.id,
@@ -5239,7 +5250,7 @@ export class AssistantDeliveryService extends Service {
     const field = (name: string) => metadata?.[`${linkedReportMetadataPrefix}.${name}`]
     try {
       if (containsReservedLearningMetadata(metadata) || metadata?.[linkedReportMetadataPrefix] !== 'v1'
-        || !record.intent.idempotencyKey.startsWith('linked-report:')
+        || !record.intent.idempotencyKey.startsWith(linkedReportKeyPrefix)
         || (typeof record.id === 'string' && this.deliveryStore.getGoalOutcomeTarget(record.id) !== undefined)) throw new Error('linked report is invalid')
       const binding = this.deliveryStore.getBinding(record.intent.bindingId)
       const alias = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
@@ -5358,7 +5369,8 @@ export class AssistantDeliveryService extends Service {
     attention?: AttentionEnvelope
   }): OutboxRecord {
     this.assertActive()
-    if (containsReservedLearningMetadata(input.metadata) || Object.keys(input.metadata ?? {}).some(key => key.startsWith('dsh.native-notice') || key.startsWith(linkedReportMetadataPrefix))) {
+    if (containsReservedLearningMetadata(input.metadata) || Object.keys(input.metadata ?? {}).some(key => key.startsWith('dsh.native-notice') || key.startsWith(linkedReportMetadataPrefix))
+      || (typeof input.idempotencyKey === 'string' && input.idempotencyKey.startsWith(linkedReportKeyPrefix))) {
       throw new AssistantDeliveryError(
         'runtime-conflict',
         'reserved metadata requires its typed delivery interface',
