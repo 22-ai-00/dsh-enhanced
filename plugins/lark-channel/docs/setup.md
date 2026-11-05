@@ -196,6 +196,7 @@ config:
   requireMentionInGroups: true
   showProgress: true
   progressDetails: direct
+  showBackgroundProgress: false
   statusReactions: true
   imageDownloadTimeoutMs: 30000
 ```

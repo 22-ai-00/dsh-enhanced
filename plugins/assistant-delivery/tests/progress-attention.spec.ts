@@ -88,4 +88,11 @@ describe('WP19 stage 2c progress attention audit', () => {
     expect(audit.record({ bindingId: 'b', eventId: 'e1', origin: 'foreground', update: { kind: 'step', text: 'two' } }).runWordCount).toBe(1)
     expect(audit.record({ bindingId: 'b', eventId: 'e3', origin: 'foreground', update: { kind: 'step', text: 'two' } }).runWordCount).toBe(2)
   })
+
+  test('a terminal also releases the background run of the same inbound message', () => {
+    const audit = new ProgressAttentionAudit(1000, 2)
+    audit.record({ ...run, origin: 'background', update: { kind: 'step', text: 'goal round' } })
+    audit.record({ ...run, origin: 'foreground', update: { kind: 'completed' } })
+    expect(audit.record({ ...run, origin: 'background', update: { kind: 'step', text: 'next' } }).runWordCount).toBe(1)
+  })
 })

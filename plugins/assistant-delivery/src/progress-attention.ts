@@ -138,7 +138,12 @@ export class ProgressAttentionAudit {
     this.entries.push(entry)
     while (this.entries.length > this.maxEntries) { this.entries.shift(); this.evictedEntries += 1 }
     const kind = input.update.kind
-    if (kind === 'completed' || kind === 'failed' || kind === 'paused') this.runs.delete(key)
+    // A terminal ends the whole inbound run. Delivery only emits foreground
+    // terminals, so also release the sibling background run state instead of
+    // leaving it to crowd live runs out of the bounded map.
+    if (kind === 'completed' || kind === 'failed' || kind === 'paused') {
+      for (const origin of ['foreground', 'background'] as const) this.runs.delete(JSON.stringify([input.bindingId, input.eventId, origin]))
+    }
     return entry
   }
 

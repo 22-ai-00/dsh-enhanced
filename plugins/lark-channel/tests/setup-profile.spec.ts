@@ -1774,6 +1774,7 @@ describe('Lark Web-profile onboarding patch', () => {
       credentialHandle: 'lark-app-secret-primary',
       showProgress: true,
       progressDetails: 'direct',
+      showBackgroundProgress: false,
       statusReactions: true,
       requestTimeoutMs: 30_000,
       imageDownloadTimeoutMs: 30_000,
