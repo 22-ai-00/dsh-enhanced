@@ -21,6 +21,8 @@ import * as trust from '../src/trust.ts'
 import * as workspace from '../src/source-workspace.ts'
 import type { LinuxSourcePreparedEvidence } from '../src/types.ts'
 import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
+import { linuxSourceBuildFailed } from '../src/linux-source-preflight.ts'
+import { sourceBuildDiagnostics } from '../src/source-build-diagnostics.ts'
 
 const transport = vi.hoisted(() => ({ realConfig: undefined as LinuxRepositoryRunnerConfig | undefined, realConstruct: undefined as ((config: LinuxRepositoryRunnerConfig) => LinuxRepositoryRunner) | undefined, construct: vi.fn(), macConstruct: vi.fn(), instances: [] as Array<{
   config: LinuxRepositoryRunnerConfig; close: ReturnType<typeof vi.fn>; inspectQuiescence: ReturnType<typeof vi.fn>
@@ -307,6 +309,52 @@ it.each([new Error('native preflight rejection'), Object.assign(new Error('Linux
   expect(f.store.getSourceJob(job.id)?.status).toBe('unknown')
 })
 
+
+const tscStderr = "source build phase failed: check\nplugins/health-helper/src/index.ts(62,7): error TS2322: Type '{ type: string; }' is not assignable to type 'boolean'.\n"
+const deterministicFailure = (bind: (input: linuxBuild.LinuxSourceBuildInput) => { runner: object; key: string }) =>
+  async (input: linuxBuild.LinuxSourceBuildInput): Promise<never> => {
+    throw linuxSourceBuildFailed('Linux source build failed: phase check exited 2', { ...bind(input), diagnostics: sourceBuildDiagnostics(tscStderr, 2) })
+  }
+
+it('settles a Host-certified quiescent build/check failure as failed with sanitized diagnostics after cleanup', async () => {
+  const f = await fixture()
+  vi.mocked(linuxBuild.runLinuxPreparedChecks).mockImplementationOnce(deterministicFailure(input => ({ runner: input.runner, key: input.sourceJob.id })))
+  const job = await f.service.enqueueSourceJob(f.request)
+  const worktree = f.store.getSourceJob(job.id)!.intent.worktree
+  await f.tick()
+  expect(f.store.getSourceJob(job.id)).toMatchObject({ status: 'failed', failureCode: 'source-build-check-failed' })
+  await expect(realpath(worktree)).rejects.toMatchObject({ code: 'ENOENT' })
+  const projected = f.service.inspectSourceJob({ id: job.id, owner: f.request.owner })
+  expect(projected).toMatchObject({ status: 'failed', failureCode: 'source-build-check-failed', diagnostics: {
+    protocol: 'dsh-source-build-diagnostics/v1', phase: 'check', exitCode: 2,
+    entries: [{ file: 'src/index.ts', line: 62, column: 7, code: 'TS2322' }] } })
+  expect(JSON.stringify(projected)).not.toContain(f.root)
+  // The failure is terminal: a replacement Host never replays it.
+  await f.tick()
+  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
+})
+
+it.each(['runner', 'key'] as const)('keeps a build failure proof bound to a different %s unknown', async wrong => {
+  const f = await fixture()
+  vi.mocked(linuxBuild.runLinuxPreparedChecks).mockImplementationOnce(deterministicFailure(input => ({
+    runner: wrong === 'runner' ? {} : input.runner, key: wrong === 'key' ? `source-job-${'e'.repeat(64)}` : input.sourceJob.id })))
+  const job = await f.service.enqueueSourceJob(f.request)
+  await f.tick()
+  expect(f.store.getSourceJob(job.id)).toMatchObject({ status: 'unknown', failureCode: 'source-job-interrupted' })
+  expect(f.service.inspectSourceJob({ id: job.id, owner: f.request.owner })).not.toHaveProperty('diagnostics')
+})
+
+it('keeps a build failure unknown when owned worktree cleanup fails', async () => {
+  const f = await fixture(), original = workspace.createIsolatedWorktree
+  vi.spyOn(workspace, 'createIsolatedWorktree').mockImplementationOnce(async input => {
+    const isolated = await original(input)
+    return { ...isolated, remove: async () => { throw new Error('worktree cleanup lost acknowledgement') } }
+  })
+  vi.mocked(linuxBuild.runLinuxPreparedChecks).mockImplementationOnce(deterministicFailure(input => ({ runner: input.runner, key: input.sourceJob.id })))
+  const job = await f.service.enqueueSourceJob(f.request)
+  await f.tick()
+  expect(f.store.getSourceJob(job.id)?.status).toBe('unknown')
+})
 
 it.skipIf(process.platform !== 'linux' || !process.getuid?.())('cleans and fails a real Git archive exceeding 64MiB before the runner is called', async () => {
   const actual = await vi.importActual<typeof linuxBuild>('../src/linux-source-build.ts')

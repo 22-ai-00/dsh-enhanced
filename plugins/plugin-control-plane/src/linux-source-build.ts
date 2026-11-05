@@ -8,7 +8,8 @@ import { checkedSourceSnapshot, runLocalBuffer, runLocalCommand } from './source
 import { PREPARED_SOURCE_BUILD_SCRIPT, sourceTree, validateSourceBuildConfig, verifySourcePreparation,
   type LinuxSourceBuildConfig, type SourceBuildResult, type runDockerPreparedChecks } from './source-build.js'
 import type { LinuxSourcePreparedEvidence } from './types.js'
-import { linuxSourceNotStarted } from './linux-source-preflight.js'
+import { consumeLinuxSourceBuildFailed, isLinuxSourceBuildFailed, linuxSourceBuildFailed, linuxSourceNotStarted } from './linux-source-preflight.js'
+import { sourceBuildDiagnostics } from './source-build-diagnostics.js'
 
 const sha = (bytes: Uint8Array | string): string => createHash('sha256').update(bytes).digest('hex')
 const maximumArchiveBytes = 64 * 1024 ** 2
@@ -117,6 +118,12 @@ export async function runLinuxPreparedChecks(provided: LinuxSourceBuildInput): P
   const attempt: { request?: Parameters<LinuxRepositoryRunner['run']>[1]; cleanupFailed: boolean } = { cleanupFailed: false }
   try { return await runLinuxPreparedChecksOwned(provided, attempt) }
   catch (error) {
+    if (isLinuxSourceBuildFailed(error)) {
+      // A deterministic failure is only certified after private index cleanup succeeded.
+      if (!attempt.cleanupFailed) throw error
+      consumeLinuxSourceBuildFailed(error, { runner: provided.runner, key: provided.sourceJob.id })
+      throw new Error((error as Error).message)
+    }
     if (!attempt.cleanupFailed && /^source-job-[a-f0-9]{64}$/u.test(provided.sourceJob?.id)) {
       const request = attempt.request
       throw linuxSourceNotStarted(error, { runner: provided.runner, key: provided.sourceJob.id,
@@ -205,6 +212,16 @@ async function runLinuxPreparedChecksOwned(provided: LinuxSourceBuildInput,
     await input.assertCurrent()
     input.signal.throwIfAborted()
     if (outcome.runtimeDigest !== runtimeDigest || outcome.contractDigest !== input.runner.contractDigest) fail('execution binding differs')
+    const exitCode = outcome.result.exitCode
+    if (outcome.result.quiescent && outcome.result.status === 'failed' && typeof exitCode === 'number'
+      && Number.isSafeInteger(exitCode) && exitCode !== 0) {
+      // Terminal, quiescent, non-zero exit under the exact runner contract: the
+      // candidate deterministically failed its native build/check. Interrupted,
+      // timed-out, cancelled or non-quiescent outcomes remain uncertain below.
+      const diagnostics = sourceBuildDiagnostics(outcome.result.stderr ?? '', exitCode)
+      throw linuxSourceBuildFailed(`Linux source build failed: phase ${diagnostics.phase} exited ${exitCode}`,
+        { runner: input.runner, key: input.sourceJob.id, diagnostics })
+    }
     if (!outcome.result.quiescent || outcome.result.status !== 'succeeded' || outcome.result.exitCode !== 0 || !outcome.receiptBinding) {
       throw new ControlPlaneCliError('EXECUTOR_FAILED', `Linux source build ${outcome.result.status}: ${outcome.result.reason ?? ''}; ${outcome.result.stderr?.slice(-4096) ?? ''}`)
     }

@@ -1,4 +1,5 @@
 import type { SourceJobRecord } from './source-job-types.js'
+import type { SourceBuildDiagnostics } from './source-build-diagnostics.js'
 
 interface NotStarted { runner: object; key: string; consume: () => boolean }
 const notStarted = new WeakMap<object, NotStarted>()
@@ -33,4 +34,48 @@ export function consumeCleanedLinuxSourcePreflight(error: unknown, job: SourceJo
   try { if (!proof.consume()) return false } catch { return false }
   cleaned.delete(error)
   return true
+}
+
+interface BuildFailed { runner: object; key: string; diagnostics: SourceBuildDiagnostics }
+const buildFailed = new WeakMap<object, BuildFailed>()
+/**
+ * Internal Host control flow: the admitted isolated build reached a terminal,
+ * quiescent, non-zero exit under the exact runner contract. The candidate
+ * source is deterministically rejected; nothing remains running.
+ */
+export function linuxSourceBuildFailed(message: string, binding: BuildFailed): Error {
+  const error = new Error(message)
+  buildFailed.set(error, { runner: binding.runner, key: binding.key, diagnostics: binding.diagnostics })
+  return error
+}
+export function isLinuxSourceBuildFailed(error: unknown): boolean {
+  return !!error && typeof error === 'object' && buildFailed.has(error)
+}
+export function consumeLinuxSourceBuildFailed(error: unknown, binding: Pick<BuildFailed, 'runner' | 'key'>): SourceBuildDiagnostics | undefined {
+  if (!error || typeof error !== 'object') return undefined
+  const proof = buildFailed.get(error)
+  if (!proof || proof.runner !== binding.runner || proof.key !== binding.key) return undefined
+  buildFailed.delete(error)
+  return proof.diagnostics
+}
+interface CleanedBuildFailure { id: string; intentDigest: string; revision: number; occurrenceId: string; generation: object; consume: () => SourceBuildDiagnostics | undefined }
+const cleanedBuildFailures = new WeakMap<object, CleanedBuildFailure>()
+/** Only service-owned successful worktree cleanup may certify a deterministic build failure. */
+export function cleanedLinuxSourceBuildFailure(cause: unknown, job: SourceJobRecord, generation: object,
+  consume: () => SourceBuildDiagnostics | undefined): Error {
+  if (!job.occurrenceId || job.status !== 'running') throw new Error('Linux build failure proof requires its original claimed job')
+  const error = new Error('Linux source build failed deterministically', { cause })
+  cleanedBuildFailures.set(error, { id: job.id, intentDigest: job.intentDigest, revision: job.revision, occurrenceId: job.occurrenceId, generation, consume })
+  return error
+}
+export function consumeCleanedLinuxSourceBuildFailure(error: unknown, job: SourceJobRecord, generation: object): SourceBuildDiagnostics | undefined {
+  if (!error || typeof error !== 'object') return undefined
+  const proof = cleanedBuildFailures.get(error)
+  if (!proof || proof.generation !== generation || proof.id !== job.id || proof.intentDigest !== job.intentDigest
+    || proof.revision !== job.revision || proof.occurrenceId !== job.occurrenceId || job.status !== 'running') return undefined
+  let diagnostics: SourceBuildDiagnostics | undefined
+  try { diagnostics = proof.consume() } catch { return undefined }
+  if (diagnostics === undefined) return undefined
+  cleanedBuildFailures.delete(error)
+  return diagnostics
 }

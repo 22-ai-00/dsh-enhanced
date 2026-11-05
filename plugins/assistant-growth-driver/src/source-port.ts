@@ -78,6 +78,18 @@ export interface SourceJobProjection {
   readonly expiresAt: number
   readonly planId?: string
   readonly failureCode?: string
+  /** Present only on a deterministic `source-build-check-failed` job: bounded, sanitized compiler diagnostics. */
+  readonly diagnostics?: SourceBuildDiagnosticsProjection
+}
+
+/** Host-sanitized build diagnostics: plugin-relative paths, no host paths or secrets, bounded length. */
+export interface SourceBuildDiagnosticsProjection {
+  readonly protocol: 'dsh-source-build-diagnostics/v1'
+  readonly phase: 'tree' | 'install' | 'check' | 'pack' | 'unknown'
+  readonly exitCode: number
+  readonly entries: readonly { readonly file: string; readonly line: number; readonly column: number; readonly code: string; readonly message: string }[]
+  readonly tail: readonly string[]
+  readonly truncated: boolean
 }
 
 /** @deprecated Prefer SourceJobProjection; retained for local source-port compatibility. */

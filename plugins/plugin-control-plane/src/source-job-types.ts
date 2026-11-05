@@ -115,4 +115,6 @@ export interface SourceJobProjection {
   expiresAt: number
   planId?: string
   failureCode?: string
+  /** Present only for `failed` + `source-build-check-failed`: bounded, sanitized, process-local. */
+  diagnostics?: import('./source-build-diagnostics.js').SourceBuildDiagnostics
 }

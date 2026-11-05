@@ -17,6 +17,7 @@ import { inspectSourceCreationContext, validateSourceCreationFiles, validateSour
 import { inheritedEnvironment, type loadTrustConfig } from './trust.js'
 import type { PluginSourcePlan } from './types.js'
 import type { SourceJobIntent, SourceJobOwnerReceipt, SourceJobProjection, SourceJobRecord, SourceJobsConfig } from './source-job-types.js'
+import { SOURCE_BUILD_CHECK_FAILED, type SourceBuildDiagnostics } from './source-build-diagnostics.js'
 
 export const SOURCE_JOB_OWNER = 'plugin-control-plane-source'
 const EXECUTOR = 'plugin-control-plane-source-check'
@@ -79,12 +80,14 @@ export function normalizeSourceJobsConfig(value:SourceJobsConfig,build?:SourceBu
   return {...structuredClone(value),...(value.creation?{creation:normalizeSourceCreationGrant(value.creation)}:{})}
 }
 
-function projection(job: SourceJobRecord): SourceJobProjection {
+function projection(job: SourceJobRecord, diagnostics?: SourceBuildDiagnostics): SourceJobProjection {
   return { id: job.id, name: job.intent.name, gapId: job.intent.gapId, baseCommit: job.intent.baseCommit,
     ...(job.intent.mode === undefined ? {} : { mode: job.intent.mode }),
     status: job.status, createdAt: job.createdAt, expiresAt: job.expiresAt,
-    ...(job.planId === undefined ? {} : { planId: job.planId }), ...(job.failureCode === undefined ? {} : { failureCode: job.failureCode }) }
+    ...(job.planId === undefined ? {} : { planId: job.planId }), ...(job.failureCode === undefined ? {} : { failureCode: job.failureCode }),
+    ...(diagnostics !== undefined && job.status === 'failed' && job.failureCode === SOURCE_BUILD_CHECK_FAILED ? { diagnostics } : {}) }
 }
+const MAX_RETAINED_DIAGNOSTICS = 64
 
 /** Persisted intent + native Automations execution. This class owns no scheduler. */
 export class SourceJobRuntime {
@@ -103,6 +106,8 @@ export class SourceJobRuntime {
   private continuationCursor = 0
   private continuationStatus: 'active' | 'paused' | undefined
   private continuationTransition = 0
+  /** Process-local, bounded build diagnostics; the failure code itself is durable. */
+  private readonly diagnostics = new Map<string, SourceBuildDiagnostics>()
   constructor(private readonly options: {
     config: SourceJobsConfig; build: SourceBuildConfig; statePath: string; store: ControlPlaneStore; ports: SourceJobPorts
     withWorkItemGrowthRunFence?: <T>(run:WorkItemSourceGrowthRunBinding,gapId:string,owner:SourceJobOwnerReceipt,generation:boolean,callback:()=>T)=>T
@@ -125,6 +130,12 @@ export class SourceJobRuntime {
     inspectNativeQuiescence?: (key: string) => Promise<'quiescent' | 'unknown'>
     /** Linux service-owned, single-use proof of no admission and completed/no Host cleanup. */
     isPreparationNotStarted?: (error: unknown, owned: SourceJobRecord) => boolean
+    /**
+     * Linux service-owned, single-use proof that the admitted build reached a
+     * terminal, quiescent, non-zero exit and Host cleanup succeeded. Returns
+     * bounded, sanitized diagnostics; anything else remains uncertain.
+     */
+    deterministicBuildFailure?: (error: unknown, owned: SourceJobRecord) => SourceBuildDiagnostics | undefined
   }) {
     validateSourceJobsConfig(options.config, options.build)
     // Preserve the live object identity used by effect-boundary drift checks.
@@ -494,7 +505,7 @@ export class SourceJobRuntime {
       || job.intent.owner.principalId !== owner.principalId || job.intent.owner.principalRecordId !== owner.principalRecordId
       || job.intent.owner.principalVersion !== owner.principalVersion || job.intent.owner.workspace !== owner.workspace
       || job.intent.owner.agentPreset !== owner.agentPreset) throw new Error('source job not found for current owner')
-    return projection(this.refreshQueued(job))
+    return projection(this.refreshQueued(job), this.diagnostics.get(job.id))
   }
 
   /** Native runner admission can fail before our executor is invoked. */
@@ -831,6 +842,18 @@ export class SourceJobRuntime {
         && current.occurrenceId === claimedJob.occurrenceId && current.intentDigest === claimedJob.intentDigest) {
         let notStarted = false
         try { notStarted = this.options.isPreparationNotStarted?.(error, claimedJob) === true } catch { /* Unavailable proof remains unknown. */ }
+        let diagnostics: SourceBuildDiagnostics | undefined
+        if (!notStarted) {
+          try { diagnostics = this.options.deterministicBuildFailure?.(error, claimedJob) } catch { /* Unavailable proof remains unknown. */ }
+        }
+        if (diagnostics !== undefined) {
+          this.options.store.settleSourceJob({ id: claimedJob.id, revision: claimedJob.revision,
+            status: 'failed', failureCode: SOURCE_BUILD_CHECK_FAILED })
+          this.diagnostics.delete(claimedJob.id); this.diagnostics.set(claimedJob.id, diagnostics)
+          while (this.diagnostics.size > MAX_RETAINED_DIAGNOSTICS) this.diagnostics.delete(this.diagnostics.keys().next().value!)
+          return { outcome: 'failed', failureClass: 'execution', failurePhase: 'host-execution',
+            failureCode: SOURCE_BUILD_CHECK_FAILED, sideEffectState: 'possible', retryability: 'unsafe' }
+        }
         if (notStarted) {
           this.options.store.settleSourceJob({ id: claimedJob.id, revision: claimedJob.revision,
             status: 'failed', failureCode: 'source-job-preparation-not-started' })

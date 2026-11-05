@@ -1,4 +1,5 @@
-import { cleanedLinuxSourcePreflight, consumeCleanedLinuxSourcePreflight, consumeLinuxSourceNotStarted } from './linux-source-preflight.js'
+import { cleanedLinuxSourceBuildFailure, cleanedLinuxSourcePreflight, consumeCleanedLinuxSourceBuildFailure, consumeCleanedLinuxSourcePreflight,
+  consumeLinuxSourceBuildFailed, consumeLinuxSourceNotStarted, isLinuxSourceBuildFailed } from './linux-source-preflight.js'
 import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type AdoptionCoordinatorConfig } from './adoption-coordinator.js'
 import { CreationCapabilityJournal, creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
 import { CreationCapabilityRuntime } from './creation-capability-runtime.js'
@@ -741,7 +742,9 @@ export class PluginControlPlaneService extends Service {
           trust: () => this.boundTrust(), prepare: (job, signal, assertCurrent) => this.prepareSourceJob(job, signal, assertCurrent,
             nativeRunner?.backend === 'linux-native' ? { runner: nativeRunner.runner, generation: preparationGeneration } : undefined),
           ...(nativeRunner?.backend === 'linux-native' ? { isPreparationNotStarted: (error: unknown, job: SourceJobRecord) =>
-            consumeCleanedLinuxSourcePreflight(error, job, preparationGeneration) } : {}),
+            consumeCleanedLinuxSourcePreflight(error, job, preparationGeneration),
+          deterministicBuildFailure: (error: unknown, job: SourceJobRecord) =>
+            consumeCleanedLinuxSourceBuildFailure(error, job, preparationGeneration) } : {}),
           ...(nativeRunner ? { inspectNativeQuiescence: (key: string) => nativeRunner.runner.inspectQuiescence(key) } : {}),
         }) } catch (error) {
           if (this.nativeSourceRunner === nativeRunner) this.nativeSourceRunner = undefined
@@ -2345,6 +2348,12 @@ export class PluginControlPlaneService extends Service {
         && sourceJob.intent.nativeResource.key === sourceJob.id && controlPlaneDigest(sourceJob.intent) === sourceJob.intentDigest) {
         // Preserve native authority checks across asynchronous worktree cleanup.
         // The runtime consumes the complete chain immediately before its original claim CAS.
+        if (linuxBuildInvoked && isLinuxSourceBuildFailed(error)) {
+          throw cleanedLinuxSourceBuildFailure(error, sourceJob, preflight.generation,
+            () => !this.abort.signal.aborted && this.nativeSourceRunner?.backend === 'linux-native'
+              && this.nativeSourceRunner.runner === preflight.runner
+              ? consumeLinuxSourceBuildFailed(error, { runner: preflight.runner, key: sourceJob.id }) : undefined)
+        }
         throw cleanedLinuxSourcePreflight(error, sourceJob, preflight.generation,
           () => !this.abort.signal.aborted && this.nativeSourceRunner?.backend === 'linux-native'
             && this.nativeSourceRunner.runner === preflight.runner

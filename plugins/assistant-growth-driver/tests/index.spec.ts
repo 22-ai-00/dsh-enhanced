@@ -1829,6 +1829,90 @@ describe('opt-in plugin source proposals', () => {
     expect(result.service.health().run?.sourceProposals).toEqual({ queued: 1, prepared: 0, rejected: 1 })
   })
 
+  describe('bounded build repair', () => {
+    const diagnostics = { protocol: 'dsh-source-build-diagnostics/v1' as const, phase: 'check' as const, exitCode: 2,
+      entries: [{ file: 'src/index.ts', line: 62, column: 7, code: 'TS2322', message: "Type '{ type: string; }' is not assignable to type 'boolean'." }],
+      tail: ['ELIFECYCLE Command failed with exit code 2.'], truncated: false }
+    const repaired = [{ path: 'src/index.ts', content: 'export const name = "repaired"\n' }]
+    function repairService(prior: Partial<{ status: 'failed' | 'unknown' | 'queued'; failureCode: string }> = {}) {
+      const source = creationService()
+      let next = 0
+      source.enqueueSourceJob.mockImplementation(async input => ({ id: `source-create-job-${++next}`, mode: 'create' as const, name: input.name,
+        gapId: input.gapId, baseCommit: input.expectedBaseCommit, status: 'queued' as const, createdAt: 1, expiresAt: 2 }))
+      source.inspectSourceJob.mockImplementation(input => ({ id: input.id, mode: 'create' as const, name: creationName, gapId: creationGap,
+        baseCommit: 'c'.repeat(40), status: prior.status ?? 'failed', createdAt: 1, expiresAt: 2,
+        ...(prior.status === 'queued' ? {} : { failureCode: prior.failureCode ?? 'source-build-check-failed' }),
+        ...(prior.status ?? 'failed') === 'failed' && (prior.failureCode ?? 'source-build-check-failed') === 'source-build-check-failed'
+          ? { diagnostics: { ...diagnostics, hostPath: '/Users/private' } } : {} }) as never)
+      return source
+    }
+    const status = (id: string, wait_ms?: number) => ({ name: 'plugin_source_job_status', args: { id, ...(wait_ms === undefined ? {} : { wait_ms }) } })
+    const prelude = () => [{ name: 'plugin_source_gaps', args: {} }, creationRead(['src/index.ts', 'README.md', 'tests/index.spec.ts']), creationCall()]
+
+    it('teaches the strict ValueSchemaSpec and handler-return contract to the author', async () => {
+      const result = await creationWake({ turns: [] })
+      const transcript = result.adapter.messageTranscripts.join('')
+      expect(transcript).toContain('additionalProperties'); expect(transcript).toContain('Promise<never>')
+      expect(transcript).toContain('source-build-check-failed')
+      expect(result.adapter.toolDescriptions[0]?.plugin_source_job_status).toContain('wait_ms')
+    })
+
+    it('surfaces bounded diagnostics and queues exactly one repair with a distinct idempotency key', async () => {
+      const source = repairService()
+      const result = await creationWake({ source, maxPlansPerWake: 2, turns: [...prelude(), status('source-create-job-1'), creationCall(repaired)] })
+      expect(source.enqueueSourceJob).toHaveBeenCalledTimes(2)
+      const [first, second] = source.enqueueSourceJob.mock.calls.map(([input]) => input)
+      expect(second!.idempotencyKey).not.toBe(first!.idempotencyKey)
+      expect(second).toMatchObject({ mode: 'create', gapId: creationGap, name: creationName, files: repaired })
+      const transcript = result.adapter.messageTranscripts.join('')
+      expect(transcript).toContain('TS2322'); expect(transcript).toContain('src/index.ts')
+      expect(transcript).not.toContain('/Users/private')
+      expect(result.service.health().run?.sourceProposals).toEqual({ queued: 2, prepared: 0, rejected: 0 })
+    })
+
+    it('fails closed after the single repair is spent', async () => {
+      const source = repairService()
+      const result = await creationWake({ source, maxPlansPerWake: 3, turns: [...prelude(), status('source-create-job-1'),
+        creationCall(repaired), status('source-create-job-2'), creationCall(repaired)] })
+      expect(source.enqueueSourceJob).toHaveBeenCalledTimes(2)
+      expect(result.adapter.messageTranscripts.join('')).toContain('repair quota exhausted')
+      expect(result.service.health().run?.sourceProposals).toEqual({ queued: 2, prepared: 0, rejected: 1 })
+    })
+
+    it('refuses a repair beyond the per-wake attempt cap', async () => {
+      const source = repairService()
+      const result = await creationWake({ source, maxPlansPerWake: 1, turns: [...prelude(), creationCall(repaired)] })
+      expect(source.enqueueSourceJob).toHaveBeenCalledTimes(1)
+      expect(result.service.health().run?.sourceProposals).toEqual({ queued: 1, prepared: 0, rejected: 1 })
+    })
+
+    it.each([{ status: 'unknown' as const, failureCode: 'source-job-interrupted' }, { status: 'failed' as const, failureCode: 'source-job-preparation-not-started' },
+      { status: 'queued' as const }])('refuses a repair when the prior job is $status/$failureCode', async prior => {
+      const source = repairService(prior)
+      const result = await creationWake({ source, maxPlansPerWake: 2, turns: [...prelude(), creationCall(repaired)] })
+      expect(source.enqueueSourceJob).toHaveBeenCalledTimes(1)
+      expect(result.adapter.messageTranscripts.join('')).toContain('requires a deterministic build/check failure')
+      expect(result.service.health().run?.sourceProposals).toEqual({ queued: 1, prepared: 0, rejected: 1 })
+    })
+
+    it('waits within its bound for a terminal job status', async () => {
+      const source = repairService()
+      let reads = 0
+      const settled = source.inspectSourceJob.getMockImplementation()!
+      source.inspectSourceJob.mockImplementation(input => (++reads === 1 ? { ...settled(input), status: 'queued', failureCode: undefined, diagnostics: undefined } : settled(input)) as never)
+      const result = await creationWake({ source, turns: [...prelude(), status('source-create-job-1', 5_000)] })
+      expect(reads).toBe(2)
+      expect(result.adapter.messageTranscripts.join('')).toContain('TS2322')
+    })
+
+    it('rejects an out-of-bound wait', async () => {
+      const source = repairService()
+      const result = await creationWake({ source, turns: [...prelude(), status('source-create-job-1', 240_001)] })
+      expect(result.adapter.messageTranscripts.join('')).toContain('wait_ms is outside its bound')
+      expect(source.inspectSourceJob).not.toHaveBeenCalled()
+    })
+  })
+
   it('invalidates a drifting template base before creation queue', async () => {
     const source = creationService()
     let reads = 0

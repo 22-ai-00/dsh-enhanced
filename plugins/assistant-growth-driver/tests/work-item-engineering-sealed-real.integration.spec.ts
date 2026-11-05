@@ -24,8 +24,10 @@ const live = process.platform === 'linux' && process.env['DSH_SEALED_REAL_LIVE']
   && !!process.env['DSH_WORK_ITEM_ENGINEERING_RESOURCES']
 const PROVIDER = process.env['DSH_WEB_REAL_PROVIDER'] ?? 'llmgw-default'
 const MODEL = process.env['DSH_WEB_REAL_MODEL'] ?? 'deepseek-v4.1-flash'
-// Author 7 model calls + creation verifier 2: attempt 3 used all 5 author calls and was cut off.
-const MAX_REAL_CALLS = 9
+// Author 10 model calls + creation verifier 2. Attempt 3 used all 5 author calls and was cut off; attempt 5 used 5 of 7
+// and failed its native tsc check with no repair: the author now waits for the build and may repair once (docs/rsi-status.md).
+const MAX_REAL_CALLS = 12
+const MAX_SOURCE_JOBS = 2
 const SEALED_ID = 'sealed-docker-normalize'
 const sha = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
 const dshPackage = () => process.env['DSH_SEALED_REAL_DSH_PACKAGE']
@@ -104,7 +106,7 @@ describe.skipIf(!live)('sealed Docker-era tool re-adopts under a new plan with a
       sealedSeed: async input => sealDockerHistory(input as typeof input & { capabilities: CreationCapabilityConfig }, seal),
       // 8192 is the fixture's ordinary author cap: attempt 1 at 4096 ran out while writing the source file.
       // Attempt 2 was cut off by the 120 s Growth limit while the author wrote source; 300 s is the config maximum.
-      realGrowthRoute: { provider: PROVIDER, model: MODEL, maxOutputTokens: 8192, maxDurationMs: 300_000, maxModelCalls: 7, maxToolCalls: 6 } })
+      realGrowthRoute: { provider: PROVIDER, model: MODEL, maxOutputTokens: 8192, maxDurationMs: 300_000, maxModelCalls: 10, maxToolCalls: 10 } })
     const { route, config, secret } = await realRoute(f.workspace)
     if (!secret) throw new Error('real route credential reference is unavailable in the process environment')
     const installed = createRequire(dshPackage())
@@ -148,17 +150,30 @@ describe.skipIf(!live)('sealed Docker-era tool re-adopts under a new plan with a
       let planId: string | undefined, alias: string | undefined
       while (!alias) {
         await f.ctx.assistantAutomations.tick(); await f.ctx.assistantAutomations.whenIdle()
-        const jobs = query(join(f.root, 'control-plane/control.sqlite'), 'SELECT id FROM source_jobs')
-        if (jobs.length > 1) throw new Error('more than one real source job')
+        const jobs = query(join(f.root, 'control-plane/control.sqlite'), 'SELECT id FROM source_jobs ORDER BY created_at, id')
+        if (jobs.length > MAX_SOURCE_JOBS) throw new Error('more real source jobs than the bounded repair allows')
         if (jobs.length === 0 && existsSync(join(f.root, 'engineering-usage.sqlite'))) {
           // A Growth run that settles without submitting source can never adopt; stop instead of waiting.
           const settled = query(join(f.root, 'engineering-usage.sqlite'),
             "SELECT state, reason FROM usage_jobs WHERE state IN ('reviewed','failed','unknown','superseded')")
           if (settled.length) throw new Error('real Growth run settled without a source job: ' + String(settled[0]!.reason))
         }
-        if (jobs.length === 1) {
-          const job = f.ctx.pluginControlPlane.inspectSourceJob({ id: String(jobs[0]!.id), owner: caller })
-          if (['failed', 'unknown'].includes(job.status)) throw new Error('real source job did not prepare: ' + job.status)
+        if (jobs.length > 0) {
+          const projected = jobs.map(row => f.ctx.pluginControlPlane.inspectSourceJob({ id: String(row.id), owner: caller }))
+          // Only a non-final job may fail, and only as a Host-certified deterministic build/check failure.
+          for (const [index, earlier] of projected.slice(0, -1).entries()) {
+            if (earlier.status !== 'failed' || earlier.failureCode !== 'source-build-check-failed') throw new Error(`real source job ${index + 1} was superseded without a deterministic build failure: ${earlier.status}/${earlier.failureCode ?? ''}`)
+          }
+          evidence['sourceJobs'] = projected.map(job => ({ id: job.id, status: job.status, failureCode: job.failureCode, planId: job.planId,
+            ...(job.diagnostics === undefined ? {} : { diagnostics: { phase: job.diagnostics.phase, exitCode: job.diagnostics.exitCode,
+              entries: job.diagnostics.entries, truncated: job.diagnostics.truncated } }) }))
+          const job = projected.at(-1)!
+          const settledGrowth = existsSync(join(f.root, 'engineering-usage.sqlite')) && query(join(f.root, 'engineering-usage.sqlite'),
+            "SELECT state FROM usage_jobs WHERE state IN ('reviewed','failed','unknown','superseded')").length > 0
+          if (job.status === 'unknown') throw new Error('real source job did not prepare: unknown/' + (job.failureCode ?? ''))
+          if (job.status === 'failed' && (job.failureCode !== 'source-build-check-failed' || jobs.length >= MAX_SOURCE_JOBS || settledGrowth)) {
+            throw new Error(`real source job did not prepare: failed/${job.failureCode ?? ''} after ${jobs.length} job(s)`)
+          }
           if (job.planId) planId = job.planId
           const verification = planId ? f.ctx.pluginControlPlane.inspectCreationVerification(planId) : undefined
           if (verification && ['unknown', 'rejected'].includes(verification.status)) throw new Error('independent verification terminal: ' + verification.status)

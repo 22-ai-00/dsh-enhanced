@@ -286,7 +286,9 @@ export async function workItemEngineeringFixture(options: { replyEnabled?:boolea
       return {...handle,dispose:async()=>{await gate;await handle.dispose()}}
     })
   }
-  await ctx.plugin(AssistantAutomationsService, { databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: true, tickIntervalMs: 1000, reconcileIntervalMs: 0 }).await()
+  await ctx.plugin(AssistantAutomationsService, { databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: true, tickIntervalMs: 1000, reconcileIntervalMs: 0,
+    // A real author may wait in-wake for its native build and repair once: the source job needs a second slot.
+    ...(options.realGrowthRoute ? { maxConcurrency: 2 } : {}) }).await()
   // Every delegated expiry must be bounded by the same owner authorization.
   // Separate clock reads could put a child expiry one millisecond past scope.
   const expiresAt = Date.now() + 3600000
@@ -471,9 +473,11 @@ for(const args of [['--dir',root,'run','typecheck'],['--dir',root,'exec','vitest
       ? {...resource.sourceBuild,...common}
       : {...common,timeoutMs:180000,maxTotalDurationMs:360000,backend:'linux-native',runtime:resource.sourceBuild.repository.runtime,systemSnapshot:resource.sourceBuild.repository.systemSnapshot,userNamespace:resource.sourceBuild.repository.userNamespace,cgroupRoots:resource.sourceBuild.cgroupRoots,
         memoryMiB:2048,cpus:1,pidsLimit:128,workspaceMiB:1024,temporaryMiB:256,workspaceInodes:100000,temporaryInodes:16384}
+    // Real route: one submission plus at most one Host-certified build repair. Scripted runs keep a single attempt.
+    const sourceAttempts=options.realGrowthRoute?2:1
     controlConfig={catalogPath,trustPath,statePath:join(root,'control-plane'),sourceBuild,
-      sourceJobs:{authorityId:'engineering-source-jobs',expiresAt:until,maxSubmissions:1,allowedModes:['create'],repository,
-        creation:{id:'engineering-create',workItemFailures:true,expiresAt:until,maxCreates:1,namePrefix},ownerRouteId:authorityId,principalId,workspace,preset:agentPreset,budgetId:'engineering-build',budgetAmount:1},
+      sourceJobs:{authorityId:'engineering-source-jobs',expiresAt:until,maxSubmissions:sourceAttempts,allowedModes:['create'],repository,
+        creation:{id:'engineering-create',workItemFailures:true,expiresAt:until,maxCreates:sourceAttempts,namePrefix},ownerRouteId:authorityId,principalId,workspace,preset:agentPreset,budgetId:'engineering-build',budgetAmount:1},
       creationVerifications:{authority:compiled.authority,publicKey:compiled.publicKey},
       creationCapabilities:{workItemFailures:true,authorityId:'engineering-adoption',keyId:'engineering-adoption-key',keyPath:adopter.path,owner,namePrefix,expiresAt:until,maxAdoptions:options.sealedSeed?2:1,maxTools:1,maxCallsPerAdoption:3,maxCallRecords:3,maxInputBytes:16384,runner:await runner('adoption-runner')}}
     if(options.sealedSeed)await options.sealedSeed({root,statePath:controlConfig.statePath,capabilities:controlConfig.creationCapabilities!})
@@ -487,7 +491,7 @@ for(const args of [['--dir',root,'run','typecheck'],['--dir',root,'exec','vitest
       ...(options.realGrowthRoute?{provider:options.realGrowthRoute.provider,model:options.realGrowthRoute.model}:{}),
       maxModelCalls:options.realGrowthRoute?.maxModelCalls??5,maxToolCalls:options.realGrowthRoute?.maxToolCalls??4,maxOutputTokens:options.realGrowthRoute?.maxOutputTokens??8192,maxDurationMs:options.realGrowthRoute?.maxDurationMs??120000,maxReviewsPerWake:1,
       usageLearning:{enabled:true,databasePath:join(root,'engineering-usage.sqlite'),scanBudgetId:engineeringScanBudgetId,scanBudgetAmount:1,workItemFailures:true,workItemAuthorities:readiness.pins},
-      pluginSourceProposals:{enabled:true,preparationMode:'durable',allowCreation:true,allowModification:false,allowRevision:false,repository,maxPlansPerWake:1,offline:true,planTtlMs:900000}}
+      pluginSourceProposals:{enabled:true,preparationMode:'durable',allowCreation:true,allowModification:false,allowRevision:false,repository,maxPlansPerWake:sourceAttempts,offline:true,planTtlMs:900000}}
     let authorStage=0,gapId:string|undefined,pluginName:string|undefined,ignoreComments=false
     const lastJson=(request:GenerateOptions)=>{const message=request.messages.filter(m=>m.role==='tool').at(-1);if(!message)throw new Error('actual source tool result missing');return JSON.parse(message.content.filter(c=>c.type==='text').map(c=>c.text).join(''))}
     supplier.engineeringHandler=async function*(request){
