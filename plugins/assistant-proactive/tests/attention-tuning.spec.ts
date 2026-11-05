@@ -107,7 +107,9 @@ describe('AssistantProactiveService reading Evaluation', () => {
     const { service, enqueue } = await setup({ currentAttentionTuning: current })
     expect(service.evaluate(input(1))).toMatchObject({ decision: { reason: 'reminder', utility: 60, attentionTuning: { version: 1 } } })
     expect(current).toHaveBeenCalledWith({ scope: { workspace: '/workspace', preset: 'standard' }, cohort: { lane: 'owner-notification', sourceId: 'assistant-proactive/v1' } })
-    expect(enqueue.mock.calls[0]![0].text).toContain('打扰成本 15')
+    // WP19 stage 2a keeps valuations out of reminder text; the tuned utility above is the observable effect.
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    expect(enqueue.mock.calls[0]![0].text).not.toContain('打扰成本')
     current.mockReturnValue({ ...overlay({ interruptionCostDelta: 10, muted: true }, 2) })
     expect(service.evaluate(input(2))).toMatchObject({ decision: { reason: 'attention-muted', attentionTuning: { version: 2 } } })
     expect(enqueue).toHaveBeenCalledTimes(1)
