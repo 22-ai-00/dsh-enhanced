@@ -21,7 +21,7 @@ export interface CreationCapabilityFeedbackInput {
   now?: number
 }
 
-/** Below this many samples a measure is reported as insufficient rather than a number. */
+/** Below this many samples a measure is marked insufficient; latency percentiles are withheld, quality counts stay exact. */
 export const DEFAULT_MINIMUM_SAMPLES = 5
 
 interface AssociationRow {

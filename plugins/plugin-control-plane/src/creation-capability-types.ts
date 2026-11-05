@@ -228,7 +228,7 @@ export interface CreationCapabilityOrdinaryUseReport {
   withinSignedUseWindow: boolean
   minimumSamples: number
   associationsDigest: string
-  /** Candidate Inboxes without a current certified judgement; an unfenced upper bound. */
+  /** Candidate Inboxes not counted as a current association (no certified judgement, or failed owner/binding re-check); an unfenced upper bound. */
   unknown: { inboxes: number }
   overall: CreationCapabilityOrdinaryUseMeasures
   strata: readonly CreationCapabilityOrdinaryUseStratum[]
