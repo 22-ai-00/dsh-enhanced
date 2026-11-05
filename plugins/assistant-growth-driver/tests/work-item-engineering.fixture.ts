@@ -186,7 +186,11 @@ export function matchesApprovalSource(task:Readonly<{inboxId:string;sessionId:st
   expected:Readonly<{inboxId:string;sessionId:string;bindingId:string}>|undefined):boolean {
   return !!task&&!!expected&&task.inboxId===expected.inboxId&&task.sessionId===expected.sessionId&&task.binding.id===expected.bindingId
 }
-export async function workItemEngineeringFixture(options: { replyEnabled?:boolean; holdSummary?: boolean; holdDispose?: boolean; markerAttack?: boolean; groupedResponse?: boolean; brokenCandidate?:boolean } = {}) {
+export async function workItemEngineeringFixture(options: { replyEnabled?:boolean; holdSummary?: boolean; holdDispose?: boolean; markerAttack?: boolean; groupedResponse?: boolean; brokenCandidate?:boolean
+  /** Opt-in: write sealed Docker-era history into the live journal before the Control Plane mounts. */
+  sealedSeed?: (input:{root:string;statePath:string;capabilities:NonNullable<ControlPlaneConfig['creationCapabilities']>})=>Promise<void>
+  /** Opt-in: route only Growth (author and creation verifier) to an explicitly mounted supplier. */
+  realGrowthRoute?: {provider:string;model:string;maxOutputTokens:number} } = {}) {
   const queryResults:unknown[]=[]
   const sourceDiagnostics:unknown[]=[]
   const ownerApprovals:Array<{request:DeliveryToolApprovalRequest;matched:boolean;outcome:'allowed-once'|'rejected'}>=[]
@@ -471,7 +475,8 @@ for(const args of [['--dir',root,'run','typecheck'],['--dir',root,'exec','vitest
       sourceJobs:{authorityId:'engineering-source-jobs',expiresAt:until,maxSubmissions:1,allowedModes:['create'],repository,
         creation:{id:'engineering-create',workItemFailures:true,expiresAt:until,maxCreates:1,namePrefix},ownerRouteId:authorityId,principalId,workspace,preset:agentPreset,budgetId:'engineering-build',budgetAmount:1},
       creationVerifications:{authority:compiled.authority,publicKey:compiled.publicKey},
-      creationCapabilities:{workItemFailures:true,authorityId:'engineering-adoption',keyId:'engineering-adoption-key',keyPath:adopter.path,owner,namePrefix,expiresAt:until,maxAdoptions:1,maxTools:1,maxCallsPerAdoption:3,maxCallRecords:3,maxInputBytes:16384,runner:await runner('adoption-runner')}}
+      creationCapabilities:{workItemFailures:true,authorityId:'engineering-adoption',keyId:'engineering-adoption-key',keyPath:adopter.path,owner,namePrefix,expiresAt:until,maxAdoptions:options.sealedSeed?2:1,maxTools:1,maxCallsPerAdoption:3,maxCallRecords:3,maxInputBytes:16384,runner:await runner('adoption-runner')}}
+    if(options.sealedSeed)await options.sealedSeed({root,statePath:controlConfig.statePath,capabilities:controlConfig.creationCapabilities!})
     controlFork=ctx.plugin(PluginControlPlaneService,controlConfig);await controlFork.await()
     const diagnostic=()=>{const internal=ctx.pluginControlPlane as unknown as {sourceRuntime?:{inspectWorkItemReadiness:(owner:typeof currentOwner)=>unknown};creationCapabilityRuntime?:{inspectWorkItemAdoptionReadiness:()=>unknown}};return {source:internal.sourceRuntime?.inspectWorkItemReadiness(currentOwner),review:ctx.assistantVerifier.inspectWorkItemCreationReviewReadiness(),adoption:internal.creationCapabilityRuntime?.inspectWorkItemAdoptionReadiness(),preparedProtocol:ctx.pluginControlPlane.inspectWorkItemPreparedCreationProtocol(),health:ctx.pluginControlPlane.health(),fiberState:controlFork?.state}}
     let readiness=ctx.pluginControlPlane.inspectWorkItemCreationReadiness({owner:currentOwner})
@@ -479,7 +484,8 @@ for(const args of [['--dir',root,'run','typecheck'],['--dir',root,'exec','vitest
     if(!readiness?.available)throw new Error('real source/review/adoption lane is not ready')
     engineering.readiness=readiness
     growthConfig={enabled:true,intervalMs:0,scope:{workspace,preset:agentPreset,principalId,ownerRouteId:authorityId},budgetId:'engineering-author',budgetAmount:1,
-      maxModelCalls:5,maxToolCalls:4,maxOutputTokens:8192,maxDurationMs:120000,maxReviewsPerWake:1,
+      ...(options.realGrowthRoute?{provider:options.realGrowthRoute.provider,model:options.realGrowthRoute.model}:{}),
+      maxModelCalls:5,maxToolCalls:4,maxOutputTokens:options.realGrowthRoute?.maxOutputTokens??8192,maxDurationMs:120000,maxReviewsPerWake:1,
       usageLearning:{enabled:true,databasePath:join(root,'engineering-usage.sqlite'),scanBudgetId:engineeringScanBudgetId,scanBudgetAmount:1,workItemFailures:true,workItemAuthorities:readiness.pins},
       pluginSourceProposals:{enabled:true,preparationMode:'durable',allowCreation:true,allowModification:false,allowRevision:false,repository,maxPlansPerWake:1,offline:true,planTtlMs:900000}}
     let authorStage=0,gapId:string|undefined,pluginName:string|undefined,ignoreComments=false
