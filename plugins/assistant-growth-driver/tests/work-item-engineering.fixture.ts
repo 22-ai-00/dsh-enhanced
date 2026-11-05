@@ -449,7 +449,10 @@ for(const args of [['--dir',root,'run','typecheck'],['--dir',root,'exec','vitest
     }
     reviewConfig={authorityId:'engineering-review',owner,namePrefix,keyId:'engineering-review-key',keyPath:reviewer.path,expiresAt:until,maxVerifications:1,
       runner:await runner('private-review-runner'),policy:'Check the exact authenticated pure key=value parsing task. Worker reports are background. Generate independent positive held-out cases that preserve Unicode and values containing equals signs. Reject candidates that cannot perform the specified transformation.',
-      maxInputBytes:262144,maxOutputTokens:2048,maxDurationMs:180000,maxCases:3,receiptTtlMs:300000,workItemFailures:true}
+      maxInputBytes:262144,
+      // Real reasoning routes: the contract and source review share one cumulative cap, so 2048 left the
+      // attempt-6 review 869 tokens and it ended at max-tokens without a verdict. Still two calls, same semantics.
+      maxOutputTokens:options.realGrowthRoute?16384:2048,maxDurationMs:options.realGrowthRoute?600000:180000,maxCases:3,receiptTtlMs:300000,workItemFailures:true}
     const compiled=compileCreationReviewConfig(reviewConfig)
     await ctx.plugin(AssistantGoalsService,{databasePath:join(root,'goals.sqlite')}).await()
     await ctx.plugin(AssistantSkillsService,{databasePath:join(root,'skills.sqlite')}).await()

@@ -48,6 +48,7 @@ class Adapter extends LlmAdapter {
   requests: GenerateOptions[] = []
   mode: 'pass' | 'insufficient' | 'malformed' | 'review-reject' = 'pass'
   afterCall: ((number: number) => void) | undefined
+  contractOutputTokens = 20
   override async resolveModel(provider: string, model: string) {
     return { provider, id: model, name: model, reasoning: { efforts: [{ id: ReasoningEffortId('high'), name: 'High' }] } }
   }
@@ -62,12 +63,12 @@ class Adapter extends LlmAdapter {
     this.afterCall?.(index)
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'block-end', index: 0, block: { type: 'text', text: JSON.stringify(value) } }
-    yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 20 } }
+    yield { type: 'usage', usage: { inputTokens: 10, outputTokens: index === 1 ? this.contractOutputTokens : 20 } }
     yield { type: 'finish', reason: { kind: 'stop' } }
   }
 }
 
-async function fixture() {
+async function fixture(options: { maxOutputTokens?: number } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'creation-review-runtime-'))); roots.push(root)
   const keyPath = join(root, 'signing.pem'), stateRoot = join(root, 'observer')
   await mkdir(stateRoot, { mode: 0o700 })
@@ -81,7 +82,7 @@ async function fixture() {
     runner: { stateRoot, image: 'sha256:' + 'a'.repeat(64), dockerPath: await realpath(process.execPath), expiresAt: now + 120_000,
       maxRuns: 8, maxTotalDurationMs: 80_000, maxDurationMs: 10_000, maxOutputBytes: 65_536 },
     policy: 'Verify arithmetic specified by the owner, including negative operands.',
-    maxInputBytes: 65_536, maxOutputTokens: 1024, maxDurationMs: 60_000, maxCases: 3, receiptTtlMs: 30_000 }
+    maxInputBytes: 65_536, maxOutputTokens: options.maxOutputTokens ?? 1024, maxDurationMs: 60_000, maxCases: 3, receiptTtlMs: 30_000 }
   const compiled = compileCreationReviewConfig(config)
   const fullOwner = { ...owner, receiptVersion: 2 as const, bindingVersion: 1, generation: 1 }
   const reference = { schemaVersion: 1, owner: fullOwner, outcomeId: 'outcome',
@@ -146,6 +147,20 @@ async function fixture() {
   return { root, ctx, runtime, config, compiled, owner, plan, growthRun, source, reference, cp, adapter, request,
     artifact, withdraw: () => { current = false }, fences: () => fences }
 }
+
+// Attempt 6 (sealed-real): a reasoning model spent 1179 of a shared 2048 on the contract, leaving the
+// source review 869 tokens, which it exhausted on reasoning (max-tokens, no verdict). The real scenario
+// budgets 16384 so each of the two calls keeps a full per-call budget; the cumulative cap is unchanged.
+test.each([
+  { total: 2048, contract: 1179, review: 869 },
+  { total: 16_384, contract: 1179, review: 15_205 },
+])('the source review receives the cumulative budget left after the contract ($total)', async ({ total, contract, review }) => {
+  const f = await fixture({ maxOutputTokens: total }); f.adapter.contractOutputTokens = contract
+  const result = await f.runtime.run(f.request)
+  expect(result.status).toBe('verified')
+  expect(f.adapter.requests.map(item => item.maxTokens)).toEqual([total - 1, review])
+  if (result.status === 'verified') expect(result.certificate.budget).toMatchObject({ modelCalls: 2, maxOutputTokens: total })
+})
 
 test('uses two fresh inherited-model Agent turns, private challenge cases, exact observer output, and a signed certificate', async () => {
   const f = await fixture()
