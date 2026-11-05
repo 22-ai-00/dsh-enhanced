@@ -69,6 +69,36 @@ export function validateIdentity(identity: ReviewPublicIdentity): void {
   if (r.maxDurationMs > r.maxTotalDurationMs || r.expiresAt < identity.authority.expiresAt
     || r.maxRuns < identity.maximum * (noModel ? 2 + 2 * b.maxCases : 1 + b.maxCases)) lineageFail('runner cannot cover review')
 }
+/** Structural view of a compiled review-lane config; kept here so creation-review.ts can project without a cycle. */
+export interface CompiledReviewLane {
+  authority: ReviewPublicIdentity['authority']
+  publicKey: string
+  config: { owner: ReviewPublicIdentity['owner']; maxVerifications: number; maxDurationMs: number; maxCases: number; receiptTtlMs: number
+    policy?: string; maxInputBytes?: number; maxOutputTokens?: number
+    runner: { stateRoot: string; maxRuns: number; maxTotalDurationMs: number; maxDurationMs: number; maxOutputBytes: number; expiresAt: number } }
+}
+/** The public, backend-neutral identity a review lane's grant hands off between authorities. */
+export function projectReviewPublicIdentity(lane: LineageScope['lane'], compiled: CompiledReviewLane): ReviewPublicIdentity {
+  const c = compiled.config, runner = c.runner
+  const key = createPublicKey(compiled.publicKey)
+  const identity: ReviewPublicIdentity = {
+    authority: { ...compiled.authority },
+    publicKey: compiled.publicKey,
+    keyFingerprint: createHash('sha256').update(key.export({ format: 'der', type: 'spki' })).digest('hex'),
+    owner: { ...c.owner },
+    maximum: c.maxVerifications,
+    // Only backend-neutral runner bounds; backend-specific fields stay inside authorityDigest.
+    runner: { logicalStateRoot: runner.stateRoot, maxRuns: runner.maxRuns, maxTotalDurationMs: runner.maxTotalDurationMs,
+      maxDurationMs: runner.maxDurationMs, maxOutputBytes: runner.maxOutputBytes, expiresAt: runner.expiresAt },
+    budget: lane === 'revision-regressions'
+      ? { maxDurationMs: c.maxDurationMs, maxCases: c.maxCases, receiptTtlMs: c.receiptTtlMs }
+      : { policy: c.policy as string, maxInputBytes: c.maxInputBytes as number,
+        maxOutputTokens: c.maxOutputTokens as number, maxDurationMs: c.maxDurationMs,
+        maxCases: c.maxCases, receiptTtlMs: c.receiptTtlMs },
+  }
+  validateIdentity(identity); validateLane(identity, lane)
+  return identity
+}
 export function stableIdentity(identity: ReviewPublicIdentity): unknown {
   const { authorityDigest: _, ...authority } = identity.authority
   return { ...identity, authority }

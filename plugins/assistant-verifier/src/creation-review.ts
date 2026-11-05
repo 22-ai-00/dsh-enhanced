@@ -12,6 +12,7 @@ import { canonicalGrowthJson, growthObjectDigest, sourceGrowthEvidenceDigest, va
   type PluginCreationVerificationResult, type PluginCreationVerificationCertificate,
   type PluginCreationVerificationLinuxExecution, type PluginCreationVerificationMacosExecution } from '@dsh-enhanced/assistant-growth-contract'
 import { CreationReviewStore } from './creation-review-store.js'
+import { projectReviewPublicIdentity } from './review-authority-lineage.js'
 import { runNativeCreationTurn, type CreationModel } from './creation-review-native.js'
 import { behaviorNativeRuntimeDigest, LINUX_BEHAVIOR_BOUNDARY, NATIVE_BEHAVIOR_BOUNDARY, validateCreationBehaviorDeploymentConfig,
   type CreationBehaviorDeploymentConfig } from './plugin-behavior-config.js'
@@ -65,6 +66,15 @@ export interface CreationReviewConfig {
   maxCases: number
   receiptTtlMs: number
   workItemFailures?: boolean
+  /** Trusted v2 grant-handoff head for reading parents certified before an in-place authority handoff. */
+  history?: CreationReviewHistory
+}
+
+export interface CreationReviewHistory {
+  headDigest: string
+  installationId: string
+  profileId: string
+  logicalDatabaseScope: string
 }
 
 export interface CreationReviewAuthorityInspection {
@@ -98,8 +108,13 @@ function privatePath(value: unknown, label: string): string {
 /** Synchronous deployment validation, before any runner or SQLite resource is acquired. */
 export function validateCreationReviewConfig(input: CreationReviewConfig): CreationReviewConfig {
   const item = exact(input, ['authorityId', 'owner', 'namePrefix', 'keyId', 'keyPath', 'expiresAt', 'maxVerifications',
-    'runner', 'policy', 'maxInputBytes', 'maxOutputTokens', 'maxDurationMs', 'maxCases', 'receiptTtlMs'], 'config', ['workItemFailures'])
+    'runner', 'policy', 'maxInputBytes', 'maxOutputTokens', 'maxDurationMs', 'maxCases', 'receiptTtlMs'], 'config', ['workItemFailures', 'history'])
   if (Object.hasOwn(item, 'workItemFailures') && typeof item.workItemFailures !== 'boolean') throw new Error('creation review invalid workItemFailures')
+  if (Object.hasOwn(item, 'history')) {
+    const history = exact(item.history, ['headDigest', 'installationId', 'profileId', 'logicalDatabaseScope'], 'history')
+    if (typeof history.headDigest !== 'string' || !SHA.test(history.headDigest)) throw new Error('creation review invalid history head')
+    for (const key of ['installationId', 'profileId', 'logicalDatabaseScope']) id(history[key], `history ${key}`)
+  }
   id(item.authorityId, 'authorityId'); id(item.keyId, 'keyId')
   const owner = exact(item.owner, ['authorityId', 'authorityHash', 'principalId', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset'], 'owner')
   for (const key of ['authorityId', 'principalId', 'principalRecordId', 'agentPreset']) id(owner[key], `owner ${key}`)
@@ -270,6 +285,7 @@ export function linuxPreparedBuildEvidenceDigest(value: unknown): string {
 export class CreationReviewRuntime {
   readonly #compiled: ReturnType<typeof compileCreationReviewConfig>
   readonly #store: CreationReviewStore
+  readonly #storePath: string
   #runner: PluginBehaviorRunner | undefined
   #runnerLoading: Promise<PluginBehaviorRunner> | undefined
   readonly #abort = new AbortController()
@@ -277,7 +293,8 @@ export class CreationReviewRuntime {
   #closing: Promise<void> | undefined
   constructor(private readonly ctx: Context, input: CreationReviewConfig, databasePath: string) {
     this.#compiled = compileCreationReviewConfig(input)
-    this.#store = new CreationReviewStore(databasePath + '.creation-reviews')
+    this.#storePath = databasePath + '.creation-reviews'
+    this.#store = new CreationReviewStore(this.#storePath)
   }
   #loadRunner(): Promise<PluginBehaviorRunner> {
     if (this.#runner) return Promise.resolve(this.#runner)
@@ -408,9 +425,24 @@ export class CreationReviewRuntime {
   readRetainedCases(parent: PluginCreationVerificationCertificate): ReturnType<CreationReviewStore['readRetained']> | undefined {
     const { authority, publicKey } = this.#compiled
     if (this.#abort.signal.aborted
-      || !verifyPluginCreationVerificationCertificate(parent, authority, publicKey, parent.verifiedAt)) return undefined
+      || !verifyPluginCreationVerificationCertificate(parent, authority, publicKey, parent.verifiedAt) && !this.#historicalParent(parent)) return undefined
     const retained = this.#store.readRetained(parent.plan.id)
     return retained && canonicalGrowthJson(retained.certificate) === canonicalGrowthJson(parent) ? retained : undefined
+  }
+  /** A parent signed before an in-place handoff: trusted only through the configured head and the sealed old identity. */
+  #historicalParent(parent: PluginCreationVerificationCertificate): boolean {
+    const history = this.#compiled.config.history
+    if (!history) return false
+    try {
+      const stat = lstatSync(this.#storePath)
+      const { certificate, identity } = this.#store.resolveHistoricalCertificate({ headDigest: history.headDigest,
+        currentIdentity: projectReviewPublicIdentity('creation-reviews', this.#compiled),
+        currentFileIdentity: { dev: stat.dev, ino: stat.ino }, installationId: history.installationId,
+        profileId: history.profileId, lane: 'creation-reviews', logicalDatabaseScope: history.logicalDatabaseScope,
+        planId: parent.plan.id, now: Date.now() })
+      return verifyPluginCreationVerificationCertificate(parent, identity.authority as CreationAcceptanceAuthorityRef,
+        identity.publicKey, parent.verifiedAt) && canonicalGrowthJson(certificate) === canonicalGrowthJson(parent)
+    } catch { return false }
   }
   run(request: PluginCreationVerificationRequest, external?: AbortSignal): Promise<PluginCreationVerificationResult> {
     if (!request || typeof request !== 'object' || Array.isArray(request)

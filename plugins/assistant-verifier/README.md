@@ -146,7 +146,9 @@ Linux 创建验收要求 Control Plane 的双 UID 完整仓库构建。派发前
 
 `resolveHistoricalCertificate()` 要求调用方提供数据库之外的可信当前 head、完整当前身份、installation/profile/lane/逻辑角色及当前文件身份；只有精确封存的记录可返回对应旧公开身份和证书。调用方仍须验签并执行原有当前 owner/source/backend 围栏，不能把证书自带的 authority 当作信任根。已有连接的方法使用同一只读事务，支持 live WAL；静态适配器仅支持停止 writer、checkpoint 后的文件。维护和历史读取先校验 SQLite 原始 TEXT 字节，拒绝 NUL、无效 UTF-8 或投影截断，审计文本必须为原始 canonical JSON。v1 的不透明配置摘要不能自动成为 v2 历史信任根。
 
-这些接口尚未接入 installer 或运行时消费者，也不注册模型工具。调用方须认证原 owner/配置来源和 stage 复制，持久化受信的外部 head；store 不替调用方完成这些授权，也不提供同 UID 恶意插件隔离。rename 后只能只读核验，不重放 apply；后续复制须由新授权身份与 head 绑定新文件，当前 v2 不支持同 digest 的 copy-only 恢复。保留旧证书不等于取得新 Linux 执行资格，也不证明采用收据连续性或完整升级通过。
+`creationReviews.history`（`resolveHistoricalCertificate()` 的运行时消费者，目前端到端不可达：Control Plane 读取修订父版本时仍只认当前创建 authority，交接前的父证书在到达 verifier 之前就被拒；安装器也尚未写入此字段）可选，字段恰为 `{ headDigest, installationId, profileId, logicalDatabaseScope }`：`headDigest` 为 64 位小写 hex，其余为有界 ID（1–200 字符）。缺省时行为与之前完全相同；它不进入 authority digest，revision 两个 lane 拒绝此字段。仅当当前 authority 验签失败时，`readRetainedCases`（回归审查读取父版本保留用例）才以此 head、由当前配置投影出的公开身份与当前库文件 dev/ino 调用 `resolveHistoricalCertificate()`，再用返回的旧身份验签，要求父证书与封存证书 canonical 相同，最后照常读取保留证据；任一步失败均返回 `undefined`（拒绝）。Control Plane 的验收/采用检查、新审查、claim 及 `inspect`/额度仍只认当前 authority。
+
+这些接口尚未接入 installer，也不注册模型工具。调用方须认证原 owner/配置来源和 stage 复制，持久化受信的外部 head；store 不替调用方完成这些授权，也不提供同 UID 恶意插件隔离。rename 后只能只读核验，不重放 apply；后续复制须由新授权身份与 head 绑定新文件，当前 v2 不支持同 digest 的 copy-only 恢复。保留旧证书不等于取得新 Linux 执行资格，也不证明采用收据连续性或完整升级通过。
 
 ## 已采用插件的新任务修订验收
 
