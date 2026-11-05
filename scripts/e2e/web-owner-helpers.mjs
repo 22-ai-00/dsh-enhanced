@@ -1,3 +1,4 @@
+import { expect } from '@playwright/test'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { DatabaseSync } from 'node:sqlite'
@@ -7,6 +8,20 @@ import { stripVTControlCharacters } from 'node:util'
 const root = fileURLToPath(new URL('../../', import.meta.url))
 // First-run notice title differs by pinned DSH Host: 'Preview Notice' (0.2.x) and 'Internal Testing Notice' (older).
 export const firstRunNoticeName = /^(Preview Notice|Internal Testing Notice)$/
+/**
+ * Fill the composer and wait until Send is enabled and stays enabled. A late
+ * settings/session re-render can clear a draft typed right after session
+ * creation, so refill until the draft survives a short settle window.
+ */
+export async function fillComposer(page, composer, text) {
+  const send = page.getByRole('button', { name: 'Send message', exact: true })
+  await expect(async () => {
+    await composer.fill(text)
+    await expect(send).toBeEnabled({ timeout: 2_000 })
+    await page.waitForTimeout(500)
+    await expect(send).toBeEnabled({ timeout: 100 })
+  }).toPass({ timeout: 30_000 })
+}
 export const sanitize = text => stripVTControlCharacters(String(text)).replace(/([?&]token=)[^\s"<>]+/g, '$1[redacted]')
 
 export async function run(command, args, env, timeout = 90_000) {

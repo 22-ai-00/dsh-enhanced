@@ -9,7 +9,7 @@ import { parseDocument } from 'yaml'
 import { objective, criteria, setConfig, contracts, jobs, waitForVerifiedGoal } from './web-owner-real-helpers.mjs'
 import { readSessionAudit } from './web-owner-real-audit.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
-import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { fillComposer, firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 test('real configured route completes a browser-owned verified native goal across Host restart', async ({ page, context }, testInfo) => {
@@ -56,7 +56,7 @@ test('real configured route completes a browser-owned verified native goal acros
     const sessionId = (await created.json()).result.value.sessionId
     const composer = page.getByLabel(/Describe what you want to build|Message or run a task/)
     const submittedPrompt = `Create a goal with objective exactly: '${objective}' amountCents is an integer; combine entries by currency, ignore orders whose status is 'cancelled', and output currency keys in dictionary order. Use goal_create with max_goal_rounds 2 and start_native_rounds true to hand off this turn to the native goal driver. Do not implement code in this turn. For the subsequent goal round: the workspace is empty; use the write tool to create summarize.mjs directly. Shell, other files and permission escalation are outside this experiment. Skip todo/plan and inspection tools. End the round after writing the artifact: the configured independent verifier will validate and complete the goal. After writing, reply with plain text (no Markdown), describing the result. Keep the entire experiment within ten model calls.`
-    await composer.fill(submittedPrompt)
+    await fillComposer(page, composer, submittedPrompt)
     const prompt = page.waitForResponse(response => new URL(response.url()).pathname === '/api/session/prompt')
     await page.getByRole('button', { name: 'Send message', exact: true }).click(); expect((await prompt).status()).toBe(200)
     await waitForVerifiedGoal(page, goalsPath, verifierPath, deliveryPath, approved, frames, sessionId, workspace)
