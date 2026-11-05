@@ -1,10 +1,12 @@
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { lstat, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 
 const exec = promisify(execFile)
+const root = fileURLToPath(new URL('../../', import.meta.url))
 const objective = 'Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.'
 
 /** Readable project directory key; mirrors dsh-session-persistence-jsonl projectKey ('~' is escaped). */
@@ -74,7 +76,12 @@ export async function readSessionAudit(home, workspace, sessionId) {
   if (!stat.isFile() || stat.size > 32 * 1024 * 1024) throw new Error('session artifact is not a bounded regular file')
   const { stdout } = await exec('zstd', ['-q', '-dc', '--', path], { encoding: 'utf8', timeout: 10_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true })
   const events = stdout.split('\n').filter(Boolean).map(line => JSON.parse(line))
-  const policy = await import(pathToFileURL(join(home, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'assistant-policy', 'lib', 'index.js')).href)
+  // Older profiles hoist the peer into the profile; newer installs keep it under the linked
+  // assistant-delivery plugin that the Host loaded, so fall back to that resolution.
+  const policyPath = [join(home, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'assistant-policy', 'lib', 'index.js'),
+    join(root, 'plugins', 'assistant-delivery', 'node_modules', '@dsh-enhanced', 'assistant-policy', 'lib', 'index.js')].find(path => existsSync(path))
+  if (policyPath === undefined) throw new Error('assistant-policy library is unavailable for the Session audit')
+  const policy = await import(pathToFileURL(policyPath).href)
   const selected = events.map(compact).filter(Boolean)
   const assistantReplies = events.filter(event => event.type === 'assistant/message').map(event => ({
     seq: event.seq, turn: event.data.turn, text: event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join(''),
