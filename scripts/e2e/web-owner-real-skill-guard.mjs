@@ -158,7 +158,14 @@ export function apply(ctx) {
     // Nested write dispatch occurs after skill_run is logged; it is only valid
     // in the replay native round and remains restricted to summarize.mjs.
     const nestedReplayWrite = execution.name === 'write' && phase === 'complete' && execution.agent && calls(execution.agent, 'skill_run').length === 1
-    if (!nestedReplayWrite && !allowedSkillExperimentTool(execution.name, execution.arguments, workspace, phase)) throw new Error('tool request is outside the verified-skill experiment')
+    // A saved write step carries a file observation: skill_run / skill_trial
+    // dispatch a nested one-line read of the same file before the write.
+    const nestedObservation = execution.name === 'read' && String(execution.rootCallId) !== String(execution.callId)
+      && String(execution.callId).includes(':skill-observation:') && ['replay', 'trial'].includes(phase)
+      && execution.agent && calls(execution.agent, phase === 'trial' ? 'skill_trial' : 'skill_run').length > 0
+      && isSummaryPath(execution.arguments, workspace) && execution.arguments.limit === 1
+      && Object.keys(execution.arguments).every(key => ['file_path', 'limit'].includes(key))
+    if (!nestedReplayWrite && !nestedObservation && !allowedSkillExperimentTool(execution.name, execution.arguments, workspace, phase)) throw new Error('tool request is outside the verified-skill experiment')
     if (nestedReplayWrite && !isSummaryPath(execution.arguments, workspace)) throw new Error('nested replay wrote outside summarize.mjs')
     record({ event: 'tool-execute', phase, name: execution.name, path: typeof execution.arguments?.file_path === 'string' ? execution.arguments.file_path : undefined })
     const concludes = execution.name === 'write' && phase === 'source' || execution.name === 'skill_run' && phase === 'replay' || execution.name === 'skill_trial' && phase === 'trial'
