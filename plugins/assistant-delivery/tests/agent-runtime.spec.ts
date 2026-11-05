@@ -10721,6 +10721,15 @@ describe('real native Delivery Agent runtime', () => {
       goalContinuationTimeoutMs: cancellation === 'timeout' ? 20 : 5_000,
       ...(cancellation === 'lease-loss' ? { leaseMs: 1_000 } : {}),
     })
+    // lease-loss needs the minimum lease so one heartbeat (leaseMs / 3)
+    // observes the forced expiry below. On the wall clock, that same lease
+    // also expires naturally whenever a loaded host stalls the event loop for
+    // about a second, and the Host then correctly refuses to start the tool.
+    // Pin the durable lease clock of both Host Stores, so only the explicit
+    // `lease_until = 0` write can expire the Session lease.
+    const hostNow = Date.now()
+    const hostClock = (): number => hostNow
+    if (cancellation === 'lease-loss') (runtimeStore(fixture.service) as unknown as { now: () => number }).now = hostClock
     const native = await nativeGoalPlugins()
     await fixture.ctx.plugin(native.GoalService as never, {} as never)
     await fixture.ctx.plugin(native.goalTools as never, {} as never)
@@ -10772,11 +10781,16 @@ describe('real native Delivery Agent runtime', () => {
     const accepted = await fixture.service.acceptInbound(message('evt-native-goal-timeout', 'Run the bounded goal'))
     const binding = runtimeStore(fixture.service).getActiveBinding(conversation)
     if (binding === undefined) throw new Error('native goal timeout fixture has no active binding')
-    const secondHost = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
+    const secondHost = new DeliveryStore({ path: join(root, 'delivery.sqlite'),
+      ...(cancellation === 'lease-loss' ? { now: hostClock } : {}) })
     const running = fixture.service.tick().then(() => fixture.service.whenIdle())
     let deadline: ReturnType<typeof setTimeout> | undefined
     try {
-      await started
+      // Fail with the cause instead of waiting for the test timeout when the
+      // turn settles without ever reaching the uncooperative tool.
+      await Promise.race([started, running.then(() => {
+        throw new Error('goal continuation settled before its tool started')
+      })])
       // This is a second Host Store on the same durable database, not a mocked
       // lease manager. The running model/tool owns the bound session fence.
       expect(secondHost.claimSessionLease({ kind: 'bound', binding }, 'second-delivery-host', 1_000))
