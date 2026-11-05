@@ -16,6 +16,18 @@ test('owner recall rejects disabled, observe, missing scope/worker and unknown c
   }
 })
 
+test('linked alias reads are an explicit, bounded owner allowlist', () => {
+  const recall = (ownerRecall: unknown) => normalizeConfig({ ...active, ownerRecall } as never, 1_000).ownerRecall
+  expect(recall({ enabled: true, linkedAliases: [] })).toEqual({ enabled: true })
+  expect(recall({ enabled: true, linkedAliases: ['telegram/bot/a', 'lark/app/b'] })).toEqual({ enabled: true, linkedAliases: ['telegram/bot/a', 'lark/app/b'] })
+  expect(Object.isFrozen(recall({ enabled: true, linkedAliases: ['telegram/bot/a'] })!.linkedAliases)).toBe(true)
+  expect(ConfigSchema({ ...active, ownerRecall: { enabled: true, linkedAliases: ['telegram/bot/a'] } }).ownerRecall).toMatchObject({ linkedAliases: ['telegram/bot/a'] })
+  for (const linkedAliases of ['telegram/bot/a', [''], [' padded'], ['a\nb'], [1], ['owner'], ['x', 'x'], Array.from({ length: 9 }, (_, index) => `alias-${index}`), ['x'.repeat(257)]]) {
+    expect(() => recall({ enabled: true, linkedAliases })).toThrow()
+  }
+  expect(() => normalizeConfig({ ...active, ownerRecall: { enabled: false, linkedAliases: ['telegram/bot/a'] } }, 1_000)).toThrow('requires ownerRecall.enabled')
+})
+
 test('owner recall alone does not change the immutable diagnosis configuration digest', async () => {
   const { diagnosisConfigurationDigest } = await import('../src/diagnosis-contract.ts')
   const previous = normalizeConfig(active, 1_000)

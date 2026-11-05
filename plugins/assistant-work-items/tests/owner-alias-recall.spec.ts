@@ -11,9 +11,10 @@ import { admitted, claim, harness, receipt, PRINCIPAL, PRESET, ROUTE, WORKSPACE 
 // side of the alias receipt (link/unlink/version/handoff) is covered in
 // assistant-delivery/tests/owner-alias.spec.ts; here we prove Work Items only
 // accepts that receipt for inspect-work-items and never in a v2 owner slot.
-async function setup() {
+const ALIAS = 'telegram/bot/personal/alias'
+async function setup(linkedAliases: string[] | null = [ALIAS]) {
   const expiresAt = Date.now() + 600000
-  const f = await harness({ ownerRecall: { enabled: true }, scope: { workspace: WORKSPACE, preset: PRESET, principalId: PRINCIPAL, ownerRouteId: ROUTE, expiresAt },
+  const f = await harness({ ownerRecall: { enabled: true, ...(linkedAliases ? { linkedAliases } : {}) }, scope: { workspace: WORKSPACE, preset: PRESET, principalId: PRINCIPAL, ownerRouteId: ROUTE, expiresAt },
     admission: { allowedKinds: ['review', 'owner-continuation'], maxOpenItems: 8, maxAdmitsPerHour: 20, cooldownMs: 0 },
     ownerContinuation: { enabled: true, automationId: 'continuation-worker', allowedTools: ['work_item_claim', 'work_item_report', 'work_item_read_context'], budgetId: 'continuation-budget', budgetAmount: 1, maxModelCalls: 3, maxToolCalls: 6, maxOutputTokens: 512, timeoutMs: 10000, expiresAt } })
   const item = await admitted(f, { title: '原任务', brief: '跨渠道可读😀' }); claim(f, item.id)
@@ -23,11 +24,11 @@ async function setup() {
   let route = { ...receipt({ authorityId: ROUTE, principalId: PRINCIPAL, workspace: WORKSPACE, agentPreset: PRESET }), generation: 3, bindingVersion: 4 }
   let linked = true, v2Leak = false, ownerProofForAlias = false, extra: Record<string, unknown> = {}
   let open: { callId: string; name: string; argumentsJson: string } | undefined
-  let allowed = true, onEvaluate = () => {}, counter = 0, admits = 0
+  let allowed = true, onEvaluate = () => {}, counter = 0, admits = 0, aliasLookups = 0
   const evaluated: string[] = []
   const aliasReceipt = (): PeerOwnerAliasReceipt => Object.freeze({ protocol: 'assistant-delivery/owner-alias-receipt/v1' as const,
     authorityId: ROUTE, authorityHash: route.authorityHash, workspace: WORKSPACE, agentPreset: PRESET,
-    alias: { principalId: 'telegram/bot/personal/alias', principalRecordId: 'alias-record', principalVersion: 2,
+    alias: { principalId: ALIAS, principalRecordId: 'alias-record', principalVersion: 2,
       bindingId: 'alias-binding', bindingVersion: 1, bindingGeneration: 1, sessionId: String(alias.session.id) },
     root: { principalId: route.principalId, principalRecordId: route.principalRecordId, principalVersion: route.principalVersion,
       bindingVersion: route.bindingVersion, generation: route.generation }, ...extra })
@@ -40,7 +41,7 @@ async function setup() {
     validateOwnerAgentForRoute: agent => agent === owner ? route : agent === alias && v2Leak && linked ? aliasReceipt() as never : undefined,
     inspectOwnerForegroundToolCall: input => (input.agent === owner || ownerProofForAlias && input.agent === alias) && matches(input)
       ? { protocol: 'assistant-delivery/foreground-tool-call/v1', call: { ...open } } : undefined,
-    inspectOwnerAliasRoute: agent => agent === alias && linked ? aliasReceipt() : undefined,
+    inspectOwnerAliasRoute: agent => { aliasLookups++; return agent === alias && linked ? aliasReceipt() : undefined },
     inspectOwnerAliasForegroundToolCall: input => input.agent === alias && linked && matches(input)
       ? (ownerProofForAlias ? { protocol: 'assistant-delivery/foreground-tool-call/v1' } : { protocol: 'assistant-delivery/owner-alias-foreground-tool-call/v1', receipt: aliasReceipt(), call: { ...open } }) : undefined,
     readOwnerForegroundToolInput: () => { throw new Error('alias must not reach continuation input') },
@@ -59,7 +60,7 @@ async function setup() {
     open = { callId, name, argumentsJson: JSON.stringify(args) }
     return { agent, name, callId, arguments: args, signal: new AbortController().signal } as OwnerWorkItemExecution
   }
-  return { f, item, owner, alias, recall, continuation, execution, evaluated, admits: () => admits,
+  return { f, item, owner, alias, recall, continuation, execution, evaluated, admits: () => admits, aliasLookups: () => aliasLookups,
     route: () => route, setRoute: (next: typeof route) => { route = next }, unlink: () => { linked = false },
     leakV2: () => { v2Leak = true }, ownerProofForAlias: () => { ownerProofForAlias = true },
     setExtra: (next: Record<string, unknown>) => { extra = next }, deny: () => { allowed = false },
@@ -142,4 +143,29 @@ test('v2 owner checks reject the alias receipt and alias receipts reject foreign
   const wrongProof = await setup()
   wrongProof.ownerProofForAlias()
   expect(() => wrongProof.recall.list(wrongProof.execution(wrongProof.alias, 'work_item_list', {}), {})).toThrow('requires an actual human foreground tool call')
+})
+
+test('a Delivery link alone is not consent: alias reads need the owner allowlist', async () => {
+  // No allowlist: Delivery is never consulted for an alias and Policy never sees the alias call,
+  // so an owner inspect rule without a principal match can no longer leak to a linked account.
+  const absent = await setup(null)
+  expect(absent.f.config.ownerRecall).toEqual({ enabled: true })
+  expect(absent.recall.preauthorize(absent.execution(absent.alias, 'work_item_list', {}))).toBe(false)
+  expect(() => absent.recall.list(absent.execution(absent.alias, 'work_item_list', {}), {})).toThrow('requires the current exact owner')
+  expect(absent.aliasLookups()).toBe(0)
+  expect(absent.evaluated).toEqual([])
+  // The exact owner is unaffected.
+  expect(absent.recall.list(absent.execution(absent.owner, 'work_item_list', {}), {}).items.map(row => row.itemId)).toEqual([absent.item.id])
+
+  // Allowlist names a different linked principal: the valid receipt is still refused before Policy.
+  const other = await setup(['lark/app/other/alias'])
+  expect(() => other.recall.list(other.execution(other.alias, 'work_item_list', {}), {})).toThrow('linked alias is not allowlisted by the owner')
+  expect(other.evaluated).toEqual([])
+  const args = { item_id: other.item.id }
+  expect(() => other.recall.recall(other.execution(other.alias, 'work_item_recall', args), args)).toThrow('linked alias is not allowlisted by the owner')
+
+  // Allowlisting never widens continuation.
+  const listed = await setup()
+  expect(() => listed.continuation.continue(listed.execution(listed.alias, 'work_item_continue', args), args)).toThrow('requires the current exact owner')
+  expect(listed.aliasLookups()).toBe(0)
 })

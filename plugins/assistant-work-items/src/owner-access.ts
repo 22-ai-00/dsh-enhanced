@@ -74,8 +74,9 @@ export class WorkItemOwnerAccess {
           || store.closed || signal.aborted || Date.now() >= expiresAt) fail('authority changed')
         const route = delivery.validateOwnerAgentForRoute!(agent, scope.ownerRouteId)
         // Read-only linked alias: only for inspect-work-items, only when the
-        // caller is not the exact owner, and re-validated on every observation.
-        if (!route && !continuing && delivery.inspectOwnerAliasRoute && delivery.inspectOwnerAliasForegroundToolCall) return observeAlias()
+        // caller is not the exact owner, only for an owner-allowlisted alias
+        // principal, and re-validated on every observation.
+        if (!route && !continuing && config.ownerRecall!.linkedAliases !== undefined && delivery.inspectOwnerAliasRoute && delivery.inspectOwnerAliasForegroundToolCall) return observeAlias()
         if (!route || route.receiptVersion !== 2 || route.authorityId !== scope.ownerRouteId || route.principalId !== scope.principalId
           || route.workspace !== scope.workspace || route.agentPreset !== scope.preset || typeof route.authorityHash !== 'string' || !route.authorityHash || !route.principalRecordId
           || !Number.isSafeInteger(route.principalVersion) || route.principalVersion < 1 || !Number.isSafeInteger(route.generation) || route.generation < 1
@@ -98,6 +99,9 @@ export class WorkItemOwnerAccess {
           || alias.alias.principalRecordId === alias.root.principalRecordId || alias.alias.principalId === alias.root.principalId
           || alias.alias.sessionId !== String(agent.session.id) || !counter(alias.alias.principalVersion)
           || !counter(alias.alias.bindingVersion) || !counter(alias.alias.bindingGeneration)) fail('requires the current exact owner or its linked alias')
+        // A Delivery link alone is not consent: the owner must name this alias
+        // principal in ownerRecall.linkedAliases. Absent allowlist = no alias.
+        if (!config.ownerRecall!.linkedAliases?.includes(alias.alias.principalId)) fail('linked alias is not allowlisted by the owner')
         const proof = delivery.inspectOwnerAliasForegroundToolCall!({ agent, authorityId: scope.ownerRouteId, callId: String(execution.callId), toolName: execution.name, argumentsJson })
         if (!proof || typeof proof !== 'object' || (proof as { protocol?: unknown }).protocol !== 'assistant-delivery/owner-alias-foreground-tool-call/v1') fail('requires an actual human foreground tool call')
         const route: OwnerAliasRoute = { authorityId: alias.authorityId, authorityHash: alias.authorityHash,

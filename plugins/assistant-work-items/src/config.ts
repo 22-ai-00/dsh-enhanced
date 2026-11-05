@@ -20,7 +20,7 @@ export interface Config {
   sources?: SourcesConfig
   settlement?: SettlementConfig
   diagnosis?: DiagnosisConfig
-  ownerRecall?: { enabled?: boolean }
+  ownerRecall?: { enabled?: boolean; linkedAliases?: string[] }
   ownerContinuation?: OwnerContinuationConfig
   ownerReplyContinuation?: boolean
   ownerReportFeedback?: boolean
@@ -149,7 +149,12 @@ export interface NormalizedConfig {
   readonly sources: NormalizedSources
   readonly settlement: NormalizedSettlement
   readonly diagnosis?: NormalizedDiagnosis
-  readonly ownerRecall?: Readonly<{ enabled: true }>
+  /**
+   * `linkedAliases` is the owner's explicit allowlist of Delivery `linked`
+   * principal ids that may read through the alias path. Absent means no alias
+   * is accepted, whatever Delivery or Policy would otherwise allow.
+   */
+  readonly ownerRecall?: Readonly<{ enabled: true; linkedAliases?: readonly string[] }>
   readonly ownerContinuation?: NormalizedOwnerContinuation
   readonly ownerReplyContinuation?: true
   readonly ownerReportFeedback?: true
@@ -302,7 +307,7 @@ export const ConfigSchema = Schema.object({
       unsubscribedEvents: Schema.boolean().default(false),
     })),
   }),
-  ownerRecall: Schema.object({ enabled: Schema.boolean().default(false) }),
+  ownerRecall: Schema.object({ enabled: Schema.boolean().default(false), linkedAliases: Schema.array(Schema.string()) }),
   ownerContinuation: Schema.object({
     enabled: Schema.boolean().default(false), automationId: Schema.string(), allowedTools: Schema.array(Schema.string()),
     budgetId: Schema.string(), budgetAmount: Schema.number().step(1),
@@ -550,11 +555,12 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     fail('invalid-input', 'sources.foregroundFailures.kind must be one of admission.allowedKinds')
   }
   const ownerRecall = value['ownerRecall'] === undefined ? {} : plainObject(value['ownerRecall'], 'ownerRecall')
-  rejectUnknown(ownerRecall, ['enabled'], 'ownerRecall')
+  rejectUnknown(ownerRecall, ['enabled', 'linkedAliases'], 'ownerRecall')
   if (ownerRecall['enabled'] !== undefined && typeof ownerRecall['enabled'] !== 'boolean') fail('invalid-input', 'ownerRecall.enabled must be a boolean')
   if (ownerRecall['enabled'] === true && (!enabled || mode !== 'active' || scope === null || workerAutomationId === null)) {
     fail('invalid-input', 'ownerRecall requires an enabled active worker and complete scope')
   }
+  const linkedAliases = normalizeLinkedAliases(ownerRecall['linkedAliases'], ownerRecall['enabled'] === true, scope)
   const ownerContinuation = normalizeOwnerContinuation(value['ownerContinuation'], scope, workerAutomationId, now, ownerReportFeedback === true)
   if (ownerContinuation && !admission.allowedKinds.includes('owner-continuation')) fail('invalid-input', 'ownerContinuation requires owner-continuation in admission.allowedKinds')
   if (ownerContinuation && (!enabled || mode !== 'active' || ownerRecall['enabled'] !== true)) {
@@ -579,7 +585,7 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     sources,
     settlement,
     ...(diagnosis === undefined ? {} : { diagnosis }),
-    ...(ownerRecall['enabled'] === true ? { ownerRecall: Object.freeze({ enabled: true as const }) } : {}),
+    ...(ownerRecall['enabled'] === true ? { ownerRecall: Object.freeze({ enabled: true as const, ...(linkedAliases ? { linkedAliases } : {}) }) } : {}),
     ...(ownerContinuation === undefined ? {} : { ownerContinuation }),
     ...(ownerReplyContinuation === true ? { ownerReplyContinuation: true as const } : {}),
     ...(ownerReportFeedback === true ? { ownerReportFeedback: true as const } : {}),
@@ -612,6 +618,34 @@ function normalizeIntakeLedger(raw: unknown): NormalizedIntakeLedger | undefined
   }
   if (!enabled) return undefined
   return Object.freeze({ enabled: true as const, sources: Object.freeze(sources) })
+}
+
+/** Maximum explicitly allowlisted linked aliases per owner scope. */
+export const MAX_LINKED_ALIASES = 8
+
+/**
+ * Normalize the owner's explicit linked-alias allowlist.
+ *
+ * An alias read is a cross-channel identity decision, so it must be named
+ * here rather than inherited from a Delivery link plus a Policy rule that
+ * happens not to match on `principal`. Entries are exact Delivery principal
+ * ids, unique, bounded, and never the root owner itself.
+ */
+function normalizeLinkedAliases(raw: unknown, recallEnabled: boolean, scope: WorkItemScope | null): readonly string[] | undefined {
+  // Schema defaults materialize an empty array; only a non-empty list is a choice.
+  if (raw === undefined || Array.isArray(raw) && raw.length === 0) return undefined
+  if (!recallEnabled) fail('invalid-input', 'ownerRecall.linkedAliases requires ownerRecall.enabled')
+  if (!Array.isArray(raw) || raw.length > MAX_LINKED_ALIASES) fail('invalid-input', `ownerRecall.linkedAliases must be an array of at most ${MAX_LINKED_ALIASES} principal ids`)
+  const seen = new Set<string>()
+  for (const entry of raw) {
+    if (typeof entry !== 'string' || entry.length === 0 || entry.length > 256 || entry.trim() !== entry || /[\p{Cc}]/u.test(entry)) {
+      fail('invalid-input', 'ownerRecall.linkedAliases entries must be non-empty principal ids')
+    }
+    if (entry === scope?.principalId) fail('invalid-input', 'ownerRecall.linkedAliases must not contain the owner principal')
+    if (seen.has(entry)) fail('invalid-input', 'ownerRecall.linkedAliases must not contain duplicates')
+    seen.add(entry)
+  }
+  return seen.size === 0 ? undefined : Object.freeze([...seen])
 }
 
 function normalizeOwnerContinuation(raw: unknown, scope: WorkItemScope | null, workerId: string | null, now: number, historicalFeedback = false): NormalizedOwnerContinuation | undefined {
