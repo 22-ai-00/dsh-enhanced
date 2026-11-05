@@ -8,7 +8,8 @@
   "types": "./lib/index.d.ts",
   "bin": {
     "dsh-permission-setup": "./bin/dsh-permission-setup.js",
-    "dsh-model-setup": "./bin/dsh-model-setup.js"
+    "dsh-model-setup": "./bin/dsh-model-setup.js",
+    "dsh-plugin-setup": "./bin/dsh-plugin-setup.js"
   },
   "exports": {
     ".": {

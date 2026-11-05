@@ -38,6 +38,8 @@ patch 会完整覆盖上游 `permission` 行，并挂载唯一的 `dsh-enhanced-
 
 部署脚本可通过本包附带的 `dsh-model-setup` 设置默认值，参数和作用范围见[高级模型配置](../../scripts/install/maintenance.md#配置默认模型)。这与“添加一个可选模型”不同；手动调用应显式指定 `--profile`，避免生成旧版全局待导入设置。
 
+插件的启用、停用、单项配置和 recommended 预设用本包附带的 `dsh-plugin-setup`（如 `profiles/<p>/node_modules/.bin/dsh-plugin-setup list`），用法、校验与拒绝项见 [assistant-policy](../assistant-policy/README.md#插件配置-clidsh-plugin-setup)。
+
 ## 权限与数据
 
 meta-bundle 不引入一套独立于上游 Host 的 OS capability、网络 API、凭据、浏览器或安装脚本权限；四个子包的实际权限和数据边界分别见其 README。没有用户覆盖的新 session 从 `danger-full-access + never` 开始，reviewer 为 `none`。完全访问允许 Host sandbox 访问任意文件与网络且不逐次询问；请仅在信任的运行环境使用。已有兼容的用户设置和已记录的会话权限不会被升级或重启覆盖。用户可在原生 Web Permission selector 切换当前会话；飞书发送 `/permission` 打开交互卡片，或使用 `/permission ask`、`/permission auto`、`/permission full confirm`。安装时用 `--permission workspace-write` 或 `--permission auto` 设置更严格的后续会话默认值；显式覆盖既有默认为完全访问仍使用 `--permission danger-full-access --confirm-dangerous-full-access`。权限档位不绕过 Policy 显式拒绝、紧急停止、身份校验和预算硬门。

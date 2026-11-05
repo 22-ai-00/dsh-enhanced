@@ -8,7 +8,8 @@
   "types": "./lib/index.d.ts",
   "bin": {
     "dsh-permission-setup": "./bin/dsh-permission-setup.js",
-    "dsh-model-setup": "./bin/dsh-model-setup.js"
+    "dsh-model-setup": "./bin/dsh-model-setup.js",
+    "dsh-plugin-setup": "./bin/dsh-plugin-setup.js"
   },
   "exports": {
     ".": {
@@ -23,6 +24,10 @@
     "./model-setup": {
       "types": "./lib/model-setup.d.ts",
       "default": "./lib/model-setup.js"
+    },
+    "./plugin-setup": {
+      "types": "./lib/plugin-setup.d.ts",
+      "default": "./lib/plugin-setup.js"
     },
     "./package.json": "./package.json"
   },

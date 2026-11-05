@@ -1,5 +1,9 @@
 # 兼容性基线
 
+## 插件配置 CLI 与 recommended 预设
+
+`@dsh-enhanced/assistant-policy` 新增安装期 bin `dsh-plugin-setup` 与导出子路径 `./plugin-setup`（`@dsh-enhanced/personal-assistant` 同名 bin 转发）。它只改写所选 profile 的 `cordis.patch.yml`，不新增数据库 schema、运行时服务或 DSH/Cordis 依赖。没有任何插件或权限默认值改变：WorkItems、intake 账本、Delivery `attentionAttachOverCap`、Evaluation `notificationOutcomesEnabled` 与 event-triggers `pollerEnabled` 仍默认关闭，`permission.defaultPreset` 仍为原有的 `danger-full-access`。`preset recommended` 由 owner 或 onboarding 显式执行，才写入上述开关（WorkItems 保持 `observe`），未安装或未加载的插件跳过。Policy 与 Control Plane 配置、Policy 停用、Delivery `ownerRoutes`/`policyRef`、秘密值及占位飞书凭据的启用均拒绝写入。
+
 ## 统一 intake 账本（WorkItems 10）
 
 WorkItems schema 10 只新增只追加的 `work_item_intake` 表、其内容摘要索引与禁止 UPDATE/DELETE 的触发器；schema 1–9 的库在打开时逐级前进升级，9→10 一步在单个事务内完成，原工作项、事件、报告、续办与历史行不改写，新表起始为空。旧 writer 不得打开新库；10 以下版本若已存在任何 `work_item_intake*` 对象即失败关闭、不升级；打开时同时校验新表、索引与触发器的精确形状，漂移或外来对象失败关闭。

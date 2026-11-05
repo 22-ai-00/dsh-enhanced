@@ -2639,6 +2639,27 @@ dsh_enhanced_apply_permission_choice() {
   dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-permission-setup --dsh-home "$dsh_home" --profile "$profile" --preset "$preset"
 }
 
+# Apply a dsh-plugin-setup preset (default: recommended) to one installed profile.
+# Opt-in: no scenario calls this implicitly; onboarding flows call it after the
+# profile's plugins are installed. Usage: <profile> <dsh_home> <dry_run> [preset]
+dsh_enhanced_apply_plugin_preset() {
+  local profile="$1"
+  local dsh_home="$2"
+  local dry_run="$3"
+  local preset="${4:-recommended}"
+  if [[ ! "$preset" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    dsh_enhanced_fail 2 "无效的插件预设：$preset"
+    return $?
+  fi
+  local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-plugin-setup"
+  if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
+    dsh_enhanced_fail 1 "找不到安装后的 dsh-plugin-setup：$setup_bin"
+    return $?
+  fi
+  printf '插件预设：为 profile %s 应用 %s。\n' "$profile" "$preset"
+  dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-plugin-setup preset "$preset" --yes --dsh-home "$dsh_home" --profile "$profile"
+}
+
 dsh_enhanced_apply_lark() {
   local mode="$1"
   local profile="$2"
@@ -2811,6 +2832,7 @@ const [home, profileName, setup, sourceRoot, suppliedExecutable, ...args] = proc
 const modules = {
   'dsh-model-setup': ['assistant-policy', 'model-setup', 'runModelSetup'],
   'dsh-permission-setup': ['assistant-policy', 'permission-setup', 'runPermissionSetup'],
+  'dsh-plugin-setup': ['assistant-policy', 'plugin-setup', 'runPluginSetup'],
   'dsh-lark-setup': ['lark-channel', 'setup', 'runLarkSetup'],
   'internal-lark-service': ['lark-channel', 'launchd-control', 'runLaunchdControl'],
   'dsh-rsi-setup': ['lark-channel', 'rsi-setup', 'runRsiSetup'],

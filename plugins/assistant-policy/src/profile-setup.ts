@@ -62,7 +62,7 @@ async function selectedDshExecutable(dshHome: string): Promise<string> {
   throw new Error('assistant-policy setup: dsh executable is unavailable on PATH')
 }
 
-function findRow(sequence: YAMLSeq, rowId: string): YAMLMap | undefined {
+export function findRow(sequence: YAMLSeq, rowId: string): YAMLMap | undefined {
   for (const entry of sequence.items) {
     if (!isMap(entry)) continue
     if (entry.get('id') === rowId) return entry
@@ -77,7 +77,10 @@ function findRow(sequence: YAMLSeq, rowId: string): YAMLMap | undefined {
   return undefined
 }
 
-export const readEffectiveProfileConfig: EffectiveProfileConfigReader = async (dshHome, profile, rowId) => {
+/** Reads the whole native `dsh --profile <p> --dump-config` entry sequence. */
+export type EffectiveProfileDumpReader = (dshHome: string, profile: string) => Promise<YAMLSeq>
+
+export const readEffectiveProfileDump: EffectiveProfileDumpReader = async (dshHome, profile) => {
   const executable = await selectedDshExecutable(dshHome)
   const { stdout } = await execFileAsync(executable, ['--profile', profile, '--dump-config'], {
     env: { ...process.env, DSH_HOME: dshHome, NODE_PATH: '', NODE_OPTIONS: '' },
@@ -88,7 +91,11 @@ export const readEffectiveProfileConfig: EffectiveProfileConfigReader = async (d
   if (document.errors.length > 0 || !isSeq(document.contents)) {
     throw new Error('assistant-policy setup: native profile dump is not a YAML entry sequence')
   }
-  const row = findRow(document.contents, rowId)
+  return document.contents
+}
+
+export const readEffectiveProfileConfig: EffectiveProfileConfigReader = async (dshHome, profile, rowId) => {
+  const row = findRow(await readEffectiveProfileDump(dshHome, profile), rowId)
   if (row === undefined) throw new Error(`assistant-policy setup: native profile has no ${rowId} row`)
   const config = row.get('config', true)
   if (config === undefined) return new YAMLMap()

@@ -58,6 +58,23 @@ dsh-rsi install --help
 
 只需升级全局 CLI：`dsh-rsi update`。从 CLI `0.1.57` 起，受支持的**现有 Linux 冻结 owner/cohort** 可先用 `dsh-rsi update --all --dry-run --yes` 看计划，再运行 `dsh-rsi update --all --yes`，从原绑定官方源码升级冻结插件与私有 Host，保留 owner、授权和历史；旧 CLI 须先单独自升级一次。完整条件与恢复步骤见[冻结 owner 升级](maintenance.md#现有-linux-冻结-owner-程序升级)及 [CLI 升级说明](../../packages/dsh-rsi-cli/README.md#升级与重装)。macOS 必须先停止整个 Home 并显式确认；**冻结了原生 owner/source/cohort 资源的 Mac Home 暂不支持普通原地升级。** `dsh-rsi reinstall` 会先备份、彻底清理再安装，属于破坏性重装，不是升级；先核对 [CLI 重装与 purge 说明](../../packages/dsh-rsi-cli/README.md#升级与重装) 和[维护说明](maintenance.md#彻底卸载purge)。
 
+## 配置插件
+
+安装后用 profile 内的 `dsh-plugin-setup` 查看和调整插件，无需手改 `cordis.patch.yml`：
+
+```sh
+bin=~/.dsh/profiles/web/node_modules/.bin/dsh-plugin-setup
+$bin                                  # 终端内引导菜单
+$bin list
+$bin enable work-items
+$bin set event-triggers pollerEnabled true
+$bin preset recommended --dry-run     # 查看推荐的可选功能
+$bin preset recommended --yes
+dsh-rsi restart --profile web         # 改动重启后生效
+```
+
+CLI 先读取原生有效配置，单项修改时自动保留整行其它配置，写入后核对生效，失败则恢复原文件。它拒绝写入秘密值、修改 Policy/Control Plane 与 owner 授权项，飞书凭据仍用 `dsh-lark-setup`。默认值不变；`recommended` 只是显式打开 work-items 与 intake 账本（observe）、Delivery `attentionAttachOverCap`、Evaluation 通知结果和 event-triggers 轮询。安装脚本可调用 `dsh_enhanced_apply_plugin_preset`。完整说明见 [assistant-policy](../../plugins/assistant-policy/README.md#插件配置-clidsh-plugin-setup)。
+
 ## 场景与参数入口
 
 | 场景 | 适用情况 |
