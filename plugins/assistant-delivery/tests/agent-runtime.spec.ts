@@ -10726,10 +10726,17 @@ describe('real native Delivery Agent runtime', () => {
     // also expires naturally whenever a loaded host stalls the event loop for
     // about a second, and the Host then correctly refuses to start the tool.
     // Pin the durable lease clock of both Host Stores, so only the explicit
-    // `lease_until = 0` write can expire the Session lease.
+    // `lease_until = 0` write can expire the Session lease. Only Store lease
+    // checks use this clock; coordinator retry times stay on the wall clock.
     const hostNow = Date.now()
     const hostClock = (): number => hostNow
-    if (cancellation === 'lease-loss') (runtimeStore(fixture.service) as unknown as { now: () => number }).now = hostClock
+    if (cancellation === 'lease-loss') {
+      const store = runtimeStore(fixture.service) as unknown as { now?: unknown }
+      // The Store keeps its clock in a private field; fail loudly if that
+      // field moves, instead of silently falling back to the wall clock.
+      expect(Object.hasOwn(store, 'now') && typeof store.now === 'function').toBe(true)
+      store.now = hostClock
+    }
     const native = await nativeGoalPlugins()
     await fixture.ctx.plugin(native.GoalService as never, {} as never)
     await fixture.ctx.plugin(native.goalTools as never, {} as never)
