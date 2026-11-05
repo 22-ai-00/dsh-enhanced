@@ -102,7 +102,8 @@ describe.skipIf(!live)('sealed Docker-era tool re-adopts under a new plan with a
     const f = await workItemEngineeringFixture({ replyEnabled: true,
       sealedSeed: async input => sealDockerHistory(input as typeof input & { capabilities: CreationCapabilityConfig }, seal),
       // 8192 is the fixture's ordinary author cap: attempt 1 at 4096 ran out while writing the source file.
-      realGrowthRoute: { provider: PROVIDER, model: MODEL, maxOutputTokens: 8192 } })
+      // Attempt 2 was cut off by the 120 s Growth limit while the author wrote source; 300 s is the config maximum.
+      realGrowthRoute: { provider: PROVIDER, model: MODEL, maxOutputTokens: 8192, maxDurationMs: 300_000 } })
     const { route, config, secret } = await realRoute(f.workspace)
     if (!secret) throw new Error('real route credential reference is unavailable in the process environment')
     const installed = createRequire(dshPackage())

@@ -190,7 +190,7 @@ export async function workItemEngineeringFixture(options: { replyEnabled?:boolea
   /** Opt-in: write sealed Docker-era history into the live journal before the Control Plane mounts. */
   sealedSeed?: (input:{root:string;statePath:string;capabilities:NonNullable<ControlPlaneConfig['creationCapabilities']>})=>Promise<void>
   /** Opt-in: route only Growth (author and creation verifier) to an explicitly mounted supplier. */
-  realGrowthRoute?: {provider:string;model:string;maxOutputTokens:number} } = {}) {
+  realGrowthRoute?: {provider:string;model:string;maxOutputTokens:number;maxDurationMs?:number} } = {}) {
   const queryResults:unknown[]=[]
   const sourceDiagnostics:unknown[]=[]
   const ownerApprovals:Array<{request:DeliveryToolApprovalRequest;matched:boolean;outcome:'allowed-once'|'rejected'}>=[]
@@ -485,7 +485,7 @@ for(const args of [['--dir',root,'run','typecheck'],['--dir',root,'exec','vitest
     engineering.readiness=readiness
     growthConfig={enabled:true,intervalMs:0,scope:{workspace,preset:agentPreset,principalId,ownerRouteId:authorityId},budgetId:'engineering-author',budgetAmount:1,
       ...(options.realGrowthRoute?{provider:options.realGrowthRoute.provider,model:options.realGrowthRoute.model}:{}),
-      maxModelCalls:5,maxToolCalls:4,maxOutputTokens:options.realGrowthRoute?.maxOutputTokens??8192,maxDurationMs:120000,maxReviewsPerWake:1,
+      maxModelCalls:5,maxToolCalls:4,maxOutputTokens:options.realGrowthRoute?.maxOutputTokens??8192,maxDurationMs:options.realGrowthRoute?.maxDurationMs??120000,maxReviewsPerWake:1,
       usageLearning:{enabled:true,databasePath:join(root,'engineering-usage.sqlite'),scanBudgetId:engineeringScanBudgetId,scanBudgetAmount:1,workItemFailures:true,workItemAuthorities:readiness.pins},
       pluginSourceProposals:{enabled:true,preparationMode:'durable',allowCreation:true,allowModification:false,allowRevision:false,repository,maxPlansPerWake:1,offline:true,planTtlMs:900000}}
     let authorStage=0,gapId:string|undefined,pluginName:string|undefined,ignoreComments=false
