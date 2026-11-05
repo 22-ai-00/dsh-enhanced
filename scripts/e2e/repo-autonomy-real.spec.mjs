@@ -9,7 +9,7 @@ import { createServer } from 'node:net'
 import { createHash } from 'node:crypto'
 import { parseDocument, isMap } from 'yaml'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
-import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 import { selectRestoredSession } from './repo-session-navigation.mjs'
 import { prepareRepositoryFixture } from './repo-verified-delivery-fixture.mjs'
 import { prepareExternalRepositoryFixture } from './repo-external-delivery-fixture.mjs'
@@ -339,7 +339,7 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
 
     // The native Web UI, not the test, creates the first durable Session.
     host = await startHost(env)
-    await page.goto(host.url); await page.getByRole('dialog', { name: 'Internal Testing Notice' }).getByRole('button', { name: 'Continue', exact: true }).click()
+    await page.goto(host.url); await page.getByRole('dialog', { name: firstRunNoticeName }).getByRole('button', { name: 'Continue', exact: true }).click()
     await expect.poll(() => http.find(response => new URL(response.url()).pathname === '/api/session/create')).toBeTruthy()
     const create = http.find(response => new URL(response.url()).pathname === '/api/session/create')
     const created = await create.json()

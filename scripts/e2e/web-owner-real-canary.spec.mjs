@@ -15,7 +15,7 @@ import { assertPublicCanaryStatus, canaryPolicy, createProspectiveCanaryAuthorit
 import { contracts, jobs, setConfig } from './web-owner-real-helpers.mjs'
 import { selectRestoredSession } from './repo-session-navigation.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
-import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const task = templateRenderCanaryTask
@@ -184,7 +184,7 @@ test('real TraeX grows template-render from failure, promotes it, and rolls it b
     observePage(activePage, http, transport, streams, frames)
     await activePage.goto(host.url).catch(() => { throw new Error('canary browser authentication failed (URL redacted)') })
     await expect(activePage).toHaveURL(`${new URL(host.url).origin}/`)
-    if (starts === 1) await activePage.getByRole('dialog', { name: 'Internal Testing Notice' }).getByRole('button', { name: 'Continue', exact: true }).click()
+    if (starts === 1) await activePage.getByRole('dialog', { name: firstRunNoticeName }).getByRole('button', { name: 'Continue', exact: true }).click()
   }
   const createSession = async () => {
     const previous = new Set(query(deliveryPath, 'SELECT session_id FROM conversation_bindings').map(item => item.session_id))

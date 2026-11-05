@@ -10,7 +10,7 @@ import { objective, criteria, setConfig, contracts, jobs } from './web-owner-rea
 import { selectRestoredSession } from './repo-session-navigation.mjs'
 import { readSessionAudit } from './web-owner-real-audit.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
-import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 import { fileObservationSteps, instantiate } from '../../plugins/assistant-skills/lib/definition.js'
 import { canaryPolicy, createProspectiveCanaryAuthority } from './real-canary-helpers.mjs'
 
@@ -73,7 +73,7 @@ test('ordinary owner request captures an accepted workflow and reuses it after r
     observePage(activePage, [], transport, new Map(), frames)
     await activePage.goto(host.url).catch(() => { throw new Error('capture browser authentication failed (URL redacted)') })
     await expect(activePage).toHaveURL(`${new URL(host.url).origin}/`)
-    if (starts === 1) await activePage.getByRole('dialog', { name: 'Internal Testing Notice' }).getByRole('button', { name: 'Continue', exact: true }).click()
+    if (starts === 1) await activePage.getByRole('dialog', { name: firstRunNoticeName }).getByRole('button', { name: 'Continue', exact: true }).click()
     else await selectRestoredSession(activePage, /Confirm this session is ready/)
   }
   const prompt = async text => {

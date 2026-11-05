@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseDocument } from 'yaml'
-import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const objective = 'Browser owner end-to-end goal'
@@ -65,7 +65,7 @@ for (const permission of ['default-full', 'workspace-write']) {
       const wrongOrigin = await context.request.post(`${origin}/api/session/create`, { headers: { Origin: 'https://untrusted.invalid' }, data: {} })
       expect(wrongOrigin.status()).toBe(403)
 
-      await page.getByRole('dialog', { name: 'Internal Testing Notice' }).getByRole('button', { name: 'Continue', exact: true }).click()
+      await page.getByRole('dialog', { name: firstRunNoticeName }).getByRole('button', { name: 'Continue', exact: true }).click()
 
       const newSession = page.getByRole('button', { name: 'New session', exact: true }).filter({ hasText: 'New Session' })
       await expect(newSession).toBeVisible()

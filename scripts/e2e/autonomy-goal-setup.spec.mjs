@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseDocument, isMap } from 'yaml'
-import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const objective = 'Create a shell program that reads two integers and prints their sum'
@@ -59,7 +59,7 @@ test(`installed Web owner CLI admits one private verified Goal after a stopped p
     prepared.add({ insert: [{ id: 'goal-setup-e2e-transport', name: resolve(root, 'scripts/e2e/autonomy-goal-setup-transport.mjs') }] })
     await writeFile(patchPath, String(prepared), { mode: 0o600 })
     await open(page)
-    await page.getByRole('dialog', { name: 'Internal Testing Notice' }).getByRole('button', { name: 'Continue', exact: true }).click()
+    await page.getByRole('dialog', { name: firstRunNoticeName }).getByRole('button', { name: 'Continue', exact: true }).click()
     await prompt(page, 'Prepare this session for the private goal admission.')
     await expect(page.getByText('Goal setup reply 1', { exact: true })).toBeVisible()
     const deliveryPath = join(home, 'assistant-delivery/state.sqlite'); const binding = query(deliveryPath, 'SELECT * FROM conversation_bindings')[0]

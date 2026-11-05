@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseDocument, isMap } from 'yaml'
 import { createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
 import { objective } from './autonomy-goal-model.mjs'
-import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const metered = process.env.DSH_AUTONOMY_DEEPSEEK_TEST === '1'
 const root = fileURLToPath(new URL('../../', import.meta.url))
@@ -74,7 +74,7 @@ test('native goals correct an isolated artifact after private independent verifi
     const origin = new URL(host.url).origin
     try { await page.goto(host.url) } catch { throw new Error('Browser launch authentication failed (URL redacted)') }
     await expect(page).toHaveURL(`${origin}/`); authenticated = true
-    await page.getByRole('dialog', { name: 'Internal Testing Notice' }).getByRole('button', { name: 'Continue', exact: true }).click()
+    await page.getByRole('dialog', { name: firstRunNoticeName }).getByRole('button', { name: 'Continue', exact: true }).click()
     await expect.poll(() => http.find(response => new URL(response.url()).pathname === '/api/session/create')).toBeTruthy()
     const created = await http.find(response => new URL(response.url()).pathname === '/api/session/create').json()
     expect(created.result.ok).toBe(true)

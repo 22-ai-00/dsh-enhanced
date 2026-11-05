@@ -10,7 +10,7 @@ import { objective, criteria, setConfig, contracts, jobs, waitForVerifiedGoal } 
 import { isEventExperimentToolAllowed } from './web-owner-real-guard.mjs'
 import { readSessionAudit } from './web-owner-real-audit.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
-import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const sourceAutomationId = 'web-owner-real-event-source'
@@ -88,7 +88,7 @@ test('real configured route wakes one browser-owned verified goal from a durable
     try { await activePage.goto(host.url) } catch { throw new Error('Browser launch authentication failed (URL redacted)') }
     await expect(activePage).toHaveURL(`${new URL(host.url).origin}/`)
     authenticated = true
-    if (hostStarts === 1) await activePage.getByRole('dialog', { name: 'Internal Testing Notice' })
+    if (hostStarts === 1) await activePage.getByRole('dialog', { name: firstRunNoticeName })
       .getByRole('button', { name: 'Continue', exact: true }).click()
   }
   const prompt = async value => {

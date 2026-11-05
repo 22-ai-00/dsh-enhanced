@@ -9,7 +9,7 @@ import { parseDocument } from 'yaml'
 import { objective, criteria, setConfig, contracts, jobs, waitForVerifiedGoal } from './web-owner-real-helpers.mjs'
 import { readSessionAudit } from './web-owner-real-audit.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
-import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 test('real configured route completes a browser-owned verified native goal across Host restart', async ({ page, context }, testInfo) => {
@@ -50,7 +50,7 @@ test('real configured route completes a browser-owned verified native goal acros
     const origin = new URL(host.url).origin
     try { await page.goto(host.url) } catch { throw new Error('Browser launch authentication failed (URL redacted)') }
     await expect(page).toHaveURL(`${origin}/`); authenticated = true
-    await page.getByRole('dialog', { name: 'Internal Testing Notice' }).getByRole('button', { name: 'Continue', exact: true }).click()
+    await page.getByRole('dialog', { name: firstRunNoticeName }).getByRole('button', { name: 'Continue', exact: true }).click()
     await expect.poll(() => http.find(response => new URL(response.url()).pathname === '/api/session/create')).toBeTruthy()
     const created = http.find(response => new URL(response.url()).pathname === '/api/session/create'); expect(created.status()).toBe(200)
     const sessionId = (await created.json()).result.value.sessionId

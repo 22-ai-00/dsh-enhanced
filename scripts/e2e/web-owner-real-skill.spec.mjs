@@ -12,7 +12,7 @@ import { objective, criteria, setConfig, contracts, jobs } from './web-owner-rea
 import { allowedSkillExperimentTool } from './web-owner-real-skill-guard.mjs'
 import { readSessionAudit } from './web-owner-real-audit.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
-import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const exec = promisify(execFile)
@@ -108,7 +108,7 @@ test(comparisonMode ? 'real browser compares a skill candidate with paired isola
     observePage(activePage, http, transport, streams, frames)
     await activePage.goto(host.url).catch(() => { throw new Error('browser authentication failed (URL redacted)') })
     await expect(activePage).toHaveURL(`${new URL(host.url).origin}/`); authenticated = true
-    if (starts === 1) await activePage.getByRole('dialog', { name: 'Internal Testing Notice' }).getByRole('button', { name: 'Continue', exact: true }).click()
+    if (starts === 1) await activePage.getByRole('dialog', { name: firstRunNoticeName }).getByRole('button', { name: 'Continue', exact: true }).click()
   }
   const prompt = async text => {
     const composer = activePage.getByLabel(/Describe what you want to build|Message or run a task/)

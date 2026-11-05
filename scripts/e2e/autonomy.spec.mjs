@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { parseDocument } from 'yaml'
-import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 
@@ -42,7 +42,7 @@ test('fresh autonomy installer executes a finite offline grant through native We
     const origin = new URL(host.url).origin
     try { await page.goto(host.url) } catch { throw new Error('Browser launch authentication failed (URL redacted)') }
     await expect(page).toHaveURL(`${origin}/`); authenticated = true
-    await page.getByRole('dialog', { name: 'Internal Testing Notice' }).getByRole('button', { name: 'Continue', exact: true }).click()
+    await page.getByRole('dialog', { name: firstRunNoticeName }).getByRole('button', { name: 'Continue', exact: true }).click()
     await expect.poll(() => http.find(response => new URL(response.url()).pathname === '/api/session/create')).toBeTruthy()
     const created = await http.find(response => new URL(response.url()).pathname === '/api/session/create').json()
     expect(created.result.ok).toBe(true)

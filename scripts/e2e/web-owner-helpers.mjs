@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
+// First-run notice title differs by pinned DSH Host: 'Preview Notice' (0.2.x) and 'Internal Testing Notice' (older).
+export const firstRunNoticeName = /^(Preview Notice|Internal Testing Notice)$/
 export const sanitize = text => stripVTControlCharacters(String(text)).replace(/([?&]token=)[^\s"<>]+/g, '$1[redacted]')
 
 export async function run(command, args, env, timeout = 90_000) {

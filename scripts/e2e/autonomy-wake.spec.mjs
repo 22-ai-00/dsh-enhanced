@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { parseDocument, isMap, isSeq } from 'yaml'
 import { createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
 import { objective, preparation } from './autonomy-wake-model.mjs'
-import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 function config(doc, id) {
@@ -46,7 +46,7 @@ for (const mode of ['resume', 'revoked', 'interrupt']) test(`installed scheduled
     observePage(activePage, http, transport, streams, frames)
     try { await activePage.goto(host.url) } catch { throw new Error('Web authentication failed (URL redacted)') }
     await expect(activePage).toHaveURL(`${new URL(host.url).origin}/`); authenticated = true
-    const notice = activePage.getByRole('dialog', { name: 'Internal Testing Notice' })
+    const notice = activePage.getByRole('dialog', { name: firstRunNoticeName })
     if (hostNumber === 1) await notice.getByRole('button', { name: 'Continue', exact: true }).click()
   }
   const select = async () => {
