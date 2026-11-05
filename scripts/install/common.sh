@@ -106,7 +106,13 @@ Options:
   --model-display-name <s>  Optional human label for a custom provider route
   --dsh-version <version>   Compatible DSH version (default: ${DSH_ENHANCED_DEFAULT_DSH_VERSION})
   --no-service              Do not install or restart the platform resident service
-  --yes                     Choose the platform default without the installer menu
+  --yes                     Choose the platform default without the installer menu; with
+                            DEEPSEEK_API_KEY or DSH_ENHANCED_MODEL_API_KEY set and no stored
+                            key, also configure deepseek-official and store the key (0600)
+  --guided                  Interactive: accept every recommended default, asking only for a missing API key
+  --customize               Interactive: show every itemized menu (scenario, model, Lark, route check)
+  --owner-wait-seconds <n>  Supervised first install: wait up to n seconds (default 600; 0 disables)
+                            for the owner's first Lark DM before owner learning setup
   --dry-run                 Print the complete plan without changing the machine
   -h, --help                Show this help
 EOF
@@ -1584,6 +1590,83 @@ dsh_enhanced_derive_api_key_env() {
   esac
 }
 
+# True when the provider's credential is usable by the resident service: an
+# agent route needs no key; an API-key route needs a non-empty top-level entry
+# in $DSH_HOME/.credentials.yaml (managed services do not inherit the
+# installer's shell environment). Only the key name is matched; the secret
+# value is never printed.
+dsh_enhanced_model_credential_stored() {
+  local dsh_home="$1" provider="$2"
+  [[ -n "$provider" ]] || return 1
+  if dsh_enhanced_is_agent_route "$provider"; then
+    return 0
+  fi
+  local ref file="$dsh_home/.credentials.yaml"
+  ref="$(dsh_enhanced_derive_api_key_env "$provider")"
+  [[ -f "$file" ]] || return 1
+  grep -Eq "^${ref}:[[:space:]]*[^[:space:]#]" "$file"
+}
+
+# True when this installer process carries an API key that dsh-model-setup
+# --store-key can persist for the provider (value is never inspected here).
+dsh_enhanced_model_env_key_present() {
+  local provider="$1" ref
+  ref="$(dsh_enhanced_derive_api_key_env "$provider")"
+  [[ -n "${DSH_ENHANCED_MODEL_API_KEY:-}" || -n "${!ref:-}" ]]
+}
+
+# Decide the guided/automatic model step without any prompt. Prints `keep`
+# (leave the composed default untouched) or `configure` (write the built-in
+# DeepSeek default and store its key). A user-owned non-default route is always
+# kept; an unresolved provider on an existing profile is treated the same way.
+# `interactive=1` means the hidden key prompt in dsh_enhanced_apply_model may
+# collect the key; otherwise only a key already in the environment is used.
+dsh_enhanced_guided_model_plan() {
+  local dsh_home="$1" provider="$2" interactive="$3"
+  if [[ -n "$provider" && "$provider" != 'deepseek-official' ]]; then
+    printf 'keep'
+    return 0
+  fi
+  if dsh_enhanced_model_credential_stored "$dsh_home" 'deepseek-official'; then
+    printf 'keep'
+  elif dsh_enhanced_model_env_key_present 'deepseek-official' || [[ "$interactive" == '1' ]]; then
+    printf 'configure'
+  else
+    printf 'keep'
+  fi
+}
+
+# Resolve the effective default provider for the guided plan. A fresh profile
+# (no directory yet) composes the built-in deepseek-official default; an
+# existing profile whose composition cannot be read is reported as
+# `unresolved` so the guided flow never overwrites it.
+dsh_enhanced_guided_model_provider() {
+  local dsh_home="$1" profile="$2" provider=''
+  if provider="$(DSH_HOME="$dsh_home" dsh_enhanced_effective_default_provider "$dsh_home" "$profile" 2>/dev/null)" && [[ -n "$provider" ]]; then
+    printf '%s' "$provider"
+  elif [[ -d "$dsh_home/profiles/$profile" ]]; then
+    printf 'unresolved'
+  else
+    printf 'deepseek-official'
+  fi
+}
+
+# One-question guided onboarding: accept every recommended default (scenario,
+# model, Lark, route check) or fall back to the itemized menus.
+dsh_enhanced_choose_onboarding_mode() {
+  printf '\n安装向导：\n' >&2
+  printf '  1) 按推荐配置一路继续（推荐：各步骤采用推荐项；保留已有模型/飞书配置，缺少 API Key 时只问一次）\n' >&2
+  printf '  2) 逐项自定义（部署场景、模型、飞书、route 验证）\n' >&2
+  printf '请选择 [1]：' >&2
+  local choice
+  IFS= read -r choice
+  case "$choice" in
+    ''|'1') printf 'guided' ;;
+    '2') printf 'custom' ;;
+    *) return 2 ;;
+  esac
+}
+
 dsh_enhanced_verify_model_route() {
   local mode="$1"
   local dry_run="$2"
@@ -2776,6 +2859,40 @@ dsh_enhanced_install_rsi_owner() {
   dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-rsi-setup "${args[@]}"
 }
 
+# First-install convenience: owner learning setup needs exactly one owner DM
+# binding, which the resident service records when the owner first messages
+# the bot. Instead of failing and asking for a rerun, wait (read-only) for that
+# message in an interactive terminal. This never creates or widens a binding;
+# the DSH-CONNECT owner binding and owner-only authorization are unchanged.
+# Any wait failure (older setup binary, timeout, ambiguity) falls through to
+# dsh_enhanced_install_rsi_owner, which keeps its existing fail-closed checks.
+dsh_enhanced_wait_owner_dm() {
+  local profile="$1" dsh_home="$2" seconds="$3" dry_run="$4"
+  [[ "$seconds" != '0' ]] || return 0
+  local args=(--wait-owner-dm --profile "$profile" --dsh-home "$dsh_home")
+  if [[ "$dry_run" == '1' ]]; then
+    printf '\n首次 owner 私聊：如尚无 owner 私聊绑定，将等待 owner 在飞书私聊 Bot（最长 %s 秒）。\n' "$seconds"
+    dsh_enhanced_print_command "$dsh_home/profiles/$profile/node_modules/.bin/dsh-rsi-setup" "${args[@]}" --timeout-seconds "$seconds"
+    return 0
+  fi
+  [[ -t 0 && -t 1 ]] || return 0
+  local output=''
+  output="$(dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-rsi-setup "${args[@]}" --timeout-seconds 1 2>/dev/null)" || true
+  [[ "$output" != *'"mode":"ready"'* ]] || return 0
+  if [[ "$output" == *'"mode":"ambiguous"'* ]]; then
+    return 0
+  fi
+  printf '\n最后一步：请在飞书/Lark 中给刚绑定的 Bot 发送一条私聊消息（例如 /model）。\n'
+  printf '安装器检测到 owner 私聊后会自动继续（最长等待 %s 秒；可用 --owner-wait-seconds 调整）。\n' "$seconds"
+  output="$(dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-rsi-setup "${args[@]}" --timeout-seconds "$seconds" 2>/dev/null)" || true
+  if [[ "$output" == *'"mode":"ready"'* ]]; then
+    printf '已检测到 owner 私聊，继续配置学习与能力进化。\n'
+  else
+    printf '未在等待时间内检测到唯一的 owner 私聊；将按原流程检查并给出重试提示。\n'
+  fi
+  return 0
+}
+
 dsh_enhanced_install_local_cohort() {
   local profile="$1" dsh_home="$2" repo_root="$3" dry_run="$4"
   shift 4
@@ -3444,6 +3561,9 @@ dsh_enhanced_install() {
   local ack_existing_automations='0'
   local ack_unverified_host='0'
   local assume_yes='0'
+  local onboarding_mode='auto' model_key_hint='0'
+  local guided='0'
+  local owner_wait_seconds='600'
   local dry_run='0'
   local add_ons=()
 
@@ -3594,6 +3714,23 @@ dsh_enhanced_install() {
       --yes)
         assume_yes='1'
         shift
+        ;;
+      --guided)
+        onboarding_mode='guided'
+        shift
+        ;;
+      --customize)
+        onboarding_mode='custom'
+        shift
+        ;;
+      --owner-wait-seconds)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--owner-wait-seconds 需要一个值。'; return $?; }
+        if [[ ! "$2" =~ ^(0|[1-9][0-9]{0,3})$ ]] || (( $2 > 3600 )); then
+          dsh_enhanced_fail 2 '--owner-wait-seconds 只能是 0 到 3600 的整数。'
+          return $?
+        fi
+        owner_wait_seconds="$2"
+        shift 2
         ;;
       --dry-run)
         dry_run='1'
@@ -3888,10 +4025,25 @@ dsh_enhanced_install() {
     fi
     scenario='supervised'
   fi
+  # Guided onboarding: one question replaces the scenario/model/Lark/route
+  # menus with their recommended answers. Explicit flags still win; --yes and
+  # non-interactive runs keep their existing non-prompting defaults.
+  if [[ "$operation" == 'install' && "$assume_yes" != '1' && -t 0 && -t 1 ]]; then
+    if [[ "$onboarding_mode" == 'auto' && "$model_mode" == 'auto' && -z "$model_provider" && "$lark_mode" == 'auto' ]]; then
+      onboarding_mode="$(dsh_enhanced_choose_onboarding_mode)" || {
+        dsh_enhanced_fail 2 '安装向导选项无效。'
+        return $?
+      }
+    fi
+    if [[ "$onboarding_mode" == 'guided' ]]; then
+      guided='1'
+      printf '安装向导：按推荐配置继续；显式参数仍然优先。\n'
+    fi
+  fi
   if [[ "$scenario" == 'auto' ]]; then
     if [[ ( "$install_platform" == 'Linux' || "$install_platform" == 'Darwin' ) && "$lark_mode" != 'skip' && "$manage_service" == '1'
       && !( "$deployment_mode_explicit" == '1' && "$deployment_mode" == 'standard' ) ]]; then
-      if [[ "$assume_yes" == '1' || ! -t 0 || ! -t 1 ]]; then
+      if [[ "$assume_yes" == '1' || "$guided" == '1' || ! -t 0 || ! -t 1 ]]; then
         scenario='supervised'
       else
         scenario="$(dsh_enhanced_choose_scenario "$existing_lark_configured" "$install_platform")" || {
@@ -3901,7 +4053,7 @@ dsh_enhanced_install() {
       fi
     elif [[ "$lark_mode" == 'configure' || "$lark_mode" == 'keep' || "$existing_lark_configured" == '1' ]]; then
       scenario='lark'
-    elif [[ "$assume_yes" == '1' || ! -t 0 || ! -t 1 ]]; then
+    elif [[ "$assume_yes" == '1' || "$guided" == '1' || ! -t 0 || ! -t 1 ]]; then
       scenario='core'
     else
       scenario="$(dsh_enhanced_choose_scenario "$existing_lark_configured" 'limited')" || {
@@ -4096,11 +4248,43 @@ dsh_enhanced_install() {
   if [[ "$dry_run" != '1' ]] && dsh_enhanced_model_is_configured "$profile" "$dsh_home"; then
     model_configured='1'
   fi
+  local model_interactive='0'
+  if [[ -t 0 && -t 1 ]]; then model_interactive='1'; fi
+  if [[ "$model_mode" == 'auto' && "$operation" == 'install' && "$guided" != '1'
+    && ( "$assume_yes" == '1' || "$model_interactive" != '1' ) ]] \
+    && dsh_enhanced_model_env_key_present 'deepseek-official'; then
+    # Scripted install with a key in the environment: persist it for the
+    # built-in default route unless the profile owns another route or a key
+    # is already stored. The secret only reaches dsh-model-setup via env.
+    if [[ "$(dsh_enhanced_guided_model_plan "$dsh_home" "$(dsh_enhanced_guided_model_provider "$dsh_home" "$profile")" 0)" == 'configure' ]]; then
+      printf '\n模型配置：检测到环境中的 API Key，将配置 deepseek-official 并存入 %s/.credentials.yaml（0600）。\n' "$dsh_home"
+      model_mode='configure'
+      model_provider='deepseek-official'
+      model_name='deepseek-v4-flash'
+    fi
+  fi
+  if [[ "$model_mode" == 'auto' && "$guided" == '1' ]]; then
+    local guided_provider=''
+    if [[ "$dry_run" == '1' ]]; then
+      guided_provider='deepseek-official'
+    else
+      guided_provider="$(dsh_enhanced_guided_model_provider "$dsh_home" "$profile")"
+    fi
+    if [[ "$(dsh_enhanced_guided_model_plan "$dsh_home" "$guided_provider" 1)" == 'configure' ]]; then
+      printf '\n模型配置：使用 DeepSeek 官方默认模型 deepseek-v4-flash。\n'
+      model_mode='configure'
+      model_provider='deepseek-official'
+      model_name='deepseek-v4-flash'
+    else
+      model_mode='skip'
+    fi
+  fi
   if [[ "$model_mode" == 'auto' ]]; then
     if [[ "$assume_yes" == '1' || ! -t 0 || ! -t 1 ]]; then
       # Non-interactive runs never invent a route: keep whatever the profile
       # already composes (the built-in deepseek-official default at minimum).
       model_mode='skip'
+      if [[ "$operation" == 'install' && -z "$model_provider" ]]; then model_key_hint='1'; fi
     else
       model_mode="$(dsh_enhanced_choose_model_mode "$model_configured")" || {
         dsh_enhanced_fail 2 '模型配置选项无效。'
@@ -4367,7 +4551,7 @@ NODE
     lark_mode='skip'
     printf '\n飞书处理：%s 场景未安装 channel，已跳过。\n' "$scenario"
   elif [[ "$lark_mode" == 'auto' ]]; then
-    if [[ "$assume_yes" == '1' ]]; then
+    if [[ "$assume_yes" == '1' || "$guided" == '1' ]]; then
       if [[ "$lark_configured" == '1' ]]; then lark_mode='keep'; else lark_mode='configure'; fi
     elif [[ -t 0 && -t 1 ]]; then
       lark_mode="$(dsh_enhanced_choose_lark_mode "$lark_configured")" || {
@@ -4452,6 +4636,14 @@ NODE
       model_route_mode='skip'
     elif [[ "$assume_yes" == '1' || ! -t 0 || ! -t 1 ]]; then
       model_route_mode='skip'
+    elif [[ "$guided" == '1' ]]; then
+      # Guided: spend one minimal request only when this run wrote the route
+      # and its key is now stored; otherwise there is nothing new to check.
+      if [[ "$model_mode" == 'configure' ]] && dsh_enhanced_model_credential_stored "$dsh_home" "$model_provider"; then
+        model_route_mode='verify'
+      else
+        model_route_mode='skip'
+      fi
     else
       model_route_mode="$(dsh_enhanced_choose_model_route_mode)" || {
         dsh_enhanced_fail 2 '模型 route 验证选项无效。'
@@ -4502,6 +4694,9 @@ NODE
     dsh_enhanced_ensure_rsi_cli "$source_mode" "$repo_root" "$resolved_plugin_version" "$dry_run" || return $?
   fi
 
+  if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' && "$lark_mode" != 'skip' ]]; then
+    dsh_enhanced_wait_owner_dm "$profile" "$dsh_home" "$owner_wait_seconds" "$dry_run"
+  fi
   if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' ]]; then
     dsh_enhanced_install_rsi_owner "$profile" "$dsh_home" "$source_mode" "$repo_root" "$dry_run" "$ack_existing_automations" || return $?
   fi
@@ -4516,6 +4711,19 @@ NODE
 
   printf '\n安装流程完成。\n'
   printf '检查配置：dsh --profile %s --dump-config\n' "$profile"
+  # The hint is decided from state already known to this run (no extra Host
+  # call): a scripted run that kept the composed default, or a DeepSeek route
+  # configured without a stored key.
+  if [[ "$model_mode" == 'configure' && "$model_provider" == 'deepseek-official' ]]; then model_key_hint='1'; fi
+  if [[ "$dry_run" != '1' && "$operation" == 'install' && "$model_key_hint" == '1' ]] \
+    && ! dsh_enhanced_model_credential_stored "$dsh_home" 'deepseek-official'; then
+    printf '下一步（模型）：若默认模型为 DeepSeek 官方，尚未存储 DEEPSEEK_API_KEY。export DEEPSEEK_API_KEY 后运行（Key 只从环境读取，写入 0600 的 .credentials.yaml）：\n'
+    dsh_enhanced_print_command "$dsh_home/profiles/$profile/node_modules/.bin/dsh-model-setup" \
+      --dsh-home "$dsh_home" --profile "$profile" --provider deepseek-official --store-key
+  fi
+  if [[ "$lark_mode" != 'skip' && ( "$scenario" == 'lark' || "$scenario" == 'supervised' || "$scenario" == 'full' ) ]]; then
+    printf '下一步（使用）：在飞书/Lark 私聊 Bot 即可开始；只有已绑定的 owner 可以操作和授权。\n'
+  fi
   if [[ "$scenario" == 'core' || "$scenario" == 'web' ]]; then
     printf '立即使用：dsh --profile %s\n' "$profile"
     printf '  该命令会打印一行带 token 的完整 URL（形如 http://127.0.0.1:PORT/?token=...）；\n'

@@ -18,9 +18,13 @@ npm install --global @dsh-enhanced/dsh-rsi-cli
 dsh-rsi install
 ```
 
-默认 `supervised` 包含飞书常驻助理、持久学习、有限授权下的能力改进。安装器解析并固定兼容的 DSH Host 和同批插件版本；遇到未知 Host 版本会拒绝安装。第一次安装请按终端向导完成飞书应用、本人绑定、模型和授权步骤。`--yes` 只跳过场景菜单，**不能跳过首次本人绑定**，也不能确认已有 active/paused Automation；后者需要显式 `--ack-existing-automations`。
+默认 `supervised` 包含飞书常驻助理、持久学习、有限授权下的能力改进。安装器解析并固定兼容的 DSH Host 和同批插件版本；遇到未知 Host 版本会拒绝安装。第一次安装请按终端向导完成飞书应用、本人绑定、模型和授权步骤。
 
-已有模型选择会保留；没有可用默认模型时须在引导中配置。API Key 不要写在命令参数中。授权有期限和预算，重试不会自动续期。事件来源、账号读取和主动提醒还需要单独配置与授权，见[事件来源](../../plugins/event-triggers/README.md)及[主动跟进](../../plugins/assistant-proactive/README.md)。
+交互式首装先问一次“按推荐配置一路继续 / 逐项自定义”。直接回车即采用推荐项：DeepSeek 官方默认模型 `deepseek-v4-flash`（缺少 Key 时只隐藏输入一次，存入 `$DSH_HOME/.credentials.yaml`，权限 `0600`）、连接飞书、在 Key 已存储时验证模型 route；随后提示你给机器人发一条私聊（如 `/model`），安装器自动等待首次 owner 会话（默认最长 600 秒，`--owner-wait-seconds <n>` 调整，`0` 关闭），不必再手动续跑。显式参数始终优先；`--guided` / `--customize` 可跳过这个问题。已有模型或飞书配置会保留。
+
+`--yes` 跳过场景菜单；若环境中已有 `DEEPSEEK_API_KEY`（或 `DSH_ENHANCED_MODEL_API_KEY`）且尚未存储 Key，会自动配置上述默认模型并把 Key 写入 `.credentials.yaml`。`--yes` **不能跳过首次本人绑定**（飞书应用确认和 `DSH-CONNECT` 短语仍需本人完成，之后只有已绑定的 owner 能操作和授权），也不能确认已有 active/paused Automation；后者需要显式 `--ack-existing-automations`。
+
+已有模型选择会保留；没有可用默认模型时须在引导中配置。API Key 只从环境变量或隐藏输入读取，不要写在命令参数中，安装输出也不会打印 Key。授权有期限和预算，重试不会自动续期。事件来源、账号读取和主动提醒还需要单独配置与授权，见[事件来源](../../plugins/event-triggers/README.md)及[主动跟进](../../plugins/assistant-proactive/README.md)。
 
 ## 打开 Web 并验收
 
@@ -91,7 +95,7 @@ CLI 先读取原生有效配置，单项修改时自动保留整行其它配置�
 - **`npm: command not found`**：先安装上面的 Node.js，重新打开终端，再运行安装命令。
 
 - **提示需要交互式飞书引导 / 本人尚未绑定**：在真实终端运行 `dsh-rsi install`，按向导连接机器人；不要用管道或 `--yes` 绕过。
-- **报 `exactly one current owner DM is required`**：先确认受管服务已启动，用本人账号给机器人私聊发送 `/model` 并完成卡片确认；保留已有绑定，再用相同的 `dsh-rsi install` 命令续跑。该步骤不要求重新授予业务权限。
+- **报 `exactly one current owner DM is required`**：交互式安装会在这一步前自动等待首次私聊；若等待超时、在非交互终端运行或传了 `--owner-wait-seconds 0`，先确认受管服务已启动，用本人账号给机器人私聊发送 `/model` 并完成卡片确认；保留已有绑定，再用相同的 `dsh-rsi install` 命令续跑。该步骤不要求重新授予业务权限。
 - **没有 Web 地址或服务未运行**：先运行 `dsh-rsi status` 和 `dsh-rsi logs --profile web --lines 100`。仅对已注册服务使用 `dsh-rsi start --profile web`；若选了 `core` / `web` 或 `--no-service`，参照上文的私有 Host 前台命令及版本说明。
 - **模型无法对话**：检查默认模型、登录或 API Key。安装时的模型设置会选择当前 profile 默认模型；参照[模型指南](../../docs/models.md)，勿把密钥贴入命令行或日志。
 - **Linux 依赖构建被 pnpm 拒绝**：当前安装器已在 `dsh plugin add` 前自动写入经评审决策（`koffi: true`、`protobufjs: false`）；仅旧版安装器首装、报出决策表之外的未知待审包、或 profile 预设有冲突值时才需手工处理——在报错的 profile 目录用相同 pnpm 版本运行 `pnpm approve-builds <包名>`（或在 `pnpm-workspace.yaml` 写明布尔），再以同一 Home / profile 重试；不要批准全部待审脚本。更多首次安装依赖说明见[维护说明](maintenance.md#首次安装依赖审批)。

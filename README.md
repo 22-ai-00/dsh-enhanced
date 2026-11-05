@@ -22,7 +22,7 @@ npm install --global @dsh-enhanced/dsh-rsi-cli
 dsh-rsi install
 ```
 
-跟随终端提示完成模型配置和飞书绑定。检测到本机 TraeX 时会复用其登录；已有模型选择会保留。默认使用名为 `web` 的配置，首次使用保持默认即可。
+安装器先问一次是否“按推荐配置一路继续”，直接回车即可：默认使用 DeepSeek 官方模型，只在缺少 API Key 时隐藏输入一次（Key 存入 `0600` 的 `.credentials.yaml`，不出现在命令行和输出中）。提前 `export DEEPSEEK_API_KEY=...` 并加 `--yes` 时，模型步骤无需任何输入。检测到本机 TraeX 时会复用其登录；已有模型选择会保留。默认使用名为 `web` 的配置，首次使用保持默认即可。
 
 新安装默认 **Full access**：助手可读写文件、访问网络、执行命令，不逐次请求批准。希望限制工作区外的写入并启用人工批准时，将第二条命令改为 `dsh-rsi install --permission workspace-write`。
 
@@ -30,9 +30,9 @@ dsh-rsi install
 
 1. 打开终端给出的飞书授权链接，选择或创建机器人。
 2. 给机器人私聊发送终端显示的最新 `DSH-CONNECT-…` 验证码，以终端显示绑定成功为准；这一步不会收到聊天回复。
-3. 常驻服务启动后，私聊发送 `/model`，选择模型并确认，再发一句普通消息验证回复。
+3. 终端提示“最后一步”时，私聊发送 `/model`，选择模型并确认；安装器检测到这条私聊后自动继续，无需重新运行。之后只有已绑定的你可以操作和授权。
 
-如果终端提示缺少主人私聊会话，先完成第 3 步，再按[安装排障](scripts/install/README.md)继续。飞书消息接入与文档、邮件等业务权限是分开的，详见[飞书接入](plugins/lark-channel/docs/setup.md)。
+如果等待超时或终端提示缺少主人私聊会话，先完成第 3 步，再按[安装排障](scripts/install/README.md)继续。飞书消息接入与文档、邮件等业务权限是分开的，详见[飞书接入](plugins/lark-channel/docs/setup.md)。
 
 ### 3. 打开 Web
 

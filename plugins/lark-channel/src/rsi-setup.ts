@@ -69,6 +69,8 @@ export interface RsiSetupArgs {
   prepareBuild?: boolean; optionalBuild?: boolean; dockerPath?: string
   prepareAuthorities?: boolean
   installOwner?: boolean
+  /** Read-only onboarding wait: poll until the owner's first Lark DM binding exists. */
+  waitOwnerDm?: boolean; timeoutSeconds?: number
   ackExistingAutomations?: boolean
   /** Installer's pre-stop source and destination inventories; never parsed from CLI. */
   expectedAutomationInventories?: RsiAutomationInventories
@@ -93,6 +95,12 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
     else if (key === '--prepare-build') result.prepareBuild = true
     else if (key === '--prepare-authorities') result.prepareAuthorities = true
     else if (key === '--install-owner') result.installOwner = true
+    else if (key === '--wait-owner-dm') result.waitOwnerDm = true
+    else if (key === '--timeout-seconds') {
+      const value = argv[++i]
+      if (!value || !/^[1-9][0-9]{0,4}$/u.test(value) || Number(value) > 3600) fail('--timeout-seconds requires an integer from 1 to 3600')
+      result.timeoutSeconds = Number(value)
+    }
     else if (key === '--ack-existing-automations') result.ackExistingAutomations = true
     else if (key === '--install-local-cohort') result.installLocalCohort = true
     else if (key === '--prepare-local-update') result.prepareLocalUpdate = true
@@ -114,6 +122,17 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
     } else fail(`unknown option ${key}`)
   }
   if (result.help) return result
+  if (result.timeoutSeconds !== undefined && !result.waitOwnerDm) fail('--timeout-seconds requires --wait-owner-dm')
+  if (result.waitOwnerDm) {
+    if (result.manifestPath || result.apply || result.rollback || result.start || result.confirmStopped || result.installOwner
+      || result.prepareSource || result.prepareBuild || result.prepareAuthorities || result.optionalBuild || result.dockerPath
+      || result.sourceRepository || result.ackExistingAutomations || result.installLocalCohort || result.bundles
+      || result.prepareLocalUpdate || result.addMemoryLearning) {
+      fail('owner DM wait cannot be combined with other operations')
+    }
+    if (!isAbsolute(result.dshHome) || !result.profile || !profilePattern.test(result.profile)) fail('owner DM wait requires --profile and absolute DSH_HOME')
+    return result
+  }
   if (result.addMemoryLearning && !result.prepareLocalUpdate) fail('--add-memory-learning requires --prepare-local-update')
   if (result.ackExistingAutomations && (!result.installOwner && !result.apply || result.rollback
     || result.prepareLocalUpdate || result.installLocalCohort || result.prepareSource || result.prepareBuild || result.prepareAuthorities)) fail('--ack-existing-automations requires --install-owner or --apply')
@@ -534,12 +553,52 @@ export async function configureRsiSetupLocked(args: RsiSetupArgs, ports: RsiSetu
   })()
 }
 
+export interface OwnerDmWaitResult { mode: 'ready' | 'timeout' | 'ambiguous'; bindings: number }
+
+/**
+ * Onboarding helper: read-only poll of the delivery database until the owner's
+ * first Lark DM has produced exactly one active owner binding. It never creates
+ * or widens a binding; owner authorization stays with the Lark DSH-CONNECT flow.
+ * A missing database is "not yet" because the Host creates it on first message.
+ */
+export async function waitForOwnerDmBinding(input: {
+  profile: string; dshHome: string; timeoutMs: number; intervalMs?: number; signal?: AbortSignal
+}, ports: Pick<RsiSetupPorts, 'dump' | 'snapshot'> = rsiSetupPorts,
+sleep: (ms: number, signal?: AbortSignal) => Promise<void> = (ms, signal) => new Promise((resolveSleep, reject) => {
+  const timer = setTimeout(resolveSleep, ms)
+  signal?.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason) }, { once: true })
+}), now: () => number = Date.now): Promise<OwnerDmWaitResult> {
+  const effective = ports.dump(input.profile, input.dshHome)
+  const deadline = now() + input.timeoutMs, interval = input.intervalMs ?? 3_000
+  let bindings = 0
+  for (;;) {
+    input.signal?.throwIfAborted()
+    try { bindings = (await ports.snapshot(effective, input.dshHome)).bindings.length } catch { bindings = 0 }
+    if (bindings === 1) return { mode: 'ready', bindings }
+    if (bindings > 1) return { mode: 'ambiguous', bindings }
+    if (now() >= deadline) return { mode: 'timeout', bindings }
+    await sleep(Math.min(interval, Math.max(0, deadline - now())), input.signal)
+  }
+}
+
 export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const args = parseRsiSetupArgs(argv)
   if (args.help) {
-    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--ack-existing-automations] [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--ack-existing-automations]\n       dsh-rsi-setup --install-local-cohort --profile <name> --source-repository <local-absolute> --bundle <slug> [--bundle <slug> ...] [--dsh-home <absolute>]\n--ack-existing-automations acknowledges active or paused durable rows when enabling or switching an Automation scheduler; accepted only with --install-owner or --apply, and does not bypass inventory drift checks.\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, prepares a pinned native offline runtime by default and exports its release toolchain/store/cache (--docker-path instead prepares the legacy offline image); --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
+    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--ack-existing-automations] [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--ack-existing-automations]\n       dsh-rsi-setup --wait-owner-dm --profile <name> [--dsh-home <absolute>] [--timeout-seconds <1-3600>]\n       dsh-rsi-setup --install-local-cohort --profile <name> --source-repository <local-absolute> --bundle <slug> [--bundle <slug> ...] [--dsh-home <absolute>]\n--ack-existing-automations acknowledges active or paused durable rows when enabling or switching an Automation scheduler; accepted only with --install-owner or --apply, and does not bypass inventory drift checks.\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, prepares a pinned native offline runtime by default and exports its release toolchain/store/cache (--docker-path instead prepares the legacy offline image); --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
     process.stdout.write('macOS: --prepare-build installs a pinned private Node and frozen manifest-only dependencies for offline Seatbelt checks; --docker-path is rejected and --optional-build does not suppress native preparation failure. --install-owner configures a native launchd Host with finite memory learning and verified plugin creation. Source replacement/release remains Linux-only.\n')
     process.stdout.write('       dsh-rsi-setup --prepare-local-update --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--add-memory-learning] [--docker-path <absolute>]\nPrepare local update source and tarballs outside the active Home; does not install or activate them. Linux builds with the native runtime by default; --docker-path keeps the legacy image builder. --add-memory-learning explicitly prepares the disabled learner bundle for a verified pre-owner installation.\n')
+    return
+  }
+  if (args.waitOwnerDm) {
+    const controller = new AbortController()
+    const cancel = () => controller.abort(new Error('owner DM wait interrupted'))
+    process.once('SIGINT', cancel); process.once('SIGTERM', cancel)
+    try {
+      const result = await waitForOwnerDmBinding({ profile: args.profile!, dshHome: args.dshHome,
+        timeoutMs: (args.timeoutSeconds ?? 600) * 1_000, signal: controller.signal })
+      process.stdout.write(`${JSON.stringify(result)}\n`)
+      if (result.mode !== 'ready') process.exitCode = 3
+    } finally { process.off('SIGINT', cancel); process.off('SIGTERM', cancel) }
     return
   }
   if (args.prepareLocalUpdate) {

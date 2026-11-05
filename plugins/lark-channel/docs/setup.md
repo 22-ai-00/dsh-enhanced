@@ -99,7 +99,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 
 `DSH-CONNECT-...` 仅用于临时长连接上的 owner 身份绑定，绑定阶段不会自动回复，也不会建立 Delivery 聊天会话。应在当前向导的等待窗口内发送最新短语；向导超时退出后，旧短语不再有效。以终端的绑定成功结果判断，不以聊天中是否回复判断。
 
-全新或完整重装的 Home 在常驻服务启动后，还需要 owner 私聊发送一条普通消息或 `/model`，以建立真实会话；`/model` 可同时验证模型卡片与选择回调。若后续原生学习配置报告 `exactly one current owner DM is required`，先完成这一步，再通过安装器的 Host-aware 入口续跑 owner 配置。此时已有身份绑定和普通服务会保留，无需重新配对或授予额外业务权限。
+全新或完整重装的 Home 在常驻服务启动后，还需要 owner 私聊发送一条普通消息或 `/model`，以建立真实会话；`/model` 可同时验证模型卡片与选择回调。交互式安装器会在配置 owner 学习前提示这一步并自动等待（默认最长 600 秒，`--owner-wait-seconds` 调整，`0` 关闭）；等待只读取本地绑定快照，不发送消息，也不改变 owner 授权。也可单独运行 `dsh-rsi-setup --wait-owner-dm --profile web --dsh-home <绝对路径> --timeout-seconds 600`，出现唯一 owner 私聊时以 `{"mode":"ready"}` 退出，超时或存在多个绑定时退出码为 3。若后续原生学习配置报告 `exactly one current owner DM is required`，先完成这一步，再通过安装器的 Host-aware 入口续跑 owner 配置。此时已有身份绑定和普通服务会保留，无需重新配对或授予额外业务权限。
 
 ### 官方一键授权的范围
 

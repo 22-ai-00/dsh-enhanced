@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { applyEntryPatches, entryListSchema } from '@deepseek-ai/cordis-plugin-include'
 import type { ActiveLarkOwnerBindingsSnapshot } from '@dsh-enhanced/assistant-delivery'
-import { assertRsiEffectivePatch, configureRsiSetup, parseRsiSetupArgs, readRsiInstalledBase, rsiSetupPorts, runRsiSetup, type RsiSetupPorts } from '../src/rsi-setup.js'
+import { assertRsiEffectivePatch, configureRsiSetup, parseRsiSetupArgs, readRsiInstalledBase, rsiSetupPorts, runRsiSetup, waitForOwnerDmBinding, type RsiSetupPorts } from '../src/rsi-setup.js'
 
 const roots: string[] = []
 afterEach(async () => {
@@ -483,6 +483,45 @@ describe('RSI dual profile setup transaction', () => {
     expect(() => parseRsiSetupArgs(['--install-owner','--profile','web','--dsh-home','/tmp/home','--apply']))
       .toThrow('cannot be combined')
     expect(parseRsiSetupArgs(['--install-owner','--profile','web','--dsh-home','/tmp/home','--ack-existing-automations']).ackExistingAutomations).toBe(true)
+  })
+  test('owner DM wait is a standalone read-only operation with a bounded timeout', () => {
+    expect(parseRsiSetupArgs(['--wait-owner-dm','--profile','web','--dsh-home','/tmp/home','--timeout-seconds','90']))
+      .toMatchObject({ waitOwnerDm: true, profile: 'web', timeoutSeconds: 90, apply: false })
+    expect(parseRsiSetupArgs(['--wait-owner-dm','--profile','web','--dsh-home','/tmp/home']).timeoutSeconds).toBeUndefined()
+    expect(() => parseRsiSetupArgs(['--wait-owner-dm','--install-owner','--profile','web','--dsh-home','/tmp/home'])).toThrow('cannot be combined')
+    expect(() => parseRsiSetupArgs(['--wait-owner-dm','--profile','web','--dsh-home','relative'])).toThrow('requires --profile and absolute')
+    expect(() => parseRsiSetupArgs(['--wait-owner-dm','--dsh-home','/tmp/home'])).toThrow('requires --profile and absolute')
+    expect(() => parseRsiSetupArgs(['--wait-owner-dm','--profile','web','--dsh-home','/tmp/home','--timeout-seconds','0'])).toThrow('1 to 3600')
+    expect(() => parseRsiSetupArgs(['--wait-owner-dm','--profile','web','--dsh-home','/tmp/home','--timeout-seconds','3601'])).toThrow('1 to 3600')
+    expect(() => parseRsiSetupArgs(['--install-owner','--profile','web','--dsh-home','/tmp/home','--timeout-seconds','5'])).toThrow('requires --wait-owner-dm')
+  })
+  test('owner DM wait polls until exactly one binding appears and treats a missing database as not yet', async () => {
+    let clock = 0
+    const results: Array<number | Error> = [new Error('database missing'), 0, 1]
+    const ports = {
+      dump: vi.fn(() => 'effective'),
+      snapshot: vi.fn(async () => {
+        const next = results.shift()!
+        if (next instanceof Error) throw next
+        return { bindings: Array.from({ length: next }, () => ({})) } as unknown as ActiveLarkOwnerBindingsSnapshot
+      }),
+    }
+    const sleep = vi.fn(async (ms: number) => { clock += ms })
+    await expect(waitForOwnerDmBinding({ profile: 'web', dshHome: '/tmp/home', timeoutMs: 60_000, intervalMs: 1_000 }, ports, sleep, () => clock))
+      .resolves.toEqual({ mode: 'ready', bindings: 1 })
+    expect(ports.dump).toHaveBeenCalledTimes(1)
+    expect(ports.snapshot).toHaveBeenCalledTimes(3)
+    expect(ports.snapshot).toHaveBeenCalledWith('effective', '/tmp/home')
+  })
+  test('owner DM wait reports timeout and ambiguity without choosing an owner', async () => {
+    let clock = 0
+    const none = { dump: () => 'effective', snapshot: async () => ({ bindings: [] }) as unknown as ActiveLarkOwnerBindingsSnapshot }
+    await expect(waitForOwnerDmBinding({ profile: 'web', dshHome: '/tmp/home', timeoutMs: 5_000, intervalMs: 2_000 }, none,
+      async ms => { clock += ms }, () => clock)).resolves.toEqual({ mode: 'timeout', bindings: 0 })
+    expect(clock).toBe(5_000)
+    const two = { dump: () => 'effective', snapshot: async () => ({ bindings: [{}, {}] }) as unknown as ActiveLarkOwnerBindingsSnapshot }
+    await expect(waitForOwnerDmBinding({ profile: 'web', dshHome: '/tmp/home', timeoutMs: 5_000 }, two, async () => {}, () => 0))
+      .resolves.toEqual({ mode: 'ambiguous', bindings: 2 })
   })
   test('argument parser refuses implicit mutation and incompatible operations', () => {
     const base = ['--manifest', '/tmp/private.json', '--dsh-home', '/tmp/home']
