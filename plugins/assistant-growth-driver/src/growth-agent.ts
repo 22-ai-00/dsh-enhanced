@@ -174,7 +174,7 @@ export function projectBuildDiagnostics(value: unknown): Record<string, unknown>
 
 /** Bounded in-run repair: one revision, only after a Host-certified deterministic build/check failure. */
 export const SOURCE_REPAIR_GUIDANCE = [
-  `After plugin_source_create, call plugin_source_job_status with wait_ms (at most ${MAX_SOURCE_JOB_WAIT_MS}) to wait for the native build. If it reports status failed with failureCode source-build-check-failed, read its diagnostics (file:line:column, TypeScript code and message) and submit ONE corrected plugin_source_create for the same gap_id and plugin_name with complete corrected files. Only one repair is allowed; any other failure, unknown status or a second build failure ends this run. Do not wait again after the repair submission.`,
+  `After plugin_source_create, call plugin_source_job_status with wait_ms (at most ${MAX_SOURCE_JOB_WAIT_MS}) to wait for the native build. If it reports status failed with failureCode source-build-check-failed, read its diagnostics (file:line:column, code and message; code is a TypeScript error code or VITEST for a failing test, whose message names the test and its first error line) and submit ONE corrected plugin_source_create for the same gap_id and plugin_name with complete corrected files. Only one repair is allowed; any other failure, unknown status or a second build failure ends this run. Do not wait again after the repair submission.`,
 ].join('\n')
 
 export const SOURCE_CREATION_PROMPT = [

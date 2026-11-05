@@ -1854,7 +1854,7 @@ describe('opt-in plugin source proposals', () => {
       const result = await creationWake({ turns: [] })
       const transcript = result.adapter.messageTranscripts.join('')
       expect(transcript).toContain('additionalProperties'); expect(transcript).toContain('Promise<never>')
-      expect(transcript).toContain('source-build-check-failed')
+      expect(transcript).toContain('source-build-check-failed'); expect(transcript).toContain('VITEST for a failing test')
       expect(result.adapter.toolDescriptions[0]?.plugin_source_job_status).toContain('wait_ms')
     })
 
