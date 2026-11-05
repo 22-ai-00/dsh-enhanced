@@ -309,12 +309,12 @@ work_item_read_report:
 
 host-only `admitDecision(decision)`（service 与 `WorkItemAdmission` 同名方法）把一条 `work-items/execute-decision/v1` 决策准入为工作项。确定性、无模型调用、不依赖 intake 实现；输入只接受 `{ protocol, decisionId, verdict: 'execute', origin: 'explicit'|'inferred', mode: 'observe'|'auto', policyRuleId?, budgetRemaining, mandate: { kind, title, brief, originBindingId, acceptanceRef } }`，未知字段、畸形 id/预算一律 `invalid-input`。
 
-- 身份：`externalId = decision:<decisionId>`；mandate 摘要 `digest` = sha256(协议、decisionId、origin、ruleId、规范化后的 kind/title/brief/originBindingId/acceptanceRef)，mode 与预算是准入时事实，不进身份。
-- 重放不开第二项：同一 decisionId 跨所有 dedup 窗口、任何状态（含已结项）都回到原工作项（`outcome: 'replayed'`，不再 wake）；同 id 不同 digest 为 `identity-mismatch`，不写入。
+- 身份：`externalId = decision:<decisionId>`，dedup 键只取 intake 源与该 externalId（独立键域 `execute-decision:v1`，不含 kind），普通信号无法占用、重放或撤回某个 decision id；mandate 摘要 `digest` = sha256(协议、decisionId、origin、ruleId、规范化后的 kind/title/brief/originBindingId/acceptanceRef)，mode 与预算是准入时事实，不进身份。
+- 重放不开第二项：同一 decisionId 跨所有 dedup 窗口、任何状态（含已结项）、跨重启都回到原工作项（`outcome: 'replayed'`，不再 wake）；同 id 不同 digest（含换 kind）为 `identity-mismatch`，不写入。查重与插入在同一同步调用内完成，单进程内无交错；多进程共用同一库时跨窗口的并发首次准入不在本片保证范围（同窗口由 `UNIQUE(dedup_key, dedup_bucket)` 拒绝）。
 - inferred 闸门（在 Policy 调用与任何写入之前）：须 `mode: 'auto'`（否则 `inferred-requires-auto`）、命名 `policyRuleId`（`inferred-requires-rule`）、`budgetRemaining >= 1`（`budget-exhausted`）；返回 `{ outcome: 'refused', reasonCode }`。explicit 不受 mode/预算约束，但仍过 kind allowlist、绑定校验与 Policy。
-- 命名规则须由 Policy 以**同一** `ruleId` allow，否则 `policy-rule-mismatch`（不写入）；deny 仍为 `source-rejected`。
+- 命名规则须由 Policy 以**同一** `ruleId` allow，否则 `policy-rule-mismatch`（不写入）；deny 仍为 `source-rejected`。规则先用无副作用的 `evaluate` 比对，不一致时不调用 `authorize`，不扣该规则授权预算、不写审计；仅缺少 `evaluate` 的旧 Policy 对端退回到 `authorize` 后比对，此时每个（decision、dedup 窗口）至多扣一次。
 - 冻结：mandate（`work-items/mandate/v1`：decisionId、origin、mode、ruleId?、budgetRemaining、digest）存入既有 `authority_basis` JSON，`admitted` 事件 detail 记 `mandate: { decisionId, origin, digest }`。**无 schema 变更。**
-- 派发复核：带 ruleId 的 mandate 在 claim/wake 前要求 Policy 仍由同一规则 allow，否则 park 为 `waiting`（`mandate-rule-changed`），不取消；畸形或不可能通过闸门的已存 mandate 视为 `malformed-basis`。
+- 派发复核：带 ruleId 的 mandate 在 claim/wake 前要求 Policy 仍由同一规则 allow，否则 park 为 `waiting`（`mandate-rule-changed`），不取消；畸形、不可能通过闸门或 decisionId 与工作项 externalId 不符的已存 mandate 视为 `malformed-basis`。
 - 未覆盖：`budgetRemaining` 是决策方上报的事实，不是 Host 持有的预算；Policy 变更主动通知活工作项、人类跟进归属、独立 verifier 绑定、observe 决策记录均未实现。
 
 ## 结果证据与结算（`ready` 只是报告）

@@ -137,6 +137,13 @@ export function dedupKeyFor(sourceId: string, kind: string, externalId: string):
   return createHash('sha256').update(`${sourceId}\u0000${kind}\u0000${externalId}`, 'utf8').digest('hex')
 }
 
+/** Dedup key of an execute decision: source and decision external id only, never the kind. */
+export function decisionDedupKeyFor(sourceId: string, externalId: string): string {
+  // `execute-decision:v1` cannot be an ordinary kind (KIND forbids `:`), so the
+  // two key domains never collide.
+  return dedupKeyFor(sourceId, 'execute-decision:v1', externalId)
+}
+
 export function dedupBucketFor(createdAt: number, windowMs: number): number {
   return Math.floor(createdAt / windowMs)
 }
@@ -258,7 +265,13 @@ export class WorkItemAdmission {
     // Lazy recovery keeps the open-item count honest without a timer.
     if (!config.diagnosis) this.#deps.ledger.recover()
 
-    const dedupKey = dedupKeyFor(config.intakeSourceId, normalized.kind, normalized.externalId)
+    // A decision's identity is its id alone: the kind is part of the mandate
+    // (and its digest), not of the key, so the same id under another kind is an
+    // identity mismatch instead of a second item. The key domain is disjoint
+    // from ordinary signals, which cannot squat or withdraw a decision id.
+    const dedupKey = decision === undefined
+      ? dedupKeyFor(config.intakeSourceId, normalized.kind, normalized.externalId)
+      : decisionDedupKeyFor(config.intakeSourceId, normalized.externalId)
     const dedupBucket = dedupBucketFor(now, config.admission.dedupWindowMs)
     let mandate: WorkItemMandateBasis | undefined
     if (decision !== undefined) {
@@ -300,7 +313,9 @@ export class WorkItemAdmission {
     if (active) {
       const rejection = wouldReject[0]
       if (rejection !== undefined) fail(rejectionCode(rejection), rejectionMessage(rejection))
-      authority = this.#authorize(active, receipt, normalized.kind, dedupKey, dedupBucket, now, mandate)
+      const authorized = this.#authorize(active, receipt, normalized.kind, dedupKey, dedupBucket, now, mandate)
+      if (authorized === 'policy-rule-mismatch') return authorized
+      authority = authorized
       if (mandate?.ruleId !== undefined && authority?.ruleId !== mandate.ruleId) return 'policy-rule-mismatch'
     }
 
@@ -439,7 +454,7 @@ export class WorkItemAdmission {
     dedupBucket: number,
     now: number,
     mandate?: WorkItemMandateBasis,
-  ): WorkItemAuthorityBasis | null {
+  ): WorkItemAuthorityBasis | null | 'policy-rule-mismatch' {
     if (!active) return null
     const policy = this.#deps.policy
     if (policy === undefined) fail('missing-dependency', 'assistantPolicy is required for active admission')
@@ -459,6 +474,15 @@ export class WorkItemAdmission {
       context: { initiator: 'background' as const },
     }
     const idempotencyKey = `work-item-admit:${dedupKey}:${String(dedupBucket)}`
+    // A named rule is checked with the side-effect-free `evaluate` first, so a
+    // decision another rule would allow is refused without consuming the
+    // rule's authorization budget or writing an audit row. A deny falls
+    // through to `authorize`, which audits it as before. Older Policy peers
+    // without `evaluate` keep the post-authorize check below in `#admit`.
+    if (mandate?.ruleId !== undefined && typeof policy.evaluate === 'function') {
+      const preview = policy.evaluate(request)
+      if (preview.effect === 'allow' && preview.ruleId !== mandate.ruleId) return 'policy-rule-mismatch'
+    }
     const decision = policy.authorize(request, { idempotencyKey })
     if (decision.effect !== 'allow') {
       fail('source-rejected', `policy denied admission (${decision.reasonCode})`, kind)

@@ -64,6 +64,8 @@ export function deliveryPeer(overrides: Partial<PeerDeliveryService> = {}): Peer
 export interface FakePolicy {
   readonly service: PeerPolicyService
   readonly requests: PeerPolicyRequest[]
+  /** Side-effect-free `evaluate` calls (never consume budget). */
+  readonly evaluations: PeerPolicyRequest[]
   readonly options: Array<{ readonly idempotencyKey?: string; readonly auditDetails?: unknown } | undefined>
   decision: PeerPolicyDecision
   failure: Error | null
@@ -74,8 +76,10 @@ export interface FakePolicy {
 export function fakePolicy(initial: PeerPolicyDecision = { effect: 'allow', reasonCode: 'rule-allow' }): FakePolicy {
   const requests: PeerPolicyRequest[] = []
   const options: Array<{ readonly idempotencyKey?: string; readonly auditDetails?: unknown } | undefined> = []
+  const evaluations: PeerPolicyRequest[] = []
   const policy: FakePolicy = {
     requests,
+    evaluations,
     options,
     decision: initial,
     failure: null,
@@ -83,6 +87,11 @@ export function fakePolicy(initial: PeerPolicyDecision = { effect: 'allow', reas
       authorize(request, opts) {
         requests.push(request)
         options.push(opts)
+        if (policy.failure !== null) throw policy.failure
+        return policy.decision
+      },
+      evaluate(request) {
+        evaluations.push(request)
         if (policy.failure !== null) throw policy.failure
         return policy.decision
       },

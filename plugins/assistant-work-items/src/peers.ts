@@ -68,6 +68,8 @@ export interface PeerPolicyDecision {
 /** `assistant-policy` default-deny authorization surface. */
 export interface PeerPolicyService {
   authorize(request: PeerPolicyRequest, options?: { idempotencyKey?: string; auditDetails?: unknown }): PeerPolicyDecision
+  /** Side-effect-free evaluation (no budget, no audit). Absent on older Policy peers. */
+  evaluate?(request: PeerPolicyRequest): PeerPolicyDecision
   authorizeAgent?(agent: import('@deepseek-ai/dsh-agent').Agent | undefined, action: string,
     resource: { kind: 'automation'; id: string }, options?: { idempotencyKey?: string }): PeerPolicyDecision
   evaluateAgent?(agent: import('@deepseek-ai/dsh-agent').Agent | undefined, action: string,

@@ -157,7 +157,7 @@ export function mandateIsUsable(value: unknown): value is WorkItemMandateBasis {
     && (mandate['origin'] === 'explicit' || mandate['origin'] === 'inferred')
     && (mandate['mode'] === 'observe' || mandate['mode'] === 'auto')
     && (rule === undefined || typeof rule === 'string' && RULE_ID.test(rule))
-    && typeof budget === 'number' && Number.isSafeInteger(budget) && budget >= 0
+    && typeof budget === 'number' && Number.isSafeInteger(budget) && budget >= 0 && budget <= MAX_BUDGET
     && typeof mandate['digest'] === 'string' && DIGEST.test(mandate['digest'])
   if (!usable) return false
   // An inferred mandate that could never have passed the gate is corrupt.

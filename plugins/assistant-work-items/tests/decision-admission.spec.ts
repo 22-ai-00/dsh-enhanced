@@ -87,6 +87,33 @@ describe('execute decision admission', () => {
     expect(itemCount(fixture)).toBe(1)
   })
 
+  test('the decision id alone is the identity: another kind under the same id is a mismatch, not a second item', async () => {
+    const fixture = await harness()
+    const first = admittedItem(fixture.admission.admitDecision(decision()))
+    const otherKind = decision({ mandate: { ...decision().mandate, kind: 'triage' } })
+    expect(() => fixture.admission.admitDecision(otherKind)).toThrow(expect.objectContaining({ code: 'identity-mismatch' }))
+    fixture.advance(fixture.config.admission.dedupWindowMs * 2)
+    expect(() => fixture.admission.admitDecision(otherKind)).toThrow(expect.objectContaining({ code: 'identity-mismatch' }))
+    expect(itemCount(fixture)).toBe(1)
+    expect(admittedItem(fixture.admission.admitDecision(decision())).id).toBe(first.id)
+  })
+
+  test('an ordinary signal cannot squat, replay or withdraw a decision id', async () => {
+    const fixture = await harness()
+    const squat = { kind: 'review', externalId: 'decision:decision-1', title: 't', brief: 'b', originBindingId: 'binding-origin-1' }
+    const ordinary = fixture.admission.admit(squat)
+    expect(ordinary.created).toBe(true)
+    fixture.advance(fixture.config.admission.cooldownMs + 1)
+    const result = fixture.admission.admitDecision(decision())
+    expect(result.outcome).toBe('admitted')
+    const item = admittedItem(result)
+    expect(item.id).not.toBe(ordinary.item.id)
+    expect(item.dedupKey).not.toBe(ordinary.item.dedupKey)
+    fixture.admission.withdraw(squat)
+    expect(fixture.store.findItemById(item.id)?.state).toBe('queued')
+    expect(fixture.admission.admitDecision(decision()).outcome).toBe('replayed')
+  })
+
   test('inferred work needs auto mode, a named rule and remaining budget, all before Policy or a write', async () => {
     const fixture = await harness()
     allowBy(fixture, RULE)
@@ -113,6 +140,9 @@ describe('execute decision admission', () => {
     allowBy(fixture, undefined)
     expect(fixture.admission.admitDecision(inferred())).toEqual({ outcome: 'refused', reasonCode: 'policy-rule-mismatch' })
     expect(itemCount(fixture)).toBe(0)
+    // The mismatch is found by the side-effect-free evaluate: no budget-consuming authorize call.
+    expect(fixture.policy.evaluations).toHaveLength(2)
+    expect(fixture.policy.requests).toHaveLength(0)
     fixture.policy.deny('rule-deny')
     expect(() => fixture.admission.admitDecision(inferred())).toThrow(expect.objectContaining({ code: 'source-rejected' }))
     expect(itemCount(fixture)).toBe(0)
@@ -121,6 +151,15 @@ describe('execute decision admission', () => {
     expect(item.authority?.ruleId).toBe(RULE)
     expect(item.authority?.mandate).toMatchObject({ origin: 'inferred', ruleId: RULE, budgetRemaining: 3 })
     expect(fixture.policy.requests.at(-1)).toMatchObject({ action: 'admit', resource: { kind: 'automation', id: item.workerAutomationId } })
+  })
+
+  test('an older Policy peer without evaluate still refuses a rule mismatch after authorize', async () => {
+    const fixture = await harness()
+    delete (fixture.policy.service as { evaluate?: unknown }).evaluate
+    allowBy(fixture, 'broad-allow')
+    expect(fixture.admission.admitDecision(inferred())).toEqual({ outcome: 'refused', reasonCode: 'policy-rule-mismatch' })
+    expect(fixture.policy.requests).toHaveLength(1)
+    expect(itemCount(fixture)).toBe(0)
   })
 
   test('ordinary admission gates still bound decision work', async () => {
@@ -154,6 +193,9 @@ describe('execute decision admission', () => {
       { ...basis, mandate: { ...basis.mandate!, ruleId: 'other-rule' } },
       { ...basis, mandate: { ...basis.mandate!, budgetRemaining: 0 } },
       { ...basis, mandate: { ...basis.mandate!, extra: true } },
+      { ...basis, mandate: { ...basis.mandate!, budgetRemaining: 1_000_000_001 } },
+      // A mandate copied onto another item's basis does not bind that item.
+      { ...basis, mandate: { ...basis.mandate!, decisionId: 'decision-2' } },
     ]
     for (const authority of variants) {
       const forged = { ...item, authority } as WorkItemRecord

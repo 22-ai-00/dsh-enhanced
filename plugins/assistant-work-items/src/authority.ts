@@ -1,6 +1,6 @@
 import type { PeerPolicyDecision, PeerPolicyRequest, PeerPolicyService } from './peers.ts'
 import type { WorkItemAuthorityBasis, WorkItemMandateBasis, WorkItemRecord } from './types.ts'
-import { mandateIsUsable } from './mandate.ts'
+import { decisionExternalId, mandateIsUsable } from './mandate.ts'
 
 /** Literal marker for the persisted basis; anything else is malformed. */
 const AUTHORITY_PROTOCOL = 'work-items/authority/v1'
@@ -127,7 +127,11 @@ export class WorkItemAuthority {
   check(item: WorkItemRecord): AuthorityCheck {
     const basis = item.authority
     if (basis === null) return Object.freeze({ kind: 'legacy' })
-    if (!basisIsUsable(basis)) return Object.freeze({ kind: 'revoked', reasonCode: MALFORMED_AUTHORITY_REASON })
+    if (!basisIsUsable(basis)
+      // A mandate belongs to exactly the item its decision id names.
+      || basis.mandate !== undefined && item.externalId !== decisionExternalId(basis.mandate.decisionId)) {
+      return Object.freeze({ kind: 'revoked', reasonCode: MALFORMED_AUTHORITY_REASON })
+    }
     const policy = this.#policy()
     if (policy === undefined) return Object.freeze({ kind: 'unavailable', detail: 'missing-policy' })
     let decision: PeerPolicyDecision
