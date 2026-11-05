@@ -21,6 +21,12 @@ export interface Config {
   settlement?: SettlementConfig
   diagnosis?: DiagnosisConfig
   ownerRecall?: { enabled?: boolean; linkedAliases?: string[] }
+  /**
+   * Cross-channel report routing. `linkedFallback` lists Delivery `linked`
+   * principal ids, in order, that may receive a terminal report only when its
+   * origin binding is unavailable. Absent or empty keeps origin-only delivery.
+   */
+  ownerReportRouting?: { linkedFallback?: string[] }
   ownerContinuation?: OwnerContinuationConfig
   ownerReplyContinuation?: boolean
   ownerReportFeedback?: boolean
@@ -155,6 +161,8 @@ export interface NormalizedConfig {
    * is accepted, whatever Delivery or Policy would otherwise allow.
    */
   readonly ownerRecall?: Readonly<{ enabled: true; linkedAliases?: readonly string[] }>
+  /** Present only when the owner named at least one linked fallback channel. */
+  readonly ownerReportRouting?: Readonly<{ linkedFallback: readonly string[] }>
   readonly ownerContinuation?: NormalizedOwnerContinuation
   readonly ownerReplyContinuation?: true
   readonly ownerReportFeedback?: true
@@ -225,7 +233,7 @@ const DELIVERY_KEYS = ['notifyOn'] as const
 const SETTLEMENT_KEYS = ['enabled', 'windowMs', 'sweepIntervalMs', 'maxSourcesPerSweep', 'maxPendingPerSweep', 'maxSettlementsPerSweep'] as const
 const SOURCES_KEYS = ['foregroundFailures'] as const
 const FOREGROUND_FAILURE_KEYS = ['enabled', 'kind', 'includeTimedOut', 'maxCandidatesPerSweep', 'maxAdmitsPerSweep', 'sweepIntervalMs'] as const
-const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerContinuation', 'ownerReplyContinuation', 'ownerReportFeedback', 'intakeLedger'] as const
+const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerReportRouting', 'ownerContinuation', 'ownerReplyContinuation', 'ownerReportFeedback', 'intakeLedger'] as const
 const INTAKE_LEDGER_KEYS = ['enabled', 'sources'] as const
 const INTAKE_SOURCE_KEYS = ['unaddressedGroupMessages', 'unsubscribedEvents'] as const
 const MAX_INTAKE_SOURCES = 32
@@ -308,6 +316,7 @@ export const ConfigSchema = Schema.object({
     })),
   }),
   ownerRecall: Schema.object({ enabled: Schema.boolean().default(false), linkedAliases: Schema.array(Schema.string()) }),
+  ownerReportRouting: Schema.object({ linkedFallback: Schema.array(Schema.string()) }),
   ownerContinuation: Schema.object({
     enabled: Schema.boolean().default(false), automationId: Schema.string(), allowedTools: Schema.array(Schema.string()),
     budgetId: Schema.string(), budgetAmount: Schema.number().step(1),
@@ -561,6 +570,11 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     fail('invalid-input', 'ownerRecall requires an enabled active worker and complete scope')
   }
   const linkedAliases = normalizeLinkedAliases(ownerRecall['linkedAliases'], ownerRecall['enabled'] === true, scope)
+  const ownerReportRouting = value['ownerReportRouting'] === undefined ? {} : plainObject(value['ownerReportRouting'], 'ownerReportRouting')
+  rejectUnknown(ownerReportRouting, ['linkedFallback'], 'ownerReportRouting')
+  const linkedFallback = normalizeLinkedAliases(ownerReportRouting['linkedFallback'],
+    enabled && mode === 'active' && scope !== null && workerAutomationId !== null, scope, 'ownerReportRouting.linkedFallback',
+    'an enabled active worker and complete scope')
   const ownerContinuation = normalizeOwnerContinuation(value['ownerContinuation'], scope, workerAutomationId, now, ownerReportFeedback === true)
   if (ownerContinuation && !admission.allowedKinds.includes('owner-continuation')) fail('invalid-input', 'ownerContinuation requires owner-continuation in admission.allowedKinds')
   if (ownerContinuation && (!enabled || mode !== 'active' || ownerRecall['enabled'] !== true)) {
@@ -586,6 +600,7 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     settlement,
     ...(diagnosis === undefined ? {} : { diagnosis }),
     ...(ownerRecall['enabled'] === true ? { ownerRecall: Object.freeze({ enabled: true as const, ...(linkedAliases ? { linkedAliases } : {}) }) } : {}),
+    ...(linkedFallback === undefined ? {} : { ownerReportRouting: Object.freeze({ linkedFallback }) }),
     ...(ownerContinuation === undefined ? {} : { ownerContinuation }),
     ...(ownerReplyContinuation === true ? { ownerReplyContinuation: true as const } : {}),
     ...(ownerReportFeedback === true ? { ownerReportFeedback: true as const } : {}),
@@ -642,18 +657,19 @@ const DELIVERY_PRINCIPAL_ID = new RegExp(`^${DELIVERY_PRINCIPAL_COMPONENT}(?:/${
  * happens not to match on `principal`. Entries are exact Delivery principal
  * ids, unique, bounded, and never the root owner itself.
  */
-function normalizeLinkedAliases(raw: unknown, recallEnabled: boolean, scope: WorkItemScope | null): readonly string[] | undefined {
+function normalizeLinkedAliases(raw: unknown, recallEnabled: boolean, scope: WorkItemScope | null,
+  field = 'ownerRecall.linkedAliases', requirement = 'ownerRecall.enabled'): readonly string[] | undefined {
   // Schema defaults materialize an empty array; only a non-empty list is a choice.
   if (raw === undefined || Array.isArray(raw) && raw.length === 0) return undefined
-  if (!recallEnabled) fail('invalid-input', 'ownerRecall.linkedAliases requires ownerRecall.enabled')
-  if (!Array.isArray(raw) || raw.length > MAX_LINKED_ALIASES) fail('invalid-input', `ownerRecall.linkedAliases must be an array of at most ${MAX_LINKED_ALIASES} principal ids`)
+  if (!recallEnabled) fail('invalid-input', `${field} requires ${requirement}`)
+  if (!Array.isArray(raw) || raw.length > MAX_LINKED_ALIASES) fail('invalid-input', `${field} must be an array of at most ${MAX_LINKED_ALIASES} principal ids`)
   const seen = new Set<string>()
   for (const entry of raw) {
     if (typeof entry !== 'string' || entry.length > 256 || !DELIVERY_PRINCIPAL_ID.test(entry)) {
-      fail('invalid-input', 'ownerRecall.linkedAliases entries must be canonical Delivery principal ids (channel/account/tenant/user)')
+      fail('invalid-input', `${field} entries must be canonical Delivery principal ids (channel/account/tenant/user)`)
     }
-    if (entry === scope?.principalId) fail('invalid-input', 'ownerRecall.linkedAliases must not contain the owner principal')
-    if (seen.has(entry)) fail('invalid-input', 'ownerRecall.linkedAliases must not contain duplicates')
+    if (entry === scope?.principalId) fail('invalid-input', `${field} must not contain the owner principal`)
+    if (seen.has(entry)) fail('invalid-input', `${field} must not contain duplicates`)
     seen.add(entry)
   }
   return seen.size === 0 ? undefined : Object.freeze([...seen])

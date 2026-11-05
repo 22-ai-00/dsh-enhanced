@@ -654,6 +654,56 @@ describe('work-item dispatch', () => {
     expect(fixture.store.reportCount(admitted.item.id)).toBe(1)
   })
 
+  describe('cross-channel report routing', () => {
+    const ALIAS = 'telegram/bot-tg/personal/alias'
+    async function routed(extra: Partial<Config>, route: (input: Parameters<NonNullable<PeerDeliveryService['routeWorkItemReport']>>[0]) =>
+      ReturnType<NonNullable<PeerDeliveryService['routeWorkItemReport']>>) {
+      const fixture = await ledgerHarness({ extra })
+      const calls: Parameters<NonNullable<PeerDeliveryService['routeWorkItemReport']>>[0][] = []
+      ;(fixture.delivery.service as { routeWorkItemReport?: PeerDeliveryService['routeWorkItemReport'] }).routeWorkItemReport = input => {
+        calls.push(input)
+        return route(input)
+      }
+      const admitted = fixture.admission.admit(signal())
+      fixture.dispatch.wake(admitted.item)
+      fixture.ledger.claim({ itemId: admitted.item.id, runId: 'run-1', occurrenceId: 'occ-1' })
+      const report = fixture.ledger.report({ itemId: admitted.item.id, runId: 'run-1', status: 'ready',
+        summary: 'Reviewed and merged.', artifactPaths: [], idempotencyKey: 'report-key-1' })
+      const item = fixture.store.findItemById(admitted.item.id) as WorkItemRecord
+      return { fixture, calls, report: report.report, item }
+    }
+
+    test('absent routing config never calls the Host route seam', async () => {
+      const r = await routed({}, () => { throw new Error('must not be called') })
+      await expect(r.fixture.dispatch.notify(r.item, r.report)).resolves.toBe(true)
+      expect(r.calls).toHaveLength(0)
+      expect(r.fixture.delivery.enqueues).toHaveLength(1)
+    })
+
+    test('an origin decision keeps the existing origin enqueue', async () => {
+      const r = await routed({ ownerReportRouting: { linkedFallback: [ALIAS] } }, () => ({ route: 'origin' }))
+      await expect(r.fixture.dispatch.notify(r.item, r.report)).resolves.toBe(true)
+      expect(r.calls).toEqual([expect.objectContaining({ originBindingId: 'binding-origin-1', idempotencyKey: r.report.deliveryKey,
+        itemId: r.item.id, reportRevision: r.report.revision, linkedFallback: [ALIAS] })])
+      expect(r.fixture.delivery.enqueues).toHaveLength(1)
+      expect(r.fixture.store.reports(r.item.id)[0]).toMatchObject({ deliveryState: 'sent', deliveryId: 'outbox-1' })
+    })
+
+    test('a linked decision records the fallback outbox and skips the origin enqueue', async () => {
+      const r = await routed({ ownerReportRouting: { linkedFallback: [ALIAS] } }, () => ({ route: 'linked', outbox: { id: 'outbox-linked' } }))
+      await expect(r.fixture.dispatch.notify(r.item, r.report)).resolves.toBe(true)
+      expect(r.fixture.delivery.enqueues).toHaveLength(0)
+      expect(r.fixture.store.reports(r.item.id)[0]).toMatchObject({ deliveryState: 'sent', deliveryId: 'outbox-linked' })
+    })
+
+    test('no eligible route fails closed without an origin enqueue', async () => {
+      const r = await routed({ ownerReportRouting: { linkedFallback: [ALIAS] } }, () => { throw peerError('missing-binding') })
+      await expect(r.fixture.dispatch.notify(r.item, r.report)).rejects.toMatchObject({ code: 'dispatch-failed' })
+      expect(r.fixture.delivery.enqueues).toHaveLength(0)
+      expect(r.fixture.store.reports(r.item.id)[0]).toMatchObject({ deliveryState: 'failed' })
+    })
+  })
+
   test('skips notification for non-terminal reports', async () => {
     const fixture = await ledgerHarness()
     const admitted = fixture.admission.admit(signal())

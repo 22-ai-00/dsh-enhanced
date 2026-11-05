@@ -246,6 +246,18 @@ export class WorkItemDispatch {
         text: notification.text,
         format: 'markdown' as const,
       }
+      // Opt-in cross-channel route: the Host keeps the origin while it is
+      // available and otherwise queues one inspect-only report on an owner-
+      // listed linked channel. Absent config never calls this seam.
+      const linkedFallback = config.ownerReportRouting?.linkedFallback
+      if (linkedFallback !== undefined && typeof delivery.routeWorkItemReport === 'function') {
+        const routed = delivery.routeWorkItemReport({ sourceId: input.sourceId, workspace: input.workspace, originBindingId: input.bindingId,
+          idempotencyKey: input.idempotencyKey, text: input.text, format: input.format, itemId: item.id, reportRevision: report.revision, linkedFallback })
+        if (routed.route === 'linked') {
+          this.#deps.ledger.recordDelivery(item.id, report.revision, 'sent', routed.outbox.id)
+          return true
+        }
+      }
       const typed = (config.ownerReplyContinuation || config.ownerReportFeedback) && delivery.workItemReplyProtocolVersion?.() === 1
         && typeof delivery.enqueueWorkItemReport === 'function'
         && this.#deps.replyReportEligible?.(item, completeReport, notification) === true

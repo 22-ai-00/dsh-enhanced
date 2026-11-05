@@ -38,6 +38,27 @@ test('linked alias reads are an explicit, bounded owner allowlist', () => {
   expect(() => normalizeConfig({ ...owned, ownerRecall: { enabled: false, linkedAliases: [A] } }, 1_000)).toThrow('requires ownerRecall.enabled')
 })
 
+test('cross-channel report routing defaults off and is an explicit, bounded linked fallback list', () => {
+  const OWNER = 'lark/cli_app/tenant/ou_owner'
+  const owned = { ...active, scope: { ...active.scope, principalId: OWNER } }
+  const routing = (ownerReportRouting: unknown, config: object = owned) => normalizeConfig({ ...config, ownerReportRouting } as never, 1_000).ownerReportRouting
+  const A = 'telegram/bot/personal/alice', B = 'lark/cli_app/tenant/ou_b'
+  expect(normalizeConfig(owned, 1_000)).not.toHaveProperty('ownerReportRouting')
+  expect(routing({})).toBeUndefined()
+  expect(routing({ linkedFallback: [] })).toBeUndefined()
+  expect(routing({ linkedFallback: [B, A] })).toEqual({ linkedFallback: [B, A] })
+  expect(Object.isFrozen(routing({ linkedFallback: [A] })!.linkedFallback)).toBe(true)
+  expect(ConfigSchema({ ...owned, ownerReportRouting: { linkedFallback: [A] } }).ownerReportRouting).toMatchObject({ linkedFallback: [A] })
+  expect(() => routing({ linkedFallback: [OWNER] })).toThrow('ownerReportRouting.linkedFallback must not contain the owner principal')
+  for (const linkedFallback of [A, ['telegram/bot/alice'], [A, A], Array.from({ length: 9 }, (_, index) => `telegram/bot/personal/alias-${index}`)]) {
+    expect(() => routing({ linkedFallback })).toThrow()
+  }
+  expect(() => routing({ linkedFallback: [A], viaActivity: true })).toThrow()
+  for (const config of [base, { ...owned, mode: 'observe' }, { ...owned, enabled: false }]) {
+    expect(() => routing({ linkedFallback: [A] }, config)).toThrow('requires an enabled active worker and complete scope')
+  }
+})
+
 test('owner recall alone does not change the immutable diagnosis configuration digest', async () => {
   const { diagnosisConfigurationDigest } = await import('../src/diagnosis-contract.ts')
   const previous = normalizeConfig(active, 1_000)

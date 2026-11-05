@@ -199,6 +199,10 @@ export interface PeerDeliveryService {
   registerInboundIntakeObserver?(observer: Readonly<{ protocol: 1; observe: (signal: import('./intake.js').WorkItemIntakeInput) => void }>): () => void
   enqueueWorkItemReport?(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string;
     text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string,string>>; itemId: string; reportRevision: number }): { readonly id: string } | Promise<{readonly id:string}>
+  /** Host cross-channel report route; `origin` means nothing was queued. */
+  routeWorkItemReport?(input: { sourceId: string; workspace: string; originBindingId: string; idempotencyKey: string; text: string
+    format?: 'markdown' | 'plain'; itemId: string; reportRevision: number; linkedFallback: readonly string[] }):
+    Readonly<{ route: 'origin' } | { route: 'linked'; outbox: { readonly id: string } }>
   listPendingWorkItemReplies?(input: WorkItemReplyListInput): Readonly<{items:readonly WorkItemReplySource[];hasMore:boolean;nextAfterSequence:number|null}>
   readWorkItemReply?(input: WorkItemReplyReadInput): Readonly<WorkItemReplySource>
   selectWorkItemReplyParent?(input: WorkItemReplyReadInput): Readonly<WorkItemReplySource>

@@ -857,6 +857,10 @@ function isModelSelectionPayload(value: unknown): value is ModelSelectionPayload
 const toolApprovalArgumentBytes = 16 * 1024
 const ownerRequestedChangeArgumentBytes = 64 * 1024
 const toolApprovalIdentityBytes = 512
+/** Reserved metadata of a work-item report the Host routed to a linked alias channel. */
+const linkedReportMetadataPrefix = 'dsh.linked-report'
+/** Bounded owner-ordered linked fallback list for one report route. */
+const maxLinkedReportFallback = 8
 
 function inspectUnsettledNativeCall(
   events: readonly SessionEvent[], turn: number, callId: string,
@@ -5105,12 +5109,121 @@ export class AssistantDeliveryService extends Service {
   }
   enqueueWorkItemReport(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string,string>>; itemId: string; reportRevision: number }): OutboxRecord {
     this.assertActive()
-    if (containsReservedLearningMetadata(input.metadata) || Object.keys(input.metadata ?? {}).some(key => key.startsWith('dsh.native-notice'))) {
+    if (containsReservedLearningMetadata(input.metadata) || Object.keys(input.metadata ?? {}).some(key => key.startsWith('dsh.native-notice') || key.startsWith(linkedReportMetadataPrefix))) {
       throw new AssistantDeliveryError('runtime-conflict', 'reserved metadata requires its typed delivery interface')
     }
     const target = this.inspectWorkItemReport(input)
     if (input.workspace !== target.scope.workspace) throw new Error('work item report scope changed')
     return this.enqueueBackgroundAuthorized(input, target, { lane: 'work-item-report', lanePurpose: { purpose: 'result', workItemId: input.itemId } })
+  }
+
+  /**
+   * Host-only cross-channel route for one background work-item report.
+   *
+   * The origin binding always wins: while it is active with an active
+   * principal this returns `{ route: 'origin' }` and enqueues nothing, so the
+   * caller keeps its existing origin path unchanged. Only when the origin is
+   * unavailable does the Host walk the owner's explicit `linkedFallback` list
+   * (Delivery principal ids, in order) and pick the first alias that is still
+   * an active `linked` row of the CURRENT owner record, with exactly one active
+   * binding in the origin workspace/preset, and that existing Policy already
+   * allows to receive this source's sends. The report is queued on the plain
+   * background lane, never the typed report lane, so a reply on the fallback
+   * channel can never continue or give feedback on the item. The queued row
+   * binds the owner and alias record versions plus the alias binding
+   * version/generation; the send-time guard drops it after any revoke or
+   * relink. A replay returns the first committed destination.
+   */
+  routeWorkItemReport(input: Readonly<{ sourceId: string; workspace: string; originBindingId: string; idempotencyKey: string; text: string
+    format?: 'markdown' | 'plain'; itemId: string; reportRevision: number; linkedFallback: readonly string[] }>): Readonly<{ route: 'origin' } | { route: 'linked'; outbox: OutboxRecord }> {
+    this.assertActive()
+    if (!Array.isArray(input.linkedFallback) || input.linkedFallback.length > maxLinkedReportFallback
+      || input.linkedFallback.some(id => typeof id !== 'string' || id.length === 0 || id.length > 256)
+      || typeof input.idempotencyKey !== 'string' || input.idempotencyKey.length === 0
+      || typeof input.itemId !== 'string' || input.itemId.length === 0
+      || !Number.isSafeInteger(input.reportRevision) || input.reportRevision < 1) {
+      throw new AssistantDeliveryError('runtime-conflict', 'linked report route input is invalid')
+    }
+    const linkedKey = `linked-report:${createHash('sha256').update(input.idempotencyKey).digest('hex')}`
+    // Never send one report twice: a committed destination is final.
+    if (this.deliveryStore.getOutboxByIdempotencyKey(input.idempotencyKey) !== undefined) return Object.freeze({ route: 'origin' as const })
+    const replay = this.deliveryStore.getOutboxByIdempotencyKey(linkedKey)
+    if (replay !== undefined) {
+      const metadata = replay.intent.metadata
+      if (metadata?.[linkedReportMetadataPrefix] !== 'v1' || metadata[`${linkedReportMetadataPrefix}.sourceId`] !== input.sourceId
+        || metadata[`${linkedReportMetadataPrefix}.originBindingId`] !== input.originBindingId
+        || metadata[`${linkedReportMetadataPrefix}.itemId`] !== input.itemId
+        || metadata[`${linkedReportMetadataPrefix}.reportRevision`] !== String(input.reportRevision)) {
+        throw new AssistantDeliveryError('runtime-conflict', 'linked report idempotency key was reused for a different report')
+      }
+      return Object.freeze({ route: 'linked' as const, outbox: replay })
+    }
+    const origin = this.deliveryStore.getBinding(input.originBindingId)
+    if (origin === undefined || origin.workspace !== input.workspace) {
+      throw new AssistantDeliveryError('missing-binding', 'report origin binding does not exist')
+    }
+    if (origin.status === 'active' && this.hasActivePrincipal(origin)) return Object.freeze({ route: 'origin' as const })
+    const owner = this.deliveryStore.getPrincipal(origin.principal)
+    if (owner?.status !== 'active' || owner.role !== 'owner' || JSON.stringify(owner.principal) !== JSON.stringify(origin.principal)) {
+      throw new AssistantDeliveryError('missing-binding', 'report origin owner is no longer active')
+    }
+    const ownerId = externalPrincipalId(owner.principal)
+    const active = this.deliveryStore.listActiveBindings()
+    for (const aliasId of input.linkedFallback) {
+      if (aliasId === ownerId) continue
+      const matches = active.filter(binding => externalPrincipalId(binding.principal) === aliasId
+        && binding.workspace === origin.workspace && binding.agentPreset === origin.agentPreset)
+      // Ambiguous alias channels are skipped rather than guessed.
+      if (matches.length !== 1) continue
+      const binding = matches[0]!
+      const alias = this.deliveryStore.getPrincipal(binding.principal)
+      if (binding.id === origin.id || alias?.status !== 'active' || alias.role !== 'linked' || alias.linkedToId !== owner.id
+        || alias.id === owner.id || JSON.stringify(alias.principal) !== JSON.stringify(binding.principal)) continue
+      if (!this.linkedReportSendAllowed(input.sourceId, binding)) continue
+      const outbox = this.enqueueBackgroundAuthorized({ sourceId: input.sourceId, workspace: binding.workspace, bindingId: binding.id,
+        idempotencyKey: linkedKey, text: input.text, format: input.format ?? 'plain', metadata: {
+          [linkedReportMetadataPrefix]: 'v1',
+          [`${linkedReportMetadataPrefix}.sourceId`]: input.sourceId,
+          [`${linkedReportMetadataPrefix}.itemId`]: input.itemId,
+          [`${linkedReportMetadataPrefix}.reportRevision`]: String(input.reportRevision),
+          [`${linkedReportMetadataPrefix}.originBindingId`]: origin.id,
+          [`${linkedReportMetadataPrefix}.ownerRecordId`]: owner.id,
+          [`${linkedReportMetadataPrefix}.ownerVersion`]: String(owner.version),
+          [`${linkedReportMetadataPrefix}.aliasRecordId`]: alias.id,
+          [`${linkedReportMetadataPrefix}.aliasVersion`]: String(alias.version),
+          [`${linkedReportMetadataPrefix}.bindingVersion`]: String(binding.version),
+          [`${linkedReportMetadataPrefix}.bindingGeneration`]: String(binding.generation),
+        } }, undefined, { lane: 'background', lanePurpose: { purpose: 'result', workItemId: input.itemId } })
+      return Object.freeze({ route: 'linked' as const, outbox })
+    }
+    throw new AssistantDeliveryError('missing-binding', 'report origin is unavailable and no linked fallback is eligible')
+  }
+  private linkedReportSendAllowed(sourceId: string, binding: Readonly<ConversationBinding>): boolean {
+    return this.policy.evaluate({ subject: { kind: 'background', id: sourceId, workspace: binding.workspace,
+      principal: externalPrincipalId(binding.principal) }, action: 'send', resource: { kind: 'message', id: binding.id },
+    context: { initiator: 'background' } }).effect === 'allow'
+  }
+  /** Send-time re-check of a linked report route; any revoke, relink or Policy change drops it. */
+  private linkedReportGuard(record: Readonly<OutboxRecord>): Extract<import('./types.js').AdapterSendResult, { outcome: 'not-sent' }> | undefined {
+    const metadata = record.intent.metadata
+    const field = (name: string) => metadata?.[`${linkedReportMetadataPrefix}.${name}`]
+    try {
+      if (containsReservedLearningMetadata(metadata) || metadata?.[linkedReportMetadataPrefix] !== 'v1'
+        || !record.intent.idempotencyKey.startsWith('linked-report:')
+        || (typeof record.id === 'string' && this.deliveryStore.getGoalOutcomeTarget(record.id) !== undefined)) throw new Error('linked report is invalid')
+      const binding = this.deliveryStore.getBinding(record.intent.bindingId)
+      const alias = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
+      const origin = this.deliveryStore.getBinding(field('originBindingId') ?? '')
+      const owner = origin === undefined ? undefined : this.deliveryStore.getPrincipal(origin.principal)
+      if (binding?.status !== 'active' || String(binding.version) !== field('bindingVersion') || String(binding.generation) !== field('bindingGeneration')
+        || origin === undefined || binding.workspace !== origin.workspace || binding.agentPreset !== origin.agentPreset
+        || owner?.status !== 'active' || owner.role !== 'owner' || owner.id !== field('ownerRecordId') || String(owner.version) !== field('ownerVersion')
+        || alias?.status !== 'active' || alias.role !== 'linked' || alias.id !== field('aliasRecordId') || String(alias.version) !== field('aliasVersion')
+        || alias.linkedToId !== owner.id || !this.linkedReportSendAllowed(canonicalBackgroundSourceId(field('sourceId') ?? ''), binding)) {
+        throw new Error('linked report route changed')
+      }
+    } catch { return { outcome: 'not-sent', failureCode: 'linked-report-route-revoked', retryable: false } }
+    return undefined
   }
   private workItemReplyPermission(binding: ConversationBinding, registration: WorkItemReplyConsumerRegistration): boolean {
     return this.policy.evaluate({ subject: { kind: 'external', id: externalPrincipalId(binding.principal), workspace: binding.workspace, principal: externalPrincipalId(binding.principal) },
@@ -5215,7 +5328,7 @@ export class AssistantDeliveryService extends Service {
     attention?: AttentionEnvelope
   }): OutboxRecord {
     this.assertActive()
-    if (containsReservedLearningMetadata(input.metadata) || Object.keys(input.metadata ?? {}).some(key => key.startsWith('dsh.native-notice'))) {
+    if (containsReservedLearningMetadata(input.metadata) || Object.keys(input.metadata ?? {}).some(key => key.startsWith('dsh.native-notice') || key.startsWith(linkedReportMetadataPrefix))) {
       throw new AssistantDeliveryError(
         'runtime-conflict',
         'reserved metadata requires its typed delivery interface',
@@ -5447,6 +5560,7 @@ export class AssistantDeliveryService extends Service {
       }
       return this.#nativeNoticeGuard(record.intent)
     }
+    if (Object.keys(metadata ?? {}).some(key => key.startsWith(linkedReportMetadataPrefix))) return this.linkedReportGuard(record)
     let goalTarget: ReturnType<DeliveryStore['getGoalOutcomeTarget']>
     try { goalTarget = this.deliveryStore.getGoalOutcomeTarget(record.id) } catch {
       return { outcome: 'not-sent', failureCode: 'goal-outcome-target-invalid', retryable: false }
