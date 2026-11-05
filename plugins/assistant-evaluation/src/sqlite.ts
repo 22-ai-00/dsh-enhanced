@@ -10,7 +10,7 @@ import {
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const evaluationSchemaVersion = 13
+export const evaluationSchemaVersion = 14
 
 export type EvaluationDatabaseErrorCode = 'invalid-path' | 'unsafe-file' | 'schema-too-new'
 
@@ -283,6 +283,65 @@ function legacyTaskSubject(scopeKey: string, id: string, evidenceJson: string): 
   }
   return { key: JSON.stringify([scopeKey, 'outcome', id]), kind: 'outcome', ref: id }
 }
+
+/**
+ * WP22 per-notification outcome canon. Revisions are immutable; the head names
+ * the current revision and carries a per-scope notification watermark used as a
+ * restart-safe read cursor. Separate from task-learning watermarks so this
+ * read-only feed never fences or advances Evolution evidence.
+ */
+const notificationOutcomeSchema = `
+  CREATE TABLE evaluation_notification_outcome_revisions (
+    notification_id TEXT NOT NULL CHECK (length(notification_id) BETWEEN 1 AND 256),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    scope_key TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('pending','delivered','reacted','accepted','rejected','expired-unhandled','failed')),
+    record_json TEXT NOT NULL CHECK (json_valid(record_json)),
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    watermark INTEGER NOT NULL CHECK (watermark >= 1),
+    recorded_at INTEGER NOT NULL CHECK (recorded_at >= 0),
+    PRIMARY KEY (notification_id, version),
+    UNIQUE (scope_key, watermark)
+  ) STRICT;
+  CREATE TRIGGER evaluation_notification_outcome_revisions_immutable
+    BEFORE UPDATE ON evaluation_notification_outcome_revisions
+    BEGIN SELECT RAISE(ABORT, 'notification outcome revisions are immutable'); END;
+  CREATE TRIGGER evaluation_notification_outcome_revisions_no_delete
+    BEFORE DELETE ON evaluation_notification_outcome_revisions
+    BEGIN SELECT RAISE(ABORT, 'notification outcome revisions are durable'); END;
+  CREATE TABLE evaluation_notification_outcome_heads (
+    notification_id TEXT PRIMARY KEY,
+    scope_key TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    outcome TEXT NOT NULL,
+    occurred_at INTEGER NOT NULL CHECK (occurred_at >= 0),
+    watermark INTEGER NOT NULL CHECK (watermark >= 1),
+    last_checked_at INTEGER NOT NULL CHECK (last_checked_at >= 0),
+    UNIQUE (scope_key, watermark),
+    FOREIGN KEY (notification_id, version) REFERENCES evaluation_notification_outcome_revisions(notification_id, version)
+  ) STRICT;
+  CREATE INDEX evaluation_notification_outcome_heads_check
+    ON evaluation_notification_outcome_heads(last_checked_at, notification_id);
+  CREATE INDEX evaluation_notification_outcome_heads_scope_time
+    ON evaluation_notification_outcome_heads(scope_key, occurred_at);
+  CREATE TRIGGER evaluation_notification_outcome_heads_monotonic
+    BEFORE UPDATE OF version, watermark, scope_key ON evaluation_notification_outcome_heads
+    WHEN NEW.version <= OLD.version OR NEW.watermark <= OLD.watermark OR NEW.scope_key IS NOT OLD.scope_key
+    BEGIN SELECT RAISE(ABORT, 'notification outcome head must advance'); END;
+  CREATE TRIGGER evaluation_notification_outcome_heads_no_delete
+    BEFORE DELETE ON evaluation_notification_outcome_heads
+    BEGIN SELECT RAISE(ABORT, 'notification outcome heads are durable'); END;
+  CREATE TABLE evaluation_notification_watermarks (
+    scope_key TEXT PRIMARY KEY,
+    watermark INTEGER NOT NULL CHECK (watermark >= 1)
+  ) STRICT;
+  CREATE TABLE evaluation_notification_sync_cursor (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    after_sequence INTEGER NOT NULL CHECK (after_sequence >= 0),
+    updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+  ) STRICT;
+`
 
 function migrate(database: DatabaseSync): void {
   const initial = schemaVersion(database)
@@ -651,6 +710,13 @@ function migrate(database: DatabaseSync): void {
         DROP TABLE evaluation_v12_outbox;
         UPDATE evaluation_schema_meta SET value = '13' WHERE key = 'schema-version';
         PRAGMA user_version = 13;
+      `)
+    }
+    if (schemaVersion(database) === 13) {
+      database.exec(`
+        ${notificationOutcomeSchema}
+        UPDATE evaluation_schema_meta SET value = '14' WHERE key = 'schema-version';
+        PRAGMA user_version = 14;
       `)
     }
     if (schemaVersion(database) !== evaluationSchemaVersion) {

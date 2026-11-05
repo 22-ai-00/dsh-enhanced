@@ -364,6 +364,10 @@ An older Host opening a schema 31 file rejects it via `delivery schema 31 is new
 
 Word counts use `Intl.Segmenter('und')` word segments plus non-ASCII, non-punctuation symbol graphemes such as emoji, with a separate non-whitespace grapheme cap per purpose. Segmentation follows the ICU data bundled with the running Node.js, so counts for the same text can change across Node/ICU upgrades; audit rows keep the verdict computed at record time and are never recomputed.
 
+### Notification outcome ledger (Evaluation schema 14, WP22 slice 1)
+
+Evaluation 13→14 adds four new tables (`evaluation_notification_outcome_revisions`, `_heads`, `evaluation_notification_watermarks`, `evaluation_notification_sync_cursor`) and changes no existing table, row, watermark or feed. Revisions and heads are protected by update/delete triggers; notification watermarks are separate from task-learning watermarks, so existing feeds, writer fences and Evolution delivery are unaffected. An older Host opening a schema 14 file rejects it with `evaluation schema 14 is newer than supported schema 13`. Delivery stays at schema 31: its new `inspectNotificationOutcomeFacts` is a read-only query over existing tables and returns no message or reply text. Sync is opt-in (`notificationOutcomesEnabled`, default `false`), runs on the existing projection tick, makes no model call and adopts no parameter.
+
 ### Work-item engineering creation (integration in progress)
 
 This opt-in requires matching Delivery/WorkItems engineering-context APIs, Growth producer v2, Control Plane prepared-creation v2, Verifier/adoption readiness APIs and Policy's `workItemGrowthToolPreauthorizationVersion() === 1`. Policy preauthorization is tied to exact live tool definitions and the bound native author run; it does not change interactive approval settings or authorize foreground creation. Missing capabilities stop admission before author generation; a shared package version alone is insufficient. The DSH/Cordis baseline is unchanged. See [current status](rsi-status.md) for verification boundaries.

@@ -7,6 +7,9 @@ import { evaluationSchemaVersion, openEvaluationDatabase } from '../src/sqlite.t
 import { EvaluationStore, EvaluationStoreError } from '../src/store.ts'
 import type { OutcomeEnvelope } from '../src/types.ts'
 
+// Schema 14 (WP22) tables; downgrade fixtures drop them with the other later-schema tables.
+const dropNotificationOutcomeTables = 'DROP TABLE evaluation_notification_outcome_heads; DROP TABLE evaluation_notification_outcome_revisions; DROP TABLE evaluation_notification_watermarks; DROP TABLE evaluation_notification_sync_cursor;'
+
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
@@ -96,7 +99,7 @@ describe('evaluation database', () => {
     current.exec(`
       DROP TABLE evaluation_owner_commands;
       DROP TABLE evaluation_owner_revisions;
-      DROP TABLE evaluation_task_projection_feed_heads;
+      DROP TABLE evaluation_task_projection_feed_heads; ${dropNotificationOutcomeTables}
       DROP VIEW evaluation_task_projection_view;
       DROP TABLE evaluation_scope_watermarks;
       DROP TABLE evaluation_task_projections;
@@ -165,7 +168,7 @@ describe('evaluation database', () => {
     const v9View = legacy.prepare(`SELECT sql FROM sqlite_schema WHERE type = 'view' AND name = 'evaluation_task_projection_view'`)
       .get() as { sql: string }
     legacy.exec(`
-      DROP TABLE evaluation_task_projection_feed_heads;
+      DROP TABLE evaluation_task_projection_feed_heads; ${dropNotificationOutcomeTables}
       DROP VIEW evaluation_task_projection_view;
       ALTER TABLE evaluation_task_projections RENAME TO evaluation_task_projections_v9_fixture;
       DROP INDEX evaluation_task_projections_scope_time;
@@ -222,7 +225,7 @@ describe('evaluation database', () => {
     const v10View = legacy.prepare(`SELECT sql FROM sqlite_schema WHERE type = 'view' AND name = 'evaluation_task_projection_view'`)
       .get() as { sql: string }
     legacy.exec(`
-      DROP TABLE evaluation_task_projection_feed_heads;
+      DROP TABLE evaluation_task_projection_feed_heads; ${dropNotificationOutcomeTables}
       DROP VIEW evaluation_task_projection_view;
       ALTER TABLE evaluation_task_projections RENAME TO evaluation_task_projections_v10_fixture;
       DROP INDEX evaluation_task_projections_scope_time;
@@ -739,7 +742,7 @@ test('schema-seven feedback is lazily adopted by an exact Host target and remain
   const old = store.append(original)
   store.close()
   const db = new DatabaseSync(path)
-  db.exec("DROP TABLE evaluation_task_projection_feed_heads; DROP TABLE evaluation_owner_commands; DROP TABLE evaluation_owner_revisions; UPDATE evaluation_schema_meta SET value = '7' WHERE key = 'schema-version'; PRAGMA user_version = 7")
+  db.exec(`DROP TABLE evaluation_task_projection_feed_heads; ${dropNotificationOutcomeTables} DROP TABLE evaluation_owner_commands; DROP TABLE evaluation_owner_revisions; UPDATE evaluation_schema_meta SET value = '7' WHERE key = 'schema-version'; PRAGMA user_version = 7`)
   db.close()
   store = new EvaluationStore({ path })
   const lineage = { principalRecordId: 'owner-record', principalVersion: 1 }

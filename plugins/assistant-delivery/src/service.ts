@@ -86,8 +86,8 @@ import { isSynchronousForegroundObservationHandle, validForegroundObservationReg
   type ForegroundTaskIdentity, type ForegroundTaskObservationRegistration,
   type ForegroundToolCallAttestation, type OwnerForegroundToolInput } from './foreground-observation.js'
 import { InboundImageMaterializer } from './inbound-images.js'
-import { assessAttention, assessAttentionSplit, attentionOverCap, attentionSplitWindowMs, convertOverCapAttention,
-  type AttentionAuditEntry, type AttentionEnvelope, type AttentionLane, type AttentionPurpose } from './attention.js'
+import { assessAttention, assessAttentionSplit, attentionOverCap, attentionSplitWindowMs, convertOverCapAttention, NOTIFICATION_OUTCOME_FACTS_PROTOCOL,
+  type AttentionAuditEntry, type AttentionEnvelope, type AttentionLane, type AttentionPurpose, type NotificationOutcomeFact } from './attention.js'
 import { registerDeliveryTools } from './tools.js'
 import {
   bindingMatchesOwnerRoute,
@@ -5217,6 +5217,35 @@ export class AssistantDeliveryService extends Service {
     return Object.freeze({ entries: page.entries, hasMore: page.hasMore,
       nextAfterSequence: page.hasMore ? page.entries.at(-1)!.sequence : null,
       processLocalWriteFailures: this.attentionAuditWriteFailures, unauditedOutbox: this.deliveryStore.attentionAudit.unauditedOutboxCount() })
+  }
+
+  /**
+   * WP22 read adapter for Evaluation: per-notification durable facts (transport,
+   * owner reply, current owner judgement) keyed by audited Outbox id. Read-only,
+   * text-free, and classification-free. Pass `outboxIds` (max 500) to refresh
+   * known notifications, or `afterSequence`/`limit` to page new audit rows.
+   */
+  inspectNotificationOutcomeFacts(input: Readonly<{ afterSequence?: number; limit?: number; outboxIds?: readonly string[] }> = {}): Readonly<{
+    protocol: typeof NOTIFICATION_OUTCOME_FACTS_PROTOCOL; facts: readonly NotificationOutcomeFact[]; hasMore: boolean; nextAfterSequence: number | null
+  }> {
+    this.assertActive()
+    if (input.outboxIds !== undefined) {
+      if (!Array.isArray(input.outboxIds) || input.outboxIds.length > 500 || input.afterSequence !== undefined || input.limit !== undefined
+        || !input.outboxIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 256)) {
+        throw new AssistantDeliveryError('runtime-conflict', 'invalid notification outcome lookup')
+      }
+      return Object.freeze({ protocol: NOTIFICATION_OUTCOME_FACTS_PROTOCOL,
+        facts: this.deliveryStore.attentionAudit.outcomeFactsFor([...new Set(input.outboxIds)]), hasMore: false, nextAfterSequence: null })
+    }
+    const afterSequence = input.afterSequence ?? 0
+    const limit = input.limit ?? 100
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new AssistantDeliveryError('runtime-conflict', 'invalid notification outcome scan')
+    }
+    const page = this.deliveryStore.attentionAudit.list(afterSequence, limit)
+    const facts = this.deliveryStore.attentionAudit.outcomeFactsFor(page.entries.map(entry => entry.outboxId))
+    return Object.freeze({ protocol: NOTIFICATION_OUTCOME_FACTS_PROTOCOL, facts, hasMore: page.hasMore,
+      nextAfterSequence: page.entries.length === 0 ? null : page.entries.at(-1)!.sequence })
   }
 
   private enqueueBackgroundAuthorized(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string, string>> }, reportTarget?: WorkItemReportTarget,

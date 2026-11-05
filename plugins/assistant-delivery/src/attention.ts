@@ -346,3 +346,40 @@ export interface AttentionAuditEntry extends AttentionAssessment {
   sourceId: string
   recordedAt: number
 }
+
+export const NOTIFICATION_OUTCOME_FACTS_PROTOCOL = 'assistant-delivery/notification-outcome-facts/v1' as const
+
+/**
+ * WP22 read model: durable Delivery facts about one audited notification.
+ * It never carries message or reply text; Evaluation classifies the outcome.
+ */
+export interface NotificationOutcomeFact {
+  auditSequence: number
+  outboxId: string
+  bindingId: string
+  scope: Readonly<{ workspace: string; preset: string }>
+  lane: AttentionLane
+  sourceId: string
+  purpose: AttentionPurpose
+  purposeSource: AttentionPurposeSource
+  workItemId?: string
+  questionId?: string
+  answersQuestionId?: string
+  verdict: AttentionVerdict
+  reasons: readonly AttentionAuditReason[]
+  auditedAt: number
+  transport: Readonly<{
+    status: 'pending' | 'attempting' | 'accepted' | 'delivered' | 'read' | 'retry_wait' | 'dead' | 'unknown_after_send'
+    acceptedAt?: number
+    deliveredAt?: number
+    readAt?: number
+  }>
+  /** Earliest owner Inbox message on the same binding that replies to this notification. */
+  reaction?: Readonly<{ firstAt: number; count: number }>
+  /** Current Host-recorded owner judgement; `unknown` means withdrawn. */
+  judgement?: Readonly<{
+    source: 'owner-objective' | 'work-item-feedback'
+    version: number
+    objectiveStatus: 'achieved' | 'partial' | 'not-achieved' | 'unknown'
+  }>
+}

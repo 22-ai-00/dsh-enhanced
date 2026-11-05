@@ -578,6 +578,9 @@ export interface EvaluationHealth {
   pendingProjections: number
   retryingProjections: number
   projectionAttempts: number
+  /** WP22 notification heads and their append-only revisions. */
+  notificationOutcomes: number
+  notificationOutcomeRevisions: number
   oldestPendingProjectionAt?: number
   latestOccurredAt?: number
 }
@@ -635,4 +638,110 @@ export interface EvaluationReview {
   outcomes: readonly ProjectedOutcome[]
   /** Latest self-report per reviewed outcome; it never changes the parent summary. */
   selfAssessments: readonly StoredSelfAssessment[]
+}
+
+/**
+ * WP22 per-notification outcome vocabulary. `accepted`/`rejected` require a
+ * current Host-recorded owner judgement; `reacted` is an owner reply (or a
+ * partial judgement); `expired-unhandled` is a sent notification without any
+ * reaction once the configured response window elapsed.
+ */
+export const notificationOutcomes = [
+  'pending', 'delivered', 'reacted', 'accepted', 'rejected', 'expired-unhandled', 'failed',
+] as const
+export type NotificationOutcome = typeof notificationOutcomes[number]
+
+export const NOTIFICATION_OUTCOME_RECORD_PROTOCOL = 'assistant-evaluation/notification-outcome/v1' as const
+export const NOTIFICATION_OUTCOME_FACTS_PROTOCOL = 'assistant-delivery/notification-outcome-facts/v1' as const
+
+/** Structural mirror of Delivery's text-free notification facts; no runtime package dependency. */
+export interface NotificationOutcomeFactInput {
+  auditSequence: number
+  outboxId: string
+  bindingId: string
+  scope: Readonly<EvaluationScope>
+  lane: string
+  sourceId: string
+  purpose: 'result' | 'attention' | 'answer'
+  purposeSource: 'declared' | 'lane' | 'default'
+  workItemId?: string
+  questionId?: string
+  answersQuestionId?: string
+  verdict: 'would-accept' | 'would-attach' | 'would-reject'
+  reasons: readonly string[]
+  auditedAt: number
+  transport: Readonly<{ status: string; acceptedAt?: number; deliveredAt?: number; readAt?: number }>
+  reaction?: Readonly<{ firstAt: number; count?: number }>
+  judgement?: Readonly<{
+    source: 'owner-objective' | 'work-item-feedback'
+    version: number
+    objectiveStatus: ObjectiveStatus
+  }>
+}
+
+/** Canonical content of one notification-outcome revision; its SHA-256 is the revision digest. */
+export interface NotificationOutcomeRecord {
+  protocol: typeof NOTIFICATION_OUTCOME_RECORD_PROTOCOL
+  classifier: Readonly<{ id: 'notification-outcome'; version: 1; responseWindowMs: number }>
+  notificationId: string
+  scope: Readonly<EvaluationScope>
+  bindingId: string
+  lane: string
+  sourceId: string
+  purpose: NotificationOutcomeFactInput['purpose']
+  purposeSource: NotificationOutcomeFactInput['purposeSource']
+  workItemId?: string
+  questionId?: string
+  answersQuestionId?: string
+  verdict: NotificationOutcomeFactInput['verdict']
+  reasons: readonly string[]
+  notifiedAt: number
+  outcome: NotificationOutcome
+  transport: Readonly<{ status: string; acceptedAt?: number; deliveredAt?: number; readAt?: number }>
+  reaction?: Readonly<{ firstAt: number }>
+  judgement?: Readonly<{ source: 'owner-objective' | 'work-item-feedback'; version: number; objectiveStatus: Exclude<ObjectiveStatus, 'unknown'> }>
+  /** Set only for `expired-unhandled`: the deterministic expiry boundary. */
+  expiredAt?: number
+}
+
+export interface StoredNotificationOutcome {
+  notificationId: string
+  scopeKey: string
+  version: number
+  digest: string
+  /** Per-scope notification watermark of this revision (not the task-learning watermark). */
+  watermark: number
+  recordedAt: number
+  record: Readonly<NotificationOutcomeRecord>
+}
+
+export interface NotificationOutcomeHistory {
+  head: Readonly<StoredNotificationOutcome>
+  revisions: readonly Readonly<StoredNotificationOutcome>[]
+}
+
+/** Restart-safe page of current notification heads after a per-scope watermark. */
+export interface NotificationOutcomeFeedPage {
+  items: readonly Readonly<StoredNotificationOutcome>[]
+  nextCursor: Readonly<{ scopeKey: string; watermark: number }>
+  scopeWatermark: number
+  hasMore: boolean
+}
+
+export interface NotificationOutcomeSummary {
+  scope: Readonly<EvaluationScope>
+  scopeKey: string
+  fromNotifiedAt: number
+  toNotifiedAt: number
+  total: number
+  outcomes: Readonly<Record<NotificationOutcome, number>>
+  /** Attention verdict x current outcome, for WP19 would-accept concordance. */
+  byVerdict: Readonly<Record<NotificationOutcomeFactInput['verdict'], Readonly<Record<NotificationOutcome, number>>>>
+}
+
+export interface NotificationOutcomeSyncResult {
+  ingested: number
+  refreshed: number
+  revised: number
+  invalid: number
 }

@@ -30,6 +30,12 @@ export {
   evaluationLearningProjectionDigest,
 } from './store.js'
 export { EvaluationDatabaseError, evaluationSchemaVersion } from './sqlite.js'
+export {
+  NotificationOutcomeLedger,
+  classifyNotificationOutcome,
+  normalizeNotificationOutcomeFact,
+  notificationOutcomeDigest,
+} from './notification-outcomes.js'
 export * from './types.js'
 
 export function apply(ctx: Context, config: ConfigType): void {

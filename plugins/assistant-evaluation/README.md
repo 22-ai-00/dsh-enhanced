@@ -77,6 +77,10 @@ projection 保存选中的 execution/objective/delivery component id，原始两
 | `maxEvidenceRefs` | `32` | 每条 outcome 的证据引用数上限。 |
 | `defaultSummaryWindowMs` | 30 天 | 未指定起点时的默认汇总窗口。 |
 | `maxSummaryWindowMs` | 365 天 | 单次汇总允许的最大窗口。 |
+| `notificationOutcomesEnabled` | `false` | WP22：在既有 projection tick 上同步 Delivery 通知结果事实。 |
+| `notificationResponseWindowMs` | 1 天 | 已发出且无反应的通知超过此窗口记为 `expired-unhandled`。 |
+| `notificationObservationHorizonMs` | 30 天 | 已知通知在此期间内被重查，以吸收迟到回复、更正与撤回。 |
+| `notificationSyncBatchSize` | `100` | 每次 tick 新摄入与重查的条数上限（最大 500）。 |
 
 ## 权限与数据边界
 
@@ -96,6 +100,12 @@ WorkItems 的普通结算仍只能记录 `objectiveStatus: unknown`。显式启�
 该路径使用 `work-item` / 原 `itemId` 作为唯一 canonical 主体；报告 revision、digest 和原生 run 是证据，不增加学习票数，也不沿续办 stream 改评后来的子项。执行状态来自独立 proof，按持久 report revision 选择；同 revision 的矛盾 proof 保持不可学习。主人判断走既有 initial / correct / withdraw CAS 和持久 operation 幂等链。`getTrustedWorkItemLearningProjection({ scope, itemId })` 返回当前有版本与 digest 的投影，撤回返回 `retract`；`getTrustedTaskLearningProjection`、owner revision reader 和 writer fence 同样支持这个主体。模型自评不能创建该可信结果。新的结果写入还要求当前 Delivery 提供源 writer fence：最后一次 WorkItems 读取后重核当前反馈授权和冻结来源，在同一源锁内写入 owner 判断并结算来源。通知在源事务提交后发送；跨库失去回执时保留原操作身份恢复，不声称可原子回滚两个数据库。
 
 schema 13 扩展任务投影的主体身份约束及投影 outbox 的状态约束，保留既有 outcome、owner 命令、projection、投影 outbox、scope watermark 和 feed head 的值。旧 `work-item` settlement 仍是独立 outcome audit，不追认或合并为新结果。Growth / Memory 消费者可以继续拒绝尚未支持的新主体；这一来源不自行触发模型、采用插件或授予执行预算。当前 Evolution 不支持该新主体，因此其投递 outbox 诚实保存为 `not-required`，不会伪造 applied/recorded、指数重试或消耗恢复预算；canonical feed、来源 reader 和 canonical writer fence 仍可使用。要求已经投递 Evolution 的旧 learning writer fence 则明确拒绝 `work-item` 证据。
+
+## 通知结果账本（WP22 切片 1，只读）
+
+schema 14 新增与任务投影分离的 `evaluation_notification_outcome_*` 表：以 Delivery Outbox id 为通知主键，每次分类变化追加不可改、不可删的 revision 并推进该 scope 独立的通知 watermark；digest 不变只刷新检查时间。分类器 `notification-outcome` v1 确定性、无模型调用，优先级：owner/工作项判断 `not-achieved`→`rejected`、`achieved`→`accepted`；回复或 `partial`→`reacted`；传输 `dead`→`failed`；已发出且超过响应窗口→`expired-unhandled`（含 `expiredAt`），否则 `delivered`；未发出→`pending`。撤回（`unknown`）不计入判断。响应窗口写入记录，改配置会形成新 revision。回复条数与任何正文不入库。
+
+启用后每个 projection tick 先从持久游标摄入新审计行，再按最久未查顺序重查观察期内的已知通知；格式错误的事实计入 `invalid` 并跳过，不阻塞游标。Delivery 缺席时为零结果。读接口：`inspectNotificationOutcome({ scope, notificationId })`（当前 + 全部 revision）、`notificationOutcomeFeed({ scope, after?, limit? })`（按 watermark 可续读的当前 head）、`notificationOutcomeSummary({ scope, fromNotifiedAt?, toNotifiedAt? })`（按 outcome 与 attention verdict 计数）。本切片不写 Evolution、不改任何参数、不触发 Growth。
 
 ## 限制
 

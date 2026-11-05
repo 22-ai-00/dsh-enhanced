@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite'
-import { attentionAuditReasons, type AttentionAssessment, type AttentionAuditEntry, type AttentionAuditReason, type AttentionLane, type AttentionLedgerView } from './attention.js'
+import { attentionAuditReasons, type AttentionAssessment, type AttentionAuditEntry, type AttentionAuditReason, type AttentionLane, type AttentionLedgerView, type NotificationOutcomeFact } from './attention.js'
 
 /** Append-only WP19 stage-1 audit. One row per Outbox record; replays keep the first verdict. */
 export const attentionAuditSchema = `
@@ -133,5 +133,58 @@ export class AttentionAuditStore {
     const rows = this.database.prepare('SELECT * FROM delivery_attention_audit WHERE audit_sequence>? ORDER BY audit_sequence LIMIT ?')
       .all(afterSequence, limit + 1) as unknown as Row[]
     return { entries: Object.freeze(rows.slice(0, limit).map(entry)), hasMore: rows.length > limit }
+  }
+
+  /** Current facts for exact notifications; unknown or unaudited ids are omitted. */
+  outcomeFactsFor(outboxIds: readonly string[]): readonly NotificationOutcomeFact[] {
+    return Object.freeze(outboxIds.map(id => this.get(id)).filter(item => item !== undefined)
+      .map(item => this.fact(item)).filter(item => item !== undefined))
+  }
+
+  private fact(audit: AttentionAuditEntry): NotificationOutcomeFact | undefined {
+    const outbox = this.database.prepare(`SELECT o.status, o.channel, o.account, o.provider_message_id, o.binding_id, o.updated_at,
+      b.workspace, b.agent_preset FROM outbox_messages o JOIN conversation_bindings b ON b.id=o.binding_id WHERE o.id=?`)
+      .get(audit.outboxId) as { status: NotificationOutcomeFact['transport']['status']; channel: string; account: string
+        provider_message_id: string | null; binding_id: string; updated_at: number; workspace: string; agent_preset: string } | undefined
+    if (outbox === undefined) return undefined
+    const accepted = (this.database.prepare(`SELECT min(finished_at) AS at FROM outbox_attempts
+      WHERE outbox_id=? AND status IN ('accepted','reconciled') AND finished_at IS NOT NULL`).get(audit.outboxId) as { at: number | null }).at
+    const receipts = outbox.provider_message_id === null ? [] : this.database.prepare(`SELECT status, occurred_at FROM delivery_receipts
+      WHERE channel=? AND account=? AND provider_message_id=?`).all(outbox.channel, outbox.account, outbox.provider_message_id) as { status: string; occurred_at: number }[]
+    const receipt = (status: string) => receipts.find(row => row.status === status)?.occurred_at
+    const sent = ['accepted', 'delivered', 'read'].includes(outbox.status)
+    const acceptedAt = accepted ?? receipt('accepted') ?? (sent ? outbox.updated_at : undefined)
+    const deliveredAt = receipt('delivered') ?? (outbox.status === 'delivered' || outbox.status === 'read' ? outbox.updated_at : undefined)
+    const readAt = receipt('read') ?? (outbox.status === 'read' ? outbox.updated_at : undefined)
+    const reaction = outbox.provider_message_id === null ? undefined : this.database.prepare(`SELECT min(received_at) AS first_at, count(*) AS count
+      FROM inbox_messages WHERE binding_id=? AND channel=? AND account=?
+      AND json_extract(envelope_json,'$.metadata.replyToProviderMessageId')=?`)
+      .get(outbox.binding_id, outbox.channel, outbox.account, outbox.provider_message_id) as { first_at: number | null; count: number }
+    const feedback = this.database.prepare(`SELECT json_extract(canonical_json,'$.version') AS version,
+      json_extract(canonical_json,'$.objectiveStatus') AS status FROM delivery_work_item_feedback
+      WHERE state='recorded' AND json_extract(source_json,'$.target.outboxId')=? ORDER BY version DESC, admission_sequence DESC LIMIT 1`)
+      .get(audit.outboxId) as { version: number; status: string } | undefined
+    const owner = feedback !== undefined ? undefined : this.database.prepare(`SELECT version, objective_status AS status
+      FROM delivery_owner_objective_commands WHERE source_outbox_id=? AND json_extract(result_json,'$.error') IS NULL
+      ORDER BY version DESC LIMIT 1`).get(audit.outboxId) as { version: number; status: string } | undefined
+    const judged = feedback ?? owner
+    const objectiveStatus = (status: string) => status === 'achieved' || status === 'partial' || status === 'not-achieved' ? status : 'unknown'
+    return Object.freeze({
+      auditSequence: audit.sequence, outboxId: audit.outboxId, bindingId: audit.bindingId,
+      scope: Object.freeze({ workspace: outbox.workspace, preset: outbox.agent_preset }),
+      lane: audit.lane, sourceId: audit.sourceId, purpose: audit.purpose, purposeSource: audit.purposeSource,
+      ...(audit.workItemId === undefined ? {} : { workItemId: audit.workItemId }),
+      ...(audit.questionId === undefined ? {} : { questionId: audit.questionId }),
+      ...(audit.answersQuestionId === undefined ? {} : { answersQuestionId: audit.answersQuestionId }),
+      verdict: audit.verdict, reasons: audit.reasons, auditedAt: audit.recordedAt,
+      transport: Object.freeze({ status: outbox.status,
+        ...(acceptedAt === undefined ? {} : { acceptedAt }),
+        ...(deliveredAt === undefined ? {} : { deliveredAt }),
+        ...(readAt === undefined ? {} : { readAt }) }),
+      ...(reaction === undefined || reaction.first_at === null ? {} : { reaction: Object.freeze({ firstAt: reaction.first_at, count: reaction.count }) }),
+      ...(judged === undefined || !Number.isSafeInteger(judged.version) ? {} : { judgement: Object.freeze({
+        source: feedback !== undefined ? 'work-item-feedback' as const : 'owner-objective' as const,
+        version: judged.version, objectiveStatus: objectiveStatus(judged.status) }) }),
+    })
   }
 }

@@ -6,6 +6,9 @@ import { afterEach, expect, test } from 'vitest'
 import { EvaluationStore, EvaluationStoreError } from '../src/store.ts'
 import type { EvaluationScope, OutcomeEnvelope } from '../src/types.ts'
 
+// Schema 14 (WP22) tables; downgrade fixtures drop them with the other later-schema tables.
+const dropNotificationOutcomeTables = 'DROP TABLE evaluation_notification_outcome_heads; DROP TABLE evaluation_notification_outcome_revisions; DROP TABLE evaluation_notification_watermarks; DROP TABLE evaluation_notification_sync_cursor;'
+
 const roots: string[] = []
 const scope: EvaluationScope = { workspace: '/work/feed', preset: 'primary' }
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -73,7 +76,7 @@ test('migrates populated v11 once without changing retained evidence or canonica
   store.close()
   const legacy = new DatabaseSync(database)
   const audit = legacy.prepare('SELECT * FROM evaluation_outcomes ORDER BY id').all()
-  legacy.exec("DROP TABLE evaluation_task_projection_feed_heads; UPDATE evaluation_schema_meta SET value = '11' WHERE key = 'schema-version'; PRAGMA user_version = 11")
+  legacy.exec(`DROP TABLE evaluation_task_projection_feed_heads; ${dropNotificationOutcomeTables} UPDATE evaluation_schema_meta SET value = '11' WHERE key = 'schema-version'; PRAGMA user_version = 11`)
   legacy.close()
   store = new EvaluationStore({ path: database, now: () => 2000 })
   const migrated = store.listTaskLearningProjectionFeed(scope, undefined, 10)

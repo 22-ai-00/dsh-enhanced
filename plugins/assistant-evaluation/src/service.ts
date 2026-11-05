@@ -6,6 +6,7 @@ import Schema from '@deepseek-ai/schemastery'
 import { acceptanceDigest, goalDefinitionSituation, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import {
   EvaluationStore,
+  EvaluationStoreError,
   canonicalEvaluationScope,
   evaluationLearningProjectionDigest,
 } from './store.js'
@@ -44,6 +45,10 @@ import type {
   TrustedOutcomeReceipt,
   TrustedTaskLearningProjectionReceipt,
   TrustedTaskLearningProjectionFeedPage,
+  NotificationOutcomeFeedPage,
+  NotificationOutcomeHistory,
+  NotificationOutcomeSummary,
+  NotificationOutcomeSyncResult,
 } from './types.js'
 import {
   executionStatuses,
@@ -67,6 +72,16 @@ export interface Config {
   projectionTimeoutMs?: number
   projectionRetryBaseMs?: number
   projectionRetryMaxMs?: number
+  /**
+   * WP22: record per-notification outcomes from Delivery's text-free facts on
+   * the existing projection tick. Read-only; nothing adopts parameters.
+   */
+  notificationOutcomesEnabled?: boolean
+  /** A sent notification with no reaction becomes `expired-unhandled` after this window. */
+  notificationResponseWindowMs?: number
+  /** Known notifications are re-checked for late reactions/corrections for this long. */
+  notificationObservationHorizonMs?: number
+  notificationSyncBatchSize?: number
 }
 
 export const ASSISTANT_EVALUATION_SKILL = `# Personal assistant self-evaluation
@@ -100,6 +115,10 @@ const configSchema = Schema.object({
   projectionTimeoutMs: Schema.number().step(1).min(100).max(300_000).default(2_000),
   projectionRetryBaseMs: Schema.number().step(1).min(1).max(3_600_000).default(1_000),
   projectionRetryMaxMs: Schema.number().step(1).min(1).max(86_400_000).default(3_600_000),
+  notificationOutcomesEnabled: Schema.boolean().default(false),
+  notificationResponseWindowMs: Schema.number().step(1).min(60_000).max(2_592_000_000).default(86_400_000),
+  notificationObservationHorizonMs: Schema.number().step(1).min(60_000).max(31_536_000_000).default(2_592_000_000),
+  notificationSyncBatchSize: Schema.number().step(1).min(1).max(500).default(100),
 }) as Schema<Config>
 
 export type AssistantEvaluationErrorCode =
@@ -136,6 +155,18 @@ export function canonicalEvaluationHostScope(input: EvaluationScope): Evaluation
     value: true, enumerable: false, configurable: false, writable: false,
   })
   return Object.freeze(branded)
+}
+
+/** Structural Delivery WP22 read adapter; Evaluation keeps no runtime dependency on Delivery. */
+interface NotificationOutcomeFactSource {
+  inspectNotificationOutcomeFacts(input: Readonly<{ afterSequence?: number; limit?: number; outboxIds?: readonly string[] }>): Readonly<{
+    protocol: string; facts: readonly unknown[]; hasMore: boolean; nextAfterSequence: number | null
+  }>
+}
+
+function isNotificationOutcomeFactSource(value: unknown): value is NotificationOutcomeFactSource {
+  return typeof value === 'object' && value !== null
+    && typeof (value as { inspectNotificationOutcomeFacts?: unknown }).inspectNotificationOutcomeFacts === 'function'
 }
 
 function exactEvaluationHostScope(input: EvaluationHostScope): EvaluationHostScope {
@@ -389,6 +420,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   private readonly activeWorkItemRegistrations = new WeakSet<object>()
   private readonly activeProjections = new Map<string, Promise<void>>()
   private projectionTimer: ReturnType<typeof setInterval> | undefined
+  private notificationFacts: NotificationOutcomeFactSource | undefined
   private active = true
 
   constructor(ctx: Context, input: Config, options: { now?: () => number } = {}) {
@@ -492,6 +524,13 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       if (!isTrustedDeliveryEvaluationProducer(producer)) return
       return this.bindDeliveryProducer(producer)
     })
+    const bindNotificationFacts = (source: unknown) => {
+      if (!isNotificationOutcomeFactSource(source)) return
+      this.notificationFacts = source
+      return () => { if (this.notificationFacts === source) this.notificationFacts = undefined }
+    }
+    bindNotificationFacts(currentDelivery)
+    ctx.inject(['assistantDelivery' as never], deliveryCtx => bindNotificationFacts(deliveryCtx.get('assistantDelivery' as never) as unknown))
     const currentVerifier = ctx.get('assistantVerifier' as never) as unknown
     if (isTrustedVerifierEvaluationProducer(currentVerifier)) this.bindVerifierProducer(currentVerifier)
     ctx.inject(['assistantVerifier' as never], verifierCtx => {
@@ -508,6 +547,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     })
     if (this.config.projectionIntervalMs > 0) {
       this.projectionTimer = setInterval(() => {
+        try { this.reconcileNotificationOutcomes() } catch { /* retried on the next tick */ }
         void this.reconcileProjections().catch(() => {})
       }, this.config.projectionIntervalMs)
       this.projectionTimer.unref?.()
@@ -516,6 +556,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       this.active = false
       if (this.projectionTimer !== undefined) clearInterval(this.projectionTimer)
       this.projectionTimer = undefined
+      this.notificationFacts = undefined
       disposeCurrentProjector?.()
       this.automationBinding?.dispose()
       this.deliveryBinding?.dispose()
@@ -987,6 +1028,79 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   health(): EvaluationHealth {
     this.assertActive()
     return this.store.health()
+  }
+
+  /**
+   * WP22 deterministic sync: ingest new Delivery audit rows after the durable
+   * cursor, then refresh a bounded batch of known notifications inside the
+   * observation horizon (least recently checked first) so late replies,
+   * corrections, withdrawals and expiry produce new revisions. No model call,
+   * no Evolution projection and no parameter change. Missing Delivery is a
+   * zero result, as is a disabled `notificationOutcomesEnabled`.
+   */
+  reconcileNotificationOutcomes(): NotificationOutcomeSyncResult {
+    this.assertActive()
+    const source = this.notificationFacts
+    if (!this.config.notificationOutcomesEnabled || source === undefined) return Object.freeze({ ingested: 0, refreshed: 0, revised: 0, invalid: 0 })
+    const ledger = this.store.notifications
+    const limit = this.config.notificationSyncBatchSize
+    const window = this.config.notificationResponseWindowMs
+    let ingested = 0
+    let refreshed = 0
+    let revised = 0
+    let invalid = 0
+    const apply = (fact: unknown): boolean => {
+      try {
+        if (ledger.apply(fact, window).revised) revised += 1
+        return true
+      } catch (error) {
+        if (error instanceof EvaluationStoreError && error.code === 'invalid-input') { invalid += 1; return false }
+        throw error
+      }
+    }
+    const page = source.inspectNotificationOutcomeFacts({ afterSequence: ledger.syncCursor(), limit })
+    for (const fact of page.facts) if (apply(fact)) ingested += 1
+    if (page.nextAfterSequence !== null) ledger.advanceSyncCursor(page.nextAfterSequence)
+    const due = ledger.dueForRefresh(this.now() - this.config.notificationObservationHorizonMs, limit)
+    if (due.length > 0) {
+      const facts = source.inspectNotificationOutcomeFacts({ outboxIds: due }).facts
+      const seen = new Set<string>()
+      for (const fact of facts) {
+        const id = (fact as { outboxId?: unknown }).outboxId
+        if (typeof id === 'string') seen.add(id)
+        if (apply(fact)) refreshed += 1
+      }
+      for (const id of due) if (!seen.has(id)) ledger.touch(id)
+    }
+    return Object.freeze({ ingested, refreshed, revised, invalid })
+  }
+
+  /** Current revision plus full revision history for one notification (Delivery Outbox id). */
+  inspectNotificationOutcome(input: { scope: EvaluationScope; notificationId: string }): NotificationOutcomeHistory | undefined {
+    this.assertActive()
+    return this.store.notifications.history(input.scope, hostIdentifier(input.notificationId, 'notificationId', 256))
+  }
+
+  /** Restart-safe feed of current notification heads after a per-scope notification watermark. */
+  notificationOutcomeFeed(input: {
+    scope: EvaluationScope
+    after?: { scopeKey: string; watermark: number }
+    limit?: number
+  }): NotificationOutcomeFeedPage {
+    this.assertActive()
+    return this.store.notifications.feed(input.scope, input.after, input.limit ?? 100)
+  }
+
+  /** Current-head counts by outcome and by attention verdict, over notification time. */
+  notificationOutcomeSummary(input: { scope: EvaluationScope; fromNotifiedAt?: number; toNotifiedAt?: number }): NotificationOutcomeSummary {
+    this.assertActive()
+    const to = input.toNotifiedAt ?? this.now() + 1
+    const from = input.fromNotifiedAt ?? Math.max(0, to - this.config.defaultSummaryWindowMs)
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to <= from
+      || to - from > this.config.maxSummaryWindowMs) {
+      throw new AssistantEvaluationError('invalid-input', 'notification outcome summary window is invalid')
+    }
+    return this.store.notifications.summary(input.scope, from, to)
   }
 
   limits(): EvaluationLimits {

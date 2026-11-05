@@ -54,8 +54,8 @@ export type { NativeWebOwnerAccess, NativeWebOwnerConfig } from './native-web-ow
 
 export type { WorkItemReportTarget, WorkItemReplySource, WorkItemReplyConsumerRegistration, WorkItemReplyReadInput, WorkItemReplyListInput } from './work-item-replies.js'
 export { WorkItemReplyCancelledError } from './work-item-replies.js'
-export { assessAttention, assessAttentionSplit, attentionAttachmentSummaryGraphemes, attentionAttachmentSummaryWords, attentionAuditReasons, attentionGraphemeCaps, attentionOverCap, attentionSplitWindowMs, attentionWordCaps, convertOverCapAttention, countAttentionWords, defaultAttentionPurpose, measureAttentionText } from './attention.js'
-export type { AttentionAssessment, AttentionAuditEntry, AttentionAuditReason, AttentionEnvelope, AttentionLane, AttentionLedgerView, AttentionPurpose, AttentionPurposeSource, AttentionQuestion, AttentionSplitVerdict, AttentionTextMeasure, AttentionVerdict } from './attention.js'
+export { assessAttention, assessAttentionSplit, attentionAttachmentSummaryGraphemes, attentionAttachmentSummaryWords, attentionAuditReasons, attentionGraphemeCaps, attentionOverCap, attentionSplitWindowMs, attentionWordCaps, convertOverCapAttention, countAttentionWords, defaultAttentionPurpose, measureAttentionText, NOTIFICATION_OUTCOME_FACTS_PROTOCOL } from './attention.js'
+export type { AttentionAssessment, AttentionAuditEntry, AttentionAuditReason, AttentionEnvelope, AttentionLane, AttentionLedgerView, AttentionPurpose, AttentionPurposeSource, AttentionQuestion, AttentionSplitVerdict, AttentionTextMeasure, AttentionVerdict, NotificationOutcomeFact } from './attention.js'
 
 export type { OwnerWorkItemLearningTask, OwnerLearningSourceExpectation, OwnerLearningSourceSnapshot, OwnerWorkItemLearningSourceExpectation, OwnerWorkItemLearningTaskFenceInput } from './work-item-feedback.js'
 

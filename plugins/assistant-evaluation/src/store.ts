@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { NotificationOutcomeLedger } from './notification-outcomes.js'
 import { isAbsolute, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { evaluationSchemaVersion, openEvaluationDatabase } from './sqlite.js'
@@ -573,10 +574,13 @@ export class EvaluationStore {
   readonly #maxEvidenceRefs: number
   readonly #maxSummaryWindowMs: number
   readonly #defaultSummaryWindowMs: number
+  /** WP22 read-only per-notification outcome canon. */
+  readonly notifications: NotificationOutcomeLedger
 
   constructor(options: EvaluationStoreOptions) {
     this.#database = openEvaluationDatabase(options.path)
     this.#now = options.now ?? Date.now
+    this.notifications = new NotificationOutcomeLedger(this.#database, this.#now)
     this.#maxQueryLimit = options.maxQueryLimit ?? 100
     this.#maxSituationBytes = options.maxSituationBytes ?? 200
     this.#maxMetricsBytes = options.maxMetricsBytes ?? 4_096
@@ -1629,6 +1633,7 @@ export class EvaluationStore {
         MIN(created_at) AS oldest
       FROM evaluation_projection_outbox WHERE status = 'pending'
     `).get() as { pending: number; retrying: number | null; attempts: number; oldest: number | null }
+    const notifications = this.notifications.counts()
     return Object.freeze({
       ready: true,
       schemaVersion: evaluationSchemaVersion,
@@ -1642,6 +1647,8 @@ export class EvaluationStore {
       pendingProjections: projectionRow.pending,
       retryingProjections: projectionRow.retrying ?? 0,
       projectionAttempts: projectionRow.attempts,
+      notificationOutcomes: notifications.notifications,
+      notificationOutcomeRevisions: notifications.revisions,
       ...(projectionRow.oldest === null ? {} : { oldestPendingProjectionAt: projectionRow.oldest }),
       ...(row.latest === null ? {} : { latestOccurredAt: row.latest }),
     })
