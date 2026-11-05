@@ -144,8 +144,43 @@ async function npmCommand(args: readonly string[], cwd: string, signal: AbortSig
   return result
 }
 
+const VALIDATED_CANDIDATE = '0.2.1-rc.2'
+
+/** 仅比较 x.y.z 或 x.y.z-rc.N；无法解析时返回 undefined。 */
+function compareCandidate(left: string, right: string): number | undefined {
+  const parse = (value: string) => {
+    const match = /^([0-9]{1,6})\.([0-9]{1,6})\.([0-9]{1,6})(?:-rc\.([0-9]{1,6}))?$/u.exec(value)
+    return match === null ? undefined : [Number(match[1]), Number(match[2]), Number(match[3]), match[4] === undefined ? Infinity : Number(match[4])]
+  }
+  const a = parse(left)
+  const b = parse(right)
+  if (a === undefined || b === undefined) return undefined
+  for (let index = 0; index < 4; index++) if (a[index] !== b[index]) return a[index]! < b[index]! ? -1 : 1
+  return 0
+}
+
 async function resolveMetadata(selector: string, root: string, signal: AbortSignal, ports: ManagedHostRuntimePorts): Promise<Metadata> {
   if (selector !== 'latest') validCandidateVersion(selector)
+  const metadata = await viewMetadata(selector, root, signal, ports)
+  // latest 指“最新的已验证版本”：上游 dist-tag 领先于验证候选时固定到候选，落后时仍拒绝（不降级）。
+  if (selector === 'latest' && !isSupportedCandidateVersion(metadata.version)
+    && (compareCandidate(metadata.version, VALIDATED_CANDIDATE) ?? 0) > 0) {
+    return validMetadata(await viewMetadata(VALIDATED_CANDIDATE, root, signal, ports), VALIDATED_CANDIDATE)
+  }
+  return validMetadata(metadata, selector)
+}
+
+function validMetadata(metadata: Metadata, selector: string): Metadata {
+  const { version, integrity, tarball } = metadata
+  validCandidateVersion(version)
+  if (selector !== 'latest' && version !== selector) fail('npm resolved a different exact version')
+  if (!validIntegrity(integrity)) fail('npm metadata lacks a valid SHA-512 integrity value')
+  const expectedTarball = `${REGISTRY}@deepseek-ai/dsh/-/dsh-${version}.tgz`
+  if (tarball !== expectedTarball) fail('npm metadata points outside the official DSH tarball')
+  return metadata
+}
+
+async function viewMetadata(selector: string, root: string, signal: AbortSignal, ports: ManagedHostRuntimePorts): Promise<Metadata> {
   const response = await npmCommand(['view', `${PACKAGE}@${selector}`, 'version', 'dist.integrity', 'dist.tarball', '--json', '--prefer-online', `--registry=${REGISTRY}`], root, signal, ports)
   let object: unknown
   try { object = JSON.parse(response.stdout) } catch { fail('npm view did not return valid JSON') }
@@ -155,11 +190,6 @@ async function resolveMetadata(selector: string, root: string, signal: AbortSign
   const integrity = data['dist.integrity']
   const tarball = data['dist.tarball']
   if (typeof version !== 'string' || typeof integrity !== 'string' || typeof tarball !== 'string') fail('npm metadata is incomplete')
-  validCandidateVersion(version)
-  if (selector !== 'latest' && version !== selector) fail('npm resolved a different exact version')
-  if (!validIntegrity(integrity)) fail('npm metadata lacks a valid SHA-512 integrity value')
-  const expectedTarball = `${REGISTRY}@deepseek-ai/dsh/-/dsh-${version}.tgz`
-  if (tarball !== expectedTarball) fail('npm metadata points outside the official DSH tarball')
   return { version, integrity, tarball }
 }
 

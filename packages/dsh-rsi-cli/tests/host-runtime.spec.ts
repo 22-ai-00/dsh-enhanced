@@ -108,6 +108,14 @@ describe('private managed DSH runtime', () => {
     expect(f.counts()).toEqual({ viewCount: 2, installCount: 1 })
   })
 
+  test.each(['0.2.2-rc.1', '0.2.1', '0.3.0'])('latest ahead of the validated candidate (%s) pins the validated candidate', async ahead => {
+    const f = await fixture()
+    f.setLatest(ahead)
+    const pinned = await prepareManagedHostRuntime({ root: f.root }, f.ports)
+    expect(pinned.version).toBe('0.2.1-rc.2')
+    expect(f.counts()).toEqual({ viewCount: 2, installCount: 1 })
+  })
+
   test('an explicit supported version is resolved and installed without following latest', async () => {
     const f = await fixture()
     f.setLatest('0.1.5-rc.4')
