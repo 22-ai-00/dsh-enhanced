@@ -79,7 +79,7 @@ live Harness app 的 `0.2.1-rc.5` 需要 owner 显式风险豁免；已在该版
 ## 待办与延后验收
 
 1. 控制台插件各切片（`94b86b61`、`da5f8d42`、`124a52a1`、`2c295a40`、`4b78dc68`、`cea6beb1`、`c0f077e2`、`44ec103c`、`f984d8c7`、`4b7d8b80`）均已双端通过精确根检查，并完成真实 Web GUI 冒烟（含三态卡片与本地打包产物安装）。下一验收受 live 环境限制：真实飞书长连接、登录态与远端使用需 owner 在活 Host 上显式授权（当前按用户要求延后）。
-2. 非空迁移资格进行中：安装器历史分类（空 / 可封存，只读复核表约束）与签名 overlay 的 `sealedAdoptionHandoff` 字段已在 `98e7916f` 交付并双端通过；control-plane 封存模块、journal 继承用量、安装器封存接线与审查库原地 handoff 接线仍在集成中。旧 Docker 证书不能作为 Linux 资格；owner 升级的空业务采用 CAS 不代表非空迁移、复制恢复或 native→native 已支持。
+2. 非空迁移资格（Docker→linux-native）已交付：`a45eac07` 封存迁移 + `68e4d8b3` Linux `NODE_PATH` 修复 + `c9ef3bd4` 仅测试的真实模型验收准备。非空采用历史只读归档（0400）后清空活账本，旧用量作为继承用量计入上限、不退还；Docker 时期 active 工具只能以新 plan id 与新 native 证书重新采用，原 plan id 被拒绝；审查库用 v2 grant handoff 原地交接，保留 `used`/`maximum` 与全部 verification 行。归档写入与事务中崩溃均可重试（WAL 与回滚日志两种残留）；整张审计表被删在 verify 时被拒；Host 更新在链上含封存 handoff 时拒绝，直到它能自行携带封存证明。限制：交接前签发的审查证书切换后仍被当前授权检查拒绝，需等运行时 `resolveHistoricalCertificate` 接入；`pendingReverification` 尚无消费者，重新采用来自普通新失败任务；真实 owner Home 的完整 live Docker→native 切换、复制恢复与 native→native 仍未验收。下一步：Linux 上 deepseek-v4.1-flash 封存工具重新采用实测（≤7 次调用）。
 3. Router 跨信道协调、订阅直通和长期普通使用收益尚未完整验收。现有持久任务不代表完整自主工程成长；两端此前五次真实模型运行额度已用尽，不重置失败或预算。
 4. 用户已延后飞书机器人实连和后续真实使用验收；正式连接门保留。完整临时双服务升级、就绪、回滚及活 Home 切换未验收，暂不操作活服务。
 
@@ -91,11 +91,11 @@ live Harness app 的 `0.2.1-rc.5` 需要 owner 显式风险豁免；已在该版
 
 | 精确提交 | 环境 | 结果 | 测试 passed / skipped | 文件 passed / skipped | 日志 SHA-256 |
 | --- | --- | --- | --- | --- | --- |
+| `c9ef3bd4`（39 包，封存迁移 + 实测验收准备） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1201.19 秒 | 10,431 / 1,927 | 714 / 86 | `54d818c30850ec7c4f810aee343f34e9ca73cd68648626ea9ebabf649640e1c0` |
+| `c9ef3bd4`（39 包，封存迁移 + 实测验收准备） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2445.28 秒 | 12,044 / 311 | 767 / 33 | `cc3dba6ccdfbfedc0a40fc10bf4c1ee4577e6cd7ccdcfc01abd8e80cd0f6dbc2` |
 | `98e7916f`（39 包，历史分类与封存元数据） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1235.16 秒 | 10,320 / 1,925 | 707 / 85 | `e4890526ed66082996126b249860d7952afb199dae31d9b871ed49feffce96af` |
 | `98e7916f`（39 包，历史分类与封存元数据） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2428.32 秒 | 11,933 / 309 | 760 / 32 | `b4df5340064d45a4195819ef77747bda3c81da54dfb4fe77695f8a08b4adc53b` |
 | `4b7d8b80`（39 包，健康枚举契约测试） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1202.12 秒 | 10,308 / 1,925 | 706 / 85 | `0fc6fa526a026fd9942d6109b6e484447e72585ac7f37a7ae15faa22ad92e740` |
 | `4b7d8b80`（39 包，健康枚举契约测试） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2415.21 秒 | 11,921 / 309 | 759 / 32 | `506e718f7113a877c18473d357a1f33ce2095e9311ff005a8f8329ea24a240c1` |
-| `44ec103c`（39 包，管理列表过滤） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1162.50 秒 | 10,303 / 1,925 | 705 / 85 | `a9b63a4ba875696a99d525b214e8c41994ad8a03dc6639b6739a6a08228b10e2` |
-| `44ec103c`（39 包，管理列表过滤） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2451.14 秒 | 11,916 / 309 | 758 / 32 | `43b68d44d2350c37e3361aeb0fc892615cc28db1197ffcd54011b8ee1b093801` |
 
 两端覆盖 manifest、零警告 lint、包构建与类型检查、测试组及唯一 dry-run pack（39 包 / 40 测试组）；源码前后同一提交且工作树干净。Linux 用 `TMPDIR=/data00/home/jiataorui/t`；准确命令与结果见对应 `docs/evidence/verification-<sha8>/`。成长切片 `d8c9fdd2` 的双端结果与早期控制台切片日志也保留在 `docs/evidence/`。Linux attempt 1 的失败是缺少测试运行时环境，已保留。跳过项、真实模型/Bot、活服务升级与长期收益不计为已验收。
