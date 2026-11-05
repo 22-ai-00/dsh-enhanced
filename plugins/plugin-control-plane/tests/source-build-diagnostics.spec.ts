@@ -50,6 +50,85 @@ describe('source build diagnostics', () => {
     expect(Object.isFrozen(result)).toBe(true)
   })
 
+  it('extracts vitest failures with test path, first error line and own-file location', () => {
+    const stderr = [
+      'source build phase failed: check',
+      '',
+      ' RUN  v4.1.8 /workspace/plugins/evolved-owner-x',
+      '',
+      ' ❯ tests/index.spec.ts (3 tests | 3 failed) 4ms',
+      '       × keeps order 3ms',
+      '',
+      '⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯',
+      '',
+      ` ${ESC}[41m${ESC}[1m FAIL ${ESC}[22m${ESC}[49m ${ESC}[2mtests/${ESC}[22mindex.spec.ts${ESC}[2m > ${ESC}[22mnormalize${ESC}[2m > ${ESC}[22mrecords${ESC}[2m > ${ESC}[22mkeeps order`,
+      `${ESC}[31m${ESC}[1mAssertionError${ESC}[22m: expected [ 1, 2 ] to deeply equal [ 2, 1 ]${ESC}[39m`,
+      '',
+      `${ESC}[32m- Expected${ESC}[39m`,
+      `${ESC}[31m+ Received${ESC}[39m`,
+      '',
+      `${ESC}[36m ${ESC}[2m❯${ESC}[22m tests/index.spec.ts:${ESC}[2m5:46${ESC}[22m${ESC}[39m`,
+      "      5|     it('keeps order', () => { expect([1, 2]).toEqual([2, 1]) })",
+      '       |                                              ^',
+      '',
+      `${ESC}[31m${ESC}[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯${ESC}[22m${ESC}[39m`,
+      '',
+      ' FAIL  plugins/evolved-owner-x/tests/index.spec.ts > normalize > throws',
+      ' FAIL  plugins/evolved-owner-x/tests/index.spec.ts > normalize > throws again',
+      "TypeError: Cannot read properties of undefined (reading 'records')",
+      ' ❯ normalize src/index.ts:40:12',
+      ' ❯ /workspace/node_modules/.pnpm/vitest@4.1.8/node_modules/@vitest/runner/dist/index.js:155:11',
+      ' ❯ tests/index.spec.ts:8:31',
+      '',
+      '⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯',
+      '',
+      ' FAIL  tests/load.spec.ts [ tests/load.spec.ts ]',
+      "Error: Cannot find module '/workspace/plugins/evolved-owner-x/src/missing.ts' imported from tests/load.spec.ts",
+      ' ❯ src/index.ts:3:1',
+      '',
+      '⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯',
+      '',
+      ' Test Files  2 failed (2)',
+      '      Tests  3 failed (3)',
+      ' ELIFECYCLE  Command failed with exit code 1.',
+    ].join('\n')
+    const result = sourceBuildDiagnostics(stderr, 1)
+    expect(result).toMatchObject({ phase: 'check', exitCode: 1 })
+    expect(result.entries).toEqual([
+      { file: 'tests/index.spec.ts', line: 5, column: 46, code: 'VITEST',
+        message: 'normalize > records > keeps order: AssertionError: expected [ 1, 2 ] to deeply equal [ 2, 1 ]' },
+      { file: 'tests/index.spec.ts', line: 8, column: 31, code: 'VITEST',
+        message: "normalize > throws: TypeError: Cannot read properties of undefined (reading 'records')" },
+      { file: 'tests/index.spec.ts', line: 8, column: 31, code: 'VITEST',
+        message: "normalize > throws again: TypeError: Cannot read properties of undefined (reading 'records')" },
+      { file: 'tests/load.spec.ts', line: 0, column: 0, code: 'VITEST',
+        message: "Error: Cannot find module 'src/missing.ts' imported from tests/load.spec.ts (at src/index.ts:3:1)" },
+    ])
+    expect(JSON.stringify(result)).not.toContain(ESC)
+    expect(JSON.stringify(result)).not.toMatch(/\/workspace|node_modules/u)
+  })
+
+  it('keeps tsc and vitest entries in log order under shared redaction and caps', () => {
+    const stderr = [
+      'source build phase failed: check',
+      "src/index.ts(12,3): error TS2304: Cannot find name 'records'.",
+      ` FAIL  tests/index.spec.ts > auth > rejects ${'n'.repeat(400)}`,
+      'AssertionError: expected LLMGW_API_KEY=abc123 to be undefined',
+      ' ❯ tests/index.spec.ts:21:7',
+      '⎯⎯⎯⎯[1/1]⎯',
+      ...Array.from({ length: 25 }, (_, index) => ` FAIL  tests/many.spec.ts > case ${index}`),
+      'Error: shared',
+    ].join('\n')
+    const result = sourceBuildDiagnostics(stderr, 1)
+    expect(result.entries).toHaveLength(20)
+    expect(result.truncated).toBe(true)
+    expect(result.entries[0]).toMatchObject({ file: 'src/index.ts', line: 12, column: 3, code: 'TS2304' })
+    expect(result.entries[1]).toMatchObject({ file: 'tests/index.spec.ts', line: 21, column: 7, code: 'VITEST' })
+    expect(result.entries[2]).toEqual({ file: 'tests/many.spec.ts', line: 0, column: 0, code: 'VITEST', message: 'case 0: Error: shared' })
+    expect(JSON.stringify(result)).not.toContain('abc123')
+    for (const entry of result.entries) expect(entry.message.length).toBeLessThanOrEqual(300)
+  })
+
   it('normalizes an unsafe exit code', () => {
     expect(sourceBuildDiagnostics('', Number.NaN).exitCode).toBe(-1)
   })
