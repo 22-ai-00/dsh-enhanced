@@ -113,14 +113,28 @@ export class WorkItemOwnerAccess {
       const initial = observe(), identity = acceptanceDigest(initial)
       const current = () => { if (acceptanceDigest(observe()) !== identity) fail('owner/call changed') }
       const resource = Object.freeze({ kind: 'automation' as const, id: automationId })
+      // A linked alias spends its own bounded quota: the matching rule must be
+      // budgeted, and the charge must land in the alias principal's own Policy
+      // partition, never in the owner's shared rule scope.
+      const aliasPrincipal = 'alias' in initial.route ? initial.route.alias.principalId : undefined
+      if (aliasPrincipal !== undefined && typeof policy.authorizeAgentForPrincipal !== 'function') fail('linked alias reads require per-principal Policy budgets')
+      const budgeted = (decision: { budget?: unknown } | undefined) => {
+        const budget = decision?.budget as { id?: unknown; amount?: unknown } | undefined
+        return !!budget && typeof budget === 'object' && typeof budget.id === 'string' && budget.id.length > 0
+          && typeof budget.amount === 'number' && Number.isFinite(budget.amount) && budget.amount > 0
+      }
       const evaluate = () => {
         current(); const decision = policy.evaluateAgent!(agent, action, resource); current()
         if (decision?.effect !== 'allow') fail(continuing ? 'permission denied' : 'read permission denied')
+        if (aliasPrincipal !== undefined && !budgeted(decision)) fail('linked alias read requires a budgeted Policy rule')
       }
       evaluate()
       if (consume) {
-        const decision = policy.authorizeAgent!(agent, action, resource, { idempotencyKey: `${continuing ? 'work-items-owner-continue' : 'work-items-owner-read'}:${acceptanceDigest({ owner: initial.route, sessionId: String(agent.session.id), callId: execution.callId, name: execution.name, args })}` })
+        const idempotencyKey = `${continuing ? 'work-items-owner-continue' : aliasPrincipal !== undefined ? 'work-items-alias-read' : 'work-items-owner-read'}:${acceptanceDigest({ owner: initial.route, sessionId: String(agent.session.id), callId: execution.callId, name: execution.name, args })}`
+        const decision = aliasPrincipal === undefined ? policy.authorizeAgent!(agent, action, resource, { idempotencyKey })
+          : policy.authorizeAgentForPrincipal!(agent, action, resource, { idempotencyKey, principal: aliasPrincipal })
         current(); if (decision?.effect !== 'allow') fail(continuing ? 'permission denied' : 'read permission denied')
+        if (aliasPrincipal !== undefined && decision.budgetPrincipal !== aliasPrincipal) fail('linked alias read was not charged to the alias principal')
       }
       evaluate()
       const owner: OwnerStoreScope = { principalId: initial.route.principalId, principalRecordId: initial.route.principalRecordId,

@@ -81,6 +81,7 @@ export type DecisionReasonCode =
   | 'budget-exhausted'
   | 'budget-idempotency-required'
   | 'budget-not-configured'
+  | 'budget-principal-mismatch'
   | 'emergency-stop'
   | 'missing-agent'
   | 'missing-agent-preset'
@@ -94,6 +95,11 @@ export interface PolicyDecision {
   reasonCode: DecisionReasonCode
   ruleId: string | undefined
   budget?: Readonly<PolicyBudgetCharge>
+  /**
+   * Set only by `authorizeAgentForPrincipal` when the rule's budget was charged
+   * in that principal's own ledger partition (never the shared rule scope).
+   */
+  budgetPrincipal?: string
 }
 
 export interface CompiledPolicy {

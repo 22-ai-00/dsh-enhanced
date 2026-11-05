@@ -82,6 +82,25 @@ export interface AuthorizationOptions {
   auditDetails?: unknown
 }
 
+export interface PrincipalAuthorizationOptions extends AuthorizationOptions {
+  /** Must equal the principal Delivery bound to this Agent; budgets are charged in its own partition. */
+  principal: string
+}
+
+/** Ledger scope of a principal-partitioned budget. Disjoint from global/subject/workspace scopes. */
+export function principalPartitionScope(baseScope: string, principal: string): string {
+  return `principal-partition/v1:${JSON.stringify([baseScope, principal])}`
+}
+
+function validPartitionPrincipal(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || Buffer.byteLength(value, 'utf8') > 256) return false
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index)
+    if (code < 0x20 || code === 0x7f) return false
+  }
+  return true
+}
+
 export interface AssistantPolicyServiceOptions {
   now?: () => number
 }
@@ -1168,6 +1187,63 @@ export class AssistantPolicyService extends Service {
   }
 
   /**
+   * Same identity and rule evaluation as `authorizeAgent`, but a matched rule
+   * budget is charged in a ledger partition owned by `options.principal`
+   * (which must be the principal bound to this Agent). Lets a linked account
+   * spend its own bounded quota without touching the owner's partition.
+   * The returned decision carries `budgetPrincipal` only when such a charge
+   * happened; an allow without a budget is returned unchanged.
+   */
+  authorizeAgentForPrincipal(
+    agent: Agent | undefined,
+    action: string,
+    resource: PolicyResource,
+    options: PrincipalAuthorizationOptions,
+  ): PolicyDecision {
+    this.assertActive()
+    if (agent === undefined) return this.auditAgentIdentityFailure(action, resource, 'missing-agent')
+    const workspace = agent.session.header.cwd
+    if (workspace === undefined || !isAbsolute(workspace)) {
+      return this.auditAgentIdentityFailure(action, resource, 'missing-workspace')
+    }
+    const preset = agent.session.header.agentPreset
+    if (preset === undefined || preset === '') {
+      return this.auditAgentIdentityFailure(action, resource, 'missing-agent-preset')
+    }
+    const authority = this.initiators.get(agent)
+    const request: PolicyRequest = {
+      subject: {
+        kind: 'agent',
+        id: preset,
+        workspace,
+        ...(authority?.principal === undefined ? {} : { principal: authority.principal }),
+      },
+      action,
+      resource,
+      context: { initiator: authority?.initiator ?? 'foreground' },
+    }
+    let decision: PolicyDecision
+    if (!validPartitionPrincipal(options.principal) || authority?.principal !== options.principal) {
+      decision = denial('budget-principal-mismatch')
+    } else {
+      decision = this.evaluate(request)
+      if (decision.effect === 'allow' && decision.budget !== undefined) {
+        decision = this.consumeAuthorizationBudget(request.subject, decision, options.idempotencyKey, options.principal)
+        if (decision.effect === 'allow') decision = { ...decision, budgetPrincipal: options.principal }
+      }
+    }
+    this.ledger.appendAudit({
+      actor: `${request.subject.kind}:${request.subject.id}`,
+      action: request.action,
+      resource: request.resource,
+      outcome: decision.effect === 'allow' ? 'allowed' : 'denied',
+      reasonCode: decision.reasonCode,
+      details: options.auditDetails ?? {},
+    })
+    return decision
+  }
+
+  /**
    * Evaluate an agent action against the same live identity and initiator
    * context as authorization, without auditing or consuming a budget.
    */
@@ -1267,6 +1343,7 @@ export class AssistantPolicyService extends Service {
     subject: PolicySubject,
     decision: PolicyDecision,
     idempotencyKey: string | undefined,
+    partitionPrincipal?: string,
   ): PolicyDecision {
     const charge = decision.budget
     if (charge === undefined) return decision
@@ -1279,7 +1356,7 @@ export class AssistantPolicyService extends Service {
         subject,
         amount: charge.amount,
         idempotencyKey,
-      })
+      }, partitionPrincipal)
       this.ledger.finalize(reservation.reservationId, charge.amount)
       return decision
     } catch (error) {
@@ -1293,7 +1370,7 @@ export class AssistantPolicyService extends Service {
     }
   }
 
-  private reserveConfiguredBudget(input: PolicyBudgetReservationInput): BudgetReservationResult {
+  private reserveConfiguredBudget(input: PolicyBudgetReservationInput, partitionPrincipal?: string): BudgetReservationResult {
     const budget = this.budgets.get(input.budgetId)
     if (budget === undefined) {
       throw new AssistantPolicyError('budget-not-configured', `budget is not configured: ${input.budgetId}`)
@@ -1313,6 +1390,7 @@ export class AssistantPolicyService extends Service {
         scope = `workspace:${input.subject.workspace}`
         break
     }
+    if (partitionPrincipal !== undefined) scope = principalPartitionScope(scope, partitionPrincipal)
     const ledgerInput: BudgetReservationInput = {
       scope,
       metric: budget.metric,

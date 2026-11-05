@@ -279,7 +279,10 @@ describe('trusted local pairing control plane', () => {
       policyRef: 'linked-dm',
     })
     store.revokePrincipal(owner.id, owner.version)
-    expect(store.getPrincipal(linkedPrincipal)).toMatchObject({ id: linked.id, status: 'active', linkedToId: owner.id })
+    // Revoking the owner detaches its links (the link is bound to that owner activation).
+    const detached = store.getPrincipal(linkedPrincipal)
+    expect(detached).toMatchObject({ id: linked.id, status: 'active', version: linked.version + 1 })
+    expect(detached?.linkedToId).toBeUndefined()
 
     const next = store.handoffOwner(replacement)
     expect(next).toMatchObject({ principal: replacement, role: 'owner', status: 'active' })

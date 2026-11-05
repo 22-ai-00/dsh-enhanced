@@ -46,11 +46,28 @@ async function setup(linkedAliases: string[] | null = [ALIAS]) {
       ? (ownerProofForAlias ? { protocol: 'assistant-delivery/foreground-tool-call/v1' } : { protocol: 'assistant-delivery/owner-alias-foreground-tool-call/v1', receipt: aliasReceipt(), call: { ...open } }) : undefined,
     readOwnerForegroundToolInput: () => { throw new Error('alias must not reach continuation input') },
   }
+  // Minimal Policy model: a budgeted read rule with per-key idempotency and one
+  // shared owner quota plus independent per-principal partitions.
+  let budgeted = true, chargeAs: string | undefined
+  const ownerCharges = new Set<string>(), partitionCharges = new Map<string, Set<string>>()
+  const budget = () => budgeted ? { budget: { id: 'reads', amount: 1 } } : {}
   const policy: PeerPolicyService = {
     authorize: () => ({ effect: 'allow', reasonCode: 'fixture-admission' }),
-    evaluateAgent: (agent, action) => { evaluated.push(`${String(agent?.id)}:${action}`); onEvaluate(); return { effect: allowed ? 'allow' : 'deny', reasonCode: 'read-rule' } },
-    authorizeAgent: () => ({ effect: allowed ? 'allow' : 'deny', reasonCode: 'read-rule' }),
+    evaluateAgent: (agent, action) => { evaluated.push(`${String(agent?.id)}:${action}`); onEvaluate(); return { effect: allowed ? 'allow' : 'deny', reasonCode: 'read-rule', ...budget() } },
+    authorizeAgent: (_agent, _action, _resource, options) => {
+      if (allowed && budgeted) ownerCharges.add(options!.idempotencyKey!)
+      return { effect: allowed ? 'allow' : 'deny', reasonCode: 'read-rule', ...budget() }
+    },
   }
+  const forPrincipal: NonNullable<PeerPolicyService['authorizeAgentForPrincipal']> = (_agent, _action, _resource, options) => {
+    if (!allowed) return { effect: 'deny', reasonCode: 'read-rule' }
+    if (!budgeted) return { effect: 'allow', reasonCode: 'read-rule' }
+    const principal = chargeAs ?? options.principal
+    const charges = partitionCharges.get(principal) ?? new Set<string>(); partitionCharges.set(principal, charges)
+    charges.add(options.idempotencyKey!)
+    return { effect: 'allow', reasonCode: 'read-rule', ...budget(), budgetPrincipal: principal }
+  }
+  Object.assign(policy, { authorizeAgentForPrincipal: forPrincipal })
   const deps = { config: f.config, store: () => f.store, delivery: () => delivery, policy: () => policy }
   const recall = new WorkItemOwnerRecall(deps)
   const continuation = new WorkItemOwnerContinuation({ ...deps, runtime: () => ({ wakePending() {} }) as unknown as WorkItemContinuation,
@@ -64,7 +81,10 @@ async function setup(linkedAliases: string[] | null = [ALIAS]) {
     route: () => route, setRoute: (next: typeof route) => { route = next }, unlink: () => { linked = false },
     leakV2: () => { v2Leak = true }, ownerProofForAlias: () => { ownerProofForAlias = true },
     setExtra: (next: Record<string, unknown>) => { extra = next }, deny: () => { allowed = false },
-    onEvaluate: (callback: () => void) => { onEvaluate = callback } }
+    onEvaluate: (callback: () => void) => { onEvaluate = callback },
+    ownerCharges: () => ownerCharges.size, aliasCharges: (principal = ALIAS) => partitionCharges.get(principal)?.size ?? 0,
+    unbudgeted: () => { budgeted = false }, withoutPartitions: () => { delete (policy as { authorizeAgentForPrincipal?: unknown }).authorizeAgentForPrincipal },
+    chargeAs: (principal: string) => { chargeAs = principal } }
 }
 
 test('a Lark owner and its linked alias list and recall the same owner items', async () => {
@@ -180,4 +200,45 @@ test('a Delivery link alone is not consent: alias reads need the owner allowlist
   const listed = await setup()
   expect(() => listed.continuation.continue(listed.execution(listed.alias, 'work_item_continue', args), args)).toThrow('requires the current exact owner')
   expect(listed.aliasLookups()).toBe(0)
+})
+
+test('alias reads spend their own bounded partition; the owner quota is untouched', async () => {
+  const h = await setup()
+  h.recall.list(h.execution(h.owner, 'work_item_list', {}), {})
+  expect(h.ownerCharges()).toBe(1)
+  h.recall.list(h.execution(h.alias, 'work_item_list', {}), {})
+  const args = { item_id: h.item.id }
+  h.recall.recall(h.execution(h.alias, 'work_item_recall', args), args)
+  expect(h.aliasCharges()).toBe(2)
+  // Preauthorization never charges, and no alias read reached the owner's quota.
+  expect(h.recall.preauthorize(h.execution(h.alias, 'work_item_list', {}))).toBe(true)
+  expect(h.aliasCharges()).toBe(2)
+  expect(h.ownerCharges()).toBe(1)
+  h.recall.list(h.execution(h.owner, 'work_item_list', {}), {})
+  expect(h.ownerCharges()).toBe(2)
+  expect(h.aliasCharges(PRINCIPAL)).toBe(0)
+})
+
+test('alias reads fail closed without per-principal budgets, an unbudgeted rule, or a misattributed charge', async () => {
+  // Older Policy peer: refused before any evaluation or charge; the owner still reads normally.
+  const old = await setup()
+  old.withoutPartitions()
+  expect(old.recall.preauthorize(old.execution(old.alias, 'work_item_list', {}))).toBe(false)
+  expect(() => old.recall.list(old.execution(old.alias, 'work_item_list', {}), {})).toThrow('linked alias reads require per-principal Policy budgets')
+  expect(old.evaluated).toEqual([])
+  expect(old.ownerCharges() + old.aliasCharges()).toBe(0)
+  expect(old.recall.list(old.execution(old.owner, 'work_item_list', {}), {}).items).toHaveLength(1)
+
+  // Unbudgeted rule: an alias read would be unbounded, so it is refused before the charge.
+  const unbudgeted = await setup()
+  unbudgeted.unbudgeted()
+  expect(unbudgeted.recall.preauthorize(unbudgeted.execution(unbudgeted.alias, 'work_item_list', {}))).toBe(false)
+  expect(() => unbudgeted.recall.list(unbudgeted.execution(unbudgeted.alias, 'work_item_list', {}), {})).toThrow('linked alias read requires a budgeted Policy rule')
+  expect(unbudgeted.aliasCharges()).toBe(0)
+  expect(unbudgeted.recall.list(unbudgeted.execution(unbudgeted.owner, 'work_item_list', {}), {}).items).toHaveLength(1)
+
+  // A Policy peer that charged some other partition is not trusted.
+  const misattributed = await setup()
+  misattributed.chargeAs(PRINCIPAL)
+  expect(() => misattributed.recall.list(misattributed.execution(misattributed.alias, 'work_item_list', {}), {})).toThrow('was not charged to the alias principal')
 })

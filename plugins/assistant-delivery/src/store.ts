@@ -6601,6 +6601,17 @@ export class DeliveryStore {
         SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
         FROM delivery_principals WHERE id = ?
       `).get(id) as unknown as PrincipalRow
+      if (row.role === 'owner') {
+        // A link is bound to the owner's activation epoch. Revoking the owner
+        // detaches every still-active link rooted in it, so reactivating the
+        // same owner record (a new row version) never silently restores an
+        // alias: the owner must re-link. Detached principals stay active
+        // ordinary principals, exactly like a freshly paired, unlinked one.
+        this.database.prepare(`
+          UPDATE delivery_principals SET linked_to_id = NULL, updated_at = ?, version = version + 1
+          WHERE role = 'linked' AND status = 'active' AND linked_to_id = ?
+        `).run(now, id)
+      }
       return principalFromRow(row)
     })
   }

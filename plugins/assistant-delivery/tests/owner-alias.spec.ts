@@ -174,6 +174,49 @@ test('unlinking the alias, an owner version change, and an owner handoff all cha
   expect(ownerRevoked.service.inspectOwnerAliasRoute(ownerRevoked.aliasSide.agent, authority.id)).toBeUndefined()
 })
 
+test('revoking the owner detaches its links: reactivating the same owner record needs a re-link', async () => {
+  const f = await fixture()
+  f.link()
+  const { agent } = f.aliasSide
+  const epoch1 = f.service.inspectOwnerAliasRoute(agent, authority.id)!
+  expect(epoch1).toBeDefined()
+  // A separately revoked alias keeps its root (re-pairing it is a fresh explicit pairing).
+  const bystander = f.pair(other)
+  f.store.linkPrincipal({ owner, linked: other, expectedLinkedVersion: bystander.version })
+  const bystanderLinked = f.store.getPrincipal(other)!
+  f.store.revokePrincipal(bystanderLinked.id, bystanderLinked.version)
+
+  const root = f.store.getPrincipal(owner)!
+  const aliasBefore = f.store.getPrincipal(alias)!
+  f.store.revokePrincipal(root.id, root.version)
+  // Still an active ordinary principal, but no longer linked to anyone.
+  const detached = f.store.getPrincipal(alias)!
+  expect(detached).toMatchObject({ role: 'linked', status: 'active', version: aliasBefore.version + 1 })
+  expect(detached.linkedToId).toBeUndefined()
+  expect(f.store.getBinding(f.aliasSide.binding.id)?.status).toBe('active')
+  expect(f.store.getPrincipal(other)).toMatchObject({ status: 'revoked', linkedToId: root.id, version: bystanderLinked.version + 1 })
+
+  // Reactivate the SAME owner record (new version / activation epoch) and give it a fresh route binding.
+  const reactivated = f.pair(owner)
+  expect(reactivated).toMatchObject({ id: root.id, role: 'owner', status: 'active', version: root.version + 2 })
+  f.store.createBinding({ conversation: ownerConversation, principal: owner, workspace: authority.workspace,
+    agentPreset: authority.agentPreset, sessionId: 'owner-session-2', policyRef: authority.policyRef })
+  expect(f.service.inspectOwnerAliasRoute(agent, authority.id)).toBeUndefined()
+
+  // Only an explicit re-link in the new epoch restores the read-only alias receipt.
+  f.link()
+  const epoch2 = f.service.inspectOwnerAliasRoute(agent, authority.id)!
+  expect(epoch2.root).toMatchObject({ principalRecordId: root.id, principalVersion: reactivated.version })
+  expect(epoch2.alias.principalVersion).toBe(detached.version + 1)
+  expect(epoch2.root.principalVersion).not.toBe(epoch1.root.principalVersion)
+
+  // A non-owner revoke never detaches anything.
+  const aliasRow = f.store.getPrincipal(alias)!
+  const otherOwnerLinks = f.store.getPrincipal(owner)!
+  f.store.revokePrincipal(aliasRow.id, aliasRow.version)
+  expect(f.store.getPrincipal(alias)).toMatchObject({ status: 'revoked', linkedToId: otherOwnerLinks.id })
+})
+
 test('an alias binding in another workspace or a rotated alias binding is not an alias route', async () => {
   const f = await fixture()
   f.link()

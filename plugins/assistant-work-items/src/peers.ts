@@ -63,6 +63,10 @@ export interface PeerPolicyDecision {
   readonly effect: PeerPolicyEffect
   readonly reasonCode: string
   readonly ruleId?: string | undefined
+  /** Matched rule budget, when the rule is budgeted. */
+  readonly budget?: Readonly<{ id: string; amount: number }>
+  /** Set by `authorizeAgentForPrincipal` when the charge landed in that principal's own partition. */
+  readonly budgetPrincipal?: string
 }
 
 /** `assistant-policy` default-deny authorization surface. */
@@ -74,6 +78,9 @@ export interface PeerPolicyService {
     resource: { kind: 'automation'; id: string }, options?: { idempotencyKey?: string }): PeerPolicyDecision
   evaluateAgent?(agent: import('@deepseek-ai/dsh-agent').Agent | undefined, action: string,
     resource: { kind: 'automation'; id: string }): PeerPolicyDecision
+  /** Charges a matched rule budget in `principal`'s own ledger partition. Absent: linked-alias reads fail closed. */
+  authorizeAgentForPrincipal?(agent: import('@deepseek-ai/dsh-agent').Agent | undefined, action: string,
+    resource: { kind: 'automation'; id: string }, options: { idempotencyKey?: string; principal: string }): PeerPolicyDecision
   /** Absent on older Policy peers: keep their ordinary approval path. */
   workItemToolPreauthorizationVersion?(): 1
   registerPreauthorizedTool?(
