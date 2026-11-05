@@ -402,7 +402,7 @@ export class AssistantGoalsService extends Service {
       if (!this.#active) throw new Error('assistant-goals: disposed')
       this.#eventWaitPolicy(intent)
       return this.#store.get(intent.wake.scope, intent.wake.goalId)
-    }, () => this.ctx.get('assistantProactive' as never, false) as unknown as { evaluate: (input: { waitId: string; profileId: string; scope: GoalScope; goalId: string; sessionId: string; definitionDigest: string; objective: string; nativeGoalId: string; nativeRevision: number; ownerRouteId: string; sourceDigest: string; sourceId: string; event: { id: string; sequence: number; digest: string; occurredAt: number }; expiresAt: number }) => { disposition: 'defer' | 'consume' | 'execute'; decision: { eventSequence: number } } } | undefined)
+    }, () => this.ctx.get('assistantProactive' as never, false) as unknown as { evaluate: (input: { waitId: string; profileId: string; scope: GoalScope; goalId: string; sessionId: string; definitionDigest: string; objective: string; nativeGoalId: string; nativeRevision: number; ownerRouteId: string; sourceDigest: string; sourceId: string; event: { id: string; sequence: number; digest: string; occurredAt: number; observationDigest?: string }; expiresAt: number }) => { disposition: 'defer' | 'consume' | 'execute'; decision: { eventSequence: number } } } | undefined)
     ctx.inject(['agents', 'goals', 'assistantDelivery', 'assistantPolicy'], runtime => {
       runtime.on('goal/changed', ({ agent, change }) => {
         try {

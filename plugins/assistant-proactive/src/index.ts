@@ -17,7 +17,8 @@ import { version } from './version.js'
 export const name = 'dsh-enhanced-assistant-proactive'
 export { version, OpportunityEngine, validateProfile }
 export type * from './types.js'
-interface NotificationPort { enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: OpportunityScope; sessionId: string; idempotencyKey: string; text: string; expiresAt: number }): unknown }
+/** `attention` is ignored by Delivery releases before the WP19 audit; it never changes how the notice is sent. */
+interface NotificationPort { enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: OpportunityScope; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention?: { purpose: 'result' } }): unknown }
 export interface Config { databasePath?: string; profiles?: OpportunityProfile[] }
 const integer = (max = 1_000_000_000) => Schema.number().step(1).min(0).max(max).required()
 export const Config: Schema<Config> = Schema.object({
@@ -110,7 +111,12 @@ export class AssistantProactiveService extends Service {
       if (!delivery) throw new Error('assistant-proactive: reminder delivery service unavailable')
       const profile = this.#engine.profileSnapshot(decision.scope, decision.goalId, decision.profileId)
       const expiresAt = reminderExpiresAt(decision, profile)
-      if (Date.now() < expiresAt) delivery.enqueueOwnerNotification({ sourceId: 'assistant-proactive/v1', ownerRouteId: decision.ownerRouteId, scope: decision.scope, sessionId: decision.sessionId, idempotencyKey: `proactive-reminder:${decision.id}`, text: reminderText(decision), expiresAt })
+      // An informational notice: no WorkItem or structured question exists, so `attention` would not apply.
+      if (Date.now() < expiresAt) {
+        delivery.enqueueOwnerNotification({ sourceId: 'assistant-proactive/v1', ownerRouteId: decision.ownerRouteId, scope: decision.scope, sessionId: decision.sessionId, idempotencyKey: `proactive-reminder:${decision.id}`, text: reminderText(decision), expiresAt, attention: { purpose: 'result' } })
+        this.#engine.confirmReminder(decision)
+      } else this.#engine.releaseReminder(decision) // never queued: a later unchanged event may still remind
+
     }
     if (evaluation.disposition === 'consume' && decision.mode === 'prepare' && decision.state === 'decided') {
       const profile = this.#engine.profileSnapshot(decision.scope, decision.goalId, decision.profileId)

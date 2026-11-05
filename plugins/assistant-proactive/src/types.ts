@@ -20,13 +20,19 @@ export interface OpportunityInput {
   waitId: string; profileId: string; scope: OpportunityScope; goalId: string; sessionId: string
   definitionDigest: string; objective: string; nativeGoalId: string; nativeRevision: number; ownerRouteId: string
   sourceDigest: string; sourceId: string
-  event: { id: string; sequence: number; digest: string; occurredAt: number }
+  /**
+   * `digest` is the canonical envelope digest (unique per event). `observationDigest` is the source's
+   * content digest (`observation.digest`); optional for older Goals, which then never dedupe a reminder.
+   */
+  event: { id: string; sequence: number; digest: string; occurredAt: number; observationDigest?: string }
   expiresAt: number
 }
 export type OpportunityReason = 'cancelled' | 'coalescing' | 'quiet-hours' | 'cooldown' | 'rejected-cooldown' | 'below-threshold' | 'budget' | 'expired' | 'prepared' | 'reminder' | 'unchanged' | 'execution'
 export interface OpportunityDecision {
   id: string; waitId: string; profileId: string; scope: OpportunityScope; goalId: string; sessionId: string; ownerRouteId: string
   sourceId: string; eventId: string; eventSequence: number; eventDigest: string; sourceDigest: string
+  /** Content digest of the triggering observation, when the caller supplied one. */
+  eventObservationDigest?: string | undefined
   objective: string; definitionDigest: string; nativeGoalId: string; nativeRevision: number
   mode: 'prepare' | 'remind' | 'execute' | 'suppress'
   state: 'pending' | 'decided' | 'closed'; reason: OpportunityReason; utility: number

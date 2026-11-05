@@ -22,12 +22,16 @@ export function reminderText(decision: Readonly<Pick<OpportunityDecision, 'objec
 }
 
 /**
- * Durable dedupe key for one goal source. It changes only when the text the owner would see, the goal
- * revision/definition or the configured source changes; a new event on an unchanged source does not.
+ * Durable dedupe key for one goal source. It changes when the triggering observation's content, the text the
+ * owner would see, the goal revision/definition or the configured source changes; a new event that observes
+ * the same content does not. Without an observation digest (older Goals) the unique envelope digest is used,
+ * so such events are never treated as unchanged.
  */
-export function reminderContentDigest(decision: Readonly<Pick<OpportunityDecision, 'objective' | 'definitionDigest' | 'nativeGoalId' | 'nativeRevision' | 'sourceId' | 'sourceDigest'>>): string {
-  return createHash('sha256').update(JSON.stringify(['assistant-proactive/reminder/v1', decision.sourceId, decision.sourceDigest,
-    decision.nativeGoalId, decision.nativeRevision, decision.definitionDigest, reminderText(decision)])).digest('hex')
+export type ReminderContent = Pick<OpportunityDecision, 'objective' | 'definitionDigest' | 'nativeGoalId' | 'nativeRevision' | 'sourceId' | 'sourceDigest' | 'eventDigest' | 'eventObservationDigest'>
+export function reminderContentDigest(decision: Readonly<ReminderContent>): string {
+  const observation = decision.eventObservationDigest === undefined ? ['envelope', decision.eventDigest] : ['observation', decision.eventObservationDigest]
+  return createHash('sha256').update(JSON.stringify(['assistant-proactive/reminder/v2', decision.sourceId, decision.sourceDigest,
+    decision.nativeGoalId, decision.nativeRevision, decision.definitionDigest, ...observation, reminderText(decision)])).digest('hex')
 }
 
 /** A queued reminder expires at the next quiet interval; it cannot arrive during a later silent period. */

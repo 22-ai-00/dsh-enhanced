@@ -286,7 +286,10 @@ describe('durable event wait lifecycle', () => {
     const f = fixture(':memory:', undefined, proactive); const wait = f.intent()
     const prepared = f.runtime.prepare({ ...wait, opportunityProfile: 'prepare-profile' })
     expect(prepared.state).toBe('waiting'); expect(f.materializations).toBe(0)
-    f.runtime.reconcile(); expect(f.lastAfter).toBe(8); expect(proactive.evaluate).toHaveBeenCalledTimes(1); f.close()
+    f.runtime.reconcile(); expect(f.lastAfter).toBe(8); expect(proactive.evaluate).toHaveBeenCalledTimes(1)
+    // The source content digest travels with the envelope digest so Proactive can tell unchanged results apart.
+    expect((proactive.evaluate.mock.calls[0] as unknown[])[0]).toMatchObject({ event: { sequence: 8, digest: externalEventDigest(f.event), observationDigest: 'b'.repeat(64) } })
+    f.close()
   })
   it('authorizes a current selected event for read-only preparation without waking or changing the native goal', () => {
     const { f, prepared, authority } = preparationFixture()

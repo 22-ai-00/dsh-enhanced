@@ -27,7 +27,8 @@ type GoalSourceClaim = {
 type OpportunityInput = {
   waitId: string; profileId: string; scope: GoalScope; goalId: string; sessionId: string
   definitionDigest: string; objective: string; nativeGoalId: string; nativeRevision: number; ownerRouteId: string
-  sourceDigest: string; sourceId: string; event: { id: string; sequence: number; digest: string; occurredAt: number }; expiresAt: number
+  // `observationDigest` is the source content digest; Proactive uses it to tell an unchanged result from new content.
+  sourceDigest: string; sourceId: string; event: { id: string; sequence: number; digest: string; occurredAt: number; observationDigest?: string }; expiresAt: number
 }
 // assistant-proactive is optional, so reuse the complete local authority
 // identity instead of coupling this independently installable plugin to it.
@@ -257,7 +258,7 @@ export class GoalEventWaitRuntime {
             nativeGoalId: wait.intent.wake.native.goalId, nativeRevision: wait.intent.wake.native.revision,
             ownerRouteId: wait.intent.wake.ownerRouteId, sourceDigest: wait.intent.source.configDigest,
             sourceId: wait.intent.source.sourceId,
-            event: { id: envelope.event.id, sequence: found.sequence, digest: externalEventDigest(envelope), occurredAt: envelope.event.occurredAt },
+            event: { id: envelope.event.id, sequence: found.sequence, digest: externalEventDigest(envelope), occurredAt: envelope.event.occurredAt, observationDigest: envelope.observation.digest },
             expiresAt: wait.intent.expiresAt,
           }
           const evaluation = proactive.evaluate(input)

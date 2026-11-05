@@ -2,7 +2,7 @@ import { closeSync, constants, lstatSync, mkdirSync, openSync, chmodSync } from 
 import { dirname, isAbsolute } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
-import { reminderContentDigest } from './reminder.js'
+import { reminderContentDigest, type ReminderContent } from './reminder.js'
 import type { OpportunityDecision, OpportunityEvaluation, OpportunityInput, OpportunityProfile, OpportunityScope } from './types.js'
 
 const max = 1_000_000_000
@@ -55,8 +55,13 @@ function scopeKey(scope: OpportunityScope): string {
 }
 function validateInput(input: OpportunityInput): void {
   if (!input || typeof input !== 'object' || ![input.waitId, input.profileId, input.goalId, input.sessionId, input.definitionDigest, input.nativeGoalId, input.ownerRouteId, input.sourceDigest, input.sourceId, input.event.id, input.event.digest].every(value => text(value)) || !content(input.objective)
+    || input.event.observationDigest !== undefined && (typeof input.event.observationDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(input.event.observationDigest))
     || !integer(input.nativeRevision) || !integer(input.event.sequence) || !integer(input.event.occurredAt, Number.MAX_SAFE_INTEGER) || !integer(input.expiresAt, Number.MAX_SAFE_INTEGER)) fail()
   scopeKey(input.scope)
+}
+function reminderContent(input: OpportunityInput): ReminderContent & Pick<OpportunityDecision, 'goalId'> {
+  return { goalId: input.goalId, objective: input.objective, definitionDigest: input.definitionDigest, nativeGoalId: input.nativeGoalId, nativeRevision: input.nativeRevision,
+    sourceId: input.sourceId, sourceDigest: input.sourceDigest, eventDigest: input.event.digest, eventObservationDigest: input.event.observationDigest }
 }
 function utility(profile: OpportunityProfile): number { return Number(BigInt(profile.expectedBenefit) * BigInt(profile.successPpm) / 1_000_000n - BigInt(profile.executionCost) - BigInt(profile.interruptionCost) - BigInt(profile.possibleLoss)) }
 function minuteAt(now: number, timezone: string): number {
@@ -90,7 +95,10 @@ export class OpportunityEngine {
       CREATE TABLE IF NOT EXISTS proactive_decisions(id TEXT PRIMARY KEY, scope_json TEXT NOT NULL, goal_id TEXT NOT NULL, profile_id TEXT NOT NULL, payload_json TEXT NOT NULL) STRICT;
       CREATE TABLE IF NOT EXISTS proactive_events(scope_json TEXT NOT NULL, goal_id TEXT NOT NULL, profile_id TEXT NOT NULL, source_id TEXT NOT NULL, event_sequence INTEGER NOT NULL, event_digest TEXT NOT NULL, decision_id TEXT NOT NULL REFERENCES proactive_decisions(id), PRIMARY KEY(scope_json, goal_id, profile_id, source_id, event_sequence, event_digest)) STRICT, WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS proactive_decisions_goal ON proactive_decisions(scope_json, goal_id, profile_id);
-      CREATE TABLE IF NOT EXISTS proactive_reminders(scope_json TEXT NOT NULL, goal_id TEXT NOT NULL, source_id TEXT NOT NULL, content_digest TEXT NOT NULL, decision_id TEXT NOT NULL REFERENCES proactive_decisions(id), PRIMARY KEY(scope_json, goal_id, source_id)) STRICT, WITHOUT ROWID;`)
+      CREATE TABLE IF NOT EXISTS proactive_reminders(scope_json TEXT NOT NULL, goal_id TEXT NOT NULL, source_id TEXT NOT NULL, content_digest TEXT NOT NULL, decision_id TEXT NOT NULL REFERENCES proactive_decisions(id), queued INTEGER NOT NULL DEFAULT 0 CHECK(queued IN (0, 1)), PRIMARY KEY(scope_json, goal_id, source_id)) STRICT, WITHOUT ROWID;`)
+    // Pre-release development databases may hold the table without `queued`; add it in place.
+    if (!(this.#db.prepare('PRAGMA table_info(proactive_reminders)').all() as Array<{ name: string }>).some(column => column.name === 'queued'))
+      this.#db.exec('ALTER TABLE proactive_reminders ADD COLUMN queued INTEGER NOT NULL DEFAULT 0 CHECK(queued IN (0, 1))')
   }
   evaluate(input: OpportunityInput): OpportunityEvaluation {
     this.#db.exec('BEGIN IMMEDIATE')
@@ -122,7 +130,7 @@ export class OpportunityEngine {
     if (utility(profile) < profile.minimumUtility) return this.#save(scope, input, profile, 'consume', 'suppress', 'below-threshold', now, now)
     if (latest && now < latest.updatedAt + profile.cooldownMs) return this.#save(scope, input, profile, 'consume', 'suppress', 'cooldown', now, now)
     if (profile.mergeWindowMs > 0) return this.#save(scope, input, profile, 'defer', 'suppress', 'coalescing', now, now + profile.mergeWindowMs)
-    if (profile.mode === 'remind' && this.#unchangedReminder(scope, input)) return this.#save(scope, input, profile, 'consume', 'suppress', 'unchanged', now, now)
+    if (profile.mode === 'remind' && this.#unchangedReminder(scope, reminderContent(input))) return this.#save(scope, input, profile, 'consume', 'suppress', 'unchanged', now, now)
     return this.#save(scope, input, profile, profile.mode === 'execute' ? 'execute' : 'consume', profile.mode, profile.mode === 'execute' ? 'execution' : profile.mode === 'remind' ? 'reminder' : 'prepared', now, now)
   }
   feedback(id: string, scopeInput: OpportunityScope, feedback: 'accepted' | 'rejected'): OpportunityDecision {
@@ -152,6 +160,17 @@ export class OpportunityEngine {
       this.#db.exec('COMMIT')
     } catch (error) { this.#db.exec('ROLLBACK'); throw error }
   }
+  /** Delivery accepted (queued) this decision's reminder; a later replay past its send window keeps the dedupe. */
+  confirmReminder(decision: Readonly<Pick<OpportunityDecision, 'id' | 'scope' | 'goalId' | 'sourceId'>>): void {
+    this.#db.prepare('UPDATE proactive_reminders SET queued = 1 WHERE scope_json = ? AND goal_id = ? AND source_id = ? AND decision_id = ?').run(scopeKey(decision.scope), decision.goalId, decision.sourceId, decision.id)
+  }
+  /**
+   * This decision's reminder was never accepted by Delivery and its send window has closed, so it must not
+   * count as seen. Only the unconfirmed row this decision wrote is removed; a newer reminder is left alone.
+   */
+  releaseReminder(decision: Readonly<Pick<OpportunityDecision, 'id' | 'scope' | 'goalId' | 'sourceId'>>): void {
+    this.#db.prepare('DELETE FROM proactive_reminders WHERE scope_json = ? AND goal_id = ? AND source_id = ? AND decision_id = ? AND queued = 0').run(scopeKey(decision.scope), decision.goalId, decision.sourceId, decision.id)
+  }
   close(): void { this.#db.close() }
   #profile(scope: string, goalId: string, profileId: string): Readonly<OpportunityProfile> {
     const row = this.#db.prepare('SELECT profile_json FROM proactive_profiles WHERE scope_json = ? AND goal_id = ? AND profile_id = ?').get(scope, goalId, profileId) as { profile_json: string } | undefined
@@ -173,7 +192,7 @@ export class OpportunityEngine {
     return { ledger: rows.length, executions: rows.filter(value => value.mode === 'execute').length, reminders: rows.filter(value => value.mode === 'remind').length }
   }
   #merge(scope: string, existing: OpportunityDecision, input: OpportunityInput, now: number): OpportunityEvaluation {
-    const next = input.event.sequence > existing.eventSequence ? freeze({ ...existing, waitId: input.waitId, sessionId: input.sessionId, ownerRouteId: input.ownerRouteId, sourceId: input.sourceId, eventId: input.event.id, eventSequence: input.event.sequence, eventDigest: input.event.digest, sourceDigest: input.sourceDigest, objective: input.objective, definitionDigest: input.definitionDigest, nativeGoalId: input.nativeGoalId, nativeRevision: input.nativeRevision, updatedAt: now, observations: existing.observations + 1 }) : freeze({ ...existing, updatedAt: now, observations: existing.observations + 1 })
+    const next = input.event.sequence > existing.eventSequence ? freeze({ ...existing, waitId: input.waitId, sessionId: input.sessionId, ownerRouteId: input.ownerRouteId, sourceId: input.sourceId, eventId: input.event.id, eventSequence: input.event.sequence, eventDigest: input.event.digest, eventObservationDigest: input.event.observationDigest, sourceDigest: input.sourceDigest, objective: input.objective, definitionDigest: input.definitionDigest, nativeGoalId: input.nativeGoalId, nativeRevision: input.nativeRevision, updatedAt: now, observations: existing.observations + 1 }) : freeze({ ...existing, updatedAt: now, observations: existing.observations + 1 })
     this.#put(next); this.#link(scope, input, next.id); return freeze({ disposition: 'defer', decision: next })
   }
   #mature(scope: string, existing: OpportunityDecision, input: OpportunityInput, profile: OpportunityProfile, now: number): OpportunityEvaluation {
@@ -190,34 +209,36 @@ export class OpportunityEngine {
     }
     const counts = this.#counts(scope, input.goalId)
     const budget = counts.ledger > profile.maxDecisionsPerGoal || profile.mode === 'execute' && counts.executions >= profile.maxExecutionsPerGoal || profile.mode === 'remind' && counts.reminders >= profile.maxRemindersPerGoal
-    const unchanged = !budget && profile.mode === 'remind' && this.#unchangedReminder(scope, existing)
+    // Compare the content of the latest coalesced observation, i.e. what this decision will actually report.
+    const observed: OpportunityDecision = { ...existing, ...(input.event.sequence > existing.eventSequence ? { eventId: input.event.id, eventSequence: input.event.sequence, eventDigest: input.event.digest, eventObservationDigest: input.event.observationDigest, observations: existing.observations + 1 } : {}) }
+    const unchanged = !budget && profile.mode === 'remind' && this.#unchangedReminder(scope, observed)
     const mode = budget || unchanged ? 'suppress' as const : profile.mode
     const reason = budget ? 'budget' as const : unchanged ? 'unchanged' as const : profile.mode === 'execute' ? 'execution' as const : profile.mode === 'remind' ? 'reminder' as const : 'prepared' as const
-    const next = freeze({ ...existing, ...(input.event.sequence > existing.eventSequence ? { eventId: input.event.id, eventSequence: input.event.sequence, eventDigest: input.event.digest, observations: existing.observations + 1 } : {}), mode, state: 'decided' as const, reason, updatedAt: now })
+    const next = freeze({ ...observed, mode, state: 'decided' as const, reason, updatedAt: now })
     this.#put(next); this.#link(scope, input, next.id); if (mode === 'remind') this.#remember(scope, next)
     return freeze({ disposition: mode === 'execute' ? 'execute' : 'consume', decision: next })
   }
   #save(scope: string, input: OpportunityInput, profile: OpportunityProfile, disposition: OpportunityEvaluation['disposition'], mode: OpportunityDecision['mode'], reason: OpportunityDecision['reason'], now: number, eligibleAt: number): OpportunityEvaluation {
     if (this.#counts(scope, input.goalId).ledger >= profile.maxDecisionsPerGoal) return this.#budgetProjection(input, profile, now)
-    const decision = freeze({ id: `opportunity-${randomUUID()}`, waitId: input.waitId, profileId: profile.id, scope: input.scope, goalId: input.goalId, sessionId: input.sessionId, ownerRouteId: input.ownerRouteId, sourceId: input.sourceId, eventId: input.event.id, eventSequence: input.event.sequence, eventDigest: input.event.digest, sourceDigest: input.sourceDigest, objective: input.objective, definitionDigest: input.definitionDigest, nativeGoalId: input.nativeGoalId, nativeRevision: input.nativeRevision, mode, state: eligibleAt > now ? 'pending' as const : 'decided' as const, reason, utility: utility(profile), firstObservedAt: now, updatedAt: now, eligibleAt, expiresAt: input.expiresAt, observations: 1 })
+    const decision = freeze({ id: `opportunity-${randomUUID()}`, waitId: input.waitId, profileId: profile.id, scope: input.scope, goalId: input.goalId, sessionId: input.sessionId, ownerRouteId: input.ownerRouteId, sourceId: input.sourceId, eventId: input.event.id, eventSequence: input.event.sequence, eventDigest: input.event.digest, eventObservationDigest: input.event.observationDigest, sourceDigest: input.sourceDigest, objective: input.objective, definitionDigest: input.definitionDigest, nativeGoalId: input.nativeGoalId, nativeRevision: input.nativeRevision, mode, state: eligibleAt > now ? 'pending' as const : 'decided' as const, reason, utility: utility(profile), firstObservedAt: now, updatedAt: now, eligibleAt, expiresAt: input.expiresAt, observations: 1 })
     this.#put(decision); this.#link(scope, input, decision.id); if (mode === 'remind') this.#remember(scope, decision); return freeze({ disposition, decision })
   }
   /**
    * One reminder per goal source until what the owner would read changes or the owner answers it. Durable in
    * the same transaction as the decision, so a restart neither forgets nor re-sends an unchanged reminder.
    */
-  #unchangedReminder(scope: string, value: Pick<OpportunityDecision, 'goalId' | 'sourceId' | 'objective' | 'definitionDigest' | 'nativeGoalId' | 'nativeRevision' | 'sourceDigest'>): boolean {
+  #unchangedReminder(scope: string, value: ReminderContent & Pick<OpportunityDecision, 'goalId'>): boolean {
     const row = this.#db.prepare('SELECT content_digest, decision_id FROM proactive_reminders WHERE scope_json = ? AND goal_id = ? AND source_id = ?').get(scope, value.goalId, value.sourceId) as { content_digest: string; decision_id: string } | undefined
     if (!row || row.content_digest !== reminderContentDigest(value)) return false
     return this.#decision(row.decision_id)?.feedback === undefined
   }
   #remember(scope: string, decision: OpportunityDecision): void {
-    this.#db.prepare('INSERT INTO proactive_reminders VALUES (?, ?, ?, ?, ?) ON CONFLICT(scope_json, goal_id, source_id) DO UPDATE SET content_digest = excluded.content_digest, decision_id = excluded.decision_id').run(scope, decision.goalId, decision.sourceId, reminderContentDigest(decision), decision.id)
+    this.#db.prepare('INSERT INTO proactive_reminders(scope_json, goal_id, source_id, content_digest, decision_id, queued) VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT(scope_json, goal_id, source_id) DO UPDATE SET content_digest = excluded.content_digest, decision_id = excluded.decision_id, queued = 0').run(scope, decision.goalId, decision.sourceId, reminderContentDigest(decision), decision.id)
   }
   #put(decision: OpportunityDecision): void { this.#db.prepare('INSERT INTO proactive_decisions(id, scope_json, goal_id, profile_id, payload_json) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json').run(decision.id, scopeKey(decision.scope), decision.goalId, decision.profileId, JSON.stringify(decision)) }
   #link(scope: string, input: OpportunityInput, id: string): void { this.#db.prepare('INSERT OR IGNORE INTO proactive_events VALUES (?, ?, ?, ?, ?, ?, ?)').run(scope, input.goalId, input.profileId, input.sourceId, input.event.sequence, input.event.digest, id) }
   #terminal(existing: OpportunityDecision, disposition: OpportunityEvaluation['disposition'], mode: OpportunityDecision['mode'], reason: OpportunityDecision['reason'], now: number): OpportunityEvaluation { const next = freeze({ ...existing, mode, reason, state: 'decided' as const, updatedAt: now }); if (existing.state === 'pending') this.#put(next); return freeze({ disposition, decision: next }) }
-  #budgetProjection(input: OpportunityInput, profile: OpportunityProfile, now: number): OpportunityEvaluation { return freeze({ disposition: 'consume', decision: freeze({ id: `opportunity-budget-${input.event.digest}`, waitId: input.waitId, profileId: profile.id, scope: input.scope, goalId: input.goalId, sessionId: input.sessionId, ownerRouteId: input.ownerRouteId, sourceId: input.sourceId, eventId: input.event.id, eventSequence: input.event.sequence, eventDigest: input.event.digest, sourceDigest: input.sourceDigest, objective: input.objective, definitionDigest: input.definitionDigest, nativeGoalId: input.nativeGoalId, nativeRevision: input.nativeRevision, mode: 'suppress' as const, state: 'decided' as const, reason: 'budget' as const, utility: utility(profile), firstObservedAt: now, updatedAt: now, eligibleAt: now, expiresAt: input.expiresAt, observations: 0 }) }) }
+  #budgetProjection(input: OpportunityInput, profile: OpportunityProfile, now: number): OpportunityEvaluation { return freeze({ disposition: 'consume', decision: freeze({ id: `opportunity-budget-${input.event.digest}`, waitId: input.waitId, profileId: profile.id, scope: input.scope, goalId: input.goalId, sessionId: input.sessionId, ownerRouteId: input.ownerRouteId, sourceId: input.sourceId, eventId: input.event.id, eventSequence: input.event.sequence, eventDigest: input.event.digest, eventObservationDigest: input.event.observationDigest, sourceDigest: input.sourceDigest, objective: input.objective, definitionDigest: input.definitionDigest, nativeGoalId: input.nativeGoalId, nativeRevision: input.nativeRevision, mode: 'suppress' as const, state: 'decided' as const, reason: 'budget' as const, utility: utility(profile), firstObservedAt: now, updatedAt: now, eligibleAt: now, expiresAt: input.expiresAt, observations: 0 }) }) }
   #sameIdentity(value: OpportunityDecision, input: OpportunityInput): boolean { return value.waitId === input.waitId && value.sessionId === input.sessionId && value.nativeGoalId === input.nativeGoalId && value.nativeRevision === input.nativeRevision && value.ownerRouteId === input.ownerRouteId && value.sourceId === input.sourceId && value.sourceDigest === input.sourceDigest && value.definitionDigest === input.definitionDigest && value.objective === input.objective && value.expiresAt === input.expiresAt && value.goalId === input.goalId && sameScope(value.scope, input.scope) }
 }
 function sameScope(left: OpportunityScope, right: OpportunityScope): boolean { return scopeKey(left) === scopeKey(right) }
