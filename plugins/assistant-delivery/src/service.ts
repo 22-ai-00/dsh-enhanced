@@ -1153,8 +1153,11 @@ export class AssistantDeliveryService extends Service {
   private acceptanceRequired = false
   private readonly preferenceTurns = new WeakMap<Agent, Readonly<DeliveryPreferenceTurnAttestation>>()
   /** Claimed human turns of linked owner aliases; read-only alias inspection only. */
+  // Alias turns pin the alias principal row version and link target observed at
+  // claim time; a re-link (which bumps the principal version) invalidates them.
   private readonly aliasTurns = new WeakMap<Agent, Readonly<{ sessionId: string; bindingId: string;
-    bindingVersion: number; sourceEventId: string; sourceInboxId: string; turn: number }>>()
+    bindingVersion: number; principalRecordId: string; principalVersion: number; linkedToId: string;
+    sourceEventId: string; sourceInboxId: string; turn: number }>>()
   private readonly goalWakeResults = new WeakMap<DeliveryGoalWakeInput, () => DeliveryGoalWakeResultPublication>()
   private modelSelectionFlight: Promise<void> | undefined
   private presentationFlight: Promise<void> | undefined
@@ -5661,7 +5664,9 @@ export class AssistantDeliveryService extends Service {
   private currentAliasTurn(agent: Agent, receipt: Readonly<OwnerAliasReceipt>) {
     const turn = this.aliasTurns.get(agent)
     if (turn === undefined || turn.sessionId !== receipt.alias.sessionId
-      || turn.bindingId !== receipt.alias.bindingId || turn.bindingVersion !== receipt.alias.bindingVersion) return undefined
+      || turn.bindingId !== receipt.alias.bindingId || turn.bindingVersion !== receipt.alias.bindingVersion
+      || turn.principalRecordId !== receipt.alias.principalRecordId || turn.principalVersion !== receipt.alias.principalVersion
+      || turn.linkedToId !== receipt.root.principalRecordId) return undefined
     const binding = this.deliveryStore.getBinding(turn.bindingId)
     const inbox = this.deliveryStore.getInbox(turn.sourceInboxId)
     if (binding?.status !== 'active' || binding.version !== turn.bindingVersion
@@ -5692,6 +5697,7 @@ export class AssistantDeliveryService extends Service {
       || !this.isInboundAuthorized(binding, inbox.envelope)) return
     this.aliasTurns.set(agent, Object.freeze({
       sessionId, bindingId: binding.id, bindingVersion: binding.version,
+      principalRecordId: principal.id, principalVersion: principal.version, linkedToId: principal.linkedToId,
       sourceEventId: source.eventId, sourceInboxId: inbox.id, turn: turnInput as number,
     }))
   }

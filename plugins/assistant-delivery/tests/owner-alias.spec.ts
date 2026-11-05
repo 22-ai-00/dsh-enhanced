@@ -17,6 +17,7 @@ const contexts: Context[] = []
 const owner = { channel: 'lark', account: 'bot', tenant: 'tenant', user: 'owner' }
 const ownerConversation = { channel: 'lark', account: 'bot', tenant: 'tenant', kind: 'dm' as const, chat: 'owner-chat' }
 const alias = { channel: 'telegram', account: 'bot-tg', tenant: 'personal', user: 'alias' }
+const other = { channel: 'telegram', account: 'bot-tg', tenant: 'personal', user: 'other' }
 const aliasConversation = { channel: 'telegram', account: 'bot-tg', tenant: 'personal', kind: 'dm' as const, chat: 'alias-chat' }
 const authority = { id: 'owner-route', conversation: ownerConversation, principal: owner, workspace: '/work/owner',
   agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }
@@ -37,7 +38,7 @@ async function fixture() {
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [
     { id: 'issue', effect: 'allow', subject: { kind: 'external', id: 'local:test' },
       actions: ['pair.issue'], resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },
-    ...[owner, alias].map(key => ({ id: `confirm-${key.user}`, effect: 'allow' as const, subject: { kind: 'external' as const, id: id(key) },
+    ...[owner, alias, other].map(key => ({ id: `confirm-${key.user}`, effect: 'allow' as const, subject: { kind: 'external' as const, id: id(key) },
       actions: ['pair.confirm', 'ingest'], resource: { kind: 'message' as const, id: '*' }, context: { initiators: ['external' as const] } })),
     ...[owner, alias].map(key => ({ id: `reply-${key.user}`, effect: 'allow' as const, subject: { kind: 'agent' as const, id: 'primary',
       workspace: '/work/owner', principal: id(key) }, actions: ['reply'], resource: { kind: 'message' as const, id: '*' },
@@ -183,4 +184,29 @@ test('an alias binding in another workspace or a rotated alias binding is not an
   expect(f.service.inspectOwnerAliasRoute(f.aliasSide.agent, authority.id)).toBeUndefined()
   expect(f.service.inspectOwnerAliasForegroundToolCall(callFor(f.aliasSide.agent, 1))).toBeUndefined()
   expect(f.service.inspectOwnerAliasRoute(f.aliasSide.agent, 'unknown-route')).toBeUndefined()
+})
+
+test('a turn claimed while linked to another root does not authorize calls after a mid-turn re-link', async () => {
+  const f = await fixture()
+  const { agent } = f.aliasSide
+  // Model an alias still linked to a non-current root B (e.g. a former owner record).
+  const formerRoot = f.pair(other)
+  const database = (f.store as unknown as { database: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).database
+  database.prepare("UPDATE delivery_principals SET linked_to_id = ?, version = version + 1 WHERE id = ?").run(formerRoot.id, f.candidate.id)
+  expect(f.store.getPrincipal(alias)).toMatchObject({ role: 'linked', linkedToId: formerRoot.id })
+  const first = claimAlias(f, f.aliasSide.binding, agent, 'linked-elsewhere', 1)
+  expect(f.service.inspectOwnerAliasRoute(agent, authority.id)).toBeUndefined()
+
+  // Re-link to the current owner A mid-turn: the binding version is unchanged, but the turn is not.
+  f.link()
+  expect(f.store.getBinding(f.aliasSide.binding.id)?.version).toBe(f.aliasSide.binding.version)
+  expect(f.service.inspectOwnerAliasRoute(agent, authority.id)).toBeDefined()
+  expect(f.service.inspectOwnerAliasForegroundToolCall(callFor(agent, 1))).toBeUndefined()
+
+  // A turn claimed after the link is accepted.
+  agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  f.store.finishInbox({ inboxId: first.inbox.id, ownerId: first.claimed.record.claimedBy!,
+    fencingToken: first.claimed.fencingToken!, outcome: 'processed' })
+  claimAlias(f, f.aliasSide.binding, agent, 'after-relink', 2)
+  expect(f.service.inspectOwnerAliasForegroundToolCall(callFor(agent, 2))).toBeDefined()
 })
