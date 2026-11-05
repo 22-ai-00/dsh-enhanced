@@ -56,7 +56,10 @@ function compact(event) {
   if (event.type === 'tool/result') {
     const message = data.message && typeof data.message === 'object' && !Array.isArray(data.message) ? data.message : {}
     const source = message.source && typeof message.source === 'object' && !Array.isArray(message.source) ? message.source : {}
-    const result = Array.isArray(message.content) && message.content.length === 1 && message.content[0]?.type === 'tool-result' ? message.content[0] : {}
+    // Session format v4 (DSH 0.2.x) stores a tool-role message with a top-level
+    // toolCallId; older formats wrap the outcome in one 'tool-result' block.
+    const result = message.role === 'tool' ? message
+      : Array.isArray(message.content) && message.content.length === 1 && message.content[0]?.type === 'tool-result' ? message.content[0] : {}
     return { seq: event.seq, type: event.type, data: { turn: data.turn, callId: source.callId, isError: result.toolCallId !== source.callId || typeof source.callId !== 'string' || message.isError === true || result.isError === true } }
   }
   if (event.type === 'turn/start') return { seq: event.seq, type: event.type, data: { turn: data.turn } }
