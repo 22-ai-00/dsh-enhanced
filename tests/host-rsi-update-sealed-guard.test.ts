@@ -99,9 +99,24 @@ test('the Host update wiring reads the mapped physical journal through the insta
 test('every ownerConfiguration readiness path runs the sealed check before any early return', () => {
   const source = readFileSync(resolve(import.meta.dirname, '../scripts/install/host-rsi-update.mjs'), 'utf8')
   const body = source.slice(source.indexOf('async function ownerConfiguration('))
-  const call = body.indexOf('await verifySealedAdoptionChain({ records: overlay.records')
+  // The function's own parameters reach the check: the stage or swapped physical Home, never the logical one.
+  expect(body.startsWith('async function ownerConfiguration(installation, homePath, physicalHome, modules, inspection = {}) {')).toBe(true)
+  const flat = body.replace(/\s+/gu, ' ')
+  const whole = 'await verifySealedAdoptionChain({ records: overlay.records, stateRoot: installation.resources.stateRoot, '
+    + 'homePath, physicalHome, modules, sourceOnly: inspection.sourceOnly === true })'
+  const call = flat.indexOf(whole)
   expect(call).toBeGreaterThan(0)
-  const firstReturn = body.search(/\breturn\b/u)
+  expect(flat.indexOf('verifySealedAdoptionChain(', call + whole.length)).toBe(-1)
+  // Everything after the signature line, up to the call.
+  const before = flat.slice(flat.indexOf(') {') + 3, call)
+  // Nothing rebinds the arguments between the signature and the call.
+  for (const name of ['physicalHome', 'homePath', 'modules', 'installation', 'inspection']) {
+    expect(before.match(new RegExp(`\\b${name}\\s*=[^=>]`, 'gu'))?.length ?? 0).toBe(0)
+  }
+  // overlay is bound exactly once, from the signed chain reader.
+  expect(flat.split('const overlay = modules.hostUpdate.readRsiHostUpdateOverlayChain(').length - 1).toBe(1)
+  expect(before.match(/\boverlay\s*=[^=>]/gu)?.length).toBe(1)
+  const firstReturn = flat.search(/\breturn\b/u)
   expect(firstReturn === -1 || call < firstReturn).toBe(true)
   expect(source).toContain('const sealedAdoption = () => sealedAdoptionModule(cp)')
 })
