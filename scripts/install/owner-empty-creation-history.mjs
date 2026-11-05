@@ -205,6 +205,56 @@ function configRows(api, ownerUpdate) {
   return { home, base, lanes, logicalPath: join(statePath, 'creation-adoptions.sqlite'), capabilities }
 }
 export async function inspectOwnerEmptyCreationHistory({ ownerUpdate, physicalHome = ownerUpdate.homePath, api }) {
+  return inspectHistory({ ownerUpdate, physicalHome, api, classify: false })
+}
+
+const REVIEW_STATES = ['discover-claimed', 'contract-claimed', 'contract-ready', 'case-claimed', 'cases-ready',
+  'review-claimed', 'certificate', 'rejected', 'unknown']
+const ADOPTION_STATUSES = ['claimed', 'authorized', 'active', 'closed', 'unknown', 'rejected']
+const CALL_STATUSES = ['claimed', 'completed', 'unknown']
+/** Fail-closed status histogram: every stored value must be TEXT, valid UTF-8 without NUL,
+ * in `allowed`, and appear in exactly one group; the groups must add up to `total`. */
+function grouped(db, table, column, allowed, code, total) {
+  const rows = db.prepare(`SELECT typeof(${column}) AS t, CAST(${column} AS BLOB) AS value, COUNT(*) AS n
+    FROM ${table} GROUP BY typeof(${column}), CAST(${column} AS BLOB) ORDER BY 1, 2`).all()
+  const result = Object.fromEntries(allowed.map(value => [value, 0])), seen = new Set()
+  let sum = 0
+  for (const row of rows) {
+    if (row.t !== 'text' || !(row.value instanceof Uint8Array) || row.value.includes(0)) fail(code)
+    let value
+    try { value = new TextDecoder('utf-8', { fatal: true }).decode(row.value) } catch { fail(code) }
+    if (!allowed.includes(value) || !Buffer.from(value).equals(Buffer.from(row.value)) || seen.has(value)) fail(code)
+    seen.add(value); result[value] = row.n; sum += row.n
+  }
+  if (sum !== total) fail(code)
+  return result
+}
+// Every CHECK constraint of the journal tables (creation-capability-journal.ts), single-column and
+// cross-column, re-evaluated explicitly. The private copy is opened read-only and SQLite's
+// quick_check does not verify CHECK constraints there, so a forged or corrupted row would
+// otherwise be archived and counted. NULL results count as invalid.
+const json = (column, max) => `(${column} IS NULL OR (json_valid(${column}) AND length(${column})<=${max}))`
+const ADOPTION_VALID = `json_valid(certificate_json) AND length(certificate_json)<=65536 AND length(certificate_digest)=64
+  AND length(artifact)>0 AND length(artifact)<=524288 AND length(artifact_sha)=64
+  AND ${json('tools_json', 65536)} AND ${json('receipt_json', 65536)} AND (reason IS NULL OR (length(reason)>0 AND length(reason)<=64))
+  AND ((status='claimed' AND tools_json IS NULL AND tools_digest IS NULL AND receipt_json IS NULL AND reason IS NULL)
+    OR (status IN ('authorized','active') AND tools_json IS NOT NULL AND tools_digest IS NOT NULL AND receipt_json IS NOT NULL AND reason IS NULL)
+    OR (status IN ('closed','unknown','rejected') AND reason IS NOT NULL))`
+const CALL_VALID = `length(arguments_digest)=64 AND ${json('result_json', 65536)} AND ${json('foreground_json', 4096)}
+  AND ((status='claimed' AND result_json IS NULL AND job_id IS NULL) OR status IN ('completed','unknown'))`
+const SOURCE_ARCHIVE_VALID = 'json_valid(archive_json) AND length(archive_json)<=2097152'
+function invariant(db, table, valid, code) {
+  if (db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE NOT COALESCE((${valid}), 0)`).get().n !== 0) fail(code)
+}
+
+/** Read-only classification for the sealed-history Docker→linux-native handoff.
+ * `empty` keeps the existing empty protocol; `sealable` only reports what a later
+ * stopped-Host seal would archive. It authorizes, settles and migrates nothing. */
+export async function inspectOwnerCreationHistory({ ownerUpdate, physicalHome = ownerUpdate.homePath, api }) {
+  return inspectHistory({ ownerUpdate, physicalHome, api, classify: true })
+}
+
+async function inspectHistory({ ownerUpdate, physicalHome, api, classify }) {
   const { home, base, lanes, logicalPath, capabilities } = configRows(api, ownerUpdate)
   absolute(physicalHome); if (fs.realpathSync(physicalHome) !== physicalHome) fail('unsafe-physical-home')
   const control = api.control
@@ -219,10 +269,16 @@ export async function inspectOwnerEmptyCreationHistory({ ownerUpdate, physicalHo
     try {
       const result = snapshot(path, physicalHome, db => {
         const schema = inspectSchema(db, 'review'), counts = { grants: db.prepare('SELECT COUNT(*) AS n FROM grants').get().n, verifications: db.prepare('SELECT COUNT(*) AS n FROM verifications').get().n }
-        if (counts.grants !== 0 || counts.verifications !== 0) fail('review-history-present')
-        return { ...schema, counts }
+        if (!classify) {
+          if (counts.grants !== 0 || counts.verifications !== 0) fail('review-history-present')
+          return { ...schema, counts }
+        }
+        // Review history is carried in place by the existing grant handoff v2 (used/maximum kept),
+        // so every state, including terminal unknown and crash-left in-progress rows, is reported.
+        return { ...schema, counts, byState: grouped(db, 'verifications', 'state', REVIEW_STATES, 'review-state-invalid', counts.verifications) }
       })
-      return { lane, status: 'empty', logicalPath: logical, physicalPath: path, ...result }
+      const status = result.counts.grants === 0 && result.counts.verifications === 0 ? 'empty' : 'sealable'
+      return { lane, status, logicalPath: logical, physicalPath: path, ...result }
     } catch (error) { if (error.code === 'database-missing' || error.code === 'ENOENT') fail('review-database-missing'); throw error }
   })
   const adoptionPath = physical(home, physicalHome, logicalPath)
@@ -234,12 +290,31 @@ export async function inspectOwnerEmptyCreationHistory({ ownerUpdate, physicalHo
       key_id: capabilities.keyId, public_key: publicKey, config_json: canonical(capabilities) })) fail('adoption-authority-mismatch')
     const counts = { authority: 1, adoptions: db.prepare('SELECT COUNT(*) AS n FROM adoptions').get().n,
       calls: db.prepare('SELECT COUNT(*) AS n FROM calls').get().n, sourceArchives: db.prepare('SELECT COUNT(*) AS n FROM source_archives').get().n }
-    if (Object.entries(counts).some(([key, value]) => key !== 'authority' && value !== 0)) fail('adoption-history-present')
-    return { ...schema, counts, authorityDigest }
+    if (!classify) {
+      if (Object.entries(counts).some(([key, value]) => key !== 'authority' && value !== 0)) fail('adoption-history-present')
+      return { ...schema, counts, authorityDigest }
+    }
+    // Every status is sealable: claimed/authorized/unknown are archived as "never eligible",
+    // never replayed, and still counted against the inherited adoption and call budget.
+    const byStatus = grouped(db, 'adoptions', 'status', ADOPTION_STATUSES, 'adoption-status-invalid', counts.adoptions)
+    const callsByStatus = grouped(db, 'calls', 'status', CALL_STATUSES, 'call-status-invalid', counts.calls)
+    invariant(db, 'adoptions', ADOPTION_VALID, 'adoption-row-invalid')
+    invariant(db, 'calls', CALL_VALID, 'call-row-invalid')
+    invariant(db, 'source_archives', SOURCE_ARCHIVE_VALID, 'source-archive-row-invalid')
+    return { ...schema, counts, authorityDigest, byStatus, callsByStatus }
   })
   } catch (error) { if (error.code === 'database-missing' || error.code === 'ENOENT') fail('adoption-database-missing'); throw error }
-  const result = { protocol: 'dsh-owner-empty-creation-history/v1', status: 'empty', installationId: ownerUpdate.original.resources.installationId,
+  if (!classify) {
+    const result = { protocol: 'dsh-owner-empty-creation-history/v1', status: 'empty', installationId: ownerUpdate.original.resources.installationId,
+      profile: ownerUpdate.profile, logicalHome: home, physicalHome, reviews,
+      adoption: { status: 'empty', logicalPath, physicalPath: adoptionPath, ...adoption } }
+    return { ...result, digest: hash(canonical(result)) }
+  }
+  const adoptionStatus = adoption.counts.adoptions === 0 && adoption.counts.calls === 0 && adoption.counts.sourceArchives === 0
+    ? 'empty' : 'sealable'
+  const status = adoptionStatus === 'empty' && reviews.every(review => review.status !== 'sealable') ? 'empty' : 'sealable'
+  const result = { protocol: 'dsh-owner-creation-history/v2', status, installationId: ownerUpdate.original.resources.installationId,
     profile: ownerUpdate.profile, logicalHome: home, physicalHome, reviews,
-    adoption: { status: 'empty', logicalPath, physicalPath: adoptionPath, ...adoption } }
+    adoption: { status: adoptionStatus, logicalPath, physicalPath: adoptionPath, ...adoption } }
   return { ...result, digest: hash(canonical(result)) }
 }

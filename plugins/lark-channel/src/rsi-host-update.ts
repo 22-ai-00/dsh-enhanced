@@ -55,19 +55,56 @@ export interface RsiOwnerEmptyAdoptionHandoff {
   planDigest: string
   proofDigest: string
   hostAnchor: string
-  fileIdentity: { dev: string; ino: string; uid: number; gid: number; mode: number; nlink: 1 }
+  fileIdentity: RsiOwnerAdoptionFileIdentity
+}
+export interface RsiOwnerAdoptionFileIdentity { dev: string; ino: string; uid: number; gid: number; mode: number; nlink: 1 }
+export interface RsiOwnerSealedAdoptionHandoff {
+  protocol: 'dsh-owner-sealed-adoption-handoff/v1'
+  transactionId: string
+  logicalPath: string
+  archiveLogicalPath: string
+  planDigest: string
+  proofDigest: string
+  hostAnchor: string
+  archiveDigest: string
+  pendingReverificationDigest: string
+  fileIdentity: RsiOwnerAdoptionFileIdentity
+  archiveFileIdentity: RsiOwnerAdoptionFileIdentity
+  inheritedUsage: { adoptions: number; calls: number }
+}
+function adoptionFileIdentityShape(file: unknown): boolean {
+  return record(file) && isDeepStrictEqual(Object.keys(file).sort(), ['dev','ino','uid','gid','mode','nlink'].sort())
+    && ['dev','ino'].every(key => typeof file[key] === 'string' && /^(?:0|[1-9][0-9]*)$/u.test(file[key]))
+    && ['uid','gid','mode'].every(key => Number.isSafeInteger(file[key]) && Number(file[key]) >= 0)
+    && file.nlink === 1
 }
 function emptyAdoptionHandoffShape(value: unknown, resources: RsiAuthorityResources, transactionId: string): void {
-  const file = record(value) && record(value.fileIdentity) ? value.fileIdentity : undefined
   if (!record(value) || !isDeepStrictEqual(Object.keys(value).sort(),
     ['protocol','transactionId','logicalPath','planDigest','proofDigest','hostAnchor','fileIdentity'].sort())
     || value.protocol !== 'dsh-owner-empty-adoption-handoff/v1' || value.transactionId !== transactionId
     || value.logicalPath !== `${resources.stateRoot}/control-plane/creation-adoptions.sqlite`
     || !['planDigest','proofDigest','hostAnchor'].every(key => typeof value[key] === 'string' && hex.test(value[key]))
-    || !record(file) || !isDeepStrictEqual(Object.keys(file).sort(), ['dev','ino','uid','gid','mode','nlink'].sort())
-    || !['dev','ino'].every(key => typeof file[key] === 'string' && /^(?:0|[1-9][0-9]*)$/u.test(file[key]))
-    || !['uid','gid','mode'].every(key => Number.isSafeInteger(file[key]) && Number(file[key]) >= 0)
-    || file.nlink !== 1) fail('empty adoption handoff metadata differs')
+    || !adoptionFileIdentityShape(value.fileIdentity)) fail('empty adoption handoff metadata differs')
+}
+function sealedAdoptionHandoffShape(value: unknown, resources: RsiAuthorityResources, transactionId: string): void {
+  const archiveDirectory = `${resources.stateRoot}/control-plane/creation-adoptions.sealed/`
+  const usage = record(value) && record(value.inheritedUsage) ? value.inheritedUsage : undefined
+  const live = record(value) ? value.fileIdentity : undefined, archive = record(value) ? value.archiveFileIdentity : undefined
+  // The archive file name is the old authority digest (unique per authority, prevents ABA), not archiveDigest.
+  if (!record(value) || !isDeepStrictEqual(Object.keys(value).sort(),
+    ['protocol','transactionId','logicalPath','archiveLogicalPath','planDigest','proofDigest','hostAnchor',
+      'archiveDigest','pendingReverificationDigest','fileIdentity','archiveFileIdentity','inheritedUsage'].sort())
+    || value.protocol !== 'dsh-owner-sealed-adoption-handoff/v1' || value.transactionId !== transactionId
+    || value.logicalPath !== `${resources.stateRoot}/control-plane/creation-adoptions.sqlite`
+    || typeof value.archiveLogicalPath !== 'string' || !value.archiveLogicalPath.startsWith(archiveDirectory)
+    || !/^[a-f0-9]{64}\.sqlite$/u.test(value.archiveLogicalPath.slice(archiveDirectory.length))
+    || !['planDigest','proofDigest','hostAnchor','archiveDigest','pendingReverificationDigest']
+      .every(key => typeof value[key] === 'string' && hex.test(value[key]))
+    || !adoptionFileIdentityShape(live) || !adoptionFileIdentityShape(archive) || !record(live) || !record(archive)
+    || live.dev === archive.dev && live.ino === archive.ino || (Number(archive.mode) & 0o777) !== 0o400
+    || !record(usage) || !isDeepStrictEqual(Object.keys(usage).sort(), ['adoptions','calls'])
+    || !['adoptions','calls'].every(key => Number.isSafeInteger(usage[key]) && Number(usage[key]) >= 0))
+    fail('sealed adoption handoff metadata differs')
 }
 export interface RsiOwnerProgramUpdateOverlay extends Omit<RsiOwnerRepairOverlay, 'kind' | 'repair'> {
   kind: 'rsi-owner-program-update-overlay'
@@ -77,6 +114,8 @@ export interface RsiOwnerProgramUpdateOverlay extends Omit<RsiOwnerRepairOverlay
     authorityDigest: string
     hostPlanDigest: string
     emptyAdoptionHandoff?: RsiOwnerEmptyAdoptionHandoff
+    // Mutually exclusive with emptyAdoptionHandoff.
+    sealedAdoptionHandoff?: RsiOwnerSealedAdoptionHandoff
     before: RsiOwnerRepairOverlay['repair']['before']
     after: RsiOwnerRepairOverlay['repair']['after']
   }
@@ -182,7 +221,9 @@ function programUpdateOverlayShape(value: unknown, resources: RsiAuthorityResour
     || Object.values(value.patches).some(digest => !hex.test(String(digest)))
     || !record(value.update) || !isDeepStrictEqual(Object.keys(value.update).sort(),
       ['sourceMaintenanceDigest', 'authorityDigest', 'hostPlanDigest', 'before', 'after',
-        ...(record(value.update) && Object.hasOwn(value.update, 'emptyAdoptionHandoff') ? ['emptyAdoptionHandoff'] : [])].sort())
+        ...(record(value.update) && Object.hasOwn(value.update, 'emptyAdoptionHandoff') ? ['emptyAdoptionHandoff'] : []),
+        ...(record(value.update) && Object.hasOwn(value.update, 'sealedAdoptionHandoff') ? ['sealedAdoptionHandoff'] : [])].sort())
+    || Object.hasOwn(value.update, 'emptyAdoptionHandoff') && Object.hasOwn(value.update, 'sealedAdoptionHandoff')
     || !hex.test(String(value.update.sourceMaintenanceDigest))
     || !hex.test(String(value.update.authorityDigest))
     || !hex.test(String(value.update.hostPlanDigest))
@@ -201,6 +242,7 @@ function programUpdateOverlayShape(value: unknown, resources: RsiAuthorityResour
     || !hex.test(String(value.update.after.creationReceiptDigest)) || !hex.test(String(value.update.after.journalDigest))
     || typeof value.signature !== 'string' || value.signature.length > 256) fail('program update overlay shape or scope differs')
   if (Object.hasOwn(value.update, 'emptyAdoptionHandoff')) emptyAdoptionHandoffShape(value.update.emptyAdoptionHandoff, resources, String(value.transactionId))
+  if (Object.hasOwn(value.update, 'sealedAdoptionHandoff')) sealedAdoptionHandoffShape(value.update.sealedAdoptionHandoff, resources, String(value.transactionId))
   const { signature, ...unsigned } = value
   const key = createPublicKey(resources.identities.host.publicKeyPem)
   if (key.asymmetricKeyType !== 'ed25519'

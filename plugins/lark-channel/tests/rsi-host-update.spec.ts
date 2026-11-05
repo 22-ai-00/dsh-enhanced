@@ -303,4 +303,116 @@ describe('bounded RSI Host update projections', () => {
       privateKey, resources, bootstrapSource, [repair])).toThrow('program update overlay shape')
   })
 
+  test('program update binds one signed adoption handoff with exact sealed-history metadata', () => {
+    const keys = generateKeyPairSync('ed25519')
+    const privateKey = keys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+    const resources = { installationId: 'install-1', configRoot: '/home/rsi-authorities/target/config',
+      stateRoot: '/home/rsi-authorities/target/state',
+      identities: { host: { authority: 'host-install-1', keyId: 'host-install-1-key',
+        publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() } } } as RsiAuthorityResources
+    const bootstrapSource = '{"schemaVersion":1}\n'
+    const manifestPath = `${resources.configRoot}/manifest.json`
+    const logicalPath = `${resources.stateRoot}/control-plane/creation-adoptions.sqlite`
+    const archiveDirectory = `${resources.stateRoot}/control-plane/creation-adoptions.sealed`
+    const fileIdentity = { dev: '16777232', ino: '42', uid: 501, gid: 20, mode: 0o100600, nlink: 1 as const }
+    const sealed = { protocol: 'dsh-owner-sealed-adoption-handoff/v1' as const, transactionId: 'update', logicalPath,
+      archiveLogicalPath: `${archiveDirectory}/${'c'.repeat(64)}.sqlite`, planDigest: oldSha, proofDigest: oldSha,
+      hostAnchor: oldSha, archiveDigest: newSha, pendingReverificationDigest: newSha, fileIdentity,
+      archiveFileIdentity: { ...fileIdentity, ino: '43', mode: 0o100400 }, inheritedUsage: { adoptions: 3, calls: 7 } }
+    const empty = { protocol: 'dsh-owner-empty-adoption-handoff/v1' as const, transactionId: 'update', logicalPath,
+      planDigest: oldSha, proofDigest: oldSha, hostAnchor: oldSha, fileIdentity }
+    const input = { schemaVersion: 1 as const, kind: 'rsi-owner-program-update-overlay' as const, transactionId: 'update',
+      dshHome: '/home', targetProfile: 'target', installationId: 'install-1', sequence: 1, previousDigest: null,
+      bootstrapDigest: createHash('sha256').update(bootstrapSource).digest('hex'),
+      files: { [manifestPath]: oldSha }, patches: { target: oldSha, coordinator: oldSha },
+      runtimeReceiptDigest: oldSha, planDigest: oldSha,
+      result: { schemaVersion: 1 as const, manifestPath, manifestDigest: oldSha,
+        targetProfile: 'target', coordinatorProfile: 'coordinator' }, issuedAt: 1,
+      authority: 'host-install-1', keyId: 'host-install-1-key',
+      update: { sourceMaintenanceDigest: oldSha, authorityDigest: oldSha, hostPlanDigest: oldSha,
+        sealedAdoptionHandoff: sealed,
+        before: { files: { [manifestPath]: oldSha }, patches: { target: oldSha, coordinator: oldSha },
+          runtimeReceiptDigest: oldSha, creationReceiptDigest: oldSha, journalDigest: oldSha },
+        after: { creationReceiptDigest: newSha, journalDigest: newSha } } }
+    const signWith = (handoff: Record<string, unknown>) => signRsiOwnerProgramUpdateOverlay({ ...input,
+      update: { ...input.update, sealedAdoptionHandoff: handoff as typeof sealed } }, privateKey, resources, bootstrapSource, [])
+    const read = (records: unknown[]) => readRsiHostUpdateOverlayChain({ source: JSON.stringify({ schemaVersion: 1,
+      kind: 'rsi-host-update-overlays', records }), resources, dshHome: '/home', profile: 'target', bootstrapSource })
+
+    const update = signRsiOwnerProgramUpdateOverlay(input, privateKey, resources, bootstrapSource, [])
+    expect(read([update]).latest).toEqual(update)
+    expect(signWith({ ...sealed, inheritedUsage: { adoptions: 0, calls: 0 } }).update.sealedAdoptionHandoff?.inheritedUsage)
+      .toEqual({ adoptions: 0, calls: 0 })
+    for (const archiveFileIdentity of [{ ...sealed.archiveFileIdentity, mode: 0o400 },
+      { ...fileIdentity, dev: '16777233', mode: 0o100400 }])
+      expect(signWith({ ...sealed, archiveFileIdentity }).update.sealedAdoptionHandoff?.archiveFileIdentity)
+        .toEqual(archiveFileIdentity)
+    const { sealedAdoptionHandoff: _, ...emptyUpdate } = input.update
+    expect(signRsiOwnerProgramUpdateOverlay({ ...input, update: { ...emptyUpdate, emptyAdoptionHandoff: empty } },
+      privateKey, resources, bootstrapSource, []).update.emptyAdoptionHandoff).toEqual(empty)
+
+    const { pendingReverificationDigest: __, ...missing } = sealed
+    const malformed: Record<string, unknown>[] = [
+      { ...sealed, extra: true }, missing,
+      { ...sealed, protocol: 'dsh-owner-empty-adoption-handoff/v1' },
+      { ...sealed, transactionId: 'other' },
+      { ...sealed, logicalPath: `${resources.stateRoot}/control-plane/other.sqlite` },
+      { ...sealed, logicalPath: sealed.archiveLogicalPath },
+      ...['planDigest', 'proofDigest', 'hostAnchor', 'archiveDigest', 'pendingReverificationDigest'].flatMap(key => [
+        { ...sealed, [key]: 'A'.repeat(64) }, { ...sealed, [key]: 'a'.repeat(63) }, { ...sealed, [key]: 1 }]),
+      ...(['fileIdentity', 'archiveFileIdentity'] as const).flatMap(key => [
+        { ...sealed, [key]: { ...sealed[key], nlink: 2 } },
+        { ...sealed, [key]: { ...sealed[key], dev: 16777232 } },
+        { ...sealed, [key]: { ...sealed[key], ino: '042' } },
+        { ...sealed, [key]: { ...sealed[key], uid: -1 } },
+        { ...sealed, [key]: { ...sealed[key], mode: 1.5 } },
+        { ...sealed, [key]: { ...sealed[key], extra: 1 } },
+        { ...sealed, [key]: { dev: '1', ino: '2', uid: 0, gid: 0, mode: 0o100400 } },
+        { ...sealed, [key]: null }]),
+      { ...sealed, archiveFileIdentity: { ...sealed.archiveFileIdentity, ino: fileIdentity.ino } },
+      { ...sealed, archiveFileIdentity: { ...fileIdentity, mode: 0o100400 } },
+      ...[0o100600, 0o100444, 0o100000, 0o100500, 0o100440, 0o600].map(mode =>
+        ({ ...sealed, archiveFileIdentity: { ...sealed.archiveFileIdentity, mode } })),
+      { ...sealed, inheritedUsage: { adoptions: -1, calls: 0 } },
+      { ...sealed, inheritedUsage: { adoptions: 0, calls: 1.5 } },
+      { ...sealed, inheritedUsage: { adoptions: 0, calls: Number.MAX_SAFE_INTEGER + 1 } },
+      { ...sealed, inheritedUsage: { adoptions: '1', calls: 0 } },
+      { ...sealed, inheritedUsage: { adoptions: 0 } },
+      { ...sealed, inheritedUsage: { adoptions: 0, calls: 0, extra: 0 } },
+      { ...sealed, inheritedUsage: [0, 0] },
+      ...[`${resources.stateRoot}/control-plane/creation-adoptions.archive/${'c'.repeat(64)}.sqlite`,
+        `${resources.configRoot}/control-plane/creation-adoptions.sealed/${'c'.repeat(64)}.sqlite`,
+        `${archiveDirectory}/nested/${'c'.repeat(64)}.sqlite`,
+        `${archiveDirectory}/../${'c'.repeat(64)}.sqlite`,
+        `${archiveDirectory}/${'C'.repeat(64)}.sqlite`,
+        `${archiveDirectory}/${'c'.repeat(63)}.sqlite`,
+        `${archiveDirectory}/${'c'.repeat(64)}.db`,
+        `${archiveDirectory}/${'c'.repeat(64)}.sqlite-wal`,
+        `${archiveDirectory}/${'c'.repeat(64)}`,
+        `${archiveDirectory}${'c'.repeat(64)}.sqlite`,
+        `relative/creation-adoptions.sealed/${'c'.repeat(64)}.sqlite`,
+        42].map(archiveLogicalPath => ({ ...sealed, archiveLogicalPath }))]
+    for (const handoff of malformed) expect(() => signWith(handoff)).toThrow('sealed adoption handoff metadata differs')
+    expect(() => signWith(null as unknown as Record<string, unknown>)).toThrow('sealed adoption handoff metadata differs')
+
+    expect(() => signRsiOwnerProgramUpdateOverlay({ ...input,
+      update: { ...input.update, emptyAdoptionHandoff: empty } }, privateKey, resources, bootstrapSource, []))
+      .toThrow('program update overlay shape')
+    expect(() => read([{ ...update, update: { ...update.update, emptyAdoptionHandoff: empty } }]))
+      .toThrow('program update overlay shape')
+    expect(() => signRsiOwnerProgramUpdateOverlay({ ...input,
+      update: { ...input.update, unknownAdoptionHandoff: sealed } } as typeof input, privateKey, resources, bootstrapSource, []))
+      .toThrow('program update overlay shape')
+
+    expect(() => read([{ ...update, update: { ...update.update, sealedAdoptionHandoff: {
+      ...sealed, inheritedUsage: { adoptions: 3, calls: 8 } } } }])).toThrow('program update overlay signature')
+    expect(() => read([{ ...update, update: { ...update.update, sealedAdoptionHandoff: {
+      ...sealed, archiveLogicalPath: `${archiveDirectory}/${'d'.repeat(64)}.sqlite` } } }]))
+      .toThrow('program update overlay signature')
+    expect(() => read([{ ...update, update: { ...update.update, sealedAdoptionHandoff: {
+      ...sealed, archiveFileIdentity: { ...sealed.archiveFileIdentity, ino: '44' } } } }]))
+      .toThrow('program update overlay signature')
+    expect(() => read([{ ...update, update: emptyUpdate }])).toThrow('program update overlay signature')
+  })
+
 })
