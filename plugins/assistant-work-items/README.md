@@ -296,9 +296,9 @@ work_item_read_report:
 - 唤醒记账诚实：peer 抛出的错误若表示「不知道是否已经提交」（非 `policy-denied`/`policy`、非去重冲突），dispatch 行记为 `state='failed'`、`reason='unknown_after_send'`，`health().dispatchUnknown` 因此只统计仍然**开放且未被观察**的 item 上真实存在的这种行：item 一旦被撤回、终结或观察，就不再计入，也不会再被恢复扫描。这样的行在同一代次身份下最多被惰性恢复重试 **1 次**（`wake_attempts` 持久计数）；重试成功则转为 `dispatched`，再次失败则保持 `failed`/`unknown_after_send`，把无法消除的缺口留给 owner，而不是无限重试或假装成功。持久身份冲突（`idempotency-conflict`）是确定性错误，记为独立原因 `idempotency-conflict` 并抛 typed `WorkItemError`（`dispatch-failed`）；没有 occurrence 查询接口时无法自动收敛，因此不静默吞掉。
 - SQLite 使用 `WAL`、`synchronous=FULL`、`BEGIN IMMEDIATE` 事务和 forward-only schema；`PRAGMA user_version` 只前进。升级写入边界要求单 writer：升级前停掉 DSH 进程。
 
-### inferred 候选的模型评估合同（WP20，纯模块）
+### inferred 候选的模型评估合同（WP20）
 
-`InferredIntakeEvaluationQueue`（`src/intake-evaluation.ts`）是 WP20 inferred 候选模型评估的纯内存合同：唯一外部调用是注入的 `evaluator`，不读写账本、不投递、不准入工作项，决策只作为返回值交给调用方（intake 账本）持久化与执行。尚未接入运行时，无 schema 变更。
+`InferredIntakeEvaluationQueue`（`src/intake-evaluation.ts`）是 WP20 inferred 候选模型评估的纯内存合同：唯一外部调用是注入的 `evaluator`，不读写账本、不投递、不准入工作项，决策只作为返回值交给调用方持久化与执行。运行时接线（第 3 阶段）见「入站接线」下的「inferred 评估运行时」。
 
 - 与 intake 账本强度分级的组合：只有 `strength: 'inferred'` 的候选入队（否则 `invalid-candidate`）；`explicit` 由确定性 gate 直接处理、不调模型，`ignore` 已被过滤。
 - 候选携带 Host 匹配规则与计算 `ceiling` 时的 `policyVersion`，不等于当前版本时入队返回 `stale-policy`。
@@ -472,7 +472,7 @@ Host 批量来源接口 `withOwnerWorkItemFeedbackTargetsFence(capabilities, cal
 
 这条历史读取与新执行授权分离。显式开启反馈后，冷启动可保留已经过期的 scope、diagnosis、continuation 原期限来读取已有结果；不会延长期限、重置预算、重新 reconcile worker 或放行旧执行。当前 Delivery owner route 与反馈 Policy 仍须有效。两个入口同开时，当前执行资格独立控制普通续办；过期后的明确评价仍可记录，普通回复不会因此取得过期执行权限。既有 v1/v2 计划和激活摘要保持兼容。
 
-这一切片引入时 WorkItems 使用 schema 9（现为 schema 10，见下节 intake 账本）；Delivery schema 30 保存独占评价意图，Evaluation schema 13 保存新的 canonical 工作项主人结果。原有 settlement 行继续作为 objective unknown 的审计材料，不回填为主人评价。备份与恢复须一致保留相关账本；这一切片不自动触发 Growth、创建/采用候选或调用模型。
+这一切片引入时 WorkItems 使用 schema 9（现为 schema 11，见下节 intake 账本）；Delivery schema 30 保存独占评价意图，Evaluation schema 13 保存新的 canonical 工作项主人结果。原有 settlement 行继续作为 objective unknown 的审计材料，不回填为主人评价。备份与恢复须一致保留相关账本；这一切片不自动触发 Growth、创建/采用候选或调用模型。
 
 ## 确定性 intake 账本（显式启用）
 
@@ -509,7 +509,28 @@ const { record, replayed } = ctx.assistantWorkItems.recordIntake({
 - `threadFollowUp` 只在白名单发送者于同一会话回复已投递（accepted/delivered/read）的 WorkItems 报告时为真；非白名单发送者的回复永远不是跟进；
 - `groupMessage` 来自会话类型。
 
-observe 只写 intake 账本：不写 Delivery inbox/outbox，不改变 adapter 原有的接收与门控，不准入、不派发、不通知；observer 异常或校验失败只记 debug 日志并丢弃。默认关闭时不注册 observer，不写任何行。无 schema 迁移。
+observe 只写 intake 账本：不写 Delivery inbox/outbox，不改变 adapter 原有的接收与门控，不准入、不派发、不通知；observer 异常或校验失败只记 debug 日志并丢弃。默认关闭时不注册 observer，不写任何行。
+
+adapter 可另传规范化正文 `text`（≤65,536 UTF-16 码元）；Delivery 仅在 observer 声明 `acceptsSourceText: true` 且 `sha256(text) === contentDigest` 时以 `sourceText` 转交，否则丢弃。正文只在内存中流转，Delivery 与账本都不落盘。
+
+### inferred 评估运行时（WP20 第 3 阶段，显式启用）
+
+`intakeLedger.evaluation.enabled: true` 时，observer 声明接收正文，WorkItems 把 `stored`+`inferred` 行的认证正文暂存内存（最多 256 条），Host 注册唯一评估器后按规则评估：
+
+```ts
+ctx.assistantWorkItems.registerIntakeEvaluator({
+  protocol: 1,
+  policy: () => ({ version: 'v1', rules: [{ ruleId: 'triage', ceiling: 'notify' }] }), // ≤16 条规则
+  evaluate: async ({ sourceText, signal }) => ({ level: 'digest', quotes: ['…'] }),   // 注入的 supplier
+})
+```
+
+- 驱动：复用已有 scheduler wake（不新增 Loop/计时器），也可由 Host 调 `runIntakeEvaluation()`；每轮最多 `maxPerRun` 次调用，滑动一小时最多 `maxCallsPerHour` 次。
+- 结果写入 schema 11 的 `work_item_intake_evaluation`（STRICT，触发器禁止改写/删除），每 `(source, sourceEventId, ruleId, policyVersion)` 一行；只存等级、原因码与引文的 UTF-16 偏移 `quoteSpans`，不存正文或引文。重放与重启均不再调用模型，返回原行。
+- 引文非认证正文子串 → `ignore`/`quote-not-in-source`；超时（`timeoutMs`）或抛错按退避重排，连续 `maxConsecutiveFailures` 次后记 `unavailable`；调用中 Policy 版本变化的结果丢弃，按新版本重新排队；Policy 无效时不评估，`lastError` 为 `policy-unavailable`。
+- 仅 observe：`effect` 恒为 `none`，不准入、不派发、不通知。`intakeEvaluations(source, eventId)` 读取记录，`intakeEvaluationHealth()` 报告队列与最近错误。
+- 局限：重启后尚未落定的候选需要重新收到正文才能评估；暂存满时跳过新候选；尚无内置 Policy 规则源，规则与上限由 Host supplier 提供。
+- 升级：schema 10 自动升级到 11；更新的 schema 或结构漂移 fail closed。
 
 ## 配置
 
@@ -523,6 +544,9 @@ observe 只写 intake 账本：不写 Delivery inbox/outbox，不改变 adapter 
 | `intakeLedger.enabled` | `false` | 显式启用确定性 intake 账本；仅 Host 调用 `recordIntake`，并经 Delivery 接收入站 adapter 的元数据/摘要观察，observe 可用，无外部副作用 |
 | `intakeLedger.sources.<id>.unaddressedGroupMessages` | `false` | 该来源未寄址群消息以元数据进入账本（否则 filtered）；最多 32 个来源 |
 | `intakeLedger.sources.<id>.unsubscribedEvents` | `false` | 该来源未订阅事件以元数据进入账本（否则 filtered） |
+| `intakeLedger.evaluation.enabled` | `false` | inferred 候选的模型评估（仅 observe，需 Host 注册评估器）；关闭时不接收正文、不写评估行 |
+| `intakeLedger.evaluation.timeoutMs` / `maxConsecutiveFailures` | `30000` / `3` | 单次调用超时；连续失败达到次数后记 `unavailable` |
+| `intakeLedger.evaluation.maxPerRun` / `maxCallsPerHour` | `5` / `20` | 每轮与每小时的调用上限 |
 | `ownerRecall.enabled` | `false` | 显式启用当前主人前台任务查询；要求 enabled active、完整 scope、worker automation 与独立 `inspect-work-items` 授权 |
 | `ownerRecall.linkedAliases` | 未设置 | 主人显式允许的 Delivery `linked` principal id 名单（规范 `channel/account/tenant/user` 形式，≤8，去重，不含 owner）；未设置时跨渠道别名读取一律拒绝；要求 `ownerRecall.enabled`；别名读取另需带 `budget` 的 `inspect-work-items` 规则及 Policy `authorizeAgentForPrincipal`（按别名 principal 独立计费） |
 | `ownerReportRouting.linkedFallback` | 未设置 | origin binding 不可用时可接收终端报告只读通知的 Delivery `linked` principal id 有序名单（规范形式，≤8，去重，不含 owner）；要求 enabled active、完整 scope 与 worker；回复不能续办 |

@@ -994,8 +994,11 @@ export interface DeliveryProgressJournal {
 
 /**
  * Metadata-only report of one inbound message an adapter saw, whether it was
- * then accepted or dropped by the adapter's own gate (WP20 intake). It never
- * carries a body; `contentDigest` is the adapter's sha256 of normalized text.
+ * then accepted or dropped by the adapter's own gate (WP20 intake).
+ * `contentDigest` is the adapter's sha256 of normalized text. The optional
+ * `text` is that normalized text, held in memory only: Delivery never stores
+ * it and forwards it only to an observer that set `acceptsSourceText`, and
+ * only when it hashes to `contentDigest`.
  */
 export interface DeliveryInboundObservation {
   readonly eventId: string
@@ -1007,6 +1010,7 @@ export interface DeliveryInboundObservation {
   readonly senderIsBot: boolean
   readonly replyToProviderMessageId?: string
   readonly contentDigest?: string
+  readonly text?: string
 }
 
 /** Normalized intake signal handed to the registered observer; mirrors the WorkItems intake input. */
@@ -1020,6 +1024,8 @@ export interface DeliveryInboundIntakeSignal {
   readonly senderIsBot: boolean
   readonly groupMessage: boolean
   readonly contentDigest?: string
+  /** Transient authenticated text; present only for an opted-in observer and a matching `contentDigest`. */
+  readonly sourceText?: string
   readonly occurredAt: number
 }
 
@@ -1031,6 +1037,8 @@ export interface DeliveryInboundIntakeSignal {
 export interface DeliveryInboundIntakeObserver {
   readonly protocol: 1
   readonly observe: (signal: Readonly<DeliveryInboundIntakeSignal>) => void
+  /** Opt in to the transient `sourceText` (WP20 inferred evaluation); omitted means metadata only. */
+  readonly acceptsSourceText?: true
 }
 
 export interface DeliveryAdapterContext {

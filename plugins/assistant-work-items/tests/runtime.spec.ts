@@ -1221,7 +1221,7 @@ describe('work-item store projection', () => {
     // Downgrade the claim table to the previous on-disk shape, then reopen.
     const raw = new DatabaseSync(fixture.config.databasePath)
     raw.exec(`
-      DROP TABLE work_item_intake;
+      DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake;
       DROP TABLE work_item_continuation;
       ALTER TABLE work_item_claim RENAME TO work_item_claim_v2;
       CREATE TABLE work_item_claim (
@@ -1259,7 +1259,7 @@ describe('work-item store projection', () => {
     closers.push(() => reopened.close())
     expect(reopened.findClaimByRun('run-1')).toMatchObject({ claimId: 1, itemId: admitted.item.id, state: 'active' })
     expect(reopened.findItemById(admitted.item.id)).toMatchObject({ state: 'claimed', owner: { generation: 2 } })
-    expect(reopened.stats()).toMatchObject({ items: 1, schemaVersion: 10, outcomes: 0, pendingOutcomes: 0 })
+    expect(reopened.stats()).toMatchObject({ items: 1, schemaVersion: 11, outcomes: 0, pendingOutcomes: 0 })
   })
 })
 

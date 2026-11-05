@@ -95,6 +95,25 @@ describe('Delivery inbound intake observation', () => {
     expect(f.signals[2]).toMatchObject({ senderAllowlisted: false })
   })
 
+  test('forwards the transient text only to an opted-in observer and only when it matches the digest', async () => {
+    const plain = await fixture(); plain.own(plain.observer); plain.service.registerInboundIntakeObserver(plain.observer)
+    plain.context().observe!(plain.observation({ text: 'hello' }))
+    expect(plain.signals[0]).not.toHaveProperty('sourceText')
+
+    const f = await fixture()
+    const opted: DeliveryInboundIntakeObserver = Object.freeze({ protocol: 1 as const, acceptsSourceText: true as const, observe: f.observe })
+    f.own(opted); f.service.registerInboundIntakeObserver(opted)
+    f.context().observe!(f.observation({ text: 'hello' }))
+    f.context().observe!(f.observation({ eventId: 'om_2', text: 'hello!' }))
+    { const { contentDigest: _digest, ...undigested } = f.observation({ eventId: 'om_3', text: 'hello' }); f.context().observe!(undigested) }
+    f.context().observe!(f.observation({ eventId: 'om_4', text: 'x'.repeat(65_537), contentDigest: createHash('sha256').update('x'.repeat(65_537)).digest('hex') }))
+    expect(f.signals.map(signal => [signal.sourceEventId, signal.sourceText])).toEqual([
+      ['intake-test/om_1', 'hello'], ['intake-test/om_2', undefined], ['intake-test/om_3', undefined], ['intake-test/om_4', undefined],
+    ])
+    expect(Object.hasOwn(f.signals[1]!, 'sourceText')).toBe(false)
+    expect(f.store.getInboxByProviderEvent('lark', 'intake-test', 'om_1')).toBeUndefined()
+  })
+
   test('a thread follow-up needs an allowlisted sender replying in-thread to a delivered report', async () => {
     const f = await fixture(); f.own(f.observer); f.service.registerInboundIntakeObserver(f.observer)
     await f.report('P')

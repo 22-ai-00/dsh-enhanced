@@ -312,7 +312,7 @@ test('schema 7 migration preserves every historical row and real keyset queries 
   const data = () => ['work_item', 'work_item_event', 'work_item_claim', 'work_item_report', 'work_item_outcome', 'work_item_dispatch', 'work_item_follow']
     .map(table => raw.prepare(`SELECT * FROM ${table}`).all())
   const before = data()
-  raw.exec("DROP TABLE work_item_intake; DROP TABLE work_item_continuation; DROP INDEX work_item_dispatch_waiting_due_idx; DROP INDEX work_item_claim_active_item_idx; PRAGMA user_version = 7; UPDATE work_item_schema_meta SET value = '7' WHERE key = 'schema_version';")
+  raw.exec("DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake; DROP TABLE work_item_continuation; DROP INDEX work_item_dispatch_waiting_due_idx; DROP INDEX work_item_claim_active_item_idx; PRAGMA user_version = 7; UPDATE work_item_schema_meta SET value = '7' WHERE key = 'schema_version';")
   const queries: string[] = []
   const original = DatabaseSync.prototype.prepare
   const prepare = vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(function (this: DatabaseSync, sql: string) {
@@ -321,7 +321,7 @@ test('schema 7 migration preserves every historical row and real keyset queries 
   })
   const store = new WorkItemStore(fixture.config.databasePath!)
   try {
-    expect(store.stats().schemaVersion).toBe(10)
+    expect(store.stats().schemaVersion).toBe(11)
     expect(data()).toEqual(before)
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(Date.now() + 60_001)
     store.listDueWaitingResumes(10)
@@ -343,7 +343,7 @@ test.each(['table', 'trigger'] as const)('rejects sqliteXshadow %s before a vers
   fixture.service.close()
   const raw = new DatabaseSync(fixture.config.databasePath!)
   try {
-    raw.exec("DROP TABLE work_item_intake; DROP TABLE work_item_continuation; DROP INDEX work_item_dispatch_waiting_due_idx; DROP INDEX work_item_claim_active_item_idx; PRAGMA user_version = 7; UPDATE work_item_schema_meta SET value = '7' WHERE key = 'schema_version';")
+    raw.exec("DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake; DROP TABLE work_item_continuation; DROP INDEX work_item_dispatch_waiting_due_idx; DROP INDEX work_item_claim_active_item_idx; PRAGMA user_version = 7; UPDATE work_item_schema_meta SET value = '7' WHERE key = 'schema_version';")
     if (kind === 'table') raw.exec('CREATE TABLE sqliteXshadow (value TEXT)')
     else raw.exec("CREATE TRIGGER sqliteXshadow AFTER UPDATE ON work_item_schema_meta BEGIN UPDATE work_item SET title = 'corrupted by foreign trigger'; END")
     expect(raw.prepare("SELECT type FROM sqlite_schema WHERE name = 'sqliteXshadow'").get()).toEqual({ type: kind })

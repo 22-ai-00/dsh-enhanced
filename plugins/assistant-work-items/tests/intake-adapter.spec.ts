@@ -2,12 +2,12 @@ import { Context } from '@deepseek-ai/cordis'
 import { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 // The real Lark adapter (built lib), driven by a fake transport: no Bot, no network.
 import { LarkDeliveryAdapter } from '../../lark-channel/lib/adapter.js'
 import type { DeliveryStore } from '../../assistant-delivery/lib/store.js'
@@ -126,6 +126,26 @@ describe('intake ledger through the inbound adapter path', () => {
     await f.transport.emit({ messageId: 'om_g', chatId: 'oc_group', chatType: 'group', content: 'lunch?' })
     expect(f.ledger()).toEqual([expect.objectContaining({ decision: 'stored', strength: 'inferred' })])
     expect(f.inbox()).toEqual([])
+  })
+
+  test('evaluates an inferred Lark message from the transient text without persisting the body', async () => {
+    const f = await fixture({ enabled: true, sources: { 'lark-channel': { unaddressedGroupMessages: true } }, evaluation: { enabled: true } })
+    const calls: string[] = []
+    f.ctx.assistantWorkItems.registerIntakeEvaluator({ protocol: 1, policy: () => ({ version: 'v1', rules: [{ ruleId: 'triage', ceiling: 'notify' }] }),
+      evaluate: async request => { calls.push(request.sourceText); return { level: 'digest', quotes: ['deploy is stuck'] } } })
+    await f.transport.emit({ messageId: 'om_g', chatId: 'oc_group', chatType: 'group', content: 'the deploy is stuck on staging' })
+    await f.transport.emit({ messageId: 'om_g', chatId: 'oc_group', chatType: 'group', content: 'the deploy is stuck on staging' })
+    await f.transport.emit({ messageId: 'om_dm', content: 'explicit request' })
+    const records = () => f.ctx.assistantWorkItems.intakeEvaluations('lark-channel', 'primary-bot/om_g')
+    await vi.waitFor(() => expect(records()).toHaveLength(1))
+    expect(records()[0]).toMatchObject({ level: 'digest', quoteSpans: [[4, 19]], status: 'decided', mode: 'observe' })
+    // One call for the redelivered event; the explicit DM is never evaluated.
+    expect(calls).toEqual(['the deploy is stuck on staging'])
+    expect(f.sideEffects()).toEqual({ items: 0, dispatches: 0, outbox: 0 })
+    await f.restart()
+    for (const file of [f.databasePath, `${f.databasePath}-wal`]) {
+      if (existsSync(file)) expect(readFileSync(file).includes(Buffer.from('deploy is stuck'))).toBe(false)
+    }
   })
 
   test('the disabled default registers no observer and writes no ledger row', async () => {

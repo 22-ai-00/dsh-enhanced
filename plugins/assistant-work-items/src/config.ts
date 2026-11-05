@@ -41,6 +41,16 @@ export interface Config {
 export interface IntakeLedgerConfig {
   enabled?: boolean
   sources?: Record<string, { unaddressedGroupMessages?: boolean; unsubscribedEvents?: boolean }>
+  /** WP20 stage 3: observe-only model evaluation of stored `inferred` rows. Off by default. */
+  evaluation?: IntakeEvaluationConfig
+}
+
+export interface IntakeEvaluationConfig {
+  enabled?: boolean
+  timeoutMs?: number
+  maxConsecutiveFailures?: number
+  maxPerRun?: number
+  maxCallsPerHour?: number
 }
 
 /** A separately authorized Host worker; it never changes the diagnosis worker. */
@@ -173,6 +183,16 @@ export interface NormalizedConfig {
 export interface NormalizedIntakeLedger {
   readonly enabled: true
   readonly sources: Readonly<Record<string, WorkItemIntakeSourcePolicy>>
+  /** Present only when evaluation is enabled. */
+  readonly evaluation?: NormalizedIntakeEvaluation
+}
+
+export interface NormalizedIntakeEvaluation {
+  readonly enabled: true
+  readonly timeoutMs: number
+  readonly maxConsecutiveFailures: number
+  readonly maxPerRun: number
+  readonly maxCallsPerHour: number
 }
 
 export interface NormalizedForegroundFailureSource {
@@ -234,7 +254,8 @@ const SETTLEMENT_KEYS = ['enabled', 'windowMs', 'sweepIntervalMs', 'maxSourcesPe
 const SOURCES_KEYS = ['foregroundFailures'] as const
 const FOREGROUND_FAILURE_KEYS = ['enabled', 'kind', 'includeTimedOut', 'maxCandidatesPerSweep', 'maxAdmitsPerSweep', 'sweepIntervalMs'] as const
 const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerReportRouting', 'ownerContinuation', 'ownerReplyContinuation', 'ownerReportFeedback', 'intakeLedger'] as const
-const INTAKE_LEDGER_KEYS = ['enabled', 'sources'] as const
+const INTAKE_LEDGER_KEYS = ['enabled', 'sources', 'evaluation'] as const
+const INTAKE_EVALUATION_KEYS = ['enabled', 'timeoutMs', 'maxConsecutiveFailures', 'maxPerRun', 'maxCallsPerHour'] as const
 const INTAKE_SOURCE_KEYS = ['unaddressedGroupMessages', 'unsubscribedEvents'] as const
 const MAX_INTAKE_SOURCES = 32
 const REPORT_STATUSES = ['progress', 'waiting', 'ready', 'blocked', 'failed'] as const
@@ -314,6 +335,11 @@ export const ConfigSchema = Schema.object({
       unaddressedGroupMessages: Schema.boolean().default(false),
       unsubscribedEvents: Schema.boolean().default(false),
     })),
+    evaluation: Schema.object({
+      enabled: Schema.boolean().default(false),
+      timeoutMs: Schema.number().step(1), maxConsecutiveFailures: Schema.number().step(1),
+      maxPerRun: Schema.number().step(1), maxCallsPerHour: Schema.number().step(1),
+    }),
   }),
   ownerRecall: Schema.object({ enabled: Schema.boolean().default(false), linkedAliases: Schema.array(Schema.string()) }),
   ownerReportRouting: Schema.object({ linkedFallback: Schema.array(Schema.string()) }),
@@ -631,8 +657,26 @@ function normalizeIntakeLedger(raw: unknown): NormalizedIntakeLedger | undefined
     }
     sources[id] = Object.freeze(policy as unknown as WorkItemIntakeSourcePolicy)
   }
+  const evaluation = normalizeIntakeEvaluation(value['evaluation'])
   if (!enabled) return undefined
-  return Object.freeze({ enabled: true as const, sources: Object.freeze(sources) })
+  return Object.freeze({ enabled: true as const, sources: Object.freeze(sources), ...(evaluation === undefined ? {} : { evaluation }) })
+}
+
+/** Absent or disabled evaluation normalizes to `undefined`; limits default small. */
+function normalizeIntakeEvaluation(raw: unknown): NormalizedIntakeEvaluation | undefined {
+  if (raw === undefined) return undefined
+  const value = plainObject(raw, 'intakeLedger.evaluation')
+  rejectUnknown(value, INTAKE_EVALUATION_KEYS, 'intakeLedger.evaluation')
+  const enabled = value['enabled'] ?? false
+  if (typeof enabled !== 'boolean') fail('invalid-input', 'intakeLedger.evaluation.enabled must be a boolean')
+  const normalized = Object.freeze({
+    enabled: true as const,
+    timeoutMs: integer(value['timeoutMs'] ?? 30_000, 'intakeLedger.evaluation.timeoutMs', 100, 600_000),
+    maxConsecutiveFailures: integer(value['maxConsecutiveFailures'] ?? 3, 'intakeLedger.evaluation.maxConsecutiveFailures', 1, 10),
+    maxPerRun: integer(value['maxPerRun'] ?? 5, 'intakeLedger.evaluation.maxPerRun', 1, 50),
+    maxCallsPerHour: integer(value['maxCallsPerHour'] ?? 20, 'intakeLedger.evaluation.maxCallsPerHour', 1, 1_000),
+  })
+  return enabled ? normalized : undefined
 }
 
 /** Maximum explicitly allowlisted linked aliases per owner scope. */

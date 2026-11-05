@@ -3,6 +3,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 import type { WorkItemIntakeInput, WorkItemIntakeResult } from './intake.js'
 import { classifyIntake, intakeSourcePolicy } from './intake.js'
+import type { WorkItemIntakeEvaluationRecord } from './intake-evaluation.js'
+import { WorkItemIntakeEvaluationRuntime, type WorkItemIntakeEvaluationHealth, type WorkItemIntakeEvaluatorRegistration } from './intake-evaluation-runtime.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { WorkItemAdmission } from './admission.js'
@@ -227,7 +229,9 @@ export class AssistantWorkItemsService extends Service {
   private workItemsFollowDegraded: WorkItemFollowDegradedReason | null = null
   private workItemsComponents: Components | undefined
   private workItemsClosed = false
-  private workItemsIntakeObserver: Readonly<{ protocol: 1; observe: (signal: WorkItemIntakeInput) => void }> | undefined
+  private workItemsIntakeObserver: Readonly<{ protocol: 1; observe: (signal: WorkItemIntakeInput) => void; acceptsSourceText?: true }> | undefined
+  /** Present only when `intakeLedger.evaluation` is enabled. */
+  private readonly workItemsIntakeEvaluation: WorkItemIntakeEvaluationRuntime | undefined
   private readonly workItemsDiagnosisKey = Object.freeze({})
   private readonly workItemsContinuationKey = Object.freeze({})
   private readonly workItemsReplyKey = Object.freeze({})
@@ -249,6 +253,12 @@ export class AssistantWorkItemsService extends Service {
       store: () => this.workItemsClosed ? undefined : this.workItemsComponents?.store,
       delivery: () => this.workItemsDelivery(), policy: () => this.workItemsPolicy() }
     const access = new WorkItemOwnerAccess(ownerDependencies)
+    const intakeEvaluation = this.workItemsConfig.enabled ? this.workItemsConfig.intakeLedger?.evaluation : undefined
+    this.workItemsIntakeEvaluation = intakeEvaluation === undefined ? undefined : new WorkItemIntakeEvaluationRuntime({
+      config: intakeEvaluation,
+      store: () => this.workItemsClosed ? undefined : this.workItemsComponents?.store,
+      log: message => ctx.logger.debug(message),
+    })
     this.workItemsOwnerReads = new WorkItemOwnerRecall({ ...ownerDependencies, access })
     this.workItemsOwnerContinuations = new WorkItemOwnerContinuation({ ...ownerDependencies, access,
       runtime: () => continuationRuntimes.get(this.workItemsContinuationKey),
@@ -304,11 +314,16 @@ export class AssistantWorkItemsService extends Service {
           intakeCtx.logger.warn('assistant-work-items: Delivery inbound intake observation is unavailable; the intake ledger stays Host-only')
           return
         }
+        const evaluation = this.workItemsIntakeEvaluation
         const observer = Object.freeze({ protocol: 1 as const, observe: (signal: WorkItemIntakeInput): void => {
           if (this.workItemsClosed || this.workItemsIntakeObserver !== observer) return
-          try { this.recordIntake(signal) }
-          catch (error) { intakeCtx.logger.debug(`assistant-work-items: intake observation not recorded: ${describe(error)}`) }
-        } })
+          try {
+            if (evaluation === undefined) { this.recordIntake(signal); return }
+            // The transient text never reaches the ledger: it is split off here and only hashed or held in memory.
+            const { sourceText, ...metadata } = signal as WorkItemIntakeInput & { sourceText?: unknown }
+            this.recordIntake(metadata, typeof sourceText === 'string' ? sourceText : undefined)
+          } catch (error) { intakeCtx.logger.debug(`assistant-work-items: intake observation not recorded: ${describe(error)}`) }
+        }, ...(evaluation === undefined ? {} : { acceptsSourceText: true as const }) })
         this.workItemsIntakeObserver = observer
         let unregister: () => void
         try { unregister = peer.registerInboundIntakeObserver(observer) }
@@ -323,7 +338,8 @@ export class AssistantWorkItemsService extends Service {
         }, 'assistant-work-items.intake-observer')
       })
     }
-    if (isActive(this.workItemsConfig)) {
+    // Evaluation reuses the native scheduler wake; without it nothing new subscribes.
+    if (isActive(this.workItemsConfig) || this.workItemsIntakeEvaluation !== undefined) {
       ctx.inject(['assistantAutomations'], wakeCtx => {
         if (this.workItemsClosed) return
         const peer = wakeCtx.get('assistantAutomations' as never) as PeerAutomationsService | undefined
@@ -335,7 +351,9 @@ export class AssistantWorkItemsService extends Service {
         // the injecting Fiber, not on its own provider or a cached root proxy.
         let active = true
         const unregister = peer.onSchedulerWake(() => {
-          if (active) this.workItemsOnSchedulerWake()
+          if (!active) return
+          this.workItemsOnSchedulerWake()
+          if (!this.workItemsClosed) void this.workItemsIntakeEvaluation?.run()
         })
         const remove = () => {
           if (!active) return
@@ -784,11 +802,41 @@ export class AssistantWorkItemsService extends Service {
    * only the intake ledger, and never admits, wakes or delivers anything. A
    * replay of the same `(source, sourceEventId)` returns the original row.
    */
-  recordIntake(input: WorkItemIntakeInput): WorkItemIntakeResult {
+  recordIntake(input: WorkItemIntakeInput, sourceText?: string): WorkItemIntakeResult {
     const ledger = this.workItemsConfig.intakeLedger
     if (!this.workItemsConfig.enabled || ledger === undefined) fail('disabled', 'the work-item intake ledger is disabled')
     const candidate = classifyIntake(input, intakeSourcePolicy(ledger.sources, String((input as { source?: unknown } | null)?.source)))
-    return this.workItemsAvailable().store.recordIntake(candidate)
+    const result = this.workItemsAvailable().store.recordIntake(candidate)
+    // `sourceText` is the authenticated text the content digest covers; with
+    // evaluation off it is ignored, with it on it is held in memory only.
+    if (sourceText !== undefined) this.workItemsIntakeEvaluation?.observe(result.record, sourceText)
+    return result
+  }
+
+  /**
+   * Host-only: register the injectable WP20 inferred-evaluation supplier
+   * (Policy snapshot + model call). Requires `intakeLedger.evaluation`.
+   */
+  registerIntakeEvaluator(registration: WorkItemIntakeEvaluatorRegistration): () => void {
+    const evaluation = this.workItemsIntakeEvaluation
+    if (evaluation === undefined || this.workItemsClosed) fail('disabled', 'intake evaluation is disabled')
+    return evaluation.register(registration)
+  }
+
+  /** Host-only drive of one bounded evaluation run; the scheduler wake calls the same path. */
+  async runIntakeEvaluation(): Promise<readonly WorkItemIntakeEvaluationRecord[]> {
+    if (this.workItemsIntakeEvaluation === undefined || this.workItemsClosed) return []
+    return this.workItemsIntakeEvaluation.run()
+  }
+
+  /** Persisted evaluation results for one intake row; replay reads these, never re-evaluates. */
+  intakeEvaluations(source: string, sourceEventId: string): readonly WorkItemIntakeEvaluationRecord[] {
+    if (this.workItemsConfig.intakeLedger === undefined || !this.workItemsConfig.enabled) fail('disabled', 'the work-item intake ledger is disabled')
+    return this.workItemsAvailable().store.listIntakeEvaluations(source, sourceEventId)
+  }
+
+  intakeEvaluationHealth(): WorkItemIntakeEvaluationHealth | undefined {
+    return this.workItemsIntakeEvaluation?.health()
   }
 
   /** Explicit Host-only reduction of a canonical work signal; never a model tool or a plan mint. */
@@ -1265,6 +1313,7 @@ export class AssistantWorkItemsService extends Service {
     diagnosisRuntimes.delete(this.workItemsDiagnosisKey)
     continuationRuntimes.get(this.workItemsContinuationKey)?.close()
     continuationRuntimes.delete(this.workItemsContinuationKey)
+    this.workItemsIntakeEvaluation?.close()
     for (const unregister of this.workItemsSchedulerUnsubscribers) {
       try { unregister() } catch (error) { this.ctx.logger.warn(`assistant-work-items: scheduler wake removal failed: ${describe(error)}`) }
     }

@@ -144,7 +144,7 @@ function modelPickerElement(card: Record<string, unknown>, name: string): Record
 }
 
 describe('Lark delivery adapter', () => {
-  test('hands Delivery a metadata-only intake observation before acceptance', async () => {
+  test('hands Delivery an intake observation with a transient digest-matched text before acceptance', async () => {
     const f = fixture()
     const observe = vi.fn()
     await f.adapter.start({ ...f.context, observe })
@@ -165,14 +165,15 @@ describe('Lark delivery adapter', () => {
         eventId: 'om_in', occurredAt: 1_000, addressed: true, senderIsBot: false,
         principal: { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', user: 'ou_owner' },
         conversation: { kind: 'dm', chat: 'oc_dm' }, replyToProviderMessageId: 'om_report',
-        contentDigest: sha256('hello\nworld'),
+        contentDigest: sha256('hello\nworld'), text: 'hello\nworld',
       },
       expect.objectContaining({ eventId: 'om_group', addressed: false, conversation: { kind: 'group', chat: 'oc_group' },
-        contentDigest: sha256('chatter') }),
+        contentDigest: sha256('chatter'), text: 'chatter' }),
       expect.objectContaining({ eventId: 'om_mention', addressed: true, conversation: { kind: 'group', chat: 'oc_group' } }),
     ])
-    // Metadata only: no body, display name or resource ever reaches the observation.
-    expect(JSON.stringify(observe.mock.calls)).not.toMatch(/hello|chatter|please look/u)
+    // The only content is the normalized text its digest covers; Delivery forwards it to an opted-in observer only.
+    for (const [observation] of observe.mock.calls) expect(sha256(observation.text)).toBe(observation.contentDigest)
+    expect(JSON.stringify(observe.mock.calls)).not.toMatch(/ hello|\\r|displayName|resource/u)
     expect(f.accept.mock.calls.map(call => call[0].eventId)).toEqual(['om_in', 'om_mention'])
   })
 

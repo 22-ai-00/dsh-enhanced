@@ -201,7 +201,7 @@ describe('durable intake ledger', () => {
     expect(service.health().openItems).toBe(0)
     const store = new WorkItemStore(config.databasePath)
     try {
-      expect(store.stats()).toMatchObject({ schemaVersion: 10, items: 0, dispatches: 0 })
+      expect(store.stats()).toMatchObject({ schemaVersion: 11, items: 0, dispatches: 0 })
       expect(store.countIntake()).toEqual({ stored: 1, duplicate: 0, filtered: 0 })
     } finally {
       store.close()
@@ -292,18 +292,18 @@ describe('schema 10 migration', () => {
     open(config).recordIntake(input())
     services.splice(0).forEach(service => service.close())
     const db = new DatabaseSync(config.databasePath)
-    db.exec("DROP TABLE work_item_intake; UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version'; PRAGMA user_version = 9;")
+    db.exec("DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake; UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version'; PRAGMA user_version = 9;")
     db.close()
     const store = new WorkItemStore(config.databasePath)
     try {
-      expect(store.stats().schemaVersion).toBe(10)
+      expect(store.stats().schemaVersion).toBe(11)
       expect(store.countIntake()).toEqual({ stored: 0, duplicate: 0, filtered: 0 })
     } finally {
       store.close()
     }
     const raw = new DatabaseSync(config.databasePath)
     try {
-      expect(raw.prepare("SELECT value FROM work_item_schema_meta WHERE key = 'schema_version'").get()).toEqual({ value: '10' })
+      expect(raw.prepare("SELECT value FROM work_item_schema_meta WHERE key = 'schema_version'").get()).toEqual({ value: '11' })
     } finally {
       raw.close()
     }
@@ -318,7 +318,7 @@ describe('schema 10 migration', () => {
     db.close()
     expect(() => new WorkItemStore(config.databasePath)).toThrow(/intake schema differs/)
     const again = new DatabaseSync(config.databasePath)
-    again.exec("DROP TABLE work_item_intake; UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version'; PRAGMA user_version = 9;")
+    again.exec("DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake; UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version'; PRAGMA user_version = 9;")
     again.exec("CREATE TRIGGER work_item_intake_no_update AFTER UPDATE ON work_item_schema_meta BEGIN SELECT 1; END")
     again.close()
     expect(() => new WorkItemStore(config.databasePath)).toThrow(/unexpected schema object/)
@@ -330,7 +330,7 @@ describe('schema 10 migration', () => {
     services.splice(0).forEach(service => service.close())
     const db = new DatabaseSync(config.databasePath)
     // The exact current shape, planted under schema 9, is still drift.
-    db.exec("DROP TRIGGER work_item_intake_no_update; DROP TRIGGER work_item_intake_no_delete; UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version'; PRAGMA user_version = 9;")
+    db.exec("DROP TABLE work_item_intake_evaluation; DROP TRIGGER work_item_intake_no_update; DROP TRIGGER work_item_intake_no_delete; UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version'; PRAGMA user_version = 9;")
     db.close()
     expect(() => new WorkItemStore(config.databasePath)).toThrow(/intake object before schema 10/)
     const again = new DatabaseSync(config.databasePath)

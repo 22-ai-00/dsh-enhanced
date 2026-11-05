@@ -54,9 +54,10 @@ import type {
 } from './types.ts'
 import { CLAIMABLE_STATES, OPEN_STATES, TERMINAL_REPORT_STATUSES, TERMINAL_STATES, WorkItemError } from './types.ts'
 import type { WorkItemIntakeCandidate, WorkItemIntakeRecord, WorkItemIntakeResult, WorkItemIntakeSignals } from './intake.ts'
+import type { WorkItemIntakeEvaluationRecord } from './intake-evaluation.ts'
 
-const SCHEMA_VERSION = 10
-const WORK_ITEM_TABLE_NAMES = ['work_item', 'work_item_claim', 'work_item_continuation', 'work_item_dispatch', 'work_item_event', 'work_item_follow', 'work_item_intake', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta']
+const SCHEMA_VERSION = 11
+const WORK_ITEM_TABLE_NAMES = ['work_item', 'work_item_claim', 'work_item_continuation', 'work_item_dispatch', 'work_item_event', 'work_item_follow', 'work_item_intake', 'work_item_intake_evaluation', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta']
 const CONTINUATION_TABLE = `CREATE TABLE work_item_continuation (
   item_id TEXT PRIMARY KEY REFERENCES work_item(id) ON DELETE RESTRICT,
   parent_item_id TEXT NOT NULL REFERENCES work_item(id) ON DELETE RESTRICT,
@@ -98,6 +99,32 @@ const INTAKE_TRIGGERS = [
   ['work_item_intake_no_delete', `CREATE TRIGGER work_item_intake_no_delete BEFORE DELETE ON work_item_intake BEGIN SELECT RAISE(ABORT, 'intake is append-only'); END`],
 ] as const
 const INTAKE_SCHEMA = `${INTAKE_TABLE};\n${INTAKE_CONTENT_INDEX};\n${INTAKE_TRIGGERS.map(([,sql]) => sql+';').join('\n')}`
+/**
+ * Inferred-candidate evaluation results (schema 11). Append-only, one row per
+ * `(intake row, rule, Policy version)`. Quotes are UTF-16 spans into the
+ * authenticated text, never the text itself.
+ */
+const INTAKE_EVALUATION_TABLE = `CREATE TABLE work_item_intake_evaluation (
+  source TEXT NOT NULL, source_event_id TEXT NOT NULL,
+  rule_id TEXT NOT NULL, policy_version TEXT NOT NULL,
+  source_digest TEXT NOT NULL,
+  mode TEXT NOT NULL CHECK(mode IN ('observe', 'auto')),
+  status TEXT NOT NULL CHECK(status IN ('decided', 'unavailable')),
+  level TEXT NOT NULL CHECK(level IN ('ignore', 'digest', 'notify', 'accept')),
+  proposed_level TEXT CHECK(proposed_level IN ('ignore', 'digest', 'notify', 'accept')),
+  ceiling TEXT NOT NULL CHECK(ceiling IN ('ignore', 'digest', 'notify', 'accept')),
+  quote_spans TEXT NOT NULL, reasons TEXT NOT NULL,
+  would_accept INTEGER NOT NULL CHECK(would_accept IN (0, 1)),
+  attempts INTEGER NOT NULL, decided_at INTEGER NOT NULL, recorded_at INTEGER NOT NULL,
+  PRIMARY KEY(source, source_event_id, rule_id, policy_version),
+  FOREIGN KEY(source, source_event_id) REFERENCES work_item_intake(source, source_event_id)
+) STRICT, WITHOUT ROWID`
+const INTAKE_EVALUATION_TRIGGERS = [
+  ['work_item_intake_evaluation_no_update', `CREATE TRIGGER work_item_intake_evaluation_no_update BEFORE UPDATE ON work_item_intake_evaluation BEGIN SELECT RAISE(ABORT, 'intake evaluation is append-only'); END`],
+  ['work_item_intake_evaluation_no_delete', `CREATE TRIGGER work_item_intake_evaluation_no_delete BEFORE DELETE ON work_item_intake_evaluation BEGIN SELECT RAISE(ABORT, 'intake evaluation is append-only'); END`],
+] as const
+const INTAKE_EVALUATION_SCHEMA = `${INTAKE_EVALUATION_TABLE};\n${INTAKE_EVALUATION_TRIGGERS.map(([,sql]) => sql+';').join('\n')}`
+const EVALUATION_LEVELS: readonly string[] = ['ignore', 'digest', 'notify', 'accept']
 /** Only TEXT fields represented in continuationItemBasis; body/display text is excluded. */
 const CONTINUATION_ITEM_TEXT_COLUMNS = ['id','dedup_key','source_id','kind','external_id','origin_binding_id','workspace','agent_preset',
   'principal_id','principal_record_id','owner_route_id','worker_automation_id','authority_basis','work_dir'] as const
@@ -325,6 +352,7 @@ function validateSchema(database: DatabaseSync): void {
   if (version !== 0 && objects.some(row => String(row['type']) !== 'index'
     && !(String(row['type']) === 'trigger' && version >= 9 && CONTINUATION_TRIGGERS.some(([name]) => name === row['name']))
     && !(String(row['type']) === 'trigger' && version >= 10 && INTAKE_TRIGGERS.some(([name]) => name === row['name']))
+    && !(String(row['type']) === 'trigger' && version >= 11 && INTAKE_EVALUATION_TRIGGERS.some(([name]) => name === row['name']))
     && (String(row['type']) !== 'table' || !WORK_ITEM_TABLE_NAMES.includes(String(row['name']))))) {
     fail('storage', 'work-item database contains an unexpected schema object')
   }
@@ -332,6 +360,9 @@ function validateSchema(database: DatabaseSync): void {
   // something the additive upgrade may adopt or trip over mid-transaction.
   if (version >= 1 && version < 10 && objects.some(row => String(row['name']).startsWith('work_item_intake'))) {
     fail('storage', 'work-item database contains an intake object before schema 10')
+  }
+  if (version === 10 && objects.some(row => String(row['name']).startsWith('work_item_intake_evaluation'))) {
+    fail('storage', 'work-item database contains an intake evaluation object before schema 11')
   }
   if (version === 0) {
     if (objects.length !== 0) fail('storage', 'new work-item database is not empty')
@@ -403,8 +434,9 @@ function validateSchema(database: DatabaseSync): void {
       ) STRICT, WITHOUT ROWID;
       ${CONTINUATION_SCHEMA};
       ${INTAKE_SCHEMA};
-      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '10');
-      PRAGMA user_version = 10;
+      ${INTAKE_EVALUATION_SCHEMA};
+      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '11');
+      PRAGMA user_version = 11;
       COMMIT;
     `)
     return
@@ -529,6 +561,12 @@ function validateSchema(database: DatabaseSync): void {
       UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version';
       PRAGMA user_version = 10; COMMIT;`)
   }
+  if (version >= 1 && version <= 10) {
+    // Additive only: the evaluation table starts empty; no intake row moves.
+    database.exec(`BEGIN IMMEDIATE; ${INTAKE_EVALUATION_SCHEMA};
+      UPDATE work_item_schema_meta SET value = '11' WHERE key = 'schema_version';
+      PRAGMA user_version = 11; COMMIT;`)
+  }
   if (!Number.isSafeInteger(version) || version < 1 || version > SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
   const expected = JSON.stringify(WORK_ITEM_TABLE_NAMES)
   const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*' ORDER BY name").all() as Row[]).map(row => String(row['name']))
@@ -540,6 +578,10 @@ function validateSchema(database: DatabaseSync): void {
   for (const [name, sql] of [['work_item_intake', INTAKE_TABLE], ['work_item_intake_content_idx', INTAKE_CONTENT_INDEX], ...INTAKE_TRIGGERS]) {
     const row = database.prepare('SELECT sql FROM sqlite_schema WHERE name = ?').get(name!) as Row | undefined
     if (typeof row?.['sql'] !== 'string' || row['sql'].replace(/\s+/gu, ' ').trim() !== sql!.replace(/\s+/gu, ' ').trim()) fail('storage', 'intake schema differs')
+  }
+  for (const [name, sql] of [['work_item_intake_evaluation', INTAKE_EVALUATION_TABLE], ...INTAKE_EVALUATION_TRIGGERS]) {
+    const row = database.prepare('SELECT sql FROM sqlite_schema WHERE name = ?').get(name!) as Row | undefined
+    if (typeof row?.['sql'] !== 'string' || row['sql'].replace(/\s+/gu, ' ').trim() !== sql!.replace(/\s+/gu, ' ').trim()) fail('storage', 'intake evaluation schema differs')
   }
   for (const [name, sql] of [['work_item_dispatch_waiting_due_idx', WAITING_RESUME_DUE_INDEX], ['work_item_claim_active_item_idx', ACTIVE_CLAIM_ITEM_INDEX]]) {
     const row = database.prepare('SELECT sql FROM sqlite_schema WHERE type = ? AND name = ?').get('index', name!) as Row | undefined
@@ -563,6 +605,28 @@ function intakeFromRow(row: Row): WorkItemIntakeRecord {
     contentDigest: optString(row['content_digest']),
     metadataDigest: String(row['metadata_digest']),
     occurredAt: Number(row['occurred_at']),
+    recordedAt: Number(row['recorded_at']),
+  })
+}
+
+function intakeEvaluationFromRow(row: Row): WorkItemIntakeEvaluationRecord {
+  const spans = (JSON.parse(String(row['quote_spans'])) as [number, number][]).map(span => Object.freeze([span[0], span[1]] as const))
+  return Object.freeze({
+    source: String(row['source']),
+    sourceEventId: String(row['source_event_id']),
+    ruleId: String(row['rule_id']),
+    policyVersion: String(row['policy_version']),
+    sourceDigest: String(row['source_digest']),
+    mode: String(row['mode']) as WorkItemIntakeEvaluationRecord['mode'],
+    status: String(row['status']) as WorkItemIntakeEvaluationRecord['status'],
+    level: String(row['level']) as WorkItemIntakeEvaluationRecord['level'],
+    proposedLevel: optString(row['proposed_level']) as WorkItemIntakeEvaluationRecord['proposedLevel'],
+    ceiling: String(row['ceiling']) as WorkItemIntakeEvaluationRecord['ceiling'],
+    quoteSpans: Object.freeze(spans),
+    reasons: Object.freeze(JSON.parse(String(row['reasons'])) as WorkItemIntakeEvaluationRecord['reasons']),
+    wouldAccept: Number(row['would_accept']) === 1,
+    attempts: Number(row['attempts']),
+    decidedAt: Number(row['decided_at']),
     recordedAt: Number(row['recorded_at']),
   })
 }
@@ -988,6 +1052,65 @@ export class WorkItemStore {
   getIntake(source: string, sourceEventId: string): WorkItemIntakeRecord | undefined {
     const row = this.#statement('SELECT * FROM work_item_intake WHERE source = ? AND source_event_id = ?').get(source, sourceEventId) as Row | undefined
     return row === undefined ? undefined : intakeFromRow(row)
+  }
+
+  /**
+   * Append one evaluation result exactly once per `(row, rule, Policy version)`.
+   * The intake row must be a `stored` `inferred` row whose content digest is the
+   * evaluated source digest. A replay returns the original row unchanged.
+   */
+  recordIntakeEvaluation(record: Omit<WorkItemIntakeEvaluationRecord, 'recordedAt'>): { readonly record: WorkItemIntakeEvaluationRecord; readonly replayed: boolean } {
+    if (this.#closed) fail('storage', 'work-item store is closed')
+    const id = (value: unknown, field: string) => {
+      if (typeof value !== 'string' || value.length === 0 || value.length > 256) fail('invalid-input', `intake evaluation ${field} is invalid`)
+      return value
+    }
+    const ruleId = id(record.ruleId, 'ruleId')
+    const policyVersion = id(record.policyVersion, 'policyVersion')
+    const spans = record.quoteSpans.map(span => [span[0], span[1]] as const)
+    if (spans.some(([start, end]) => !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start)) {
+      fail('invalid-input', 'intake evaluation quote spans are invalid')
+    }
+    if (!EVALUATION_LEVELS.includes(record.level) || !EVALUATION_LEVELS.includes(record.ceiling)
+      || (record.proposedLevel !== null && !EVALUATION_LEVELS.includes(record.proposedLevel))) fail('invalid-input', 'intake evaluation level is invalid')
+    if (!Number.isSafeInteger(record.attempts) || record.attempts < 0 || !Number.isSafeInteger(record.decidedAt)) fail('invalid-input', 'intake evaluation counters are invalid')
+    return this.#transaction(() => {
+      const existing = this.getIntakeEvaluation(record.source, record.sourceEventId, ruleId, policyVersion)
+      if (existing !== undefined) return Object.freeze({ record: existing, replayed: true })
+      const intake = this.getIntake(record.source, record.sourceEventId)
+      if (intake === undefined || intake.decision !== 'stored' || intake.strength !== 'inferred' || intake.contentDigest !== record.sourceDigest) {
+        fail('invalid-state', 'intake evaluation requires a stored inferred row with the same content digest')
+      }
+      this.#statement(`INSERT INTO work_item_intake_evaluation(source, source_event_id, rule_id, policy_version, source_digest, mode, status,
+          level, proposed_level, ceiling, quote_spans, reasons, would_accept, attempts, decided_at, recorded_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(record.source, record.sourceEventId, ruleId, policyVersion, record.sourceDigest, record.mode, record.status,
+          record.level, record.proposedLevel, record.ceiling, JSON.stringify(spans), JSON.stringify([...record.reasons]),
+          record.wouldAccept ? 1 : 0, record.attempts, record.decidedAt, this.#now())
+      return Object.freeze({ record: this.getIntakeEvaluation(record.source, record.sourceEventId, ruleId, policyVersion)!, replayed: false })
+    })
+  }
+
+  getIntakeEvaluation(source: string, sourceEventId: string, ruleId: string, policyVersion: string): WorkItemIntakeEvaluationRecord | undefined {
+    const row = this.#statement(`SELECT * FROM work_item_intake_evaluation
+      WHERE source = ? AND source_event_id = ? AND rule_id = ? AND policy_version = ?`).get(source, sourceEventId, ruleId, policyVersion) as Row | undefined
+    return row === undefined ? undefined : intakeEvaluationFromRow(row)
+  }
+
+  /** Every persisted evaluation of one intake row, oldest first; read-only. */
+  listIntakeEvaluations(source: string, sourceEventId: string): readonly WorkItemIntakeEvaluationRecord[] {
+    const rows = this.#statement(`SELECT * FROM work_item_intake_evaluation WHERE source = ? AND source_event_id = ?
+      ORDER BY recorded_at, rule_id, policy_version`).all(source, sourceEventId) as Row[]
+    return Object.freeze(rows.map(intakeEvaluationFromRow))
+  }
+
+  /** Status counts over the evaluation table; read-only. */
+  countIntakeEvaluations(): Readonly<Record<WorkItemIntakeEvaluationRecord['status'], number>> {
+    const counts = { decided: 0, unavailable: 0 }
+    for (const row of this.#statement('SELECT status, COUNT(*) AS count FROM work_item_intake_evaluation GROUP BY status').all() as Row[]) {
+      counts[String(row['status']) as keyof typeof counts] = Number(row['count'])
+    }
+    return Object.freeze(counts)
   }
 
   /** Decision counts over the intake table; read-only. */

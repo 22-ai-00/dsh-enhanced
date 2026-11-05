@@ -702,9 +702,9 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   }
 
   /**
-   * WP20 intake: hand Delivery a metadata-only observation (ids, booleans and
-   * a sha256 digest, never the body). Optional on older Delivery cores and
-   * never allowed to affect acceptance.
+   * WP20 intake: hand Delivery an observation (ids, booleans, a sha256 digest
+   * and the transient normalized text the digest covers). Optional on older
+   * Delivery cores and never allowed to affect acceptance.
    */
   private observeIntake(context: DeliveryAdapterContext, message: LarkMessage, addressed: boolean, text?: string): void {
     if (typeof context.observe !== 'function') return
@@ -719,7 +719,8 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         // The normalized SDK message carries no sender type; bot senders are not distinguished yet.
         senderIsBot: false,
         ...(message.replyToMessageId === undefined ? {} : { replyToProviderMessageId: message.replyToMessageId }),
-        ...(normalized.length === 0 ? {} : { contentDigest: createHash('sha256').update(normalized, 'utf8').digest('hex') }),
+        // `text` is transient: Delivery forwards it only to an opted-in observer and never stores it.
+        ...(normalized.length === 0 ? {} : { contentDigest: createHash('sha256').update(normalized, 'utf8').digest('hex'), text: normalized }),
       })
     } catch { /* observation is best-effort */ }
   }

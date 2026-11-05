@@ -545,3 +545,28 @@ function snapshotCandidate(candidate: unknown): InferredIntakeCandidate | undefi
     return undefined
   }
 }
+
+/**
+ * One persisted evaluation of one intake row under one rule and Policy
+ * version (schema 11). Quotes are stored only as UTF-16 `[start, end)` spans
+ * into the authenticated source text, so no body excerpt reaches disk; a
+ * holder of the same text can rebuild them, everyone else sees offsets only.
+ */
+export interface WorkItemIntakeEvaluationRecord {
+  readonly source: string
+  readonly sourceEventId: string
+  readonly ruleId: string
+  readonly policyVersion: string
+  readonly sourceDigest: string
+  readonly mode: IntakeEvaluationMode
+  readonly status: IntakeEvaluationDecision['status']
+  readonly level: IntakeEvaluationLevel
+  readonly proposedLevel: IntakeEvaluationLevel | null
+  readonly ceiling: IntakeEvaluationLevel
+  readonly quoteSpans: readonly (readonly [number, number])[]
+  readonly reasons: readonly IntakeEvaluationReason[]
+  readonly wouldAccept: boolean
+  readonly attempts: number
+  readonly decidedAt: number
+  readonly recordedAt: number
+}

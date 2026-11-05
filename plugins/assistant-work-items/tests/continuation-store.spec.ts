@@ -29,11 +29,11 @@ function sql(path: string, fn: (db: DatabaseSync) => void) {const db = new Datab
 test('schema 8 upgrades additively to 9 and a cold reopen preserves complete continuation bytes and parent history', async () => {
   const f = await harness(), parent = await readyItem(f), before = {item:f.store.findItemById(parent.id),reports:f.store.reports(parent.id),outcomes:f.store.outcomes(parent.id)}
   f.store.close()
-  sql(f.config.databasePath,db => {db.exec("DROP TABLE work_item_intake; DROP TRIGGER work_item_continuation_no_update; DROP TRIGGER work_item_continuation_no_delete; DROP TABLE work_item_continuation; UPDATE work_item_schema_meta SET value='8' WHERE key='schema_version'; PRAGMA user_version=8;")})
+  sql(f.config.databasePath,db => {db.exec("DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake; DROP TRIGGER work_item_continuation_no_update; DROP TRIGGER work_item_continuation_no_delete; DROP TABLE work_item_continuation; UPDATE work_item_schema_meta SET value='8' WHERE key='schema_version'; PRAGMA user_version=8;")})
   const upgraded = new WorkItemStore(f.config.databasePath,{now:f.now})
   const item = child(f,parent), frozen = record(parent,item)
   try {
-    expect(upgraded.stats().schemaVersion).toBe(10)
+    expect(upgraded.stats().schemaVersion).toBe(11)
     upgraded.admitItem(item,{kind:'admitted',actor:'admission'},dispatch(item),[],undefined,frozen)
     expect(upgraded.getContinuation(item.id)).toEqual({...frozen,inputBytes:Buffer.byteLength(frozen.inputText,'utf8')})
     expect({item:upgraded.findItemById(parent.id),reports:upgraded.reports(parent.id),outcomes:upgraded.outcomes(parent.id)}).toEqual(before)

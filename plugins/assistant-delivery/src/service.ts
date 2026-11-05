@@ -837,6 +837,8 @@ interface ModelSelectionWaiter {
   deadlineTimer?: ReturnType<typeof setTimeout>
 }
 
+/** UTF-16 bound on transient inbound text forwarded to an opted-in intake observer. */
+const MAX_INBOUND_INTAKE_TEXT = 65_536
 const MODEL_SELECTION_WAIT_POLL_MS = 500
 const MODEL_SELECTION_WAIT_TIMEOUT_MS = 120_000
 
@@ -5066,14 +5068,14 @@ export class AssistantDeliveryService extends Service {
     try {
       const observer = this.currentInboundIntakeObserver()
       if (observer === undefined) return
-      const signal = this.inboundIntakeSignal(observation)
+      const signal = this.inboundIntakeSignal(observation, observer.acceptsSourceText === true)
       if (signal !== undefined) observer.observe(signal)
     } catch (error) {
       this.context.logger.debug(`assistant-delivery: inbound intake observation dropped: ${String(error)}`)
     }
   }
 
-  private inboundIntakeSignal(input: Readonly<DeliveryInboundObservation>): Readonly<DeliveryInboundIntakeSignal> | undefined {
+  private inboundIntakeSignal(input: Readonly<DeliveryInboundObservation>, withText = false): Readonly<DeliveryInboundIntakeSignal> | undefined {
     const principal = input?.principal, conversation = input?.conversation
     const text = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 256
     if (!principal || !conversation || !text(input.eventId) || !text(principal.channel) || !text(principal.account)
@@ -5105,6 +5107,9 @@ export class AssistantDeliveryService extends Service {
       senderIsBot: input.senderIsBot,
       groupMessage: conversation.kind === 'group',
       ...(input.contentDigest === undefined ? {} : { contentDigest: input.contentDigest }),
+      // Only an opted-in observer sees the text, and only when it is the digested text.
+      ...(withText && input.contentDigest !== undefined && typeof input.text === 'string' && input.text.length <= MAX_INBOUND_INTAKE_TEXT
+        && createHash('sha256').update(input.text, 'utf8').digest('hex') === input.contentDigest ? { sourceText: input.text } : {}),
       occurredAt: input.occurredAt,
     })
   }

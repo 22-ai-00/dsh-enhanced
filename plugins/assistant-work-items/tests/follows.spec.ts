@@ -798,7 +798,7 @@ describe('followed-thread persistence across schema upgrades', () => {
     const raw = new DatabaseSync(fixture.config.databasePath)
     try {
       const version = raw.prepare('PRAGMA user_version').get() as Record<string, unknown>
-      expect(Number(version['user_version'])).toBe(10)
+      expect(Number(version['user_version'])).toBe(11)
       const columns = (raw.prepare('PRAGMA table_info(work_item_follow)').all() as Array<Record<string, unknown>>)
         .map(row => String(row['name']))
       expect(columns).toEqual([
@@ -806,7 +806,7 @@ describe('followed-thread persistence across schema upgrades', () => {
         'source', 'source_generation', 'opened_at', 'closed_at',
       ])
       const meta = raw.prepare("SELECT value FROM work_item_schema_meta WHERE key = 'schema_version'").get() as Record<string, unknown>
-      expect(meta['value']).toBe('10')
+      expect(meta['value']).toBe('11')
       const index = raw.prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'work_item_follow_state_idx'").get()
       expect(index).toBeDefined()
     } finally {
@@ -877,12 +877,12 @@ describe('followed-thread persistence across schema upgrades', () => {
     const raw = new DatabaseSync(fixture.path)
     try {
       const version = raw.prepare('PRAGMA user_version').get() as Record<string, unknown>
-      expect(Number(version['user_version'])).toBe(10)
+      expect(Number(version['user_version'])).toBe(11)
       const tables = (raw.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*' ORDER BY name").all() as Array<Record<string, unknown>>)
         .map(row => String(row['name']))
       expect(tables).toEqual([
         'work_item', 'work_item_claim', 'work_item_continuation', 'work_item_dispatch', 'work_item_event',
-        'work_item_follow', 'work_item_intake', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta',
+        'work_item_follow', 'work_item_intake', 'work_item_intake_evaluation', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta',
       ])
       const indexes = (raw.prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name NOT GLOB 'sqlite_*' ORDER BY name").all() as Array<Record<string, unknown>>)
         .map(row => String(row['name']))
