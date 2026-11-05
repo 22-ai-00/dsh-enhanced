@@ -103,7 +103,7 @@ function compileModules(root: string): WorkerModules {
     }
     writeFileSync(join(target, 'package.json'), JSON.stringify({ type: 'module' }))
   }
-  transpile(evaluationSource, evaluationOutput, ['types', 'sqlite', 'store'])
+  transpile(evaluationSource, evaluationOutput, ['types', 'sqlite', 'notification-outcomes', 'attention-tuning', 'store'])
   transpile(evolutionSource, evolutionOutput, ['types', 'sqlite', 'review', 'store'])
   return {
     evaluation: pathToFileURL(join(evaluationOutput, 'store.js')).href,
