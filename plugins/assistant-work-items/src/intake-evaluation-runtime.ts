@@ -63,9 +63,17 @@ interface HeldText {
 }
 
 const MAX_RULES = 16
-const MAX_HELD_TEXTS = 256
+export const MAX_HELD_INTAKE_TEXTS = 256
+/** Same bound Delivery applies to the transient inbound text, in UTF-16 code units. */
+export const MAX_INTAKE_SOURCE_TEXT = 65_536
+const MAX_HELD_TEXTS = MAX_HELD_INTAKE_TEXTS
 const POLICY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
 const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex')
+
+/** `true` when `text` is a bounded string whose SHA-256 is `digest`. */
+export function authenticatesIntakeText(text: unknown, digest: string | null | undefined): text is string {
+  return typeof text === 'string' && text.length <= MAX_INTAKE_SOURCE_TEXT && typeof digest === 'string' && sha256(text) === digest
+}
 const candidateIdOf = (source: string, sourceEventId: string) => `${source}:${sourceEventId}`
 
 /** Read and validate one Policy snapshot; anything malformed is `undefined` (nothing is evaluated). */
@@ -99,6 +107,8 @@ export class WorkItemIntakeEvaluationRuntime {
   readonly #now: () => number
   readonly #setTimer: ((ms: number, callback: () => void) => () => void) | undefined
   readonly #texts = new Map<string, HeldText>()
+  /** Held texts already queued under the current Policy version (cleared when it moves). */
+  readonly #enqueued = new Set<string>()
   #registration: WorkItemIntakeEvaluatorRegistration | undefined
   #queue: InferredIntakeEvaluationQueue | undefined
   #version: string | undefined
@@ -153,6 +163,9 @@ export class WorkItemIntakeEvaluationRuntime {
       this.#registration = undefined
       this.#queue = undefined
       this.#version = undefined
+      // Without a supplier nothing can evaluate the held texts; do not keep bodies around.
+      this.#texts.clear()
+      this.#enqueued.clear()
     }
   }
 
@@ -163,17 +176,16 @@ export class WorkItemIntakeEvaluationRuntime {
    */
   observe(record: WorkItemIntakeRecord, text: string): void {
     try {
-      if (this.#closed || this.#queue === undefined || typeof text !== 'string') return
-      if (record.decision !== 'stored' || record.strength !== 'inferred' || record.contentDigest === null) return
-      if (sha256(text) !== record.contentDigest) return
+      if (this.#closed || this.#queue === undefined) return
+      if (record.decision !== 'stored' || record.strength !== 'inferred') return
+      if (!authenticatesIntakeText(text, record.contentDigest)) return
       const id = candidateIdOf(record.source, record.sourceEventId)
-      const held: HeldText = Object.freeze({ source: record.source, sourceEventId: record.sourceEventId, text, digest: record.contentDigest })
+      const held: HeldText = Object.freeze({ source: record.source, sourceEventId: record.sourceEventId, text, digest: record.contentDigest! })
       if (!this.#texts.has(id) && !this.#makeRoom()) { this.#skipped++; return }
       this.#texts.delete(id)
       this.#texts.set(id, held)
-      const policy = this.#refresh()
-      // A Policy change re-enqueued every held text already; otherwise queue this one.
-      if (policy !== undefined && !policy.changed) this.#enqueue(held, policy.policy)
+      // Queues this text (and any held text not yet queued under the current Policy).
+      this.#refresh()
       void this.run()
     } catch (error) {
       this.#fail(error)
@@ -217,25 +229,33 @@ export class WorkItemIntakeEvaluationRuntime {
     this.#registration = undefined
     this.#queue = undefined
     this.#texts.clear()
+    this.#enqueued.clear()
   }
 
-  /** Re-enqueue every held text when the Policy version moved. */
-  #refresh(): { policy: WorkItemIntakeEvaluationPolicy; changed: boolean } | undefined {
+  /**
+   * Idempotently queue every held text not yet queued under the current
+   * Policy version: a version move re-queues all of them, and a text held
+   * while the Policy was unreadable is queued once it is readable again.
+   */
+  #refresh(): void {
     const registration = this.#registration
-    if (registration === undefined) return undefined
+    if (registration === undefined) return
     const policy = readPolicy(registration)
-    if (policy === undefined) { this.#lastError = 'policy-unavailable'; return undefined }
-    if (policy.version === this.#version) return { policy, changed: false }
-    this.#version = policy.version
-    for (const held of this.#texts.values()) this.#enqueue(held, policy)
-    return { policy, changed: true }
+    if (policy === undefined) { this.#lastError = 'policy-unavailable'; return }
+    if (this.#lastError === 'policy-unavailable') this.#lastError = null
+    if (policy.version !== this.#version) { this.#version = policy.version; this.#enqueued.clear() }
+    for (const [id, held] of this.#texts) {
+      if (!this.#enqueued.has(id) && this.#enqueue(held, policy)) this.#enqueued.add(id)
+    }
   }
 
-  #enqueue(held: HeldText, policy: WorkItemIntakeEvaluationPolicy): void {
+  /** `false` when the text could not be fully queued and must be retried on the next refresh. */
+  #enqueue(held: HeldText, policy: WorkItemIntakeEvaluationPolicy): boolean {
     const queue = this.#queue
     const store = this.#store()
-    if (queue === undefined || store === undefined) return
+    if (queue === undefined || store === undefined) return false
     const candidateId = candidateIdOf(held.source, held.sourceEventId)
+    let complete = true
     for (const rule of policy.rules) {
       const candidate = Object.freeze({
         candidateId, ruleId: rule.ruleId, strength: 'inferred' as const, policyVersion: policy.version,
@@ -245,8 +265,12 @@ export class WorkItemIntakeEvaluationRuntime {
       // A persisted result re-seeds the queue so the same row and rule is never evaluated twice.
       const result = queue.enqueue(candidate, stored === undefined ? undefined : priorOf(candidateId, stored, held.text))
       if (result.state === 'decided' && !result.decision.reasons.includes('source-unauthenticated')) this.#persist(result.decision)
-      else if (result.state === 'rejected' && result.reason !== 'stale-policy') this.#lastError = `enqueue-${result.reason}`
+      else if (result.state === 'rejected') {
+        complete = false
+        if (result.reason !== 'stale-policy') this.#lastError = `enqueue-${result.reason}`
+      }
     }
+    return complete
   }
 
   #persist(decision: IntakeEvaluationDecision): WorkItemIntakeEvaluationRecord[] {
@@ -271,14 +295,20 @@ export class WorkItemIntakeEvaluationRuntime {
     }
   }
 
-  /** Evict the oldest held text whose every current rule is settled; `false` when none is. */
+  /**
+   * Evict the oldest held text whose every current rule already has a
+   * persisted row. A decision settled in the queue but not yet written (an
+   * in-flight run persists only when it returns) does not count, so its
+   * text stays held until the result is on disk.
+   */
   #makeRoom(): boolean {
     if (this.#texts.size < MAX_HELD_TEXTS) return true
     const policy = this.#registration === undefined ? undefined : readPolicy(this.#registration)
+    const store = this.#store()
+    if (policy === undefined || store === undefined) return false
     for (const [id, held] of this.#texts) {
-      const settled = policy === undefined || policy.rules.every(rule => this.#queue?.decision(id, rule.ruleId) !== undefined
-        || this.#store()?.getIntakeEvaluation(held.source, held.sourceEventId, rule.ruleId, policy.version) !== undefined)
-      if (settled) { this.#texts.delete(id); return true }
+      const persisted = policy.rules.every(rule => store.getIntakeEvaluation(held.source, held.sourceEventId, rule.ruleId, policy.version) !== undefined)
+      if (persisted) { this.#texts.delete(id); this.#enqueued.delete(id); return true }
     }
     return false
   }

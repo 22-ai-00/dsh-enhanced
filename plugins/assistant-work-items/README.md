@@ -525,11 +525,13 @@ ctx.assistantWorkItems.registerIntakeEvaluator({
 })
 ```
 
-- 驱动：复用已有 scheduler wake（不新增 Loop/计时器），也可由 Host 调 `runIntakeEvaluation()`；每轮最多 `maxPerRun` 次调用，滑动一小时最多 `maxCallsPerHour` 次。
+- 驱动：每条入站 observe 都立即触发一次 `run()`；另复用已有 scheduler wake（不新增 Loop/计时器），也可由 Host 调 `runIntakeEvaluation()`。无论哪种触发，每轮最多 `maxPerRun` 次调用、滑动一小时最多 `maxCallsPerHour` 次的预算都生效，进行中的一轮不重入。
+- Host 直接调 `recordIntake(input, sourceText)` 时同样校验：正文 ≤65,536 UTF-16 码元且 SHA-256 等于 `contentDigest`，否则 `invalid-input` 且不写账本。
 - 结果写入 schema 11 的 `work_item_intake_evaluation`（STRICT，触发器禁止改写/删除），每 `(source, sourceEventId, ruleId, policyVersion)` 一行；只存等级、原因码与引文的 UTF-16 偏移 `quoteSpans`，不存正文或引文。重放与重启均不再调用模型，返回原行。
-- 引文非认证正文子串 → `ignore`/`quote-not-in-source`；超时（`timeoutMs`）或抛错按退避重排，连续 `maxConsecutiveFailures` 次后记 `unavailable`；调用中 Policy 版本变化的结果丢弃，按新版本重新排队；Policy 无效时不评估，`lastError` 为 `policy-unavailable`。
+- 引文非认证正文子串 → `ignore`/`quote-not-in-source`；超时（`timeoutMs`）或抛错按退避重排，连续 `maxConsecutiveFailures` 次后记 `unavailable`；调用中 Policy 版本变化的结果丢弃，按新版本重新排队；Policy 无效时不评估，`lastError` 为 `policy-unavailable`；恢复可读后（即使版本未变）暂存的正文幂等补入队并清除该错误。
 - 仅 observe：`effect` 恒为 `none`，不准入、不派发、不通知。`intakeEvaluations(source, eventId)` 读取记录，`intakeEvaluationHealth()` 报告队列与最近错误。
-- 局限：重启后尚未落定的候选需要重新收到正文才能评估；暂存满时跳过新候选；尚无内置 Policy 规则源，规则与上限由 Host supplier 提供。
+- 暂存：只驱逐当前全部规则都已落库的最旧正文；已在队列中落定但尚未写盘的结果不算，避免丢失。注销评估器或 dispose 时清空暂存正文。
+- 局限：重启后尚未落定的候选需要重新收到正文才能评估；暂存满且无可驱逐项时跳过新候选（计入 `skipped`）；尚无内置 Policy 规则源，规则与上限由 Host supplier 提供。
 - 升级：schema 10 自动升级到 11；更新的 schema 或结构漂移 fail closed。
 
 ## 配置

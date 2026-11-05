@@ -4,7 +4,7 @@ import { Service } from '@deepseek-ai/cordis'
 import type { WorkItemIntakeInput, WorkItemIntakeResult } from './intake.js'
 import { classifyIntake, intakeSourcePolicy } from './intake.js'
 import type { WorkItemIntakeEvaluationRecord } from './intake-evaluation.js'
-import { WorkItemIntakeEvaluationRuntime, type WorkItemIntakeEvaluationHealth, type WorkItemIntakeEvaluatorRegistration } from './intake-evaluation-runtime.js'
+import { authenticatesIntakeText, WorkItemIntakeEvaluationRuntime, type WorkItemIntakeEvaluationHealth, type WorkItemIntakeEvaluatorRegistration } from './intake-evaluation-runtime.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { WorkItemAdmission } from './admission.js'
@@ -806,6 +806,10 @@ export class AssistantWorkItemsService extends Service {
     const ledger = this.workItemsConfig.intakeLedger
     if (!this.workItemsConfig.enabled || ledger === undefined) fail('disabled', 'the work-item intake ledger is disabled')
     const candidate = classifyIntake(input, intakeSourcePolicy(ledger.sources, String((input as { source?: unknown } | null)?.source)))
+    // A Host caller gets the same bound and digest check Delivery applies before forwarding a text.
+    if (sourceText !== undefined && !authenticatesIntakeText(sourceText, candidate.contentDigest)) {
+      fail('invalid-input', 'intake source text must be at most 65,536 UTF-16 units and match the content digest')
+    }
     const result = this.workItemsAvailable().store.recordIntake(candidate)
     // `sourceText` is the authenticated text the content digest covers; with
     // evaluation off it is ignored, with it on it is held in memory only.

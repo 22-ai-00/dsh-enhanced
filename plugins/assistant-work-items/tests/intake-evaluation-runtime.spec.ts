@@ -92,8 +92,10 @@ async function direct(config: Partial<NormalizedIntakeEvaluation> = {}) {
   })
   closers.push(() => runtime.close())
   const record = () => store.recordIntake(classifyIntake(input())).record
+  const recordText = (eventId: string, text: string) =>
+    store.recordIntake(classifyIntake(input({ sourceEventId: eventId, contentDigest: sha256(text) }))).record
   const fireTimers = () => { for (const timer of timers.splice(0)) if (timer.live) timer.fire() }
-  return { databasePath, store, runtime, record, fireTimers, advance: (ms: number) => { now += ms } }
+  return { databasePath, store, runtime, record, recordText, fireTimers, advance: (ms: number) => { now += ms } }
 }
 
 describe('inferred intake evaluation', () => {
@@ -136,10 +138,16 @@ describe('inferred intake evaluation', () => {
   })
 
   test('text that does not match the stored digest, explicit rows and filtered rows are never evaluated', async () => {
-    const service = open(await evaluationConfig())
+    const config = await evaluationConfig()
+    const service = open(config)
     const s = supplier(() => ({ level: 'digest', quotes: ['build is red'] }))
     service.registerIntakeEvaluator(s.registration)
-    service.recordIntake(input({ sourceEventId: 'om_forged' }), `${TEXT}!`)
+    // A Host caller gets the same digest and length check Delivery applies; nothing is recorded.
+    expect(() => service.recordIntake(input({ sourceEventId: 'om_forged' }), `${TEXT}!`)).toThrow(/match the content digest/)
+    const long = 'x'.repeat(65_537)
+    expect(() => service.recordIntake(input({ sourceEventId: 'om_long', contentDigest: sha256(long) }), long)).toThrow(/65,536/)
+    expect(() => service.recordIntake(input({ sourceEventId: 'om_undigested', contentDigest: undefined as never }), TEXT)).toThrow(/invalid|digest/)
+    expect(query(config.databasePath, 'SELECT count(*) AS n FROM work_item_intake')[0]!['n']).toBe(0)
     service.recordIntake(input({ sourceEventId: 'om_explicit', addressed: true, contentDigest: sha256('x') }), 'x')
     service.recordIntake(input({ sourceEventId: 'om_stranger', senderAllowlisted: false, contentDigest: sha256('y') }), 'y')
     await flush()
@@ -238,6 +246,67 @@ describe('inferred intake evaluation', () => {
     expect(await service.runIntakeEvaluation()).toEqual([])
     expect(s.calls).toHaveLength(3)
     expect(service.intakeEvaluationHealth()).toMatchObject({ policyVersion: null, lastError: 'policy-unavailable' })
+  })
+
+  test('a text held while the Policy was unreadable is queued once the same version is readable again', async () => {
+    const f = await direct()
+    const s = supplier(request => ({ level: 'digest', quotes: [request.sourceText.slice(0, 7)] }))
+    const unregister = f.runtime.register(s.registration)
+    f.runtime.observe(f.recordText('om_a', 'message a'), 'message a')
+    await vi.waitFor(() => expect(f.store.listIntakeEvaluations('lark-channel', 'om_a')).toHaveLength(1))
+
+    s.state.policy = { version: 'bad version', rules: [] }
+    f.runtime.observe(f.recordText('om_b', 'message b'), 'message b')
+    await flush()
+    expect(await f.runtime.run()).toEqual([])
+    expect(f.runtime.health()).toMatchObject({ heldTexts: 2, lastError: 'policy-unavailable' })
+
+    // Same version as before the outage: no version move, yet the held text is queued.
+    s.state.policy = { version: 'v1', rules: [{ ruleId: 'triage', ceiling: 'notify' }] }
+    expect(await f.runtime.run()).toEqual([expect.objectContaining({ sourceEventId: 'om_b', policyVersion: 'v1', level: 'digest' })])
+    expect(s.calls.map(call => call.sourceText)).toEqual(['message a', 'message b'])
+    expect(f.runtime.health()).toMatchObject({ lastError: null })
+    // Idempotent: later runs neither re-queue nor re-call.
+    expect(await f.runtime.run()).toEqual([])
+    expect(s.calls).toHaveLength(2)
+
+    // Dropping the supplier drops the held bodies.
+    unregister()
+    expect(f.runtime.health()).toMatchObject({ registered: false, heldTexts: 0 })
+  })
+
+  test('holds at most 256 texts and evicts only texts whose results are already on disk', async () => {
+    const f = await direct({ maxPerRun: 2, timeoutMs: 600_000 })
+    let release: (value: unknown) => void = () => {}
+    const s = supplier(request => request.sourceText === 'message 1'
+      ? new Promise(resolve => { release = resolve })
+      : { level: 'digest', quotes: ['message'] })
+    f.runtime.register(s.registration)
+    // Fill the bound while nothing can run, so one run later covers message 0 and message 1.
+    s.state.policy = { version: 'bad version', rules: [] }
+    for (let i = 0; i < 256; i++) f.runtime.observe(f.recordText(`om_${i}`, `message ${i}`), `message ${i}`)
+    expect(f.runtime.health()).toMatchObject({ heldTexts: 256, skipped: 0 })
+    s.state.policy = { version: 'v1', rules: [{ ruleId: 'triage', ceiling: 'notify' }] }
+    const run = f.runtime.run()
+    await vi.waitFor(() => expect(s.calls).toHaveLength(2))
+    // message 0 is settled in the queue but not yet persisted: it must not be evicted.
+    expect(f.store.listIntakeEvaluations('lark-channel', 'om_0')).toEqual([])
+    f.runtime.observe(f.recordText('om_256', 'message 256'), 'message 256')
+    expect(f.runtime.health()).toMatchObject({ heldTexts: 256, skipped: 1 })
+
+    release({ level: 'digest', quotes: ['message 1'] })
+    expect((await run).map(record => record.sourceEventId)).toEqual(['om_0', 'om_1'])
+    expect(f.runtime.health()).toMatchObject({ heldTexts: 256, persisted: { decided: 2, unavailable: 0 }, lastError: null })
+
+    // Once persisted, the oldest such text makes room for a new one.
+    f.runtime.observe(f.recordText('om_257', 'message 257'), 'message 257')
+    expect(f.runtime.health()).toMatchObject({ heldTexts: 256, skipped: 1 })
+    // A redelivery of the evicted text re-seeds from its row without another call.
+    const calls = s.calls.length
+    f.runtime.observe(f.store.getIntake('lark-channel', 'om_0')!, 'message 0')
+    await flush()
+    expect(s.calls.slice(calls).map(call => call.sourceText)).not.toContain('message 0')
+    expect(f.store.listIntakeEvaluations('lark-channel', 'om_0')).toHaveLength(1)
   })
 
   test('replay and restart return the original result without a second call', async () => {

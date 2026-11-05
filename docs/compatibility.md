@@ -8,7 +8,7 @@
 
 WorkItems schema 10 只新增只追加的 `work_item_intake` 表、其内容摘要索引与禁止 UPDATE/DELETE 的触发器；schema 1–9 的库在打开时逐级前进升级，9→10 一步在单个事务内完成，原工作项、事件、报告、续办与历史行不改写，新表起始为空。旧 writer 不得打开新库；10 以下版本若已存在任何 `work_item_intake*` 对象即失败关闭、不升级；打开时同时校验新表、索引与触发器的精确形状，漂移或外来对象失败关闭。
 
-WorkItems schema 11 只新增只追加的 `work_item_intake_evaluation` 表（STRICT）与禁止 UPDATE/DELETE 的触发器；10→11 一步在单个事务内完成，原有行不改写，新表起始为空，行内只有等级、原因码与引文偏移，不含正文。11 以下版本若已存在评估对象即失败关闭；更新的 schema 或形状漂移同样失败关闭。
+WorkItems schema 11 只新增只追加的 `work_item_intake_evaluation` 表（STRICT）与禁止 UPDATE/DELETE 的触发器；10→11 一步在单个事务内完成，原有行不改写，新表起始为空，行内只有等级、原因码与引文偏移，不含正文。11 以下版本若已存在评估对象即失败关闭；更新的 schema 或形状漂移同样失败关闭。插件启用（`enabled: true`）即在打开账本时执行 10→11 迁移，与 `intakeLedger.evaluation` 开关无关；迁移后旧 writer 无法再打开该库，不支持降级。
 
 该账本默认关闭：只有 `enabled: true` 且显式 `intakeLedger.enabled: true` 时，Host-only `recordIntake` 才写入；observe 模式可用，不准入工作项、不唤醒 worker、不调用 Delivery 或模型。强度分级中名单同时限定寄址与线程跟进，非白名单跟进为 ignore/filtered（`follow-up-not-allowlisted`）。行只保存来源、事件 ID、决策/原因码、强度、布尔信号、可选的调用方 SHA-256 内容摘要与元数据摘要，不保存正文、标题或发送者身份。现有调用方、`admit` 与配置语义不变；当前没有入站插件调用该接口，lark-channel 的 mention gate 保持原样。
 
