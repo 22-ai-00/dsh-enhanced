@@ -12,7 +12,7 @@ import { objective, criteria, setConfig, contracts, jobs } from './web-owner-rea
 import { allowedSkillExperimentTool } from './web-owner-real-skill-guard.mjs'
 import { readSessionAudit, sessionArtifactPath } from './web-owner-real-audit.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
-import { acceptFirstRunNotice, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { acceptFirstRunNotice, observePage, query, revealToolCall, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const exec = promisify(execFile)
@@ -196,10 +196,7 @@ test(comparisonMode ? 'real browser compares a skill candidate with paired isola
     // an unsolicited live notification of independent acceptance.
     await activePage.reload()
     await selectOriginalSession(activePage)
-    const bottom = activePage.getByRole('button', { name: 'Back to bottom', exact: true })
-    if (await bottom.isVisible()) await bottom.click()
-    for (const group of await activePage.getByRole('button', { name: /^\d+ tool calls?$/ }).all()) await group.click()
-    await activePage.getByRole('button', { name: candidateMode ? /^Tool call skill_trial/ : /^Tool call skill_run/ }).last().click()
+    await (await revealToolCall(activePage, candidateMode ? /^Tool call skill_trial/ : /^Tool call skill_run/)).click()
     await expect(activePage.getByText('requires-fresh-goal-verification', { exact: false }).last()).toBeVisible()
     const replayHash = createHash('sha256').update(await readFile(join(workspace, 'summarize.mjs'))).digest('hex')
     expect(replayHash).toBe(sourceHash)
@@ -220,9 +217,7 @@ test(comparisonMode ? 'real browser compares a skill candidate with paired isola
       const versions = query(skillsPath, 'SELECT definition_json FROM skill_definitions ORDER BY version').map(row => JSON.parse(row.definition_json))
       expect(versions[2]).toMatchObject({ version: 3, parentVersion: 2, restoredFromVersion: 1, description: versions[0].description, steps: versions[0].steps })
       await activePage.reload(); await selectOriginalSession(activePage)
-      const bottom = activePage.getByRole('button', { name: 'Back to bottom', exact: true }); if (await bottom.isVisible()) await bottom.click()
-      for (const group of await activePage.getByRole('button', { name: /^\d+ tool calls?$/ }).all()) await group.click()
-      await activePage.getByRole('button', { name: /^Tool call skill_rollback/ }).last().click()
+      await (await revealToolCall(activePage, /^Tool call skill_rollback/)).click()
       await expect(activePage.getByText('restoredFromVersion', { exact: false }).last()).toBeVisible()
       lifecycle = { candidate: activated, trial, versions, ownerRollbackReadback: true, improvement: 'unmeasured', activation: 'owner-request-after-independent-trial' }
     }

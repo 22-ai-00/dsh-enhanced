@@ -31,6 +31,25 @@ export async function readProfilePatch(path) {
   return parseDocument(await readFile(path, 'utf8'))
 }
 /**
+ * Reveal a persisted tool row in the transcript and return its locator.
+ * DSH 0.2.x folds settled turns behind a turn-process disclosure
+ * ("Completed in Xs") and tool rows behind step-process groups
+ * ("Called tools"); older Hosts used "N tool calls" groups. Only collapsed
+ * disclosures are opened, so retries never close one already open.
+ */
+export async function revealToolCall(page, name) {
+  const target = page.getByRole('button', { name }).last()
+  const collapsed = page.locator('button[data-turn-process][aria-expanded="false"]:not([disabled]), button[data-process-activity][aria-expanded="false"]')
+    .or(page.getByRole('button', { name: /^\d+ tool calls?$/, expanded: false }))
+  await expect(async () => {
+    const bottom = page.getByRole('button', { name: 'Back to bottom', exact: true })
+    if (await bottom.isVisible()) await bottom.click()
+    for (const disclosure of await collapsed.all()) await disclosure.click()
+    await expect(target).toBeVisible({ timeout: 2_000 })
+  }).toPass({ timeout: 45_000 })
+  return target
+}
+/**
  * Fill the composer and wait until Send is enabled and stays enabled. A late
  * settings/session re-render can clear a draft typed right after session
  * creation, so refill until the draft survives a short settle window.
