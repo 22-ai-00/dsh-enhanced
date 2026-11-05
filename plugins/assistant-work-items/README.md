@@ -294,6 +294,18 @@ work_item_read_report:
 - 唤醒记账诚实：peer 抛出的错误若表示「不知道是否已经提交」（非 `policy-denied`/`policy`、非去重冲突），dispatch 行记为 `state='failed'`、`reason='unknown_after_send'`，`health().dispatchUnknown` 因此只统计仍然**开放且未被观察**的 item 上真实存在的这种行：item 一旦被撤回、终结或观察，就不再计入，也不会再被恢复扫描。这样的行在同一代次身份下最多被惰性恢复重试 **1 次**（`wake_attempts` 持久计数）；重试成功则转为 `dispatched`，再次失败则保持 `failed`/`unknown_after_send`，把无法消除的缺口留给 owner，而不是无限重试或假装成功。持久身份冲突（`idempotency-conflict`）是确定性错误，记为独立原因 `idempotency-conflict` 并抛 typed `WorkItemError`（`dispatch-failed`）；没有 occurrence 查询接口时无法自动收敛，因此不静默吞掉。
 - SQLite 使用 `WAL`、`synchronous=FULL`、`BEGIN IMMEDIATE` 事务和 forward-only schema；`PRAGMA user_version` 只前进。升级写入边界要求单 writer：升级前停掉 DSH 进程。
 
+### inferred 候选的模型评估合同（WP20，纯模块）
+
+`InferredIntakeEvaluationQueue`（`src/intake-evaluation.ts`）是 WP20 inferred 候选模型评估的纯内存合同：唯一外部调用是注入的 `evaluator`，不读写账本、不投递、不准入工作项，决策只作为返回值交给调用方（intake 账本）持久化与执行。尚未接入运行时，无 schema 变更。
+
+- 逐 `(candidateId, ruleId)` 在每个 Policy 版本下只评估一次；同键再入队返回 `duplicate`，原文摘要或上限不同返回 `conflict`。调用方可用 `enqueue(candidate, prior)` 回填已持久化决策，避免重启后重复评估；回填的引文与等级同样复核。
+- 等级 `ignore < digest < notify < accept`，Host 给出 `ceiling`，模型只能降级；高于上限时钳到上限并记 `upgrade-clamped`。
+- `sourceDigest` 必须是 `sourceText` 的 SHA-256，否则不调用模型直接 `ignore`/`source-unauthenticated`。每条引文必须是认证原文的**精确子串**（不做任何规范化），否则 `ignore`/`quote-not-in-source`；非 ignore 无引文为 `quote-missing`，输出形状不符为 `malformed-output`，引文条数/长度越界为 `quote-bound-exceeded`。降级时不保留任何模型引文。
+- 预算：滑动窗口 `budget.maxCalls`/`windowMs`（超时与失败也计入），每轮 `maxPerRun`，队列上限 `maxPending`；预算耗尽时剩余项保持排队。
+- 超时（`timeoutMs`，同时 abort 传给 evaluator 的 signal）或抛错按 `backoffBaseMs·2^(n-1)` 退避、上限 `backoffMaxMs` 重排；连续 `maxConsecutiveFailures` 次失败落为 `unavailable`（等级 ignore、无效果）。一次成功清零计数。
+- 调用期间 Policy 版本变化的结果丢弃并按新版本重排；旧版本上已落定的决策在下一轮 `runDue` 开始时重排，`decision()` 只返回当前版本决策。
+- observe 模式下 `effect` 恒为 `none`，仅记录 `wouldAccept`；auto 模式下已决定且非 ignore 才为 `apply`。
+
 ### 准入授权的复核（依次 claim / wake 之前）
 
 准入时的 `assistant-policy` allow 是**那一刻**的决定，不是永久的授权。工作项因此在真正派发之前会重新验证自己的“mandate”：同一个 `authorize(request, { idempotencyKey })` 请求在 claim 前和 wake 前各重跑一次，policy 仍是唯一权威。
