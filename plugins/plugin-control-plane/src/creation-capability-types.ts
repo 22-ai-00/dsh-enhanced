@@ -293,7 +293,10 @@ export interface CreationCapabilityTrendWindow {
   index: number
   startExclusive: number
   endInclusive: number
-  /** False only for the latest after window when it extends past `min(now, expiresAt)`. */
+  /**
+   * Before windows are full; after windows end no later than `min(now, expiresAt)`, so the latest one may be clipped.
+   * False only for that clipped latest after window.
+   */
   complete: boolean
 }
 
@@ -309,11 +312,13 @@ export interface CreationCapabilityTrendCell {
 }
 
 /**
- * Pooled after-minus-before treated change minus the same control change. The interval is an Agresti-Caffo adjusted
- * Wald 95% interval assuming independent tasks; insufficient when any of the four pooled cells is below minimumSamples.
+ * Pooled after-minus-before treated change minus the same control change. `estimate` uses raw rates; the interval is a
+ * four-cell Price-Bonett adjusted Wald 95% interval (each cell `(y+0.5)/(n+1)`) centered on `adjustedEstimate`, assuming
+ * independent tasks; insufficient when any of the four pooled cells is below minimumSamples.
  */
 export type CreationCapabilityTrendDifferenceInDifferences =
-  | { status: 'estimated'; estimate: number; standardError: number; interval95: { low: number; high: number } }
+  | { status: 'estimated'; estimate: number; adjustedEstimate: number; standardError: number
+    interval95: { low: number; high: number } }
   | { status: 'insufficient' }
 
 /** Drift of the treated-minus-control gap between the earliest and latest pre-adoption windows measured in both cohorts. */
@@ -328,7 +333,8 @@ export interface CreationCapabilityTrendStratum {
   parallelTrend: CreationCapabilityTrendParallelCheck
 }
 
-export type CreationCapabilityTrendFlag = 'parallel-trend-suspect' | 'no-control-cohort' | 'concurrent-adoptions' | 'partial-window'
+export type CreationCapabilityTrendFlag =
+  | 'parallel-trend-suspect' | 'no-control-cohort' | 'concurrent-adoptions' | 'partial-window' | 'adoption-not-active'
 
 /**
  * Longitudinal ordinary-use series of one adoption with a same-scope session-cohort control and a

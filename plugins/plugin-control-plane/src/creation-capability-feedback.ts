@@ -455,7 +455,9 @@ export const TREND_ASSUMPTIONS: readonly string[] = Object.freeze([
   'parallel-trends: without this adoption the treated and control session cohorts would change achieved rate equally',
   'session-cohort: a session is treated when a counted after-window task in it has an exact call of this adoption; membership is chosen after adoption, so selection on post-adoption use is not removed',
   'no-spillover: control sessions are assumed unaffected although the capability is available to them',
-  'independent-tasks: the 95% interval is an Agresti-Caffo adjusted Wald interval over independent task outcomes',
+  'independent-tasks: the 95% interval is a four-cell Price-Bonett adjusted Wald interval (each cell (y+0.5)/(n+1)), centered on the adjusted estimate, over independent task outcomes',
+  'session-rotation: after an owner DM /new rotation the earlier session is a time-split control of the same owner, not a parallel one',
+  'availability: after windows end at min(now, expiresAt) only; a non-active adoption record (closed, rejected, unknown) is still treated as available and flagged adoption-not-active',
 ])
 
 export interface CreationCapabilityTrendInput extends CreationCapabilityAttributionInput {
@@ -495,13 +497,15 @@ CreationCapabilityTrendDifferenceInDifferences {
   const [t0, t1, c0, c1] = cells as [CreationCapabilityOrdinaryUseQuality, CreationCapabilityOrdinaryUseQuality,
     CreationCapabilityOrdinaryUseQuality, CreationCapabilityOrdinaryUseQuality]
   const estimate = (rate(t1) - rate(t0)) - (rate(c1) - rate(c0))
-  // Agresti-Caffo: one added success and failure per cell keeps the variance positive at 0% and 100%.
+  // Price-Bonett: half a success and half a failure per cell, interval centered on the adjusted contrast.
+  const adjusted = (cell: CreationCapabilityOrdinaryUseQuality) => (cell.achieved + 0.5) / (cell.samples + 1)
+  const adjustedEstimate = (adjusted(t1) - adjusted(t0)) - (adjusted(c1) - adjusted(c0))
   const standardError = Math.sqrt(cells.reduce((sum, cell) => {
-    const p = (cell.achieved + 1) / (cell.samples + 2)
-    return sum + p * (1 - p) / (cell.samples + 2)
+    const p = adjusted(cell)
+    return sum + p * (1 - p) / (cell.samples + 1)
   }, 0))
-  return { status: 'estimated', estimate, standardError, interval95: {
-    low: Math.max(-2, estimate - 1.96 * standardError), high: Math.min(2, estimate + 1.96 * standardError) } }
+  return { status: 'estimated', estimate, adjustedEstimate, standardError, interval95: {
+    low: Math.max(-2, adjustedEstimate - 1.96 * standardError), high: Math.min(2, adjustedEstimate + 1.96 * standardError) } }
 }
 
 function parallelTrend(cells: readonly CreationCapabilityTrendCell[], threshold: number): CreationCapabilityTrendParallelCheck {
@@ -549,12 +553,15 @@ CreationCapabilityOrdinaryUseTrend | undefined {
   const postWindows = Math.min(maxPostWindows, Math.ceil((observedUntil - receipt.adoptedAt) / windowMs))
   const windows: CreationCapabilityTrendWindow[] = []
   for (let index = -preWindows; index < postWindows; index++) {
-    const endInclusive = receipt.adoptedAt + (index + 1) * windowMs
-    windows.push({ index, startExclusive: endInclusive - windowMs, endInclusive, complete: endInclusive <= observedUntil || index < 0 })
+    const fullEnd = receipt.adoptedAt + (index + 1) * windowMs
+    // After windows never extend past min(now, expiresAt); the latest one is clipped there and marked incomplete.
+    windows.push({ index, startExclusive: fullEnd - windowMs,
+      endInclusive: index < 0 ? fullEnd : Math.min(fullEnd, observedUntil), complete: index < 0 || fullEnd <= observedUntil })
   }
   const first = windows[0]!.startExclusive
-  const last = windows[windows.length - 1]!.endInclusive
-  // A dispatch exactly at adoption precedes it, matching the strict call admission rule.
+  const last = Math.min(windows[windows.length - 1]!.endInclusive, observedUntil)
+  // A dispatch exactly at adoption precedes it, matching the strict call admission rule. Dispatches after
+  // min(now, expiresAt) are outside every window, so an expired adoption stops accruing after tasks.
   const windowOf = (at: number): number | undefined => at <= first || at > last ? undefined
     : Math.ceil((at - receipt.adoptedAt) / windowMs) - 1
   const grouped = eligibleCalls(input, receipt, receiptDigest, now)
@@ -638,6 +645,7 @@ CreationCapabilityOrdinaryUseTrend | undefined {
   if (controlSessions.size === 0) flags.push('no-control-cohort')
   if (concurrent > 0) flags.push('concurrent-adoptions')
   if (windows.some(window => !window.complete)) flags.push('partial-window')
+  if (record.status !== 'active') flags.push('adoption-not-active')
   return deepFreeze({ protocol: 'dsh-created-capability-ordinary-use-trend/v1', causal: false,
     design: 'session-cohort-difference-in-differences-model-stratified', planId: record.planId, receiptDigest,
     artifactSha256: receipt.artifactSha256, schemaDigest: receipt.schemaDigest, adoptionStatus: record.status,

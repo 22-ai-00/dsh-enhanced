@@ -107,9 +107,11 @@ function fixture() {
 
 const at = <T extends { index: number }>(cells: readonly T[], index: number) => cells.find(item => item.index === index)!
 
-/** Agresti-Caffo standard error of four (achieved, samples) cells. */
+/** Price-Bonett adjusted rate (y + 0.5) / (n + 1) of one (achieved, samples) cell. */
+const adjusted = ([a, n]: [number, number]) => (a + 0.5) / (n + 1)
+/** Price-Bonett standard error of four (achieved, samples) cells. */
 const standardError = (...cells: [number, number][]) =>
-  Math.sqrt(cells.reduce((sum, [a, n]) => { const p = (a + 1) / (n + 2); return sum + p * (1 - p) / (n + 2) }, 0))
+  Math.sqrt(cells.reduce((sum, cell) => { const p = adjusted(cell); return sum + p * (1 - p) / (cell[1] + 1) }, 0))
 
 describe('created capability ordinary-use trend', () => {
   it('splits dispatch times into fixed (start, end] windows around adoption and marks the open window partial', () => {
@@ -124,7 +126,8 @@ describe('created capability ordinary-use trend', () => {
     f.set('trigger', { dispatchedAt: adoptedAt - 1 })
     const result = f.trend({ minimumSamples: 1, now: adoptedAt + 2 * H + 1 })!
     expect(result.windows).toEqual([-4, -3, -2, -1, 0, 1, 2].map(index => ({ index,
-      startExclusive: adoptedAt + index * H, endInclusive: adoptedAt + (index + 1) * H, complete: index < 2 })))
+      startExclusive: adoptedAt + index * H, endInclusive: index < 2 ? adoptedAt + (index + 1) * H : adoptedAt + 2 * H + 1,
+      complete: index < 2 })))
     expect(result.population).toEqual({ scanned: 8, counted: 5,
       excluded: { nonForeground: 0, trigger: 1, retracted: 0, unverified: 0, outsideWindow: 2 } })
     const cells = result.strata[0]!.cells
@@ -136,6 +139,31 @@ describe('created capability ordinary-use trend', () => {
     expect(f.trend({ now: adoptedAt + 2_000 * H, maxPostWindows: 52, windowMs: 90 * 24 * H })!.windows
       .filter(item => item.index >= 0)).toHaveLength(1)
     expect(f.trend({ now: adoptedAt })!.windows.filter(item => item.index >= 0)).toEqual([])
+  })
+
+  it('stops after windows at the signed expiry and flags a non-active adoption record', () => {
+    const f = fixture()
+    const expiresAt = adoptedAt + 2 * H + H / 2
+    const expired = { ...record, status: 'closed', receipt: { ...receipt, expiresAt } } as unknown as CreationCapabilityRecord
+    f.set('in-window', { dispatchedAt: adoptedAt + 2 * H + 1 })
+    f.set('at-expiry', { dispatchedAt: expiresAt })
+    f.set('after-expiry', { dispatchedAt: expiresAt + 1 })
+    f.set('late', { dispatchedAt: adoptedAt + 3 * H })
+    const result = f.trend({ record: expired, minimumSamples: 1, now: adoptedAt + 10 * H,
+      otherAdoptedAt: [expiresAt, expiresAt + 1, adoptedAt + 3 * H] })!
+    expect(result.withinSignedUseWindow).toBe(false)
+    expect(result.adoptionStatus).toBe('closed')
+    expect(result.windows.filter(item => item.index >= 0)).toEqual([
+      { index: 0, startExclusive: adoptedAt, endInclusive: adoptedAt + H, complete: true },
+      { index: 1, startExclusive: adoptedAt + H, endInclusive: adoptedAt + 2 * H, complete: true },
+      { index: 2, startExclusive: adoptedAt + 2 * H, endInclusive: expiresAt, complete: false }])
+    // Dispatches in (expiresAt, adoptedAt + 3H] fall inside the unclipped last window but are not post-adoption use.
+    expect(result.population).toEqual({ scanned: 4, counted: 2,
+      excluded: { nonForeground: 0, trigger: 0, retracted: 0, unverified: 0, outsideWindow: 2 } })
+    expect(at(result.strata[0]!.cells, 2).control.samples).toBe(2)
+    expect(result.concurrentAdoptions).toEqual({ status: 'flagged', count: 1 })
+    expect(result.flags).toEqual(['concurrent-adoptions', 'partial-window', 'adoption-not-active'])
+    expect(f.trend({ minimumSamples: 1, now: adoptedAt + 10 * H })!.flags).not.toContain('adoption-not-active')
   })
 
   it('marks sparse cells and the estimate insufficient while keeping exact counts', () => {
@@ -155,7 +183,7 @@ describe('created capability ordinary-use trend', () => {
     expect(f.trend({ minimumSamples: 4 })!.strata[0]!.differenceInDifferences.status).toBe('estimated')
   })
 
-  it('estimates pooled difference-in-differences with an Agresti-Caffo interval, never causal', () => {
+  it('estimates pooled difference-in-differences with a Price-Bonett interval, never causal', () => {
     const f = fixture()
     f.cell('t-pre', -1, 'treated', 5, 2)
     f.cell('t-post', 0, 'treated', 5, 4, { exposed: true })
@@ -172,10 +200,14 @@ describe('created capability ordinary-use trend', () => {
     if (did.status !== 'estimated') throw new Error('expected an estimate')
     // (4/5 - 2/5) - (3/5 - 3/5)
     expect(did.estimate).toBeCloseTo(0.4, 12)
+    // (4.5/6 - 2.5/6) - (3.5/6 - 3.5/6): the interval is centered on the adjusted contrast, not the raw one.
+    const center = (adjusted([4, 5]) - adjusted([2, 5])) - (adjusted([3, 5]) - adjusted([3, 5]))
+    expect(did.adjustedEstimate).toBeCloseTo(center, 12)
+    expect(center).toBeCloseTo(1 / 3, 12)
     const se = standardError([2, 5], [4, 5], [3, 5], [3, 5])
     expect(did.standardError).toBeCloseTo(se, 12)
-    expect(did.interval95.low).toBeCloseTo(0.4 - 1.96 * se, 12)
-    expect(did.interval95.high).toBeCloseTo(0.4 + 1.96 * se, 12)
+    expect(did.interval95.low).toBeCloseTo(center - 1.96 * se, 12)
+    expect(did.interval95.high).toBeCloseTo(center + 1.96 * se, 12)
     // Unexposed tasks of a treated session stay treated; a control session never used it.
     f.cell('t-post-plain', 0, 'treated', 5, 0)
     const diluted = f.trend()!.strata[0]!
