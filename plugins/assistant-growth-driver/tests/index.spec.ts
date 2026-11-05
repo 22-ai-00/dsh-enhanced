@@ -28,6 +28,7 @@ import { SourceGrowthRunUnavailableError, sourceGrowthRunDigest, validateSourceG
 import { OwnerVerifiedWorkflowSourceError, type GoalRecord, type GoalScope, type VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
 import plugin, { apply, AssistantGrowthDriverService, name, normalizeConfig, version } from '../src/index.ts'
 import type { OwnerRouteReceipt } from '../src/deposit.ts'
+import { SOURCE_REVISION_PROMPT, SOURCE_SECURE_CODING_GUIDANCE } from '../src/growth-agent.ts'
 import type { GrowthSourceGap, GrowthSourcePlanePort } from '../src/source-port.ts'
 
 const contractState = vi.hoisted(() => ({ expired: false }))
@@ -1855,6 +1856,17 @@ describe('opt-in plugin source proposals', () => {
       expect(transcript).toContain('additionalProperties'); expect(transcript).toContain('Promise<never>')
       expect(transcript).toContain('source-build-check-failed')
       expect(result.adapter.toolDescriptions[0]?.plugin_source_job_status).toContain('wait_ms')
+    })
+
+    it('teaches null-prototype maps for untrusted keys and README/code consistency to creation and revision authors', async () => {
+      const result = await creationWake({ turns: [] })
+      const transcript = result.adapter.messageTranscripts.join('')
+      expect(transcript).toContain(JSON.stringify(SOURCE_SECURE_CODING_GUIDANCE).slice(1, -1))
+      expect(SOURCE_REVISION_PROMPT).toContain(SOURCE_SECURE_CODING_GUIDANCE)
+      for (const text of [transcript, SOURCE_REVISION_PROMPT]) {
+        expect(text).toContain('Object.create(null)'); expect(text).toContain('__proto__')
+        expect(text).toContain('Object.fromEntries'); expect(text).toContain('README claims consistent with the code')
+      }
     })
 
     it('surfaces bounded diagnostics and queues exactly one repair with a distinct idempotency key', async () => {

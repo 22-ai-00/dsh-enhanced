@@ -136,6 +136,17 @@ export const SOURCE_TYPECHECK_GUIDANCE = [
   '- Parameters use the same specs with an optional required: true per property. Keep imports to the template packages; never add dependencies.',
 ].join('\n')
 
+/**
+ * Generic secure-coding and documentation rules for authored tool code. Tool inputs are untrusted:
+ * plain `{}` accumulators drop or reinterpret keys such as `__proto__`, and README claims that
+ * contradict the code leave reviewers unable to tell which behavior is intended.
+ */
+export const SOURCE_SECURE_CODING_GUIDANCE = [
+  'Secure coding for tool code:',
+  '- A map or record keyed by untrusted input must use a Map or a null-prototype object (Object.create(null)), and build the returned object with Object.fromEntries or Object.defineProperty, so keys such as __proto__, constructor or prototype round-trip as ordinary own properties. Never assign untrusted keys into a plain {} literal.',
+  '- Keep README claims consistent with the code and tests: document exactly the behavior the code implements (accepted inputs, rejected inputs, edge cases), and never claim a check the code does not perform.',
+].join('\n')
+
 /** Upper bound on one plugin_source_job_status wait; also capped by the wake deadline. */
 export const MAX_SOURCE_JOB_WAIT_MS = 240_000
 /** At most one Host-certified build repair per gap/name per wake (two create attempts in total). */
@@ -173,6 +184,7 @@ export const SOURCE_CREATION_PROMPT = [
   'plugin_source_create accepts only bounded full source, README and test files. The Host owns the package manifest, Cordis patch, license, catalog, dependencies, grants, repository, build and adoption. Never supply or try to change them, generated files, parent paths or new directories.',
   'Creation only queues a content-free durable Host job. An accepted queue acknowledgement is not verification or deployment. The separate Control Plane enforces the owner creation grant, quota and independent checks. A rejected attempt should not be retried with a different name to evade its boundary.',
   SOURCE_TYPECHECK_GUIDANCE,
+  SOURCE_SECURE_CODING_GUIDANCE,
   SOURCE_REPAIR_GUIDANCE,
 ].join('\n')
 
@@ -183,6 +195,7 @@ export const SOURCE_REVISION_PROMPT = [
   'Choose only a listed parent_plan_id and plugin_name. Inspect its fixed committed source with plugin_source_revision_inspect before replacing a file.',
   'plugin_source_revise queues only bounded README.md and direct src/tests code files for independent review. The Host owns the parent, repository, grant, model, budget, build and expiry.',
   'The new task and current feedback must justify the edit. A queued revision is neither verified nor adopted and does not grant execution or replacement.',
+  SOURCE_SECURE_CODING_GUIDANCE,
 ].join('\n')
 
 export interface GrowthSourceWakeCounters {
