@@ -362,7 +362,8 @@ export class DeliveryCoordinator {
       return
     }
     // WP19 stage 2b: the inline body of a converted notice is only a summary; never send it without its attachment.
-    if (record.intent.attachment !== undefined && adapter.capabilities.textAttachments !== true) {
+    // Reconcile never resends, so an unknown send is still reconciled; a reconciled not-sent row lands here next.
+    if (mode === 'send' && record.intent.attachment !== undefined && adapter.capabilities.textAttachments !== true) {
       this.finish(record, fencingToken, { outcome: 'not-sent', failureCode: 'attachment-unsupported', retryable: false })
       return
     }

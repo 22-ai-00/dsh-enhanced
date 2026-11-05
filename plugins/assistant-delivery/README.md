@@ -538,5 +538,5 @@ schema 31 新增只追加的 `delivery_attention_audit`，按 outbox id 去重�
 
 - 超出所属目的字数或字素上限的通知改为一条消息：短正文（最多 60 词、360 非空白字素的整单元前缀，URL 与 Markdown 链接整体保留或整体移出，绝不截断）加固定说明 `（全文较长，共 N 词，已转为附件 notice-<sha256 前 12 位>.txt|md）`，format 为 `plain`；原文完整放入 `intent.attachment`（`kind: 'text'`、`mediaType` 随原 format、`sha256` 绑定原文）。转换为纯函数 `convertOverCapAttention`，同一原文逐字节相同；同一幂等键重放返回原记录。链接文字与 URL 计入上限。
 - 通道适配器须声明 `capabilities.textAttachments: true`；未声明时超长通知在入队时以 `policy-denied` 拒绝，不入队、不拆条；无适配器时为 `runtime-unavailable`。Coordinator 另有兜底：带附件的 Outbox 遇到不支持附件的适配器直接 `dead`（`attachment-unsupported`），绝不只发摘要。仓库内现有适配器（飞书、web）均未声明该能力。
-- 拒绝拆条：同一 binding、同一通道、同一来源在 `attentionSplitWindowMs`（5 分钟）内已审计的内联正文，与本条合计超过本条目的上限时，以 `policy-denied`（`attention split evasion`）拒绝；单条不受影响，补救方式是发一条（超长则自动转附件）。判断依赖尽力而为的审计行，审计写入失败的通知不计入。
+- 拒绝拆条：同一 binding、同一通道、同一来源在 `attentionSplitWindowMs`（5 分钟）内已审计的内联正文，与本条合计超过本条目的上限时，以 `policy-denied`（`attention split evasion`）拒绝；单条不受影响，补救方式是发一条（超长则自动转附件）。窗口按审计行持久化的 `recorded_at` 与 Delivery Store 时钟比较，重启不会重置。判断依赖尽力而为的审计行，审计写入失败的通知不计入（可由 `processLocalWriteFailures` 发现）。关闭开关后，新通知按第 1 阶段原样入队，已转换的幂等键重放仍返回原记录。
 - Store 校验附件：仅 `plain` intent，键集固定，名称 `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`，正文非空且不超过 `maxTextBytes`，`sha256` 与正文一致。附件存于 `intent_json`，不改 schema（仍为 31）。审计按附件原文计词，因此转换后的行仍记 `would-attach`。

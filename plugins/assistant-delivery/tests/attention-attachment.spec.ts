@@ -154,6 +154,23 @@ describe('over-cap conversion (service, opt-in)', () => {
     expect(f.background('short', 'Build passed.', 'other-source').intent).not.toHaveProperty('attachment')
   })
 
+  test('a converted key stays idempotent after the flag is turned off', async () => {
+    const f = await fixture({ attach: true, textAttachments: true })
+    const text = words(attentionWordCaps.result + 5)
+    const queued = f.background('long', text)
+    ;(f.service as unknown as { config: { attentionAttachOverCap?: boolean } }).config.attentionAttachOverCap = false
+    expect(f.background('long', text).id).toBe(queued.id)
+    const routed = (() => {
+      ;(f.service as unknown as { config: { attentionAttachOverCap?: boolean } }).config.attentionAttachOverCap = true
+      return f.service.enqueueBackgroundRoute({ sourceId: 'route-source', authorityId: authority.id, idempotencyKey: 'route-long', text })
+    })()
+    ;(f.service as unknown as { config: { attentionAttachOverCap?: boolean } }).config.attentionAttachOverCap = false
+    expect(f.service.enqueueBackgroundRoute({ sourceId: 'route-source', authorityId: authority.id, idempotencyKey: 'route-long', text }).id)
+      .toBe(routed.id)
+    // New keys with the flag off are untouched.
+    expect(f.background('long-2', text).intent).not.toHaveProperty('attachment')
+  })
+
   test('markdown over-cap text is attached as text/markdown', async () => {
     const f = await fixture({ attach: true, textAttachments: true })
     const text = `# Report\n\n${words(attentionWordCaps.result + 5)}`

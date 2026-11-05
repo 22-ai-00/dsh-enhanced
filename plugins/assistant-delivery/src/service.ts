@@ -5151,28 +5151,34 @@ export class AssistantDeliveryService extends Service {
    * over-cap notice to a short body plus one text attachment (never split),
    * and reject an inline notice that, with recent inline notices from the same
    * source, binding and lane, exceeds the cap of its purpose. Deterministic for
-   * one (input, audited history, clock). Off: the input is returned unchanged.
+   * one (input, audited history, clock). Off: the input is returned unchanged,
+   * except that a replay of an already converted key keeps its stored form.
    */
   private prepareAttentionDelivery(input: Readonly<{
     lane: AttentionLane; envelope?: unknown; lanePurpose?: Readonly<{ purpose: AttentionPurpose; workItemId?: string }>
-    sourceId: string; binding: Readonly<ConversationBinding>; idempotencyKey: string; text: string; format: 'markdown' | 'plain'
+    sourceId: string; binding: Readonly<ConversationBinding> | (() => Readonly<ConversationBinding> | undefined)
+    idempotencyKey: string; text: string; format: 'markdown' | 'plain'
   }>): { text: string; format: 'markdown' | 'plain'; attachment?: NonNullable<OutboundIntent['attachment']> } {
     const unchanged = { text: input.text, format: input.format }
-    if (this.config.attentionAttachOverCap !== true) return unchanged
     let winner: OutboxRecord | undefined
     try { winner = this.deliveryStore.getOutboxByIdempotencyKey(input.idempotencyKey) } catch { winner = undefined }
-    // A replay keeps the stored form; the store still rejects a changed intent under the same key.
+    // A replay keeps the stored form even after the flag is turned off, so a converted row
+    // stays idempotent; the store still rejects a changed intent under the same key.
     if (winner !== undefined) {
       const stored = winner.intent.attachment
       return stored !== undefined && stored.text === input.text && stored.mediaType === (input.format === 'markdown' ? 'text/markdown' : 'text/plain')
         ? { text: winner.intent.text, format: 'plain', attachment: stored } : unchanged
     }
+    if (this.config.attentionAttachOverCap !== true) return unchanged
+    const binding = typeof input.binding === 'function' ? input.binding() : input.binding
+    // No active binding: the store rejects the enqueue with its usual error.
+    if (binding === undefined) return unchanged
     const purpose = assessAttention({ text: input.text, ...(input.envelope === undefined ? {} : { envelope: input.envelope }),
       ...(input.lanePurpose === undefined ? {} : { lanePurpose: input.lanePurpose }),
-      ledger: this.deliveryStore.attentionAudit.ledger(input.binding.id) }).purpose
+      ledger: this.deliveryStore.attentionAudit.ledger(binding.id) }).purpose
     let delivered: { text: string; format: 'markdown' | 'plain'; attachment?: NonNullable<OutboundIntent['attachment']> } = unchanged
     if (attentionOverCap(input.text, purpose)) {
-      const adapter = this.registry.get(input.binding.conversation.channel, input.binding.conversation.account)
+      const adapter = this.registry.get(binding.conversation.channel, binding.conversation.account)
       if (adapter === undefined) {
         throw new AssistantDeliveryError('runtime-unavailable', 'over-cap notice needs its channel adapter to attach the full text')
       }
@@ -5183,7 +5189,7 @@ export class AssistantDeliveryService extends Service {
         digest: text => createHash('sha256').update(text).digest('hex') })
     }
     const split = assessAttentionSplit({ text: delivered.text, purpose, priorInlineTexts: this.deliveryStore.attentionAudit.recentInlineTexts({
-      bindingId: input.binding.id, lane: input.lane, sourceId: input.sourceId, since: Date.now() - attentionSplitWindowMs }) })
+      bindingId: binding.id, lane: input.lane, sourceId: input.sourceId, windowMs: attentionSplitWindowMs }) })
     if (split.split) {
       throw new AssistantDeliveryError('policy-denied',
         `attention split evasion: ${split.priorNotices} recent notice(s) from this source plus this one exceed the ${purpose} cap; send one notice`)
@@ -6292,10 +6298,9 @@ export class AssistantDeliveryService extends Service {
     const authority = this.ownerRoutes.get(resolved.authorityId)!
     const decision = authorizeOwnerRoute(this.policy, authority, sourceId, idempotencyKey)
     if (decision.effect !== 'allow') throw policyDenied(decision)
-    const routeBinding = this.deliveryStore.getActiveBinding(authority.conversation)
-    const delivered = routeBinding === undefined ? { text: input.text, format: input.format ?? 'plain' }
-      : this.prepareAttentionDelivery({ lane: 'background-route', envelope: input.attention, sourceId, binding: routeBinding,
-        idempotencyKey, text: input.text, format: input.format ?? 'plain' })
+    const delivered = this.prepareAttentionDelivery({ lane: 'background-route', envelope: input.attention, sourceId,
+      binding: () => this.deliveryStore.getActiveBinding(authority.conversation),
+      idempotencyKey, text: input.text, format: input.format ?? 'plain' })
     try {
       return this.auditAttention('background-route', sourceId, { envelope: input.attention }, this.deliveryStore.enqueueOwnerRoute({
         authority,
