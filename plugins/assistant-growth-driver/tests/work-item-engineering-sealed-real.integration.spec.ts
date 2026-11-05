@@ -24,7 +24,8 @@ const live = process.platform === 'linux' && process.env['DSH_SEALED_REAL_LIVE']
   && !!process.env['DSH_WORK_ITEM_ENGINEERING_RESOURCES']
 const PROVIDER = process.env['DSH_WEB_REAL_PROVIDER'] ?? 'llmgw-default'
 const MODEL = process.env['DSH_WEB_REAL_MODEL'] ?? 'deepseek-v4.1-flash'
-const MAX_REAL_CALLS = 7
+// Author 7 model calls + creation verifier 2: attempt 3 used all 5 author calls and was cut off.
+const MAX_REAL_CALLS = 9
 const SEALED_ID = 'sealed-docker-normalize'
 const sha = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
 const dshPackage = () => process.env['DSH_SEALED_REAL_DSH_PACKAGE']
@@ -103,7 +104,7 @@ describe.skipIf(!live)('sealed Docker-era tool re-adopts under a new plan with a
       sealedSeed: async input => sealDockerHistory(input as typeof input & { capabilities: CreationCapabilityConfig }, seal),
       // 8192 is the fixture's ordinary author cap: attempt 1 at 4096 ran out while writing the source file.
       // Attempt 2 was cut off by the 120 s Growth limit while the author wrote source; 300 s is the config maximum.
-      realGrowthRoute: { provider: PROVIDER, model: MODEL, maxOutputTokens: 8192, maxDurationMs: 300_000 } })
+      realGrowthRoute: { provider: PROVIDER, model: MODEL, maxOutputTokens: 8192, maxDurationMs: 300_000, maxModelCalls: 7, maxToolCalls: 6 } })
     const { route, config, secret } = await realRoute(f.workspace)
     if (!secret) throw new Error('real route credential reference is unavailable in the process environment')
     const installed = createRequire(dshPackage())
