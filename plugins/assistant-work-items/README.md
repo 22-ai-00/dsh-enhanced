@@ -496,7 +496,18 @@ const { record, replayed } = ctx.assistantWorkItems.recordIntake({
 - 决策：`ignore` 为 `filtered`（`strength-ignore`）；既未寄址、也不是白名单跟进的群消息为 `filtered`（`unaddressed-group-disabled`），未订阅事件为 `filtered`（`unsubscribed-event-disabled`），除非 owner 在 `intakeLedger.sources.<source>` 中开启对应项；同一来源中内容摘要已有强度不低于本条的 `stored` 行的新事件为 `duplicate`（`duplicate-content`），更强的重发（如补 @ 后再发）不会被较弱的原行压掉；其余为 `stored`，只记元数据。
 - 重放：同一 `(source, sourceEventId)` 返回原记录与 `replayed: true`，不写第二行，重启后同样成立；元数据不同时额外返回 `metadataChanged: true`，原决策不变。
 - 数据：输入字段封闭，`text`/`body` 等任何额外字段会被拒绝；行只含来源事件 ID、布尔信号、原因码、强度和摘要，SQL 触发器禁止改写或删除。`contentDigest` 是无盐 SHA-256，短文本可被猜测还原，按敏感数据对待。
-- 要求 `enabled: true` 且 `intakeLedger.enabled: true`，否则返回 `disabled`。当前没有入站插件调用该接口。
+- 要求 `enabled: true` 且 `intakeLedger.enabled: true`，否则返回 `disabled`。入站接线见下节。
+
+### 入站接线（WP20 第 2 阶段）
+
+启用 `intakeLedger` 时，WorkItems 向 `assistant-delivery` 注册唯一的 intake observer（冻结对象 `{ protocol: 1, observe }`，以当前 WorkItems 所有权栅栏校验，dispose 时注销）。入站 adapter（目前为 `lark-channel`）对每条已规范化、未过期、非问题/审批答复的消息调用 `context.observe(...)`，只传事件 ID、时间、发送者、会话类型、是否寄址、可选回复目标与正文 SHA-256；Delivery 据此计算：
+
+- `source` = `<channel>-channel`，`sourceEventId` = `<account>/<eventId>`；
+- `senderAllowlisted` = 发送者当前为已配对且未撤销的主人主体；
+- `threadFollowUp` 只在白名单发送者于同一会话回复已投递（accepted/delivered/read）的 WorkItems 报告时为真；非白名单发送者的回复永远不是跟进；
+- `groupMessage` 来自会话类型。
+
+observe 只写 intake 账本：不写 Delivery inbox/outbox，不改变 adapter 原有的接收与门控，不准入、不派发、不通知；observer 异常或校验失败只记 debug 日志并丢弃。默认关闭时不注册 observer，不写任何行。无 schema 迁移。
 
 ## 配置
 
@@ -507,7 +518,7 @@ const { record, replayed } = ctx.assistantWorkItems.recordIntake({
 | `ownerContinuation` | 关闭 | 单独启用、独立 automation ID、显式工具范围与有限执行预算；见主人续办旧任务 |
 | `ownerReplyContinuation` | `false` | 将已授权主人的真实报告回复持久转交续办；要求已启用 ownerContinuation 和独立外部 Policy 授权 |
 | `ownerReportFeedback` | `false` | 认证报告结果反馈；要求 ownerContinuation，独立 `feedback-work-items` 授权，不要求回复续办，不取得新执行额度 |
-| `intakeLedger.enabled` | `false` | 显式启用确定性 intake 账本；仅 Host 调用 `recordIntake`，observe 可用，无外部副作用 |
+| `intakeLedger.enabled` | `false` | 显式启用确定性 intake 账本；仅 Host 调用 `recordIntake`，并经 Delivery 接收入站 adapter 的元数据/摘要观察，observe 可用，无外部副作用 |
 | `intakeLedger.sources.<id>.unaddressedGroupMessages` | `false` | 该来源未寄址群消息以元数据进入账本（否则 filtered）；最多 32 个来源 |
 | `intakeLedger.sources.<id>.unsubscribedEvents` | `false` | 该来源未订阅事件以元数据进入账本（否则 filtered） |
 | `ownerRecall.enabled` | `false` | 显式启用当前主人前台任务查询；要求 enabled active、完整 scope、worker automation 与独立 `inspect-work-items` 授权 |

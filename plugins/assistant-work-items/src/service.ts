@@ -227,6 +227,7 @@ export class AssistantWorkItemsService extends Service {
   private workItemsFollowDegraded: WorkItemFollowDegradedReason | null = null
   private workItemsComponents: Components | undefined
   private workItemsClosed = false
+  private workItemsIntakeObserver: Readonly<{ protocol: 1; observe: (signal: WorkItemIntakeInput) => void }> | undefined
   private readonly workItemsDiagnosisKey = Object.freeze({})
   private readonly workItemsContinuationKey = Object.freeze({})
   private readonly workItemsReplyKey = Object.freeze({})
@@ -292,6 +293,36 @@ export class AssistantWorkItemsService extends Service {
     // The disabled default must not create a directory, lock a file or open a
     // database, so persistence starts only for an explicitly enabled intake.
     if (this.workItemsConfig.enabled) this.workItemsOpen()
+    if (this.workItemsConfig.enabled && this.workItemsConfig.intakeLedger) {
+      // WP20 slice 2: inbound adapters reach the ledger only through Delivery's
+      // metadata-only observation. Observe and active modes behave the same;
+      // the observer writes the intake ledger and nothing else.
+      ctx.inject(['assistantDelivery'], intakeCtx => {
+        if (this.workItemsClosed) return
+        const peer = intakeCtx.get('assistantDelivery' as never) as PeerDeliveryService | undefined
+        if (typeof peer?.registerInboundIntakeObserver !== 'function') {
+          intakeCtx.logger.warn('assistant-work-items: Delivery inbound intake observation is unavailable; the intake ledger stays Host-only')
+          return
+        }
+        const observer = Object.freeze({ protocol: 1 as const, observe: (signal: WorkItemIntakeInput): void => {
+          if (this.workItemsClosed || this.workItemsIntakeObserver !== observer) return
+          try { this.recordIntake(signal) }
+          catch (error) { intakeCtx.logger.debug(`assistant-work-items: intake observation not recorded: ${describe(error)}`) }
+        } })
+        this.workItemsIntakeObserver = observer
+        let unregister: () => void
+        try { unregister = peer.registerInboundIntakeObserver(observer) }
+        catch (error) {
+          this.workItemsIntakeObserver = undefined
+          intakeCtx.logger.warn(`assistant-work-items: inbound intake observer unavailable: ${describe(error)}`)
+          return
+        }
+        intakeCtx.effect(() => () => {
+          unregister()
+          if (this.workItemsIntakeObserver === observer) this.workItemsIntakeObserver = undefined
+        }, 'assistant-work-items.intake-observer')
+      })
+    }
     if (isActive(this.workItemsConfig)) {
       ctx.inject(['assistantAutomations'], wakeCtx => {
         if (this.workItemsClosed) return
@@ -496,6 +527,9 @@ export class AssistantWorkItemsService extends Service {
   get diagnosisEnabled(): boolean { return this.workItemsConfig.diagnosis !== undefined }
 
   get ownerContinuationEnabled(): boolean { return this.workItemsConfig.ownerContinuation !== undefined }
+  /** Delivery's ownership fence for the single inbound intake observer. */
+  ownsInboundIntakeObserver = (observer: unknown): boolean =>
+    !this.workItemsClosed && this.workItemsIntakeObserver !== undefined && observer === this.workItemsIntakeObserver
   ownsWorkItemReplyRegistration = (registration: WorkItemReplyConsumerRegistration): boolean =>
     !this.workItemsClosed && replyConsumers.get(this.workItemsReplyKey)?.owns(registration) === true
   issueOwnerWorkItemFeedbackTarget = (input: OwnerWorkItemFeedbackSelector): unknown | undefined =>

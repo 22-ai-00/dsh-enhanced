@@ -188,6 +188,8 @@ export interface PeerOwnerForegroundToolInput {
 export interface PeerDeliveryService {
   workItemReplyProtocolVersion?(): 1
   registerWorkItemReplyConsumer?(registration: WorkItemReplyConsumerRegistration): () => void
+  /** WP20: metadata-only inbound observations; the signal shape is the WorkItems intake input. */
+  registerInboundIntakeObserver?(observer: Readonly<{ protocol: 1; observe: (signal: import('./intake.js').WorkItemIntakeInput) => void }>): () => void
   enqueueWorkItemReport?(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string;
     text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string,string>>; itemId: string; reportRevision: number }): { readonly id: string } | Promise<{readonly id:string}>
   listPendingWorkItemReplies?(input: WorkItemReplyListInput): Readonly<{items:readonly WorkItemReplySource[];hasMore:boolean;nextAfterSequence:number|null}>

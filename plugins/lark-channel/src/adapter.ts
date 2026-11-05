@@ -62,6 +62,7 @@ import {
   LarkTransportError,
   type LarkChannelHealth,
   type LarkInboundConfig,
+  type LarkMessage,
   type LarkSendOptions,
   type LarkTransport,
 } from './types.js'
@@ -620,10 +621,17 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
           message,
           this.now(),
         )
-        if (normalized.outcome !== 'accept') return
+        if (normalized.outcome !== 'accept') {
+          // An unaddressed group message is still a metadata-only intake
+          // observation; stale and empty events are not.
+          if (normalized.reason === 'bot-mention-required') this.observeIntake(context, message, false)
+          return
+        }
         if (await this.tryAnswerUserQuestion(normalized.envelope, message.messageId)) return
         if (this.tryAnswerToolApproval(normalized.envelope, message.messageId)) return
         if (unmentionedQuestionReply) return
+        this.observeIntake(context, message, message.chatType === 'p2p' || message.mentionedBot
+          || normalized.envelope.kind === 'command', normalized.envelope.text)
         const accepted = await context.accept(normalized.envelope)
         if (this.statusReactions && !accepted.duplicate && accepted.status === 'queued') {
           // The durable Inbox acknowledgement is the critical path. A slow or
@@ -691,6 +699,29 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         } finally { if (timer !== undefined) clearTimeout(timer) }
       }
     }
+  }
+
+  /**
+   * WP20 intake: hand Delivery a metadata-only observation (ids, booleans and
+   * a sha256 digest, never the body). Optional on older Delivery cores and
+   * never allowed to affect acceptance.
+   */
+  private observeIntake(context: DeliveryAdapterContext, message: LarkMessage, addressed: boolean, text?: string): void {
+    if (typeof context.observe !== 'function') return
+    try {
+      const normalized = text ?? message.content.replaceAll('\r\n', '\n').trim()
+      context.observe({
+        eventId: message.messageId,
+        occurredAt: message.createTime,
+        principal: { channel: 'lark', account: this.config.account, tenant: this.config.tenant, user: message.senderId },
+        conversation: { kind: message.chatType === 'p2p' ? 'dm' : 'group', chat: message.chatId },
+        addressed,
+        // The normalized SDK message carries no sender type; bot senders are not distinguished yet.
+        senderIsBot: false,
+        ...(message.replyToMessageId === undefined ? {} : { replyToProviderMessageId: message.replyToMessageId }),
+        ...(normalized.length === 0 ? {} : { contentDigest: createHash('sha256').update(normalized, 'utf8').digest('hex') }),
+      })
+    } catch { /* observation is best-effort */ }
   }
 
   health(): LarkChannelHealth {

@@ -992,8 +992,54 @@ export interface DeliveryProgressJournal {
   recover(channel: string, account: string, credentialFingerprint: string, limit: number): Promise<readonly DeliveryProgressRecord[]>
 }
 
+/**
+ * Metadata-only report of one inbound message an adapter saw, whether it was
+ * then accepted or dropped by the adapter's own gate (WP20 intake). It never
+ * carries a body; `contentDigest` is the adapter's sha256 of normalized text.
+ */
+export interface DeliveryInboundObservation {
+  readonly eventId: string
+  readonly occurredAt: number
+  readonly principal: Readonly<ExternalPrincipalKey>
+  readonly conversation: Readonly<{ kind: ConversationKind; chat: string }>
+  /** Direct message, explicit bot mention, or an accepted command. */
+  readonly addressed: boolean
+  readonly senderIsBot: boolean
+  readonly replyToProviderMessageId?: string
+  readonly contentDigest?: string
+}
+
+/** Normalized intake signal handed to the registered observer; mirrors the WorkItems intake input. */
+export interface DeliveryInboundIntakeSignal {
+  readonly source: string
+  readonly sourceEventId: string
+  readonly kind: 'message'
+  readonly senderAllowlisted: boolean
+  readonly addressed: boolean
+  readonly threadFollowUp: boolean
+  readonly senderIsBot: boolean
+  readonly groupMessage: boolean
+  readonly contentDigest?: string
+  readonly occurredAt: number
+}
+
+/**
+ * The single inbound intake observer. Ownership is fenced by object identity
+ * (WorkItems `ownsInboundIntakeObserver`), so it is an object, not a bare
+ * function that a service proxy could re-wrap.
+ */
+export interface DeliveryInboundIntakeObserver {
+  readonly protocol: 1
+  readonly observe: (signal: Readonly<DeliveryInboundIntakeSignal>) => void
+}
+
 export interface DeliveryAdapterContext {
   accept(envelope: InboundEnvelope): Promise<{ duplicate: boolean; inboxId: string; status: InboxStatus }>
+  /**
+   * Optional, synchronous and best-effort: never throws, never changes
+   * acceptance, and is a no-op unless an intake observer is registered.
+   */
+  observe?(observation: Readonly<DeliveryInboundObservation>): void
   receipt(receipt: DeliveryReceipt): Promise<void>
   progressJournal?: DeliveryProgressJournal
 }

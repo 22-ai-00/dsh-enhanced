@@ -144,6 +144,53 @@ function modelPickerElement(card: Record<string, unknown>, name: string): Record
 }
 
 describe('Lark delivery adapter', () => {
+  test('hands Delivery a metadata-only intake observation before acceptance', async () => {
+    const f = fixture()
+    const observe = vi.fn()
+    await f.adapter.start({ ...f.context, observe })
+    await f.transport.emitMessage({ ...baseMessage, content: ' hello\r\nworld ', replyToMessageId: 'om_report' })
+    await f.transport.emitMessage({ ...baseMessage, messageId: 'om_group', chatId: 'oc_group', chatType: 'group',
+      content: 'chatter' })
+    await f.transport.emitMessage({ ...baseMessage, messageId: 'om_mention', chatId: 'oc_group', chatType: 'group',
+      mentionedBot: true, content: 'please look' })
+    await f.transport.emitMessage({ ...baseMessage, messageId: 'om_empty', content: '   ' })
+    const stale = fixture({ now: () => 1_000_000 })
+    const staleObserve = vi.fn()
+    await stale.adapter.start({ ...stale.context, observe: staleObserve })
+    await stale.transport.emitMessage({ ...baseMessage, messageId: 'om_stale' })
+    expect(staleObserve).not.toHaveBeenCalled()
+
+    expect(observe.mock.calls.map(call => call[0])).toEqual([
+      {
+        eventId: 'om_in', occurredAt: 1_000, addressed: true, senderIsBot: false,
+        principal: { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', user: 'ou_owner' },
+        conversation: { kind: 'dm', chat: 'oc_dm' }, replyToProviderMessageId: 'om_report',
+        contentDigest: sha256('hello\nworld'),
+      },
+      expect.objectContaining({ eventId: 'om_group', addressed: false, conversation: { kind: 'group', chat: 'oc_group' },
+        contentDigest: sha256('chatter') }),
+      expect.objectContaining({ eventId: 'om_mention', addressed: true, conversation: { kind: 'group', chat: 'oc_group' } }),
+    ])
+    // Metadata only: no body, display name or resource ever reaches the observation.
+    expect(JSON.stringify(observe.mock.calls)).not.toMatch(/hello|chatter|please look/u)
+    expect(f.accept.mock.calls.map(call => call[0].eventId)).toEqual(['om_in', 'om_mention'])
+  })
+
+  test('acceptance is unaffected when the intake observer is absent or throws', async () => {
+    const absent = fixture()
+    await absent.adapter.start(absent.context)
+    await absent.transport.emitMessage(baseMessage)
+    expect(absent.accept).toHaveBeenCalledOnce()
+
+    const throwing = fixture()
+    const observe = vi.fn(() => { throw new Error('observer failure') })
+    await throwing.adapter.start({ ...throwing.context, observe })
+    await throwing.transport.emitMessage(baseMessage)
+    expect(observe).toHaveBeenCalledOnce()
+    expect(throwing.accept).toHaveBeenCalledOnce()
+    expect(throwing.adapter.health()).not.toMatchObject({ lastErrorCode: expect.anything() })
+  })
+
   test('exposes an image-only, message-bound inbound resource reader', async () => {
     const f = fixture()
     expect(f.adapter.capabilities.inboundImages).toBe(true)

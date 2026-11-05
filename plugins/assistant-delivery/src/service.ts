@@ -144,6 +144,9 @@ import type {
   DeliveryToolApprovalRequest,
   DeliveryUserQuestionOutcome,
   DeliveryUserQuestionRequest,
+  DeliveryInboundIntakeObserver,
+  DeliveryInboundIntakeSignal,
+  DeliveryInboundObservation,
   ExternalPrincipalKey,
   InboundEnvelope,
   InboxRecord,
@@ -1158,6 +1161,7 @@ export class AssistantDeliveryService extends Service {
   private readonly acceptanceProducerGeneration = `assistant-delivery-acceptance:${randomUUID()}`
   private acceptanceSink: Readonly<{ token: symbol; registration: TaskAcceptanceRegistration }> | undefined
   private workItemReplyConsumer: WorkItemReplyConsumerRegistration | undefined
+  private inboundIntakeObserver: DeliveryInboundIntakeObserver | undefined
   private foregroundObserver: Readonly<{ token: symbol; generation: string; registration: ForegroundTaskObservationRegistration; handles: Map<string, { task: ForegroundTaskIdentity; handle: unknown }> }> | undefined
   /** Once a live verifier required acceptance, loss of that verifier must not silently bypass it. */
   private acceptanceRequired = false
@@ -1286,6 +1290,7 @@ export class AssistantDeliveryService extends Service {
         const result = await this.acceptInbound(envelope)
         return { duplicate: result.duplicate, inboxId: result.inboxId, status: result.status }
       },
+      observe: observation => this.observeInbound(observation),
       receipt: async receipt => {
         if (!this.active) return
         this.deliveryStore.recordReceipt(receipt)
@@ -4995,6 +5000,81 @@ export class AssistantDeliveryService extends Service {
     this.notifyWorkItemReplyPending()
     void this.drainWorkItemFeedback().catch(() => { /* durable feedback retries */ })
     return () => { if (live) { live = false; if (this.workItemReplyConsumer === registration) this.workItemReplyConsumer = undefined } }
+  }
+
+  /**
+   * WP20 intake: one observer, owned by the current WorkItems service, receives
+   * a metadata-only signal per adapter observation. Delivery adds only the
+   * read-only allowlist and tracked-report-thread facts; it writes nothing.
+   */
+  registerInboundIntakeObserver(observer: DeliveryInboundIntakeObserver): () => void {
+    this.assertActive()
+    if (!observer || observer.protocol !== 1 || typeof observer.observe !== 'function') throw new AssistantDeliveryError('runtime-conflict', 'invalid inbound intake observer')
+    if (this.inboundIntakeObserver !== undefined) throw new AssistantDeliveryError('runtime-conflict', 'inbound intake observer already registered')
+    this.inboundIntakeObserver = observer
+    if (this.currentInboundIntakeObserver() !== observer) {
+      this.inboundIntakeObserver = undefined
+      throw new AssistantDeliveryError('runtime-conflict', 'inbound intake observer lacks current WorkItems ownership')
+    }
+    let live = true
+    return () => { if (live) { live = false; if (this.inboundIntakeObserver === observer) this.inboundIntakeObserver = undefined } }
+  }
+
+  private currentInboundIntakeObserver(): DeliveryInboundIntakeObserver | undefined {
+    const observer = this.inboundIntakeObserver
+    if (!this.active || observer === undefined) return undefined
+    const peer = this.context.get('assistantWorkItems' as never, false) as unknown as {
+      ownsInboundIntakeObserver?(value: DeliveryInboundIntakeObserver): boolean
+    } | undefined
+    return peer?.ownsInboundIntakeObserver?.(observer) === true ? observer : undefined
+  }
+
+  /** Best-effort and side-effect free: any invalid input or observer failure is dropped. */
+  private observeInbound(observation: Readonly<DeliveryInboundObservation>): void {
+    try {
+      const observer = this.currentInboundIntakeObserver()
+      if (observer === undefined) return
+      const signal = this.inboundIntakeSignal(observation)
+      if (signal !== undefined) observer.observe(signal)
+    } catch (error) {
+      this.context.logger.debug(`assistant-delivery: inbound intake observation dropped: ${String(error)}`)
+    }
+  }
+
+  private inboundIntakeSignal(input: Readonly<DeliveryInboundObservation>): Readonly<DeliveryInboundIntakeSignal> | undefined {
+    const principal = input?.principal, conversation = input?.conversation
+    const text = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 256
+    if (!principal || !conversation || !text(input.eventId) || !text(principal.channel) || !text(principal.account)
+      || !text(principal.tenant) || !text(principal.user) || !text(conversation.chat)
+      || (conversation.kind !== 'dm' && conversation.kind !== 'group')
+      || typeof input.addressed !== 'boolean' || typeof input.senderIsBot !== 'boolean'
+      || !Number.isSafeInteger(input.occurredAt) || input.occurredAt < 0
+      || (input.replyToProviderMessageId !== undefined && !text(input.replyToProviderMessageId))
+      || (input.contentDigest !== undefined && !/^[0-9a-f]{64}$/u.test(input.contentDigest))
+      || !/^[a-z][a-z0-9-]{0,54}$/u.test(principal.channel)) return undefined
+    const key: ExternalPrincipalKey = { channel: principal.channel, account: principal.account, tenant: principal.tenant, user: principal.user }
+    const senderAllowlisted = this.deliveryStore.isAuthorizedPrincipal(key)
+    // A follow-up counts only from an allowlisted sender replying, in the same
+    // conversation, to a delivered WorkItems report.
+    let threadFollowUp = false
+    if (senderAllowlisted && input.replyToProviderMessageId !== undefined) {
+      const report = this.deliveryStore.workItemReplies.replyReport(key.channel, key.account, input.replyToProviderMessageId)
+      const target = report?.outbox.intent.target.conversation
+      threadFollowUp = report !== undefined && ['accepted', 'delivered', 'read'].includes(report.outbox.status)
+        && target?.kind === conversation.kind && target.chat === conversation.chat
+    }
+    return Object.freeze({
+      source: `${key.channel}-channel`,
+      sourceEventId: `${key.account}/${input.eventId}`,
+      kind: 'message' as const,
+      senderAllowlisted,
+      addressed: input.addressed,
+      threadFollowUp,
+      senderIsBot: input.senderIsBot,
+      groupMessage: conversation.kind === 'group',
+      ...(input.contentDigest === undefined ? {} : { contentDigest: input.contentDigest }),
+      occurredAt: input.occurredAt,
+    })
   }
 
   private notifyWorkItemReplyPending(): void {
