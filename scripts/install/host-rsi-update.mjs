@@ -110,7 +110,10 @@ async function installedMigrationModules(homePath, profile) {
     [store, 'readCurrentRuntimeEpochDeployment']]) {
     if (typeof module[name] !== 'function') fail(`installed cohort lacks migration API: ${name}`)
   }
-  return { store, sqlite, maintenance, trust, authorityRuntime, authorityResources, hostUpdate }
+  // Loaded only for a chain with a sealed handoff, so a cohort that predates the module keeps working on
+  // every other chain; its absence there fails closed in assertSealedAdoptionAuditPresent.
+  const sealedAdoption = () => sealedAdoptionModule(cp)
+  return { store, sqlite, maintenance, trust, authorityRuntime, authorityResources, hostUpdate, sealedAdoption }
 }
 
 async function watchedPlans(installation, homePath, physicalHome, modules) {
@@ -202,15 +205,52 @@ function assertUnitProperties(value) {
     || Object.values(value).some(item => typeof item !== 'string')) fail('candidate unit properties are incomplete')
 }
 
-/** A sealed creation-adoption handoff is only re-checked by the owner program-update verifiers. A Host
- * overlay appended after it would end that check, so a dropped sealed audit could refund inherited usage
- * unnoticed. Refuse until this path carries the sealed proof digest forward itself. */
-export function assertNoSealedAdoptionChain(records) {
+/** Signed proof digest of the latest owner program-update overlay that carries a sealed creation-adoption
+ * handoff anywhere in the chain, or undefined. A Host overlay appended later ends the owner verifiers'
+ * re-check, so every Host update readiness path must then compare the live journal with this digest. */
+export function sealedAdoptionProofDigestRequirement(records) {
   if (!Array.isArray(records)) fail('owner overlay chain is invalid')
-  if (records.some(record => record?.kind === 'rsi-owner-program-update-overlay'
-    && record.update?.sealedAdoptionHandoff !== undefined)) {
-    fail('owner Home with a sealed creation-adoption handoff requires a sealed-aware Host update')
+  const sealed = records.findLast(record => record?.kind === 'rsi-owner-program-update-overlay'
+    && record.update?.sealedAdoptionHandoff !== undefined)
+  if (!sealed) return undefined
+  const digest = sealed.update.sealedAdoptionHandoff?.proofDigest
+  if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest)) fail('signed sealed creation-adoption proof digest is invalid')
+  return digest
+}
+
+/** A wholly dropped sealed audit leaves a journal that counts no inherited usage, so it must be refused
+ * here: the stored digest must exist and equal the signed one. A reader-less control plane cannot tell. */
+export async function assertSealedAdoptionAuditPresent({ readDigest, physicalPath, expected }) {
+  if (typeof expected !== 'string' || !/^[a-f0-9]{64}$/u.test(expected)) fail('signed sealed creation-adoption proof digest is invalid')
+  if (typeof readDigest !== 'function') fail('installed control plane cannot verify the sealed creation-adoption audit (readSealedAdoptionHandoffDigest is unavailable)')
+  let stored
+  try { stored = await readDigest({ physicalPath }) } catch (error) {
+    fail(`sealed creation-adoption audit is unreadable: ${error instanceof Error ? error.message : String(error)}`)
   }
+  if (stored === null || stored === undefined) fail('live creation-adoption journal lost the signed sealed audit')
+  if (stored !== expected) fail('live creation-adoption journal replaced the signed sealed audit')
+}
+
+/** The sealed handoff module of a materialized control-plane package, or undefined for a cohort that
+ * predates it. Import errors propagate, which fails closed. */
+export async function sealedAdoptionModule(controlPlaneRoot) {
+  const path = join(controlPlaneRoot, 'lib', 'creation-capability-sealed-handoff.js')
+  return await optional(path) ? import(pathToFileURL(path).href) : undefined
+}
+
+/** The sealed-chain step every ownerConfiguration readiness path runs (original, stage, before and
+ * after the swap). Exported so the wiring itself, not only its helpers, is tested on a real layout. */
+export async function verifySealedAdoptionChain({ records, stateRoot, homePath, physicalHome, modules, sourceOnly = false }) {
+  const expected = sealedAdoptionProofDigestRequirement(records)
+  if (expected === undefined) return
+  // The scanner's observed source fence does not cover the journal; keep refusing there.
+  if (sourceOnly) fail('scanner source inspection cannot verify a sealed creation-adoption handoff')
+  const control = await modules.sealedAdoption?.()
+  // The reader requires a canonical path, so after the swap this reads by path rather than the pinned
+  // /proc/self/fd descriptor the rest of verify uses; a rename race only makes it fail closed.
+  const journal = join(stateRoot, 'control-plane', 'creation-adoptions.sqlite')
+  await assertSealedAdoptionAuditPresent({ readDigest: control?.readSealedAdoptionHandoffDigest,
+    physicalPath: physical(homePath, await realpath(physicalHome), journal), expected })
 }
 
 async function ownerConfiguration(installation, homePath, physicalHome, modules, inspection = {}) {
@@ -228,7 +268,8 @@ async function ownerConfiguration(installation, homePath, physicalHome, modules,
   const overlay = modules.hostUpdate.readRsiHostUpdateOverlayChain({ source: overlaySource,
     resources: installation.resources, dshHome: homePath, profile: installation.targetProfile, bootstrapSource })
   const effective = overlay.latest ?? receipt
-  assertNoSealedAdoptionChain(overlay.records)
+  await verifySealedAdoptionChain({ records: overlay.records, stateRoot: installation.resources.stateRoot,
+    homePath, physicalHome, modules, sourceOnly: inspection.sourceOnly === true })
   const ownerUpdate = overlay.records.findLast(record => ['rsi-owner-repair-overlay', 'rsi-owner-program-update-overlay'].includes(record.kind))
   const ownerAfter = ownerUpdate?.kind === 'rsi-owner-repair-overlay' ? ownerUpdate.repair.after : ownerUpdate?.update.after
   // The creation receipt a program-update overlay digests comes from the
