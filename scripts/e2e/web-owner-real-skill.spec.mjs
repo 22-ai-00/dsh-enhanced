@@ -174,6 +174,10 @@ test(comparisonMode ? 'real browser compares a skill candidate with paired isola
       expect(JSON.parse(query(skillsPath, 'SELECT candidate_json FROM skill_candidates')[0].candidate_json).state).toBe('pending')
       expect(createHash('sha256').update(await readFile(join(workspace, 'summarize.mjs'))).digest('hex')).toBe(sourceHash)
     }
+    // A later owner input may count as processed while the skill_save turn is
+    // still streaming its reply. Stopping then interrupts that turn and
+    // dead-letters its input, so wait until no owner input is in flight.
+    await waitFor({ predicate: () => query(deliveryPath, "SELECT id FROM inbox_messages WHERE status NOT IN ('processed', 'dead_letter')").length === 0, page: activePage, frames, approved, workspace, description: 'owner input quiescence before Host restart' })
     await stop()
     await rm(join(workspace, 'summarize.mjs'))
     expect(existsSync(join(workspace, 'summarize.mjs'))).toBe(false)
