@@ -78,6 +78,7 @@ interface MountHarnessOptions {
   toolApprovalTtlMs?: number
   toolApprovalPreparationTimeoutMs?: number
   leaseMs?: number
+  tickIntervalMs?: number
 }
 
 class DeliveryReviewerAdapter extends LlmAdapter {
@@ -204,6 +205,7 @@ async function mountHarness(root: string, allow = true, options: MountHarnessOpt
   await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'),
     schedulerEnabled: false,
     ...(options.leaseMs === undefined ? {} : { leaseMs: options.leaseMs }),
+    ...(options.tickIntervalMs === undefined ? {} : { tickIntervalMs: options.tickIntervalMs }),
     ...(options.toolApprovalTtlMs === undefined ? {} : { toolApprovalTtlMs: options.toolApprovalTtlMs }),
     ...(options.toolApprovalPreparationTimeoutMs === undefined ? {} : { toolApprovalPreparationTimeoutMs: options.toolApprovalPreparationTimeoutMs }) })
   if (options.reviewer !== undefined && options.reviewerMountOrder === 'after-delivery') {
@@ -2796,6 +2798,39 @@ describe('assistant delivery Cordis service', () => {
       status: 'delivered',
       occurredAt: Date.now(),
     })).resolves.toBeUndefined()
+  })
+
+  test('disarms the scheduler before awaiting the native Web owner drain on dispose', async () => {
+    const { ctx, service } = await harness(true, { tickIntervalMs: 100 })
+    const rejections: unknown[] = []
+    const onRejection = (reason: unknown) => { rejections.push(reason) }
+    process.on('unhandledRejection', onRejection)
+    try {
+      let releaseDrain!: () => void
+      const drain = new Promise<void>(resolve => { releaseDrain = resolve })
+      const ownerDispose = vi.fn(() => drain)
+      // Stand in for a native Web turn whose owner drain is still pending.
+      ;(service as unknown as { nativeWebOwner: { dispose(): Promise<void> } }).nativeWebOwner = { dispose: ownerDispose }
+      const tick = vi.spyOn(service, 'tick')
+      service.start()
+      await service.whenIdle()
+      tick.mockClear()
+
+      const disposing = ctx.fiber.restart()
+      await vi.waitFor(() => expect(ownerDispose).toHaveBeenCalledOnce())
+      // Several scheduler intervals elapse while the disposer awaits the drain.
+      await new Promise(resolve => setTimeout(resolve, 350))
+      expect(tick).not.toHaveBeenCalled()
+      // A tick that still slips through after dispose is a no-op, not a rejection.
+      await expect(service.tick()).resolves.toBeUndefined()
+
+      releaseDrain()
+      await disposing
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(rejections).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onRejection)
+    }
   })
 
   test('fences a late session creation before it can write to a closed delivery store', async () => {

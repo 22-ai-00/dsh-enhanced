@@ -1470,6 +1470,9 @@ export class AssistantDeliveryService extends Service {
     if (config.schedulerEnabled) this.start()
     ctx.effect(() => async () => {
       this.active = false
+      // Disarm the scheduler before the first await: the Web owner drain can
+      // take seconds, and an armed tick must not run against a disposed service.
+      this.clearSchedulerTimers()
       // The isolated Web owner may already be unwinding concurrently. Await
       // its memoized drain while the delivery Store is still available so a
       // successfully disposed Agent can record its quiescent lease release.
@@ -6954,7 +6957,8 @@ export class AssistantDeliveryService extends Service {
   }
 
   async tick(): Promise<void> {
-    this.assertActive()
+    // Timer-driven entry: a tick that fires after dispose is a no-op, not an error.
+    if (!this.active) return
     await this.drainInboundAdmissions()
     this.drainRestartContinuations()
     const restartFence = this.deliveryStore.getRestartFence()
@@ -7266,7 +7270,7 @@ export class AssistantDeliveryService extends Service {
     return promise
   }
 
-  private async stopInternal(): Promise<void> {
+  private clearSchedulerTimers(): void {
     if (this.timer !== undefined) clearInterval(this.timer)
     if (this.modelSelectionRetryTimer !== undefined) clearTimeout(this.modelSelectionRetryTimer)
     if (this.workflowTraceRetryTimer !== undefined) clearTimeout(this.workflowTraceRetryTimer)
@@ -7275,6 +7279,10 @@ export class AssistantDeliveryService extends Service {
     this.modelSelectionRetryTimer = undefined
     this.workflowTraceRetryTimer = undefined
     this.preferenceProjectionRetryTimer = undefined
+  }
+
+  private async stopInternal(): Promise<void> {
+    this.clearSchedulerTimers()
     this.cancelModelSelectionWaiters()
     this.inboundAdmissionRecoveryController.abort(new Error('assistant-delivery is stopping'))
     this.restartController.abort(new Error('assistant-delivery is stopping'))
