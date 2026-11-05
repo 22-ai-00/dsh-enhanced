@@ -150,7 +150,9 @@ async function reviewMaintenance(installer) {
     if (['MODULE_NOT_FOUND', 'ERR_PACKAGE_PATH_NOT_EXPORTED', 'ENOENT'].includes(error?.code)) return {}
     throw error
   }
-  if (!inside(installer.root, path)) fail('reviewed installer dependency escaped')
+  // Node also searches NODE_PATH and global folders. A copy found there is not shipped by this
+  // reviewed installer, so it is never loaded; it counts as absent, and review history still refuses.
+  if (!inside(installer.root, path)) return {}
   return { verifier: await import(pathToFileURL(path).href) }
 }
 async function ledger(api, home, physicalHome, profile, repository, records) {
