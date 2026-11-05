@@ -5,6 +5,7 @@ import { createRequire } from 'node:module'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { developmentCorpus, developmentDataset } from './corpus.js'
+import { familiesDevelopmentCorpus, familiesDevelopmentDataset } from './families-corpus.js'
 import { memoryDevelopmentCorpus, memoryDevelopmentDataset, memoryDevelopmentCorpusV2, memoryDevelopmentDatasetV2 } from './memory-corpus.js'
 import { benchmarkReport } from './report.js'
 import { benchmarkPlanDigest, benchmarkSchedule, BenchmarkError } from './schema.js'
@@ -15,9 +16,11 @@ import type { BenchmarkResult } from './types.js'
 
 const runtimePackages = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-agent-loop',
   '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-session-projection', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tools'] as const
+/** Kept local (not imported from native.ts) so corpus/doctor work without the native runtime packages. */
+const nativeSuiteNames: readonly string[] = ['research-v1', 'families-v1', 'memory-v1', 'memory-v2']
 const help = `dsh-benchmark: public development benchmarks through the native DSH AgentLoop
-  corpus [--suite research-v1|memory-v1|memory-v2|strategy-v1|strategy-v2]
-  doctor [--suite research-v1|memory-v1|memory-v2|strategy-v1|strategy-v2] [--config FILE]
+  corpus [--suite research-v1|families-v1|memory-v1|memory-v2|strategy-v1|strategy-v2]
+  doctor [--suite research-v1|families-v1|memory-v1|memory-v2|strategy-v1|strategy-v2] [--config FILE]
   plan --config FILE [--output FILE]
   run --config FILE --adapter ABSOLUTE_MODULE --database FILE [--output FILE]
   report --database FILE --plan ID [--config FILE] [--output FILE]
@@ -144,8 +147,10 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
       const [, , , , , corpusV2] = await strategyModules()
       result = { dataset: corpusV2.strategyDatasetForSuite(suite), tasks: corpusV2.strategyCorpusForSuite(suite).map(task => ({ id: task.id, domain: task.domain, objective: task.objective })) }
     } else {
-      if (!['research-v1', 'memory-v1', 'memory-v2'].includes(suite)) throw new BenchmarkError('invalid native suite')
-      result = { dataset: suite === 'memory-v2' ? memoryDevelopmentDatasetV2 : suite === 'memory-v1' ? memoryDevelopmentDataset : developmentDataset, tasks: (suite === 'memory-v2' ? memoryDevelopmentCorpusV2 : suite === 'memory-v1' ? memoryDevelopmentCorpus : developmentCorpus).map(task => ({ id: task.id, domain: task.domain, objective: task.objective })) }
+      if (!nativeSuiteNames.includes(suite)) throw new BenchmarkError('invalid native suite')
+      const dataset = suite === 'memory-v2' ? memoryDevelopmentDatasetV2 : suite === 'memory-v1' ? memoryDevelopmentDataset : suite === 'families-v1' ? familiesDevelopmentDataset : developmentDataset
+      const corpus = suite === 'memory-v2' ? memoryDevelopmentCorpusV2 : suite === 'memory-v1' ? memoryDevelopmentCorpus : suite === 'families-v1' ? familiesDevelopmentCorpus : developmentCorpus
+      result = { dataset, tasks: corpus.map(task => ({ id: task.id, domain: task.domain, objective: task.objective })) }
     }
   } else if (command === 'doctor') {
     const args = options(argv.slice(1), ['--suite', '--config'], [])
@@ -186,8 +191,8 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
         exitCode = (result as { ready: boolean }).ready ? 0 : 2
       }
     } else {
-      if (!['research-v1', 'memory-v1', 'memory-v2'].includes(suite)) throw new BenchmarkError('invalid native suite')
-      const names = [...runtimePackages, ...(suite !== 'research-v1' ? ['@dsh-enhanced/personal-memory', '@dsh-enhanced/assistant-policy'] : [])]
+      if (!nativeSuiteNames.includes(suite)) throw new BenchmarkError('invalid native suite')
+      const names = [...runtimePackages, ...(suite === 'memory-v1' || suite === 'memory-v2' ? ['@dsh-enhanced/personal-memory', '@dsh-enhanced/assistant-policy'] : [])]
       const packages = names.map(name => {
         try { require.resolve(name); return { name, available: true } } catch { return { name, available: false } }
       })

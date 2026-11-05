@@ -39,7 +39,7 @@ Host adapter 负责创建干净且等价的执行环境、载入确切变体、�
 
 `./benchmark/native` 复用 `AgentRegistry.create()` 与生产 `AgentLoop`，每个 cell 使用新 Context、Session 与临时目录。直接接原生入口是因为 Automations 的 `reconcileSystem` 会修改自动化定义并注入 Growth 上下文，不适合此阶段冻结单次输入与空能力环境；日常 Automation 路径没有被复制或替换。首批是 8 道公开合成研究/注入题，答案由纯函数严格判断，模型不接收验收对象。引用必须覆盖用于计算、候选排除和规则判断的来源，规则已纳入输入摘要；只有正确答案与引用、完整成功终态、完整计量和资源释放同时满足，才记录 completed。
 
-默认 `research-v1` 只比较 persona，四个能力开关均为 false。新增 `memory-v2` 将真实 PersonalMemory/Policy 接入同一原生 AgentLoop，见下节；SDK 的完整规划/复核/成长消融仍待接入与验证。配置示例（摘要需替换为可信适配器文件的实际 SHA-256）：
+默认 `research-v1` 只比较 persona，四个能力开关均为 false。新增 `memory-v2` 将真实 PersonalMemory/Policy 接入同一原生 AgentLoop，见下节；`families-v1` 与复核消融见“任务族、消融与分布统计”；规划/成长消融仍待接入与验证。配置示例（摘要需替换为可信适配器文件的实际 SHA-256）：
 
 ```json
 {
@@ -64,6 +64,16 @@ Host adapter 负责创建干净且等价的执行环境、载入确切变体、�
 本例为 8 个 cell，计划最多输入 96,000 / 输出 8,000 tokens，金额未知。配置不包含密钥；可信模块自行通过宿主凭据服务解析。每次请求固定 provider/model/temperature/maxTokens/system 与空工具，执行前预留最大输入输出预算，完成后对真实 usage 再核验。提供商可能忽略 seed 或采样参数，不能宣称确定性复现；固定模型别名也不能阻止远端悄悄替换权重。
 
 `inputTokenUpperBound` 属于可信 Host 合约，不是本 SDK 内置的模型 tokenizer。适配器应提供与其序列化一致的可靠上界，关闭提供商内部重试，并遵循 DSH 的计量：非缓存输入、cache read、cache write 为互斥分项，三者之和为总输入；reasoning 是 output 的子集。总输入、输出、各分项、totalTokens 的一致性与整数溢出均被核验。若只使用字节估算，必须显式选择 `inputLimitMode: "estimate"`；该模式不声称输入上界，不接受金额预算。返回量超过预留值时记录 unknown 并停止，不能回溯撤销该次远端消费。运行时版本摘要包含协议与安装包版本，不是完整可执行文件供应链证明。
+
+## 任务族、消融与分布统计
+
+`families-v1`（数据集 `dsh-task-families` v1，development）补齐 8 个任务族：代码、研究、跨日、主动性、注入、撤销、目标变化与重复操作，共 9 道公开合成题。判定沿用 research-v1 的纯函数 `{answer, citations}` 精确匹配（judgeSchema `families-development-response-v1`），无模型、工具、时钟或网络依赖。它们是任务族的提示层代理（例如跨日只是书面交接），不是真实多日会话，也不是 holdout。`research-v1` 的数据集摘要、题目、提示与判定保持字节不变。
+
+原生变体新增可选 `review: boolean`，开启时在同一 persona section 末尾追加冻结的复核指引（`nativeReviewGuidance`），`features.review` 随之为 true。可加 `role: "ablation"` 变体：必须恰有一个 candidate，persona 与 candidate 相同，只关闭一个能力开关（复核或在 memory 套件中关闭 review 保留 memory）。只要任一变体开启 review，全计划的 prompt 摘要改为 `{persona, complete, review: 指引摘要}`，使 ablation 与 candidate 的 versions 相同；未使用 review 的旧配置摘要不变。报告中 ablation 的参照臂是 candidate。复核指引只是提示，不是独立校验器。
+
+报告在 schemaVersion 1 上增加 `distributionVersion: 1` 字段（加法变更，无存储或计划 schema 迁移）：每个指标增加 min/p10/p90/max；每个变体增加 `byDomain` 与 `taskSuccess`（每题跨重复成功率分布，含 mixed 即重复间不一致的题数，有未知或缺失重复的题不计入）；每组比较增加 `byDomain` 胜负与 `metricDeltas`（变体减参照的配对差，仅统计双方均有测量的配对，不论判定是否已知）。
+
+`./benchmark` 导出留出隔离检查：`assertHoldoutIsolation(plan, additional?)` 要求 holdout split，且与 research-v1、families-v1、memory-v1、memory-v2 公开清单在数据集 id/摘要、题目 id、输入摘要和验收摘要上都不重叠；strategy 套件依赖较重，需由调用方经 `additional` 传入。`runIndependentHoldout()` 启动前会执行该检查。`assertCandidateGenerationInput(plan)` 拒绝任何非 development 计划，供生成候选的代码调用。这是清单级检查，只能发现已发布题目或判定的复用，不能发现改写后的泄漏。
 
 
 ## Memory 的真实检索对照

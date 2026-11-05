@@ -10,6 +10,7 @@ import {
   parseSignedHoldoutFinish, parseSignedHoldoutInput, parseSignedHoldoutManifest, parseSignedHoldoutVerdict,
   type SignedHoldoutManifest,
 } from './holdout-protocol.js'
+import { assertHoldoutIsolation } from './holdout-isolation.js'
 import { runBenchmark, type BenchmarkExecutionRequest, type BenchmarkExecutor } from './runner.js'
 import {
   BenchmarkError, benchmarkAssert, benchmarkHash, benchmarkObject, benchmarkPlanDigest, benchmarkSchedule,
@@ -249,6 +250,8 @@ export async function runIndependentHoldout(options: IndependentHoldoutOptions):
   'invalid independent holdout options')
   const plan = parseBenchmarkPlan(options.plan)
   benchmarkAssert(plan.dataset.split === 'holdout', 'independent holdout requires a holdout dataset')
+  // Reject reuse of any published development task, judge or dataset before opening the authority.
+  assertHoldoutIsolation(plan)
   const expectedDataset = validateDatasetPin(options.expectedDataset, plan)
   benchmarkAssert(typeof options.pinnedPublicKey === 'string', 'invalid holdout public key')
   holdoutAuthorityKeyId(options.pinnedPublicKey)
