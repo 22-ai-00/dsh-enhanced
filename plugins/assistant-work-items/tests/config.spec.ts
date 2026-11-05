@@ -17,15 +17,25 @@ test('owner recall rejects disabled, observe, missing scope/worker and unknown c
 })
 
 test('linked alias reads are an explicit, bounded owner allowlist', () => {
-  const recall = (ownerRecall: unknown) => normalizeConfig({ ...active, ownerRecall } as never, 1_000).ownerRecall
+  const OWNER = 'lark/cli_app/tenant/ou_owner'
+  const owned = { ...active, scope: { ...active.scope, principalId: OWNER } }
+  const recall = (ownerRecall: unknown) => normalizeConfig({ ...owned, ownerRecall } as never, 1_000).ownerRecall
+  const A = 'telegram/bot/personal/alice', B = 'lark/cli_app/tenant/ou_b%40x%2Fy'
   expect(recall({ enabled: true, linkedAliases: [] })).toEqual({ enabled: true })
-  expect(recall({ enabled: true, linkedAliases: ['telegram/bot/a', 'lark/app/b'] })).toEqual({ enabled: true, linkedAliases: ['telegram/bot/a', 'lark/app/b'] })
-  expect(Object.isFrozen(recall({ enabled: true, linkedAliases: ['telegram/bot/a'] })!.linkedAliases)).toBe(true)
-  expect(ConfigSchema({ ...active, ownerRecall: { enabled: true, linkedAliases: ['telegram/bot/a'] } }).ownerRecall).toMatchObject({ linkedAliases: ['telegram/bot/a'] })
-  for (const linkedAliases of ['telegram/bot/a', [''], [' padded'], ['a\nb'], [1], ['owner'], ['x', 'x'], Array.from({ length: 9 }, (_, index) => `alias-${index}`), ['x'.repeat(257)]]) {
+  expect(recall({ enabled: true, linkedAliases: [A, B] })).toEqual({ enabled: true, linkedAliases: [A, B] })
+  expect(Object.isFrozen(recall({ enabled: true, linkedAliases: [A] })!.linkedAliases)).toBe(true)
+  expect(ConfigSchema({ ...owned, ownerRecall: { enabled: true, linkedAliases: [A] } }).ownerRecall).toMatchObject({ linkedAliases: [A] })
+  // Bypass/misconfiguration shapes: never a canonical Delivery principal id, so rejected rather than silently unmatched.
+  const variants = [`${A} `, ` ${A}`, `${A}\u200b`, `${A}\n`, A.normalize('NFD').replace('alice', 'ali\u0301ce'), A.replace('alice', 'al\u00edce'), A.replace('alice', '\uff41lice'),
+    'telegram/bot/a', 'telegram/bot/personal/alice/extra', 'telegram//personal/alice', 'lark/cli_app/tenant/ou_b%2fy', 'lark/cli_app/tenant/ou_b@x', 'lark/cli_app/tenant/张三']
+  for (const variant of variants) expect(() => recall({ enabled: true, linkedAliases: [variant] })).toThrow('canonical Delivery principal ids')
+  for (const linkedAliases of [A, [''], [1], [OWNER], [A, A], Array.from({ length: 9 }, (_, index) => `telegram/bot/personal/alias-${index}`), [`telegram/bot/personal/${'x'.repeat(240)}`]]) {
     expect(() => recall({ enabled: true, linkedAliases })).toThrow()
   }
-  expect(() => normalizeConfig({ ...active, ownerRecall: { enabled: false, linkedAliases: ['telegram/bot/a'] } }, 1_000)).toThrow('requires ownerRecall.enabled')
+  expect(() => recall({ enabled: true, linkedAliases: [OWNER] })).toThrow('must not contain the owner principal')
+  // Case variants are distinct Delivery principals (keys are case-sensitive) and stay exact-match only.
+  expect(recall({ enabled: true, linkedAliases: [OWNER.replace('ou_owner', 'OU_OWNER')] })!.linkedAliases).toEqual(['lark/cli_app/tenant/OU_OWNER'])
+  expect(() => normalizeConfig({ ...owned, ownerRecall: { enabled: false, linkedAliases: [A] } }, 1_000)).toThrow('requires ownerRecall.enabled')
 })
 
 test('owner recall alone does not change the immutable diagnosis configuration digest', async () => {

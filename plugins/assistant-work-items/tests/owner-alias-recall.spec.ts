@@ -24,7 +24,7 @@ async function setup(linkedAliases: string[] | null = [ALIAS]) {
   let route = { ...receipt({ authorityId: ROUTE, principalId: PRINCIPAL, workspace: WORKSPACE, agentPreset: PRESET }), generation: 3, bindingVersion: 4 }
   let linked = true, v2Leak = false, ownerProofForAlias = false, extra: Record<string, unknown> = {}
   let open: { callId: string; name: string; argumentsJson: string } | undefined
-  let allowed = true, onEvaluate = () => {}, counter = 0, admits = 0, aliasLookups = 0
+  let allowed = true, onEvaluate = () => {}, counter = 0, admits = 0, aliasLookups = 0, aliasProofs = 0
   const evaluated: string[] = []
   const aliasReceipt = (): PeerOwnerAliasReceipt => Object.freeze({ protocol: 'assistant-delivery/owner-alias-receipt/v1' as const,
     authorityId: ROUTE, authorityHash: route.authorityHash, workspace: WORKSPACE, agentPreset: PRESET,
@@ -42,7 +42,7 @@ async function setup(linkedAliases: string[] | null = [ALIAS]) {
     inspectOwnerForegroundToolCall: input => (input.agent === owner || ownerProofForAlias && input.agent === alias) && matches(input)
       ? { protocol: 'assistant-delivery/foreground-tool-call/v1', call: { ...open } } : undefined,
     inspectOwnerAliasRoute: agent => { aliasLookups++; return agent === alias && linked ? aliasReceipt() : undefined },
-    inspectOwnerAliasForegroundToolCall: input => input.agent === alias && linked && matches(input)
+    inspectOwnerAliasForegroundToolCall: input => ++aliasProofs > 0 && input.agent === alias && linked && matches(input)
       ? (ownerProofForAlias ? { protocol: 'assistant-delivery/foreground-tool-call/v1' } : { protocol: 'assistant-delivery/owner-alias-foreground-tool-call/v1', receipt: aliasReceipt(), call: { ...open } }) : undefined,
     readOwnerForegroundToolInput: () => { throw new Error('alias must not reach continuation input') },
   }
@@ -60,7 +60,7 @@ async function setup(linkedAliases: string[] | null = [ALIAS]) {
     open = { callId, name, argumentsJson: JSON.stringify(args) }
     return { agent, name, callId, arguments: args, signal: new AbortController().signal } as OwnerWorkItemExecution
   }
-  return { f, item, owner, alias, recall, continuation, execution, evaluated, admits: () => admits, aliasLookups: () => aliasLookups,
+  return { f, item, owner, alias, recall, continuation, execution, evaluated, admits: () => admits, aliasLookups: () => aliasLookups, aliasProofs: () => aliasProofs,
     route: () => route, setRoute: (next: typeof route) => { route = next }, unlink: () => { linked = false },
     leakV2: () => { v2Leak = true }, ownerProofForAlias: () => { ownerProofForAlias = true },
     setExtra: (next: Record<string, unknown>) => { extra = next }, deny: () => { allowed = false },
@@ -163,6 +163,18 @@ test('a Delivery link alone is not consent: alias reads need the owner allowlist
   expect(other.evaluated).toEqual([])
   const args = { item_id: other.item.id }
   expect(() => other.recall.recall(other.execution(other.alias, 'work_item_recall', args), args)).toThrow('linked alias is not allowlisted by the owner')
+  expect(other.recall.preauthorize(other.execution(other.alias, 'work_item_list', {}))).toBe(false)
+  expect(other.aliasProofs()).toBe(0)
+
+  // Allowlist entries are exact Delivery principal ids: a case variant of the real alias id is a
+  // different principal and grants nothing (whitespace/Unicode variants are rejected by config).
+  for (const variant of [ALIAS.toUpperCase(), 'Telegram/bot/personal/alias', 'telegram/bot/personal/Alias']) {
+    const near = await setup([variant])
+    expect(() => near.recall.list(near.execution(near.alias, 'work_item_list', {}), {})).toThrow('linked alias is not allowlisted by the owner')
+    expect(near.evaluated).toEqual([])
+    expect(near.aliasProofs()).toBe(0)
+  }
+  await expect(setup([`${ALIAS} `])).rejects.toThrow('canonical Delivery principal ids')
 
   // Allowlisting never widens continuation.
   const listed = await setup()

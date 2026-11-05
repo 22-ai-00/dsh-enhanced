@@ -624,6 +624,17 @@ function normalizeIntakeLedger(raw: unknown): NormalizedIntakeLedger | undefined
 export const MAX_LINKED_ALIASES = 8
 
 /**
+ * Canonical Delivery external principal id: four `encodeURIComponent`-encoded
+ * components (`channel/account/tenant/user`) of Delivery's key alphabet
+ * `[A-Za-z0-9][A-Za-z0-9._@/-]*`, so only `%40` and `%2F` escapes occur.
+ * Mirrors assistant-delivery `externalPrincipalId`; anything else (Unicode,
+ * NFD/compatibility variants, whitespace, lower-case escapes) can never equal
+ * a Delivery receipt and is rejected rather than silently never matching.
+ */
+const DELIVERY_PRINCIPAL_COMPONENT = String.raw`[A-Za-z0-9](?:[A-Za-z0-9._-]|%40|%2F)*`
+const DELIVERY_PRINCIPAL_ID = new RegExp(`^${DELIVERY_PRINCIPAL_COMPONENT}(?:/${DELIVERY_PRINCIPAL_COMPONENT}){3}$`, 'u')
+
+/**
  * Normalize the owner's explicit linked-alias allowlist.
  *
  * An alias read is a cross-channel identity decision, so it must be named
@@ -638,8 +649,8 @@ function normalizeLinkedAliases(raw: unknown, recallEnabled: boolean, scope: Wor
   if (!Array.isArray(raw) || raw.length > MAX_LINKED_ALIASES) fail('invalid-input', `ownerRecall.linkedAliases must be an array of at most ${MAX_LINKED_ALIASES} principal ids`)
   const seen = new Set<string>()
   for (const entry of raw) {
-    if (typeof entry !== 'string' || entry.length === 0 || entry.length > 256 || entry.trim() !== entry || /[\p{Cc}]/u.test(entry)) {
-      fail('invalid-input', 'ownerRecall.linkedAliases entries must be non-empty principal ids')
+    if (typeof entry !== 'string' || entry.length > 256 || !DELIVERY_PRINCIPAL_ID.test(entry)) {
+      fail('invalid-input', 'ownerRecall.linkedAliases entries must be canonical Delivery principal ids (channel/account/tenant/user)')
     }
     if (entry === scope?.principalId) fail('invalid-input', 'ownerRecall.linkedAliases must not contain the owner principal')
     if (seen.has(entry)) fail('invalid-input', 'ownerRecall.linkedAliases must not contain duplicates')
