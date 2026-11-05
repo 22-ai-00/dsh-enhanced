@@ -530,6 +530,8 @@ ctx.assistantWorkItems.registerIntakeEvaluator({
 - 结果写入 schema 11 的 `work_item_intake_evaluation`（STRICT，触发器禁止改写/删除），每 `(source, sourceEventId, ruleId, policyVersion)` 一行；只存等级、原因码与引文的 UTF-16 偏移 `quoteSpans`，不存正文或引文。重放与重启均不再调用模型，返回原行。
 - 引文非认证正文子串 → `ignore`/`quote-not-in-source`；超时（`timeoutMs`）或抛错按退避重排，连续 `maxConsecutiveFailures` 次后记 `unavailable`；调用中 Policy 版本变化的结果丢弃，按新版本重新排队；Policy 无效时不评估，`lastError` 为 `policy-unavailable`；恢复可读后（即使版本未变）暂存的正文幂等补入队并清除该错误。
 - 仅 observe：`effect` 恒为 `none`，不准入、不派发、不通知。`intakeEvaluations(source, eventId)` 读取记录，`intakeEvaluationHealth()` 报告队列与最近错误。
+- Policy 版本即规则集身份：同一版本的规则与上限必须不变；同版本内改规则不会触发重排，新增规则的正文会一直占位直到版本前进。改规则请同时换版本。
+- 落库失败（如 `SQLITE_BUSY`）的结果在下次 refresh/run 重试，落库后才可驱逐；注销评估器时进行中的一轮仍按快照落库。
 - 暂存：只驱逐当前全部规则都已落库的最旧正文；已在队列中落定但尚未写盘的结果不算，避免丢失。注销评估器或 dispose 时清空暂存正文。
 - 局限：重启后尚未落定的候选需要重新收到正文才能评估；暂存满且无可驱逐项时跳过新候选（计入 `skipped`）；尚无内置 Policy 规则源，规则与上限由 Host supplier 提供。
 - 升级：schema 10 自动升级到 11；更新的 schema 或结构漂移 fail closed。

@@ -309,6 +309,49 @@ describe('inferred intake evaluation', () => {
     expect(f.store.listIntakeEvaluations('lark-channel', 'om_0')).toHaveLength(1)
   })
 
+  test('a failed store write is retried on the next refresh and then frees its slot', async () => {
+    // One call per hour: only message 0 is ever evaluated, everything else stays unsettled.
+    const f = await direct({ maxCallsPerHour: 1 })
+    const s = supplier(() => ({ level: 'digest', quotes: ['message'] }))
+    f.runtime.register(s.registration)
+    s.state.policy = { version: 'bad version', rules: [] }
+    for (let i = 0; i < 256; i++) f.runtime.observe(f.recordText(`om_${i}`, `message ${i}`), `message ${i}`)
+    s.state.policy = { version: 'v1', rules: [{ ruleId: 'triage', ceiling: 'notify' }] }
+    // Fails in the run and again in that run's closing refresh.
+    vi.spyOn(f.store, 'recordIntakeEvaluation')
+      .mockImplementationOnce(() => { throw new Error('SQLITE_BUSY') })
+      .mockImplementationOnce(() => { throw new Error('SQLITE_BUSY') })
+    expect(await f.runtime.run()).toEqual([])
+    expect(f.store.listIntakeEvaluations('lark-channel', 'om_0')).toEqual([])
+    expect(f.runtime.health()).toMatchObject({ decided: 1, lastError: 'evaluation-failed' })
+
+    // Not on disk yet, so not evictable: the new text is skipped.
+    f.runtime.observe(f.recordText('om_256', 'message 256'), 'message 256')
+    expect(f.runtime.health()).toMatchObject({ heldTexts: 256, skipped: 1 })
+    // The next run's refresh retries the write.
+    await f.runtime.run()
+    expect(f.store.listIntakeEvaluations('lark-channel', 'om_0')).toEqual([expect.objectContaining({ status: 'decided', level: 'digest', quoteSpans: [[0, 7]] })])
+    // Now persisted, its slot is released for the next text, without another call.
+    f.runtime.observe(f.recordText('om_257', 'message 257'), 'message 257')
+    expect(f.runtime.health()).toMatchObject({ heldTexts: 256, skipped: 1 })
+    expect(s.calls).toHaveLength(1)
+  })
+
+  test('unregistering during a run still persists that run\'s results', async () => {
+    const f = await direct()
+    let release: (value: unknown) => void = () => {}
+    const s = supplier(() => new Promise(resolve => { release = resolve }))
+    const unregister = f.runtime.register(s.registration)
+    f.runtime.observe(f.record(), TEXT)
+    await vi.waitFor(() => expect(s.calls).toHaveLength(1))
+    // The observe-kicked run is in flight; an explicit run would only return [] (no re-entry).
+    unregister()
+    expect(f.runtime.health()).toMatchObject({ registered: false, heldTexts: 0 })
+    release({ level: 'digest', quotes: ['build is red'] })
+    await vi.waitFor(() => expect(f.store.listIntakeEvaluations('lark-channel', 'om_1')).toEqual([
+      expect.objectContaining({ status: 'decided', level: 'digest', quoteSpans: [[4, 16]] })]))
+  })
+
   test('replay and restart return the original result without a second call', async () => {
     const config = await evaluationConfig()
     const first = open(config)

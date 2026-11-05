@@ -109,6 +109,8 @@ export class WorkItemIntakeEvaluationRuntime {
   readonly #texts = new Map<string, HeldText>()
   /** Held texts already queued under the current Policy version (cleared when it moves). */
   readonly #enqueued = new Set<string>()
+  /** Decisions settled in the queue whose store write failed; retried on every refresh. */
+  readonly #unpersisted = new Map<string, IntakeEvaluationDecision>()
   #registration: WorkItemIntakeEvaluatorRegistration | undefined
   #queue: InferredIntakeEvaluationQueue | undefined
   #version: string | undefined
@@ -166,6 +168,7 @@ export class WorkItemIntakeEvaluationRuntime {
       // Without a supplier nothing can evaluate the held texts; do not keep bodies around.
       this.#texts.clear()
       this.#enqueued.clear()
+      this.#unpersisted.clear()
     }
   }
 
@@ -198,7 +201,9 @@ export class WorkItemIntakeEvaluationRuntime {
     if (this.#closed || queue === undefined) return []
     try {
       this.#refresh()
-      const persisted = (await queue.runDue()).flatMap(decision => this.#persist(decision))
+      // Snapshot the texts this run may persist, so an unregister mid-run does not drop its results.
+      const texts = new Map(this.#texts)
+      const persisted = (await queue.runDue()).flatMap(decision => this.#persist(decision, texts))
       // A Policy change during the run left entries awaiting re-match; queue them now for the next run.
       if (this.#queue === queue) this.#refresh()
       return Object.freeze(persisted)
@@ -230,6 +235,7 @@ export class WorkItemIntakeEvaluationRuntime {
     this.#queue = undefined
     this.#texts.clear()
     this.#enqueued.clear()
+    this.#unpersisted.clear()
   }
 
   /**
@@ -243,6 +249,7 @@ export class WorkItemIntakeEvaluationRuntime {
     const policy = readPolicy(registration)
     if (policy === undefined) { this.#lastError = 'policy-unavailable'; return }
     if (this.#lastError === 'policy-unavailable') this.#lastError = null
+    for (const decision of this.#unpersisted.values()) this.#persist(decision)
     if (policy.version !== this.#version) { this.#version = policy.version; this.#enqueued.clear() }
     for (const [id, held] of this.#texts) {
       if (!this.#enqueued.has(id) && this.#enqueue(held, policy)) this.#enqueued.add(id)
@@ -273,10 +280,11 @@ export class WorkItemIntakeEvaluationRuntime {
     return complete
   }
 
-  #persist(decision: IntakeEvaluationDecision): WorkItemIntakeEvaluationRecord[] {
-    const held = this.#texts.get(decision.candidateId)
+  #persist(decision: IntakeEvaluationDecision, texts: ReadonlyMap<string, HeldText> = this.#texts): WorkItemIntakeEvaluationRecord[] {
+    const key = `${decision.candidateId}\0${decision.ruleId}\0${decision.policyVersion}`
+    const held = texts.get(decision.candidateId)
     const store = this.#store()
-    if (held === undefined || store === undefined) { this.#lastError = 'persist-unavailable'; return [] }
+    if (held === undefined || store === undefined) { this.#unpersisted.delete(key); this.#lastError = 'persist-unavailable'; return [] }
     try {
       const quoteSpans = decision.quotes.map(quote => {
         const start = held.text.indexOf(quote)
@@ -288,8 +296,12 @@ export class WorkItemIntakeEvaluationRuntime {
         proposedLevel: decision.proposedLevel, ceiling: decision.ceiling, quoteSpans, reasons: decision.reasons,
         wouldAccept: decision.wouldAccept, attempts: decision.attempts, decidedAt: Math.trunc(decision.decidedAt),
       })
+      this.#unpersisted.delete(key)
       return [record]
     } catch (error) {
+      // A transient failure (e.g. SQLITE_BUSY) is retried; a row that exists after all is final.
+      if (store.getIntakeEvaluation(held.source, held.sourceEventId, decision.ruleId, decision.policyVersion) === undefined) this.#unpersisted.set(key, decision)
+      else this.#unpersisted.delete(key)
       this.#fail(error)
       return []
     }
