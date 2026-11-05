@@ -151,9 +151,12 @@ async function fixture(options: { maxOutputTokens?: number } = {}) {
 // Attempt 6 (sealed-real): a reasoning model spent 1179 of a shared 2048 on the contract, leaving the
 // source review 869 tokens, which it exhausted on reasoning (max-tokens, no verdict). The real scenario
 // budgets 16384 so each of the two calls keeps a full per-call budget; the cumulative cap is unchanged.
+// Attempt 7: contract 3601 left the review 12783, still spent on reasoning; the real scenario now uses the
+// config bound 32768 (provider accepts max_tokens 32767), leaving the review 29167 after that contract.
 test.each([
   { total: 2048, contract: 1179, review: 869 },
   { total: 16_384, contract: 1179, review: 15_205 },
+  { total: 32_768, contract: 3601, review: 29_167 },
 ])('the source review receives the cumulative budget left after the contract ($total)', async ({ total, contract, review }) => {
   const f = await fixture({ maxOutputTokens: total }); f.adapter.contractOutputTokens = contract
   const result = await f.runtime.run(f.request)

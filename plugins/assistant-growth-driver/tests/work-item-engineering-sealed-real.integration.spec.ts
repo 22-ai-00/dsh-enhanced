@@ -205,7 +205,7 @@ describe.skipIf(!live)('sealed Docker-era tool re-adopts under a new plan with a
         route: { provider: route.provider, model: route.model, headerNames: Object.keys(config.headers ?? {}).sort() },
         seal, ...evidence, realCalls: calls, startedAt: started, finishedAt: Date.now() }, null, 2) + '\n', { mode: 0o600 })
     }
-  }, 1_200_000)
+  }, 1_500_000)
 })
 
 describe.skipIf(!(process.platform === 'linux' && process.env['DSH_SEALED_REAL_PROBE'] === '1'))('sealed real acceptance no-call probe', () => {
