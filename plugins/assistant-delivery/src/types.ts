@@ -164,6 +164,49 @@ export interface OwnerRouteValidationReceipt {
   generation: number
 }
 
+/**
+ * Content-free, READ-ONLY Host receipt proving that the live caller Agent is
+ * bound to an active `linked` principal whose `linked_to_id` is the CURRENT
+ * owner row of one configured owner route.
+ *
+ * It deliberately has no `receiptVersion`: every consumer that requires a v2
+ * owner receipt (`receiptVersion === 2`) rejects it. It never grants approval,
+ * continuation, mutation, or owner foreground authority.
+ */
+export interface OwnerAliasReceipt {
+  protocol: 'assistant-delivery/owner-alias-receipt/v1'
+  authorityId: string
+  authorityHash: string
+  workspace: string
+  agentPreset: string
+  alias: Readonly<{
+    principalId: string
+    principalRecordId: string
+    principalVersion: number
+    bindingId: string
+    bindingVersion: number
+    bindingGeneration: number
+    sessionId: string
+  }>
+  root: Readonly<{
+    principalId: string
+    principalRecordId: string
+    principalVersion: number
+    bindingVersion: number
+    generation: number
+  }>
+}
+
+/** Host-only proof of one live native tool call in the alias's claimed human Inbox turn. */
+export interface OwnerAliasForegroundToolCallAttestation {
+  protocol: 'assistant-delivery/owner-alias-foreground-tool-call/v1'
+  receipt: Readonly<OwnerAliasReceipt>
+  sourceInboxId: string
+  sourceEventId: string
+  turn: number
+  call: Readonly<{ id: string; toolName: string; eventSeq: number; eventDigest: string; argumentsDigest: string }>
+}
+
 /** Content-free Host observation; only an exact durable owner row proves revocation. */
 export type OwnerRouteStateInspection =
   | { status: 'active'; receipt: Readonly<OwnerRouteValidationReceipt> }

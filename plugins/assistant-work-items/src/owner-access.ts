@@ -2,7 +2,7 @@ import { symbols } from '@deepseek-ai/cordis'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { NormalizedConfig } from './config.js'
-import type { PeerDeliveryService, PeerOwnerRouteReceipt, PeerPolicyService } from './peers.js'
+import type { PeerDeliveryService, PeerOwnerAliasReceipt, PeerOwnerRouteReceipt, PeerPolicyService } from './peers.js'
 import type { WorkItemStore } from './store.js'
 import { WorkItemError } from './types.js'
 
@@ -29,10 +29,16 @@ export function ownerArgumentsOf(value: unknown, allowed: readonly string[], lab
   }
   return Object.freeze(output)
 }
+/** Root owner scope reached through a read-only linked alias. Never a v2 owner receipt. */
+export type OwnerAliasRoute = Omit<PeerOwnerRouteReceipt, 'receiptVersion'> & {
+  readonly receiptVersion?: never
+  readonly alias: PeerOwnerAliasReceipt['alias']
+}
 export interface WorkItemOwnerAccessContext {
   store: WorkItemStore
   owner: Readonly<OwnerStoreScope>
-  route: Readonly<PeerOwnerRouteReceipt>
+  /** Exact v2 owner receipt, or (inspect-work-items only) the alias-rooted owner scope. */
+  route: Readonly<PeerOwnerRouteReceipt | OwnerAliasRoute>
   delivery: PeerDeliveryService
   assertCurrent: () => void
 }
@@ -67,6 +73,9 @@ export class WorkItemOwnerAccess {
           || peerIdentity(this.dependencies.delivery()) !== deliveryIdentity || peerIdentity(this.dependencies.policy()) !== policyIdentity || this.dependencies.store() !== store
           || store.closed || signal.aborted || Date.now() >= expiresAt) fail('authority changed')
         const route = delivery.validateOwnerAgentForRoute!(agent, scope.ownerRouteId)
+        // Read-only linked alias: only for inspect-work-items, only when the
+        // caller is not the exact owner, and re-validated on every observation.
+        if (!route && !continuing && delivery.inspectOwnerAliasRoute && delivery.inspectOwnerAliasForegroundToolCall) return observeAlias()
         if (!route || route.receiptVersion !== 2 || route.authorityId !== scope.ownerRouteId || route.principalId !== scope.principalId
           || route.workspace !== scope.workspace || route.agentPreset !== scope.preset || typeof route.authorityHash !== 'string' || !route.authorityHash || !route.principalRecordId
           || !Number.isSafeInteger(route.principalVersion) || route.principalVersion < 1 || !Number.isSafeInteger(route.generation) || route.generation < 1
@@ -76,6 +85,26 @@ export class WorkItemOwnerAccess {
         return { route: { receiptVersion: route.receiptVersion, authorityId: route.authorityId, authorityHash: route.authorityHash,
           principalId: route.principalId, principalRecordId: route.principalRecordId, principalVersion: route.principalVersion,
           workspace: route.workspace, agentPreset: route.agentPreset, bindingVersion: route.bindingVersion, generation: route.generation }, proof: acceptanceDigest(proof) }
+      }
+      const observeAlias = () => {
+        const alias = delivery.inspectOwnerAliasRoute!(agent, scope.ownerRouteId)
+        const counter = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 1
+        if (!alias || alias.protocol !== 'assistant-delivery/owner-alias-receipt/v1' || 'receiptVersion' in alias
+          || alias.authorityId !== scope.ownerRouteId || alias.workspace !== scope.workspace || alias.agentPreset !== scope.preset
+          || typeof alias.authorityHash !== 'string' || !alias.authorityHash || !alias.root || !alias.alias
+          || alias.root.principalId !== scope.principalId || typeof alias.root.principalRecordId !== 'string' || !alias.root.principalRecordId
+          || !counter(alias.root.principalVersion) || !counter(alias.root.generation) || !counter(alias.root.bindingVersion)
+          || typeof alias.alias.principalRecordId !== 'string' || !alias.alias.principalRecordId
+          || alias.alias.principalRecordId === alias.root.principalRecordId || alias.alias.principalId === alias.root.principalId
+          || alias.alias.sessionId !== String(agent.session.id) || !counter(alias.alias.principalVersion)
+          || !counter(alias.alias.bindingVersion) || !counter(alias.alias.bindingGeneration)) fail('requires the current exact owner or its linked alias')
+        const proof = delivery.inspectOwnerAliasForegroundToolCall!({ agent, authorityId: scope.ownerRouteId, callId: String(execution.callId), toolName: execution.name, argumentsJson })
+        if (!proof || typeof proof !== 'object' || (proof as { protocol?: unknown }).protocol !== 'assistant-delivery/owner-alias-foreground-tool-call/v1') fail('requires an actual human foreground tool call')
+        const route: OwnerAliasRoute = { authorityId: alias.authorityId, authorityHash: alias.authorityHash,
+          principalId: alias.root.principalId, principalRecordId: alias.root.principalRecordId, principalVersion: alias.root.principalVersion,
+          workspace: alias.workspace, agentPreset: alias.agentPreset, bindingVersion: alias.root.bindingVersion, generation: alias.root.generation,
+          alias: Object.freeze({ ...alias.alias }) }
+        return { route, proof: acceptanceDigest(proof) }
       }
       const initial = observe(), identity = acceptanceDigest(initial)
       const current = () => { if (acceptanceDigest(observe()) !== identity) fail('owner/call changed') }

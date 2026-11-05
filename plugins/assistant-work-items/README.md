@@ -56,6 +56,8 @@ diagnosis:
 
 在完整的 active 配置中加入 `ownerRecall: { enabled: true }`，并让主人的前台 preset 包含 `work_item_list`、`work_item_recall`，即可在新会话中查找后台工作项及其已有结论。默认关闭；开启时仍须配置完整的 `scope` 和 `workerAutomationId`。这两个工具供当前已认证主人使用，后台 worker 继续通过自己的 occurrence 认领、读报告和汇报。
 
+跨渠道只读别名：若 Delivery 提供 `inspectOwnerAliasRoute`，已 link 到当前 owner 的 `linked` principal（例如 Lark 主人关联的 Telegram 账号）在精确 owner 校验失败时，可以只用 `work_item_list`、`work_item_recall`（`inspect-work-items`）读取同一主人的工作项；列表、正文、报告和游标都按根 owner 的 principal record/version 与 binding 代次过滤，与主人本人看到的一致。别名回执（`assistant-delivery/owner-alias-receipt/v1`）不进入 v2 owner 槽位，`receiptVersion` 存在、根身份或 scope 不符、alias 与 root 相同、Session 不符、或调用证明不是别名协议都拒绝。每次观察（Policy 评估前后、authorize 之后、回调前后）都重新向 Delivery 取回执并比对摘要，解除关联或 owner 版本变化会使进行中的读取以 `owner/call changed` 失败；owner 版本变化后旧版本工作项对主人和别名同样不可见。`work_item_continue`（`continue-work-items`）、审批、worker 认领/汇报等变更仍只接受精确 owner 或 worker 身份。Policy 以别名 Agent 为主体求值，须为别名 principal 单独授予 `inspect-work-items`。原生 Web owner 以别名身份加入不在此范围。
+
 该入口沿用已能正常对话的 Delivery owner route；原生对话的身份与回复授权仍需有效。前台读取另外需要独立的 Policy 授权，例如：
 
 ```yaml
@@ -401,7 +403,7 @@ worker 仍由原生 Automations/AgentLoop 执行。认领后，`work_item_read_c
 
 Delivery schema 29 保存真实报告关联、回复原文与回复序列；WorkItems schema 9 用 v2 计划保存来源和继承关系。备份时须一致保留两份账本；不能只复制其中一个库来恢复续办。既有 v1 前台续办计划保持原协议。已有 continuation 配置不变时，单独开关回复入口不重建 worker；若同时更改准入种类、工具或预算，则仍受原有激活合同约束。
 
-此入口覆盖同一渠道的报告回复，不实现运行中指令插入、任意跨信道身份合并、多对多 Thread 订阅或长期自主成长。Provider 接受报告不等于用户已读或任务已独立验收。
+此入口覆盖同一渠道的报告回复，不实现运行中指令插入、任意跨信道身份合并（仅有上文的 linked 别名只读查询）、多对多 Thread 订阅或长期自主成长。Provider 接受报告不等于用户已读或任务已独立验收。
 
 ### 主人评价报告结果（显式启用）
 

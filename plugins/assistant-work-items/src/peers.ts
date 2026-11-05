@@ -96,6 +96,22 @@ export interface PeerOwnerRouteReceipt {
   readonly generation: number
 }
 
+/**
+ * `assistant-delivery` read-only linked owner alias receipt. It has no
+ * `receiptVersion`, so it is never a {@link PeerOwnerRouteReceipt}.
+ */
+export interface PeerOwnerAliasReceipt {
+  readonly protocol: 'assistant-delivery/owner-alias-receipt/v1'
+  readonly authorityId: string
+  readonly authorityHash: string
+  readonly workspace: string
+  readonly agentPreset: string
+  readonly alias: Readonly<{ principalId: string; principalRecordId: string; principalVersion: number
+    bindingId: string; bindingVersion: number; bindingGeneration: number; sessionId: string }>
+  readonly root: Readonly<{ principalId: string; principalRecordId: string; principalVersion: number
+    bindingVersion: number; generation: number }>
+}
+
 export interface PeerOwnerRouteInspection {
   readonly status: 'active' | 'revoked' | 'unavailable'
   readonly receipt?: PeerOwnerRouteReceipt
@@ -178,6 +194,10 @@ export interface PeerDeliveryService {
   acknowledgeWorkItemReply?(input: WorkItemReplyReadInput & {childItemId:string;childPlanDigest:string}): Readonly<WorkItemReplySource>
   validateOwnerAgentForRoute?(agent: import('@deepseek-ai/dsh-agent').Agent, authorityId: string): Readonly<PeerOwnerRouteReceipt> | undefined
   inspectOwnerForegroundToolCall?(input: Readonly<{ agent: import('@deepseek-ai/dsh-agent').Agent; authorityId: string;
+    callId: string; toolName: string; argumentsJson: string }>): unknown
+  /** Optional read-only linked owner alias surfaces; accepted ONLY for `inspect-work-items`. */
+  inspectOwnerAliasRoute?(agent: import('@deepseek-ai/dsh-agent').Agent, authorityId: string): Readonly<PeerOwnerAliasReceipt> | undefined
+  inspectOwnerAliasForegroundToolCall?(input: Readonly<{ agent: import('@deepseek-ai/dsh-agent').Agent; authorityId: string;
     callId: string; toolName: string; argumentsJson: string }>): unknown
   readOwnerForegroundToolInput?(input: Readonly<{ agent: import('@deepseek-ai/dsh-agent').Agent; authorityId: string;
     callId: string; toolName: string; argumentsJson: string; offset?: number; maxBytes?: number }>): Readonly<PeerOwnerForegroundToolInput> | undefined

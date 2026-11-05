@@ -35,6 +35,8 @@ Host-only `validateOwnerAgentForRoute(agent, authorityId)` 为有限动态工具
 
 Host-only `inspectOwnerForegroundToolCall({ agent, authorityId, callId, toolName, argumentsJson })` 另核对当前认领的具体 Inbox、尚未结束的原生 turn、pending 前台执行记录及唯一未结算的 `tool/call` 事件。工具名和实际参数须与事件一致；返回内容无关的 task/owner/binding、turn、调用事件与参数摘要，不返回任务正文或参数。同 Session、开放 turn 或 owner 身份本身不足以产生证明；Host 直接调用、PTC 子调用、旧或重复事件保持未归因。此只读接口不迁移数据库，不授予执行权限，也不证明任务成功；消费者须保留后续 canonical 反馈与独立验收边界。
 
+Host-only `inspectOwnerAliasRoute(agent, authorityId)` 与 `inspectOwnerAliasForegroundToolCall({ agent, authorityId, callId, toolName, argumentsJson })` 为跨渠道只读查询提供 linked 别名证明。只有 role 为 `linked`、`linked_to_id` 精确指向当前 active owner、自身 active 且通过当前 active binding（同一 workspace/preset、非 owner route binding、Session 一致）调用的 principal 才有回执；`linked_to_id` 为空、指向他人、owner 交接/撤销、别名撤销（当前“解除关联”即 `revokePrincipal`，会同时撤销其 binding）或 binding 轮换均无回执。回执协议为 `assistant-delivery/owner-alias-receipt/v1`，不含 `receiptVersion`，同时携带别名身份与根 owner 的 principal record/version、binding version/generation，因此 owner 重新配对（版本递增）会改变回执；调用证明协议为 `assistant-delivery/owner-alias-foreground-tool-call/v1`，要求别名在 link 之后认领的 Inbox、未结束 turn 与唯一未结算的原生 `tool/call`。两者每次调用都重读两遍并要求一致。别名回执不是 v2 owner receipt：`validateOwnerRoute`、`validateOwnerAgentForRoute`、`inspectOwnerForegroundToolCall`、偏好 turn、审批准备及原生 Web owner（`role !== 'owner'` 检查未改）对别名一律拒绝。此 API 无 schema 迁移；link 仅按 owner record id 生根、不冻结 link 时的 owner 版本，owner 撤销后以同一 record 重新激活时原有 link 随之恢复（沿用现有 Delivery 语义）。原生 Web 认领不登记别名 turn，Web owner 以别名身份加入属后续工作。
+
 `readOwnerForegroundToolInput` 使用同一真实当前调用证明，按 UTF-8 字节分页读取已经持久保存的人类输入，并返回实际记录的供应商冻结状态。每页最多 8192 字节；sourceDigest 绑定 task、原 envelope、全文和 model state，不随调用 ID、模型工具参数或页窗口变化。缺失/不一致 supplier 由执行消费者拒绝。它不接受任意 Inbox、来源或路径选择器，不读取模型生成的替代正文，不新建任务、发送消息或授予执行权限；调用前后 owner/native-call 变化会使读取失效。Delivery 当前 schema 为 30。
 
 
@@ -486,7 +488,7 @@ Host 可用 `inspectOwnerForegroundLearningTask()` 将 Evaluation 增量结果�
 
 原生 Goal 仍为 `active` 且 `armed` 时，空闲回收保留同一个 Agent 和 Session lease，允许宿主唯一 GoalRoundDriver 在会话保存完成后调度下一轮。目标终态或 disarm 后恢复普通空闲回收；owner 撤权、租约失效、scope 卸载和原有 `maxExecutionMs` 期限仍优先结束执行，不为每轮重置期限。若宿主缺少 GoalRoundDriver，armed 目标最多保持到该期限；此保留检查本身不派发任务。
 
-当前 Web 只支持单已认证控制面的文本交互；图片、完整 queue/steer、跨渠道 owner 别名和子 Agent 历史仍未验收。原生 Web 安装、配置、Policy 与权限见 [Web owner 包说明](../assistant-web-owner/README.md)，浏览器探针及证据边界见 [E2E 指南](../../scripts/e2e/README.md)。
+当前 Web 只支持单已认证控制面的文本交互；图片、完整 queue/steer、以 linked 别名加入 Web owner 和子 Agent 历史仍未验收（外部渠道别名只读查询见上文 `inspectOwnerAliasRoute`）。原生 Web 安装、配置、Policy 与权限见 [Web owner 包说明](../assistant-web-owner/README.md)，浏览器探针及证据边界见 [E2E 指南](../../scripts/e2e/README.md)。
 
 可选 Host 接口 `registerForegroundTaskObserver()` 只接受当前 Control Plane 拥有的注册，在认证 Inbox 的执行绑定后同步通知开始，资源释放并保存真实执行回执后通知结束。它不改变 schema 23 或学习来源摘要，不注册模型工具；注销、owner/服务换代及重启后不补发历史事件，观察错误不影响正常聊天。部署版本与 readiness 核对由 [Control Plane](../plugin-control-plane) 持有；这些事件本身不证明任务质量或具体工具调用。
 

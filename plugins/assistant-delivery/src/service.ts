@@ -160,6 +160,8 @@ import type {
   OwnerForegroundTaskSourceRef,
   OwnerApprovalForPreferenceInput,
   OwnerApprovalForPreferenceResult,
+  OwnerAliasForegroundToolCallAttestation,
+  OwnerAliasReceipt,
   OwnerRouteStateInspection,
   OwnerRouteValidationReceipt,
   OutboundIntent,
@@ -1150,6 +1152,9 @@ export class AssistantDeliveryService extends Service {
   /** Once a live verifier required acceptance, loss of that verifier must not silently bypass it. */
   private acceptanceRequired = false
   private readonly preferenceTurns = new WeakMap<Agent, Readonly<DeliveryPreferenceTurnAttestation>>()
+  /** Claimed human turns of linked owner aliases; read-only alias inspection only. */
+  private readonly aliasTurns = new WeakMap<Agent, Readonly<{ sessionId: string; bindingId: string;
+    bindingVersion: number; sourceEventId: string; sourceInboxId: string; turn: number }>>()
   private readonly goalWakeResults = new WeakMap<DeliveryGoalWakeInput, () => DeliveryGoalWakeResultPublication>()
   private modelSelectionFlight: Promise<void> | undefined
   private presentationFlight: Promise<void> | undefined
@@ -1246,12 +1251,17 @@ export class AssistantDeliveryService extends Service {
     }
     ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
       this.capturePreferenceTurn(agent, message.source, turn)
+      this.captureAliasTurn(agent, message.source, turn)
     })
     ctx.on('agent/inbox/discarded', ({ agent }) => {
       this.preferenceTurns.delete(agent)
+      this.aliasTurns.delete(agent)
     })
     ctx.on('agent/status', ({ agent, status }) => {
-      if (status === 'idle') this.preferenceTurns.delete(agent)
+      if (status === 'idle') {
+        this.preferenceTurns.delete(agent)
+        this.aliasTurns.delete(agent)
+      }
     })
     this.registry = new DeliveryAdapterRegistry({
       accept: async envelope => {
@@ -5541,6 +5551,149 @@ export class AssistantDeliveryService extends Service {
       if (error instanceof AssistantDeliveryError && error.code === 'missing-binding') return undefined
       throw error
     }
+  }
+
+  /**
+   * Host-only, READ-ONLY proof that the live caller Agent is bound to an
+   * active `linked` principal whose `linked_to_id` is the CURRENT owner row of
+   * this owner route. The receipt has a distinct protocol and no
+   * `receiptVersion`, so v2 owner checks reject it; it never grants owner,
+   * approval, continuation or mutation authority. Every call re-reads the
+   * route, the root owner, the alias binding and the alias principal twice.
+   */
+  inspectOwnerAliasRoute(agent: Agent, authorityId: string): Readonly<OwnerAliasReceipt> | undefined {
+    if (!this.active || typeof agent !== 'object' || agent === null || agent.session === undefined
+      || typeof authorityId !== 'string' || authorityId.length === 0
+      || Buffer.byteLength(authorityId) > toolApprovalIdentityBytes) return undefined
+    const agents = this.context.get('agents')
+    const sessions = this.context.get('sessions')
+    if (agents === undefined || sessions === undefined) return undefined
+    const sessionId = String(agent.session.id)
+    const liveCaller = () => String(agent.id) === sessionId
+      && agents.get(agent.id) === agent
+      && sessions.get(agent.id) === agent.session
+    if (!liveCaller()) return undefined
+    const read = (): Readonly<OwnerAliasReceipt> | undefined => {
+      const route = this.resolveOwnerRoute(authorityId)
+      const authority = this.ownerRoutes.get(route.authorityId)
+      const root = this.deliveryStore.getPrincipal(route.binding.principal)
+      if (authority === undefined || root?.status !== 'active' || root.role !== 'owner'
+        || JSON.stringify(root.principal) !== JSON.stringify(route.binding.principal)) return undefined
+      const binding = this.deliveryStore.getBindingBySession(sessionId)
+      if (binding?.status !== 'active' || binding.sessionId !== sessionId || binding.id === route.binding.id
+        || this.deliveryStore.getActiveBinding(binding.conversation)?.id !== binding.id
+        || binding.workspace !== authority.workspace || binding.agentPreset !== authority.agentPreset
+        || agent.session.header.cwd !== binding.workspace
+        || agent.session.header.agentPreset !== binding.agentPreset) return undefined
+      const alias = this.deliveryStore.getPrincipal(binding.principal)
+      if (alias?.status !== 'active' || alias.role !== 'linked'
+        || typeof alias.linkedToId !== 'string' || alias.linkedToId !== root.id || alias.id === root.id
+        || JSON.stringify(alias.principal) !== JSON.stringify(binding.principal)) return undefined
+      return Object.freeze({
+        protocol: 'assistant-delivery/owner-alias-receipt/v1' as const,
+        authorityId: route.authorityId,
+        authorityHash: route.snapshot.authorityHash,
+        workspace: authority.workspace,
+        agentPreset: authority.agentPreset,
+        alias: Object.freeze({
+          principalId: externalPrincipalId(alias.principal),
+          principalRecordId: alias.id,
+          principalVersion: alias.version,
+          bindingId: binding.id,
+          bindingVersion: binding.version,
+          bindingGeneration: binding.generation,
+          sessionId,
+        }),
+        root: Object.freeze({
+          principalId: externalPrincipalId(root.principal),
+          principalRecordId: root.id,
+          principalVersion: root.version,
+          bindingVersion: route.snapshot.bindingVersion,
+          generation: route.snapshot.generation,
+        }),
+      })
+    }
+    try {
+      const first = read()
+      if (first === undefined) return undefined
+      const current = read()
+      return current !== undefined && liveCaller()
+        && acceptanceCanonicalJson(current) === acceptanceCanonicalJson(first) ? first : undefined
+    } catch (error) {
+      if (error instanceof AssistantDeliveryError && error.code === 'missing-binding') return undefined
+      throw error
+    }
+  }
+
+  /**
+   * Host-only proof of one live, unsettled native tool call in the alias's
+   * exact claimed human Inbox turn. Read-only; it is NOT an owner foreground
+   * proof (`assistant-delivery/foreground-tool-call/v1`) and must never be
+   * accepted where one is required.
+   */
+  inspectOwnerAliasForegroundToolCall(input: Readonly<{
+    agent: Agent; authorityId: string; callId: string; toolName: string; argumentsJson: string
+  }>): Readonly<OwnerAliasForegroundToolCallAttestation> | undefined {
+    if (!input || typeof input !== 'object'
+      || typeof input.authorityId !== 'string' || input.authorityId.length === 0
+      || typeof input.callId !== 'string' || input.callId.length === 0
+      || typeof input.toolName !== 'string' || input.toolName.length === 0
+      || typeof input.argumentsJson !== 'string'
+      || Buffer.byteLength(input.authorityId) > toolApprovalIdentityBytes
+      || Buffer.byteLength(input.callId) > toolApprovalIdentityBytes
+      || Buffer.byteLength(input.toolName) > toolApprovalIdentityBytes
+      || Buffer.byteLength(input.argumentsJson) > toolApprovalArgumentBytes) return undefined
+    const agent = input.agent
+    const receipt = this.inspectOwnerAliasRoute(agent, input.authorityId)
+    if (receipt === undefined) return undefined
+    const turn = this.currentAliasTurn(agent, receipt)
+    if (turn === undefined) return undefined
+    const call = inspectUnsettledNativeCall(agent.session.snapshotEvents(), turn.turn,
+      input.callId, input.toolName, input.argumentsJson)
+    if (call === undefined) return undefined
+    const current = this.inspectOwnerAliasRoute(agent, input.authorityId)
+    if (current === undefined || acceptanceCanonicalJson(current) !== acceptanceCanonicalJson(receipt)
+      || this.currentAliasTurn(agent, receipt) !== turn) return undefined
+    return Object.freeze({ protocol: 'assistant-delivery/owner-alias-foreground-tool-call/v1' as const,
+      receipt, sourceInboxId: turn.sourceInboxId, sourceEventId: turn.sourceEventId, turn: turn.turn, call })
+  }
+
+  private currentAliasTurn(agent: Agent, receipt: Readonly<OwnerAliasReceipt>) {
+    const turn = this.aliasTurns.get(agent)
+    if (turn === undefined || turn.sessionId !== receipt.alias.sessionId
+      || turn.bindingId !== receipt.alias.bindingId || turn.bindingVersion !== receipt.alias.bindingVersion) return undefined
+    const binding = this.deliveryStore.getBinding(turn.bindingId)
+    const inbox = this.deliveryStore.getInbox(turn.sourceInboxId)
+    if (binding?.status !== 'active' || binding.version !== turn.bindingVersion
+      || binding.sessionId !== turn.sessionId
+      || inbox?.status !== 'claimed' || inbox.bindingId !== binding.id
+      || inbox.envelope.eventId !== turn.sourceEventId
+      || !this.isInboundAuthorized(binding, inbox.envelope)) return undefined
+    const events = agent.session.snapshotEvents()
+    const started = events.some(event => event.type === 'turn/start' && event.data.turn === turn.turn)
+    const ended = events.some(event => event.type === 'turn/end' && event.data.turn === turn.turn)
+    return started && !ended ? turn : undefined
+  }
+
+  private captureAliasTurn(agent: Agent, sourceInput: unknown, turnInput: unknown): void {
+    if (!this.active || typeof sourceInput !== 'object' || sourceInput === null
+      || !Number.isSafeInteger(turnInput) || (turnInput as number) < 0) return
+    const source = sourceInput as { kind?: unknown; channel?: unknown; account?: unknown; eventId?: unknown }
+    if (source.kind !== 'delivery' || typeof source.channel !== 'string'
+      || typeof source.account !== 'string' || typeof source.eventId !== 'string') return
+    const sessionId = String(agent.session.id)
+    const binding = this.deliveryStore.getBindingBySession(sessionId)
+    const inbox = this.deliveryStore.getInboxByProviderEvent(source.channel, source.account, source.eventId)
+    const principal = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
+    if (binding?.status !== 'active' || inbox?.status !== 'claimed' || inbox.bindingId !== binding.id
+      || binding.sessionId !== sessionId || binding.workspace !== agent.session.header.cwd
+      || binding.agentPreset !== agent.session.header.agentPreset
+      || principal?.status !== 'active' || principal.role !== 'linked' || typeof principal.linkedToId !== 'string'
+      || !this.isInboundAuthorized(binding, inbox.envelope)) return
+    this.aliasTurns.set(agent, Object.freeze({
+      sessionId, bindingId: binding.id, bindingVersion: binding.version,
+      sourceEventId: source.eventId, sourceInboxId: inbox.id, turn: turnInput as number,
+    }))
   }
 
   /** Host-only durable ordinary-turn metadata; never registered as a model tool. */
