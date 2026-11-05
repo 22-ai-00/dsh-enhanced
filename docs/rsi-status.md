@@ -91,11 +91,11 @@ live Harness app 的 `0.2.1-rc.5` 需要 owner 显式风险豁免；已在该版
 
 | 精确提交 | 环境 | 结果 | 测试 passed / skipped | 文件 passed / skipped | 日志 SHA-256 |
 | --- | --- | --- | --- | --- | --- |
+| `22d6d459`（39 包，Host 更新识别封存链） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1270.95 秒 | 10,435 / 1,927 | 714 / 86 | `34ea4c1d846d2732513a8f97893077836f522992d13cfc3d58ddea8b615790f1` |
+| `22d6d459`（39 包，Host 更新识别封存链） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2416.34 秒 | 12,048 / 311 | 767 / 33 | `e97af40d15eb537cfe15cc2683702550b24770c9d8e77605ad7f18b3c184ee4c` |
 | `c9ef3bd4`（39 包，封存迁移 + 实测验收准备） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1201.19 秒 | 10,431 / 1,927 | 714 / 86 | `54d818c30850ec7c4f810aee343f34e9ca73cd68648626ea9ebabf649640e1c0` |
 | `c9ef3bd4`（39 包，封存迁移 + 实测验收准备） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2445.28 秒 | 12,044 / 311 | 767 / 33 | `cc3dba6ccdfbfedc0a40fc10bf4c1ee4577e6cd7ccdcfc01abd8e80cd0f6dbc2` |
 | `98e7916f`（39 包，历史分类与封存元数据） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1235.16 秒 | 10,320 / 1,925 | 707 / 85 | `e4890526ed66082996126b249860d7952afb199dae31d9b871ed49feffce96af` |
 | `98e7916f`（39 包，历史分类与封存元数据） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2428.32 秒 | 11,933 / 309 | 760 / 32 | `b4df5340064d45a4195819ef77747bda3c81da54dfb4fe77695f8a08b4adc53b` |
-| `4b7d8b80`（39 包，健康枚举契约测试） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1202.12 秒 | 10,308 / 1,925 | 706 / 85 | `0fc6fa526a026fd9942d6109b6e484447e72585ac7f37a7ae15faa22ad92e740` |
-| `4b7d8b80`（39 包，健康枚举契约测试） | Linux / Node 22.23.2 | EXIT 0，独立 PASS，2415.21 秒 | 11,921 / 309 | 759 / 32 | `506e718f7113a877c18473d357a1f33ce2095e9311ff005a8f8329ea24a240c1` |
 
 两端覆盖 manifest、零警告 lint、包构建与类型检查、测试组及唯一 dry-run pack（39 包 / 40 测试组）；源码前后同一提交且工作树干净。Linux 用 `TMPDIR=/data00/home/jiataorui/t`；准确命令与结果见对应 `docs/evidence/verification-<sha8>/`。成长切片 `d8c9fdd2` 的双端结果与早期控制台切片日志也保留在 `docs/evidence/`。Linux attempt 1 的失败是缺少测试运行时环境，已保留。跳过项、真实模型/Bot、活服务升级与长期收益不计为已验收。
