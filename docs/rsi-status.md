@@ -6,7 +6,7 @@
 
 ## 目标与纪律
 
-Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、独立验收和有限采用，减少用户管理上下文与逐步协调的负担。仅保留 `dev`、`main`：开发提交推送走 `dev`，发布验收通过后才合入 `main`。
+Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、独立验收和有限采用，减少用户管理上下文与逐步协调的负担。主动性是核心：借鉴 Superagent 原型“用最少的人类注意力换最多的价值”，按“触发→判断→行动→验收→学习”闭环自主发现并推进工作；确定性 gate 与模型判断分离，文本不能提升权限；对外发言由 Host 校验目的与字数，空闲不发言。与原型靠人工调规则不同，本项目的放开由留出证据、独立验收、有界采用与精确版本回退驱动，人只在超出一次性预授权范围时回答一个结构化问题。仅保留 `dev`、`main`：开发提交推送走 `dev`，发布验收通过后才合入 `main`。
 
 ## 已交付能力与边界
 
@@ -80,7 +80,8 @@ live Harness app 的 `0.2.1-rc.5` 需要 owner 显式风险豁免；已在该版
 
 1. 控制台插件各切片（`94b86b61`、`da5f8d42`、`124a52a1`、`2c295a40`、`4b78dc68`、`cea6beb1`、`c0f077e2`、`44ec103c`、`f984d8c7`、`4b7d8b80`）均已双端通过精确根检查，并完成真实 Web GUI 冒烟（含三态卡片与本地打包产物安装）。下一验收受 live 环境限制：真实飞书长连接、登录态与远端使用需 owner 在活 Host 上显式授权（当前按用户要求延后）。
 2. 非空迁移资格（Docker→linux-native）已交付：`a45eac07` 封存迁移 + `68e4d8b3` Linux `NODE_PATH` 修复 + `c9ef3bd4` 仅测试的真实模型验收准备。非空采用历史只读归档（0400）后清空活账本，旧用量作为继承用量计入上限、不退还；Docker 时期 active 工具只能以新 plan id 与新 native 证书重新采用，原 plan id 被拒绝；审查库用 v2 grant handoff 原地交接，保留 `used`/`maximum` 与全部 verification 行。归档写入与事务中崩溃均可重试（WAL 与回滚日志两种残留）；整张审计表被删在 verify 时被拒；链上含封存 handoff 时，Host 更新在准备（原 Home 与暂存 Home）和切换前后的验证中都要求活账本的封存审计摘要等于签名 `proofDigest`，缺失、不同或已安装 control-plane 无读取函数时拒绝。限制：交接前签发的审查证书切换后仍被当前授权检查拒绝；按决定（`c2e2a5c2` 后），Docker 时期父版本一律以新 plan 在当前授权下重新验证、重新采用，Control Plane 不放宽；verifier 的 `creationReviews.history` 读取已就绪但保持休眠，仅供将来 native→native 原地交接使用；verifier 已有可选 `creationReviews.history` 消费者（`readRetainedCases` 按签名 head 解析历史证书并用旧公钥验签），但安装器尚未写入该字段、Control Plane 读取修订父版本仍只认当前 authority，端到端尚不可达；`pendingReverification` 尚无消费者，重新采用来自普通新失败任务；真实 owner Home 的完整 live Docker→native 切换、复制恢复与 native→native 仍未验收。真实模型复验（Linux，deepseek-v4.1-flash）四次尝试均未通过，本场景不再追加真实调用：封存、继承用量与真实路由每次都正常。第 1 次（`465ba29c` 前，作者输出上限 4096）写源码时撞上上限（`length`）；第 2 次（8192）在 Growth 120 秒 `maxDurationMs` 内未写完被中断（`interrupted-after-dispatch`）；这两次都没有提交源码作业，各 4 次真实调用。第 3 次（`1712b656`，仅测试把该场景 Growth 时限放宽到 300 秒）作者写完并提交了源码（单次 7,868 输出 token），共 6 次真实调用，但源码作业在入队检查时被判 `source-job-task-source-changed`（`source-jobs.ts` 中 `withJobSource` 抛出非“生产者不可用”错误），没有构建、审查与采用。根因已查明：作者依次调用 gaps、read、read、create、job_status，已用满冻结合同的 `maxModelCalls: 5`；第 6 次模型请求被 Growth 钩子以 `assistant-growth-driver-model-rejected` 拒绝并取消运行，运行记为 `unknown`，源码作业的任务来源 fence 只接受 `running`/`reviewed` 的运行，于是按设计判 `source-job-task-source-changed`。这是预算失败关闭，不是迁移或来源绑定缺陷；脚本场景只用 4 次模型调用所以不受影响。迁移的真实模型重新采用仍未实测，需把该场景的作者 `maxModelCalls` 提高到 6 后再验。原始证据在忽略的 `docs/evidence/sealed-real/`。 第 4 次（`b1347bf6`，仅测试把作者 `maxModelCalls` 放宽到 7、总上限 9）作者正确识别缺口 `work-item-task-repair` 并读取模板，第 3 次调用遇 LLMBox 上游 502（`provider_error`，EOF），Growth 记为 `review-incomplete`，共 3 次真实调用；属供应方瞬时故障，非预算或代码问题。累计 17 次真实调用，用户决定不跑第 5 次。剩余未实测：独立审查、新 plan id 采用与新会话调用。封存工具重放（`827dc60a`）停在 S1：`readSealedReverificationSource` 校验签名 `proofDigest`、`pendingReverification` 成员、0400 归档身份/字节/摘要、归档行摘要、旧公钥签名与源码绑定后，只读返回原 README/src/tests，不授予采用。S2/S3 不接线，原因有三：原缺口仍挂着原候选 id，无法再次使用；原 Growth 运行的生成窗口已过，重放需要新的准入路径；新 plan id 可能与封存行同名，需先定义命名隔离。
-3. Router 跨信道协调、订阅直通和长期普通使用收益尚未完整验收。现有持久任务不代表完整自主工程成长；两端此前五次真实模型运行额度已用尽，不重置失败或预算。
+3. Router 跨信道协调、订阅直通和长期普通使用收益尚未完整验收。现有持久任务不代表完整自主工程成长；旧五次真实模型额度已用尽、不重置，新实验仅用 LLMBox 有界预算并本地留证。
+5. 主动进化（Superagent 原型融合，2026-11-05 只读评审）：验收见合同 WP19–WP22。顺序为注意力合同 → 统一 intake 与 observe 影子判断 → 决策准入 WorkItem → 注意力结果回流学习；不新增 Loop/timer，不连活飞书。
 4. 用户已延后飞书机器人实连和后续真实使用验收；正式连接门保留。完整临时双服务升级、就绪、回滚及活 Home 切换未验收，暂不操作活服务。
 
 本地与远端项目均只保留主 `dev` checkout，`main` 分支保留；旧 worktree 的修改、暂存成果和证据已保全，归档候选未全部整合。未发布、未合入 main；全局 CLI 实际在 `~/.npm-global`。
