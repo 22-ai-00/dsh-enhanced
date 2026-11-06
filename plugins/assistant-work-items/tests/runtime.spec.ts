@@ -206,6 +206,13 @@ class FakeAutomationsPeer extends Service {
   get calls(): IngestInput[] { return this.spy.calls }
   ingestExternal(input: IngestInput) { return this.spy.service.ingestExternal(input) }
   setFailCode(value: string) { this.spy.setFailCode(value) }
+  /** The native scheduler wake; a test fires it with `wake()`. */
+  readonly wakeListeners = new Set<() => void>()
+  onSchedulerWake(listener: () => void): () => void {
+    this.wakeListeners.add(listener)
+    return () => { this.wakeListeners.delete(listener) }
+  }
+  wake(): void { for (const listener of Array.from(this.wakeListeners)) listener() }
 }
 
 interface RegisteredTool {
@@ -218,8 +225,12 @@ type VerifierInspection = NonNullable<ReturnType<NonNullable<PeerVerifierService
 /** Host-injected independent verifier slot; the only source of a contract or receipt. */
 class FakeVerifierPeer extends Service {
   readonly tasks = new Map<string, Omit<VerifierInspection, 'attempts'>>()
+  readonly reads: string[] = []
+  failure: Error | null = null
   constructor(ctx: Context) { super(ctx, 'assistantVerifier') }
   inspectAcceptedTask(contractId: string): VerifierInspection | null {
+    this.reads.push(contractId)
+    if (this.failure !== null) throw this.failure
     const task = this.tasks.get(contractId)
     return task === undefined ? null : Object.freeze({ ...task, attempts: 0 })
   }
@@ -1177,6 +1188,158 @@ describe('work-item admission authority revalidation', () => {
     failedPeer.tasks.set(failedContract.id, { contract: failedContract, state: 'done', reason: null, receipt: serviceReceipt(failedContract) })
     expect(errorCode(() => failed.service.settleAcceptance(failedItem.item.id))).toBe('invalid-state')
     expect(failed.service.acceptanceVerdict(failedItem.item.id)).toBeNull()
+  })
+
+  /** One acceptance-bound item driven through claim and a `ready` report. */
+  async function executedBound(fixture: Awaited<ReturnType<typeof serviceHarness>>, peer: FakeVerifierPeer, id: string, occurrence: string) {
+    const contract = serviceContract(id)
+    peer.tasks.set(contract.id, { contract, state: 'awaiting-execution', reason: null, receipt: null })
+    const admitted = fixture.service.admitDecision(boundDecision(contract, `decision-${id}`))
+    if (admitted.outcome === 'refused') throw new Error(admitted.reasonCode)
+    fixture.service.claim(workerAgent(occurrence))
+    await fixture.service.report(workerAgent(occurrence), { status: 'ready', summary: 'done', idempotencyKey: `r-${id}` })
+    return { contract, itemId: admitted.item.id }
+  }
+
+  function verdictEvents(fixture: { root: string }, itemId: string): number {
+    const db = new DatabaseSync(join(fixture.root, 'state', 'state.sqlite'), { readOnly: true })
+    try {
+      const row = db.prepare("SELECT COUNT(*) AS count FROM work_item_event WHERE item_id = ? AND kind = 'acceptance-verified'").get(itemId) as { count: number }
+      return Number(row.count)
+    } finally { db.close() }
+  }
+
+  const autoSettle = (maxPerTick?: number): Partial<Config> => ({ acceptance: { autoSettle: { enabled: true, ...(maxPerTick === undefined ? {} : { maxPerTick }) } } })
+
+  test('acceptance auto-settle is off by default: a scheduler wake reads no verifier and records nothing', async () => {
+    const fixture = await serviceHarness()
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { contract, itemId } = await executedBound(fixture, peer, 'auto-off-1', 'occ-1')
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract) })
+    const reads = peer.reads.length
+    expect(fixture.automations?.wakeListeners.size).toBe(1)
+    fixture.automations?.wake()
+    expect(peer.reads).toHaveLength(reads)
+    expect(fixture.service.acceptanceVerdict(itemId)).toBeNull()
+    expect(fixture.config.acceptanceAutoSettle).toBeUndefined()
+  })
+
+  test('acceptance auto-settle records one verdict on a wake and is idempotent afterwards', async () => {
+    const fixture = await serviceHarness({ extra: autoSettle() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { contract, itemId } = await executedBound(fixture, peer, 'auto-on-1', 'occ-1')
+    peer.tasks.set(contract.id, { contract, state: 'pending', reason: null, receipt: null })
+    fixture.automations?.wake()
+    expect(fixture.service.acceptanceVerdict(itemId)).toBeNull()
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract) })
+    fixture.automations?.wake()
+    expect(fixture.service.acceptanceVerdict(itemId)).toMatchObject({ receiptId: 'svc-receipt-1', objectiveStatus: 'achieved' })
+    const reads = peer.reads.length
+    fixture.automations?.wake()
+    fixture.automations?.wake()
+    // A settled item leaves the candidate set: no further verifier reads, one event.
+    expect(peer.reads).toHaveLength(reads)
+    expect(verdictEvents(fixture, itemId)).toBe(1)
+    expect(fixture.service.settleAcceptance(itemId).outcome).toBe('already-verified')
+  })
+
+  test('acceptance auto-settle skips unbound and unexecuted items', async () => {
+    const fixture = await serviceHarness({ extra: autoSettle() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const contract = serviceContract('auto-unrun-1')
+    peer.tasks.set(contract.id, { contract, state: 'awaiting-execution', reason: null, receipt: null })
+    const admitted = fixture.service.admitDecision(boundDecision(contract, 'decision-auto-unrun-1'))
+    if (admitted.outcome === 'refused') throw new Error(admitted.reasonCode)
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract) })
+    const reads = peer.reads.length
+    fixture.automations?.wake()
+    expect(peer.reads).toHaveLength(reads)
+    expect(fixture.service.acceptanceVerdict(admitted.item.id)).toBeNull()
+  })
+
+  test('acceptance auto-settle without a verifier peer neither throws nor records, and settles once it appears', async () => {
+    const fixture = await serviceHarness({ extra: autoSettle() })
+    const contract = serviceContract('auto-missing-1')
+    // Bind while a verifier exists, then remove it before the wake.
+    const binder = fixture.ctx.plugin({ apply: (ctx: Context) => { const peer = new FakeVerifierPeer(ctx); peer.tasks.set(contract.id, { contract, state: 'awaiting-execution', reason: null, receipt: null }) } })
+    await binder
+    const admitted = fixture.service.admitDecision(boundDecision(contract, 'decision-auto-missing-1'))
+    if (admitted.outcome === 'refused') throw new Error(admitted.reasonCode)
+    fixture.service.claim(workerAgent('occ-1'))
+    await fixture.service.report(workerAgent('occ-1'), { status: 'ready', summary: 'done', idempotencyKey: 'r-missing' })
+    await binder.dispose()
+    expect(fixture.ctx.get('assistantVerifier' as never)).toBeUndefined()
+    expect(() => fixture.automations?.wake()).not.toThrow()
+    expect(fixture.service.acceptanceVerdict(admitted.item.id)).toBeNull()
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract) })
+    fixture.automations?.wake()
+    expect(fixture.service.acceptanceVerdict(admitted.item.id)).toMatchObject({ receiptId: 'svc-receipt-1' })
+  })
+
+  test('acceptance auto-settle records nothing on contract drift', async () => {
+    const fixture = await serviceHarness({ extra: autoSettle() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { contract, itemId } = await executedBound(fixture, peer, 'auto-drift-1', 'occ-1')
+    const other = serviceContract('auto-drift-other')
+    peer.tasks.set(contract.id, { contract: other, state: 'done', reason: null, receipt: serviceReceipt(other) })
+    fixture.automations?.wake()
+    fixture.automations?.wake()
+    expect(fixture.service.acceptanceVerdict(itemId)).toBeNull()
+    expect(verdictEvents(fixture, itemId)).toBe(0)
+    peer.tasks.delete(contract.id)
+    fixture.automations?.wake()
+    expect(fixture.service.acceptanceVerdict(itemId)).toBeNull()
+  })
+
+  test('acceptance auto-settle survives a throwing verifier and retries on the next wake', async () => {
+    const fixture = await serviceHarness({ extra: autoSettle() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { contract, itemId } = await executedBound(fixture, peer, 'auto-retry-1', 'occ-1')
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract) })
+    peer.failure = new Error('verifier stopped')
+    expect(() => fixture.automations?.wake()).not.toThrow()
+    expect(fixture.service.acceptanceVerdict(itemId)).toBeNull()
+    peer.failure = null
+    fixture.automations?.wake()
+    expect(fixture.service.acceptanceVerdict(itemId)).toMatchObject({ receiptId: 'svc-receipt-1' })
+  })
+
+  test('acceptance auto-settle reads at most maxPerTick items per wake, round-robin past pending ones', async () => {
+    const fixture = await serviceHarness({ extra: autoSettle(1) })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const first = await executedBound(fixture, peer, 'auto-batch-1', 'occ-1')
+    const second = await executedBound(fixture, peer, 'auto-batch-2', 'occ-2')
+    // The older item stays pending; it must not starve the newer one.
+    peer.tasks.set(first.contract.id, { contract: first.contract, state: 'verifying', reason: null, receipt: null })
+    peer.tasks.set(second.contract.id, { contract: second.contract, state: 'done', reason: null, receipt: serviceReceipt(second.contract) })
+    let reads = peer.reads.length
+    fixture.automations?.wake()
+    expect(peer.reads.slice(reads)).toEqual([first.contract.id])
+    reads = peer.reads.length
+    fixture.automations?.wake()
+    expect(peer.reads.slice(reads)).toEqual([second.contract.id])
+    expect(fixture.service.acceptanceVerdict(second.itemId)).not.toBeNull()
+    reads = peer.reads.length
+    fixture.automations?.wake()
+    // Only the pending item remains, and the cursor wraps to it.
+    expect(peer.reads.slice(reads)).toEqual([first.contract.id])
+    expect(fixture.service.acceptanceVerdict(first.itemId)).toBeNull()
+  })
+
+  test('acceptance.autoSettle validates its shape and requires an active intake', () => {
+    const base = { enabled: true, mode: 'active', databasePath: '/data/state.sqlite', workRoot: '/data/work', workerAutomationId: WORKER,
+      admission: { allowedKinds: ['review'] },
+      scope: { workspace: WORKSPACE, preset: PRESET, principalId: PRINCIPAL, ownerRouteId: ROUTE, expiresAt: Date.now() + 3_600_000 } } satisfies Config
+    expect(normalizeConfig({ ...base, acceptance: { autoSettle: { enabled: true } } }, Date.now()).acceptanceAutoSettle).toEqual({ maxPerTick: 5 })
+    expect(normalizeConfig({ ...base, acceptance: { autoSettle: { enabled: false, maxPerTick: 3 } } }, Date.now()).acceptanceAutoSettle).toBeUndefined()
+    expect(normalizeConfig({ ...base, acceptance: {} }, Date.now()).acceptanceAutoSettle).toBeUndefined()
+    for (const maxPerTick of [0, 11, 1.5]) {
+      expect(errorCode(() => normalizeConfig({ ...base, acceptance: { autoSettle: { enabled: true, maxPerTick } } }, Date.now()))).toBe('invalid-input')
+    }
+    expect(errorCode(() => normalizeConfig({ ...base, acceptance: { autoSettle: { enabled: true, extra: 1 } } } as never, Date.now()))).toBe('invalid-input')
+    expect(() => normalizeConfig({ ...base, mode: 'observe', acceptance: { autoSettle: { enabled: true } } }, Date.now())).toThrow(/acceptance\.autoSettle requires/u)
+    expect(() => normalizeConfig({ ...base, enabled: false, acceptance: { autoSettle: { enabled: true } } }, Date.now())).toThrow(/acceptance\.autoSettle requires/u)
   })
 
   test('a Policy change notifies a live item without cancelling it; its follow-ups release when it ends', async () => {

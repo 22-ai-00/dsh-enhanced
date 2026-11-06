@@ -250,6 +250,8 @@ export class AssistantWorkItemsService extends Service {
   private workItemsSchedulerWaking = false
   private workItemsSchedulerLastWakeAt: number | null = null
   private workItemsSchedulerLastError: string | null = null
+  /** In-memory round-robin position of `acceptance.autoSettle`; a restart rescans from the start. */
+  private workItemsAutoSettleCursor: Readonly<{ createdAt: number; id: string }> | null = null
 
   private readonly workItemsOwnerReads: WorkItemOwnerRecall
   private readonly workItemsOwnerContinuations: WorkItemOwnerContinuation
@@ -568,7 +570,40 @@ export class AssistantWorkItemsService extends Service {
       this.workItemsSchedulerLastError = error instanceof WorkItemError ? error.code : 'scheduler-wake-failed'
       this.ctx.logger.warn(`assistant-work-items: waiting resume scan failed: ${describe(error)}`)
     } finally {
+      try { this.workItemsAutoSettle(components) }
+      catch (error) { this.ctx.logger.warn(`assistant-work-items: acceptance auto-settle scan failed: ${describe(error)}`) }
       this.workItemsSchedulerWaking = false
+    }
+  }
+
+  /**
+   * WP21 slice 5: on the same native wake, read back at most `maxPerTick`
+   * executed, acceptance-bound items without a verdict through the Host-only
+   * `settleAcceptance`. Round-robin over an in-memory cursor so items still
+   * pending at the verifier cannot starve later ones. Anything short of a
+   * validated receipt writes nothing and is simply read again on a later wake.
+   */
+  private workItemsAutoSettle(components: Components): void {
+    const autoSettle = this.workItemsConfig.acceptanceAutoSettle
+    // A missing verifier peer cannot settle anything; skip the scan entirely.
+    if (autoSettle === undefined || this.workItemsClosed || this.workItemsVerifier() === undefined) return
+    const limit = autoSettle.maxPerTick
+    const batch = [...components.store.listUnsettledAcceptanceItems(this.workItemsAutoSettleCursor, limit)]
+    if (batch.length < limit && this.workItemsAutoSettleCursor !== null) {
+      const seen = new Set(batch.map(item => item.id))
+      for (const item of components.store.listUnsettledAcceptanceItems(null, limit - batch.length)) if (!seen.has(item.id)) batch.push(item)
+    }
+    for (const item of batch) {
+      if (this.workItemsClosed) break
+      this.workItemsAutoSettleCursor = Object.freeze({ createdAt: item.createdAt, id: item.id })
+      try {
+        const result = this.settleAcceptance(item.id)
+        if (result.outcome !== 'verified' && result.outcome !== 'pending') {
+          this.ctx.logger.debug(`assistant-work-items: acceptance auto-settle for ${item.id}: ${result.outcome}`)
+        }
+      } catch (error) {
+        this.ctx.logger.debug(`assistant-work-items: acceptance auto-settle for ${item.id} not recorded: ${describe(error)}`)
+      }
     }
   }
 

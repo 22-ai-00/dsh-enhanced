@@ -340,7 +340,8 @@ host-only `admitDecision(decision)`（service 与 `WorkItemAdmission` 同名方�
 - 冻结：mandate 新增 `acceptance`（`work-items/acceptance-binding/v1`：verifier=`assistant-verifier`、author、contractId/Digest、taskKind、task/objective/profile 摘要、criteria 数、expiresAt）。author 由契约 task kind 推出（automation-run→automations、foreground-turn→delivery、goal-*→goals），须与 verifier、执行方 `assistant-work-items` 三方互异；已存绑定结构不符即 `malformed-basis`。句柄进入 mandate digest（无句柄时 digest 与第 1 片完全一致），同 decisionId 换句柄为 `identity-mismatch`。
 - 完成判定：host-only `settleAcceptance(itemId)` 不接受判定输入，只从 verifier 读回同一契约的 `done` 回执并以 `validateTaskVerificationReceipt` 校验，objectiveStatus 取回执由准则结果推出的值；回执 `startedAt` 早于工作项创建时间、契约漂移、回执无效或缺 verifier 一律不写（`drift`/`unavailable`）。结算前先做本地无副作用门：已存依据须完整且指向本项（不调用 Policy，不写审计），且工作项须已被认领执行并处于 `ready`；从未认领、park（含授权撤销）、blocked、failed、dropped 均为 `invalid-state`。每项至多一条 `acceptance-verified` 事件，先到回执胜出：同回执重放幂等（`already-verified`），已记判定与当前绑定契约不符为 `drift`，竞争中落败的不同回执返回 `{ outcome: 'identity-mismatch', verdict, receiptDigest }` 而非抛错，绝不覆盖；`acceptanceVerdict(itemId)` 读回。worker 的 `ready` 报告不产生任何判定。仅追加事件行，**无 schema 变更**。
 - 独立性依赖宿主注入的 `assistantVerifier` 服务槽：WorkItems 只信任该槽提供的契约与回执，宿主须保证注入的是真正独立的 verifier，而非执行方自身或其代理。
-- 未覆盖：判定只记事件，不推进工作项状态或 outcome 表；按需拉取，无定时器；尚无调用方提供句柄；contractId 查重按已存依据 JSON 全表扫描（无索引）。
+- 自动结算（WP21 第 5 片）：`acceptance: { autoSettle: { enabled: true, maxPerTick?: 1–10，默认 5 } }` 默认关，开启须 enabled + active 部署；关闭时零行为变化。不新增定时器，只搭既有 Automations scheduler wake：每次 wake 在等待恢复扫描之后，按 (created_at, id) 内存游标轮转选出至多 `maxPerTick` 个 `ready`、attempt≥1、绑定了 acceptance 合同且尚无 `acceptance-verified` 事件的工作项，逐个走与 host-only `settleAcceptance(itemId)` 完全相同的路径（门禁、首个回执胜出、漂移判定语义不变）。verifier 槽缺失时整轮跳过不扫描；verifier 抛错、`pending`、`drift`、`needs-attention` 均不写任何行，下次 wake 重读；单项异常只记 debug 日志，不影响 wake 其余工作。已记判定的项离开候选集，不再读 verifier。游标仅在内存，重启从头轮转。
+- 未覆盖：判定只记事件，不推进工作项状态或 outcome 表；漂移项不会被永久排除，每轮仍占一个读额度；尚无调用方提供句柄；contractId 查重与自动结算候选查询按已存依据 JSON 全表扫描（无索引）。
 
 ### Policy 变更通知与跟进归属（WP21 第 2 片）
 
@@ -587,6 +588,7 @@ ctx.assistantWorkItems.registerIntakeEvaluator({
 | `intakeLedger.evaluation.admit.kind` / `originBindingId` | `intake-inferred` / 必填 | 准入 mandate 的 kind（auto 须在 `allowedKinds` 内）与报告发往的 origin binding |
 | `intakeLedger.evaluation.admit.maxPerHour` | `5` | 滑动一小时准入上限（1–100） |
 | `follows.eventTriggers.enabled` | `false` | 有 `eventTriggers` 服务时注册 `event-triggers` follow 来源（ref `<triggerId>@<afterSequence>@<configDigest>`，序号须等于当前全局 high water，摘要须等于该 trigger 当前配置）；要求 enabled intake 与完整 scope |
+| `acceptance.autoSettle.enabled` / `maxPerTick` | `false` / `5` | 在既有 scheduler wake 上自动读回已执行绑定项的 verifier 回执并记判定（每次 wake 至多 1–10 项，需 enabled active）；见独立验收绑定 |
 | `ownerRecall.enabled` | `false` | 显式启用当前主人前台任务查询；要求 enabled active、完整 scope、worker automation 与独立 `inspect-work-items` 授权 |
 | `ownerRecall.linkedAliases` | 未设置 | 主人显式允许的 Delivery `linked` principal id 名单（规范 `channel/account/tenant/user` 形式，≤8，去重，不含 owner）；未设置时跨渠道别名读取一律拒绝；要求 `ownerRecall.enabled`；别名读取另需带 `budget` 的 `inspect-work-items` 规则及 Policy `authorizeAgentForPrincipal`（按别名 principal 独立计费） |
 | `ownerReportRouting.linkedFallback` | 未设置 | origin binding 不可用时可接收终端报告只读通知的 Delivery `linked` principal id 有序名单（规范形式，≤8，去重，不含 owner）；要求 enabled active、完整 scope 与 worker；回复不能续办 |

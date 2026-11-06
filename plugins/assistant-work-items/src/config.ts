@@ -33,6 +33,11 @@ export interface Config {
   ownerReplyContinuation?: boolean
   ownerReportFeedback?: boolean
   intakeLedger?: IntakeLedgerConfig
+  /**
+   * WP21 slice 5: `autoSettle` reads bound items' verifier receipts on the
+   * existing scheduler wake, at most `maxPerTick` (1–10, default 5) per wake.
+   */
+  acceptance?: { autoSettle?: { enabled?: boolean; maxPerTick?: number } }
   follows?: FollowsConfig
 }
 
@@ -206,6 +211,8 @@ export interface NormalizedConfig {
   readonly ownerReportFeedback?: true
   /** Present only when the intake ledger is enabled. */
   readonly intakeLedger?: NormalizedIntakeLedger
+  /** Present only when `acceptance.autoSettle.enabled` is true. */
+  readonly acceptanceAutoSettle?: Readonly<{ maxPerTick: number }>
   /** Present only when at least one built-in followed-thread source is enabled. */
   readonly follows?: NormalizedFollows
 }
@@ -298,7 +305,7 @@ const DELIVERY_KEYS = ['notifyOn'] as const
 const SETTLEMENT_KEYS = ['enabled', 'windowMs', 'sweepIntervalMs', 'maxSourcesPerSweep', 'maxPendingPerSweep', 'maxSettlementsPerSweep'] as const
 const SOURCES_KEYS = ['foregroundFailures'] as const
 const FOREGROUND_FAILURE_KEYS = ['enabled', 'kind', 'includeTimedOut', 'maxCandidatesPerSweep', 'maxAdmitsPerSweep', 'sweepIntervalMs'] as const
-const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerReportRouting', 'ownerContinuation', 'ownerReplyContinuation', 'ownerReportFeedback', 'intakeLedger', 'follows'] as const
+const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerReportRouting', 'ownerContinuation', 'ownerReplyContinuation', 'ownerReportFeedback', 'intakeLedger', 'follows', 'acceptance'] as const
 const FOLLOWS_KEYS = ['eventTriggers'] as const
 const FOLLOW_SOURCE_KEYS = ['enabled'] as const
 const INTAKE_LEDGER_KEYS = ['enabled', 'sources', 'evaluation'] as const
@@ -396,6 +403,9 @@ export const ConfigSchema = Schema.object({
     }),
   }),
   follows: Schema.object({ eventTriggers: Schema.object({ enabled: Schema.boolean().default(false) }) }),
+  acceptance: Schema.object({
+    autoSettle: Schema.object({ enabled: Schema.boolean().default(false), maxPerTick: Schema.number().step(1) }),
+  }),
   ownerRecall: Schema.object({ enabled: Schema.boolean().default(false), linkedAliases: Schema.array(Schema.string()) }),
   ownerReportRouting: Schema.object({ linkedFallback: Schema.array(Schema.string()), prefer: Schema.union(['origin', 'recent'] as const) }),
   ownerContinuation: Schema.object({
@@ -676,6 +686,8 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   }
   const follows = normalizeFollows(value['follows'])
   if (follows?.eventTriggers === true && (!enabled || scope === null)) fail('invalid-input', 'follows.eventTriggers requires an enabled intake with an owner scope')
+  const acceptanceAutoSettle = normalizeAcceptanceAutoSettle(value['acceptance'])
+  if (acceptanceAutoSettle && (!enabled || mode !== 'active')) fail('invalid-input', 'acceptance.autoSettle requires an enabled active intake')
   return Object.freeze({
     enabled,
     mode,
@@ -697,7 +709,22 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     ...(ownerReportFeedback === true ? { ownerReportFeedback: true as const } : {}),
     ...(intakeLedger === undefined ? {} : { intakeLedger }),
     ...(follows === undefined ? {} : { follows }),
+    ...(acceptanceAutoSettle === undefined ? {} : { acceptanceAutoSettle }),
   })
+}
+
+/** Absent or disabled auto-settle normalizes to `undefined`. */
+function normalizeAcceptanceAutoSettle(raw: unknown): Readonly<{ maxPerTick: number }> | undefined {
+  if (raw === undefined) return undefined
+  const value = plainObject(raw, 'acceptance')
+  rejectUnknown(value, ['autoSettle'], 'acceptance')
+  if (value['autoSettle'] === undefined) return undefined
+  const autoSettle = plainObject(value['autoSettle'], 'acceptance.autoSettle')
+  rejectUnknown(autoSettle, ['enabled', 'maxPerTick'], 'acceptance.autoSettle')
+  const enabled = autoSettle['enabled'] ?? false
+  if (typeof enabled !== 'boolean') fail('invalid-input', 'acceptance.autoSettle.enabled must be a boolean')
+  if (!enabled) return undefined
+  return Object.freeze({ maxPerTick: integer(autoSettle['maxPerTick'] ?? 5, 'acceptance.autoSettle.maxPerTick', 1, 10) })
 }
 
 /** Absent or all-disabled follow sources normalize to `undefined`. */

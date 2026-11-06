@@ -1305,6 +1305,24 @@ export class WorkItemStore {
     return row === undefined ? undefined : itemFromRow(row)
   }
 
+  /**
+   * Executed (`ready`, attempt ≥ 1) items whose frozen mandate binds an
+   * acceptance contract and that have no recorded verdict yet, in
+   * (created_at, id) order strictly after `after`. A bounded full scan over
+   * the stored basis JSON, like `findItemByAcceptanceContract` (no schema change).
+   */
+  listUnsettledAcceptanceItems(after: Readonly<{ createdAt: number; id: string }> | null, limit: number): readonly WorkItemRecord[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) fail('invalid-input', 'acceptance settle limit must be between 1 and 10')
+    return Object.freeze((this.#statement(`
+      SELECT ${ITEM_ALIASES} FROM work_item i
+      WHERE i.state = 'ready' AND i.attempt >= 1
+        AND CASE WHEN json_valid(i.authority_basis) THEN json_extract(i.authority_basis, '$.mandate.acceptance.contractId') END IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM work_item_event e WHERE e.item_id = i.id AND e.kind = '${ACCEPTANCE_VERIFIED_EVENT}')
+        AND (i.created_at, i.id) > (?, ?)
+      ORDER BY i.created_at ASC, i.id ASC LIMIT ?
+    `).all(after?.createdAt ?? -1, after?.id ?? '', limit) as Row[]).map(itemFromRow))
+  }
+
   /** Read one durable key/value row from the schema-meta table. */
   meta(key: string): string | null {
     const row = this.#statement('SELECT value FROM work_item_schema_meta WHERE key = ?').get(key) as Row | undefined
