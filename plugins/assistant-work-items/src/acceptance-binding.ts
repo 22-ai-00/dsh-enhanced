@@ -19,6 +19,8 @@ import type { PeerOwnerRouteReceipt, PeerVerifierService } from './peers.ts'
 import type {
   WorkItemAcceptanceAuthor,
   WorkItemAcceptanceBinding,
+  WorkItemAcceptanceBlockReason,
+  WorkItemAcceptanceGateExpectation,
   WorkItemAcceptanceHandle,
   WorkItemAcceptanceSettleResult,
   WorkItemAcceptanceVerdict,
@@ -180,7 +182,7 @@ export function acceptanceBindingIsUsable(value: unknown): value is WorkItemAcce
 /** Durable verdict sink; the store keeps one verdict per item. */
 export interface AcceptanceVerdictSink {
   acceptanceVerdict(itemId: string): WorkItemAcceptanceVerdict | undefined
-  recordAcceptanceVerdict(verdict: Omit<WorkItemAcceptanceVerdict, 'recordedAt'>): Readonly<{ verdict: WorkItemAcceptanceVerdict; created: boolean }>
+  recordAcceptanceVerdict(verdict: Omit<WorkItemAcceptanceVerdict, 'recordedAt'>, gate?: WorkItemAcceptanceGateExpectation): Readonly<{ verdict: WorkItemAcceptanceVerdict; created: boolean; blockedReason?: WorkItemAcceptanceBlockReason }>
 }
 
 /**
@@ -196,6 +198,12 @@ export function settleAcceptance(
   verifier: PeerVerifierService | undefined,
   item: WorkItemRecord,
   binding: WorkItemAcceptanceBinding,
+  /**
+   * `acceptance.verdictGate`: the executed generation a not-achieved or
+   * unknown verdict moves to `blocked`, in the verdict's own transaction.
+   * The caller handles `needs-attention` (no verdict is written for it).
+   */
+  gate?: WorkItemAcceptanceGateExpectation,
 ): WorkItemAcceptanceSettleResult {
   const recorded = sink.acceptanceVerdict(item.id)
   if (recorded !== undefined) {
@@ -203,7 +211,12 @@ export function settleAcceptance(
     if (recorded.contractId !== binding.contractId || recorded.contractDigest !== binding.contractDigest) {
       return Object.freeze({ outcome: 'drift', detail: 'recorded verdict is for another contract' })
     }
-    return Object.freeze({ outcome: 'already-verified', verdict: recorded })
+    if (gate === undefined || recorded.objectiveStatus === 'achieved') return Object.freeze({ outcome: 'already-verified', verdict: recorded })
+    // The gate was enabled after this verdict: replaying the same receipt is idempotent and applies it.
+    const { recordedAt: _recordedAt, ...replay } = recorded
+    const result = sink.recordAcceptanceVerdict(replay, gate)
+    return Object.freeze({ outcome: 'already-verified', verdict: result.verdict,
+      ...(result.blockedReason === undefined ? {} : { blockedReason: result.blockedReason }) })
   }
   const read = inspect(verifier, binding.contractId)
   if (read.kind === 'unavailable') return Object.freeze({ outcome: 'unavailable', detail: read.detail })
@@ -241,12 +254,13 @@ export function settleAcceptance(
       receiptDigest: receipt.digest,
       objectiveStatus: receipt.objectiveStatus,
       completedAt: receipt.completedAt,
-    })
+    }, gate)
   } catch (error) {
     // A different receipt already won (first-receipt-wins); report, never overwrite.
     const existing = error instanceof WorkItemError && error.code === 'identity-mismatch' ? sink.acceptanceVerdict(item.id) : undefined
     if (existing === undefined) throw error
     return Object.freeze({ outcome: 'identity-mismatch', verdict: existing, receiptDigest: receipt.digest })
   }
-  return Object.freeze({ outcome: result.created ? 'verified' : 'already-verified', verdict: result.verdict })
+  return Object.freeze({ outcome: result.created ? 'verified' : 'already-verified', verdict: result.verdict,
+    ...(result.blockedReason === undefined ? {} : { blockedReason: result.blockedReason }) })
 }

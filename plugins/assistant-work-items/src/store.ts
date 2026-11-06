@@ -31,6 +31,8 @@ import type {
   WorkItemPolicyNotice,
   WorkItemAcceptanceBinding,
   WorkItemAcceptanceVerdict,
+  WorkItemAcceptanceBlockReason,
+  WorkItemAcceptanceGateExpectation,
   WorkItemLateAcceptanceBinding,
   WorkItemExecutionStatus,
   WorkItemObjectiveStatus,
@@ -2590,7 +2592,7 @@ export class WorkItemStore {
    * has a verdict is an identity mismatch and writes nothing. The item's state,
    * lease and outcome revisions are untouched.
    */
-  recordAcceptanceVerdict(verdict: Omit<WorkItemAcceptanceVerdict, 'recordedAt'>): Readonly<{ verdict: WorkItemAcceptanceVerdict; created: boolean }> {
+  recordAcceptanceVerdict(verdict: Omit<WorkItemAcceptanceVerdict, 'recordedAt'>, gate?: WorkItemAcceptanceGateExpectation): Readonly<{ verdict: WorkItemAcceptanceVerdict; created: boolean; blockedReason?: WorkItemAcceptanceBlockReason }> {
     const now = this.#now()
     return this.#transaction(() => {
       this.#requireItem(verdict.itemId)
@@ -2599,7 +2601,9 @@ export class WorkItemStore {
         if (prior.receiptDigest !== verdict.receiptDigest || prior.contractDigest !== verdict.contractDigest) {
           fail('identity-mismatch', 'item already has a verdict from a different receipt')
         }
-        return Object.freeze({ verdict: prior, created: false })
+        // Applying the gate to an existing verdict is idempotent: a blocked item stays put.
+        const blockedReason = gate === undefined ? undefined : this.#gateVerdict(prior, gate, now)
+        return Object.freeze({ verdict: prior, created: false, ...(blockedReason === undefined ? {} : { blockedReason }) })
       }
       this.#appendEvent(verdict.itemId, ACCEPTANCE_VERIFIED_EVENT, 'verifier', {
         verifier: verdict.verifier,
@@ -2612,8 +2616,50 @@ export class WorkItemStore {
       }, now)
       const recorded = this.acceptanceVerdict(verdict.itemId)
       if (recorded === undefined) fail('storage', 'acceptance verdict could not be read back')
-      return Object.freeze({ verdict: recorded, created: true })
+      // Same transaction as the verdict: a crash never leaves a failed verdict on a `ready` item.
+      const blockedReason = gate === undefined ? undefined : this.#gateVerdict(recorded, gate, now)
+      return Object.freeze({ verdict: recorded, created: true, ...(blockedReason === undefined ? {} : { blockedReason }) })
     })
+  }
+
+  /**
+   * WP21 slice 7 (`acceptance.verdictGate`): an independent verifier said the
+   * executed item's objective was not achieved, could not tell, or needs
+   * attention. Move it from `ready` to the existing `blocked` state with an
+   * `acceptance-*` reason and one `blocked` event. Compare-and-swap on the
+   * expected state, attempt and occurrence: an item that moved on (re-armed,
+   * withdrawn, already blocked) is left untouched and nothing is written. The
+   * outcome ledger is not rewritten; the self-reported `ready` revision stays
+   * history.
+   */
+  blockForAcceptance(itemId: string, expect: WorkItemAcceptanceGateExpectation, reason: WorkItemAcceptanceBlockReason,
+    detail: Readonly<{ contractId: string; receiptDigest?: string; verifierReason?: string | null }>): boolean {
+    return this.#transaction(() => this.#blockForAcceptance(itemId, expect, reason, detail, this.#now()))
+  }
+
+  #gateVerdict(verdict: WorkItemAcceptanceVerdict, expect: WorkItemAcceptanceGateExpectation, now: number): WorkItemAcceptanceBlockReason | undefined {
+    if (verdict.objectiveStatus === 'achieved') return undefined
+    const reason: WorkItemAcceptanceBlockReason = verdict.objectiveStatus === 'not-achieved' ? 'acceptance-not-achieved' : 'acceptance-unknown'
+    return this.#blockForAcceptance(verdict.itemId, expect, reason, { contractId: verdict.contractId, receiptDigest: verdict.receiptDigest }, now)
+      ? reason : undefined
+  }
+
+  #blockForAcceptance(itemId: string, expect: WorkItemAcceptanceGateExpectation, reason: WorkItemAcceptanceBlockReason,
+    detail: Readonly<{ contractId: string; receiptDigest?: string; verifierReason?: string | null }>, now: number): boolean {
+    const item = this.#requireItem(itemId)
+    if (item.observed || item.state !== 'ready' || item.attempt < 1 || item.attempt !== expect.attempt
+      || item.occurrenceId !== expect.occurrenceId || item.leaseUntil !== null) return false
+    const changed = this.#statement(`UPDATE work_item SET state = 'blocked', state_reason = ?, updated_at = ?
+      WHERE id = ? AND state = 'ready' AND attempt = ? AND occurrence_id IS ?`).run(reason, now, itemId, expect.attempt, expect.occurrenceId)
+    if (Number(changed.changes) !== 1) return false
+    this.#appendEvent(itemId, 'blocked', 'verifier', {
+      reason,
+      attempt: item.attempt,
+      contractId: detail.contractId,
+      ...(detail.receiptDigest === undefined ? {} : { receiptDigest: detail.receiptDigest }),
+      ...(detail.verifierReason === undefined || detail.verifierReason === null ? {} : { verifierReason: truncateUtf8(detail.verifierReason, 256).value }),
+    }, now)
+    return true
   }
 
   /** Every Policy-change notice recorded for one item, oldest first. */

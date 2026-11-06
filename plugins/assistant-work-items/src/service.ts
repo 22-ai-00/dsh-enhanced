@@ -1025,7 +1025,16 @@ export class AssistantWorkItemsService extends Service {
     // Only work that actually ran and reached `ready` can be accepted: never
     // claimed, parked, blocked, failed or dropped items settle nothing.
     if (item.attempt < 1 || item.state !== 'ready') fail('invalid-state', `work item is ${item.state}, not executed`)
-    return settleAcceptance(components.store, this.workItemsVerifier(), item, binding)
+    const gate = this.workItemsConfig.acceptanceVerdictGate === true
+      ? Object.freeze({ attempt: item.attempt, occurrenceId: item.occurrenceId }) : undefined
+    const result = settleAcceptance(components.store, this.workItemsVerifier(), item, binding, gate)
+    // WP21 slice 7: the verifier's needs-attention writes no verdict, but with
+    // the gate on it still moves this executed generation to `blocked`.
+    if (gate !== undefined && result.outcome === 'needs-attention'
+      && components.store.blockForAcceptance(item.id, gate, 'acceptance-needs-attention', { contractId: binding.contractId, verifierReason: result.reason })) {
+      return Object.freeze({ ...result, blockedReason: 'acceptance-needs-attention' as const })
+    }
+    return result
   }
 
   /** Host-only: the verifier verdict recorded for one item, or null. */

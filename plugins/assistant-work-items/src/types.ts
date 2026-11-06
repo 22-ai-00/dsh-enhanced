@@ -270,14 +270,21 @@ export interface WorkItemLateAcceptanceBinding {
   readonly recordedAt: number
 }
 
+/** `blocked` reasons `acceptance.verdictGate` writes; the state itself is the existing `blocked`. */
+export type WorkItemAcceptanceBlockReason = 'acceptance-not-achieved' | 'acceptance-unknown' | 'acceptance-needs-attention'
+
+/** The executed generation a verdict gate may move: compare-and-swap inputs. */
+export type WorkItemAcceptanceGateExpectation = Readonly<{ attempt: number; occurrenceId: string | null }>
+
 export type WorkItemAcceptanceSettleResult =
   /** The verifier peer is missing or could not answer; nothing was written. */
   | Readonly<{ outcome: 'unavailable'; detail: string }>
   /** The verifier no longer holds the frozen contract, or its receipt does not validate; nothing was written. */
   | Readonly<{ outcome: 'drift'; detail: string }>
   | Readonly<{ outcome: 'pending'; state: 'awaiting-execution' | 'pending' | 'verifying' }>
-  | Readonly<{ outcome: 'needs-attention'; reason: string | null }>
-  | Readonly<{ outcome: 'verified' | 'already-verified'; verdict: WorkItemAcceptanceVerdict }>
+  /** `blockedReason` is present only when `acceptance.verdictGate` moved the item to `blocked` on this call. */
+  | Readonly<{ outcome: 'needs-attention'; reason: string | null; blockedReason?: WorkItemAcceptanceBlockReason }>
+  | Readonly<{ outcome: 'verified' | 'already-verified'; verdict: WorkItemAcceptanceVerdict; blockedReason?: WorkItemAcceptanceBlockReason }>
   /** A different receipt already settled this item (first receipt wins); nothing was written. */
   | Readonly<{ outcome: 'identity-mismatch'; verdict: WorkItemAcceptanceVerdict; receiptDigest: string }>
 

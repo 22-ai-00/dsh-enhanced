@@ -268,12 +268,12 @@ function serviceContract(id = 'svc-acceptance-1', options: { ref?: string; owner
 }
 
 /** A passing receipt whose verification starts now, after the item exists. */
-function serviceReceipt(contract: TaskAcceptanceContract, startedAt = Date.now(), status: 'passed' | 'unknown' = 'passed') {
+function serviceReceipt(contract: TaskAcceptanceContract, startedAt = Date.now(), status: 'passed' | 'unknown' | 'failed' = 'passed') {
   const now = startedAt
   return createTaskVerificationReceipt(contract, {
     protocol: 'task-verification/v1', id: 'svc-receipt-1', contractId: contract.id, contractDigest: contract.digest,
     scope: contract.scope, owner: contract.owner, task: contract.task,
-    results: [{ criterionId: 'program', status, reason: status === 'passed' ? 'output-matched' : 'probe-timeout', evidence: status === 'passed' ? [{ kind: 'process-output', ref: 'capture-1', digest: 'a'.repeat(64) }] : [] }],
+    results: [{ criterionId: 'program', status, reason: status === 'passed' ? 'output-matched' : status === 'failed' ? 'output-differed' : 'probe-timeout', evidence: status !== 'unknown' ? [{ kind: 'process-output', ref: 'capture-1', digest: 'a'.repeat(64) }] : [] }],
     startedAt: now, completedAt: now + 1, validUntil: now + 1_800_000,
   })
 }
@@ -1226,6 +1226,118 @@ describe('work-item admission authority revalidation', () => {
   }
 
   const autoSettle = (maxPerTick?: number): Partial<Config> => ({ acceptance: { autoSettle: { enabled: true, ...(maxPerTick === undefined ? {} : { maxPerTick }) } } })
+
+  const verdictGate = (): Partial<Config> => ({ acceptance: { autoSettle: { enabled: true }, verdictGate: { enabled: true } } })
+
+  function blockedEvents(fixture: { root: string }, itemId: string): Array<Record<string, unknown>> {
+    const db = new DatabaseSync(join(fixture.root, 'state', 'state.sqlite'), { readOnly: true })
+    try {
+      return (db.prepare("SELECT actor, detail FROM work_item_event WHERE item_id = ? AND kind = 'blocked' ORDER BY sequence").all(itemId) as Array<{ actor: string; detail: string }>)
+        .map(row => ({ actor: row.actor, ...JSON.parse(row.detail) as Record<string, unknown> }))
+    } finally { db.close() }
+  }
+
+  test('acceptance.verdictGate is off by default: a not-achieved verdict leaves the item ready', async () => {
+    const fixture = await serviceHarness({ extra: autoSettle() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { contract, itemId } = await executedBound(fixture, peer, 'gate-off-1', 'occ-1')
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract, Date.now(), 'failed') })
+    fixture.automations?.wake()
+    expect(fixture.service.acceptanceVerdict(itemId)).toMatchObject({ objectiveStatus: 'not-achieved' })
+    expect(readStore(fixture).findItemById(itemId)).toMatchObject({ state: 'ready', stateReason: null })
+    expect(blockedEvents(fixture, itemId)).toEqual([])
+    expect(fixture.config.acceptanceVerdictGate).toBeUndefined()
+  })
+
+  test('acceptance.verdictGate blocks an executed item whose verifier verdict is not achieved, in the verdict transaction', async () => {
+    const fixture = await serviceHarness({ extra: verdictGate() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { contract, itemId } = await executedBound(fixture, peer, 'gate-failed-1', 'occ-1')
+    const outcomesBefore = readStore(fixture).outcomes(itemId)
+    const receipt = serviceReceipt(contract, Date.now(), 'failed')
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt })
+    fixture.automations?.wake()
+    expect(fixture.service.acceptanceVerdict(itemId)).toMatchObject({ objectiveStatus: 'not-achieved' })
+    expect(readStore(fixture).findItemById(itemId)).toMatchObject({ state: 'blocked', stateReason: 'acceptance-not-achieved' })
+    expect(blockedEvents(fixture, itemId)).toEqual([{ actor: 'verifier', reason: 'acceptance-not-achieved', attempt: 1, contractId: contract.id, receiptDigest: receipt.digest }])
+    // The outcome ledger keeps its history; the gate only moves the item state.
+    expect(readStore(fixture).outcomes(itemId)).toEqual(outcomesBefore)
+    // Settled and blocked: nothing is read or written again.
+    const reads = peer.reads.length
+    fixture.automations?.wake()
+    expect(peer.reads).toHaveLength(reads)
+    expect(errorCode(() => fixture.service.settleAcceptance(itemId))).toBe('invalid-state')
+    expect(blockedEvents(fixture, itemId)).toHaveLength(1)
+  })
+
+  test('acceptance.verdictGate blocks an unknown verdict and a verifier needs-attention, and keeps an achieved item ready', async () => {
+    const fixture = await serviceHarness({ extra: verdictGate() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const unknown = await executedBound(fixture, peer, 'gate-unknown-1', 'occ-1')
+    peer.tasks.set(unknown.contract.id, { contract: unknown.contract, state: 'done', reason: null, receipt: serviceReceipt(unknown.contract, Date.now(), 'unknown') })
+    expect(fixture.service.settleAcceptance(unknown.itemId)).toMatchObject({ outcome: 'verified', blockedReason: 'acceptance-unknown' })
+    expect(readStore(fixture).findItemById(unknown.itemId)).toMatchObject({ state: 'blocked', stateReason: 'acceptance-unknown' })
+
+    const attention = await executedBound(fixture, peer, 'gate-attention-1', 'occ-2')
+    peer.tasks.set(attention.contract.id, { contract: attention.contract, state: 'needs-attention', reason: 'attempt-limit', receipt: null })
+    expect(fixture.service.settleAcceptance(attention.itemId)).toEqual({ outcome: 'needs-attention', reason: 'attempt-limit', blockedReason: 'acceptance-needs-attention' })
+    expect(readStore(fixture).findItemById(attention.itemId)).toMatchObject({ state: 'blocked', stateReason: 'acceptance-needs-attention' })
+    expect(fixture.service.acceptanceVerdict(attention.itemId)).toBeNull()
+    expect(blockedEvents(fixture, attention.itemId)).toEqual([{ actor: 'verifier', reason: 'acceptance-needs-attention', attempt: 1, contractId: attention.contract.id, verifierReason: 'attempt-limit' }])
+
+    const passed = await executedBound(fixture, peer, 'gate-passed-1', 'occ-3')
+    peer.tasks.set(passed.contract.id, { contract: passed.contract, state: 'done', reason: null, receipt: serviceReceipt(passed.contract) })
+    const settled = fixture.service.settleAcceptance(passed.itemId)
+    expect(settled).toMatchObject({ outcome: 'verified', verdict: { objectiveStatus: 'achieved' } })
+    expect(settled).not.toHaveProperty('blockedReason')
+    expect(readStore(fixture).findItemById(passed.itemId)).toMatchObject({ state: 'ready', stateReason: null })
+    expect(blockedEvents(fixture, passed.itemId)).toEqual([])
+  })
+
+  test('acceptance.verdictGate never moves an item whose generation changed (compare-and-swap)', async () => {
+    const fixture = await serviceHarness({ extra: verdictGate() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { contract, itemId } = await executedBound(fixture, peer, 'gate-cas-1', 'occ-1')
+    const store = readStore(fixture)
+    const item = store.findItemById(itemId)!
+    const detail = { contractId: contract.id }
+    expect(store.blockForAcceptance(itemId, { attempt: item.attempt + 1, occurrenceId: item.occurrenceId }, 'acceptance-needs-attention', detail)).toBe(false)
+    expect(store.blockForAcceptance(itemId, { attempt: item.attempt, occurrenceId: 'occ-other' }, 'acceptance-needs-attention', detail)).toBe(false)
+    expect(store.findItemById(itemId)).toMatchObject({ state: 'ready', stateReason: null })
+    expect(blockedEvents(fixture, itemId)).toEqual([])
+    expect(store.blockForAcceptance(itemId, { attempt: item.attempt, occurrenceId: item.occurrenceId }, 'acceptance-needs-attention', detail)).toBe(true)
+    // Already blocked: a second call writes nothing.
+    expect(store.blockForAcceptance(itemId, { attempt: item.attempt, occurrenceId: item.occurrenceId }, 'acceptance-not-achieved', detail)).toBe(false)
+    expect(store.findItemById(itemId)).toMatchObject({ state: 'blocked', stateReason: 'acceptance-needs-attention' })
+    expect(blockedEvents(fixture, itemId)).toHaveLength(1)
+  })
+
+  test('acceptance.verdictGate enabled after a failed verdict applies once on the next settle', async () => {
+    const before = await serviceHarness({ extra: autoSettle() })
+    const peer = new FakeVerifierPeer(before.ctx)
+    const { contract, itemId } = await executedBound(before, peer, 'gate-late-1', 'occ-1')
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract, Date.now(), 'failed') })
+    expect(before.service.settleAcceptance(itemId)).toMatchObject({ outcome: 'verified' })
+    expect(readStore(before).findItemById(itemId)?.state).toBe('ready')
+    const after = await serviceHarness({ root: before.root, extra: verdictGate() })
+    new FakeVerifierPeer(after.ctx)
+    expect(after.service.settleAcceptance(itemId)).toMatchObject({ outcome: 'already-verified', blockedReason: 'acceptance-not-achieved' })
+    expect(readStore(after).findItemById(itemId)).toMatchObject({ state: 'blocked', stateReason: 'acceptance-not-achieved' })
+    expect(verdictEvents(after, itemId)).toBe(1)
+    expect(blockedEvents(after, itemId)).toHaveLength(1)
+  })
+
+  test('acceptance.verdictGate validates its shape and requires an active intake', () => {
+    const base = { enabled: true, mode: 'active', databasePath: '/data/state.sqlite', workRoot: '/data/work', workerAutomationId: WORKER,
+      admission: { allowedKinds: ['review'] },
+      scope: { workspace: WORKSPACE, preset: PRESET, principalId: PRINCIPAL, ownerRouteId: ROUTE, expiresAt: Date.now() + 3_600_000 } } satisfies Config
+    expect(normalizeConfig({ ...base, acceptance: { verdictGate: { enabled: true } } }, Date.now()).acceptanceVerdictGate).toBe(true)
+    expect(normalizeConfig({ ...base, acceptance: { verdictGate: { enabled: false } } }, Date.now()).acceptanceVerdictGate).toBeUndefined()
+    expect(normalizeConfig({ ...base, acceptance: { verdictGate: {} } }, Date.now()).acceptanceVerdictGate).toBeUndefined()
+    expect(errorCode(() => normalizeConfig({ ...base, acceptance: { verdictGate: { enabled: 'yes' } } } as never, Date.now()))).toBe('invalid-input')
+    expect(errorCode(() => normalizeConfig({ ...base, acceptance: { verdictGate: { enabled: true, maxPerTick: 1 } } } as never, Date.now()))).toBe('invalid-input')
+    expect(() => normalizeConfig({ ...base, mode: 'observe', acceptance: { verdictGate: { enabled: true } } }, Date.now())).toThrow(/acceptance\.verdictGate requires/u)
+  })
 
   test('acceptance auto-settle is off by default: a scheduler wake reads no verifier and records nothing', async () => {
     const fixture = await serviceHarness()

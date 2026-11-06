@@ -42,7 +42,13 @@ export interface Config {
    * acceptance contract its worker run froze, on the same wake, at most
    * `maxPerTick` (1–10, default 5) per wake.
    */
-  acceptance?: { autoSettle?: { enabled?: boolean; maxPerTick?: number }; bindWorkerRun?: { enabled?: boolean; maxPerTick?: number } }
+  /**
+   * WP21 slice 7: `verdictGate` lets a settled verdict move the item. A
+   * not-achieved or unknown objective, or a verifier `needs-attention`,
+   * turns an executed `ready` item into `blocked` (`acceptance-*` reason);
+   * an achieved one leaves it `ready`. Off: verdicts stay events only.
+   */
+  acceptance?: { autoSettle?: { enabled?: boolean; maxPerTick?: number }; bindWorkerRun?: { enabled?: boolean; maxPerTick?: number }; verdictGate?: { enabled?: boolean } }
   follows?: FollowsConfig
 }
 
@@ -220,6 +226,8 @@ export interface NormalizedConfig {
   readonly acceptanceAutoSettle?: Readonly<{ maxPerTick: number }>
   /** Present only when `acceptance.bindWorkerRun.enabled` is true. */
   readonly acceptanceBindWorkerRun?: Readonly<{ maxPerTick: number }>
+  /** Present only when `acceptance.verdictGate.enabled` is true. */
+  readonly acceptanceVerdictGate?: true
   /** Present only when at least one built-in followed-thread source is enabled. */
   readonly follows?: NormalizedFollows
 }
@@ -413,6 +421,7 @@ export const ConfigSchema = Schema.object({
   acceptance: Schema.object({
     autoSettle: Schema.object({ enabled: Schema.boolean().default(false), maxPerTick: Schema.number().step(1) }),
     bindWorkerRun: Schema.object({ enabled: Schema.boolean().default(false), maxPerTick: Schema.number().step(1) }),
+    verdictGate: Schema.object({ enabled: Schema.boolean().default(false) }),
   }),
   ownerRecall: Schema.object({ enabled: Schema.boolean().default(false), linkedAliases: Schema.array(Schema.string()) }),
   ownerReportRouting: Schema.object({ linkedFallback: Schema.array(Schema.string()), prefer: Schema.union(['origin', 'recent'] as const) }),
@@ -699,6 +708,8 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   if (acceptanceAutoSettle && (!enabled || mode !== 'active')) fail('invalid-input', 'acceptance.autoSettle requires an enabled active intake')
   const acceptanceBindWorkerRun = acceptance.bindWorkerRun
   if (acceptanceBindWorkerRun && (!enabled || mode !== 'active')) fail('invalid-input', 'acceptance.bindWorkerRun requires an enabled active intake')
+  const acceptanceVerdictGate = acceptance.verdictGate
+  if (acceptanceVerdictGate && (!enabled || mode !== 'active')) fail('invalid-input', 'acceptance.verdictGate requires an enabled active intake')
   return Object.freeze({
     enabled,
     mode,
@@ -722,14 +733,15 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     ...(follows === undefined ? {} : { follows }),
     ...(acceptanceAutoSettle === undefined ? {} : { acceptanceAutoSettle }),
     ...(acceptanceBindWorkerRun === undefined ? {} : { acceptanceBindWorkerRun }),
+    ...(acceptanceVerdictGate === true ? { acceptanceVerdictGate: true as const } : {}),
   })
 }
 
 /** Absent or disabled acceptance passes normalize to `undefined`. */
-function normalizeAcceptance(raw: unknown): Readonly<{ autoSettle?: Readonly<{ maxPerTick: number }>; bindWorkerRun?: Readonly<{ maxPerTick: number }> }> {
+function normalizeAcceptance(raw: unknown): Readonly<{ autoSettle?: Readonly<{ maxPerTick: number }>; bindWorkerRun?: Readonly<{ maxPerTick: number }>; verdictGate?: true }> {
   if (raw === undefined) return {}
   const value = plainObject(raw, 'acceptance')
-  rejectUnknown(value, ['autoSettle', 'bindWorkerRun'], 'acceptance')
+  rejectUnknown(value, ['autoSettle', 'bindWorkerRun', 'verdictGate'], 'acceptance')
   const pass = (key: 'autoSettle' | 'bindWorkerRun'): Readonly<{ maxPerTick: number }> | undefined => {
     if (value[key] === undefined) return undefined
     const section = plainObject(value[key], `acceptance.${key}`)
@@ -740,7 +752,16 @@ function normalizeAcceptance(raw: unknown): Readonly<{ autoSettle?: Readonly<{ m
     return Object.freeze({ maxPerTick: integer(section['maxPerTick'] ?? 5, `acceptance.${key}.maxPerTick`, 1, 10) })
   }
   const autoSettle = pass('autoSettle'), bindWorkerRun = pass('bindWorkerRun')
-  return { ...(autoSettle === undefined ? {} : { autoSettle }), ...(bindWorkerRun === undefined ? {} : { bindWorkerRun }) }
+  let verdictGate = false
+  if (value['verdictGate'] !== undefined) {
+    const section = plainObject(value['verdictGate'], 'acceptance.verdictGate')
+    rejectUnknown(section, ['enabled'], 'acceptance.verdictGate')
+    const gate = section['enabled'] ?? false
+    if (typeof gate !== 'boolean') fail('invalid-input', 'acceptance.verdictGate.enabled must be a boolean')
+    verdictGate = gate
+  }
+  return { ...(autoSettle === undefined ? {} : { autoSettle }), ...(bindWorkerRun === undefined ? {} : { bindWorkerRun }),
+    ...(verdictGate ? { verdictGate: true as const } : {}) }
 }
 
 /** Absent or all-disabled follow sources normalize to `undefined`. */
