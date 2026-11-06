@@ -1,4 +1,4 @@
-import { rmSync } from 'node:fs'
+import { existsSync, rmSync } from 'node:fs'
 import { afterEach, expect, test } from 'vitest'
 import { CreationCapabilityJournal } from '../src/creation-capability-journal.js'
 import { assertSealedReplayPlanIdIsolated, planSealedAdoptionHandoff } from '../src/creation-capability-sealed-handoff.js'
@@ -44,6 +44,17 @@ test('refuses a plan id already used by the live journal under the next authorit
   expect(() => s.check('fresh')).toThrow(/already names a live adoption/u)
   expect(() => s.check('FRESH')).toThrow(/already names a live adoption/u)
   expect(s.check('fresh-2').planId).toBe('fresh-2')
+})
+
+test('sees an uncheckpointed live adoption while the Host journal is open with WAL sidecars', () => {
+  const s = sealed()
+  const journal = new CreationCapabilityJournal({ path: s.path, config: s.config })
+  try {
+    journal.claim({ certificate: s.certificate('running'), artifact: s.artifact })
+    expect(existsSync(`${s.path}-wal`)).toBe(true)
+    expect(() => s.check('Running')).toThrow(/already names a live adoption/u)
+    expect(s.check('running-2').planId).toBe('running-2')
+  } finally { journal.close() }
 })
 
 test('fails closed on a wrong proof anchor, malformed input or a journal without a sealed proof', () => {
