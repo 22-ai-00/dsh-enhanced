@@ -127,18 +127,42 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 
 `tests/client-bundle.spec.ts` 用 Web 外壳的 `__ModuleLoader__` 契约加载实际构建产物
 `lib/client.js`，以真实 `react`/`react/jsx-runtime` 执行 factory，断言 sidebar/main 两个注册与释放；
-并断言侧栏标签为「文鳐」、main 槽根容器带纵向滚动样式；
+并断言侧栏标签为「文鳐」、main 槽根容器带纵向滚动样式、产物内联 4 个 webp 且不含外部图片 URL；
 因此该测试依赖先运行 `pnpm --dir plugins/owner-console build`（根检查与 `pnpm check` 均先构建）。
-`tests/client-render.spec.ts` 不依赖 DOM，桩掉 React hooks 后展开元素树，断言页头品牌、装饰元素
-`aria-hidden`、状态胶囊带文字标签与空状态文案。
+`tests/client-render.spec.ts` 不依赖 DOM，桩掉 React hooks 后展开元素树，断言页头品牌、11 深海觉醒
+主视觉/面板背景/印章/侧栏图标均为纯装饰（`alt=""` + `aria-hidden`）、状态胶囊带文字标签与空状态文案。
 
 ## 界面布局
 
-- 页头：内联的文鳐主视觉 banner（`src/wenyao-hero.ts`，webp data URI，纯装饰 `alt=""`）、
-  标题「文鳐 Ray」与朱红印章、副标题，以及主按钮「开始对话」。
+- 页头：11 深海觉醒背景裁成的 3:1 主视觉 banner（webp data URI，纯装饰 `alt=""`）、
+  标题「文鳐 Ray」与圆形鲸印章、副标题，以及主按钮「开始对话」。
+- 面板主体：同一套背景的方形版本以低透明度铺在面板表面、卡片之下（不仅是页头），文字仍落在
+  主题卡片表面上，明暗主题的对比度不变。
+- 侧栏入口图标与页头印章都来自 11 深海觉醒 `icon.png`（方形裁切，可作圆形头像裁切）。
 - 卡片：统一圆角与边框，标题前一枚小云纹；状态用「圆点 + 文字」胶囊（ok/warn/error），不只靠颜色。
 - 颜色只取宿主 `--dsw-*` 变量并带回退值，明暗主题通用；不引入外部 CSS、字体或网络资源。
   装饰 SVG 见 `src/art.ts`。
+
+### 主视觉与图标资产
+
+源图 `11_深海觉醒/background.png`（1254×1254，1893031 bytes）与 `icon.png`（1254×1254，
+1240250 bytes）不入库；只提交 `assets/` 下压缩后的派生文件（合计约 88 KB），构建时由
+`scripts/build-assets.mjs` 内联成 `src/artwork.ts` 的 data URI，因此 `lib/client.js` 仍然自包含。
+`assets/` 不随 npm 包发布，也不需要发布：数据已内联在 `lib/` 中。
+
+重新生成派生资产（仅当源图变化时；需要 Python + Pillow）：
+
+```sh
+python3 plugins/owner-console/scripts/prepare-assets.py /path/to/kunpeng-11/11_深海觉醒
+```
+
+每次构建都会从已提交的 `assets/` 重新生成 `src/artwork.ts`（幂等、无需源图）：
+
+```sh
+pnpm --dir plugins/owner-console build          # 内含 build:assets
+# 或只刷新内联数据 URI：
+pnpm --dir plugins/owner-console build:assets
+```
 
 ## 限制
 

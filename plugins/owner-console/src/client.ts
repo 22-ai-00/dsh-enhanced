@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { jsx } from 'react/jsx-runtime'
-import { CloudMark, KAI_FONT, QUIET_PHRASE, WenyaoGlyph, WenyaoSeal } from './art.js'
+import { CloudMark, KAI_FONT, QUIET_PHRASE } from './art.js'
 import { TYPERT_REMOTE } from './typert.js'
-import { WENYAO_HERO_DATA_URI, WENYAO_HERO_HEIGHT, WENYAO_HERO_WIDTH } from './wenyao-hero.js'
+import { WENYAO_BACKDROP_DATA_URI, WENYAO_HERO_DATA_URI, WENYAO_HERO_HEIGHT, WENYAO_HERO_WIDTH,
+  WENYAO_ICON_DATA_URI, WENYAO_SEAL_DATA_URI } from './artwork.js'
 import type { IntakeAgreementAvailability, OwnerConsoleIntakeAgreement, OwnerConsoleStatus, OwnerConsoleTrendSnapshotItem, OwnerConsoleTrendSnapshots,
   OwnerConsoleWriteResult } from './typert.js'
 
@@ -108,7 +109,12 @@ const tint = (color: string, percent: number) => `color-mix(in srgb, ${color} ${
  * parent shrink this root below its content height instead of clipping it.
  */
 export const scrollRootStyle = { height: '100%', minHeight: 0, flex: '1 1 auto', overflowY: 'auto', boxSizing: 'border-box' } as const
-const panelStyle = { padding: '28px 24px 40px', maxWidth: 840, margin: '0 auto', display: 'grid', gap: 16, color: ink, fontSize: 13, lineHeight: 1.5 }
+const panelStyle = { position: 'relative', isolation: 'isolate', padding: '28px 24px 40px', maxWidth: 840, margin: '0 auto', display: 'grid', gap: 16, color: ink, fontSize: 13, lineHeight: 1.5 } as const
+/** The artwork layer sits behind the content; `user-select`/pointer events stay off the decoration. */
+const backdropStyle = { position: 'absolute', inset: 0, zIndex: 0, overflow: 'hidden', pointerEvents: 'none', userSelect: 'none' } as const
+const backdropImageStyle = { display: 'block', width: '100%', height: 'auto', opacity: 0.2,
+  maskImage: 'linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.55) 55%, transparent 94%)',
+  WebkitMaskImage: 'linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.55) 55%, transparent 94%)' } as const
 const cardStyle = { border: `1px solid ${border}`, borderRadius: 12, padding: '16px 18px', background: surface, boxShadow: '0 1px 2px rgba(0, 0, 0, 0.04)', display: 'grid', gap: 12, minWidth: 0 }
 const inputStyle = { padding: '7px 10px', borderRadius: 8, border: `1px solid ${borderStrong}`, background: 'transparent', color: 'inherit', fontSize: 13, lineHeight: 1.4, width: '100%', minWidth: 0, boxSizing: 'border-box' }
 /** Secondary button: outlined, quiet. */
@@ -334,8 +340,11 @@ export function IntakeAgreementCard({ remote, availability }: Readonly<{ remote:
     intakeAgreementView(result, failed))
 }
 
+/** Sidebar entry: the 11 深海觉醒 whale mark, cropped square and shown as a round avatar. */
 export function OwnerConsoleIcon() {
-  return el('span', { 'aria-hidden': true, style: { display: 'block', width: 18, height: 18 } }, jsx(WenyaoGlyph, { size: 18 }))
+  return el('span', { 'aria-hidden': true, style: { display: 'block', width: 18, height: 18, borderRadius: '50%', overflow: 'hidden', flex: 'none' } },
+    el('img', { src: WENYAO_ICON_DATA_URI, alt: '', 'aria-hidden': 'true', draggable: false, 'data-owner-console-art': 'sidebar-icon',
+      width: 18, height: 18, style: { display: 'block', width: '100%', height: '100%', objectFit: 'cover' } }))
 }
 
 export function OwnerConsolePanel({ remote, navigation }: Readonly<{
@@ -531,16 +540,23 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
           } }, '应用配置')))))
 
   return el('section', { 'aria-label': '文鳐（主人控制台）', style: panelStyle },
-    header(navigation),
-    error === '' ? null : el('p', { role: 'alert', style: { ...bannerStyle(danger), fontWeight: 500 } },
-      el('span', { 'aria-hidden': true, style: { color: danger, fontWeight: 700 } }, '!'), error),
-    notice === '' ? null : el('p', { role: 'status', style: bannerStyle(accent) },
-      el('span', { 'aria-hidden': true, style: { color: accent, fontWeight: 700 } }, 'i'), notice),
-    card('远程接入（飞书）', feishuRows, feishuActions),
-    card('TraeX', traexRows),
-    card('本项目插件管理', bundles),
-    jsx(TrendSnapshotsCard, { remote }),
-    jsx(IntakeAgreementCard, { remote, availability: status?.evaluation.intakeAgreement }))
+    // 11 深海觉醒 background on the panel's own surface, not only the header. The whale sits
+    // at low opacity behind every card and fades out before the lower rows; text stays on the
+    // theme's card surface, so light/dark contrast is untouched.
+    el('div', { style: backdropStyle },
+      el('img', { src: WENYAO_BACKDROP_DATA_URI, alt: '', 'aria-hidden': 'true', draggable: false,
+        'data-owner-console-art': 'backdrop', width: 960, height: 960, style: backdropImageStyle })),
+    el('div', { 'data-owner-console-content': '', style: { position: 'relative', zIndex: 1, display: 'grid', gap: 16 } },
+      header(navigation),
+      error === '' ? null : el('p', { role: 'alert', style: { ...bannerStyle(danger), fontWeight: 500 } },
+        el('span', { 'aria-hidden': true, style: { color: danger, fontWeight: 700 } }, '!'), error),
+      notice === '' ? null : el('p', { role: 'status', style: bannerStyle(accent) },
+        el('span', { 'aria-hidden': true, style: { color: accent, fontWeight: 700 } }, 'i'), notice),
+      card('远程接入（飞书）', feishuRows, feishuActions),
+      card('TraeX', traexRows),
+      card('本项目插件管理', bundles),
+      jsx(TrendSnapshotsCard, { remote }),
+      jsx(IntakeAgreementCard, { remote, availability: status?.evaluation.intakeAgreement })))
 }
 
 function bannerStyle(color: string) {
@@ -549,9 +565,10 @@ function bannerStyle(color: string) {
 }
 
 /**
- * Brand header: the 文鳐 banner (decorative, 3:1, cropped to 108–156px tall so a narrow pane
- * never overflows), then name with seal, subtitle, and the primary 开始对话 action. Text sits on
- * the card surface below the image, so its contrast follows the theme rather than the artwork.
+ * Brand header: the 11 深海觉醒 background cropped to a 3:1 banner (decorative, 108–300px
+ * tall so a narrow pane never overflows), then name with the round whale seal, subtitle,
+ * and the primary 开始对话 action. Text sits on the card surface below the image, so its
+ * contrast follows the theme rather than the artwork.
  */
 function header(navigation: Readonly<{ openConversation(): void, openPlugins(): void }>) {
   return el('header', { 'data-owner-console-header': '', style: { overflow: 'hidden', borderRadius: 16,
@@ -564,7 +581,8 @@ function header(navigation: Readonly<{ openConversation(): void, openPlugins(): 
     el('div', { style: { display: 'grid', gap: 4, minWidth: 0, flex: '1 1 280px' } },
       el('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
         el('h2', { style: { margin: 0, fontSize: 22, fontWeight: 600, letterSpacing: '0.02em', lineHeight: 1.25 } }, '文鳐 Ray'),
-        jsx(WenyaoSeal, { height: 30 })),
+        el('img', { src: WENYAO_SEAL_DATA_URI, alt: '', 'aria-hidden': 'true', draggable: false, 'data-owner-console-art': 'seal',
+          width: 30, height: 30, style: { display: 'block', width: 30, height: 30, borderRadius: '50%', objectFit: 'cover', flex: 'none' } })),
       el('p', { style: { margin: 0, fontSize: 13, color: muted, fontFamily: KAI_FONT, letterSpacing: '0.04em' } }, '你的个人助手小鳐 · 小鳐小鳐，游而化飞'),
       el('p', { style: { margin: '2px 0 0', fontSize: 12, color: caption } }, '只显示需要你处理的事；需要直接对话时从这里进入。')),
     el('div', { style: actionsStyle },

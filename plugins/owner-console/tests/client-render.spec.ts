@@ -61,7 +61,7 @@ describe('owner console panel presentation', () => {
     expect(navigation.openConversation).toHaveBeenCalledOnce()
   })
 
-  it('shows the inlined 文鳐 banner and seal as decoration only', () => {
+  it('renders the 11 深海觉醒 hero, panel backdrop, seal and sidebar icon as decoration only', () => {
     const { nodes } = render()
     const hero = nodes.find(node => node.props['data-owner-console-art'] === 'hero')
     expect(hero?.type).toBe('img')
@@ -69,16 +69,39 @@ describe('owner console panel presentation', () => {
     expect(hero!.props['aria-hidden']).toBe('true')
     // Inlined: no network fetch or bundler asset URL.
     expect(String(hero!.props['src'])).toMatch(/^data:image\/webp;base64,/)
-    for (const art of ['seal', 'cloud']) {
-      const svg = nodes.find(node => node.type === 'svg' && node.props['data-owner-console-art'] === art)
-      expect(svg, art).toBeDefined()
-      expect(svg!.props['aria-hidden']).toBe('true')
-    }
-    expect(text(nodes.filter(node => node.type === 'text'))).toBe('文|鳐')
-    expect(nodes.filter(node => node.type === 'img')).toHaveLength(1)
+
+    // The background is on the panel's own surface, behind the cards, not just the header.
+    const backdrop = nodes.find(node => node.props['data-owner-console-art'] === 'backdrop')
+    expect(backdrop?.type).toBe('img')
+    expect(String(backdrop!.props['src'])).toMatch(/^data:image\/webp;base64,/)
+    expect(backdrop!.props['alt']).toBe('')
+    expect(backdrop!.props['aria-hidden']).toBe('true')
+    expect(Number((backdrop!.props['style'] as Record<string, unknown>)['opacity'])).toBeLessThanOrEqual(0.25)
+    const backdropLayer = nodes.find(node => node.type === 'div' && node.props['style'] !== undefined
+      && (node.props['style'] as Record<string, unknown>)['position'] === 'absolute')
+    expect(backdropLayer).toBeDefined()
+
+    // Brand seal is the round-cropped icon image, still decorative.
+    const seal = nodes.find(node => node.props['data-owner-console-art'] === 'seal')
+    expect(seal?.type).toBe('img')
+    expect(String(seal!.props['src'])).toMatch(/^data:image\/webp;base64,/)
+    expect(seal!.props['alt']).toBe('')
+    expect(seal!.props['aria-hidden']).toBe('true')
+    expect((seal!.props['style'] as Record<string, unknown>)['borderRadius']).toBe('50%')
+    expect(nodes.some(node => node.type === 'svg' && node.props['data-owner-console-art'] === 'cloud')).toBe(true)
+    // Decorative images only; the product name stays live text.
+    expect(nodes.filter(node => node.type === 'img')).toHaveLength(3)
+    expect(text(nodes)).toContain('文鳐 Ray')
+
+    // Sidebar entry: the same 11 深海觉醒 icon, square-cropped into a round avatar.
     const icon = expand(OwnerConsoleIcon())
     expect(icon[0]!.props['aria-hidden']).toBe(true)
-    expect(icon.some(node => node.type === 'svg')).toBe(true)
+    const iconImage = icon.find(node => node.type === 'img')
+    expect(iconImage).toBeDefined()
+    expect(String(iconImage!.props['src'])).toMatch(/^data:image\/webp;base64,/)
+    expect(iconImage!.props['alt']).toBe('')
+    expect(iconImage!.props['aria-hidden']).toBe('true')
+    expect(icon.some(node => node.type === 'svg')).toBe(false)
   })
 
   it('shows statuses as pills with text labels and friendly empty states', () => {
