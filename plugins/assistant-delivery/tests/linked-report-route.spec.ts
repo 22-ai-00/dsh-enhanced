@@ -507,6 +507,16 @@ describe('linked work-item report routing', () => {
       expect(f.store.listOutbox({ bindingId: f.aliasBinding.id })).toHaveLength(0)
     })
 
+    test("a rotated sticky origin no longer overrides prefer: 'recent' for the next revision", async () => {
+      const f = await fixture({ orderAcrossLanes: true })
+      await originWaiting(f, 'plain')
+      // `/new` revokes the frozen origin; the caller's origin enqueue would fail,
+      // so ordering must fall back to the ordinary recent-alias route.
+      f.store.rotateBinding({ bindingId: f.origin.id, expectedVersion: f.origin.version, sessionId: 'owner-session-2' })
+      inbound(f, f.aliasBinding.id, 3_000)
+      expect(f.service.routeWorkItemReport(revision(f, [id(alias)], 2, { prefer: 'recent' }))).toMatchObject({ route: 'linked' })
+    })
+
     test('an unsettled alias report keeps the next revision on the same alias, sent after it', async () => {
       const f = await fixture({ orderAcrossLanes: true })
       const first = aliasWaiting(f)

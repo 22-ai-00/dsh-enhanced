@@ -5279,15 +5279,20 @@ export class AssistantDeliveryService extends Service {
         originBindingId: origin.id, itemId: input.itemId, beforeRevision: input.reportRevision })
       : undefined
     const stickyLinked = sticky?.route === 'linked'
-    if (origin.status === 'active' && this.hasActivePrincipal(origin) && !recent && !stickyLinked) return Object.freeze({ route: 'origin' as const })
+    // A sticky origin only orders a lane the caller can still address: after a
+    // `/new` rotation the frozen origin binding is revoked, so forcing it would
+    // make the caller's origin enqueue fail where `prefer: 'recent'` could have
+    // delivered on an alias. Fall through to normal routing in that case.
+    const originDirect = origin.status === 'active' && this.hasActivePrincipal(origin)
+    if (originDirect && !recent && !stickyLinked) return Object.freeze({ route: 'origin' as const })
     // A `/new` rotation revokes the origin and inserts a successor in the same
     // conversation for the same principal. That origin is still available: keep
     // the origin path (and its existing failure semantics) rather than reroute.
     const successor = origin.status === 'active' ? undefined : this.deliveryStore.getActiveBinding(origin.conversation)
-    const originAvailable = (origin.status === 'active' && this.hasActivePrincipal(origin)) || (successor !== undefined && successor.id !== origin.id
+    const originAvailable = originDirect || (successor !== undefined && successor.id !== origin.id
       && successor.workspace === origin.workspace && successor.agentPreset === origin.agentPreset
       && JSON.stringify(successor.principal) === JSON.stringify(origin.principal) && this.hasActivePrincipal(successor))
-    if (originAvailable && ((!recent && !stickyLinked) || sticky?.route === 'origin')) return Object.freeze({ route: 'origin' as const })
+    if (originAvailable && ((!recent && !stickyLinked) || (sticky?.route === 'origin' && originDirect))) return Object.freeze({ route: 'origin' as const })
     const owner = this.deliveryStore.getPrincipal(origin.principal)
     if (owner?.status !== 'active' || owner.role !== 'owner' || JSON.stringify(owner.principal) !== JSON.stringify(origin.principal)) {
       if (originAvailable) return Object.freeze({ route: 'origin' as const })
