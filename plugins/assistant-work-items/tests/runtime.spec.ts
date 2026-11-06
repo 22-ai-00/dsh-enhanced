@@ -262,12 +262,12 @@ function serviceContract(id = 'svc-acceptance-1', options: { ref?: string; owner
 }
 
 /** A passing receipt whose verification starts now, after the item exists. */
-function serviceReceipt(contract: TaskAcceptanceContract, startedAt = Date.now()) {
+function serviceReceipt(contract: TaskAcceptanceContract, startedAt = Date.now(), status: 'passed' | 'unknown' = 'passed') {
   const now = startedAt
   return createTaskVerificationReceipt(contract, {
     protocol: 'task-verification/v1', id: 'svc-receipt-1', contractId: contract.id, contractDigest: contract.digest,
     scope: contract.scope, owner: contract.owner, task: contract.task,
-    results: [{ criterionId: 'program', status: 'passed', reason: 'output-matched', evidence: [{ kind: 'process-output', ref: 'capture-1', digest: 'a'.repeat(64) }] }],
+    results: [{ criterionId: 'program', status, reason: status === 'passed' ? 'output-matched' : 'probe-timeout', evidence: status === 'passed' ? [{ kind: 'process-output', ref: 'capture-1', digest: 'a'.repeat(64) }] : [] }],
     startedAt: now, completedAt: now + 1, validUntil: now + 1_800_000,
   })
 }
@@ -1573,6 +1573,23 @@ describe('work-item admission authority revalidation', () => {
     againPeer.tasks.set(flagged.id, { contract: flagged, state: 'needs-attention', reason: 'flaky', receipt: null })
     again.automations?.wake()
     expect(boundEvents(again, attention.itemId)).toBe(0)
+  })
+
+  test('acceptance.bindWorkerRun binds a pending contract carrying a retry receipt unless that receipt predates the dispatch', async () => {
+    const fixture = await serviceHarness({ extra: bindWorkerRun() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const retrying = admitPlain(fixture, 'bind-late-retry')
+    const stale = admitPlain(fixture, 'bind-late-retry-stale')
+    const store = readStore(fixture)
+    const notBefore = (itemId: string) => Math.max(store.findItemById(itemId)?.createdAt ?? 0, store.getDispatch(itemId)?.occurredAt ?? 0)
+    // The verifier scheduled a retry: state pending with an inconclusive receipt.
+    const fresh = publishWorkerContract(fixture, peer, retrying.occurrenceId, { issuedAt: notBefore(retrying.itemId) })
+    peer.tasks.set(fresh.id, { contract: fresh, state: 'pending', reason: null, receipt: serviceReceipt(fresh, notBefore(retrying.itemId), 'unknown') })
+    const old = publishWorkerContract(fixture, peer, stale.occurrenceId, { issuedAt: notBefore(stale.itemId) - 2_000 })
+    peer.tasks.set(old.id, { contract: old, state: 'pending', reason: null, receipt: serviceReceipt(old, notBefore(stale.itemId) - 1_000, 'unknown') })
+    fixture.automations?.wake()
+    expect(store.lateAcceptanceBinding(retrying.itemId)).toMatchObject({ occurrenceId: retrying.occurrenceId, binding: { contractId: fresh.id } })
+    expect(boundEvents(fixture, stale.itemId)).toBe(0)
   })
 
   test('acceptance.bindWorkerRun refuses a done receipt that started before the dispatch and parks it until the occurrence changes', async () => {

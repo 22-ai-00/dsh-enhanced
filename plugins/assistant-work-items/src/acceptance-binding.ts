@@ -93,10 +93,10 @@ export function resolveAcceptanceBinding(
   /**
    * Late binding of a worker run's own contract (WP21 slice 6): the contract
    * must name exactly `taskRef`. Because that ref pins the one run of this
-   * generation, `pending`, `verifying` and `done` are also accepted, the last
-   * two only when the contract was issued, and a `done` receipt started, no
-   * earlier than `notBefore` (this generation's dispatch); `needs-attention`
-   * never binds.
+   * generation, `pending`, `verifying` and `done` are also accepted. Nothing
+   * may predate `notBefore` (this generation's dispatch): not the start of any
+   * receipt, a `pending` retry's included, nor the issue of a `verifying` or
+   * `done` contract. `needs-attention` never binds.
    */
   late?: Readonly<{ taskRef: string; notBefore: number }>,
 ): WorkItemAcceptanceBinding | WorkItemDecisionRefusal {
@@ -111,11 +111,12 @@ export function resolveAcceptanceBinding(
   }
   if (contract.expiresAt <= now) return 'acceptance-expired'
   const state = read.value.state
-  if (late !== undefined && (state === 'verifying' || state === 'done')) {
+  if (late !== undefined && (state === 'pending' || state === 'verifying' || state === 'done')) {
     // The run may have finished between two wakes. Its ref already pins this
     // generation's run; additionally the contract, and any receipt, must not
-    // predate this generation's dispatch.
-    if (contract.issuedAt < late.notBefore) return 'acceptance-already-settled'
+    // predate this generation's dispatch. A `pending` contract may carry the
+    // inconclusive receipt of a scheduled retry; it is checked the same way.
+    if (state !== 'pending' && contract.issuedAt < late.notBefore) return 'acceptance-already-settled'
     if (state === 'done' || read.value.receipt !== null) {
       let receipt
       try { receipt = validateTaskVerificationReceipt(contract, read.value.receipt) } catch { return 'acceptance-already-settled' }
@@ -125,7 +126,7 @@ export function resolveAcceptanceBinding(
     if (state === 'done' || state === 'needs-attention' || read.value.receipt !== null) return 'acceptance-already-settled'
     // Only a contract nobody has started verifying may bind new work; a pending
     // or verifying one could settle on evidence gathered before this item ran.
-    if (state !== 'awaiting-execution' && (late === undefined || state !== 'pending')) return 'acceptance-not-awaiting'
+    if (state !== 'awaiting-execution') return 'acceptance-not-awaiting'
   }
   const author = acceptanceAuthorFor(contract.task.kind)
   if (author === undefined || !acceptanceIsIndependent({ author, verifier: ACCEPTANCE_VERIFIER, executor: ACCEPTANCE_EXECUTOR })) {
