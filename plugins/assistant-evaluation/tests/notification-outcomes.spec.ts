@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { AssistantEvaluationService } from '../src/service.ts'
-import { classifyNotificationOutcome, normalizeNotificationOutcomeFact } from '../src/notification-outcomes.ts'
+import { classifyNotificationOutcome, normalizeNotificationOutcomeFact, notificationOutcomeDigest } from '../src/notification-outcomes.ts'
 
 const scope = { workspace: '/work/notify', preset: 'primary' }
 const hour = 3_600_000
@@ -85,7 +85,27 @@ describe('notification outcome classifier', () => {
       fact('n', 1, { verdict: 'maybe' }), fact('n', 1, { transport: { status: 'sent' } }), fact(' n', 1),
       fact('n', -1), fact('n', 1, { judgement: { source: 'owner-objective', version: 0, objectiveStatus: 'achieved' } }),
       fact('n', 1, { scope: { workspace: '', preset: 'x' } }), null, [],
+      // Optional linked route: strict shape, never `origin`, never the notification's own binding.
+      fact('n', 1, { route: null }), fact('n', 1, { route: 'linked' }), fact('n', 1, { route: { kind: 'origin', originBindingId: 'b0' } }),
+      fact('n', 1, { route: { kind: 'linked' } }), fact('n', 1, { route: { kind: 'linked', originBindingId: '' } }),
+      fact('n', 1, { route: { kind: 'linked', originBindingId: ' b0' } }), fact('n', 1, { route: { kind: 'linked', originBindingId: 7 } }),
+      fact('n', 1, { route: { kind: 'linked', originBindingId: 'binding-1' } }),
+      fact('n', 1, { route: { kind: 'linked', originBindingId: 'b0', extra: 1 } }),
     ]) expect(() => normalizeNotificationOutcomeFact(bad), JSON.stringify(bad)).toThrow()
+  })
+  test('a linked route is carried verbatim and never changes the outcome; route-free digests are pinned', () => {
+    const pinned = fact('outbox-pinned', 7, { reasons: ['r'], workItemId: 'item-1', transport: { status: 'delivered', acceptedAt: 1_100, deliveredAt: 1_200 },
+      reaction: { firstAt: 1_500, count: 2 }, judgement: { source: 'work-item-feedback', version: 2, objectiveStatus: 'partial' } })
+    const expired = fact('outbox-expired', 7, { reasons: ['r'], workItemId: 'item-1' })
+    const digest = (input: Fact, now = 2_000) => notificationOutcomeDigest(classifyNotificationOutcome(normalizeNotificationOutcomeFact(input), now, hour))
+    // Digests produced by the classifier before the route field existed (classifier v1).
+    expect(digest(pinned)).toBe('ae2efca538a99074f5990ceafc08c666598b64887e1feeaee18a556efcf0de0e')
+    expect(digest(expired, 10 * hour)).toBe('77177c19c21801ee458fa99424b264ff1d1a9426fd919572c031c86bedc3cc4a')
+    const linked = { ...pinned, route: { kind: 'linked', originBindingId: 'binding-origin' } }
+    const record = classifyNotificationOutcome(normalizeNotificationOutcomeFact(linked), 2_000, hour)
+    expect(record).toMatchObject({ classifier: { version: 1 }, outcome: 'reacted', route: { kind: 'linked', originBindingId: 'binding-origin' } })
+    expect(digest(linked)).not.toBe(digest(pinned))
+    expect(classifyNotificationOutcome(normalizeNotificationOutcomeFact(pinned), 2_000, hour)).not.toHaveProperty('route')
   })
 })
 
@@ -189,6 +209,22 @@ describe('notification outcome ledger', () => {
     expect(summary.byVerdict['would-accept'].reacted).toBe(1)
     expect(evaluation.notificationOutcomeSummary({ scope }).total).toBe(3)
     expect(() => evaluation.notificationOutcomeSummary({ scope, fromNotifiedAt: 10, toNotifiedAt: 5 })).toThrow(/window/)
+  })
+
+  test('a linked-route notification is ingested, revised on tagging and counted in feed and summary', () => {
+    const { source, evaluation } = setup()
+    source.put(fact('n1', 1))
+    source.put(fact('n2', 2, { bindingId: 'binding-alias' }))
+    evaluation.reconcileNotificationOutcomes()
+    // Delivery starts tagging an already-ingested linked report: one new revision.
+    source.put(fact('n2', 2, { bindingId: 'binding-alias', route: { kind: 'linked', originBindingId: 'binding-1' } }))
+    source.put(fact('n3', 3, { bindingId: 'binding-alias', route: { kind: 'linked', originBindingId: 'binding-1' }, reaction: { firstAt: 1_500 } }))
+    evaluation.reconcileNotificationOutcomes()
+    const n2 = evaluation.inspectNotificationOutcome({ scope, notificationId: 'n2' })!
+    expect(n2.revisions.map(revision => revision.record.route)).toEqual([undefined, { kind: 'linked', originBindingId: 'binding-1' }])
+    expect(evaluation.inspectNotificationOutcome({ scope, notificationId: 'n1' })!.head.record).not.toHaveProperty('route')
+    expect(evaluation.notificationOutcomeSummary({ scope })).toMatchObject({ total: 3, outcomes: { delivered: 2, reacted: 1 } })
+    expect(evaluation.notificationOutcomeFeed({ scope, limit: 10 }).items.map(item => item.notificationId).sort()).toEqual(['n1', 'n2', 'n3'])
   })
 
   test('piggybacks on the existing projection tick', async () => {

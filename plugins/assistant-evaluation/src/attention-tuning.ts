@@ -559,6 +559,13 @@ function versionDigest(input: Omit<AttentionTuningVersion, 'digest' | 'createdAt
 }
 
 const negativeOutcomes: readonly NotificationOutcome[] = ['rejected', 'expired-unhandled']
+/**
+ * Cohort filter: a linked-alias fallback report reached the owner on another
+ * channel, so its outcome says nothing about the origin cohort's parameters.
+ * Stats, holdout seals/replays and cohort discovery all use this filter;
+ * route-free (pre-existing) records count as origin.
+ */
+const originRoute = `coalesce(json_extract(r.record_json, '$.route.kind'), 'origin')='origin'`
 
 /**
  * Durable ledger over the same Evaluation database as the notification canon.
@@ -593,6 +600,7 @@ export class AttentionTuningLedger {
       JOIN evaluation_notification_outcome_revisions r ON r.notification_id=h.notification_id AND r.version=h.version
       WHERE h.scope_key=? AND h.occurred_at>=? AND h.occurred_at<?
         AND json_extract(r.record_json, '$.lane')=? AND json_extract(r.record_json, '$.sourceId')=?
+        AND ${originRoute}
       ORDER BY h.notification_id`).all(scopeKey, fromNotifiedAt, toNotifiedAt, cohort.lane, cohort.sourceId) as unknown as { notification_id: string; outcome: NotificationOutcome; occurred_at: number }[]
   }
 
@@ -622,6 +630,7 @@ export class AttentionTuningLedger {
       JOIN evaluation_notification_outcome_revisions r ON r.notification_id=h.notification_id AND r.version=h.version
       WHERE h.scope_key=? AND h.occurred_at>=? AND h.occurred_at<?
         AND json_extract(r.record_json, '$.lane')=? AND json_extract(r.record_json, '$.sourceId')=?
+        AND ${originRoute}
       GROUP BY h.outcome`).all(scopeKey, fromNotifiedAt, toNotifiedAt, cohort.lane, cohort.sourceId) as { outcome: NotificationOutcome; count: number }[]
     return this.#summarize(fromNotifiedAt, toNotifiedAt, rows)
   }
@@ -647,7 +656,7 @@ export class AttentionTuningLedger {
         json_extract(r.record_json, '$.scope.preset') AS preset
       FROM evaluation_notification_outcome_heads h
       JOIN evaluation_notification_outcome_revisions r ON r.notification_id=h.notification_id AND r.version=h.version
-      WHERE json_extract(r.record_json, '$.lane')=? AND json_extract(r.record_json, '$.sourceId')=?
+      WHERE json_extract(r.record_json, '$.lane')=? AND json_extract(r.record_json, '$.sourceId')=? AND ${originRoute}
       UNION SELECT workspace, preset FROM evaluation_attention_tuning_heads WHERE lane=? AND source_id=?
       ORDER BY workspace, preset`).all(cohort.lane, cohort.sourceId, cohort.lane, cohort.sourceId) as { workspace: string; preset: string }[]
     return Object.freeze(rows.map(row => Object.freeze({ workspace: row.workspace, preset: row.preset })))

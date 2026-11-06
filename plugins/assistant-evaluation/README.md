@@ -120,6 +120,8 @@ schema 14 新增与任务投影分离的 `evaluation_notification_outcome_*` 表
 
 schema 15 新增 `evaluation_attention_tuning_versions`（不可改、不可删，按 scope + cohort 递增版本，记录精确父版本与父 digest、参数、依据统计与 scope watermark、变化项、来源 `auto`/`request`、sha256 digest）、`_heads`（当前生效版本、`idle`/`observing` 状态与持久观察窗口）和 `_events`（`adopted`/`rolled-back`/`settled`/`request-rejected` 只追加审计）。cohort 是 Evaluation scope 内的 Delivery `lane` + `sourceId`；只统计通知结果账本当前 head。
 
+Delivery 事实可带 `route: { kind: 'linked', originBindingId }`（经 owner linked 别名跨渠道兜底送达的工作项报告）。归一化严格校验：只接受恰好这两个键、`kind` 为 `linked`、`originBindingId` 为非空规范字符串且不等于本通知 `bindingId`，否则计入 `invalid`；记录原样保留该字段，缺席即 origin（不写入），因此无 route 记录的 digest 与改动前一致，分类结果不受 route 影响，分类器仍为 v1。linked 记录照常进入 revision、feed 与 summary，但调优的统计、提议器、留出密封与重放、owner 结构化问题一律按 `coalesce(json_extract(record_json,'$.route.kind'),'origin')='origin'` 排除，别名信道上的反应不污染 origin cohort。依据中的 `scopeWatermark` 仍是 scope 级账本位置（含 linked），只作来源锚点。
+
 参数与固定界限：`interruptionCostDelta` 0–100 步长 10、`minimumUtilityDelta` 0–100 步长 10、`quietExtensionMinutes` 0–120 步长 30（在既有静默时段两侧各延长，总长不超过 1439 分钟）、`muted`。默认全零，即不改变消费者行为。纯函数提议器确定性、只收紧：已判定数不足 `attentionTuningMinSample` 为 no-op；负向率达到阈值时按固定顺序（打扰成本→阈值→静默→停用）对第一个未到上界的参数前进一步，`muted` 另需停用阈值。
 
 `reconcileAttentionTuning()` 在通知同步之后运行（同一节流与错误边界），每个 cohort 在一个 `BEGIN IMMEDIATE` 事务内：空闲时提议并采用一步（幂等键绑定父版本、父 digest、scope watermark 与变化），进入观察；观察中若当前版本 digest 校验失败，或观察期内样本足够且负向率高于依据率加余量，则回退到精确父版本（含版本 0 默认值）；正向或持平证据从不触发回退，观察期满记为 `settled`。被回退版本的证据不复用，须重新累积样本。`currentAttentionTuning({ scope, cohort })` 返回经 digest 校验的当前版本，校验失败时沿父链回落到最近可校验版本或默认值；开关关闭时返回 `undefined`。

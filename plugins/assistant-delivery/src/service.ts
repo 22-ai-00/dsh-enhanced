@@ -87,7 +87,7 @@ import { isSynchronousForegroundObservationHandle, validForegroundObservationReg
   type ForegroundToolCallAttestation, type OwnerForegroundToolInput } from './foreground-observation.js'
 import { InboundImageMaterializer } from './inbound-images.js'
 import { assessAttention, assessAttentionSplit, attentionOverCap, attentionSplitWindowMs, convertOverCapAttention, NOTIFICATION_OUTCOME_FACTS_PROTOCOL,
-  type AttentionAuditEntry, type AttentionEnvelope, type AttentionLane, type AttentionPurpose, type NotificationOutcomeFact } from './attention.js'
+  type AttentionAuditEntry, type AttentionEnvelope, type AttentionLane, type AttentionPurpose, type NotificationOutcomeFact, linkedReportKeyPrefix, linkedReportMetadataPrefix } from './attention.js'
 import { ProgressAttentionAudit, type ProgressAttentionAuditPage } from './progress-attention.js'
 import { AttentionRejectionLog, attentionEnforcementReasons, type AttentionRejectionEntry, type AttentionRejectionPage,
   type AttentionRejectionReason } from './attention-enforcement.js'
@@ -927,12 +927,8 @@ function isModelSelectionPayload(value: unknown): value is ModelSelectionPayload
 const toolApprovalArgumentBytes = 16 * 1024
 const ownerRequestedChangeArgumentBytes = 64 * 1024
 const toolApprovalIdentityBytes = 512
-/** Reserved metadata of a work-item report the Host routed to a linked alias channel. */
-const linkedReportMetadataPrefix = 'dsh.linked-report'
 /** Bounded owner-ordered linked fallback list for one report route. */
 const maxLinkedReportFallback = 8
-/** Reserved idempotency-key prefix of a Host-routed linked report. */
-const linkedReportKeyPrefix = 'linked-report:'
 
 function inspectUnsettledNativeCall(
   events: readonly SessionEvent[], turn: number, callId: string,

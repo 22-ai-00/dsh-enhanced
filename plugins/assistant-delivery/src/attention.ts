@@ -347,6 +347,11 @@ export interface AttentionAuditEntry extends AttentionAssessment {
   recordedAt: number
 }
 
+/** Reserved metadata of a work-item report the Host routed to a linked alias channel. */
+export const linkedReportMetadataPrefix = 'dsh.linked-report'
+/** Reserved idempotency-key prefix of a Host-routed linked report. */
+export const linkedReportKeyPrefix = 'linked-report:'
+
 export const NOTIFICATION_OUTCOME_FACTS_PROTOCOL = 'assistant-delivery/notification-outcome-facts/v1' as const
 
 /**
@@ -381,5 +386,10 @@ export interface NotificationOutcomeFact {
     source: 'owner-objective' | 'work-item-feedback'
     version: number
     objectiveStatus: 'achieved' | 'partial' | 'not-achieved' | 'unknown'
-  }>
+  }>  /**
+   * Present only for a Host-routed linked work-item report (cross-channel
+   * fallback to an owner alias); `originBindingId` is the unavailable origin.
+   * Absent means the notification went to its own binding.
+   */
+  route?: Readonly<{ kind: 'linked'; originBindingId: string }>
 }

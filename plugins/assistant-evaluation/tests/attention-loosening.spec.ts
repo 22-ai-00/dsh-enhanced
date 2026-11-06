@@ -40,7 +40,7 @@ class FactSource {
   sequence = 0
   put(value: Fact) { this.facts.set(value.outboxId, value) }
   /** Notification `${prefix}-${index}` is owner-rejected when `negative` says so (first N, or a predicate on the id); otherwise accepted. */
-  batch(prefix: string, count: number, negative: number | ((id: string) => boolean), at: number) {
+  batch(prefix: string, count: number, negative: number | ((id: string) => boolean), at: number, extra: Record<string, unknown> = {}) {
     for (let index = 0; index < count; index += 1) {
       const id = `${prefix}-${index}`
       const rejected = typeof negative === 'number' ? index < negative : negative(id)
@@ -50,6 +50,7 @@ class FactSource {
         purpose: 'attention', purposeSource: 'lane', verdict: 'would-accept', reasons: [], auditedAt: at,
         transport: { status: 'delivered', acceptedAt: at + 1, deliveredAt: at + 2 },
         judgement: { source: 'owner-objective', version: 1, objectiveStatus: rejected ? 'not-achieved' : 'achieved' },
+        ...extra,
       })
     }
   }
@@ -208,6 +209,53 @@ describe('attention loosening service', () => {
     g.source.batch('a', 200, id => !attentionHoldoutMember(id), 1_000)
     g.sync(); g.clock.now += day; g.sync()
     expect(g.request(tuned({}))).toEqual(proposed)
+  })
+
+  test('linked-route notifications never reach tuning: the sealed origin-only holdout is unchanged', () => {
+    // Pinned from the origin-only run above before routes existed.
+    const pinnedDigest = '825cd405c5caa4756fe2e1218c5db0a7e781b268e98fc0c3d4e29b7989ce6562'
+    const pinnedStats = { accepted: 0, decided: 147, expiredUnhandled: 0, fromNotifiedAt: 0, negative: 147, reacted: 0, rejected: 147, toNotifiedAt: 86_410_001, total: 147 }
+    const run = (linked: boolean) => {
+      const f = setup({ loosening: true })
+      f.source.batch('a', 200, id => !attentionHoldoutMember(id), 1_000)
+      // Same cohort and window, delivered over a linked owner alias: training accepted, holdout rejected.
+      if (linked) f.source.batch('l', 200, attentionHoldoutMember, 1_000, { bindingId: 'binding-alias', route: { kind: 'linked', originBindingId: 'binding-1' } })
+      expect(f.sync()).toMatchObject([{ result: { action: 'adopted', version: 1 } }])
+      f.clock.now += day
+      f.sync()
+      return { f, proposed: f.request(tuned({})) }
+    }
+    const origin = run(false)
+    const mixed = run(true)
+    expect(origin.proposed).toMatchObject({ status: 'proposed', holdout: { digest: pinnedDigest } })
+    // Only provenance moves: the scope-wide ledger watermark (shared with feed
+    // cursors) and the parent digest that carries it. Holdout, stats and window are identical.
+    const strip = (proposal: Record<string, unknown> & { basis: Record<string, unknown> }) =>
+      ({ ...proposal, parentDigest: null, basis: { ...proposal.basis, scopeWatermark: null } })
+    const [mixedEntry] = mixed.f.status().proposals
+    const [originEntry] = origin.f.status().proposals
+    expect(mixedEntry!.proposal.basis.scopeWatermark).toBe(400)
+    expect(strip(mixedEntry!.proposal as never)).toEqual(strip(originEntry!.proposal as never))
+    expect(mixed.proposed).toMatchObject({ holdout: (origin.proposed as { holdout: unknown }).holdout })
+    expect(mixed.f.status().proposals[0]!.proposal.basis.stats).toEqual(pinnedStats)
+    expect(mixed.f.evaluation.attentionTuningStatus({ scope, cohort }).versions[0]!.basis.stats).toMatchObject({ decided: 147, negative: 147 })
+    // Linked records are still ingested and counted outside tuning.
+    expect(mixed.f.evaluation.notificationOutcomeSummary({ scope, fromNotifiedAt: 0, toNotifiedAt: 10 * day }).total).toBe(400)
+    // Their rejected holdout members never fail the sealed replay.
+    mixed.f.grant()
+    expect(mixed.f.sync()).toMatchObject([{ result: { action: 'loosening-adopted', version: 2 } }])
+  })
+
+  test('a linked-route negative flood alone never tightens the cohort', () => {
+    const f = setup()
+    f.source.batch('a', 40, 0, 1_000)
+    f.source.batch('l', 200, 200, 1_000, { bindingId: 'binding-alias', route: { kind: 'linked', originBindingId: 'binding-1' } })
+    f.sync()
+    expect(f.evaluation.currentAttentionTuning({ scope, cohort })).toMatchObject({ version: 0, digest: null })
+    const control = setup()
+    control.source.batch('a', 40, 0, 1_000)
+    control.source.batch('l', 200, 200, 1_000, { bindingId: 'binding-alias' })
+    expect(control.sync()).toMatchObject([{ result: { action: 'adopted', version: 1 } }])
   })
 
   test('replay pass inside the grant adopts with the exact parent; rollback and restart never refund quota', async () => {

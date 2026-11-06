@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite'
-import { attentionAuditReasons, type AttentionAssessment, type AttentionAuditEntry, type AttentionAuditReason, type AttentionLane, type AttentionLedgerView, type NotificationOutcomeFact } from './attention.js'
+import { attentionAuditReasons, type AttentionAssessment, type AttentionAuditEntry, type AttentionAuditReason, type AttentionLane, type AttentionLedgerView, type NotificationOutcomeFact, linkedReportKeyPrefix, linkedReportMetadataPrefix } from './attention.js'
 
 /** Append-only WP19 stage-1 audit. One row per Outbox record; replays keep the first verdict. */
 export const attentionAuditSchema = `
@@ -174,9 +174,12 @@ export class AttentionAuditStore {
   private fact(audit: AttentionAuditEntry, reaction: { first_at: number; count: number } | undefined,
     feedback: { version: number; status: string } | undefined): NotificationOutcomeFact | undefined {
     const outbox = this.database.prepare(`SELECT o.status, o.channel, o.account, o.provider_message_id, o.updated_at,
-      b.workspace, b.agent_preset FROM outbox_messages o JOIN conversation_bindings b ON b.id=o.binding_id WHERE o.id=?`)
-      .get(audit.outboxId) as { status: NotificationOutcomeFact['transport']['status']; channel: string; account: string
-        provider_message_id: string | null; updated_at: number; workspace: string; agent_preset: string } | undefined
+      b.workspace, b.agent_preset, o.idempotency_key,
+      json_extract(o.intent_json,?) AS linked_report, json_extract(o.intent_json,?) AS linked_origin
+      FROM outbox_messages o JOIN conversation_bindings b ON b.id=o.binding_id WHERE o.id=?`)
+      .get(`$.metadata."${linkedReportMetadataPrefix}"`, `$.metadata."${linkedReportMetadataPrefix}.originBindingId"`, audit.outboxId) as { status: NotificationOutcomeFact['transport']['status']; channel: string; account: string
+        provider_message_id: string | null; updated_at: number; workspace: string; agent_preset: string
+        idempotency_key: string; linked_report: unknown; linked_origin: unknown } | undefined
     if (outbox === undefined) return undefined
     const accepted = (this.database.prepare(`SELECT min(finished_at) AS at FROM outbox_attempts
       WHERE outbox_id=? AND status IN ('accepted','reconciled') AND finished_at IS NOT NULL`).get(audit.outboxId) as { at: number | null }).at
@@ -194,6 +197,10 @@ export class AttentionAuditStore {
       ORDER BY version DESC LIMIT 1`).get(audit.outboxId) as { version: number; status: string } | undefined)
       ?? (this.database.prepare(`SELECT 1 AS version, objective_status AS status FROM workflow_verified_task_feedback
         WHERE source_outbox_id=?`).get(audit.outboxId) as { version: number; status: string } | undefined)
+    // Only `routeWorkItemReport` writes this reserved marker + key prefix;
+    // every public enqueue rejects both.
+    const linkedOrigin = outbox.linked_report === 'v1' && outbox.idempotency_key.startsWith(linkedReportKeyPrefix)
+      && typeof outbox.linked_origin === 'string' && outbox.linked_origin.length > 0 ? outbox.linked_origin : undefined
     const judged = feedback ?? owner
     const objectiveStatus = (status: string) => status === 'achieved' || status === 'partial' || status === 'not-achieved' ? status : 'unknown'
     return Object.freeze({
@@ -212,6 +219,7 @@ export class AttentionAuditStore {
       ...(judged === undefined || !Number.isSafeInteger(judged.version) ? {} : { judgement: Object.freeze({
         source: feedback !== undefined ? 'work-item-feedback' as const : 'owner-objective' as const,
         version: judged.version, objectiveStatus: objectiveStatus(judged.status) }) }),
+      ...(linkedOrigin === undefined ? {} : { route: Object.freeze({ kind: 'linked' as const, originBindingId: linkedOrigin }) }),
     })
   }
 }

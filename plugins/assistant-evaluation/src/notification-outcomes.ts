@@ -67,6 +67,10 @@ export function normalizeNotificationOutcomeFact(input: unknown): NotificationOu
   if (judgement !== undefined && (!Number.isSafeInteger(judgement.version) || (judgement.version as number) < 1)) {
     invalid('judgement.version must be a positive integer')
   }
+  const route = fact.route === undefined ? undefined : plain(fact.route, 'route')
+  if (route !== undefined && (Object.keys(route).length !== 2 || route.kind !== 'linked')) invalid('route must be a linked route')
+  const originBindingId = route === undefined ? undefined : text(route.originBindingId, 'route.originBindingId')
+  if (originBindingId !== undefined && originBindingId === fact.bindingId) invalid('route.originBindingId must differ from bindingId')
   const workItemId = optionalText(fact.workItemId, 'workItemId')
   const questionId = optionalText(fact.questionId, 'questionId')
   const answersQuestionId = optionalText(fact.answersQuestionId, 'answersQuestionId')
@@ -100,6 +104,7 @@ export function normalizeNotificationOutcomeFact(input: unknown): NotificationOu
       version: judgement.version as number,
       objectiveStatus: member(judgement.objectiveStatus, objectiveStatuses, 'judgement.objectiveStatus'),
     } }),
+    ...(originBindingId === undefined ? {} : { route: { kind: 'linked' as const, originBindingId } }),
   }
 }
 
@@ -107,7 +112,9 @@ export function normalizeNotificationOutcomeFact(input: unknown): NotificationOu
  * Deterministic `notification-outcome/v1` classifier. Precedence: an owner
  * judgement (rejected, accepted) beats a reply (reacted), which beats transport
  * state. A withdrawn judgement (`unknown`) contributes nothing. Expiry depends
- * only on `now`, the earliest sent timestamp and the configured window.
+ * only on `now`, the earliest sent timestamp and the configured window. An
+ * optional linked route is carried verbatim and never affects the outcome, so
+ * the classifier stays at version 1 and route-free records keep their digests.
  */
 export function classifyNotificationOutcome(fact: NotificationOutcomeFactInput, now: number, responseWindowMs: number): NotificationOutcomeRecord {
   const judgement = fact.judgement !== undefined && fact.judgement.objectiveStatus !== 'unknown'
@@ -148,6 +155,7 @@ export function classifyNotificationOutcome(fact: NotificationOutcomeFactInput, 
     transport: { ...fact.transport },
     ...(fact.reaction === undefined ? {} : { reaction: { firstAt: fact.reaction.firstAt } }),
     ...(judgement === undefined ? {} : { judgement }),
+    ...(fact.route === undefined ? {} : { route: { kind: fact.route.kind, originBindingId: fact.route.originBindingId } }),
     ...(expiry === undefined ? {} : { expiry }),
   }
 }

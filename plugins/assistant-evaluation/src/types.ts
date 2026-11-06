@@ -677,6 +677,8 @@ export interface NotificationOutcomeFactInput {
     version: number
     objectiveStatus: ObjectiveStatus
   }>
+  /** Host-routed cross-channel fallback to a linked owner alias; absent means the notification's own binding. */
+  route?: Readonly<{ kind: 'linked'; originBindingId: string }>
 }
 
 /** Canonical content of one notification-outcome revision; its SHA-256 is the revision digest. */
@@ -700,6 +702,12 @@ export interface NotificationOutcomeRecord {
   transport: Readonly<{ status: string; acceptedAt?: number; deliveredAt?: number; readAt?: number }>
   reaction?: Readonly<{ firstAt: number }>
   judgement?: Readonly<{ source: 'owner-objective' | 'work-item-feedback'; version: number; objectiveStatus: Exclude<ObjectiveStatus, 'unknown'> }>
+  /**
+   * Linked-alias fallback route. Counted in summaries and the feed, excluded
+   * from attention-tuning cohorts. Absent (not `origin`) for ordinary
+   * notifications so pre-existing record digests are unchanged.
+   */
+  route?: Readonly<{ kind: 'linked'; originBindingId: string }>
   /**
    * Set only for `expired-unhandled`: the deterministic expiry boundary and the
    * response window that produced it. The window is deliberately absent from

@@ -286,4 +286,27 @@ describe('linked work-item report routing', () => {
     await drain(f.service)
     expect(f.sends.telegram).toHaveBeenCalledOnce()
   })
+
+  test('WP22 outcome facts tag only a Host-routed linked report with its origin binding', async () => {
+    const f = await fixture()
+    f.link()
+    const direct = f.service.enqueueBackground({ sourceId, workspace, bindingId: f.origin.id, idempotencyKey: 'direct-1', text: 'direct' })
+    // A marker without the reserved key prefix (only reachable by tampering) is not a linked route.
+    const tampered = f.service.enqueueBackground({ sourceId, workspace, bindingId: f.origin.id, idempotencyKey: 'direct-2', text: 'tampered' })
+    const db = new DatabaseSync(join(f.root, 'delivery.sqlite'))
+    try {
+      db.prepare(`UPDATE outbox_messages SET intent_json=json_set(intent_json,'$.metadata',json_object('dsh.linked-report','v1',
+        'dsh.linked-report.originBindingId','x')) WHERE id=?`).run(tampered.id)
+    } finally { db.close() }
+    f.dropOrigin()
+    const routed = f.service.routeWorkItemReport(report(f, [id(alias)])) as { route: 'linked'; outbox: { id: string } }
+    await drain(f.service)
+    const facts = f.service.inspectNotificationOutcomeFacts({ outboxIds: [direct.id, tampered.id, routed.outbox.id] }).facts
+    expect(facts.map(fact => fact.outboxId)).toEqual([direct.id, tampered.id, routed.outbox.id])
+    expect(facts[0]).not.toHaveProperty('route')
+    expect(facts[1]).not.toHaveProperty('route')
+    expect(facts[2]).toMatchObject({ bindingId: f.aliasBinding.id, lane: 'background', workItemId: 'item-1',
+      route: { kind: 'linked', originBindingId: f.origin.id } })
+    expect(Object.isFrozen(facts[2]!.route)).toBe(true)
+  })
 })
