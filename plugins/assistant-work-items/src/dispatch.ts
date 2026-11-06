@@ -16,6 +16,12 @@ function peerCode(error: unknown): string {
   return String((error as { code: unknown }).code)
 }
 
+/** WP21 slice 8: how a report held for acceptance settles before release. */
+export type HeldReportRelease =
+  | Readonly<{ kind: 'achieved' }>
+  | Readonly<{ kind: 'unverified'; timeoutMs: number }>
+  | Readonly<{ kind: 'blocked'; reason: string }>
+
 export interface DispatchDependencies {
   readonly config: NormalizedConfig
   readonly store: WorkItemStore
@@ -189,7 +195,7 @@ export class WorkItemDispatch {
   }
 
   /** Build the owner-facing notification for one terminal report. */
-  notification(item: WorkItemRecord, report: WorkItemReportRecord): WorkItemNotification {
+  notification(item: WorkItemRecord, report: WorkItemReportRecord, note?: string): WorkItemNotification {
     const lines = [
       `**Work item ${report.status}: ${item.title}**`,
       '',
@@ -205,6 +211,7 @@ export class WorkItemDispatch {
       for (const path of report.artifactPaths) lines.push(`- \`${path}\``)
     }
     if (report.truncated) lines.push('', '_The report was truncated at the configured byte limit._')
+    if (note !== undefined) lines.push('', note)
     return Object.freeze({
       item,
       report,
@@ -226,16 +233,50 @@ export class WorkItemDispatch {
    * records the outcome, including `unknown` when the enqueue result is lost.
    */
   async notify(item: WorkItemRecord, report: WorkItemReportRecord): Promise<boolean> {
+    if (!isActive(this.#deps.config) || !this.shouldNotify(report)) return false
+    return this.#deliver(item, report, complete => this.notification(item, complete))
+  }
+
+  /**
+   * WP21 slice 8 (`acceptance.holdReport`): send the report held while the
+   * verifier settles the binding. `achieved` sends the ordinary report,
+   * `unverified` sends it with an explicit timeout note, and `blocked` sends a
+   * `blocked` report instead of the self-reported `ready` one. The delivery
+   * coordinates stay on the held report revision, so a crash or a later wake
+   * can never enqueue the same held report twice.
+   */
+  async notifyHeld(item: WorkItemRecord, report: WorkItemReportRecord, release: HeldReportRelease): Promise<boolean> {
+    if (!isActive(this.#deps.config)) return false
+    const target = release.kind === 'blocked'
+      ? Object.freeze({ ...report, status: 'blocked' as const,
+        summary: `The independent verifier did not accept this work (${release.reason}). The worker reported: ${report.summary}` })
+      : report
+    if (!this.shouldNotify(target)) return false
+    const note = release.kind === 'unverified'
+      ? `_Unverified: no verifier verdict arrived within the ${String(Math.round(release.timeoutMs / 60_000))}-minute hold window, so this self-reported result was released on timeout._`
+      : undefined
+    return this.#deliver(item, report, complete => {
+      const reported = release.kind === 'blocked'
+        ? Object.freeze({ ...complete, status: 'blocked' as const,
+          summary: `The independent verifier did not accept this work (${release.reason}). The worker reported: ${complete.summary}` })
+        : complete
+      const built = this.notification(item, reported, note)
+      // The blocked variant is a different message; give it its own delivery
+      // identity while still recording the outcome against the held revision.
+      return release.kind === 'blocked' ? Object.freeze({ ...built, idempotencyKey: `${report.deliveryKey}:blocked` }) : built
+    })
+  }
+
+  async #deliver(item: WorkItemRecord, report: WorkItemReportRecord,
+    build: (completeReport: WorkItemReportRecord) => WorkItemNotification): Promise<boolean> {
     const config = this.#deps.config
-    if (!isActive(config)) return false
-    if (!this.shouldNotify(report)) return false
     const delivery = typeof this.#deps.delivery === 'function' ? this.#deps.delivery() : this.#deps.delivery
     if (delivery === undefined) fail('missing-dependency', 'assistantDelivery is required to notify the owner')
     // Feedback evidence binds the complete immutable bytes. Node 24's ordinary
     // TEXT projection may hide a NUL suffix; use the bounded byte reader when
     // this explicit metadata capability is enabled, without changing legacy sends.
     const completeReport = config.ownerReportFeedback ? this.#deps.store.feedbackReportByRevision(item.id, report.revision) ?? report : report
-    const notification = this.notification(item, completeReport)
+    const notification = build(completeReport)
     this.#deps.ledger.recordDelivery(item.id, report.revision, 'pending', null)
     try {
       const input = {

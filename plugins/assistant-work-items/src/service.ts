@@ -11,7 +11,7 @@ import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { WorkItemAdmission } from './admission.js'
 import { storedBasisHolds, WorkItemAuthority } from './authority.js'
 import { ConfigSchema, isActive, normalizeConfig, text, type Config, type NormalizedConfig } from './config.js'
-import { WorkItemDispatch } from './dispatch.js'
+import { WorkItemDispatch, type HeldReportRelease } from './dispatch.js'
 import { eventFollowReader, eventFollowRegistration, type EventFollowOwnerScope } from './event-follow.js'
 import { WorkItemEvaluationExporter, type WorkItemEvaluationRegistration } from './evaluation.js'
 import { normalizeWorkItemReportSummary, WorkItemLedger } from './ledger.js'
@@ -35,6 +35,7 @@ import {
 import { registerWorkItemTools, workItemReportKey } from './tools.js'
 import type {
   WorkItemScope,
+  WorkItemAcceptanceBinding,
   WorkItemAcceptanceSettleResult,
   WorkItemAcceptanceVerdict,
   WorkItemAdmitInput,
@@ -189,6 +190,8 @@ const WORKER_RUN_BIND_SCAN_LIMIT = 100
 const WORKER_RUN_BIND_SKIP_LIMIT = 1_000
 /** Consecutive `owner-route-drift` reads of one (item, occurrence) before a single warn. */
 const WORKER_RUN_DRIFT_WARN_AFTER = 5
+/** Held reports released per scheduler wake; the next wake continues the scan. */
+const HELD_REPORT_RELEASE_LIMIT = 10
 /**
  * `bindWorkerRun` refusals that cannot change while the item keeps its
  * occurrence: an expired, mismatched (ref, owner scope, digest), settled or
@@ -609,6 +612,10 @@ export class AssistantWorkItemsService extends Service {
       catch (error) { this.ctx.logger.warn(`assistant-work-items: acceptance worker-run bind scan failed: ${describe(error)}`) }
       try { this.workItemsAutoSettle(components) }
       catch (error) { this.ctx.logger.warn(`assistant-work-items: acceptance auto-settle scan failed: ${describe(error)}`) }
+      // Release only after auto-settle, so a verdict that arrived on this wake
+      // decides the same pass whether the held report is sent or blocked.
+      try { this.workItemsReleaseHeldReports(components) }
+      catch (error) { this.ctx.logger.warn(`assistant-work-items: acceptance held-report scan failed: ${describe(error)}`) }
       this.workItemsSchedulerWaking = false
     }
   }
@@ -823,6 +830,106 @@ export class AssistantWorkItemsService extends Service {
         }
       }
     }
+  }
+
+  /**
+   * WP21 slice 8 (`acceptance.holdReport`): the mandate binding, or else the
+   * latest late binding while it still belongs to the item's current
+   * occurrence. A malformed late row throws `storage`; callers decide whether
+   * to hold (fail closed) or treat the item as unbound.
+   */
+  private workItemsAcceptanceBinding(components: Components, item: WorkItemRecord): WorkItemAcceptanceBinding | undefined {
+    const mandate = item.authority?.mandate?.acceptance
+    if (mandate !== undefined) return mandate
+    const late = components.store.lateAcceptanceBinding(item.id)
+    return late !== undefined && late.occurrenceId === item.occurrenceId ? late.binding : undefined
+  }
+
+  /**
+   * Whether this report must be held instead of dispatched: `holdReport` is
+   * on, it is the terminal `ready` self-report of an executed item, the status
+   * is notifiable, and the item already has an independent acceptance binding.
+   * An item that has not been bound yet (for example a run that reports before
+   * the wake that binds it) is reported normally, exactly as today.
+   */
+  private workItemsHoldsReport(components: Components, item: WorkItemRecord, report: WorkItemReportRecord): boolean {
+    if (this.workItemsConfig.acceptanceHoldReport === undefined || this.workItemsClosed
+      || report.status !== 'ready' || item.state !== 'ready' || item.observed) return false
+    if (!components.dispatch.shouldNotify(report)) return false
+    return this.workItemsAcceptanceBinding(components, item) !== undefined
+  }
+
+  /**
+   * Whether this `ready` report is still held. Used to imply the verdict gate
+   * for held items even when `acceptance.verdictGate` itself is off: the gate
+   * must move the item before the held report can be replaced by the blocked
+   * one. A malformed binding row fails closed (treated as bound).
+   */
+  private workItemsReportIsHeld(components: Components, item: WorkItemRecord): boolean {
+    if (this.workItemsConfig.acceptanceHoldReport === undefined || item.state !== 'ready' || item.observed) return false
+    const report = components.store.lastReport(item.id)
+    if (report === undefined || report.status !== 'ready' || report.deliveryState !== null) return false
+    try { return this.workItemsAcceptanceBinding(components, item) !== undefined }
+    catch { return true }
+  }
+
+  /**
+   * WP21 slice 8: on the same native wake, release at most
+   * `HELD_REPORT_RELEASE_LIMIT` held reports. Achievement sends the ordinary
+   * report; any other settled verdict (or a verdict-gate `blocked` item) sends
+   * a blocked report instead; an unbound or still-pending item stays held, and
+   * one whose `holdTimeoutMs` elapsed is sent marked unverified. A missing or
+   * throwing verifier cannot hold a report forever: only the timeout decides.
+   */
+  private workItemsReleaseHeldReports(components: Components): void {
+    const hold = this.workItemsConfig.acceptanceHoldReport
+    if (hold === undefined || this.workItemsClosed) return
+    const now = Date.now()
+    for (const { item, report } of components.store.listHeldAcceptanceReports(HELD_REPORT_RELEASE_LIMIT)) {
+      if (this.workItemsClosed) break
+      let bound: boolean
+      try { bound = this.workItemsAcceptanceBinding(components, item) !== undefined }
+      catch (error) {
+        if (!this.workItemsWarnMalformedLateBinding(item.id, error)) {
+          this.ctx.logger.debug(`assistant-work-items: held report of ${item.id} cannot read its acceptance binding: ${describe(error)}`)
+        }
+        bound = true
+      }
+      // Only an acceptance-bound report was ever held. The report stays
+      // undelivered until an ordinary later dispatch path owns it.
+      if (!bound) continue
+      const release = this.workItemsHeldRelease(components, item, report, now, hold.holdTimeoutMs)
+      if (release === undefined) continue
+      // A status the operator explicitly excluded from `notifyOn` cannot be
+      // sent; record the terminal no-send so every later wake stops rescanning it.
+      if (!this.workItemsConfig.notifyOn.includes(release.kind === 'blocked' ? 'blocked' : 'ready')) {
+        components.ledger.recordDelivery(item.id, report.revision, 'failed', null)
+        continue
+      }
+      void components.dispatch.notifyHeld(item, report, release).catch(error => {
+        this.ctx.logger.warn(`assistant-work-items: held report release failed for ${item.id}: ${describe(error)}`)
+      })
+    }
+  }
+
+  /** Decide one held report without writing: release it, or wait for a later wake. */
+  private workItemsHeldRelease(components: Components, item: WorkItemRecord, report: WorkItemReportRecord,
+    now: number, timeoutMs: number): HeldReportRelease | undefined {
+    if (item.state === 'blocked') {
+      // The store query only returns acceptance-gated blocked rows.
+      return { kind: 'blocked', reason: item.stateReason ?? 'acceptance-blocked' }
+    }
+    const verdict = components.store.acceptanceVerdict(item.id)
+    // Only the verdict of this executed generation decides this report; an
+    // older generation's verdict cannot be moved by the gate either, so the
+    // held report waits for this run's verdict or the timeout.
+    if (verdict !== undefined && verdict.attempt === item.attempt && verdict.occurrenceId === item.occurrenceId) {
+      return verdict.objectiveStatus === 'achieved'
+        ? { kind: 'achieved' }
+        : { kind: 'blocked', reason: `acceptance-${verdict.objectiveStatus}` }
+    }
+    // A released report is never held again; the owning revision records the send.
+    return now >= report.recordedAt + timeoutMs ? { kind: 'unverified', timeoutMs } : undefined
   }
 
   get enabled(): boolean {
@@ -1069,7 +1176,10 @@ export class AssistantWorkItemsService extends Service {
     // Only work that actually ran and reached `ready` can be accepted: never
     // claimed, parked, blocked, failed or dropped items settle nothing.
     if (item.attempt < 1 || item.state !== 'ready') fail('invalid-state', `work item is ${item.state}, not executed`)
-    const gate = this.workItemsConfig.acceptanceVerdictGate === true
+    // `holdReport` implies the gate for a held report even when
+    // `acceptance.verdictGate` is off, so a non-achieved verdict can move the
+    // item before the held report is replaced by the blocked one.
+    const gate = this.workItemsConfig.acceptanceVerdictGate === true || this.workItemsReportIsHeld(components, item)
       ? Object.freeze({ attempt: item.attempt, occurrenceId: item.occurrenceId }) : undefined
     const result = settleAcceptance(components.store, this.workItemsVerifier(), item, binding, gate)
     // WP21 slice 7: the verifier's needs-attention writes no verdict, but with
@@ -1324,7 +1434,19 @@ export class AssistantWorkItemsService extends Service {
     let notified = false
     if (!result.replayed) {
       try {
-        notified = await components.dispatch.notify(result.item, result.report)
+        // A held report is simply not dispatched this pass: the same scheduler
+        // wake that settles the binding releases it in `workItemsReleaseHeldReports`.
+        let held = false
+        try { held = this.workItemsHoldsReport(components, result.item, result.report) }
+        catch (error) {
+          // A malformed late binding fails closed: keep holding; the timeout
+          // still releases it unverified rather than dropping the report.
+          if (!this.workItemsWarnMalformedLateBinding(item.id, error)) {
+            this.ctx.logger.debug(`assistant-work-items: report hold for ${item.id} cannot read its acceptance binding: ${describe(error)}`)
+          }
+          held = this.workItemsConfig.acceptanceHoldReport !== undefined && result.report.status === 'ready'
+        }
+        notified = held ? false : await components.dispatch.notify(result.item, result.report)
       } catch (error) {
         // `notify` already persisted the failed/unknown delivery state. Report
         // evidence must survive a notification failure, so surface it in the

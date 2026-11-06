@@ -1472,6 +1472,44 @@ export class WorkItemStore {
     `).all(after?.createdAt ?? -1, after?.id ?? '', limit) as Row[]).map(itemFromRow))
   }
 
+  /**
+   * WP21 slice 8 (`acceptance.holdReport`): executed items whose latest report
+   * is a terminal `ready` self-report that has not been handed to Delivery and
+   * that is either still waiting for the verifier (`ready`) or was moved to
+   * `blocked` by the verdict gate (`acceptance-*`). One row per item, oldest
+   * report first. Read-only and bounded; no schema change.
+   */
+  listHeldAcceptanceReports(limit: number): readonly Readonly<{ item: WorkItemRecord; report: WorkItemReportRecord }>[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('invalid-input', 'held report limit must be between 1 and 100')
+    const rows = this.#statement(`
+      SELECT ${ITEM_ALIASES}, r.revision AS heldRevision, r.summary AS heldSummary, r.truncated AS heldTruncated,
+        r.artifact_paths AS heldArtifactPaths, r.idempotency_key AS heldIdempotencyKey, r.delivery_key AS heldDeliveryKey,
+        r.recorded_at AS heldRecordedAt
+      FROM work_item_report r JOIN work_item i ON i.id = r.item_id
+      WHERE r.revision = (SELECT MAX(revision) FROM work_item_report WHERE item_id = i.id)
+        AND r.status = 'ready' AND r.delivery_state IS NULL
+        AND i.observed = 0 AND i.attempt >= 1
+        AND (i.state = 'ready' OR (i.state = 'blocked' AND i.state_reason LIKE 'acceptance-%'))
+      ORDER BY r.recorded_at ASC, i.id ASC LIMIT ?
+    `).all(limit) as Row[]
+    return Object.freeze(rows.map(row => Object.freeze({
+      item: itemFromRow(row),
+      report: Object.freeze({
+        itemId: String(row['id']),
+        revision: Number(row['heldRevision']),
+        summary: String(row['heldSummary']),
+        truncated: Number(row['heldTruncated']) === 1,
+        artifactPaths: Object.freeze(JSON.parse(String(row['heldArtifactPaths'])) as string[]),
+        idempotencyKey: String(row['heldIdempotencyKey']),
+        deliveryKey: String(row['heldDeliveryKey']),
+        deliveryState: null,
+        deliveryId: null,
+        recordedAt: Number(row['heldRecordedAt']),
+        status: 'ready' as const,
+      }),
+    })))
+  }
+
   /** Read one durable key/value row from the schema-meta table. */
   meta(key: string): string | null {
     const row = this.#statement('SELECT value FROM work_item_schema_meta WHERE key = ?').get(key) as Row | undefined

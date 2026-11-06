@@ -47,8 +47,20 @@ export interface Config {
    * not-achieved or unknown objective, or a verifier `needs-attention`,
    * turns an executed `ready` item into `blocked` (`acceptance-*` reason);
    * an achieved one leaves it `ready`. Off: verdicts stay events only.
+   *
+   * WP21 slice 8: `holdReport` holds the owner's `ready` report of an
+   * acceptance-bound item until the verifier settles it: achieved sends it,
+   * anything else blocks the item and sends a blocked report instead, and
+   * `holdTimeoutMs` (default 30 min, max 24 h) sends it marked unverified.
+   * Needs `autoSettle` and `bindWorkerRun`; a held item is gated like
+   * `verdictGate` whether or not that flag is on.
    */
-  acceptance?: { autoSettle?: { enabled?: boolean; maxPerTick?: number }; bindWorkerRun?: { enabled?: boolean; maxPerTick?: number }; verdictGate?: { enabled?: boolean } }
+  acceptance?: {
+    autoSettle?: { enabled?: boolean; maxPerTick?: number }
+    bindWorkerRun?: { enabled?: boolean; maxPerTick?: number }
+    verdictGate?: { enabled?: boolean }
+    holdReport?: { enabled?: boolean; holdTimeoutMs?: number }
+  }
   follows?: FollowsConfig
 }
 
@@ -228,6 +240,8 @@ export interface NormalizedConfig {
   readonly acceptanceBindWorkerRun?: Readonly<{ maxPerTick: number }>
   /** Present only when `acceptance.verdictGate.enabled` is true. */
   readonly acceptanceVerdictGate?: true
+  /** Present only when `acceptance.holdReport.enabled` is true. */
+  readonly acceptanceHoldReport?: Readonly<{ holdTimeoutMs: number }>
   /** Present only when at least one built-in followed-thread source is enabled. */
   readonly follows?: NormalizedFollows
 }
@@ -422,6 +436,7 @@ export const ConfigSchema = Schema.object({
     autoSettle: Schema.object({ enabled: Schema.boolean().default(false), maxPerTick: Schema.number().step(1) }),
     bindWorkerRun: Schema.object({ enabled: Schema.boolean().default(false), maxPerTick: Schema.number().step(1) }),
     verdictGate: Schema.object({ enabled: Schema.boolean().default(false) }),
+    holdReport: Schema.object({ enabled: Schema.boolean().default(false), holdTimeoutMs: Schema.number().step(1) }),
   }),
   ownerRecall: Schema.object({ enabled: Schema.boolean().default(false), linkedAliases: Schema.array(Schema.string()) }),
   ownerReportRouting: Schema.object({ linkedFallback: Schema.array(Schema.string()), prefer: Schema.union(['origin', 'recent'] as const) }),
@@ -710,6 +725,9 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   if (acceptanceBindWorkerRun && (!enabled || mode !== 'active')) fail('invalid-input', 'acceptance.bindWorkerRun requires an enabled active intake')
   const acceptanceVerdictGate = acceptance.verdictGate
   if (acceptanceVerdictGate && (!enabled || mode !== 'active')) fail('invalid-input', 'acceptance.verdictGate requires an enabled active intake')
+  const acceptanceHoldReport = acceptance.holdReport
+  if (acceptanceHoldReport && (!enabled || mode !== 'active' || diagnosis)) fail('invalid-input', 'acceptance.holdReport requires an enabled active intake without diagnosis')
+  if (acceptanceHoldReport && (!acceptanceBindWorkerRun || !acceptanceAutoSettle)) fail('invalid-input', 'acceptance.holdReport requires acceptance.bindWorkerRun and acceptance.autoSettle')
   return Object.freeze({
     enabled,
     mode,
@@ -734,14 +752,16 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     ...(acceptanceAutoSettle === undefined ? {} : { acceptanceAutoSettle }),
     ...(acceptanceBindWorkerRun === undefined ? {} : { acceptanceBindWorkerRun }),
     ...(acceptanceVerdictGate === true ? { acceptanceVerdictGate: true as const } : {}),
+    ...(acceptanceHoldReport === undefined ? {} : { acceptanceHoldReport }),
   })
 }
 
 /** Absent or disabled acceptance passes normalize to `undefined`. */
-function normalizeAcceptance(raw: unknown): Readonly<{ autoSettle?: Readonly<{ maxPerTick: number }>; bindWorkerRun?: Readonly<{ maxPerTick: number }>; verdictGate?: true }> {
+function normalizeAcceptance(raw: unknown): Readonly<{ autoSettle?: Readonly<{ maxPerTick: number }>; bindWorkerRun?: Readonly<{ maxPerTick: number }>; verdictGate?: true;
+  holdReport?: Readonly<{ holdTimeoutMs: number }> }> {
   if (raw === undefined) return {}
   const value = plainObject(raw, 'acceptance')
-  rejectUnknown(value, ['autoSettle', 'bindWorkerRun', 'verdictGate'], 'acceptance')
+  rejectUnknown(value, ['autoSettle', 'bindWorkerRun', 'verdictGate', 'holdReport'], 'acceptance')
   const pass = (key: 'autoSettle' | 'bindWorkerRun'): Readonly<{ maxPerTick: number }> | undefined => {
     if (value[key] === undefined) return undefined
     const section = plainObject(value[key], `acceptance.${key}`)
@@ -760,8 +780,17 @@ function normalizeAcceptance(raw: unknown): Readonly<{ autoSettle?: Readonly<{ m
     if (typeof gate !== 'boolean') fail('invalid-input', 'acceptance.verdictGate.enabled must be a boolean')
     verdictGate = gate
   }
+  let holdReport: Readonly<{ holdTimeoutMs: number }> | undefined
+  if (value['holdReport'] !== undefined) {
+    const section = plainObject(value['holdReport'], 'acceptance.holdReport')
+    rejectUnknown(section, ['enabled', 'holdTimeoutMs'], 'acceptance.holdReport')
+    const hold = section['enabled'] ?? false
+    if (typeof hold !== 'boolean') fail('invalid-input', 'acceptance.holdReport.enabled must be a boolean')
+    // One minute to one day: a verifier outage releases the report unverified, never holds it forever.
+    if (hold) holdReport = Object.freeze({ holdTimeoutMs: integer(section['holdTimeoutMs'] ?? 1_800_000, 'acceptance.holdReport.holdTimeoutMs', 60_000, 86_400_000) })
+  }
   return { ...(autoSettle === undefined ? {} : { autoSettle }), ...(bindWorkerRun === undefined ? {} : { bindWorkerRun }),
-    ...(verdictGate ? { verdictGate: true as const } : {}) }
+    ...(verdictGate ? { verdictGate: true as const } : {}), ...(holdReport === undefined ? {} : { holdReport }) }
 }
 
 /** Absent or all-disabled follow sources normalize to `undefined`. */
