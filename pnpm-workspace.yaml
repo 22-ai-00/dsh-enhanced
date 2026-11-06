@@ -80,6 +80,13 @@ catalog:
 
 linkWorkspacePackages: true
 
+# pnpm records this setting in node_modules/.pnpm-workspace-state-v1.json and
+# verify-deps-before-run fails when it differs. CI forces it to false, so a
+# local install run without CI would otherwise rewrite the state with the key
+# absent and make the next CI=1 check report "setting has changed". Pinning it
+# here keeps the recorded value identical in both environments.
+enableGlobalVirtualStore: false
+
 # pnpm denies dependency build scripts unless they are reviewed here.
 allowBuilds:
   esbuild: true
