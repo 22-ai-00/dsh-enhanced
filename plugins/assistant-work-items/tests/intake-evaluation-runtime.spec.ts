@@ -562,13 +562,13 @@ describe('schema 11 migration', () => {
     const config = await downgraded("DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version'; PRAGMA user_version = 10;")
     const store = new WorkItemStore(config.databasePath)
     try {
-      expect(store.stats().schemaVersion).toBe(12)
+      expect(store.stats().schemaVersion).toBe(13)
       expect(store.countIntake()).toEqual({ stored: 1, duplicate: 0, filtered: 0 })
       expect(store.countIntakeEvaluations()).toEqual({ decided: 0, unavailable: 0 })
     } finally {
       store.close()
     }
-    expect(query(config.databasePath, 'PRAGMA user_version')).toEqual([{ user_version: 12 }])
+    expect(query(config.databasePath, 'PRAGMA user_version')).toEqual([{ user_version: 13 }])
   })
 
   test('an evaluation object under schema 10 or a drifted evaluation table fails closed', async () => {
@@ -584,7 +584,7 @@ describe('schema 11 migration', () => {
   })
 
   test('a newer schema fails closed', async () => {
-    const config = await downgraded("UPDATE work_item_schema_meta SET value = '13' WHERE key = 'schema_version'; PRAGMA user_version = 13;")
+    const config = await downgraded("UPDATE work_item_schema_meta SET value = '14' WHERE key = 'schema_version'; PRAGMA user_version = 14;")
     expect(() => new WorkItemStore(config.databasePath)).toThrow()
   })
 })

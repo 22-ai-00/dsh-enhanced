@@ -33,7 +33,7 @@ test('schema 8 upgrades additively to 9 and a cold reopen preserves complete con
   const upgraded = new WorkItemStore(f.config.databasePath,{now:f.now})
   const item = child(f,parent), frozen = record(parent,item)
   try {
-    expect(upgraded.stats().schemaVersion).toBe(12)
+    expect(upgraded.stats().schemaVersion).toBe(13)
     upgraded.admitItem(item,{kind:'admitted',actor:'admission'},dispatch(item),[],undefined,frozen)
     expect(upgraded.getContinuation(item.id)).toEqual({...frozen,inputBytes:Buffer.byteLength(frozen.inputText,'utf8')})
     expect({item:upgraded.findItemById(parent.id),reports:upgraded.reports(parent.id),outcomes:upgraded.outcomes(parent.id)}).toEqual(before)

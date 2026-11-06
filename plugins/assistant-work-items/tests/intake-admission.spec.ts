@@ -398,17 +398,17 @@ describe('schema 12 migration', () => {
     return path
   }
 
-  test('schema 11 upgrades additively to 12 and keeps its rows', async () => {
+  test('schema 11 upgrades additively through 13 and keeps its rows', async () => {
     const path = await downgraded("DROP TABLE work_item_intake_admission; UPDATE work_item_schema_meta SET value = '11' WHERE key = 'schema_version'; PRAGMA user_version = 11;")
     const store = new WorkItemStore(path)
     try {
-      expect(store.stats().schemaVersion).toBe(12)
+      expect(store.stats().schemaVersion).toBe(13)
       expect(store.countIntake()).toEqual({ stored: 1, duplicate: 0, filtered: 0 })
       expect(store.pendingIntakeAdmissions(10)).toEqual([])
     } finally {
       store.close()
     }
-    expect(rows(path, 'PRAGMA user_version')).toEqual([{ user_version: 12 }])
+    expect(rows(path, 'PRAGMA user_version')).toEqual([{ user_version: 13 }])
   })
 
   test('an admission object under schema 11 or a drifted admission table fails closed', async () => {
@@ -422,5 +422,65 @@ describe('schema 12 migration', () => {
     expect(() => new WorkItemStore(drifted)).toThrow(/intake admission schema differs/)
     const index = await downgraded('DROP INDEX work_item_intake_admission_admitted_idx;')
     expect(() => new WorkItemStore(index)).toThrow(/intake admission schema differs/)
+  })
+})
+
+describe('schema 13 migration', () => {
+  /** An auto-admitted item, then the database rewound to schema 12 (no item index). */
+  async function schema12WithAdmission() {
+    const fixture = await allowing()
+    evaluated(fixture)
+    const [record] = bridge(fixture).instance.run()
+    const provenance = fixture.store.intakeProvenance(record!.itemId!)
+    expect(provenance?.admission).toEqual(record)
+    fixture.store.close()
+    const db = new DatabaseSync(fixture.config.databasePath)
+    db.exec("DROP INDEX work_item_intake_admission_item_idx; UPDATE work_item_schema_meta SET value = '12' WHERE key = 'schema_version'; PRAGMA user_version = 12;")
+    db.close()
+    return { path: fixture.config.databasePath, itemId: record!.itemId!, provenance }
+  }
+  const plan = (path: string) => rows(path, "EXPLAIN QUERY PLAN SELECT * FROM work_item_intake_admission WHERE item_id = 'x' AND outcome IN ('admitted', 'replayed') ORDER BY recorded_at, source, source_event_id, rule_id, policy_version LIMIT 1")
+    .map(row => String(row['detail'])).join('\n')
+
+  test('a fresh database has the partial item index and the provenance read uses it', async () => {
+    const fixture = await allowing()
+    expect(fixture.store.stats().schemaVersion).toBe(13)
+    expect(rows(fixture.config.databasePath, "SELECT sql FROM sqlite_schema WHERE name = 'work_item_intake_admission_item_idx'"))
+      .toEqual([{ sql: expect.stringMatching(/ON work_item_intake_admission\(item_id\) WHERE item_id IS NOT NULL$/u) }])
+    expect(plan(fixture.config.databasePath)).toContain('USING INDEX work_item_intake_admission_item_idx')
+  })
+
+  test('schema 12 upgrades additively to 13: rows are kept and provenance reads the same', async () => {
+    const { path, itemId, provenance } = await schema12WithAdmission()
+    expect(plan(path)).not.toContain('work_item_intake_admission_item_idx')
+    const store = new WorkItemStore(path)
+    try {
+      expect(store.stats().schemaVersion).toBe(13)
+      expect(store.intakeProvenance(itemId)).toEqual(provenance)
+      expect(store.countIntakeAdmissions()).toMatchObject({ admitted: 1 })
+    } finally {
+      store.close()
+    }
+    expect(rows(path, 'PRAGMA user_version')).toEqual([{ user_version: 13 }])
+    expect(rows(path, "SELECT value FROM work_item_schema_meta WHERE key = 'schema_version'")).toEqual([{ value: '13' }])
+    expect(plan(path)).toContain('USING INDEX work_item_intake_admission_item_idx')
+  })
+
+  test('an item index under schema 12 or a missing or drifted one at 13 fails closed', async () => {
+    const early = await schema12WithAdmission()
+    const pre = new DatabaseSync(early.path)
+    pre.exec('CREATE INDEX work_item_intake_admission_item_idx ON work_item_intake_admission(item_id)')
+    pre.close()
+    expect(() => new WorkItemStore(early.path)).toThrow(/intake admission item index before schema 13/)
+    expect(rows(early.path, 'PRAGMA user_version')).toEqual([{ user_version: 12 }])
+    const missing = await schema12WithAdmission()
+    const raw = new DatabaseSync(missing.path)
+    raw.exec("UPDATE work_item_schema_meta SET value = '13' WHERE key = 'schema_version'; PRAGMA user_version = 13;")
+    raw.close()
+    expect(() => new WorkItemStore(missing.path)).toThrow(/intake admission schema differs/)
+    const drifted = new DatabaseSync(missing.path)
+    drifted.exec("CREATE INDEX work_item_intake_admission_item_idx ON work_item_intake_admission(item_id) WHERE outcome = 'admitted'")
+    drifted.close()
+    expect(() => new WorkItemStore(missing.path)).toThrow(/intake admission schema differs/)
   })
 })

@@ -204,7 +204,7 @@ describe('durable intake ledger', () => {
     expect(service.health().openItems).toBe(0)
     const store = new WorkItemStore(config.databasePath)
     try {
-      expect(store.stats()).toMatchObject({ schemaVersion: 12, items: 0, dispatches: 0 })
+      expect(store.stats()).toMatchObject({ schemaVersion: 13, items: 0, dispatches: 0 })
       expect(store.countIntake()).toEqual({ stored: 1, duplicate: 0, filtered: 0 })
     } finally {
       store.close()
@@ -299,14 +299,14 @@ describe('schema 10 migration', () => {
     db.close()
     const store = new WorkItemStore(config.databasePath)
     try {
-      expect(store.stats().schemaVersion).toBe(12)
+      expect(store.stats().schemaVersion).toBe(13)
       expect(store.countIntake()).toEqual({ stored: 0, duplicate: 0, filtered: 0 })
     } finally {
       store.close()
     }
     const raw = new DatabaseSync(config.databasePath)
     try {
-      expect(raw.prepare("SELECT value FROM work_item_schema_meta WHERE key = 'schema_version'").get()).toEqual({ value: '12' })
+      expect(raw.prepare("SELECT value FROM work_item_schema_meta WHERE key = 'schema_version'").get()).toEqual({ value: '13' })
     } finally {
       raw.close()
     }

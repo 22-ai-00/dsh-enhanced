@@ -12,6 +12,8 @@ WorkItems schema 11 只新增只追加的 `work_item_intake_evaluation` 表（ST
 
 WorkItems schema 12 只新增只追加的 `work_item_intake_admission` 表（STRICT）、`work_item_intake_admission_admitted_idx` 索引与禁止 UPDATE/DELETE 的触发器；11→12 一步在单个事务内完成，原有行不改写，新表起始为空，行内只有确定性 decisionId、结果与原因码，不含正文。12 以下版本若已存在准入对象即失败关闭；更新的 schema 或形状漂移同样失败关闭。与 11 相同，插件启用即在打开账本时迁移，与 `intakeLedger.evaluation.admit` 开关（默认关）无关；迁移后旧 writer 无法再打开该库，不支持降级。
 
+WorkItems schema 13 只新增部分索引 `work_item_intake_admission_item_idx`（`ON work_item_intake_admission(item_id) WHERE item_id IS NOT NULL`），供 `inspectIntakeProvenance` 按工作项查找；12→13 一步在单个事务内完成，不改写任何行。12 及以下版本若已存在同名索引即失败关闭；13 时索引缺失或定义漂移同样失败关闭。插件启用即在打开账本时迁移；迁移后旧 writer 无法再打开该库，不支持降级。
+
 该账本默认关闭：只有 `enabled: true` 且显式 `intakeLedger.enabled: true` 时，Host-only `recordIntake` 才写入；observe 模式可用，不准入工作项、不唤醒 worker、不调用 Delivery 或模型。强度分级中名单同时限定寄址与线程跟进，非白名单跟进为 ignore/filtered（`follow-up-not-allowlisted`）。行只保存来源、事件 ID、决策/原因码、强度、布尔信号、可选的调用方 SHA-256 内容摘要与元数据摘要，不保存正文、标题或发送者身份。现有调用方、`admit` 与配置语义不变；当前没有入站插件调用该接口，lark-channel 的 mention gate 保持原样。
 
 ## 别名 link 激活期与按 principal 预算（无 schema 变更）

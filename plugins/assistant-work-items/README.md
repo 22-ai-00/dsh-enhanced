@@ -498,7 +498,7 @@ Host 批量来源接口 `withOwnerWorkItemFeedbackTargetsFence(capabilities, cal
 
 这条历史读取与新执行授权分离。显式开启反馈后，冷启动可保留已经过期的 scope、diagnosis、continuation 原期限来读取已有结果；不会延长期限、重置预算、重新 reconcile worker 或放行旧执行。当前 Delivery owner route 与反馈 Policy 仍须有效。两个入口同开时，当前执行资格独立控制普通续办；过期后的明确评价仍可记录，普通回复不会因此取得过期执行权限。既有 v1/v2 计划和激活摘要保持兼容。
 
-这一切片引入时 WorkItems 使用 schema 9（现为 schema 12，见下节 intake 账本）；Delivery schema 30 保存独占评价意图，Evaluation schema 13 保存新的 canonical 工作项主人结果。原有 settlement 行继续作为 objective unknown 的审计材料，不回填为主人评价。备份与恢复须一致保留相关账本；这一切片不自动触发 Growth、创建/采用候选或调用模型。
+这一切片引入时 WorkItems 使用 schema 9（现为 schema 13，见下节 intake 账本）；Delivery schema 30 保存独占评价意图，Evaluation schema 13 保存新的 canonical 工作项主人结果。原有 settlement 行继续作为 objective unknown 的审计材料，不回填为主人评价。备份与恢复须一致保留相关账本；这一切片不自动触发 Growth、创建/采用候选或调用模型。
 
 ## 确定性 intake 账本（显式启用）
 
@@ -570,8 +570,9 @@ ctx.assistantWorkItems.registerIntakeEvaluator({
 - `mode: observe`（默认）：只记一行 `would-admit`，不建工作项；之后切到 `auto` 也不追溯准入这些行。
 - `mode: auto`：要求 WorkItems `enabled` + `active`，`kind` 在 `allowedKinds` 内；以 `admitDecision` 准入 inferred mandate（仅元数据：标题 `Intake <source>:<eventId>`、规则/Policy 版本，不含正文或引文），发往配置的 `originBindingId`。decisionId 由 `(source, sourceEventId, ruleId, policyVersion)` 确定性派生，重放或重启返回原项，不开第二项。
 - 每小时最多 `maxPerHour` 次准入；超出记 `refused`/`budget-exhausted`。`admitDecision` 拒绝（如 `policy-rule-mismatch`）或错误码（`kind-rejected`、`identity-mismatch`、`source-rejected`）记一行 `refused` 并带原因码，终态不重试；仅 `storage`/`disabled` 推迟到下次 wake，同错误只记一次日志。
-- 结果写入 schema 12 的 `work_item_intake_admission`（STRICT，触发器禁止改写/删除），每个评估键一行；`intakeAdmissions(source, eventId)` 读取。Host-only 只读 `inspectIntakeProvenance(itemId)` 反查准入某工作项的 intake 判断（`work-items/intake-provenance/v1`：source/eventId、rule、policy 版本、mode、level、`wouldAccept`、准入时间，不含正文），并带该项 owner scope，供 Evaluation 的 intake 与注意力结果吻合度使用；`admitted` 与崩溃恢复的 `replayed` 都算 intake 准入；项不存在或非 intake 准入时返回 `undefined`，intake ledger 关闭时抛 `disabled`（不把"无法判断"当成"非 intake"）；按 item_id 扫描准入表，无索引。
+- 结果写入 schema 12 的 `work_item_intake_admission`（STRICT，触发器禁止改写/删除），每个评估键一行；`intakeAdmissions(source, eventId)` 读取。Host-only 只读 `inspectIntakeProvenance(itemId)` 反查准入某工作项的 intake 判断（`work-items/intake-provenance/v1`：source/eventId、rule、policy 版本、mode、level、`wouldAccept`、准入时间，不含正文），并带该项 owner scope，供 Evaluation 的 intake 与注意力结果吻合度使用；`admitted` 与崩溃恢复的 `replayed` 都算 intake 准入；项不存在或非 intake 准入时返回 `undefined`，intake ledger 关闭时抛 `disabled`（不把"无法判断"当成"非 intake"）；schema 13 起由部分索引 `work_item_intake_admission_item_idx`（`item_id IS NOT NULL`）按 item_id 查找，不再全表扫描。
 - 升级：schema 11 自动升级到 12（仅新增表、索引与触发器）；更新的 schema 或结构漂移 fail closed。
+- 升级：schema 12 自动升级到 13（仅新增准入表的 item_id 部分索引，不改写行）；12 及以下已存在同名索引、13 时索引缺失或定义不符均 fail closed。
 
 ## 配置
 

@@ -63,7 +63,7 @@ import type { WorkItemIntakeCandidate, WorkItemIntakeRecord, WorkItemIntakeResul
 import type { WorkItemIntakeEvaluationRecord } from './intake-evaluation.ts'
 import type { WorkItemIntakeAdmissionRecord } from './intake-admission.ts'
 
-const SCHEMA_VERSION = 12
+const SCHEMA_VERSION = 13
 const WORK_ITEM_TABLE_NAMES = ['work_item', 'work_item_claim', 'work_item_continuation', 'work_item_dispatch', 'work_item_event', 'work_item_follow', 'work_item_intake', 'work_item_intake_admission', 'work_item_intake_evaluation', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta']
 const CONTINUATION_TABLE = `CREATE TABLE work_item_continuation (
   item_id TEXT PRIMARY KEY REFERENCES work_item(id) ON DELETE RESTRICT,
@@ -153,6 +153,13 @@ const INTAKE_ADMISSION_TABLE = `CREATE TABLE work_item_intake_admission (
 ) STRICT, WITHOUT ROWID`
 const INTAKE_ADMISSION_ADMITTED_INDEX = `CREATE INDEX work_item_intake_admission_admitted_idx
   ON work_item_intake_admission(recorded_at) WHERE outcome = 'admitted'`
+/**
+ * Item lookup for `intakeProvenance` (schema 13). Partial: only rows that name
+ * an item (`admitted`/`replayed`) are indexed; it also backs the
+ * `item_id REFERENCES work_item(id)` foreign key.
+ */
+const INTAKE_ADMISSION_ITEM_INDEX = `CREATE INDEX work_item_intake_admission_item_idx
+  ON work_item_intake_admission(item_id) WHERE item_id IS NOT NULL`
 const INTAKE_ADMISSION_TRIGGERS = [
   ['work_item_intake_admission_no_update', `CREATE TRIGGER work_item_intake_admission_no_update BEFORE UPDATE ON work_item_intake_admission BEGIN SELECT RAISE(ABORT, 'intake admission is append-only'); END`],
   ['work_item_intake_admission_no_delete', `CREATE TRIGGER work_item_intake_admission_no_delete BEFORE DELETE ON work_item_intake_admission BEGIN SELECT RAISE(ABORT, 'intake admission is append-only'); END`],
@@ -417,6 +424,9 @@ function validateSchema(database: DatabaseSync): void {
   if (version >= 10 && version <= 11 && objects.some(row => String(row['name']).startsWith('work_item_intake_admission'))) {
     fail('storage', 'work-item database contains an intake admission object before schema 12')
   }
+  if (version >= 1 && version <= 12 && objects.some(row => String(row['name']) === 'work_item_intake_admission_item_idx')) {
+    fail('storage', 'work-item database contains the intake admission item index before schema 13')
+  }
   if (version === 0) {
     if (objects.length !== 0) fail('storage', 'new work-item database is not empty')
     database.exec(`
@@ -489,8 +499,9 @@ function validateSchema(database: DatabaseSync): void {
       ${INTAKE_SCHEMA};
       ${INTAKE_EVALUATION_SCHEMA};
       ${INTAKE_ADMISSION_SCHEMA};
-      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '12');
-      PRAGMA user_version = 12;
+      ${INTAKE_ADMISSION_ITEM_INDEX};
+      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '13');
+      PRAGMA user_version = 13;
       COMMIT;
     `)
     return
@@ -627,6 +638,12 @@ function validateSchema(database: DatabaseSync): void {
       UPDATE work_item_schema_meta SET value = '12' WHERE key = 'schema_version';
       PRAGMA user_version = 12; COMMIT;`)
   }
+  if (version >= 1 && version <= 12) {
+    // Additive only: an index over existing admission rows; no row moves.
+    database.exec(`BEGIN IMMEDIATE; ${INTAKE_ADMISSION_ITEM_INDEX};
+      UPDATE work_item_schema_meta SET value = '13' WHERE key = 'schema_version';
+      PRAGMA user_version = 13; COMMIT;`)
+  }
   if (!Number.isSafeInteger(version) || version < 1 || version > SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
   const expected = JSON.stringify(WORK_ITEM_TABLE_NAMES)
   const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*' ORDER BY name").all() as Row[]).map(row => String(row['name']))
@@ -643,7 +660,8 @@ function validateSchema(database: DatabaseSync): void {
     const row = database.prepare('SELECT sql FROM sqlite_schema WHERE name = ?').get(name!) as Row | undefined
     if (typeof row?.['sql'] !== 'string' || row['sql'].replace(/\s+/gu, ' ').trim() !== sql!.replace(/\s+/gu, ' ').trim()) fail('storage', 'intake evaluation schema differs')
   }
-  for (const [name, sql] of [['work_item_intake_admission', INTAKE_ADMISSION_TABLE], ['work_item_intake_admission_admitted_idx', INTAKE_ADMISSION_ADMITTED_INDEX], ...INTAKE_ADMISSION_TRIGGERS]) {
+  for (const [name, sql] of [['work_item_intake_admission', INTAKE_ADMISSION_TABLE], ['work_item_intake_admission_admitted_idx', INTAKE_ADMISSION_ADMITTED_INDEX],
+    ['work_item_intake_admission_item_idx', INTAKE_ADMISSION_ITEM_INDEX], ...INTAKE_ADMISSION_TRIGGERS]) {
     const row = database.prepare('SELECT sql FROM sqlite_schema WHERE name = ?').get(name!) as Row | undefined
     if (typeof row?.['sql'] !== 'string' || row['sql'].replace(/\s+/gu, ' ').trim() !== sql!.replace(/\s+/gu, ' ').trim()) fail('storage', 'intake admission schema differs')
   }
@@ -1238,9 +1256,7 @@ export class WorkItemStore {
    * The intake decision that admitted one item, if any: its first
    * `admitted` (or crash-recovered `replayed`) admission row joined with the
    * evaluation it acted on.
-   * Read-only. Scans the append-only admission table: there is no index on
-   * item_id, and adding one needs a schema step. Growth is capped by the
-   * hourly intake budget.
+   * Read-only. Served by the partial `item_id` index (schema 13).
    */
   intakeProvenance(itemId: string): Readonly<{ admission: WorkItemIntakeAdmissionRecord; evaluation: WorkItemIntakeEvaluationRecord }> | undefined {
     const row = this.#statement(`SELECT * FROM work_item_intake_admission WHERE item_id = ? AND outcome IN ('admitted', 'replayed')

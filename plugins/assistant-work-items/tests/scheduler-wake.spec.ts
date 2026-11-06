@@ -321,7 +321,7 @@ test('schema 7 migration preserves every historical row and real keyset queries 
   })
   const store = new WorkItemStore(fixture.config.databasePath!)
   try {
-    expect(store.stats().schemaVersion).toBe(12)
+    expect(store.stats().schemaVersion).toBe(13)
     expect(data()).toEqual(before)
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(Date.now() + 60_001)
     store.listDueWaitingResumes(10)
