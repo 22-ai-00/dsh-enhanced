@@ -152,6 +152,8 @@ ownerRoutes:
 
 `resolveOwnerRoute(id)` 每次从 binding ledger 读取该 conversation 的当前 active binding，只接受 active owner，且要求 principal、workspace、agent preset、policyRef 全部逐项相等、generation 不低于显式 floor；`/new` 产生的同 lineage 下一代可单调前进，任一身份或作用域漂移都会 fail closed。authority 只存在于 Host 配置和 service API，不注册为 Agent 工具、不进入 prompt，也不能由成长系统自行创建或修改。
 
+Host-only `inspectOwnerRouteBinding({ authorityId, principalId, workspace, agentPreset })` 与 `validateOwnerRoute()` 共用同一次 route 解析，返回 `{ protocol: 'assistant-delivery/owner-route-binding/v1', receipt, bindingId }`：`receipt` 即不变的 v2 回执，`bindingId` 是它所解析的那条 active binding 行。v2 回执本身仍不含 binding id；该接口只供需要把工作钉到某一条 binding 的 Host 消费者（如 WorkItems 晚绑定 worker run 合同）使用，不注册为 Agent 工具，错误与 `validateOwnerRoute()` 相同（`missing-binding`）。
+
 Host-only `inspectOwnerRouteState({ authorityId, principalId, workspace, agentPreset })` 提供无正文的只读状态：`active` 带原 `validateOwnerRoute()` receipt；`revoked` 只在请求 scope 与配置一致、精确 durable owner 行明确撤销时返回 authority id/hash 和 principal id/record/version，不要求仍有 active binding。缺失 authority/owner/binding、scope 漂移或数据库异常均为 `unavailable`，`reason` 只有稳定代码，不包含异常或配置内容；消费者不能据此退休 owner。普通 `/new` 只撤销旧 binding，不等于 owner 撤销。接口不配对、不创建或修改 principal/binding/history；显式 A→B→A 交接仍沿用 durable row 的新版本，旧撤销观察不代表新版本授权。
 
 `inspectOwnerModelSelection()` 在同一 owner route 校验后提供模型快照，供修复与成长继承。传入 `sourceAgent` 时读取匹配 binding 的 Session 最新原生 `request/header`，避免初始 Agent options 已过期；未传入时读取外部会话的持久模型选择或其 Delivery 默认配置。原生 Web 的模型由 DSH 管理，必须提供来源 Agent；该接口不替它猜测模型。返回值仅含 provider/model/可选 reasoning effort，不含会话内容或凭据。

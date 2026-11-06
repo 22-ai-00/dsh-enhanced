@@ -172,6 +172,7 @@ import type {
   OwnerAliasReceipt,
   OwnerRouteStateInspection,
   OwnerRouteValidationReceipt,
+  OwnerRouteBindingReceipt,
   OutboundIntent,
   OutboxRecord,
   PairingChallenge,
@@ -6092,6 +6093,30 @@ export class AssistantDeliveryService extends Service {
     workspace: string
     agentPreset: string
   }): Readonly<OwnerRouteValidationReceipt> {
+    return this.ownerRouteReceipt(input).receipt
+  }
+
+  /**
+   * Host-only: the same receipt as `validateOwnerRoute`, plus the id of the
+   * exact active binding it was resolved from (one resolve, so both describe
+   * the same route state). Not an Agent tool; same `missing-binding` errors.
+   */
+  inspectOwnerRouteBinding(input: {
+    authorityId: string
+    principalId: string
+    workspace: string
+    agentPreset: string
+  }): Readonly<OwnerRouteBindingReceipt> {
+    const { receipt, bindingId } = this.ownerRouteReceipt(input)
+    return Object.freeze({ protocol: 'assistant-delivery/owner-route-binding/v1' as const, receipt, bindingId })
+  }
+
+  private ownerRouteReceipt(input: {
+    authorityId: string
+    principalId: string
+    workspace: string
+    agentPreset: string
+  }): Readonly<{ receipt: Readonly<OwnerRouteValidationReceipt>; bindingId: string }> {
     this.assertActive()
     const resolved = this.resolveOwnerRoute(input.authorityId)
     const authority = this.ownerRoutes.get(resolved.authorityId)!
@@ -6121,7 +6146,7 @@ export class AssistantDeliveryService extends Service {
       || agentPreset !== authority.agentPreset) {
       throw new AssistantDeliveryError('missing-binding', 'owner route authority does not match the requested scope')
     }
-    return Object.freeze({
+    const receipt = Object.freeze({
       receiptVersion: 2 as const,
       authorityId: resolved.authorityId,
       authorityHash: resolved.snapshot.authorityHash,
@@ -6133,6 +6158,7 @@ export class AssistantDeliveryService extends Service {
       bindingVersion: resolved.snapshot.bindingVersion,
       generation: resolved.snapshot.generation,
     })
+    return Object.freeze({ receipt, bindingId: resolved.snapshot.bindingId })
   }
 
   /** Host-only proof that the live caller Agent belongs to the current owner route. */

@@ -398,6 +398,13 @@ describe('stable owner route authority', () => {
     })
     expect(validation).not.toHaveProperty('bindingId')
     expect(validation).not.toHaveProperty('conversation')
+    // The Host-only companion pins the same receipt to the exact active binding.
+    const bound = f.service.inspectOwnerRouteBinding(ownerScope)
+    expect(bound).toEqual({ protocol: 'assistant-delivery/owner-route-binding/v1', receipt: validation, bindingId: second.id })
+    expect(Object.isFrozen(bound)).toBe(true)
+    expect(Object.isFrozen(bound.receipt)).toBe(true)
+    expect(() => f.service.inspectOwnerRouteBinding({ ...ownerScope, principalId: 'lark/bot-1/tenant-a/ou_other' }))
+      .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
     expect(() => f.service.validateOwnerRoute({
       authorityId: authority.id,
       principalId: 'lark/bot-1/tenant-a/ou_other',

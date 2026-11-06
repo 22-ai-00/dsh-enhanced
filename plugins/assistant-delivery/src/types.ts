@@ -207,6 +207,18 @@ export interface OwnerAliasForegroundToolCallAttestation {
   call: Readonly<{ id: string; toolName: string; eventSeq: number; eventDigest: string; argumentsDigest: string }>
 }
 
+/**
+ * Host-only companion of {@link OwnerRouteValidationReceipt}: the unchanged v2
+ * receipt plus the id of the exact active binding row it was read from, both
+ * from one route resolve. Lets a consumer pin work frozen under one binding
+ * without the v2 receipt itself ever carrying a binding address.
+ */
+export interface OwnerRouteBindingReceipt {
+  protocol: 'assistant-delivery/owner-route-binding/v1'
+  receipt: Readonly<OwnerRouteValidationReceipt>
+  bindingId: string
+}
+
 /** Content-free Host observation; only an exact durable owner row proves revocation. */
 export type OwnerRouteStateInspection =
   | { status: 'active'; receipt: Readonly<OwnerRouteValidationReceipt> }
