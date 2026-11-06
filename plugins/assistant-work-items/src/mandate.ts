@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto'
+import { ACCEPTANCE_CONTRACT_ID, acceptanceBindingIsUsable } from './acceptance-binding.ts'
 import type {
+  WorkItemAcceptanceBinding,
+  WorkItemAcceptanceHandle,
   WorkItemAdmitInput,
   WorkItemDecisionRefusal,
   WorkItemExecuteDecision,
@@ -38,6 +41,8 @@ export interface NormalizedExecuteDecision {
   readonly policyRuleId: string | undefined
   readonly budgetRemaining: number
   readonly input: WorkItemAdmitInput
+  /** Acceptance handle, resolved against the verifier by admission. */
+  readonly acceptance: WorkItemAcceptanceHandle | undefined
 }
 
 /**
@@ -48,7 +53,7 @@ export interface NormalizedExecuteDecision {
  */
 export function normalizeExecuteDecision(value: unknown): NormalizedExecuteDecision {
   const decision = plainObject(value, 'decision')
-  exactKeys(decision, ['protocol', 'decisionId', 'verdict', 'origin', 'mode', 'policyRuleId', 'budgetRemaining', 'mandate'], 'decision')
+  exactKeys(decision, ['protocol', 'decisionId', 'verdict', 'origin', 'mode', 'policyRuleId', 'budgetRemaining', 'mandate', 'acceptance'], 'decision')
   if (decision['protocol'] !== DECISION_PROTOCOL) fail('decision.protocol is not supported')
   if (decision['verdict'] !== 'execute') fail('decision.verdict must be execute')
   const decisionId = decision['decisionId']
@@ -68,12 +73,23 @@ export function normalizeExecuteDecision(value: unknown): NormalizedExecuteDecis
   for (const key of ['kind', 'title', 'brief', 'originBindingId', 'acceptanceRef'] as const) {
     if (typeof mandate[key] !== 'string') fail(`decision.mandate.${key} must be a string`)
   }
+  let acceptance: WorkItemAcceptanceHandle | undefined
+  if (decision['acceptance'] !== undefined) {
+    const handle = plainObject(decision['acceptance'], 'decision.acceptance')
+    exactKeys(handle, ['contractId', 'contractDigest'], 'decision.acceptance')
+    const contractId = handle['contractId']
+    if (typeof contractId !== 'string' || !ACCEPTANCE_CONTRACT_ID.test(contractId)) fail('decision.acceptance.contractId has an invalid shape')
+    const contractDigest = handle['contractDigest']
+    if (typeof contractDigest !== 'string' || !DIGEST.test(contractDigest)) fail('decision.acceptance.contractDigest must be a sha256 hex digest')
+    acceptance = Object.freeze({ contractId, contractDigest })
+  }
   return Object.freeze({
     decisionId,
     origin,
     mode,
     policyRuleId: rule as string | undefined,
     budgetRemaining: budget,
+    acceptance,
     input: Object.freeze({
       kind: mandate['kind'] as string,
       externalId: decisionExternalId(decisionId),
@@ -127,11 +143,17 @@ export function mandateDigest(decision: NormalizedExecuteDecision, normalized: {
     normalized.brief,
     normalized.originBindingId,
     normalized.acceptanceRef,
+    // Appended only when bound, so every digest admitted before slice 4 is unchanged.
+    ...(decision.acceptance === undefined ? [] : [['acceptance', decision.acceptance.contractId, decision.acceptance.contractDigest]]),
   ])
   return createHash('sha256').update(canonical, 'utf8').digest('hex')
 }
 
-export function buildMandateBasis(decision: NormalizedExecuteDecision, digest: string): WorkItemMandateBasis {
+export function buildMandateBasis(
+  decision: NormalizedExecuteDecision,
+  digest: string,
+  acceptance?: WorkItemAcceptanceBinding,
+): WorkItemMandateBasis {
   return Object.freeze({
     protocol: MANDATE_PROTOCOL,
     decisionId: decision.decisionId,
@@ -140,6 +162,7 @@ export function buildMandateBasis(decision: NormalizedExecuteDecision, digest: s
     ...(decision.policyRuleId === undefined ? {} : { ruleId: decision.policyRuleId }),
     budgetRemaining: decision.budgetRemaining,
     digest,
+    ...(acceptance === undefined ? {} : { acceptance }),
   })
 }
 
@@ -148,7 +171,7 @@ export function mandateIsUsable(value: unknown): value is WorkItemMandateBasis {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   const mandate = value as Record<string, unknown>
   for (const key of Object.keys(mandate)) {
-    if (!['protocol', 'decisionId', 'origin', 'mode', 'ruleId', 'budgetRemaining', 'digest'].includes(key)) return false
+    if (!['protocol', 'decisionId', 'origin', 'mode', 'ruleId', 'budgetRemaining', 'digest', 'acceptance'].includes(key)) return false
   }
   const budget = mandate['budgetRemaining']
   const rule = mandate['ruleId']
@@ -159,6 +182,7 @@ export function mandateIsUsable(value: unknown): value is WorkItemMandateBasis {
     && (rule === undefined || typeof rule === 'string' && RULE_ID.test(rule))
     && typeof budget === 'number' && Number.isSafeInteger(budget) && budget >= 0 && budget <= MAX_BUDGET
     && typeof mandate['digest'] === 'string' && DIGEST.test(mandate['digest'])
+    && (mandate['acceptance'] === undefined || acceptanceBindingIsUsable(mandate['acceptance']))
   if (!usable) return false
   // An inferred mandate that could never have passed the gate is corrupt.
   return mandate['origin'] !== 'inferred' || mandate['mode'] === 'auto' && rule !== undefined && (budget as number) >= 1

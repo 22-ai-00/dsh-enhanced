@@ -12,6 +12,7 @@ import type {
   PeerPolicyDecision,
   PeerPolicyRequest,
   PeerPolicyService,
+  PeerVerifierService,
 } from '../src/peers.ts'
 import { WorkItemStore } from '../src/store.ts'
 import type { WorkItemAdmitInput, WorkItemReportStatus } from '../src/types.ts'
@@ -136,6 +137,8 @@ export interface Harness {
 export interface HarnessOptions {
   /** Registered thread source lookup; unset means every followed kind is forged. */
   readonly threadSource?: (kind: string) => { readonly source: string; readonly generation: string } | undefined
+  /** Independent verifier peer for acceptance-bound decisions; unset means not connected. */
+  readonly verifier?: () => PeerVerifierService | undefined
 }
 
 /** Fresh plugin instance on a temp SQLite database, in active mode. */
@@ -176,6 +179,7 @@ export async function harness(overrides: Partial<Config> = {}, options: HarnessO
     policy: policy.service,
     delivery: deliveryPeer(),
     ...(options.threadSource === undefined ? {} : { threadSource: options.threadSource }),
+    ...(options.verifier === undefined ? {} : { verifier: options.verifier }),
     now,
   })
   closers.push(() => store.close())

@@ -165,6 +165,47 @@ export interface WorkItemExecuteDecision {
     /** TaskAcceptanceContract reference the work is accepted against. */
     acceptanceRef: string
   }>
+  /**
+   * Optional handle of an already-prepared TaskAcceptanceContract (WP21 slice 4).
+   *
+   * Only the handle crosses: admission re-reads the contract from the
+   * independent verifier itself and never trusts a caller-supplied body or
+   * verdict. When present, the item's completion is judged by that verifier.
+   */
+  readonly acceptance?: WorkItemAcceptanceHandle
+}
+
+/** Handle naming one verifier-held TaskAcceptanceContract. */
+export interface WorkItemAcceptanceHandle {
+  readonly contractId: string
+  readonly contractDigest: string
+}
+
+/** Host producer that froze a TaskAcceptanceContract, derived from its task kind. */
+export type WorkItemAcceptanceAuthor = 'assistant-automations' | 'assistant-delivery' | 'assistant-goals'
+
+/**
+ * Frozen summary of the TaskAcceptanceContract an item is accepted against.
+ *
+ * Read from the verifier at admission and stored inside the mandate, so the
+ * item's acceptance terms cannot drift after admission. The author (the Host
+ * producer that froze the contract), the verifier and the executor
+ * (`assistant-work-items`' worker) are three distinct identities.
+ */
+export interface WorkItemAcceptanceBinding {
+  readonly protocol: 'work-items/acceptance-binding/v1'
+  readonly verifier: 'assistant-verifier'
+  readonly author: WorkItemAcceptanceAuthor
+  readonly contractId: string
+  readonly contractDigest: string
+  readonly taskKind: string
+  /** acceptanceDigest of the contract's task identity. */
+  readonly taskDigest: string
+  /** acceptanceDigest of the contract's objective text. */
+  readonly objectiveDigest: string
+  readonly profileDigest: string
+  readonly criteria: number
+  readonly expiresAt: number
 }
 
 /** Frozen record of the decision an item was admitted for. */
@@ -177,6 +218,8 @@ export interface WorkItemMandateBasis {
   readonly budgetRemaining: number
   /** sha256 over the decision identity (id, origin, rule, mandate fields); excludes mode and budget. */
   readonly digest: string
+  /** Independent acceptance binding; absent for decisions admitted without one. */
+  readonly acceptance?: WorkItemAcceptanceBinding
 }
 
 /** Deterministic reasons an execute decision is refused before any durable write. */
@@ -185,6 +228,42 @@ export type WorkItemDecisionRefusal =
   | 'inferred-requires-rule'
   | 'budget-exhausted'
   | 'policy-rule-mismatch'
+  /** No verifier peer, or it holds no contract under the handle. */
+  | 'acceptance-unavailable'
+  /** The verifier's contract is invalid or differs from the handle or the item's owner scope. */
+  | 'acceptance-mismatch'
+  | 'acceptance-expired'
+  /** The contract was already verified (or needs attention) before this work began. */
+  | 'acceptance-already-settled'
+  /** Author, verifier and executor are not three distinct identities. */
+  | 'acceptance-not-independent'
+
+/**
+ * Verdict read back from the independent verifier for one bound item.
+ *
+ * `objectiveStatus` is derived by `validateTaskVerificationReceipt` from the
+ * receipt's criterion results; no caller or worker input reaches it.
+ */
+export interface WorkItemAcceptanceVerdict {
+  readonly itemId: string
+  readonly verifier: 'assistant-verifier'
+  readonly contractId: string
+  readonly contractDigest: string
+  readonly receiptId: string
+  readonly receiptDigest: string
+  readonly objectiveStatus: 'achieved' | 'not-achieved' | 'unknown'
+  readonly completedAt: number
+  readonly recordedAt: number
+}
+
+export type WorkItemAcceptanceSettleResult =
+  /** The verifier peer is missing or could not answer; nothing was written. */
+  | Readonly<{ outcome: 'unavailable'; detail: string }>
+  /** The verifier no longer holds the frozen contract, or its receipt does not validate; nothing was written. */
+  | Readonly<{ outcome: 'drift'; detail: string }>
+  | Readonly<{ outcome: 'pending'; state: 'awaiting-execution' | 'pending' | 'verifying' }>
+  | Readonly<{ outcome: 'needs-attention'; reason: string | null }>
+  | Readonly<{ outcome: 'verified' | 'already-verified'; verdict: WorkItemAcceptanceVerdict }>
 
 export type WorkItemDecisionAdmitResult =
   | Readonly<{ outcome: 'admitted'; item: WorkItemRecord; dispatch: WorkItemDispatchRecord; mandate: WorkItemMandateBasis }>

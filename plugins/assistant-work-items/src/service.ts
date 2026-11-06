@@ -25,6 +25,7 @@ import { WorkItemOwnerRecall, type OwnerWorkItemExecution, type OwnerWorkItemLis
 export type { OwnerWorkItemExecution, OwnerWorkItemListInput, OwnerWorkItemRecallInput, OwnerWorkItemSummary } from './owner-recall.js'
 import { WorkItemStore, type WorkItemFollowUpCursor } from './store.js'
 import { normalizeFollowUp, normalizePolicyChange, noticePolicyChange } from './policy-notice.js'
+import { settleAcceptance } from './acceptance-binding.js'
 import {
   WorkItemSignalIntake,
   type WorkItemSignalRegistration,
@@ -32,6 +33,8 @@ import {
 } from './signals.js'
 import { registerWorkItemTools, workItemReportKey } from './tools.js'
 import type {
+  WorkItemAcceptanceSettleResult,
+  WorkItemAcceptanceVerdict,
   WorkItemAdmitInput,
   WorkItemDecisionAdmitResult,
   WorkItemExecuteDecision,
@@ -67,7 +70,7 @@ import { WorkItemOwnerAccess } from './owner-access.js'
 import { WorkItemOwnerContinuation } from './owner-continuation.js'
 import { WorkItemOwnerReplies } from './owner-replies.js'
 import { WorkItemOwnerFeedbackTargets, type OwnerWorkItemFeedbackProof, type OwnerWorkItemFeedbackSelector } from './feedback-targets.js'
-import type { WorkItemReplyConsumerRegistration } from './peers.js'
+import type { PeerVerifierService, WorkItemReplyConsumerRegistration } from './peers.js'
 
 function fail(code: ConstructorParameters<typeof WorkItemError>[0], message: string, detail?: string): never {
   throw new WorkItemError(code, message, detail)
@@ -761,6 +764,29 @@ export class AssistantWorkItemsService extends Service {
     const normalized = normalizePolicyChange(change)
     const components = this.workItemsAvailable()
     return noticePolicyChange(components.store, components.authority, normalized)
+  }
+
+  /**
+   * Host-only (WP21 slice 4): read a bound item's verdict back from the
+   * independent verifier. Takes no verdict input; a worker report, the
+   * decision caller or this call's caller can never assert completion. Writes
+   * one append-only verdict event once the verifier's receipt validates
+   * against the frozen contract; anything short of that writes nothing.
+   */
+  settleAcceptance(itemId: string): WorkItemAcceptanceSettleResult {
+    const components = this.workItemsAvailable()
+    const item = components.store.findItemById(itemId)
+    if (item === undefined) fail('not-found', 'work item does not exist')
+    const binding = item.authority?.mandate?.acceptance
+    if (binding === undefined) fail('invalid-state', 'work item has no independent acceptance binding')
+    return settleAcceptance(components.store, this.workItemsVerifier(), item, binding)
+  }
+
+  /** Host-only: the verifier verdict recorded for one item, or null. */
+  acceptanceVerdict(itemId: string): WorkItemAcceptanceVerdict | null {
+    const components = this.workItemsAvailable()
+    if (components.store.findItemById(itemId) === undefined) fail('not-found', 'work item does not exist')
+    return components.store.acceptanceVerdict(itemId) ?? null
   }
 
   /** Host-only: every Policy-change notice recorded for one item. */
@@ -1560,6 +1586,7 @@ export class AssistantWorkItemsService extends Service {
       workspace,
       policy: this.workItemsPolicy(),
       delivery: () => this.workItemsDelivery(),
+      verifier: () => this.workItemsVerifier(),
       diagnosisPlanFor: input => builders.get(input),
       threadSource: kind => {
         const registration = this.workItemsThreadSources.get(kind)
@@ -1767,6 +1794,10 @@ export class AssistantWorkItemsService extends Service {
 
   private workItemsDelivery(): PeerDeliveryService | undefined {
     return this.ctx.get('assistantDelivery') as PeerDeliveryService | undefined
+  }
+
+  private workItemsVerifier(): PeerVerifierService | undefined {
+    return this.ctx.get('assistantVerifier') as PeerVerifierService | undefined
   }
 
   private workItemsAutomations(): PeerAutomationsService | undefined {

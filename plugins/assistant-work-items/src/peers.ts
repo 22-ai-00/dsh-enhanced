@@ -280,3 +280,21 @@ export interface PeerAutomationsService {
     envelope?: unknown
   }): { readonly id: string; readonly automationId: string }
 }
+
+/**
+ * `assistant-verifier` read-only inspection of one accepted task (WP21 slice 4).
+ *
+ * Structural copy of the verifier's Host feedback read. Work items only ever
+ * reads it: contracts are frozen by registered Host producers and receipts are
+ * written by the verifier itself, so neither the executor nor a decision
+ * caller can supply either. Both bodies are re-validated before use.
+ */
+export interface PeerVerifierService {
+  inspectAcceptedTask?(contractId: string): Readonly<{
+    contract: unknown
+    state: 'awaiting-execution' | 'pending' | 'verifying' | 'done' | 'needs-attention'
+    attempts: number
+    reason: string | null
+    receipt: unknown
+  }> | null
+}

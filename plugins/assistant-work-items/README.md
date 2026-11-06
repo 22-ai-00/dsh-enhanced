@@ -332,7 +332,14 @@ host-only `admitDecision(decision)`（service 与 `WorkItemAdmission` 同名方�
 - 命名规则须由 Policy 以**同一** `ruleId` allow，否则 `policy-rule-mismatch`（不写入）；deny 仍为 `source-rejected`。规则先用无副作用的 `evaluate` 比对，不一致时不调用 `authorize`，不扣该规则授权预算、不写审计；仅缺少 `evaluate` 的旧 Policy 对端退回到 `authorize` 后比对，此时每个（decision、dedup 窗口）至多扣一次。
 - 冻结：mandate（`work-items/mandate/v1`：decisionId、origin、mode、ruleId?、budgetRemaining、digest）存入既有 `authority_basis` JSON，`admitted` 事件 detail 记 `mandate: { decisionId, origin, digest }`。**无 schema 变更。**
 - 派发复核：带 ruleId 的 mandate 在 claim/wake 前要求 Policy 仍由同一规则 allow，否则 park 为 `waiting`（`mandate-rule-changed`），不取消；畸形、不可能通过闸门或 decisionId 与工作项 externalId 不符的已存 mandate 视为 `malformed-basis`。
-- 未覆盖：`budgetRemaining` 是决策方上报的事实，不是 Host 持有的预算；独立 verifier 绑定、observe 决策记录未实现（Policy 变更通知与跟进归属见下节）。
+- 未覆盖：`budgetRemaining` 是决策方上报的事实，不是 Host 持有的预算；observe 决策记录未实现（Policy 变更通知与跟进归属见下节，独立验收绑定见第 4 片）。
+
+### 独立验收绑定（WP21 第 4 片）
+
+- 决策可选带 `acceptance: { contractId, contractDigest }`，只是句柄，不接受契约正文或判定。准入时 WorkItems 自己经 `assistantVerifier.inspectAcceptedTask(contractId)` 读回契约：须通过 `validateTaskAcceptanceContract`、id/digest 与句柄一致、`scope.workspace/preset` 与 owner 精确一致、`owner.principalRecordId/principalVersion` 一致、未过期、尚无回执且非 done/needs-attention；否则在 Policy 与任何写入之前拒绝（`acceptance-unavailable`/`-mismatch`/`-expired`/`-already-settled`/`-not-independent`）。
+- 冻结：mandate 新增 `acceptance`（`work-items/acceptance-binding/v1`：verifier=`assistant-verifier`、author、contractId/Digest、taskKind、task/objective/profile 摘要、criteria 数、expiresAt）。author 由契约 task kind 推出（automation-run→automations、foreground-turn→delivery、goal-*→goals），须与 verifier、执行方 `assistant-work-items` 三方互异；已存绑定结构不符即 `malformed-basis`。句柄进入 mandate digest（无句柄时 digest 与第 1 片完全一致），同 decisionId 换句柄为 `identity-mismatch`。
+- 完成判定：host-only `settleAcceptance(itemId)` 不接受判定输入，只从 verifier 读回同一契约的 `done` 回执并以 `validateTaskVerificationReceipt` 校验，objectiveStatus 取回执由准则结果推出的值；契约漂移、回执无效或缺 verifier 一律不写。每项至多一条 `acceptance-verified` 事件（同回执重放幂等，不同回执 `identity-mismatch`），`acceptanceVerdict(itemId)` 读回。worker 的 `ready` 报告不产生任何判定。仅追加事件行，**无 schema 变更**。
+- 未覆盖：判定只记事件，不推进工作项状态或 outcome 表；按需拉取，无定时器；尚无调用方提供句柄。
 
 ### Policy 变更通知与跟进归属（WP21 第 2 片）
 

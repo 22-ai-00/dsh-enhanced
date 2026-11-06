@@ -3,7 +3,8 @@ import type { NormalizedConfig } from './config.ts'
 import { byteLength, isActive, truncateUtf8 } from './config.ts'
 import { buildAuthorityBasis } from './authority.ts'
 import type { WorkItemLedger } from './ledger.ts'
-import type { PeerDeliveryService, PeerOwnerRouteReceipt, PeerPolicyService } from './peers.ts'
+import type { PeerDeliveryService, PeerOwnerRouteReceipt, PeerPolicyService, PeerVerifierService } from './peers.ts'
+import { resolveAcceptanceBinding } from './acceptance-binding.ts'
 import type { WorkItemFollowInput, WorkItemStore } from './store.ts'
 import { buildMandateBasis, decisionRefusal, mandateDigest, normalizeExecuteDecision, type NormalizedExecuteDecision } from './mandate.ts'
 import type {
@@ -155,6 +156,8 @@ export interface AdmissionDependencies {
   readonly workspace: WorkItemWorkspace
   readonly policy: PeerPolicyService | undefined
   readonly delivery: PeerDeliveryService | undefined | (() => PeerDeliveryService | undefined)
+  /** Independent verifier, read only for decisions that carry an acceptance handle. */
+  readonly verifier?: PeerVerifierService | undefined | (() => PeerVerifierService | undefined)
   readonly continuationFor?: (input: WorkItemAdmitInput) => WorkItemContinuationAdmission | undefined
   readonly diagnosisPlanFor?: (input: WorkItemAdmitInput) => ((item: WorkItemRecord) => Readonly<WorkItemDiagnosisPlan>) | undefined
   /**
@@ -214,8 +217,11 @@ export class WorkItemAdmission {
    * dedup window; a different mandate under the same id is `identity-mismatch`)
    * → inferred gate (auto mode, named Policy rule, remaining budget ≥ 1) →
    * ordinary kind/cooldown/rate/capacity gates → Policy `admit`, whose allowing
-   * rule must equal the named rule. Every refusal happens before any durable
-   * write; the mandate is persisted inside the item's authority basis.
+   * rule must equal the named rule. A decision carrying an acceptance handle
+   * is also bound to the verifier's exact contract for this owner scope
+   * (after the inferred gate, before the ordinary gates). Every refusal
+   * happens before any durable write; the mandate is persisted inside the
+   * item's authority basis.
    */
   admitDecision(value: unknown): WorkItemDecisionAdmitResult {
     const config = this.#config
@@ -290,7 +296,14 @@ export class WorkItemAdmission {
       }
       const refusal = decisionRefusal(decision)
       if (refusal !== undefined) return refusal
-      mandate = buildMandateBasis(decision, digest)
+      let acceptance
+      if (decision.acceptance !== undefined) {
+        const verifier = typeof this.#deps.verifier === 'function' ? this.#deps.verifier() : this.#deps.verifier
+        const resolved = resolveAcceptanceBinding(verifier, decision.acceptance, receipt, now)
+        if (typeof resolved === 'string') return resolved
+        acceptance = resolved
+      }
+      mandate = buildMandateBasis(decision, digest, acceptance)
     }
     const existing = this.#deps.store.findItemByDedup(dedupKey, dedupBucket)
     if (existing !== undefined) {
@@ -378,7 +391,14 @@ export class WorkItemAdmission {
     const detail: Record<string, unknown> = { kind: normalized.kind, dedupBucket }
     if (normalized.provenance !== null) detail['provenance'] = normalized.provenance
     if (!active) detail['wouldReject'] = wouldReject
-    if (mandate !== undefined) detail['mandate'] = { decisionId: mandate.decisionId, origin: mandate.origin, digest: mandate.digest }
+    if (mandate !== undefined) {
+      detail['mandate'] = {
+        decisionId: mandate.decisionId, origin: mandate.origin, digest: mandate.digest,
+        ...(mandate.acceptance === undefined ? {} : {
+          acceptance: { verifier: mandate.acceptance.verifier, author: mandate.acceptance.author, contractId: mandate.acceptance.contractId, contractDigest: mandate.acceptance.contractDigest },
+        }),
+      }
+    }
     const continuationRecord = continuation?.create(item)
     if (continuation && !continuationRecord) fail('invalid-input','continuation builder did not freeze a record')
     if (continuationRecord && (continuationRecord.sourceKey !== continuation!.sourceKey || continuationRecord.sourceDigest !== continuation!.sourceDigest || continuationRecord.parentItemId !== continuation!.parentItemId)) fail('invalid-input','continuation builder changed its source identity')

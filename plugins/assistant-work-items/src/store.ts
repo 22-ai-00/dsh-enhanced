@@ -28,6 +28,7 @@ import type {
   WorkItemFollowUpOwnResult,
   WorkItemFollowUpRecord,
   WorkItemPolicyNotice,
+  WorkItemAcceptanceVerdict,
   WorkItemExecutionStatus,
   WorkItemObjectiveStatus,
   WorkItemOutcomeEvidence,
@@ -288,6 +289,8 @@ export const POLICY_NOTICE_EVENT = 'policy-change-noticed'
 export const FOLLOW_UP_OWNED_EVENT = 'follow-up-owned'
 export const FOLLOW_UP_PROCESSED_EVENT = 'follow-up-processed'
 export const FOLLOW_UP_RELEASED_EVENT = 'follow-up-released'
+/** WP21 slice 4: the independent verifier's verdict, read back once per bound item. */
+export const ACCEPTANCE_VERIFIED_EVENT = 'acceptance-verified'
 
 /** Position of one released follow-up in release order. */
 export interface WorkItemFollowUpCursor {
@@ -2410,6 +2413,70 @@ export class WorkItemStore {
     return Object.freeze({
       items: Object.freeze(rows.map(itemFromRow)),
       remaining: Math.max(0, Number(total['count']) - rows.length),
+    })
+  }
+
+  /**
+   * The independent verifier's verdict recorded for one item, if any.
+   *
+   * Append-only event, at most one per item: a receipt is final for its
+   * contract, so the first validated read-back is the item's verdict.
+   */
+  acceptanceVerdict(itemId: string): WorkItemAcceptanceVerdict | undefined {
+    const row = this.#statement(`SELECT detail, recorded_at FROM work_item_event
+      WHERE item_id = ? AND kind = '${ACCEPTANCE_VERIFIED_EVENT}' ORDER BY sequence LIMIT 1`).get(itemId) as Row | undefined
+    if (row === undefined) return undefined
+    const detail = eventDetail(row['detail'])
+    const status = detail?.['objectiveStatus']
+    if (detail === null || detail['verifier'] !== 'assistant-verifier'
+      || (status !== 'achieved' && status !== 'not-achieved' && status !== 'unknown')
+      || typeof detail['contractId'] !== 'string' || typeof detail['contractDigest'] !== 'string'
+      || typeof detail['receiptId'] !== 'string' || typeof detail['receiptDigest'] !== 'string'
+      || typeof detail['completedAt'] !== 'number') {
+      fail('storage', 'recorded acceptance verdict is malformed')
+    }
+    return Object.freeze({
+      itemId,
+      verifier: 'assistant-verifier',
+      contractId: detail['contractId'],
+      contractDigest: detail['contractDigest'],
+      receiptId: detail['receiptId'],
+      receiptDigest: detail['receiptDigest'],
+      objectiveStatus: status,
+      completedAt: detail['completedAt'],
+      recordedAt: Number(row['recorded_at']),
+    })
+  }
+
+  /**
+   * Record the verifier's verdict for one item, at most once. The same
+   * receipt again is idempotent; a different receipt for an item that already
+   * has a verdict is an identity mismatch and writes nothing. The item's state,
+   * lease and outcome revisions are untouched.
+   */
+  recordAcceptanceVerdict(verdict: Omit<WorkItemAcceptanceVerdict, 'recordedAt'>): Readonly<{ verdict: WorkItemAcceptanceVerdict; created: boolean }> {
+    const now = this.#now()
+    return this.#transaction(() => {
+      this.#requireItem(verdict.itemId)
+      const prior = this.acceptanceVerdict(verdict.itemId)
+      if (prior !== undefined) {
+        if (prior.receiptDigest !== verdict.receiptDigest || prior.contractDigest !== verdict.contractDigest) {
+          fail('identity-mismatch', 'item already has a verdict from a different receipt')
+        }
+        return Object.freeze({ verdict: prior, created: false })
+      }
+      this.#appendEvent(verdict.itemId, ACCEPTANCE_VERIFIED_EVENT, 'verifier', {
+        verifier: verdict.verifier,
+        contractId: verdict.contractId,
+        contractDigest: verdict.contractDigest,
+        receiptId: verdict.receiptId,
+        receiptDigest: verdict.receiptDigest,
+        objectiveStatus: verdict.objectiveStatus,
+        completedAt: verdict.completedAt,
+      }, now)
+      const recorded = this.acceptanceVerdict(verdict.itemId)
+      if (recorded === undefined) fail('storage', 'acceptance verdict could not be read back')
+      return Object.freeze({ verdict: recorded, created: true })
     })
   }
 
