@@ -101,8 +101,11 @@ describe('DSH compatibility baseline', () => {
         .map(([name, range]) => ({ package: manifest.name, path, name, range })))
 
     expect(peers.length).toBeGreaterThan(0)
+    // A plugin may either pin the verified release or declare the whole verified 0.2 line
+    // (the live app runs 0.2.2-rc.1); a lower or unverified range is still rejected.
+    const allowed = [baseline, `>=${baseline} <0.3.0`]
     for (const peer of peers) {
-      expect(peer, peer.path).toMatchObject({ range: baseline })
+      expect(allowed, `${peer.path}: ${peer.name} ${peer.range}`).toContain(peer.range)
     }
   })
 

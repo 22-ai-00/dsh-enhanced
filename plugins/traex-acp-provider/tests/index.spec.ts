@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
@@ -11,6 +12,15 @@ describe('dsh-enhanced-traex-acp-provider', () => {
     expect(Plugin.name).toBe('dsh-enhanced-traex-acp-provider')
     expect(Plugin.inject).toEqual(['llm', 'sessions', 'agents'])
     expect(Plugin.probeTraexReadiness).toBeTypeOf('function')
+  })
+
+  it('declares the verified 0.2 DSH line so the live app can install it', async () => {
+    const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
+      peerDependencies: Record<string, string>
+    }
+    for (const name of ['@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session']) {
+      expect(manifest.peerDependencies[name]).toBe('>=0.2.1-rc.2 <0.3.0')
+    }
   })
 
   it('is disabled by default', async () => {

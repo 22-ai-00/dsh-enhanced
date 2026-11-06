@@ -1,5 +1,12 @@
 # 兼容性基线
 
+## 0.2.2-rc.1 Host 上的一键安装
+
+当前桌面 Host 运行 `0.2.2-rc.1`，而仓库验证基线仍是 `0.2.1-rc.2`（catalog、锁文件与测试依赖不变）。两处有限修复只影响安装：
+
+- `@dsh-enhanced/traex-acp-provider` 的 `@deepseek-ai/dsh-agent` / `dsh-llm` / `dsh-session` peer 范围从精确 `0.2.1-rc.2` 放宽为 `>=0.2.1-rc.2 <0.3.0`。Host 用 `semver.satisfies(..., { includePrerelease: true })` 匹配，因此同时接受已验证基线和当前 `0.2.2-rc.1`；低于基线或未验证的 0.3 仍拒绝。根 `tests/dsh-compatibility.spec.ts` 只允许这两种写法，其他插件仍固定精确基线。
+- lark-channel 一键安装会被 Host 的 ANSI 解析缺陷挡住：`plugin-manager` 的 `/\bIgnored build scripts:/` 在 pnpm 11 的彩色输出中匹配失败，`pendingBuilds` 为空，之后 `approvedBuilds` 重试返回 `stale-approval`。面板侧有限兜底：安装失败时从 pnpm 原始输出（去 ANSI）解析受影响的依赖名并交给主人确认；确认后若 Host 仍无待批准记录，面板把确认过的名字写入 profile 的 `pnpm-workspace.yaml`（`allowBuilds: <name>: true`，原子写入、0600），再不带批准参数重试一次。名称仍受上限 64、长度 200、禁止通配符与控制字符约束；不自动批准，不触碰其他 profile 键。Host 自身仍保留缺陷，此兜底不改 Host 安装器。
+
 ## 插件配置 CLI 与 recommended 预设
 
 `@dsh-enhanced/assistant-policy` 新增安装期 bin `dsh-plugin-setup` 与导出子路径 `./plugin-setup`（`@dsh-enhanced/personal-assistant` 同名 bin 转发）。它只改写所选 profile 的 `cordis.patch.yml`，不新增数据库 schema、运行时服务或 DSH/Cordis 依赖。没有任何插件或权限默认值改变：WorkItems、intake 账本、Delivery `attentionAttachOverCap`、Evaluation `notificationOutcomesEnabled` 与 event-triggers `pollerEnabled` 仍默认关闭，`permission.defaultPreset` 仍为原有的 `danger-full-access`。`preset recommended` 由 owner 或 onboarding 显式执行，才写入上述开关（WorkItems 保持 `observe`），未安装或未加载的插件跳过。安装器只在引导式首装（`--guided` 或首个问题选推荐）时询问是否应用（默认是），或在显式传 `--plugin-preset <name>` 时应用；`--yes`、非交互和逐项自定义安装默认不应用。Policy 与 Control Plane 配置、Policy 停用、Delivery `ownerRoutes`/`policyRef`、秘密值及占位飞书凭据的启用均拒绝写入。
