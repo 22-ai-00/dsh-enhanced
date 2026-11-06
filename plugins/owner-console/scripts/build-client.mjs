@@ -9,6 +9,7 @@ const bundled = (await build({
   platform: 'browser',
   write: false,
   external: ['react', 'react/jsx-runtime'],
+  charset: 'utf8',
   legalComments: 'none',
 })).outputFiles[0]?.text
 if (bundled === undefined) throw new Error('owner-console: client bundle emitted no output')

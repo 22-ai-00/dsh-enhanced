@@ -17,7 +17,7 @@ vi.mock('react', async importOriginal => {
   }
 })
 
-const { OwnerConsoleIcon, OwnerConsolePanel, larkConnectionTone } = await import('../src/client.ts')
+const { OwnerConsoleIcon, OwnerConsoleSettingsPanel, larkConnectionTone } = await import('../src/client.ts')
 
 type Node = { type: unknown, props: Record<string, unknown> }
 function expand(node: unknown): Node[] {
@@ -36,7 +36,7 @@ function render(status?: OwnerConsoleStatus) {
   seed.status = status
   seed.calls = 0
   const navigation = { openConversation: vi.fn(), openPlugins: vi.fn() }
-  return { nodes: expand(OwnerConsolePanel({ remote: {} as never, navigation })), navigation }
+  return { nodes: expand(OwnerConsoleSettingsPanel({ remote: {} as never, navigation })), navigation }
 }
 
 const STATUS = {

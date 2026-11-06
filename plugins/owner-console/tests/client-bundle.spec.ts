@@ -40,7 +40,7 @@ function clientContext() {
           register: (options: Record<string, unknown>, component: unknown) => {
             registrations.push({ name: String(options['name']), options, component })
             expect(typeof component).toBe('function')
-            return () => { disposed.push(String(options['id'] ?? options['key'])) }
+            return () => { disposed.push(String(options['id'] ?? options['key'] ?? options['name'])) }
           },
         },
       }
@@ -68,23 +68,34 @@ describe('owner console client bundle', () => {
     expect(fake.ctx.remote.$mount).toHaveBeenCalledOnce()
     expect(fake.registrations.map(item => item.options)).toEqual([
       { name: 'sidebar.panellist', id: 'owner-console', order: 30, label: expect.any(Function) },
-      { name: 'main', key: 'owner-console' },
+      { name: 'main', key: 'owner-console',
+        children: { 'owner-console.conversation': { kind: 'single', scope: 'session' } } },
+      { name: 'owner-console.conversation' },
     ])
     expect((fake.registrations[0]!.options['label'] as () => string)()).toBe('文鳐')
-    // The main slot root must own vertical scrolling so lower cards stay reachable on short windows.
+    // The main slot root fills the fixed-height Host pane; the chat log and the settings view own
+    // their own scrolling, so the composer stays anchored and the settings cards stay reachable.
     type Element = { type: (props: unknown) => Element, props: { style?: Record<string, unknown> } & Record<string, unknown> }
-    const mainElement = (fake.registrations[1]!.component as () => Element)()
+    const mainElement = (fake.registrations[1]!.component as (seats: Record<string, unknown>) => Element)({})
     const root = mainElement.type(mainElement.props)
     expect(root.props['data-owner-console-scroll']).toBe('')
-    expect(root.props.style).toMatchObject({ height: '100%', minHeight: 0, overflowY: 'auto' })
+    expect(root.props.style).toMatchObject({ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' })
     // The brand header, panel backdrop, seal and sidebar icon are self-contained in the emitted
     // bundle: four inlined 11 深海觉醒 images, no external asset URL and no network fetch.
     const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
     expect(source).toContain('data-owner-console-header')
+    expect(source).toContain('data-owner-console-chat')
+    expect(source).toContain('data-owner-console-chat-log')
+    expect(source).toContain('data-owner-console-native-conversation')
+    expect(source).toContain('conversation.content')
+    expect(source).toContain('owner-console.conversation')
+    expect(source).toContain('打开设置')
+    expect(source).toContain('语音对话')
     expect(source.match(/data:image\/webp;base64,/g)).toHaveLength(4)
     expect(source).not.toMatch(/https?:\/\/[^\s'"]+\.(?:png|jpe?g|webp|gif|svg)/i)
     await release()
-    expect(fake.disposed).toEqual(['main', 'owner-console', 'sidebar.panellist', 'owner-console'])
+    expect(fake.disposed).toEqual(['owner-console.conversation', 'owner-console.conversation',
+      'main', 'owner-console', 'sidebar.panellist', 'owner-console'])
     expect(fake.unmount).toHaveBeenCalledOnce()
   })
 })

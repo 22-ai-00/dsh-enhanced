@@ -84,14 +84,17 @@
     "@deepseek-ai/cordis": "catalog:",
     "@deepseek-ai/dsh-system-prompt": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
-    "@types/node": "catalog:",
-    "typescript": "catalog:",
-    "vitest": "catalog:",
     "@deepseek-ai/dsh-typert-protocol": "catalog:",
     "@deepseek-ai/dsh-typert-registry": "catalog:",
+    "@types/node": "catalog:",
     "@types/react": "~18.3.1",
+    "@types/react-dom": "~18.3.7",
     "esbuild": "^0.27.0",
-    "react": "^18.2.0"
+    "jsdom": "^29.1.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.3.1",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",

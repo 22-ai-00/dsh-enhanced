@@ -41,7 +41,7 @@ function fakeContext(registrations: Registration[], disposed: string[]) {
             },
             register: (options: Record<string, unknown>, component: unknown) => {
               registrations.push({ options, component })
-              return () => { disposed.push(String(options['id'] ?? options['key'])) }
+              return () => { disposed.push(String(options['id'] ?? options['key'] ?? options['name'])) }
             },
           },
         }
@@ -135,12 +135,16 @@ describe('owner console client', () => {
     const release = await apply(ctx)
     expect(registrations.map(item => item.options)).toEqual([
       { name: 'sidebar.panellist', id: 'owner-console', order: 30, label: expect.any(Function) },
-      { name: 'main', key: 'owner-console' },
+      { name: 'main', key: 'owner-console',
+        children: { 'owner-console.conversation': { kind: 'single', scope: 'session' } } },
+      { name: 'owner-console.conversation' },
     ])
     expect(typeof registrations[0]!.component).toBe('function')
     expect(typeof registrations[1]!.component).toBe('function')
+    expect(typeof registrations[2]!.component).toBe('function')
     await release()
-    expect(disposed).toEqual(['main', 'owner-console', 'sidebar.panellist', 'owner-console'])
+    expect(disposed).toEqual(['owner-console.conversation', 'owner-console.conversation',
+      'main', 'owner-console', 'sidebar.panellist', 'owner-console'])
     expect(unmount).toHaveBeenCalledOnce()
   })
 

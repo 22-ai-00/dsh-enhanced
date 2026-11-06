@@ -6,10 +6,18 @@
 注意力是预算，只在被请求或书面规则允许时行动；只说需要人行动的话；一次一个问题；概念和设置尽量少；
 面板只展示需要人处理的事。
 
-当前切片：只读状态 + 主人点击的一次性配置与管理动作。配置写入只经 Host `settings` 服务合并到
-指定条目；bundle/条目管理与安装只经 Host `pluginManager`。两类动作都由主人点击触发，
-不发起模型调用、不创建 Bot、不接受明文 secret、不改动未列出的插件。安装会把 pnpm 子进程和
-registry 网络调用委托给 DSH 自身的 plugin manager，不在本插件里实现网络或进程逻辑。
+当前切片：**专属对话窗口 + 设置页**。
+
+- **对话窗口**（左侧栏「文鳐」的默认视图）：正文和 composer 复用 DSH 自己的
+  `conversation.content` 组件工厂，通过 renderer 注入的 `SessionProvider` / `renderSlot` /
+  `renderFactorySlot` 渲染在插件自己的 `main` 面板里。消息流、发送、附件、停止、权限 chip、
+  模型选择、工具/审批/计划行和空态都来自原生实现；本插件不复制这些组件，也不启动第二个
+  Agent loop。右上角「原生会话」把同一条会话切到 DSH 原生会话视图。
+- **设置页**（右上角 ⚙）：保留原有只读状态 + 主人点击的一次性配置与管理动作。配置写入只经
+  Host `settings` 服务合并到指定条目；bundle/条目管理与安装只经 Host `pluginManager`。
+  两类动作都由主人点击触发，不发起模型调用、不创建 Bot、不接受明文 secret、不改动未列出的
+  插件。安装会把 pnpm 子进程和 registry 网络调用委托给 DSH 自身的 plugin manager，不在本插件里
+  实现网络或进程逻辑。
 
 ## 安装
 
@@ -19,8 +27,42 @@ dsh --profile web --dump-config
 ```
 
 安装由 DSH 的 pnpm 路径完成，本包声明的运行依赖（`@deepseek-ai/schemastery`、`zod`）随包安装；
-Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏出现「文鳐」入口：
-顶部「开始对话」直接进入当前工作区的智能体会话，「打开插件页」跳到 DSH 原生插件页；下面是配置卡片：
+Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏出现「文鳐」入口，点击进入
+对话窗口；首次打开会在默认工作区创建/复用一条专用会话并在浏览器里记住 id，之后继续同一会话。
+面板不显示工作区、文件目录或会话目录；需要完整原生视图时点右上角「原生会话」，需要配置、
+飞书 / TraeX 或插件管理时点 ⚙。
+
+### 对话窗口的实现边界
+
+- **会话生命周期**：客户端只调用 Host 注入的 `sessions` / `uiWorkspace` / `conversation` 服务。
+  首次打开用 `workspaces.initializeDefault()` 解析默认工作区，再用 `uiWorkspace.connectWorkspace()`
+  创建/复用会话（不可用时退回 `sessions.create()`）；随后 `sessions.retain(id,
+  {source: 'ownerConsoleChat'})` 取得 `SessionBinding`，面板卸载时 `release()`。会话 id 存在
+  `localStorage['dsh.owner-console.chat-session']`，过期或打不开时清除并重新创建。
+- **原生正文**：主入口声明一个 session-scoped 子槽；renderer 因此注入 `SessionProvider` 与
+  `renderSlot`。子槽按原生 `conversationPhase` 同样的规则计算 `phase`，然后
+  `renderFactorySlot('conversation.content', {variant: 'embedded', phase, hero: false}, …)`。
+  `hero: false` 关掉工作区选择器和 agent preset 座；面板不会渲染目录清单。
+- **语音**：「语音对话」用浏览器 `SpeechRecognition`（`webkitSpeechRecognition` 回退）识别，
+  通过 `conversation.input.for(actx).setDraft()` + `focus()` 写入**原生 composer 草稿**；
+  「朗读」用浏览器 `SpeechSynthesis`。浏览器没有对应 API 时按钮禁用并在 tooltip 中说明。
+  语音识别/合成由浏览器（或其服务商）完成，不是 DSH 模型；插件不录音、不保存音频。
+- **权限**：当前值读会话 `permissions` projection，可选目录读
+  `ctx.get('remote.permissionPresets').catalog()`；切换只提交原生 `/permission <preset>` 命令，
+  不直接写会话状态、不绕过 Policy。原生 composer 的权限 chip 在可用时是主入口；本插件自己的
+  权限行只在原生 chip 不可用（或没有 renderer 的降级窗口）时显示。高风险预设仍走原生/面板的
+  显式确认。
+- **附件**：原生 composer 的附件按钮与上传/回执路径原样可用。降级窗口（没有 renderer seats 的
+  嵌入）用 `fileUpload.upload` / `uploadImage` 取得 receipt，再以 `{type: 'file', receiptId}`
+  交给 `SessionFace.prompt`；服务缺失时只显示可见限制，不伪造附件。
+- **降级窗口**：当 renderer 没有注入 `SessionProvider` / `renderSlot` / `renderFactorySlot`
+  （非 Web renderer 的嵌入或旧 Host）时，面板退回自包含实现：从 `binding.eventSource` 折叠
+  文本消息/工具行/错误，用 `SessionFace.prompt` 发送，用 `fileUpload` 上传附件。它是诚实的
+  最小可用面，不是完整原生渲染；真实 DSH Web 走上面的原生工厂路径。
+
+### 设置页（⚙）
+
+设置页保留以下配置卡片：
 
 | 卡片 | 内容 | 数据来源 |
 | --- | --- | --- |
@@ -31,9 +73,10 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 | intake 吻合度（只读） | 填写 Evaluation 作用域（workspace + preset）后读取：窗口、扫描通知数（是否截断）、intake 准入合计与按 level 的吻合 / 不吻合计数与比例、非 intake / 无法判断 / 他 scope 计数；只有计数，不含工作项 id 或正文 | `assistantEvaluation.inspectIntakeAttentionAgreement`（结构化读取，可缺省；开关关闭时显示未启用）+ `loader` 条目配置（只读开关，无需作用域） |
 
 读取与写入都经 `typert` 的严格 invocation 返回；面板不缓存或上报任何内容。
-Host 状态里仍带 `dependencies` 字段，但面板不再渲染「依赖自检」卡片。
-面板根容器自带纵向滚动（`height: 100%` + `min-height: 0` + `overflow-y: auto`），窗口较矮时
-底部的「高级：合并配置」仍可滚动到达。飞书「连接」行读取
+Host 状态里仍带 `dependencies` 字段，但设置页不再渲染「依赖自检」卡片。
+主面板根容器填满 Host 的固定高度；设置页自己有纵向滚动（`height: 100%` + `min-height: 0` +
+`overflow-y: auto`），窗口较矮时底部的「高级：合并配置」仍可滚动到达。对话窗口的原生正文和
+composer 由 DSH 的会话骨架自己滚动。飞书「连接」行读取
 `larkChannel.health()` 的同步快照（无 I/O）：只透传枚举内的连接状态（已连接 / 已连接但期间有断档 /
 连接中 / 重连中 / 未连接 / 已停用）与枚举内的最近错误码；没有该 service 显示「未加载」，service
 存在但 health 抛错、缺失或返回未知值显示「已加载，状态未知」，不会推断为已连接。
@@ -137,7 +180,11 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 - 配置写入只经 Host `settings.mutate`，且限定到单个已安装条目；bundle/entry 管理只经 Host
   `pluginManager` 且限定 `@dsh-enhanced/*`；授权来源是主人自己在面板上的点击，不是模型工具调用，
   也不存在后台自动写配置。
-- 不读取会话内容、报告或记忆；client bundle 只依赖宿主提供的 `react` 与 `remote`/`slots`。
+- 对话窗口只读取当前 retained Session 自己的 `eventSource` / snapshot / `permissions`
+  projection，用来显示状态、降级文本和朗读；不读取其它会话、报告或记忆，也不上报内容。
+  client bundle 只依赖宿主提供的 `react`（以及 `react/jsx-runtime`）与 Host 注入的客户端服务，
+  不 import 其它 DSH 组件包；原生正文由 renderer 的 factory seat 渲染。
+- 语音识别/合成由浏览器完成；插件不录音、不保存音频，只把最终转写写进当前会话的原生草稿。
 - 安装/移除仅由主人点击触发，走 DSH 官方安装路径；移除只对 Host 标记为 `removable` 且非本面板自身的
   bundle 显示，并需浏览器确认（无确认通道时给出可见提示并停止）；不改动未列出的条目；
   secret 明文不接受、不存储、不回显。
@@ -145,19 +192,31 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 ## 测试
 
 `tests/client-bundle.spec.ts` 用 Web 外壳的 `__ModuleLoader__` 契约加载实际构建产物
-`lib/client.js`，以真实 `react`/`react/jsx-runtime` 执行 factory，断言 sidebar/main 两个注册与释放；
-并断言侧栏标签为「文鳐」、main 槽根容器带纵向滚动样式、产物内联 4 个 webp 且不含外部图片 URL；
-因此该测试依赖先运行 `pnpm --dir plugins/owner-console build`（根检查与 `pnpm check` 均先构建）。
-`tests/client-render.spec.ts` 不依赖 DOM，桩掉 React hooks 后展开元素树，断言页头品牌、11 深海觉醒
-主视觉/面板背景/印章/侧栏图标均为纯装饰（`alt=""` + `aria-hidden`）、状态胶囊带文字标签与空状态文案。
+`lib/client.js`，以真实 `react`/`react/jsx-runtime` 执行 factory，断言 sidebar / main /
+session-scoped 子槽三个注册与释放；并断言侧栏标签为「文鳐」、main 槽根容器填满固定高度、产物
+内联 4 个 webp、包含原生对话与设置标记且不含外部图片 URL。因此该测试依赖先运行
+`pnpm --dir plugins/owner-console build`（根检查与 `pnpm check` 均先构建）。
+`tests/chat-dom.spec.ts` 在 jsdom 中真实挂载 React DOM，覆盖：降级消息列表与 composer 发送
+(`SessionFace.prompt`)、附件上传 receipt、上传服务缺失时的可见限制、语音不可用禁用/tooltip、
+可用时浏览器识别写入草稿、权限投影与 `/permission` 切换、renderer seat 下的原生
+`SessionProvider`/子槽渲染、原生 phase 计算、语音写入原生草稿、齿轮打开设置页并保留全部卡片、
+返回对话。`tests/chat.spec.ts` 覆盖事件折叠、工具状态、会话创建/复用/过期、上传失败、权限标签等
+纯函数。`jsdom` / `react-dom` / `@types/react-dom` 只作为测试 devDependencies，不进入客户端产物。
+`tests/client-render.spec.ts` 不依赖 DOM，桩掉 React hooks 后展开设置页元素树，断言页头品牌、
+11 深海觉醒主视觉/面板背景/印章/侧栏图标均为纯装饰（`alt=""` + `aria-hidden`）、状态胶囊带文字
+标签与空状态文案。
 
 ## 界面布局
 
-- 页头：11 深海觉醒背景裁成的 3:1 主视觉 banner（webp data URI，纯装饰 `alt=""`）、
-  标题「文鳐 Ray」与圆形鲸印章、副标题，以及主按钮「开始对话」。
-- 面板主体：同一套背景的方形版本以低透明度铺在面板表面、卡片之下（不仅是页头），文字仍落在
-  主题卡片表面上，明暗主题的对比度不变。
-- 侧栏入口图标与页头印章都来自 11 深海觉醒 `icon.png`（方形裁切，可作圆形头像裁切）。
+- **对话窗口**：紧凑页头（圆形鲸标、标题「文鳐 Ray」、状态胶囊、副标题、右上角「原生会话」与 ⚙），
+  下面是语音/朗读工具行；正文和 composer 由 DSH 原生会话骨架占满剩余高度。原生 composer 自带
+  发送、附件、权限 chip、模型选择与停止，宽屏居中、窄屏自适应。
+- **设置页**：顶部「← 返回对话」+「设置」；下面是保留的 11 深海觉醒 3:1 主视觉 banner（webp
+  data URI，纯装饰 `alt=""`）、标题与圆形鲸印章、副标题，以及「开始对话 / 打开插件页」；再往下是
+  配置卡片。
+- 两个视图共用同一套背景：方形鲸图以低透明度铺在面板表面、内容之下，文字仍落在主题卡片/原生
+  会话表面上，明暗主题的对比度不变。
+- 侧栏入口图标与设置页印章都来自 11 深海觉醒 `icon.png`（方形裁切，可作圆形头像裁切）。
 - 卡片：统一圆角与边框，标题前一枚小云纹；状态用「圆点 + 文字」胶囊（ok/warn/error），不只靠颜色。
 - 颜色只取宿主 `--dsw-*` 变量并带回退值，明暗主题通用；不引入外部 CSS、字体或网络资源。
   装饰 SVG 见 `src/art.ts`。
@@ -184,29 +243,66 @@ pnpm --dir plugins/owner-console build:assets
 
 ## 限制
 
+### 对话窗口
+
+- **原生嵌入依赖 renderer 注入的 seats**：真实 Web 外壳会向每个 renderer 组件注入
+  `SessionProvider` / `renderSlot` / `renderFactorySlot`，并允许插件 main 入口声明一个
+  session-scoped 子槽；本插件据此复用 `conversation.content`。如果某个嵌入没有这些 seats，
+  或 Host 没有注册 `conversation.content` 工厂，面板退回自包含的降级窗口（文本消息 + composer），
+  不会假装渲染原生组件。2026-11-06 在临时 profile + pinned DSH `0.2.1-rc.2` 的真实 `dsh web`
+  中已确认原生正文、composer、附件按钮、权限 chip、模型选择与语音工具行都在面板内（证据
+  `docs/evidence/owner-console/wenyao-chat-20261106/`）。
+- **没有真实模型/API Key，未完成一次真实发送**：隔离 profile 未登录、未配置模型，原生 composer
+  显示「请选择模型」；因此只验证了 composer 的 DOM/按钮/草稿写入，没有验证真实模型回合并。
+  降级 composer 的 `SessionFace.prompt` 发送路径由 jsdom 单测覆盖，但不是 live 模型验收。
+- **专用会话不是专用 agent preset**：会话通过 `workspaces.initializeDefault()` +
+  `uiWorkspace.connectWorkspace()` 建在默认工作区，运行 Host 默认 agent preset。若主人希望文鳐
+  固定人格/固定权限/固定模型，需要 DSH 提供主机侧 agent preset 绑定，或由 owner 在设置中改变
+  默认 preset；本插件不伪造第二个 agent 身份。
+- **不显示目录**：面板不渲染工作区、文件目录或会话列表；`hero: false` 关掉原生工作区选择器。
+  切换会话/工作区要用左侧栏或「原生会话」。如果默认工作区不可用，会话退回 Host 默认 cwd 的
+  ungrouped 会话，原生视图可能要求选择工作区。
+- **语音是浏览器能力**：「语音对话」/「朗读」分别依赖浏览器 `SpeechRecognition` /
+  `SpeechSynthesis`；不可用时按钮禁用并在 tooltip 说明。识别/合成由浏览器（及其可能的服务商）
+  完成，不是 DSH 模型；插件不录音、不保存音频。真实麦克风与真人语音未验收；jsdom 用桩覆盖
+  降级与草稿写入，真实 Chrome 用注入的假识别器验证了「转写写入原生 Lexical 草稿」。
+- **语音写入原生草稿会替换/追加纯文本**：通过 `conversation.input.for(actx).setDraft()` 写入；
+  当前已有引用 chip 时，`setDraft` 会把草稿变为纯文本（浏览器语音的固有边界）。原生输入服务
+  缺失时按钮仍可点，但会显示可见失败，不会静默。
+- **权限选项来自 Host**：原生权限 chip 需要 `ui-permission-presets`；没有它时本插件显示自己的
+  权限行。可选 preset 目录由 Host `permissionPresets.catalog()` 决定；隔离 profile 中目录只返回
+  一个可用 preset。切换只走 `/permission <preset>`，没有直接写会话权限的客户端 API；高风险
+  preset 的确认由原生或面板的显式确认承担。
+- **附件上传走原生 composer**：真实 GUI 只验证了附件按钮存在；没有实际选择文件/完成一次带附件
+  的发送（无模型）。降级窗口的 `fileUpload` 上传/回执由单测覆盖；没有自定义拖拽、粘贴或预览。
+- **降级窗口不是完整原生渲染**：只折叠 user/assistant 文本、工具名+状态和 turn 错误；不渲染
+  markdown、图片、工具参数/结果、审批/计划/队列等原生卡片。这是诚实的最小可用面，真实 DSH Web
+  不触发它。
+- **原生会话入口**：调用 `uiWorkspace.openSession(id)`；服务缺失时显示可见提示。已验证在同一条
+  会话上切换到原生视图（同一 session id、默认工作区 composer），未验证在原生视图发消息。
+
+### 设置页与安装
+
 - 一键模式只做 Host 环境变量探测，既不执行也不依赖 lark-cli；需要向导时由 owner 用系统已装的
   lark-cli skill 或其他方式自行提供 appId/secret 环境变量。
-- 插件管理支持移除本项目 bundle（仅 `removable` 且非自身，且必须由浏览器确认；无确认通道时不执行）；
-- **真实 Web GUI 已验证**：临时 profile + pinned DSH `0.2.1-rc.2` 下左侧栏入口、面板全部卡片、
-  原生插件页已安装行、「打开插件页 / 开始对话」均通过（证据 `docs/evidence/owner-console/browser-smoke/`）。
-  live Harness Mac app 现为 `0.2.2-rc.1`：owner-console `0.1.65` 的 tgz 经 app 自带的 dsh 装入
-  `desktop` profile（peer 版本不符，需 owner 显式 `dsh plugin allow-version … --accept-risk`），
-  2026-11-06 验证了侧栏入口、面板、插件页已安装行与「开始对话」（证据在被 git 忽略的
-  `docs/evidence/owner-console/mac-live-app-20261106/`）。
-  **未在真实 GUI 中复验的部分**：飞书/TraeX 的“已安装未启用→启用”“活动→配置”两态此前是用 patch
-  覆盖伪造的状态，安装按钮也从未在真实 GUI 点击过；面板的状态文案、安装拒绝与修复提示由单元测试
-  覆盖，真实 GUI 只验证过侧栏入口、面板渲染、插件页已安装行与「开始对话」。登录态与真实
-  飞书/模型连接仍未验收。
-  本地 `pnpm pack` 产物（非 workspace 链接）经 `dsh plugin add <tgz>` 安装也已验证：随包依赖
-  `@deepseek-ai/schemastery` / `zod` 由 pnpm 一并装入，入口、面板与插件页已安装行正常；
-  从 registry 发布后安装尚未验证。
-  面板安装只接受 `@dsh-enhanced/*` 包名（不支持任意本地/git 源）。
-- 面板会列出 `owner-console` 自己的 bundle/entry：禁用它会隐藏这个入口，需用 `dsh plugin` 或 CLI
+- 插件管理支持移除本项目 bundle（仅 `removable` 且非自身，且必须由浏览器确认；无确认通道时不执行）。
+- **真实 Web GUI 已验证（设置/安装切片）**：临时 profile + pinned DSH `0.2.1-rc.2` 下左侧栏入口、
+  设置页全部卡片、原生插件页已安装行、「打开插件页 / 开始对话」均通过（证据
+  `docs/evidence/owner-console/browser-smoke/`）。2026-11-06 的新 smoke 也确认 ⚙ 打开设置页、
+  五张卡片渲染、返回对话正常。live Harness Mac app 为 `0.2.2-rc.1`：owner-console `0.1.65` 的
+  tgz 经 app 自带 dsh 装入 `desktop` profile（peer 版本不符，需 owner 显式
+  `dsh plugin allow-version … --accept-risk`），更早验证了侧栏入口、面板、插件页已安装行与
+  「开始对话」；本次对话窗口未在 live app profile 复验。
+- **未在真实 GUI 中复验的部分**：飞书/TraeX 的“已安装未启用→启用”“活动→配置”两态此前是用 patch
+  覆盖伪造的状态，安装按钮也从未在真实 GUI 点击过；状态文案、安装拒绝与修复提示由单元测试覆盖。
+  登录态、模型连接与真实飞书 Bot 仍未验收。
+- 本地 `pnpm pack` 产物（非 workspace 链接）经 `dsh plugin add <tgz>` 安装已验证：随包依赖
+  `@deepseek-ai/schemastery` / `zod` 由 pnpm 一并装入，入口、设置页与插件页已安装行正常；
+  从 registry 发布后安装尚未验证。面板安装只接受 `@dsh-enhanced/*` 包名（不支持任意本地/git 源）。
+- 设置页会列出 `owner-console` 自己的 bundle/entry：禁用它会隐藏这个入口，需用 `dsh plugin` 或 CLI
   重新启用（与 DSH 原生插件页语义一致）。
-- 「开始对话 / 打开插件页」调用 DSH 客户端 `uiWorkspace.startSession()` 与 `layout.selectPanel()`；
-  两个服务在点击时惰性解析，缺少它们时入口与状态页仍注册。已在真实无头 Chrome 中验收：
-  入口出现、面板渲染、插件页显示已安装行、开始对话进入 composer（证据同下）。
-- 停用 bundle 只摘除 patch 层，依赖与包文件保留；面板的「移除」经 Host `pluginManager.removeBundle`（内部走 pnpm），不是仅去掉 profile 里的选择。
+- 停用 bundle 只摘除 patch 层，依赖与包文件保留；「移除」经 Host `pluginManager.removeBundle`
+  （内部走 pnpm），不是仅去掉 profile 里的选择。
 - 连接状态是 `lark-channel` 自己报告的快照，面板不主动探测飞书；「已连接」来自通道的长连接状态，
   没有用真实飞书 Bot 验收过（按用户要求延后）。
 - 不校验 app secret；secret 的写入通道留给 keychain 切片。

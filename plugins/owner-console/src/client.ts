@@ -1,50 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
 import { jsx } from 'react/jsx-runtime'
-import { CloudMark, KAI_FONT, QUIET_PHRASE } from './art.js'
+import { KAI_FONT, QUIET_PHRASE } from './art.js'
 import { TYPERT_REMOTE } from './typert.js'
 import { WENYAO_BACKDROP_DATA_URI, WENYAO_HERO_DATA_URI, WENYAO_HERO_HEIGHT, WENYAO_HERO_WIDTH,
   WENYAO_ICON_DATA_URI, WENYAO_SEAL_DATA_URI } from './artwork.js'
-import type { IntakeAgreementAvailability, OwnerConsoleIntakeAgreement, OwnerConsoleStatus, OwnerConsoleTrendSnapshotItem, OwnerConsoleTrendSnapshots,
-  OwnerConsoleWriteResult } from './typert.js'
+import type { IntakeAgreementAvailability, OwnerConsoleIntakeAgreement, OwnerConsoleStatus, OwnerConsoleTrendSnapshotItem,
+  OwnerConsoleTrendSnapshots, OwnerConsoleWriteResult } from './typert.js'
 import { componentState, missingRemedy, repairPatch, type ComponentState } from './state.js'
-
-/** The installed Host supplies remote and the slot registry. */
-export const inject = ['remote', 'slots']
-
-/** The gateway's failure result keeps the business code and unchanged message; the panel must show
- * both instead of one generic sentence. `error` stays optional so a minimal transport result is legal. */
-type RemoteFailure = Readonly<{ code: string, message: string, details?: unknown }>
-type RemoteResult<T> = Readonly<{ ok: true, value: T }> | Readonly<{ ok: false, error?: RemoteFailure }>
-type ConsoleRemote = Readonly<{
-  status(): Promise<RemoteResult<OwnerConsoleStatus>>
-  trendSnapshots(planId: string, beforeSequence: number, limit: number): Promise<RemoteResult<OwnerConsoleTrendSnapshots>>
-  intakeAgreement(workspace: string, preset: string): Promise<RemoteResult<OwnerConsoleIntakeAgreement>>
-  configureFeishu(appId: string, appSecretEnv: string, credentialHandle: string,
-    account: string, tenant: string, discoverAppId: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
-  configureTraex(enabled: boolean, command: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
-  configureBundle(entry: string, config: Readonly<Record<string, unknown>>): Promise<RemoteResult<OwnerConsoleWriteResult>>
-  setBundleEnabled(name: string, enabled: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
-  setPluginEnabled(entryId: string, enabled: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
-  installProjectBundle(spec: string, approvedBuilds: readonly string[]): Promise<RemoteResult<OwnerConsoleWriteResult>>
-  removeProjectBundle(name: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
-}>
-type SlotRuntime = {
-  readonly remote: Readonly<{ ownerConsole: ConsoleRemote }>
-  readonly slots: {
-    inject(name: string, factory: () => unknown): () => void
-    register(options: unknown, component: unknown): () => void
-  }
-}
-type ClientContext = {
-  readonly remote: { readonly $mount: (value: unknown) => Promise<() => Promise<void>> }
-  readonly get: <T>(name: string) => T | undefined
-  inject(dependencies: readonly string[], callback: (runtime: SlotRuntime) => unknown): { dispose(): Promise<void> }
-}
-
-type Props = Record<string, unknown>
-const el = (tag: string, props: Props, ...children: readonly unknown[]) => children.length === 0
-  ? jsx(tag as never, props as never)
-  : jsx(tag as never, { ...props, children: children.length === 1 ? children[0] : children } as never)
+import { OwnerConsoleChat, OwnerConsoleConversation, type OwnerConsoleRendererSeat } from './chat-view.js'
+import {
+  browserLang, browserSpeechRecognition, browserSpeechSynthesisAvailable, browserStorage, speakInBrowser,
+  type ChatRuntime, type ChatSessions, type ChatUploads, type PermissionCatalog,
+} from './chat.js'
+import {
+  accent, actionsStyle, backdropImageStyle, backdropStyle, border, buttonStyle, card, caption,
+  danger, dangerButtonStyle, el, field, gridStyle, hairline, hintStyle, idle, ink, inputStyle, listStyle, monoFont,
+  monoMuted, muted, pill, placeholder, primaryButtonStyle, row, subheadStyle, surface, tint, type StatusTone,
+} from './ui.js'
 
 /** Only the reference the owner picked is submitted; the other stays empty. */
 export function feishuSecretRefs(source: 'env' | 'handle', env: string,
@@ -110,9 +82,6 @@ export function larkConnectionLabel(connection: OwnerConsoleStatus['feishu']['co
   return lastErrorCode === undefined ? label : `${label}（最近错误：${lastErrorCode}）`
 }
 
-/** Status tone for a pill; every pill also carries a text label, so tone is never the only signal. */
-export type StatusTone = 'ok' | 'warn' | 'error' | 'neutral'
-
 /** Read-only tone for the lark-channel connection pill. */
 export function larkConnectionTone(connection: OwnerConsoleStatus['feishu']['connection'],
   lastErrorCode?: string): StatusTone {
@@ -125,7 +94,6 @@ export function larkConnectionTone(connection: OwnerConsoleStatus['feishu']['con
 const OWN_PACKAGE = '@dsh-enhanced/owner-console'
 const LARK_PACKAGE = '@dsh-enhanced/lark-channel'
 const TRAEX_PACKAGE = '@dsh-enhanced/traex-acp-provider'
-const monoFont = 'ui-monospace, SFMono-Regular, Menlo, monospace'
 
 /** One bounded line of Host-provided diagnostic text for a row. */
 export function boundedLine(text: string, limit = 240): string {
@@ -144,95 +112,48 @@ export function fiberState(phase: OwnerConsoleStatus['plugins'][number]['fiberPh
   return enabled ? { label: '已启用未启动', tone: 'warn' } : { label: '已停用', tone: 'neutral' }
 }
 
-/*
- * Theme tokens: only Host `--dsw-alias-*` variables (light/dark switch with the shell), each
- * with a light-theme fallback so an embedding without the token set still reads correctly.
- */
-const ink = 'var(--dsw-alias-label-primary, #0f1115)'
-const muted = 'var(--dsw-alias-label-secondary, #61666b)'
-const caption = 'var(--dsw-alias-label-tertiary, #81858c)'
-const monoMuted = { fontSize: 12, color: caption, fontFamily: monoFont } as const
-const hairline = 'var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.04))'
-const border = 'var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1))'
-const borderStrong = 'var(--dsw-alias-border-l3, rgba(0, 0, 0, 0.12))'
-const surface = 'var(--dsw-alias-settings-card-fill, var(--dsw-alias-bg-layer-2, transparent))'
-const sunken = 'var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06))'
-const accent = 'var(--dsw-alias-state-business-primary, #4176e6)'
-const danger = 'var(--dsw-alias-state-error-primary, #ec1313)'
-const toneColor: Readonly<Record<StatusTone, string>> = {
-  ok: 'var(--dsw-alias-state-success-primary, #22c55e)',
-  warn: 'var(--dsw-alias-state-warn-primary, #f59e0b)',
-  error: danger,
-  neutral: 'var(--dsw-alias-state-idle-primary, #a3a3a3)',
+const settingsSectionStyle = { position: 'relative', isolation: 'isolate', height: '100%', minHeight: 0 } as const
+const settingsScrollStyle = { position: 'relative', zIndex: 1, height: '100%', overflowY: 'auto', boxSizing: 'border-box' } as const
+const panelStyle = { padding: '28px 24px 40px', maxWidth: 840, margin: '0 auto', display: 'grid', gap: 16, color: ink,
+  fontSize: 13, lineHeight: 1.5 } as const
+/** The Host main slot is a fixed-height pane; the chat view fills it and the settings view scrolls inside. */
+const mainRootStyle = { height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden',
+  boxSizing: 'border-box' } as const
+
+export type { StatusTone } from './ui.js'
+
+/** The installed Host supplies remote and the slot registry. */
+export const inject = ['remote', 'slots']
+
+/** The gateway's failure result keeps the business code and unchanged message; the panel must show
+ * both instead of one generic sentence. `error` stays optional so a minimal transport result is legal. */
+type RemoteFailure = Readonly<{ code: string, message: string, details?: unknown }>
+type RemoteResult<T> = Readonly<{ ok: true, value: T }> | Readonly<{ ok: false, error?: RemoteFailure }>
+type ConsoleRemote = Readonly<{
+  status(): Promise<RemoteResult<OwnerConsoleStatus>>
+  trendSnapshots(planId: string, beforeSequence: number, limit: number): Promise<RemoteResult<OwnerConsoleTrendSnapshots>>
+  intakeAgreement(workspace: string, preset: string): Promise<RemoteResult<OwnerConsoleIntakeAgreement>>
+  configureFeishu(appId: string, appSecretEnv: string, credentialHandle: string,
+    account: string, tenant: string, discoverAppId: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  configureTraex(enabled: boolean, command: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  configureBundle(entry: string, config: Readonly<Record<string, unknown>>): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  setBundleEnabled(name: string, enabled: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  setPluginEnabled(entryId: string, enabled: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  installProjectBundle(spec: string, approvedBuilds: readonly string[]): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  removeProjectBundle(name: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
+}>
+type SlotRuntime = {
+  readonly remote: Readonly<{ ownerConsole: ConsoleRemote }>
+  readonly slots: {
+    inject(name: string, factory: () => unknown): () => void
+    register(options: unknown, component: unknown): () => void
+  }
 }
-/** A translucent wash of a token colour; works in both themes because it mixes with transparent. */
-const tint = (color: string, percent: number) => `color-mix(in srgb, ${color} ${percent}%, transparent)`
-
-/**
- * The Host main slot is a fixed-height pane; the panel owns its own vertical scroll so
- * the lower cards stay reachable on short windows. `minHeight: 0` lets a flex/grid
- * parent shrink this root below its content height instead of clipping it.
- */
-export const scrollRootStyle = { height: '100%', minHeight: 0, flex: '1 1 auto', overflowY: 'auto', boxSizing: 'border-box' } as const
-const panelStyle = { position: 'relative', isolation: 'isolate', padding: '28px 24px 40px', maxWidth: 840, margin: '0 auto', display: 'grid', gap: 16, color: ink, fontSize: 13, lineHeight: 1.5 } as const
-/** The artwork layer sits behind the content; `user-select`/pointer events stay off the decoration. */
-const backdropStyle = { position: 'absolute', inset: 0, zIndex: 0, overflow: 'hidden', pointerEvents: 'none', userSelect: 'none' } as const
-const backdropImageStyle = { display: 'block', width: '100%', height: 'auto', opacity: 0.2,
-  maskImage: 'linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.55) 55%, transparent 94%)',
-  WebkitMaskImage: 'linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.55) 55%, transparent 94%)' } as const
-const cardStyle = { border: `1px solid ${border}`, borderRadius: 12, padding: '16px 18px', background: surface, boxShadow: '0 1px 2px rgba(0, 0, 0, 0.04)', display: 'grid', gap: 12, minWidth: 0 }
-const inputStyle = { padding: '7px 10px', borderRadius: 8, border: `1px solid ${borderStrong}`, background: 'transparent', color: 'inherit', fontSize: 13, lineHeight: 1.4, width: '100%', minWidth: 0, boxSizing: 'border-box' }
-/** Secondary button: outlined, quiet. */
-const buttonStyle = { padding: '6px 12px', borderRadius: 8, border: `1px solid ${borderStrong}`, background: 'transparent', color: ink, fontSize: 13, fontWeight: 500, lineHeight: 1.4, cursor: 'pointer', whiteSpace: 'nowrap' }
-/** Primary button: the shell's own primary fill so it inverts with the theme. */
-const primaryButtonStyle = { ...buttonStyle, border: '1px solid transparent', background: 'var(--dsw-alias-button-primary-fill, #0f1115)', color: 'var(--dsw-alias-label-primary-foreground, #ffffff)' }
-const dangerButtonStyle = { ...buttonStyle, color: danger, border: `1px solid ${tint(danger, 40)}` }
-const gridStyle = { display: 'grid', gap: 8 }
-/** Grouped read-only rows sit on a sunken well so they read as one block. */
-const listStyle = { display: 'grid', background: sunken, borderRadius: 10, padding: '2px 12px' }
-const actionsStyle = { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }
-const hintStyle = { margin: 0, fontSize: 12, color: caption }
-const subheadStyle = { margin: 0, fontSize: 12, fontWeight: 600, color: muted, letterSpacing: '0.02em' }
-
-/** Disabled buttons keep their <button> semantics; this only dims them while a write is in flight. */
-const idle = (style: Readonly<Record<string, unknown>>, busy: boolean) =>
-  busy ? { ...style, opacity: 0.5, cursor: 'not-allowed' } : style
-
-function pill(label: string, tone: StatusTone) {
-  const color = toneColor[tone]
-  return el('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '1px 10px 1px 8px', borderRadius: 999,
-    fontSize: 12, fontWeight: 500, lineHeight: '20px', color: ink, background: tint(color, 14), border: `1px solid ${tint(color, 32)}`, whiteSpace: 'nowrap' } },
-  el('span', { 'aria-hidden': true, style: { width: 6, height: 6, borderRadius: 999, background: color, flex: 'none' } }), label)
-}
-
-/** Empty/pending state; an empty list may add a short classical line under the plain message. */
-function placeholder(text: string, phrase?: string) {
-  return el('div', { style: { padding: '14px 12px', borderRadius: 10, border: `1px dashed ${border}`, color: caption, fontSize: 12, textAlign: 'center', display: 'grid', gap: 2 } },
-    el('p', { style: { margin: 0 } }, text),
-    phrase === undefined ? null : el('p', { style: { margin: 0, fontFamily: KAI_FONT, fontSize: 13, color: muted, letterSpacing: '0.12em' } }, phrase))
-}
-
-function row(label: string, value: unknown) {
-  return el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '8px 0', borderTop: `1px solid ${hairline}`, minWidth: 0 } },
-    el('span', { style: { color: muted, flex: 'none' } }, label),
-    el('span', { style: { textAlign: 'right', minWidth: 0, overflowWrap: 'anywhere' } }, value))
-}
-
-/** Every card shares one frame: a titled header followed by evenly spaced body blocks. */
-function card(title: string, ...body: readonly unknown[]) {
-  return el('div', { style: cardStyle },
-    el('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-      el('span', { style: { color: accent, opacity: 0.75 } }, jsx(CloudMark, {})),
-      el('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600, color: ink, whiteSpace: 'nowrap' } }, title),
-      el('span', { 'aria-hidden': true, style: { flex: 1, height: 1, minWidth: 24, background: `linear-gradient(90deg, ${border}, transparent)` } })),
-    ...body)
-}
-
-function field(label: string, value: string, onChange: (next: string) => void, placeholderText = '') {
-  return el('label', { style: { display: 'grid', gap: 4, fontSize: 12, fontWeight: 500, color: muted, minWidth: 0, flex: '1 1 200px' } },
-    el('span', {}, label),
-    el('input', { value, placeholder: placeholderText, style: inputStyle,
-      onChange: (event: { target: { value: string } }) => onChange(event.target.value) }))
+type PermissionPresetsRemote = Readonly<{ catalog(): Promise<RemoteResult<PermissionCatalog>> }>
+type ClientContext = {
+  readonly remote: { readonly $mount: (value: unknown) => Promise<() => Promise<void>> }
+  readonly get: <T>(name: string) => T | undefined
+  inject(dependencies: readonly string[], callback: (runtime: SlotRuntime) => unknown): { dispose(): Promise<void> }
 }
 
 const TREND_PAGE = 10
@@ -412,9 +333,29 @@ export function OwnerConsoleIcon() {
       width: 18, height: 18, style: { display: 'block', width: '100%', height: '100%', objectFit: 'cover' } }))
 }
 
-export function OwnerConsolePanel({ remote, navigation }: Readonly<{
+export type OwnerConsoleNavigation = Readonly<{ openConversation(): void, openPlugins(): void }>
+
+/** The main-slot panel: chat by default, with the configuration console behind the gear.
+ * The renderer's seats arrive as top-level props (no package import); in their absence the
+ * compact self-contained chat is the fallback. */
+export type OwnerConsolePanelProps = OwnerConsoleRendererSeat & Readonly<{
   remote: ConsoleRemote
-  navigation: Readonly<{ openConversation(): void, openPlugins(): void }>
+  navigation: OwnerConsoleNavigation
+  runtime: ChatRuntime
+}>
+
+export function OwnerConsolePanel({ remote, navigation, runtime, ...renderer }: OwnerConsolePanelProps) {
+  const [view, setView] = useState<'chat' | 'settings'>('chat')
+  return view === 'chat'
+    ? jsx(OwnerConsoleChat, { runtime, onOpenSettings: () => setView('settings'), renderer })
+    : jsx(OwnerConsoleSettingsPanel, { remote, navigation, onBack: () => setView('chat') })
+}
+
+/** The existing configuration console, moved behind the chat header's ⚙ button. */
+export function OwnerConsoleSettingsPanel({ remote, navigation, onBack }: Readonly<{
+  remote: ConsoleRemote
+  navigation: OwnerConsoleNavigation
+  onBack?: () => void
 }>) {
   const [status, setStatus] = useState<OwnerConsoleStatus>()
   const [error, setError] = useState('')
@@ -658,30 +599,35 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
             } catch { setError('配置必须是 JSON 对象') }
           } }, '应用配置')))))
 
-  return el('section', { 'aria-label': '文鳐（主人控制台）', style: panelStyle },
-    // 11 深海觉醒 background on the panel's own surface, not only the header. The whale sits
+  return el('section', { 'data-owner-console-settings': '', 'aria-label': '文鳐设置（主人控制台）', style: settingsSectionStyle },
+    // 11 深海觉醒 background on the settings surface, not only the header. The whale sits
     // at low opacity behind every card and fades out before the lower rows; text stays on the
     // theme's card surface, so light/dark contrast is untouched.
     el('div', { style: backdropStyle },
       el('img', { src: WENYAO_BACKDROP_DATA_URI, alt: '', 'aria-hidden': 'true', draggable: false,
         'data-owner-console-art': 'backdrop', width: 960, height: 960, style: backdropImageStyle })),
-    el('div', { 'data-owner-console-content': '', style: { position: 'relative', zIndex: 1, display: 'grid', gap: 16 } },
-      header(navigation),
-      error === '' ? null : el('p', { role: 'alert', style: { ...bannerStyle(danger), fontWeight: 500 } },
-        el('span', { 'aria-hidden': true, style: { color: danger, fontWeight: 700 } }, '!'), error),
-      // A missing Host service is reported explicitly; the cards below then never read as "not installed".
-      status !== undefined && (status.host.settings === false || status.host.pluginManager === false)
-        ? el('p', { role: 'status', style: { ...bannerStyle(accent), fontSize: 12 } },
-          `Host 服务不完整：settings ${status.host.settings ? '已加载' : '未加载'}、`
-          + `pluginManager ${status.host.pluginManager ? '已加载' : '未加载'}；相关卡片只显示不可用，不能写入。`)
-        : null,
-      notice === '' ? null : el('p', { role: 'status', style: bannerStyle(accent) },
-        el('span', { 'aria-hidden': true, style: { color: accent, fontWeight: 700 } }, 'i'), notice),
-      card('远程接入（飞书）', feishuRows, feishuActions),
-      card('TraeX', traexRows),
-      card('本项目插件管理', bundles),
-      jsx(TrendSnapshotsCard, { remote }),
-      jsx(IntakeAgreementCard, { remote, availability: status?.evaluation.intakeAgreement })))
+    el('div', { 'data-owner-console-settings-scroll': '', style: settingsScrollStyle },
+      el('div', { 'data-owner-console-content': '', style: panelStyle },
+        onBack === undefined ? null : el('div', { 'data-owner-console-settings-bar': '',
+          style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 } },
+        el('button', { type: 'button', style: buttonStyle, onClick: onBack, 'aria-label': '返回对话' }, '← 返回对话'),
+        el('h2', { style: { margin: 0, fontSize: 13, fontWeight: 600, color: muted } }, '设置')),
+        header(navigation),
+        error === '' ? null : el('p', { role: 'alert', style: { ...bannerStyle(danger), fontWeight: 500 } },
+          el('span', { 'aria-hidden': true, style: { color: danger, fontWeight: 700 } }, '!'), error),
+        // A missing Host service is reported explicitly; the cards below then never read as "not installed".
+        status !== undefined && (status.host.settings === false || status.host.pluginManager === false)
+          ? el('p', { role: 'status', style: { ...bannerStyle(accent), fontSize: 12 } },
+            `Host 服务不完整：settings ${status.host.settings ? '已加载' : '未加载'}、`
+            + `pluginManager ${status.host.pluginManager ? '已加载' : '未加载'}；相关卡片只显示不可用，不能写入。`)
+          : null,
+        notice === '' ? null : el('p', { role: 'status', style: bannerStyle(accent) },
+          el('span', { 'aria-hidden': true, style: { color: accent, fontWeight: 700 } }, 'i'), notice),
+        card('远程接入（飞书）', feishuRows, feishuActions),
+        card('TraeX', traexRows),
+        card('本项目插件管理', bundles),
+        jsx(TrendSnapshotsCard, { remote }),
+        jsx(IntakeAgreementCard, { remote, availability: status?.evaluation.intakeAgreement }))))
 }
 
 function bannerStyle(color: string) {
@@ -695,7 +641,7 @@ function bannerStyle(color: string) {
  * and the primary 开始对话 action. Text sits on the card surface below the image, so its
  * contrast follows the theme rather than the artwork.
  */
-function header(navigation: Readonly<{ openConversation(): void, openPlugins(): void }>) {
+function header(navigation: OwnerConsoleNavigation) {
   return el('header', { 'data-owner-console-header': '', style: { overflow: 'hidden', borderRadius: 16,
     border: `1px solid ${border}`, color: ink, background: surface, boxShadow: '0 1px 2px rgba(0, 0, 0, 0.04)' } },
   el('img', { src: WENYAO_HERO_DATA_URI, alt: '', 'aria-hidden': 'true', draggable: false, 'data-owner-console-art': 'hero',
@@ -715,9 +661,9 @@ function header(navigation: Readonly<{ openConversation(): void, openPlugins(): 
       el('button', { style: buttonStyle, onClick: () => navigation.openPlugins() }, '打开插件页'))))
 }
 
-/** Main-slot root: a scroll container around the panel. */
-export function OwnerConsoleMain(props: Parameters<typeof OwnerConsolePanel>[0]) {
-  return el('div', { 'data-owner-console-scroll': '', style: scrollRootStyle }, jsx(OwnerConsolePanel, props))
+/** Main-slot root: fills the fixed-height Host pane; each view owns its own scrolling. */
+export function OwnerConsoleMain(props: OwnerConsolePanelProps) {
+  return el('div', { 'data-owner-console-scroll': '', style: mainRootStyle }, jsx(OwnerConsolePanel, props))
 }
 
 export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
@@ -740,13 +686,100 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
           } catch { /* the native plugins page may not be registered in an embedding */ }
         },
       }
-      const panel = () => jsx(OwnerConsoleMain, { remote, navigation })
+      // Every chat capability is resolved lazily from the Host client services; a missing one
+      // degrades that control instead of taking the sidebar entry down.
+      const chatRuntime: ChatRuntime = {
+        sessions: () => ctx.get<ChatSessions>('sessions'),
+        fileUploads: () => ctx.get<ChatUploads>('fileUpload'),
+        permissionCatalog: () => {
+          try {
+            // Namespace services are registered as `remote.<namespace>`; `ctx.get` is the
+            // canonical lookup and stays undefined when the Host did not compose the domain.
+            const presets = ctx.get<PermissionPresetsRemote>('remote.permissionPresets')
+            if (presets === undefined || typeof presets.catalog !== 'function') return undefined
+            return presets.catalog()
+          } catch {
+            return undefined
+          }
+        },
+        openNativeSession: sessionId => {
+          try {
+            const workspace = ctx.get<{ openSession(id: string): void }>('uiWorkspace')
+            if (workspace === undefined || typeof workspace.openSession !== 'function') return false
+            workspace.openSession(sessionId)
+            return true
+          } catch {
+            return false
+          }
+        },
+        startConversation: () => navigation.openConversation(),
+        storage: () => browserStorage(),
+        voiceAvailable: () => browserSpeechRecognition() !== undefined,
+        createRecognition: () => {
+          const Recognition = browserSpeechRecognition()
+          return Recognition === undefined ? undefined : new Recognition()
+        },
+        recognitionLang: () => browserLang(),
+        speakAvailable: () => browserSpeechSynthesisAvailable(),
+        speak: text => speakInBrowser(text),
+        createSession: async () => {
+          const sessions = ctx.get<ChatSessions>('sessions')
+          if (sessions === undefined) throw new Error('会话服务不可用')
+          // A grouped Session can be opened in the native view without landing on a workspace
+          // picker. The default Workspace is the only one the client API names; no catalog UI is
+          // shown here. Any failure falls back to the previous ungrouped creation path.
+          try {
+            const workspaces = ctx.get<{
+              initializeDefault(signal?: AbortSignal): Promise<Readonly<{ workspaceId?: string }> | undefined>
+            }>('workspaces')
+            const workspace = await workspaces?.initializeDefault()
+            const workspaceId = workspace?.workspaceId
+            if (workspaceId !== undefined && workspaceId !== '') {
+              if (typeof sessions.connectWorkspace === 'function') {
+                return await sessions.connectWorkspace(workspaceId)
+              }
+              return await sessions.create({ workspaceId })
+            }
+          } catch {
+            // The default Workspace is optional; fall through to the Host default cwd.
+          }
+          return await sessions.create()
+        },
+        insertDraft: (reference, text) => {
+          try {
+            const conversation = ctx.get<{
+              input?: {
+                for(actx: unknown): {
+                  state?: { getSnapshot(): Readonly<{ draft?: string }> }
+                  setDraft(value: string): void
+                  focus?(): void
+                }
+              }
+            }>('conversation')
+            const facade = conversation?.input?.for(reference.binding.ctx)
+            if (facade === undefined) return false
+            const draft = typeof facade.state?.getSnapshot === 'function' ? facade.state.getSnapshot().draft ?? '' : ''
+            facade.setDraft(draft === '' ? text : `${draft} ${text}`)
+            facade.focus?.()
+            return true
+          } catch {
+            return false
+          }
+        },
+      }
+      const panel = (seats: Readonly<Record<string, unknown>>) =>
+        jsx(OwnerConsoleMain, { ...seats, remote, navigation, runtime: chatRuntime })
       const sidebar = runtime.slots.inject('sidebar.panellist', () => runtime.slots.register(
         { name: 'sidebar.panellist', id: 'owner-console', order: 30, label: () => '文鳐' }, OwnerConsoleIcon))
+      // The declared session child is what makes the renderer inject SessionProvider and
+      // renderSlot; the child body renders the Host's own `conversation.content` factory.
       const main = runtime.slots.inject('main', () => runtime.slots.register(
-        { name: 'main', key: 'owner-console' }, panel))
+        { name: 'main', key: 'owner-console',
+          children: { 'owner-console.conversation': { kind: 'single', scope: 'session' } } }, panel))
+      const conversation = runtime.slots.inject('owner-console.conversation', () => runtime.slots.register(
+        { name: 'owner-console.conversation' }, OwnerConsoleConversation))
       // Cordis effects accept a function: dispose the slot registrations in reverse order.
-      return () => { main(); sidebar() }
+      return () => { conversation(); main(); sidebar() }
     })
     return async () => {
       await injection.dispose()
