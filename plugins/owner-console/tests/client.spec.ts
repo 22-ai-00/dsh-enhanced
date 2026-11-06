@@ -133,6 +133,7 @@ describe('owner console client', () => {
     expect(found).toEqual([])
     const rendered = text(view)
     expect(rendered).toContain('causal: false')
+    expect(rendered).toContain('[2023-11-14T22:13:20.000Z, 2023-11-14T22:15:00.000Z)')
     expect(rendered).toContain('吻合 2 / 不吻合 1 · 66.7%（通知 4，工作项 3）')
     expect(rendered).toContain('notify（通知）')
     expect(rendered).toContain('尚无已决结果')

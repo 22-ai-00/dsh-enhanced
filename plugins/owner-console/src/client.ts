@@ -265,7 +265,8 @@ export function intakeAgreementView(result: OwnerConsoleIntakeAgreement | undefi
   return el('div', { style: gridStyle },
     el('p', { style: hintStyle }, '只读：观察性统计（causal: false），不是 intake 准确率，不作为采用依据；只统计 auto 准入的工作项。'),
     el('div', { style: listStyle },
-      row('窗口', `(${isoTime(summary.fromNotifiedAt)}, ${isoTime(summary.toNotifiedAt)}]`),
+      // Evaluation reads notifications in [from, to).
+      row('窗口', `[${isoTime(summary.fromNotifiedAt)}, ${isoTime(summary.toNotifiedAt)})`),
       row('扫描通知', el('span', { style: actionsStyle }, String(summary.scanned), summary.truncated ? pill('已截断', 'warn') : null)),
       row('intake 准入合计', agreementLabel(summary.intake)),
       ...summary.byLevel.map(entry => row(INTAKE_LEVEL_LABELS[entry.level], agreementLabel(entry.cell))),
