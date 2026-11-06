@@ -104,10 +104,11 @@ TraeX 需兼容发布或 owner 豁免，live app profile 未安装新主视觉�
 
 ## 最新完整检查
 
-最近三个切片的双端精确根检查结果（更早切片保留在 `docs/evidence/verification-<sha8>/`）：
+最近切片的精确根检查结果（更早切片保留在 `docs/evidence/verification-<sha8>/`）：
 
 | 精确提交 | 环境 | 结果 | 测试 passed / skipped | 文件 passed / skipped | 日志 SHA-256 |
 | --- | --- | --- | --- | --- | --- |
+| `d7784720`（39 包，本轮 2026-11-06 切片：owner-console 主视觉 11_深海觉醒 `bb2572d0`/构建 `689338a8`、WorkItems `acceptance.holdReport` `af59d866`/轮转修复 `b86639bc`、Delivery `orderAcrossLanes` `56ec9ec7`/轮换回退 `fc7756d2`、`follows.eventTriggers.acceptHeadRef` `75deec79`、policy 开关登记 `be7c4be4`、owner-console 安装/状态判定 `3679e482`/`cf4b633f`、memory-learning CI 预算 `d7784720`） | **仅 Mac / Node 26.11.1**（本轮未跑 Linux） | EXIT 0，PASS，1256.20 秒；r1 因 `ERR_PNPM_VERIFY_DEPS_BEFORE_RUN` 失败、r2 因会话继承 `NO_COLOR`/`FORCE_COLOR` 使 stderr 非空失败，均保留 | 11,150 / 1,931 | 762 / 85 | `9ed15866ad5c451998ba56d616f2c222b8fbd51b26c19f55b6467fa7f1fbcb96` |
 | `750d89b2`（39 包，WP21 晚绑定 binding id 钉住与漂移/缺方法重读 `15f14327`/`2fc28f15`/`ef02735d`/`750d89b2`、裁决门 `d3cea278`/`25269ac9`、intake 吻合度 `f1bf0f37`/`9609905f`/`523e9e8f`、封存重放 plan id 隔离 `8d34792c`/`7c9a5350`、活 WAL 用例 `fec3160b`） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1224.74 秒 | 11,063 / 1,931 | 758 / 85 | `e6183669fc2840b1b59450a43f26c6ce569ed30f5b9d87dba4ed31bfee59b64e` |
 | `750d89b2`（39 包，WP21 晚绑定 binding id 钉住与漂移/缺方法重读 `15f14327`/`2fc28f15`/`ef02735d`/`750d89b2`、裁决门 `d3cea278`/`25269ac9`、intake 吻合度 `f1bf0f37`/`9609905f`/`523e9e8f`、封存重放 plan id 隔离 `8d34792c`/`7c9a5350`、活 WAL 用例 `fec3160b`） | Linux / Node 24.7.0 | EXIT 0，独立 PASS，2450.48 秒 | 12,680 / 311 | 811 / 32 | `9dcddcb9e90cee64d11f9199edd80969c831a930b3c9acc19ac66d38289a5157` |
 | `9f497ab0`（39 包，Router 路由标签/订阅线程来源/最近别名 `65ebcc23`…`c7442ac6`、acceptance 自动结算与晚绑定 `db18af8a`/`0e47cd5b`/`45693fd0`/`21ef83f0`/`f6850f92`、DiD 植入回放与趋势快照 `27ea5da2`/`82fca5ae`、控制台文鳐面板 `ea6c5f55`…`9f497ab0`） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1174.12 秒 | 11,030 / 1,931 | 756 / 85 | `37e4d08e1eaecb873bf41ca03c62ea92c4279da122b0560b5b346b2650fc8575` |
