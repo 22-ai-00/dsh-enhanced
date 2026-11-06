@@ -895,6 +895,8 @@ export interface WorkItemEvaluationHealth {
 export interface WorkItemIntakeProvenance {
   readonly protocol: 'work-items/intake-provenance/v1'
   readonly itemId: string
+  /** The item's owner scope; a consumer must not attribute it to another scope. */
+  readonly scope: Readonly<{ workspace: string; preset: string }>
   readonly source: string
   readonly sourceEventId: string
   readonly ruleId: string

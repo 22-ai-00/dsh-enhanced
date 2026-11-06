@@ -8,6 +8,7 @@
  * notification and cannot be measured here; only auto-admitted items are.
  * Nothing is written, adopted or sent; the result is observational.
  */
+import { canonicalEvaluationScope } from './store.js'
 import type { NotificationOutcome, NotificationOutcomeRecord } from './types.js'
 import { notificationOutcomes } from './types.js'
 
@@ -30,13 +31,23 @@ type IntakeLevel = typeof LEVELS[number]
 
 interface IntakeProvenance { itemId: string; level: IntakeLevel; mode: 'observe' | 'auto' }
 
-/** Validate one peer answer; anything malformed counts as unavailable, never as a match. */
-function provenance(value: unknown, itemId: string): IntakeProvenance | null | 'invalid' {
+/**
+ * Validate one peer answer; anything malformed, or an item of another owner
+ * scope, counts as unresolved, never as a match. A notification sender may
+ * name any work item id, so the item's own scope must equal the metric's.
+ */
+function provenance(value: unknown, itemId: string, scopeKey: string): IntakeProvenance | null | 'invalid' | 'foreign' {
   if (value === undefined) return null
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return 'invalid'
   const item = value as Record<string, unknown>
   if (item.protocol !== 'work-items/intake-provenance/v1' || item.itemId !== itemId || item.wouldAccept !== true
     || !(LEVELS as readonly unknown[]).includes(item.level) || (item.mode !== 'observe' && item.mode !== 'auto')) return 'invalid'
+  const scope = item.scope as { workspace?: unknown; preset?: unknown } | null | undefined
+  let key: string
+  try {
+    key = canonicalEvaluationScope({ workspace: scope?.workspace as string, preset: scope?.preset as string }).scopeKey
+  } catch { return 'invalid' }
+  if (key !== scopeKey) return 'foreign'
   return { itemId, level: item.level as IntakeLevel, mode: item.mode }
 }
 
@@ -69,8 +80,10 @@ export interface IntakeAttentionAgreement {
   readonly provenanceAvailable: boolean
   /** Notifications whose item was not admitted from intake (explicit decisions, continuations). */
   readonly notIntake: number
-  /** Notifications whose provenance read threw or was malformed. */
+  /** Notifications whose provenance read threw (WorkItems unavailable or intake ledger off) or was malformed. */
   readonly unresolved: number
+  /** Notifications naming a work item of another owner scope; never attributed to this one. */
+  readonly foreign: number
   readonly intake: IntakeAttentionAgreementCell
   readonly byLevel: Readonly<Partial<Record<IntakeLevel, IntakeAttentionAgreementCell>>>
 }
@@ -115,12 +128,13 @@ export function computeIntakeAttentionAgreement(input: Readonly<{
   truncated: boolean
   source: IntakeProvenanceSource | undefined
 }>): IntakeAttentionAgreement {
-  const resolved = new Map<string, IntakeProvenance | null | 'invalid'>()
+  const { scopeKey } = canonicalEvaluationScope(input.scope)
+  const resolved = new Map<string, IntakeProvenance | null | 'invalid' | 'foreign'>()
   const resolve = (itemId: string) => {
     if (!resolved.has(itemId)) {
-      let value: IntakeProvenance | null | 'invalid' = 'invalid'
+      let value: IntakeProvenance | null | 'invalid' | 'foreign' = 'invalid'
       if (input.source !== undefined) {
-        try { value = provenance(input.source.inspectIntakeProvenance(itemId), itemId) } catch { value = 'invalid' }
+        try { value = provenance(input.source.inspectIntakeProvenance(itemId), itemId, scopeKey) } catch { value = 'invalid' }
       }
       resolved.set(itemId, value)
     }
@@ -128,12 +142,13 @@ export function computeIntakeAttentionAgreement(input: Readonly<{
   }
   const intake = new Cell()
   const byLevel = new Map<IntakeLevel, Cell>()
-  let notIntake = 0, unresolved = 0
+  let notIntake = 0, unresolved = 0, foreign = 0
   for (const record of input.records) {
     const itemId = record.workItemId
     if (itemId === undefined) continue
     const found = resolve(itemId)
     if (found === 'invalid') { unresolved += 1; continue }
+    if (found === 'foreign') { foreign += 1; continue }
     if (found === null) { notIntake += 1; continue }
     intake.add(itemId, record.outcome)
     let cell = byLevel.get(found.level)
@@ -151,6 +166,7 @@ export function computeIntakeAttentionAgreement(input: Readonly<{
     provenanceAvailable: input.source !== undefined,
     notIntake,
     unresolved,
+    foreign,
     intake: intake.freeze(),
     byLevel: Object.freeze(Object.fromEntries(LEVELS.flatMap(level => {
       const cell = byLevel.get(level)

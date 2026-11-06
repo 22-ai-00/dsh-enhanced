@@ -119,9 +119,9 @@ schema 14 新增与任务投影分离的 `evaluation_notification_outcome_*` 表
 
 ## intake 与注意力结果吻合度（WP22，只读）
 
-`intakeAttentionAgreementEnabled`（默认关，须同时开 `notificationOutcomesEnabled`）开放 Host-only `inspectIntakeAttentionAgreement({ scope, fromNotifiedAt?, toNotifiedAt? })`；关闭时返回 `undefined`、不读 WorkItems。唯一可用的连接是：WP20 intake 准入 → 工作项 → 结果通知（结果账本记录中的 `workItemId`）→ 主人结果。它在窗口内按通知时间扫描当前结果头中带 `workItemId` 的记录（至多 1000 条，超出标 `truncated`），每个工作项经 WorkItems 结构化接口 `inspectIntakeProvenance(itemId)` 只读一次，按准入时的 intake level 聚合：`agreed` = accepted + reacted，`disagreed` = rejected + expired-unhandled，`agreementPpm` = agreed / (agreed + disagreed)，无已判定通知时为 `null`；delivered/pending/failed 只计入 `outcomes`。非 intake 准入的工作项（显式决策、续办）计 `notIntake`；接口抛错、回执畸形或无 WorkItems peer（`provenanceAvailable: false`）计 `unresolved`，从不当作吻合。
+`intakeAttentionAgreementEnabled`（默认关，须同时开 `notificationOutcomesEnabled`）开放 Host-only `inspectIntakeAttentionAgreement({ scope, fromNotifiedAt?, toNotifiedAt? })`；关闭时返回 `undefined`、不读 WorkItems。唯一可用的连接是：WP20 intake 准入 → 工作项 → 结果通知（结果账本记录中的 `workItemId`）→ 主人结果。它在窗口内按通知时间扫描当前结果头中带 `workItemId` 的记录（至多 1000 条，超出标 `truncated`），每个工作项经 WorkItems 结构化接口 `inspectIntakeProvenance(itemId)` 只读一次，按准入时的 intake level 聚合：`agreed` = accepted + reacted，`disagreed` = rejected + expired-unhandled，`agreementPpm` = agreed / (agreed + disagreed)，无已判定通知时为 `null`；delivered/pending/failed 只计入 `outcomes`。非 intake 准入的工作项（显式决策、续办）计 `notIntake`；接口抛错（含 WorkItems intake ledger 关闭）、回执畸形或无 WorkItems peer（`provenanceAvailable: false`）计 `unresolved`；通知发送方可声明任意 `workItemId`，因此 provenance 所带工作项 owner scope 与本次 scope 不同的计 `foreign`，二者都从不当作吻合。
 
-限制：observe 模式的 `would-admit` 不创建工作项，因而不产生通知，无法在此度量，只有 auto 准入的项可测；未被 intake 接受（`wouldAccept: false`）的事件同样没有通知，不能估计漏判。结果是观察性的（`causal: false`），不写任何行、不采用参数、不发送；按 `record_json` 扫描（无 workItemId 索引，无 schema 变更）。
+限制：observe 模式的 `would-admit` 不创建工作项，因而不产生通知，无法在此度量，只有 auto 准入（含崩溃恢复的 `replayed`）的项可测；未被 intake 接受（`wouldAccept: false`）的事件同样没有通知，不能估计漏判。另有一条可行但不采用的连接：owner 对通知的回复本身是一条入站消息，也会被 intake 判断，可经 Delivery 回复关系连回该通知；但正是这条回复使通知变成 `reacted`，度量会自证循环，故不采用。口径按通知计（一个项的报告越多权重越大），`rejected` 来自工作项反馈的 not-achieved、反映执行结果而不只是 intake 判断，因此该值是"执行 + 注意力"的综合信号，不是 intake 准确率。结果是观察性的（`causal: false`），不写任何行、不采用参数、不发送；按 `record_json` 扫描（无 workItemId 索引，无 schema 变更）。
 
 ## 注意力参数有界收紧与回退（WP22 切片 2）
 

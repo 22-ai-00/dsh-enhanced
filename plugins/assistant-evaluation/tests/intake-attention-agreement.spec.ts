@@ -43,8 +43,8 @@ class ProvenanceSource {
     if (this.failing.has(itemId)) throw new Error('work items unavailable')
     return this.items.get(itemId)
   }
-  admit(itemId: string, level = 'accept') {
-    this.items.set(itemId, { protocol: 'work-items/intake-provenance/v1', itemId, source: 'lark-channel', sourceEventId: `om-${itemId}`,
+  admit(itemId: string, level = 'accept', itemScope: { workspace: string; preset: string } = scope) {
+    this.items.set(itemId, { protocol: 'work-items/intake-provenance/v1', itemId, scope: itemScope, source: 'lark-channel', sourceEventId: `om-${itemId}`,
       ruleId: 'rule-1', policyVersion: 'v1', mode: 'auto', level, wouldAccept: true, admittedAt: 900 })
   }
 }
@@ -102,12 +102,17 @@ describe('intake attention agreement (WP22, read-only)', () => {
   test('counts throwing or malformed provenance as unresolved and works without a WorkItems peer', () => {
     const { facts, provenance, evaluation } = setup()
     provenance!.failing.add('item-x')
-    provenance!.items.set('item-y', { protocol: 'work-items/intake-provenance/v1', itemId: 'other', level: 'accept', mode: 'auto', wouldAccept: true })
+    provenance!.items.set('item-y', { protocol: 'work-items/intake-provenance/v1', itemId: 'other', scope, level: 'accept', mode: 'auto', wouldAccept: true })
+    provenance!.items.set('item-z', { protocol: 'work-items/intake-provenance/v1', itemId: 'item-z', level: 'accept', mode: 'auto', wouldAccept: true })
+    // Another owner scope's intake item named by this scope's notification.
+    provenance!.admit('item-b', 'accept', { workspace: '/work/other', preset: 'primary' })
     facts.put(fact('out-1', 1, { workItemId: 'item-x' }))
     facts.put(fact('out-2', 2, { workItemId: 'item-y' }))
+    facts.put(fact('out-3', 3, { workItemId: 'item-z' }))
+    facts.put(fact('out-4', 4, { workItemId: 'item-b', judgement: { source: 'work-item-feedback', version: 1, objectiveStatus: 'achieved' } }))
     evaluation.reconcileNotificationOutcomes()
     expect(evaluation.inspectIntakeAttentionAgreement({ scope, fromNotifiedAt: 0, toNotifiedAt: 10_000 }))
-      .toMatchObject({ scanned: 2, unresolved: 2, notIntake: 0, intake: { notifications: 0, agreementPpm: null }, byLevel: {} })
+      .toMatchObject({ scanned: 4, unresolved: 3, foreign: 1, notIntake: 0, intake: { notifications: 0, agreementPpm: null }, byLevel: {} })
 
     const bare = setup({ provenance: null })
     bare.facts.put(fact('out-1', 1, { workItemId: 'item-a' }))
@@ -119,5 +124,19 @@ describe('intake attention agreement (WP22, read-only)', () => {
   test('rejects an invalid window', () => {
     const { evaluation } = setup()
     expect(() => evaluation.inspectIntakeAttentionAgreement({ scope, fromNotifiedAt: 10, toNotifiedAt: 10 })).toThrow(/window is invalid/u)
+  })
+})
+
+describe('intake attention agreement scan bound', () => {
+  test('marks the result truncated past the scan limit', async () => {
+    const { INTAKE_ATTENTION_AGREEMENT_SCAN_LIMIT } = await import('../src/intake-attention-agreement.ts')
+    const { facts, provenance, evaluation } = setup()
+    for (let index = 1; index <= INTAKE_ATTENTION_AGREEMENT_SCAN_LIMIT + 1; index += 1) {
+      provenance!.admit(`item-${String(index)}`)
+      facts.put(fact(`out-${String(index)}`, index, { workItemId: `item-${String(index)}`, auditedAt: 1_000 + index }))
+    }
+    while (evaluation.reconcileNotificationOutcomes().ingested > 0) { /* drain bounded batches */ }
+    expect(evaluation.inspectIntakeAttentionAgreement({ scope, fromNotifiedAt: 0, toNotifiedAt: 1_000_000 }))
+      .toMatchObject({ scanned: INTAKE_ATTENTION_AGREEMENT_SCAN_LIMIT, truncated: true, intake: { notifications: INTAKE_ATTENTION_AGREEMENT_SCAN_LIMIT } })
   })
 })

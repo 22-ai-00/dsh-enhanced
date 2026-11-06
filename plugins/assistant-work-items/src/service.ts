@@ -1145,19 +1145,24 @@ export class AssistantWorkItemsService extends Service {
   /**
    * Host-only, read-only (WP22): the WP20 intake judgment that admitted one
    * work item, for Evaluation's intake/attention agreement metric. Undefined
-   * when the intake ledger is off, the item does not exist, or it was not
-   * admitted from intake (observe-mode `would-admit` never creates an item).
-   * Carries no source text: identity, rule, policy version and verdict only.
+   * when the item does not exist or was not admitted from intake
+   * (observe-mode `would-admit` never creates an item). Throws `disabled`
+   * when the intake ledger is off, so "cannot tell" is never read as "not
+   * intake". Carries the item's owner scope and no source text.
    */
   inspectIntakeProvenance(itemId: string): WorkItemIntakeProvenance | undefined {
-    if (this.workItemsConfig.intakeLedger === undefined || !this.workItemsConfig.enabled || this.workItemsClosed) return undefined
-    if (typeof itemId !== 'string' || itemId === '' || itemId.length > 256) return undefined
-    const found = this.workItemsAvailable().store.intakeProvenance(itemId)
+    if (this.workItemsConfig.intakeLedger === undefined || !this.workItemsConfig.enabled) fail('disabled', 'the work-item intake ledger is disabled')
+    if (typeof itemId !== 'string' || itemId === '' || itemId.length > 256) fail('invalid-input', 'itemId is invalid')
+    const store = this.workItemsAvailable().store
+    const found = store.intakeProvenance(itemId)
     if (found === undefined) return undefined
+    const item = store.findItemById(itemId)
+    if (item === undefined) fail('storage', 'intake admission names a missing work item')
     const { admission, evaluation } = found
     return Object.freeze({
       protocol: 'work-items/intake-provenance/v1',
       itemId,
+      scope: Object.freeze({ workspace: item.scope.workspace, preset: item.scope.preset }),
       source: admission.source,
       sourceEventId: admission.sourceEventId,
       ruleId: admission.ruleId,

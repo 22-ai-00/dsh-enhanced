@@ -190,6 +190,9 @@ describe('durable intake ledger', () => {
     expect(await readdir(paths.root)).toEqual([])
     const ledgerOff = open({ enabled: true, mode: 'observe', databasePath: paths.databasePath, workRoot: paths.workRoot })
     expect(() => ledgerOff.recordIntake(input())).toThrow(/intake ledger is disabled/)
+    // "Cannot tell" is never read as "not admitted from intake".
+    expect(() => disabled.inspectIntakeProvenance('any-item')).toThrow(/intake ledger is disabled/)
+    expect(() => ledgerOff.inspectIntakeProvenance('any-item')).toThrow(/intake ledger is disabled/)
   })
 
   test('records in observe mode without admitting or dispatching work', async () => {

@@ -333,13 +333,25 @@ describe('intake admission on the scheduler wake', () => {
     const [admission] = fixture.service.intakeAdmissions('lark-channel', 'om_1')
     const [evaluation] = fixture.service.intakeEvaluations('lark-channel', 'om_1')
     const provenance = fixture.service.inspectIntakeProvenance(admission!.itemId!)
-    expect(provenance).toEqual({ protocol: 'work-items/intake-provenance/v1', itemId: admission!.itemId, source: 'lark-channel', sourceEventId: 'om_1',
+    expect(provenance).toEqual({ protocol: 'work-items/intake-provenance/v1', itemId: admission!.itemId, scope: { workspace: fixture.root, preset: 'primary' },
+      source: 'lark-channel', sourceEventId: 'om_1',
       ruleId: admission!.ruleId, policyVersion: admission!.policyVersion, mode: 'auto', level: evaluation!.level, wouldAccept: true, admittedAt: admission!.recordedAt })
     expect(Object.isFrozen(provenance)).toBe(true)
     expect(JSON.stringify(provenance)).not.toContain(TEXT)
     expect(fixture.service.inspectIntakeProvenance('missing-item')).toBeUndefined()
-    expect(fixture.service.inspectIntakeProvenance('')).toBeUndefined()
+    expect(() => fixture.service.inspectIntakeProvenance('')).toThrow(/itemId is invalid/u)
+    // A crash-recovered admission (`replayed`) is intake provenance too.
+    const db = new DatabaseSync(fixture.databasePath)
+    try {
+      db.exec('DROP TRIGGER IF EXISTS work_item_intake_admission_no_update')
+      const triggers = db.prepare("SELECT name, sql FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = 'work_item_intake_admission'").all() as { name: string; sql: string }[]
+      for (const trigger of triggers) db.exec(`DROP TRIGGER "${trigger.name}"`)
+      db.prepare("UPDATE work_item_intake_admission SET outcome = 'replayed'").run()
+      for (const trigger of triggers) db.exec(trigger.sql)
+    } finally { db.close() }
+    expect(fixture.service.inspectIntakeProvenance(admission!.itemId!)).toMatchObject({ itemId: admission!.itemId, mode: 'auto' })
   })
+
 
   test('inspectIntakeProvenance is undefined in observe mode, where no item exists', async () => {
     const fixture = await serviceSetup({ enabled: true, originBindingId: 'binding-origin-1' }, { mode: 'observe' })
