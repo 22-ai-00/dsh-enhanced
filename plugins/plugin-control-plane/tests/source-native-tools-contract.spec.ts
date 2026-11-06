@@ -61,7 +61,7 @@ it('provides the native Tools SDK through the real generator and a single frozen
     devDependencies: Record<string, string>
   }
   expect(manifest.name).toBe(packageName)
-  expect(manifest.peerDependencies[sdk]).toBe('0.2.1-rc.2')
+  expect(manifest.peerDependencies[sdk]).toBe('>=0.2.1-rc.2 <0.3.0')
   expect(manifest.peerDependenciesMeta[sdk]).toEqual({ optional: true })
   expect(manifest.devDependencies[sdk]).toBe('catalog:')
   expect(manifest.devDependencies[systemPrompt]).toBe('catalog:')
