@@ -378,7 +378,7 @@ it('cancels a runtime preflight without starting an archive or container', async
   const pending = runDockerPreparedChecks({ ...f.input, signal: abort.signal })
   void pending.catch(() => undefined)
   try {
-    await vi.waitFor(async () => { expect((await lstat(`${f.dockerPath}.version-started`)).isFile()).toBe(true) })
+    await vi.waitFor(async () => { expect((await lstat(`${f.dockerPath}.version-started`)).isFile()).toBe(true) }, { timeout: 5_000 })
     const started = Date.now()
     abort.abort()
     await expect(pending).rejects.toThrow(/cancelled/)
