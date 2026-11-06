@@ -28,6 +28,7 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 | TraeX | `traex-acp-provider` 条目、是否启用、命令 | `settings.describe` |
 | 本项目插件管理 | 本项目的 bundle 层（启用/停用）、已加载条目（启用/禁用/阶段）、安装 `@dsh-enhanced/*`（含依赖），以及对 live 字段的合并配置 | `pluginManager` + `settings.describe` / `settings.mutate` |
 | 趋势快照（只读） | 已封存的普通使用趋势快照：序号、计划、窗口边界、会话数、flags、按冻结模型分层的 DiD 与平行趋势、digest 前缀；每页 10 条，可翻到更早一页 | `pluginControlPlane.inspectCreatedCapabilityOrdinaryUseTrendSnapshots`（结构化读取，可缺省） |
+| intake 吻合度（只读） | 填写 Evaluation 作用域（workspace + preset）后读取：窗口、扫描通知数（是否截断）、intake 准入合计与按 level 的吻合 / 不吻合计数与比例、非 intake / 无法判断 / 他 scope 计数；只有计数，不含工作项 id 或正文 | `assistantEvaluation.inspectIntakeAttentionAgreement`（结构化读取，可缺省；开关关闭时显示未启用） |
 
 读取与写入都经 `typert` 的严格 invocation 返回；面板不缓存或上报任何内容。
 Host 状态里仍带 `dependencies` 字段，但面板不再渲染「依赖自检」卡片。
@@ -84,6 +85,12 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 趋势快照卡片只读：唯一的按钮是「更早的快照 / 回到最新」，都只重新调用 `trendSnapshots`；面板没有封存、
 编辑或删除入口，封存由 Host 侧 owner 调用 Control Plane 完成。结果固定 `causal: false`，不作为采用、晋升或撤权依据。
 没有 Control Plane 显示未加载；查询被拒、已封存行未通过 digest 校验或返回值不合模式时显示「未通过校验」，不修复也不改写。
+
+intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation 作用域，唯一的「读取」按钮只调用 `intakeAgreement`，
+按 Evaluation 的默认摘要窗口读取；面板不写入、不采用、不发送。没有 Evaluation 显示未加载；Evaluation 未开启
+`intakeAttentionAgreementEnabled`（默认关，需同时开启 `notificationOutcomesEnabled`）时显示「未启用」；作用域为空、
+查询被拒或抛错、协议不符、`causal` 不为 `false` 或计数不合模式时显示「未通过校验」。结果固定 `causal: false`：
+口径混合了执行与注意力结果，不是 intake 准确率，只覆盖 auto 准入的工作项，不作为采用依据。
 
 ## 配置
 

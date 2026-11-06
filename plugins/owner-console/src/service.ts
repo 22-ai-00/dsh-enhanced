@@ -7,8 +7,9 @@ import {
   type SettingsDescriptor, type SettingsPathOp, type SettingsService,
 } from './settings.js'
 import {
-  LARK_CONNECTIONS, LARK_ERROR_CODES, OwnerConsoleTrendSnapshotsSchema, TREND_SNAPSHOT_PAGE_MAX,
-  type OwnerConsoleStatus, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
+  INTAKE_AGREEMENT_LEVELS, INTAKE_AGREEMENT_OUTCOMES, LARK_CONNECTIONS, LARK_ERROR_CODES, OwnerConsoleIntakeAgreementSchema,
+  OwnerConsoleTrendSnapshotsSchema, TREND_SNAPSHOT_PAGE_MAX,
+  type OwnerConsoleIntakeAgreement, type OwnerConsoleStatus, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
 } from './typert.js'
 
 /** Companions worth surfacing; a missing one is a setup hint, never a hard failure. */
@@ -126,6 +127,13 @@ export class OwnerConsoleService extends TypertRemoteService {
    * at the newest row. Any refusal or tampered row is reported as `unverifiable`, never repaired. */
   async trendSnapshots(planId: string, beforeSequence: number, limit: number): Promise<OwnerConsoleTrendSnapshots> {
     return readTrendSnapshots(this.host.get('pluginControlPlane' as never), planId, beforeSequence, limit)
+  }
+
+  /** Read-only agreement between intake judgments and owner notification outcomes for one exact
+   * Evaluation scope (workspace + preset), over Evaluation's default window. It never writes, adopts
+   * or sends; a disabled switch is reported as `disabled`, any refusal or odd shape as `unverifiable`. */
+  async intakeAgreement(workspace: string, preset: string): Promise<OwnerConsoleIntakeAgreement> {
+    return readIntakeAgreement(this.host.get('assistantEvaluation' as never), workspace, preset)
   }
 
   /** Select or remove one installed project bundle layer; dependencies stay installed. */
@@ -355,5 +363,44 @@ export function readTrendSnapshots(provider: unknown, planId: string, beforeSequ
     return parsed.success ? Object.freeze(parsed.data) : UNVERIFIABLE
   } catch {
     return UNVERIFIABLE
+  }
+}
+
+type IntakeAgreementProvider = { inspectIntakeAttentionAgreement?: (input: { scope: { workspace: string, preset: string } }) => unknown }
+const INTAKE_UNVERIFIABLE: OwnerConsoleIntakeAgreement = Object.freeze({ state: 'unverifiable', causal: false })
+
+function intakeAgreementCell(value: unknown) {
+  const cell = record(value)
+  const outcomes = record(cell['outcomes'])
+  return {
+    notifications: cell['notifications'], items: cell['items'], agreed: cell['agreed'], disagreed: cell['disagreed'],
+    agreementPpm: cell['agreementPpm'],
+    outcomes: Object.fromEntries(INTAKE_AGREEMENT_OUTCOMES.map(outcome => [outcome, outcomes[outcome]])),
+  }
+}
+
+/** Project Evaluation's intake attention agreement onto the panel summary; counts only, no ids or content. */
+export function readIntakeAgreement(provider: unknown, workspace: string, preset: string): OwnerConsoleIntakeAgreement {
+  if (provider === undefined || provider === null) return Object.freeze({ state: 'absent', causal: false })
+  const scope = { workspace: workspace.trim(), preset: preset.trim() }
+  if (scope.workspace === '' || scope.preset === '') return INTAKE_UNVERIFIABLE
+  try {
+    const read = (provider as IntakeAgreementProvider).inspectIntakeAttentionAgreement
+    if (typeof read !== 'function') return INTAKE_UNVERIFIABLE
+    const result = read.call(provider, { scope })
+    if (result === undefined) return Object.freeze({ state: 'disabled', causal: false })
+    const agreement = record(result)
+    if (agreement['protocol'] !== 'assistant-evaluation/intake-attention-agreement/v1' || agreement['causal'] !== false) return INTAKE_UNVERIFIABLE
+    const byLevel = record(agreement['byLevel'])
+    const parsed = OwnerConsoleIntakeAgreementSchema.safeParse({ state: 'ok', causal: false, summary: {
+      fromNotifiedAt: agreement['fromNotifiedAt'], toNotifiedAt: agreement['toNotifiedAt'], scanned: agreement['scanned'],
+      truncated: agreement['truncated'], provenanceAvailable: agreement['provenanceAvailable'], notIntake: agreement['notIntake'],
+      unresolved: agreement['unresolved'], foreign: agreement['foreign'], intake: intakeAgreementCell(agreement['intake']),
+      byLevel: INTAKE_AGREEMENT_LEVELS.filter(level => byLevel[level] !== undefined)
+        .map(level => ({ level, cell: intakeAgreementCell(byLevel[level]) })),
+    } })
+    return parsed.success ? Object.freeze(parsed.data) : INTAKE_UNVERIFIABLE
+  } catch {
+    return INTAKE_UNVERIFIABLE
   }
 }

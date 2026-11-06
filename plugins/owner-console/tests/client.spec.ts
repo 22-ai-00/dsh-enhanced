@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { TYPERT_REMOTE } from '../src/typert.ts'
-import { apply, feishuSecretRefs, larkConnectionLabel, trendSnapshotsView } from '../src/client.ts'
-import type { OwnerConsoleTrendSnapshots } from '../src/typert.ts'
+import { apply, feishuSecretRefs, intakeAgreementView, larkConnectionLabel, trendSnapshotsView } from '../src/client.ts'
+import type { OwnerConsoleIntakeAgreement, OwnerConsoleTrendSnapshots } from '../src/typert.ts'
 
 type Node = { type?: unknown, props?: Record<string, unknown> & { children?: unknown } }
 function walk(node: unknown, visit: (node: Node) => void): void {
@@ -119,5 +119,30 @@ describe('owner console client', () => {
       expect(found).toEqual([])
     }
     expect(text(trendSnapshotsView({ state: 'unverifiable', causal: false, items: [] }, false, older))).toContain('未通过校验')
+  })
+  it('renders intake agreement read-only: counts and causal: false, a not-enabled state and no controls', () => {
+    const outcomes = { pending: 1, delivered: 0, reacted: 1, accepted: 1, rejected: 1, 'expired-unhandled': 0, failed: 0 }
+    const cell = { notifications: 4, items: 3, outcomes, agreed: 2, disagreed: 1, agreementPpm: 666_667 }
+    const empty = { ...cell, notifications: 0, items: 0, agreed: 0, disagreed: 0, agreementPpm: null }
+    const result = { state: 'ok', causal: false, summary: { fromNotifiedAt: 1_700_000_000_000, toNotifiedAt: 1_700_000_100_000, scanned: 6,
+      truncated: true, provenanceAvailable: false, notIntake: 1, unresolved: 2, foreign: 1, intake: cell,
+      byLevel: [{ level: 'notify', cell: empty }, { level: 'accept', cell }] } } as unknown as OwnerConsoleIntakeAgreement
+    const view = intakeAgreementView(result, false)
+    const found: Node[] = []
+    walk(view, node => { if (['button', 'input', 'select', 'textarea', 'form'].includes(String(node.type))) found.push(node) })
+    expect(found).toEqual([])
+    const rendered = text(view)
+    expect(rendered).toContain('causal: false')
+    expect(rendered).toContain('吻合 2 / 不吻合 1 · 66.7%（通知 4，工作项 3）')
+    expect(rendered).toContain('notify（通知）')
+    expect(rendered).toContain('尚无已决结果')
+    expect(rendered).toContain('已截断')
+    expect(rendered).toContain('1 / 2 / 1')
+    expect(rendered).toContain('WorkItems 未提供来源')
+    expect(text(intakeAgreementView({ state: 'disabled', causal: false }, false))).toContain('未启用')
+    expect(text(intakeAgreementView({ state: 'unverifiable', causal: false }, false))).toContain('未通过校验')
+    expect(text(intakeAgreementView({ state: 'absent', causal: false }, false))).toContain('assistant-evaluation 未加载')
+    expect(text(intakeAgreementView(undefined, true))).toContain('暂时无法读取')
+    expect(text(intakeAgreementView(undefined, false))).toContain('workspace 与 preset')
   })
 })

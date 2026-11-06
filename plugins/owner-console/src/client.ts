@@ -3,7 +3,8 @@ import { jsx } from 'react/jsx-runtime'
 import { CloudMark, KAI_FONT, QUIET_PHRASE, WenyaoGlyph, WenyaoSeal } from './art.js'
 import { TYPERT_REMOTE } from './typert.js'
 import { WENYAO_HERO_DATA_URI, WENYAO_HERO_HEIGHT, WENYAO_HERO_WIDTH } from './wenyao-hero.js'
-import type { OwnerConsoleStatus, OwnerConsoleTrendSnapshotItem, OwnerConsoleTrendSnapshots, OwnerConsoleWriteResult } from './typert.js'
+import type { OwnerConsoleIntakeAgreement, OwnerConsoleStatus, OwnerConsoleTrendSnapshotItem, OwnerConsoleTrendSnapshots,
+  OwnerConsoleWriteResult } from './typert.js'
 
 /** The installed Host supplies remote and the slot registry. */
 export const inject = ['remote', 'slots']
@@ -12,6 +13,7 @@ type RemoteResult<T> = Readonly<{ ok: true, value: T }> | Readonly<{ ok: false }
 type ConsoleRemote = Readonly<{
   status(): Promise<RemoteResult<OwnerConsoleStatus>>
   trendSnapshots(planId: string, beforeSequence: number, limit: number): Promise<RemoteResult<OwnerConsoleTrendSnapshots>>
+  intakeAgreement(workspace: string, preset: string): Promise<RemoteResult<OwnerConsoleIntakeAgreement>>
   configureFeishu(appId: string, appSecretEnv: string, credentialHandle: string,
     account: string, tenant: string, discoverAppId: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
   configureTraex(enabled: boolean, command: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
@@ -233,6 +235,67 @@ export function TrendSnapshotsCard({ remote }: Readonly<{ remote: ConsoleRemote 
       : null)
 }
 
+type IntakeAgreementCell = NonNullable<OwnerConsoleIntakeAgreement['summary']>['intake']
+const INTAKE_LEVEL_LABELS: Readonly<Record<NonNullable<OwnerConsoleIntakeAgreement['summary']>['byLevel'][number]['level'], string>> = {
+  ignore: 'ignore（忽略）', digest: 'digest（摘要）', notify: 'notify（通知）', accept: 'accept（准入）',
+}
+
+function agreementLabel(cell: IntakeAgreementCell): string {
+  const rate = cell.agreementPpm === null ? '尚无已决结果' : `${(cell.agreementPpm / 10_000).toFixed(1)}%`
+  return `吻合 ${cell.agreed} / 不吻合 ${cell.disagreed} · ${rate}（通知 ${cell.notifications}，工作项 ${cell.items}）`
+}
+
+/**
+ * Hook-free rendering of one read-only intake agreement result. It shows counts only; nothing here
+ * writes, adopts or sends, and a switched-off Evaluation is shown as not enabled.
+ */
+export function intakeAgreementView(result: OwnerConsoleIntakeAgreement | undefined, failed: boolean) {
+  if (failed) return el('p', { role: 'alert', style: hintStyle }, '暂时无法读取 intake 吻合度，稍后重试。')
+  if (result === undefined) return placeholder('填写 Evaluation 作用域（workspace 与 preset）后读取。')
+  if (result.state === 'absent') return placeholder('assistant-evaluation 未加载，没有 intake 吻合度。')
+  if (result.state === 'disabled') {
+    return el('div', { style: { ...actionsStyle, fontSize: 12, color: muted } }, pill('未启用', 'neutral'),
+      'Evaluation 未开启 intakeAttentionAgreementEnabled（默认关，需同时开启 notificationOutcomesEnabled）。')
+  }
+  const summary = result.summary
+  if (result.state === 'unverifiable' || summary === undefined) {
+    return el('div', { role: 'alert', style: { ...actionsStyle, fontSize: 12, color: muted } }, pill('未通过校验', 'error'),
+      '查询被拒绝或返回的结构不符；面板不会修复或改写它。')
+  }
+  return el('div', { style: gridStyle },
+    el('p', { style: hintStyle }, '只读：观察性统计（causal: false），不是 intake 准确率，不作为采用依据；只统计 auto 准入的工作项。'),
+    el('div', { style: listStyle },
+      row('窗口', `(${isoTime(summary.fromNotifiedAt)}, ${isoTime(summary.toNotifiedAt)}]`),
+      row('扫描通知', el('span', { style: actionsStyle }, String(summary.scanned), summary.truncated ? pill('已截断', 'warn') : null)),
+      row('intake 准入合计', agreementLabel(summary.intake)),
+      ...summary.byLevel.map(entry => row(INTAKE_LEVEL_LABELS[entry.level], agreementLabel(entry.cell))),
+      row('非 intake / 无法判断 / 他 scope', `${summary.notIntake} / ${summary.unresolved} / ${summary.foreign}`)),
+    summary.provenanceAvailable ? null : el('div', { style: { ...actionsStyle, fontSize: 12, color: muted } },
+      pill('WorkItems 未提供来源', 'warn'), '缺少 inspectIntakeProvenance，所有工作项计为无法判断。'))
+}
+
+/** Read-only intake agreement card; its only control re-reads `intakeAgreement` for the typed scope. */
+export function IntakeAgreementCard({ remote }: Readonly<{ remote: ConsoleRemote }>) {
+  const [workspace, setWorkspace] = useState('')
+  const [preset, setPreset] = useState('')
+  const [result, setResult] = useState<OwnerConsoleIntakeAgreement>()
+  const [failed, setFailed] = useState(false)
+  const load = () => {
+    setFailed(false)
+    void remote.intakeAgreement(workspace, preset).then(read => {
+      if (read.ok) setResult(read.value)
+      else setFailed(true)
+    }, () => setFailed(true))
+  }
+  return card('intake 吻合度（只读）',
+    el('div', { style: actionsStyle },
+      field('workspace', workspace, setWorkspace, '/absolute/workspace'),
+      field('preset', preset, setPreset, 'primary')),
+    el('div', { style: actionsStyle },
+      el('button', { style: buttonStyle, disabled: workspace.trim() === '' || preset.trim() === '', onClick: load }, '读取')),
+    intakeAgreementView(result, failed))
+}
+
 export function OwnerConsoleIcon() {
   return el('span', { 'aria-hidden': true, style: { display: 'block', width: 18, height: 18 } }, jsx(WenyaoGlyph, { size: 18 }))
 }
@@ -438,7 +501,8 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
     card('远程接入（飞书）', feishuRows, feishuActions),
     card('TraeX', traexRows),
     card('本项目插件管理', bundles),
-    jsx(TrendSnapshotsCard, { remote }))
+    jsx(TrendSnapshotsCard, { remote }),
+    jsx(IntakeAgreementCard, { remote }))
 }
 
 function bannerStyle(color: string) {

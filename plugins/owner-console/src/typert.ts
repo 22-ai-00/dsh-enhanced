@@ -89,7 +89,43 @@ export const OwnerConsoleTrendSnapshotsSchema = z.object({
 export type OwnerConsoleTrendSnapshots = Readonly<z.infer<typeof OwnerConsoleTrendSnapshotsSchema>>
 export type OwnerConsoleTrendSnapshotItem = OwnerConsoleTrendSnapshots['items'][number]
 
-/** Strict Host and client descriptors: two reads plus owner-clicked one-step writes. */
+/** Notification outcomes and intake levels as Evaluation's intake attention agreement reports them. */
+export const INTAKE_AGREEMENT_OUTCOMES = ['pending', 'delivered', 'reacted', 'accepted', 'rejected', 'expired-unhandled', 'failed'] as const
+export const INTAKE_AGREEMENT_LEVELS = ['ignore', 'digest', 'notify', 'accept'] as const
+const intakeAgreementCell = z.object({
+  notifications: count,
+  items: count,
+  outcomes: z.object(Object.fromEntries(INTAKE_AGREEMENT_OUTCOMES.map(outcome => [outcome, count])) as
+    Record<typeof INTAKE_AGREEMENT_OUTCOMES[number], typeof count>).readonly(),
+  agreed: count,
+  disagreed: count,
+  agreementPpm: z.number().int().min(0).max(1_000_000).nullable(),
+}).readonly()
+/**
+ * `absent`: no Evaluation service; `disabled`: `intakeAttentionAgreementEnabled` is off;
+ * `unverifiable`: the read was refused, failed or returned an unexpected shape.
+ * Observational only: `causal` is always false and nothing here writes, adopts or sends.
+ */
+export const OwnerConsoleIntakeAgreementSchema = z.object({
+  state: z.enum(['absent', 'disabled', 'unverifiable', 'ok']),
+  causal: z.literal(false),
+  summary: z.object({
+    fromNotifiedAt: z.number().int().nonnegative(),
+    toNotifiedAt: z.number().int().positive(),
+    scanned: count,
+    truncated: z.boolean(),
+    provenanceAvailable: z.boolean(),
+    notIntake: count,
+    unresolved: count,
+    foreign: count,
+    intake: intakeAgreementCell,
+    byLevel: z.array(z.object({ level: z.enum(INTAKE_AGREEMENT_LEVELS), cell: intakeAgreementCell }).readonly())
+      .max(INTAKE_AGREEMENT_LEVELS.length).readonly(),
+  }).readonly().optional(),
+}).readonly()
+export type OwnerConsoleIntakeAgreement = Readonly<z.infer<typeof OwnerConsoleIntakeAgreementSchema>>
+
+/** Strict Host and client descriptors: three reads plus owner-clicked one-step writes. */
 export const TYPERT = {
   package: '@dsh-enhanced/owner-console',
   face: 'host',
@@ -115,6 +151,17 @@ export const TYPERT = {
       ],
       result: codec('@dsh-enhanced/owner-console#OwnerConsoleTrendSnapshots', () => OwnerConsoleTrendSnapshotsSchema),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 37, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/intakeAgreement',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'intakeAgreement',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'workspace', wire: 'workspace', source: 'json', codec: codec('owner-console#intakeWorkspace', () => z.string().max(4_096)) },
+        { name: 'preset', wire: 'preset', source: 'json', codec: codec('owner-console#intakePreset', () => z.string().max(200)) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#OwnerConsoleIntakeAgreement', () => OwnerConsoleIntakeAgreementSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 109, column: 3 },
     },
     {
       id: '@dsh-enhanced/owner-console#ownerConsole/configureFeishu',

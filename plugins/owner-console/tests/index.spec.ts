@@ -6,7 +6,7 @@ import { Config, apply, name, version } from '../src/index.ts'
 import type { OwnerConsoleService } from '../src/service.ts'
 import type { SettingsDescriptor, SettingsService } from '../src/settings.ts'
 import { TYPERT } from '../src/typert.ts'
-import { readTrendSnapshots } from '../src/service.ts'
+import { readIntakeAgreement, readTrendSnapshots } from '../src/service.ts'
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
   version: string
@@ -69,6 +69,7 @@ describe('dsh-enhanced-owner-console', () => {
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/installProjectBundle')).toEqual(['spec'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/removeProjectBundle')).toEqual(['name'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/trendSnapshots')).toEqual(['planId', 'beforeSequence', 'limit'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/intakeAgreement')).toEqual(['workspace', 'preset'])
   })
 
   it('reports absent entries, strict providers and no fabricated connection', async () => {
@@ -377,5 +378,58 @@ describe('owner console trend snapshots (read-only)', () => {
     expect(readTrendSnapshots(page([]), '', 0, 101)).toEqual(unverifiable)
     expect(readTrendSnapshots(page([]), '', -1, 10)).toEqual(unverifiable)
     expect(readTrendSnapshots(page([]), '', 0, 10)).toEqual({ state: 'ok', causal: false, items: [] })
+  })
+})
+
+function agreementCell(overrides: Record<string, unknown> = {}) {
+  return { notifications: 4, items: 3, outcomes: { pending: 1, delivered: 0, reacted: 1, accepted: 1, rejected: 1, 'expired-unhandled': 0, failed: 0 },
+    agreed: 2, disagreed: 1, agreementPpm: 666_667, ...overrides }
+}
+function agreement(overrides: Record<string, unknown> = {}) {
+  return { protocol: 'assistant-evaluation/intake-attention-agreement/v1', causal: false, scope: { workspace: '/work/alpha', preset: 'primary' },
+    fromNotifiedAt: 1_000, toNotifiedAt: 2_000, scanned: 6, truncated: false, provenanceAvailable: true, notIntake: 1, unresolved: 0, foreign: 1,
+    intake: agreementCell(), byLevel: { accept: agreementCell(), notify: agreementCell({ notifications: 0, items: 0, agreed: 0, disagreed: 0, agreementPpm: null,
+      outcomes: { pending: 0, delivered: 0, reacted: 0, accepted: 0, rejected: 0, 'expired-unhandled': 0, failed: 0 } }) }, ...overrides }
+}
+
+describe('owner console intake agreement (read-only)', () => {
+  it('reports absent without Evaluation and disabled while its switch is off', () => {
+    expect(readIntakeAgreement(undefined, '/work/alpha', 'primary')).toEqual({ state: 'absent', causal: false })
+    const read = vi.fn(() => undefined)
+    expect(readIntakeAgreement({ inspectIntakeAttentionAgreement: read }, '/work/alpha', 'primary')).toEqual({ state: 'disabled', causal: false })
+    expect(read).toHaveBeenCalledExactlyOnceWith({ scope: { workspace: '/work/alpha', preset: 'primary' } })
+  })
+
+  it('maps the counts in level order and forwards only the trimmed scope', () => {
+    const read = vi.fn(() => agreement())
+    const provider = { inspectIntakeAttentionAgreement: read, attentionTuningAdopt: vi.fn() }
+    const result = readIntakeAgreement(provider, ' /work/alpha ', ' primary ')
+    expect(read).toHaveBeenCalledExactlyOnceWith({ scope: { workspace: '/work/alpha', preset: 'primary' } })
+    expect(provider.attentionTuningAdopt).not.toHaveBeenCalled()
+    expect(result.state).toBe('ok')
+    expect(result.causal).toBe(false)
+    expect(result.summary).toMatchObject({ fromNotifiedAt: 1_000, toNotifiedAt: 2_000, scanned: 6, truncated: false, provenanceAvailable: true,
+      notIntake: 1, unresolved: 0, foreign: 1, intake: agreementCell() })
+    expect(result.summary!.byLevel.map(entry => entry.level)).toEqual(['notify', 'accept'])
+    expect(result.summary!.byLevel[0]!.cell.agreementPpm).toBeNull()
+    // Counts only: the scope echo and protocol never reach the panel.
+    expect(JSON.stringify(result)).not.toContain('/work/alpha')
+  })
+
+  it('reports unverifiable for an empty scope, a refused read, a causal claim or an odd shape', () => {
+    const unverifiable = { state: 'unverifiable', causal: false }
+    const provider = (value: unknown) => ({ inspectIntakeAttentionAgreement: () => value })
+    const read = vi.fn(() => agreement())
+    expect(readIntakeAgreement({ inspectIntakeAttentionAgreement: read }, ' ', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreement({ inspectIntakeAttentionAgreement: read }, '/work/alpha', '')).toEqual(unverifiable)
+    expect(read).not.toHaveBeenCalled()
+    expect(readIntakeAgreement({}, '/work/alpha', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreement({ inspectIntakeAttentionAgreement: () => { throw new Error('invalid-input') } }, '/work/alpha', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreement(provider(agreement({ causal: true })), '/work/alpha', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreement(provider(agreement({ protocol: 'other/v1' })), '/work/alpha', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreement(provider(agreement({ scanned: -1 })), '/work/alpha', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreement(provider(agreement({ intake: agreementCell({ agreementPpm: 2_000_000 }) })), '/work/alpha', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreement(provider(agreement({ intake: agreementCell({ outcomes: { accepted: 1 } }) })), '/work/alpha', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreement(provider(null), '/work/alpha', 'primary')).toEqual(unverifiable)
   })
 })
