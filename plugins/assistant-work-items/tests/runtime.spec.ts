@@ -11,6 +11,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test, vi } from 'vitest'
+import { AssistantDeliveryService, type OwnerRouteAuthority } from '@dsh-enhanced/assistant-delivery'
+import type { DeliveryStore } from '../../assistant-delivery/lib/store.js'
 import { WorkItemAdmission } from '../src/admission.ts'
 import { WorkItemAuthority } from '../src/authority.ts'
 import { type Config, normalizeConfig, type NormalizedConfig } from '../src/config.ts'
@@ -44,10 +46,10 @@ const PRESET = 'primary'
 const PRINCIPAL = 'owner:me'
 const ROUTE = 'route-1'
 const roots: string[] = []
-const closers: Array<() => void> = []
+const closers: Array<() => void | Promise<void>> = []
 
 afterEach(async () => {
-  for (const close of closers.splice(0)) close()
+  for (const close of closers.splice(0)) await close()
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
@@ -358,6 +360,53 @@ async function serviceHarness(options: {
   }
 }
 
+/**
+ * The service harness wired to the real assistant-delivery service instead of
+ * the fake Delivery peer, so `validateOwnerRoute` and the Host-only
+ * `inspectOwnerRouteBinding` answer from a real Delivery store. Policy,
+ * Automations and the verifier stay fakes; no adapter, network or Bot.
+ */
+async function realDeliveryHarness(extra: Partial<Config>) {
+  const root = await mkdtemp(join(tmpdir(), 'assistant-work-items-real-delivery-'))
+  roots.push(root)
+  const ctx = new Context()
+  closers.push(() => ctx.fiber.dispose().then(() => undefined))
+  const policy = new FakePolicyPeer(ctx)
+  const automations = new FakeAutomationsPeer(ctx)
+  const principal = { channel: 'lark', account: 'bot-1', tenant: 'tenant-a', user: 'ou_owner' }
+  const conversation = { channel: 'lark', account: 'bot-1', tenant: 'tenant-a', kind: 'dm' as const, chat: 'oc_owner' }
+  const principalId = 'lark/bot-1/tenant-a/ou_owner'
+  const authority: OwnerRouteAuthority = { id: ROUTE, conversation, principal, workspace: WORKSPACE, agentPreset: PRESET,
+    policyRef: 'owner-dm', minimumGeneration: 1 }
+  await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'),
+    schedulerEnabled: false, ownerRoutes: [authority] }).await()
+  const delivery = ctx.assistantDelivery
+  const deliveryStore = (delivery as unknown as { deliveryStore: DeliveryStore }).deliveryStore
+  deliveryStore.ensureOwner(principal)
+  const link = (sessionId: string) => deliveryStore.createBinding({ conversation, principal, workspace: WORKSPACE,
+    agentPreset: PRESET, policyRef: 'owner-dm', sessionId })
+  link('owner-session-1')
+  const config: Config = {
+    enabled: true, mode: 'active', databasePath: join(root, 'state', 'state.sqlite'), workRoot: join(root, 'work'),
+    intakeSourceId: SOURCE, workerAutomationId: WORKER,
+    scope: { workspace: WORKSPACE, preset: PRESET, principalId, ownerRouteId: ROUTE, expiresAt: Date.now() + 3_600_000 },
+    admission: { allowedKinds: ['review', 'triage'], maxOpenItems: 4, maxAdmitsPerHour: 8, dedupWindowMs: 3_600_000, cooldownMs: 0, maxBriefBytes: 512 },
+    ...extra,
+  }
+  // Mounted as a plugin so a test can restart it (dropping its in-memory state).
+  let fork = ctx.plugin(AssistantWorkItemsService, config)
+  await fork.await()
+  const restart = async () => { await fork.dispose(); fork = ctx.plugin(AssistantWorkItemsService, config); await fork.await() }
+  /** The active binding behind the owner route and the owner's frozen identity. */
+  const route = () => {
+    const binding = deliveryStore.getActiveBinding(conversation)
+    const owner = deliveryStore.getPrincipal(principal)!
+    return { binding, owner }
+  }
+  return { root, ctx, get service(): AssistantWorkItemsService { return ctx.get('assistantWorkItems' as never) as unknown as AssistantWorkItemsService },
+    policy, automations, delivery, deliveryStore, principal, conversation, link, route, restart }
+}
+
 async function ledgerHarness(options: {
   mode?: 'observe' | 'active'
   now?: number
@@ -425,7 +474,7 @@ async function ledgerHarness(options: {
 }
 
 /** Read the service's durable rows through a second connection. */
-function readStore(fixture: Awaited<ReturnType<typeof serviceHarness>>): WorkItemStore {
+function readStore(fixture: { readonly root: string }): WorkItemStore {
   const store = new WorkItemStore(join(fixture.root, 'state', 'state.sqlite'))
   closers.push(() => store.close())
   return store
@@ -1567,7 +1616,9 @@ describe('work-item admission authority revalidation', () => {
   }
 
   /** The contract a worker run of `occurrenceId` froze, published by the fake Automations peer. */
-  function publishWorkerContract(fixture: Awaited<ReturnType<typeof serviceHarness>>, peer: FakeVerifierPeer, occurrenceId: string,
+  type BindFixture = { readonly service: AssistantWorkItemsService; readonly automations?: FakeAutomationsPeer | undefined }
+
+  function publishWorkerContract(fixture: BindFixture, peer: FakeVerifierPeer, occurrenceId: string,
     options: Parameters<typeof serviceContract>[1] = {}, id = `worker-${occurrenceId}`,
     route: Partial<{ bindingId: string; bindingVersion: number; bindingGeneration: number }> = {}) {
     const contract = serviceContract(id, { ref: `run-task-${occurrenceId}`, ...options })
@@ -1579,7 +1630,7 @@ describe('work-item admission authority revalidation', () => {
   }
 
   /** An unbound decision admitted and dispatched; returns its item and occurrence. */
-  function admitPlain(fixture: Awaited<ReturnType<typeof serviceHarness>>, id: string) {
+  function admitPlain(fixture: BindFixture, id: string) {
     const admitted = fixture.service.admitDecision(plainDecision(`decision-${id}`))
     if (admitted.outcome === 'refused') throw new Error(admitted.reasonCode)
     const occurrenceId = admitted.dispatch.occurrenceId
@@ -2136,6 +2187,97 @@ describe('work-item admission authority revalidation', () => {
     expect(fixture.automations?.acceptanceReads).toEqual([])
     expect(readStore(fixture).listLateAcceptanceCandidates(WORKER, null, 10)).toEqual([])
     expect(boundEvents(fixture, itemId)).toBe(0)
+  })
+
+  describe('through a real assistant-delivery owner route', () => {
+    const ownerScope = { authorityId: ROUTE, principalId: 'lark/bot-1/tenant-a/ou_owner', workspace: WORKSPACE, agentPreset: PRESET }
+    /** Publish the worker contract frozen under the route's current real Delivery binding. */
+    function publishUnderLiveRoute(f: Awaited<ReturnType<typeof realDeliveryHarness>>, peer: FakeVerifierPeer, occurrenceId: string) {
+      const { binding, owner } = f.route()
+      if (binding === undefined) throw new Error('no active owner binding')
+      return publishWorkerContract(f, peer, occurrenceId, { owner: { principalRecordId: owner.id, principalVersion: owner.version } }, undefined,
+        { bindingId: binding.id, bindingVersion: binding.version, bindingGeneration: binding.generation })
+    }
+
+    test('binds the worker run to the exact active Delivery binding and settles it', async () => {
+      const f = await realDeliveryHarness(bindWorkerRun())
+      const peer = new FakeVerifierPeer(f.ctx)
+      const { itemId, occurrenceId } = admitPlain(f, 'real-bind')
+      const { binding } = f.route()
+      // The real Host-only read names the active binding and embeds the same v2 receipt.
+      const read = f.delivery.inspectOwnerRouteBinding(ownerScope)
+      expect(read).toEqual({ protocol: 'assistant-delivery/owner-route-binding/v1', bindingId: binding!.id, receipt: f.delivery.validateOwnerRoute(ownerScope) })
+      expect(readStore(f).findItemById(itemId)?.owner).toMatchObject({ bindingVersion: binding!.version, generation: binding!.generation })
+      const contract = publishUnderLiveRoute(f, peer, occurrenceId)
+      f.service.claim(workerAgent(occurrenceId))
+      f.automations.wake()
+      expect(readStore(f).lateAcceptanceBinding(itemId)).toMatchObject({ occurrenceId, binding: { contractId: contract.id, contractDigest: contract.digest } })
+      await f.service.report(workerAgent(occurrenceId), { status: 'ready', summary: 'done', idempotencyKey: 'r-real-bind' })
+      peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract) })
+      f.automations.wake()
+      expect(f.service.acceptanceVerdict(itemId)).toMatchObject({ contractId: contract.id, objectiveStatus: 'achieved' })
+      expect(boundEvents(f, itemId)).toBe(1)
+    })
+
+    test('a revoked owner never binds, and a later re-link cannot revive the admitted generation', async () => {
+      const f = await realDeliveryHarness(bindWorkerRun())
+      const peer = new FakeVerifierPeer(f.ctx)
+      const { itemId, occurrenceId } = admitPlain(f, 'real-revoke')
+      const admitted = f.route()
+      publishUnderLiveRoute(f, peer, occurrenceId)
+      f.deliveryStore.revokePrincipal(admitted.owner.id, admitted.owner.version)
+      expect(() => f.delivery.inspectOwnerRouteBinding(ownerScope)).toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+      f.automations.acceptanceReads.splice(0)
+      f.automations.wake()
+      f.automations.wake()
+      // `missing-binding` is deterministic: the pair is parked after one read.
+      expect(f.automations.acceptanceReads).toEqual([occurrenceId])
+      expect(boundEvents(f, itemId)).toBe(0)
+      // Re-link the owner: Delivery issues a strictly higher generation.
+      f.deliveryStore.handoffOwner(f.principal)
+      const relinked = f.link('owner-session-relinked')
+      expect(relinked.generation).toBeGreaterThan(admitted.binding!.generation)
+      expect(f.delivery.inspectOwnerRouteBinding(ownerScope).bindingId).toBe(relinked.id)
+      f.automations.wake()
+      expect(f.automations.acceptanceReads).toEqual([occurrenceId])
+      // Even with the in-memory park forgotten (a restart), the frozen generation
+      // is gone for good: the item is refused, never bound to the new binding.
+      await f.restart()
+      f.automations.wake()
+      expect(f.automations.acceptanceReads).toEqual([occurrenceId, occurrenceId])
+      expect(boundEvents(f, itemId)).toBe(0)
+      expect(peer.reads).toEqual([])
+    })
+
+    test('a /new between the two reads is re-read; the higher generation then parks the item', async () => {
+      const f = await realDeliveryHarness(bindWorkerRun())
+      const peer = new FakeVerifierPeer(f.ctx)
+      const { itemId, occurrenceId } = admitPlain(f, 'real-new')
+      const admitted = f.route()
+      publishUnderLiveRoute(f, peer, occurrenceId)
+      f.automations.acceptanceReads.splice(0)
+      // `/new` lands right after WorkItems validated the route and before it reads the binding id.
+      const validate = f.delivery.validateOwnerRoute.bind(f.delivery)
+      let rotated: ReturnType<DeliveryStore['rotateBinding']> | undefined
+      const spy = vi.spyOn(f.delivery, 'validateOwnerRoute').mockImplementation(input => {
+        const receipt = validate(input)
+        if (rotated === undefined) {
+          rotated = f.deliveryStore.rotateBinding({ bindingId: admitted.binding!.id, expectedVersion: admitted.binding!.version, sessionId: 'owner-session-new' })
+        }
+        return receipt
+      })
+      f.automations.wake()
+      spy.mockRestore()
+      expect(rotated?.generation).toBeGreaterThan(admitted.binding!.generation)
+      expect(boundEvents(f, itemId)).toBe(0)
+      // `owner-route-drift` is not parked: the next wake reads again, now sees the
+      // higher generation (`owner-changed`) and parks the pair for this occurrence.
+      f.automations.wake()
+      f.automations.wake()
+      expect(f.automations.acceptanceReads).toEqual([occurrenceId, occurrenceId])
+      expect(boundEvents(f, itemId)).toBe(0)
+      expect(peer.reads).toEqual([])
+    })
   })
 
   test('acceptance.bindWorkerRun validates its shape and requires an active intake', () => {
