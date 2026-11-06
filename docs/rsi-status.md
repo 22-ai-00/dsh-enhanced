@@ -1,8 +1,16 @@
 # RSI 当前状态
 
-更新：2026-11-06。验收见[合同](rsi-acceptance.md)，发行见[发布协议](releasing.md)；实现历史查 Git，原始证据在忽略的 `docs/evidence/`。
+更新：2026-11-07。验收见[合同](rsi-acceptance.md)，发行见[发布协议](releasing.md)；实现历史查 Git，原始证据在忽略的 `docs/evidence/`。
 
 当前接手入口：`docs/evidence/handover/CURRENT.md`。先核对该入口的源码清单，再续做下一步。
+
+## 2026-11-07 发布与桌面面板收口
+
+- `@dsh-enhanced/*` 0.1.66 已通过 tag `v0.1.66`（`main` = `48fa40fa`）由 GitHub Actions `release.yml` 发布 40 包，未本地 `npm publish`。`dev` 上 `819cd190` 同步发布记录、`f1740a64` 准备 0.1.67。
+- `48fa40fa` 双端精确根检查 PASS 且 `sourceStable: true`：Mac 11,179 / 1,933 tests、765 / 85 files、39 包 40 组（sha `c6582c24…`）；Linux r3 12,796 passed / 311 skipped（exit 0）。r1/r2 的失败均为运行环境（`TMPDIR`、`XDG_DATA_HOME`、`PNPM_HOME`），不是代码缺陷。
+- `ERR_PNPM_VERIFY_DEPS_BEFORE_RUN` 长期阻塞已根治：pnpm 把 `enableGlobalVirtualStore` 记入 workspace state，CI 强制 false 而本地缺键 → 在 `pnpm-workspace.yaml` 显式固定 `enableGlobalVirtualStore: false`。
+- Mac 桌面 profile 已整体升级到 registry 0.1.66（5 个 bundle、9 个 `@dsh-enhanced/*`），应用重启正常、无新 crash 日志；TraeX peer 放宽到 `>=0.2.1-rc.2 <0.3.0` 后 Host 0.2.2-rc.1 接受；lark-channel 缺 `@dsh-enhanced/assistant-delivery` 的导入错误消失（profile `nodeLinker: hoisted`，且该包已在 profile 依赖中）。
+- 边界：空 profile 只装 lark-channel 仍会缺兄弟插件（可选 peer 静态导入，面板会列出缺失 bundle）；Host 侧 ANSI 解析缺陷未修，一键安装仍需人工 `allowBuilds` 绕过；`verifiedHostRange` 仍精确 `0.2.1-rc.2`（有意保留）。
 
 ## 目标与纪律
 
@@ -108,6 +116,8 @@ TraeX 需兼容发布或 owner 豁免，live app profile 未安装新主视觉�
 
 | 精确提交 | 环境 | 结果 | 测试 passed / skipped | 文件 passed / skipped | 日志 SHA-256 |
 | --- | --- | --- | --- | --- | --- |
+| `48fa40fa`（39 包，0.1.66 发布提交：pnpm 固定 `enableGlobalVirtualStore`、memory-learning CI 预算、owner-console/TraeX peer 兼容） | Mac / Node 26.11.1 | EXIT 0，PASS，1148.32 秒 | 11,179 / 1,933 | 765 / 85 | `c6582c24fba4c2f2be2472f6975c56b370dc304d132fa45d3045ab3304b9cc00` |
+| `48fa40fa`（同上，Linux r3） | Linux / Node 22.23.2 | EXIT 0，PASS（r1 `TMPDIR` 预检失败、r2 缺 XDG/PNPM_HOME 环境失败，均保留） | 12,796 / 311 | 815 / 32 | 结果在远端 `docs/evidence/verification-48fa40fa/linux-r3-result.json` |
 | `d7784720`（39 包，本轮 2026-11-06 切片：owner-console 主视觉 11_深海觉醒 `bb2572d0`/构建 `689338a8`、WorkItems `acceptance.holdReport` `af59d866`/轮转修复 `b86639bc`、Delivery `orderAcrossLanes` `56ec9ec7`/轮换回退 `fc7756d2`、`follows.eventTriggers.acceptHeadRef` `75deec79`、policy 开关登记 `be7c4be4`、owner-console 安装/状态判定 `3679e482`/`cf4b633f`、memory-learning CI 预算 `d7784720`） | Mac / Node 26.11.1 | EXIT 0，PASS，1256.20 秒；r1 因 `ERR_PNPM_VERIFY_DEPS_BEFORE_RUN` 失败、r2 因会话继承 `NO_COLOR`/`FORCE_COLOR` 使 stderr 非空失败，均保留 | 11,150 / 1,931 | 762 / 85 | `9ed15866ad5c451998ba56d616f2c222b8fbd51b26c19f55b6467fa7f1fbcb96` |
 | `d7784720`（同上，Linux） | Linux / Node 22.23.2 | EXIT 0，PASS，2436.70 秒 | 12,767 / 311 | 815 / 32 | `693c6ae0e97f1316aeee6ad7c1e89d1c3803964d03e4827583337f9b236e767e` |
 | `750d89b2`（39 包，WP21 晚绑定 binding id 钉住与漂移/缺方法重读 `15f14327`/`2fc28f15`/`ef02735d`/`750d89b2`、裁决门 `d3cea278`/`25269ac9`、intake 吻合度 `f1bf0f37`/`9609905f`/`523e9e8f`、封存重放 plan id 隔离 `8d34792c`/`7c9a5350`、活 WAL 用例 `fec3160b`） | Mac / Node 26.11.1 | EXIT 0，独立 PASS，1224.74 秒 | 11,063 / 1,931 | 758 / 85 | `e6183669fc2840b1b59450a43f26c6ce569ed30f5b9d87dba4ed31bfee59b64e` |
