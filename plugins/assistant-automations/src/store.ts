@@ -160,6 +160,15 @@ interface RunRow {
   updated_at: number
 }
 
+/** Host-only worker-run acceptance handle and the Delivery binding it was frozen under. */
+export interface OccurrenceAcceptanceHandle {
+  contractId: string
+  contractDigest: string
+  bindingId: string
+  bindingVersion: number
+  bindingGeneration: number
+}
+
 interface AcceptanceRow {
   task_id: string
   contract_id: string
@@ -2768,22 +2777,37 @@ export class AutomationStore {
 
   /**
    * Host-only: the acceptance handle one production occurrence's worker task
-   * froze, if any. Keyed by the exact (automation, occurrence, scope) tuple;
-   * dry runs and other scopes never match. Returns ids only, no contract body.
+   * froze, if any, with the Delivery binding it was frozen under. Keyed by the
+   * exact (automation, occurrence, scope) tuple. Like `inspectAcceptedExecution`
+   * the task must be production: a non-dry-run occurrence whose immutable task
+   * snapshot is a non-host definition of this scope and, once a terminal run
+   * exists, whose run execution mode is `production`. Ids only, no contract body.
    */
   inspectOccurrenceAcceptance(input: {
     automationId: string; occurrenceId: string; workspace: string; agentPreset: string
-  }): Readonly<{ contractId: string; contractDigest: string }> | undefined {
+  }): Readonly<OccurrenceAcceptanceHandle> | undefined {
     const values = [input.automationId, input.occurrenceId, input.workspace, input.agentPreset]
     if (values.some(value => typeof value !== 'string' || value === '' || value.length > 4_096)) return undefined
-    const row = this.database.prepare(`SELECT acceptance.contract_id, acceptance.contract_digest FROM automation_task_acceptance acceptance
+    const row = this.database.prepare(`SELECT acceptance.task_id, acceptance.contract_id, acceptance.contract_digest,
+        acceptance.binding_id, acceptance.binding_version, acceptance.binding_generation, run.id AS run_id
+      FROM automation_task_acceptance acceptance
       JOIN automation_tasks task ON task.id = acceptance.task_id
       JOIN automation_occurrences occurrence ON occurrence.id = task.occurrence_id AND occurrence.automation_id = task.automation_id
+      LEFT JOIN automation_runs run ON run.task_id = acceptance.task_id
       WHERE task.automation_id = ? AND task.occurrence_id = ? AND occurrence.dry_run = 0
         AND acceptance.workspace = ? AND acceptance.preset = ?`)
-      .get(input.automationId, input.occurrenceId, input.workspace, input.agentPreset) as Pick<AcceptanceRow, 'contract_id' | 'contract_digest'> | undefined
-    if (row === undefined || typeof row.contract_id !== 'string' || !/^[a-f0-9]{64}$/u.test(row.contract_digest)) return undefined
-    return Object.freeze({ contractId: row.contract_id, contractDigest: row.contract_digest })
+      .get(input.automationId, input.occurrenceId, input.workspace, input.agentPreset) as
+        (Pick<AcceptanceRow, 'task_id' | 'contract_id' | 'contract_digest' | 'binding_id' | 'binding_version' | 'binding_generation'> & { run_id: string | null }) | undefined
+    if (row === undefined || typeof row.contract_id !== 'string' || !/^[a-f0-9]{64}$/u.test(row.contract_digest)
+      || typeof row.binding_id !== 'string' || row.binding_id === ''
+      || !Number.isSafeInteger(row.binding_version) || row.binding_version < 1
+      || !Number.isSafeInteger(row.binding_generation) || row.binding_generation < 1) return undefined
+    const snapshot = this.getTaskExecutionSnapshot(row.task_id)
+    if (snapshot === undefined || isHostAutomationDefinition(snapshot.definition)
+      || snapshot.definition.workspace !== input.workspace || snapshot.definition.agentPreset !== input.agentPreset) return undefined
+    if (row.run_id !== null && this.getRunExecutionMode(row.run_id) !== 'production') return undefined
+    return Object.freeze({ contractId: row.contract_id, contractDigest: row.contract_digest,
+      bindingId: row.binding_id, bindingVersion: row.binding_version, bindingGeneration: row.binding_generation })
   }
 
   markAcceptedTaskQuiescent(taskId: string, quiescent: boolean): void {

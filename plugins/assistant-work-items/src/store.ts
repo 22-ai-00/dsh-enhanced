@@ -296,6 +296,17 @@ export const FOLLOW_UP_RELEASED_EVENT = 'follow-up-released'
 export const ACCEPTANCE_VERIFIED_EVENT = 'acceptance-verified'
 /** WP21 slice 6: a worker run's contract bound after wake; the latest row is current. */
 export const ACCEPTANCE_BOUND_EVENT = 'acceptance-bound'
+/** Message of the fail-closed storage error for a malformed latest `acceptance-bound` row. */
+export const MALFORMED_ACCEPTANCE_BINDING = 'recorded acceptance binding is malformed'
+
+/** One dispatched, unbound item whose current worker run may be late-bound. */
+export interface WorkItemLateAcceptanceCandidate {
+  readonly item: WorkItemRecord
+  readonly automationId: string
+  readonly occurrenceId: string
+  /** Earliest time this generation's run can have started: max(item createdAt, dispatch occurredAt). */
+  readonly notBefore: number
+}
 
 /** Position of one released follow-up in release order. */
 export interface WorkItemFollowUpCursor {
@@ -1319,7 +1330,7 @@ export class WorkItemStore {
    * that occurrence. Never-run, withdrawn, failed and dropped items are out.
    * (created_at, id) order strictly after `after`; bounded scan, no schema change.
    */
-  listLateAcceptanceCandidates(workerAutomationId: string, after: Readonly<{ createdAt: number; id: string }> | null, limit: number): readonly Readonly<{ item: WorkItemRecord; automationId: string; occurrenceId: string }>[] {
+  listLateAcceptanceCandidates(workerAutomationId: string, after: Readonly<{ createdAt: number; id: string }> | null, limit: number): readonly WorkItemLateAcceptanceCandidate[] {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) fail('invalid-input', 'acceptance bind limit must be between 1 and 10')
     const rows = this.#statement(`
       SELECT ${ITEM_ALIASES} FROM work_item i
@@ -1333,25 +1344,30 @@ export class WorkItemStore {
         AND (i.created_at, i.id) > (?, ?)
       ORDER BY i.created_at ASC, i.id ASC LIMIT ?
     `).all(workerAutomationId, after?.createdAt ?? -1, after?.id ?? '', limit) as Row[]
-    const candidates: Array<Readonly<{ item: WorkItemRecord; automationId: string; occurrenceId: string }>> = []
+    const candidates: WorkItemLateAcceptanceCandidate[] = []
     for (const row of rows) {
       const item = itemFromRow(row)
       const dispatch = this.getDispatch(item.id)
       if (dispatch?.state !== 'dispatched' || dispatch.occurrenceId === null || dispatch.occurrenceId !== item.occurrenceId) continue
-      candidates.push(Object.freeze({ item, automationId: dispatch.automationId === '' ? workerAutomationId : dispatch.automationId, occurrenceId: dispatch.occurrenceId }))
+      candidates.push(Object.freeze({ item, automationId: dispatch.automationId === '' ? workerAutomationId : dispatch.automationId, occurrenceId: dispatch.occurrenceId,
+        // This generation was armed at `occurredAt` (a re-arm sets it to the
+        // re-arm or resume-due time) and is woken no earlier, so its run
+        // cannot have started before it or before the item existed.
+        notBefore: Math.max(item.createdAt, dispatch.occurredAt) }))
     }
     return Object.freeze(candidates)
   }
 
   /** The current (latest) late acceptance binding of one item, if any; malformed rows fail closed. */
   lateAcceptanceBinding(itemId: string): WorkItemLateAcceptanceBinding | undefined {
-    const row = this.#statement(`SELECT detail, recorded_at FROM work_item_event
+    const row = this.#statement(`SELECT sequence, detail, recorded_at FROM work_item_event
       WHERE item_id = ? AND kind = '${ACCEPTANCE_BOUND_EVENT}' ORDER BY sequence DESC LIMIT 1`).get(itemId) as Row | undefined
     if (row === undefined) return undefined
     const detail = eventDetail(row['detail'])
     const occurrenceId = detail?.['occurrenceId']
     if (detail === null || typeof occurrenceId !== 'string' || occurrenceId === '' || !acceptanceBindingIsUsable(detail['binding'])) {
-      fail('storage', 'recorded acceptance binding is malformed')
+      // The detail names the offending row so the caller can report it once.
+      fail('storage', MALFORMED_ACCEPTANCE_BINDING, `${ACCEPTANCE_BOUND_EVENT}#${String(row['sequence'])}`)
     }
     return Object.freeze({ itemId, occurrenceId, binding: Object.freeze({ ...detail['binding'] }), recordedAt: Number(row['recorded_at']) })
   }

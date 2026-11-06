@@ -264,8 +264,14 @@ export interface PeerDeliveryService {
 /** `assistant-automations` external-event intake. */
 export interface PeerAutomationsService {
   inspectProductionOccurrence?(input: { automationId: string; occurrenceId: string; workspace: string; agentPreset: string }): ProductionOccurrenceTerminalProjection | undefined
-  /** Host-only: the acceptance handle the production worker task of one occurrence froze; absent on older peers. */
-  inspectOccurrenceAcceptance?(input: { automationId: string; occurrenceId: string; workspace: string; agentPreset: string }): Readonly<{ contractId: string; contractDigest: string }> | undefined
+  /**
+   * Host-only: the acceptance handle the production worker task of one
+   * occurrence froze, with the Delivery binding it was frozen under; absent on
+   * older peers.
+   */
+  inspectOccurrenceAcceptance?(input: { automationId: string; occurrenceId: string; workspace: string; agentPreset: string }): Readonly<{
+    contractId: string; contractDigest: string; bindingId: string; bindingVersion: number; bindingGeneration: number
+  }> | undefined
   hostAgentAuthorizationVersion?(): 1
   runAgentForHostExecution?(input: HostAutomationExecutorInput, contract: HostAgentExecutionContract, authorization?: HostAgentAuthorizationFence): Promise<Readonly<HostAgentExecutionResult>>
   registerHostExecutor?(executor: HostAutomationExecutor): () => void

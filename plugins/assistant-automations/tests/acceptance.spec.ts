@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, test } from 'vitest'
 import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
@@ -107,12 +108,28 @@ describe('automation acceptance persistence', () => {
     expect(task.id).toBe(`task-${task.occurrenceId}`)
     expect(lookup()).toBeUndefined()
     bind(fixture.store, task.id)
-    expect(lookup()).toEqual({ contractId: 'acceptance-contract', contractDigest: 'a'.repeat(64) })
+    expect(lookup()).toEqual({ contractId: 'acceptance-contract', contractDigest: 'a'.repeat(64), bindingId: 'binding-owner', bindingVersion: 3, bindingGeneration: 2 })
     expect(lookup({ automationId: 'other' })).toBeUndefined()
     expect(lookup({ occurrenceId: 'occ-other' })).toBeUndefined()
     expect(lookup({ workspace: '/work/other' })).toBeUndefined()
     expect(lookup({ agentPreset: 'other' })).toBeUndefined()
     expect(lookup({ occurrenceId: '' })).toBeUndefined()
+    fixture.store.close()
+  })
+
+  test('reads the occurrence handle only while its terminal run is production, like inspectAcceptedExecution', async () => {
+    const fixture = await storeFixture()
+    const { task, duty } = start(fixture.store, 'acceptance-occurrence-mode')
+    bind(fixture.store, task.id)
+    fixture.store.completeTask({
+      taskId: task.id, ownerId: 'acceptance-owner', fencingToken: duty.fencingToken,
+      now: 1_200, outcome: 'succeeded', outputPreview: 'done', usage: {},
+    })
+    const lookup = () => fixture.store.inspectOccurrenceAcceptance({ automationId: 'acceptance-occurrence-mode', occurrenceId: task.occurrenceId, workspace: '/work/alpha', agentPreset: 'primary' })
+    expect(lookup()).toMatchObject({ contractId: 'acceptance-contract', bindingId: 'binding-owner' })
+    const db = new DatabaseSync(fixture.path)
+    try { db.prepare("UPDATE automation_runs SET execution_mode = 'unknown' WHERE task_id = ?").run(task.id) } finally { db.close() }
+    expect(lookup()).toBeUndefined()
     fixture.store.close()
   })
 

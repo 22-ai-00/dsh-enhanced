@@ -70,7 +70,7 @@ import {
 import { AutomationProposalManager, AutomationProposalStore } from './proposals.js'
 import { DshAutomationRunner, HostAutomationRunner, RoutedAutomationRunner } from './runner.js'
 import { AutomationPreparationRunner, type PreparationInput, type PreparationResult } from './preparation.js'
-import { AutomationStore } from './store.js'
+import { AutomationStore, type OccurrenceAcceptanceHandle } from './store.js'
 import type { AcceptanceContract, AcceptedExecution, TaskAcceptanceRegistration } from './acceptance.js'
 import { registerAutomationTools } from './tools.js'
 import type {
@@ -1873,12 +1873,13 @@ export class AssistantAutomationsService extends Service implements
 
   /**
    * Host-only: the acceptance handle `{ contractId, contractDigest }` the
-   * production worker task of one occurrence froze before its prompt, or
-   * undefined. Read-only; never exposed as a model tool.
+   * production worker task of one occurrence froze before its prompt, with
+   * the Delivery binding `{ bindingId, bindingVersion, bindingGeneration }` it
+   * was frozen under, or undefined. Read-only; never exposed as a model tool.
    */
   inspectOccurrenceAcceptance = (input: {
     automationId: string; occurrenceId: string; workspace: string; agentPreset: string
-  }): Readonly<{ contractId: string; contractDigest: string }> | undefined => {
+  }): Readonly<OccurrenceAcceptanceHandle> | undefined => {
     this.assertActive()
     return this.store.inspectOccurrenceAcceptance(input)
   }

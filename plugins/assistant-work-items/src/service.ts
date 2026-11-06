@@ -24,7 +24,7 @@ import type {
 import { settleOutcomes as runSettlement, type SettlementResult, type ThreadResolution } from './settlement.js'
 import { WorkItemOwnerRecall, type OwnerWorkItemExecution, type OwnerWorkItemListInput, type OwnerWorkItemRecallInput } from './owner-recall.js'
 export type { OwnerWorkItemExecution, OwnerWorkItemListInput, OwnerWorkItemRecallInput, OwnerWorkItemSummary } from './owner-recall.js'
-import { WorkItemStore, type WorkItemFollowUpCursor } from './store.js'
+import { MALFORMED_ACCEPTANCE_BINDING, WorkItemStore, type WorkItemFollowUpCursor, type WorkItemLateAcceptanceCandidate } from './store.js'
 import { normalizeFollowUp, normalizePolicyChange, noticePolicyChange } from './policy-notice.js'
 import { resolveAcceptanceBinding, settleAcceptance, workerRunTaskRef } from './acceptance-binding.js'
 import {
@@ -182,6 +182,22 @@ interface Components {
 }
 
 // Neither the runtime nor the plan-mint closure is published on a Cordis service receiver.
+/** Rows `bindWorkerRun` may scan per wake, parked ones included. */
+const WORKER_RUN_BIND_SCAN_LIMIT = 100
+/** Upper bound of in-memory parked (item, occurrence) pairs and warned malformed rows. */
+const WORKER_RUN_BIND_SKIP_LIMIT = 1_000
+/**
+ * `bindWorkerRun` refusals that cannot change while the item keeps its
+ * occurrence: an expired, mismatched (ref, owner scope, digest), settled or
+ * non-independent contract, a changed or revoked owner route, a different
+ * frozen binding, a contract already bound elsewhere, or a malformed row.
+ * Everything else (no contract yet, missing or throwing peers) is transient.
+ */
+const WORKER_RUN_BIND_TERMINAL: ReadonlySet<string> = new Set([
+  'mandate-bound', 'owner-changed', 'binding-mismatch',
+  'acceptance-mismatch', 'acceptance-expired', 'acceptance-already-settled', 'acceptance-not-awaiting', 'acceptance-not-independent',
+  'owner-route-invalid', 'owner-route-expired', 'identity-mismatch', 'malformed-binding',
+])
 const continuationRuntimes = new WeakMap<object, WorkItemContinuation>()
 const continuationAdmissions = new WeakMap<Components, (input: WorkItemAdmitInput, continuation: WorkItemContinuationAdmission) => WorkItemAdmitResult>()
 const continuationDispatches = new WeakMap<Components, WorkItemDispatch>()
@@ -254,6 +270,10 @@ export class AssistantWorkItemsService extends Service {
   private workItemsAutoSettleCursor: Readonly<{ createdAt: number; id: string }> | null = null
   /** In-memory round-robin position of `acceptance.bindWorkerRun`; a restart rescans from the start. */
   private workItemsBindWorkerRunCursor: Readonly<{ createdAt: number; id: string }> | null = null
+  /** itemId → occurrenceId refused deterministically by `bindWorkerRun`; in memory, bounded, dropped on occurrence change. */
+  private readonly workItemsBindWorkerRunSkips = new Map<string, string>()
+  /** `itemId:row` malformed `acceptance-bound` rows already warned about. */
+  private readonly workItemsMalformedBindingWarned = new Set<string>()
 
   private readonly workItemsOwnerReads: WorkItemOwnerRecall
   private readonly workItemsOwnerContinuations: WorkItemOwnerContinuation
@@ -587,8 +607,11 @@ export class AssistantWorkItemsService extends Service {
    * Automations only names the handle for the exact occurrence; the contract
    * itself is re-read from the verifier and checked against the live owner
    * route. Items whose mandate already binds a contract are never touched.
-   * Round-robin like auto-settle; anything short of a valid binding writes
-   * nothing and is simply tried again on a later wake.
+   * Round-robin like auto-settle. A deterministic refusal parks the
+   * (item, occurrence) pair in memory so it is not re-read until the item's
+   * occurrence changes; transient ones (no contract yet, peer missing or
+   * throwing) are simply tried again on a later wake. Parked pairs do not
+   * consume the per-wake budget.
    */
   private workItemsBindWorkerRuns(components: Components): void {
     const bind = this.workItemsConfig.acceptanceBindWorkerRun
@@ -597,33 +620,71 @@ export class AssistantWorkItemsService extends Service {
     if (bind === undefined || worker === null || this.workItemsClosed || this.workItemsVerifier() === undefined
       || typeof automations?.inspectOccurrenceAcceptance !== 'function') return
     const limit = bind.maxPerTick
-    const batch = [...components.store.listLateAcceptanceCandidates(worker, this.workItemsBindWorkerRunCursor, limit)]
-    if (batch.length < limit && this.workItemsBindWorkerRunCursor !== null) {
-      const seen = new Set(batch.map(candidate => candidate.item.id))
-      for (const candidate of components.store.listLateAcceptanceCandidates(worker, null, limit - batch.length)) {
-        if (!seen.has(candidate.item.id)) batch.push(candidate)
+    const skips = this.workItemsBindWorkerRunSkips
+    const seen = new Set<string>()
+    let processed = 0, scanned = 0, wrapped = this.workItemsBindWorkerRunCursor === null, done = false
+    while (!done && processed < limit && scanned < WORKER_RUN_BIND_SCAN_LIMIT && !this.workItemsClosed) {
+      const page = components.store.listLateAcceptanceCandidates(worker, this.workItemsBindWorkerRunCursor, 10)
+      if (page.length === 0) {
+        if (wrapped) break
+        wrapped = true
+        this.workItemsBindWorkerRunCursor = null
+        continue
       }
-    }
-    for (const candidate of batch) {
-      if (this.workItemsClosed) break
-      this.workItemsBindWorkerRunCursor = Object.freeze({ createdAt: candidate.item.createdAt, id: candidate.item.id })
-      try {
-        const outcome = this.workItemsBindWorkerRun(components, automations, candidate)
-        if (outcome !== 'bound' && outcome !== 'no-contract') {
-          this.ctx.logger.debug(`assistant-work-items: acceptance worker-run bind for ${candidate.item.id}: ${outcome}`)
+      for (const candidate of page) {
+        if (processed >= limit || scanned >= WORKER_RUN_BIND_SCAN_LIMIT || this.workItemsClosed) { done = true; break }
+        const { item, occurrenceId } = candidate
+        if (seen.has(item.id)) { done = true; break }
+        seen.add(item.id)
+        scanned += 1
+        this.workItemsBindWorkerRunCursor = Object.freeze({ createdAt: item.createdAt, id: item.id })
+        const parked = skips.get(item.id)
+        if (parked === occurrenceId) continue
+        if (parked !== undefined) skips.delete(item.id)
+        processed += 1
+        let outcome: string
+        try {
+          outcome = this.workItemsBindWorkerRun(components, automations, candidate)
+        } catch (error) {
+          if (this.workItemsWarnMalformedLateBinding(item.id, error)) outcome = 'malformed-binding'
+          else {
+            outcome = error instanceof WorkItemError ? error.code : 'error'
+            this.ctx.logger.debug(`assistant-work-items: acceptance worker-run bind for ${item.id} not recorded: ${describe(error)}`)
+          }
         }
-      } catch (error) {
-        this.ctx.logger.debug(`assistant-work-items: acceptance worker-run bind for ${candidate.item.id} not recorded: ${describe(error)}`)
+        if (WORKER_RUN_BIND_TERMINAL.has(outcome)) {
+          // Bounded: the oldest parked pair is forgotten first and simply re-read once.
+          if (skips.size >= WORKER_RUN_BIND_SKIP_LIMIT) skips.delete(skips.keys().next().value as string)
+          skips.set(item.id, occurrenceId)
+        }
+        if (outcome !== 'bound' && outcome !== 'no-contract') {
+          this.ctx.logger.debug(`assistant-work-items: acceptance worker-run bind for ${item.id}: ${outcome}`)
+        }
       }
     }
+  }
+
+  /**
+   * Warn once per (item, row) about a malformed latest `acceptance-bound`
+   * row. The item stays fail-closed (never bound or settled); later reads of
+   * the same row stay silent. Returns whether `error` was that condition.
+   */
+  private workItemsWarnMalformedLateBinding(itemId: string, error: unknown): boolean {
+    if (!(error instanceof WorkItemError) || error.code !== 'storage' || error.message !== MALFORMED_ACCEPTANCE_BINDING) return false
+    const key = `${itemId}:${error.detail ?? ''}`
+    if (this.workItemsMalformedBindingWarned.has(key)) return true
+    if (this.workItemsMalformedBindingWarned.size >= WORKER_RUN_BIND_SKIP_LIMIT) this.workItemsMalformedBindingWarned.clear()
+    this.workItemsMalformedBindingWarned.add(key)
+    this.ctx.logger.warn(`assistant-work-items: work item ${itemId} has a malformed ${error.detail ?? 'acceptance-bound row'}; its acceptance stays unbound and unsettled`)
+    return true
   }
 
   private workItemsBindWorkerRun(
     components: Components,
     automations: PeerAutomationsService,
-    candidate: Readonly<{ item: WorkItemRecord; automationId: string; occurrenceId: string }>,
+    candidate: WorkItemLateAcceptanceCandidate,
   ): string {
-    const { item, automationId, occurrenceId } = candidate
+    const { item, automationId, occurrenceId, notBefore } = candidate
     if (item.authority?.mandate?.acceptance !== undefined) return 'mandate-bound'
     if (typeof automations.inspectOccurrenceAcceptance !== 'function') return 'automations-unsupported'
     const handle = automations.inspectOccurrenceAcceptance({ automationId, occurrenceId, workspace: item.scope.workspace, agentPreset: item.scope.preset })
@@ -633,7 +694,10 @@ export class AssistantWorkItemsService extends Service {
     const owner = this.workItemsAssertOwnerRoute(item)
     if (owner.principalVersion !== item.owner.principalVersion
       || owner.bindingVersion !== item.owner.bindingVersion || owner.generation !== item.owner.generation) return 'owner-changed'
-    const binding = resolveAcceptanceBinding(this.workItemsVerifier(), handle, owner, Date.now(), { taskRef: workerRunTaskRef(occurrenceId) })
+    // The run must have been frozen under this owner route's binding.
+    if (typeof handle.bindingId !== 'string' || handle.bindingId === ''
+      || handle.bindingVersion !== owner.bindingVersion || handle.bindingGeneration !== owner.generation) return 'binding-mismatch'
+    const binding = resolveAcceptanceBinding(this.workItemsVerifier(), handle, owner, Date.now(), { taskRef: workerRunTaskRef(occurrenceId), notBefore })
     if (typeof binding === 'string') return binding
     return components.store.recordLateAcceptanceBinding({ itemId: item.id, occurrenceId, binding }).created ? 'bound' : 'already-bound'
   }
@@ -664,7 +728,9 @@ export class AssistantWorkItemsService extends Service {
           this.ctx.logger.debug(`assistant-work-items: acceptance auto-settle for ${item.id}: ${result.outcome}`)
         }
       } catch (error) {
-        this.ctx.logger.debug(`assistant-work-items: acceptance auto-settle for ${item.id} not recorded: ${describe(error)}`)
+        if (!this.workItemsWarnMalformedLateBinding(item.id, error)) {
+          this.ctx.logger.debug(`assistant-work-items: acceptance auto-settle for ${item.id} not recorded: ${describe(error)}`)
+        }
       }
     }
   }
