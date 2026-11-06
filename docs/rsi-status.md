@@ -73,11 +73,24 @@ live Harness app 的 `0.2.1-rc.5` 需要 owner 显式风险豁免；已在该版
 随包依赖 `schemastery`/`zod` 由 pnpm 装入，入口、面板与原生插件页已安装行正常（见 `tarball-install.md`）；
 从 registry 发布后安装未验证。
 
-**文鳐 Ray（2026-11-06）**：助手命名为「文鳐」（《山海经·西山经》：状如鲤鱼，鱼身而鸟翼，苍文而白首赤喙，以夜飞），小名小鳐，口号「小鳐小鳐，游而化飞」；侧栏入口与面板标题改为「文鳐」，包名与入口 id 仍为 `owner-console`（`ea6c5f55`）。面板美化（`2c025929`）：主题 token、云纹/印章/楷体短语、卡片与状态 pill；页头 banner 按原文重画为宋院体工笔青绿 + 海水江崖纹（`862ffd30`，960×320 webp 内联约 36 KB，codex 生图，候选在忽略的 `docs/evidence/owner-console/wenyao-art-20261106/`），`e57253e8` 放宽高度上限避免只剩鱼身中段。live DeepSeek Harness.app 0.2.2-rc.1 已装 45693fd0 并截图验收新 banner 与趋势快照卡片（证据 `docs/evidence/owner-console/mac-live-app-20261106/`）；该 profile 未装 plugin-control-plane，趋势卡片只验证了占位态。
+**文鳐 Ray（2026-11-06）**：助手命名为「文鳐」（《山海经·西山经》：状如鲤鱼，鱼身而鸟翼，苍文而白首赤喙，以夜飞），小名小鳐，口号「小鳐小鳐，游而化飞」；侧栏入口与面板标题改为「文鳐」，包名与入口 id 仍为 `owner-console`（`ea6c5f55`）。面板美化（`2c025929`）：主题 token、云纹/印章/楷体短语、卡片与状态 pill。主视觉（`bb2572d0`、`689338a8`）：侧栏入口图标、面板背景、页头 hero 与圆形印章统一换成 11_深海觉醒；源图 `background.png`/`icon.png`（各 1.2–1.9 MB，1254×1254）不入库，只提交 `plugins/owner-console/assets/` 的 4 个派生 webp（合计 88,298 B），并内联为已提交 `src/artwork.ts` 的 data URI，`lib/client.js` 仍自包含（无网络/外部图片地址）；生成移出构建，`build` 固定为 `tsc -p tsconfig.build.json && node ./scripts/build-client.mjs`，`tests/artwork.spec.ts` 校验派生资产与已提交 `src/artwork.ts` 逐字节一致，重新压缩资产后忘记刷新会测试失败。真实 `dsh web` 冒烟（隔离 temp `DSH_HOME` + pinned `@deepseek-ai/dsh@0.2.1-rc.2`，tarball 经 `dsh plugin add` 安装、独立端口、无头 Chrome）验收侧栏图标、页头 hero、面板背景与滚动，无页面 JS 错误（证据 `docs/evidence/owner-console/live-artwork-20261106/`）；未在 live 0.2.2-rc.1 app profile 安装（需退出应用并重启活 Host，未操作）。
 
 尚未完成：从面板选择任意 registry 源（出于安全只允许本项目包名）、真实飞书长连接验收
 （按用户要求延后，未连活 Bot）。lark-cli 不在本插件范围内，其安装/配置由 owner 自行通过 skill 完成。
-远端真实使用验收仍由正式连接门保留。
+远端真实使用验收仍由正式连接门保留。一键安装 lark-channel 受 Host ANSI 解析缺陷限制（面板侧已给准确指引），
+TraeX 需兼容发布或 owner 豁免，live app profile 未安装新主视觉，真实 Web GUI 长跑与明暗主题未复验。
+
+## 当前开发：默认关闭切片与安装提示（2026-11-06）
+
+三个切片均默认关、关闭时零行为变化、无 schema 变更、无新 Loop/timer；验收合同见 WP19/WP21 行。
+
+- **`acceptance.holdReport`（WP21 第 8 片，`af59d866`，评审修复 `b86639bc`）**：开启须 intake enabled+active、无 diagnosis，并同时开 `acceptance.bindWorkerRun` 与 `acceptance.autoSettle`。已绑定验收项的 `ready` 报告不再当场派发，而在既有 scheduler wake 上按 `(recorded_at,item_id)` 轮转游标扫描释放：achieved 直发、其他判定转 blocked 并改发 blocked 报告、`holdTimeoutMs`（60s–24h，默认 30 分钟）内无判定则标 unverified 释放；无绑定的孤儿报告按普通报告恢复发送；单条畸形行只 warn 跳过；报告时已有旧代判定则按 flag-off 立即发送。释放记录在被打断的 `ready` 修订上，重启/后续 wake 不重发。限制：超时只在既有 wake 上检查；只覆盖可通知的 `ready` 报告；verifier 槽缺失或抛错只是超时释放，不等于验收通过；随打开线程延后的 `ready` 报告不持有。
+- **`ownerReportRouting.orderAcrossLanes`（Delivery，`56ec9ec7`，评审修复 `fc7756d2`）**：同一工作项仍有未结算报告时，新修订粘在早期报告的信道（origin 或同一合格别名），由既有 per-lane claim 顺序先旧后新；保序只限同一 lane（typed 结果通道与普通后台分开），origin 已被 `/new` 轮换时不粘滞（回退普通路由），sticky 不可用不阻塞投递。只在 `linkedFallback` 路由已启用时有实际意义；真实跨信道送达顺序未验收。
+- **`follows.eventTriggers.acceptHeadRef`（WorkItems，`75deec79`）**：Event Triggers follow 在同步准入段内把 `<triggerId>@head` 钉成当前 high water + 配置摘要的三段式 ref 后入库，`validate` 仍对新旧形式生效；显式三段式 ref 行为不变；关闭时 `@head` 仍是非法 ref。
+- **面板安装提示与状态判定（`3679e482`、`cf4b633f`）**：安装拒绝不再只显示 Host 原始码——依赖构建脚本被 pnpm 拒绝时给出具体依赖名与 `allowBuilds` 办法，并允许确认 Host 已记录的 pending 名称后重试一次；`incompatible-version` 给出 package@version、缺失 peer 与当前 DSH 版本及豁免办法；通用失败只显示截断的 ANSI 清理诊断并带 `packageResult.logPath`。
+  独立只读审计（`docs/evidence/owner-console/panel-audit-20261106/`，对照真实 Host 0.2.2-rc.1 的 plugin-manager/settings/gateway 契约）发现并已修：任何不在 `settings.describe()` 的 bundle 都显示「已安装但未启用」并给无效的「启用」按钮（现在按 `bundles[].enabled` + `plugins[].fiberPhase`/`diagnostic` 区分 absent/disabled/active/pending/failed/busy/unloaded/errored，已启用不再给启用按钮；缺伴生服务时列出需安装的 bundle）；`inventory()` 丢弃所有带 error 的 bundle（现在只滤 `not-bundle`，错误码与诊断可见）；安装按钮宣称「含依赖」但只装该包与 pnpm 依赖（标签与提示已改）；配置写失败后条目消失且无法从面板修复（现在给 phase/诊断/缺失服务与可复制的 `cordis.patch.yml` 关行修复）；RPC 失败被压成一句通用话（现在透传 gateway `{code,message}`）；`logPath`、keychain handle 校验、reload 不虚报成功、`settings.mutate` 错误映射、`listBundles/listPlugins` 失败隔离与 Host 服务缺失提示、确认通道缺失可见提示均已修；`plugins/README.md` 与 owner-console README 的过时/夸大表述已改（撤回「三态卡片已在真实 GUI 复验」的过度声明）。
+  **一键安装 lark-channel 在 live 0.2.2-rc.1 仍被 Host 缺陷挡住**：其 `dsh-plugin-manager` 用 `/\bIgnored build scripts: (.+)/` 解析 ANSI 着色的 pnpm 11 输出失败，`pendingBuilds` 永远为空，任何调用方都无法批准（本仓库改不了；手工在 profile `pnpm-workspace.yaml` 写 `allowBuilds` 可绕）；TraeX 被 Host 兼容预检拒绝（本包 peer 固定 0.2.1-rc.2，live 为 0.2.2-rc.1），需要兼容发布或 owner 豁免。这两项是本轮 release 仍未验证的真实环境边界。
+- **评审修复**：`assistant-policy` `dsh-plugin-setup` 登记上述新开关（不再要求 `--force`，`be7c4be4`）；holdReport 轮转/孤儿/毒行/旧代判定四处缺陷修复并新增 6 个回归（`b86639bc`）；Delivery 轮换 origin 回退（`fc7756d2`）；owner-console 状态判定/错误透传/安装提示批量修复（`cf4b633f`，8 个测试文件 / 67 tests）。独立审计仍余 P2 项（typert 行号、默认 installSpec、趋势分页竞态、dotted 包名、未用 peer/devDep 等），不影响本轮。
 
 ## 待办与延后验收
 
