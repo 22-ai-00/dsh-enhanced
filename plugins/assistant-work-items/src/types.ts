@@ -258,6 +258,18 @@ export interface WorkItemAcceptanceVerdict {
   readonly recordedAt: number
 }
 
+/**
+ * WP21 slice 6: a worker run's own acceptance contract bound after wake as an
+ * append-only event, outside the mandate digest. The latest row is current;
+ * it only settles while `occurrenceId` is still the item's occurrence.
+ */
+export interface WorkItemLateAcceptanceBinding {
+  readonly itemId: string
+  readonly occurrenceId: string
+  readonly binding: WorkItemAcceptanceBinding
+  readonly recordedAt: number
+}
+
 export type WorkItemAcceptanceSettleResult =
   /** The verifier peer is missing or could not answer; nothing was written. */
   | Readonly<{ outcome: 'unavailable'; detail: string }>

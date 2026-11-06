@@ -140,6 +140,9 @@ describe('plugin setup: naming and validation', () => {
     expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.autoSettle.enabled', 'on', undefined)).toBe(true)
     expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.autoSettle.maxPerTick', '3', undefined)).toBe(3)
     expect(() => coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.autoSettle.maxPerTick', 'many', undefined)).toThrow(/expects a number/u)
+    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.bindWorkerRun.enabled', 'on', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.bindWorkerRun.maxPerTick', '4', undefined)).toBe(4)
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.bindWorkerRun.enabled', 'maybe', undefined)).toThrow(/expects a boolean/u)
   })
 
   test('parses commands and rejects bad arity or options', () => {

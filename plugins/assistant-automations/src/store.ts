@@ -2766,6 +2766,26 @@ export class AutomationStore {
       dispatchedAt: row.dispatched_at, status, quiescent, completedAt: row.created_at, executionRef: row.id })
   }
 
+  /**
+   * Host-only: the acceptance handle one production occurrence's worker task
+   * froze, if any. Keyed by the exact (automation, occurrence, scope) tuple;
+   * dry runs and other scopes never match. Returns ids only, no contract body.
+   */
+  inspectOccurrenceAcceptance(input: {
+    automationId: string; occurrenceId: string; workspace: string; agentPreset: string
+  }): Readonly<{ contractId: string; contractDigest: string }> | undefined {
+    const values = [input.automationId, input.occurrenceId, input.workspace, input.agentPreset]
+    if (values.some(value => typeof value !== 'string' || value === '' || value.length > 4_096)) return undefined
+    const row = this.database.prepare(`SELECT acceptance.contract_id, acceptance.contract_digest FROM automation_task_acceptance acceptance
+      JOIN automation_tasks task ON task.id = acceptance.task_id
+      JOIN automation_occurrences occurrence ON occurrence.id = task.occurrence_id AND occurrence.automation_id = task.automation_id
+      WHERE task.automation_id = ? AND task.occurrence_id = ? AND occurrence.dry_run = 0
+        AND acceptance.workspace = ? AND acceptance.preset = ?`)
+      .get(input.automationId, input.occurrenceId, input.workspace, input.agentPreset) as Pick<AcceptanceRow, 'contract_id' | 'contract_digest'> | undefined
+    if (row === undefined || typeof row.contract_id !== 'string' || !/^[a-f0-9]{64}$/u.test(row.contract_digest)) return undefined
+    return Object.freeze({ contractId: row.contract_id, contractDigest: row.contract_digest })
+  }
+
   markAcceptedTaskQuiescent(taskId: string, quiescent: boolean): void {
     this.database.prepare(`UPDATE automation_task_acceptance SET quiescent = ? WHERE task_id = ?`)
       .run(quiescent ? 1 : 0, taskId)

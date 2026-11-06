@@ -90,20 +90,27 @@ export function resolveAcceptanceBinding(
   handle: WorkItemAcceptanceHandle,
   owner: PeerOwnerRouteReceipt,
   now: number,
+  /**
+   * Late binding of a worker run's own contract (WP21 slice 6): the contract
+   * must name exactly `taskRef`, and `pending` is also accepted because that
+   * run's evidence cannot predate the run the contract was frozen for.
+   */
+  late?: Readonly<{ taskRef: string }>,
 ): WorkItemAcceptanceBinding | WorkItemDecisionRefusal {
   const read = inspect(verifier, handle.contractId)
   if (read.kind === 'unavailable' || read.value === null || read.value === undefined) return 'acceptance-unavailable'
   const contract = validContract(read.value.contract)
   if (contract === undefined || contract.id !== handle.contractId || contract.digest !== handle.contractDigest
     || contract.scope.workspace !== owner.workspace || contract.scope.preset !== owner.agentPreset
-    || contract.owner.principalRecordId !== owner.principalRecordId || contract.owner.principalVersion !== owner.principalVersion) {
+    || contract.owner.principalRecordId !== owner.principalRecordId || contract.owner.principalVersion !== owner.principalVersion
+    || (late !== undefined && (contract.task.kind !== 'automation-run' || contract.task.ref !== late.taskRef))) {
     return 'acceptance-mismatch'
   }
   if (contract.expiresAt <= now) return 'acceptance-expired'
   if (read.value.state === 'done' || read.value.state === 'needs-attention' || read.value.receipt !== null) return 'acceptance-already-settled'
   // Only a contract nobody has started verifying may bind new work; a pending
   // or verifying one could settle on evidence gathered before this item ran.
-  if (read.value.state !== 'awaiting-execution') return 'acceptance-not-awaiting'
+  if (read.value.state !== 'awaiting-execution' && (late === undefined || read.value.state !== 'pending')) return 'acceptance-not-awaiting'
   const author = acceptanceAuthorFor(contract.task.kind)
   if (author === undefined || !acceptanceIsIndependent({ author, verifier: ACCEPTANCE_VERIFIER, executor: ACCEPTANCE_EXECUTOR })) {
     return 'acceptance-not-independent'
@@ -121,6 +128,16 @@ export function resolveAcceptanceBinding(
     criteria: contract.criteria.length,
     expiresAt: contract.expiresAt,
   })
+}
+
+/**
+ * The acceptance task ref Automations freezes for the worker run of one
+ * occurrence: task id `task-<occurrenceId>`, ref `run-<taskId>`. Coupled to
+ * Automations' id derivation on purpose, so a contract for any other run of
+ * the same automation can never bind this item.
+ */
+export function workerRunTaskRef(occurrenceId: string): string {
+  return `run-task-${occurrenceId}`
 }
 
 /** Structural check of a stored binding; anything else makes the mandate malformed. */

@@ -37,7 +37,12 @@ export interface Config {
    * WP21 slice 5: `autoSettle` reads bound items' verifier receipts on the
    * existing scheduler wake, at most `maxPerTick` (1–10, default 5) per wake.
    */
-  acceptance?: { autoSettle?: { enabled?: boolean; maxPerTick?: number } }
+  /**
+   * WP21 slice 6: `bindWorkerRun` binds each dispatched item to the
+   * acceptance contract its worker run froze, on the same wake, at most
+   * `maxPerTick` (1–10, default 5) per wake.
+   */
+  acceptance?: { autoSettle?: { enabled?: boolean; maxPerTick?: number }; bindWorkerRun?: { enabled?: boolean; maxPerTick?: number } }
   follows?: FollowsConfig
 }
 
@@ -213,6 +218,8 @@ export interface NormalizedConfig {
   readonly intakeLedger?: NormalizedIntakeLedger
   /** Present only when `acceptance.autoSettle.enabled` is true. */
   readonly acceptanceAutoSettle?: Readonly<{ maxPerTick: number }>
+  /** Present only when `acceptance.bindWorkerRun.enabled` is true. */
+  readonly acceptanceBindWorkerRun?: Readonly<{ maxPerTick: number }>
   /** Present only when at least one built-in followed-thread source is enabled. */
   readonly follows?: NormalizedFollows
 }
@@ -405,6 +412,7 @@ export const ConfigSchema = Schema.object({
   follows: Schema.object({ eventTriggers: Schema.object({ enabled: Schema.boolean().default(false) }) }),
   acceptance: Schema.object({
     autoSettle: Schema.object({ enabled: Schema.boolean().default(false), maxPerTick: Schema.number().step(1) }),
+    bindWorkerRun: Schema.object({ enabled: Schema.boolean().default(false), maxPerTick: Schema.number().step(1) }),
   }),
   ownerRecall: Schema.object({ enabled: Schema.boolean().default(false), linkedAliases: Schema.array(Schema.string()) }),
   ownerReportRouting: Schema.object({ linkedFallback: Schema.array(Schema.string()), prefer: Schema.union(['origin', 'recent'] as const) }),
@@ -686,8 +694,11 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   }
   const follows = normalizeFollows(value['follows'])
   if (follows?.eventTriggers === true && (!enabled || scope === null)) fail('invalid-input', 'follows.eventTriggers requires an enabled intake with an owner scope')
-  const acceptanceAutoSettle = normalizeAcceptanceAutoSettle(value['acceptance'])
+  const acceptance = normalizeAcceptance(value['acceptance'])
+  const acceptanceAutoSettle = acceptance.autoSettle
   if (acceptanceAutoSettle && (!enabled || mode !== 'active')) fail('invalid-input', 'acceptance.autoSettle requires an enabled active intake')
+  const acceptanceBindWorkerRun = acceptance.bindWorkerRun
+  if (acceptanceBindWorkerRun && (!enabled || mode !== 'active')) fail('invalid-input', 'acceptance.bindWorkerRun requires an enabled active intake')
   return Object.freeze({
     enabled,
     mode,
@@ -710,21 +721,26 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     ...(intakeLedger === undefined ? {} : { intakeLedger }),
     ...(follows === undefined ? {} : { follows }),
     ...(acceptanceAutoSettle === undefined ? {} : { acceptanceAutoSettle }),
+    ...(acceptanceBindWorkerRun === undefined ? {} : { acceptanceBindWorkerRun }),
   })
 }
 
-/** Absent or disabled auto-settle normalizes to `undefined`. */
-function normalizeAcceptanceAutoSettle(raw: unknown): Readonly<{ maxPerTick: number }> | undefined {
-  if (raw === undefined) return undefined
+/** Absent or disabled acceptance passes normalize to `undefined`. */
+function normalizeAcceptance(raw: unknown): Readonly<{ autoSettle?: Readonly<{ maxPerTick: number }>; bindWorkerRun?: Readonly<{ maxPerTick: number }> }> {
+  if (raw === undefined) return {}
   const value = plainObject(raw, 'acceptance')
-  rejectUnknown(value, ['autoSettle'], 'acceptance')
-  if (value['autoSettle'] === undefined) return undefined
-  const autoSettle = plainObject(value['autoSettle'], 'acceptance.autoSettle')
-  rejectUnknown(autoSettle, ['enabled', 'maxPerTick'], 'acceptance.autoSettle')
-  const enabled = autoSettle['enabled'] ?? false
-  if (typeof enabled !== 'boolean') fail('invalid-input', 'acceptance.autoSettle.enabled must be a boolean')
-  if (!enabled) return undefined
-  return Object.freeze({ maxPerTick: integer(autoSettle['maxPerTick'] ?? 5, 'acceptance.autoSettle.maxPerTick', 1, 10) })
+  rejectUnknown(value, ['autoSettle', 'bindWorkerRun'], 'acceptance')
+  const pass = (key: 'autoSettle' | 'bindWorkerRun'): Readonly<{ maxPerTick: number }> | undefined => {
+    if (value[key] === undefined) return undefined
+    const section = plainObject(value[key], `acceptance.${key}`)
+    rejectUnknown(section, ['enabled', 'maxPerTick'], `acceptance.${key}`)
+    const enabled = section['enabled'] ?? false
+    if (typeof enabled !== 'boolean') fail('invalid-input', `acceptance.${key}.enabled must be a boolean`)
+    if (!enabled) return undefined
+    return Object.freeze({ maxPerTick: integer(section['maxPerTick'] ?? 5, `acceptance.${key}.maxPerTick`, 1, 10) })
+  }
+  const autoSettle = pass('autoSettle'), bindWorkerRun = pass('bindWorkerRun')
+  return { ...(autoSettle === undefined ? {} : { autoSettle }), ...(bindWorkerRun === undefined ? {} : { bindWorkerRun }) }
 }
 
 /** Absent or all-disabled follow sources normalize to `undefined`. */

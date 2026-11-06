@@ -1871,6 +1871,18 @@ export class AssistantAutomationsService extends Service implements
     return this.store.inspectSystemOwned(input)
   }
 
+  /**
+   * Host-only: the acceptance handle `{ contractId, contractDigest }` the
+   * production worker task of one occurrence froze before its prompt, or
+   * undefined. Read-only; never exposed as a model tool.
+   */
+  inspectOccurrenceAcceptance = (input: {
+    automationId: string; occurrenceId: string; workspace: string; agentPreset: string
+  }): Readonly<{ contractId: string; contractDigest: string }> | undefined => {
+    this.assertActive()
+    return this.store.inspectOccurrenceAcceptance(input)
+  }
+
   /** Host-only exact production terminal proof. Never exposed as a model tool. */
   inspectProductionOccurrence = (input: {
     automationId: string; occurrenceId: string; workspace: string; agentPreset: string

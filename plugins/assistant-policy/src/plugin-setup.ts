@@ -55,6 +55,8 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['ownerReportRouting.prefer', ['origin', 'recent']],
     ['acceptance.autoSettle.enabled', 'boolean'],
     ['acceptance.autoSettle.maxPerTick', 'number'],
+    ['acceptance.bindWorkerRun.enabled', 'boolean'],
+    ['acceptance.bindWorkerRun.maxPerTick', 'number'],
   ])],
   ['dsh-enhanced-assistant-delivery', new Map<string, KnownType>([['attentionAttachOverCap', 'boolean']])],
   ['dsh-enhanced-assistant-evaluation', new Map<string, KnownType>([

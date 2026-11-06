@@ -15,6 +15,7 @@ import {
   type WorkItemOutcomeDraft,
 } from './outcome.ts'
 import { truncateUtf8 } from './config.ts'
+import { acceptanceBindingIsUsable } from './acceptance-binding.ts'
 import type {
   WorkItemClaimRecord,
   WorkItemClaimState,
@@ -28,7 +29,9 @@ import type {
   WorkItemFollowUpOwnResult,
   WorkItemFollowUpRecord,
   WorkItemPolicyNotice,
+  WorkItemAcceptanceBinding,
   WorkItemAcceptanceVerdict,
+  WorkItemLateAcceptanceBinding,
   WorkItemExecutionStatus,
   WorkItemObjectiveStatus,
   WorkItemOutcomeEvidence,
@@ -291,6 +294,8 @@ export const FOLLOW_UP_PROCESSED_EVENT = 'follow-up-processed'
 export const FOLLOW_UP_RELEASED_EVENT = 'follow-up-released'
 /** WP21 slice 4: the independent verifier's verdict, read back once per bound item. */
 export const ACCEPTANCE_VERIFIED_EVENT = 'acceptance-verified'
+/** WP21 slice 6: a worker run's contract bound after wake; the latest row is current. */
+export const ACCEPTANCE_BOUND_EVENT = 'acceptance-bound'
 
 /** Position of one released follow-up in release order. */
 export interface WorkItemFollowUpCursor {
@@ -1300,14 +1305,95 @@ export class WorkItemStore {
     const row = this.#statement(`
       SELECT ${ITEM_ALIASES} FROM work_item
       WHERE CASE WHEN json_valid(authority_basis) THEN json_extract(authority_basis, '$.mandate.acceptance.contractId') END = ?
+        OR EXISTS (SELECT 1 FROM work_item_event e WHERE e.item_id = work_item.id AND e.kind = '${ACCEPTANCE_BOUND_EVENT}'
+          AND CASE WHEN json_valid(e.detail) THEN json_extract(e.detail, '$.binding.contractId') END = ?)
       ORDER BY created_at ASC, id ASC LIMIT 1
-    `).get(contractId) as Row | undefined
+    `).get(contractId, contractId) as Row | undefined
     return row === undefined ? undefined : itemFromRow(row)
   }
 
   /**
+   * WP21 slice 6 candidates: items whose worker dispatch is `dispatched` to
+   * `workerAutomationId` under their current occurrence, whose mandate binds
+   * no contract, that have no verdict yet and no `acceptance-bound` row for
+   * that occurrence. Never-run, withdrawn, failed and dropped items are out.
+   * (created_at, id) order strictly after `after`; bounded scan, no schema change.
+   */
+  listLateAcceptanceCandidates(workerAutomationId: string, after: Readonly<{ createdAt: number; id: string }> | null, limit: number): readonly Readonly<{ item: WorkItemRecord; automationId: string; occurrenceId: string }>[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) fail('invalid-input', 'acceptance bind limit must be between 1 and 10')
+    const rows = this.#statement(`
+      SELECT ${ITEM_ALIASES} FROM work_item i
+      WHERE EXISTS (SELECT 1 FROM work_item_dispatch d WHERE d.item_id = i.id AND d.state = 'dispatched'
+          AND d.occurrence_id IS NOT NULL AND d.occurrence_id = i.occurrence_id AND (d.automation_id = ? OR d.automation_id = ''))
+        AND i.state NOT IN ('failed', 'dropped')
+        AND CASE WHEN json_valid(i.authority_basis) THEN json_extract(i.authority_basis, '$.mandate.acceptance') END IS NULL
+        AND NOT EXISTS (SELECT 1 FROM work_item_event e WHERE e.item_id = i.id AND e.kind = '${ACCEPTANCE_VERIFIED_EVENT}')
+        AND NOT EXISTS (SELECT 1 FROM work_item_event e WHERE e.item_id = i.id AND e.kind = '${ACCEPTANCE_BOUND_EVENT}'
+          AND CASE WHEN json_valid(e.detail) THEN json_extract(e.detail, '$.occurrenceId') END = i.occurrence_id)
+        AND (i.created_at, i.id) > (?, ?)
+      ORDER BY i.created_at ASC, i.id ASC LIMIT ?
+    `).all(workerAutomationId, after?.createdAt ?? -1, after?.id ?? '', limit) as Row[]
+    const candidates: Array<Readonly<{ item: WorkItemRecord; automationId: string; occurrenceId: string }>> = []
+    for (const row of rows) {
+      const item = itemFromRow(row)
+      const dispatch = this.getDispatch(item.id)
+      if (dispatch?.state !== 'dispatched' || dispatch.occurrenceId === null || dispatch.occurrenceId !== item.occurrenceId) continue
+      candidates.push(Object.freeze({ item, automationId: dispatch.automationId === '' ? workerAutomationId : dispatch.automationId, occurrenceId: dispatch.occurrenceId }))
+    }
+    return Object.freeze(candidates)
+  }
+
+  /** The current (latest) late acceptance binding of one item, if any; malformed rows fail closed. */
+  lateAcceptanceBinding(itemId: string): WorkItemLateAcceptanceBinding | undefined {
+    const row = this.#statement(`SELECT detail, recorded_at FROM work_item_event
+      WHERE item_id = ? AND kind = '${ACCEPTANCE_BOUND_EVENT}' ORDER BY sequence DESC LIMIT 1`).get(itemId) as Row | undefined
+    if (row === undefined) return undefined
+    const detail = eventDetail(row['detail'])
+    const occurrenceId = detail?.['occurrenceId']
+    if (detail === null || typeof occurrenceId !== 'string' || occurrenceId === '' || !acceptanceBindingIsUsable(detail['binding'])) {
+      fail('storage', 'recorded acceptance binding is malformed')
+    }
+    return Object.freeze({ itemId, occurrenceId, binding: Object.freeze({ ...detail['binding'] }), recordedAt: Number(row['recorded_at']) })
+  }
+
+  /**
+   * Append one late acceptance binding for the item's current occurrence.
+   * Refused for a mandate-bound or already-verified item, for a stale
+   * occurrence, and for a contract another item already binds. The same
+   * occurrence and contract again is idempotent; a later occurrence's row
+   * supersedes earlier ones. State, lease and mandate are untouched.
+   */
+  recordLateAcceptanceBinding(input: Readonly<{ itemId: string; occurrenceId: string; binding: WorkItemAcceptanceBinding }>): Readonly<{ binding: WorkItemLateAcceptanceBinding; created: boolean }> {
+    if (!acceptanceBindingIsUsable(input.binding)) fail('invalid-input', 'acceptance binding is malformed')
+    const now = this.#now()
+    return this.#transaction(() => {
+      const item = this.#requireItem(input.itemId)
+      if (item.authority?.mandate?.acceptance !== undefined) fail('invalid-state', 'work item mandate already binds an acceptance contract')
+      if (this.acceptanceVerdict(item.id) !== undefined) fail('invalid-state', 'work item already has an acceptance verdict')
+      const dispatch = this.getDispatch(item.id)
+      if (item.occurrenceId !== input.occurrenceId || dispatch?.state !== 'dispatched' || dispatch.occurrenceId !== input.occurrenceId) {
+        fail('invalid-state', 'occurrence is not the item\'s current dispatch')
+      }
+      const owner = this.findItemByAcceptanceContract(input.binding.contractId)
+      const current = this.lateAcceptanceBinding(item.id)
+      if (current !== undefined && current.occurrenceId === input.occurrenceId) {
+        if (current.binding.contractId !== input.binding.contractId || current.binding.contractDigest !== input.binding.contractDigest) {
+          fail('identity-mismatch', 'occurrence already binds a different acceptance contract')
+        }
+        return Object.freeze({ binding: current, created: false })
+      }
+      if (owner !== undefined) fail('identity-mismatch', 'acceptance contract is already bound to a work item')
+      this.#appendEvent(item.id, ACCEPTANCE_BOUND_EVENT, 'acceptance', { occurrenceId: input.occurrenceId, binding: input.binding }, now)
+      const recorded = this.lateAcceptanceBinding(item.id)
+      if (recorded === undefined) fail('storage', 'acceptance binding could not be read back')
+      return Object.freeze({ binding: recorded, created: true })
+    })
+  }
+
+  /**
    * Executed (`ready`, attempt ≥ 1) items whose frozen mandate binds an
-   * acceptance contract and that have no recorded verdict yet, in
+   * acceptance contract, or whose latest late binding is for the item's
+   * current occurrence, and that have no recorded verdict yet, in
    * (created_at, id) order strictly after `after`. A bounded full scan over
    * the stored basis JSON, like `findItemByAcceptanceContract` (no schema change).
    */
@@ -1316,7 +1402,9 @@ export class WorkItemStore {
     return Object.freeze((this.#statement(`
       SELECT ${ITEM_ALIASES} FROM work_item i
       WHERE i.state = 'ready' AND i.attempt >= 1
-        AND CASE WHEN json_valid(i.authority_basis) THEN json_extract(i.authority_basis, '$.mandate.acceptance.contractId') END IS NOT NULL
+        AND (CASE WHEN json_valid(i.authority_basis) THEN json_extract(i.authority_basis, '$.mandate.acceptance.contractId') END IS NOT NULL
+          OR (SELECT CASE WHEN json_valid(b.detail) THEN json_extract(b.detail, '$.occurrenceId') END FROM work_item_event b
+            WHERE b.item_id = i.id AND b.kind = '${ACCEPTANCE_BOUND_EVENT}' ORDER BY b.sequence DESC LIMIT 1) = i.occurrence_id)
         AND NOT EXISTS (SELECT 1 FROM work_item_event e WHERE e.item_id = i.id AND e.kind = '${ACCEPTANCE_VERIFIED_EVENT}')
         AND (i.created_at, i.id) > (?, ?)
       ORDER BY i.created_at ASC, i.id ASC LIMIT ?

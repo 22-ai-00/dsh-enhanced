@@ -213,6 +213,16 @@ class FakeAutomationsPeer extends Service {
     return () => { this.wakeListeners.delete(listener) }
   }
   wake(): void { for (const listener of Array.from(this.wakeListeners)) listener() }
+  /** Host-only worker-run acceptance handles, keyed by occurrence. */
+  readonly acceptance = new Map<string, { contractId: string; contractDigest: string }>()
+  readonly acceptanceReads: string[] = []
+  acceptanceFailure: Error | null = null
+  inspectOccurrenceAcceptance(input: { automationId: string; occurrenceId: string; workspace: string; agentPreset: string }) {
+    this.acceptanceReads.push(input.occurrenceId)
+    if (this.acceptanceFailure !== null) throw this.acceptanceFailure
+    if (input.automationId !== WORKER || input.workspace !== WORKSPACE || input.agentPreset !== PRESET) return undefined
+    return this.acceptance.get(input.occurrenceId)
+  }
 }
 
 interface RegisteredTool {
@@ -236,13 +246,13 @@ class FakeVerifierPeer extends Service {
   }
 }
 
-function serviceContract(id = 'svc-acceptance-1'): TaskAcceptanceContract {
+function serviceContract(id = 'svc-acceptance-1', options: { ref?: string; owner?: { principalRecordId: string; principalVersion: number } } = {}): TaskAcceptanceContract {
   const now = Date.now()
   return createTaskAcceptanceContract({
     protocol: 'task-acceptance/v1', id,
     scope: { workspace: WORKSPACE, preset: PRESET },
-    owner: { principalRecordId: 'principal-1', principalVersion: 7 },
-    task: { kind: 'automation-run', ref: `run-${id}` },
+    owner: options.owner ?? { principalRecordId: 'principal-1', principalVersion: 7 },
+    task: { kind: 'automation-run', ref: options.ref ?? `run-${id}` },
     objective: 'The deploy step passes twice in a row.',
     profile: { id: 'profile-1', version: 1, digest: 'a'.repeat(64) },
     issuedAt: now - 1_000, expiresAt: now + 3_600_000,
@@ -1340,6 +1350,204 @@ describe('work-item admission authority revalidation', () => {
     expect(errorCode(() => normalizeConfig({ ...base, acceptance: { autoSettle: { enabled: true, extra: 1 } } } as never, Date.now()))).toBe('invalid-input')
     expect(() => normalizeConfig({ ...base, mode: 'observe', acceptance: { autoSettle: { enabled: true } } }, Date.now())).toThrow(/acceptance\.autoSettle requires/u)
     expect(() => normalizeConfig({ ...base, enabled: false, acceptance: { autoSettle: { enabled: true } } }, Date.now())).toThrow(/acceptance\.autoSettle requires/u)
+  })
+
+  const bindWorkerRun = (maxPerTick?: number): Partial<Config> => ({ acceptance: {
+    autoSettle: { enabled: true },
+    bindWorkerRun: { enabled: true, ...(maxPerTick === undefined ? {} : { maxPerTick }) },
+  } })
+
+  function plainDecision(decisionId: string) {
+    return {
+      protocol: 'work-items/execute-decision/v1', decisionId, verdict: 'execute',
+      origin: 'explicit', mode: 'auto', budgetRemaining: 1,
+      mandate: { kind: 'review', title: 'Review', brief: 'Review the change.', originBindingId: 'binding-origin-1', acceptanceRef: 'tac:review/v1' },
+    } as const
+  }
+
+  /** The contract a worker run of `occurrenceId` froze, published by the fake Automations peer. */
+  function publishWorkerContract(fixture: Awaited<ReturnType<typeof serviceHarness>>, peer: FakeVerifierPeer, occurrenceId: string,
+    options: Parameters<typeof serviceContract>[1] = {}, id = `worker-${occurrenceId}`) {
+    const contract = serviceContract(id, { ref: `run-task-${occurrenceId}`, ...options })
+    peer.tasks.set(contract.id, { contract, state: 'awaiting-execution', reason: null, receipt: null })
+    fixture.automations?.acceptance.set(occurrenceId, { contractId: contract.id, contractDigest: contract.digest })
+    return contract
+  }
+
+  /** An unbound decision admitted and dispatched; returns its item and occurrence. */
+  function admitPlain(fixture: Awaited<ReturnType<typeof serviceHarness>>, id: string) {
+    const admitted = fixture.service.admitDecision(plainDecision(`decision-${id}`))
+    if (admitted.outcome === 'refused') throw new Error(admitted.reasonCode)
+    const occurrenceId = admitted.dispatch.occurrenceId
+    if (occurrenceId === null) throw new Error('not dispatched')
+    return { itemId: admitted.item.id, occurrenceId }
+  }
+
+  function boundEvents(fixture: { root: string }, itemId: string): number {
+    const db = new DatabaseSync(join(fixture.root, 'state', 'state.sqlite'), { readOnly: true })
+    try {
+      const row = db.prepare("SELECT COUNT(*) AS count FROM work_item_event WHERE item_id = ? AND kind = 'acceptance-bound'").get(itemId) as { count: number }
+      return Number(row.count)
+    } finally { db.close() }
+  }
+
+  test('acceptance.bindWorkerRun is off by default: a wake reads no worker-run handle and binds nothing', async () => {
+    const fixture = await serviceHarness({ extra: autoSettle() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { itemId, occurrenceId } = admitPlain(fixture, 'bind-off-1')
+    const contract = publishWorkerContract(fixture, peer, occurrenceId)
+    fixture.service.claim(workerAgent(occurrenceId))
+    await fixture.service.report(workerAgent(occurrenceId), { status: 'ready', summary: 'done', idempotencyKey: 'r-bind-off' })
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract) })
+    fixture.automations?.wake()
+    expect(fixture.automations?.acceptanceReads).toEqual([])
+    expect(boundEvents(fixture, itemId)).toBe(0)
+    expect(fixture.service.acceptanceVerdict(itemId)).toBeNull()
+    expect(errorCode(() => fixture.service.settleAcceptance(itemId))).toBe('invalid-state')
+    expect(fixture.config.acceptanceBindWorkerRun).toBeUndefined()
+  })
+
+  test('acceptance.bindWorkerRun binds the worker run contract on a wake and auto-settle records its verdict', async () => {
+    const fixture = await serviceHarness({ extra: bindWorkerRun() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { itemId, occurrenceId } = admitPlain(fixture, 'bind-on-1')
+    const contract = publishWorkerContract(fixture, peer, occurrenceId)
+    fixture.service.claim(workerAgent(occurrenceId))
+    // The run is in flight: its contract still awaits execution.
+    fixture.automations?.wake()
+    const store = readStore(fixture)
+    expect(store.lateAcceptanceBinding(itemId)).toMatchObject({ occurrenceId, binding: { contractId: contract.id, contractDigest: contract.digest, author: 'assistant-automations', taskKind: 'automation-run' } })
+    // The mandate digest is untouched: the binding is an event row only.
+    expect(store.findItemById(itemId)?.authority?.mandate?.acceptance).toBeUndefined()
+    await fixture.service.report(workerAgent(occurrenceId), { status: 'ready', summary: 'done', idempotencyKey: 'r-bind-on' })
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract) })
+    fixture.automations?.wake()
+    expect(fixture.service.acceptanceVerdict(itemId)).toMatchObject({ contractId: contract.id, receiptId: 'svc-receipt-1', objectiveStatus: 'achieved' })
+    const reads = fixture.automations?.acceptanceReads.length
+    fixture.automations?.wake()
+    expect(fixture.automations?.acceptanceReads).toHaveLength(reads ?? 0)
+    expect(boundEvents(fixture, itemId)).toBe(1)
+    expect(verdictEvents(fixture, itemId)).toBe(1)
+    // One contract binds one item: a decision naming it is refused.
+    expect(fixture.service.admitDecision(boundDecision(contract, 'decision-bind-on-reuse'))).toMatchObject({ outcome: 'refused' })
+  })
+
+  test('acceptance.bindWorkerRun does not bind when the contract owner differs from the item owner route', async () => {
+    const fixture = await serviceHarness({ extra: bindWorkerRun() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const first = admitPlain(fixture, 'bind-owner-1')
+    publishWorkerContract(fixture, peer, first.occurrenceId, { owner: { principalRecordId: 'principal-other', principalVersion: 7 } })
+    const second = admitPlain(fixture, 'bind-owner-2')
+    publishWorkerContract(fixture, peer, second.occurrenceId)
+    // The second item's route is revoked by the time the wake runs.
+    fixture.delivery.spy.setInvalid(true)
+    expect(() => fixture.automations?.wake()).not.toThrow()
+    expect(boundEvents(fixture, second.itemId)).toBe(0)
+    fixture.delivery.spy.setInvalid(false)
+    fixture.automations?.wake()
+    fixture.automations?.wake()
+    expect(boundEvents(fixture, first.itemId)).toBe(0)
+    expect(boundEvents(fixture, second.itemId)).toBe(1)
+  })
+
+  test('acceptance.bindWorkerRun refuses a contract whose task ref is another run', async () => {
+    const fixture = await serviceHarness({ extra: bindWorkerRun() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { itemId, occurrenceId } = admitPlain(fixture, 'bind-ref-1')
+    publishWorkerContract(fixture, peer, occurrenceId, { ref: 'run-task-occ-elsewhere' })
+    fixture.automations?.wake()
+    fixture.automations?.wake()
+    expect(fixture.automations?.acceptanceReads.length).toBeGreaterThan(0)
+    expect(boundEvents(fixture, itemId)).toBe(0)
+  })
+
+  test('acceptance.bindWorkerRun never late-binds an item whose mandate already binds a contract', async () => {
+    const fixture = await serviceHarness({ extra: bindWorkerRun() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { itemId, contract } = await executedBound(fixture, peer, 'bind-mandate-1', 'occ-1')
+    publishWorkerContract(fixture, peer, 'occ-1')
+    fixture.automations?.wake()
+    expect(fixture.automations?.acceptanceReads).toEqual([])
+    expect(boundEvents(fixture, itemId)).toBe(0)
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract) })
+    fixture.automations?.wake()
+    expect(fixture.service.acceptanceVerdict(itemId)).toMatchObject({ contractId: contract.id })
+  })
+
+  test('acceptance.bindWorkerRun follows a re-armed item to its newest occurrence; the old binding never settles it', async () => {
+    const fixture = await serviceHarness({ extra: bindWorkerRun() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { itemId, occurrenceId: first } = admitPlain(fixture, 'bind-rearm-1')
+    const old = publishWorkerContract(fixture, peer, first)
+    fixture.service.claim(workerAgent(first))
+    fixture.automations?.wake()
+    expect(readStore(fixture).lateAcceptanceBinding(itemId)).toMatchObject({ occurrenceId: first, binding: { contractId: old.id } })
+    await fixture.service.report(workerAgent(first), { status: 'waiting', summary: 'waiting for upstream', idempotencyKey: 'r-rearm-wait' })
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(Date.now() + fixture.config.limits.waitingResumeMs + 1)
+      // The due resume dispatches a second occurrence; it has no contract yet.
+      fixture.automations?.wake()
+      const store = readStore(fixture)
+      const second = store.getDispatch(itemId)?.occurrenceId
+      expect(second).not.toBe(first)
+      if (second === null || second === undefined) throw new Error('not re-dispatched')
+      fixture.service.claim(workerAgent(second))
+      await fixture.service.report(workerAgent(second), { status: 'ready', summary: 'done', idempotencyKey: 'r-rearm-ready' })
+      // The earlier generation's contract completes, but it is not this run's.
+      peer.tasks.set(old.id, { contract: old, state: 'done', reason: null, receipt: serviceReceipt(old) })
+      fixture.automations?.wake()
+      expect(fixture.service.acceptanceVerdict(itemId)).toBeNull()
+      expect(errorCode(() => fixture.service.settleAcceptance(itemId))).toBe('invalid-state')
+      // Once the newest run's contract is known, its row supersedes the old one.
+      const fresh = publishWorkerContract(fixture, peer, second)
+      peer.tasks.set(fresh.id, { contract: fresh, state: 'pending', reason: null, receipt: null })
+      fixture.automations?.wake()
+      expect(store.lateAcceptanceBinding(itemId)).toMatchObject({ occurrenceId: second, binding: { contractId: fresh.id } })
+      expect(fixture.service.acceptanceVerdict(itemId)).toBeNull()
+      peer.tasks.set(fresh.id, { contract: fresh, state: 'done', reason: null, receipt: serviceReceipt(fresh) })
+      fixture.automations?.wake()
+      expect(fixture.service.acceptanceVerdict(itemId)).toMatchObject({ contractId: fresh.id })
+      expect(boundEvents(fixture, itemId)).toBe(2)
+    } finally { vi.useRealTimers() }
+  })
+
+  test('acceptance.bindWorkerRun reads at most maxPerTick handles per wake and survives a failing peer', async () => {
+    const fixture = await serviceHarness({ extra: bindWorkerRun(1) })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const first = admitPlain(fixture, 'bind-batch-1')
+    const second = admitPlain(fixture, 'bind-batch-2')
+    // The older run has no contract yet; it must not starve the newer one.
+    publishWorkerContract(fixture, peer, second.occurrenceId)
+    const reads = () => fixture.automations?.acceptanceReads.splice(0) ?? []
+    reads()
+    fixture.automations?.wake()
+    expect(reads()).toEqual([first.occurrenceId])
+    fixture.automations?.wake()
+    expect(reads()).toEqual([second.occurrenceId])
+    expect(boundEvents(fixture, second.itemId)).toBe(1)
+    fixture.automations?.wake()
+    expect(reads()).toEqual([first.occurrenceId])
+    if (fixture.automations !== undefined) fixture.automations.acceptanceFailure = new Error('automations stopped')
+    expect(() => fixture.automations?.wake()).not.toThrow()
+    expect(reads()).toEqual([first.occurrenceId])
+    expect(boundEvents(fixture, first.itemId)).toBe(0)
+  })
+
+  test('acceptance.bindWorkerRun validates its shape and requires an active intake', () => {
+    const base = { enabled: true, mode: 'active', databasePath: '/data/state.sqlite', workRoot: '/data/work', workerAutomationId: WORKER,
+      admission: { allowedKinds: ['review'] },
+      scope: { workspace: WORKSPACE, preset: PRESET, principalId: PRINCIPAL, ownerRouteId: ROUTE, expiresAt: Date.now() + 3_600_000 } } satisfies Config
+    expect(normalizeConfig({ ...base, acceptance: { bindWorkerRun: { enabled: true } } }, Date.now()).acceptanceBindWorkerRun).toEqual({ maxPerTick: 5 })
+    expect(normalizeConfig({ ...base, acceptance: { bindWorkerRun: { enabled: true, maxPerTick: 2 } } }, Date.now())).toMatchObject({ acceptanceBindWorkerRun: { maxPerTick: 2 } })
+    expect(normalizeConfig({ ...base, acceptance: { bindWorkerRun: { enabled: false, maxPerTick: 3 } } }, Date.now()).acceptanceBindWorkerRun).toBeUndefined()
+    expect(normalizeConfig({ ...base, acceptance: { bindWorkerRun: { enabled: true } } }, Date.now()).acceptanceAutoSettle).toBeUndefined()
+    for (const maxPerTick of [0, 11, 1.5]) {
+      expect(errorCode(() => normalizeConfig({ ...base, acceptance: { bindWorkerRun: { enabled: true, maxPerTick } } }, Date.now()))).toBe('invalid-input')
+    }
+    expect(errorCode(() => normalizeConfig({ ...base, acceptance: { bindWorkerRun: { enabled: 'yes' } } } as never, Date.now()))).toBe('invalid-input')
+    expect(errorCode(() => normalizeConfig({ ...base, acceptance: { bindWorkerRun: { enabled: true, extra: 1 } } } as never, Date.now()))).toBe('invalid-input')
+    expect(() => normalizeConfig({ ...base, mode: 'observe', acceptance: { bindWorkerRun: { enabled: true } } }, Date.now())).toThrow(/acceptance\.bindWorkerRun requires/u)
   })
 
   test('a Policy change notifies a live item without cancelling it; its follow-ups release when it ends', async () => {

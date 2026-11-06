@@ -99,6 +99,23 @@ describe('automation acceptance persistence', () => {
     fixture.store.close()
   })
 
+  test('reads the frozen acceptance handle back by exact occurrence and scope only', async () => {
+    const fixture = await storeFixture()
+    const { task } = start(fixture.store, 'acceptance-occurrence')
+    const lookup = (overrides: Partial<{ automationId: string; occurrenceId: string; workspace: string; agentPreset: string }> = {}) =>
+      fixture.store.inspectOccurrenceAcceptance({ automationId: 'acceptance-occurrence', occurrenceId: task.occurrenceId, workspace: '/work/alpha', agentPreset: 'primary', ...overrides })
+    expect(task.id).toBe(`task-${task.occurrenceId}`)
+    expect(lookup()).toBeUndefined()
+    bind(fixture.store, task.id)
+    expect(lookup()).toEqual({ contractId: 'acceptance-contract', contractDigest: 'a'.repeat(64) })
+    expect(lookup({ automationId: 'other' })).toBeUndefined()
+    expect(lookup({ occurrenceId: 'occ-other' })).toBeUndefined()
+    expect(lookup({ workspace: '/work/other' })).toBeUndefined()
+    expect(lookup({ agentPreset: 'other' })).toBeUndefined()
+    expect(lookup({ occurrenceId: '' })).toBeUndefined()
+    fixture.store.close()
+  })
+
   test('restarts an accepted submitted attempt as durable unknown without replaying the original execution', async () => {
     const fixture = await storeFixture()
     const { task } = start(fixture.store, 'acceptance-restart')

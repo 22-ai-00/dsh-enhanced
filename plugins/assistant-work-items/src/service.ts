@@ -26,7 +26,7 @@ import { WorkItemOwnerRecall, type OwnerWorkItemExecution, type OwnerWorkItemLis
 export type { OwnerWorkItemExecution, OwnerWorkItemListInput, OwnerWorkItemRecallInput, OwnerWorkItemSummary } from './owner-recall.js'
 import { WorkItemStore, type WorkItemFollowUpCursor } from './store.js'
 import { normalizeFollowUp, normalizePolicyChange, noticePolicyChange } from './policy-notice.js'
-import { settleAcceptance } from './acceptance-binding.js'
+import { resolveAcceptanceBinding, settleAcceptance, workerRunTaskRef } from './acceptance-binding.js'
 import {
   WorkItemSignalIntake,
   type WorkItemSignalRegistration,
@@ -252,6 +252,8 @@ export class AssistantWorkItemsService extends Service {
   private workItemsSchedulerLastError: string | null = null
   /** In-memory round-robin position of `acceptance.autoSettle`; a restart rescans from the start. */
   private workItemsAutoSettleCursor: Readonly<{ createdAt: number; id: string }> | null = null
+  /** In-memory round-robin position of `acceptance.bindWorkerRun`; a restart rescans from the start. */
+  private workItemsBindWorkerRunCursor: Readonly<{ createdAt: number; id: string }> | null = null
 
   private readonly workItemsOwnerReads: WorkItemOwnerRecall
   private readonly workItemsOwnerContinuations: WorkItemOwnerContinuation
@@ -570,10 +572,70 @@ export class AssistantWorkItemsService extends Service {
       this.workItemsSchedulerLastError = error instanceof WorkItemError ? error.code : 'scheduler-wake-failed'
       this.ctx.logger.warn(`assistant-work-items: waiting resume scan failed: ${describe(error)}`)
     } finally {
+      // Bind first so a run that already finished can settle on this same wake.
+      try { this.workItemsBindWorkerRuns(components) }
+      catch (error) { this.ctx.logger.warn(`assistant-work-items: acceptance worker-run bind scan failed: ${describe(error)}`) }
       try { this.workItemsAutoSettle(components) }
       catch (error) { this.ctx.logger.warn(`assistant-work-items: acceptance auto-settle scan failed: ${describe(error)}`) }
       this.workItemsSchedulerWaking = false
     }
+  }
+
+  /**
+   * WP21 slice 6: on the same native wake, bind at most `maxPerTick`
+   * dispatched items to the acceptance contract their own worker run froze.
+   * Automations only names the handle for the exact occurrence; the contract
+   * itself is re-read from the verifier and checked against the live owner
+   * route. Items whose mandate already binds a contract are never touched.
+   * Round-robin like auto-settle; anything short of a valid binding writes
+   * nothing and is simply tried again on a later wake.
+   */
+  private workItemsBindWorkerRuns(components: Components): void {
+    const bind = this.workItemsConfig.acceptanceBindWorkerRun
+    const worker = this.workItemsConfig.workerAutomationId
+    const automations = this.workItemsAutomations()
+    if (bind === undefined || worker === null || this.workItemsClosed || this.workItemsVerifier() === undefined
+      || typeof automations?.inspectOccurrenceAcceptance !== 'function') return
+    const limit = bind.maxPerTick
+    const batch = [...components.store.listLateAcceptanceCandidates(worker, this.workItemsBindWorkerRunCursor, limit)]
+    if (batch.length < limit && this.workItemsBindWorkerRunCursor !== null) {
+      const seen = new Set(batch.map(candidate => candidate.item.id))
+      for (const candidate of components.store.listLateAcceptanceCandidates(worker, null, limit - batch.length)) {
+        if (!seen.has(candidate.item.id)) batch.push(candidate)
+      }
+    }
+    for (const candidate of batch) {
+      if (this.workItemsClosed) break
+      this.workItemsBindWorkerRunCursor = Object.freeze({ createdAt: candidate.item.createdAt, id: candidate.item.id })
+      try {
+        const outcome = this.workItemsBindWorkerRun(components, automations, candidate)
+        if (outcome !== 'bound' && outcome !== 'no-contract') {
+          this.ctx.logger.debug(`assistant-work-items: acceptance worker-run bind for ${candidate.item.id}: ${outcome}`)
+        }
+      } catch (error) {
+        this.ctx.logger.debug(`assistant-work-items: acceptance worker-run bind for ${candidate.item.id} not recorded: ${describe(error)}`)
+      }
+    }
+  }
+
+  private workItemsBindWorkerRun(
+    components: Components,
+    automations: PeerAutomationsService,
+    candidate: Readonly<{ item: WorkItemRecord; automationId: string; occurrenceId: string }>,
+  ): string {
+    const { item, automationId, occurrenceId } = candidate
+    if (item.authority?.mandate?.acceptance !== undefined) return 'mandate-bound'
+    if (typeof automations.inspectOccurrenceAcceptance !== 'function') return 'automations-unsupported'
+    const handle = automations.inspectOccurrenceAcceptance({ automationId, occurrenceId, workspace: item.scope.workspace, agentPreset: item.scope.preset })
+    if (handle === undefined) return 'no-contract'
+    // The contract owner must be this item's owner on the live route; any
+    // drift since admission leaves the item unbound.
+    const owner = this.workItemsAssertOwnerRoute(item)
+    if (owner.principalVersion !== item.owner.principalVersion
+      || owner.bindingVersion !== item.owner.bindingVersion || owner.generation !== item.owner.generation) return 'owner-changed'
+    const binding = resolveAcceptanceBinding(this.workItemsVerifier(), handle, owner, Date.now(), { taskRef: workerRunTaskRef(occurrenceId) })
+    if (typeof binding === 'string') return binding
+    return components.store.recordLateAcceptanceBinding({ itemId: item.id, occurrenceId, binding }).created ? 'bound' : 'already-bound'
   }
 
   /**
@@ -836,7 +898,14 @@ export class AssistantWorkItemsService extends Service {
     const components = this.workItemsAvailable()
     const item = components.store.findItemById(itemId)
     if (item === undefined) fail('not-found', 'work item does not exist')
-    const binding = item.authority?.mandate?.acceptance
+    let binding = item.authority?.mandate?.acceptance
+    if (binding === undefined) {
+      // WP21 slice 6: the latest late binding, only for the current occurrence;
+      // an earlier generation's unsettled binding never settles re-armed work.
+      const late = components.store.lateAcceptanceBinding(item.id)
+      if (late !== undefined && late.occurrenceId !== item.occurrenceId) fail('invalid-state', 'acceptance binding is for an earlier occurrence')
+      binding = late?.binding
+    }
     if (binding === undefined) fail('invalid-state', 'work item has no independent acceptance binding')
     // The stored mandate must still be intact for this exact item; checked
     // locally so a pull-based settle never writes Policy audit.
