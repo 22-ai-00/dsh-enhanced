@@ -19,7 +19,7 @@ function loadBundle(): BundleRegistration {
 }
 
 function clientContext() {
-  const registrations: { name: string, options: Record<string, unknown> }[] = []
+  const registrations: { name: string, options: Record<string, unknown>, component: unknown }[] = []
   const disposed: string[] = []
   const unmount = vi.fn(async () => undefined)
   const ctx = {
@@ -38,7 +38,7 @@ function clientContext() {
             return () => { disposed.push(name); dispose() }
           },
           register: (options: Record<string, unknown>, component: unknown) => {
-            registrations.push({ name: String(options['name']), options })
+            registrations.push({ name: String(options['name']), options, component })
             expect(typeof component).toBe('function')
             return () => { disposed.push(String(options['id'] ?? options['key'])) }
           },
@@ -70,7 +70,13 @@ describe('owner console client bundle', () => {
       { name: 'sidebar.panellist', id: 'owner-console', order: 30, label: expect.any(Function) },
       { name: 'main', key: 'owner-console' },
     ])
-    expect(fake.registrations[0]!.options['label'] as () => string).toBeTypeOf('function')
+    expect((fake.registrations[0]!.options['label'] as () => string)()).toBe('文鳐')
+    // The main slot root must own vertical scrolling so lower cards stay reachable on short windows.
+    type Element = { type: (props: unknown) => Element, props: { style?: Record<string, unknown> } & Record<string, unknown> }
+    const mainElement = (fake.registrations[1]!.component as () => Element)()
+    const root = mainElement.type(mainElement.props)
+    expect(root.props['data-owner-console-scroll']).toBe('')
+    expect(root.props.style).toMatchObject({ height: '100%', minHeight: 0, overflowY: 'auto' })
     await release()
     expect(fake.disposed).toEqual(['main', 'owner-console', 'sidebar.panellist', 'owner-console'])
     expect(fake.unmount).toHaveBeenCalledOnce()

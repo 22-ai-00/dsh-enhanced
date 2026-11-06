@@ -62,6 +62,12 @@ export function larkConnectionLabel(connection: OwnerConsoleStatus['feishu']['co
 
 const OWN_PACKAGE = '@dsh-enhanced/owner-console'
 const muted = 'var(--dsw-alias-label-primary-dimmed)'
+/**
+ * The Host main slot is a fixed-height pane; the panel owns its own vertical scroll so
+ * the lower cards stay reachable on short windows. `minHeight: 0` lets a flex/grid
+ * parent shrink this root below its content height instead of clipping it.
+ */
+export const scrollRootStyle = { height: '100%', minHeight: 0, flex: '1 1 auto', overflowY: 'auto', boxSizing: 'border-box' } as const
 const panelStyle = { padding: '24px', maxWidth: 760, margin: '0 auto', display: 'grid', gap: 16 }
 const cardStyle = { border: '1px solid var(--dsw-alias-border-secondary)', borderRadius: 8, padding: 16 }
 const inputStyle = { padding: '4px 8px', borderRadius: 6, border: '1px solid var(--dsw-alias-border-secondary)', background: 'transparent', color: 'inherit', fontSize: 13 }
@@ -88,7 +94,7 @@ export function OwnerConsoleIcon() {
   return el('span', {
     'aria-hidden': true,
     style: { display: 'block', width: 18, height: 18, borderRadius: 4, border: '1px solid currentColor', textAlign: 'center', lineHeight: '16px', fontSize: 11 },
-  }, '控')
+  }, '鳐')
 }
 
 export function OwnerConsolePanel({ remote, navigation }: Readonly<{
@@ -265,8 +271,10 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
         } catch { setError('配置必须是 JSON 对象') }
       } }, '应用配置')))
 
-  return el('section', { 'aria-label': '主人控制台', style: panelStyle },
-    el('h2', { style: { margin: 0, fontSize: 18 } }, '控制台'),
+  return el('section', { 'aria-label': '文鳐（主人控制台）', style: panelStyle },
+    el('div', {},
+      el('h2', { style: { margin: 0, fontSize: 18 } }, '文鳐 Ray'),
+      el('p', { style: { margin: '2px 0 0', fontSize: 12, color: muted } }, '你的个人助手小鳐 · 小鳐小鳐，从游到飞')),
     el('p', { style: { margin: 0, fontSize: 13, color: muted } }, '只显示需要你处理的事；需要直接对话时从这里进入。'),
     el('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
       el('button', { style: buttonStyle, onClick: () => navigation.openConversation() }, '开始对话'),
@@ -276,6 +284,11 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
     card('远程接入（飞书）', feishuRows, feishuActions),
     card('TraeX', traexRows),
     card('本项目插件管理', bundles))
+}
+
+/** Main-slot root: a scroll container around the panel. */
+export function OwnerConsoleMain(props: Parameters<typeof OwnerConsolePanel>[0]) {
+  return el('div', { 'data-owner-console-scroll': '', style: scrollRootStyle }, jsx(OwnerConsolePanel, props))
 }
 
 export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
@@ -298,9 +311,9 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
           } catch { /* the native plugins page may not be registered in an embedding */ }
         },
       }
-      const panel = () => jsx(OwnerConsolePanel, { remote, navigation })
+      const panel = () => jsx(OwnerConsoleMain, { remote, navigation })
       const sidebar = runtime.slots.inject('sidebar.panellist', () => runtime.slots.register(
-        { name: 'sidebar.panellist', id: 'owner-console', order: 30, label: () => '控制台' }, OwnerConsoleIcon))
+        { name: 'sidebar.panellist', id: 'owner-console', order: 30, label: () => '文鳐' }, OwnerConsoleIcon))
       const main = runtime.slots.inject('main', () => runtime.slots.register(
         { name: 'main', key: 'owner-console' }, panel))
       // Cordis effects accept a function: dispose the slot registrations in reverse order.

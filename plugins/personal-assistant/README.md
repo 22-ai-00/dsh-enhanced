@@ -1,6 +1,6 @@
 # @dsh-enhanced/personal-assistant
 
-个人助理四核心的纯 meta-bundle，一次安装以下独立包：
+个人助手「文鳐」（Ray，小鳐）四核心的纯 meta-bundle，一次安装以下独立包：
 
 - `@dsh-enhanced/assistant-policy`
 - `@dsh-enhanced/personal-memory`

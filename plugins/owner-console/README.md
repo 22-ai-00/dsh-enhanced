@@ -1,6 +1,7 @@
-# owner-console
+# owner-console（文鳐 Ray）
 
-DeepSeek Harness 左侧栏的单一入口「控制台」。设计沿用
+个人助手「文鳐」（英文 Ray，小名小鳐；口号「小鳐小鳐，从游到飞」）在 DeepSeek Harness 左侧栏的
+单一入口，即原来的「控制台」（主人控制台）；面板标题显示助手的名字与口号。改名只影响显示，包名、插件 id 与条目 id 仍是 `owner-console`。设计沿用
 [dsh-superagent-prototype](https://github.com/22-ai-00/dsh-superagent-prototype) 的理念：
 注意力是预算，只在被请求或书面规则允许时行动；只说需要人行动的话；一次一个问题；概念和设置尽量少；
 面板只展示需要人处理的事。
@@ -18,7 +19,7 @@ dsh --profile web --dump-config
 ```
 
 安装由 DSH 的 pnpm 路径完成，本包声明的运行依赖（`@deepseek-ai/schemastery`、`zod`）随包安装；
-Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏出现「控制台」入口：
+Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏出现「文鳐」入口：
 顶部「开始对话」直接进入当前工作区的智能体会话，「打开插件页」跳到 DSH 原生插件页；下面是配置卡片：
 
 | 卡片 | 内容 | 数据来源 |
@@ -26,10 +27,11 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 | 远程接入（飞书） | 接入方式、`lark-channel` 条目、连接状态（`larkChannel.health()` 快照）、appId 是否配置；两种对接：直接填写 appId + secret 引用，或从 Host 环境一键探测 appId | `settings.describe` + `larkChannel.health()` |
 | TraeX | `traex-acp-provider` 条目、是否启用、命令 | `settings.describe` |
 | 本项目插件管理 | 本项目的 bundle 层（启用/停用）、已加载条目（启用/禁用/阶段）、安装 `@dsh-enhanced/*`（含依赖），以及对 live 字段的合并配置 | `pluginManager` + `settings.describe` / `settings.mutate` |
-| 依赖自检 | `assistant-policy`、`assistant-delivery`、`assistant-skills` 是否可用 | Cordis service 注册表（严格查找） |
 
 读取与写入都经 `typert` 的严格 invocation 返回；面板不缓存或上报任何内容。
-依赖自检的「可用」只表示提供该 service 的 fiber 当前处于活动状态。飞书「连接」行读取
+Host 状态里仍带 `dependencies` 字段，但面板不再渲染「依赖自检」卡片。
+面板根容器自带纵向滚动（`height: 100%` + `min-height: 0` + `overflow-y: auto`），窗口较矮时
+底部的「高级：合并配置」仍可滚动到达。飞书「连接」行读取
 `larkChannel.health()` 的同步快照（无 I/O）：只透传枚举内的连接状态（已连接 / 已连接但期间有断档 /
 连接中 / 重连中 / 未连接 / 已停用）与枚举内的最近错误码；没有该 service 显示「未加载」，service
 存在但 health 抛错、缺失或返回未知值显示「已加载，状态未知」，不会推断为已连接。
@@ -107,6 +109,7 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 
 `tests/client-bundle.spec.ts` 用 Web 外壳的 `__ModuleLoader__` 契约加载实际构建产物
 `lib/client.js`，以真实 `react`/`react/jsx-runtime` 执行 factory，断言 sidebar/main 两个注册与释放；
+并断言侧栏标签为「文鳐」、main 槽根容器带纵向滚动样式；
 因此该测试依赖先运行 `pnpm --dir plugins/owner-console build`（根检查与 `pnpm check` 均先构建）。
 
 ## 限制
@@ -116,8 +119,10 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 - 插件管理支持移除本项目 bundle（仅 `removable` 且非自身，且必须由浏览器确认；无确认通道时不执行）；
 - **真实 Web GUI 已验证**：临时 profile + pinned DSH `0.2.1-rc.2` 下左侧栏入口、面板全部卡片、
   原生插件页已安装行、「打开插件页 / 开始对话」均通过（证据 `docs/evidence/owner-console/browser-smoke/`）。
-  live Harness app 是 `0.2.1-rc.5`，仓库 peer 约定精确 `0.2.1-rc.2`，安装需 owner 显式
-  `dsh plugin allow-version … --accept-risk`；该路径下同样验证了入口、面板与 typert 状态。
+  live Harness Mac app 现为 `0.2.2-rc.1`：owner-console `0.1.65` 的 tgz 经 app 自带的 dsh 装入
+  `desktop` profile（peer 版本不符，需 owner 显式 `dsh plugin allow-version … --accept-risk`），
+  2026-11-06 验证了侧栏入口、面板、插件页已安装行与「开始对话」（证据在被 git 忽略的
+  `docs/evidence/owner-console/mac-live-app-20261106/`）。
   飞书/TraeX 三态卡片（未安装→安装、已安装未启用→启用、活动→配置）也在真实 GUI 中复验：
   启用动作返回 restart-required 并提示重启。登录态与真实飞书/模型连接仍未验收。
   本地 `pnpm pack` 产物（非 workspace 链接）经 `dsh plugin add <tgz>` 安装也已验证：随包依赖
