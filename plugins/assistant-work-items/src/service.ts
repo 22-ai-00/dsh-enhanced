@@ -701,11 +701,18 @@ export class AssistantWorkItemsService extends Service {
     // admission cannot come back. Other Delivery failures
     // (`owner-route-unavailable`) stay transient and are re-read.
     const owner = this.workItemsAssertOwnerRoute(item)
-    const bindingId = this.workItemsOwnerRouteBindingId(item, owner)
+    const route = this.workItemsOwnerRouteBindingId(item, owner)
     if (owner.principalVersion !== item.owner.principalVersion
       || owner.bindingVersion !== item.owner.bindingVersion || owner.generation !== item.owner.generation) return 'owner-changed'
+    // A Delivery without the method, or a route that moved between the two
+    // reads, is re-read on a later wake instead of parking the pair; only a
+    // malformed answer is final for this occurrence.
+    if (route.kind !== 'bound') {
+      return route.kind === 'unsupported' ? 'owner-route-binding-unsupported'
+        : route.kind === 'drift' ? 'owner-route-drift' : 'owner-route-binding-unknown'
+    }
     // The run must have been frozen under exactly this owner route's binding.
-    if (bindingId === undefined) return 'owner-route-binding-unknown'
+    const bindingId = route.bindingId
     if (typeof handle.bindingId !== 'string' || handle.bindingId !== bindingId
       || handle.bindingVersion !== owner.bindingVersion || handle.bindingGeneration !== owner.generation) return 'binding-mismatch'
     const binding = resolveAcceptanceBinding(this.workItemsVerifier(), handle, owner, Date.now(), { taskRef: workerRunTaskRef(occurrenceId), notBefore })
@@ -717,19 +724,23 @@ export class AssistantWorkItemsService extends Service {
    * The exact Delivery binding id behind `owner`, read through Delivery's
    * Host-only `inspectOwnerRouteBinding`. Its embedded receipt must equal
    * `owner` field for field, so the id belongs to the very route state just
-   * validated. Undefined (fail closed) for a Delivery without the method or a
-   * receipt that does not match; Delivery errors propagate like
-   * `validateOwnerRoute`'s.
+   * validated. Fails closed without a binding id when Delivery lacks the
+   * method (`unsupported`), when the embedded receipt differs from `owner`
+   * (`drift`: the route moved between the two reads) or when the answer is
+   * malformed; Delivery errors propagate like `validateOwnerRoute`'s.
    */
-  private workItemsOwnerRouteBindingId(item: WorkItemRecord, owner: Readonly<PeerOwnerRouteReceipt>): string | undefined {
+  private workItemsOwnerRouteBindingId(item: WorkItemRecord, owner: Readonly<PeerOwnerRouteReceipt>):
+    { readonly kind: 'bound', readonly bindingId: string } | { readonly kind: 'unsupported' | 'drift' | 'malformed' } {
     const delivery = this.workItemsDelivery()
     if (typeof delivery?.inspectOwnerRouteBinding !== 'function') {
       if (!this.workItemsOwnerRouteBindingWarned) {
         this.workItemsOwnerRouteBindingWarned = true
         this.ctx.logger.warn('assistant-work-items: acceptance.bindWorkerRun needs assistant-delivery with inspectOwnerRouteBinding; worker runs stay unbound')
       }
-      return undefined
+      return { kind: 'unsupported' }
     }
+    // Warn again if a later Delivery drops the method once more.
+    this.workItemsOwnerRouteBindingWarned = false
     const scope = item.scope
     let read
     try {
@@ -744,9 +755,10 @@ export class AssistantWorkItemsService extends Service {
     const keys: readonly (keyof PeerOwnerRouteReceipt)[] = ['receiptVersion', 'authorityId', 'authorityHash', 'principalId',
       'principalRecordId', 'principalVersion', 'workspace', 'agentPreset', 'bindingVersion', 'generation']
     if (read === null || typeof read !== 'object' || read.protocol !== 'assistant-delivery/owner-route-binding/v1'
-      || receipt === null || typeof receipt !== 'object' || !keys.every(key => receipt[key] === owner[key])
-      || typeof read.bindingId !== 'string' || read.bindingId === '' || read.bindingId.length > 256) return undefined
-    return read.bindingId
+      || receipt === null || typeof receipt !== 'object'
+      || typeof read.bindingId !== 'string' || read.bindingId === '' || read.bindingId.length > 256) return { kind: 'malformed' }
+    if (!keys.every(key => receipt[key] === owner[key])) return { kind: 'drift' }
+    return { kind: 'bound', bindingId: read.bindingId }
   }
 
   /**

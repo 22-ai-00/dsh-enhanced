@@ -1238,7 +1238,9 @@ export class WorkItemStore {
    * The intake decision that admitted one item, if any: its first
    * `admitted` (or crash-recovered `replayed`) admission row joined with the
    * evaluation it acted on.
-   * Read-only; a bounded scan of the admission table (no index on item_id).
+   * Read-only. Scans the append-only admission table: there is no index on
+   * item_id, and adding one needs a schema step. Growth is capped by the
+   * hourly intake budget.
    */
   intakeProvenance(itemId: string): Readonly<{ admission: WorkItemIntakeAdmissionRecord; evaluation: WorkItemIntakeEvaluationRecord }> | undefined {
     const row = this.#statement(`SELECT * FROM work_item_intake_admission WHERE item_id = ? AND outcome IN ('admitted', 'replayed')

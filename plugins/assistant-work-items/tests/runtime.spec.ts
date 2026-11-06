@@ -1331,6 +1331,20 @@ describe('work-item admission authority revalidation', () => {
     expect(readStore(fixture).findItemById(other.itemId)).toMatchObject({ state: 'ready', attempt: 1 })
   })
 
+  test('a terminal item claimed again while Policy is unavailable stays terminal and is not re-armed', async () => {
+    const fixture = await serviceHarness({ extra: verdictGate() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { contract, itemId } = await executedBound(fixture, peer, 'gate-revive-unavailable', 'occ-1')
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract, Date.now(), 'failed') })
+    expect(fixture.service.settleAcceptance(itemId)).toMatchObject({ blockedReason: 'acceptance-not-achieved' })
+    const dispatch = readStore(fixture).getDispatch(itemId)
+    fixture.policy.setFailure(peerError('idempotency-conflict'))
+    expect(errorCode(() => fixture.service.claim(workerAgent('occ-1')))).toBe('claim-conflict')
+    expect(readStore(fixture).findItemById(itemId)).toMatchObject({ state: 'blocked', stateReason: 'acceptance-not-achieved', attempt: 1 })
+    expect(readStore(fixture).getDispatch(itemId)).toEqual(dispatch)
+    expect(fixture.service.health().authority).toMatchObject({ parked: 0 })
+  })
+
   test('acceptance.verdictGate only moves the generation a verdict was settled for', async () => {
     const fixture = await serviceHarness({ extra: verdictGate() })
     const peer = new FakeVerifierPeer(fixture.ctx)
@@ -1702,18 +1716,43 @@ describe('work-item admission authority revalidation', () => {
     }
   })
 
-  test('acceptance.bindWorkerRun refuses a binding receipt that differs from the validated owner route', async () => {
+  test('acceptance.bindWorkerRun re-reads a binding receipt that drifted from the validated owner route', async () => {
+    for (const drift of [{ authorityHash: 'sha256:other' }, { generation: 99 }, { bindingVersion: 99 }] as const) {
+      const fixture = await serviceHarness({ extra: bindWorkerRun() })
+      const peer = new FakeVerifierPeer(fixture.ctx)
+      const { itemId, occurrenceId } = admitPlain(fixture, `bind-route-binding-drift-${Object.keys(drift)[0]!}`)
+      publishWorkerContract(fixture, peer, occurrenceId)
+      fixture.automations?.acceptanceReads.splice(0)
+      const service = fixture.delivery.spy.service
+      const original = service.inspectOwnerRouteBinding!
+      let drifted = 2
+      service.inspectOwnerRouteBinding = input => {
+        const read = original(input)
+        if (drifted === 0) return read
+        drifted -= 1
+        return Object.freeze({ ...read, receipt: Object.freeze({ ...read.receipt, ...drift }) })
+      }
+      fixture.automations?.wake()
+      fixture.automations?.wake()
+      // Not parked: each wake reads again, and nothing reaches the verifier.
+      expect(fixture.automations?.acceptanceReads).toEqual([occurrenceId, occurrenceId])
+      expect(peer.reads).toEqual([])
+      expect(boundEvents(fixture, itemId)).toBe(0)
+      // Once both reads agree the run binds.
+      fixture.automations?.wake()
+      expect(boundEvents(fixture, itemId)).toBe(1)
+    }
+  })
+
+  test('acceptance.bindWorkerRun parks a malformed owner route binding answer', async () => {
     const fixture = await serviceHarness({ extra: bindWorkerRun() })
     const peer = new FakeVerifierPeer(fixture.ctx)
-    const { itemId, occurrenceId } = admitPlain(fixture, 'bind-route-binding-drift')
+    const { itemId, occurrenceId } = admitPlain(fixture, 'bind-route-binding-protocol')
     publishWorkerContract(fixture, peer, occurrenceId)
     fixture.automations?.acceptanceReads.splice(0)
     const service = fixture.delivery.spy.service
     const original = service.inspectOwnerRouteBinding!
-    service.inspectOwnerRouteBinding = input => {
-      const read = original(input)
-      return Object.freeze({ ...read, receipt: Object.freeze({ ...read.receipt, authorityHash: 'sha256:other' }) })
-    }
+    service.inspectOwnerRouteBinding = input => Object.freeze({ ...original(input), protocol: 'assistant-delivery/owner-route-binding/v0' as never })
     fixture.automations?.wake()
     fixture.automations?.wake()
     expect(fixture.automations?.acceptanceReads).toEqual([occurrenceId])
@@ -1738,22 +1777,36 @@ describe('work-item admission authority revalidation', () => {
     const fixture = await serviceHarness({ extra: bindWorkerRun() })
     const peer = new FakeVerifierPeer(fixture.ctx)
     // A Delivery that predates `inspectOwnerRouteBinding`.
-    Object.defineProperty(fixture.delivery, 'inspectOwnerRouteBinding', { value: undefined })
+    const drop = (): void => { Object.defineProperty(fixture.delivery, 'inspectOwnerRouteBinding', { value: undefined, configurable: true }) }
+    const restore = (): void => { delete (fixture.delivery as { inspectOwnerRouteBinding?: unknown }).inspectOwnerRouteBinding }
+    drop()
     const warn = vi.spyOn(fixture.ctx.logger, 'warn')
+    const bindingWarns = (): number => warn.mock.calls.filter(([message]) => String(message).includes('inspectOwnerRouteBinding')).length
     const { itemId, occurrenceId } = admitPlain(fixture, 'bind-route-legacy')
     publishWorkerContract(fixture, peer, occurrenceId)
     fixture.automations?.acceptanceReads.splice(0)
     fixture.automations?.wake()
     fixture.automations?.wake()
-    // Deterministic for this Delivery: parked after the first read, nothing bound.
-    expect(fixture.automations?.acceptanceReads).toEqual([occurrenceId])
-    // A second item does not warn again.
+    // Not parked, so an upgraded Delivery is picked up; nothing bound meanwhile.
+    expect(fixture.automations?.acceptanceReads).toEqual([occurrenceId, occurrenceId])
+    expect(bindingWarns()).toBe(1)
+    expect(peer.reads).toEqual([])
+    expect(boundEvents(fixture, itemId)).toBe(0)
+    // Delivery gains the method: the run binds on the next wake.
+    restore()
+    fixture.automations?.wake()
+    expect(boundEvents(fixture, itemId)).toBe(1)
+    // Losing it again warns once more, and the next item still recovers.
+    drop()
     const other = admitPlain(fixture, 'bind-route-legacy-2')
     publishWorkerContract(fixture, peer, other.occurrenceId)
     fixture.automations?.wake()
-    expect(warn.mock.calls.filter(([message]) => String(message).includes('inspectOwnerRouteBinding'))).toHaveLength(1)
-    expect(peer.reads).toEqual([])
-    expect(boundEvents(fixture, itemId)).toBe(0)
+    fixture.automations?.wake()
+    expect(bindingWarns()).toBe(2)
+    expect(boundEvents(fixture, other.itemId)).toBe(0)
+    restore()
+    fixture.automations?.wake()
+    expect(boundEvents(fixture, other.itemId)).toBe(1)
   })
 
   test('acceptance.bindWorkerRun refuses a contract whose task ref is another run', async () => {
