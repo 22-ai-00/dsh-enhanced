@@ -400,9 +400,34 @@ export function prepareDatabaseFile(path: string): void {
   }
 }
 
+// `validateSchema` reads the version before any write lock, so a concurrent
+// opener may advance the schema while this one waits on `busy_timeout`. Each
+// step re-reads `user_version` under its own `BEGIN IMMEDIATE` and runs its DDL
+// only when the file is still at `from`; otherwise it rolls back and returns
+// false so the caller re-validates the file as the other opener left it.
+function migrateStep(database: DatabaseSync, from: number, sql: string): boolean {
+  database.exec('BEGIN IMMEDIATE')
+  try {
+    if ((database.prepare('PRAGMA user_version').get() as Row)['user_version'] !== from) {
+      database.exec('ROLLBACK')
+      return false
+    }
+    database.exec(sql)
+    database.exec('COMMIT')
+    return true
+  } catch (error) {
+    if (database.isTransaction) database.exec('ROLLBACK')
+    throw error
+  }
+}
+
 function validateSchema(database: DatabaseSync): void {
+  // One read snapshot, so the version and the object list cannot straddle a
+  // concurrent opener's migration commit.
+  database.exec('BEGIN')
   const version = (database.prepare('PRAGMA user_version').get() as Row)['user_version'] as number
   const objects = database.prepare("SELECT type, name FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type, name").all() as Row[]
+  database.exec('COMMIT')
   // Reject unowned objects before migrations can fire a trigger or update a
   // foreign schema. `_` is literal here: sqliteXshadow is an application name.
   if (version !== 0 && objects.some(row => String(row['type']) !== 'index'
@@ -429,8 +454,7 @@ function validateSchema(database: DatabaseSync): void {
   }
   if (version === 0) {
     if (objects.length !== 0) fail('storage', 'new work-item database is not empty')
-    database.exec(`
-      BEGIN IMMEDIATE;
+    if (!migrateStep(database, 0, `
       CREATE TABLE work_item (
         id TEXT PRIMARY KEY, dedup_key TEXT NOT NULL, dedup_bucket INTEGER NOT NULL,
         source_id TEXT NOT NULL, kind TEXT NOT NULL, external_id TEXT NOT NULL,
@@ -502,16 +526,14 @@ function validateSchema(database: DatabaseSync): void {
       ${INTAKE_ADMISSION_ITEM_INDEX};
       INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '13');
       PRAGMA user_version = 13;
-      COMMIT;
-    `)
+    `)) return validateSchema(database)
     return
   }
   if (version === 1) {
     // A run may legitimately reclaim an expired lease, which needs a fresh claim
     // row for the same run. Rebuild the claim table without the (item, run) key
     // and add a surrogate `claim_id`; every existing row maps to a new id.
-    database.exec(`
-      BEGIN IMMEDIATE;
+    if (!migrateStep(database, 1, `
       ALTER TABLE work_item_claim RENAME TO work_item_claim_v1;
       CREATE TABLE work_item_claim (
         claim_id INTEGER PRIMARY KEY,
@@ -525,40 +547,34 @@ function validateSchema(database: DatabaseSync): void {
       DROP TABLE work_item_claim_v1;
       CREATE INDEX work_item_claim_run_idx ON work_item_claim(run_id);
       PRAGMA user_version = 2;
-      COMMIT;
-    `)
+    `)) return validateSchema(database)
   }
   if (version === 1 || version === 2) {
     // v3 adds the append-only outcome ledger. No existing table changes, so the
     // upgrade is a pure table creation that keeps every stored report intact.
-    database.exec(`
-      BEGIN IMMEDIATE;
+    if (!migrateStep(database, 2, `
       ${OUTCOME_SCHEMA_V3}
       UPDATE work_item_schema_meta SET value = '3' WHERE key = 'schema_version';
       PRAGMA user_version = 3;
-      COMMIT;
-    `)
+    `)) return validateSchema(database)
   }
   if (version === 1 || version === 2 || version === 3) {
     // v4 scopes a dispatch row to one delivery generation. Existing rows are
     // generation 0, whose identity is exactly the stored `event_id` /
     // `occurred_at`; no value is rewritten, so an in-flight wake stays valid.
-    database.exec(`
-      BEGIN IMMEDIATE;
+    if (!migrateStep(database, 3, `
       ALTER TABLE work_item_dispatch ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE work_item_dispatch ADD COLUMN wake_attempts INTEGER NOT NULL DEFAULT 0;
       UPDATE work_item_schema_meta SET value = '4' WHERE key = 'schema_version';
       PRAGMA user_version = 4;
-      COMMIT;
-    `)
+    `)) return validateSchema(database)
   }
   if (version === 1 || version === 2 || version === 3 || version === 4) {
     // v5 records the trusted Evaluation export state per settled outcome. Legacy
     // rows default to `pending`, so an upgraded database replays exactly the
     // settlements that have not reached Evaluation yet; no existing column is
     // rewritten and no prior revision is dropped.
-    database.exec(`
-      BEGIN IMMEDIATE;
+    if (!migrateStep(database, 4, `
       ALTER TABLE work_item_outcome ADD COLUMN evaluation_state TEXT NOT NULL DEFAULT 'pending' CHECK(evaluation_state IN ('pending', 'exported', 'skipped'));
       ALTER TABLE work_item_outcome ADD COLUMN evaluation_digest TEXT;
       ALTER TABLE work_item_outcome ADD COLUMN evaluation_recorded_at INTEGER;
@@ -566,8 +582,7 @@ function validateSchema(database: DatabaseSync): void {
       CREATE INDEX work_item_outcome_evaluation_idx ON work_item_outcome(evaluation_state, evidence_state);
       UPDATE work_item_schema_meta SET value = '5' WHERE key = 'schema_version';
       PRAGMA user_version = 5;
-      COMMIT;
-    `)
+    `)) return validateSchema(database)
   }
   if (version === 1 || version === 2 || version === 3 || version === 4 || version === 5) {
     // v6 adds followed-thread settlement. Two of its enum values land on the
@@ -576,8 +591,7 @@ function validateSchema(database: DatabaseSync): void {
     // column, drop the old table, recreate both indexes. No row is dropped and
     // no stored value changes; only the two CHECK lists gain `closed-by-thread`.
     // The follow table itself is a pure additive creation.
-    database.exec(`
-      BEGIN IMMEDIATE;
+    if (!migrateStep(database, 5, `
       ALTER TABLE work_item_outcome RENAME TO work_item_outcome_v5;
       DROP INDEX work_item_outcome_pending_idx;
       DROP INDEX work_item_outcome_evaluation_idx;
@@ -588,61 +602,56 @@ function validateSchema(database: DatabaseSync): void {
       ${FOLLOW_SCHEMA}
       UPDATE work_item_schema_meta SET value = '6' WHERE key = 'schema_version';
       PRAGMA user_version = 6;
-      COMMIT;
-    `)
+    `)) return validateSchema(database)
   }
   if (version >= 1 && version <= 6) {
     // v7 persists the audit-only admission mandate so claim and wake can replay
     // the identical policy decision. Both columns are nullable and additive:
     // pre-v7 rows stay `NULL` and are reported as legacy, never re-authorized
     // from the current configuration.
-    database.exec(`
-      BEGIN IMMEDIATE;
+    if (!migrateStep(database, 6, `
       ALTER TABLE work_item ADD COLUMN authority_basis TEXT;
       ALTER TABLE work_item ADD COLUMN authority_checked_at INTEGER;
       UPDATE work_item_schema_meta SET value = '7' WHERE key = 'schema_version';
       PRAGMA user_version = 7;
-      COMMIT;
-    `)
+    `)) return validateSchema(database)
   }
   if (version >= 1 && version <= 7) {
     // Add only bounded scheduler lookup indexes. No stored task, report,
     // occurrence, attempt, authority or budget value is rewritten.
-    database.exec(`BEGIN IMMEDIATE;
-      ${WAITING_RESUME_DUE_INDEX};
+    if (!migrateStep(database, 7, `${WAITING_RESUME_DUE_INDEX};
       ${ACTIVE_CLAIM_ITEM_INDEX};
       UPDATE work_item_schema_meta SET value = '8' WHERE key = 'schema_version';
-      PRAGMA user_version = 8;
-      COMMIT;`)
+      PRAGMA user_version = 8;`)) return validateSchema(database)
   }
   if (version >= 1 && version <= 8) {
-    database.exec(`BEGIN IMMEDIATE; ${CONTINUATION_SCHEMA};
+    if (!migrateStep(database, 8, `${CONTINUATION_SCHEMA};
       UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version';
-      PRAGMA user_version = 9; COMMIT;`)
+      PRAGMA user_version = 9;`)) return validateSchema(database)
   }
   if (version >= 1 && version <= 9) {
     // Additive only: the intake ledger starts empty and no existing row moves.
-    database.exec(`BEGIN IMMEDIATE; ${INTAKE_SCHEMA};
+    if (!migrateStep(database, 9, `${INTAKE_SCHEMA};
       UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version';
-      PRAGMA user_version = 10; COMMIT;`)
+      PRAGMA user_version = 10;`)) return validateSchema(database)
   }
   if (version >= 1 && version <= 10) {
     // Additive only: the evaluation table starts empty; no intake row moves.
-    database.exec(`BEGIN IMMEDIATE; ${INTAKE_EVALUATION_SCHEMA};
+    if (!migrateStep(database, 10, `${INTAKE_EVALUATION_SCHEMA};
       UPDATE work_item_schema_meta SET value = '11' WHERE key = 'schema_version';
-      PRAGMA user_version = 11; COMMIT;`)
+      PRAGMA user_version = 11;`)) return validateSchema(database)
   }
   if (version >= 1 && version <= 11) {
     // Additive only: the admission table starts empty; no evaluation row moves.
-    database.exec(`BEGIN IMMEDIATE; ${INTAKE_ADMISSION_SCHEMA};
+    if (!migrateStep(database, 11, `${INTAKE_ADMISSION_SCHEMA};
       UPDATE work_item_schema_meta SET value = '12' WHERE key = 'schema_version';
-      PRAGMA user_version = 12; COMMIT;`)
+      PRAGMA user_version = 12;`)) return validateSchema(database)
   }
   if (version >= 1 && version <= 12) {
     // Additive only: an index over existing admission rows; no row moves.
-    database.exec(`BEGIN IMMEDIATE; ${INTAKE_ADMISSION_ITEM_INDEX};
+    if (!migrateStep(database, 12, `${INTAKE_ADMISSION_ITEM_INDEX};
       UPDATE work_item_schema_meta SET value = '13' WHERE key = 'schema_version';
-      PRAGMA user_version = 13; COMMIT;`)
+      PRAGMA user_version = 13;`)) return validateSchema(database)
   }
   if (!Number.isSafeInteger(version) || version < 1 || version > SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
   const expected = JSON.stringify(WORK_ITEM_TABLE_NAMES)

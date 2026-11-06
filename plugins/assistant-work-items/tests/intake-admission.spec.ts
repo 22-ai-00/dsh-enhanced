@@ -1,9 +1,11 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import { createHash } from 'node:crypto'
+import { once } from 'node:events'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { Worker } from 'node:worker_threads'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   AssistantWorkItemsService,
@@ -482,5 +484,32 @@ describe('schema 13 migration', () => {
     drifted.exec("CREATE INDEX work_item_intake_admission_item_idx ON work_item_intake_admission(item_id) WHERE outcome = 'admitted'")
     drifted.close()
     expect(() => new WorkItemStore(missing.path)).toThrow(/intake admission schema differs/)
+  })
+
+  test('a concurrent opener that migrated 12 to 13 first is adopted, not re-run', async () => {
+    const indexSql = rows((await allowing()).config.databasePath, "SELECT sql FROM sqlite_schema WHERE name = 'work_item_intake_admission_item_idx'")[0]!['sql']
+    const { path, itemId, provenance } = await schema12WithAdmission()
+    // The other opener holds the write lock while this one reads version 12,
+    // then commits the 12->13 step while this one waits on `busy_timeout`.
+    const other = new Worker(`
+      const { parentPort, workerData } = require('node:worker_threads')
+      const db = new (require('node:sqlite').DatabaseSync)(workerData.path)
+      db.exec('BEGIN IMMEDIATE')
+      parentPort.postMessage('locked')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300)
+      db.exec(workerData.sql + "; UPDATE work_item_schema_meta SET value = '13' WHERE key = 'schema_version'; PRAGMA user_version = 13; COMMIT;")
+      db.close()
+    `, { eval: true, workerData: { path, sql: indexSql } })
+    const exited = once(other, 'exit')
+    await once(other, 'message')
+    const store = new WorkItemStore(path)
+    try {
+      expect(store.stats().schemaVersion).toBe(13)
+      expect(store.intakeProvenance(itemId)).toEqual(provenance)
+    } finally {
+      store.close()
+    }
+    expect(await exited).toEqual([0])
+    expect(rows(path, "SELECT count(*) AS n FROM sqlite_schema WHERE name = 'work_item_intake_admission_item_idx'")).toEqual([{ n: 1 }])
   })
 })
