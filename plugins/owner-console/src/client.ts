@@ -463,7 +463,7 @@ function header(navigation: Readonly<{ openConversation(): void, openPlugins(): 
       el('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
         el('h2', { style: { margin: 0, fontSize: 22, fontWeight: 600, letterSpacing: '0.02em', lineHeight: 1.25 } }, '文鳐 Ray'),
         jsx(WenyaoSeal, { height: 30 })),
-      el('p', { style: { margin: 0, fontSize: 13, color: muted, fontFamily: KAI_FONT, letterSpacing: '0.04em' } }, '你的个人助手小鳐 · 小鳐小鳐，从游到飞'),
+      el('p', { style: { margin: 0, fontSize: 13, color: muted, fontFamily: KAI_FONT, letterSpacing: '0.04em' } }, '你的个人助手小鳐 · 小鳐小鳐，游而化飞'),
       el('p', { style: { margin: '2px 0 0', fontSize: 12, color: caption } }, '只显示需要你处理的事；需要直接对话时从这里进入。')),
     el('div', { style: actionsStyle },
       el('button', { style: { ...primaryButtonStyle, padding: '8px 18px', fontSize: 14 }, onClick: () => navigation.openConversation() }, '开始对话'),

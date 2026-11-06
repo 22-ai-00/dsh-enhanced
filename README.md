@@ -3,7 +3,7 @@
 在本机运行的个人 AI 助手，通过 **Web 或飞书**聊天、处理任务、积累记忆，也可接入你自己的模型。基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)。
 
 助手名叫 **文鳐**（英文 Ray，小名小鳐）。文鳐出自《山海经》，是鱼身有翼、夜间飞行的祥瑞之鱼；
-定位是突破型、创造力型助手，口号「小鳐小鳐，从游到飞」。包名与插件 id 仍沿用 `dsh-enhanced` / `@dsh-enhanced/*`。
+定位是突破型、创造力型助手，口号「小鳐小鳐，游而化飞」。包名与插件 id 仍沿用 `dsh-enhanced` / `@dsh-enhanced/*`。
 
 项目希望让助手从日常使用和纠正中持续改进。**目前是实验版，完整的自动改进闭环仍在验证中。** 已支持的能力与限制见[当前状态](docs/rsi-status.md)。
 

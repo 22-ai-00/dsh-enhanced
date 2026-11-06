@@ -53,7 +53,7 @@ describe('owner console panel presentation', () => {
     expect(header?.type).toBe('header')
     const headerNodes = expand(header)
     expect(text(headerNodes)).toContain('文鳐 Ray')
-    expect(text(headerNodes)).toContain('你的个人助手小鳐 · 小鳐小鳐，从游到飞')
+    expect(text(headerNodes)).toContain('你的个人助手小鳐 · 小鳐小鳐，游而化飞')
     const start = headerNodes.find(node => node.type === 'button' && node.props['children'] === '开始对话')
     expect(start).toBeDefined()
     ;(start!.props['onClick'] as () => void)()

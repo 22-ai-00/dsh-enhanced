@@ -1,6 +1,6 @@
 # owner-console（文鳐 Ray）
 
-个人助手「文鳐」（英文 Ray，小名小鳐；口号「小鳐小鳐，从游到飞」）在 DeepSeek Harness 左侧栏的
+个人助手「文鳐」（英文 Ray，小名小鳐；口号「小鳐小鳐，游而化飞」）在 DeepSeek Harness 左侧栏的
 单一入口，即原来的「控制台」（主人控制台）；面板标题显示助手的名字与口号。改名只影响显示，包名、插件 id 与条目 id 仍是 `owner-console`。设计沿用
 [dsh-superagent-prototype](https://github.com/22-ai-00/dsh-superagent-prototype) 的理念：
 注意力是预算，只在被请求或书面规则允许时行动；只说需要人行动的话；一次一个问题；概念和设置尽量少；
