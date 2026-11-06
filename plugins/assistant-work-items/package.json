@@ -98,6 +98,7 @@
     "@dsh-enhanced/assistant-delivery": "workspace:*",
     "@dsh-enhanced/assistant-evaluation": "workspace:*",
     "@dsh-enhanced/assistant-policy": "workspace:*",
+    "@dsh-enhanced/assistant-verifier": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
