@@ -2215,7 +2215,7 @@ importers:
   plugins/personal-assistant:
     dependencies:
       '@deepseek-ai/dsh-permission-presets':
-        specifier: 0.2.1-rc.2
+        specifier: '>=0.2.1-rc.2 <0.3.0'
         version: 0.2.1-rc.2(21dfc7ab704f3c861ff2b79006a82931)
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
