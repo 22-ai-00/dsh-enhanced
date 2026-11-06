@@ -280,19 +280,40 @@ export function IntakeAgreementCard({ remote }: Readonly<{ remote: ConsoleRemote
   const [preset, setPreset] = useState('')
   const [result, setResult] = useState<OwnerConsoleIntakeAgreement>()
   const [failed, setFailed] = useState(false)
-  const load = () => {
+  const [busy, setBusy] = useState(false)
+  // The result never echoes its scope, so only the answer to the latest read for the
+  // scope still in the fields may be shown: editing a field or a newer read drops it.
+  const request = useRef(0)
+  const edit = (set: (value: string) => void) => (value: string) => {
+    request.current += 1
+    set(value)
+    setResult(undefined)
     setFailed(false)
+    setBusy(false)
+  }
+  const load = () => {
+    const id = ++request.current
+    setFailed(false)
+    setResult(undefined)
+    setBusy(true)
     void remote.intakeAgreement(workspace, preset).then(read => {
+      if (id !== request.current) return
+      setBusy(false)
       if (read.ok) setResult(read.value)
       else setFailed(true)
-    }, () => setFailed(true))
+    }, () => {
+      if (id !== request.current) return
+      setBusy(false)
+      setFailed(true)
+    })
   }
+  const blocked = busy || workspace.trim() === '' || preset.trim() === ''
   return card('intake 吻合度（只读）',
     el('div', { style: actionsStyle },
-      field('workspace', workspace, setWorkspace, '/absolute/workspace'),
-      field('preset', preset, setPreset, 'primary')),
+      field('workspace', workspace, edit(setWorkspace), '/absolute/workspace'),
+      field('preset', preset, edit(setPreset), 'primary')),
     el('div', { style: actionsStyle },
-      el('button', { style: buttonStyle, disabled: workspace.trim() === '' || preset.trim() === '', onClick: load }, '读取')),
+      el('button', { style: idle(buttonStyle, blocked), disabled: blocked, onClick: load }, busy ? '读取中…' : '读取')),
     intakeAgreementView(result, failed))
 }
 

@@ -431,5 +431,27 @@ describe('owner console intake agreement (read-only)', () => {
     expect(readIntakeAgreement(provider(agreement({ intake: agreementCell({ agreementPpm: 2_000_000 }) })), '/work/alpha', 'primary')).toEqual(unverifiable)
     expect(readIntakeAgreement(provider(agreement({ intake: agreementCell({ outcomes: { accepted: 1 } }) })), '/work/alpha', 'primary')).toEqual(unverifiable)
     expect(readIntakeAgreement(provider(null), '/work/alpha', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreement(provider(agreement({ scanned: Number.NaN })), '/work/alpha', 'primary')).toEqual(unverifiable)
+    const hostile = agreement()
+    Object.defineProperty(hostile, 'scanned', { get() { throw new Error('getter') } })
+    expect(readIntakeAgreement(provider(hostile), '/work/alpha', 'primary')).toEqual(unverifiable)
+  })
+
+  it('reports unverifiable for a field-valid answer whose counts contradict each other', () => {
+    const provider = (value: unknown) => ({ inspectIntakeAttentionAgreement: () => value })
+    const unverifiable = { state: 'unverifiable', causal: false }
+    for (const overrides of [
+      { intake: agreementCell({ agreed: 3 }) },
+      { intake: agreementCell({ disagreed: 0 }) },
+      { intake: agreementCell({ agreementPpm: 0 }) },
+      { intake: agreementCell({ notifications: 5 }) },
+      { intake: agreementCell({ items: 5 }) },
+      { scanned: 3 },
+      { fromNotifiedAt: 2_000 },
+      { byLevel: { accept: agreementCell(), digest: agreementCell() } },
+    ]) {
+      expect(readIntakeAgreement(provider(agreement(overrides)), '/work/alpha', 'primary')).toEqual(unverifiable)
+    }
+    expect(readIntakeAgreement(provider(agreement()), '/work/alpha', 'primary').state).toBe('ok')
   })
 })

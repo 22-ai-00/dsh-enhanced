@@ -89,7 +89,7 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation 作用域，唯一的「读取」按钮只调用 `intakeAgreement`，
 按 Evaluation 的默认摘要窗口读取；面板不写入、不采用、不发送。没有 Evaluation 显示未加载；Evaluation 未开启
 `intakeAttentionAgreementEnabled`（默认关，需同时开启 `notificationOutcomesEnabled`）时显示「未启用」；作用域为空、
-查询被拒或抛错、协议不符、`causal` 不为 `false` 或计数不合模式时显示「未通过校验」。结果固定 `causal: false`：
+查询被拒或抛错（含相对路径等 Evaluation 拒收的作用域）、协议不符、`causal` 不为 `false`、计数不合模式或彼此矛盾（结果合计、吻合/不吻合与比例按 Evaluation 的算法复核）时显示「未通过校验」。修改任一输入框会清掉已显示的结果，读取进行中按钮禁用，过期的应答被丢弃，因此显示的计数总是对应输入框里的作用域。结果固定 `causal: false`：
 口径混合了执行与注意力结果，不是 intake 准确率，只覆盖 auto 准入的工作项，不作为采用依据。
 
 ## 配置

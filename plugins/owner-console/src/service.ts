@@ -399,8 +399,27 @@ export function readIntakeAgreement(provider: unknown, workspace: string, preset
       byLevel: INTAKE_AGREEMENT_LEVELS.filter(level => byLevel[level] !== undefined)
         .map(level => ({ level, cell: intakeAgreementCell(byLevel[level]) })),
     } })
-    return parsed.success ? Object.freeze(parsed.data) : INTAKE_UNVERIFIABLE
+    return parsed.success && intakeAgreementConsistent(parsed.data.summary!) ? Object.freeze(parsed.data) : INTAKE_UNVERIFIABLE
   } catch {
     return INTAKE_UNVERIFIABLE
   }
+}
+
+type IntakeAgreementSummary = NonNullable<OwnerConsoleIntakeAgreement['summary']>
+
+/** Evaluation's own arithmetic, re-checked so a self-contradicting answer is never shown as `ok`. */
+function intakeAgreementConsistent(summary: IntakeAgreementSummary): boolean {
+  const cellConsistent = (cell: IntakeAgreementSummary['intake']) => {
+    const o = cell.outcomes
+    const total = INTAKE_AGREEMENT_OUTCOMES.reduce((sum, outcome) => sum + o[outcome], 0)
+    const decided = cell.agreed + cell.disagreed
+    return total === cell.notifications && cell.items <= cell.notifications
+      && cell.agreed === o.accepted + o.reacted && cell.disagreed === o.rejected + o['expired-unhandled']
+      && cell.agreementPpm === (decided === 0 ? null : Math.round(cell.agreed * 1_000_000 / decided))
+  }
+  const levels = summary.byLevel.map(entry => entry.cell)
+  return summary.fromNotifiedAt < summary.toNotifiedAt
+    && summary.intake.notifications + summary.notIntake + summary.unresolved + summary.foreign <= summary.scanned
+    && cellConsistent(summary.intake) && levels.every(cellConsistent)
+    && levels.reduce((sum, cell) => sum + cell.notifications, 0) === summary.intake.notifications
 }
