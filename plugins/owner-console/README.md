@@ -146,8 +146,9 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 ### 主视觉与图标资产
 
 源图 `11_深海觉醒/background.png`（1254×1254，1893031 bytes）与 `icon.png`（1254×1254，
-1240250 bytes）不入库；只提交 `assets/` 下压缩后的派生文件（合计约 88 KB），构建时由
-`scripts/build-assets.mjs` 内联成 `src/artwork.ts` 的 data URI，因此 `lib/client.js` 仍然自包含。
+1240250 bytes）不入库；只提交 `assets/` 下压缩后的派生文件（合计约 88 KB）与内联结果
+`src/artwork.ts`，因此 `lib/client.js` 仍然自包含。构建本身不重写 `src/`；`tests/artwork.spec.ts`
+校验已提交的 `src/artwork.ts` 与 `assets/` 逐字节一致，资产重新压缩后忘记刷新会直接测试失败。
 `assets/` 不随 npm 包发布，也不需要发布：数据已内联在 `lib/` 中。
 
 重新生成派生资产（仅当源图变化时；需要 Python + Pillow）：
@@ -156,11 +157,9 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 python3 plugins/owner-console/scripts/prepare-assets.py /path/to/kunpeng-11/11_深海觉醒
 ```
 
-每次构建都会从已提交的 `assets/` 重新生成 `src/artwork.ts`（幂等、无需源图）：
+派生资产变化后，用已提交的 `assets/` 重新生成 `src/artwork.ts`（幂等、无需源图）并提交：
 
 ```sh
-pnpm --dir plugins/owner-console build          # 内含 build:assets
-# 或只刷新内联数据 URI：
 pnpm --dir plugins/owner-console build:assets
 ```
 
