@@ -61,6 +61,7 @@ import type {
   WorkItemSettlementReport,
   WorkItemThreadClosure,
   WorkItemThreadSourceRegistration,
+  WorkItemIntakeProvenance,
 } from './types.js'
 import { WorkItemError } from './types.js'
 import { WorkItemWorkspace } from './workspace.js'
@@ -1139,6 +1140,33 @@ export class AssistantWorkItemsService extends Service {
   intakeAdmissions(source: string, sourceEventId: string): readonly WorkItemIntakeAdmissionRecord[] {
     if (this.workItemsConfig.intakeLedger === undefined || !this.workItemsConfig.enabled) fail('disabled', 'the work-item intake ledger is disabled')
     return this.workItemsAvailable().store.listIntakeAdmissions(source, sourceEventId)
+  }
+
+  /**
+   * Host-only, read-only (WP22): the WP20 intake judgment that admitted one
+   * work item, for Evaluation's intake/attention agreement metric. Undefined
+   * when the intake ledger is off, the item does not exist, or it was not
+   * admitted from intake (observe-mode `would-admit` never creates an item).
+   * Carries no source text: identity, rule, policy version and verdict only.
+   */
+  inspectIntakeProvenance(itemId: string): WorkItemIntakeProvenance | undefined {
+    if (this.workItemsConfig.intakeLedger === undefined || !this.workItemsConfig.enabled || this.workItemsClosed) return undefined
+    if (typeof itemId !== 'string' || itemId === '' || itemId.length > 256) return undefined
+    const found = this.workItemsAvailable().store.intakeProvenance(itemId)
+    if (found === undefined) return undefined
+    const { admission, evaluation } = found
+    return Object.freeze({
+      protocol: 'work-items/intake-provenance/v1',
+      itemId,
+      source: admission.source,
+      sourceEventId: admission.sourceEventId,
+      ruleId: admission.ruleId,
+      policyVersion: admission.policyVersion,
+      mode: admission.mode,
+      level: evaluation.level,
+      wouldAccept: evaluation.wouldAccept,
+      admittedAt: admission.recordedAt,
+    })
   }
 
   /** Persisted evaluation results for one intake row; replay reads these, never re-evaluates. */

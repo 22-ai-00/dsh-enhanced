@@ -324,6 +324,32 @@ describe('intake admission on the scheduler wake', () => {
     expect(second.service.intakeAdmissions('lark-channel', 'om_1')).toHaveLength(1)
   })
 
+  test('inspectIntakeProvenance names the intake judgment behind an auto-admitted item only', async () => {
+    const fixture = await serviceSetup({ enabled: true, mode: 'auto', kind: 'triage', originBindingId: 'binding-origin-1' })
+    fixture.service.recordIntake(input(), TEXT)
+    await vi.waitFor(() => expect(fixture.service.intakeEvaluations('lark-channel', 'om_1')).toMatchObject([{ wouldAccept: true }]))
+    fixture.scheduler.wake()
+    await vi.waitFor(() => expect(fixture.service.intakeAdmissions('lark-channel', 'om_1')).toMatchObject([{ outcome: 'admitted' }]))
+    const [admission] = fixture.service.intakeAdmissions('lark-channel', 'om_1')
+    const [evaluation] = fixture.service.intakeEvaluations('lark-channel', 'om_1')
+    const provenance = fixture.service.inspectIntakeProvenance(admission!.itemId!)
+    expect(provenance).toEqual({ protocol: 'work-items/intake-provenance/v1', itemId: admission!.itemId, source: 'lark-channel', sourceEventId: 'om_1',
+      ruleId: admission!.ruleId, policyVersion: admission!.policyVersion, mode: 'auto', level: evaluation!.level, wouldAccept: true, admittedAt: admission!.recordedAt })
+    expect(Object.isFrozen(provenance)).toBe(true)
+    expect(JSON.stringify(provenance)).not.toContain(TEXT)
+    expect(fixture.service.inspectIntakeProvenance('missing-item')).toBeUndefined()
+    expect(fixture.service.inspectIntakeProvenance('')).toBeUndefined()
+  })
+
+  test('inspectIntakeProvenance is undefined in observe mode, where no item exists', async () => {
+    const fixture = await serviceSetup({ enabled: true, originBindingId: 'binding-origin-1' }, { mode: 'observe' })
+    fixture.service.recordIntake(input(), TEXT)
+    await vi.waitFor(() => expect(fixture.service.intakeEvaluations('lark-channel', 'om_1')).toMatchObject([{ wouldAccept: true }]))
+    fixture.scheduler.wake()
+    await vi.waitFor(() => expect(fixture.service.intakeAdmissions('lark-channel', 'om_1')).toMatchObject([{ outcome: 'would-admit', itemId: null }]))
+    expect(rows(fixture.databasePath, "SELECT count(*) AS n FROM work_item_intake_admission WHERE item_id IS NOT NULL")).toEqual([{ n: 0 }])
+  })
+
   test('observe: the wake records would-admit without any work item', async () => {
     const fixture = await serviceSetup({ enabled: true, originBindingId: 'binding-origin-1' }, { mode: 'observe' })
     fixture.service.recordIntake(input(), TEXT)

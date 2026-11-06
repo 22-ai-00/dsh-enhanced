@@ -1234,6 +1234,21 @@ export class WorkItemStore {
     return Object.freeze(rows.map(intakeEvaluationFromRow))
   }
 
+  /**
+   * The intake decision that admitted one item, if any: its first
+   * `admitted` admission row joined with the evaluation it acted on.
+   * Read-only; a bounded scan of the admission table (no index on item_id).
+   */
+  intakeProvenance(itemId: string): Readonly<{ admission: WorkItemIntakeAdmissionRecord; evaluation: WorkItemIntakeEvaluationRecord }> | undefined {
+    const row = this.#statement(`SELECT * FROM work_item_intake_admission WHERE item_id = ? AND outcome = 'admitted'
+      ORDER BY recorded_at, source, source_event_id, rule_id, policy_version LIMIT 1`).get(itemId) as Row | undefined
+    if (row === undefined) return undefined
+    const admission = intakeAdmissionFromRow(row)
+    const evaluation = this.getIntakeEvaluation(admission.source, admission.sourceEventId, admission.ruleId, admission.policyVersion)
+    if (evaluation === undefined) fail('storage', 'intake admission has no evaluation row')
+    return Object.freeze({ admission, evaluation })
+  }
+
   /** Items admitted from intake at or after `since`; the hourly intake budget. */
   countIntakeAdmitted(since: number): number {
     const row = this.#statement(`SELECT COUNT(*) AS count FROM work_item_intake_admission

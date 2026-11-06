@@ -883,3 +883,17 @@ export interface WorkItemEvaluationHealth {
   /** Set when the last export attempt failed and the row stays retryable. */
   readonly degraded: string | null
 }
+
+/** Read-only WP20 intake judgment behind one admitted work item (`inspectIntakeProvenance`). */
+export interface WorkItemIntakeProvenance {
+  readonly protocol: 'work-items/intake-provenance/v1'
+  readonly itemId: string
+  readonly source: string
+  readonly sourceEventId: string
+  readonly ruleId: string
+  readonly policyVersion: string
+  readonly mode: 'observe' | 'auto'
+  readonly level: 'ignore' | 'digest' | 'notify' | 'accept'
+  readonly wouldAccept: boolean
+  readonly admittedAt: number
+}
