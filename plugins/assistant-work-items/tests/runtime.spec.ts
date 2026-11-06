@@ -1448,44 +1448,46 @@ describe('work-item admission authority revalidation', () => {
     publishWorkerContract(fixture, peer, first.occurrenceId, { owner: { principalRecordId: 'principal-other', principalVersion: 7 } })
     const second = admitPlain(fixture, 'bind-owner-2')
     publishWorkerContract(fixture, peer, second.occurrenceId)
-    // Delivery briefly has no binding for the route when the wake runs: transient.
+    // The route is revoked by the time the wake runs: a deterministic refusal,
+    // since a revoked binding never returns and a re-link gets a new generation.
     fixture.delivery.spy.setInvalid(true)
     expect(() => fixture.automations?.wake()).not.toThrow()
     expect(boundEvents(fixture, second.itemId)).toBe(0)
     fixture.delivery.spy.setInvalid(false)
-    const reads = fixture.automations?.acceptanceReads.splice(0)
-    expect(reads).toEqual([first.occurrenceId, second.occurrenceId])
+    const reads = fixture.automations?.acceptanceReads.length
     fixture.automations?.wake()
-    // Both are re-read once the route is back: the owner mismatch is then
-    // parked for its occurrence and the other one binds.
-    expect(fixture.automations?.acceptanceReads.splice(0)).toEqual([first.occurrenceId, second.occurrenceId])
     fixture.automations?.wake()
-    expect(fixture.automations?.acceptanceReads).toEqual([])
+    // Both refusals are parked for their occurrence: neither is read again.
+    expect(fixture.automations?.acceptanceReads).toHaveLength(reads ?? 0)
     expect(boundEvents(fixture, first.itemId)).toBe(0)
-    expect(boundEvents(fixture, second.itemId)).toBe(1)
+    expect(boundEvents(fixture, second.itemId)).toBe(0)
   })
 
-  test('acceptance.bindWorkerRun re-reads a missing owner route a bounded number of wakes, then parks it', async () => {
+  test('acceptance.bindWorkerRun keeps re-reading while Delivery fails other than missing-binding', async () => {
     const fixture = await serviceHarness({ extra: bindWorkerRun() })
     const peer = new FakeVerifierPeer(fixture.ctx)
-    const { itemId, occurrenceId } = admitPlain(fixture, 'bind-route-missing')
+    const { itemId, occurrenceId } = admitPlain(fixture, 'bind-route-unavailable')
     publishWorkerContract(fixture, peer, occurrenceId)
     fixture.automations?.acceptanceReads.splice(0)
-    fixture.delivery.spy.setInvalid(true)
-    for (let wake = 0; wake < 5; wake += 1) fixture.automations?.wake()
-    expect(fixture.automations?.acceptanceReads).toEqual([occurrenceId, occurrenceId, occurrenceId])
-    // Parked until the occurrence changes, even once the route is back.
-    fixture.delivery.spy.setInvalid(false)
+    const service = fixture.delivery.spy.service
+    const original = service.inspectOwnerRouteBinding
+    let failures = 2
+    service.inspectOwnerRouteBinding = input => {
+      if (failures > 0) { failures -= 1; throw peerError('runtime-unavailable') }
+      return original!(input)
+    }
     fixture.automations?.wake()
-    expect(fixture.automations?.acceptanceReads).toHaveLength(3)
-    expect(peer.reads).toEqual([])
+    fixture.automations?.wake()
     expect(boundEvents(fixture, itemId)).toBe(0)
+    fixture.automations?.wake()
+    expect(fixture.automations?.acceptanceReads).toEqual([occurrenceId, occurrenceId, occurrenceId])
+    expect(boundEvents(fixture, itemId)).toBe(1)
   })
 
-  test('acceptance.bindWorkerRun treats a binding read that briefly misses the route as transient', async () => {
+  test('acceptance.bindWorkerRun parks a missing-binding from the binding read like the route check', async () => {
     const fixture = await serviceHarness({ extra: bindWorkerRun() })
     const peer = new FakeVerifierPeer(fixture.ctx)
-    const { itemId, occurrenceId } = admitPlain(fixture, 'bind-route-binding-miss')
+    const { itemId, occurrenceId } = admitPlain(fixture, 'bind-route-binding-missing')
     publishWorkerContract(fixture, peer, occurrenceId)
     fixture.automations?.acceptanceReads.splice(0)
     const service = fixture.delivery.spy.service
@@ -1496,10 +1498,27 @@ describe('work-item admission authority revalidation', () => {
       return original!(input)
     }
     fixture.automations?.wake()
-    expect(boundEvents(fixture, itemId)).toBe(0)
     fixture.automations?.wake()
-    expect(fixture.automations?.acceptanceReads).toEqual([occurrenceId, occurrenceId])
-    expect(boundEvents(fixture, itemId)).toBe(1)
+    expect(fixture.automations?.acceptanceReads).toEqual([occurrenceId])
+    expect(boundEvents(fixture, itemId)).toBe(0)
+  })
+
+  test('acceptance.bindWorkerRun refuses an empty or oversized binding id from Delivery', async () => {
+    for (const bindingId of ['', 'b'.repeat(257)]) {
+      const fixture = await serviceHarness({ extra: bindWorkerRun() })
+      const peer = new FakeVerifierPeer(fixture.ctx)
+      const { itemId, occurrenceId } = admitPlain(fixture, `bind-route-id-${String(bindingId.length)}`)
+      publishWorkerContract(fixture, peer, occurrenceId, {}, undefined, { bindingId })
+      const service = fixture.delivery.spy.service
+      const original = service.inspectOwnerRouteBinding!
+      service.inspectOwnerRouteBinding = input => Object.freeze({ ...original(input), bindingId })
+      fixture.automations?.acceptanceReads.splice(0)
+      fixture.automations?.wake()
+      fixture.automations?.wake()
+      expect(fixture.automations?.acceptanceReads).toEqual([occurrenceId])
+      expect(peer.reads).toEqual([])
+      expect(boundEvents(fixture, itemId)).toBe(0)
+    }
   })
 
   test('acceptance.bindWorkerRun refuses a binding receipt that differs from the validated owner route', async () => {
@@ -1539,6 +1558,7 @@ describe('work-item admission authority revalidation', () => {
     const peer = new FakeVerifierPeer(fixture.ctx)
     // A Delivery that predates `inspectOwnerRouteBinding`.
     Object.defineProperty(fixture.delivery, 'inspectOwnerRouteBinding', { value: undefined })
+    const warn = vi.spyOn(fixture.ctx.logger, 'warn')
     const { itemId, occurrenceId } = admitPlain(fixture, 'bind-route-legacy')
     publishWorkerContract(fixture, peer, occurrenceId)
     fixture.automations?.acceptanceReads.splice(0)
@@ -1546,6 +1566,11 @@ describe('work-item admission authority revalidation', () => {
     fixture.automations?.wake()
     // Deterministic for this Delivery: parked after the first read, nothing bound.
     expect(fixture.automations?.acceptanceReads).toEqual([occurrenceId])
+    // A second item does not warn again.
+    const other = admitPlain(fixture, 'bind-route-legacy-2')
+    publishWorkerContract(fixture, peer, other.occurrenceId)
+    fixture.automations?.wake()
+    expect(warn.mock.calls.filter(([message]) => String(message).includes('inspectOwnerRouteBinding'))).toHaveLength(1)
     expect(peer.reads).toEqual([])
     expect(boundEvents(fixture, itemId)).toBe(0)
   })
