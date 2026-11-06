@@ -1821,10 +1821,13 @@ describe('work-item admission authority revalidation', () => {
     expect(streakWarnings()).toHaveLength(1)
     expect(fixture.automations?.acceptanceReads).toHaveLength(11)
     expect(boundEvents(fixture, itemId)).toBe(0)
-    // A successful bind clears the streak.
+    // Once the reads agree the run binds and the item leaves the candidate set.
+    // (A bind restarting the streak is the same non-drift reset the next test pins.)
     drifting = false
     fixture.automations?.wake()
     expect(boundEvents(fixture, itemId)).toBe(1)
+    fixture.automations?.wake()
+    expect(fixture.automations?.acceptanceReads).toHaveLength(12)
     expect(streakWarnings()).toHaveLength(1)
   })
 
