@@ -833,7 +833,7 @@ export class AssistantActionsService extends Service {
     delivery.enqueueOwnerNotification({ sourceId: 'assistant-actions-verified-delivery/v1', ownerRouteId: security.ownerRouteId,
       scope: { principalId: security.principalId, principalRecordId: security.identity.principalRecordId, principalVersion: security.identity.principalVersion,
         workspace: security.identity.workspace, preset: security.identity.agentPreset }, sessionId: security.sessionId,
-      idempotencyKey: value.idempotencyKey, text: value.text, expiresAt: security.expiresAt })
+      idempotencyKey: value.idempotencyKey, text: value.text, expiresAt: security.expiresAt, attention: { purpose: 'result' } })
   }
   #externalDeliveryAuthorization(intent: DeliveryIntent, frozen?: string): ExternalBackgroundAuthorization {
     const current = () => {

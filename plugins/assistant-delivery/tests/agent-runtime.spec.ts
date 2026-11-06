@@ -1349,10 +1349,8 @@ describe('real native Delivery Agent runtime', () => {
       expect(first.intent).toMatchObject({ idempotencyKey: `goal-wake-completion-notice:${proof.proofDigest}:${binding.id}`,
         text: '目标已通过独立验收并完成。', format: 'plain', metadata: { 'dsh.native-notice': 'v1', 'dsh.native-notice.expiresAt': String(Math.min(wake.deadlineAt, proof.receipt.validUntil)) } })
       expect(first.intent.metadata?.['dsh.native-notice.sourceId']).toBe('assistant-goals-wake/v1')
-      // WP19 stage 3: on, the Host declares `result`; off, the notice is audited as an undeclared legacy send.
-      expect(store.attentionAudit.get(first.id)).toMatchObject(enforce
-        ? { lane: 'owner-notification', purposeSource: 'declared', purpose: 'result', reasons: [] }
-        : { lane: 'owner-notification', purposeSource: 'default', reasons: ['missing-purpose'] })
+      // WP19: the Host always declares `result`, with or without stage 3 enforcement.
+      expect(store.attentionAudit.get(first.id)).toMatchObject({ lane: 'owner-notification', purposeSource: 'declared', purpose: 'result', reasons: [] })
       expect(fixture.service.inspectAttentionRejections().entries).toEqual([])
       await disposeGoals(); disposeGoals = undefined
       await drive(fixture.service)

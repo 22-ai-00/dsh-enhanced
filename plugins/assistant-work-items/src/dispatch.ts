@@ -265,7 +265,7 @@ export class WorkItemDispatch {
       // after an ambiguous typed enqueue, which could duplicate a real send.
       const outbox = await (typed
         ? delivery.enqueueWorkItemReport!({ ...input, itemId: item.id, reportRevision: report.revision })
-        : delivery.enqueueBackground(input))
+        : delivery.enqueueBackground({ ...input, attention: { purpose: 'result', workItemId: item.id } }))
       this.#deps.ledger.recordDelivery(item.id, report.revision, 'sent', outbox.id)
       return true
     } catch (error) {

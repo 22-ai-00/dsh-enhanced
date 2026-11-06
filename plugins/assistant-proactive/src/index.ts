@@ -20,7 +20,7 @@ export { version, OpportunityEngine, validateProfile, attentionOverlay, tuneProf
 export type { AttentionOverlay }
 export type * from './types.js'
 /** `attention` is ignored by Delivery releases before the WP19 audit; it never changes how the notice is sent. */
-interface NotificationPort { enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: OpportunityScope; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention?: { purpose: 'result' } }): unknown }
+interface NotificationPort { enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: OpportunityScope; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention: { purpose: 'result' } }): unknown }
 export interface Config { databasePath?: string; profiles?: OpportunityProfile[] }
 const integer = (max = 1_000_000_000) => Schema.number().step(1).min(0).max(max).required()
 export const Config: Schema<Config> = Schema.object({

@@ -57,6 +57,8 @@ export interface RepairFeedbackDelivery {
     idempotencyKey: string
     text: string
     expiresAt: number
+    /** WP19: repair milestones are results; they ask the owner nothing. */
+    attention: { purpose: 'result' }
   }): unknown
 }
 
@@ -133,7 +135,8 @@ export function enqueueRepairFeedback(delivery: RepairFeedbackDelivery, record: 
   const text = renderRepairFeedback(outcome)
   try {
     delivery.enqueueOwnerNotification({ sourceId, ownerRouteId: record.authorization.ownerRouteId, scope: record.scope,
-      sessionId: record.feedbackAuthority.sessionId, idempotencyKey, text, expiresAt: record.feedbackAuthority.expiresAt })
+      sessionId: record.feedbackAuthority.sessionId, idempotencyKey, text, expiresAt: record.feedbackAuthority.expiresAt,
+      attention: { purpose: 'result' } })
   } catch { return { outcome: 'not-queued', reason: 'delivery-rejected' } }
   return { outcome: 'queued', idempotencyKey, text }
 }

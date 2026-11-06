@@ -256,6 +256,8 @@ export interface PeerDeliveryService {
     text: string
     format?: 'markdown' | 'plain'
     metadata?: Readonly<Record<string, string>>
+    /** WP19: reports declare `result`; they carry no structured owner question. */
+    attention: { purpose: 'result'; workItemId?: string }
   }): { readonly id: string } | Promise<{ readonly id: string }>
 }
 

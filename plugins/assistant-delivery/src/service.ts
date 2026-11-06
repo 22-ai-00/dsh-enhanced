@@ -2183,8 +2183,8 @@ export class AssistantDeliveryService extends Service {
         principalVersion: locator.principalVersion, workspace: locator.workspace, preset: locator.preset },
       sessionId: locator.sessionId, idempotencyKey, text: goalWakeCompletionNotice,
       expiresAt: Math.min(input.deadlineAt, proof.receipt.validUntil),
-      // Host-authored result notice: under stage 3 enforcement the Host declares its purpose; off, it is audited as before.
-      ...(this.config.attentionEnforce === true ? { attention: { purpose: 'result' as const } } : {}),
+      // Host-authored result notice: the Host always declares its purpose (WP19).
+      attention: { purpose: 'result' },
     })
   }
 
@@ -4954,8 +4954,8 @@ export class AssistantDeliveryService extends Service {
           :intent.canonical?.version===0?'查询时该工作项暂无已记录反馈。':objectiveStateMessage(intent.canonical!).replace('当前任务反馈：',intent.command?.kind==='objective-status'?'查询时的任务反馈：':'本次已记录任务反馈：')
         this.enqueueBackgroundAuthorized({sourceId:registration.sourceId,workspace:binding.workspace,bindingId:binding.id,
           idempotencyKey:`feedback:${intent.source.inboxId}:ack`,text,format:'plain'},undefined,
-        // Host-authored result ACK: under stage 3 enforcement the Host declares its purpose; off, it is audited as before.
-        this.config.attentionEnforce===true?{lane:'background',lanePurpose:{purpose:'result'}}:{lane:'background'})
+        // Host-authored result ACK: the Host always declares its purpose through the lane (WP19).
+        {lane:'background',lanePurpose:{purpose:'result'}})
       }catch{/* Recording is independent of send authority; only an absent Outbox is retried. */}
     }
   }
@@ -5547,8 +5547,8 @@ export class AssistantDeliveryService extends Service {
     return this.attentionRejections.list(afterSequence, limit)
   }
 
-  private enqueueBackgroundAuthorized(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string, string>> }, reportTarget?: WorkItemReportTarget,
-    audit: Readonly<{ lane: AttentionLane; envelope?: unknown; lanePurpose?: Readonly<{ purpose: AttentionPurpose; workItemId?: string }> }> = { lane: 'background' }): OutboxRecord {
+  private enqueueBackgroundAuthorized(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string, string>> }, reportTarget: WorkItemReportTarget | undefined,
+    audit: Readonly<{ lane: AttentionLane; envelope?: unknown; lanePurpose?: Readonly<{ purpose: AttentionPurpose; workItemId?: string }> }>): OutboxRecord {
     const binding = this.deliveryStore.getBinding(input.bindingId)
     if (binding === undefined || binding.status !== 'active' || !this.hasActivePrincipal(binding)) {
       throw new AssistantDeliveryError('missing-binding', 'delivery binding does not exist or is revoked')

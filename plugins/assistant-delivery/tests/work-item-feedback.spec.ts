@@ -103,8 +103,8 @@ describe('owner work-item result feedback through real Delivery and Evaluation',
  test.each([false,true])('Host result ACK is queued and audited with its purpose source (attentionEnforce %s)',async enforce=>{
   const f=await fixture({enforce});await f.report();const status=await f.service.acceptInbound(f.envelope('status','/feedback status'));await f.settle()
   const ack=f.store.getOutboxByIdempotencyKey(`feedback:${status.inboxId}:ack`)!;expect(ack).toBeDefined()
-  // WP19 stage 3: on, the Host declares `result` through the lane; off, it stays an undeclared legacy send.
-  expect(f.store.attentionAudit.get(ack.id)).toMatchObject(enforce?{lane:'background',purposeSource:'lane',purpose:'result',reasons:[]}:{lane:'background',purposeSource:'default',reasons:['missing-purpose']})
+  // WP19: the Host always declares `result` through the lane, with or without stage 3 enforcement.
+  expect(f.store.attentionAudit.get(ack.id)).toMatchObject({lane:'background',purposeSource:'lane',purpose:'result',reasons:[]})
   expect(f.service.inspectAttentionRejections().entries).toEqual([])
  })
  test('recovers canonical append after lost local ACK and cold reopening without another vote or source rewrite',async()=>{

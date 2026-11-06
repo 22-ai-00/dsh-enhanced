@@ -53,6 +53,8 @@ export interface AutomationDeliveryDispatcher {
     text: string
     format?: 'markdown' | 'plain'
     metadata?: Readonly<Record<string, string>>
+    /** WP19: every caller declares its purpose; incident alerts carry no structured question. */
+    attention: { purpose: 'result' }
   }): { id: string; status: string }
   enqueueAutomationResult?(input: {
     automationId: string
@@ -67,6 +69,8 @@ export interface AutomationDeliveryDispatcher {
     idempotencyKey: string
     text: string
     format?: 'markdown' | 'plain'
+    /** WP19: every caller declares its purpose. */
+    attention: { purpose: 'result' }
   }): { id: string; status: string }
   /** Trusted Host-only desired-message projection; never exposed as an Agent tool. */
   publishDeliveryPresentation?(input: DeliveryPresentationUpdate): { status: string }
@@ -849,6 +853,7 @@ export class AutomationCoordinator {
                 // mutable details and eventually replaces this exact message.
                 text: `Automation incident ${incident.id}`,
                 format: 'plain',
+                attention: { purpose: 'result' },
               })
             : { id: incident.alertRef, status: 'enqueued' }
           publish.call(delivery, {
@@ -886,6 +891,7 @@ export class AutomationCoordinator {
             idempotencyKey: `${lifecycleKey}:r${incident.presentationRevision}`,
             text: incidentAlertText(incident),
             format: 'plain',
+            attention: { purpose: 'result' },
           })
         }
         this.store.completeIncidentAlert({
