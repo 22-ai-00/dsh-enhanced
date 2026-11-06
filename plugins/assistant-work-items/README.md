@@ -294,7 +294,7 @@ work_item_read_report:
 - Automations peer 按调用时解析，晚加载或替换后由新 owning injection 重新订阅；旧代次 callback 被撤销，close 先停监听再关账本，同步重入会被隔离。disabled/observe 不订阅，也不因 tick 打开账本。旧 peer 缺 `onSchedulerWake` 时会 warn 并保留启动/claim 惰性恢复路径。要在空闲 Host 自动续办，仍须启用原生 Automations `schedulerEnabled`；`health().schedulerWake.subscribed` 只证明监听已安装，不证明调度器、duty 或任务执行已获授权。
 - 崩溃恢复：`ingestExternal` 已成功但 dispatch 行仍未记账时，该行保持 `pending` 且身份不变，下一次有界恢复用**同一代次身份**重新唤醒，automation store 以相同 `(automationId, eventId, occurredAt)` 幂等返回既有 occurrence，绝不重复运行、绝不重复报告。
 - 唤醒记账诚实：peer 抛出的错误若表示「不知道是否已经提交」（非 `policy-denied`/`policy`、非去重冲突），dispatch 行记为 `state='failed'`、`reason='unknown_after_send'`，`health().dispatchUnknown` 因此只统计仍然**开放且未被观察**的 item 上真实存在的这种行：item 一旦被撤回、终结或观察，就不再计入，也不会再被恢复扫描。这样的行在同一代次身份下最多被惰性恢复重试 **1 次**（`wake_attempts` 持久计数）；重试成功则转为 `dispatched`，再次失败则保持 `failed`/`unknown_after_send`，把无法消除的缺口留给 owner，而不是无限重试或假装成功。持久身份冲突（`idempotency-conflict`）是确定性错误，记为独立原因 `idempotency-conflict` 并抛 typed `WorkItemError`（`dispatch-failed`）；没有 occurrence 查询接口时无法自动收敛，因此不静默吞掉。
-- SQLite 使用 `WAL`、`synchronous=FULL`、`BEGIN IMMEDIATE` 事务和 forward-only schema；`PRAGMA user_version` 只前进。版本与对象清单在同一读快照里读取；每个迁移步骤在自己的 `BEGIN IMMEDIATE` 内重读 `user_version`，若并发打开者已推进版本，则回滚本步、按其留下的文件重新校验，不重复执行 DDL。升级仍建议单 writer：升级前停掉 DSH 进程。
+- SQLite 使用 `WAL`、`synchronous=FULL`、`BEGIN IMMEDIATE` 事务和 forward-only schema；`PRAGMA user_version` 只前进。版本与对象清单在同一读快照里读取；每个迁移步骤在自己的 `BEGIN IMMEDIATE` 内重读 `user_version`，若并发打开者已推进版本，则回滚本步、按其留下的文件重新校验，不重复执行 DDL（仅限已有版本 ≥1 的库；两个进程同时首次创建新库仍可能抛原始 `SQLITE_BUSY` 或 `EEXIST`）。升级仍建议单 writer：升级前停掉 DSH 进程。
 
 ### inferred 候选的模型评估合同（WP20）
 

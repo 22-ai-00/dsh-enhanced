@@ -496,13 +496,17 @@ describe('schema 13 migration', () => {
       const db = new (require('node:sqlite').DatabaseSync)(workerData.path)
       db.exec('BEGIN IMMEDIATE')
       parentPort.postMessage('locked')
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300)
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000)
       db.exec(workerData.sql + "; UPDATE work_item_schema_meta SET value = '13' WHERE key = 'schema_version'; PRAGMA user_version = 13; COMMIT;")
       db.close()
     `, { eval: true, workerData: { path, sql: indexSql } })
     const exited = once(other, 'exit')
     await once(other, 'message')
+    const started = performance.now()
     const store = new WorkItemStore(path)
+    // Waiting on the lock proves this opener read 12 and took the adopt path;
+    // reading 13 straight away would return without waiting.
+    expect(performance.now() - started).toBeGreaterThan(500)
     try {
       expect(store.stats().schemaVersion).toBe(13)
       expect(store.intakeProvenance(itemId)).toEqual(provenance)
