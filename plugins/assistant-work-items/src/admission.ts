@@ -167,7 +167,12 @@ export interface AdmissionDependencies {
    * a later pass can detect a generation change instead of believing a stale
    * closure. A ref whose source is not registered at admission is rejected.
    */
-  readonly threadSource?: (kind: string) => { readonly source: string; readonly generation: string; readonly validate?: (ref: string) => boolean } | undefined
+  readonly threadSource?: (kind: string) => {
+    readonly source: string
+    readonly generation: string
+    readonly validate?: (ref: string) => boolean
+    readonly canonicalize?: (ref: string) => string | undefined
+  } | undefined
   readonly now?: () => number
   readonly newId?: () => string
 }
@@ -324,7 +329,10 @@ export class WorkItemAdmission {
       return Object.freeze({ item: settled, created: false, reason: 'fenced', dispatch })
     }
 
-    this.#validateFollows(follows)
+    // Canonical rows only: from here to `admitItem` there is no await, so a
+    // source alias (an event `@head`) is pinned in the same synchronous section
+    // that persists it.
+    const admittedFollows = this.#validateFollows(follows)
     const wouldReject = this.#gateReasons(normalized.kind, now)
     let authority: WorkItemAuthorityBasis | null = null
     if (active) {
@@ -414,7 +422,7 @@ export class WorkItemAdmission {
         detail,
       },
       dispatch,
-      follows,
+      admittedFollows,
       planBuilder?.(item),
       continuationRecord,
     )
@@ -604,18 +612,37 @@ export class WorkItemAdmission {
    * only after every replay/dedup/fence answer, so retrying an already admitted
    * signal returns its duplicate even when the ref is no longer admissible
    * (for example an event cursor that has since been passed).
+   *
+   * A source's optional `canonicalize` rewrites each ref first; `validate` and
+   * the stored row see only the canonical form, and refs that canonicalize to
+   * the same thread collapse like literal duplicates.
    */
-  #validateFollows(follows: readonly WorkItemFollowInput[]): void {
+  #validateFollows(follows: readonly WorkItemFollowInput[]): readonly WorkItemFollowInput[] {
+    const seen = new Set<string>()
+    const admitted: WorkItemFollowInput[] = []
     for (const follow of follows) {
       const registration = this.#deps.threadSource?.(follow.kind)
       if (registration === undefined || registration.source !== follow.source || registration.generation !== follow.sourceGeneration) {
         fail('invalid-input', `followed thread kind ${follow.kind} has no registered source`)
       }
-      if (registration.validate === undefined) continue
-      let accepted = false
-      try { accepted = registration.validate(follow.ref) === true } catch { accepted = false }
-      if (!accepted) fail('invalid-input', `followed thread ref is not admissible for source ${registration.source}`)
+      let ref: string | undefined = follow.ref
+      if (registration.canonicalize !== undefined) {
+        try { ref = registration.canonicalize(follow.ref) } catch { ref = undefined }
+        if (typeof ref !== 'string' || !THREAD_REF.test(ref)) {
+          fail('invalid-input', `followed thread ref is not admissible for source ${registration.source}`)
+        }
+      }
+      if (registration.validate !== undefined) {
+        let accepted = false
+        try { accepted = registration.validate(ref) === true } catch { accepted = false }
+        if (!accepted) fail('invalid-input', `followed thread ref is not admissible for source ${registration.source}`)
+      }
+      const key = `${follow.kind}\u0000${ref}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      admitted.push(ref === follow.ref ? follow : Object.freeze({ ...follow, ref }))
     }
+    return Object.freeze(admitted)
   }
 }
 

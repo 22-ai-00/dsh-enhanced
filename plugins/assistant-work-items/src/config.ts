@@ -67,11 +67,12 @@ export interface Config {
 /**
  * Followed-thread sources the plugin registers itself. Each source is off by
  * default. `eventTriggers` lets a work item follow an Event Triggers
- * subscription (`<triggerId>@<afterSequence>`); it needs an enabled intake
- * with an owner scope.
+ * subscription (`<triggerId>@<afterSequence>@<configDigest>`); it needs an
+ * enabled intake with an owner scope. `acceptHeadRef` (default off) also
+ * admits `<triggerId>@head`, pinned to the live high water at admission.
  */
 export interface FollowsConfig {
-  eventTriggers?: { enabled?: boolean }
+  eventTriggers?: { enabled?: boolean; acceptHeadRef?: boolean }
 }
 
 /**
@@ -248,6 +249,8 @@ export interface NormalizedConfig {
 
 export interface NormalizedFollows {
   readonly eventTriggers: boolean
+  /** Present only when `follows.eventTriggers.acceptHeadRef` is true. */
+  readonly eventTriggersAcceptHeadRef?: true
 }
 
 export interface NormalizedIntakeLedger {
@@ -336,7 +339,7 @@ const SOURCES_KEYS = ['foregroundFailures'] as const
 const FOREGROUND_FAILURE_KEYS = ['enabled', 'kind', 'includeTimedOut', 'maxCandidatesPerSweep', 'maxAdmitsPerSweep', 'sweepIntervalMs'] as const
 const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerReportRouting', 'ownerContinuation', 'ownerReplyContinuation', 'ownerReportFeedback', 'intakeLedger', 'follows', 'acceptance'] as const
 const FOLLOWS_KEYS = ['eventTriggers'] as const
-const FOLLOW_SOURCE_KEYS = ['enabled'] as const
+const FOLLOW_SOURCE_KEYS = ['enabled', 'acceptHeadRef'] as const
 const INTAKE_LEDGER_KEYS = ['enabled', 'sources', 'evaluation'] as const
 const INTAKE_EVALUATION_KEYS = ['enabled', 'timeoutMs', 'maxConsecutiveFailures', 'maxPerRun', 'maxCallsPerHour', 'admit'] as const
 const INTAKE_ADMIT_KEYS = ['enabled', 'mode', 'kind', 'originBindingId', 'maxPerHour'] as const
@@ -431,7 +434,7 @@ export const ConfigSchema = Schema.object({
       }),
     }),
   }),
-  follows: Schema.object({ eventTriggers: Schema.object({ enabled: Schema.boolean().default(false) }) }),
+  follows: Schema.object({ eventTriggers: Schema.object({ enabled: Schema.boolean().default(false), acceptHeadRef: Schema.boolean().default(false) }) }),
   acceptance: Schema.object({
     autoSettle: Schema.object({ enabled: Schema.boolean().default(false), maxPerTick: Schema.number().step(1) }),
     bindWorkerRun: Schema.object({ enabled: Schema.boolean().default(false), maxPerTick: Schema.number().step(1) }),
@@ -802,7 +805,10 @@ function normalizeFollows(raw: unknown): NormalizedFollows | undefined {
   rejectUnknown(source, FOLLOW_SOURCE_KEYS, 'follows.eventTriggers')
   const eventTriggers = source['enabled'] ?? false
   if (typeof eventTriggers !== 'boolean') fail('invalid-input', 'follows.eventTriggers.enabled must be a boolean')
-  return eventTriggers ? Object.freeze({ eventTriggers }) : undefined
+  const acceptHeadRef = source['acceptHeadRef'] ?? false
+  if (typeof acceptHeadRef !== 'boolean') fail('invalid-input', 'follows.eventTriggers.acceptHeadRef must be a boolean')
+  if (!eventTriggers) return undefined
+  return Object.freeze(acceptHeadRef ? { eventTriggers, eventTriggersAcceptHeadRef: true as const } : { eventTriggers })
 }
 
 /** Absent or disabled ledgers normalize to `undefined`; opt-ins default off. */

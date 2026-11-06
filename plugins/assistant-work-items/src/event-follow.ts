@@ -5,7 +5,9 @@ import type { WorkItemThreadClosure, WorkItemThreadSourceRegistration } from './
  * Event Triggers as a followed-thread source (subscription pass-through, slice 1).
  *
  * A work item may follow `event-triggers` refs shaped
- * `<triggerId>@<afterSequence>@<configDigest>`.
+ * `<triggerId>@<afterSequence>@<configDigest>`; with `acceptHeadRef` an
+ * admission may also pass `<triggerId>@head`, which is rewritten to that
+ * canonical form before it is validated or stored.
  * The follow closes once the first authenticated source event after that cursor
  * exists. The event only proves something happened on the subscription, never
  * that the objective was achieved, so a closure always reports outcome
@@ -56,6 +58,14 @@ export function eventFollowReader(value: unknown): EventFollowReader | undefined
 const REF = /^([a-z0-9][a-z0-9._:-]{0,199})@(0|[1-9][0-9]{0,15})@([a-f0-9]{64})$/
 
 export interface EventFollowRef { readonly triggerId: string; readonly afterSequence: number; readonly configDigest: string }
+
+const HEAD_REF = /^([a-z0-9][a-z0-9._:-]{0,199})@head$/
+
+/** Trigger id of an admission-only `<triggerId>@head` alias; never a stored ref. */
+export function parseEventFollowHeadRef(ref: string): string | undefined {
+  const match = typeof ref === 'string' ? HEAD_REF.exec(ref) : null
+  return match === null ? undefined : match[1]!
+}
 
 /** Parse `<triggerId>@<afterSequence>@<configDigest>`; anything else is not an event follow. */
 export function parseEventFollowRef(ref: string): EventFollowRef | undefined {
@@ -110,6 +120,8 @@ export function eventFollowRegistration(input: {
   readonly reader: EventFollowReader
   readonly owner: () => EventFollowOwnerScope
   readonly now?: () => number
+  /** Accept the admission-only `<triggerId>@head` alias (`follows.eventTriggers.acceptHeadRef`). */
+  readonly acceptHeadRef?: boolean
 }): WorkItemThreadSourceRegistration {
   const { reader, owner } = input
   const now = input.now ?? Date.now
@@ -123,9 +135,24 @@ export function eventFollowRegistration(input: {
     const snapshot = reader.sourceSnapshot(ref.triggerId)
     return snapshot.configDigest === ref.configDigest ? snapshot : undefined
   }
+  // `<triggerId>@head` pins the cursor and digest from one synchronous
+  // `sourceSnapshot` read inside admission (no await before the row is
+  // written), so an event between the caller's own snapshot read and admission
+  // cannot fail it. The canonical ref still goes through `validate`, and an
+  // explicit three-part ref passes through unchanged.
+  const canonicalize = (ref: string): string | undefined => {
+    const triggerId = parseEventFollowHeadRef(ref)
+    if (triggerId === undefined) return ref
+    const scope = owner()
+    if (eventFollowGeneration(scope) !== generation) return undefined
+    if (!reader.inspectOwnerSources(scope).some(source => source.triggerId === triggerId)) return undefined
+    const snapshot = reader.sourceSnapshot(triggerId)
+    return `${triggerId}@${String(snapshot.highWaterSequence)}@${snapshot.configDigest}`
+  }
   return Object.freeze({
     source: EVENT_TRIGGERS_FOLLOW_SOURCE,
     generation,
+    ...(input.acceptHeadRef === true ? { canonicalize } : {}),
     // Admission-time fence: the cursor must be exactly the current high water
     // (a store-global sequence) and the digest the trigger's current config, so
     // a forged low cursor cannot close a follow on an event that already

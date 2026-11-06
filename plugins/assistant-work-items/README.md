@@ -383,18 +383,20 @@ host-only `admitDecision(decision)`（service 与 `WorkItemAdmission` 同名方�
 - 没有 timer：只有 `claim()` 或宿主显式 `settleOutcomes(force)` 触发解析；无 follow 的 item 走原有窗口路径，行为不变。follow 不是新的 authority store，也不产生 objective-achievement 推断。
 - 与 Evaluation 的衔接：`closed-by-thread` 修订按 unverified 结算投影（`executionStatus: 'unknown'`、`evaluator.version: 'unverified-v1'`、`objectiveStatus`/`deliveryStatus` 为 `unknown`、`trust: 'trusted'`），幂等键仍为 `work-items/<itemId>/<revision>/<evidenceState>`。协议 `assistant-work-items/evaluation/v1` 原生接受该原因，不做 `window-expired` 之类的别名替换。
 - 注册形状额外接受可选 `validate(ref): boolean`（同步、只读）；返回 false 或抛错时整条准入以 `invalid-input` 失败，不写任何行。未提供 `validate` 的既有来源行为不变。
+- 注册形状还接受可选 `canonicalize(ref): string | undefined`（同步、只读），只对新建项在 `validate` 之前运行：返回值替换原 ref 交给 `validate` 并入库，返回 undefined 或抛错时以同一 `invalid-input` 失败；改写后相同的 ref 按重复折叠。
 
 #### 订阅直通：event-triggers 来源（slice 1）
 
 配置 `follows: { eventTriggers: { enabled: true } }`（默认 `false`；要求 enabled intake 且有完整 `scope`）且宿主提供 `eventTriggers` 服务时，本插件在启动时自行注册 `source: 'event-triggers'`，让工作项跟随一个事件订阅：
 
 - ref 形如 `<triggerId>@<afterSequence>@<configDigest>`（`configDigest` 为该 trigger 当时的 64 位小写 hex 配置摘要）。准入时 `validate` 要求 trigger 属于当前 owner（经 Delivery `validateOwnerRoute` 取得的 principal record/version、workspace、preset，与 `inspectOwnerSources` 范围一致）、`configDigest` 等于该 trigger 当前配置摘要，且 `afterSequence` **等于**当前 `highWaterSequence`。`highWaterSequence` 是 event-triggers store 的全局序号，不分 trigger。更低的序号（伪造的旧序号，可能借旧事件关闭）、更高的序号、过期摘要、他人 trigger、格式错误一律拒绝。安全性依赖这一次准入时检查：resolve 只是回放已存 ref 中的序号。
+- `follows.eventTriggers.acceptHeadRef: true`（默认 `false`）时，Host 与 owner 准入入口还接受 `<triggerId>@head`：准入在同一同步段内（读取与写入之间没有 await）检查 owner 归属、读 `sourceSnapshot` 取当时的 `highWaterSequence` 与 `configDigest`，改写为三段式 canonical ref，再走上面的 `validate` 并入库。存储、`follows()`、health 与报告里只出现 canonical 形式。未知或他人 trigger 与三段式一样以 `invalid-input` 拒绝；显式三段式 ref 的校验不变（伪造/过期序号或摘要仍拒绝）。开关关闭时 `@head` 不是合法 ref，以 `invalid-input` 拒绝。
 - `validate` 只对新建项运行：同一信号在 dedup 窗口内重试、已结算项的 fence、decision/continuation 重放都先于它返回原项，因此新事件到达后重试会得到 `duplicate` 而不是 `invalid-input`。
 - generation 为 `event-triggers/v1/<sha256(principalRecordId, principalVersion, workspace, preset)>`，只取决于 owner 身份，不随 trigger 运行时状态（observer 到期、goal 退役、automation 暂停、配置编辑）或重新 provide 变化。`v1` 是 follow 协议常量：Event Triggers 只在单个 trigger 的 snapshot 上暴露版本号；升级后 `firstEventAfter` 只匹配同版本 envelope，旧 follow 保持 open。
 - resolve 同步调用 `firstEventAfter`：命中已认证事件 → `closed`，`outcome: 'unknown'`，`digest` 为该事件 envelope 的 `externalEventDigest`（事件到达不等于目标达成，结算仍为 unverified）；未命中 → `open`。
 - 降级按 follow 隔离：某个 trigger 被停用、observer 到期、不再属于 owner 或配置摘要变化时，只有跟随它的 follow 记为 `resolver-failed` 并保持 open（不会被当作关闭），其他 trigger 的 follow 与新准入不受影响。owner 身份变化（principal version 等）会让全部 event follow 在重新注册前为 `resolver-failed`，重新注册后为 `generation-mismatch`。
 - 仅被动：沿用上文结算 pass 与 CAS，无 timer、不订阅 `subscribeSourceChanges`；无 schema 变更。开关关闭时不注册、不读 event-triggers，宿主仍可自行注册同名来源。
-- 限制：准入序号须精确等于全局 high water，调用方要在读到 snapshot 后立即准入，期间若有任何 trigger 的新事件写入，准入会被拒绝，需重读后重试；trigger 配置一经编辑，旧 follow 永久 `resolver-failed`（不会自动迁移到新摘要）；owner principal version 变化后旧 follow 无法解析。
+- 限制：显式三段式 ref 的序号须精确等于全局 high water，调用方要在读到 snapshot 后立即准入，期间若有任何 trigger 的新事件写入，准入会被拒绝，需重读后重试；开启 `acceptHeadRef` 后改用 `<triggerId>@head` 可免去这一竞争（游标取准入时刻的 high water，调用方读 snapshot 之后、准入之前到达的事件不会关闭该 follow）；trigger 配置一经编辑，旧 follow 永久 `resolver-failed`（不会自动迁移到新摘要）；owner principal version 变化后旧 follow 无法解析。
 
 ### 可信 Evaluation 导出（第四个 trusted producer）
 
@@ -595,6 +597,7 @@ ctx.assistantWorkItems.registerIntakeEvaluator({
 | `intakeLedger.evaluation.admit.kind` / `originBindingId` | `intake-inferred` / 必填 | 准入 mandate 的 kind（auto 须在 `allowedKinds` 内）与报告发往的 origin binding |
 | `intakeLedger.evaluation.admit.maxPerHour` | `5` | 滑动一小时准入上限（1–100） |
 | `follows.eventTriggers.enabled` | `false` | 有 `eventTriggers` 服务时注册 `event-triggers` follow 来源（ref `<triggerId>@<afterSequence>@<configDigest>`，序号须等于当前全局 high water，摘要须等于该 trigger 当前配置）；要求 enabled intake 与完整 scope |
+| `follows.eventTriggers.acceptHeadRef` | `false` | 另接受 `<triggerId>@head`，准入时同步改写为当前 high water 与配置摘要的三段式 ref 后入库；仅在 `enabled` 时生效 |
 | `acceptance.autoSettle.enabled` / `maxPerTick` | `false` / `5` | 在既有 scheduler wake 上自动读回已执行绑定项的 verifier 回执并记判定（每次 wake 至多 1–10 项，需 enabled active）；见独立验收绑定 |
 | `acceptance.verdictGate.enabled` | `false` | 让独立验收判定改变工作项状态：not-achieved/unknown/needs-attention 把已执行 `ready` 项转入 `blocked`（`acceptance-*` 原因），achieved 保持 `ready`；需 enabled active；见独立验收绑定 |
 | `acceptance.bindWorkerRun.enabled` / `maxPerTick` | `false` / `5` | 在既有 scheduler wake 上把已 dispatch 的未绑定项晚绑定到其 worker run 冻结的 `automation-run` 合同（事件行，不进 mandate digest；每次 wake 至多 1–10 项，需 enabled active）；见独立验收绑定 |

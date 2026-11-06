@@ -123,14 +123,14 @@ function workerAgent(occurrenceId: string): Agent {
   return { ctx: { get: (name: string) => name === 'assistantAutomationExecution' ? execution : undefined } } as unknown as Agent
 }
 
-function config(root: string, follows: boolean | undefined): Config {
+function config(root: string, follows: boolean | undefined, acceptHeadRef?: boolean): Config {
   return {
     enabled: true, mode: 'active',
     databasePath: join(root, 'state', 'state.sqlite'), workRoot: join(root, 'work'),
     intakeSourceId: 'work-items/v1', workerAutomationId: WORKER,
     scope: { workspace: WORKSPACE, preset: PRESET, principalId: PRINCIPAL, ownerRouteId: ROUTE, expiresAt: Date.now() + 3_600_000 },
     admission: { allowedKinds: ['review'], maxOpenItems: 8, maxAdmitsPerHour: 16, dedupWindowMs: 3_600_000, cooldownMs: 0, maxBriefBytes: 512 },
-    ...(follows === undefined ? {} : { follows: { eventTriggers: { enabled: follows } } }),
+    ...(follows === undefined ? {} : { follows: { eventTriggers: { enabled: follows, ...(acceptHeadRef === undefined ? {} : { acceptHeadRef }) } } }),
   }
 }
 
@@ -146,7 +146,7 @@ interface Fixture {
   reopen(): Promise<void>
 }
 
-async function fixture(options: { follows?: boolean | undefined; eventTriggers?: boolean } = {}): Promise<Fixture> {
+async function fixture(options: { follows?: boolean | undefined; eventTriggers?: boolean; acceptHeadRef?: boolean } = {}): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), 'work-items-event-follow-'))
   roots.push(root)
   const state = fakeState()
@@ -157,7 +157,7 @@ async function fixture(options: { follows?: boolean | undefined; eventTriggers?:
     new FakeToolsPeer(ctx)
     new FakeAutomationsPeer(ctx)
     let fork = options.eventTriggers === false ? undefined : ctx.plugin({ name: 'fake-event-triggers', apply: (child: Context) => { new FakeEventTriggers(child, state) } })
-    const service = new AssistantWorkItemsService(ctx, config(root, 'follows' in options ? options.follows : true))
+    const service = new AssistantWorkItemsService(ctx, config(root, 'follows' in options ? options.follows : true, options.acceptHeadRef))
     closers.push(() => service.close())
     return { ctx, service, reload: async () => {
       await fork?.dispose()
@@ -357,13 +357,112 @@ describe('event-triggers follow source', () => {
   })
 })
 
+describe('event-triggers follow @head alias', () => {
+  test('an event between the caller\'s snapshot read and admission no longer fails @head', async () => {
+    const fx = await fixture({ acceptHeadRef: true })
+    // The caller reads the high water, then unrelated traffic lands first.
+    const seen = refFor(fx.state, 'deploy-hook')
+    const early = arrive(fx.state, 'other', 'evt-between')
+    expect(errorCode(() => fx.service.admit(signal({ externalId: 'explicit', follows: [{ kind: 'event-triggers', ref: seen }] })))).toBe('invalid-input')
+    const admitted = await admitAndReport(fx, 'deploy-hook@head')
+    const follow = readStore(fx.root).follows(admitted.item.id)[0]!
+    // Pinned to the admission-time high water, never the alias.
+    expect(follow.ref).toBe(`deploy-hook@${early.sequence}@${hex('config-1')}`)
+    expect(parseEventFollowRef(follow.ref)?.afterSequence).toBe(fx.state.sequence)
+    expect(fx.service.settleOutcomes(true)).toMatchObject({ deferred: 1, closedByThread: 0 })
+    const event = arrive(fx.state, 'deploy-hook', 'evt-1')
+    expect(fx.service.settleOutcomes(true)).toMatchObject({ deferred: 0, closedByThread: 1 })
+    expect(readStore(fx.root).follows(admitted.item.id)[0]).toMatchObject({ state: 'closed', digest: externalEventDigest(event.envelope) })
+  })
+
+  test('an event on the followed trigger before admission does not close an @head follow', async () => {
+    const fx = await fixture({ acceptHeadRef: true })
+    arrive(fx.state, 'deploy-hook', 'evt-before')
+    const admitted = await admitAndReport(fx, 'deploy-hook@head')
+    expect(readStore(fx.root).follows(admitted.item.id)[0]!.ref).toBe(refFor(fx.state, 'deploy-hook'))
+    expect(fx.service.settleOutcomes(true)).toMatchObject({ deferred: 1, closedByThread: 0 })
+  })
+
+  test('unknown, foreign, disabled or malformed @head refs fail exactly like three-part refs', async () => {
+    const fx = await fixture({ acceptHeadRef: true })
+    fx.state.triggers.set('foreign', { ...fx.state.triggers.get('deploy-hook')!, id: 'foreign', owner: { ...OWNER, principalVersion: 8 } })
+    fx.state.triggers.set('off', { ...fx.state.triggers.get('deploy-hook')!, id: 'off', enabled: false })
+    for (const ref of ['missing@head', 'foreign@head', 'off@head', 'Deploy-Hook@head', 'deploy-hook@HEAD', 'deploy-hook@head@head', '@head']) {
+      const admit = () => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref }] }))
+      expect(errorCode(admit)).toBe('invalid-input')
+      expect(admit).toThrow(/not admissible for source event-triggers/)
+    }
+    // A stale or forged explicit ref is still refused with the alias enabled.
+    const before = fx.state.sequence
+    arrive(fx.state, 'deploy-hook', 'evt-old')
+    for (const ref of [refFor(fx.state, 'deploy-hook', before), refFor(fx.state, 'deploy-hook', fx.state.sequence + 1), refFor(fx.state, 'deploy-hook', fx.state.sequence, hex('stale'))]) {
+      expect(() => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref }] }))).toThrow(/not admissible for source event-triggers/)
+    }
+    expect(readStore(fx.root).countFollows()).toEqual({ open: 0, closed: 0 })
+    // The exact current explicit ref still admits unchanged.
+    const explicit = fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: refFor(fx.state, 'deploy-hook') }] }))
+    expect(readStore(fx.root).follows(explicit.item.id)[0]!.ref).toBe(refFor(fx.state, 'deploy-hook'))
+  })
+
+  test('replaying an @head admission returns the same item and canonical ref', async () => {
+    const fx = await fixture({ acceptHeadRef: true })
+    const input = signal({ follows: [{ kind: 'event-triggers', ref: 'deploy-hook@head' }] })
+    const first = fx.service.admit(input)
+    const canonicalRef = readStore(fx.root).follows(first.item.id)[0]!.ref
+    expect(canonicalRef).toBe(refFor(fx.state, 'deploy-hook'))
+    arrive(fx.state, 'deploy-hook', 'evt-1')
+    const retry = fx.service.admit(input)
+    expect(retry).toMatchObject({ created: false, reason: 'duplicate' })
+    expect(retry.item.id).toBe(first.item.id)
+    expect(readStore(fx.root).follows(first.item.id).map(follow => follow.ref)).toEqual([canonicalRef])
+    expect(readStore(fx.root).countFollows()).toEqual({ open: 1, closed: 0 })
+  })
+
+  test('@head and its explicit canonical ref collapse into one follow', async () => {
+    const fx = await fixture({ acceptHeadRef: true })
+    const admitted = fx.service.admit(signal({ follows: [
+      { kind: 'event-triggers', ref: 'deploy-hook@head' }, { kind: 'event-triggers', ref: refFor(fx.state, 'deploy-hook') },
+      { kind: 'event-triggers', ref: 'other@head' },
+    ] }))
+    expect(readStore(fx.root).follows(admitted.item.id).map(follow => follow.ref)).toEqual([refFor(fx.state, 'deploy-hook'), refFor(fx.state, 'other')])
+  })
+
+  test('flag off rejects @head as an invalid ref', async () => {
+    for (const acceptHeadRef of [undefined, false]) {
+      const fx = await fixture(acceptHeadRef === undefined ? {} : { acceptHeadRef })
+      expect(() => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: 'deploy-hook@head' }] }))).toThrow(/not admissible for source event-triggers/)
+      expect(readStore(fx.root).countFollows()).toEqual({ open: 0, closed: 0 })
+      // The canonical three-part ref is unaffected.
+      expect(fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: refFor(fx.state, 'deploy-hook') }] })).created).toBe(true)
+    }
+  })
+
+  test('canonicalize is an optional registration key and must be a function', async () => {
+    const fx = await fixture({ follows: false })
+    expect(errorCode(() => fx.service.registerThreadSource({ source: 'ticket', generation: 'g', resolve: () => undefined, canonicalize: 1 } as never))).toBe('invalid-input')
+    const dispose = fx.service.registerThreadSource({ source: 'ticket', generation: 'g', resolve: () => undefined,
+      canonicalize: ref => ref === 'latest' ? 'T-9' : ref === 'boom' ? (() => { throw new Error('boom') })() : ref === 'none' ? undefined : ref,
+      validate: ref => ref.startsWith('T-') })
+    const admitted = fx.service.admit(signal({ follows: [{ kind: 'ticket', ref: 'latest' }] }))
+    expect(readStore(fx.root).follows(admitted.item.id).map(follow => follow.ref)).toEqual(['T-9'])
+    for (const ref of ['boom', 'none', 'X-1']) {
+      expect(errorCode(() => fx.service.admit(signal({ externalId: `ext-${ref}`, follows: [{ kind: 'ticket', ref }] })))).toBe('invalid-input')
+    }
+    dispose()
+  })
+})
+
 describe('event-triggers follow config and helpers', () => {
   test('validates follows config and requires an enabled scoped intake', () => {
     const root = '/tmp/work-items-event-follow-config'
     expect(normalizeConfig(config(root, true)).follows).toEqual({ eventTriggers: true })
     expect(normalizeConfig(config(root, false)).follows).toBeUndefined()
+    expect(normalizeConfig(config(root, true, false)).follows).toEqual({ eventTriggers: true })
+    expect(normalizeConfig(config(root, true, true)).follows).toEqual({ eventTriggers: true, eventTriggersAcceptHeadRef: true })
+    expect(normalizeConfig(config(root, false, true)).follows).toBeUndefined()
     const bad = (follows: unknown, overrides: Partial<Config> = {}) => errorCode(() => normalizeConfig({ ...config(root, undefined), ...overrides, follows } as Config))
     expect(bad({ eventTriggers: { enabled: 'yes' } })).toBe('invalid-input')
+    expect(bad({ eventTriggers: { enabled: true, acceptHeadRef: 'yes' } })).toBe('invalid-input')
     expect(bad({ eventTriggers: { enabled: true, extra: 1 } })).toBe('invalid-input')
     expect(bad({ other: {} })).toBe('invalid-input')
     expect(bad([])).toBe('invalid-input')

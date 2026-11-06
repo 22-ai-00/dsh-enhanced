@@ -407,7 +407,10 @@ export class AssistantWorkItemsService extends Service {
         }
         let unregister: () => void
         try {
-          unregister = this.registerThreadSource(eventFollowRegistration({ reader, owner: () => this.workItemsEventFollowOwner(scope) }))
+          unregister = this.registerThreadSource(eventFollowRegistration({
+            reader, owner: () => this.workItemsEventFollowOwner(scope),
+            acceptHeadRef: this.workItemsConfig.follows?.eventTriggersAcceptHeadRef === true,
+          }))
         } catch (error) {
           followCtx.logger.warn(`assistant-work-items: event follow source unavailable: ${describe(error)}`)
           return
@@ -1505,7 +1508,7 @@ export class AssistantWorkItemsService extends Service {
     if (registration === null || typeof registration !== 'object' || Array.isArray(registration)) {
       fail('invalid-input', 'thread source registration must be an object')
     }
-    const allowed = ['source', 'generation', 'resolve', 'validate'] as const
+    const allowed = ['source', 'generation', 'resolve', 'validate', 'canonicalize'] as const
     for (const key of Object.keys(registration)) {
       if (!(allowed as readonly string[]).includes(key)) fail('invalid-input', `thread source registration contains unknown field ${key}`)
     }
@@ -1514,6 +1517,7 @@ export class AssistantWorkItemsService extends Service {
     text(registration.generation, 'thread source generation', 200)
     if (typeof registration.resolve !== 'function') fail('invalid-input', 'thread source must expose a resolve function')
     if (registration.validate !== undefined && typeof registration.validate !== 'function') fail('invalid-input', 'thread source validate must be a function')
+    if (registration.canonicalize !== undefined && typeof registration.canonicalize !== 'function') fail('invalid-input', 'thread source canonicalize must be a function')
     if (this.workItemsThreadSources.has(source)) fail('invalid-input', `thread source ${source} is already registered`)
     const installed = registration
     this.workItemsThreadSources.set(source, installed)
@@ -2050,6 +2054,7 @@ export class AssistantWorkItemsService extends Service {
             source: registration.source,
             generation: registration.generation,
             ...(registration.validate === undefined ? {} : { validate: (ref: string) => registration.validate?.(ref) === true }),
+            ...(registration.canonicalize === undefined ? {} : { canonicalize: (ref: string) => registration.canonicalize?.(ref) }),
           })
       },
     })

@@ -597,6 +597,13 @@ export interface WorkItemThreadSourceRegistration {
    * write, so a source can refuse a ref that would close on stale evidence.
    */
   validate?(ref: string): boolean
+  /**
+   * Optional admission-time ref rewrite, run before `validate` for a new item.
+   * Synchronous and read-only; returns the canonical ref to validate and store,
+   * or undefined (or throws) to reject with `invalid-input`. Only the returned
+   * form is ever persisted, so an alias the source accepts never leaks out.
+   */
+  canonicalize?(ref: string): string | undefined
 }
 
 /** Persisted lifecycle of one followed thread. */
