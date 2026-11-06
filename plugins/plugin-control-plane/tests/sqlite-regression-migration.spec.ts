@@ -110,7 +110,7 @@ test('populated v33 source, revision, adoption and consumed quotas survive v34 m
 
   const migrated = openControlPlaneDatabase(location)
   try {
-    expect(version(migrated)).toBe(34)
+    expect(version(migrated)).toBe(controlPlaneSchemaVersion)
     for (const table of historicalTables) expect(rows(migrated, table)).toEqual(saved.get(table))
     expect(migrated.prepare("SELECT sql FROM sqlite_schema WHERE name='source_jobs_created'").get()).toEqual(sourceIndex)
     expect(migrated.prepare('PRAGMA foreign_key_check').all()).toEqual([])
@@ -181,7 +181,7 @@ test('v33 conflicting view rolls back the v34 table creation transaction', () =>
 test.each(['view', 'missing'] as const)('v34 %s regression table fails closed without changing old rows', kind => {
   const location = populatedV33()
   const upgraded = openControlPlaneDatabase(location)
-  expect(version(upgraded)).toBe(34)
+  expect(version(upgraded)).toBe(controlPlaneSchemaVersion)
   upgraded.close()
   const before = new DatabaseSync(location)
   before.exec('DROP TABLE source_revision_regressions')
@@ -194,7 +194,7 @@ test.each(['view', 'missing'] as const)('v34 %s regression table fails closed wi
   expect(() => openControlPlaneDatabase(location)).toThrow(/revision regression schema/)
   const after = new DatabaseSync(location)
   try {
-    expect(version(after)).toBe(34)
+    expect(version(after)).toBe(controlPlaneSchemaVersion)
     expect(schema(after, 'source_revision_regressions')).toBeUndefined()
     expect(after.prepare("SELECT type FROM sqlite_schema WHERE name='source_revision_regressions'").get())
       .toEqual(kind === 'view' ? { type: 'view' } : undefined)

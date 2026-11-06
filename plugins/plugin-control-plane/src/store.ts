@@ -26,6 +26,9 @@ import type { AnyOwnerTaskFailureReference as OwnerTaskFailureReference } from '
 import { assertForegroundDeployment, assertForegroundTask, type ForegroundDeploymentRecord } from './foreground-deployment.js'
 import { assertTaskObservationBatch, getTaskObservationRecord, readTaskObservationContext } from './task-observation-store.js'
 import type { TaskObservationBatch, TaskObservationRecord } from './task-observation-types.js'
+import { createCreationCapabilityTrendSnapshot, listCreationCapabilityTrendSnapshots, sealCreationCapabilityTrendSnapshot,
+  type CreationCapabilityTrendSnapshotPage, type CreationCapabilityTrendSnapshotQuery, type CreationCapabilityTrendSnapshotRecord } from './creation-capability-trend-snapshot.js'
+import type { CreationCapabilityOrdinaryUseTrend } from './creation-capability-types.js'
 import { parseRuntimeEpochRequest, parseRuntimeEpochReceipt, verifyRuntimeEpochReceipt, type RuntimeEpochRequest, type RuntimeEpochReceipt } from './runtime-epoch.js'
 import { runtimeIdentityDigest } from './foreground-deployment.js'
 import { readHostMaintenanceRecords, verifyHostMaintenanceChain, hostMaintenanceCanonical, hostMaintenanceDigest, type HostMaintenanceRecord } from './host-maintenance.js'
@@ -4565,6 +4568,18 @@ export class ControlPlaneStore {
 
   getTaskObservation(id: string): TaskObservationRecord | undefined { return getTaskObservationRecord(this.#database, id) }
   assertCurrentTaskObservation(id: string): void { readTaskObservationContext(this.#database, id) }
+  /** Seal one observational trend result into the append-only snapshot ledger; same trend, same row. */
+  sealCreatedCapabilityTrendSnapshot(trend: CreationCapabilityOrdinaryUseTrend): { created: boolean; record: CreationCapabilityTrendSnapshotRecord } {
+    const snapshot = createCreationCapabilityTrendSnapshot(trend)
+    this.#beginMutation()
+    try {
+      const result = sealCreationCapabilityTrendSnapshot(this.#database, snapshot, this.#now())
+      this.#commitMutation(); return result
+    } catch (error) { this.#rollbackMutation(); throw error }
+  }
+  listCreatedCapabilityTrendSnapshots(query: CreationCapabilityTrendSnapshotQuery = {}): CreationCapabilityTrendSnapshotPage {
+    return listCreationCapabilityTrendSnapshots(this.#database, query)
+  }
   listTaskObservations(lane: string, limit = 100): readonly TaskObservationRecord[] {
     if (!KEY.test(lane) || !Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new ControlPlaneStoreError('invalid-input', 'task observation list is invalid')
     const rows = this.#database.prepare(`SELECT batch_json,batch_digest,state,receipt_json FROM task_observation_batches WHERE lane=?

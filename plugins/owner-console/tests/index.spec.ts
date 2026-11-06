@@ -6,6 +6,7 @@ import { Config, apply, name, version } from '../src/index.ts'
 import type { OwnerConsoleService } from '../src/service.ts'
 import type { SettingsDescriptor, SettingsService } from '../src/settings.ts'
 import { TYPERT } from '../src/typert.ts'
+import { readTrendSnapshots } from '../src/service.ts'
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
   version: string
@@ -67,6 +68,7 @@ describe('dsh-enhanced-owner-console', () => {
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/setPluginEnabled')).toEqual(['entryId', 'enabled'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/installProjectBundle')).toEqual(['spec'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/removeProjectBundle')).toEqual(['name'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/trendSnapshots')).toEqual(['planId', 'beforeSequence', 'limit'])
   })
 
   it('reports absent entries, strict providers and no fabricated connection', async () => {
@@ -319,5 +321,61 @@ describe('dsh-enhanced-owner-console', () => {
     } finally {
       await ctx.fiber.dispose()
     }
+  })
+})
+
+const D = (c: string) => c.repeat(64)
+function snapshotRecord(sequence: number, overrides: Record<string, unknown> = {}) {
+  return { sequence, sealedAt: 5_000 + sequence, snapshot: {
+    protocol: 'dsh-created-capability-ordinary-use-trend-snapshot/v1', causal: false, planId: 'plan', receiptDigest: D('a'),
+    inputsDigest: D('b'), trendDigest: D('c'), digest: D('d'),
+    window: { windowMs: 86_400_000, preWindows: 2, postWindows: 2, startExclusive: 10, endInclusive: 20, complete: false },
+    models: [], flags: ['partial-window'],
+    trend: { causal: false, cohorts: { treatedSessions: 3, controlSessions: 4 }, rowsDigest: D('e'), strata: [
+      { model: { state: 'frozen', provider: 'supplier', model: 'task-model', reasoningEffort: 'high' },
+        differenceInDifferences: { status: 'estimated', estimate: 0.17, adjustedEstimate: 0.14, standardError: 0.2,
+          interval95: { low: -0.27, high: 0.55 } }, parallelTrend: { status: 'not-flagged', testedWindows: 2, gapChange: 0 } },
+      { model: { state: 'missing' }, differenceInDifferences: { status: 'insufficient' },
+        parallelTrend: { status: 'untestable', testedWindows: 0 } }] },
+    ...overrides } }
+}
+
+describe('owner console trend snapshots (read-only)', () => {
+  it('reports absent without a control plane', () => {
+    expect(readTrendSnapshots(undefined, '', 0, 10)).toEqual({ state: 'absent', causal: false, items: [] })
+  })
+
+  it('maps one bounded page and forwards only the read query', () => {
+    const read = vi.fn(() => ({ protocol: 'dsh-created-capability-ordinary-use-trend-snapshot-list/v1', causal: false,
+      items: [snapshotRecord(2)], nextBeforeSequence: 2 }))
+    const provider = { inspectCreatedCapabilityOrdinaryUseTrendSnapshots: read, sealCreatedCapabilityOrdinaryUseTrendSnapshot: vi.fn() }
+    const page = readTrendSnapshots(provider, ' plan ', 7, 10)
+    expect(read).toHaveBeenCalledExactlyOnceWith({ planId: 'plan', beforeSequence: 7, limit: 10 })
+    expect(provider.sealCreatedCapabilityOrdinaryUseTrendSnapshot).not.toHaveBeenCalled()
+    expect(page).toEqual({ state: 'ok', causal: false, nextBeforeSequence: 2, items: [{
+      sequence: 2, sealedAt: 5_002, planId: 'plan', digest: D('d'), inputsDigest: D('b'), trendDigest: D('c'),
+      window: { windowMs: 86_400_000, preWindows: 2, postWindows: 2, startExclusive: 10, endInclusive: 20, complete: false },
+      cohorts: { treatedSessions: 3, controlSessions: 4 }, flags: ['partial-window'], strata: [
+        { model: { state: 'frozen', provider: 'supplier', model: 'task-model', reasoningEffort: 'high' },
+          differenceInDifferences: { status: 'estimated', estimate: 0.17, low: -0.27, high: 0.55 }, parallelTrend: 'not-flagged' },
+        { model: { state: 'missing' }, differenceInDifferences: { status: 'insufficient' }, parallelTrend: 'untestable' }] }] })
+    readTrendSnapshots(provider, '', 0, 100)
+    expect(read).toHaveBeenLastCalledWith({ limit: 100 })
+  })
+
+  it('reports unverifiable for refused queries, tampered rows or a causal claim', () => {
+    const unverifiable = { state: 'unverifiable', causal: false, items: [] }
+    const page = (items: unknown[]) => ({ inspectCreatedCapabilityOrdinaryUseTrendSnapshots: () => ({ causal: false, items }) })
+    // The control plane returns undefined when a stored row fails its digest check.
+    expect(readTrendSnapshots({ inspectCreatedCapabilityOrdinaryUseTrendSnapshots: () => undefined }, '', 0, 10)).toEqual(unverifiable)
+    expect(readTrendSnapshots({ inspectCreatedCapabilityOrdinaryUseTrendSnapshots: () => { throw new Error('x') } }, '', 0, 10))
+      .toEqual(unverifiable)
+    expect(readTrendSnapshots({}, '', 0, 10)).toEqual(unverifiable)
+    expect(readTrendSnapshots(page([snapshotRecord(1, { causal: true })]), '', 0, 10)).toEqual(unverifiable)
+    expect(readTrendSnapshots(page([snapshotRecord(1, { digest: 'nope' })]), '', 0, 10)).toEqual(unverifiable)
+    expect(readTrendSnapshots(page([]), '', 0, 0)).toEqual(unverifiable)
+    expect(readTrendSnapshots(page([]), '', 0, 101)).toEqual(unverifiable)
+    expect(readTrendSnapshots(page([]), '', -1, 10)).toEqual(unverifiable)
+    expect(readTrendSnapshots(page([]), '', 0, 10)).toEqual({ state: 'ok', causal: false, items: [] })
   })
 })

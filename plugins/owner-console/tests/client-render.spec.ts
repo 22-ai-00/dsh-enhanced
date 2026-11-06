@@ -5,13 +5,13 @@ import type { OwnerConsoleStatus } from '../src/typert.ts'
  * Renders the panel tree without a DOM: hooks are stubbed so the first `useState` (the status)
  * can be seeded, then function components are expanded and the element tree is walked.
  */
-const seed: { status: OwnerConsoleStatus | undefined } = { status: undefined }
+const seed: { status: OwnerConsoleStatus | undefined, calls: number } = { status: undefined, calls: 0 }
 vi.mock('react', async importOriginal => {
   const actual = await importOriginal<typeof import('react')>()
-  let calls = 0
   return {
     ...actual,
-    useState: (initial: unknown) => [calls++ % 14 === 0 ? seed.status : initial, () => undefined],
+    // Only the panel's first useState (the status) is seeded; the counter resets per render so nested cards' hooks don't shift it.
+    useState: (initial: unknown) => [seed.calls++ === 0 ? seed.status : initial, () => undefined],
     useEffect: () => undefined,
     useRef: (value: unknown) => ({ current: value }),
   }
@@ -34,6 +34,7 @@ const text = (nodes: readonly Node[]) => nodes.flatMap(node => {
 
 function render(status?: OwnerConsoleStatus) {
   seed.status = status
+  seed.calls = 0
   const navigation = { openConversation: vi.fn(), openPlugins: vi.fn() }
   return { nodes: expand(OwnerConsolePanel({ remote: {} as never, navigation })), navigation }
 }

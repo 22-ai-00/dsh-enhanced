@@ -6,7 +6,10 @@ import {
   type BundleInfoLike, type ChangeResultLike, type LoaderService, type PluginInfoLike, type PluginManagerService,
   type SettingsDescriptor, type SettingsPathOp, type SettingsService,
 } from './settings.js'
-import { LARK_CONNECTIONS, LARK_ERROR_CODES, type OwnerConsoleStatus, type OwnerConsoleWriteResult } from './typert.js'
+import {
+  LARK_CONNECTIONS, LARK_ERROR_CODES, OwnerConsoleTrendSnapshotsSchema, TREND_SNAPSHOT_PAGE_MAX,
+  type OwnerConsoleStatus, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
+} from './typert.js'
 
 /** Companions worth surfacing; a missing one is a setup hint, never a hard failure. */
 const DEPENDENCIES = ['assistantPolicy', 'assistantDelivery', 'assistantSkills'] as const
@@ -116,6 +119,13 @@ export class OwnerConsoleService extends TypertRemoteService {
         fiberPhase: plugin.fiberPhase,
       }))),
     })
+  }
+
+  /** Read-only page of sealed ordinary-use trend snapshots from the control plane. It never seals,
+   * so viewing cannot change the ledger; `planId: ''` lists every plan and `beforeSequence: 0` starts
+   * at the newest row. Any refusal or tampered row is reported as `unverifiable`, never repaired. */
+  async trendSnapshots(planId: string, beforeSequence: number, limit: number): Promise<OwnerConsoleTrendSnapshots> {
+    return readTrendSnapshots(this.host.get('pluginControlPlane' as never), planId, beforeSequence, limit)
   }
 
   /** Select or remove one installed project bundle layer; dependencies stay installed. */
@@ -292,5 +302,58 @@ function readLarkHealth(provider: unknown): LarkHealthFacts {
     connected: state === 'connected' || state === 'connected-with-gap',
     connection: state,
     ...(includes(LARK_ERROR_CODES, code) ? { lastErrorCode: code } : {}),
+  }
+}
+
+type TrendSnapshotProvider = { inspectCreatedCapabilityOrdinaryUseTrendSnapshots?: (query: {
+  planId?: string, beforeSequence?: number, limit?: number }) => unknown }
+const UNVERIFIABLE: OwnerConsoleTrendSnapshots = Object.freeze({ state: 'unverifiable', causal: false, items: Object.freeze([]) })
+const record = (value: unknown): Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}
+const list = (value: unknown): readonly unknown[] => Array.isArray(value) ? value : []
+
+/** Project one control-plane snapshot page onto the bounded panel summary; content-free digests and counts only. */
+export function readTrendSnapshots(provider: unknown, planId: string, beforeSequence: number,
+  limit: number): OwnerConsoleTrendSnapshots {
+  if (provider === undefined || provider === null) return Object.freeze({ state: 'absent', causal: false, items: Object.freeze([]) })
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > TREND_SNAPSHOT_PAGE_MAX
+    || !Number.isSafeInteger(beforeSequence) || beforeSequence < 0) return UNVERIFIABLE
+  try {
+    const read = (provider as TrendSnapshotProvider).inspectCreatedCapabilityOrdinaryUseTrendSnapshots
+    if (typeof read !== 'function') return UNVERIFIABLE
+    const page = record(read.call(provider, {
+      ...(planId.trim() === '' ? {} : { planId: planId.trim() }),
+      ...(beforeSequence === 0 ? {} : { beforeSequence }),
+      limit,
+    }))
+    if (page['causal'] !== false || !Array.isArray(page['items'])) return UNVERIFIABLE
+    const items = page['items'].map(item => {
+      const row = record(item)
+      const snapshot = record(row['snapshot'])
+      const trend = record(snapshot['trend'])
+      if (snapshot['causal'] !== false || trend['causal'] !== false) throw new Error('causal snapshot')
+      return {
+        sequence: row['sequence'], sealedAt: row['sealedAt'], planId: snapshot['planId'], digest: snapshot['digest'],
+        inputsDigest: snapshot['inputsDigest'], trendDigest: snapshot['trendDigest'], window: snapshot['window'],
+        cohorts: trend['cohorts'], flags: snapshot['flags'],
+        strata: list(trend['strata']).map(value => {
+          const stratum = record(value)
+          const did = record(stratum['differenceInDifferences'])
+          const interval = record(did['interval95'])
+          return {
+            model: stratum['model'],
+            differenceInDifferences: did['status'] === 'estimated'
+              ? { status: 'estimated', estimate: did['estimate'], low: interval['low'], high: interval['high'] }
+              : { status: 'insufficient' },
+            parallelTrend: record(stratum['parallelTrend'])['status'],
+          }
+        }),
+      }
+    })
+    const parsed = OwnerConsoleTrendSnapshotsSchema.safeParse({ state: 'ok', causal: false, items,
+      ...(page['nextBeforeSequence'] === undefined ? {} : { nextBeforeSequence: page['nextBeforeSequence'] }) })
+    return parsed.success ? Object.freeze(parsed.data) : UNVERIFIABLE
+  } catch {
+    return UNVERIFIABLE
   }
 }

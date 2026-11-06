@@ -19,6 +19,10 @@ export { inspectCreationCapabilityAvailabilityAttribution, inspectCreationCapabi
   inspectCreationCapabilityOrdinaryUseTrend, inspectCreationCapabilityTaskAssociations } from './creation-capability-feedback.js'
 export type { CreationCapabilityAttributionInput, CreationCapabilityFeedbackInput,
   CreationCapabilityTrendInput } from './creation-capability-feedback.js'
+export { assertCreationCapabilityTrendSnapshot, createCreationCapabilityTrendSnapshot, TREND_SNAPSHOT_DEFAULT_PAGE,
+  TREND_SNAPSHOT_MAX_PAGE } from './creation-capability-trend-snapshot.js'
+export type { CreationCapabilityTrendSnapshot, CreationCapabilityTrendSnapshotPage, CreationCapabilityTrendSnapshotQuery,
+  CreationCapabilityTrendSnapshotRecord } from './creation-capability-trend-snapshot.js'
 export { creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig,
   verifyCreationCapabilityReceipt } from './creation-capability-journal.js'
 export * from './catalog.js'

@@ -27,6 +27,7 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 | 远程接入（飞书） | 接入方式、`lark-channel` 条目、连接状态（`larkChannel.health()` 快照）、appId 是否配置；两种对接：直接填写 appId + secret 引用，或从 Host 环境一键探测 appId | `settings.describe` + `larkChannel.health()` |
 | TraeX | `traex-acp-provider` 条目、是否启用、命令 | `settings.describe` |
 | 本项目插件管理 | 本项目的 bundle 层（启用/停用）、已加载条目（启用/禁用/阶段）、安装 `@dsh-enhanced/*`（含依赖），以及对 live 字段的合并配置 | `pluginManager` + `settings.describe` / `settings.mutate` |
+| 趋势快照（只读） | 已封存的普通使用趋势快照：序号、计划、窗口边界、会话数、flags、按冻结模型分层的 DiD 与平行趋势、digest 前缀；每页 10 条，可翻到更早一页 | `pluginControlPlane.inspectCreatedCapabilityOrdinaryUseTrendSnapshots`（结构化读取，可缺省） |
 
 读取与写入都经 `typert` 的严格 invocation 返回；面板不缓存或上报任何内容。
 Host 状态里仍带 `dependencies` 字段，但面板不再渲染「依赖自检」卡片。
@@ -79,6 +80,10 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 - 面板收到 Host 的业务拒绝会原样显示原因（例如环境变量不存在、身份字段缺失、需要重启），不静默失败。
 - 「方式」按条目里实际存在的 secret 引用显示（环境变量 secret 或 keychain secret），
   不再只反映本插件自己的偏好字段。
+
+趋势快照卡片只读：唯一的按钮是「更早的快照 / 回到最新」，都只重新调用 `trendSnapshots`；面板没有封存、
+编辑或删除入口，封存由 Host 侧 owner 调用 Control Plane 完成。结果固定 `causal: false`，不作为采用、晋升或撤权依据。
+没有 Control Plane 显示未加载；查询被拒、已封存行未通过 digest 校验或返回值不合模式时显示「未通过校验」，不修复也不改写。
 
 ## 配置
 

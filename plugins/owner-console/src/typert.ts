@@ -43,7 +43,53 @@ export type OwnerConsoleStatus = Readonly<z.infer<typeof OwnerConsoleStatusSchem
 export const WRITE_RESULT = z.object({ applied: z.boolean(), entry: z.string(), note: z.string() }).readonly()
 export type OwnerConsoleWriteResult = Readonly<z.infer<typeof WRITE_RESULT>>
 
-/** Strict Host and client descriptors: one read plus owner-clicked one-step writes. */
+/** Bounds of the read-only trend snapshot page; the control plane enforces the same page limit. */
+export const TREND_SNAPSHOT_PAGE_MAX = 100
+const DIGEST = z.string().regex(/^[a-f0-9]{64}$/u)
+const PLAN_ID = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u)
+const label = z.string().min(1).max(200)
+const count = z.number().int().nonnegative()
+export const TREND_FLAGS = ['parallel-trend-suspect', 'no-control-cohort', 'concurrent-adoptions', 'partial-window',
+  'adoption-not-active'] as const
+const trendModel = z.union([
+  z.object({ state: z.literal('frozen'), provider: label, model: label, reasoningEffort: label.optional() }).readonly(),
+  z.object({ state: z.enum(['missing', 'inconsistent']) }).readonly(),
+])
+const trendStratum = z.object({
+  model: trendModel,
+  differenceInDifferences: z.union([
+    z.object({ status: z.literal('estimated'), estimate: z.number(), low: z.number(), high: z.number() }).readonly(),
+    z.object({ status: z.literal('insufficient') }).readonly(),
+  ]),
+  parallelTrend: z.enum(['not-flagged', 'parallel-trend-suspect', 'untestable']),
+}).readonly()
+const trendSnapshotItem = z.object({
+  sequence: z.number().int().positive(),
+  sealedAt: z.number().int().positive(),
+  planId: PLAN_ID,
+  digest: DIGEST,
+  inputsDigest: DIGEST,
+  trendDigest: DIGEST,
+  window: z.object({ windowMs: z.number().int().positive(), preWindows: count, postWindows: count,
+    startExclusive: z.number().int(), endInclusive: z.number().int(), complete: z.boolean() }).readonly(),
+  cohorts: z.object({ treatedSessions: count, controlSessions: count }).readonly(),
+  flags: z.array(z.enum(TREND_FLAGS)).max(TREND_FLAGS.length).readonly(),
+  strata: z.array(trendStratum).max(64).readonly(),
+}).readonly()
+/**
+ * `absent`: no control plane service; `unverifiable`: it refused the query or a sealed row failed its digest check.
+ * Observational only: `causal` is always false and nothing here adopts, promotes or revokes.
+ */
+export const OwnerConsoleTrendSnapshotsSchema = z.object({
+  state: z.enum(['absent', 'unverifiable', 'ok']),
+  causal: z.literal(false),
+  items: z.array(trendSnapshotItem).max(TREND_SNAPSHOT_PAGE_MAX).readonly(),
+  nextBeforeSequence: z.number().int().positive().optional(),
+}).readonly()
+export type OwnerConsoleTrendSnapshots = Readonly<z.infer<typeof OwnerConsoleTrendSnapshotsSchema>>
+export type OwnerConsoleTrendSnapshotItem = OwnerConsoleTrendSnapshots['items'][number]
+
+/** Strict Host and client descriptors: two reads plus owner-clicked one-step writes. */
 export const TYPERT = {
   package: '@dsh-enhanced/owner-console',
   face: 'host',
@@ -55,6 +101,20 @@ export const TYPERT = {
       invocation: { kind: 'direct' }, parameters: [],
       result: codec('@dsh-enhanced/owner-console#OwnerConsoleStatus', () => OwnerConsoleStatusSchema),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 30, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/trendSnapshots',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'trendSnapshots',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'planId', wire: 'planId', source: 'json', codec: codec('owner-console#trendPlanId', () => z.string().max(160)) },
+        { name: 'beforeSequence', wire: 'beforeSequence', source: 'json',
+          codec: codec('owner-console#trendBeforeSequence', () => z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)) },
+        { name: 'limit', wire: 'limit', source: 'json',
+          codec: codec('owner-console#trendLimit', () => z.number().int().min(1).max(TREND_SNAPSHOT_PAGE_MAX)) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#OwnerConsoleTrendSnapshots', () => OwnerConsoleTrendSnapshotsSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 37, column: 3 },
     },
     {
       id: '@dsh-enhanced/owner-console#ownerConsole/configureFeishu',

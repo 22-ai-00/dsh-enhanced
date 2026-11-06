@@ -4,7 +4,7 @@ import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 
-export const controlPlaneSchemaVersion = 34
+export const controlPlaneSchemaVersion = 35
 
 const sourceRevisionGrantSchema = `CREATE TABLE IF NOT EXISTS source_revision_grants (
   grant_id TEXT PRIMARY KEY,
@@ -34,6 +34,22 @@ CREATE TABLE IF NOT EXISTS source_revision_sources (
 ) STRICT, WITHOUT ROWID;`
 
 const sourceRevisionRegressionSchema = sourceCreationVerificationSchema.replace('source_creation_verifications', 'source_revision_regressions')
+
+/** Append-only, content-addressed seals of observational ordinary-use trend results (schema 35). */
+const createdCapabilityTrendSnapshotTableSchema = `CREATE TABLE IF NOT EXISTS created_capability_trend_snapshots (
+  sequence INTEGER PRIMARY KEY CHECK(sequence > 0),
+  snapshot_digest TEXT NOT NULL UNIQUE CHECK(length(snapshot_digest) = 64 AND snapshot_digest NOT GLOB '*[^a-f0-9]*'),
+  plan_id TEXT NOT NULL CHECK(length(plan_id) > 0 AND length(plan_id) <= 160),
+  snapshot_json TEXT NOT NULL CHECK(json_valid(snapshot_json) AND json_type(snapshot_json) = 'object' AND length(snapshot_json) <= 1048576),
+  sealed_at INTEGER NOT NULL CHECK(sealed_at > 0)
+) STRICT;`
+
+const createdCapabilityTrendSnapshotSchema = `${createdCapabilityTrendSnapshotTableSchema}
+CREATE INDEX IF NOT EXISTS created_capability_trend_snapshots_plan ON created_capability_trend_snapshots(plan_id, sequence);
+CREATE TRIGGER IF NOT EXISTS created_capability_trend_snapshots_no_update BEFORE UPDATE ON created_capability_trend_snapshots
+BEGIN SELECT RAISE(ABORT, 'created capability trend snapshots are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS created_capability_trend_snapshots_no_delete BEFORE DELETE ON created_capability_trend_snapshots
+BEGIN SELECT RAISE(ABORT, 'created capability trend snapshots are append-only'); END;`
 
 const sourcePreparedArtifactTableSchema = `CREATE TABLE IF NOT EXISTS source_prepared_artifacts (
   pack_sha256 TEXT PRIMARY KEY CHECK(length(pack_sha256) = 64 AND pack_sha256 NOT GLOB '*[^a-f0-9]*'),
@@ -1456,6 +1472,21 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
         database.exec(`${sourceRevisionRegressionSchema} PRAGMA user_version = 34; COMMIT;`)
       } catch (error) { database.exec('ROLLBACK'); throw error }
     } else database.exec(sourceRevisionRegressionSchema)
+    const trendSnapshotSchema = database.prepare("SELECT type,sql FROM sqlite_schema WHERE name='created_capability_trend_snapshots'")
+      .get() as { type: string; sql: string | null } | undefined
+    if (trendSnapshotSchema === undefined && Number(database.prepare('PRAGMA user_version').get()?.user_version) >= 35) {
+      throw new Error('missing created capability trend snapshot schema')
+    }
+    if (trendSnapshotSchema !== undefined && (trendSnapshotSchema.type !== 'table'
+      || trendSnapshotSchema.sql !== storedTableSchema(createdCapabilityTrendSnapshotTableSchema))) {
+      throw new Error('unknown created capability trend snapshot schema')
+    }
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 35) {
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        database.exec(`${createdCapabilityTrendSnapshotSchema} PRAGMA user_version = 35; COMMIT;`)
+      } catch (error) { database.exec('ROLLBACK'); throw error }
+    } else database.exec(createdCapabilityTrendSnapshotSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {

@@ -1168,6 +1168,26 @@ export class PluginControlPlaneService extends Service {
     } catch { return undefined }
   }
 
+  /**
+   * Host-only, owner-invoked: seal the current ordinary-use trend of one adoption into the append-only,
+   * content-addressed snapshot ledger. Re-sealing an unchanged trend returns the existing row (`created: false`);
+   * rows are never rewritten. Still observational (`causal: false`); never adoption or revocation evidence.
+   */
+  sealCreatedCapabilityOrdinaryUseTrendSnapshot = (planId: string,
+    options: { windowMs?: number; preWindows?: number; maxPostWindows?: number } = {}) => {
+    const trend = this.inspectCreatedCapabilityOrdinaryUseTrend(planId, options)
+    if (!trend) return undefined
+    try { return this.store.sealCreatedCapabilityTrendSnapshot(trend) } catch { return undefined }
+  }
+
+  /** Host-only bounded newest-first read of sealed trend snapshots; undefined on invalid query or any tampered row. */
+  inspectCreatedCapabilityOrdinaryUseTrendSnapshots = (query: { planId?: string; beforeSequence?: number; limit?: number } = {}) => {
+    try {
+      this.abort.signal.throwIfAborted()
+      return this.store.listCreatedCapabilityTrendSnapshots(query)
+    } catch { return undefined }
+  }
+
   /** The historical read is deferred so callers keep it inside their own failure boundary. */
   private createdCapabilityFeedbackInput(planId: string):
   (() => CreationCapabilityFeedbackInput & { evaluation: AssistantEvaluationService }) | undefined {

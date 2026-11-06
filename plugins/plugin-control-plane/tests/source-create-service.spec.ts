@@ -770,6 +770,14 @@ it.each(['correction', 'withdrawal'] as const)(
       population: { scanned: 2, counted: 0, excluded: { trigger: 1, unverified: 1 } },
       cohorts: { treatedSessions: 0, controlSessions: 0 }, strata: [], flags: ['no-control-cohort', 'partial-window'] })
     expect(f.service.inspectCreatedCapabilityOrdinaryUseTrend(planId, { windowMs: 0 })).toBeUndefined()
+    const sealed = f.service.sealCreatedCapabilityOrdinaryUseTrendSnapshot(planId)
+    expect(sealed).toMatchObject({ created: true, record: { sequence: 1, snapshot: { causal: false, planId,
+      trendDigest: controlPlaneDigest(f.service.inspectCreatedCapabilityOrdinaryUseTrend(planId)), models: [],
+      flags: ['no-control-cohort', 'partial-window'] } } })
+    expect(f.service.sealCreatedCapabilityOrdinaryUseTrendSnapshot(planId)).toEqual({ created: false, record: sealed!.record })
+    expect(f.service.sealCreatedCapabilityOrdinaryUseTrendSnapshot(planId, { windowMs: 0 })).toBeUndefined()
+    expect(f.service.inspectCreatedCapabilityOrdinaryUseTrendSnapshots({ planId })?.items).toEqual([sealed!.record])
+    expect(f.service.inspectCreatedCapabilityOrdinaryUseTrendSnapshots({ limit: 101 })).toBeUndefined()
     expect(adoption()).toEqual({ ...adoptedBefore, calls: 2 })
     expect(runnerRun).toHaveBeenCalledTimes(3)
     f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()

@@ -3,7 +3,7 @@ import { jsx } from 'react/jsx-runtime'
 import { CloudMark, KAI_FONT, QUIET_PHRASE, WenyaoGlyph, WenyaoSeal } from './art.js'
 import { TYPERT_REMOTE } from './typert.js'
 import { WENYAO_HERO_DATA_URI, WENYAO_HERO_HEIGHT, WENYAO_HERO_WIDTH } from './wenyao-hero.js'
-import type { OwnerConsoleStatus, OwnerConsoleWriteResult } from './typert.js'
+import type { OwnerConsoleStatus, OwnerConsoleTrendSnapshotItem, OwnerConsoleTrendSnapshots, OwnerConsoleWriteResult } from './typert.js'
 
 /** The installed Host supplies remote and the slot registry. */
 export const inject = ['remote', 'slots']
@@ -11,6 +11,7 @@ export const inject = ['remote', 'slots']
 type RemoteResult<T> = Readonly<{ ok: true, value: T }> | Readonly<{ ok: false }>
 type ConsoleRemote = Readonly<{
   status(): Promise<RemoteResult<OwnerConsoleStatus>>
+  trendSnapshots(planId: string, beforeSequence: number, limit: number): Promise<RemoteResult<OwnerConsoleTrendSnapshots>>
   configureFeishu(appId: string, appSecretEnv: string, credentialHandle: string,
     account: string, tenant: string, discoverAppId: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
   configureTraex(enabled: boolean, command: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
@@ -161,7 +162,77 @@ function field(label: string, value: string, onChange: (next: string) => void, p
       onChange: (event: { target: { value: string } }) => onChange(event.target.value) }))
 }
 
-/** Sidebar entry: a monochrome 文鳐 silhouette that follows the sidebar's text colour. */
+const TREND_PAGE = 10
+const shortDigest = (digest: string) => digest.slice(0, 12)
+const isoTime = (ms: number) => { try { return new Date(ms).toISOString() } catch { return String(ms) } }
+
+function modelLabel(model: OwnerConsoleTrendSnapshotItem['strata'][number]['model']): string {
+  if (model.state !== 'frozen') return model.state === 'missing' ? '模型未冻结' : '模型记录不一致'
+  return `${model.provider}/${model.model}${model.reasoningEffort === undefined ? '' : ` · ${model.reasoningEffort}`}`
+}
+
+function didLabel(did: OwnerConsoleTrendSnapshotItem['strata'][number]['differenceInDifferences']): string {
+  return did.status === 'insufficient' ? '样本不足'
+    : `${did.estimate.toFixed(3)}（95%：${did.low.toFixed(3)} ~ ${did.high.toFixed(3)}）`
+}
+
+/**
+ * Hook-free rendering of one read-only snapshot page. The only control is paging to older rows, which
+ * re-reads; nothing here seals, edits or deletes a snapshot.
+ */
+export function trendSnapshotsView(page: OwnerConsoleTrendSnapshots | undefined, failed: boolean,
+  older: (beforeSequence: number) => void) {
+  if (failed) return el('p', { role: 'alert', style: hintStyle }, '暂时无法读取趋势快照，稍后重试。')
+  if (page === undefined) return placeholder('正在读取…')
+  if (page.state === 'absent') return placeholder('plugin-control-plane 未加载，没有趋势快照。')
+  if (page.state === 'unverifiable') {
+    return el('div', { role: 'alert', style: { ...actionsStyle, fontSize: 12, color: muted } }, pill('未通过校验', 'error'),
+      '查询被拒绝或已封存的记录被改动；面板不会修复或改写它。')
+  }
+  const mono = { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }
+  const items = page.items.length === 0
+    ? placeholder('还没有封存的趋势快照。', QUIET_PHRASE)
+    : el('ol', { style: { ...listStyle, margin: 0, listStyle: 'none' } }, ...page.items.map(item => el('li', {
+      key: item.digest, style: { display: 'grid', gap: 4, padding: '10px 0', borderTop: `1px solid ${hairline}`, minWidth: 0, overflowWrap: 'anywhere' } },
+      el('span', { style: actionsStyle },
+        el('span', { style: { fontWeight: 500 } }, `#${item.sequence} · ${item.planId}`),
+        item.window.complete ? null : pill('末窗未满', 'warn'),
+        ...item.flags.filter(flag => flag !== 'partial-window').map(flag => pill(flag, 'neutral'))),
+      el('span', { style: { fontSize: 12, color: caption } },
+        `封存于 ${isoTime(item.sealedAt)} · 窗口 ${item.window.preWindows}+${item.window.postWindows} × ${Math.round(item.window.windowMs / 3_600_000)}h`
+        + ` · (${isoTime(item.window.startExclusive)}, ${isoTime(item.window.endInclusive)}]`),
+      el('span', { style: { fontSize: 12, color: muted } },
+        `会话：使用 ${item.cohorts.treatedSessions} / 对照 ${item.cohorts.controlSessions}`),
+      ...item.strata.map(stratum => el('span', { style: { fontSize: 12 } },
+        `${modelLabel(stratum.model)}：DiD ${didLabel(stratum.differenceInDifferences)} · 平行趋势 ${stratum.parallelTrend}`)),
+      el('span', { style: { ...mono, fontSize: 11, color: caption } },
+        `digest ${shortDigest(item.digest)} · inputs ${shortDigest(item.inputsDigest)} · trend ${shortDigest(item.trendDigest)}`))))
+  const next = page.nextBeforeSequence
+  return el('div', { style: gridStyle },
+    el('p', { style: hintStyle }, '只读：观察性统计（causal: false），不作为采用、晋升或撤销依据；封存由 Host 侧 owner 操作完成。'),
+    items,
+    next === undefined ? null : el('div', { style: actionsStyle },
+      el('button', { style: buttonStyle, onClick: () => older(next) }, '更早的快照')))
+}
+
+/** Read-only trend snapshot card; it only ever calls `trendSnapshots`. */
+export function TrendSnapshotsCard({ remote }: Readonly<{ remote: ConsoleRemote }>) {
+  const [page, setPage] = useState<OwnerConsoleTrendSnapshots>()
+  const [failed, setFailed] = useState(false)
+  const load = (beforeSequence: number) => {
+    setFailed(false)
+    void remote.trendSnapshots('', beforeSequence, TREND_PAGE).then(result => {
+      if (result.ok) setPage(result.value)
+      else setFailed(true)
+    }, () => setFailed(true))
+  }
+  useEffect(() => { load(0) }, [])
+  return card('趋势快照（只读）', trendSnapshotsView(page, failed, load),
+    page !== undefined && page.state === 'ok' && page.items.length > 0
+      ? el('div', { style: actionsStyle }, el('button', { style: buttonStyle, onClick: () => load(0) }, '回到最新'))
+      : null)
+}
+
 export function OwnerConsoleIcon() {
   return el('span', { 'aria-hidden': true, style: { display: 'block', width: 18, height: 18 } }, jsx(WenyaoGlyph, { size: 18 }))
 }
@@ -366,7 +437,8 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
       el('span', { 'aria-hidden': true, style: { color: accent, fontWeight: 700 } }, 'i'), notice),
     card('远程接入（飞书）', feishuRows, feishuActions),
     card('TraeX', traexRows),
-    card('本项目插件管理', bundles))
+    card('本项目插件管理', bundles),
+    jsx(TrendSnapshotsCard, { remote }))
 }
 
 function bannerStyle(color: string) {
