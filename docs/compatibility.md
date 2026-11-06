@@ -4,7 +4,7 @@
 
 当前桌面 Host 运行 `0.2.2-rc.1`，而仓库验证基线仍是 `0.2.1-rc.2`（catalog、锁文件与测试依赖不变）。两处有限修复只影响安装：
 
-- `@dsh-enhanced/traex-acp-provider` 的 `@deepseek-ai/dsh-agent` / `dsh-llm` / `dsh-session` peer 范围从精确 `0.2.1-rc.2` 放宽为 `>=0.2.1-rc.2 <0.3.0`。Host 用 `semver.satisfies(..., { includePrerelease: true })` 匹配，因此同时接受已验证基线和当前 `0.2.2-rc.1`；低于基线或未验证的 0.3 仍拒绝。根 `tests/dsh-compatibility.spec.ts` 只允许这两种写法，其他插件仍固定精确基线。
+- `@dsh-enhanced/traex-acp-provider` 的 `@deepseek-ai/dsh-agent` / `dsh-llm` / `dsh-session` peer 范围、以及 `@dsh-enhanced/owner-console` 的 `@deepseek-ai/dsh-tools` / `dsh-typert-protocol` / `dsh-typert-registry` peer 范围，都从精确 `0.2.1-rc.2` 放宽为 `>=0.2.1-rc.2 <0.3.0`（后者是本面板自身的兼容，Host 同样按 peer 拒绝精确基线）。Host 用 `semver.satisfies(..., { includePrerelease: true })` 匹配，因此同时接受已验证基线和当前 `0.2.2-rc.1`；低于基线或未验证的 0.3 仍拒绝。根 `tests/dsh-compatibility.spec.ts` 只允许这两种写法，其他插件仍固定精确基线。
 - lark-channel 一键安装会被 Host 的 ANSI 解析缺陷挡住：`plugin-manager` 的 `/\bIgnored build scripts:/` 在 pnpm 11 的彩色输出中匹配失败，`pendingBuilds` 为空，之后 `approvedBuilds` 重试返回 `stale-approval`。面板侧有限兜底：安装失败时从 pnpm 原始输出（去 ANSI）解析受影响的依赖名并交给主人确认；确认后若 Host 仍无待批准记录，面板把确认过的名字写入 profile 的 `pnpm-workspace.yaml`（`allowBuilds: <name>: true`，原子写入、0600），再不带批准参数重试一次。名称仍受上限 64、长度 200、禁止通配符与控制字符约束；不自动批准，不触碰其他 profile 键。Host 自身仍保留缺陷，此兜底不改 Host 安装器。
 
 ## 插件配置 CLI 与 recommended 预设

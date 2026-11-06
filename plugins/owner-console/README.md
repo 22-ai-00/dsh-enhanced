@@ -294,10 +294,10 @@ pnpm --dir plugins/owner-console build:assets
 - **真实 Web GUI 已验证（设置/安装切片）**：临时 profile + pinned DSH `0.2.1-rc.2` 下左侧栏入口、
   设置页全部卡片、原生插件页已安装行、「打开插件页 / 开始对话」均通过（证据
   `docs/evidence/owner-console/browser-smoke/`）。2026-11-06 的新 smoke 也确认 ⚙ 打开设置页、
-  五张卡片渲染、返回对话正常。live Harness Mac app 为 `0.2.2-rc.1`：owner-console `0.1.65` 的
-  tgz 经 app 自带 dsh 装入 `desktop` profile（peer 版本不符，需 owner 显式
-  `dsh plugin allow-version … --accept-risk`），更早验证了侧栏入口、面板、插件页已安装行与
-  「开始对话」；本次对话窗口未在 live app profile 复验。
+  五张卡片渲染、返回对话正常。live Harness Mac app 为 `0.2.2-rc.1`：owner-console `0.1.66`
+  起 peer 采用已验证的 0.2 线范围（`>=0.2.1-rc.2 <0.3.0`），不再需要 owner 豁免即可安装；
+  同日在 live `desktop` profile 复验了侧栏「文鳐」入口、对话面板、原生正文与 composer、
+  语音工具行、⚙ 设置入口（证据 `docs/evidence/owner-console/mac-live-app-20261106/`）。
 - **未在真实 GUI 中复验的部分**：飞书/TraeX 的“已安装未启用→启用”“活动→配置”两态此前是用 patch
   覆盖伪造的状态，安装按钮也从未在真实 GUI 点击过；状态文案、安装拒绝与修复提示由单元测试覆盖。
   登录态、模型连接与真实飞书 Bot 仍未验收。

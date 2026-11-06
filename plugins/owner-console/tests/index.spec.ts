@@ -13,6 +13,7 @@ import { applyInstall, blockedBuildNames, readIntakeAgreement, readIntakeAgreeme
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
   version: string
+  peerDependencies: Record<string, string>
 }
 const defaults = { feishuAppId: '' }
 
@@ -57,6 +58,12 @@ describe('dsh-enhanced-owner-console', () => {
     expect(version).toBe(manifest.version)
     expect(Config({} as never)).toEqual(defaults)
     expect(() => Config({ feishuAppId: 5 } as never)).toThrow()
+  })
+
+  it('declares the verified 0.2 DSH line so the live app can install it', () => {
+    for (const name of ['@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-typert-protocol', '@deepseek-ai/dsh-typert-registry']) {
+      expect(manifest.peerDependencies[name]).toBe('>=0.2.1-rc.2 <0.3.0')
+    }
   })
 
   it('keeps every remote wire order equal to its Host method parameter order', () => {
