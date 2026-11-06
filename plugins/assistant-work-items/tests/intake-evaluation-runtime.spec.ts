@@ -558,25 +558,25 @@ describe('schema 11 migration', () => {
     return config
   }
 
-  test('schema 10 upgrades additively to 11 and keeps its intake rows', async () => {
-    const config = await downgraded("DROP TABLE work_item_intake_evaluation; UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version'; PRAGMA user_version = 10;")
+  test('schema 10 upgrades additively to 12 and keeps its intake rows', async () => {
+    const config = await downgraded("DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version'; PRAGMA user_version = 10;")
     const store = new WorkItemStore(config.databasePath)
     try {
-      expect(store.stats().schemaVersion).toBe(11)
+      expect(store.stats().schemaVersion).toBe(12)
       expect(store.countIntake()).toEqual({ stored: 1, duplicate: 0, filtered: 0 })
       expect(store.countIntakeEvaluations()).toEqual({ decided: 0, unavailable: 0 })
     } finally {
       store.close()
     }
-    expect(query(config.databasePath, 'PRAGMA user_version')).toEqual([{ user_version: 11 }])
+    expect(query(config.databasePath, 'PRAGMA user_version')).toEqual([{ user_version: 12 }])
   })
 
   test('an evaluation object under schema 10 or a drifted evaluation table fails closed', async () => {
-    const early = await downgraded("DROP TRIGGER work_item_intake_evaluation_no_update; DROP TRIGGER work_item_intake_evaluation_no_delete; UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version'; PRAGMA user_version = 10;")
+    const early = await downgraded("DROP TABLE work_item_intake_admission; DROP TRIGGER work_item_intake_evaluation_no_update; DROP TRIGGER work_item_intake_evaluation_no_delete; UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version'; PRAGMA user_version = 10;")
     expect(() => new WorkItemStore(early.databasePath)).toThrow(/intake evaluation object before schema 11/)
     expect(query(early.databasePath, 'PRAGMA user_version')).toEqual([{ user_version: 10 }])
     // Its append-only triggers alone are already an unknown object at schema 10.
-    const triggers = await downgraded("UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version'; PRAGMA user_version = 10;")
+    const triggers = await downgraded("DROP TABLE work_item_intake_admission; UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version'; PRAGMA user_version = 10;")
     expect(() => new WorkItemStore(triggers.databasePath)).toThrow(/unexpected schema object/)
 
     const drifted = await downgraded('DROP TABLE work_item_intake_evaluation; CREATE TABLE work_item_intake_evaluation (source TEXT) STRICT;')
@@ -584,7 +584,7 @@ describe('schema 11 migration', () => {
   })
 
   test('a newer schema fails closed', async () => {
-    const config = await downgraded("UPDATE work_item_schema_meta SET value = '12' WHERE key = 'schema_version'; PRAGMA user_version = 12;")
+    const config = await downgraded("UPDATE work_item_schema_meta SET value = '13' WHERE key = 'schema_version'; PRAGMA user_version = 13;")
     expect(() => new WorkItemStore(config.databasePath)).toThrow()
   })
 })

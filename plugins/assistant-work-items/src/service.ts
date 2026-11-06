@@ -5,6 +5,7 @@ import type { WorkItemIntakeInput, WorkItemIntakeResult } from './intake.js'
 import { classifyIntake, intakeSourcePolicy } from './intake.js'
 import type { WorkItemIntakeEvaluationRecord } from './intake-evaluation.js'
 import { authenticatesIntakeText, WorkItemIntakeEvaluationRuntime, type WorkItemIntakeEvaluationHealth, type WorkItemIntakeEvaluatorRegistration } from './intake-evaluation-runtime.js'
+import { WorkItemIntakeAdmissionBridge, type WorkItemIntakeAdmissionRecord } from './intake-admission.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { WorkItemAdmission } from './admission.js'
@@ -232,6 +233,8 @@ export class AssistantWorkItemsService extends Service {
   private workItemsIntakeObserver: Readonly<{ protocol: 1; observe: (signal: WorkItemIntakeInput) => void; acceptsSourceText?: true }> | undefined
   /** Present only when `intakeLedger.evaluation` is enabled. */
   private readonly workItemsIntakeEvaluation: WorkItemIntakeEvaluationRuntime | undefined
+  /** Present only when `intakeLedger.evaluation.admit` is enabled. */
+  private readonly workItemsIntakeAdmission: WorkItemIntakeAdmissionBridge | undefined
   private readonly workItemsDiagnosisKey = Object.freeze({})
   private readonly workItemsContinuationKey = Object.freeze({})
   private readonly workItemsReplyKey = Object.freeze({})
@@ -257,6 +260,14 @@ export class AssistantWorkItemsService extends Service {
     this.workItemsIntakeEvaluation = intakeEvaluation === undefined ? undefined : new WorkItemIntakeEvaluationRuntime({
       config: intakeEvaluation,
       store: () => this.workItemsClosed ? undefined : this.workItemsComponents?.store,
+      log: message => ctx.logger.debug(message),
+    })
+    this.workItemsIntakeAdmission = intakeEvaluation?.admit === undefined ? undefined : new WorkItemIntakeAdmissionBridge({
+      config: intakeEvaluation.admit,
+      maxPerRun: intakeEvaluation.maxPerRun,
+      store: () => this.workItemsClosed ? undefined : this.workItemsComponents?.store,
+      // The public Host path, so an admitted item wakes its worker like any decision.
+      admit: decision => this.admitDecision(decision),
       log: message => ctx.logger.debug(message),
     })
     this.workItemsOwnerReads = new WorkItemOwnerRecall({ ...ownerDependencies, access })
@@ -353,7 +364,7 @@ export class AssistantWorkItemsService extends Service {
         const unregister = peer.onSchedulerWake(() => {
           if (!active) return
           this.workItemsOnSchedulerWake()
-          if (!this.workItemsClosed) void this.workItemsIntakeEvaluation?.run()
+          if (!this.workItemsClosed) void this.workItemsIntakeEvaluation?.run().then(() => this.runIntakeAdmission())
         })
         const remove = () => {
           if (!active) return
@@ -831,6 +842,22 @@ export class AssistantWorkItemsService extends Service {
   async runIntakeEvaluation(): Promise<readonly WorkItemIntakeEvaluationRecord[]> {
     if (this.workItemsIntakeEvaluation === undefined || this.workItemsClosed) return []
     return this.workItemsIntakeEvaluation.run()
+  }
+
+  /**
+   * Host-only drive of one bounded admission pass over persisted accepting
+   * evaluations (WP21); the scheduler wake calls it after each evaluation run.
+   * Requires `intakeLedger.evaluation.admit`; never throws.
+   */
+  runIntakeAdmission(): readonly WorkItemIntakeAdmissionRecord[] {
+    if (this.workItemsIntakeAdmission === undefined || this.workItemsClosed) return []
+    return this.workItemsIntakeAdmission.run()
+  }
+
+  /** Durable admission outcomes (`would-admit`, `admitted`, `replayed`, `refused`) for one intake row. */
+  intakeAdmissions(source: string, sourceEventId: string): readonly WorkItemIntakeAdmissionRecord[] {
+    if (this.workItemsConfig.intakeLedger === undefined || !this.workItemsConfig.enabled) fail('disabled', 'the work-item intake ledger is disabled')
+    return this.workItemsAvailable().store.listIntakeAdmissions(source, sourceEventId)
   }
 
   /** Persisted evaluation results for one intake row; replay reads these, never re-evaluates. */

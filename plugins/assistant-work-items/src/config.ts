@@ -51,6 +51,21 @@ export interface IntakeEvaluationConfig {
   maxConsecutiveFailures?: number
   maxPerRun?: number
   maxCallsPerHour?: number
+  /** WP21: route accepting `inferred` evaluations into `admitDecision`. Off by default. */
+  admit?: IntakeAdmitConfig
+}
+
+/**
+ * `observe` records each would-admit decision and admits nothing; `auto`
+ * calls `admitDecision` and needs an active deployment whose
+ * `admission.allowedKinds` includes `kind`.
+ */
+export interface IntakeAdmitConfig {
+  enabled?: boolean
+  mode?: 'observe' | 'auto'
+  kind?: string
+  originBindingId?: string
+  maxPerHour?: number
 }
 
 /** A separately authorized Host worker; it never changes the diagnosis worker. */
@@ -193,6 +208,17 @@ export interface NormalizedIntakeEvaluation {
   readonly maxConsecutiveFailures: number
   readonly maxPerRun: number
   readonly maxCallsPerHour: number
+  /** Present only when admission of accepting evaluations is enabled. */
+  readonly admit?: NormalizedIntakeAdmit
+}
+
+export interface NormalizedIntakeAdmit {
+  readonly enabled: true
+  readonly mode: 'observe' | 'auto'
+  readonly kind: string
+  readonly originBindingId: string
+  /** Items admitted from intake per rolling hour; reported to `admitDecision` as the remaining budget. */
+  readonly maxPerHour: number
 }
 
 export interface NormalizedForegroundFailureSource {
@@ -255,7 +281,9 @@ const SOURCES_KEYS = ['foregroundFailures'] as const
 const FOREGROUND_FAILURE_KEYS = ['enabled', 'kind', 'includeTimedOut', 'maxCandidatesPerSweep', 'maxAdmitsPerSweep', 'sweepIntervalMs'] as const
 const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerReportRouting', 'ownerContinuation', 'ownerReplyContinuation', 'ownerReportFeedback', 'intakeLedger'] as const
 const INTAKE_LEDGER_KEYS = ['enabled', 'sources', 'evaluation'] as const
-const INTAKE_EVALUATION_KEYS = ['enabled', 'timeoutMs', 'maxConsecutiveFailures', 'maxPerRun', 'maxCallsPerHour'] as const
+const INTAKE_EVALUATION_KEYS = ['enabled', 'timeoutMs', 'maxConsecutiveFailures', 'maxPerRun', 'maxCallsPerHour', 'admit'] as const
+const INTAKE_ADMIT_KEYS = ['enabled', 'mode', 'kind', 'originBindingId', 'maxPerHour'] as const
+const BINDING_ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$/
 const INTAKE_SOURCE_KEYS = ['unaddressedGroupMessages', 'unsubscribedEvents'] as const
 const MAX_INTAKE_SOURCES = 32
 const REPORT_STATUSES = ['progress', 'waiting', 'ready', 'blocked', 'failed'] as const
@@ -339,6 +367,11 @@ export const ConfigSchema = Schema.object({
       enabled: Schema.boolean().default(false),
       timeoutMs: Schema.number().step(1), maxConsecutiveFailures: Schema.number().step(1),
       maxPerRun: Schema.number().step(1), maxCallsPerHour: Schema.number().step(1),
+      admit: Schema.object({
+        enabled: Schema.boolean().default(false),
+        mode: Schema.union(['observe', 'auto'] as const).default('observe'),
+        kind: Schema.string(), originBindingId: Schema.string(), maxPerHour: Schema.number().step(1),
+      }),
     }),
   }),
   ownerRecall: Schema.object({ enabled: Schema.boolean().default(false), linkedAliases: Schema.array(Schema.string()) }),
@@ -611,6 +644,11 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   if (ownerReplyContinuation !== undefined && typeof ownerReplyContinuation !== 'boolean') fail('invalid-input', 'ownerReplyContinuation must be a boolean')
   if (ownerReplyContinuation === true && !ownerContinuation) fail('invalid-input', 'ownerReplyContinuation requires active ownerContinuation authorization')
   const intakeLedger = normalizeIntakeLedger(value['intakeLedger'])
+  const intakeAdmit = intakeLedger?.evaluation?.admit
+  if (intakeAdmit?.mode === 'auto') {
+    if (!enabled || mode !== 'active' || diagnosis) fail('invalid-input', 'intakeLedger.evaluation.admit auto mode requires an enabled active intake without diagnosis')
+    if (!admission.allowedKinds.includes(intakeAdmit.kind)) fail('invalid-input', 'intakeLedger.evaluation.admit.kind must be one of admission.allowedKinds')
+  }
   return Object.freeze({
     enabled,
     mode,
@@ -676,7 +714,29 @@ function normalizeIntakeEvaluation(raw: unknown): NormalizedIntakeEvaluation | u
     maxPerRun: integer(value['maxPerRun'] ?? 5, 'intakeLedger.evaluation.maxPerRun', 1, 50),
     maxCallsPerHour: integer(value['maxCallsPerHour'] ?? 20, 'intakeLedger.evaluation.maxCallsPerHour', 1, 1_000),
   })
-  return enabled ? normalized : undefined
+  const admit = normalizeIntakeAdmit(value['admit'])
+  if (!enabled) return undefined
+  return admit === undefined ? normalized : Object.freeze({ ...normalized, admit })
+}
+
+/** Absent or disabled admission normalizes to `undefined`; enabled needs a kind and binding. */
+function normalizeIntakeAdmit(raw: unknown): NormalizedIntakeAdmit | undefined {
+  if (raw === undefined) return undefined
+  const value = plainObject(raw, 'intakeLedger.evaluation.admit')
+  rejectUnknown(value, INTAKE_ADMIT_KEYS, 'intakeLedger.evaluation.admit')
+  const enabled = value['enabled'] ?? false
+  if (typeof enabled !== 'boolean') fail('invalid-input', 'intakeLedger.evaluation.admit.enabled must be a boolean')
+  if (!enabled) return undefined
+  const mode = value['mode'] ?? 'observe'
+  if (mode !== 'observe' && mode !== 'auto') fail('invalid-input', "intakeLedger.evaluation.admit.mode must be 'observe' or 'auto'")
+  const kind = text(value['kind'] ?? 'intake-inferred', 'intakeLedger.evaluation.admit.kind', 64)
+  if (!KIND.test(kind)) fail('invalid-input', 'intakeLedger.evaluation.admit.kind has an invalid shape')
+  const originBindingId = text(value['originBindingId'], 'intakeLedger.evaluation.admit.originBindingId', 256)
+  if (!BINDING_ID.test(originBindingId)) fail('invalid-input', 'intakeLedger.evaluation.admit.originBindingId has an invalid shape')
+  return Object.freeze({
+    enabled: true as const, mode, kind, originBindingId,
+    maxPerHour: integer(value['maxPerHour'] ?? 5, 'intakeLedger.evaluation.admit.maxPerHour', 1, 100),
+  })
 }
 
 /** Maximum explicitly allowlisted linked aliases per owner scope. */

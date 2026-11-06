@@ -472,7 +472,7 @@ Host 批量来源接口 `withOwnerWorkItemFeedbackTargetsFence(capabilities, cal
 
 这条历史读取与新执行授权分离。显式开启反馈后，冷启动可保留已经过期的 scope、diagnosis、continuation 原期限来读取已有结果；不会延长期限、重置预算、重新 reconcile worker 或放行旧执行。当前 Delivery owner route 与反馈 Policy 仍须有效。两个入口同开时，当前执行资格独立控制普通续办；过期后的明确评价仍可记录，普通回复不会因此取得过期执行权限。既有 v1/v2 计划和激活摘要保持兼容。
 
-这一切片引入时 WorkItems 使用 schema 9（现为 schema 11，见下节 intake 账本）；Delivery schema 30 保存独占评价意图，Evaluation schema 13 保存新的 canonical 工作项主人结果。原有 settlement 行继续作为 objective unknown 的审计材料，不回填为主人评价。备份与恢复须一致保留相关账本；这一切片不自动触发 Growth、创建/采用候选或调用模型。
+这一切片引入时 WorkItems 使用 schema 9（现为 schema 12，见下节 intake 账本）；Delivery schema 30 保存独占评价意图，Evaluation schema 13 保存新的 canonical 工作项主人结果。原有 settlement 行继续作为 objective unknown 的审计材料，不回填为主人评价。备份与恢复须一致保留相关账本；这一切片不自动触发 Growth、创建/采用候选或调用模型。
 
 ## 确定性 intake 账本（显式启用）
 
@@ -529,12 +529,23 @@ ctx.assistantWorkItems.registerIntakeEvaluator({
 - Host 直接调 `recordIntake(input, sourceText)` 时同样校验：正文 ≤65,536 UTF-16 码元且 SHA-256 等于 `contentDigest`，否则 `invalid-input` 且不写账本。
 - 结果写入 schema 11 的 `work_item_intake_evaluation`（STRICT，触发器禁止改写/删除），每 `(source, sourceEventId, ruleId, policyVersion)` 一行；只存等级、原因码与引文的 UTF-16 偏移 `quoteSpans`，不存正文或引文。重放与重启均不再调用模型，返回原行。
 - 引文非认证正文子串 → `ignore`/`quote-not-in-source`；超时（`timeoutMs`）或抛错按退避重排，连续 `maxConsecutiveFailures` 次后记 `unavailable`；调用中 Policy 版本变化的结果丢弃，按新版本重新排队；Policy 无效时不评估，`lastError` 为 `policy-unavailable`；恢复可读后（即使版本未变）暂存的正文幂等补入队并清除该错误。
-- 仅 observe：`effect` 恒为 `none`，不准入、不派发、不通知。`intakeEvaluations(source, eventId)` 读取记录，`intakeEvaluationHealth()` 报告队列与最近错误。
+- 仅 observe：`effect` 恒为 `none`，评估本身不准入、不派发、不通知（准入见下节显式 `admit`）。`intakeEvaluations(source, eventId)` 读取记录，`intakeEvaluationHealth()` 报告队列与最近错误。
 - Policy 版本即规则集身份：同一版本的规则与上限必须不变；同版本内改规则不会触发重排，新增规则的正文会一直占位直到版本前进。改规则请同时换版本。
 - 落库失败（如 `SQLITE_BUSY`）的结果按条指数退避重试：第 n 次失败后隔 2^(n−1) 次 refresh（上限 64 次）再试，同一条的相同错误只记一次日志；失败后的存在性检查本身读失败时按未落库处理，不影响同轮其余结果。待重试条数见 `intakeEvaluationHealth().unpersisted`，落库后才可驱逐。注销评估器时进行中的一轮仍按快照落库；该轮写失败的结果直接丢弃，不在内存中保留引文。
 - 暂存：只驱逐当前全部规则都已落库的最旧正文；已在队列中落定但尚未写盘的结果不算，避免丢失。注销评估器或 dispose 时清空暂存正文。
 - 局限：重启后尚未落定的候选需要重新收到正文才能评估；暂存满且无可驱逐项时跳过新候选（计入 `skipped`）；尚无内置 Policy 规则源，规则与上限由 Host supplier 提供。
 - 升级：schema 10 自动升级到 11；更新的 schema 或结构漂移 fail closed。
+
+### inferred 评估准入（WP21 第 3 片，显式启用）
+
+`intakeLedger.evaluation.admit.enabled: true` 时，评估结果为 accept 的候选交给 `admitDecision`。只处理 `inferred` 候选；`addressed`/`subscribed` 不经此路径。未配置时行为不变。
+
+- 驱动：只在已有 scheduler wake 上、评估一轮之后运行（不新增 Loop/计时器），也可由 Host 调 `runIntakeAdmission()`；每轮最多 `evaluation.maxPerRun` 条。
+- `mode: observe`（默认）：只记一行 `would-admit`，不建工作项；之后切到 `auto` 也不追溯准入这些行。
+- `mode: auto`：要求 WorkItems `enabled` + `active`，`kind` 在 `allowedKinds` 内；以 `admitDecision` 准入 inferred mandate（仅元数据：标题 `Intake <source>:<eventId>`、规则/Policy 版本，不含正文或引文），发往配置的 `originBindingId`。decisionId 由 `(source, sourceEventId, ruleId, policyVersion)` 确定性派生，重放或重启返回原项，不开第二项。
+- 每小时最多 `maxPerHour` 次准入；超出记 `refused`/`budget-exhausted`。`admitDecision` 拒绝（如 `policy-rule-mismatch`）或错误码（`kind-rejected`、`identity-mismatch`、`source-rejected`）记一行 `refused` 并带原因码，终态不重试；仅 `storage`/`disabled` 推迟到下次 wake，同错误只记一次日志。
+- 结果写入 schema 12 的 `work_item_intake_admission`（STRICT，触发器禁止改写/删除），每个评估键一行；`intakeAdmissions(source, eventId)` 读取。
+- 升级：schema 11 自动升级到 12（仅新增表、索引与触发器）；更新的 schema 或结构漂移 fail closed。
 
 ## 配置
 
@@ -551,6 +562,9 @@ ctx.assistantWorkItems.registerIntakeEvaluator({
 | `intakeLedger.evaluation.enabled` | `false` | inferred 候选的模型评估（仅 observe，需 Host 注册评估器）；关闭时不接收正文、不写评估行 |
 | `intakeLedger.evaluation.timeoutMs` / `maxConsecutiveFailures` | `30000` / `3` | 单次调用超时；连续失败达到次数后记 `unavailable` |
 | `intakeLedger.evaluation.maxPerRun` / `maxCallsPerHour` | `5` / `20` | 每轮与每小时的调用上限 |
+| `intakeLedger.evaluation.admit.enabled` / `mode` | `false` / `observe` | 仅 inferred 候选：评估 accept 后 `observe` 记 would-admit，`auto` 经 `admitDecision` 准入（需 enabled active） |
+| `intakeLedger.evaluation.admit.kind` / `originBindingId` | `intake-inferred` / 必填 | 准入 mandate 的 kind（auto 须在 `allowedKinds` 内）与报告发往的 origin binding |
+| `intakeLedger.evaluation.admit.maxPerHour` | `5` | 滑动一小时准入上限（1–100） |
 | `ownerRecall.enabled` | `false` | 显式启用当前主人前台任务查询；要求 enabled active、完整 scope、worker automation 与独立 `inspect-work-items` 授权 |
 | `ownerRecall.linkedAliases` | 未设置 | 主人显式允许的 Delivery `linked` principal id 名单（规范 `channel/account/tenant/user` 形式，≤8，去重，不含 owner）；未设置时跨渠道别名读取一律拒绝；要求 `ownerRecall.enabled`；别名读取另需带 `budget` 的 `inspect-work-items` 规则及 Policy `authorizeAgentForPrincipal`（按别名 principal 独立计费） |
 | `ownerReportRouting.linkedFallback` | 未设置 | origin binding 不可用时可接收终端报告只读通知的 Delivery `linked` principal id 有序名单（规范形式，≤8，去重，不含 owner）；要求 enabled active、完整 scope 与 worker；回复不能续办 |

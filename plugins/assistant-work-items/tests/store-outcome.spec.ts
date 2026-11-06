@@ -429,7 +429,7 @@ describe('work-item outcome ledger', () => {
     const { path, root } = legacyDatabase(2)
     const reopened = new WorkItemStore(path)
     try {
-      expect(reopened.stats()).toMatchObject({ schemaVersion: 11, items: 1, outcomes: 0, pendingOutcomes: 0 })
+      expect(reopened.stats()).toMatchObject({ schemaVersion: 12, items: 1, outcomes: 0, pendingOutcomes: 0 })
       // The old item and its report survive untouched, claims keep their id.
       expect(reopened.findItemById('item-legacy')).toMatchObject({ state: 'blocked' })
       expect(reopened.reports('item-legacy')).toHaveLength(1)
@@ -448,7 +448,7 @@ describe('work-item outcome ledger', () => {
     const { path, root } = legacyDatabase(3)
     const reopened = new WorkItemStore(path)
     try {
-      expect(reopened.stats()).toMatchObject({ schemaVersion: 11, items: 1, dispatches: 1, outcomes: 0 })
+      expect(reopened.stats()).toMatchObject({ schemaVersion: 12, items: 1, dispatches: 1, outcomes: 0 })
       // The stored identity is preserved verbatim: generation 0 is the
       // admission event, so an in-flight wake stays valid across the upgrade.
       expect(reopened.getDispatch('item-legacy')).toMatchObject({
@@ -472,7 +472,7 @@ describe('work-item outcome ledger', () => {
     const { path, root } = v4Database()
     const reopened = new WorkItemStore(path)
     try {
-      expect(reopened.stats()).toMatchObject({ schemaVersion: 11, items: 1, outcomes: 1, evaluationPending: 1 })
+      expect(reopened.stats()).toMatchObject({ schemaVersion: 12, items: 1, outcomes: 1, evaluationPending: 1 })
       // Existing rows keep their ledger facts and default to an unexported state.
       expect(reopened.latestOutcome('item-legacy')).toMatchObject({
         revision: 2,
@@ -502,7 +502,7 @@ describe('work-item outcome ledger', () => {
     const { path, root } = legacyDatabase(1)
     const reopened = new WorkItemStore(path)
     try {
-      expect(reopened.stats()).toMatchObject({ schemaVersion: 11, items: 1, outcomes: 0 })
+      expect(reopened.stats()).toMatchObject({ schemaVersion: 12, items: 1, outcomes: 0 })
       expect(reopened.reports('item-legacy')).toHaveLength(1)
       // v1 had no surrogate key; the rebuild assigns a fresh claim_id.
       const claimRow = reopened.findClaimByRun('run-legacy')
