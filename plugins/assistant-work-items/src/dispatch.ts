@@ -21,6 +21,12 @@ export type HeldReportRelease =
   | Readonly<{ kind: 'achieved' }>
   | Readonly<{ kind: 'unverified'; timeoutMs: number }>
   | Readonly<{ kind: 'blocked'; reason: string }>
+  /**
+   * The row was never actually held (it has no acceptance binding any more),
+   * so it is recovered as an ordinary report: no timeout note, normal delivery
+   * identity, the self-reported status unchanged.
+   */
+  | Readonly<{ kind: 'plain' }>
 
 export interface DispatchDependencies {
   readonly config: NormalizedConfig
@@ -240,10 +246,12 @@ export class WorkItemDispatch {
   /**
    * WP21 slice 8 (`acceptance.holdReport`): send the report held while the
    * verifier settles the binding. `achieved` sends the ordinary report,
-   * `unverified` sends it with an explicit timeout note, and `blocked` sends a
-   * `blocked` report instead of the self-reported `ready` one. The delivery
-   * coordinates stay on the held report revision, so a crash or a later wake
-   * can never enqueue the same held report twice.
+   * `unverified` sends it with an explicit timeout note, `blocked` sends a
+   * `blocked` report instead of the self-reported `ready` one, and `plain`
+   * recovers a row that lost its binding (or was never really held) by sending
+   * it exactly like an ordinary report. The delivery coordinates stay on the
+   * held report revision, so a crash or a later wake can never enqueue the same
+   * held report twice.
    */
   async notifyHeld(item: WorkItemRecord, report: WorkItemReportRecord, release: HeldReportRelease): Promise<boolean> {
     if (!isActive(this.#deps.config)) return false

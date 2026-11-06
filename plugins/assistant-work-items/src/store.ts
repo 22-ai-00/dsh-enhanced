@@ -1477,10 +1477,14 @@ export class WorkItemStore {
    * is a terminal `ready` self-report that has not been handed to Delivery and
    * that is either still waiting for the verifier (`ready`) or was moved to
    * `blocked` by the verdict gate (`acceptance-*`). One row per item, oldest
-   * report first. Read-only and bounded; no schema change.
+   * report first. `after` is the `(recordedAt, itemId)` keyset position of the
+   * previous page, so a full page advances the caller's in-memory round-robin
+   * position instead of rescanning rows that are still waiting. Read-only and
+   * bounded; no schema change.
    */
-  listHeldAcceptanceReports(limit: number): readonly Readonly<{ item: WorkItemRecord; report: WorkItemReportRecord }>[] {
+  listHeldAcceptanceReports(limit: number, after?: Readonly<{ recordedAt: number; itemId: string }>): readonly Readonly<{ item: WorkItemRecord; report: WorkItemReportRecord }>[] {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('invalid-input', 'held report limit must be between 1 and 100')
+    const keyset = after === undefined ? '' : ' AND (r.recorded_at > ? OR (r.recorded_at = ? AND i.id > ?))'
     const rows = this.#statement(`
       SELECT ${ITEM_ALIASES}, r.revision AS heldRevision, r.summary AS heldSummary, r.truncated AS heldTruncated,
         r.artifact_paths AS heldArtifactPaths, r.idempotency_key AS heldIdempotencyKey, r.delivery_key AS heldDeliveryKey,
@@ -1490,8 +1494,9 @@ export class WorkItemStore {
         AND r.status = 'ready' AND r.delivery_state IS NULL
         AND i.observed = 0 AND i.attempt >= 1
         AND (i.state = 'ready' OR (i.state = 'blocked' AND i.state_reason LIKE 'acceptance-%'))
+        ${keyset}
       ORDER BY r.recorded_at ASC, i.id ASC LIMIT ?
-    `).all(limit) as Row[]
+    `).all(...(after === undefined ? [] : [after.recordedAt, after.recordedAt, after.itemId]), limit) as Row[]
     return Object.freeze(rows.map(row => Object.freeze({
       item: itemFromRow(row),
       report: Object.freeze({

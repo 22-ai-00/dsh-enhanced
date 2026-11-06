@@ -2759,6 +2759,198 @@ describe('work-item admission authority revalidation', () => {
     }
   })
 
+  test('acceptance.holdReport rotates the release window so waiting rows cannot starve a releasable one', async () => {
+    const realNow = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(realNow)
+    try {
+      // Eleven held items exceed the ten-row release window: the ten oldest have
+      // no verdict yet, the eleventh (newest) is already achieved.
+      const fixture = await serviceHarness({ extra: { ...holdReport(), admission: {
+        allowedKinds: ['review', 'triage'], maxAdmitsPerHour: 24, cooldownMs: 0 } } })
+      const peer = new FakeVerifierPeer(fixture.ctx)
+      const held: Array<{ contract: TaskAcceptanceContract; itemId: string }> = []
+      for (let index = 1; index <= 11; index += 1) {
+        // Distinct report timestamps keep the scan order deterministic.
+        vi.setSystemTime(realNow + index * 1_000)
+        held.push(await executedBound(fixture, peer, `hold-rotate-${String(index)}`, `occ-${String(index)}`))
+      }
+      const target = held[held.length - 1]!
+      const heldRows = readStore(fixture).listHeldAcceptanceReports(100)
+      expect(heldRows).toHaveLength(11)
+      expect(heldRows.at(-1)?.item.id).toBe(target.itemId)
+      peer.tasks.set(target.contract.id, { contract: target.contract, state: 'done', reason: null, receipt: serviceReceipt(target.contract) })
+      expect(fixture.service.settleAcceptance(target.itemId))
+        .toMatchObject({ outcome: 'verified', verdict: { objectiveStatus: 'achieved' } })
+
+      // Wake 1 scans only the ten oldest, still-pending rows: the releasable
+      // eleventh row is behind them and must be reached by the rotation.
+      fixture.automations?.wake()
+      await Promise.resolve()
+      expect(fixture.delivery.enqueues).toHaveLength(0)
+      for (const item of held.slice(0, 10)) expect(heldReportDelivery(fixture, item.itemId)).toBeNull()
+
+      // Wake 2 continues after the last scanned row and releases it exactly once.
+      fixture.automations?.wake()
+      await vi.waitFor(() => expect(fixture.delivery.enqueues).toHaveLength(1))
+      expect(fixture.delivery.enqueues[0]?.text).toContain('**Work item ready:')
+      expect(fixture.delivery.enqueues[0]?.text).toContain(`item: \`${target.itemId}\``)
+      expect(fixture.delivery.enqueues[0]?.text).not.toContain('Unverified')
+      expect(heldReportDelivery(fixture, target.itemId)).toBe('sent')
+      // The short page reset the cursor; a later wake restarts from the oldest
+      // row and never re-sends the released report.
+      fixture.automations?.wake()
+      await Promise.resolve()
+      expect(fixture.delivery.enqueues).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('acceptance.holdReport recovers a report whose acceptance binding disappeared as an ordinary send', async () => {
+    const fixture = await serviceHarness({ extra: holdReport() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { itemId } = await executedBound(fixture, peer, 'hold-orphan-1', 'occ-1')
+    expect(fixture.delivery.enqueues).toHaveLength(0)
+    expect(heldReportDelivery(fixture, itemId)).toBeNull()
+    // The ready report committed while bound; the binding then disappears (a
+    // re-armed generation supersedes it, or the mandate lost it). This row can
+    // never settle, so the scan must recover it instead of stranding it.
+    rewriteBasis(fixture, itemId, basis => {
+      const mandate = basis?.['mandate'] as Record<string, unknown> | undefined
+      if (mandate === undefined) throw new Error('item has no mandate')
+      const rest = { ...mandate }
+      delete rest['acceptance']
+      return { ...basis, mandate: rest }
+    })
+    expect(readStore(fixture).findItemById(itemId)?.authority?.mandate?.acceptance).toBeUndefined()
+    const report = readStore(fixture).reports(itemId).at(-1)!
+    fixture.automations?.wake()
+    await vi.waitFor(() => expect(fixture.delivery.enqueues).toHaveLength(1))
+    expect(fixture.delivery.enqueues[0]?.text).toContain('**Work item ready:')
+    expect(fixture.delivery.enqueues[0]?.text).toContain(`item: \`${itemId}\``)
+    expect(fixture.delivery.enqueues[0]?.text).not.toContain('Unverified')
+    // The recovered send is the ordinary report: normal delivery identity, no note.
+    expect(fixture.delivery.enqueues[0]?.idempotencyKey).toBe(report.deliveryKey)
+    expect(heldReportDelivery(fixture, itemId)).toBe('sent')
+    fixture.automations?.wake()
+    await Promise.resolve()
+    expect(fixture.delivery.enqueues).toHaveLength(1)
+  })
+
+  test('acceptance.holdReport records a terminal no-send for a never-held report when ready is not notifiable', async () => {
+    const fixture = await serviceHarness({ extra: { ...holdReport(), delivery: { notifyOn: ['blocked'] } } })
+    const plain = admitPlain(fixture, 'hold-orphan-silent-1')
+    fixture.service.claim(workerAgent(plain.occurrenceId))
+    await fixture.service.report(workerAgent(plain.occurrenceId), { status: 'ready', summary: 'done', idempotencyKey: 'r-orphan-silent' })
+    // Report-time `notifyOn` excluded `ready`: the report was never held, never
+    // sent and has no delivery state, but the scan still sees the row.
+    expect(fixture.delivery.enqueues).toHaveLength(0)
+    expect(heldReportDelivery(fixture, plain.itemId)).toBeNull()
+    fixture.automations?.wake()
+    await vi.waitFor(() => expect(heldReportDelivery(fixture, plain.itemId)).toBe('failed'))
+    expect(fixture.delivery.enqueues).toHaveLength(0)
+    // Terminal: the recovered row is not rescanned into a send.
+    fixture.automations?.wake()
+    await Promise.resolve()
+    expect(fixture.delivery.enqueues).toHaveLength(0)
+    expect(heldReportDelivery(fixture, plain.itemId)).toBe('failed')
+  })
+
+  test('acceptance.holdReport skips a malformed verdict row and still releases the rest of the page', async () => {
+    const fixture = await serviceHarness({ extra: holdReport() })
+    const warnings: string[] = []
+    fixture.ctx.logger.exporter({ levels: { default: 3 }, export: message => { if (message.type === 'warn') warnings.push(String(message.args.join(' '))) } })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const poison = await executedBound(fixture, peer, 'hold-poison-1', 'occ-1')
+    const healthy = await executedBound(fixture, peer, 'hold-poison-2', 'occ-2')
+    // A malformed `acceptance-verified` row makes the verdict read throw `storage`.
+    const raw = new DatabaseSync(join(fixture.root, 'state', 'state.sqlite'))
+    try {
+      const row = raw.prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM work_item_event WHERE item_id = ?').get(poison.itemId) as { next: number }
+      raw.prepare("INSERT INTO work_item_event(item_id, sequence, kind, actor, detail, recorded_at) VALUES (?, ?, 'acceptance-verified', 'verifier', ?, ?)")
+        .run(poison.itemId, row.next, JSON.stringify({ nope: true }), Date.now())
+    } finally { raw.close() }
+    peer.tasks.set(healthy.contract.id, { contract: healthy.contract, state: 'done', reason: null, receipt: serviceReceipt(healthy.contract) })
+    expect(fixture.service.settleAcceptance(healthy.itemId)).toMatchObject({ outcome: 'verified' })
+    // The poison row is older: before the fix it aborted the scan and the
+    // achieved report behind it was never released that wake.
+    fixture.automations?.wake()
+    await vi.waitFor(() => expect(fixture.delivery.enqueues).toHaveLength(1))
+    expect(fixture.delivery.enqueues[0]?.text).toContain(`item: \`${healthy.itemId}\``)
+    expect(fixture.delivery.enqueues[0]?.text).not.toContain('Unverified')
+    expect(heldReportDelivery(fixture, poison.itemId)).toBeNull()
+    expect(warnings.some(text => text.includes(poison.itemId))).toBe(true)
+    // The poison row stays fail-closed held and cannot crash a later wake.
+    fixture.automations?.wake()
+    await Promise.resolve()
+    expect(fixture.delivery.enqueues).toHaveLength(1)
+    expect(heldReportDelivery(fixture, poison.itemId)).toBeNull()
+  })
+
+  test('acceptance.holdReport does not hold a report when only an earlier generation has a verdict', async () => {
+    const realNow = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(realNow)
+    try {
+      const fixture = await serviceHarness({ extra: holdReport() })
+      const peer = new FakeVerifierPeer(fixture.ctx)
+      const contract = serviceContract('hold-stale-1')
+      peer.tasks.set(contract.id, { contract, state: 'awaiting-execution', reason: null, receipt: null })
+      const admitted = fixture.service.admitDecision(boundDecision(contract, 'decision-hold-stale-1'))
+      if (admitted.outcome === 'refused') throw new Error(admitted.reasonCode)
+      const itemId = admitted.item.id
+      fixture.service.claim(workerAgent('occ-1'))
+      // Attempt 1 already has the item's one verdict (the store keeps one per item).
+      readStore(fixture).recordAcceptanceVerdict({ itemId, verifier: 'assistant-verifier', contractId: contract.id,
+        contractDigest: contract.digest, receiptId: 'svc-receipt-1', receiptDigest: 'b'.repeat(64),
+        objectiveStatus: 'achieved', completedAt: realNow, attempt: 1, occurrenceId: 'occ-1' })
+      await fixture.service.report(workerAgent('occ-1'), { status: 'progress', summary: 'still working', idempotencyKey: 'r-stale-progress' })
+      // Lease expiry re-arms a second generation through the ordinary claim sweep.
+      vi.setSystemTime(realNow + fixture.config.limits.leaseMs + 1)
+      expect(errorCode(() => fixture.service.claim(workerAgent('occ-unknown')))).toBe('not-found')
+      expect(fixture.automations?.calls).toHaveLength(2)
+      expect(fixture.service.claim(workerAgent('occ-2'))).toMatchObject({ attempt: 2, replayed: false })
+      await fixture.service.report(workerAgent('occ-2'), { status: 'ready', summary: 'done', idempotencyKey: 'r-stale-ready' })
+      // The stale attempt-1 verdict can never settle attempt 2: holding would
+      // always wait out holdTimeoutMs, so the report goes out immediately.
+      expect(fixture.delivery.enqueues).toHaveLength(1)
+      expect(fixture.delivery.enqueues[0]?.text).toContain('**Work item ready:')
+      expect(fixture.delivery.enqueues[0]?.text).not.toContain('Unverified')
+      expect(heldReportDelivery(fixture, itemId)).toBe('sent')
+      expect(readStore(fixture).findItemById(itemId)).toMatchObject({ state: 'ready', attempt: 2 })
+      // Nothing was held, so a later wake has nothing to release or duplicate.
+      fixture.automations?.wake()
+      await Promise.resolve()
+      expect(fixture.delivery.enqueues).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('acceptance.holdReport fails closed and holds when the stored verdict row is malformed', async () => {
+    const fixture = await serviceHarness({ extra: holdReport() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const contract = serviceContract('hold-malformed-1')
+    peer.tasks.set(contract.id, { contract, state: 'awaiting-execution', reason: null, receipt: null })
+    const admitted = fixture.service.admitDecision(boundDecision(contract, 'decision-hold-malformed-1'))
+    if (admitted.outcome === 'refused') throw new Error(admitted.reasonCode)
+    fixture.service.claim(workerAgent('occ-1'))
+    const raw = new DatabaseSync(join(fixture.root, 'state', 'state.sqlite'))
+    try {
+      const row = raw.prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM work_item_event WHERE item_id = ?').get(admitted.item.id) as { next: number }
+      raw.prepare("INSERT INTO work_item_event(item_id, sequence, kind, actor, detail, recorded_at) VALUES (?, ?, 'acceptance-verified', 'verifier', ?, ?)")
+        .run(admitted.item.id, row.next, JSON.stringify({ nope: true }), Date.now())
+    } finally { raw.close() }
+    const report = await fixture.service.report(workerAgent('occ-1'), { status: 'ready', summary: 'done', idempotencyKey: 'r-malformed-hold' })
+    // An unreadable verdict can prove nothing: the report stays held (fail
+    // closed) instead of being dispatched as if the verdict were absent.
+    expect(report).toMatchObject({ notified: false, delivery: 'pending' })
+    expect(errorCode(() => fixture.service.acceptanceVerdict(admitted.item.id))).toBe('storage')
+    expect(fixture.delivery.enqueues).toHaveLength(0)
+    expect(heldReportDelivery(fixture, admitted.item.id)).toBeNull()
+  })
+
   test('acceptance.holdReport validates its shape, dependencies and hold window', () => {
     const base = { enabled: true, mode: 'active', databasePath: '/data/state.sqlite', workRoot: '/data/work', workerAutomationId: WORKER,
       admission: { allowedKinds: ['review'] },

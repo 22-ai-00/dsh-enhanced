@@ -190,7 +190,7 @@ const WORKER_RUN_BIND_SCAN_LIMIT = 100
 const WORKER_RUN_BIND_SKIP_LIMIT = 1_000
 /** Consecutive `owner-route-drift` reads of one (item, occurrence) before a single warn. */
 const WORKER_RUN_DRIFT_WARN_AFTER = 5
-/** Held reports released per scheduler wake; the next wake continues the scan. */
+/** Held reports released per scheduler wake; a full page advances the in-memory round-robin cursor. */
 const HELD_REPORT_RELEASE_LIMIT = 10
 /**
  * `bindWorkerRun` refusals that cannot change while the item keeps its
@@ -277,6 +277,8 @@ export class AssistantWorkItemsService extends Service {
   private workItemsAutoSettleCursor: Readonly<{ createdAt: number; id: string }> | null = null
   /** In-memory round-robin position of `acceptance.bindWorkerRun`; a restart rescans from the start. */
   private workItemsBindWorkerRunCursor: Readonly<{ createdAt: number; id: string }> | null = null
+  /** In-memory round-robin position of `acceptance.holdReport`; a restart rescans from the start. */
+  private workItemsHeldReportCursor: Readonly<{ recordedAt: number; itemId: string }> | null = null
   /** itemId → occurrenceId refused deterministically by `bindWorkerRun`; in memory, bounded, dropped on occurrence change. */
   private readonly workItemsBindWorkerRunSkips = new Map<string, string>()
   /**
@@ -854,12 +856,22 @@ export class AssistantWorkItemsService extends Service {
    * is notifiable, and the item already has an independent acceptance binding.
    * An item that has not been bound yet (for example a run that reports before
    * the wake that binds it) is reported normally, exactly as today.
+   *
+   * A verdict recorded for an earlier generation can never settle this report
+   * (the store keeps at most one verdict per item and excludes settled items
+   * from auto-settle), so holding it would just wait out `holdTimeoutMs` before
+   * releasing it unverified. It is dispatched now, exactly like flag-off.
+   * An unreadable verdict row fails closed and holds, like a malformed binding.
    */
   private workItemsHoldsReport(components: Components, item: WorkItemRecord, report: WorkItemReportRecord): boolean {
     if (this.workItemsConfig.acceptanceHoldReport === undefined || this.workItemsClosed
       || report.status !== 'ready' || item.state !== 'ready' || item.observed) return false
     if (!components.dispatch.shouldNotify(report)) return false
-    return this.workItemsAcceptanceBinding(components, item) !== undefined
+    if (this.workItemsAcceptanceBinding(components, item) === undefined) return false
+    let verdict: WorkItemAcceptanceVerdict | undefined
+    try { verdict = components.store.acceptanceVerdict(item.id) }
+    catch { return true }
+    return verdict === undefined || (verdict.attempt === item.attempt && verdict.occurrenceId === item.occurrenceId)
   }
 
   /**
@@ -878,30 +890,59 @@ export class AssistantWorkItemsService extends Service {
 
   /**
    * WP21 slice 8: on the same native wake, release at most
-   * `HELD_REPORT_RELEASE_LIMIT` held reports. Achievement sends the ordinary
-   * report; any other settled verdict (or a verdict-gate `blocked` item) sends
-   * a blocked report instead; an unbound or still-pending item stays held, and
-   * one whose `holdTimeoutMs` elapsed is sent marked unverified. A missing or
-   * throwing verifier cannot hold a report forever: only the timeout decides.
+   * `HELD_REPORT_RELEASE_LIMIT` held reports through an in-memory
+   * `(recordedAt, itemId)` round-robin cursor. A full page advances the cursor
+   * past rows that are still waiting, so they cannot starve a releasable row
+   * behind them; a short page resets it and the next wake restarts from the
+   * oldest row. Achievement sends the ordinary report; any other settled
+   * verdict (or a verdict-gate `blocked` item) sends a blocked report instead;
+   * a still-pending item stays held, and one whose `holdTimeoutMs` elapsed is
+   * sent marked unverified. A row with no acceptance binding any more was never
+   * really held and is recovered as an ordinary report instead of stranded.
+   * One unreadable row (a malformed binding or verdict event) is warned about
+   * and skipped without aborting the remaining releases; the fail-closed hold
+   * itself is unchanged.
    */
   private workItemsReleaseHeldReports(components: Components): void {
     const hold = this.workItemsConfig.acceptanceHoldReport
     if (hold === undefined || this.workItemsClosed) return
     const now = Date.now()
-    for (const { item, report } of components.store.listHeldAcceptanceReports(HELD_REPORT_RELEASE_LIMIT)) {
+    const page = components.store.listHeldAcceptanceReports(HELD_REPORT_RELEASE_LIMIT,
+      this.workItemsHeldReportCursor ?? undefined)
+    // Only a full page proves there may be rows this wake did not examine; a
+    // short page ends the rotation so the next wake starts from the oldest.
+    if (page.length < HELD_REPORT_RELEASE_LIMIT) this.workItemsHeldReportCursor = null
+    else {
+      const last = page[page.length - 1]!
+      this.workItemsHeldReportCursor = Object.freeze({ recordedAt: last.report.recordedAt, itemId: last.item.id })
+    }
+    for (const { item, report } of page) {
       if (this.workItemsClosed) break
-      let bound: boolean
-      try { bound = this.workItemsAcceptanceBinding(components, item) !== undefined }
-      catch (error) {
-        if (!this.workItemsWarnMalformedLateBinding(item.id, error)) {
-          this.ctx.logger.debug(`assistant-work-items: held report of ${item.id} cannot read its acceptance binding: ${describe(error)}`)
+      let release: HeldReportRelease | undefined
+      try {
+        let bound: boolean
+        try { bound = this.workItemsAcceptanceBinding(components, item) !== undefined }
+        catch (error) {
+          if (!this.workItemsWarnMalformedLateBinding(item.id, error)) {
+            this.ctx.logger.debug(`assistant-work-items: held report of ${item.id} cannot read its acceptance binding: ${describe(error)}`)
+          }
+          bound = true
         }
-        bound = true
+        // No binding any more means the row was never actually held (the report
+        // committed before its pending delivery write, Delivery was missing,
+        // `notifyOn` excluded `ready`, or a re-arm lost the binding). Recovery
+        // sends the ordinary report instead of leaving it undelivered forever.
+        release = bound
+          ? this.workItemsHeldRelease(components, item, report, now, hold.holdTimeoutMs)
+          : Object.freeze({ kind: 'plain' as const })
+      } catch (error) {
+        // One poison row (a malformed binding or verdict event) must not abort
+        // the scan: warn and keep releasing the remaining rows.
+        if (!this.workItemsWarnMalformedLateBinding(item.id, error)) {
+          this.ctx.logger.warn(`assistant-work-items: held report of ${item.id} cannot be decided: ${describe(error)}`)
+        }
+        continue
       }
-      // Only an acceptance-bound report was ever held. The report stays
-      // undelivered until an ordinary later dispatch path owns it.
-      if (!bound) continue
-      const release = this.workItemsHeldRelease(components, item, report, now, hold.holdTimeoutMs)
       if (release === undefined) continue
       // A status the operator explicitly excluded from `notifyOn` cannot be
       // sent; record the terminal no-send so every later wake stops rescanning it.
