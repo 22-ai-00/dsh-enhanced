@@ -12,6 +12,7 @@ import { WorkItemAdmission } from './admission.js'
 import { storedBasisHolds, WorkItemAuthority } from './authority.js'
 import { ConfigSchema, isActive, normalizeConfig, text, type Config, type NormalizedConfig } from './config.js'
 import { WorkItemDispatch } from './dispatch.js'
+import { eventFollowReader, eventFollowRegistration, type EventFollowOwnerScope } from './event-follow.js'
 import { WorkItemEvaluationExporter, type WorkItemEvaluationRegistration } from './evaluation.js'
 import { normalizeWorkItemReportSummary, WorkItemLedger } from './ledger.js'
 import type {
@@ -33,6 +34,7 @@ import {
 } from './signals.js'
 import { registerWorkItemTools, workItemReportKey } from './tools.js'
 import type {
+  WorkItemScope,
   WorkItemAcceptanceSettleResult,
   WorkItemAcceptanceVerdict,
   WorkItemAdmitInput,
@@ -350,6 +352,28 @@ export class AssistantWorkItemsService extends Service {
           unregister()
           if (this.workItemsIntakeObserver === observer) this.workItemsIntakeObserver = undefined
         }, 'assistant-work-items.intake-observer')
+      })
+    }
+    if (this.workItemsConfig.enabled && this.workItemsConfig.follows?.eventTriggers === true) {
+      // Subscription pass-through: Event Triggers becomes a followed-thread
+      // source. Resolution is passive (settlement pass only); a re-provided
+      // Event Triggers service re-runs this callback with a fresh generation.
+      ctx.inject(['eventTriggers', 'assistantDelivery'], followCtx => {
+        if (this.workItemsClosed) return
+        const reader = eventFollowReader(followCtx.get('eventTriggers' as never))
+        const scope = this.workItemsConfig.scope
+        if (reader === undefined || scope === null) {
+          followCtx.logger.warn('assistant-work-items: Event Triggers source reads are unavailable; event follows stay unregistered')
+          return
+        }
+        let unregister: () => void
+        try {
+          unregister = this.registerThreadSource(eventFollowRegistration({ reader, owner: () => this.workItemsEventFollowOwner(scope) }))
+        } catch (error) {
+          followCtx.logger.warn(`assistant-work-items: event follow source unavailable: ${describe(error)}`)
+          return
+        }
+        followCtx.effect(() => unregister, 'assistant-work-items.event-follows')
       })
     }
     // Evaluation reuses the native scheduler wake; without it nothing new subscribes.
@@ -1058,7 +1082,7 @@ export class AssistantWorkItemsService extends Service {
     if (registration === null || typeof registration !== 'object' || Array.isArray(registration)) {
       fail('invalid-input', 'thread source registration must be an object')
     }
-    const allowed = ['source', 'generation', 'resolve'] as const
+    const allowed = ['source', 'generation', 'resolve', 'validate'] as const
     for (const key of Object.keys(registration)) {
       if (!(allowed as readonly string[]).includes(key)) fail('invalid-input', `thread source registration contains unknown field ${key}`)
     }
@@ -1066,6 +1090,7 @@ export class AssistantWorkItemsService extends Service {
     if (!/^[a-z][a-z0-9-]{0,63}$/.test(source)) fail('invalid-input', 'thread source has an invalid shape')
     text(registration.generation, 'thread source generation', 200)
     if (typeof registration.resolve !== 'function') fail('invalid-input', 'thread source must expose a resolve function')
+    if (registration.validate !== undefined && typeof registration.validate !== 'function') fail('invalid-input', 'thread source validate must be a function')
     if (this.workItemsThreadSources.has(source)) fail('invalid-input', `thread source ${source} is already registered`)
     const installed = registration
     this.workItemsThreadSources.set(source, installed)
@@ -1598,7 +1623,11 @@ export class AssistantWorkItemsService extends Service {
         const registration = this.workItemsThreadSources.get(kind)
         return registration === undefined
           ? undefined
-          : Object.freeze({ source: registration.source, generation: registration.generation })
+          : Object.freeze({
+            source: registration.source,
+            generation: registration.generation,
+            ...(registration.validate === undefined ? {} : { validate: (ref: string) => registration.validate?.(ref) === true }),
+          })
       },
     })
     // One lazy policy resolver serves admission and revalidation: a peer that
@@ -1796,6 +1825,18 @@ export class AssistantWorkItemsService extends Service {
 
   private workItemsPolicy(): PeerPolicyService | undefined {
     return this.ctx.get('assistantPolicy') as PeerPolicyService | undefined
+  }
+
+  /** Live owner scope for Event Triggers reads; throws when the owner route is unavailable. */
+  private workItemsEventFollowOwner(scope: WorkItemScope): EventFollowOwnerScope {
+    const delivery = this.workItemsDelivery()
+    if (typeof delivery?.validateOwnerRoute !== 'function') fail('disabled', 'owner route is unavailable for event follows')
+    const receipt = delivery.validateOwnerRoute({ authorityId: scope.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, agentPreset: scope.preset })
+    if (receipt.principalId !== scope.principalId || receipt.workspace !== scope.workspace || receipt.agentPreset !== scope.preset) {
+      fail('disabled', 'owner route does not match the configured scope')
+    }
+    return Object.freeze({ principalId: receipt.principalId, principalRecordId: receipt.principalRecordId,
+      principalVersion: receipt.principalVersion, workspace: scope.workspace, preset: scope.preset })
   }
 
   private workItemsDelivery(): PeerDeliveryService | undefined {

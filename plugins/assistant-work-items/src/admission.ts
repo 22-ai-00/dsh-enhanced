@@ -167,7 +167,7 @@ export interface AdmissionDependencies {
    * a later pass can detect a generation change instead of believing a stale
    * closure. A ref whose source is not registered at admission is rejected.
    */
-  readonly threadSource?: (kind: string) => { readonly source: string; readonly generation: string } | undefined
+  readonly threadSource?: (kind: string) => { readonly source: string; readonly generation: string; readonly validate?: (ref: string) => boolean } | undefined
   readonly now?: () => number
   readonly newId?: () => string
 }
@@ -587,6 +587,11 @@ export class WorkItemAdmission {
       const registration = this.#deps.threadSource?.(ref.kind)
       if (registration === undefined) {
         fail('invalid-input', `followed thread kind ${ref.kind} has no registered source`)
+      }
+      if (registration.validate !== undefined) {
+        let accepted = false
+        try { accepted = registration.validate(ref.ref) === true } catch { accepted = false }
+        if (!accepted) fail('invalid-input', `followed thread ref is not admissible for source ${registration.source}`)
       }
       return Object.freeze({
         kind: ref.kind,

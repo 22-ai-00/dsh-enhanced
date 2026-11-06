@@ -375,6 +375,18 @@ host-only `admitDecision(decision)`（service 与 `WorkItemAdmission` 同名方�
 - 无法解析时保持 `waiting` 并显式降级，绝不把缺失当成关闭：`source-missing`（注册已撤销/从未注册）、`generation-mismatch`（注册代际与准入时冻结的代际不一致）、`resolver-failed`（resolver 抛错、返回 undefined 或畸形 closure）。`health().follows` 暴露 `open`/`closed`/`unresolved` 计数与 `degraded` 原因（`source-missing` > `generation-mismatch` > 最近一次结算的降级），`stats().follows` 暴露总数；不暴露 ref 或 digest。open/unresolved 只统计仍活跃的 item，撤回或被其他路径结项的 item 留下的 follow 行不会造成永久降级。
 - 没有 timer：只有 `claim()` 或宿主显式 `settleOutcomes(force)` 触发解析；无 follow 的 item 走原有窗口路径，行为不变。follow 不是新的 authority store，也不产生 objective-achievement 推断。
 - 与 Evaluation 的衔接：`closed-by-thread` 修订按 unverified 结算投影（`executionStatus: 'unknown'`、`evaluator.version: 'unverified-v1'`、`objectiveStatus`/`deliveryStatus` 为 `unknown`、`trust: 'trusted'`），幂等键仍为 `work-items/<itemId>/<revision>/<evidenceState>`。协议 `assistant-work-items/evaluation/v1` 原生接受该原因，不做 `window-expired` 之类的别名替换。
+- 注册形状额外接受可选 `validate(ref): boolean`（同步、只读）；返回 false 或抛错时整条准入以 `invalid-input` 失败，不写任何行。未提供 `validate` 的既有来源行为不变。
+
+#### 订阅直通：event-triggers 来源（slice 1）
+
+配置 `follows: { eventTriggers: { enabled: true } }`（默认 `false`；要求 enabled intake 且有完整 `scope`）且宿主提供 `eventTriggers` 服务时，本插件在启动时自行注册 `source: 'event-triggers'`，让工作项跟随一个事件订阅：
+
+- ref 形如 `<triggerId>@<afterSequence>`。准入时 `validate` 要求 trigger 属于当前 owner（经 Delivery `validateOwnerRoute` 取得的 principal record/version、workspace、preset，与 `inspectOwnerSources` 范围一致）且 `afterSequence` **等于**当前 `highWaterSequence`；更低（伪造的旧序号，可能用旧事件关闭）、更高、他人 trigger、格式错误一律拒绝。
+- generation 为 `event-triggers/<version>/<owner 全部 trigger 的 id、configDigest、kind、automationId 摘要>`。
+- resolve 同步调用 `firstEventAfter`：命中已认证事件 → `closed`，`outcome: 'unknown'`，`digest` 为该事件 envelope 的 `externalEventDigest`（事件到达不等于目标达成，结算仍为 unverified）；未命中 → `open`。
+- trigger 被停用、删除或配置变更时：重新 provide 前为 `resolver-failed`，重新 provide 后为 `generation-mismatch`；follow 保持 open，绝不当作关闭。
+- 仅被动：沿用上文结算 pass 与 CAS，无 timer、不订阅 `subscribeSourceChanges`；无 schema 变更。开关关闭时不注册、不读 event-triggers，宿主仍可自行注册同名来源。
+- 限制：generation 覆盖 owner 的全部 trigger，任一 trigger 增删改都会降级所有 event follow；准入要求序号精确等于全局 high water，新事件到达后重放同一准入会被拒绝而非识别为重复；owner principal version 变化后 follow 无法解析。
 
 ### 可信 Evaluation 导出（第四个 trusted producer）
 
@@ -450,7 +462,7 @@ worker 仍由原生 Automations/AgentLoop 执行。认领后，`work_item_read_c
 
 Delivery schema 29 保存真实报告关联、回复原文与回复序列；WorkItems schema 9 用 v2 计划保存来源和继承关系。备份时须一致保留两份账本；不能只复制其中一个库来恢复续办。既有 v1 前台续办计划保持原协议。已有 continuation 配置不变时，单独开关回复入口不重建 worker；若同时更改准入种类、工具或预算，则仍受原有激活合同约束。
 
-此入口覆盖同一渠道的报告回复，不实现运行中指令插入、任意跨信道身份合并（仅有上文的 linked 别名只读查询）、多对多 Thread 订阅或长期自主成长。Provider 接受报告不等于用户已读或任务已独立验收。
+此入口覆盖同一渠道的报告回复，不实现运行中指令插入、任意跨信道身份合并（仅有上文的 linked 别名只读查询）、多对多 Thread 订阅（目前仅有上文 `follows` 的单项跟随与 event-triggers 被动来源）或长期自主成长。Provider 接受报告不等于用户已读或任务已独立验收。
 
 ### 主人评价报告结果（显式启用）
 
@@ -573,6 +585,7 @@ ctx.assistantWorkItems.registerIntakeEvaluator({
 | `intakeLedger.evaluation.admit.enabled` / `mode` | `false` / `observe` | 仅 inferred 候选：评估 accept 后 `observe` 记 would-admit，`auto` 经 `admitDecision` 准入（需 enabled active） |
 | `intakeLedger.evaluation.admit.kind` / `originBindingId` | `intake-inferred` / 必填 | 准入 mandate 的 kind（auto 须在 `allowedKinds` 内）与报告发往的 origin binding |
 | `intakeLedger.evaluation.admit.maxPerHour` | `5` | 滑动一小时准入上限（1–100） |
+| `follows.eventTriggers.enabled` | `false` | 有 `eventTriggers` 服务时注册 `event-triggers` follow 来源（ref `<triggerId>@<afterSequence>`，序号须等于当前 high water）；要求 enabled intake 与完整 scope |
 | `ownerRecall.enabled` | `false` | 显式启用当前主人前台任务查询；要求 enabled active、完整 scope、worker automation 与独立 `inspect-work-items` 授权 |
 | `ownerRecall.linkedAliases` | 未设置 | 主人显式允许的 Delivery `linked` principal id 名单（规范 `channel/account/tenant/user` 形式，≤8，去重，不含 owner）；未设置时跨渠道别名读取一律拒绝；要求 `ownerRecall.enabled`；别名读取另需带 `budget` 的 `inspect-work-items` 规则及 Policy `authorizeAgentForPrincipal`（按别名 principal 独立计费） |
 | `ownerReportRouting.linkedFallback` | 未设置 | origin binding 不可用时可接收终端报告只读通知的 Delivery `linked` principal id 有序名单（规范形式，≤8，去重，不含 owner）；要求 enabled active、完整 scope 与 worker；回复不能续办 |

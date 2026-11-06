@@ -565,6 +565,12 @@ export interface WorkItemThreadSourceRegistration {
   /** Registration generation; a follow records it and a stale one cannot close. */
   readonly generation: string
   resolve(ref: string): WorkItemThreadClosure | undefined
+  /**
+   * Optional admission-time ref check. Synchronous and read-only; returning
+   * false (or throwing) rejects the admission with `invalid-input` before any
+   * write, so a source can refuse a ref that would close on stale evidence.
+   */
+  validate?(ref: string): boolean
 }
 
 /** Persisted lifecycle of one followed thread. */

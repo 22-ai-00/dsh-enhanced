@@ -31,6 +31,17 @@ export interface Config {
   ownerReplyContinuation?: boolean
   ownerReportFeedback?: boolean
   intakeLedger?: IntakeLedgerConfig
+  follows?: FollowsConfig
+}
+
+/**
+ * Followed-thread sources the plugin registers itself. Each source is off by
+ * default. `eventTriggers` lets a work item follow an Event Triggers
+ * subscription (`<triggerId>@<afterSequence>`); it needs an enabled intake
+ * with an owner scope.
+ */
+export interface FollowsConfig {
+  eventTriggers?: { enabled?: boolean }
 }
 
 /**
@@ -193,6 +204,12 @@ export interface NormalizedConfig {
   readonly ownerReportFeedback?: true
   /** Present only when the intake ledger is enabled. */
   readonly intakeLedger?: NormalizedIntakeLedger
+  /** Present only when at least one built-in followed-thread source is enabled. */
+  readonly follows?: NormalizedFollows
+}
+
+export interface NormalizedFollows {
+  readonly eventTriggers: boolean
 }
 
 export interface NormalizedIntakeLedger {
@@ -279,7 +296,9 @@ const DELIVERY_KEYS = ['notifyOn'] as const
 const SETTLEMENT_KEYS = ['enabled', 'windowMs', 'sweepIntervalMs', 'maxSourcesPerSweep', 'maxPendingPerSweep', 'maxSettlementsPerSweep'] as const
 const SOURCES_KEYS = ['foregroundFailures'] as const
 const FOREGROUND_FAILURE_KEYS = ['enabled', 'kind', 'includeTimedOut', 'maxCandidatesPerSweep', 'maxAdmitsPerSweep', 'sweepIntervalMs'] as const
-const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerReportRouting', 'ownerContinuation', 'ownerReplyContinuation', 'ownerReportFeedback', 'intakeLedger'] as const
+const TOP_LEVEL_KEYS = ['enabled', 'mode', 'databasePath', 'workRoot', 'intakeSourceId', 'workerAutomationId', 'scope', 'admission', 'limits', 'delivery', 'sources', 'settlement', 'diagnosis', 'ownerRecall', 'ownerReportRouting', 'ownerContinuation', 'ownerReplyContinuation', 'ownerReportFeedback', 'intakeLedger', 'follows'] as const
+const FOLLOWS_KEYS = ['eventTriggers'] as const
+const FOLLOW_SOURCE_KEYS = ['enabled'] as const
 const INTAKE_LEDGER_KEYS = ['enabled', 'sources', 'evaluation'] as const
 const INTAKE_EVALUATION_KEYS = ['enabled', 'timeoutMs', 'maxConsecutiveFailures', 'maxPerRun', 'maxCallsPerHour', 'admit'] as const
 const INTAKE_ADMIT_KEYS = ['enabled', 'mode', 'kind', 'originBindingId', 'maxPerHour'] as const
@@ -374,6 +393,7 @@ export const ConfigSchema = Schema.object({
       }),
     }),
   }),
+  follows: Schema.object({ eventTriggers: Schema.object({ enabled: Schema.boolean().default(false) }) }),
   ownerRecall: Schema.object({ enabled: Schema.boolean().default(false), linkedAliases: Schema.array(Schema.string()) }),
   ownerReportRouting: Schema.object({ linkedFallback: Schema.array(Schema.string()) }),
   ownerContinuation: Schema.object({
@@ -649,6 +669,8 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     if (!enabled || mode !== 'active' || diagnosis) fail('invalid-input', 'intakeLedger.evaluation.admit auto mode requires an enabled active intake without diagnosis')
     if (!admission.allowedKinds.includes(intakeAdmit.kind)) fail('invalid-input', 'intakeLedger.evaluation.admit.kind must be one of admission.allowedKinds')
   }
+  const follows = normalizeFollows(value['follows'])
+  if (follows?.eventTriggers === true && (!enabled || scope === null)) fail('invalid-input', 'follows.eventTriggers requires an enabled intake with an owner scope')
   return Object.freeze({
     enabled,
     mode,
@@ -669,7 +691,20 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     ...(ownerReplyContinuation === true ? { ownerReplyContinuation: true as const } : {}),
     ...(ownerReportFeedback === true ? { ownerReportFeedback: true as const } : {}),
     ...(intakeLedger === undefined ? {} : { intakeLedger }),
+    ...(follows === undefined ? {} : { follows }),
   })
+}
+
+/** Absent or all-disabled follow sources normalize to `undefined`. */
+function normalizeFollows(raw: unknown): NormalizedFollows | undefined {
+  if (raw === undefined) return undefined
+  const value = plainObject(raw, 'follows')
+  rejectUnknown(value, FOLLOWS_KEYS, 'follows')
+  const source = value['eventTriggers'] === undefined ? {} : plainObject(value['eventTriggers'], 'follows.eventTriggers')
+  rejectUnknown(source, FOLLOW_SOURCE_KEYS, 'follows.eventTriggers')
+  const eventTriggers = source['enabled'] ?? false
+  if (typeof eventTriggers !== 'boolean') fail('invalid-input', 'follows.eventTriggers.enabled must be a boolean')
+  return eventTriggers ? Object.freeze({ eventTriggers }) : undefined
 }
 
 /** Absent or disabled ledgers normalize to `undefined`; opt-ins default off. */
