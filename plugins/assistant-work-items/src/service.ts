@@ -757,6 +757,9 @@ export class AssistantWorkItemsService extends Service {
     if (read === null || typeof read !== 'object' || read.protocol !== 'assistant-delivery/owner-route-binding/v1'
       || receipt === null || typeof receipt !== 'object'
       || typeof read.bindingId !== 'string' || read.bindingId === '' || read.bindingId.length > 256) return { kind: 'malformed' }
+    // Only a well-formed receipt can drift; a missing or retyped field is a
+    // Delivery defect and must not be re-read forever.
+    if (!keys.every(key => typeof receipt[key] === typeof owner[key])) return { kind: 'malformed' }
     if (!keys.every(key => receipt[key] === owner[key])) return { kind: 'drift' }
     return { kind: 'bound', bindingId: read.bindingId }
   }

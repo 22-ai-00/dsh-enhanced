@@ -1760,6 +1760,31 @@ describe('work-item admission authority revalidation', () => {
     expect(boundEvents(fixture, itemId)).toBe(0)
   })
 
+  test('acceptance.bindWorkerRun parks a binding receipt with a missing or retyped field instead of re-reading it', async () => {
+    for (const [label, edit] of [
+      ['missing', (receipt: Record<string, unknown>) => { delete receipt['authorityHash'] }],
+      ['retyped', (receipt: Record<string, unknown>) => { receipt['generation'] = String(receipt['generation']) }],
+    ] as const) {
+      const fixture = await serviceHarness({ extra: bindWorkerRun() })
+      const peer = new FakeVerifierPeer(fixture.ctx)
+      const { itemId, occurrenceId } = admitPlain(fixture, `bind-route-binding-${label}`)
+      publishWorkerContract(fixture, peer, occurrenceId)
+      fixture.automations?.acceptanceReads.splice(0)
+      const service = fixture.delivery.spy.service
+      const original = service.inspectOwnerRouteBinding!
+      service.inspectOwnerRouteBinding = input => {
+        const read = original(input)
+        const receipt: Record<string, unknown> = { ...read.receipt }
+        edit(receipt)
+        return Object.freeze({ ...read, receipt: Object.freeze(receipt) as never })
+      }
+      fixture.automations?.wake()
+      fixture.automations?.wake()
+      expect(fixture.automations?.acceptanceReads).toEqual([occurrenceId])
+      expect(boundEvents(fixture, itemId)).toBe(0)
+    }
+  })
+
   test('acceptance.bindWorkerRun requires the owner route binding receipt to name the handle binding id', async () => {
     const fixture = await serviceHarness({ extra: bindWorkerRun() })
     const peer = new FakeVerifierPeer(fixture.ctx)
