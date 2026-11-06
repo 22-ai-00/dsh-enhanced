@@ -457,7 +457,7 @@ function header(navigation: Readonly<{ openConversation(): void, openPlugins(): 
   el('img', { src: WENYAO_HERO_DATA_URI, alt: '', 'aria-hidden': 'true', draggable: false, 'data-owner-console-art': 'hero',
     width: WENYAO_HERO_WIDTH, height: WENYAO_HERO_HEIGHT,
     style: { display: 'block', width: '100%', height: 'auto', aspectRatio: `${WENYAO_HERO_WIDTH} / ${WENYAO_HERO_HEIGHT}`,
-      minHeight: 108, maxHeight: 156, objectFit: 'cover', objectPosition: 'center 42%', borderBottom: `1px solid ${hairline}` } }),
+      minHeight: 108, maxHeight: 300, objectFit: 'cover', objectPosition: 'center', borderBottom: `1px solid ${hairline}` } }),
   el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px 18px' } },
     el('div', { style: { display: 'grid', gap: 4, minWidth: 0, flex: '1 1 280px' } },
       el('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
