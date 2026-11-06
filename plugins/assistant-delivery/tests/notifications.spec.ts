@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { AssistantDeliveryService, type OwnerRouteAuthority } from '../src/index.ts'
+import { AssistantDeliveryService, ownerNotificationWithdrawalProtocol, type OwnerNotificationWithdrawal, type OwnerRouteAuthority } from '../src/index.ts'
 import { DeliveryStore } from '../src/store.ts'
 
 const roots: string[] = []
@@ -86,6 +86,20 @@ function notificationInput(f: Fixture, overrides: Partial<{ expiresAt: number; i
   }
 }
 
+/** Test owner service in its own ctx slot; it vouches only for registrations it created. */
+function withdrawalAuthority(f: Fixture, slot = 'noticeAuthority') {
+  const owned = new Set<object>()
+  f.ctx.provide(slot as never, { ownsOwnerNotificationWithdrawal: (registration: object) => owned.has(registration) } as never)
+  return {
+    owned,
+    register(isWithdrawn: (key: string) => boolean) {
+      const registration: OwnerNotificationWithdrawal = Object.freeze({ protocol: ownerNotificationWithdrawalProtocol, authority: slot, sourceId: 'proactive-engine', isWithdrawn })
+      owned.add(registration)
+      return { registration, binding: f.service.registerOwnerNotificationWithdrawal(registration) }
+    },
+  }
+}
+
 async function drain(f: Fixture): Promise<void> {
   await f.service.tick()
   await f.service.whenIdle()
@@ -164,36 +178,105 @@ describe('typed owner notifications', () => {
     const f = await fixture()
     const withdrawn = new Set<string>(['notice-1'])
     const isWithdrawn = vi.fn((key: string) => withdrawn.has(key))
-    const unregister = f.service.registerOwnerNotificationWithdrawal({ sourceId: 'proactive-engine', isWithdrawn })
-    const queued = f.service.enqueueOwnerNotification({ ...notificationInput(f), withdrawable: true })
-    expect(queued.intent.metadata).toMatchObject({ 'dsh.native-notice.withdrawable': 'v1' })
+    const { binding } = withdrawalAuthority(f).register(isWithdrawn)
+    const queued = f.service.enqueueOwnerNotification({ ...notificationInput(f), withdrawable: true, withdrawalHandle: binding.handle })
+    expect(queued.intent.metadata).toMatchObject({ 'dsh.native-notice.withdrawable': 'v1', 'dsh.native-notice.withdrawalAuthority': 'noticeAuthority' })
     await drain(f)
     expect(isWithdrawn).toHaveBeenCalledWith('notice-1')
     expect(f.send).not.toHaveBeenCalled()
     expect(f.store.getOutbox(queued.id)).toMatchObject({ status: 'dead', failureCode: 'native-notice-withdrawn' })
-    unregister()
+    binding.unregister()
   })
 
-  test('sends a withdrawable notice the source still wants and holds it while no check is registered', async () => {
+  test('holds a withdrawable notice while its check is unregistered and sends once a vouched check is back', async () => {
     const f = await fixture()
-    const queued = f.service.enqueueOwnerNotification({ ...notificationInput(f), withdrawable: true })
+    const owner = withdrawalAuthority(f)
+    const first = owner.register(() => false)
+    const queued = f.service.enqueueOwnerNotification({ ...notificationInput(f), withdrawable: true, withdrawalHandle: first.binding.handle })
+    first.binding.unregister()
     await drain(f)
     expect(f.send).not.toHaveBeenCalled()
     expect(f.store.getOutbox(queued.id)).toMatchObject({ status: 'retry_wait', failureCode: 'native-notice-withdrawal-unavailable' })
-    const unregister = f.service.registerOwnerNotificationWithdrawal({ sourceId: 'proactive-engine', isWithdrawn: () => false })
-    expect(() => f.service.registerOwnerNotificationWithdrawal({ sourceId: 'proactive-engine', isWithdrawn: () => false }))
-      .toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
+    const second = owner.register(() => false)
+    expect(() => owner.register(() => false)).toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
     await new Promise(resolve => setTimeout(resolve, 5))
     await drain(f)
     expect(f.send).toHaveBeenCalledOnce()
     expect(f.store.getOutbox(queued.id)).toMatchObject({ status: 'accepted' })
-    unregister()
+    second.binding.unregister()
+  })
+
+  test('a restarted owner whose old registration it no longer vouches for takes over queued notices', async () => {
+    const f = await fixture()
+    const owner = withdrawalAuthority(f)
+    const old = owner.register(() => false)
+    const queued = f.service.enqueueOwnerNotification({ ...notificationInput(f), withdrawable: true, withdrawalHandle: old.binding.handle })
+    // Crash-style restart: the owner forgets its registration without unregistering.
+    owner.owned.delete(old.registration)
+    await drain(f)
+    expect(f.send).not.toHaveBeenCalled()
+    expect(f.store.getOutbox(queued.id)).toMatchObject({ status: 'retry_wait', failureCode: 'native-notice-withdrawal-unavailable' })
+    expect(() => f.service.inspectOwnerNotification({ sourceId: 'proactive-engine', idempotencyKey: 'notice-1', withdrawalHandle: old.binding.handle }))
+      .toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
+    const isWithdrawn = vi.fn(() => true)
+    const next = owner.register(isWithdrawn)
+    expect(f.service.inspectOwnerNotification({ sourceId: 'proactive-engine', idempotencyKey: 'notice-1', withdrawalHandle: next.binding.handle }))
+      .toEqual({ outboxId: queued.id, status: 'retry_wait' })
+    await new Promise(resolve => setTimeout(resolve, 5))
+    await drain(f)
+    expect(isWithdrawn).toHaveBeenCalledWith('notice-1')
+    expect(f.send).not.toHaveBeenCalled()
+    expect(f.store.getOutbox(queued.id)).toMatchObject({ status: 'dead', failureCode: 'native-notice-withdrawn' })
+  })
+
+  test('a foreign registration for the same source can neither squat the owner slot nor reach its notices', async () => {
+    const f = await fixture()
+    const owner = withdrawalAuthority(f)
+    // Unvouched object claiming the owner's authority: rejected before it can register.
+    expect(() => f.service.registerOwnerNotificationWithdrawal({ protocol: ownerNotificationWithdrawalProtocol,
+      authority: 'noticeAuthority', sourceId: 'proactive-engine', isWithdrawn: () => false }))
+      .toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
+    // A missing slot vouches for nothing.
+    expect(() => f.service.registerOwnerNotificationWithdrawal({ protocol: ownerNotificationWithdrawalProtocol,
+      authority: 'missingAuthority', sourceId: 'proactive-engine', isWithdrawn: () => false }))
+      .toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
+    // A foreign authority that vouches for itself registers first under the same source.
+    const squatIsWithdrawn = vi.fn(() => false)
+    const squatter = withdrawalAuthority(f, 'squatAuthority').register(squatIsWithdrawn)
+    const ownerIsWithdrawn = vi.fn(() => true)
+    const legit = owner.register(ownerIsWithdrawn)
+    expect(squatter.binding.handle).not.toBe(legit.binding.handle)
+    const queued = f.service.enqueueOwnerNotification({ ...notificationInput(f), withdrawable: true, withdrawalHandle: legit.binding.handle })
+    expect(f.service.inspectOwnerNotification({ sourceId: 'proactive-engine', idempotencyKey: 'notice-1', withdrawalHandle: squatter.binding.handle })).toBeUndefined()
+    squatter.binding.unregister()
+    await drain(f)
+    expect(squatIsWithdrawn).not.toHaveBeenCalled()
+    expect(ownerIsWithdrawn).toHaveBeenCalledWith('notice-1')
+    expect(f.send).not.toHaveBeenCalled()
+    expect(f.store.getOutbox(queued.id)).toMatchObject({ status: 'dead', failureCode: 'native-notice-withdrawn' })
+  })
+
+  test('enqueue rejects a withdrawable notice without a live handle for its source', async () => {
+    const f = await fixture()
+    const { binding } = withdrawalAuthority(f).register(() => false)
+    expect(() => f.service.enqueueOwnerNotification({ ...notificationInput(f), withdrawable: true }))
+      .toThrowError(expect.objectContaining({ code: 'policy-denied' }))
+    expect(() => f.service.enqueueOwnerNotification({ ...notificationInput(f), withdrawable: true, withdrawalHandle: 'not-a-handle' }))
+      .toThrowError(expect.objectContaining({ code: 'policy-denied' }))
+    expect(() => f.service.enqueueOwnerNotification({ ...notificationInput(f), sourceId: 'other-source', withdrawable: true, withdrawalHandle: binding.handle }))
+      .toThrowError(expect.objectContaining({ code: 'policy-denied' }))
+    expect(() => f.service.enqueueOwnerNotification({ ...notificationInput(f), withdrawalHandle: binding.handle }))
+      .toThrowError(expect.objectContaining({ code: 'policy-denied' }))
+    binding.unregister()
+    expect(() => f.service.enqueueOwnerNotification({ ...notificationInput(f), withdrawable: true, withdrawalHandle: binding.handle }))
+      .toThrowError(expect.objectContaining({ code: 'policy-denied' }))
+    expect(f.store.listOutbox({ bindingId: f.binding.id })).toHaveLength(0)
   })
 
   test('a throwing withdrawal check fails closed and never sends', async () => {
     const f = await fixture()
-    f.service.registerOwnerNotificationWithdrawal({ sourceId: 'proactive-engine', isWithdrawn: () => { throw new Error('boom') } })
-    const queued = f.service.enqueueOwnerNotification({ ...notificationInput(f), withdrawable: true })
+    const { binding } = withdrawalAuthority(f).register(() => { throw new Error('boom') })
+    const queued = f.service.enqueueOwnerNotification({ ...notificationInput(f), withdrawable: true, withdrawalHandle: binding.handle })
     await drain(f)
     expect(f.send).not.toHaveBeenCalled()
     expect(f.store.getOutbox(queued.id)).toMatchObject({ status: 'retry_wait', failureCode: 'native-notice-withdrawal-unavailable' })
@@ -201,21 +284,26 @@ describe('typed owner notifications', () => {
 
   test('a notice queued without withdrawable ignores the withdrawal registry', async () => {
     const f = await fixture()
-    f.service.registerOwnerNotificationWithdrawal({ sourceId: 'proactive-engine', isWithdrawn: () => true })
+    withdrawalAuthority(f).register(() => true)
     const queued = f.service.enqueueOwnerNotification(notificationInput(f))
     await drain(f)
     expect(f.send).toHaveBeenCalledOnce()
     expect(f.store.getOutbox(queued.id)).toMatchObject({ status: 'accepted' })
   })
 
-  test('inspects an owner notice by key only for the source that queued it', async () => {
+  test('inspects an owner notice by key only through the live handle of the authority that queued it', async () => {
     const f = await fixture()
-    const queued = f.service.enqueueOwnerNotification(notificationInput(f))
-    expect(f.service.inspectOwnerNotification({ sourceId: 'proactive-engine', idempotencyKey: 'notice-1' }))
-      .toEqual({ outboxId: queued.id, status: 'pending' })
-    expect(f.service.inspectOwnerNotification({ sourceId: 'other-source', idempotencyKey: 'notice-1' })).toBeUndefined()
-    expect(f.service.inspectOwnerNotification({ sourceId: 'proactive-engine', idempotencyKey: 'missing' })).toBeUndefined()
-    expect(() => f.service.inspectOwnerNotification({ sourceId: 'proactive-engine', idempotencyKey: '' }))
-      .toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
+    const { binding } = withdrawalAuthority(f).register(() => false)
+    const plain = f.service.enqueueOwnerNotification(notificationInput(f, { idempotencyKey: 'plain-notice' }))
+    const queued = f.service.enqueueOwnerNotification({ ...notificationInput(f), withdrawable: true, withdrawalHandle: binding.handle })
+    const inspect = (input: Partial<{ sourceId: string; idempotencyKey: string; withdrawalHandle: string }>) => f.service.inspectOwnerNotification({
+      sourceId: 'proactive-engine', idempotencyKey: 'notice-1', withdrawalHandle: binding.handle, ...input })
+    expect(inspect({})).toEqual({ outboxId: queued.id, status: 'pending' })
+    expect(plain.id).toEqual(expect.any(String))
+    expect(inspect({ idempotencyKey: 'plain-notice' })).toBeUndefined()
+    expect(inspect({ idempotencyKey: 'missing' })).toBeUndefined()
+    expect(() => inspect({ sourceId: 'other-source' })).toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
+    expect(() => inspect({ withdrawalHandle: 'not-a-handle' })).toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
+    expect(() => inspect({ idempotencyKey: '' })).toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
   })
 })

@@ -8,7 +8,7 @@ import { workItemReplyCanonical, workItemReplyDigest, type WorkItemReportTarget,
 import { chmodSync, mkdirSync, readFileSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import { isProxy } from 'node:util/types'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Context, Service, symbols } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -453,6 +453,10 @@ function workItemPeerIdentity(value:unknown):unknown {
   try {return Reflect.get(value,symbols.original) ?? value}catch{return value}
 }
 
+/** Cordis service slot names that may own an owner-notice withdrawal check. */
+const ownerNotificationAuthorityPattern = /^[A-Za-z][A-Za-z0-9]{0,63}$/u
+function ownerNotificationWithdrawalKey(authority: string, sourceId: string): string { return `${authority}\u0000${sourceId}` }
+
 function containsReservedLearningMetadata(metadata: Readonly<Record<string, string>> | undefined): boolean {
   return metadata !== undefined && Object.keys(metadata).some(key => key.startsWith(learningMetadataPrefix))
 }
@@ -544,12 +548,39 @@ export type AssistantDeliveryErrorCode =
  * Send-time withdrawal check for owner notices queued with `withdrawable`.
  * `isWithdrawn` must be synchronous, side-effect free and keyed only by the
  * notice's idempotency key. A withdrawable notice is never sent while no
- * check is registered for its source, or while the check throws; it is
- * withdrawn (dead, never sent) once the check returns true.
+ * check is registered for its authority and source, or while the check
+ * throws; it is withdrawn (dead, never sent) once the check returns true.
+ *
+ * `authority` names the Cordis service slot that owns the check. Delivery
+ * accepts the registration only when the service currently in that slot
+ * vouches for this exact object through `ownsOwnerNotificationWithdrawal`
+ * (the same slot-anchored ownership proof the task-acceptance sink uses), so
+ * a plugin that does not occupy the slot cannot register for it.
  */
 export interface OwnerNotificationWithdrawal {
+  readonly protocol: typeof ownerNotificationWithdrawalProtocol
+  readonly authority: string
   readonly sourceId: string
   isWithdrawn(idempotencyKey: string): boolean
+}
+
+export const ownerNotificationWithdrawalProtocol = 'assistant-delivery/owner-notification-withdrawal/v1' as const
+
+/** Service that may own a withdrawal check; looked up by slot name, never taken from the caller. */
+interface OwnerNotificationWithdrawalAuthority {
+  ownsOwnerNotificationWithdrawal(registration: Readonly<OwnerNotificationWithdrawal>): boolean
+}
+
+/**
+ * Live registration returned to the owner. `handle` is an unguessable
+ * process-local capability: enqueueing a `withdrawable` notice and inspecting
+ * notices both require it. Notices are bound to the stable
+ * (authority, source) pair, not to the handle, so a restart or a later
+ * registration by the same authority takes over notices already queued.
+ */
+export interface OwnerNotificationWithdrawalBinding {
+  readonly handle: string
+  unregister(): void
 }
 
 /** Read-only view of an owner notice found by its idempotency key; carries no text. */
@@ -1207,8 +1238,10 @@ export class AssistantDeliveryService extends Service {
   private acceptanceSink: Readonly<{ token: symbol; registration: TaskAcceptanceRegistration }> | undefined
   private workItemReplyConsumer: WorkItemReplyConsumerRegistration | undefined
   private inboundIntakeObserver: DeliveryInboundIntakeObserver | undefined
-  /** Send-time withdrawal checks for `withdrawable` owner notices, one per canonical source id. */
-  private readonly ownerNotificationWithdrawals = new Map<string, OwnerNotificationWithdrawal>()
+  /** Send-time withdrawal checks for `withdrawable` owner notices, one per (authority, canonical source id). */
+  private readonly ownerNotificationWithdrawals = new Map<string, Readonly<{ handle: string; authority: string; sourceId: string; registration: OwnerNotificationWithdrawal }>>()
+  /** Live handles issued by `registerOwnerNotificationWithdrawal`, mapped to their (authority, source) key. */
+  private readonly ownerNotificationWithdrawalHandles = new Map<string, string>()
   private foregroundObserver: Readonly<{ token: symbol; generation: string; registration: ForegroundTaskObservationRegistration; handles: Map<string, { task: ForegroundTaskIdentity; handle: unknown }> }> | undefined
   /** Once a live verifier required acceptance, loss of that verifier must not silently bypass it. */
   private acceptanceRequired = false
@@ -2606,7 +2639,8 @@ export class AssistantDeliveryService extends Service {
       claimed: (agent, envelope, turn) => this.capturePreferenceTurn(agent,
         { kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId: envelope.eventId }, turn),
       notifications: binding => this.deliveryStore.listOutbox({ bindingId: binding.id, limit: 50 }).filter(record => record.status === 'accepted'
-        && record.intent.metadata?.['dsh.native-notice'] === 'v1' && this.#notificationGuard(record) === undefined)
+        // Already-accepted notices stay listed: withdrawal only gates the send attempt.
+        && record.intent.metadata?.['dsh.native-notice'] === 'v1' && this.#notificationGuard(record, { withdrawal: false }) === undefined)
         .map(record => ({ id: record.id, text: record.intent.text, createdAt: record.createdAt })),
     }, config)
     this.nativeWebOwner = access
@@ -2616,10 +2650,15 @@ export class AssistantDeliveryService extends Service {
       capabilities: Object.freeze({ reconcileUnknownSend: true, receipts: [], formats: ['plain'] as const }),
       async start() {},
       send: async (intent) => {
-        if (this.#nativeNoticeGuard(intent) !== undefined) return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
+        // Pass the guard verdict through: a withdrawal-unavailable hold must stay retryable.
+        const refused = this.#nativeNoticeGuard(intent)
+        if (refused !== undefined) return refused
         return { outcome: 'accepted', providerMessageId: this.#notificationProviderId(intent) }
       },
-      reconcileUnknownSend: async (record) => { return record.intent.metadata?.['dsh.native-notice'] === 'v1' && this.#notificationGuard(record) === undefined ? { outcome: 'accepted', providerMessageId: this.#notificationProviderId(record.intent) } : { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false } },
+      reconcileUnknownSend: async (record) => {
+        if (record.intent.metadata?.['dsh.native-notice'] !== 'v1') return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
+        return this.#notificationGuard(record) ?? { outcome: 'accepted', providerMessageId: this.#notificationProviderId(record.intent) }
+      },
     }
     ctx.effect(() => {
       const registration = this.registry.register(noticeAdapter)
@@ -5597,7 +5636,8 @@ export class AssistantDeliveryService extends Service {
       reportTarget === undefined ? enqueue() : this.deliveryStore.workItemReplies.enqueueReport(reportTarget, binding, enqueue))
   }
 
-  #notificationGuard(record: Readonly<OutboxRecord>): Extract<import('./types.js').AdapterSendResult, { outcome: 'not-sent' }> | undefined {
+  /** `withdrawal: false` is for listing already-accepted notices; every send path keeps the default. */
+  #notificationGuard(record: Readonly<OutboxRecord>, options: Readonly<{ withdrawal: boolean }> = { withdrawal: true }): Extract<import('./types.js').AdapterSendResult, { outcome: 'not-sent' }> | undefined {
     const key = record.intent.idempotencyKey
     if (key.startsWith('inbound:') && (key.endsWith(':maintenance') || key.endsWith(':maintenance-failed'))) {
       try {
@@ -5659,7 +5699,7 @@ export class AssistantDeliveryService extends Service {
           return { outcome: 'not-sent', failureCode: 'goal-outcome-target-invalid', retryable: false }
         }
       }
-      return this.#nativeNoticeGuard(record.intent)
+      return this.#nativeNoticeGuard(record.intent, options)
     }
     if (Object.keys(metadata ?? {}).some(key => key.startsWith(linkedReportMetadataPrefix))) return this.linkedReportGuard(record)
     let goalTarget: ReturnType<DeliveryStore['getGoalOutcomeTarget']>
@@ -5710,7 +5750,7 @@ export class AssistantDeliveryService extends Service {
     }
     return undefined
   }
-  #nativeNoticeGuard(intent: Readonly<OutboundIntent>): Extract<import('./types.js').AdapterSendResult, { outcome: 'not-sent' }> | undefined {
+  #nativeNoticeGuard(intent: Readonly<OutboundIntent>, options: Readonly<{ withdrawal: boolean }> = { withdrawal: true }): Extract<import('./types.js').AdapterSendResult, { outcome: 'not-sent' }> | undefined {
     const metadata = intent.metadata
     const nativeKeys = Object.keys(metadata ?? {}).filter(key => key.startsWith('dsh.native-notice'))
     if (nativeKeys.length === 0 || containsReservedLearningMetadata(metadata)) return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
@@ -5728,26 +5768,37 @@ export class AssistantDeliveryService extends Service {
       if (permission.effect !== 'allow') throw new Error('send denied')
     } catch { return { outcome: 'not-sent', failureCode: 'native-notice-policy-revoked', retryable: false } }
     const withdrawable = metadata['dsh.native-notice.withdrawable']
-    if (withdrawable !== undefined) {
-      if (withdrawable !== 'v1') return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
-      // Fail closed: without a live check for this source the notice waits (bounded by its expiry) instead of sending.
-      let withdrawn: boolean
-      try {
-        const check = this.ownerNotificationWithdrawals.get(canonicalBackgroundSourceId(metadata['dsh.native-notice.sourceId']!))
-        if (check === undefined) return { outcome: 'not-sent', failureCode: 'native-notice-withdrawal-unavailable', retryable: true }
-        withdrawn = check.isWithdrawn(intent.idempotencyKey)
-      } catch { return { outcome: 'not-sent', failureCode: 'native-notice-withdrawal-unavailable', retryable: true } }
-      if (withdrawn !== false) return { outcome: 'not-sent', failureCode: 'native-notice-withdrawn', retryable: false }
+    const authority = metadata['dsh.native-notice.withdrawalAuthority']
+    if (withdrawable !== undefined || authority !== undefined) {
+      if (withdrawable !== 'v1' || typeof authority !== 'string' || !ownerNotificationAuthorityPattern.test(authority)) return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
+      if (options.withdrawal) {
+        // Fail closed: without a live check that the authority's current
+        // service still vouches for, the notice waits (retryable, bounded by
+        // its expiry) instead of sending. A foreign registration under another
+        // authority is a different key and never reaches this notice.
+        let withdrawn: boolean
+        try {
+          const live = this.ownerNotificationWithdrawals.get(ownerNotificationWithdrawalKey(authority, canonicalBackgroundSourceId(metadata['dsh.native-notice.sourceId']!)))
+          if (live === undefined || !this.withdrawalVouched(live.authority, live.registration)) return { outcome: 'not-sent', failureCode: 'native-notice-withdrawal-unavailable', retryable: true }
+          withdrawn = live.registration.isWithdrawn(intent.idempotencyKey)
+        } catch { return { outcome: 'not-sent', failureCode: 'native-notice-withdrawal-unavailable', retryable: true } }
+        if (withdrawn !== false) return { outcome: 'not-sent', failureCode: 'native-notice-withdrawn', retryable: false }
+      }
     }
     return undefined
   }
   #notificationProviderId(intent: Readonly<OutboundIntent>): string { return `native-notice:${createHash('sha256').update(intent.idempotencyKey).update('\u0000').update(intent.bindingId).update('\u0000').update(intent.text).digest('hex')}` }
 
   /** Queue a typed owner notice. Accepted means queued; it never asserts user read. */
-  enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention?: AttentionEnvelope; withdrawable?: boolean }): OutboxRecord {
+  enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention?: AttentionEnvelope; withdrawable?: boolean; withdrawalHandle?: string }): OutboxRecord {
     this.assertActive()
     if (!Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || typeof input.text !== 'string' || input.text.length === 0 || input.text.length > 16_384) throw new AssistantDeliveryError('policy-denied', 'owner notification is invalid or expired')
     if (input.withdrawable !== undefined && typeof input.withdrawable !== 'boolean') throw new AssistantDeliveryError('policy-denied', 'owner notification is invalid or expired')
+    if (input.withdrawalHandle !== undefined && input.withdrawable !== true) throw new AssistantDeliveryError('policy-denied', 'owner notification is invalid or expired')
+    // A withdrawable notice must present a live handle for its own source; the
+    // notice is then bound to that handle's authority, which alone controls it.
+    const withdrawal = input.withdrawable === true ? this.liveWithdrawal(input.withdrawalHandle, input.sourceId) : undefined
+    if (input.withdrawable === true && withdrawal === undefined) throw new AssistantDeliveryError('policy-denied', 'owner notification withdrawal is not registered for this source')
     const resolved = this.resolveOwnerRoute(input.ownerRouteId)
     const binding = resolved.binding; const owner = this.deliveryStore.getPrincipal(binding.principal)
     if (binding.sessionId !== input.sessionId || binding.workspace !== input.scope.workspace || binding.agentPreset !== input.scope.preset
@@ -5755,41 +5806,88 @@ export class AssistantDeliveryService extends Service {
     return this.enqueueBackgroundAuthorized({ sourceId: input.sourceId, workspace: binding.workspace, bindingId: binding.id, idempotencyKey: input.idempotencyKey, text: input.text, format: 'plain', metadata: {
       'dsh.native-notice': 'v1', 'dsh.native-notice.sourceId': input.sourceId, 'dsh.native-notice.ownerRouteId': input.ownerRouteId, 'dsh.native-notice.expiresAt': String(input.expiresAt), 'dsh.native-notice.ownerRecordId': owner.id,
       'dsh.native-notice.ownerVersion': String(owner.version), 'dsh.native-notice.bindingVersion': String(binding.version), 'dsh.native-notice.bindingGeneration': String(binding.generation), 'dsh.native-notice.sessionId': binding.sessionId,
-      ...(input.withdrawable === true ? { 'dsh.native-notice.withdrawable': 'v1' } : {}),
+      ...(withdrawal !== undefined ? { 'dsh.native-notice.withdrawable': 'v1', 'dsh.native-notice.withdrawalAuthority': withdrawal.authority } : {}),
     } }, undefined, { lane: 'owner-notification', envelope: input.attention })
   }
 
   /**
    * Register the send-time withdrawal check for one owner-notice source (see
-   * `OwnerNotificationWithdrawal`). One check per source; the returned
-   * function unregisters it, after which that source's withdrawable notices
-   * wait instead of sending.
+   * `OwnerNotificationWithdrawal`). The service in the `authority` slot must
+   * vouch for the registration; one live check per (authority, source). A
+   * registration its authority no longer vouches for (owner restarted or
+   * replaced) is superseded by the next vouched one, so the legitimate owner
+   * regains control of notices already queued under its authority. After
+   * `unregister`, those notices wait instead of sending.
    */
-  registerOwnerNotificationWithdrawal(registration: OwnerNotificationWithdrawal): () => void {
+  registerOwnerNotificationWithdrawal(registration: OwnerNotificationWithdrawal): OwnerNotificationWithdrawalBinding {
     this.assertActive()
-    if (!registration || typeof registration.isWithdrawn !== 'function' || typeof registration.sourceId !== 'string') throw new AssistantDeliveryError('runtime-conflict', 'invalid owner notification withdrawal')
+    if (!registration || registration.protocol !== ownerNotificationWithdrawalProtocol || typeof registration.isWithdrawn !== 'function'
+      || typeof registration.sourceId !== 'string' || typeof registration.authority !== 'string' || !ownerNotificationAuthorityPattern.test(registration.authority)) {
+      throw new AssistantDeliveryError('runtime-conflict', 'invalid owner notification withdrawal')
+    }
+    const authority = registration.authority
     const sourceId = canonicalBackgroundSourceId(registration.sourceId)
-    if (this.ownerNotificationWithdrawals.has(sourceId)) throw new AssistantDeliveryError('runtime-conflict', 'owner notification withdrawal already registered')
-    this.ownerNotificationWithdrawals.set(sourceId, registration)
+    if (!this.withdrawalVouched(authority, registration)) throw new AssistantDeliveryError('runtime-conflict', 'owner notification withdrawal is not owned by its authority')
+    const key = ownerNotificationWithdrawalKey(authority, sourceId)
+    const existing = this.ownerNotificationWithdrawals.get(key)
+    if (existing !== undefined) {
+      if (this.withdrawalVouched(existing.authority, existing.registration)) throw new AssistantDeliveryError('runtime-conflict', 'owner notification withdrawal already registered')
+      this.ownerNotificationWithdrawalHandles.delete(existing.handle)
+    }
+    const handle = randomBytes(32).toString('base64url')
+    const entry = Object.freeze({ handle, authority, sourceId, registration })
+    this.ownerNotificationWithdrawals.set(key, entry)
+    this.ownerNotificationWithdrawalHandles.set(handle, key)
     let live = true
-    return () => { if (live) { live = false; if (this.ownerNotificationWithdrawals.get(sourceId) === registration) this.ownerNotificationWithdrawals.delete(sourceId) } }
+    return Object.freeze({ handle, unregister: () => {
+      if (!live) return
+      live = false
+      this.ownerNotificationWithdrawalHandles.delete(handle)
+      if (this.ownerNotificationWithdrawals.get(key) === entry) this.ownerNotificationWithdrawals.delete(key)
+    } })
+  }
+
+  /** The service now in `authority`'s slot vouches for this exact registration object. */
+  private withdrawalVouched(authority: string, registration: Readonly<OwnerNotificationWithdrawal>): boolean {
+    try {
+      const owner = this.context.get(authority as never, false) as unknown as Partial<OwnerNotificationWithdrawalAuthority> | undefined
+      return typeof owner?.ownsOwnerNotificationWithdrawal === 'function' && owner.ownsOwnerNotificationWithdrawal(registration) === true
+    } catch { return false }
+  }
+
+  /** Live, still-vouched registration behind `handle`, for exactly `sourceId`. */
+  private liveWithdrawal(handle: unknown, sourceId: string): Readonly<{ authority: string; sourceId: string }> | undefined {
+    if (typeof handle !== 'string') return undefined
+    const key = this.ownerNotificationWithdrawalHandles.get(handle)
+    const entry = key === undefined ? undefined : this.ownerNotificationWithdrawals.get(key)
+    if (entry === undefined || entry.handle !== handle || !this.withdrawalVouched(entry.authority, entry.registration)) return undefined
+    let canonical: string
+    try { canonical = canonicalBackgroundSourceId(sourceId) } catch { return undefined }
+    return canonical === entry.sourceId ? entry : undefined
   }
 
   /**
-   * Read-only lookup of an owner notice by idempotency key, scoped to the
-   * source that queued it: a key held by another source or by a non-notice
-   * record reads as absent. Never returns text or metadata.
+   * Read-only lookup of an owner notice by idempotency key. The caller
+   * presents its withdrawal handle; the lookup is scoped to that handle's
+   * source and authority. A key held by another source, another authority,
+   * a non-withdrawable notice or a non-notice record reads as absent. Never
+   * returns text or metadata.
    */
-  inspectOwnerNotification(input: Readonly<{ sourceId: string; idempotencyKey: string }>): Readonly<OwnerNotificationRecordView> | undefined {
+  inspectOwnerNotification(input: Readonly<{ sourceId: string; idempotencyKey: string; withdrawalHandle: string }>): Readonly<OwnerNotificationRecordView> | undefined {
     this.assertActive()
     if (typeof input?.idempotencyKey !== 'string' || input.idempotencyKey.length === 0 || input.idempotencyKey.length > 256) throw new AssistantDeliveryError('runtime-conflict', 'invalid owner notification lookup')
-    const sourceId = canonicalBackgroundSourceId(input.sourceId)
+    const withdrawal = this.liveWithdrawal(input.withdrawalHandle, input.sourceId)
+    if (withdrawal === undefined) throw new AssistantDeliveryError('runtime-conflict', 'owner notification withdrawal is not registered for this source')
     const record = this.deliveryStore.getOutboxByIdempotencyKey(input.idempotencyKey)
     const metadata = record?.intent.metadata
     if (record === undefined || metadata?.['dsh.native-notice'] !== 'v1' || typeof metadata['dsh.native-notice.sourceId'] !== 'string') return undefined
     let stored: string
     try { stored = canonicalBackgroundSourceId(metadata['dsh.native-notice.sourceId']) } catch { return undefined }
-    return stored === sourceId ? Object.freeze({ outboxId: record.id, status: record.status }) : undefined
+    if (stored !== withdrawal.sourceId) return undefined
+    // A row this authority did not queue (another authority, or no withdrawal
+    // binding at all) reads as absent, so the caller never adopts it.
+    if (metadata['dsh.native-notice.withdrawalAuthority'] !== withdrawal.authority) return undefined
+    return Object.freeze({ outboxId: record.id, status: record.status })
   }
 
   /**

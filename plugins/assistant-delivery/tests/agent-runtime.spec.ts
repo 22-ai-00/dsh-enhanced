@@ -69,7 +69,7 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 import { deliveryProgressFromSessionEvent, modelPickerOperationId } from '../src/agent-runtime.ts'
-import { AssistantDeliveryService } from '../src/service.ts'
+import { AssistantDeliveryService, ownerNotificationWithdrawalProtocol, type OwnerNotificationWithdrawal } from '../src/service.ts'
 import type { DeliveryGoalWakeInput, OwnerGoalOutcomeFeedbackLocator, OwnerGoalOutcomeFeedbackProof } from '../src/goal-wake-types.ts'
 import { DeliveryStore } from '../src/store.ts'
 import { externalPrincipalId } from '../src/canonical.ts'
@@ -1282,6 +1282,56 @@ describe('real native Delivery Agent runtime', () => {
       await drive(fixture.service)
       expect(store.getOutbox(mixed.id)).toMatchObject({ status: 'dead', failureCode: 'native-notice-invalid' })
       expect(access.notifications(binding.sessionId).map(value => value.id)).toEqual([notice.id])
+    } finally { await access?.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
+  })
+
+  test('native Web notice adapter keeps a withdrawal-unavailable hold retryable and keeps accepted withdrawable notices listed after close', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-withdrawal-')); roots.push(root)
+    const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
+    const webConversation = { channel: 'web', account: 'browser', tenant: 'local', kind: 'dm' as const, chat: 'owner-chat' }
+    const ownerId = 'web/browser/local/owner'
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      ownerRoutes: [{ id: 'web-owner-notice', conversation: webConversation, principal: webPrincipal, workspace: root, agentPreset: 'primary', policyRef: 'web-owner', minimumGeneration: 1 }],
+      policyRules: [{ id: 'web-owner-notice-send', effect: 'allow', subject: { kind: 'background', id: 'proactive-engine', workspace: root, principal: ownerId }, actions: ['send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } }],
+    })
+    const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
+    let access: ReturnType<AssistantDeliveryService['bindNativeWebOwner']> | undefined
+    try {
+      operator.handoffOwner(webPrincipal)
+      access = fixture.service.bindNativeWebOwner(fixture.ctx, { principal: webPrincipal, workspace: root, preset: 'primary' })
+      const store = runtimeStore(fixture.service) as unknown as DeliveryStore
+      const binding = store.createBinding({ conversation: webConversation, principal: webPrincipal, workspace: root, agentPreset: 'primary', sessionId: 'web-owner-session', policyRef: 'web-owner' })
+      const owner = store.getPrincipal(webPrincipal)!
+      const owned = new Set<object>()
+      fixture.ctx.provide('noticeAuthority' as never, { ownsOwnerNotificationWithdrawal: (registration: object) => owned.has(registration) } as never)
+      let verdict: () => boolean = () => false
+      const registration: OwnerNotificationWithdrawal = Object.freeze({ protocol: ownerNotificationWithdrawalProtocol, authority: 'noticeAuthority', sourceId: 'proactive-engine', isWithdrawn: () => verdict() })
+      owned.add(registration)
+      const withdrawal = fixture.service.registerOwnerNotificationWithdrawal(registration)
+      const enqueue = (idempotencyKey: string, text: string) => fixture.service.enqueueOwnerNotification({ sourceId: 'proactive-engine', ownerRouteId: 'web-owner-notice', scope: { principalId: ownerId, principalRecordId: owner.id, principalVersion: owner.version, workspace: root, preset: 'primary' }, sessionId: binding.sessionId, idempotencyKey, text, expiresAt: Date.now() + 60_000, withdrawable: true, withdrawalHandle: withdrawal.handle })
+
+      const accepted = enqueue('native-notice-withdrawable', 'Open owner question.')
+      await drive(fixture.service)
+      expect(store.getOutbox(accepted.id)).toMatchObject({ status: 'accepted' })
+      expect(access.notifications(binding.sessionId).map(value => value.id)).toEqual([accepted.id])
+
+      // The coordinator's pre-send check passes, then the check becomes
+      // unavailable inside the adapter's own send: the hold stays retryable.
+      let calls = 0
+      verdict = () => { calls += 1; if (calls === 1) return false; throw new Error('evaluation unavailable') }
+      const held = enqueue('native-notice-held', 'Held owner question.')
+      await drive(fixture.service)
+      expect(calls).toBe(2)
+      expect(store.getOutbox(held.id)).toMatchObject({ status: 'retry_wait', failureCode: 'native-notice-withdrawal-unavailable' })
+
+      // The question closes, the check throws, then Evaluation unloads: the accepted notice stays listed.
+      verdict = () => true
+      expect(access.notifications(binding.sessionId).map(value => value.id)).toEqual([accepted.id])
+      verdict = () => { throw new Error('evaluation failed') }
+      expect(access.notifications(binding.sessionId).map(value => value.id)).toEqual([accepted.id])
+      withdrawal.unregister()
+      owned.clear()
+      expect(access.notifications(binding.sessionId).map(value => value.id)).toEqual([accepted.id])
     } finally { await access?.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
   })
 

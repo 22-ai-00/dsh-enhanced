@@ -165,11 +165,25 @@ export interface Config {
 interface OwnerQuestionDeliveryPort {
   validateOwnerRoute(input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }): { principalRecordId: string; principalVersion: number }
   resolveOwnerRoute(authorityId: string): { binding: { sessionId: string } }
-  enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention: { purpose: 'result' }; withdrawable: true }): { id: string }
-  /** Read-only Outbox lookup by idempotency key, scoped to this source; never returns text. */
-  inspectOwnerNotification(input: { sourceId: string; idempotencyKey: string }): { outboxId: string; status: string } | undefined
-  /** Send-time withdrawal check: Delivery never sends a withdrawable notice the check withdraws. */
-  registerOwnerNotificationWithdrawal(registration: { sourceId: string; isWithdrawn(idempotencyKey: string): boolean }): () => void
+  enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention: { purpose: 'result' }; withdrawable: true; withdrawalHandle: string }): { id: string }
+  /** Read-only Outbox lookup by idempotency key, scoped to this source and its live withdrawal handle; never returns text. */
+  inspectOwnerNotification(input: { sourceId: string; idempotencyKey: string; withdrawalHandle: string }): { outboxId: string; status: string } | undefined
+  /**
+   * Send-time withdrawal check: Delivery never sends a withdrawable notice the
+   * check withdraws. Delivery vouches the registration through
+   * `ctx.get(authority).ownsOwnerNotificationWithdrawal`, then returns an
+   * unguessable handle that enqueue and inspect must present.
+   */
+  registerOwnerNotificationWithdrawal(registration: OwnerQuestionWithdrawalRegistration): { handle: string; unregister(): void }
+}
+
+const OWNER_NOTIFICATION_WITHDRAWAL_PROTOCOL = 'assistant-delivery/owner-notification-withdrawal/v1' as const
+
+interface OwnerQuestionWithdrawalRegistration {
+  readonly protocol: typeof OWNER_NOTIFICATION_WITHDRAWAL_PROTOCOL
+  readonly authority: 'assistantEvaluation'
+  readonly sourceId: string
+  isWithdrawn(idempotencyKey: string): boolean
 }
 
 function isOwnerQuestionDeliveryPort(value: unknown): value is OwnerQuestionDeliveryPort {
@@ -537,7 +551,8 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   private projectionTimer: ReturnType<typeof setInterval> | undefined
   private notificationFacts: NotificationOutcomeFactSource | undefined
   private lastNotificationSyncAt = Number.NEGATIVE_INFINITY
-  private ownerQuestionWithdrawal: Readonly<{ source: object; dispose: () => void }> | undefined
+  private ownerQuestionWithdrawal: Readonly<{ source: object; handle: string; dispose: () => void }> | undefined
+  private readonly activeOwnerQuestionWithdrawals = new WeakSet<object>()
   private readonly attentionCohorts: readonly AttentionCohort[]
   private active = true
 
@@ -1378,18 +1393,39 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   private bindOwnerQuestionWithdrawal(source: unknown): (() => void) | undefined {
     if (!this.active || !isOwnerQuestionDeliveryPort(source)) return undefined
     if (this.ownerQuestionWithdrawal?.source === source) return undefined
-    let unregister: () => void
+    const registration: OwnerQuestionWithdrawalRegistration = Object.freeze({
+      protocol: OWNER_NOTIFICATION_WITHDRAWAL_PROTOCOL,
+      authority: 'assistantEvaluation' as const,
+      sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID,
+      isWithdrawn: (idempotencyKey: string) => this.#ownerQuestionWithdrawn(idempotencyKey),
+    })
+    this.activeOwnerQuestionWithdrawals.add(registration)
+    let handle: unknown
+    let unregister: unknown
     try {
-      unregister = source.registerOwnerNotificationWithdrawal({ sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID,
-        isWithdrawn: idempotencyKey => this.#ownerQuestionWithdrawn(idempotencyKey) })
-    } catch { return undefined }
-    if (typeof unregister !== 'function') return undefined
+      const result = source.registerOwnerNotificationWithdrawal(registration)
+      handle = result?.handle
+      unregister = result?.unregister
+    } catch (error) {
+      this.activeOwnerQuestionWithdrawals.delete(registration)
+      // Unbound: the tick defers owner questions as delivery-unavailable until a later bind succeeds.
+      this.ctx.logger.warn(`assistant-evaluation: owner-question withdrawal registration failed; owner questions deferred: ${String(error)}`)
+      return undefined
+    }
+    if (typeof handle !== 'string' || handle.length === 0 || typeof unregister !== 'function') {
+      this.activeOwnerQuestionWithdrawals.delete(registration)
+      try { if (typeof unregister === 'function') unregister() } catch { /* best effort */ }
+      this.ctx.logger.warn('assistant-evaluation: owner-question withdrawal registration returned no handle; owner questions deferred')
+      return undefined
+    }
+    const release = unregister as () => void
     this.ownerQuestionWithdrawal?.dispose()
     let live = true
-    const binding = Object.freeze({ source, dispose: () => {
+    const binding = Object.freeze({ source, handle, dispose: () => {
       if (!live) return
       live = false
-      try { unregister() } catch { /* Delivery already gone */ }
+      this.activeOwnerQuestionWithdrawals.delete(registration)
+      try { release() } catch { /* Delivery already gone */ }
       if (this.ownerQuestionWithdrawal === binding) this.ownerQuestionWithdrawal = undefined
     } })
     this.ownerQuestionWithdrawal = binding
@@ -1429,7 +1465,8 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
    * recorded reply) already closed is recorded `closed` and never sent; one
    * older than the notice TTL is recorded `expired`. Notices are queued
    * `withdrawable`, so a question closed after queueing is withdrawn by
-   * Delivery's send-time check instead of being sent. Delivery absence, a
+   * Delivery's send-time check instead of being sent. Delivery absence (or no
+   * live withdrawal binding of this service to that Delivery instance), a
    * route that does not match the scope, or an enqueue failure leaves no row,
    * so a later tick retries under the same idempotency key. Zero work when
    * `attentionOwnerQuestionDeliveryEnabled` is off.
@@ -1455,12 +1492,21 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
         // Without Delivery no Outbox lookup is possible, so no terminal row is written either.
         if (delivery === undefined) { push({ action: 'deferred', questionId, reason: 'delivery-unavailable' }); continue }
         this.bindOwnerQuestionWithdrawal(delivery)
+        // Only queue (or adopt) while this service's own withdrawal check is
+        // bound to this exact Delivery instance; otherwise a closed question
+        // could be sent unchecked.
+        const withdrawal = this.ownerQuestionWithdrawal
+        if (withdrawal === undefined || withdrawal.source !== delivery) {
+          push({ action: 'deferred', questionId, reason: 'delivery-unavailable' })
+          continue
+        }
+        const withdrawalHandle = withdrawal.handle
         const idempotencyKey = attentionOwnerQuestionIdempotencyKey(questionId)
         // An Outbox row under this key (e.g. enqueued before a crash, or under an
         // older TTL) is adopted as queued; the send-time withdrawal check then
         // keeps a since-closed question from being sent.
         let existing: { outboxId: string; status: string } | undefined
-        try { existing = delivery.inspectOwnerNotification({ sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID, idempotencyKey }) } catch {
+        try { existing = delivery.inspectOwnerNotification({ sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID, idempotencyKey, withdrawalHandle }) } catch {
           push({ action: 'deferred', questionId, reason: 'delivery-unavailable' })
           continue
         }
@@ -1507,6 +1553,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
             expiresAt,
             attention: { purpose: 'result' },
             withdrawable: true,
+            withdrawalHandle,
           }).id
         } catch {
           push({ action: 'deferred', questionId, reason: 'enqueue-failed' })
@@ -1567,6 +1614,16 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   ): boolean {
     return this.active && typeof registration === 'object' && registration !== null
       && this.activeAutomationRegistrations.has(registration)
+  }
+
+  /**
+   * Delivery's slot-anchored proof that an owner-notification withdrawal
+   * registration under the `assistantEvaluation` authority is this live
+   * service's own; a foreign object claiming that authority never passes.
+   */
+  ownsOwnerNotificationWithdrawal(registration: object): boolean {
+    return this.active && typeof registration === 'object' && registration !== null
+      && this.activeOwnerQuestionWithdrawals.has(registration)
   }
 
   /** Delivery uses the same ownership boundary as Automations. */

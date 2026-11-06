@@ -30,41 +30,70 @@ const tuned = (overrides: Partial<AttentionTuningParameters>): AttentionTuningPa
 const tightest = tuned({ interruptionCostDelta: 100, minimumUtilityDelta: 100, quietExtensionMinutes: 120, muted: true })
 
 type Fact = Record<string, unknown> & { outboxId: string; auditSequence: number }
-type Enqueue = { sourceId: string; ownerRouteId: string; scope: Record<string, unknown>; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention: unknown; withdrawable?: boolean }
-type Withdrawal = { sourceId: string; isWithdrawn(idempotencyKey: string): boolean }
+type Enqueue = { sourceId: string; ownerRouteId: string; scope: Record<string, unknown>; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention: unknown; withdrawable?: boolean; withdrawalHandle?: string }
+type Withdrawal = { protocol: string; authority: string; sourceId: string; isWithdrawn(idempotencyKey: string): boolean }
+type WithdrawalEntry = { handle: string; registration: Withdrawal }
+
+const withdrawalKey = (authority: string, sourceId: string) => `${authority}\u0000${sourceId}`
 
 /**
  * Text-free Delivery facts plus a fake owner-notification path that dedupes by
  * idempotency key and intent hash like the real Outbox, with the real
- * send-time withdrawal registry and source-scoped inspect.
+ * slot-vouched send-time withdrawal registry, handle-gated enqueue and
+ * handle-scoped inspect.
  */
 class FakeDelivery {
   readonly facts = new Map<string, Fact>()
   readonly enqueued: Enqueue[] = []
-  readonly outbox = new Map<string, { id: string; intent: string; sourceId: string; status: string; withdrawable: boolean }>()
-  readonly withdrawals = new Map<string, Withdrawal>()
+  readonly outbox = new Map<string, { id: string; intent: string; sourceId: string; authority: string | undefined; status: string; withdrawable: boolean }>()
+  readonly withdrawals = new Map<string, WithdrawalEntry>()
+  ctx: Context | undefined
   sequence = 0
+  handles = 0
   routeWorkspace = scope.workspace
   failEnqueue = false
   failInspect = false
-  registerOwnerNotificationWithdrawal(registration: Withdrawal) {
-    if (this.withdrawals.has(registration.sourceId)) throw new Error('already registered')
-    this.withdrawals.set(registration.sourceId, registration)
-    return () => { if (this.withdrawals.get(registration.sourceId) === registration) this.withdrawals.delete(registration.sourceId) }
+  failRegister = false
+  vouched(registration: Withdrawal): boolean {
+    const owner = this.ctx?.get(registration.authority as never, false) as unknown as { ownsOwnerNotificationWithdrawal?: (value: object) => boolean } | undefined
+    return owner?.ownsOwnerNotificationWithdrawal?.(registration) === true
   }
-  inspectOwnerNotification(input: { sourceId: string; idempotencyKey: string }) {
+  registerOwnerNotificationWithdrawal(registration: Withdrawal) {
+    if (this.failRegister) throw new Error('delivery registry unavailable')
+    if (registration.protocol !== 'assistant-delivery/owner-notification-withdrawal/v1' || !this.vouched(registration)) throw new Error('not owned by its authority')
+    const key = withdrawalKey(registration.authority, registration.sourceId)
+    const existing = this.withdrawals.get(key)
+    if (existing !== undefined && this.vouched(existing.registration)) throw new Error('already registered')
+    this.handles += 1
+    const entry = { handle: `handle-${this.handles}`, registration }
+    this.withdrawals.set(key, entry)
+    return { handle: entry.handle, unregister: () => { if (this.withdrawals.get(key) === entry) this.withdrawals.delete(key) } }
+  }
+  /** The live, vouched check Evaluation registered for its owner-question source. */
+  evaluationCheck(): Withdrawal | undefined {
+    const entry = this.withdrawals.get(withdrawalKey('assistantEvaluation', ATTENTION_OWNER_QUESTION_SOURCE_ID))
+    return entry !== undefined && this.vouched(entry.registration) ? entry.registration : undefined
+  }
+  liveHandle(handle: string | undefined, sourceId: string): WithdrawalEntry | undefined {
+    const entry = [...this.withdrawals.values()].find(value => value.handle === handle)
+    return entry !== undefined && entry.registration.sourceId === sourceId && this.vouched(entry.registration) ? entry : undefined
+  }
+  inspectOwnerNotification(input: { sourceId: string; idempotencyKey: string; withdrawalHandle: string }) {
     if (this.failInspect) throw new Error('store unavailable')
+    const live = this.liveHandle(input.withdrawalHandle, input.sourceId)
+    if (live === undefined) throw new Error('withdrawal not registered')
     const record = this.outbox.get(input.idempotencyKey)
-    return record === undefined || record.sourceId !== input.sourceId ? undefined : { outboxId: record.id, status: record.status }
+    return record === undefined || record.sourceId !== input.sourceId || record.authority !== live.registration.authority
+      ? undefined : { outboxId: record.id, status: record.status }
   }
   /** Mirror of Delivery's send-time guard for withdrawable notices. */
   sendDue(): void {
     for (const [key, record] of this.outbox) {
       if (record.status !== 'pending' || !record.withdrawable) continue
-      const check = this.withdrawals.get(record.sourceId)
-      if (check === undefined) continue
+      const check = this.withdrawals.get(withdrawalKey(record.authority!, record.sourceId))
+      if (check === undefined || !this.vouched(check.registration)) continue
       let withdrawn: boolean
-      try { withdrawn = check.isWithdrawn(key) } catch { continue }
+      try { withdrawn = check.registration.isWithdrawn(key) } catch { continue }
       record.status = withdrawn === false ? 'accepted' : 'dead'
     }
   }
@@ -101,14 +130,18 @@ class FakeDelivery {
   }
   enqueueOwnerNotification(input: Enqueue) {
     if (this.failEnqueue) throw new Error('policy denied')
+    const live = input.withdrawable === true ? this.liveHandle(input.withdrawalHandle, input.sourceId) : undefined
+    if (input.withdrawable === true && live === undefined) throw new Error('withdrawal not registered')
     this.enqueued.push(input)
-    const intent = createHash('sha256').update(JSON.stringify({ ...input, idempotencyKey: undefined })).digest('hex')
+    const authority = live?.registration.authority
+    // The handle is per registration; the stored intent binds the stable authority instead.
+    const intent = createHash('sha256').update(JSON.stringify({ ...input, idempotencyKey: undefined, withdrawalHandle: undefined, authority })).digest('hex')
     const existing = this.outbox.get(input.idempotencyKey)
     if (existing !== undefined) {
       if (existing.intent !== intent) throw new Error('idempotency conflict')
       return { id: existing.id }
     }
-    const record = { id: `outbox-${this.outbox.size + 1}`, intent, sourceId: input.sourceId, status: 'pending', withdrawable: input.withdrawable === true }
+    const record = { id: `outbox-${this.outbox.size + 1}`, intent, sourceId: input.sourceId, authority, status: 'pending', withdrawable: input.withdrawable === true }
     this.outbox.set(input.idempotencyKey, record)
     return { id: record.id }
   }
@@ -118,6 +151,9 @@ function setup(options: { path?: string; delivery?: FakeDelivery; clock?: { now:
   const ctx = new Context(); contexts.push(ctx)
   const delivery = options.delivery ?? new FakeDelivery()
   const clock = options.clock ?? { now: 10_000 }
+  const warnings: string[] = []
+  ctx.logger.exporter({ levels: { default: 3 }, export: message => { if (message.type === 'warn') warnings.push(String(message.args)) } })
+  delivery.ctx = ctx
   if (options.provide !== false) ctx.provide('assistantDelivery' as never, delivery as never)
   const enabled = options.enabled ?? true
   const evaluation = new AssistantEvaluationService(ctx, {
@@ -138,7 +174,7 @@ function setup(options: { path?: string; delivery?: FakeDelivery; clock?: { now:
   } })
   const deliver = () => evaluation.reconcileAttentionOwnerQuestions()
   const status = () => evaluation.attentionOwnerQuestionStatus({ scope, cohort })
-  return { ctx, delivery, clock, evaluation, sync, request, grant, deliver, status }
+  return { ctx, delivery, clock, evaluation, sync, request, grant, deliver, status, warnings }
 }
 
 /** A settled tightened parent, then a loosening request outside any grant: one recorded owner question. */
@@ -160,7 +196,8 @@ function crashEnqueue(f: ReturnType<typeof setup>, delivery: FakeDelivery, quest
   return delivery.enqueueOwnerNotification({ sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID, ownerRouteId: owner.ownerRouteId,
     scope: { principalId: owner.principalId, principalRecordId: 'principal-record-1', principalVersion: 3, ...scope }, sessionId: 'session-1',
     idempotencyKey: attentionOwnerQuestionIdempotencyKey(questionId), text: attentionOwnerQuestionText(question, scope),
-    expiresAt: question.createdAt + ttl, attention: { purpose: 'result' }, withdrawable: true })
+    expiresAt: question.createdAt + ttl, attention: { purpose: 'result' }, withdrawable: true,
+    withdrawalHandle: delivery.withdrawals.get(withdrawalKey('assistantEvaluation', ATTENTION_OWNER_QUESTION_SOURCE_ID))!.handle })
 }
 
 /** A genuine schema-16 database built by the unchanged 0..16 migration chain. */
@@ -213,6 +250,7 @@ describe('attention owner question delivery', () => {
       sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID, ownerRouteId: owner.ownerRouteId, sessionId: 'session-1',
       scope: { principalId: owner.principalId, principalRecordId: 'principal-record-1', principalVersion: 3, ...scope },
       idempotencyKey: attentionOwnerQuestionIdempotencyKey(questionId), attention: { purpose: 'result' }, withdrawable: true,
+      withdrawalHandle: f.delivery.withdrawals.get(withdrawalKey('assistantEvaluation', ATTENTION_OWNER_QUESTION_SOURCE_ID))!.handle,
     })
     const question = f.evaluation.attentionLooseningStatus({ scope, cohort }).questions[0]!.question
     expect(call!.expiresAt).toBe(question.createdAt + day)
@@ -301,7 +339,7 @@ describe('attention owner question delivery', () => {
     const f = setup()
     const questionId = withQuestion(f)
     expect(f.deliver()).toMatchObject([{ result: { action: 'queued', questionId } }])
-    const check = f.delivery.withdrawals.get(ATTENTION_OWNER_QUESTION_SOURCE_ID)!
+    const check = f.delivery.evaluationCheck()!
     const key = attentionOwnerQuestionIdempotencyKey(questionId)
     expect(check.isWithdrawn(key)).toBe(false)
     expect(check.isWithdrawn(attentionOwnerQuestionIdempotencyKey('f'.repeat(64)))).toBe(true)
@@ -314,7 +352,7 @@ describe('attention owner question delivery', () => {
     const g = setup()
     const other = withQuestion(g)
     g.deliver()
-    const otherCheck = g.delivery.withdrawals.get(ATTENTION_OWNER_QUESTION_SOURCE_ID)!
+    const otherCheck = g.delivery.evaluationCheck()!
     g.evaluation.recordAttentionOwnerQuestionReply({ scope, cohort, questionId: other, choice: 'decline' })
     expect(otherCheck.isWithdrawn(attentionOwnerQuestionIdempotencyKey(other))).toBe(true)
 
@@ -324,7 +362,7 @@ describe('attention owner question delivery', () => {
     h.delivery.sendDue()
     expect(h.delivery.outbox.get(attentionOwnerQuestionIdempotencyKey(sent))).toMatchObject({ status: 'accepted' })
     h.clock.now += day
-    expect(h.delivery.withdrawals.get(ATTENTION_OWNER_QUESTION_SOURCE_ID)!.isWithdrawn(attentionOwnerQuestionIdempotencyKey(sent))).toBe(true)
+    expect(h.delivery.evaluationCheck()!.isWithdrawn(attentionOwnerQuestionIdempotencyKey(sent))).toBe(true)
   })
 
   test('the withdrawal check is registered only when enabled and is released on stop', async () => {
@@ -334,6 +372,55 @@ describe('attention owner question delivery', () => {
     expect(on.delivery.withdrawals.size).toBe(1)
     await on.ctx.fiber.restart(); contexts.splice(contexts.indexOf(on.ctx), 1)
     expect(on.delivery.withdrawals.size).toBe(0)
+  })
+
+  test('defers as delivery-unavailable while its own withdrawal binding is missing, and logs the registration failure', () => {
+    const delivery = new FakeDelivery()
+    delivery.failRegister = true
+    const f = setup({ delivery })
+    expect(f.warnings.join('\n')).toMatch(/owner-question withdrawal registration failed.*delivery registry unavailable/u)
+    const questionId = withQuestion(f)
+    expect(f.deliver()).toMatchObject([{ result: { action: 'deferred', questionId, reason: 'delivery-unavailable' } }])
+    expect(delivery.enqueued).toEqual([])
+    expect(f.status().deliveries).toEqual([])
+    delivery.failRegister = false
+    expect(f.deliver()).toMatchObject([{ result: { action: 'queued', questionId } }])
+    expect(delivery.evaluationCheck()).toBeDefined()
+
+    // A Delivery returning no handle is likewise unbound.
+    const handleless = new FakeDelivery()
+    Object.assign(handleless, { registerOwnerNotificationWithdrawal: () => ({ unregister: () => {} }) })
+    const g = setup({ delivery: handleless })
+    expect(g.warnings.join('\n')).toMatch(/returned no handle/u)
+    const other = withQuestion(g)
+    expect(g.deliver()).toMatchObject([{ result: { action: 'deferred', questionId: other, reason: 'delivery-unavailable' } }])
+    expect(handleless.enqueued).toEqual([])
+  })
+
+  test('vouches only for its own live registration, so a foreign check cannot reach its notices', async () => {
+    const f = setup()
+    const questionId = withQuestion(f)
+    const own = f.delivery.evaluationCheck()!
+    expect(f.evaluation.ownsOwnerNotificationWithdrawal(own)).toBe(true)
+    const forged = { ...own, isWithdrawn: () => false }
+    expect(f.evaluation.ownsOwnerNotificationWithdrawal(forged)).toBe(false)
+    // A foreign registration claiming Evaluation's authority is refused; one under its own authority is a different key.
+    expect(() => f.delivery.registerOwnerNotificationWithdrawal(forged)).toThrow('not owned by its authority')
+    const squatOwned = new Set<object>()
+    f.ctx.provide('squatAuthority' as never, { ownsOwnerNotificationWithdrawal: (value: object) => squatOwned.has(value) } as never)
+    const squat = { protocol: 'assistant-delivery/owner-notification-withdrawal/v1', authority: 'squatAuthority', sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID, isWithdrawn: vi.fn(() => false) }
+    squatOwned.add(squat)
+    const squatter = f.delivery.registerOwnerNotificationWithdrawal(squat)
+    expect(f.deliver()).toMatchObject([{ result: { action: 'queued', questionId } }])
+    expect(() => f.delivery.inspectOwnerNotification({ sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID, idempotencyKey: attentionOwnerQuestionIdempotencyKey(questionId), withdrawalHandle: squatter.handle }))
+      .not.toThrow()
+    expect(f.delivery.inspectOwnerNotification({ sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID, idempotencyKey: attentionOwnerQuestionIdempotencyKey(questionId), withdrawalHandle: squatter.handle })).toBeUndefined()
+    f.grant()
+    f.delivery.sendDue()
+    expect(squat.isWithdrawn).not.toHaveBeenCalled()
+    expect(f.delivery.outbox.get(attentionOwnerQuestionIdempotencyKey(questionId))).toMatchObject({ status: 'dead' })
+    await f.ctx.fiber.restart(); contexts.splice(contexts.indexOf(f.ctx), 1)
+    expect(f.evaluation.ownsOwnerNotificationWithdrawal(own)).toBe(false)
   })
 
   test('a newer grant closes the question before it is sent', () => {
