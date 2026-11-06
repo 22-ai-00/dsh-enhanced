@@ -345,6 +345,23 @@ export class NotificationOutcomeLedger {
     return deepFreeze({ scope, scopeKey, fromNotifiedAt, toNotifiedAt, total, outcomes, byVerdict })
   }
 
+  /**
+   * Current heads in `[from, to)` notification time whose record names a work
+   * item, oldest first, at most `limit` (plus whether more exist). Read-only;
+   * a scan of the scope's heads in the window (no index on the work item).
+   */
+  workItemHeads(scopeInput: EvaluationScope, fromNotifiedAt: number, toNotifiedAt: number, limit: number):
+    Readonly<{ records: readonly NotificationOutcomeRecord[]; truncated: boolean }> {
+    const { scopeKey } = canonicalEvaluationScope(scopeInput)
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) invalid('work item head limit is invalid')
+    const rows = this.#database.prepare(`SELECT r.* FROM evaluation_notification_outcome_heads h
+      JOIN evaluation_notification_outcome_revisions r ON r.notification_id=h.notification_id AND r.version=h.version
+      WHERE h.scope_key=? AND h.occurred_at>=? AND h.occurred_at<?
+        AND json_extract(r.record_json, '$.workItemId') IS NOT NULL
+      ORDER BY h.occurred_at, h.notification_id LIMIT ?`).all(scopeKey, fromNotifiedAt, toNotifiedAt, limit + 1) as unknown as RevisionRow[]
+    return Object.freeze({ records: Object.freeze(rows.slice(0, limit).map(row => stored(row).record)), truncated: rows.length > limit })
+  }
+
   counts(): Readonly<{ notifications: number; revisions: number }> {
     const heads = this.#database.prepare('SELECT COUNT(*) AS count FROM evaluation_notification_outcome_heads').get() as { count: number }
     const revisions = this.#database.prepare('SELECT COUNT(*) AS count FROM evaluation_notification_outcome_revisions').get() as { count: number }

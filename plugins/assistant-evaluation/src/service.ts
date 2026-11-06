@@ -33,6 +33,7 @@ import {
   type AttentionOwnerQuestionTickAction,
 } from './attention-owner-questions.js'
 import { validateWorkItemOwnerFeedbackProof } from './work-item-owner-proof.js'
+import { computeIntakeAttentionAgreement, INTAKE_ATTENTION_AGREEMENT_SCAN_LIMIT, isIntakeProvenanceSource, type IntakeAttentionAgreement } from './intake-attention-agreement.js'
 import type {
   EvaluationHealth,
   EvaluationCanonicalLearningEvidenceTuple,
@@ -117,6 +118,13 @@ export interface Config {
    * Requires `notificationOutcomesEnabled`.
    */
   attentionTuningAutoAdopt?: boolean
+  /**
+   * WP22: expose `inspectIntakeAttentionAgreement`, the read-only agreement
+   * between WP20 intake judgments (via WorkItems `inspectIntakeProvenance`)
+   * and recorded notification outcomes. Off by default; changes no sending
+   * behaviour. Requires `notificationOutcomesEnabled`.
+   */
+  intakeAttentionAgreementEnabled?: boolean
   /** Cohorts (`lane`, `sourceId`) eligible for tuning. Defaults to proactive reminders. */
   attentionTuningCohorts?: { lane: string; sourceId: string }[]
   /** Minimum decided notifications before any proposal or regression judgement. */
@@ -230,6 +238,7 @@ const configSchema = Schema.object({
   notificationSyncBatchSize: Schema.number().step(1).min(1).max(500).default(100),
   notificationSyncIntervalMs: Schema.number().step(1).min(0).max(86_400_000).default(60_000),
   attentionTuningAutoAdopt: Schema.boolean().default(false),
+  intakeAttentionAgreementEnabled: Schema.boolean().default(false),
   attentionTuningCohorts: Schema.array(Schema.object({
     lane: Schema.string().required(),
     sourceId: Schema.string().required(),
@@ -571,6 +580,9 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     }
     if (this.config.projectionRetryBaseMs > this.config.projectionRetryMaxMs) {
       throw new Error('assistant-evaluation: projectionRetryBaseMs must not exceed projectionRetryMaxMs')
+    }
+    if (this.config.intakeAttentionAgreementEnabled && !this.config.notificationOutcomesEnabled) {
+      throw new Error('assistant-evaluation: intakeAttentionAgreementEnabled requires notificationOutcomesEnabled')
     }
     if (this.config.attentionTuningAutoAdopt && !this.config.notificationOutcomesEnabled) {
       throw new Error('assistant-evaluation: attentionTuningAutoAdopt requires notificationOutcomesEnabled')
@@ -1278,6 +1290,30 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       throw new AssistantEvaluationError('invalid-input', 'notification outcome summary window is invalid')
     }
     return this.store.notifications.summary(input.scope, from, to)
+  }
+
+  /**
+   * WP22, read-only and default off: agreement between the WP20 intake
+   * judgment behind each auto-admitted work item and the owner outcome of its
+   * notifications, over notification time. Undefined when
+   * `intakeAttentionAgreementEnabled` is off. Observe-mode intake creates no
+   * item and is therefore not measurable here. Observational (`causal:
+   * false`); it writes, adopts and sends nothing.
+   */
+  inspectIntakeAttentionAgreement(input: { scope: EvaluationScope; fromNotifiedAt?: number; toNotifiedAt?: number }): IntakeAttentionAgreement | undefined {
+    this.assertActive()
+    if (!this.config.intakeAttentionAgreementEnabled) return undefined
+    const to = input.toNotifiedAt ?? this.now() + 1
+    const from = input.fromNotifiedAt ?? Math.max(0, to - this.config.defaultSummaryWindowMs)
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to <= from
+      || to - from > this.config.maxSummaryWindowMs) {
+      throw new AssistantEvaluationError('invalid-input', 'intake attention agreement window is invalid')
+    }
+    const { scope } = canonicalEvaluationScope(input.scope)
+    const heads = this.store.notifications.workItemHeads(scope, from, to, INTAKE_ATTENTION_AGREEMENT_SCAN_LIMIT)
+    const workItems = this.ctx.get('assistantWorkItems' as never) as unknown
+    return computeIntakeAttentionAgreement({ scope, fromNotifiedAt: from, toNotifiedAt: to, records: heads.records,
+      truncated: heads.truncated, source: isIntakeProvenanceSource(workItems) ? workItems : undefined })
   }
 
   #attentionPolicy(): AttentionTuningPolicy {

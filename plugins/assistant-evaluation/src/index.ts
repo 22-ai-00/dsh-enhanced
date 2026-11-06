@@ -36,6 +36,8 @@ export {
   normalizeNotificationOutcomeFact,
   notificationOutcomeDigest,
 } from './notification-outcomes.js'
+export { INTAKE_ATTENTION_AGREEMENT_PROTOCOL, computeIntakeAttentionAgreement } from './intake-attention-agreement.js'
+export type { IntakeAttentionAgreement, IntakeAttentionAgreementCell } from './intake-attention-agreement.js'
 export {
   ATTENTION_HOLDOUT_PROTOCOL,
   ATTENTION_LOOSENING_GRANT_PROTOCOL,

@@ -1,0 +1,160 @@
+/**
+ * WP22: read-only agreement between WP20 intake judgments and the attention
+ * outcome ledger.
+ *
+ * The only join that exists is intake admission → work item → result
+ * notification (`workItemId` on the outcome record) → owner outcome. An
+ * observe-mode `would-admit` never creates an item, so it never reaches a
+ * notification and cannot be measured here; only auto-admitted items are.
+ * Nothing is written, adopted or sent; the result is observational.
+ */
+import type { NotificationOutcome, NotificationOutcomeRecord } from './types.js'
+import { notificationOutcomes } from './types.js'
+
+export const INTAKE_ATTENTION_AGREEMENT_PROTOCOL = 'assistant-evaluation/intake-attention-agreement/v1' as const
+/** Notifications with a work item scanned per call; more is reported as `truncated`. */
+export const INTAKE_ATTENTION_AGREEMENT_SCAN_LIMIT = 1_000
+
+/** Structural mirror of WorkItems' `inspectIntakeProvenance`; Evaluation keeps no runtime dependency on WorkItems. */
+export interface IntakeProvenanceSource {
+  inspectIntakeProvenance(itemId: string): unknown
+}
+
+export function isIntakeProvenanceSource(value: unknown): value is IntakeProvenanceSource {
+  return typeof value === 'object' && value !== null
+    && typeof (value as { inspectIntakeProvenance?: unknown }).inspectIntakeProvenance === 'function'
+}
+
+const LEVELS = ['ignore', 'digest', 'notify', 'accept'] as const
+type IntakeLevel = typeof LEVELS[number]
+
+interface IntakeProvenance { itemId: string; level: IntakeLevel; mode: 'observe' | 'auto' }
+
+/** Validate one peer answer; anything malformed counts as unavailable, never as a match. */
+function provenance(value: unknown, itemId: string): IntakeProvenance | null | 'invalid' {
+  if (value === undefined) return null
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return 'invalid'
+  const item = value as Record<string, unknown>
+  if (item.protocol !== 'work-items/intake-provenance/v1' || item.itemId !== itemId || item.wouldAccept !== true
+    || !(LEVELS as readonly unknown[]).includes(item.level) || (item.mode !== 'observe' && item.mode !== 'auto')) return 'invalid'
+  return { itemId, level: item.level as IntakeLevel, mode: item.mode }
+}
+
+/** Owner outcomes that confirm the intake judgment, that contradict it, and that decide nothing yet. */
+const POSITIVE: ReadonlySet<NotificationOutcome> = new Set(['accepted', 'reacted'])
+const NEGATIVE: ReadonlySet<NotificationOutcome> = new Set(['rejected', 'expired-unhandled'])
+
+export interface IntakeAttentionAgreementCell {
+  readonly notifications: number
+  readonly items: number
+  readonly outcomes: Readonly<Record<NotificationOutcome, number>>
+  /** accepted + reacted */
+  readonly agreed: number
+  /** rejected + expired-unhandled */
+  readonly disagreed: number
+  /** agreed / (agreed + disagreed) in ppm; null without any decided notification. */
+  readonly agreementPpm: number | null
+}
+
+export interface IntakeAttentionAgreement {
+  readonly protocol: typeof INTAKE_ATTENTION_AGREEMENT_PROTOCOL
+  readonly causal: false
+  readonly scope: Readonly<{ workspace: string; preset: string }>
+  readonly fromNotifiedAt: number
+  readonly toNotifiedAt: number
+  /** Current notification heads in the window that name a work item, at most the scan limit. */
+  readonly scanned: number
+  readonly truncated: boolean
+  /** No WorkItems peer exposes `inspectIntakeProvenance`: every item is unresolved. */
+  readonly provenanceAvailable: boolean
+  /** Notifications whose item was not admitted from intake (explicit decisions, continuations). */
+  readonly notIntake: number
+  /** Notifications whose provenance read threw or was malformed. */
+  readonly unresolved: number
+  readonly intake: IntakeAttentionAgreementCell
+  readonly byLevel: Readonly<Partial<Record<IntakeLevel, IntakeAttentionAgreementCell>>>
+}
+
+class Cell {
+  notifications = 0
+  readonly items = new Set<string>()
+  readonly outcomes = Object.fromEntries(notificationOutcomes.map(outcome => [outcome, 0])) as Record<NotificationOutcome, number>
+  add(itemId: string, outcome: NotificationOutcome) {
+    this.notifications += 1
+    this.items.add(itemId)
+    this.outcomes[outcome] += 1
+  }
+  freeze(): IntakeAttentionAgreementCell {
+    let agreed = 0, disagreed = 0
+    for (const outcome of notificationOutcomes) {
+      if (POSITIVE.has(outcome)) agreed += this.outcomes[outcome]
+      if (NEGATIVE.has(outcome)) disagreed += this.outcomes[outcome]
+    }
+    const decided = agreed + disagreed
+    return Object.freeze({
+      notifications: this.notifications,
+      items: this.items.size,
+      outcomes: Object.freeze({ ...this.outcomes }),
+      agreed,
+      disagreed,
+      agreementPpm: decided === 0 ? null : Math.round(agreed * 1_000_000 / decided),
+    })
+  }
+}
+
+/**
+ * Aggregate `records` (current heads, each naming a work item) by the intake
+ * judgment behind its item. Provenance is read once per item; a throwing or
+ * malformed answer leaves that item unresolved.
+ */
+export function computeIntakeAttentionAgreement(input: Readonly<{
+  scope: Readonly<{ workspace: string; preset: string }>
+  fromNotifiedAt: number
+  toNotifiedAt: number
+  records: readonly NotificationOutcomeRecord[]
+  truncated: boolean
+  source: IntakeProvenanceSource | undefined
+}>): IntakeAttentionAgreement {
+  const resolved = new Map<string, IntakeProvenance | null | 'invalid'>()
+  const resolve = (itemId: string) => {
+    if (!resolved.has(itemId)) {
+      let value: IntakeProvenance | null | 'invalid' = 'invalid'
+      if (input.source !== undefined) {
+        try { value = provenance(input.source.inspectIntakeProvenance(itemId), itemId) } catch { value = 'invalid' }
+      }
+      resolved.set(itemId, value)
+    }
+    return resolved.get(itemId)!
+  }
+  const intake = new Cell()
+  const byLevel = new Map<IntakeLevel, Cell>()
+  let notIntake = 0, unresolved = 0
+  for (const record of input.records) {
+    const itemId = record.workItemId
+    if (itemId === undefined) continue
+    const found = resolve(itemId)
+    if (found === 'invalid') { unresolved += 1; continue }
+    if (found === null) { notIntake += 1; continue }
+    intake.add(itemId, record.outcome)
+    let cell = byLevel.get(found.level)
+    if (cell === undefined) byLevel.set(found.level, cell = new Cell())
+    cell.add(itemId, record.outcome)
+  }
+  return Object.freeze({
+    protocol: INTAKE_ATTENTION_AGREEMENT_PROTOCOL,
+    causal: false,
+    scope: Object.freeze({ workspace: input.scope.workspace, preset: input.scope.preset }),
+    fromNotifiedAt: input.fromNotifiedAt,
+    toNotifiedAt: input.toNotifiedAt,
+    scanned: input.records.length,
+    truncated: input.truncated,
+    provenanceAvailable: input.source !== undefined,
+    notIntake,
+    unresolved,
+    intake: intake.freeze(),
+    byLevel: Object.freeze(Object.fromEntries(LEVELS.flatMap(level => {
+      const cell = byLevel.get(level)
+      return cell === undefined ? [] : [[level, cell.freeze()]]
+    }))),
+  })
+}

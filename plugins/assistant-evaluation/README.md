@@ -82,6 +82,7 @@ projection 保存选中的 execution/objective/delivery component id，原始两
 | `notificationObservationHorizonMs` | 30 天 | 已知通知自通知时间起在此期间内被重查，以吸收迟到回复、更正与撤回；有效值至少为响应窗口的两倍。超出观察期的通知不再被扫描（按 `occurred_at` 范围索引）。 |
 | `notificationSyncBatchSize` | `100` | 每次同步新摄入与重查的条数上限（最大 500）。 |
 | `notificationSyncIntervalMs` | 60 秒 | 定时器驱动的通知同步最小间隔（projection tick 更频繁，同步按此节流；`0` 表示每个 tick）。 |
+| `intakeAttentionAgreementEnabled` | `false` | WP22：开放只读 `inspectIntakeAttentionAgreement`（WP20 intake 判断与通知结果的吻合度）；要求 `notificationOutcomesEnabled`，不改变任何发送行为。 |
 | `attentionTuningAutoAdopt` | `false` | WP22 切片 2：按 cohort 有界自动采用收紧类注意力参数并在回归时回退；要求 `notificationOutcomesEnabled`。 |
 | `attentionTuningCohorts` | `[{ lane: owner-notification, sourceId: assistant-proactive/v1 }]` | 可调 cohort（`lane` + `sourceId`），最多 16 个。 |
 | `attentionTuningMinSample` | `20` | 提议与回归判断所需的最少已判定通知数（最小 5）。 |
@@ -115,6 +116,12 @@ schema 13 扩展任务投影的主体身份约束及投影 outbox 的状态约�
 schema 14 新增与任务投影分离的 `evaluation_notification_outcome_*` 表：以 Delivery Outbox id 为通知主键，每次分类变化追加不可改、不可删的 revision 并推进该 scope 独立的通知 watermark；digest 不变只刷新检查时间。分类器 `notification-outcome` v1 确定性、无模型调用，优先级：owner/工作项判断 `not-achieved`→`rejected`、`achieved`→`accepted`；回复或 `partial`→`reacted`；传输 `dead`→`failed`；已发出且超过响应窗口→`expired-unhandled`（含 `expiry: { at, responseWindowMs }`），否则 `delivered`；未发出→`pending`。撤回（`unknown`）不计入判断。响应窗口只写入 `expired-unhandled` 记录，改配置只对到期判定实际改变的通知形成新 revision。格式错误或 scope 与已记录 head 冲突的事实计入 `invalid` 并跳过，不阻塞游标。head 必须与其 revision 的 digest、结果、watermark、scope 与通知时间一致，通知 watermark 与同步游标只进不退、不可删（触发器保证）。回复条数与任何正文不入库。
 
 启用后每个 projection tick 先从持久游标摄入新审计行，再按最久未查顺序重查观察期内的已知通知；格式错误的事实计入 `invalid` 并跳过，不阻塞游标。Delivery 缺席时为零结果。读接口：`inspectNotificationOutcome({ scope, notificationId })`（当前 + 全部 revision）、`notificationOutcomeFeed({ scope, after?, limit? })`（按 watermark 可续读的当前 head）、`notificationOutcomeSummary({ scope, fromNotifiedAt?, toNotifiedAt? })`（按 outcome 与 attention verdict 计数）。本切片不写 Evolution、不改任何参数、不触发 Growth。
+
+## intake 与注意力结果吻合度（WP22，只读）
+
+`intakeAttentionAgreementEnabled`（默认关，须同时开 `notificationOutcomesEnabled`）开放 Host-only `inspectIntakeAttentionAgreement({ scope, fromNotifiedAt?, toNotifiedAt? })`；关闭时返回 `undefined`、不读 WorkItems。唯一可用的连接是：WP20 intake 准入 → 工作项 → 结果通知（结果账本记录中的 `workItemId`）→ 主人结果。它在窗口内按通知时间扫描当前结果头中带 `workItemId` 的记录（至多 1000 条，超出标 `truncated`），每个工作项经 WorkItems 结构化接口 `inspectIntakeProvenance(itemId)` 只读一次，按准入时的 intake level 聚合：`agreed` = accepted + reacted，`disagreed` = rejected + expired-unhandled，`agreementPpm` = agreed / (agreed + disagreed)，无已判定通知时为 `null`；delivered/pending/failed 只计入 `outcomes`。非 intake 准入的工作项（显式决策、续办）计 `notIntake`；接口抛错、回执畸形或无 WorkItems peer（`provenanceAvailable: false`）计 `unresolved`，从不当作吻合。
+
+限制：observe 模式的 `would-admit` 不创建工作项，因而不产生通知，无法在此度量，只有 auto 准入的项可测；未被 intake 接受（`wouldAccept: false`）的事件同样没有通知，不能估计漏判。结果是观察性的（`causal: false`），不写任何行、不采用参数、不发送；按 `record_json` 扫描（无 workItemId 索引，无 schema 变更）。
 
 ## 注意力参数有界收紧与回退（WP22 切片 2）
 
