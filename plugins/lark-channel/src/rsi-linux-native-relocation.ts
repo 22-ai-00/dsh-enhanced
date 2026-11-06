@@ -853,10 +853,21 @@ async function attestedLogicalHome(logicalHome: string): Promise<void> {
   if (await realpath(logicalHome) !== logicalHome) fail('existing logical Home is not canonical')
 }
 
-async function assertTargetsAbsent(physicalHome: string, profile: string): Promise<void> {
-  for (const path of [runtimeFamily(profile), repositoryFamily(profile), authorityFamily(profile),
+/** A fresh physical Home must hold none of the families. An in-place stage of
+ * the live Home (`inPlace`) already carries the owner's authority state, which
+ * the relocation must keep: there only the behavior family it writes inside the
+ * authority must be absent, and the authority directories it descends through
+ * must already be private. */
+async function assertTargetsAbsent(physicalHome: string, profile: string, inPlace: boolean): Promise<void> {
+  const authority = inPlace ? behaviorFamily(profile) : authorityFamily(profile)
+  for (const path of [runtimeFamily(profile), repositoryFamily(profile), authority,
     creationRelative(profile), releaseRelative(profile)]) {
     if (await exists(under(physicalHome, path))) fail('relocation target already exists')
+  }
+  if (!inPlace) return
+  for (const path of [authorityFamily(profile), `${authorityFamily(profile)}/state`]) {
+    const location = under(physicalHome, path)
+    if (await exists(location)) await privateDirectory(location, 'unsafe existing authority directory')
   }
 }
 
@@ -903,7 +914,7 @@ export async function relocateLinuxRsiNativeFamily(
   } else await attestedLogicalHome(logicalHome)
   if (await exists(physicalHome)) await privateDirectory(physicalHome, 'unsafe physical Home')
   else await makePrivateDirectory(physicalHome)
-  await assertTargetsAbsent(physicalHome, profile)
+  await assertTargetsAbsent(physicalHome, profile, input.existingLogicalHome !== undefined)
   const peer = behaviorPeer()
 
   const source = await authenticateSource(sourceHome, profile, peer, signal)

@@ -1,4 +1,4 @@
-import { chmod, lstat, realpath, rename, rm, symlink } from 'node:fs/promises'
+import { chmod, lstat, readFile, realpath, rename, rm, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { hashLinuxRuntimeTree, linuxRuntimeDigest, verifyLinuxRuntime,
@@ -185,6 +185,51 @@ describe('rsi Linux native relocation', () => {
     expect(await realpath(ctx.logicalHome)).toBe(ctx.logicalHome)
     // Only the attestation skipped the absence guard: the staged Home is complete.
     expect((await lstat(ctx.physicalHome)).isDirectory()).toBe(true)
+  })
+
+  linux('keeps the owner authority state of an in-place stage and writes only the behavior family', async () => {
+    const ctx = await fixture()
+    await privateDirectory(ctx.logicalHome)
+    // The stage copy of the live owner Home already holds its authority state.
+    const authority = join(ctx.physicalHome, 'rsi-authorities/unit')
+    await privateDirectory(ctx.physicalHome)
+    await privateDirectory(join(authority, 'state'))
+    await privateDirectory(join(authority, 'config'))
+    await write(join(authority, 'catalog.json'), '{"schemaVersion":1,"entries":[]}\n')
+    await write(join(authority, 'state/growth.sqlite'), 'owner state\n')
+    await write(join(authority, 'config/trust.json'), '{}\n')
+    const proof = await relocateLinuxRsiNativeFamily({ sourceHome: ctx.sourceHome,
+      physicalHome: ctx.physicalHome, logicalHome: ctx.logicalHome, profile: ctx.profile,
+      existingLogicalHome: ctx.logicalHome })
+    await verifyLinuxRsiNativeRelocation(proof)
+    expect(await readFile(join(authority, 'state/growth.sqlite'), 'utf8')).toBe('owner state\n')
+    expect(await readFile(join(authority, 'config/trust.json'), 'utf8')).toBe('{}\n')
+    expect((await lstat(join(authority, 'state/linux-creation-behavior/behavior.json'))).isFile()).toBe(true)
+  })
+
+  linux('refuses an in-place stage whose authority already has a behavior family or is not private', async () => {
+    const ctx = await fixture()
+    await privateDirectory(ctx.logicalHome)
+    const authority = join(ctx.physicalHome, 'rsi-authorities/unit')
+    const run = () => relocateLinuxRsiNativeFamily({ sourceHome: ctx.sourceHome,
+      physicalHome: ctx.physicalHome, logicalHome: ctx.logicalHome, profile: ctx.profile,
+      existingLogicalHome: ctx.logicalHome })
+    await privateDirectory(ctx.physicalHome)
+    await privateDirectory(join(authority, 'state/linux-creation-behavior'))
+    await expectFailure(run(), 'relocation target already exists')
+    await rm(join(authority, 'state/linux-creation-behavior'), { recursive: true })
+    await chmod(join(authority, 'state'), 0o755)
+    await expectFailure(run(), 'unsafe existing authority directory')
+    await chmod(join(authority, 'state'), 0o700)
+    await chmod(authority, 0o750)
+    await expectFailure(run(), 'unsafe existing authority directory')
+    expect(await lstat(join(ctx.physicalHome, 'rsi-linux-runtimes')).then(() => true, () => false)).toBe(false)
+  })
+
+  linux('still refuses an existing authority family in a fresh physical Home', async () => {
+    const ctx = await fixture()
+    await privateDirectory(join(ctx.physicalHome, 'rsi-authorities/unit/state'))
+    await expectFailure(relocate(ctx), 'relocation target already exists')
   })
 
   linux('still refuses an occupied logical Home without the attestation', async () => {
