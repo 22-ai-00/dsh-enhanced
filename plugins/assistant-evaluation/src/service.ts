@@ -14,6 +14,9 @@ import { registerEvaluationTools } from './tools.js'
 import {
   normalizeAttentionCohort,
   type AttentionCohort,
+  type AttentionLooseningGrantResult,
+  type AttentionLooseningOptions,
+  type AttentionLooseningStatus,
   type AttentionTuningCurrent,
   type AttentionTuningParameters,
   type AttentionTuningPolicy,
@@ -120,6 +123,17 @@ export interface Config {
   attentionTuningObservationMs?: number
   /** Look-back for the evidence a proposal is computed from. */
   attentionTuningEvaluationWindowMs?: number
+  /**
+   * WP22 slice 3: loosening requests become sealed proposals judged by a
+   * deterministic replay on a hash-partitioned holdout, adopted only inside
+   * an owner one-time grant; outside it a structured owner question is
+   * recorded (never sent). Off by default; when off, behaviour is exactly
+   * slice 2 (loosening is rejected as `loosening-requires-holdout`).
+   * Requires `attentionTuningAutoAdopt`.
+   */
+  attentionLooseningEnabled?: boolean
+  /** Look-back of the holdout replay window frozen into each loosening proposal. */
+  attentionLooseningReplayWindowMs?: number
 }
 
 export const ASSISTANT_EVALUATION_SKILL = `# Personal assistant self-evaluation
@@ -169,6 +183,8 @@ const configSchema = Schema.object({
   attentionTuningRegressionMarginPpm: Schema.number().step(1).min(0).max(1_000_000).default(100_000),
   attentionTuningObservationMs: Schema.number().step(1).min(60_000).max(31_536_000_000).default(604_800_000),
   attentionTuningEvaluationWindowMs: Schema.number().step(1).min(60_000).max(31_536_000_000).default(604_800_000),
+  attentionLooseningEnabled: Schema.boolean().default(false),
+  attentionLooseningReplayWindowMs: Schema.number().step(1).min(3_600_000).max(31_536_000_000).default(2_592_000_000),
 }) as Schema<Config>
 
 export type AssistantEvaluationErrorCode =
@@ -493,6 +509,9 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     }
     if (this.config.attentionTuningAutoAdopt && !this.config.notificationOutcomesEnabled) {
       throw new Error('assistant-evaluation: attentionTuningAutoAdopt requires notificationOutcomesEnabled')
+    }
+    if (this.config.attentionLooseningEnabled && !this.config.attentionTuningAutoAdopt) {
+      throw new Error('assistant-evaluation: attentionLooseningEnabled requires attentionTuningAutoAdopt')
     }
     if (this.config.attentionTuningMuteRatePpm < this.config.attentionTuningNegativeRatePpm) {
       throw new Error('assistant-evaluation: attentionTuningMuteRatePpm must not be below attentionTuningNegativeRatePpm')
@@ -1191,6 +1210,10 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     })
   }
 
+  #looseningOptions(): AttentionLooseningOptions | undefined {
+    return this.config.attentionLooseningEnabled ? Object.freeze({ replayWindowMs: this.config.attentionLooseningReplayWindowMs }) : undefined
+  }
+
   #attentionCohort(input: unknown): AttentionCohort {
     let cohort: AttentionCohort
     try {
@@ -1208,13 +1231,19 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
    * WP22 slice 2 deterministic tuning tick: for every configured cohort and
    * every scope that has notifications in it, monitor an observing version
    * (exact-parent rollback on regression) or adopt one bounded tightening
-   * step. Zero work when `attentionTuningAutoAdopt` is off.
+   * step. With `attentionLooseningEnabled`, a pending sealed loosening
+   * proposal is decided first and tightening uses training data only.
+   * Zero work when `attentionTuningAutoAdopt` is off.
    */
   reconcileAttentionTuning(): readonly Readonly<{ scopeKey: string; cohort: AttentionCohort; result: AttentionTuningTickAction }>[] {
     this.assertActive()
     if (!this.config.attentionTuningAutoAdopt) return Object.freeze([])
     const policy = this.#attentionPolicy()
-    const options = { observationMs: this.config.attentionTuningObservationMs, evaluationWindowMs: this.config.attentionTuningEvaluationWindowMs }
+    const loosening = this.#looseningOptions()
+    const options = {
+      observationMs: this.config.attentionTuningObservationMs, evaluationWindowMs: this.config.attentionTuningEvaluationWindowMs,
+      ...(loosening === undefined ? {} : { loosening }),
+    }
     const results: { scopeKey: string; cohort: AttentionCohort; result: AttentionTuningTickAction }[] = []
     for (const cohort of this.attentionCohorts) {
       for (const scope of this.store.attention.scopes(cohort)) {
@@ -1243,8 +1272,10 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   }
 
   /**
-   * Host-internal explicit request. Loosening is never adopted in this slice:
-   * it is rejected as `loosening-requires-holdout` and recorded.
+   * Host-internal explicit request. Without `attentionLooseningEnabled`,
+   * loosening is rejected as `loosening-requires-holdout` and recorded; with
+   * it, a single-parameter loosening is sealed as a proposal for the next
+   * tick's holdout replay and grant check.
    */
   requestAttentionTuning(input: { scope: EvaluationScope; cohort: AttentionCohort; parameters: AttentionTuningParameters }): AttentionTuningRequestResult {
     this.assertActive()
@@ -1252,7 +1283,23 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       enabled: this.config.attentionTuningAutoAdopt,
       observationMs: this.config.attentionTuningObservationMs,
       evaluationWindowMs: this.config.attentionTuningEvaluationWindowMs,
+      ...(this.#looseningOptions() === undefined ? {} : { loosening: this.#looseningOptions()! }),
     })
+  }
+
+  /** Record an owner one-time loosening pre-authorization for one cohort. */
+  grantAttentionLoosening(input: { scope: EvaluationScope; cohort: AttentionCohort; grant: unknown }): AttentionLooseningGrantResult {
+    this.assertActive()
+    const cohort = this.#attentionCohort(input.cohort)
+    if (!this.config.attentionLooseningEnabled) return Object.freeze({ status: 'rejected', reason: 'loosening-disabled' })
+    return this.store.attention.grant(input.scope, cohort, input.grant)
+  }
+
+  /** Active grant with used/remaining quota, sealed proposals with decisions, and recorded owner questions. */
+  attentionLooseningStatus(input: { scope: EvaluationScope; cohort: AttentionCohort }): AttentionLooseningStatus & Readonly<{ enabled: boolean }> {
+    this.assertActive()
+    const status = this.store.attention.looseningStatus(input.scope, this.#attentionCohort(input.cohort))
+    return Object.freeze({ enabled: this.config.attentionLooseningEnabled, ...status })
   }
 
   limits(): EvaluationLimits {

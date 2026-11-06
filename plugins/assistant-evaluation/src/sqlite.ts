@@ -10,7 +10,7 @@ import {
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const evaluationSchemaVersion = 15
+export const evaluationSchemaVersion = 16
 
 export type EvaluationDatabaseErrorCode = 'invalid-path' | 'unsafe-file' | 'schema-too-new'
 
@@ -449,6 +449,91 @@ const attentionTuningSchema = `
     BEGIN SELECT RAISE(ABORT, 'attention tuning events are durable'); END;
 `
 
+/**
+ * WP22 slice 3 loosening canon, appended after schema 15. An owner grant is a
+ * one-time pre-authorization; a proposal seals only the holdout membership
+ * digest (never its outcomes); each proposal gets exactly one immutable
+ * decision; an out-of-grant pass records a structured owner question (not
+ * delivered in this slice). Grant usage is the count of adopted decisions
+ * naming the grant, so a later rollback never refunds quota.
+ */
+const attentionLooseningSchema = `
+  CREATE TABLE evaluation_attention_loosening_grants (
+    scope_key TEXT NOT NULL,
+    lane TEXT NOT NULL CHECK (length(lane) BETWEEN 1 AND 64),
+    source_id TEXT NOT NULL CHECK (length(source_id) BETWEEN 1 AND 256),
+    grant_id TEXT NOT NULL CHECK (length(grant_id) BETWEEN 1 AND 128),
+    grant_json TEXT NOT NULL CHECK (json_valid(grant_json)),
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    created_at INTEGER NOT NULL CHECK (created_at >= 0),
+    PRIMARY KEY (scope_key, lane, source_id, grant_id)
+  ) STRICT;
+  CREATE TRIGGER evaluation_attention_loosening_grants_immutable
+    BEFORE UPDATE ON evaluation_attention_loosening_grants
+    BEGIN SELECT RAISE(ABORT, 'attention loosening grants are immutable'); END;
+  CREATE TRIGGER evaluation_attention_loosening_grants_no_delete
+    BEFORE DELETE ON evaluation_attention_loosening_grants
+    BEGIN SELECT RAISE(ABORT, 'attention loosening grants are durable'); END;
+  CREATE TABLE evaluation_attention_loosening_proposals (
+    proposal_id TEXT PRIMARY KEY CHECK (length(proposal_id) = 64),
+    scope_key TEXT NOT NULL,
+    lane TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    parent_version INTEGER NOT NULL CHECK (parent_version >= 0),
+    proposal_json TEXT NOT NULL CHECK (json_valid(proposal_json)),
+    holdout_digest TEXT NOT NULL CHECK (length(holdout_digest) = 64),
+    created_at INTEGER NOT NULL CHECK (created_at >= 0)
+  ) STRICT;
+  CREATE INDEX evaluation_attention_loosening_proposals_cohort
+    ON evaluation_attention_loosening_proposals(scope_key, lane, source_id, created_at);
+  CREATE TRIGGER evaluation_attention_loosening_proposals_immutable
+    BEFORE UPDATE ON evaluation_attention_loosening_proposals
+    BEGIN SELECT RAISE(ABORT, 'attention loosening proposals are immutable'); END;
+  CREATE TRIGGER evaluation_attention_loosening_proposals_no_delete
+    BEFORE DELETE ON evaluation_attention_loosening_proposals
+    BEGIN SELECT RAISE(ABORT, 'attention loosening proposals are durable'); END;
+  CREATE TABLE evaluation_attention_loosening_decisions (
+    proposal_id TEXT PRIMARY KEY,
+    scope_key TEXT NOT NULL,
+    lane TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK (decision IN ('adopted','rejected','owner-question')),
+    reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 64),
+    grant_id TEXT,
+    version INTEGER,
+    replay_json TEXT NOT NULL CHECK (json_valid(replay_json)),
+    decided_at INTEGER NOT NULL CHECK (decided_at >= 0),
+    CHECK ((decision = 'adopted' AND grant_id IS NOT NULL AND version >= 1) OR (decision <> 'adopted' AND version IS NULL)),
+    FOREIGN KEY (proposal_id) REFERENCES evaluation_attention_loosening_proposals(proposal_id) ON DELETE RESTRICT
+  ) STRICT;
+  CREATE INDEX evaluation_attention_loosening_decisions_grant
+    ON evaluation_attention_loosening_decisions(scope_key, lane, source_id, grant_id, decision);
+  CREATE TRIGGER evaluation_attention_loosening_decisions_immutable
+    BEFORE UPDATE ON evaluation_attention_loosening_decisions
+    BEGIN SELECT RAISE(ABORT, 'attention loosening decisions are immutable'); END;
+  CREATE TRIGGER evaluation_attention_loosening_decisions_no_delete
+    BEFORE DELETE ON evaluation_attention_loosening_decisions
+    BEGIN SELECT RAISE(ABORT, 'attention loosening decisions are durable'); END;
+  CREATE TABLE evaluation_attention_owner_questions (
+    question_id TEXT PRIMARY KEY CHECK (length(question_id) = 64),
+    proposal_id TEXT NOT NULL UNIQUE,
+    scope_key TEXT NOT NULL,
+    lane TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    question_json TEXT NOT NULL CHECK (json_valid(question_json)),
+    created_at INTEGER NOT NULL CHECK (created_at >= 0),
+    FOREIGN KEY (proposal_id) REFERENCES evaluation_attention_loosening_proposals(proposal_id) ON DELETE RESTRICT
+  ) STRICT;
+  CREATE INDEX evaluation_attention_owner_questions_cohort
+    ON evaluation_attention_owner_questions(scope_key, lane, source_id, created_at);
+  CREATE TRIGGER evaluation_attention_owner_questions_immutable
+    BEFORE UPDATE ON evaluation_attention_owner_questions
+    BEGIN SELECT RAISE(ABORT, 'attention owner questions are immutable'); END;
+  CREATE TRIGGER evaluation_attention_owner_questions_no_delete
+    BEFORE DELETE ON evaluation_attention_owner_questions
+    BEGIN SELECT RAISE(ABORT, 'attention owner questions are durable'); END;
+`
+
 function migrate(database: DatabaseSync): void {
   const initial = schemaVersion(database)
   if (initial > evaluationSchemaVersion) {
@@ -830,6 +915,13 @@ function migrate(database: DatabaseSync): void {
         ${attentionTuningSchema}
         UPDATE evaluation_schema_meta SET value = '15' WHERE key = 'schema-version';
         PRAGMA user_version = 15;
+      `)
+    }
+    if (schemaVersion(database) === 15) {
+      database.exec(`
+        ${attentionLooseningSchema}
+        UPDATE evaluation_schema_meta SET value = '16' WHERE key = 'schema-version';
+        PRAGMA user_version = 16;
       `)
     }
     if (schemaVersion(database) !== evaluationSchemaVersion) {
