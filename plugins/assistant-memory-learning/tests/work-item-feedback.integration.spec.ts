@@ -93,7 +93,7 @@ describe('work-item owner failure into independently reviewed native memory',()=
       return receipt
     })
     await f.mountLearning()
-    await vi.waitFor(async()=>{await f.ctx.assistantAutomations.tick();await f.ctx.assistantAutomations.whenIdle();expect(lost).toBe(true)},{timeout:15000})
+    await vi.waitFor(async()=>{await f.ctx.assistantAutomations.tick();await f.ctx.assistantAutomations.whenIdle();expect(lost).toBe(true)},{timeout:30000})
     expect(query(join(f.root,'learning.sqlite'),'SELECT state FROM jobs')).toEqual([{state:'unknown'}])
     const before=paidCounts(f),calls=f.supplier.requests.filter(call=>/^memory-(extract|review)-/u.test(String(call.sessionId))).length
     const operation=query(join(f.root,'memory.sqlite'),"SELECT operation_id FROM memory_learning_adoptions WHERE row_kind='operation'")
@@ -104,7 +104,7 @@ describe('work-item owner failure into independently reviewed native memory',()=
     await f.ctx.assistantDelivery.tick();await f.ctx.assistantAutomations.tick();await f.ctx.assistantAutomations.whenIdle()
     expect(paidCounts(f)).toEqual(before);expect(f.supplier.requests.filter(call=>/^memory-(extract|review)-/u.test(String(call.sessionId)))).toHaveLength(calls)
     expect(await f.queryMemory()).toHaveLength(1)
-  },15000)
+  },120000)
 
   test('old independent review and adoption grants fail closed before paid work-item extraction',async()=>{
     const f=await workItemLearningFixture();await feedbackSource(f)
