@@ -2191,6 +2191,17 @@ describe('work-item admission authority revalidation', () => {
 
   describe('through a real assistant-delivery owner route', () => {
     const ownerScope = { authorityId: ROUTE, principalId: 'lark/bot-1/tenant-a/ou_owner', workspace: WORKSPACE, agentPreset: PRESET }
+    /** Every non-bound `bindWorkerRun` outcome logged for `itemId`, in order. */
+    function bindOutcomes(f: Awaited<ReturnType<typeof realDeliveryHarness>>, itemId: string): string[] {
+      const outcomes: string[] = []
+      const prefix = `acceptance worker-run bind for ${itemId}: `
+      f.ctx.logger.exporter({ levels: { default: 3 }, export: message => {
+        const text = String(message.args.join(' '))
+        const at = text.indexOf(prefix)
+        if (message.type === 'debug' && at !== -1) outcomes.push(text.slice(at + prefix.length))
+      } })
+      return outcomes
+    }
     /** Publish the worker contract frozen under the route's current real Delivery binding. */
     function publishUnderLiveRoute(f: Awaited<ReturnType<typeof realDeliveryHarness>>, peer: FakeVerifierPeer, occurrenceId: string) {
       const { binding, owner } = f.route()
@@ -2219,10 +2230,11 @@ describe('work-item admission authority revalidation', () => {
       expect(boundEvents(f, itemId)).toBe(1)
     })
 
-    test('a revoked owner never binds, and a later re-link cannot revive the admitted generation', async () => {
+    test('a revoked owner never binds, and a later re-link cannot revive the admitted owner route', async () => {
       const f = await realDeliveryHarness(bindWorkerRun())
       const peer = new FakeVerifierPeer(f.ctx)
       const { itemId, occurrenceId } = admitPlain(f, 'real-revoke')
+      const outcomes = bindOutcomes(f, itemId)
       const admitted = f.route()
       publishUnderLiveRoute(f, peer, occurrenceId)
       f.deliveryStore.revokePrincipal(admitted.owner.id, admitted.owner.version)
@@ -2232,6 +2244,7 @@ describe('work-item admission authority revalidation', () => {
       f.automations.wake()
       // `missing-binding` is deterministic: the pair is parked after one read.
       expect(f.automations.acceptanceReads).toEqual([occurrenceId])
+      expect(outcomes).toEqual(['owner-route-invalid'])
       expect(boundEvents(f, itemId)).toBe(0)
       // Re-link the owner: Delivery issues a strictly higher generation.
       f.deliveryStore.handoffOwner(f.principal)
@@ -2240,11 +2253,13 @@ describe('work-item admission authority revalidation', () => {
       expect(f.delivery.inspectOwnerRouteBinding(ownerScope).bindingId).toBe(relinked.id)
       f.automations.wake()
       expect(f.automations.acceptanceReads).toEqual([occurrenceId])
-      // Even with the in-memory park forgotten (a restart), the frozen generation
-      // is gone for good: the item is refused, never bound to the new binding.
+      // Even with the in-memory park forgotten (a restart), the admitted route is
+      // gone for good: the re-linked owner has a new principal version and binding
+      // generation, so the item is refused, never bound to the new binding.
       await f.restart()
       f.automations.wake()
       expect(f.automations.acceptanceReads).toEqual([occurrenceId, occurrenceId])
+      expect(outcomes).toEqual(['owner-route-invalid', 'owner-changed'])
       expect(boundEvents(f, itemId)).toBe(0)
       expect(peer.reads).toEqual([])
     })
@@ -2253,6 +2268,7 @@ describe('work-item admission authority revalidation', () => {
       const f = await realDeliveryHarness(bindWorkerRun())
       const peer = new FakeVerifierPeer(f.ctx)
       const { itemId, occurrenceId } = admitPlain(f, 'real-new')
+      const outcomes = bindOutcomes(f, itemId)
       const admitted = f.route()
       publishUnderLiveRoute(f, peer, occurrenceId)
       f.automations.acceptanceReads.splice(0)
@@ -2269,12 +2285,16 @@ describe('work-item admission authority revalidation', () => {
       f.automations.wake()
       spy.mockRestore()
       expect(rotated?.generation).toBeGreaterThan(admitted.binding!.generation)
+      // `/new` keeps the owner principal: only the binding generation moved.
+      expect(f.route().owner.version).toBe(admitted.owner.version)
+      expect(outcomes).toEqual(['owner-route-drift'])
       expect(boundEvents(f, itemId)).toBe(0)
       // `owner-route-drift` is not parked: the next wake reads again, now sees the
       // higher generation (`owner-changed`) and parks the pair for this occurrence.
       f.automations.wake()
       f.automations.wake()
       expect(f.automations.acceptanceReads).toEqual([occurrenceId, occurrenceId])
+      expect(outcomes).toEqual(['owner-route-drift', 'owner-changed'])
       expect(boundEvents(f, itemId)).toBe(0)
       expect(peer.reads).toEqual([])
     })
