@@ -120,7 +120,9 @@ export function OwnerConsoleConversation({ sessionId, renderFactorySlot, useSess
   const settling = shellPhase === 'blank' && session.openState === 'loading' && summaryBlank !== true
   const hero = shellPhase === 'blank' && (session.openState === 'open' || summaryBlank === true)
   const phase = settling ? 'settling' : hero ? 'hero' : 'active'
-  return renderFactorySlot('conversation.content', { variant: 'embedded', phase, hero: false }, {
+  // The hero layout is deliberately suppressed here; the sticky active composer layout is what
+  // remains usable without the workspace picker, so never hand the native surface a hero phase.
+  return renderFactorySlot('conversation.content', { variant: 'embedded', phase: hero ? 'active' : phase, hero: false }, {
     slots: { views: ChatConversationView },
     fallback: placeholder('原生对话组件未加载，可用右上角「原生会话」进入完整会话。'),
   })
@@ -140,17 +142,17 @@ function NativeToolbar({ voiceAvailable, listening, speakAvailable, speakReady, 
       'aria-label': voiceAvailable ? (listening ? '停止语音对话' : '语音对话') : '语音对话（当前浏览器不支持）',
       'aria-pressed': listening,
       title: voiceAvailable
-        ? '语音转写会写入原生草稿；识别由浏览器 SpeechRecognition 提供（浏览器侧处理，非 DSH 模型）'
+        ? '语音转写会写入原生草稿；识别由浏览器 SpeechRecognition 提供，音频可能发送给浏览器厂商的语音服务，不属于 DSH 权限模型或审计范围'
         : '当前浏览器未提供 SpeechRecognition，语音输入不可用；该功能由浏览器提供，不是 DSH 模型功能',
       disabled: !voiceAvailable, onClick: onVoice },
     listening ? '停止语音' : '语音对话'),
     el('button', { type: 'button', style: speakAvailable && speakReady ? smallButtonStyle : idle(smallButtonStyle, true),
       'aria-label': '朗读最近一条回复', title: speakAvailable
-        ? '用浏览器 SpeechSynthesis 朗读最近一条回复（浏览器功能，不是 DSH 模型）'
+        ? '用浏览器 SpeechSynthesis 朗读最近一条回复；远端语音可能把文本发送给浏览器厂商，不是 DSH 模型'
         : '当前浏览器未提供 SpeechSynthesis，朗读不可用',
       disabled: !speakAvailable || !speakReady, onClick: onSpeak }, '朗读'),
     el('span', { style: { ...hintStyle, fontSize: 11 } },
-      '语音转写只写入本会话的原生草稿；语音识别/合成由浏览器提供，不是 DSH 模型功能。'))
+      '语音转写只写入本会话的原生草稿；语音识别/合成由浏览器提供，音频或文本可能发送给浏览器厂商的语音服务，不是 DSH 模型功能。'))
 }
 
 /** Round 11 深海觉醒 whale mark used by the chat header. */
@@ -301,13 +303,13 @@ function Composer(props: ComposerProps) {
       'aria-label': props.voiceAvailable ? (props.listening ? '停止语音对话' : '语音对话') : '语音对话（当前浏览器不支持）',
       'aria-pressed': props.listening,
       title: props.voiceAvailable
-        ? '语音输入由浏览器 SpeechRecognition 提供（浏览器侧处理，非 DSH 模型）'
+        ? '语音输入由浏览器 SpeechRecognition 提供，音频可能发送给浏览器厂商的语音服务，不属于 DSH 权限模型或审计范围'
         : '当前浏览器未提供 SpeechRecognition，语音输入不可用；该功能由浏览器提供，不是 DSH 模型功能',
       disabled: !props.voiceAvailable || props.sending, onClick: props.onVoice },
     props.listening ? '停止语音' : '语音对话'),
     el('button', { type: 'button', style: props.speakAvailable && props.speakReady ? smallButtonStyle : idle(smallButtonStyle, true),
       'aria-label': '朗读最近一条回复', title: props.speakAvailable
-        ? '用浏览器 SpeechSynthesis 朗读最近一条回复（浏览器功能，不是 DSH 模型）'
+        ? '用浏览器 SpeechSynthesis 朗读最近一条回复；远端语音可能把文本发送给浏览器厂商，不是 DSH 模型'
         : '当前浏览器未提供 SpeechSynthesis，朗读不可用',
       disabled: !props.speakAvailable || !props.speakReady || props.sending, onClick: props.onSpeak }, '朗读'),
     el('span', { 'aria-hidden': true, style: { flex: '1 1 20px' } }),
@@ -316,7 +318,7 @@ function Composer(props: ComposerProps) {
     el('button', { type: 'submit', style: idle(primaryButtonStyle, blocked), disabled: blocked,
       'aria-label': props.sending ? '正在发送消息' : '发送消息' }, props.sending ? '发送中…' : '发送')),
   el('p', { style: { ...hintStyle, fontSize: 11 } },
-    '消息经由 DSH 会话发送；附件先上传到本会话。语音输入与朗读由浏览器提供（浏览器侧识别/合成），不是 DSH 模型功能。'))
+    '消息经由 DSH 会话发送；附件先上传到本会话。语音输入与朗读由浏览器提供，音频或文本可能发送给浏览器厂商的语音服务，不是 DSH 模型功能。'))
 }
 
 /** One-line textarea style: same input shell without the single-line padding assumptions. */
@@ -359,6 +361,7 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
     alive.current = true
     let disposed = false
     let reference: ChatReference | undefined
+    const controller = new AbortController()
     const sessions = runtime.sessions()
     if (sessions === undefined) {
       setState({ phase: 'unavailable' })
@@ -367,7 +370,7 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
     setState({ phase: 'preparing' })
     void (async () => {
       try {
-        reference = await openDedicatedChatSession(sessions, runtime.storage(), undefined, runtime.createSession)
+        reference = await openDedicatedChatSession(sessions, runtime.storage(), undefined, runtime.createSession, controller.signal)
         if (disposed) {
           reference.release()
           return
@@ -380,6 +383,9 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
     })()
     return () => {
       disposed = true
+      // Cancelling the acquisition stops the Host waiting on a hung open, so this panel
+      // cannot leak its retention after unmount.
+      controller.abort()
       reference?.release()
     }
   }, [runtime, attempt])
@@ -552,6 +558,8 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
     created.interimResults = true
     created.continuous = false
     created.onresult = event => {
+      // A late result from a stopped/replaced recognizer (or after unmount) must not touch the draft.
+      if (!alive.current || recognition.current !== created) return
       let finalText = ''
       for (let index = event.resultIndex; index < event.results.length; index += 1) {
         const result = event.results[index]
@@ -568,10 +576,14 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
       setDraft(previous => previous === '' ? finalText : `${previous} ${finalText}`)
     }
     created.onerror = event => {
+      if (!alive.current || recognition.current !== created) return
+      recognition.current = null
       setListening(false)
       setNotice({ tone: 'error', text: `语音识别失败：${event.error ?? '未知错误'}。语音识别由浏览器提供，不是 DSH 模型功能。` })
     }
     created.onend = () => {
+      // A stopped/replaced recognizer must not clear the instance that replaced it.
+      if (!alive.current || recognition.current !== created) return
       recognition.current = null
       setListening(false)
     }

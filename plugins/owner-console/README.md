@@ -47,6 +47,8 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
   通过 `conversation.input.for(actx).setDraft()` + `focus()` 写入**原生 composer 草稿**；
   「朗读」用浏览器 `SpeechSynthesis`。浏览器没有对应 API 时按钮禁用并在 tooltip 中说明。
   语音识别/合成由浏览器（或其服务商）完成，不是 DSH 模型；插件不录音、不保存音频。
+  **隐私边界**：常见浏览器会把麦克风音频或待朗读文本发送给浏览器厂商自己的语音服务，
+  这段链路不经过 DSH 的权限模型、策略与审计，也不受本插件控制。
 - **权限**：当前值读会话 `permissions` projection，可选目录读
   `ctx.get('remote.permissionPresets').catalog()`；切换只提交原生 `/permission <preset>` 命令，
   不直接写会话状态、不绕过 Policy。原生 composer 的权限 chip 在可用时是主入口；本插件自己的
@@ -184,7 +186,8 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
   projection，用来显示状态、降级文本和朗读；不读取其它会话、报告或记忆，也不上报内容。
   client bundle 只依赖宿主提供的 `react`（以及 `react/jsx-runtime`）与 Host 注入的客户端服务，
   不 import 其它 DSH 组件包；原生正文由 renderer 的 factory seat 渲染。
-- 语音识别/合成由浏览器完成；插件不录音、不保存音频，只把最终转写写进当前会话的原生草稿。
+- 语音识别/合成由浏览器完成，音频或文本可能发送给浏览器厂商的语音服务（不经过 DSH 权限模型与审计）；
+  插件不录音、不保存音频，只把最终转写写进当前会话的原生草稿。
 - 安装/移除仅由主人点击触发，走 DSH 官方安装路径；移除只对 Host 标记为 `removable` 且非本面板自身的
   bundle 显示，并需浏览器确认（无确认通道时给出可见提示并停止）；不改动未列出的条目；
   secret 明文不接受、不存储、不回显。
@@ -264,7 +267,8 @@ pnpm --dir plugins/owner-console build:assets
   ungrouped 会话，原生视图可能要求选择工作区。
 - **语音是浏览器能力**：「语音对话」/「朗读」分别依赖浏览器 `SpeechRecognition` /
   `SpeechSynthesis`；不可用时按钮禁用并在 tooltip 说明。识别/合成由浏览器（及其可能的服务商）
-  完成，不是 DSH 模型；插件不录音、不保存音频。真实麦克风与真人语音未验收；jsdom 用桩覆盖
+  完成，不是 DSH 模型；插件不录音、不保存音频。**常见浏览器会把音频或待朗读文本发给浏览器厂商的
+  语音服务，这段链路不经过 DSH 的权限模型与审计**；真实麦克风与真人语音未验收；jsdom 用桩覆盖
   降级与草稿写入，真实 Chrome 用注入的假识别器验证了「转写写入原生 Lexical 草稿」。
 - **语音写入原生草稿会替换/追加纯文本**：通过 `conversation.input.for(actx).setDraft()` 写入；
   当前已有引用 chip 时，`setDraft` 会把草稿变为纯文本（浏览器语音的固有边界）。原生输入服务

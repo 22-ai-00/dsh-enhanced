@@ -727,25 +727,31 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
           if (sessions === undefined) throw new Error('会话服务不可用')
           // A grouped Session can be opened in the native view without landing on a workspace
           // picker. The default Workspace is the only one the client API names; no catalog UI is
-          // shown here. Any failure falls back to the previous ungrouped creation path.
+          // shown here. Only the optional workspace lookup may fail soft; a Session creation
+          // failure must reach the panel's failed/retry state instead of creating a second one.
+          let workspaceId: string | undefined
           try {
             const workspaces = ctx.get<{
               initializeDefault(signal?: AbortSignal): Promise<Readonly<{ workspaceId?: string }> | undefined>
             }>('workspaces')
-            const workspace = await workspaces?.initializeDefault()
-            const workspaceId = workspace?.workspaceId
-            if (workspaceId !== undefined && workspaceId !== '') {
-              if (typeof sessions.connectWorkspace === 'function') {
-                return await sessions.connectWorkspace(workspaceId)
-              }
-              return await sessions.create({ workspaceId })
-            }
+            workspaceId = (await workspaces?.initializeDefault())?.workspaceId
           } catch {
             // The default Workspace is optional; fall through to the Host default cwd.
           }
-          return await sessions.create()
+          if (workspaceId === undefined || workspaceId === '') return await sessions.create()
+          // uiWorkspace is the native path that reuses a blank and dedupes concurrent connects;
+          // sessions.create({ workspaceId }) stays as the fallback when that seat is absent.
+          try {
+            const workspace = ctx.get<{ connectWorkspace?(id: string): Promise<string> }>('uiWorkspace')
+            if (typeof workspace?.connectWorkspace === 'function') return await workspace.connectWorkspace(workspaceId)
+          } catch {
+            // Unknown workspace or absent seat: create the grouped Session directly.
+          }
+          return await sessions.create({ workspaceId })
         },
         insertDraft: (reference, text) => {
+          // Without the binding's own agent context the facade could resolve another conversation.
+          if (reference.binding.ctx === undefined) return false
           try {
             const conversation = ctx.get<{
               input?: {
@@ -758,7 +764,9 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
             }>('conversation')
             const facade = conversation?.input?.for(reference.binding.ctx)
             if (facade === undefined) return false
-            const draft = typeof facade.state?.getSnapshot === 'function' ? facade.state.getSnapshot().draft ?? '' : ''
+            // Without a readable draft there is no safe append: a blind setDraft would wipe it.
+            if (typeof facade.state?.getSnapshot !== 'function') return false
+            const draft = facade.state.getSnapshot().draft ?? ''
             facade.setDraft(draft === '' ? text : `${draft} ${text}`)
             facade.focus?.()
             return true

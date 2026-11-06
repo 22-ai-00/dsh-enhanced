@@ -32,10 +32,11 @@ const binding = (): ChatBinding => ({
 function fakeSessions(bind: ChatBinding, ready: Promise<ChatBinding> = Promise.resolve(bind)) {
   const create = vi.fn(async () => 's1')
   const references: ChatReference[] = []
-  const retain = vi.fn((_id: string, _options: Readonly<{ source: string }>) => {
+  const retain = vi.fn((_id: string, _options: Readonly<{ source: string; signal?: AbortSignal }>) => {
     // Only the first acquisition sees the supplied readiness; a replacement after a stale
     // generation must be able to open normally.
-    const reference: ChatReference = { binding: bind, ready: references.length === 0 ? ready : Promise.resolve(bind), release: vi.fn() }
+    const reference: ChatReference = { sessionId: _id, binding: bind,
+      ready: references.length === 0 ? ready : Promise.resolve(bind), release: vi.fn() }
     references.push(reference)
     return reference
   })
@@ -47,9 +48,12 @@ const user = (seq: number, text: string): ChatEntry => ({ type: 'event', event: 
 const assistant = (seq: number, text: string): ChatEntry => ({ type: 'event', event: {
   type: 'assistant/message', seq, data: { message: { content: [{ type: 'text', text }] } } } })
 const toolCall = (seq: number, callId: string, name: string): ChatEntry => ({ type: 'event', event: {
-  type: 'tool/call', seq, data: { callId, name } } })
+  type: 'tool/call', seq, data: { turn: 1, step: 1, callId, name, arguments: '{}' } } })
+/** Real `tool/result` data: no top-level call id; identity rides on the tool-role message. */
 const toolResult = (seq: number, callId: string, isError = false): ChatEntry => ({ type: 'event', event: {
-  type: 'tool/result', seq, data: { callId, message: { isError } } } })
+  type: 'tool/result', seq, data: { turn: 1, step: 1, message: {
+    role: 'tool', content: [{ type: 'text', text: 'done' }],
+    source: { kind: 'tool', callId }, toolCallId: callId, isError } } } })
 
 describe('owner console chat transcript', () => {
   it('projects only human prompts and assistant text, plus compact tool and error rows', () => {
@@ -67,11 +71,25 @@ describe('owner console chat transcript', () => {
     ]
     const rows = chatMessages(entries)
     expect(rows.map(row => row.kind)).toEqual(['user', 'assistant', 'tool', 'tool', 'error'])
+    expect(rows.filter(row => row.kind === 'tool')).toHaveLength(2)
     expect(rows[0]).toMatchObject({ kind: 'user', text: '帮我整理一下' })
     expect(rows[1]).toMatchObject({ kind: 'assistant', text: '好的，我先看看。' })
+    // Each result settles the preceding call row rather than appending a new tool row.
     expect(rows[2]).toMatchObject({ kind: 'tool', name: 'fs_read', status: 'ok' })
     expect(rows[3]).toMatchObject({ kind: 'tool', name: 'shell', status: 'error' })
     expect(rows[4]).toMatchObject({ kind: 'error', text: 'provider/error：supplier failed' })
+  })
+
+  it('pairs a tool result through message.toolCallId and keeps an unpaired result explicit', () => {
+    const rows = chatMessages([
+      toolCall(1, 'call-1', 'fs_read'),
+      { type: 'event', event: { type: 'tool/result', seq: 2, data: { turn: 1, step: 1, message: {
+        role: 'tool', source: { kind: 'tool' }, toolCallId: 'call-1', isError: false } } } },
+      { type: 'event', event: { type: 'tool/result', seq: 3, data: { turn: 1, step: 1, message: {
+        role: 'tool', source: { kind: 'tool', callId: 'call-lost' }, isError: true } } } },
+    ])
+    expect(rows[0]).toMatchObject({ kind: 'tool', name: 'fs_read', status: 'ok' })
+    expect(rows[1]).toMatchObject({ kind: 'tool', name: 'tool', status: 'error' })
   })
 
   it('names attachments instead of inventing their content and bounds the transcript window', () => {
@@ -139,6 +157,57 @@ describe('owner console chat session handling', () => {
     expect(stale.retain.mock.calls[0]?.[0]).toBe('old')
     expect(stale.retain.mock.calls[1]?.[0]).toBe('s1')
     expect(storage.value).toBe('s1')
+  })
+
+  it('cancels a hung open, releases its reference, and keeps the stored session id', async () => {
+    const bind = binding()
+    const controller = new AbortController()
+    const release = vi.fn()
+    const retain = vi.fn((_id: string, options: Readonly<{ source: string; signal?: AbortSignal }>) => {
+      // The real retain waiter rejects its `ready` when the acquisition signal aborts.
+      const ready = new Promise<ChatBinding>((_resolve, reject) => {
+        options.signal?.addEventListener('abort', () => reject(options.signal?.reason))
+      })
+      return { sessionId: _id, binding: bind, ready, release } as ChatReference
+    })
+    const create = vi.fn(async () => 's1')
+    const storage = (() => {
+      let value: string | undefined = 'old'
+      return { getItem: () => value ?? null, setItem: (_key: string, next: string) => { value = next },
+        removeItem: () => { value = undefined }, value: () => value }
+    })()
+    const opening = openDedicatedChatSession({ create, retain }, storage, undefined, undefined, controller.signal)
+    controller.abort(new Error('unmounted'))
+    await expect(opening).rejects.toThrow('unmounted')
+    expect(retain).toHaveBeenCalledWith('old', expect.objectContaining({ signal: controller.signal }))
+    expect(release).toHaveBeenCalledOnce()
+    expect(create).not.toHaveBeenCalled()
+    expect(storage.value()).toBe('old')
+  })
+
+  it('replaces a stored session whose ready resolves with a failed open state', async () => {
+    const bind = binding()
+    const broken: ChatBinding = {
+      ...bind,
+      session: { ...bind.session, getSnapshot: () => ({ openState: 'error', removed: false }) },
+    }
+    const good = fakeSessions(bind)
+    // The stored generation opens (ready resolves) but its history is in the error state.
+    const retain = vi.fn((_id: string, _options: Readonly<{ source: string; signal?: AbortSignal }>) => {
+      const reference: ChatReference = { sessionId: _id, binding: retain.mock.calls.length === 1 ? broken : bind,
+        ready: Promise.resolve(retain.mock.calls.length === 1 ? broken : bind), release: vi.fn() }
+      return reference
+    })
+    const sessions: ChatSessions = { create: good.create, retain }
+    const storage = (() => {
+      let value: string | undefined = 'old'
+      return { getItem: () => value ?? null, setItem: (_key: string, next: string) => { value = next },
+        removeItem: () => { value = undefined }, value: () => value }
+    })()
+    const reference = await openDedicatedChatSession(sessions, storage)
+    expect(reference.binding).toBe(bind)
+    expect(retain.mock.calls.map(call => call[0])).toEqual(['old', 's1'])
+    expect(storage.value()).toBe('s1')
   })
 })
 

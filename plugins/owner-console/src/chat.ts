@@ -62,13 +62,21 @@ export type DurableChatEvent = Readonly<{
   seq: number
   time?: number
   data?: Readonly<{
+    turn?: number
+    step?: number
     message?: Readonly<{
+      role?: string
       content?: readonly ChatContentBlock[]
-      source?: Readonly<{ kind?: string }>
+      /** Tool results carry their paired call id here (`source.callId`); calls use `data.callId`. */
+      source?: Readonly<{ kind?: string; callId?: string }>
+      /** Provider-issued tool-call id on a `tool/result` message, mirroring `source.callId`. */
+      toolCallId?: string
       isError?: boolean
     }>
     callId?: string
     name?: string
+    /** Raw JSON argument string on `tool/call`. */
+    arguments?: string
     reason?: Readonly<{ kind?: string; error?: Readonly<{ code?: string; message?: string }> }>
   }>
 }>
@@ -95,6 +103,8 @@ export type ChatMessage =
 
 /** One retained Session generation and the release path that ends this panel's use. */
 export type ChatReference = Readonly<{
+  /** Exact Session generation this reference retains; required by the native Session Provider. */
+  sessionId: string
   /** Live binding for the retained generation (history opens through `ready`). */
   binding: ChatBinding
   ready: Promise<ChatBinding>
@@ -112,8 +122,7 @@ export type ChatBinding = Readonly<{
 /** Native Session controller face used by the panel (create + retain). */
 export type ChatSessions = Readonly<{
   create(options?: Readonly<{ workspaceId?: string; cwd?: string; agentPreset?: string }>): Promise<string>
-  retain(id: string, options: Readonly<{ source: string; signal?: AbortSignal }>): ChatReference
-  connectWorkspace?(workspaceId: string, options?: Readonly<{ agentPreset?: string }>): Promise<string>
+  retain(id: string, options: Readonly<{ source: string; signal?: AbortSignal | undefined }>): ChatReference
 }>
 
 /** Host staged-upload service: prompt files and images are uploaded before they are cited. */
@@ -270,17 +279,20 @@ export function chatMessages(entries: readonly ChatEntry[] | undefined): readonl
         break
       }
       case 'tool/result': {
-        const callId = event.data?.callId
+        // The result event's own data has no call id or name: the identity lives on the
+        // model-facing message (`source.callId`, and `toolCallId` for the same value).
+        const message = event.data?.message
+        const callId = message?.source?.callId ?? message?.toolCallId
+        const status = message?.isError === true ? 'error' : 'ok'
         const index = callId === undefined ? undefined : tools.get(callId)
-        if (index === undefined) {
-          const name = event.data?.name === undefined || event.data.name === '' ? 'tool' : event.data.name
-          messages.push({ kind: 'tool', key: `tool:${seq}`, seq, name, status: event.data?.message?.isError === true ? 'error' : 'ok' })
+        const previous = index === undefined ? undefined : messages[index]
+        if (previous?.kind === 'tool' && index !== undefined) {
+          // Pair with its `tool/call` row: keep that row's name and settle its status.
+          messages[index] = { ...previous, status }
           break
         }
-        const previous = messages[index]
-        if (previous?.kind === 'tool') {
-          messages[index] = { ...previous, status: event.data?.message?.isError === true ? 'error' : 'ok' }
-        }
+        // No paired call in the window (e.g. it aged out); keep the result visible without inventing a name.
+        messages.push({ kind: 'tool', key: `tool:${seq}`, seq, name: 'tool', status })
         break
       }
       case 'turn/end': {
@@ -344,43 +356,84 @@ export function forgetChatSession(storage: ChatStorage | undefined): void {
   }
 }
 
+/** A retained Session whose history failed to open must be replaced, not shown as ready. */
+function chatOpenFailed(reference: ChatReference): boolean {
+  try {
+    const snapshot = reference.binding.session.getSnapshot()
+    return snapshot.openState === 'error' || snapshot.removed === true
+  } catch {
+    return true
+  }
+}
+
+/** Abort reason for a cancelled acquisition; falls back when the caller gave the signal no reason. */
+function abortReason(signal: AbortSignal | undefined): unknown {
+  return signal?.reason ?? new Error('会话打开已取消。')
+}
+
+/** Read `aborted` through a call so control-flow narrowing is not retained across the awaits. */
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true
+}
+
 /**
  * Open the dedicated chat Session: reuse the stored one when it is still openable, otherwise
- * create one through the native Session controller and remember it. The caller owns the
- * returned reference and must release it when the chat surface unmounts.
+ * create one through the native Session controller and remember it. `ready` resolves even when
+ * the Host failed to open the retained history (`openState: 'error'`), so the snapshot decides.
+ * `signal` cancels the acquisition itself (the Host also stops waiting through `retain`), so an
+ * unmounted chat surface cannot keep a hung open retained. The caller owns the returned reference
+ * and must release it when the chat surface unmounts.
  */
 export async function openDedicatedChatSession(
   sessions: ChatSessions,
   storage: ChatStorage | undefined,
   source: string = CHAT_REFERENCE_SOURCE,
   create: (() => Promise<string>) | undefined = undefined,
+  signal?: AbortSignal,
 ): Promise<ChatReference> {
   const stored = storedChatSession(storage)
   if (stored !== undefined) {
+    let reference: ChatReference | undefined
     try {
-      const reference = sessions.retain(stored, { source })
-      try {
-        await reference.ready
+      reference = sessions.retain(stored, { source, signal })
+      await reference.ready
+      if (!chatOpenFailed(reference)) {
+        if (isAborted(signal)) throw abortReason(signal)
         return reference
-      } catch (error) {
-        reference.release()
-        throw error
       }
     } catch {
-      forgetChatSession(storage)
+      // A stale generation or a failed open both fall through to a fresh Session.
     }
+    if (isAborted(signal)) {
+      // Cancellation is not a stale generation: keep the stored id for the next attempt.
+      reference?.release()
+      throw abortReason(signal)
+    }
+    reference?.release()
+    forgetChatSession(storage)
   }
   const sessionId = create === undefined ? await sessions.create() : await create()
-  rememberChatSession(storage, sessionId)
-  const reference = sessions.retain(sessionId, { source })
+  if (isAborted(signal)) throw abortReason(signal)
+  const reference = sessions.retain(sessionId, { source, signal })
   try {
     await reference.ready
-    return reference
   } catch (error) {
     reference.release()
     forgetChatSession(storage)
-    throw error
+    throw isAborted(signal) ? abortReason(signal) : error
   }
+  if (isAborted(signal)) {
+    reference.release()
+    forgetChatSession(storage)
+    throw abortReason(signal)
+  }
+  if (chatOpenFailed(reference)) {
+    reference.release()
+    forgetChatSession(storage)
+    throw new Error('新建的会话无法打开，请重试。')
+  }
+  rememberChatSession(storage, sessionId)
+  return reference
 }
 
 /** Supported prompt-image media types; other blobs travel as ordinary files. */

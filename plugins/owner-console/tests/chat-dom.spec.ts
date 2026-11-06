@@ -82,7 +82,7 @@ function harness(overrides: Partial<ChatRuntime> = {}, entries: readonly ChatEnt
     removeItem: () => { storage.value = undefined } }
   const uploads: ChatUploads = { upload, uploadImage }
   const runtime: ChatRuntime = {
-    sessions: () => ({ create, retain: vi.fn(() => ({ binding, ready: Promise.resolve(binding), release })) }),
+    sessions: () => ({ create, retain: vi.fn(() => ({ sessionId: 's1', binding, ready: Promise.resolve(binding), release })) }),
     fileUploads: () => uploads,
     permissionCatalog: () => Promise.resolve({ ok: true, value: CATALOG }),
     openNativeSession: vi.fn(() => true),
@@ -320,8 +320,9 @@ describe('文鳐 native Conversation embedding', () => {
     })
 
     await render(createElement(OwnerConsoleConversation as never, seat({ blank: true, openState: 'open' }, true)))
+    // The hero layout is suppressed, so the native surface gets the sticky active phase instead.
     expect(renderFactorySlot).toHaveBeenLastCalledWith('conversation.content',
-      { variant: 'embedded', phase: 'hero', hero: false }, expect.objectContaining({ slots: expect.any(Object) }))
+      { variant: 'embedded', phase: 'active', hero: false }, expect.objectContaining({ slots: expect.any(Object) }))
     const options = renderFactorySlot.mock.calls.at(-1)?.[2] as unknown as { slots: { views: (props: unknown) => unknown } }
     options.slots.views({ renderSlot })
     expect(renderSlot).toHaveBeenCalledWith('conversation.session', { view: 'chat' })
