@@ -221,8 +221,11 @@ describe('active Automations readiness read', () => {
     f.store.close()
     const database = new DatabaseSync(f.path)
     database.exec('PRAGMA journal_mode=DELETE')
-    database.exec('PRAGMA user_version = 14')
     database.close()
+    for (const version of [15, 16, 14]) {
+      const set = new DatabaseSync(f.path); set.exec(`PRAGMA user_version = ${version}`); set.close()
+      if (version !== 14) expect(listActiveAutomationsForReadiness(f.path).map(record => record.id)).toEqual(['bad'])
+    }
     expectCode(() => listActiveAutomationsForReadiness(f.path), 'schema-unsupported')
     const repair = new DatabaseSync(f.path)
     repair.exec('PRAGMA user_version = 17')

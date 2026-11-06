@@ -1447,7 +1447,11 @@ export function listActiveAutomationsForReadiness(databasePath: string): Automat
     const queryOnly = (database.prepare('PRAGMA query_only').get() as { query_only?: unknown }).query_only
     if (queryOnly !== 1) fail('database-unavailable', 'read-only guard was not enabled')
     const version = (database.prepare('PRAGMA user_version').get() as { user_version?: unknown }).user_version
-    if (version !== automationSchemaVersion) fail('schema-unsupported', `expected schema ${automationSchemaVersion}`)
+    // Readiness also reads the still-running original program's store during an owner update;
+    // automation_definitions is unchanged from schema 15 (16/17 only add tables, triggers and a runs column).
+    if (version !== automationSchemaVersion && version !== 15 && version !== 16) {
+      fail('schema-unsupported', 'expected schema 15, 16 or 17')
+    }
     const rows = database.prepare(`
       SELECT id, system_owner, definition_hash, definition_json, status, next_run_at,
         created_at, updated_at, version, 0 AS running_task_count
