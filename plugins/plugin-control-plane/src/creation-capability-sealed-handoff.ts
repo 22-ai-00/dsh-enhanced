@@ -473,6 +473,70 @@ function readArchive<T>(file: string, proof: SealedAdoptionProof, action: (db: D
   } finally { db?.close(); closeSync(fd) }
 }
 
+/** The journal's immutable sealed proof, bound to the caller's signed proof digest and re-validated against
+ * its plan, archive, next authority, inherited usage and the journal's own file identity. */
+function anchoredProof(db: DatabaseSync, file: string, expectedProofDigest: string): SealedAdoptionProof {
+  schema(db, true)
+  const audit = readSealedAdoptionAudit(db)
+  if (!audit) fail('missing immutable proof')
+  const stored = audit.proof as unknown as SealedAdoptionProof
+  if (stored.digest !== expectedProofDigest) fail('external proof anchor mismatch')
+  exact(stored, SEALED_PROOF_KEYS)
+  exact(stored.fileIdentity, FILE_KEYS)
+  exact(stored.archive, ['logicalPath','fileIdentity','bytes','digest','mode'])
+  exact(stored.archive.fileIdentity, FILE_KEYS)
+  validatePlan(stored.plan)
+  if (stored.archive.logicalPath !== stored.plan.archive.logicalPath || stored.archive.bytes !== stored.plan.snapshot.bytes
+    || stored.archive.digest !== stored.plan.snapshot.digest || stored.archive.mode !== 0o400) fail('proof mismatch')
+  authority(db, stored.plan.nextIdentity)
+  if (encode(sealedAdoptionInheritedUsage(db, stored.plan.nextIdentity.authorityDigest)) !== encode(stored.plan.inheritedUsage)) fail('proof mismatch')
+  if (encode(identity(file)) !== encode(stored.fileIdentity)) fail('journal file identity mismatch')
+  return structuredClone(stored)
+}
+
+/** Comparison form of a plan id. Plan ids are ASCII (`ID`), so case folding is the only aliasing: SQLite
+ * compares them exactly, but two ids differing only in case would still read as the same tool name. */
+function planIdNameForm(planId: string): string {
+  return planId.toLowerCase()
+}
+
+/** Proof that a new replay plan id is isolated from the sealed handoff's history. */
+export interface SealedReplayPlanIdIsolation {
+  protocol: 'dsh-sealed-replay-plan-id-isolation/v1'
+  planId: string
+  proofDigest: string
+  sealedRows: number
+}
+
+/** S2 naming isolation for sealed tool replay (check and refuse only; nothing adopts with it yet).
+ *
+ * A replayed sealed tool must return under a NEW plan id. Bound to the caller's signed proof digest, this
+ * refuses `planId` when it names any sealed history row (every status, not only pending reverification),
+ * equals one ignoring case, or already names a row of the live journal under the next authority.
+ * It reads the journal only and grants nothing: passing it is necessary for a replay plan, never sufficient. */
+export function assertSealedReplayPlanIdIsolated(input: { physicalPath: string; expectedProofDigest: string;
+  planId: string }): Readonly<SealedReplayPlanIdIsolation> {
+  const file = input?.physicalPath, planId = input?.planId
+  if (typeof input?.expectedProofDigest !== 'string' || !SHA.test(input.expectedProofDigest)) fail('invalid expected proof digest')
+  if (typeof planId !== 'string' || !ID.test(planId)) fail('invalid plan id')
+  return readJournal(file, db => {
+    const proof = anchoredProof(db, file, input.expectedProofDigest)
+    const form = planIdNameForm(planId)
+    for (const row of proof.plan.history.rows) {
+      if (typeof row?.planId !== 'string') fail('invalid sealed row')
+      if (row.planId === planId) fail('plan id names a sealed row')
+      if (planIdNameForm(row.planId) === form) fail('plan id collides with a sealed row')
+    }
+    for (const row of proof.plan.pendingReverification) {
+      if (typeof row?.planId !== 'string' || planIdNameForm(row.planId) === form) fail('plan id collides with a sealed row')
+    }
+    const live = db.prepare('SELECT CAST(plan_id AS BLOB) AS plan_id FROM adoptions').all()
+    if (live.some(row => planIdNameForm(text(row.plan_id)) === form)) fail('plan id already names a live adoption')
+    return freeze({ protocol: 'dsh-sealed-replay-plan-id-isolation/v1' as const, planId, proofDigest: proof.digest,
+      sealedRows: proof.plan.history.rows.length })
+  })
+}
+
 /** Read-only provenance reader for re-verifying one sealed `pendingReverification` tool. It binds the live
  * or stopped journal's immutable proof to the caller's signed proof digest, reads the exact sealed 0400
  * archive under the OLD authority and returns only candidate source files. It grants nothing: no
@@ -482,24 +546,7 @@ export function readSealedReverificationSource(input: { physicalPath: string; ex
   const file = input?.physicalPath, planId = input?.planId
   if (typeof input?.expectedProofDigest !== 'string' || !SHA.test(input.expectedProofDigest)) fail('invalid expected proof digest')
   if (typeof planId !== 'string' || !ID.test(planId)) fail('invalid plan id')
-  const proof = readJournal(file, db => {
-    schema(db, true)
-    const audit = readSealedAdoptionAudit(db)
-    if (!audit) fail('missing immutable proof')
-    const stored = audit.proof as unknown as SealedAdoptionProof
-    if (stored.digest !== input.expectedProofDigest) fail('external proof anchor mismatch')
-    exact(stored, SEALED_PROOF_KEYS)
-    exact(stored.fileIdentity, FILE_KEYS)
-    exact(stored.archive, ['logicalPath','fileIdentity','bytes','digest','mode'])
-    exact(stored.archive.fileIdentity, FILE_KEYS)
-    validatePlan(stored.plan)
-    if (stored.archive.logicalPath !== stored.plan.archive.logicalPath || stored.archive.bytes !== stored.plan.snapshot.bytes
-      || stored.archive.digest !== stored.plan.snapshot.digest || stored.archive.mode !== 0o400) fail('proof mismatch')
-    authority(db, stored.plan.nextIdentity)
-    if (encode(sealedAdoptionInheritedUsage(db, stored.plan.nextIdentity.authorityDigest)) !== encode(stored.plan.inheritedUsage)) fail('proof mismatch')
-    if (encode(identity(file)) !== encode(stored.fileIdentity)) fail('journal file identity mismatch')
-    return structuredClone(stored)
-  })
+  const proof = readJournal(file, db => anchoredProof(db, file, input.expectedProofDigest))
   const pending = proof.plan.pendingReverification.find(row => row?.planId === planId)
   if (!pending) fail('plan is not pending reverification')
   const row = proof.plan.history.rows.find(row => row?.planId === planId)

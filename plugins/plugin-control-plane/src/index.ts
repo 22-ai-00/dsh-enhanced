@@ -85,6 +85,6 @@ export * from './host-maintenance.js'
 export { planEmptyAdoptionHandoff, applyEmptyAdoptionHandoff, verifyEmptyAdoptionHandoff } from './creation-capability-empty-handoff.js'
 export type { EmptyAdoptionScope, EmptyAdoptionPlan, EmptyAdoptionProof } from './creation-capability-empty-handoff.js'
 export { planSealedAdoptionHandoff, applySealedAdoptionHandoff, verifySealedAdoptionHandoff,
-  readSealedAdoptionHandoffDigest, readSealedReverificationSource } from './creation-capability-sealed-handoff.js'
+  readSealedAdoptionHandoffDigest, readSealedReverificationSource, assertSealedReplayPlanIdIsolated } from './creation-capability-sealed-handoff.js'
 export type { SealedAdoptionScope, SealedAdoptionPlan, SealedAdoptionProof, SealedAdoptionHistory, SealedAdoptionRow,
-  SealedPendingReverification, SealedReverificationSource } from './creation-capability-sealed-handoff.js'
+  SealedPendingReverification, SealedReverificationSource, SealedReplayPlanIdIsolation } from './creation-capability-sealed-handoff.js'
