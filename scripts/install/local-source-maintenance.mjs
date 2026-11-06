@@ -112,7 +112,11 @@ export async function bindLocalSourceInstaller(root) {
   const visit = async path => {
     if (entries.length > 250_000) fail('installer module tree exceeds entry bound')
     const item = await lstat(path)
-    if (item.uid !== process.getuid() || !item.isSymbolicLink() && (item.mode & 0o022)) fail(`unsafe installer module entry: ${path}`)
+    if (item.uid !== process.getuid()) fail(`unsafe installer module entry: ${path}`)
+    // A umask 002 checkout is common on Linux; name the one-line repair.
+    if (!item.isSymbolicLink() && (item.mode & 0o022)) {
+      fail(`unsafe installer module entry: ${path} is group/other-writable; run: chmod -R go-w ${root}`)
+    }
     const locator = relative(root, path)
     if (item.isSymbolicLink()) {
       const text = await readlink(path)
