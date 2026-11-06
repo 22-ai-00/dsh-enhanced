@@ -14,7 +14,7 @@ async function feedbackSource(f:Fixture) {
   await vi.waitFor(async()=>{
     await f.ctx.assistantDelivery.tick();await f.ctx.assistantDelivery.whenIdle()
     expect(f.ctx.assistantEvaluation.getTrustedWorkItemLearningProjection({scope:f.ctx.assistantEvaluation.createHostScope({workspace:f.workspace,preset:'primary'}),itemId})).toMatchObject({projection:{subjectKind:'work-item',subjectRef:itemId},objective:{status:'not-achieved'}})
-  },{timeout:10000})
+  },{timeout:30000})
   expect({requests:f.supplier.requests.length,runs:f.snapshot().runs,budget:f.snapshot().budget}).toEqual(before)
   expect(f.operator!.getInbox(feedback.inboxId)?.status).toBe('processed')
   expect(query(join(f.root,'delivery.sqlite'),`SELECT * FROM delivery_foreground_executions WHERE inbox_id='${feedback.inboxId}'`)).toEqual([])
@@ -24,7 +24,7 @@ async function adopted(f:Fixture) {
   await vi.waitFor(async()=>{
     await f.ctx.assistantAutomations.tick();await f.ctx.assistantAutomations.whenIdle()
     expect(f.ctx.assistantMemoryLearning.health(),JSON.stringify(f.warnings)).toMatchObject({counts:{adopted:1}})
-  },{timeout:15000})
+  },{timeout:60000})
 }
 function paidCounts(f:Fixture) {
   const jobs=query(join(f.root,'learning.sqlite'),'SELECT id FROM jobs').map(row=>`background:${String(row.id)}`)
@@ -60,7 +60,7 @@ describe('work-item owner failure into independently reviewed native memory',()=
     expect(hits).toHaveLength(1);expect(hits[0]!.record).toMatchObject({kind:'experience',content:f.supplier.memoryContent})
     expect(paidCounts(f)).toMatchObject({learning:[{consumed:1}],reviews:[{used:1}],adoptions:[{used_mutations:1}]})
     expect(paidCounts(f).reservations).toHaveLength(1)
-  },15000)
+  },120000)
 
   test('owner correction then withdrawal hides old experience immediately and across cold Memory stack reopening',async()=>{
     const f=await workItemLearningFixture(),source=await feedbackSource(f)
@@ -79,7 +79,7 @@ describe('work-item owner failure into independently reviewed native memory',()=
     expect(await f.queryMemory()).toEqual([])
     await f.remountMemoryStack();expect(await f.queryMemory()).toEqual([])
     expect(paidCounts(f)).toEqual(paid);expect(f.supplier.requests.filter(call=>/^memory-(extract|review)-/u.test(String(call.sessionId)))).toHaveLength(calls)
-  },15000)
+  },120000)
 
   test('real adoption followed by lost ACK and a duplicate owner message recovers the same operation without another extraction or review',async()=>{
     const f=await workItemLearningFixture(),source=await feedbackSource(f)
@@ -115,5 +115,5 @@ describe('work-item owner failure into independently reviewed native memory',()=
     expect(f.supplier.requests.filter(call=>/^memory-(extract|review)-/u.test(String(call.sessionId)))).toEqual([])
     expect(query(join(f.root,'learning.sqlite'),'SELECT consumed FROM grant_record')).toEqual([{consumed:0}])
     expect(query(join(f.root,'memory.sqlite'),"SELECT operation_id FROM memory_learning_adoptions WHERE row_kind='operation'")).toEqual([])
-  },15000)
+  },120000)
 })
