@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { TYPERT_REMOTE } from '../src/typert.ts'
-import { apply, feishuSecretRefs, intakeAgreementView, larkConnectionLabel, trendSnapshotsView } from '../src/client.ts'
+import { apply, feishuSecretRefs, installWithApproval, intakeAgreementView, larkConnectionLabel, trendSnapshotsView } from '../src/client.ts'
 import type { OwnerConsoleIntakeAgreement, OwnerConsoleTrendSnapshots } from '../src/typert.ts'
 
 type Node = { type?: unknown, props?: Record<string, unknown> & { children?: unknown } }
@@ -58,6 +58,37 @@ describe('owner console client', () => {
       .toEqual({ appSecretEnv: 'LARK_APP_SECRET', credentialHandle: '' })
     expect(feishuSecretRefs('handle', 'ignored-env', 'typed-handle'))
       .toEqual({ appSecretEnv: '', credentialHandle: 'typed-handle' })
+  })
+
+  it('retries an install only with the Host-recorded build names, and only after confirmation', async () => {
+    type Write = { applied: boolean, entry: string, note: string, pendingBuilds?: readonly string[] }
+    const result = (value: Write) => ({ ok: true as const, value })
+    const install = vi.fn()
+      .mockResolvedValueOnce(result({ applied: false, entry: 'spec', note: 'blocked', pendingBuilds: ['protobufjs@7.6.6'] }))
+      .mockResolvedValueOnce(result({ applied: true, entry: 'spec', note: 'done' }))
+    const confirm = vi.fn(() => true)
+    await expect(installWithApproval({ installProjectBundle: install }, '@dsh-enhanced/lark-channel', confirm))
+      .resolves.toMatchObject({ ok: true, value: { applied: true } })
+    expect(confirm).toHaveBeenCalledExactlyOnceWith('安装需要允许这些依赖运行构建脚本：protobufjs@7.6.6。允许并重试？')
+    expect(install.mock.calls).toEqual([
+      ['@dsh-enhanced/lark-channel', []],
+      ['@dsh-enhanced/lark-channel', ['protobufjs@7.6.6']],
+    ])
+    // A declined confirmation or a failure that recorded no name never retries.
+    const denied = vi.fn(async () => result({ applied: false, entry: 'spec', note: 'blocked', pendingBuilds: ['esbuild@1'] }))
+    await expect(installWithApproval({ installProjectBundle: denied }, '@dsh-enhanced/lark-channel', () => false))
+      .resolves.toMatchObject({ ok: true, value: { applied: false } })
+    expect(denied).toHaveBeenCalledOnce()
+    const unrecorded = vi.fn(async () => result({ applied: false, entry: 'spec', note: 'blocked' }))
+    await installWithApproval({ installProjectBundle: unrecorded }, '@dsh-enhanced/lark-channel', () => true)
+    expect(unrecorded).toHaveBeenCalledOnce()
+    const applied = vi.fn(async () => result({ applied: true, entry: 'spec', note: 'done' }))
+    await installWithApproval({ installProjectBundle: applied }, '@dsh-enhanced/lark-channel', () => true)
+    expect(applied).toHaveBeenCalledOnce()
+    const refused = vi.fn(async () => ({ ok: false as const }))
+    await expect(installWithApproval({ installProjectBundle: refused }, '@dsh-enhanced/lark-channel', () => true))
+      .resolves.toEqual({ ok: false })
+    expect(refused).toHaveBeenCalledOnce()
   })
 
   it('labels the lark-channel health snapshot without inventing a connection', () => {

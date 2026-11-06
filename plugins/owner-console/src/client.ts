@@ -21,7 +21,7 @@ type ConsoleRemote = Readonly<{
   configureBundle(entry: string, config: Readonly<Record<string, unknown>>): Promise<RemoteResult<OwnerConsoleWriteResult>>
   setBundleEnabled(name: string, enabled: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
   setPluginEnabled(entryId: string, enabled: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
-  installProjectBundle(spec: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  installProjectBundle(spec: string, approvedBuilds: readonly string[]): Promise<RemoteResult<OwnerConsoleWriteResult>>
   removeProjectBundle(name: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
 }>
 type SlotRuntime = {
@@ -46,6 +46,32 @@ const el = (tag: string, props: Props, ...children: readonly unknown[]) => child
 export function feishuSecretRefs(source: 'env' | 'handle', env: string,
   handle: string): Readonly<{ appSecretEnv: string, credentialHandle: string }> {
   return source === 'env' ? { appSecretEnv: env, credentialHandle: '' } : { appSecretEnv: '', credentialHandle: handle }
+}
+
+/** Browser confirmation channel; without one the panel never performs a destructive or
+ * install-script-authorizing step. */
+function askOwner(message: string): boolean {
+  const ask = (globalThis as unknown as { confirm?: (message: string) => boolean }).confirm
+  return ask !== undefined && ask(message)
+}
+
+/**
+ * One install click, then one explicit confirmation when the Host recorded dependency build
+ * scripts. Only the names the Host itself reported as pending are approved on the retry; with no
+ * confirmation channel, or a failure that recorded none, the package stays uninstalled.
+ */
+export async function installWithApproval(
+  remote: Pick<ConsoleRemote, 'installProjectBundle'>,
+  spec: string,
+  confirm: (message: string) => boolean,
+): Promise<RemoteResult<OwnerConsoleWriteResult>> {
+  const first = await remote.installProjectBundle(spec, [])
+  if (!first.ok || first.value.applied) return first
+  const pending = first.value.pendingBuilds ?? []
+  if (pending.length === 0) return first
+  return confirm(`安装需要允许这些依赖运行构建脚本：${pending.join('、')}。允许并重试？`)
+    ? remote.installProjectBundle(spec, pending)
+    : first
 }
 
 const LARK_CONNECTION_LABELS: Readonly<Record<OwnerConsoleStatus['feishu']['connection'], string>> = {
@@ -399,6 +425,8 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
     }
   }
 
+  const runInstall = (spec: string) => run(() => installWithApproval(remote, spec, askOwner))
+
   const pending = status === undefined
   const larkReady = status !== undefined && status.feishu.entry !== undefined
   const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy)
@@ -412,7 +440,7 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
       row('appId', pill(status.feishu.appIdConfigured ? '已配置' : '未配置', status.feishu.appIdConfigured ? 'ok' : 'warn')))
   const installLark = status !== undefined && !status.feishu.installed && status.feishu.entry === undefined
     ? el('button', { style: btn(primaryButtonStyle), disabled: busy,
-      onClick: () => void run(() => remote.installProjectBundle('@dsh-enhanced/lark-channel')) },
+      onClick: () => void runInstall('@dsh-enhanced/lark-channel') },
     '安装 lark-channel（含依赖）')
     : null
   const enableLark = status !== undefined && status.feishu.installed && status.feishu.entry === undefined
@@ -471,7 +499,7 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
         ? placeholder('正在读取…')
         : el('div', { style: actionsStyle }, !status.traex.installed
           ? el('button', { style: btn(primaryButtonStyle), disabled: busy,
-            onClick: () => void run(() => remote.installProjectBundle('@dsh-enhanced/traex-acp-provider')) },
+            onClick: () => void runInstall('@dsh-enhanced/traex-acp-provider') },
           '安装 traex-acp-provider（含依赖）')
           : el('button', { style: btn(primaryButtonStyle), disabled: busy,
             onClick: () => void run(() => remote.setBundleEnabled('@dsh-enhanced/traex-acp-provider', true)) },
@@ -495,9 +523,8 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
           bundle.removable && bundle.name !== OWN_PACKAGE
             ? el('button', { style: btn(dangerButtonStyle), disabled: busy,
               onClick: () => {
-                const ask = (globalThis as unknown as { confirm?: (message: string) => boolean }).confirm
                 // Without a confirmation channel the panel never performs the destructive step.
-                if (ask !== undefined && ask(`移除 ${bundle.name}？重新安装可用面板的安装入口。`)) {
+                if (askOwner(`移除 ${bundle.name}？重新安装可用面板的安装入口。`)) {
                   void run(() => remote.removeProjectBundle(bundle.name))
                 }
               } }, '移除')
@@ -522,7 +549,7 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
     el('div', { style: { ...actionsStyle, alignItems: 'end', marginTop: 6 } },
       field('安装本项目 bundle（含依赖）', installSpec, setInstallSpec, '@dsh-enhanced/plugin-name'),
       el('button', { style: btn(primaryButtonStyle), disabled: busy,
-        onClick: () => void run(() => remote.installProjectBundle(installSpec)) }, '安装')),
+        onClick: () => void runInstall(installSpec) }, '安装')),
     el('p', { style: hintStyle }, '安装使用 DSH 自身的 pnpm 路径，会一并安装该包声明的依赖；安装/启用后如提示需要重启 profile，请依提示操作。'),
     el('details', { style: { marginTop: 4, borderTop: `1px solid ${hairline}`, paddingTop: 10 } },
       el('summary', { style: { fontSize: 12, fontWeight: 500, color: muted, cursor: 'pointer' } }, '高级：合并配置（只对声明了 live 字段的条目生效）'),

@@ -48,7 +48,13 @@ export const OwnerConsoleStatusSchema = z.object({
 }).readonly()
 export type OwnerConsoleStatus = Readonly<z.infer<typeof OwnerConsoleStatusSchema>>
 
-export const WRITE_RESULT = z.object({ applied: z.boolean(), entry: z.string(), note: z.string() }).readonly()
+/** `pendingBuilds` names dependency build scripts the Host recorded and a confirmed retry may approve. */
+export const WRITE_RESULT = z.object({
+  applied: z.boolean(),
+  entry: z.string(),
+  note: z.string(),
+  pendingBuilds: z.array(z.string().min(1).max(200)).max(64).readonly().optional(),
+}).readonly()
 export type OwnerConsoleWriteResult = Readonly<z.infer<typeof WRITE_RESULT>>
 
 /** Bounds of the read-only trend snapshot page; the control plane enforces the same page limit. */
@@ -246,6 +252,8 @@ export const TYPERT = {
       invocation: { kind: 'direct' },
       parameters: [
         { name: 'spec', wire: 'spec', source: 'json', codec: codec('owner-console#spec', () => z.string().max(300)) },
+        { name: 'approvedBuilds', wire: 'approvedBuilds', source: 'json',
+          codec: codec('owner-console#approvedBuilds', () => z.array(z.string().min(1).max(200)).max(64)) },
       ],
       result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 93, column: 3 },

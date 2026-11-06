@@ -5,8 +5,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { Config, apply, name, version } from '../src/index.ts'
 import type { OwnerConsoleService } from '../src/service.ts'
 import type { SettingsDescriptor, SettingsService } from '../src/settings.ts'
-import { OwnerConsoleStatusSchema, TYPERT } from '../src/typert.ts'
-import { readIntakeAgreement, readIntakeAgreementAvailability, readTrendSnapshots } from '../src/service.ts'
+import { OwnerConsoleStatusSchema, TYPERT, WRITE_RESULT } from '../src/typert.ts'
+import { applyInstall, blockedBuildNames, readIntakeAgreement, readIntakeAgreementAvailability, readTrendSnapshots } from '../src/service.ts'
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
   version: string
@@ -66,7 +66,7 @@ describe('dsh-enhanced-owner-console', () => {
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/configureBundle')).toEqual(['entry', 'config'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/setBundleEnabled')).toEqual(['name', 'enabled'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/setPluginEnabled')).toEqual(['entryId', 'enabled'])
-    expect(wires('@dsh-enhanced/owner-console#ownerConsole/installProjectBundle')).toEqual(['spec'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/installProjectBundle')).toEqual(['spec', 'approvedBuilds'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/removeProjectBundle')).toEqual(['name'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/trendSnapshots')).toEqual(['planId', 'beforeSequence', 'limit'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/intakeAgreement')).toEqual(['workspace', 'preset'])
@@ -229,7 +229,7 @@ describe('dsh-enhanced-owner-console', () => {
       ]),
       setBundleEnabled: vi.fn(async (name: string) => ({ changed: true, application: 'applied' as const, target: name, enabled: true })),
       setPluginEnabled: vi.fn(async (entryId: string) => ({ changed: true, application: 'restart-required' as const, target: entryId, enabled: false })),
-      installBundle: vi.fn(async (spec: string) => ({ changed: true, application: 'applied' as const, target: spec, enabled: true })),
+      installBundle: vi.fn(async (spec: string, _options?: unknown) => ({ changed: true, application: 'applied' as const, target: spec, enabled: true })),
       removeBundle: vi.fn(async (name: string) => ({ changed: true, application: 'applied' as const, target: name, enabled: false })),
     }
     const { ctx, console } = await mount(undefined, undefined, manager)
@@ -320,6 +320,133 @@ describe('dsh-enhanced-owner-console', () => {
     const { ctx, console } = await mount()
     try {
       await expect(console.configureTraex(true, '')).rejects.toThrow(/settings service is unavailable/u)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+})
+
+const ESC = '\u001b'
+/** pnpm 11's own failure line, decorated with the colour escapes the Host forwards verbatim. */
+const ANSI_BUILD_BLOCKED = `${ESC}[41m${ESC}[31m[${ESC}[39m${ESC}[49m${ESC}[41m${ESC}[30mERR_PNPM_IGNORED_BUILDS${ESC}[39m${ESC}[49m${ESC}[41m${ESC}[31m${ESC}[39m${ESC}[49m ${ESC}[31mIgnored build scripts: protobufjs@7.6.6${ESC}[39m\n\nRun "pnpm approve-builds" to pick which dependencies should be allowed to run scripts.\n`
+
+function fakeManager(install: (spec: string, options?: unknown) => unknown) {
+  return {
+    listBundles: vi.fn(async () => []),
+    listPlugins: vi.fn(async () => []),
+    installBundle: vi.fn(async (spec: string, options?: unknown) => {
+      const result = await install(spec, options)
+      return result as never
+    }),
+  }
+}
+
+describe('owner console install failures', () => {
+  it('turns pnpm\'s coloured build-script refusal into an actionable note', async () => {
+    const manager = fakeManager(() => ({ changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
+      error: { code: 'operation-error', diagnostic: ANSI_BUILD_BLOCKED }, pendingBuilds: [],
+      packageResult: { kind: 'build-blocked', exitCode: 1 } }))
+    const { ctx, console } = await mount(undefined, undefined, manager)
+    try {
+      const refused = await console.installProjectBundle(' @dsh-enhanced/lark-channel ')
+      expect(refused).toMatchObject({ applied: false, entry: '@dsh-enhanced/lark-channel' })
+      // The Host recorded no pending name, so the panel must not offer an approval that would be stale.
+      expect(refused.pendingBuilds).toBeUndefined()
+      expect(refused.note).toContain('protobufjs@7.6.6')
+      expect(refused.note).toContain('pnpm-workspace.yaml')
+      expect(refused.note).not.toContain(ESC)
+      expect(manager.installBundle).toHaveBeenCalledExactlyOnceWith('@dsh-enhanced/lark-channel',
+        { enabled: true, saveExact: true })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the Host-recorded build names and approves exactly those on a confirmed retry', async () => {
+    const manager = fakeManager((_spec, options) => (options as { approvedBuilds?: readonly string[] }).approvedBuilds === undefined
+      ? { changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
+        error: { code: 'operation-error', diagnostic: ANSI_BUILD_BLOCKED }, pendingBuilds: ['protobufjs@7.6.6'],
+        packageResult: { kind: 'build-blocked', exitCode: 1 } }
+      : { changed: true, application: 'restart-required', target: '@dsh-enhanced/lark-channel' })
+    const { ctx, console } = await mount(undefined, undefined, manager)
+    try {
+      const refused = await console.installProjectBundle('@dsh-enhanced/lark-channel')
+      expect(refused).toMatchObject({ applied: false, pendingBuilds: ['protobufjs@7.6.6'] })
+      expect(refused.note).toContain('确认允许')
+      const retried = await console.installProjectBundle('@dsh-enhanced/lark-channel', ['protobufjs@7.6.6'])
+      expect(retried).toMatchObject({ applied: true, entry: '@dsh-enhanced/lark-channel' })
+      expect(manager.installBundle).toHaveBeenLastCalledWith('@dsh-enhanced/lark-channel',
+        { enabled: true, saveExact: true, approvedBuilds: ['protobufjs@7.6.6'] })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('reports a compatibility refusal with the exact package and runtime versions', async () => {
+    const manager = fakeManager(() => ({ changed: false, application: 'failed', target: '@dsh-enhanced/traex-acp-provider',
+      error: { code: 'incompatible-version', incompatible: [{ name: '@dsh-enhanced/traex-acp-provider', version: '0.1.65',
+        runtimeVersion: '0.2.2-rc.1', requirements: { '@deepseek-ai/dsh-llm': '0.2.1-rc.2' } }] } }))
+    const { ctx, console } = await mount(undefined, undefined, manager)
+    try {
+      const refused = await console.installProjectBundle('@dsh-enhanced/traex-acp-provider')
+      expect(refused.applied).toBe(false)
+      expect(refused.note).toContain('@dsh-enhanced/traex-acp-provider@0.1.65')
+      expect(refused.note).toContain('@deepseek-ai/dsh-llm 0.2.1-rc.2')
+      expect(refused.note).toContain('0.2.2-rc.1')
+      expect(refused.note).toContain('兼容豁免')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('rejects malformed approvals before touching the Host manager', async () => {
+    const manager = fakeManager(() => ({ changed: true, application: 'applied', target: '@dsh-enhanced/lark-channel' }))
+    const { ctx, console } = await mount(undefined, undefined, manager)
+    try {
+      for (const names of [[''], ['pkg*'], ['pkg\n2'], ['x'.repeat(201)],
+        Array.from({ length: 65 }, (_value, index) => `pkg${String(index)}`)]) {
+        expect((await console.installProjectBundle('@dsh-enhanced/lark-channel', names)).applied).toBe(false)
+      }
+      expect(manager.installBundle).not.toHaveBeenCalled()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('reads build names out of coloured, plain and hostile pnpm output', () => {
+    expect(blockedBuildNames(ANSI_BUILD_BLOCKED)).toEqual(['protobufjs@7.6.6'])
+    expect(blockedBuildNames('   Ignored build scripts: esbuild@0.21.5, @scope/native.')).toEqual(['esbuild@0.21.5', '@scope/native'])
+    expect(blockedBuildNames('Ignored build scripts: esbuild@1, esbuild@1')).toEqual(['esbuild@1'])
+    expect(blockedBuildNames('Ignored build scripts: *')).toEqual([])
+    expect(blockedBuildNames('nothing to see')).toEqual([])
+    expect(blockedBuildNames('')).toEqual([])
+  })
+
+  it('bounds a generic diagnostic instead of echoing the whole pnpm log', () => {
+    const bounded = applyInstall({ changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
+      error: { code: 'operation-error', diagnostic: `${ESC}[31m${'x'.repeat(4_000)}${ESC}[39m` },
+      packageResult: { kind: 'network', exitCode: 1 } })
+    expect(bounded.applied).toBe(false)
+    expect(bounded.note).toContain('operation-error')
+    expect(bounded.note).not.toContain(ESC)
+    expect(bounded.note.length).toBeLessThan(800)
+  })
+
+  it('keeps the approval list bounded on the wire', async () => {
+    expect(WRITE_RESULT.safeParse({ applied: false, entry: 'e', note: 'n', pendingBuilds: ['protobufjs@7.6.6'] }).success).toBe(true)
+    const many = Array.from({ length: 65 }, (_value, index) => `pkg${String(index)}`)
+    expect(WRITE_RESULT.safeParse({ applied: false, entry: 'e', note: 'n', pendingBuilds: many }).success).toBe(false)
+    // A Host list the wire would reject is bounded by the service instead of failing the whole result.
+    const hostile = [...many, '', 'line\nbreak', 'x'.repeat(201)]
+    const manager = fakeManager(() => ({ changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
+      error: { code: 'operation-error', diagnostic: ANSI_BUILD_BLOCKED }, pendingBuilds: hostile,
+      packageResult: { kind: 'build-blocked', exitCode: 1 } }))
+    const { ctx, console } = await mount(undefined, undefined, manager)
+    try {
+      const result = await console.installProjectBundle('@dsh-enhanced/lark-channel')
+      expect(result.pendingBuilds).toHaveLength(64)
+      expect(WRITE_RESULT.safeParse(result).success).toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }

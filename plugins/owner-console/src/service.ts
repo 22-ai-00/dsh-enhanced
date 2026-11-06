@@ -143,7 +143,8 @@ export class OwnerConsoleService extends TypertRemoteService {
   /** Select or remove one installed project bundle layer; dependencies stay installed. */
   async setBundleEnabled(name: string, enabled: boolean): Promise<OwnerConsoleWriteResult> {
     if (!isProjectPackage(name)) return refuse('', '只允许管理本项目的 @dsh-enhanced/* bundle')
-    return applyChange(this.manager(), await this.manager().setBundleEnabled(name, enabled))
+    const manager = this.manager()
+    return applyChange(await manager.setBundleEnabled(name, enabled))
   }
 
   /** Enable or disable one loaded entry of a project bundle. */
@@ -153,22 +154,37 @@ export class OwnerConsoleService extends TypertRemoteService {
     const inventory = await this.inventory()
     const entry = inventory.plugins.find(plugin => plugin.entryId === entryId)
     if (entry === undefined) return refuse(entryId, '该条目不属于本项目的插件，或尚未安装')
-    return applyChange(manager, await manager.setPluginEnabled(entryId, enabled))
+    return applyChange(await manager.setPluginEnabled(entryId, enabled))
   }
 
   /** Remove one project bundle layer after the owner confirms the destructive step. */
   async removeProjectBundle(name: string): Promise<OwnerConsoleWriteResult> {
     if (!isProjectPackage(name)) return refuse('', '只允许移除本项目的 @dsh-enhanced/* bundle')
-    return applyChange(this.manager(), await this.manager().removeBundle(name))
+    const manager = this.manager()
+    return applyChange(await manager.removeBundle(name))
   }
 
-  /** Install one project bundle with its declared dependencies, then activate it. */
-  async installProjectBundle(spec: string): Promise<OwnerConsoleWriteResult> {
+  /** Install one project bundle with its declared dependencies, then activate it.
+   * The Host's pnpm run can stop at its dependency build-script policy; the names it recorded
+   * in `pendingBuilds` are the only ones a retry may approve, so the panel never approves a
+   * build script the Host did not surface. */
+  async installProjectBundle(spec: string, approvedBuilds: readonly string[] = []): Promise<OwnerConsoleWriteResult> {
     const trimmed = spec.trim()
     if (!isProjectPackage(trimmed)) {
       return refuse('', '只允许安装本项目的 @dsh-enhanced/<name> 包；本地路径和 git 地址不在此面板处理')
     }
-    return applyChange(this.manager(), await this.manager().installBundle(trimmed, { enabled: true, saveExact: true }))
+    const approvals = [...new Set(approvedBuilds.map(name => name.trim()))]
+    if (approvedBuilds.length > MAX_BUILD_NAMES
+      || approvals.some(name => name === '' || name.length > 200 || /[*?\r\n]/u.test(name))) {
+      return refuse(trimmed, '批准的构建脚本名称无效')
+    }
+    const manager = this.manager()
+    const result = await manager.installBundle(trimmed, {
+      enabled: true,
+      saveExact: true,
+      ...(approvals.length === 0 ? {} : { approvedBuilds: approvals }),
+    })
+    return applyInstall(result)
   }
 
   /** Feishu: one owner click, two ways to pair the bot. No plaintext secret is ever accepted. */
@@ -265,13 +281,90 @@ export class OwnerConsoleService extends TypertRemoteService {
   }
 }
 
-function applyChange(manager: PluginManagerService, result: ChangeResultLike): OwnerConsoleWriteResult {
-  void manager
+const ANSI_ESCAPE = String.fromCodePoint(0x1b)
+const ANSI_SEQUENCE = new RegExp(`${ANSI_ESCAPE}\\[[0-9;]*m`, 'gu')
+/** pnpm names the scripts it skipped on one line, coloured by default (pnpm 11 makes that a failure). */
+const IGNORED_BUILDS = /\bIgnored build scripts: ([^\n]+)/u
+const MAX_BUILD_NAMES = 64
+const MAX_DIAGNOSTIC_CHARS = 600
+
+/** Read the build-script names pnpm reported from a raw run: ANSI escapes are stripped first, since
+ * pnpm 11 decorates the line and the Host's own parser (`dsh-plugin-manager`) can miss the boundary. */
+export function blockedBuildNames(output: string): readonly string[] {
+  const line = IGNORED_BUILDS.exec(output.replace(ANSI_SEQUENCE, ''))?.[1]
+  if (line === undefined) return Object.freeze([])
+  const names = new Set<string>()
+  for (const raw of line.split(',')) {
+    const name = raw.trim().replace(/\.$/u, '')
+    if (name === '' || name.length > 200 || /[*?]/u.test(name)) continue
+    names.add(name)
+    if (names.size >= MAX_BUILD_NAMES) break
+  }
+  return Object.freeze([...names])
+}
+
+/** A failure diagnostic is shown as one bounded line; the full pnpm log stays in the Host's log file. */
+function diagnosticTail(output: string | undefined): string {
+  const text = (output ?? '').replace(ANSI_SEQUENCE, '').replace(/\s+/gu, ' ').trim()
+  return text.length > MAX_DIAGNOSTIC_CHARS ? `…${text.slice(-MAX_DIAGNOSTIC_CHARS)}` : text
+}
+
+function requirementsLabel(requirements: Readonly<Record<string, string>>): string {
+  const entries = Object.entries(requirements)
+  return entries.length === 0 ? '未知要求' : entries.map(([name, version]) => `${name} ${version}`).join('、')
+}
+
+/** Install-specific refusal mapping: keep the Host's approval names only when it recorded them, and
+ * turn pnpm's raw error box or a compatibility denial into the concrete owner-facing next step. */
+export function applyInstall(result: ChangeResultLike): OwnerConsoleWriteResult {
+  const error = result.error
+  if (error === undefined) return applyChange(result)
+  const incompatible = error.incompatible ?? []
+  if (incompatible.length > 0) {
+    const packages = incompatible.map(plugin =>
+      `${plugin.name}@${plugin.version}（要求 ${requirementsLabel(plugin.requirements)}，当前 DSH ${plugin.runtimeVersion}）`)
+    return Object.freeze({
+      applied: false,
+      entry: result.target,
+      note: `Host 拒绝了不兼容的插件版本：${packages.join('；')}。请安装兼容版本，或由主人为这个精确版本授予兼容豁免后重试。`,
+    })
+  }
+  // Only names the wire schema accepts reach the client, so a Host list can never make the
+  // whole write result fail validation; a longer list is approved in bounded retries.
+  const pending = (result.pendingBuilds ?? [])
+    .filter(name => name !== '' && name.length <= 200 && !/[\r\n]/u.test(name))
+    .slice(0, MAX_BUILD_NAMES)
+  const buildBlocked = result.packageResult?.kind === 'build-blocked'
+    || /ERR_PNPM_IGNORED_BUILDS/u.test(error.diagnostic ?? '')
+  if (buildBlocked) {
+    const names = pending.length > 0 ? pending : blockedBuildNames(error.diagnostic ?? '')
+    const listed = names.length === 0 ? 'Host 未给出名称（完整输出在 profile 的 pnpm 日志中）' : names.join('、')
+    const next = pending.length > 0
+      ? '确认允许这些依赖运行构建脚本后重试。'
+      : `Host 未能自动记录这次拒绝；请在 profile 的 pnpm-workspace.yaml 中写入 allowBuilds（${names.length === 0
+        ? '依赖名: true'
+        : names.map(name => `${name}: true`).join('、')}），或运行 pnpm approve-builds 后重试。`
+    return Object.freeze({
+      applied: false,
+      entry: result.target,
+      ...(pending.length === 0 ? {} : { pendingBuilds: pending }),
+      note: `安装被 pnpm 的依赖构建脚本策略拒绝：${listed}。${next}`,
+    })
+  }
+  const tail = diagnosticTail(error.diagnostic ?? result.packageResult?.output)
+  return Object.freeze({
+    applied: false,
+    entry: result.target,
+    note: `${error.code}（${result.application}）${tail === '' ? '' : `：${tail}`}`,
+  })
+}
+
+function applyChange(result: ChangeResultLike): OwnerConsoleWriteResult {
   const reason = result.error === undefined
     ? result.application === 'restart-required'
       ? '需要重启 profile 后生效'
       : result.application === 'overridden' ? '被更高优先级的覆盖项接管' : ''
-    : `${result.error.code}${result.error.diagnostic === undefined ? '' : `：${result.error.diagnostic}`}`
+    : `${result.error.code}${result.error.diagnostic === undefined ? '' : `：${diagnosticTail(result.error.diagnostic)}`}`
   const warnings = (result.warnings ?? []).length === 0 ? '' : `；警告：${(result.warnings ?? []).join('；')}`
   const builds = (result.pendingBuilds ?? []).length === 0 ? ''
     : `；需要在设置页批准构建脚本：${(result.pendingBuilds ?? []).join('、')}`

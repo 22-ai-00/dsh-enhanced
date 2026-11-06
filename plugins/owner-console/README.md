@@ -76,7 +76,13 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
   可单独启用/禁用；按模块归属而不是 bundle row 归属判断，第三方模块行不在此面板管理。
 - **安装**：只接受 `@dsh-enhanced/<name>` 形式的包名，走 DSH 自身的 `pluginManager.installBundle`
   （与 `dsh plugin` 相同的 pnpm 路径），会一并安装该包声明的依赖并默认激活；本地路径和 git 地址
-  不在此面板处理，避免面板变成任意代码源入口。安装/启用后如返回 `restart-required`，按提示重启 profile。
+  不在此面板处理，避免面板成为任意代码源入口。安装/启用后如返回 `restart-required`，按提示重启 profile。
+- **依赖构建脚本**：pnpm 可能拒绝依赖的构建脚本（`ERR_PNPM_IGNORED_BUILDS`）。Host 记录到
+  `pendingBuilds` 时，面板会先让主人确认，再用这些精确名称重试；Host 未记录（例如它的解析没认出
+  带 ANSI 的输出）时，面板会从失败输出中读出依赖名，并给出 `pnpm-workspace.yaml` 的 `allowBuilds`
+  写法和 `pnpm approve-builds` 提示，不会替主人静默放行。
+- **不兼容版本**：Host 以 `incompatible-version` 拒绝时，面板列出被拒的 `包@版本`、缺失的 DSH peer
+  要求与当前 DSH 版本，并提示更新插件或为这个精确版本授予兼容豁免后重试。
 - **高级**：对声明了 live 字段的条目仍可合并一段 JSON 配置（≤16 KiB），不重置其它字段。
 - 面板收到 Host 的业务拒绝会原样显示原因（例如环境变量不存在、身份字段缺失、需要重启），不静默失败。
 - 「方式」按条目里实际存在的 secret 引用显示（环境变量 secret 或 keychain secret），
@@ -116,6 +122,7 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 - 本插件自身不直接读写文件、不直接联网、不直接起子进程、不读取凭据；需要落盘的动作都委托给
   Host 的 `settings`（配置）与 `pluginManager`（bundle/条目管理与 pnpm 安装），由后者执行。
 - 安装动作因此会经由 Host 启动 pnpm 并访问 registry（与 `dsh plugin` 相同）；只在主人点击时发生。
+  依赖构建脚本只有在主人于面板再次确认后、且仅针对 Host 记入 `pendingBuilds` 的精确名称才被批准。
 - 配置写入只经 Host `settings.mutate`，且限定到单个已安装条目；bundle/entry 管理只经 Host
   `pluginManager` 且限定 `@dsh-enhanced/*`；授权来源是主人自己在面板上的点击，不是模型工具调用，
   也不存在后台自动写配置。

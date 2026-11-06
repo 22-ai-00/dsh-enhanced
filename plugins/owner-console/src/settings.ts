@@ -45,21 +45,49 @@ export interface PluginInfoLike {
   readonly enabled: boolean
   readonly fiberPhase: 'pending' | 'loading' | 'active' | 'failed' | 'unloading' | null
 }
+/** A package the running DSH version refused; the Host reports the exact peer requirements it missed. */
+export interface IncompatiblePluginLike {
+  readonly name: string
+  readonly version: string
+  readonly runtimeVersion: string
+  readonly requirements: Readonly<Record<string, string>>
+}
+/** What the Host's pnpm run reported; `kind: 'build-blocked'` is pnpm's dependency-script policy. */
+export interface PackageResultLike {
+  readonly exitCode?: number
+  readonly output?: string
+  readonly truncated?: boolean
+  readonly logPath?: string
+  readonly kind?: string
+  readonly timedOut?: boolean
+  readonly incompatible?: readonly IncompatiblePluginLike[]
+}
 export interface ChangeResultLike {
   readonly changed: boolean
   readonly application: 'applied' | 'restart-required' | 'overridden' | 'failed' | 'cancelled'
   readonly target: string
   readonly enabled?: boolean
-  readonly error?: Readonly<{ code: string, diagnostic?: string }>
+  readonly error?: Readonly<{ code: string, diagnostic?: string, incompatible?: readonly IncompatiblePluginLike[] }>
   readonly warnings?: readonly string[]
+  /** Exact `allowBuilds` keys the Host recorded after a failed run; only these may be approved on retry. */
   readonly pendingBuilds?: readonly string[]
+  readonly approvedBuilds?: readonly string[]
+  readonly packageResult?: PackageResultLike
+  readonly failedAt?: 'registry' | 'spec-host'
+  readonly restartReason?: string
+}
+export interface InstallBundleOptions {
+  readonly enabled?: boolean
+  readonly saveExact?: boolean
+  /** Names from a previous result's `pendingBuilds`; the Host refuses any name it no longer holds pending. */
+  readonly approvedBuilds?: readonly string[]
 }
 export interface PluginManagerService {
   listBundles(): Promise<readonly BundleInfoLike[]>
   listPlugins(): Promise<readonly PluginInfoLike[]>
   setBundleEnabled(name: string, enabled: boolean): Promise<ChangeResultLike>
   setPluginEnabled(entryId: string, enabled: boolean): Promise<ChangeResultLike>
-  installBundle(spec: string, options?: Readonly<{ enabled?: boolean, saveExact?: boolean }>): Promise<ChangeResultLike>
+  installBundle(spec: string, options?: InstallBundleOptions): Promise<ChangeResultLike>
   removeBundle(name: string): Promise<ChangeResultLike>
 }
 
