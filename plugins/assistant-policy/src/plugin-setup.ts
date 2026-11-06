@@ -52,6 +52,7 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['ownerReplyContinuation', 'boolean'],
     ['ownerReportFeedback', 'boolean'],
     ['follows.eventTriggers.enabled', 'boolean'],
+    ['ownerReportRouting.prefer', ['origin', 'recent']],
   ])],
   ['dsh-enhanced-assistant-delivery', new Map<string, KnownType>([['attentionAttachOverCap', 'boolean']])],
   ['dsh-enhanced-assistant-evaluation', new Map<string, KnownType>([
