@@ -5208,7 +5208,7 @@ export class AssistantDeliveryService extends Service {
   /**
    * Host-only cross-channel route for one background work-item report.
    *
-   * The origin binding always wins: while it is active with an active
+   * The origin binding always wins (default prefer): while it is active with an active
    * principal this returns `{ route: 'origin' }` and enqueues nothing, so the
    * caller keeps its existing origin path unchanged. Only when the origin is
    * unavailable does the Host walk the owner's explicit `linkedFallback` list
@@ -5224,7 +5224,8 @@ export class AssistantDeliveryService extends Service {
    *
    * Opt-in `prefer: 'recent'` instead ranks eligible aliases by the owner's
    * newest inbound message (`inbox_messages.received_at`); an available origin
-   * still wins unless an eligible alias received strictly newer inbound.
+   * still wins unless an eligible alias received strictly newer inbound, and
+   * also when that alias is refused before its linked row commits.
    */
   routeWorkItemReport(input: Readonly<{ sourceId: string; workspace: string; originBindingId: string; idempotencyKey: string; text: string
     format?: 'markdown' | 'plain'; itemId: string; reportRevision: number; linkedFallback: readonly string[]; prefer?: 'origin' | 'recent' }>): Readonly<{ route: 'origin' } | { route: 'linked'; outbox: OutboxRecord }> {
@@ -5286,27 +5287,31 @@ export class AssistantDeliveryService extends Service {
       if (!this.linkedReportSendAllowed(sourceId, binding)) return undefined
       return { binding, alias }
     }
-    let order: readonly string[] = input.linkedFallback
+    let picked: ReturnType<typeof eligible>
     if (recent) {
-      // Opt-in: rank eligible aliases by the owner's newest inbound message
-      // (stable sort keeps list order on ties). An available origin wins
-      // unless an eligible alias received strictly newer inbound.
+      // Opt-in: rank eligible aliases (one Policy evaluate each) by the owner's
+      // newest inbound message (stable sort keeps list order on ties). An
+      // available origin wins unless an eligible alias received strictly newer inbound.
       const candidates = input.linkedFallback.flatMap(aliasId => {
         const found = eligible(aliasId)
-        return found === undefined ? [] : [{ aliasId, bindingId: found.binding.id }]
+        return found === undefined ? [] : [found]
       })
-      const latest = this.deliveryStore.latestInboundAtByBinding([origin.id, ...candidates.map(candidate => candidate.bindingId)])
+      const latest = this.deliveryStore.latestInboundAtByBinding([origin.id, ...candidates.map(candidate => candidate.binding.id)])
       const at = (bindingId: string) => latest.get(bindingId) ?? Number.NEGATIVE_INFINITY
-      candidates.sort((left, right) => at(left.bindingId) === at(right.bindingId) ? 0 : at(left.bindingId) < at(right.bindingId) ? 1 : -1)
-      const top = candidates[0]
-      if (originAvailable && (top === undefined || !(at(top.bindingId) > at(origin.id)))) return Object.freeze({ route: 'origin' as const })
-      order = candidates.map(candidate => candidate.aliasId)
+      candidates.sort((left, right) => at(left.binding.id) === at(right.binding.id) ? 0 : at(left.binding.id) < at(right.binding.id) ? 1 : -1)
+      picked = candidates[0]
+      if (originAvailable && (picked === undefined || !(at(picked.binding.id) > at(origin.id)))) return Object.freeze({ route: 'origin' as const })
+    } else {
+      for (const aliasId of input.linkedFallback) {
+        picked = eligible(aliasId)
+        if (picked !== undefined) break
+      }
     }
-    for (const aliasId of order) {
-      const found = eligible(aliasId)
-      if (found === undefined) continue
-      const { binding, alias } = found
-      const outbox = this.enqueueBackgroundAuthorized({ sourceId, workspace: binding.workspace, bindingId: binding.id,
+    if (picked !== undefined) {
+      const { binding, alias } = picked
+      let outbox: OutboxRecord
+      try {
+        outbox = this.enqueueBackgroundAuthorized({ sourceId, workspace: binding.workspace, bindingId: binding.id,
         idempotencyKey: linkedKey, text: input.text, format: input.format ?? 'plain', metadata: {
           [linkedReportMetadataPrefix]: 'v1',
           [`${linkedReportMetadataPrefix}.sourceId`]: sourceId,
@@ -5320,6 +5325,15 @@ export class AssistantDeliveryService extends Service {
           [`${linkedReportMetadataPrefix}.bindingVersion`]: String(binding.version),
           [`${linkedReportMetadataPrefix}.bindingGeneration`]: String(binding.generation),
         } }, undefined, { lane: 'background', lanePurpose: { purpose: 'result', workItemId: input.itemId } })
+      } catch (error) {
+        // `prefer: 'recent'` with an available origin: a refusal raised before
+        // the linked row commits (Policy authorize deny, attention enforce,
+        // binding change) keeps the origin path instead of losing the report.
+        // A committed linked row is final and is never paired with an origin send.
+        if (recent && originAvailable && error instanceof AssistantDeliveryError
+          && this.deliveryStore.getOutboxByIdempotencyKey(linkedKey) === undefined) return Object.freeze({ route: 'origin' as const })
+        throw error
+      }
       return Object.freeze({ route: 'linked' as const, outbox })
     }
     throw new AssistantDeliveryError('missing-binding', 'report origin is unavailable and no linked fallback is eligible')

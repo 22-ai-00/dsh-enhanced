@@ -402,6 +402,30 @@ describe('linked work-item report routing', () => {
       expect(f.store.listOutbox({ bindingId: f.aliasBinding.id })).toHaveLength(0)
     })
 
+    test('an alias refused by Policy authorize before commit keeps the available origin', async () => {
+      const f = await fixture()
+      f.link()
+      inbound(f, f.origin.id, 1_000)
+      inbound(f, f.aliasBinding.id, 2_000)
+      const evaluate = vi.spyOn(f.ctx.assistantPolicy, 'evaluate')
+      // evaluate allows the alias, but authorize (e.g. budget/rate) denies it.
+      const authorize = f.ctx.assistantPolicy.authorize.bind(f.ctx.assistantPolicy)
+      const authorizeSpy = vi.spyOn(f.ctx.assistantPolicy, 'authorize').mockImplementation((request, options) =>
+        request.action === 'send' && request.subject.principal === id(alias)
+          ? { ...f.ctx.assistantPolicy.evaluate(request), effect: 'deny', reasonCode: 'budget-exhausted' } as ReturnType<typeof authorize>
+          : authorize(request, options))
+      expect(f.service.routeWorkItemReport(recent(f, [id(alias)]))).toEqual({ route: 'origin' })
+      expect(authorizeSpy.mock.calls.some(([request]) => request.subject.principal === id(alias))).toBe(true)
+      // One Policy evaluate per eligible alias during routing (the authorize mock adds one).
+      expect(evaluate.mock.calls.filter(([request]) => request.action === 'send' && request.subject.principal === id(alias))).toHaveLength(2)
+      expect(f.store.listOutbox({ bindingId: f.aliasBinding.id })).toHaveLength(0)
+      // With the origin unavailable the same refusal still surfaces.
+      f.dropOrigin()
+      expect(() => f.service.routeWorkItemReport(recent(f, [id(alias)])))
+        .toThrowError(expect.objectContaining({ code: 'policy-denied' }))
+      expect(f.store.listOutbox({ bindingId: f.aliasBinding.id })).toHaveLength(0)
+    })
+
     test('an unavailable origin uses the most recent eligible alias, and an unknown prefer is refused', async () => {
       const f = await fixture()
       f.link(denied)
