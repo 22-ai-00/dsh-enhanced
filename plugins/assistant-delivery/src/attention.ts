@@ -386,7 +386,8 @@ export interface NotificationOutcomeFact {
     source: 'owner-objective' | 'work-item-feedback'
     version: number
     objectiveStatus: 'achieved' | 'partial' | 'not-achieved' | 'unknown'
-  }>  /**
+  }>
+  /**
    * Present only for a Host-routed linked work-item report (cross-channel
    * fallback to an owner alias); `originBindingId` is the unavailable origin.
    * Absent means the notification went to its own binding.
