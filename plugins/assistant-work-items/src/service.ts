@@ -63,7 +63,7 @@ import type {
   WorkItemThreadSourceRegistration,
   WorkItemIntakeProvenance,
 } from './types.js'
-import { WorkItemError } from './types.js'
+import { TERMINAL_STATES, WorkItemError } from './types.js'
 import { WorkItemWorkspace } from './workspace.js'
 import { WorkItemDiagnosis, persistedDiagnosisIntervention, type DiagnosisSourcePage } from './diagnosis.js'
 import type { WorkItemDiagnosisPlan } from './diagnosis-contract.js'
@@ -2030,6 +2030,9 @@ export class AssistantWorkItemsService extends Service {
    * A later allow resumes it through the same wake path.
    */
   private workItemsRevalidateAuthority(components: Components, item: WorkItemRecord): void {
+    // A terminal item is not claimable; the ledger refuses it. Revalidating
+    // first would park and re-arm finished work into a new generation.
+    if (TERMINAL_STATES.includes(item.state)) return
     const check = components.authority.check(item)
     if (check.kind === 'legacy') return
     if (check.kind === 'allow') {

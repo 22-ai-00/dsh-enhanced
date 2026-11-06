@@ -255,6 +255,13 @@ export interface WorkItemAcceptanceVerdict {
   readonly receiptDigest: string
   readonly objectiveStatus: 'achieved' | 'not-achieved' | 'unknown'
   readonly completedAt: number
+  /**
+   * The executed generation the verdict was settled for (attempt and
+   * occurrence at settle time). Absent on verdicts recorded before slice 7;
+   * `acceptance.verdictGate` never moves an item on such a verdict.
+   */
+  readonly attempt?: number
+  readonly occurrenceId?: string | null
   readonly recordedAt: number
 }
 

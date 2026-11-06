@@ -2588,6 +2588,11 @@ export class WorkItemStore {
       || typeof detail['completedAt'] !== 'number') {
       fail('storage', 'recorded acceptance verdict is malformed')
     }
+    const attempt = detail['attempt'], occurrenceId = detail['occurrenceId']
+    const generation = Object.hasOwn(detail, 'attempt') || Object.hasOwn(detail, 'occurrenceId')
+    if (generation && (!Number.isSafeInteger(attempt) || (attempt as number) < 0 || (occurrenceId !== null && typeof occurrenceId !== 'string'))) {
+      fail('storage', 'recorded acceptance verdict is malformed')
+    }
     return Object.freeze({
       itemId,
       verifier: 'assistant-verifier',
@@ -2597,6 +2602,7 @@ export class WorkItemStore {
       receiptDigest: detail['receiptDigest'],
       objectiveStatus: status,
       completedAt: detail['completedAt'],
+      ...(generation ? { attempt: attempt as number, occurrenceId: occurrenceId as string | null } : {}),
       recordedAt: Number(row['recorded_at']),
     })
   }
@@ -2628,6 +2634,7 @@ export class WorkItemStore {
         receiptDigest: verdict.receiptDigest,
         objectiveStatus: verdict.objectiveStatus,
         completedAt: verdict.completedAt,
+        ...(verdict.attempt === undefined ? {} : { attempt: verdict.attempt, occurrenceId: verdict.occurrenceId ?? null }),
       }, now)
       const recorded = this.acceptanceVerdict(verdict.itemId)
       if (recorded === undefined) fail('storage', 'acceptance verdict could not be read back')
@@ -2654,6 +2661,9 @@ export class WorkItemStore {
 
   #gateVerdict(verdict: WorkItemAcceptanceVerdict, expect: WorkItemAcceptanceGateExpectation, now: number): WorkItemAcceptanceBlockReason | undefined {
     if (verdict.objectiveStatus === 'achieved') return undefined
+    // Only the generation this verdict was settled for may be moved; a verdict
+    // without one (recorded before slice 7) never moves the item.
+    if (verdict.attempt !== expect.attempt || verdict.occurrenceId !== expect.occurrenceId) return undefined
     const reason: WorkItemAcceptanceBlockReason = verdict.objectiveStatus === 'not-achieved' ? 'acceptance-not-achieved' : 'acceptance-unknown'
     return this.#blockForAcceptance(verdict.itemId, expect, reason, { contractId: verdict.contractId, receiptDigest: verdict.receiptDigest }, now)
       ? reason : undefined

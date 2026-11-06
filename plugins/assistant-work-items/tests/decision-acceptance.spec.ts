@@ -346,7 +346,9 @@ describe('acceptance-bound execute decisions', () => {
       outcome: 'verified',
       verdict: {
         itemId: item.id, verifier: 'assistant-verifier', contractId: contract.id, contractDigest: contract.digest,
-        receiptId: receipt.id, receiptDigest: receipt.digest, objectiveStatus: 'achieved', completedAt: receipt.completedAt, recordedAt: NOW,
+        receiptId: receipt.id, receiptDigest: receipt.digest, objectiveStatus: 'achieved', completedAt: receipt.completedAt,
+        // The generation of the item record the caller settled for.
+        attempt: item.attempt, occurrenceId: item.occurrenceId, recordedAt: NOW,
       },
     })
     expect(fixture.store.acceptanceVerdict(item.id)).toEqual(settled.outcome === 'verified' ? settled.verdict : undefined)

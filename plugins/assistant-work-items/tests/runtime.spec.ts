@@ -1312,6 +1312,75 @@ describe('work-item admission authority revalidation', () => {
     expect(blockedEvents(fixture, itemId)).toHaveLength(1)
   })
 
+  test('a terminal item claimed again under a revoked Policy stays terminal and is not re-armed', async () => {
+    const fixture = await serviceHarness({ extra: verdictGate() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { contract, itemId } = await executedBound(fixture, peer, 'gate-revive-1', 'occ-1')
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract, Date.now(), 'failed') })
+    expect(fixture.service.settleAcceptance(itemId)).toMatchObject({ blockedReason: 'acceptance-not-achieved' })
+    const dispatch = readStore(fixture).getDispatch(itemId)
+    fixture.policy.setAllow(false)
+    expect(errorCode(() => fixture.service.claim(workerAgent('occ-1')))).toBe('claim-conflict')
+    expect(readStore(fixture).findItemById(itemId)).toMatchObject({ state: 'blocked', stateReason: 'acceptance-not-achieved', attempt: 1 })
+    expect(readStore(fixture).getDispatch(itemId)).toEqual(dispatch)
+    // A ready item is protected the same way.
+    fixture.policy.setAllow(true)
+    const other = await executedBound(fixture, peer, 'gate-revive-2', 'occ-2')
+    fixture.policy.setAllow(false)
+    expect(errorCode(() => fixture.service.claim(workerAgent('occ-2')))).toBe('claim-conflict')
+    expect(readStore(fixture).findItemById(other.itemId)).toMatchObject({ state: 'ready', attempt: 1 })
+  })
+
+  test('acceptance.verdictGate only moves the generation a verdict was settled for', async () => {
+    const fixture = await serviceHarness({ extra: verdictGate() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { contract, itemId } = await executedBound(fixture, peer, 'gate-generation-1', 'occ-1')
+    const store = readStore(fixture)
+    const item = store.findItemById(itemId)!
+    const receipt = serviceReceipt(contract, Date.now(), 'failed')
+    const base = { itemId, verifier: 'assistant-verifier' as const, contractId: contract.id, contractDigest: contract.digest,
+      receiptId: receipt.id, receiptDigest: receipt.digest, objectiveStatus: 'not-achieved' as const, completedAt: receipt.completedAt }
+    // A verdict settled for an earlier generation never blocks this one.
+    expect(store.recordAcceptanceVerdict({ ...base, attempt: item.attempt, occurrenceId: 'occ-earlier' },
+      { attempt: item.attempt, occurrenceId: item.occurrenceId })).not.toHaveProperty('blockedReason')
+    expect(store.findItemById(itemId)).toMatchObject({ state: 'ready' })
+    expect(store.acceptanceVerdict(itemId)).toMatchObject({ attempt: 1, occurrenceId: 'occ-earlier' })
+    expect(fixture.service.settleAcceptance(itemId)).not.toHaveProperty('blockedReason')
+    expect(blockedEvents(fixture, itemId)).toEqual([])
+  })
+
+  test('acceptance.verdictGate never moves an item on a verdict recorded without its generation', async () => {
+    const fixture = await serviceHarness({ extra: verdictGate() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { contract, itemId } = await executedBound(fixture, peer, 'gate-legacy-1', 'occ-1')
+    const store = readStore(fixture)
+    const receipt = serviceReceipt(contract, Date.now(), 'failed')
+    store.recordAcceptanceVerdict({ itemId, verifier: 'assistant-verifier', contractId: contract.id, contractDigest: contract.digest,
+      receiptId: receipt.id, receiptDigest: receipt.digest, objectiveStatus: 'not-achieved', completedAt: receipt.completedAt })
+    expect(store.acceptanceVerdict(itemId)).not.toHaveProperty('attempt')
+    expect(fixture.service.settleAcceptance(itemId)).toMatchObject({ outcome: 'already-verified' })
+    expect(store.findItemById(itemId)).toMatchObject({ state: 'ready' })
+  })
+
+  test('acceptance.verdictGate moves a late-bound worker run and a needs-attention on the wake', async () => {
+    const fixture = await serviceHarness({ extra: { acceptance: { autoSettle: { enabled: true }, bindWorkerRun: { enabled: true }, verdictGate: { enabled: true } } } })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { itemId, occurrenceId } = admitPlain(fixture, 'gate-late-bound')
+    const contract = publishWorkerContract(fixture, peer, occurrenceId)
+    fixture.service.claim(workerAgent(occurrenceId))
+    fixture.automations?.wake()
+    await fixture.service.report(workerAgent(occurrenceId), { status: 'ready', summary: 'done', idempotencyKey: 'r-gate-late' })
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract, Date.now(), 'failed') })
+    fixture.automations?.wake()
+    expect(readStore(fixture).findItemById(itemId)).toMatchObject({ state: 'blocked', stateReason: 'acceptance-not-achieved' })
+    expect(fixture.service.acceptanceVerdict(itemId)).toMatchObject({ attempt: 1, occurrenceId })
+
+    const attention = await executedBound(fixture, peer, 'gate-wake-attention', 'occ-2')
+    peer.tasks.set(attention.contract.id, { contract: attention.contract, state: 'needs-attention', reason: 'contract-expired', receipt: null })
+    fixture.automations?.wake()
+    expect(readStore(fixture).findItemById(attention.itemId)).toMatchObject({ state: 'blocked', stateReason: 'acceptance-needs-attention' })
+  })
+
   test('acceptance.verdictGate enabled after a failed verdict applies once on the next settle', async () => {
     const before = await serviceHarness({ extra: autoSettle() })
     const peer = new FakeVerifierPeer(before.ctx)

@@ -254,6 +254,8 @@ export function settleAcceptance(
       receiptDigest: receipt.digest,
       objectiveStatus: receipt.objectiveStatus,
       completedAt: receipt.completedAt,
+      attempt: item.attempt,
+      occurrenceId: item.occurrenceId,
     }, gate)
   } catch (error) {
     // A different receipt already won (first-receipt-wins); report, never overwrite.
