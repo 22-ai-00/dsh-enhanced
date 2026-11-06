@@ -519,6 +519,11 @@ export interface Config {
    * as are over-cap notices unless `attentionAttachOverCap` attaches them.
    */
   attentionEnforce?: boolean
+  /**
+   * Opt-in (default off): `routeWorkItemReport` keeps a report on the route of
+   * the same item's earlier still-unsettled report, so one lane orders both.
+   */
+  ownerReportRouting?: { orderAcrossLanes?: boolean }
 }
 
 export interface DeliveryInboundRuntime extends InboundMessageProcessor {
@@ -762,6 +767,7 @@ const configSchema = Schema.object({
   toolApprovalPreparationTimeoutMs: Schema.number().step(1).min(100).max(30_000).default(10_000),
   attentionAttachOverCap: Schema.boolean().default(false),
   attentionEnforce: Schema.boolean().default(false),
+  ownerReportRouting: Schema.object({ orderAcrossLanes: Schema.boolean().default(false) }),
   ownerRoutes: Schema.array(Schema.object({
     id: Schema.string().min(1).required(),
     conversation: Schema.object({
@@ -5227,6 +5233,14 @@ export class AssistantDeliveryService extends Service {
    * newest inbound message (`inbox_messages.received_at`); an available origin
    * still wins unless an eligible alias received strictly newer inbound, and
    * also when that alias is refused before its linked row commits.
+   *
+   * Opt-in `ownerReportRouting.orderAcrossLanes` (Delivery config) keeps one
+   * item's reports in revision order across channels: when an earlier report
+   * of the same item is still unsettled, the new one sticks to that route
+   * (same origin, or same alias while it is still eligible and owner-listed)
+   * so the existing per-lane claim order sends it after. A sticky origin also
+   * overrides `prefer: 'recent'`. An unusable sticky route falls back to the
+   * rules above, so ordering never blocks delivery.
    */
   routeWorkItemReport(input: Readonly<{ sourceId: string; workspace: string; originBindingId: string; idempotencyKey: string; text: string
     format?: 'markdown' | 'plain'; itemId: string; reportRevision: number; linkedFallback: readonly string[]; prefer?: 'origin' | 'recent' }>): Readonly<{ route: 'origin' } | { route: 'linked'; outbox: OutboxRecord }> {
@@ -5259,7 +5273,13 @@ export class AssistantDeliveryService extends Service {
       throw new AssistantDeliveryError('missing-binding', 'report origin binding does not exist')
     }
     const recent = input.prefer === 'recent'
-    if (origin.status === 'active' && this.hasActivePrincipal(origin) && !recent) return Object.freeze({ route: 'origin' as const })
+    // Replays returned above, so a sticky row is always another report of this item.
+    const sticky = this.config.ownerReportRouting?.orderAcrossLanes === true
+      ? this.deliveryStore.findUnsettledWorkItemReport({ sourceIds: [sourceId, input.sourceId], workspace: input.workspace,
+        originBindingId: origin.id, itemId: input.itemId, beforeRevision: input.reportRevision })
+      : undefined
+    const stickyLinked = sticky?.route === 'linked'
+    if (origin.status === 'active' && this.hasActivePrincipal(origin) && !recent && !stickyLinked) return Object.freeze({ route: 'origin' as const })
     // A `/new` rotation revokes the origin and inserts a successor in the same
     // conversation for the same principal. That origin is still available: keep
     // the origin path (and its existing failure semantics) rather than reroute.
@@ -5267,7 +5287,7 @@ export class AssistantDeliveryService extends Service {
     const originAvailable = (origin.status === 'active' && this.hasActivePrincipal(origin)) || (successor !== undefined && successor.id !== origin.id
       && successor.workspace === origin.workspace && successor.agentPreset === origin.agentPreset
       && JSON.stringify(successor.principal) === JSON.stringify(origin.principal) && this.hasActivePrincipal(successor))
-    if (originAvailable && !recent) return Object.freeze({ route: 'origin' as const })
+    if (originAvailable && ((!recent && !stickyLinked) || sticky?.route === 'origin')) return Object.freeze({ route: 'origin' as const })
     const owner = this.deliveryStore.getPrincipal(origin.principal)
     if (owner?.status !== 'active' || owner.role !== 'owner' || JSON.stringify(owner.principal) !== JSON.stringify(origin.principal)) {
       if (originAvailable) return Object.freeze({ route: 'origin' as const })
@@ -5289,7 +5309,17 @@ export class AssistantDeliveryService extends Service {
       return { binding, alias }
     }
     let picked: ReturnType<typeof eligible>
-    if (recent) {
+    if (stickyLinked) {
+      // Same alias binding only: a revoked, relinked, unlisted or ambiguous alias is not sticky.
+      const binding = this.deliveryStore.getBinding(sticky.bindingId)
+      const aliasId = binding === undefined ? undefined : externalPrincipalId(binding.principal)
+      const found = aliasId === undefined || !input.linkedFallback.includes(aliasId) ? undefined : eligible(aliasId)
+      // A kept alias queues behind the earlier report through the per-lane claim order.
+      if (found?.binding.id === sticky.bindingId) picked = found
+      else if (originAvailable && !recent) return Object.freeze({ route: 'origin' as const })
+    }
+    const stickyPicked = picked !== undefined
+    if (!stickyPicked && recent) {
       // Opt-in: rank eligible aliases (one Policy evaluate each) by the owner's
       // newest inbound message (stable sort keeps list order on ties). An
       // available origin wins unless an eligible alias received strictly newer inbound.
@@ -5302,7 +5332,7 @@ export class AssistantDeliveryService extends Service {
       candidates.sort((left, right) => at(left.binding.id) === at(right.binding.id) ? 0 : at(left.binding.id) < at(right.binding.id) ? 1 : -1)
       picked = candidates[0]
       if (originAvailable && (picked === undefined || !(at(picked.binding.id) > at(origin.id)))) return Object.freeze({ route: 'origin' as const })
-    } else {
+    } else if (!stickyPicked) {
       for (const aliasId of input.linkedFallback) {
         picked = eligible(aliasId)
         if (picked !== undefined) break
@@ -5327,11 +5357,11 @@ export class AssistantDeliveryService extends Service {
           [`${linkedReportMetadataPrefix}.bindingGeneration`]: String(binding.generation),
         } }, undefined, { lane: 'background', lanePurpose: { purpose: 'result', workItemId: input.itemId } })
       } catch (error) {
-        // `prefer: 'recent'` with an available origin: a refusal raised before
+        // `prefer: 'recent'` or a sticky alias with an available origin: a refusal raised before
         // the linked row commits (Policy authorize deny, attention enforce,
         // binding change) keeps the origin path instead of losing the report.
         // A committed linked row is final and is never paired with an origin send.
-        if (recent && originAvailable && error instanceof AssistantDeliveryError
+        if ((recent || stickyPicked) && originAvailable && error instanceof AssistantDeliveryError
           && this.deliveryStore.getOutboxByIdempotencyKey(linkedKey) === undefined) return Object.freeze({ route: 'origin' as const })
         throw error
       }

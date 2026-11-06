@@ -2731,6 +2731,64 @@ export class DeliveryStore {
     return new Map(rows.flatMap(row => row.received_at === null ? [] : [[row.binding_id, row.received_at] as const]))
   }
 
+  /**
+   * Read-only: the newest still-unsettled earlier report of one work item from
+   * one source (any of `sourceIds`: canonical and as-sent forms), so a router can keep the next revision behind it on one lane.
+   * Unsettled means the claim-order states (`pending`, `retry_wait`,
+   * `attempting`, `unknown_after_send`) without an operator cancel; terminal
+   * rows never match. Scoped by the origin binding's workspace and the
+   * `outbox_claim` status index. A linked row is a Host-routed
+   * `dsh.linked-report` v1 row of this origin with a lower `reportRevision`.
+   * An origin row is queued on the origin binding and is either a typed report
+   * (`delivery_work_item_reports` target with a lower `reportRevision`) or a
+   * plain background notice whose WP19 audit row records `purpose: 'result'`
+   * and this `workItemId`; that plain lane carries no revision, so any such
+   * committed row of the item counts as earlier.
+   */
+  findUnsettledWorkItemReport(input: Readonly<{ sourceIds: readonly string[]; workspace: string; originBindingId: string
+    itemId: string; beforeRevision: number }>): Readonly<{ outboxId: string; bindingId: string; route: 'origin' | 'linked' }> | undefined {
+    this.assertOpen()
+    const sourceIds = JSON.stringify([...new Set(input.sourceIds)])
+    const row = this.database.prepare(`
+      SELECT o.id, o.binding_id, json_extract(o.intent_json, '$.metadata."dsh.linked-report"') IS NOT NULL AS linked
+      FROM outbox_messages AS o
+      JOIN conversation_bindings AS b ON b.id = o.binding_id AND b.workspace = ?
+      WHERE o.status IN ('pending', 'retry_wait', 'attempting', 'unknown_after_send')
+        AND NOT EXISTS (
+          SELECT 1 FROM dead_letter_resolutions AS resolution
+          WHERE resolution.kind = 'outbox' AND resolution.message_id = o.id
+            AND resolution.attempt_count = o.attempt_count AND resolution.resolution = 'cancel'
+        )
+        AND ((
+          o.idempotency_key GLOB 'linked-report:*'
+          AND json_extract(o.intent_json, '$.metadata."dsh.linked-report"') = 'v1'
+          AND json_extract(o.intent_json, '$.metadata."dsh.linked-report.sourceId"') IN (SELECT value FROM json_each(?))
+          AND json_extract(o.intent_json, '$.metadata."dsh.linked-report.originBindingId"') = ?
+          AND json_extract(o.intent_json, '$.metadata."dsh.linked-report.itemId"') = ?
+          AND CAST(json_extract(o.intent_json, '$.metadata."dsh.linked-report.reportRevision"') AS INTEGER) < ?
+        ) OR (
+          o.binding_id = ?
+          AND json_type(o.intent_json, '$.metadata."dsh.linked-report"') IS NULL
+          AND (EXISTS (
+            SELECT 1 FROM delivery_work_item_reports AS report
+            WHERE report.outbox_id = o.id AND json_extract(report.target_json, '$.sourceId') IN (SELECT value FROM json_each(?))
+              AND json_extract(report.target_json, '$.itemId') = ?
+              AND json_extract(report.target_json, '$.reportRevision') < ?
+          ) OR (NOT EXISTS (SELECT 1 FROM delivery_work_item_reports AS report WHERE report.outbox_id = o.id)
+            AND EXISTS (
+              SELECT 1 FROM delivery_attention_audit AS audit
+              WHERE audit.outbox_id = o.id AND audit.lane = 'background' AND audit.purpose = 'result'
+                AND audit.source_id IN (SELECT value FROM json_each(?)) AND audit.work_item_id = ?
+            )))
+        ))
+      ORDER BY o.rowid DESC LIMIT 1
+    `).get(input.workspace, sourceIds, input.originBindingId, input.itemId, input.beforeRevision,
+      input.originBindingId, sourceIds, input.itemId, input.beforeRevision, sourceIds, input.itemId) as
+      { id: string; binding_id: string; linked: number } | undefined
+    return row === undefined ? undefined
+      : Object.freeze({ outboxId: row.id, bindingId: row.binding_id, route: row.linked === 1 ? 'linked' as const : 'origin' as const })
+  }
+
   /** Snapshot one exact active owner binding under the Delivery write fence. */
   resolveApprovalRouteByBinding(input: Readonly<{
     sourceId: string

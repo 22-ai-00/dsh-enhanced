@@ -5,9 +5,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { AssistantDeliveryService } from '../src/service.ts'
+import { AssistantDeliveryError, AssistantDeliveryService } from '../src/service.ts'
 import { DeliveryStore } from '../src/store.ts'
 import type { ExternalPrincipalKey } from '../src/types.ts'
+import { workItemReplyDigest, type WorkItemReplyConsumerRegistration } from '../src/work-item-replies.ts'
 
 const roots: string[] = []
 const contexts = new Set<Context>()
@@ -26,7 +27,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-async function start(root: string) {
+async function start(root: string, options: Readonly<{ orderAcrossLanes?: boolean }> = {}) {
   const ctx = new Context()
   contexts.add(ctx)
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [
@@ -40,7 +41,8 @@ async function start(root: string) {
     context: { initiators: ['background' as const] } })),
   ] })
   await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'),
-    spoolPath: join(root, 'spool'), schedulerEnabled: false, retryBaseMs: 1, retryMaxMs: 1 })
+    spoolPath: join(root, 'spool'), schedulerEnabled: false, retryBaseMs: 1, retryMaxMs: 1,
+    ...(options.orderAcrossLanes === undefined ? {} : { ownerReportRouting: { orderAcrossLanes: options.orderAcrossLanes } }) })
   const service = ctx.assistantDelivery
   const store = (service as unknown as { deliveryStore: DeliveryStore }).deliveryStore
   const sends = { lark: vi.fn(async () => ({ outcome: 'accepted' as const, providerMessageId: 'lark-msg' })),
@@ -52,10 +54,10 @@ async function start(root: string) {
   return { ctx, service, store, sends }
 }
 
-async function fixture() {
+async function fixture(options: Readonly<{ orderAcrossLanes?: boolean }> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'delivery-linked-report-'))
   roots.push(root)
-  const live = await start(root)
+  const live = await start(root, options)
   const pair = (key: ExternalPrincipalKey) => {
     const challenge = live.service.issuePairing('test', key)
     return live.service.confirmPairing({ challengeId: challenge.challenge.id, principal: key, code: challenge.code })
@@ -438,6 +440,201 @@ describe('linked work-item report routing', () => {
       expect(f.store.getOutbox(routed.outbox.id)!.intent.bindingId).toBe(deniedBinding.id)
       expect(() => f.service.routeWorkItemReport({ ...report(f, [id(alias)], 'other-key'), prefer: 'newest' as 'recent' }))
         .toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
+    })
+  })
+
+  describe('ownerReportRouting.orderAcrossLanes', () => {
+    const tamper = (f: Fixture, sql: string, ...params: Array<string | number>) => {
+      const db = new DatabaseSync(join(f.root, 'delivery.sqlite'))
+      try { db.prepare(sql).run(...params) } finally { db.close() }
+    }
+    const inbound = (f: Fixture, bindingId: string, receivedAt: number) => {
+      const binding = f.store.getBinding(bindingId)!
+      tamper(f, `INSERT INTO inbox_messages (id, channel, account, event_id, envelope_hash, envelope_json, status, binding_id, received_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, '{}', 'processed', ?, ?, ?)`, `in-${bindingId}-${receivedAt}`, binding.conversation.channel,
+      binding.conversation.account, `evt-${bindingId}-${receivedAt}`, 'a'.repeat(64), bindingId, receivedAt, receivedAt)
+    }
+    const setStatus = (f: Fixture, outboxId: string, status: string) =>
+      tamper(f, `UPDATE outbox_messages SET status = ? WHERE id = ?`, status, outboxId)
+    // Operator settlement goes through the public seam so the v9 receipt fence stays satisfied.
+    const resolveOutbox = (f: Fixture, outboxId: string, resolution: 'cancel' | 'retry') =>
+      f.store.resolveOutbox({ outboxId, expectedAttemptCount: f.store.getOutbox(outboxId)!.attemptCount,
+        resolution, operatorId: 'test-operator' })
+    // A recovered origin channel: the same binding row becomes active again.
+    const restoreOrigin = (f: Fixture) =>
+      tamper(f, `UPDATE conversation_bindings SET status = 'active', version = version + 1 WHERE id = ?`, f.origin.id)
+    const revision = (f: Fixture, linkedFallback: readonly string[], reportRevision: number, extra: Readonly<{ prefer?: 'recent' }> = {}) =>
+      ({ ...report(f, linkedFallback, `work-item-report:item-1:${String(reportRevision)}`), reportRevision, text: `report ${String(reportRevision)}`, ...extra })
+    // The two shapes WorkItems uses on the origin: the typed report lane or a plain background notice.
+    const originReport = (f: Fixture, kind: 'typed' | 'plain', reportRevision = 1) => {
+      const input = { sourceId, workspace, bindingId: f.origin.id, idempotencyKey: `work-item-report:item-1:${String(reportRevision)}`,
+        text: `report ${String(reportRevision)}`, format: 'markdown' as const }
+      if (kind === 'plain') return f.service.enqueueBackground({ ...input, attention: { purpose: 'result', workItemId: 'item-1' } })
+      // Narrow work-item report consumer: every report it is asked about is current.
+      const ownerRow = f.store.getPrincipal(owner)!
+      const registration: WorkItemReplyConsumerRegistration = { protocol: 1, sourceId, continuationAutomationId: 'reply-worker',
+        inspectReport: request => ({ protocol: 'assistant-delivery/work-item-report/v1', itemId: request.itemId, reportRevision: request.reportRevision,
+          streamId: request.itemId, reportDigest: workItemReplyDigest(['report', request.itemId, String(request.reportRevision)]), sourceId,
+          scope: { workspace, preset: 'primary' }, owner: { principalRecordId: ownerRow.id, principalVersion: ownerRow.version } }),
+        inspectChild: () => true, onPending: () => {}, onCancelled: () => {} }
+      f.ctx.provide('assistantWorkItems' as never, { ownsWorkItemReplyRegistration: (value: unknown) => value === registration } as never)
+      f.service.registerWorkItemReplyConsumer(registration)
+      return f.service.enqueueWorkItemReport({ ...input, itemId: 'item-1', reportRevision })
+    }
+    // Origin rev1 is waiting to retry while the alias spoke last.
+    const originWaiting = async (f: Fixture, kind: 'typed' | 'plain') => {
+      f.link()
+      const first = await originReport(f, kind)
+      setStatus(f, first.id, 'retry_wait')
+      inbound(f, f.origin.id, 1_000)
+      inbound(f, f.aliasBinding.id, 2_000)
+      return first
+    }
+    // Alias rev1 is queued while the origin was down; the origin has since recovered.
+    const aliasWaiting = (f: Fixture) => {
+      f.link()
+      f.dropOrigin()
+      const first = f.service.routeWorkItemReport(revision(f, [id(alias)], 1)) as { route: 'linked'; outbox: { id: string } }
+      expect(first.route).toBe('linked')
+      restoreOrigin(f)
+      return first
+    }
+
+    test.each(['typed', 'plain'] as const)("an unsettled %s origin report keeps the next revision on the origin despite prefer: 'recent'", async kind => {
+      const f = await fixture({ orderAcrossLanes: true })
+      await originWaiting(f, kind)
+      expect(f.service.routeWorkItemReport(revision(f, [id(alias)], 2, { prefer: 'recent' }))).toEqual({ route: 'origin' })
+      expect(f.store.listOutbox({ bindingId: f.aliasBinding.id })).toHaveLength(0)
+    })
+
+    test('an unsettled alias report keeps the next revision on the same alias, sent after it', async () => {
+      const f = await fixture({ orderAcrossLanes: true })
+      const first = aliasWaiting(f)
+      const second = f.service.routeWorkItemReport(revision(f, [id(alias)], 2)) as { route: 'linked'; outbox: { id: string } }
+      expect(second.route).toBe('linked')
+      expect(f.store.getOutbox(second.outbox.id)!.intent).toMatchObject({ bindingId: f.aliasBinding.id,
+        metadata: { 'dsh.linked-report.reportRevision': '2', 'dsh.linked-report.originBindingId': f.origin.id } })
+      // While rev1 has an unknown outcome the same-lane claim order holds rev2 back.
+      setStatus(f, first.outbox.id, 'unknown_after_send')
+      await drain(f.service)
+      expect(f.sends.telegram).not.toHaveBeenCalled()
+      expect(f.store.getOutbox(second.outbox.id)).toMatchObject({ status: 'pending' })
+      resolveOutbox(f, first.outbox.id, 'retry')
+      await drain(f.service)
+      await drain(f.service)
+      const texts = f.sends.telegram.mock.calls.map(call => JSON.stringify(call))
+      expect(texts).toHaveLength(2)
+      expect(texts[0]).toContain('report 1')
+      expect(texts[1]).toContain('report 2')
+      expect(f.sends.lark).not.toHaveBeenCalled()
+    })
+
+    test('flag off keeps the existing routing for both cases', async () => {
+      const f = await fixture()
+      await originWaiting(f, 'typed')
+      expect(f.service.routeWorkItemReport(revision(f, [id(alias)], 2, { prefer: 'recent' }))).toMatchObject({ route: 'linked' })
+      const g = await fixture({ orderAcrossLanes: false })
+      aliasWaiting(g)
+      expect(g.service.routeWorkItemReport(revision(g, [id(alias)], 2))).toEqual({ route: 'origin' })
+      expect(g.store.listOutbox({ bindingId: g.aliasBinding.id })).toHaveLength(1)
+    })
+
+    test.each(['dead', 'accepted', 'delivered'])('an earlier report that is %s is not sticky', async status => {
+      const f = await fixture({ orderAcrossLanes: true })
+      const origin = await originWaiting(f, 'typed')
+      setStatus(f, origin.id, status)
+      expect(f.service.routeWorkItemReport(revision(f, [id(alias)], 2, { prefer: 'recent' }))).toMatchObject({ route: 'linked' })
+      const g = await fixture({ orderAcrossLanes: true })
+      const linked = aliasWaiting(g)
+      setStatus(g, linked.outbox.id, status)
+      expect(g.service.routeWorkItemReport(revision(g, [id(alias)], 2))).toEqual({ route: 'origin' })
+    })
+
+    test('only a lower revision of the same item is sticky', async () => {
+      const f = await fixture({ orderAcrossLanes: true })
+      f.link()
+      const later = await originReport(f, 'typed', 3)
+      setStatus(f, later.id, 'retry_wait')
+      inbound(f, f.origin.id, 1_000)
+      inbound(f, f.aliasBinding.id, 2_000)
+      expect(f.service.routeWorkItemReport(revision(f, [id(alias)], 2, { prefer: 'recent' }))).toMatchObject({ route: 'linked' })
+      expect(f.service.routeWorkItemReport({ ...revision(f, [id(alias)], 4, { prefer: 'recent' }), itemId: 'item-2' })).toMatchObject({ route: 'linked' })
+    })
+
+    test('a sticky alias that is revoked, unlisted or no longer linked falls back to normal routing', async () => {
+      const f = await fixture({ orderAcrossLanes: true })
+      aliasWaiting(f)
+      // Removed from the owner's list: the origin is available again.
+      expect(f.service.routeWorkItemReport({ ...revision(f, [], 2) })).toEqual({ route: 'origin' })
+      const g = await fixture({ orderAcrossLanes: true })
+      aliasWaiting(g)
+      g.revokeBindingRow(g.aliasBinding.id)
+      expect(g.service.routeWorkItemReport(revision(g, [id(alias)], 2))).toEqual({ route: 'origin' })
+      // With the origin gone too, the normal rules fail closed rather than block.
+      g.dropOrigin()
+      expect(() => g.service.routeWorkItemReport(revision(g, [id(alias)], 3))).toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    })
+
+    test('a sticky origin that is unavailable falls back to the linked alias', async () => {
+      const f = await fixture({ orderAcrossLanes: true })
+      await originWaiting(f, 'typed')
+      f.dropOrigin()
+      expect(f.service.routeWorkItemReport(revision(f, [id(alias)], 2))).toMatchObject({ route: 'linked' })
+    })
+
+    test('an operator-cancelled unknown report is not unsettled', async () => {
+      const f = await fixture({ orderAcrossLanes: true })
+      const linked = aliasWaiting(f)
+      setStatus(f, linked.outbox.id, 'unknown_after_send')
+      resolveOutbox(f, linked.outbox.id, 'cancel')
+      expect(f.store.getOutbox(linked.outbox.id)).toMatchObject({ status: 'unknown_after_send', failureCode: 'operator-cancelled-unknown' })
+      // The cancelled alias row no longer holds the next revision on its lane.
+      expect(f.service.routeWorkItemReport(revision(f, [id(alias)], 2))).toEqual({ route: 'origin' })
+      const g = await fixture({ orderAcrossLanes: true })
+      const origin = await originWaiting(g, 'typed')
+      setStatus(g, origin.id, 'unknown_after_send')
+      resolveOutbox(g, origin.id, 'cancel')
+      // The cancelled origin row no longer overrides prefer: 'recent'.
+      expect(g.service.routeWorkItemReport(revision(g, [id(alias)], 2, { prefer: 'recent' }))).toMatchObject({ route: 'linked' })
+    })
+
+    test('a sticky alias refusal before commit falls back to the origin; after commit it throws', async () => {
+      const f = await fixture({ orderAcrossLanes: true })
+      aliasWaiting(f)
+      const enqueue = f.store.enqueue.bind(f.store)
+      const refusal = vi.spyOn(f.store, 'enqueue').mockImplementationOnce(() => {
+        throw new AssistantDeliveryError('missing-binding', 'alias refused before commit')
+      })
+      expect(f.service.routeWorkItemReport(revision(f, [id(alias)], 2))).toEqual({ route: 'origin' })
+      expect(f.store.listOutbox({ bindingId: f.aliasBinding.id })).toHaveLength(1)
+      refusal.mockRestore()
+      // A refusal raised after the linked row committed is final: never pair it with an origin send.
+      const committed = vi.spyOn(f.store, 'enqueue').mockImplementationOnce(input => {
+        enqueue(input)
+        throw new AssistantDeliveryError('missing-binding', 'alias refused after commit')
+      })
+      expect(() => f.service.routeWorkItemReport(revision(f, [id(alias)], 3)))
+        .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+      committed.mockRestore()
+      expect(f.store.listOutbox({ bindingId: f.aliasBinding.id })).toHaveLength(2)
+      await drain(f.service)
+      expect(f.sends.lark).not.toHaveBeenCalled()
+    })
+
+    test('replay and idempotency are unchanged', async () => {
+      const f = await fixture({ orderAcrossLanes: true })
+      const first = aliasWaiting(f)
+      // A replay of rev1 keeps its committed alias row even though the origin recovered.
+      expect(f.service.routeWorkItemReport(revision(f, [id(alias)], 1))).toMatchObject({ route: 'linked', outbox: { id: first.outbox.id } })
+      const second = f.service.routeWorkItemReport(revision(f, [id(alias)], 2)) as { route: 'linked'; outbox: { id: string } }
+      expect(f.service.routeWorkItemReport(revision(f, [id(alias)], 2))).toMatchObject({ outbox: { id: second.outbox.id } })
+      expect(() => f.service.routeWorkItemReport({ ...revision(f, [id(alias)], 2), itemId: 'item-2' }))
+        .toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
+      expect(f.store.listOutbox({ bindingId: f.aliasBinding.id })).toHaveLength(2)
+      // A key already committed on the origin still returns the origin.
+      const g = await fixture({ orderAcrossLanes: true })
+      await originWaiting(g, 'typed')
+      expect(g.service.routeWorkItemReport(revision(g, [id(alias)], 1, { prefer: 'recent' }))).toEqual({ route: 'origin' })
     })
   })
 })
