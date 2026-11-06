@@ -237,6 +237,8 @@ export type WorkItemDecisionRefusal =
   | 'acceptance-already-settled'
   /** Author, verifier and executor are not three distinct identities. */
   | 'acceptance-not-independent'
+  | 'acceptance-not-awaiting'
+  | 'acceptance-contract-bound'
 
 /**
  * Verdict read back from the independent verifier for one bound item.
@@ -264,6 +266,8 @@ export type WorkItemAcceptanceSettleResult =
   | Readonly<{ outcome: 'pending'; state: 'awaiting-execution' | 'pending' | 'verifying' }>
   | Readonly<{ outcome: 'needs-attention'; reason: string | null }>
   | Readonly<{ outcome: 'verified' | 'already-verified'; verdict: WorkItemAcceptanceVerdict }>
+  /** A different receipt already settled this item (first receipt wins); nothing was written. */
+  | Readonly<{ outcome: 'identity-mismatch'; verdict: WorkItemAcceptanceVerdict; receiptDigest: string }>
 
 export type WorkItemDecisionAdmitResult =
   | Readonly<{ outcome: 'admitted'; item: WorkItemRecord; dispatch: WorkItemDispatchRecord; mandate: WorkItemMandateBasis }>

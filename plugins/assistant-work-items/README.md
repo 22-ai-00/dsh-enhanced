@@ -336,10 +336,11 @@ host-only `admitDecision(decision)`（service 与 `WorkItemAdmission` 同名方�
 
 ### 独立验收绑定（WP21 第 4 片）
 
-- 决策可选带 `acceptance: { contractId, contractDigest }`，只是句柄，不接受契约正文或判定。准入时 WorkItems 自己经 `assistantVerifier.inspectAcceptedTask(contractId)` 读回契约：须通过 `validateTaskAcceptanceContract`、id/digest 与句柄一致、`scope.workspace/preset` 与 owner 精确一致、`owner.principalRecordId/principalVersion` 一致、未过期、尚无回执且非 done/needs-attention；否则在 Policy 与任何写入之前拒绝（`acceptance-unavailable`/`-mismatch`/`-expired`/`-already-settled`/`-not-independent`）。
+- 决策可选带 `acceptance: { contractId, contractDigest }`，只是句柄，不接受契约正文或判定。准入时 WorkItems 自己经 `assistantVerifier.inspectAcceptedTask(contractId)` 读回契约：须通过 `validateTaskAcceptanceContract`、id/digest 与句柄一致、`scope.workspace/preset` 与 owner 精确一致、`owner.principalRecordId/principalVersion` 一致、未过期、尚无回执且状态恰为 `awaiting-execution`（pending/verifying 可能用本项运行前采集的证据结算，拒为 `acceptance-not-awaiting`）、且该 contractId 尚未被任何工作项绑定（一契约只绑一项，`acceptance-contract-bound`；同一 decisionId 重放先于此检查，仍回原项）；否则在 Policy 与任何写入之前拒绝（`acceptance-unavailable`/`-mismatch`/`-expired`/`-already-settled`/`-not-awaiting`/`-contract-bound`/`-not-independent`）。
 - 冻结：mandate 新增 `acceptance`（`work-items/acceptance-binding/v1`：verifier=`assistant-verifier`、author、contractId/Digest、taskKind、task/objective/profile 摘要、criteria 数、expiresAt）。author 由契约 task kind 推出（automation-run→automations、foreground-turn→delivery、goal-*→goals），须与 verifier、执行方 `assistant-work-items` 三方互异；已存绑定结构不符即 `malformed-basis`。句柄进入 mandate digest（无句柄时 digest 与第 1 片完全一致），同 decisionId 换句柄为 `identity-mismatch`。
-- 完成判定：host-only `settleAcceptance(itemId)` 不接受判定输入，只从 verifier 读回同一契约的 `done` 回执并以 `validateTaskVerificationReceipt` 校验，objectiveStatus 取回执由准则结果推出的值；契约漂移、回执无效或缺 verifier 一律不写。每项至多一条 `acceptance-verified` 事件（同回执重放幂等，不同回执 `identity-mismatch`），`acceptanceVerdict(itemId)` 读回。worker 的 `ready` 报告不产生任何判定。仅追加事件行，**无 schema 变更**。
-- 未覆盖：判定只记事件，不推进工作项状态或 outcome 表；按需拉取，无定时器；尚无调用方提供句柄。
+- 完成判定：host-only `settleAcceptance(itemId)` 不接受判定输入，只从 verifier 读回同一契约的 `done` 回执并以 `validateTaskVerificationReceipt` 校验，objectiveStatus 取回执由准则结果推出的值；回执 `startedAt` 早于工作项创建时间、契约漂移、回执无效或缺 verifier 一律不写（`drift`/`unavailable`）。结算前先做本地无副作用门：已存依据须完整且指向本项（不调用 Policy，不写审计），且工作项须已被认领执行并处于 `ready`；从未认领、park（含授权撤销）、blocked、failed、dropped 均为 `invalid-state`。每项至多一条 `acceptance-verified` 事件，先到回执胜出：同回执重放幂等（`already-verified`），已记判定与当前绑定契约不符为 `drift`，竞争中落败的不同回执返回 `{ outcome: 'identity-mismatch', verdict, receiptDigest }` 而非抛错，绝不覆盖；`acceptanceVerdict(itemId)` 读回。worker 的 `ready` 报告不产生任何判定。仅追加事件行，**无 schema 变更**。
+- 独立性依赖宿主注入的 `assistantVerifier` 服务槽：WorkItems 只信任该槽提供的契约与回执，宿主须保证注入的是真正独立的 verifier，而非执行方自身或其代理。
+- 未覆盖：判定只记事件，不推进工作项状态或 outcome 表；按需拉取，无定时器；尚无调用方提供句柄；contractId 查重按已存依据 JSON 全表扫描（无索引）。
 
 ### Policy 变更通知与跟进归属（WP21 第 2 片）
 

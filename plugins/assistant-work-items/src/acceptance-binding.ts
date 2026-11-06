@@ -25,6 +25,7 @@ import type {
   WorkItemDecisionRefusal,
   WorkItemRecord,
 } from './types.ts'
+import { WorkItemError } from './types.ts'
 
 export const ACCEPTANCE_BINDING_PROTOCOL = 'work-items/acceptance-binding/v1'
 /** The only identity whose receipt may settle a bound item. */
@@ -100,6 +101,9 @@ export function resolveAcceptanceBinding(
   }
   if (contract.expiresAt <= now) return 'acceptance-expired'
   if (read.value.state === 'done' || read.value.state === 'needs-attention' || read.value.receipt !== null) return 'acceptance-already-settled'
+  // Only a contract nobody has started verifying may bind new work; a pending
+  // or verifying one could settle on evidence gathered before this item ran.
+  if (read.value.state !== 'awaiting-execution') return 'acceptance-not-awaiting'
   const author = acceptanceAuthorFor(contract.task.kind)
   if (author === undefined || !acceptanceIsIndependent({ author, verifier: ACCEPTANCE_VERIFIER, executor: ACCEPTANCE_EXECUTOR })) {
     return 'acceptance-not-independent'
@@ -160,7 +164,13 @@ export function settleAcceptance(
   binding: WorkItemAcceptanceBinding,
 ): WorkItemAcceptanceSettleResult {
   const recorded = sink.acceptanceVerdict(item.id)
-  if (recorded !== undefined) return Object.freeze({ outcome: 'already-verified', verdict: recorded })
+  if (recorded !== undefined) {
+    // First receipt wins, but only for the contract this binding froze.
+    if (recorded.contractId !== binding.contractId || recorded.contractDigest !== binding.contractDigest) {
+      return Object.freeze({ outcome: 'drift', detail: 'recorded verdict is for another contract' })
+    }
+    return Object.freeze({ outcome: 'already-verified', verdict: recorded })
+  }
   const read = inspect(verifier, binding.contractId)
   if (read.kind === 'unavailable') return Object.freeze({ outcome: 'unavailable', detail: read.detail })
   if (read.value === null || read.value === undefined) return Object.freeze({ outcome: 'drift', detail: 'verifier no longer holds the bound contract' })
@@ -177,18 +187,32 @@ export function settleAcceptance(
   } catch (error) {
     return Object.freeze({ outcome: 'drift', detail: `verifier receipt is invalid: ${error instanceof Error ? error.message : String(error)}` })
   }
+  // Defensive: validateTaskVerificationReceipt already binds the receipt to
+  // this contract's id and digest, so this cannot fire for a valid receipt.
   if (receipt.contractId !== binding.contractId || receipt.contractDigest !== binding.contractDigest) {
     return Object.freeze({ outcome: 'drift', detail: 'verifier receipt is for another contract' })
   }
-  const result = sink.recordAcceptanceVerdict({
-    itemId: item.id,
-    verifier: ACCEPTANCE_VERIFIER,
-    contractId: binding.contractId,
-    contractDigest: binding.contractDigest,
-    receiptId: receipt.id,
-    receiptDigest: receipt.digest,
-    objectiveStatus: receipt.objectiveStatus,
-    completedAt: receipt.completedAt,
-  })
+  // Evidence gathered before this item existed cannot complete it.
+  if (receipt.startedAt < item.createdAt) {
+    return Object.freeze({ outcome: 'drift', detail: 'verifier receipt predates the work item' })
+  }
+  let result
+  try {
+    result = sink.recordAcceptanceVerdict({
+      itemId: item.id,
+      verifier: ACCEPTANCE_VERIFIER,
+      contractId: binding.contractId,
+      contractDigest: binding.contractDigest,
+      receiptId: receipt.id,
+      receiptDigest: receipt.digest,
+      objectiveStatus: receipt.objectiveStatus,
+      completedAt: receipt.completedAt,
+    })
+  } catch (error) {
+    // A different receipt already won (first-receipt-wins); report, never overwrite.
+    const existing = error instanceof WorkItemError && error.code === 'identity-mismatch' ? sink.acceptanceVerdict(item.id) : undefined
+    if (existing === undefined) throw error
+    return Object.freeze({ outcome: 'identity-mismatch', verdict: existing, receiptDigest: receipt.digest })
+  }
   return Object.freeze({ outcome: result.created ? 'verified' : 'already-verified', verdict: result.verdict })
 }

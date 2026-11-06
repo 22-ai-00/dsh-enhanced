@@ -1,4 +1,9 @@
 import { Context, Service } from '@deepseek-ai/cordis'
+import {
+  createTaskAcceptanceContract,
+  createTaskVerificationReceipt,
+  type TaskAcceptanceContract,
+} from '@dsh-enhanced/task-acceptance-contract'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolDefinition, ToolExecution } from '@deepseek-ai/dsh-tools'
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
@@ -21,6 +26,7 @@ import type {
   PeerPolicyDecision,
   PeerPolicyRequest,
   PeerPolicyService,
+  PeerVerifierService,
 } from '../src/peers.ts'
 import { OUTCOME_EVIDENCE_SOURCE } from '../src/outcome.ts'
 import { AssistantWorkItemsService } from '../src/service.ts'
@@ -205,6 +211,53 @@ class FakeAutomationsPeer extends Service {
 interface RegisteredTool {
   readonly name: string
   execute(args: Record<string, unknown>, exec: unknown): Promise<Record<string, unknown>>
+}
+
+type VerifierInspection = NonNullable<ReturnType<NonNullable<PeerVerifierService['inspectAcceptedTask']>>>
+
+/** Host-injected independent verifier slot; the only source of a contract or receipt. */
+class FakeVerifierPeer extends Service {
+  readonly tasks = new Map<string, Omit<VerifierInspection, 'attempts'>>()
+  constructor(ctx: Context) { super(ctx, 'assistantVerifier') }
+  inspectAcceptedTask(contractId: string): VerifierInspection | null {
+    const task = this.tasks.get(contractId)
+    return task === undefined ? null : Object.freeze({ ...task, attempts: 0 })
+  }
+}
+
+function serviceContract(id = 'svc-acceptance-1'): TaskAcceptanceContract {
+  const now = Date.now()
+  return createTaskAcceptanceContract({
+    protocol: 'task-acceptance/v1', id,
+    scope: { workspace: WORKSPACE, preset: PRESET },
+    owner: { principalRecordId: 'principal-1', principalVersion: 7 },
+    task: { kind: 'automation-run', ref: `run-${id}` },
+    objective: 'The deploy step passes twice in a row.',
+    profile: { id: 'profile-1', version: 1, digest: 'a'.repeat(64) },
+    issuedAt: now - 1_000, expiresAt: now + 3_600_000,
+    criteria: [{ id: 'program', kind: 'process-behavior', authority: { id: 'node-22', digest: 'a'.repeat(64) }, artifactPath: 'fixtures/program.mjs', stdin: '', expectedStdout: 'ok\n', expectedExitCode: 0 }],
+    bounds: { maxDurationMs: 30_000, maxEvidenceBytes: 10_000 },
+  })
+}
+
+/** A passing receipt whose verification starts now, after the item exists. */
+function serviceReceipt(contract: TaskAcceptanceContract) {
+  const now = Date.now()
+  return createTaskVerificationReceipt(contract, {
+    protocol: 'task-verification/v1', id: 'svc-receipt-1', contractId: contract.id, contractDigest: contract.digest,
+    scope: contract.scope, owner: contract.owner, task: contract.task,
+    results: [{ criterionId: 'program', status: 'passed', reason: 'output-matched', evidence: [{ kind: 'process-output', ref: 'capture-1', digest: 'a'.repeat(64) }] }],
+    startedAt: now, completedAt: now + 1, validUntil: now + 1_800_000,
+  })
+}
+
+function boundDecision(contract: TaskAcceptanceContract, decisionId = 'svc-bound-1') {
+  return {
+    protocol: 'work-items/execute-decision/v1', decisionId, verdict: 'execute',
+    origin: 'explicit', mode: 'auto', budgetRemaining: 1,
+    mandate: { kind: 'review', title: 'Review', brief: 'Review the change.', originBindingId: 'binding-origin-1', acceptanceRef: 'tac:review/v1' },
+    acceptance: { contractId: contract.id, contractDigest: contract.digest },
+  } as const
 }
 
 class FakeToolsPeer extends Service {
@@ -1056,6 +1109,66 @@ describe('work-item admission authority revalidation', () => {
     expect(fixture.service.admitDecision({ ...decision, decisionId: 'svc-decision-2', origin: 'inferred' }))
       .toEqual({ outcome: 'refused', reasonCode: 'inferred-requires-rule' })
     expect(fixture.automations?.calls).toHaveLength(1)
+  })
+
+  test('settleAcceptance needs an existing, bound, intact and executed item', async () => {
+    const fixture = await serviceHarness()
+    expect(errorCode(() => fixture.service.settleAcceptance('missing-item'))).toBe('not-found')
+    const { acceptance, ...unbound } = boundDecision(serviceContract(), 'svc-plain-1')
+    void acceptance
+    const plain = fixture.service.admitDecision(unbound)
+    if (plain.outcome === 'refused') throw new Error(plain.reasonCode)
+    expect(errorCode(() => fixture.service.settleAcceptance(plain.item.id))).toBe('invalid-state')
+
+    const second = await serviceHarness()
+    const peer = new FakeVerifierPeer(second.ctx)
+    const contract = serviceContract()
+    peer.tasks.set(contract.id, { contract, state: 'awaiting-execution', reason: null, receipt: null })
+    const admitted = second.service.admitDecision(boundDecision(contract))
+    if (admitted.outcome === 'refused') throw new Error(admitted.reasonCode)
+    const itemId = admitted.item.id
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract) })
+    // Never claimed: a verifier receipt alone cannot accept work that never ran.
+    expect(errorCode(() => second.service.settleAcceptance(itemId))).toBe('invalid-state')
+    second.service.claim(workerAgent('occ-1'))
+    expect(errorCode(() => second.service.settleAcceptance(itemId))).toBe('invalid-state')
+    await second.service.report(workerAgent('occ-1'), { status: 'ready', summary: 'done', idempotencyKey: 'r-1' })
+    // A stored mandate no longer naming this item is not a usable basis.
+    let original: Record<string, unknown> | null = null
+    rewriteBasis(second, itemId, value => {
+      original = value
+      return { ...value, mandate: { ...(value?.['mandate'] as Record<string, unknown>), decisionId: 'svc-bound-other' } }
+    })
+    expect(errorCode(() => second.service.settleAcceptance(itemId))).toBe('invalid-state')
+    rewriteBasis(second, itemId, () => original)
+    expect(second.service.settleAcceptance(itemId)).toMatchObject({ outcome: 'verified', verdict: { itemId, objectiveStatus: 'achieved' } })
+    expect(second.service.acceptanceVerdict(itemId)).toMatchObject({ receiptId: 'svc-receipt-1' })
+  })
+
+  test('settleAcceptance refuses a revoked or failed item even with a passing receipt', async () => {
+    const revoked = await serviceHarness()
+    const peer = new FakeVerifierPeer(revoked.ctx)
+    const contract = serviceContract()
+    peer.tasks.set(contract.id, { contract, state: 'awaiting-execution', reason: null, receipt: null })
+    const admitted = revoked.service.admitDecision(boundDecision(contract))
+    if (admitted.outcome === 'refused') throw new Error(admitted.reasonCode)
+    revoked.policy.setAllow(false)
+    expect(errorCode(() => revoked.service.claim(workerAgent('occ-1')))).toBe('authority-revoked')
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract) })
+    expect(errorCode(() => revoked.service.settleAcceptance(admitted.item.id))).toBe('invalid-state')
+    expect(revoked.service.acceptanceVerdict(admitted.item.id)).toBeNull()
+
+    const failed = await serviceHarness()
+    const failedPeer = new FakeVerifierPeer(failed.ctx)
+    const failedContract = serviceContract('svc-acceptance-2')
+    failedPeer.tasks.set(failedContract.id, { contract: failedContract, state: 'awaiting-execution', reason: null, receipt: null })
+    const failedItem = failed.service.admitDecision(boundDecision(failedContract))
+    if (failedItem.outcome === 'refused') throw new Error(failedItem.reasonCode)
+    failed.service.claim(workerAgent('occ-1'))
+    await failed.service.report(workerAgent('occ-1'), { status: 'failed', summary: 'could not finish', idempotencyKey: 'r-1' })
+    failedPeer.tasks.set(failedContract.id, { contract: failedContract, state: 'done', reason: null, receipt: serviceReceipt(failedContract) })
+    expect(errorCode(() => failed.service.settleAcceptance(failedItem.item.id))).toBe('invalid-state')
+    expect(failed.service.acceptanceVerdict(failedItem.item.id)).toBeNull()
   })
 
   test('a Policy change notifies a live item without cancelling it; its follow-ups release when it ends', async () => {

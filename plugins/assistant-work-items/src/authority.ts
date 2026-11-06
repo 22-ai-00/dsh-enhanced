@@ -160,6 +160,15 @@ function basisHolds(item: WorkItemRecord, basis: WorkItemAuthorityBasis): boolea
 }
 
 /**
+ * Local, side-effect-free integrity of an item's own stored basis: present,
+ * well-formed, and (for a mandate) naming this exact item. Unlike
+ * `WorkItemAuthority.check` it never calls Policy, so it writes no audit.
+ */
+export function storedBasisHolds(item: WorkItemRecord): boolean {
+  return item.authority !== null && item.authority !== undefined && basisHolds(item, item.authority)
+}
+
+/**
  * Re-run the admission decision before an item is ever claimed or woken.
  *
  * Policy stays the only authority: an `allow` here means the same request with

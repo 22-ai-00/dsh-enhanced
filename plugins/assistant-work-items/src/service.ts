@@ -9,7 +9,7 @@ import { WorkItemIntakeAdmissionBridge, type WorkItemIntakeAdmissionRecord } fro
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { WorkItemAdmission } from './admission.js'
-import { WorkItemAuthority } from './authority.js'
+import { storedBasisHolds, WorkItemAuthority } from './authority.js'
 import { ConfigSchema, isActive, normalizeConfig, text, type Config, type NormalizedConfig } from './config.js'
 import { WorkItemDispatch } from './dispatch.js'
 import { WorkItemEvaluationExporter, type WorkItemEvaluationRegistration } from './evaluation.js'
@@ -779,6 +779,12 @@ export class AssistantWorkItemsService extends Service {
     if (item === undefined) fail('not-found', 'work item does not exist')
     const binding = item.authority?.mandate?.acceptance
     if (binding === undefined) fail('invalid-state', 'work item has no independent acceptance binding')
+    // The stored mandate must still be intact for this exact item; checked
+    // locally so a pull-based settle never writes Policy audit.
+    if (!storedBasisHolds(item)) fail('invalid-state', 'work item authority basis is no longer usable')
+    // Only work that actually ran and reached `ready` can be accepted: never
+    // claimed, parked, blocked, failed or dropped items settle nothing.
+    if (item.attempt < 1 || item.state !== 'ready') fail('invalid-state', `work item is ${item.state}, not executed`)
     return settleAcceptance(components.store, this.workItemsVerifier(), item, binding)
   }
 

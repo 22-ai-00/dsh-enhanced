@@ -298,6 +298,9 @@ export class WorkItemAdmission {
       if (refusal !== undefined) return refusal
       let acceptance
       if (decision.acceptance !== undefined) {
+        // One contract settles one item: another decision cannot reuse it.
+        // (This decision's own replay already returned above.)
+        if (this.#deps.store.findItemByAcceptanceContract(decision.acceptance.contractId) !== undefined) return 'acceptance-contract-bound'
         const verifier = typeof this.#deps.verifier === 'function' ? this.#deps.verifier() : this.#deps.verifier
         const resolved = resolveAcceptanceBinding(verifier, decision.acceptance, receipt, now)
         if (typeof resolved === 'string') return resolved

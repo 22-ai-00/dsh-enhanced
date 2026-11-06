@@ -172,6 +172,7 @@ describe('acceptance-bound execute decisions', () => {
     verifier.tasks.set(verified.id, { contract: verified, state: 'done', reason: null, receipt: receiptFor(verified) })
     const attention = prepared(verifier, { id: 'acceptance-attention' })
     verifier.tasks.set(attention.id, { contract: attention, state: 'needs-attention', reason: 'runner-unavailable', receipt: null })
+    const wrongPreset = prepared(verifier, { id: 'acceptance-other-preset', scope: { workspace: WORKSPACE, preset: 'other-preset' } })
     const forged = prepared(verifier, { id: 'acceptance-forged' })
     // A body edited after freezing no longer matches its own digest.
     verifier.tasks.set(forged.id, { contract: { ...forged, objective: 'Anything passes.' }, state: 'awaiting-execution', reason: null, receipt: null })
@@ -180,6 +181,7 @@ describe('acceptance-bound execute decisions', () => {
       [decision(undefined, { acceptance: { contractId: contract.id, contractDigest: SHA } }), 'acceptance-mismatch'],
       [decision(wrongPrincipal), 'acceptance-mismatch'],
       [decision(wrongWorkspace), 'acceptance-mismatch'],
+      [decision(wrongPreset), 'acceptance-mismatch'],
       [decision(forged), 'acceptance-mismatch'],
       [decision(expired), 'acceptance-expired'],
       [decision(verified), 'acceptance-already-settled'],
@@ -219,6 +221,85 @@ describe('acceptance-bound execute decisions', () => {
     expect(() => fixture.admission.admitDecision(decision(other))).toThrow(expect.objectContaining({ code: 'identity-mismatch' }))
     expect(() => fixture.admission.admitDecision(decision(undefined))).toThrow(expect.objectContaining({ code: 'identity-mismatch' }))
     expect(fixture.store.countItemsSince(0)).toBe(1)
+  })
+
+  test('only a contract still awaiting execution may bind new work', async () => {
+    const { fixture, verifier } = await bound()
+    for (const state of ['pending', 'verifying'] as const) {
+      const contract = prepared(verifier, { id: `acceptance-${state}` })
+      verifier.tasks.set(contract.id, { contract, state, reason: null, receipt: null })
+      const input = decision(contract, { decisionId: `decision-${state}` })
+      expect(fixture.admission.admitDecision(input)).toEqual({ outcome: 'refused', reasonCode: 'acceptance-not-awaiting' })
+      expect(fixture.admission.admitDecision(input)).toEqual({ outcome: 'refused', reasonCode: 'acceptance-not-awaiting' })
+    }
+    expect(fixture.policy.requests).toHaveLength(0)
+    expect(fixture.store.countItemsSince(0)).toBe(0)
+  })
+
+  test('one contract binds exactly one item; its own decision still replays', async () => {
+    const { fixture, verifier } = await bound()
+    const contract = prepared(verifier)
+    const first = admittedItem(fixture.admission.admitDecision(decision(contract)))
+    expect(fixture.store.findItemByAcceptanceContract(contract.id)?.id).toBe(first.id)
+    const second = decision(contract, { decisionId: 'decision-acc-2' })
+    expect(fixture.admission.admitDecision(second)).toEqual({ outcome: 'refused', reasonCode: 'acceptance-contract-bound' })
+    expect(fixture.admission.admitDecision(second)).toEqual({ outcome: 'refused', reasonCode: 'acceptance-contract-bound' })
+    const replay = fixture.admission.admitDecision(decision(contract))
+    expect(replay.outcome).toBe('replayed')
+    expect(admittedItem(replay).id).toBe(first.id)
+    expect(fixture.store.countItemsSince(0)).toBe(1)
+    expect(fixture.store.findItemByAcceptanceContract('acceptance-unbound')).toBeUndefined()
+  })
+
+  test('a receipt whose verification started before the item existed cannot settle it', async () => {
+    const { fixture, verifier } = await bound()
+    const contract = prepared(verifier)
+    // The item is admitted after the receipt's startedAt (NOW + 100).
+    fixture.advance(1_000)
+    const item = admittedItem(fixture.admission.admitDecision(decision(contract)))
+    verifier.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: receiptFor(contract) })
+    expect(settleAcceptance(fixture.store, verifier.service, item, bindingOf(item)))
+      .toEqual({ outcome: 'drift', detail: 'verifier receipt predates the work item' })
+    expect(verdictEvents(fixture, item.id)).toBe(0)
+  })
+
+  test('a recorded verdict only answers for the contract it was recorded against', async () => {
+    const { fixture, verifier } = await bound()
+    const contract = prepared(verifier)
+    const item = admittedItem(fixture.admission.admitDecision(decision(contract)))
+    verifier.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: receiptFor(contract) })
+    const binding = bindingOf(item)
+    expect(settleAcceptance(fixture.store, verifier.service, item, binding).outcome).toBe('verified')
+    for (const forged of [{ ...binding, contractId: 'acceptance-review-9' }, { ...binding, contractDigest: 'b'.repeat(64) }]) {
+      expect(settleAcceptance(fixture.store, verifier.service, item, forged))
+        .toEqual({ outcome: 'drift', detail: 'recorded verdict is for another contract' })
+    }
+  })
+
+  test('first receipt wins: a racing different receipt is reported as identity-mismatch, not thrown', async () => {
+    const { fixture, verifier } = await bound()
+    const contract = prepared(verifier)
+    const item = admittedItem(fixture.admission.admitDecision(decision(contract)))
+    const winner = receiptFor(contract, 'failed', 'receipt-2')
+    fixture.store.recordAcceptanceVerdict({
+      itemId: item.id, verifier: 'assistant-verifier', contractId: contract.id, contractDigest: contract.digest,
+      receiptId: winner.id, receiptDigest: winner.digest, objectiveStatus: 'not-achieved', completedAt: winner.completedAt,
+    })
+    const loser = receiptFor(contract)
+    verifier.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: loser })
+    // The first read misses the winner, as it would for a concurrent settle.
+    let reads = 0
+    const racing = {
+      acceptanceVerdict: (itemId: string) => reads++ === 0 ? undefined : fixture.store.acceptanceVerdict(itemId),
+      recordAcceptanceVerdict: (verdict: Parameters<Harness['store']['recordAcceptanceVerdict']>[0]) => fixture.store.recordAcceptanceVerdict(verdict),
+    }
+    expect(settleAcceptance(racing, verifier.service, item, bindingOf(item))).toEqual({
+      outcome: 'identity-mismatch',
+      verdict: expect.objectContaining({ receiptId: 'receipt-2', objectiveStatus: 'not-achieved' }),
+      receiptDigest: loser.digest,
+    })
+    expect(fixture.store.acceptanceVerdict(item.id)?.receiptId).toBe('receipt-2')
+    expect(verdictEvents(fixture, item.id)).toBe(1)
   })
 
   test('author, verifier and executor stay distinct; a forged binding is a malformed basis', async () => {

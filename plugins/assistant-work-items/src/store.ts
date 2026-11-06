@@ -1291,6 +1291,20 @@ export class WorkItemStore {
     return row === undefined ? undefined : itemFromRow(row)
   }
 
+  /**
+   * The item whose frozen mandate already binds `contractId`, if any. One
+   * acceptance contract settles exactly one item. A full scan over the stored
+   * basis JSON (no index, no schema change); unreadable bases never match.
+   */
+  findItemByAcceptanceContract(contractId: string): WorkItemRecord | undefined {
+    const row = this.#statement(`
+      SELECT ${ITEM_ALIASES} FROM work_item
+      WHERE CASE WHEN json_valid(authority_basis) THEN json_extract(authority_basis, '$.mandate.acceptance.contractId') END = ?
+      ORDER BY created_at ASC, id ASC LIMIT 1
+    `).get(contractId) as Row | undefined
+    return row === undefined ? undefined : itemFromRow(row)
+  }
+
   /** Read one durable key/value row from the schema-meta table. */
   meta(key: string): string | null {
     const row = this.#statement('SELECT value FROM work_item_schema_meta WHERE key = ?').get(key) as Row | undefined
