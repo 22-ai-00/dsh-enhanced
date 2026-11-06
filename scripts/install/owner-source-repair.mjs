@@ -420,6 +420,53 @@ export function ownerRepairPatchEquivalent({ yaml, planned, applied }) {
     yamlDocumentValue(api, applied, 'applied patch'))
 }
 
+const ownerEditableScalarTags = new Set([null, 'tag:yaml.org,2002:str', 'tag:yaml.org,2002:int',
+  'tag:yaml.org,2002:float', 'tag:yaml.org,2002:bool', 'tag:yaml.org,2002:null'])
+
+function plainOwnerData(api, node) {
+  if (api.yaml.isAlias(node) || node?.anchor) return false
+  if (api.yaml.isScalar(node)) return ownerEditableScalarTags.has(node.tag ?? null)
+  if (node?.tag) return false
+  if (api.yaml.isSeq(node)) return node.items.every(item => plainOwnerData(api, item))
+  if (api.yaml.isMap(node)) return node.items.every(item => plainOwnerData(api, item.key)
+    && plainOwnerData(api, item.value))
+  return false
+}
+
+// The owner may edit model providers (`llm-pi-ai` config.providers) after a
+// signed update; every other row and key must match the signed patch exactly.
+export function ownerProviderEditEquivalent({ yaml, signed, current }) {
+  const api = { yaml }
+  try {
+    const before = yamlRows(api, signed, 'signed patch'), after = yamlRows(api, current, 'current patch')
+    const rows = document => document.contents.items.map(row => [api.yaml.isMap(row) ? row.get('id') : undefined, row])
+    const first = rows(before), second = rows(after)
+    if (!same(first.map(([id]) => id), second.map(([id]) => id))
+      || first.some(([id]) => typeof id !== 'string')) return false
+    for (const [index, [id, row]] of first.entries()) {
+      const next = second[index][1]
+      if (id !== 'llm-pi-ai') {
+        if (!same(yamlValue(api, row, before), yamlValue(api, next, after))) return false
+        continue
+      }
+      const config = row.get('config', true), nextConfig = next.get('config', true)
+      if (!api.yaml.isMap(row) || !api.yaml.isMap(next) || !api.yaml.isMap(config)
+        || !api.yaml.isMap(nextConfig) || !plainOwnerData(api, nextConfig.get('providers', true))) return false
+      const without = (map, key) => map.items.filter(item => !(api.yaml.isScalar(item.key) && item.key.value === key))
+      const shape = (document, items) => items.map(item =>
+        [yamlValue(api, item.key, document), yamlValue(api, item.value, document)])
+        .sort((left, right) => JSON.stringify(left[0]).localeCompare(JSON.stringify(right[0])))
+      if (!same(shape(before, without(row, 'config')), shape(after, without(next, 'config')))
+        || !same(shape(before, without(config, 'providers')), shape(after, without(nextConfig, 'providers')))) {
+        return false
+      }
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
 function ownerSnapshotIdentity(snapshot) {
   if (snapshot?.protocol !== 'assistant-delivery/active-lark-owner-bindings-snapshot/v1'
     || ![23, 24, 25, 26, 27, 28, 29, 30, 31].includes(snapshot.schemaVersion)

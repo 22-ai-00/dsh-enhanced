@@ -17,7 +17,7 @@ import { assertOwnerSealedAdoptionMaintenanceApi, stageOwnerSealedAdoptionHandof
 import { assertOwnerEmptyAdoptionMaintenanceApi, stageOwnerEmptyAdoptionHandoff, verifyOwnerEmptyAdoptionHandoff } from './owner-empty-adoption-handoff.mjs'
 import { assertOwnerReviewGrantHandoffApi, preflightOwnerReviewGrantHandoffs, stageOwnerReviewGrantHandoffs,
   verifyOwnerReviewGrantHandoffs } from './owner-review-grant-handoff.mjs'
-import { composeOwnerRepairProfiles, ownerRepairPatchEquivalent,
+import { composeOwnerRepairProfiles, ownerProviderEditEquivalent, ownerRepairPatchEquivalent,
   ownerRepairSnapshotEquivalent } from './owner-source-repair.mjs'
 
 const protocol = 'dsh-enhanced/host-owner-program-update/v1'
@@ -676,7 +676,6 @@ export async function captureOwnerProgramUpdate({ homePath, profile, installer, 
       2_097_152, false)).toString('utf8')
   }
   const actualPatchDigests = Object.fromEntries(Object.entries(patches).map(([name, value]) => [name, hash(value)]))
-  if (chain.latest && !same(actualPatchDigests, patchDigests)) fail('current signed profile patches differ')
   if (chain.latest) {
     if (chain.latest.planDigest !== hash(json({ files: fileDigests, patches: patchDigests }))) {
       fail('signed owner overlay plan differs')
@@ -684,10 +683,25 @@ export async function captureOwnerProgramUpdate({ homePath, profile, installer, 
   }
   const journalSource = (await bytes(join(homePath, '.rsi-setup-journal.json'))).toString('utf8')
   const journal = parse(journalSource, 'owner setup journal')
+  // The journal holds the signed patch text; an owner model-provider edit since
+  // then is carried forward into the next signed record.
+  const names = [profile, manifest.coordinatorProfile]
+  const edited = new Set()
+  if (chain.latest) {
+    for (const [index, name] of names.entries()) {
+      if (actualPatchDigests[name] === patchDigests?.[name]) continue
+      const signed = journal.entries?.[index]?.after
+      if (typeof signed !== 'string' || hash(signed) !== patchDigests?.[name]
+        || !ownerProviderEditEquivalent({ yaml: api.yaml, signed, current: patches[name] })) {
+        fail('current signed profile patches differ')
+      }
+      edited.add(name)
+    }
+  }
   if (journal.schemaVersion !== 2 || journal.stage !== 'applied'
     || journal.manifestDigest !== hash(manifestSource)
-    || !same(journal.entries?.map(item => [item.profile, item.after]),
-      [profile, manifest.coordinatorProfile].map(name => [name, patches[name]]))) {
+    || !same(journal.entries?.map(item => [item.profile, edited.has(item.profile) ? null : item.after]),
+      names.map(name => [name, edited.has(name) ? null : patches[name]]))) {
     fail('applied owner setup journal differs')
   }
   const creationSource = (await bytes(join(homePath, 'rsi-creation-builds', profile, 'bootstrap.json'), 65_536)).toString('utf8')
@@ -1860,7 +1874,11 @@ export async function verifyOwnerProgramUpdate({ ownerUpdate, ownerUpdateNext, h
   const journal = parse(journalSource, 'owner setup journal')
   if (journal.manifestDigest !== hash(files[manifestPath])
     || !same(journal.entries?.map(item => [item.profile, item.after]),
-      [ownerUpdate.profile, ownerUpdate.coordinatorProfile].map(name => [name, patches[name]]))) {
+      // Before finalize the journal still holds the signed text an owner
+      // provider edit was checked against; the original proof pins it below.
+      phase === 'after-finalize'
+        ? [ownerUpdate.profile, ownerUpdate.coordinatorProfile].map(name => [name, patches[name]])
+        : original.journal.entries?.map(item => [item.profile, item.after]))) {
     fail('owner journal or profile patch differs')
   }
   // Each manifest reports the backend of the family it binds, so the creation
