@@ -204,6 +204,16 @@ function configRows(api, ownerUpdate) {
     || !equal(manifest.controlPlane.creationCapabilities, capabilities)) fail('adoption-config-mismatch')
   return { home, base, lanes, logicalPath: join(statePath, 'creation-adoptions.sqlite'), capabilities }
 }
+/** The parsed stored config when it is canonical JSON and differs from `capabilities` only in a
+ * non-empty string `runner.image`; otherwise undefined. */
+export function staleRunnerImageConfig(configJson, capabilities) {
+  let config
+  try { config = JSON.parse(configJson) } catch { return undefined }
+  try { if (canonical(config) !== configJson) return undefined } catch { return undefined }
+  const image = config?.runner?.image
+  if (typeof image !== 'string' || !image || image === capabilities?.runner?.image) return undefined
+  return equal({ ...config, runner: { ...config.runner, image: capabilities.runner.image } }, capabilities) ? config : undefined
+}
 export async function inspectOwnerEmptyCreationHistory({ ownerUpdate, physicalHome = ownerUpdate.homePath, api }) {
   return inspectHistory({ ownerUpdate, physicalHome, api, classify: false })
 }
@@ -286,13 +296,24 @@ async function inspectHistory({ ownerUpdate, physicalHome, api, classify }) {
   try { adoption = snapshot(adoptionPath, physicalHome, db => {
     const schema = inspectSchema(db, 'adoption')
     const rows = textRows(db, 'authority', ['authority_id', 'authority_digest', 'key_id', 'public_key', 'config_json'])
-    if (rows.length !== 1 || !equal(rows[0], { authority_id: capabilities.authorityId, authority_digest: authorityDigest,
-      key_id: capabilities.keyId, public_key: publicKey, config_json: canonical(capabilities) })) fail('adoption-authority-mismatch')
     const counts = { authority: 1, adoptions: db.prepare('SELECT COUNT(*) AS n FROM adoptions').get().n,
       calls: db.prepare('SELECT COUNT(*) AS n FROM calls').get().n, sourceArchives: db.prepare('SELECT COUNT(*) AS n FROM source_archives').get().n }
+    const empty = counts.adoptions === 0 && counts.calls === 0 && counts.sourceArchives === 0
+    let stored = authorityDigest, staleConfig
+    if (rows.length !== 1 || !equal(rows[0], { authority_id: capabilities.authorityId, authority_digest: authorityDigest,
+      key_id: capabilities.keyId, public_key: publicKey, config_json: canonical(capabilities) })) {
+      // A Docker-era program update may re-pin `runner.image` in the manifest without migrating an
+      // empty journal's authority row. Only that row is carried: same identity and key, a config that
+      // differs from the manifest in `runner.image` alone, and a digest the reviewed validator derives.
+      staleConfig = empty && rows.length === 1 ? staleRunnerImageConfig(rows[0].config_json, capabilities) : undefined
+      if (!staleConfig || rows[0].authority_id !== capabilities.authorityId || rows[0].key_id !== capabilities.keyId
+        || rows[0].public_key !== publicKey || rows[0].authority_digest !== control.creationCapabilityAuthorityDigest({ path: logicalPath, config: staleConfig })) fail('adoption-authority-mismatch')
+      stored = rows[0].authority_digest
+    }
+    const authority = staleConfig ? { authorityDigest: stored, staleConfig } : { authorityDigest: stored }
     if (!classify) {
-      if (Object.entries(counts).some(([key, value]) => key !== 'authority' && value !== 0)) fail('adoption-history-present')
-      return { ...schema, counts, authorityDigest }
+      if (!empty) fail('adoption-history-present')
+      return { ...schema, counts, ...authority }
     }
     // Every status is sealable: claimed/authorized/unknown are archived as "never eligible",
     // never replayed, and still counted against the inherited adoption and call budget.
@@ -301,7 +322,7 @@ async function inspectHistory({ ownerUpdate, physicalHome, api, classify }) {
     invariant(db, 'adoptions', ADOPTION_VALID, 'adoption-row-invalid')
     invariant(db, 'calls', CALL_VALID, 'call-row-invalid')
     invariant(db, 'source_archives', SOURCE_ARCHIVE_VALID, 'source-archive-row-invalid')
-    return { ...schema, counts, authorityDigest, byStatus, callsByStatus }
+    return { ...schema, counts, ...authority, byStatus, callsByStatus }
   })
   } catch (error) { if (error.code === 'database-missing' || error.code === 'ENOENT') fail('adoption-database-missing'); throw error }
   if (!classify) {

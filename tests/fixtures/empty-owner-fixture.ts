@@ -94,10 +94,12 @@ export type OwnerHistorySeed = (f: ReturnType<typeof linuxFixture>) => void
 export interface OwnerFixtureOptions {
   reviews?: (f: ReturnType<typeof linuxFixture>) => { old: CreationReviewConfig; next: CreationReviewConfig }
   reviewSeed?: (path: string, f: ReturnType<typeof linuxFixture>) => void
+  /** Journal authority config when it predates the manifest (e.g. a runner.image re-pin). */
+  journalConfig?: (f: ReturnType<typeof linuxFixture>) => ReturnType<typeof linuxFixture>['oldConfig']
 }
 export async function ownerFixture(seed?: OwnerHistorySeed, options: OwnerFixtureOptions = {}) {
   const f = linuxFixture()
-  new CreationCapabilityJournal({ path: f.path, config: f.oldConfig }).close()
+  new CreationCapabilityJournal({ path: f.path, config: options.journalConfig?.(f) ?? f.oldConfig }).close()
   seed?.(f)
   // Seeded homes are classified with the v2 inspector; unseeded homes keep the exact v1 empty gate.
   const inspect = seed || options.reviewSeed ? inspectOwnerCreationHistory : inspectOwnerEmptyCreationHistory

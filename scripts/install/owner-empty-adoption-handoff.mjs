@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual as same } from 'node:util'
 import { join, relative, sep } from 'node:path'
+import { staleRunnerImageConfig } from './owner-empty-creation-history.mjs'
 
 const protocol = 'dsh-owner-empty-adoption-handoff/v1'
 const SHA = /^[a-f0-9]{64}$/u
@@ -50,9 +51,14 @@ export async function stageOwnerEmptyAdoptionHandoff({ ownerUpdate, stageHome, t
     || !same(candidateCreation.emptyCreationHistory.reviews.map(item => [item.lane, item.status, item.logicalPath]),
       stageHistory.reviews.map(item => [item.lane, item.status, item.logicalPath]))) fail('source history scope changed')
   const original = ownerUpdate.original
-  const oldConfig = original.manifest.controlPlane.creationCapabilities
+  const manifestConfig = original.manifest.controlPlane.creationCapabilities
+  // A stale empty authority row (runner.image only, see inspectHistory) is migrated from what is stored.
+  const stale = stageHistory.adoption.staleConfig
+  if (!same(stale, candidateCreation.emptyCreationHistory.adoption.staleConfig)
+    || stale !== undefined && !same(staleRunnerImageConfig(canonical(stale), manifestConfig), stale)) fail('source history scope changed')
+  const oldConfig = stale ?? manifestConfig
   const nextConfig = manifest.controlPlane.creationCapabilities
-  if (!same(oldConfig, original.manifest.pluginCreation.capabilities)
+  if (!same(manifestConfig, original.manifest.pluginCreation.capabilities)
     || !same(nextConfig, manifest.pluginCreation.capabilities)) fail('capability mirrors differ')
   const now = Date.now()
   const expiresAt = Math.min(now + 300_000, oldConfig.expiresAt, nextConfig.expiresAt,
@@ -74,6 +80,10 @@ export async function stageOwnerEmptyAdoptionHandoff({ ownerUpdate, stageHome, t
   return { metadata, plan }
 }
 
+function oldAuthorityConfig(config, manifestConfig) {
+  if (same(config, manifestConfig)) return true
+  try { return same(staleRunnerImageConfig(canonical(config), manifestConfig), config) } catch { return false }
+}
 /** Metadata is signed; the full plan is carried by the durable transaction, never inferred from the DB. */
 export async function verifyOwnerEmptyAdoptionHandoff({ ownerUpdate, ownerUpdateNext, manifest,
   metadata, physicalHome, stoppedEmptyAdoption, api }) {
@@ -88,7 +98,7 @@ export async function verifyOwnerEmptyAdoptionHandoff({ ownerUpdate, ownerUpdate
     || metadata.logicalPath !== carried.plan?.oldIdentity?.logicalPath
     || metadata.planDigest !== carried.plan?.digest || metadata.hostAnchor !== carried.plan?.hostAnchor
     || !same(metadata.fileIdentity, carried.plan?.snapshot?.identity)
-    || !same(carried.plan.oldIdentity.config, ownerUpdate.original.manifest.controlPlane.creationCapabilities)
+    || !oldAuthorityConfig(carried.plan.oldIdentity?.config, ownerUpdate.original.manifest.controlPlane.creationCapabilities)
     || !same(carried.plan.nextIdentity.config, manifest.controlPlane.creationCapabilities)) fail('signed handoff or current authority differs')
   const { digest: planDigest, ...body } = carried.plan
   if (!SHA.test(metadata.proofDigest) || digest(body) !== planDigest) fail('carried plan digest differs')

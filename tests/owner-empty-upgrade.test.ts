@@ -38,6 +38,25 @@ test('real stopped stage CAS, cutover rename and new constructor preserve the or
   expect(readFileSync(f.root + '.old/control-plane/creation-adoptions.sqlite')).toEqual(before)
 })
 
+test('an empty journal whose authority predates a runner.image re-pin migrates from the stored row', async () => {
+  let stale: Awaited<ReturnType<typeof ownerFixture>>['oldConfig'] | undefined
+  const f = await ownerFixture(undefined, { journalConfig: g => (stale = { ...g.oldConfig, runner: { ...g.oldConfig.runner, image: `runner@sha256:${d('9')}` } }) })
+  expect(f.stageHistory.adoption.staleConfig).toEqual(stale)
+  const packet = await stageOwnerEmptyAdoptionHandoff(stageInput(f))
+  expect(packet.plan.oldIdentity.config).toEqual(stale)
+  expect(packet.plan.nextIdentity.config).toEqual(f.config)
+  const next = { transactionId: 'transaction-1', emptyAdoptionHandoff: packet }
+  await verifyOwnerEmptyAdoptionHandoff({ ownerUpdate: f.ownerUpdate, ownerUpdateNext: next, manifest: f.nextManifest,
+    metadata: packet.metadata, physicalHome: f.stageHome, stoppedEmptyAdoption: true, api })
+  const drifted = structuredClone(next)
+  drifted.emptyAdoptionHandoff.plan.oldIdentity.config.runner.maxRuns += 1
+  await expect(verifyOwnerEmptyAdoptionHandoff({ ownerUpdate: f.ownerUpdate, ownerUpdateNext: drifted, manifest: f.nextManifest,
+    metadata: packet.metadata, physicalHome: f.stageHome, stoppedEmptyAdoption: false, api })).rejects.toThrow('signed handoff or current authority differs')
+  const g = await ownerFixture(undefined, { journalConfig: h => ({ ...h.oldConfig, runner: { ...h.oldConfig.runner, image: `runner@sha256:${d('8')}` } }) })
+  await expect(stageOwnerEmptyAdoptionHandoff({ ...stageInput(g), stageHistory: { ...g.stageHistory,
+    adoption: { ...g.stageHistory.adoption, staleConfig: undefined } } })).rejects.toThrow('source history scope changed')
+})
+
 test('uses actual maintenance time rather than the original long-lived grant creation time', async () => {
   const f = await ownerFixture(); Object.assign(f.ownerUpdate.original, { now: 1 })
   const started = Date.now(), packet = await stageOwnerEmptyAdoptionHandoff(stageInput(f))

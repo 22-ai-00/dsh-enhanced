@@ -8,7 +8,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { CreationCapabilityJournal, creationCapabilityAuthorityDigest, creationCapabilityPublicKey } from '../plugins/plugin-control-plane/src/creation-capability-journal.ts'
 import type { CreationCapabilityConfig } from '../plugins/plugin-control-plane/src/creation-capability-types.ts'
 import { CreationReviewStore } from '../plugins/assistant-verifier/src/creation-review-store.ts'
-import { inspectOwnerEmptyCreationHistory } from '../scripts/install/owner-empty-creation-history.mjs'
+import { inspectOwnerCreationHistory, inspectOwnerEmptyCreationHistory, staleRunnerImageConfig } from '../scripts/install/owner-empty-creation-history.mjs'
 const roots: string[] = []
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }) })
 function fixture() {
@@ -213,4 +213,38 @@ test('initial sidecar lstat EACCES closes every previously pinned parent descrip
   await expect(inspect(f)).rejects.toThrow('injected sidecar EACCES')
   expect(pinned.length).toBeGreaterThanOrEqual(2)
   for (const fd of pinned) expect(() => fs.fstatSync(fd)).toThrow('EBADF')
+})
+
+function staleJournal(f: ReturnType<typeof fixture>, change: (runner: CreationCapabilityConfig['runner']) => CreationCapabilityConfig['runner']) {
+  const stale = { ...f.config, runner: change({ ...f.config.runner }) }
+  for (const suffix of ['', '-wal', '-shm']) fs.rmSync(`${f.adoption}${suffix}`, { force: true })
+  new CreationCapabilityJournal({ path: f.adoption, config: stale }).close()
+  return stale
+}
+test('empty journal whose authority predates a runner.image re-pin is carried from the stored row', async () => {
+  const f = fixture(), stale = staleJournal(f, runner => ({ ...runner, image: `runner@sha256:${'c'.repeat(64)}` }))
+  for (const result of [await inspect(f), await inspectOwnerCreationHistory({ ownerUpdate: f.ownerUpdate, api: f.api })]) {
+    expect(result.status).toBe('empty')
+    expect(result.adoption.staleConfig).toEqual(stale)
+    expect(result.adoption.authorityDigest).toBe(creationCapabilityAuthorityDigest({ path: f.adoption, config: stale }))
+    expect(result.adoption.authorityDigest).not.toBe(creationCapabilityAuthorityDigest({ path: f.adoption, config: f.config }))
+  }
+  expect((await inspect(fixture())).adoption).not.toHaveProperty('staleConfig')
+})
+test('stale authority rows refuse unless only runner.image differs, the digest is derived and history is empty', async () => {
+  for (const change of [(runner: CreationCapabilityConfig['runner']) => ({ ...runner, image: 'other@sha256:' + 'd'.repeat(64), maxRuns: 6 }),
+    (runner: CreationCapabilityConfig['runner']) => ({ ...runner, dockerPath: '/opt/docker' })]) {
+    const f = fixture(); staleJournal(f, change)
+    await expect(inspect(f)).rejects.toThrow('adoption-authority-mismatch')
+  }
+  const forged = fixture(); staleJournal(forged, runner => ({ ...runner, image: `runner@sha256:${'f'.repeat(64)}` }))
+  sql(forged.adoption, `UPDATE authority SET authority_digest='${'e'.repeat(64)}'`)
+  await expect(inspect(forged)).rejects.toThrow('adoption-authority-mismatch')
+  const used = fixture(); staleJournal(used, runner => ({ ...runner, image: `runner@sha256:${'f'.repeat(64)}` }))
+  sql(used.adoption, `INSERT INTO adoptions(plan_id,status,certificate_json,certificate_digest,artifact,artifact_sha) VALUES('p','claimed','{}','${'a'.repeat(64)}',X'01','${'b'.repeat(64)}')`)
+  await expect(inspectOwnerCreationHistory({ ownerUpdate: used.ownerUpdate, api: used.api })).rejects.toThrow('adoption-authority-mismatch')
+  const config = fixture().config, text = (value: unknown) => JSON.stringify(value, Object.keys(value as object).sort())
+  expect(staleRunnerImageConfig('{', config)).toBeUndefined()
+  expect(staleRunnerImageConfig(' {}', config)).toBeUndefined()
+  expect(staleRunnerImageConfig(text({ a: 1 }), config)).toBeUndefined()
 })
