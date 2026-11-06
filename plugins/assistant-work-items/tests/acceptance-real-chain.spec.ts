@@ -16,8 +16,9 @@
  *   `assistantDelivery.prepareAgentApproval(agent)` resolves the owner and
  *   binding, then the real (private) `prepareTaskAcceptance` freezes the
  *   contract through the real verifier registration.
- * - The agents. `prepareAgentApproval` gets a structural agent naming the
- *   owner's bound session; work-items `claim`/`report` get a structural worker
+ * - The agents. `prepareAgentApproval` gets a structural run agent whose
+ *   session has no direct binding, so it resolves through the real
+ *   `bindAgentApprovalRoute` delegation setup installs; work-items `claim`/`report` get a structural worker
  *   agent carrying the `assistantAutomationExecution` the runner would install.
  */
 
@@ -110,7 +111,7 @@ test('binds a real Automations worker run to its real verifier contract and sett
   const delivery = ctx.assistantDelivery
   const deliveryStore = (delivery as unknown as { deliveryStore: DeliveryStore }).deliveryStore
   deliveryStore.ensureOwner(principal)
-  deliveryStore.createBinding({ conversation, principal, workspace: root, agentPreset: PRESET, policyRef: 'owner-dm', sessionId: 'owner-session-1' })
+  const ownerBinding = deliveryStore.createBinding({ conversation, principal, workspace: root, agentPreset: PRESET, policyRef: 'owner-dm', sessionId: 'owner-session-1' })
   const owner = deliveryStore.getPrincipal(principal)!
 
   await ctx.plugin(AssistantAutomationsService, {
@@ -184,8 +185,12 @@ test('binds a real Automations worker run to its real verifier contract and sett
   const duty = automations.store.acquireDuty({ ...lease, now: Date.now() })
   automations.store.claimTask({ ...lease, taskId, fencingToken: duty.fencingToken, now: Date.now() })
   automations.store.startTask({ ...lease, taskId, fencingToken: duty.fencingToken, now: Date.now(), sessionId: 'worker-session-1' })
-  const route = delivery.prepareAgentApproval({ session: { id: 'owner-session-1', header: { cwd: root, agentPreset: PRESET } } } as unknown as Agent,
-    { sourceId: 'dsh-enhanced-assistant-verifier' })
+  // The run session has no direct binding; as in production, setup delegates
+  // the owner binding to the worker agent and the route resolves through it.
+  const runAgent = { session: { id: 'worker-session-1', header: { cwd: root, agentPreset: PRESET } } } as unknown as Agent
+  const releaseRoute = delivery.bindAgentApprovalRoute(runAgent, { bindingId: ownerBinding.id })
+  const route = delivery.prepareAgentApproval(runAgent, { sourceId: 'dsh-enhanced-assistant-verifier' })
+  releaseRoute()
   automations.prepareTaskAcceptance({
     taskId, automationId: WORKER, scope: { workspace: root, preset: PRESET }, objective: PROMPT,
     owner: { principalRecordId: route.principalRecordId, principalVersion: route.principalVersion },
