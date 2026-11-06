@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { normalizeConfig, type Config } from '../src/config.ts'
-import { eventEnvelopeDigest, parseEventFollowRef } from '../src/event-follow.ts'
+import { eventEnvelopeDigest, eventFollowGeneration, parseEventFollowRef } from '../src/event-follow.ts'
 import { AssistantWorkItemsService } from '../src/service.ts'
 import { WorkItemStore } from '../src/store.ts'
 import type { PeerPolicyService } from '../src/peers.ts'
@@ -23,7 +23,7 @@ const OWNER = Object.freeze({ principalId: PRINCIPAL, principalRecordId: 'princi
 const VERSION = 'event-triggers/test'
 const hex = (value: string) => createHash('sha256').update(value).digest('hex')
 
-interface FakeTrigger { id: string; enabled: boolean; configDigest: string; automationId: string; owner: typeof OWNER }
+interface FakeTrigger { id: string; enabled: boolean; configDigest: string; automationId: string; owner: typeof OWNER; expiresAt?: number }
 interface FakeEvent { sequence: number; triggerId: string; configDigest: string; envelope: Readonly<ExternalEventEnvelope> }
 interface FakeState { triggers: Map<string, FakeTrigger>; events: FakeEvent[]; sequence: number; reads: number }
 
@@ -61,11 +61,13 @@ class FakeEventTriggers extends Service {
   constructor(ctx: Context, private readonly state: FakeState) { super(ctx, 'eventTriggers' as never) }
 
   inspectOwnerSources(scope: typeof OWNER) {
+    // Like the real service, an expired observer drops out of owner discovery.
     return Object.freeze([...this.state.triggers.values()].filter(trigger => trigger.enabled
+      && (trigger.expiresAt === undefined || trigger.expiresAt > Date.now())
       && trigger.owner.principalId === scope.principalId && trigger.owner.principalRecordId === scope.principalRecordId
       && trigger.owner.principalVersion === scope.principalVersion && trigger.owner.workspace === scope.workspace
       && trigger.owner.preset === scope.preset)
-      .map(trigger => Object.freeze({ triggerId: trigger.id, automationId: trigger.automationId, kind: 'webhook', expiresAt: Date.now() + 3_600_000 })))
+      .map(trigger => Object.freeze({ triggerId: trigger.id, automationId: trigger.automationId, kind: 'webhook', expiresAt: trigger.expiresAt ?? Date.now() + 3_600_000 })))
   }
 
   sourceSnapshot(triggerId: string) {
@@ -112,7 +114,7 @@ class FakeToolsPeer extends Service {
 class FakeAutomationsPeer extends Service {
   constructor(ctx: Context) { super(ctx, 'assistantAutomations') }
   ingestExternal(input: { automationId: string; eventId: string; occurredAt: number }) {
-    return Object.freeze({ id: 'occ-1', automationId: input.automationId, eventId: input.eventId, occurredAt: input.occurredAt })
+    return Object.freeze({ id: `occ-${input.eventId}`, automationId: input.automationId, eventId: input.eventId, occurredAt: input.occurredAt })
   }
 }
 
@@ -189,10 +191,19 @@ function errorCode(run: () => unknown): string {
   throw new Error('expected a WorkItemError')
 }
 
+/** Ref for a trigger at a cursor (default: current high water) under its live config digest. */
+function refFor(state: FakeState, triggerId: string, afterSequence = state.sequence, digest = state.triggers.get(triggerId)!.configDigest): string {
+  return `${triggerId}@${afterSequence}@${digest}`
+}
+
 async function admitAndReport(fx: Fixture, ref: string) {
   const admitted = fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref }] }))
-  fx.service.claim(workerAgent('occ-1'))
-  await fx.service.report(workerAgent('occ-1'), { status: 'ready', summary: 'done', idempotencyKey: 'idem-1' })
+  await flush()
+  const occurrenceId = readStore(fx.root).getDispatch(admitted.item.id)?.occurrenceId
+  if (!occurrenceId) throw new Error('dispatch has no occurrence')
+  const worker = workerAgent(occurrenceId)
+  fx.service.claim(worker)
+  await fx.service.report(worker, { status: 'ready', summary: 'done', idempotencyKey: `idem-${occurrenceId}` })
   return admitted
 }
 
@@ -201,7 +212,7 @@ async function admitAndReport(fx: Fixture, ref: string) {
 describe('event-triggers follow source', () => {
   test('an authenticated event after the admitted cursor closes the follow and settles exactly once', async () => {
     const fx = await fixture()
-    const admitted = await admitAndReport(fx, 'deploy-hook@3')
+    const admitted = await admitAndReport(fx, refFor(fx.state, 'deploy-hook'))
     expect(fx.service.settleOutcomes(true)).toMatchObject({ deferred: 1, closedByThread: 0 })
 
     // An event on another owner trigger does not close this follow.
@@ -220,64 +231,101 @@ describe('event-triggers follow source', () => {
     expect(fx.service.health().follows).toMatchObject({ open: 0, closed: 1, unresolved: 0, degraded: null })
   })
 
-  test('an Event Triggers config change degrades to generation-mismatch and the follow stays open', async () => {
+  test('a config edit of one trigger degrades only that trigger\'s follows, with or without re-provide', async () => {
     const fx = await fixture()
-    const admitted = await admitAndReport(fx, 'deploy-hook@3')
+    const onA = await admitAndReport(fx, refFor(fx.state, 'deploy-hook'))
+    const onOther = await admitAndReport(fx, refFor(fx.state, 'other'))
+    const generation = readStore(fx.root).follows(onA.item.id)[0]!.sourceGeneration
     fx.state.triggers.get('deploy-hook')!.configDigest = hex('config-2')
-    await fx.reload()
-    arrive(fx.state, 'deploy-hook', 'evt-1')
+    arrive(fx.state, 'deploy-hook', 'evt-a')
+    arrive(fx.state, 'other', 'evt-other')
 
-    expect(fx.service.settleOutcomes(true)).toMatchObject({ deferred: 1, closedByThread: 0, followDegraded: 'generation-mismatch' })
+    expect(fx.service.settleOutcomes(true)).toMatchObject({ deferred: 1, closedByThread: 1, followDegraded: 'resolver-failed' })
+    await fx.reload()
+    // The generation is owner-only, so a re-provide never strands follows.
+    expect(fx.service.settleOutcomes(true)).toMatchObject({ deferred: 1, closedByThread: 0, followDegraded: 'resolver-failed' })
     const store = readStore(fx.root)
-    expect(store.latestOutcome(admitted.item.id)).toBeUndefined()
-    expect(store.follows(admitted.item.id)[0]).toMatchObject({ state: 'open', outcome: null })
-    expect(fx.service.health().follows).toMatchObject({ open: 1, unresolved: 1, degraded: 'generation-mismatch' })
+    expect(store.latestOutcome(onA.item.id)).toBeUndefined()
+    expect(store.follows(onA.item.id)[0]).toMatchObject({ state: 'open', outcome: null })
+    expect(store.latestOutcome(onOther.item.id)).toMatchObject({ settledBy: 'closed-by-thread' })
+    expect(fx.service.health().follows).toMatchObject({ open: 1, closed: 1, degraded: 'resolver-failed' })
+
+    // New admissions use the new digest; the old digest is refused.
+    expect(errorCode(() => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: refFor(fx.state, 'deploy-hook', fx.state.sequence, hex('config-1')) }] })))).toBe('invalid-input')
+    const fresh = fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: refFor(fx.state, 'deploy-hook') }] }))
+    expect(readStore(fx.root).follows(fresh.item.id)[0]!.sourceGeneration).toBe(generation)
   })
 
-  test('a config change seen before the source is re-provided fails closed instead of closing', async () => {
+  test('observer expiry of an unrelated trigger affects neither other follows nor new admissions', async () => {
     const fx = await fixture()
-    const admitted = await admitAndReport(fx, 'deploy-hook@3')
-    fx.state.triggers.get('deploy-hook')!.configDigest = hex('config-2')
-    arrive(fx.state, 'deploy-hook', 'evt-1')
-    expect(fx.service.settleOutcomes(true)).toMatchObject({ deferred: 1, closedByThread: 0, followDegraded: 'resolver-failed' })
-    expect(readStore(fx.root).latestOutcome(admitted.item.id)).toBeUndefined()
+    const onA = await admitAndReport(fx, refFor(fx.state, 'deploy-hook'))
+    const onOther = await admitAndReport(fx, refFor(fx.state, 'other'))
+    fx.state.triggers.get('other')!.expiresAt = Date.now() - 1
+    await fx.reload()
+
+    // Admission for a still-current trigger keeps working.
+    const fresh = fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: refFor(fx.state, 'deploy-hook') }] }))
+    expect(fresh.created).toBe(true)
+    expect(errorCode(() => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: refFor(fx.state, 'other') }] })))).toBe('invalid-input')
+
+    arrive(fx.state, 'deploy-hook', 'evt-a')
+    arrive(fx.state, 'other', 'evt-other')
+    expect(fx.service.settleOutcomes(true)).toMatchObject({ deferred: 1, closedByThread: 1, followDegraded: 'resolver-failed' })
+    const store = readStore(fx.root)
+    expect(store.latestOutcome(onA.item.id)).toMatchObject({ settledBy: 'closed-by-thread' })
+    expect(store.latestOutcome(onOther.item.id)).toBeUndefined()
+    expect(store.follows(onOther.item.id)[0]).toMatchObject({ state: 'open' })
   })
 
   test('a disabled trigger leaves the follow unresolved', async () => {
     const fx = await fixture()
-    const admitted = await admitAndReport(fx, 'deploy-hook@3')
+    const admitted = await admitAndReport(fx, refFor(fx.state, 'deploy-hook'))
     arrive(fx.state, 'deploy-hook', 'evt-1')
     fx.state.triggers.get('deploy-hook')!.enabled = false
 
     // Without and with a re-provide, a disabled source never closes the follow.
     expect(fx.service.settleOutcomes(true)).toMatchObject({ deferred: 1, closedByThread: 0, followDegraded: 'resolver-failed' })
     await fx.reload()
-    expect(fx.service.settleOutcomes(true)).toMatchObject({ deferred: 1, closedByThread: 0, followDegraded: 'generation-mismatch' })
+    expect(fx.service.settleOutcomes(true)).toMatchObject({ deferred: 1, closedByThread: 0, followDegraded: 'resolver-failed' })
     expect(readStore(fx.root).latestOutcome(admitted.item.id)).toBeUndefined()
-    expect(errorCode(() => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: 'deploy-hook@4' }] })))).toBe('invalid-input')
+    expect(errorCode(() => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: `deploy-hook@4@${hex('config-1')}` }] })))).toBe('invalid-input')
+  })
+
+  test('retrying an admitted signal after new events returns the duplicate, not invalid-input', async () => {
+    const fx = await fixture()
+    const input = signal({ follows: [{ kind: 'event-triggers', ref: refFor(fx.state, 'deploy-hook') }] })
+    const first = fx.service.admit(input)
+    arrive(fx.state, 'deploy-hook', 'evt-1')
+    // The cursor is now below the high water, yet the replay is answered first.
+    const retry = fx.service.admit(input)
+    expect(retry).toMatchObject({ created: false, reason: 'duplicate' })
+    expect(retry.item.id).toBe(first.item.id)
+    expect(readStore(fx.root).countFollows()).toEqual({ open: 1, closed: 0 })
   })
 
   test('admission rejects a forged low, a future, a foreign or a malformed cursor before any write', async () => {
     const fx = await fixture()
     arrive(fx.state, 'deploy-hook', 'evt-old')
+    const digest = hex('config-1')
     // High water is now 4; evt-old at sequence 4 already exists.
-    for (const ref of ['deploy-hook@3', 'deploy-hook@0', 'deploy-hook@5', 'missing@4', 'deploy-hook', 'Deploy-Hook@4', 'deploy-hook@04']) {
+    for (const ref of [`deploy-hook@3@${digest}`, `deploy-hook@0@${digest}`, `deploy-hook@5@${digest}`, `missing@4@${digest}`,
+      `deploy-hook@4@${hex('stale')}`, 'deploy-hook@4', 'deploy-hook', `Deploy-Hook@4@${digest}`, `deploy-hook@04@${digest}`]) {
       expect(errorCode(() => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref }] })))).toBe('invalid-input')
     }
     fx.state.triggers.set('foreign', { ...fx.state.triggers.get('deploy-hook')!, id: 'foreign', owner: { ...OWNER, principalVersion: 8 } })
-    expect(errorCode(() => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: 'foreign@4' }] })))).toBe('invalid-input')
+    expect(errorCode(() => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: `foreign@4@${digest}` }] })))).toBe('invalid-input')
     const store = readStore(fx.root)
     expect(store.countFollows()).toEqual({ open: 0, closed: 0 })
 
     // The exact current high water admits, and the old event never closes it.
-    const admitted = await admitAndReport(fx, 'deploy-hook@4')
+    const admitted = await admitAndReport(fx, `deploy-hook@4@${digest}`)
     expect(fx.service.settleOutcomes(true)).toMatchObject({ deferred: 1, closedByThread: 0 })
     expect(store.follows(admitted.item.id)[0]).toMatchObject({ state: 'open' })
   })
 
   test('restart is idempotent: the same generation re-registers and settles once', async () => {
     const fx = await fixture()
-    const admitted = await admitAndReport(fx, 'deploy-hook@3')
+    const admitted = await admitAndReport(fx, refFor(fx.state, 'deploy-hook'))
     expect(fx.service.settleOutcomes(true)).toMatchObject({ deferred: 1, closedByThread: 0 })
     await fx.reopen()
     expect(fx.service.health().follows).toMatchObject({ open: 1, unresolved: 0, degraded: null })
@@ -295,7 +343,7 @@ describe('event-triggers follow source', () => {
         // Absent config keeps the prior normalized shape exactly.
         expect('follows' in normalizeConfig(config(fx.root, undefined))).toBe(false)
       }
-      expect(errorCode(() => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: 'deploy-hook@3' }] })))).toBe('invalid-input')
+      expect(errorCode(() => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: refFor(fx.state, 'deploy-hook') }] })))).toBe('invalid-input')
       // Hosts may still register their own source under that name.
       const dispose = fx.service.registerThreadSource({ source: 'event-triggers', generation: 'host', resolve: () => undefined })
       dispose()
@@ -305,7 +353,7 @@ describe('event-triggers follow source', () => {
 
   test('without the Event Triggers service the source stays unregistered', async () => {
     const fx = await fixture({ eventTriggers: false })
-    expect(errorCode(() => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: 'deploy-hook@3' }] })))).toBe('invalid-input')
+    expect(errorCode(() => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: refFor(fx.state, 'deploy-hook') }] })))).toBe('invalid-input')
   })
 })
 
@@ -330,9 +378,20 @@ describe('event-triggers follow config and helpers', () => {
   })
 
   test('parses only canonical refs', () => {
-    expect(parseEventFollowRef('deploy-hook@12')).toEqual({ triggerId: 'deploy-hook', afterSequence: 12 })
-    for (const ref of ['deploy-hook@', '@1', 'deploy-hook@-1', 'deploy-hook@1.5', 'deploy-hook@99999999999999999', 'a@1@2']) {
+    const digest = hex('config-1')
+    expect(parseEventFollowRef(`deploy-hook@12@${digest}`)).toEqual({ triggerId: 'deploy-hook', afterSequence: 12, configDigest: digest })
+    for (const ref of ['deploy-hook@12', `deploy-hook@@${digest}`, `@1@${digest}`, `deploy-hook@-1@${digest}`, `deploy-hook@1.5@${digest}`,
+      `deploy-hook@99999999999999999@${digest}`, `deploy-hook@1@${digest.toUpperCase()}`, `deploy-hook@1@${digest.slice(1)}`, `a@1@2@${digest}`]) {
       expect(parseEventFollowRef(ref)).toBeUndefined()
+    }
+  })
+
+  test('the generation depends on the owner identity only', () => {
+    const base = eventFollowGeneration(OWNER)
+    expect(base).toMatch(/^event-triggers\/v1\/[a-f0-9]{64}$/)
+    expect(eventFollowGeneration({ ...OWNER })).toBe(base)
+    for (const change of [{ principalRecordId: 'principal-2' }, { principalVersion: 8 }, { workspace: '/work/beta' }, { preset: 'other' }]) {
+      expect(eventFollowGeneration({ ...OWNER, ...change })).not.toBe(base)
     }
   })
 

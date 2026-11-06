@@ -4,7 +4,8 @@ import type { WorkItemThreadClosure, WorkItemThreadSourceRegistration } from './
 /**
  * Event Triggers as a followed-thread source (subscription pass-through, slice 1).
  *
- * A work item may follow `event-triggers` refs shaped `<triggerId>@<afterSequence>`.
+ * A work item may follow `event-triggers` refs shaped
+ * `<triggerId>@<afterSequence>@<configDigest>`.
  * The follow closes once the first authenticated source event after that cursor
  * exists. The event only proves something happened on the subscription, never
  * that the objective was achieved, so a closure always reports outcome
@@ -50,15 +51,18 @@ export function eventFollowReader(value: unknown): EventFollowReader | undefined
     && typeof candidate.firstEventAfter === 'function' ? candidate as EventFollowReader : undefined
 }
 
-// Trigger ids follow Event Triggers' stable lowercase identifier shape.
-const REF = /^([a-z0-9][a-z0-9._:-]{0,199})@(0|[1-9][0-9]{0,15})$/
+// Trigger ids follow Event Triggers' stable lowercase identifier shape; the
+// trailing segment is the trigger's 64-hex config digest at admission.
+const REF = /^([a-z0-9][a-z0-9._:-]{0,199})@(0|[1-9][0-9]{0,15})@([a-f0-9]{64})$/
 
-/** Parse `<triggerId>@<afterSequence>`; anything else is not an event follow. */
-export function parseEventFollowRef(ref: string): { triggerId: string; afterSequence: number } | undefined {
+export interface EventFollowRef { readonly triggerId: string; readonly afterSequence: number; readonly configDigest: string }
+
+/** Parse `<triggerId>@<afterSequence>@<configDigest>`; anything else is not an event follow. */
+export function parseEventFollowRef(ref: string): EventFollowRef | undefined {
   const match = typeof ref === 'string' ? REF.exec(ref) : null
   if (match === null) return undefined
   const afterSequence = Number(match[2])
-  return Number.isSafeInteger(afterSequence) ? { triggerId: match[1]!, afterSequence } : undefined
+  return Number.isSafeInteger(afterSequence) ? { triggerId: match[1]!, afterSequence, configDigest: match[3]! } : undefined
 }
 
 function canonical(value: unknown): string {
@@ -77,20 +81,25 @@ export function eventEnvelopeDigest(envelope: unknown): string {
 }
 
 /**
- * The source generation: Event Triggers version plus every owner trigger's
- * config digest. Any trigger config, enablement or owner change yields a new
- * generation, which degrades older follows to `generation-mismatch`.
+ * Follow protocol version carried in the generation. Event Triggers exposes its
+ * package version only on per-trigger snapshots, which vanish when a trigger is
+ * disabled or its observer expires, so a stable constant is used instead; an
+ * Event Triggers version change surfaces per follow because `firstEventAfter`
+ * only matches envelopes of the snapshot's version.
  */
-export function eventFollowGeneration(reader: EventFollowReader, owner: EventFollowOwnerScope): string {
-  const parts: string[] = []
-  let version = 'none'
-  for (const source of [...reader.inspectOwnerSources(owner)].sort((a, b) => a.triggerId < b.triggerId ? -1 : a.triggerId > b.triggerId ? 1 : 0)) {
-    const snapshot = reader.sourceSnapshot(source.triggerId)
-    version = snapshot.version
-    parts.push(`${source.triggerId} ${snapshot.configDigest} ${snapshot.kind} ${snapshot.target.automationId}`)
-  }
-  const digest = createHash('sha256').update(parts.join('\n')).digest('hex')
-  return `event-triggers/${version}/${digest}`
+export const EVENT_FOLLOW_PROTOCOL = 'v1'
+
+/**
+ * The source generation depends only on the owner identity, never on runtime
+ * trigger state (observer expiry, goal retirement, automation pause, config
+ * edits). Per-trigger config isolation lives in the ref's config digest, so one
+ * trigger's change degrades only the follows on that trigger.
+ */
+export function eventFollowGeneration(owner: EventFollowOwnerScope): string {
+  const digest = createHash('sha256')
+    .update(JSON.stringify([owner.principalRecordId, owner.principalVersion, owner.workspace, owner.preset]))
+    .digest('hex')
+  return `event-triggers/${EVENT_FOLLOW_PROTOCOL}/${digest}`
 }
 
 /**
@@ -104,34 +113,40 @@ export function eventFollowRegistration(input: {
 }): WorkItemThreadSourceRegistration {
   const { reader, owner } = input
   const now = input.now ?? Date.now
-  const generation = eventFollowGeneration(reader, owner())
-  const ownedSnapshot = (triggerId: string): Readonly<SourceSnapshot> | undefined => {
+  const generation = eventFollowGeneration(owner())
+  // Snapshot of one followed trigger, only while it is still an owner source
+  // under the admitted config digest; other triggers' state is irrelevant.
+  const ownedSnapshot = (ref: EventFollowRef): Readonly<SourceSnapshot> | undefined => {
     const scope = owner()
-    if (!reader.inspectOwnerSources(scope).some(source => source.triggerId === triggerId)) return undefined
-    // A live generation change means this registration is about to be replaced.
-    if (eventFollowGeneration(reader, scope) !== generation) return undefined
-    return reader.sourceSnapshot(triggerId)
+    if (eventFollowGeneration(scope) !== generation) return undefined
+    if (!reader.inspectOwnerSources(scope).some(source => source.triggerId === ref.triggerId)) return undefined
+    const snapshot = reader.sourceSnapshot(ref.triggerId)
+    return snapshot.configDigest === ref.configDigest ? snapshot : undefined
   }
   return Object.freeze({
     source: EVENT_TRIGGERS_FOLLOW_SOURCE,
     generation,
-    // Admission-time fence: the cursor must be exactly the current high water,
-    // so a forged low cursor cannot close a follow on an event that already
+    // Admission-time fence: the cursor must be exactly the current high water
+    // (a store-global sequence) and the digest the trigger's current config, so
+    // a forged low cursor cannot close a follow on an event that already
     // existed, and a future cursor cannot be pre-armed.
     validate(ref: string): boolean {
       const parsed = parseEventFollowRef(ref)
       if (parsed === undefined) return false
-      const snapshot = ownedSnapshot(parsed.triggerId)
+      const snapshot = ownedSnapshot(parsed)
       return snapshot !== undefined && parsed.afterSequence === snapshot.highWaterSequence
     },
     resolve(ref: string): WorkItemThreadClosure | undefined {
       const parsed = parseEventFollowRef(ref)
       if (parsed === undefined) return undefined
-      const snapshot = ownedSnapshot(parsed.triggerId)
+      const snapshot = ownedSnapshot(parsed)
       if (snapshot === undefined) return undefined
       if (parsed.afterSequence > snapshot.highWaterSequence) return undefined
-      // Read from the admitted cursor; Event Triggers revalidates the trigger,
-      // config digest, envelope digest and signing skew for every candidate.
+      // Security relies on the admission-time high-water check in `validate`:
+      // this cursor is replayed from the stored ref and is trusted only because
+      // admission refused any cursor below the high water at that moment.
+      // Event Triggers revalidates the trigger, config digest, envelope digest
+      // and signing skew for every candidate.
       const event = reader.firstEventAfter({ ...snapshot, highWaterSequence: parsed.afterSequence }, parsed.afterSequence, now())
       if (event === undefined) {
         return Object.freeze({ state: 'open' as const, outcome: 'unknown' as const, digest: `${snapshot.configDigest}@${snapshot.highWaterSequence}` })

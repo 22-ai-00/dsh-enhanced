@@ -135,6 +135,8 @@ describe('plugin setup: naming and validation', () => {
     expect(coerceConfigValue('row', 'missing', '3', undefined, true)).toBe(3)
     expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'mode', 'active', undefined)).toBe('active')
     expect(() => coerceConfigValue('dsh-enhanced-assistant-work-items', 'mode', 'loud', undefined)).toThrow(/observe, active/u)
+    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'follows.eventTriggers.enabled', 'true', undefined)).toBe(true)
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-work-items', 'follows.eventTriggers.enabled', 'maybe', undefined)).toThrow(/expects a boolean/u)
   })
 
   test('parses commands and rejects bad arity or options', () => {

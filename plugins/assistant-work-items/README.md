@@ -381,12 +381,13 @@ host-only `admitDecision(decision)`（service 与 `WorkItemAdmission` 同名方�
 
 配置 `follows: { eventTriggers: { enabled: true } }`（默认 `false`；要求 enabled intake 且有完整 `scope`）且宿主提供 `eventTriggers` 服务时，本插件在启动时自行注册 `source: 'event-triggers'`，让工作项跟随一个事件订阅：
 
-- ref 形如 `<triggerId>@<afterSequence>`。准入时 `validate` 要求 trigger 属于当前 owner（经 Delivery `validateOwnerRoute` 取得的 principal record/version、workspace、preset，与 `inspectOwnerSources` 范围一致）且 `afterSequence` **等于**当前 `highWaterSequence`；更低（伪造的旧序号，可能用旧事件关闭）、更高、他人 trigger、格式错误一律拒绝。
-- generation 为 `event-triggers/<version>/<owner 全部 trigger 的 id、configDigest、kind、automationId 摘要>`。
+- ref 形如 `<triggerId>@<afterSequence>@<configDigest>`（`configDigest` 为该 trigger 当时的 64 位小写 hex 配置摘要）。准入时 `validate` 要求 trigger 属于当前 owner（经 Delivery `validateOwnerRoute` 取得的 principal record/version、workspace、preset，与 `inspectOwnerSources` 范围一致）、`configDigest` 等于该 trigger 当前配置摘要，且 `afterSequence` **等于**当前 `highWaterSequence`。`highWaterSequence` 是 event-triggers store 的全局序号，不分 trigger。更低的序号（伪造的旧序号，可能借旧事件关闭）、更高的序号、过期摘要、他人 trigger、格式错误一律拒绝。安全性依赖这一次准入时检查：resolve 只是回放已存 ref 中的序号。
+- `validate` 只对新建项运行：同一信号在 dedup 窗口内重试、已结算项的 fence、decision/continuation 重放都先于它返回原项，因此新事件到达后重试会得到 `duplicate` 而不是 `invalid-input`。
+- generation 为 `event-triggers/v1/<sha256(principalRecordId, principalVersion, workspace, preset)>`，只取决于 owner 身份，不随 trigger 运行时状态（observer 到期、goal 退役、automation 暂停、配置编辑）或重新 provide 变化。`v1` 是 follow 协议常量：Event Triggers 只在单个 trigger 的 snapshot 上暴露版本号；升级后 `firstEventAfter` 只匹配同版本 envelope，旧 follow 保持 open。
 - resolve 同步调用 `firstEventAfter`：命中已认证事件 → `closed`，`outcome: 'unknown'`，`digest` 为该事件 envelope 的 `externalEventDigest`（事件到达不等于目标达成，结算仍为 unverified）；未命中 → `open`。
-- trigger 被停用、删除或配置变更时：重新 provide 前为 `resolver-failed`，重新 provide 后为 `generation-mismatch`；follow 保持 open，绝不当作关闭。
+- 降级按 follow 隔离：某个 trigger 被停用、observer 到期、不再属于 owner 或配置摘要变化时，只有跟随它的 follow 记为 `resolver-failed` 并保持 open（不会被当作关闭），其他 trigger 的 follow 与新准入不受影响。owner 身份变化（principal version 等）会让全部 event follow 在重新注册前为 `resolver-failed`，重新注册后为 `generation-mismatch`。
 - 仅被动：沿用上文结算 pass 与 CAS，无 timer、不订阅 `subscribeSourceChanges`；无 schema 变更。开关关闭时不注册、不读 event-triggers，宿主仍可自行注册同名来源。
-- 限制：generation 覆盖 owner 的全部 trigger，任一 trigger 增删改都会降级所有 event follow；准入要求序号精确等于全局 high water，新事件到达后重放同一准入会被拒绝而非识别为重复；owner principal version 变化后 follow 无法解析。
+- 限制：准入序号须精确等于全局 high water，调用方要在读到 snapshot 后立即准入，期间若有任何 trigger 的新事件写入，准入会被拒绝，需重读后重试；trigger 配置一经编辑，旧 follow 永久 `resolver-failed`（不会自动迁移到新摘要）；owner principal version 变化后旧 follow 无法解析。
 
 ### 可信 Evaluation 导出（第四个 trusted producer）
 
@@ -585,7 +586,7 @@ ctx.assistantWorkItems.registerIntakeEvaluator({
 | `intakeLedger.evaluation.admit.enabled` / `mode` | `false` / `observe` | 仅 inferred 候选：评估 accept 后 `observe` 记 would-admit，`auto` 经 `admitDecision` 准入（需 enabled active） |
 | `intakeLedger.evaluation.admit.kind` / `originBindingId` | `intake-inferred` / 必填 | 准入 mandate 的 kind（auto 须在 `allowedKinds` 内）与报告发往的 origin binding |
 | `intakeLedger.evaluation.admit.maxPerHour` | `5` | 滑动一小时准入上限（1–100） |
-| `follows.eventTriggers.enabled` | `false` | 有 `eventTriggers` 服务时注册 `event-triggers` follow 来源（ref `<triggerId>@<afterSequence>`，序号须等于当前 high water）；要求 enabled intake 与完整 scope |
+| `follows.eventTriggers.enabled` | `false` | 有 `eventTriggers` 服务时注册 `event-triggers` follow 来源（ref `<triggerId>@<afterSequence>@<configDigest>`，序号须等于当前全局 high water，摘要须等于该 trigger 当前配置）；要求 enabled intake 与完整 scope |
 | `ownerRecall.enabled` | `false` | 显式启用当前主人前台任务查询；要求 enabled active、完整 scope、worker automation 与独立 `inspect-work-items` 授权 |
 | `ownerRecall.linkedAliases` | 未设置 | 主人显式允许的 Delivery `linked` principal id 名单（规范 `channel/account/tenant/user` 形式，≤8，去重，不含 owner）；未设置时跨渠道别名读取一律拒绝；要求 `ownerRecall.enabled`；别名读取另需带 `budget` 的 `inspect-work-items` 规则及 Policy `authorizeAgentForPrincipal`（按别名 principal 独立计费） |
 | `ownerReportRouting.linkedFallback` | 未设置 | origin binding 不可用时可接收终端报告只读通知的 Delivery `linked` principal id 有序名单（规范形式，≤8，去重，不含 owner）；要求 enabled active、完整 scope 与 worker；回复不能续办 |

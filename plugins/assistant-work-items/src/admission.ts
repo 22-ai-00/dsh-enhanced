@@ -324,6 +324,7 @@ export class WorkItemAdmission {
       return Object.freeze({ item: settled, created: false, reason: 'fenced', dispatch })
     }
 
+    this.#validateFollows(follows)
     const wouldReject = this.#gateReasons(normalized.kind, now)
     let authority: WorkItemAuthorityBasis | null = null
     if (active) {
@@ -588,11 +589,6 @@ export class WorkItemAdmission {
       if (registration === undefined) {
         fail('invalid-input', `followed thread kind ${ref.kind} has no registered source`)
       }
-      if (registration.validate !== undefined) {
-        let accepted = false
-        try { accepted = registration.validate(ref.ref) === true } catch { accepted = false }
-        if (!accepted) fail('invalid-input', `followed thread ref is not admissible for source ${registration.source}`)
-      }
       return Object.freeze({
         kind: ref.kind,
         ref: ref.ref,
@@ -601,6 +597,25 @@ export class WorkItemAdmission {
       })
     })
     return Object.freeze(resolved)
+  }
+
+  /**
+   * Run each source's optional admission `validate` for a new item. Called
+   * only after every replay/dedup/fence answer, so retrying an already admitted
+   * signal returns its duplicate even when the ref is no longer admissible
+   * (for example an event cursor that has since been passed).
+   */
+  #validateFollows(follows: readonly WorkItemFollowInput[]): void {
+    for (const follow of follows) {
+      const registration = this.#deps.threadSource?.(follow.kind)
+      if (registration === undefined || registration.source !== follow.source || registration.generation !== follow.sourceGeneration) {
+        fail('invalid-input', `followed thread kind ${follow.kind} has no registered source`)
+      }
+      if (registration.validate === undefined) continue
+      let accepted = false
+      try { accepted = registration.validate(follow.ref) === true } catch { accepted = false }
+      if (!accepted) fail('invalid-input', `followed thread ref is not admissible for source ${registration.source}`)
+    }
   }
 }
 
