@@ -3,7 +3,7 @@ import { jsx } from 'react/jsx-runtime'
 import { CloudMark, KAI_FONT, QUIET_PHRASE, WenyaoGlyph, WenyaoSeal } from './art.js'
 import { TYPERT_REMOTE } from './typert.js'
 import { WENYAO_HERO_DATA_URI, WENYAO_HERO_HEIGHT, WENYAO_HERO_WIDTH } from './wenyao-hero.js'
-import type { OwnerConsoleIntakeAgreement, OwnerConsoleStatus, OwnerConsoleTrendSnapshotItem, OwnerConsoleTrendSnapshots,
+import type { IntakeAgreementAvailability, OwnerConsoleIntakeAgreement, OwnerConsoleStatus, OwnerConsoleTrendSnapshotItem, OwnerConsoleTrendSnapshots,
   OwnerConsoleWriteResult } from './typert.js'
 
 /** The installed Host supplies remote and the slot registry. */
@@ -275,8 +275,23 @@ export function intakeAgreementView(result: OwnerConsoleIntakeAgreement | undefi
       pill('WorkItems 未提供来源', 'warn'), '缺少 inspectIntakeProvenance，所有工作项计为无法判断。'))
 }
 
+const INTAKE_AVAILABILITY: Readonly<Record<IntakeAgreementAvailability, readonly [string, StatusTone]>> = {
+  absent: ['未加载', 'neutral'],
+  unknown: ['已加载，开关状态未知', 'warn'],
+  disabled: ['未启用', 'neutral'],
+  available: ['已启用', 'ok'],
+}
+
+/** Scope-free pill from `status`; the read below stays authoritative, so it never blocks the button. */
+export function intakeAvailabilityPill(availability: IntakeAgreementAvailability | undefined) {
+  if (availability === undefined) return pill('正在读取…', 'neutral')
+  const [label, tone] = INTAKE_AVAILABILITY[availability]
+  return pill(label, tone)
+}
+
 /** Read-only intake agreement card; its only control re-reads `intakeAgreement` for the typed scope. */
-export function IntakeAgreementCard({ remote }: Readonly<{ remote: ConsoleRemote }>) {
+export function IntakeAgreementCard({ remote, availability }: Readonly<{ remote: ConsoleRemote,
+  availability?: IntakeAgreementAvailability }>) {
   const [workspace, setWorkspace] = useState('')
   const [preset, setPreset] = useState('')
   const [result, setResult] = useState<OwnerConsoleIntakeAgreement>()
@@ -310,6 +325,7 @@ export function IntakeAgreementCard({ remote }: Readonly<{ remote: ConsoleRemote
   }
   const blocked = busy || workspace.trim() === '' || preset.trim() === ''
   return card('intake 吻合度（只读）',
+    el('div', { style: listStyle }, row('Evaluation 开关', intakeAvailabilityPill(availability))),
     el('div', { style: actionsStyle },
       field('workspace', workspace, edit(setWorkspace), '/absolute/workspace'),
       field('preset', preset, edit(setPreset), 'primary')),
@@ -524,7 +540,7 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
     card('TraeX', traexRows),
     card('本项目插件管理', bundles),
     jsx(TrendSnapshotsCard, { remote }),
-    jsx(IntakeAgreementCard, { remote }))
+    jsx(IntakeAgreementCard, { remote, availability: status?.evaluation.intakeAgreement }))
 }
 
 function bannerStyle(color: string) {

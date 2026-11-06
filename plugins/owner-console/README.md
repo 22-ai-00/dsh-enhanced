@@ -28,7 +28,7 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 | TraeX | `traex-acp-provider` 条目、是否启用、命令 | `settings.describe` |
 | 本项目插件管理 | 本项目的 bundle 层（启用/停用）、已加载条目（启用/禁用/阶段）、安装 `@dsh-enhanced/*`（含依赖），以及对 live 字段的合并配置 | `pluginManager` + `settings.describe` / `settings.mutate` |
 | 趋势快照（只读） | 已封存的普通使用趋势快照：序号、计划、窗口边界、会话数、flags、按冻结模型分层的 DiD 与平行趋势、digest 前缀；每页 10 条，可翻到更早一页 | `pluginControlPlane.inspectCreatedCapabilityOrdinaryUseTrendSnapshots`（结构化读取，可缺省） |
-| intake 吻合度（只读） | 填写 Evaluation 作用域（workspace + preset）后读取：窗口、扫描通知数（是否截断）、intake 准入合计与按 level 的吻合 / 不吻合计数与比例、非 intake / 无法判断 / 他 scope 计数；只有计数，不含工作项 id 或正文 | `assistantEvaluation.inspectIntakeAttentionAgreement`（结构化读取，可缺省；开关关闭时显示未启用） |
+| intake 吻合度（只读） | 填写 Evaluation 作用域（workspace + preset）后读取：窗口、扫描通知数（是否截断）、intake 准入合计与按 level 的吻合 / 不吻合计数与比例、非 intake / 无法判断 / 他 scope 计数；只有计数，不含工作项 id 或正文 | `assistantEvaluation.inspectIntakeAttentionAgreement`（结构化读取，可缺省；开关关闭时显示未启用）+ `loader` 条目配置（只读开关，无需作用域） |
 
 读取与写入都经 `typert` 的严格 invocation 返回；面板不缓存或上报任何内容。
 Host 状态里仍带 `dependencies` 字段，但面板不再渲染「依赖自检」卡片。
@@ -91,6 +91,12 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 `intakeAttentionAgreementEnabled`（默认关，需同时开启 `notificationOutcomesEnabled`）时显示「未启用」；作用域为空、
 查询被拒或抛错（含相对路径等 Evaluation 拒收的作用域）、协议不符、`causal` 不为 `false`、计数不合模式或彼此矛盾（结果合计、吻合/不吻合与比例按 Evaluation 的算法复核）时显示「未通过校验」。修改任一输入框会清掉已显示的结果，读取进行中按钮禁用，过期的应答被丢弃，因此显示的计数总是对应输入框里的作用域。结果固定 `causal: false`：
 口径混合了执行与注意力结果，不是 intake 准确率，只覆盖 auto 准入的工作项，不作为采用依据。
+
+卡片顶部的「Evaluation 开关」来自 Host 状态的 `evaluation.intakeAgreement`，不需要作用域：没有 Evaluation
+显示「未加载」；Evaluation 存在且唯一启用的 `@dsh-enhanced/assistant-evaluation` Loader 条目未开启
+`intakeAttentionAgreementEnabled` 时显示「未启用」，开启时显示「已启用」；Evaluation 缺少该读取方法、没有 loader、
+找不到或找到多个启用条目、或开关值不是布尔时显示「已加载，开关状态未知」。它不调用 Evaluation、不扫描通知，
+只透传这四个枚举值，不含作用域、计数或其它配置；它也不阻止「读取」，作用域内的结果仍以读取为准。
 
 ## 配置
 

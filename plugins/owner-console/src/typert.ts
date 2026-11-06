@@ -22,6 +22,13 @@ export const LARK_CONNECTIONS = ['absent', 'unknown', 'connected', 'connected-wi
   'disabled', 'disconnected', 'reconnecting'] as const
 export const LARK_ERROR_CODES = ['format_error', 'not_connected', 'permission_denied', 'rate_limited',
   'send_timeout', 'ssrf_blocked', 'target_revoked', 'unknown', 'upload_failed'] as const
+/**
+ * Scope-free availability of the intake agreement read. `absent`: no Evaluation service;
+ * `unknown`: it exists but the read or its switch cannot be determined; `disabled`:
+ * `intakeAttentionAgreementEnabled` is off; `available`: the switch is on. No scope or count.
+ */
+export const INTAKE_AGREEMENT_AVAILABILITY = ['absent', 'unknown', 'disabled', 'available'] as const
+export type IntakeAgreementAvailability = typeof INTAKE_AGREEMENT_AVAILABILITY[number]
 export const OwnerConsoleStatusSchema = z.object({
   feishu: z.object({
     entry: z.string().min(1).optional(),
@@ -35,6 +42,7 @@ export const OwnerConsoleStatusSchema = z.object({
   }).readonly(),
   traex: z.object({ entry: z.string().min(1).optional(), installed: z.boolean(), enabled: z.boolean(), command: z.string() }).readonly(),
   dependencies: z.array(dependency).readonly(),
+  evaluation: z.object({ intakeAgreement: z.enum(INTAKE_AGREEMENT_AVAILABILITY) }).readonly(),
   bundles: z.array(bundle).readonly(),
   plugins: z.array(plugin).readonly(),
 }).readonly()

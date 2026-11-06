@@ -5,8 +5,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { Config, apply, name, version } from '../src/index.ts'
 import type { OwnerConsoleService } from '../src/service.ts'
 import type { SettingsDescriptor, SettingsService } from '../src/settings.ts'
-import { TYPERT } from '../src/typert.ts'
-import { readIntakeAgreement, readTrendSnapshots } from '../src/service.ts'
+import { OwnerConsoleStatusSchema, TYPERT } from '../src/typert.ts'
+import { readIntakeAgreement, readIntakeAgreementAvailability, readTrendSnapshots } from '../src/service.ts'
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
   version: string
@@ -80,6 +80,7 @@ describe('dsh-enhanced-owner-console', () => {
       expect(status.traex).toEqual({ installed: false, enabled: false, command: '' })
       expect(status.dependencies.map(item => item.name)).toEqual(['assistantPolicy', 'assistantDelivery', 'assistantSkills'])
       expect(status.dependencies.every(item => item.available === false)).toBe(true)
+      expect(status.evaluation).toEqual({ intakeAgreement: 'absent' })
       expect(status.bundles).toEqual([])
       expect(Object.isFrozen(status)).toBe(true)
       expect(ctx.get('ownerConsole' as never)).toBeDefined()
@@ -453,5 +454,61 @@ describe('owner console intake agreement (read-only)', () => {
       expect(readIntakeAgreement(provider(agreement(overrides)), '/work/alpha', 'primary')).toEqual(unverifiable)
     }
     expect(readIntakeAgreement(provider(agreement()), '/work/alpha', 'primary').state).toBe('ok')
+  })
+})
+
+const evaluationEntry = (config: unknown, extra: Record<string, unknown> = {}) =>
+  ({ id: 'include:eval', options: { id: 'dsh-enhanced-assistant-evaluation', name: '@dsh-enhanced/assistant-evaluation', config, ...extra },
+    refresh: async () => undefined })
+const loaderOf = (...entries: unknown[]) => ({ entries: () => entries })
+
+describe('owner console intake agreement availability (scope-free)', () => {
+  it('reports absent, disabled and available without calling Evaluation', () => {
+    const read = vi.fn(() => { throw new Error('must not scan') })
+    const provider = { inspectIntakeAttentionAgreement: read }
+    expect(readIntakeAgreementAvailability(undefined, loaderOf(evaluationEntry({ intakeAttentionAgreementEnabled: true })))).toBe('absent')
+    expect(readIntakeAgreementAvailability(null, undefined)).toBe('absent')
+    // Evaluation defaults the switch off, so a missing key is disabled.
+    expect(readIntakeAgreementAvailability(provider, loaderOf(evaluationEntry({ databasePath: '/secret/evaluation.sqlite' })))).toBe('disabled')
+    expect(readIntakeAgreementAvailability(provider, loaderOf(evaluationEntry(undefined)))).toBe('disabled')
+    expect(readIntakeAgreementAvailability(provider, loaderOf(evaluationEntry({ intakeAttentionAgreementEnabled: false })))).toBe('disabled')
+    expect(readIntakeAgreementAvailability(provider, loaderOf(
+      evaluationEntry({ intakeAttentionAgreementEnabled: false }, { disabled: true }),
+      evaluationEntry({ intakeAttentionAgreementEnabled: true }),
+      { id: 'other', options: { id: 'other', name: '@dsh-enhanced/lark-channel', config: { intakeAttentionAgreementEnabled: false } } },
+    ))).toBe('available')
+    expect(read).not.toHaveBeenCalled()
+  })
+
+  it('reports unknown when the read or its switch cannot be determined', () => {
+    const provider = { inspectIntakeAttentionAgreement: () => undefined }
+    const on = evaluationEntry({ intakeAttentionAgreementEnabled: true })
+    expect(readIntakeAgreementAvailability({}, loaderOf(on))).toBe('unknown')
+    expect(readIntakeAgreementAvailability(provider, undefined)).toBe('unknown')
+    expect(readIntakeAgreementAvailability(provider, {})).toBe('unknown')
+    expect(readIntakeAgreementAvailability(provider, loaderOf())).toBe('unknown')
+    expect(readIntakeAgreementAvailability(provider, loaderOf(on, evaluationEntry({})))).toBe('unknown')
+    expect(readIntakeAgreementAvailability(provider, loaderOf(evaluationEntry({ intakeAttentionAgreementEnabled: 'yes' })))).toBe('unknown')
+    expect(readIntakeAgreementAvailability(provider, { entries: () => { throw new Error('loader down') } })).toBe('unknown')
+  })
+
+  it('surfaces only the availability enum in status, never scope, counts or config', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    const read = vi.fn(() => agreement())
+    ctx.provide('assistantEvaluation' as never, { inspectIntakeAttentionAgreement: read } as never)
+    ctx.provide('loader' as never, loaderOf(evaluationEntry({ intakeAttentionAgreementEnabled: true,
+      databasePath: '/secret/evaluation.sqlite' })) as never)
+    apply(ctx, Config(defaults))
+    try {
+      const status = await (ctx.get('ownerConsole' as never) as unknown as OwnerConsoleService).status()
+      expect(status.evaluation).toEqual({ intakeAgreement: 'available' })
+      expect(Object.isFrozen(status.evaluation)).toBe(true)
+      expect(OwnerConsoleStatusSchema.safeParse(status).success).toBe(true)
+      expect(read).not.toHaveBeenCalled()
+      expect(JSON.stringify(status)).not.toContain('/secret')
+    } finally {
+      await ctx.fiber.dispose()
+    }
   })
 })

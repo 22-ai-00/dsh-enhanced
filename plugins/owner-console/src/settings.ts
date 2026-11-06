@@ -68,7 +68,7 @@ export const isProjectPackage = (value: unknown): value is string => typeof valu
 
 export interface LoaderEntry {
   readonly id: string
-  readonly options: { readonly id: string, readonly config?: unknown }
+  readonly options: { readonly id: string, readonly name?: string, readonly config?: unknown, readonly disabled?: boolean | null }
   readonly fiber?: { update(config: unknown, noSave?: boolean): void }
   refresh(): Promise<void>
 }

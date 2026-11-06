@@ -9,7 +9,7 @@ import {
 import {
   INTAKE_AGREEMENT_LEVELS, INTAKE_AGREEMENT_OUTCOMES, LARK_CONNECTIONS, LARK_ERROR_CODES, OwnerConsoleIntakeAgreementSchema,
   OwnerConsoleTrendSnapshotsSchema, TREND_SNAPSHOT_PAGE_MAX,
-  type OwnerConsoleIntakeAgreement, type OwnerConsoleStatus, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
+  type IntakeAgreementAvailability, type OwnerConsoleIntakeAgreement, type OwnerConsoleStatus, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
 } from './typert.js'
 
 /** Companions worth surfacing; a missing one is a setup hint, never a hard failure. */
@@ -106,6 +106,10 @@ export class OwnerConsoleService extends TypertRemoteService {
       dependencies: Object.freeze(DEPENDENCIES.map(name => Object.freeze({
         name, available: this.host.get(name as never) !== undefined,
       }))),
+      evaluation: Object.freeze({
+        intakeAgreement: readIntakeAgreementAvailability(this.host.get('assistantEvaluation' as never),
+          this.host.get('loader' as never)),
+      }),
       bundles: Object.freeze(inventory.bundles.map(bundle => Object.freeze({
         name: bundle.name,
         ...(bundle.version === undefined ? {} : { version: bundle.version }),
@@ -402,6 +406,29 @@ export function readIntakeAgreement(provider: unknown, workspace: string, preset
     return parsed.success && intakeAgreementConsistent(parsed.data.summary!) ? Object.freeze(parsed.data) : INTAKE_UNVERIFIABLE
   } catch {
     return INTAKE_UNVERIFIABLE
+  }
+}
+
+const EVALUATION_MODULE = '@dsh-enhanced/assistant-evaluation'
+
+/** Scope-free and read-only: whether `intakeAgreement` can answer at all. Nothing on Evaluation is
+ * called, so no notification is scanned; the switch comes from the one enabled Evaluation loader
+ * entry's persisted config (Evaluation defaults it off). No scope, count or other config passes through. */
+export function readIntakeAgreementAvailability(provider: unknown, loader: unknown): IntakeAgreementAvailability {
+  if (provider === undefined || provider === null) return 'absent'
+  try {
+    if (typeof (provider as IntakeAgreementProvider).inspectIntakeAttentionAgreement !== 'function') return 'unknown'
+    const read = (loader as Partial<LoaderService> | undefined | null)?.entries
+    if (typeof read !== 'function') return 'unknown'
+    const entries = [...read.call(loader)].filter(entry =>
+      entry.options.name === EVALUATION_MODULE && entry.options.disabled !== true)
+    // Zero or several candidates: the panel cannot tell which one provides the service.
+    if (entries.length !== 1) return 'unknown'
+    const enabled = record(entries[0]!.options.config)['intakeAttentionAgreementEnabled']
+    if (enabled === true) return 'available'
+    return enabled === undefined || enabled === false ? 'disabled' : 'unknown'
+  } catch {
+    return 'unknown'
   }
 }
 

@@ -42,6 +42,7 @@ function render(status?: OwnerConsoleStatus) {
 const STATUS = {
   feishu: { mode: 'env', installed: true, entry: 'dsh-enhanced-lark-channel', connection: 'connected', appIdConfigured: false },
   traex: { installed: false, enabled: false, command: '' },
+  evaluation: { intakeAgreement: 'disabled' },
   bundles: [],
   plugins: [],
 } as unknown as OwnerConsoleStatus
@@ -88,6 +89,16 @@ describe('owner console panel presentation', () => {
     expect(all).toContain('本 profile 中没有本项目的 bundle。')
     expect(all).toContain('云水无事，小鳐静候')
     expect(nodes.filter(node => node.type === 'button').length).toBeGreaterThan(3)
+  })
+
+  it('shows the scope-free intake agreement switch from status without blocking the read', () => {
+    const labels = { absent: '未加载', unknown: '已加载，开关状态未知', disabled: '未启用', available: '已启用' } as const
+    for (const [availability, label] of Object.entries(labels)) {
+      const { nodes } = render({ ...STATUS, evaluation: { intakeAgreement: availability } } as unknown as OwnerConsoleStatus)
+      const all = text(nodes)
+      expect(all).toContain(`Evaluation 开关|${label}`)
+    }
+    expect(text(render().nodes)).toContain('Evaluation 开关|正在读取…')
   })
 
   it('maps lark connection states to tones without relying on colour alone', () => {
