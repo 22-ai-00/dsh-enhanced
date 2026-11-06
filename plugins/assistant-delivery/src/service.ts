@@ -540,6 +540,24 @@ export type AssistantDeliveryErrorCode =
   | 'runtime-conflict'
   | 'runtime-unavailable'
 
+/**
+ * Send-time withdrawal check for owner notices queued with `withdrawable`.
+ * `isWithdrawn` must be synchronous, side-effect free and keyed only by the
+ * notice's idempotency key. A withdrawable notice is never sent while no
+ * check is registered for its source, or while the check throws; it is
+ * withdrawn (dead, never sent) once the check returns true.
+ */
+export interface OwnerNotificationWithdrawal {
+  readonly sourceId: string
+  isWithdrawn(idempotencyKey: string): boolean
+}
+
+/** Read-only view of an owner notice found by its idempotency key; carries no text. */
+export interface OwnerNotificationRecordView {
+  readonly outboxId: string
+  readonly status: OutboxRecord['status']
+}
+
 export class AssistantDeliveryError extends Error {
   constructor(readonly code: AssistantDeliveryErrorCode, message: string) {
     super(message)
@@ -1189,6 +1207,8 @@ export class AssistantDeliveryService extends Service {
   private acceptanceSink: Readonly<{ token: symbol; registration: TaskAcceptanceRegistration }> | undefined
   private workItemReplyConsumer: WorkItemReplyConsumerRegistration | undefined
   private inboundIntakeObserver: DeliveryInboundIntakeObserver | undefined
+  /** Send-time withdrawal checks for `withdrawable` owner notices, one per canonical source id. */
+  private readonly ownerNotificationWithdrawals = new Map<string, OwnerNotificationWithdrawal>()
   private foregroundObserver: Readonly<{ token: symbol; generation: string; registration: ForegroundTaskObservationRegistration; handles: Map<string, { task: ForegroundTaskIdentity; handle: unknown }> }> | undefined
   /** Once a live verifier required acceptance, loss of that verifier must not silently bypass it. */
   private acceptanceRequired = false
@@ -5707,14 +5727,27 @@ export class AssistantDeliveryService extends Service {
       const permission = this.policy.evaluate({ subject: { kind: 'background', id: sourceId, workspace: binding.workspace, principal: externalPrincipalId(binding.principal) }, action: 'send', resource: { kind: 'message', id: binding.id }, context: { initiator: 'background' } })
       if (permission.effect !== 'allow') throw new Error('send denied')
     } catch { return { outcome: 'not-sent', failureCode: 'native-notice-policy-revoked', retryable: false } }
+    const withdrawable = metadata['dsh.native-notice.withdrawable']
+    if (withdrawable !== undefined) {
+      if (withdrawable !== 'v1') return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
+      // Fail closed: without a live check for this source the notice waits (bounded by its expiry) instead of sending.
+      let withdrawn: boolean
+      try {
+        const check = this.ownerNotificationWithdrawals.get(canonicalBackgroundSourceId(metadata['dsh.native-notice.sourceId']!))
+        if (check === undefined) return { outcome: 'not-sent', failureCode: 'native-notice-withdrawal-unavailable', retryable: true }
+        withdrawn = check.isWithdrawn(intent.idempotencyKey)
+      } catch { return { outcome: 'not-sent', failureCode: 'native-notice-withdrawal-unavailable', retryable: true } }
+      if (withdrawn !== false) return { outcome: 'not-sent', failureCode: 'native-notice-withdrawn', retryable: false }
+    }
     return undefined
   }
   #notificationProviderId(intent: Readonly<OutboundIntent>): string { return `native-notice:${createHash('sha256').update(intent.idempotencyKey).update('\u0000').update(intent.bindingId).update('\u0000').update(intent.text).digest('hex')}` }
 
   /** Queue a typed owner notice. Accepted means queued; it never asserts user read. */
-  enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention?: AttentionEnvelope }): OutboxRecord {
+  enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention?: AttentionEnvelope; withdrawable?: boolean }): OutboxRecord {
     this.assertActive()
     if (!Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || typeof input.text !== 'string' || input.text.length === 0 || input.text.length > 16_384) throw new AssistantDeliveryError('policy-denied', 'owner notification is invalid or expired')
+    if (input.withdrawable !== undefined && typeof input.withdrawable !== 'boolean') throw new AssistantDeliveryError('policy-denied', 'owner notification is invalid or expired')
     const resolved = this.resolveOwnerRoute(input.ownerRouteId)
     const binding = resolved.binding; const owner = this.deliveryStore.getPrincipal(binding.principal)
     if (binding.sessionId !== input.sessionId || binding.workspace !== input.scope.workspace || binding.agentPreset !== input.scope.preset
@@ -5722,7 +5755,41 @@ export class AssistantDeliveryService extends Service {
     return this.enqueueBackgroundAuthorized({ sourceId: input.sourceId, workspace: binding.workspace, bindingId: binding.id, idempotencyKey: input.idempotencyKey, text: input.text, format: 'plain', metadata: {
       'dsh.native-notice': 'v1', 'dsh.native-notice.sourceId': input.sourceId, 'dsh.native-notice.ownerRouteId': input.ownerRouteId, 'dsh.native-notice.expiresAt': String(input.expiresAt), 'dsh.native-notice.ownerRecordId': owner.id,
       'dsh.native-notice.ownerVersion': String(owner.version), 'dsh.native-notice.bindingVersion': String(binding.version), 'dsh.native-notice.bindingGeneration': String(binding.generation), 'dsh.native-notice.sessionId': binding.sessionId,
+      ...(input.withdrawable === true ? { 'dsh.native-notice.withdrawable': 'v1' } : {}),
     } }, undefined, { lane: 'owner-notification', envelope: input.attention })
+  }
+
+  /**
+   * Register the send-time withdrawal check for one owner-notice source (see
+   * `OwnerNotificationWithdrawal`). One check per source; the returned
+   * function unregisters it, after which that source's withdrawable notices
+   * wait instead of sending.
+   */
+  registerOwnerNotificationWithdrawal(registration: OwnerNotificationWithdrawal): () => void {
+    this.assertActive()
+    if (!registration || typeof registration.isWithdrawn !== 'function' || typeof registration.sourceId !== 'string') throw new AssistantDeliveryError('runtime-conflict', 'invalid owner notification withdrawal')
+    const sourceId = canonicalBackgroundSourceId(registration.sourceId)
+    if (this.ownerNotificationWithdrawals.has(sourceId)) throw new AssistantDeliveryError('runtime-conflict', 'owner notification withdrawal already registered')
+    this.ownerNotificationWithdrawals.set(sourceId, registration)
+    let live = true
+    return () => { if (live) { live = false; if (this.ownerNotificationWithdrawals.get(sourceId) === registration) this.ownerNotificationWithdrawals.delete(sourceId) } }
+  }
+
+  /**
+   * Read-only lookup of an owner notice by idempotency key, scoped to the
+   * source that queued it: a key held by another source or by a non-notice
+   * record reads as absent. Never returns text or metadata.
+   */
+  inspectOwnerNotification(input: Readonly<{ sourceId: string; idempotencyKey: string }>): Readonly<OwnerNotificationRecordView> | undefined {
+    this.assertActive()
+    if (typeof input?.idempotencyKey !== 'string' || input.idempotencyKey.length === 0 || input.idempotencyKey.length > 256) throw new AssistantDeliveryError('runtime-conflict', 'invalid owner notification lookup')
+    const sourceId = canonicalBackgroundSourceId(input.sourceId)
+    const record = this.deliveryStore.getOutboxByIdempotencyKey(input.idempotencyKey)
+    const metadata = record?.intent.metadata
+    if (record === undefined || metadata?.['dsh.native-notice'] !== 'v1' || typeof metadata['dsh.native-notice.sourceId'] !== 'string') return undefined
+    let stored: string
+    try { stored = canonicalBackgroundSourceId(metadata['dsh.native-notice.sourceId']) } catch { return undefined }
+    return stored === sourceId ? Object.freeze({ outboxId: record.id, status: record.status }) : undefined
   }
 
   /**

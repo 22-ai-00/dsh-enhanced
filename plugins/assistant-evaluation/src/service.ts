@@ -165,7 +165,18 @@ export interface Config {
 interface OwnerQuestionDeliveryPort {
   validateOwnerRoute(input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }): { principalRecordId: string; principalVersion: number }
   resolveOwnerRoute(authorityId: string): { binding: { sessionId: string } }
-  enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention: { purpose: 'result' } }): { id: string }
+  enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention: { purpose: 'result' }; withdrawable: true }): { id: string }
+  /** Read-only Outbox lookup by idempotency key, scoped to this source; never returns text. */
+  inspectOwnerNotification(input: { sourceId: string; idempotencyKey: string }): { outboxId: string; status: string } | undefined
+  /** Send-time withdrawal check: Delivery never sends a withdrawable notice the check withdraws. */
+  registerOwnerNotificationWithdrawal(registration: { sourceId: string; isWithdrawn(idempotencyKey: string): boolean }): () => void
+}
+
+function isOwnerQuestionDeliveryPort(value: unknown): value is OwnerQuestionDeliveryPort {
+  const port = value as Partial<OwnerQuestionDeliveryPort> | null | undefined
+  return typeof port === 'object' && port !== null && typeof port.enqueueOwnerNotification === 'function'
+    && typeof port.validateOwnerRoute === 'function' && typeof port.resolveOwnerRoute === 'function'
+    && typeof port.inspectOwnerNotification === 'function' && typeof port.registerOwnerNotificationWithdrawal === 'function'
 }
 
 export const ASSISTANT_EVALUATION_SKILL = `# Personal assistant self-evaluation
@@ -526,6 +537,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   private projectionTimer: ReturnType<typeof setInterval> | undefined
   private notificationFacts: NotificationOutcomeFactSource | undefined
   private lastNotificationSyncAt = Number.NEGATIVE_INFINITY
+  private ownerQuestionWithdrawal: Readonly<{ source: object; dispose: () => void }> | undefined
   private readonly attentionCohorts: readonly AttentionCohort[]
   private active = true
 
@@ -658,6 +670,10 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     }
     bindNotificationFacts(currentDelivery)
     ctx.inject(['assistantDelivery' as never], deliveryCtx => bindNotificationFacts(deliveryCtx.get('assistantDelivery' as never) as unknown))
+    if (this.config.attentionOwnerQuestionDeliveryEnabled) {
+      this.bindOwnerQuestionWithdrawal(currentDelivery)
+      ctx.inject(['assistantDelivery' as never], deliveryCtx => this.bindOwnerQuestionWithdrawal(deliveryCtx.get('assistantDelivery' as never) as unknown))
+    }
     const currentVerifier = ctx.get('assistantVerifier' as never) as unknown
     if (isTrustedVerifierEvaluationProducer(currentVerifier)) this.bindVerifierProducer(currentVerifier)
     ctx.inject(['assistantVerifier' as never], verifierCtx => {
@@ -690,6 +706,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       if (this.projectionTimer !== undefined) clearInterval(this.projectionTimer)
       this.projectionTimer = undefined
       this.notificationFacts = undefined
+      this.ownerQuestionWithdrawal?.dispose()
       disposeCurrentProjector?.()
       this.automationBinding?.dispose()
       this.deliveryBinding?.dispose()
@@ -1351,18 +1368,71 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
 
   #ownerQuestionDelivery(): OwnerQuestionDeliveryPort | undefined {
     const delivery = this.ctx.get('assistantDelivery' as never) as unknown as Partial<OwnerQuestionDeliveryPort> | undefined
-    return typeof delivery?.enqueueOwnerNotification === 'function' && typeof delivery.validateOwnerRoute === 'function'
-      && typeof delivery.resolveOwnerRoute === 'function' ? delivery as OwnerQuestionDeliveryPort : undefined
+    return isOwnerQuestionDeliveryPort(delivery) ? delivery : undefined
+  }
+
+  /**
+   * Register (once per Delivery instance) the send-time withdrawal check for
+   * owner-question notices. A Delivery without the check is treated as absent.
+   */
+  private bindOwnerQuestionWithdrawal(source: unknown): (() => void) | undefined {
+    if (!this.active || !isOwnerQuestionDeliveryPort(source)) return undefined
+    if (this.ownerQuestionWithdrawal?.source === source) return undefined
+    let unregister: () => void
+    try {
+      unregister = source.registerOwnerNotificationWithdrawal({ sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID,
+        isWithdrawn: idempotencyKey => this.#ownerQuestionWithdrawn(idempotencyKey) })
+    } catch { return undefined }
+    if (typeof unregister !== 'function') return undefined
+    this.ownerQuestionWithdrawal?.dispose()
+    let live = true
+    const binding = Object.freeze({ source, dispose: () => {
+      if (!live) return
+      live = false
+      try { unregister() } catch { /* Delivery already gone */ }
+      if (this.ownerQuestionWithdrawal === binding) this.ownerQuestionWithdrawal = undefined
+    } })
+    this.ownerQuestionWithdrawal = binding
+    return binding.dispose
+  }
+
+  /**
+   * Send-time answer for one owner-question notice. It stays sendable only
+   * while its question is still the cohort's latest, open, unanswered, inside
+   * the notice TTL, and not recorded closed/expired. Anything else, including
+   * a key this service did not issue, is withdrawn. A storage error throws so
+   * Delivery holds the notice (bounded by its expiry) rather than sending.
+   */
+  #ownerQuestionWithdrawn(idempotencyKey: string): boolean {
+    if (!this.active || !this.config.attentionOwnerQuestionDeliveryEnabled) return true
+    const prefix = attentionOwnerQuestionIdempotencyKey('')
+    if (typeof idempotencyKey !== 'string' || !idempotencyKey.startsWith(prefix)) return true
+    const questionId = idempotencyKey.slice(prefix.length)
+    for (const cohort of this.attentionCohorts) {
+      for (const scope of this.store.attention.scopes(cohort)) {
+        const latest = this.store.attention.latestOwnerQuestion(scope, cohort)
+        if (latest === undefined || latest === 'unverifiable' || latest.questionId !== questionId) continue
+        const delivery = this.store.attentionQuestions.delivery(questionId)
+        return !latest.open || this.store.attentionQuestions.reply(questionId) !== undefined
+          || (delivery !== undefined && delivery.status !== 'queued')
+          || this.now() >= latest.question.createdAt + this.config.attentionOwnerQuestionNoticeTtlMs
+      }
+    }
+    return true
   }
 
   /**
    * WP22 slice 4 tick step: for each configured cohort and scope, the latest
-   * recorded owner question is handed to Delivery at most once. A question a
-   * newer grant (or a recorded reply) already closed is recorded `closed` and
-   * never sent; one older than the notice TTL is recorded `expired`. Delivery
-   * absence, a route that does not match the scope, or an enqueue failure
-   * leaves no row, so a later tick retries under the same idempotency key.
-   * Zero work when `attentionOwnerQuestionDeliveryEnabled` is off.
+   * recorded owner question is handed to Delivery at most once. An Outbox row
+   * already holding the question's idempotency key is adopted as `queued`
+   * before any other decision. Otherwise a question a newer grant (or a
+   * recorded reply) already closed is recorded `closed` and never sent; one
+   * older than the notice TTL is recorded `expired`. Notices are queued
+   * `withdrawable`, so a question closed after queueing is withdrawn by
+   * Delivery's send-time check instead of being sent. Delivery absence, a
+   * route that does not match the scope, or an enqueue failure leaves no row,
+   * so a later tick retries under the same idempotency key. Zero work when
+   * `attentionOwnerQuestionDeliveryEnabled` is off.
    */
   reconcileAttentionOwnerQuestions(): readonly Readonly<{ scopeKey: string; cohort: AttentionCohort; result: AttentionOwnerQuestionTickAction }>[] {
     this.assertActive()
@@ -1381,6 +1451,28 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
         if (latest === 'unverifiable') { push({ action: 'unverifiable' }); continue }
         const { questionId, question } = latest
         if (this.store.attentionQuestions.delivery(questionId) !== undefined) continue
+        const delivery = this.#ownerQuestionDelivery()
+        // Without Delivery no Outbox lookup is possible, so no terminal row is written either.
+        if (delivery === undefined) { push({ action: 'deferred', questionId, reason: 'delivery-unavailable' }); continue }
+        this.bindOwnerQuestionWithdrawal(delivery)
+        const idempotencyKey = attentionOwnerQuestionIdempotencyKey(questionId)
+        // An Outbox row under this key (e.g. enqueued before a crash, or under an
+        // older TTL) is adopted as queued; the send-time withdrawal check then
+        // keeps a since-closed question from being sent.
+        let existing: { outboxId: string; status: string } | undefined
+        try { existing = delivery.inspectOwnerNotification({ sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID, idempotencyKey }) } catch {
+          push({ action: 'deferred', questionId, reason: 'delivery-unavailable' })
+          continue
+        }
+        if (existing !== undefined) {
+          if (typeof existing.outboxId !== 'string' || existing.outboxId.length === 0 || existing.outboxId.length > 256) {
+            push({ action: 'deferred', questionId, reason: 'delivery-unavailable' })
+            continue
+          }
+          this.store.attentionQuestions.recordDelivery(scope, cohort, questionId, 'queued', existing.outboxId)
+          push({ action: 'queued', questionId, outboxId: existing.outboxId })
+          continue
+        }
         if (!latest.open || this.store.attentionQuestions.reply(questionId) !== undefined) {
           this.store.attentionQuestions.recordDelivery(scope, cohort, questionId, 'closed', null)
           push({ action: 'closed', questionId })
@@ -1392,8 +1484,6 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
           push({ action: 'expired', questionId })
           continue
         }
-        const delivery = this.#ownerQuestionDelivery()
-        if (delivery === undefined) { push({ action: 'deferred', questionId, reason: 'delivery-unavailable' }); continue }
         let principal: { principalRecordId: string; principalVersion: number }
         let sessionId: string
         try {
@@ -1412,10 +1502,11 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
             ownerRouteId: owner.ownerRouteId,
             scope: { principalId: owner.principalId, ...principal, workspace: scope.workspace, preset: scope.preset },
             sessionId,
-            idempotencyKey: attentionOwnerQuestionIdempotencyKey(questionId),
+            idempotencyKey,
             text: attentionOwnerQuestionText(question, scope),
             expiresAt,
             attention: { purpose: 'result' },
+            withdrawable: true,
           }).id
         } catch {
           push({ action: 'deferred', questionId, reason: 'enqueue-failed' })
@@ -1445,7 +1536,10 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     if (latest === undefined || latest === 'unverifiable' || latest.questionId !== input.questionId) {
       return Object.freeze({ status: 'rejected', reason: 'unknown-question' })
     }
-    return this.store.attentionQuestions.recordReply(input.scope, cohort, latest.questionId, input.choice, latest.open)
+    // A question whose notice expired (recorded, or past the TTL) no longer takes a reply.
+    const expired = this.store.attentionQuestions.delivery(latest.questionId)?.status === 'expired'
+      || this.now() >= latest.question.createdAt + this.config.attentionOwnerQuestionNoticeTtlMs
+    return this.store.attentionQuestions.recordReply(input.scope, cohort, latest.questionId, input.choice, latest.open, expired)
   }
 
   /** Per-question delivery decisions and recorded replies for one cohort. */

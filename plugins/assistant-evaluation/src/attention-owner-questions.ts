@@ -39,7 +39,7 @@ export interface AttentionOwnerQuestionReply {
 
 export type AttentionOwnerQuestionReplyResult =
   | Readonly<{ status: 'recorded'; questionId: string; choice: AttentionOwnerQuestionChoice; repliedAt: number }>
-  | Readonly<{ status: 'rejected'; reason: 'delivery-disabled' | 'unknown-question' | 'question-closed' | 'reply-conflict' }>
+  | Readonly<{ status: 'rejected'; reason: 'delivery-disabled' | 'unknown-question' | 'question-closed' | 'question-expired' | 'reply-conflict' }>
 
 export interface AttentionOwnerQuestionStatus {
   readonly enabled: boolean
@@ -94,7 +94,7 @@ export function attentionOwnerQuestionText(question: AttentionOwnerQuestion, sco
     `Change: ${label} from ${valueText(question.change.from)} to ${valueText(question.change.to)} (${question.steps} step${question.steps === 1 ? '' : 's'}).`,
     `Held-out notices replayed: ${checked}.`,
     `Approval is needed because ${reasons.length === 0 ? 'no owner grant covers it' : reasons.join('; ')}.`,
-    'Reply "authorize once" to allow this single change, or "decline" to keep the current setting. Nothing changes until an owner grant is recorded.',
+    'To allow this single change, record an owner grant through the host configuration. Replies to this message are not read. Nothing changes until an owner grant is recorded.',
   ].join('\n')
 }
 
@@ -161,11 +161,12 @@ export class AttentionOwnerQuestionLedger {
 
   /**
    * Record-only owner reply. The caller has already established that the
-   * question is the cohort's latest and still open; replaying the same choice
-   * is idempotent and a different choice is a conflict.
+   * question is the cohort's latest and whether it is open and expired; a new
+   * reply needs open and not expired. Replaying the same choice is idempotent
+   * and a different choice is a conflict.
    */
   recordReply(scopeInput: EvaluationScope, cohortInput: AttentionCohort, questionId: string, choiceInput: unknown,
-    open: boolean): AttentionOwnerQuestionReplyResult {
+    open: boolean, expired: boolean): AttentionOwnerQuestionReplyResult {
     const { scopeKey } = canonicalEvaluationScope(scopeInput)
     const cohort = normalizeAttentionCohort(cohortInput)
     if (typeof choiceInput !== 'string' || !(attentionOwnerQuestionChoices as readonly string[]).includes(choiceInput)) invalid('choice is not recognised')
@@ -178,6 +179,7 @@ export class AttentionOwnerQuestionLedger {
           : Object.freeze({ status: 'rejected' as const, reason: 'reply-conflict' as const })
       }
       if (!open) return Object.freeze({ status: 'rejected' as const, reason: 'question-closed' as const })
+      if (expired) return Object.freeze({ status: 'rejected' as const, reason: 'question-expired' as const })
       const repliedAt = this.#now()
       this.#database.prepare(`INSERT INTO evaluation_attention_owner_question_replies
         (question_id, scope_key, lane, source_id, choice, replied_at) VALUES (?,?,?,?,?,?)`)

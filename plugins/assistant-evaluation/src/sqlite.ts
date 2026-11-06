@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite'
 
 export const evaluationSchemaVersion = 17
 
-export type EvaluationDatabaseErrorCode = 'invalid-path' | 'unsafe-file' | 'schema-too-new'
+export type EvaluationDatabaseErrorCode = 'invalid-path' | 'unsafe-file' | 'schema-too-new' | 'schema-drift'
 
 export class EvaluationDatabaseError extends Error {
   constructor(readonly code: EvaluationDatabaseErrorCode, message: string) {
@@ -570,7 +570,61 @@ const attentionOwnerQuestionDeliverySchema = `
     BEGIN SELECT RAISE(ABORT, 'attention owner question replies are durable'); END;
 `
 
+const attentionOwnerQuestionDeliveryTables = Object.freeze([
+  'evaluation_attention_owner_question_deliveries',
+  'evaluation_attention_owner_question_replies',
+])
+
+interface SchemaObject { readonly type: string; readonly name: string; readonly tbl_name: string; readonly sql: string | null }
+
+function ownerQuestionSchemaObjects(database: DatabaseSync): string[] {
+  const placeholders = attentionOwnerQuestionDeliveryTables.map(() => '?').join(',')
+  const rows = database.prepare(`SELECT type, name, tbl_name, sql FROM sqlite_schema
+    WHERE tbl_name IN (${placeholders}) OR name IN (${placeholders})`)
+    .all(...attentionOwnerQuestionDeliveryTables, ...attentionOwnerQuestionDeliveryTables) as unknown as SchemaObject[]
+  return rows.map(row => JSON.stringify([row.type, row.name, row.tbl_name, row.sql?.replace(/\s+/g, ' ').trim() ?? null])).sort()
+}
+
+let expectedOwnerQuestionSchema: readonly string[] | undefined
+
+function expectedOwnerQuestionSchemaObjects(): readonly string[] {
+  if (expectedOwnerQuestionSchema === undefined) {
+    const reference = new DatabaseSync(':memory:')
+    try {
+      reference.exec(attentionOwnerQuestionDeliverySchema)
+      expectedOwnerQuestionSchema = Object.freeze(ownerQuestionSchemaObjects(reference))
+    } finally {
+      reference.close()
+    }
+  }
+  return expectedOwnerQuestionSchema
+}
+
+/**
+ * Fail closed unless the schema-17 owner-question tables, their indexes and
+ * their immutability triggers are exactly the ones the migration creates.
+ */
+function assertOwnerQuestionSchema(database: DatabaseSync): void {
+  const actual = ownerQuestionSchemaObjects(database)
+  const expected = expectedOwnerQuestionSchemaObjects()
+  if (actual.length !== expected.length || actual.some((entry, index) => entry !== expected[index])) {
+    throw new EvaluationDatabaseError('schema-drift', 'evaluation owner-question delivery schema does not match schema 17')
+  }
+}
+
 function migrate(database: DatabaseSync): void {
+  migrateEvaluationDatabase(database)
+}
+
+/**
+ * Upgrade `database` to `target` (default: the current schema). Exported
+ * outside the package index so tests can build a genuine older schema with
+ * the same migration chain.
+ */
+export function migrateEvaluationDatabase(database: DatabaseSync, target: number = evaluationSchemaVersion): void {
+  if (!Number.isSafeInteger(target) || target < 1 || target > evaluationSchemaVersion) {
+    throw new Error('evaluation migration target is not a supported schema')
+  }
   const initial = schemaVersion(database)
   if (initial > evaluationSchemaVersion) {
     throw new EvaluationDatabaseError(
@@ -578,11 +632,14 @@ function migrate(database: DatabaseSync): void {
       `evaluation schema ${initial} is newer than supported schema ${evaluationSchemaVersion}`,
     )
   }
-  if (initial === evaluationSchemaVersion) return
+  if (initial >= target) {
+    if (initial >= 17) assertOwnerQuestionSchema(database)
+    return
+  }
 
   database.exec('BEGIN IMMEDIATE')
   try {
-    if (schemaVersion(database) === 0) {
+    if (schemaVersion(database) === 0 && target > 0) {
       database.exec(`
         CREATE TABLE evaluation_schema_meta (
           key TEXT PRIMARY KEY,
@@ -639,14 +696,14 @@ function migrate(database: DatabaseSync): void {
         PRAGMA user_version = 7;
       `)
     }
-    if (schemaVersion(database) === 1) {
+    if (schemaVersion(database) === 1 && target > 1) {
       database.exec(`
         ${selfAssessmentSchema}
         UPDATE evaluation_schema_meta SET value = '2' WHERE key = 'schema-version';
         PRAGMA user_version = 2;
       `)
     }
-    if (schemaVersion(database) === 2) {
+    if (schemaVersion(database) === 2 && target > 2) {
       database.exec(`
         ${projectionOutboxSchema}
         INSERT INTO evaluation_projection_outbox(
@@ -659,7 +716,7 @@ function migrate(database: DatabaseSync): void {
         PRAGMA user_version = 3;
       `)
     }
-    if (schemaVersion(database) === 3) {
+    if (schemaVersion(database) === 3 && target > 3) {
       database.exec(`
         ALTER TABLE evaluation_outcomes ADD COLUMN task_subject_key TEXT;
         ALTER TABLE evaluation_outcomes ADD COLUMN task_subject_kind TEXT;
@@ -696,7 +753,7 @@ function migrate(database: DatabaseSync): void {
         PRAGMA user_version = 4;
       `)
     }
-    if (schemaVersion(database) === 4) {
+    if (schemaVersion(database) === 4 && target > 4) {
       database.exec(`
         DROP VIEW evaluation_task_projection_view;
         ALTER TABLE evaluation_task_projections
@@ -726,7 +783,7 @@ function migrate(database: DatabaseSync): void {
         PRAGMA user_version = 5;
       `)
     }
-    if (schemaVersion(database) === 5) {
+    if (schemaVersion(database) === 5 && target > 5) {
       database.exec(`
         -- Protocol v2 uses a distinct task-revision sink capability.  A v5
         -- Evaluation may already have marked a trigger recorded after an older
@@ -754,7 +811,7 @@ function migrate(database: DatabaseSync): void {
         PRAGMA user_version = 6;
       `)
     }
-    if (schemaVersion(database) === 6) {
+    if (schemaVersion(database) === 6 && target > 6) {
       database.exec(`
         ${scopeWatermarkSchema}
         -- The sum of each subject's monotonic learning revision is the exact
@@ -788,7 +845,7 @@ function migrate(database: DatabaseSync): void {
         PRAGMA user_version = 7;
       `)
     }
-    if (schemaVersion(database) === 7) {
+    if (schemaVersion(database) === 7 && target > 7) {
       database.exec(`
         CREATE TABLE evaluation_owner_revisions (
           outcome_id TEXT PRIMARY KEY REFERENCES evaluation_outcomes(id),
@@ -810,7 +867,7 @@ function migrate(database: DatabaseSync): void {
         PRAGMA user_version = 8;
       `)
     }
-    if (schemaVersion(database) === 8) {
+    if (schemaVersion(database) === 8 && target > 8) {
       // SQLite CHECK constraints cannot be widened in place.  Preserve every
       // existing v8 projection while enabling the distinct foreground subject.
       database.exec(`
@@ -852,7 +909,7 @@ function migrate(database: DatabaseSync): void {
         PRAGMA user_version = 9;
       `)
     }
-    if (schemaVersion(database) === 9) {
+    if (schemaVersion(database) === 9 && target > 9) {
       // Rebuild only the constrained projection table; its rows and all
       // outcome/foreign-key references remain intact across the v9 -> v10 step.
       database.exec(`
@@ -866,7 +923,7 @@ function migrate(database: DatabaseSync): void {
         PRAGMA user_version = 10;
       `)
     }
-    if (schemaVersion(database) === 10) {
+    if (schemaVersion(database) === 10 && target > 10) {
       // Preserve all historical projections while widening only the durable
       // subject-kind constraint for whole-goal verifier assessments.
       database.exec(`
@@ -880,7 +937,7 @@ function migrate(database: DatabaseSync): void {
         PRAGMA user_version = 11;
       `)
     }
-    if (schemaVersion(database) === 11) {
+    if (schemaVersion(database) === 11 && target > 11) {
       // Historical projections had a scope fence but no cursorable head. Give
       // every existing canonical subject a stable new watermark exactly once.
       const overflow = database.prepare(`
@@ -915,7 +972,7 @@ function migrate(database: DatabaseSync): void {
         PRAGMA user_version = 12;
       `)
     }
-    if (schemaVersion(database) === 12) {
+    if (schemaVersion(database) === 12 && target > 12) {
       // Preserve feed heads and every semantic revision verbatim while widening
       // the projection identity. Historical settlement evidence is not re-keyed.
       database.exec(`
@@ -939,37 +996,41 @@ function migrate(database: DatabaseSync): void {
         PRAGMA user_version = 13;
       `)
     }
-    if (schemaVersion(database) === 13) {
+    if (schemaVersion(database) === 13 && target > 13) {
       database.exec(`
         ${notificationOutcomeSchema}
         UPDATE evaluation_schema_meta SET value = '14' WHERE key = 'schema-version';
         PRAGMA user_version = 14;
       `)
     }
-    if (schemaVersion(database) === 14) {
+    if (schemaVersion(database) === 14 && target > 14) {
       database.exec(`
         ${attentionTuningSchema}
         UPDATE evaluation_schema_meta SET value = '15' WHERE key = 'schema-version';
         PRAGMA user_version = 15;
       `)
     }
-    if (schemaVersion(database) === 15) {
+    if (schemaVersion(database) === 15 && target > 15) {
       database.exec(`
         ${attentionLooseningSchema}
         UPDATE evaluation_schema_meta SET value = '16' WHERE key = 'schema-version';
         PRAGMA user_version = 16;
       `)
     }
-    if (schemaVersion(database) === 16) {
+    if (schemaVersion(database) === 16 && target > 16) {
+      if (ownerQuestionSchemaObjects(database).length > 0) {
+        throw new EvaluationDatabaseError('schema-drift', 'evaluation schema 16 already holds owner-question delivery objects')
+      }
       database.exec(`
         ${attentionOwnerQuestionDeliverySchema}
         UPDATE evaluation_schema_meta SET value = '17' WHERE key = 'schema-version';
         PRAGMA user_version = 17;
       `)
     }
-    if (schemaVersion(database) !== evaluationSchemaVersion) {
+    if (schemaVersion(database) !== target) {
       throw new Error('evaluation migration did not reach the current schema')
     }
+    if (target >= 17) assertOwnerQuestionSchema(database)
     database.exec('COMMIT')
   } catch (error) {
     database.exec('ROLLBACK')
