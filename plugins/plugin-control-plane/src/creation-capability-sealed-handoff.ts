@@ -512,8 +512,12 @@ export interface SealedReplayPlanIdIsolation {
  *
  * A replayed sealed tool must return under a NEW plan id. Bound to the caller's signed proof digest, this
  * refuses `planId` when it names any sealed history row (every status, not only pending reverification),
- * equals one ignoring case, or already names a row of the live journal under the next authority.
- * It reads the journal only and grants nothing: passing it is necessary for a replay plan, never sufficient. */
+ * equals one ignoring case, or equals ignoring case any `adoptions` row of the live ledger, whatever its
+ * authority (stricter than the next authority alone, intentionally fail-closed).
+ * It reads the journal only and grants nothing: passing it is necessary for a replay plan, never sufficient.
+ * It runs in its own read-only snapshot and reserves nothing, and `CreationCapabilityJournal.claim` compares
+ * plan ids exactly without case folding, so whoever wires it must re-run this case-folded check inside the
+ * claim writer transaction; otherwise a concurrent `FRESH`/`fresh` pair both pass. */
 export function assertSealedReplayPlanIdIsolated(input: { physicalPath: string; expectedProofDigest: string;
   planId: string }): Readonly<SealedReplayPlanIdIsolation> {
   const file = input?.physicalPath, planId = input?.planId
