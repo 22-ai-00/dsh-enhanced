@@ -1,6 +1,9 @@
 import { Context } from '@deepseek-ai/cordis'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { readFileSync } from 'node:fs'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { Config, apply, name, version } from '../src/index.ts'
 import type { OwnerConsoleService } from '../src/service.ts'
@@ -344,7 +347,7 @@ function fakeManager(install: (spec: string, options?: unknown) => unknown) {
 }
 
 describe('owner console install failures', () => {
-  it('turns pnpm\'s coloured build-script refusal into an actionable note', async () => {
+  it('reads build names out of pnpm\'s coloured refusal even when the Host recorded none', async () => {
     const manager = fakeManager(() => ({ changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
       error: { code: 'operation-error', diagnostic: ANSI_BUILD_BLOCKED }, pendingBuilds: [],
       packageResult: { kind: 'build-blocked', exitCode: 1 } }))
@@ -352,15 +355,44 @@ describe('owner console install failures', () => {
     try {
       const refused = await console.installProjectBundle(' @dsh-enhanced/lark-channel ')
       expect(refused).toMatchObject({ applied: false, entry: '@dsh-enhanced/lark-channel' })
-      // The Host recorded no pending name, so the panel must not offer an approval that would be stale.
-      expect(refused.pendingBuilds).toBeUndefined()
+      // pnpm named the script; the panel offers the owner an approval for exactly that name.
+      expect(refused.pendingBuilds).toEqual(['protobufjs@7.6.6'])
       expect(refused.note).toContain('protobufjs@7.6.6')
-      expect(refused.note).toContain('pnpm-workspace.yaml')
+      expect(refused.note).toContain('allowBuilds')
       expect(refused.note).not.toContain(ESC)
       expect(manager.installBundle).toHaveBeenCalledExactlyOnceWith('@dsh-enhanced/lark-channel',
         { enabled: true, saveExact: true })
     } finally {
       await ctx.fiber.dispose()
+    }
+  })
+
+  it('writes the confirmed names to the profile when the Host holds no pending approval', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'owner-console-builds-'))
+    const manager = fakeManager((_spec, options) => {
+      if ((options as { approvedBuilds?: readonly string[] }).approvedBuilds !== undefined) {
+        return { changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
+          error: { code: 'stale-approval', diagnostic: 'not pending' }, pendingBuilds: [] }
+      }
+      return manager.installBundle.mock.calls.length === 1
+        ? { changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
+          error: { code: 'operation-error', diagnostic: ANSI_BUILD_BLOCKED }, pendingBuilds: [],
+          packageResult: { kind: 'build-blocked', exitCode: 1 } }
+        : { changed: true, application: 'restart-required', target: '@dsh-enhanced/lark-channel' }
+    })
+    const { ctx, console } = await mount(undefined, undefined, manager)
+    ctx.provide('profileContext' as never, { dir } as never)
+    try {
+      const refused = await console.installProjectBundle('@dsh-enhanced/lark-channel')
+      expect(refused.pendingBuilds).toEqual(['protobufjs@7.6.6'])
+      const retried = await console.installProjectBundle('@dsh-enhanced/lark-channel', ['protobufjs@7.6.6'])
+      expect(retried).toMatchObject({ applied: true, entry: '@dsh-enhanced/lark-channel' })
+      expect(manager.installBundle).toHaveBeenLastCalledWith('@dsh-enhanced/lark-channel',
+        { enabled: true, saveExact: true })
+      expect(await readFile(join(dir, 'pnpm-workspace.yaml'), 'utf8')).toContain('protobufjs@7.6.6: true')
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(dir, { recursive: true, force: true })
     }
   })
 

@@ -98,6 +98,7 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
+    "yaml": "2.9.0",
     "zod": "catalog:"
   }
 }

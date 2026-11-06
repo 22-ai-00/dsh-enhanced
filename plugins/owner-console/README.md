@@ -134,9 +134,10 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
   （与 `dsh plugin` 相同的 pnpm 路径），会一并安装该包声明的依赖并默认激活；本地路径和 git 地址
   不在此面板处理，避免面板成为任意代码源入口。安装/启用后如返回 `restart-required`，按提示重启 profile。
 - **依赖构建脚本**：pnpm 可能拒绝依赖的构建脚本（`ERR_PNPM_IGNORED_BUILDS`）。Host 记录到
-  `pendingBuilds` 时，面板会先让主人确认，再用这些精确名称重试；Host 未记录（例如它的解析没认出
-  带 ANSI 的输出）时，面板会从失败输出中读出依赖名，并给出 `pnpm-workspace.yaml` 的 `allowBuilds`
-  写法和 `pnpm approve-builds` 提示，不会替主人静默放行。
+  `pendingBuilds` 时，面板会先让主人确认，再用这些精确名称重试。Host 未记录（当前 Host 的解析没认出
+  带 ANSI 的输出）时，面板会从失败输出中读出依赖名交给主人确认；确认后若 Host 仍返回 `stale-approval`，
+  面板把确认过的名称写入当前 profile 的 `pnpm-workspace.yaml`（`allowBuilds: <name>: true`，原子写入、0600），
+  再重试一次。不会自动放行，也不会写入未确认的名称；Host 安装器本身的缺陷未在面板内修补。
 - **不兼容版本**：Host 以 `incompatible-version` 拒绝时，面板列出被拒的 `包@版本`、缺失的 DSH peer
   要求与当前 DSH 版本，并提示更新插件或为这个精确版本授予兼容豁免后重试。
 - **高级**：对声明了 live 字段的条目仍可合并一段 JSON 配置（≤16 KiB），不重置其它字段。

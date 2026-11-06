@@ -12,6 +12,7 @@ import {
   type IntakeAgreementAvailability, type OwnerConsoleIntakeAgreement, type OwnerConsoleStatus, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
 } from './typert.js'
 import { componentState, missingRemedy, repairPatch } from './state.js'
+import { persistAllowedBuilds } from './build-approvals.js'
 
 /** Companions worth surfacing; a missing one is a setup hint, never a hard failure. */
 const DEPENDENCIES = ['assistantPolicy', 'assistantDelivery', 'assistantSkills'] as const
@@ -19,6 +20,8 @@ const LARK = /(^|[-_/])lark(-channel)?($|[-_/])/u
 const TRAEX = /traex/iu
 const APP_ID_ENV = ['LARK_APP_ID', 'FEISHU_APP_ID'] as const
 const ACCOUNT = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
+/** The Host's answer when an approval names a build script it no longer holds as pending. */
+const STALE_APPROVAL = 'stale-approval'
 
 /** Read-only status plus owner-clicked, one-step writes through the Host settings service.
  * Only `.volatile()` config fields are editable by that service; every write addresses one
@@ -35,6 +38,12 @@ export class OwnerConsoleService extends TypertRemoteService {
     const settings = this.host.get('settings' as never) as SettingsService | undefined
     if (settings === undefined) throw new Error('Host settings service is unavailable; this console cannot edit configuration')
     return settings
+  }
+
+  /** Host-supplied profile directory; only the `allowBuilds` fallback writes there. */
+  private profileDirectory(): string | undefined {
+    const profile = this.host.get('profileContext' as never) as { dir?: unknown } | undefined
+    return typeof profile?.dir === 'string' && profile.dir !== '' ? profile.dir : undefined
   }
 
   private descriptors(): readonly SettingsDescriptor[] {
@@ -248,8 +257,9 @@ export class OwnerConsoleService extends TypertRemoteService {
 
   /** Install one project bundle with its declared dependencies, then activate it.
    * The Host's pnpm run can stop at its dependency build-script policy; the names it recorded
-   * in `pendingBuilds` are the only ones a retry may approve, so the panel never approves a
-   * build script the Host did not surface. */
+   * in `pendingBuilds` are the only ones a retry may approve. When pnpm's coloured output made
+   * the Host record none, the owner-confirmed names are written to the profile's
+   * `allowBuilds` and installed once more without an approval flag. */
   async installProjectBundle(spec: string, approvedBuilds: readonly string[] = []): Promise<OwnerConsoleWriteResult> {
     const trimmed = spec.trim()
     if (!isProjectPackage(trimmed)) {
@@ -261,11 +271,21 @@ export class OwnerConsoleService extends TypertRemoteService {
       return refuse(trimmed, '批准的构建脚本名称无效')
     }
     const manager = this.manager()
-    const result = await manager.installBundle(trimmed, {
+    let result = await manager.installBundle(trimmed, {
       enabled: true,
       saveExact: true,
       ...(approvals.length === 0 ? {} : { approvedBuilds: approvals }),
     })
+    if (approvals.length > 0 && result.error?.code === STALE_APPROVAL) {
+      const dir = this.profileDirectory()
+      if (dir === undefined) return rejectStaleApproval(trimmed, approvals)
+      try {
+        await persistAllowedBuilds(dir, approvals)
+      } catch (cause) {
+        return refuse(trimmed, `写入 allowBuilds 失败：${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+      result = await manager.installBundle(trimmed, { enabled: true, saveExact: true })
+    }
     return applyInstall(result)
   }
 
@@ -431,8 +451,9 @@ function normalizeBuildNames(names: readonly string[] | undefined): readonly str
     .slice(0, MAX_BUILD_NAMES))
 }
 
-/** Install-specific refusal mapping: keep the Host's approval names only when it recorded them, and
- * turn pnpm's raw error box or a compatibility denial into the concrete owner-facing next step. */
+/** Install-specific refusal mapping: surface every build name pnpm reported (the Host's own record
+ * may be empty when its parser misses pnpm's coloured line), and turn a raw error box or a
+ * compatibility denial into the concrete owner-facing next step. */
 export function applyInstall(result: ChangeResultLike): OwnerConsoleWriteResult {
   const pending = normalizeBuildNames(result.pendingBuilds)
   const log = result.packageResult?.logPath === undefined
@@ -453,17 +474,18 @@ export function applyInstall(result: ChangeResultLike): OwnerConsoleWriteResult 
   const buildBlocked = result.packageResult?.kind === 'build-blocked'
     || /ERR_PNPM_IGNORED_BUILDS/u.test(error.diagnostic ?? '')
   if (buildBlocked) {
-    const names = pending.length > 0 ? pending : blockedBuildNames(error.diagnostic ?? '')
+    const names = pending.length > 0 ? pending
+      : normalizeBuildNames(blockedBuildNames(error.diagnostic ?? result.packageResult?.output ?? ''))
     const listed = names.length === 0 ? 'Host 未给出名称（完整输出在 profile 的 pnpm 日志中）' : names.join('、')
-    const next = pending.length > 0
-      ? '确认允许这些依赖运行构建脚本后重试。'
-      : `Host 未能自动记录这次拒绝；请在 profile 的 pnpm-workspace.yaml 中写入 allowBuilds（${names.length === 0
-        ? '依赖名: true'
-        : names.map(name => `${name}: true`).join('、')}），或运行 pnpm approve-builds 后重试。`
+    const next = names.length === 0
+      ? 'Host 未能自动记录这次拒绝；请在 profile 的 pnpm-workspace.yaml 中写入 allowBuilds（依赖名: true），或运行 pnpm approve-builds 后重试。'
+      : pending.length > 0
+        ? '确认允许这些依赖运行构建脚本后重试。'
+        : '确认允许后，面板会把这些名称写入 profile 的 allowBuilds 并重试一次。'
     return Object.freeze({
       applied: false,
       entry: result.target,
-      ...(pending.length === 0 ? {} : { pendingBuilds: pending }),
+      ...(names.length === 0 ? {} : { pendingBuilds: names }),
       note: `安装被 pnpm 的依赖构建脚本策略拒绝：${listed}。${next}${log}`,
     })
   }
@@ -511,6 +533,12 @@ function writeFailure(entry: string, cause: unknown): OwnerConsoleWriteResult {
         ? `该条目当前不可配置（未加载或没有 live 字段）：${boundedText(message, 300)}。条目未加载时请重启 profile 或用 profile patch 修复`
         : `写入失败：${boundedText(message, 400)}`
   return refuse(entry, note)
+}
+
+/** The Host holds no pending record for a name the owner approved, so no retry is possible. */
+function rejectStaleApproval(entry: string, names: readonly string[]): OwnerConsoleWriteResult {
+  return refuse(entry, `Host 未记录这些待批准的构建脚本：${names.join('、')}；且未提供 profile 目录，`
+    + '无法写入 allowBuilds。请在 profile 的 pnpm-workspace.yaml 中写入对应条目后重试。')
 }
 
 function refuse(entry: string, note: string): OwnerConsoleWriteResult {
