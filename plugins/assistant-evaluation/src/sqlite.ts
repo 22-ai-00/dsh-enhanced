@@ -10,7 +10,7 @@ import {
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const evaluationSchemaVersion = 16
+export const evaluationSchemaVersion = 17
 
 export type EvaluationDatabaseErrorCode = 'invalid-path' | 'unsafe-file' | 'schema-too-new'
 
@@ -534,6 +534,42 @@ const attentionLooseningSchema = `
     BEGIN SELECT RAISE(ABORT, 'attention owner questions are durable'); END;
 `
 
+const attentionOwnerQuestionDeliverySchema = `
+  CREATE TABLE evaluation_attention_owner_question_deliveries (
+    question_id TEXT PRIMARY KEY CHECK (length(question_id) = 64),
+    scope_key TEXT NOT NULL,
+    lane TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('queued','closed','expired')),
+    outbox_id TEXT CHECK (outbox_id IS NULL OR length(outbox_id) BETWEEN 1 AND 256),
+    idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 256),
+    recorded_at INTEGER NOT NULL CHECK (recorded_at >= 0),
+    CHECK ((status = 'queued') = (outbox_id IS NOT NULL)),
+    FOREIGN KEY (question_id) REFERENCES evaluation_attention_owner_questions(question_id) ON DELETE RESTRICT
+  ) STRICT;
+  CREATE TRIGGER evaluation_attention_owner_question_deliveries_immutable
+    BEFORE UPDATE ON evaluation_attention_owner_question_deliveries
+    BEGIN SELECT RAISE(ABORT, 'attention owner question deliveries are immutable'); END;
+  CREATE TRIGGER evaluation_attention_owner_question_deliveries_no_delete
+    BEFORE DELETE ON evaluation_attention_owner_question_deliveries
+    BEGIN SELECT RAISE(ABORT, 'attention owner question deliveries are durable'); END;
+  CREATE TABLE evaluation_attention_owner_question_replies (
+    question_id TEXT PRIMARY KEY CHECK (length(question_id) = 64),
+    scope_key TEXT NOT NULL,
+    lane TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    choice TEXT NOT NULL CHECK (choice IN ('authorize-once','decline')),
+    replied_at INTEGER NOT NULL CHECK (replied_at >= 0),
+    FOREIGN KEY (question_id) REFERENCES evaluation_attention_owner_questions(question_id) ON DELETE RESTRICT
+  ) STRICT;
+  CREATE TRIGGER evaluation_attention_owner_question_replies_immutable
+    BEFORE UPDATE ON evaluation_attention_owner_question_replies
+    BEGIN SELECT RAISE(ABORT, 'attention owner question replies are immutable'); END;
+  CREATE TRIGGER evaluation_attention_owner_question_replies_no_delete
+    BEFORE DELETE ON evaluation_attention_owner_question_replies
+    BEGIN SELECT RAISE(ABORT, 'attention owner question replies are durable'); END;
+`
+
 function migrate(database: DatabaseSync): void {
   const initial = schemaVersion(database)
   if (initial > evaluationSchemaVersion) {
@@ -922,6 +958,13 @@ function migrate(database: DatabaseSync): void {
         ${attentionLooseningSchema}
         UPDATE evaluation_schema_meta SET value = '16' WHERE key = 'schema-version';
         PRAGMA user_version = 16;
+      `)
+    }
+    if (schemaVersion(database) === 16) {
+      database.exec(`
+        ${attentionOwnerQuestionDeliverySchema}
+        UPDATE evaluation_schema_meta SET value = '17' WHERE key = 'schema-version';
+        PRAGMA user_version = 17;
       `)
     }
     if (schemaVersion(database) !== evaluationSchemaVersion) {

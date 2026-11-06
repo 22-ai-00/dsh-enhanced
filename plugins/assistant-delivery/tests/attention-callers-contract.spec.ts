@@ -118,7 +118,7 @@ describe('WP19 attention purpose callers', () => {
     const files = new Set(calls.map(call => call.file))
     for (const file of [
       'plugins/assistant-actions/src/service.ts', 'plugins/assistant-automations/src/coordinator.ts',
-      'plugins/assistant-delivery/src/service.ts', 'plugins/assistant-proactive/src/index.ts',
+      'plugins/assistant-delivery/src/service.ts', 'plugins/assistant-evaluation/src/service.ts', 'plugins/assistant-proactive/src/index.ts',
       'plugins/assistant-skills/src/repair-feedback.ts', 'plugins/assistant-work-items/src/dispatch.ts',
     ]) expect(files).toContain(file)
   })

@@ -195,7 +195,11 @@ export interface AttentionLooseningDecision {
   readonly decidedAt: number
 }
 
-/** Structured owner question. Recorded only; this slice never delivers it. */
+/**
+ * Structured owner question. The body is immutable and keeps `delivery:
+ * 'not-sent'` as recorded; the optional slice-4 delivery state lives in the
+ * separate `attention-owner-questions` ledger.
+ */
 export interface AttentionOwnerQuestion {
   readonly protocol: typeof ATTENTION_OWNER_QUESTION_PROTOCOL
   readonly kind: 'attention-loosening-authorization'
@@ -945,6 +949,27 @@ export class AttentionTuningLedger {
     } catch {
       return true
     }
+  }
+
+  /**
+   * WP22 slice 4: the latest owner question of a cohort, verified against its
+   * content id, and whether it is still open (same rule as `#openQuestion`).
+   * Older questions are always closed. A row whose body no longer hashes to
+   * its id is reported as `unverifiable` and must never be delivered.
+   */
+  latestOwnerQuestion(scopeInput: EvaluationScope, cohortInput: AttentionCohort):
+    Readonly<{ questionId: string; question: AttentionOwnerQuestion; open: boolean }> | 'unverifiable' | undefined {
+    const { scopeKey } = canonicalEvaluationScope(scopeInput)
+    const cohort = normalizeAttentionCohort(cohortInput)
+    const row = this.#database.prepare(`SELECT question_id, question_json FROM evaluation_attention_owner_questions
+      WHERE scope_key=? AND lane=? AND source_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+      .get(scopeKey, cohort.lane, cohort.sourceId) as { question_id: string; question_json: string } | undefined
+    if (row === undefined) return undefined
+    let question: AttentionOwnerQuestion
+    try { question = JSON.parse(row.question_json) as AttentionOwnerQuestion } catch { return 'unverifiable' }
+    if (sha256(question) !== row.question_id || question.protocol !== ATTENTION_OWNER_QUESTION_PROTOCOL
+      || question.scopeKey !== scopeKey || question.cohort?.lane !== cohort.lane || question.cohort?.sourceId !== cohort.sourceId) return 'unverifiable'
+    return deepFreeze({ questionId: row.question_id, question, open: question.grantId === this.#latestGrantId(scopeKey, cohort) })
   }
 
   #latestGrantId(scopeKey: string, cohort: AttentionCohort): string | null {

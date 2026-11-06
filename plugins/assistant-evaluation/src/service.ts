@@ -24,6 +24,14 @@ import {
   type AttentionTuningStatus,
   type AttentionTuningTickAction,
 } from './attention-tuning.js'
+import {
+  ATTENTION_OWNER_QUESTION_SOURCE_ID,
+  attentionOwnerQuestionIdempotencyKey,
+  attentionOwnerQuestionText,
+  type AttentionOwnerQuestionReplyResult,
+  type AttentionOwnerQuestionStatus,
+  type AttentionOwnerQuestionTickAction,
+} from './attention-owner-questions.js'
 import { validateWorkItemOwnerFeedbackProof } from './work-item-owner-proof.js'
 import type {
   EvaluationHealth,
@@ -134,6 +142,30 @@ export interface Config {
   attentionLooseningEnabled?: boolean
   /** Look-back of the holdout replay window frozen into each loosening proposal. */
   attentionLooseningReplayWindowMs?: number
+  /**
+   * WP22 slice 4: hand each cohort's latest open owner question to Delivery's
+   * owner notification path at most once, on the existing notification sync
+   * tick. Off by default; when off, questions stay recorded-only exactly as in
+   * slice 3. Requires `attentionLooseningEnabled` and
+   * `attentionOwnerQuestionOwner`.
+   */
+  attentionOwnerQuestionDeliveryEnabled?: boolean
+  /** Delivery owner route and principal the questions are addressed to. */
+  attentionOwnerQuestionOwner?: { ownerRouteId: string; principalId: string }
+  /** A question not queued within this long after it was recorded expires unsent; also the notice expiry. */
+  attentionOwnerQuestionNoticeTtlMs?: number
+}
+
+/**
+ * Structural Delivery port for owner questions. `attention.purpose` is
+ * `result`: Delivery's audit has no `question` purpose, and `attention`
+ * requires a WorkItem id plus a structured WorkItem question, neither of which
+ * exists for a tuning question.
+ */
+interface OwnerQuestionDeliveryPort {
+  validateOwnerRoute(input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }): { principalRecordId: string; principalVersion: number }
+  resolveOwnerRoute(authorityId: string): { binding: { sessionId: string } }
+  enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention: { purpose: 'result' } }): { id: string }
 }
 
 export const ASSISTANT_EVALUATION_SKILL = `# Personal assistant self-evaluation
@@ -185,6 +217,12 @@ const configSchema = Schema.object({
   attentionTuningEvaluationWindowMs: Schema.number().step(1).min(60_000).max(31_536_000_000).default(604_800_000),
   attentionLooseningEnabled: Schema.boolean().default(false),
   attentionLooseningReplayWindowMs: Schema.number().step(1).min(3_600_000).max(31_536_000_000).default(2_592_000_000),
+  attentionOwnerQuestionDeliveryEnabled: Schema.boolean().default(false),
+  attentionOwnerQuestionOwner: Schema.union([Schema.object({
+    ownerRouteId: Schema.string().required(),
+    principalId: Schema.string().required(),
+  })]),
+  attentionOwnerQuestionNoticeTtlMs: Schema.number().step(1).min(60_000).max(2_592_000_000).default(86_400_000),
 }) as Schema<Config>
 
 export type AssistantEvaluationErrorCode =
@@ -513,6 +551,14 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     if (this.config.attentionLooseningEnabled && !this.config.attentionTuningAutoAdopt) {
       throw new Error('assistant-evaluation: attentionLooseningEnabled requires attentionTuningAutoAdopt')
     }
+    if (this.config.attentionOwnerQuestionDeliveryEnabled && !this.config.attentionLooseningEnabled) {
+      throw new Error('assistant-evaluation: attentionOwnerQuestionDeliveryEnabled requires attentionLooseningEnabled')
+    }
+    if (this.config.attentionOwnerQuestionDeliveryEnabled && (typeof this.config.attentionOwnerQuestionOwner?.ownerRouteId !== 'string'
+      || this.config.attentionOwnerQuestionOwner.ownerRouteId.length === 0 || typeof this.config.attentionOwnerQuestionOwner.principalId !== 'string'
+      || this.config.attentionOwnerQuestionOwner.principalId.length === 0)) {
+      throw new Error('assistant-evaluation: attentionOwnerQuestionDeliveryEnabled requires attentionOwnerQuestionOwner')
+    }
     if (this.config.attentionTuningMuteRatePpm < this.config.attentionTuningNegativeRatePpm) {
       throw new Error('assistant-evaluation: attentionTuningMuteRatePpm must not be below attentionTuningNegativeRatePpm')
     }
@@ -633,6 +679,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
           this.lastNotificationSyncAt = now
           try { this.reconcileNotificationOutcomes() } catch { /* isolated from projection; retried on a later tick */ }
           try { this.reconcileAttentionTuning() } catch { /* retried on a later sync */ }
+          try { this.reconcileAttentionOwnerQuestions() } catch { /* retried on a later sync */ }
         }
         void this.reconcileProjections().catch(() => {})
       }, this.config.projectionIntervalMs)
@@ -1300,6 +1347,111 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     this.assertActive()
     const status = this.store.attention.looseningStatus(input.scope, this.#attentionCohort(input.cohort))
     return Object.freeze({ enabled: this.config.attentionLooseningEnabled, ...status })
+  }
+
+  #ownerQuestionDelivery(): OwnerQuestionDeliveryPort | undefined {
+    const delivery = this.ctx.get('assistantDelivery' as never) as unknown as Partial<OwnerQuestionDeliveryPort> | undefined
+    return typeof delivery?.enqueueOwnerNotification === 'function' && typeof delivery.validateOwnerRoute === 'function'
+      && typeof delivery.resolveOwnerRoute === 'function' ? delivery as OwnerQuestionDeliveryPort : undefined
+  }
+
+  /**
+   * WP22 slice 4 tick step: for each configured cohort and scope, the latest
+   * recorded owner question is handed to Delivery at most once. A question a
+   * newer grant (or a recorded reply) already closed is recorded `closed` and
+   * never sent; one older than the notice TTL is recorded `expired`. Delivery
+   * absence, a route that does not match the scope, or an enqueue failure
+   * leaves no row, so a later tick retries under the same idempotency key.
+   * Zero work when `attentionOwnerQuestionDeliveryEnabled` is off.
+   */
+  reconcileAttentionOwnerQuestions(): readonly Readonly<{ scopeKey: string; cohort: AttentionCohort; result: AttentionOwnerQuestionTickAction }>[] {
+    this.assertActive()
+    if (!this.config.attentionOwnerQuestionDeliveryEnabled) return Object.freeze([])
+    const owner = this.config.attentionOwnerQuestionOwner
+    const ttl = this.config.attentionOwnerQuestionNoticeTtlMs
+    const results: { scopeKey: string; cohort: AttentionCohort; result: AttentionOwnerQuestionTickAction }[] = []
+    for (const cohort of this.attentionCohorts) {
+      for (const scope of this.store.attention.scopes(cohort)) {
+        let scopeKey: string
+        try { scopeKey = canonicalEvaluationScope(scope).scopeKey } catch { continue }
+        const push = (result: AttentionOwnerQuestionTickAction) => { results.push({ scopeKey, cohort, result: Object.freeze(result) }) }
+        const latest = this.store.attention.latestOwnerQuestion(scope, cohort)
+        if (latest === undefined) continue
+        // Fail closed: a question whose stored body does not verify is never sent.
+        if (latest === 'unverifiable') { push({ action: 'unverifiable' }); continue }
+        const { questionId, question } = latest
+        if (this.store.attentionQuestions.delivery(questionId) !== undefined) continue
+        if (!latest.open || this.store.attentionQuestions.reply(questionId) !== undefined) {
+          this.store.attentionQuestions.recordDelivery(scope, cohort, questionId, 'closed', null)
+          push({ action: 'closed', questionId })
+          continue
+        }
+        const expiresAt = question.createdAt + ttl
+        if (this.now() >= expiresAt) {
+          this.store.attentionQuestions.recordDelivery(scope, cohort, questionId, 'expired', null)
+          push({ action: 'expired', questionId })
+          continue
+        }
+        const delivery = this.#ownerQuestionDelivery()
+        if (delivery === undefined) { push({ action: 'deferred', questionId, reason: 'delivery-unavailable' }); continue }
+        let principal: { principalRecordId: string; principalVersion: number }
+        let sessionId: string
+        try {
+          const receipt = delivery.validateOwnerRoute({ authorityId: owner.ownerRouteId, principalId: owner.principalId,
+            workspace: scope.workspace, agentPreset: scope.preset })
+          sessionId = delivery.resolveOwnerRoute(owner.ownerRouteId).binding.sessionId
+          principal = { principalRecordId: receipt.principalRecordId, principalVersion: receipt.principalVersion }
+        } catch {
+          push({ action: 'deferred', questionId, reason: 'route-mismatch' })
+          continue
+        }
+        let outboxId: unknown
+        try {
+          outboxId = delivery.enqueueOwnerNotification({
+            sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID,
+            ownerRouteId: owner.ownerRouteId,
+            scope: { principalId: owner.principalId, ...principal, workspace: scope.workspace, preset: scope.preset },
+            sessionId,
+            idempotencyKey: attentionOwnerQuestionIdempotencyKey(questionId),
+            text: attentionOwnerQuestionText(question, scope),
+            expiresAt,
+            attention: { purpose: 'result' },
+          }).id
+        } catch {
+          push({ action: 'deferred', questionId, reason: 'enqueue-failed' })
+          continue
+        }
+        if (typeof outboxId !== 'string' || outboxId.length === 0 || outboxId.length > 256) {
+          push({ action: 'deferred', questionId, reason: 'enqueue-failed' })
+          continue
+        }
+        this.store.attentionQuestions.recordDelivery(scope, cohort, questionId, 'queued', outboxId)
+        push({ action: 'queued', questionId, outboxId })
+      }
+    }
+    return Object.freeze(results)
+  }
+
+  /**
+   * Host-internal record-only owner reply to the cohort's latest question.
+   * It never records a grant or changes a tuning version; an owner who
+   * authorizes still records a grant through `grantAttentionLoosening`.
+   */
+  recordAttentionOwnerQuestionReply(input: { scope: EvaluationScope; cohort: AttentionCohort; questionId: string; choice: unknown }): AttentionOwnerQuestionReplyResult {
+    this.assertActive()
+    const cohort = this.#attentionCohort(input.cohort)
+    if (!this.config.attentionOwnerQuestionDeliveryEnabled) return Object.freeze({ status: 'rejected', reason: 'delivery-disabled' })
+    const latest = this.store.attention.latestOwnerQuestion(input.scope, cohort)
+    if (latest === undefined || latest === 'unverifiable' || latest.questionId !== input.questionId) {
+      return Object.freeze({ status: 'rejected', reason: 'unknown-question' })
+    }
+    return this.store.attentionQuestions.recordReply(input.scope, cohort, latest.questionId, input.choice, latest.open)
+  }
+
+  /** Per-question delivery decisions and recorded replies for one cohort. */
+  attentionOwnerQuestionStatus(input: { scope: EvaluationScope; cohort: AttentionCohort }): AttentionOwnerQuestionStatus {
+    this.assertActive()
+    return this.store.attentionQuestions.status(input.scope, this.#attentionCohort(input.cohort), this.config.attentionOwnerQuestionDeliveryEnabled)
   }
 
   limits(): EvaluationLimits {

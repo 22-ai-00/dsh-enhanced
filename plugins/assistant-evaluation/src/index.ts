@@ -92,6 +92,22 @@ export type {
   AttentionTuningTickAction,
   AttentionTuningVersion,
 } from './attention-tuning.js'
+export {
+  ATTENTION_OWNER_QUESTION_SOURCE_ID,
+  AttentionOwnerQuestionLedger,
+  attentionOwnerQuestionChoices,
+  attentionOwnerQuestionIdempotencyKey,
+  attentionOwnerQuestionText,
+} from './attention-owner-questions.js'
+export type {
+  AttentionOwnerQuestionChoice,
+  AttentionOwnerQuestionDelivery,
+  AttentionOwnerQuestionDeliveryStatus,
+  AttentionOwnerQuestionReply,
+  AttentionOwnerQuestionReplyResult,
+  AttentionOwnerQuestionStatus,
+  AttentionOwnerQuestionTickAction,
+} from './attention-owner-questions.js'
 export * from './types.js'
 
 export function apply(ctx: Context, config: ConfigType): void {

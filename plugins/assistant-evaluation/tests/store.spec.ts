@@ -8,7 +8,7 @@ import { EvaluationStore, EvaluationStoreError } from '../src/store.ts'
 import type { OutcomeEnvelope } from '../src/types.ts'
 
 // Schema 14/15/16 (WP22) tables; downgrade fixtures drop them with the other later-schema tables.
-const dropNotificationOutcomeTables = 'DROP TABLE evaluation_attention_owner_questions; DROP TABLE evaluation_attention_loosening_decisions; DROP TABLE evaluation_attention_loosening_proposals; DROP TABLE evaluation_attention_loosening_grants; DROP TABLE evaluation_notification_outcome_heads; DROP TABLE evaluation_notification_outcome_revisions; DROP TABLE evaluation_notification_watermarks; DROP TABLE evaluation_notification_sync_cursor; DROP TABLE evaluation_attention_tuning_events; DROP TABLE evaluation_attention_tuning_heads; DROP TABLE evaluation_attention_tuning_versions;'
+const dropNotificationOutcomeTables = 'DROP TABLE evaluation_attention_owner_question_replies; DROP TABLE evaluation_attention_owner_question_deliveries; DROP TABLE evaluation_attention_owner_questions; DROP TABLE evaluation_attention_loosening_decisions; DROP TABLE evaluation_attention_loosening_proposals; DROP TABLE evaluation_attention_loosening_grants; DROP TABLE evaluation_notification_outcome_heads; DROP TABLE evaluation_notification_outcome_revisions; DROP TABLE evaluation_notification_watermarks; DROP TABLE evaluation_notification_sync_cursor; DROP TABLE evaluation_attention_tuning_events; DROP TABLE evaluation_attention_tuning_heads; DROP TABLE evaluation_attention_tuning_versions;'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
