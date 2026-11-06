@@ -194,10 +194,19 @@ const WORKER_RUN_BIND_SKIP_LIMIT = 1_000
  * Everything else (no contract yet, missing or throwing peers) is transient.
  */
 const WORKER_RUN_BIND_TERMINAL: ReadonlySet<string> = new Set([
-  'mandate-bound', 'owner-changed', 'binding-mismatch',
+  'mandate-bound', 'owner-changed', 'binding-mismatch', 'owner-route-binding-unknown',
   'acceptance-mismatch', 'acceptance-expired', 'acceptance-already-settled', 'acceptance-not-awaiting', 'acceptance-not-independent',
   'owner-route-invalid', 'owner-route-expired', 'identity-mismatch', 'malformed-binding',
 ])
+/**
+ * Delivery has no active binding for the owner route right now (for example
+ * between a revoke and a re-link). Re-read on this many consecutive wakes of
+ * one (item, occurrence), then park it like a deterministic refusal.
+ */
+const WORKER_RUN_BIND_ROUTE_MISSING = 'owner-route-missing'
+const WORKER_RUN_BIND_ROUTE_MISSING_READS = 3
+/** Message of the `owner-route-invalid` failure Delivery's `missing-binding` maps to. */
+const OWNER_ROUTE_MISSING_MESSAGE = 'owner route validation failed'
 const continuationRuntimes = new WeakMap<object, WorkItemContinuation>()
 const continuationAdmissions = new WeakMap<Components, (input: WorkItemAdmitInput, continuation: WorkItemContinuationAdmission) => WorkItemAdmitResult>()
 const continuationDispatches = new WeakMap<Components, WorkItemDispatch>()
@@ -272,6 +281,8 @@ export class AssistantWorkItemsService extends Service {
   private workItemsBindWorkerRunCursor: Readonly<{ createdAt: number; id: string }> | null = null
   /** itemId → occurrenceId refused deterministically by `bindWorkerRun`; in memory, bounded, dropped on occurrence change. */
   private readonly workItemsBindWorkerRunSkips = new Map<string, string>()
+  /** itemId → consecutive missing-owner-route reads of one occurrence; in memory, bounded. */
+  private readonly workItemsBindWorkerRunRouteMisses = new Map<string, Readonly<{ occurrenceId: string; reads: number }>>()
   /** `itemId:row` malformed `acceptance-bound` rows already warned about. */
   private readonly workItemsMalformedBindingWarned = new Set<string>()
 
@@ -610,8 +621,10 @@ export class AssistantWorkItemsService extends Service {
    * Round-robin like auto-settle. A deterministic refusal parks the
    * (item, occurrence) pair in memory so it is not re-read until the item's
    * occurrence changes; transient ones (no contract yet, peer missing or
-   * throwing) are simply tried again on a later wake. Parked pairs do not
-   * consume the per-wake budget.
+   * throwing) are simply tried again on a later wake. A briefly missing
+   * Delivery binding for the owner route is re-read on at most
+   * `WORKER_RUN_BIND_ROUTE_MISSING_READS` consecutive wakes, then parked.
+   * Parked pairs do not consume the per-wake budget.
    */
   private workItemsBindWorkerRuns(components: Components): void {
     const bind = this.workItemsConfig.acceptanceBindWorkerRun
@@ -652,6 +665,17 @@ export class AssistantWorkItemsService extends Service {
             this.ctx.logger.debug(`assistant-work-items: acceptance worker-run bind for ${item.id} not recorded: ${describe(error)}`)
           }
         }
+        const misses = this.workItemsBindWorkerRunRouteMisses
+        if (outcome === WORKER_RUN_BIND_ROUTE_MISSING) {
+          const previous = misses.get(item.id)
+          const reads = previous?.occurrenceId === occurrenceId ? previous.reads + 1 : 1
+          misses.delete(item.id)
+          if (reads >= WORKER_RUN_BIND_ROUTE_MISSING_READS) outcome = 'owner-route-invalid'
+          else {
+            if (misses.size >= WORKER_RUN_BIND_SKIP_LIMIT) misses.delete(misses.keys().next().value as string)
+            misses.set(item.id, Object.freeze({ occurrenceId, reads }))
+          }
+        } else misses.delete(item.id)
         if (WORKER_RUN_BIND_TERMINAL.has(outcome)) {
           // Bounded: the oldest parked pair is forgotten first and simply re-read once.
           if (skips.size >= WORKER_RUN_BIND_SKIP_LIMIT) skips.delete(skips.keys().next().value as string)
@@ -690,16 +714,57 @@ export class AssistantWorkItemsService extends Service {
     const handle = automations.inspectOccurrenceAcceptance({ automationId, occurrenceId, workspace: item.scope.workspace, agentPreset: item.scope.preset })
     if (handle === undefined) return 'no-contract'
     // The contract owner must be this item's owner on the live route; any
-    // drift since admission leaves the item unbound.
-    const owner = this.workItemsAssertOwnerRoute(item)
+    // drift since admission leaves the item unbound. Delivery briefly lacking
+    // an active binding for the route is transient (bounded by the caller);
+    // every other route refusal is deterministic.
+    let owner: Readonly<PeerOwnerRouteReceipt>
+    let bindingId: string | undefined
+    try {
+      owner = this.workItemsAssertOwnerRoute(item)
+      bindingId = this.workItemsOwnerRouteBindingId(item, owner)
+    } catch (error) {
+      if (error instanceof WorkItemError && error.code === 'owner-route-invalid' && error.message === OWNER_ROUTE_MISSING_MESSAGE) return WORKER_RUN_BIND_ROUTE_MISSING
+      throw error
+    }
     if (owner.principalVersion !== item.owner.principalVersion
       || owner.bindingVersion !== item.owner.bindingVersion || owner.generation !== item.owner.generation) return 'owner-changed'
-    // The run must have been frozen under this owner route's binding.
-    if (typeof handle.bindingId !== 'string' || handle.bindingId === ''
+    // The run must have been frozen under exactly this owner route's binding.
+    if (bindingId === undefined) return 'owner-route-binding-unknown'
+    if (typeof handle.bindingId !== 'string' || handle.bindingId !== bindingId
       || handle.bindingVersion !== owner.bindingVersion || handle.bindingGeneration !== owner.generation) return 'binding-mismatch'
     const binding = resolveAcceptanceBinding(this.workItemsVerifier(), handle, owner, Date.now(), { taskRef: workerRunTaskRef(occurrenceId), notBefore })
     if (typeof binding === 'string') return binding
     return components.store.recordLateAcceptanceBinding({ itemId: item.id, occurrenceId, binding }).created ? 'bound' : 'already-bound'
+  }
+
+  /**
+   * The exact Delivery binding id behind `owner`, read through Delivery's
+   * Host-only `inspectOwnerRouteBinding`. Its embedded receipt must equal
+   * `owner` field for field, so the id belongs to the very route state just
+   * validated. Undefined (fail closed) for a Delivery without the method or a
+   * receipt that does not match; Delivery errors propagate like
+   * `validateOwnerRoute`'s.
+   */
+  private workItemsOwnerRouteBindingId(item: WorkItemRecord, owner: Readonly<PeerOwnerRouteReceipt>): string | undefined {
+    const delivery = this.workItemsDelivery()
+    if (typeof delivery?.inspectOwnerRouteBinding !== 'function') return undefined
+    const scope = item.scope
+    let read
+    try {
+      read = delivery.inspectOwnerRouteBinding({ authorityId: scope.ownerRouteId, principalId: scope.principalId,
+        workspace: scope.workspace, agentPreset: scope.preset })
+    } catch (error) {
+      const missing = error !== null && typeof error === 'object' && 'code' in error && error.code === 'missing-binding'
+      fail(missing ? 'owner-route-invalid' : 'owner-route-unavailable', OWNER_ROUTE_MISSING_MESSAGE,
+        error instanceof Error ? error.message : String(error))
+    }
+    const receipt = read?.receipt
+    const keys: readonly (keyof PeerOwnerRouteReceipt)[] = ['receiptVersion', 'authorityId', 'authorityHash', 'principalId',
+      'principalRecordId', 'principalVersion', 'workspace', 'agentPreset', 'bindingVersion', 'generation']
+    if (read === null || typeof read !== 'object' || read.protocol !== 'assistant-delivery/owner-route-binding/v1'
+      || receipt === null || typeof receipt !== 'object' || !keys.every(key => receipt[key] === owner[key])
+      || typeof read.bindingId !== 'string' || read.bindingId === '' || read.bindingId.length > 256) return undefined
+    return read.bindingId
   }
 
   /**
@@ -1918,7 +1983,7 @@ export class AssistantWorkItemsService extends Service {
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
       const missing = error !== null && typeof error === 'object' && 'code' in error && error.code === 'missing-binding'
-      fail(missing ? 'owner-route-invalid' : 'owner-route-unavailable', 'owner route validation failed', detail)
+      fail(missing ? 'owner-route-invalid' : 'owner-route-unavailable', OWNER_ROUTE_MISSING_MESSAGE, detail)
     }
     if (receipt.receiptVersion !== 2
       || receipt.workspace !== scope.workspace

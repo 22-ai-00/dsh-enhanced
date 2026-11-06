@@ -129,6 +129,11 @@ function createDelivery(options: { invalid?: boolean; failCode?: string } = {}) 
       if (invalid) throw peerError('missing-binding')
       return receipt(input)
     },
+    inspectOwnerRouteBinding(input) {
+      validations.push(input)
+      if (invalid) throw peerError('missing-binding')
+      return Object.freeze({ protocol: 'assistant-delivery/owner-route-binding/v1' as const, receipt: receipt(input), bindingId: 'binding-owner' })
+    },
     enqueueBackground(input) {
       enqueues.push(input)
       if (failCode !== '') return Promise.reject(peerError(failCode))
@@ -197,6 +202,7 @@ class FakeDeliveryPeer extends Service {
   get enqueues(): EnqueueInput[] { return this.spy.enqueues }
   get validations(): RouteInput[] { return this.spy.validations }
   validateOwnerRoute(input: RouteInput) { return this.spy.service.validateOwnerRoute(input) }
+  inspectOwnerRouteBinding(input: RouteInput) { return this.spy.service.inspectOwnerRouteBinding!(input) }
   enqueueBackground(input: EnqueueInput) { return this.spy.service.enqueueBackground(input) }
 }
 
@@ -1442,18 +1448,106 @@ describe('work-item admission authority revalidation', () => {
     publishWorkerContract(fixture, peer, first.occurrenceId, { owner: { principalRecordId: 'principal-other', principalVersion: 7 } })
     const second = admitPlain(fixture, 'bind-owner-2')
     publishWorkerContract(fixture, peer, second.occurrenceId)
-    // The route is revoked by the time the wake runs: a deterministic refusal.
+    // Delivery briefly has no binding for the route when the wake runs: transient.
     fixture.delivery.spy.setInvalid(true)
     expect(() => fixture.automations?.wake()).not.toThrow()
     expect(boundEvents(fixture, second.itemId)).toBe(0)
     fixture.delivery.spy.setInvalid(false)
-    const reads = fixture.automations?.acceptanceReads.length
+    const reads = fixture.automations?.acceptanceReads.splice(0)
+    expect(reads).toEqual([first.occurrenceId, second.occurrenceId])
     fixture.automations?.wake()
+    // Both are re-read once the route is back: the owner mismatch is then
+    // parked for its occurrence and the other one binds.
+    expect(fixture.automations?.acceptanceReads.splice(0)).toEqual([first.occurrenceId, second.occurrenceId])
     fixture.automations?.wake()
-    // Both refusals are parked for their occurrence: neither is read again.
-    expect(fixture.automations?.acceptanceReads).toHaveLength(reads ?? 0)
+    expect(fixture.automations?.acceptanceReads).toEqual([])
     expect(boundEvents(fixture, first.itemId)).toBe(0)
-    expect(boundEvents(fixture, second.itemId)).toBe(0)
+    expect(boundEvents(fixture, second.itemId)).toBe(1)
+  })
+
+  test('acceptance.bindWorkerRun re-reads a missing owner route a bounded number of wakes, then parks it', async () => {
+    const fixture = await serviceHarness({ extra: bindWorkerRun() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { itemId, occurrenceId } = admitPlain(fixture, 'bind-route-missing')
+    publishWorkerContract(fixture, peer, occurrenceId)
+    fixture.automations?.acceptanceReads.splice(0)
+    fixture.delivery.spy.setInvalid(true)
+    for (let wake = 0; wake < 5; wake += 1) fixture.automations?.wake()
+    expect(fixture.automations?.acceptanceReads).toEqual([occurrenceId, occurrenceId, occurrenceId])
+    // Parked until the occurrence changes, even once the route is back.
+    fixture.delivery.spy.setInvalid(false)
+    fixture.automations?.wake()
+    expect(fixture.automations?.acceptanceReads).toHaveLength(3)
+    expect(peer.reads).toEqual([])
+    expect(boundEvents(fixture, itemId)).toBe(0)
+  })
+
+  test('acceptance.bindWorkerRun treats a binding read that briefly misses the route as transient', async () => {
+    const fixture = await serviceHarness({ extra: bindWorkerRun() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { itemId, occurrenceId } = admitPlain(fixture, 'bind-route-binding-miss')
+    publishWorkerContract(fixture, peer, occurrenceId)
+    fixture.automations?.acceptanceReads.splice(0)
+    const service = fixture.delivery.spy.service
+    const original = service.inspectOwnerRouteBinding
+    let misses = 1
+    service.inspectOwnerRouteBinding = input => {
+      if (misses > 0) { misses -= 1; throw peerError('missing-binding') }
+      return original!(input)
+    }
+    fixture.automations?.wake()
+    expect(boundEvents(fixture, itemId)).toBe(0)
+    fixture.automations?.wake()
+    expect(fixture.automations?.acceptanceReads).toEqual([occurrenceId, occurrenceId])
+    expect(boundEvents(fixture, itemId)).toBe(1)
+  })
+
+  test('acceptance.bindWorkerRun refuses a binding receipt that differs from the validated owner route', async () => {
+    const fixture = await serviceHarness({ extra: bindWorkerRun() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { itemId, occurrenceId } = admitPlain(fixture, 'bind-route-binding-drift')
+    publishWorkerContract(fixture, peer, occurrenceId)
+    fixture.automations?.acceptanceReads.splice(0)
+    const service = fixture.delivery.spy.service
+    const original = service.inspectOwnerRouteBinding!
+    service.inspectOwnerRouteBinding = input => {
+      const read = original(input)
+      return Object.freeze({ ...read, receipt: Object.freeze({ ...read.receipt, authorityHash: 'sha256:other' }) })
+    }
+    fixture.automations?.wake()
+    fixture.automations?.wake()
+    expect(fixture.automations?.acceptanceReads).toEqual([occurrenceId])
+    expect(peer.reads).toEqual([])
+    expect(boundEvents(fixture, itemId)).toBe(0)
+  })
+
+  test('acceptance.bindWorkerRun requires the owner route binding receipt to name the handle binding id', async () => {
+    const fixture = await serviceHarness({ extra: bindWorkerRun() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    // Same version and generation, but frozen under another Delivery binding.
+    const other = admitPlain(fixture, 'bind-route-id-other')
+    publishWorkerContract(fixture, peer, other.occurrenceId, {}, undefined, { bindingId: 'binding-other' })
+    fixture.automations?.wake()
+    fixture.automations?.wake()
+    expect(fixture.automations?.acceptanceReads.filter(id => id === other.occurrenceId)).toHaveLength(1)
+    expect(boundEvents(fixture, other.itemId)).toBe(0)
+    expect(peer.reads).toEqual([])
+  })
+
+  test('acceptance.bindWorkerRun fails closed on a Delivery without owner route binding receipts', async () => {
+    const fixture = await serviceHarness({ extra: bindWorkerRun() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    // A Delivery that predates `inspectOwnerRouteBinding`.
+    Object.defineProperty(fixture.delivery, 'inspectOwnerRouteBinding', { value: undefined })
+    const { itemId, occurrenceId } = admitPlain(fixture, 'bind-route-legacy')
+    publishWorkerContract(fixture, peer, occurrenceId)
+    fixture.automations?.acceptanceReads.splice(0)
+    fixture.automations?.wake()
+    fixture.automations?.wake()
+    // Deterministic for this Delivery: parked after the first read, nothing bound.
+    expect(fixture.automations?.acceptanceReads).toEqual([occurrenceId])
+    expect(peer.reads).toEqual([])
+    expect(boundEvents(fixture, itemId)).toBe(0)
   })
 
   test('acceptance.bindWorkerRun refuses a contract whose task ref is another run', async () => {

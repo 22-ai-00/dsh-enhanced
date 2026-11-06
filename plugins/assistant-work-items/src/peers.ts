@@ -121,6 +121,16 @@ export interface PeerOwnerAliasReceipt {
     bindingVersion: number; generation: number }>
 }
 
+/**
+ * `assistant-delivery` Host-only owner route binding receipt: the unchanged v2
+ * receipt plus the exact active binding row behind it, read in one resolve.
+ */
+export interface PeerOwnerRouteBindingReceipt {
+  readonly protocol: 'assistant-delivery/owner-route-binding/v1'
+  readonly receipt: PeerOwnerRouteReceipt
+  readonly bindingId: string
+}
+
 export interface PeerOwnerRouteInspection {
   readonly status: 'active' | 'revoked' | 'unavailable'
   readonly receipt?: PeerOwnerRouteReceipt
@@ -222,6 +232,13 @@ export interface PeerDeliveryService {
     workspace: string
     agentPreset: string
   }): Readonly<PeerOwnerRouteReceipt>
+  /** Optional: older Delivery versions lack it; callers that must pin a binding fail closed. */
+  inspectOwnerRouteBinding?(input: {
+    authorityId: string
+    principalId: string
+    workspace: string
+    agentPreset: string
+  }): Readonly<PeerOwnerRouteBindingReceipt>
   inspectOwnerRouteState?(input: {
     authorityId: string
     principalId: string
