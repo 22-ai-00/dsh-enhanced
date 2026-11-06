@@ -111,6 +111,16 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
 `lib/client.js`，以真实 `react`/`react/jsx-runtime` 执行 factory，断言 sidebar/main 两个注册与释放；
 并断言侧栏标签为「文鳐」、main 槽根容器带纵向滚动样式；
 因此该测试依赖先运行 `pnpm --dir plugins/owner-console build`（根检查与 `pnpm check` 均先构建）。
+`tests/client-render.spec.ts` 不依赖 DOM，桩掉 React hooks 后展开元素树，断言页头品牌、装饰元素
+`aria-hidden`、状态胶囊带文字标签与空状态文案。
+
+## 界面布局
+
+- 页头：内联的文鳐主视觉 banner（`src/wenyao-hero.ts`，webp data URI，纯装饰 `alt=""`）、
+  标题「文鳐 Ray」与朱红印章、副标题，以及主按钮「开始对话」。
+- 卡片：统一圆角与边框，标题前一枚小云纹；状态用「圆点 + 文字」胶囊（ok/warn/error），不只靠颜色。
+- 颜色只取宿主 `--dsw-*` 变量并带回退值，明暗主题通用；不引入外部 CSS、字体或网络资源。
+  装饰 SVG 见 `src/art.ts`。
 
 ## 限制
 

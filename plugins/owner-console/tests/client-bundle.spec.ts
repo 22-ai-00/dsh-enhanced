@@ -77,6 +77,10 @@ describe('owner console client bundle', () => {
     const root = mainElement.type(mainElement.props)
     expect(root.props['data-owner-console-scroll']).toBe('')
     expect(root.props.style).toMatchObject({ height: '100%', minHeight: 0, overflowY: 'auto' })
+    // The brand header and its banner are self-contained in the emitted bundle (no asset URL).
+    const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+    expect(source).toContain('data-owner-console-header')
+    expect(source).toContain('data:image/webp;base64,')
     await release()
     expect(fake.disposed).toEqual(['main', 'owner-console', 'sidebar.panellist', 'owner-console'])
     expect(fake.unmount).toHaveBeenCalledOnce()
