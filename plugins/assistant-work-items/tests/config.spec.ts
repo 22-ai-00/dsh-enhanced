@@ -54,6 +54,14 @@ test('cross-channel report routing defaults off and is an explicit, bounded link
     expect(() => routing({ linkedFallback })).toThrow()
   }
   expect(() => routing({ linkedFallback: [A], viaActivity: true })).toThrow()
+  // `prefer` defaults to 'origin' (normalized away); 'recent' is opt-in and needs a fallback list.
+  expect(routing({ linkedFallback: [A], prefer: 'origin' })).toEqual({ linkedFallback: [A] })
+  expect(routing({ linkedFallback: [A], prefer: 'recent' })).toEqual({ linkedFallback: [A], prefer: 'recent' })
+  expect(ConfigSchema({ ...owned, ownerReportRouting: { linkedFallback: [A], prefer: 'recent' } }).ownerReportRouting).toMatchObject({ prefer: 'recent' })
+  expect(() => routing({ linkedFallback: [A], prefer: 'newest' })).toThrow("ownerReportRouting.prefer must be 'origin' or 'recent'")
+  expect(() => routing({ prefer: 'recent' })).toThrow("ownerReportRouting.prefer 'recent' requires a non-empty linkedFallback")
+  expect(() => routing({ linkedFallback: [], prefer: 'recent' })).toThrow('requires a non-empty linkedFallback')
+  expect(routing({ prefer: 'origin' })).toBeUndefined()
   for (const config of [base, { ...owned, mode: 'observe' }, { ...owned, enabled: false }]) {
     expect(() => routing({ linkedFallback: [A] }, config)).toThrow('requires an enabled active worker and complete scope')
   }

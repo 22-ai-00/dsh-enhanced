@@ -309,4 +309,111 @@ describe('linked work-item report routing', () => {
       route: { kind: 'linked', originBindingId: f.origin.id } })
     expect(Object.isFrozen(facts[2]!.route)).toBe(true)
   })
+
+  describe("prefer: 'recent'", () => {
+    // Record one inbound row as the Host would after admission (binding set, processed).
+    const inbound = (f: Fixture, bindingId: string, receivedAt: number) => {
+      const binding = f.store.getBinding(bindingId)!
+      const db = new DatabaseSync(join(f.root, 'delivery.sqlite'))
+      try {
+        db.prepare(`INSERT INTO inbox_messages (id, channel, account, event_id, envelope_hash, envelope_json, status, binding_id, received_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, '{}', 'processed', ?, ?, ?)`).run(`in-${bindingId}-${receivedAt}`, binding.conversation.channel,
+          binding.conversation.account, `evt-${bindingId}-${receivedAt}`, 'a'.repeat(64), bindingId, receivedAt, receivedAt)
+      } finally { db.close() }
+    }
+    const recent = (f: Fixture, linkedFallback: readonly string[]) => ({ ...report(f, linkedFallback), prefer: 'recent' as const })
+    const allowDeniedSend = (f: Fixture) => {
+      const evaluate = f.ctx.assistantPolicy.evaluate.bind(f.ctx.assistantPolicy)
+      vi.spyOn(f.ctx.assistantPolicy, 'evaluate').mockImplementation(request =>
+        request.action === 'send' && request.subject.principal === id(denied)
+          ? { ...evaluate(request), effect: 'allow' } as ReturnType<typeof evaluate> : evaluate(request))
+    }
+
+    test("default and explicit 'origin' keep the available origin even when the alias spoke last", async () => {
+      const f = await fixture()
+      f.link()
+      inbound(f, f.origin.id, 1_000)
+      inbound(f, f.aliasBinding.id, 2_000)
+      expect(f.service.routeWorkItemReport(report(f, [id(alias)]))).toEqual({ route: 'origin' })
+      expect(f.service.routeWorkItemReport({ ...report(f, [id(alias)]), prefer: 'origin' })).toEqual({ route: 'origin' })
+      expect(f.store.listOutbox({ bindingId: f.aliasBinding.id })).toHaveLength(0)
+    })
+
+    test('routes to the linked alias with the newest inbound while the origin is available', async () => {
+      const f = await fixture()
+      f.link()
+      inbound(f, f.origin.id, 1_000)
+      inbound(f, f.aliasBinding.id, 2_000)
+      const routed = f.service.routeWorkItemReport(recent(f, [id(alias)])) as { route: 'linked'; outbox: { id: string } }
+      expect(routed.route).toBe('linked')
+      expect(f.store.getOutbox(routed.outbox.id)!.intent).toMatchObject({ bindingId: f.aliasBinding.id,
+        metadata: { 'dsh.linked-report': 'v1', 'dsh.linked-report.originBindingId': f.origin.id } })
+      await drain(f.service)
+      expect(f.sends.telegram).toHaveBeenCalledOnce()
+      expect(f.sends.lark).not.toHaveBeenCalled()
+      // A replay keeps the committed destination.
+      expect(f.service.routeWorkItemReport(recent(f, [id(alias)]))).toMatchObject({ route: 'linked', outbox: { id: routed.outbox.id } })
+    })
+
+    test('the newest inbound wins over list order; ties keep the origin, then list order', async () => {
+      const f = await fixture()
+      f.link(denied)
+      f.link()
+      allowDeniedSend(f)
+      const deniedBinding = f.store.listActiveBindings().find(binding => binding.principal.user === 'denied')!
+      inbound(f, f.origin.id, 1_000)
+      inbound(f, f.aliasBinding.id, 2_000)
+      inbound(f, deniedBinding.id, 3_000)
+      const newest = f.service.routeWorkItemReport(recent(f, [id(alias), id(denied)])) as { route: 'linked'; outbox: { id: string } }
+      expect(f.store.getOutbox(newest.outbox.id)!.intent.bindingId).toBe(deniedBinding.id)
+      // Equal alias timestamps fall back to the owner's list order.
+      inbound(f, f.aliasBinding.id, 3_000)
+      const tied = f.service.routeWorkItemReport({ ...recent(f, [id(alias), id(denied)]), idempotencyKey: 'work-item-report:item-1:2', reportRevision: 2 }) as
+        { route: 'linked'; outbox: { id: string } }
+      expect(f.store.getOutbox(tied.outbox.id)!.intent.bindingId).toBe(f.aliasBinding.id)
+      // A tie with the origin keeps the origin.
+      inbound(f, f.origin.id, 3_000)
+      expect(f.service.routeWorkItemReport({ ...recent(f, [id(alias), id(denied)]), idempotencyKey: 'work-item-report:item-1:3', reportRevision: 3 }))
+        .toEqual({ route: 'origin' })
+    })
+
+    test('without any alias inbound the available origin is kept', async () => {
+      const f = await fixture()
+      f.link()
+      expect(f.service.routeWorkItemReport(recent(f, [id(alias)]))).toEqual({ route: 'origin' })
+      inbound(f, f.origin.id, 1_000)
+      expect(f.service.routeWorkItemReport(recent(f, [id(alias)]))).toEqual({ route: 'origin' })
+      expect(f.store.listOutbox({ bindingId: f.aliasBinding.id })).toHaveLength(0)
+    })
+
+    test('a disabled or Policy-denied recent alias falls back to the origin', async () => {
+      const f = await fixture()
+      f.link()
+      inbound(f, f.origin.id, 1_000)
+      inbound(f, f.aliasBinding.id, 2_000)
+      const evaluate = f.ctx.assistantPolicy.evaluate.bind(f.ctx.assistantPolicy)
+      const spy = vi.spyOn(f.ctx.assistantPolicy, 'evaluate').mockImplementation(request =>
+        request.action === 'send' && request.subject.principal === id(alias)
+          ? { ...evaluate(request), effect: 'deny' } as ReturnType<typeof evaluate> : evaluate(request))
+      expect(f.service.routeWorkItemReport(recent(f, [id(alias)]))).toEqual({ route: 'origin' })
+      spy.mockRestore()
+      f.revokeBindingRow(f.aliasBinding.id)
+      expect(f.service.routeWorkItemReport(recent(f, [id(alias)]))).toEqual({ route: 'origin' })
+      expect(f.store.listOutbox({ bindingId: f.aliasBinding.id })).toHaveLength(0)
+    })
+
+    test('an unavailable origin uses the most recent eligible alias, and an unknown prefer is refused', async () => {
+      const f = await fixture()
+      f.link(denied)
+      f.link()
+      allowDeniedSend(f)
+      const deniedBinding = f.store.listActiveBindings().find(binding => binding.principal.user === 'denied')!
+      inbound(f, deniedBinding.id, 2_000)
+      f.dropOrigin()
+      const routed = f.service.routeWorkItemReport(recent(f, [id(alias), id(denied)])) as { route: 'linked'; outbox: { id: string } }
+      expect(f.store.getOutbox(routed.outbox.id)!.intent.bindingId).toBe(deniedBinding.id)
+      expect(() => f.service.routeWorkItemReport({ ...report(f, [id(alias)], 'other-key'), prefer: 'newest' as 'recent' }))
+        .toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
+    })
+  })
 })

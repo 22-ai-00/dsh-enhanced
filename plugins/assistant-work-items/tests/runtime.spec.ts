@@ -740,6 +740,14 @@ describe('work-item dispatch', () => {
         itemId: r.item.id, reportRevision: r.report.revision, linkedFallback: [ALIAS] })])
       expect(r.fixture.delivery.enqueues).toHaveLength(1)
       expect(r.fixture.store.reports(r.item.id)[0]).toMatchObject({ deliveryState: 'sent', deliveryId: 'outbox-1' })
+      // Default 'origin' passes no prefer field, keeping the seam input unchanged.
+      expect(r.calls[0]).not.toHaveProperty('prefer')
+    })
+
+    test("prefer 'recent' is passed through to the Host route seam", async () => {
+      const r = await routed({ ownerReportRouting: { linkedFallback: [ALIAS], prefer: 'recent' } }, () => ({ route: 'origin' }))
+      await expect(r.fixture.dispatch.notify(r.item, r.report)).resolves.toBe(true)
+      expect(r.calls).toEqual([expect.objectContaining({ linkedFallback: [ALIAS], prefer: 'recent' })])
     })
 
     test('a linked decision records the fallback outbox and skips the origin enqueue', async () => {

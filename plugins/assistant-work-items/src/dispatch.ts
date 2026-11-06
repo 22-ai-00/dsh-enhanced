@@ -252,7 +252,8 @@ export class WorkItemDispatch {
       const linkedFallback = config.ownerReportRouting?.linkedFallback
       if (linkedFallback !== undefined && typeof delivery.routeWorkItemReport === 'function') {
         const routed = delivery.routeWorkItemReport({ sourceId: input.sourceId, workspace: input.workspace, originBindingId: input.bindingId,
-          idempotencyKey: input.idempotencyKey, text: input.text, format: input.format, itemId: item.id, reportRevision: report.revision, linkedFallback })
+          idempotencyKey: input.idempotencyKey, text: input.text, format: input.format, itemId: item.id, reportRevision: report.revision, linkedFallback,
+          ...(config.ownerReportRouting?.prefer === 'recent' ? { prefer: 'recent' as const } : {}) })
         if (routed.route === 'linked') {
           this.#deps.ledger.recordDelivery(item.id, report.revision, 'sent', routed.outbox.id)
           return true

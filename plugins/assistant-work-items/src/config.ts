@@ -25,8 +25,10 @@ export interface Config {
    * Cross-channel report routing. `linkedFallback` lists Delivery `linked`
    * principal ids, in order, that may receive a terminal report only when its
    * origin binding is unavailable. Absent or empty keeps origin-only delivery.
+   * `prefer: 'recent'` (requires `linkedFallback`) sends to the listed alias the
+   * owner most recently messaged from; default `'origin'` keeps the origin.
    */
-  ownerReportRouting?: { linkedFallback?: string[] }
+  ownerReportRouting?: { linkedFallback?: string[]; prefer?: 'origin' | 'recent' }
   ownerContinuation?: OwnerContinuationConfig
   ownerReplyContinuation?: boolean
   ownerReportFeedback?: boolean
@@ -198,7 +200,7 @@ export interface NormalizedConfig {
    */
   readonly ownerRecall?: Readonly<{ enabled: true; linkedAliases?: readonly string[] }>
   /** Present only when the owner named at least one linked fallback channel. */
-  readonly ownerReportRouting?: Readonly<{ linkedFallback: readonly string[] }>
+  readonly ownerReportRouting?: Readonly<{ linkedFallback: readonly string[]; prefer?: 'recent' }>
   readonly ownerContinuation?: NormalizedOwnerContinuation
   readonly ownerReplyContinuation?: true
   readonly ownerReportFeedback?: true
@@ -395,7 +397,7 @@ export const ConfigSchema = Schema.object({
   }),
   follows: Schema.object({ eventTriggers: Schema.object({ enabled: Schema.boolean().default(false) }) }),
   ownerRecall: Schema.object({ enabled: Schema.boolean().default(false), linkedAliases: Schema.array(Schema.string()) }),
-  ownerReportRouting: Schema.object({ linkedFallback: Schema.array(Schema.string()) }),
+  ownerReportRouting: Schema.object({ linkedFallback: Schema.array(Schema.string()), prefer: Schema.union(['origin', 'recent'] as const) }),
   ownerContinuation: Schema.object({
     enabled: Schema.boolean().default(false), automationId: Schema.string(), allowedTools: Schema.array(Schema.string()),
     budgetId: Schema.string(), budgetAmount: Schema.number().step(1),
@@ -650,10 +652,13 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   }
   const linkedAliases = normalizeLinkedAliases(ownerRecall['linkedAliases'], ownerRecall['enabled'] === true, scope)
   const ownerReportRouting = value['ownerReportRouting'] === undefined ? {} : plainObject(value['ownerReportRouting'], 'ownerReportRouting')
-  rejectUnknown(ownerReportRouting, ['linkedFallback'], 'ownerReportRouting')
+  rejectUnknown(ownerReportRouting, ['linkedFallback', 'prefer'], 'ownerReportRouting')
   const linkedFallback = normalizeLinkedAliases(ownerReportRouting['linkedFallback'],
     enabled && mode === 'active' && scope !== null && workerAutomationId !== null, scope, 'ownerReportRouting.linkedFallback',
     'an enabled active worker and complete scope')
+  const reportPrefer = ownerReportRouting['prefer']
+  if (reportPrefer !== undefined && reportPrefer !== 'origin' && reportPrefer !== 'recent') fail('invalid-input', "ownerReportRouting.prefer must be 'origin' or 'recent'")
+  if (reportPrefer === 'recent' && linkedFallback === undefined) fail('invalid-input', "ownerReportRouting.prefer 'recent' requires a non-empty linkedFallback")
   const ownerContinuation = normalizeOwnerContinuation(value['ownerContinuation'], scope, workerAutomationId, now, ownerReportFeedback === true)
   if (ownerContinuation && !admission.allowedKinds.includes('owner-continuation')) fail('invalid-input', 'ownerContinuation requires owner-continuation in admission.allowedKinds')
   if (ownerContinuation && (!enabled || mode !== 'active' || ownerRecall['enabled'] !== true)) {
@@ -686,7 +691,7 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     settlement,
     ...(diagnosis === undefined ? {} : { diagnosis }),
     ...(ownerRecall['enabled'] === true ? { ownerRecall: Object.freeze({ enabled: true as const, ...(linkedAliases ? { linkedAliases } : {}) }) } : {}),
-    ...(linkedFallback === undefined ? {} : { ownerReportRouting: Object.freeze({ linkedFallback }) }),
+    ...(linkedFallback === undefined ? {} : { ownerReportRouting: Object.freeze({ linkedFallback, ...(reportPrefer === 'recent' ? { prefer: 'recent' as const } : {}) }) }),
     ...(ownerContinuation === undefined ? {} : { ownerContinuation }),
     ...(ownerReplyContinuation === true ? { ownerReplyContinuation: true as const } : {}),
     ...(ownerReportFeedback === true ? { ownerReportFeedback: true as const } : {}),

@@ -5221,16 +5221,21 @@ export class AssistantDeliveryService extends Service {
    * binds the owner and alias record versions plus the alias binding
    * version/generation; the send-time guard drops it after any revoke or
    * relink. A replay returns the first committed destination.
+   *
+   * Opt-in `prefer: 'recent'` instead ranks eligible aliases by the owner's
+   * newest inbound message (`inbox_messages.received_at`); an available origin
+   * still wins unless an eligible alias received strictly newer inbound.
    */
   routeWorkItemReport(input: Readonly<{ sourceId: string; workspace: string; originBindingId: string; idempotencyKey: string; text: string
-    format?: 'markdown' | 'plain'; itemId: string; reportRevision: number; linkedFallback: readonly string[] }>): Readonly<{ route: 'origin' } | { route: 'linked'; outbox: OutboxRecord }> {
+    format?: 'markdown' | 'plain'; itemId: string; reportRevision: number; linkedFallback: readonly string[]; prefer?: 'origin' | 'recent' }>): Readonly<{ route: 'origin' } | { route: 'linked'; outbox: OutboxRecord }> {
     this.assertActive()
     const sourceId = canonicalBackgroundSourceId(input.sourceId)
     if (!Array.isArray(input.linkedFallback) || input.linkedFallback.length > maxLinkedReportFallback
       || input.linkedFallback.some(id => typeof id !== 'string' || id.length === 0 || id.length > 256)
       || typeof input.idempotencyKey !== 'string' || input.idempotencyKey.length === 0
       || typeof input.itemId !== 'string' || input.itemId.length === 0
-      || !Number.isSafeInteger(input.reportRevision) || input.reportRevision < 1) {
+      || !Number.isSafeInteger(input.reportRevision) || input.reportRevision < 1
+      || (input.prefer !== undefined && input.prefer !== 'origin' && input.prefer !== 'recent')) {
       throw new AssistantDeliveryError('runtime-conflict', 'linked report route input is invalid')
     }
     const linkedKey = `${linkedReportKeyPrefix}${createHash('sha256').update(input.idempotencyKey).digest('hex')}`
@@ -5251,31 +5256,56 @@ export class AssistantDeliveryService extends Service {
     if (origin === undefined || origin.workspace !== input.workspace) {
       throw new AssistantDeliveryError('missing-binding', 'report origin binding does not exist')
     }
-    if (origin.status === 'active' && this.hasActivePrincipal(origin)) return Object.freeze({ route: 'origin' as const })
+    const recent = input.prefer === 'recent'
+    if (origin.status === 'active' && this.hasActivePrincipal(origin) && !recent) return Object.freeze({ route: 'origin' as const })
     // A `/new` rotation revokes the origin and inserts a successor in the same
     // conversation for the same principal. That origin is still available: keep
     // the origin path (and its existing failure semantics) rather than reroute.
     const successor = origin.status === 'active' ? undefined : this.deliveryStore.getActiveBinding(origin.conversation)
-    if (successor !== undefined && successor.id !== origin.id && successor.workspace === origin.workspace
-      && successor.agentPreset === origin.agentPreset && JSON.stringify(successor.principal) === JSON.stringify(origin.principal)
-      && this.hasActivePrincipal(successor)) return Object.freeze({ route: 'origin' as const })
+    const originAvailable = (origin.status === 'active' && this.hasActivePrincipal(origin)) || (successor !== undefined && successor.id !== origin.id
+      && successor.workspace === origin.workspace && successor.agentPreset === origin.agentPreset
+      && JSON.stringify(successor.principal) === JSON.stringify(origin.principal) && this.hasActivePrincipal(successor))
+    if (originAvailable && !recent) return Object.freeze({ route: 'origin' as const })
     const owner = this.deliveryStore.getPrincipal(origin.principal)
     if (owner?.status !== 'active' || owner.role !== 'owner' || JSON.stringify(owner.principal) !== JSON.stringify(origin.principal)) {
+      if (originAvailable) return Object.freeze({ route: 'origin' as const })
       throw new AssistantDeliveryError('missing-binding', 'report origin owner is no longer active')
     }
     const ownerId = externalPrincipalId(owner.principal)
     const active = this.deliveryStore.listActiveBindings()
-    for (const aliasId of input.linkedFallback) {
-      if (aliasId === ownerId) continue
+    const eligible = (aliasId: string) => {
+      if (aliasId === ownerId) return undefined
       const matches = active.filter(binding => externalPrincipalId(binding.principal) === aliasId
         && binding.workspace === origin.workspace && binding.agentPreset === origin.agentPreset)
       // Ambiguous alias channels are skipped rather than guessed.
-      if (matches.length !== 1) continue
+      if (matches.length !== 1) return undefined
       const binding = matches[0]!
       const alias = this.deliveryStore.getPrincipal(binding.principal)
       if (binding.id === origin.id || alias?.status !== 'active' || alias.role !== 'linked' || alias.linkedToId !== owner.id
-        || alias.id === owner.id || JSON.stringify(alias.principal) !== JSON.stringify(binding.principal)) continue
-      if (!this.linkedReportSendAllowed(sourceId, binding)) continue
+        || alias.id === owner.id || JSON.stringify(alias.principal) !== JSON.stringify(binding.principal)) return undefined
+      if (!this.linkedReportSendAllowed(sourceId, binding)) return undefined
+      return { binding, alias }
+    }
+    let order: readonly string[] = input.linkedFallback
+    if (recent) {
+      // Opt-in: rank eligible aliases by the owner's newest inbound message
+      // (stable sort keeps list order on ties). An available origin wins
+      // unless an eligible alias received strictly newer inbound.
+      const candidates = input.linkedFallback.flatMap(aliasId => {
+        const found = eligible(aliasId)
+        return found === undefined ? [] : [{ aliasId, bindingId: found.binding.id }]
+      })
+      const latest = this.deliveryStore.latestInboundAtByBinding([origin.id, ...candidates.map(candidate => candidate.bindingId)])
+      const at = (bindingId: string) => latest.get(bindingId) ?? Number.NEGATIVE_INFINITY
+      candidates.sort((left, right) => at(left.bindingId) === at(right.bindingId) ? 0 : at(left.bindingId) < at(right.bindingId) ? 1 : -1)
+      const top = candidates[0]
+      if (originAvailable && (top === undefined || !(at(top.bindingId) > at(origin.id)))) return Object.freeze({ route: 'origin' as const })
+      order = candidates.map(candidate => candidate.aliasId)
+    }
+    for (const aliasId of order) {
+      const found = eligible(aliasId)
+      if (found === undefined) continue
+      const { binding, alias } = found
       const outbox = this.enqueueBackgroundAuthorized({ sourceId, workspace: binding.workspace, bindingId: binding.id,
         idempotencyKey: linkedKey, text: input.text, format: input.format ?? 'plain', metadata: {
           [linkedReportMetadataPrefix]: 'v1',

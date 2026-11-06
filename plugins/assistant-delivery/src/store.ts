@@ -2715,6 +2715,22 @@ export class DeliveryStore {
       .all() as unknown as BindingRow[]).map(bindingFromRow)
   }
 
+  /**
+   * Read-only: newest inbound `received_at` per candidate binding, counting any
+   * generation of the same conversation from the same principal (so a `/new`
+   * rotation keeps its history). Bindings without inbound are absent. Callers
+   * bound the candidate list.
+   */
+  latestInboundAtByBinding(bindingIds: readonly string[]): ReadonlyMap<string, number> {
+    this.assertOpen()
+    const rows = this.database.prepare(`SELECT c.value AS binding_id, (SELECT max(i.received_at) FROM inbox_messages AS i
+        JOIN conversation_bindings AS ib ON ib.id = i.binding_id
+        WHERE ib.conversation_hash = cb.conversation_hash AND ib.principal_id = cb.principal_id) AS received_at
+      FROM json_each(?) AS c JOIN conversation_bindings AS cb ON cb.id = c.value`)
+      .all(JSON.stringify(bindingIds)) as { binding_id: string; received_at: number | null }[]
+    return new Map(rows.flatMap(row => row.received_at === null ? [] : [[row.binding_id, row.received_at] as const]))
+  }
+
   /** Snapshot one exact active owner binding under the Delivery write fence. */
   resolveApprovalRouteByBinding(input: Readonly<{
     sourceId: string
