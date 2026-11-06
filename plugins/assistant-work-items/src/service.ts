@@ -187,6 +187,8 @@ interface Components {
 const WORKER_RUN_BIND_SCAN_LIMIT = 100
 /** Upper bound of in-memory parked (item, occurrence) pairs and warned malformed rows. */
 const WORKER_RUN_BIND_SKIP_LIMIT = 1_000
+/** Consecutive `owner-route-drift` reads of one (item, occurrence) before a single warn. */
+const WORKER_RUN_DRIFT_WARN_AFTER = 5
 /**
  * `bindWorkerRun` refusals that cannot change while the item keeps its
  * occurrence: an expired, mismatched (ref, owner scope, digest), settled or
@@ -274,6 +276,12 @@ export class AssistantWorkItemsService extends Service {
   private workItemsBindWorkerRunCursor: Readonly<{ createdAt: number; id: string }> | null = null
   /** itemId → occurrenceId refused deterministically by `bindWorkerRun`; in memory, bounded, dropped on occurrence change. */
   private readonly workItemsBindWorkerRunSkips = new Map<string, string>()
+  /**
+   * itemId → consecutive `owner-route-drift` streak of `bindWorkerRun` for one
+   * occurrence; in memory, bounded. Any other outcome or a new occurrence
+   * drops it. Only for visibility: drift is re-read either way.
+   */
+  private readonly workItemsBindWorkerRunDrifts = new Map<string, { occurrenceId: string; count: number }>()
   /** Whether the missing Delivery `inspectOwnerRouteBinding` was already warned about. */
   private workItemsOwnerRouteBindingWarned = false
   /** `itemId:row` malformed `acceptance-bound` rows already warned about. */
@@ -656,6 +664,7 @@ export class AssistantWorkItemsService extends Service {
             this.ctx.logger.debug(`assistant-work-items: acceptance worker-run bind for ${item.id} not recorded: ${describe(error)}`)
           }
         }
+        this.workItemsTrackBindWorkerRunDrift(item.id, occurrenceId, outcome)
         if (WORKER_RUN_BIND_TERMINAL.has(outcome)) {
           // Bounded: the oldest parked pair is forgotten first and simply re-read once.
           if (skips.size >= WORKER_RUN_BIND_SKIP_LIMIT) skips.delete(skips.keys().next().value as string)
@@ -665,6 +674,25 @@ export class AssistantWorkItemsService extends Service {
           this.ctx.logger.debug(`assistant-work-items: acceptance worker-run bind for ${item.id}: ${outcome}`)
         }
       }
+    }
+  }
+
+  /**
+   * Count consecutive `owner-route-drift` outcomes of one (item, occurrence)
+   * and warn once when the streak reaches `WORKER_RUN_DRIFT_WARN_AFTER`: a
+   * route that keeps moving between the two Delivery reads would otherwise be
+   * re-read silently forever. Any other outcome, including a successful bind,
+   * or a new occurrence restarts the streak. Never changes the re-read.
+   */
+  private workItemsTrackBindWorkerRunDrift(itemId: string, occurrenceId: string, outcome: string): void {
+    const drifts = this.workItemsBindWorkerRunDrifts
+    if (outcome !== 'owner-route-drift') { drifts.delete(itemId); return }
+    const previous = drifts.get(itemId)
+    const count = previous?.occurrenceId === occurrenceId ? previous.count + 1 : 1
+    if (previous === undefined && drifts.size >= WORKER_RUN_BIND_SKIP_LIMIT) drifts.delete(drifts.keys().next().value as string)
+    drifts.set(itemId, { occurrenceId, count })
+    if (count === WORKER_RUN_DRIFT_WARN_AFTER) {
+      this.ctx.logger.warn(`assistant-work-items: work item ${itemId} occurrence ${occurrenceId} saw owner-route-drift on ${String(count)} consecutive bindWorkerRun reads; still re-reading, the owner route keeps moving between validateOwnerRoute and inspectOwnerRouteBinding`)
     }
   }
 

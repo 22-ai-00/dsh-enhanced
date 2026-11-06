@@ -1795,6 +1795,78 @@ describe('work-item admission authority revalidation', () => {
     }
   })
 
+  test('acceptance.bindWorkerRun warns once after five consecutive owner route drifts of one occurrence and keeps re-reading', async () => {
+    const fixture = await serviceHarness({ extra: bindWorkerRun() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const warnings: string[] = []
+    fixture.ctx.logger.exporter({ levels: { default: 3 }, export: message => { if (message.type === 'warn') warnings.push(String(message.args.join(' '))) } })
+    const { itemId, occurrenceId } = admitPlain(fixture, 'bind-drift-streak')
+    publishWorkerContract(fixture, peer, occurrenceId)
+    fixture.automations?.acceptanceReads.splice(0)
+    const service = fixture.delivery.spy.service
+    const original = service.inspectOwnerRouteBinding!
+    let drifting = true
+    service.inspectOwnerRouteBinding = input => {
+      const read = original(input)
+      return drifting ? Object.freeze({ ...read, receipt: Object.freeze({ ...read.receipt, generation: 99 }) }) : read
+    }
+    const streakWarnings = () => warnings.filter(text => text.includes(itemId) && text.includes('owner-route-drift'))
+    for (let wake = 0; wake < 4; wake += 1) fixture.automations?.wake()
+    expect(streakWarnings()).toEqual([])
+    fixture.automations?.wake()
+    expect(streakWarnings()).toHaveLength(1)
+    expect(streakWarnings()[0]).toContain(occurrenceId)
+    // Once per streak: further drifts stay silent, and re-reading is unchanged.
+    for (let wake = 0; wake < 6; wake += 1) fixture.automations?.wake()
+    expect(streakWarnings()).toHaveLength(1)
+    expect(fixture.automations?.acceptanceReads).toHaveLength(11)
+    expect(boundEvents(fixture, itemId)).toBe(0)
+    // A successful bind clears the streak.
+    drifting = false
+    fixture.automations?.wake()
+    expect(boundEvents(fixture, itemId)).toBe(1)
+    expect(streakWarnings()).toHaveLength(1)
+  })
+
+  test('acceptance.bindWorkerRun restarts the drift streak when another outcome intervenes or the occurrence changes', async () => {
+    const fixture = await serviceHarness({ extra: bindWorkerRun() })
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const warnings: string[] = []
+    fixture.ctx.logger.exporter({ levels: { default: 3 }, export: message => { if (message.type === 'warn') warnings.push(String(message.args.join(' '))) } })
+    const { itemId, occurrenceId } = admitPlain(fixture, 'bind-drift-reset')
+    publishWorkerContract(fixture, peer, occurrenceId)
+    const service = fixture.delivery.spy.service
+    const original = service.inspectOwnerRouteBinding!
+    let mode: 'drift' | 'unavailable' = 'drift'
+    service.inspectOwnerRouteBinding = input => {
+      if (mode === 'unavailable') throw peerError('runtime-unavailable')
+      const read = original(input)
+      return Object.freeze({ ...read, receipt: Object.freeze({ ...read.receipt, generation: 99 }) })
+    }
+    const streakWarnings = () => warnings.filter(text => text.includes(itemId) && text.includes('owner-route-drift'))
+    for (let wake = 0; wake < 4; wake += 1) fixture.automations?.wake()
+    // A transient failure in between is not a drift: the streak restarts.
+    mode = 'unavailable'
+    fixture.automations?.wake()
+    mode = 'drift'
+    for (let wake = 0; wake < 4; wake += 1) fixture.automations?.wake()
+    expect(streakWarnings()).toEqual([])
+    // A new occurrence of the item restarts it too.
+    const raw = new DatabaseSync(join(fixture.root, 'state', 'state.sqlite'))
+    try {
+      raw.prepare("UPDATE work_item_dispatch SET occurrence_id = 'occ-next' WHERE item_id = ?").run(itemId)
+      raw.prepare("UPDATE work_item SET occurrence_id = 'occ-next' WHERE id = ?").run(itemId)
+    } finally { raw.close() }
+    publishWorkerContract(fixture, peer, 'occ-next')
+    fixture.automations?.acceptanceReads.splice(0)
+    for (let wake = 0; wake < 4; wake += 1) fixture.automations?.wake()
+    expect(streakWarnings()).toEqual([])
+    fixture.automations?.wake()
+    expect(streakWarnings()).toHaveLength(1)
+    expect(streakWarnings()[0]).toContain('occ-next')
+    expect(fixture.automations?.acceptanceReads).toEqual(Array(5).fill('occ-next'))
+  })
+
   test('acceptance.bindWorkerRun parks a malformed owner route binding answer', async () => {
     const fixture = await serviceHarness({ extra: bindWorkerRun() })
     const peer = new FakeVerifierPeer(fixture.ctx)
