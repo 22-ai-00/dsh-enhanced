@@ -143,6 +143,15 @@ describe('plugin setup: naming and validation', () => {
     expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.bindWorkerRun.enabled', 'on', undefined)).toBe(true)
     expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.bindWorkerRun.maxPerTick', '4', undefined)).toBe(4)
     expect(() => coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.bindWorkerRun.enabled', 'maybe', undefined)).toThrow(/expects a boolean/u)
+    // Documented optional switches of the WP21 slices need no `--force` either.
+    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'follows.eventTriggers.acceptHeadRef', 'true', undefined)).toBe(true)
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-work-items', 'follows.eventTriggers.acceptHeadRef', 'maybe', undefined)).toThrow(/expects a boolean/u)
+    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.verdictGate.enabled', 'on', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.holdReport.enabled', 'on', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.holdReport.holdTimeoutMs', '900000', undefined)).toBe(900000)
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.holdReport.holdTimeoutMs', 'soon', undefined)).toThrow(/expects a number/u)
+    expect(coerceConfigValue('dsh-enhanced-assistant-delivery', 'ownerReportRouting.orderAcrossLanes', 'on', undefined)).toBe(true)
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-delivery', 'ownerReportRouting.orderAcrossLanes', 'maybe', undefined)).toThrow(/expects a boolean/u)
   })
 
   test('parses commands and rejects bad arity or options', () => {
