@@ -245,7 +245,8 @@ test('native pnpm peer overrides preserve one module identity and do not install
     // All runtime packages are frozen local tarballs. Offline resolution also
     // prevents pnpm's optional peer metadata probe from needing a registry.
     const output = execFileSync('pnpm', ['--dir', profilePath, 'install', '--offline', '--ignore-scripts'], { encoding: 'utf8', timeout: 30_000,
-      env: { ...process.env, CI: 'true', pnpm_config_package_import_method: 'copy' } })
+      // An inherited FORCE_COLOR would interleave ANSI codes with the summary.
+      env: { ...process.env, CI: 'true', FORCE_COLOR: '0', NO_COLOR: '1', pnpm_config_package_import_method: 'copy' } })
     expect(output).toContain('Packages: +3')
     await verifyRsiLocalInstalledPackages({ cohort, profilePath })
     const targetPath = createRequire(join(profilePath, 'package.json')).resolve(`${target.name}/package.json`)
