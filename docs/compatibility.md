@@ -5,6 +5,7 @@
 当前桌面 Host 运行 `0.2.2-rc.1`，而仓库验证基线仍是 `0.2.1-rc.2`（catalog、锁文件与测试依赖不变）。两处有限修复只影响安装：
 
 - 所有插件与共享包的 `@deepseek-ai/*` peer 范围从精确 `0.2.1-rc.2` 放宽为 `>=0.2.1-rc.2 <0.3.0`。只放宽 Host 版本声明，不改变 catalog、锁文件、测试基线或任何 `@dsh-enhanced/*` 内部 peer。Host 用 `semver.satisfies(..., { includePrerelease: true })` 匹配，因此同时接受已验证基线和当前 `0.2.2-rc.1`；低于基线或未验证的 0.3 仍拒绝。根 `tests/dsh-compatibility.spec.ts` 只允许精确基线或这条已验证的 0.2 线。
+- 插件不得把 `@deepseek-ai/dsh-*` 运行时包写成普通 `dependencies`。这类依赖会随插件装进 profile 的 `node_modules`，Loader 解析 base bundle 的同名行时优先拿到 profile 里的旧副本，兼容门随即禁用 `working-directory`、`session-projection` 等根服务，导致所有下游插件 pending。`assistant-skills` 0.1.65 曾以普通依赖引入 5 个 `0.2.1-rc.2` 包并触发该故障；0.1.66 起改为可选 Host peer（`>=0.2.1-rc.2 <0.3.0`），构建/测试用 devDependency，`index.spec` 断言 `dependencies` 中不出现 `@deepseek-ai/dsh-*`。
 - lark-channel 一键安装会被 Host 的 ANSI 解析缺陷挡住：`plugin-manager` 的 `/\bIgnored build scripts:/` 在 pnpm 11 的彩色输出中匹配失败，`pendingBuilds` 为空，之后 `approvedBuilds` 重试返回 `stale-approval`。面板侧有限兜底：安装失败时从 pnpm 原始输出（去 ANSI）解析受影响的依赖名并交给主人确认；确认后若 Host 仍无待批准记录，面板把确认过的名字写入 profile 的 `pnpm-workspace.yaml`（`allowBuilds: <name>: true`，原子写入、0600），再不带批准参数重试一次。名称仍受上限 64、长度 200、禁止通配符与控制字符约束；不自动批准，不触碰其他 profile 键。Host 自身仍保留缺陷，此兜底不改 Host 安装器。
 
 ## 插件配置 CLI 与 recommended 预设
