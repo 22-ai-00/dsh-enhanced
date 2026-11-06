@@ -29,6 +29,12 @@ export const isAppId = (value: unknown): value is string => typeof value === 'st
 export const isEnvName = (value: unknown): value is string => typeof value === 'string' && ENV_NAME.test(value)
 export const isSecretRef = (value: unknown): value is string => typeof value === 'string' && SECRET_REF.test(value)
 
+/** One loader row a bundle's patch declares; its row id is the stable patch target. */
+export interface BundleRowLike {
+  readonly rowId: string
+  readonly moduleName: string
+  readonly entryId?: string
+}
 export interface BundleInfoLike {
   readonly name: string
   readonly version?: string
@@ -36,14 +42,18 @@ export interface BundleInfoLike {
   readonly installed: boolean
   readonly removable: boolean
   readonly optional: boolean
-  /** `error.code === 'not-bundle'` marks a dependency row without a bundle patch. */
-  readonly error?: Readonly<{ code?: string }>
+  /** Any ManagementError, including `not-bundle`, incompatible versions and platform refusals. */
+  readonly error?: Readonly<{ code?: string, diagnostic?: string }>
+  readonly rows?: readonly BundleRowLike[]
+  readonly readOnlyReason?: 'management-required' | 'unaddressable'
 }
 export interface PluginInfoLike {
   readonly entryId: string
   readonly moduleName: string
   readonly enabled: boolean
   readonly fiberPhase: 'pending' | 'loading' | 'active' | 'failed' | 'unloading' | null
+  /** Current startup failure message; absent when the fiber did not fail. */
+  readonly diagnostic?: string
 }
 /** A package the running DSH version refused; the Host reports the exact peer requirements it missed. */
 export interface IncompatiblePluginLike {
@@ -117,8 +127,8 @@ export function configFacts(value: unknown): Record<string, unknown> {
 }
 
 export function boundedConfig(input: unknown): Readonly<Record<string, unknown>> {
-  if (input === null || typeof input !== 'object' || Array.isArray(input)) throw new Error('config must be a JSON object')
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) throw new Error('配置必须是 JSON 对象')
   const serialized = JSON.stringify(input)
-  if (Buffer.byteLength(serialized, 'utf8') > MAX_CONFIG_BYTES) throw new Error('config is too large')
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_CONFIG_BYTES) throw new Error('配置过大（上限 16 KiB）')
   return input as Record<string, unknown>
 }

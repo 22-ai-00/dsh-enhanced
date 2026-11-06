@@ -6,11 +6,15 @@ import { WENYAO_BACKDROP_DATA_URI, WENYAO_HERO_DATA_URI, WENYAO_HERO_HEIGHT, WEN
   WENYAO_ICON_DATA_URI, WENYAO_SEAL_DATA_URI } from './artwork.js'
 import type { IntakeAgreementAvailability, OwnerConsoleIntakeAgreement, OwnerConsoleStatus, OwnerConsoleTrendSnapshotItem, OwnerConsoleTrendSnapshots,
   OwnerConsoleWriteResult } from './typert.js'
+import { componentState, missingRemedy, repairPatch, type ComponentState } from './state.js'
 
 /** The installed Host supplies remote and the slot registry. */
 export const inject = ['remote', 'slots']
 
-type RemoteResult<T> = Readonly<{ ok: true, value: T }> | Readonly<{ ok: false }>
+/** The gateway's failure result keeps the business code and unchanged message; the panel must show
+ * both instead of one generic sentence. `error` stays optional so a minimal transport result is legal. */
+type RemoteFailure = Readonly<{ code: string, message: string, details?: unknown }>
+type RemoteResult<T> = Readonly<{ ok: true, value: T }> | Readonly<{ ok: false, error?: RemoteFailure }>
 type ConsoleRemote = Readonly<{
   status(): Promise<RemoteResult<OwnerConsoleStatus>>
   trendSnapshots(planId: string, beforeSequence: number, limit: number): Promise<RemoteResult<OwnerConsoleTrendSnapshots>>
@@ -48,11 +52,25 @@ export function feishuSecretRefs(source: 'env' | 'handle', env: string,
   return source === 'env' ? { appSecretEnv: env, credentialHandle: '' } : { appSecretEnv: '', credentialHandle: handle }
 }
 
-/** Browser confirmation channel; without one the panel never performs a destructive or
- * install-script-authorizing step. */
-function askOwner(message: string): boolean {
-  const ask = (globalThis as unknown as { confirm?: (message: string) => boolean }).confirm
-  return ask !== undefined && ask(message)
+/** Browser confirmation channel. Without one the panel never performs a destructive or
+ * install-script-authorizing step, and the caller must show that refusal instead of going silent. */
+export function askOwner(confirm: ((message: string) => boolean) | undefined,
+  message: string): 'approved' | 'declined' | 'unavailable' {
+  if (confirm === undefined) return 'unavailable'
+  return confirm(message) ? 'approved' : 'declined'
+}
+
+/** The visible consequence of a confirmation: an unavailable channel and a decline must not be silent. */
+export function confirmationNotice(answer: 'approved' | 'declined' | 'unavailable', message: string): string | undefined {
+  if (answer === 'unavailable') return `当前界面没有确认对话框，本次操作未执行：${message}`
+  return answer === 'declined' ? '已取消操作' : undefined
+}
+
+/** Render a gateway failure verbatim (bounded), keeping its stable code for support. */
+export function remoteFailureText(error: RemoteFailure | undefined): string {
+  if (error === undefined || error.code === '' || error.message === '') return 'Host 返回了未说明的拒绝'
+  const message = error.message.length > 600 ? `${error.message.slice(0, 600)}…` : error.message
+  return `${error.code}：${message}`
 }
 
 /**
@@ -105,6 +123,26 @@ export function larkConnectionTone(connection: OwnerConsoleStatus['feishu']['con
 }
 
 const OWN_PACKAGE = '@dsh-enhanced/owner-console'
+const LARK_PACKAGE = '@dsh-enhanced/lark-channel'
+const TRAEX_PACKAGE = '@dsh-enhanced/traex-acp-provider'
+const monoFont = 'ui-monospace, SFMono-Regular, Menlo, monospace'
+
+/** One bounded line of Host-provided diagnostic text for a row. */
+export function boundedLine(text: string, limit = 240): string {
+  const normalized = text.replace(/\s+/gu, ' ').trim()
+  return normalized.length > limit ? `${normalized.slice(0, limit)}…` : normalized
+}
+
+/** A plugin row's status comes from its fiber, not from the persisted enable flag. */
+export function fiberState(phase: OwnerConsoleStatus['plugins'][number]['fiberPhase'],
+  enabled: boolean): Readonly<{ label: string, tone: StatusTone }> {
+  if (phase === 'active') return { label: '已加载', tone: 'ok' }
+  if (phase === 'failed') return { label: '加载失败', tone: 'error' }
+  if (phase === 'pending') return { label: '等待依赖服务', tone: 'warn' }
+  if (phase === 'loading') return { label: '加载中', tone: 'warn' }
+  if (phase === 'unloading') return { label: '卸载中', tone: 'neutral' }
+  return enabled ? { label: '已启用未启动', tone: 'warn' } : { label: '已停用', tone: 'neutral' }
+}
 
 /*
  * Theme tokens: only Host `--dsw-alias-*` variables (light/dark switch with the shell), each
@@ -113,6 +151,7 @@ const OWN_PACKAGE = '@dsh-enhanced/owner-console'
 const ink = 'var(--dsw-alias-label-primary, #0f1115)'
 const muted = 'var(--dsw-alias-label-secondary, #61666b)'
 const caption = 'var(--dsw-alias-label-tertiary, #81858c)'
+const monoMuted = { fontSize: 12, color: caption, fontFamily: monoFont } as const
 const hairline = 'var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.04))'
 const border = 'var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1))'
 const borderStrong = 'var(--dsw-alias-border-l3, rgba(0, 0, 0, 0.12))'
@@ -396,9 +435,9 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
     try {
       const result = await remote.status()
       if (result.ok) setStatus(result.value)
-      else setError('Host 没有返回状态；请确认 settings 服务已加载。')
-    } catch {
-      setError('暂时无法读取状态，稍后重试。')
+      else setError(`读取状态失败（${remoteFailureText(result.error)}）`)
+    } catch (cause) {
+      setError(cause instanceof Error ? `暂时无法读取状态：${cause.message}` : '暂时无法读取状态，稍后重试。')
     }
   }
   const mounted = useRef(true)
@@ -413,7 +452,7 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
     try {
       const result = await action()
       if (!mounted.current) return
-      if (!result.ok) { setError('Host 拒绝了这次操作，请检查输入。'); return }
+      if (!result.ok) { setError(`Host 拒绝了这次操作（${remoteFailureText(result.error)}）`); return }
       if (!result.value.applied) { setError(result.value.note); return }
       // A persisted change can still need a profile restart; refresh the rows and
       // show the Host note as information, not as a failed action.
@@ -425,33 +464,68 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
     }
   }
 
-  const runInstall = (spec: string) => run(() => installWithApproval(remote, spec, askOwner))
+  /** A confirmation that is unavailable or declined is visible: neither is a silent no-op. */
+  const confirmOwner = (message: string): boolean => {
+    const answer = askOwner((globalThis as unknown as { confirm?: (message: string) => boolean }).confirm, message)
+    const notice = confirmationNotice(answer, message)
+    if (notice !== undefined) {
+      if (answer === 'unavailable') setError(notice)
+      else setNotice(notice)
+      return false
+    }
+    return true
+  }
+
+  const runInstall = (spec: string) => run(() => installWithApproval(remote, spec, confirmOwner))
 
   const pending = status === undefined
   const larkReady = status !== undefined && status.feishu.entry !== undefined
+  const larkState = componentState(status, LARK_PACKAGE)
+  const traexState = componentState(status, TRAEX_PACKAGE)
   const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy)
+  const entryLabel = (entry: string | undefined) => entry === undefined ? null
+    : el('span', { style: monoMuted }, entry)
+  /** A minimal repair: the exact missing bundles to install and a copyable patch to stop a stuck row. */
+  const repairSection = (state: ComponentState, packageName: string) => el('div', { style: { display: 'grid', gap: 8 } },
+    el('p', { style: hintStyle }, state.stalled
+      ? `条目加载后配置表单才会出现。${missingRemedy(state) === '' ? '' : `${missingRemedy(state)}。`}修复依赖后重启 profile。`
+      : `该条目当前不可写：${state.label}。`),
+    state.missing.length === 0 ? null : el('div', { style: actionsStyle },
+      ...state.missing.map(item => el('button', { key: item.bundle, style: btn(buttonStyle), disabled: busy,
+        onClick: () => void runInstall(item.bundle) }, `安装 ${item.bundle}`))),
+    state.stalled || state.kind === 'errored'
+      ? el('textarea', { readOnly: true, rows: 4, 'aria-label': `${packageName} 最小修复 patch`, value: repairPatch(state, packageName),
+        style: { ...inputStyle, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11, resize: 'vertical' } })
+      : null)
+
   const feishuRows = pending
     ? placeholder('正在读取…')
     : el('div', { style: listStyle },
       row('方式', status.feishu.mode === 'env' ? '环境变量 secret' : 'keychain secret'),
-      row('入口', status.feishu.entry ?? (status.feishu.installed ? 'lark-channel 已安装但未启用' : '未安装 lark-channel')),
+      row('入口', el('span', { style: actionsStyle }, pill(larkState.label, larkState.tone), entryLabel(status.feishu.entry))),
+      ...(larkState.entry?.diagnostic === undefined ? [] : [row('诊断', boundedLine(larkState.entry.diagnostic))]),
+      ...(larkState.error === undefined ? [] : [row('错误', `${larkState.error.code}${larkState.error.diagnostic === undefined ? '' : `：${boundedLine(larkState.error.diagnostic)}`}`)]),
+      ...(larkState.missing.length === 0 ? [] : [row('缺少服务', missingRemedy(larkState))]),
       row('连接', pill(larkConnectionLabel(status.feishu.connection, status.feishu.lastErrorCode),
         larkConnectionTone(status.feishu.connection, status.feishu.lastErrorCode))),
       row('appId', pill(status.feishu.appIdConfigured ? '已配置' : '未配置', status.feishu.appIdConfigured ? 'ok' : 'warn')))
-  const installLark = status !== undefined && !status.feishu.installed && status.feishu.entry === undefined
+  const installLark = larkState.canInstall
     ? el('button', { style: btn(primaryButtonStyle), disabled: busy,
-      onClick: () => void runInstall('@dsh-enhanced/lark-channel') },
-    '安装 lark-channel（含依赖）')
+      onClick: () => void runInstall(LARK_PACKAGE) }, '安装 lark-channel')
     : null
-  const enableLark = status !== undefined && status.feishu.installed && status.feishu.entry === undefined
+  const enableLark = larkState.canEnable
     ? el('button', { style: btn(primaryButtonStyle), disabled: busy,
-      onClick: () => void run(() => remote.setBundleEnabled('@dsh-enhanced/lark-channel', true)) },
-    '启用 lark-channel')
+      onClick: () => void run(() => remote.setBundleEnabled(LARK_PACKAGE, true)) }, '启用 lark-channel')
     : null
-  const feishuActions = !larkReady && !installLark && !enableLark
+  // A stalled or errored card stays actionable: it offers the missing bundles and a repair patch
+  // instead of a dead-end "启用" button that would be a no-op on an already enabled bundle.
+  const larkRepair = !larkReady && (larkState.stalled || larkState.missing.length > 0 || larkState.kind === 'errored')
+    ? repairSection(larkState, LARK_PACKAGE) : null
+  const feishuActions = !larkReady && !installLark && !enableLark && larkRepair === null
     ? null
     : el('div', { style: { display: 'grid', gap: 12 } },
       installLark === null && enableLark === null ? null : el('div', { style: actionsStyle }, installLark, enableLark),
+      larkRepair,
       ...(larkReady ? [
     el('div', { style: { display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center', fontSize: 13 }, role: 'radiogroup', 'aria-label': 'secret 引用方式' },
       el('span', { style: subheadStyle }, 'secret 引用'),
@@ -483,10 +557,14 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
       '这里配置的是 lark-channel 通道；secret 只接受环境变量名或 keychain handle，明文不入配置。')] : []))
 
   const traexReady = status !== undefined && status.traex.entry !== undefined
+  const traexRepair = !traexReady && (traexState.stalled || traexState.missing.length > 0 || traexState.kind === 'errored')
+    ? repairSection(traexState, TRAEX_PACKAGE) : null
   const traexRows = el('div', { style: gridStyle },
     el('div', { style: listStyle },
-      row('入口', status?.traex.entry ?? (status?.traex.installed ? 'traex-acp-provider 已安装但未启用' : '未安装 traex-acp-provider')),
-      row('状态', pill(status?.traex.enabled === true ? '已启用' : '未启用', status?.traex.enabled === true ? 'ok' : 'neutral')),
+      row('入口', el('span', { style: actionsStyle }, pill(traexState.label, traexState.tone), entryLabel(status?.traex.entry))),
+      ...(traexState.entry?.diagnostic === undefined ? [] : [row('诊断', boundedLine(traexState.entry.diagnostic))]),
+      ...(traexState.error === undefined ? [] : [row('错误', `${traexState.error.code}${traexState.error.diagnostic === undefined ? '' : `：${boundedLine(traexState.error.diagnostic)}`}`)]),
+      ...(traexState.missing.length === 0 ? [] : [row('缺少服务', missingRemedy(traexState))]),
       row('命令', status === undefined || status.traex.command === '' ? '（默认）' : status.traex.command)),
     traexReady
       ? el('div', { style: { ...actionsStyle, alignItems: 'end' } },
@@ -497,60 +575,74 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
           onClick: () => void run(() => remote.configureTraex(false, '')) }, '停用'))
       : status === undefined
         ? placeholder('正在读取…')
-        : el('div', { style: actionsStyle }, !status.traex.installed
-          ? el('button', { style: btn(primaryButtonStyle), disabled: busy,
-            onClick: () => void runInstall('@dsh-enhanced/traex-acp-provider') },
-          '安装 traex-acp-provider（含依赖）')
-          : el('button', { style: btn(primaryButtonStyle), disabled: busy,
-            onClick: () => void run(() => remote.setBundleEnabled('@dsh-enhanced/traex-acp-provider', true)) },
-          '启用 traex-acp-provider')))
+        : el('div', { style: { display: 'grid', gap: 10 } },
+          el('div', { style: actionsStyle },
+            traexState.canInstall
+              ? el('button', { style: btn(primaryButtonStyle), disabled: busy,
+                onClick: () => void runInstall(TRAEX_PACKAGE) }, '安装 traex-acp-provider')
+              : null,
+            traexState.canEnable
+              ? el('button', { style: btn(primaryButtonStyle), disabled: busy,
+                onClick: () => void run(() => remote.setBundleEnabled(TRAEX_PACKAGE, true)) }, '启用 traex-acp-provider')
+              : null),
+          traexRepair))
 
   const itemStyle = { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8, alignItems: 'center', padding: '10px 0', borderTop: `1px solid ${hairline}` }
   const bundleRows = pending
     ? placeholder('正在读取…')
     : status.bundles.length === 0
       ? placeholder('本 profile 中没有本项目的 bundle。', QUIET_PHRASE)
-      : el('div', { style: listStyle }, ...status.bundles.map(bundle => el('div', { style: itemStyle },
-        el('span', { style: { display: 'inline-flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 6, minWidth: 0, overflowWrap: 'anywhere' } },
-          el('span', { style: { fontWeight: 500 } }, bundle.name),
-          bundle.version === undefined ? null : el('span', { style: { fontSize: 12, color: caption } }, `@${bundle.version}`)),
-        el('span', { style: actionsStyle },
-          bundle.installed ? null : pill('未安装', 'warn'),
-          pill(bundle.enabled ? '已启用' : '已停用', bundle.enabled ? 'ok' : 'neutral'),
-          el('button', { style: btn(), disabled: busy,
-            onClick: () => void run(() => remote.setBundleEnabled(bundle.name, !bundle.enabled)) },
-          bundle.enabled ? '停用' : '启用'),
-          bundle.removable && bundle.name !== OWN_PACKAGE
-            ? el('button', { style: btn(dangerButtonStyle), disabled: busy,
-              onClick: () => {
-                // Without a confirmation channel the panel never performs the destructive step.
-                if (askOwner(`移除 ${bundle.name}？重新安装可用面板的安装入口。`)) {
-                  void run(() => remote.removeProjectBundle(bundle.name))
-                }
-              } }, '移除')
-            : null))))
+      : el('div', { style: listStyle }, ...status.bundles.map(bundle => {
+        const state = componentState(status, bundle.name)
+        return el('div', { key: bundle.name, style: itemStyle },
+          el('span', { style: { display: 'grid', gap: 2, minWidth: 0, overflowWrap: 'anywhere' } },
+            el('span', { style: { display: 'inline-flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 6, minWidth: 0 } },
+              el('span', { style: { fontWeight: 500 } }, bundle.name),
+              bundle.version === undefined ? null : el('span', { style: { fontSize: 12, color: caption } }, `@${bundle.version}`)),
+            bundle.error === undefined ? null : el('span', { style: { fontSize: 11, color: danger, fontFamily: monoFont } },
+              `${bundle.error.code}${bundle.error.diagnostic === undefined ? '' : `：${boundedLine(bundle.error.diagnostic)}`}`)),
+          el('span', { style: actionsStyle },
+            pill(state.label, state.tone),
+            // A bundle the Host already refused must not offer "启用": the write would not change it.
+            bundle.error !== undefined && !bundle.enabled ? null
+              : el('button', { style: btn(), disabled: busy,
+                onClick: () => void run(() => remote.setBundleEnabled(bundle.name, !bundle.enabled)) },
+              bundle.enabled ? '停用' : '启用'),
+            bundle.removable && bundle.name !== OWN_PACKAGE
+              ? el('button', { style: btn(dangerButtonStyle), disabled: busy,
+                onClick: () => {
+                  // Without a confirmation channel the panel never performs the destructive step.
+                  if (confirmOwner(`移除 ${bundle.name}？重新安装可用面板的安装入口。`)) {
+                    void run(() => remote.removeProjectBundle(bundle.name))
+                  }
+                } }, '移除')
+              : null))
+      }))
   const pluginRows = pending || status.plugins.length === 0
     ? placeholder(pending ? '正在读取…' : '没有已加载的本项目插件条目。', pending ? undefined : QUIET_PHRASE)
-    : el('div', { style: listStyle }, ...status.plugins.map(plugin => el('div', { style: itemStyle },
-      el('span', { style: { display: 'grid', minWidth: 0, overflowWrap: 'anywhere' } },
-        el('span', { style: { fontWeight: 500 } }, plugin.moduleName),
-        el('span', { style: { fontSize: 12, color: caption, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' } },
-          `${plugin.entryId} · ${plugin.fiberPhase ?? 'null'}`)),
-      el('span', { style: actionsStyle },
-        pill(plugin.enabled ? '已启用' : '已禁用', plugin.enabled ? 'ok' : 'neutral'),
-        el('button', { style: btn(), disabled: busy,
-          onClick: () => void run(() => remote.setPluginEnabled(plugin.entryId, !plugin.enabled)) },
-        plugin.enabled ? '禁用' : '启用')))))
+    : el('div', { style: listStyle }, ...status.plugins.map(plugin => {
+      const fiber = fiberState(plugin.fiberPhase, plugin.enabled)
+      return el('div', { key: plugin.entryId, style: itemStyle },
+        el('span', { style: { display: 'grid', gap: 2, minWidth: 0, overflowWrap: 'anywhere' } },
+          el('span', { style: { fontWeight: 500 } }, plugin.moduleName),
+          el('span', { style: monoMuted }, `${plugin.entryId} · ${plugin.fiberPhase ?? 'null'}`),
+          plugin.diagnostic === undefined ? null : el('span', { style: { fontSize: 11, color: danger } }, boundedLine(plugin.diagnostic))),
+        el('span', { style: actionsStyle },
+          pill(fiber.label, fiber.tone),
+          el('button', { style: btn(), disabled: busy,
+            onClick: () => void run(() => remote.setPluginEnabled(plugin.entryId, !plugin.enabled)) },
+          plugin.enabled ? '禁用' : '启用')))
+    }))
   const bundles = el('div', { style: { display: 'grid', gap: 10 } },
     el('h4', { style: subheadStyle }, 'Bundle 层'),
     bundleRows,
     el('h4', { style: { ...subheadStyle, marginTop: 6 } }, '已加载条目'),
     pluginRows,
     el('div', { style: { ...actionsStyle, alignItems: 'end', marginTop: 6 } },
-      field('安装本项目 bundle（含依赖）', installSpec, setInstallSpec, '@dsh-enhanced/plugin-name'),
+      field('安装本项目 bundle', installSpec, setInstallSpec, '@dsh-enhanced/plugin-name'),
       el('button', { style: btn(primaryButtonStyle), disabled: busy,
         onClick: () => void runInstall(installSpec) }, '安装')),
-    el('p', { style: hintStyle }, '安装使用 DSH 自身的 pnpm 路径，会一并安装该包声明的依赖；安装/启用后如提示需要重启 profile，请依提示操作。'),
+    el('p', { style: hintStyle }, '安装走 DSH 自身的 pnpm 路径，只装该包及其 pnpm 依赖；它的 @dsh-enhanced peer bundle 与 Host 服务不会自动安装，缺失项会显示在卡片里。安装/启用后如提示需要重启 profile，请依提示操作。'),
     el('details', { style: { marginTop: 4, borderTop: `1px solid ${hairline}`, paddingTop: 10 } },
       el('summary', { style: { fontSize: 12, fontWeight: 500, color: muted, cursor: 'pointer' } }, '高级：合并配置（只对声明了 live 字段的条目生效）'),
       el('div', { style: { display: 'grid', gap: 8, marginTop: 10 } },
@@ -577,6 +669,12 @@ export function OwnerConsolePanel({ remote, navigation }: Readonly<{
       header(navigation),
       error === '' ? null : el('p', { role: 'alert', style: { ...bannerStyle(danger), fontWeight: 500 } },
         el('span', { 'aria-hidden': true, style: { color: danger, fontWeight: 700 } }, '!'), error),
+      // A missing Host service is reported explicitly; the cards below then never read as "not installed".
+      status !== undefined && (status.host.settings === false || status.host.pluginManager === false)
+        ? el('p', { role: 'status', style: { ...bannerStyle(accent), fontSize: 12 } },
+          `Host 服务不完整：settings ${status.host.settings ? '已加载' : '未加载'}、`
+          + `pluginManager ${status.host.pluginManager ? '已加载' : '未加载'}；相关卡片只显示不可用，不能写入。`)
+        : null,
       notice === '' ? null : el('p', { role: 'status', style: bannerStyle(accent) },
         el('span', { 'aria-hidden': true, style: { color: accent, fontWeight: 700 } }, 'i'), notice),
       card('远程接入（飞书）', feishuRows, feishuActions),

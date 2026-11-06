@@ -11,6 +11,7 @@ import {
   OwnerConsoleTrendSnapshotsSchema, TREND_SNAPSHOT_PAGE_MAX,
   type IntakeAgreementAvailability, type OwnerConsoleIntakeAgreement, type OwnerConsoleStatus, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
 } from './typert.js'
+import { componentState, missingRemedy, repairPatch } from './state.js'
 
 /** Companions worth surfacing; a missing one is a setup hint, never a hard failure. */
 const DEPENDENCIES = ['assistantPolicy', 'assistantDelivery', 'assistantSkills'] as const
@@ -43,21 +44,61 @@ export class OwnerConsoleService extends TypertRemoteService {
 
   /** Volatile edits update the running fiber references but never re-run apply.
    * A one-step write therefore restarts just this entry with its persisted raw
-   * config, so the connector or provider rebuilds from the new plain values. */
+   * config. `fiber.update()` is synchronous while the restart is not, so the note
+   * only claims a reload when the entry is active again in a fresh `describe()`;
+   * anything else says a restart is needed. This never throws. */
   private async reload(entryId: string): Promise<string> {
     const loader = this.host.get('loader' as never) as LoaderService | undefined
     if (loader === undefined) return '；已保存，但 loader 不可用，重启 profile 后生效'
     try {
       const entry = [...loader.entries()].find(candidate => candidate.options.id === entryId || candidate.id === entryId)
       if (entry === undefined) return '；已保存，但未找到该 profile 条目，重启 profile 后生效'
-      if (entry.fiber === undefined) {
-        await entry.refresh()
-        return '；条目已重新加载'
-      }
-      entry.fiber.update(entry.options.config, true)
-      return '；条目已重新加载'
+      if (entry.fiber === undefined) await entry.refresh()
+      else entry.fiber.update(entry.options.config, true)
+      return this.descriptors().some(descriptor => descriptor.ns === entryId)
+        ? '；条目已重新加载'
+        : '；已保存，但未能确认条目已恢复加载；如未生效请重启 profile'
     } catch {
       return '；已保存，但自动重载失败，请重启 profile 后生效'
+    }
+  }
+
+  /** Why a card's write target is not active, in the panel's own terms. It reports the observed
+   * fiber phase/diagnostic, the missing companion services and a minimal patch repair instead of
+   * the generic "not installed" refusal that hides a failed or pending load. */
+  private async targetRefusal(entry: string, packageName: string, label: string): Promise<OwnerConsoleWriteResult> {
+    const state = componentState(await this.status(), packageName)
+    const diagnostic = state.entry?.diagnostic === undefined ? '' : `：${boundedText(state.entry.diagnostic, 300)}`
+    const bundleError = state.error === undefined ? '' : `；Host 记录错误 ${state.error.code}`
+    const missing = missingRemedy(state)
+    const repair = state.stalled
+      ? ` 可用以下最小 patch 临时停用该行：${repairPatch(state, packageName)}` : ''
+    const note = state.kind === 'absent'
+      ? `${label} 未安装；请先在面板安装 ${packageName}，再配置`
+      : state.kind === 'active'
+        ? `${label} 已加载，但没有声明任何可实时修改的配置字段`
+        : state.kind === 'disabled'
+        ? `${label} 已安装但未启用；请先点“启用”，等条目加载后再配置`
+        : state.kind === 'unavailable' || state.kind === 'unreadable'
+          ? `${label} 状态不可读：${state.label}${diagnostic}`
+          : `${label} 已启用但未加载（${state.entry?.fiberPhase ?? '无 Loader 条目'}${bundleError}）${diagnostic}。`
+            + `${missing === '' ? '' : `${missing}。`}修复后重启 profile 再配置。${repair}`
+    return refuse(entry, note)
+  }
+
+  /** Read the keychain handles only when the provider exposes them; a provider that cannot list
+   * (or throws) fails soft, and the write proceeds with a note that existence was not verified. */
+  private keychainHandles(): readonly string[] | undefined {
+    const keychain = this.host.get('credentialsKeychain' as never) as
+      | Readonly<{ listHandles?: () => readonly Readonly<{ id?: unknown }>[] }> | undefined
+    try {
+      if (typeof keychain?.listHandles !== 'function') return undefined
+      const handles = keychain.listHandles()
+      return Array.isArray(handles)
+        ? handles.flatMap(handle => typeof handle?.id === 'string' ? [handle.id] : [])
+        : undefined
+    } catch {
+      return undefined
     }
   }
 
@@ -67,26 +108,50 @@ export class OwnerConsoleService extends TypertRemoteService {
     return manager
   }
 
-  private async inventory(): Promise<Readonly<{ bundles: readonly BundleInfoLike[], plugins: readonly PluginInfoLike[] }>> {
+  /** One inventory read, with each list isolated: a rejecting list is reported instead of making the
+   * whole status (or the other list) fail, and an absent service is not the same fact as "nothing installed". */
+  private async inventory(): Promise<Readonly<{
+    bundles: readonly BundleInfoLike[], plugins: readonly PluginInfoLike[],
+    phases: Readonly<{ bundles: 'ok' | 'unavailable' | 'failed', plugins: 'ok' | 'unavailable' | 'failed' }>,
+    diagnostic?: string,
+  }>> {
     const manager = this.host.get('pluginManager' as never) as PluginManagerService | undefined
-    if (manager === undefined) return Object.freeze({ bundles: [], plugins: [] })
-    const [bundles, plugins] = await Promise.all([manager.listBundles(), manager.listPlugins()])
+    if (manager === undefined) {
+      return Object.freeze({ bundles: Object.freeze([]), plugins: Object.freeze([]),
+        phases: Object.freeze({ bundles: 'unavailable' as const, plugins: 'unavailable' as const }) })
+    }
+    const [listedBundles, listedPlugins] = await Promise.allSettled([manager.listBundles(), manager.listPlugins()])
+    const phases = Object.freeze({
+      bundles: listedBundles.status === 'fulfilled' ? 'ok' as const : 'failed' as const,
+      plugins: listedPlugins.status === 'fulfilled' ? 'ok' as const : 'failed' as const,
+    })
+    const rejected = [listedBundles, listedPlugins].find(result => result.status === 'rejected')
     return Object.freeze({
-      // A dependency row without a bundle patch (`not-bundle`) is not manageable here.
-      bundles: Object.freeze(bundles.filter(bundle => isProjectPackage(bundle.name) && bundle.error === undefined)),
-      plugins: Object.freeze(plugins.filter(plugin => isProjectPackage(plugin.moduleName))),
+      // A dependency row without a bundle patch (`not-bundle`) is not manageable here; every other
+      // ManagementError stays visible so an incompatible installed bundle is never reported as absent.
+      bundles: Object.freeze(listedBundles.status === 'fulfilled'
+        ? listedBundles.value.filter(bundle => isProjectPackage(bundle.name) && bundle.error?.code !== 'not-bundle')
+        : []),
+      plugins: Object.freeze(listedPlugins.status === 'fulfilled'
+        ? listedPlugins.value.filter(plugin => isProjectPackage(plugin.moduleName))
+        : []),
+      phases,
+      ...(rejected === undefined
+        ? {}
+        : { diagnostic: boundedText(rejected.reason instanceof Error ? rejected.reason.message : String(rejected.reason), 1_024) }),
     })
   }
 
   async status(): Promise<OwnerConsoleStatus> {
-    const entries = this.descriptors()
+    const settings = this.host.get('settings' as never) as SettingsService | undefined
+    const entries = settings?.describe({ redactSecrets: true }) ?? []
     const inventory = await this.inventory()
     const lark = findEntry(entries, ns => LARK.test(ns))
     const traex = findEntry(entries, ns => TRAEX.test(ns))
     const larkValue = configFacts(lark?.value)
     const traexValue = configFacts(traex?.value)
-    const installed = (name: string) => inventory.bundles.some(bundle =>
-      bundle.name === name && bundle.installed && bundle.error === undefined)
+    const installed = (name: string) => inventory.phases.bundles === 'ok'
+      && inventory.bundles.some(bundle => bundle.name === name && bundle.installed)
     const larkHealth = readLarkHealth(this.host.get('larkChannel' as never))
     return Object.freeze({
       feishu: Object.freeze({
@@ -103,6 +168,13 @@ export class OwnerConsoleService extends TypertRemoteService {
         enabled: traexValue['enabled'] === true,
         command: typeof traexValue['command'] === 'string' ? traexValue['command'] : '',
       }),
+      host: Object.freeze({
+        settings: settings !== undefined,
+        pluginManager: this.host.get('pluginManager' as never) !== undefined,
+        bundles: inventory.phases.bundles,
+        plugins: inventory.phases.plugins,
+        ...(inventory.diagnostic === undefined ? {} : { diagnostic: inventory.diagnostic }),
+      }),
       dependencies: Object.freeze(DEPENDENCIES.map(name => Object.freeze({
         name, available: this.host.get(name as never) !== undefined,
       }))),
@@ -116,12 +188,22 @@ export class OwnerConsoleService extends TypertRemoteService {
         enabled: bundle.enabled,
         installed: bundle.installed,
         removable: bundle.removable,
+        ...(bundle.error === undefined ? {} : { error: Object.freeze({
+          code: bundle.error.code ?? 'operation-error',
+          ...(bundle.error.diagnostic === undefined ? {} : { diagnostic: boundedText(bundle.error.diagnostic, 2_048) }),
+        }) }),
+        rows: Object.freeze((bundle.rows ?? []).slice(0, 32).map(row => Object.freeze({
+          rowId: row.rowId,
+          moduleName: row.moduleName,
+          ...(row.entryId === undefined ? {} : { entryId: row.entryId }),
+        }))),
       }))),
       plugins: Object.freeze(inventory.plugins.map(plugin => Object.freeze({
         entryId: plugin.entryId,
         moduleName: plugin.moduleName,
         enabled: plugin.enabled,
         fiberPhase: plugin.fiberPhase,
+        ...(plugin.diagnostic === undefined ? {} : { diagnostic: boundedText(plugin.diagnostic, 4_096) }),
       }))),
     })
   }
@@ -193,7 +275,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     const settings = this.settings()
     const lark = findEntry(this.descriptors(), ns => LARK.test(ns))
     if (lark === undefined) {
-      return refuse('', 'lark-channel 未安装，或它没有声明任何可实时修改的配置字段')
+      return await this.targetRefusal('dsh-enhanced-lark-channel', '@dsh-enhanced/lark-channel', 'lark-channel')
     }
     const current = configFacts(lark.value)
     const configured = isAppId(this.config.feishuAppId) ? this.config.feishuAppId : undefined
@@ -216,8 +298,17 @@ export class OwnerConsoleService extends TypertRemoteService {
     if (envName !== '' && process.env[envName] === undefined) {
       return refuse(lark.ns, `Host 进程中不存在环境变量 ${envName}；请先设置它，或改用 keychain handle`)
     }
-    if (handle !== '' && this.host.get('credentialsKeychain' as never) === undefined) {
-      return refuse(lark.ns, 'credentials-keychain 未加载；无法引用 keychain secret')
+    let keychainVerified = true
+    if (handle !== '') {
+      if (this.host.get('credentialsKeychain' as never) === undefined) {
+        return refuse(lark.ns, 'credentials-keychain 未加载；无法引用 keychain secret')
+      }
+      const handles = this.keychainHandles()
+      keychainVerified = handles !== undefined
+      if (handles !== undefined && !handles.includes(handle)) {
+        const known = handles.length === 0 ? '当前没有任何 handle' : `现有：${handles.slice(0, 8).join('、')}`
+        return refuse(lark.ns, `credentials keychain 中没有 handle "${handle}"（${known}）；请先在 keychain 创建它，或改用环境变量引用`)
+      }
     }
     const resolvedAccount = account.trim() === '' ? current['account'] : account.trim()
     const resolvedTenant = tenant.trim() === '' ? current['tenant'] : tenant.trim()
@@ -227,32 +318,43 @@ export class OwnerConsoleService extends TypertRemoteService {
     if (typeof resolvedTenant !== 'string' || !ACCOUNT.test(resolvedTenant)) {
       return refuse(lark.ns, 'tenant 缺失或格式无效；请填写当前 owner 的 tenant，避免更换身份')
     }
-    await settings.mutate(lark.ns, [
-      { op: 'set', path: ['enabled'], value: true },
-      { op: 'set', path: ['appId'], value: resolvedAppId },
-      { op: 'set', path: ['account'], value: resolvedAccount },
-      { op: 'set', path: ['tenant'], value: resolvedTenant },
-      envName === '' ? { op: 'unset', path: ['appSecretEnv'] } : { op: 'set', path: ['appSecretEnv'], value: envName },
-      { op: 'set', path: ['secretSource'], value: handle === '' ? 'env' : 'handle' },
-      handle === '' ? { op: 'unset', path: ['credentialHandle'] } : { op: 'set', path: ['credentialHandle'], value: handle },
-    ], lark.revision)
+    try {
+      await settings.mutate(lark.ns, [
+        { op: 'set', path: ['enabled'], value: true },
+        { op: 'set', path: ['appId'], value: resolvedAppId },
+        { op: 'set', path: ['account'], value: resolvedAccount },
+        { op: 'set', path: ['tenant'], value: resolvedTenant },
+        envName === '' ? { op: 'unset', path: ['appSecretEnv'] } : { op: 'set', path: ['appSecretEnv'], value: envName },
+        { op: 'set', path: ['secretSource'], value: handle === '' ? 'env' : 'handle' },
+        handle === '' ? { op: 'unset', path: ['credentialHandle'] } : { op: 'set', path: ['credentialHandle'], value: handle },
+      ], lark.revision)
+    } catch (cause) {
+      return writeFailure(lark.ns, cause)
+    }
     const reloaded = await this.reload(lark.ns)
+    const unchecked = handle !== '' && !keychainVerified ? '（未能校验 keychain handle 是否存在）' : ''
     return Object.freeze({ applied: true, entry: lark.ns,
-      note: (handle === '' ? `secret 来自环境变量 ${envName}` : 'secret 保留在 credentials keychain') + reloaded })
+      note: (handle === '' ? `secret 来自环境变量 ${envName}` : 'secret 保留在 credentials keychain') + unchecked + reloaded })
   }
 
   /** TraeX: one owner click toggles the local provider row; command is optional. */
   async configureTraex(enabled: boolean, command: string): Promise<OwnerConsoleWriteResult> {
     const settings = this.settings()
     const traex = findEntry(this.descriptors(), ns => TRAEX.test(ns))
-    if (traex === undefined) return refuse('', 'traex-acp-provider 未安装，或它没有声明可实时修改的配置字段')
+    if (traex === undefined) {
+      return await this.targetRefusal('dsh-enhanced-traex-acp-provider', '@dsh-enhanced/traex-acp-provider', 'traex-acp-provider')
+    }
     const value = command.trim()
     if (value !== '' && (value.length > 1_024 || /[\r\n]/u.test(value))) {
       return refuse(traex.ns, 'command 必须是单行且不超过 1024 字符')
     }
     const ops: SettingsPathOp[] = [{ op: 'set', path: ['enabled'], value: enabled }]
     if (value !== '') ops.push({ op: 'set', path: ['command'], value })
-    await settings.mutate(traex.ns, ops, traex.revision)
+    try {
+      await settings.mutate(traex.ns, ops, traex.revision)
+    } catch (cause) {
+      return writeFailure(traex.ns, cause)
+    }
     const reloaded = await this.reload(traex.ns)
     return Object.freeze({ applied: true, entry: traex.ns, note: (enabled ? 'TraeX 行已启用' : 'TraeX 行已停用') + reloaded })
   }
@@ -265,7 +367,10 @@ export class OwnerConsoleService extends TypertRemoteService {
     }
     const target = findEntry(this.descriptors(), ns => ns === entry)
     if (target === undefined) {
-      return refuse(entry, '该条目未安装，或它没有声明可实时修改的配置字段')
+      const status = await this.status()
+      const packageName = status.bundles.find(bundle => bundle.rows.some(row => row.rowId === entry))?.name
+        ?? entry.replace(/^dsh-enhanced-/u, '@dsh-enhanced/')
+      return await this.targetRefusal(entry, packageName, entry)
     }
     let patch: Readonly<Record<string, unknown>>
     try {
@@ -275,7 +380,11 @@ export class OwnerConsoleService extends TypertRemoteService {
     }
     const ops: SettingsPathOp[] = Object.entries(patch).map(([key, value]) => ({ op: 'set', path: [key], value }))
     if (ops.length === 0) return refuse(entry, '配置为空，没有可写入的字段')
-    await settings.mutate(entry, ops, target.revision)
+    try {
+      await settings.mutate(entry, ops, target.revision)
+    } catch (cause) {
+      return writeFailure(entry, cause)
+    }
     const reloaded = await this.reload(entry)
     return Object.freeze({ applied: true, entry, note: '已合并写入' + reloaded })
   }
@@ -314,9 +423,20 @@ function requirementsLabel(requirements: Readonly<Record<string, string>>): stri
   return entries.length === 0 ? '未知要求' : entries.map(([name, version]) => `${name} ${version}`).join('、')
 }
 
+/** Only names the write-result wire schema accepts reach the client; a longer Host list is
+ * approved in bounded retries instead of failing the whole result validation. */
+function normalizeBuildNames(names: readonly string[] | undefined): readonly string[] {
+  return Object.freeze((names ?? [])
+    .filter(name => name !== '' && name.length <= 200 && !/[\r\n]/u.test(name))
+    .slice(0, MAX_BUILD_NAMES))
+}
+
 /** Install-specific refusal mapping: keep the Host's approval names only when it recorded them, and
  * turn pnpm's raw error box or a compatibility denial into the concrete owner-facing next step. */
 export function applyInstall(result: ChangeResultLike): OwnerConsoleWriteResult {
+  const pending = normalizeBuildNames(result.pendingBuilds)
+  const log = result.packageResult?.logPath === undefined
+    ? '' : `；pnpm 日志：${boundedText(result.packageResult.logPath, 300)}`
   const error = result.error
   if (error === undefined) return applyChange(result)
   const incompatible = error.incompatible ?? []
@@ -326,14 +446,10 @@ export function applyInstall(result: ChangeResultLike): OwnerConsoleWriteResult 
     return Object.freeze({
       applied: false,
       entry: result.target,
-      note: `Host 拒绝了不兼容的插件版本：${packages.join('；')}。请安装兼容版本，或由主人为这个精确版本授予兼容豁免后重试。`,
+      ...(pending.length === 0 ? {} : { pendingBuilds: pending }),
+      note: `Host 拒绝了不兼容的插件版本：${packages.join('；')}。请安装兼容版本，或由主人为这个精确版本授予兼容豁免后重试。${log}`,
     })
   }
-  // Only names the wire schema accepts reach the client, so a Host list can never make the
-  // whole write result fail validation; a longer list is approved in bounded retries.
-  const pending = (result.pendingBuilds ?? [])
-    .filter(name => name !== '' && name.length <= 200 && !/[\r\n]/u.test(name))
-    .slice(0, MAX_BUILD_NAMES)
   const buildBlocked = result.packageResult?.kind === 'build-blocked'
     || /ERR_PNPM_IGNORED_BUILDS/u.test(error.diagnostic ?? '')
   if (buildBlocked) {
@@ -348,14 +464,15 @@ export function applyInstall(result: ChangeResultLike): OwnerConsoleWriteResult 
       applied: false,
       entry: result.target,
       ...(pending.length === 0 ? {} : { pendingBuilds: pending }),
-      note: `安装被 pnpm 的依赖构建脚本策略拒绝：${listed}。${next}`,
+      note: `安装被 pnpm 的依赖构建脚本策略拒绝：${listed}。${next}${log}`,
     })
   }
   const tail = diagnosticTail(error.diagnostic ?? result.packageResult?.output)
   return Object.freeze({
     applied: false,
     entry: result.target,
-    note: `${error.code}（${result.application}）${tail === '' ? '' : `：${tail}`}`,
+    ...(pending.length === 0 ? {} : { pendingBuilds: pending }),
+    note: `${error.code}（${result.application}）${tail === '' ? '' : `：${tail}`}${log}`,
   })
 }
 
@@ -367,7 +484,7 @@ function applyChange(result: ChangeResultLike): OwnerConsoleWriteResult {
     : `${result.error.code}${result.error.diagnostic === undefined ? '' : `：${diagnosticTail(result.error.diagnostic)}`}`
   const warnings = (result.warnings ?? []).length === 0 ? '' : `；警告：${(result.warnings ?? []).join('；')}`
   const builds = (result.pendingBuilds ?? []).length === 0 ? ''
-    : `；需要在设置页批准构建脚本：${(result.pendingBuilds ?? []).join('、')}`
+    : `；需要在面板确认允许构建脚本：${normalizeBuildNames(result.pendingBuilds).join('、')}`
   return Object.freeze({
     // A persisted change that only needs a profile restart is still applied;
     // failed/cancelled results and validation refusals stay not applied.
@@ -375,6 +492,25 @@ function applyChange(result: ChangeResultLike): OwnerConsoleWriteResult {
     entry: result.target,
     note: `${result.changed ? '已变更' : '无变化'}（${result.application}）${reason === '' ? '' : `；${reason}`}${warnings}${builds}`,
   })
+}
+
+/** Keep a Host message or diagnostic short enough for a panel banner. */
+function boundedText(text: string, limit: number): string {
+  const normalized = text.replace(/\s+/gu, ' ').trim()
+  return normalized.length > limit ? `${normalized.slice(0, limit)}…` : normalized
+}
+
+/** Map a rejected `settings.mutate` to a business note instead of throwing through the RPC. */
+function writeFailure(entry: string, cause: unknown): OwnerConsoleWriteResult {
+  const message = cause instanceof Error ? cause.message : String(cause)
+  const note = /not volatile/iu.test(message)
+    ? `字段不能实时修改：${boundedText(message, 300)}`
+    : /changed since it was read|conflict/iu.test(message)
+      ? '配置已被其他操作修改（CAS 冲突）；请刷新面板后重试'
+      : /No configurable plugin entry|no volatile fields/iu.test(message)
+        ? `该条目当前不可配置（未加载或没有 live 字段）：${boundedText(message, 300)}。条目未加载时请重启 profile 或用 profile patch 修复`
+        : `写入失败：${boundedText(message, 400)}`
+  return refuse(entry, note)
 }
 
 function refuse(entry: string, note: string): OwnerConsoleWriteResult {

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { TYPERT_REMOTE } from '../src/typert.ts'
-import { apply, feishuSecretRefs, installWithApproval, intakeAgreementView, larkConnectionLabel, trendSnapshotsView } from '../src/client.ts'
+import { apply, askOwner, boundedLine, confirmationNotice, feishuSecretRefs, fiberState, installWithApproval,
+  intakeAgreementView, larkConnectionLabel, remoteFailureText, trendSnapshotsView } from '../src/client.ts'
 import type { OwnerConsoleIntakeAgreement, OwnerConsoleTrendSnapshots } from '../src/typert.ts'
 
 type Node = { type?: unknown, props?: Record<string, unknown> & { children?: unknown } }
@@ -89,6 +90,36 @@ describe('owner console client', () => {
     await expect(installWithApproval({ installProjectBundle: refused }, '@dsh-enhanced/lark-channel', () => true))
       .resolves.toEqual({ ok: false })
     expect(refused).toHaveBeenCalledOnce()
+  })
+
+  it('surfaces the gateway failure code and message instead of one generic sentence', () => {
+    expect(remoteFailureText({ code: 'gateway/internal', message: 'settings namespace "x" changed since it was read' }))
+      .toBe('gateway/internal：settings namespace "x" changed since it was read')
+    expect(remoteFailureText({ code: 'gateway/internal', message: 'y'.repeat(1_000) }).length).toBeLessThan(650)
+    expect(remoteFailureText(undefined)).toContain('未说明的拒绝')
+    expect(remoteFailureText({ code: '', message: '' })).toContain('未说明的拒绝')
+    expect(boundedLine('a\n b\t c', 10)).toBe('a b c')
+    expect(boundedLine('abcdefghijk', 4)).toBe('abcd…')
+  })
+
+  it('makes an unavailable or declined confirmation visible, never silent', () => {
+    expect(askOwner(undefined, 'remove?')).toBe('unavailable')
+    expect(askOwner(() => false, 'remove?')).toBe('declined')
+    expect(askOwner(() => true, 'remove?')).toBe('approved')
+    expect(confirmationNotice('unavailable', '移除 x？')).toContain('没有确认对话框')
+    expect(confirmationNotice('unavailable', '移除 x？')).toContain('移除 x？')
+    expect(confirmationNotice('declined', '移除 x？')).toBe('已取消操作')
+    expect(confirmationNotice('approved', '移除 x？')).toBeUndefined()
+  })
+
+  it('reports fiber activity rather than the persisted enable flag', () => {
+    expect(fiberState('active', true)).toEqual({ label: '已加载', tone: 'ok' })
+    expect(fiberState('failed', true)).toEqual({ label: '加载失败', tone: 'error' })
+    expect(fiberState('pending', true)).toEqual({ label: '等待依赖服务', tone: 'warn' })
+    expect(fiberState('loading', true)).toEqual({ label: '加载中', tone: 'warn' })
+    expect(fiberState('unloading', true)).toEqual({ label: '卸载中', tone: 'neutral' })
+    expect(fiberState(null, true)).toEqual({ label: '已启用未启动', tone: 'warn' })
+    expect(fiberState(null, false)).toEqual({ label: '已停用', tone: 'neutral' })
   })
 
   it('labels the lark-channel health snapshot without inventing a connection', () => {

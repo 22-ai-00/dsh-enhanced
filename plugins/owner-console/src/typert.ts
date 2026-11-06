@@ -4,18 +4,36 @@ import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry'
 const codec = <T>(typeSymbol: string, create: () => z.ZodType<T>) => ({ mode: 'strict' as const, typeSymbol, create })
 
 const dependency = z.object({ name: z.string().min(1), available: z.boolean() }).readonly()
+const bundleError = z.object({ code: z.string().min(1).max(64), diagnostic: z.string().max(2_048).optional() }).readonly()
+const bundleRow = z.object({
+  rowId: z.string().min(1).max(200),
+  moduleName: z.string().min(1).max(200),
+  entryId: z.string().min(1).max(200).optional(),
+}).readonly()
 const bundle = z.object({
   name: z.string().min(1),
   version: z.string().optional(),
   enabled: z.boolean(),
   installed: z.boolean(),
   removable: z.boolean(),
+  error: bundleError.optional(),
+  rows: z.array(bundleRow).max(32).readonly(),
 }).readonly()
 const plugin = z.object({
   entryId: z.string().min(1),
   moduleName: z.string().min(1),
   enabled: z.boolean(),
   fiberPhase: z.enum(['pending', 'loading', 'active', 'failed', 'unloading']).nullable(),
+  diagnostic: z.string().max(4_096).optional(),
+}).readonly()
+/** `ok` read succeeds; `unavailable` means the Host service is absent; `failed` means the read rejected. */
+const readPhase = z.enum(['ok', 'unavailable', 'failed'])
+const host = z.object({
+  settings: z.boolean(),
+  pluginManager: z.boolean(),
+  bundles: readPhase,
+  plugins: readPhase,
+  diagnostic: z.string().max(1_024).optional(),
 }).readonly()
 /** `absent`: no larkChannel service; `unknown`: it exists but gave no valid health. */
 export const LARK_CONNECTIONS = ['absent', 'unknown', 'connected', 'connected-with-gap', 'connecting',
@@ -41,6 +59,7 @@ export const OwnerConsoleStatusSchema = z.object({
     lastErrorCode: z.enum(LARK_ERROR_CODES).optional(),
   }).readonly(),
   traex: z.object({ entry: z.string().min(1).optional(), installed: z.boolean(), enabled: z.boolean(), command: z.string() }).readonly(),
+  host,
   dependencies: z.array(dependency).readonly(),
   evaluation: z.object({ intakeAgreement: z.enum(INTAKE_AGREEMENT_AVAILABILITY) }).readonly(),
   bundles: z.array(bundle).readonly(),

@@ -25,14 +25,15 @@ function fakeSettings(entries: Entry[]) {
 
 type FakeLoader = { entries: Map<string, { updated: unknown[], refreshed: number }> }
 
-async function mount(settings?: SettingsService, loader?: FakeLoader, manager?: unknown, lark?: unknown) {
+async function mount(settings?: SettingsService, loader?: FakeLoader, manager?: unknown, lark?: unknown,
+  keychain: unknown = {}) {
   const ctx = new Context()
   await ctx.plugin(TypertRegistry)
   if (settings !== undefined) ctx.provide('settings' as never, settings as never)
   if (lark !== undefined) ctx.provide('larkChannel' as never, lark as never)
-  // The handle mode requires the keychain provider; the fixture only checks that
-  // the reference path is reachable, not the provider's own behaviour.
-  ctx.provide('credentialsKeychain' as never, {} as never)
+  // The handle mode requires the keychain provider; by default it exposes no listHandles, so the
+  // existence check fails soft. A supplied probe exercises the verified path.
+  ctx.provide('credentialsKeychain' as never, keychain as never)
   if (manager !== undefined) ctx.provide('pluginManager' as never, manager as never)
   if (loader !== undefined) {
     ctx.provide('loader' as never, {
@@ -449,6 +450,186 @@ describe('owner console install failures', () => {
       expect(WRITE_RESULT.safeParse(result).success).toBe(true)
     } finally {
       await ctx.fiber.dispose()
+    }
+  })
+})
+
+const larkBundle = (overrides: Record<string, unknown> = {}) => ({
+  name: '@dsh-enhanced/lark-channel', enabled: true, installed: true, removable: true, optional: false,
+  rows: [{ rowId: 'dsh-enhanced-lark-channel', moduleName: '@dsh-enhanced/lark-channel' }], ...overrides,
+})
+const traexBundle = (overrides: Record<string, unknown> = {}) => ({
+  name: '@dsh-enhanced/traex-acp-provider', enabled: true, installed: true, removable: true, optional: false,
+  rows: [{ rowId: 'dsh-enhanced-traex-acp-provider', moduleName: '@dsh-enhanced/traex-acp-provider' }], ...overrides,
+})
+const managerWith = (bundles: readonly unknown[], plugins: readonly unknown[] = []) => ({
+  listBundles: vi.fn(async () => bundles),
+  listPlugins: vi.fn(async () => plugins),
+})
+
+describe('owner console honest status and configuration repair', () => {
+  it('keeps errored bundles visible and isolates a rejecting inventory read', async () => {
+    const manager = managerWith([
+      larkBundle({ error: { code: 'incompatible-version', diagnostic: 'pins 0.2.1-rc.2' } }),
+      { name: '@dsh-enhanced/helper', enabled: true, installed: true, removable: false, optional: false,
+        error: { code: 'not-bundle' } },
+    ], [{ entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'failed',
+      diagnostic: 'cannot inject assistantDelivery' }])
+    const mounted = await mount(undefined, undefined, manager)
+    try {
+      const status = await mounted.console.status()
+      // Only the not-bundle dependency row is filtered; an incompatible installed bundle stays visible.
+      expect(status.bundles.map(bundle => bundle.name)).toEqual(['@dsh-enhanced/lark-channel'])
+      expect(status.bundles[0]!.error).toEqual({ code: 'incompatible-version', diagnostic: 'pins 0.2.1-rc.2' })
+      expect(status.bundles[0]!.rows).toEqual([{ rowId: 'dsh-enhanced-lark-channel', moduleName: '@dsh-enhanced/lark-channel' }])
+      expect(status.plugins[0]!.diagnostic).toBe('cannot inject assistantDelivery')
+      expect(status.host).toMatchObject({ pluginManager: true, bundles: 'ok', plugins: 'ok' })
+    } finally {
+      await mounted.ctx.fiber.dispose()
+    }
+
+    const broken = {
+      listBundles: vi.fn(async () => { throw new Error('bundle list exploded') }),
+      listPlugins: vi.fn(async () => [{ entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active' }]),
+    }
+    const partial = await mount(undefined, undefined, broken)
+    try {
+      const status = await partial.console.status()
+      // The rejecting list is reported, the other list still answers, and neither looks like "absent".
+      expect(status.host).toMatchObject({ bundles: 'failed', plugins: 'ok' })
+      expect(status.host.diagnostic).toContain('bundle list exploded')
+      expect(status.bundles).toEqual([])
+      expect(status.plugins).toHaveLength(1)
+    } finally {
+      await partial.ctx.fiber.dispose()
+    }
+  })
+
+  it('reports an absent Host plugin manager instead of claiming nothing is installed', async () => {
+    const mounted = await mount()
+    try {
+      const status = await mounted.console.status()
+      expect(status.host).toMatchObject({ settings: false, pluginManager: false, bundles: 'unavailable', plugins: 'unavailable' })
+    } finally {
+      await mounted.ctx.fiber.dispose()
+    }
+  })
+
+  it('does not claim a reload it could not verify', async () => {
+    let active = true
+    const settings = {
+      describe: () => active ? [{ ns: 'dsh-enhanced-traex-acp-provider', schema: {}, value: { enabled: false, command: 'traex' },
+        revision: 1, applies: 'live' as const }] : [],
+      mutate: vi.fn(async () => { active = false }),
+    } satisfies SettingsService
+    const loader: FakeLoader = { entries: new Map([['dsh-enhanced-traex-acp-provider', { updated: [], refreshed: 0 }]]) }
+    const mounted = await mount(settings, loader)
+    try {
+      const result = await mounted.console.configureTraex(true, '')
+      expect(result.applied).toBe(true)
+      expect(result.note).toContain('未能确认条目已恢复加载')
+      expect(result.note).not.toContain('条目已重新加载')
+    } finally {
+      await mounted.ctx.fiber.dispose()
+    }
+  })
+
+  it('forwards pending build names and the pnpm log path on every failure branch', () => {
+    const logPath = '/Users/owner/.dsh/profiles/desktop/.plugin-manager/logs/operation-x/pnpm.log'
+    const generic = applyInstall({ changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
+      error: { code: 'operation-error', diagnostic: 'network down' }, pendingBuilds: ['protobufjs@7.6.6'],
+      packageResult: { kind: 'network', exitCode: 1, logPath } })
+    expect(generic.pendingBuilds).toEqual(['protobufjs@7.6.6'])
+    expect(generic.note).toContain(logPath)
+    const incompatible = applyInstall({ changed: false, application: 'failed', target: '@dsh-enhanced/traex-acp-provider',
+      error: { code: 'incompatible-version', incompatible: [{ name: '@dsh-enhanced/traex-acp-provider', version: '0.1.65',
+        runtimeVersion: '0.2.2-rc.1', requirements: { '@deepseek-ai/dsh-llm': '0.2.1-rc.2' } }] },
+      pendingBuilds: ['esbuild@1'], packageResult: { logPath } })
+    expect(incompatible.pendingBuilds).toEqual(['esbuild@1'])
+    expect(incompatible.note).toContain(logPath)
+  })
+
+  it('verifies keychain handles when the provider can list them, and fails soft otherwise', async () => {
+    const lark = fakeSettings([{ ns: 'dsh-enhanced-lark-channel',
+      value: { enabled: false, appId: 'cli_0123456789abcdef', account: 'owner', tenant: 'tenant' } }])
+    const missing = await mount(lark.service, undefined, undefined, undefined, { listHandles: () => [{ id: 'other-handle' }] })
+    try {
+      const result = await missing.console.configureFeishu('cli_0123456789abcdef', '', 'missing-handle', 'owner', 'tenant', false)
+      expect(result.applied).toBe(false)
+      expect(result.note).toContain('没有 handle "missing-handle"')
+      expect(result.note).toContain('other-handle')
+      expect(lark.mutate).not.toHaveBeenCalled()
+    } finally {
+      await missing.ctx.fiber.dispose()
+    }
+    const failing = await mount(lark.service, undefined, undefined, undefined, { listHandles: () => { throw new Error('keychain down') } })
+    try {
+      const result = await failing.console.configureFeishu('cli_0123456789abcdef', '', 'fine-handle', 'owner', 'tenant', false)
+      expect(result.applied).toBe(true)
+      expect(result.note).toContain('未能校验 keychain handle')
+    } finally {
+      await failing.ctx.fiber.dispose()
+    }
+  })
+
+  it('maps settings.mutate refusals and repairs a stalled target instead of the generic refusal', async () => {
+    const entries = fakeSettings([{ ns: 'dsh-enhanced-other', value: {} }])
+    const volatile = { ...entries.service, mutate: vi.fn(async () => { throw new Error('Config field "blob" is not volatile') }) }
+    const mapped = await mount(volatile)
+    try {
+      const result = await mapped.console.configureBundle('dsh-enhanced-other', { blob: 1 })
+      expect(result.applied).toBe(false)
+      expect(result.note).toContain('字段不能实时修改')
+      expect(result.note).toContain('blob')
+    } finally {
+      await mapped.ctx.fiber.dispose()
+    }
+    const conflict = { ...entries.service, mutate: vi.fn(async () => { throw new Error('settings namespace "x" changed since it was read') }) }
+    const raced = await mount(conflict)
+    try {
+      expect((await raced.console.configureBundle('dsh-enhanced-other', { enabled: false })).note).toContain('CAS 冲突')
+    } finally {
+      await raced.ctx.fiber.dispose()
+    }
+
+    // Installed + enabled but its fiber failed: show the phase, diagnostic, missing bundles and repair.
+    const manager = managerWith([larkBundle(), traexBundle()],
+      [{ entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'failed',
+        diagnostic: 'cannot inject assistantDelivery' },
+      { entryId: 'traex', moduleName: '@dsh-enhanced/traex-acp-provider', enabled: true, fiberPhase: 'pending' }])
+    const stalled = await mount(fakeSettings([]).service, undefined, manager)
+    try {
+      const result = await stalled.console.configureBundle('dsh-enhanced-lark-channel', { enabled: false })
+      expect(result.applied).toBe(false)
+      expect(result.note).toContain('已启用但未加载')
+      expect(result.note).toContain('failed')
+      expect(result.note).toContain('cannot inject assistantDelivery')
+      expect(result.note).toContain('@dsh-enhanced/assistant-delivery')
+      expect(result.note).toContain('disabled: true')
+      // The same repair context answers the Feishu card's generic target refusal.
+      const feishu = await stalled.console.configureFeishu('cli_0123456789abcdef', 'LARK_APP_SECRET', '', 'owner', 'tenant', false)
+      expect(feishu.note).toContain('已启用但未加载')
+      expect((await stalled.console.configureTraex(true, '')).note).toContain('已启用但未加载')
+    } finally {
+      await stalled.ctx.fiber.dispose()
+    }
+
+    // Active fiber but the entry exposes no live field in describe(): say that, not "not loaded".
+    const active = await mount(fakeSettings([]).service, undefined,
+      managerWith([larkBundle()], [{ entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active' }]))
+    try {
+      expect((await active.console.configureBundle('dsh-enhanced-lark-channel', { enabled: false })).note)
+        .toContain('没有声明任何可实时修改的配置字段')
+    } finally {
+      await active.ctx.fiber.dispose()
+    }
+
+    // Installed but the bundle layer is not selected: the honest next step is 启用, not 安装/配置.
+    const disabled = await mount(fakeSettings([]).service, undefined, managerWith([larkBundle({ enabled: false }), traexBundle({ enabled: false })]))
+    try {
+      expect((await disabled.console.configureTraex(true, '')).note).toContain('已安装但未启用')
+    } finally {
+      await disabled.ctx.fiber.dispose()
     }
   })
 })

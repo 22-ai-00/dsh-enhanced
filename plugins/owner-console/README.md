@@ -26,7 +26,7 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 | --- | --- | --- |
 | 远程接入（飞书） | 接入方式、`lark-channel` 条目、连接状态（`larkChannel.health()` 快照）、appId 是否配置；两种对接：直接填写 appId + secret 引用，或从 Host 环境一键探测 appId | `settings.describe` + `larkChannel.health()` |
 | TraeX | `traex-acp-provider` 条目、是否启用、命令 | `settings.describe` |
-| 本项目插件管理 | 本项目的 bundle 层（启用/停用）、已加载条目（启用/禁用/阶段）、安装 `@dsh-enhanced/*`（含依赖），以及对 live 字段的合并配置 | `pluginManager` + `settings.describe` / `settings.mutate` |
+| 本项目插件管理 | 本项目的 bundle 层（已安装/已启用/已加载、停用/启用、移除）、已加载条目（按 fiber 阶段的启用/禁用/诊断）、安装 `@dsh-enhanced/*`，以及对 live 字段的合并配置 | `pluginManager`（bundle/entry/安装）+ `settings.describe` / `settings.mutate`（live 字段） |
 | 趋势快照（只读） | 已封存的普通使用趋势快照：序号、计划、窗口边界、会话数、flags、按冻结模型分层的 DiD 与平行趋势、digest 前缀；每页 10 条，可翻到更早一页 | `pluginControlPlane.inspectCreatedCapabilityOrdinaryUseTrendSnapshots`（结构化读取，可缺省） |
 | intake 吻合度（只读） | 填写 Evaluation 作用域（workspace + preset）后读取：窗口、扫描通知数（是否截断）、intake 准入合计与按 level 的吻合 / 不吻合计数与比例、非 intake / 无法判断 / 他 scope 计数；只有计数，不含工作项 id 或正文 | `assistantEvaluation.inspectIntakeAttentionAgreement`（结构化读取，可缺省；开关关闭时显示未启用）+ `loader` 条目配置（只读开关，无需作用域） |
 
@@ -56,8 +56,19 @@ Host 状态里仍带 `dependencies` 字段，但面板不再渲染「依赖自�
 条目让通道按新配置重建；`restart-required` 视为已持久化并提示重启，校验拒绝保持红色告警。
 secret 明文永不进入配置、日志或本插件。
 
-卡片会按实际状态给出下一步：未安装时显示「安装 lark-channel（含依赖）」（走 Host pluginManager 的
-pnpm 安装），已安装但未启用时显示「启用 lark-channel」，只有条目处于活动状态才显示配置表单。
+卡片按实际状态给出下一步，状态由 `bundles[].enabled` 与 `plugins[].fiberPhase` 判定，不再把
+“条目不在 `settings.describe()` 里”一律当成未启用：
+
+- 未安装：显示「安装 lark-channel」（走 Host pluginManager 的 pnpm 安装，只装该包及其 pnpm 依赖）；
+- 已安装但 bundle 未启用：显示「启用 lark-channel」；
+- 已启用但 fiber 为 pending / failed / 无条目：显示「已启用，等待依赖服务 / 已启用但加载失败 /
+  已启用，但 Loader 没有条目」，附 fiber 阶段、诊断、缺少的 companion 服务（及对应要安装的
+  `@dsh-enhanced/*` bundle）和一段可复制的最小 `cordis.patch.yml` 修复行；此时绝不显示「启用」
+  （对已启用的 bundle 是无效动作），也不会把配置拒绝推给泛化文案；
+- fiber active 且条目有 live 字段：才显示配置表单。
+
+安装只包含该包本身及其 pnpm `dependencies`；`peerDependencies` 里的 `@dsh-enhanced/*` bundle 与它
+在 profile 里需要的 Host 服务不会随安装自动装上，缺失项由上面的状态区列出。
 TraeX 卡片同理（安装/启用 traex-acp-provider）。
 
 只有声明了 `.volatile()` 的配置字段才能这样实时改写：`lark-channel` 暴露
@@ -127,7 +138,8 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
   `pluginManager` 且限定 `@dsh-enhanced/*`；授权来源是主人自己在面板上的点击，不是模型工具调用，
   也不存在后台自动写配置。
 - 不读取会话内容、报告或记忆；client bundle 只依赖宿主提供的 `react` 与 `remote`/`slots`。
-- 安装仅由主人点击触发，走 DSH 官方安装路径；不提供卸载，不改动未列出的条目；
+- 安装/移除仅由主人点击触发，走 DSH 官方安装路径；移除只对 Host 标记为 `removable` 且非本面板自身的
+  bundle 显示，并需浏览器确认（无确认通道时给出可见提示并停止）；不改动未列出的条目；
   secret 明文不接受、不存储、不回显。
 
 ## 测试
@@ -181,8 +193,10 @@ pnpm --dir plugins/owner-console build:assets
   `desktop` profile（peer 版本不符，需 owner 显式 `dsh plugin allow-version … --accept-risk`），
   2026-11-06 验证了侧栏入口、面板、插件页已安装行与「开始对话」（证据在被 git 忽略的
   `docs/evidence/owner-console/mac-live-app-20261106/`）。
-  飞书/TraeX 三态卡片（未安装→安装、已安装未启用→启用、活动→配置）也在真实 GUI 中复验：
-  启用动作返回 restart-required 并提示重启。登录态与真实飞书/模型连接仍未验收。
+  **未在真实 GUI 中复验的部分**：飞书/TraeX 的“已安装未启用→启用”“活动→配置”两态此前是用 patch
+  覆盖伪造的状态，安装按钮也从未在真实 GUI 点击过；面板的状态文案、安装拒绝与修复提示由单元测试
+  覆盖，真实 GUI 只验证过侧栏入口、面板渲染、插件页已安装行与「开始对话」。登录态与真实
+  飞书/模型连接仍未验收。
   本地 `pnpm pack` 产物（非 workspace 链接）经 `dsh plugin add <tgz>` 安装也已验证：随包依赖
   `@deepseek-ai/schemastery` / `zod` 由 pnpm 一并装入，入口、面板与插件页已安装行正常；
   从 registry 发布后安装尚未验证。
@@ -192,7 +206,7 @@ pnpm --dir plugins/owner-console build:assets
 - 「开始对话 / 打开插件页」调用 DSH 客户端 `uiWorkspace.startSession()` 与 `layout.selectPanel()`；
   两个服务在点击时惰性解析，缺少它们时入口与状态页仍注册。已在真实无头 Chrome 中验收：
   入口出现、面板渲染、插件页显示已安装行、开始对话进入 composer（证据同下）。
-- 停用 bundle 只摘除 patch 层，依赖与包文件保留；彻底移除仍用 `dsh plugin remove`。
+- 停用 bundle 只摘除 patch 层，依赖与包文件保留；面板的「移除」经 Host `pluginManager.removeBundle`（内部走 pnpm），不是仅去掉 profile 里的选择。
 - 连接状态是 `lark-channel` 自己报告的快照，面板不主动探测飞书；「已连接」来自通道的长连接状态，
   没有用真实飞书 Bot 验收过（按用户要求延后）。
 - 不校验 app secret；secret 的写入通道留给 keychain 切片。
