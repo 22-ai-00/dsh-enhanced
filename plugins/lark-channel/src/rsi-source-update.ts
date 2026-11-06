@@ -212,9 +212,9 @@ export async function prepareRsiSourceUpdate(input: RsiSourceUpdateInput): Promi
       baseline.source.repository, `+${baseline.repairCommit}:refs/dsh-update/repair`], signal)
     await git(repository, ['checkout', '-B', 'repairs', baseline.repairCommit], signal)
     if (await ancestor(repository, baseline.repairCommit, baseline.upstreamCommit, signal)) {
-      await git(repository, ['merge', '--ff-only', 'refs/dsh-update/upstream'], signal)
+      await git(repository, ['merge', '--ff-only', '--quiet', '--no-stat', 'refs/dsh-update/upstream'], signal)
     } else if (!await ancestor(repository, baseline.upstreamCommit, baseline.repairCommit, signal)) {
-      try { await git(repository, ['merge', '--no-ff', '--no-edit', '--strategy=ort', 'refs/dsh-update/upstream'], signal) }
+      try { await git(repository, ['merge', '--no-ff', '--no-edit', '--quiet', '--no-stat', '--strategy=ort', 'refs/dsh-update/upstream'], signal) }
       catch { fail('upstream and repair commits cannot be merged without conflict') }
     }
     const sourceCommit = await git(repository, ['rev-parse', 'HEAD'], signal)

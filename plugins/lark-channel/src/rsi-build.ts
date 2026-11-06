@@ -131,7 +131,11 @@ async function command(executable: string, args: readonly string[], environment:
       deadline.removeEventListener('abort', abort)
       if (killTimer) clearTimeout(killTimer)
       if (spawnError || overLimit || deadline.aborted || code !== 0 || killed !== null) {
+        // Git calls lead with `-c key=value` / `-C dir`; name the subcommand instead.
+        const gitIndex = executable.endsWith('/git') ? args.findIndex((arg, index) =>
+          !arg.startsWith('-') && args[index - 1] !== '-c' && args[index - 1] !== '-C') : -1
         const stage = executable === process.execPath ? 'source-image-builder'
+          : gitIndex >= 0 ? `git-${args[gitIndex]}${overLimit ? '-output-limit' : ''}`
           : args[0] === 'image' ? 'image-inspect' : args[0] ?? 'command'
         const tail = diagnosticTail(stderrTail)
         reject(new Error(`rsi build: subprocess failed, was cancelled, or exceeded its bound (stage=${stage}, exit=${code ?? 'signal'}${tail ? `, stderr=${tail}` : ''})`))

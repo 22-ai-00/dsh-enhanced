@@ -52,6 +52,21 @@ describe('private RSI source update candidate', () => {
     expect(await readFile(join(result.repository, 'upstream.txt'), 'utf8')).toBe('upstream work\n')
   })
 
+  test('fast-forwards an upstream whose merge diffstat exceeds the bounded Git output', async () => {
+    const f = await fixture()
+    // ~1,500 new files under long paths give a diffstat and create-mode summary well above 64 KiB.
+    const bulk = join(f.sourceRepository, 'bulk-upstream-files-with-a-deliberately-long-directory-name')
+    await mkdir(bulk)
+    await Promise.all(Array.from({ length: 1_500 }, (_, index) =>
+      writeFile(join(bulk, `generated-upstream-file-with-long-name-${String(index).padStart(5, '0')}.txt`), `${index}\n`)))
+    git(f.sourceRepository, 'add', '.')
+    git(f.sourceRepository, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-q', '-m', 'bulk')
+    const upstream = git(f.sourceRepository, 'rev-parse', 'HEAD')
+    expect(git(f.sourceRepository, 'diff', '--stat', '--summary', f.source.sourceCommit, upstream).length).toBeGreaterThan(65_536)
+    const result = await prepareRsiSourceUpdate(f.input)
+    expect(result.sourceCommit).toBe(upstream)
+  }, 60_000)
+
   test('merges divergent nonconflicting upstream and repair commits reproducibly', async () => {
     const f = await fixture()
     const repair = await advanceRepair(f, 'repair.txt', 'owner repair\n')
