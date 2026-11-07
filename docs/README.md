@@ -47,6 +47,7 @@
 
 - [原生技能复用评测接线](native-skill-reuse.md)：来源验证、受限 Host 委派、原生双臂评测与签名留出报告。
 - [目标编排](goal-orchestration-design.md)：原生执行、独立验收、持久唤醒与事件等待。
+- [PTC 执行模式与持续成长](ptc-growth-integration.md)：可预测阶段交给程序、轨迹作为成长输入，以及分阶段落地边界。
 - [固定任务评测](benchmark-implementation.md)、[执行策略评测](goal-strategy-evaluation.md)：固定供应与预算的比较方法及证据限制。
 - [技能比较配置](skill-comparison-profiles.md)、[独立留出验收](skill-holdout-authority.md)：原生重放、冻结后生成任务、签名验收与有限 canary。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)：可复现入口与当前验证边界。

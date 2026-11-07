@@ -211,11 +211,11 @@ Anthropic 技术文档允许 `claude -p` 使用订阅登录，但其法律与合
 ## 已验证基线
 
 - Node.js `^22.19.0 || >=24.0.0`
-- DeepSeek Harness / `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-llm` / `@deepseek-ai/dsh-session` `>=0.1.2-rc.1 <0.2.0`
+- DeepSeek Harness / `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-llm` / `@deepseek-ai/dsh-session` `>=0.2.1-rc.2 <0.3.0`
 - Cordis `^4.0.1`
 - Codex CLI `0.147.0`–`0.150.1`（显式 fallback；模型目录基于 App Server `model/list`）
 - Codex direct（发布 bundle 默认；私有实验协议）
-- `@deepseek-ai/dsh-attachment` `>=0.1.2-rc.1 <0.2.0`（可选图片输入）
+- `@deepseek-ai/dsh-attachment` `>=0.2.1-rc.2 <0.3.0`（可选图片输入）
 - Claude Code `2.1.218`
 - Grok Build `1.0.5`
 - Cursor CLI 目录入口 `--list-models`；生成仍不列入已验证基线
