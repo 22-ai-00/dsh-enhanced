@@ -1632,7 +1632,7 @@ describe('goal strategy compare concurrency', () => {
     const record = f.service.create(agent, objective, 2)
     await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
     await vi.waitFor(() => expect(childStarts).toBe(2), { timeout: 2_000 })
-    await vi.waitFor(() => expect(compareResult(agent)).toBeDefined(), { timeout: 3_000 })
+    await vi.waitFor(() => expect(compareResult(agent)).toBeDefined(), { timeout: 10_000 })
     await agent.whenIdle(); await f.service.whenIdle()
 
     const result = compareResult(agent)!

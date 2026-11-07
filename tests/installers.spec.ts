@@ -1,7 +1,7 @@
 import { appendFile, chmod, cp, link, lstat, mkdtemp, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, delimiter as pathDelimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:net'
@@ -12,6 +12,14 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { parse, stringify } from 'yaml'
 import { RECOVERY_CATALOG_DIGEST } from '@dsh-enhanced/assistant-recovery'
 import { createSystemdUserUnit, systemdServicePaths } from '../plugins/lark-channel/src/systemd.ts'
+
+// vitest 4 prepends a relative ./node_modules/.bin to process.env.PATH. The
+// local-source installer correctly refuses non-absolute PATH entries, so the
+// root suite normalizes PATH once before any lifecycle module reads it.
+process.env.PATH = (process.env.PATH ?? '')
+  .split(pathDelimiter)
+  .filter(entry => entry.length > 0 && isAbsolute(entry))
+  .join(pathDelimiter)
 import { classifyLifecycleScenario } from '../scripts/install/lifecycle-config.mjs'
 import { lifecycleProfileTest } from '../scripts/install/lifecycle-profile.mjs'
 import { nativeInstallerHost, nativeInstallerSetupPackage } from './native-installer-host-fixture.ts'
