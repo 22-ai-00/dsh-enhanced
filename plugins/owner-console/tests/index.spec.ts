@@ -403,23 +403,28 @@ describe('owner console install failures', () => {
     }
   })
 
-  it('keeps the Host-recorded build names and approves exactly those on a confirmed retry', async () => {
-    const manager = fakeManager((_spec, options) => (options as { approvedBuilds?: readonly string[] }).approvedBuilds === undefined
+  it('keeps the Host-recorded build names and pre-writes exactly those on a confirmed retry', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'owner-console-builds-'))
+    const manager = fakeManager(() => (manager.installBundle.mock.calls.length === 1
       ? { changed: false, application: 'failed', target: '@dsh-enhanced/lark-channel',
         error: { code: 'operation-error', diagnostic: ANSI_BUILD_BLOCKED }, pendingBuilds: ['protobufjs@7.6.6'],
         packageResult: { kind: 'build-blocked', exitCode: 1 } }
-      : { changed: true, application: 'restart-required', target: '@dsh-enhanced/lark-channel' })
+      : { changed: true, application: 'restart-required', target: '@dsh-enhanced/lark-channel' }))
     const { ctx, console } = await mount(undefined, undefined, manager)
+    ctx.provide('profileContext' as never, { dir } as never)
     try {
       const refused = await console.installProjectBundle('@dsh-enhanced/lark-channel')
       expect(refused).toMatchObject({ applied: false, pendingBuilds: ['protobufjs@7.6.6'] })
       expect(refused.note).toContain('确认允许')
       const retried = await console.installProjectBundle('@dsh-enhanced/lark-channel', ['protobufjs@7.6.6'])
       expect(retried).toMatchObject({ applied: true, entry: '@dsh-enhanced/lark-channel' })
+      // The names are written before the retry; the Host never sees an approval flag it might reject.
+      expect(await readFile(join(dir, 'pnpm-workspace.yaml'), 'utf8')).toContain('protobufjs@7.6.6: true')
       expect(manager.installBundle).toHaveBeenLastCalledWith('@dsh-enhanced/lark-channel',
-        { enabled: true, saveExact: true, approvedBuilds: ['protobufjs@7.6.6'] })
+        { enabled: true, saveExact: true })
     } finally {
       await ctx.fiber.dispose()
+      await rm(dir, { recursive: true, force: true })
     }
   })
 

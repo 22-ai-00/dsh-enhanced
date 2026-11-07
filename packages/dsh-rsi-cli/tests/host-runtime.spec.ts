@@ -15,7 +15,7 @@ async function fixture() {
   created.push(parent)
   const root = join(parent, 'private cache')
   await mkdir(root, { mode: 0o700 })
-  let latest = '0.2.1-rc.2'
+  let latest = '0.2.2-rc.1'
   let integrity = SHA_A
   let installCount = 0
   let viewCount = 0
@@ -86,7 +86,7 @@ describe('private managed DSH runtime', () => {
   test('installs exact latest once, verifies executable and reuses the local receipt', async () => {
     const f = await fixture()
     const first = await prepareManagedHostRuntime({ root: f.root }, f.ports)
-    expect(first.version).toBe('0.2.1-rc.2')
+    expect(first.version).toBe('0.2.2-rc.1')
     expect(first.integrity).toBe(SHA_A)
     expect(first.dshPath).toBe(join(first.binDirectory, 'dsh'))
     expect(first.root).toBe(join(f.root, first.version))
@@ -108,19 +108,19 @@ describe('private managed DSH runtime', () => {
     expect(f.counts()).toEqual({ viewCount: 2, installCount: 1 })
   })
 
-  test.each(['0.2.2-rc.1', '0.2.1', '0.3.0'])('latest ahead of the validated candidate (%s) pins the validated candidate', async ahead => {
+  test.each(['0.2.3-rc.1', '0.2.2', '0.3.0'])('latest ahead of the validated candidate (%s) pins the validated candidate', async ahead => {
     const f = await fixture()
     f.setLatest(ahead)
     const pinned = await prepareManagedHostRuntime({ root: f.root }, f.ports)
-    expect(pinned.version).toBe('0.2.1-rc.2')
+    expect(pinned.version).toBe('0.2.2-rc.1')
     expect(f.counts()).toEqual({ viewCount: 2, installCount: 1 })
   })
 
   test('an explicit supported version is resolved and installed without following latest', async () => {
     const f = await fixture()
     f.setLatest('0.1.5-rc.4')
-    const exact = await prepareManagedHostRuntime({ root: f.root, selector: '0.2.1-rc.2' }, f.ports)
-    expect(exact.version).toBe('0.2.1-rc.2')
+    const exact = await prepareManagedHostRuntime({ root: f.root, selector: '0.2.2-rc.1' }, f.ports)
+    expect(exact.version).toBe('0.2.2-rc.1')
     expect(f.counts()).toEqual({ viewCount: 1, installCount: 1 })
   })
 
@@ -188,7 +188,7 @@ describe('private managed DSH runtime', () => {
     const f = await fixture()
     f.failInstall()
     await expect(prepareManagedHostRuntime({ root: f.root }, f.ports)).rejects.toThrow(/npm install failed \(exit 42, EAUTH\)/u)
-    expect((await readdir(f.root)).filter(name => name.startsWith('.stage-') || name === '0.2.1-rc.2')).toEqual([])
+    expect((await readdir(f.root)).filter(name => name.startsWith('.stage-') || name === '0.2.2-rc.1')).toEqual([])
   })
 
   test('an already cancelled request never contacts npm or publishes a runtime', async () => {

@@ -6,7 +6,7 @@ import { promisify } from 'node:util'
 import { isMap, isSeq, parseDocument, YAMLMap, YAMLSeq } from 'yaml'
 
 const execFileAsync = promisify(execFile)
-const supportedHostVersion = '0.2.1-rc.2'
+const supportedHostVersions = new Set(['0.2.1-rc.2', '0.2.2-rc.1'])
 
 export type EffectiveProfileConfigReader = (dshHome: string, profile: string, rowId: string) => Promise<YAMLMap>
 
@@ -36,7 +36,7 @@ async function selectedDshExecutable(dshHome: string): Promise<string> {
           name?: string; version?: string; bin?: { dsh?: string }
         }
         if (manifest.name === '@deepseek-ai/dsh') {
-          if (manifest.version !== supportedHostVersion || typeof manifest.bin?.dsh !== 'string'
+          if (!supportedHostVersions.has(manifest.version ?? '') || typeof manifest.bin?.dsh !== 'string'
             || await realpath(join(hostRoot, manifest.bin.dsh)) !== executable
             || !inside(hostRoot, executable) || inside(dshHome, hostRoot)) {
             throw new Error('assistant-policy setup: selected dsh executable is not an approved Host')
@@ -45,7 +45,7 @@ async function selectedDshExecutable(dshHome: string): Promise<string> {
           const bootManifest = JSON.parse(await readFile(hostRequire.resolve('@deepseek-ai/dsh-app-boot/package.json'), 'utf8')) as {
             name?: string; version?: string
           }
-          if (bootManifest.name !== '@deepseek-ai/dsh-app-boot' || bootManifest.version !== supportedHostVersion) {
+          if (bootManifest.name !== '@deepseek-ai/dsh-app-boot' || !supportedHostVersions.has(bootManifest.version ?? '')) {
             throw new Error('assistant-policy setup: selected dsh boot does not match the Host')
           }
           return executable

@@ -40,11 +40,11 @@ dsh-rsi doctor
 
 ## 只用本机 Web
 
-适合先体验聊天，暂不连接飞书、不启用后台学习；这一场景无需 Docker。以下路径适用于 CLI `0.1.57` 起新安装的 `0.2.1-rc.2` 私有 Host。旧 Home 或自定义缓存目录请先[查找绑定的 Host 入口](maintenance.md#查找私有-host-入口)：
+适合先体验聊天，暂不连接飞书、不启用后台学习；这一场景无需 Docker。以下路径适用于新安装的 `0.2.2-rc.1` 私有 Host（已验证范围 `>=0.2.1-rc.2 <0.3.0`）。旧 Home 或自定义缓存目录请先[查找绑定的 Host 入口](maintenance.md#查找私有-host-入口)：
 
 ```sh
 dsh-rsi install --scenario core --model skip --yes
-~/.local/share/dsh-enhanced/hosts/0.2.1-rc.2/node_modules/.bin/dsh --profile web
+~/.local/share/dsh-enhanced/hosts/0.2.2-rc.1/node_modules/.bin/dsh --profile web
 ```
 
 在浏览器打开前台命令打印的完整授权地址，按[模型指南](../../docs/models.md)配置并开始聊天。这个进程需要保持终端运行；按 Ctrl-C 停止。它没有注册常驻服务，因此不用 `dsh-rsi web-url` 或 `start`。

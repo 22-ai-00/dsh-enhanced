@@ -58,17 +58,17 @@ function inside(base: string, path: string): boolean {
 }
 export function isSupportedReceiptVersion(version: string): boolean {
   const match = /^0\.1\.5(?:-rc\.([0-9]{1,6}))?$/u.exec(version)
-  return (version === '0.2.0-rc.2' || version === '0.2.1-rc.2') || match !== null && (match[1] === undefined || Number(match[1]) >= 3)
+  return (version === '0.2.0-rc.2' || version === '0.2.1-rc.2' || version === '0.2.2-rc.1') || match !== null && (match[1] === undefined || Number(match[1]) >= 3)
 }
 export function isSupportedCandidateVersion(version: string): boolean {
-  return version === '0.2.1-rc.2'
+  return version === '0.2.2-rc.1'
 }
 function validReceiptVersion(version: string): string {
   if (!isSupportedReceiptVersion(version)) fail(`unsupported DSH receipt version ${JSON.stringify(version)}`)
   return version
 }
 function validCandidateVersion(version: string): string {
-  if (!isSupportedCandidateVersion(version)) fail(`unsupported DSH version ${JSON.stringify(version)}; validated candidate is 0.2.1-rc.2`)
+  if (!isSupportedCandidateVersion(version)) fail(`unsupported DSH version ${JSON.stringify(version)}; validated candidate is 0.2.2-rc.1`)
   return version
 }
 function validIntegrity(integrity: string): boolean {
@@ -144,7 +144,7 @@ async function npmCommand(args: readonly string[], cwd: string, signal: AbortSig
   return result
 }
 
-const VALIDATED_CANDIDATE = '0.2.1-rc.2'
+const VALIDATED_CANDIDATE = '0.2.2-rc.1'
 
 /** 仅比较 x.y.z 或 x.y.z-rc.N；无法解析时返回 undefined。 */
 function compareCandidate(left: string, right: string): number | undefined {

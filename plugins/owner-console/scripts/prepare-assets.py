@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Derive the small artwork files committed under `plugins/owner-console/assets/`.
 
-The 11 深海觉醒 source set (`background.png` 1893031 bytes, `icon.png` 1240250 bytes,
-both 1254x1254) is far too heavy to inline in the Web client bundle. This script crops
-and compresses it once; the derived files are committed, then `build-assets.mjs` inlines
-them as data URIs into `src/artwork.ts`.
+The 02 水墨化鹏 source set (`background.png` 1672x941, `icon.png` 1254x1254) is far
+too heavy to inline in the Web client bundle. This script compresses it once; the
+derived files are committed, then `build-assets.mjs` inlines them as data URIs into
+`src/artwork.ts`.
 
 Usage:
     python3 plugins/owner-console/scripts/prepare-assets.py [SOURCE_DIR]
 
-SOURCE_DIR defaults to `$KUNPENG_ASSET_DIR` or `~/Downloads/kunpeng-11/11_深海觉醒`.
+SOURCE_DIR defaults to `$WENYAO_ASSET_DIR` or `~/Downloads/02_水墨化鹏_副本`.
 Regenerate only when the source artwork changes; every day-to-day build uses the
 committed files under `assets/` and does not need the originals.
 
@@ -27,27 +27,28 @@ from PIL import Image
 PLUGIN = Path(__file__).resolve().parent.parent
 OUT = PLUGIN / "assets"
 
-# Panel header band: the 1254px square cropped to the 3:1 hero slot. The top band keeps the
-# moonlit surface and the whale's head/wing while leaving the left side calm behind nothing.
-HERO_BOX = (0, 0, 1254, 418)
+# Settings banner: the wide background (1672x941) scaled to 1254px, keeping the whole
+# fish-to-peng composition rather than cropping a 3:1 band.
 HERO_WIDTH = 1254
 
-# Whole-square panel backdrop, reduced to keep the data URI small; rendered at low opacity.
+# Whole-background panel backdrop, reduced to keep the data URI small; rendered at low
+# opacity behind the chat and settings surfaces.
 BACKDROP_WIDTH = 960
 
-# Whale glyph crop around the icon's subject: the source icon is mostly empty navy, so a
-# square crop around the whale keeps the sidebar mark and the round seal legible at 18-30px.
-ICON_BOX = (320, 330, 950, 960)
+# Icon glyph crop around the fish-and-peng roundel: the source is paper-toned with a
+# lot of margin, so a square around the subject keeps the sidebar mark and seal legible
+# at 18-30px while retaining the red sun and the bird's wing.
+ICON_BOX = (210, 157, 1090, 1037)
 
 
 def source_dir(argv: list[str]) -> Path:
     raw = argv[1] if len(argv) > 1 else os.environ.get(
-        "KUNPENG_ASSET_DIR", str(Path.home() / "Downloads/kunpeng-11/11_深海觉醒")
+        "WENYAO_ASSET_DIR", str(Path.home() / "Downloads/02_水墨化鹏_副本")
     )
     directory = Path(raw).expanduser().resolve()
     for name in ("background.png", "icon.png"):
         if not (directory / name).is_file():
-            raise SystemExit(f"missing {directory / name}; pass the 11_深海觉醒 directory")
+            raise SystemExit(f"missing {directory / name}; pass the 02 水墨化鹏 directory")
     return directory
 
 
@@ -63,12 +64,12 @@ def main() -> None:
     background = Image.open(source / "background.png").convert("RGB")
     icon = Image.open(source / "icon.png").convert("RGB")
 
-    hero = background.crop(HERO_BOX)
+    hero = background.copy()
     if hero.width != HERO_WIDTH:
         hero = hero.resize((HERO_WIDTH, round(hero.height * HERO_WIDTH / hero.width)), Image.LANCZOS)
     save_webp(hero, "hero.webp", 72)
 
-    backdrop = background.resize((BACKDROP_WIDTH, BACKDROP_WIDTH), Image.LANCZOS)
+    backdrop = background.resize((BACKDROP_WIDTH, round(background.height * BACKDROP_WIDTH / background.width)), Image.LANCZOS)
     save_webp(backdrop, "backdrop.webp", 68)
 
     subject = icon.crop(ICON_BOX).resize((128, 128), Image.LANCZOS)

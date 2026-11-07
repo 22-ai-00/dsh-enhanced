@@ -228,12 +228,12 @@ test('source branch update uses fetch, fast-forward merge, frozen install, build
   expect(await runFrozenOwnerUpdate(owner, { dryRun: true }, adapter)).toBe(0)
   expect(calls).toHaveLength(4)
   calls.length = 0
-  expect(await runFrozenOwnerUpdate(owner, { dryRun: false, dshVersion: '0.2.1-rc.2' }, adapter)).toBe(0)
+  expect(await runFrozenOwnerUpdate(owner, { dryRun: false, dshVersion: '0.2.2-rc.1' }, adapter)).toBe(0)
   expect(calls.slice(4, 8)).toEqual([
     `${f.repository} git fetch origin dev`, `${f.repository} git merge --ff-only FETCH_HEAD`,
     `${f.repository} pnpm install --frozen-lockfile`, `${f.repository} pnpm build`,
   ])
-  expect(calls[8]).toContain(`scripts/install/upgrade-program.mjs --dsh-home ${f.home} --profile owner --dsh-version 0.2.1-rc.2`)
+  expect(calls[8]).toContain(`scripts/install/upgrade-program.mjs --dsh-home ${f.home} --profile owner --dsh-version 0.2.2-rc.1`)
 })
 
 test('rejects foreign origin, dirty tree and non-upstream branches before build', async () => {

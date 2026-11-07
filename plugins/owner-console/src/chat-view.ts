@@ -9,7 +9,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { jsx } from 'react/jsx-runtime'
 import { QUIET_PHRASE } from './art.js'
-import { WENYAO_BACKDROP_DATA_URI, WENYAO_ICON_DATA_URI } from './artwork.js'
+import { WENYAO_BACKDROP_DATA_URI, WENYAO_BACKDROP_HEIGHT, WENYAO_BACKDROP_WIDTH, WENYAO_ICON_DATA_URI } from './artwork.js'
 import {
   boundedText, chatMessages, openDedicatedChatSession, permissionLabel, permissionOptions, permissionValue,
   remoteFailureSummary, requiresPermissionConfirmation, sendChatMessage, streamingAssistantText,
@@ -128,34 +128,7 @@ export function OwnerConsoleConversation({ sessionId, renderFactorySlot, useSess
   })
 }
 
-/** Browser voice/read-aloud controls used beside the native composer (outside its single-occupant slots). */
-function NativeToolbar({ voiceAvailable, listening, speakAvailable, speakReady, onVoice, onSpeak }: Readonly<{
-  voiceAvailable: boolean
-  listening: boolean
-  speakAvailable: boolean
-  speakReady: boolean
-  onVoice: () => void
-  onSpeak: () => void
-}>) {
-  return el('div', { 'data-owner-console-voice-toolbar': '', style: { ...actionsStyle, padding: '0 2px' } },
-    el('button', { type: 'button', style: voiceAvailable ? smallButtonStyle : idle(smallButtonStyle, true),
-      'aria-label': voiceAvailable ? (listening ? '停止语音对话' : '语音对话') : '语音对话（当前浏览器不支持）',
-      'aria-pressed': listening,
-      title: voiceAvailable
-        ? '语音转写会写入原生草稿；识别由浏览器 SpeechRecognition 提供，音频可能发送给浏览器厂商的语音服务，不属于 DSH 权限模型或审计范围'
-        : '当前浏览器未提供 SpeechRecognition，语音输入不可用；该功能由浏览器提供，不是 DSH 模型功能',
-      disabled: !voiceAvailable, onClick: onVoice },
-    listening ? '停止语音' : '语音对话'),
-    el('button', { type: 'button', style: speakAvailable && speakReady ? smallButtonStyle : idle(smallButtonStyle, true),
-      'aria-label': '朗读最近一条回复', title: speakAvailable
-        ? '用浏览器 SpeechSynthesis 朗读最近一条回复；远端语音可能把文本发送给浏览器厂商，不是 DSH 模型'
-        : '当前浏览器未提供 SpeechSynthesis，朗读不可用',
-      disabled: !speakAvailable || !speakReady, onClick: onSpeak }, '朗读'),
-    el('span', { style: { ...hintStyle, fontSize: 11 } },
-      '语音转写只写入本会话的原生草稿；语音识别/合成由浏览器提供，音频或文本可能发送给浏览器厂商的语音服务，不是 DSH 模型功能。'))
-}
-
-/** Round 11 深海觉醒 whale mark used by the chat header. */
+/** Round 02 水墨化鹏 fish-and-peng mark used by the chat header. */
 function ChatMark() {
   return el('img', { src: WENYAO_ICON_DATA_URI, alt: '', 'aria-hidden': 'true', draggable: false,
     'data-owner-console-art': 'chat-mark', width: 34, height: 34,
@@ -664,7 +637,8 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
   return el('section', { 'aria-label': '文鳐对话', 'data-owner-console-chat': '', style: chatRootStyle },
     el('div', { style: backdropStyle },
       el('img', { src: WENYAO_BACKDROP_DATA_URI, alt: '', 'aria-hidden': 'true', draggable: false,
-        'data-owner-console-art': 'backdrop', width: 960, height: 960, style: backdropImageStyle })),
+        'data-owner-console-art': 'backdrop', width: WENYAO_BACKDROP_WIDTH, height: WENYAO_BACKDROP_HEIGHT,
+        style: backdropImageStyle })),
     el('div', { style: chatColumnStyle },
       el('header', { 'data-owner-console-chat-header': '', style: headerStyle },
         jsx(ChatMark, {}),
@@ -696,8 +670,6 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
               onVoice: toggleVoice, onSpeak: speak, onStop: stop }),
           ]
         : [
-            jsx(NativeToolbar, { voiceAvailable, listening, speakAvailable, speakReady: lastAssistant !== undefined,
-              onVoice: toggleVoice, onSpeak: speak }),
             el('div', { 'data-owner-console-native-conversation': '',
               style: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } },
             jsx(nativeSurface.provider as never, {

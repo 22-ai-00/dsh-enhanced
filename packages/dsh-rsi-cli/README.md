@@ -45,7 +45,7 @@ dsh-rsi reinstall --dry-run             # 预览清理与重新安装两阶段
 dsh-rsi reinstall                       # 备份、删除、重新安装并重做 onboarding
 ```
 
-`update --all` 先升级 CLI，再更新已安装程序；它不是对所有 Home 通用的升级路径。从 CLI `0.1.57` 起，**原安装为 Docker 后端且满足下述条件的 Linux 冻结 owner/cohort Home** 可用上面的 `update --all --yes`：从 Home 原来绑定的官方源码仓库拉取干净的 `dev` 或 `main` 分支，若绑定仓库是 detached HEAD，则仅当它位于本机记录的 `origin/dev` 或 `origin/main` 历史上时按该分支快进、更新后仍保持 detached（两者历史都包含 HEAD 时优先 `dev`；本机连 `origin/dev`、`origin/main` 的跟踪引用都没有，或浅历史无法判定时同样先拒绝），否则在写操作前拒绝；把私有 Host 从 `0.2.0-rc.2` 或 `0.2.1-rc.2` 更新到 `0.2.1-rc.2`，同时更新冻结插件，并在事务中停启已注册服务。要求原 owner 授权有效、target/coordinator 双服务均活动，且无已采用的源码 activation 或未结 activation；原 owner 绑定、授权期限和已用额度、权限、凭据、模型、Session、Goal 及历史保留，不重新配对、续期或扩权。已过期授权会在预检中被拒绝，需先按原授权流程处理。
+`update --all` 先升级 CLI，再更新已安装程序；它不是对所有 Home 通用的升级路径。从 CLI `0.1.57` 起，**原安装为 Docker 后端且满足下述条件的 Linux 冻结 owner/cohort Home** 可用上面的 `update --all --yes`：从 Home 原来绑定的官方源码仓库拉取干净的 `dev` 或 `main` 分支，若绑定仓库是 detached HEAD，则仅当它位于本机记录的 `origin/dev` 或 `origin/main` 历史上时按该分支快进、更新后仍保持 detached（两者历史都包含 HEAD 时优先 `dev`；本机连 `origin/dev`、`origin/main` 的跟踪引用都没有，或浅历史无法判定时同样先拒绝），否则在写操作前拒绝；把私有 Host 从 `0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.2-rc.1` 更新到 `0.2.2-rc.1`，同时更新冻结插件，并在事务中停启已注册服务。要求原 owner 授权有效、target/coordinator 双服务均活动，且无已采用的源码 activation 或未结 activation；原 owner 绑定、授权期限和已用额度、权限、凭据、模型、Session、Goal 及历史保留，不重新配对、续期或扩权。已过期授权会在预检中被拒绝，需先按原授权流程处理。
 
 owner 的 Docker→native 切换还要求 已配置的 creation-review、revision-review 及 revision-regression 库中的 grants、verifications 均空，以及 creation-adoptions 库中的 adoptions、calls、source_archives 全空；不存在的已配置审查库不算空库。任何状态的历史行都不能忽略。已建立 owner 的 native→native 程序升级会在预检中拒绝；非空创建历史迁移尚未实现，完整 live Docker→native 服务切换仍未验收，不能把这一命令理解为通用保权升级。不要删库或重装以满足前提。
 

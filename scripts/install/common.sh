@@ -3,11 +3,11 @@
 # Shared implementation for install-local.sh and install-npm.sh.
 # This file is sourced by the two public entrypoints; do not execute it directly.
 
-DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.2.1-rc.2'
+DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.2.2-rc.1'
 DSH_ENHANCED_DEFAULT_DSH_VERSION='latest'
 DSH_ENHANCED_DEFAULT_PNPM_VERSION='11.7.0'
 if [[ -z "${DSH_ENHANCED_VERIFIED_HOST_RANGE:-}" ]]; then
-  DSH_ENHANCED_VERIFIED_HOST_RANGE='0.2.1-rc.2'
+  DSH_ENHANCED_VERIFIED_HOST_RANGE='>=0.2.1-rc.2 <0.3.0'
 fi
 DSH_ENHANCED_CORE_PLUGIN_SLUGS=(
   'personal-assistant'
@@ -2995,7 +2995,7 @@ if (installAnchor === undefined) throw new Error('selected dsh executable has no
 installAnchor = await realpath(installAnchor)
 const hostManifest = JSON.parse(await readFile(installAnchor, 'utf8'))
 const hostRoot = dirname(installAnchor)
-if (hostManifest.name !== '@deepseek-ai/dsh' || !['0.2.0-rc.2', '0.2.1-rc.2'].includes(hostManifest.version)
+if (hostManifest.name !== '@deepseek-ai/dsh' || !['0.2.0-rc.2', '0.2.1-rc.2', '0.2.2-rc.1'].includes(hostManifest.version)
   || typeof hostManifest.bin?.dsh !== 'string' || await realpath(join(hostRoot, hostManifest.bin.dsh)) !== executable
   || !inside(hostRoot, executable) || inside(home, hostRoot)) throw new Error('selected dsh executable is not owned by verified Host')
 const hostRequire = createRequire(installAnchor)
@@ -3120,7 +3120,7 @@ if (installAnchor === undefined) {
 }
 const hostRequire = createRequire(installAnchor)
 const appBoot = await import(pathToFileURL(hostRequire.resolve('@deepseek-ai/dsh-app-boot')).href)
-if (['0.2.0-rc.2', '0.2.1-rc.2'].includes(expectedVersion)) {
+if (['0.2.0-rc.2', '0.2.1-rc.2', '0.2.2-rc.1'].includes(expectedVersion)) {
   if (typeof appBoot.loadProfileDirectory !== 'function' || typeof appBoot.createRuntimeResolution !== 'function'
     || typeof appBoot.PluginPackages !== 'function') throw new Error('verified DSH lacks process-local resolution APIs')
 } else if (typeof appBoot.healProfilesModuleFallback !== 'function') {

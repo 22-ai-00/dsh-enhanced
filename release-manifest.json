@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "nextVerifiedHostRange": "0.2.1-rc.2",
-  "nextPinnedHostVersion": "0.2.1-rc.2",
+  "nextVerifiedHostRange": ">=0.2.1-rc.2 <0.3.0",
+  "nextPinnedHostVersion": "0.2.2-rc.1",
   "current": {
     "version": "0.1.66",
     "releasedAt": "2026-11-06T23:17:54.293Z",
@@ -52,8 +52,8 @@
   "pending": {
     "version": "0.1.67",
     "preparedAt": "2026-11-06T23:21:37.129Z",
-    "verifiedHostRange": "0.2.1-rc.2",
-    "pinnedHostVersion": "0.2.1-rc.2",
+    "verifiedHostRange": ">=0.2.1-rc.2 <0.3.0",
+    "pinnedHostVersion": "0.2.2-rc.1",
     "packages": {
       "@dsh-enhanced/assistant-growth-contract": "0.1.67",
       "@dsh-enhanced/dsh-rsi-cli": "0.1.67",

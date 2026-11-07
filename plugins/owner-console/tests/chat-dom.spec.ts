@@ -303,8 +303,8 @@ describe('文鳐 native Conversation embedding', () => {
     expect(SessionProvider.mock.calls.at(-1)?.[0].session).toBeDefined()
     expect(renderSlot).toHaveBeenCalledWith('owner-console.conversation', { sessionId: 's1' },
       { fallback: expect.anything() })
-    // Voice controls stay outside the native composer's single-occupant slots.
-    expect(byLabel('语音对话（当前浏览器不支持）')).not.toBeNull()
+    // The native composer owns voice input through its Host slot; no duplicate toolbar.
+    expect(container.querySelector('[data-owner-console-voice-toolbar]')).toBeNull()
   })
 
   it('computes the native phase from Session snapshots and selects the Chat view', async () => {
@@ -336,25 +336,5 @@ describe('文鳐 native Conversation embedding', () => {
     await render(createElement(OwnerConsoleConversation as never, seat({ blank: true, openState: 'loading' }, undefined)))
     expect(renderFactorySlot).toHaveBeenLastCalledWith('conversation.content',
       { variant: 'embedded', phase: 'settling', hero: false }, expect.anything())
-  })
-
-  it('writes a browser transcript into the native draft instead of a local textarea', async () => {
-    let fake: Harness
-    const insertDraft = vi.fn(() => true)
-    fake = harness({ voiceAvailable: () => true, createRecognition: () => fake.recognition, insertDraft })
-    const SessionProvider = vi.fn((props: { session?: unknown, children?: unknown }) => props.children)
-    const renderSlot = vi.fn(() => createElement('div', { 'data-native-conversation-slot': '' }))
-    await render(createElement(OwnerConsoleChat, {
-      runtime: fake.runtime, onOpenSettings: vi.fn(), renderer: { SessionProvider, renderSlot },
-    }))
-    await click(byLabel('语音对话'))
-    await act(async () => {
-      fake.recognition.onresult?.({
-        resultIndex: 0,
-        results: { length: 1, 0: { isFinal: true, length: 1, 0: { transcript: '原生草稿' } } },
-      })
-    })
-    expect(insertDraft).toHaveBeenCalledWith(expect.objectContaining({ binding: fake.binding }), '原生草稿')
-    expect(container.querySelector('textarea')).toBeNull()
   })
 })

@@ -81,7 +81,7 @@ describe('owner console client bundle', () => {
     expect(root.props['data-owner-console-scroll']).toBe('')
     expect(root.props.style).toMatchObject({ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' })
     // The brand header, panel backdrop, seal and sidebar icon are self-contained in the emitted
-    // bundle: four inlined 11 深海觉醒 images, no external asset URL and no network fetch.
+    // bundle: four inlined 02 水墨化鹏 images, no external asset URL and no network fetch.
     const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
     expect(source).toContain('data-owner-console-header')
     expect(source).toContain('data-owner-console-chat')

@@ -187,7 +187,7 @@ export async function prepareUnboundHostUpdatePlan(input: {
   }
   input.signal?.throwIfAborted()
   const selector = input.selector ?? 'latest'
-  if (selector !== 'latest' && selector !== '0.2.1-rc.2') throw new PurgeError('请求的 Host 版本不兼容。')
+  if (selector !== 'latest' && selector !== '0.2.2-rc.1') throw new PurgeError('请求的 Host 版本不兼容。')
   const preparedRuntime = await dependencies.prepare({ root: cacheRoot, selector,
     ...(input.signal === undefined ? {} : { signal: input.signal }) })
   if (!isSupportedCandidateVersion(preparedRuntime.version) || selector !== 'latest' && preparedRuntime.version !== selector

@@ -695,11 +695,11 @@ export async function healLocalSourceProfileModuleFallback({ homePath, profile, 
     || !inside(dirname(bootManifestPath), bootPath)) fail('pinned DSH boot module identity differs')
   const { loadProfileDirectory, healProfilesModuleFallback, createRuntimeResolution } = await import(pathToFileURL(bootPath).href)
   if (typeof loadProfileDirectory !== 'function') {
-    fail(['0.2.0-rc.2', '0.2.1-rc.2'].includes(dshManifest.version) ? 'pinned DSH boot module lacks native profile loading API'
+    fail(['0.2.0-rc.2', '0.2.1-rc.2', '0.2.2-rc.1'].includes(dshManifest.version) ? 'pinned DSH boot module lacks native profile loading API'
       : 'pinned DSH boot module lacks native fallback healing APIs')
   }
   const loaded = loadProfileDirectory('dsh', join(homePath, 'profiles', profile), dshManifestPath)
-  if (['0.2.0-rc.2', '0.2.1-rc.2'].includes(dshManifest.version)) {
+  if (['0.2.0-rc.2', '0.2.1-rc.2', '0.2.2-rc.1'].includes(dshManifest.version)) {
     if (typeof createRuntimeResolution !== 'function' || loaded.skippedBundles?.length) {
       fail('pinned DSH boot module cannot resolve the complete profile')
     }

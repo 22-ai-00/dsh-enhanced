@@ -43,9 +43,9 @@ const sourceOwnerNext = proof => proof?.protocol === OWNER_PROGRAM_PROTOCOL ? pr
 function hostOwnerProgramSelection(plan, services, profile) {
   parseHostUpdatePlan(plan, plan?.canonicalHome)
   if (!PROFILE_NAME.test(profile) || plan.schemaVersion !== 1
-    || !['0.2.0-rc.2', '0.2.1-rc.2'].includes(plan.originalRuntime.version)
-    || plan.candidateRuntime.version !== '0.2.1-rc.2') {
-    fail('owner program update requires a bound supported 0.2 Host and a verified 0.2.1-rc.2 candidate')
+    || !['0.2.0-rc.2', '0.2.1-rc.2', '0.2.2-rc.1'].includes(plan.originalRuntime.version)
+    || plan.candidateRuntime.version !== '0.2.2-rc.1') {
+    fail('owner program update requires a bound supported 0.2 Host and a verified 0.2.2-rc.1 candidate')
   }
   const coordinatorProfile = `rsi-${profile.slice(0, 43)}-${createHash('sha256').update(profile).digest('hex').slice(0, 12)}`
   if (!Array.isArray(services) || services.length !== 2

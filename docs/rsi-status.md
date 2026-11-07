@@ -10,7 +10,10 @@
 - `48fa40fa` 双端精确根检查 PASS 且 `sourceStable: true`：Mac 11,179 / 1,933 tests、765 / 85 files、39 包 40 组（sha `c6582c24…`）；Linux r3 12,796 passed / 311 skipped（exit 0）。r1/r2 的失败均为运行环境（`TMPDIR`、`XDG_DATA_HOME`、`PNPM_HOME`），不是代码缺陷。
 - `ERR_PNPM_VERIFY_DEPS_BEFORE_RUN` 长期阻塞已根治：pnpm 把 `enableGlobalVirtualStore` 记入 workspace state，CI 强制 false 而本地缺键 → 在 `pnpm-workspace.yaml` 显式固定 `enableGlobalVirtualStore: false`。
 - Mac 桌面 profile 已整体升级到 registry 0.1.66（5 个 bundle、9 个 `@dsh-enhanced/*`），应用重启正常、无新 crash 日志；TraeX peer 放宽到 `>=0.2.1-rc.2 <0.3.0` 后 Host 0.2.2-rc.1 接受；lark-channel 缺 `@dsh-enhanced/assistant-delivery` 的导入错误消失（profile `nodeLinker: hoisted`，且该包已在 profile 依赖中）。
-- 边界：空 profile 只装 lark-channel 仍会缺兄弟插件（可选 peer 静态导入，面板会列出缺失 bundle）；Host 侧 ANSI 解析缺陷未修，一键安装仍需人工 `allowBuilds` 绕过；`verifiedHostRange` 仍精确 `0.2.1-rc.2`（有意保留）。
+- 边界（0.1.67 待发布修复）：空 profile 只装 lark-channel 缺兄弟插件 → 面板现在先补装
+  `@dsh-enhanced/assistant-delivery`；Host 侧 ANSI 解析缺陷仍在 Host，但面板先写 `allowBuilds`
+  再重试，一键安装不再需要人工绕过；安装器 `verifiedHostRange` 已从精确 `0.2.1-rc.2` 升级为
+  `>=0.2.1-rc.2 <0.3.0`，并固定新安装/升级候选 `0.2.2-rc.1`。这些改动待 0.1.67 双端根检查与 tag 发布。
 
 ## 目标与纪律
 
@@ -85,8 +88,10 @@ live Harness app 的 `0.2.1-rc.5` 需要 owner 显式风险豁免；已在该版
 
 尚未完成：从面板选择任意 registry 源（出于安全只允许本项目包名）、真实飞书长连接验收
 （按用户要求延后，未连活 Bot）。lark-cli 不在本插件范围内，其安装/配置由 owner 自行通过 skill 完成。
-远端真实使用验收仍由正式连接门保留。一键安装 lark-channel 受 Host ANSI 解析缺陷限制（面板侧已给准确指引），
-TraeX 需兼容发布或 owner 豁免，live app profile 未安装新主视觉，真实 Web GUI 长跑与明暗主题未复验。
+远端真实使用验收仍由正式连接门保留。0.1.67 已把面板侧的一键安装改为先写 `allowBuilds` 再重试（绕开
+Host ANSI 解析缺陷）、并自动补装 lark-channel 的 `@dsh-enhanced/assistant-delivery` 同伴 bundle；
+TraeX 的 peer 已放宽到 `>=0.2.1-rc.2 <0.3.0`，live 0.2.2-rc.1 可直接安装。live app profile 的面板
+复验仍需下次重启 Host 后确认，真实 Web GUI 长跑与明暗主题未复验。
 
 ## 当前开发：默认关闭切片与安装提示（2026-11-06）
 
@@ -97,7 +102,13 @@ TraeX 需兼容发布或 owner 豁免，live app profile 未安装新主视觉�
 - **`follows.eventTriggers.acceptHeadRef`（WorkItems，`75deec79`）**：Event Triggers follow 在同步准入段内把 `<triggerId>@head` 钉成当前 high water + 配置摘要的三段式 ref 后入库，`validate` 仍对新旧形式生效；显式三段式 ref 行为不变；关闭时 `@head` 仍是非法 ref。
 - **面板安装提示与状态判定（`3679e482`、`cf4b633f`）**：安装拒绝不再只显示 Host 原始码——依赖构建脚本被 pnpm 拒绝时给出具体依赖名与 `allowBuilds` 办法，并允许确认 Host 已记录的 pending 名称后重试一次；`incompatible-version` 给出 package@version、缺失 peer 与当前 DSH 版本及豁免办法；通用失败只显示截断的 ANSI 清理诊断并带 `packageResult.logPath`。
   独立只读审计（`docs/evidence/owner-console/panel-audit-20261106/`，对照真实 Host 0.2.2-rc.1 的 plugin-manager/settings/gateway 契约）发现并已修：任何不在 `settings.describe()` 的 bundle 都显示「已安装但未启用」并给无效的「启用」按钮（现在按 `bundles[].enabled` + `plugins[].fiberPhase`/`diagnostic` 区分 absent/disabled/active/pending/failed/busy/unloaded/errored，已启用不再给启用按钮；缺伴生服务时列出需安装的 bundle）；`inventory()` 丢弃所有带 error 的 bundle（现在只滤 `not-bundle`，错误码与诊断可见）；安装按钮宣称「含依赖」但只装该包与 pnpm 依赖（标签与提示已改）；配置写失败后条目消失且无法从面板修复（现在给 phase/诊断/缺失服务与可复制的 `cordis.patch.yml` 关行修复）；RPC 失败被压成一句通用话（现在透传 gateway `{code,message}`）；`logPath`、keychain handle 校验、reload 不虚报成功、`settings.mutate` 错误映射、`listBundles/listPlugins` 失败隔离与 Host 服务缺失提示、确认通道缺失可见提示均已修；`plugins/README.md` 与 owner-console README 的过时/夸大表述已改（撤回「三态卡片已在真实 GUI 复验」的过度声明）。
-  **一键安装 lark-channel 在 live 0.2.2-rc.1 仍被 Host 缺陷挡住**：其 `dsh-plugin-manager` 用 `/\bIgnored build scripts: (.+)/` 解析 ANSI 着色的 pnpm 11 输出失败，`pendingBuilds` 永远为空，任何调用方都无法批准（本仓库改不了；手工在 profile `pnpm-workspace.yaml` 写 `allowBuilds` 可绕）；TraeX 被 Host 兼容预检拒绝（本包 peer 固定 0.2.1-rc.2，live 为 0.2.2-rc.1），需要兼容发布或 owner 豁免。这两项是本轮 release 仍未验证的真实环境边界。
+  **一键安装的 Host 缺陷已在面板侧绕开（0.1.67）**：Host 的 `dsh-plugin-manager` 用
+  `/\bIgnored build scripts: (.+)/` 解析 ANSI 着色的 pnpm 11 输出失败、`pendingBuilds` 为空的问题
+  仍在 Host 侧，但面板现在先把主人确认的精确名称原子写入 profile `pnpm-workspace.yaml` 的
+  `allowBuilds`，再不带审批参数重试，因此无需人工改文件；同一版本起，安装 lark-channel 会先补装
+  `@dsh-enhanced/assistant-delivery`，空 profile 单装也能激活。TraeX peer 已在 0.1.66 放宽到
+  `>=0.2.1-rc.2 <0.3.0`，live Host 0.2.2-rc.1 不再需要 owner 豁免。这两项仍待 live app profile
+  点击复验（需重启 Host）。
 - **评审修复**：`assistant-policy` `dsh-plugin-setup` 登记上述新开关（不再要求 `--force`，`be7c4be4`）；holdReport 轮转/孤儿/毒行/旧代判定四处缺陷修复并新增 6 个回归（`b86639bc`）；Delivery 轮换 origin 回退（`fc7756d2`）；owner-console 状态判定/错误透传/安装提示批量修复（`cf4b633f`，8 个测试文件 / 67 tests）。独立审计仍余 P2 项（typert 行号、默认 installSpec、趋势分页竞态、dotted 包名、未用 peer/devDep 等），不影响本轮。
 
 ## 待办与延后验收

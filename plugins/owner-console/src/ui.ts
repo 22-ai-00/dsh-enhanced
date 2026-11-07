@@ -1,6 +1,6 @@
 /**
  * Shared visual primitives for the 文鳐 surfaces. The settings console and the chat window
- * use one token set, so both stay on the Host theme (`--dsw-*`) and the 11 深海觉醒
+ * use one token set, so both stay on the Host theme (`--dsw-*`) and the 02 水墨化鹏
  * artwork rather than inventing a second style.
  */
 import { jsx, jsxs } from 'react/jsx-runtime'

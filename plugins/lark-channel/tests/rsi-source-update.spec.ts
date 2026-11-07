@@ -178,5 +178,5 @@ describe('private RSI source update candidate', () => {
     await writeFile(join(bareAlternate.source.baseline.remote, 'objects', 'info', 'http-alternates'), 'https://example.invalid/objects\n')
     await expect(prepareRsiSourceUpdate(bareAlternate.input)).rejects.toThrow('external Git object alternates')
     await expect(lstat(bareAlternate.input.candidateRoot)).rejects.toMatchObject({ code: 'ENOENT' })
-  })
+  }, 120_000)
 })

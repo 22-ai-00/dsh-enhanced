@@ -43,10 +43,11 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
   `renderSlot`。子槽按原生 `conversationPhase` 同样的规则计算 `phase`，然后
   `renderFactorySlot('conversation.content', {variant: 'embedded', phase, hero: false}, …)`。
   `hero: false` 关掉工作区选择器和 agent preset 座；面板不会渲染目录清单。
-- **语音**：「语音对话」用浏览器 `SpeechRecognition`（`webkitSpeechRecognition` 回退）识别，
-  通过 `conversation.input.for(actx).setDraft()` + `focus()` 写入**原生 composer 草稿**；
-  「朗读」用浏览器 `SpeechSynthesis`。浏览器没有对应 API 时按钮禁用并在 tooltip 中说明。
-  语音识别/合成由浏览器（或其服务商）完成，不是 DSH 模型；插件不录音、不保存音频。
+- **语音**：原生对话直接使用 Host composer 自带的语音输入，面板不再重复渲染工具行。
+  仅降级窗口（没有 renderer seats 时）显示「语音对话」/「朗读」：前者用浏览器 `SpeechRecognition`
+  （`webkitSpeechRecognition` 回退）识别，通过 `conversation.input.for(actx).setDraft()` + `focus()`
+  写入**原生 composer 草稿**；后者用浏览器 `SpeechSynthesis`。浏览器没有对应 API 时按钮禁用并在
+  tooltip 中说明。语音识别/合成由浏览器（或其服务商）完成，不是 DSH 模型；插件不录音、不保存音频。
   **隐私边界**：常见浏览器会把麦克风音频或待朗读文本发送给浏览器厂商自己的语音服务，
   这段链路不经过 DSH 的权限模型、策略与审计，也不受本插件控制。
 - **权限**：当前值读会话 `permissions` projection，可选目录读
@@ -104,7 +105,8 @@ secret 明文永不进入配置、日志或本插件。
 卡片按实际状态给出下一步，状态由 `bundles[].enabled` 与 `plugins[].fiberPhase` 判定，不再把
 “条目不在 `settings.describe()` 里”一律当成未启用：
 
-- 未安装：显示「安装 lark-channel」（走 Host pluginManager 的 pnpm 安装，只装该包及其 pnpm 依赖）；
+- 未安装：显示「安装 lark-channel」（走 Host pluginManager 的 pnpm 安装，会先补装激活所需的
+  同伴 bundle `@dsh-enhanced/assistant-delivery`，再装该包及其 pnpm 依赖）；
 - 已安装但 bundle 未启用：显示「启用 lark-channel」；
 - 已启用但 fiber 为 pending / failed / 无条目：显示「已启用，等待依赖服务 / 已启用但加载失败 /
   已启用，但 Loader 没有条目」，附 fiber 阶段、诊断、缺少的 companion 服务（及对应要安装的
@@ -113,7 +115,9 @@ secret 明文永不进入配置、日志或本插件。
 - fiber active 且条目有 live 字段：才显示配置表单。
 
 安装只包含该包本身及其 pnpm `dependencies`；`peerDependencies` 里的 `@dsh-enhanced/*` bundle 与它
-在 profile 里需要的 Host 服务不会随安装自动装上，缺失项由上面的状态区列出。
+在 profile 里需要的 Host 服务不会由 pnpm 自动装上。`lark-channel` 在激活时静态 import
+`@dsh-enhanced/assistant-delivery`，因此面板的「安装 lark-channel」会先安装这个同伴 bundle；
+其余缺失项仍由上面的状态区列出。
 TraeX 卡片同理（安装/启用 traex-acp-provider）。
 
 只有声明了 `.volatile()` 的配置字段才能这样实时改写：`lark-channel` 暴露
@@ -134,10 +138,11 @@ enabled/command。没有 live 字段的条目不会出现在面板里。
   （与 `dsh plugin` 相同的 pnpm 路径），会一并安装该包声明的依赖并默认激活；本地路径和 git 地址
   不在此面板处理，避免面板成为任意代码源入口。安装/启用后如返回 `restart-required`，按提示重启 profile。
 - **依赖构建脚本**：pnpm 可能拒绝依赖的构建脚本（`ERR_PNPM_IGNORED_BUILDS`）。Host 记录到
-  `pendingBuilds` 时，面板会先让主人确认，再用这些精确名称重试。Host 未记录（当前 Host 的解析没认出
-  带 ANSI 的输出）时，面板会从失败输出中读出依赖名交给主人确认；确认后若 Host 仍返回 `stale-approval`，
-  面板把确认过的名称写入当前 profile 的 `pnpm-workspace.yaml`（`allowBuilds: <name>: true`，原子写入、0600），
-  再重试一次。不会自动放行，也不会写入未确认的名称；Host 安装器本身的缺陷未在面板内修补。
+  `pendingBuilds` 时，面板会先让主人确认，再用这些精确名称重试。当前 Host 的 ANSI 解析缺陷会丢掉
+  依赖名、使 `pendingBuilds` 为空，因此面板也支持从失败输出中读出依赖名交给主人确认；确认后不再
+  依赖 Host 的 `approveBuilds`（它可能返回 `stale-approval`）：面板先把确认过的名称写入当前 profile
+  的 `pnpm-workspace.yaml`（`allowBuilds: <name>: true`，原子写入、0600），再不带审批参数重试一次，
+  所以一键安装不再需要人工改 `allowBuilds`。不会自动放行，也不会写入未确认的名称。
 - **不兼容版本**：Host 以 `incompatible-version` 拒绝时，面板列出被拒的 `包@版本`、缺失的 DSH peer
   要求与当前 DSH 版本，并提示更新插件或为这个精确版本授予兼容豁免后重试。
 - **高级**：对声明了 live 字段的条目仍可合并一段 JSON 配置（≤16 KiB），不重置其它字段。
@@ -179,7 +184,8 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 - 本插件自身不直接读写文件、不直接联网、不直接起子进程、不读取凭据；需要落盘的动作都委托给
   Host 的 `settings`（配置）与 `pluginManager`（bundle/条目管理与 pnpm 安装），由后者执行。
 - 安装动作因此会经由 Host 启动 pnpm 并访问 registry（与 `dsh plugin` 相同）；只在主人点击时发生。
-  依赖构建脚本只有在主人于面板再次确认后、且仅针对 Host 记入 `pendingBuilds` 的精确名称才被批准。
+  依赖构建脚本只有在主人于面板再次确认后、且仅针对 Host 记入 `pendingBuilds` 或安装输出中读到的
+  精确名称才被批准；确认写入 profile 的 `allowBuilds` 后由服务端重试，不经模型。
 - 配置写入只经 Host `settings.mutate`，且限定到单个已安装条目；bundle/entry 管理只经 Host
   `pluginManager` 且限定 `@dsh-enhanced/*`；授权来源是主人自己在面板上的点击，不是模型工具调用，
   也不存在后台自动写配置。
@@ -187,8 +193,9 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
   projection，用来显示状态、降级文本和朗读；不读取其它会话、报告或记忆，也不上报内容。
   client bundle 只依赖宿主提供的 `react`（以及 `react/jsx-runtime`）与 Host 注入的客户端服务，
   不 import 其它 DSH 组件包；原生正文由 renderer 的 factory seat 渲染。
-- 语音识别/合成由浏览器完成，音频或文本可能发送给浏览器厂商的语音服务（不经过 DSH 权限模型与审计）；
-  插件不录音、不保存音频，只把最终转写写进当前会话的原生草稿。
+- 降级窗口的语音识别/合成由浏览器完成，音频或文本可能发送给浏览器厂商的语音服务（不经过 DSH
+  权限模型与审计）；插件不录音、不保存音频，只把最终转写写进当前会话的原生草稿。原生对话不渲染
+  这些控件，语音入口直接来自 Host composer。
 - 安装/移除仅由主人点击触发，走 DSH 官方安装路径；移除只对 Host 标记为 `removable` 且非本面板自身的
   bundle 显示，并需浏览器确认（无确认通道时给出可见提示并停止）；不改动未列出的条目；
   secret 明文不接受、不存储、不回显。
@@ -201,34 +208,34 @@ session-scoped 子槽三个注册与释放；并断言侧栏标签为「文鳐�
 内联 4 个 webp、包含原生对话与设置标记且不含外部图片 URL。因此该测试依赖先运行
 `pnpm --dir plugins/owner-console build`（根检查与 `pnpm check` 均先构建）。
 `tests/chat-dom.spec.ts` 在 jsdom 中真实挂载 React DOM，覆盖：降级消息列表与 composer 发送
-(`SessionFace.prompt`)、附件上传 receipt、上传服务缺失时的可见限制、语音不可用禁用/tooltip、
-可用时浏览器识别写入草稿、权限投影与 `/permission` 切换、renderer seat 下的原生
-`SessionProvider`/子槽渲染、原生 phase 计算、语音写入原生草稿、齿轮打开设置页并保留全部卡片、
-返回对话。`tests/chat.spec.ts` 覆盖事件折叠、工具状态、会话创建/复用/过期、上传失败、权限标签等
+(`SessionFace.prompt`)、附件上传 receipt、上传服务缺失时的可见限制、降级窗口语音不可用禁用/
+tooltip、可用时浏览器识别写入草稿、权限投影与 `/permission` 切换、renderer seat 下的原生
+`SessionProvider`/子槽渲染、原生 phase 计算、原生对话不再重复渲染语音工具行、齿轮打开设置页并
+保留全部卡片、返回对话。`tests/chat.spec.ts` 覆盖事件折叠、工具状态、会话创建/复用/过期、上传失败、权限标签等
 纯函数。`jsdom` / `react-dom` / `@types/react-dom` 只作为测试 devDependencies，不进入客户端产物。
 `tests/client-render.spec.ts` 不依赖 DOM，桩掉 React hooks 后展开设置页元素树，断言页头品牌、
-11 深海觉醒主视觉/面板背景/印章/侧栏图标均为纯装饰（`alt=""` + `aria-hidden`）、状态胶囊带文字
+02 水墨化鹏主视觉/面板背景/印章/侧栏图标均为纯装饰（`alt=""` + `aria-hidden`）、状态胶囊带文字
 标签与空状态文案。
 
 ## 界面布局
 
-- **对话窗口**：紧凑页头（圆形鲸标、标题「文鳐 Ray」、状态胶囊、副标题、右上角「原生会话」与 ⚙），
-  下面是语音/朗读工具行；正文和 composer 由 DSH 原生会话骨架占满剩余高度。原生 composer 自带
-  发送、附件、权限 chip、模型选择与停止，宽屏居中、窄屏自适应。
-- **设置页**：顶部「← 返回对话」+「设置」；下面是保留的 11 深海觉醒 3:1 主视觉 banner（webp
-  data URI，纯装饰 `alt=""`）、标题与圆形鲸印章、副标题，以及「开始对话 / 打开插件页」；再往下是
+- **对话窗口**：紧凑页头（圆形化鹏标、标题「文鳐 Ray」、状态胶囊、副标题、右上角「原生会话」与 ⚙），
+  正文和 composer 由 DSH 原生会话骨架占满剩余高度。原生 composer 自带发送、附件、语音输入、
+  权限 chip、模型选择与停止，宽屏居中、窄屏自适应；面板不重复渲染语音/朗读工具行。降级窗口才有
+  自己的消息列表、composer 与语音工具行。
+- **设置页**：顶部「← 返回对话」+「设置」；下面是 02 水墨化鹏宽幅主视觉 banner（webp
+  data URI，纯装饰 `alt=""`）、标题与圆形化鹏印章、副标题，以及「开始对话 / 打开插件页」；再往下是
   配置卡片。
-- 两个视图共用同一套背景：方形鲸图以低透明度铺在面板表面、内容之下，文字仍落在主题卡片/原生
+- 两个视图共用同一套背景：02 水墨化鹏宽幅图以低透明度铺在面板表面、内容之下，文字仍落在主题卡片/原生
   会话表面上，明暗主题的对比度不变。
-- 侧栏入口图标与设置页印章都来自 11 深海觉醒 `icon.png`（方形裁切，可作圆形头像裁切）。
+- 侧栏入口图标与设置页印章都来自 02 水墨化鹏 `icon.png`（方形裁切鱼跃化鹏纹样，可作圆形头像裁切）。
 - 卡片：统一圆角与边框，标题前一枚小云纹；状态用「圆点 + 文字」胶囊（ok/warn/error），不只靠颜色。
 - 颜色只取宿主 `--dsw-*` 变量并带回退值，明暗主题通用；不引入外部 CSS、字体或网络资源。
   装饰 SVG 见 `src/art.ts`。
 
 ### 主视觉与图标资产
 
-源图 `11_深海觉醒/background.png`（1254×1254，1893031 bytes）与 `icon.png`（1254×1254，
-1240250 bytes）不入库；只提交 `assets/` 下压缩后的派生文件（合计约 88 KB）与内联结果
+源图 `02_水墨化鹏_副本/background.png`（1672×941）与 `icon.png`（1254×1254）不入库；只提交 `assets/` 下压缩后的派生文件（hero 1254×706、backdrop 960×540、icon 128/256，合计约 53 KB）与内联结果
 `src/artwork.ts`，因此 `lib/client.js` 仍然自包含。构建本身不重写 `src/`；`tests/artwork.spec.ts`
 校验已提交的 `src/artwork.ts` 与 `assets/` 逐字节一致，资产重新压缩后忘记刷新会直接测试失败。
 `assets/` 不随 npm 包发布，也不需要发布：数据已内联在 `lib/` 中。
@@ -236,7 +243,7 @@ session-scoped 子槽三个注册与释放；并断言侧栏标签为「文鳐�
 重新生成派生资产（仅当源图变化时；需要 Python + Pillow）：
 
 ```sh
-python3 plugins/owner-console/scripts/prepare-assets.py /path/to/kunpeng-11/11_深海觉醒
+python3 plugins/owner-console/scripts/prepare-assets.py /path/to/02_水墨化鹏_副本
 ```
 
 派生资产变化后，用已提交的 `assets/` 重新生成 `src/artwork.ts`（幂等、无需源图）并提交：
@@ -254,7 +261,8 @@ pnpm --dir plugins/owner-console build:assets
   session-scoped 子槽；本插件据此复用 `conversation.content`。如果某个嵌入没有这些 seats，
   或 Host 没有注册 `conversation.content` 工厂，面板退回自包含的降级窗口（文本消息 + composer），
   不会假装渲染原生组件。2026-11-06 在临时 profile + pinned DSH `0.2.1-rc.2` 的真实 `dsh web`
-  中已确认原生正文、composer、附件按钮、权限 chip、模型选择与语音工具行都在面板内（证据
+  中已确认原生正文、composer、附件按钮、权限 chip 与模型选择都在面板内；语音输入由 Host
+  composer 提供，面板自身不再重复渲染工具行（证据
   `docs/evidence/owner-console/wenyao-chat-20261106/`）。
 - **没有真实模型/API Key，未完成一次真实发送**：隔离 profile 未登录、未配置模型，原生 composer
   显示「请选择模型」；因此只验证了 composer 的 DOM/按钮/草稿写入，没有验证真实模型回合并。
@@ -266,14 +274,14 @@ pnpm --dir plugins/owner-console build:assets
 - **不显示目录**：面板不渲染工作区、文件目录或会话列表；`hero: false` 关掉原生工作区选择器。
   切换会话/工作区要用左侧栏或「原生会话」。如果默认工作区不可用，会话退回 Host 默认 cwd 的
   ungrouped 会话，原生视图可能要求选择工作区。
-- **语音是浏览器能力**：「语音对话」/「朗读」分别依赖浏览器 `SpeechRecognition` /
-  `SpeechSynthesis`；不可用时按钮禁用并在 tooltip 说明。识别/合成由浏览器（及其可能的服务商）
-  完成，不是 DSH 模型；插件不录音、不保存音频。**常见浏览器会把音频或待朗读文本发给浏览器厂商的
-  语音服务，这段链路不经过 DSH 的权限模型与审计**；真实麦克风与真人语音未验收；jsdom 用桩覆盖
-  降级与草稿写入，真实 Chrome 用注入的假识别器验证了「转写写入原生 Lexical 草稿」。
-- **语音写入原生草稿会替换/追加纯文本**：通过 `conversation.input.for(actx).setDraft()` 写入；
-  当前已有引用 chip 时，`setDraft` 会把草稿变为纯文本（浏览器语音的固有边界）。原生输入服务
-  缺失时按钮仍可点，但会显示可见失败，不会静默。
+- **语音是浏览器能力（仅降级窗口）**：面板自己的「语音对话」/「朗读」分别依赖浏览器
+  `SpeechRecognition` / `SpeechSynthesis`；不可用时按钮禁用并在 tooltip 说明。识别/合成由浏览器
+  （及其可能的服务商）完成，不是 DSH 模型；插件不录音、不保存音频。**常见浏览器会把音频或待朗读
+  文本发给浏览器厂商的语音服务，这段链路不经过 DSH 的权限模型与审计**；真实麦克风与真人语音未
+  验收；jsdom 用桩覆盖降级与草稿写入。原生对话的语音入口归 Host composer，插件不渲染、不拦截。
+- **降级窗口语音写入原生草稿会替换/追加纯文本**：通过 `conversation.input.for(actx).setDraft()`
+  写入；当前已有引用 chip 时，`setDraft` 会把草稿变为纯文本（浏览器语音的固有边界）。原生输入
+  服务缺失时按钮仍可点，但会显示可见失败，不会静默。
 - **权限选项来自 Host**：原生权限 chip 需要 `ui-permission-presets`；没有它时本插件显示自己的
   权限行。可选 preset 目录由 Host `permissionPresets.catalog()` 决定；隔离 profile 中目录只返回
   一个可用 preset。切换只走 `/permission <preset>`，没有直接写会话权限的客户端 API；高风险
@@ -297,7 +305,7 @@ pnpm --dir plugins/owner-console build:assets
   五张卡片渲染、返回对话正常。live Harness Mac app 为 `0.2.2-rc.1`：owner-console `0.1.66`
   起 peer 采用已验证的 0.2 线范围（`>=0.2.1-rc.2 <0.3.0`），不再需要 owner 豁免即可安装；
   同日在 live `desktop` profile 复验了侧栏「文鳐」入口、对话面板、原生正文与 composer、
-  语音工具行、⚙ 设置入口（证据 `docs/evidence/owner-console/mac-live-app-20261106/`）。
+  ⚙ 设置入口（证据 `docs/evidence/owner-console/mac-live-app-20261106/`）。
 - **未在真实 GUI 中复验的部分**：飞书/TraeX 的“已安装未启用→启用”“活动→配置”两态此前是用 patch
   覆盖伪造的状态，安装按钮也从未在真实 GUI 点击过；状态文案、安装拒绝与修复提示由单元测试覆盖。
   登录态、模型连接与真实飞书 Bot 仍未验收。

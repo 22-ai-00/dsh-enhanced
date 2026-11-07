@@ -9,7 +9,7 @@ function fixture(originalVersion = '0.2.0-rc.2') {
     dshPath: `/private/hosts/${version}/node_modules/.bin/dsh`,
     binDirectory: `/private/hosts/${version}/node_modules/.bin`,
     integrity: `sha512-${Buffer.alloc(64).toString('base64')}`, receiptDigest: digest(version) })
-  const original = runtime(originalVersion), candidate = runtime('0.2.1-rc.2')
+  const original = runtime(originalVersion), candidate = runtime('0.2.2-rc.1')
   const binding = (value: typeof original) => JSON.stringify({ schemaVersion: 1,
     cacheRoot: '/private/hosts', version: value.version, receiptDigest: value.receiptDigest }) + '\n'
   const plan = { schemaVersion: 1, status: originalVersion === candidate.version ? 'current' : 'update',
@@ -24,7 +24,7 @@ function fixture(originalVersion = '0.2.0-rc.2') {
 
 describe('program-only upgrade entry', () => {
   it('accepts a current owner pair for a newer or unchanged supported Host', () => {
-    for (const original of ['0.2.0-rc.2', '0.2.1-rc.2']) {
+    for (const original of ['0.2.0-rc.2', '0.2.1-rc.2', '0.2.2-rc.1']) {
       const setup = fixture(original)
       expect(lifecycleProfileTest.hostOwnerProgramSelection(setup.plan, setup.services, 'assistant'))
         .toEqual({ coordinatorProfile: setup.coordinatorProfile })

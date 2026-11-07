@@ -59,7 +59,7 @@ Delivery v26 只新增与 Inbox claim 同库的持久维护栅栏，owner snapsh
 
 ## Linux 既有 owner 的程序升级
 
-`dsh-rsi update --all --yes` 为受支持的冻结源码 Linux owner 安装提供专用程序升级事务：沿安装收据绑定的官方 `dev` / `main` 分支快进源码，在 Home 外准备依赖，再成对停服、复制 Home、更新程序和私有 Host，最后检查本次启动的目标与协调器。它保留原 owner 绑定、模型配置、凭据引用、授权原期限、累计已用额度和业务历史；不重新 onboarding，不重置额度或自动续期。当前入口仅接受原安装为 Docker 后端、未发生源码采用且无未结 activation 的安装及 `0.2.0-rc.2` / `0.2.1-rc.2` 原 Host，候选固定为 `0.2.1-rc.2`。Docker→native 另要求创建 review 与 adoption 业务历史为空；已是 native 的 owner 安装拒绝，完整 live 切换尚未验收。详细前提及独立的 pre-owner 维护入口见[维护说明](../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)。它不扩展 Mac 冻结 Home 或 `0.1 → 0.2` 迁移范围。
+`dsh-rsi update --all --yes` 为受支持的冻结源码 Linux owner 安装提供专用程序升级事务：沿安装收据绑定的官方 `dev` / `main` 分支快进源码，在 Home 外准备依赖，再成对停服、复制 Home、更新程序和私有 Host，最后检查本次启动的目标与协调器。它保留原 owner 绑定、模型配置、凭据引用、授权原期限、累计已用额度和业务历史；不重新 onboarding，不重置额度或自动续期。当前入口仅接受原安装为 Docker 后端、未发生源码采用且无未结 activation 的安装及 `0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.2-rc.1` 原 Host，候选固定为 `0.2.2-rc.1`。Docker→native 另要求创建 review 与 adoption 业务历史为空；已是 native 的 owner 安装拒绝，完整 live 切换尚未验收。详细前提及独立的 pre-owner 维护入口见[维护说明](../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)。它不扩展 Mac 冻结 Home 或 `0.1 → 0.2` 迁移范围。
 
 升级追加独立签名的 `rsi-owner-program-update-overlay` 和源码维护记录，保留原 bootstrap 与此前 repair 链。后续 reader 必须支持两种 owner overlay，并核对最近记录的 creation / journal 摘要。候选启动前失败可恢复原 Home；候选已启动后只继续核验当前 Home，不能用旧副本覆盖可能新增的业务记录。未完成事务优先恢复，不先拉取或重建其已固定的安装器。操作说明见 [CLI 指南](../packages/dsh-rsi-cli/README.md#升级与重装)，实际验收状态见 [当前状态](rsi-status.md)。
 

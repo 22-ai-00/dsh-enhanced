@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { TYPERT_REMOTE } from '../src/typert.ts'
 import { apply, askOwner, boundedLine, confirmationNotice, feishuSecretRefs, fiberState, installWithApproval,
-  intakeAgreementView, larkConnectionLabel, remoteFailureText, trendSnapshotsView } from '../src/client.ts'
+  installWithCompanions, intakeAgreementView, larkConnectionLabel, remoteFailureText, trendSnapshotsView } from '../src/client.ts'
 import type { OwnerConsoleIntakeAgreement, OwnerConsoleTrendSnapshots } from '../src/typert.ts'
 
 type Node = { type?: unknown, props?: Record<string, unknown> & { children?: unknown } }
@@ -90,6 +90,29 @@ describe('owner console client', () => {
     await expect(installWithApproval({ installProjectBundle: refused }, '@dsh-enhanced/lark-channel', () => true))
       .resolves.toEqual({ ok: false })
     expect(refused).toHaveBeenCalledOnce()
+  })
+
+  it('installs activation-critical companions before the requested bundle', async () => {
+    const install = vi.fn(async (spec: string) => ({ ok: true as const, value: { applied: true, entry: spec, note: 'done' } }))
+    await expect(installWithCompanions({ installProjectBundle: install }, '@dsh-enhanced/lark-channel',
+      ['@dsh-enhanced/assistant-delivery'], () => true))
+      .resolves.toMatchObject({ ok: true, value: { applied: true } })
+    expect(install.mock.calls).toEqual([
+      ['@dsh-enhanced/assistant-delivery', []],
+      ['@dsh-enhanced/lark-channel', []],
+    ])
+    // A failed companion stops the chain; the requested bundle is never attempted.
+    const failing = vi.fn(async (spec: string) => spec === '@dsh-enhanced/assistant-delivery'
+      ? { ok: true as const, value: { applied: false, entry: spec, note: 'blocked' } }
+      : { ok: true as const, value: { applied: true, entry: spec, note: 'done' } })
+    await expect(installWithCompanions({ installProjectBundle: failing }, '@dsh-enhanced/lark-channel',
+      ['@dsh-enhanced/assistant-delivery'], () => true))
+      .resolves.toMatchObject({ ok: true, value: { applied: false } })
+    expect(failing).toHaveBeenCalledOnce()
+    // No companions still installs exactly the requested bundle.
+    const direct = vi.fn(async (spec: string) => ({ ok: true as const, value: { applied: true, entry: spec, note: 'done' } }))
+    await installWithCompanions({ installProjectBundle: direct }, '@dsh-enhanced/lark-channel', [], () => true)
+    expect(direct).toHaveBeenCalledExactlyOnceWith('@dsh-enhanced/lark-channel', [])
   })
 
   it('surfaces the gateway failure code and message instead of one generic sentence', () => {

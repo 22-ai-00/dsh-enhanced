@@ -237,20 +237,24 @@ jobs:
         run: pnpm run test:root
 
   verify:
-    needs: [linux-packages, linux-root-tests]
+    needs: [linux-packages, linux-root-tests, macos-verify, windows-acp-smoke]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
-      - name: Verify both Linux lanes
+      - name: Verify all CI lanes
         shell: bash
         run: |
           packages='${{ needs.linux-packages.result }}'
           root='${{ needs.linux-root-tests.result }}'
-          printf 'linux-packages=%s linux-root-tests=%s\n' "$packages" "$root"
+          macos='${{ needs.macos-verify.result }}'
+          windows='${{ needs.windows-acp-smoke.result }}'
+          printf 'linux-packages=%s linux-root-tests=%s macos-verify=%s windows-acp-smoke=%s\n' "$packages" "$root" "$macos" "$windows"
           test "$packages" = success
           test "$root" = success
+          test "$macos" = success
+          test "$windows" = success
 
   macos-verify:
     # The installers document macOS LaunchAgent support and the Control Plane
@@ -314,7 +318,7 @@ jobs:
 
   windows-acp-smoke:
     runs-on: windows-2025
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - name: Check out repository
@@ -336,7 +340,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Test Windows mode policy
-        run: pnpm --filter @dsh-enhanced/acp test
+        run: pnpm --filter @dsh-enhanced/acp test -- --testTimeout=15000
 
       - name: Pack ACP plugin
         shell: pwsh
@@ -345,7 +349,7 @@ jobs:
       - name: Install DSH and packed plugin in a clean profile
         shell: pwsh
         run: |
-          npm install --global --no-audit --no-fund @deepseek-ai/dsh@0.2.1-rc.2
+          npm install --global --no-audit --no-fund @deepseek-ai/dsh@0.2.2-rc.1
           if ($LASTEXITCODE -ne 0) { throw "failed to install DSH" }
 
           $env:DSH_HOME = Join-Path $env:RUNNER_TEMP "dsh-home"

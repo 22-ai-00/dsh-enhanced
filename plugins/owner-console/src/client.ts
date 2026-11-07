@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import { jsx } from 'react/jsx-runtime'
 import { KAI_FONT, QUIET_PHRASE } from './art.js'
 import { TYPERT_REMOTE } from './typert.js'
-import { WENYAO_BACKDROP_DATA_URI, WENYAO_HERO_DATA_URI, WENYAO_HERO_HEIGHT, WENYAO_HERO_WIDTH,
-  WENYAO_ICON_DATA_URI, WENYAO_SEAL_DATA_URI } from './artwork.js'
+import { WENYAO_BACKDROP_DATA_URI, WENYAO_BACKDROP_HEIGHT, WENYAO_BACKDROP_WIDTH, WENYAO_HERO_DATA_URI,
+  WENYAO_HERO_HEIGHT, WENYAO_HERO_WIDTH, WENYAO_ICON_DATA_URI, WENYAO_SEAL_DATA_URI } from './artwork.js'
 import type { IntakeAgreementAvailability, OwnerConsoleIntakeAgreement, OwnerConsoleStatus, OwnerConsoleTrendSnapshotItem,
   OwnerConsoleTrendSnapshots, OwnerConsoleWriteResult } from './typert.js'
-import { componentState, missingRemedy, repairPatch, type ComponentState } from './state.js'
+import { componentState, DEPENDENCY_BUNDLES, missingRemedy, repairPatch, type ComponentState } from './state.js'
 import { OwnerConsoleChat, OwnerConsoleConversation, type OwnerConsoleRendererSeat } from './chat-view.js'
 import {
   browserLang, browserSpeechRecognition, browserSpeechSynthesisAvailable, browserStorage, speakInBrowser,
@@ -64,6 +64,23 @@ export async function installWithApproval(
     : first
 }
 
+/**
+ * Install activation-critical companions before the requested bundle, so an empty profile does
+ * not end with a package whose static sibling imports cannot resolve. Stops at the first failure.
+ */
+export async function installWithCompanions(
+  remote: Pick<ConsoleRemote, 'installProjectBundle'>,
+  spec: string,
+  companions: readonly string[],
+  confirm: (message: string) => boolean,
+): Promise<RemoteResult<OwnerConsoleWriteResult>> {
+  for (const companion of [...new Set(companions)].filter(name => name !== spec)) {
+    const result = await installWithApproval(remote, companion, confirm)
+    if (!result.ok || !result.value.applied) return result
+  }
+  return installWithApproval(remote, spec, confirm)
+}
+
 const LARK_CONNECTION_LABELS: Readonly<Record<OwnerConsoleStatus['feishu']['connection'], string>> = {
   absent: '未加载',
   unknown: '已加载，状态未知',
@@ -94,6 +111,8 @@ export function larkConnectionTone(connection: OwnerConsoleStatus['feishu']['con
 const OWN_PACKAGE = '@dsh-enhanced/owner-console'
 const LARK_PACKAGE = '@dsh-enhanced/lark-channel'
 const TRAEX_PACKAGE = '@dsh-enhanced/traex-acp-provider'
+/** lark-channel imports this sibling at activation; its optional peer is not installed by pnpm. */
+const LARK_COMPANION_BUNDLES = ['@dsh-enhanced/assistant-delivery'] as const
 
 /** One bounded line of Host-provided diagnostic text for a row. */
 export function boundedLine(text: string, limit = 240): string {
@@ -326,7 +345,7 @@ export function IntakeAgreementCard({ remote, availability }: Readonly<{ remote:
     intakeAgreementView(result, failed))
 }
 
-/** Sidebar entry: the 11 深海觉醒 whale mark, cropped square and shown as a round avatar. */
+/** Sidebar entry: the 02 水墨化鹏 fish-and-peng mark, cropped square and shown as a round avatar. */
 export function OwnerConsoleIcon() {
   return el('span', { 'aria-hidden': true, style: { display: 'block', width: 18, height: 18, borderRadius: '50%', overflow: 'hidden', flex: 'none' } },
     el('img', { src: WENYAO_ICON_DATA_URI, alt: '', 'aria-hidden': 'true', draggable: false, 'data-owner-console-art': 'sidebar-icon',
@@ -450,9 +469,14 @@ export function OwnerConsoleSettingsPanel({ remote, navigation, onBack }: Readon
       row('连接', pill(larkConnectionLabel(status.feishu.connection, status.feishu.lastErrorCode),
         larkConnectionTone(status.feishu.connection, status.feishu.lastErrorCode))),
       row('appId', pill(status.feishu.appIdConfigured ? '已配置' : '未配置', status.feishu.appIdConfigured ? 'ok' : 'warn')))
+  const installedCompanions = new Set((status?.dependencies ?? [])
+    .filter(dependency => dependency.available)
+    .map(dependency => DEPENDENCY_BUNDLES[dependency.name])
+    .filter((bundle): bundle is string => bundle !== undefined))
+  const larkCompanions = LARK_COMPANION_BUNDLES.filter(bundle => !installedCompanions.has(bundle))
   const installLark = larkState.canInstall
     ? el('button', { style: btn(primaryButtonStyle), disabled: busy,
-      onClick: () => void runInstall(LARK_PACKAGE) }, '安装 lark-channel')
+      onClick: () => void run(() => installWithCompanions(remote, LARK_PACKAGE, larkCompanions, confirmOwner)) }, '安装 lark-channel')
     : null
   const enableLark = larkState.canEnable
     ? el('button', { style: btn(primaryButtonStyle), disabled: busy,
@@ -600,12 +624,13 @@ export function OwnerConsoleSettingsPanel({ remote, navigation, onBack }: Readon
           } }, '应用配置')))))
 
   return el('section', { 'data-owner-console-settings': '', 'aria-label': '文鳐设置（主人控制台）', style: settingsSectionStyle },
-    // 11 深海觉醒 background on the settings surface, not only the header. The whale sits
-    // at low opacity behind every card and fades out before the lower rows; text stays on the
-    // theme's card surface, so light/dark contrast is untouched.
+    // 02 水墨化鹏 background on the settings surface, not only the header. The fish-to-peng
+    // artwork sits at low opacity behind every card and fades out before the lower rows; text
+    // stays on the theme's card surface, so light/dark contrast is untouched.
     el('div', { style: backdropStyle },
       el('img', { src: WENYAO_BACKDROP_DATA_URI, alt: '', 'aria-hidden': 'true', draggable: false,
-        'data-owner-console-art': 'backdrop', width: 960, height: 960, style: backdropImageStyle })),
+        'data-owner-console-art': 'backdrop', width: WENYAO_BACKDROP_WIDTH, height: WENYAO_BACKDROP_HEIGHT,
+        style: backdropImageStyle })),
     el('div', { 'data-owner-console-settings-scroll': '', style: settingsScrollStyle },
       el('div', { 'data-owner-console-content': '', style: panelStyle },
         onBack === undefined ? null : el('div', { 'data-owner-console-settings-bar': '',
@@ -636,8 +661,8 @@ function bannerStyle(color: string) {
 }
 
 /**
- * Brand header: the 11 深海觉醒 background cropped to a 3:1 banner (decorative, 108–300px
- * tall so a narrow pane never overflows), then name with the round whale seal, subtitle,
+ * Brand header: the 02 水墨化鹏 background scaled whole, not cropped (decorative, 108–300px
+ * tall so a narrow pane never overflows), then name with the round fish-and-peng seal, subtitle,
  * and the primary 开始对话 action. Text sits on the card surface below the image, so its
  * contrast follows the theme rather than the artwork.
  */

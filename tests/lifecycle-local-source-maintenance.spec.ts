@@ -48,7 +48,7 @@ async function hostFixture(root: string, missingApi = false, version = '0.1.5-rc
   await writeFile(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version,
     type: 'module', exports: { '.': './lib/index.js', './package.json': './package.json' } }), { mode: 0o600 })
   await writeFile(join(bootRoot, 'lib/index.js'), missingApi ? 'export const boot = () => { throw new Error("plugin effects ran") }\n'
-    : ['0.2.0-rc.2', '0.2.1-rc.2'].includes(version) ? `import { readFileSync } from 'node:fs'
+    : ['0.2.0-rc.2', '0.2.1-rc.2', '0.2.2-rc.1'].includes(version) ? `import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 export function loadProfileDirectory(name, dir, installAnchor) {
   if (name !== 'dsh' || !installAnchor.endsWith('/@deepseek-ai/dsh/package.json')) throw new Error('wrong Host')
@@ -193,7 +193,7 @@ describe('pre-owner local source maintenance admission', () => {
     expect(changed.status).not.toBe(0)
     expect(changed.stderr).toContain('pinned DSH executable changed')
   })
-  test.each(['0.2.0-rc.2', '0.2.1-rc.2'])('DSH %s resolves a pinned Host profile without legacy fallback writes', async version => {
+  test.each(['0.2.0-rc.2', '0.2.1-rc.2', '0.2.2-rc.1'])('DSH %s resolves a pinned Host profile without legacy fallback writes', async version => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'local-source-resolution-')))
     roots.push(root)
     const homePath = join(root, 'home')

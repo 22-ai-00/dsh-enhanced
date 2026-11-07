@@ -74,7 +74,7 @@ describe('owner console panel presentation', () => {
     expect(navigation.openConversation).toHaveBeenCalledOnce()
   })
 
-  it('renders the 11 深海觉醒 hero, panel backdrop, seal and sidebar icon as decoration only', () => {
+  it('renders the 02 水墨化鹏 hero, panel backdrop, seal and sidebar icon as decoration only', () => {
     const { nodes } = render()
     const hero = nodes.find(node => node.props['data-owner-console-art'] === 'hero')
     expect(hero?.type).toBe('img')
@@ -106,7 +106,7 @@ describe('owner console panel presentation', () => {
     expect(nodes.filter(node => node.type === 'img')).toHaveLength(3)
     expect(text(nodes)).toContain('文鳐 Ray')
 
-    // Sidebar entry: the same 11 深海觉醒 icon, square-cropped into a round avatar.
+    // Sidebar entry: the same 02 水墨化鹏 icon, square-cropped into a round avatar.
     const icon = expand(OwnerConsoleIcon())
     expect(icon[0]!.props['aria-hidden']).toBe(true)
     const iconImage = icon.find(node => node.type === 'img')

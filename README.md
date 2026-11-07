@@ -1,4 +1,12 @@
-# dsh-enhanced
+<p align="center">
+  <img src="plugins/owner-console/assets/icon-128.webp" width="88" height="88" alt="文鳐 Ray icon">
+</p>
+
+<h1 align="center">dsh-enhanced · 文鳐 Ray</h1>
+
+<p align="center">
+  <img src="plugins/owner-console/assets/hero.webp" width="720" alt="文鳐 Ray logo">
+</p>
 
 在本机运行的个人 AI 助手，通过 **Web 或飞书**聊天、处理任务、积累记忆，也可接入你自己的模型。基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)。
 

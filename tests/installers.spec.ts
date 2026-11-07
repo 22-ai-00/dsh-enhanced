@@ -9404,7 +9404,7 @@ exit 0
     ], dshHome)
 
     expect(result.status).toBe(2)
-    expect(result.stderr).toContain('支持 DSH 0.2.1-rc.2')
+    expect(result.stderr).toContain('支持 DSH >=0.2.1-rc.2 <0.3.0')
   })
 
   test('fresh checkout defers latest resolution in dry-run while the released bootstrap retains its exact pin', async () => {
@@ -9421,8 +9421,8 @@ exit 0
     expect(npm.stdout).toContain('DSH 目标：npm latest（dry-run 未联网解析')
     expect(local.stdout).not.toContain('npm install --global @deepseek-ai/dsh@latest')
     expect(npm.stdout).not.toContain('npm install --global @deepseek-ai/dsh@latest')
-    expect(manifest.nextPinnedHostVersion).toBe('0.2.1-rc.2')
-    expect(manifest.nextVerifiedHostRange).toBe('0.2.1-rc.2')
+    expect(manifest.nextPinnedHostVersion).toBe('0.2.2-rc.1')
+    expect(manifest.nextVerifiedHostRange).toBe('>=0.2.1-rc.2 <0.3.0')
     expect(released).toContain(`DSH_ENHANCED_PINNED_HOST_VERSION='${pinnedRelease.pinnedHostVersion}'`)
     expect(released).toContain(`DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='${pinnedRelease.verifiedHostRange}'`)
   })
@@ -9976,14 +9976,14 @@ exit 8
       '--dry-run', '--lark', 'skip', '--dsh-version', '0.1.0-rc.8',
     ], dshHome)
     expect(blocked.status).toBe(2)
-    expect(blocked.stderr).toContain('支持 DSH 0.2.1-rc.2')
+    expect(blocked.stderr).toContain('支持 DSH >=0.2.1-rc.2 <0.3.0')
     expect(blocked.stdout).not.toContain('dsh plugin')
 
     const acknowledged = runInstaller(localInstaller, [
       '--dry-run', '--lark', 'skip', '--dsh-version', '0.1.0-rc.8', '--ack-unverified-host',
     ], dshHome)
     expect(acknowledged.status).toBe(2)
-    expect(acknowledged.stderr).toContain('支持 DSH 0.2.1-rc.2')
+    expect(acknowledged.stderr).toContain('支持 DSH >=0.2.1-rc.2 <0.3.0')
     expect(acknowledged.stdout).not.toContain('@deepseek-ai/dsh@0.1.0-rc.8')
 
     const sourcePin = readFileSync(installerLibrary, 'utf8').match(/^DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='([^']+)'$/mu)?.[1]
@@ -9998,23 +9998,25 @@ exit 8
     expect(override.stdout).not.toContain('dsh plugin')
   })
 
-  test('accepts the verified 0.2 release candidate and rejects next-line or malformed Host versions', () => {
+  test('accepts the verified 0.2 release candidates and rejects next-line or malformed Host versions', () => {
     const result = spawnSync('/bin/bash', ['-c', [
       'source "$1"',
       'dsh_enhanced_require_pinned_host_version 0.2.1-rc.2',
+      'dsh_enhanced_require_pinned_host_version 0.2.2-rc.1',
       '! dsh_enhanced_require_pinned_host_version 0.2.0-rc.1',
       '! dsh_enhanced_require_pinned_host_version 0.2.1-rc.2-invalid!',
     ].join('; '), 'installer-test', installerLibrary], { encoding: 'utf8' })
     expect(result.status, result.stderr).toBe(0)
-    expect(result.stderr).toContain('支持 DSH 0.2.1-rc.2')
+    expect(result.stderr).toContain('支持 DSH >=0.2.1-rc.2 <0.3.0')
   })
 
-  test('next release Host baseline admits 0.2.1-rc.2 and rejects old or beta builds', () => {
+  test('next release Host baseline admits 0.2.1-rc.2 and 0.2.2-rc.1 and rejects old or beta builds', () => {
     const manifest = JSON.parse(readFileSync(join(repoRoot, 'release-manifest.json'), 'utf8'))
     const result = spawnSync('/bin/bash', ['-c', [
       'set -e',
       'source "$1"',
       'dsh_enhanced_require_pinned_host_version 0.2.1-rc.2',
+      'dsh_enhanced_require_pinned_host_version 0.2.2-rc.1',
       '! dsh_enhanced_require_pinned_host_version 0.2.0-rc.2',
       '! dsh_enhanced_require_pinned_host_version 0.1.5-rc.2',
       '! dsh_enhanced_require_pinned_host_version 0.1.6-beta.1',
@@ -10024,7 +10026,7 @@ exit 8
       env: { ...process.env, DSH_ENHANCED_VERIFIED_HOST_RANGE: manifest.nextVerifiedHostRange },
     })
     expect(result.status, result.stderr).toBe(0)
-    expect(result.stderr).toContain('支持 DSH 0.2.1-rc.2')
+    expect(result.stderr).toContain('支持 DSH >=0.2.1-rc.2 <0.3.0')
   })
 
   test('local installer installs the exact supported DSH on a fresh machine and executes build, install, and validation', async () => {

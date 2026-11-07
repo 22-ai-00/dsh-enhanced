@@ -20,8 +20,6 @@ const LARK = /(^|[-_/])lark(-channel)?($|[-_/])/u
 const TRAEX = /traex/iu
 const APP_ID_ENV = ['LARK_APP_ID', 'FEISHU_APP_ID'] as const
 const ACCOUNT = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
-/** The Host's answer when an approval names a build script it no longer holds as pending. */
-const STALE_APPROVAL = 'stale-approval'
 
 /** Read-only status plus owner-clicked, one-step writes through the Host settings service.
  * Only `.volatile()` config fields are editable by that service; every write addresses one
@@ -256,10 +254,11 @@ export class OwnerConsoleService extends TypertRemoteService {
   }
 
   /** Install one project bundle with its declared dependencies, then activate it.
-   * The Host's pnpm run can stop at its dependency build-script policy; the names it recorded
-   * in `pendingBuilds` are the only ones a retry may approve. When pnpm's coloured output made
-   * the Host record none, the owner-confirmed names are written to the profile's
-   * `allowBuilds` and installed once more without an approval flag. */
+   * The Host's pnpm run can stop at its dependency build-script policy. The names the console
+   * parsed from that failure are written to the profile's `allowBuilds` before the retry, then
+   * the install runs once more without an approval flag. Writing first works even when the
+   * Host's own ANSI parsing lost the names: pnpm sees a real allow decision instead of a
+   * pending placeholder, so the Host never has to record or re-approve them. */
   async installProjectBundle(spec: string, approvedBuilds: readonly string[] = []): Promise<OwnerConsoleWriteResult> {
     const trimmed = spec.trim()
     if (!isProjectPackage(trimmed)) {
@@ -271,22 +270,17 @@ export class OwnerConsoleService extends TypertRemoteService {
       return refuse(trimmed, '批准的构建脚本名称无效')
     }
     const manager = this.manager()
-    let result = await manager.installBundle(trimmed, {
-      enabled: true,
-      saveExact: true,
-      ...(approvals.length === 0 ? {} : { approvedBuilds: approvals }),
-    })
-    if (approvals.length > 0 && result.error?.code === STALE_APPROVAL) {
-      const dir = this.profileDirectory()
-      if (dir === undefined) return rejectStaleApproval(trimmed, approvals)
-      try {
-        await persistAllowedBuilds(dir, approvals)
-      } catch (cause) {
-        return refuse(trimmed, `写入 allowBuilds 失败：${cause instanceof Error ? cause.message : String(cause)}`)
-      }
-      result = await manager.installBundle(trimmed, { enabled: true, saveExact: true })
+    if (approvals.length === 0) {
+      return applyInstall(await manager.installBundle(trimmed, { enabled: true, saveExact: true }))
     }
-    return applyInstall(result)
+    const dir = this.profileDirectory()
+    if (dir === undefined) return rejectStaleApproval(trimmed, approvals)
+    try {
+      await persistAllowedBuilds(dir, approvals)
+    } catch (cause) {
+      return refuse(trimmed, `写入 allowBuilds 失败：${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+    return applyInstall(await manager.installBundle(trimmed, { enabled: true, saveExact: true }))
   }
 
   /** Feishu: one owner click, two ways to pair the bot. No plaintext secret is ever accepted. */
