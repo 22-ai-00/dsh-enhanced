@@ -14,6 +14,7 @@ concurrency:
 
 env:
   VITEST_MAX_WORKERS: '2'
+  DSH_TEST_CONCURRENCY: '2'
 
 jobs:
   linux-packages:
@@ -125,7 +126,7 @@ jobs:
         run: pnpm run build && pnpm run typecheck:built
 
       - name: Verify package tests
-        run: pnpm --recursive --no-sort --if-present run test --testTimeout=15000
+        run: pnpm run test:built
 
       - name: Verify package packs
         run: pnpm run pack:check

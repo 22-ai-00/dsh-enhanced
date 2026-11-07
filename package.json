@@ -23,7 +23,7 @@
     "release:status": "node ./scripts/release-version.mjs status",
     "release:supersede": "node ./scripts/release-version.mjs supersede",
     "test": "pnpm run build && pnpm run test:built",
-    "test:built": "pnpm run test:root && pnpm --recursive --no-sort --if-present run test --testTimeout=15000",
+    "test:built": "pnpm run test:root && pnpm --recursive --no-sort --if-present --workspace-concurrency=${DSH_TEST_CONCURRENCY:-6} run test --testTimeout=15000",
     "test:root": "vitest run --testTimeout=15000 --dir tests",
     "test:autonomy": "playwright test --config scripts/e2e/playwright-autonomy.config.mjs",
     "test:autonomy:wake": "playwright test --config scripts/e2e/playwright-wake.config.mjs",
@@ -39,7 +39,8 @@
     "test:web-owner:real-capture": "playwright test --config scripts/e2e/playwright-real-capture.config.mjs",
     "test:web-owner:real-canary": "playwright test --config scripts/e2e/playwright-real-canary.config.mjs",
     "test:web-owner:real-repair": "playwright test --config scripts/e2e/playwright-real-repair.config.mjs",
-    "test:web-owner:real-repair:topology": "playwright test --config scripts/e2e/playwright-real-repair-topology.config.mjs"
+    "test:web-owner:real-repair:topology": "playwright test --config scripts/e2e/playwright-real-repair-topology.config.mjs",
+    "check:quick": "pnpm run validate && pnpm run lint && pnpm --filter \"{origin/dev}...\" --if-present run build && pnpm --filter \"{origin/dev}...\" --if-present run typecheck && pnpm --filter \"{origin/dev}\" --if-present run test --testTimeout=15000"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "catalog:",
