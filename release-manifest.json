@@ -51,7 +51,7 @@
   },
   "pending": {
     "version": "0.1.67",
-    "preparedAt": "2026-11-07T12:31:50.183Z",
+    "preparedAt": "2026-11-07T15:37:47.673Z",
     "verifiedHostRange": ">=0.2.1-rc.2 <0.3.0",
     "pinnedHostVersion": "0.2.2-rc.1",
     "packages": {
