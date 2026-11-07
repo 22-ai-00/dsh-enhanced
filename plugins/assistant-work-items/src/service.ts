@@ -621,6 +621,9 @@ export class AssistantWorkItemsService extends Service {
       catch (error) { this.ctx.logger.warn(`assistant-work-items: acceptance worker-run bind scan failed: ${describe(error)}`) }
       try { this.workItemsAutoSettle(components) }
       catch (error) { this.ctx.logger.warn(`assistant-work-items: acceptance auto-settle scan failed: ${describe(error)}`) }
+      // P1-1: resolve outcome windows and followed-thread closures on the same
+      // bounded wake instead of waiting for an unrelated claim or Host call.
+      this.workItemsSettleQuietly(components)
       // Release only after auto-settle, so a verdict that arrived on this wake
       // decides the same pass whether the held report is sent or blocked.
       try { this.workItemsReleaseHeldReports(components) }
