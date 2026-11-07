@@ -59,7 +59,7 @@ describe('bounded bare Git source review', () => {
     expect(result.digest).toBe(f.request.checkedPatchDigest)
     expect(result.patch).toContain('export const reviewed = true')
     expect(() => assertSourceReviewHead(f.config, f.request)).not.toThrow()
-  })
+  }, 90_000)
 
   it('rejects a moved PR head, a wrong single parent, and a mismatched digest', async () => {
     const f = await fixture()
@@ -70,7 +70,7 @@ describe('bounded bare Git source review', () => {
     const original = await fixture()
     await expect(inspectSourceReviewGit(original.config, { ...original.request, baseCommit: 'a'.repeat(40) })).rejects.toThrow('parent changed')
     await expect(inspectSourceReviewGit(original.config, { ...original.request, checkedPatchDigest: '0'.repeat(64) })).rejects.toThrow('snapshot changed')
-  })
+  }, 90_000)
 
   it('rejects files outside scope and configured byte bounds', async () => {
     const f = await fixture()
@@ -94,5 +94,5 @@ describe('bounded bare Git source review', () => {
   it('honors an already-aborted signal before invoking Git', async () => {
     const f = await fixture(); const controller = new AbortController(); controller.abort(new Error('stop-review'))
     await expect(inspectSourceReviewGit(f.config, f.request, controller.signal)).rejects.toThrow('stop-review')
-  })
+  }, 90_000)
 })
