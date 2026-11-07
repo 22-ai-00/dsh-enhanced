@@ -11032,7 +11032,7 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain(
       '--provider custom-gateway --model glm5.2 --base-url https://custom-gateway.example/v1'
-      + ' --api openai-completions --display-name Super\\ Relay',
+      + ' --api openai-completions --display-name Custom\\ Gateway',
     )
   })
 
